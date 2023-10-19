@@ -1,0 +1,6 @@
+# Configure mesa (in root dir):
+meson gonzo -Dbackend=ninja -Dintel-clc=enabled -Dvulkan-drivers=intel -Dgallium-drivers=iris,zink,swrast -Dprefix=~/bin/mesa
+
+# Get rid of unknown options for SLP
+sed -i 's/-mtls-dialect=gnu2 //g' compile_commands.json
+sed -i 's/-flifetime-dse=1 //g' compile_commands.json
