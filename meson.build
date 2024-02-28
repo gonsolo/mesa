@@ -244,7 +244,7 @@ elif _vulkan_drivers.contains('all')
    _vulkan_drivers = ['amd', 'intel', 'intel_hasvk', 'swrast',
                       'freedreno', 'panfrost', 'virtio', 'broadcom',
                       'imagination-experimental', 'microsoft-experimental',
-                      'nouveau']
+                      'nouveau', 'borg-experimental']
 endif
 
 with_intel_vk = _vulkan_drivers.contains('intel')
@@ -259,6 +259,7 @@ with_imagination_vk = _vulkan_drivers.contains('imagination-experimental')
 with_imagination_srv = get_option('imagination-srv')
 with_microsoft_vk = _vulkan_drivers.contains('microsoft-experimental')
 with_nouveau_vk = _vulkan_drivers.contains('nouveau')
+with_borg_vk = _vulkan_drivers.contains('borg-experimental')
 with_any_vk = _vulkan_drivers.length() != 0
 
 if with_any_vk and host_machine.system() == 'windows' and meson.version().version_compare('< 1.3')

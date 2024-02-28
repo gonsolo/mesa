@@ -1,10 +1,15 @@
+MESON = ~/src/meson/meson.py
+
+# List mesa configuration options:
+$(MESON) configure
+
 # Configure mesa (in root dir):
 # Intel and zink
-~/src/meson/meson.py setup gonzo-intel-zink -Dbackend=ninja -Dintel-clc=enabled -Dvulkan-drivers=intel -Dgallium-drivers=iris,zink,swrast -Dprefix=~/bin/mesa
-# Nouveau and nvk
-~/src/meson/meson.py setup gonzo-nouveau -Dbackend=ninja -Dvulkan-drivers=nouveau-experimental -Dprefix=~/bin/mesa
+$(MESON) setup gonzo-intel-zink -Dbackend=ninja -Dintel-clc=enabled -Dvulkan-drivers=intel -Dgallium-drivers=iris,zink,swrast -Dprefix=~/bin/mesa
+# Nouveau and nvk and borg
+$(MESON) setup gonzo-nouveau-borg -Dbackend=ninja -Dgallium-drivers= -Dvulkan-drivers=nouveau-experimental,borg-experimental -Dprefix=~/bin/mesa
 # Panfrost
-~/src/meson/meson.py setup gonzo-panfrost -Dbackend=ninja -Dvulkan-drivers=help -Dprefix=~/bin/mesa
+$(MESON) setup gonzo-panfrost -Dbackend=ninja -Dvulkan-drivers=help -Dprefix=~/bin/mesa
 
 # Build
 cd gonzo-*; meson compile
