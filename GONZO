@@ -3,6 +3,8 @@
 meson-1.3 setup gonzo-intel-zink -Dbackend=ninja -Dintel-clc=enabled -Dvulkan-drivers=intel -Dgallium-drivers=iris,zink,swrast -Dprefix=~/bin/mesa
 # Nouveau and nvk
 meson-1.3 setup gonzo-nouveau -Dbackend=ninja -Dvulkan-drivers=nouveau-experimental -Dprefix=~/bin/mesa
+# Panfrost
+~/src/mesaon/meson.py setup gonzo-panfrost -Dbackend=ninja -Dvulkan-drivers=help -Dprefix=~/bin/mesa
 
 # Build
 cd gonzo-*; meson compile
