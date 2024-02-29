@@ -8,12 +8,35 @@
 #include "vulkan/runtime/vk_instance.h"
 #include "vulkan/runtime/vk_log.h"
 #include "vulkan/util/vk_alloc.h"
+#include "vulkan/util/vk_util.h"
 
 static const struct vk_instance_extension_table instance_extensions = {
    .KHR_get_physical_device_properties2   = true,
    .EXT_debug_report                      = true,
    .EXT_debug_utils                       = true,
 };
+
+VKAPI_ATTR VkResult VKAPI_CALL
+borg_EnumerateInstanceVersion(uint32_t *pApiVersion)
+{
+   uint32_t version_override = vk_get_version_override();
+   *pApiVersion = version_override ? version_override :
+                  VK_MAKE_VERSION(1, 3, VK_HEADER_VERSION);
+
+   return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+borg_EnumerateInstanceExtensionProperties(const char *pLayerName,
+                                           uint32_t *pPropertyCount,
+                                           VkExtensionProperties *pProperties)
+{
+   if (pLayerName)
+      return vk_error(NULL, VK_ERROR_LAYER_NOT_PRESENT);
+
+   return vk_enumerate_instance_extension_properties(
+      &instance_extensions, pPropertyCount, pProperties);
+}
 
 VKAPI_ATTR VkResult VKAPI_CALL
 borg_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
