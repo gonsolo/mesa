@@ -1,0 +1,17 @@
+MESON = ~/src/meson/meson.py
+BUILD_DIR_NAME = gonsolo-nouveau-borg
+BUILD_DIR = ../$(BUILD_DIR_NAME)
+
+test: install
+	VK_ICD_FILENAMES=~/bin/mesa/share/vulkan/icd.d/borg_icd.x86_64.json vulkaninfo
+install: compile
+	cd $(BUILD_DIR); $(MESON) install; cd -
+compile:
+	cd $(BUILD_DIR); $(MESON) compile; cd -
+setup:
+	cd ..; $(MESON) setup $(BUILD_DIR_NAME) -Dbackend=ninja -Dgallium-drivers= -Dvulkan-drivers=nouveau-experimental,borg-experimental -Dprefix=~/bin/mesa; cd -
+c: clean
+clean:
+	cd ..; rm -rf gonsolo-nouveau-borg; cd -
+
+.PHONY: c clean compile install setup test
