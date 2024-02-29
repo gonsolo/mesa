@@ -7,3 +7,5 @@
 .venv/
 /sccache.log
 /tags
+/.cache
+/compile_commands.json
