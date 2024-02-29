@@ -62,3 +62,20 @@ borg_DestroyInstance(VkInstance _instance,
    vk_free(&instance->vk.alloc, instance);
 }
 
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+borg_GetInstanceProcAddr(VkInstance _instance,
+                        const char *pName)
+{
+   VK_FROM_HANDLE(borg_instance, instance, _instance);
+   return vk_instance_get_proc_addr(&instance->vk,
+                                    &borg_instance_entrypoints,
+                                    pName);
+}
+
+PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+vk_icdGetInstanceProcAddr(VkInstance instance,
+                          const char *pName)
+{
+   return borg_GetInstanceProcAddr(instance, pName);
+}
+
