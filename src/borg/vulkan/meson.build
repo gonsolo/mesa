@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: MIT
 
 borg_files = files(
-  'borg_device.c'
+  'borg_device.c',
+  'borg_instance.c',
+  'borg_instance.h'
 )
 
 borg_entrypoints = custom_target(
