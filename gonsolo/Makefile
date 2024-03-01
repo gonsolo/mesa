@@ -1,11 +1,17 @@
 MESON = ~/src/meson/meson.py
 BUILD_DIR_NAME = gonsolo-nouveau-borg
 BUILD_DIR = ../$(BUILD_DIR_NAME)
+VULKANINFO = ~/src/Vulkan-Tools/gonsolo/vulkaninfo/vulkaninfo
 
 test: install
-	VK_ICD_FILENAMES=~/bin/mesa/share/vulkan/icd.d/borg_icd.x86_64.json vulkaninfo
-install: compile
+	VK_ICD_FILENAMES=~/bin/mesa/share/vulkan/icd.d/borg_icd.x86_64.json $(VULKANINFO)
+gdb: install
+	VK_ICD_FILENAMES=~/bin/mesa/share/vulkan/icd.d/borg_icd.x86_64.json gdb $(VULKANINFO)
+lldb: install
+	VK_ICD_FILENAMES=~/bin/mesa/share/vulkan/icd.d/borg_icd.x86_64.json lldb $(VULKANINFO)
+install: compile_and_tidy
 	cd $(BUILD_DIR); $(MESON) install; cd -
+compile_and_tidy: compile tidy_compile_commands
 compile:
 	cd $(BUILD_DIR); $(MESON) compile; cd -
 	cd ..; ln -s $(BUILD_DIR_NAME)/compile_commands.json .; cd -

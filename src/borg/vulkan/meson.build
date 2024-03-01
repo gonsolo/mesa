@@ -3,8 +3,13 @@
 
 borg_files = files(
   'borg_device.c',
+  'borg_device.h',
+  'borg_format.c',
+  'borg_image.c',
   'borg_instance.c',
-  'borg_instance.h'
+  'borg_instance.h',
+  'borg_physical_device.c',
+  'borg_physical_device.h'
 )
 
 borg_entrypoints = custom_target(
@@ -20,6 +25,8 @@ borg_entrypoints = custom_target(
 )
 
 borg_deps = [
+  dep_libdrm,
+  dep_valgrind,
   idep_vulkan_runtime,
   idep_vulkan_util,
 ]
@@ -45,8 +52,16 @@ borg_icd = custom_target(
 
 libvulkan_borg = shared_library(
   'vulkan_borg',
-  [ borg_entrypoints, borg_files ],
-  include_directories : [ inc_include, inc_src, ],
+  [
+    borg_entrypoints,
+    borg_files
+  ],
+  include_directories : [
+    inc_gallium,
+    inc_gallium_aux,
+    inc_include,
+    inc_src,
+  ],
   dependencies : borg_deps,
   gnu_symbol_visibility : 'hidden',
   install : true,

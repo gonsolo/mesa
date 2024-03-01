@@ -5,6 +5,7 @@
 
 #include "borg_instance.h"
 #include "borg_entrypoints.h"
+#include "borg_physical_device.h"
 #include "vulkan/runtime/vk_instance.h"
 #include "vulkan/runtime/vk_log.h"
 #include "vulkan/util/vk_alloc.h"
@@ -65,7 +66,9 @@ borg_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
       return result;
    }
 
-   /* Initialize driver-specific stuff */
+   instance->vk.physical_devices.try_create_for_drm =
+      borg_create_drm_physical_device;
+   instance->vk.physical_devices.destroy = borg_physical_device_destroy;
 
    *pInstance = borg_instance_to_handle(instance);
 
@@ -95,6 +98,9 @@ borg_GetInstanceProcAddr(VkInstance _instance,
                                     pName);
 }
 
+PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+vk_icdGetInstanceProcAddr(VkInstance instance,
+                          const char *pName);
 PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vk_icdGetInstanceProcAddr(VkInstance instance,
                           const char *pName)
