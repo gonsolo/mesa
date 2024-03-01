@@ -17,3 +17,7 @@ cd gonzo-*; meson compile
 # Get rid of unknown options for SLP
 sed -i 's/-mtls-dialect=gnu2 //g' compile_commands.json
 sed -i 's/-flifetime-dse=1 //g' compile_commands.json
+
+
+# Test Vulkan Compute:
+# https://github.com/gonsolo/VulkanHpp-Compute-Sample
