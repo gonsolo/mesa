@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 borg_files = files(
+  'borg_buffer.c',
+  'borg_buffer.h',
   'borg_device.c',
   'borg_device.h',
   'borg_format.c',
