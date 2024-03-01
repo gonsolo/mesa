@@ -66,6 +66,7 @@ VKAPI_ATTR void VKAPI_CALL
      uint32_t *pQueueFamilyPropertyCount,
      VkQueueFamilyProperties2 *pQueueFamilyProperties)
 {
+   *pQueueFamilyPropertyCount = 1;
    // TODO
 }
 
