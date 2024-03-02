@@ -30,6 +30,7 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
    //struct vk_device_extension_table supported_extensions;
    //struct vk_features supported_features;
    struct vk_properties properties;
+   properties.apiVersion = VK_MAKE_VERSION(1, 0, VK_HEADER_VERSION);
    snprintf(properties.deviceName, sizeof(properties.deviceName), "%s", "Borg 9000");
 
    struct vk_physical_device_dispatch_table dispatch_table;
