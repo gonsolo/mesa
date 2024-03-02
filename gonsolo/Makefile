@@ -3,8 +3,8 @@ BUILD_DIR_NAME = gonsolo-nouveau-borg
 BUILD_DIR = ../$(BUILD_DIR_NAME)
 VULKANINFO = ~/src/Vulkan-Tools/gonsolo/vulkaninfo/vulkaninfo
 COMPUTE_SAMPLE = ~/src/VulkanHpp-Compute-Sample/gonsolo/VulkanCompute
-APPLICATION = $(VULKANINFO)
-#APPLICATION = $(COMPUTE_SAMPLE)
+#APPLICATION = $(VULKANINFO)
+APPLICATION = $(COMPUTE_SAMPLE)
 
 test: install
 	VK_ICD_FILENAMES=~/bin/mesa/share/vulkan/icd.d/borg_icd.x86_64.json $(APPLICATION)

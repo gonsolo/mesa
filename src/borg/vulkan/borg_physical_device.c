@@ -6,6 +6,7 @@
 #include "borg_entrypoints.h"
 #include "borg_instance.h"
 #include "borg_physical_device.h"
+#include "borg_private.h"
 #include "vk_alloc.h"
 #include "vk_log.h"
 #include "vk_util.h"
@@ -31,7 +32,13 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
    //struct vk_features supported_features;
    struct vk_properties properties = {
       .apiVersion = VK_MAKE_VERSION(1, 0, VK_HEADER_VERSION),
-      .driverVersion = vk_get_driver_version()
+      .driverVersion = vk_get_driver_version(),
+      .vendorID = 0x666,
+      .deviceID = 0x9000,
+      .deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
+
+      // Vulkan 1.0 limits
+      .maxComputeSharedMemorySize = BORG_MAX_SHARED_SIZE,
    };
    snprintf(properties.deviceName, sizeof(properties.deviceName), "%s", "Borg 9000");
 
