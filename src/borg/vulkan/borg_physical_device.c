@@ -29,7 +29,8 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
 
    //struct vk_device_extension_table supported_extensions;
    //struct vk_features supported_features;
-   //struct vk_properties properties;
+   struct vk_properties properties;
+   snprintf(properties.deviceName, sizeof(properties.deviceName), "%s", "Borg 9000");
 
    struct vk_physical_device_dispatch_table dispatch_table;
    vk_physical_device_dispatch_table_from_entrypoints(
@@ -38,7 +39,7 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
    result = vk_physical_device_init(&pdev->vk, &instance->vk,
                                       NULL, //&supported_extensions,
                                       NULL, //&supported_features,
-                                      NULL, //&properties,
+                                      &properties,
                                       &dispatch_table
 				    );
 
