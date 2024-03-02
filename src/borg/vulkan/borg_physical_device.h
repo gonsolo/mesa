@@ -8,10 +8,16 @@
 
 #include "vulkan/runtime/vk_physical_device.h"
 
+struct borg_queue_family {
+   VkQueueFlags queue_flags;
+   uint32_t queue_count;
+};
+
 struct borg_physical_device {
    struct vk_physical_device vk;
 
-   /* Driver-specific stuff */
+   struct borg_queue_family queue_families[1];
+   uint8_t queue_family_count;
 };
 
 struct _drmDevice;

@@ -53,6 +53,12 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
                                       &dispatch_table
 				    );
 
+   pdev->queue_families[pdev->queue_family_count++] = (struct borg_queue_family) {
+      .queue_flags = VK_QUEUE_COMPUTE_BIT,
+      .queue_count = 1,
+   };
+   assert(pdev->queue_family_count <= ARRAY_SIZE(pdev->queue_families));
+
    *pdev_out = &pdev->vk;
    return result;
 }
@@ -77,7 +83,20 @@ VKAPI_ATTR void VKAPI_CALL
      uint32_t *pQueueFamilyPropertyCount,
      VkQueueFamilyProperties2 *pQueueFamilyProperties)
 {
-   *pQueueFamilyPropertyCount = 1;
-   // TODO
+   VK_FROM_HANDLE(borg_physical_device, pdev, physicalDevice);
+   VK_OUTARRAY_MAKE_TYPED(VkQueueFamilyProperties2, out, pQueueFamilyProperties,
+                            pQueueFamilyPropertyCount);
+
+   for (uint8_t i = 0; i < pdev->queue_family_count; i++) {
+      const struct borg_queue_family *queue_family = &pdev->queue_families[i];
+
+      vk_outarray_append_typed(VkQueueFamilyProperties2, &out, p) {
+         p->queueFamilyProperties.queueFlags = queue_family->queue_flags;
+         p->queueFamilyProperties.queueCount = queue_family->queue_count;
+         p->queueFamilyProperties.timestampValidBits = 64;
+         p->queueFamilyProperties.minImageTransferGranularity =
+            (VkExtent3D){1, 1, 1};
+      }
+   }
 }
 
