@@ -8,7 +8,10 @@
 #include "borg_entrypoints.h"
 #include "borg_instance.h"
 #include "borg_physical_device.h"
+#include "borg_shader.h"
+
 #include "vulkan/runtime/vk_object.h"
+
 #include "vk_alloc.h"
 #include "vk_log.h"
 
@@ -36,9 +39,11 @@ borg_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS)
       return result;
 
+   dev->vk.shader_ops = &borg_device_shader_ops;
+
    dev->pdev = pdev;
 
-  *pDevice = borg_device_to_handle(dev);
+   *pDevice = borg_device_to_handle(dev);
 
    return VK_SUCCESS;
 }

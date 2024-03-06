@@ -14,7 +14,9 @@ borg_files = files(
   'borg_instance.c',
   'borg_instance.h',
   'borg_physical_device.c',
-  'borg_physical_device.h'
+  'borg_physical_device.h',
+  'borg_shader.c',
+  'borg_shader.h'
 )
 
 borg_entrypoints = custom_target(
@@ -32,6 +34,7 @@ borg_entrypoints = custom_target(
 borg_deps = [
   dep_libdrm,
   dep_valgrind,
+  idep_nir_headers,
   idep_vulkan_runtime,
   idep_vulkan_util,
 ]
