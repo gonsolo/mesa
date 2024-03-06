@@ -6,6 +6,7 @@
 #include "borg_buffer.h"
 #include "borg_device.h"
 #include "borg_entrypoints.h"
+#include "borg_physical_device.h"
 #include "vk_log.h"
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -22,7 +23,7 @@ borg_CreateBuffer(VkDevice device,
    if (!buffer)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-     *pBuffer = borg_buffer_to_handle(buffer);
+   *pBuffer = borg_buffer_to_handle(buffer);
 
    return VK_SUCCESS;
 }
@@ -41,12 +42,30 @@ borg_DestroyBuffer(VkDevice device,
    vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
 }
 
-
 VKAPI_ATTR void VKAPI_CALL
 borg_GetDeviceBufferMemoryRequirements(
    VkDevice device,
    const VkDeviceBufferMemoryRequirements *pInfo,
    VkMemoryRequirements2 *pMemoryRequirements)
 {
+   VK_FROM_HANDLE(borg_device, dev, device);
+
+   const uint32_t alignment = 4;
+   //const uint32_t unused = 0;
+
+   pMemoryRequirements->memoryRequirements = (VkMemoryRequirements) {
+      .size = align64(pInfo->pCreateInfo->size, alignment),
+      .alignment = alignment,
+      .memoryTypeBits = BITFIELD_MASK(dev->pdev->mem_type_count),
+   };
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+borg_BindBufferMemory2(VkDevice device,
+                      uint32_t bindInfoCount,
+                      const VkBindBufferMemoryInfo *pBindInfos)
+{
    // TODO
+   printf("gonsolo bindInfoCount: %i\n", bindInfoCount);
+   return VK_SUCCESS;
 }

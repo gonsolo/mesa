@@ -36,6 +36,8 @@ borg_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS)
       return result;
 
+   dev->pdev = pdev;
+
   *pDevice = borg_device_to_handle(dev);
 
    return VK_SUCCESS;

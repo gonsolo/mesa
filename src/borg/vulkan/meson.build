@@ -4,8 +4,11 @@
 borg_files = files(
   'borg_buffer.c',
   'borg_buffer.h',
+  'borg_descriptor_set_layout.c',
   'borg_device.c',
   'borg_device.h',
+  'borg_device_memory.c',
+  'borg_device_memory.h',
   'borg_format.c',
   'borg_image.c',
   'borg_instance.c',

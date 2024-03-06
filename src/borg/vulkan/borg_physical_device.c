@@ -39,6 +39,7 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
 
       // Vulkan 1.0 limits
       .maxComputeSharedMemorySize = BORG_MAX_SHARED_SIZE,
+      .maxMemoryAllocationCount = 4096,
    };
    snprintf(properties.deviceName, sizeof(properties.deviceName), "%s", "Borg 9000");
 
@@ -52,6 +53,19 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
                                       &properties,
                                       &dispatch_table
 				    );
+
+   pdev->mem_heap_count = 1;
+   pdev->mem_heaps[0] = (struct borg_memory_heap) {
+      .size = 1024,
+      .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT
+
+   };
+   pdev->mem_type_count = 1;
+   pdev->mem_types[0] = (VkMemoryType) {
+      .propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+      .heapIndex = 0
+   };
 
    pdev->queue_families[pdev->queue_family_count++] = (struct borg_queue_family) {
       .queue_flags = VK_QUEUE_COMPUTE_BIT,
@@ -74,7 +88,19 @@ VKAPI_ATTR void VKAPI_CALL
      VkPhysicalDevice physicalDevice,
      VkPhysicalDeviceMemoryProperties2 *pMemoryProperties)
 {
-   // TODO
+   VK_FROM_HANDLE(borg_physical_device, pdev, physicalDevice);
+
+   pMemoryProperties->memoryProperties.memoryHeapCount = pdev->mem_heap_count;
+   for (int i = 0; i < pdev->mem_heap_count; i++) {
+      pMemoryProperties->memoryProperties.memoryHeaps[i] = (VkMemoryHeap) {
+         .size = pdev->mem_heaps[i].size,
+         .flags = pdev->mem_heaps[i].flags,
+      };
+   }
+   pMemoryProperties->memoryProperties.memoryTypeCount = pdev->mem_type_count;
+   for (int i = 0; i < pdev->mem_type_count; i++) {
+      pMemoryProperties->memoryProperties.memoryTypes[i] = pdev->mem_types[i];
+    }
 }
 
 VKAPI_ATTR void VKAPI_CALL
