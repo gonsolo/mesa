@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "borg_cmd_buffer.h"
 #include "borg_device.h"
 #include "borg_entrypoints.h"
 #include "borg_shader.h"
@@ -99,6 +100,6 @@ const struct vk_device_shader_ops borg_device_shader_ops = {
    .compile = borg_compile_shaders,
    //.deserialize = nvk_deserialize_shader,
    //.cmd_set_dynamic_graphics_state = vk_cmd_set_dynamic_graphics_state,
-   //.cmd_bind_shaders = nvk_cmd_bind_shaders,
+   .cmd_bind_shaders = borg_cmd_bind_shaders,
 };
 

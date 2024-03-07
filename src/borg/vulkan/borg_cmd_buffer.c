@@ -48,3 +48,12 @@ borg_BeginCommandBuffer(VkCommandBuffer commandBuffer,
    // TODO
    return VK_SUCCESS;
 }
+
+void
+borg_cmd_bind_shaders(struct vk_command_buffer *vk_cmd,
+                      uint32_t stage_count,
+                      const gl_shader_stage *stages,
+                      struct vk_shader ** const shaders)
+{
+   // TODO
+}
