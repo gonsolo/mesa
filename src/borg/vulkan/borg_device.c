@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "borg_command_buffer.h"
 #include "borg_device.h"
-
 #include "borg_entrypoints.h"
 #include "borg_instance.h"
 #include "borg_physical_device.h"
@@ -40,6 +40,7 @@ borg_CreateDevice(VkPhysicalDevice physicalDevice,
       return result;
 
    dev->vk.shader_ops = &borg_device_shader_ops;
+   dev->vk.command_buffer_ops = &borg_command_buffer_ops;
 
    dev->pdev = pdev;
 
