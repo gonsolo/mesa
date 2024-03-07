@@ -13,7 +13,7 @@ test: install
 gdb: install
 	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) gdb $(APPLICATION); cd -
 lldb: install
-	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) lldb $(APPLICATION); cd -
+	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) lldb -o run $(APPLICATION); cd -
 install: compile_and_tidy
 	cd $(BUILD_DIR); $(MESON) install; cd -
 compile_and_tidy: compile tidy_compile_commands
