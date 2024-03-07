@@ -21,7 +21,7 @@ compile:
 	cd $(BUILD_DIR); $(MESON) compile; cd -
 	#cd ..; ln -s $(BUILD_DIR_NAME)/compile_commands.json .; cd -
 setup:
-	cd ..; $(MESON) setup $(BUILD_DIR_NAME) -Dbackend=ninja -Dgallium-drivers= -Dvulkan-drivers=nouveau-experimental,borg-experimental -Dprefix=~/bin/mesa; cd -
+	cd ..; $(MESON) setup $(BUILD_DIR_NAME) -Dbackend=ninja -Dgallium-drivers= -Dvulkan-drivers=nouveau,borg-experimental -Dprefix=~/bin/mesa; cd -
 c: clean
 clean:
 	cd ..; rm -rf gonsolo-nouveau-borg; cd -
