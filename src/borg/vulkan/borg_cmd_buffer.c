@@ -41,3 +41,10 @@ const struct vk_command_buffer_ops borg_cmd_buffer_ops = {
    //.destroy = borg_destroy_cmd_buffer,
 };
 
+VKAPI_ATTR VkResult VKAPI_CALL
+borg_BeginCommandBuffer(VkCommandBuffer commandBuffer,
+                        const VkCommandBufferBeginInfo *pBeginInfo)
+{
+   // TODO
+   return VK_SUCCESS;
+}
