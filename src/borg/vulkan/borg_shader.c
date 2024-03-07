@@ -18,9 +18,17 @@ borg_get_nir_options(struct vk_physical_device *vk_pdev,
    return NULL;
 }
 
+static struct spirv_to_nir_options
+borg_get_spirv_options(struct vk_physical_device *vk_pdev,
+                        UNUSED gl_shader_stage stage,
+                        const struct vk_pipeline_robustness_state *rs)
+{
+   return (struct spirv_to_nir_options) { /* TODO */ };
+}
+
 const struct vk_device_shader_ops borg_device_shader_ops = {
    .get_nir_options = borg_get_nir_options,
-   //.get_spirv_options = nvk_get_spirv_options,
+   .get_spirv_options = borg_get_spirv_options,
    //.preprocess_nir = nvk_preprocess_nir,
    //.hash_graphics_state = nvk_hash_graphics_state,
    //.compile = nvk_compile_shaders,
