@@ -18,4 +18,10 @@ struct borg_device {
 
 VK_DEFINE_HANDLE_CASTS(borg_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
 
+static inline struct borg_physical_device *
+borg_device_physical(struct borg_device *dev)
+{
+   return (struct borg_physical_device *)dev->vk.physical;
+}
+
 #endif

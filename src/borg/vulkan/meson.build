@@ -11,6 +11,7 @@ borg_files = files(
   'borg_cmd_pool.h',
   'borg_descriptor_set.c',
   'borg_descriptor_set_layout.c',
+  'borg_descriptor_set_layout.h',
   'borg_device.c',
   'borg_device.h',
   'borg_device_memory.c',

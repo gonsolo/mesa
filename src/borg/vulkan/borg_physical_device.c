@@ -67,7 +67,8 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
    }
 
    //struct vk_device_extension_table supported_extensions;
-   //struct vk_features supported_features;
+   //struct vk_features supported_features; 
+
    struct vk_properties properties = {
       .apiVersion = VK_MAKE_VERSION(1, 0, VK_HEADER_VERSION),
       .driverVersion = vk_get_driver_version(),
@@ -79,7 +80,8 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
       .maxComputeSharedMemorySize = BORG_MAX_SHARED_SIZE,
       .maxMemoryAllocationCount = 4096,
       .maxPerStageDescriptorStorageBuffers = 4,
-      .maxDescriptorSetStorageBuffers =  96
+      .maxDescriptorSetStorageBuffers =  96,
+
    };
    snprintf(properties.deviceName, sizeof(properties.deviceName), "%s", "Borg 9000");
 
