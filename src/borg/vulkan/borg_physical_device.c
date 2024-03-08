@@ -78,10 +78,14 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
 
       // Vulkan 1.0 limits
       .maxComputeSharedMemorySize = BORG_MAX_SHARED_SIZE,
+      .maxComputeWorkGroupCount = {65535,65535,65535},
+      .maxComputeWorkGroupInvocations = 128,
+      .maxDescriptorSetStorageBuffers =  96,
       .maxMemoryAllocationCount = 4096,
       .maxPerStageDescriptorStorageBuffers = 4,
-      .maxDescriptorSetStorageBuffers =  96,
-
+      .maxPerStageResources = 128,
+      .maxStorageBufferRange = 1 << 27,
+      .maxComputeWorkGroupSize = {32, 1, 1},
    };
    snprintf(properties.deviceName, sizeof(properties.deviceName), "%s", "Borg 9000");
 
