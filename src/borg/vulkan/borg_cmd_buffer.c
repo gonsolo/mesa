@@ -57,3 +57,16 @@ borg_cmd_bind_shaders(struct vk_command_buffer *vk_cmd,
 {
    // TODO
 }
+
+VKAPI_ATTR void VKAPI_CALL
+borg_CmdBindDescriptorSets(VkCommandBuffer commandBuffer,
+                           VkPipelineBindPoint pipelineBindPoint,
+                           VkPipelineLayout layout,
+                           uint32_t firstSet,
+                           uint32_t descriptorSetCount,
+                           const VkDescriptorSet *pDescriptorSets,
+                           uint32_t dynamicOffsetCount,
+                           const uint32_t *pDynamicOffsets)
+{
+   // TODO
+}
