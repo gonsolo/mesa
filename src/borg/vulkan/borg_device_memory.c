@@ -62,3 +62,11 @@ borg_UnmapMemory2KHR(VkDevice device,
    munmap(mem->map, length);
    return VK_SUCCESS;
 }
+
+VKAPI_ATTR void VKAPI_CALL
+borg_FreeMemory(VkDevice device,
+                VkDeviceMemory _mem,
+                const VkAllocationCallbacks *pAllocator)
+{
+   // TODO
+}
