@@ -6,6 +6,7 @@ borg_files = files(
   'borg_buffer.h',
   'borg_cmd_buffer.h',
   'borg_cmd_buffer.c',
+  'borg_cmd_dispatch.c',
   'borg_cmd_pool.h',
   'borg_descriptor_set.c',
   'borg_descriptor_set_layout.c',

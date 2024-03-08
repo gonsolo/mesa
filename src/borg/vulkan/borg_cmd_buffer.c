@@ -70,3 +70,10 @@ borg_CmdBindDescriptorSets(VkCommandBuffer commandBuffer,
 {
    // TODO
 }
+
+VKAPI_ATTR VkResult VKAPI_CALL
+borg_EndCommandBuffer(VkCommandBuffer commandBuffer)
+{
+   // TODO
+   return VK_SUCCESS;
+}

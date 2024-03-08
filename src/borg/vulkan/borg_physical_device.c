@@ -12,6 +12,44 @@
 #include "vk_util.h"
 #include <xf86drm.h>
 
+VkResult dummy_syncobj_init(struct vk_device *device,
+                    struct vk_sync *sync,
+                    uint64_t initial_value);
+VkResult dummy_syncobj_init(struct vk_device *device,
+                    struct vk_sync *sync,
+                    uint64_t initial_value)
+{
+   return VK_SUCCESS;
+}
+
+VkResult dummy_syncobj_wait(struct vk_device *device,
+                            struct vk_sync *sync,
+                            uint64_t wait_value,
+                            enum vk_sync_wait_flags wait_flags,
+                            uint64_t abs_timeout_ns);
+VkResult dummy_syncobj_wait(struct vk_device *device,
+                            struct vk_sync *sync,
+                            uint64_t wait_value,
+                            enum vk_sync_wait_flags wait_flags,
+                            uint64_t abs_timeout_ns)
+{
+   return VK_SUCCESS;
+}
+
+VkResult dumm_syncobj_reset(struct vk_device *device,
+                            struct vk_sync *sync);
+VkResult dumm_syncobj_reset(struct vk_device *device,
+                            struct vk_sync *sync)
+{
+   return VK_SUCCESS;
+}
+
+void dummy_syncobj_finish(struct vk_device *device,
+                          struct vk_sync *sync);
+void dummy_syncobj_finish(struct vk_device *device,
+                          struct vk_sync *sync)
+{}
+
 VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
                                           struct _drmDevice *drm_device,
                                           struct vk_physical_device **pdev_out)
@@ -72,6 +110,27 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
       .queue_count = 1,
    };
    assert(pdev->queue_family_count <= ARRAY_SIZE(pdev->queue_families));
+
+   pdev->syncobj_sync_type = (struct vk_sync_type) {
+      .size = sizeof(struct vk_sync),
+      .features = VK_SYNC_FEATURE_BINARY |
+                  VK_SYNC_FEATURE_CPU_WAIT |
+                  VK_SYNC_FEATURE_CPU_RESET,
+      .init = dummy_syncobj_init,
+      .finish = dummy_syncobj_finish,
+      //.signal = vk_drm_syncobj_signal,
+      .reset = dumm_syncobj_reset,
+      //.move = vk_drm_syncobj_move,
+      //.import_opaque_fd = dummy_import_opaque_fd,
+      //.export_opaque_fd = vk_drm_syncobj_export_opaque_fd,
+      //.import_sync_file = vk_drm_syncobj_import_sync_file,
+      //.export_sync_file = vk_drm_syncobj_export_sync_file,
+      .wait = dummy_syncobj_wait,
+     };
+
+   pdev->sync_types[0] = &pdev->syncobj_sync_type;
+   pdev->sync_types[1] = NULL;
+   pdev->vk.supported_sync_types = pdev->sync_types;
 
    *pdev_out = &pdev->vk;
    return result;
