@@ -35,9 +35,16 @@ borg_create_cmd_buffer(struct vk_command_pool *vk_pool,
    return VK_SUCCESS;
 }
 
+static void
+borg_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
+		      VkCommandBufferResetFlags flags)
+{
+   // TODO
+}
+
 const struct vk_command_buffer_ops borg_cmd_buffer_ops = {
    .create = borg_create_cmd_buffer,
-   //.reset = borg_reset_cmd_buffer,
+   .reset = borg_reset_cmd_buffer,
    //.destroy = borg_destroy_cmd_buffer,
 };
 

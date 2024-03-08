@@ -34,3 +34,12 @@ borg_UpdateDescriptorSets(VkDevice device,
 {
    // TODO
 }
+
+VKAPI_ATTR void VKAPI_CALL
+borg_DestroyDescriptorPool(VkDevice device,
+                           VkDescriptorPool _pool,
+                           const VkAllocationCallbacks *pAllocator)
+
+{
+   // TODO
+}

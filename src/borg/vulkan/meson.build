@@ -7,6 +7,7 @@ borg_files = files(
   'borg_cmd_buffer.h',
   'borg_cmd_buffer.c',
   'borg_cmd_dispatch.c',
+  'borg_cmd_pool.c',
   'borg_cmd_pool.h',
   'borg_descriptor_set.c',
   'borg_descriptor_set_layout.c',
@@ -18,10 +19,11 @@ borg_files = files(
   'borg_image.c',
   'borg_instance.c',
   'borg_instance.h',
-  'borg_queue.c',
-  'borg_queue.h',
   'borg_physical_device.c',
   'borg_physical_device.h',
+  'borg_pipeline.c',
+  'borg_queue.c',
+  'borg_queue.h',
   'borg_shader.c',
   'borg_shader.h'
 )
