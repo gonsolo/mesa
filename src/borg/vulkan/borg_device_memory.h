@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 
+#ifndef BORG_DEVICE_MEMORY_H
+#define BORG_DEVICE_MEMORY_H
+
 #include "vk_device_memory.h"
 
 struct borg_device_memory {               
@@ -12,3 +15,4 @@ struct borg_device_memory {
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(borg_device_memory, vk.base, VkDeviceMemory, VK_OBJECT_TYPE_DEVICE_MEMORY)
 
+#endif

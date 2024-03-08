@@ -42,6 +42,10 @@ borg_CreateDevice(VkPhysicalDevice physicalDevice,
    dev->vk.shader_ops = &borg_device_shader_ops;
    dev->vk.command_buffer_ops = &borg_cmd_buffer_ops;
 
+   result = borg_queue_init(dev, &dev->queue, &pCreateInfo->pQueueCreateInfos[0], 0);
+   if (result != VK_SUCCESS)
+      return result;
+
    dev->pdev = pdev;
 
    *pDevice = borg_device_to_handle(dev);

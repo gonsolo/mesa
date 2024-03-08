@@ -18,6 +18,8 @@ borg_files = files(
   'borg_image.c',
   'borg_instance.c',
   'borg_instance.h',
+  'borg_queue.c',
+  'borg_queue.h',
   'borg_physical_device.c',
   'borg_physical_device.h',
   'borg_shader.c',

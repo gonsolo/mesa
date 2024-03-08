@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 
+#ifndef BORG_CMD_BUFFER_H
+#define BORG_CMD_BUFFER_H
+
 #include "vk_command_buffer.h"
 #include "vk_shader.h"
 
@@ -22,3 +25,4 @@ void borg_cmd_bind_shaders(struct vk_command_buffer *vk_cmd,
                            const gl_shader_stage *stages,
                            struct vk_shader ** const shaders);
 
+#endif
