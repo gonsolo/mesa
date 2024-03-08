@@ -77,6 +77,7 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
       .deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
 
       // Vulkan 1.0 limits
+      .maxBoundDescriptorSets = 4,
       .maxComputeSharedMemorySize = BORG_MAX_SHARED_SIZE,
       .maxComputeWorkGroupCount = {65535,65535,65535},
       .maxComputeWorkGroupInvocations = 128,
