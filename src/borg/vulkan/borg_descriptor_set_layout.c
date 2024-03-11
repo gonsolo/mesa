@@ -42,7 +42,7 @@ borg_descriptor_get_type_list(VkDescriptorType type,
    return type_list;
 }         
 
-static void
+void
 borg_descriptor_stride_align_for_type(const struct borg_physical_device *pdev,
                                      VkDescriptorType type,
                                      const VkMutableDescriptorTypeListEXT *type_list,

@@ -9,6 +9,7 @@
 #include "vk_physical_device.h"
 #include "vk_sync.h"
 
+struct borg_device_info;
 struct borg_physical_device;
 struct _drmDevice;
 
