@@ -21,4 +21,12 @@ struct borg_descriptor_pool_entry {
 
 };
 
+struct borg_descriptor_set {
+   struct vk_object_base base;
+};
+
+VK_DEFINE_NONDISP_HANDLE_CASTS(borg_descriptor_set, base, VkDescriptorSet,
+                       VK_OBJECT_TYPE_DESCRIPTOR_SET)
+
+
 #endif

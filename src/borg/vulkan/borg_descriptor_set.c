@@ -12,14 +12,72 @@
 #include "vk_log.h"
 #include "vk_util.h"
 
+static VkResult
+borg_descriptor_set_create(struct borg_device *dev,
+                          struct borg_descriptor_pool *pool,
+                          struct borg_descriptor_set_layout *layout,
+                          uint32_t variable_count,
+                          struct borg_descriptor_set **out_set)
+{
+   struct borg_descriptor_set *set;
+
+   uint32_t dummy_mem_size = 32;
+
+   set = vk_object_zalloc(&dev->vk, NULL, dummy_mem_size,
+                          VK_OBJECT_TYPE_DESCRIPTOR_SET);
+   if (!set)
+      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   // TODO
+
+   *out_set = set;
+
+   return VK_SUCCESS;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 borg_AllocateDescriptorSets(VkDevice device,
                             const VkDescriptorSetAllocateInfo *pAllocateInfo,
                             VkDescriptorSet *pDescriptorSets)
 {
-   // TODO
+   VK_FROM_HANDLE(borg_device, dev, device);
+   VK_FROM_HANDLE(borg_descriptor_pool, pool, pAllocateInfo->descriptorPool);
 
-   return VK_SUCCESS;
+   VkResult result = VK_SUCCESS;
+   uint32_t i;
+
+   struct borg_descriptor_set *set = NULL;
+
+   const VkDescriptorSetVariableDescriptorCountAllocateInfo *var_desc_count =
+      vk_find_struct_const(pAllocateInfo->pNext,
+                           DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO);
+
+   /* allocate a set of buffers for each shader to contain descriptors */
+   for (i = 0; i < pAllocateInfo->descriptorSetCount; i++) {
+      VK_FROM_HANDLE(borg_descriptor_set_layout, layout,
+                     pAllocateInfo->pSetLayouts[i]);
+      /* If descriptorSetCount is zero or this structure is not included in
+       * the pNext chain, then the variable lengths are considered to be zero.
+       */
+      const uint32_t variable_count =
+         var_desc_count && var_desc_count->descriptorSetCount > 0 ?
+         var_desc_count->pDescriptorCounts[i] : 0;
+
+      result = borg_descriptor_set_create(dev, pool, layout,
+                                         variable_count, &set);
+      if (result != VK_SUCCESS)
+         break;
+
+      pDescriptorSets[i] = borg_descriptor_set_to_handle(set);
+   }
+
+   if (result != VK_SUCCESS) {
+      borg_FreeDescriptorSets(device, pAllocateInfo->descriptorPool, i, pDescriptorSets);
+      for (i = 0; i < pAllocateInfo->descriptorSetCount; i++) {
+         pDescriptorSets[i] = VK_NULL_HANDLE;
+      }
+   }
+   return result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
