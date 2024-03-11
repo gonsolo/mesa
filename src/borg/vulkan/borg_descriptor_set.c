@@ -14,14 +14,14 @@
 
 static VkResult
 borg_descriptor_set_create(struct borg_device *dev,
-                          struct borg_descriptor_pool *pool,
-                          struct borg_descriptor_set_layout *layout,
-                          uint32_t variable_count,
-                          struct borg_descriptor_set **out_set)
+                           struct borg_descriptor_pool *pool,
+                           struct borg_descriptor_set_layout *layout,
+                           uint32_t variable_count,
+                           struct borg_descriptor_set **out_set)
 {
    struct borg_descriptor_set *set;
 
-   uint32_t dummy_mem_size = 32;
+   uint32_t dummy_mem_size = 64;
 
    set = vk_object_zalloc(&dev->vk, NULL, dummy_mem_size,
                           VK_OBJECT_TYPE_DESCRIPTOR_SET);
@@ -34,6 +34,16 @@ borg_descriptor_set_create(struct borg_device *dev,
 
    return VK_SUCCESS;
 }
+
+static void
+borg_descriptor_set_destroy(struct borg_device *dev,
+                           struct borg_descriptor_pool *pool,
+                           struct borg_descriptor_set *set, bool free_bo)
+{
+   // TODO
+   vk_object_free(&dev->vk, NULL, set);
+}
+
 
 VKAPI_ATTR VkResult VKAPI_CALL
 borg_AllocateDescriptorSets(VkDevice device,
@@ -162,6 +172,25 @@ borg_UpdateDescriptorSets(VkDevice device,
 {
    // TODO
 }
+
+VKAPI_ATTR VkResult VKAPI_CALL
+borg_FreeDescriptorSets(VkDevice device,
+                        VkDescriptorPool descriptorPool,
+                        uint32_t descriptorSetCount,
+                        const VkDescriptorSet *pDescriptorSets)
+{
+   VK_FROM_HANDLE(borg_device, dev, device);
+   VK_FROM_HANDLE(borg_descriptor_pool, pool, descriptorPool);
+
+   for (uint32_t i = 0; i < descriptorSetCount; i++) {
+      VK_FROM_HANDLE(borg_descriptor_set, set, pDescriptorSets[i]);
+
+      if (set)
+         borg_descriptor_set_destroy(dev, pool, set, true);
+   }
+   return VK_SUCCESS;
+}
+
 
 VKAPI_ATTR void VKAPI_CALL
 borg_DestroyDescriptorPool(VkDevice device,
