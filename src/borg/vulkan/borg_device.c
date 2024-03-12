@@ -6,14 +6,16 @@
 #include "borg_cmd_buffer.h"
 #include "borg_device.h"
 #include "borg_entrypoints.h"
-#include "borg_instance.h"
 #include "borg_physical_device.h"
 #include "borg_shader.h"
 
 #include "vulkan/runtime/vk_object.h"
+#include "vulkan/wsi/wsi_common.h"
 
 #include "vk_alloc.h"
 #include "vk_log.h"
+
+#include <xf86drm.h>
 
 VKAPI_ATTR VkResult VKAPI_CALL
 borg_CreateDevice(VkPhysicalDevice physicalDevice,
@@ -29,10 +31,11 @@ borg_CreateDevice(VkPhysicalDevice physicalDevice,
    if (!dev)
       return vk_error(pdev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-
    struct vk_device_dispatch_table dispatch_table;
    vk_device_dispatch_table_from_entrypoints(&dispatch_table,
                                              &borg_device_entrypoints, true);
+   vk_device_dispatch_table_from_entrypoints(&dispatch_table,
+                                               &wsi_device_entrypoints, false);
 
    VkResult result = vk_device_init(&dev->vk, &pdev->vk, &dispatch_table,
                            pCreateInfo, pAllocator);
@@ -40,6 +43,15 @@ borg_CreateDevice(VkPhysicalDevice physicalDevice,
       return result;
 
    dev->vk.shader_ops = &borg_device_shader_ops;
+
+   drmDevicePtr drm_device = NULL;
+   int ret = drmGetDeviceFromDevId(pdev->render_dev, 0, &drm_device);
+   if (ret != 0) {
+      result = vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
+                         "Failed to get DRM device: %m");
+      return result;
+   }
+
    dev->vk.command_buffer_ops = &borg_cmd_buffer_ops;
 
    result = borg_queue_init(dev, &dev->queue, &pCreateInfo->pQueueCreateInfos[0], 0);

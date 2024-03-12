@@ -6,7 +6,7 @@
 #ifndef BORG_INSTANCE_H
 #define BORG_INSTANCE_H
 
-#include "vulkan/runtime/vk_instance.h"
+#include "vk_instance.h"
 
 struct borg_instance {
 	struct vk_instance vk;

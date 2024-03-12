@@ -28,6 +28,7 @@ struct borg_memory_heap {
 
 struct borg_physical_device {
    struct vk_physical_device vk;
+   dev_t render_dev;
 
    struct borg_memory_heap mem_heaps[1];
    uint8_t mem_heap_count;

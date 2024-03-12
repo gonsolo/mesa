@@ -7,10 +7,15 @@
 #include "borg_instance.h"
 #include "borg_physical_device.h"
 #include "borg_private.h"
+
 #include "vk_alloc.h"
 #include "vk_log.h"
 #include "vk_util.h"
+
+#include <sys/stat.h>
 #include <xf86drm.h>
+
+#define BORG_VENDOR_ID 0x3333 // seems to be unused
 
 VkResult dummy_syncobj_init(struct vk_device *device,
                     struct vk_sync *sync,
@@ -57,6 +62,41 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
    VkResult result;
 
    struct borg_instance *instance = (struct borg_instance *)vk_instance;
+
+   if (!(drm_device->available_nodes & (1 << DRM_NODE_RENDER)))
+      return VK_ERROR_INCOMPATIBLE_DRIVER;
+
+   switch (drm_device->bustype) {
+      case DRM_BUS_PCI:
+         if (drm_device->deviceinfo.pci->vendor_id != BORG_VENDOR_ID)
+            return VK_ERROR_INCOMPATIBLE_DRIVER;
+         break;
+      case DRM_BUS_PLATFORM: {
+         const char *compat_prefix = "borg,";
+         bool found = false;
+         for (int i = 0; drm_device->deviceinfo.platform->compatible[i] != NULL; i++) {
+            if (strncmp(drm_device->deviceinfo.platform->compatible[0], compat_prefix, strlen(compat_prefix)) == 0) {
+               found = true;
+               break;
+            }
+         }
+         if (!found)
+            return VK_ERROR_INCOMPATIBLE_DRIVER;
+         break;
+      }
+      default:
+         return VK_ERROR_INCOMPATIBLE_DRIVER;
+   }
+
+   struct stat st;
+   if (stat(drm_device->nodes[DRM_NODE_RENDER], &st)) {
+      result = vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
+                         "fstat() failed on %s: %m",
+                         drm_device->nodes[DRM_NODE_RENDER]);
+      perror("gonso 1");
+      return result;
+   }
+   const dev_t render_dev = st.st_rdev;
 
    struct borg_physical_device *pdev =
       vk_zalloc(&instance->vk.alloc, sizeof(*pdev),
@@ -141,7 +181,10 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
    pdev->sync_types[1] = NULL;
    pdev->vk.supported_sync_types = pdev->sync_types;
 
+   pdev->render_dev = render_dev;
+
    *pdev_out = &pdev->vk;
+
    return result;
 }
 
