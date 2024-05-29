@@ -1,4 +1,5 @@
-MESON = ~/src/meson/meson.py
+#MESON = ~/src/meson/meson.py
+MESON = meson
 BUILD_DIR_NAME = gonsolo-nouveau-borg
 BUILD_DIR = ../$(BUILD_DIR_NAME)
 VULKANINFO = ~/src/Vulkan-Tools/gonsolo/vulkaninfo/vulkaninfo

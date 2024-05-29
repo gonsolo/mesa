@@ -11,6 +11,7 @@
 
 static VkResult
 borg_create_cmd_buffer(struct vk_command_pool *vk_pool,
+		       VkCommandBufferLevel level,
                        struct vk_command_buffer **cmd_buffer_out)
 {
    struct borg_cmd_pool *pool = container_of(vk_pool, struct borg_cmd_pool, vk);
