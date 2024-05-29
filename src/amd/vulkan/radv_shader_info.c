@@ -301,12 +301,6 @@ gather_intrinsic_info(const nir_shader *nir, const nir_intrinsic_instr *instr, s
    case nir_intrinsic_store_output:
       gather_intrinsic_store_output_info(nir, instr, info, consider_force_vrs);
       break;
-   case nir_intrinsic_load_sbt_base_amd:
-      info->cs.is_rt_shader = true;
-      break;
-   case nir_intrinsic_load_rt_dynamic_callable_stack_base_amd:
-      info->cs.uses_dynamic_rt_callable_stack = true;
-      break;
    case nir_intrinsic_bvh64_intersect_ray_amd:
       info->cs.uses_rt = true;
       break;
@@ -587,9 +581,12 @@ gather_shader_info_tes(struct radv_device *device, const nir_shader *nir, struct
    info->tes.reads_tess_factors =
       !!(nir->info.inputs_read & (VARYING_BIT_TESS_LEVEL_INNER | VARYING_BIT_TESS_LEVEL_OUTER));
 
-   if (!info->inputs_linked)
+   if (!info->inputs_linked) {
       info->tes.num_linked_inputs = util_last_bit64(radv_gather_unlinked_io_mask(
          nir->info.inputs_read & ~(VARYING_BIT_TESS_LEVEL_OUTER | VARYING_BIT_TESS_LEVEL_INNER)));
+      info->tes.num_linked_patch_inputs = util_last_bit64(
+         radv_gather_unlinked_patch_io_mask(nir->info.inputs_read, nir->info.patch_inputs_read));
+   }
    if (!info->outputs_linked)
       info->tes.num_linked_outputs = util_last_bit64(radv_gather_unlinked_io_mask(nir->info.outputs_written));
 

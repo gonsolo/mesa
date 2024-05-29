@@ -162,7 +162,6 @@ struct wsi_wl_surface {
 
    /* This has no functional use, and is here only for perfetto */
    struct {
-      const VkAllocationCallbacks *pAllocator;
       char *latency_str;
       uint64_t presenting;
       uint64_t presentation_track_id;
@@ -1345,11 +1344,12 @@ wsi_wl_surface_get_present_rectangles(VkIcdSurfaceBase *surface,
 }
 
 static void
-wsi_wl_surface_analytics_fini(struct wsi_wl_surface *wsi_wl_surface)
+wsi_wl_surface_analytics_fini(struct wsi_wl_surface *wsi_wl_surface,
+                              const VkAllocationCallbacks *parent_pAllocator,
+                              const VkAllocationCallbacks *pAllocator)
 {
-   const VkAllocationCallbacks *pAllocator = wsi_wl_surface->analytics.pAllocator;
-
-   vk_free(pAllocator, wsi_wl_surface->analytics.latency_str);
+   vk_free2(parent_pAllocator, pAllocator,
+            wsi_wl_surface->analytics.latency_str);
 }
 
 void
@@ -1375,7 +1375,7 @@ wsi_wl_surface_destroy(VkIcdSurfaceBase *icd_surface, VkInstance _instance,
    if (wsi_wl_surface->display)
       wsi_wl_display_destroy(wsi_wl_surface->display);
 
-   wsi_wl_surface_analytics_fini(wsi_wl_surface);
+   wsi_wl_surface_analytics_fini(wsi_wl_surface, &instance->alloc, pAllocator);
 
    vk_free2(&instance->alloc, pAllocator, wsi_wl_surface);
 }
@@ -1597,9 +1597,6 @@ wsi_wl_surface_analytics_init(struct wsi_wl_surface *wsi_wl_surface,
    uint64_t wl_id;
    char *track_name;
 
-   wl_id = wl_proxy_get_id((struct wl_proxy *) wsi_wl_surface->surface);
-
-   wsi_wl_surface->analytics.pAllocator = pAllocator;
    wl_id = wl_proxy_get_id((struct wl_proxy *) wsi_wl_surface->surface);
    track_name = vk_asprintf(pAllocator, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT,
                             "wl%" PRIu64 " presentation", wl_id);
@@ -1896,11 +1893,16 @@ wsi_wl_swapchain_acquire_next_image_explicit(struct wsi_swapchain *wsi_chain,
    for (uint32_t i = 0; i < chain->base.image_count; i++)
       images[i] = &chain->images[i].base;
 
-   VkResult result = wsi_drm_wait_for_explicit_sync_release(wsi_chain,
-                                                            wsi_chain->image_count,
-                                                            images,
-                                                            info->timeout,
-                                                            image_index);
+   VkResult result;
+#ifdef HAVE_LIBDRM
+   result = wsi_drm_wait_for_explicit_sync_release(wsi_chain,
+                                                   wsi_chain->image_count,
+                                                   images,
+                                                   info->timeout,
+                                                   image_index);
+#else
+   result = VK_ERROR_FEATURE_NOT_PRESENT;
+#endif
    STACK_ARRAY_FINISH(images);
 
    if (result == VK_SUCCESS)

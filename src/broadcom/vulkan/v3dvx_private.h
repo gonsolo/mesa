@@ -61,6 +61,9 @@ void
 v3dX(cmd_buffer_emit_line_width)(struct v3dv_cmd_buffer *cmd_buffer);
 
 void
+v3dX(cmd_buffer_emit_default_point_size)(struct v3dv_cmd_buffer *cmd_buffer);
+
+void
 v3dX(cmd_buffer_emit_sample_state)(struct v3dv_cmd_buffer *cmd_buffer);
 
 void
@@ -338,7 +341,8 @@ v3dX(job_emit_noop)(struct v3dv_job *job);
 
 /* Used at v3dv_query */
 VkResult
-v3dX(enumerate_performance_query_counters)(uint32_t *pCounterCount,
+v3dX(enumerate_performance_query_counters)(struct v3dv_physical_device *pDevice,
+                                           uint32_t *pCounterCount,
                                            VkPerformanceCounterKHR *pCounters,
                                            VkPerformanceCounterDescriptionKHR *pCounterDescriptions);
 

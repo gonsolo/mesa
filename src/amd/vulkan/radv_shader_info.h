@@ -28,6 +28,7 @@ enum radv_shader_type {
    RADV_SHADER_TYPE_DEFAULT = 0,
    RADV_SHADER_TYPE_GS_COPY,
    RADV_SHADER_TYPE_TRAP_HANDLER,
+   RADV_SHADER_TYPE_RT_PROLOG,
 };
 
 struct radv_vs_output_info {
@@ -151,7 +152,8 @@ struct radv_shader_info {
       bool point_mode;
       bool reads_tess_factors;
       unsigned tcs_vertices_out;
-      uint8_t num_linked_inputs; /* Number of reserved per-vertex input slots in VRAM. */
+      uint8_t num_linked_inputs;       /* Number of reserved per-vertex input slots in VRAM. */
+      uint8_t num_linked_patch_inputs; /* Number of reserved per-patch input slots in VRAM. */
       uint8_t num_linked_outputs;
       uint32_t num_outputs; /* For NGG streamout only */
    } tes;
@@ -217,8 +219,6 @@ struct radv_shader_info {
       bool uses_local_invocation_idx;
       unsigned block_size[3];
 
-      bool is_rt_shader;
-      bool uses_dynamic_rt_callable_stack;
       bool uses_rt;
       bool uses_full_subgroups;
       bool linear_taskmesh_dispatch;

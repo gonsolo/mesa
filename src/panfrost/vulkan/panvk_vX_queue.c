@@ -80,12 +80,12 @@ panvk_queue_submit_batch(struct panvk_queue *queue, struct panvk_batch *batch,
                       phys_dev->kmod.props.gpu_prod_id);
       }
 
+      if (debug & PANVK_DEBUG_DUMP)
+         pandecode_dump_mappings(dev->debug.decode_ctx);
+
       if (debug & PANVK_DEBUG_SYNC)
          pandecode_abort_on_fault(dev->debug.decode_ctx, submit.jc,
                                   phys_dev->kmod.props.gpu_prod_id);
-
-      if (debug & PANVK_DEBUG_DUMP)
-         pandecode_dump_mappings(dev->debug.decode_ctx);
    }
 
    if (batch->fragment_job) {
@@ -326,7 +326,7 @@ VKAPI_ATTR VkResult VKAPI_CALL
 panvk_per_arch(QueueWaitIdle)(VkQueue _queue)
 {
    VK_FROM_HANDLE(panvk_queue, queue, _queue);
-   struct panvk_device *dev = panvk_queue_get_device(queue);
+   struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
 
    if (vk_device_is_lost(&dev->vk))
       return VK_ERROR_DEVICE_LOST;

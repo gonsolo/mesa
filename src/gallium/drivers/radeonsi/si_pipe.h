@@ -16,6 +16,7 @@
 #include "util/u_threaded_context.h"
 #include "util/u_vertex_state_cache.h"
 #include "util/perf/u_trace.h"
+#include "ac_descriptors.h"
 #include "ac_sqtt.h"
 #include "ac_spm.h"
 #include "si_perfetto.h"
@@ -253,6 +254,7 @@ enum
    DBG_TEST_VMFAULT_CP,
    DBG_TEST_VMFAULT_SHADER,
    DBG_TEST_DMA_PERF,
+   DBG_TEST_MEM_PERF,
 };
 
 #define DBG_ALL_SHADERS (((1 << (DBG_CS + 1)) - 1))
@@ -443,46 +445,15 @@ struct si_surface {
    uint8_t db_format_index : 3;
 
    /* Color registers. */
-   unsigned cb_color_info;
-   unsigned cb_color_view;
-   unsigned cb_color_view2;
-   unsigned cb_color_attrib;
-   unsigned cb_color_attrib2;                      /* GFX9 and later */
-   unsigned cb_color_attrib3;                      /* GFX10 and later */
-   unsigned cb_dcc_control;                        /* GFX8 and later */
+   struct ac_cb_surface cb;
+
    unsigned spi_shader_col_format : 8;             /* no blending, no alpha-to-coverage. */
    unsigned spi_shader_col_format_alpha : 8;       /* alpha-to-coverage */
    unsigned spi_shader_col_format_blend : 8;       /* blending without alpha. */
    unsigned spi_shader_col_format_blend_alpha : 8; /* blending with alpha. */
 
    /* DB registers. */
-   unsigned db_depth_view;
-   unsigned db_depth_size;
-   unsigned db_z_info;
-   unsigned db_stencil_info;
-   uint64_t db_depth_base; /* DB_Z_READ/WRITE_BASE */
-   uint64_t db_stencil_base;
-
-   union {
-      struct {
-         uint64_t db_htile_data_base;
-         unsigned db_depth_info;
-         unsigned db_z_info2; /* GFX9 only */
-         unsigned db_depth_slice;
-         unsigned db_stencil_info2; /* GFX9 only */
-         unsigned db_htile_surface;
-      } gfx6;
-
-      struct {
-         uint64_t hiz_base;
-         unsigned hiz_info;
-         unsigned hiz_size_xy;
-         uint64_t his_base;
-         unsigned his_info;
-         unsigned his_size_xy;
-         unsigned db_depth_view1;
-      } gfx12;
-   } u;
+   struct ac_ds_surface ds;
 };
 
 struct si_mmio_counter {
@@ -1490,8 +1461,6 @@ struct si_clear_info {
    union pipe_color_union color;
 };
 
-enum pipe_format si_simplify_cb_format(enum pipe_format format);
-bool vi_alpha_is_on_msb(struct si_screen *sscreen, enum pipe_format format);
 bool vi_dcc_get_clear_info(struct si_context *sctx, struct si_texture *tex, unsigned level,
                            unsigned clear_value, struct si_clear_info *out);
 void si_init_buffer_clear(struct si_clear_info *info,
@@ -1729,8 +1698,10 @@ void si_gfx11_destroy_query(struct si_context *sctx);
 void si_test_image_copy_region(struct si_screen *sscreen);
 void si_test_blit(struct si_screen *sscreen, unsigned test_flags);
 
-/* si_test_clearbuffer.c */
+/* si_test_dma_perf.c */
 void si_test_dma_perf(struct si_screen *sscreen);
+
+void si_test_mem_perf(struct si_screen *sscreen);
 
 /* si_uvd.c */
 struct pipe_video_codec *si_uvd_create_decoder(struct pipe_context *context,
@@ -1764,8 +1735,6 @@ bool vi_dcc_formats_are_incompatible(struct pipe_resource *tex, unsigned level,
                                      enum pipe_format view_format);
 void vi_disable_dcc_if_incompatible_format(struct si_context *sctx, struct pipe_resource *tex,
                                            unsigned level, enum pipe_format view_format);
-unsigned si_translate_colorswap(enum amd_gfx_level gfx_level, enum pipe_format format,
-                                bool do_endian_swap);
 bool si_texture_disable_dcc(struct si_context *sctx, struct si_texture *tex);
 void si_init_screen_texture_functions(struct si_screen *sscreen);
 void si_init_context_texture_functions(struct si_context *sctx);
@@ -1837,14 +1806,6 @@ si_shader_selector_reference(struct si_context *sctx, /* sctx can optionally be 
 static inline bool vi_dcc_enabled(struct si_texture *tex, unsigned level)
 {
    return !tex->is_depth && tex->surface.meta_offset && level < tex->surface.num_meta_levels;
-}
-
-static inline unsigned si_tile_mode_index(struct si_texture *tex, unsigned level, bool stencil)
-{
-   if (stencil)
-      return tex->surface.u.legacy.zs.stencil_tiling_index[level];
-   else
-      return tex->surface.u.legacy.tiling_index[level];
 }
 
 static inline unsigned si_get_minimum_num_gfx_cs_dwords(struct si_context *sctx,
