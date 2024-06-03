@@ -1,13 +1,16 @@
 #MESON = ~/src/meson/meson.py
 MESON = meson
-BUILD_DIR_NAME = gonsolo-nouveau-borg
+BUILD_DIR_NAME = gonsolo-build
 BUILD_DIR = ../$(BUILD_DIR_NAME)
-VULKANINFO = ~/src/Vulkan-Tools/gonsolo/vulkaninfo/vulkaninfo
+#VULKANINFO = ~/src/Vulkan-Tools/gonsolo/vulkaninfo/vulkaninfo
+VULKANINFO = /usr/bin/vulkaninfo
 VULKAN_COMPUTE_DIR = ~/src/VulkanHpp-Compute-Sample/gonsolo
 VULKAN_COMPUTE = ~/src/VulkanHpp-Compute-Sample/gonsolo/VulkanCompute
 #APPLICATION = $(VULKANINFO)
 APPLICATION = $(VULKAN_COMPUTE)
 ICD = ~/bin/mesa/share/vulkan/icd.d/borg_icd.x86_64.json
+#DRIVERS = nouveau,borg-experimental
+DRIVERS = borg-experimental
 
 test: install
 	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) $(APPLICATION); cd -
@@ -22,10 +25,10 @@ compile:
 	cd $(BUILD_DIR); $(MESON) compile; cd -
 	#cd ..; ln -s $(BUILD_DIR_NAME)/compile_commands.json .; cd -
 setup:
-	cd ..; $(MESON) setup $(BUILD_DIR_NAME) -Dbackend=ninja -Dgallium-drivers= -Dvulkan-drivers=nouveau,borg-experimental -Dprefix=~/bin/mesa; cd -
+	cd ..; $(MESON) setup $(BUILD_DIR_NAME) -Dbackend=ninja -Dgallium-drivers= -Dvulkan-drivers=$(DRIVERS) -Dprefix=~/bin/mesa; cd -
 c: clean
 clean:
-	cd ..; rm -rf gonsolo-nouveau-borg; cd -
+	cd ..; rm -rf $(BUILD_DIR_NAME); cd -
 
 tidy_compile_commands:
 	cd $(BUILD_DIR); sed -i 's/-mtls-dialect=gnu2 //g' compile_commands.json; cd -

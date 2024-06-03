@@ -1,4 +1,8 @@
-MESON = ~/src/meson/meson.py
+# Use the Makefile!
+# This file is mostly obsolete.
+
+MESON = meson
+# MESON = ~/src/meson/meson.py
 
 # List mesa configuration options:
 $(MESON) configure
