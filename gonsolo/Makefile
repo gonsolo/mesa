@@ -1,6 +1,6 @@
 #MESON = ~/src/meson/meson.py
 MESON = meson
-BUILD_DIR_NAME = gonsolo-build
+BUILD_DIR_NAME = build
 BUILD_DIR = ../$(BUILD_DIR_NAME)
 #VULKANINFO = ~/src/Vulkan-Tools/gonsolo/vulkaninfo/vulkaninfo
 VULKANINFO = /usr/bin/vulkaninfo
@@ -23,7 +23,8 @@ install: compile_and_tidy
 compile_and_tidy: compile tidy_compile_commands
 compile:
 	cd $(BUILD_DIR); $(MESON) compile; cd -
-	#cd ..; ln -s $(BUILD_DIR_NAME)/compile_commands.json .; cd -
+link_compile_commands:
+	cd ..; ln -s $(BUILD_DIR_NAME)/compile_commands.json .; cd -
 setup:
 	cd ..; $(MESON) setup $(BUILD_DIR_NAME) -Dbackend=ninja -Dgallium-drivers= -Dvulkan-drivers=$(DRIVERS) -Dprefix=~/bin/mesa; cd -
 c: clean
