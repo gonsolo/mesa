@@ -13,9 +13,9 @@ ICD = ~/bin/mesa/share/vulkan/icd.d/borg_icd.$(MACHINE).json
 #DRIVERS = nouveau,borg-experimental
 DRIVERS = borg-experimental
 
-test: install
+test: #install
 	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) $(APPLICATION); cd -
-gdb: install
+gdb: #install
 	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) gdb $(APPLICATION); cd -
 lldb: install
 	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) lldb -o run $(APPLICATION); cd -
