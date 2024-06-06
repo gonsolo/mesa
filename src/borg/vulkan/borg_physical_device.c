@@ -61,6 +61,8 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
 {
    VkResult result;
 
+   puts(__func__);
+
    struct borg_instance *instance = (struct borg_instance *)vk_instance;
 
    if (!(drm_device->available_nodes & (1 << DRM_NODE_RENDER))) {
