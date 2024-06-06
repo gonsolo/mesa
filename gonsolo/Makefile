@@ -37,3 +37,6 @@ tidy_compile_commands:
 	cd $(BUILD_DIR); sed -i 's/-flifetime-dse=1 //g' compile_commands.json; cd -
 
 .PHONY: c clean compile install setup test
+
+bla: bla.c
+	gcc -I/usr/include/libdrm -ldrm -o bla bla.c
