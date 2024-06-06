@@ -8,7 +8,8 @@ VULKAN_COMPUTE_DIR = ~/src/VulkanHpp-Compute-Sample/gonsolo
 VULKAN_COMPUTE = ~/src/VulkanHpp-Compute-Sample/gonsolo/VulkanCompute
 #APPLICATION = $(VULKANINFO)
 APPLICATION = $(VULKAN_COMPUTE)
-ICD = ~/bin/mesa/share/vulkan/icd.d/borg_icd.x86_64.json
+MACHINE = $(shell uname -m)
+ICD = ~/bin/mesa/share/vulkan/icd.d/borg_icd.$(MACHINE).json
 #DRIVERS = nouveau,borg-experimental
 DRIVERS = borg-experimental
 
