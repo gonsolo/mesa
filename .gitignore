@@ -6,6 +6,6 @@
 /build
 .venv/
 /sccache.log
-/tags
+tags
 /.cache
 /compile_commands.json

@@ -10,8 +10,8 @@ VULKAN_COMPUTE = ~/src/VulkanHpp-Compute-Sample/gonsolo/VulkanCompute
 APPLICATION = $(VULKAN_COMPUTE)
 MACHINE = $(shell uname -m)
 ICD = ~/bin/mesa/share/vulkan/icd.d/borg_icd.$(MACHINE).json
-#DRIVERS = nouveau,borg-experimental
-DRIVERS = borg-experimental
+DRIVERS = nouveau,borg-experimental
+#DRIVERS = borg-experimental
 
 test: #install
 	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) $(APPLICATION); cd -

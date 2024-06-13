@@ -119,7 +119,7 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
    //struct vk_features supported_features; 
 
    struct vk_properties properties = {
-      .apiVersion = VK_MAKE_VERSION(1, 0, VK_HEADER_VERSION),
+      .apiVersion = VK_MAKE_VERSION(1, 3, VK_HEADER_VERSION),
       .driverVersion = vk_get_driver_version(),
       .vendorID = 0x666,
       .deviceID = 0x9000,
