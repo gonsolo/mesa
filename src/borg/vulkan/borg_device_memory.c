@@ -22,6 +22,8 @@ borg_AllocateMemory(VkDevice device,
 
    struct borg_device_memory *mem;
 
+   printf("borg_AllocateMemory: allocationSize: %li\n", pAllocateInfo->allocationSize);
+
    mem = vk_device_memory_create(&dev->vk, pAllocateInfo,
                                 pAllocator, sizeof(*mem));
    if (!mem)
