@@ -1757,6 +1757,7 @@ if draw_with_llvm
   # lto is needded with LLVM>=15, but we don't know what LLVM verrsion we are using yet
   llvm_optional_modules += ['lto']
 endif
+amd_with_llvm = get_option('amd-use-llvm')
 
 if with_amd_vk or with_gallium_radeonsi or with_clc
   _llvm_version = '>= 15.0.0'
@@ -1798,6 +1799,10 @@ if with_llvm
     error('Lavapipe requires LLVM draw support.')
   endif
 
+  if with_gallium_r600 and not amd_with_llvm
+    error('R600 requires LLVM AMD support.')
+  endif
+
   if host_machine.system() != 'windows'
     # LLVM can be built without rtti, turning off rtti changes the ABI of C++
     # programs, so we need to build all C++ code in mesa without rtti as well to
@@ -1836,8 +1841,10 @@ elif with_clc
 else
   draw_with_llvm = false
 endif
+amd_with_llvm = amd_with_llvm and with_llvm
 pre_args += '-DLLVM_AVAILABLE=@0@'.format(with_llvm.to_int())
 pre_args += '-DDRAW_LLVM_AVAILABLE=@0@'.format((with_llvm and draw_with_llvm).to_int())
+pre_args += '-DAMD_LLVM_AVAILABLE=@0@'.format(amd_with_llvm.to_int())
 
 with_opencl_spirv = (_opencl != 'disabled' and get_option('opencl-spirv')) or with_clc
 if with_opencl_spirv

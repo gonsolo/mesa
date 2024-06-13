@@ -134,6 +134,7 @@ DEFINE_LOADER_DRM_ENTRYPOINT(sti)
 DEFINE_LOADER_DRM_ENTRYPOINT(stm)
 DEFINE_LOADER_DRM_ENTRYPOINT(sun4i_drm)
 DEFINE_LOADER_DRM_ENTRYPOINT(udl)
+DEFINE_LOADER_DRM_ENTRYPOINT(vkms)
 DEFINE_LOADER_DRM_ENTRYPOINT(zynqmp_dpsub)
 #endif
 
@@ -142,12 +143,16 @@ DEFINE_LOADER_DRM_ENTRYPOINT(lima)
 #endif
 
 #if defined(GALLIUM_ZINK)
+#if DETECT_OS_ANDROID
+DEFINE_LOADER_DRM_ENTRYPOINT(zink);
+#else
 const __DRIextension **__driDriverGetExtensions_zink(void);
 
 PUBLIC const __DRIextension **__driDriverGetExtensions_zink(void)
 {
    return debug_get_bool_option("LIBGL_KOPPER_DISABLE", false) ? galliumdrm_driver_extensions : galliumvk_driver_extensions;
 }
+#endif
 #endif
 
 #if defined(GALLIUM_D3D12)

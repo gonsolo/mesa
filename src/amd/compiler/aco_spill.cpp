@@ -548,6 +548,7 @@ init_live_in_vars(spill_ctx& ctx, Block* block, unsigned block_idx)
 
       Block::edge_vec& preds =
          phi->opcode == aco_opcode::p_phi ? block->logical_preds : block->linear_preds;
+      bool is_all_undef = true;
       bool is_all_spilled = true;
       bool is_partial_spill = false;
       for (unsigned i = 0; i < phi->operands.size(); i++) {
@@ -557,9 +558,10 @@ init_live_in_vars(spill_ctx& ctx, Block* block, unsigned block_idx)
                         ctx.spills_exit[preds[i]].count(phi->operands[i].getTemp());
          is_all_spilled &= spilled;
          is_partial_spill |= spilled;
+         is_all_undef = false;
       }
 
-      if (is_all_spilled) {
+      if (is_all_spilled && !is_all_undef) {
          /* The phi is spilled at all predecessors. Keep it spilled. */
          ctx.add_to_spills(phi->definitions[0].getTemp(), ctx.spills_entry[block_idx]);
          spilled_registers += phi->definitions[0].getTemp();
@@ -1324,8 +1326,9 @@ spill_vgpr(spill_ctx& ctx, Block& block, std::vector<aco_ptr<Instruction>>& inst
                         offset, memory_sync_info(storage_vgpr_spill, semantic_private));
          } else {
             Instruction* instr = bld.mubuf(aco_opcode::buffer_store_dword, ctx.scratch_rsrc,
-                                           Operand(v1), scratch_offset, elem, offset, false, true);
+                                           Operand(v1), scratch_offset, elem, offset, false);
             instr->mubuf().sync = memory_sync_info(storage_vgpr_spill, semantic_private);
+            instr->mubuf().cache.value = ac_swizzled;
          }
       }
    } else if (ctx.program->gfx_level >= GFX9) {
@@ -1333,8 +1336,9 @@ spill_vgpr(spill_ctx& ctx, Block& block, std::vector<aco_ptr<Instruction>>& inst
                   memory_sync_info(storage_vgpr_spill, semantic_private));
    } else {
       Instruction* instr = bld.mubuf(aco_opcode::buffer_store_dword, ctx.scratch_rsrc, Operand(v1),
-                                     scratch_offset, temp, offset, false, true);
+                                     scratch_offset, temp, offset, false);
       instr->mubuf().sync = memory_sync_info(storage_vgpr_spill, semantic_private);
+      instr->mubuf().cache.value = ac_swizzled;
    }
 }
 
@@ -1366,8 +1370,9 @@ reload_vgpr(spill_ctx& ctx, Block& block, std::vector<aco_ptr<Instruction>>& ins
          } else {
             Instruction* instr =
                bld.mubuf(aco_opcode::buffer_load_dword, Definition(tmp), ctx.scratch_rsrc,
-                         Operand(v1), scratch_offset, offset, false, true);
+                         Operand(v1), scratch_offset, offset, false);
             instr->mubuf().sync = memory_sync_info(storage_vgpr_spill, semantic_private);
+            instr->mubuf().cache.value = ac_swizzled;
          }
       }
       bld.insert(vec);
@@ -1376,8 +1381,9 @@ reload_vgpr(spill_ctx& ctx, Block& block, std::vector<aco_ptr<Instruction>>& ins
                   memory_sync_info(storage_vgpr_spill, semantic_private));
    } else {
       Instruction* instr = bld.mubuf(aco_opcode::buffer_load_dword, def, ctx.scratch_rsrc,
-                                     Operand(v1), scratch_offset, offset, false, true);
+                                     Operand(v1), scratch_offset, offset, false);
       instr->mubuf().sync = memory_sync_info(storage_vgpr_spill, semantic_private);
+      instr->mubuf().cache.value = ac_swizzled;
    }
 }
 

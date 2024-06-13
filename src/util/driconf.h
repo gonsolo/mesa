@@ -317,7 +317,7 @@
    DRI_CONF_OPT_B(ignore_discard_framebuffer, def, \
                   "Ignore glDiscardFramebuffer/glInvalidateFramebuffer, workaround for games that use it incorrectly")
 
-#define DRI_CONF_FORCE_VK_VENDOR(def) \
+#define DRI_CONF_FORCE_VK_VENDOR() \
    DRI_CONF_OPT_I(force_vk_vendor, 0, -1, 2147483647, "Override GPU vendor id")
 
 #define DRI_CONF_FAKE_SPARSE(def) \
@@ -789,6 +789,10 @@
 
 #define DRI_CONF_ANV_COMPRESSION_CONTROL_ENABLED(def) \
    DRI_CONF_OPT_B(compression_control_enabled, def, "Enable VK_EXT_image_compression_control support")
+
+#define DRI_CONF_ANV_FAKE_NONLOCAL_MEMORY(def) \
+   DRI_CONF_OPT_B(anv_fake_nonlocal_memory, def, \
+                  "Present host-visible device-local memory types as non device-local")
 
 /**
  * \brief HASVK specific configuration options

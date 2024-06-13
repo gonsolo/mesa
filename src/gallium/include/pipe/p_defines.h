@@ -509,6 +509,12 @@ enum pipe_flush_flags
 #define PIPE_RESOURCE_FLAG_FRONTEND_PRIV         (1 << 24) /* gallium frontend private */
 
 /**
+ * Fixed-rate compression
+ */
+#define PIPE_COMPRESSION_FIXED_RATE_NONE    0x0
+#define PIPE_COMPRESSION_FIXED_RATE_DEFAULT 0xF
+
+/**
  * Hint about the expected lifecycle of a resource.
  * Sorted according to GPU vs CPU access.
  */
@@ -1325,7 +1331,7 @@ enum pipe_perf_counter_data_type
 #define PIPE_UUID_SIZE 16
 #define PIPE_LUID_SIZE 8
 
-#if DETECT_OS_UNIX
+#if DETECT_OS_POSIX
 #define PIPE_MEMORY_FD
 #endif
 
