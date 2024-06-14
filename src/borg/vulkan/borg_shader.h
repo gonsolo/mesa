@@ -12,6 +12,9 @@ extern const struct vk_device_shader_ops borg_device_shader_ops;
 
 struct borg_shader {
    struct vk_shader vk;
+   struct bak_shader_bin *bak;
+   const void *code_ptr;
+   uint32_t code_size;
 };
 
 #endif

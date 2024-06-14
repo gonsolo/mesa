@@ -47,6 +47,7 @@ borg_entrypoints = custom_target(
 borg_deps = [
   dep_libdrm,
   dep_valgrind,
+  idep_bak,
   idep_nir_headers,
   idep_vulkan_runtime,
   idep_vulkan_util,

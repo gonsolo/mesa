@@ -1,0 +1,67 @@
+# Copyright © 2024 Andreas Wendleder
+# SPDX-License-Identifier: MIT
+
+add_languages('rust', required: true)
+rust = import('rust')
+
+libbak_deps = [
+  idep_mesautil,
+  idep_nir_headers
+]
+
+bak_bindings_rs = rust.bindgen(
+  input : ['bak_bindings.h'],
+  output : 'bak_bindings.rs',
+  c_args : [
+    pre_args,
+  ],
+  args : [
+    '--allowlist-function', 'bak_.*',
+    '--allowlist-function', 'nir_.*',
+  ],
+  dependencies : libbak_deps,
+)
+
+libbak_bindings_gen = static_library(
+  'bak_bindings',
+  bak_bindings_rs,
+  gnu_symbol_visibility : 'hidden',
+  rust_abi : 'rust',
+)
+
+
+bak_rust_args = [
+   '-Aclippy::upper_case_acronyms',
+]
+
+_libbak_rs = static_library(
+  'bak_rs',
+  files('bak/lib.rs'),
+  gnu_symbol_visibility : 'hidden',
+  rust_abi : 'c',
+  rust_args : bak_rust_args,
+  dependencies : [
+  ],
+  link_with: [
+    libbak_bindings_gen
+  ],
+)
+
+libbak_c_files = files(
+  'bak.h',
+)
+
+_libbak = static_library(
+  'bak',
+  [libbak_c_files],
+  include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium],
+  dependencies : libbak_deps,
+  link_with : [_libbak_rs],
+  c_args : [no_override_init_args],
+  gnu_symbol_visibility : 'hidden',
+)
+
+idep_bak = declare_dependency(
+  include_directories : include_directories('.'),
+  link_with : _libbak,
+)   

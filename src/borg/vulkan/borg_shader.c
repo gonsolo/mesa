@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "bak.h"
 #include "borg_cmd_buffer.h"
 #include "borg_device.h"
 #include "borg_entrypoints.h"
@@ -37,23 +38,16 @@ borg_get_spirv_options(struct vk_physical_device *vk_pdev,
 }
 
 static VkResult
-borg_compile_shader(struct borg_device *dev,
-                     struct vk_shader_compile_info *info,
-                     const struct vk_graphics_pipeline_state *state,
-                     const VkAllocationCallbacks* pAllocator,
-                     struct vk_shader **shader_out)
+borg_compile_nir(struct borg_device *dev,
+                 nir_shader *nir,
+                 VkShaderCreateFlagsEXT shader_flags,
+                 const struct vk_pipeline_robustness_state *rs,
+                 struct borg_shader *shader)
 {
-   struct borg_shader *shader;
-
-   shader = vk_shader_zalloc(&dev->vk, &borg_shader_ops, info->stage,
-                               pAllocator, sizeof(*shader));
-
-   nir_shader *nir = info->nir;
-   printf("nir: %p\n", nir);
-
-   *shader_out = &shader->vk;
-
-   return VK_SUCCESS;
+        shader->bak = bak_compile_shader(nir);
+        shader->code_ptr = shader->bak->code;
+        shader->code_size = shader->bak->code_size;
+        return VK_SUCCESS;
 }
 
 static void
@@ -62,6 +56,33 @@ borg_shader_destroy(struct vk_device *vk_dev,
                     const VkAllocationCallbacks* pAllocator)
 {
    // TODO
+}
+
+static VkResult
+borg_compile_shader(struct borg_device *dev,
+                     struct vk_shader_compile_info *info,
+                     const struct vk_graphics_pipeline_state *state,
+                     const VkAllocationCallbacks* pAllocator,
+                     struct vk_shader **shader_out)
+{
+   struct borg_shader *shader;
+   VkResult result;
+
+   shader = vk_shader_zalloc(&dev->vk, &borg_shader_ops, info->stage,
+                               pAllocator, sizeof(*shader));
+
+   nir_shader *nir = info->nir;
+
+   result = borg_compile_nir(dev, nir, info->flags, info->robustness, shader);
+   ralloc_free(nir);
+   if (result != VK_SUCCESS) {
+      borg_shader_destroy(&dev->vk, &shader->vk, pAllocator);
+      return result;
+     }
+
+   *shader_out = &shader->vk;
+
+   return VK_SUCCESS;
 }
 
 static VkResult
