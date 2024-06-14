@@ -152,7 +152,7 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
 
    pdev->mem_heap_count = 1;
    pdev->mem_heaps[0] = (struct borg_memory_heap) {
-      .size = 1024,
+      .size = 256 * 1024 * 1024,
       .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT
 
    };
