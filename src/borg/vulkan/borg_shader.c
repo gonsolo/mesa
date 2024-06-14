@@ -48,6 +48,9 @@ borg_compile_shader(struct borg_device *dev,
    shader = vk_shader_zalloc(&dev->vk, &borg_shader_ops, info->stage,
                                pAllocator, sizeof(*shader));
 
+   nir_shader *nir = info->nir;
+   printf("nir: %p\n", nir);
+
    *shader_out = &shader->vk;
 
    return VK_SUCCESS;
