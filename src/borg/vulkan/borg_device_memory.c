@@ -41,6 +41,7 @@ borg_MapMemory2KHR(VkDevice device,
                    const VkMemoryMapInfoKHR *pMemoryMapInfo,
                    void **ppData)
 {
+   puts("borg_MapMemory2KHR");
    //VK_FROM_HANDLE(borg_device, dev, device);
    VK_FROM_HANDLE(borg_device_memory, mem, pMemoryMapInfo->memory);
 
@@ -49,6 +50,7 @@ borg_MapMemory2KHR(VkDevice device,
    mem->map = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, offset);
 
   *ppData = mem->map + offset;
+  printf("  address or ppData: %p\n", ppData);
 
    return VK_SUCCESS;
 }
