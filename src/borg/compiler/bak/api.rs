@@ -1,7 +1,8 @@
 // Copyright © 2024 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-use bak_bindings::*;
+extern crate bak_bindings;
+use api::bak_bindings::*;
 
 #[repr(C)]
 struct ShaderBin {
