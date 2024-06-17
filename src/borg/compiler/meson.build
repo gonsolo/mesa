@@ -16,6 +16,9 @@ bak_bindings_rs = rust.bindgen(
     pre_args,
   ],
   args : [
+    '--raw-line', '#![allow(non_camel_case_types)]',
+    '--raw-line', '#![allow(non_snake_case)]',
+    '--raw-line', '#![allow(non_upper_case_globals)]',
     '--allowlist-function', 'bak_.*',
     '--allowlist-function', 'nir_.*',
   ],
@@ -31,7 +34,17 @@ libbak_bindings_gen = static_library(
 
 
 bak_rust_args = [
-   '-Aclippy::upper_case_acronyms',
+  '-Aclippy::identity_op',
+  '-Aclippy::len_zero',
+  '-Aclippy::manual_range_contains',
+  # normally this is a good one, but we use it where the "better" code is worse
+  '-Aclippy::needless_range_loop',
+  '-Aclippy::redundant_field_names',
+  '-Aclippy::upper_case_acronyms',
+  '-Aclippy::vec_box',
+  '-Aclippy::write_with_newline',
+  '-Anon_snake_case',
+  '-Anon_camel_case_types',
 ]
 
 _libbak_rs = static_library(
