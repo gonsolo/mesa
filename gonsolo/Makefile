@@ -23,7 +23,7 @@ install: #compile_and_tidy
 	cd $(BUILD_DIR); $(MESON) install; cd -
 compile_and_tidy: compile tidy_compile_commands
 compile:
-	cd $(BUILD_DIR); $(MESON) compile; cd -
+	cd $(BUILD_DIR); $(MESON) compile --verbose; cd -
 link_compile_commands:
 	cd ..; ln -s $(BUILD_DIR_NAME)/compile_commands.json .; cd -
 setup:
