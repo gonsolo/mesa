@@ -12,6 +12,7 @@ MACHINE = $(shell uname -m)
 ICD = ~/bin/mesa/share/vulkan/icd.d/borg_icd.$(MACHINE).json
 DRIVERS = nouveau,borg-experimental
 #DRIVERS = borg-experimental
+#VERBOSE = --verbose
 
 test: #install
 	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) $(APPLICATION); cd -
@@ -23,7 +24,7 @@ install: #compile_and_tidy
 	cd $(BUILD_DIR); $(MESON) install; cd -
 compile_and_tidy: compile tidy_compile_commands
 compile:
-	cd $(BUILD_DIR); $(MESON) compile --verbose; cd -
+	cd $(BUILD_DIR); $(MESON) compile $(VERBOSE); cd -
 link_compile_commands:
 	cd ..; ln -s $(BUILD_DIR_NAME)/compile_commands.json .; cd -
 setup:

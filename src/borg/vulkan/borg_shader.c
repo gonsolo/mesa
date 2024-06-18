@@ -45,8 +45,8 @@ borg_compile_nir(struct borg_device *dev,
                  struct borg_shader *shader)
 {
         shader->bak = bak_compile_shader(nir);
-        shader->code_ptr = shader->bak->code;
-        shader->code_size = shader->bak->code_size;
+        //shader->code_ptr = shader->bak->code;
+        //shader->code_size = shader->bak->code_size;
         return VK_SUCCESS;
 }
 
