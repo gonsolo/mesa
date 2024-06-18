@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 extern crate bak_bindings;
-use api::bak_bindings::*;
+use bak_bindings::*;
 
 #[repr(C)]
 struct ShaderBin {

@@ -10,7 +10,11 @@
 
 struct borg_device_memory {               
    struct vk_device_memory vk;
+
    void* map;
+
+   void* todo_bo_mem;
+   VkDeviceSize todo_bo_size;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(borg_device_memory, vk.base, VkDeviceMemory, VK_OBJECT_TYPE_DEVICE_MEMORY)

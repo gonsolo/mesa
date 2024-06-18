@@ -31,6 +31,9 @@ borg_AllocateMemory(VkDevice device,
 
    mem->map = NULL;
 
+   mem->todo_bo_size = pAllocateInfo->allocationSize;
+   mem->todo_bo_mem = calloc(1, mem->todo_bo_size);
+
    *pMem = borg_device_memory_to_handle(mem);
 
    return VK_SUCCESS;
@@ -42,17 +45,10 @@ borg_MapMemory2KHR(VkDevice device,
                    void **ppData)
 {
    puts("borg_MapMemory2KHR");
-   //VK_FROM_HANDLE(borg_device, dev, device);
    VK_FROM_HANDLE(borg_device_memory, mem, pMemoryMapInfo->memory);
 
-   size_t length = 10;
    off_t offset = 0;
-   mem->map = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, offset);
-   if (mem->map == MAP_FAILED) {
-        int err = errno;
-        printf("borg: MapMemory failed with %s\n", strerror(err));
-        return VK_ERROR_MEMORY_MAP_FAILED;
-   }
+   mem->map = mem->todo_bo_mem;
    *ppData = mem->map + offset;
    printf("  address or ppData: %p\n", ppData);
 
@@ -66,8 +62,7 @@ borg_UnmapMemory2KHR(VkDevice device,
    VK_FROM_HANDLE(borg_device_memory, mem, pMemoryUnmapInfo->memory);
    if (mem == NULL)
       return VK_SUCCESS;
-   size_t length = 10;
-   munmap(mem->map, length);
+   mem->map = NULL;
    return VK_SUCCESS;
 }
 
