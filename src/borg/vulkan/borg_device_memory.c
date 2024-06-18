@@ -48,9 +48,13 @@ borg_MapMemory2KHR(VkDevice device,
    size_t length = 10;
    off_t offset = 0;
    mem->map = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, offset);
-
-  *ppData = mem->map + offset;
-  printf("  address or ppData: %p\n", ppData);
+   if (mem->map == MAP_FAILED) {
+        int err = errno;
+        printf("borg: MapMemory failed with %s\n", strerror(err));
+        return VK_ERROR_MEMORY_MAP_FAILED;
+   }
+   *ppData = mem->map + offset;
+   printf("  address or ppData: %p\n", ppData);
 
    return VK_SUCCESS;
 }
