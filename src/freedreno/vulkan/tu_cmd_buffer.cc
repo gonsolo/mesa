@@ -9,9 +9,9 @@
 
 #include "tu_cmd_buffer.h"
 
+#include "vk_common_entrypoints.h"
 #include "vk_render_pass.h"
 #include "vk_util.h"
-#include "vk_common_entrypoints.h"
 
 #include "tu_clear_blit.h"
 #include "tu_cs.h"
@@ -1269,7 +1269,17 @@ tu6_init_hw(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
       if (!magic_reg.reg)
          break;
 
-      tu_cs_emit_write_reg(cs, magic_reg.reg, magic_reg.value);
+      uint32_t value = magic_reg.value;
+      switch(magic_reg.reg) {
+         case REG_A6XX_TPL1_DBG_ECO_CNTL1:
+            value = (value & ~A6XX_TPL1_DBG_ECO_CNTL1_TP_UBWC_FLAG_HINT) |
+                    (phys_dev->info->a7xx.enable_tp_ubwc_flag_hint
+                        ? A6XX_TPL1_DBG_ECO_CNTL1_TP_UBWC_FLAG_HINT
+                        : 0);
+            break;
+      }
+
+      tu_cs_emit_write_reg(cs, magic_reg.reg, value);
    }
 
    tu_cs_emit_write_reg(cs, REG_A6XX_RB_DBG_ECO_CNTL,
@@ -1394,6 +1404,25 @@ tu6_init_hw(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
        * so we play safe and don't add it.
        */
       tu_cs_emit_regs(cs, A7XX_PC_TESS_FACTOR_SIZE(TU_TESS_FACTOR_SIZE));
+   }
+
+   /* There is an optimization to skip executing draw states for draws with no
+    * instances. Instead of simply skipping the draw, internally the firmware
+    * sets a bit in PC_DRAW_INITIATOR that seemingly skips the draw. However
+    * there is a hardware bug where this bit does not always cause the FS
+    * early preamble to be skipped. Because the draw states were skipped,
+    * SP_FS_CTRL_REG0, SP_FS_OBJ_START and so on are never updated and a
+    * random FS preamble from the last draw is executed. If the last visible
+    * draw is from the same submit, it shouldn't be a problem because we just
+    * re-execute the same preamble and preambles don't have side effects, but
+    * if it's from another process then we could execute a garbage preamble
+    * leading to hangs and faults. To make sure this doesn't happen, we reset
+    * SP_FS_CTRL_REG0 here, making sure that the EARLYPREAMBLE bit isn't set
+    * so any leftover early preamble doesn't get executed. Other stages don't
+    * seem to be affected.
+    */
+   if (phys_dev->info->a6xx.has_early_preamble) {
+      tu_cs_emit_regs(cs, A6XX_SP_FS_CTRL_REG0());
    }
 
    tu_cs_sanity_check(cs);
@@ -1731,6 +1760,7 @@ tu_trace_start_render_pass(struct tu_cmd_buffer *cmd)
    uint32_t store_cpp = 0;
    uint32_t clear_cpp = 0;
    bool has_depth = false;
+   char ubwc[MAX_RTS + 3];
    for (uint32_t i = 0; i < cmd->state.pass->attachment_count; i++) {
       const struct tu_render_pass_attachment *attachment =
          &cmd->state.pass->attachments[i];
@@ -1749,6 +1779,25 @@ tu_trace_start_render_pass(struct tu_cmd_buffer *cmd)
       has_depth |= vk_format_has_depth(attachment->format);
    }
 
+   uint8_t ubwc_len = 0;
+   const struct tu_subpass *subpass = &cmd->state.pass->subpasses[0];
+   for (uint32_t i = 0; i < subpass->color_count; i++) {
+      uint32_t att = subpass->color_attachments[i].attachment;
+      ubwc[ubwc_len++] = att == VK_ATTACHMENT_UNUSED ? '-'
+                         : cmd->state.attachments[att]->view.ubwc_enabled
+                            ? 'y'
+                            : 'n';
+   }
+   if (subpass->depth_used) {
+      ubwc[ubwc_len++] = '|';
+      ubwc[ubwc_len++] =
+         cmd->state.attachments[subpass->depth_stencil_attachment.attachment]
+               ->view.ubwc_enabled
+            ? 'y'
+            : 'n';
+   }
+   ubwc[ubwc_len] = '\0';
+
    uint32_t max_samples = 0;
    for (uint32_t i = 0; i < cmd->state.pass->subpass_count; i++) {
       max_samples = MAX2(max_samples, cmd->state.pass->subpasses[i].samples);
@@ -1756,7 +1805,7 @@ tu_trace_start_render_pass(struct tu_cmd_buffer *cmd)
 
    trace_start_render_pass(&cmd->trace, &cmd->cs, cmd->state.framebuffer,
                            cmd->state.tiling, max_samples, clear_cpp,
-                           load_cpp, store_cpp, has_depth);
+                           load_cpp, store_cpp, has_depth, ubwc);
 }
 
 static void
@@ -2066,7 +2115,9 @@ tu_cmd_render_tiles(struct tu_cmd_buffer *cmd,
    trace_end_render_pass(&cmd->trace, &cmd->cs, true,
                          cmd->state.rp.drawcall_count,
                          cmd->state.rp.drawcall_bandwidth_per_sample_sum /
-                            cmd->state.rp.drawcall_count);
+                            MAX2(cmd->state.rp.drawcall_count, 1),
+                         cmd->state.lrz.valid,
+                         cmd->state.rp.lrz_disable_reason);
 
    /* We have trashed the dynamically-emitted viewport, scissor, and FS params
     * via the patchpoints, so we need to re-emit them if they are reused for a
@@ -2106,7 +2157,9 @@ tu_cmd_render_sysmem(struct tu_cmd_buffer *cmd,
    trace_end_render_pass(&cmd->trace, &cmd->cs, false,
                          cmd->state.rp.drawcall_count,
                          cmd->state.rp.drawcall_bandwidth_per_sample_sum /
-                            cmd->state.rp.drawcall_count);
+                            MAX2(cmd->state.rp.drawcall_count, 1),
+                         cmd->state.lrz.valid,
+                         cmd->state.rp.lrz_disable_reason);
 }
 
 template <chip CHIP>
@@ -3585,6 +3638,7 @@ gfx_write_access(VkAccessFlags2 flags, VkPipelineStageFlags2 stages,
    return filter_write_access(flags, stages, tu_flags,
                               tu_stages | VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT);
 }
+
 static enum tu_cmd_access_mask
 vk2tu_access(VkAccessFlags2 flags, VkPipelineStageFlags2 stages, bool image_only, bool gmem)
 {
@@ -3626,7 +3680,10 @@ vk2tu_access(VkAccessFlags2 flags, VkPipelineStageFlags2 stages, bool image_only
                        VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT |
                        VK_ACCESS_2_UNIFORM_READ_BIT |
                        VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT |
-                       VK_ACCESS_2_SHADER_READ_BIT,
+                       VK_ACCESS_2_SHADER_READ_BIT |
+                       VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
+                       VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                       VK_ACCESS_2_SHADER_BINDING_TABLE_READ_BIT_KHR,
                        VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT |
                        VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
                        VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT |
@@ -3647,6 +3704,7 @@ vk2tu_access(VkAccessFlags2 flags, VkPipelineStageFlags2 stages, bool image_only
 
    if (gfx_write_access(flags, stages,
                         VK_ACCESS_2_SHADER_WRITE_BIT |
+                        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT |
                         VK_ACCESS_2_TRANSFORM_FEEDBACK_WRITE_BIT_EXT,
                         VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT |
                         SHADER_STAGES))
@@ -3861,6 +3919,7 @@ tu_render_pass_state_merge(struct tu_render_pass_state *dst,
    dst->has_tess |= src->has_tess;
    dst->has_gs |= src->has_gs;
    dst->has_prim_generated_query_in_rp |= src->has_prim_generated_query_in_rp;
+   dst->has_zpass_done_sample_count_write_in_rp |= src->has_zpass_done_sample_count_write_in_rp;
    dst->disable_gmem |= src->disable_gmem;
    dst->sysmem_single_prim_mode |= src->sysmem_single_prim_mode;
    dst->draw_cs_writes_to_cond_pred |= src->draw_cs_writes_to_cond_pred;
@@ -3869,6 +3928,8 @@ tu_render_pass_state_merge(struct tu_render_pass_state *dst,
    dst->drawcall_count += src->drawcall_count;
    dst->drawcall_bandwidth_per_sample_sum +=
       src->drawcall_bandwidth_per_sample_sum;
+   if (!dst->lrz_disable_reason)
+      dst->lrz_disable_reason = src->lrz_disable_reason;
 }
 
 void

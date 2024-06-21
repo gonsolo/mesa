@@ -278,6 +278,7 @@ struct tu_render_pass_state
    bool has_tess;
    bool has_gs;
    bool has_prim_generated_query_in_rp;
+   bool has_zpass_done_sample_count_write_in_rp;
    bool disable_gmem;
    bool sysmem_single_prim_mode;
    bool shared_viewport;
@@ -310,6 +311,8 @@ struct tu_render_pass_state
     * just intended to be a rough estimate that is easy to calculate.
     */
    uint32_t drawcall_bandwidth_per_sample_sum;
+
+   const char *lrz_disable_reason;
 };
 
 /* These are the states of the suspend/resume state machine. In addition to
@@ -699,9 +702,6 @@ void tu_disable_draw_states(struct tu_cmd_buffer *cmd, struct tu_cs *cs);
 
 void tu6_apply_depth_bounds_workaround(struct tu_device *device,
                                        uint32_t *rb_depth_cntl);
-
-void
-update_stencil_mask(uint32_t *value, VkStencilFaceFlags face, uint32_t mask);
 
 typedef void (*tu_fdm_bin_apply_t)(struct tu_cmd_buffer *cmd,
                                    struct tu_cs *cs,

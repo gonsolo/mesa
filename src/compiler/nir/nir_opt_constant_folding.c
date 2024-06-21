@@ -175,16 +175,12 @@ try_fold_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin,
 {
    switch (intrin->intrinsic) {
    case nir_intrinsic_demote_if:
-   case nir_intrinsic_discard_if:
    case nir_intrinsic_terminate_if:
       if (nir_src_is_const(intrin->src[0])) {
          if (nir_src_as_bool(intrin->src[0])) {
             b->cursor = nir_before_instr(&intrin->instr);
             nir_intrinsic_op op;
             switch (intrin->intrinsic) {
-            case nir_intrinsic_discard_if:
-               op = nir_intrinsic_discard;
-               break;
             case nir_intrinsic_demote_if:
                op = nir_intrinsic_demote;
                break;
@@ -403,8 +399,7 @@ nir_opt_constant_folding(nir_shader *shader)
    state.has_indirect_load_const = false;
 
    bool progress = nir_shader_instructions_pass(shader, try_fold_instr,
-                                                nir_metadata_block_index |
-                                                   nir_metadata_dominance,
+                                                nir_metadata_control_flow,
                                                 &state);
 
    /* This doesn't free the constant data if there are no constant loads because

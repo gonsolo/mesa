@@ -611,7 +611,10 @@ fs_reg::component_size(unsigned width) const
       const unsigned vs = vstride ? 1 << (vstride - 1) : 0;
       const unsigned hs = hstride ? 1 << (hstride - 1) : 0;
       assert(w > 0);
-      return ((MAX2(1, h) - 1) * vs + (w - 1) * hs + 1) * brw_type_size_bytes(type);
+      /* Note this rounds up to next horizontal stride to be consistent with
+       * the VGRF case below.
+       */
+      return ((MAX2(1, h) - 1) * vs + MAX2(w * hs, 1)) * brw_type_size_bytes(type);
    } else {
       return MAX2(width * stride, 1) * brw_type_size_bytes(type);
    }
@@ -2175,6 +2178,7 @@ void
 fs_visitor::dump_instructions_to_file(FILE *file) const
 {
    if (cfg && grf_used == 0) {
+      const brw::def_analysis &defs = def_analysis.require();
       const register_pressure *rp =
          INTEL_DEBUG(DEBUG_REG_PRESSURE) ? &regpressure_analysis.require() : NULL;
 
@@ -2191,7 +2195,7 @@ fs_visitor::dump_instructions_to_file(FILE *file) const
 
          for (unsigned i = 0; i < cf_count; i++)
             fprintf(file, "  ");
-         dump_instruction(inst, file);
+         dump_instruction(inst, file, &defs);
          ip++;
 
          if (inst->is_control_flow_begin())
@@ -2464,6 +2468,8 @@ brw_instruction_name(const struct brw_isa_info *isa, enum opcode op)
       return "btd_retire_logical";
    case SHADER_OPCODE_READ_ARCH_REG:
       return "read_arch_reg";
+   case SHADER_OPCODE_LOAD_SUBGROUP_INVOCATION:
+      return "load_subgroup_invocation";
    }
 
    unreachable("not reached");
@@ -2471,7 +2477,7 @@ brw_instruction_name(const struct brw_isa_info *isa, enum opcode op)
 
 
 void
-fs_visitor::dump_instruction_to_file(const fs_inst *inst, FILE *file) const
+fs_visitor::dump_instruction_to_file(const fs_inst *inst, FILE *file, const brw::def_analysis *defs) const
 {
    if (inst->predicate) {
       fprintf(file, "(%cf%d.%d) ",
@@ -2510,7 +2516,10 @@ fs_visitor::dump_instruction_to_file(const fs_inst *inst, FILE *file) const
 
    switch (inst->dst.file) {
    case VGRF:
-      fprintf(file, "v%d", inst->dst.nr);
+      if (defs && defs->get(inst->dst))
+         fprintf(file, "%%%d", inst->dst.nr);
+      else
+         fprintf(file, "v%d", inst->dst.nr);
       break;
    case FIXED_GRF:
       fprintf(file, "g%d", inst->dst.nr);
@@ -2574,7 +2583,10 @@ fs_visitor::dump_instruction_to_file(const fs_inst *inst, FILE *file) const
          fprintf(file, "|");
       switch (inst->src[i].file) {
       case VGRF:
-         fprintf(file, "v%d", inst->src[i].nr);
+         if (defs && defs->get(inst->src[i]))
+            fprintf(file, "%%%d", inst->src[i].nr);
+         else
+            fprintf(file, "v%d", inst->src[i].nr);
          break;
       case FIXED_GRF:
          fprintf(file, "g%d", inst->src[i].nr);
@@ -2737,6 +2749,7 @@ fs_visitor::invalidate_analysis(brw::analysis_dependency_class c)
    live_analysis.invalidate(c);
    regpressure_analysis.invalidate(c);
    idom_analysis.invalidate(c);
+   def_analysis.invalidate(c);
 }
 
 void
@@ -3629,9 +3642,8 @@ brw_nir_move_interpolation_to_top(nir_shader *nir)
 
       progress = progress || impl_progress;
 
-      nir_metadata_preserve(impl, impl_progress ? (nir_metadata_block_index |
-                                                      nir_metadata_dominance)
-                                                   : nir_metadata_all);
+      nir_metadata_preserve(impl, impl_progress ? nir_metadata_control_flow
+                                                : nir_metadata_all);
    }
 
    return progress;
@@ -3644,8 +3656,7 @@ brw_nir_populate_wm_prog_data(nir_shader *shader,
                               struct brw_wm_prog_data *prog_data,
                               const struct brw_mue_map *mue_map)
 {
-   prog_data->uses_kill = shader->info.fs.uses_discard ||
-                          shader->info.fs.uses_demote;
+   prog_data->uses_kill = shader->info.fs.uses_discard;
    prog_data->uses_omask = !key->ignore_sample_mask_out &&
       (shader->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK));
    prog_data->max_polygons = 1;

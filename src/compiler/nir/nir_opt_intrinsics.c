@@ -375,9 +375,7 @@ opt_intrinsics_impl(nir_function_impl *impl,
 
          case nir_instr_type_intrinsic: {
             nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
-            if (intrin->intrinsic == nir_intrinsic_discard ||
-                intrin->intrinsic == nir_intrinsic_discard_if ||
-                intrin->intrinsic == nir_intrinsic_demote ||
+            if (intrin->intrinsic == nir_intrinsic_demote ||
                 intrin->intrinsic == nir_intrinsic_demote_if ||
                 intrin->intrinsic == nir_intrinsic_terminate ||
                 intrin->intrinsic == nir_intrinsic_terminate_if)
@@ -405,8 +403,7 @@ nir_opt_intrinsics(nir_shader *shader)
    nir_foreach_function_impl(impl, shader) {
       if (opt_intrinsics_impl(impl, shader->options)) {
          progress = true;
-         nir_metadata_preserve(impl, nir_metadata_block_index |
-                                        nir_metadata_dominance);
+         nir_metadata_preserve(impl, nir_metadata_control_flow);
       } else {
          nir_metadata_preserve(impl, nir_metadata_all);
       }

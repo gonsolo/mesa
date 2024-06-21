@@ -379,19 +379,9 @@ fs_nir_emit_system_values(nir_to_brw_state &ntb)
     * never end up using it.
     */
    {
-      const fs_builder abld = bld.annotate("gl_SubgroupInvocation", NULL);
       fs_reg &reg = ntb.system_values[SYSTEM_VALUE_SUBGROUP_INVOCATION];
-      reg = abld.vgrf(BRW_TYPE_UW);
-      abld.UNDEF(reg);
-
-      const fs_builder allbld8 = abld.group(8, 0).exec_all();
-      allbld8.MOV(reg, brw_imm_v(0x76543210));
-      if (s.dispatch_width > 8)
-         allbld8.ADD(byte_offset(reg, 16), reg, brw_imm_uw(8u));
-      if (s.dispatch_width > 16) {
-         const fs_builder allbld16 = abld.group(16, 0).exec_all();
-         allbld16.ADD(byte_offset(reg, 32), reg, brw_imm_uw(16u));
-      }
+      reg = bld.vgrf(s.dispatch_width < 16 ? BRW_TYPE_UD : BRW_TYPE_UW);
+      bld.emit(SHADER_OPCODE_LOAD_SUBGROUP_INVOCATION, reg);
    }
 
    nir_function_impl *impl = nir_shader_get_entrypoint((nir_shader *)s.nir);
@@ -2682,14 +2672,22 @@ static void
 setup_barrier_message_payload_gfx125(const fs_builder &bld,
                                      const fs_reg &msg_payload)
 {
-   assert(bld.shader->devinfo->verx10 >= 125);
+   const fs_builder ubld = bld.exec_all().group(1, 0);
+   const struct intel_device_info *devinfo = bld.shader->devinfo;
+   assert(devinfo->verx10 >= 125);
 
    /* From BSpec: 54006, mov r0.2[31:24] into m0.2[31:24] and m0.2[23:16] */
    fs_reg m0_10ub = horiz_offset(retype(msg_payload, BRW_TYPE_UB), 10);
    fs_reg r0_11ub =
       stride(suboffset(retype(brw_vec1_grf(0, 0), BRW_TYPE_UB), 11),
              0, 1, 0);
-   bld.exec_all().group(2, 0).MOV(m0_10ub, r0_11ub);
+   ubld.group(2, 0).MOV(m0_10ub, r0_11ub);
+
+   if (devinfo->ver >= 20) {
+      /* Use an active threads barrier. */
+      const fs_reg m0_2ud = component(retype(msg_payload, BRW_TYPE_UD), 2);
+      ubld.OR(m0_2ud, m0_2ud, brw_imm_ud(1u << 8));
+   }
 }
 
 static void
@@ -3904,10 +3902,8 @@ fs_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
    }
 
    case nir_intrinsic_demote:
-   case nir_intrinsic_discard:
    case nir_intrinsic_terminate:
    case nir_intrinsic_demote_if:
-   case nir_intrinsic_discard_if:
    case nir_intrinsic_terminate_if: {
       /* We track our discarded pixels in f0.1/f1.0.  By predicating on it, we
        * can update just the flag bits that aren't yet discarded.  If there's
@@ -3916,7 +3912,6 @@ fs_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
        */
       fs_inst *cmp = NULL;
       if (instr->intrinsic == nir_intrinsic_demote_if ||
-          instr->intrinsic == nir_intrinsic_discard_if ||
           instr->intrinsic == nir_intrinsic_terminate_if) {
          nir_alu_instr *alu = nir_src_as_alu_instr(instr->src[0]);
 
@@ -6745,6 +6740,8 @@ fs_nir_emit_intrinsic(nir_to_brw_state &ntb,
          fs_reg handle = component(ubld.vgrf(BRW_TYPE_UD), 0);
          ubld.AND(handle, retype(brw_vec1_grf(0, 5), BRW_TYPE_UD),
                           brw_imm_ud(INTEL_MASK(31, 10)));
+         if (devinfo->ver >= 20)
+            ubld.SHR(handle, handle, brw_imm_ud(4));
          srcs[SURFACE_LOGICAL_SRC_SURFACE] = brw_imm_ud(GFX125_NON_BINDLESS);
          srcs[SURFACE_LOGICAL_SRC_SURFACE_HANDLE] = handle;
       } else {
@@ -6805,6 +6802,8 @@ fs_nir_emit_intrinsic(nir_to_brw_state &ntb,
          fs_reg handle = component(ubld.vgrf(BRW_TYPE_UD), 0);
          ubld.AND(handle, retype(brw_vec1_grf(0, 5), BRW_TYPE_UD),
                           brw_imm_ud(INTEL_MASK(31, 10)));
+         if (devinfo->ver >= 20)
+            ubld.SHR(handle, handle, brw_imm_ud(4));
          srcs[SURFACE_LOGICAL_SRC_SURFACE] = brw_imm_ud(GFX125_NON_BINDLESS);
          srcs[SURFACE_LOGICAL_SRC_SURFACE_HANDLE] = handle;
       } else {
@@ -8199,34 +8198,47 @@ fs_nir_emit_texture(nir_to_brw_state &ntb,
       inst->keep_payload_trailing_zeros = true;
    }
 
-   fs_reg nir_dest[5];
-   for (unsigned i = 0; i < read_size; i++)
-      nir_dest[i] = offset(dst, bld, i);
+   fs_reg nir_def_reg = get_nir_def(ntb, instr->def);
 
-   if (instr->op == nir_texop_query_levels) {
-      /* # levels is in .w */
-      if (devinfo->ver == 9) {
-         /**
-          * Wa_1940217:
-          *
-          * When a surface of type SURFTYPE_NULL is accessed by resinfo, the
-          * MIPCount returned is undefined instead of 0.
-          */
-         fs_inst *mov = bld.MOV(bld.null_reg_d(), dst);
-         mov->conditional_mod = BRW_CONDITIONAL_NZ;
-         nir_dest[0] = bld.vgrf(BRW_TYPE_D);
-         fs_inst *sel = bld.SEL(nir_dest[0], offset(dst, bld, 3), brw_imm_d(0));
-         sel->predicate = BRW_PREDICATE_NORMAL;
-      } else {
-         nir_dest[0] = offset(dst, bld, 3);
+   if (instr->op != nir_texop_query_levels && !instr->is_sparse) {
+      /* In most cases we can write directly to the result. */
+      inst->dst = nir_def_reg;
+   } else {
+      /* In other cases, we have to reorganize the sampler message's results
+       * a bit to match the NIR intrinsic's expectations.
+       */
+      fs_reg nir_dest[5];
+      for (unsigned i = 0; i < read_size; i++)
+         nir_dest[i] = offset(dst, bld, i);
+
+      if (instr->op == nir_texop_query_levels) {
+         /* # levels is in .w */
+         if (devinfo->ver == 9) {
+            /**
+             * Wa_1940217:
+             *
+             * When a surface of type SURFTYPE_NULL is accessed by resinfo, the
+             * MIPCount returned is undefined instead of 0.
+             */
+            fs_inst *mov = bld.MOV(bld.null_reg_d(), dst);
+            mov->conditional_mod = BRW_CONDITIONAL_NZ;
+            nir_dest[0] = bld.vgrf(BRW_TYPE_D);
+            fs_inst *sel =
+               bld.SEL(nir_dest[0], offset(dst, bld, 3), brw_imm_d(0));
+            sel->predicate = BRW_PREDICATE_NORMAL;
+         } else {
+            nir_dest[0] = offset(dst, bld, 3);
+         }
       }
+
+      /* The residency bits are only in the first component. */
+      if (instr->is_sparse) {
+         nir_dest[dest_size - 1] =
+            component(offset(dst, bld, dest_size - 1), 0);
+      }
+
+      bld.LOAD_PAYLOAD(nir_def_reg, nir_dest, dest_size, 0);
    }
-
-   /* The residency bits are only in the first component. */
-   if (instr->is_sparse)
-      nir_dest[dest_size - 1] = component(offset(dst, bld, dest_size - 1), 0);
-
-   bld.LOAD_PAYLOAD(get_nir_def(ntb, instr->def), nir_dest, dest_size, 0);
 }
 
 static void

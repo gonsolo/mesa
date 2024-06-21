@@ -499,6 +499,7 @@ build_load_render_surface_state_address(nir_builder *b,
 {
    if (state->pdevice->isl_dev.buffer_length_in_aux_addr)
       return build_optimized_load_render_surface_state_address(b, desc_addr, state);
+   /* Wa_14019708328 */
    return build_non_optimized_load_render_surface_state_address(b, desc_addr, state);
 }
 
@@ -2384,8 +2385,7 @@ anv_nir_apply_pipeline_layout(nir_shader *shader,
     *     intrinsics in that pass.
     */
    nir_shader_instructions_pass(shader, lower_direct_buffer_instr,
-                                nir_metadata_block_index |
-                                nir_metadata_dominance,
+                                nir_metadata_control_flow,
                                 &state);
 
    /* We just got rid of all the direct access.  Delete it so it's not in the
@@ -2394,8 +2394,7 @@ anv_nir_apply_pipeline_layout(nir_shader *shader,
    nir_opt_dce(shader);
 
    nir_shader_instructions_pass(shader, apply_pipeline_layout,
-                                nir_metadata_block_index |
-                                nir_metadata_dominance,
+                                nir_metadata_control_flow,
                                 &state);
 
    ralloc_free(mem_ctx);

@@ -168,9 +168,7 @@ files_libglsl = files(
   'ir_equals.cpp',
   'ir_expression_flattening.cpp',
   'ir_expression_flattening.h',
-  'ir_function_can_inline.cpp',
   'ir_function_detect_recursion.cpp',
-  'ir_function_inlining.h',
   'ir_function.cpp',
   'ir_hierarchical_visitor.cpp',
   'ir_hierarchical_visitor.h',
@@ -227,8 +225,6 @@ files_libglsl = files(
 )
 
 files_libglsl_standalone = files(
-  'ir_builder_print_visitor.cpp',
-  'ir_builder_print_visitor.h',
   'opt_add_neg_to_sub.h',
   'standalone_scaffolding.cpp',
   'standalone_scaffolding.h',

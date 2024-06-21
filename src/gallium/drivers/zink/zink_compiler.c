@@ -1066,7 +1066,7 @@ static bool
 lower_64bit_pack(nir_shader *shader)
 {
    return nir_shader_instructions_pass(shader, lower_64bit_pack_instr,
-                                       nir_metadata_block_index | nir_metadata_dominance, NULL);
+                                       nir_metadata_control_flow, NULL);
 }
 
 nir_shader *
@@ -1434,6 +1434,9 @@ zink_screen_init_compiler(struct zink_screen *screen)
        screen->info.driver_props.driverID == VK_DRIVER_ID_AMD_OPEN_SOURCE ||
        screen->info.driver_props.driverID == VK_DRIVER_ID_AMD_PROPRIETARY)
       screen->nir_options.lower_doubles_options = nir_lower_dmod;
+
+   if (screen->info.have_EXT_shader_demote_to_helper_invocation)
+      screen->nir_options.discard_is_demote = true;
 }
 
 const void *
@@ -3687,7 +3690,9 @@ lower_zs_swizzle_tex(nir_shader *nir, const void *swizzle, bool shadow_only)
    /* We don't use nir_lower_tex to do our swizzling, because of this base_sampler_id. */
    unsigned base_sampler_id = gl_shader_stage_is_compute(nir->info.stage) ? 0 : PIPE_MAX_SAMPLERS * nir->info.stage;
    struct lower_zs_swizzle_state state = {shadow_only, base_sampler_id, swizzle};
-   return nir_shader_instructions_pass(nir, lower_zs_swizzle_tex_instr, nir_metadata_dominance | nir_metadata_block_index, (void*)&state);
+   return nir_shader_instructions_pass(nir, lower_zs_swizzle_tex_instr,
+                                       nir_metadata_control_flow,
+                                       (void*)&state);
 }
 
 static bool
@@ -3974,7 +3979,7 @@ compile_module(struct zink_screen *screen, struct zink_shader *zs, nir_shader *n
    }
 
    struct zink_shader_object obj = {0};
-   struct spirv_shader *spirv = nir_to_spirv(nir, sinfo, screen->spirv_version);
+   struct spirv_shader *spirv = nir_to_spirv(nir, sinfo, screen);
    if (spirv)
       obj = zink_shader_spirv_compile(screen, zs, spirv, can_shobj, pg);
 
@@ -4120,7 +4125,7 @@ zink_shader_compile(struct zink_screen *screen, bool can_shobj, struct zink_shad
             nir_fixup_deref_modes(nir);
             NIR_PASS_V(nir, nir_remove_dead_variables, nir_var_shader_temp, NULL);
             NIR_PASS_V(nir, nir_shader_intrinsics_pass, remove_interpolate_at_sample,
-                       nir_metadata_dominance | nir_metadata_block_index, NULL);
+                       nir_metadata_control_flow, NULL);
 
             need_optimize = true;
          }
@@ -6224,10 +6229,6 @@ zink_shader_init(struct zink_screen *screen, struct zink_shader *zs)
    if (!screen->info.feats.features.shaderStorageImageMultisample)
       NIR_PASS_V(nir, strip_tex_ms);
    NIR_PASS_V(nir, nir_lower_frexp); /* TODO: Use the spirv instructions for this. */
-
-   if (screen->info.have_EXT_shader_demote_to_helper_invocation) {
-      NIR_PASS_V(nir, nir_lower_discard_or_demote, true);
-   }
 
    if (screen->need_2D_zs)
       NIR_PASS_V(nir, lower_1d_shadow, screen);

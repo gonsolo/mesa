@@ -89,7 +89,7 @@ nv50_nir_lower_load_user_clip_plane_cb(nir_builder *b, nir_intrinsic_instr *intr
 bool
 nv50_nir_lower_load_user_clip_plane(nir_shader *nir, struct nv50_ir_prog_info *info) {
    return nir_shader_intrinsics_pass(nir, nv50_nir_lower_load_user_clip_plane_cb,
-                                     nir_metadata_block_index | nir_metadata_dominance,
+                                     nir_metadata_control_flow,
                                      info);
 }
 
@@ -1322,7 +1322,7 @@ Converter::parseNIR()
       info_out->prop.fp.postDepthCoverage = nir->info.fs.post_depth_coverage;
       info_out->prop.fp.readsSampleLocations =
          BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_SAMPLE_POS);
-      info_out->prop.fp.usesDiscard = nir->info.fs.uses_discard || nir->info.fs.uses_demote;
+      info_out->prop.fp.usesDiscard = nir->info.fs.uses_discard;
       info_out->prop.fp.usesSampleMaskIn =
          BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_SAMPLE_MASK_IN);
       break;
@@ -1860,14 +1860,12 @@ Converter::visit(nir_intrinsic_instr *insn)
       break;
    }
    case nir_intrinsic_demote:
-   case nir_intrinsic_discard:
       mkOp(OP_DISCARD, TYPE_NONE, NULL);
       break;
-   case nir_intrinsic_demote_if:
-   case nir_intrinsic_discard_if: {
+   case nir_intrinsic_demote_if: {
       Value *pred = getSSA(1, FILE_PREDICATE);
       if (insn->num_components > 1) {
-         ERROR("nir_intrinsic_discard_if only with 1 component supported!\n");
+         ERROR("nir_intrinsic_demote_if only with 1 component supported!\n");
          assert(false);
          return false;
       }
@@ -2022,7 +2020,8 @@ Converter::visit(nir_intrinsic_instr *insn)
       mkOp1(getOperation(op), TYPE_U32, NULL, mkImm(idx))->fixed = 1;
       break;
    }
-   case nir_intrinsic_load_ubo: {
+   case nir_intrinsic_load_ubo:
+   case nir_intrinsic_ldc_nv: {
       const DataType dType = getDType(insn);
       LValues &newDefs = convert(&insn->def);
       Value *indirectIndex;
@@ -3158,8 +3157,7 @@ nv_nir_move_stores_to_end(nir_shader *s)
       }
    }
    nir_metadata_preserve(impl,
-                         nir_metadata_block_index |
-                         nir_metadata_dominance);
+                         nir_metadata_control_flow);
 }
 
 unsigned
@@ -3505,6 +3503,7 @@ nvir_nir_shader_compiler_options(int chipset, uint8_t shader_type)
       ((chipset >= NVISA_GV100_CHIPSET) ? nir_lower_dsub : 0) |
       ((chipset >= NVISA_GV100_CHIPSET) ? nir_lower_ddiv : 0)
    );
+   op.discard_is_demote = true;
    return op;
 }
 

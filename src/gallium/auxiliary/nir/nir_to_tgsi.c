@@ -2558,11 +2558,11 @@ ntt_emit_intrinsic(struct ntt_compile *c, nir_intrinsic_instr *instr)
       ntt_DEMOTE(c);
       break;
 
-   case nir_intrinsic_discard:
+   case nir_intrinsic_terminate:
       ntt_KILL(c);
       break;
 
-   case nir_intrinsic_discard_if: {
+   case nir_intrinsic_terminate_if: {
       struct ureg_src cond = ureg_scalar(ntt_get_src(c, instr->src[0]), 0);
 
       if (c->native_integers) {
@@ -3573,8 +3573,7 @@ nir_to_tgsi_lower_64bit_to_vec2(nir_shader *s)
 {
    return nir_shader_instructions_pass(s,
                                        nir_to_tgsi_lower_64bit_to_vec2_instr,
-                                       nir_metadata_block_index |
-                                       nir_metadata_dominance,
+                                       nir_metadata_control_flow,
                                        NULL);
 }
 
@@ -3663,8 +3662,7 @@ nir_to_tgsi_lower_tex(nir_shader *s)
 {
    return nir_shader_instructions_pass(s,
                                        nir_to_tgsi_lower_tex_instr,
-                                       nir_metadata_block_index |
-                                       nir_metadata_dominance,
+                                       nir_metadata_control_flow,
                                        NULL);
 }
 

@@ -9,13 +9,13 @@
 
 #include "vk_blend.h"
 #include "vk_format.h"
+#include "vk_graphics_state.h"
 #include "vk_log.h"
 
 #include "pan_shader.h"
 
 #include "panvk_blend.h"
 #include "panvk_device.h"
-#include "panvk_pipeline.h"
 #include "panvk_shader.h"
 
 DERIVE_HASH_TABLE(pan_blend_shader_key);
@@ -27,13 +27,23 @@ panvk_per_arch(blend_shader_cache_init)(struct panvk_device *dev)
 
    simple_mtx_init(&cache->lock, mtx_plain);
 
-   panvk_pool_init(&cache->bin_pool, dev, NULL, PAN_KMOD_BO_FLAG_EXECUTABLE,
-                   16 * 1024, "blend shaders", false);
+   struct panvk_pool_properties bin_pool_props = {
+      .create_flags = PAN_KMOD_BO_FLAG_EXECUTABLE,
+      .slab_size = 16 * 1024,
+      .label = "blend shaders",
+      .owns_bos = true,
+      .prealloc = false,
+      .needs_locking = false,
+   };
+   panvk_pool_init(&cache->bin_pool, dev, NULL, &bin_pool_props);
 
    cache->ht = pan_blend_shader_key_table_create(NULL);
-   if (!cache->ht)
+   if (!cache->ht) {
+      panvk_pool_cleanup(&cache->bin_pool);
+      simple_mtx_destroy(&cache->lock);
       return vk_errorf(dev, VK_ERROR_OUT_OF_HOST_MEMORY,
                        "couldn't create blend shader hash table");
+   }
 
    return VK_SUCCESS;
 }
@@ -117,7 +127,7 @@ get_blend_shader_locked(struct panvk_device *dev,
       GENX(pan_blend_create_shader)(state, src0_type, src1_type, rt);
 
    NIR_PASS_V(nir, nir_shader_instructions_pass, lower_load_blend_const,
-              nir_metadata_block_index | nir_metadata_dominance, NULL);
+              nir_metadata_control_flow, NULL);
 
    /* Compile the NIR shader */
    struct panfrost_compile_inputs inputs = {

@@ -1191,7 +1191,7 @@ get_scratch_surf(struct anv_pipeline *pipeline,
    anv_reloc_list_add_bo(pipeline->batch.relocs, bo);
    return anv_scratch_pool_get_surf(pipeline->device,
                                     &pipeline->device->scratch_pool,
-                                    bin->prog_data->total_scratch) >> 4;
+                                    bin->prog_data->total_scratch) >> ANV_SCRATCH_SPACE_SHIFT(GFX_VER);
 }
 
 static void
@@ -1450,6 +1450,10 @@ emit_3dstate_te(struct anv_graphics_pipeline *pipeline)
          te.TargetBlockSize = 8;
          /* 1K_TRIANGLES */
          te.LocalBOPAccumulatorThreshold = 1;
+#endif
+
+#if GFX_VER >= 20
+         te.NumberOfRegionsPerPatch = 2;
 #endif
       }
    }
