@@ -5,6 +5,9 @@
 
 #include <alloca.h>
 #include <sys/mman.h>
+
+#include "borg_bo.h"
+
 #include "borg_device.h"
 #include "borg_device_memory.h"
 #include "borg_entrypoints.h"
@@ -19,8 +22,8 @@ borg_AllocateMemory(VkDevice device,
                    VkDeviceMemory *pMem)
 {
    VK_FROM_HANDLE(borg_device, dev, device);
-
    struct borg_device_memory *mem;
+   VkResult result = VK_SUCCESS;
 
    printf("borg_AllocateMemory: allocationSize: %li\n", pAllocateInfo->allocationSize);
 
@@ -31,12 +34,22 @@ borg_AllocateMemory(VkDevice device,
 
    mem->map = NULL;
 
-   mem->todo_bo_size = pAllocateInfo->allocationSize;
-   mem->todo_bo_mem = calloc(1, mem->todo_bo_size);
+   mem->bo = borg_ws_bo_new(dev->ws_dev);
+   if (!mem->bo) {
+          result = vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+          goto fail_alloc;
+       }
+
+   //mem->todo_bo_size = pAllocateInfo->allocationSize;
+   //mem->todo_bo_mem = calloc(1, mem->todo_bo_size);
 
    *pMem = borg_device_memory_to_handle(mem);
 
    return VK_SUCCESS;
+
+fail_alloc:
+     vk_device_memory_destroy(&dev->vk, pAllocator, &mem->vk);
+     return result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -48,7 +61,7 @@ borg_MapMemory2KHR(VkDevice device,
    VK_FROM_HANDLE(borg_device_memory, mem, pMemoryMapInfo->memory);
 
    off_t offset = 0;
-   mem->map = mem->todo_bo_mem;
+   //mem->map = mem->todo_bo_mem;
    *ppData = mem->map + offset;
    printf("  address or ppData: %p\n", ppData);
 

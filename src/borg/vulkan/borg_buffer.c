@@ -49,6 +49,7 @@ borg_GetDeviceBufferMemoryRequirements(
    VkMemoryRequirements2 *pMemoryRequirements)
 {
    VK_FROM_HANDLE(borg_device, dev, device);
+   struct borg_physical_device *pdev = borg_device_physical(dev);
 
    const uint32_t alignment = 4;
    //const uint32_t unused = 0;
@@ -56,7 +57,7 @@ borg_GetDeviceBufferMemoryRequirements(
    pMemoryRequirements->memoryRequirements = (VkMemoryRequirements) {
       .size = align64(pInfo->pCreateInfo->size, alignment),
       .alignment = alignment,
-      .memoryTypeBits = BITFIELD_MASK(dev->pdev->mem_type_count),
+      .memoryTypeBits = BITFIELD_MASK(pdev->mem_type_count),
    };
 }
 

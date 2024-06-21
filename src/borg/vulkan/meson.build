@@ -48,6 +48,7 @@ borg_deps = [
   dep_libdrm,
   dep_valgrind,
   idep_bak,
+  idep_borg_ws,
   idep_nir_headers,
   idep_vulkan_runtime,
   idep_vulkan_util,
