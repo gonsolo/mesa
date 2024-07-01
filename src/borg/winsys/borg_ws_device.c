@@ -35,6 +35,8 @@ borg_ws_device_new(drmDevicePtr drm_device)
         device->fd = fd;
 
         simple_mtx_init(&device->bos_lock, mtx_plain);
+
+        return device;
 out_err:
         if (ver)
                 drmFreeVersion(ver);
