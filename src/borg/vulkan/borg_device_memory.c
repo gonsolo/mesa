@@ -34,11 +34,11 @@ borg_AllocateMemory(VkDevice device,
 
    mem->map = NULL;
 
-   mem->bo = borg_ws_bo_new(dev->ws_dev);
+   mem->bo = borg_ws_bo_new(dev->ws_dev, pAllocateInfo->allocationSize);
    if (!mem->bo) {
           result = vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
           goto fail_alloc;
-       }
+   }
 
    //mem->todo_bo_size = pAllocateInfo->allocationSize;
    //mem->todo_bo_mem = calloc(1, mem->todo_bo_size);
@@ -52,16 +52,42 @@ fail_alloc:
      return result;
 }
 
+VKAPI_ATTR void VKAPI_CALL
+borg_FreeMemory(VkDevice device,
+                VkDeviceMemory _mem,
+                const VkAllocationCallbacks *pAllocator)
+{
+        VK_FROM_HANDLE(borg_device, dev, device);
+        VK_FROM_HANDLE(borg_device_memory, mem, _mem);
+
+        if (!mem)
+                return;
+
+        if (mem->map)
+               borg_ws_bo_unmap(mem->bo, mem->map);
+
+        borg_ws_bo_destroy(mem->bo);
+
+        vk_device_memory_destroy(&dev->vk, pAllocator, &mem->vk);
+}
+        
 VKAPI_ATTR VkResult VKAPI_CALL
 borg_MapMemory2KHR(VkDevice device,
                    const VkMemoryMapInfoKHR *pMemoryMapInfo,
                    void **ppData)
 {
    puts("borg_MapMemory2KHR");
+   VK_FROM_HANDLE(borg_device, dev, device);
    VK_FROM_HANDLE(borg_device_memory, mem, pMemoryMapInfo->memory);
 
    off_t offset = 0;
    //mem->map = mem->todo_bo_mem;
+   mem->map = borg_ws_bo_map(mem->bo);
+   if (mem->map == NULL) {
+     return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
+                         "Memory object couldn't be mapped.");
+   }
+
    *ppData = mem->map + offset;
    printf("  address or ppData: %p\n", ppData);
 
@@ -75,14 +101,11 @@ borg_UnmapMemory2KHR(VkDevice device,
    VK_FROM_HANDLE(borg_device_memory, mem, pMemoryUnmapInfo->memory);
    if (mem == NULL)
       return VK_SUCCESS;
+
+   borg_ws_bo_unmap(mem->bo, mem->map);
+
    mem->map = NULL;
    return VK_SUCCESS;
 }
 
-VKAPI_ATTR void VKAPI_CALL
-borg_FreeMemory(VkDevice device,
-                VkDeviceMemory _mem,
-                const VkAllocationCallbacks *pAllocator)
-{
-   // TODO
-}
+

@@ -7,6 +7,8 @@
 
 struct borg_ws_device {
 
+        int fd;
+
         simple_mtx_t bos_lock;
 };
  

@@ -27,6 +27,8 @@ borg_ws_device_new(drmDevicePtr drm_device)
                 goto out_err;
         }
 
+        device->fd = fd;
+
         simple_mtx_init(&device->bos_lock, mtx_plain);
 out_err:
         if (ver)
