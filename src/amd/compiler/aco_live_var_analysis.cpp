@@ -32,56 +32,41 @@ get_live_changes(aco_ptr<Instruction>& instr)
    return changes;
 }
 
-void
-handle_def_fixed_to_op(RegisterDemand* demand, RegisterDemand demand_before, Instruction* instr,
-                       int op_idx)
+RegisterDemand
+get_additional_operand_demand(Instruction* instr)
 {
-   /* Usually the register demand before an instruction would be considered part of the previous
-    * instruction, since it's not greater than the register demand for that previous instruction.
-    * Except, it can be greater in the case of an definition fixed to a non-killed operand: the RA
-    * needs to reserve space between the two instructions for the definition (containing a copy of
-    * the operand).
-    */
-   demand_before += instr->definitions[0].getTemp();
-   demand->update(demand_before);
+   RegisterDemand additional_demand;
+   int op_idx = get_op_fixed_to_def(instr);
+   if (op_idx != -1 && !instr->operands[op_idx].isKill())
+      additional_demand += instr->definitions[0].getTemp();
+
+   return additional_demand;
 }
 
 RegisterDemand
 get_temp_registers(aco_ptr<Instruction>& instr)
 {
-   RegisterDemand temp_registers;
+   RegisterDemand demand_before;
+   RegisterDemand demand_after;
 
    for (Definition def : instr->definitions) {
-      if (!def.isTemp())
-         continue;
       if (def.isKill())
-         temp_registers += def.getTemp();
+         demand_after += def.getTemp();
+      else if (def.isTemp())
+         demand_before -= def.getTemp();
    }
 
    for (Operand op : instr->operands) {
-      if (op.isTemp() && op.isLateKill() && op.isFirstKill())
-         temp_registers += op.getTemp();
+      if (op.isFirstKill()) {
+         demand_before += op.getTemp();
+         if (op.isLateKill())
+            demand_after += op.getTemp();
+      }
    }
 
-   int op_idx = get_op_fixed_to_def(instr.get());
-   if (op_idx != -1 && !instr->operands[op_idx].isKill()) {
-      RegisterDemand before_instr;
-      before_instr -= get_live_changes(instr);
-      handle_def_fixed_to_op(&temp_registers, before_instr, instr.get(), op_idx);
-   }
-
-   return temp_registers;
-}
-
-RegisterDemand
-get_demand_before(RegisterDemand demand, aco_ptr<Instruction>& instr,
-                  aco_ptr<Instruction>& instr_before)
-{
-   demand -= get_live_changes(instr);
-   demand -= get_temp_registers(instr);
-   if (instr_before)
-      demand += get_temp_registers(instr_before);
-   return demand;
+   demand_before += get_additional_operand_demand(instr.get());
+   demand_after.update(demand_before);
+   return demand_after;
 }
 
 namespace {
@@ -185,24 +170,19 @@ process_live_temps_per_block(Program* program, Block* block, unsigned& worklist,
          }
       }
 
-      int op_idx = get_op_fixed_to_def(insn);
-      if (op_idx != -1 && !insn->operands[op_idx].isKill()) {
-         RegisterDemand before_instr = new_demand;
-         handle_def_fixed_to_op(&register_demand[idx], before_instr, insn, op_idx);
-      }
+      RegisterDemand before_instr = new_demand + get_additional_operand_demand(insn);
+      register_demand[idx].update(before_instr);
    }
 
    /* handle phi definitions */
    uint16_t linear_phi_defs = 0;
-   int phi_idx = idx;
-   while (phi_idx >= 0) {
+   for (int phi_idx = 0; phi_idx <= idx; phi_idx++) {
       register_demand[phi_idx] = new_demand;
       Instruction* insn = block->instructions[phi_idx].get();
 
       assert(is_phi(insn) && insn->definitions.size() == 1);
       if (!insn->definitions[0].isTemp()) {
          assert(insn->definitions[0].isFixed() && insn->definitions[0].physReg() == exec);
-         phi_idx--;
          continue;
       }
       Definition& definition = insn->definitions[0];
@@ -211,17 +191,15 @@ process_live_temps_per_block(Program* program, Block* block, unsigned& worklist,
       const Temp temp = definition.getTemp();
       const size_t n = live.erase(temp.id());
 
-      if (n)
+      if (n) {
          definition.setKill(false);
-      else
+         if (insn->opcode == aco_opcode::p_linear_phi) {
+            assert(definition.getTemp().type() == RegType::sgpr);
+            linear_phi_defs += definition.size();
+         }
+      } else {
          definition.setKill(true);
-
-      if (insn->opcode == aco_opcode::p_linear_phi) {
-         assert(definition.getTemp().type() == RegType::sgpr);
-         linear_phi_defs += definition.size();
       }
-
-      phi_idx--;
    }
 
    for (unsigned pred_idx : block->linear_preds)
@@ -262,10 +240,12 @@ process_live_temps_per_block(Program* program, Block* block, unsigned& worklist,
    }
 
    /* handle phi operands */
-   phi_idx = idx;
-   while (phi_idx >= 0) {
+   for (int phi_idx = 0; phi_idx <= idx; phi_idx++) {
       Instruction* insn = block->instructions[phi_idx].get();
       assert(is_phi(insn));
+      /* Ignore dead phis. */
+      if (insn->definitions[0].isKill())
+         continue;
       /* directly insert into the predecessors live-out set */
       Block::edge_vec& preds =
          insn->opcode == aco_opcode::p_phi ? block->logical_preds : block->linear_preds;
@@ -290,8 +270,10 @@ process_live_temps_per_block(Program* program, Block* block, unsigned& worklist,
          /* set if the operand is killed by this (or another) phi instruction */
          operand.setKill(!live.count(operand.tempId()));
       }
-      phi_idx--;
    }
+
+   block->live_in_demand = new_demand;
+   block->live_in_demand.sgpr += 2; /* Add 2 SGPRs for potential long-jumps. */
 
    assert(!block->linear_preds.empty() || (new_demand == RegisterDemand() && live.empty()));
 }

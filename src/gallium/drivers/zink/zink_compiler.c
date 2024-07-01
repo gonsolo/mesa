@@ -452,10 +452,8 @@ lower_pv_mode_gs_end_primitive(nir_builder *b,
    nir_push_loop(b);
    {
       nir_def *out_pos_counter = nir_load_var(b, state->out_pos_counter);
-      nir_push_if(b, nir_ilt(b, nir_isub(b, pos_counter, out_pos_counter),
-                                nir_imm_int(b, state->primitive_vert_count)));
-      nir_jump(b, nir_jump_break);
-      nir_pop_if(b, NULL);
+      nir_break_if(b, nir_ilt(b, nir_isub(b, pos_counter, out_pos_counter),
+                                 nir_imm_int(b, state->primitive_vert_count)));
 
       lower_pv_mode_emit_rotated_prim(b, state, out_pos_counter);
       nir_end_primitive(b);
@@ -1057,8 +1055,7 @@ lower_64bit_pack_instr(nir_builder *b, nir_instr *instr, void *data)
    default:
       unreachable("Impossible opcode");
    }
-   nir_def_rewrite_uses(&alu_instr->def, dest);
-   nir_instr_remove(&alu_instr->instr);
+   nir_def_replace(&alu_instr->def, dest);
    return true;
 }
 
@@ -1197,8 +1194,7 @@ lower_system_values_to_inlined_uniforms_instr(nir_builder *b,
       new_dest_def = dwords[0];
    else
       new_dest_def = nir_pack_64_2x32_split(b, dwords[0], dwords[1]);
-   nir_def_rewrite_uses(&intrin->def, new_dest_def);
-   nir_instr_remove(&intrin->instr);
+   nir_def_replace(&intrin->def, new_dest_def);
    return true;
 }
 
@@ -2370,8 +2366,7 @@ rewrite_atomic_ssbo_instr(nir_builder *b, nir_instr *instr, struct bo_vars *bo)
    }
 
    nir_def *load = nir_vec(b, result, num_components);
-   nir_def_rewrite_uses(&intr->def, load);
-   nir_instr_remove(instr);
+   nir_def_replace(&intr->def, load);
 }
 
 static bool
@@ -2804,8 +2799,7 @@ rewrite_read_as_0(nir_builder *b, nir_instr *instr, void *data)
          break;
       }
    }
-   nir_def_rewrite_uses(&intr->def, zero);
-   nir_instr_remove(instr);
+   nir_def_replace(&intr->def, zero);
    return true;
 }
 
@@ -5528,7 +5522,7 @@ create_io_var(nir_shader *nir, struct rework_io_state *ris)
 static void
 loop_io_var_mask(nir_shader *nir, nir_variable_mode mode, bool indirect, bool patch, uint64_t mask)
 {
-   bool is_vertex_input = nir->info.stage == MESA_SHADER_VERTEX && mode == nir_var_shader_in;
+   ASSERTED bool is_vertex_input = nir->info.stage == MESA_SHADER_VERTEX && mode == nir_var_shader_in;
    u_foreach_bit64(slot, mask) {
       if (patch)
          slot += VARYING_SLOT_PATCH0;

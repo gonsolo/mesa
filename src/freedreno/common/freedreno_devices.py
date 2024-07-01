@@ -388,6 +388,7 @@ a6xx_gen3 = A6XXProps(
         has_lrz_dir_tracking = True,
         enable_lrz_fast_clear = True,
         lrz_track_quirk = True,
+        has_lrz_feedback = True,
         has_per_view_viewport = True,
         has_scalar_alu = True,
         has_early_preamble = True,
@@ -413,11 +414,14 @@ a6xx_gen4 = A6XXProps(
         has_dp4acc = True,
         enable_lrz_fast_clear = True,
         has_lrz_dir_tracking = True,
+        has_lrz_feedback = True,
         has_per_view_viewport = True,
         has_scalar_alu = True,
         has_isam_v = True,
         has_ssbo_imm_offsets = True,
-        has_early_preamble = True,
+        # TODO: there seems to be a quirk where at least rcp can't be in an
+        # early preamble. a660 at least is affected.
+        #has_early_preamble = True,
     )
 
 a6xx_a690_quirk = A6XXProps(
@@ -776,7 +780,7 @@ a7xx_base = A6XXProps(
         vs_max_inputs_count = 32,
         max_sets = 8,
 
-        reg_size_vec4 = 64,
+        reg_size_vec4 = 96,
         # Blob limits it to 128 but we hang with 128
         instr_cache_size = 127,
         supports_multiview_mask = True,
@@ -793,6 +797,7 @@ a7xx_base = A6XXProps(
         has_dp4acc = True,
         enable_lrz_fast_clear = True,
         has_lrz_dir_tracking = True,
+        has_lrz_feedback = True,
         has_per_view_viewport = True,
         line_width_min = 1.0,
         line_width_max = 127.5,

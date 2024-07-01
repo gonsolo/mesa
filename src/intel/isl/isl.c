@@ -322,6 +322,7 @@ isl_device_init(struct isl_device *dev,
    dev->use_separate_stencil = ISL_GFX_VER(dev) >= 6;
    dev->has_bit6_swizzling = info->has_bit6_swizzle;
    dev->buffer_length_in_aux_addr = false;
+   dev->sampler_route_to_lsc = false;
 
    /* The ISL_DEV macros may be defined in the CFLAGS, thus hardcoding some
     * device properties at buildtime. Verify that the macros with the device
@@ -1319,11 +1320,12 @@ isl_choose_array_pitch_span(const struct isl_device *dev,
 static void
 isl_choose_image_alignment_el(const struct isl_device *dev,
                               const struct isl_surf_init_info *restrict info,
-                              enum isl_tiling tiling,
+                              const struct isl_tile_info *tile_info,
                               enum isl_dim_layout dim_layout,
                               enum isl_msaa_layout msaa_layout,
                               struct isl_extent3d *image_align_el)
 {
+   enum isl_tiling tiling = tile_info->tiling;
    const struct isl_format_layout *fmtl = isl_format_get_layout(info->format);
    if (fmtl->txc == ISL_TXC_MCS) {
       /*
@@ -1397,16 +1399,16 @@ isl_choose_image_alignment_el(const struct isl_device *dev,
    }
 
    if (ISL_GFX_VERX10(dev) >= 200) {
-      isl_gfx20_choose_image_alignment_el(dev, info, tiling, dim_layout,
+      isl_gfx20_choose_image_alignment_el(dev, info, tile_info, dim_layout,
                                            msaa_layout, image_align_el);
    } else if (ISL_GFX_VERX10(dev) >= 125) {
-      isl_gfx125_choose_image_alignment_el(dev, info, tiling, dim_layout,
+      isl_gfx125_choose_image_alignment_el(dev, info, tile_info, dim_layout,
                                            msaa_layout, image_align_el);
    } else if (ISL_GFX_VER(dev) >= 12) {
-      isl_gfx12_choose_image_alignment_el(dev, info, tiling, dim_layout,
+      isl_gfx12_choose_image_alignment_el(dev, info, tile_info, dim_layout,
                                           msaa_layout, image_align_el);
    } else if (ISL_GFX_VER(dev) >= 9) {
-      isl_gfx9_choose_image_alignment_el(dev, info, tiling, dim_layout,
+      isl_gfx9_choose_image_alignment_el(dev, info, tile_info, dim_layout,
                                          msaa_layout, image_align_el);
    } else if (ISL_GFX_VER(dev) >= 8) {
       isl_gfx8_choose_image_alignment_el(dev, info, tiling, dim_layout,
@@ -2783,8 +2785,8 @@ isl_surf_init_s(const struct isl_device *dev,
                        info->samples, &tile_info);
 
    struct isl_extent3d image_align_el;
-   isl_choose_image_alignment_el(dev, info, tiling, dim_layout, msaa_layout,
-                                 &image_align_el);
+   isl_choose_image_alignment_el(dev, info, &tile_info, dim_layout,
+                                 msaa_layout, &image_align_el);
 
    struct isl_extent3d image_align_sa =
       isl_extent3d_el_to_sa(info->format, image_align_el);
@@ -4446,106 +4448,6 @@ isl_format_get_aux_map_encoding(enum isl_format format)
    case ISL_FORMAT_YCRCB_SWAPY: return 0xB;
    default:
       unreachable("Unsupported aux-map format!");
-      return 0;
-   }
-}
-
-/*
- * Returns compression format encoding for Unified Lossless Compression
- */
-uint8_t
-isl_get_render_compression_format(enum isl_format format)
-{
-   /* From the Bspec, Enumeration_RenderCompressionFormat section (53726): */
-   switch(format) {
-   case ISL_FORMAT_R32G32B32A32_FLOAT:
-   case ISL_FORMAT_R32G32B32X32_FLOAT:
-   case ISL_FORMAT_R32G32B32A32_SINT:
-      return 0x0;
-   case ISL_FORMAT_R32G32B32A32_UINT:
-      return 0x1;
-   case ISL_FORMAT_R32G32_FLOAT:
-   case ISL_FORMAT_R32G32_SINT:
-      return 0x2;
-   case ISL_FORMAT_R32G32_UINT:
-      return 0x3;
-   case ISL_FORMAT_R16G16B16A16_UNORM:
-   case ISL_FORMAT_R16G16B16X16_UNORM:
-   case ISL_FORMAT_R16G16B16A16_UINT:
-      return 0x4;
-   case ISL_FORMAT_R16G16B16A16_SNORM:
-   case ISL_FORMAT_R16G16B16A16_SINT:
-   case ISL_FORMAT_R16G16B16A16_FLOAT:
-   case ISL_FORMAT_R16G16B16X16_FLOAT:
-      return 0x5;
-   case ISL_FORMAT_R16G16_UNORM:
-   case ISL_FORMAT_R16G16_UINT:
-      return 0x6;
-   case ISL_FORMAT_R16G16_SNORM:
-   case ISL_FORMAT_R16G16_SINT:
-   case ISL_FORMAT_R16G16_FLOAT:
-      return 0x7;
-   case ISL_FORMAT_B8G8R8A8_UNORM:
-   case ISL_FORMAT_B8G8R8X8_UNORM:
-   case ISL_FORMAT_B8G8R8A8_UNORM_SRGB:
-   case ISL_FORMAT_B8G8R8X8_UNORM_SRGB:
-   case ISL_FORMAT_R8G8B8A8_UNORM:
-   case ISL_FORMAT_R8G8B8X8_UNORM:
-   case ISL_FORMAT_R8G8B8A8_UNORM_SRGB:
-   case ISL_FORMAT_R8G8B8X8_UNORM_SRGB:
-   case ISL_FORMAT_R8G8B8A8_UINT:
-      return 0x8;
-   case ISL_FORMAT_R8G8B8A8_SNORM:
-   case ISL_FORMAT_R8G8B8A8_SINT:
-      return 0x9;
-   case ISL_FORMAT_B5G6R5_UNORM:
-   case ISL_FORMAT_B5G6R5_UNORM_SRGB:
-   case ISL_FORMAT_B5G5R5A1_UNORM:
-   case ISL_FORMAT_B5G5R5A1_UNORM_SRGB:
-   case ISL_FORMAT_B4G4R4A4_UNORM:
-   case ISL_FORMAT_B4G4R4A4_UNORM_SRGB:
-   case ISL_FORMAT_B5G5R5X1_UNORM:
-   case ISL_FORMAT_B5G5R5X1_UNORM_SRGB:
-   case ISL_FORMAT_A1B5G5R5_UNORM:
-   case ISL_FORMAT_A4B4G4R4_UNORM:
-   case ISL_FORMAT_R8G8_UNORM:
-   case ISL_FORMAT_R8G8_UINT:
-      return 0xA;
-   case ISL_FORMAT_R8G8_SNORM:
-   case ISL_FORMAT_R8G8_SINT:
-      return 0xB;
-   case ISL_FORMAT_R10G10B10A2_UNORM:
-   case ISL_FORMAT_R10G10B10A2_UNORM_SRGB:
-   case ISL_FORMAT_R10G10B10_FLOAT_A2_UNORM:
-   case ISL_FORMAT_R10G10B10A2_UINT:
-   case ISL_FORMAT_B10G10R10A2_UNORM:
-   case ISL_FORMAT_B10G10R10X2_UNORM:
-   case ISL_FORMAT_B10G10R10A2_UNORM_SRGB:
-      return 0xC;
-   case ISL_FORMAT_R11G11B10_FLOAT:
-      return 0xD;
-   case ISL_FORMAT_R32_SINT:
-   case ISL_FORMAT_R32_FLOAT:
-      return 0x10;
-   case ISL_FORMAT_R32_UINT:
-   case ISL_FORMAT_R24_UNORM_X8_TYPELESS:
-      return 0x11;
-   case ISL_FORMAT_R16_UNORM:
-   case ISL_FORMAT_R16_UINT:
-      return 0x14;
-   case ISL_FORMAT_R16_SNORM:
-   case ISL_FORMAT_R16_SINT:
-   case ISL_FORMAT_R16_FLOAT:
-      return 0x15;
-   case ISL_FORMAT_R8_UNORM:
-   case ISL_FORMAT_R8_UINT:
-   case ISL_FORMAT_A8_UNORM:
-      return 0x18;
-   case ISL_FORMAT_R8_SNORM:
-   case ISL_FORMAT_R8_SINT:
-      return 0x19;
-   default:
-      unreachable("Unsupported render compression format!");
       return 0;
    }
 }

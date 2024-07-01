@@ -35,8 +35,6 @@
 #include "perf/intel_perf_query.h"
 #include "perf/intel_perf_regs.h"
 
-#include "drm-uapi/i915_drm.h"
-
 #include "util/compiler.h"
 #include "util/u_math.h"
 
@@ -308,7 +306,7 @@ static bool
 inc_n_users(struct intel_perf_context *perf_ctx)
 {
    if (perf_ctx->n_oa_users == 0 &&
-       intel_ioctl(perf_ctx->oa_stream_fd, I915_PERF_IOCTL_ENABLE, 0) < 0)
+       intel_perf_stream_set_state(perf_ctx->perf, perf_ctx->oa_stream_fd, true) < 0)
    {
       return false;
    }
@@ -327,7 +325,7 @@ dec_n_users(struct intel_perf_context *perf_ctx)
     */
    --perf_ctx->n_oa_users;
    if (perf_ctx->n_oa_users == 0 &&
-       intel_ioctl(perf_ctx->oa_stream_fd, I915_PERF_IOCTL_DISABLE, 0) < 0)
+       intel_perf_stream_set_state(perf_ctx->perf, perf_ctx->oa_stream_fd, false) < 0)
    {
       DBG("WARNING: Error disabling gen perf stream: %m\n");
    }
@@ -705,6 +703,7 @@ snapshot_query_layout(struct intel_perf_context *perf_ctx,
       case INTEL_PERF_QUERY_FIELD_TYPE_SRM_OA_A:
       case INTEL_PERF_QUERY_FIELD_TYPE_SRM_OA_B:
       case INTEL_PERF_QUERY_FIELD_TYPE_SRM_OA_C:
+      case INTEL_PERF_QUERY_FIELD_TYPE_SRM_OA_PEC:
          perf_cfg->vtbl.store_register_mem(perf_ctx->ctx, query->oa.bo,
                                            field->mmio_offset, field->size,
                                            offset + field->location);

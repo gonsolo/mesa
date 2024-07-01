@@ -3059,6 +3059,17 @@ init_driver_workarounds(struct zink_screen *screen)
       break;
    }
 
+   screen->driver_workarounds.can_2d_view_sparse = true;
+   switch (screen->info.driver_props.driverID) {
+   case VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA:
+   case VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS:
+      /* this does wild things to block shapes */
+      screen->driver_workarounds.can_2d_view_sparse = false;
+      break;
+   default:
+      break;
+   }
+
    if (!screen->resizable_bar)
       screen->info.have_EXT_host_image_copy = false;
 }
@@ -3749,7 +3760,7 @@ zink_drm_create_screen(int fd, const struct pipe_screen_config *config)
    return &ret->base;
 }
 
-void zink_stub_function_not_loaded()
+void VKAPI_PTR zink_stub_function_not_loaded()
 {
    /* this will be used by the zink_verify_*_extensions() functions on a
     * release build

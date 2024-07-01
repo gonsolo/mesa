@@ -936,25 +936,37 @@ fs_inst::size_read(int arg) const
       }
       break;
 
-   case BRW_OPCODE_DPAS:
+   case BRW_OPCODE_DPAS: {
+      /* This is a little bit sketchy. There's no way to get at devinfo from
+       * here, so the regular reg_unit() cannot be used. However, on
+       * reg_unit() == 1 platforms, DPAS exec_size must be 8, and on known
+       * reg_unit() == 2 platforms, DPAS exec_size must be 16. This is not a
+       * coincidence, so this isn't so bad.
+       */
+      const unsigned reg_unit = this->exec_size / 8;
+
       switch (arg) {
       case 0:
          if (src[0].type == BRW_TYPE_HF) {
-            return rcount * REG_SIZE / 2;
+            return rcount * reg_unit * REG_SIZE / 2;
          } else {
-            return rcount * REG_SIZE;
+            return rcount * reg_unit * REG_SIZE;
          }
       case 1:
-         return sdepth * REG_SIZE;
+         return sdepth * reg_unit * REG_SIZE;
       case 2:
          /* This is simpler than the formula described in the Bspec, but it
-          * covers all of the cases that we support on DG2.
+          * covers all of the cases that we support. Each inner sdepth
+          * iteration of the DPAS consumes a single dword for int8, uint8, or
+          * float16 types. These are the one source types currently
+          * supportable through Vulkan. This is independent of reg_unit.
           */
-         return rcount * REG_SIZE;
+         return rcount * sdepth * 4;
       default:
          unreachable("Invalid source number.");
       }
       break;
+   }
 
    default:
       break;
@@ -2709,6 +2721,15 @@ fs_visitor::dump_instruction_to_file(const fs_inst *inst, FILE *file, const brw:
    if (inst->exec_size != dispatch_width)
       fprintf(file, "group%d ", inst->group);
 
+   if (inst->has_no_mask_send_params)
+      fprintf(file, "NoMaskParams ");
+
+   if (inst->sched.pipe != TGL_PIPE_NONE) {
+      fprintf(file, "{ ");
+      brw_print_swsb(file, devinfo, inst->sched);
+      fprintf(file, " } ");
+   }
+
    fprintf(file, "\n");
 }
 
@@ -3527,6 +3548,35 @@ brw_compute_barycentric_interp_modes(const struct intel_device_info *devinfo,
    return barycentric_interp_modes;
 }
 
+/**
+ * Return a bitfield where bit n is set if barycentric interpolation
+ * mode n (see enum brw_barycentric_mode) is needed by the fragment
+ * shader barycentric intrinsics that take an explicit offset or
+ * sample as argument.
+ */
+static unsigned
+brw_compute_offset_barycentric_interp_modes(const struct brw_wm_prog_key *key,
+                                            const nir_shader *shader)
+{
+   unsigned barycentric_interp_modes = 0;
+
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+            if (intrin->intrinsic == nir_intrinsic_load_barycentric_at_offset ||
+                intrin->intrinsic == nir_intrinsic_load_barycentric_at_sample)
+               barycentric_interp_modes |= 1 << brw_barycentric_mode(key, intrin);
+         }
+      }
+   }
+
+   return barycentric_interp_modes;
+}
+
 static void
 brw_compute_flat_inputs(struct brw_wm_prog_data *prog_data,
                         const nir_shader *shader)
@@ -3724,9 +3774,22 @@ brw_nir_populate_wm_prog_data(nir_shader *shader,
          ~BITFIELD_BIT(BRW_BARYCENTRIC_PERSPECTIVE_SAMPLE);
    }
 
-   prog_data->uses_nonperspective_interp_modes |=
-      (prog_data->barycentric_interp_modes &
-      BRW_BARYCENTRIC_NONPERSPECTIVE_BITS) != 0;
+   if (devinfo->ver >= 20) {
+      const unsigned offset_bary_modes =
+         brw_compute_offset_barycentric_interp_modes(key, shader);
+
+      prog_data->uses_npc_bary_coefficients =
+         offset_bary_modes & BRW_BARYCENTRIC_NONPERSPECTIVE_BITS;
+      prog_data->uses_pc_bary_coefficients =
+         offset_bary_modes & ~BRW_BARYCENTRIC_NONPERSPECTIVE_BITS;
+      prog_data->uses_sample_offsets =
+         offset_bary_modes & ((1 << BRW_BARYCENTRIC_PERSPECTIVE_SAMPLE) |
+                              (1 << BRW_BARYCENTRIC_NONPERSPECTIVE_SAMPLE));
+   }
+
+   prog_data->uses_nonperspective_interp_modes =
+      (prog_data->barycentric_interp_modes & BRW_BARYCENTRIC_NONPERSPECTIVE_BITS) ||
+      prog_data->uses_npc_bary_coefficients;
 
    /* The current VK_EXT_graphics_pipeline_library specification requires
     * coarse to specified at compile time. But per sample interpolation can be
@@ -3790,9 +3853,9 @@ brw_nir_populate_wm_prog_data(nir_shader *shader,
    prog_data->uses_src_depth =
       BITSET_TEST(shader->info.system_values_read, SYSTEM_VALUE_FRAG_COORD) &&
       prog_data->coarse_pixel_dispatch != BRW_ALWAYS;
-   prog_data->uses_depth_w_coefficients =
-      BITSET_TEST(shader->info.system_values_read, SYSTEM_VALUE_FRAG_COORD) &&
-      prog_data->coarse_pixel_dispatch != BRW_NEVER;
+   prog_data->uses_depth_w_coefficients = prog_data->uses_pc_bary_coefficients ||
+      (BITSET_TEST(shader->info.system_values_read, SYSTEM_VALUE_FRAG_COORD) &&
+       prog_data->coarse_pixel_dispatch != BRW_NEVER);
 
    calculate_urb_setup(devinfo, key, prog_data, shader, mue_map);
    brw_compute_flat_inputs(prog_data, shader);
@@ -4583,5 +4646,32 @@ namespace brw {
                               dynamic_msaa_flags(wm_prog_data),
                               brw_imm_ud(flag));
       inst->conditional_mod = BRW_CONDITIONAL_NZ;
+   }
+}
+
+void
+brw_print_swsb(FILE *f, const struct intel_device_info *devinfo, const tgl_swsb swsb)
+{
+   if (swsb.pipe == TGL_PIPE_NONE)
+      return;
+
+   if (swsb.regdist) {
+      fprintf(f, "%s@%d",
+              (devinfo && devinfo->verx10 < 125 ? "" :
+               swsb.pipe == TGL_PIPE_FLOAT ? "F" :
+               swsb.pipe == TGL_PIPE_INT ? "I" :
+               swsb.pipe == TGL_PIPE_LONG ? "L" :
+               swsb.pipe == TGL_PIPE_ALL ? "A"  :
+               swsb.pipe == TGL_PIPE_MATH ? "M" : "" ),
+              swsb.regdist);
+   }
+
+   if (swsb.mode) {
+      if (swsb.regdist)
+          fprintf(f, " ");
+
+      fprintf(f, "$%d%s", swsb.sbid,
+              (swsb.mode & TGL_SBID_SET ? "" :
+               swsb.mode & TGL_SBID_DST ? ".dst" : ".src"));
    }
 }

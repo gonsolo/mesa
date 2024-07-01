@@ -59,6 +59,7 @@
 #include "vk_deferred_operation.h"
 #include "vk_drm_syncobj.h"
 #include "common/intel_aux_map.h"
+#include "common/intel_common.h"
 #include "common/intel_debug_identifier.h"
 #include "common/intel_uuid.h"
 #include "perf/intel_perf.h"
@@ -80,6 +81,7 @@ static const driOptionDescription anv_dri_options[] = {
       DRI_CONF_ANV_ASSUME_FULL_SUBGROUPS(0)
       DRI_CONF_ANV_DISABLE_FCV(false)
       DRI_CONF_ANV_EXTERNAL_MEMORY_IMPLICIT_SYNC(true)
+      DRI_CONF_ANV_FORCE_GUC_LOW_LATENCY(false)
       DRI_CONF_ANV_SAMPLE_MASK_OUT_OPENGL_BEHAVIOUR(false)
       DRI_CONF_ANV_FORCE_FILTER_ADDR_ROUNDING(false)
       DRI_CONF_ANV_FP64_WORKAROUND_ENABLED(false)
@@ -87,6 +89,7 @@ static const driOptionDescription anv_dri_options[] = {
       DRI_CONF_ANV_GENERATED_INDIRECT_RING_THRESHOLD(100)
       DRI_CONF_NO_16BIT(false)
       DRI_CONF_INTEL_ENABLE_WA_14018912822(false)
+      DRI_CONF_INTEL_SAMPLER_ROUTE_TO_LSC(false)
       DRI_CONF_ANV_QUERY_CLEAR_WITH_BLORP_THRESHOLD(6)
       DRI_CONF_ANV_QUERY_COPY_WITH_SHADER_THRESHOLD(6)
       DRI_CONF_ANV_FORCE_INDIRECT_DESCRIPTORS(false)
@@ -280,7 +283,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_multiview                         = true,
       .KHR_performance_query =
          device->perf &&
-         (device->perf->i915_perf_version >= 3 ||
+         (intel_perf_has_hold_preemption(device->perf) ||
           INTEL_DEBUG(DEBUG_NO_OACONFIG)) &&
          device->use_call_secondary,
       .KHR_pipeline_executable_properties    = true,
@@ -445,7 +448,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .GOOGLE_hlsl_functionality1            = true,
       .GOOGLE_user_type                      = true,
       .INTEL_performance_query               = device->perf &&
-                                               device->perf->i915_perf_version >= 3,
+                                               intel_perf_has_hold_preemption(device->perf),
       .INTEL_shader_integer_functions2       = true,
       .EXT_multi_draw                        = true,
       .NV_compute_shader_derivatives         = true,
@@ -2224,20 +2227,14 @@ anv_physical_device_init_queue_families(struct anv_physical_device *pdevice)
          sparse_supports_non_render_engines;
 
       if (can_use_non_render_engines) {
-         c_count = intel_engines_supported_count(pdevice->local_fd,
-                                                 &pdevice->info,
-                                                 pdevice->engine_info,
-                                                 INTEL_ENGINE_CLASS_COMPUTE);
+         c_count = pdevice->info.engine_class_supported_count[INTEL_ENGINE_CLASS_COMPUTE];
       }
       enum intel_engine_class compute_class =
          c_count < 1 ? INTEL_ENGINE_CLASS_RENDER : INTEL_ENGINE_CLASS_COMPUTE;
 
       int blit_count = 0;
       if (pdevice->info.verx10 >= 125 && can_use_non_render_engines) {
-         blit_count = intel_engines_supported_count(pdevice->local_fd,
-                                                    &pdevice->info,
-                                                    pdevice->engine_info,
-                                                    INTEL_ENGINE_CLASS_COPY);
+         blit_count = pdevice->info.engine_class_supported_count[INTEL_ENGINE_CLASS_COPY];
       }
 
       anv_override_engine_counts(&gc_count, &g_count, &c_count, &v_count);
@@ -2556,6 +2553,8 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
 
    isl_device_init(&device->isl_dev, &device->info);
    device->isl_dev.buffer_length_in_aux_addr = !intel_needs_workaround(device->isl_dev.info, 14019708328);
+   device->isl_dev.sampler_route_to_lsc =
+      driQueryOptionb(&instance->dri_options, "intel_sampler_route_to_lsc");
 
    result = anv_physical_device_init_uuids(device);
    if (result != VK_SUCCESS)
@@ -2578,9 +2577,8 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
    device->master_fd = master_fd;
 
    device->engine_info = intel_engine_get_info(fd, device->info.kmd_type);
-   device->info.has_compute_engine = device->engine_info &&
-                                     intel_engines_count(device->engine_info,
-                                                         INTEL_ENGINE_CLASS_COMPUTE);
+   intel_common_update_device_info(fd, &device->info);
+
    anv_physical_device_init_queue_families(device);
 
    anv_physical_device_init_perf(device, fd);
@@ -2737,6 +2735,7 @@ anv_init_dri_options(struct anv_instance *instance)
        instance->stack_ids = 512;
        break;
     }
+    instance->force_guc_low_latency = driQueryOptionb(&instance->dri_options, "force_guc_low_latency");
 }
 
 VkResult anv_CreateInstance(
@@ -3840,7 +3839,8 @@ VkResult anv_CreateDevice(
    isl_null_fill_state(&device->isl_dev, &device->host_null_surface_state,
                        .size = isl_extent3d(1, 1, 1) /* This shouldn't matter */);
 
-   anv_scratch_pool_init(device, &device->scratch_pool);
+   anv_scratch_pool_init(device, &device->scratch_pool, false);
+   anv_scratch_pool_init(device, &device->protected_scratch_pool, true);
 
    /* TODO(RT): Do we want some sort of data structure for this? */
    memset(device->rt_scratch_bos, 0, sizeof(device->rt_scratch_bos));
@@ -4028,6 +4028,7 @@ VkResult anv_CreateDevice(
       anv_device_release_bo(device, device->btd_fifo_bo);
  fail_trivial_batch_bo_and_scratch_pool:
    anv_scratch_pool_finish(device, &device->scratch_pool);
+   anv_scratch_pool_finish(device, &device->protected_scratch_pool);
  fail_trivial_batch:
    anv_device_release_bo(device, device->trivial_batch_bo);
  fail_ray_query_bo:
@@ -4183,6 +4184,7 @@ void anv_DestroyDevice(
    }
 
    anv_scratch_pool_finish(device, &device->scratch_pool);
+   anv_scratch_pool_finish(device, &device->protected_scratch_pool);
 
    if (device->vk.enabled_extensions.KHR_ray_query) {
       for (unsigned i = 0; i < ARRAY_SIZE(device->ray_query_shadow_bos); i++) {
@@ -4470,9 +4472,6 @@ VkResult anv_AllocateMemory(
    if (mem_type->propertyFlags & VK_MEMORY_PROPERTY_PROTECTED_BIT)
       alloc_flags |= ANV_BO_ALLOC_PROTECTED;
 
-   if (mem_type->compressed)
-      alloc_flags |= ANV_BO_ALLOC_COMPRESSED;
-
    /* For now, always allocated AUX-TT aligned memory, regardless of dedicated
     * allocations. An application can for example, suballocate a large
     * VkDeviceMemory and try to bind an image created with a CCS modifier. In
@@ -4535,6 +4534,12 @@ VkResult anv_AllocateMemory(
             alloc_flags |= ANV_BO_ALLOC_IMPLICIT_WRITE;
       }
    }
+
+   /* TODO: Disabling compression on external bos will cause problems once we
+    * have a modifier that supports compression (Xe2+).
+    */
+   if (!(alloc_flags & ANV_BO_ALLOC_EXTERNAL) && mem_type->compressed)
+      alloc_flags |= ANV_BO_ALLOC_COMPRESSED;
 
    if (mem_type->descriptor_buffer)
       alloc_flags |= ANV_BO_ALLOC_DESCRIPTOR_BUFFER_POOL;

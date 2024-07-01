@@ -15,6 +15,7 @@
 
 #include "vk_util.h"
 
+#include "tu_buffer.h"
 #include "tu_cmd_buffer.h"
 #include "tu_cs.h"
 #include "tu_device.h"
@@ -1481,7 +1482,7 @@ emit_end_xfb_query(struct tu_cmd_buffer *cmdbuf,
    tu_emit_event_write<CHIP>(cmdbuf, cs, FD_WRITE_PRIMITIVE_COUNTS);
 
    tu_cs_emit_wfi(cs);
-   tu_emit_event_write<CHIP>(cmdbuf, cs, FD_CACHE_FLUSH);
+   tu_emit_event_write<CHIP>(cmdbuf, cs, FD_CACHE_CLEAN);
 
    /* Set the count of written primitives */
    tu_cs_emit_pkt7(cs, CP_MEM_TO_MEM, 9);
@@ -1492,7 +1493,7 @@ emit_end_xfb_query(struct tu_cmd_buffer *cmdbuf,
    tu_cs_emit_qw(cs, end_written_iova);
    tu_cs_emit_qw(cs, begin_written_iova);
 
-   tu_emit_event_write<CHIP>(cmdbuf, cs, FD_CACHE_FLUSH);
+   tu_emit_event_write<CHIP>(cmdbuf, cs, FD_CACHE_CLEAN);
 
    /* Set the count of generated primitives */
    tu_cs_emit_pkt7(cs, CP_MEM_TO_MEM, 9);

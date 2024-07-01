@@ -526,7 +526,7 @@ public:
           */
          unsigned rcount:4;
 
-         unsigned pad:3;
+         unsigned pad:2;
 
          bool predicate_inverse:1;
          bool writes_accumulator:1; /**< instruction implicitly writes accumulator */
@@ -556,11 +556,12 @@ public:
          bool last_rt:1;
          bool pi_noperspective:1;   /**< Pixel interpolator noperspective flag */
          bool keep_payload_trailing_zeros:1;
-
          /**
-          * Hint that this instruction has combined LOD/LOD bias with array index
+          * Whether the parameters of the SEND instructions are build with
+          * NoMask (for A32 messages this covers only the surface handle, for
+          * A64 messages this covers the load address).
           */
-         bool has_packed_lod_ai_src:1;
+         bool has_no_mask_send_params:1;
       };
       uint32_t bits;
    };

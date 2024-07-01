@@ -1746,14 +1746,9 @@ aco_ptr<Instruction> convert_to_DPP(amd_gfx_level gfx_level, aco_ptr<Instruction
                                     bool dpp8);
 bool needs_exec_mask(const Instruction* instr);
 
-aco_opcode get_ordered(aco_opcode op);
-aco_opcode get_unordered(aco_opcode op);
-aco_opcode get_inverse(aco_opcode op);
-aco_opcode get_swapped(aco_opcode op);
-aco_opcode get_f32_cmp(aco_opcode op);
+aco_opcode get_vcmp_inverse(aco_opcode op);
+aco_opcode get_vcmp_swapped(aco_opcode op);
 aco_opcode get_vcmpx(aco_opcode op);
-unsigned get_cmp_bitsize(aco_opcode op);
-bool is_fp_cmp(aco_opcode op);
 bool is_cmpx(aco_opcode op);
 
 bool can_swap_operands(aco_ptr<Instruction>& instr, aco_opcode* new_op, unsigned idx0 = 0,
@@ -1887,6 +1882,7 @@ struct Block {
    edge_vec logical_succs;
    edge_vec linear_succs;
    RegisterDemand register_demand = RegisterDemand();
+   RegisterDemand live_in_demand = RegisterDemand();
    uint32_t kind = 0;
    int32_t logical_idom = -1;
    int32_t linear_idom = -1;
@@ -2226,8 +2222,6 @@ int get_op_fixed_to_def(Instruction* instr);
 /* utilities for dealing with register demand */
 RegisterDemand get_live_changes(aco_ptr<Instruction>& instr);
 RegisterDemand get_temp_registers(aco_ptr<Instruction>& instr);
-RegisterDemand get_demand_before(RegisterDemand demand, aco_ptr<Instruction>& instr,
-                                 aco_ptr<Instruction>& instr_before);
 
 /* number of sgprs that need to be allocated but might notbe addressable as s0-s105 */
 uint16_t get_extra_sgprs(Program* program);

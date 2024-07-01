@@ -669,8 +669,7 @@ unpack_res_index(nir_builder *b, nir_def *index)
    defs.dyn_offset_base = nir_extract_u8(b, packed, nir_imm_int(b, 0));
 
    defs.desc_offset_base = nir_channel(b, index, 1);
-   defs.array_index = nir_umin(b, nir_channel(b, index, 2),
-                                  nir_channel(b, index, 3));
+   defs.array_index = nir_channel(b, index, 3);
 
    return defs;
 }
@@ -1450,8 +1449,7 @@ lower_load_accel_struct_desc(nir_builder *b,
 
    assert(load_desc->def.bit_size == 64);
    assert(load_desc->def.num_components == 1);
-   nir_def_rewrite_uses(&load_desc->def, desc);
-   nir_instr_remove(&load_desc->instr);
+   nir_def_replace(&load_desc->def, desc);
 
    return true;
 }
@@ -1533,8 +1531,7 @@ lower_res_index_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin,
 
    assert(intrin->def.bit_size == index->bit_size);
    assert(intrin->def.num_components == index->num_components);
-   nir_def_rewrite_uses(&intrin->def, index);
-   nir_instr_remove(&intrin->instr);
+   nir_def_replace(&intrin->def, index);
 
    return true;
 }
@@ -1551,8 +1548,7 @@ lower_res_reindex_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin,
 
    assert(intrin->def.bit_size == index->bit_size);
    assert(intrin->def.num_components == index->num_components);
-   nir_def_rewrite_uses(&intrin->def, index);
-   nir_instr_remove(&intrin->instr);
+   nir_def_replace(&intrin->def, index);
 
    return true;
 }
@@ -1573,8 +1569,7 @@ lower_load_vulkan_descriptor(nir_builder *b, nir_intrinsic_instr *intrin,
 
    assert(intrin->def.bit_size == desc->bit_size);
    assert(intrin->def.num_components == desc->num_components);
-   nir_def_rewrite_uses(&intrin->def, desc);
-   nir_instr_remove(&intrin->instr);
+   nir_def_replace(&intrin->def, desc);
 
    return true;
 }
@@ -1616,8 +1611,7 @@ lower_get_ssbo_size(nir_builder *b, nir_intrinsic_instr *intrin,
    }
 
    nir_def *size = nir_channel(b, desc_range, 2);
-   nir_def_rewrite_uses(&intrin->def, size);
-   nir_instr_remove(&intrin->instr);
+   nir_def_replace(&intrin->def, size);
 
    return true;
 }

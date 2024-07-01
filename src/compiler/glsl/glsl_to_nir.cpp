@@ -1153,7 +1153,7 @@ nir_visitor::visit(ir_call *ir)
          /* Set the intrinsic parameters. */
          if (!param->is_tail_sentinel()) {
             instr->src[1] =
-               nir_src_for_ssa(evaluate_rvalue((ir_dereference *)param));
+               nir_src_for_ssa(evaluate_rvalue((ir_rvalue *)param));
             param = param->get_next();
          }
 
@@ -1234,7 +1234,7 @@ nir_visitor::visit(ir_call *ir)
           * components.
           */
          nir_def *src_addr =
-            evaluate_rvalue((ir_dereference *)param);
+            evaluate_rvalue((ir_rvalue *)param);
          nir_def *srcs[4];
 
          for (int i = 0; i < 4; i++) {
@@ -1261,7 +1261,7 @@ nir_visitor::visit(ir_call *ir)
          /* Set the intrinsic parameters. */
          if (!param->is_tail_sentinel()) {
             instr->src[3] =
-               nir_src_for_ssa(evaluate_rvalue((ir_dereference *)param));
+               nir_src_for_ssa(evaluate_rvalue((ir_rvalue *)param));
             param = param->get_next();
          } else if (op == nir_intrinsic_image_deref_load ||
                     op == nir_intrinsic_image_deref_sparse_load) {
@@ -1270,7 +1270,7 @@ nir_visitor::visit(ir_call *ir)
 
          if (!param->is_tail_sentinel()) {
             instr->src[4] =
-               nir_src_for_ssa(evaluate_rvalue((ir_dereference *)param));
+               nir_src_for_ssa(evaluate_rvalue((ir_rvalue *)param));
             param = param->get_next();
          } else if (op == nir_intrinsic_image_deref_store) {
             instr->src[4] = nir_src_for_ssa(nir_imm_int(&b, 0)); /* LOD */
@@ -2430,7 +2430,8 @@ nir_visitor::visit(ir_texture *ir)
 
    if (ir->offset != NULL) {
       if (glsl_type_is_array(ir->offset->type)) {
-         for (int i = 0; i < glsl_array_size(ir->offset->type); i++) {
+         const int size = MIN2(glsl_array_size(ir->offset->type), 4);
+         for (int i = 0; i < size; i++) {
             const ir_constant *c =
                ir->offset->as_constant()->get_array_element(i);
 

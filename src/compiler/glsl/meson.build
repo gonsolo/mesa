@@ -1,22 +1,5 @@
 # Copyright © 2017 Intel Corporation
-
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
+# SPDX-License-Identifier: MIT
 
 libglsl_util = static_library(
   'glsl_util',
@@ -232,12 +215,16 @@ files_libglsl_standalone = files(
   'standalone.h',
 )
 
+libglsl_headers = [
+  ir_expression_operation_h, cross_platform_settings_piece_all_h, bc1_glsl_h,
+  bc4_glsl_h, etc2_rgba_stitch_glsl_h, astc_glsl_h
+]
+
 libglsl = static_library(
   'glsl',
-  [files_libglsl, glsl_parser, glsl_lexer_cpp, ir_expression_operation_h,
+  [files_libglsl, glsl_parser, glsl_lexer_cpp, libglsl_headers,
    ir_expression_operation_strings_h, ir_expression_operation_constant_h,
-   float64_glsl_h, cross_platform_settings_piece_all_h, bc1_glsl_h, bc4_glsl_h,
-   etc2_rgba_stitch_glsl_h, astc_glsl_h],
+   float64_glsl_h],
   c_args : [c_msvc_compat_args, no_override_init_args],
   cpp_args : [cpp_msvc_compat_args],
   gnu_symbol_visibility : 'hidden',
@@ -245,6 +232,11 @@ libglsl = static_library(
   include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux],
   dependencies : idep_nir,
   build_by_default : false,
+)
+
+idep_libglsl = declare_dependency(
+  sources: libglsl_headers,
+  link_with: libglsl,
 )
 
 libglsl_standalone = static_library(

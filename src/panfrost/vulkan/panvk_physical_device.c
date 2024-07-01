@@ -72,6 +72,7 @@ get_device_extensions(const struct panvk_physical_device *device,
       .KHR_pipeline_executable_properties = true,
       .KHR_pipeline_library = true,
       .KHR_push_descriptor = true,
+      .KHR_sampler_mirror_clamp_to_edge = true,
       .KHR_shader_expect_assume = true,
       .KHR_storage_buffer_storage_class = true,
 #ifdef PANVK_USE_WSI_PLATFORM
@@ -85,6 +86,7 @@ get_device_extensions(const struct panvk_physical_device *device,
       .EXT_index_type_uint8 = true,
       .EXT_pipeline_creation_cache_control = true,
       .EXT_pipeline_creation_feedback = true,
+      .EXT_private_data = true,
       .EXT_shader_module_identifier = true,
       .EXT_vertex_attribute_divisor = true,
    };
@@ -106,6 +108,7 @@ get_features(const struct panvk_physical_device *device,
       .largePoints = true,
       .textureCompressionETC2 = true,
       .textureCompressionASTC_LDR = true,
+      .samplerAnisotropy = true,
       .shaderUniformBufferArrayDynamicIndexing = true,
       .shaderSampledImageArrayDynamicIndexing = true,
       .shaderStorageBufferArrayDynamicIndexing = true,
@@ -126,7 +129,7 @@ get_features(const struct panvk_physical_device *device,
       .shaderDrawParameters = false,
 
       /* Vulkan 1.2 */
-      .samplerMirrorClampToEdge = false,
+      .samplerMirrorClampToEdge = true,
       .drawIndirectCount = false,
       .storageBuffer8BitAccess = false,
       .uniformAndStorageBuffer8BitAccess = false,
@@ -242,6 +245,11 @@ get_device_properties(const struct panvk_instance *instance,
 
    uint64_t os_page_size = 4096;
    os_get_page_size(&os_page_size);
+
+   ASSERTED unsigned arch = pan_arch(device->kmod.props.gpu_prod_id);
+
+   /* Ensure that the max threads count per workgroup is valid for Bifrost */
+   assert(arch > 8 || device->kmod.props.max_threads_per_wg <= 1024);
 
    *properties = (struct vk_properties){
       .apiVersion = panvk_get_vk_version(),
@@ -383,11 +391,14 @@ get_device_properties(const struct panvk_instance *instance,
        * dispatch in several jobs if it's too big.
        */
       .maxComputeWorkGroupCount = {65535, 65535, 65535},
-      /* We have 10 bits to encode the local-size, and there's a minus(1)
-       * modifier, so, a size of 1 takes no bit.
+
+      /* We could also split into serveral jobs but this has many limitations.
+       * As such we limit to the max threads per workgroup supported by the GPU.
        */
-      .maxComputeWorkGroupInvocations = 1 << 10,
-      .maxComputeWorkGroupSize = {1 << 10, 1 << 10, 1 << 10},
+      .maxComputeWorkGroupInvocations = device->kmod.props.max_threads_per_wg,
+      .maxComputeWorkGroupSize = {device->kmod.props.max_threads_per_wg,
+                                  device->kmod.props.max_threads_per_wg,
+                                  device->kmod.props.max_threads_per_wg},
       /* 8-bit subpixel precision. */
       .subPixelPrecisionBits = 8,
       .subTexelPrecisionBits = 8,

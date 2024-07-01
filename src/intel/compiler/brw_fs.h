@@ -457,6 +457,11 @@ public:
       return *static_cast<fs_thread_payload *>(this->payload_);
    };
 
+   const fs_thread_payload &fs_payload() const {
+      assert(stage == MESA_SHADER_FRAGMENT);
+      return *static_cast<const fs_thread_payload *>(this->payload_);
+   };
+
    cs_thread_payload &cs_payload() {
       assert(gl_shader_stage_uses_workgroup(stage));
       return *static_cast<cs_thread_payload *>(this->payload_);
@@ -503,6 +508,8 @@ public:
                         const char *pass_name,
                         int iteration, int pass_num) const;
 };
+
+void brw_print_swsb(FILE *f, const struct intel_device_info *devinfo, const tgl_swsb swsb);
 
 /**
  * Return the flag register used in fragment shaders to keep track of live

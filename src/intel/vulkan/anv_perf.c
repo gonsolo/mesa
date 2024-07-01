@@ -72,6 +72,7 @@ anv_physical_device_init_perf(struct anv_physical_device *device, int fd)
       case INTEL_PERF_QUERY_FIELD_TYPE_SRM_OA_A:
       case INTEL_PERF_QUERY_FIELD_TYPE_SRM_OA_B:
       case INTEL_PERF_QUERY_FIELD_TYPE_SRM_OA_C:
+      case INTEL_PERF_QUERY_FIELD_TYPE_SRM_OA_PEC:
          device->n_perf_query_commands += field->size / 4;
          break;
       default:
@@ -205,7 +206,7 @@ VkResult anv_ReleasePerformanceConfigurationINTEL(
    ANV_FROM_HANDLE(anv_performance_configuration_intel, config, _configuration);
 
    if (!INTEL_DEBUG(DEBUG_NO_OACONFIG))
-      intel_ioctl(device->fd, DRM_IOCTL_I915_PERF_REMOVE_CONFIG, &config->config_id);
+      intel_perf_remove_configuration(device->physical->perf, device->fd, config->config_id);
 
    ralloc_free(config->register_config);
 
@@ -228,8 +229,9 @@ VkResult anv_QueueSetPerformanceConfigurationINTEL(
          if (device->perf_fd < 0)
             return VK_ERROR_INITIALIZATION_FAILED;
       } else {
-         int ret = intel_ioctl(device->perf_fd, I915_PERF_IOCTL_CONFIG,
-                               (void *)(uintptr_t) config->config_id);
+         int ret = intel_perf_stream_set_metrics_id(device->physical->perf,
+                                                    device->perf_fd,
+                                                    config->config_id);
          if (ret < 0)
             return vk_device_set_lost(&device->vk, "i915-perf config failed: %m");
       }

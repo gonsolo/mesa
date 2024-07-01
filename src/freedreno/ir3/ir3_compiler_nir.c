@@ -277,13 +277,18 @@ create_cov(struct ir3_context *ctx, struct ir3_instruction *src,
 
    if (op == nir_op_f2f16_rtne) {
       cov->cat1.round = ROUND_EVEN;
-   } else if (op == nir_op_f2f16) {
+   } else if (op == nir_op_f2f16_rtz) {
+      cov->cat1.round = ROUND_ZERO;
+   } else if (dst_type == TYPE_F16 || dst_type == TYPE_F32) {
       unsigned execution_mode = ctx->s->info.float_controls_execution_mode;
+      nir_alu_type type =
+         dst_type == TYPE_F16 ? nir_type_float16 : nir_type_float32;
       nir_rounding_mode rounding_mode =
-         nir_get_rounding_mode_from_float_controls(execution_mode,
-                                                   nir_type_float16);
+         nir_get_rounding_mode_from_float_controls(execution_mode, type);
       if (rounding_mode == nir_rounding_mode_rtne)
          cov->cat1.round = ROUND_EVEN;
+      else if (rounding_mode == nir_rounding_mode_rtz)
+         cov->cat1.round = ROUND_ZERO;
    }
 
    return cov;
@@ -946,6 +951,12 @@ emit_intrinsic_copy_ubo_to_uniform(struct ir3_context *ctx,
 
    ir3_instr_set_address(ldc, addr1);
 
+   /* The assembler isn't aware of what value a1.x has, so make sure that
+    * constlen includes the ldc.k here.
+    */
+   ctx->so->constlen =
+      MAX2(ctx->so->constlen, DIV_ROUND_UP(base + size * 4, 4));
+
    array_insert(b, b->keeps, ldc);
 }
 
@@ -978,6 +989,12 @@ emit_intrinsic_copy_global_to_uniform(struct ir3_context *ctx,
       ir3_instr_set_address(ldg, a1);
       ldg->flags |= IR3_INSTR_A1EN;
    }
+
+   /* The assembler isn't aware of what value a1.x has, so make sure that
+    * constlen includes the ldg.k here.
+    */
+   ctx->so->constlen =
+      MAX2(ctx->so->constlen, DIV_ROUND_UP(dst + size * 4, 4));
 
    array_insert(b, b->keeps, ldg);
 }
@@ -2697,6 +2714,10 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
    }
    case nir_intrinsic_elect:
       dst[0] = ir3_ELECT_MACRO(ctx->block);
+      dst[0]->flags |= IR3_INSTR_NEEDS_HELPERS;
+      break;
+   case nir_intrinsic_elect_any_ir3:
+      dst[0] = ir3_ELECT_MACRO(ctx->block);
       break;
    case nir_intrinsic_preamble_start_ir3:
       dst[0] = ir3_SHPS_MACRO(ctx->block);
@@ -2853,6 +2874,11 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
          ir3_instr_set_address(stc, a1);
          stc->flags |= IR3_INSTR_A1EN;
       }
+      /* The assembler isn't aware of what value a1.x has, so make sure that
+       * constlen includes the stc here.
+       */
+      ctx->so->constlen =
+         MAX2(ctx->so->constlen, DIV_ROUND_UP(dst + components, 4));
       array_insert(b, b->keeps, stc);
       break;
    }
@@ -3965,6 +3991,7 @@ instr_can_be_predicated(nir_instr *instr)
       case nir_intrinsic_brcst_active_ir3:
       case nir_intrinsic_ballot:
       case nir_intrinsic_elect:
+      case nir_intrinsic_elect_any_ir3:
       case nir_intrinsic_read_invocation_cond_ir3:
       case nir_intrinsic_demote:
       case nir_intrinsic_demote_if:
@@ -4104,7 +4131,8 @@ emit_if(struct ir3_context *ctx, nir_if *nif)
       ir3_BALL(ctx->block, pred, IR3_REG_PREDICATE);
    } else if (condition->opc == OPC_ELECT_MACRO &&
               condition->block == ctx->block) {
-      ir3_GETONE(ctx->block);
+      struct ir3_instruction *branch = ir3_GETONE(ctx->block);
+      branch->flags |= condition->flags & IR3_INSTR_NEEDS_HELPERS;
    } else if (condition->opc == OPC_SHPS_MACRO &&
               condition->block == ctx->block) {
       /* TODO: technically this only works if the block is the only user of the

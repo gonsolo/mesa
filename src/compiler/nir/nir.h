@@ -4025,6 +4025,12 @@ typedef struct nir_shader_compiler_options {
    /* Backend supports fused comapre against zero and csel */
    bool has_fused_comp_and_csel;
 
+   /* Backend supports fneo, fequ, fltu, fgeu. */
+   bool has_fneo_fcmpu;
+
+   /* Backend supports ford and funord. */
+   bool has_ford_funord;
+
    /** Backend supports fsub, if not set fsub will automatically be lowered to
     * fadd(x, fneg(y)). If true, driver should call nir_opt_algebraic_late(). */
    bool has_fsub;
@@ -4866,6 +4872,13 @@ void nir_def_rewrite_uses(nir_def *def, nir_def *new_ssa);
 void nir_def_rewrite_uses_src(nir_def *def, nir_src new_src);
 void nir_def_rewrite_uses_after(nir_def *def, nir_def *new_ssa,
                                 nir_instr *after_me);
+
+static inline void
+nir_def_replace(nir_def *def, nir_def *new_ssa)
+{
+   nir_def_rewrite_uses(def, new_ssa);
+   nir_instr_remove(def->parent_instr);
+}
 
 nir_component_mask_t nir_src_components_read(const nir_src *src);
 nir_component_mask_t nir_def_components_read(const nir_def *def);

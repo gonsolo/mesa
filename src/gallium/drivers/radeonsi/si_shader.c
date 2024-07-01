@@ -2104,9 +2104,7 @@ static bool lower_ps_load_color_intrinsic(nir_builder *b, nir_instr *instr, void
    unsigned index = intrin->intrinsic == nir_intrinsic_load_color0 ? 0 : 1;
    assert(colors[index]);
 
-   nir_def_rewrite_uses(&intrin->def, colors[index]);
-
-   nir_instr_remove(&intrin->instr);
+   nir_def_replace(&intrin->def, colors[index]);
    return true;
 }
 
@@ -3091,14 +3089,13 @@ si_get_shader_part(struct si_screen *sscreen, struct si_shader_part **list,
    result = CALLOC_STRUCT(si_shader_part);
    result->key = *key;
 
-   ASSERTED bool use_aco = sscreen->use_aco ||
-                           (stage == MESA_SHADER_FRAGMENT &&
-                            ((prolog && key->ps_prolog.use_aco) ||
-                             (!prolog && key->ps_epilog.use_aco)));
-
    bool ok =
 #if AMD_LLVM_AVAILABLE
-      !use_aco ? si_llvm_build_shader_part(sscreen, stage, prolog, compiler, debug, name, result) :
+      !(sscreen->use_aco ||
+        (stage == MESA_SHADER_FRAGMENT &&
+         ((prolog && key->ps_prolog.use_aco) ||
+          (!prolog && key->ps_epilog.use_aco)))) ?
+      si_llvm_build_shader_part(sscreen, stage, prolog, compiler, debug, name, result) :
 #endif
       si_aco_build_shader_part(sscreen, stage, prolog, debug, name, result);
 
