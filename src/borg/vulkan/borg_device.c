@@ -9,6 +9,8 @@
 #include "borg_physical_device.h"
 #include "borg_shader.h"
 
+#include "borg_ws_device.h"
+
 #include "vulkan/runtime/vk_object.h"
 #include "vulkan/wsi/wsi_common.h"
 
@@ -23,6 +25,8 @@ borg_CreateDevice(VkPhysicalDevice physicalDevice,
                  const VkAllocationCallbacks *pAllocator,
                  VkDevice *pDevice)
 {
+   puts("Mesa Borg: borg_CreateDevice.");
+
    VK_FROM_HANDLE(borg_physical_device, pdev, physicalDevice);
    struct borg_device *dev;
 
@@ -51,6 +55,8 @@ borg_CreateDevice(VkPhysicalDevice physicalDevice,
                          "Failed to get DRM device: %m");
       return result;
    }
+
+   dev->ws_dev = borg_ws_device_new(drm_device);
 
    dev->vk.command_buffer_ops = &borg_cmd_buffer_ops;
 
