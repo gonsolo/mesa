@@ -21,12 +21,15 @@ struct drm_borg_gem_info {
 
 struct drm_borg_gem_new {
         struct drm_borg_gem_info info;
-};   
+};
 
 #define DRM_BORG_GEM_NEW            0x40
+
+#define DRM_IOCTL_BORG_GEM_NEW            DRM_IOWR(DRM_COMMAND_BASE + DRM_BORG_GEM_NEW, struct drm_borg_gem_new)
 
 #if defined(__cplusplus)
 }
 #endif
 
 #endif
+
