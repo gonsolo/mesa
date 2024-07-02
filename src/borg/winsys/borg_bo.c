@@ -46,9 +46,13 @@ struct borg_ws_bo *borg_ws_bo_new(struct borg_ws_device *dev,
 
 void *borg_ws_bo_map(struct borg_ws_bo *bo)
 {
+        puts("Mesa Borg: borg_ws_bo_map.");
+
         int prot = PROT_READ | PROT_WRITE;
         int map_flags = MAP_SHARED;
 
+        printf("Mesa Borg: Before mmap. bo: %p, size: %li, dev: %p, fd: %i\n",
+                bo, bo->size, bo->dev, bo->dev->fd);
         void *res = mmap(NULL, bo->size, prot, map_flags,
                       bo->dev->fd, 0);
         if (res == MAP_FAILED)
