@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 extern crate bak_bindings;
+
+// On RISCV64 qemu this has to be used, don't know why
+//use api::bak_bindings::*;
 use bak_bindings::*;
 
 #[repr(C)]
