@@ -40,9 +40,6 @@ borg_AllocateMemory(VkDevice device,
           goto fail_alloc;
    }
 
-   //mem->todo_bo_size = pAllocateInfo->allocationSize;
-   //mem->todo_bo_mem = calloc(1, mem->todo_bo_size);
-
    *pMem = borg_device_memory_to_handle(mem);
 
    return VK_SUCCESS;
@@ -80,9 +77,29 @@ borg_MapMemory2KHR(VkDevice device,
    VK_FROM_HANDLE(borg_device, dev, device);
    VK_FROM_HANDLE(borg_device_memory, mem, pMemoryMapInfo->memory);
 
-   printf("  memory size: %li\n", mem->bo->size);
-   off_t offset = 0;
-   //mem->map = mem->todo_bo_mem;
+   if (mem == NULL) {
+      *ppData = NULL;
+      return VK_SUCCESS;
+   }
+
+   const VkDeviceSize offset = pMemoryMapInfo->offset;
+   const VkDeviceSize size = vk_device_memory_range(&mem->vk,
+                                                    pMemoryMapInfo->offset,
+                                                    pMemoryMapInfo->size);
+   assert(size > 0);
+   assert(offset + size <= mem->bo->size);
+
+   if (size != (size_t)size) {
+      return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
+                       "requested size 0x%"PRIx64" does not fit in %u bits",
+                       size, (unsigned)(sizeof(size_t) * 8));
+   }
+   if (mem->map != NULL) {
+      return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
+                       "Memory object already mapped.");
+   }
+
+
    mem->map = borg_ws_bo_map(mem->bo);
    if (mem->map == NULL) {
      return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,

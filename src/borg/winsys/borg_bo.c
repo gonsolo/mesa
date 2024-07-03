@@ -10,6 +10,8 @@ struct borg_ws_bo * borg_ws_bo_new_locked(struct borg_ws_device *dev,
 
         struct drm_borg_gem_new req = {};
 
+        printf("  size: %li\n", size);
+
         req.info.size = size;
 
         puts("Mesa Borg: drmCommandWriteRead");
