@@ -62,17 +62,23 @@ borg_GetDeviceBufferMemoryRequirements(
    const VkDeviceBufferMemoryRequirements *pInfo,
    VkMemoryRequirements2 *pMemoryRequirements)
 {
+   puts("borg_GetDeviceBufferMemoryRequirements");
+
    VK_FROM_HANDLE(borg_device, dev, device);
    struct borg_physical_device *pdev = borg_device_physical(dev);
 
    const uint32_t alignment = 4;
    //const uint32_t unused = 0;
 
+   printf("  pInfo->pCreateInfo->size: %li\n", pInfo->pCreateInfo->size);
+
    pMemoryRequirements->memoryRequirements = (VkMemoryRequirements) {
       .size = align64(pInfo->pCreateInfo->size, alignment),
       .alignment = alignment,
       .memoryTypeBits = BITFIELD_MASK(pdev->mem_type_count),
    };
+
+   printf("  pMemoryRequirements->memoryRequirements.size: %li\n", pMemoryRequirements->memoryRequirements.size);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
