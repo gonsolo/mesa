@@ -80,6 +80,7 @@ borg_MapMemory2KHR(VkDevice device,
    VK_FROM_HANDLE(borg_device, dev, device);
    VK_FROM_HANDLE(borg_device_memory, mem, pMemoryMapInfo->memory);
 
+   printf("  memory size: %li\n", mem->bo->size);
    off_t offset = 0;
    //mem->map = mem->todo_bo_mem;
    mem->map = borg_ws_bo_map(mem->bo);
