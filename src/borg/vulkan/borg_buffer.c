@@ -7,6 +7,7 @@
 #include "borg_device.h"
 #include "borg_entrypoints.h"
 #include "borg_physical_device.h"
+#include "borg_private.h"
 #include "vk_log.h"
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -18,12 +19,25 @@ borg_CreateBuffer(VkDevice device,
    VK_FROM_HANDLE(borg_device, dev, device);
    struct borg_buffer *buffer;
 
+   puts("borg_CreateBuffer");
+   printf("pCreateInfo->size: %li\n", pCreateInfo->size);
+
+   if (pCreateInfo->size > BORG_MAX_BUFFER_SIZE) {
+      puts("size > max buffer size");
+      return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+   }
+
    buffer = vk_buffer_create(&dev->vk, pCreateInfo, pAllocator,
                              sizeof(*buffer));
-   if (!buffer)
+   if (!buffer) {
+      puts("no buffer");
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+   printf("buffer->vk.size: %li\n", buffer->vk.size);
 
    *pBuffer = borg_buffer_to_handle(buffer);
+
+   puts("borg_CreateBuffer: Success.");
 
    return VK_SUCCESS;
 }
