@@ -9,4 +9,8 @@
 #include "bak.h"
 #include "nir.h"
 
+struct bak_compiler {
+        struct nir_shader_compiler_options nir_options;
+};
+
 #endif

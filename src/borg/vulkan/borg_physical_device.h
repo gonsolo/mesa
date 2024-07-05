@@ -26,6 +26,8 @@ struct borg_memory_heap {
    uint64_t (*available)(struct borg_physical_device *pdev);
 };
 
+struct bak_compiler;
+
 struct borg_physical_device {
    struct vk_physical_device vk;
    dev_t render_dev;
@@ -40,6 +42,8 @@ struct borg_physical_device {
 
    struct vk_sync_type syncobj_sync_type;
    const struct vk_sync_type *sync_types[2];
+
+   struct bak_compiler* bak;
 };
 
 VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,

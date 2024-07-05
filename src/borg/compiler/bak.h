@@ -7,6 +7,8 @@
 
 #include "nir.h"
 
+struct bak_compiler;
+
 struct bak_shader_bin {
         const void *code;
         uint32_t code_size;
@@ -14,5 +16,10 @@ struct bak_shader_bin {
 
 struct bak_shader_bin *
 bak_compile_shader(nir_shader *nir);
+
+const struct nir_shader_compiler_options *
+bak_nir_options(const struct bak_compiler *bak);
+
+struct bak_compiler *bak_compiler_create();
 
 #endif

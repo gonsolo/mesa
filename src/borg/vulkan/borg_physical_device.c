@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "bak.h"
 #include "borg_entrypoints.h"
 #include "borg_instance.h"
 #include "borg_physical_device.h"
@@ -150,6 +151,12 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
                                       &dispatch_table
 				    );
 
+   pdev->bak = bak_compiler_create();
+   if (pdev->bak == NULL) {
+      result = vk_error(instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+      goto fail_init;
+   }
+
    pdev->mem_heap_count = 1;
    pdev->mem_heaps[0] = (struct borg_memory_heap) {
       .size = 256 * 1024 * 1024,
@@ -193,6 +200,9 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
    pdev->render_dev = render_dev;
 
    *pdev_out = &pdev->vk;
+
+fail_init:
+   vk_physical_device_finish(&pdev->vk);
 
    return result;
 }

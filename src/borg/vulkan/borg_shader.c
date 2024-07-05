@@ -7,6 +7,7 @@
 #include "borg_cmd_buffer.h"
 #include "borg_device.h"
 #include "borg_entrypoints.h"
+#include "borg_physical_device.h"
 #include "borg_shader.h"
 
 #include "vk_shader.h"
@@ -25,8 +26,9 @@ borg_get_nir_options(struct vk_physical_device *vk_pdev,
                      gl_shader_stage stage,
                      UNUSED const struct vk_pipeline_robustness_state *rs)
 {
-   // TODO
-   return NULL;
+        const struct borg_physical_device *pdev = container_of(vk_pdev, struct borg_physical_device, vk);
+
+        return bak_nir_options(pdev->bak);
 }
 
 static struct spirv_to_nir_options
