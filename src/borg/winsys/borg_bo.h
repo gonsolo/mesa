@@ -18,7 +18,7 @@ extern "C" {
 
 struct borg_ws_bo {
         uint64_t size;
-        //uint64_t map_handle;
+        uint64_t map_handle;
         struct borg_ws_device *dev;
         uint32_t handle;
         atomic_uint_fast32_t refcnt;

@@ -25,7 +25,7 @@ struct borg_ws_bo * borg_ws_bo_new_locked(struct borg_ws_device *dev,
         struct borg_ws_bo *bo = CALLOC_STRUCT(borg_ws_bo);
         bo->size = size;
         bo->handle = req.info.handle;
-        //bo->map_handle = req.info.map_handle;
+        bo->map_handle = req.info.map_handle;
         bo->dev = dev;
         bo->refcnt = 1;
 
@@ -56,9 +56,11 @@ void *borg_ws_bo_map(struct borg_ws_bo *bo)
         printf("Mesa Borg: Before mmap. bo: %p, size: %li, dev: %p, fd: %i\n",
                 bo, bo->size, bo->dev, bo->dev->fd);
         void *res = mmap(NULL, bo->size, prot, map_flags,
-                      bo->dev->fd, 0);
-        if (res == MAP_FAILED)
+                      bo->dev->fd, bo->map_handle);
+        if (res == MAP_FAILED) {
+                puts("Mesa Borg: mmap failed.");
                 return NULL;
+        }
 
         return res;
 }
