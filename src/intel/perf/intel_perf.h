@@ -29,12 +29,6 @@
 #include <stdint.h>
 #include <string.h>
 
-#if defined(MAJOR_IN_SYSMACROS)
-#include <sys/sysmacros.h>
-#elif defined(MAJOR_IN_MKDEV)
-#include <sys/mkdev.h>
-#endif
-
 #include "compiler/glsl/list.h"
 #include "dev/intel_device_info.h"
 #include "util/bitscan.h"
@@ -130,13 +124,6 @@ struct intel_pipeline_stat {
 #define STATS_BO_SIZE               4096
 #define STATS_BO_END_OFFSET_BYTES   (STATS_BO_SIZE / 2)
 #define MAX_STAT_COUNTERS           (STATS_BO_END_OFFSET_BYTES / 8)
-
-/* Up to now all platforms uses the same sample size */
-#define INTEL_PERF_OA_SAMPLE_SIZE 256
-
-/* header + sample */
-#define INTEL_PERF_OA_HEADER_SAMPLE_SIZE (sizeof(struct intel_perf_record_header) + \
-                                          INTEL_PERF_OA_SAMPLE_SIZE)
 
 struct intel_perf_query_result {
    /**
@@ -366,6 +353,7 @@ struct intel_perf_config {
    int n_counters;
 
    struct intel_perf_query_field_layout query_layout;
+   size_t oa_sample_size;
 
    /* Variables referenced in the XML meta data for OA performance
     * counters, e.g in the normalization equations.
@@ -516,6 +504,7 @@ void intel_perf_query_result_accumulate(struct intel_perf_query_result *result,
 /** Read the timestamp value in a report.
  */
 uint64_t intel_perf_report_timestamp(const struct intel_perf_query_info *query,
+                                     const struct intel_device_info *devinfo,
                                      const uint32_t *report);
 
 /** Accumulate the delta between 2 snapshots of OA perf registers (layout

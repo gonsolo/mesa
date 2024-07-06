@@ -53,17 +53,19 @@ STATUS_COLORS = {
     "success": Fore.GREEN,
     "failed": Fore.RED,
     "canceled": Fore.MAGENTA,
+    "canceling": Fore.MAGENTA,
     "manual": "",
     "pending": "",
     "skipped": "",
 }
 
-COMPLETED_STATUSES = ["success", "failed"]
+COMPLETED_STATUSES = {"success", "failed"}
+RUNNING_STATUSES = {"created", "pending", "running"}
 
 
 def print_job_status(job, new_status=False) -> None:
     """It prints a nice, colored job status with a link to the job."""
-    if job.status == "canceled":
+    if job.status in {"canceled", "canceling"}:
         return
 
     if new_status and job.status == "created":
@@ -120,7 +122,7 @@ def monitor_pipeline(
     if stress:
         # When stress test, it is necessary to collect this information before start.
         for job in pipeline.jobs.list(all=True, include_retried=True):
-            if target_jobs_regex.fullmatch(job.name) and job.status in ["success", "failed"]:
+            if target_jobs_regex.fullmatch(job.name) and job.status in COMPLETED_STATUSES:
                 stress_status_counter[job.name][job.status] += 1
                 execution_times[job.name][job.id] = (job_duration(job), job.status, job.web_url)
 
@@ -133,7 +135,7 @@ def monitor_pipeline(
                 target_id = job.id
                 target_status = job.status
 
-                if stress and target_status in ["success", "failed"]:
+                if stress and target_status in COMPLETED_STATUSES:
                     if (
                         stress < 0
                         or sum(stress_status_counter[job.name].values()) < stress
@@ -189,13 +191,13 @@ def monitor_pipeline(
 
         if (
             {"failed"}.intersection(target_statuses.values())
-            and not set(["running", "pending"]).intersection(target_statuses.values())
+            and not RUNNING_STATUSES.intersection(target_statuses.values())
         ):
             return None, 1, execution_times
 
         if (
             {"skipped"}.intersection(target_statuses.values())
-            and not {"running", "pending"}.intersection(target_statuses.values())
+            and not RUNNING_STATUSES.intersection(target_statuses.values())
         ):
             print(
                 Fore.RED,
@@ -228,15 +230,15 @@ def enable_job(
 ) -> gitlab.v4.objects.ProjectPipelineJob:
     """enable job"""
     if (
-        (job.status in ["success", "failed"] and action_type != "retry")
+        (job.status in COMPLETED_STATUSES and action_type != "retry")
         or (job.status == "manual" and not force_manual)
-        or job.status in ["skipped", "running", "created", "pending"]
+        or job.status in {"skipped"} | RUNNING_STATUSES
     ):
         return job
 
     pjob = project.jobs.get(job.id, lazy=True)
 
-    if job.status in ["success", "failed", "canceled"]:
+    if job.status in {"success", "failed", "canceled", "canceling"}:
         new_job = pjob.retry()
         job = get_pipeline_job(pipeline, new_job["id"])
     else:
@@ -257,12 +259,7 @@ def enable_job(
 
 def cancel_job(project, job) -> None:
     """Cancel GitLab job"""
-    if job.status in [
-        "canceled",
-        "success",
-        "failed",
-        "skipped",
-    ]:
+    if job.status not in RUNNING_STATUSES:
         return
     pjob = project.jobs.get(job.id, lazy=True)
     pjob.cancel()

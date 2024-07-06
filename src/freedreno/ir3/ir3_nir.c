@@ -72,7 +72,8 @@ ir3_load_driver_ubo_indirect(nir_builder *b, unsigned components,
                              unsigned base, nir_def *offset,
                              unsigned range)
 {
-   ubo->size = MAX2(ubo->size, base + components + range * 4);
+   assert(range > 0);
+   ubo->size = MAX2(ubo->size, base + components + (range - 1) * 4);
 
    return nir_load_ubo(b, components, 32, ir3_get_driver_ubo(b, ubo),
                        nir_iadd(b, nir_imul24(b, offset, nir_imm_int(b, 16)),
@@ -97,6 +98,13 @@ ir3_nir_should_scalarize_mem(const nir_instr *instr, const void *data)
    if ((intrin->intrinsic == nir_intrinsic_load_ssbo) &&
        (nir_intrinsic_access(intrin) & ACCESS_CAN_REORDER) &&
        compiler->has_isam_ssbo && !compiler->has_isam_v) {
+      return true;
+   }
+
+   if ((intrin->intrinsic == nir_intrinsic_load_ssbo &&
+        intrin->def.bit_size == 8) ||
+       (intrin->intrinsic == nir_intrinsic_store_ssbo &&
+        intrin->src[0].ssa->bit_size == 8)) {
       return true;
    }
 

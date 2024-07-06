@@ -855,8 +855,6 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_TEXTURE_TRANSFER_MODES: {
       enum pipe_texture_transfer_mode mode = PIPE_TEXTURE_TRANSFER_BLIT;
       if (!screen->is_cpu &&
-          /* this needs substantial perf tuning */
-          screen->info.driver_props.driverID != VK_DRIVER_ID_MESA_TURNIP &&
           screen->info.have_KHR_8bit_storage &&
           screen->info.have_KHR_16bit_storage &&
           screen->info.have_KHR_shader_float16_int8)
@@ -3013,16 +3011,6 @@ init_driver_workarounds(struct zink_screen *screen)
       screen->driver_workarounds.track_renderpasses = true;
    else if (zink_debug & ZINK_DEBUG_NORP)
       screen->driver_workarounds.track_renderpasses = false;
-
-   /* these drivers can't optimize non-overlapping copy ops */
-   switch (screen->info.driver_props.driverID) {
-   case VK_DRIVER_ID_MESA_TURNIP:
-   case VK_DRIVER_ID_QUALCOMM_PROPRIETARY:
-      screen->driver_workarounds.broken_cache_semantics = true;
-      break;
-   default:
-      break;
-   }
 
    /* these drivers can successfully do INVALID <-> LINEAR dri3 modifier swap */
    switch (screen->info.driver_props.driverID) {

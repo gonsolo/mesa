@@ -38,7 +38,7 @@
 #include "tu_dynamic_rendering.h"
 #include "tu_image.h"
 #include "tu_pass.h"
-#include "tu_query.h"
+#include "tu_query_pool.h"
 #include "tu_rmv.h"
 #include "tu_tracepoints.h"
 #include "tu_wsi.h"
@@ -142,6 +142,7 @@ get_device_extensions(const struct tu_physical_device *device,
                       struct vk_device_extension_table *ext)
 {
    *ext = (struct vk_device_extension_table) { .table = {
+      .KHR_8bit_storage = device->info->a7xx.storage_8bit,
       .KHR_16bit_storage = device->info->a6xx.storage_16bit,
       .KHR_bind_memory2 = true,
       .KHR_buffer_device_address = true,
@@ -241,7 +242,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_extended_dynamic_state3 = true,
       .EXT_external_memory_dma_buf = true,
       .EXT_filter_cubic = device->info->a6xx.has_tex_filter_cubic,
-      .EXT_fragment_density_map = !device->info->a7xx.load_shader_consts_via_preamble,
+      .EXT_fragment_density_map = true,
       .EXT_global_priority = true,
       .EXT_global_priority_query = true,
       .EXT_graphics_pipeline_library = true,
@@ -379,7 +380,7 @@ tu_get_features(struct tu_physical_device *pdevice,
    /* Vulkan 1.2 */
    features->samplerMirrorClampToEdge            = true;
    features->drawIndirectCount                   = true;
-   features->storageBuffer8BitAccess             = false;
+   features->storageBuffer8BitAccess             = pdevice->info->a7xx.storage_8bit;
    features->uniformAndStorageBuffer8BitAccess   = false;
    features->storagePushConstant8                = false;
    features->shaderBufferInt64Atomics            = false;
@@ -1095,10 +1096,9 @@ tu_get_properties(struct tu_physical_device *pdevice,
    props->robustStorageTexelBufferDescriptorSize = A6XX_TEX_CONST_DWORDS * 4;
    props->uniformBufferDescriptorSize = A6XX_TEX_CONST_DWORDS * 4;
    props->robustUniformBufferDescriptorSize = A6XX_TEX_CONST_DWORDS * 4;
-   props->storageBufferDescriptorSize =
-      pdevice->info->a6xx.storage_16bit ?
-      2 * A6XX_TEX_CONST_DWORDS * 4 :
-      A6XX_TEX_CONST_DWORDS * 4;
+   props->storageBufferDescriptorSize = A6XX_TEX_CONST_DWORDS * 4 * (1 +
+      COND(pdevice->info->a6xx.storage_16bit && !pdevice->info->a6xx.has_isam_v, 1) +
+      COND(pdevice->info->a7xx.storage_8bit, 1));
    props->robustStorageBufferDescriptorSize =
       props->storageBufferDescriptorSize;
    props->inputAttachmentDescriptorSize = TU_DEBUG(DYNAMIC) ?
@@ -1309,6 +1309,9 @@ tu_physical_device_finish(struct tu_physical_device *device)
    close(device->local_fd);
    if (device->master_fd != -1)
       close(device->master_fd);
+
+   if (device->kgsl_dma_fd != -1)
+      close(device->kgsl_dma_fd);
 
    disk_cache_destroy(device->vk.disk_cache);
    vk_free(&device->instance->vk.alloc, (void *)device->name);
@@ -2303,6 +2306,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
          .bindless_fb_read_descriptor = -1,
          .bindless_fb_read_slot = -1,
          .storage_16bit = physical_device->info->a6xx.storage_16bit,
+         .storage_8bit = physical_device->info->a7xx.storage_8bit,
          .shared_push_consts = !TU_DEBUG(PUSH_CONSTS_PER_STAGE),
       };
       device->compiler = ir3_compiler_create(
@@ -2834,6 +2838,14 @@ tu_AllocateMemory(VkDevice _device,
            VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT)) {
          alloc_flags |= TU_BO_ALLOC_REPLAYABLE;
       }
+
+      const VkExportMemoryAllocateInfo *export_info =
+         vk_find_struct_const(pAllocateInfo->pNext, EXPORT_MEMORY_ALLOCATE_INFO);
+      if (export_info && (export_info->handleTypes &
+                          (VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT |
+                           VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT)))
+         alloc_flags |= TU_BO_ALLOC_SHAREABLE;
+
 
       char name[64] = "vkAllocateMemory()";
       if (device->bo_sizes)

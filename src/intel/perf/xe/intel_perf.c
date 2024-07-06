@@ -18,15 +18,27 @@
 
 uint64_t xe_perf_get_oa_format(struct intel_perf_config *perf)
 {
-   uint64_t fmt = FIELD_PREP_ULL(DRM_XE_OA_FORMAT_MASK_FMT_TYPE, DRM_XE_OA_FMT_TYPE_OAG);
+   uint64_t fmt;
 
-   /* same as I915_OA_FORMAT_A24u40_A14u32_B8_C8 and
-    * I915_OA_FORMAT_A32u40_A4u32_B8_C8 returned for gfx 125+ and gfx 120
-    * respectively.
-    */
-   fmt |= FIELD_PREP_ULL(DRM_XE_OA_FORMAT_MASK_COUNTER_SEL, 5);
-   fmt |= FIELD_PREP_ULL(DRM_XE_OA_FORMAT_MASK_COUNTER_SIZE, 0);
-   fmt |= FIELD_PREP_ULL(DRM_XE_OA_FORMAT_MASK_BC_REPORT, 0);
+   if (perf->devinfo->verx10 >= 200) {
+      /* BSpec: 60942
+       * PEC64u64
+       */
+      fmt = FIELD_PREP_ULL(DRM_XE_OA_FORMAT_MASK_FMT_TYPE, DRM_XE_OA_FMT_TYPE_PEC);
+      fmt |= FIELD_PREP_ULL(DRM_XE_OA_FORMAT_MASK_COUNTER_SEL, 1);
+      fmt |= FIELD_PREP_ULL(DRM_XE_OA_FORMAT_MASK_COUNTER_SIZE, 1);
+      fmt |= FIELD_PREP_ULL(DRM_XE_OA_FORMAT_MASK_BC_REPORT, 0);
+   } else {
+      /* BSpec: 52198
+       * same as I915_OA_FORMAT_A24u40_A14u32_B8_C8 and
+       * I915_OA_FORMAT_A32u40_A4u32_B8_C8 returned for gfx 125+ and gfx 120
+       * respectively.
+       */
+      fmt = FIELD_PREP_ULL(DRM_XE_OA_FORMAT_MASK_FMT_TYPE, DRM_XE_OA_FMT_TYPE_OAG);
+      fmt |= FIELD_PREP_ULL(DRM_XE_OA_FORMAT_MASK_COUNTER_SEL, 5);
+      fmt |= FIELD_PREP_ULL(DRM_XE_OA_FORMAT_MASK_COUNTER_SIZE, 0);
+      fmt |= FIELD_PREP_ULL(DRM_XE_OA_FORMAT_MASK_BC_REPORT, 0);
+   }
 
    return fmt;
 }
@@ -91,7 +103,7 @@ xe_add_config(struct intel_perf_config *perf, int fd,
    memcpy(regs, config->flex_regs, config->n_flex_regs * sizeof(uint64_t));
 
    ret = intel_ioctl(fd, DRM_IOCTL_XE_PERF, &perf_param);
-   free(regs);
+   free((void*)(uintptr_t)xe_config.regs_ptr);
    return ret > 0 ? ret : 0;
 }
 
@@ -211,15 +223,17 @@ xe_perf_stream_read_error(int perf_stream_fd, uint8_t *buffer, size_t buffer_len
 }
 
 int
-xe_perf_stream_read_samples(int perf_stream_fd, uint8_t *buffer,
-                            size_t buffer_len)
+xe_perf_stream_read_samples(struct intel_perf_config *perf_config, int perf_stream_fd,
+                            uint8_t *buffer, size_t buffer_len)
 {
-   uint32_t num_samples = buffer_len / INTEL_PERF_OA_HEADER_SAMPLE_SIZE;
-   const size_t max_bytes_read = num_samples * INTEL_PERF_OA_SAMPLE_SIZE;
+   const size_t sample_size = perf_config->oa_sample_size;
+   const size_t sample_header_size = sample_size + sizeof(struct intel_perf_record_header);
+   uint32_t num_samples = buffer_len / sample_header_size;
+   const size_t max_bytes_read = num_samples * sample_size;
    uint8_t *offset, *offset_samples;
    int len, i;
 
-   if (buffer_len < INTEL_PERF_OA_HEADER_SAMPLE_SIZE)
+   if (buffer_len < sample_header_size)
       return -ENOSPC;
 
    do {
@@ -233,7 +247,7 @@ xe_perf_stream_read_samples(int perf_stream_fd, uint8_t *buffer,
       return len < 0 ? -errno : 0;
    }
 
-   num_samples = len / INTEL_PERF_OA_SAMPLE_SIZE;
+   num_samples = len / sample_size;
    offset = buffer;
    offset_samples = buffer + (buffer_len - len);
    /* move all samples to the end of buffer */
@@ -246,12 +260,12 @@ xe_perf_stream_read_samples(int perf_stream_fd, uint8_t *buffer,
       /* TODO: also append REPORT_LOST and BUFFER_LOST */
       header->type = INTEL_PERF_RECORD_TYPE_SAMPLE;
       header->pad = 0;
-      header->size = INTEL_PERF_OA_HEADER_SAMPLE_SIZE;
+      header->size = sample_header_size;
       offset += sizeof(*header);
 
-      memmove(offset, offset_samples, INTEL_PERF_OA_SAMPLE_SIZE);
-      offset += INTEL_PERF_OA_SAMPLE_SIZE;
-      offset_samples += INTEL_PERF_OA_SAMPLE_SIZE;
+      memmove(offset, offset_samples, sample_size);
+      offset += sample_size;
+      offset_samples += sample_size;
    }
 
    return offset - buffer;

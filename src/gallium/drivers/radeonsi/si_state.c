@@ -2245,6 +2245,40 @@ static bool si_is_zs_format_supported(enum pipe_format format)
    return ac_is_zs_format_supported(format);
 }
 
+/* GFX6-8:
+ * - no integer format support
+ * - no depth format support (depth formats without shadow samplers are supported,
+ *   but that's not enough)
+ * - only single-channel formats are supported
+ * - limitations of early chips (GFX6 only): no R9G9B9E5 support
+ *
+ * GFX9+:
+ * - all formats are supported
+ */
+static bool si_is_reduction_mode_supported(struct pipe_screen *screen, enum pipe_format format)
+{
+   struct si_screen *sscreen = (struct si_screen *)screen;
+   const struct util_format_description *desc = util_format_description(format);
+
+   if (sscreen->info.gfx_level <= GFX8) {
+      /* old HW limitations */
+      if (sscreen->info.gfx_level == GFX6 &&
+          format == PIPE_FORMAT_R9G9B9E5_FLOAT)
+         return false;
+
+      /* reject if more than one channel */
+      if (desc->nr_channels > 1)
+         return false;
+
+      /* no integer or depth format support */
+      if (util_format_is_pure_integer(format) ||
+          util_format_has_depth(desc))
+         return false;
+   }
+
+   return true;
+}
+
 static bool si_is_format_supported(struct pipe_screen *screen, enum pipe_format format,
                                    enum pipe_texture_target target, unsigned sample_count,
                                    unsigned storage_sample_count, unsigned usage)
@@ -2342,6 +2376,11 @@ static bool si_is_format_supported(struct pipe_screen *screen, enum pipe_format 
    if ((usage & PIPE_BIND_LINEAR) && !util_format_is_compressed(format) &&
        !(usage & PIPE_BIND_DEPTH_STENCIL))
       retval |= PIPE_BIND_LINEAR;
+
+   if ((usage & PIPE_BIND_SAMPLER_REDUCTION_MINMAX) &&
+       screen->get_param(screen, PIPE_CAP_SAMPLER_REDUCTION_MINMAX) &&
+       si_is_reduction_mode_supported(screen, format))
+      retval |= PIPE_BIND_SAMPLER_REDUCTION_MINMAX;
 
    return retval == usage;
 }
@@ -4331,6 +4370,21 @@ static inline unsigned si_tex_aniso_filter(unsigned filter)
    return 4;
 }
 
+static unsigned si_tex_filter_mode(unsigned mode)
+{
+   switch (mode) {
+   case PIPE_TEX_REDUCTION_WEIGHTED_AVERAGE:
+      return V_008F30_SQ_IMG_FILTER_MODE_BLEND;
+   case PIPE_TEX_REDUCTION_MIN:
+      return V_008F30_SQ_IMG_FILTER_MODE_MIN;
+   case PIPE_TEX_REDUCTION_MAX:
+      return V_008F30_SQ_IMG_FILTER_MODE_MAX;
+   default:
+      break;
+   }
+   return 0;
+}
+
 static void *si_create_sampler_state(struct pipe_context *ctx,
                                      const struct pipe_sampler_state *state)
 {
@@ -4339,6 +4393,7 @@ static void *si_create_sampler_state(struct pipe_context *ctx,
    struct si_sampler_state *rstate = CALLOC_STRUCT(si_sampler_state);
    unsigned max_aniso = sscreen->force_aniso >= 0 ? sscreen->force_aniso : state->max_anisotropy;
    unsigned max_aniso_ratio = si_tex_aniso_filter(max_aniso);
+   unsigned filter_mode = si_tex_filter_mode(state->reduction_mode);
    bool trunc_coord = (state->min_img_filter == PIPE_TEX_FILTER_NEAREST &&
                        state->mag_img_filter == PIPE_TEX_FILTER_NEAREST &&
                        state->compare_mode == PIPE_TEX_COMPARE_NONE) ||
@@ -4379,6 +4434,7 @@ static void *si_create_sampler_state(struct pipe_context *ctx,
       .unnormalized_coords = state->unnormalized_coords,
       .cube_wrap = state->seamless_cube_map,
       .trunc_coord = trunc_coord,
+      .filter_mode = filter_mode,
       .mag_filter = si_tex_filter(state->mag_img_filter, max_aniso),
       .min_filter = si_tex_filter(state->min_img_filter, max_aniso),
       .mip_filter = si_tex_mipfilter(state->min_mip_filter),

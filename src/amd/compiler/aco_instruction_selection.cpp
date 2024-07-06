@@ -3298,6 +3298,8 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
          src0 = emit_extract_vector(ctx, src0, 0, v2b);
          src1 = emit_extract_vector(ctx, src1, 0, v2b);
          bld.pseudo(aco_opcode::p_create_vector, Definition(dst), src0, src1);
+      } else if (ctx->program->gfx_level >= GFX9) {
+         bld.sop2(aco_opcode::s_pack_ll_b32_b16, Definition(dst), src0, src1);
       } else {
          src0 = bld.sop2(aco_opcode::s_and_b32, bld.def(s1), bld.def(s1, scc), src0,
                          Operand::c32(0xFFFFu));
@@ -5858,8 +5860,8 @@ visit_load_constant(isel_context* ctx, nir_intrinsic_instr* instr)
                           Operand::c32(MIN2(base + range, ctx->shader->constant_data_size)),
                           Operand::c32(desc[3]));
    unsigned size = instr->def.bit_size / 8;
-   // TODO: get alignment information for subdword constants
-   load_buffer(ctx, instr->num_components, size, dst, rsrc, offset, size, 0);
+   load_buffer(ctx, instr->num_components, size, dst, rsrc, offset, nir_intrinsic_align_mul(instr),
+               nir_intrinsic_align_offset(instr));
 }
 
 /* Packs multiple Temps of different sizes in to a vector of v1 Temps.
