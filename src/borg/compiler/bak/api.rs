@@ -1,30 +1,39 @@
 // Copyright © 2024 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
+use crate::from_nir::*;
+
 extern crate bak_bindings;
 use bak_bindings::*;
 
 #[repr(C)]
 struct ShaderBin {
+    code: Vec<u32>
 }
 
 impl ShaderBin {
-    pub fn new() -> ShaderBin {
+    pub fn new(code: Vec<u32>) -> ShaderBin {
 
         // TODO
 
-        ShaderBin {}
+        ShaderBin {
+            code: code
+        }
     }
 }
 
 #[no_mangle]
 pub extern "C" fn bak_compile_shader(
-    _nir: *mut nir_shader
+    nir: *mut nir_shader
 ) -> *mut bak_shader_bin {
 
+    let nir = unsafe { &*nir };
+
+    let s = bak_shader_from_nir(nir);
+    let code = s.encode();
     // TODO
 
-    let bin = Box::new(ShaderBin::new());
+    let bin = Box::new(ShaderBin::new(code));
     Box::into_raw(bin) as *mut bak_shader_bin
 }
 
