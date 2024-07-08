@@ -20,6 +20,7 @@ impl<'a> ShaderFromNir<'a> {
 
     pub fn parse_function_impl(&mut self, nfi: &nir_function_impl) -> Function {
 
+        println!("Parsing function!");
         let mut f = Function {
             // TODO
         };
