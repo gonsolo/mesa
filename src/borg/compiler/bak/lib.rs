@@ -5,3 +5,4 @@ mod api;
 mod encode;
 mod from_nir;
 mod ir;
+mod nir;
