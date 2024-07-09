@@ -24,7 +24,24 @@ impl<'a> ShaderFromNir<'a> {
     ) {
         println!("ShaderFromNir::parse_cf_list");
         for node in list {
-            println!("node");
+            match node.type_ {
+                nir_cf_node_block => {
+                    println!("node block");
+                    //let nb = node.as_block().unwrap();
+                    //self.parse_block(ssa_alloc, phi_map, nb);
+                }
+                nir_cf_node_if => {
+                    println!("node if");
+                    //let ni = node.as_if().unwrap();
+                    //self.parse_if(ssa_alloc, phi_map, ni);
+                }
+                nir_cf_node_loop => {
+                    println!("node loop");
+                    //let nl = node.as_loop().unwrap();
+                    //self.parse_loop(ssa_alloc, phi_map, nl);
+                }
+                _ => panic!("Invalid inner CF node type"),
+            }
         }
     }
 
