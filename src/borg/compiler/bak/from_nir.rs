@@ -6,6 +6,22 @@ use crate::nir::*;
 
 use bak_bindings::*;
 
+use std::collections::HashMap;
+
+struct PhiAllocMap<'a> {
+    alloc: &'a mut PhiAllocator,
+    map: HashMap<(u32, u8), u32>,
+}
+
+impl<'a> PhiAllocMap<'a> {
+    fn new(alloc: &'a mut PhiAllocator) -> PhiAllocMap<'a> {
+        PhiAllocMap {
+            alloc: alloc,
+            map: HashMap::new(),
+        }
+    }
+}
+
 struct ShaderFromNir<'a> {
     nir: &'a nir_shader,
 }
@@ -18,8 +34,22 @@ impl<'a> ShaderFromNir<'a> {
         }
     }
 
+    fn parse_block(
+        &mut self,
+        ssa_alloc: &mut SSAValueAllocator,
+        phi_map: &mut PhiAllocMap,
+        nb: &nir_block,
+    ) {
+        println!("ShaderFromNir::parse_block TODO");
+        // TODO
+    }
+
+
+
     fn parse_cf_list(
         &mut self,
+        ssa_alloc: &mut SSAValueAllocator,
+        phi_map: &mut PhiAllocMap,
         list: ExecListIter<nir_cf_node>,
     ) {
         println!("ShaderFromNir::parse_cf_list");
@@ -27,8 +57,8 @@ impl<'a> ShaderFromNir<'a> {
             match node.type_ {
                 nir_cf_node_block => {
                     println!("node block");
-                    //let nb = node.as_block().unwrap();
-                    //self.parse_block(ssa_alloc, phi_map, nb);
+                    let nb = node.as_block().unwrap();
+                    self.parse_block(ssa_alloc, phi_map, nb);
                 }
                 nir_cf_node_if => {
                     println!("node if");
@@ -48,7 +78,14 @@ impl<'a> ShaderFromNir<'a> {
     pub fn parse_function_impl(&mut self, nfi: &nir_function_impl) -> Function {
         println!("ShaderFromNir::parse_function_impl!");
 
-        self.parse_cf_list(nfi.iter_body());
+        let mut ssa_alloc = SSAValueAllocator::new();
+        let end_nb = nfi.end_block();
+        //self.end_block_id = end_nb.index;
+
+        let mut phi_alloc = PhiAllocator::new();
+        let mut phi_map = PhiAllocMap::new(&mut phi_alloc);
+
+        self.parse_cf_list(&mut ssa_alloc, &mut phi_map, nfi.iter_body());
 
         let mut f = Function {
             // TODO

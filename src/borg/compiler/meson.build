@@ -21,6 +21,7 @@ bak_bindings_rs = rust.bindgen(
     '--raw-line', '#![allow(non_upper_case_globals)]',
     '--allowlist-function', 'bak_.*',
     '--allowlist-function', 'nir_.*',
+    '--no-prepend-enum-name',
   ],
   dependencies : libbak_deps,
 )

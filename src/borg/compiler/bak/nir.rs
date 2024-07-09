@@ -5,6 +5,7 @@ use bak_bindings::*;
 
 use std::ffi::c_void;
 use std::marker::PhantomData;
+use std::ptr::NonNull;
 
 // From nouveau
 macro_rules! offset_of {
@@ -52,6 +53,20 @@ impl<'a, T: 'a> Iterator for ExecListIter<'a, T> {
     }
 }
 
+pub trait NirCfNode {
+    fn as_block(&self) -> Option<&nir_block>;
+}
+
+impl NirCfNode for nir_cf_node {
+    fn as_block(&self) -> Option<&nir_block> {
+        if self.type_ == nir_cf_node_block {
+            Some(unsafe { &*(self as *const nir_cf_node as *const nir_block) })
+        } else {
+            None
+        }
+    }
+}
+
 pub trait NirFunction {
     fn get_impl(&self) -> Option<&nir_function_impl>;
 }
@@ -64,11 +79,17 @@ impl NirFunction for nir_function {
 
 pub trait NirFunctionImpl {
     fn iter_body(&self) -> ExecListIter<nir_cf_node>;
+    fn end_block(&self) -> &nir_block;
 }
 
 impl NirFunctionImpl for nir_function_impl {
+
     fn iter_body(&self) -> ExecListIter<nir_cf_node> {
         ExecListIter::new(&self.body, offset_of!(nir_cf_node, node))
+    }
+
+    fn end_block(&self) -> &nir_block {
+        unsafe { NonNull::new(self.end_block).unwrap().as_ref() }
     }
 
 }
