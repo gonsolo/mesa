@@ -18,9 +18,21 @@ impl<'a> ShaderFromNir<'a> {
         }
     }
 
-    pub fn parse_function_impl(&mut self, nfi: &nir_function_impl) -> Function {
+    fn parse_cf_list(
+        &mut self,
+        list: ExecListIter<nir_cf_node>,
+    ) {
+        println!("ShaderFromNir::parse_cf_list");
+        for node in list {
+            println!("node");
+        }
+    }
 
+    pub fn parse_function_impl(&mut self, nfi: &nir_function_impl) -> Function {
         println!("ShaderFromNir::parse_function_impl!");
+
+        self.parse_cf_list(nfi.iter_body());
+
         let mut f = Function {
             // TODO
         };

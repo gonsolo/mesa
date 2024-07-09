@@ -62,6 +62,17 @@ impl NirFunction for nir_function {
     }
 }
 
+pub trait NirFunctionImpl {
+    fn iter_body(&self) -> ExecListIter<nir_cf_node>;
+}
+
+impl NirFunctionImpl for nir_function_impl {
+    fn iter_body(&self) -> ExecListIter<nir_cf_node> {
+        ExecListIter::new(&self.body, offset_of!(nir_cf_node, node))
+    }
+
+}
+
 pub trait NirShader {
     fn iter_functions(&self) -> ExecListIter<nir_function>;
 }   
