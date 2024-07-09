@@ -20,7 +20,7 @@ impl<'a> ShaderFromNir<'a> {
 
     pub fn parse_function_impl(&mut self, nfi: &nir_function_impl) -> Function {
 
-        println!("Parsing function!");
+        println!("ShaderFromNir::parse_function_impl!");
         let mut f = Function {
             // TODO
         };
@@ -29,6 +29,7 @@ impl<'a> ShaderFromNir<'a> {
 
 
     pub fn parse_shader(mut self) -> Shader {
+        println!("ShaderFromNir::parse_shader!");
         let mut functions = Vec::new();
         for nf in self.nir.iter_functions() {
             if let Some(nfi) = nf.get_impl() {
@@ -44,6 +45,7 @@ impl<'a> ShaderFromNir<'a> {
 }
 
 pub fn bak_shader_from_nir(ns: &nir_shader) -> Shader {
+    println!("bak_shader_from_nir");
     ShaderFromNir::new(ns).parse_shader()
 }
 

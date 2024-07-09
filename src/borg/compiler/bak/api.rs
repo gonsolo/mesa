@@ -27,6 +27,7 @@ pub extern "C" fn bak_compile_shader(
     nir: *mut nir_shader
 ) -> *mut bak_shader_bin {
 
+    println!("bak_compile_shader");
     let nir = unsafe { &*nir };
 
     let s = bak_shader_from_nir(nir);
@@ -56,6 +57,8 @@ fn nir_options() -> nir_shader_compiler_options {
 
 #[no_mangle]
 pub extern "C" fn bak_compiler_create() -> *mut bak_compiler {
+
+    println!("bak_compiler_create");
 
     let bak = Box::new(bak_compiler {
         nir_options: nir_options(),
