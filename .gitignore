@@ -9,3 +9,4 @@
 tags
 /.cache
 /compile_commands.json
+/rust-project.json

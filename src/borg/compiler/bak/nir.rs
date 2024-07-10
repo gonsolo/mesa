@@ -53,6 +53,16 @@ impl<'a, T: 'a> Iterator for ExecListIter<'a, T> {
     }
 }
 
+pub trait NirBlock {
+    fn iter_instr_list(&self) -> ExecListIter<nir_instr>;
+}
+
+impl NirBlock for nir_block {
+    fn iter_instr_list(&self) -> ExecListIter<nir_instr> {
+        ExecListIter::new(&self.instr_list, offset_of!(nir_instr, node))
+    }
+}
+
 pub trait NirCfNode {
     fn as_block(&self) -> Option<&nir_block>;
 }
