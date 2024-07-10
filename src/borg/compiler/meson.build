@@ -63,6 +63,7 @@ _libbak_rs = static_library(
 
 libbak_c_files = files(
   'bak.h',
+  'bak_print.c',
 )
 
 _libbak = static_library(

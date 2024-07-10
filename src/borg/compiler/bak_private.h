@@ -17,8 +17,11 @@ struct bak_compiler {
         struct nir_shader_compiler_options nir_options;
 };
 
+void bak_print_instr(const nir_instr*);
+
 #ifdef __cplusplus
 }
 #endif
+
 
 #endif

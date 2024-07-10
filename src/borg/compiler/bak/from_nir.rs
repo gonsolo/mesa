@@ -42,7 +42,10 @@ impl<'a> ShaderFromNir<'a> {
     ) {
         println!("ShaderFromNir::parse_block TODO");
         for ni in nb.iter_instr_list() {
-            println!("{}", ni.type_);
+            //println!("{}", ni.type_);
+            unsafe {
+                bak_print_instr(ni);
+            }
         }
         // TODO
     }
