@@ -49,6 +49,9 @@ impl<'a> ShaderFromNir<'a> {
                 nir_instr_type_alu => {
                     println!("  alu instruction");
                 },
+                nir_instr_type_deref => {
+                    println!("  deref instruction");
+                },
                 nir_instr_type_jump => {
                     println!("  jump instruction");
                 },
