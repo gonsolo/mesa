@@ -46,14 +46,31 @@ impl<'a> ShaderFromNir<'a> {
                 bak_print_instr(ni);
             }
             match ni.type_ {
-                //nir_instr_type_alu => {}
-                // nir_instr_type_jump => {
-                // nir_instr_type_tex => {
-                // nir_instr_type_intrinsic => {
-                // nir_instr_type_load_const => {
-                // nir_instr_type_undef => {
-                // nir_instr_type_phi => (),
-                _ => panic!("Unsupported instruction type"),
+                nir_instr_type_alu => {
+                    println!("  alu instruction");
+                },
+                nir_instr_type_jump => {
+                    println!("  jump instruction");
+                },
+                nir_instr_type_tex => {
+                    println!("  tex instruction");
+                },
+                nir_instr_type_intrinsic => {
+                    println!("  intrinsic instruction");
+                },
+                nir_instr_type_load_const => {
+                    println!("  load const instruction");
+                },
+                nir_instr_type_undef => {
+                    println!("  type undef instruction");
+                },
+                nir_instr_type_phi => {
+                    println!("  phi instruction");
+                },
+                _ => {
+                    println!("  {} instruction", ni.type_);
+                    panic!("Unsupported instruction type")
+                }
               }
         }
         // TODO

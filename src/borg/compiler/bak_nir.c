@@ -18,6 +18,8 @@ optimize_nir(nir_shader *nir, const struct bak_compiler *bak)
 {
         bool progress;
 
+        puts("optimize_nir");
+
         do {
                 progress = false;
 
@@ -74,6 +76,7 @@ bak_optimize_nir(nir_shader *nir, const struct bak_compiler *bak)
 void
 bak_postprocess_nir(nir_shader *nir, const struct bak_compiler *bak)
 {
+        puts("bak_postprocess_nir");
         UNUSED bool progress = false;
         bak_optimize_nir(nir, bak);
         OPT(nir, nir_opt_shrink_vectors, true);
