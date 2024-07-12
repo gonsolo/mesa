@@ -42,15 +42,22 @@ impl<'a> ShaderFromNir<'a> {
     ) {
         println!("ShaderFromNir::parse_block TODO");
         for ni in nb.iter_instr_list() {
-            //println!("{}", ni.type_);
             unsafe {
                 bak_print_instr(ni);
             }
+            match ni.type_ {
+                //nir_instr_type_alu => {}
+                // nir_instr_type_jump => {
+                // nir_instr_type_tex => {
+                // nir_instr_type_intrinsic => {
+                // nir_instr_type_load_const => {
+                // nir_instr_type_undef => {
+                // nir_instr_type_phi => (),
+                _ => panic!("Unsupported instruction type"),
+              }
         }
         // TODO
     }
-
-
 
     fn parse_cf_list(
         &mut self,

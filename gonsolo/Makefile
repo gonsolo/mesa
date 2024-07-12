@@ -9,7 +9,8 @@ VULKAN_COMPUTE = ~/src/VulkanHpp-Compute-Sample/gonsolo/VulkanCompute
 #APPLICATION = $(VULKANINFO)
 APPLICATION = $(VULKAN_COMPUTE)
 MACHINE = $(shell uname -m)
-ICD = ~/bin/mesa/share/vulkan/icd.d/borg_icd.$(MACHINE).json
+#ICD = ~/bin/mesa/share/vulkan/icd.d/borg_icd.$(MACHINE).json
+ICD = ~/bin/mesa/share/vulkan/icd.d/nouveau_icd.$(MACHINE).json
 DRIVERS = nouveau,borg-experimental
 #DRIVERS = borg-experimental
 #VERBOSE = --verbose
@@ -18,6 +19,8 @@ test: #install
 	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) $(APPLICATION); cd -
 gdb: #install
 	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) gdb $(APPLICATION); cd -
+rust-gdb: #install
+	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) rust-gdb $(APPLICATION); cd -
 lldb: install
 	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) lldb -o run $(APPLICATION); cd -
 install: #compile_and_tidy

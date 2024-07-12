@@ -251,6 +251,8 @@ void nak_flush_memstream(struct nak_memstream *memstream);
 void nak_clear_memstream(struct nak_memstream *memstream);
 void nak_nir_asprint_instr(struct nak_memstream *memstream, const nir_instr *instr);
 
+void nak_print_instr(const nir_instr*);
+
 #ifdef __cplusplus
 }
 #endif

@@ -3231,6 +3231,9 @@ impl<'a> ShaderFromNir<'a> {
                 && ni.def().is_some_and(|d| !d.divergent);
             let mut b = UniformBuilder::new(&mut b, uniform);
 
+            unsafe {
+                nak_print_instr(ni);
+            }
             match ni.type_ {
                 nir_instr_type_alu => {
                     self.parse_alu(&mut b, ni.as_alu().unwrap())

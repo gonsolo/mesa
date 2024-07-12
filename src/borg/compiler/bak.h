@@ -15,11 +15,13 @@ struct bak_shader_bin {
 };
 
 struct bak_shader_bin *
-bak_compile_shader(nir_shader *nir);
+bak_compile_shader(nir_shader *nir, const struct bak_compiler *bak);
 
 const struct nir_shader_compiler_options *
 bak_nir_options(const struct bak_compiler *bak);
 
 struct bak_compiler *bak_compiler_create();
+
+void bak_postprocess_nir(nir_shader *nir, const struct bak_compiler *nak);
 
 #endif

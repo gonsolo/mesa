@@ -24,10 +24,14 @@ impl ShaderBin {
 
 #[no_mangle]
 pub extern "C" fn bak_compile_shader(
-    nir: *mut nir_shader
+    nir: *mut nir_shader,
+    bak: *const bak_compiler,
 ) -> *mut bak_shader_bin {
 
     println!("bak_compile_shader");
+
+    unsafe { bak_postprocess_nir(nir, bak) };
+
     let nir = unsafe { &*nir };
 
     let s = bak_shader_from_nir(nir);
