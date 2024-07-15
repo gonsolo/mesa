@@ -25,6 +25,7 @@ lldb: install
 	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) lldb -o run $(APPLICATION); cd -
 install: #compile_and_tidy
 	cd $(BUILD_DIR); $(MESON) install; cd -
+ct: compile_and_tidy
 compile_and_tidy: compile tidy_compile_commands
 compile:
 	cd $(BUILD_DIR); $(MESON) compile $(VERBOSE); cd -
@@ -40,7 +41,4 @@ tidy_compile_commands:
 	cd $(BUILD_DIR); sed -i 's/-mtls-dialect=gnu2 //g' compile_commands.json; cd -
 	cd $(BUILD_DIR); sed -i 's/-flifetime-dse=1 //g' compile_commands.json; cd -
 
-.PHONY: c clean compile install setup test
-
-bla: bla.c
-	gcc -I/usr/include/libdrm -ldrm -o bla bla.c
+.PHONY: c clean compile compile_and_tidy ct install link_compile_commands setup test
