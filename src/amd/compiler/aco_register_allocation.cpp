@@ -1704,13 +1704,8 @@ should_compact_linear_vgprs(ra_ctx& ctx, const RegisterFile& reg_file)
       max_vgpr_usage =
          MAX2(max_vgpr_usage, (unsigned)ctx.program->blocks[next_toplevel].register_demand.vgpr);
    }
-
-   std::vector<aco_ptr<Instruction>>& instructions =
-      ctx.program->blocks[next_toplevel].instructions;
-   if (!instructions.empty() && is_phi(instructions[0])) {
-      max_vgpr_usage =
-         MAX2(max_vgpr_usage, (unsigned)ctx.program->live.register_demand[next_toplevel][0].vgpr);
-   }
+   max_vgpr_usage =
+      MAX2(max_vgpr_usage, (unsigned)ctx.program->blocks[next_toplevel].live_in_demand.vgpr);
 
    for (unsigned tmp : find_vars(ctx, reg_file, get_reg_bounds(ctx, RegType::vgpr, true)))
       max_vgpr_usage -= ctx.assignments[tmp].rc.size();
@@ -2690,7 +2685,7 @@ get_affinities(ra_ctx& ctx, std::vector<IDSet>& live_out_per_block)
                   op = instr->operands[op_fixed_to_def0];
                } else if (vop3_can_use_vop2acc(ctx, instr.get())) {
                   op = instr->operands[2];
-               } else if (sop2_can_use_sopk(ctx, instr.get())) {
+               } else if (i == 0 && sop2_can_use_sopk(ctx, instr.get())) {
                   op = instr->operands[instr->operands[0].isLiteral()];
                } else {
                   continue;
@@ -3019,40 +3014,6 @@ register_allocation(Program* program, ra_test_policy policy)
          std::find_if(block.instructions.begin(), block.instructions.end(), NonPhi);
       for (; instr_it != block.instructions.end(); ++instr_it) {
          aco_ptr<Instruction>& instr = *instr_it;
-
-         /* parallelcopies from p_phi are inserted here which means
-          * live ranges of killed operands end here as well */
-         if (instr->opcode == aco_opcode::p_logical_end) {
-            /* no need to process this instruction any further */
-            if (block.logical_succs.size() != 1) {
-               instructions.emplace_back(std::move(instr));
-               continue;
-            }
-
-            Block& succ = program->blocks[block.logical_succs[0]];
-            unsigned idx = 0;
-            for (; idx < succ.logical_preds.size(); idx++) {
-               if (succ.logical_preds[idx] == block.index)
-                  break;
-            }
-            for (aco_ptr<Instruction>& phi : succ.instructions) {
-               if (phi->opcode == aco_opcode::p_phi) {
-                  if (phi->operands[idx].isTemp() &&
-                      phi->operands[idx].getTemp().type() == RegType::sgpr &&
-                      phi->operands[idx].isFirstKillBeforeDef()) {
-                     Definition phi_op(
-                        read_variable(ctx, phi->operands[idx].getTemp(), block.index));
-                     phi_op.setFixed(ctx.assignments[phi_op.tempId()].reg);
-                     register_file.clear(phi_op);
-                  }
-               } else if (phi->opcode != aco_opcode::p_linear_phi) {
-                  break;
-               }
-            }
-            instructions.emplace_back(std::move(instr));
-            continue;
-         }
-
          std::vector<std::pair<Operand, Definition>> parallelcopy;
          bool temp_in_scc = register_file[scc];
 

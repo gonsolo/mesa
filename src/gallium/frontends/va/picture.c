@@ -136,6 +136,9 @@ vlVaBeginPicture(VADriverContextP ctx, VAContextID context_id, VASurfaceID rende
    if (context->decoder->entrypoint != PIPE_VIDEO_ENTRYPOINT_ENCODE)
       context->needs_begin_frame = true;
 
+   context->slice_data_offset = 0;
+   context->have_slice_params = false;
+
    mtx_unlock(&drv->mutex);
    return VA_STATUS_SUCCESS;
 }
@@ -299,7 +302,7 @@ handleIQMatrixBuffer(vlVaContext *context, vlVaBuffer *buf)
 }
 
 static void
-handleSliceParameterBuffer(vlVaContext *context, vlVaBuffer *buf, unsigned num_slices, unsigned slice_offset)
+handleSliceParameterBuffer(vlVaContext *context, vlVaBuffer *buf)
 {
    switch (u_reduce_video_profile(context->templat.profile)) {
    case PIPE_VIDEO_FORMAT_MPEG12:
@@ -331,7 +334,7 @@ handleSliceParameterBuffer(vlVaContext *context, vlVaBuffer *buf, unsigned num_s
       break;
 
    case PIPE_VIDEO_FORMAT_AV1:
-      vlVaHandleSliceParameterBufferAV1(context, buf, num_slices, slice_offset);
+      vlVaHandleSliceParameterBufferAV1(context, buf);
       break;
 
    default:
@@ -971,8 +974,6 @@ vlVaRenderPicture(VADriverContextP ctx, VAContextID context_id, VABufferID *buff
    VAStatus vaStatus = VA_STATUS_SUCCESS;
 
    unsigned i;
-   unsigned slice_idx = 0;
-   unsigned slice_offset = 0;
    vlVaBuffer *seq_param_buf = NULL;
 
    if (!ctx)
@@ -1022,23 +1023,16 @@ vlVaRenderPicture(VADriverContextP ctx, VAContextID context_id, VABufferID *buff
          break;
 
       case VASliceParameterBufferType:
-      {
-         /* Some apps like gstreamer send all the slices at once
-            and some others send individual VASliceParameterBufferType buffers
-
-            slice_idx is the zero based number of total slices received
-               before this call to handleSliceParameterBuffer
-
-            slice_offset is the slice offset in bitstream buffer
-         */
-         handleSliceParameterBuffer(context, buf, slice_idx, slice_offset);
-         slice_idx += buf->num_elements;
-      } break;
+         handleSliceParameterBuffer(context, buf);
+         context->have_slice_params = true;
+         break;
 
       case VASliceDataBufferType:
          vaStatus = handleVASliceDataBufferType(context, buf);
-         if (slice_idx)
-            slice_offset += buf->size;
+         /* Workaround for apps sending single slice data buffer followed
+          * by multiple slice parameter buffers. */
+         if (context->have_slice_params)
+            context->slice_data_offset += buf->size;
          break;
 
       case VAProcPipelineParameterBufferType:

@@ -582,7 +582,7 @@ Khronos extensions that are not part of any Vulkan version:
   VK_EXT_display_surface_counter                        DONE (anv, lvp, nvk, radv, tu)
   VK_EXT_dynamic_rendering_unused_attachments           DONE (anv, nvk, radv, vn)
   VK_EXT_extended_dynamic_state3                        DONE (anv, lvp, nvk, radv, tu, vn)
-  VK_EXT_external_memory_acquire_unmodified             DONE (radv)
+  VK_EXT_external_memory_acquire_unmodified             DONE (radv, vn)
   VK_EXT_external_memory_dma_buf                        DONE (anv, hasvk, lvp, nvk, pvr, radv, tu, v3dv, vn)
   VK_EXT_external_memory_host                           DONE (anv, hasvk, lvp, radv)
   VK_EXT_filter_cubic                                   DONE (tu/a650+)
@@ -867,7 +867,7 @@ Rusticl OpenCL 1.2 -- all DONE:
   Separate compilation and linking of programs          DONE
   Extend cl_mem_flags                                   DONE
   clEnqueueFillBuffer, clEnqueueFillImage               DONE
-  Add CL_MAP_WRITE_INVALIDATE_REGION to cl_map_flags    in progress (flag is ignored)
+  Add CL_MAP_WRITE_INVALIDATE_REGION to cl_map_flags    DONE
   New image types                                       DONE
   clCreateImage                                         DONE
   clEnqueueMigrateMemObjects                            DONE

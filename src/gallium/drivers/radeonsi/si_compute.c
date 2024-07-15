@@ -936,7 +936,8 @@ static void si_emit_dispatch_packets(struct si_context *sctx, const struct pipe_
                                   * allow launching waves out-of-order. (same as Vulkan)
                                   * Not available in gfx940.
                                   */
-                                 S_00B800_ORDER_MODE(sctx->gfx_level >= GFX7 &&
+                                 S_00B800_ORDER_MODE(!sctx->cs_shader_state.program->sel.info.uses_atomic_ordered_add &&
+                                                     sctx->gfx_level >= GFX7 &&
                                                      (sctx->family < CHIP_GFX940 || sctx->screen->info.has_graphics)) |
                                  S_00B800_CS_W32_EN(sctx->cs_shader_state.program->shader.wave_size == 32);
 
@@ -972,7 +973,8 @@ static void si_emit_dispatch_packets(struct si_context *sctx, const struct pipe_
       /* Set PING_PONG_EN for every other dispatch.
        * Only allowed on a gfx queue, and PARTIAL_TG_EN and USE_THREAD_DIMENSIONS must be 0.
        */
-      if (sctx->has_graphics && !partial_block_en) {
+      if (sctx->has_graphics && !partial_block_en &&
+          !sctx->cs_shader_state.program->sel.info.uses_atomic_ordered_add) {
          dispatch_initiator |= S_00B800_PING_PONG_EN(sctx->compute_ping_pong_launch);
          sctx->compute_ping_pong_launch ^= 1;
       }
@@ -1251,7 +1253,7 @@ static void si_launch_grid(struct pipe_context *ctx, const struct pipe_grid_info
    }
 
    /* Prefetch the compute shader to L2. */
-   if (sctx->gfx_level >= GFX7 && prefetch)
+   if (sctx->gfx_level >= GFX7 && sctx->screen->info.has_cp_dma && prefetch)
       si_cp_dma_prefetch(sctx, &program->shader.bo->b.b, 0, program->shader.bo->b.b.width0);
 
    if (program->ir_type != PIPE_SHADER_IR_NATIVE)

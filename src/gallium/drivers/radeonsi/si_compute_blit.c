@@ -346,7 +346,8 @@ void si_clear_buffer(struct si_context *sctx, struct pipe_resource *dst,
            clear_value_size > 4 ||
            /* Use compute if the size is large enough. Always prefer compute on GFX12. */
            (clear_value_size == 4 && offset % 4 == 0 &&
-            (size > compute_min_size || sctx->screen->info.cp_sdma_ge_use_system_memory_scope))))
+            (!sctx->screen->info.has_cp_dma ||
+             sctx->screen->info.cp_sdma_ge_use_system_memory_scope || size > compute_min_size))))
          method = SI_COMPUTE_CLEAR_METHOD;
 
       if (method == SI_COMPUTE_CLEAR_METHOD) {
@@ -403,10 +404,10 @@ void si_copy_buffer(struct si_context *sctx, struct pipe_resource *dst, struct p
 
    /* Only use compute for VRAM copies on dGPUs. */
    /* TODO: use compute for unaligned big sizes */
-   if (sctx->screen->info.has_dedicated_vram && si_resource(dst)->domains & RADEON_DOMAIN_VRAM &&
-       si_resource(src)->domains & RADEON_DOMAIN_VRAM &&
-       dst_offset % 4 == 0 && src_offset % 4 == 0 && size % 4 == 0 &&
-       (size > compute_min_size || sctx->screen->info.cp_sdma_ge_use_system_memory_scope)) {
+   if (dst_offset % 4 == 0 && src_offset % 4 == 0 && size % 4 == 0 &&
+       (!sctx->screen->info.has_cp_dma || sctx->screen->info.cp_sdma_ge_use_system_memory_scope ||
+        (sctx->screen->info.has_dedicated_vram && si_resource(dst)->domains & RADEON_DOMAIN_VRAM &&
+         si_resource(src)->domains & RADEON_DOMAIN_VRAM && size > compute_min_size))) {
       si_compute_do_clear_or_copy(sctx, dst, dst_offset, src, src_offset, size, NULL, 0,
                                   flags, coher);
    } else {
@@ -416,9 +417,9 @@ void si_copy_buffer(struct si_context *sctx, struct pipe_resource *dst, struct p
 }
 
 void si_compute_shorten_ubyte_buffer(struct si_context *sctx, struct pipe_resource *dst, struct pipe_resource *src,
-                                     uint64_t dst_offset, uint64_t src_offset, unsigned size, unsigned flags)
+                                     uint64_t dst_offset, uint64_t src_offset, unsigned count, unsigned flags)
 {
-   if (!size)
+   if (!count)
       return;
 
    if (!sctx->cs_ubyte_to_ushort)
@@ -432,16 +433,16 @@ void si_compute_shorten_ubyte_buffer(struct si_context *sctx, struct pipe_resour
    si_improve_sync_flags(sctx, dst, src, &flags);
 
    struct pipe_grid_info info = {};
-   set_work_size(&info, 64, 1, 1, size, 1, 1);
+   set_work_size(&info, 64, 1, 1, count, 1, 1);
 
    struct pipe_shader_buffer sb[2] = {};
    sb[0].buffer = dst;
    sb[0].buffer_offset = dst_offset;
-   sb[0].buffer_size = dst->width0;
+   sb[0].buffer_size = count * 2;
 
    sb[1].buffer = src;
    sb[1].buffer_offset = src_offset;
-   sb[1].buffer_size = src->width0;
+   sb[1].buffer_size = count;
 
    si_launch_grid_internal_ssbos(sctx, &info, sctx->cs_ubyte_to_ushort, flags, coher,
                                  2, sb, 0x1);

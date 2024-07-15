@@ -6,9 +6,9 @@ extern crate nak_ir_proc;
 
 use bitview::BitMutView;
 
-use crate::api::{GetDebugFlags, DEBUG};
 pub use crate::builder::{Builder, InstrBuilder, SSABuilder, SSAInstrBuilder};
 use crate::cfg::CFG;
+use crate::legalize::LegalizeBuilder;
 use crate::sph::{OutputTopology, PixelImap};
 use nak_ir_proc::*;
 use std::cmp::{max, min};
@@ -142,55 +142,6 @@ impl RegFile {
             | RegFile::Bar
             | RegFile::Mem => false,
             RegFile::Pred | RegFile::UPred => true,
-        }
-    }
-
-    pub fn num_regs(&self, sm: u8) -> u32 {
-        match self {
-            RegFile::GPR => {
-                if DEBUG.spill() {
-                    // We need at least 16 registers to satisfy RA constraints
-                    // for texture ops and another 2 for parallel copy lowering
-                    18
-                } else if sm >= 70 {
-                    // Volta+ has a maximum of 253 registers.  Presumably
-                    // because two registers get burned for UGPRs? Unclear
-                    // on why we need it on Volta though.
-                    253
-                } else {
-                    255
-                }
-            }
-            RegFile::UGPR => {
-                if sm >= 75 {
-                    63
-                } else {
-                    0
-                }
-            }
-            RegFile::Pred => 7,
-            RegFile::UPred => {
-                if sm >= 75 {
-                    7
-                } else {
-                    0
-                }
-            }
-            RegFile::Carry => {
-                if sm >= 70 {
-                    0
-                } else {
-                    1
-                }
-            }
-            RegFile::Bar => {
-                if sm >= 70 {
-                    16
-                } else {
-                    0
-                }
-            }
-            RegFile::Mem => 1 << 24,
         }
     }
 
@@ -652,6 +603,8 @@ pub struct RegRef {
 }
 
 impl RegRef {
+    pub const MAX_IDX: u32 = (1 << 26) - 1;
+
     fn zero_idx(file: RegFile) -> u32 {
         match file {
             RegFile::GPR => 255,
@@ -665,7 +618,7 @@ impl RegRef {
     }
 
     pub fn new(file: RegFile, base_idx: u32, comps: u8) -> RegRef {
-        assert!(base_idx < (1 << 26));
+        assert!(base_idx <= Self::MAX_IDX);
         let mut packed = base_idx;
         assert!(comps > 0 && comps <= 8);
         packed |= u32::from(comps - 1) << 26;
@@ -5713,38 +5666,6 @@ impl Instr {
         self.op.is_uniform()
     }
 
-    pub fn can_be_uniform(&self, sm: u8) -> bool {
-        match &self.op {
-            Op::R2UR(_)
-            | Op::S2R(_)
-            | Op::BMsk(_)
-            | Op::BRev(_)
-            | Op::Flo(_)
-            | Op::IAdd3(_)
-            | Op::IAdd3X(_)
-            | Op::IMad(_)
-            | Op::IMad64(_)
-            | Op::ISetP(_)
-            | Op::Lop3(_)
-            | Op::Mov(_)
-            | Op::PLop3(_)
-            | Op::PopC(_)
-            | Op::Prmt(_)
-            | Op::PSetP(_)
-            | Op::Sel(_)
-            | Op::Shf(_)
-            | Op::Shl(_)
-            | Op::Shr(_)
-            | Op::Vote(_)
-            | Op::Copy(_)
-            | Op::Pin(_)
-            | Op::Unpin(_) => sm >= 75,
-            Op::Ldc(op) => sm >= 75 && op.offset.is_zero(),
-            // UCLEA  USHL  USHR
-            _ => false,
-        }
-    }
-
     pub fn has_fixed_latency(&self, _sm: u8) -> bool {
         match &self.op {
             // Float ALU
@@ -6316,7 +6237,6 @@ pub enum ShaderIoInfo {
 
 #[derive(Debug)]
 pub struct ShaderInfo {
-    pub sm: u8,
     pub num_gprs: u8,
     pub num_barriers: u8,
     pub slm_size: u32,
@@ -6327,12 +6247,23 @@ pub struct ShaderInfo {
     pub io: ShaderIoInfo,
 }
 
-pub struct Shader {
+pub trait ShaderModel {
+    fn sm(&self) -> u8;
+    fn num_regs(&self, file: RegFile) -> u32;
+
+    fn op_can_be_uniform(&self, op: &Op) -> bool;
+
+    fn legalize_op(&self, b: &mut LegalizeBuilder, op: &mut Op);
+    fn encode_shader(&self, s: &Shader<'_>) -> Vec<u32>;
+}
+
+pub struct Shader<'a> {
+    pub sm: &'a dyn ShaderModel,
     pub info: ShaderInfo,
     pub functions: Vec<Function>,
 }
 
-impl Shader {
+impl Shader<'_> {
     pub fn for_each_instr(&self, f: &mut impl FnMut(&Instr)) {
         for func in &self.functions {
             for b in &func.blocks {
@@ -6386,7 +6317,7 @@ impl Shader {
     }
 }
 
-impl fmt::Display for Shader {
+impl fmt::Display for Shader<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for func in &self.functions {
             write!(f, "{}", func)?;
