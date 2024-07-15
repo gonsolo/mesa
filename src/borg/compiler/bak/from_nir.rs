@@ -50,6 +50,9 @@ impl<'a> ShaderFromNir<'a> {
                     println!("  alu instruction");
                 },
                 nir_instr_type_deref => {
+                    unsafe {
+                        bak_print_defer_instr(ni);
+                    }
                     println!("  deref instruction");
                 },
                 nir_instr_type_jump => {

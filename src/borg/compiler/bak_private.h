@@ -19,6 +19,7 @@ struct bak_compiler {
 
 void bak_optimize_nir(nir_shader *nir, const struct bak_compiler *nak);
 void bak_print_instr(const nir_instr*);
+void bak_print_defer_instr(const nir_instr*);
 
 #ifdef __cplusplus
 }
