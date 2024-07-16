@@ -88,18 +88,11 @@ bak_nir_lower_workgroup_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
         b->cursor = nir_before_instr(&intrin->instr);
         nir_def *val;
         switch (intrin->intrinsic) {
+        case nir_intrinsic_load_base_workgroup_id:
         case nir_intrinsic_load_workgroup_id: {
-                // Always use 0, 0, 0 for now
-                nir_def *comps[3];
-                assert(intrin->def.num_components <= 3);
-                unsigned bitsize = 32;
-                for (unsigned c = 0; c < intrin->def.num_components; c++) {
-                        nir_load_const_instr *load_comp = nir_load_const_instr_create(b->shader, 1, bitsize);
-                        load_comp->value[0] = nir_const_value_for_int(0, bitsize);
-                        nir_builder_instr_insert(b, &load_comp->instr);
-                        comps[c] = &load_comp->def;
-                }
-                val = nir_vec(b, comps, intrin->def.num_components);
+                unsigned components = 3;
+                unsigned bit_size = 32;
+                val = nir_imm_zero(b, components, bit_size);
                 break;
         }
         default:
