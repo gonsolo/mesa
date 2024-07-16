@@ -5,6 +5,8 @@
 
 #include "bak_private.h"
 
+#include "nir_builder.h"
+
 #define OPT(nir, pass, ...) ({                             \
      bool this_progress = false;                           \
      NIR_PASS(this_progress, nir, pass, ##__VA_ARGS__);    \
@@ -79,17 +81,58 @@ bak_optimize_nir(nir_shader *nir, const struct bak_compiler *bak)
         optimize_nir(nir, bak);
 }
 
+static bool
+bak_nir_lower_workgroup_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
+                                    void *data)
+{
+        b->cursor = nir_before_instr(&intrin->instr);
+        nir_def *val;
+        switch (intrin->intrinsic) {
+        case nir_intrinsic_load_workgroup_id: {
+                // Always use 0, 0, 0 for now
+                nir_def *comps[3];
+                assert(intrin->def.num_components <= 3);
+                unsigned bitsize = 32;
+                for (unsigned c = 0; c < intrin->def.num_components; c++) {
+                        nir_load_const_instr *load_comp = nir_load_const_instr_create(b->shader, 1, bitsize);
+                        load_comp->value[0] = nir_const_value_for_int(0, bitsize);
+                        nir_builder_instr_insert(b, &load_comp->instr);
+                        comps[c] = &load_comp->def;
+                }
+                val = nir_vec(b, comps, intrin->def.num_components);
+                break;
+        }
+        default:
+                return false;
+        }
+        nir_def_rewrite_uses(&intrin->def, val);
+        return true;
+}
+
+static bool
+bak_nir_lower_workgroup(nir_shader *nir, const struct bak_compiler *bak)
+{
+        return nir_shader_intrinsics_pass(nir, bak_nir_lower_workgroup_intrin,
+                                          nir_metadata_none,
+                                          (void *)bak);
+}
+
 void
 bak_postprocess_nir(nir_shader *nir, const struct bak_compiler *bak)
 {
         puts("bak_postprocess_nir");
         UNUSED bool progress = false;
         bak_optimize_nir(nir, bak);
+
         OPT(nir, nir_opt_shrink_vectors, true);
         bak_optimize_nir(nir, bak);
+
+        OPT(nir, bak_nir_lower_workgroup, bak);
+
         OPT(nir, nir_lower_doubles, NULL, bak->nir_options.lower_doubles_options);
         OPT(nir, nir_lower_int64);
         bak_optimize_nir(nir, bak);
+
         nir_convert_to_lcssa(nir, true, true);
         nir_divergence_analysis(nir);
 }
