@@ -28,6 +28,12 @@ optimize_nir(nir_shader *nir, const struct bak_compiler *bak)
                 if (OPT(nir, nir_opt_memcpy))
                    OPT(nir, nir_split_var_copies);
 
+                OPT(nir, nir_lower_system_values);
+                nir_lower_compute_system_values_options lower_csv_options = {
+                        .has_base_workgroup_id = nir->info.stage == MESA_SHADER_COMPUTE,
+                };
+                OPT(nir, nir_lower_compute_system_values, &lower_csv_options);
+
                 OPT(nir, nir_lower_vars_to_ssa);
 
                 OPT(nir, nir_opt_copy_prop_vars);
