@@ -64,6 +64,69 @@ borg_shader_destroy(struct vk_device *vk_dev,
         // TODO
 }
 
+static void
+borg_lower_nir(struct borg_device *dev, nir_shader *nir)
+{
+        puts("borg_lower_nir");
+
+        nir_lower_compute_system_values_options csv_options = {
+                .has_base_workgroup_id = true,
+        };
+        NIR_PASS(_, nir, nir_lower_compute_system_values, &csv_options);
+
+        /* Lower push constants before lower_descriptors */
+        NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_push_const,
+                 nir_address_format_32bit_offset);
+
+        /* Lower non-uniform access before lower_descriptors */
+        enum nir_lower_non_uniform_access_type lower_non_uniform_access_types =
+                nir_lower_non_uniform_ubo_access;
+
+        /* In practice, most shaders do not have non-uniform-qualified accesses
+         * thus a cheaper and likely to fail check is run first.
+         */
+        if (nir_has_non_uniform_access(nir, lower_non_uniform_access_types)) {
+                struct nir_lower_non_uniform_access_options opts = {
+                        .types = lower_non_uniform_access_types,
+                        .callback = NULL,
+                };
+                NIR_PASS(_, nir, nir_opt_non_uniform_access);
+                NIR_PASS(_, nir, nir_lower_non_uniform_access, &opts);
+        }
+
+        /* Large constant support assumes cbufs */
+        NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
+
+        //NIR_PASS(_, nir, nvk_nir_lower_descriptors, pdev, rs,
+            //set_layout_count, set_layouts, cbuf_map);
+        //NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
+            //nir_address_format_64bit_global);
+        //NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ssbo,
+            //nvk_ssbo_addr_format(pdev, rs->storage_buffers));
+        //NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
+            //nvk_ubo_addr_format(pdev, rs->uniform_buffers));
+        //NIR_PASS(_, nir, nir_shader_intrinsics_pass,
+            //lower_load_intrinsic, nir_metadata_none, NULL);
+
+        NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_shared,
+                 nir_address_format_32bit_offset);
+
+        if (nir->info.zero_initialize_shared_memory && nir->info.shared_size > 0) {
+                /* QMD::SHARED_MEMORY_SIZE requires an alignment of 256B so it's safe to
+                 * align everything up to 16B so we can write whole vec4s.
+                 */
+                nir->info.shared_size = align(nir->info.shared_size, 16);
+                NIR_PASS(_, nir, nir_zero_initialize_shared_memory,
+                         nir->info.shared_size, 16);
+
+                /* We need to call lower_compute_system_values again because
+                 * nir_zero_initialize_shared_memory generates load_invocation_id which
+                 * has to be lowered to load_invocation_index.
+                 */
+                NIR_PASS(_, nir, nir_lower_compute_system_values, NULL);
+        }
+}
+
 static VkResult
 borg_compile_shader(struct borg_device *dev,
                 struct vk_shader_compile_info *info,
@@ -80,6 +143,8 @@ borg_compile_shader(struct borg_device *dev,
                         pAllocator, sizeof(*shader));
 
         nir_shader *nir = info->nir;
+
+        borg_lower_nir(dev, nir);
 
         result = borg_compile_nir(dev, nir, info->flags, info->robustness, shader);
         ralloc_free(nir);
