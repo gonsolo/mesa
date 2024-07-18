@@ -21,6 +21,7 @@ borg_files = files(
   'borg_image.c',
   'borg_instance.c',
   'borg_instance.h',
+  'borg_nir_lower_descriptors.c',
   'borg_physical_device.c',
   'borg_physical_device.h',
   'borg_pipeline.c',

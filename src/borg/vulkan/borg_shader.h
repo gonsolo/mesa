@@ -8,6 +8,8 @@
 
 #include "vk_shader.h"
 
+#include "borg_physical_device.h"
+
 extern const struct vk_device_shader_ops borg_device_shader_ops;
 
 struct borg_shader {
@@ -17,4 +19,9 @@ struct borg_shader {
    uint32_t code_size;
 };
 
+bool
+borg_nir_lower_descriptors(nir_shader *nir,
+                           const struct borg_physical_device *pdev,
+                           uint32_t set_layout_count,
+                           struct vk_descriptor_set_layout * const *set_layouts);
 #endif

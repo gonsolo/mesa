@@ -65,9 +65,14 @@ borg_shader_destroy(struct vk_device *vk_dev,
 }
 
 static void
-borg_lower_nir(struct borg_device *dev, nir_shader *nir)
+borg_lower_nir(struct borg_device *dev,
+               nir_shader *nir,
+               uint32_t set_layout_count,
+               struct vk_descriptor_set_layout * const *set_layouts)
 {
         puts("borg_lower_nir");
+
+        struct borg_physical_device *pdev = borg_device_physical(dev);
 
         nir_lower_compute_system_values_options csv_options = {
                 .has_base_workgroup_id = true,
@@ -97,8 +102,7 @@ borg_lower_nir(struct borg_device *dev, nir_shader *nir)
         /* Large constant support assumes cbufs */
         NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
 
-        //NIR_PASS(_, nir, nvk_nir_lower_descriptors, pdev, rs,
-            //set_layout_count, set_layouts, cbuf_map);
+        NIR_PASS(_, nir, borg_nir_lower_descriptors, pdev, set_layout_count, set_layouts);
         //NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
             //nir_address_format_64bit_global);
         //NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ssbo,
@@ -144,7 +148,7 @@ borg_compile_shader(struct borg_device *dev,
 
         nir_shader *nir = info->nir;
 
-        borg_lower_nir(dev, nir);
+        borg_lower_nir(dev, nir, info->set_layout_count, info->set_layouts);
 
         result = borg_compile_nir(dev, nir, info->flags, info->robustness, shader);
         ralloc_free(nir);

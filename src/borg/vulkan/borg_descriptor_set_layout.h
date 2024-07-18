@@ -29,12 +29,18 @@ struct borg_descriptor_set_layout {
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(borg_descriptor_set_layout, vk.base,
-                                 VkDescriptorSetLayout,
-                                 VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT)
+                               VkDescriptorSetLayout,
+                               VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT)
 void
 borg_descriptor_stride_align_for_type(const struct borg_physical_device *pdev,
-                                     VkDescriptorType type,
-                                     const VkMutableDescriptorTypeListEXT *type_list,
-                                     uint32_t *stride, uint32_t *alignment);
+                                      VkDescriptorType type,
+                                      const VkMutableDescriptorTypeListEXT *type_list,
+                                      uint32_t *stride, uint32_t *alignment);
+
+static inline struct borg_descriptor_set_layout *
+vk_to_borg_descriptor_set_layout(struct vk_descriptor_set_layout *layout)
+{
+   return container_of(layout, struct borg_descriptor_set_layout, vk);
+}
 
 #endif
