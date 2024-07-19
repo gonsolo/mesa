@@ -250,6 +250,15 @@ fn eprint_hex(label: &str, data: &[u32]) {
     eprintln!("");
 }
 
+macro_rules! pass {
+    ($s: expr, $pass: ident) => {
+        $s.$pass();
+        if DEBUG.print() {
+            eprintln!("NAK IR after {}:\n{}", stringify!($pass), $s);
+        }
+    };
+}
+
 #[no_mangle]
 pub extern "C" fn nak_compile_shader(
     nir: *mut nir_shader,
@@ -281,56 +290,22 @@ pub extern "C" fn nak_compile_shader(
         eprintln!("NAK IR:\n{}", &s);
     }
 
-    s.opt_bar_prop();
-    if DEBUG.print() {
-        eprintln!("NAK IR after opt_bar_prop:\n{}", &s);
-    }
+    pass!(s, opt_bar_prop);
+    pass!(s, opt_uniform_instrs);
+    pass!(s, opt_copy_prop);
+    pass!(s, opt_prmt);
+    pass!(s, opt_lop);
+    pass!(s, opt_copy_prop);
+    pass!(s, opt_dce);
+    pass!(s, opt_out);
+    pass!(s, legalize);
+    pass!(s, assign_regs);
+    pass!(s, lower_par_copies);
+    pass!(s, lower_copy_swap);
+    pass!(s, opt_jump_thread);
+    pass!(s, calc_instr_deps);
 
-    s.opt_uniform_instrs();
-    if DEBUG.print() {
-        eprintln!("NAK IR after lower_uniform_instrs:\n{}", &s);
-    }
-
-    s.opt_copy_prop();
-    if DEBUG.print() {
-        eprintln!("NAK IR after opt_copy_prop:\n{}", &s);
-    }
-
-    s.opt_lop();
-    if DEBUG.print() {
-        eprintln!("NAK IR after opt_lop:\n{}", &s);
-    }
-
-    s.opt_dce();
-    if DEBUG.print() {
-        eprintln!("NAK IR after dce:\n{}", &s);
-    }
-
-    s.opt_out();
-    if DEBUG.print() {
-        eprintln!("NAK IR after opt_out:\n{}", &s);
-    }
-
-    s.legalize();
-    if DEBUG.print() {
-        eprintln!("NAK IR after legalize:\n{}", &s);
-    }
-
-    s.assign_regs();
-    if DEBUG.print() {
-        eprintln!("NAK IR after assign_regs:\n{}", &s);
-    }
-
-    s.lower_par_copies();
-    s.lower_copy_swap();
-    s.opt_jump_thread();
-    s.calc_instr_deps();
-
-    if DEBUG.print() {
-        eprintln!("NAK IR:\n{}", &s);
-    }
-
-    s.gather_global_mem_usage();
+    s.gather_info();
 
     let info = nak_shader_info {
         stage: nir.info.stage(),
@@ -342,6 +317,7 @@ pub extern "C" fn nak_compile_shader(
         },
         num_barriers: s.info.num_barriers,
         _pad0: Default::default(),
+        num_instrs: s.info.num_instrs,
         slm_size: s.info.slm_size,
         __bindgen_anon_1: match &s.info.stage {
             ShaderStageInfo::Compute(cs_info) => {
@@ -457,16 +433,9 @@ pub extern "C" fn nak_compile_shader(
             let c_name = _mesa_shader_stage_to_string(info.stage as u32);
             CStr::from_ptr(c_name).to_str().expect("Invalid UTF-8")
         };
-        let instruction_count = if nak.sm >= 70 {
-            code.len() / 4
-        } else if nak.sm >= 50 {
-            (code.len() / 8) * 3
-        } else {
-            unreachable!()
-        };
 
         eprintln!("Stage: {}", stage_name);
-        eprintln!("Instruction count: {}", instruction_count);
+        eprintln!("Instruction count: {}", info.num_instrs);
         eprintln!("Num GPRs: {}", info.num_gprs);
         eprintln!("SLM size: {}", info.slm_size);
 

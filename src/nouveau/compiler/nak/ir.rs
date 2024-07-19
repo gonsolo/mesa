@@ -829,6 +829,15 @@ impl SrcRef {
         }
     }
 
+    pub fn as_u32(&self) -> Option<u32> {
+        match self {
+            SrcRef::Zero => Some(0),
+            SrcRef::Imm32(u) => Some(*u),
+            SrcRef::CBuf(_) | SrcRef::SSA(_) | SrcRef::Reg(_) => None,
+            _ => panic!("Invalid integer source"),
+        }
+    }
+
     pub fn get_reg(&self) -> Option<&RegRef> {
         match self {
             SrcRef::Zero
@@ -900,6 +909,12 @@ impl From<u32> for SrcRef {
 impl From<f32> for SrcRef {
     fn from(f: f32) -> SrcRef {
         f.to_bits().into()
+    }
+}
+
+impl From<PrmtSel> for SrcRef {
+    fn from(sel: PrmtSel) -> SrcRef {
+        u32::from(sel.0).into()
     }
 }
 
@@ -1215,12 +1230,7 @@ impl Src {
 
     pub fn as_u32(&self) -> Option<u32> {
         if self.src_mod.is_none() {
-            match self.src_ref {
-                SrcRef::Zero => Some(0),
-                SrcRef::Imm32(u) => Some(u),
-                SrcRef::CBuf(_) | SrcRef::SSA(_) | SrcRef::Reg(_) => None,
-                _ => panic!("Invalid integer source"),
-            }
+            self.src_ref.as_u32()
         } else {
             None
         }
@@ -2269,11 +2279,31 @@ pub enum InterpFreq {
     State,
 }
 
+impl fmt::Display for InterpFreq {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InterpFreq::Pass => write!(f, ".pass"),
+            InterpFreq::PassMulW => write!(f, ".pass_mul_w"),
+            InterpFreq::Constant => write!(f, ".constant"),
+            InterpFreq::State => write!(f, ".state"),
+        }
+    }
+}
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum InterpLoc {
     Default,
     Centroid,
     Offset,
+}
+
+impl fmt::Display for InterpLoc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InterpLoc::Default => Ok(()),
+            InterpLoc::Centroid => write!(f, ".centroid"),
+            InterpLoc::Offset => write!(f, ".offset"),
+        }
+    }
 }
 
 pub struct AttrAccess {
@@ -3639,6 +3669,65 @@ impl DisplayOp for OpMov {
 }
 impl_display_for_op!(OpMov);
 
+#[derive(Copy, Clone)]
+pub struct PrmtSelByte(u8);
+
+impl PrmtSelByte {
+    pub const INVALID: PrmtSelByte = PrmtSelByte(u8::MAX);
+
+    pub fn new(src_idx: usize, byte_idx: usize, msb: bool) -> PrmtSelByte {
+        assert!(src_idx < 2);
+        assert!(byte_idx < 4);
+
+        let mut nib = 0;
+        nib |= (src_idx as u8) << 2;
+        nib |= byte_idx as u8;
+        if msb {
+            nib |= 0x8;
+        }
+        PrmtSelByte(nib)
+    }
+
+    pub fn src(&self) -> usize {
+        ((self.0 >> 2) & 0x1).into()
+    }
+
+    pub fn byte(&self) -> usize {
+        (self.0 & 0x3).into()
+    }
+
+    pub fn msb(&self) -> bool {
+        (self.0 & 0x8) != 0
+    }
+
+    pub fn fold_u32(&self, u: u32) -> u8 {
+        let mut sb = (u >> (self.byte() * 8)) as u8;
+        if self.msb() {
+            sb = ((sb as i8) >> 7) as u8;
+        }
+        sb
+    }
+}
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+pub struct PrmtSel(pub u16);
+
+impl PrmtSel {
+    pub fn new(bytes: [PrmtSelByte; 4]) -> PrmtSel {
+        let mut sel = 0;
+        for i in 0..4 {
+            assert!(bytes[i].0 <= 0xf);
+            sel |= u16::from(bytes[i].0) << (i * 4);
+        }
+        PrmtSel(sel)
+    }
+
+    pub fn get(&self, byte_idx: usize) -> PrmtSelByte {
+        assert!(byte_idx < 4);
+        PrmtSelByte(((self.0 >> (byte_idx * 4)) & 0xf) as u8)
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub enum PrmtMode {
@@ -3678,6 +3767,41 @@ pub struct OpPrmt {
     pub sel: Src,
 
     pub mode: PrmtMode,
+}
+
+impl OpPrmt {
+    pub fn get_sel(&self) -> Option<PrmtSel> {
+        // TODO: We could construct a PrmtSel for the other modes but we don't
+        // use them right now because they're kinda pointless.
+        if self.mode != PrmtMode::Index {
+            return None;
+        }
+
+        if let Some(sel) = self.sel.as_u32() {
+            // The top 16 bits are ignored
+            Some(PrmtSel(sel as u16))
+        } else {
+            None
+        }
+    }
+
+    pub fn as_u32(&self) -> Option<u32> {
+        let Some(sel) = self.get_sel() else {
+            return None;
+        };
+
+        let mut imm = 0_u32;
+        for b in 0..4 {
+            let sel_byte = sel.get(b);
+            let Some(src_u32) = self.srcs[sel_byte.src()].as_u32() else {
+                return None;
+            };
+
+            let sb = sel_byte.fold_u32(src_u32);
+            imm |= u32::from(sb) << (b * 8);
+        }
+        Some(imm)
+    }
 }
 
 impl DisplayOp for OpPrmt {
@@ -4351,20 +4475,11 @@ pub struct OpIpa {
 
 impl DisplayOp for OpIpa {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ipa")?;
-        match self.freq {
-            InterpFreq::Pass => write!(f, ".pass")?,
-            InterpFreq::PassMulW => write!(f, ".pass_mul_w")?,
-            InterpFreq::Constant => write!(f, ".constant")?,
-            InterpFreq::State => write!(f, ".state")?,
-        }
-        match self.loc {
-            InterpLoc::Default => (),
-            InterpLoc::Centroid => write!(f, ".centroid")?,
-            InterpLoc::Offset => write!(f, ".offset")?,
-        }
-
-        write!(f, " {} a[{:#x}] {}", self.dst, self.addr, self.inv_w)?;
+        write!(
+            f,
+            "ipa{}{} a[{:#x}] {}",
+            self.freq, self.loc, self.addr, self.inv_w
+        )?;
         if self.loc == InterpLoc::Offset {
             write!(f, " {}", self.offset)?;
         }
@@ -6239,6 +6354,7 @@ pub enum ShaderIoInfo {
 pub struct ShaderInfo {
     pub num_gprs: u8,
     pub num_barriers: u8,
+    pub num_instrs: u32,
     pub slm_size: u32,
     pub uses_global_mem: bool,
     pub writes_global_mem: bool,
@@ -6294,15 +6410,14 @@ impl Shader<'_> {
         })
     }
 
-    pub fn gather_global_mem_usage(&mut self) {
-        if let ShaderStageInfo::Compute(_) = self.info.stage {
-            return;
-        }
-
+    pub fn gather_info(&mut self) {
+        let mut num_instrs = 0;
         let mut uses_global_mem = false;
         let mut writes_global_mem = false;
 
         self.for_each_instr(&mut |instr| {
+            num_instrs += 1;
+
             if !uses_global_mem {
                 uses_global_mem = instr.uses_global_mem();
             }
@@ -6312,6 +6427,7 @@ impl Shader<'_> {
             }
         });
 
+        self.info.num_instrs = num_instrs;
         self.info.uses_global_mem = uses_global_mem;
         self.info.writes_global_mem = writes_global_mem;
     }

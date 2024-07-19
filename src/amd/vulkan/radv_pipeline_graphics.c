@@ -2001,7 +2001,7 @@ radv_fill_shader_info(struct radv_device *device, const enum radv_pipeline_type 
       }
 
       radv_nir_shader_info_pass(device, stages[i].nir, &stages[i].layout, &stages[i].key, gfx_state, pipeline_type,
-                                consider_force_vrs, false, &stages[i].info);
+                                consider_force_vrs, &stages[i].info);
    }
 
    radv_nir_shader_info_link(device, gfx_state, stages);
@@ -2082,7 +2082,7 @@ radv_create_gs_copy_shader(struct radv_device *device, struct vk_pipeline_cache 
    };
    radv_nir_shader_info_init(gs_copy_stage.stage, MESA_SHADER_FRAGMENT, &gs_copy_stage.info);
    radv_nir_shader_info_pass(device, nir, &gs_stage->layout, &gs_stage->key, gfx_state, RADV_PIPELINE_GRAPHICS, false,
-                             false, &gs_copy_stage.info);
+                             &gs_copy_stage.info);
    gs_copy_stage.info.wave_size = 64;      /* Wave32 not supported. */
    gs_copy_stage.info.workgroup_size = 64; /* HW VS: separate waves, no workgroups */
    gs_copy_stage.info.so = gs_info->so;
@@ -3058,7 +3058,6 @@ radv_pipeline_init_extra(struct radv_graphics_pipeline *pipeline,
    if (radv_pipeline_has_ds_attachments(state->rp)) {
       pipeline->db_render_control |= S_028000_DEPTH_CLEAR_ENABLE(extra->db_depth_clear);
       pipeline->db_render_control |= S_028000_STENCIL_CLEAR_ENABLE(extra->db_stencil_clear);
-      pipeline->db_render_control |= S_028000_RESUMMARIZE_ENABLE(extra->resummarize_enable);
       pipeline->db_render_control |= S_028000_DEPTH_COMPRESS_DISABLE(extra->depth_compress_disable);
       pipeline->db_render_control |= S_028000_STENCIL_COMPRESS_DISABLE(extra->stencil_compress_disable);
    }

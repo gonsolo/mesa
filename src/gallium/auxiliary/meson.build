@@ -329,7 +329,6 @@ if draw_with_llvm
     'gallivm/lp_bld_gather.c',
     'gallivm/lp_bld_gather.h',
     'gallivm/lp_bld.h',
-    'gallivm/lp_bld_init.c',
     'gallivm/lp_bld_init_common.c',
     'gallivm/lp_bld_init.h',
     'gallivm/lp_bld_intr.c',
@@ -384,6 +383,11 @@ if draw_with_llvm
     'nir/nir_to_tgsi_info.c',
     'nir/nir_to_tgsi_info.h',
   )
+  if llvm_with_orcjit
+    files_libgallium += files('gallivm/lp_bld_init_orc.cpp',)
+  else
+    files_libgallium += files('gallivm/lp_bld_init.c',)
+  endif
 endif
 
 files_libgalliumvl = files(
@@ -427,6 +431,7 @@ files_libgalliumvl = files(
 )
 
 vlwinsys_deps = []
+vlwinsys_links = []
 files_libgalliumvlwinsys = files('vl/vl_winsys.h')
 if host_machine.system() == 'windows'
   files_libgalliumvlwinsys += files('vl/vl_winsys_win32.c')
@@ -440,6 +445,7 @@ if with_dri2 and with_platform_x11
       dep_xcb_sync, dep_xcb_present, dep_xshmfence, dep_xcb_xfixes,
       dep_xcb_dri3,
     ]
+    vlwinsys_links += libloader_dri3_helper
     files_libgalliumvlwinsys += files('vl/vl_winsys_dri3.c')
   endif
 endif
@@ -571,5 +577,6 @@ libgalliumvlwinsys = static_library(
   files_libgalliumvlwinsys,
   include_directories : [inc_gallium, inc_include, inc_loader, inc_src],
   dependencies : [dep_libdrm, vlwinsys_deps, idep_mesautil],
+  link_with : vlwinsys_links,
   build_by_default : false,
 )

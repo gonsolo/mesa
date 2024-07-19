@@ -81,7 +81,7 @@ def print_job_status(
 
     print(
         STATUS_COLORS[job.status]
-        + "🞋 job "  # U+1F78B Round target
+        + "🞋 target job "  # U+1F78B Round target
         + link2print(job.web_url, job.name, job_name_field_pad)
         + (f"has new status: {job.status}" if new_status else f"{job.status}")
         + (f" ({pretty_duration(duration)})" if job.started_at else "")
@@ -191,7 +191,7 @@ def monitor_pipeline(
 
         print("---------------------------------", flush=False)
 
-        if len(target_statuses) == 1 and {"running"}.intersection(
+        if len(target_statuses) == 1 and RUNNING_STATUSES.intersection(
             target_statuses.values()
         ):
             return target_id, None, execution_times
@@ -254,11 +254,11 @@ def enable_job(
         job = get_pipeline_job(pipeline, pjob.id)
 
     if action_type == "target":
-        jtype = "🞋"  # U+1F78B Round target
+        jtype = "🞋 target"  # U+1F78B Round target
     elif action_type == "retry":
-        jtype = "↻"  # U+21BB Clockwise open circle arrow
+        jtype = "↻ retrying"  # U+21BB Clockwise open circle arrow
     else:
-        jtype = "↪"  # U+21AA Left Arrow Curving Right
+        jtype = "↪ dependency"  # U+21AA Left Arrow Curving Right
 
     job_name_field_pad = len(job.name) if job_name_field_pad < 1 else job_name_field_pad
     print(Fore.MAGENTA + f"{jtype} job {job.name:{job_name_field_pad}}manually enabled" + Style.RESET_ALL)
@@ -275,7 +275,7 @@ def cancel_job(
         return
     pjob = project.jobs.get(job.id, lazy=True)
     pjob.cancel()
-    print(f"♲ {job.name}", end=" ")  # U+2672 Universal Recycling symbol
+    print(f"🗙 {job.name}", end=" ")  # U+1F5D9 Cancellation X
 
 
 def cancel_jobs(
@@ -286,6 +286,7 @@ def cancel_jobs(
     if not to_cancel:
         return
 
+    print("Cancelled jobs: ", end=" ")
     with ThreadPoolExecutor(max_workers=6) as exe:
         part = partial(cancel_job, project)
         exe.map(part, to_cancel)
@@ -542,7 +543,7 @@ def main() -> None:
         target = '|'.join(args.target)
         target = target.strip()
 
-        print("🞋 job: " + Fore.BLUE + target + Style.RESET_ALL)  # U+1F78B Round target
+        print("🞋 target job: " + Fore.BLUE + target + Style.RESET_ALL)  # U+1F78B Round target
 
         # Implicitly include `parallel:` jobs
         target = f'({target})' + r'( \d+/\d+)?'

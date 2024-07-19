@@ -2081,52 +2081,29 @@ radv_device_init_dgc_prepare_state(struct radv_device *device)
    VkResult result;
    nir_shader *cs = build_dgc_prepare_shader(device);
 
-   VkDescriptorSetLayoutCreateInfo ds_create_info = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                                                     .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
-                                                     .bindingCount = 1,
-                                                     .pBindings = (VkDescriptorSetLayoutBinding[]){
-                                                        {.binding = 0,
-                                                         .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                                                         .descriptorCount = 1,
-                                                         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                                                         .pImmutableSamplers = NULL},
-                                                     }};
+   const VkDescriptorSetLayoutBinding binding = {
+      .binding = 0,
+      .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+      .descriptorCount = 1,
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+   };
 
-   result = radv_CreateDescriptorSetLayout(radv_device_to_handle(device), &ds_create_info, &device->meta_state.alloc,
-                                           &device->meta_state.dgc_prepare.ds_layout);
+   result = radv_meta_create_descriptor_set_layout(device, 1, &binding, &device->meta_state.dgc_prepare.ds_layout);
    if (result != VK_SUCCESS)
       goto cleanup;
 
-   const VkPipelineLayoutCreateInfo leaf_pl_create_info = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1,
-      .pSetLayouts = &device->meta_state.dgc_prepare.ds_layout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges = &(VkPushConstantRange){VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(struct radv_dgc_params)},
+   const VkPushConstantRange pc_range = {
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .size = sizeof(struct radv_dgc_params),
    };
 
-   result = radv_CreatePipelineLayout(radv_device_to_handle(device), &leaf_pl_create_info, &device->meta_state.alloc,
-                                      &device->meta_state.dgc_prepare.p_layout);
+   result = radv_meta_create_pipeline_layout(device, &device->meta_state.dgc_prepare.ds_layout, 1, &pc_range,
+                                             &device->meta_state.dgc_prepare.p_layout);
    if (result != VK_SUCCESS)
       goto cleanup;
 
-   VkPipelineShaderStageCreateInfo shader_stage = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = vk_shader_module_handle_from_nir(cs),
-      .pName = "main",
-      .pSpecializationInfo = NULL,
-   };
-
-   VkComputePipelineCreateInfo pipeline_info = {
-      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage = shader_stage,
-      .flags = 0,
-      .layout = device->meta_state.dgc_prepare.p_layout,
-   };
-
-   result = radv_compute_pipeline_create(radv_device_to_handle(device), device->meta_state.cache, &pipeline_info,
-                                         &device->meta_state.alloc, &device->meta_state.dgc_prepare.pipeline);
+   result = radv_meta_create_compute_pipeline(device, cs, device->meta_state.dgc_prepare.p_layout,
+                                              &device->meta_state.dgc_prepare.pipeline);
    if (result != VK_SUCCESS)
       goto cleanup;
 

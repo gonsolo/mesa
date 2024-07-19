@@ -984,11 +984,16 @@ static const struct intel_device_info intel_device_info_ehl_2x4 = {
    .gt = _gt, .num_slices = _slices, .l3_banks = _l3,           \
    .simulator_id = 22,                                          \
    .max_eus_per_subslice = 16,                                  \
+   /* BSpec 45101 (r51017) */                                   \
    .pat = {                                                     \
-         .cached_coherent = PAT_ENTRY(0, WB, 2WAY),             \
-         .scanout = PAT_ENTRY(1, WC, NONE),                     \
-         .writeback_incoherent = PAT_ENTRY(0, WB, 2WAY),        \
-         .writecombining = PAT_ENTRY(1, WC, NONE),              \
+         /* CPU: WB, GPU: PAT 0 => WB, 2WAY */                  \
+         .cached_coherent = PAT_ENTRY(0, WB),                   \
+         /* CPU: WC, GPU: PAT 1 => WC */                        \
+         .scanout = PAT_ENTRY(1, WC),                           \
+         /* CPU: WB, GPU: PAT 0 => WB, 2WAY */                  \
+         .writeback_incoherent = PAT_ENTRY(0, WB),              \
+         /* CPU: WC, GPU: PAT 1 => WC */                        \
+         .writecombining = PAT_ENTRY(1, WC),                    \
    },                                                           \
    .cooperative_matrix_configurations = {                       \
     { INTEL_CMAT_SCOPE_SUBGROUP, 8, 8, 16, INTEL_CMAT_FLOAT16, INTEL_CMAT_FLOAT16, INTEL_CMAT_FLOAT32, INTEL_CMAT_FLOAT32 }, \
@@ -1064,14 +1069,7 @@ static const struct intel_device_info intel_device_info_rpl_p = {
    .has_llc = false,                                     \
    .has_local_mem = true,                                \
    .urb.size = 768,                                      \
-   .simulator_id = 30,                                   \
-   /* There is no PAT table for DG1, using TGL one */    \
-   .pat = {                                              \
-         .cached_coherent = PAT_ENTRY(0, WB, 2WAY),      \
-         .scanout = PAT_ENTRY(1, WC, NONE),              \
-         .writeback_incoherent = PAT_ENTRY(0, WB, 2WAY), \
-         .writecombining = PAT_ENTRY(1, WC, NONE),       \
-   }
+   .simulator_id = 30
 
 static const struct intel_device_info intel_device_info_dg1 = {
    GFX12_DG1_SG1_FEATURES,
@@ -1136,11 +1134,16 @@ static const struct intel_device_info intel_device_info_sg1 = {
    .has_ray_tracing = true,                                     \
    .has_flat_ccs = true,                                        \
    /* There is no PAT table for DG2, using TGL ones */          \
+   /* BSpec 45101 (r51017) */                                   \
    .pat = {                                                     \
-         .cached_coherent = PAT_ENTRY(0, WB, 1WAY),             \
-         .scanout = PAT_ENTRY(1, WC, NONE),                     \
-         .writeback_incoherent = PAT_ENTRY(0, WB, 2WAY),        \
-         .writecombining = PAT_ENTRY(1, WC, NONE),              \
+         /* CPU: WB, GPU: PAT 0 => WB, 2WAY */                  \
+         .cached_coherent = PAT_ENTRY(0, WB),                   \
+         /* CPU: WC, GPU: PAT 1 => WC */                        \
+         .scanout = PAT_ENTRY(1, WC),                           \
+         /* CPU: WB, GPU: PAT 0 => WB, 2WAY */                  \
+         .writeback_incoherent = PAT_ENTRY(0, WB),              \
+         /* CPU: WC, GPU: PAT 1 => WC */                        \
+         .writecombining = PAT_ENTRY(1, WC),                    \
    }
 
 static const struct intel_device_info intel_device_info_dg2_g10 = {
@@ -1179,11 +1182,16 @@ static const struct intel_device_info intel_device_info_atsm_g11 = {
    .has_coarse_pixel_primitive_and_cb = true,                   \
    .has_mesh_shading = true,                                    \
    .has_ray_tracing = true,                                     \
+   /* BSpec 45101 (r51017) */                                   \
    .pat = {                                                     \
-         .cached_coherent = PAT_ENTRY(3, WB, 1WAY),             \
-         .scanout = PAT_ENTRY(1, WC, NONE),                     \
-         .writeback_incoherent = PAT_ENTRY(0, WB, NONE),        \
-         .writecombining = PAT_ENTRY(1, WC, NONE),              \
+         /* CPU: WB, GPU: PAT 3 => WB, 1WAY */                  \
+         .cached_coherent = PAT_ENTRY(3, WB),                   \
+         /* CPU: WC, GPU: PAT 1 => WC */                        \
+         .scanout = PAT_ENTRY(1, WC),                           \
+         /* CPU: WB, GPU: PAT 0 => WB, 0WAY */                  \
+         .writeback_incoherent = PAT_ENTRY(0, WB),              \
+         /* CPU: WC, GPU: PAT 1 => WC */                        \
+         .writecombining = PAT_ENTRY(1, WC),                    \
    }
 
 static const struct intel_device_info intel_device_info_mtl_u = {
@@ -1220,12 +1228,16 @@ static const struct intel_device_info intel_device_info_arl_h = {
    .has_mesh_shading = true,                                    \
    .has_ray_tracing = true,                                     \
    .has_indirect_unroll = true,                                 \
+   /* BSpec 71582 (r59285) */                                   \
    .pat = {                                                     \
-      .cached_coherent = PAT_ENTRY(1, WB, 1WAY),                \
-      .scanout = PAT_ENTRY(6, WC, NONE),                        \
-      .writeback_incoherent = PAT_ENTRY(0, WB, NONE),           \
-      .writecombining = PAT_ENTRY(6, WC, NONE),                 \
-      .compressed = PAT_ENTRY(11, WC, NONE)                     \
+      /* CPU: WB, GPU: PAT 1 => WB, 1WAY */                     \
+      .cached_coherent = PAT_ENTRY(1, WB),                      \
+      /* CPU: WC, GPU: PAT 6 => XD */                           \
+      .scanout = PAT_ENTRY(6, WC),                              \
+      /* CPU: WC, GPU: PAT 0 => WB */                           \
+      .writecombining = PAT_ENTRY(0, WC),                       \
+      /* CPU: WC, GPU: PAT 11 => XD, compressed */              \
+      .compressed = PAT_ENTRY(11, WC)                           \
    },                                                           \
    .cooperative_matrix_configurations = {                       \
     { INTEL_CMAT_SCOPE_SUBGROUP, 8, 16, 16, INTEL_CMAT_FLOAT16, INTEL_CMAT_FLOAT16, INTEL_CMAT_FLOAT32, INTEL_CMAT_FLOAT32 }, \

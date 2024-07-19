@@ -1625,6 +1625,30 @@ typedef struct nir_alu_instr {
    nir_alu_src src[];
 } nir_alu_instr;
 
+static inline bool
+nir_alu_instr_is_signed_zero_preserve(nir_alu_instr *alu)
+{
+   return nir_is_float_control_signed_zero_preserve(alu->fp_fast_math, alu->def.bit_size);
+}
+
+static inline bool
+nir_alu_instr_is_inf_preserve(nir_alu_instr *alu)
+{
+   return nir_is_float_control_inf_preserve(alu->fp_fast_math, alu->def.bit_size);
+}
+
+static inline bool
+nir_alu_instr_is_nan_preserve(nir_alu_instr *alu)
+{
+   return nir_is_float_control_nan_preserve(alu->fp_fast_math, alu->def.bit_size);
+}
+
+static inline bool
+nir_alu_instr_is_signed_zero_inf_nan_preserve(nir_alu_instr *alu)
+{
+   return nir_is_float_control_signed_zero_inf_nan_preserve(alu->fp_fast_math, alu->def.bit_size);
+}
+
 void nir_alu_src_copy(nir_alu_src *dest, const nir_alu_src *src);
 
 nir_component_mask_t
@@ -3782,6 +3806,12 @@ typedef struct nir_shader_compiler_options {
 
    /** enable rules that avoid generating umin from signed integer ops */
    bool lower_umin;
+
+   /* lower fmin/fmax with signed zero preserve to fmin/fmax with
+    * no_signed_zero, for backends whose fmin/fmax implementations do not
+    * implement IEEE-754-2019 semantics for signed zero.
+    */
+   bool lower_fminmax_signed_zero;
 
    /* lower fdph to fdot4 */
    bool lower_fdph;
@@ -6576,6 +6606,7 @@ bool nir_opt_large_constants(nir_shader *shader,
                              glsl_type_size_align_func size_align,
                              unsigned threshold);
 
+bool nir_opt_licm(nir_shader *shader);
 bool nir_opt_loop(nir_shader *shader);
 
 bool nir_opt_loop_unroll(nir_shader *shader);
