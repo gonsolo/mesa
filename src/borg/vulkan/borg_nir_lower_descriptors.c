@@ -105,6 +105,8 @@ lower_ssbo_resource_index(nir_builder *b, nir_intrinsic_instr *intrin,
 
    nir_def *addr;
    switch (ctx->ssbo_addr_format) {
+
+   case nir_address_format_64bit_global:
    case nir_address_format_64bit_global_32bit_offset:
    case nir_address_format_64bit_bounded_global:
       addr = nir_vec4(b, nir_unpack_64_2x32_split_x(b, binding_addr),
