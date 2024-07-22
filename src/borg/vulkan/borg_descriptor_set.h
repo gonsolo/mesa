@@ -28,5 +28,10 @@ struct borg_descriptor_set {
 VK_DEFINE_NONDISP_HANDLE_CASTS(borg_descriptor_set, base, VkDescriptorSet,
                        VK_OBJECT_TYPE_DESCRIPTOR_SET)
 
+struct borg_buffer_address {
+   uint64_t base_addr;
+   uint32_t size;
+   uint32_t zero; /* Must be zero! */
+};
 
 #endif
