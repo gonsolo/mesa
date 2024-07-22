@@ -114,6 +114,7 @@ lower_ssbo_resource_index(nir_builder *b, nir_intrinsic_instr *intrin,
       break;
 
    default:
+      printf("Unknown address mode: %i\n", ctx->ssbo_addr_format);
       unreachable("Unknown address mode");
    }
 
