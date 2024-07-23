@@ -424,6 +424,9 @@ pub extern "C" fn nak_compile_shader(
         write!(asm, "{}", s).expect("Failed to dump assembly");
     }
 
+    // gonsolo
+    println!("{}", s);
+
     s.remove_annotations();
 
     let code = sm.encode_shader(&s);

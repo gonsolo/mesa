@@ -1,9 +1,17 @@
 // Copyright © 2024 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
+use std::cmp::max;
+use std::fmt;
 
 pub struct Function {
     // TODO
+}
+
+impl fmt::Display for Function {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Ok(())
+    }
 }
 
 pub struct PhiAllocator {
@@ -19,6 +27,15 @@ impl PhiAllocator {
 pub struct Shader {
     //pub info: ShaderInfo,
     pub functions: Vec<Function>,
+}
+
+impl fmt::Display for Shader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for func in &self.functions {
+            write!(f, "{}", func)?;
+        }
+        Ok(())
+    }
 }
 
 pub struct SSAValueAllocator {

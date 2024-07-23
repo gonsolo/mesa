@@ -35,6 +35,10 @@ pub extern "C" fn bak_compile_shader(
     let nir = unsafe { &*nir };
 
     let s = bak_shader_from_nir(nir);
+
+    // gonsolo
+    println!("{}", s);
+
     let code = s.encode();
     // TODO
 

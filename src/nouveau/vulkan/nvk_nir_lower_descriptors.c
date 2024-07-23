@@ -559,6 +559,8 @@ load_descriptor_set_addr(nir_builder *b, uint32_t set,
    uint32_t set_addr_offset = nvk_root_descriptor_offset(sets) +
       set * sizeof(struct nvk_buffer_address);
 
+   printf("load_descriptor_set_addr: %i\n", set_addr_offset);
+
    return nir_ldc_nv(b, 1, 64, nir_imm_int(b, 0),
                      nir_imm_int(b, set_addr_offset),
                      .align_mul = 8, .align_offset = 0);
