@@ -48,6 +48,10 @@ borg_CreateDevice(VkPhysicalDevice physicalDevice,
 
    dev->vk.shader_ops = &borg_device_shader_ops;
 
+   simple_mtx_init(&dev->heap_mutex, mtx_plain);
+   STATIC_ASSERT(BORG_HEAP_START < BORG_HEAP_END);
+   util_vma_heap_init(&dev->heap, BORG_HEAP_START, BORG_HEAP_END - BORG_HEAP_START);
+
    drmDevicePtr drm_device = NULL;
    int ret = drmGetDeviceFromDevId(pdev->render_dev, 0, &drm_device);
    if (ret != 0) {

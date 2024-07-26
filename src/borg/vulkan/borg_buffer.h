@@ -10,6 +10,7 @@
 
 struct borg_buffer {
 	struct vk_buffer vk;
+        uint64_t addr;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(borg_buffer, vk.base, VkBuffer, VK_OBJECT_TYPE_BUFFER)
