@@ -12,6 +12,9 @@
 #include "nir_builder.h"
 #include "nir_deref.h"
 
+#include "clc397.h"
+#include "clc597.h"
+
 struct lower_desc_cbuf {
    struct nvk_cbuf key;
 
@@ -48,6 +51,7 @@ compar_cbufs(const void *_a, const void *_b)
 }
 
 struct lower_descriptors_ctx {
+   const struct nv_device_info *dev_info;
    const struct nvk_descriptor_set_layout *set_layouts[NVK_MAX_SETS];
 
    bool use_bindless_cbuf;
@@ -454,6 +458,14 @@ build_cbuf_map(nir_shader *nir, struct lower_descriptors_ctx *ctx)
       /* We can't support indirect cbufs in compute yet */
       if ((nir->info.stage == MESA_SHADER_COMPUTE ||
            nir->info.stage == MESA_SHADER_KERNEL) &&
+          cbufs[i].key.type == NVK_CBUF_TYPE_UBO_DESC)
+         continue;
+
+      /* Prior to Turing, indirect cbufs require splitting the pushbuf and
+       * pushing bits of the descriptor set.  Doing this every draw call is
+       * probably more overhead than it's worth.
+       */
+      if (ctx->dev_info->cls_eng3d < TURING_A &&
           cbufs[i].key.type == NVK_CBUF_TYPE_UBO_DESC)
          continue;
 
@@ -1053,12 +1065,13 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
    const uint64_t plane_offset_B =
       plane * sizeof(struct nvk_sampled_image_descriptor);
 
+   nir_def *texture_desc =
+         load_resource_deref_desc(b, 1, 32, texture, plane_offset_B, ctx);
+
    nir_def *combined_handle;
    if (texture == sampler) {
-      combined_handle = load_resource_deref_desc(b, 1, 32, texture, plane_offset_B, ctx);
+      combined_handle = texture_desc;
    } else {
-      nir_def *texture_desc =
-         load_resource_deref_desc(b, 1, 32, texture, plane_offset_B, ctx);
       combined_handle = nir_iand_imm(b, texture_desc,
                                      NVK_IMAGE_DESCRIPTOR_IMAGE_INDEX_MASK);
 
@@ -1086,6 +1099,23 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
    } else {
       nir_src_rewrite(&tex->src[sampler_src_idx].src, combined_handle);
       tex->src[sampler_src_idx].src_type = nir_tex_src_sampler_handle;
+   }
+
+   /* On pre-Volta hardware, we don't have real null descriptors.  Null
+    * descriptors work well enough for sampling but they may not return the
+    * correct query results.
+    */
+   if (ctx->dev_info->cls_eng3d < VOLTA_A && nir_tex_instr_is_query(tex)) {
+      b->cursor = nir_after_instr(&tex->instr);
+
+      /* This should get CSE'd with the earlier load */
+      nir_def *texture_handle =
+         nir_iand_imm(b, texture_desc, NVK_IMAGE_DESCRIPTOR_IMAGE_INDEX_MASK);
+      nir_def *is_null = nir_ieq_imm(b, texture_handle, 0);
+      nir_def *zero = nir_imm_zero(b, tex->def.num_components,
+                                      tex->def.bit_size);
+      nir_def *res = nir_bcsel(b, is_null, zero, &tex->def);
+      nir_def_rewrite_uses_after(&tex->def, res, res->parent_instr);
    }
 
    return true;
@@ -1320,6 +1350,7 @@ nvk_nir_lower_descriptors(nir_shader *nir,
                           struct nvk_cbuf_map *cbuf_map_out)
 {
    struct lower_descriptors_ctx ctx = {
+      .dev_info = &pdev->info,
       .use_bindless_cbuf = nvk_use_bindless_cbuf(&pdev->info),
       .clamp_desc_array_bounds =
          rs->storage_buffers != VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT ||

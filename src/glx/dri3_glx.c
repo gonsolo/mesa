@@ -345,10 +345,6 @@ dri3_create_drawable(struct glx_screen *base, XID xDrawable,
    struct dri3_screen *psc = (struct dri3_screen *) base;
    __GLXDRIconfigPrivate *config = (__GLXDRIconfigPrivate *) config_base;
    bool has_multibuffer = false;
-#ifdef HAVE_DRI3_MODIFIERS
-   const struct dri3_display *const pdp = (struct dri3_display *)
-      base->display->dri3Display;
-#endif
 
    pdraw = calloc(1, sizeof(*pdraw));
    if (!pdraw)
@@ -360,7 +356,7 @@ dri3_create_drawable(struct glx_screen *base, XID xDrawable,
    pdraw->base.psc = &psc->base;
 
 #ifdef HAVE_DRI3_MODIFIERS
-   if (pdp->has_multibuffer && psc->image && psc->image->base.version >= 15)
+   if (base->display->has_multibuffer && psc->image && psc->image->base.version >= 15)
       has_multibuffer = true;
 #endif
 
@@ -541,7 +537,7 @@ const __DRIuseInvalidateExtension dri3UseInvalidate = {
    .base = { __DRI_USE_INVALIDATE, 1 }
 };
 
-static const __DRIbackgroundCallableExtension driBackgroundCallable = {
+static const __DRIbackgroundCallableExtension dri3BackgroundCallable = {
    .base = { __DRI_BACKGROUND_CALLABLE, 2 },
 
    .setBackgroundContext = dri_set_background_context,
@@ -551,7 +547,7 @@ static const __DRIbackgroundCallableExtension driBackgroundCallable = {
 static const __DRIextension *loader_extensions[] = {
    &imageLoaderExtension.base,
    &dri3UseInvalidate.base,
-   &driBackgroundCallable.base,
+   &dri3BackgroundCallable.base,
    NULL
 };
 
@@ -789,19 +785,17 @@ static const struct glx_screen_vtable dri3_screen_vtable = {
  * Initializes the driver for the screen and sets up our structures
  */
 
-static struct glx_screen *
-dri3_create_screen(int screen, struct glx_display * priv, bool driver_name_is_inferred)
+struct glx_screen *
+dri3_create_screen(int screen, struct glx_display * priv, bool driver_name_is_inferred, bool *return_zink)
 {
    xcb_connection_t *c = XGetXCBConnection(priv->dpy);
    const __DRIconfig **driver_configs;
    const __DRIextension **extensions;
-   const struct dri3_display *const pdp = (struct dri3_display *)
-      priv->dri3Display;
    struct dri3_screen *psc;
    __GLXDRIscreen *psp;
    struct glx_config *configs = NULL, *visuals = NULL;
    char *driverName, *driverNameDisplayGPU, *tmp;
-   bool return_zink = false;
+   *return_zink = false;
 
    psc = calloc(1, sizeof *psc);
    if (psc == NULL)
@@ -838,7 +832,7 @@ dri3_create_screen(int screen, struct glx_display * priv, bool driver_name_is_in
    }
 
    if (!strcmp(driverName, "zink") && !debug_get_bool_option("LIBGL_KOPPER_DISABLE", false)) {
-      return_zink = true;
+      *return_zink = true;
       goto handle_error;
    }
 
@@ -866,7 +860,7 @@ dri3_create_screen(int screen, struct glx_display * priv, bool driver_name_is_in
          if (strcmp(driverName, driverNameDisplayGPU) == 0) {
             psc->driScreenDisplayGPU =
                psc->image_driver->createNewScreen3(screen, psc->fd_display_gpu,
-                                                   pdp->loader_extensions,
+                                                   loader_extensions,
                                                    extensions,
                                                    &driver_configs, driver_name_is_inferred, psc);
          }
@@ -877,7 +871,7 @@ dri3_create_screen(int screen, struct glx_display * priv, bool driver_name_is_in
 
    psc->driScreenRenderGPU =
       psc->image_driver->createNewScreen3(screen, psc->fd_render_gpu,
-                                          pdp->loader_extensions,
+                                          loader_extensions,
                                           extensions,
                                           &driver_configs, driver_name_is_inferred, psc);
 
@@ -1013,10 +1007,12 @@ dri3_create_screen(int screen, struct glx_display * priv, bool driver_name_is_in
          psc->prefer_back_buffer_reuse = value;
    }
 
+   priv->driver = GLX_DRIVER_DRI3;
+
    return &psc->base;
 
 handle_error:
-   if (!return_zink)
+   if (!*return_zink)
       CriticalErrorMessageF("failed to load driver: %s\n", driverName ? driverName : "(null)");
 
    if (configs)
@@ -1038,46 +1034,7 @@ handle_error:
    glx_screen_cleanup(&psc->base);
    free(psc);
 
-   return return_zink ? GLX_LOADER_USE_ZINK : NULL;
-}
-
-/** dri_destroy_display
- *
- * Called from __glXFreeDisplayPrivate.
- */
-static void
-dri3_destroy_display(__GLXDRIdisplay * dpy)
-{
-   free(dpy);
-}
-
-/** dri3_create_display
- *
- * Allocate, initialize and return a __DRIdisplayPrivate object.
- * This is called from __glXInitialize() when we are given a new
- * display pointer. This is public to that function, but hidden from
- * outside of libGL.
- */
-_X_HIDDEN __GLXDRIdisplay *
-dri3_create_display(Display * dpy)
-{
-   struct dri3_display                  *pdp;
-   bool err = false;
-   bool has_multibuffer = loader_dri3_check_multibuffer(XGetXCBConnection(dpy), &err);
-   if (err)
-      return NULL;
-
-   pdp = calloc(1, sizeof *pdp);
-   if (pdp == NULL)
-      return NULL;
-   pdp->has_multibuffer = has_multibuffer;
-
-   pdp->base.destroyDisplay = dri3_destroy_display;
-   pdp->base.createScreen = dri3_create_screen;
-
-   pdp->loader_extensions = loader_extensions;
-
-   return &pdp->base;
+   return NULL;
 }
 
 #endif /* GLX_DIRECT_RENDERING */

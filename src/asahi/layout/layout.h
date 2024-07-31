@@ -186,6 +186,19 @@ ail_get_layer_level_B(const struct ail_layout *layout, unsigned z_px,
 }
 
 static inline uint32_t
+ail_get_level_size_B(const struct ail_layout *layout, unsigned level)
+{
+   if (layout->tiling == AIL_TILING_LINEAR) {
+      assert(level == 0);
+      return layout->layer_stride_B;
+   } else {
+      assert(level + 1 < ARRAY_SIZE(layout->level_offsets_B));
+      return layout->level_offsets_B[level + 1] -
+             layout->level_offsets_B[level];
+   }
+}
+
+static inline uint32_t
 ail_get_linear_pixel_B(const struct ail_layout *layout, ASSERTED unsigned level,
                        uint32_t x_px, uint32_t y_px, uint32_t z_px)
 {
@@ -264,13 +277,15 @@ ail_is_level_twiddled_uncompressed(const struct ail_layout *layout,
 
 void ail_make_miptree(struct ail_layout *layout);
 
-void ail_detile(void *_tiled, void *_linear, struct ail_layout *tiled_layout,
-                unsigned level, unsigned linear_pitch_B, unsigned sx_px,
-                unsigned sy_px, unsigned width_px, unsigned height_px);
+void ail_detile(void *_tiled, void *_linear,
+                const struct ail_layout *tiled_layout, unsigned level,
+                unsigned linear_pitch_B, unsigned sx_px, unsigned sy_px,
+                unsigned width_px, unsigned height_px);
 
-void ail_tile(void *_tiled, void *_linear, struct ail_layout *tiled_layout,
-              unsigned level, unsigned linear_pitch_B, unsigned sx_px,
-              unsigned sy_px, unsigned width_px, unsigned height_px);
+void ail_tile(void *_tiled, void *_linear,
+              const struct ail_layout *tiled_layout, unsigned level,
+              unsigned linear_pitch_B, unsigned sx_px, unsigned sy_px,
+              unsigned width_px, unsigned height_px);
 
 #ifdef __cplusplus
 } /* extern C */

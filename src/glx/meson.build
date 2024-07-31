@@ -61,7 +61,7 @@ extra_deps_libgl = []
 extra_ld_args_libgl = []
 
 # dri2
-if (with_dri_platform == 'drm' and dep_libdrm.found()) or with_dri_platform == 'apple'
+if with_x11_dri2
   files_libglx += files(
     'dri2.c',
     'dri2_glx.c',
@@ -144,9 +144,4 @@ libgl = shared_library(
   version : gl_lib_version,
   darwin_versions : '4.0.0',
   install : true,
-  install_rpath : dri_drivers_path,
 )
-
-if with_tests
-  subdir('tests')
-endif

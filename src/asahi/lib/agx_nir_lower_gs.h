@@ -24,14 +24,10 @@ struct nir_def *agx_load_per_vertex_input(struct nir_builder *b,
                                           nir_intrinsic_instr *intr,
                                           struct nir_def *vertex);
 
-bool agx_nir_lower_index_buffer(struct nir_shader *s, unsigned index_size_B,
-                                bool patches);
-
-bool agx_nir_lower_sw_vs_id(nir_shader *s);
+bool agx_nir_lower_sw_vs(struct nir_shader *s, unsigned index_size_B);
 
 bool agx_nir_lower_vs_before_gs(struct nir_shader *vs,
-                                const struct nir_shader *libagx,
-                                uint64_t *outputs);
+                                const struct nir_shader *libagx);
 
 bool agx_nir_lower_gs(struct nir_shader *gs, const struct nir_shader *libagx,
                       bool rasterizer_discard, struct nir_shader **gs_count,
@@ -74,13 +70,16 @@ void agx_nir_tessellate(struct nir_builder *b, const void *key);
 
 bool agx_nir_lower_tcs(struct nir_shader *tcs, const struct nir_shader *libagx);
 
-bool agx_nir_lower_tes(struct nir_shader *tes, const struct nir_shader *libagx);
+bool agx_nir_lower_tes(struct nir_shader *tes, const struct nir_shader *libagx,
+                       bool to_hw_vs);
 
 uint64_t agx_tcs_per_vertex_outputs(const struct nir_shader *nir);
 
 unsigned agx_tcs_output_stride(const struct nir_shader *nir);
 
 void agx_nir_tess_setup_indirect(struct nir_builder *b, const void *data);
+
+void agx_nir_increment_statistic(struct nir_builder *b, const void *data);
 
 void agx_nir_increment_cs_invocations(struct nir_builder *b, const void *data);
 

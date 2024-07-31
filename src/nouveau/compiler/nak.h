@@ -98,8 +98,14 @@ struct nak_shader_info {
    /** Number of GPRs used */
    uint8_t num_gprs;
 
-   /** Number of barriers used */
-   uint8_t num_barriers;
+   /**
+    * Number of control barriers used
+    *
+    * These are barriers in the sense of glsl barrier(), not reconvergence
+    * barriers. In CUDA, these barriers have an index, but we currently
+    * only use index zero for vulkan, which means this will be at most 1.
+    */
+   uint8_t num_control_barriers;
 
    uint8_t _pad0;
 
@@ -108,6 +114,9 @@ struct nak_shader_info {
 
    /** Size of shader local (scratch) memory */
    uint32_t slm_size;
+
+   /** Size of call/return stack in bytes/warp */
+   uint32_t crs_size;
 
    union {
       struct {
@@ -196,7 +205,14 @@ void nak_fill_qmd(const struct nv_device_info *dev,
                   const struct nak_qmd_info *qmd_info,
                   void *qmd_out, size_t qmd_size);
 
-uint32_t nak_qmd_dispatch_size_offset(const struct nv_device_info *dev);
+struct nak_qmd_dispatch_size_layout {
+   uint16_t x_start, x_end;
+   uint16_t y_start, y_end;
+   uint16_t z_start, z_end;
+};
+
+struct nak_qmd_dispatch_size_layout
+nak_get_qmd_dispatch_size_layout(const struct nv_device_info *dev);
 
 #ifdef __cplusplus
 }

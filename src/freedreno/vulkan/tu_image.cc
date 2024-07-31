@@ -10,11 +10,13 @@
 #include "tu_image.h"
 
 #include "fdl/fd6_format_table.h"
+#include "common/freedreno_lrz.h"
 
 #include "util/u_debug.h"
 #include "util/format/u_format.h"
 #include "vulkan/vulkan_android.h"
 #include "vk_android.h"
+#include "vk_debug_utils.h"
 #include "vk_util.h"
 #include "drm-uapi/drm_fourcc.h"
 #include "vulkan/vulkan_core.h"
@@ -237,6 +239,7 @@ tu_image_view_init(struct tu_device *device,
    args.level_count = vk_image_subresource_level_count(&image->vk, range);
    args.min_lod_clamp = iview->vk.min_lod;
    args.format = tu_format_for_aspect(format, aspect_mask);
+   args.ubwc_fc_mutable = image->ubwc_fc_mutable;
    vk_component_mapping_to_pipe_swizzle(pCreateInfo->components, args.swiz);
    if (conversion) {
       unsigned char conversion_swiz[4], create_swiz[4];
@@ -593,12 +596,12 @@ tu_image_update_layout(struct tu_device *device, struct tu_image *image,
       /* Fast-clear buffer cannot be larger than 512 bytes on A6XX and 1024 bytes on A7XX (HW limitation) */
       image->has_lrz_fc =
          device->physical_device->info->a6xx.enable_lrz_fast_clear &&
-         lrz_fc_size <= tu_lrzfc_layout<CHIP>::FC_SIZE &&
+         lrz_fc_size <= fd_lrzfc_layout<CHIP>::FC_SIZE &&
          !TU_DEBUG(NOLRZFC);
 
       if (image->has_lrz_fc || device->physical_device->info->a6xx.has_lrz_dir_tracking) {
          image->lrz_fc_offset = image->total_size + lrz_size;
-         lrz_size += sizeof(tu_lrzfc_layout<CHIP>);
+         lrz_size += sizeof(fd_lrzfc_layout<CHIP>);
       }
 
       image->total_size += lrz_size;
@@ -645,6 +648,7 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
                       device->use_z24uint_s8uint))
       image->ubwc_enabled = false;
 
+   bool fmt_list_has_swaps = false;
    /* Mutable images can be reinterpreted as any other compatible format.
     * This is a problem with UBWC (compression for different formats is different),
     * but also tiling ("swap" affects how tiled formats are stored in memory)
@@ -661,9 +665,11 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
        !vk_format_is_depth_or_stencil(image->vk.format)) {
       const VkImageFormatListCreateInfo *fmt_list =
          vk_find_struct_const(pCreateInfo->pNext, IMAGE_FORMAT_LIST_CREATE_INFO);
+      fmt_list_has_swaps = format_list_has_swaps(fmt_list);
       if (!tu6_mutable_format_list_ubwc_compatible(device->physical_device->info,
                                                    fmt_list)) {
-         if (image->ubwc_enabled) {
+         bool mutable_ubwc_fc = device->physical_device->info->a7xx.ubwc_all_formats_compatible;
+         if (image->ubwc_enabled && !mutable_ubwc_fc) {
             if (fmt_list && fmt_list->viewFormatCount == 2) {
                perf_debug(
                   device,
@@ -685,10 +691,17 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
             image->ubwc_enabled = false;
          }
 
-         if (format_list_reinterprets_r8g8_r16(tu_vk_format_to_pipe_format(image->vk.format), fmt_list) ||
-            format_list_has_swaps(fmt_list)) {
+         bool r8g8_r16 = format_list_reinterprets_r8g8_r16(tu_vk_format_to_pipe_format(image->vk.format), fmt_list);
+
+         /* A750+ TODO: Correctly handle swaps when copying mutable images.
+          * We should be able to support UBWC for mutable images with swaps.
+          */
+         if ((r8g8_r16 && !mutable_ubwc_fc) || fmt_list_has_swaps) {
+            image->ubwc_enabled = false;
             image->force_linear_tile = true;
          }
+
+         image->ubwc_fc_mutable = image->ubwc_enabled && mutable_ubwc_fc;
       }
    }
 
@@ -821,6 +834,7 @@ tu_DestroyImage(VkDevice _device,
 {
    VK_FROM_HANDLE(tu_device, device, _device);
    VK_FROM_HANDLE(tu_image, image, _image);
+   struct tu_instance *instance = device->physical_device->instance;
 
    if (!image)
       return;
@@ -831,6 +845,11 @@ tu_DestroyImage(VkDevice _device,
    tu_perfetto_log_destroy_image(device, image);
 #endif
 
+   if (image->iova)
+      vk_address_binding_report(&instance->vk, &image->vk.base,
+                                image->iova, image->total_size,
+                                VK_DEVICE_ADDRESS_BINDING_TYPE_UNBIND_EXT);
+
    vk_image_destroy(&device->vk, pAllocator, &image->vk);
 }
 
@@ -840,6 +859,7 @@ tu_BindImageMemory2(VkDevice _device,
                     const VkBindImageMemoryInfo *pBindInfos)
 {
    VK_FROM_HANDLE(tu_device, device, _device);
+   struct tu_instance *instance = device->physical_device->instance;
 
    for (uint32_t i = 0; i < bindInfoCount; ++i) {
       VK_FROM_HANDLE(tu_image, image, pBindInfos[i].image);
@@ -858,6 +878,13 @@ tu_BindImageMemory2(VkDevice _device,
          image->bo = wsi_img->bo;
          image->map = NULL;
          image->iova = wsi_img->iova;
+
+         TU_RMV(image_bind, device, image);
+
+         vk_address_binding_report(&instance->vk, &image->vk.base,
+                                   image->iova, image->total_size,
+                                   VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT);
+
          continue;
       }
 #endif
@@ -916,6 +943,10 @@ tu_BindImageMemory2(VkDevice _device,
       }
 
       TU_RMV(image_bind, device, image);
+
+      vk_address_binding_report(&instance->vk, &image->vk.base,
+                                image->iova, image->total_size,
+                                VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT);
    }
 
    return VK_SUCCESS;

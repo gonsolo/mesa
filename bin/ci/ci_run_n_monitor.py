@@ -33,6 +33,7 @@ from gitlab_common import (
     get_gitlab_project,
     get_token_from_default_dir,
     pretty_duration,
+    print_once,
     read_token,
     wait_for_pipeline,
 )
@@ -79,9 +80,9 @@ def print_job_status(
 
     duration = job_duration(job)
 
-    print(
+    print_once(
         STATUS_COLORS[job.status]
-        + "🞋 target job "  # U+1F78B Round target
+        + "🞋 job "  # U+1F78B Round target
         + link2print(job.web_url, job.name, job_name_field_pad)
         + (f"has new status: {job.status}" if new_status else f"{job.status}")
         + (f" ({pretty_duration(duration)})" if job.started_at else "")
@@ -124,6 +125,11 @@ def monitor_pipeline(
     execution_times = defaultdict(lambda: defaultdict(tuple))
     target_id: int = -1
     name_field_pad: int = len(max(dependencies, key=len))+2
+    # In a running pipeline, we can skip following job traces that are in these statuses.
+    skip_follow_statuses = COMPLETED_STATUSES
+    if not force_manual:
+        # If the target job is marked as manual and we don't force it to run, it will be skipped.
+        skip_follow_statuses.add("manual")
 
     # Pre-populate the stress status counter for already completed target jobs.
     if stress:
@@ -133,11 +139,23 @@ def monitor_pipeline(
                 stress_status_counter[job.name][job.status] += 1
                 execution_times[job.name][job.id] = (job_duration(job), job.status, job.web_url)
 
+    # jobs_waiting is a list of job names that are waiting for status update.
+    # It occurs when a job that we want to run depends on another job that is not yet finished.
+    jobs_waiting = []
+    # FIXME: This function has too many parameters, consider refactoring.
+    enable_job_fn = partial(
+        enable_job,
+        project=project,
+        pipeline=pipeline,
+        force_manual=force_manual,
+        job_name_field_pad=name_field_pad,
+        jobs_waiting=jobs_waiting,
+    )
     while True:
         deps_failed = []
         to_cancel = []
+        jobs_waiting.clear()
         for job in sorted(pipeline.jobs.list(all=True), key=lambda j: j.name):
-            # target jobs
             if target_jobs_regex.fullmatch(job.name):
                 target_id = job.id
                 target_status = job.status
@@ -149,10 +167,10 @@ def monitor_pipeline(
                     ):
                         stress_status_counter[job.name][target_status] += 1
                         execution_times[job.name][job.id] = (job_duration(job), target_status, job.web_url)
-                        job = enable_job(project, pipeline, job, "retry", force_manual, name_field_pad)
+                        job = enable_job_fn(job=job, action_type="retry")
                 else:
                     execution_times[job.name][job.id] = (job_duration(job), target_status, job.web_url)
-                    job = enable_job(project, pipeline, job, "target", force_manual, name_field_pad)
+                    job = enable_job_fn(job=job, action_type="target")
 
                 print_job_status(job, target_status not in target_statuses[job.name], name_field_pad)
                 target_statuses[job.name] = target_status
@@ -165,7 +183,7 @@ def monitor_pipeline(
 
             # run dependencies and cancel the rest
             if job.name in dependencies:
-                job = enable_job(project, pipeline, job, "dep", True, name_field_pad)
+                job = enable_job_fn(job=job, action_type="dep")
                 if job.status == "failed":
                     deps_failed.append(job.name)
             else:
@@ -189,7 +207,14 @@ def monitor_pipeline(
                 pretty_wait(REFRESH_WAIT_JOBS)
                 continue
 
-        print("---------------------------------", flush=False)
+        if jobs_waiting:
+            print_once(
+                f"{Fore.YELLOW}Waiting for jobs to update status:",
+                ", ".join(jobs_waiting),
+                Fore.RESET,
+            )
+            pretty_wait(REFRESH_WAIT_JOBS)
+            continue
 
         if len(target_statuses) == 1 and RUNNING_STATUSES.intersection(
             target_statuses.values()
@@ -214,7 +239,7 @@ def monitor_pipeline(
             )
             return None, 1, execution_times
 
-        if {"success", "manual"}.issuperset(target_statuses.values()):
+        if skip_follow_statuses.issuperset(target_statuses.values()):
             return None, 0, execution_times
 
         pretty_wait(REFRESH_WAIT_JOBS)
@@ -235,8 +260,14 @@ def enable_job(
     action_type: Literal["target", "dep", "retry"],
     force_manual: bool,
     job_name_field_pad: int = 0,
+    jobs_waiting: list[str] = [],
 ) -> gitlab.v4.objects.ProjectPipelineJob:
-    """enable job"""
+    # We want to run this job, but it is not ready to run yet, so let's try again in the next
+    # iteration.
+    if job.status == "created":
+        jobs_waiting.append(job.name)
+        return job
+
     if (
         (job.status in COMPLETED_STATUSES and action_type != "retry")
         or (job.status == "manual" and not force_manual)
@@ -286,11 +317,12 @@ def cancel_jobs(
     if not to_cancel:
         return
 
-    print("Cancelled jobs: ", end=" ")
     with ThreadPoolExecutor(max_workers=6) as exe:
         part = partial(cancel_job, project)
         exe.map(part, to_cancel)
-    print()
+
+    # The cancelled jobs are printed without a newline
+    print_once()
 
 
 def print_log(

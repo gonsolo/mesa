@@ -22,8 +22,9 @@ fn init_info_from_nir(nir: &nir_shader) -> ShaderInfo {
     ShaderInfo {
         num_gprs: 0,
         num_instrs: 0,
-        num_barriers: 0,
+        num_control_barriers: 0,
         slm_size: nir.scratch_size,
+        max_crs_depth: 0,
         uses_global_mem: false,
         writes_global_mem: false,
         // TODO: handle this.
@@ -40,7 +41,16 @@ fn init_info_from_nir(nir: &nir_shader) -> ShaderInfo {
                 })
             }
             MESA_SHADER_VERTEX => ShaderStageInfo::Vertex,
-            MESA_SHADER_FRAGMENT => ShaderStageInfo::Fragment,
+            MESA_SHADER_FRAGMENT => {
+                let info_fs = unsafe { &nir.info.__bindgen_anon_1.fs };
+                ShaderStageInfo::Fragment(FragmentShaderInfo {
+                    uses_kill: false,
+                    does_interlock: false,
+                    post_depth_coverage: info_fs.post_depth_coverage(),
+                    early_fragment_tests: info_fs.early_fragment_tests(),
+                    uses_sample_shading: info_fs.uses_sample_shading(),
+                })
+            }
             MESA_SHADER_GEOMETRY => {
                 let info_gs = unsafe { &nir.info.__bindgen_anon_1.gs };
                 let output_topology = match info_gs.output_primitive {
@@ -69,7 +79,40 @@ fn init_info_from_nir(nir: &nir_shader) -> ShaderInfo {
                     threads_per_patch: info_tess.tcs_vertices_out,
                 })
             }
-            MESA_SHADER_TESS_EVAL => ShaderStageInfo::Tessellation,
+            MESA_SHADER_TESS_EVAL => {
+                let info_tess = unsafe { &nir.info.__bindgen_anon_1.tess };
+                ShaderStageInfo::Tessellation(TessellationShaderInfo {
+                    domain: match info_tess._primitive_mode {
+                        TESS_PRIMITIVE_TRIANGLES => {
+                            TessellationDomain::Triangle
+                        }
+                        TESS_PRIMITIVE_QUADS => TessellationDomain::Quad,
+                        TESS_PRIMITIVE_ISOLINES => TessellationDomain::Isoline,
+                        _ => panic!("Invalid tess_primitive_mode"),
+                    },
+                    spacing: match info_tess.spacing() {
+                        TESS_SPACING_EQUAL => TessellationSpacing::Integer,
+                        TESS_SPACING_FRACTIONAL_ODD => {
+                            TessellationSpacing::FractionalOdd
+                        }
+                        TESS_SPACING_FRACTIONAL_EVEN => {
+                            TessellationSpacing::FractionalEven
+                        }
+                        _ => panic!("Invalid gl_tess_spacing"),
+                    },
+                    primitives: if info_tess.point_mode() {
+                        TessellationPrimitives::Points
+                    } else if info_tess._primitive_mode
+                        == TESS_PRIMITIVE_ISOLINES
+                    {
+                        TessellationPrimitives::Lines
+                    } else if info_tess.ccw() {
+                        TessellationPrimitives::TrianglesCCW
+                    } else {
+                        TessellationPrimitives::TrianglesCW
+                    },
+                })
+            }
             _ => panic!("Unknown shader stage"),
         },
         io: match nir.info.stage() {
@@ -84,28 +127,42 @@ fn init_info_from_nir(nir: &nir_shader) -> ShaderInfo {
                 attr_in: [PixelImap::Unused; 128],
                 barycentric_attr_in: [0; 4],
                 reads_sample_mask: false,
-                uses_kill: false,
                 writes_color: 0,
                 writes_sample_mask: false,
                 writes_depth: false,
-                // TODO: Should be set if interlocks are in use. (VK_EXT_fragment_shader_interlock)
-                does_interlock: false,
             }),
             MESA_SHADER_VERTEX
             | MESA_SHADER_GEOMETRY
             | MESA_SHADER_TESS_CTRL
-            | MESA_SHADER_TESS_EVAL => ShaderIoInfo::Vtg(VtgIoInfo {
-                sysvals_in: SysValInfo::default(),
-                sysvals_in_d: 0,
-                sysvals_out: SysValInfo::default(),
-                sysvals_out_d: 0,
-                attr_in: [0; 4],
-                attr_out: [0; 4],
+            | MESA_SHADER_TESS_EVAL => {
+                let num_clip = nir.info.clip_distance_array_size();
+                let num_cull = nir.info.cull_distance_array_size();
+                let clip_enable = (1_u32 << num_clip) - 1;
+                let cull_enable = ((1_u32 << num_cull) - 1) << num_clip;
 
-                // TODO: figure out how to fill this.
-                store_req_start: u8::MAX,
-                store_req_end: 0,
-            }),
+                ShaderIoInfo::Vtg(VtgIoInfo {
+                    sysvals_in: SysValInfo::default(),
+                    sysvals_in_d: 0,
+                    sysvals_out: SysValInfo::default(),
+                    sysvals_out_d: 0,
+                    attr_in: [0; 4],
+                    attr_out: [0; 4],
+
+                    // TODO: figure out how to fill this.
+                    store_req_start: u8::MAX,
+                    store_req_end: 0,
+
+                    clip_enable: clip_enable.try_into().unwrap(),
+                    cull_enable: cull_enable.try_into().unwrap(),
+                    xfb: if nir.xfb_info.is_null() {
+                        None
+                    } else {
+                        Some(Box::new(unsafe {
+                            nak_xfb_from_nir(nir.xfb_info)
+                        }))
+                    },
+                })
+            }
             _ => panic!("Unknown shader stage"),
         },
     }
@@ -231,6 +288,13 @@ impl Index<FloatType> for ShaderFloatControls {
     }
 }
 
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum SyncType {
+    Sync,
+    Brk,
+    Cont,
+}
+
 struct ShaderFromNir<'a> {
     nir: &'a nir_shader,
     sm: &'a dyn ShaderModel,
@@ -240,6 +304,8 @@ struct ShaderFromNir<'a> {
     label_alloc: LabelAllocator,
     block_label: HashMap<u32, Label>,
     bar_label: HashMap<u32, Label>,
+    sync_blocks: HashSet<u32>,
+    crs: Vec<(u32, SyncType)>,
     fs_out_regs: [SSAValue; 34],
     end_block_id: u32,
     ssa_map: HashMap<u32, Vec<SSAValue>>,
@@ -258,6 +324,8 @@ impl<'a> ShaderFromNir<'a> {
             label_alloc: LabelAllocator::new(),
             block_label: HashMap::new(),
             bar_label: HashMap::new(),
+            sync_blocks: HashSet::new(),
+            crs: Vec::new(),
             fs_out_regs: [SSAValue::NONE; 34],
             end_block_id: 0,
             ssa_map: HashMap::new(),
@@ -271,6 +339,54 @@ impl<'a> ShaderFromNir<'a> {
             .block_label
             .entry(block.index)
             .or_insert_with(|| self.label_alloc.alloc())
+    }
+
+    fn push_crs(&mut self, target: &nir_block, sync_type: SyncType) {
+        self.sync_blocks.insert(target.index);
+        self.crs.push((target.index, sync_type));
+        let crs_depth = u32::try_from(self.crs.len()).unwrap();
+        self.info.max_crs_depth = max(self.info.max_crs_depth, crs_depth);
+    }
+
+    fn pop_crs(&mut self, target: &nir_block, sync_type: SyncType) {
+        if let Some((top_index, top_sync_type)) = self.crs.pop() {
+            assert!(top_index == target.index);
+            assert!(top_sync_type == sync_type);
+        } else {
+            panic!("Tried to pop an empty stack");
+        }
+    }
+
+    fn peek_crs(&self, target: &nir_block) -> Option<SyncType> {
+        for (i, (index, sync_type)) in self.crs.iter().enumerate().rev() {
+            if *index != target.index {
+                continue;
+            }
+
+            match sync_type {
+                SyncType::Sync => {
+                    // Sync must always be top-of-stack
+                    assert!(i == self.crs.len() - 1);
+                }
+                SyncType::Brk => {
+                    // Brk cannot skip over another Brk
+                    for (_, inner_sync) in &self.crs[(i + 1)..] {
+                        assert!(*inner_sync != SyncType::Brk);
+                    }
+                }
+                SyncType::Cont => {
+                    // Cont can only skip over Sync
+                    for (_, inner_sync) in &self.crs[(i + 1)..] {
+                        assert!(*inner_sync == SyncType::Sync);
+                    }
+                }
+            }
+
+            return Some(*sync_type);
+        }
+
+        assert!(!self.sync_blocks.contains(&target.index));
+        None
     }
 
     fn get_ssa(&mut self, ssa: &nir_def) -> &[SSAValue] {
@@ -1044,7 +1160,25 @@ impl<'a> ShaderFromNir<'a> {
                     high: false,
                     integer_rnd: false,
                 });
-                dst
+                if b.sm() < 70 {
+                    // Pre-Volta, F2F.ftz doesn't flush denorms so we need to do
+                    // that manually
+                    let denorm = b.alloc_ssa(RegFile::Pred, 1);
+                    b.push_op(OpFSetP {
+                        dst: denorm.into(),
+                        set_op: PredSetOp::And,
+                        cmp_op: FloatCmpOp::OrdLt,
+                        srcs: [srcs[0].fabs(), 0x38800000.into()],
+                        accum: true.into(),
+                        ftz: false,
+                    });
+                    // Get the correctly signed zero
+                    let zero =
+                        b.lop2(LogicOp2::And, srcs[0], 0x80000000.into());
+                    b.sel(denorm.into(), zero.into(), dst.into())
+                } else {
+                    dst
+                }
             }
             nir_op_frcp => {
                 assert!(alu.def.bit_size() == 32);
@@ -1284,21 +1418,7 @@ impl<'a> ShaderFromNir<'a> {
             }
             nir_op_ineg => {
                 if alu.def.bit_size == 64 {
-                    let x = srcs[0].as_ssa().unwrap();
-                    let sum = b.alloc_ssa(RegFile::GPR, 2);
-                    let carry = b.alloc_ssa(RegFile::Pred, 1);
-                    b.push_op(OpIAdd3 {
-                        dst: sum[0].into(),
-                        overflow: [carry.into(), Dst::None],
-                        srcs: [0.into(), Src::from(x[0]).ineg(), 0.into()],
-                    });
-                    b.push_op(OpIAdd3X {
-                        dst: sum[1].into(),
-                        overflow: [Dst::None, Dst::None],
-                        srcs: [0.into(), Src::from(x[1]).bnot(), 0.into()],
-                        carry: [carry.into(), SrcRef::False.into()],
-                    });
-                    sum
+                    b.ineg64(srcs[0])
                 } else {
                     assert!(alu.def.bit_size() == 32);
                     b.ineg(srcs[0])
@@ -1314,81 +1434,36 @@ impl<'a> ShaderFromNir<'a> {
             }
             nir_op_ior => b.lop2(LogicOp2::Or, srcs[0], srcs[1]),
             nir_op_ishl => {
-                let x = *srcs[0].as_ssa().unwrap();
-                let shift = srcs[1];
                 if alu.def.bit_size() == 64 {
-                    // For 64-bit shifts, we have to use clamp mode so we need
-                    // to mask the shift in order satisfy NIR semantics.
                     let shift = if let Some(s) = nir_srcs[1].comp_as_uint(0) {
-                        ((s & 0x3f) as u32).into()
+                        (s as u32).into()
                     } else {
-                        b.lop2(LogicOp2::And, shift, 0x3f.into()).into()
+                        srcs[1]
                     };
-                    let dst = b.alloc_ssa(RegFile::GPR, 2);
-                    b.push_op(OpShf {
-                        dst: dst[0].into(),
-                        low: 0.into(),
-                        high: x[0].into(),
-                        shift,
-                        right: false,
-                        wrap: false,
-                        data_type: IntType::U32,
-                        dst_high: true,
-                    });
-                    b.push_op(OpShf {
-                        dst: dst[1].into(),
-                        low: x[0].into(),
-                        high: x[1].into(),
-                        shift,
-                        right: false,
-                        wrap: false,
-                        data_type: IntType::U64,
-                        dst_high: true,
-                    });
-                    dst
+                    b.shl64(srcs[0], shift)
                 } else {
                     assert!(alu.def.bit_size() == 32);
                     b.shl(srcs[0], srcs[1])
                 }
             }
             nir_op_ishr => {
-                let x = *srcs[0].as_ssa().unwrap();
-                let shift = srcs[1];
                 if alu.def.bit_size() == 64 {
-                    // For 64-bit shifts, we have to use clamp mode so we need
-                    // to mask the shift in order satisfy NIR semantics.
                     let shift = if let Some(s) = nir_srcs[1].comp_as_uint(0) {
-                        ((s & 0x3f) as u32).into()
+                        (s as u32).into()
                     } else {
-                        b.lop2(LogicOp2::And, shift, 0x3f.into()).into()
+                        srcs[1]
                     };
-                    let dst = b.alloc_ssa(RegFile::GPR, 2);
-                    b.push_op(OpShf {
-                        dst: dst[0].into(),
-                        low: x[0].into(),
-                        high: x[1].into(),
-                        shift,
-                        right: true,
-                        wrap: false,
-                        data_type: IntType::I64,
-                        dst_high: false,
-                    });
-                    b.push_op(OpShf {
-                        dst: dst[1].into(),
-                        low: x[0].into(),
-                        high: x[1].into(),
-                        shift,
-                        right: true,
-                        wrap: false,
-                        data_type: IntType::I32,
-                        dst_high: true,
-                    });
-                    dst
+                    b.shr64(srcs[0], shift, true)
                 } else {
                     assert!(alu.def.bit_size() == 32);
                     b.shr(srcs[0], srcs[1], true)
                 }
             }
+            nir_op_isub => match alu.def.bit_size {
+                32 => b.iadd(srcs[0], srcs[1].ineg(), 0.into()),
+                64 => b.iadd64(srcs[0], srcs[1].ineg(), 0.into()),
+                x => panic!("unsupported bit size for nir_op_iadd: {x}"),
+            },
             nir_op_ixor => b.lop2(LogicOp2::Xor, srcs[0], srcs[1]),
             nir_op_pack_half_2x16_split | nir_op_pack_half_2x16_rtz_split => {
                 assert!(alu.get_src(0).bit_size() == 32);
@@ -1574,38 +1649,13 @@ impl<'a> ShaderFromNir<'a> {
                 dst
             }
             nir_op_ushr => {
-                let x = *srcs[0].as_ssa().unwrap();
-                let shift = srcs[1];
                 if alu.def.bit_size() == 64 {
-                    // For 64-bit shifts, we have to use clamp mode so we need
-                    // to mask the shift in order satisfy NIR semantics.
                     let shift = if let Some(s) = nir_srcs[1].comp_as_uint(0) {
-                        ((s & 0x3f) as u32).into()
+                        (s as u32).into()
                     } else {
-                        b.lop2(LogicOp2::And, shift, 0x3f.into()).into()
+                        srcs[1]
                     };
-                    let dst = b.alloc_ssa(RegFile::GPR, 2);
-                    b.push_op(OpShf {
-                        dst: dst[0].into(),
-                        low: x[0].into(),
-                        high: x[1].into(),
-                        shift,
-                        right: true,
-                        wrap: false,
-                        data_type: IntType::U64,
-                        dst_high: false,
-                    });
-                    b.push_op(OpShf {
-                        dst: dst[1].into(),
-                        low: x[0].into(),
-                        high: x[1].into(),
-                        shift,
-                        right: true,
-                        wrap: false,
-                        data_type: IntType::U32,
-                        dst_high: true,
-                    });
-                    dst
+                    b.shr64(srcs[0], shift, false)
                 } else {
                     assert!(alu.def.bit_size() == 32);
                     b.shr(srcs[0], srcs[1], false)
@@ -1888,7 +1938,11 @@ impl<'a> ShaderFromNir<'a> {
         }
     }
 
-    fn get_atomic_op(&self, intrin: &nir_intrinsic_instr) -> AtomOp {
+    fn get_atomic_op(
+        &self,
+        intrin: &nir_intrinsic_instr,
+        cmp_src: AtomCmpSrc,
+    ) -> AtomOp {
         match intrin.atomic_op() {
             nir_atomic_op_iadd => AtomOp::Add,
             nir_atomic_op_imin => AtomOp::Min,
@@ -1902,7 +1956,7 @@ impl<'a> ShaderFromNir<'a> {
             nir_atomic_op_fadd => AtomOp::Add,
             nir_atomic_op_fmin => AtomOp::Min,
             nir_atomic_op_fmax => AtomOp::Max,
-            nir_atomic_op_cmpxchg => AtomOp::CmpExch,
+            nir_atomic_op_cmpxchg => AtomOp::CmpExch(cmp_src),
             _ => panic!("Unsupported NIR atomic op"),
         }
     }
@@ -2012,7 +2066,7 @@ impl<'a> ShaderFromNir<'a> {
                                     (range.end / 4).try_into().unwrap(),
                                 );
                             }
-                            ShaderStageInfo::Tessellation => (),
+                            ShaderStageInfo::Tessellation(_) => (),
                             _ => panic!("Patch I/O not supported"),
                         }
                     } else {
@@ -2151,7 +2205,7 @@ impl<'a> ShaderFromNir<'a> {
                 let coord = self.get_image_coord(intrin, dim);
                 // let sample = self.get_src(&srcs[2]);
                 let atom_type = self.get_atomic_type(intrin);
-                let atom_op = self.get_atomic_op(intrin);
+                let atom_op = self.get_atomic_op(intrin, AtomCmpSrc::Packed);
 
                 assert!(
                     intrin.def.bit_size() == 32 || intrin.def.bit_size() == 64
@@ -2181,8 +2235,15 @@ impl<'a> ShaderFromNir<'a> {
                     self.get_src(&srcs[3])
                 };
 
+                let is_reduction =
+                    atom_op.is_reduction() && intrin.def.components_read() == 0;
+
                 b.push_op(OpSuAtom {
-                    dst: dst.into(),
+                    dst: if self.sm.sm() >= 70 && is_reduction {
+                        Dst::None
+                    } else {
+                        dst.into()
+                    },
                     fault: Dst::None,
                     handle: handle,
                     coord: coord,
@@ -2321,10 +2382,10 @@ impl<'a> ShaderFromNir<'a> {
                     }
                 }
 
-                b.push_op(OpFSOut { srcs: srcs });
+                b.push_op(OpRegOut { srcs: srcs });
             }
             nir_intrinsic_demote => {
-                if let ShaderIoInfo::Fragment(info) = &mut self.info.io {
+                if let ShaderStageInfo::Fragment(info) = &mut self.info.stage {
                     info.uses_kill = true;
                 } else {
                     panic!("OpKill is only available in fragment shaders");
@@ -2332,7 +2393,7 @@ impl<'a> ShaderFromNir<'a> {
                 b.push_op(OpKill {});
             }
             nir_intrinsic_demote_if => {
-                if let ShaderIoInfo::Fragment(info) = &mut self.info.io {
+                if let ShaderStageInfo::Fragment(info) = &mut self.info.stage {
                     info.uses_kill = true;
                 } else {
                     panic!("OpKill is only available in fragment shaders");
@@ -2345,13 +2406,16 @@ impl<'a> ShaderFromNir<'a> {
                 let (addr, offset) = self.get_io_addr_offset(&srcs[0], 24);
                 let data = self.get_src(&srcs[1]);
                 let atom_type = self.get_atomic_type(intrin);
-                let atom_op = self.get_atomic_op(intrin);
+                let atom_op = self.get_atomic_op(intrin, AtomCmpSrc::Separate);
 
                 assert!(intrin.def.num_components() == 1);
                 let dst = b.alloc_ssa(RegFile::GPR, bit_size.div_ceil(32));
 
+                let is_reduction =
+                    atom_op.is_reduction() && intrin.def.components_read() == 0;
+
                 b.push_op(OpAtom {
-                    dst: dst.into(),
+                    dst: if is_reduction { Dst::None } else { dst.into() },
                     addr: addr,
                     cmpr: 0.into(),
                     data: data,
@@ -2380,7 +2444,7 @@ impl<'a> ShaderFromNir<'a> {
                     addr: addr,
                     cmpr: cmpr,
                     data: data,
-                    atom_op: AtomOp::CmpExch,
+                    atom_op: AtomOp::CmpExch(AtomCmpSrc::Separate),
                     atom_type: atom_type,
                     addr_offset: offset,
                     mem_space: MemSpace::Global(MemAddrType::A64),
@@ -2541,7 +2605,7 @@ impl<'a> ShaderFromNir<'a> {
                 // weird.  It's treated as a per-vertex output which is indexed
                 // by LANEID.
                 match &self.info.stage {
-                    ShaderStageInfo::Tessellation => (),
+                    ShaderStageInfo::Tessellation(_) => (),
                     _ => panic!(
                         "load_tess_coord is only available in tessellation \
                          shaders"
@@ -2747,12 +2811,16 @@ impl<'a> ShaderFromNir<'a> {
                 if (modes & nir_var_mem_global) != 0
                     && (semantics & NIR_MEMORY_RELEASE) != 0
                 {
-                    b.push_op(OpCCtl {
-                        op: CCtlOp::WBAll,
-                        mem_space: MemSpace::Global(MemAddrType::A64),
-                        addr: 0.into(),
-                        addr_offset: 0,
-                    });
+                    // Pre-Volta doesn't have WBAll but it also seems that we
+                    // don't need it.
+                    if self.sm.sm() >= 70 {
+                        b.push_op(OpCCtl {
+                            op: CCtlOp::WBAll,
+                            mem_space: MemSpace::Global(MemAddrType::A64),
+                            addr: 0.into(),
+                            addr_offset: 0,
+                        });
+                    }
                 }
                 match intrin.execution_scope() {
                     SCOPE_NONE => (),
@@ -2761,7 +2829,7 @@ impl<'a> ShaderFromNir<'a> {
                             self.nir.info.stage() == MESA_SHADER_COMPUTE
                                 || self.nir.info.stage() == MESA_SHADER_KERNEL
                         );
-                        self.info.num_barriers = 1;
+                        self.info.num_control_barriers = 1;
                         b.push_op(OpBar {});
                     }
                     _ => panic!("Unhandled execution scope"),
@@ -2851,7 +2919,7 @@ impl<'a> ShaderFromNir<'a> {
                 let (addr, offset) = self.get_io_addr_offset(&srcs[0], 24);
                 let data = self.get_src(&srcs[1]);
                 let atom_type = self.get_atomic_type(intrin);
-                let atom_op = self.get_atomic_op(intrin);
+                let atom_op = self.get_atomic_op(intrin, AtomCmpSrc::Separate);
 
                 assert!(intrin.def.num_components() == 1);
                 let dst = b.alloc_ssa(RegFile::GPR, bit_size.div_ceil(32));
@@ -2886,7 +2954,7 @@ impl<'a> ShaderFromNir<'a> {
                     addr: addr,
                     cmpr: cmpr,
                     data: data,
-                    atom_op: AtomOp::CmpExch,
+                    atom_op: AtomOp::CmpExch(AtomCmpSrc::Separate),
                     atom_type: atom_type,
                     addr_offset: offset,
                     mem_space: MemSpace::Shared,
@@ -2999,6 +3067,8 @@ impl<'a> ShaderFromNir<'a> {
 
                 if self.sm.sm() >= 70 {
                     b.push_op(OpOutFinal { handle: handle });
+                } else {
+                    b.push_op(OpRegOut { srcs: vec![handle] });
                 }
             }
             nir_intrinsic_vote_all
@@ -3118,9 +3188,30 @@ impl<'a> ShaderFromNir<'a> {
             b.push_op(OpExit {});
         } else {
             self.cfg.add_edge(nb.index, target.index);
-            b.push_op(OpBra {
-                target: self.get_block_label(target),
-            });
+            let target_label = self.get_block_label(target);
+
+            match self.peek_crs(target) {
+                Some(SyncType::Sync) => {
+                    b.push_op(OpSync {
+                        target: target_label,
+                    });
+                }
+                Some(SyncType::Brk) => {
+                    b.push_op(OpBrk {
+                        target: target_label,
+                    });
+                }
+                Some(SyncType::Cont) => {
+                    b.push_op(OpCont {
+                        target: target_label,
+                    });
+                }
+                None => {
+                    b.push_op(OpBra {
+                        target: target_label,
+                    });
+                }
+            }
         }
     }
 
@@ -3154,7 +3245,8 @@ impl<'a> ShaderFromNir<'a> {
         let sm = self.sm;
         let mut b = SSAInstrBuilder::new(sm, ssa_alloc);
 
-        if nb.index == 0 && self.nir.info.shared_size > 0 {
+        if self.sm.sm() >= 70 && nb.index == 0 && self.nir.info.shared_size > 0
+        {
             // The blob seems to always do a BSYNC before accessing shared
             // memory.  Perhaps this is to ensure that our allocation is
             // actually available and not in use by another thread?
@@ -3224,6 +3316,15 @@ impl<'a> ShaderFromNir<'a> {
             b.push_op(phi);
         }
 
+        if self.sm.sm() < 75 && nb.cf_node.prev().is_none() {
+            if let Some(_) = nb.parent().as_loop() {
+                b.push_op(OpPCnt {
+                    target: self.get_block_label(nb),
+                });
+                self.push_crs(nb, SyncType::Cont);
+            }
+        }
+
         let mut goto = None;
         for ni in nb.iter_instr_list() {
             if DEBUG.annotate() && ni.type_ != nir_instr_type_phi {
@@ -3273,6 +3374,22 @@ impl<'a> ShaderFromNir<'a> {
                 }
                 nir_instr_type_phi => (),
                 _ => panic!("Unsupported instruction type"),
+            }
+        }
+
+        if self.sm.sm() < 70 {
+            if let Some(ni) = nb.following_if() {
+                let fb = ni.following_block();
+                b.push_op(OpSSy {
+                    target: self.get_block_label(fb),
+                });
+                self.push_crs(fb, SyncType::Sync);
+            } else if let Some(nl) = nb.following_loop() {
+                let fb = nl.following_block();
+                b.push_op(OpPBk {
+                    target: self.get_block_label(fb),
+                });
+                self.push_crs(fb, SyncType::Brk);
             }
         }
 
@@ -3389,6 +3506,11 @@ impl<'a> ShaderFromNir<'a> {
     ) {
         self.parse_cf_list(ssa_alloc, phi_map, ni.iter_then_list());
         self.parse_cf_list(ssa_alloc, phi_map, ni.iter_else_list());
+
+        if self.sm.sm() < 70 {
+            let next_block = ni.cf_node.next().unwrap().as_block().unwrap();
+            self.pop_crs(next_block, SyncType::Sync);
+        }
     }
 
     fn parse_loop(
@@ -3398,6 +3520,13 @@ impl<'a> ShaderFromNir<'a> {
         nl: &nir_loop,
     ) {
         self.parse_cf_list(ssa_alloc, phi_map, nl.iter_body());
+
+        if self.sm.sm() < 70 {
+            let header = nl.iter_body().next().unwrap().as_block().unwrap();
+            self.pop_crs(header, SyncType::Cont);
+            let next_block = nl.cf_node.next().unwrap().as_block().unwrap();
+            self.pop_crs(next_block, SyncType::Brk);
+        }
     }
 
     fn parse_cf_list(
@@ -3463,7 +3592,7 @@ impl<'a> ShaderFromNir<'a> {
 
         // Tessellation evaluation shaders MUST claim to read gl_TessCoord or
         // the hardware will throw an SPH error.
-        if matches!(self.info.stage, ShaderStageInfo::Tessellation) {
+        if matches!(self.info.stage, ShaderStageInfo::Tessellation(_)) {
             match &mut self.info.io {
                 ShaderIoInfo::Vtg(io) => {
                     let tc = NAK_ATTR_TESS_COORD;

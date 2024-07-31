@@ -41,7 +41,6 @@ rustfmt:
     - shopt -s globstar
     - rustfmt --version
     - rustfmt --verbose src/**/lib.rs
-    - rustfmt --verbose src/**/main.rs
 
 python-test:
   # Cancel job if a newer commit is pushed to the same branch
@@ -125,7 +124,7 @@ python-test:
 
 .b2c-vkd3d-proton-test:
   variables:
-    HWCI_TEST_SCRIPT: ./install/vkd3d-proton/run.sh
+    HWCI_TEST_SCRIPT: install/vkd3d-runner.sh
 
 .piglit-traces-test:
   artifacts:

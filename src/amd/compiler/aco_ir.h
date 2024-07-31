@@ -2013,6 +2013,7 @@ enum class CompilationProgress {
    after_isel,
    after_spilling,
    after_ra,
+   after_lower_to_hw,
 };
 
 class Program final {
@@ -2035,6 +2036,7 @@ public:
    bool has_pops_overlapped_waves_wait = false;
    bool has_color_exports = false;
    bool is_prolog = false;
+   bool is_epilog = false;
 
    std::vector<uint8_t> constant_data;
    Temp private_segment_buffer;

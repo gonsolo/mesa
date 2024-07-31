@@ -1344,6 +1344,7 @@ print_intrinsic_instr(nir_intrinsic_instr *instr, print_state *state)
          nir_variable_mode mode = nir_var_mem_generic;
          switch (instr->intrinsic) {
          case nir_intrinsic_load_input:
+         case nir_intrinsic_load_per_primitive_input:
          case nir_intrinsic_load_interpolated_input:
          case nir_intrinsic_load_per_vertex_input:
          case nir_intrinsic_load_input_vertex:
@@ -1369,9 +1370,6 @@ print_intrinsic_instr(nir_intrinsic_instr *instr, print_state *state)
                                             buf);
 
          fprintf(fp, "io location=%s slots=%u", loc, io.num_slots);
-
-         if (io.per_primitive)
-            fprintf(fp, " per_primitive");
 
          if (io.interp_explicit_strict)
             fprintf(fp, " explicit_strict");
@@ -1622,6 +1620,7 @@ print_intrinsic_instr(nir_intrinsic_instr *instr, print_state *state)
       var_mode = nir_var_uniform;
       break;
    case nir_intrinsic_load_input:
+   case nir_intrinsic_load_per_primitive_input:
    case nir_intrinsic_load_interpolated_input:
    case nir_intrinsic_load_per_vertex_input:
       var_mode = nir_var_shader_in;
@@ -1797,6 +1796,14 @@ print_tex_instr(nir_tex_instr *instr, print_state *state)
          break;
       case nir_tex_src_ddy:
          fprintf(fp, "(ddy)");
+         break;
+      case nir_tex_src_sampler_deref_intrinsic:
+         has_texture_deref = true;
+         fprintf(fp, "(sampler_deref_intrinsic)");
+         break;
+      case nir_tex_src_texture_deref_intrinsic:
+         has_texture_deref = true;
+         fprintf(fp, "(texture_deref_intrinsic)");
          break;
       case nir_tex_src_texture_deref:
          has_texture_deref = true;

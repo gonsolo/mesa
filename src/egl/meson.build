@@ -76,7 +76,7 @@ g_egldispatchstubs_h = custom_target(
   capture : true,
 )
 
-if with_dri2
+if with_dri
   files_egl += files(
     'drivers/dri2/egl_dri2.c',
     'drivers/dri2/egl_dri2.h',
@@ -190,7 +190,6 @@ libegl = shared_library(
   link_args : [ld_args_bsymbolic, ld_args_gc_sections],
   dependencies : [deps_for_egl, dep_dl, dep_libdrm, dep_clock, dep_thread, idep_mesautil],
   install : true,
-  install_rpath : dri_drivers_path,
   version : egl_lib_version,
   soversion : egl_lib_soversion,
   name_prefix : host_machine.system() == 'windows' ? 'lib' : [],  # always use lib, but avoid warnings on !windows

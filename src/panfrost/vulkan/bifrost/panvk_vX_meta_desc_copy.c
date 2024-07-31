@@ -298,7 +298,8 @@ panvk_per_arch(meta_get_copy_desc_job)(
    struct panvk_device *dev, struct pan_pool *desc_pool,
    const struct panvk_shader *shader,
    const struct panvk_descriptor_state *desc_state,
-   const struct panvk_shader_desc_state *shader_desc_state)
+   const struct panvk_shader_desc_state *shader_desc_state,
+   uint32_t attrib_buf_idx_offset)
 {
    if (!shader)
       return (struct panfrost_ptr){0};
@@ -311,8 +312,7 @@ panvk_per_arch(meta_get_copy_desc_job)(
       .img_attrib_table = shader_desc_state->img_attrib_table,
       .desc_copy = {
          .table = copy_table,
-         .attrib_buf_idx_offset =
-            shader->info.stage == MESA_SHADER_VERTEX ? MAX_VS_ATTRIBS : 0,
+         .attrib_buf_idx_offset = attrib_buf_idx_offset,
       },
    };
 

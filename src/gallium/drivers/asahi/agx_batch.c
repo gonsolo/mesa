@@ -23,7 +23,8 @@
    do {                                                                        \
       if (unlikely(agx_device(batch->ctx->base.screen)->debug &                \
                    AGX_DBG_BATCH))                                             \
-         agx_msg("[Batch %u] " fmt "\n", agx_batch_idx(batch), ##__VA_ARGS__); \
+         agx_msg("[Queue %u Batch %u] " fmt "\n", batch->ctx->queue_id,        \
+                 agx_batch_idx(batch), ##__VA_ARGS__);                         \
    } while (0)
 
 bool
@@ -754,16 +755,48 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
    /* We allocate the worst-case sync array size since this won't be excessive
     * for most workloads
     */
-   unsigned max_syncs = batch->bo_list.bit_count + 1;
+   unsigned max_syncs = batch->bo_list.bit_count + 2;
    unsigned in_sync_count = 0;
    unsigned shared_bo_count = 0;
    struct drm_asahi_sync *in_syncs =
       malloc(max_syncs * sizeof(struct drm_asahi_sync));
    struct agx_bo **shared_bos = malloc(max_syncs * sizeof(struct agx_bo *));
 
-   struct drm_asahi_sync out_sync = {
-      .sync_type = DRM_ASAHI_SYNC_SYNCOBJ,
-      .handle = batch->syncobj,
+   uint64_t wait_seqid = p_atomic_read(&screen->flush_wait_seqid);
+   uint64_t seqid = p_atomic_inc_return(&screen->flush_cur_seqid);
+   assert(seqid > wait_seqid);
+
+   batch_debug(batch, "Sync point is %" PRIu64, seqid);
+
+   /* Subtle concurrency note: Since we assign seqids atomically and do
+    * not lock submission across contexts, it is possible for two threads
+    * to submit timeline syncobj updates out of order. As far as I can
+    * tell, this case is handled in the kernel conservatively: it triggers
+    * a fence context bump and effectively "splits" the timeline at the
+    * larger point, causing future lookups for earlier points to return a
+    * later point, waiting more. The signaling code still makes sure all
+    * prior fences have to be signaled before considering a given point
+    * signaled, regardless of order. That's good enough for us.
+    *
+    * (Note: this case breaks drm_syncobj_query_ioctl and for this reason
+    * triggers a DRM_DEBUG message on submission, but we don't use that
+    * so we don't care.)
+    *
+    * This case can be tested by setting seqid = 1 unconditionally here,
+    * causing every single syncobj update to reuse the same timeline point.
+    * Everything still works (but over-synchronizes because this effectively
+    * serializes all submissions once any context flushes once).
+    */
+   struct drm_asahi_sync out_syncs[2] = {
+      {
+         .sync_type = DRM_ASAHI_SYNC_SYNCOBJ,
+         .handle = batch->syncobj,
+      },
+      {
+         .sync_type = DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ,
+         .handle = screen->flush_syncobj,
+         .timeline_value = seqid,
+      },
    };
 
    /* This lock protects against a subtle race scenario:
@@ -822,9 +855,11 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
           * wait on these using their syncobj.
           */
          uint64_t writer = p_atomic_read_relaxed(&bo->writer);
-         if (writer && agx_bo_writer_queue(writer) != ctx->queue_id) {
-            batch_debug(batch, "Waits on inter-context BO @ 0x%" PRIx64,
-                        bo->ptr.gpu);
+         uint32_t queue_id = agx_bo_writer_queue(writer);
+         if (writer && queue_id != ctx->queue_id) {
+            batch_debug(
+               batch, "Waits on inter-context BO @ 0x%" PRIx64 " from queue %u",
+               bo->ptr.gpu, queue_id);
 
             agx_add_sync(in_syncs, &in_sync_count,
                          agx_bo_writer_syncobj(writer));
@@ -844,6 +879,17 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
 
    /* Add an explicit fence from gallium, if any */
    agx_add_sync(in_syncs, &in_sync_count, agx_get_in_sync(ctx));
+
+   /* Add an implicit cross-context flush sync point, if any */
+   if (wait_seqid) {
+      batch_debug(batch, "Waits on inter-context sync point %" PRIu64,
+                  wait_seqid);
+      in_syncs[in_sync_count++] = (struct drm_asahi_sync){
+         .sync_type = DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ,
+         .handle = screen->flush_syncobj,
+         .timeline_value = wait_seqid,
+      };
+   }
 
    /* Submit! */
    struct drm_asahi_command commands[2];
@@ -881,10 +927,10 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
       .queue_id = ctx->queue_id,
       .result_handle = feedback ? ctx->result_buf->handle : 0,
       .in_sync_count = in_sync_count,
-      .out_sync_count = 1,
+      .out_sync_count = 2,
       .command_count = command_count,
       .in_syncs = (uint64_t)(uintptr_t)(in_syncs),
-      .out_syncs = (uint64_t)(uintptr_t)(&out_sync),
+      .out_syncs = (uint64_t)(uintptr_t)(out_syncs),
       .commands = (uint64_t)(uintptr_t)(&commands[0]),
    };
 
@@ -955,6 +1001,7 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
       /* But any BOs written by active batches are ours */
       assert(writer == batch && "exclusive writer");
       p_atomic_set(&bo->writer, agx_bo_writer(ctx->queue_id, batch->syncobj));
+      batch_debug(batch, "Writes to BO @ 0x%" PRIx64, bo->ptr.gpu);
    }
 
    free(in_syncs);
@@ -999,6 +1046,11 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
 
    /* Record the last syncobj for fence creation */
    ctx->syncobj = batch->syncobj;
+
+   /* Update the last seqid in the context (must only happen if the submit
+    * succeeded, otherwise the timeline point would not be valid).
+    */
+   ctx->flush_last_seqid = seqid;
 
    if (ctx->batch == batch)
       ctx->batch = NULL;

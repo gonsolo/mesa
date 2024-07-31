@@ -1398,7 +1398,7 @@ zink_screen_init_compiler(struct zink_screen *screen)
       screen->nir_options.max_unroll_iterations_fp64 = 32;
    }
 
-   if (screen->driver_workarounds.io_opt) {
+   if (screen->driver_compiler_workarounds.io_opt) {
       screen->nir_options.io_options |= nir_io_glsl_opt_varyings;
 
       switch (zink_driverid(screen)) {
@@ -2998,7 +2998,7 @@ zink_compiler_assign_io(struct zink_screen *screen, nir_shader *producer, nir_sh
             nir_shader_instructions_pass(consumer, rewrite_read_as_0, nir_metadata_dominance, var_in);
          }
       }
-      if (consumer->info.stage == MESA_SHADER_FRAGMENT && screen->driver_workarounds.needs_sanitised_layer)
+      if (consumer->info.stage == MESA_SHADER_FRAGMENT && screen->driver_compiler_workarounds.needs_sanitised_layer)
          do_fixup |= clamp_layer_output(producer, consumer, &io.reserved);
    }
    nir_shader_gather_info(producer, nir_shader_get_entrypoint(producer));
@@ -3671,7 +3671,7 @@ lower_zs_swizzle_tex_instr(nir_builder *b, nir_instr *instr, void *data)
  * draw-time shader recompile to do so.
  *
  * We may also need to apply shader swizzles for
- * driver_workarounds.needs_zs_shader_swizzle.
+ * driver_compiler_workarounds.needs_zs_shader_swizzle.
  */
 static bool
 lower_zs_swizzle_tex(nir_shader *nir, const void *swizzle, bool shadow_only)
@@ -5049,7 +5049,13 @@ type_image(nir_shader *nir, nir_variable *var)
                nir_variable *img = nir_deref_instr_get_variable(deref);
                if (img != var)
                   continue;
-               nir_alu_type alu_type = nir_intrinsic_src_type(intr);
+
+               nir_alu_type alu_type;
+               if (nir_intrinsic_has_src_type(intr))
+                  alu_type = nir_intrinsic_src_type(intr);
+               else
+                  alu_type = nir_intrinsic_dest_type(intr);
+
                const struct glsl_type *type = glsl_without_array(var->type);
                if (glsl_get_sampler_result_type(type) != GLSL_TYPE_VOID) {
                   assert(glsl_get_sampler_result_type(type) == nir_get_glsl_base_type_for_nir_type(alu_type));

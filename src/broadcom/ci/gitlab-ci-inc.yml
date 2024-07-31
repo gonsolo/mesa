@@ -151,6 +151,7 @@
   script:
     - ./install/bare-metal/poe-powered.sh
   variables:
+    BOOT_PHASE_TIMEOUT_SECONDS: 90
     HWCI_TEST_SCRIPT: "/install/deqp-runner.sh"
     FLAKES_CHANNEL: "#videocore-ci"
     FARM: igalia
@@ -162,6 +163,11 @@
     - .baremetal-test-arm64
   variables:
     BM_BOOTFS: /boot/raspberrypi_arm64
+
+.broadcom-asan-test:arm64:
+  extends:
+    - .broadcom-test:arm64
+    - .baremetal-arm64-asan-test
 
 .broadcom-test:arm32:
   extends:

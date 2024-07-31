@@ -62,14 +62,6 @@
 #include "loader_dri3_helper.h"
 #include "mesa_interface.h"
 
-struct dri3_display
-{
-   __GLXDRIdisplay base;
-
-   const __DRIextension **loader_extensions;
-   int has_multibuffer;
-};
-
 struct dri3_screen {
    struct glx_screen base;
 

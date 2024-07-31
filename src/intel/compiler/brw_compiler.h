@@ -48,6 +48,8 @@ struct shader_info;
 struct nir_shader_compiler_options;
 typedef struct nir_shader nir_shader;
 
+#define REG_CLASS_COUNT 20
+
 struct brw_compiler {
    const struct intel_device_info *devinfo;
 
@@ -65,7 +67,7 @@ struct brw_compiler {
        * Array of the ra classes for the unaligned contiguous register
        * block sizes used, indexed by register size.
        */
-      struct ra_class *classes[16];
+      struct ra_class *classes[REG_CLASS_COUNT];
    } fs_reg_set;
 
    void (*shader_debug_log)(void *, unsigned *id, const char *str, ...) PRINTFLIKE(3, 4);
@@ -331,8 +333,9 @@ struct brw_wm_prog_key {
    bool coherent_fb_fetch:1;
    bool ignore_sample_mask_out:1;
    bool coarse_pixel:1;
+   bool null_push_constant_tbimr_workaround:1;
 
-   uint64_t padding:36;
+   uint64_t padding:35;
 };
 
 struct brw_cs_prog_key {
@@ -1657,8 +1660,10 @@ brw_compute_first_urb_slot_required(uint64_t inputs_read,
    if ((inputs_read & (VARYING_BIT_LAYER | VARYING_BIT_VIEWPORT | VARYING_BIT_PRIMITIVE_SHADING_RATE)) == 0) {
       for (int i = 0; i < prev_stage_vue_map->num_slots; i++) {
          int varying = prev_stage_vue_map->slot_to_varying[i];
-         if (varying > 0 && (inputs_read & BITFIELD64_BIT(varying)) != 0)
+         if (varying != BRW_VARYING_SLOT_PAD && varying > 0 &&
+             (inputs_read & BITFIELD64_BIT(varying)) != 0) {
             return ROUND_DOWN_TO(i, 2);
+         }
       }
    }
 

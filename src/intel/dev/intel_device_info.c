@@ -1093,6 +1093,7 @@ static const struct intel_device_info intel_device_info_sg1 = {
 
 #define XEHP_FEATURES(_gt, _slices, _l3)                        \
    GFX8_FEATURES,                                               \
+   .needs_null_push_constant_tbimr_workaround = true,           \
    .has_64bit_float = false,                                    \
    .has_64bit_int = false,                                      \
    .has_integer_dword_mul = false,                              \
@@ -1221,6 +1222,7 @@ static const struct intel_device_info intel_device_info_arl_h = {
    .verx10 = 200,                                               \
    .num_subslices = dual_subslices(1),                          \
    .grf_size = 64,                                              \
+   .needs_null_push_constant_tbimr_workaround = false,          \
    .has_64bit_float = true,                                     \
    .has_64bit_int = true,                                       \
    .has_integer_dword_mul = false,                              \
@@ -1613,6 +1615,20 @@ intel_device_info_init_common(int pci_id, bool building,
             devinfo->max_constant_urb_size_kb / 2;
    }
 
+   /*
+    * Gfx 12.5 moved scratch to a surface and SURFTYPE_SCRATCH has this pitch
+    * restriction:
+    *
+    * BSpec 43862 (r52666)
+    * RENDER_SURFACE_STATE::Surface Pitch
+    *    For surfaces of type SURFTYPE_SCRATCH, valid range of pitch is:
+    *    [63,262143] -> [64B, 256KB]
+    *
+    * The pitch of the surface is the scratch size per thread and the surface
+    * should be large enough to accommodate every physical thread.
+    */
+   devinfo->max_scratch_size_per_thread = devinfo->verx10 >= 125 ?
+                                          (256 * 1024) : (2 * 1024 * 1024);
    intel_device_info_update_cs_workgroup_threads(devinfo);
 
    return true;

@@ -228,7 +228,7 @@ option(
   value : ['auto'],
   choices : ['auto', 'amd', 'broadcom', 'freedreno', 'intel', 'intel_hasvk',
              'panfrost', 'swrast', 'virtio', 'imagination-experimental',
-             'microsoft-experimental', 'nouveau',
+             'microsoft-experimental', 'nouveau', 'asahi',
              'borg-experimental', 'all'],
   description : 'List of vulkan drivers to build. If this is set to auto ' +
                 'all drivers applicable to the target OS/architecture ' +
@@ -747,4 +747,14 @@ option(
   description : 'Build custom xmlconfig (driconf) support. If disabled, ' +
                 'the default driconf file is hardcoded into Mesa. ' +
                 'Requires expat.'
+)
+
+option(
+  'legacy-x11',
+  type : 'array',
+  value : ['none'],
+  description : 'Build legacy X11 support features.',
+  choices : [
+    'none', 'dri2'
+  ],
 )

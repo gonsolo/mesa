@@ -722,9 +722,8 @@ agx_pack_texture(void *out, struct agx_resource *rsrc,
          cfg.width = AGX_TEXTURE_BUFFER_WIDTH;
          cfg.height = DIV_ROUND_UP(size_el, cfg.width);
          cfg.first_level = cfg.last_level = 0;
-
-         /* Stash the actual size in the software-defined section for txs */
-         cfg.software_defined = size_el;
+         cfg.buffer_size_sw = size_el;
+         cfg.buffer_offset_sw = 0;
       } else {
          cfg.width = rsrc->base.width0;
          cfg.height = rsrc->base.height0;
@@ -1653,7 +1652,13 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          NIR_PASS(_, nir, agx_nir_lower_cull_distance_vs);
          NIR_PASS(_, nir, agx_nir_lower_uvs, &uvs);
       } else {
-         NIR_PASS(_, nir, agx_nir_lower_vs_before_gs, dev->libagx, &outputs);
+         NIR_PASS(_, nir, agx_nir_lower_vs_before_gs, dev->libagx);
+
+         /* Turn into a compute shader now that we're free of vertexisms */
+         nir->info.stage = MESA_SHADER_COMPUTE;
+         memset(&nir->info.cs, 0, sizeof(nir->info.cs));
+         nir->xfb_info = NULL;
+         outputs = nir->info.outputs_written;
       }
    } else if (nir->info.stage == MESA_SHADER_TESS_CTRL) {
       NIR_PASS_V(nir, agx_nir_lower_tcs, dev->libagx);
@@ -1894,7 +1899,7 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
    so->type = pipe_shader_type_from_mesa(nir->info.stage);
 
    if (nir->info.stage == MESA_SHADER_TESS_EVAL) {
-      NIR_PASS(_, nir, agx_nir_lower_tes, dev->libagx);
+      NIR_PASS(_, nir, agx_nir_lower_tes, dev->libagx, true);
    }
 
    blob_init(&so->serialized_nir);
@@ -4003,6 +4008,7 @@ agx_batch_geometry_params(struct agx_batch *batch, uint64_t input_index_buffer,
     */
    unsigned count_buffer_stride = batch->ctx->gs->gs_count_words * 4;
    batch->uniforms.vertex_outputs = batch->ctx->vs->b.info.outputs;
+   params.input_mask = batch->uniforms.vertex_outputs;
 
    if (indirect) {
       params.count_buffer_stride = count_buffer_stride;
@@ -4032,6 +4038,8 @@ agx_batch_geometry_params(struct agx_batch *batch, uint64_t input_index_buffer,
          uint64_t addr = agx_pool_alloc_aligned(&batch->pool, vb_size, 4).gpu;
          batch->uniforms.vertex_output_buffer_ptr =
             agx_pool_upload(&batch->pool, &addr, 8);
+
+         params.input_buffer = addr;
       }
    }
 

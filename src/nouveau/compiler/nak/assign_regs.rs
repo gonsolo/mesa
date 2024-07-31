@@ -119,7 +119,7 @@ impl SSAUseMap {
     pub fn add_block(&mut self, b: &BasicBlock) {
         for (ip, instr) in b.instrs.iter().enumerate() {
             match &instr.op {
-                Op::FSOut(op) => {
+                Op::RegOut(op) => {
                     for (i, src) in op.srcs.iter().enumerate() {
                         let out_reg = u32::try_from(i).unwrap();
                         if let Some(ssa) = src_ssa_ref(src) {
@@ -1130,7 +1130,7 @@ impl AssignRegsBlock {
                     Some(instr)
                 }
             }
-            Op::FSOut(out) => {
+            Op::RegOut(out) => {
                 for src in out.srcs.iter_mut() {
                     if let Some(src_vec) = src_ssa_ref(src) {
                         debug_assert!(src_vec.comps() == 1);
@@ -1358,13 +1358,6 @@ impl Shader<'_> {
         }
 
         self.info.num_gprs = total_gprs.try_into().unwrap();
-
-        // We do a maximum here because nak_from_nir may set num_barriers to 1
-        // in the case where there is an OpBar.
-        self.info.num_barriers = max(
-            self.info.num_barriers,
-            max_live[RegFile::Bar].try_into().unwrap(),
-        );
 
         let limit = PerRegFile::new_with(|file| {
             if file == RegFile::GPR {

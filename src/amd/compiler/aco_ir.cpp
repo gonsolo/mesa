@@ -828,6 +828,12 @@ get_operand_size(aco_ptr<Instruction>& instr, unsigned index)
             instr->opcode == aco_opcode::v_fma_mixlo_f16 ||
             instr->opcode == aco_opcode::v_fma_mixhi_f16)
       return instr->valu().opsel_hi[index] ? 16 : 32;
+   else if (instr->opcode == aco_opcode::v_interp_p10_f16_f32_inreg ||
+            instr->opcode == aco_opcode::v_interp_p10_rtz_f16_f32_inreg)
+      return index == 1 ? 32 : 16;
+   else if (instr->opcode == aco_opcode::v_interp_p2_f16_f32_inreg ||
+            instr->opcode == aco_opcode::v_interp_p2_rtz_f16_f32_inreg)
+      return index == 0 ? 16 : 32;
    else if (instr->isVALU() || instr->isSALU())
       return instr_info.operand_size[(int)instr->opcode];
    else
@@ -1346,6 +1352,9 @@ should_form_clause(const Instruction* a, const Instruction* b)
    if (a->isVMEM() || a->isSMEM())
       return a->operands[0].tempId() == b->operands[0].tempId();
 
+   if (a->isEXP() && b->isEXP())
+      return true;
+
    return false;
 }
 
@@ -1397,6 +1406,14 @@ dealloc_vgprs(Program* program)
    /* sendmsg(dealloc_vgprs) releases scratch, so this isn't safe if there is a in-progress scratch
     * store. */
    if (uses_scratch(program))
+      return false;
+
+   /* If we insert the sendmsg on GFX11.5, the export priority workaround will require us to insert
+    * a wait after exports. There might still be pending VMEM stores for PS parameter exports,
+    * except NGG lowering usually inserts a memory barrier. This means there is unlikely to be any
+    * pending VMEM stores or exports if we insert the sendmsg for these stages. */
+   if (program->gfx_level == GFX11_5 && (program->stage.hw == AC_HW_NEXT_GEN_GEOMETRY_SHADER ||
+                                         program->stage.hw == AC_HW_PIXEL_SHADER))
       return false;
 
    Block& block = program->blocks.back();
