@@ -61,7 +61,7 @@ static void radeon_enc_op_preset(struct radeon_encoder *enc)
    uint32_t preset_mode;
 
    if (enc->enc_pic.quality_modes.preset_mode == RENCODE_PRESET_MODE_SPEED &&
-         (enc->enc_pic.sample_adaptive_offset_enabled_flag &&
+         (!enc->enc_pic.hevc_deblock.disable_sao &&
          (u_reduce_video_profile(enc->base.profile) == PIPE_VIDEO_FORMAT_HEVC)))
       preset_mode = RENCODE_IB_OP_SET_BALANCE_ENCODING_MODE;
    else if (enc->enc_pic.quality_modes.preset_mode == RENCODE_PRESET_MODE_QUALITY)
@@ -1105,7 +1105,6 @@ static void radeon_enc_av1_encode_params(struct radeon_encoder *enc)
       assert(false);
    }
 
-   enc->enc_pic.enc_params.allowed_max_bitstream_size = enc->bs_size;
    enc->enc_pic.enc_params.input_pic_luma_pitch = enc->luma->u.gfx9.surf_pitch;
    enc->enc_pic.enc_params.input_pic_chroma_pitch = enc->chroma ?
       enc->chroma->u.gfx9.surf_pitch : enc->luma->u.gfx9.surf_pitch;

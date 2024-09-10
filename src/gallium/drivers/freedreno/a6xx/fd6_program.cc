@@ -1,25 +1,7 @@
 /*
- * Copyright (C) 2016 Rob Clark <robclark@freedesktop.org>
+ * Copyright © 2016 Rob Clark <robclark@freedesktop.org>
  * Copyright © 2018 Google, Inc.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * SPDX-License-Identifier: MIT
  *
  * Authors:
  *    Rob Clark <robclark@freedesktop.org>
@@ -543,7 +525,6 @@ emit_vfd_dest(struct fd_ringbuffer *ring, const struct ir3_shader_variant *vs)
       OUT_PKT4(ring, REG_A6XX_VFD_DEST_CNTL_INSTR(0), attr_count);
 
    for (uint32_t i = 0; i < attr_count; i++) {
-      assert(vs->inputs[i].compmask);
       assert(!vs->inputs[i].sysval);
       OUT_RING(ring,
                A6XX_VFD_DEST_CNTL_INSTR_WRITEMASK(vs->inputs[i].compmask) |
@@ -1397,16 +1378,6 @@ fd6_program_create(void *data, const struct ir3_shader_variant *bs,
    state->fs = fs;
    state->binning_stateobj = fd_ringbuffer_new_object(ctx->pipe, 0x1000);
    state->stateobj = fd_ringbuffer_new_object(ctx->pipe, 0x1000);
-
-#if MESA_DEBUG
-   if (!ds) {
-      for (unsigned i = 0; i < bs->inputs_count; i++) {
-         if (vs->inputs[i].sysval)
-            continue;
-         assert(bs->inputs[i].regid == vs->inputs[i].regid);
-      }
-   }
-#endif
 
    if (hs) {
       /* Allocate the fixed-size tess factor BO globally on the screen.  This

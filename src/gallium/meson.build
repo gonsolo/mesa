@@ -52,11 +52,11 @@ if with_any_llvmpipe
 else
   driver_llvmpipe = declare_dependency()
 endif
-if with_gallium_llvmpipe and with_gallium_softpipe
+if with_any_llvmpipe and with_gallium_softpipe
   driver_swrast = declare_dependency(
     dependencies : [ driver_softpipe, driver_llvmpipe ],
   )
-elif with_gallium_llvmpipe
+elif with_any_llvmpipe
   driver_swrast = driver_llvmpipe
 elif with_gallium_softpipe
   driver_swrast = driver_softpipe
@@ -217,10 +217,6 @@ endif
 if with_gallium_vdpau
   subdir('frontends/vdpau')
   subdir('targets/vdpau')
-endif
-if with_gallium_omx != 'disabled'
-  subdir('frontends/omx')
-  subdir('targets/omx')
 endif
 if with_gallium_va
   subdir('frontends/va')

@@ -2045,8 +2045,11 @@ label_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
       break;
    }
    case aco_opcode::v_cvt_f16_f32: {
-      if (instr->operands[0].isTemp())
-         ctx.info[instr->operands[0].tempId()].set_f2f16(instr.get());
+      if (instr->operands[0].isTemp()) {
+         ssa_info& info = ctx.info[instr->operands[0].tempId()];
+         if (!info.is_dpp() || info.instr->pass_flags != instr->pass_flags)
+            info.set_f2f16(instr.get());
+      }
       break;
    }
    case aco_opcode::v_cvt_f32_f16: {
@@ -2987,6 +2990,21 @@ apply_sgprs(opt_ctx& ctx, aco_ptr<Instruction>& instr)
    }
 }
 
+bool
+interp_can_become_fma(opt_ctx& ctx, aco_ptr<Instruction>& instr)
+{
+   if (instr->opcode != aco_opcode::v_interp_p2_f32_inreg)
+      return false;
+
+   instr->opcode = aco_opcode::v_fma_f32;
+   instr->format = Format::VOP3;
+   bool dpp_allowed = can_use_DPP(ctx.program->gfx_level, instr, false);
+   instr->opcode = aco_opcode::v_interp_p2_f32_inreg;
+   instr->format = Format::VINTERP_INREG;
+
+   return dpp_allowed;
+}
+
 void
 interp_p2_f32_inreg_to_fma_dpp(aco_ptr<Instruction>& instr)
 {
@@ -3017,9 +3035,8 @@ apply_omod_clamp(opt_ctx& ctx, aco_ptr<Instruction>& instr)
       return false;
 
    /* SDWA omod is GFX9+. */
-   bool can_use_omod =
-      (can_vop3 || ctx.program->gfx_level >= GFX9) && !instr->isVOP3P() &&
-      (!instr->isVINTERP_INREG() || instr->opcode == aco_opcode::v_interp_p2_f32_inreg);
+   bool can_use_omod = (can_vop3 || ctx.program->gfx_level >= GFX9) && !instr->isVOP3P() &&
+                       (!instr->isVINTERP_INREG() || interp_can_become_fma(ctx, instr));
 
    ssa_info& def_info = ctx.info[instr->definitions[0].tempId()];
 
@@ -3578,7 +3595,7 @@ combine_output_conversion(opt_ctx& ctx, aco_ptr<Instruction>& instr)
    if (conv->usesModifiers())
       return false;
 
-   if (instr->opcode == aco_opcode::v_interp_p2_f32_inreg)
+   if (interp_can_become_fma(ctx, instr))
       interp_p2_f32_inreg_to_fma_dpp(instr);
 
    if (!can_use_mad_mix(ctx, instr))

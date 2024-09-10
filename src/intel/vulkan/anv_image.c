@@ -242,7 +242,9 @@ anv_image_choose_isl_surf_usage(struct anv_physical_device *device,
                    ISL_SURF_USAGE_DISABLE_AUX_BIT;
 
    if (vk_usage & VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR ||
-       vk_usage & VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR)
+       vk_usage & VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR ||
+       vk_usage & VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR ||
+       vk_usage & VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR)
       isl_usage |= ISL_SURF_USAGE_VIDEO_DECODE_BIT;
 
    if (vk_create_flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT)
@@ -666,11 +668,9 @@ add_aux_state_tracking_buffer(struct anv_device *device,
       binding = ANV_IMAGE_MEMORY_BINDING_PRIVATE;
    }
 
-   /* We believe that 256B alignment may be sufficient, but we choose 4K due to
-    * lack of testing.  And MI_LOAD/STORE operations require dword-alignment.
-    */
+   /* The indirect clear color BO requires 64B-alignment on gfx11+. */
    return image_binding_grow(device, image, binding,
-                             state_offset, state_size, 4096,
+                             state_offset, state_size, 64,
                              &image->planes[plane].fast_clear_memory_range);
 }
 
@@ -688,6 +688,29 @@ add_compression_control_buffer(struct anv_device *device,
                              INTEL_AUX_MAP_MAIN_SIZE_SCALEDOWN,
                              INTEL_AUX_MAP_META_ALIGNMENT_B,
                              &image->planes[plane].compr_ctrl_memory_range);
+}
+
+static bool
+want_hiz_wt_for_image(const struct intel_device_info *devinfo,
+                      const struct anv_image *image)
+{
+   /* Gen12 only supports single-sampled while Gen20+ supports
+    * multi-sampled images.
+    */
+   if (devinfo->ver < 20 && image->vk.samples > 1)
+      return false;
+
+   if ((image->vk.usage & (VK_IMAGE_USAGE_SAMPLED_BIT |
+                           VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)) == 0)
+      return false;
+
+   /* If this image has the maximum number of samples supported by
+    * running platform and will be used as a texture, put the HiZ surface
+    * in write-through mode so that we can sample from it.
+    *
+    * TODO: This is a heuristic trade-off; we haven't tuned it at all.
+    */
+   return true;
 }
 
 /**
@@ -744,17 +767,7 @@ add_aux_surface_if_supported(struct anv_device *device,
                                  &image->planes[plane].primary_surface.isl,
                                  &image->planes[plane].aux_surface.isl)) {
          image->planes[plane].aux_usage = ISL_AUX_USAGE_HIZ;
-      } else if (image->vk.usage & (VK_IMAGE_USAGE_SAMPLED_BIT |
-                                    VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) &&
-                 image->vk.samples == 1) {
-         /* If it's used as an input attachment or a texture and it's
-          * single-sampled (this is a requirement for HiZ+CCS write-through
-          * mode), use write-through mode so that we don't need to resolve
-          * before texturing.  This will make depth testing a bit slower but
-          * texturing faster.
-          *
-          * TODO: This is a heuristic trade-off; we haven't tuned it at all.
-          */
+      } else if (want_hiz_wt_for_image(device->info, image)) {
          assert(device->info->ver >= 12);
          image->planes[plane].aux_usage = ISL_AUX_USAGE_HIZ_CCS_WT;
       } else {
@@ -893,7 +906,8 @@ add_video_buffers(struct anv_device *device,
          unsigned h_mb = DIV_ROUND_UP(image->vk.extent.height, ANV_MB_HEIGHT);
          size = w_mb * h_mb * 128;
       }
-      else if (profile_list->pProfiles[i].videoCodecOperation == VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR) {
+      else if (profile_list->pProfiles[i].videoCodecOperation == VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR ||
+               profile_list->pProfiles[i].videoCodecOperation == VK_VIDEO_CODEC_OPERATION_ENCODE_H265_BIT_KHR) {
          unsigned w_mb = DIV_ROUND_UP(image->vk.extent.width, 32);
          unsigned h_mb = DIV_ROUND_UP(image->vk.extent.height, 32);
          size = ALIGN(w_mb * h_mb, 2) << 6;
@@ -1106,11 +1120,8 @@ check_memory_bindings(const struct anv_device *device,
             binding = ANV_IMAGE_MEMORY_BINDING_PRIVATE;
          }
 
-         /* We believe that 256B alignment may be sufficient, but we choose 4K
-          * due to lack of testing.  And MI_LOAD/STORE operations require
-          * dword-alignment.
-          */
-         assert(plane->fast_clear_memory_range.alignment == 4096);
+         /* The indirect clear color BO requires 64B-alignment on gfx11+. */
+         assert(plane->fast_clear_memory_range.alignment == 64);
          check_memory_range(accum_ranges,
                             .test_range = &plane->fast_clear_memory_range,
                             .expect_binding = binding);
@@ -1617,6 +1628,15 @@ anv_image_init(struct anv_device *device, struct anv_image *image,
 
    image->n_planes = anv_get_format_planes(image->vk.format);
 
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
+   /* In the case of gralloc-backed swap chain image, we don't know the
+    * layout yet.
+    */
+   if (vk_find_struct_const(pCreateInfo->pNext,
+                            IMAGE_SWAPCHAIN_CREATE_INFO_KHR) != NULL)
+      return VK_SUCCESS;
+#endif
+
    image->from_wsi =
       vk_find_struct_const(pCreateInfo->pNext, WSI_IMAGE_CREATE_INFO_MESA) != NULL;
 
@@ -1913,9 +1933,9 @@ VkResult anv_CreateImage(
               __LINE__, pCreateInfo->flags);
 
 #ifndef VK_USE_PLATFORM_ANDROID_KHR
-   /* Ignore swapchain creation info on Android. Since we don't have an
-    * implementation in Mesa, we're guaranteed to access an Android object
-    * incorrectly.
+   /* Skip the WSI common swapchain creation here on Android. Similar to ahw,
+    * this case is handled by a partial image init and then resolved when the
+    * image is bound and gralloc info is passed.
     */
    const VkImageSwapchainCreateInfoKHR *swapchain_info =
       vk_find_struct_const(pCreateInfo->pNext, IMAGE_SWAPCHAIN_CREATE_INFO_KHR);
@@ -1982,7 +2002,14 @@ resolve_ahw_image(struct anv_device *device,
 
    /* Check tiling. */
    enum isl_tiling tiling;
-   result = anv_device_get_bo_tiling(device, mem->bo, &tiling);
+   const native_handle_t *handle =
+      AHardwareBuffer_getNativeHandle(mem->vk.ahardware_buffer);
+   struct u_gralloc_buffer_handle gr_handle = {
+      .handle = handle,
+      .hal_format = desc.format,
+      .pixel_stride = desc.stride,
+   };
+   result = anv_android_get_tiling(device, &gr_handle, &tiling);
    assert(result == VK_SUCCESS);
    isl_tiling_flags_t isl_tiling_flags = (1u << tiling);
 
@@ -1997,6 +2024,36 @@ resolve_ahw_image(struct anv_device *device,
    image->n_planes = anv_get_format_planes(image->vk.format);
 
    result = add_all_surfaces_implicit_layout(device, image, NULL, desc.stride,
+                                             isl_tiling_flags,
+                                             ISL_SURF_USAGE_DISABLE_AUX_BIT);
+   assert(result == VK_SUCCESS);
+#endif
+}
+
+static void
+resolve_anb_image(struct anv_device *device,
+                  struct anv_image *image,
+                  const VkNativeBufferANDROID *gralloc_info)
+{
+#if DETECT_OS_ANDROID && ANDROID_API_LEVEL >= 29
+   VkResult result;
+
+   /* Check tiling. */
+   enum isl_tiling tiling;
+   struct u_gralloc_buffer_handle gr_handle = {
+      .handle = gralloc_info->handle,
+      .hal_format = gralloc_info->format,
+      .pixel_stride = gralloc_info->stride,
+   };
+   result = anv_android_get_tiling(device, &gr_handle, &tiling);
+   assert(result == VK_SUCCESS);
+
+   isl_tiling_flags_t isl_tiling_flags = (1u << tiling);
+
+   /* Now we are able to fill anv_image fields properly and create
+    * isl_surface for it.
+    */
+   result = add_all_surfaces_implicit_layout(device, image, NULL, gralloc_info->stride,
                                              isl_tiling_flags,
                                              ISL_SURF_USAGE_DISABLE_AUX_BIT);
    assert(result == VK_SUCCESS);
@@ -2044,19 +2101,6 @@ anv_image_is_pat_compressible(struct anv_device *device, struct anv_image *image
     */
    if (image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT)
       return false;
-
-   /* TODO: Enable compression on depth surfaces.
-    * https://gitlab.freedesktop.org/mesa/mesa/-/issues/11361
-    */
-   for (uint32_t plane = 0; plane < image->n_planes; plane++) {
-      const struct isl_surf *surf =
-         &image->planes[plane].primary_surface.isl;
-      if (surf && isl_surf_usage_is_depth(surf->usage)) {
-         anv_perf_warn(VK_LOG_OBJS(&image->vk.base),
-                       "Disable PAT-based compression on depth images.");
-         return false;
-      }
-   }
 
    return true;
 }
@@ -2518,6 +2562,8 @@ anv_bind_image_memory(struct anv_device *device,
                                                        gralloc_info);
          if (result != VK_SUCCESS)
             return result;
+
+         resolve_anb_image(device, image, gralloc_info);
          did_bind = true;
          break;
       }

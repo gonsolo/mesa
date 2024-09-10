@@ -396,6 +396,12 @@ opt_loop_peel_initial_break(nir_loop *loop)
        !is_block_empty(nir_if_first_else_block(nif)))
       return false;
 
+   /* If do_work_2() ends in a break (presumably with a continue somewhere)
+    * then we can't move it to the top of the loop ahead of do_work_1()
+    */
+   if (nir_block_ends_in_break(nir_loop_last_block(loop)))
+      return false;
+
    /* Check that there is actual work to be done after the initial break. */
    if (!block_contains_work(nir_cf_node_cf_tree_next(if_node)))
       return false;
@@ -551,7 +557,13 @@ merge_terminators(nir_builder *b, nir_if *dest_if, nir_if *src_if)
    }
 
    b->cursor = nir_before_src(&dest_if->condition);
-   nir_def *new_c = nir_ior(b, dest_if->condition.ssa, src_if->condition.ssa);
+
+   nir_def *new_c = NULL;
+   if (then_break)
+      new_c = nir_ior(b, dest_if->condition.ssa, src_if->condition.ssa);
+   else
+      new_c = nir_iand(b, dest_if->condition.ssa, src_if->condition.ssa);
+
    nir_src_rewrite(&dest_if->condition, new_c);
 }
 

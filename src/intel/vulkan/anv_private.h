@@ -149,21 +149,6 @@ struct intel_perf_query_result;
 
 #define BINDING_TABLE_POOL_BLOCK_SIZE (65536)
 
-/* Allowing different clear colors requires us to perform a depth resolve at
- * the end of certain render passes. This is because while slow clears store
- * the clear color in the HiZ buffer, fast clears (without a resolve) don't.
- * See the PRMs for examples describing when additional resolves would be
- * necessary. To enable fast clears without requiring extra resolves, we set
- * the clear value to a globally-defined one. We could allow different values
- * if the user doesn't expect coherent data during or after a render passes
- * (VK_ATTACHMENT_STORE_OP_DONT_CARE), but such users (aside from the CTS)
- * don't seem to exist yet. In almost all Vulkan applications tested thus far,
- * 1.0f seems to be the only value used. The only application that doesn't set
- * this value does so through the usage of an seemingly uninitialized clear
- * value.
- */
-#define ANV_HZ_FC_VAL 1.0f
-
 /* 3DSTATE_VERTEX_BUFFER supports 33 VBs, we use 2 for base & drawid SGVs */
 #define MAX_VBS         (33 - 2)
 
@@ -580,10 +565,26 @@ anv_address_physical(struct anv_address addr)
    return intel_canonical_address(address);
 }
 
+static inline struct u_trace_address
+anv_address_utrace(struct anv_address addr)
+{
+   return (struct u_trace_address) {
+      .bo = addr.bo,
+      .offset = addr.offset,
+   };
+}
+
 static inline struct anv_address
 anv_address_add(struct anv_address addr, uint64_t offset)
 {
    addr.offset += offset;
+   return addr;
+}
+
+static inline struct anv_address
+anv_address_add_aligned(struct anv_address addr, uint64_t offset, uint32_t alignment)
+{
+   addr.offset = align(addr.offset + offset, alignment);
    return addr;
 }
 
@@ -705,7 +706,7 @@ struct anv_fixed_size_state_pool {
 };
 
 #define ANV_MIN_STATE_SIZE_LOG2 6
-#define ANV_MAX_STATE_SIZE_LOG2 22
+#define ANV_MAX_STATE_SIZE_LOG2 24
 
 #define ANV_STATE_BUCKETS (ANV_MAX_STATE_SIZE_LOG2 - ANV_MIN_STATE_SIZE_LOG2 + 1)
 
@@ -1005,6 +1006,7 @@ struct anv_physical_device {
     struct intel_device_info                      info;
 
     bool                                        video_decode_enabled;
+    bool                                        video_encode_enabled;
 
     struct brw_compiler *                       compiler;
     struct isl_device                           isl_dev;
@@ -1220,6 +1222,9 @@ struct anv_physical_device {
 
     void (*cmd_emit_timestamp)(struct anv_batch *, struct anv_device *, struct anv_address,
                                enum anv_timestamp_capture_type, void *);
+    void (*cmd_capture_data)(struct anv_batch *, struct anv_device *,
+                             struct anv_address, struct anv_address,
+                             uint32_t);
     struct intel_measure_device                 measure_device;
 
     /* Value of PIPELINE_SELECT::PipelineSelection == GPGPU */
@@ -1274,6 +1279,7 @@ struct anv_instance {
      * Workarounds for game bugs.
      */
     uint8_t                                     assume_full_subgroups;
+    bool                                        assume_full_subgroups_with_barrier;
     bool                                        limit_trig_input_range;
     bool                                        sample_mask_out_opengl_behaviour;
     bool                                        force_filter_addr_rounding;
@@ -1286,6 +1292,7 @@ struct anv_instance {
     unsigned                                    force_vk_vendor;
     bool                                        has_fake_sparse;
     bool                                        disable_fcv;
+    bool                                        disable_xe2_ccs;
     bool                                        compression_control_enabled;
     bool                                        anv_fake_nonlocal_memory;
 
@@ -1583,6 +1590,7 @@ struct anv_gfx_dynamic_state {
 
    /* 3DSTATE_PS_EXTRA */
    struct {
+      bool PixelShaderHasUAV;
       bool PixelShaderIsPerSample;
       bool PixelShaderKillsPixel;
       bool PixelShaderIsPerCoarsePixel;
@@ -1711,7 +1719,6 @@ struct anv_gfx_dynamic_state {
 
    /* 3DSTATE_WM */
    struct {
-      uint32_t ForceThreadDispatchEnable;
       bool     LineStippleEnable;
       uint32_t BarycentricInterpolationMode;
    } wm;
@@ -1945,7 +1952,6 @@ struct anv_device {
     struct anv_cmd_buffer                      *cmd_buffer_being_decoded;
 
     int                                         perf_fd; /* -1 if no opened */
-    uint64_t                                    perf_metric; /* 0 if unset */
 
     struct intel_aux_map_context                *aux_map_ctx;
 
@@ -2332,6 +2338,11 @@ struct anv_batch {
     * Number of 3DPRIMITIVE's emitted for WA 16014538804
     */
    uint8_t num_3d_primitives_emitted;
+
+   struct u_trace * trace;
+   const char * pc_reasons[4];
+   uint32_t pc_reasons_count;
+
 };
 
 void *anv_batch_emit_dwords(struct anv_batch *batch, int num_dwords);
@@ -2428,6 +2439,9 @@ _anv_combine_address(struct anv_batch *batch, void *location,
            assert((pipeline)->state.len == __anv_cmd_length(cmd));      \
            __anv_cmd_pack(cmd)(batch, _partial, &name);                 \
            for (uint32_t i = 0; i < __anv_cmd_length(cmd); i++) {       \
+              assert((_partial[i] &                                     \
+                      (pipeline)->batch_data[                           \
+                         (pipeline)->state.offset + i]) == 0);          \
               ((uint32_t *)_dst)[i] = _partial[i] |                     \
                  (pipeline)->batch_data[(pipeline)->state.offset + i];  \
            }                                                            \
@@ -2447,6 +2461,9 @@ _anv_combine_address(struct anv_batch *batch, void *location,
            assert(_cmd_state->len == __anv_cmd_length(cmd));            \
            __anv_cmd_pack(cmd)(batch, _partial, &name);                 \
            for (uint32_t i = 0; i < __anv_cmd_length(cmd); i++) {       \
+              assert((_partial[i] &                                     \
+                      (pipeline)->batch_data[                           \
+                         (pipeline)->state.offset + i]) == 0);          \
               ((uint32_t *)_dst)[i] = _partial[i] |                     \
                  (pipeline)->batch_data[_cmd_state->offset + i];        \
            }                                                            \
@@ -3301,6 +3318,8 @@ enum anv_cmd_dirty_bits {
    ANV_CMD_DIRTY_RESTART_INDEX                       = 1 << 5,
    ANV_CMD_DIRTY_OCCLUSION_QUERY_ACTIVE              = 1 << 6,
    ANV_CMD_DIRTY_FS_MSAA_FLAGS                       = 1 << 7,
+   ANV_CMD_DIRTY_COARSE_PIXEL_ACTIVE                 = 1 << 8,
+   ANV_CMD_DIRTY_INDIRECT_DATA_STRIDE                = 1 << 9,
 };
 typedef enum anv_cmd_dirty_bits anv_cmd_dirty_mask_t;
 
@@ -3773,6 +3792,12 @@ struct anv_cmd_pipeline_state {
    struct anv_pipeline      *pipeline;
 };
 
+enum anv_coarse_pixel_state {
+   ANV_COARSE_PIXEL_STATE_UNKNOWN,
+   ANV_COARSE_PIXEL_STATE_DISABLED,
+   ANV_COARSE_PIXEL_STATE_ENABLED,
+};
+
 /** State tracking for graphics pipeline
  *
  * This has anv_cmd_pipeline_state as a base struct to track things which get
@@ -3815,6 +3840,9 @@ struct anv_cmd_graphics_state {
    uint32_t index_offset;
    uint32_t index_size;
 
+   uint32_t indirect_data_stride;
+   bool indirect_data_stride_aligned;
+
    struct vk_vertex_input_state vertex_input;
    struct vk_sample_locations_state sample_locations;
 
@@ -3835,6 +3863,11 @@ struct anv_cmd_graphics_state {
     * State tracking for Wa_18020335297.
     */
    bool                                         viewport_set;
+
+   /**
+    * State tracking for Wa_18038825448.
+    */
+   enum anv_coarse_pixel_state coarse_pixel_active;
 
    struct intel_urb_config urb_cfg;
 
@@ -3860,8 +3893,6 @@ struct anv_cmd_compute_state {
    struct anv_cmd_pipeline_state base;
 
    bool pipeline_dirty;
-
-   struct anv_state push_data;
 
    struct anv_address num_workgroups;
 
@@ -3900,8 +3931,6 @@ struct anv_cmd_state {
    struct anv_cmd_ray_tracing_state             rt;
 
    enum anv_pipe_bits                           pending_pipe_bits;
-   const char *                                 pc_reasons[4];
-   uint32_t                                     pc_reasons_count;
 
    /**
     * Whether the last programmed STATE_BASE_ADDRESS references
@@ -3978,6 +4007,11 @@ struct anv_cmd_state {
     * last command buffer to the primary (if known).
     */
    enum anv_depth_reg_mode                      depth_reg_mode;
+
+   /* The last auxiliary surface operation (or equivalent operation) provided
+    * to genX(cmd_buffer_update_color_aux_op).
+    */
+   enum isl_aux_op                              color_aux_op;
 
    /**
     * Whether RHWO optimization is enabled (Wa_1508744258).
@@ -4212,7 +4246,8 @@ static inline bool
 anv_cmd_buffer_is_video_queue(const struct anv_cmd_buffer *cmd_buffer)
 {
    struct anv_queue_family *queue_family = cmd_buffer->queue_family;
-   return (queue_family->queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR) != 0;
+   return ((queue_family->queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR) |
+           (queue_family->queueFlags & VK_QUEUE_VIDEO_ENCODE_BIT_KHR)) != 0;
 }
 
 static inline bool
@@ -4669,6 +4704,11 @@ struct anv_graphics_lib_pipeline {
 
       enum gl_subgroup_size                     subgroup_size_type;
 
+      /* Hold on the value of VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT
+       * from library that introduces the stage, so it remains consistent.
+       */
+      bool                                      view_index_from_device_index;
+
       /* NIR captured in anv_pipeline_stage_get_nir(), includes specialization
        * constants.
        */
@@ -4707,7 +4747,6 @@ struct anv_graphics_pipeline {
    bool                                         rp_has_ds_self_dep;
 
    bool                                         kill_pixel;
-   bool                                         force_fragment_thread_dispatch;
    bool                                         uses_xfb;
    bool                                         sample_shading_enable;
    float                                        min_sample_shading;
@@ -4792,20 +4831,6 @@ struct anv_graphics_pipeline {
       struct anv_gfx_state_ptr                  vfg;
    } partial;
 };
-
-#define anv_batch_merge_pipeline_state(batch, dwords0, pipeline, state) \
-   do {                                                                 \
-      uint32_t *dw;                                                     \
-                                                                        \
-      assert(ARRAY_SIZE(dwords0) == (pipeline)->state.len);             \
-      dw = anv_batch_emit_dwords((batch), ARRAY_SIZE(dwords0));         \
-      if (!dw)                                                          \
-         break;                                                         \
-      for (uint32_t i = 0; i < ARRAY_SIZE(dwords0); i++)                \
-         dw[i] = (dwords0)[i] |                                         \
-            (pipeline)->batch_data[(pipeline)->state.offset + i];       \
-      VG(VALGRIND_CHECK_MEM_IS_DEFINED(dw, ARRAY_SIZE(dwords0) * 4));   \
-   } while (0)
 
 #define anv_batch_emit_pipeline_state(batch, pipeline, state)           \
    do {                                                                 \
@@ -5674,12 +5699,26 @@ anv_image_clear_depth_stencil(struct anv_cmd_buffer *cmd_buffer,
                               uint32_t level,
                               uint32_t base_layer, uint32_t layer_count,
                               VkRect2D area,
-                              float depth_value, uint8_t stencil_value);
+                              const VkClearDepthStencilValue *clear_value);
 void
 anv_attachment_msaa_resolve(struct anv_cmd_buffer *cmd_buffer,
                             const struct anv_attachment *att,
                             VkImageLayout layout,
                             VkImageAspectFlagBits aspect);
+
+static inline union isl_color_value
+anv_image_hiz_clear_value(const struct anv_image *image)
+{
+   /* The benchmarks we're tracking tend to prefer clearing depth buffers to
+    * 0.0f when the depth buffers are part of images with multiple aspects.
+    * Otherwise, they tend to prefer clearing depth buffers to 1.0f.
+    */
+   if (image->n_planes == 2)
+      return (union isl_color_value) { .f32 = { 0.0f, } };
+   else
+      return (union isl_color_value) { .f32 = { 1.0f, } };
+}
+
 void
 anv_image_hiz_op(struct anv_cmd_buffer *cmd_buffer,
                  const struct anv_image *image,
@@ -5692,7 +5731,8 @@ anv_image_hiz_clear(struct anv_cmd_buffer *cmd_buffer,
                     VkImageAspectFlags aspects,
                     uint32_t level,
                     uint32_t base_layer, uint32_t layer_count,
-                    VkRect2D area, uint8_t stencil_value);
+                    VkRect2D area,
+                    const VkClearDepthStencilValue *clear_value);
 void
 anv_image_mcs_op(struct anv_cmd_buffer *cmd_buffer,
                  const struct anv_image *image,
@@ -6043,6 +6083,9 @@ struct anv_query_pool {
    struct intel_perf_counter_pass                *counter_pass;
    uint32_t                                     n_passes;
    struct intel_perf_query_info                 **pass_query;
+
+   /* Video encoding queries */
+   VkVideoCodecOperationFlagsKHR                codec;
 };
 
 static inline uint32_t khr_perf_query_preamble_offset(const struct anv_query_pool *pool,
@@ -6058,8 +6101,6 @@ struct anv_vid_mem {
    VkDeviceSize       size;
 };
 
-#define ANV_VIDEO_MEM_REQS_H264 4
-#define ANV_VIDEO_MEM_REQS_H265 9
 #define ANV_MB_WIDTH 16
 #define ANV_MB_HEIGHT 16
 #define ANV_VIDEO_H264_MAX_NUM_REF_FRAME 16
@@ -6085,18 +6126,21 @@ enum anv_vid_mem_h265_types {
    ANV_VID_MEM_H265_SAO_LINE,
    ANV_VID_MEM_H265_SAO_TILE_LINE,
    ANV_VID_MEM_H265_SAO_TILE_COLUMN,
-   ANV_VID_MEM_H265_MAX,
+   ANV_VID_MEM_H265_DEC_MAX,
+   ANV_VID_MEM_H265_SSE_SRC_PIX_ROW_STORE = ANV_VID_MEM_H265_DEC_MAX,
+   ANV_VID_MEM_H265_ENC_MAX,
 };
 
 struct anv_video_session {
    struct vk_video_session vk;
 
    /* the decoder needs some private memory allocations */
-   struct anv_vid_mem vid_mem[ANV_VID_MEM_H265_MAX];
+   struct anv_vid_mem vid_mem[ANV_VID_MEM_H265_ENC_MAX];
 };
 
 struct anv_video_session_params {
    struct vk_video_session_parameters vk;
+   VkVideoEncodeRateControlModeFlagBitsKHR rc_mode;
 };
 
 void
@@ -6113,11 +6157,8 @@ anv_add_pending_pipe_bits(struct anv_cmd_buffer* cmd_buffer,
       anv_dump_pipe_bits(bits, stdout);
       fprintf(stdout, "reason: %s\n", reason);
    }
-   /* store reason, if space available*/
-   if (cmd_buffer->state.pc_reasons_count <
-       ARRAY_SIZE(cmd_buffer->state.pc_reasons)) {
-      cmd_buffer->state.pc_reasons[
-         cmd_buffer->state.pc_reasons_count++] = reason;
+   if (cmd_buffer->batch.pc_reasons_count < ARRAY_SIZE(cmd_buffer->batch.pc_reasons)) {
+      cmd_buffer->batch.pc_reasons[cmd_buffer->batch.pc_reasons_count++] = reason;
    }
 }
 
@@ -6132,6 +6173,7 @@ struct anv_performance_configuration_intel {
 void anv_physical_device_init_va_ranges(struct anv_physical_device *device);
 void anv_physical_device_init_perf(struct anv_physical_device *device, int fd);
 void anv_device_perf_init(struct anv_device *device);
+void anv_device_perf_close(struct anv_device *device);
 void anv_perf_write_pass_results(struct intel_perf_config *perf,
                                  struct anv_query_pool *pool, uint32_t pass,
                                  const struct intel_perf_query_result *accumulated_results,
@@ -6189,9 +6231,6 @@ struct anv_utrace_submit {
    struct anv_state_stream dynamic_state_stream;
    struct anv_state_stream general_state_stream;
 
-   /* Buffer of 64bits timestamps (only used for timestamp copies) */
-   struct anv_bo *trace_bo;
-
    /* Last fully read 64bit timestamp (used to rebuild the upper bits of 32bit
     * timestamps)
     */
@@ -6211,6 +6250,13 @@ anv_device_utrace_flush_cmd_buffers(struct anv_queue *queue,
                                     uint32_t cmd_buffer_count,
                                     struct anv_cmd_buffer **cmd_buffers,
                                     struct anv_utrace_submit **out_submit);
+
+void
+anv_device_utrace_emit_gfx_copy_buffer(struct u_trace_context *utctx,
+                                       void *cmdstream,
+                                       void *ts_from, uint64_t from_offset_B,
+                                       void *ts_to, uint64_t to_offset_B,
+                                       uint64_t size_B);
 
 static bool
 anv_has_cooperative_matrix(const struct anv_physical_device *device)

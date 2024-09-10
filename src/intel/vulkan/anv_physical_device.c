@@ -150,6 +150,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_shader_maximal_reconvergence      = true,
       .KHR_shader_non_semantic_info          = true,
       .KHR_shader_quad_control               = true,
+      .KHR_shader_relaxed_extended_instruction = true,
       .KHR_shader_subgroup_extended_types    = true,
       .KHR_shader_subgroup_rotate            = true,
       .KHR_shader_subgroup_uniform_control_flow = true,
@@ -165,10 +166,13 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_uniform_buffer_standard_layout    = true,
       .KHR_variable_pointers                 = true,
       .KHR_vertex_attribute_divisor          = true,
-      .KHR_video_queue                       = device->video_decode_enabled,
+      .KHR_video_queue                       = device->video_decode_enabled || device->video_encode_enabled,
       .KHR_video_decode_queue                = device->video_decode_enabled,
       .KHR_video_decode_h264                 = VIDEO_CODEC_H264DEC && device->video_decode_enabled,
       .KHR_video_decode_h265                 = VIDEO_CODEC_H265DEC && device->video_decode_enabled,
+      .KHR_video_encode_queue                = device->video_encode_enabled,
+      .KHR_video_encode_h264                 = VIDEO_CODEC_H264ENC && device->video_encode_enabled,
+      .KHR_video_encode_h265                 = device->info.ver >= 12 && VIDEO_CODEC_H265ENC && device->video_encode_enabled,
       .KHR_vulkan_memory_model               = true,
       .KHR_workgroup_memory_explicit_layout  = true,
       .KHR_zero_initialize_workgroup_memory  = true,
@@ -801,6 +805,9 @@ get_features(const struct anv_physical_device *pdevice,
 
       /* VK_KHR_maintenance7 */
       .maintenance7 = true,
+
+      /* VK_KHR_shader_relaxed_extended_instruction */
+      .shaderRelaxedExtendedInstruction = true,
    };
 
    /* The new DOOM and Wolfenstein games require depthBounds without
@@ -2017,6 +2024,7 @@ anv_physical_device_free_disk_cache(struct anv_physical_device *device)
  *  * "g" is for graphics queues with no compute support
  *  * "c" is for compute queues with no graphics support
  *  * "v" is for video queues with no graphics support
+ *  * "b" is for copy (blitter) queues with no graphics support
  *
  * For example, ANV_QUEUE_OVERRIDE=gc=2,c=1 would override the number of
  * advertised queues to be 2 queues with graphics+compute support, and 1 queue
@@ -2031,12 +2039,13 @@ anv_physical_device_free_disk_cache(struct anv_physical_device *device)
  * number of graphics+compute queues to be 0.
  */
 static void
-anv_override_engine_counts(int *gc_count, int *g_count, int *c_count, int *v_count)
+anv_override_engine_counts(int *gc_count, int *g_count, int *c_count, int *v_count, int *blit_count)
 {
    int gc_override = -1;
    int g_override = -1;
    int c_override = -1;
    int v_override = -1;
+   int blit_override = -1;
    const char *env_ = os_get_option("ANV_QUEUE_OVERRIDE");
 
    if (env_ == NULL)
@@ -2054,6 +2063,8 @@ anv_override_engine_counts(int *gc_count, int *g_count, int *c_count, int *v_cou
          c_override = strtol(next + 2, NULL, 0);
       } else if (strncmp(next, "v=", 2) == 0) {
          v_override = strtol(next + 2, NULL, 0);
+      } else if (strncmp(next, "b=", 2) == 0) {
+         blit_override = strtol(next + 2, NULL, 0);
       } else {
          mesa_logw("Ignoring unsupported ANV_QUEUE_OVERRIDE token: %s", next);
       }
@@ -2071,6 +2082,8 @@ anv_override_engine_counts(int *gc_count, int *g_count, int *c_count, int *v_cou
       *c_count = c_override;
    if (v_override >= 0)
       *v_count = v_override;
+   if (blit_override >= 0)
+      *blit_count = blit_override;
 }
 
 static void
@@ -2090,12 +2103,20 @@ anv_physical_device_init_queue_families(struct anv_physical_device *pdevice)
          intel_engines_count(pdevice->engine_info, INTEL_ENGINE_CLASS_VIDEO);
       int g_count = 0;
       int c_count = 0;
+      /* Not only the Kernel needs to have vm_control, but it also needs to
+       * have a new enough GuC and the interface to tell us so. This is
+       * implemented in the common layer by is_guc_semaphore_functional() and
+       * results in devinfo->engine_class_supported_count being adjusted,
+       * which we read below.
+       */
       const bool kernel_supports_non_render_engines = pdevice->has_vm_control;
-      const bool sparse_supports_non_render_engines =
-         pdevice->sparse_type != ANV_SPARSE_TYPE_TRTT;
+      /* For now we're choosing to not expose non-render engines on i915.ko
+       * even when the Kernel allows it. We have data suggesting it's not an
+       * obvious win in terms of performance.
+       */
       const bool can_use_non_render_engines =
          kernel_supports_non_render_engines &&
-         sparse_supports_non_render_engines;
+         pdevice->info.kmd_type == INTEL_KMD_TYPE_XE;
 
       if (can_use_non_render_engines) {
          c_count = pdevice->info.engine_class_supported_count[INTEL_ENGINE_CLASS_COMPUTE];
@@ -2108,7 +2129,7 @@ anv_physical_device_init_queue_families(struct anv_physical_device *pdevice)
          blit_count = pdevice->info.engine_class_supported_count[INTEL_ENGINE_CLASS_COPY];
       }
 
-      anv_override_engine_counts(&gc_count, &g_count, &c_count, &v_count);
+      anv_override_engine_counts(&gc_count, &g_count, &c_count, &v_count, &blit_count);
 
       if (gc_count > 0) {
          pdevice->queue.families[family_count++] = (struct anv_queue_family) {
@@ -2141,7 +2162,7 @@ anv_physical_device_init_queue_families(struct anv_physical_device *pdevice)
             .engine_class = compute_class,
          };
       }
-      if (v_count > 0 && pdevice->video_decode_enabled) {
+      if (v_count > 0 && (pdevice->video_decode_enabled || pdevice->video_encode_enabled)) {
          /* HEVC support on Gfx9 is only available on VCS0. So limit the number of video queues
           * to the first VCS engine instance.
           *
@@ -2154,7 +2175,8 @@ anv_physical_device_init_queue_families(struct anv_physical_device *pdevice)
           */
          /* TODO: enable protected content on video queue */
          pdevice->queue.families[family_count++] = (struct anv_queue_family) {
-            .queueFlags = VK_QUEUE_VIDEO_DECODE_BIT_KHR,
+            .queueFlags = (pdevice->video_decode_enabled ? VK_QUEUE_VIDEO_DECODE_BIT_KHR : 0) |
+                          (pdevice->video_encode_enabled ? VK_QUEUE_VIDEO_ENCODE_BIT_KHR : 0),
             .queueCount = pdevice->info.ver == 9 ? MIN2(1, v_count) : v_count,
             .engine_class = INTEL_ENGINE_CLASS_VIDEO,
          };
@@ -2234,17 +2256,22 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
       goto fail_fd;
    }
 
-   if (devinfo.ver == 20) {
-      mesa_logw("Vulkan not yet supported on %s", devinfo.name);
-   } else if (devinfo.ver > 12) {
-      result = vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                         "Vulkan not yet supported on %s", devinfo.name);
-      goto fail_fd;
-   } else if (devinfo.ver < 9) {
+   if (devinfo.ver < 9) {
       /* Silently fail here, hasvk should pick up this device. */
       result = VK_ERROR_INCOMPATIBLE_DRIVER;
       goto fail_fd;
+   } else if (devinfo.probe_forced) {
+      /* If INTEL_FORCE_PROBE was used, then the user has opted-in for
+       * unsupported device support. No need to print a warning message.
+       */
+   } else if (devinfo.ver > 20) {
+      result = vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
+                         "Vulkan not yet supported on %s", devinfo.name);
+      goto fail_fd;
    }
+
+   if (devinfo.ver == 20 && instance->disable_xe2_ccs)
+      intel_debug |= DEBUG_NO_CCS;
 
    /* Disable Wa_16013994831 on Gfx12.0 because we found other cases where we
     * need to always disable preemption :
@@ -2368,6 +2395,7 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
       !debug_get_bool_option("ANV_DISABLE_SECONDARY_CMD_BUFFER_CALLS", false);
 
    device->video_decode_enabled = debug_get_bool_option("ANV_VIDEO_DECODE", false);
+   device->video_encode_enabled = debug_get_bool_option("ANV_VIDEO_ENCODE", false);
 
    device->uses_ex_bso = device->info.verx10 >= 125;
 
@@ -2389,21 +2417,20 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
    device->uses_relocs = device->info.kmd_type != INTEL_KMD_TYPE_XE;
 
    /* While xe.ko can use both vm_bind and TR-TT, i915.ko only has TR-TT. */
-   if (device->info.kmd_type == INTEL_KMD_TYPE_XE) {
-      if (debug_get_bool_option("ANV_SPARSE_USE_TRTT", false))
-         device->sparse_type = ANV_SPARSE_TYPE_TRTT;
-      else
-         device->sparse_type = ANV_SPARSE_TYPE_VM_BIND;
-   } else {
-      if (device->info.ver >= 12 &&
-          device->has_exec_timeline &&
-          debug_get_bool_option("ANV_SPARSE", true)) {
-         device->sparse_type = ANV_SPARSE_TYPE_TRTT;
-      } else if (instance->has_fake_sparse) {
-         device->sparse_type = ANV_SPARSE_TYPE_FAKE;
+   if (debug_get_bool_option("ANV_SPARSE", true)) {
+      if (device->info.kmd_type == INTEL_KMD_TYPE_XE) {
+         if (debug_get_bool_option("ANV_SPARSE_USE_TRTT", false))
+            device->sparse_type = ANV_SPARSE_TYPE_TRTT;
+         else
+            device->sparse_type = ANV_SPARSE_TYPE_VM_BIND;
       } else {
-         device->sparse_type = ANV_SPARSE_TYPE_NOT_SUPPORTED;
+         if (device->info.ver >= 12 && device->has_exec_timeline)
+            device->sparse_type = ANV_SPARSE_TYPE_TRTT;
       }
+   }
+   if (device->sparse_type == ANV_SPARSE_TYPE_NOT_SUPPORTED) {
+      if (instance->has_fake_sparse)
+         device->sparse_type = ANV_SPARSE_TYPE_FAKE;
    }
 
    device->always_flush_cache = INTEL_DEBUG(DEBUG_STALL) ||
@@ -2416,7 +2443,6 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
    }
    device->compiler->shader_debug_log = compiler_debug_log;
    device->compiler->shader_perf_log = compiler_perf_log;
-   device->compiler->indirect_ubos_use_sampler = device->info.ver < 12;
    device->compiler->extended_bindless_surface_offset = device->uses_ex_bso;
    device->compiler->use_bindless_sampler_offset = false;
    device->compiler->spilling_rate =
@@ -2614,6 +2640,11 @@ void anv_GetPhysicalDeviceQueueFamilyProperties2(
                if (queue_family->queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR) {
                   prop->videoCodecOperations = VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR |
                                                VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR;
+               }
+
+               if (queue_family->queueFlags & VK_QUEUE_VIDEO_ENCODE_BIT_KHR) {
+                  prop->videoCodecOperations |= VK_VIDEO_CODEC_OPERATION_ENCODE_H264_BIT_KHR |
+                                                VK_VIDEO_CODEC_OPERATION_ENCODE_H265_BIT_KHR;
                }
                break;
             }

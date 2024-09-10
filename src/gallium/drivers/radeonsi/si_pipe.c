@@ -122,6 +122,8 @@ static const struct debug_named_value radeonsi_debug_options[] = {
 
 static const struct debug_named_value test_options[] = {
    /* Tests: */
+   {"clearbuffer", DBG(TEST_CLEAR_BUFFER), "Test correctness of the clear_buffer compute shader"},
+   {"copybuffer", DBG(TEST_COPY_BUFFER), "Test correctness of the copy_buffer compute shader"},
    {"imagecopy", DBG(TEST_IMAGE_COPY), "Invoke resource_copy_region tests with images and exit."},
    {"cbresolve", DBG(TEST_CB_RESOLVE), "Invoke MSAA resolve tests and exit."},
    {"computeblit", DBG(TEST_COMPUTE_BLIT), "Invoke blits tests and exit."},
@@ -973,7 +975,7 @@ static struct pipe_context *si_pipe_create_context(struct pipe_screen *screen, v
 /*
  * pipe_screen
  */
-static void si_destroy_screen(struct pipe_screen *pscreen)
+void si_destroy_screen(struct pipe_screen *pscreen)
 {
    struct si_screen *sscreen = (struct si_screen *)pscreen;
    struct si_shader_part *parts[] = {sscreen->ps_prologs, sscreen->ps_epilogs};
@@ -1064,7 +1066,6 @@ static void si_destroy_screen(struct pipe_screen *pscreen)
 
    sscreen->ws->destroy(sscreen->ws);
    FREE(sscreen->nir_options);
-   FREE(sscreen->nir_lower_subgroups_options);
    FREE(sscreen);
 }
 
@@ -1233,7 +1234,6 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
    sscreen->b.finalize_nir = si_finalize_nir;
 
    sscreen->nir_options = CALLOC_STRUCT(nir_shader_compiler_options);
-   sscreen->nir_lower_subgroups_options = CALLOC_STRUCT(nir_lower_subgroups_options);
 
    si_init_screen_get_functions(sscreen);
    si_init_screen_buffer_functions(sscreen);
@@ -1270,7 +1270,6 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
    si_init_gs_info(sscreen);
    if (!si_init_shader_cache(sscreen)) {
       FREE(sscreen->nir_options);
-      FREE(sscreen->nir_lower_subgroups_options);
       FREE(sscreen);
       return NULL;
    }
@@ -1327,7 +1326,6 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
                         UTIL_QUEUE_INIT_SET_FULL_THREAD_AFFINITY, NULL)) {
       si_destroy_shader_cache(sscreen);
       FREE(sscreen->nir_options);
-      FREE(sscreen->nir_lower_subgroups_options);
       FREE(sscreen);
       glsl_type_singleton_decref();
       return NULL;
@@ -1339,7 +1337,6 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
                         UTIL_QUEUE_INIT_SET_FULL_THREAD_AFFINITY, NULL)) {
       si_destroy_shader_cache(sscreen);
       FREE(sscreen->nir_options);
-      FREE(sscreen->nir_lower_subgroups_options);
       FREE(sscreen);
       glsl_type_singleton_decref();
       return NULL;
@@ -1498,15 +1495,20 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
       }
    }
 
+   if (test_flags & DBG(TEST_CLEAR_BUFFER))
+      si_test_clear_buffer(sscreen);
+
+   if (test_flags & DBG(TEST_COPY_BUFFER))
+      si_test_copy_buffer(sscreen);
+
    if (test_flags & DBG(TEST_IMAGE_COPY))
       si_test_image_copy_region(sscreen);
 
    if (test_flags & (DBG(TEST_CB_RESOLVE) | DBG(TEST_COMPUTE_BLIT)))
       si_test_blit(sscreen, test_flags);
 
-   if (test_flags & DBG(TEST_DMA_PERF)) {
+   if (test_flags & DBG(TEST_DMA_PERF))
       si_test_dma_perf(sscreen);
-   }
 
    if (test_flags & DBG(TEST_MEM_PERF))
       si_test_mem_perf(sscreen);

@@ -68,8 +68,6 @@ typedef void *drmDevicePtr;
 #include "vk_sync.h"
 #include "vk_sync_dummy.h"
 
-#include "aco_interface.h"
-
 #if AMD_LLVM_AVAILABLE
 #include "ac_llvm_util.h"
 #endif
@@ -575,7 +573,8 @@ radv_device_init_memory_cache(struct radv_device *device)
 static void
 radv_device_finish_memory_cache(struct radv_device *device)
 {
-   vk_pipeline_cache_destroy(device->mem_cache, NULL);
+   if (device->mem_cache)
+      vk_pipeline_cache_destroy(device->mem_cache, NULL);
 }
 
 static VkResult
@@ -875,7 +874,6 @@ radv_device_init_cache_key(struct radv_device *device)
 static void
 radv_create_gfx_preamble(struct radv_device *device)
 {
-   const struct radv_physical_device *pdev = radv_device_physical(device);
    struct radeon_cmdbuf *cs = device->ws->cs_create(device->ws, AMD_IP_GFX, false);
    if (!cs)
       return;
@@ -884,12 +882,7 @@ radv_create_gfx_preamble(struct radv_device *device)
 
    radv_emit_graphics(device, cs);
 
-   while (cs->cdw & 7) {
-      if (pdev->info.gfx_ib_pad_with_type2)
-         radeon_emit(cs, PKT2_NOP_PAD);
-      else
-         radeon_emit(cs, PKT3_NOP_PAD);
-   }
+   device->ws->cs_pad(cs, 0);
 
    VkResult result = radv_bo_create(
       device, NULL, cs->cdw * 4, 4096, device->ws->cs_domain(device->ws),
@@ -1054,22 +1047,6 @@ radv_device_init_msaa(struct radv_device *device)
       radv_get_sample_position(device, 8, i, device->sample_locations_8x[i]);
 }
 
-static bool
-radv_is_cache_disabled(struct radv_device *device)
-{
-   const struct radv_physical_device *pdev = radv_device_physical(device);
-   const struct radv_instance *instance = radv_physical_device_instance(pdev);
-
-   /* The buffer address used for debug printf is hardcoded. */
-   if (device->printf.buffer_addr)
-      return true;
-
-   /* Pipeline caches can be disabled with RADV_DEBUG=nocache, with MESA_GLSL_CACHE_DISABLE=1 and
-    * when ACO_DEBUG is used. MESA_GLSL_CACHE_DISABLE is done elsewhere.
-    */
-   return (instance->debug_flags & RADV_DEBUG_NO_CACHE) || (pdev->use_llvm ? 0 : aco_get_codegen_flags());
-}
-
 VKAPI_ATTR VkResult VKAPI_CALL
 radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCreateInfo,
                   const VkAllocationCallbacks *pAllocator, VkDevice *pDevice)
@@ -1133,10 +1110,6 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
       device->vk.enabled_extensions.KHR_ray_tracing_pipeline ||
       device->vk.enabled_extensions.KHR_acceleration_structure ||
       device->vk.enabled_extensions.VALVE_descriptor_set_host_mapping;
-
-   device->buffer_robustness = device->vk.enabled_features.robustBufferAccess2  ? RADV_BUFFER_ROBUSTNESS_2
-                               : device->vk.enabled_features.robustBufferAccess ? RADV_BUFFER_ROBUSTNESS_1
-                                                                                : RADV_BUFFER_ROBUSTNESS_DISABLED;
 
    radv_init_shader_arenas(device);
 
@@ -1303,9 +1276,11 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    if (!(instance->debug_flags & RADV_DEBUG_NO_IBS))
       radv_create_gfx_preamble(device);
 
-   result = radv_device_init_memory_cache(device);
-   if (result != VK_SUCCESS)
-      goto fail_meta;
+   if (!device->vk.disable_internal_cache) {
+      result = radv_device_init_memory_cache(device);
+      if (result != VK_SUCCESS)
+         goto fail_meta;
+   }
 
    device->force_aniso = MIN2(16, (int)debug_get_num_option("RADV_TEX_ANISO", -1));
    if (device->force_aniso >= 0) {
@@ -1330,8 +1305,6 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
       if (!radv_device_acquire_performance_counters(device))
          fprintf(stderr, "radv: failed to set pstate to profile_peak.\n");
    }
-
-   device->cache_disabled = radv_is_cache_disabled(device);
 
    *pDevice = radv_device_to_handle(device);
    return VK_SUCCESS;

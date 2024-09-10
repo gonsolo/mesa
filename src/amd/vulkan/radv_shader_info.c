@@ -493,6 +493,9 @@ gather_shader_info_vs(struct radv_device *device, const nir_shader *nir,
       info->vs.dynamic_inputs = true;
    }
 
+   info->gs_inputs_read = ~0ULL;
+   info->vs.hs_inputs_read = ~0ULL;
+
    /* Use per-attribute vertex descriptors to prevent faults and for correct bounds checking. */
    info->vs.use_per_attribute_vb_descs = radv_use_per_attribute_vb_descs(nir, gfx_state, stage_key);
 
@@ -574,6 +577,7 @@ gather_shader_info_tcs(struct radv_device *device, const nir_shader *nir,
 static void
 gather_shader_info_tes(struct radv_device *device, const nir_shader *nir, struct radv_shader_info *info)
 {
+   info->gs_inputs_read = ~0ULL;
    info->tes._primitive_mode = nir->info.tess._primitive_mode;
    info->tes.spacing = nir->info.tess.spacing;
    info->tes.ccw = nir->info.tess.ccw;
@@ -871,6 +875,7 @@ gather_shader_info_fs(const struct radv_device *device, const nir_shader *nir,
    info->ps.post_depth_coverage = nir->info.fs.post_depth_coverage;
    info->ps.depth_layout = nir->info.fs.depth_layout;
    info->ps.uses_sample_shading = nir->info.fs.uses_sample_shading;
+   info->ps.uses_fbfetch_output = nir->info.fs.uses_fbfetch_output;
    info->ps.writes_memory = nir->info.writes_memory;
    info->ps.has_pcoord = nir->info.inputs_read & VARYING_BIT_PNTC;
    info->ps.prim_id_input = nir->info.inputs_read & VARYING_BIT_PRIMITIVE_ID;
@@ -1726,11 +1731,17 @@ radv_link_shaders_info(struct radv_device *device, struct radv_shader_stage *pro
 
          es_info->workgroup_size = gs_info->workgroup_size;
       }
+
+      if (consumer && consumer->stage == MESA_SHADER_GEOMETRY) {
+         producer->info.gs_inputs_read = consumer->nir->info.inputs_read;
+      }
    }
 
    if (producer->stage == MESA_SHADER_VERTEX && consumer && consumer->stage == MESA_SHADER_TESS_CTRL) {
       struct radv_shader_stage *vs_stage = producer;
       struct radv_shader_stage *tcs_stage = consumer;
+
+      vs_stage->info.vs.hs_inputs_read = tcs_stage->nir->info.inputs_read;
 
       if (gfx_state->ts.patch_control_points) {
          vs_stage->info.workgroup_size =

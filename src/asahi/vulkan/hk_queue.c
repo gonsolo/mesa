@@ -75,9 +75,11 @@ asahi_fill_cdm_command(struct hk_device *dev, struct hk_cs *cs,
       .encoder_ptr = cs->addr,
       .encoder_end = cs->addr + len,
 
-      .sampler_array = dev->samplers.table.bo->ptr.gpu,
+      .sampler_array = dev->samplers.table.bo->va->addr,
       .sampler_count = dev->samplers.table.alloc,
       .sampler_max = dev->samplers.table.alloc + 1,
+
+      .usc_base = dev->dev.shader_base,
 
       .encoder_id = agx_get_global_id(&dev->dev),
       .cmd_id = agx_get_global_id(&dev->dev),
@@ -85,9 +87,9 @@ asahi_fill_cdm_command(struct hk_device *dev, struct hk_cs *cs,
    };
 
    if (cs->scratch.cs.main || cs->scratch.cs.preamble) {
-      cmd->helper_arg = dev->scratch.cs.buf->ptr.gpu;
+      cmd->helper_arg = dev->scratch.cs.buf->va->addr;
       cmd->helper_cfg = cs->scratch.cs.preamble << 16;
-      cmd->helper_program = dev->dev.helper->ptr.gpu | 1;
+      cmd->helper_program = dev->dev.helper->va->addr | 1;
    }
 }
 
@@ -118,6 +120,9 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
    c->cmd_3d_id = cmd_3d_id;
    c->cmd_ta_id = cmd_ta_id;
    c->ppp_ctrl = 0x202;
+
+   c->fragment_usc_base = dev->dev.shader_base;
+   c->vertex_usc_base = c->fragment_usc_base;
 
    c->fb_width = cs->cr.width;
    c->fb_height = cs->cr.height;
@@ -195,8 +200,6 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
 
    c->ppp_multisamplectl = cs->ppp_multisamplectl;
    c->sample_size = cs->tib.sample_size_B;
-
-   /* XXX OR 0x80 with eMRT? */
    c->tib_blocks = ALIGN_POT(agx_tilebuffer_total_size(&cs->tib), 2048) / 2048;
 
    float tan_60 = 1.732051f;
@@ -223,7 +226,7 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
    c->scissor_array = cs->uploaded_scissor;
    c->depth_bias_array = cs->uploaded_zbias;
 
-   c->vertex_sampler_array = dev->samplers.table.bo->ptr.gpu;
+   c->vertex_sampler_array = dev->samplers.table.bo->va->addr;
    c->vertex_sampler_count = dev->samplers.table.alloc;
    c->vertex_sampler_max = dev->samplers.table.alloc + 1;
 
@@ -231,7 +234,7 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
    c->fragment_sampler_count = c->vertex_sampler_count;
    c->fragment_sampler_max = c->vertex_sampler_max;
 
-   c->visibility_result_buffer = dev->occlusion_queries.bo->ptr.gpu;
+   c->visibility_result_buffer = dev->occlusion_queries.bo->va->addr;
 
    /* If a tile is empty, we do not want to process it, as the redundant
     * roundtrip of memory-->tilebuffer-->memory wastes a tremendous amount of
@@ -247,15 +250,15 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
 
    if (cs->scratch.vs.main || cs->scratch.vs.preamble) {
       c->flags |= ASAHI_RENDER_VERTEX_SPILLS;
-      c->vertex_helper_arg = dev->scratch.vs.buf->ptr.gpu;
+      c->vertex_helper_arg = dev->scratch.vs.buf->va->addr;
       c->vertex_helper_cfg = cs->scratch.vs.preamble << 16;
-      c->vertex_helper_program = dev->dev.helper->ptr.gpu | 1;
+      c->vertex_helper_program = dev->dev.helper->va->addr | 1;
    }
 
    if (cs->scratch.fs.main || cs->scratch.fs.preamble) {
-      c->fragment_helper_arg = dev->scratch.fs.buf->ptr.gpu;
+      c->fragment_helper_arg = dev->scratch.fs.buf->va->addr;
       c->fragment_helper_cfg = cs->scratch.fs.preamble << 16;
-      c->fragment_helper_program = dev->dev.helper->ptr.gpu | 1;
+      c->fragment_helper_program = dev->dev.helper->va->addr | 1;
    }
 }
 
@@ -284,8 +287,14 @@ union drm_asahi_cmd {
    struct drm_asahi_cmd_render render;
 };
 
-/* TODO: I think it's 64. Can we query from the kernel? */
-#define MAX_COMMANDS_PER_SUBMIT (16)
+/* XXX: Batching multiple commands per submission is causing rare (7ppm) flakes
+ * on the CTS once lossless compression is enabled. This needs to be
+ * investigated before we can reenable this mechanism. We are likely missing a
+ * cache flush or barrier somewhere.
+ *
+ * TODO: I think the actual maximum is 64. Can we query from the kernel?
+ */
+#define MAX_COMMANDS_PER_SUBMIT (1)
 
 static VkResult
 queue_submit_single(struct agx_device *dev, struct drm_asahi_submit *submit)
@@ -497,7 +506,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
          }
       }
 
-      agxdecode_image_heap(dev->dev.agxdecode, dev->images.bo->ptr.gpu,
+      agxdecode_image_heap(dev->dev.agxdecode, dev->images.bo->va->addr,
                            dev->images.alloc);
 
       agxdecode_next_frame();

@@ -1631,9 +1631,6 @@ static void si_query_hw_get_result_resource(struct si_context *sctx, struct si_q
          ssbo[2].buffer = resource;
          ssbo[2].buffer_offset = offset;
          ssbo[2].buffer_size = resource->width0 - offset;
-         /* assert size is correct, based on result_type ? */
-
-         si_resource(resource)->TC_L2_dirty = true;
       }
 
       if ((flags & PIPE_QUERY_WAIT) && qbuf == &query->buffer) {
@@ -1698,7 +1695,7 @@ static void si_render_condition(struct pipe_context *ctx, struct pipe_query *que
          /* Settings this in the render cond atom is too late,
           * so set it here. */
          if (sctx->gfx_level <= GFX8) {
-            sctx->flags |= SI_CONTEXT_WB_L2;
+            sctx->flags |= SI_CONTEXT_WB_L2 | SI_CONTEXT_PFP_SYNC_ME;
             si_mark_atom_dirty(sctx, &sctx->atoms.s.cache_flush);
          }
 

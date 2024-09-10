@@ -265,7 +265,7 @@ enum si_tracked_reg
 {
    /* CONTEXT registers. */
    /* 2 consecutive registers (GFX6-11), or separate registers (GFX12) */
-   SI_TRACKED_DB_RENDER_CONTROL,             /* GFX6-11 (not tracked on GFX12) */
+   SI_TRACKED_DB_RENDER_CONTROL,
    SI_TRACKED_DB_COUNT_CONTROL,
 
    SI_TRACKED_DB_DEPTH_CONTROL,
@@ -634,7 +634,6 @@ void si_mark_display_dcc_dirty(struct si_context *sctx, struct si_texture *tex);
 void si_update_ps_iter_samples(struct si_context *sctx);
 void si_save_qbo_state(struct si_context *sctx, struct si_qbo_state *st);
 void si_restore_qbo_state(struct si_context *sctx, struct si_qbo_state *st);
-unsigned gfx103_get_cu_mask_ps(struct si_screen *sscreen);
 
 struct si_fast_udiv_info32 {
    unsigned multiplier; /* the "magic number" multiplier */

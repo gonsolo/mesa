@@ -678,6 +678,7 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
    case nir_intrinsic_load_global_invocation_id:
    case nir_intrinsic_load_base_global_invocation_id:
    case nir_intrinsic_load_global_invocation_index:
+   case nir_intrinsic_load_global_size:
    case nir_intrinsic_load_workgroup_id:
    case nir_intrinsic_load_base_workgroup_id:
    case nir_intrinsic_load_workgroup_index:
@@ -756,6 +757,18 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
       } else if (nir_intrinsic_interp_mode(instr) == INTERP_MODE_NOPERSPECTIVE) {
          BITSET_SET(shader->info.system_values_read, SYSTEM_VALUE_BARYCENTRIC_LINEAR_COORD);
       }
+      break;
+
+   case nir_intrinsic_ddx:
+   case nir_intrinsic_ddx_fine:
+   case nir_intrinsic_ddx_coarse:
+   case nir_intrinsic_ddy:
+   case nir_intrinsic_ddy_fine:
+   case nir_intrinsic_ddy_coarse:
+      shader->info.uses_fddx_fddy = true;
+
+      if (shader->info.stage == MESA_SHADER_FRAGMENT)
+         shader->info.fs.needs_quad_helper_invocations = true;
       break;
 
    case nir_intrinsic_quad_vote_any:
@@ -846,10 +859,13 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
       if (nir_intrinsic_writes_external_memory(instr))
          shader->info.writes_memory = true;
 
-      if (instr->intrinsic == nir_intrinsic_image_size ||
+      if (instr->intrinsic == nir_intrinsic_image_levels ||
+          instr->intrinsic == nir_intrinsic_image_size ||
           instr->intrinsic == nir_intrinsic_image_samples ||
+          instr->intrinsic == nir_intrinsic_image_deref_levels ||
           instr->intrinsic == nir_intrinsic_image_deref_size ||
           instr->intrinsic == nir_intrinsic_image_deref_samples ||
+          instr->intrinsic == nir_intrinsic_bindless_image_levels ||
           instr->intrinsic == nir_intrinsic_bindless_image_size ||
           instr->intrinsic == nir_intrinsic_bindless_image_samples)
          shader->info.uses_resource_info_query = true;

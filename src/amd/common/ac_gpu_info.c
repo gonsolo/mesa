@@ -2342,6 +2342,10 @@ ac_get_compute_resource_limits(const struct radeon_info *info, unsigned waves_pe
                             info->max_waves_per_simd;
       }
 
+      /* On GFX12+, WAVES_PER_SH means waves per SE. */
+      if (info->gfx_level >= GFX12)
+         max_waves_per_sh *= info->max_sa_per_se;
+
       /* Force even distribution on all SIMDs in CU if the workgroup
        * size is 64. This has shown some good improvements if # of CUs
        * per SE is not a multiple of 4.
@@ -2514,4 +2518,16 @@ uint32_t ac_memory_ops_per_clock(uint32_t vram_type)
    case AMDGPU_VRAM_TYPE_GDDR6:
       return 16;
    }
+}
+
+uint32_t ac_gfx103_get_cu_mask_ps(const struct radeon_info *info)
+{
+   /* It's wasteful to enable all CUs for PS if shader arrays have a different
+    * number of CUs. The reason is that the hardware sends the same number of PS
+    * waves to each shader array, so the slowest shader array limits the performance.
+    * Disable the extra CUs for PS in other shader arrays to save power and thus
+    * increase clocks for busy CUs. In the future, we might disable or enable this
+    * tweak only for certain apps.
+    */
+   return u_bit_consecutive(0, info->min_good_cu_per_sa);
 }

@@ -170,12 +170,14 @@ fi
 uncollapsed_section_switch deqp "deqp: deqp-runner"
 
 # Print the detailed version with the list of backports and local patches
+{ set +x; } 2>/dev/null
 for api in vk gl gles; do
   deqp_version_log=/deqp/version-$api
   if [ -r "$deqp_version_log" ]; then
     cat "$deqp_version_log"
   fi
 done
+set -x
 
 set +e
 if [ -z "$DEQP_SUITE" ]; then
@@ -203,7 +205,7 @@ else
         --skips $INSTALL/all-skips.txt $DEQP_SKIPS \
         --flakes $INSTALL/$GPU_VERSION-flakes.txt \
         --testlog-to-xml /deqp/executor/testlog-to-xml \
-        --fraction-start $CI_NODE_INDEX \
+        --fraction-start ${CI_NODE_INDEX:-1} \
         --fraction $((CI_NODE_TOTAL * ${DEQP_FRACTION:-1})) \
         --jobs ${FDO_CI_CONCURRENT:-4} \
         $DEQP_RUNNER_OPTIONS

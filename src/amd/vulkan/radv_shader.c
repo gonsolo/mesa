@@ -64,6 +64,8 @@ get_nir_options_for_stage(struct radv_physical_device *pdev, gl_shader_stage sta
    options->max_unroll_iterations_aggressive = 128;
    options->lower_doubles_options = nir_lower_drcp | nir_lower_dsqrt | nir_lower_drsq | nir_lower_ddiv;
    options->io_options |= nir_io_mediump_is_32bit;
+   options->varying_estimate_instr_cost = ac_nir_varying_estimate_instr_cost;
+   options->varying_expression_max_cost = ac_nir_varying_expression_max_cost;
 }
 
 void
@@ -331,7 +333,7 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
 
       bool dump_meta = instance->debug_flags & RADV_DEBUG_DUMP_META_SHADERS;
       if ((instance->debug_flags & RADV_DEBUG_DUMP_SPIRV) && (!is_internal || dump_meta))
-         radv_print_spirv(stage->spirv.data, stage->spirv.size, stderr);
+         spirv_print_asm(stderr, (const uint32_t *)stage->spirv.data, stage->spirv.size / 4);
 
       uint32_t num_spec_entries = 0;
       struct nir_spirv_specialization *spec_entries = vk_spec_info_to_nir_spirv(stage->spec_info, &num_spec_entries);
@@ -462,6 +464,9 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
       NIR_PASS(_, nir, ac_nir_lower_sin_cos);
    }
 
+   if (options && options->lower_view_index_to_device_index)
+      NIR_PASS(_, nir, nir_lower_view_index_to_device_index);
+
    NIR_PASS(_, nir, nir_lower_system_values);
    nir_lower_compute_system_values_options csv_options = {
       /* Mesh shaders run as NGG which can implement local_invocation_index from
@@ -529,8 +534,9 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
 
    bool gfx7minus = pdev->info.gfx_level <= GFX7;
    bool has_inverse_ballot = true;
+   bool use_llvm = radv_use_llvm_for_stage(pdev, nir->info.stage);
 #if AMD_LLVM_AVAILABLE
-   has_inverse_ballot = !radv_use_llvm_for_stage(pdev, nir->info.stage) || LLVM_VERSION_MAJOR >= 17;
+   has_inverse_ballot = !use_llvm || LLVM_VERSION_MAJOR >= 17;
 #endif
 
    NIR_PASS(_, nir, nir_lower_subgroups,
@@ -541,7 +547,7 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
                .lower_to_scalar = 1,
                .lower_subgroup_masks = 1,
                .lower_relative_shuffle = 1,
-               .lower_rotate_to_shuffle = radv_use_llvm_for_stage(pdev, nir->info.stage),
+               .lower_rotate_to_shuffle = use_llvm,
                .lower_shuffle_to_32bit = 1,
                .lower_vote_eq = 1,
                .lower_vote_bool_eq = 1,
@@ -550,7 +556,7 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
                .lower_shuffle_to_swizzle_amd = 1,
                .lower_ballot_bit_count_to_mbcnt_amd = 1,
                .lower_inverse_ballot = !has_inverse_ballot,
-               .lower_boolean_reduce = 1,
+               .lower_boolean_reduce = !use_llvm,
                .lower_boolean_shuffle = true,
             });
 
@@ -2780,7 +2786,8 @@ radv_fill_nir_compiler_options(struct radv_nir_compiler_options *options, struct
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
    /* robust_buffer_access_llvm here used by LLVM only, pipeline robustness is not exposed there. */
-   options->robust_buffer_access_llvm = device->buffer_robustness >= RADV_BUFFER_ROBUSTNESS_1;
+   options->robust_buffer_access_llvm =
+      (device->vk.enabled_features.robustBufferAccess2 || device->vk.enabled_features.robustBufferAccess);
    options->wgp_mode = should_use_wgp;
    options->info = &pdev->info;
    options->dump_shader = can_dump_shader;
@@ -2789,6 +2796,20 @@ radv_fill_nir_compiler_options(struct radv_nir_compiler_options *options, struct
    options->record_stats = keep_statistic_info;
    options->check_ir = instance->debug_flags & RADV_DEBUG_CHECKIR;
    options->enable_mrt_output_nan_fixup = gfx_state ? gfx_state->ps.epilog.enable_mrt_output_nan_fixup : false;
+}
+
+void
+radv_set_stage_key_robustness(const struct vk_pipeline_robustness_state *rs, gl_shader_stage stage,
+                              struct radv_shader_stage_key *key)
+{
+   if (rs->storage_buffers == VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2_EXT)
+      key->storage_robustness2 = 1;
+   if (rs->uniform_buffers == VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2_EXT)
+      key->uniform_robustness2 = 1;
+   if (stage == MESA_SHADER_VERTEX &&
+       (rs->vertex_inputs == VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_EXT ||
+        rs->vertex_inputs == VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2_EXT))
+      key->vertex_robustness1 = 1u;
 }
 
 static void

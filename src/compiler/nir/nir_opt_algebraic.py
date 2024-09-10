@@ -719,7 +719,9 @@ optimizations.extend([
    (('ine', ('iadd', a, b), a), ('ine', b, 0)),
 
    (('feq', ('b2f', 'a@1'), 0.0), ('inot', a)),
+   (('fge', 0.0, ('b2f', 'a@1')), ('inot', a)),
    (('fneu', ('b2f', 'a@1'), 0.0), a),
+   (('flt',  0.0, ('b2f', 'a@1')), a),
    (('ieq', ('b2i', 'a@1'), 0),   ('inot', a)),
    (('ine', ('b2i', 'a@1'), 0),   a),
    (('ieq', 'a@1', False), ('inot', a)),
@@ -1888,12 +1890,10 @@ optimizations.extend([
    (('iadd', ('pack_half_2x16_rtz_split', a, 0), ('pack_half_2x16_rtz_split', 0, b)), ('pack_half_2x16_rtz_split', a, b)),
    (('ior',  ('pack_half_2x16_rtz_split', a, 0), ('pack_half_2x16_rtz_split', 0, b)), ('pack_half_2x16_rtz_split', a, b)),
 
+   (('pack_uint_2x16', ('vec2', ('pack_half_2x16_rtz_split', a, 0), ('pack_half_2x16_rtz_split', b, 0))), ('pack_half_2x16_rtz_split', a, b)),
+
    (('bfi', 0xffff0000, ('pack_half_2x16_split', a, b), ('pack_half_2x16_split', c, d)),
     ('pack_half_2x16_split', c, a)),
-
-   # Part of the BFI operation is src2&~src0. This expands to (b & 3) & ~0xc
-   # which is (b & 3) & 3.
-   (('bfi', 0x0000000c, a, ('iand', b, 3)), ('bfi', 0x0000000c, a, b)),
 
    # The important part here is that ~0xf & 0xfffffffc = ~0xf.
    (('iand', ('bfi', 0x0000000f, '#a', b), 0xfffffffc),
@@ -2005,6 +2005,7 @@ optimizations.extend([
    (('iand', '#a', ('iand', 'b(is_not_const)', '#c')), ('iand', ('iand', a, c), b)),
    (('ior',  '#a', ('ior',  'b(is_not_const)', '#c')), ('ior',  ('ior',  a, c), b)),
    (('ixor', '#a', ('ixor', 'b(is_not_const)', '#c')), ('ixor', ('ixor', a, c), b)),
+   (('ior', ('iand', a, '#c'), ('ior', b, ('iand', a, '#d'))), ('ior', b, ('iand', a, ('ior', c, d)))),
 
    # Reassociate add chains for more MAD/FMA-friendly code
    (('~fadd', ('fadd(is_used_once)', 'a(is_fmul)', 'b(is_fmul)'), 'c(is_not_fmul)'), ('fadd', ('fadd', a, c), b)),
@@ -2054,12 +2055,18 @@ optimizations.extend([
    (('bcsel', ('ine', 'a@32', 0), ('iadd', 31, ('ineg', ('ufind_msb_rev', a))), ('ufind_msb_rev', a)), ('ufind_msb', a), '!options->lower_ufind_msb'),
    (('bcsel', ('ieq', 'a@32', 0), ('ufind_msb_rev', a), ('iadd', 31, ('ineg', ('ufind_msb_rev', a)))), ('ufind_msb', a), '!options->lower_ufind_msb'),
 
+   # Clear the LSB
+   (('iand', a, ('inot', ('ishl', 1, ('find_lsb', a)))), ('iand', a, ('inot', ('ineg', a)))),
+
    # This is safe. Both ufind_msb_rev and bitfield_reverse can only have
    # 32-bit sources, so the transformation can only generate correct NIR.
    (('find_lsb', ('bitfield_reverse', a)), ('ufind_msb_rev', a), 'options->has_find_msb_rev'),
    (('ufind_msb_rev', ('bitfield_reverse', a)), ('find_lsb', a), '!options->lower_find_lsb'),
 
    (('ifind_msb', ('f2i32(is_used_once)', a)), ('ufind_msb', ('f2i32', ('fabs', a)))),
+   (('ifind_msb', ('extract_u8', a, b)),       ('ufind_msb', ('extract_u8', a, b))),
+   (('ifind_msb', ('extract_u16', a, b)),      ('ufind_msb', ('extract_u16', a, b))),
+   (('ifind_msb', ('imax', a, 1)),             ('ufind_msb', ('imax', a, 1))),
 
    (('~fmul', ('bcsel(is_used_once)', c, -1.0, 1.0), b), ('bcsel', c, ('fneg', b), b)),
    (('~fmul', ('bcsel(is_used_once)', c, 1.0, -1.0), b), ('bcsel', c, b, ('fneg', b))),
@@ -2883,7 +2890,7 @@ for op in ['fadd', 'fmul', 'fmulz', 'iadd', 'imul']:
 for op in ['fddx', 'fddx_fine', 'fddx_coarse',
            'fddy', 'fddy_fine', 'fddy_coarse']:
    optimizations += [
-      ((op, 'a'), 0.0, 'info->stage == MESA_SHADER_COMPUTE && info->cs.derivative_group == DERIVATIVE_GROUP_NONE')
+      ((op, 'a'), 0.0, 'info->stage == MESA_SHADER_COMPUTE && info->derivative_group == DERIVATIVE_GROUP_NONE')
 ]
 
 # Some optimizations for ir3-specific instructions.

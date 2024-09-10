@@ -1,24 +1,6 @@
 /*
- * Copyright (C) 2019 Rob Clark <robclark@freedesktop.org>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Copyright © 2019 Rob Clark <robclark@freedesktop.org>
+ * SPDX-License-Identifier: MIT
  *
  * Authors:
  *    Rob Clark <robclark@freedesktop.org>
@@ -106,22 +88,19 @@ cs_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
                            A6XX_SP_CS_CNTL_1_THREADSIZE(thrsz));
       }
    } else {
-      enum a7xx_cs_yalign yalign = (v->local_size[1] % 8 == 0)   ? CS_YALIGN_8
-                                   : (v->local_size[1] % 4 == 0) ? CS_YALIGN_4
-                                   : (v->local_size[1] % 2 == 0) ? CS_YALIGN_2
-                                                                 : CS_YALIGN_1;
+      unsigned tile_height = (v->local_size[1] % 8 == 0)   ? 3
+                             : (v->local_size[1] % 4 == 0) ? 5
+                             : (v->local_size[1] % 2 == 0) ? 9
+                                                           : 17;
 
       OUT_REG(ring,
          HLSQ_CS_CNTL_1(
             CHIP,
             .linearlocalidregid = regid(63, 0),
             .threadsize = thrsz_cs,
-            /* A7XX TODO: blob either sets all of these unknowns
-             * together or doesn't set them at all.
-             */
-            .unk11 = true,
-            .unk22 = true,
-            .yalign = yalign,
+            .workgrouprastorderzfirsten = true,
+            .wgtilewidth = 4,
+            .wgtileheight = tile_height,
          )
       );
 
@@ -139,8 +118,9 @@ cs_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
             CHIP,
             .linearlocalidregid = INVALID_REG,
             .threadsize = thrsz_cs,
-            /* A7XX TODO: enable UNK15 when we don't use subgroup ops. */
-            .unk15 = false,
+            .workitemrastorder =
+               v->cs.force_linear_dispatch ? WORKITEMRASTORDER_LINEAR
+                                           : WORKITEMRASTORDER_TILED,
          )
       );
       OUT_REG(ring,
@@ -312,6 +292,31 @@ fd6_compute_state_delete(struct pipe_context *pctx, void *_hwcso)
    free(hwcso);
 }
 
+static void
+fd6_get_compute_state_info(struct pipe_context *pctx, void *cso, struct pipe_compute_state_object_info *info)
+{
+   static struct ir3_shader_key key; /* static is implicitly zeroed */
+   struct fd6_compute_state *cs = (struct fd6_compute_state *)cso;
+   struct ir3_shader_state *hwcso = (struct ir3_shader_state *)cs->hwcso;
+   struct ir3_shader_variant *v = ir3_shader_variant(ir3_get_shader(hwcso), key, false, &pctx->debug);
+   struct fd_context *ctx = fd_context(pctx);
+   uint32_t threadsize_base = ctx->screen->info->threadsize_base;
+
+   info->max_threads = threadsize_base * ctx->screen->info->max_waves;
+   info->simd_sizes = threadsize_base;
+   info->preferred_simd_size = threadsize_base;
+
+   if (ctx->screen->info->a6xx.supports_double_threadsize &&
+       v->info.double_threadsize) {
+
+      info->max_threads *= 2;
+      info->simd_sizes |= (threadsize_base * 2);
+      info->preferred_simd_size *= 2;
+   }
+
+   info->private_memory = v->pvtmem_size;
+}
+
 template <chip CHIP>
 void
 fd6_compute_init(struct pipe_context *pctx)
@@ -322,5 +327,6 @@ fd6_compute_init(struct pipe_context *pctx)
    ctx->launch_grid = fd6_launch_grid<CHIP>;
    pctx->create_compute_state = fd6_compute_state_create;
    pctx->delete_compute_state = fd6_compute_state_delete;
+   pctx->get_compute_state_info = fd6_get_compute_state_info;
 }
 FD_GENX(fd6_compute_init);

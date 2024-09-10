@@ -90,6 +90,7 @@ anv_per_hw_ver_files = files(
   'genX_cmd_draw_generated_flush.h',
   'genX_cmd_draw_generated_indirect.h',
   'genX_cmd_video.c',
+  'genX_cmd_video_enc.c',
   'genX_gfx_state.c',
   'genX_gpu_memcpy.c',
   'genX_init_state.c',
@@ -332,5 +333,7 @@ if with_tests
     ),
     suite : ['intel'],
     protocol : 'gtest',
+    is_parallel : false,
+    timeout : 60,
   )
 endif

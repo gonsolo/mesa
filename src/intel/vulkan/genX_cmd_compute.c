@@ -26,10 +26,7 @@
 
 #include "anv_private.h"
 #include "anv_measure.h"
-#include "vk_render_pass.h"
-#include "vk_util.h"
 
-#include "common/intel_aux_map.h"
 #include "common/intel_compute_slm.h"
 #include "genxml/gen_macros.h"
 #include "genxml/genX_pack.h"
@@ -99,6 +96,8 @@ genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer)
    assert(pipeline->cs);
 
    genX(cmd_buffer_config_l3)(cmd_buffer, pipeline->base.l3_config);
+
+   genX(cmd_buffer_update_color_aux_op(cmd_buffer, ISL_AUX_OP_NONE));
 
    genX(flush_descriptor_buffers)(cmd_buffer, &comp_state->base);
 
@@ -180,18 +179,18 @@ genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer)
 
    if (cmd_buffer->state.push_constants_dirty & VK_SHADER_STAGE_COMPUTE_BIT) {
 
-      if (comp_state->push_data.alloc_size == 0 ||
+      if (comp_state->base.push_constants_state.alloc_size == 0 ||
           comp_state->base.push_constants_data_dirty) {
-         comp_state->push_data =
+         comp_state->base.push_constants_state =
             anv_cmd_buffer_cs_push_constants(cmd_buffer);
          comp_state->base.push_constants_data_dirty = false;
       }
 
 #if GFX_VERx10 < 125
-      if (comp_state->push_data.alloc_size) {
+      if (comp_state->base.push_constants_state.alloc_size) {
          anv_batch_emit(&cmd_buffer->batch, GENX(MEDIA_CURBE_LOAD), curbe) {
-            curbe.CURBETotalDataLength    = comp_state->push_data.alloc_size;
-            curbe.CURBEDataStartAddress   = comp_state->push_data.offset;
+            curbe.CURBETotalDataLength    = comp_state->base.push_constants_state.alloc_size;
+            curbe.CURBEDataStartAddress   = comp_state->base.push_constants_state.offset;
          }
       }
 #endif
@@ -275,6 +274,7 @@ get_interface_descriptor_data(struct anv_cmd_buffer *cmd_buffer,
    const struct intel_device_info *devinfo = cmd_buffer->device->info;
 
    return (struct GENX(INTERFACE_DESCRIPTOR_DATA)) {
+      .SamplerCount = DIV_ROUND_UP(CLAMP(shader->bind_map.sampler_count, 0, 16), 4),
       .KernelStartPointer = shader->kernel.offset,
       .SamplerStatePointer = cmd_buffer->state.samplers[MESA_SHADER_COMPUTE].offset,
       .BindingTablePointer = cmd_buffer->state.binding_tables[MESA_SHADER_COMPUTE].offset,
@@ -311,8 +311,8 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
    struct GENX(COMPUTE_WALKER_BODY) body =  {
       .SIMDSize                 = dispatch_size,
       .MessageSIMD              = dispatch_size,
-      .IndirectDataStartAddress = comp_state->push_data.offset,
-      .IndirectDataLength       = comp_state->push_data.alloc_size,
+      .IndirectDataStartAddress = comp_state->base.push_constants_state.offset,
+      .IndirectDataLength       = comp_state->base.push_constants_state.alloc_size,
       .GenerateLocalID          = prog_data->generate_local_id != 0,
       .EmitLocal                = prog_data->generate_local_id,
       .WalkOrder                = prog_data->walk_order,
@@ -365,8 +365,8 @@ emit_compute_walker(struct anv_cmd_buffer *cmd_buffer,
          .PredicateEnable                = predicate,
          .SIMDSize                       = dispatch.simd_size / 16,
          .MessageSIMD                    = dispatch.simd_size / 16,
-         .IndirectDataStartAddress       = comp_state->push_data.offset,
-         .IndirectDataLength             = comp_state->push_data.alloc_size,
+         .IndirectDataStartAddress       = comp_state->base.push_constants_state.offset,
+         .IndirectDataLength             = comp_state->base.push_constants_state.alloc_size,
 #if GFX_VERx10 == 125
          .SystolicModeEnable             = prog_data->uses_systolic,
 #endif
@@ -529,7 +529,7 @@ void genX(CmdDispatchIndirect)(
                         INTEL_SNAPSHOT_COMPUTE,
                         "compute indirect",
                         0);
-   trace_intel_begin_compute(&cmd_buffer->trace);
+   trace_intel_begin_compute_indirect(&cmd_buffer->trace);
 
    if (prog_data->uses_num_work_groups) {
       cmd_buffer->state.compute.num_workgroups = addr;
@@ -545,7 +545,8 @@ void genX(CmdDispatchIndirect)(
 
    emit_cs_walker(cmd_buffer, pipeline, prog_data, addr, 0, 0, 0);
 
-   trace_intel_end_compute(&cmd_buffer->trace, 0, 0, 0);
+   trace_intel_end_compute_indirect(&cmd_buffer->trace,
+                                    anv_address_utrace(addr));
 }
 
 struct anv_address
@@ -601,6 +602,8 @@ genX(cmd_buffer_dispatch_kernel)(struct anv_cmd_buffer *cmd_buffer,
       brw_cs_prog_data_const(kernel->bin->prog_data);
 
    genX(cmd_buffer_config_l3)(cmd_buffer, kernel->l3_config);
+
+   genX(cmd_buffer_update_color_aux_op(cmd_buffer, ISL_AUX_OP_NONE));
 
    genX(flush_pipeline_select_gpgpu)(cmd_buffer);
 
@@ -890,6 +893,8 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
    trace_intel_begin_rays(&cmd_buffer->trace);
 
    genX(cmd_buffer_config_l3)(cmd_buffer, pipeline->base.l3_config);
+
+   genX(cmd_buffer_update_color_aux_op(cmd_buffer, ISL_AUX_OP_NONE));
 
    genX(flush_descriptor_buffers)(cmd_buffer, &rt->base);
 

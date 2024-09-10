@@ -4948,17 +4948,15 @@ iris_populate_cs_key(const struct iris_context *ice,
 {
 }
 
-static uint32_t
+static inline uint32_t
 encode_sampler_count(const struct iris_compiled_shader *shader)
 {
-   uint32_t count = util_last_bit64(shader->bt.samplers_used_mask);
-   uint32_t count_by_4 = DIV_ROUND_UP(count, 4);
-
    /* We can potentially have way more than 32 samplers and that's ok.
     * However, the 3DSTATE_XS packets only have 3 bits to specify how
     * many to pre-fetch and all values above 4 are marked reserved.
     */
-   return MIN2(count_by_4, 4);
+   uint32_t count = util_last_bit64(shader->bt.samplers_used_mask);
+   return DIV_ROUND_UP(CLAMP(count, 0, 16), 4);
 }
 
 #define INIT_THREAD_DISPATCH_FIELDS(pkt, prefix, stage)                   \
@@ -7813,19 +7811,9 @@ iris_upload_dirty_render_state(struct iris_context *ice,
 
       iris_batch_emit(batch, cso_z->packets, sizeof(cso_z->packets));
 
-      /* Wa_14016712196:
-       * Emit depth flush after state that sends implicit depth flush.
-       */
-      if (intel_needs_workaround(batch->screen->devinfo, 14016712196)) {
-         iris_emit_pipe_control_flush(batch, "Wa_14016712196",
-                                      PIPE_CONTROL_DEPTH_CACHE_FLUSH);
-      }
-
-      if (zres)
-         genX(emit_depth_state_workarounds)(ice, batch, &zres->surf);
-
       if (intel_needs_workaround(batch->screen->devinfo, 1408224581) ||
-          intel_needs_workaround(batch->screen->devinfo, 14014097488)) {
+          intel_needs_workaround(batch->screen->devinfo, 14014097488) ||
+          intel_needs_workaround(batch->screen->devinfo, 14016712196)) {
          /* Wa_1408224581
           *
           * Workaround: Gfx12LP Astep only An additional pipe control with
@@ -7833,13 +7821,17 @@ iris_upload_dirty_render_state(struct iris_context *ice,
           * have an additional pipe control after the stencil state whenever
           * the surface state bits of this state is changing).
           *
-          * This also seems sufficient to handle Wa_14014097488.
+          * This also seems sufficient to handle Wa_14014097488 and
+          * Wa_14016712196.
           */
-         iris_emit_pipe_control_write(batch, "WA for stencil state",
+         iris_emit_pipe_control_write(batch, "WA for depth/stencil state",
                                       PIPE_CONTROL_WRITE_IMMEDIATE,
                                       screen->workaround_address.bo,
                                       screen->workaround_address.offset, 0);
       }
+
+      if (zres)
+         genX(emit_depth_state_workarounds)(ice, batch, &zres->surf);
    }
 
    if (dirty & (IRIS_DIRTY_DEPTH_BUFFER | IRIS_DIRTY_WM_DEPTH_STENCIL)) {
@@ -8640,7 +8632,7 @@ iris_upload_indirect_render_state(struct iris_context *ice,
 
    iris_emit_cmd(batch, GENX(EXECUTE_INDIRECT_DRAW), ind) {
       ind.ArgumentFormat             =
-         draw->index_size > 0 ? DRAWINDEXED : DRAW;
+         draw->index_size > 0 ? XI_DRAWINDEXED : XI_DRAW;
       ind.PredicateEnable            = use_predicate;
       ind.TBIMREnabled               = ice->state.use_tbimr;
       ind.MaxCount                   = indirect->draw_count;

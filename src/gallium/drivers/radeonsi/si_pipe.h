@@ -248,6 +248,8 @@ enum
 enum
 {
    /* Tests: */
+   DBG_TEST_CLEAR_BUFFER,
+   DBG_TEST_COPY_BUFFER,
    DBG_TEST_IMAGE_COPY,
    DBG_TEST_CB_RESOLVE,
    DBG_TEST_COMPUTE_BLIT,
@@ -329,14 +331,14 @@ struct si_resource {
    struct util_range valid_buffer_range;
 
    /* For buffers only. This indicates that a write operation has been
-    * performed by TC L2, but the cache hasn't been flushed.
-    * Any hw block which doesn't use or bypasses TC L2 should check this
+    * performed by L2, but the cache hasn't been flushed.
+    * Any hw block which doesn't use or bypasses L2 should check this
     * flag and flush the cache before using the buffer.
     *
-    * For example, TC L2 must be flushed if a buffer which has been
+    * For example, L2 must be flushed if a buffer which has been
     * modified by a shader store instruction is about to be used as
     * an index buffer. The reason is that VGT DMA index fetching doesn't
-    * use TC L2.
+    * use L2.
     */
    bool TC_L2_dirty;
 
@@ -525,7 +527,6 @@ struct si_screen {
 
    struct radeon_info info;
    struct nir_shader_compiler_options *nir_options;
-   struct nir_lower_subgroups_options *nir_lower_subgroups_options;
    uint64_t debug_flags;
    char renderer_string[183];
 
@@ -1019,7 +1020,10 @@ struct si_context {
    unsigned last_dirty_tex_counter;
    unsigned last_dirty_buf_counter;
    unsigned last_compressed_colortex_counter;
-   unsigned last_num_draw_calls;
+   struct {
+      unsigned with_cb;
+      unsigned with_db;
+   } num_draw_calls_sh_coherent;
    unsigned flags; /* flush flags */
 
    /* Atoms (state emit functions). */
@@ -1621,6 +1625,7 @@ void si_init_aux_async_compute_ctx(struct si_screen *sscreen);
 struct si_context *si_get_aux_context(struct si_aux_context *ctx);
 void si_put_aux_context_flush(struct si_aux_context *ctx);
 void si_put_aux_shader_upload_context_flush(struct si_screen *sscreen);
+void si_destroy_screen(struct pipe_screen *pscreen);
 
 /* si_perfcounters.c */
 void si_init_perfcounters(struct si_screen *screen);
@@ -1642,14 +1647,6 @@ void si_suspend_queries(struct si_context *sctx);
 void si_resume_queries(struct si_context *sctx);
 
 /* si_shaderlib_nir.c */
-union si_cs_clear_copy_buffer_key {
-   struct {
-      bool is_clear:1;
-      unsigned dwords_per_thread:3; /* 1..4 allowed */
-      unsigned clear_value_size_is_12:1;
-   };
-   uint64_t key;
-};
 
 void *si_create_shader_state(struct si_context *sctx, struct nir_shader *nir);
 void *si_create_dcc_retile_cs(struct si_context *sctx, struct radeon_surf *surf);
@@ -1658,7 +1655,6 @@ void *si_create_passthrough_tcs(struct si_context *sctx);
 void *si_clear_image_dcc_single_shader(struct si_context *sctx, bool is_msaa, unsigned wg_dim);
 void *si_get_blitter_vs(struct si_context *sctx, enum blitter_attrib_type type,
                         unsigned num_layers);
-void *si_create_dma_compute_shader(struct si_context *sctx, union si_cs_clear_copy_buffer_key *key);
 void *si_create_ubyte_to_ushort_compute_shader(struct si_context *sctx);
 void *si_create_clear_buffer_rmw_cs(struct si_context *sctx);
 void *si_create_fmask_expand_cs(struct si_context *sctx, unsigned num_samples, bool is_array);
@@ -1676,6 +1672,8 @@ void si_test_blit(struct si_screen *sscreen, unsigned test_flags);
 /* si_test_dma_perf.c */
 void si_test_dma_perf(struct si_screen *sscreen);
 void si_test_mem_perf(struct si_screen *sscreen);
+void si_test_clear_buffer(struct si_screen *sscreen);
+void si_test_copy_buffer(struct si_screen *sscreen);
 
 /* si_test_blit_perf.c */
 void si_test_blit_perf(struct si_screen *sscreen);
@@ -1745,6 +1743,18 @@ void si_handle_sqtt(struct si_context *sctx, struct radeon_cmdbuf *rcs);
 /*
  * common helpers
  */
+
+/* Use this helper when casting pipe_resouce::screen to get a real si_screen
+ * instance (= this is only useful when intending to access si_screen members directly)
+ */
+static inline struct si_screen *
+si_screen(struct pipe_screen *pscreen)
+{
+   struct pipe_screen *s =
+      pscreen->get_driver_pipe_screen ? pscreen->get_driver_pipe_screen(pscreen) : pscreen;
+   assert(s->destroy == si_destroy_screen);
+   return (struct si_screen *)s;
+}
 
 static inline void si_compute_reference(struct si_compute **dst, struct si_compute *src)
 {
@@ -1932,7 +1942,7 @@ static inline bool si_can_sample_zs(struct si_texture *tex, bool stencil_sampler
 
 static inline bool si_htile_enabled(struct si_texture *tex, unsigned level, unsigned zs_mask)
 {
-   struct si_screen *sscreen = (struct si_screen *)tex->buffer.b.b.screen;
+   struct si_screen *sscreen = si_screen(tex->buffer.b.b.screen);
 
    /* Gfx12 should never call this. */
    assert(sscreen->info.gfx_level < GFX12);
@@ -1957,7 +1967,7 @@ static inline bool si_htile_enabled(struct si_texture *tex, unsigned level, unsi
 static inline bool vi_tc_compat_htile_enabled(struct si_texture *tex, unsigned level,
                                               unsigned zs_mask)
 {
-   struct si_screen *sscreen = (struct si_screen *)tex->buffer.b.b.screen;
+   struct si_screen *sscreen = si_screen(tex->buffer.b.b.screen);
 
    /* Gfx12 should never call this. */
    assert(sscreen->info.gfx_level < GFX12);

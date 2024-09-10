@@ -22,8 +22,14 @@ if with_ld_dynamic_list
   gallium_dri_link_depends += files('../dri.dyn')
 endif
 
+if get_option('unversion-libgallium') or with_platform_android
+  libgallium_name = 'gallium_dri'
+else
+  libgallium_name = 'gallium-@0@'.format(meson.project_version())
+endif
+
 libgallium_dri = shared_library(
-  'gallium-@0@'.format(meson.project_version()),
+  libgallium_name,
   files('dri_target.c'),
   include_directories : [
     inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux, inc_util, inc_gallium_drivers,
@@ -33,10 +39,11 @@ libgallium_dri = shared_library(
   link_args : [ld_args_build_id, ld_args_gc_sections, gallium_dri_ld_args],
   link_depends : gallium_dri_link_depends,
   link_with : [
-    libdri, libmesa, libgalliumvl,
+    libmesa, libgalliumvl,
     libgallium, libglapi, libpipe_loader_static, libws_null, libwsw, libswdri,
     libswkmsdri,
   ],
+  link_whole : [libdri],
   dependencies : [
     dep_selinux, dep_libdrm, dep_llvm, dep_thread, idep_xmlconfig, idep_mesautil,
     driver_swrast, driver_r300, driver_r600, driver_radeonsi, driver_nouveau,

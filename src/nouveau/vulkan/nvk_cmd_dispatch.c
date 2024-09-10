@@ -4,7 +4,6 @@
  */
 #include "nvk_buffer.h"
 #include "nvk_cmd_buffer.h"
-#include "nvk_descriptor_set.h"
 #include "nvk_device.h"
 #include "nvk_entrypoints.h"
 #include "nvk_mme.h"
@@ -101,18 +100,12 @@ nvk_compute_local_size(struct nvk_cmd_buffer *cmd)
           shader->info.cs.local_size[2];
 }
 
-static uint64_t
+static void
 nvk_flush_compute_state(struct nvk_cmd_buffer *cmd,
                         uint32_t base_workgroup[3],
-                        uint32_t global_size[3],
-                        uint64_t *root_desc_addr_out)
+                        uint32_t global_size[3])
 {
-   struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
-   const uint32_t min_cbuf_alignment = nvk_min_cbuf_alignment(&pdev->info);
-   const struct nvk_shader *shader = cmd->state.cs.shader;
    struct nvk_descriptor_state *desc = &cmd->state.cs.descriptors;
-   VkResult result;
 
    nvk_cmd_buffer_flush_push_descriptors(cmd, desc);
 
@@ -120,25 +113,37 @@ nvk_flush_compute_state(struct nvk_cmd_buffer *cmd,
                                        0, 3, base_workgroup);
    nvk_descriptor_state_set_root_array(cmd, desc, cs.group_count,
                                        0, 3, global_size);
+}
+
+static VkResult
+nvk_cmd_upload_qmd(struct nvk_cmd_buffer *cmd,
+                   const struct nvk_shader *shader,
+                   const struct nvk_descriptor_state *desc,
+                   const struct nvk_root_descriptor_table *root,
+                   uint32_t global_size[3],
+                   uint64_t *qmd_addr_out,
+                   uint64_t *root_desc_addr_out)
+{
+   struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
+   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const uint32_t min_cbuf_alignment = nvk_min_cbuf_alignment(&pdev->info);
+   VkResult result;
 
    /* pre Pascal the constant buffer sizes need to be 0x100 aligned. As we
     * simply allocated a buffer and upload data to it, make sure its size is
     * 0x100 aligned.
     */
-   STATIC_ASSERT((sizeof(desc->root) & 0xff) == 0);
-   assert(sizeof(desc->root) % min_cbuf_alignment == 0);
+   STATIC_ASSERT((sizeof(*root) & 0xff) == 0);
+   assert(sizeof(*root) % min_cbuf_alignment == 0);
 
    void *root_desc_map;
    uint64_t root_desc_addr;
-   result = nvk_cmd_buffer_upload_alloc(cmd, sizeof(desc->root),
-                                        min_cbuf_alignment,
+   result = nvk_cmd_buffer_upload_alloc(cmd, sizeof(*root), min_cbuf_alignment,
                                         &root_desc_addr, &root_desc_map);
-   if (unlikely(result != VK_SUCCESS)) {
-      vk_command_buffer_set_error(&cmd->vk, result);
-      return 0;
-   }
+   if (unlikely(result != VK_SUCCESS))
+      return result;
 
-   memcpy(root_desc_map, &desc->root, sizeof(desc->root));
+   memcpy(root_desc_map, root, sizeof(*root));
 
    struct nak_qmd_info qmd_info = {
       .addr = shader->hdr_addr,
@@ -159,7 +164,7 @@ nvk_flush_compute_state(struct nvk_cmd_buffer *cmd,
       if (cbuf->type == NVK_CBUF_TYPE_ROOT_DESC) {
          ba = (struct nvk_buffer_address) {
             .base_addr = root_desc_addr,
-            .size = sizeof(desc->root),
+            .size = sizeof(*root),
          };
       } else {
          ASSERTED bool direct_descriptor =
@@ -185,15 +190,14 @@ nvk_flush_compute_state(struct nvk_cmd_buffer *cmd,
 
    uint64_t qmd_addr;
    result = nvk_cmd_buffer_upload_data(cmd, qmd, sizeof(qmd), 0x100, &qmd_addr);
-   if (unlikely(result != VK_SUCCESS)) {
-      vk_command_buffer_set_error(&cmd->vk, result);
-      return 0;
-   }
+   if (unlikely(result != VK_SUCCESS))
+      return result;
 
+   *qmd_addr_out = qmd_addr;
    if (root_desc_addr_out != NULL)
       *root_desc_addr_out = root_desc_addr;
 
-   return qmd_addr;
+   return VK_SUCCESS;
 }
 
 static void
@@ -234,13 +238,20 @@ nvk_CmdDispatchBase(VkCommandBuffer commandBuffer,
                     uint32_t groupCountZ)
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
+   struct nvk_descriptor_state *desc = &cmd->state.cs.descriptors;
 
    uint32_t base_workgroup[3] = { baseGroupX, baseGroupY, baseGroupZ };
    uint32_t global_size[3] = { groupCountX, groupCountY, groupCountZ };
-   uint64_t qmd_addr = nvk_flush_compute_state(cmd, base_workgroup,
-                                               global_size, NULL);
-   if (unlikely(qmd_addr == 0))
+   nvk_flush_compute_state(cmd, base_workgroup, global_size);
+
+   uint64_t qmd_addr;
+   VkResult result = nvk_cmd_upload_qmd(cmd, cmd->state.cs.shader,
+                                        desc, (void *)desc->root, global_size,
+                                        &qmd_addr, NULL);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd->vk, result);
       return;
+   }
 
    const uint32_t local_size = nvk_compute_local_size(cmd);
    const uint64_t cs_invocations =
@@ -265,6 +276,54 @@ nvk_CmdDispatchBase(VkCommandBuffer commandBuffer,
       P_IMMD(p, NVC6C0, SEND_SIGNALING_PCAS2_B,
              PCAS_ACTION_INVALIDATE_COPY_SCHEDULE);
    }
+}
+
+void
+nvk_cmd_dispatch_shader(struct nvk_cmd_buffer *cmd,
+                        struct nvk_shader *shader,
+                        const void *push_data, size_t push_size,
+                        uint32_t groupCountX,
+                        uint32_t groupCountY,
+                        uint32_t groupCountZ)
+{
+   struct nvk_root_descriptor_table root = {
+      .cs.group_count = {
+         groupCountX,
+         groupCountY,
+         groupCountZ,
+      },
+   };
+   assert(push_size <= sizeof(root.push));
+   memcpy(root.push, push_data, push_size);
+
+   uint64_t qmd_addr;
+   VkResult result = nvk_cmd_upload_qmd(cmd, shader, NULL, &root,
+                                        root.cs.group_count,
+                                        &qmd_addr, NULL);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd->vk, result);
+      return;
+   }
+
+   struct nv_push *p = nvk_cmd_buffer_push(cmd, 8);
+
+   /* Internal shaders don't want conditional rendering */
+   P_IMMD(p, NVA0C0, SET_RENDER_ENABLE_OVERRIDE, MODE_ALWAYS_RENDER);
+
+   P_MTHD(p, NVA0C0, SEND_PCAS_A);
+   P_NVA0C0_SEND_PCAS_A(p, qmd_addr >> 8);
+
+   if (nvk_cmd_buffer_compute_cls(cmd) <= TURING_COMPUTE_A) {
+      P_IMMD(p, NVA0C0, SEND_SIGNALING_PCAS_B, {
+            .invalidate = INVALIDATE_TRUE,
+            .schedule = SCHEDULE_TRUE
+      });
+   } else {
+      P_IMMD(p, NVC6C0, SEND_SIGNALING_PCAS2_B,
+             PCAS_ACTION_INVALIDATE_COPY_SCHEDULE);
+   }
+
+   P_IMMD(p, NVA0C0, SET_RENDER_ENABLE_OVERRIDE, MODE_USE_RENDER_ENABLE);
 }
 
 static void
@@ -297,24 +356,13 @@ mme_store_global_vec3_free_addr(struct mme_builder *b,
    mme_free_reg64(b, addr);
 }
 
-void
-nvk_mme_dispatch_indirect(struct mme_builder *b)
+static void
+mme_store_root_desc_group_count(struct mme_builder *b,
+                                struct mme_value64 root_desc_addr,
+                                struct mme_value group_count_x,
+                                struct mme_value group_count_y,
+                                struct mme_value group_count_z)
 {
-   struct mme_value group_count_x, group_count_y, group_count_z;
-   if (b->devinfo->cls_eng3d >= TURING_A) {
-      struct mme_value64 dispatch_addr = mme_load_addr64(b);
-      mme_tu104_read_fifoed(b, dispatch_addr, mme_imm(3));
-      group_count_x = mme_load(b);
-      group_count_y = mme_load(b);
-      group_count_z = mme_load(b);
-      mme_free_reg64(b, dispatch_addr);
-   } else {
-      group_count_x = mme_load(b);
-      group_count_y = mme_load(b);
-      group_count_z = mme_load(b);
-   }
-
-   struct mme_value64 root_desc_addr = mme_load_addr64(b);
    uint32_t root_desc_size_offset =
       offsetof(struct nvk_root_descriptor_table, cs.group_count);
    mme_store_global_vec3_free_addr(b, root_desc_addr,
@@ -322,12 +370,19 @@ nvk_mme_dispatch_indirect(struct mme_builder *b)
                                    group_count_x,
                                    group_count_y,
                                    group_count_z);
+}
 
+static void
+mme_store_qmd_dispatch_size(struct mme_builder *b,
+                            struct mme_value64 qmd_addr,
+                            struct mme_value group_count_x,
+                            struct mme_value group_count_y,
+                            struct mme_value group_count_z)
+{
    struct nak_qmd_dispatch_size_layout qmd_size_layout =
       nak_get_qmd_dispatch_size_layout(b->devinfo);
    assert(qmd_size_layout.y_start == qmd_size_layout.x_start + 32);
 
-   struct mme_value64 qmd_addr = mme_load_addr64(b);
    if (qmd_size_layout.z_start == qmd_size_layout.y_start + 32) {
       mme_store_global_vec3_free_addr(b, qmd_addr,
                                       qmd_size_layout.x_start / 8,
@@ -348,26 +403,71 @@ nvk_mme_dispatch_indirect(struct mme_builder *b)
 
       mme_free_reg64(b, qmd_addr);
    };
+}
 
-   struct mme_value64 count;
+void
+nvk_mme_dispatch_indirect(struct mme_builder *b)
+{
    if (b->devinfo->cls_eng3d >= TURING_A) {
+      /* Load everything before we switch to an indirect read */
+      struct mme_value64 dispatch_addr = mme_load_addr64(b);
+      struct mme_value64 root_desc_addr = mme_load_addr64(b);
+      struct mme_value64 qmd_addr = mme_load_addr64(b);
       struct mme_value local_size = mme_load(b);
-      struct mme_value64 cs1 = mme_umul_32x32_64(b, group_count_y, group_count_z);
-      struct mme_value64 cs2 = mme_umul_32x32_64(b, group_count_x, local_size);
-      count = mme_mul64(b, cs1, cs2);
+
+      mme_tu104_read_fifoed(b, dispatch_addr, mme_imm(3));
+      mme_free_reg64(b, dispatch_addr);
+      struct mme_value group_count_x = mme_load(b);
+      struct mme_value group_count_y = mme_load(b);
+      struct mme_value group_count_z = mme_load(b);
+
+      mme_store_root_desc_group_count(b, root_desc_addr,
+                                      group_count_x,
+                                      group_count_y,
+                                      group_count_z);
+
+      mme_store_qmd_dispatch_size(b, qmd_addr,
+                                  group_count_x,
+                                  group_count_y,
+                                  group_count_z);
+
+      struct mme_value64 cs1 = mme_umul_32x32_64(b, group_count_y,
+                                                    group_count_z);
+      struct mme_value64 cs2 = mme_umul_32x32_64(b, group_count_x,
+                                                    local_size);
+      struct mme_value64 count = mme_mul64(b, cs1, cs2);
       mme_free_reg64(b, cs1);
       mme_free_reg64(b, cs2);
+
+      nvk_build_mme_add_cs_invocations(b, count);
    } else {
+      struct mme_value group_count_x = mme_load(b);
+      struct mme_value group_count_y = mme_load(b);
+      struct mme_value group_count_z = mme_load(b);
+
+      struct mme_value64 root_desc_addr = mme_load_addr64(b);
+      mme_store_root_desc_group_count(b, root_desc_addr,
+                                      group_count_x,
+                                      group_count_y,
+                                      group_count_z);
+
+      struct mme_value64 qmd_addr = mme_load_addr64(b);
+      mme_store_qmd_dispatch_size(b, qmd_addr,
+                                  group_count_x,
+                                  group_count_y,
+                                  group_count_z);
+
       /* Y and Z are 16b, so this cant't overflow */
       struct mme_value cs1 =
          mme_mul_32x32_32_free_srcs(b, group_count_y, group_count_z);
       struct mme_value64 cs2 =
          mme_umul_32x32_64_free_srcs(b, group_count_x, cs1);
       struct mme_value local_size = mme_load(b);
-      count = mme_umul_32x64_64_free_srcs(b, local_size, cs2);
+      struct mme_value64 count =
+         mme_umul_32x64_64_free_srcs(b, local_size, cs2);
+
+      nvk_build_mme_add_cs_invocations(b, count);
    }
-   nvk_build_mme_add_cs_invocations(b, count);
-   mme_free_reg64(b, count);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -377,18 +477,23 @@ nvk_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(nvk_buffer, buffer, _buffer);
+   struct nvk_descriptor_state *desc = &cmd->state.cs.descriptors;
 
    uint64_t dispatch_addr = nvk_buffer_address(buffer, offset);
 
    /* We set these through the MME */
    uint32_t base_workgroup[3] = { 0, 0, 0 };
    uint32_t global_size[3] = { 0, 0, 0 };
+   nvk_flush_compute_state(cmd, base_workgroup, global_size);
 
-   uint64_t root_desc_addr;
-   uint64_t qmd_addr = nvk_flush_compute_state(cmd, base_workgroup,
-                                               global_size, &root_desc_addr);
-   if (unlikely(qmd_addr == 0))
+   uint64_t qmd_addr, root_desc_addr;
+   VkResult result = nvk_cmd_upload_qmd(cmd, cmd->state.cs.shader,
+                                        desc, (void *)desc->root, global_size,
+                                        &qmd_addr, &root_desc_addr);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd->vk, result);
       return;
+   }
 
    struct nv_push *p;
    if (nvk_cmd_buffer_compute_cls(cmd) >= TURING_A) {

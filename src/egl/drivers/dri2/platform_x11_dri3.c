@@ -38,6 +38,7 @@
 #include "platform_x11_dri3.h"
 
 #include "loader.h"
+#include "loader_x11.h"
 #include "loader_dri3_helper.h"
 
 static struct dri3_egl_surface *
@@ -193,7 +194,7 @@ dri3_create_surface(_EGLDisplay *disp, EGLint type, _EGLConfig *conf,
           dri2_dpy->conn, drawable, egl_to_loader_dri3_drawable_type(type),
           dri2_dpy->dri_screen_render_gpu, dri2_dpy->dri_screen_display_gpu,
           dri2_dpy->multibuffers_available, true, dri_config,
-          &dri2_dpy->loader_dri3_ext, &egl_dri3_vtable,
+          &egl_dri3_vtable,
           &dri3_surf->loader_drawable)) {
       _eglError(EGL_BAD_ALLOC, "dri3_surface_create");
       goto cleanup_pixmap;
@@ -225,7 +226,7 @@ dri3_authenticate(_EGLDisplay *disp, uint32_t id)
 #ifdef HAVE_WAYLAND_PLATFORM
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
 
-   if (dri2_dpy->device_name) {
+   if (!dri2_dpy->swrast) {
       _eglLog(_EGL_WARNING,
               "Wayland client render node authentication is unnecessary");
       return 0;
@@ -323,14 +324,14 @@ dri3_create_image_khr_pixmap(_EGLDisplay *disp, _EGLContext *ctx,
 
    dri2_img->dri_image = loader_dri3_create_image(
       dri2_dpy->conn, bp_reply, fourcc, dri2_dpy->dri_screen_render_gpu,
-      dri2_dpy->image, dri2_img);
+      dri2_img);
 
    free(bp_reply);
 
    return &dri2_img->base;
 }
 
-#ifdef HAVE_DRI3_MODIFIERS
+#ifdef HAVE_X11_DRM
 static _EGLImage *
 dri3_create_image_khr_pixmap_from_buffers(_EGLDisplay *disp, _EGLContext *ctx,
                                           EGLClientBuffer buffer,
@@ -372,7 +373,7 @@ dri3_create_image_khr_pixmap_from_buffers(_EGLDisplay *disp, _EGLContext *ctx,
 
    dri2_img->dri_image = loader_dri3_create_image_from_buffers(
       dri2_dpy->conn, bp_reply, fourcc, dri2_dpy->dri_screen_render_gpu,
-      dri2_dpy->image, dri2_img);
+      dri2_img);
    free(bp_reply);
 
    if (!dri2_img->dri_image) {
@@ -389,13 +390,13 @@ static _EGLImage *
 dri3_create_image_khr(_EGLDisplay *disp, _EGLContext *ctx, EGLenum target,
                       EGLClientBuffer buffer, const EGLint *attr_list)
 {
-#ifdef HAVE_DRI3_MODIFIERS
+#ifdef HAVE_X11_DRM
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
 #endif
 
    switch (target) {
    case EGL_NATIVE_PIXMAP_KHR:
-#ifdef HAVE_DRI3_MODIFIERS
+#ifdef HAVE_X11_DRM
       if (dri2_dpy->multibuffers_available)
          return dri3_create_image_khr_pixmap_from_buffers(disp, ctx, buffer,
                                                           attr_list);
@@ -527,10 +528,10 @@ struct dri2_egl_display_vtbl dri3_x11_display_vtbl = {
 };
 
 enum dri2_egl_driver_fail
-dri3_x11_connect(struct dri2_egl_display *dri2_dpy, bool swrast)
+dri3_x11_connect(struct dri2_egl_display *dri2_dpy, bool zink, bool swrast)
 {
    dri2_dpy->fd_render_gpu =
-      loader_dri3_open(dri2_dpy->conn, dri2_dpy->screen->root, 0);
+      x11_dri3_open(dri2_dpy->conn, dri2_dpy->screen->root, 0);
    if (dri2_dpy->fd_render_gpu < 0) {
       int conn_error = xcb_connection_has_error(dri2_dpy->conn);
       if (!swrast) {
@@ -549,15 +550,16 @@ dri3_x11_connect(struct dri2_egl_display *dri2_dpy, bool swrast)
    if (!dri2_dpy->driver_name)
       dri2_dpy->driver_name = loader_get_driver_for_fd(dri2_dpy->fd_render_gpu);
 
-   if (!strcmp(dri2_dpy->driver_name, "zink") &&
-       !debug_get_bool_option("LIBGL_KOPPER_DISABLE", false)) {
+   if (!zink && !strcmp(dri2_dpy->driver_name, "zink")) {
       close(dri2_dpy->fd_render_gpu);
+      dri2_dpy->fd_render_gpu = -1;
       return DRI2_EGL_DRIVER_PREFER_ZINK;
    }
 
    if (!dri2_dpy->driver_name) {
       _eglLog(_EGL_WARNING, "DRI3: No driver found");
       close(dri2_dpy->fd_render_gpu);
+      dri2_dpy->fd_render_gpu = -1;
       return DRI2_EGL_DRIVER_FAILED;
    }
 

@@ -1,25 +1,7 @@
 /*
- * Copyright (C) 2016 Rob Clark <robclark@freedesktop.org>
+ * Copyright © 2016 Rob Clark <robclark@freedesktop.org>
  * Copyright © 2018 Google, Inc.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * SPDX-License-Identifier: MIT
  *
  * Authors:
  *    Rob Clark <robclark@freedesktop.org>
@@ -1342,7 +1324,7 @@ emit_blit(struct fd_batch *batch, struct fd_ringbuffer *ring, uint32_t base,
    }
 
    if (CHIP >= A7XX)
-      OUT_REG(ring, A7XX_RB_UNKNOWN_88E4(.unk0 = 1));
+      OUT_REG(ring, A7XX_RB_BLIT_CLEAR_MODE(.clear_mode = CLEAR_MODE_GMEM));
 
    fd6_emit_blit<CHIP>(batch->ctx, ring);
 }
@@ -1356,8 +1338,7 @@ emit_restore_blit(struct fd_batch *batch, struct fd_ringbuffer *ring,
 
    OUT_REG(ring,
            A6XX_RB_BLIT_INFO(
-                 .unk0 = true,
-                 .gmem = true,
+                 .type = BLIT_EVENT_LOAD,
                  .sample_0 = util_format_is_pure_integer(psurf->format),
                  .depth = (buffer == FD_BUFFER_DEPTH),
            ),
@@ -1429,8 +1410,8 @@ emit_subpass_clears(struct fd_batch *batch, struct fd_batch_subpass *subpass)
                      A6XX_RB_BLIT_DST_INFO_COLOR_FORMAT(fd6_color_format(pfmt, TILE6_LINEAR)));
 
          OUT_PKT4(ring, REG_A6XX_RB_BLIT_INFO, 1);
-         OUT_RING(ring,
-                  A6XX_RB_BLIT_INFO_GMEM | A6XX_RB_BLIT_INFO_CLEAR_MASK(0xf));
+         OUT_RING(ring, A6XX_RB_BLIT_INFO_TYPE(BLIT_EVENT_CLEAR) |
+                           A6XX_RB_BLIT_INFO_CLEAR_MASK(0xf));
 
          OUT_PKT4(ring, REG_A6XX_RB_BLIT_BASE_GMEM, 1);
          OUT_RING(ring, gmem->cbuf_base[i]);
@@ -1445,7 +1426,7 @@ emit_subpass_clears(struct fd_batch *batch, struct fd_batch_subpass *subpass)
          OUT_RING(ring, uc.ui[3]);
 
          if (CHIP >= A7XX)
-            OUT_REG(ring, A7XX_RB_UNKNOWN_88E4(.unk0 = 1));
+            OUT_REG(ring, A7XX_RB_BLIT_CLEAR_MODE(.clear_mode = CLEAR_MODE_GMEM));
 
          fd6_emit_blit<CHIP>(batch->ctx, ring);
       }
@@ -1484,8 +1465,7 @@ emit_subpass_clears(struct fd_batch *batch, struct fd_batch_subpass *subpass)
                   A6XX_RB_BLIT_DST_INFO_COLOR_FORMAT(fd6_color_format(pfmt, TILE6_LINEAR)));
 
       OUT_PKT4(ring, REG_A6XX_RB_BLIT_INFO, 1);
-      OUT_RING(ring, A6XX_RB_BLIT_INFO_GMEM |
-                        // XXX UNK0 for separate stencil ??
+      OUT_RING(ring, A6XX_RB_BLIT_INFO_TYPE(BLIT_EVENT_CLEAR) |
                         A6XX_RB_BLIT_INFO_DEPTH |
                         A6XX_RB_BLIT_INFO_CLEAR_MASK(mask));
 
@@ -1510,8 +1490,7 @@ emit_subpass_clears(struct fd_batch *batch, struct fd_batch_subpass *subpass)
                         A6XX_RB_BLIT_DST_INFO_COLOR_FORMAT(FMT6_8_UINT));
 
       OUT_PKT4(ring, REG_A6XX_RB_BLIT_INFO, 1);
-      OUT_RING(ring, A6XX_RB_BLIT_INFO_GMEM |
-                        // A6XX_RB_BLIT_INFO_UNK0 |
+      OUT_RING(ring, A6XX_RB_BLIT_INFO_TYPE(BLIT_EVENT_CLEAR) |
                         A6XX_RB_BLIT_INFO_DEPTH |
                         A6XX_RB_BLIT_INFO_CLEAR_MASK(0x1));
 
@@ -1699,13 +1678,14 @@ emit_resolve_blit(struct fd_batch *batch, struct fd_ringbuffer *ring,
 
    switch (buffer) {
    case FD_BUFFER_COLOR:
+      info = A6XX_RB_BLIT_INFO_TYPE(BLIT_EVENT_STORE);
       break;
    case FD_BUFFER_STENCIL:
-      info |= A6XX_RB_BLIT_INFO_UNK0;
+      info = A6XX_RB_BLIT_INFO_TYPE(BLIT_EVENT_STORE_AND_CLEAR);
       stencil = true;
       break;
    case FD_BUFFER_DEPTH:
-      info |= A6XX_RB_BLIT_INFO_DEPTH;
+      info = A6XX_RB_BLIT_INFO_TYPE(BLIT_EVENT_STORE) | A6XX_RB_BLIT_INFO_DEPTH;
       break;
    }
 

@@ -602,6 +602,10 @@
    DRI_CONF_OPT_B(tu_allow_oob_indirect_ubo_loads, def, \
                   "Some D3D11 games rely on out-of-bounds indirect UBO loads to return real values from underlying bound descriptor, this prevents us from lowering indirectly accessed UBOs to consts")
 
+#define DRI_CONF_TU_DISABLE_D24S8_BORDER_COLOR_WORKAROUND(def) \
+   DRI_CONF_OPT_B(tu_disable_d24s8_border_color_workaround, def, \
+                  "Use UBWC for D24S8 images with VK_IMAGE_USAGE_SAMPLED_BIT when customBorderColorWithoutFormat is enabled")
+
 /**
  * \brief venus specific configuration options
  */
@@ -739,6 +743,10 @@
    DRI_CONF_OPT_I(anv_assume_full_subgroups, def, 0, 32, \
                   "Allow assuming full subgroups requirement even when it's not specified explicitly and set the given size")
 
+#define DRI_CONF_ANV_ASSUME_FULL_SUBGROUPS_WITH_BARRIER(def) \
+   DRI_CONF_OPT_B(anv_assume_full_subgroups_with_barrier, def, \
+                  "Assume full subgroups requirement for compute shaders that use control barriers")
+
 #define DRI_CONF_ANV_SAMPLE_MASK_OUT_OPENGL_BEHAVIOUR(def) \
    DRI_CONF_OPT_B(anv_sample_mask_out_opengl_behaviour, def, \
                   "Ignore sample mask out when having single sampled target")
@@ -783,6 +791,10 @@
 #define DRI_CONF_ANV_DISABLE_FCV(def) \
    DRI_CONF_OPT_B(anv_disable_fcv, def, \
                   "Disable FCV optimization")
+
+#define DRI_CONF_ANV_DISABLE_XE2_CCS(def) \
+   DRI_CONF_OPT_B(anv_disable_xe2_ccs, def, \
+                  "Disable CCS optimization on Xe2")
 
 #define DRI_CONF_ANV_EXTERNAL_MEMORY_IMPLICIT_SYNC(def) \
    DRI_CONF_OPT_B(anv_external_memory_implicit_sync, def, "Implicit sync on external BOs")

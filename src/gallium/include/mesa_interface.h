@@ -49,7 +49,6 @@ typedef struct __DRIversionRec		__DRIversion;
 
 typedef struct __DRIcoreExtensionRec		__DRIcoreExtension;
 typedef struct __DRIextensionRec		__DRIextension;
-typedef struct __DRIcopySubBufferExtensionRec	__DRIcopySubBufferExtension;
 typedef struct __DRIswapControlExtensionRec	__DRIswapControlExtension;
 typedef struct __DRIframeTrackingExtensionRec	__DRIframeTrackingExtension;
 typedef struct __DRImediaStreamCounterExtensionRec	__DRImediaStreamCounterExtension;
@@ -61,7 +60,6 @@ typedef struct __DRIbufferRec			__DRIbuffer;
 typedef struct __DRIdri2ExtensionRec		__DRIdri2Extension;
 typedef struct __DRIdri2LoaderExtensionRec	__DRIdri2LoaderExtension;
 typedef struct __DRI2flushExtensionRec	__DRI2flushExtension;
-typedef struct __DRI2throttleExtensionRec	__DRI2throttleExtension;
 typedef struct __DRI2fenceExtensionRec          __DRI2fenceExtension;
 typedef struct __DRI2interopExtensionRec	__DRI2interopExtension;
 typedef struct __DRI2blobExtensionRec           __DRI2blobExtension;
@@ -110,18 +108,6 @@ struct __DRIextensionRec {
  */
 #define __DRI_READ_DRAWABLE "DRI_ReadDrawable"
 #define __DRI_READ_DRAWABLE_VERSION 1
-
-/**
- * Used by drivers that implement the GLX_MESA_copy_sub_buffer extension.
- *
- * Used by the X server in swrast mode.
- */
-#define __DRI_COPY_SUB_BUFFER "DRI_CopySubBuffer"
-#define __DRI_COPY_SUB_BUFFER_VERSION 1
-struct __DRIcopySubBufferExtensionRec {
-    __DRIextension base;
-    void (*copySubBuffer)(__DRIdrawable *drawable, int x, int y, int w, int h);
-};
 
 /**
  * Used by drivers that implement the GLX_SGI_swap_control or
@@ -179,17 +165,6 @@ struct __DRItexBufferExtensionRec {
 
     /**
      * Method to override base texture image with the contents of a
-     * __DRIdrawable.
-     *
-     * For GLX_EXT_texture_from_pixmap with AIGLX.  Deprecated in favor of
-     * setTexBuffer2 in version 2 of this interface.  Not used by post-2011 X.
-     */
-    void (*setTexBuffer)(__DRIcontext *pDRICtx,
-			 int target,
-			 __DRIdrawable *pDraw);
-
-    /**
-     * Method to override base texture image with the contents of a
      * __DRIdrawable, including the required texture format attribute.
      *
      * For GLX_EXT_texture_from_pixmap with AIGLX.  Used by the X server since
@@ -201,20 +176,6 @@ struct __DRItexBufferExtensionRec {
 			  int target,
 			  int format,
 			  __DRIdrawable *pDraw);
-    /**
-     * Called from glXReleaseTexImageEXT().
-     *
-     * This was used by i965 in 24952160fde9 ("i965: Use finish_external instead
-     * of make_shareable in setTexBuffer2") to note when the user mis-used the
-     * interface in a way that would produce rendering bugs, and try to recover
-     * from them.  This has only ever been used from inside the Mesa tree and
-     * was never used by the X server.
-     *
-     * \since 3
-     */
-    void (*releaseTexBuffer)(__DRIcontext *pDRICtx,
-			int target,
-			__DRIdrawable *pDraw);
 };
 
 /**
@@ -268,24 +229,6 @@ struct __DRI2flushExtensionRec {
                              __DRIdrawable *drawable,
                              unsigned flags,
                              enum __DRI2throttleReason throttle_reason);
-};
-
-
-/**
- * Extension that the driver uses to request
- * throttle callbacks.
- *
- * Not used by the X server.
- */
-
-#define __DRI2_THROTTLE "DRI2_Throttle"
-#define __DRI2_THROTTLE_VERSION 1
-
-struct __DRI2throttleExtensionRec {
-   __DRIextension base;
-   void (*throttle)(__DRIcontext *ctx,
-		    __DRIdrawable *drawable,
-		    enum __DRI2throttleReason reason);
 };
 
 /**
@@ -1175,61 +1118,6 @@ struct __DRIdri2LoaderExtensionRec {
 #define __DRI_CTX_ERROR_UNKNOWN_FLAG		6
 /*@}*/
 
-struct __DRIdri2ExtensionRec {
-    __DRIextension base;
-
-    __DRIscreen *(*createNewScreen)(int screen, int fd,
-				    const __DRIextension **extensions,
-				    const __DRIconfig ***driver_configs,
-				    void *loaderPrivate);
-
-   __DRIcreateNewDrawableFunc   createNewDrawable;
-   __DRIcontext *(*createNewContext)(__DRIscreen *screen,
-                                     const __DRIconfig *config,
-                                     __DRIcontext *shared,
-                                     void *loaderPrivate);
-
-   /* Since version 2 */
-   __DRIgetAPIMaskFunc          getAPIMask;
-
-   __DRIcontext *(*createNewContextForAPI)(__DRIscreen *screen,
-					   int api,
-					   const __DRIconfig *config,
-					   __DRIcontext *shared,
-					   void *data);
-
-   __DRIbuffer *(*allocateBuffer)(__DRIscreen *screen,
-				  unsigned int attachment,
-				  unsigned int format,
-				  int width,
-				  int height);
-   void (*releaseBuffer)(__DRIscreen *screen,
-			 __DRIbuffer *buffer);
-
-   /**
-    * Create a context for a particular API with a set of attributes
-    *
-    * \since version 3
-    *
-    * \sa __DRIswrastExtensionRec::createContextAttribs
-    */
-   __DRIcreateContextAttribsFunc        createContextAttribs;
-
-   /**
-    * createNewScreen with the driver's extension list passed in.
-    *
-    * \since version 4
-    */
-   __DRIcreateNewScreen2Func            createNewScreen2;
-
-   /**
-    * createNewScreen with the driver's extension list passed in and implicit load flag.
-    *
-    * \since version 5
-    */
-   __DRIcreateNewScreen3Func            createNewScreen3;
-};
-
 
 /**
  * This extension provides functionality to enable various EGLImage
@@ -1823,9 +1711,6 @@ typedef struct __DRIconfigOptionsExtensionRec {
  * This allows the window system layer (either EGL or GLX) to query aspects of
  * hardware and driver support without creating a context.
  */
-#define __DRI2_RENDERER_QUERY "DRI_RENDERER_QUERY"
-#define __DRI2_RENDERER_QUERY_VERSION 1
-
 #define __DRI2_RENDERER_VENDOR_ID                             0x0000
 #define __DRI2_RENDERER_DEVICE_ID                             0x0001
 #define __DRI2_RENDERER_VERSION                               0x0002
@@ -1839,14 +1724,6 @@ typedef struct __DRIconfigOptionsExtensionRec {
 #define __DRI2_RENDERER_OPENGL_ES2_PROFILE_VERSION            0x000a
 
 #define __DRI2_RENDERER_PREFER_BACK_BUFFER_REUSE              0x000f
-
-typedef struct __DRI2rendererQueryExtensionRec __DRI2rendererQueryExtension;
-struct __DRI2rendererQueryExtensionRec {
-   __DRIextension base;
-
-   int (*queryInteger)(__DRIscreen *screen, int attribute, unsigned int *val);
-   int (*queryString)(__DRIscreen *screen, int attribute, const char **val);
-};
 
 /**
  * Image Loader extension. Drivers use this to allocate color buffers
@@ -2162,13 +2039,6 @@ struct __DRImesaCoreExtensionRec {
 #define MESA_INTERFACE_VERSION_STRING PACKAGE_VERSION MESA_GIT_SHA1
    const char *version_string;
 
-   /* Screen creation function regardless of DRI2, image, or swrast backend.
-    * (Nothing uses the old __DRI_CORE screen create).
-    *
-    * If not associated with a DRM fd (non-swkms swrast), the fd argument should
-    * be -1.
-    */
-   __DRIcreateNewScreen2Func createNewScreen;
 
    __DRIcreateContextAttribsFunc createContext;
 
@@ -2177,6 +2047,12 @@ struct __DRImesaCoreExtensionRec {
 
    int (*queryCompatibleRenderOnlyDeviceFd)(int kms_only_fd);
 
+   /* Screen creation function regardless of DRI2, image, or swrast backend.
+    * (Nothing uses the old __DRI_CORE screen create).
+    *
+    * If not associated with a DRM fd (non-swkms swrast), the fd argument should
+    * be -1.
+    */
    /* version 2 */
    __DRIcreateNewScreen3Func createNewScreen3;
 };

@@ -34,13 +34,13 @@ uint32_t
 tu6_plane_count(VkFormat format)
 {
    switch (format) {
-   default:
-      return 1;
-   case VK_FORMAT_G8_B8R8_2PLANE_420_UNORM:
    case VK_FORMAT_D32_SFLOAT_S8_UINT:
+      /* We do not support interleaved depth/stencil. Instead, we decompose to
+       * a depth plane and a stencil plane.
+       */
       return 2;
-   case VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM:
-      return 3;
+   default:
+      return vk_format_get_plane_count(format);
    }
 }
 
@@ -55,7 +55,7 @@ tu6_plane_format(VkFormat format, uint32_t plane)
    case VK_FORMAT_D32_SFLOAT_S8_UINT:
       return plane ? PIPE_FORMAT_S8_UINT : PIPE_FORMAT_Z32_FLOAT;
    default:
-      return tu_vk_format_to_pipe_format(format);
+      return vk_format_to_pipe_format(format);
    }
 }
 
@@ -123,12 +123,18 @@ tu_is_r8g8_compatible(enum pipe_format format)
           !util_format_is_depth_or_stencil(format);
 }
 
+uint64_t
+tu_layer_address(const struct fdl6_view *iview, uint32_t layer)
+{
+   return iview->base_addr + iview->layer_size * layer;
+}
+
 void
 tu_cs_image_ref(struct tu_cs *cs, const struct fdl6_view *iview, uint32_t layer)
 {
    tu_cs_emit(cs, A6XX_RB_MRT_PITCH(0, iview->pitch).value);
    tu_cs_emit(cs, iview->layer_size >> 6);
-   tu_cs_emit_qw(cs, iview->base_addr + iview->layer_size * layer);
+   tu_cs_emit_qw(cs, tu_layer_address(iview, layer));
 }
 
 void
@@ -205,7 +211,7 @@ tu_image_view_init(struct tu_device *device,
    if (aspect_mask != VK_IMAGE_ASPECT_COLOR_BIT)
       format = tu6_plane_format(vk_format, tu6_plane_index(vk_format, aspect_mask));
    else
-      format = tu_vk_format_to_pipe_format(vk_format);
+      format = vk_format_to_pipe_format(vk_format);
 
    if (image->vk.format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM &&
        aspect_mask == VK_IMAGE_ASPECT_PLANE_0_BIT) {
@@ -343,7 +349,7 @@ ubwc_possible(struct tu_device *device,
 
    if (!info->a6xx.has_8bpp_ubwc &&
        vk_format_get_blocksizebits(format) == 8 &&
-       tu6_plane_count(format) == 1)
+       vk_format_get_plane_count(format) == 1)
       return false;
 
    if (type == VK_IMAGE_TYPE_3D) {
@@ -424,7 +430,7 @@ format_list_reinterprets_r8g8_r16(enum pipe_format format, const VkImageFormatLi
    bool has_non_r8g8 = false;
    for (uint32_t i = 0; i < fmt_list->viewFormatCount; i++) {
       enum pipe_format format =
-         tu_vk_format_to_pipe_format(fmt_list->pViewFormats[i]);
+         vk_format_to_pipe_format(fmt_list->pViewFormats[i]);
       if (tu_is_r8g8(format))
          has_r8g8 = true;
       else
@@ -444,7 +450,7 @@ format_list_has_swaps(const VkImageFormatListCreateInfo *fmt_list)
 
    for (uint32_t i = 0; i < fmt_list->viewFormatCount; i++) {
       enum pipe_format format =
-         tu_vk_format_to_pipe_format(fmt_list->pViewFormats[i]);
+         vk_format_to_pipe_format(fmt_list->pViewFormats[i]);
 
       if (tu6_format_texture(format, TILE6_LINEAR).swap)
          return true;
@@ -470,7 +476,7 @@ tu_image_update_layout(struct tu_device *device, struct tu_image *image,
    }
 
    /* Whether a view of the image with an R8G8 format could be made. */
-   bool has_r8g8 = tu_is_r8g8(tu_vk_format_to_pipe_format(image->vk.format));
+   bool has_r8g8 = tu_is_r8g8(vk_format_to_pipe_format(image->vk.format));
 
    /* With AHB, we could be asked to create an image with VK_IMAGE_TILING_LINEAR
     * but gralloc doesn't know this.  So if we are explicitly told that it is
@@ -493,25 +499,12 @@ tu_image_update_layout(struct tu_device *device, struct tu_image *image,
    for (uint32_t i = 0; i < tu6_plane_count(image->vk.format); i++) {
       struct fdl_layout *layout = &image->layout[i];
       enum pipe_format format = tu6_plane_format(image->vk.format, i);
-      uint32_t width0 = image->vk.extent.width;
-      uint32_t height0 = image->vk.extent.height;
+      uint32_t width0 = vk_format_get_plane_width(image->vk.format, i, image->vk.extent.width);
+      uint32_t height0 = vk_format_get_plane_height(image->vk.format, i, image->vk.extent.height);
 
-      if (i > 0) {
-         switch (image->vk.format) {
-         case VK_FORMAT_G8_B8R8_2PLANE_420_UNORM:
-         case VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM:
-            /* half width/height on chroma planes */
-            width0 = (width0 + 1) >> 1;
-            height0 = (height0 + 1) >> 1;
-            break;
-         case VK_FORMAT_D32_SFLOAT_S8_UINT:
-            /* no UBWC for separate stencil */
-            image->ubwc_enabled = false;
-            break;
-         default:
-            break;
-         }
-      }
+      if (i == 1 && image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT)
+         /* no UBWC for separate stencil */
+         image->ubwc_enabled = false;
 
       struct fdl_explicit_layout plane_layout;
 
@@ -691,7 +684,7 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
             image->ubwc_enabled = false;
          }
 
-         bool r8g8_r16 = format_list_reinterprets_r8g8_r16(tu_vk_format_to_pipe_format(image->vk.format), fmt_list);
+         bool r8g8_r16 = format_list_reinterprets_r8g8_r16(vk_format_to_pipe_format(image->vk.format), fmt_list);
 
          /* A750+ TODO: Correctly handle swaps when copying mutable images.
           * We should be able to support UBWC for mutable images with swaps.

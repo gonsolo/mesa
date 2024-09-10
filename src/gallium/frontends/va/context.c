@@ -169,8 +169,16 @@ VA_DRIVER_INIT_FUNC(VADriverContextP ctx)
          FREE(drm_driver_name);
       }
 #endif
-      if(!drv->vscreen)
-         drv->vscreen = vl_drm_screen_create(drm_info->fd);
+      if(!drv->vscreen) {
+         /* VA_DISPLAY_WAYLAND uses the compositor's fd, like VA_DISPLAY_X11 does.
+          * In this case, tell vl_drm_screen_create to consider the DRI_PRIME env
+          * variable to let the user select a different device.
+          * The other display types receive a fd explicitely picked by the application,
+          * so don't try to override them.
+          */
+         bool honor_dri_prime = ctx->display_type == VA_DISPLAY_WAYLAND;
+         drv->vscreen = vl_drm_screen_create(drm_info->fd, honor_dri_prime);
+      }
       break;
    }
 #endif
@@ -372,10 +380,12 @@ vlVaCreateContext(VADriverContextP ctx, VAConfigID config_id, int picture_width,
       case PIPE_VIDEO_FORMAT_MPEG4_AVC:
          context->desc.h264enc.rate_ctrl[0].rate_ctrl_method = config->rc;
          context->desc.h264enc.frame_idx = util_hash_table_create_ptr_keys();
+         util_dynarray_init(&context->desc.h264enc.raw_headers, NULL);
          break;
       case PIPE_VIDEO_FORMAT_HEVC:
-         context->desc.h265enc.rc.rate_ctrl_method = config->rc;
+         context->desc.h265enc.rc[0].rate_ctrl_method = config->rc;
          context->desc.h265enc.frame_idx = util_hash_table_create_ptr_keys();
+         util_dynarray_init(&context->desc.h265enc.raw_headers, NULL);
          break;
       case PIPE_VIDEO_FORMAT_AV1:
          context->desc.av1enc.rc[0].rate_ctrl_method = config->rc;
@@ -383,6 +393,7 @@ vlVaCreateContext(VADriverContextP ctx, VAConfigID config_id, int picture_width,
       default:
          break;
       }
+      context->desc.base.packed_headers = config->packed_headers;
    }
 
    context->surfaces = _mesa_set_create(NULL, _mesa_hash_pointer, _mesa_key_pointer_equal);
@@ -431,11 +442,13 @@ vlVaDestroyContext(VADriverContextP ctx, VAContextID context_id)
              PIPE_VIDEO_FORMAT_MPEG4_AVC) {
             if (context->desc.h264enc.frame_idx)
                _mesa_hash_table_destroy(context->desc.h264enc.frame_idx, NULL);
+            util_dynarray_fini(&context->desc.h264enc.raw_headers);
          }
          if (u_reduce_video_profile(context->decoder->profile) ==
              PIPE_VIDEO_FORMAT_HEVC) {
             if (context->desc.h265enc.frame_idx)
                _mesa_hash_table_destroy(context->desc.h265enc.frame_idx, NULL);
+            util_dynarray_fini(&context->desc.h265enc.raw_headers);
          }
       } else {
          if (u_reduce_video_profile(context->decoder->profile) ==

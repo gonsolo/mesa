@@ -880,6 +880,26 @@ nir_parallel_copy_instr_create(nir_shader *shader)
    return instr;
 }
 
+nir_debug_info_instr *
+nir_debug_info_instr_create(nir_shader *shader, nir_debug_info_type type,
+                            uint32_t string_length)
+{
+   uint32_t additional_size = 0;
+   if (type == nir_debug_info_string)
+      additional_size = string_length + 1;
+
+   nir_debug_info_instr *instr = gc_zalloc_size(
+      shader->gctx, sizeof(nir_debug_info_instr) + additional_size, 1);
+   instr_init(&instr->instr, nir_instr_type_debug_info);
+
+   instr->type = type;
+
+   if (type == nir_debug_info_string)
+      instr->string_length = string_length;
+
+   return instr;
+}
+
 nir_undef_instr *
 nir_undef_instr_create(nir_shader *shader,
                        unsigned num_components,
@@ -1331,6 +1351,7 @@ nir_instr_def(nir_instr *instr)
 
    case nir_instr_type_call:
    case nir_instr_type_jump:
+   case nir_instr_type_debug_info:
       return NULL;
    }
 
@@ -1401,6 +1422,16 @@ nir_src_as_const_value(nir_src src)
    return load->value;
 }
 
+const char *
+nir_src_as_string(nir_src src)
+{
+   nir_debug_info_instr *di = nir_src_as_debug_info(src);
+   if (di && di->type == nir_debug_info_string)
+      return di->string;
+
+   return NULL;
+}
+
 /**
  * Returns true if the source is known to be always uniform. Otherwise it
  * returns false which means it may or may not be uniform but it can't be
@@ -1447,6 +1478,17 @@ nir_src_is_always_uniform(nir_src src)
     * called with uniform arguments.
     */
    return false;
+}
+
+nir_block *
+nir_src_get_block(nir_src *src)
+{
+   if (nir_src_is_if(src))
+      return nir_cf_node_cf_tree_prev(&nir_src_parent_if(src)->cf_node);
+   else if (nir_src_parent_instr(src)->type == nir_instr_type_phi)
+      return list_entry(src, nir_phi_src, src)->pred;
+   else
+      return nir_src_parent_instr(src)->block;
 }
 
 static void
@@ -2157,7 +2199,7 @@ nir_shader_supports_implicit_lod(nir_shader *shader)
 {
    return (shader->info.stage == MESA_SHADER_FRAGMENT ||
            (shader->info.stage == MESA_SHADER_COMPUTE &&
-            shader->info.cs.derivative_group != DERIVATIVE_GROUP_NONE));
+            shader->info.derivative_group != DERIVATIVE_GROUP_NONE));
 }
 
 nir_intrinsic_op
@@ -2260,6 +2302,8 @@ nir_intrinsic_from_system_value(gl_system_value val)
       return nir_intrinsic_load_base_global_invocation_id;
    case SYSTEM_VALUE_GLOBAL_INVOCATION_INDEX:
       return nir_intrinsic_load_global_invocation_index;
+   case SYSTEM_VALUE_GLOBAL_GROUP_SIZE:
+      return nir_intrinsic_load_global_size;
    case SYSTEM_VALUE_WORK_DIM:
       return nir_intrinsic_load_work_dim;
    case SYSTEM_VALUE_USER_DATA_AMD:
@@ -2424,6 +2468,8 @@ nir_system_value_from_intrinsic(nir_intrinsic_op intrin)
       return SYSTEM_VALUE_BASE_GLOBAL_INVOCATION_ID;
    case nir_intrinsic_load_global_invocation_index:
       return SYSTEM_VALUE_GLOBAL_INVOCATION_INDEX;
+   case nir_intrinsic_load_global_size:
+      return SYSTEM_VALUE_GLOBAL_GROUP_SIZE;
    case nir_intrinsic_load_work_dim:
       return SYSTEM_VALUE_WORK_DIM;
    case nir_intrinsic_load_user_data_amd:
@@ -2573,6 +2619,7 @@ nir_rewrite_image_intrinsic(nir_intrinsic_instr *intrin, nir_def *src,
       CASE(load_raw_intel)
       CASE(store_raw_intel)
       CASE(fragment_mask_load_amd)
+      CASE(store_block_agx)
 #undef CASE
    default:
       unreachable("Unhanded image intrinsic");

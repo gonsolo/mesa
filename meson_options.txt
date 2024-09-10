@@ -52,17 +52,18 @@ option(
 )
 
 option(
-  'dri3',
-  type : 'feature',
-  deprecated: {'true': 'enabled', 'false': 'disabled'},
-  description : 'enable support for dri3'
-)
-
-option(
   'dri-drivers-path',
   type : 'string',
   value : '',
   description : 'Location to install dri drivers. Default: $libdir/dri.'
+)
+
+option(
+  'unversion-libgallium',
+  type : 'boolean',
+  value : false,
+  description : 'Do not include mesa version in libgallium DSO filename. ' +
+                'Do not enable unless you know what you are doing. Default: false'
 )
 
 option(
@@ -86,7 +87,7 @@ option(
   type : 'array',
   value : ['auto'],
   choices : [
-    'auto', 'kmsro', 'radeonsi', 'r300', 'r600', 'nouveau', 'freedreno',
+    'auto', 'radeonsi', 'r300', 'r600', 'nouveau', 'freedreno',
     'swrast', 'v3d', 'vc4', 'etnaviv', 'tegra', 'i915', 'svga', 'virgl',
     'panfrost', 'iris', 'lima', 'zink', 'd3d12', 'asahi', 'crocus', 'all',
     'softpipe', 'llvmpipe',
@@ -115,22 +116,6 @@ option(
   type : 'string',
   value : '',
   description : 'path to put vdpau libraries. defaults to $libdir/vdpau.'
-)
-
-option(
-  'gallium-omx',
-  type : 'combo',
-  value : 'auto',
-  choices : ['auto', 'disabled', 'bellagio', 'tizonia'],
-  description : 'enable gallium omx frontend.',
-)
-
-option(
-  'omx-libs-path',
-  type : 'string',
-  value : '',
-  description : 'path to put omx libraries. defaults to omx-bellagio ' +
-                'pkg-config pluginsdir.'
 )
 
 option(
@@ -304,7 +289,7 @@ option(
   'vulkan-layers',
   type : 'array',
   value : [],
-  choices : ['device-select', 'intel-nullhw', 'overlay'],
+  choices : ['device-select', 'intel-nullhw', 'overlay', 'screenshot'],
   description : 'List of vulkan layers to build'
 )
 
@@ -437,7 +422,10 @@ option (
   'llvm-orcjit',
   type : 'boolean',
   value : false,
-  description: 'Build llvmpipe with LLVM ORCJIT support.'
+  description: 'Build llvmpipe with LLVM ORCJIT support. Has no effect when ' +
+               'building for architectures without LLVM MCJIT support -- ' +
+               'ORCJIT is the only choice on such architectures and will ' +
+               'always be enabled.'
 )
 
 option(

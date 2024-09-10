@@ -437,9 +437,9 @@ if host_machine.system() == 'windows'
 else
   files_libgalliumvlwinsys += files('vl/vl_winsys_drm.c')
 endif
-if with_dri2 and with_platform_x11
+if with_platform_x11
   files_libgalliumvlwinsys += files('vl/vl_winsys_dri.c')
-  if with_dri3
+  if with_dri_platform == 'drm'
     vlwinsys_deps += [
       dep_xcb_sync, dep_xcb_present, dep_xshmfence, dep_xcb_xfixes,
       dep_xcb_dri3,
@@ -562,8 +562,7 @@ libgalliumvl = static_library(
 
 # some drivers export their screen creation function globally, so all frontends have to contain the
 # full libgalliumvl. So we'll handle this here globally for everybody.
-if (with_gallium_va or with_gallium_vdpau or with_gallium_omx != 'disabled' or
-   with_dri or with_gallium_radeonsi)
+if (with_gallium_va or with_gallium_vdpau or with_dri or with_gallium_radeonsi)
   libgalliumvl_stub = libgalliumvl
 else
   libgalliumvl_stub = _libgalliumvl_stub

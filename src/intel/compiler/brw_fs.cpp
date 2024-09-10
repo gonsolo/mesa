@@ -1001,6 +1001,29 @@ fs_inst::has_sampler_residency() const
    }
 }
 
+/* \sa inst_is_raw_move in brw_eu_validate. */
+bool
+fs_inst::is_raw_move() const
+{
+   if (opcode != BRW_OPCODE_MOV)
+      return false;
+
+   if (src[0].file == IMM) {
+      if (brw_type_is_vector_imm(src[0].type))
+         return false;
+   } else if (src[0].negate || src[0].abs) {
+      return false;
+   }
+
+   if (saturate)
+      return false;
+
+   return src[0].type == dst.type ||
+          (brw_type_is_int(src[0].type) &&
+           brw_type_is_int(dst.type) &&
+           brw_type_size_bits(src[0].type) == brw_type_size_bits(dst.type));
+}
+
 /* For SIMD16, we need to follow from the uniform setup of SIMD8 dispatch.
  * This brings in those uniform definitions
  */
@@ -1117,7 +1140,7 @@ fs_visitor::assign_curb_setup()
        */
       assert(devinfo->verx10 >= 125);
       assert(uniform_push_length <= reg_unit(devinfo));
-   } else if (is_compute && devinfo->verx10 >= 125) {
+   } else if (is_compute && devinfo->verx10 >= 125 && uniform_push_length > 0) {
       assert(devinfo->has_lsc);
       fs_builder ubld = fs_builder(this, 1).exec_all().at(
          cfg->first_block(), cfg->first_block()->start());
@@ -1515,7 +1538,7 @@ brw::register_pressure::register_pressure(const fs_visitor *v)
    const unsigned payload_count = v->first_non_payload_grf;
 
    int *payload_last_use_ip = new int[payload_count];
-   v->calculate_payload_ranges(payload_count, payload_last_use_ip);
+   v->calculate_payload_ranges(true, payload_count, payload_last_use_ip);
 
    for (unsigned reg = 0; reg < payload_count; reg++) {
       for (int ip = 0; ip < payload_last_use_ip[reg]; ip++)

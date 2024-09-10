@@ -23,7 +23,6 @@
  */
 
 #include "util/detect_os.h"
-#include "driver_trace/tr_screen.h"
 
 #include "zink_context.h"
 #include "zink_screen.h"
@@ -656,7 +655,8 @@ zink_kopper_acquire(struct zink_context *ctx, struct zink_resource *res, uint64_
    const struct kopper_swapchain *cswap = cdt->swapchain;
    res->obj->new_dt |= res->base.b.width0 != cswap->scci.imageExtent.width ||
                        res->base.b.height0 != cswap->scci.imageExtent.height;
-   VkResult ret = kopper_acquire(zink_screen(trace_screen_unwrap(ctx->base.screen)), res, timeout);
+   struct zink_screen *zscreen = zink_screen(kopper_get_zink_screen(ctx->base.screen));
+   VkResult ret = kopper_acquire(zscreen, res, timeout);
    if (ret == VK_SUCCESS || ret == VK_SUBOPTIMAL_KHR) {
       if (cswap != cdt->swapchain) {
          ctx->swapchain_size = cdt->swapchain->scci.imageExtent;
@@ -887,6 +887,8 @@ zink_kopper_present_queue(struct zink_screen *screen, struct zink_resource *res,
       kopper_present(cpi, screen, -1);
    }
    res->obj->indefinite_acquire = false;
+   res->use_damage = false;
+   memset(&res->damage, 0, sizeof(res->damage));
    cdt->swapchain->images[res->obj->dt_idx].acquired = NULL;
    res->obj->dt_idx = UINT32_MAX;
 }

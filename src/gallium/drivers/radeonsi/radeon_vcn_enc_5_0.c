@@ -12,8 +12,8 @@
 #include "si_pipe.h"
 #include "radeon_vcn_enc.h"
 
-#define RENCODE_FW_INTERFACE_MAJOR_VERSION   0
-#define RENCODE_FW_INTERFACE_MINOR_VERSION   0
+#define RENCODE_FW_INTERFACE_MAJOR_VERSION   1
+#define RENCODE_FW_INTERFACE_MINOR_VERSION   3
 
 #define RENCODE_REC_SWIZZLE_MODE_256B_D_VCN5                        1
 
@@ -58,12 +58,7 @@ static void radeon_enc_cdf_default_table(struct radeon_encoder *enc)
 
 static void radeon_enc_spec_misc(struct radeon_encoder *enc)
 {
-   enc->enc_pic.spec_misc.constrained_intra_pred_flag = 0;
-   enc->enc_pic.spec_misc.transform_8x8_mode = 0;
-   enc->enc_pic.spec_misc.half_pel_enabled = 1;
-   enc->enc_pic.spec_misc.quarter_pel_enabled = 1;
    enc->enc_pic.spec_misc.level_idc = enc->base.level;
-   enc->enc_pic.spec_misc.weighted_bipred_idc = 0;
 
    RADEON_ENC_BEGIN(enc->cmd.spec_misc_h264);
    RADEON_ENC_CS(enc->enc_pic.spec_misc.constrained_intra_pred_flag);
@@ -125,7 +120,6 @@ static void radeon_enc_encode_params(struct radeon_encoder *enc)
       assert(false);
    }
 
-   enc->enc_pic.enc_params.allowed_max_bitstream_size = enc->bs_size;
    enc->enc_pic.enc_params.input_pic_luma_pitch = enc->luma->u.gfx9.surf_pitch;
    enc->enc_pic.enc_params.input_pic_chroma_pitch = enc->chroma ?
       enc->chroma->u.gfx9.surf_pitch : enc->luma->u.gfx9.surf_pitch;
@@ -146,12 +140,6 @@ static void radeon_enc_encode_params(struct radeon_encoder *enc)
 
 static void radeon_enc_encode_params_h264(struct radeon_encoder *enc)
 {
-   enc->enc_pic.h264_enc_params.input_picture_structure = RENCODE_H264_PICTURE_STRUCTURE_FRAME;
-   enc->enc_pic.h264_enc_params.input_pic_order_cnt = 0;
-   enc->enc_pic.h264_enc_params.is_reference = !enc->enc_pic.not_referenced;
-   enc->enc_pic.h264_enc_params.is_long_term = enc->enc_pic.is_ltr;
-   enc->enc_pic.h264_enc_params.interlaced_mode = RENCODE_H264_INTERLACING_MODE_PROGRESSIVE;
-
    if (enc->enc_pic.enc_params.reference_picture_index != 0xFFFFFFFF){
       enc->enc_pic.h264_enc_params.lsm_reference_pictures[0].list = 0;
       enc->enc_pic.h264_enc_params.lsm_reference_pictures[0].list_index = 0;
@@ -376,6 +364,7 @@ static void radeon_enc_rc_per_pic(struct radeon_encoder *enc)
    RADEON_ENC_CS(enc->enc_pic.rc_per_pic.enabled_filler_data);
    RADEON_ENC_CS(enc->enc_pic.rc_per_pic.skip_frame_enable);
    RADEON_ENC_CS(enc->enc_pic.rc_per_pic.enforce_hrd);
+   RADEON_ENC_CS(enc->enc_pic.rc_per_pic.qvbr_quality_level);
    RADEON_ENC_END();
 }
 
@@ -416,9 +405,6 @@ static void radeon_enc_encode_params_av1(struct radeon_encoder *enc)
 
 static void radeon_enc_spec_misc_hevc(struct radeon_encoder *enc)
 {
-   enc->enc_pic.hevc_spec_misc.transform_skip_discarded = 0;
-   enc->enc_pic.hevc_spec_misc.cu_qp_delta_enabled_flag = 0;
-
    RADEON_ENC_BEGIN(enc->cmd.spec_misc_hevc);
    RADEON_ENC_CS(enc->enc_pic.hevc_spec_misc.log2_min_luma_coding_block_size_minus3);
    RADEON_ENC_CS(enc->enc_pic.hevc_spec_misc.amp_disabled);
@@ -427,7 +413,7 @@ static void radeon_enc_spec_misc_hevc(struct radeon_encoder *enc)
    RADEON_ENC_CS(enc->enc_pic.hevc_spec_misc.cabac_init_flag);
    RADEON_ENC_CS(enc->enc_pic.hevc_spec_misc.half_pel_enabled);
    RADEON_ENC_CS(enc->enc_pic.hevc_spec_misc.quarter_pel_enabled);
-   RADEON_ENC_CS(enc->enc_pic.hevc_spec_misc.transform_skip_discarded);
+   RADEON_ENC_CS(enc->enc_pic.hevc_spec_misc.transform_skip_disabled);
    RADEON_ENC_CS(0);
    RADEON_ENC_CS(enc->enc_pic.hevc_spec_misc.cu_qp_delta_enabled_flag);
    RADEON_ENC_END();

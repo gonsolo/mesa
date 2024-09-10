@@ -8,7 +8,6 @@
 
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
-#include "agx_internal_formats.h"
 #include "agx_nir_passes.h"
 #include "glsl_types.h"
 #include "libagx_shaders.h"
@@ -747,6 +746,7 @@ agx_nir_lower_texture(nir_shader *s)
       [nir_tex_src_lod] = {true, 16},
       [nir_tex_src_bias] = {true, 16},
       [nir_tex_src_ms_index] = {true, 16},
+      [nir_tex_src_min_lod] = {true, 16},
       [nir_tex_src_texture_offset] = {true, 16},
       [nir_tex_src_sampler_offset] = {true, 16},
    };

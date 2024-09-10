@@ -132,6 +132,7 @@ anv_nir_lower_set_vtx_and_prim_count(nir_shader *nir)
  */
 static nir_shader *
 anv_shader_stage_to_nir(struct anv_device *device,
+                        VkPipelineCreateFlags2KHR pipeline_flags,
                         const VkPipelineShaderStageCreateInfo *stage_info,
                         enum brw_robustness_flags robust_flags,
                         void *mem_ctx)
@@ -160,7 +161,7 @@ anv_shader_stage_to_nir(struct anv_device *device,
 
    nir_shader *nir;
    VkResult result =
-      vk_pipeline_shader_stage_to_nir(&device->vk, stage_info,
+      vk_pipeline_shader_stage_to_nir(&device->vk, pipeline_flags, stage_info,
                                       &spirv_options, nir_options,
                                       mem_ctx, &nir);
    if (result != VK_SUCCESS)
@@ -309,6 +310,7 @@ void anv_DestroyPipeline(
 struct anv_pipeline_stage {
    gl_shader_stage stage;
 
+   VkPipelineCreateFlags2KHR pipeline_flags;
    struct vk_pipeline_robustness_state rstate;
 
    /* VkComputePipelineCreateInfo, VkGraphicsPipelineCreateInfo or
@@ -655,7 +657,8 @@ anv_stage_write_shader_hash(struct anv_pipeline_stage *stage,
                                      stage->pipeline_pNext,
                                      stage->info->pNext);
 
-   vk_pipeline_hash_shader_stage(stage->info, &stage->rstate, stage->shader_sha1);
+   vk_pipeline_hash_shader_stage(stage->pipeline_flags, stage->info,
+                                 &stage->rstate, stage->shader_sha1);
 
    stage->robust_flags = anv_get_robust_flags(&stage->rstate);
 
@@ -736,6 +739,9 @@ anv_pipeline_hash_compute(struct anv_compute_pipeline *pipeline,
    const uint8_t afs = device->physical->instance->assume_full_subgroups;
    _mesa_sha1_update(&ctx, &afs, sizeof(afs));
 
+   const bool afswb = device->physical->instance->assume_full_subgroups_with_barrier;
+   _mesa_sha1_update(&ctx, &afswb, sizeof(afswb));
+
    _mesa_sha1_update(&ctx, stage->shader_sha1,
                      sizeof(stage->shader_sha1));
    _mesa_sha1_update(&ctx, &stage->key.cs, sizeof(stage->key.cs));
@@ -811,7 +817,8 @@ anv_pipeline_stage_get_nir(struct anv_pipeline *pipeline,
    if (vk_pipeline_shader_stage_has_identifier(stage->info))
       return VK_PIPELINE_COMPILE_REQUIRED;
 
-   stage->nir = anv_shader_stage_to_nir(pipeline->device, stage->info,
+   stage->nir = anv_shader_stage_to_nir(pipeline->device,
+                                        stage->pipeline_flags, stage->info,
                                         stage->key.base.robust_flags, mem_ctx);
    if (stage->nir) {
       anv_device_upload_nir(pipeline->device, cache,
@@ -874,7 +881,7 @@ anv_nir_compute_dynamic_push_bits(nir_shader *shader)
                continue;
 
             switch (nir_intrinsic_base(intrin)) {
-            case offsetof(struct anv_push_constants, gfx.tcs_input_vertices):
+            case anv_drv_const_offset(gfx.tcs_input_vertices):
                ret |= ANV_DYNAMIC_PUSH_INPUT_VERTICES;
                break;
 
@@ -911,6 +918,15 @@ anv_fixup_subgroup_size(struct anv_device *device, struct shader_info *info)
    if (device->physical->instance->assume_full_subgroups &&
        info->uses_wide_subgroup_intrinsics &&
        info->subgroup_size == SUBGROUP_SIZE_API_CONSTANT &&
+       local_size &&
+       local_size % BRW_SUBGROUP_SIZE == 0)
+      info->subgroup_size = SUBGROUP_SIZE_FULL_SUBGROUPS;
+
+   if (device->physical->instance->assume_full_subgroups_with_barrier &&
+       info->stage == MESA_SHADER_COMPUTE &&
+       device->info->verx10 <= 125 &&
+       info->uses_control_barrier &&
+       info->subgroup_size == SUBGROUP_SIZE_VARYING &&
        local_size &&
        local_size % BRW_SUBGROUP_SIZE == 0)
       info->subgroup_size = SUBGROUP_SIZE_FULL_SUBGROUPS;
@@ -2192,6 +2208,7 @@ anv_graphics_pipeline_compile(struct anv_graphics_base_pipeline *pipeline,
          continue;
 
       stages[stage].stage = stage;
+      stages[stage].pipeline_flags = pipeline->base.flags;
       stages[stage].pipeline_pNext = info->pNext;
       stages[stage].info = &info->pStages[i];
       stages[stage].feedback_idx = shader_count++;
@@ -2625,6 +2642,7 @@ anv_pipeline_compile_cs(struct anv_compute_pipeline *pipeline,
    struct anv_pipeline_stage stage = {
       .stage = MESA_SHADER_COMPUTE,
       .info = &info->stage,
+      .pipeline_flags = pipeline->base.flags,
       .pipeline_pNext = info->pNext,
       .cache_key = {
          .stage = MESA_SHADER_COMPUTE,
@@ -2690,6 +2708,7 @@ anv_pipeline_compile_cs(struct anv_compute_pipeline *pipeline,
             .stats = stage.stats,
             .log_data = device,
             .mem_ctx = mem_ctx,
+            .source_hash = stage.source_hash,
          },
          .key = &stage.key.cs,
          .prog_data = &stage.prog_data.cs,
@@ -3392,6 +3411,7 @@ compile_upload_rt_shader(struct anv_ray_tracing_pipeline *pipeline,
          .stats = stage->stats,
          .log_data = pipeline->base.device,
          .mem_ctx = mem_ctx,
+         .source_hash = stage->source_hash,
       },
       .key = &stage->key.bs,
       .prog_data = &stage->prog_data.bs,
@@ -3537,6 +3557,7 @@ anv_pipeline_init_ray_tracing_stages(struct anv_ray_tracing_pipeline *pipeline,
 
       stages[i] = (struct anv_pipeline_stage) {
          .stage = vk_to_mesa_shader_stage(sinfo->stage),
+         .pipeline_flags = pipeline->base.flags,
          .pipeline_pNext = info->pNext,
          .info = sinfo,
          .cache_key = {
