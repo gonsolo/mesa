@@ -88,7 +88,7 @@ create_mem_or_close_bo(struct borg_device* dev,
 fail_mem:
    FREE(mem);
 fail_bo:
-   borg_ws_bo_destroy(mem->bo);
+   borg_ws_bo_destroy(bo);
 
    return result;
 }
