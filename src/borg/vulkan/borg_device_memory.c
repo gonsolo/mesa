@@ -71,6 +71,8 @@ create_mem_or_close_bo(struct borg_device* dev,
                        struct borg_ws_bo *bo,
                        struct vk_object_base *log_obj)
 {
+   puts("create_mem_or_close_bo.");
+
    const uint64_t size_B = bo->size;
    VkResult result;
 
