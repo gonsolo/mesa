@@ -101,6 +101,7 @@ if with_any_nouveau
 endif
 if with_borg_vk
   subdir('borg')
+endif
 if with_gfxstream_vk
   subdir('gfxstream')
 endif
