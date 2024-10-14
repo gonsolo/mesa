@@ -1,4 +1,5 @@
-#MESON = ~/src/meson/meson.py
+# TODO:
+# Remove workaround in nouveau_bo.h for bindgen 66
 MESON = meson
 BUILD_DIR_NAME = build
 BUILD_DIR = ../$(BUILD_DIR_NAME)
