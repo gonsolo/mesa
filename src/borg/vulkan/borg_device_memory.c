@@ -77,14 +77,16 @@ create_mem_or_close_bo(struct borg_device* dev,
    struct borg_mem *mem = CALLOC_STRUCT(borg_mem);
    if (mem == NULL) {
       result = vk_error(log_obj, VK_ERROR_OUT_OF_HOST_MEMORY);
+      puts("create_mem_or_close_bo: out of host memory.");
       goto fail_bo;
    }
    mem->bo = bo;
 
    result = borg_alloc_va(dev, log_obj, size_B, &mem->va);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      puts("create_mem_or_close_bo: borg_alloc_va failed.");
       goto fail_mem;
-
+   }
 fail_mem:
    FREE(mem);
 fail_bo:
