@@ -38,7 +38,8 @@ struct nouveau_ws_bo {
    uint64_t map_handle;
    uint32_t handle;
    enum nouveau_ws_bo_flags flags;
-   atomic_uint_fast32_t refcnt;
+   _Atomic uint_fast32_t refcnt; // gonsolo: Workaround for bindgen 66
+   // gonsolo atomic_uint_fast32_t refcnt;
 };
 
 void nouveau_ws_bo_bind_vma(struct nouveau_ws_device *dev,
