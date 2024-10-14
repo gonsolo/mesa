@@ -223,6 +223,9 @@ struct gl_extensions
    GLboolean OES_texture_cube_map_array;
    GLboolean OES_texture_view;
    GLboolean OES_viewport_array;
+   GLboolean OVR_multiview;
+   GLboolean OVR_multiview2;
+   GLboolean OVR_multiview_multisampled_render_to_texture;
    /* vendor extensions */
    GLboolean AMD_compressed_ATC_texture;
    GLboolean AMD_framebuffer_multisample_advanced;
@@ -397,15 +400,6 @@ struct gl_program_constants
    GLuint MaxParameters;
    GLuint MaxLocalParams;
    GLuint MaxEnvParams;
-   /* native/hardware limits */
-   GLuint MaxNativeInstructions;
-   GLuint MaxNativeAluInstructions;
-   GLuint MaxNativeTexInstructions;
-   GLuint MaxNativeTexIndirections;
-   GLuint MaxNativeAttribs;
-   GLuint MaxNativeTemps;
-   GLuint MaxNativeAddressRegs;
-   GLuint MaxNativeParameters;
    /* For shaders */
    GLuint MaxUniformComponents;  /**< Usually == MaxParameters * 4 */
 

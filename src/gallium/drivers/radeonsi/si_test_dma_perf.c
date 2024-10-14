@@ -187,7 +187,7 @@ void si_test_dma_perf(struct si_screen *sscreen)
 
                /* Don't test large sizes with GTT because it's slow. */
                if ((dst_usage == PIPE_USAGE_STREAM || src_usage == PIPE_USAGE_STREAM) &&
-                   size > 32 * 1024 * 1024) {
+                   size > 16 * 1024 * 1024) {
                   printf("%8s,", "n/a");
                   continue;
                }
@@ -207,38 +207,57 @@ void si_test_dma_perf(struct si_screen *sscreen)
 
                   if (method == METHOD_DEFAULT) {
                      if (is_copy) {
-                        si_copy_buffer(sctx, dst, src, dst_offset, src_offset, size,
-                                       SI_OP_SYNC_BEFORE_AFTER);
+                        si_barrier_before_simple_buffer_op(sctx, 0, dst, src);
+                        si_copy_buffer(sctx, dst, src, dst_offset, src_offset, size);
+                        si_barrier_after_simple_buffer_op(sctx, 0, dst, src);
                      } else {
                         sctx->b.clear_buffer(&sctx->b, dst, dst_offset, size, &clear_value,
                                              clear_value_size);
                      }
                   } else if (method == METHOD_CP_DMA) {
                      /* CP DMA */
+                     if (sscreen->info.cp_sdma_ge_use_system_memory_scope) {
+                        /* The CP DMA code doesn't implement this case. */
+                        success = false;
+                        continue;
+                     }
+
                      if (is_copy) {
-                        si_cp_dma_copy_buffer(sctx, dst, src, dst_offset, src_offset, size,
-                                              SI_OP_SYNC_BEFORE_AFTER, SI_COHERENCY_SHADER, L2_LRU);
-                     } else {
-                        /* CP DMA clears must be aligned to 4 bytes. */
-                        if (dst_offset % 4 || size % 4) {
+                        /* CP DMA copies are about as slow as PCIe on GFX6-8. */
+                        if (sctx->gfx_level <= GFX8 && size > 16 * 1024 * 1024) {
                            success = false;
                            continue;
                         }
+
+                        si_barrier_before_simple_buffer_op(sctx, 0, dst, src);
+                        si_cp_dma_copy_buffer(sctx, dst, src, dst_offset, src_offset, size);
+                        si_barrier_after_simple_buffer_op(sctx, 0, dst, src);
+                     } else {
+                        /* CP DMA clears must be aligned to 4 bytes. */
+                        if (dst_offset % 4 || size % 4 ||
+                            /* CP DMA clears are so slow on GFX6-8 that we risk getting a GPU timeout. */
+                            (sctx->gfx_level <= GFX8 && size > 512 * 1024)) {
+                           success = false;
+                           continue;
+                        }
+
                         assert(clear_value_size == 4);
+                        si_barrier_before_simple_buffer_op(sctx, 0, dst, src);
                         si_cp_dma_clear_buffer(sctx, &sctx->gfx_cs, dst, dst_offset, size,
-                                               clear_value[0], SI_OP_SYNC_BEFORE_AFTER,
-                                               SI_COHERENCY_SHADER, L2_LRU);
+                                               clear_value[0]);
+                        si_barrier_after_simple_buffer_op(sctx, 0, dst, src);
                      }
                   } else {
                      /* Compute */
+                     si_barrier_before_simple_buffer_op(sctx, 0, dst, src);
                      success &=
                         si_compute_clear_copy_buffer(sctx, dst, dst_offset, src, src_offset,
                                                      size, clear_value, clear_value_size,
-                                                     SI_OP_SYNC_BEFORE_AFTER, SI_COHERENCY_SHADER,
-                                                     dwords_per_thread, false);
+                                                     dwords_per_thread, false, false);
+                     si_barrier_after_simple_buffer_op(sctx, 0, dst, src);
                   }
 
-                  sctx->flags |= SI_CONTEXT_INV_L2;
+                  sctx->barrier_flags |= SI_BARRIER_INV_L2;
                }
 
                ctx->end_query(ctx, q);
@@ -252,7 +271,10 @@ void si_test_dma_perf(struct si_screen *sscreen)
                ctx->get_query_result(ctx, q, true, &result);
                ctx->destroy_query(ctx, q);
 
-               if (success) {
+               /* Navi10 and Vega10 sometimes incorrectly return elapsed time of 0 nanoseconds
+                * for very small ops.
+                */
+               if (success && result.u64) {
                   double GB = 1024.0 * 1024.0 * 1024.0;
                   double seconds = result.u64 / (double)NUM_RUNS / (1000.0 * 1000.0 * 1000.0);
                   double GBps = (size / GB) / seconds * (test_flavor == TEST_COPY_VRAM_VRAM ? 2 : 1);
@@ -460,10 +482,11 @@ void si_test_clear_buffer(struct si_screen *sscreen)
       printf("%s, ", COLOR_RESET);
       fflush(stdout);
 
+      si_barrier_before_simple_buffer_op(sctx, 0, dst, NULL);
       bool done = si_compute_clear_copy_buffer(sctx, dst, dst_offset, NULL, 0, op_size,
                                                (uint32_t*)clear_value, clear_value_size,
-                                               SI_OP_SYNC_BEFORE_AFTER, SI_COHERENCY_SHADER,
-                                               dwords_per_thread, false);
+                                               dwords_per_thread, false, false);
+      si_barrier_after_simple_buffer_op(sctx, 0, dst, NULL);
 
       if (done) {
          pipe_buffer_read(ctx, dst, 0, buf_size, read_dst_buffer);
@@ -566,9 +589,10 @@ void si_test_copy_buffer(struct si_screen *sscreen)
       }
       fflush(stdout);
 
+      si_barrier_before_simple_buffer_op(sctx, 0, dst, src);
       bool done = si_compute_clear_copy_buffer(sctx, dst, dst_offset, src, src_offset, op_size,
-                                               NULL, 0, SI_OP_SYNC_BEFORE_AFTER,
-                                               SI_COHERENCY_SHADER, dwords_per_thread, false);
+                                               NULL, 0, dwords_per_thread, false, false);
+      si_barrier_after_simple_buffer_op(sctx, 0, dst, src);
 
       if (done) {
          pipe_buffer_read(ctx, dst, 0, buf_size, read_dst_buffer);

@@ -219,44 +219,33 @@ BEGIN_TEST(optimize.output_modifiers)
    /* omod flushes -0.0 to +0.0 */
 
    //>> BB3
-   //! /* logical preds: BB2, / linear preds: BB2, / kind: */
-   program->next_fp_mode.denorm32 = fp_denorm_keep;
-   program->next_fp_mode.denorm16_64 = fp_denorm_keep;
-   program->next_fp_mode.preserve_signed_zero_inf_nan32 = true;
-   program->next_fp_mode.preserve_signed_zero_inf_nan16_64 = false;
+   //! /* logical preds: BB2, / linear preds: BB2, / kind: uniform, */
+   program->next_fp_mode.denorm32 = fp_denorm_flush;
+   program->next_fp_mode.denorm16_64 = fp_denorm_flush;
    bld.reset(program->create_and_insert_block());
+   bld.is_sz_preserve = true;
    program->blocks[2].linear_succs.push_back(3);
    program->blocks[2].logical_succs.push_back(3);
    program->blocks[3].linear_preds.push_back(2);
    program->blocks[3].logical_preds.push_back(2);
 
-   //! v1: %res18_tmp = v_add_f32 %a, %b
-   //! v1: %res18 = v_mul_f32 2.0, %res18_tmp
+   //! v1: (SzPreserve)%res18_tmp = v_add_f32 %a, %b
+   //! v1: (SzPreserve)%res18 = v_mul_f32 2.0, %res18_tmp
    //! p_unit_test 18, %res18
    tmp = bld.vop2(aco_opcode::v_add_f32, bld.def(v1), inputs[0], inputs[1]);
    writeout(18, bld.vop2(aco_opcode::v_mul_f32, bld.def(v1), Operand::c32(0x40000000u), tmp));
-   //! v1: %res19 = v_add_f32 %a, %b clamp
+   //! v1: (SzPreserve)%res19 = v_add_f32 %a, %b clamp
    //! p_unit_test 19, %res19
    tmp = bld.vop2(aco_opcode::v_add_f32, bld.def(v1), inputs[0], inputs[1]);
    writeout(19, bld.vop3(aco_opcode::v_med3_f32, bld.def(v1), Operand::zero(),
                          Operand::c32(0x3f800000u), tmp));
 
-   //>> BB4
-   //! /* logical preds: BB3, / linear preds: BB3, / kind: uniform, */
-   program->next_fp_mode.preserve_signed_zero_inf_nan32 = false;
-   program->next_fp_mode.preserve_signed_zero_inf_nan16_64 = true;
-   bld.reset(program->create_and_insert_block());
-   program->blocks[3].linear_succs.push_back(4);
-   program->blocks[3].logical_succs.push_back(4);
-   program->blocks[4].linear_preds.push_back(3);
-   program->blocks[4].logical_preds.push_back(3);
-
-   //! v2b: %res20_tmp = v_add_f16 %a, %b
-   //! v2b: %res20 = v_mul_f16 2.0, %res20_tmp
+   //! v2b: (SzPreserve)%res20_tmp = v_add_f16 %a, %b
+   //! v2b: (SzPreserve)%res20 = v_mul_f16 2.0, %res20_tmp
    //! p_unit_test 20, %res20
    tmp = bld.vop2(aco_opcode::v_add_f16, bld.def(v2b), inputs[0], inputs[1]);
    writeout(20, bld.vop2(aco_opcode::v_mul_f16, bld.def(v2b), Operand::c16(0x4000u), tmp));
-   //! v2b: %res21 = v_add_f16 %a, %b clamp
+   //! v2b: (SzPreserve)%res21 = v_add_f16 %a, %b clamp
    //! p_unit_test 21, %res21
    tmp = bld.vop2(aco_opcode::v_add_f16, bld.def(v2b), inputs[0], inputs[1]);
    writeout(21, bld.vop3(aco_opcode::v_med3_f16, bld.def(v2b), Operand::c16(0u),
@@ -2050,6 +2039,47 @@ BEGIN_TEST(optimize.s_pack)
    //! s1: %res7 = s_pack_hl_b32_b16 %c, %a
    //! p_unit_test 7, %res7
    writeout(7, bld.sop2(aco_opcode::s_pack_ll_b32_b16, bld.def(s1), hi, inputs[0]));
+
+   finish_opt_test();
+END_TEST
+
+BEGIN_TEST(optimizer.trans_inline_constant)
+   if (!setup_cs("", GFX12))
+      return;
+
+   //>> s1: %res0 = v_s_rcp_f32 1.0
+   //! p_unit_test 0, %res0
+   writeout(0, bld.vop3(aco_opcode::v_s_rcp_f32, bld.def(s1), bld.copy(bld.def(s1), Operand::c32(0x3f800000))));
+
+   //! s1: %res1 = v_s_rcp_f32 0x3c00
+   //! p_unit_test 1, %res1
+   writeout(1, bld.vop3(aco_opcode::v_s_rcp_f32, bld.def(s1), bld.copy(bld.def(s1), Operand::c32(0x3c00))));
+
+   //! s1: %tmp2 = p_parallelcopy 1.0
+   //! s1: %res2 = v_s_rcp_f16 %tmp2
+   //! p_unit_test 2, %res2
+   writeout(2, bld.vop3(aco_opcode::v_s_rcp_f16, bld.def(s1), bld.copy(bld.def(s1), Operand::c32(0x3f800000))));
+
+   //! s1: %tmp3 = p_parallelcopy 0x3c00
+   //! s1: %res3 = v_s_rcp_f16 %tmp3
+   //! p_unit_test 3, %res3
+   writeout(3, bld.vop3(aco_opcode::v_s_rcp_f16, bld.def(s1), bld.copy(bld.def(s1), Operand::c32(0x3c00))));
+
+   //! v1: %res4 = v_rcp_f32 1.0
+   //! p_unit_test 4, %res4
+   writeout(4, bld.vop1(aco_opcode::v_rcp_f32, bld.def(v1), bld.copy(bld.def(s1), Operand::c32(0x3f800000))));
+
+   //! v1: %res5 = v_rcp_f32 0x3c00
+   //! p_unit_test 5, %res5
+   writeout(5, bld.vop1(aco_opcode::v_rcp_f32, bld.def(v1), bld.copy(bld.def(s1), Operand::c32(0x3c00))));
+
+   //! v2b: %res6 = v_rcp_f16 0x3f800000
+   //! p_unit_test 6, %res6
+   writeout(6, bld.vop1(aco_opcode::v_rcp_f16, bld.def(v2b), bld.copy(bld.def(s1), Operand::c32(0x3f800000))));
+
+   //! v2b: %res7 = v_rcp_f16 1.0
+   //! p_unit_test 7, %res7
+   writeout(7, bld.vop1(aco_opcode::v_rcp_f16, bld.def(v2b), bld.copy(bld.def(s1), Operand::c32(0x3c00))));
 
    finish_opt_test();
 END_TEST

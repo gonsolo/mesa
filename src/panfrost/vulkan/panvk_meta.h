@@ -12,15 +12,11 @@
 #include "vk_format.h"
 #include "vk_meta.h"
 
-static inline bool
-panvk_meta_copy_to_image_use_gfx_pipeline(struct panvk_image *dst_img)
-{
-   /* Writes to AFBC images must go through the graphics pipeline. */
-   if (drm_is_afbc(dst_img->pimage.layout.modifier))
-      return true;
-
-   return false;
-}
+enum panvk_meta_object_key_type {
+   PANVK_META_OBJECT_KEY_BLEND_SHADER = VK_META_OBJECT_KEY_DRIVER_OFFSET,
+   PANVK_META_OBJECT_KEY_COPY_DESC_SHADER,
+   PANVK_META_OBJECT_KEY_FB_PRELOAD_SHADER,
+};
 
 static inline VkFormat
 panvk_meta_get_uint_format_for_blk_size(unsigned blk_sz)
@@ -134,21 +130,17 @@ panvk_meta_copy_get_image_properties(struct panvk_image *img)
 }
 
 #if defined(PAN_ARCH) && PAN_ARCH <= 7
-void panvk_per_arch(meta_desc_copy_init)(struct panvk_device *dev);
-
-void panvk_per_arch(meta_desc_copy_cleanup)(struct panvk_device *dev);
-
+struct panvk_cmd_buffer;
 struct panvk_descriptor_state;
 struct panvk_device;
 struct panvk_shader;
 struct panvk_shader_desc_state;
 
-struct panfrost_ptr panvk_per_arch(meta_get_copy_desc_job)(
-   struct panvk_device *dev, struct pan_pool *desc_pool,
-   const struct panvk_shader *shader,
+VkResult panvk_per_arch(meta_get_copy_desc_job)(
+   struct panvk_cmd_buffer *cmdbuf, const struct panvk_shader *shader,
    const struct panvk_descriptor_state *desc_state,
    const struct panvk_shader_desc_state *shader_desc_state,
-   uint32_t attrib_buf_idx_offset);
+   uint32_t attrib_buf_idx_offset, struct panfrost_ptr *job_desc);
 #endif
 
 #endif

@@ -133,12 +133,6 @@ vlVaHandleVAEncPictureParameterBufferTypeH264(vlVaDriver *drv, vlVaContext *cont
    context->desc.h264enc.pic_ctrl.transform_8x8_mode_flag =
       h264->pic_fields.bits.transform_8x8_mode_flag;
 
-   if (!(context->desc.base.packed_headers & VA_ENC_PACKED_HEADER_SLICE)) {
-      unsigned max_poc = 1 << (context->desc.h264enc.seq.log2_max_pic_order_cnt_lsb_minus4 + 4);
-      context->desc.h264enc.slice.frame_num = h264->frame_num;
-      context->desc.h264enc.slice.pic_order_cnt_lsb = h264->CurrPic.TopFieldOrderCnt % max_poc;
-   }
-
    return VA_STATUS_SUCCESS;
 }
 
@@ -233,39 +227,8 @@ vlVaHandleVAEncSliceParameterBufferTypeH264(vlVaDriver *drv, vlVaContext *contex
 VAStatus
 vlVaHandleVAEncSequenceParameterBufferTypeH264(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf)
 {
+   VAEncSequenceParameterBufferH264 *h264 = buf->data;
    uint32_t num_units_in_tick = 0, time_scale  = 0;
-
-   VAEncSequenceParameterBufferH264 *h264 = (VAEncSequenceParameterBufferH264 *)buf->data;
-   if (!context->decoder) {
-      context->templat.max_references = h264->max_num_ref_frames;
-      context->templat.level = h264->level_idc;
-      context->decoder = drv->pipe->create_video_codec(drv->pipe, &context->templat);
-      if (!context->decoder)
-         return VA_STATUS_ERROR_ALLOCATION_FAILED;
-
-      struct pipe_h264_enc_dpb_entry *dpb =
-         &context->desc.h264enc.dpb[context->desc.h264enc.dpb_curr_pic];
-      if (dpb->id && !dpb->buffer && context->decoder->create_dpb_buffer) {
-         vlVaSurface *surf = handle_table_get(drv->htab, dpb->id);
-         if (!surf)
-            return VA_STATUS_ERROR_INVALID_PARAMETER;
-         surf->buffer = context->decoder->create_dpb_buffer(context->decoder, &context->desc.base, &surf->templat);
-         dpb->buffer = surf->buffer;
-      }
-
-      getEncParamPresetH264(context);
-      context->desc.h264enc.rate_ctrl[0].vbv_buffer_size = 20000000;
-      context->desc.h264enc.rate_ctrl[0].vbv_buf_lv = 48;
-      context->desc.h264enc.rate_ctrl[0].fill_data_enable = 1;
-      context->desc.h264enc.rate_ctrl[0].enforce_hrd = 1;
-      context->desc.h264enc.rate_ctrl[0].max_qp = 51;
-      context->desc.h264enc.rate_ctrl[0].min_qp = 0;
-      context->desc.h264enc.enable_vui = false;
-      context->desc.h264enc.intra_refresh.mode = INTRA_REFRESH_MODE_NONE;
-      context->desc.h264enc.intra_refresh.offset = 0;
-      context->desc.h264enc.intra_refresh.region_size = 0;
-      context->desc.h264enc.intra_refresh.need_sequence_header = 0;
-   }
 
    context->desc.h264enc.ip_period = h264->ip_period;
    context->desc.h264enc.intra_idr_period =
@@ -328,15 +291,6 @@ vlVaHandleVAEncSequenceParameterBufferTypeH264(vlVaDriver *drv, vlVaContext *con
       context->desc.h264enc.seq.enc_frame_crop_right_offset = h264->frame_crop_right_offset;
       context->desc.h264enc.seq.enc_frame_crop_top_offset = h264->frame_crop_top_offset;
       context->desc.h264enc.seq.enc_frame_crop_bottom_offset = h264->frame_crop_bottom_offset;
-   }
-
-   if (!(context->desc.base.packed_headers & VA_ENC_PACKED_HEADER_SEQUENCE)) {
-      util_dynarray_append(&context->desc.h264enc.raw_headers,
-                           struct pipe_enc_raw_header,
-                           (struct pipe_enc_raw_header){.type = PIPE_H264_NAL_SPS});
-      util_dynarray_append(&context->desc.h264enc.raw_headers,
-                           struct pipe_enc_raw_header,
-                           (struct pipe_enc_raw_header){.type = PIPE_H264_NAL_PPS});
    }
 
    return VA_STATUS_SUCCESS;
@@ -762,6 +716,19 @@ static void parseEncPpsParamsH264(vlVaContext *context, struct vl_rbsp *rbsp)
    }
 }
 
+static void parseEncPrefixH264(vlVaContext *context, struct vl_rbsp *rbsp)
+{
+   if (!vl_rbsp_u(rbsp, 1)) /* svc_extension_flag */
+      return;
+
+   vl_rbsp_u(rbsp, 1); /* idr_flag */
+   vl_rbsp_u(rbsp, 6); /* priority_id */
+   vl_rbsp_u(rbsp, 1); /* no_inter_layer_pred_flag */
+   vl_rbsp_u(rbsp, 3); /* dependency_id */
+   vl_rbsp_u(rbsp, 4); /* quality_id */
+   context->desc.h264enc.pic_ctrl.temporal_id = vl_rbsp_u(rbsp, 3);
+}
+
 VAStatus
 vlVaHandleVAEncPackedHeaderDataBufferTypeH264(vlVaContext *context, vlVaBuffer *buf)
 {
@@ -820,6 +787,9 @@ vlVaHandleVAEncPackedHeaderDataBufferTypeH264(vlVaContext *context, vlVaBuffer *
       case PIPE_H264_NAL_PPS:
          parseEncPpsParamsH264(context, &rbsp);
          break;
+      case PIPE_H264_NAL_PREFIX:
+         parseEncPrefixH264(context, &rbsp);
+         break;
       default:
          break;
       }
@@ -870,34 +840,24 @@ vlVaHandleVAEncMiscParameterTypeHRDH264(vlVaContext *context, VAEncMiscParameter
 {
    VAEncMiscParameterHRD *ms = (VAEncMiscParameterHRD *)misc->data;
 
-   if (ms->buffer_size) {
-      context->desc.h264enc.rate_ctrl[0].vbv_buffer_size = ms->buffer_size;
-      context->desc.h264enc.rate_ctrl[0].vbv_buf_lv = (ms->initial_buffer_fullness << 6 ) / ms->buffer_size;
-      context->desc.h264enc.rate_ctrl[0].vbv_buf_initial_size = ms->initial_buffer_fullness;
-      /* Distinguishes from the default params set for these values in other
+   if (ms->buffer_size == 0)
+      return VA_STATUS_ERROR_INVALID_PARAMETER;
+
+   /* Distinguishes from the default params set for these values in other
       functions and app specific params passed down via HRD buffer */
-      context->desc.h264enc.rate_ctrl[0].app_requested_hrd_buffer = true;
+   context->desc.h264enc.rate_ctrl[0].app_requested_hrd_buffer = true;
+   context->desc.h264enc.rate_ctrl[0].vbv_buffer_size = ms->buffer_size;
+   context->desc.h264enc.rate_ctrl[0].vbv_buf_lv = (ms->initial_buffer_fullness << 6) / ms->buffer_size;
+   context->desc.h264enc.rate_ctrl[0].vbv_buf_initial_size = ms->initial_buffer_fullness;
+
+   for (unsigned i = 1; i < context->desc.h264enc.seq.num_temporal_layers; i++) {
+      context->desc.h264enc.rate_ctrl[i].vbv_buffer_size =
+         (float)ms->buffer_size / context->desc.h264enc.rate_ctrl[0].peak_bitrate *
+         context->desc.h264enc.rate_ctrl[i].peak_bitrate;
+      context->desc.h264enc.rate_ctrl[i].vbv_buf_lv = context->desc.h264enc.rate_ctrl[0].vbv_buf_lv;
+      context->desc.h264enc.rate_ctrl[i].vbv_buf_initial_size =
+         (context->desc.h264enc.rate_ctrl[i].vbv_buffer_size * context->desc.h264enc.rate_ctrl[i].vbv_buf_lv) >> 6;
    }
 
    return VA_STATUS_SUCCESS;
-}
-
-void getEncParamPresetH264(vlVaContext *context)
-{
-   //rate control
-   if (context->desc.h264enc.rate_ctrl[0].frame_rate_num == 0 ||
-       context->desc.h264enc.rate_ctrl[0].frame_rate_den == 0) {
-         context->desc.h264enc.rate_ctrl[0].frame_rate_num = 30;
-         context->desc.h264enc.rate_ctrl[0].frame_rate_den = 1;
-   }
-   context->desc.h264enc.rate_ctrl[0].target_bits_picture =
-      context->desc.h264enc.rate_ctrl[0].target_bitrate *
-      ((float)context->desc.h264enc.rate_ctrl[0].frame_rate_den /
-      context->desc.h264enc.rate_ctrl[0].frame_rate_num);
-   context->desc.h264enc.rate_ctrl[0].peak_bits_picture_integer =
-      context->desc.h264enc.rate_ctrl[0].peak_bitrate *
-      ((float)context->desc.h264enc.rate_ctrl[0].frame_rate_den /
-      context->desc.h264enc.rate_ctrl[0].frame_rate_num);
-
-   context->desc.h264enc.rate_ctrl[0].peak_bits_picture_fraction = 0;
 }

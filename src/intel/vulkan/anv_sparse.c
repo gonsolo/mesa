@@ -578,6 +578,11 @@ anv_sparse_trtt_garbage_collect_batches(struct anv_device *device,
          vk_sync_get_value(&device->vk, trtt->timeline, &last_value);
       if (result != VK_SUCCESS)
          return result;
+
+      /* Valgrind doesn't know that drmSyncobjQuery writes to 'last_value' on
+       * success.
+       */
+      VG(VALGRIND_MAKE_MEM_DEFINED(&last_value, sizeof(last_value)));
    } else {
       last_value = trtt->timeline_val;
    }
@@ -795,11 +800,13 @@ anv_sparse_bind_vm_bind(struct anv_device *device,
 {
    struct anv_queue *queue = submit->queue;
 
-   if (!queue)
-      assert(submit->wait_count == 0 && submit->signal_count == 0);
-
    VkResult result = device->kmd_backend->vm_bind(device, submit,
                                                   ANV_VM_BIND_FLAG_NONE);
+   if (!queue) {
+      assert(submit->wait_count == 0 && submit->signal_count == 0 &&
+             submit->binds_len == 1);
+      return result;
+   }
 
    if (result == VK_ERROR_OUT_OF_HOST_MEMORY) {
       /* If we get this, the system is under memory pressure. First we

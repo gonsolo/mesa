@@ -197,6 +197,7 @@ radv_optimize_nir_algebraic(nir_shader *nir, bool opt_offsets, bool opt_mqsad)
       NIR_PASS(_, nir, nir_opt_constant_folding);
       NIR_PASS(_, nir, nir_opt_cse);
       NIR_PASS(more_algebraic, nir, nir_opt_algebraic);
+      NIR_PASS(_, nir, nir_opt_generate_bfi);
       NIR_PASS(_, nir, nir_opt_dead_cf);
    }
 
@@ -372,9 +373,6 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
       free(spec_entries);
 
       radv_device_associate_nir(device, nir);
-
-      /* TODO: This can be removed once GCM (which is more general) is used. */
-      NIR_PASS(_, nir, nir_opt_reuse_constants);
 
       const struct nir_lower_sysvals_to_varyings_options sysvals_to_varyings = {
          .point_coord = true,
@@ -1745,9 +1743,102 @@ radv_precompute_registers_hw_cs(struct radv_device *device, struct radv_shader_b
 }
 
 static void
+radv_precompute_registers_pgm(const struct radv_device *device, struct radv_shader_info *info)
+{
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const enum amd_gfx_level gfx_level = pdev->info.gfx_level;
+   enum ac_hw_stage hw_stage = radv_select_hw_stage(info, gfx_level);
+
+   /* Special case for merged shaders compiled separately with ESO on GFX9+. */
+   if (info->merged_shader_compiled_separately) {
+      if (info->stage == MESA_SHADER_VERTEX && info->next_stage == MESA_SHADER_TESS_CTRL) {
+         hw_stage = AC_HW_HULL_SHADER;
+      } else if ((info->stage == MESA_SHADER_VERTEX || info->stage == MESA_SHADER_TESS_EVAL) &&
+                 info->next_stage == MESA_SHADER_GEOMETRY) {
+         hw_stage = info->is_ngg ? AC_HW_NEXT_GEN_GEOMETRY_SHADER : AC_HW_LEGACY_GEOMETRY_SHADER;
+      }
+   }
+
+   switch (hw_stage) {
+   case AC_HW_NEXT_GEN_GEOMETRY_SHADER:
+      assert(gfx_level >= GFX10);
+      if (gfx_level >= GFX12) {
+         info->regs.pgm_lo = R_00B224_SPI_SHADER_PGM_LO_ES;
+      } else {
+         info->regs.pgm_lo = R_00B320_SPI_SHADER_PGM_LO_ES;
+      }
+
+      info->regs.pgm_rsrc1 = R_00B228_SPI_SHADER_PGM_RSRC1_GS;
+      info->regs.pgm_rsrc2 = R_00B22C_SPI_SHADER_PGM_RSRC2_GS;
+      break;
+   case AC_HW_LEGACY_GEOMETRY_SHADER:
+      assert(gfx_level < GFX11);
+      if (gfx_level >= GFX10) {
+         info->regs.pgm_lo = R_00B320_SPI_SHADER_PGM_LO_ES;
+      } else if (gfx_level >= GFX9) {
+         info->regs.pgm_lo = R_00B210_SPI_SHADER_PGM_LO_ES;
+      } else {
+         info->regs.pgm_lo = R_00B220_SPI_SHADER_PGM_LO_GS;
+      }
+
+      info->regs.pgm_rsrc1 = R_00B228_SPI_SHADER_PGM_RSRC1_GS;
+      info->regs.pgm_rsrc2 = R_00B22C_SPI_SHADER_PGM_RSRC2_GS;
+      break;
+   case AC_HW_EXPORT_SHADER:
+      assert(gfx_level < GFX9);
+      info->regs.pgm_lo = R_00B320_SPI_SHADER_PGM_LO_ES;
+      info->regs.pgm_rsrc1 = R_00B328_SPI_SHADER_PGM_RSRC1_ES;
+      info->regs.pgm_rsrc2 = R_00B32C_SPI_SHADER_PGM_RSRC2_ES;
+      break;
+   case AC_HW_LOCAL_SHADER:
+      assert(gfx_level < GFX9);
+      info->regs.pgm_lo = R_00B520_SPI_SHADER_PGM_LO_LS;
+      info->regs.pgm_rsrc1 = R_00B528_SPI_SHADER_PGM_RSRC1_LS;
+      info->regs.pgm_rsrc2 = R_00B52C_SPI_SHADER_PGM_RSRC2_LS;
+      break;
+   case AC_HW_HULL_SHADER:
+      if (gfx_level >= GFX12) {
+         info->regs.pgm_lo = R_00B424_SPI_SHADER_PGM_LO_LS;
+      } else if (gfx_level >= GFX10) {
+         info->regs.pgm_lo = R_00B520_SPI_SHADER_PGM_LO_LS;
+      } else if (gfx_level >= GFX9) {
+         info->regs.pgm_lo = R_00B410_SPI_SHADER_PGM_LO_LS;
+      } else {
+         info->regs.pgm_lo = R_00B420_SPI_SHADER_PGM_LO_HS;
+      }
+
+      info->regs.pgm_rsrc1 = R_00B428_SPI_SHADER_PGM_RSRC1_HS;
+      info->regs.pgm_rsrc2 = R_00B42C_SPI_SHADER_PGM_RSRC2_HS;
+      break;
+   case AC_HW_VERTEX_SHADER:
+      assert(gfx_level < GFX11);
+      info->regs.pgm_lo = R_00B120_SPI_SHADER_PGM_LO_VS;
+      info->regs.pgm_rsrc1 = R_00B128_SPI_SHADER_PGM_RSRC1_VS;
+      info->regs.pgm_rsrc2 = R_00B12C_SPI_SHADER_PGM_RSRC2_VS;
+      break;
+   case AC_HW_PIXEL_SHADER:
+      info->regs.pgm_lo = R_00B020_SPI_SHADER_PGM_LO_PS;
+      info->regs.pgm_rsrc1 = R_00B028_SPI_SHADER_PGM_RSRC1_PS;
+      info->regs.pgm_rsrc2 = R_00B02C_SPI_SHADER_PGM_RSRC2_PS;
+      break;
+   case AC_HW_COMPUTE_SHADER:
+      info->regs.pgm_lo = R_00B830_COMPUTE_PGM_LO;
+      info->regs.pgm_rsrc1 = R_00B848_COMPUTE_PGM_RSRC1;
+      info->regs.pgm_rsrc2 = R_00B84C_COMPUTE_PGM_RSRC2;
+      info->regs.pgm_rsrc3 = R_00B8A0_COMPUTE_PGM_RSRC3;
+      break;
+   default:
+      unreachable("invalid hw stage");
+      break;
+   }
+}
+
+static void
 radv_precompute_registers(struct radv_device *device, struct radv_shader_binary *binary)
 {
    struct radv_shader_info *info = &binary->info;
+
+   radv_precompute_registers_pgm(device, info);
 
    switch (info->stage) {
    case MESA_SHADER_VERTEX:
@@ -2484,6 +2575,8 @@ radv_shader_create_uncached(struct radv_device *device, const struct radv_shader
    }
    simple_mtx_init(&shader->replay_mtx, mtx_plain);
 
+   _mesa_blake3_compute(binary, binary->total_size, shader->hash);
+
    vk_pipeline_cache_object_init(&device->vk, &shader->base, &radv_shader_ops, shader->hash, sizeof(shader->hash));
 
    shader->info = binary->info;
@@ -2881,7 +2974,7 @@ shader_compile(struct radv_device *device, struct nir_shader *const *shaders, in
       struct aco_shader_info ac_info;
       struct aco_compiler_options ac_opts;
       radv_aco_convert_opts(&ac_opts, options, args, stage_key);
-      radv_aco_convert_shader_info(&ac_info, info, args, &device->cache_key, options->info->gfx_level);
+      radv_aco_convert_shader_info(&ac_info, info, args, options->info->gfx_level);
       aco_compile_shader(&ac_opts, &ac_info, shader_count, shaders, &args->ac, &radv_aco_build_shader_binary,
                          (void **)&binary);
    }
@@ -3023,7 +3116,7 @@ radv_create_rt_prolog(struct radv_device *device)
    struct radv_shader_stage_key stage_key = {0};
    struct aco_shader_info ac_info;
    struct aco_compiler_options ac_opts;
-   radv_aco_convert_shader_info(&ac_info, &info, &in_args, &device->cache_key, options.info->gfx_level);
+   radv_aco_convert_shader_info(&ac_info, &info, &in_args, options.info->gfx_level);
    radv_aco_convert_opts(&ac_opts, &options, &in_args, &stage_key);
    aco_compile_rt_prolog(&ac_opts, &ac_info, &in_args.ac, &out_args.ac, &radv_aco_build_shader_binary,
                          (void **)&binary);
@@ -3089,7 +3182,7 @@ radv_create_vs_prolog(struct radv_device *device, const struct radv_vs_prolog_ke
    struct aco_shader_info ac_info;
    struct aco_vs_prolog_info ac_prolog_info;
    struct aco_compiler_options ac_opts;
-   radv_aco_convert_shader_info(&ac_info, &info, &args, &device->cache_key, options.info->gfx_level);
+   radv_aco_convert_shader_info(&ac_info, &info, &args, options.info->gfx_level);
    radv_aco_convert_opts(&ac_opts, &options, &args, &stage_key);
    radv_aco_convert_vs_prolog_key(&ac_prolog_info, key, &args);
    aco_compile_vs_prolog(&ac_opts, &ac_info, &ac_prolog_info, &args.ac, &radv_aco_build_shader_part, (void **)&binary);
@@ -3144,7 +3237,7 @@ radv_create_ps_epilog(struct radv_device *device, const struct radv_ps_epilog_ke
    struct aco_shader_info ac_info;
    struct aco_ps_epilog_info ac_epilog_info = {0};
    struct aco_compiler_options ac_opts;
-   radv_aco_convert_shader_info(&ac_info, &info, &args, &device->cache_key, options.info->gfx_level);
+   radv_aco_convert_shader_info(&ac_info, &info, &args, options.info->gfx_level);
    radv_aco_convert_opts(&ac_opts, &options, &args, &stage_key);
    radv_aco_convert_ps_epilog_key(&ac_epilog_info, key, &args);
    aco_compile_ps_epilog(&ac_opts, &ac_info, &ac_epilog_info, &args.ac, &radv_aco_build_shader_part, (void **)&binary);

@@ -125,46 +125,18 @@ struct pipe_video_codec
                         struct pipe_enc_feedback_metadata* metadata /* opt NULL */);
 
    /**
-    * Get decoder fence.
+    * Wait for fence.
     *
-    * Can be used to query the status of the previous decode job denoted by
+    * Can be used to query the status of the previous job denoted by
     * 'fence' given 'timeout'.
     *
     * A pointer to a fence pointer can be passed to the codecs before the
     * end_frame vfunc and the codec should then be responsible for allocating a
     * fence on command stream submission.
     */
-   int (*get_decoder_fence)(struct pipe_video_codec *codec,
-                            struct pipe_fence_handle *fence,
-                            uint64_t timeout);
-
-   /**
-    * Get processor fence.
-    *
-    * Can be used to query the status of the previous process job denoted by
-    * 'fence' given 'timeout'.
-    *
-    * A pointer to a fence pointer can be passed to the codecs before the
-    * end_frame vfunc and the codec should then be responsible for allocating a
-    * fence on command stream submission.
-    */
-   int (*get_processor_fence)(struct pipe_video_codec *codec,
-                              struct pipe_fence_handle *fence,
-                              uint64_t timeout);
-
-   /**
-    * Get feedback fence.
-    *
-    * Can be used to query the status of the previous process job denoted by
-    * 'fence' given 'timeout'.
-    *
-    * A pointer to a fence pointer can be passed to the codecs before the
-    * end_frame vfunc and the codec should then be responsible for allocating a
-    * fence on command stream submission.
-    */
-   int (*get_feedback_fence)(struct pipe_video_codec *codec,
-                             struct pipe_fence_handle *fence,
-                             uint64_t timeout);
+   int (*fence_wait)(struct pipe_video_codec *codec,
+                     struct pipe_fence_handle *fence,
+                     uint64_t timeout);
 
    /**
     * Destroy fence.
@@ -222,6 +194,7 @@ struct pipe_video_buffer
    unsigned height;
    bool interlaced;
    unsigned bind;
+   unsigned flags;
    bool contiguous_planes;
 
    /**

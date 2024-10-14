@@ -86,9 +86,6 @@ struct radv_graphics_pipeline {
 
    VkShaderStageFlags active_stages;
 
-   uint32_t spi_shader_col_format;
-   uint32_t cb_shader_mask;
-
    struct radv_dynamic_state dynamic_state;
 
    struct radv_vertex_input_state vertex_input;
@@ -562,8 +559,6 @@ radv_normalize_blend_factor(VkBlendOp op, VkBlendFactor *src_factor, VkBlendFact
 
 void radv_blend_remove_dst(VkBlendOp *func, VkBlendFactor *src_factor, VkBlendFactor *dst_factor,
                            VkBlendFactor expected_dst, VkBlendFactor replacement_src);
-
-unsigned radv_compact_spi_shader_col_format(uint32_t spi_shader_col_format);
 
 unsigned radv_format_meta_fs_key(struct radv_device *device, VkFormat format);
 

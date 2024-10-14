@@ -83,6 +83,20 @@ struct PhysRegIterator {
    bool operator<(PhysRegIterator oth) const { return reg < oth.reg; }
 };
 
+struct vector_info {
+   vector_info() : is_weak(false), num_parts(0), parts(NULL) {}
+   vector_info(Instruction* instr, unsigned start = 0, bool weak = false)
+       : is_weak(weak), num_parts(instr->operands.size() - start),
+         parts(instr->operands.begin() + start)
+   {}
+
+   /* If true, then we should stop trying to form a vector if anything goes wrong. Useful for when
+    * the cost of failing does not introduce copies. */
+   bool is_weak;
+   uint32_t num_parts;
+   Operand* parts;
+};
+
 struct ra_ctx {
 
    Program* program;
@@ -92,7 +106,7 @@ struct ra_ctx {
    std::vector<aco::unordered_map<uint32_t, Temp>> renames;
    std::vector<uint32_t> loop_header;
    aco::unordered_map<uint32_t, Temp> orig_names;
-   aco::unordered_map<uint32_t, Instruction*> vectors;
+   aco::unordered_map<uint32_t, vector_info> vectors;
    aco::unordered_map<uint32_t, Instruction*> split_vectors;
    aco_ptr<Instruction> pseudo_dummy;
    aco_ptr<Instruction> phi_dummy;
@@ -329,12 +343,16 @@ public:
          fill(start, rc.size(), 0);
    }
 
-   void fill(Operand op)
+   void fill_killed_operands(Instruction* instr)
    {
-      if (op.regClass().is_subdword())
-         fill_subdword(op.physReg(), op.bytes(), op.tempId());
-      else
-         fill(op.physReg(), op.size(), op.tempId());
+      for (Operand& op : instr->operands) {
+         if (op.isFixed() && op.isFirstKillBeforeDef()) {
+            if (op.regClass().is_subdword())
+               fill_subdword(op.physReg(), op.bytes(), op.tempId());
+            else
+               fill(op.physReg(), op.size(), op.tempId());
+         }
+      }
    }
 
    void clear(Operand op) { clear(op.physReg(), op.regClass()); }
@@ -781,7 +799,6 @@ adjust_max_used_regs(ra_ctx& ctx, RegClass rc, unsigned reg)
 
 enum UpdateRenames {
    rename_not_killed_ops = 0x1,
-   fill_killed_ops = 0x2,
    rename_precolored_ops = 0x4,
 };
 MESA_DEFINE_CPP_ENUM_BITFIELD_OPERATORS(UpdateRenames);
@@ -838,7 +855,7 @@ update_renames(ra_ctx& ctx, RegisterFile& reg_file,
                if (op.isTemp() && op.tempId() == other.second.tempId()) {
                   // FIXME: ensure that the operand can use this reg
                   op.setFixed(other.second.physReg());
-                  fill = (flags & fill_killed_ops) || !op.isKillBeforeDef();
+                  fill = !op.isKillBeforeDef();
                }
             }
             if (fill)
@@ -891,10 +908,11 @@ update_renames(ra_ctx& ctx, RegisterFile& reg_file,
             op.setTemp(copy.second.getTemp());
             op.setFixed(copy.second.physReg());
 
-            fill = (flags & fill_killed_ops) || !op.isKillBeforeDef();
+            fill = !op.isKillBeforeDef() || (flags & rename_precolored_ops);
          }
       }
 
+      /* Apply changes to register file. */
       if (fill)
          reg_file.fill(copy.second);
 
@@ -1354,22 +1372,14 @@ get_reg_impl(ra_ctx& ctx, const RegisterFile& reg_file,
    RegisterFile tmp_file(reg_file);
 
    /* p_create_vector: also re-place killed operands in the definition space */
-   if (instr->opcode == aco_opcode::p_create_vector) {
-      for (Operand& op : instr->operands) {
-         if (op.isTemp() && op.isFirstKillBeforeDef())
-            tmp_file.fill(op);
-      }
-   }
+   if (instr->opcode == aco_opcode::p_create_vector)
+      tmp_file.fill_killed_operands(instr.get());
 
    std::vector<unsigned> vars = collect_vars(ctx, tmp_file, best_win);
 
    /* re-enable killed operands */
-   if (!is_phi(instr) && instr->opcode != aco_opcode::p_create_vector) {
-      for (Operand& op : instr->operands) {
-         if (op.isTemp() && op.isFirstKillBeforeDef())
-            tmp_file.fill(op);
-      }
-   }
+   if (!is_phi(instr) && instr->opcode != aco_opcode::p_create_vector)
+      tmp_file.fill_killed_operands(instr.get());
 
    std::vector<std::pair<Operand, Definition>> pc;
    if (!get_regs_for_copies(ctx, tmp_file, pc, vars, instr, best_win))
@@ -1522,32 +1532,39 @@ compact_relocate_vars(ra_ctx& ctx, const std::vector<IDAndRegClass>& vars,
 }
 
 bool
-is_mimg_vaddr_intact(ra_ctx& ctx, const RegisterFile& reg_file, Instruction* instr)
+is_vector_intact(ra_ctx& ctx, const RegisterFile& reg_file, const vector_info& vec_info)
 {
+   unsigned size = 0;
+   for (unsigned i = 0; i < vec_info.num_parts; i++)
+      size += vec_info.parts[i].bytes();
+
    PhysReg first{512};
-   for (unsigned i = 0; i < instr->operands.size() - 3u; i++) {
-      Operand op = instr->operands[i + 3];
+   int offset = 0;
+   for (unsigned i = 0; i < vec_info.num_parts; i++) {
+      Operand op = vec_info.parts[i];
 
       if (ctx.assignments[op.tempId()].assigned) {
          PhysReg reg = ctx.assignments[op.tempId()].reg;
 
          if (first.reg() == 512) {
             PhysRegInterval bounds = get_reg_bounds(ctx, RegType::vgpr, false);
-            first = reg.advance(i * -4);
-            PhysRegInterval vec = PhysRegInterval{first, instr->operands.size() - 3u};
+            first = reg.advance(-offset);
+            PhysRegInterval vec = PhysRegInterval{first, DIV_ROUND_UP(size, 4)};
             if (!bounds.contains(vec)) /* not enough space for other operands */
                return false;
          } else {
-            if (reg != first.advance(i * 4)) /* not at the best position */
+            if (reg != first.advance(offset)) /* not at the best position */
                return false;
          }
       } else {
          /* If there's an unexpected temporary, this operand is unlikely to be
           * placed in the best position.
           */
-         if (first.reg() != 512 && reg_file.test(first.advance(i * 4), 4))
+         if (first.reg() != 512 && reg_file.test(first.advance(offset), op.bytes()))
             return false;
       }
+
+      offset += op.bytes();
    }
 
    return true;
@@ -1557,25 +1574,24 @@ std::optional<PhysReg>
 get_reg_vector(ra_ctx& ctx, const RegisterFile& reg_file, Temp temp, aco_ptr<Instruction>& instr,
                int operand)
 {
-   Instruction* vec = ctx.vectors[temp.id()];
-   unsigned first_operand = vec->format == Format::MIMG ? 3 : 0;
-   unsigned our_offset = 0;
-   for (unsigned i = first_operand; i < vec->operands.size(); i++) {
-      Operand& op = vec->operands[i];
-      if (op.isTemp() && op.tempId() == temp.id())
-         break;
-      else
-         our_offset += op.bytes();
-   }
+   const vector_info& vec = ctx.vectors[temp.id()];
+   if (!vec.is_weak || is_vector_intact(ctx, reg_file, vec)) {
+      unsigned our_offset = 0;
+      for (unsigned i = 0; i < vec.num_parts; i++) {
+         const Operand& op = vec.parts[i];
+         if (op.isTemp() && op.tempId() == temp.id())
+            break;
+         else
+            our_offset += op.bytes();
+      }
 
-   if (vec->format != Format::MIMG || is_mimg_vaddr_intact(ctx, reg_file, vec)) {
       unsigned their_offset = 0;
       /* check for every operand of the vector
        * - whether the operand is assigned and
        * - we can use the register relative to that operand
        */
-      for (unsigned i = first_operand; i < vec->operands.size(); i++) {
-         Operand& op = vec->operands[i];
+      for (unsigned i = 0; i < vec.num_parts; i++) {
+         const Operand& op = vec.parts[i];
          if (op.isTemp() && op.tempId() != temp.id() && op.getTemp().type() == temp.type() &&
              ctx.assignments[op.tempId()].assigned) {
             PhysReg reg = ctx.assignments[op.tempId()].reg;
@@ -1584,7 +1600,7 @@ get_reg_vector(ra_ctx& ctx, const RegisterFile& reg_file, Temp temp, aco_ptr<Ins
                return reg;
 
             /* return if MIMG vaddr components don't remain vector-aligned */
-            if (vec->format == Format::MIMG)
+            if (vec.is_weak)
                return {};
          }
          their_offset += op.bytes();
@@ -1664,10 +1680,7 @@ alloc_linear_vgpr(ra_ctx& ctx, const RegisterFile& reg_file, aco_ptr<Instruction
    std::vector<unsigned> blocking_vars = collect_vars(ctx, tmp_file, new_win);
 
    /* Re-enable killed operands */
-   for (Operand& op : instr->operands) {
-      if (op.isTemp() && op.isFirstKillBeforeDef())
-         tmp_file.fill(op);
-   }
+   tmp_file.fill_killed_operands(instr.get());
 
    /* Find new assignments for blocking vars. */
    std::vector<std::pair<Operand, Definition>> pc;
@@ -1969,10 +1982,8 @@ get_reg_create_vector(ra_ctx& ctx, const RegisterFile& reg_file, Temp temp,
 
    /* re-enable killed operands which are in the wrong position */
    RegisterFile tmp_file(reg_file);
-   for (Operand& op : instr->operands) {
-      if (op.isTemp() && op.isFirstKillBeforeDef())
-         tmp_file.fill(op);
-   }
+   tmp_file.fill_killed_operands(instr.get());
+
    for (unsigned i = 0; i < instr->operands.size(); i++) {
       if ((correct_pos_mask >> i) & 1u && instr->operands[i].isKill())
          tmp_file.clear(instr->operands[i]);
@@ -2077,6 +2088,7 @@ handle_fixed_operands(ra_ctx& ctx, RegisterFile& register_file,
                       aco_ptr<Instruction>& instr)
 {
    assert(instr->operands.size() <= 128);
+   assert(parallelcopy.empty());
 
    RegisterFile tmp_file(register_file);
 
@@ -2096,17 +2108,9 @@ handle_fixed_operands(ra_ctx& ctx, RegisterFile& register_file,
          continue;
       }
 
-      unsigned j;
-      bool found = false;
-      BITSET_FOREACH_SET (j, mask, i) {
-         if (instr->operands[j].tempId() == op.tempId() &&
-             instr->operands[j].physReg() == op.physReg()) {
-            found = true;
-            break;
-         }
-      }
-      if (found)
-         continue; /* the copy is already added to the list */
+      /* An instruction can have at most one operand precolored to the same register. */
+      assert(std::none_of(parallelcopy.begin(), parallelcopy.end(),
+                          [&](auto copy) { return copy.second.physReg() == op.physReg(); }));
 
       /* clear from register_file so fixed operands are not collected be collect_vars() */
       tmp_file.clear(src, op.regClass()); // TODO: try to avoid moving block vars to src
@@ -2135,7 +2139,7 @@ handle_fixed_operands(ra_ctx& ctx, RegisterFile& register_file,
 
    get_regs_for_copies(ctx, tmp_file, parallelcopy, blocking_vars, instr, PhysRegInterval());
    update_renames(ctx, register_file, parallelcopy, instr,
-                  rename_not_killed_ops | fill_killed_ops | rename_precolored_ops);
+                  rename_not_killed_ops | rename_precolored_ops);
 }
 
 void
@@ -2152,7 +2156,8 @@ get_reg_for_operand(ra_ctx& ctx, RegisterFile& register_file,
    pc_op.setFixed(src);
    Definition pc_def = Definition(dst, pc_op.regClass());
    parallelcopy.emplace_back(pc_op, pc_def);
-   update_renames(ctx, register_file, parallelcopy, instr, rename_not_killed_ops | fill_killed_ops);
+   update_renames(ctx, register_file, parallelcopy, instr, rename_not_killed_ops);
+   register_file.fill(Definition(operand.getTemp(), dst));
 }
 
 PhysReg
@@ -2495,7 +2500,7 @@ init_reg_file(ra_ctx& ctx, const std::vector<IDSet>& live_out_per_block, Block& 
             add_rename(ctx, val, renamed);
          assignment& var = ctx.assignments[renamed.id()];
          assert(var.assigned);
-         register_file.fill(Definition(renamed.id(), var.reg, var.rc));
+         register_file.fill(Definition(renamed, var.reg));
       }
    } else {
       /* rename phi operands */
@@ -2519,7 +2524,7 @@ init_reg_file(ra_ctx& ctx, const std::vector<IDSet>& live_out_per_block, Block& 
          assignment& var = ctx.assignments[renamed.id()];
          /* due to live-range splits, the live-in might be a phi, now */
          if (var.assigned) {
-            register_file.fill(Definition(renamed.id(), var.reg, var.rc));
+            register_file.fill(Definition(renamed, var.reg));
          }
          if (renamed != val) {
             add_rename(ctx, val, renamed);
@@ -2622,6 +2627,46 @@ sop2_can_use_sopk(ra_ctx& ctx, Instruction* instr)
 }
 
 void
+create_phi_vector_affinities(ra_ctx& ctx, aco_ptr<Instruction>& instr,
+                             std::map<Operand*, std::vector<vector_info>>& vector_phis)
+{
+   auto it = ctx.vectors.find(instr->definitions[0].tempId());
+   if (it == ctx.vectors.end())
+      return;
+   vector_info& dest_vector = it->second;
+
+   auto pair = vector_phis.try_emplace(dest_vector.parts, instr->operands.size(), dest_vector);
+   std::vector<vector_info>& src_vectors = pair.first->second;
+   if (pair.second) {
+      RegType type = instr->definitions[0].regClass().type();
+
+      for (vector_info& src_vector : src_vectors) {
+         src_vector.parts =
+            (Operand*)ctx.memory.allocate(sizeof(Operand) * src_vector.num_parts, alignof(Operand));
+         for (unsigned j = 0; j < src_vector.num_parts; j++)
+            src_vector.parts[j] = Operand(RegClass::get(type, dest_vector.parts[j].bytes()));
+      }
+   }
+
+   unsigned index = 0;
+   for (; index < dest_vector.num_parts; index++) {
+      if (dest_vector.parts[index].isTemp() &&
+          dest_vector.parts[index].tempId() == instr->definitions[0].tempId())
+         break;
+   }
+   assert(index != dest_vector.num_parts);
+
+   for (int i = instr->operands.size() - 1; i >= 0; i--) {
+      const Operand& op = instr->operands[i];
+      if (!op.isTemp() || op.regClass() != instr->definitions[0].regClass())
+         continue;
+
+      src_vectors[i].parts[index] = op;
+      ctx.vectors[op.tempId()] = src_vectors[i];
+   }
+}
+
+void
 get_affinities(ra_ctx& ctx)
 {
    std::vector<std::vector<Temp>> phi_resources;
@@ -2642,12 +2687,12 @@ get_affinities(ra_ctx& ctx)
             for (const Operand& op : instr->operands) {
                if (op.isTemp() && op.isFirstKill() &&
                    op.getTemp().type() == instr->definitions[0].getTemp().type())
-                  ctx.vectors[op.tempId()] = instr.get();
+                  ctx.vectors[op.tempId()] = vector_info(instr.get());
             }
          } else if (instr->format == Format::MIMG && instr->operands.size() > 4 &&
                     !instr->mimg().strict_wqm && ctx.program->gfx_level < GFX12) {
             for (unsigned i = 3; i < instr->operands.size(); i++)
-               ctx.vectors[instr->operands[i].tempId()] = instr.get();
+               ctx.vectors[instr->operands[i].tempId()] = vector_info(instr.get(), 3, true);
          } else if (instr->opcode == aco_opcode::p_split_vector &&
                     instr->operands[0].isFirstKillBeforeDef()) {
             ctx.split_vectors[instr->operands[0].tempId()] = instr.get();
@@ -2705,6 +2750,7 @@ get_affinities(ra_ctx& ctx)
       }
 
       /* collect phi affinities */
+      std::map<Operand*, std::vector<vector_info>> vector_phis;
       for (; rit != block.instructions.rend(); ++rit) {
          aco_ptr<Instruction>& instr = *rit;
          assert(is_phi(instr));
@@ -2733,6 +2779,8 @@ get_affinities(ra_ctx& ctx)
                temp_to_phi_resources[op.tempId()] = index;
             }
          }
+
+         create_phi_vector_affinities(ctx, instr, vector_phis);
       }
 
       /* visit the loop header phis first in order to create nested affinities */
@@ -3107,10 +3155,7 @@ register_allocation(Program* program, ra_test_policy policy)
 
                RegisterFile tmp_file(register_file);
                /* re-enable the killed operands, so that we don't move the blocking vars there */
-               for (const Operand& op : instr->operands) {
-                  if (op.isTemp() && op.isFirstKillBeforeDef())
-                     tmp_file.fill(op);
-               }
+               tmp_file.fill_killed_operands(instr.get());
 
                ASSERTED bool success = false;
                success = get_regs_for_copies(ctx, tmp_file, parallelcopy, vars, instr, def_regs);

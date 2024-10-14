@@ -83,6 +83,37 @@ struct hk_draw {
    enum agx_index_size index_size;
 };
 
+UNUSED static inline void
+print_draw(struct hk_draw d, FILE *fp)
+{
+   if (d.b.indirect)
+      fprintf(fp, "indirect (buffer %" PRIx64 "):", d.b.ptr);
+   else
+      fprintf(fp, "direct (%ux%u):", d.b.count[0], d.b.count[1]);
+
+   if (d.index_size)
+      fprintf(fp, " index_size=%u", agx_index_size_to_B(d.index_size));
+   else
+      fprintf(fp, " non-indexed");
+
+   if (d.raw)
+      fprintf(fp, " raw");
+
+   if (d.restart)
+      fprintf(fp, " restart");
+
+   if (d.index_bias)
+      fprintf(fp, " index_bias=%u", d.index_bias);
+
+   if (d.start)
+      fprintf(fp, " start=%u", d.start);
+
+   if (d.start_instance)
+      fprintf(fp, " start_instance=%u", d.start_instance);
+
+   fprintf(fp, "\n");
+}
+
 static struct hk_draw
 hk_draw_indirect(uint64_t ptr)
 {
@@ -158,6 +189,9 @@ hk_cmd_buffer_dirty_render_pass(struct hk_cmd_buffer *cmd)
 
    /* This may depend on render targets for ESO */
    BITSET_SET(dyn->dirty, MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES);
+
+   /* This may depend on render targets */
+   BITSET_SET(dyn->dirty, MESA_VK_DYNAMIC_COLOR_ATTACHMENT_MAP);
 }
 
 void
@@ -193,6 +227,18 @@ hk_cmd_buffer_begin_graphics(struct hk_cmd_buffer *cmd,
          render->depth_att.vk_format = inheritance_info->depthAttachmentFormat;
          render->stencil_att.vk_format =
             inheritance_info->stencilAttachmentFormat;
+
+         const VkRenderingAttachmentLocationInfoKHR att_loc_info_default = {
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO_KHR,
+            .colorAttachmentCount = inheritance_info->colorAttachmentCount,
+         };
+         const VkRenderingAttachmentLocationInfoKHR *att_loc_info =
+            vk_get_command_buffer_rendering_attachment_location_info(
+               cmd->vk.level, pBeginInfo);
+         if (att_loc_info == NULL)
+            att_loc_info = &att_loc_info_default;
+
+         vk_cmd_set_rendering_attachment_locations(&cmd->vk, att_loc_info);
 
          hk_cmd_buffer_dirty_render_pass(cmd);
       }
@@ -258,6 +304,16 @@ hk_GetRenderingAreaGranularityKHR(
    *pGranularity = (VkExtent2D){.width = 1, .height = 1};
 }
 
+static bool
+is_attachment_stored(const VkRenderingAttachmentInfo *att)
+{
+   /* When resolving, we store the intermediate multisampled image as the
+    * resolve is a separate control stream. This could be optimized.
+    */
+   return att->storeOp == VK_ATTACHMENT_STORE_OP_STORE ||
+          att->resolveMode != VK_RESOLVE_MODE_NONE;
+}
+
 static struct hk_bg_eot
 hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
                 bool store, bool partial_render, bool incomplete_render_area)
@@ -287,17 +343,12 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
          continue;
 
       if (store) {
-         bool store = att_info->storeOp == VK_ATTACHMENT_STORE_OP_STORE;
-
-         /* When resolving, we store the intermediate multisampled image as the
-          * resolve is a separate control stream. This could be optimized.
-          */
-         store |= att_info->resolveMode != VK_RESOLVE_MODE_NONE;
+         bool should_store = is_attachment_stored(att_info);
 
          /* Partial renders always need to flush to memory. */
-         store |= partial_render;
+         should_store |= partial_render;
 
-         if (store)
+         if (should_store)
             key.op[i] = AGX_EOT_STORE;
       } else {
          bool load = att_info->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -315,6 +366,38 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
 
          /* Don't read back spilled render targets, they're already in memory */
          load &= !key.tib.spilled[i];
+
+         /* This is a very frustrating corner case. From the spec:
+          *
+          *     VK_ATTACHMENT_STORE_OP_NONE specifies the contents within the
+          *     render area are not accessed by the store operation as long as
+          *     no values are written to the attachment during the render pass.
+          *
+          * With VK_ATTACHMENT_STORE_OP_NONE, we suppress stores on the main
+          * end-of-tile program. Unfortunately, that's not enough: we also need
+          * to preserve the contents throughout partial renders. The easiest way
+          * to do that is forcing a load in the background program, so that
+          * partial stores for unused attachments will be no-op'd by writing
+          * existing contents.
+          *
+          * Optimizing this would require nontrivial tracking. Fortunately,
+          * this is all Android gunk and we don't have to care too much for
+          * dekstop games. So do the simple thing.
+          *
+          * VK_ATTACHMENT_STORE_OP_DONT_CARE does not need this workaround,
+          * fortunately. It's just here as a temporary stopgap to workaround CTS
+          * issue #5369.
+          */
+         bool no_store =
+            (att_info->storeOp == VK_ATTACHMENT_STORE_OP_NONE) ||
+            (att_info->storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE);
+
+         bool no_store_wa = no_store && !load && !clear;
+         if (no_store_wa) {
+            perf_debug(dev, "STORE_OP_NONE workaround");
+         }
+
+         load |= no_store_wa;
 
          /* Don't apply clears for spilled render targets when we clear the
           * render area explicitly after.
@@ -478,9 +561,14 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
 {
    agx_pack(packed, ZLS_CONTROL, zls_control) {
       if (z_layout) {
+         /* XXX: Dropping Z stores is wrong if the render pass gets split into
+          * multiple control streams (can that ever happen?) We need more ZLS
+          * variants. Force || true for now.
+          */
          zls_control.z_store_enable =
             attach_z->storeOp == VK_ATTACHMENT_STORE_OP_STORE ||
-            attach_z->resolveMode != VK_RESOLVE_MODE_NONE || partial_render;
+            attach_z->resolveMode != VK_RESOLVE_MODE_NONE || partial_render ||
+            true;
 
          zls_control.z_load_enable =
             attach_z->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD || partial_render ||
@@ -528,6 +616,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    struct hk_rendering_state *render = &cmd->state.gfx.render;
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
    memset(render, 0, sizeof(*render));
 
@@ -578,6 +667,12 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    render->tilebuffer = agx_build_tilebuffer_layout(
       formats, render->color_att_count, render->tilebuffer.nr_samples, true);
 
+   const VkRenderingAttachmentLocationInfoKHR ral_info = {
+      .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO_KHR,
+      .colorAttachmentCount = pRenderingInfo->colorAttachmentCount,
+   };
+   vk_cmd_set_rendering_attachment_locations(&cmd->vk, &ral_info);
+
    hk_cmd_buffer_dirty_render_pass(cmd);
 
    /* Determine whether the render area is complete, enabling us to use a
@@ -593,6 +688,12 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       (render->view_mask &&
        render->view_mask != BITFIELD64_MASK(render->cr.layers));
 
+   perf_debug(dev, "Rendering %ux%ux%u@%u %s%s", render->cr.width,
+              render->cr.height, render->cr.layers,
+              render->tilebuffer.nr_samples,
+              render->view_mask ? " multiview" : "",
+              incomplete_render_area ? " incomplete" : "");
+
    render->cr.bg.main = hk_build_bg_eot(cmd, pRenderingInfo, false, false,
                                         incomplete_render_area);
    render->cr.bg.partial =
@@ -600,7 +701,8 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    render->cr.eot.main =
       hk_build_bg_eot(cmd, pRenderingInfo, true, false, incomplete_render_area);
-   render->cr.eot.partial = render->cr.eot.main;
+   render->cr.eot.partial =
+      hk_build_bg_eot(cmd, pRenderingInfo, true, true, incomplete_render_area);
 
    render->cr.isp_bgobjvals = 0x300;
 
@@ -740,7 +842,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    cs->cr.zls_control = render->cr.zls_control;
 
    /* Reordering barrier for post-gfx, in case we had any. */
-   hk_cmd_buffer_end_compute_internal(&cmd->current_cs.post_gfx);
+   hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.post_gfx);
 
    /* Don't reorder compute across render passes.
     *
@@ -755,8 +857,6 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
     * we're not that clever yet.
     */
    if (agx_tilebuffer_spills(&render->tilebuffer)) {
-      struct hk_device *dev = hk_cmd_buffer_device(cmd);
-
       perf_debug(dev, "eMRT render pass");
 
       for (unsigned i = 0; i < render->color_att_count; ++i) {
@@ -809,54 +909,69 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       }
    }
 
-   if (incomplete_render_area) {
-      uint32_t clear_count = 0;
-      VkClearAttachment clear_att[HK_MAX_RTS + 1];
-      for (uint32_t i = 0; i < pRenderingInfo->colorAttachmentCount; i++) {
-         const VkRenderingAttachmentInfo *att_info =
-            &pRenderingInfo->pColorAttachments[i];
-         if (att_info->imageView == VK_NULL_HANDLE ||
-             att_info->loadOp != VK_ATTACHMENT_LOAD_OP_CLEAR)
-            continue;
+   uint32_t clear_count = 0;
+   VkClearAttachment clear_att[HK_MAX_RTS + 1];
+   bool resolved_clear = false;
 
-         clear_att[clear_count++] = (VkClearAttachment){
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .colorAttachment = i,
-            .clearValue = att_info->clearValue,
-         };
-      }
+   for (uint32_t i = 0; i < pRenderingInfo->colorAttachmentCount; i++) {
+      const VkRenderingAttachmentInfo *att_info =
+         &pRenderingInfo->pColorAttachments[i];
+      if (att_info->imageView == VK_NULL_HANDLE ||
+          att_info->loadOp != VK_ATTACHMENT_LOAD_OP_CLEAR)
+         continue;
 
-      clear_att[clear_count] = (VkClearAttachment){
-         .aspectMask = 0,
+      clear_att[clear_count++] = (VkClearAttachment){
+         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         .colorAttachment = i,
+         .clearValue = att_info->clearValue,
       };
 
-      if (attach_z && attach_z->imageView != VK_NULL_HANDLE &&
-          attach_z->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
-         clear_att[clear_count].aspectMask |= VK_IMAGE_ASPECT_DEPTH_BIT;
-         clear_att[clear_count].clearValue.depthStencil.depth =
-            attach_z->clearValue.depthStencil.depth;
-      }
+      resolved_clear |= is_attachment_stored(att_info);
+   }
 
-      if (attach_s != NULL && attach_s->imageView != VK_NULL_HANDLE &&
-          attach_s->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
-         clear_att[clear_count].aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
-         clear_att[clear_count].clearValue.depthStencil.stencil =
-            attach_s->clearValue.depthStencil.stencil;
-      }
+   clear_att[clear_count] = (VkClearAttachment){
+      .aspectMask = 0,
+   };
 
-      if (clear_att[clear_count].aspectMask != 0)
-         clear_count++;
+   if (attach_z && attach_z->imageView != VK_NULL_HANDLE &&
+       attach_z->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
+      clear_att[clear_count].aspectMask |= VK_IMAGE_ASPECT_DEPTH_BIT;
+      clear_att[clear_count].clearValue.depthStencil.depth =
+         attach_z->clearValue.depthStencil.depth;
 
-      if (clear_count > 0) {
-         const VkClearRect clear_rect = {
-            .rect = render->area,
-            .baseArrayLayer = 0,
-            .layerCount = render->view_mask ? 1 : render->layer_count,
-         };
+      resolved_clear |= is_attachment_stored(attach_z);
+   }
 
-         hk_CmdClearAttachments(hk_cmd_buffer_to_handle(cmd), clear_count,
-                                clear_att, 1, &clear_rect);
-      }
+   if (attach_s != NULL && attach_s->imageView != VK_NULL_HANDLE &&
+       attach_s->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
+      clear_att[clear_count].aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+      clear_att[clear_count].clearValue.depthStencil.stencil =
+         attach_s->clearValue.depthStencil.stencil;
+
+      resolved_clear |= is_attachment_stored(attach_s);
+   }
+
+   if (clear_att[clear_count].aspectMask != 0)
+      clear_count++;
+
+   if (clear_count > 0 && incomplete_render_area) {
+      const VkClearRect clear_rect = {
+         .rect = render->area,
+         .baseArrayLayer = 0,
+         .layerCount = render->view_mask ? 1 : render->layer_count,
+      };
+
+      hk_CmdClearAttachments(hk_cmd_buffer_to_handle(cmd), clear_count,
+                             clear_att, 1, &clear_rect);
+   } else {
+      /* If a tile is empty, we do not want to process it, as the redundant
+       * roundtrip of memory-->tilebuffer-->memory wastes a tremendous amount of
+       * memory bandwidth. Any draw marks a tile as non-empty, so we only need
+       * to process empty tiles if the background+EOT programs have a side
+       * effect. This is the case exactly when there is an attachment we are
+       * fast clearing and then storing.
+       */
+      cs->cr.process_empty_tiles = resolved_clear;
    }
 }
 
@@ -865,7 +980,17 @@ hk_CmdEndRendering(VkCommandBuffer commandBuffer)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    struct hk_rendering_state *render = &cmd->state.gfx.render;
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
+   /* The last control stream of the render pass is special since it gets its
+    * stores dropped. Swap it in.
+    */
+   struct hk_cs *cs = cmd->current_cs.gfx;
+   if (cs) {
+      cs->cr.eot.main = render->cr.eot.main;
+   }
+
+   perf_debug(dev, "End rendering");
    hk_cmd_buffer_end_graphics(cmd);
 
    bool need_resolve = false;
@@ -928,6 +1053,9 @@ hk_CmdEndRendering(VkCommandBuffer commandBuffer)
    memset(render, 0, sizeof(*render));
 
    if (need_resolve) {
+      perf_debug(dev, "Resolving render pass, colour store op %u",
+                 vk_color_att[0].storeOp);
+
       hk_meta_resolve_rendering(cmd, &vk_render);
    }
 }
@@ -939,6 +1067,8 @@ hk_geometry_state(struct hk_cmd_buffer *cmd)
 
    /* We tie heap allocation to geometry state allocation, so allocate now. */
    if (unlikely(!dev->heap)) {
+      perf_debug(dev, "Allocating heap");
+
       size_t size = 128 * 1024 * 1024;
       dev->heap = agx_bo_create(&dev->dev, size, 0, 0, "Geometry heap");
 
@@ -956,6 +1086,7 @@ hk_geometry_state(struct hk_cmd_buffer *cmd)
 
    /* We need to free all allocations after each command buffer execution */
    if (!cmd->uses_heap) {
+      perf_debug(dev, "Freeing heap");
       uint64_t addr = dev->rodata.geometry_state;
 
       /* Zeroing the allocated index frees everything */
@@ -1524,6 +1655,7 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs, struct hk_draw draw)
 
    /* Setup grids */
    if (draw.b.indirect) {
+      perf_debug(dev, "Indirect tessellation");
       unreachable("todo: indirect tess");
 #if 0
       struct agx_gs_setup_indirect_key key = {.prim = mode};
@@ -1683,59 +1815,15 @@ hk_cmd_bind_graphics_shader(struct hk_cmd_buffer *cmd,
    }
 }
 
-static uint32_t
-hk_pipeline_bind_group(gl_shader_stage stage)
-{
-   return stage;
-}
-
 static void
 hk_flush_shaders(struct hk_cmd_buffer *cmd)
 {
    if (cmd->state.gfx.shaders_dirty == 0)
       return;
 
-   /* Map shader types to shaders */
-   struct hk_api_shader *type_shader[6] = {
-      NULL,
-   };
-   uint32_t types_dirty = 0;
-
-   const uint32_t gfx_stages =
-      BITFIELD_BIT(MESA_SHADER_VERTEX) | BITFIELD_BIT(MESA_SHADER_TESS_CTRL) |
-      BITFIELD_BIT(MESA_SHADER_TESS_EVAL) | BITFIELD_BIT(MESA_SHADER_GEOMETRY) |
-      BITFIELD_BIT(MESA_SHADER_FRAGMENT);
-
    /* Geometry shading overrides the restart index, reemit on rebind */
    if (IS_SHADER_DIRTY(GEOMETRY)) {
       cmd->state.gfx.dirty |= HK_DIRTY_INDEX;
-   }
-
-   u_foreach_bit(stage, cmd->state.gfx.shaders_dirty & gfx_stages) {
-      /* TODO: compact? */
-      uint32_t type = stage;
-      types_dirty |= BITFIELD_BIT(type);
-
-      /* Only copy non-NULL shaders because mesh/task alias with vertex and
-       * tessellation stages.
-       */
-      if (cmd->state.gfx.shaders[stage] != NULL) {
-         assert(type < ARRAY_SIZE(type_shader));
-         assert(type_shader[type] == NULL);
-         type_shader[type] = cmd->state.gfx.shaders[stage];
-      }
-   }
-
-   u_foreach_bit(type, types_dirty) {
-      struct hk_api_shader *shader = type_shader[type];
-
-      /* We always map index == type */
-      // const uint32_t idx = type;
-
-      if (shader == NULL)
-         continue;
-
-      /* TODO */
    }
 
    struct hk_graphics_state *gfx = &cmd->state.gfx;
@@ -2058,9 +2146,6 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
    /* Additionally clamp to the framebuffer so we don't rasterize
     * off-screen pixels. TODO: Is this necessary? the GL driver does this but
     * it might be cargoculted at this point.
-    *
-    * which is software-visible and can cause faults with
-    * eMRT when the framebuffer is not a multiple of the tile size.
     */
    for (unsigned i = 0; i < count; ++i) {
       minx[i] = MIN2(minx[i], cmd->state.gfx.render.cr.width);
@@ -2408,8 +2493,8 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
       }
    }
 
-   struct agx_fragment_face_packed fragment_face;
-   struct agx_fragment_face_2_packed fragment_face_2;
+   struct agx_fragment_face_packed fragment_face = {};
+   struct agx_fragment_face_2_packed fragment_face_2 = {};
 
    if (dirty.fragment_front_face) {
       bool has_z = render->depth_att.vk_format != VK_FORMAT_UNDEFINED;
@@ -2641,7 +2726,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
             (dev->vk.enabled_features.robustBufferAccess2 ||
              dev->vk.enabled_features.pipelineRobustness)
                ? AGX_ROBUSTNESS_D3D
-               : AGX_ROBUSTNESS_GL,
+            : dev->vk.enabled_features.robustBufferAccess
+               ? AGX_ROBUSTNESS_GL
+               : AGX_ROBUSTNESS_DISABLED,
 
          .prolog.robustness.soft_fault = agx_has_soft_fault(&dev->dev),
       };
@@ -2716,15 +2803,25 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        IS_DIRTY(CB_BLEND_CONSTANTS) ||
        desc->root_dirty /* for pipeline stats */ || true) {
 
+      unsigned tib_sample_mask = BITFIELD_MASK(dyn->ms.rasterization_samples);
+      unsigned api_sample_mask = dyn->ms.sample_mask & tib_sample_mask;
+      bool has_sample_mask = api_sample_mask != tib_sample_mask;
+
+      if (hw_vs->info.vs.cull_distance_array_size) {
+         perf_debug(dev, "Emulating cull distance (size %u, %s a frag shader)",
+                    hw_vs->info.vs.cull_distance_array_size,
+                    fs ? "with" : "without");
+      }
+
+      if (has_sample_mask) {
+         perf_debug(dev, "Emulating sample mask (%s a frag shader)",
+                    fs ? "with" : "without");
+      }
+
       if (fs) {
          unsigned samples_shaded = 0;
          if (fs->info.fs.epilog_key.sample_shading)
             samples_shaded = dyn->ms.rasterization_samples;
-
-         unsigned tib_sample_mask =
-            BITFIELD_MASK(dyn->ms.rasterization_samples);
-         unsigned api_sample_mask = dyn->ms.sample_mask & tib_sample_mask;
-         bool has_sample_mask = api_sample_mask != tib_sample_mask;
 
          struct hk_fast_link_key_fs key = {
             .prolog.statistics = hk_pipeline_stat_addr(
@@ -2769,6 +2866,21 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                                      ? vk_logic_op_to_pipe(dyn->cb.logic_op)
                                      : PIPE_LOGICOP_COPY,
          };
+
+         for (unsigned rt = 0; rt < ARRAY_SIZE(dyn->cal.color_map); ++rt) {
+            int map = dyn->cal.color_map[rt];
+            key.epilog.remap[rt] = map == MESA_VK_ATTACHMENT_UNUSED ? -1 : map;
+         }
+
+         if (dyn->ms.alpha_to_one_enable || dyn->ms.alpha_to_coverage_enable ||
+             dyn->cb.logic_op_enable) {
+
+            perf_debug(
+               dev, "Epilog with%s%s%s",
+               dyn->ms.alpha_to_one_enable ? " alpha-to-one" : "",
+               dyn->ms.alpha_to_coverage_enable ? " alpha-to-coverage" : "",
+               dyn->cb.logic_op_enable ? " logic-op" : "");
+         }
 
          key.epilog.link.already_ran_zs |= nontrivial_force_early;
 
@@ -2896,11 +3008,8 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    if (dyn->ms.rasterization_samples &&
        gfx->render.tilebuffer.nr_samples != dyn->ms.rasterization_samples) {
 
-      assert(gfx->render.tilebuffer.nr_samples == 0);
-
       unsigned nr_samples = MAX2(dyn->ms.rasterization_samples, 1);
-      gfx->render.tilebuffer.nr_samples = nr_samples;
-      agx_tilebuffer_pack_usc(&gfx->render.tilebuffer);
+      agx_tilebuffer_set_samples(&gfx->render.tilebuffer, nr_samples);
       cs->tib = gfx->render.tilebuffer;
    }
 
@@ -3381,6 +3490,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct hk_draw draw_)
       cmd, VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT);
 
    bool ia_stats = stat_ia_verts || stat_vs_inv;
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
    hk_foreach_view(cmd) {
       struct hk_draw draw = draw_;
@@ -3396,6 +3506,11 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct hk_draw draw_)
       struct hk_cs *ccs = NULL;
       uint8_t *out = cs->current;
       assert(cs->current + 0x1000 < cs->end);
+
+      if (tess && HK_PERF(dev, NOTESS))
+         continue;
+
+      cs->stats.calls++;
 
       if (geom || tess || ia_stats) {
          ccs =
@@ -3422,6 +3537,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct hk_draw draw_)
             }
 
             cs->current = out;
+            cs->stats.cmds++;
             continue;
          }
       }
@@ -3495,6 +3611,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct hk_draw draw_)
       }
 
       cs->current = out;
+      cs->stats.cmds++;
    }
 }
 

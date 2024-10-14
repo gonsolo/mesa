@@ -50,6 +50,7 @@ convert_pc_to_bits(struct GENX(PIPE_CONTROL) *pc) {
 #endif
 #if GFX_VER == 12
    bits |= (pc->TileCacheFlushEnable) ?  ANV_PIPE_TILE_CACHE_FLUSH_BIT : 0;
+   bits |= (pc->L3FabricFlush) ?  ANV_PIPE_L3_FABRIC_FLUSH_BIT : 0;
 #endif
 #if GFX_VER >= 12
    bits |= (pc->HDCPipelineFlushEnable) ?  ANV_PIPE_HDC_PIPELINE_FLUSH_BIT : 0;
@@ -338,18 +339,6 @@ genX(cmd_buffer_emit_state_base_address)(struct anv_cmd_buffer *cmd_buffer)
       (intel_needs_workaround(device->info, 16013000631) ?
        ANV_PIPE_INSTRUCTION_CACHE_INVALIDATE_BIT : 0);
 
-#if GFX_VER >= 9 && GFX_VER <= 11
-      /* From the SKL PRM, Vol. 2a, "PIPE_CONTROL",
-       *
-       *    "Workaround : “CS Stall” bit in PIPE_CONTROL command must be
-       *     always set for GPGPU workloads when “Texture Cache Invalidation
-       *     Enable” bit is set".
-       *
-       * Workaround stopped appearing in TGL PRMs.
-       */
-      if (cmd_buffer->state.current_pipeline == GPGPU)
-         bits |= ANV_PIPE_CS_STALL_BIT;
-#endif
    genx_batch_emit_pipe_control(&cmd_buffer->batch, device->info,
                                 cmd_buffer->state.current_pipeline,
                                 bits);
@@ -476,8 +465,8 @@ transition_depth_buffer(struct anv_cmd_buffer *cmd_buffer,
       const union isl_color_value clear_value =
          anv_image_hiz_clear_value(image);
 
-      uint32_t depth_value;
-      isl_color_value_pack(&clear_value, depth_format, &depth_value);
+      uint32_t depth_value[4] = {};
+      isl_color_value_pack(&clear_value, depth_format, depth_value);
 
       const uint32_t clear_pixel_offset = clear_color_addr.offset +
          isl_get_sampler_clear_field_offset(cmd_buffer->device->info,
@@ -490,7 +479,7 @@ transition_depth_buffer(struct anv_cmd_buffer *cmd_buffer,
       struct mi_builder b;
       mi_builder_init(&b, cmd_buffer->device->info, &cmd_buffer->batch);
       mi_builder_set_write_check(&b, true);
-      mi_store(&b, mi_mem32(clear_pixel_addr), mi_imm(depth_value));
+      mi_store(&b, mi_mem32(clear_pixel_addr), mi_imm(depth_value[0]));
    }
 
    /* If will_full_fast_clear is set, the caller promises to fast-clear the
@@ -1658,37 +1647,37 @@ genX(emit_apply_pipe_flushes)(struct anv_batch *batch,
    if (bits & ANV_PIPE_FLUSH_BITS)
       bits |= ANV_PIPE_NEEDS_END_OF_PIPE_SYNC_BIT;
 
-
-   /* HSD 1209978178: docs say that before programming the aux table:
+   /* From Bspec 43904 (Register_CCSAuxiliaryTableInvalidate):
+    * RCS engine idle sequence:
     *
-    *    "Driver must ensure that the engine is IDLE but ensure it doesn't
-    *    add extra flushes in the case it knows that the engine is already
-    *    IDLE."
+    *    Gfx12+:
+    *       PIPE_CONTROL:- DC Flush + L3 Fabric Flush + CS Stall + Render
+    *                      Target Cache Flush + Depth Cache
     *
-    * HSD 22012751911: SW Programming sequence when issuing aux invalidation:
+    *    Gfx125+:
+    *       PIPE_CONTROL:- DC Flush + L3 Fabric Flush + CS Stall + Render
+    *                      Target Cache Flush + Depth Cache + CCS flush
     *
-    *    "Render target Cache Flush + L3 Fabric Flush + State Invalidation + CS Stall"
+    * Compute engine idle sequence:
     *
-    * Notice we don't set the L3 Fabric Flush here, because we have
-    * ANV_PIPE_END_OF_PIPE_SYNC_BIT which inserts a CS stall. The
-    * PIPE_CONTROL::L3 Fabric Flush documentation says :
+    *    Gfx12+:
+    *       PIPE_CONTROL:- DC Flush + L3 Fabric Flush + CS Stall
     *
-    *    "L3 Fabric Flush will ensure all the pending transactions in the L3
-    *     Fabric are flushed to global observation point. HW does implicit L3
-    *     Fabric Flush on all stalling flushes (both explicit and implicit)
-    *     and on PIPECONTROL having Post Sync Operation enabled."
-    *
-    * Therefore setting L3 Fabric Flush here would be redundant.
+    *    Gfx125+:
+    *       PIPE_CONTROL:- DC Flush + L3 Fabric Flush + CS Stall + CCS flush
     */
    if (GFX_VER == 12 && (bits & ANV_PIPE_AUX_TABLE_INVALIDATE_BIT)) {
       if (current_pipeline == GPGPU) {
-         bits |= (ANV_PIPE_NEEDS_END_OF_PIPE_SYNC_BIT |
-                  ANV_PIPE_DATA_CACHE_FLUSH_BIT |
-                  (GFX_VERx10 == 125 ? ANV_PIPE_CCS_CACHE_FLUSH_BIT: 0));
+         bits |=  (ANV_PIPE_DATA_CACHE_FLUSH_BIT |
+                   ANV_PIPE_L3_FABRIC_FLUSH_BIT |
+                   ANV_PIPE_CS_STALL_BIT |
+                   (GFX_VERx10 == 125 ? ANV_PIPE_CCS_CACHE_FLUSH_BIT: 0));
       } else if (current_pipeline == _3D) {
-         bits |= (ANV_PIPE_NEEDS_END_OF_PIPE_SYNC_BIT |
+         bits |= (ANV_PIPE_DATA_CACHE_FLUSH_BIT |
+                  ANV_PIPE_L3_FABRIC_FLUSH_BIT |
+                  ANV_PIPE_CS_STALL_BIT |
                   ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
-                  ANV_PIPE_STATE_CACHE_INVALIDATE_BIT |
+                  ANV_PIPE_DEPTH_CACHE_FLUSH_BIT |
                   (GFX_VERx10 == 125 ? ANV_PIPE_CCS_CACHE_FLUSH_BIT: 0));
       }
    }
@@ -2098,9 +2087,12 @@ emit_binding_table(struct anv_cmd_buffer *cmd_buffer,
       case ANV_DESCRIPTOR_SET_COLOR_ATTACHMENTS:
          /* Color attachment binding */
          assert(shader->stage == MESA_SHADER_FRAGMENT);
-         if (binding->index < cmd_buffer->state.gfx.color_att_count) {
+         uint32_t index = binding->index < MAX_RTS ?
+            cmd_buffer->state.gfx.color_output_mapping[binding->index] :
+            binding->index;
+         if (index < cmd_buffer->state.gfx.color_att_count) {
             const struct anv_attachment *att =
-               &cmd_buffer->state.gfx.color_att[binding->index];
+               &cmd_buffer->state.gfx.color_att[index];
             surface_state = att->surface_state.state;
          } else {
             surface_state = cmd_buffer->state.gfx.null_surface_state;
@@ -2512,20 +2504,6 @@ genX(batch_emit_pipe_control_write)(struct anv_batch *batch,
    if (GFX_VER == 9 && (bits & ANV_PIPE_VF_CACHE_INVALIDATE_BIT))
       anv_batch_emit(batch, GENX(PIPE_CONTROL), pipe);
 
-#if GFX_VER >= 9 && GFX_VER <= 11
-   /* From the SKL PRM, Vol. 2a, "PIPE_CONTROL",
-    *
-    *    "Workaround : “CS Stall” bit in PIPE_CONTROL command must be
-    *     always set for GPGPU workloads when “Texture Cache
-    *     Invalidation Enable” bit is set".
-    *
-    * Workaround stopped appearing in TGL PRMs.
-    */
-   if (current_pipeline == GPGPU &&
-       (bits & ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT))
-      bits |= ANV_PIPE_CS_STALL_BIT;
-#endif
-
    anv_batch_emit(batch, GENX(PIPE_CONTROL), pipe) {
 #if GFX_VERx10 >= 125
       pipe.UntypedDataPortCacheFlushEnable =
@@ -2534,6 +2512,7 @@ genX(batch_emit_pipe_control_write)(struct anv_batch *batch,
 #endif
 #if GFX_VER == 12
       pipe.TileCacheFlushEnable = bits & ANV_PIPE_TILE_CACHE_FLUSH_BIT;
+      pipe.L3FabricFlush = bits & ANV_PIPE_L3_FABRIC_FLUSH_BIT;
 #endif
 #if GFX_VER > 11
       pipe.HDCPipelineFlushEnable = bits & ANV_PIPE_HDC_PIPELINE_FLUSH_BIT;
@@ -5176,15 +5155,24 @@ void genX(CmdBeginRendering)(
    };
 
    const uint32_t color_att_count = pRenderingInfo->colorAttachmentCount;
+
    result = anv_cmd_buffer_init_attachments(cmd_buffer, color_att_count);
    if (result != VK_SUCCESS)
       return;
 
    genX(flush_pipeline_select_3d)(cmd_buffer);
 
+   UNUSED bool render_target_change = false;
    for (uint32_t i = 0; i < gfx->color_att_count; i++) {
-      if (pRenderingInfo->pColorAttachments[i].imageView == VK_NULL_HANDLE)
+      if (pRenderingInfo->pColorAttachments[i].imageView == VK_NULL_HANDLE) {
+         render_target_change |= gfx->color_att[i].iview != NULL;
+
+         gfx->color_att[i].vk_format = VK_FORMAT_UNDEFINED;
+         gfx->color_att[i].iview = NULL;
+         gfx->color_att[i].layout = VK_IMAGE_LAYOUT_UNDEFINED;
+         gfx->color_att[i].aux_usage = ISL_AUX_USAGE_NONE;
          continue;
+      }
 
       const VkRenderingAttachmentInfo *att =
          &pRenderingInfo->pColorAttachments[i];
@@ -5211,10 +5199,23 @@ void genX(CmdBeginRendering)(
                                  att->imageLayout,
                                  cmd_buffer->queue_family->queueFlags);
 
+      render_target_change |= gfx->color_att[i].iview != iview;
+
+      gfx->color_att[i].vk_format = iview->vk.format;
+      gfx->color_att[i].iview = iview;
+      gfx->color_att[i].layout = att->imageLayout;
+      gfx->color_att[i].aux_usage = aux_usage;
+
       union isl_color_value fast_clear_color = { .u32 = { 0, } };
 
       if (att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR &&
           !(gfx->rendering_flags & VK_RENDERING_RESUMING_BIT)) {
+         uint32_t clear_view_mask = pRenderingInfo->viewMask;
+         VkClearRect clear_rect = {
+            .rect = render_area,
+            .baseArrayLayer = iview->vk.base_array_layer,
+            .layerCount = layers,
+         };
          const union isl_color_value clear_color =
             vk_to_isl_color_with_format(att->clearValue.color,
                                         iview->planes[0].isl.format);
@@ -5222,10 +5223,12 @@ void genX(CmdBeginRendering)(
          /* We only support fast-clears on the first layer */
          const bool fast_clear =
             (!is_multiview || (gfx->view_mask & 1)) &&
-            anv_can_fast_clear_color_view(cmd_buffer->device, iview,
-                                          att->imageLayout, clear_color,
-                                          layers, render_area,
-                                          cmd_buffer->queue_family->queueFlags);
+            anv_can_fast_clear_color(cmd_buffer, iview->image,
+                                     iview->vk.base_mip_level,
+                                     &clear_rect, att->imageLayout,
+                                     iview->planes[0].isl.format,
+                                     iview->planes[0].isl.swizzle,
+                                     clear_color);
 
          if (att->imageLayout != initial_layout) {
             assert(render_area.offset.x == 0 && render_area.offset.y == 0 &&
@@ -5256,9 +5259,6 @@ void genX(CmdBeginRendering)(
             }
          }
 
-         uint32_t clear_view_mask = pRenderingInfo->viewMask;
-         uint32_t base_clear_layer = iview->vk.base_array_layer;
-         uint32_t clear_layer_count = gfx->layer_count;
          if (fast_clear) {
             /* We only support fast-clears on the first layer */
             assert(iview->vk.base_mip_level == 0 &&
@@ -5284,8 +5284,8 @@ void genX(CmdBeginRendering)(
                                 false);
             }
             clear_view_mask &= ~1u;
-            base_clear_layer++;
-            clear_layer_count--;
+            clear_rect.baseArrayLayer++;
+            clear_rect.layerCount--;
 #if GFX_VER < 20
             genX(set_fast_clear_state)(cmd_buffer, iview->image,
                                        iview->planes[0].isl.format,
@@ -5304,25 +5304,21 @@ void genX(CmdBeginRendering)(
                                      iview->vk.base_array_layer + view, 1,
                                      render_area, clear_color);
             }
-         } else {
+         } else if (clear_rect.layerCount > 0) {
             anv_image_clear_color(cmd_buffer, iview->image,
                                   VK_IMAGE_ASPECT_COLOR_BIT,
                                   aux_usage,
                                   iview->planes[0].isl.format,
                                   iview->planes[0].isl.swizzle,
                                   iview->vk.base_mip_level,
-                                  base_clear_layer, clear_layer_count,
+                                  clear_rect.baseArrayLayer,
+                                  clear_rect.layerCount,
                                   render_area, clear_color);
          }
       } else {
          /* If not LOAD_OP_CLEAR, we shouldn't have a layout transition. */
          assert(att->imageLayout == initial_layout);
       }
-
-      gfx->color_att[i].vk_format = iview->vk.format;
-      gfx->color_att[i].iview = iview;
-      gfx->color_att[i].layout = att->imageLayout;
-      gfx->color_att[i].aux_usage = aux_usage;
 
       struct isl_view isl_view = iview->planes[0].isl;
       if (pRenderingInfo->viewMask) {
@@ -5600,14 +5596,7 @@ void genX(CmdBeginRendering)(
    gfx->dirty |= ANV_CMD_DIRTY_PIPELINE;
 
 #if GFX_VER >= 11
-   bool has_color_att = false;
-   for (uint32_t i = 0; i < gfx->color_att_count; i++) {
-      if (pRenderingInfo->pColorAttachments[i].imageView != VK_NULL_HANDLE) {
-         has_color_att = true;
-         break;
-      }
-   }
-   if (has_color_att) {
+   if (render_target_change) {
       /* The PIPE_CONTROL command description says:
       *
       *    "Whenever a Binding Table Index (BTI) used by a Render Target Message
@@ -6231,45 +6220,6 @@ genX(batch_emit_return)(struct anv_batch *batch)
                           GENX(MI_BATCH_BUFFER_START),
                           .AddressSpaceIndicator = ASI_PPGTT,
                           .SecondLevelBatchBuffer = Firstlevelbatch);
-}
-
-void
-genX(batch_emit_post_3dprimitive_was)(struct anv_batch *batch,
-                                      const struct anv_device *device,
-                                      uint32_t primitive_topology,
-                                      uint32_t vertex_count)
-{
-#if INTEL_WA_22014412737_GFX_VER || INTEL_WA_16014538804_GFX_VER
-   if (intel_needs_workaround(device->info, 22014412737) &&
-       (primitive_topology == _3DPRIM_POINTLIST ||
-        primitive_topology == _3DPRIM_LINELIST ||
-        primitive_topology == _3DPRIM_LINESTRIP ||
-        primitive_topology == _3DPRIM_LINELIST_ADJ ||
-        primitive_topology == _3DPRIM_LINESTRIP_ADJ ||
-        primitive_topology == _3DPRIM_LINELOOP ||
-        primitive_topology == _3DPRIM_POINTLIST_BF ||
-        primitive_topology == _3DPRIM_LINESTRIP_CONT ||
-        primitive_topology == _3DPRIM_LINESTRIP_BF ||
-        primitive_topology == _3DPRIM_LINESTRIP_CONT_BF) &&
-       (vertex_count == 1 || vertex_count == 2)) {
-      genx_batch_emit_pipe_control_write
-         (batch, device->info, 0, WriteImmediateData,
-          device->workaround_address, 0, 0);
-
-      /* Reset counter because we just emitted a PC */
-      batch->num_3d_primitives_emitted = 0;
-   } else if (intel_needs_workaround(device->info, 16014538804)) {
-      batch->num_3d_primitives_emitted++;
-      /* WA 16014538804:
-       *    After every 3 3D_Primitive command,
-       *    atleast 1 pipe_control must be inserted.
-       */
-      if (batch->num_3d_primitives_emitted == 3) {
-         anv_batch_emit(batch, GENX(PIPE_CONTROL), pc);
-         batch->num_3d_primitives_emitted = 0;
-      }
-   }
-#endif
 }
 
 /* Wa_16018063123 */

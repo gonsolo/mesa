@@ -39,6 +39,7 @@ tu6_plane_count(VkFormat format)
        * a depth plane and a stencil plane.
        */
       return 2;
+
    default:
       return vk_format_get_plane_count(format);
    }
@@ -48,30 +49,40 @@ enum pipe_format
 tu6_plane_format(VkFormat format, uint32_t plane)
 {
    switch (format) {
-   case VK_FORMAT_G8_B8R8_2PLANE_420_UNORM:
-      return plane ? PIPE_FORMAT_R8G8_UNORM : PIPE_FORMAT_Y8_UNORM;
-   case VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM:
-      return PIPE_FORMAT_R8_UNORM;
    case VK_FORMAT_D32_SFLOAT_S8_UINT:
-      return plane ? PIPE_FORMAT_S8_UINT : PIPE_FORMAT_Z32_FLOAT;
+      /* See tu6_plane_count above */
+      return !plane ? PIPE_FORMAT_Z32_FLOAT : PIPE_FORMAT_S8_UINT;
+
+   case VK_FORMAT_G8_B8R8_2PLANE_420_UNORM:
+      /* The 0'th plane of this format has a different UBWC compression */
+      return !plane ? PIPE_FORMAT_Y8_UNORM : PIPE_FORMAT_R8G8_UNORM;
+
    default:
-      return vk_format_to_pipe_format(format);
+      return vk_format_to_pipe_format(vk_format_get_plane_format(format, plane));
    }
 }
 
 uint32_t
 tu6_plane_index(VkFormat format, VkImageAspectFlags aspect_mask)
 {
+   /* Must only be one aspect unless it's depth/stencil */
+   assert(aspect_mask ==
+             (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT) ||
+          util_bitcount(aspect_mask) == 1);
+
    switch (aspect_mask) {
    default:
       assert(aspect_mask != VK_IMAGE_ASPECT_MEMORY_PLANE_3_BIT_EXT);
       return 0;
+
    case VK_IMAGE_ASPECT_PLANE_1_BIT:
    case VK_IMAGE_ASPECT_MEMORY_PLANE_1_BIT_EXT:
       return 1;
+
    case VK_IMAGE_ASPECT_PLANE_2_BIT:
    case VK_IMAGE_ASPECT_MEMORY_PLANE_2_BIT_EXT:
       return 2;
+
    case VK_IMAGE_ASPECT_STENCIL_BIT:
       return format == VK_FORMAT_D32_SFLOAT_S8_UINT;
    }
@@ -83,7 +94,7 @@ tu_format_for_aspect(enum pipe_format format, VkImageAspectFlags aspect_mask)
    switch (format) {
    case PIPE_FORMAT_Z24_UNORM_S8_UINT:
       /* VK_IMAGE_ASPECT_COLOR_BIT is used internally for blits (despite we
-       * also incorrectly advertise VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT for
+       * also incorrectly advertise VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT for
        * depth formats).  Return PIPE_FORMAT_Z24_UNORM_S8_UINT_AS_R8G8B8A8 in
        * this case.
        *
@@ -208,8 +219,8 @@ tu_image_view_init(struct tu_device *device,
    layouts[0] = &image->layout[tu6_plane_index(image->vk.format, aspect_mask)];
 
    enum pipe_format format;
-   if (aspect_mask != VK_IMAGE_ASPECT_COLOR_BIT)
-      format = tu6_plane_format(vk_format, tu6_plane_index(vk_format, aspect_mask));
+   if (vk_format == VK_FORMAT_D32_SFLOAT_S8_UINT)
+      format = tu_aspects_to_plane(vk_format, aspect_mask);
    else
       format = vk_format_to_pipe_format(vk_format);
 
@@ -227,8 +238,7 @@ tu_image_view_init(struct tu_device *device,
    }
 
    if (aspect_mask == VK_IMAGE_ASPECT_COLOR_BIT &&
-       (vk_format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM ||
-        vk_format == VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM)) {
+       vk_format_get_plane_count(vk_format) > 1) {
       layouts[1] = &image->layout[1];
       layouts[2] = &image->layout[2];
    }
@@ -464,7 +474,9 @@ tu_image_update_layout(struct tu_device *device, struct tu_image *image,
                        uint64_t modifier, const VkSubresourceLayout *plane_layouts)
 {
    enum a6xx_tile_mode tile_mode = TILE6_3;
+#if DETECT_OS_LINUX || DETECT_OS_BSD
    image->vk.drm_format_mod = modifier;
+#endif
 
    if (modifier == DRM_FORMAT_MOD_LINEAR) {
       image->force_linear_tile = true;

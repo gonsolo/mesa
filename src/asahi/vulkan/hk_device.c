@@ -34,6 +34,17 @@
 #include <fcntl.h>
 #include <xf86drm.h>
 
+/* clang-format off */
+static const struct debug_named_value hk_perf_options[] = {
+   {"notess",    HK_PERF_NOTESS,   "Skip draws with tessellation"},
+   {"noborder",  HK_PERF_NOBORDER, "Disable custom border colour emulation"},
+   {"nobarrier", HK_PERF_NOBARRIER,"Ignore pipeline barriers"},
+   {"batch",     HK_PERF_BATCH,    "Batch submissions"},
+   {"norobust",  HK_PERF_NOROBUST, "Disable robustness"},
+   DEBUG_NAMED_VALUE_END
+};
+/* clang-format on */
+
 /*
  * We preupload some constants so we can cheaply reference later without extra
  * allocation and copying.
@@ -300,8 +311,9 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    VK_FROM_HANDLE(hk_physical_device, pdev, physicalDevice);
    VkResult result = VK_ERROR_OUT_OF_HOST_MEMORY;
    struct hk_device *dev;
+   struct hk_instance *instance = (struct hk_instance *)pdev->vk.instance;
 
-   dev = vk_zalloc2(&pdev->vk.instance->alloc, pAllocator, sizeof(*dev), 8,
+   dev = vk_zalloc2(&instance->vk.alloc, pAllocator, sizeof(*dev), 8,
                     VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
    if (!dev)
       return vk_error(pdev, VK_ERROR_OUT_OF_HOST_MEMORY);
@@ -351,6 +363,20 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       result = vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
                          "failed to open device %s", path);
       goto fail_init;
+   }
+
+   dev->perftest = debug_get_flags_option("HK_PERFTEST", hk_perf_options, 0);
+
+   if (instance->no_border) {
+      dev->perftest |= HK_PERF_NOBORDER;
+   }
+
+   if (HK_PERF(dev, NOROBUST)) {
+      dev->vk.enabled_features.robustBufferAccess = false;
+      dev->vk.enabled_features.robustBufferAccess2 = false;
+      dev->vk.enabled_features.robustImageAccess = false;
+      dev->vk.enabled_features.robustImageAccess2 = false;
+      dev->vk.enabled_features.pipelineRobustness = false;
    }
 
    bool succ = agx_open_device(NULL, &dev->dev);

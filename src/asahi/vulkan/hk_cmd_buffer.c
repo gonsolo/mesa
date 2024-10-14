@@ -75,6 +75,7 @@ hk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
       container_of(vk_cmd_buffer, struct hk_cmd_buffer, vk);
    struct hk_cmd_pool *pool = hk_cmd_buffer_pool(cmd);
 
+   util_dynarray_fini(&cmd->large_bos);
    hk_free_resettable_cmd_buffer(cmd);
    vk_command_buffer_finish(&cmd->vk);
    vk_free(&pool->vk.alloc, cmd);
@@ -246,9 +247,11 @@ hk_BeginCommandBuffer(VkCommandBuffer commandBuffer,
                       const VkCommandBufferBeginInfo *pBeginInfo)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
    hk_reset_cmd_buffer(&cmd->vk, 0);
 
+   perf_debug(dev, "Begin command buffer");
    hk_cmd_buffer_begin_compute(cmd, pBeginInfo);
    hk_cmd_buffer_begin_graphics(cmd, pBeginInfo);
 
@@ -259,12 +262,27 @@ VKAPI_ATTR VkResult VKAPI_CALL
 hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
    assert(cmd->current_cs.gfx == NULL && cmd->current_cs.pre_gfx == NULL &&
           "must end rendering before ending the command buffer");
 
+   perf_debug(dev, "End command buffer");
    hk_cmd_buffer_end_compute(cmd);
-   hk_cmd_buffer_end_compute_internal(&cmd->current_cs.post_gfx);
+   hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.post_gfx);
+
+   /* With rasterizer discard, we might end up with empty VDM batches.
+    * It is difficult to avoid creating these empty batches, but it's easy to
+    * optimize them out at record-time. Do so now.
+    */
+   list_for_each_entry_safe(struct hk_cs, cs, &cmd->control_streams, node) {
+      if (cs->type == HK_CS_VDM && cs->stats.cmds == 0 &&
+          !cs->cr.process_empty_tiles) {
+
+         list_del(&cs->node);
+         hk_cs_destroy(cs);
+      }
+   }
 
    return vk_command_buffer_get_record_result(&cmd->vk);
 }
@@ -274,6 +292,12 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                        const VkDependencyInfo *pDependencyInfo)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+
+   if (HK_PERF(dev, NOBARRIER))
+      return;
+
+   perf_debug(dev, "Pipeline barrier");
 
    /* The big hammer. We end both compute and graphics batches. Ending compute
     * here is necessary to properly handle graphics->compute dependencies.
@@ -585,6 +609,9 @@ hk_reserve_scratch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    /* Note: this uses the hardware stage, not the software stage */
    hk_device_alloc_scratch(dev, s->b.info.stage, max_scratch_size);
+   perf_debug(dev, "Reserving %u (%u) bytes of scratch for stage %s",
+              s->b.info.scratch_size, s->b.info.preamble_scratch_size,
+              _mesa_shader_stage_to_abbrev(s->b.info.stage));
 
    switch (s->b.info.stage) {
    case PIPE_SHADER_FRAGMENT:
@@ -721,11 +748,12 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    cs->tib = render->tilebuffer;
 
    /* Assume this is not the first control stream of the render pass, so
-    * initially use the partial background program and ZLS control.
-    * hk_BeginRendering will override.
+    * initially use the partial background/EOT program and ZLS control.
+    * hk_BeginRendering/hk_EndRendering will override.
     */
    cs->cr = render->cr;
    cs->cr.bg.main = render->cr.bg.partial;
+   cs->cr.eot.main = render->cr.eot.partial;
    cs->cr.zls_control = render->cr.zls_control_partial;
 
    /* Barrier to enforce GPU-CPU coherency, in case this batch is back to back

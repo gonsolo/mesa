@@ -22,9 +22,9 @@ static void
 pack_assert_internal(const agx_instr *I, bool condition, const char *msg)
 {
    if (!condition) {
-      printf("Packing assertion failed for instruction:\n\n");
-      agx_print_instr(I, stdout);
-      printf("\n%s\n", msg);
+      fprintf(stderr, "Packing assertion failed for instruction:\n\n");
+      agx_print_instr(I, stderr);
+      fprintf(stderr, "\n%s\n", msg);
       abort();
    }
 }
@@ -731,7 +731,7 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
       unsigned O = agx_pack_memory_index(I, I->src[offset_src], &Ot);
       unsigned u1 = is_uniform_store ? 0 : 1; // XXX
       unsigned u3 = 0;
-      unsigned u4 = is_uniform_store ? 0 : 4; // XXX
+      unsigned u4 = is_uniform_store ? 0 : I->coherent ? 7 : 4;
       unsigned u5 = 0;
       bool L = true; /* TODO: when would you want short? */
 
@@ -856,7 +856,7 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
 
       unsigned q1 = I->shadow;
       unsigned q2 = I->query_lod ? 2 : 0;
-      unsigned q3 = 12;  // XXX
+      unsigned q3 = 0xc; // XXX
       unsigned kill = 0; // helper invocation kill bit
 
       /* Set bit 43 for image loads. This seems to makes sure that image loads
@@ -868,8 +868,14 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
        * Apple seems to set this bit unconditionally for read/write image loads
        * and never for readonly image loads. Some sort of cache control.
        */
-      if (I->op == AGX_OPCODE_IMAGE_LOAD)
+      if (I->op == AGX_OPCODE_IMAGE_LOAD) {
          q3 |= 1;
+
+         /* Cache bypass for multidie coherency */
+         if (I->coherent) {
+            q3 |= 2;
+         }
+      }
 
       uint32_t extend = ((U & BITFIELD_MASK(5)) << 0) | (kill << 5) |
                         ((I->dim >> 3) << 7) | ((R >> 6) << 8) |
@@ -917,6 +923,8 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
       pack_assert(I, T < (1 << 8));
       pack_assert(I, Tt < (1 << 2));
 
+      unsigned coherency = I->coherent ? 0xf : 0x9;
+
       uint64_t raw = agx_opcodes_info[I->op].encoding.exact |
                      (Rt ? (1 << 8) : 0) | ((R & BITFIELD_MASK(6)) << 9) |
                      ((C & BITFIELD_MASK(6)) << 16) | (Ct ? (1 << 22) : 0) |
@@ -924,8 +932,8 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
                      (((uint64_t)(T & BITFIELD_MASK(6))) << 32) |
                      (((uint64_t)Tt) << 38) |
                      (((uint64_t)I->dim & BITFIELD_MASK(3)) << 40) |
-                     (Cs ? (1ull << 47) : 0) | (((uint64_t)U) << 48) |
-                     (rtz ? (1ull << 53) : 0) |
+                     (((uint64_t)coherency) << 43) | (Cs ? (1ull << 47) : 0) |
+                     (((uint64_t)U) << 48) | (rtz ? (1ull << 53) : 0) |
                      ((I->dim & BITFIELD_BIT(4)) ? (1ull << 55) : 0) |
                      (((uint64_t)R >> 6) << 56) | (((uint64_t)C >> 6) << 58) |
                      (((uint64_t)D >> 6) << 60) | (((uint64_t)T >> 6) << 62);
@@ -1059,11 +1067,11 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
       struct agx_opcode_info info = agx_opcodes_info[I->op];
       uint64_t raw =
          info.encoding.exact | (q1 << 8) | ((value.value & 0x3F) << 10) |
-         ((I->imm & 0xF) << 20) | (1UL << 24) | // XXX
-         (1UL << 26) |                          // XXX
+         ((I->imm & 0xF) << 20) | (1ull << 24) | // XXX
+         (1ull << 26) |                          // XXX
          (q2 << 30) | ((uint64_t)((I->imm >> 4) & 0xF) << 32) |
          ((uint64_t)q3 << 37) | ((uint64_t)(value.value >> 6) << 40) |
-         ((uint64_t)q4 << 42) | (1UL << 47) | // XXX
+         ((uint64_t)q4 << 42) | (1ull << 47) | // XXX
          ((uint64_t)q5 << 48) | ((uint64_t)(I->imm >> 8) << 56);
 
       memcpy(util_dynarray_grow_bytes(emission, 1, 8), &raw, 8);
@@ -1099,7 +1107,7 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
          (((uint64_t)((O >> 4) & BITFIELD_MASK(4))) << 32) |
          ((uint64_t)i2 << 36) |
          (((uint64_t)((R >> 6) & BITFIELD_MASK(2))) << 40) |
-         ((uint64_t)i5 << 44) | (L ? (1UL << 47) : 0) |
+         ((uint64_t)i5 << 44) | (L ? (1ull << 47) : 0) |
          (((uint64_t)(format >> 2)) << 50) | (((uint64_t)Rt) << 49) |
          (((uint64_t)mask) << 52) | (((uint64_t)(O >> 8)) << 56);
 
@@ -1120,7 +1128,7 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
          info.encoding.exact | ((uint64_t)i0 << 8) | ((uint64_t)i1 << 26) |
          ((uint64_t)i2 << 36) | ((uint64_t)i3 << 44) | ((uint64_t)i4 << 50) |
          ((I->stack_size & 0xF) << 20) |
-         ((uint64_t)((I->stack_size >> 4) & 0xF) << 32) | (1UL << 47) | // XXX
+         ((uint64_t)((I->stack_size >> 4) & 0xF) << 32) | (1ull << 47) | // XXX
          ((uint64_t)(I->stack_size >> 8) << 56);
 
       memcpy(util_dynarray_grow_bytes(emission, 1, 8), &raw, 8);

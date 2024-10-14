@@ -245,10 +245,24 @@ hk_can_compress(struct agx_device *dev, VkFormat format, unsigned plane,
     * although the vendor driver does support something similar if I recall.
     * Compression is not supported in hardware for storage images or mutable
     * formats in general.
+    *
+    * Feedback loops are problematic with compression. The GL driver bans them.
+    * Interestingly, the relevant CTS tests pass on G13G and G14C, but not on
+    * G13D. For now, conservatively ban compression with feedback loops.
     */
    if (usage &
-       (VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT | VK_IMAGE_USAGE_STORAGE_BIT))
+       (VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT | VK_IMAGE_USAGE_STORAGE_BIT |
+        VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT)) {
+
+      perf_debug_dev(
+         dev, "No compression: incompatible usage -%s%s%s",
+         (usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT) ? " host-transfer" : "",
+         (usage & VK_IMAGE_USAGE_STORAGE_BIT) ? " storage" : "",
+         (usage & VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT)
+            ? " feedback-loop"
+            : "");
       return false;
+   }
 
    enum pipe_format p_format = vk_format_to_pipe_format(format);
 
@@ -267,16 +281,20 @@ hk_can_compress(struct agx_device *dev, VkFormat format, unsigned plane,
          enum pipe_format view_format =
             vk_format_to_pipe_format(format_list->pViewFormats[i]);
 
-         if (!ail_formats_compatible(p_format, view_format))
+         if (!ail_formats_compatible(p_format, view_format)) {
+            perf_debug_dev(dev, "No compression: incompatible image view");
             return false;
+         }
       }
    }
 
-   /* TODO: Need to smarten up the blitter */
-   if (samples > 1)
+   if (!ail_can_compress(p_format, width, height, samples)) {
+      perf_debug_dev(dev, "No compression: invalid layout %s %ux%ux%u",
+                     util_format_short_name(p_format), width, height, samples);
       return false;
+   }
 
-   return ail_can_compress(p_format, width, height, samples);
+   return true;
 }
 
 static bool
@@ -643,7 +661,7 @@ hk_GetPhysicalDeviceSparseImageFormatProperties2(
 
 static enum ail_tiling
 hk_map_tiling(struct hk_device *dev, const VkImageCreateInfo *info,
-              unsigned plane)
+              unsigned plane, uint64_t modifier)
 {
    switch (info->tiling) {
    case VK_IMAGE_TILING_LINEAR:
@@ -659,8 +677,8 @@ hk_map_tiling(struct hk_device *dev, const VkImageCreateInfo *info,
       }
 
    case VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT:
-      /* TODO */
-      return AIL_TILING_TWIDDLED;
+      return ail_drm_modifier_to_tiling(modifier);
+
    default:
       unreachable("invalid tiling");
    }
@@ -783,7 +801,8 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
       const uint8_t height_scale =
          ycbcr_info ? ycbcr_info->planes[plane].denominator_scales[1] : 1;
 
-      enum ail_tiling tiling = hk_map_tiling(dev, pCreateInfo, plane);
+      enum ail_tiling tiling =
+         hk_map_tiling(dev, pCreateInfo, plane, image->vk.drm_format_mod);
 
       image->planes[plane].layout = (struct ail_layout){
          .tiling = tiling,

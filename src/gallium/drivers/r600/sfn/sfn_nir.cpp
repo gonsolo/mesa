@@ -623,6 +623,8 @@ optimize_once(nir_shader *shader)
    NIR_PASS(progress, shader, nir_copy_prop);
    NIR_PASS(progress, shader, nir_opt_dce);
    NIR_PASS(progress, shader, nir_opt_algebraic);
+   if (shader->options->has_bitfield_select)
+      NIR_PASS(progress, shader, nir_opt_generate_bfi);
    NIR_PASS(progress, shader, nir_opt_constant_folding);
    NIR_PASS(progress, shader, nir_opt_copy_prop_vars);
    NIR_PASS(progress, shader, nir_opt_remove_phis);
@@ -822,10 +824,8 @@ r600_lower_and_optimize_nir(nir_shader *sh,
    if (lower_64bit)
       NIR_PASS_V(sh, r600::r600_nir_64_to_vec2);
 
-   if ((sh->info.bit_sizes_float | sh->info.bit_sizes_int) & 64) {
+   if ((sh->info.bit_sizes_float | sh->info.bit_sizes_int) & 64)
       NIR_PASS_V(sh, r600::r600_split_64bit_uniforms_and_ubo);
-      NIR_PASS_V(sh, nir_lower_doubles, NULL, sh->options->lower_doubles_options);
-   }
 
    /* Lower to scalar to let some optimization work out better */
    while (optimize_once(sh))

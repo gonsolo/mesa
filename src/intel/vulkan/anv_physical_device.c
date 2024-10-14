@@ -73,6 +73,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_bind_memory2                      = true,
       .KHR_buffer_device_address             = true,
       .KHR_calibrated_timestamps             = device->has_reg_timestamp,
+      .KHR_compute_shader_derivatives        = true,
       .KHR_copy_commands2                    = true,
       .KHR_cooperative_matrix                = anv_has_cooperative_matrix(device),
       .KHR_create_renderpass2                = true,
@@ -84,6 +85,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_draw_indirect_count               = true,
       .KHR_driver_properties                 = true,
       .KHR_dynamic_rendering                 = true,
+      .KHR_dynamic_rendering_local_read      = true,
       .KHR_external_fence                    = has_syncobj_wait,
       .KHR_external_fence_fd                 = has_syncobj_wait,
       .KHR_external_memory                   = true,
@@ -173,6 +175,10 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_video_encode_queue                = device->video_encode_enabled,
       .KHR_video_encode_h264                 = VIDEO_CODEC_H264ENC && device->video_encode_enabled,
       .KHR_video_encode_h265                 = device->info.ver >= 12 && VIDEO_CODEC_H265ENC && device->video_encode_enabled,
+      .KHR_video_maintenance1                = (device->video_decode_enabled &&
+                                               (VIDEO_CODEC_H264DEC || VIDEO_CODEC_H265DEC)) ||
+                                               (device->video_encode_enabled &&
+                                               (VIDEO_CODEC_H264ENC || VIDEO_CODEC_H265ENC)),
       .KHR_vulkan_memory_model               = true,
       .KHR_workgroup_memory_explicit_layout  = true,
       .KHR_zero_initialize_workgroup_memory  = true,
@@ -188,6 +194,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .EXT_custom_border_color               = true,
       .EXT_depth_bias_control                = true,
       .EXT_depth_clamp_zero_one              = true,
+      .EXT_depth_clamp_control               = true,
       .EXT_depth_clip_control                = true,
       .EXT_depth_range_unrestricted          = device->info.ver >= 20,
       .EXT_depth_clip_enable                 = true,
@@ -242,6 +249,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .EXT_pipeline_creation_cache_control   = true,
       .EXT_pipeline_creation_feedback        = true,
       .EXT_pipeline_library_group_handles    = rt_enabled,
+      .EXT_pipeline_protected_access         = device->has_protected_contexts,
       .EXT_pipeline_robustness               = true,
       .EXT_post_depth_coverage               = true,
       .EXT_primitives_generated_query        = true,
@@ -272,6 +280,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .EXT_transform_feedback                = true,
       .EXT_vertex_attribute_divisor          = true,
       .EXT_vertex_input_dynamic_state        = true,
+      .EXT_ycbcr_2plane_444_formats          = true,
       .EXT_ycbcr_image_arrays                = true,
       .AMD_buffer_marker                     = true,
       .AMD_texture_gather_bias_lod           = device->info.ver >= 20,
@@ -477,7 +486,7 @@ get_features(const struct anv_physical_device *pdevice,
       /* VK_EXT_image_sliced_view_of_3d */
       .imageSlicedViewOf3D = true,
 
-      /* VK_NV_compute_shader_derivatives */
+      /* VK_KHR_compute_shader_derivatives */
       .computeDerivativeGroupQuads = true,
       .computeDerivativeGroupLinear = true,
 
@@ -660,6 +669,9 @@ get_features(const struct anv_physical_device *pdevice,
       /* VK_EXT_ycbcr_image_arrays */
       .ycbcrImageArrays = true,
 
+      /* VK_EXT_ycbcr_2plane_444_formats */
+      .ycbcr2plane444Formats = true,
+
       /* VK_EXT_extended_dynamic_state */
       .extendedDynamicState = true,
 
@@ -711,6 +723,9 @@ get_features(const struct anv_physical_device *pdevice,
       /* VK_EXT_primitive_topology_list_restart */
       .primitiveTopologyListRestart = true,
       .primitiveTopologyPatchListRestart = true,
+
+      /* VK_EXT_depth_clamp_control */
+      .depthClampControl = true,
 
       /* VK_EXT_depth_clip_control */
       .depthClipControl = true,
@@ -788,6 +803,9 @@ get_features(const struct anv_physical_device *pdevice,
       .swapchainMaintenance1 = true,
 #endif
 
+      /* VK_KHR_video_maintenance1 */
+      .videoMaintenance1 = true,
+
       /* VK_EXT_image_compression_control */
       .imageCompressionControl = true,
 
@@ -808,6 +826,12 @@ get_features(const struct anv_physical_device *pdevice,
 
       /* VK_KHR_shader_relaxed_extended_instruction */
       .shaderRelaxedExtendedInstruction = true,
+
+      /* VK_KHR_dynamic_rendering_local_read */
+      .dynamicRenderingLocalRead = true,
+
+      /* VK_EXT_pipeline_protected_access */
+      .pipelineProtectedAccess = true,
    };
 
    /* The new DOOM and Wolfenstein games require depthBounds without
@@ -1298,6 +1322,11 @@ get_properties(const struct anv_physical_device *pdevice,
       props->maxDescriptorSetAccelerationStructures = UINT16_MAX;
       props->maxDescriptorSetUpdateAfterBindAccelerationStructures = UINT16_MAX;
       props->minAccelerationStructureScratchOffsetAlignment = 64;
+   }
+
+   /* VK_KHR_compute_shader_derivatives */
+   {
+      props->meshAndTaskShaderDerivatives = pdevice->info.has_mesh_shading;
    }
 
    /* VK_KHR_fragment_shading_rate */
@@ -1881,6 +1910,7 @@ anv_physical_device_init_heaps(struct anv_physical_device *device, int fd)
                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
             continue;
 
+         assert(device->memory.type_count < ARRAY_SIZE(device->memory.types));
          struct anv_memory_type *new_type =
             &device->memory.types[device->memory.type_count++];
          *new_type = device->memory.types[i];
@@ -1923,6 +1953,7 @@ anv_physical_device_init_heaps(struct anv_physical_device *device, int fd)
       device->memory.dynamic_visible_mem_types |=
          BITFIELD_BIT(device->memory.type_count);
 
+      assert(device->memory.type_count < ARRAY_SIZE(device->memory.types));
       struct anv_memory_type *new_type =
          &device->memory.types[device->memory.type_count++];
       *new_type = device->memory.types[i];
@@ -2121,8 +2152,6 @@ anv_physical_device_init_queue_families(struct anv_physical_device *pdevice)
       if (can_use_non_render_engines) {
          c_count = pdevice->info.engine_class_supported_count[INTEL_ENGINE_CLASS_COMPUTE];
       }
-      enum intel_engine_class compute_class =
-         c_count < 1 ? INTEL_ENGINE_CLASS_RENDER : INTEL_ENGINE_CLASS_COMPUTE;
 
       int blit_count = 0;
       if (pdevice->info.verx10 >= 125 && can_use_non_render_engines) {
@@ -2130,6 +2159,11 @@ anv_physical_device_init_queue_families(struct anv_physical_device *pdevice)
       }
 
       anv_override_engine_counts(&gc_count, &g_count, &c_count, &v_count, &blit_count);
+
+      enum intel_engine_class compute_class =
+         pdevice->info.engine_class_supported_count[INTEL_ENGINE_CLASS_COMPUTE] &&
+         c_count >= 1 ? INTEL_ENGINE_CLASS_COMPUTE :
+                        INTEL_ENGINE_CLASS_RENDER;
 
       if (gc_count > 0) {
          pdevice->queue.families[family_count++] = (struct anv_queue_family) {
@@ -2140,6 +2174,7 @@ anv_physical_device_init_queue_families(struct anv_physical_device *pdevice)
                           protected_flag,
             .queueCount = gc_count,
             .engine_class = INTEL_ENGINE_CLASS_RENDER,
+            .supports_perf = true,
          };
       }
       if (g_count > 0) {

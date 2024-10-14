@@ -57,7 +57,8 @@
 #if defined(VK_USE_PLATFORM_WAYLAND_KHR) || \
     defined(VK_USE_PLATFORM_WIN32_KHR) || \
     defined(VK_USE_PLATFORM_XCB_KHR) || \
-    defined(VK_USE_PLATFORM_XLIB_KHR)
+    defined(VK_USE_PLATFORM_XLIB_KHR) || \
+    defined(VK_USE_PLATFORM_METAL_EXT)
 #define LVP_USE_WSI_PLATFORM
 #endif
 #define LVP_API_VERSION VK_MAKE_VERSION(1, 3, VK_HEADER_VERSION)
@@ -95,6 +96,9 @@ static const struct vk_instance_extension_table lvp_instance_extensions_supporte
 #ifdef VK_USE_PLATFORM_XLIB_KHR
    .KHR_xlib_surface                         = true,
 #endif
+#ifdef VK_USE_PLATFORM_METAL_EXT
+   .EXT_metal_surface                        = true,
+#endif
 #ifndef VK_USE_PLATFORM_WIN32_KHR
    .EXT_headless_surface                     = true,
 #endif
@@ -126,6 +130,7 @@ static const struct vk_device_extension_table lvp_device_extensions_supported = 
    .KHR_external_semaphore                = true,
    .KHR_shader_float_controls             = true,
    .KHR_get_memory_requirements2          = true,
+   .KHR_global_priority                   = true,
 #ifdef LVP_USE_WSI_PLATFORM
    .KHR_incremental_present               = true,
 #endif
@@ -161,7 +166,9 @@ static const struct vk_device_extension_table lvp_device_extensions_supported = 
    .KHR_shader_integer_dot_product        = true,
    .KHR_shader_maximal_reconvergence      = true,
    .KHR_shader_non_semantic_info          = true,
+   .KHR_shader_relaxed_extended_instruction = true,
    .KHR_shader_subgroup_extended_types    = true,
+   .KHR_shader_subgroup_rotate            = true,
    .KHR_shader_terminate_invocation       = true,
    .KHR_spirv_1_4                         = true,
    .KHR_storage_buffer_storage_class      = true,
@@ -190,6 +197,7 @@ static const struct vk_device_extension_table lvp_device_extensions_supported = 
    .EXT_dynamic_rendering_unused_attachments = true,
    .EXT_descriptor_buffer                 = true,
    .EXT_descriptor_indexing               = true,
+   .EXT_device_generated_commands         = true,
    .EXT_extended_dynamic_state            = true,
    .EXT_extended_dynamic_state2           = true,
    .EXT_extended_dynamic_state3           = true,
@@ -220,6 +228,7 @@ static const struct vk_device_extension_table lvp_device_extensions_supported = 
    .EXT_pipeline_creation_feedback        = true,
    .EXT_pipeline_creation_cache_control   = true,
    .EXT_pipeline_library_group_handles    = true,
+   .EXT_pipeline_protected_access         = true,
    .EXT_pipeline_robustness               = true,
    .EXT_post_depth_coverage               = true,
    .EXT_private_data                      = true,
@@ -467,8 +476,14 @@ lvp_get_features(const struct lvp_physical_device *pdevice,
       /* VK_EXT_non_seamless_cube_map */
       .nonSeamlessCubeMap = true,
 
+      /* VK_KHR_global_priority */
+      .globalPriorityQuery = true,
+
       /* VK_EXT_attachment_feedback_loop_layout */
       .attachmentFeedbackLoopLayout = true,
+
+      /* VK_EXT_pipeline_protected_access */
+      .pipelineProtectedAccess = true,
 
       /* VK_EXT_rasterization_order_attachment_access */
       .rasterizationOrderColorAttachmentAccess = true,
@@ -629,6 +644,10 @@ lvp_get_features(const struct lvp_physical_device *pdevice,
       /* VK_NV_device_generated_commands */
       .deviceGeneratedCommandsNV = true,
 
+      /* VK_EXT_device_generated_commands */
+      .deviceGeneratedCommands = true,
+      .dynamicGeneratedPipelineLayout = true,
+
       /* VK_EXT_primitive_topology_list_restart */
       .primitiveTopologyListRestart = true,
       .primitiveTopologyPatchListRestart = true,
@@ -720,6 +739,13 @@ lvp_get_features(const struct lvp_physical_device *pdevice,
       /* VK_EXT_swapchain_maintenance1 */
       .swapchainMaintenance1 = true,
 #endif
+
+      /* VK_KHR_shader_relaxed_extended_instruction */
+      .shaderRelaxedExtendedInstruction = true,
+
+      /* VK_KHR_shader_subgroup_rotate */
+      .shaderSubgroupRotate = true,
+      .shaderSubgroupRotateClustered = true,
    };
 }
 
@@ -843,7 +869,7 @@ lvp_get_properties(const struct lvp_physical_device *device, struct vk_propertie
       .maxComputeWorkGroupSize                  = { block_size[0], block_size[1], block_size[2] },
       .subPixelPrecisionBits                    = device->pscreen->get_param(device->pscreen, PIPE_CAP_RASTERIZER_SUBPIXEL_BITS),
       .subTexelPrecisionBits                    = 8,
-      .mipmapPrecisionBits                      = 4,
+      .mipmapPrecisionBits                      = 6,
       .maxDrawIndexedIndexValue                 = UINT32_MAX,
       .maxDrawIndirectCount                     = UINT32_MAX,
       .maxSamplerLodBias                        = 16,
@@ -1046,6 +1072,17 @@ lvp_get_properties(const struct lvp_physical_device *device, struct vk_propertie
       .minSequencesIndexBufferOffsetAlignment = 4,
       .minIndirectCommandsBufferOffsetAlignment = 4,
 
+      /* VK_EXT_device_generated_commands */
+      .maxIndirectPipelineCount = 1<<12,
+      .maxIndirectShaderObjectCount = 1<<12,
+      .maxIndirectCommandsIndirectStride = 2048,
+      .supportedIndirectCommandsInputModes = VK_INDIRECT_COMMANDS_INPUT_MODE_VULKAN_INDEX_BUFFER_EXT | VK_INDIRECT_COMMANDS_INPUT_MODE_DXGI_INDEX_BUFFER_EXT,
+      .supportedIndirectCommandsShaderStages = VK_SHADER_STAGE_ALL,
+      .supportedIndirectCommandsShaderStagesPipelineBinding = VK_SHADER_STAGE_ALL,
+      .supportedIndirectCommandsShaderStagesShaderBinding = VK_SHADER_STAGE_ALL,
+      .deviceGeneratedCommandsTransformFeedback = true,
+      .deviceGeneratedCommandsMultiDrawIndirectCount = true,
+
       /* VK_EXT_external_memory_host */
       .minImportedHostPointerAlignment = 4096,
 
@@ -1160,7 +1197,7 @@ lvp_get_properties(const struct lvp_physical_device *device, struct vk_propertie
       .maxPerStageDescriptorUpdateAfterBindAccelerationStructures = MAX_DESCRIPTORS,
       .maxDescriptorSetAccelerationStructures = MAX_DESCRIPTORS,
       .maxDescriptorSetUpdateAfterBindAccelerationStructures = MAX_DESCRIPTORS,
-      .minAccelerationStructureScratchOffsetAlignment = 128,
+      .minAccelerationStructureScratchOffsetAlignment = 8,
 
       /* VK_EXT_legacy_vertex_attributes */
       .nativeUnalignedPerformance = true,
@@ -1188,7 +1225,8 @@ lvp_get_properties(const struct lvp_physical_device *device, struct vk_propertie
    memset(p->deviceLUID, 0, VK_LUID_SIZE);
 
 #if LLVM_VERSION_MAJOR >= 10
-   p->subgroupSupportedOperations |= VK_SUBGROUP_FEATURE_SHUFFLE_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT | VK_SUBGROUP_FEATURE_QUAD_BIT;
+   p->subgroupSupportedOperations |= VK_SUBGROUP_FEATURE_SHUFFLE_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT | VK_SUBGROUP_FEATURE_QUAD_BIT |
+      VK_SUBGROUP_FEATURE_CLUSTERED_BIT | VK_SUBGROUP_FEATURE_ROTATE_BIT_KHR | VK_SUBGROUP_FEATURE_ROTATE_CLUSTERED_BIT_KHR;
 #endif
 
    /* Vulkan 1.2 */
@@ -1471,6 +1509,15 @@ VKAPI_ATTR void VKAPI_CALL lvp_GetPhysicalDeviceQueueFamilyProperties2(
    VkQueueFamilyProperties2                   *pQueueFamilyProperties)
 {
    VK_OUTARRAY_MAKE_TYPED(VkQueueFamilyProperties2, out, pQueueFamilyProperties, pCount);
+
+   VkQueueFamilyGlobalPriorityPropertiesKHR *prio = vk_find_struct(pQueueFamilyProperties, QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR);
+   if (prio) {
+      prio->priorityCount = 4;
+      prio->priorities[0] = VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR;
+      prio->priorities[1] = VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR;
+      prio->priorities[2] = VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR;
+      prio->priorities[3] = VK_QUEUE_GLOBAL_PRIORITY_REALTIME_KHR;
+   }
 
    vk_outarray_append_typed(VkQueueFamilyProperties2, &out, p) {
       p->queueFamilyProperties = (VkQueueFamilyProperties) {

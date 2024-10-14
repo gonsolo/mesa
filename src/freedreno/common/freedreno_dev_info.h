@@ -94,6 +94,11 @@ struct fd_dev_info {
       bool depth_bounds_require_depth_test_quirk;
 
       bool has_tex_filter_cubic;
+
+      /* The blob driver does not support SEPARATE_RECONSTRUCTION_FILTER_BIT
+       * before a6xx_gen3.  It still sets CHROMA_LINEAR bit according to
+       * chromaFilter, but the bit has no effect before a6xx_gen3.
+       */
       bool has_separate_chroma_filter;
 
       bool has_sample_locations;
@@ -271,11 +276,19 @@ struct fd_dev_info {
       /* Whether a single clear blit could be used for both sysmem and gmem.*/
       bool has_generic_clear;
 
+      /* Whether r8g8 UBWC fast-clear work correctly. */
+      bool r8g8_faulty_fast_clear_quirk;
+
       /* a750 has a bug where writing and then reading a UBWC-compressed IBO
        * requires flushing UCHE. This is reproducible in many CTS tests, for
        * example dEQP-VK.image.load_store.with_format.2d.*.
        */
       bool ubwc_coherency_quirk;
+
+      /* Whether CP_ALWAYS_ON_COUNTER only resets on device loss rather than
+       * on every suspend/resume.
+       */
+      bool has_persistent_counter;
    } a7xx;
 };
 

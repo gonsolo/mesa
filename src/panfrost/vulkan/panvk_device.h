@@ -20,13 +20,18 @@
 
 #include "kmod/pan_kmod.h"
 #include "util/pan_ir.h"
-#include "pan_blend.h"
-#include "pan_blitter.h"
+
+#include "util/vma.h"
 
 #define PANVK_MAX_QUEUE_FAMILIES 1
 
 struct panvk_device {
    struct vk_device vk;
+
+   struct {
+      simple_mtx_t lock;
+      struct util_vma_heap heap;
+   } as;
 
    struct {
       struct pan_kmod_vm *vm;
@@ -37,34 +42,11 @@ struct panvk_device {
    struct panvk_priv_bo *tiler_heap;
    struct panvk_priv_bo *sample_positions;
 
-   /* Access to the blitter pools are protected by the blitter
-    * shader/rsd locks. They can't be merged with other binary/desc
-    * pools unless we patch pan_blitter.c to support external pool locks.
-    *
-    * FIXME: The blitter infrastructure is only needed for FB preload.
-    * We should probably consider getting rid of the dependency we have
-    * on pan_desc.c and implement preload ourselves so we don't have
-    * to duplicate caches.
-    */
-   struct {
-      struct panvk_pool bin_pool;
-      struct panvk_pool desc_pool;
-      struct pan_blitter_cache cache;
-      struct pan_blend_shader_cache blend_shader_cache;
-   } blitter;
-
-   struct panvk_blend_shader_cache blend_shader_cache;
    struct vk_meta_device meta;
-
-#if PAN_ARCH <= 7
-   struct {
-      struct panvk_priv_mem shader;
-      struct panvk_priv_mem rsd;
-   } desc_copy;
-#endif
 
    struct {
       struct panvk_pool rw;
+      struct panvk_pool rw_nc;
       struct panvk_pool exec;
    } mempools;
 
@@ -93,7 +75,7 @@ panvk_device_adjust_bo_flags(const struct panvk_device *device,
    struct panvk_instance *instance =
       to_panvk_instance(device->vk.physical->instance);
 
-   if (instance->debug_flags & PANVK_DEBUG_DUMP)
+   if (instance->debug_flags & (PANVK_DEBUG_DUMP | PANVK_DEBUG_TRACE))
       bo_flags &= ~PAN_KMOD_BO_FLAG_NO_MMAP;
 
    return bo_flags;

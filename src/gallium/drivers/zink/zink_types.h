@@ -1272,7 +1272,6 @@ struct zink_resource_object {
    VkFormatFeatureFlags vkfeats;
    uint64_t modifier;
    VkImageAspectFlags modifier_aspect;
-   VkSamplerYcbcrConversion sampler_conversion;
    unsigned plane_offsets[3];
    unsigned plane_strides[3];
    unsigned plane_count;
@@ -1371,7 +1370,7 @@ struct zink_transfer {
 
 
 /** screen types */
-struct zink_modifier_prop {
+struct zink_modifier_props {
     uint32_t                             drmFormatModifierCount;
     VkDrmFormatModifierPropertiesEXT*    pDrmFormatModifierProperties;
 };
@@ -1523,7 +1522,8 @@ struct zink_screen {
    } driconf;
 
    struct zink_format_props format_props[PIPE_FORMAT_COUNT];
-   struct zink_modifier_prop modifier_props[PIPE_FORMAT_COUNT];
+   struct zink_modifier_props modifier_props[PIPE_FORMAT_COUNT];
+   bool format_props_init[PIPE_FORMAT_COUNT];
 
    VkExtent2D maxSampleLocationGridSize[5];
    VkPipelineLayout gfx_push_constant_layout;

@@ -255,6 +255,9 @@ struct intel_perf_query_result;
 #define ANV_TRTT_L1_NULL_TILE_VAL 0
 #define ANV_TRTT_L1_INVALID_TILE_VAL 1
 
+#define ANV_COLOR_OUTPUT_DISABLED (0xff)
+#define ANV_COLOR_OUTPUT_UNUSED   (0xfe)
+
 static inline uint32_t
 align_down_npot_u32(uint32_t v, uint32_t a)
 {
@@ -954,6 +957,7 @@ struct anv_queue_family {
    uint32_t       queueCount;
 
    enum intel_engine_class engine_class;
+   bool supports_perf;
 };
 
 #define ANV_MAX_QUEUE_FAMILIES 5
@@ -1952,6 +1956,7 @@ struct anv_device {
     struct anv_cmd_buffer                      *cmd_buffer_being_decoded;
 
     int                                         perf_fd; /* -1 if no opened */
+    struct anv_queue                            *perf_queue;
 
     struct intel_aux_map_context                *aux_map_ctx;
 
@@ -3376,6 +3381,9 @@ enum anv_pipe_bits {
     * implement a workaround for Gfx9.
     */
    ANV_PIPE_POST_SYNC_BIT                    = (1 << 24),
+
+   /* L3 Fabric Flush */
+   ANV_PIPE_L3_FABRIC_FLUSH_BIT              = (1 << 25),
 };
 
 /* These bits track the state of buffer writes for queries. They get cleared
@@ -3438,7 +3446,8 @@ enum anv_query_bits {
    ANV_PIPE_HDC_PIPELINE_FLUSH_BIT | \
    ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT | \
    ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT | \
-   ANV_PIPE_TILE_CACHE_FLUSH_BIT)
+   ANV_PIPE_TILE_CACHE_FLUSH_BIT | \
+   ANV_PIPE_L3_FABRIC_FLUSH_BIT)
 
 #define ANV_PIPE_STALL_BITS ( \
    ANV_PIPE_STALL_AT_SCOREBOARD_BIT | \
@@ -3819,6 +3828,11 @@ struct anv_cmd_graphics_state {
    struct anv_attachment depth_att;
    struct anv_attachment stencil_att;
    struct anv_state null_surface_state;
+
+   /* Map of color output from the last dispatched fragment shader to color
+    * attachments in the render pass.
+    */
+   uint8_t color_output_mapping[MAX_RTS];
 
    anv_cmd_dirty_mask_t dirty;
    uint32_t vb_dirty;
@@ -4420,14 +4434,15 @@ anv_cmd_buffer_get_view_count(struct anv_cmd_buffer *cmd_buffer)
 enum anv_cmd_saved_state_flags {
    ANV_CMD_SAVED_STATE_COMPUTE_PIPELINE         = BITFIELD_BIT(0),
    ANV_CMD_SAVED_STATE_DESCRIPTOR_SET_0         = BITFIELD_BIT(1),
-   ANV_CMD_SAVED_STATE_PUSH_CONSTANTS           = BITFIELD_BIT(2),
+   ANV_CMD_SAVED_STATE_DESCRIPTOR_SET_ALL       = BITFIELD_BIT(2),
+   ANV_CMD_SAVED_STATE_PUSH_CONSTANTS           = BITFIELD_BIT(3),
 };
 
 struct anv_cmd_saved_state {
    uint32_t flags;
 
    struct anv_pipeline *pipeline;
-   struct anv_descriptor_set *descriptor_set;
+   struct anv_descriptor_set *descriptor_set[MAX_SETS];
    uint8_t push_constants[MAX_PUSH_CONSTANTS_SIZE];
 };
 
@@ -4772,6 +4787,13 @@ struct anv_graphics_pipeline {
     */
    uint32_t                                     vertex_input_elems;
    uint32_t                                     vertex_input_data[2 * 31 /* MAX_VES + 2 internal */];
+
+   /* Number of color outputs used by the fragment shader. */
+   uint8_t                                      num_color_outputs;
+   /* Map of color output of the fragment shader to color attachments in the
+    * render pass.
+    */
+   uint8_t                                      color_output_mapping[MAX_RTS];
 
    /* Pre computed CS instructions that can directly be copied into
     * anv_cmd_buffer.
@@ -5778,13 +5800,14 @@ anv_can_hiz_clear_ds_view(struct anv_device *device,
                           const VkQueueFlagBits queue_flags);
 
 bool
-anv_can_fast_clear_color_view(struct anv_device *device,
-                              struct anv_image_view *iview,
-                              VkImageLayout layout,
-                              union isl_color_value clear_color,
-                              uint32_t num_layers,
-                              VkRect2D render_area,
-                              const VkQueueFlagBits queue_flags);
+anv_can_fast_clear_color(const struct anv_cmd_buffer *cmd_buffer,
+                         const struct anv_image *image,
+                         unsigned level,
+                         const struct VkClearRect *clear_rect,
+                         VkImageLayout layout,
+                         enum isl_format view_format,
+                         struct isl_swizzle view_swizzle,
+                         union isl_color_value clear_color);
 
 enum isl_aux_state ATTRIBUTE_PURE
 anv_layout_to_aux_state(const struct intel_device_info * const devinfo,
@@ -5892,7 +5915,8 @@ static inline const struct anv_surface_state *
 anv_image_view_texture_surface_state(const struct anv_image_view *iview,
                                      uint32_t plane, VkImageLayout layout)
 {
-   return layout == VK_IMAGE_LAYOUT_GENERAL ?
+   return (layout == VK_IMAGE_LAYOUT_GENERAL ||
+           layout == VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ_KHR) ?
           &iview->planes[plane].general_sampler :
           &iview->planes[plane].optimal_sampler;
 }
@@ -6062,7 +6086,7 @@ struct anv_sampler {
 struct anv_query_pool {
    struct vk_query_pool                         vk;
 
-   /** Stride between slots, in bytes */
+   /** Stride between queries, in bytes */
    uint32_t                                     stride;
    /** Number of slots in this query pool */
    struct anv_bo *                              bo;
@@ -6076,8 +6100,11 @@ struct anv_query_pool {
    uint32_t                                     khr_perf_preamble_stride;
 
    /* KHR perf queries : */
+   /** Query pass size in bytes(availability + padding + query data) */
    uint32_t                                     pass_size;
+   /** Offset of the query data within a pass */
    uint32_t                                     data_offset;
+   /** query data / 2 */
    uint32_t                                     snapshot_size;
    uint32_t                                     n_counters;
    struct intel_perf_counter_pass                *counter_pass;

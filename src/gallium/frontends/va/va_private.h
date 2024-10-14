@@ -97,7 +97,8 @@
                                  VA_ENC_PACKED_HEADER_RAW_DATA)
 #define ENC_PACKED_HEADERS_AV1  (VA_ENC_PACKED_HEADER_SEQUENCE | \
                                  VA_ENC_PACKED_HEADER_PICTURE  | \
-                                 VA_ENC_PACKED_HEADER_MISC)
+                                 VA_ENC_PACKED_HEADER_MISC | \
+                                 VA_ENC_PACKED_HEADER_RAW_DATA)
 
 static inline enum pipe_video_chroma_format
 ChromaToPipe(int format)
@@ -432,7 +433,6 @@ typedef struct {
    enum pipe_video_entrypoint entrypoint;
    enum pipe_h2645_enc_rate_control_method rc;
    unsigned int rt_format;
-   unsigned int packed_headers;
 } vlVaConfig;
 
 typedef struct vlVaSurface {
@@ -595,9 +595,6 @@ void vlVaHandleSliceParameterBufferVP9(vlVaContext *context, vlVaBuffer *buf);
 void vlVaDecoderVP9BitstreamHeader(vlVaContext *context, vlVaBuffer *buf);
 void vlVaHandlePictureParameterBufferAV1(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
 void vlVaHandleSliceParameterBufferAV1(vlVaContext *context, vlVaBuffer *buf);
-void getEncParamPresetH264(vlVaContext *context);
-void getEncParamPresetH265(vlVaContext *context);
-void getEncParamPresetAV1(vlVaContext *context);
 void vlVaHandleVAEncMiscParameterTypeQualityLevel(struct pipe_enc_quality_modes *p, vlVaQualityBits *in);
 VAStatus vlVaHandleVAEncPictureParameterBufferTypeH264(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
 VAStatus vlVaHandleVAEncSliceParameterBufferTypeH264(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);

@@ -154,28 +154,6 @@ format_is_float32(VkFormat format)
    return channel >= 0 && desc->channel[channel].type == UTIL_FORMAT_TYPE_FLOAT && desc->channel[channel].size == 32;
 }
 
-unsigned
-radv_compact_spi_shader_col_format(uint32_t spi_shader_col_format)
-{
-   unsigned value = 0, num_mrts = 0;
-   unsigned i, num_targets;
-
-   /* Compute the number of MRTs. */
-   num_targets = DIV_ROUND_UP(util_last_bit(spi_shader_col_format), 4);
-
-   /* Remove holes in spi_shader_col_format. */
-   for (i = 0; i < num_targets; i++) {
-      unsigned spi_format = (spi_shader_col_format >> (i * 4)) & 0xf;
-
-      if (spi_format) {
-         value |= spi_format << (num_mrts * 4);
-         num_mrts++;
-      }
-   }
-
-   return value;
-}
-
 /*
  * Ordered so that for each i,
  * radv_format_meta_fs_key(radv_fs_key_format_exemplars[i]) == i.
@@ -397,6 +375,8 @@ radv_dynamic_state_mask(VkDynamicState state)
       return RADV_DYNAMIC_SAMPLE_LOCATIONS_ENABLE;
    case VK_DYNAMIC_STATE_ALPHA_TO_ONE_ENABLE_EXT:
       return RADV_DYNAMIC_ALPHA_TO_ONE_ENABLE;
+   case VK_DYNAMIC_STATE_DEPTH_CLAMP_RANGE_EXT:
+      return RADV_DYNAMIC_DEPTH_CLAMP_RANGE;
    default:
       unreachable("Unhandled dynamic state");
    }
@@ -771,6 +751,11 @@ radv_pipeline_init_dynamic_state(const struct radv_device *device, struct radv_g
 
    if (states & RADV_DYNAMIC_DEPTH_CLIP_NEGATIVE_ONE_TO_ONE) {
       dynamic->vk.vp.depth_clip_negative_one_to_one = state->vp->depth_clip_negative_one_to_one;
+   }
+
+   if (states & RADV_DYNAMIC_DEPTH_CLAMP_RANGE) {
+      dynamic->vk.vp.depth_clamp_mode = state->vp->depth_clamp_mode;
+      dynamic->vk.vp.depth_clamp_range = state->vp->depth_clamp_range;
    }
 
    /* Discard rectangles. */
@@ -1184,9 +1169,6 @@ radv_link_shaders(const struct radv_device *device, struct radv_shader_stage *pr
           !(producer->info.outputs_written & VARYING_BIT_VIEWPORT)) {
          NIR_PASS(_, consumer, radv_nir_lower_viewport_to_zero);
       }
-
-      /* Lower the view index to map on the layer. */
-      NIR_PASS(_, consumer, radv_nir_lower_view_index, producer->info.stage == MESA_SHADER_MESH);
    }
 
    if (producer_stage->key.optimisations_disabled || consumer_stage->key.optimisations_disabled)
@@ -1382,6 +1364,9 @@ static void
 radv_link_fs(struct radv_shader_stage *fs_stage, const struct radv_graphics_state_key *gfx_state)
 {
    assert(fs_stage->nir->info.stage == MESA_SHADER_FRAGMENT);
+
+   /* Lower the view index to map on the layer. */
+   NIR_PASS(_, fs_stage->nir, radv_nir_lower_view_index);
 
    radv_remove_color_exports(gfx_state, fs_stage->nir);
 }
@@ -3231,18 +3216,7 @@ radv_pipeline_init_extra(struct radv_graphics_pipeline *pipeline,
                          const struct radv_graphics_pipeline_create_info *extra,
                          const struct vk_graphics_pipeline_state *state)
 {
-   if (extra->custom_blend_mode == V_028808_CB_ELIMINATE_FAST_CLEAR ||
-       extra->custom_blend_mode == V_028808_CB_FMASK_DECOMPRESS ||
-       extra->custom_blend_mode == V_028808_CB_DCC_DECOMPRESS_GFX8 ||
-       extra->custom_blend_mode == V_028808_CB_DCC_DECOMPRESS_GFX11 ||
-       extra->custom_blend_mode == V_028808_CB_RESOLVE) {
-      /* According to the CB spec states, CB_SHADER_MASK should be set to enable writes to all four
-       * channels of MRT0.
-       */
-      pipeline->cb_shader_mask = 0xf;
-
-      pipeline->custom_blend_mode = extra->custom_blend_mode;
-   }
+   pipeline->custom_blend_mode = extra->custom_blend_mode;
 
    if (extra->use_rectlist) {
       struct radv_dynamic_state *dynamic = &pipeline->dynamic_state;
@@ -3388,17 +3362,6 @@ radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv
    if (!radv_pipeline_has_stage(pipeline, MESA_SHADER_MESH))
       radv_pipeline_init_input_assembly_state(device, pipeline);
    radv_pipeline_init_dynamic_state(device, pipeline, &gfx_state.vk, pCreateInfo);
-
-   const struct radv_shader *ps = pipeline->base.shaders[MESA_SHADER_FRAGMENT];
-   if (ps && !ps->info.has_epilog) {
-      pipeline->spi_shader_col_format = ps->info.ps.spi_shader_col_format;
-      pipeline->cb_shader_mask = ps->info.ps.cb_shader_mask;
-   }
-
-   unsigned custom_blend_mode = extra ? extra->custom_blend_mode : 0;
-   if (radv_needs_null_export_workaround(device, ps, custom_blend_mode) && !pipeline->spi_shader_col_format) {
-      pipeline->spi_shader_col_format = V_028714_SPI_SHADER_32_R;
-   }
 
    if (!radv_pipeline_has_stage(pipeline, MESA_SHADER_MESH))
       radv_pipeline_init_vertex_input_state(device, pipeline, &gfx_state.vk);

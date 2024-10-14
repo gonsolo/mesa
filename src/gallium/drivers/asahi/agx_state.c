@@ -11,6 +11,7 @@
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/genxml/agx_pack.h"
 #include "asahi/layout/layout.h"
+#include "asahi/lib/agx_abi.h"
 #include "asahi/lib/agx_helpers.h"
 #include "asahi/lib/agx_nir_passes.h"
 #include "asahi/lib/agx_ppp.h"
@@ -1674,8 +1675,10 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          /* Ensure the sample ID is preserved in register */
          nir_builder b =
             nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
-         nir_export_agx(&b, nir_load_exported_agx(&b, 1, 16, .base = 1),
-                        .base = 1);
+         nir_export_agx(
+            &b,
+            nir_load_exported_agx(&b, 1, 16, .base = AGX_ABI_FIN_SAMPLE_MASK),
+            .base = AGX_ABI_FOUT_SAMPLE_MASK);
 
          NIR_PASS(_, nir, agx_nir_lower_to_per_sample);
       }
@@ -1861,8 +1864,8 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
       so->info.cull_distance_size = nir->info.cull_distance_array_size;
    }
 
-   NIR_PASS(_, nir, agx_nir_lower_texture);
-   NIR_PASS(_, nir, nir_lower_ssbo);
+   NIR_PASS(_, nir, agx_nir_lower_texture, true);
+   NIR_PASS(_, nir, nir_lower_ssbo, NULL);
 
    agx_preprocess_nir(nir, dev->libagx);
 
@@ -2201,8 +2204,9 @@ agx_update_vs(struct agx_context *ctx, unsigned index_size_B)
       .prolog.vs.hw = key.hw,
       .prolog.vs.sw_index_size_B = key.hw ? 0 : index_size_B,
 
-      /* TODO: We could optimize this */
-      .prolog.vs.robustness.level = AGX_ROBUSTNESS_GL,
+      .prolog.vs.robustness.level =
+         ctx->robust ? AGX_ROBUSTNESS_GL : AGX_ROBUSTNESS_DISABLED,
+
       .prolog.vs.robustness.soft_fault = agx_has_soft_fault(dev),
       .main = ctx->vs,
    };
@@ -2348,6 +2352,8 @@ agx_update_fs(struct agx_batch *batch)
       struct pipe_surface *surf = batch->key.cbufs[i];
 
       link_key.epilog.fs.rt_formats[i] = surf ? surf->format : PIPE_FORMAT_NONE;
+      link_key.epilog.fs.remap[i] =
+         link_key.epilog.fs.link.broadcast_rt0 ? 0 : i;
    }
 
    memcpy(&link_key.epilog.fs.blend, &ctx->blend->key,
@@ -2358,7 +2364,7 @@ agx_update_fs(struct agx_batch *batch)
       link_key.epilog.fs.link.rt_spill_base = 0;
 
    /* Try to disable blending to get rid of some fsats */
-   if (link_key.epilog.fs.link.rt0_w_1) {
+   if (link_key.epilog.fs.link.loc0_w_1) {
       struct agx_blend_rt_key *k = &link_key.epilog.fs.blend.rt[0];
 
       k->rgb_src_factor = optimize_blend_factor_w_1(k->rgb_src_factor);
@@ -2589,7 +2595,7 @@ agx_build_meta_shader_internal(struct agx_context *ctx,
                nir_address_format_62bit_generic);
 
       agx_preprocess_nir(b.shader, NULL);
-      NIR_PASS(_, b.shader, agx_nir_lower_texture);
+      NIR_PASS(_, b.shader, agx_nir_lower_texture, true);
       NIR_PASS(_, b.shader, agx_nir_lower_multisampled_image_store);
    }
 

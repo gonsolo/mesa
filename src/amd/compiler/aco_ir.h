@@ -151,9 +151,6 @@ struct float_mode {
       };
       uint8_t val = 0;
    };
-   /* if false, optimizations which may remove infs/nan/-0.0 can be done */
-   bool preserve_signed_zero_inf_nan32 : 1;
-   bool preserve_signed_zero_inf_nan16_64 : 1;
    /* if false, optimizations which may remove denormal flushing can be done */
    bool must_flush_denorms32 : 1;
    bool must_flush_denorms16_64 : 1;
@@ -164,10 +161,7 @@ struct float_mode {
     * current one instead. */
    bool canReplace(float_mode other) const noexcept
    {
-      return val == other.val &&
-             (preserve_signed_zero_inf_nan32 || !other.preserve_signed_zero_inf_nan32) &&
-             (preserve_signed_zero_inf_nan16_64 || !other.preserve_signed_zero_inf_nan16_64) &&
-             (must_flush_denorms32 || !other.must_flush_denorms32) &&
+      return val == other.val && (must_flush_denorms32 || !other.must_flush_denorms32) &&
              (must_flush_denorms16_64 || !other.must_flush_denorms16_64) &&
              (care_about_round32 || !other.care_about_round32) &&
              (care_about_round16_64 || !other.care_about_round16_64);
@@ -911,15 +905,12 @@ private:
 class Definition final {
 public:
    constexpr Definition()
-       : temp(Temp(0, s1)), reg_(0), isFixed_(0), isKill_(0), isPrecise_(0), isNUW_(0), isNoCSE_(0)
+       : temp(Temp(0, s1)), reg_(0), isFixed_(0), isKill_(0), isPrecise_(0), isInfPreserve_(0),
+         isNaNPreserve_(0), isSZPreserve_(0), isNUW_(0), isNoCSE_(0)
    {}
-   Definition(uint32_t index, RegClass type) noexcept : temp(index, type) {}
    explicit Definition(Temp tmp) noexcept : temp(tmp) {}
-   Definition(PhysReg reg, RegClass type) noexcept : temp(Temp(0, type)) { setFixed(reg); }
-   Definition(uint32_t tmpId, PhysReg reg, RegClass type) noexcept : temp(Temp(tmpId, type))
-   {
-      setFixed(reg);
-   }
+   explicit Definition(PhysReg reg, RegClass type) noexcept : temp(Temp(0, type)) { setFixed(reg); }
+   explicit Definition(Temp tmp, PhysReg reg) noexcept : temp(tmp) { setFixed(reg); }
 
    constexpr bool isTemp() const noexcept { return tempId() > 0; }
 
@@ -955,6 +946,18 @@ public:
 
    constexpr bool isPrecise() const noexcept { return isPrecise_; }
 
+   constexpr void setInfPreserve(bool inf_preserve) noexcept { isInfPreserve_ = inf_preserve; }
+
+   constexpr bool isInfPreserve() const noexcept { return isInfPreserve_; }
+
+   constexpr void setNaNPreserve(bool nan_preserve) noexcept { isNaNPreserve_ = nan_preserve; }
+
+   constexpr bool isNaNPreserve() const noexcept { return isNaNPreserve_; }
+
+   constexpr void setSZPreserve(bool sz_preserve) noexcept { isSZPreserve_ = sz_preserve; }
+
+   constexpr bool isSZPreserve() const noexcept { return isSZPreserve_; }
+
    /* No Unsigned Wrap */
    constexpr void setNUW(bool nuw) noexcept { isNUW_ = nuw; }
 
@@ -972,6 +975,9 @@ private:
          uint8_t isFixed_ : 1;
          uint8_t isKill_ : 1;
          uint8_t isPrecise_ : 1;
+         uint8_t isInfPreserve_ : 1;
+         uint8_t isNaNPreserve_ : 1;
+         uint8_t isSZPreserve_ : 1;
          uint8_t isNUW_ : 1;
          uint8_t isNoCSE_ : 1;
       };
@@ -2109,25 +2115,15 @@ public:
       void* private_data;
    } debug;
 
-   uint32_t allocateId(RegClass rc)
-   {
-      assert(allocationID <= 16777215);
-      temp_rc.push_back(rc);
-      return allocationID++;
-   }
-
    void allocateRange(unsigned amount)
    {
-      assert(allocationID + amount <= 16777216);
+      assert(temp_rc.size() + amount <= 16777216);
       temp_rc.resize(temp_rc.size() + amount);
-      allocationID += amount;
    }
 
    Temp allocateTmp(RegClass rc) { return Temp(allocateId(rc), rc); }
 
-   uint32_t peekAllocationId() { return allocationID; }
-
-   friend void reindex_ssa(Program* program, bool update_live_out);
+   uint32_t peekAllocationId() { return temp_rc.size(); }
 
    Block* create_and_insert_block()
    {
@@ -2147,7 +2143,12 @@ public:
    }
 
 private:
-   uint32_t allocationID = 1;
+   uint32_t allocateId(RegClass rc)
+   {
+      assert(temp_rc.size() <= 16777215);
+      temp_rc.push_back(rc);
+      return temp_rc.size() - 1;
+   }
 };
 
 struct ra_test_policy {
@@ -2199,6 +2200,7 @@ void optimize_postRA(Program* program);
 void setup_reduce_temp(Program* program);
 void lower_to_cssa(Program* program);
 void register_allocation(Program* program, ra_test_policy = {});
+void reindex_ssa(Program* program);
 void ssa_elimination(Program* program);
 void lower_to_hw_instr(Program* program);
 void schedule_program(Program* program);

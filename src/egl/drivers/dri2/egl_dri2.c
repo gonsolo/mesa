@@ -627,16 +627,19 @@ dri2_setup_screen(_EGLDisplay *disp)
    struct pipe_screen *pscreen = screen->base.screen;
    unsigned int api_mask = screen->api_mask;
 
+#ifdef HAVE_LIBDRM
    int caps = dri_get_screen_param(dri2_dpy->dri_screen_render_gpu, PIPE_CAP_DMABUF);
    /* set if both import and export are suported */
    if (dri2_dpy->multibuffers_available) {
       dri2_dpy->has_dmabuf_import = (caps & DRM_PRIME_CAP_IMPORT) > 0;
       dri2_dpy->has_dmabuf_export = (caps & DRM_PRIME_CAP_EXPORT) > 0;
    }
+#endif
 #ifdef HAVE_ANDROID_PLATFORM
    dri2_dpy->has_native_fence_fd = dri_get_screen_param(dri2_dpy->dri_screen_render_gpu, PIPE_CAP_NATIVE_FENCE_FD);
 #endif
-   dri2_dpy->has_compression_modifiers = pscreen->query_compression_rates && pscreen->query_compression_modifiers;
+   dri2_dpy->has_compression_modifiers = pscreen->query_compression_rates &&
+                                         (pscreen->query_compression_modifiers || dri2_dpy->kopper);
 
    /*
     * EGL 1.5 specification defines the default value to 1. Moreover,
@@ -672,6 +675,18 @@ dri2_setup_screen(_EGLDisplay *disp)
    /* Report back to EGL the bitmask of priorities supported */
    disp->Extensions.IMG_context_priority =
       dri_get_screen_param(dri2_dpy->dri_screen_render_gpu, PIPE_CAP_CONTEXT_PRIORITY_MASK);
+
+   /**
+    * FIXME: Some drivers currently misreport what context priorities the user
+    * can use and fail context creation. This cause issues on Android where the
+    * display process would try to use realtime priority. This is also a spec
+    * violation for IMG_context_priority.
+    */
+#ifndef HAVE_ANDROID_PLATFORM
+   disp->Extensions.NV_context_priority_realtime =
+      disp->Extensions.IMG_context_priority &
+      (1 << __EGL_CONTEXT_PRIORITY_REALTIME_BIT);
+#endif
 
    disp->Extensions.EXT_pixel_format_float = EGL_TRUE;
 
@@ -1144,6 +1159,9 @@ dri2_fill_context_attribs(struct dri2_egl_context *dri2_ctx,
       unsigned val;
 
       switch (dri2_ctx->base.ContextPriority) {
+      case EGL_CONTEXT_PRIORITY_REALTIME_NV:
+         val = __DRI_CTX_PRIORITY_REALTIME;
+         break;
       case EGL_CONTEXT_PRIORITY_HIGH_IMG:
          val = __DRI_CTX_PRIORITY_HIGH;
          break;
@@ -2166,9 +2184,10 @@ dri2_create_image_mesa_drm_buffer(_EGLDisplay *disp, _EGLContext *ctx,
       return NULL;
    }
 
+   int offset = 0;
    dri_image = dri2_from_names(
       dri2_dpy->dri_screen_render_gpu, attrs.Width, attrs.Height, fourcc,
-      (int *) &name, 1, (int *) &pitch, 0, NULL);
+      (int *) &name, 1, (int *) &pitch, &offset, NULL);
 
    return dri2_create_image_from_dri(disp, dri_image);
 }

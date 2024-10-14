@@ -5,9 +5,9 @@
 # DEBIAN_TEST_GL_TAG
 # KERNEL_ROOTFS_TAG
 
-set -ex
+set -uex
 
-VALIDATION_TAG="v1.3.289"
+VALIDATION_TAG="snapshot-2024wk39"
 
 git clone -b "$VALIDATION_TAG" --single-branch --depth 1 https://github.com/KhronosGroup/Vulkan-ValidationLayers.git
 pushd Vulkan-ValidationLayers

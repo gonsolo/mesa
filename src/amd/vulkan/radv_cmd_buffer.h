@@ -76,7 +76,8 @@ enum radv_dynamic_state_bits {
    RADV_DYNAMIC_ALPHA_TO_ONE_ENABLE = 1ull << 50,
    RADV_DYNAMIC_COLOR_ATTACHMENT_MAP = 1ull << 51,
    RADV_DYNAMIC_INPUT_ATTACHMENT_MAP = 1ull << 52,
-   RADV_DYNAMIC_ALL = (1ull << 53) - 1,
+   RADV_DYNAMIC_DEPTH_CLAMP_RANGE = 1ull << 53,
+   RADV_DYNAMIC_ALL = (1ull << 54) - 1,
 };
 
 enum radv_cmd_dirty_bits {
@@ -87,14 +88,18 @@ enum radv_cmd_dirty_bits {
    RADV_CMD_DIRTY_STREAMOUT_BUFFER = 1ull << 4,
    RADV_CMD_DIRTY_GUARDBAND = 1ull << 5,
    RADV_CMD_DIRTY_RBPLUS = 1ull << 6,
-   RADV_CMD_DIRTY_SHADER_QUERY = 1ull << 7,
-   RADV_CMD_DIRTY_OCCLUSION_QUERY = 1ull << 8,
-   RADV_CMD_DIRTY_DB_SHADER_CONTROL = 1ull << 9,
-   RADV_CMD_DIRTY_STREAMOUT_ENABLE = 1ull << 10,
-   RADV_CMD_DIRTY_GRAPHICS_SHADERS = 1ull << 11,
-   RADV_CMD_DIRTY_COLOR_OUTPUT = 1ull << 12,
-   RADV_CMD_DIRTY_FBFETCH_OUTPUT = 1ull << 13,
-   RADV_CMD_DIRTY_ALL = (1ull << 14) - 1,
+   RADV_CMD_DIRTY_OCCLUSION_QUERY = 1ull << 7,
+   RADV_CMD_DIRTY_DB_SHADER_CONTROL = 1ull << 8,
+   RADV_CMD_DIRTY_STREAMOUT_ENABLE = 1ull << 9,
+   RADV_CMD_DIRTY_GRAPHICS_SHADERS = 1ull << 10,
+   RADV_CMD_DIRTY_COLOR_OUTPUT = 1ull << 11,
+   RADV_CMD_DIRTY_FBFETCH_OUTPUT = 1ull << 12,
+   RADV_CMD_DIRTY_FS_STATE = 1ull << 13,
+   RADV_CMD_DIRTY_NGG_STATE = 1ull << 14,
+   RADV_CMD_DIRTY_TASK_STATE = 1ull << 15,
+   RADV_CMD_DIRTY_ALL = (1ull << 16) - 1,
+
+   RADV_CMD_DIRTY_SHADER_QUERY = RADV_CMD_DIRTY_NGG_STATE | RADV_CMD_DIRTY_TASK_STATE,
 };
 
 enum radv_cmd_flush_bits {
@@ -414,7 +419,7 @@ struct radv_cmd_state {
 
    /* Per-vertex VRS state. */
    uint32_t last_vrs_rates;
-   int8_t last_vrs_rates_sgpr_idx;
+   int32_t last_force_vrs_rates_offset;
 
    /* Whether to suspend streamout for internal driver operations. */
    bool suspend_streamout;

@@ -254,7 +254,7 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       return;
 
    int prims = u_decomposed_prims_for_vertices(info->mode, draws[0].count);
-   if (unlikely(prims <= 0)) {
+   if (!indirect && unlikely(prims <= 0)) {
       DBG("Invalid draw primitive mode=%i or no primitives to be drawn", info->mode);
       return;
    }
@@ -302,8 +302,10 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       .sprite_coord_yinvert = !!ctx->rasterizer->sprite_coord_mode,
    };
 
-   if (pfb->cbufs[0])
-      key.frag_rb_swap = !!translate_pe_format_rb_swap(pfb->cbufs[0]->format);
+    for (i = 0; i < pfb->nr_cbufs; i++) {
+       if (pfb->cbufs[i])
+         key.frag_rb_swap |= !!translate_pe_format_rb_swap(pfb->cbufs[i]->format) << i;
+    }
 
    if (!etna_get_vs(ctx, &key) || !etna_get_fs(ctx, &key)) {
       BUG("compiled shaders are not okay");
@@ -373,6 +375,19 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       }
    }
 
+   if (indirect) {
+      /*
+       * When the indirect buffer is written by the GPU, e.g. by a compute shader,
+       * the shader L1 cache needs to be flushed for the data to become visible to
+       * the FE. Also there needs to be a PE/FE stall enforced between commands
+       * that generate the indirect buffer content and the indirect draw.
+       *
+       * This isn't implemented right now, so we don't support GPU written indirect buffers for now.
+       */
+      assert(!(etna_resource_status(ctx, etna_resource(indirect->buffer)) & ETNA_PENDING_WRITE));
+      resource_read(ctx, indirect->buffer);
+   }
+
    ctx->stats.prims_generated += u_reduced_prims_for_vertices(info->mode, draws[0].count);
    ctx->stats.draw_calls++;
 
@@ -399,15 +414,19 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       }
    }
 
-   if (screen->info->halti >= 2) {
-      /* On HALTI2+ (GC3000 and higher) only use instanced drawing commands, as the blob does */
-      etna_draw_instanced(ctx->stream, info->index_size, draw_mode, info->instance_count,
-         draws[0].count, info->index_size ? draws->index_bias : draws[0].start);
+   if (indirect) {
+      etna_draw_indirect(ctx->stream, draw_mode, indirect->buffer, indirect->offset, info->index_size);
    } else {
-      if (info->index_size)
-         etna_draw_indexed_primitives(ctx->stream, draw_mode, 0, prims, draws->index_bias);
-      else
-         etna_draw_primitives(ctx->stream, draw_mode, draws[0].start, prims);
+      if (screen->info->halti >= 2) {
+         /* On HALTI2+ (GC3000 and higher) only use instanced drawing commands, as the blob does */
+         etna_draw_instanced(ctx->stream, info->index_size, draw_mode, info->instance_count,
+            draws[0].count, info->index_size ? draws->index_bias : draws[0].start);
+      } else {
+         if (info->index_size)
+            etna_draw_indexed_primitives(ctx->stream, draw_mode, 0, prims, draws->index_bias);
+         else
+            etna_draw_primitives(ctx->stream, draw_mode, draws[0].start, prims);
+      }
    }
 
    if (DBG_ENABLED(ETNA_DBG_DRAW_STALL)) {
@@ -420,8 +439,11 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    if (DBG_ENABLED(ETNA_DBG_FLUSH_ALL))
       pctx->flush(pctx, NULL, 0);
 
-   if (ctx->framebuffer_s.cbufs[0])
-      etna_resource_level_mark_changed(etna_surface(ctx->framebuffer_s.cbufs[0])->level);
+   for (i = 0; i < pfb->nr_cbufs; i++) {
+      if (pfb->cbufs[i])
+         etna_resource_level_mark_changed(etna_surface(pfb->cbufs[i])->level);
+   }
+
    if (ctx->framebuffer_s.zsbuf)
       etna_resource_level_mark_changed(etna_surface(ctx->framebuffer_s.zsbuf)->level);
    if (info->index_size && indexbuf != info->index.resource)

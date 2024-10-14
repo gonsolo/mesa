@@ -42,6 +42,10 @@ clear_image(struct hk_cmd_buffer *cmd, struct hk_image *image,
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    ASSERTED VkResult result;
 
+   /* TODO: Use fast clear */
+   bool compressed = ail_is_compressed(&image->planes[0].layout);
+   perf_debug(dev, "Image clear (%scompressed)", compressed ? "" : "un");
+
    for (uint32_t r = 0; r < range_count; r++) {
       const uint32_t level_count =
          vk_image_subresource_level_count(&image->vk, &ranges[r]);
@@ -70,7 +74,7 @@ clear_image(struct hk_cmd_buffer *cmd, struct hk_image *image,
          };
          const VkImageViewCreateInfo view_info = {
             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-            .flags = VK_IMAGE_VIEW_CREATE_INTERNAL_MESA,
+            .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
             .pNext = &view_usage_info,
             .image = hk_image_to_handle(image),
             .viewType = render_view_type(image->vk.image_type, layer_count),

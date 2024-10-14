@@ -503,13 +503,11 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
                     stage->info.outinfo.export_prim_id, false, false, false, stage->info.force_vrs_per_vertex);
 
       } else {
-         bool emulate_ngg_gs_query_pipeline_stat = pdev->emulate_ngg_gs_query_pipeline_stat;
-
          ac_nir_gs_output_info gs_out_info = {
             .streams = stage->info.gs.output_streams,
             .usage_mask = stage->info.gs.output_usage_mask,
          };
-         NIR_PASS_V(stage->nir, ac_nir_lower_legacy_gs, false, emulate_ngg_gs_query_pipeline_stat, &gs_out_info);
+         NIR_PASS_V(stage->nir, ac_nir_lower_legacy_gs, false, false, &gs_out_info);
       }
    } else if (stage->stage == MESA_SHADER_FRAGMENT) {
       ac_nir_lower_ps_options options = {
@@ -518,7 +516,7 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
          .use_aco = !radv_use_llvm_for_stage(pdev, stage->stage),
          .uses_discard = true,
          .alpha_func = COMPARE_FUNC_ALWAYS,
-         .no_color_export = stage->info.has_epilog,
+         .no_color_export = stage->info.ps.has_epilog,
          .no_depth_export = stage->info.ps.exports_mrtz_via_epilog,
 
          .bc_optimize_for_persp = G_0286CC_PERSP_CENTER_ENA(stage->info.ps.spi_ps_input_ena) &&

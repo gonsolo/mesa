@@ -180,10 +180,10 @@ panvk_shader_get_dev_addr(const struct panvk_shader *shader)
    return shader != NULL ? panvk_priv_mem_dev_addr(shader->code_mem) : 0;
 }
 
-void panvk_per_arch(link_shaders)(struct panvk_pool *desc_pool,
-                                  const struct panvk_shader *vs,
-                                  const struct panvk_shader *fs,
-                                  struct panvk_shader_link *link);
+VkResult panvk_per_arch(link_shaders)(struct panvk_pool *desc_pool,
+                                      const struct panvk_shader *vs,
+                                      const struct panvk_shader *fs,
+                                      struct panvk_shader_link *link);
 
 static inline void
 panvk_shader_link_cleanup(struct panvk_pool *desc_pool,
@@ -194,8 +194,32 @@ panvk_shader_link_cleanup(struct panvk_pool *desc_pool,
 }
 
 bool panvk_per_arch(nir_lower_descriptors)(
-   nir_shader *nir, struct panvk_device *dev, uint32_t set_layout_count,
+   nir_shader *nir, struct panvk_device *dev,
+   const struct vk_pipeline_robustness_state *rs, uint32_t set_layout_count,
    struct vk_descriptor_set_layout *const *set_layouts,
    struct panvk_shader *shader);
+
+/* This a stripped-down version of panvk_shader for internal shaders that
+ * are managed by vk_meta (blend and preload shaders). Those don't need the
+ * complexity inherent to user provided shaders as they're not exposed. */
+struct panvk_internal_shader {
+   struct vk_shader vk;
+   struct pan_shader_info info;
+   struct panvk_priv_mem code_mem;
+
+#if PAN_ARCH <= 7
+   struct panvk_priv_mem rsd;
+#else
+   struct panvk_priv_mem spd;
+#endif
+};
+
+VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_internal_shader, vk.base, VkShaderEXT,
+                               VK_OBJECT_TYPE_SHADER_EXT)
+
+VkResult panvk_per_arch(create_internal_shader)(
+   struct panvk_device *dev, nir_shader *nir,
+   struct panfrost_compile_inputs *compiler_inputs,
+   struct panvk_internal_shader **shader_out);
 
 #endif

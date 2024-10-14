@@ -152,6 +152,9 @@ struct panfrost_batch {
    /* Thread local storage descriptor. */
    struct panfrost_ptr tls;
 
+   /* Vertex count */
+   uint32_t vertex_count;
+
    /* Tiler context */
    struct pan_tiler_context tiler_ctx;
 
@@ -197,6 +200,9 @@ struct panfrost_batch {
     * attributes, wildly enough.
     */
    mali_ptr images[PIPE_SHADER_TYPES];
+
+   /* SSBOs. */
+   mali_ptr ssbos[PIPE_SHADER_TYPES];
 
    /* On Valhall, these are properties of the batch. On Bifrost, they are
     * per draw.

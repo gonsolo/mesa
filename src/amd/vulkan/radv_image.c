@@ -640,6 +640,9 @@ radv_get_surface_flags(struct radv_device *device, struct radv_image *image, uns
       unreachable("unhandled image type");
    }
 
+   if (image->vk.create_flags & (VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT | VK_IMAGE_CREATE_2D_VIEW_COMPATIBLE_BIT_EXT))
+      flags |= RADEON_SURF_VIEW_3D_AS_2D_ARRAY;
+
    /* Required for clearing/initializing a specific layer on GFX8. */
    flags |= RADEON_SURF_CONTIGUOUS_DCC_LAYERS;
 
@@ -762,7 +765,7 @@ radv_query_opaque_metadata(struct radv_device *device, struct radv_image *image,
 
    radv_make_texture_descriptor(device, image, false, (VkImageViewType)image->vk.image_type, plane_format,
                                 &fixedmapping, 0, image->vk.mip_levels - 1, 0, image->vk.array_layers - 1, plane_width,
-                                plane_height, image->vk.extent.depth, 0.0f, desc, NULL, 0, NULL, NULL);
+                                plane_height, image->vk.extent.depth, 0.0f, desc, NULL, NULL, NULL);
 
    radv_set_mutable_tex_desc_fields(device, image, base_level_info, plane_id, 0, 0, surface->blk_w, false, false, false,
                                     false, desc, NULL);

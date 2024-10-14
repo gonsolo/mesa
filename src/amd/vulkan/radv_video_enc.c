@@ -382,7 +382,7 @@ radv_enc_flush_headers(struct radv_cmd_buffer *cmd_buffer)
 static void
 radv_enc_code_ue(struct radv_cmd_buffer *cmd_buffer, unsigned int value)
 {
-   int x = -1;
+   unsigned int x = 0;
    unsigned int ue_code = value + 1;
    value += 1;
 
@@ -390,9 +390,9 @@ radv_enc_code_ue(struct radv_cmd_buffer *cmd_buffer, unsigned int value)
       value = (value >> 1);
       x += 1;
    }
-
-   unsigned int ue_length = (x << 1) + 1;
-   radv_enc_code_fixed_bits(cmd_buffer, ue_code, ue_length);
+   if (x > 1)
+     radv_enc_code_fixed_bits(cmd_buffer, 0, x - 1);
+   radv_enc_code_fixed_bits(cmd_buffer, ue_code, x);
 }
 
 static void
@@ -483,6 +483,9 @@ radv_enc_session_init(struct radv_cmd_buffer *cmd_buffer, const struct VkVideoEn
       radeon_emit(cs, 0); // slice output enabled.
    }
    radeon_emit(cs, vid->enc_session.display_remote);
+   if (pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_4) {
+      radeon_emit(cs, 0);
+   }
    ENC_END;
 }
 
@@ -947,7 +950,7 @@ radv_enc_slice_header_hevc(struct radv_cmd_buffer *cmd_buffer, const VkVideoEnco
    radv_enc_code_fixed_bits(cmd_buffer, 0x0, 1);
    radv_enc_code_fixed_bits(cmd_buffer, nal_unit_type, 6);
    radv_enc_code_fixed_bits(cmd_buffer, 0x0, 6);
-   radv_enc_code_fixed_bits(cmd_buffer, 0x1, 3);
+   radv_enc_code_fixed_bits(cmd_buffer, pic->TemporalId + 1, 3);
 
    radv_enc_flush_headers(cmd_buffer);
    instruction[inst_index] = RENCODE_HEADER_INSTRUCTION_COPY;
@@ -1142,11 +1145,21 @@ radv_enc_ctx(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfoKHR *inf
    struct radv_image_plane *dpb_chroma = NULL;
    uint64_t va = 0;
    uint32_t luma_pitch = 0;
+   int max_ref_slot_idx = 0;
 
-   if (info->pSetupReferenceSlot)
+   if (info->pSetupReferenceSlot) {
       dpb_iv = radv_image_view_from_handle(info->pSetupReferenceSlot->pPictureResource->imageViewBinding);
-   else if (info->referenceSlotCount > 0)
+      if (info->pSetupReferenceSlot->slotIndex > max_ref_slot_idx)
+         max_ref_slot_idx = info->pSetupReferenceSlot->slotIndex;
+   }
+
+   if (info->referenceSlotCount > 0) {
       dpb_iv = radv_image_view_from_handle(info->pReferenceSlots[0].pPictureResource->imageViewBinding);
+      for (unsigned i = 0; i < info->referenceSlotCount; i++) {
+         if (info->pReferenceSlots[i].slotIndex > max_ref_slot_idx)
+            max_ref_slot_idx = info->pReferenceSlots[i].slotIndex;
+      }
+   }
 
    if (dpb_iv) {
       dpb = dpb_iv->image;
@@ -1170,10 +1183,10 @@ radv_enc_ctx(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfoKHR *inf
    radeon_emit(cs, swizzle_mode);
    radeon_emit(cs, luma_pitch);                   // rec_luma_pitch
    radeon_emit(cs, luma_pitch);                   // rec_luma_pitch0); //rec_chromma_pitch
-   radeon_emit(cs, info->referenceSlotCount + 1); // num_reconstructed_pictures
+   radeon_emit(cs, max_ref_slot_idx + 1); // num_reconstructed_pictures
 
    int i;
-   for (i = 0; i < info->referenceSlotCount + 1; i++) {
+   for (i = 0; i < max_ref_slot_idx + 1; i++) {
       radeon_emit(cs, dpb_luma ? dpb_luma->surface.u.gfx9.surf_offset + i * dpb_luma->surface.u.gfx9.surf_slice_size
                                : 0); // luma offset
       radeon_emit(cs, dpb_chroma
@@ -1980,6 +1993,14 @@ radv_GetEncodedVideoSessionParametersKHR(VkDevice device,
          assert(pps);
          char *data_ptr = pData ? (char *)pData + vps_size + sps_size : NULL;
          vk_video_encode_h265_pps(pps, size_limit, &pps_size, data_ptr);
+
+         if (pFeedbackInfo) {
+            struct VkVideoEncodeH265SessionParametersFeedbackInfoKHR *h265_feedback_info =
+               vk_find_struct(pFeedbackInfo->pNext, VIDEO_ENCODE_H265_SESSION_PARAMETERS_FEEDBACK_INFO_KHR);
+            pFeedbackInfo->hasOverrides = VK_TRUE;
+            if (h265_feedback_info)
+               h265_feedback_info->hasStdPPSOverrides = VK_TRUE;
+         }
       }
       total_size = sps_size + pps_size + vps_size;
       break;

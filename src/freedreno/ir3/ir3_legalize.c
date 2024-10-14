@@ -598,7 +598,7 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
          list_addtail(&n->node, &block->instr_list);
       }
 
-      if (is_sfu(n))
+      if (is_sfu(n) || n->opc == OPC_SHFL)
          regmask_set(&state->needs_ss, n->dsts[0]);
 
       foreach_dst (dst, n) {
@@ -662,7 +662,7 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
           * (sy)... ; sam synced so consumed its sources
           * (ss)write rs ; (ss) unnecessary since rs has been consumed already
           */
-         bool needs_ss = is_ss_producer(n) || is_store(n);
+         bool needs_ss = is_ss_producer(n) || is_store(n) || n->opc == OPC_STC;
 
          if (n_is_scalar_alu) {
             /* Scalar ALU also does not immediately read its source because it

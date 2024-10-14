@@ -57,8 +57,8 @@ static const struct spirv_capabilities implemented_capabilities = {
    .AtomicFloat64MinMaxEXT = true,
    .AtomicStorage = true,
    .ClipDistance = true,
-   .ComputeDerivativeGroupLinearNV = true,
-   .ComputeDerivativeGroupQuadsNV = true,
+   .ComputeDerivativeGroupLinearKHR = true,
+   .ComputeDerivativeGroupQuadsKHR = true,
    .CooperativeMatrixKHR = true,
    .CullDistance = true,
    .DemoteToHelperInvocation = true,
@@ -128,6 +128,7 @@ static const struct spirv_capabilities implemented_capabilities = {
    .MinLod = true,
    .MultiView = true,
    .MultiViewport = true,
+   .OptNoneINTEL = true, // FIXME: make codegen emit the EXT name
    .PerViewAttributesNV = true,
    .PhysicalStorageBufferAddresses = true,
    .QuadControlKHR = true,
@@ -4913,6 +4914,15 @@ vtn_handle_preamble_instruction(struct vtn_builder *b, SpvOp opcode,
                   spirv_capability_to_string(cap));
          break;
 
+      case SpvCapabilityOptNoneEXT:
+         /* This is a "strong request" not to optimize a function, usually
+          * because it's a compute shader and the workgroup size etc is
+          * manually tuned and we shouldn't risk undoing it. Someday!
+          */
+         vtn_info("Not fully supported capability: %s",
+                  spirv_capability_to_string(cap));
+         break;
+
       default:
          vtn_fail_if(!spirv_capabilities_get(&implemented_capabilities, cap),
                      "Unimplemented SPIR-V capability: %s (%u)",
@@ -5272,13 +5282,13 @@ vtn_handle_execution_mode(struct vtn_builder *b, struct vtn_value *entry_point,
       vtn_assert(b->shader->info.stage == MESA_SHADER_FRAGMENT);
       break;
 
-   case SpvExecutionModeDerivativeGroupQuadsNV:
-      vtn_assert(b->shader->info.stage == MESA_SHADER_COMPUTE);
+   case SpvExecutionModeDerivativeGroupQuadsKHR:
+      vtn_assert(gl_shader_stage_uses_workgroup(b->shader->info.stage));
       b->shader->info.derivative_group = DERIVATIVE_GROUP_QUADS;
       break;
 
-   case SpvExecutionModeDerivativeGroupLinearNV:
-      vtn_assert(b->shader->info.stage == MESA_SHADER_COMPUTE);
+   case SpvExecutionModeDerivativeGroupLinearKHR:
+      vtn_assert(gl_shader_stage_uses_workgroup(b->shader->info.stage));
       b->shader->info.derivative_group = DERIVATIVE_GROUP_LINEAR;
       break;
 

@@ -15,6 +15,8 @@ zink-lvp:
     ZINK_DEBUG: validation
     XVFB_SCRIPT: "VK_DRIVER=lvp install/deqp-runner.sh"
   script: |
+    export LD_LIBRARY_PATH="$CI_PROJECT_DIR/install/lib"
+    export LIBGL_DRIVERS_PATH="$CI_PROJECT_DIR/install/lib/dri"
     xvfb-run --server-args='-noreset' bash -c ". $SCRIPTS_DIR/setup-test-env.sh && ${XVFB_SCRIPT}"
 
 zink-venus-lvp:
@@ -32,8 +34,10 @@ zink-venus-lvp:
     LP_NUM_THREADS: 2
     CROSVM_MEMORY: 12288
     CROSVM_CPU: $FDO_CI_CONCURRENT
-  script:
-    - xvfb-run --server-args='-noreset' bash -c "./install/crosvm-runner.sh ./install/deqp-runner.sh"
+  script: |
+    export LD_LIBRARY_PATH="$CI_PROJECT_DIR/install/lib"
+    export LIBGL_DRIVERS_PATH="$CI_PROJECT_DIR/install/lib/dri"
+    xvfb-run --server-args='-noreset' bash -c "./install/crosvm-runner.sh ./install/deqp-runner.sh"
 
 zink-anv-adl:
   extends:
@@ -111,7 +115,7 @@ zink-tu-a618:
     - .zink-test
     - .lava-sc7180-trogdor-lazor-limozeen:arm64
   variables:
-    DEQP_FRACTION: 2
+    DEQP_FRACTION: 3
     DEQP_SUITE: zink-freedreno-a618
     FLAKES_CHANNEL: "#freedreno-ci"
     HWCI_START_WESTON: 1
@@ -179,9 +183,11 @@ zink-radv-polaris10-valve:
     - .radv-zink-test-valve
     - .polaris10-test-valve-kws
     - .zink-radv-manual-rules
+  timeout: 40m
   variables:
     GPU_VERSION: zink-radv-polaris10
     ZINK_DEBUG: quiet
+    B2C_TIMEOUT_OVERALL_MINUTES: 30
 
 zink-radv-navi10-valve:
   extends:

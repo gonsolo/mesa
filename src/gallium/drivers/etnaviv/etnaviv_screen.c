@@ -162,9 +162,6 @@ etna_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_FRAGMENT_SHADER_DERIVATIVES:
    case PIPE_CAP_TEXTURE_BARRIER:
    case PIPE_CAP_QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION:
-   case PIPE_CAP_VERTEX_BUFFER_OFFSET_4BYTE_ALIGNED_ONLY:
-   case PIPE_CAP_VERTEX_BUFFER_STRIDE_4BYTE_ALIGNED_ONLY:
-   case PIPE_CAP_VERTEX_ELEMENT_SRC_OFFSET_4BYTE_ALIGNED_ONLY:
    case PIPE_CAP_TGSI_TEXCOORD:
    case PIPE_CAP_VERTEX_COLOR_UNCLAMPED:
    case PIPE_CAP_MIXED_COLOR_DEPTH_BITS:
@@ -172,6 +169,8 @@ etna_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_STRING_MARKER:
    case PIPE_CAP_FRONTEND_NOOP:
       return 1;
+   case PIPE_CAP_VERTEX_INPUT_ALIGNMENT:
+      return PIPE_VERTEX_INPUT_ALIGNMENT_4BYTE;
    case PIPE_CAP_NATIVE_FENCE_FD:
       return screen->drm_version >= ETNA_DRM_VERSION_FENCE_FD;
    case PIPE_CAP_FS_POSITION_IS_SYSVAL:
@@ -198,6 +197,9 @@ etna_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 
    case PIPE_CAP_ALPHA_TEST:
       return !VIV_FEATURE(screen, ETNA_FEATURE_PE_NO_ALPHA_TEST);
+
+   case PIPE_CAP_DRAW_INDIRECT:
+      return VIV_FEATURE(screen, ETNA_FEATURE_HALTI5);
 
    /* Unsupported features. */
    case PIPE_CAP_TEXTURE_BUFFER_OFFSET_ALIGNMENT:
@@ -250,6 +252,20 @@ etna_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return 7;
    case PIPE_CAP_SEAMLESS_CUBE_MAP_PER_TEXTURE:
       return screen->specs.seamless_cube_map;
+
+   /* Render targets. */
+   case PIPE_CAP_MAX_RENDER_TARGETS: {
+      /* If the GPU supports float formats we need to reserve half of
+       * the available render targets for emulation proposes.
+       */
+      if (VIV_FEATURE(screen, ETNA_FEATURE_HALTI2))
+         return screen->specs.num_rts / 2;
+
+      return screen->specs.num_rts;
+   }
+   case PIPE_CAP_INDEP_BLEND_ENABLE:
+   case PIPE_CAP_INDEP_BLEND_FUNC:
+      return screen->info->halti >= 5;
 
    /* Queries. */
    case PIPE_CAP_OCCLUSION_QUERY:
@@ -394,7 +410,7 @@ etna_screen_get_shader_param(struct pipe_screen *pscreen,
       return shader == PIPE_SHADER_FRAGMENT ? screen->specs.max_varyings
                                             : screen->specs.vertex_max_elements;
    case PIPE_SHADER_CAP_MAX_OUTPUTS:
-      return 16; /* see VIVS_VS_OUTPUT */
+      return screen->specs.max_vs_outputs;
    case PIPE_SHADER_CAP_MAX_TEMPS:
       return 64; /* Max native temporaries. */
    case PIPE_SHADER_CAP_MAX_CONST_BUFFERS:
@@ -471,7 +487,7 @@ gpu_supports_texture_format(struct etna_screen *screen, uint32_t fmt,
 
    /* Requires split sampler support, which the driver doesn't support, yet. */
    if (!util_format_is_compressed(format) &&
-       util_format_get_blocksizebits(format) > 32)
+       util_format_get_blocksizebits(format) > 64)
       return false;
 
    if (fmt == TEXTURE_FORMAT_ETC1)
@@ -517,7 +533,7 @@ gpu_supports_render_format(struct etna_screen *screen, enum pipe_format format,
       return false;
 
    /* Requires split target support, which the driver doesn't support, yet. */
-   if (util_format_get_blocksizebits(format) > 32)
+   if (util_format_get_blocksizebits(format) > 64)
       return false;
 
    if (sample_count > 1) {
@@ -795,6 +811,17 @@ etna_screen_get_dmabuf_modifier_planes(struct pipe_screen *pscreen,
 }
 
 static void
+etna_determine_num_rts(struct etna_screen *screen)
+{
+   if (screen->info->halti >= 2)
+      screen->specs.num_rts = 8;
+   else if (screen->info->halti >= 0)
+      screen->specs.num_rts = 4;
+   else
+      screen->specs.num_rts = 1;
+}
+
+static void
 etna_determine_uniform_limits(struct etna_screen *screen)
 {
    /* values for the non unified case are taken from
@@ -853,7 +880,6 @@ etna_get_specs(struct etna_screen *screen)
    if (info->type == ETNA_CORE_GPU) {
       instruction_count = info->gpu.max_instructions;
       screen->specs.pixel_pipes = info->gpu.pixel_pipes;
-      screen->specs.max_varyings = MIN2(info->gpu.max_varyings, ETNA_NUM_VARYINGS);
 
       if (screen->npu)
          info = etna_gpu_get_core_info(screen->npu);
@@ -941,6 +967,7 @@ etna_get_specs(struct etna_screen *screen)
       screen->specs.vertex_max_elements = 10;
    }
 
+   etna_determine_num_rts(screen);
    etna_determine_uniform_limits(screen);
    etna_determine_sampler_limits(screen);
 
@@ -963,6 +990,13 @@ etna_get_specs(struct etna_screen *screen)
       screen->specs.vs_uniforms_offset = VIVS_VS_UNIFORMS(0);
       screen->specs.ps_uniforms_offset = VIVS_PS_UNIFORMS(0);
    }
+
+   screen->specs.max_vs_outputs = screen->info->halti >= 5 ? 32 : 16;
+
+   screen->specs.max_varyings = MIN3(ETNA_NUM_VARYINGS,
+                                     info->gpu.max_varyings,
+                                     /* one output slot used for position */
+                                     screen->specs.max_vs_outputs - 1);
 
    screen->specs.max_texture_size =
       VIV_FEATURE(screen, ETNA_FEATURE_TEXTURE_8K) ? 8192 : 2048;
@@ -1107,7 +1141,6 @@ etna_screen_create(struct etna_device *dev, struct etna_gpu *gpu,
    pscreen->get_vendor = etna_screen_get_vendor;
    pscreen->get_device_vendor = etna_screen_get_device_vendor;
 
-   pscreen->get_timestamp = u_default_get_timestamp;
    pscreen->context_create = etna_context_create;
    pscreen->is_format_supported = etna_screen_is_format_supported;
    pscreen->query_dmabuf_modifiers = etna_screen_query_dmabuf_modifiers;

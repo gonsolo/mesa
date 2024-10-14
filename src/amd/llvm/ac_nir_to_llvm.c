@@ -334,7 +334,8 @@ static LLVMValueRef emit_umul_high(struct ac_llvm_context *ctx, LLVMValueRef src
 {
    LLVMValueRef dst64, result;
 
-#if LLVM_VERSION_MAJOR < 20
+/* 64-bit multiplication by a constant is broken in old LLVM. Fixed in LLVM 19.1 and LLVM 20. */
+#if LLVM_VERSION_MAJOR < 19 || (LLVM_VERSION_MAJOR == 19 && LLVM_VERSION_MINOR == 0)
    if (LLVMIsConstant(src0))
       ac_build_optimization_barrier(ctx, &src1, false);
    else
@@ -3466,8 +3467,11 @@ static bool visit_intrinsic(struct ac_nir_context *ctx, nir_intrinsic_instr *ins
       break;
    }
    case nir_intrinsic_is_subgroup_invocation_lt_amd: {
-      LLVMValueRef count = LLVMBuildAnd(ctx->ac.builder, get_src(ctx, instr->src[0]),
-                                        LLVMConstInt(ctx->ac.i32, 0xff, 0), "");
+      unsigned offset = nir_intrinsic_base(instr);
+      LLVMValueRef count = get_src(ctx, instr->src[0]);
+      if (offset)
+         count = LLVMBuildLShr(ctx->ac.builder, count, LLVMConstInt(ctx->ac.i32, offset, 0), "");
+      count = LLVMBuildAnd(ctx->ac.builder, count, LLVMConstInt(ctx->ac.i32, 0xff, 0), "");
       result = LLVMBuildICmp(ctx->ac.builder, LLVMIntULT, ac_get_thread_id(&ctx->ac), count, "");
       break;
    }

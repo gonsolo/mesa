@@ -27,9 +27,9 @@
 
 #include "drm-uapi/panfrost_drm.h"
 
-#include "pan_blitter.h"
 #include "pan_cmdstream.h"
 #include "pan_context.h"
+#include "pan_fb_preload.h"
 #include "pan_indirect_dispatch.h"
 #include "pan_jm.h"
 #include "pan_job.h"
@@ -241,8 +241,9 @@ GENX(jm_preload_fb)(struct panfrost_batch *batch, struct pan_fb_info *fb)
    struct panfrost_device *dev = pan_device(batch->ctx->base.screen);
    struct panfrost_ptr preload_jobs[2];
 
-   unsigned preload_job_count = GENX(pan_preload_fb)(
-      &dev->blitter, &batch->pool.base, fb, 0, batch->tls.gpu, preload_jobs);
+   unsigned preload_job_count =
+      GENX(pan_preload_fb)(&dev->fb_preload_cache, &batch->pool.base, fb,
+                           batch->tls.gpu, preload_jobs);
 
    assert(PAN_ARCH < 6 || !preload_job_count);
 
@@ -387,9 +388,11 @@ static mali_ptr
 jm_emit_tiler_desc(struct panfrost_batch *batch)
 {
    struct panfrost_device *dev = pan_device(batch->ctx->base.screen);
+   mali_ptr tiler_desc = PAN_ARCH >= 9 ? batch->tiler_ctx.bifrost.desc
+                                       : batch->tiler_ctx.valhall.desc;
 
-   if (batch->tiler_ctx.bifrost)
-      return batch->tiler_ctx.bifrost;
+   if (tiler_desc)
+      return tiler_desc;
 
    struct panfrost_ptr t = pan_pool_alloc_desc(&batch->pool.base, TILER_HEAP);
 
@@ -428,8 +431,12 @@ jm_emit_tiler_desc(struct panfrost_batch *batch)
 #endif
    }
 
-   batch->tiler_ctx.bifrost = t.gpu;
-   return batch->tiler_ctx.bifrost;
+   if (PAN_ARCH >= 9)
+      batch->tiler_ctx.valhall.desc = t.gpu;
+   else
+      batch->tiler_ctx.bifrost.desc = t.gpu;
+
+   return t.gpu;
 }
 #endif
 
@@ -687,6 +694,9 @@ jm_emit_primitive(struct panfrost_batch *batch,
       /* Non-fixed restart indices should have been lowered */
       assert(!cfg.primitive_restart || panfrost_is_implicit_prim_restart(info));
 #endif
+
+      cfg.low_depth_cull = rast->depth_clip_near;
+      cfg.high_depth_cull = rast->depth_clip_far;
 
       cfg.index_count = draw->count;
       cfg.index_type = panfrost_translate_index_size(info->index_size);

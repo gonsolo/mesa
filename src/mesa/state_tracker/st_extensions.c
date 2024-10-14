@@ -223,28 +223,20 @@ void st_init_limits(struct pipe_screen *screen,
               MAX_TEXTURE_IMAGE_UNITS);
 
       pc->MaxInstructions =
-      pc->MaxNativeInstructions =
          screen->get_shader_param(screen, sh, PIPE_SHADER_CAP_MAX_INSTRUCTIONS);
       pc->MaxAluInstructions =
-      pc->MaxNativeAluInstructions =
          screen->get_shader_param(screen, sh,
                                   PIPE_SHADER_CAP_MAX_ALU_INSTRUCTIONS);
       pc->MaxTexInstructions =
-      pc->MaxNativeTexInstructions =
          screen->get_shader_param(screen, sh,
                                   PIPE_SHADER_CAP_MAX_TEX_INSTRUCTIONS);
       pc->MaxTexIndirections =
-      pc->MaxNativeTexIndirections =
          screen->get_shader_param(screen, sh,
                                   PIPE_SHADER_CAP_MAX_TEX_INDIRECTIONS);
       pc->MaxAttribs =
-      pc->MaxNativeAttribs =
          screen->get_shader_param(screen, sh, PIPE_SHADER_CAP_MAX_INPUTS);
       pc->MaxTemps =
-      pc->MaxNativeTemps =
          screen->get_shader_param(screen, sh, PIPE_SHADER_CAP_MAX_TEMPS);
-      pc->MaxAddressRegs =
-      pc->MaxNativeAddressRegs = sh == PIPE_SHADER_VERTEX ? 1 : 0;
 
       pc->MaxUniformComponents =
          screen->get_shader_param(screen, sh,
@@ -274,8 +266,7 @@ void st_init_limits(struct pipe_screen *screen,
        * internal values in addition to what the source program uses.  So, we
        * drop the limit one step lower, to 2048, to be safe.
        */
-      pc->MaxParameters =
-      pc->MaxNativeParameters = MIN2(pc->MaxUniformComponents / 4, 2048);
+      pc->MaxParameters = MIN2(pc->MaxUniformComponents / 4, 2048);
       pc->MaxInputComponents =
          screen->get_shader_param(screen, sh, PIPE_SHADER_CAP_MAX_INPUTS) * 4;
       pc->MaxOutputComponents =
@@ -370,7 +361,7 @@ void st_init_limits(struct pipe_screen *screen,
          !screen->get_shader_param(screen, sh,
                                    PIPE_SHADER_CAP_INDIRECT_CONST_ADDR);
 
-      if (pc->MaxNativeInstructions &&
+      if (pc->MaxInstructions &&
           (options->EmitNoIndirectUniform || pc->MaxUniformBlocks < 12)) {
          can_ubo = false;
       }
@@ -988,25 +979,11 @@ void st_init_extensions(struct pipe_screen *screen,
           PIPE_FORMAT_RGTC2_UNORM,
           PIPE_FORMAT_RGTC2_SNORM } },
 
-      /* RGTC software fallback support. */
-      { { o(ARB_texture_compression_rgtc) },
-        { PIPE_FORMAT_R8_UNORM,
-          PIPE_FORMAT_R8_SNORM,
-          PIPE_FORMAT_R8G8_UNORM,
-          PIPE_FORMAT_R8G8_SNORM } },
-
       { { o(EXT_texture_compression_latc) },
         { PIPE_FORMAT_LATC1_UNORM,
           PIPE_FORMAT_LATC1_SNORM,
           PIPE_FORMAT_LATC2_UNORM,
           PIPE_FORMAT_LATC2_SNORM } },
-
-      /* LATC software fallback support. */
-      { { o(EXT_texture_compression_latc) },
-        { PIPE_FORMAT_L8_UNORM,
-          PIPE_FORMAT_L8_SNORM,
-          PIPE_FORMAT_L8A8_UNORM,
-          PIPE_FORMAT_L8A8_SNORM } },
 
       { { o(EXT_texture_compression_s3tc),
           o(ANGLE_texture_compression_dxt) },
@@ -1015,32 +992,17 @@ void st_init_extensions(struct pipe_screen *screen,
           PIPE_FORMAT_DXT3_RGBA,
           PIPE_FORMAT_DXT5_RGBA } },
 
-      /* S3TC software fallback support. */
-      { { o(EXT_texture_compression_s3tc),
-          o(ANGLE_texture_compression_dxt) },
-        { PIPE_FORMAT_R8G8B8A8_UNORM } },
-
       { { o(EXT_texture_compression_s3tc_srgb) },
         { PIPE_FORMAT_DXT1_SRGB,
           PIPE_FORMAT_DXT1_SRGBA,
           PIPE_FORMAT_DXT3_SRGBA,
           PIPE_FORMAT_DXT5_SRGBA } },
 
-      /* S3TC SRGB software fallback support. */
-      { { o(EXT_texture_compression_s3tc_srgb) },
-        { PIPE_FORMAT_R8G8B8A8_SRGB } },
-
       { { o(ARB_texture_compression_bptc) },
         { PIPE_FORMAT_BPTC_RGBA_UNORM,
           PIPE_FORMAT_BPTC_SRGBA,
           PIPE_FORMAT_BPTC_RGB_FLOAT,
           PIPE_FORMAT_BPTC_RGB_UFLOAT } },
-
-      /* BPTC software fallback support. */
-      { { o(ARB_texture_compression_bptc) },
-        { PIPE_FORMAT_R8G8B8A8_UNORM,
-          PIPE_FORMAT_R8G8B8A8_SRGB,
-          PIPE_FORMAT_R16G16B16X16_FLOAT } },
 
       { { o(TDFX_texture_compression_FXT1) },
         { PIPE_FORMAT_FXT1_RGB,
@@ -1077,12 +1039,6 @@ void st_init_extensions(struct pipe_screen *screen,
           PIPE_FORMAT_ASTC_12x10_SRGB,
           PIPE_FORMAT_ASTC_12x12_SRGB } },
 
-      /* ASTC software fallback support. */
-      { { o(KHR_texture_compression_astc_ldr),
-          o(KHR_texture_compression_astc_sliced_3d) },
-        { PIPE_FORMAT_R8G8B8A8_UNORM,
-          PIPE_FORMAT_R8G8B8A8_SRGB } },
-
       { { o(EXT_texture_shared_exponent) },
         { PIPE_FORMAT_R9G9B9E5_FLOAT } },
 
@@ -1111,9 +1067,6 @@ void st_init_extensions(struct pipe_screen *screen,
       { { o(ATI_texture_compression_3dc) },
         { PIPE_FORMAT_LATC2_UNORM } },
 
-      { { o(ATI_texture_compression_3dc) },
-        { PIPE_FORMAT_L8A8_UNORM } },
-
       { { o(MESA_ycbcr_texture) },
         { PIPE_FORMAT_UYVY,
           PIPE_FORMAT_YUYV },
@@ -1134,6 +1087,41 @@ void st_init_extensions(struct pipe_screen *screen,
         { PIPE_FORMAT_ATC_RGB,
           PIPE_FORMAT_ATC_RGBA_EXPLICIT,
           PIPE_FORMAT_ATC_RGBA_INTERPOLATED } },
+   };
+
+   /* Required: sampler support */
+   static const struct st_extension_format_mapping texture_mapping_compressed_fallback[] = {
+      { { o(KHR_texture_compression_astc_ldr),
+          o(KHR_texture_compression_astc_sliced_3d) },
+        { PIPE_FORMAT_R8G8B8A8_UNORM,
+          PIPE_FORMAT_R8G8B8A8_SRGB } },
+
+      { { o(ARB_texture_compression_rgtc) },
+        { PIPE_FORMAT_R8_UNORM,
+          PIPE_FORMAT_R8_SNORM,
+          PIPE_FORMAT_R8G8_UNORM,
+          PIPE_FORMAT_R8G8_SNORM } },
+
+      { { o(EXT_texture_compression_latc) },
+        { PIPE_FORMAT_L8_UNORM,
+          PIPE_FORMAT_L8_SNORM,
+          PIPE_FORMAT_L8A8_UNORM,
+          PIPE_FORMAT_L8A8_SNORM } },
+
+      { { o(EXT_texture_compression_s3tc),
+          o(ANGLE_texture_compression_dxt) },
+        { PIPE_FORMAT_R8G8B8A8_UNORM } },
+
+      { { o(EXT_texture_compression_s3tc_srgb) },
+        { PIPE_FORMAT_R8G8B8A8_SRGB } },
+
+      { { o(ARB_texture_compression_bptc) },
+        { PIPE_FORMAT_R8G8B8A8_UNORM,
+          PIPE_FORMAT_R8G8B8A8_SRGB,
+          PIPE_FORMAT_R16G16B16X16_FLOAT } },
+
+      { { o(ATI_texture_compression_3dc) },
+        { PIPE_FORMAT_L8A8_UNORM } },
    };
 
    /* Required: vertex fetch support. */
@@ -1186,6 +1174,11 @@ void st_init_extensions(struct pipe_screen *screen,
    init_format_extensions(screen, extensions, texture_mapping,
                           ARRAY_SIZE(texture_mapping), PIPE_TEXTURE_2D,
                           PIPE_BIND_SAMPLER_VIEW);
+   if (options->allow_compressed_fallback)
+      init_format_extensions(screen, extensions,
+                             texture_mapping_compressed_fallback,
+                             ARRAY_SIZE(texture_mapping_compressed_fallback),
+                             PIPE_TEXTURE_2D, PIPE_BIND_SAMPLER_VIEW);
    init_format_extensions(screen, extensions, vertex_mapping,
                           ARRAY_SIZE(vertex_mapping), PIPE_BUFFER,
                           PIPE_BIND_VERTEX_BUFFER);
@@ -1286,6 +1279,19 @@ void st_init_extensions(struct pipe_screen *screen,
       extensions->EXT_shader_integer_mix = GL_TRUE;
       extensions->ARB_arrays_of_arrays = GL_TRUE;
       extensions->MESA_shader_integer_functions = GL_TRUE;
+
+      switch (screen->get_param(screen, PIPE_CAP_MULTIVIEW)) {
+      case 1:
+         extensions->OVR_multiview = GL_TRUE;
+         break;
+      case 2:
+         extensions->OVR_multiview = GL_TRUE;
+         extensions->OVR_multiview2 = GL_TRUE;
+         break;
+      }
+
+      extensions->OVR_multiview_multisampled_render_to_texture = extensions->EXT_multisampled_render_to_texture &&
+                                                                 extensions->OVR_multiview;
 
       if (screen->get_param(screen, PIPE_CAP_OPENCL_INTEGER_FUNCTIONS) &&
           screen->get_param(screen, PIPE_CAP_INTEGER_MULTIPLY_32X16)) {

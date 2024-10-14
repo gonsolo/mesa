@@ -12,7 +12,8 @@
 static void
 agx_optimize_and_dce(agx_context *ctx)
 {
-   agx_optimizer(ctx);
+   agx_optimizer_backward(ctx);
+   agx_optimizer_forward(ctx);
    agx_dce(ctx, true);
 }
 
@@ -178,6 +179,46 @@ TEST_F(Optimizer, FmulFsatF2F16)
          agx_fmov_to(b, out, tmp);
       },
       { agx_fmul_to(b, out, wx, wy)->saturate = true; });
+}
+
+TEST_F(Optimizer, FsatWithPhi)
+{
+   /*
+    * Construct the loop:
+    *
+    * A:
+    *   ...
+    *
+    * B:
+    *    phi ..., u
+    *    u = wx * phi
+    *    out = fsat u
+    *    --> B
+    *
+    * This example shows that phi sources are read at the end of the
+    * predecessor, not at the start of the successor. If phis are not handled
+    * properly, the fsat would be fused incorrectly.
+    *
+    * This reproduces an issue hit in a Control shader. Astonishingly, it is not
+    * hit anywhere in CTS.
+    */
+   NEGCASE32({
+      agx_block *A = agx_start_block(b->shader);
+      agx_block *B = agx_test_block(b->shader);
+
+      agx_block_add_successor(A, B);
+      agx_block_add_successor(B, B);
+
+      b->cursor = agx_after_block(B);
+      agx_index u = agx_temp(b->shader, AGX_SIZE_32);
+
+      agx_instr *phi = agx_phi_to(b, agx_temp(b->shader, AGX_SIZE_32), 2);
+      phi->src[0] = wx;
+      phi->src[1] = u;
+
+      agx_fmul_to(b, u, wx, phi->dest[0]);
+      agx_fmov_to(b, out, u)->saturate = true;
+   });
 }
 
 TEST_F(Optimizer, Copyprop)

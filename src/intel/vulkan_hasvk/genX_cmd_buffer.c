@@ -3065,6 +3065,11 @@ cmd_buffer_emit_depth_viewport(struct anv_cmd_buffer *cmd_buffer,
       float min_depth = MIN2(vp->minDepth, vp->maxDepth);
       float max_depth = MAX2(vp->minDepth, vp->maxDepth);
 
+      if (dyn->vp.depth_clamp_mode == VK_DEPTH_CLAMP_MODE_USER_DEFINED_RANGE_EXT) {
+         min_depth = dyn->vp.depth_clamp_range.minDepthClamp;
+         max_depth = dyn->vp.depth_clamp_range.maxDepthClamp;
+      }
+
       struct GENX(CC_VIEWPORT) cc_viewport = {
          .MinimumDepth = depth_clamp_enable ? min_depth : 0.0f,
          .MaximumDepth = depth_clamp_enable ? max_depth : 1.0f,
@@ -5227,7 +5232,7 @@ void genX(CmdBeginRendering)(
                                      iview->vk.base_array_layer + view, 1,
                                      render_area, clear_color);
             }
-         } else {
+         } else if (clear_layer_count > 0) {
             anv_image_clear_color(cmd_buffer, iview->image,
                                   VK_IMAGE_ASPECT_COLOR_BIT,
                                   aux_usage,

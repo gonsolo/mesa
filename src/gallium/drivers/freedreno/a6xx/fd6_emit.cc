@@ -824,6 +824,8 @@ fd6_emit_ccu_cntl(struct fd_ringbuffer *ring, struct fd_screen *screen, bool gme
          );
       }
    } else {
+      OUT_WFI5(ring);   /* early a6xx (a630?) needed this */
+
       OUT_REG(ring,
          RB_CCU_CNTL(
             CHIP,
@@ -854,59 +856,11 @@ fd6_emit_stomp(struct fd_ringbuffer *ring, const uint16_t *regs, size_t count)
    }
 }
 
-/* emit setup at begin of new cmdstream buffer (don't rely on previous
- * state, there could have been a context switch between ioctls):
- */
 template <chip CHIP>
 void
-fd6_emit_restore(struct fd_batch *batch, struct fd_ringbuffer *ring)
+fd6_emit_static_regs(struct fd_context *ctx, struct fd_ringbuffer *ring)
 {
-   struct fd_context *ctx = batch->ctx;
    struct fd_screen *screen = ctx->screen;
-
-   if (!batch->nondraw) {
-      trace_start_state_restore(&batch->trace, ring);
-   }
-
-   if (FD_DBG(STOMP)) {
-      fd6_emit_stomp<CHIP>(ring, &RP_BLIT_REGS<CHIP>[0], ARRAY_SIZE(RP_BLIT_REGS<CHIP>));
-      fd6_emit_stomp<CHIP>(ring, &CMD_REGS<CHIP>[0], ARRAY_SIZE(CMD_REGS<CHIP>));
-   }
-
-   OUT_PKT7(ring, CP_SET_MODE, 1);
-   OUT_RING(ring, 0);
-
-   if (CHIP == A6XX) {
-      fd6_cache_inv<CHIP>(ctx, ring);
-   } else {
-      OUT_PKT7(ring, CP_THREAD_CONTROL, 1);
-      OUT_RING(ring, CP_THREAD_CONTROL_0_THREAD(CP_SET_THREAD_BR) |
-                     CP_THREAD_CONTROL_0_CONCURRENT_BIN_DISABLE);
-
-      fd6_event_write<CHIP>(ctx, ring, FD_CCU_INVALIDATE_COLOR);
-      fd6_event_write<CHIP>(ctx, ring, FD_CCU_INVALIDATE_DEPTH);
-
-      OUT_PKT7(ring, CP_EVENT_WRITE, 1);
-      OUT_RING(ring, UNK_40);
-
-      fd6_event_write<CHIP>(ctx, ring, FD_CACHE_INVALIDATE);
-      OUT_WFI5(ring);
-   }
-
-   OUT_REG(ring,
-      HLSQ_INVALIDATE_CMD(CHIP,
-         .vs_state = true, .hs_state = true,
-         .ds_state = true, .gs_state = true,
-         .fs_state = true, .cs_state = true,
-         .cs_ibo = true,   .gfx_ibo = true,
-         .cs_shared_const = true,
-         .gfx_shared_const = true,
-         .cs_bindless = CHIP == A6XX ? 0x1f : 0xff,
-         .gfx_bindless = CHIP == A6XX ? 0x1f : 0xff,
-      )
-   );
-
-   OUT_WFI5(ring);
 
    if (CHIP >= A7XX) {
       /* On A7XX, RB_CCU_CNTL was broken into two registers, RB_CCU_CNTL which has
@@ -922,10 +876,7 @@ fd6_emit_restore(struct fd_batch *batch, struct fd_ringbuffer *ring)
             .concurrent_resolve = screen->info->a6xx.concurrent_resolve,
          )
       );
-      OUT_WFI5(ring);
    }
-
-   fd6_emit_ccu_cntl<CHIP>(ring, screen, false);
 
    for (size_t i = 0; i < ARRAY_SIZE(screen->info->a6xx.magic_raw); i++) {
       auto magic_reg = screen->info->a6xx.magic_raw[i];
@@ -1036,8 +987,7 @@ fd6_emit_restore(struct fd_batch *batch, struct fd_ringbuffer *ring)
 
    emit_marker6(ring, 7);
 
-   OUT_PKT4(ring, REG_A6XX_VFD_MODE_CNTL, 1);
-   OUT_RING(ring, 0x00000000); /* VFD_MODE_CNTL */
+   OUT_REG(ring, A6XX_VFD_MODE_CNTL(RENDERING_PASS));
 
    WRITE(REG_A6XX_VFD_MULTIVIEW_CNTL, 0);
 
@@ -1076,17 +1026,6 @@ fd6_emit_restore(struct fd_batch *batch, struct fd_ringbuffer *ring)
    for (int32_t i = 0; i < 32; i++) {
       OUT_PKT4(ring, REG_A6XX_VFD_FETCH_SIZE(i), 1);
       OUT_RING(ring, 0);
-   }
-
-   /* This happens after all drawing has been emitted to the draw CS, so we know
-    * whether we need the tess BO pointers.
-    */
-   if (batch->tessellation) {
-      assert(screen->tess_bo);
-      fd_ringbuffer_attach_bo(ring, screen->tess_bo);
-      OUT_REG(ring, PC_TESSFACTOR_ADDR(CHIP, screen->tess_bo));
-      /* Updating PC_TESSFACTOR_ADDR could race with the next draw which uses it. */
-      OUT_WFI5(ring);
    }
 
    struct fd6_context *fd6_ctx = fd6_context(ctx);
@@ -1137,6 +1076,80 @@ fd6_emit_restore(struct fd_batch *batch, struct fd_ringbuffer *ring)
    if (screen->info->a6xx.has_early_preamble) {
       WRITE(REG_A6XX_SP_FS_CTRL_REG0, 0);
    }
+}
+FD_GENX(fd6_emit_static_regs);
+
+/* emit setup at begin of new cmdstream buffer (don't rely on previous
+ * state, there could have been a context switch between ioctls):
+ */
+template <chip CHIP>
+void
+fd6_emit_restore(struct fd_batch *batch, struct fd_ringbuffer *ring)
+{
+   struct fd_context *ctx = batch->ctx;
+   struct fd_screen *screen = ctx->screen;
+
+   if (!batch->nondraw) {
+      trace_start_state_restore(&batch->trace, ring);
+   }
+
+   if (FD_DBG(STOMP)) {
+      fd6_emit_stomp<CHIP>(ring, &RP_BLIT_REGS<CHIP>[0], ARRAY_SIZE(RP_BLIT_REGS<CHIP>));
+      fd6_emit_stomp<CHIP>(ring, &CMD_REGS<CHIP>[0], ARRAY_SIZE(CMD_REGS<CHIP>));
+   }
+
+   OUT_PKT7(ring, CP_SET_MODE, 1);
+   OUT_RING(ring, 0);
+
+   if (CHIP == A6XX) {
+      fd6_cache_inv<CHIP>(ctx, ring);
+   } else {
+      OUT_PKT7(ring, CP_THREAD_CONTROL, 1);
+      OUT_RING(ring, CP_THREAD_CONTROL_0_THREAD(CP_SET_THREAD_BR) |
+                     CP_THREAD_CONTROL_0_CONCURRENT_BIN_DISABLE);
+
+      fd6_event_write<CHIP>(ctx, ring, FD_CCU_INVALIDATE_COLOR);
+      fd6_event_write<CHIP>(ctx, ring, FD_CCU_INVALIDATE_DEPTH);
+
+      OUT_PKT7(ring, CP_EVENT_WRITE, 1);
+      OUT_RING(ring, UNK_40);
+
+      fd6_event_write<CHIP>(ctx, ring, FD_CACHE_INVALIDATE);
+      OUT_WFI5(ring);
+   }
+
+   OUT_REG(ring,
+      HLSQ_INVALIDATE_CMD(CHIP,
+         .vs_state = true, .hs_state = true,
+         .ds_state = true, .gs_state = true,
+         .fs_state = true, .cs_state = true,
+         .cs_ibo = true,   .gfx_ibo = true,
+         .cs_shared_const = true,
+         .gfx_shared_const = true,
+         .cs_bindless = CHIP == A6XX ? 0x1f : 0xff,
+         .gfx_bindless = CHIP == A6XX ? 0x1f : 0xff,
+      )
+   );
+
+   OUT_WFI5(ring);
+
+   fd6_emit_ib(ring, fd6_context(ctx)->restore);
+   fd6_emit_ccu_cntl<CHIP>(ring, screen, false);
+
+   OUT_PKT7(ring, CP_SET_AMBLE, 3);
+   uint32_t dwords = fd_ringbuffer_emit_reloc_ring_full(ring, fd6_context(ctx)->preamble, 0) / 4;
+   OUT_RING(ring, CP_SET_AMBLE_2_DWORDS(dwords) |
+                  CP_SET_AMBLE_2_TYPE(BIN_PREAMBLE_AMBLE_TYPE));
+
+   OUT_PKT7(ring, CP_SET_AMBLE, 3);
+   OUT_RING(ring, 0x00000000);
+   OUT_RING(ring, 0x00000000);
+   OUT_RING(ring, CP_SET_AMBLE_2_TYPE(PREAMBLE_AMBLE_TYPE));
+
+   OUT_PKT7(ring, CP_SET_AMBLE, 3);
+   OUT_RING(ring, 0x00000000);
+   OUT_RING(ring, 0x00000000);
+   OUT_RING(ring, CP_SET_AMBLE_2_TYPE(POSTAMBLE_AMBLE_TYPE));
 
    if (!batch->nondraw) {
       trace_end_state_restore(&batch->trace, ring);

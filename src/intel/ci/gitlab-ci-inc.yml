@@ -19,6 +19,9 @@
         - src/intel/ci/$GPU_VERSION-fails.txt
         - src/intel/ci/$GPU_VERSION-flakes.txt
         - src/intel/ci/$GPU_VERSION-skips.txt
+        - src/intel/ci/$VK_DRIVER-skips.txt
+        - src/intel/ci/$GALLIUM_DRIVER-skips.txt
+        - src/intel/ci/$DRIVER_NAME-skips.txt
         - src/intel/ci/$PIGLIT_TRACES_FILE
       when: on_success
 
@@ -114,7 +117,8 @@
   allow_failure: true # see comment in .performance-rules, which we don't inherit this line from.
   variables:
     JOB_PRIORITY: 40
-    S3_ARTIFACT_NAME: "mesa-x86_64-default-release"
+    LAVA_S3_ARTIFACT_NAME: mesa-x86_64-default-release
+    S3_ARTIFACT_NAME: mesa-python-test
   needs:
     - kernel+rootfs_x86_64
     - debian-release
@@ -196,6 +200,7 @@
 .lava-acer-cbv514-1h-34uz-brya:x86_64:
   variables:
     DEVICE_TYPE: acer-cbv514-1h-34uz-brya
+    FARM: collabora
     FDO_CI_CONCURRENT: 9
     GPU_VERSION: iris-adl
     HWCI_KERNEL_MODULES: i915
@@ -398,7 +403,8 @@
     HWCI_FREQ_MAX: "true"
     LAVA_TAGS: "cbg-0"
     # Ensure that we are using the release build artifact
-    S3_ARTIFACT_NAME: mesa-x86_64-default-release
+    LAVA_S3_ARTIFACT_NAME: mesa-x86_64-default-release
+    S3_ARTIFACT_NAME: mesa-python-test
 
 .iris-whl-traces-performance:
   extends:

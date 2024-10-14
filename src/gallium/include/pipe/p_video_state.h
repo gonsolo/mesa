@@ -61,8 +61,10 @@ extern "C" {
 #define PIPE_H265_MAX_DELTA_POC 48
 #define PIPE_H265_MAX_DPB_SIZE 16
 #define PIPE_H265_MAX_NUM_LIST_REF 15
-#define PIPE_H265_MAX_ST_REF_PIC_SETS 64
+#define PIPE_H265_MAX_ST_REF_PIC_SETS 65
 #define PIPE_H265_MAX_SUB_LAYERS 7
+#define PIPE_AV1_MAX_DPB_SIZE 8
+#define PIPE_AV1_REFS_PER_FRAME 7
 
 /*
  * see table 6-12 in the spec
@@ -134,6 +136,7 @@ enum pipe_h264_nal_unit_type
    PIPE_H264_NAL_SPS = 7,
    PIPE_H264_NAL_PPS = 8,
    PIPE_H264_NAL_AUD = 9,
+   PIPE_H264_NAL_PREFIX = 14,
 };
 
 enum pipe_h264_slice_type
@@ -235,7 +238,6 @@ struct pipe_picture_desc
    unsigned flush_flags;
    /* A fence for pipe_video_codec::end_frame to signal job completion */
    struct pipe_fence_handle **fence;
-   unsigned packed_headers;
 };
 
 struct pipe_quant_matrix
@@ -397,6 +399,8 @@ struct pipe_h264_sps
    uint8_t  mb_adaptive_frame_field_flag;
    uint8_t  direct_8x8_inference_flag;
    uint8_t  MinLumaBiPredSize8x8;
+   uint32_t pic_width_in_mbs_minus1;
+   uint32_t pic_height_in_mbs_minus1;
 };
 
 struct pipe_h264_pps
@@ -538,9 +542,6 @@ struct pipe_h264_enc_rate_control
    unsigned vbv_buf_lv;
    unsigned vbv_buf_initial_size;
    bool app_requested_hrd_buffer;
-   unsigned target_bits_picture;
-   unsigned peak_bits_picture_integer;
-   unsigned peak_bits_picture_fraction;
    unsigned fill_data_enable;
    unsigned skip_frame_enable;
    unsigned enforce_hrd;
@@ -758,6 +759,7 @@ struct pipe_h264_enc_dpb_entry
    uint32_t id;
    uint32_t frame_idx;
    uint32_t pic_order_cnt;
+   uint32_t temporal_id;
    bool is_ltr;
    struct pipe_video_buffer *buffer;
 };
@@ -816,9 +818,7 @@ struct pipe_h264_enc_picture_desc
    /* Use with PIPE_VIDEO_SLICE_MODE_MAX_SLICE_SIZE */
    unsigned max_slice_bytes;
 
-   bool insert_aud_nalu;
    enum pipe_video_feedback_metadata_type requested_metadata;
-   bool renew_headers_on_idr;
 
    struct pipe_h264_enc_dpb_entry dpb[PIPE_H264_MAX_DPB_SIZE];
    uint8_t dpb_size;
@@ -1025,6 +1025,19 @@ struct pipe_h265_enc_seq_param
    struct pipe_h265_profile_tier_level profile_tier_level;
    struct pipe_h265_enc_hrd_params hrd_parameters;
    struct pipe_h265_st_ref_pic_set st_ref_pic_set[PIPE_H265_MAX_ST_REF_PIC_SETS];
+   struct {
+      uint32_t sps_range_extension_flag;
+      uint32_t transform_skip_rotation_enabled_flag: 1;
+      uint32_t transform_skip_context_enabled_flag: 1;
+      uint32_t implicit_rdpcm_enabled_flag: 1;
+      uint32_t explicit_rdpcm_enabled_flag: 1;
+      uint32_t extended_precision_processing_flag: 1;
+      uint32_t intra_smoothing_disabled_flag: 1;
+      uint32_t high_precision_offsets_enabled_flag: 1;
+      uint32_t persistent_rice_adaptation_enabled_flag: 1;
+      uint32_t cabac_bypass_alignment_enabled_flag: 1;
+   } sps_range_extension;
+   uint8_t separate_colour_plane_flag;
 };
 
 struct pipe_h265_enc_pic_param
@@ -1060,6 +1073,18 @@ struct pipe_h265_enc_pic_param
    int8_t pps_cr_qp_offset;
    int8_t pps_beta_offset_div2;
    int8_t pps_tc_offset_div2;
+   struct {
+      uint8_t pps_range_extension_flag;
+      uint32_t log2_max_transform_skip_block_size_minus2;
+      uint32_t cross_component_prediction_enabled_flag: 1;
+      uint32_t chroma_qp_offset_list_enabled_flag: 1;
+      uint32_t diff_cu_chroma_qp_offset_depth;
+      uint32_t chroma_qp_offset_list_len_minus1;
+      int32_t cb_qp_offset_list[6];
+      int32_t cr_qp_offset_list[6];
+      uint32_t log2_sao_offset_scale_luma;
+      uint32_t log2_sao_offset_scale_chroma;
+   } pps_range_extension;
 };
 
 struct pipe_h265_enc_slice_param
@@ -1101,7 +1126,6 @@ struct pipe_h265_enc_slice_param
    int8_t slice_cr_qp_offset;
    int8_t slice_beta_offset_div2;
    int8_t slice_tc_offset_div2;
-   struct pipe_h265_st_ref_pic_set st_ref_pic_set;
    struct pipe_h265_ref_pic_lists_modification ref_pic_lists_modification;
 };
 
@@ -1120,9 +1144,6 @@ struct pipe_h265_enc_rate_control
    unsigned vbv_buf_lv;
    unsigned vbv_buf_initial_size;
    bool app_requested_hrd_buffer;
-   unsigned target_bits_picture;
-   unsigned peak_bits_picture_integer;
-   unsigned peak_bits_picture_fraction;
    unsigned fill_data_enable;
    unsigned skip_frame_enable;
    unsigned enforce_hrd;
@@ -1139,6 +1160,7 @@ struct pipe_h265_enc_dpb_entry
 {
    uint32_t id;
    uint32_t pic_order_cnt;
+   uint32_t temporal_id;
    bool is_ltr;
    struct pipe_video_buffer *buffer;
 };
@@ -1178,7 +1200,6 @@ struct pipe_h265_enc_picture_desc
    /* Use with PIPE_VIDEO_SLICE_MODE_MAX_SLICE_SIZE */
    unsigned max_slice_bytes;
    enum pipe_video_feedback_metadata_type requested_metadata;
-   bool renew_headers_on_idr;
 
    struct pipe_enc_hdr_cll metadata_hdr_cll;
    struct pipe_enc_hdr_mdcv metadata_hdr_mdcv;
@@ -1203,9 +1224,6 @@ struct pipe_av1_enc_rate_control
    unsigned vbv_buf_lv;
    unsigned vbv_buf_initial_size;
    bool app_requested_hrd_buffer;
-   unsigned target_bits_picture;
-   unsigned peak_bits_picture_integer;
-   unsigned peak_bits_picture_fraction;
    unsigned fill_data_enable;
    unsigned skip_frame_enable;
    unsigned enforce_hrd;
@@ -1271,6 +1289,8 @@ struct pipe_av1_enc_seq_param
       uint32_t decoder_model_info_present_flag:1;
       uint32_t force_screen_content_tools:2;
       uint32_t force_integer_mv:2;
+      uint32_t initial_display_delay_present_flag:1;
+      uint32_t choose_integer_mv:1;
    } seq_bits;
 
    /* timing info params */
@@ -1285,12 +1305,26 @@ struct pipe_av1_enc_seq_param
    uint16_t frame_width_bits_minus1;
    uint16_t frame_height_bits_minus1;
    uint16_t operating_point_idc[32];
+   uint8_t seq_level_idx[32];
+   uint8_t seq_tier[32];
    uint8_t decoder_model_present_for_this_op[32];
+   uint32_t decoder_buffer_delay[32];
+   uint32_t encoder_buffer_delay[32];
+   uint8_t low_delay_mode_flag[32];
+   uint8_t initial_display_delay_present_for_this_op[32];
+   uint8_t initial_display_delay_minus_1[32];
 };
 
 struct pipe_av1_tile_group {
    uint8_t tile_group_start;
    uint8_t tile_group_end;
+};
+
+struct pipe_av1_enc_dpb_entry
+{
+   uint32_t id;
+   uint32_t order_hint;
+   struct pipe_video_buffer *buffer;
 };
 
 struct pipe_av1_enc_picture_desc
@@ -1300,6 +1334,7 @@ struct pipe_av1_enc_picture_desc
    struct pipe_av1_enc_seq_param seq;
    struct pipe_av1_enc_rate_control rc[4];
    struct {
+      uint32_t obu_extension_flag:1;
       uint32_t enable_frame_obu:1;
       uint32_t error_resilient_mode:1;
       uint32_t disable_cdf_update:1;
@@ -1312,12 +1347,16 @@ struct pipe_av1_enc_picture_desc
       uint32_t allow_high_precision_mv:1;
       uint32_t use_ref_frame_mvs;
       uint32_t show_existing_frame:1;
+      uint32_t show_frame:1;
+      uint32_t showable_frame:1;
       uint32_t enable_render_size:1;
       uint32_t use_superres:1;
       uint32_t reduced_tx_set:1;
       uint32_t skip_mode_present:1;
       uint32_t long_term_reference:1;
       uint32_t uniform_tile_spacing:1;
+      uint32_t frame_refs_short_signaling:1;
+      uint32_t is_motion_mode_switchable:1;
    };
    struct pipe_enc_quality_modes quality_modes;
    struct pipe_enc_intra_refresh intra_refresh;
@@ -1349,9 +1388,12 @@ struct pipe_av1_enc_picture_desc
    uint32_t primary_ref_frame;
    uint8_t refresh_frame_flags;
    uint8_t ref_frame_idx[7];
-   uint32_t ref_frame_ctrl_l0;            /* forward prediction only */
-   void *ref_list[8];                     /* for tracking ref frames */
-   void *recon_frame;
+   uint32_t delta_frame_id_minus_1[7];
+   uint32_t frame_presentation_time;
+   uint32_t current_frame_id;
+   uint32_t ref_order_hint[8];
+   uint8_t last_frame_idx;
+   uint8_t gold_frame_idx;
 
    struct {
       uint8_t cdef_damping_minus_3;
@@ -1418,6 +1460,15 @@ struct pipe_av1_enc_picture_desc
 
    struct pipe_enc_hdr_cll metadata_hdr_cll;
    struct pipe_enc_hdr_mdcv metadata_hdr_mdcv;
+
+   struct pipe_av1_enc_dpb_entry dpb[PIPE_AV1_MAX_DPB_SIZE + 1];
+   uint8_t dpb_size;
+   uint8_t dpb_curr_pic; /* index in dpb */
+   uint8_t dpb_ref_frame_idx[PIPE_AV1_REFS_PER_FRAME]; /* index in dpb, PIPE_H2645_LIST_REF_INVALID_ENTRY invalid */
+   uint8_t ref_list0[PIPE_AV1_REFS_PER_FRAME]; /* index in dpb_ref_frame_idx, PIPE_H2645_LIST_REF_INVALID_ENTRY invalid */
+   uint8_t ref_list1[PIPE_AV1_REFS_PER_FRAME]; /* index in dpb_ref_frame_idx, PIPE_H2645_LIST_REF_INVALID_ENTRY invalid */
+
+   struct util_dynarray raw_headers; /* struct pipe_enc_raw_header */
 };
 
 struct pipe_h265_sps
@@ -2357,6 +2408,95 @@ union pipe_enc_cap_surface_alignment {
       uint32_t reserved                             : 24;
    } bits;
    uint32_t value;
+};
+
+/* To be used with PIPE_VIDEO_CAP_ENC_HEVC_RANGE_EXTENSION_SUPPORT */
+union pipe_h265_enc_cap_range_extension {
+   struct {
+      /* Driver output. A bitmask indicating which values are allowed to be configured when encoding with diff_cu_chroma_qp_offset_depth.
+      * Codec valid range for support for diff_cu_chroma_qp_offset_depth is [0, 3].
+      * For driver to indicate that value is supported, it must set the following in the reported bitmask.
+      * supported_diff_cu_chroma_qp_offset_depth_values |= (1 << value)
+      */
+      uint32_t supported_diff_cu_chroma_qp_offset_depth_values: 4;
+      /* Driver output. A bitmask indicating which values are allowed to be configured when encoding with log2_sao_offset_scale_luma.
+      * Codec valid range for support for log2_sao_offset_scale_luma is [0, 6].
+      * For driver to indicate that value is supported, it must set the following in the reported bitmask.
+      * supported_log2_sao_offset_scale_luma_values |= (1 << value)
+      */
+      uint32_t supported_log2_sao_offset_scale_luma_values: 7;
+      /* Driver output. A bitmask indicating which values are allowed to be configured when encoding with log2_sao_offset_scale_chroma.
+      * Codec valid range for support for log2_sao_offset_scale_chroma is [0, 6].
+      * For driver to indicate that value is supported, it must set the following in the reported bitmask.
+      * supported_log2_sao_offset_scale_chroma_values |= (1 << value)
+      */
+      uint32_t supported_log2_sao_offset_scale_chroma_values: 7;
+      /* Driver output. A bitmask indicating which values are allowed to be configured when encoding with log2_max_transform_skip_block_size_minus2.
+      * Codec valid range for support for log2_max_transform_skip_block_size_minus2 is [0, 3].
+      * For driver to indicate that value is supported, it must set the following in the reported bitmask.
+      * supported_log2_max_transform_skip_block_size_minus2_values |= (1 << value)
+      */
+      uint32_t supported_log2_max_transform_skip_block_size_minus2_values: 6;
+      /* Driver output.The minimum value allowed to be configured when encoding with chroma_qp_offset_list_len_minus1.
+      * Codec valid range for support for chroma_qp_offset_list_len_minus1 is [0, 5].
+      */
+      uint32_t min_chroma_qp_offset_list_len_minus1_values: 3;
+      /* Driver output.The maximum value allowed to be configured when encoding with chroma_qp_offset_list_len_minus1.
+      * Codec valid range for support for chroma_qp_offset_list_len_minus1 is [0, 5].
+      */
+      uint32_t max_chroma_qp_offset_list_len_minus1_values: 3;
+   } bits;
+  uint32_t value;
+};
+
+union pipe_h265_enc_cap_range_extension_flags {
+   struct {
+      /*
+       * Driver Output. Indicates pipe_enc_feature values for setting transform_skip_rotation_enabled_flag
+       */
+      uint32_t supports_transform_skip_rotation_enabled_flag: 2;
+      /*
+       * Driver Output. Indicates pipe_enc_feature values for setting transform_skip_context_enabled_flag
+       */
+      uint32_t supports_transform_skip_context_enabled_flag: 2;
+      /*
+       * Driver Output. Indicates pipe_enc_feature values for setting implicit_rdpcm_enabled_flag
+       */
+      uint32_t supports_implicit_rdpcm_enabled_flag: 2;
+      /*
+       * Driver Output. Indicates pipe_enc_feature values for setting explicit_rdpcm_enabled_flag
+       */
+      uint32_t supports_explicit_rdpcm_enabled_flag: 2;
+      /*
+       * Driver Output. Indicates pipe_enc_feature values for setting extended_precision_processing_flag
+       */
+      uint32_t supports_extended_precision_processing_flag: 2;
+      /*
+       * Driver Output. Indicates pipe_enc_feature values for setting intra_smoothing_disabled_flag
+       */
+      uint32_t supports_intra_smoothing_disabled_flag: 2;
+      /*
+       * Driver Output. Indicates pipe_enc_feature values for setting high_precision_offsets_enabled_flag
+       */
+      uint32_t supports_high_precision_offsets_enabled_flag: 2;
+      /*
+       * Driver Output. Indicates pipe_enc_feature values for setting persistent_rice_adaptation_enabled_flag
+       */
+      uint32_t supports_persistent_rice_adaptation_enabled_flag: 2;
+      /*
+       * Driver Output. Indicates pipe_enc_feature values for setting cabac_bypass_alignment_enabled_flag
+       */
+      uint32_t supports_cabac_bypass_alignment_enabled_flag: 2;
+      /*
+       * Driver Output. Indicates pipe_enc_feature values for setting cross_component_prediction_enabled_flag
+       */
+      uint32_t supports_cross_component_prediction_enabled_flag: 2;
+      /*
+       * Driver Output. Indicates pipe_enc_feature values for setting chroma_qp_offset_list_enabled_flag
+       */
+      uint32_t supports_chroma_qp_offset_list_enabled_flag: 2;
+   } bits;
+  uint32_t value;
 };
 
 #ifdef __cplusplus

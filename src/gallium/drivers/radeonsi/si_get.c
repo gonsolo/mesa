@@ -280,9 +280,6 @@ static int si_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       /* Allow 1/4th of the heap size. */
       return sscreen->info.max_heap_size_kb / 1024 / 4;
 
-   case PIPE_CAP_VERTEX_BUFFER_OFFSET_4BYTE_ALIGNED_ONLY:
-   case PIPE_CAP_VERTEX_BUFFER_STRIDE_4BYTE_ALIGNED_ONLY:
-   case PIPE_CAP_VERTEX_ELEMENT_SRC_OFFSET_4BYTE_ALIGNED_ONLY:
    case PIPE_CAP_PREFER_BACK_BUFFER_REUSE:
    case PIPE_CAP_UMA:
    case PIPE_CAP_PREFER_IMM_ARRAYS_AS_CONSTBUF:
@@ -686,7 +683,7 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
       case PIPE_VIDEO_CAP_NPOT_TEXTURES:
          return 1;
       case PIPE_VIDEO_CAP_MIN_WIDTH:
-         return 256;
+         return (codec == PIPE_VIDEO_FORMAT_HEVC) ? 130 : 128;
       case PIPE_VIDEO_CAP_MIN_HEIGHT:
          return 128;
       case PIPE_VIDEO_CAP_MAX_WIDTH:
@@ -845,6 +842,10 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
          if (sscreen->info.vcn_ip_version >= VCN_3_0_0) {
             int refPicList0 = 1;
             int refPicList1 = codec == PIPE_VIDEO_FORMAT_MPEG4_AVC ? 1 : 0;
+            if (sscreen->info.vcn_ip_version >= VCN_5_0_0 && codec == PIPE_VIDEO_FORMAT_AV1) {
+               refPicList0 = 2;
+               refPicList1 = 1;
+            }
             return refPicList0 | (refPicList1 << 16);
          } else
             return 1;
@@ -1172,6 +1173,7 @@ static bool si_vid_is_target_buffer_supported(struct pipe_screen *screen,
             target->buffer_format == PIPE_FORMAT_R10G10B10X2_UNORM;
 
          if (sscreen->info.vcn_ip_version < VCN_2_0_0 ||
+             sscreen->info.vcn_ip_version == VCN_2_2_0 ||
              sscreen->info.vcn_ip_version >= VCN_5_0_0 ||
              sscreen->debug_flags & DBG(NO_EFC))
             return false;

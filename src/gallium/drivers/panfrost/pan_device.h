@@ -40,7 +40,7 @@
 
 #include "panfrost/util/pan_ir.h"
 #include "pan_blend.h"
-#include "pan_blitter.h"
+#include "pan_fb_preload.h"
 #include "pan_indirect_dispatch.h"
 #include "pan_pool.h"
 #include "pan_props.h"
@@ -152,7 +152,7 @@ struct panfrost_device {
       struct list_head buckets[NR_BO_CACHE_BUCKETS];
    } bo_cache;
 
-   struct pan_blitter_cache blitter;
+   struct pan_fb_preload_cache fb_preload_cache;
    struct pan_blend_shader_cache blend_shaders;
    struct pan_indirect_dispatch_meta indirect_dispatch;
 
@@ -214,7 +214,7 @@ void panfrost_open_device(void *memctx, int fd, struct panfrost_device *dev);
 void panfrost_close_device(struct panfrost_device *dev);
 
 bool panfrost_supports_compressed_format(struct panfrost_device *dev,
-                                         unsigned fmt);
+                                         unsigned texfeat_bit);
 
 static inline struct panfrost_bo *
 pan_lookup_bo(struct panfrost_device *dev, uint32_t gem_handle)

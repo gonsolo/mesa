@@ -105,9 +105,21 @@ struct hk_device {
       struct agx_scratch vs, fs, cs;
       simple_mtx_t lock;
    } scratch;
+
+   uint32_t perftest;
 };
 
 VK_DEFINE_HANDLE_CASTS(hk_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
+
+enum hk_perftest {
+   HK_PERF_NOTESS = BITFIELD_BIT(0),
+   HK_PERF_NOBORDER = BITFIELD_BIT(1),
+   HK_PERF_NOBARRIER = BITFIELD_BIT(2),
+   HK_PERF_BATCH = BITFIELD_BIT(3),
+   HK_PERF_NOROBUST = BITFIELD_BIT(4),
+};
+
+#define HK_PERF(dev, flag) unlikely((dev)->perftest &HK_PERF_##flag)
 
 static inline struct hk_physical_device *
 hk_device_physical(struct hk_device *dev)

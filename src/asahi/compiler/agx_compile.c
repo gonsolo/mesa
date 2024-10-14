@@ -70,6 +70,18 @@ agx_cached_preload(agx_context *ctx, unsigned base, enum agx_size size)
 }
 
 static agx_index
+agx_tess_coord_x(agx_builder *b)
+{
+   return agx_cached_preload(b->shader, 4, AGX_SIZE_32);
+}
+
+static agx_index
+agx_tess_coord_y(agx_builder *b)
+{
+   return agx_cached_preload(b->shader, 6, AGX_SIZE_32);
+}
+
+static agx_index
 agx_vertex_id(agx_builder *b)
 {
    return agx_cached_preload(b->shader, 10, AGX_SIZE_32);
@@ -364,6 +376,18 @@ static agx_index
 agx_vec2(agx_builder *b, agx_index s0, agx_index s1)
 {
    return agx_emit_collect(b, 2, (agx_index[]){s0, s1});
+}
+
+static agx_index
+agx_pad_to_32(agx_builder *b, agx_index s)
+{
+   assert(s.size == AGX_SIZE_16);
+   assert(agx_channels(s) == 1);
+
+   agx_index srcs[2] = {s, agx_undef(AGX_SIZE_16)};
+   agx_index dst = agx_vec_temp(b->shader, AGX_SIZE_32, 1);
+   agx_emit_collect_to(b, dst, 2, srcs);
+   return dst;
 }
 
 static agx_index
@@ -673,6 +697,12 @@ agx_emit_local_load_pixel(agx_builder *b, agx_index dest,
    agx_emit_cached_split(b, dest, nr_comps);
 }
 
+static bool
+nir_is_coherent(nir_intrinsic_instr *instr)
+{
+   return nir_intrinsic_access(instr) & (ACCESS_COHERENT | ACCESS_VOLATILE);
+}
+
 static void
 agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
 {
@@ -686,7 +716,8 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
       offset = agx_abs(offset);
 
    agx_device_load_to(b, dest, addr, offset, fmt,
-                      BITFIELD_MASK(instr->def.num_components), shift);
+                      BITFIELD_MASK(instr->def.num_components), shift,
+                      nir_is_coherent(instr));
    agx_emit_cached_split(b, dest, instr->def.num_components);
 }
 
@@ -704,7 +735,7 @@ agx_emit_store(agx_builder *b, nir_intrinsic_instr *instr)
 
    agx_device_store(b, agx_recollect_vector(b, instr->src[0]), addr, offset,
                     fmt, BITFIELD_MASK(nir_src_num_components(instr->src[0])),
-                    shift);
+                    shift, nir_is_coherent(instr));
 }
 
 /* Preambles write directly to uniform registers, so move from uniform to GPR */
@@ -811,9 +842,7 @@ agx_emit_block_image_store(agx_builder *b, nir_intrinsic_instr *instr)
    /* 32-bit source physically, 16-bit in NIR, top half ignored but needed
     * logically to ensure alignment.
     */
-   offset = agx_vec2(b, offset, agx_undef(AGX_SIZE_16));
-   offset.channels_m1--;
-   offset.size = AGX_SIZE_32;
+   offset = agx_pad_to_32(b, offset);
 
    /* Modified coordinate descriptor */
    if (!explicit) {
@@ -1092,7 +1121,7 @@ agx_emit_image_load(agx_builder *b, agx_index dst, nir_intrinsic_instr *intr)
 
    agx_instr *I = agx_image_load_to(
       b, tmp, coords, lod, bindless, texture, agx_immediate(0), agx_null(),
-      agx_tex_dim(dim, is_array), lod_mode, 0, false);
+      agx_tex_dim(dim, is_array), lod_mode, 0, false, nir_is_coherent(intr));
    I->mask = agx_expand_tex_to(b, &intr->def, tmp, true);
 
    b->shader->out->uses_txf = true;
@@ -1195,7 +1224,8 @@ agx_emit_image_store(agx_builder *b, nir_intrinsic_instr *instr)
    /* Image stores act like tilebuffer stores when used for tib spilling */
    b->shader->out->tag_write_disable = false;
 
-   return agx_image_write(b, data, coords, lod, base, index, dim);
+   return agx_image_write(b, data, coords, lod, base, index, dim,
+                          nir_is_coherent(instr));
 }
 
 static enum agx_simd_op
@@ -1256,7 +1286,7 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       return NULL;
 
    case nir_intrinsic_store_uvs_agx:
-      assert(stage == MESA_SHADER_VERTEX);
+      assert(stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_TESS_EVAL);
       return agx_st_vary(b, agx_src_index(&instr->src[1]),
                          agx_src_index(&instr->src[0]));
 
@@ -1351,8 +1381,19 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       /* We don't assert the HW stage since we use this same ABI with SW VS */
       return agx_mov_to(b, dst, agx_abs(agx_vertex_id(b)));
 
+   case nir_intrinsic_load_primitive_id:
+      assert(stage == MESA_SHADER_TESS_EVAL);
+      return agx_mov_to(b, dst, agx_abs(agx_vertex_id(b)));
+
    case nir_intrinsic_load_instance_id:
       return agx_mov_to(b, dst, agx_abs(agx_instance_id(b)));
+
+   case nir_intrinsic_load_tess_coord_xy: {
+      assert(stage == MESA_SHADER_TESS_EVAL);
+
+      agx_index coords[] = {agx_tess_coord_x(b), agx_tess_coord_y(b)};
+      return agx_emit_collect_to(b, dst, 2, coords);
+   }
 
    case nir_intrinsic_load_preamble:
       return agx_emit_load_preamble(b, dst, instr);
@@ -1406,14 +1447,19 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
             agx_memory_barrier(b);
 
             /* Pull out all the big hammers to make cross-workgroup memory
-             * barriers work. Found experimentally, seems to work on G13G at
-             * least.
-             *
-             * TODO: check on other models, we may need more barriers for G13D.
+             * barriers work.
              */
             if (nir_intrinsic_memory_scope(instr) >= SCOPE_QUEUE_FAMILY) {
-               agx_memory_barrier_2(b);
                agx_unknown_barrier_1(b);
+               agx_memory_barrier_2(b);
+
+               /* These are observed on G13D. At some point we should figure out
+                * what the individual opcodes do.
+                */
+               agx_device_barrier_2(b);
+               agx_unknown_barrier_2(b);
+               agx_memory_barrier_3(b);
+               agx_device_barrier_1(b);
             }
          }
 
@@ -1836,6 +1882,9 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
       return agx_icmpsel_to(b, dst, s0, s1, s0, s1, AGX_ICOND_ULT);
    case nir_op_umax:
       return agx_icmpsel_to(b, dst, s0, s1, s0, s1, AGX_ICOND_UGT);
+   case nir_op_bounds_agx:
+      /* end offset > bound ? 0 : data */
+      return agx_icmpsel_to(b, dst, s1, s2, agx_zero(), s0, AGX_ICOND_UGT);
 
    case nir_op_iadd:
       return agx_iadd_to(b, dst, s0, s1, 0);
@@ -2149,9 +2198,7 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
             min = agx_src_index(&instr->src[min_idx].src);
 
             /* Undef extend to 32-bit since our IR is iffy */
-            min = agx_vec2(b, min, agx_undef(AGX_SIZE_16));
-            min.channels_m1--;
-            min.size = AGX_SIZE_32;
+            min = agx_pad_to_32(b, min);
          }
 
          /* We explicitly don't cache about the split cache for this */
@@ -2659,7 +2706,7 @@ agx_dump_stats(agx_context *ctx, unsigned size, char **out)
       "%u uniforms, %u scratch, %u threads, %u loops, "
       "%u:%u spills:fills",
       gl_shader_stage_name(ctx->stage), nr_ins, cycles.alu, cycles.f_scib,
-      cycles.ic, size, ctx->max_reg, ctx->out->push_count, ctx->scratch_size,
+      cycles.ic, size, ctx->max_reg, ctx->out->push_count, ctx->scratch_size_B,
       nr_threads, ctx->loop_count, spills, fills);
 }
 
@@ -2776,6 +2823,119 @@ set_speculate(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *_)
    return true;
 }
 
+static bool
+optimize_bounds(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_constant_agx)
+      return false;
+
+   assert(intr->def.bit_size > 1 && "no if-uses");
+   nir_scalar srcs[2] = {{NULL}};
+   unsigned use_count = 0;
+
+   nir_alu_instr *first_use = NULL;
+
+   nir_foreach_use(use, &intr->def) {
+      /* All uses need to be bounds_agx */
+      nir_instr *parent = nir_src_parent_instr(use);
+      if (parent->type != nir_instr_type_alu)
+         return false;
+
+      nir_alu_instr *alu = nir_instr_as_alu(parent);
+      if ((alu->op != nir_op_bounds_agx) || (alu->src[0].src.ssa != &intr->def))
+         return false;
+
+      assert(alu->def.num_components == 1 && alu->def.bit_size == 32);
+
+      /* All bounds checks need a common offset and bounds */
+      for (unsigned s = 0; s < 2; ++s) {
+         nir_scalar this = nir_scalar_resolved(alu->src[1 + s].src.ssa,
+                                               alu->src[1 + s].swizzle[0]);
+
+         if (srcs[s].def == NULL)
+            srcs[s] = this;
+         else if (!nir_scalar_equal(srcs[s], this))
+            return false;
+
+         /* To avoid dominance problems, we must sink loads. */
+         if (this.def->parent_instr->block != intr->instr.block) {
+            return false;
+         }
+      }
+
+      if (!first_use || first_use->def.index > alu->def.index) {
+         first_use = alu;
+      }
+
+      ++use_count;
+   }
+
+   /* We've matched. Freeze the set of uses before chaning things. */
+   nir_alu_instr **uses = alloca(sizeof(nir_alu_instr *) * use_count);
+
+   unsigned i = 0;
+   nir_foreach_use(use, &intr->def) {
+      nir_instr *parent = nir_src_parent_instr(use);
+      uses[i++] = nir_instr_as_alu(parent);
+   }
+   assert(i == use_count && "should not have changed");
+
+   /* Sink the load */
+   nir_instr_remove(&intr->instr);
+   b->cursor = nir_before_instr(&first_use->instr);
+   nir_builder_instr_insert(b, &intr->instr);
+
+   /* Now start rewriting. Grab some common variables */
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *offset = nir_channel(b, srcs[0].def, srcs[0].comp);
+   nir_def *bounds = nir_channel(b, srcs[1].def, srcs[1].comp);
+
+   nir_def *in_bounds = nir_uge(b, bounds, offset);
+   nir_def *zero = nir_imm_int(b, 0);
+
+   nir_src *base_src = &intr->src[0];
+   nir_src *offs_src = &intr->src[1];
+
+   nir_def *base_lo = nir_unpack_64_2x32_split_x(b, base_src->ssa);
+   nir_def *base_hi = nir_unpack_64_2x32_split_y(b, base_src->ssa);
+
+   /* Bounds check the base/offset instead. We currently reserve the bottom
+    * 2^36 of VA (this is driver/compiler ABI). With soft fault enabled, that
+    * means any read of the lower region will return zero as required.
+    *
+    * Therefore, when out-of-bounds, we clamp the index to zero and the high
+    * half of the address to zero. We don't need to clamp the low half of the
+    * address. The resulting sum is thus:
+    *
+    *    0*(2^32) + lo + (index << shift)
+    *
+    * ...which will be in the unmapped zero region provided shift < 4.
+    */
+   base_hi = nir_bcsel(b, in_bounds, base_hi, zero);
+
+   /* Clamp index if the shift is too large or sign-extension used */
+   if (nir_intrinsic_base(intr) >= 2 || nir_intrinsic_sign_extend(intr)) {
+      nir_src_rewrite(offs_src, nir_bcsel(b, in_bounds, offs_src->ssa, zero));
+   }
+
+   nir_src_rewrite(base_src, nir_pack_64_2x32_split(b, base_lo, base_hi));
+
+   /* Now that the load itself is bounds checked, all that's left is removing
+    * the bounds checks on the output. This requires a little care to avoid an
+    * infinite loop.
+    *
+    * Also note we cannot remove the uses here, because it would invalidate the
+    * iterator inside intrinsics_pass. I hate C, don't you?
+    */
+   for (unsigned i = 0; i < use_count; ++i) {
+      b->cursor = nir_after_instr(&uses[i]->instr);
+      nir_def *chan = nir_channel(b, &intr->def, uses[i]->src[0].swizzle[0]);
+      nir_def_rewrite_uses(&uses[i]->def, chan);
+   }
+
+   return true;
+}
+
 static void
 agx_optimize_nir(nir_shader *nir, bool soft_fault, unsigned *preamble_size)
 {
@@ -2882,6 +3042,21 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, unsigned *preamble_size)
       NIR_PASS(progress, nir, nir_opt_cse);
       NIR_PASS(progress, nir, agx_nir_fuse_algebraic_late);
    } while (progress);
+
+   /* Before optimizing bounds checks, we need to clean up and index defs so
+    * optimize_bounds does the right thing.
+    */
+   NIR_PASS(_, nir, nir_copy_prop);
+   NIR_PASS(_, nir, nir_opt_dce);
+
+   nir_foreach_function_impl(impl, nir) {
+      nir_index_ssa_defs(impl);
+   }
+
+   if (soft_fault) {
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, optimize_bounds,
+               nir_metadata_control_flow, NULL);
+   }
 
    /* Do remaining lowering late, since this inserts &s for shifts so we want to
     * do it after fusing constant shifts. Constant folding will clean up.
@@ -3169,6 +3344,12 @@ agx_should_dump(nir_shader *nir, unsigned agx_dbg_bit)
           !(nir->info.internal && !(agx_compiler_debug & AGX_DBG_INTERNAL));
 }
 
+#define AGX_PASS(shader, pass, ...)                                            \
+   do {                                                                        \
+      pass(shader, ##__VA_ARGS__);                                             \
+      agx_validate(ctx, #pass);                                                \
+   } while (0)
+
 static unsigned
 agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
                          struct agx_shader_key *key,
@@ -3212,7 +3393,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
     */
    if (ctx->any_scratch) {
       assert(!ctx->is_preamble && "preambles don't use scratch");
-      ctx->scratch_size = ALIGN(nir->scratch_size, 16);
+      ctx->scratch_size_B = ALIGN(nir->scratch_size, 16);
    }
 
    /* Stop the main shader or preamble shader after the exit block. For real
@@ -3228,21 +3409,22 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    if (likely(!(agx_compiler_debug & AGX_DBG_NOOPT))) {
       /* Eliminate dead instructions before CSE to avoid silly scheduling */
-      agx_dce(ctx, false);
+      AGX_PASS(ctx, agx_dce, false);
 
       /* CSE before eliminating dead destinations so that subdivision is
        * optimized properly.
        */
-      agx_opt_cse(ctx);
+      AGX_PASS(ctx, agx_opt_cse);
 
       /* After DCE, use counts are right so we can run the optimizer. */
-      agx_optimizer(ctx);
-      agx_opt_compact_constants(ctx);
+      AGX_PASS(ctx, agx_optimizer_backward);
+      AGX_PASS(ctx, agx_optimizer_forward);
+      AGX_PASS(ctx, agx_opt_compact_constants);
 
       /* After inlining constants, promote what's left */
       if (key->promote_constants && !key->secondary &&
           !(agx_compiler_debug & AGX_DBG_NOPROMOTE)) {
-         agx_opt_promote_constants(ctx);
+         AGX_PASS(ctx, agx_opt_promote_constants);
       }
    }
 
@@ -3250,30 +3432,27 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
     * as copyprop creates uniform sources). To keep register pressure in
     * check, lower after CSE, since moves are cheaper than registers.
     */
-   agx_lower_uniform_sources(ctx);
+   AGX_PASS(ctx, agx_lower_uniform_sources);
 
    /* RA correctness depends on DCE */
-   agx_dce(ctx, true);
-   agx_validate(ctx, "Pre-RA passes");
+   AGX_PASS(ctx, agx_dce, true);
 
    if (agx_should_dump(nir, AGX_DBG_SHADERS))
       agx_print_shader(ctx, stdout);
 
    if (likely(!(agx_compiler_debug & AGX_DBG_NOSCHED))) {
-      agx_pressure_schedule(ctx);
-      agx_validate(ctx, "Pre-RA scheduler");
+      AGX_PASS(ctx, agx_pressure_schedule);
    }
 
    if (agx_should_dump(nir, AGX_DBG_SHADERS))
       agx_print_shader(ctx, stdout);
 
-   agx_ra(ctx);
-   agx_validate(ctx, "RA");
+   AGX_PASS(ctx, agx_ra);
    agx_lower_64bit_postra(ctx);
 
-   if (ctx->scratch_size > 0) {
+   if (ctx->scratch_size_B > 0) {
       /* Apple always allocate 40 more bytes in the entrypoint and align to 4. */
-      uint64_t stack_size = ALIGN(DIV_ROUND_UP(ctx->scratch_size, 4) + 10, 4);
+      uint64_t stack_size = ALIGN(DIV_ROUND_UP(ctx->scratch_size_B, 4) + 10, 4);
 
       assert(stack_size < INT16_MAX);
 
@@ -3297,8 +3476,9 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
          out->scratch_size = stack_size;
    }
 
-   if (ctx->stage == MESA_SHADER_VERTEX && !impl->function->is_preamble &&
-       !ctx->key->secondary)
+   if ((ctx->stage == MESA_SHADER_VERTEX ||
+        ctx->stage == MESA_SHADER_TESS_EVAL) &&
+       !impl->function->is_preamble && !ctx->key->secondary)
       agx_set_st_vary_final(ctx);
 
    agx_insert_waits(ctx);
@@ -3331,7 +3511,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
     * GPRs. Do it here so the driver doesn't have to worry about it.
     */
    if (impl->function->is_preamble)
-      out->nr_preamble_gprs = ctx->scratch_size ? 256 : nr_gprs;
+      out->nr_preamble_gprs = ctx->scratch_size_B ? 256 : nr_gprs;
    else
       out->nr_gprs = nr_gprs;
 
@@ -3430,7 +3610,7 @@ agx_preprocess_nir(nir_shader *nir, const nir_shader *libagx)
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
 
    /* Lower large arrays to scratch and small arrays to csel */
-   NIR_PASS(_, nir, nir_lower_vars_to_scratch, nir_var_function_temp, 16,
+   NIR_PASS(_, nir, nir_lower_vars_to_scratch, nir_var_function_temp, 256,
             glsl_get_natural_size_align_bytes,
             glsl_get_natural_size_align_bytes);
    NIR_PASS(_, nir, nir_lower_indirect_derefs, nir_var_function_temp, ~0);
@@ -3601,10 +3781,12 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
       BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_DRAW_ID);
 
    info->uses_base_param =
+      BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_FIRST_VERTEX) ||
       BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_BASE_VERTEX) ||
       BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_BASE_INSTANCE);
 
-   if (nir->info.stage == MESA_SHADER_VERTEX) {
+   if (nir->info.stage == MESA_SHADER_VERTEX ||
+       nir->info.stage == MESA_SHADER_TESS_EVAL) {
       info->nonzero_viewport = nir->info.outputs_written & VARYING_BIT_VIEWPORT;
 
       info->writes_layer_viewport =

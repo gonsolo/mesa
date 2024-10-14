@@ -8,7 +8,7 @@ radv-stoney-vkcts:x86_64:
     - .radv-stoney-test:x86_64
   parallel: 5
   variables:
-    DEQP_FRACTION: 11
+    DEQP_FRACTION: 15
 
 radv-stoney-angle:
   extends:
@@ -19,6 +19,7 @@ radv-stoney-angle:
     USE_ANGLE: 1
     HWCI_START_XORG: 1
     GPU_VERSION: angle-radv-stoney-aco
+    DEQP_FRACTION: 2
 
 radv-stoney-angle-full:
   extends:
@@ -37,6 +38,14 @@ radeonsi-stoney-gl:x86_64:
   variables:
     DEQP_SUITE: radeonsi-stoney
     HWCI_START_WESTON: 1
+    DEQP_FRACTION: 2
+
+radeonsi-stoney-gl:x86_64_full:
+  extends:
+    - radeonsi-stoney-gl:x86_64
+    - .radeonsi-manual-rules
+  variables:
+    DEQP_FRACTION: 1
 
 radeonsi-stoney-traces:x86_64:
   extends:
@@ -107,6 +116,16 @@ radeonsi-raven-piglit-quick_shader:x86_64:
   variables:
     PIGLIT_PROFILES: quick_shader
     PIGLIT_FRACTION: 2
+
+# lower image opcodes to emulate CDNA compute devices
+radeonsi-raven-cdna-lower-image:x86_64:
+  extends:
+    - .lava-test-deqp:x86_64
+    - .radeonsi-raven-test:x86_64
+    - .lava-lenovo-TPad-C13-Yoga-zork:x86_64
+  variables:
+    DEQP_SUITE: radeonsi-raven-cdna
+    GPU_VERSION: radeonsi-raven-cdna
 
 radeonsi-raven-va:x86_64:
   extends:
@@ -277,10 +296,11 @@ glcts-vangogh-valve:
     DEQP_SUITE: radeonsi-vangogh
 
 vkcts-navi31-valve:
+  parallel: 2
   extends:
     - .vkcts-test-valve
     - .navi31-test-valve
-    - .radv-valve-manual-rules
+    - .radv-valve-rules
   variables:
     GPU_VERSION: radv-navi31-aco
     RADV_DEBUG: nomeshshader # Disable mesh shaders until task shaders stop hanging

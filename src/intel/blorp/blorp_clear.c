@@ -414,14 +414,23 @@ blorp_fast_clear(struct blorp_batch *batch,
    params.y1 = y1;
 
    if (batch->blorp->isl_dev->info->ver >= 20) {
+      union isl_color_value clear_color =
+         isl_color_value_swizzle_inv(surf->clear_color, swizzle);
+      if (format == ISL_FORMAT_R9G9B9E5_SHAREDEXP) {
+         clear_color.u32[0] = float3_to_rgb9e5(clear_color.f32);
+         format = ISL_FORMAT_R32_UINT;
+      } else if (format == ISL_FORMAT_L8_UNORM_SRGB) {
+         clear_color.f32[0] = util_format_linear_to_srgb_float(clear_color.f32[0]);
+         format = ISL_FORMAT_R8_UNORM;
+      }
+
       /* Bspec 57340 (r59562):
        *
        *   Overview of Fast Clear:
        *      Pixel shader's color output is treated as Clear Value, value
        *      should be a constant.
        */
-      memcpy(&params.wm_inputs.clear_color, &surf->clear_color,
-             4 * sizeof(float));
+      memcpy(&params.wm_inputs.clear_color, &clear_color, 4 * sizeof(float));
    } else {
       /* BSpec: 2423 (r153658):
        *
@@ -608,6 +617,7 @@ blorp_clear(struct blorp_batch *batch,
    if (!compute && !blorp_ensure_sf_program(batch, &params))
       return;
 
+   assert(num_layers > 0);
    while (num_layers > 0) {
       blorp_surface_info_init(batch, &params.dst, surf, level,
                                   start_layer, format, true);
@@ -834,6 +844,7 @@ blorp_clear_depth_stencil(struct blorp_batch *batch,
                           uint8_t stencil_mask, uint8_t stencil_value)
 {
    assert((batch->flags & BLORP_BATCH_USE_COMPUTE) == 0);
+   assert(num_layers > 0);
 
    if (!clear_depth && blorp_clear_stencil_as_rgba(batch, stencil, level,
                                                    start_layer, num_layers,

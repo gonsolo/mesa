@@ -62,8 +62,7 @@ static void si_emit_cb_render_state(struct si_context *sctx, unsigned index)
       sctx->last_cb_target_mask = cb_target_mask;
 
       radeon_begin(cs);
-      radeon_emit(PKT3(PKT3_EVENT_WRITE, 0, 0));
-      radeon_emit(EVENT_TYPE(V_028A90_BREAK_BATCH) | EVENT_INDEX(0));
+      radeon_event_write(V_028A90_BREAK_BATCH);
       radeon_end();
    }
 
@@ -659,7 +658,9 @@ static void *si_create_blend_state_mode(struct pipe_context *ctx,
          ac_pm4_set_reg(&pm4->base, R_028760_SX_MRT0_BLEND_OPT + i * 4, sx_mrt_blend_opt[i]);
 
       /* RB+ doesn't work with dual source blending, logic op, and RESOLVE. */
-      if (blend->dual_src_blend || logicop_enable || mode == V_028808_CB_RESOLVE)
+      if (blend->dual_src_blend || logicop_enable || mode == V_028808_CB_RESOLVE ||
+          /* Disabling RB+ improves blending performance in synthetic tests on GFX11. */
+          (sctx->gfx_level == GFX11 && blend->blend_enable_4bit))
          color_control |= S_028808_DISABLE_DUAL_QUAD(1);
    }
 
@@ -773,8 +774,7 @@ static void si_bind_blend_state(struct pipe_context *ctx, void *state)
    if ((sctx->screen->info.has_export_conflict_bug &&
         old_blend->blend_enable_4bit != blend->blend_enable_4bit) ||
        (sctx->occlusion_query_mode == SI_OCCLUSION_QUERY_MODE_PRECISE_BOOLEAN &&
-        !!old_blend->cb_target_mask != !!blend->cb_target_enabled_4bit) ||
-       (sctx->gfx_level >= GFX11 && old_blend->alpha_to_coverage != blend->alpha_to_coverage))
+        !!old_blend->cb_target_mask != !!blend->cb_target_enabled_4bit))
       si_mark_atom_dirty(sctx, &sctx->atoms.s.db_render_state);
 
    if (old_blend->cb_target_enabled_4bit != blend->cb_target_enabled_4bit ||
@@ -1756,15 +1756,15 @@ static void si_set_active_query_state(struct pipe_context *ctx, bool enable)
    if (enable) {
       /* Disable pipeline stats if there are no active queries. */
       if (sctx->num_hw_pipestat_streamout_queries) {
-         sctx->flags &= ~SI_CONTEXT_STOP_PIPELINE_STATS;
-         sctx->flags |= SI_CONTEXT_START_PIPELINE_STATS;
-         si_mark_atom_dirty(sctx, &sctx->atoms.s.cache_flush);
+         sctx->barrier_flags &= ~SI_BARRIER_EVENT_PIPELINESTAT_STOP;
+         sctx->barrier_flags |= SI_BARRIER_EVENT_PIPELINESTAT_START;
+         si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
       }
    } else {
       if (sctx->num_hw_pipestat_streamout_queries) {
-         sctx->flags &= ~SI_CONTEXT_START_PIPELINE_STATS;
-         sctx->flags |= SI_CONTEXT_STOP_PIPELINE_STATS;
-         si_mark_atom_dirty(sctx, &sctx->atoms.s.cache_flush);
+         sctx->barrier_flags &= ~SI_BARRIER_EVENT_PIPELINESTAT_START;
+         sctx->barrier_flags |= SI_BARRIER_EVENT_PIPELINESTAT_STOP;
+         si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
       }
    }
 
@@ -1792,19 +1792,8 @@ static void si_emit_db_render_state(struct si_context *sctx, unsigned index)
    /* DB_RENDER_CONTROL */
    /* Program OREO_MODE optimally for GFX11+. */
    if (sctx->gfx_level >= GFX11) {
-      /* This ignores CONSERVATIVE_Z_EXPORT, so it's slightly pessimistic. */
-      bool late_z = !G_02880C_DEPTH_BEFORE_SHADER(sctx->ps_db_shader_control) &&
-                    (G_02880C_Z_ORDER(sctx->ps_db_shader_control) == V_02880C_LATE_Z ||
-                     /* Late Z is always used in these cases: */
-                     G_02880C_KILL_ENABLE(sctx->ps_db_shader_control) ||
-                     G_02880C_Z_EXPORT_ENABLE(sctx->ps_db_shader_control) ||
-                     G_02880C_STENCIL_TEST_VAL_EXPORT_ENABLE(sctx->ps_db_shader_control) ||
-                     G_02880C_STENCIL_OP_VAL_EXPORT_ENABLE(sctx->ps_db_shader_control) ||
-                     G_02880C_COVERAGE_TO_MASK_ENABLE(sctx->ps_db_shader_control) ||
-                     G_02880C_MASK_EXPORT_ENABLE(sctx->ps_db_shader_control) ||
-                     sctx->queued.named.blend->alpha_to_coverage);
-
-      db_render_control |= S_028000_OREO_MODE(late_z ? V_028000_OMODE_BLEND : V_028000_OMODE_O_THEN_B);
+      bool z_export = G_02880C_Z_EXPORT_ENABLE(sctx->ps_db_shader_control);
+      db_render_control |= S_028000_OREO_MODE(z_export ? V_028000_OMODE_BLEND : V_028000_OMODE_O_THEN_B);
    }
 
    if (sctx->gfx_level >= GFX12) {
@@ -2487,53 +2476,6 @@ static void si_init_depth_surface(struct si_context *sctx, struct si_surface *su
    surf->depth_initialized = true;
 }
 
-void si_set_sampler_depth_decompress_mask(struct si_context *sctx, struct si_texture *tex)
-{
-   assert(sctx->gfx_level < GFX12);
-
-   /* Check all sampler bindings in all shaders where depth textures are bound, and update
-    * which samplers should be decompressed.
-    */
-   u_foreach_bit(sh, sctx->shader_has_depth_tex) {
-      u_foreach_bit(i, sctx->samplers[sh].has_depth_tex_mask) {
-         if (sctx->samplers[sh].views[i]->texture == &tex->buffer.b.b) {
-            sctx->samplers[sh].needs_depth_decompress_mask |= 1 << i;
-            sctx->shader_needs_decompress_mask |= 1 << sh;
-         }
-      }
-   }
-}
-
-void si_update_fb_dirtiness_after_rendering(struct si_context *sctx)
-{
-   if (sctx->gfx_level >= GFX12 || sctx->decompression_enabled)
-      return;
-
-   if (sctx->framebuffer.state.zsbuf) {
-      struct pipe_surface *surf = sctx->framebuffer.state.zsbuf;
-      struct si_texture *tex = (struct si_texture *)surf->texture;
-
-      tex->dirty_level_mask |= 1 << surf->u.tex.level;
-
-      if (tex->surface.has_stencil)
-         tex->stencil_dirty_level_mask |= 1 << surf->u.tex.level;
-
-      si_set_sampler_depth_decompress_mask(sctx, tex);
-   }
-
-   unsigned compressed_cb_mask = sctx->framebuffer.compressed_cb_mask;
-   while (compressed_cb_mask) {
-      unsigned i = u_bit_scan(&compressed_cb_mask);
-      struct pipe_surface *surf = sctx->framebuffer.state.cbufs[i];
-      struct si_texture *tex = (struct si_texture *)surf->texture;
-
-      if (tex->surface.fmask_offset) {
-         tex->dirty_level_mask |= 1 << surf->u.tex.level;
-         tex->fmask_is_identity = false;
-      }
-   }
-}
-
 static void si_dec_framebuffer_counters(const struct pipe_framebuffer_state *state)
 {
    for (int i = 0; i < state->nr_cbufs; ++i) {
@@ -2605,7 +2547,7 @@ static void si_set_framebuffer_state(struct pipe_context *ctx,
       return;
    }
 
-   si_update_fb_dirtiness_after_rendering(sctx);
+   si_fb_barrier_after_rendering(sctx, SI_FB_BARRIER_SYNC_ALL);
 
    /* Disable DCC if the formats are incompatible. */
    if (sctx->gfx_level >= GFX8 && sctx->gfx_level < GFX11) {
@@ -2627,64 +2569,6 @@ static void si_set_framebuffer_state(struct pipe_context *ctx,
       }
    }
 
-   /* When MSAA is enabled, CB and L2 caches are flushed on demand
-    * (after FMASK decompression). Shader write -> FB read transitions
-    * cannot happen for MSAA textures, because MSAA shader images are
-    * not supported.
-    *
-    * Only flush and wait for CB if there is actually a bound color buffer.
-    */
-   if (sctx->framebuffer.uncompressed_cb_mask) {
-      si_make_CB_shader_coherent(sctx, sctx->framebuffer.nr_samples,
-                                 sctx->framebuffer.CB_has_shader_readable_metadata,
-                                 sctx->framebuffer.all_DCC_pipe_aligned);
-   }
-
-   /* Wait for CS because: shader write -> FB read
-    * Wait for PS because: texture -> render (eg: glBlitFramebuffer(with src=dst) then glDraw*)
-    */
-   sctx->flags |= SI_CONTEXT_CS_PARTIAL_FLUSH | SI_CONTEXT_PS_PARTIAL_FLUSH;
-   si_mark_atom_dirty(sctx, &sctx->atoms.s.cache_flush);
-
-   /* DB caches are flushed on demand (using si_decompress_textures) except the cases below. */
-   if (sctx->gfx_level >= GFX12) {
-      si_make_DB_shader_coherent(sctx, sctx->framebuffer.nr_samples, true, false);
-   } else if (sctx->generate_mipmap_for_depth) {
-      /* u_blitter doesn't invoke depth decompression when it does multiple
-       * blits in a row, but the only case when it matters for DB is when
-       * doing generate_mipmap. So here we flush DB manually between
-       * individual generate_mipmap blits.
-       * Note that lower mipmap levels aren't compressed.
-       */
-      si_make_DB_shader_coherent(sctx, 1, false, sctx->framebuffer.DB_has_shader_readable_metadata);
-   } else if (old_has_zsbuf &&
-              sctx->gfx_level == GFX11 && sctx->screen->info.family == CHIP_NAVI33) {
-      struct si_surface *old_zsurf = (struct si_surface *)sctx->framebuffer.state.zsbuf;
-      struct si_texture *old_ztex = (struct si_texture *)old_zsurf->base.texture;
-
-      if (old_ztex->upgraded_depth) {
-         /* TODO: some failures related to hyperz appeared after 969ed851 on nv33:
-          * - piglit tex-miplevel-selection
-          * - KHR-GL46.direct_state_access.framebuffers_texture_attachment
-          * - GTF-GL46.gtf30.GL3Tests.blend_minmax.blend_minmax_draw
-          * - KHR-GL46.direct_state_access.framebuffers_texture_layer_attachment
-          *
-          * This seems to fix them:
-          */
-         sctx->flags |= SI_CONTEXT_FLUSH_AND_INV_DB | SI_CONTEXT_INV_L2;
-         si_mark_atom_dirty(sctx, &sctx->atoms.s.cache_flush);
-      }
-   } else if (sctx->gfx_level == GFX9) {
-      /* It appears that DB metadata "leaks" in a sequence of:
-       *  - depth clear
-       *  - DCC decompress for shader image writes (with DB disabled)
-       *  - render with DEPTH_BEFORE_SHADER=1
-       * Flushing DB metadata works around the problem.
-       */
-      sctx->flags |= SI_CONTEXT_FLUSH_AND_INV_DB_META;
-      si_mark_atom_dirty(sctx, &sctx->atoms.s.cache_flush);
-   }
-
    /* Take the maximum of the old and new count. If the new count is lower,
     * dirtying is needed to disable the unbound colorbuffers.
     */
@@ -2694,6 +2578,10 @@ static void si_set_framebuffer_state(struct pipe_context *ctx,
 
    si_dec_framebuffer_counters(&sctx->framebuffer.state);
    util_copy_framebuffer_state(&sctx->framebuffer.state, state);
+
+   /* The framebuffer state must be set before the barrier. */
+   si_fb_barrier_before_rendering(sctx);
+
    /* Recompute layers because frontends and utils might not set it. */
    sctx->framebuffer.state.layers = util_framebuffer_get_num_layers(state);
 
@@ -3191,10 +3079,9 @@ static void gfx6_emit_framebuffer_state(struct si_context *sctx, unsigned index)
                           S_028208_BR_X(state->width) | S_028208_BR_Y(state->height));
 
    if (sctx->screen->dpbb_allowed &&
-       sctx->screen->pbb_context_states_per_bin > 1) {
-      radeon_emit(PKT3(PKT3_EVENT_WRITE, 0, 0));
-      radeon_emit(EVENT_TYPE(V_028A90_BREAK_BATCH) | EVENT_INDEX(0));
-   }
+       sctx->screen->pbb_context_states_per_bin > 1)
+      radeon_event_write(V_028A90_BREAK_BATCH);
+
    radeon_end();
 
    si_update_display_dcc_dirty(sctx);
@@ -3341,10 +3228,9 @@ static void gfx11_dgpu_emit_framebuffer_state(struct si_context *sctx, unsigned 
    gfx11_end_packed_context_regs();
 
    if (sctx->screen->dpbb_allowed &&
-       sctx->screen->pbb_context_states_per_bin > 1) {
-      radeon_emit(PKT3(PKT3_EVENT_WRITE, 0, 0));
-      radeon_emit(EVENT_TYPE(V_028A90_BREAK_BATCH) | EVENT_INDEX(0));
-   }
+       sctx->screen->pbb_context_states_per_bin > 1)
+      radeon_event_write(V_028A90_BREAK_BATCH);
+
    radeon_end();
 
    si_update_display_dcc_dirty(sctx);
@@ -3478,10 +3364,9 @@ static void gfx12_emit_framebuffer_state(struct si_context *sctx, unsigned index
    gfx12_end_context_regs();
 
    if (sctx->screen->dpbb_allowed &&
-       sctx->screen->pbb_context_states_per_bin > 1) {
-      radeon_emit(PKT3(PKT3_EVENT_WRITE, 0, 0));
-      radeon_emit(EVENT_TYPE(V_028A90_BREAK_BATCH) | EVENT_INDEX(0));
-   }
+       sctx->screen->pbb_context_states_per_bin > 1)
+      radeon_event_write(V_028A90_BREAK_BATCH);
+
    radeon_end();
 
    sctx->framebuffer.dirty_cbufs = 0;
@@ -3894,13 +3779,6 @@ static void gfx10_make_texture_descriptor(
    unsigned last_level, unsigned first_layer, unsigned last_layer, unsigned width, unsigned height,
    unsigned depth, bool get_bo_metadata, uint32_t *state, uint32_t *fmask_state)
 {
-   if (!screen->info.has_image_opcodes && !get_bo_metadata) {
-      cdna_emu_make_image_descriptor(screen, tex, sampler, target, pipe_format, state_swizzle,
-                                     first_level, last_level, first_layer, last_layer, width,
-                                     height, depth, state, fmask_state);
-      return;
-   }
-
    struct pipe_resource *res = &tex->buffer.b.b;
    const struct util_format_description *desc;
    unsigned char swizzle[4];
@@ -4005,19 +3883,26 @@ static void gfx10_make_texture_descriptor(
 /**
  * Build the sampler view descriptor for a texture (SI-GFX9).
  */
-static void si_make_texture_descriptor(struct si_screen *screen, struct si_texture *tex,
-                                       bool sampler, enum pipe_texture_target target,
-                                       enum pipe_format pipe_format,
-                                       const unsigned char state_swizzle[4], unsigned first_level,
-                                       unsigned last_level, unsigned first_layer,
-                                       unsigned last_layer, unsigned width, unsigned height,
-                                       unsigned depth, bool get_bo_metadata,
-                                       uint32_t *state, uint32_t *fmask_state)
+void si_make_texture_descriptor(struct si_screen *screen, struct si_texture *tex,
+                                bool sampler, enum pipe_texture_target target,
+                                enum pipe_format pipe_format,
+                                const unsigned char state_swizzle[4], unsigned first_level,
+                                unsigned last_level, unsigned first_layer,
+                                unsigned last_layer, unsigned width, unsigned height,
+                                unsigned depth, bool get_bo_metadata,
+                                uint32_t *state, uint32_t *fmask_state)
 {
    if (!screen->info.has_image_opcodes && !get_bo_metadata) {
       cdna_emu_make_image_descriptor(screen, tex, sampler, target, pipe_format, state_swizzle,
                                      first_level, last_level, first_layer, last_layer, width,
                                      height, depth, state, fmask_state);
+      return;
+   }
+
+   if (screen->info.gfx_level >= GFX10) {
+      gfx10_make_texture_descriptor(screen, tex, sampler, target, pipe_format, state_swizzle,
+                                    first_level, last_level, first_layer, last_layer, width,
+                                    height, depth, get_bo_metadata, state, fmask_state);
       return;
    }
 
@@ -4237,11 +4122,11 @@ static struct pipe_sampler_view *si_create_sampler_view(struct pipe_context *ctx
    view->dcc_incompatible =
       vi_dcc_formats_are_incompatible(texture, state->u.tex.first_level, state->format);
 
-   sctx->screen->make_texture_descriptor(
-      sctx->screen, tex, true, state->target, pipe_format, state_swizzle,
-      state->u.tex.first_level, state->u.tex.last_level,
-      state->u.tex.first_layer, last_layer, texture->width0, texture->height0, texture->depth0,
-      false, view->state, view->fmask_state);
+   si_make_texture_descriptor(sctx->screen, tex, true, state->target, pipe_format, state_swizzle,
+                              state->u.tex.first_level, state->u.tex.last_level,
+                              state->u.tex.first_layer, last_layer, texture->width0,
+                              texture->height0, texture->depth0, false, view->state,
+                              view->fmask_state);
 
    view->base_level_info = &surflevel[0];
    view->block_width = util_format_get_blockwidth(pipe_format);
@@ -4935,78 +4820,6 @@ static void si_set_tess_state(struct pipe_context *ctx, const float default_oute
    si_set_internal_const_buffer(sctx, SI_HS_CONST_DEFAULT_TESS_LEVELS, &cb);
 }
 
-static void si_texture_barrier(struct pipe_context *ctx, unsigned flags)
-{
-   struct si_context *sctx = (struct si_context *)ctx;
-
-   si_update_fb_dirtiness_after_rendering(sctx);
-
-   /* Multisample surfaces are flushed in si_decompress_textures. */
-   if (sctx->framebuffer.uncompressed_cb_mask) {
-      si_make_CB_shader_coherent(sctx, sctx->framebuffer.nr_samples,
-                                 sctx->framebuffer.CB_has_shader_readable_metadata,
-                                 sctx->framebuffer.all_DCC_pipe_aligned);
-   }
-}
-
-/* This only ensures coherency for shader image/buffer stores. */
-static void si_memory_barrier(struct pipe_context *ctx, unsigned flags)
-{
-   struct si_context *sctx = (struct si_context *)ctx;
-
-   if (!(flags & ~PIPE_BARRIER_UPDATE))
-      return;
-
-   /* Subsequent commands must wait for all shader invocations to
-    * complete. */
-   sctx->flags |= SI_CONTEXT_PS_PARTIAL_FLUSH | SI_CONTEXT_CS_PARTIAL_FLUSH |
-                  SI_CONTEXT_PFP_SYNC_ME;
-
-   if (flags & PIPE_BARRIER_CONSTANT_BUFFER)
-      sctx->flags |= SI_CONTEXT_INV_SCACHE | SI_CONTEXT_INV_VCACHE;
-
-   if (flags & (PIPE_BARRIER_VERTEX_BUFFER | PIPE_BARRIER_SHADER_BUFFER | PIPE_BARRIER_TEXTURE |
-                PIPE_BARRIER_IMAGE | PIPE_BARRIER_STREAMOUT_BUFFER | PIPE_BARRIER_GLOBAL_BUFFER)) {
-      /* As far as I can tell, L1 contents are written back to L2
-       * automatically at end of shader, but the contents of other
-       * L1 caches might still be stale. */
-      sctx->flags |= SI_CONTEXT_INV_VCACHE;
-
-      if (flags & (PIPE_BARRIER_IMAGE | PIPE_BARRIER_TEXTURE) &&
-          sctx->screen->info.tcc_rb_non_coherent)
-         sctx->flags |= SI_CONTEXT_INV_L2;
-   }
-
-   if (flags & PIPE_BARRIER_INDEX_BUFFER) {
-      /* Indices are read through TC L2 since GFX8.
-       * L1 isn't used.
-       */
-      if (sctx->screen->info.gfx_level <= GFX7)
-         sctx->flags |= SI_CONTEXT_WB_L2;
-   }
-
-   /* MSAA color, any depth and any stencil are flushed in
-    * si_decompress_textures when needed.
-    */
-   if (flags & PIPE_BARRIER_FRAMEBUFFER && sctx->framebuffer.uncompressed_cb_mask) {
-      sctx->flags |= SI_CONTEXT_FLUSH_AND_INV_CB;
-
-      if (sctx->gfx_level <= GFX8)
-         sctx->flags |= SI_CONTEXT_WB_L2;
-   }
-
-   /* Indirect buffers use TC L2 on GFX9, but not older hw. */
-   if (sctx->screen->info.gfx_level <= GFX8 && flags & PIPE_BARRIER_INDIRECT_BUFFER)
-      sctx->flags |= SI_CONTEXT_WB_L2;
-
-   /* Indices and draw indirect don't use GL2. */
-   if (sctx->screen->info.cp_sdma_ge_use_system_memory_scope &&
-       flags & (PIPE_BARRIER_INDEX_BUFFER | PIPE_BARRIER_INDIRECT_BUFFER))
-      sctx->flags |= SI_CONTEXT_WB_L2;
-
-   si_mark_atom_dirty(sctx, &sctx->atoms.s.cache_flush);
-}
-
 static void *si_create_blend_custom(struct si_context *sctx, unsigned mode)
 {
    struct pipe_blend_state blend;
@@ -5017,9 +4830,14 @@ static void *si_create_blend_custom(struct si_context *sctx, unsigned mode)
    return si_create_blend_state_mode(&sctx->b, &blend, mode);
 }
 
-static void si_emit_cache_flush_state(struct si_context *sctx, unsigned index)
+static void si_pm4_emit_sqtt_pipeline(struct si_context *sctx, unsigned index)
 {
-   sctx->emit_cache_flush(sctx, &sctx->gfx_cs);
+   struct si_pm4_state *state = sctx->queued.array[index];
+
+   si_pm4_emit_state(sctx, index);
+
+   radeon_add_to_buffer_list(sctx, &sctx->gfx_cs, ((struct si_sqtt_fake_pipeline*)state)->bo,
+                             RADEON_USAGE_READ | RADEON_PRIO_SHADER_BINARY);
 }
 
 void si_init_state_compute_functions(struct si_context *sctx)
@@ -5028,7 +4846,6 @@ void si_init_state_compute_functions(struct si_context *sctx)
    sctx->b.delete_sampler_state = si_delete_sampler_state;
    sctx->b.create_sampler_view = si_create_sampler_view;
    sctx->b.sampler_view_destroy = si_sampler_view_destroy;
-   sctx->b.memory_barrier = si_memory_barrier;
 }
 
 void si_init_state_functions(struct si_context *sctx)
@@ -5036,7 +4853,7 @@ void si_init_state_functions(struct si_context *sctx)
    sctx->atoms.s.pm4_states[SI_STATE_IDX(blend)].emit = si_pm4_emit_state;
    sctx->atoms.s.pm4_states[SI_STATE_IDX(rasterizer)].emit = si_pm4_emit_rasterizer;
    sctx->atoms.s.pm4_states[SI_STATE_IDX(dsa)].emit = si_pm4_emit_dsa;
-   sctx->atoms.s.pm4_states[SI_STATE_IDX(sqtt_pipeline)].emit = si_pm4_emit_state;
+   sctx->atoms.s.pm4_states[SI_STATE_IDX(sqtt_pipeline)].emit = si_pm4_emit_sqtt_pipeline;
    sctx->atoms.s.pm4_states[SI_STATE_IDX(ls)].emit = si_pm4_emit_shader;
    sctx->atoms.s.pm4_states[SI_STATE_IDX(hs)].emit = si_pm4_emit_shader;
    sctx->atoms.s.pm4_states[SI_STATE_IDX(es)].emit = si_pm4_emit_shader;
@@ -5060,7 +4877,6 @@ void si_init_state_functions(struct si_context *sctx)
    sctx->atoms.s.clip_regs.emit = si_emit_clip_regs;
    sctx->atoms.s.clip_state.emit = si_emit_clip_state;
    sctx->atoms.s.stencil_ref.emit = si_emit_stencil_ref;
-   sctx->atoms.s.cache_flush.emit = si_emit_cache_flush_state;
 
    sctx->b.create_blend_state = si_create_blend_state;
    sctx->b.bind_blend_state = si_bind_blend_state;
@@ -5102,7 +4918,6 @@ void si_init_state_functions(struct si_context *sctx)
    sctx->b.delete_vertex_elements_state = si_delete_vertex_element;
    sctx->b.set_vertex_buffers = si_set_vertex_buffers;
 
-   sctx->b.texture_barrier = si_texture_barrier;
    sctx->b.set_min_samples = si_set_min_samples;
    sctx->b.set_tess_state = si_set_tess_state;
 
@@ -5114,11 +4929,6 @@ void si_init_screen_state_functions(struct si_screen *sscreen)
    sscreen->b.is_format_supported = si_is_format_supported;
    sscreen->b.create_vertex_state = si_pipe_create_vertex_state;
    sscreen->b.vertex_state_destroy = si_pipe_vertex_state_destroy;
-
-   if (sscreen->info.gfx_level >= GFX10)
-      sscreen->make_texture_descriptor = gfx10_make_texture_descriptor;
-   else
-      sscreen->make_texture_descriptor = si_make_texture_descriptor;
 
    util_vertex_state_cache_init(&sscreen->vertex_state_cache,
                                 si_create_vertex_state, si_vertex_state_destroy);

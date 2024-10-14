@@ -57,10 +57,11 @@ class d3d12_video_bitstream_builder_hevc : public d3d12_video_bitstream_builder_
                                  std::vector<BYTE>::iterator placingPositionStart,
                                  size_t &writtenBytes);
 
-   HevcPicParameterSet build_pps(const HevcSeqParameterSet& parentSPS,
+   HevcPicParameterSet build_pps(const struct pipe_h265_enc_pic_param & picData,
+                                 const HevcSeqParameterSet& parentSPS,
                                  uint8_t pic_parameter_set_id,
                                  const D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC& codecConfig,
-                                 const D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC& pictureControl,
+                                 const D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC1& pictureControl,
                                  std::vector<BYTE> &headerBitstream,
                                  std::vector<BYTE>::iterator placingPositionStart,
                                  size_t &writtenBytes);
@@ -71,6 +72,11 @@ class d3d12_video_bitstream_builder_hevc : public d3d12_video_bitstream_builder_
    void write_end_of_sequence_nalu(std::vector<uint8_t> &         headerBitstream,
                                    std::vector<uint8_t>::iterator placingPositionStart,
                                    size_t &                       writtenBytes);
+
+   void write_aud(std::vector<uint8_t> &         headerBitstream,
+                  std::vector<uint8_t>::iterator placingPositionStart,
+                  D3D12_VIDEO_ENCODER_FRAME_TYPE_HEVC frameType,
+                  size_t &                       writtenBytes);
 
    void print_vps(const HevcVideoParameterSet& vps);
    void print_sps(const HevcSeqParameterSet& sps);

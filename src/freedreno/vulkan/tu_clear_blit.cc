@@ -355,6 +355,44 @@ r2d_src_buffer(struct tu_cmd_buffer *cmd,
 
 template <chip CHIP>
 static void
+r2d_src_buffer_unaligned(struct tu_cmd_buffer *cmd,
+                         struct tu_cs *cs,
+                         enum pipe_format format,
+                         uint64_t va,
+                         uint32_t pitch,
+                         uint32_t width,
+                         uint32_t height,
+                         enum pipe_format dst_format)
+{
+   /* This functionality is only allowed on A7XX, this assertion statically
+    * disallows calling this function on prior generations by mistake.
+    */
+   static_assert(CHIP >= A7XX);
+
+   struct tu_native_format fmt =
+      blit_format_texture<CHIP>(format, TILE6_LINEAR, false);
+   enum a6xx_format color_format = fmt.fmt;
+   fixup_src_format(&format, dst_format, &color_format);
+
+   uint32_t offset_texels = ((va & 0x3f) / util_format_get_blocksize(format));
+   va &= ~0x3f;
+   tu_cs_emit_regs(cs,
+                   A7XX_TPL1_2D_SRC_CNTL(.raw_copy = false,
+                                         .start_offset_texels = offset_texels,
+                                         .type = A6XX_TEX_IMG_BUFFER));
+
+   tu_cs_emit_regs(cs,
+                   SP_PS_2D_SRC_INFO(CHIP, .color_format = color_format,
+                                     .color_swap = fmt.swap,
+                                     .srgb = util_format_is_srgb(format),
+                                     .unk20 = 1, .unk22 = 1),
+                   SP_PS_2D_SRC_SIZE(CHIP, .width = width, .height = height),
+                   SP_PS_2D_SRC(CHIP, .qword = va),
+                   SP_PS_2D_SRC_PITCH(CHIP, .pitch = pitch));
+}
+
+template <chip CHIP>
+static void
 r2d_dst(struct tu_cs *cs, const struct fdl6_view *iview, uint32_t layer,
         enum pipe_format src_format)
 {
@@ -465,8 +503,9 @@ r2d_setup_common(struct tu_cmd_buffer *cmd,
    tu_cs_emit(cs, blit_cntl);
 
    if (CHIP > A6XX) {
-      tu_cs_emit_pkt4(cs, REG_A7XX_SP_PS_UNKNOWN_B2D2, 1);
-      tu_cs_emit(cs, 0x20000000);
+      tu_cs_emit_regs(cs, A7XX_TPL1_2D_SRC_CNTL(.raw_copy = false,
+                                                .start_offset_texels = 0,
+                                                .type = A6XX_TEX_2D));
    }
 
    if (fmt == FMT6_10_10_10_2_UNORM_DEST)
@@ -1749,27 +1788,16 @@ copy_format(VkFormat vk_format, VkImageAspectFlags aspect_mask)
     */
    format = util_format_snorm_to_unorm(format);
 
-   switch (format) {
-   case PIPE_FORMAT_R9G9B9E5_FLOAT:
+   if (vk_format == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32)
       return PIPE_FORMAT_R32_UINT;
 
-   case PIPE_FORMAT_G8_B8R8_420_UNORM:
-      if (aspect_mask == VK_IMAGE_ASPECT_PLANE_1_BIT)
-         return PIPE_FORMAT_R8G8_UNORM;
-      else
-         return PIPE_FORMAT_Y8_UNORM;
-   case PIPE_FORMAT_G8_B8_R8_420_UNORM:
-      return PIPE_FORMAT_R8_UNORM;
+   /* For VK_FORMAT_D32_SFLOAT_S8_UINT and YCbCr formats use our existing helpers */
+   if (vk_format == VK_FORMAT_D32_SFLOAT_S8_UINT ||
+       vk_format_get_ycbcr_info(vk_format))
+      return tu_aspects_to_plane(vk_format, aspect_mask);
 
-   case PIPE_FORMAT_Z32_FLOAT_S8X24_UINT:
-      if (aspect_mask == VK_IMAGE_ASPECT_STENCIL_BIT)
-         return PIPE_FORMAT_S8_UINT;
-      assert(aspect_mask == VK_IMAGE_ASPECT_DEPTH_BIT);
-      return PIPE_FORMAT_Z32_FLOAT;
-
-   default:
-      return format;
-   }
+   /* Otherwise, simply return the pipe_format */
+   return format;
 }
 
 static void
@@ -2162,9 +2190,7 @@ tu_image_view_blit(struct fdl6_view *iview,
                    const VkImageSubresourceLayers *subres,
                    uint32_t layer)
 {
-   enum pipe_format format =
-      tu6_plane_format(image->vk.format, tu6_plane_index(image->vk.format,
-                                                         subres->aspectMask));
+   enum pipe_format format = tu_aspects_to_plane(image->vk.format, subres->aspectMask);
    tu_image_view_copy_blit<CHIP>(iview, image, format, subres, layer, false);
 }
 
@@ -2231,17 +2257,11 @@ tu6_blit_image(struct tu_cmd_buffer *cmd,
       blit_param = z_scale ? R3D_Z_SCALE : 0;
    }
 
-   /* use the right format in setup() for D32_S8
-    * TODO: this probably should use a helper
-    */
-   enum pipe_format src_format =
-      tu6_plane_format(src_image->vk.format,
-                       tu6_plane_index(src_image->vk.format,
-                                       info->srcSubresource.aspectMask));
-   enum pipe_format dst_format =
-      tu6_plane_format(dst_image->vk.format,
-                       tu6_plane_index(src_image->vk.format,
-                                       info->srcSubresource.aspectMask));
+   /* use the right format in setup() for D32_S8 */
+   enum pipe_format src_format = tu_aspects_to_plane(
+      src_image->vk.format, info->srcSubresource.aspectMask);
+   enum pipe_format dst_format = tu_aspects_to_plane(
+      dst_image->vk.format, info->dstSubresource.aspectMask);
    trace_start_blit(&cmd->trace, cs,
                   ops == &r3d_ops<CHIP>,
                   src_image->vk.format,
@@ -2384,11 +2404,13 @@ tu_copy_buffer_to_image(struct tu_cmd_buffer *cmd,
    }
 
    /* note: could use "R8_UNORM" when no UBWC */
+   bool has_unaligned = CHIP >= A7XX; /* If unaligned buffer copies are supported. */
    unsigned blit_param = 0;
    if (src_format == PIPE_FORMAT_Y8_UNORM ||
        tu_pipe_format_is_float16(src_format)) {
       ops = &r3d_ops<CHIP>;
       blit_param = R3D_COPY;
+      has_unaligned = false;
    }
 
    VkOffset3D offset = info->imageOffset;
@@ -2413,7 +2435,8 @@ tu_copy_buffer_to_image(struct tu_cmd_buffer *cmd,
       ops->dst(cs, &dst, i, src_format);
 
       uint64_t src_va = src_buffer->iova + info->bufferOffset + layer_size * i;
-      if ((src_va & 63) || (pitch & 63)) {
+      bool unaligned = (src_va & 63) || (pitch & 63);
+      if (!has_unaligned && unaligned) {
          for (uint32_t y = 0; y < extent.height; y++) {
             uint32_t x = (src_va & 63) / util_format_get_blocksize(src_format);
             ops->src_buffer(cmd, cs, src_format, src_va & ~63, pitch,
@@ -2424,7 +2447,20 @@ tu_copy_buffer_to_image(struct tu_cmd_buffer *cmd,
             src_va += pitch;
          }
       } else {
-         ops->src_buffer(cmd, cs, src_format, src_va, pitch, extent.width, extent.height, dst_format);
+         if constexpr (CHIP >= A7XX) {
+            /* Necessary to not trigger static assertion from A6XX variant. */
+            if (has_unaligned) {
+               r2d_src_buffer_unaligned<CHIP>(cmd, cs, src_format, src_va,
+                                              pitch, extent.width,
+                                              extent.height, dst_format);
+            } else {
+               ops->src_buffer(cmd, cs, src_format, src_va, pitch,
+                               extent.width, extent.height, dst_format);
+            }
+         } else {
+            ops->src_buffer(cmd, cs, src_format, src_va, pitch, extent.width,
+                            extent.height, dst_format);
+         }
          coords(ops, cmd, cs, offset, (VkOffset3D) {}, extent);
          ops->run(cmd, cs);
       }
@@ -3091,9 +3127,7 @@ clear_image_cp_blit(struct tu_cmd_buffer *cmd,
    if (image->vk.format == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32) {
       format = PIPE_FORMAT_R32_UINT;
    } else {
-      format = tu6_plane_format(image->vk.format,
-                                tu6_plane_index(image->vk.format,
-                                                aspect_mask));
+      format = tu_aspects_to_plane(image->vk.format, aspect_mask);
    }
 
    if (image->layout[0].depth0 > 1) {
@@ -3240,12 +3274,18 @@ static bool
 use_generic_clear_for_image_clear(struct tu_cmd_buffer *cmd,
                                   struct tu_image *image)
 {
-   return cmd->device->physical_device->info->a7xx.has_generic_clear &&
+   const struct fd_dev_info *info = cmd->device->physical_device->info;
+   return info->a7xx.has_generic_clear &&
           /* A7XX supports R9G9B9E5_FLOAT as color attachment and supports
            * generic clears for it. A7XX TODO: allow R9G9B9E5_FLOAT
            * attachments.
            */
-          image->vk.format != VK_FORMAT_E5B9G9R9_UFLOAT_PACK32;
+          image->vk.format != VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 &&
+          /* Clearing VK_FORMAT_R8G8_* with fast-clear value, certain
+           * dimensions (e.g. 960x540), and having GMEM renderpass afterwards
+           * may lead to a GPU fault on A7XX.
+           */
+          !(info->a7xx.r8g8_faulty_fast_clear_quirk && image_is_r8g8(image));
 }
 
 template <chip CHIP>

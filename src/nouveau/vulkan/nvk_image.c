@@ -85,9 +85,14 @@ nvk_get_image_plane_format_features(struct nvk_physical_device *pdev,
        p_format == PIPE_FORMAT_R64_UINT || p_format == PIPE_FORMAT_R64_SINT)
       features |= VK_FORMAT_FEATURE_2_STORAGE_IMAGE_ATOMIC_BIT;
 
+   if (p_format == PIPE_FORMAT_R8_UINT && tiling == VK_IMAGE_TILING_OPTIMAL)
+      features |= VK_FORMAT_FEATURE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
+
    if (features != 0) {
       features |= VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT;
       features |= VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
+      if (!vk_format_is_depth_or_stencil(vk_format))
+         features |= VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT;
    }
 
    return features;
@@ -271,6 +276,8 @@ vk_image_usage_to_format_features(VkImageUsageFlagBits usage_flag)
    case VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT:
       return VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT |
              VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT;
+   case VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR:
+      return VK_FORMAT_FEATURE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
    default:
       return 0;
    }
@@ -400,6 +407,10 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
                                    VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT)))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
+   if (pImageFormatInfo->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT &&
+       pImageFormatInfo->type != VK_IMAGE_TYPE_2D)
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
    const uint32_t max_dim =
       nvk_image_max_dimension(&pdev->info, VK_IMAGE_TYPE_1D);
    VkExtent3D maxExtent;
@@ -427,6 +438,11 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
    uint32_t maxMipLevels = util_logbase2(max_dim) + 1;
    if (ycbcr_info != NULL || pImageFormatInfo->tiling == VK_IMAGE_TILING_LINEAR)
        maxMipLevels = 1;
+
+   if (pImageFormatInfo->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
+      maxArraySize = 1;
+      maxMipLevels = 1;
+   }
 
    VkSampleCountFlags sampleCounts = VK_SAMPLE_COUNT_1_BIT;
    if (pImageFormatInfo->tiling == VK_IMAGE_TILING_OPTIMAL &&
@@ -548,6 +564,10 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
        (pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT)))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
+   if ((pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) &&
+       (pImageFormatInfo->usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT))
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
    pImageFormatProperties->imageFormatProperties = (VkImageFormatProperties) {
       .maxExtent = maxExtent,
       .maxMipLevels = maxMipLevels,
@@ -576,6 +596,12 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
       case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES: {
          VkSamplerYcbcrConversionImageFormatProperties *ycbcr_props = (void *) s;
          ycbcr_props->combinedImageSamplerDescriptorCount = plane_count;
+         break;
+      }
+      case VK_STRUCTURE_TYPE_HOST_IMAGE_COPY_DEVICE_PERFORMANCE_QUERY_EXT: {
+         VkHostImageCopyDevicePerformanceQueryEXT *host_props = (void *) s;
+         host_props->optimalDeviceAccess = true;
+         host_props->identicalMemoryLayout = true;
          break;
       }
       default:
@@ -1033,6 +1059,18 @@ nvk_get_image_memory_requirements(struct nvk_device *dev,
    struct nvk_physical_device *pdev = nvk_device_physical(dev);
    uint32_t memory_types = (1 << pdev->mem_type_count) - 1;
 
+   /* Remove non host visible heaps from the types for host image copy in case
+    * of potential issues. This should be removed when we get ReBAR.
+    */
+   if (image->vk.usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT) {
+      struct nvk_physical_device *pdev = nvk_device_physical(dev);
+      for (uint32_t i = 0; i < pdev->mem_type_count; i++) {
+         if (!(pdev->mem_types[i].propertyFlags &
+             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+            memory_types &= ~BITFIELD_BIT(i);
+      }
+   }
+
    // TODO hope for the best?
 
    uint64_t size_B = 0;
@@ -1245,6 +1283,14 @@ nvk_get_image_subresource_layout(struct nvk_device *dev,
    offset_B += nil_image_level_layer_offset_B(&plane->nil, isr->mipLevel,
                                               isr->arrayLayer);
 
+   VkSubresourceHostMemcpySizeEXT *host_memcpy_size =
+      vk_find_struct(pLayout->pNext, SUBRESOURCE_HOST_MEMCPY_SIZE_EXT);
+   if (host_memcpy_size) {
+      host_memcpy_size->size =
+         nil_image_level_layer_size_B(&plane->nil, isr->mipLevel) *
+         plane->nil.extent_px.array_len;
+   }
+
    pLayout->subresourceLayout = (VkSubresourceLayout) {
       .offset = offset_B,
       .size = nil_image_level_size_B(&plane->nil, isr->mipLevel),
@@ -1305,6 +1351,11 @@ nvk_image_plane_bind(struct nvk_device *dev,
    } else {
       assert(plane->nil.pte_kind == 0);
       plane->addr = mem->mem->va->addr + *offset_B;
+   }
+
+   if (image->vk.usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT) {
+      plane->host_mem = mem;
+      plane->host_offset = *offset_B;
    }
 
    *offset_B += plane_size_B;

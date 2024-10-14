@@ -208,7 +208,8 @@ anv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice,
 
    if (enc_caps) {
       enc_caps->flags = 0;
-      enc_caps->rateControlModes = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DEFAULT_KHR;
+      enc_caps->rateControlModes = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DEFAULT_KHR |
+                                   VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR;
       enc_caps->maxRateControlLayers = 1;
       enc_caps->maxQualityLevels = 1;
       enc_caps->encodeInputPictureGranularity.width = 32;
@@ -324,16 +325,33 @@ anv_GetPhysicalDeviceVideoFormatPropertiesKHR(VkPhysicalDevice physicalDevice,
 
    vk_outarray_append_typed(VkVideoFormatPropertiesKHR, &out, p) {
       p->format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+      p->imageCreateFlags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
       p->imageType = VK_IMAGE_TYPE_2D;
       p->imageTiling = VK_IMAGE_TILING_OPTIMAL;
+      p->imageUsageFlags = pVideoFormatInfo->imageUsage;
+   }
+
+   vk_outarray_append_typed(VkVideoFormatPropertiesKHR, &out, p) {
+      p->format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+      p->imageCreateFlags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+      p->imageType = VK_IMAGE_TYPE_2D;
+      p->imageTiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
       p->imageUsageFlags = pVideoFormatInfo->imageUsage;
    }
 
    if (need_10bit) {
       vk_outarray_append_typed(VkVideoFormatPropertiesKHR, &out, p) {
          p->format = VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
+         p->imageCreateFlags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
          p->imageType = VK_IMAGE_TYPE_2D;
          p->imageTiling = VK_IMAGE_TILING_OPTIMAL;
+         p->imageUsageFlags = pVideoFormatInfo->imageUsage;
+      }
+      vk_outarray_append_typed(VkVideoFormatPropertiesKHR, &out, p) {
+         p->format = VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
+         p->imageCreateFlags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+         p->imageType = VK_IMAGE_TYPE_2D;
+         p->imageTiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
          p->imageUsageFlags = pVideoFormatInfo->imageUsage;
       }
    }

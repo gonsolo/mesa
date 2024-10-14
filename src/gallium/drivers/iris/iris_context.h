@@ -499,6 +499,7 @@ enum pipe_control_flags
    PIPE_CONTROL_L3_READ_ONLY_CACHE_INVALIDATE   = (1 << 28),
    PIPE_CONTROL_UNTYPED_DATAPORT_CACHE_FLUSH    = (1 << 29),
    PIPE_CONTROL_CCS_CACHE_FLUSH                 = (1 << 30),
+   PIPE_CONTROL_L3_FABRIC_FLUSH                 = (1 << 31),
 };
 
 #define PIPE_CONTROL_CACHE_FLUSH_BITS \
@@ -635,6 +636,9 @@ struct iris_binding_table {
    uint64_t used_mask[IRIS_SURFACE_GROUP_COUNT];
 
    uint64_t samplers_used_mask;
+
+   /** Whether the first render target is a null fb surface */
+   uint8_t use_null_rt;
 };
 
 /**

@@ -57,11 +57,17 @@ struct radv_indirect_command_layout {
 VK_DEFINE_NONDISP_HANDLE_CASTS(radv_indirect_command_layout, base, VkIndirectCommandsLayoutNV,
                                VK_OBJECT_TYPE_INDIRECT_COMMANDS_LAYOUT_NV)
 
-uint32_t radv_get_indirect_gfx_cmdbuf_size(const VkGeneratedCommandsInfoNV *cmd_info);
+uint32_t radv_get_indirect_main_cmdbuf_size(const VkGeneratedCommandsInfoNV *cmd_info);
 
 uint32_t radv_get_indirect_ace_cmdbuf_size(const VkGeneratedCommandsInfoNV *cmd_info);
 
+uint32_t radv_get_indirect_main_cmdbuf_offset(const VkGeneratedCommandsInfoNV *cmd_info);
+
 uint32_t radv_get_indirect_ace_cmdbuf_offset(const VkGeneratedCommandsInfoNV *cmd_info);
+
+uint32_t radv_get_indirect_main_trailer_offset(const VkGeneratedCommandsInfoNV *cmd_info);
+
+uint32_t radv_get_indirect_ace_trailer_offset(const VkGeneratedCommandsInfoNV *cmd_info);
 
 bool radv_use_dgc_predication(struct radv_cmd_buffer *cmd_buffer,
                               const VkGeneratedCommandsInfoNV *pGeneratedCommandsInfo);

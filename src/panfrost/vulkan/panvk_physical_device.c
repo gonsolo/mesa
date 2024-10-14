@@ -34,7 +34,6 @@
 #include "genxml/gen_macros.h"
 
 #define ARM_VENDOR_ID        0x13b5
-#define MAX_VIEWPORTS        1
 #define MAX_PUSH_DESCRIPTORS 32
 /* We reserve one ubo for push constant, one for sysvals and one per-set for the
  * descriptor metadata  */
@@ -65,9 +64,12 @@ get_device_extensions(const struct panvk_physical_device *device,
    *ext = (struct vk_device_extension_table){
       .KHR_buffer_device_address = true,
       .KHR_copy_commands2 = true,
+      .KHR_create_renderpass2 = true,
       .KHR_device_group = true,
       .KHR_descriptor_update_template = true,
       .KHR_driver_properties = true,
+      .KHR_get_memory_requirements2 = true,
+      .KHR_maintenance1 = true,
       .KHR_maintenance3 = true,
       .KHR_pipeline_executable_properties = true,
       .KHR_pipeline_library = true,
@@ -658,31 +660,31 @@ panvk_physical_device_init(struct panvk_physical_device *device,
 
    fd = open(path, O_RDWR | O_CLOEXEC);
    if (fd < 0) {
-      return vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                       "failed to open device %s", path);
+      return panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
+                          "failed to open device %s", path);
    }
 
    version = drmGetVersion(fd);
    if (!version) {
       close(fd);
-      return vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                       "failed to query kernel driver version for device %s",
-                       path);
+      return panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
+                          "failed to query kernel driver version for device %s",
+                          path);
    }
 
-   if (strcmp(version->name, "panfrost")) {
+   if (strcmp(version->name, "panfrost") && strcmp(version->name, "panthor")) {
       drmFreeVersion(version);
       close(fd);
-      return vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                       "device %s does not use the panfrost kernel driver",
-                       path);
+      return panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
+                          "device %s does not use the panfrost kernel driver",
+                          path);
    }
 
    drmFreeVersion(version);
 
    if (!getenv("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER")) {
       close(fd);
-      return vk_errorf(
+      return panvk_errorf(
          instance, VK_ERROR_INCOMPATIBLE_DRIVER,
          "WARNING: panvk is not a conformant vulkan implementation, "
          "pass PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1 if you know what you're doing.");
@@ -695,7 +697,8 @@ panvk_physical_device_init(struct panvk_physical_device *device,
                                           &instance->kmod.allocator);
 
    if (!device->kmod.dev) {
-      result = vk_errorf(instance, panvk_errno_to_vk_error(), "cannot create device");
+      result = panvk_errorf(instance, VK_ERROR_OUT_OF_HOST_MEMORY,
+                            "cannot create device");
       goto fail;
    }
 
@@ -706,9 +709,15 @@ panvk_physical_device_init(struct panvk_physical_device *device,
 
    unsigned arch = pan_arch(device->kmod.props.gpu_prod_id);
 
-   if (arch <= 5 || arch >= 8) {
-      result = vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                         "%s not supported", device->model->name);
+   switch (arch) {
+   case 6:
+   case 7:
+   case 10:
+      break;
+
+   default:
+      result = panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
+                            "%s not supported", device->model->name);
       goto fail;
    }
 
@@ -728,8 +737,8 @@ panvk_physical_device_init(struct panvk_physical_device *device,
    sprintf(device->name, "%s", device->model->name);
 
    if (get_cache_uuid(device->kmod.props.gpu_prod_id, device->cache_uuid)) {
-      result = vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
-                         "cannot generate UUID");
+      result = panvk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
+                            "cannot generate UUID");
       goto fail;
    }
 
@@ -761,20 +770,16 @@ panvk_physical_device_init(struct panvk_physical_device *device,
                                     &supported_extensions, &supported_features,
                                     &properties, &dispatch_table);
 
-   if (result != VK_SUCCESS) {
-      vk_error(instance, result);
+   if (result != VK_SUCCESS)
       goto fail;
-   }
 
    device->sync_types[0] = &device->drm_syncobj_type;
    device->sync_types[1] = NULL;
    device->vk.supported_sync_types = device->sync_types;
 
    result = panvk_wsi_init(device);
-   if (result != VK_SUCCESS) {
-      vk_error(instance, result);
+   if (result != VK_SUCCESS)
       goto fail;
-   }
 
    return VK_SUCCESS;
 
@@ -899,6 +904,7 @@ panvk_GetPhysicalDeviceExternalFenceProperties(
 
 DEVICE_PER_ARCH_FUNCS(6);
 DEVICE_PER_ARCH_FUNCS(7);
+DEVICE_PER_ARCH_FUNCS(10);
 
 VKAPI_ATTR VkResult VKAPI_CALL
 panvk_CreateDevice(VkPhysicalDevice physicalDevice,
@@ -928,7 +934,8 @@ panvk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 
 static bool
 format_is_supported(struct panvk_physical_device *physical_device,
-                    const struct panfrost_format fmt)
+                    const struct panfrost_format fmt,
+                    enum pipe_format pfmt)
 {
    /* If the format ID is zero, it's not supported. */
    if (!fmt.hw)
@@ -936,14 +943,13 @@ format_is_supported(struct panvk_physical_device *physical_device,
 
    /* Compressed formats (ID < 32) are optional. We need to check against
     * the supported formats reported by the GPU. */
-   unsigned idx = MALI_EXTRACT_INDEX(fmt.hw);
-   if (MALI_EXTRACT_TYPE(idx) == MALI_FORMAT_COMPRESSED) {
+   if (util_format_is_compressed(pfmt)) {
       uint32_t supported_compr_fmts =
          panfrost_query_compressed_formats(&physical_device->kmod.props);
 
-      assert(idx < 32);
+      assert(fmt.texfeat_bit < 32);
 
-      if (!(BITFIELD_BIT(idx) & supported_compr_fmts))
+      if (!(BITFIELD_BIT(fmt.texfeat_bit) & supported_compr_fmts))
          return false;
    }
 
@@ -956,13 +962,25 @@ get_format_properties(struct panvk_physical_device *physical_device,
 {
    VkFormatFeatureFlags tex = 0, buffer = 0;
    enum pipe_format pfmt = vk_format_to_pipe_format(format);
+   unsigned arch = pan_arch(physical_device->kmod.props.gpu_prod_id);
+
+   /* FIXME: Valhall doesn't support interleaved D32_S8X24. Implement it as
+    * a multi-plane format, and we probably want to switch Bifrost to this
+    * layout too, since:
+    * - it's more cache-friendly (you load more samples on a cache-line if you don't
+    *   have those 24 dummy bits)
+    * - it takes less memory (you don't lose those 24bits per texel)
+    * - we can use AFBC
+    */
+   if (arch >= 9 && format == VK_FORMAT_D32_SFLOAT_S8_UINT)
+      goto end;
 
    if (pfmt == PIPE_FORMAT_NONE)
       goto end;
 
    const struct panfrost_format fmt = physical_device->formats.all[pfmt];
 
-   if (!format_is_supported(physical_device, fmt))
+   if (!format_is_supported(physical_device, fmt, pfmt))
       goto end;
 
    /* 3byte formats are not supported by the buffer <-> image copy helpers. */
@@ -1022,16 +1040,6 @@ end:
    out_properties->linearTilingFeatures = tex;
    out_properties->optimalTilingFeatures = tex;
    out_properties->bufferFeatures = buffer;
-}
-
-VKAPI_ATTR void VKAPI_CALL
-panvk_GetPhysicalDeviceFormatProperties(VkPhysicalDevice physicalDevice,
-                                        VkFormat format,
-                                        VkFormatProperties *pFormatProperties)
-{
-   VK_FROM_HANDLE(panvk_physical_device, physical_device, physicalDevice);
-
-   get_format_properties(physical_device, format, pFormatProperties);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1249,7 +1257,7 @@ panvk_get_external_image_format_properties(
             VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
          break;
       default:
-         return vk_errorf(
+         return panvk_errorf(
             physical_device, VK_ERROR_FORMAT_NOT_SUPPORTED,
             "VkExternalMemoryTypeFlagBits(0x%x) unsupported for VkImageType(%d)",
             handleType, pImageFormatInfo->type);
@@ -1260,9 +1268,9 @@ panvk_get_external_image_format_properties(
       compat_flags = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
       break;
    default:
-      return vk_errorf(physical_device, VK_ERROR_FORMAT_NOT_SUPPORTED,
-                       "VkExternalMemoryTypeFlagBits(0x%x) unsupported",
-                       handleType);
+      return panvk_errorf(physical_device, VK_ERROR_FORMAT_NOT_SUPPORTED,
+                          "VkExternalMemoryTypeFlagBits(0x%x) unsupported",
+                          handleType);
    }
 
    *external_properties = (VkExternalMemoryProperties){

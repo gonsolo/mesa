@@ -101,6 +101,8 @@ if with_any_nouveau
 endif
 if with_borg_vk
   subdir('borg')
+if with_gfxstream_vk
+  subdir('gfxstream')
 endif
 if with_gallium_asahi or with_tools.contains('asahi')
   subdir('asahi')

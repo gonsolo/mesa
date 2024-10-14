@@ -260,6 +260,14 @@ typedef enum {
    ALIAS_MEM = 4,
 } ir3_alias_scope;
 
+typedef enum {
+   SHFL_XOR = 1,
+   SHFL_UP = 2,
+   SHFL_DOWN = 3,
+   SHFL_RUP = 6,
+   SHFL_RDOWN = 7,
+} ir3_shfl_mode;
+
 typedef enum ir3_instruction_flags {
    /* (sy) flag is set on first instruction, and after sample
     * instructions (probably just on RAW hazard).
@@ -416,6 +424,7 @@ struct ir3_instruction {
          unsigned d    : 3; /* for ldc, component offset */
          bool typed    : 1;
          unsigned base : 3;
+         ir3_shfl_mode shfl_mode : 3;
       } cat6;
       struct {
          unsigned w : 1; /* write */
@@ -2053,7 +2062,7 @@ is_ss_producer(struct ir3_instruction *instr)
    if (instr->block->in_early_preamble && writes_addr1(instr))
       return true;
 
-   return is_sfu(instr) || is_local_mem_load(instr);
+   return is_sfu(instr) || is_local_mem_load(instr) || instr->opc == OPC_SHFL;
 }
 
 static inline bool
@@ -2160,7 +2169,8 @@ soft_sy_delay(struct ir3_instruction *instr, struct ir3 *shader)
 static inline bool
 is_war_hazard_producer(struct ir3_instruction *instr)
 {
-   return is_tex(instr) || is_mem(instr) || is_ss_producer(instr);
+   return is_tex(instr) || is_mem(instr) || is_ss_producer(instr) ||
+          instr->opc == OPC_STC;
 }
 
 bool ir3_cleanup_rpt(struct ir3 *ir, struct ir3_shader_variant *v);
@@ -2955,6 +2965,7 @@ INSTR1(QUAD_SHUFFLE_DIAG)
 INSTR2NODST(LDC_K)
 INSTR2NODST(STC)
 INSTR2NODST(STSC)
+INSTR2(SHFL)
 #ifndef GPU
 #elif GPU >= 600
 INSTR4NODST(STIB);

@@ -106,7 +106,6 @@ struct radv_shader_info {
    uint32_t user_data_0;
    bool inputs_linked;
    bool outputs_linked;
-   bool has_epilog;                        /* Only for TCS or PS */
    bool merged_shader_compiled_separately; /* GFX9+ */
    bool force_indirect_desc_sets;
    uint64_t gs_inputs_read; /* Mask of GS inputs read (only used by linked ES) */
@@ -216,6 +215,7 @@ struct radv_shader_info {
       bool load_rasterization_prim;
       bool force_sample_iter_shading_rate;
       bool uses_fbfetch_output;
+      bool has_epilog;
    } ps;
    struct {
       bool uses_grid_size;
@@ -257,6 +257,11 @@ struct radv_shader_info {
 
    /* Precomputed register values. */
    struct {
+      uint32_t pgm_lo;
+      uint32_t pgm_rsrc1;
+      uint32_t pgm_rsrc2;
+      uint32_t pgm_rsrc3;
+
       struct {
          uint32_t spi_shader_late_alloc_vs;
          uint32_t spi_shader_pgm_rsrc3_vs;

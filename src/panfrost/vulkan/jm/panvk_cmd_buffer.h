@@ -82,7 +82,6 @@ struct panvk_attrib_buf {
 
 struct panvk_resolve_attachment {
    VkResolveModeFlagBits mode;
-   struct panvk_image_view *src_iview;
    struct panvk_image_view *dst_iview;
 };
 
@@ -137,6 +136,7 @@ struct panvk_cmd_graphics_state {
 
       enum vk_rp_attachment_flags bound_attachments;
       struct {
+         struct panvk_image_view *iviews[MAX_RTS];
          VkFormat fmts[MAX_RTS];
          uint8_t samples[MAX_RTS];
          struct panvk_resolve_attachment resolve[MAX_RTS];
@@ -145,6 +145,7 @@ struct panvk_cmd_graphics_state {
       struct pan_image_view zs_pview;
 
       struct {
+         struct panvk_image_view *iview;
          struct panvk_resolve_attachment resolve;
       } z_attachment, s_attachment;
 
@@ -234,13 +235,14 @@ struct panvk_batch *
 
 void panvk_per_arch(cmd_close_batch)(struct panvk_cmd_buffer *cmdbuf);
 
-void panvk_per_arch(cmd_alloc_fb_desc)(struct panvk_cmd_buffer *cmdbuf);
+VkResult panvk_per_arch(cmd_alloc_fb_desc)(struct panvk_cmd_buffer *cmdbuf);
 
-void panvk_per_arch(cmd_alloc_tls_desc)(struct panvk_cmd_buffer *cmdbuf,
-                                        bool gfx);
+VkResult panvk_per_arch(cmd_alloc_tls_desc)(struct panvk_cmd_buffer *cmdbuf,
+                                            bool gfx);
 
-void panvk_per_arch(cmd_prepare_tiler_context)(struct panvk_cmd_buffer *cmdbuf,
-                                               uint32_t layer_idx);
+VkResult
+   panvk_per_arch(cmd_prepare_tiler_context)(struct panvk_cmd_buffer *cmdbuf,
+                                             uint32_t layer_idx);
 
 void panvk_per_arch(cmd_preload_fb_after_batch_split)(
    struct panvk_cmd_buffer *cmdbuf);

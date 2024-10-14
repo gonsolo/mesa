@@ -1452,12 +1452,16 @@ va_emit_image_coord(bi_builder *b, bi_index coord, bi_index sample_index,
                                bi_half(bi_extract(b, coord, 2), false));
       else if (coord_comps == 2)
          return array_idx;
-   } else if (coord_comps == 3)
+   } else if (coord_comps == 3 && is_array) {
       return bi_mkvec_v2i16(b, bi_imm_u16(0),
                             bi_half(bi_extract(b, coord, 2), false));
-   else if (coord_comps == 2 && is_array)
+   } else if (coord_comps == 3 && !is_array) {
+      return bi_mkvec_v2i16(b, bi_half(bi_extract(b, coord, 2), false),
+                            bi_imm_u16(0));
+   } else if (coord_comps == 2 && is_array) {
       return bi_mkvec_v2i16(b, bi_imm_u16(0),
                             bi_half(bi_extract(b, coord, 1), false));
+   }
    return bi_zero();
 }
 
@@ -1466,7 +1470,8 @@ bi_emit_image_load(bi_builder *b, nir_intrinsic_instr *instr)
 {
    enum glsl_sampler_dim dim = nir_intrinsic_image_dim(instr);
    unsigned coord_comps = nir_image_intrinsic_coord_components(instr);
-   bool array = nir_intrinsic_image_array(instr);
+   bool array =
+      nir_intrinsic_image_array(instr) || dim == GLSL_SAMPLER_DIM_CUBE;
 
    bi_index coords = bi_src_index(&instr->src[1]);
    bi_index indexvar = bi_src_index(&instr->src[2]);
@@ -1514,7 +1519,8 @@ static void
 bi_emit_lea_image_to(bi_builder *b, bi_index dest, nir_intrinsic_instr *instr)
 {
    enum glsl_sampler_dim dim = nir_intrinsic_image_dim(instr);
-   bool array = nir_intrinsic_image_array(instr);
+   bool array =
+      nir_intrinsic_image_array(instr) || dim == GLSL_SAMPLER_DIM_CUBE;
    unsigned coord_comps = nir_image_intrinsic_coord_components(instr);
 
    enum bi_register_format type =
@@ -1991,6 +1997,22 @@ bi_emit_intrinsic(bi_builder *b, nir_intrinsic_instr *instr)
       bi_mov_i32_to(b, dst, bi_u8_to_u32(b, bi_byte(bi_preload(b, 62), 0)));
       break;
 
+   case nir_intrinsic_load_ssbo_address:
+      assert(b->shader->arch >= 9);
+      bi_lea_buffer_to(b, dst, bi_src_index(&instr->src[1]),
+                       bi_src_index(&instr->src[0]));
+      bi_emit_cached_split(b, dst, 64);
+      break;
+
+   case nir_intrinsic_load_ssbo: {
+      assert(b->shader->arch >= 9);
+      unsigned dst_bits = instr->num_components * instr->def.bit_size;
+      bi_ld_buffer_to(b, dst_bits, dst, bi_src_index(&instr->src[1]),
+                      bi_src_index(&instr->src[0]));
+      bi_emit_cached_split(b, dst, dst_bits);
+      break;
+   }
+
    default:
       fprintf(stderr, "Unhandled intrinsic %s\n",
               nir_intrinsic_infos[instr->intrinsic].name);
@@ -2440,11 +2462,15 @@ bi_emit_alu(bi_builder *b, nir_alu_instr *instr)
       bi_index src = bi_src_index(&instr->src[0].src);
 
       assert(sz == 32 && src_sz == 32);
-      bi_mkvec_v4i8_to(
-         b, dst, bi_byte(bi_extract(b, src, instr->src[0].swizzle[0]), 0),
-         bi_byte(bi_extract(b, src, instr->src[0].swizzle[1]), 0),
-         bi_byte(bi_extract(b, src, instr->src[0].swizzle[2]), 0),
-         bi_byte(bi_extract(b, src, instr->src[0].swizzle[3]), 0));
+
+      bi_index srcs[4] = {
+         bi_extract(b, src, instr->src[0].swizzle[0]),
+         bi_extract(b, src, instr->src[0].swizzle[1]),
+         bi_extract(b, src, instr->src[0].swizzle[2]),
+         bi_extract(b, src, instr->src[0].swizzle[3]),
+      };
+      unsigned channels[4] = {0};
+      bi_make_vec_to(b, dst, srcs, channels, 4, 8);
       return;
    }
 
@@ -2617,13 +2643,13 @@ bi_emit_alu(bi_builder *b, nir_alu_instr *instr)
       break;
    }
 
-   case nir_op_fsat_signed_mali: {
+   case nir_op_fsat_signed: {
       bi_instr *I = bi_fclamp_to(b, sz, dst, s0);
       I->clamp = BI_CLAMP_CLAMP_M1_1;
       break;
    }
 
-   case nir_op_fclamp_pos_mali: {
+   case nir_op_fclamp_pos: {
       bi_instr *I = bi_fclamp_to(b, sz, dst, s0);
       I->clamp = BI_CLAMP_CLAMP_0_INF;
       break;
@@ -3112,6 +3138,8 @@ valhall_tex_dimension(enum glsl_sampler_dim dim)
    case GLSL_SAMPLER_DIM_MS:
    case GLSL_SAMPLER_DIM_EXTERNAL:
    case GLSL_SAMPLER_DIM_RECT:
+   case GLSL_SAMPLER_DIM_SUBPASS:
+   case GLSL_SAMPLER_DIM_SUBPASS_MS:
       return BI_DIMENSION_2D;
 
    case GLSL_SAMPLER_DIM_3D:
@@ -5083,7 +5111,12 @@ bifrost_preprocess_nir(nir_shader *nir, unsigned gpu_id)
               bi_lower_load_push_const_with_dyn_offset,
               nir_metadata_control_flow, NULL);
 
-   NIR_PASS_V(nir, nir_lower_ssbo);
+   nir_lower_ssbo_options ssbo_opts = {
+      .native_loads = pan_arch(gpu_id) >= 9,
+      .native_offset = pan_arch(gpu_id) >= 9,
+   };
+   NIR_PASS_V(nir, nir_lower_ssbo, &ssbo_opts);
+
    NIR_PASS_V(nir, pan_lower_sample_pos);
    NIR_PASS_V(nir, nir_lower_bit_size, bi_lower_bit_size, NULL);
    NIR_PASS_V(nir, nir_lower_64bit_phis);

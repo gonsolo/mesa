@@ -1361,6 +1361,13 @@ opcode("imadshl_agx", 0, tint, [0, 0, 0, 0], [tint, tint, tint, tint], False,
 opcode("imsubshl_agx", 0, tint, [0, 0, 0, 0], [tint, tint, tint, tint], False,
        "", f"(src0 * src1) - (src2 << src3)")
 
+# Bounds check instruction.
+#
+# Sources: <data, end offset, bounds>
+opcode("bounds_agx", 0, tint, [0, 0, 0],
+       [tint, tint, tint], False,
+       "", "src1 <= src2 ? src0 : 0")
+
 binop_convert("interleave_agx", tuint32, tuint16, "", """
       dst = 0;
       for (unsigned bit = 0; bit < 16; bit++) {
@@ -1504,9 +1511,9 @@ unop("pack_2x16_to_unorm_2x10_v3d", tuint32, "pack_2x16_to_unorm_2x10(src0)")
 # and one 10 bit unorm
 unop("pack_2x16_to_unorm_10_2_v3d", tuint32, "pack_2x16_to_unorm_10_2(src0)")
 
-# Mali-specific opcodes
-unop("fsat_signed_mali", tfloat, ("fmin(fmax(src0, -1.0), 1.0)"))
-unop("fclamp_pos_mali", tfloat, ("fmax(src0, 0.0)"))
+# These opcodes are used used by Mali and V3D
+unop("fsat_signed", tfloat, ("fmin(fmax(src0, -1.0), 1.0)"))
+unop("fclamp_pos", tfloat, ("fmax(src0, 0.0)"))
 
 opcode("b32fcsel_mdg", 0, tuint, [0, 0, 0],
        [tbool32, tfloat, tfloat], False, selection, "src0 ? src1 : src2",

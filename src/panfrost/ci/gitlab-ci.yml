@@ -225,10 +225,11 @@
     GPU_VERSION: panfrost-g610
     DRIVER_NAME: panfrost
     FDO_CI_CONCURRENT: 6
+    HWCI_KERNEL_MODULES: panthor
     BOOT_METHOD: u-boot
     KERNEL_IMAGE_NAME: Image
     KERNEL_IMAGE_TYPE: "image"
-    FORCE_KERNEL_TAG: "v6.11-rc5-mesa-3831"
+    FORCE_KERNEL_TAG: "v6.11-rc7-mesa-f9e9"
     KERNEL_IMAGE_BASE: https://${S3_HOST}/${S3_KERNEL_BUCKET}/${KERNEL_REPO}/${FORCE_KERNEL_TAG}
     RUNNER_TAG: mesa-ci-x86-64-lava-rk3588-rock-5b
 
@@ -271,6 +272,19 @@ panfrost-t760-traces:arm32:
     - .lava-rk3288-veyron-jaq:arm32
     - .panfrost-traces
 
+panfrost-t860-cl:arm64:
+  extends:
+    - .lava-test-deqp:arm64
+    - .panfrost-midgard-manual-rules
+    - .panfrost-test
+    - .lava-rk3399-gru-kevin:arm64
+  rules:
+    - !reference [.panfrost-midgard-manual-rules, rules]
+    - !reference [.rusticl-manual-rules, rules]
+  variables:
+    HWCI_START_WESTON: 1
+    DEQP_SUITE: panfrost-t860-cl
+
 panfrost-t860-gl:arm64:
   parallel: 3
   extends:
@@ -299,6 +313,11 @@ panfrost-t860-traces:arm64:
     - .panfrost-test
     - .lava-rk3399-gru-kevin:arm64
     - .panfrost-traces
+  variables:
+    # force fixed kernel until 6.11 is switched officially
+    FORCE_KERNEL_TAG: "v6.11-rc7-mesa-3fb8"
+    KERNEL_IMAGE_BASE: https://${S3_HOST}/${S3_KERNEL_BUCKET}/${KERNEL_REPO}/${FORCE_KERNEL_TAG}
+
 
 panfrost-g52-gl:arm64:
   parallel: 3
@@ -318,8 +337,10 @@ panfrost-g52-vk:arm64:
     - .lava-test-deqp:arm64
     - .panfrost-test
     - .lava-meson-g12b-a311d-khadas-vim3:arm64
-    - .panfrost-bifrost-vk-manual-rules
+    - .panfrost-bifrost-vk-rules
   variables:
+    # Using more than 4 cores cause instabilities
+    FDO_CI_CONCURRENT: 4
     MESA_VK_IGNORE_CONFORMANCE_WARNING: 1
     PAN_I_WANT_A_BROKEN_VULKAN_DRIVER: 1
     PANVK_DEBUG: "no_known_warn,sync"

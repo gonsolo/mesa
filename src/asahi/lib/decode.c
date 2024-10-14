@@ -725,7 +725,7 @@ agxdecode_vdm(struct agxdecode_ctx *ctx, const uint8_t *map, uint64_t *link,
       TESS_PRINT(base_instance, BASE_INSTANCE, "Base instance");
       TESS_PRINT(instance_stride, INSTANCE_STRIDE, "Instance stride");
       TESS_PRINT(indirect, INDIRECT, "Indirect");
-      TESS_PRINT(unknown, UNKNOWN, "Unknown");
+      TESS_PRINT(factor_buffer_size, FACTOR_BUFFER_SIZE, "Factor buffer size");
 
 #undef TESS_PRINT
       return length;
@@ -910,7 +910,7 @@ agxdecode_drm_cmd_render(struct agxdecode_ctx *ctx,
 
    DUMP_FIELD(c, "%d", vertex_attachment_count);
    struct drm_asahi_attachment *vertex_attachments =
-      (void *)c->vertex_attachments;
+      (void *)(uintptr_t)c->vertex_attachments;
    for (unsigned i = 0; i < c->vertex_attachment_count; i++) {
       DUMP_FIELD((&vertex_attachments[i]), "0x%x", order);
       DUMP_FIELD((&vertex_attachments[i]), "0x%llx", size);
@@ -918,7 +918,7 @@ agxdecode_drm_cmd_render(struct agxdecode_ctx *ctx,
    }
    DUMP_FIELD(c, "%d", fragment_attachment_count);
    struct drm_asahi_attachment *fragment_attachments =
-      (void *)c->fragment_attachments;
+      (void *)(uintptr_t)c->fragment_attachments;
    for (unsigned i = 0; i < c->fragment_attachment_count; i++) {
       DUMP_FIELD((&fragment_attachments[i]), "0x%x", order);
       DUMP_FIELD((&fragment_attachments[i]), "0x%llx", size);

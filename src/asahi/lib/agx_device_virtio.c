@@ -60,8 +60,6 @@ agx_virtio_bo_alloc(struct agx_device *dev, size_t size, size_t align,
    struct agx_bo *bo;
    unsigned handle = 0;
 
-   size = ALIGN_POT(size, dev->params.vm_page_size);
-
    /* executable implies low va */
    assert(!(flags & AGX_BO_EXEC) || (flags & AGX_BO_LOW_VA));
 
@@ -84,8 +82,7 @@ agx_virtio_bo_alloc(struct agx_device *dev, size_t size, size_t align,
    uint32_t blob_id = p_atomic_inc_return(&dev->next_blob_id);
 
    enum agx_va_flags va_flags = flags & AGX_BO_LOW_VA ? AGX_VA_USC : 0;
-   struct agx_va *va =
-      agx_va_alloc(dev, size, dev->params.vm_page_size, va_flags, 0);
+   struct agx_va *va = agx_va_alloc(dev, size, align, va_flags, 0);
    if (!va) {
       fprintf(stderr, "Failed to allocate BO VMA\n");
       return NULL;
@@ -110,7 +107,7 @@ agx_virtio_bo_alloc(struct agx_device *dev, size_t size, size_t align,
    assert(!memcmp(bo, &((struct agx_bo){}), sizeof(*bo)));
 
    bo->size = size;
-   bo->align = MAX2(dev->params.vm_page_size, align);
+   bo->align = align;
    bo->flags = flags;
    bo->handle = handle;
    bo->prime_fd = -1;
@@ -194,13 +191,14 @@ out:
 
 static int
 agx_virtio_submit(struct agx_device *dev, struct drm_asahi_submit *submit,
-                  uint32_t vbo_res_id)
+                  struct agx_submit_virt *virt)
 {
    struct drm_asahi_command *commands =
-      (struct drm_asahi_command *)submit->commands;
-   struct drm_asahi_sync *in_syncs = (struct drm_asahi_sync *)submit->in_syncs;
+      (struct drm_asahi_command *)(uintptr_t)submit->commands;
+   struct drm_asahi_sync *in_syncs =
+      (struct drm_asahi_sync *)(uintptr_t)submit->in_syncs;
    struct drm_asahi_sync *out_syncs =
-      (struct drm_asahi_sync *)submit->out_syncs;
+      (struct drm_asahi_sync *)(uintptr_t)submit->out_syncs;
    size_t req_len = sizeof(struct asahi_ccmd_submit_req);
 
    for (int i = 0; i < submit->command_count; i++) {
@@ -213,7 +211,7 @@ agx_virtio_submit(struct agx_device *dev, struct drm_asahi_submit *submit,
 
       case DRM_ASAHI_CMD_RENDER: {
          struct drm_asahi_cmd_render *render =
-            (struct drm_asahi_cmd_render *)commands[i].cmd_buffer;
+            (struct drm_asahi_cmd_render *)(uintptr_t)commands[i].cmd_buffer;
          req_len += sizeof(struct drm_asahi_command) +
                     sizeof(struct drm_asahi_cmd_render);
          req_len += render->fragment_attachment_count *
@@ -226,12 +224,17 @@ agx_virtio_submit(struct agx_device *dev, struct drm_asahi_submit *submit,
       }
    }
 
+   size_t extres_size =
+      sizeof(struct asahi_ccmd_submit_res) * virt->extres_count;
+   req_len += extres_size;
+
    struct asahi_ccmd_submit_req *req =
       (struct asahi_ccmd_submit_req *)calloc(1, req_len);
 
    req->queue_id = submit->queue_id;
-   req->result_res_id = vbo_res_id;
+   req->result_res_id = virt->vbo_res_id;
    req->command_count = submit->command_count;
+   req->extres_count = virt->extres_count;
 
    char *ptr = (char *)&req->payload;
 
@@ -239,18 +242,23 @@ agx_virtio_submit(struct agx_device *dev, struct drm_asahi_submit *submit,
       memcpy(ptr, &commands[i], sizeof(struct drm_asahi_command));
       ptr += sizeof(struct drm_asahi_command);
 
-      memcpy(ptr, (char *)commands[i].cmd_buffer, commands[i].cmd_buffer_size);
+      memcpy(ptr, (char *)(uintptr_t)commands[i].cmd_buffer,
+             commands[i].cmd_buffer_size);
       ptr += commands[i].cmd_buffer_size;
 
       if (commands[i].cmd_type == DRM_ASAHI_CMD_RENDER) {
          struct drm_asahi_cmd_render *render =
-            (struct drm_asahi_cmd_render *)commands[i].cmd_buffer;
+            (struct drm_asahi_cmd_render *)(uintptr_t)commands[i].cmd_buffer;
          size_t fragments_size = sizeof(struct drm_asahi_attachment) *
                                  render->fragment_attachment_count;
-         memcpy(ptr, (char *)render->fragment_attachments, fragments_size);
+         memcpy(ptr, (char *)(uintptr_t)render->fragment_attachments,
+                fragments_size);
          ptr += fragments_size;
       }
    }
+
+   memcpy(ptr, virt->extres, extres_size);
+   ptr += extres_size;
 
    req->hdr.cmd = ASAHI_CCMD_SUBMIT;
    req->hdr.len = req_len;
