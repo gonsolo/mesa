@@ -92,12 +92,14 @@ create_mem_or_close_bo(struct borg_device* dev,
       exit(-1);
       goto fail_mem;
    }
+   puts("create_mem_or_close_bo returns success.");
    return VK_SUCCESS;
 
 fail_mem:
    FREE(mem);
 fail_bo:
    borg_ws_bo_destroy(bo);
+   printf("create_mem_or_close_bo returns %i.\n", result);
 
    return result;
 }
