@@ -130,20 +130,25 @@ borg_AllocateMemory(VkDevice device,
 
    mem = vk_device_memory_create(&dev->vk, pAllocateInfo,
                                 pAllocator, sizeof(*mem));
-   if (!mem)
+   if (!mem) {
+      puts("borg_AllocateMemory: No mem!");
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
-
+   }
    result = borg_alloc_mem(dev, &dev->vk.base, pAllocateInfo->allocationSize);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      puts("borg_AllocateMemory: borg_alloc_mem failed!");
       goto fail_alloc;
+   }
 
    *pMem = borg_device_memory_to_handle(mem);
 
+   puts("borg_AllocateMemory successful!");
    return result;
 
 fail_alloc:
-     vk_device_memory_destroy(&dev->vk, pAllocator, &mem->vk);
-     return result;
+   puts("borg_AllocateMemory fail alloc!");
+   vk_device_memory_destroy(&dev->vk, pAllocator, &mem->vk);
+   return result;
 }
 
 static void borg_mem_unmap(struct borg_mem *mem)
