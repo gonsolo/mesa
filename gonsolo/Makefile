@@ -20,6 +20,7 @@ DRIVERS = nouveau,borg-experimental
 #DRIVERS = borg-experimental
 #VERBOSE = --verbose
 
+t: test
 test: #install
 	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) $(APPLICATION); cd -
 gdb: #install
@@ -46,4 +47,5 @@ tidy_compile_commands:
 	cd $(BUILD_DIR); sed -i 's/-mtls-dialect=gnu2 //g' compile_commands.json; cd -
 	cd $(BUILD_DIR); sed -i 's/-flifetime-dse=1 //g' compile_commands.json; cd -
 
-.PHONY: c clean compile compile_and_tidy ct install link_compile_commands setup test
+.PHONY: c clean compile compile_and_tidy ct install link_compile_commands \
+	setup t test

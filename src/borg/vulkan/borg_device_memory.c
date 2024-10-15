@@ -69,7 +69,8 @@ fail_alloc:
 static VkResult
 create_mem_or_close_bo(struct borg_device* dev,
                        struct borg_ws_bo *bo,
-                       struct vk_object_base *log_obj)
+                       struct vk_object_base *log_obj,
+                       struct borg_mem **mem_out)
 {
    puts("create_mem_or_close_bo.");
 
@@ -81,7 +82,6 @@ create_mem_or_close_bo(struct borg_device* dev,
    if (mem == NULL) {
       result = vk_error(log_obj, VK_ERROR_OUT_OF_HOST_MEMORY);
       puts("create_mem_or_close_bo: out of host memory.");
-      exit(-1);
       goto fail_bo;
    }
    mem->bo = bo;
@@ -89,10 +89,12 @@ create_mem_or_close_bo(struct borg_device* dev,
    result = borg_alloc_va(dev, log_obj, size_B, &mem->va);
    if (result != VK_SUCCESS) {
       puts("create_mem_or_close_bo: borg_alloc_va failed.");
-      exit(-1);
       goto fail_mem;
    }
    puts("create_mem_or_close_bo returns success.");
+
+   *mem_out = mem;
+
    return VK_SUCCESS;
 
 fail_mem:
@@ -107,13 +109,14 @@ fail_bo:
 static VkResult
 borg_alloc_mem(struct borg_device *dev,
                struct vk_object_base *log_obj,
-               uint64_t size)
+               uint64_t size,
+               struct borg_mem **mem_out)
 {
    struct borg_ws_bo *bo = borg_ws_bo_new(dev->ws_dev, size);
    if (bo == NULL)
         return vk_errorf(log_obj, VK_ERROR_OUT_OF_DEVICE_MEMORY, "%m");
 
-   return create_mem_or_close_bo(dev, bo, log_obj);
+   return create_mem_or_close_bo(dev, bo, log_obj, mem_out);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -134,7 +137,7 @@ borg_AllocateMemory(VkDevice device,
       puts("borg_AllocateMemory: No mem!");
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
    }
-   result = borg_alloc_mem(dev, &dev->vk.base, pAllocateInfo->allocationSize);
+   result = borg_alloc_mem(dev, &dev->vk.base, pAllocateInfo->allocationSize, &mem->mem);
    if (result != VK_SUCCESS) {
       puts("borg_AllocateMemory: borg_alloc_mem failed!");
       goto fail_alloc;
