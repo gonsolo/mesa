@@ -77,6 +77,7 @@ create_mem_or_close_bo(struct borg_device* dev,
    VkResult result;
 
    struct borg_mem *mem = CALLOC_STRUCT(borg_mem);
+   printf("mem: %p\n", mem);
    if (mem == NULL) {
       result = vk_error(log_obj, VK_ERROR_OUT_OF_HOST_MEMORY);
       puts("create_mem_or_close_bo: out of host memory.");
@@ -91,6 +92,8 @@ create_mem_or_close_bo(struct borg_device* dev,
       exit(-1);
       goto fail_mem;
    }
+   return VK_SUCCESS;
+
 fail_mem:
    FREE(mem);
 fail_bo:
