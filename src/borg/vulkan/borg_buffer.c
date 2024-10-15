@@ -100,10 +100,12 @@ borg_BindBufferMemory2(VkDevice device,
                       uint32_t bindInfoCount,
                       const VkBindBufferMemoryInfo *pBindInfos)
 {
+   puts("borg_BindBufferMemory2");
    VK_FROM_HANDLE(borg_device, dev, device);
    VkResult first_error_or_success = VK_SUCCESS;
 
    for (uint32_t i = 0; i < bindInfoCount; ++i) {
+      printf("  in for: i: %i, bindInfoCount: %i, dev->ws_dev: %p, pBindInfos: %p", i, bindInfoCount, dev->ws_dev, pBindInfos); 
       VkResult result = borg_bind_buffer_memory(dev, &pBindInfos[i]);
 
         const VkBindMemoryStatusKHR *status =
@@ -114,6 +116,6 @@ borg_BindBufferMemory2(VkDevice device,
         if (first_error_or_success == VK_SUCCESS)
            first_error_or_success = result;
      }
-
-     return first_error_or_success;
+   printf("borg_BindBufferMemory2 returns %i\n", first_error_or_success);
+   return first_error_or_success;
 }
