@@ -91,6 +91,10 @@ borg_bind_buffer_memory(struct borg_device *dev, const VkBindBufferMemoryInfo *i
    VK_FROM_HANDLE(borg_buffer, buffer, info->buffer);
    VkResult result = VK_SUCCESS;
 
+   assert(mem->mem);
+   assert(mem->mem->va);
+   assert(info);
+
    buffer->addr = mem->mem->va->addr + info->memoryOffset;
    return result;
 }
