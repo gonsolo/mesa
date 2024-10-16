@@ -196,6 +196,7 @@ free_heap_addr(struct borg_device *dev,
 
 static void borg_va_free(struct borg_va *va)
 {
+   assert(va);
    VkResult result = VK_SUCCESS;
    struct borg_device* dev = va->dev;
 
@@ -212,11 +213,12 @@ static void borg_va_free(struct borg_va *va)
       free_heap_addr(dev, va->addr, va->size_B);
 
    FREE(va);
-
 }
 
 static void borg_mem_free(struct borg_mem *mem)
 {
+   assert(mem);
+   assert(mem->va);
    borg_va_free(mem->va);
    borg_ws_bo_destroy(mem->bo);
    FREE(mem);
