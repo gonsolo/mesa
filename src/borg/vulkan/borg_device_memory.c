@@ -212,12 +212,12 @@ static void borg_va_free(struct borg_va *va)
    {
       struct drm_borg_vm_bind_op bind = {
          .op = DRM_BORG_VM_BIND_OP_UNMAP,
-         .addr = va->addr,
-         .range = va->size_B,
+         .addr = 1, //va->addr,
+         .range = 1, //va->size_B,
       };
       result |= vm_bind(dev, NULL, &bind);
    }
-  /* If unbinding fails, we leak the VA range */
+   /* If unbinding fails, we leak the VA range */
    if (result == VK_SUCCESS)
       free_heap_addr(dev, va->addr, va->size_B);
 
