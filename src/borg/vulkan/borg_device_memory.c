@@ -288,6 +288,7 @@ borg_MapMemory2KHR(VkDevice device,
                                                     pMemoryMapInfo->offset,
                                                     pMemoryMapInfo->size);
    assert(size > 0);
+   printf("offset: %lu, size: %lu, size_B: %lu\n", offset, size, mem->mem->size_B);
    assert(offset + size <= mem->mem->size_B);
 
    if (size != (size_t)size) {
