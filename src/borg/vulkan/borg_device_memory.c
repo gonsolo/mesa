@@ -61,6 +61,8 @@ borg_alloc_va(struct borg_device *dev, struct vk_object_base *log_obj, uint64_t 
 
    printf("borg_alloc_va: va: %p, va->addr: %lu, va->size_B: %lu", va, va->addr, va->size_B);
 
+   va->size_B = size_B;
+
    *va_out = va;
 
    return VK_SUCCESS;
