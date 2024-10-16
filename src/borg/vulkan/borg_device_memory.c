@@ -59,10 +59,15 @@ borg_alloc_va(struct borg_device *dev, struct vk_object_base *log_obj, uint64_t 
    if (result != VK_SUCCESS)
       goto fail_alloc;
 
+   printf("borg_alloc_va: va: %p, va->addr: %lu, va->size_B: %lu", va, va->addr, va->size_B);
+
    *va_out = va;
+
+   return VK_SUCCESS;
 
 fail_alloc:
    FREE(va);
+   *va_out = NULL;
    return result;
 }
 
