@@ -84,6 +84,9 @@ create_mem_or_close_bo(struct borg_device* dev,
       puts("create_mem_or_close_bo: out of host memory.");
       goto fail_bo;
    }
+   mem->size_B = bo->size;
+   printf("mem size_B is now %lu\n", mem->size_B);
+
    mem->bo = bo;
 
    result = borg_alloc_va(dev, log_obj, size_B, &mem->va);

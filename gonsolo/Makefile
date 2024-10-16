@@ -34,7 +34,7 @@ install: #compile_and_tidy
 ct: compile_and_tidy
 compile_and_tidy: compile tidy_compile_commands
 compile:
-	cd $(BUILD_DIR); $(MESON) compile $(VERBOSE); cd -
+	cd $(BUILD_DIR); mold -run $(MESON) compile $(VERBOSE); cd -
 link_compile_commands:
 	cd ..; ln -s $(BUILD_DIR_NAME)/compile_commands.json .; cd -
 setup:
