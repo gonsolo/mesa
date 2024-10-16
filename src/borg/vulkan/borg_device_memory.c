@@ -197,9 +197,11 @@ free_heap_addr(struct borg_device *dev,
 static void borg_va_free(struct borg_va *va)
 {
    assert(va);
+
    VkResult result = VK_SUCCESS;
    struct borg_device* dev = va->dev;
 
+   printf("borg_va_free: va->addr: %lu, va->size_B: %lu\n", va->addr, va->size_B);
    {
       struct drm_borg_vm_bind_op bind = {
          .op = DRM_BORG_VM_BIND_OP_UNMAP,
