@@ -209,14 +209,25 @@ static void borg_va_free(struct borg_va *va)
    struct borg_device* dev = va->dev;
 
    printf("borg_va_free: va->addr: %lu, va->size_B: %lu\n", va->addr, va->size_B);
-   {
-      struct drm_borg_vm_bind_op bind = {
-         .op = DRM_BORG_VM_BIND_OP_UNMAP,
-         .addr = 1, //va->addr,
-         .range = 1, //va->size_B,
-      };
-      result |= vm_bind(dev, NULL, &bind);
-   }
+   //{
+   //   struct drm_borg_vm_bind_op bind = {
+   //      .op = DRM_BORG_VM_BIND_OP_UNMAP,
+   //      .addr = va->addr,
+   //      .range = va->size_B,
+   //   };
+   //   result |= vm_bind(dev, NULL, &bind);
+   //}
+   puts("building bind.");
+   struct drm_borg_vm_bind_op bind;
+   bind.op = DRM_BORG_VM_BIND_OP_UNMAP;
+   bind.addr = va->addr;
+   bind.range = va->size_B;
+   puts("before vm_bind.");
+
+   result = vm_bind(dev, NULL, &bind);
+   puts("after vm_bind.");
+
+
    /* If unbinding fails, we leak the VA range */
    if (result == VK_SUCCESS)
       free_heap_addr(dev, va->addr, va->size_B);
