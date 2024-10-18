@@ -22,25 +22,17 @@ borg_CreateBuffer(VkDevice device,
    VK_FROM_HANDLE(borg_device, dev, device);
    struct borg_buffer *buffer;
 
-   puts("borg_CreateBuffer");
-   printf("pCreateInfo->size: %li\n", pCreateInfo->size);
+   //puts("borg_CreateBuffer");
 
    if (pCreateInfo->size > BORG_MAX_BUFFER_SIZE) {
-      puts("size > max buffer size");
       return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    }
-
    buffer = vk_buffer_create(&dev->vk, pCreateInfo, pAllocator,
                              sizeof(*buffer));
    if (!buffer) {
-      puts("no buffer");
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
    }
-   printf("buffer->vk.size: %li\n", buffer->vk.size);
-
    *pBuffer = borg_buffer_to_handle(buffer);
-
-   puts("borg_CreateBuffer: Success.");
 
    return VK_SUCCESS;
 }
@@ -65,23 +57,18 @@ borg_GetDeviceBufferMemoryRequirements(
    const VkDeviceBufferMemoryRequirements *pInfo,
    VkMemoryRequirements2 *pMemoryRequirements)
 {
-   puts("borg_GetDeviceBufferMemoryRequirements");
+   //puts("borg_GetDeviceBufferMemoryRequirements");
 
    VK_FROM_HANDLE(borg_device, dev, device);
    struct borg_physical_device *pdev = borg_device_physical(dev);
 
    const uint32_t alignment = 4;
-   //const uint32_t unused = 0;
-
-   printf("  pInfo->pCreateInfo->size: %li\n", pInfo->pCreateInfo->size);
 
    pMemoryRequirements->memoryRequirements = (VkMemoryRequirements) {
       .size = align64(pInfo->pCreateInfo->size, alignment),
       .alignment = alignment,
       .memoryTypeBits = BITFIELD_MASK(pdev->mem_type_count),
    };
-
-   printf("  pMemoryRequirements->memoryRequirements.size: %li\n", pMemoryRequirements->memoryRequirements.size);
 }
 
 static VkResult
@@ -104,22 +91,19 @@ borg_BindBufferMemory2(VkDevice device,
                       uint32_t bindInfoCount,
                       const VkBindBufferMemoryInfo *pBindInfos)
 {
-   puts("borg_BindBufferMemory2");
+   //puts("borg_BindBufferMemory2");
    VK_FROM_HANDLE(borg_device, dev, device);
    VkResult first_error_or_success = VK_SUCCESS;
 
    for (uint32_t i = 0; i < bindInfoCount; ++i) {
-      printf("  in for: i: %i, bindInfoCount: %i, dev->ws_dev: %p, pBindInfos: %p", i, bindInfoCount, dev->ws_dev, pBindInfos); 
       VkResult result = borg_bind_buffer_memory(dev, &pBindInfos[i]);
-
         const VkBindMemoryStatusKHR *status =
-        vk_find_struct_const(pBindInfos[i].pNext, BIND_MEMORY_STATUS_KHR);
+           vk_find_struct_const(pBindInfos[i].pNext, BIND_MEMORY_STATUS_KHR);
         if (status != NULL && status->pResult != NULL)
            *status->pResult = result;
 
         if (first_error_or_success == VK_SUCCESS)
            first_error_or_success = result;
      }
-   printf("borg_BindBufferMemory2 returns %i\n", first_error_or_success);
    return first_error_or_success;
 }

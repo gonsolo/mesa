@@ -25,8 +25,7 @@ borg_CreateDevice(VkPhysicalDevice physicalDevice,
                  const VkAllocationCallbacks *pAllocator,
                  VkDevice *pDevice)
 {
-   puts("Mesa Borg: borg_CreateDevice.");
-
+   //puts(__func__);
    VK_FROM_HANDLE(borg_physical_device, pdev, physicalDevice);
    struct borg_device *dev;
 

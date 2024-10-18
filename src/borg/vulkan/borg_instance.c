@@ -44,7 +44,7 @@ borg_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
                    const VkAllocationCallbacks *pAllocator,
                    VkInstance *pInstance)
 {
-   puts(__func__);
+   //puts(__func__);
 
    struct borg_instance *instance;
    VkResult result;

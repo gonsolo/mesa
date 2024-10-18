@@ -26,7 +26,6 @@ borg_get_nir_options(struct vk_physical_device *vk_pdev,
                 gl_shader_stage stage,
                 UNUSED const struct vk_pipeline_robustness_state *rs)
 {
-        puts("borg_get_nir_options");
         const struct borg_physical_device *pdev = container_of(vk_pdev, struct borg_physical_device, vk);
         return bak_nir_options(pdev->bak);
 }
@@ -36,7 +35,6 @@ borg_get_spirv_options(struct vk_physical_device *vk_pdev,
                 UNUSED gl_shader_stage stage,
                 const struct vk_pipeline_robustness_state *rs)
 {
-        puts("borg_get_spirv_options TODO");
         return (struct spirv_to_nir_options) { /* TODO */ };
 }
 
@@ -47,7 +45,6 @@ borg_compile_nir(struct borg_device *dev,
                 const struct vk_pipeline_robustness_state *rs,
                 struct borg_shader *shader)
 {
-        puts("borg_compile_nir");
         struct borg_physical_device *pdev = borg_device_physical(dev);
         shader->bak = bak_compile_shader(nir, pdev->bak);
         //shader->code_ptr = shader->bak->code;
@@ -60,7 +57,6 @@ borg_shader_destroy(struct vk_device *vk_dev,
                 struct vk_shader *vk_shader,
                 const VkAllocationCallbacks* pAllocator)
 {
-        puts("borg_shader_destroy TODO");
         // TODO
 }
 
@@ -70,8 +66,6 @@ borg_lower_nir(struct borg_device *dev,
                uint32_t set_layout_count,
                struct vk_descriptor_set_layout * const *set_layouts)
 {
-        puts("borg_lower_nir");
-
         struct borg_physical_device *pdev = borg_device_physical(dev);
 
         nir_lower_compute_system_values_options csv_options = {
@@ -141,8 +135,6 @@ borg_compile_shader(struct borg_device *dev,
         struct borg_shader *shader;
         VkResult result;
 
-        puts("borg_compile_shader");
-
         shader = vk_shader_zalloc(&dev->vk, &borg_shader_ops, info->stage,
                         pAllocator, sizeof(*shader));
 
@@ -170,7 +162,6 @@ borg_compile_shaders(struct vk_device *vk_dev,
                 const VkAllocationCallbacks* pAllocator,
                 struct vk_shader **shaders_out)
 {
-        puts("borg_compile_shaders");
         struct borg_device *dev = container_of(vk_dev, struct borg_device, vk);
 
         for (uint32_t i = 0; i < shader_count; i++) {

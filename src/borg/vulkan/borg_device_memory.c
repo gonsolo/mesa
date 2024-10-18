@@ -59,11 +59,8 @@ borg_alloc_va(struct borg_device *dev, struct vk_object_base *log_obj, uint64_t 
    if (result != VK_SUCCESS)
       goto fail_alloc;
 
-   printf("borg_alloc_va: va: %p, va->addr: %lu, va->size_B: %lu", va, va->addr, va->size_B);
-
    va->dev = dev;
    va->size_B = size_B;
-
    *va_out = va;
 
    return VK_SUCCESS;
@@ -80,30 +77,20 @@ create_mem_or_close_bo(struct borg_device* dev,
                        struct vk_object_base *log_obj,
                        struct borg_mem **mem_out)
 {
-   puts("create_mem_or_close_bo.");
-
-   const uint64_t size_B = bo->size;
    VkResult result;
-
+   const uint64_t size_B = bo->size;
    struct borg_mem *mem = CALLOC_STRUCT(borg_mem);
-   printf("mem: %p\n", mem);
    if (mem == NULL) {
       result = vk_error(log_obj, VK_ERROR_OUT_OF_HOST_MEMORY);
-      puts("create_mem_or_close_bo: out of host memory.");
       goto fail_bo;
    }
    mem->size_B = bo->size;
-   printf("mem size_B is now %lu\n", mem->size_B);
-
    mem->bo = bo;
 
    result = borg_alloc_va(dev, log_obj, size_B, &mem->va);
    if (result != VK_SUCCESS) {
-      puts("create_mem_or_close_bo: borg_alloc_va failed.");
       goto fail_mem;
    }
-   puts("create_mem_or_close_bo returns success.");
-
    *mem_out = mem;
 
    return VK_SUCCESS;
@@ -112,8 +99,6 @@ fail_mem:
    FREE(mem);
 fail_bo:
    borg_ws_bo_destroy(bo);
-   printf("create_mem_or_close_bo returns %i.\n", result);
-
    return result;
 }
 
@@ -140,27 +125,19 @@ borg_AllocateMemory(VkDevice device,
    struct borg_device_memory *mem;
    VkResult result = VK_SUCCESS;
 
-   printf("borg_AllocateMemory: allocationSize: %li\n", pAllocateInfo->allocationSize);
-
    mem = vk_device_memory_create(&dev->vk, pAllocateInfo,
                                 pAllocator, sizeof(*mem));
    if (!mem) {
-      puts("borg_AllocateMemory: No mem!");
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
    }
    result = borg_alloc_mem(dev, &dev->vk.base, pAllocateInfo->allocationSize, &mem->mem);
    if (result != VK_SUCCESS) {
-      puts("borg_AllocateMemory: borg_alloc_mem failed!");
       goto fail_alloc;
    }
-
    *pMem = borg_device_memory_to_handle(mem);
-
-   puts("borg_AllocateMemory successful!");
    return result;
 
 fail_alloc:
-   puts("borg_AllocateMemory fail alloc!");
    vk_device_memory_destroy(&dev->vk, pAllocator, &mem->vk);
    return result;
 }
@@ -204,30 +181,16 @@ free_heap_addr(struct borg_device *dev,
 
 static void borg_va_free(struct borg_va *va)
 {
-   assert(va);
-
    VkResult result = VK_SUCCESS;
+   assert(va);
    struct borg_device* dev = va->dev;
 
-   printf("borg_va_free: va->addr: %lu, va->size_B: %lu\n", va->addr, va->size_B);
-   //{
-   //   struct drm_borg_vm_bind_op bind = {
-   //      .op = DRM_BORG_VM_BIND_OP_UNMAP,
-   //      .addr = va->addr,
-   //      .range = va->size_B,
-   //   };
-   //   result |= vm_bind(dev, NULL, &bind);
-   //}
-   puts("building bind.");
    struct drm_borg_vm_bind_op bind;
    bind.op = DRM_BORG_VM_BIND_OP_UNMAP;
    bind.addr = va->addr;
    bind.range = va->size_B;
-   puts("before vm_bind.");
 
    result = vm_bind(dev, NULL, &bind);
-   puts("after vm_bind.");
-
 
    /* If unbinding fails, we leak the VA range */
    if (result == VK_SUCCESS)
@@ -297,10 +260,9 @@ borg_MapMemory2KHR(VkDevice device,
                    const VkMemoryMapInfoKHR *pMemoryMapInfo,
                    void **ppData)
 {
-   puts("borg_MapMemory2KHR");
+   //puts(__func__);
 
    VkResult result;
-
    VK_FROM_HANDLE(borg_device, dev, device);
    VK_FROM_HANDLE(borg_device_memory, mem, pMemoryMapInfo->memory);
 
@@ -308,15 +270,12 @@ borg_MapMemory2KHR(VkDevice device,
       *ppData = NULL;
       return VK_SUCCESS;
    }
-
    const VkDeviceSize offset = pMemoryMapInfo->offset;
    const VkDeviceSize size = vk_device_memory_range(&mem->vk,
                                                     pMemoryMapInfo->offset,
                                                     pMemoryMapInfo->size);
    assert(size > 0);
-   printf("offset: %lu, size: %lu, size_B: %lu\n", offset, size, mem->mem->size_B);
    assert(offset + size <= mem->mem->size_B);
-
    if (size != (size_t)size) {
       return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
                        "requested size 0x%"PRIx64" does not fit in %u bits",
@@ -326,8 +285,6 @@ borg_MapMemory2KHR(VkDevice device,
       return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
                        "Memory object already mapped.");
    }
-
-
    void *mem_map = NULL;
    result = borg_mem_map(dev, mem->mem, &mem->vk.base, &mem_map);
    if (result != VK_SUCCESS)

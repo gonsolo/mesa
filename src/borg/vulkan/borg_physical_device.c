@@ -61,20 +61,14 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
                                           struct vk_physical_device **pdev_out)
 {
    VkResult result;
-
-   puts(__func__);
-
    struct borg_instance *instance = (struct borg_instance *)vk_instance;
 
    if (!(drm_device->available_nodes & (1 << DRM_NODE_RENDER))) {
-      puts("Borg: No render node!");
       return VK_ERROR_INCOMPATIBLE_DRIVER;
    }
-
    switch (drm_device->bustype) {
       case DRM_BUS_PCI:
          if (drm_device->deviceinfo.pci->vendor_id != BORG_VENDOR_ID) {
-            puts("Borg: PCI vendor id is not Borg!");
             return VK_ERROR_INCOMPATIBLE_DRIVER;
          }
          break;
@@ -88,13 +82,11 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
             }
          }
          if (!found) {
-            puts("Borg: No compatible device found!");
             return VK_ERROR_INCOMPATIBLE_DRIVER;
          }
          break;
       }
       default:
-         puts("Borg: Unknown bus type!");
          return VK_ERROR_INCOMPATIBLE_DRIVER;
    }
 
@@ -103,7 +95,6 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
       result = vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
                          "fstat() failed on %s: %m",
                          drm_device->nodes[DRM_NODE_RENDER]);
-      perror("gonso 1");
       return result;
    }
    const dev_t render_dev = st.st_rdev;

@@ -49,8 +49,6 @@ static nir_def *
 load_descriptor_set_addr(nir_builder *b, uint32_t set,
                          UNUSED const struct lower_descriptors_ctx *ctx)
 {
-   puts("load_descriptor_set_addr");
-
    uint32_t set_addr_offset = borg_root_descriptor_offset(sets) +
       set * sizeof(struct borg_buffer_address);
 
@@ -66,12 +64,8 @@ static bool
 lower_ssbo_resource_index(nir_builder *b, nir_intrinsic_instr *intrin,
                             const struct lower_descriptors_ctx *ctx)
 {
-   puts("lower_ssbo_resource_index");
-
    if (!descriptor_type_is_ssbo(nir_intrinsic_desc_type(intrin)))
       return false;
-
-   puts("  descriptor type is ssbo");
 
    b->cursor = nir_instr_remove(&intrin->instr);
 
@@ -95,33 +89,26 @@ lower_ssbo_resource_index(nir_builder *b, nir_intrinsic_instr *intrin,
          printf("unhandled binding_layout type: %i\n", binding_layout->type);
          unreachable("Not an SSBO descriptor");
    }
-
    binding_addr = nir_ior_imm(b, binding_addr, (uint64_t)binding_stride << 56);
-
    const uint32_t binding_size = binding_layout->array_size * binding_stride;
    nir_def *offset_in_binding = nir_imul_imm(b, index, binding_stride);
-
    assert(binding_layout->array_size >= 1);
 
    nir_def *addr;
    switch (ctx->ssbo_addr_format) {
-
-   case nir_address_format_64bit_global:
-   case nir_address_format_64bit_global_32bit_offset:
-   case nir_address_format_64bit_bounded_global:
-      addr = nir_vec4(b, nir_unpack_64_2x32_split_x(b, binding_addr),
-                         nir_unpack_64_2x32_split_y(b, binding_addr),
-                         nir_imm_int(b, binding_size),
-                         offset_in_binding);
-      break;
-
-   default:
-      printf("Unknown address mode: %i\n", ctx->ssbo_addr_format);
-      unreachable("Unknown address mode");
+      case nir_address_format_64bit_global:
+      case nir_address_format_64bit_global_32bit_offset:
+      case nir_address_format_64bit_bounded_global:
+         addr = nir_vec4(b, nir_unpack_64_2x32_split_x(b, binding_addr),
+               nir_unpack_64_2x32_split_y(b, binding_addr),
+               nir_imm_int(b, binding_size),
+               offset_in_binding);
+         break;
+      default:
+         printf("Unknown address mode: %i\n", ctx->ssbo_addr_format);
+         unreachable("Unknown address mode");
    }
-
    nir_def_rewrite_uses(&intrin->def, addr);
-
    return true;
 }
 
@@ -129,8 +116,6 @@ lower_ssbo_resource_index(nir_builder *b, nir_intrinsic_instr *intrin,
 static bool
 lower_ssbo_descriptor_instr(nir_builder *b, nir_instr *instr, void *_data)
 {
-   puts("lower_ssbo_descriptor_instr");
-
    const struct lower_descriptors_ctx *ctx = _data;
 
    if (instr->type != nir_instr_type_intrinsic)
@@ -138,10 +123,10 @@ lower_ssbo_descriptor_instr(nir_builder *b, nir_instr *instr, void *_data)
 
    nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
    switch (intrin->intrinsic) {
-   case nir_intrinsic_vulkan_resource_index:
-      return lower_ssbo_resource_index(b, intrin, ctx);
-   default:
-      return false;
+      case nir_intrinsic_vulkan_resource_index:
+         return lower_ssbo_resource_index(b, intrin, ctx);
+      default:
+         return false;
    }
 }
 
