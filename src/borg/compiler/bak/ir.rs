@@ -1,7 +1,8 @@
 // Copyright © 2024 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-use std::cmp::max;
+#![allow(dead_code)]
+
 use std::fmt;
 
 pub struct Function {
@@ -9,7 +10,7 @@ pub struct Function {
 }
 
 impl fmt::Display for Function {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
         Ok(())
     }
 }

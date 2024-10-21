@@ -3,7 +3,8 @@
 
 use crate::from_nir::*;
 
-extern crate bak_bindings;
+//extern crate bak_bindings;
+use compiler::bindings::*;
 use bak_bindings::*;
 
 #[repr(C)]

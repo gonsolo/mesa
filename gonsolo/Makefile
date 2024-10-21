@@ -20,6 +20,7 @@ DRIVERS = nouveau,borg-experimental
 #DRIVERS = borg-experimental
 #VERBOSE = --verbose
 
+all: compile
 t: test
 test: #install
 	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) $(APPLICATION); cd -
@@ -38,7 +39,8 @@ compile:
 link_compile_commands:
 	cd ..; ln -s $(BUILD_DIR_NAME)/compile_commands.json .; cd -
 setup:
-	cd ..; $(MESON) setup $(BUILD_DIR_NAME) -Dbackend=ninja -Dgallium-drivers= -Dvulkan-drivers=$(DRIVERS) -Dprefix=~/bin/mesa; cd -
+	cd ..; $(MESON) setup $(BUILD_DIR_NAME) -Dbackend=ninja -Dgallium-drivers= \
+		-Dvulkan-drivers=$(DRIVERS) -Dprefix=~/bin/mesa; cd -
 c: clean
 clean:
 	cd ..; rm -rf $(BUILD_DIR_NAME); cd -
@@ -47,5 +49,5 @@ tidy_compile_commands:
 	cd $(BUILD_DIR); sed -i 's/-mtls-dialect=gnu2 //g' compile_commands.json; cd -
 	cd $(BUILD_DIR); sed -i 's/-flifetime-dse=1 //g' compile_commands.json; cd -
 
-.PHONY: c clean compile compile_and_tidy ct install link_compile_commands \
+.PHONY: all c clean compile compile_and_tidy ct install link_compile_commands \
 	setup t test

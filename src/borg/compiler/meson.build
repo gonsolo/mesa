@@ -9,27 +9,31 @@ libbak_deps = [
   idep_nir_headers
 ]
 
-bak_bindings_rs = rust.bindgen(
+_bak_bindings_rs = rust.bindgen(
   input : ['bak_bindings.h'],
   output : 'bak_bindings.rs',
   c_args : [
     pre_args,
   ],
   args : [
+    compiler_rs_bindgen_blocklist,
     '--raw-line', '#![allow(non_camel_case_types)]',
     '--raw-line', '#![allow(non_snake_case)]',
     '--raw-line', '#![allow(non_upper_case_globals)]',
+    '--raw-line', 'use compiler::bindings::*;',
     '--allowlist-function', 'bak_.*',
-    '--allowlist-function', 'nir_.*',
     '--no-prepend-enum-name',
   ],
   dependencies : libbak_deps,
 )
 
-libbak_bindings_gen = static_library(
+_libbak_bindings_rs = static_library(
   'bak_bindings',
-  bak_bindings_rs,
+  _bak_bindings_rs,
   gnu_symbol_visibility : 'hidden',
+  dependencies : [
+    idep_compiler_rs,
+  ],
   rust_abi : 'rust',
 )
 
@@ -55,9 +59,10 @@ _libbak_rs = static_library(
   rust_abi : 'c',
   rust_args : bak_rust_args,
   dependencies : [
+    idep_compiler_rs
   ],
   link_with: [
-    libbak_bindings_gen
+    _libbak_bindings_rs
   ],
 )
 

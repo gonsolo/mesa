@@ -1,10 +1,17 @@
 // Copyright © 2024 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
+#![allow(non_upper_case_globals)]
+
+#![allow(dead_code)]
+
+use crate::builder::*;
 use crate::ir::*;
-use crate::nir::*;
 
 use bak_bindings::*;
+
+use compiler::bindings::*;
+use compiler::nir::*;
 
 use std::collections::HashMap;
 
@@ -34,13 +41,47 @@ impl<'a> ShaderFromNir<'a> {
         }
     }
 
+    fn parse_load_const(
+        &mut self,
+        _b: &mut impl SSABuilder,
+        load_const: &nir_load_const_instr,
+    ) {
+        println!("  load const instruction");
+        let _values = &load_const.values();
+
+        let mut dst = Vec::new();
+        dst.push(1); // dummy
+        match load_const.def.bit_size {
+            1 => {
+                println!("  bit size 1");
+            }
+            8 => {
+                println!("  bit size 8");
+            }
+            16 => {
+                println!("  bit size 16");
+            }
+            32 => {
+                println!("  bit size 32");
+            }
+            64 => {
+                println!("  bit size 64");
+            }
+            _ => panic!("Unknown bit size: {}", load_const.def.bit_size),
+        }
+        // self.set_ssa(&load_const.def, dst);
+    }
+
     fn parse_block(
         &mut self,
         ssa_alloc: &mut SSAValueAllocator,
-        phi_map: &mut PhiAllocMap,
+        _phi_map: &mut PhiAllocMap,
         nb: &nir_block,
     ) {
         println!("ShaderFromNir::parse_block TODO");
+
+        let mut b = SSAInstrBuilder::new(ssa_alloc);
+
         for ni in nb.iter_instr_list() {
             unsafe {
                 bak_print_instr(ni);
@@ -65,7 +106,7 @@ impl<'a> ShaderFromNir<'a> {
                     println!("  intrinsic instruction");
                 },
                 nir_instr_type_load_const => {
-                    println!("  load const instruction");
+                    self.parse_load_const(&mut b, ni.as_load_const().unwrap());
                 },
                 nir_instr_type_undef => {
                     println!("  type undef instruction");
@@ -115,7 +156,7 @@ impl<'a> ShaderFromNir<'a> {
         println!("ShaderFromNir::parse_function_impl!");
 
         let mut ssa_alloc = SSAValueAllocator::new();
-        let end_nb = nfi.end_block();
+        let _end_nb = nfi.end_block();
         //self.end_block_id = end_nb.index;
 
         let mut phi_alloc = PhiAllocator::new();
@@ -123,7 +164,7 @@ impl<'a> ShaderFromNir<'a> {
 
         self.parse_cf_list(&mut ssa_alloc, &mut phi_map, nfi.iter_body());
 
-        let mut f = Function {
+        let f = Function {
             // TODO
         };
         f
