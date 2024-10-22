@@ -37,6 +37,11 @@ _libbak_bindings_rs = static_library(
   rust_abi : 'rust',
 )
 
+_libbak_ir_proc_rs = rust.proc_macro(
+  'bak_ir_proc',
+  files('bak/ir_proc.rs'),
+  dependencies : [idep_compiler_proc_rs],
+)
 
 bak_rust_args = [
   '-Aclippy::identity_op',
@@ -62,7 +67,8 @@ _libbak_rs = static_library(
     idep_compiler_rs
   ],
   link_with: [
-    _libbak_bindings_rs
+    _libbak_bindings_rs,
+    _libbak_ir_proc_rs
   ],
 )
 
