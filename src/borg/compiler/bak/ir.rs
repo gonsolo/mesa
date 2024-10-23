@@ -8,11 +8,13 @@ extern crate bak_ir_proc;
 use std::fmt;
 use bak_ir_proc::*;
 use compiler::as_slice::*;
+use compiler::cfg::CFG;
 use compiler::smallvec::SmallVec;
 use std::ops::{Deref, DerefMut};
 
 pub struct Function {
-    // TODO
+    pub ssa_alloc: SSAValueAllocator,
+    pub blocks: CFG<BasicBlock>,
 }
 
 impl fmt::Display for Function {

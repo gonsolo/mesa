@@ -179,8 +179,11 @@ impl<'a> ShaderFromNir<'a> {
 
         self.parse_cf_list(&mut ssa_alloc, &mut phi_map, nfi.iter_body());
 
+        let cfg = std::mem::take(&mut self.cfg).as_cfg();
+        assert!(cfg.len() > 0);
         let f = Function {
-            // TODO
+            ssa_alloc: ssa_alloc,
+            blocks: cfg,
         };
         f
     }
