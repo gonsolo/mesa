@@ -171,7 +171,7 @@ create_frag_input(struct ir3_context *ctx, struct ir3_instruction *coord,
 }
 
 static struct ir3_instruction *
-create_driver_param(struct ir3_context *ctx, enum ir3_driver_param dp)
+create_driver_param(struct ir3_context *ctx, uint32_t dp)
 {
    /* first four vec4 sysval's reserved for UBOs: */
    /* NOTE: dp is in scalar, but there can be >4 dp components: */
@@ -182,7 +182,7 @@ create_driver_param(struct ir3_context *ctx, enum ir3_driver_param dp)
 }
 
 static struct ir3_instruction *
-create_driver_param_indirect(struct ir3_context *ctx, enum ir3_driver_param dp,
+create_driver_param_indirect(struct ir3_context *ctx, uint32_t dp,
                              struct ir3_instruction *address)
 {
    /* first four vec4 sysval's reserved for UBOs: */
@@ -1027,7 +1027,22 @@ emit_alu(struct ir3_context *ctx, nir_alu_instr *alu)
       dst = ir3_SUB_S_rpt(b, dst_sz, src[0], 0, src[1], 0);
       set_instr_flags(dst.rpts, dst_sz, IR3_INSTR_SAT);
       break;
-
+   case nir_op_pack_64_2x32_split: {
+       struct ir3_instruction *r0 = ir3_MOV(b, src[0].rpts[0], TYPE_U32);
+       struct ir3_instruction *r1 = ir3_MOV(b, src[1].rpts[0], TYPE_U32);
+       dst.rpts[0] = r0;
+       dst.rpts[1] = r1;
+       dst_sz = 2;
+      break;
+   }
+   case nir_op_unpack_64_2x32_split_x: {
+       ir3_split_dest(b, &dst.rpts[0], src[0].rpts[0], 0, 1);
+      break;
+   }
+   case nir_op_unpack_64_2x32_split_y: {
+       ir3_split_dest(b, &dst.rpts[0], src[0].rpts[0], 1, 1);
+      break;
+   }
    case nir_op_udot_4x8_uadd:
    case nir_op_udot_4x8_uadd_sat:
    case nir_op_sdot_4x8_iadd:
@@ -1659,7 +1674,7 @@ get_image_ssbo_samp_tex_src(struct ir3_context *ctx, nir_src *src, bool image)
       texture = create_immed_typed(ctx->block, tex_idx, TYPE_U16);
       sampler = create_immed_typed(ctx->block, tex_idx, TYPE_U16);
 
-      info.samp_tex = ir3_collect(b, sampler, texture);
+      info.samp_tex = ir3_collect(b, texture, sampler);
    }
 
    return info;
@@ -1866,8 +1881,7 @@ get_bindless_samp_src(struct ir3_context *ctx, nir_src *tex,
          info.flags |= IR3_INSTR_A1EN;
       }
 
-      /* Note: the indirect source is now a vec2 instead of hvec2, and
-       * for some reason the texture and sampler are swapped.
+      /* Note: the indirect source is now a vec2 instead of hvec2
        */
       struct ir3_instruction *texture, *sampler;
 
@@ -2483,6 +2497,12 @@ shfl_mode(nir_intrinsic_instr *intr)
    switch (intr->intrinsic) {
    case nir_intrinsic_rotate:
       return SHFL_RDOWN;
+   case nir_intrinsic_shuffle_up_uniform_ir3:
+      return SHFL_RUP;
+   case nir_intrinsic_shuffle_down_uniform_ir3:
+      return SHFL_RDOWN;
+   case nir_intrinsic_shuffle_xor_uniform_ir3:
+      return SHFL_XOR;
    default:
       unreachable("unsupported shfl");
    }
@@ -2793,25 +2813,25 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
    case nir_intrinsic_load_base_vertex:
    case nir_intrinsic_load_first_vertex:
       if (!ctx->basevertex) {
-         ctx->basevertex = create_driver_param(ctx, IR3_DP_VTXID_BASE);
+         ctx->basevertex = create_driver_param(ctx, IR3_DP_VS(vtxid_base));
       }
       dst[0] = ctx->basevertex;
       break;
    case nir_intrinsic_load_is_indexed_draw:
       if (!ctx->is_indexed_draw) {
-         ctx->is_indexed_draw = create_driver_param(ctx, IR3_DP_IS_INDEXED_DRAW);
+         ctx->is_indexed_draw = create_driver_param(ctx, IR3_DP_VS(is_indexed_draw));
       }
       dst[0] = ctx->is_indexed_draw;
       break;
    case nir_intrinsic_load_draw_id:
       if (!ctx->draw_id) {
-         ctx->draw_id = create_driver_param(ctx, IR3_DP_DRAWID);
+         ctx->draw_id = create_driver_param(ctx, IR3_DP_VS(draw_id));
       }
       dst[0] = ctx->draw_id;
       break;
    case nir_intrinsic_load_base_instance:
       if (!ctx->base_instance) {
-         ctx->base_instance = create_driver_param(ctx, IR3_DP_INSTID_BASE);
+         ctx->base_instance = create_driver_param(ctx, IR3_DP_VS(instid_base));
       }
       dst[0] = ctx->base_instance;
       break;
@@ -2858,7 +2878,7 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
       idx = nir_intrinsic_ucp_id(intr);
       for (int i = 0; i < dest_components; i++) {
          unsigned n = idx * 4 + i;
-         dst[i] = create_driver_param(ctx, IR3_DP_UCP0_X + n);
+         dst[i] = create_driver_param(ctx, IR3_DP_VS(ucp[0].x) + n);
       }
       create_rpt = true;
       break;
@@ -2894,41 +2914,41 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
       } else {
          /* For a3xx/a4xx, this comes in via const injection by the hw */
          for (int i = 0; i < dest_components; i++) {
-            dst[i] = create_driver_param(ctx, IR3_DP_WORKGROUP_ID_X + i);
+            dst[i] = create_driver_param(ctx, IR3_DP_CS(workgroup_id_x) + i);
          }
       }
       break;
    case nir_intrinsic_load_base_workgroup_id:
       for (int i = 0; i < dest_components; i++) {
-         dst[i] = create_driver_param(ctx, IR3_DP_BASE_GROUP_X + i);
+         dst[i] = create_driver_param(ctx, IR3_DP_CS(base_group_x) + i);
       }
       create_rpt = true;
       break;
    case nir_intrinsic_load_num_workgroups:
       for (int i = 0; i < dest_components; i++) {
-         dst[i] = create_driver_param(ctx, IR3_DP_NUM_WORK_GROUPS_X + i);
+         dst[i] = create_driver_param(ctx, IR3_DP_CS(num_work_groups_x) + i);
       }
       create_rpt = true;
       break;
    case nir_intrinsic_load_workgroup_size:
       for (int i = 0; i < dest_components; i++) {
-         dst[i] = create_driver_param(ctx, IR3_DP_LOCAL_GROUP_SIZE_X + i);
+         dst[i] = create_driver_param(ctx, IR3_DP_CS(local_group_size_x) + i);
       }
       create_rpt = true;
       break;
    case nir_intrinsic_load_subgroup_size: {
       assert(ctx->so->type == MESA_SHADER_COMPUTE ||
              ctx->so->type == MESA_SHADER_FRAGMENT);
-      enum ir3_driver_param size = ctx->so->type == MESA_SHADER_COMPUTE ?
-         IR3_DP_CS_SUBGROUP_SIZE : IR3_DP_FS_SUBGROUP_SIZE;
+      unsigned size = ctx->so->type == MESA_SHADER_COMPUTE ?
+         IR3_DP_CS(subgroup_size) : IR3_DP_FS(subgroup_size);
       dst[0] = create_driver_param(ctx, size);
       break;
    }
    case nir_intrinsic_load_subgroup_id_shift_ir3:
-      dst[0] = create_driver_param(ctx, IR3_DP_SUBGROUP_ID_SHIFT);
+      dst[0] = create_driver_param(ctx, IR3_DP_CS(subgroup_id_shift));
       break;
    case nir_intrinsic_load_work_dim:
-      dst[0] = create_driver_param(ctx, IR3_DP_WORK_DIM);
+      dst[0] = create_driver_param(ctx, IR3_DP_CS(work_dim));
       break;
    case nir_intrinsic_load_subgroup_invocation:
       assert(ctx->compiler->has_getfiberid);
@@ -2938,24 +2958,24 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
       break;
    case nir_intrinsic_load_tess_level_outer_default:
       for (int i = 0; i < dest_components; i++) {
-         dst[i] = create_driver_param(ctx, IR3_DP_HS_DEFAULT_OUTER_LEVEL_X + i);
+         dst[i] = create_driver_param(ctx, IR3_DP_TCS(default_outer_level_x) + i);
       }
       create_rpt = true;
       break;
    case nir_intrinsic_load_tess_level_inner_default:
       for (int i = 0; i < dest_components; i++) {
-         dst[i] = create_driver_param(ctx, IR3_DP_HS_DEFAULT_INNER_LEVEL_X + i);
+         dst[i] = create_driver_param(ctx, IR3_DP_TCS(default_inner_level_x) + i);
       }
       create_rpt = true;
       break;
    case nir_intrinsic_load_frag_invocation_count:
-      dst[0] = create_driver_param(ctx, IR3_DP_FS_FRAG_INVOCATION_COUNT);
+      dst[0] = create_driver_param(ctx, IR3_DP_FS(frag_invocation_count));
       break;
    case nir_intrinsic_load_frag_size_ir3:
    case nir_intrinsic_load_frag_offset_ir3: {
-      enum ir3_driver_param param =
+      unsigned param =
          intr->intrinsic == nir_intrinsic_load_frag_size_ir3 ?
-         IR3_DP_FS_FRAG_SIZE : IR3_DP_FS_FRAG_OFFSET;
+         IR3_DP_FS(frag_size) : IR3_DP_FS(frag_offset);
       if (nir_src_is_const(intr->src[0])) {
          uint32_t view = nir_src_as_uint(intr->src[0]);
          for (int i = 0; i < dest_components; i++) {
@@ -3285,6 +3305,9 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
       break;
    }
    case nir_intrinsic_rotate:
+   case nir_intrinsic_shuffle_up_uniform_ir3:
+   case nir_intrinsic_shuffle_down_uniform_ir3:
+   case nir_intrinsic_shuffle_xor_uniform_ir3:
       dst[0] = emit_shfl(ctx, intr);
       break;
    default:
@@ -3303,9 +3326,9 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
 static void
 emit_load_const(struct ir3_context *ctx, nir_load_const_instr *instr)
 {
-   struct ir3_instruction **dst =
-      ir3_get_dst_ssa(ctx, &instr->def, instr->def.num_components);
    unsigned bit_size = ir3_bitsize(ctx, instr->def.bit_size);
+   struct ir3_instruction **dst =
+      ir3_get_dst_ssa(ctx, &instr->def, instr->def.num_components * ((bit_size == 64) ? 2 : 1));
 
    if (bit_size <= 8) {
       for (int i = 0; i < instr->def.num_components; i++)
@@ -3313,9 +3336,15 @@ emit_load_const(struct ir3_context *ctx, nir_load_const_instr *instr)
    } else if (bit_size <= 16) {
       for (int i = 0; i < instr->def.num_components; i++)
          dst[i] = create_immed_typed(ctx->block, instr->value[i].u16, TYPE_U16);
-   } else {
+   } else if (bit_size <= 32) {
       for (int i = 0; i < instr->def.num_components; i++)
          dst[i] = create_immed_typed(ctx->block, instr->value[i].u32, TYPE_U32);
+   } else {
+      assert(instr->def.num_components == 1);
+      for (int i = 0; i < instr->def.num_components; i++) {
+         dst[2 * i] = create_immed_typed(ctx->block, (uint32_t)(instr->value[i].u64), TYPE_U32);
+         dst[2 * i + 1] = create_immed_typed(ctx->block, (uint32_t)(instr->value[i].u64 >> 32), TYPE_U32);
+      }
    }
 }
 
@@ -3437,7 +3466,7 @@ get_tex_samp_tex_src(struct ir3_context *ctx, nir_tex_instr *tex)
          info.samp_idx = tex->texture_index;
       }
 
-      info.samp_tex = ir3_collect(b, sampler, texture);
+      info.samp_tex = ir3_collect(b, texture, sampler);
    }
 
    return info;
@@ -4551,7 +4580,7 @@ emit_stream_out(struct ir3_context *ctx)
     * of the shader:
     */
    vtxcnt = create_sysval_input(ctx, SYSTEM_VALUE_VERTEX_CNT, 0x1);
-   maxvtxcnt = create_driver_param(ctx, IR3_DP_VTXCNT_MAX);
+   maxvtxcnt = create_driver_param(ctx, IR3_DP_VS(vtxcnt_max));
 
    /* at this point, we are at the original 'end' block,
     * re-purpose this block to stream-out condition, then
@@ -5793,6 +5822,15 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
    if (ctx->so->type == MESA_SHADER_FRAGMENT &&
        compiler->fs_must_have_non_zero_constlen_quirk) {
       so->constlen = MAX2(so->constlen, 4);
+   }
+
+   if (gl_shader_stage_is_compute(so->type)) {
+      so->cs.local_invocation_id =
+         ir3_find_sysval_regid(so, SYSTEM_VALUE_LOCAL_INVOCATION_ID);
+      so->cs.work_group_id =
+         ir3_find_sysval_regid(so, SYSTEM_VALUE_WORKGROUP_ID);
+   } else {
+      so->vtxid_base = ir3_find_sysval_regid(so, SYSTEM_VALUE_VERTEX_ID_ZERO_BASE);
    }
 
 out:

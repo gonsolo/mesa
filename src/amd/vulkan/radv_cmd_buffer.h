@@ -97,7 +97,8 @@ enum radv_cmd_dirty_bits {
    RADV_CMD_DIRTY_FS_STATE = 1ull << 13,
    RADV_CMD_DIRTY_NGG_STATE = 1ull << 14,
    RADV_CMD_DIRTY_TASK_STATE = 1ull << 15,
-   RADV_CMD_DIRTY_ALL = (1ull << 16) - 1,
+   RADV_CMD_DIRTY_DEPTH_STENCIL_STATE = 1ull << 16,
+   RADV_CMD_DIRTY_ALL = (1ull << 17) - 1,
 
    RADV_CMD_DIRTY_SHADER_QUERY = RADV_CMD_DIRTY_NGG_STATE | RADV_CMD_DIRTY_TASK_STATE,
 };
@@ -245,6 +246,22 @@ enum radv_tracked_reg {
    RADV_TRACKED_DB_COUNT_CONTROL,
    RADV_TRACKED_DB_SHADER_CONTROL,
    RADV_TRACKED_DB_VRS_OVERRIDE_CNTL,
+
+   /* 2 consecutive registers */
+   RADV_TRACKED_DB_DEPTH_BOUNDS_MIN,
+   RADV_TRACKED_DB_DEPTH_BOUNDS_MAX,
+
+   /* 2 consecutive registers */
+   RADV_TRACKED_DB_STENCILREFMASK,    /* GFX6-11.5 */
+   RADV_TRACKED_DB_STENCILREFMASK_BF, /* GFX6-11.5 */
+
+   /* 2 consecutive registers */
+   RADV_TRACKED_DB_STENCIL_READ_MASK,  /* GFX12 */
+   RADV_TRACKED_DB_STENCIL_WRITE_MASK, /* GFX12 */
+
+   RADV_TRACKED_DB_DEPTH_CONTROL,
+   RADV_TRACKED_DB_STENCIL_CONTROL,
+   RADV_TRACKED_DB_STENCIL_REF, /* GFX12 */
 
    RADV_TRACKED_GE_MAX_OUTPUT_PER_SUBGROUP,
    RADV_TRACKED_GE_NGG_SUBGRP_CNTL,
@@ -441,6 +458,8 @@ struct radv_cmd_state {
    /* Custom blend mode for internal operations. */
    unsigned custom_blend_mode;
    unsigned db_render_control;
+
+   unsigned last_cb_target_mask;
 
    unsigned rast_prim;
 

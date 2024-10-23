@@ -482,7 +482,6 @@ static const nir_shader_compiler_options nv30_base_compiler_options = {
    .no_integers = true,
 
    .use_interpolated_input_intrinsics = true,
-   .has_ddx_intrinsics = true,
 };
 
 static const void *
@@ -535,7 +534,7 @@ nv30_screen_destroy(struct pipe_screen *pscreen)
 {
    struct nv30_screen *screen = nv30_screen(pscreen);
 
-   if (!nouveau_drm_screen_unref(&screen->base))
+   if (!screen->base.initialized)
       return;
 
    nouveau_bo_ref(NULL, &screen->notify);

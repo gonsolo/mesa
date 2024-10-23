@@ -30,6 +30,7 @@
 #include "pipe/p_defines.h"
 #include "pipe/p_screen.h"
 #include "pipe/p_state.h"
+#include "util/perf/cpu_trace.h"
 
 #include "util/u_debug.h"
 #include "util/u_memory.h"
@@ -762,7 +763,6 @@ v3d_screen_get_compiler_options(struct pipe_screen *pscreen,
                  */
                 .max_unroll_iterations = 16,
                 .force_indirect_unrolling_sampler = true,
-                .has_ddx_intrinsics = true,
                 .scalarize_ddx = true,
         };
 
@@ -915,6 +915,8 @@ v3d_screen_create(int fd, const struct pipe_screen_config *config,
 {
         struct v3d_screen *screen = rzalloc(NULL, struct v3d_screen);
         struct pipe_screen *pscreen;
+
+        util_cpu_trace_init();
 
         pscreen = &screen->base;
 

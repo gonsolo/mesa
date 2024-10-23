@@ -42,32 +42,6 @@ binding_has_immutable_samplers(const VkDescriptorSetLayoutBinding *binding)
    }
 }
 
-static bool
-is_sampler(const VkDescriptorSetLayoutBinding *binding)
-{
-   switch (binding->descriptorType) {
-   case VK_DESCRIPTOR_TYPE_SAMPLER:
-   case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
-      return true;
-   default:
-      return false;
-   }
-}
-
-static bool
-is_texture(const VkDescriptorSetLayoutBinding *binding)
-{
-   switch (binding->descriptorType) {
-   case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
-   case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
-   case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
-   case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
-      return true;
-   default:
-      return false;
-   }
-}
-
 VkResult
 panvk_per_arch(CreateDescriptorSetLayout)(
    VkDevice _device, const VkDescriptorSetLayoutCreateInfo *pCreateInfo,
@@ -190,7 +164,7 @@ panvk_per_arch(CreateDescriptorSetLayout)(
       /* Immutable samplers are ignored for now */
    }
 
-   _mesa_blake3_final(&hash_ctx, layout->hash);
+   _mesa_blake3_final(&hash_ctx, layout->vk.blake3);
 
    free(bindings);
    *pSetLayout = panvk_descriptor_set_layout_to_handle(layout);

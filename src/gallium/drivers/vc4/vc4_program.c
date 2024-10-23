@@ -25,6 +25,7 @@
 #include <inttypes.h>
 #include "util/format/u_format.h"
 #include "util/crc32.h"
+#include "util/perf/cpu_trace.h"
 #include "util/u_helpers.h"
 #include "util/u_math.h"
 #include "util/u_memory.h"
@@ -2183,7 +2184,6 @@ static const nir_shader_compiler_options nir_options = {
         .lower_mul_high = true,
         .max_unroll_iterations = 32,
         .force_indirect_unrolling = (nir_var_shader_in | nir_var_shader_out | nir_var_function_temp),
-        .has_ddx_intrinsics = true,
         .scalarize_ddx = true,
 };
 
@@ -2213,6 +2213,8 @@ vc4_shader_ntq(struct vc4_context *vc4, enum qstage stage,
                struct vc4_key *key, bool fs_threaded)
 {
         struct vc4_compile *c = qir_compile_init();
+
+        MESA_TRACE_FUNC();
 
         c->vc4 = vc4;
         c->stage = stage;

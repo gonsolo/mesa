@@ -163,7 +163,6 @@ fn nir_options(dev: &nv_device_info) -> nir_shader_compiler_options {
     op.discard_is_demote = true;
 
     op.max_unroll_iterations = 32;
-    op.has_ddx_intrinsics = true;
     op.scalarize_ddx = true;
 
     op
@@ -426,6 +425,9 @@ pub extern "C" fn nak_compile_shader(
     } else {
         pass!(s, opt_crs);
     }
+
+    s.remove_annotations();
+
     pass!(s, calc_instr_deps);
 
     s.gather_info();
@@ -434,11 +436,6 @@ pub extern "C" fn nak_compile_shader(
     if dump_asm {
         write!(asm, "{}", s).expect("Failed to dump assembly");
     }
-
-    // gonsolo
-    println!("{}", s);
-
-    s.remove_annotations();
 
     let code = sm.encode_shader(&s);
     let bin =

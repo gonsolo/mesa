@@ -56,8 +56,6 @@ extern "C" {
 #define MAX_LINE_SIZE 1024 // without 16 pixels for the seams
 #define MAX_LINE_CNT  4
 
-#define MAX_NUM_SAVED_CONFIG 16
-
 enum vpe_cmd_ops {
     VPE_CMD_OPS_BLENDING,
     VPE_CMD_OPS_BG,
@@ -103,7 +101,7 @@ struct vpe_cmd_info {
 
     // input
     uint16_t             num_inputs;
-    struct vpe_cmd_input inputs[MAX_PIPE];
+    struct vpe_cmd_input inputs[MAX_INPUT_PIPE];
 
     // output
     uint16_t              num_outputs;
@@ -130,11 +128,9 @@ struct stream_ctx {
     uint16_t            num_segments;
     struct segment_ctx *segment_ctx;
 
-    uint16_t num_configs;                               // shared among same stream
-    uint16_t num_stream_op_configs[VPE_CMD_TYPE_COUNT]; // shared among same cmd type within the
-                                                        // same stream
-    struct config_record configs[MAX_NUM_SAVED_CONFIG];
-    struct config_record stream_op_configs[VPE_CMD_TYPE_COUNT][MAX_NUM_SAVED_CONFIG];
+    // share configs that can be re-used once generated
+    struct vpe_vector *configs[MAX_INPUT_PIPE];
+    struct vpe_vector *stream_op_configs[MAX_INPUT_PIPE][VPE_CMD_TYPE_COUNT];
 
     // cached color properties
     bool                     per_pixel_alpha;
@@ -180,8 +176,8 @@ struct output_ctx {
     enum color_transfer_func tf;
     enum color_space         cs;
 
-    uint32_t             num_configs;
-    struct config_record configs[MAX_NUM_SAVED_CONFIG];
+    // store generated per-pipe configs that can be reused
+    struct vpe_vector *configs[MAX_OUTPUT_PIPE];
 
     union {
         struct {
@@ -259,7 +255,7 @@ struct vpe_priv {
     struct output_ctx output_ctx;
 
     uint16_t        num_pipe;
-    struct pipe_ctx pipe_ctx[MAX_PIPE];
+    struct pipe_ctx pipe_ctx[MAX_INPUT_PIPE];
 
     // internal temp structure for creating pure BG filling
     struct vpe_build_param *dummy_input_param;

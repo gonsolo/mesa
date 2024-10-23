@@ -222,6 +222,8 @@ struct intel_perf_query_result;
 
 #define ANV_GRAPHICS_SHADER_STAGE_COUNT (MESA_SHADER_MESH + 1)
 
+#define ANV_INLINE_PARAM_NUM_WORKGROUPS_OFFSET (8)
+
 /* RENDER_SURFACE_STATE is a bit smaller (48b) but since it is aligned to 64
  * and we can't put anything else there we use 64b.
  */
@@ -1043,6 +1045,11 @@ struct anv_physical_device {
 
     /** Whether KMD has the ability to create VM objects */
     bool                                        has_vm_control;
+
+    /** Whether the device is not able map all the device local memory on the
+     * host
+     */
+    bool                                        has_small_bar;
 
     /** True if we have the means to do sparse binding (e.g., a Kernel driver
      * a vm_bind ioctl).
@@ -2142,6 +2149,26 @@ anv_mocs_for_address(const struct anv_device *device,
 void anv_device_init_blorp(struct anv_device *device);
 void anv_device_finish_blorp(struct anv_device *device);
 
+static inline void
+anv_sanitize_map_params(struct anv_device *device,
+                        uint64_t in_offset,
+                        uint64_t in_size,
+                        uint64_t *out_offset,
+                        uint64_t *out_size)
+{
+   /* GEM will fail to map if the offset isn't 4k-aligned.  Round down. */
+   if (!device->physical->info.has_mmap_offset)
+      *out_offset = in_offset & ~4095ull;
+   else
+      *out_offset = 0;
+   assert(in_offset >= *out_offset);
+   *out_size = (in_offset + in_size) - *out_offset;
+
+   /* Let's map whole pages */
+   *out_size = align64(*out_size, 4096);
+}
+
+
 VkResult anv_device_alloc_bo(struct anv_device *device,
                              const char *name, uint64_t size,
                              enum anv_bo_alloc_flags alloc_flags,
@@ -3076,11 +3103,10 @@ anv_descriptor_set_write_template(struct anv_device *device,
                                   const struct vk_descriptor_update_template *template,
                                   const void *data);
 
-#define ANV_DESCRIPTOR_SET_DESCRIPTORS_BUFFER (UINT8_MAX - 5)
-#define ANV_DESCRIPTOR_SET_NULL               (UINT8_MAX - 4)
-#define ANV_DESCRIPTOR_SET_PUSH_CONSTANTS     (UINT8_MAX - 3)
-#define ANV_DESCRIPTOR_SET_DESCRIPTORS        (UINT8_MAX - 2)
-#define ANV_DESCRIPTOR_SET_NUM_WORK_GROUPS    (UINT8_MAX - 1)
+#define ANV_DESCRIPTOR_SET_DESCRIPTORS_BUFFER (UINT8_MAX - 4)
+#define ANV_DESCRIPTOR_SET_NULL               (UINT8_MAX - 3)
+#define ANV_DESCRIPTOR_SET_PUSH_CONSTANTS     (UINT8_MAX - 2)
+#define ANV_DESCRIPTOR_SET_DESCRIPTORS        (UINT8_MAX - 1)
 #define ANV_DESCRIPTOR_SET_COLOR_ATTACHMENTS   UINT8_MAX
 
 struct anv_pipeline_binding {
@@ -3598,6 +3624,9 @@ struct anv_push_constants {
           */
          uint32_t base_work_group_id[3];
 
+         /** gl_NumWorkgroups */
+         uint32_t num_work_groups[3];
+
          /** Subgroup ID
           *
           * This is never set by software but is implicitly filled out when
@@ -3907,8 +3936,6 @@ struct anv_cmd_compute_state {
    struct anv_cmd_pipeline_state base;
 
    bool pipeline_dirty;
-
-   struct anv_address num_workgroups;
 
    uint32_t scratch_size;
 };
@@ -5323,11 +5350,16 @@ struct anv_image {
     * Usually, the app will provide the address via the parameters of
     * vkBindImageMemory.  However, special-case bindings may be bound to
     * driver-private memory.
+    *
+    * If needed a host pointer to the image is mapped for host image copies.
     */
    struct anv_image_binding {
       struct anv_image_memory_range memory_range;
       struct anv_address address;
       struct anv_sparse_binding_data sparse_data;
+      void *host_map;
+      uint64_t map_delta;
+      uint64_t map_size;
    } bindings[ANV_IMAGE_MEMORY_BINDING_END];
 
    /**
@@ -5430,6 +5462,22 @@ anv_image_format_is_d16_or_s8(const struct anv_image *image)
       image->vk.format == VK_FORMAT_D24_UNORM_S8_UINT ||
       image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT ||
       image->vk.format == VK_FORMAT_S8_UINT;
+}
+
+static inline bool
+anv_image_can_host_memcpy(const struct anv_image *image)
+{
+   const struct isl_surf *surf = &image->planes[0].primary_surface.isl;
+   struct isl_tile_info tile_info;
+   isl_surf_get_tile_info(surf, &tile_info);
+
+   const bool array_pitch_aligned_to_tile =
+      surf->array_pitch_el_rows % tile_info.logical_extent_el.height == 0;
+
+   return image->vk.tiling != VK_IMAGE_TILING_LINEAR &&
+          image->n_planes == 1 &&
+          array_pitch_aligned_to_tile &&
+          image->vk.mip_levels == 1;
 }
 
 /* The ordering of this enum is important */
@@ -5701,7 +5749,7 @@ anv_cmd_buffer_load_clear_color_from_image(struct anv_cmd_buffer *cmd_buffer,
                                            struct anv_state state,
                                            const struct anv_image *image);
 
-struct anv_image_binding *
+enum anv_image_memory_binding
 anv_image_aspect_to_binding(struct anv_image *image,
                             VkImageAspectFlags aspect);
 

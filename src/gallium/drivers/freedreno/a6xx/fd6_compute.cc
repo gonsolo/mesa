@@ -51,10 +51,8 @@ cs_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
                      A6XX_SP_CS_CONFIG_NTEX(v->num_samp) |
                      A6XX_SP_CS_CONFIG_NSAMP(v->num_samp)); /* SP_CS_CONFIG */
 
-   uint32_t local_invocation_id, work_group_id;
-   local_invocation_id =
-      ir3_find_sysval_regid(v, SYSTEM_VALUE_LOCAL_INVOCATION_ID);
-   work_group_id = ir3_find_sysval_regid(v, SYSTEM_VALUE_WORKGROUP_ID);
+   uint32_t local_invocation_id = v->cs.local_invocation_id;
+   uint32_t work_group_id = v->cs.work_group_id;
 
    /*
     * Devices that do not support double threadsize take the threadsize from
@@ -154,7 +152,7 @@ fd6_launch_grid(struct fd_context *ctx, const struct pipe_grid_info *info) in_dt
       cs->stateobj = fd_ringbuffer_new_object(ctx->pipe, 0x1000);
       cs_program_emit<CHIP>(ctx, cs->stateobj, cs->v);
 
-      cs->user_consts_cmdstream_size = fd6_user_consts_cmdstream_size(cs->v);
+      cs->user_consts_cmdstream_size = fd6_user_consts_cmdstream_size<CHIP>(cs->v);
    }
 
    trace_start_compute(&ctx->batch->trace, ring, !!info->indirect, info->work_dim,
@@ -192,10 +190,10 @@ fd6_launch_grid(struct fd_context *ctx, const struct pipe_grid_info *info) in_dt
       fd6_emit_cs_state<CHIP>(ctx, ring, cs);
 
    if (ctx->gen_dirty & BIT(FD6_GROUP_CONST))
-      fd6_emit_cs_user_consts(ctx, ring, cs);
+      fd6_emit_cs_user_consts<CHIP>(ctx, ring, cs);
 
    if (cs->v->need_driver_params || info->input)
-      fd6_emit_cs_driver_params(ctx, ring, cs, info);
+      fd6_emit_cs_driver_params<CHIP>(ctx, ring, cs, info);
 
    OUT_PKT7(ring, CP_SET_MARKER, 1);
    OUT_RING(ring, A6XX_CP_SET_MARKER_0_MODE(RM6_COMPUTE));
@@ -206,7 +204,7 @@ fd6_launch_grid(struct fd_context *ctx, const struct pipe_grid_info *info) in_dt
    OUT_RING(ring, A6XX_SP_CS_UNKNOWN_A9B1_SHARED_SIZE(shared_size) |
                      A6XX_SP_CS_UNKNOWN_A9B1_UNK6);
 
-   if (ctx->screen->info->a6xx.has_lpac) {
+   if (CHIP == A6XX && ctx->screen->info->a6xx.has_lpac) {
       OUT_PKT4(ring, REG_A6XX_HLSQ_CS_UNKNOWN_B9D0, 1);
       OUT_RING(ring, A6XX_HLSQ_CS_UNKNOWN_B9D0_SHARED_SIZE(shared_size) |
                         A6XX_HLSQ_CS_UNKNOWN_B9D0_UNK6);

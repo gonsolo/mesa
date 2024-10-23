@@ -9,7 +9,9 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <sys/stat.h>
 #include <sys/sysinfo.h>
+#include <sys/sysmacros.h>
 
 #include "util/disk_cache.h"
 #include "git_sha1.h"
@@ -41,6 +43,87 @@
 #define MAX_INLINE_UNIFORM_BLOCK_DESCRIPTORS 32 - RESERVED_UBO_COUNT
 #define MAX_INLINE_UNIFORM_BLOCK_SIZE        (1 << 16)
 
+static VkResult
+create_kmod_dev(struct panvk_physical_device *device,
+                const struct panvk_instance *instance, drmDevicePtr drm_device)
+{
+   const char *path = drm_device->nodes[DRM_NODE_RENDER];
+   drmVersionPtr version;
+   int fd;
+
+   fd = open(path, O_RDWR | O_CLOEXEC);
+   if (fd < 0) {
+      return panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
+                          "failed to open device %s", path);
+   }
+
+   version = drmGetVersion(fd);
+   if (!version) {
+      close(fd);
+      return panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
+                          "failed to query kernel driver version for device %s",
+                          path);
+   }
+
+   if (strcmp(version->name, "panfrost") && strcmp(version->name, "panthor")) {
+      drmFreeVersion(version);
+      close(fd);
+      return panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
+                          "device %s does not use the panfrost kernel driver",
+                          path);
+   }
+
+   drmFreeVersion(version);
+
+   if (!getenv("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER")) {
+      close(fd);
+      return panvk_errorf(
+         instance, VK_ERROR_INCOMPATIBLE_DRIVER,
+         "WARNING: panvk is not a conformant vulkan implementation, "
+         "pass PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1 if you know what you're doing.");
+   }
+
+   if (instance->debug_flags & PANVK_DEBUG_STARTUP)
+      vk_logi(VK_LOG_NO_OBJS(instance), "Found compatible device '%s'.", path);
+
+   device->kmod.dev = pan_kmod_dev_create(fd, PAN_KMOD_DEV_FLAG_OWNS_FD,
+                                          &instance->kmod.allocator);
+
+   if (!device->kmod.dev) {
+      close(fd);
+      return panvk_errorf(instance, VK_ERROR_OUT_OF_HOST_MEMORY,
+                          "cannot create device");
+   }
+
+   return VK_SUCCESS;
+}
+
+static VkResult
+get_drm_device_ids(struct panvk_physical_device *device,
+                   const struct panvk_instance *instance,
+                   drmDevicePtr drm_device)
+{
+   struct stat st;
+
+   if (stat(drm_device->nodes[DRM_NODE_RENDER], &st)) {
+      return vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
+                       "failed to query render node stat");
+   }
+
+   device->drm.render_rdev = st.st_rdev;
+
+   if (drm_device->available_nodes & (1 << DRM_NODE_PRIMARY)) {
+      if (stat(drm_device->nodes[DRM_NODE_PRIMARY], &st)) {
+         return vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
+                          "failed to query primary node stat");
+      }
+
+      device->drm.primary_rdev = st.st_rdev;
+   }
+
+   return VK_SUCCESS;
+}
+
 static int
 get_cache_uuid(uint16_t family, void *uuid)
 {
@@ -62,18 +145,29 @@ get_device_extensions(const struct panvk_physical_device *device,
                       struct vk_device_extension_table *ext)
 {
    *ext = (struct vk_device_extension_table){
+      .KHR_bind_memory2 = true,
       .KHR_buffer_device_address = true,
       .KHR_copy_commands2 = true,
       .KHR_create_renderpass2 = true,
       .KHR_device_group = true,
       .KHR_descriptor_update_template = true,
       .KHR_driver_properties = true,
+      .KHR_dynamic_rendering = true,
+      .KHR_external_fence = true,
+      .KHR_external_fence_fd = true,
+      .KHR_external_memory = true,
+      .KHR_external_memory_fd = true,
+      .KHR_external_semaphore = true,
+      .KHR_external_semaphore_fd = true,
       .KHR_get_memory_requirements2 = true,
+      .KHR_image_format_list = true,
       .KHR_maintenance1 = true,
+      .KHR_maintenance2 = true,
       .KHR_maintenance3 = true,
       .KHR_pipeline_executable_properties = true,
       .KHR_pipeline_library = true,
       .KHR_push_descriptor = true,
+      .KHR_relaxed_block_layout = true,
       .KHR_sampler_mirror_clamp_to_edge = true,
       .KHR_shader_expect_assume = true,
       .KHR_storage_buffer_storage_class = true,
@@ -84,8 +178,11 @@ get_device_extensions(const struct panvk_physical_device *device,
       .KHR_variable_pointers = true,
       .EXT_buffer_device_address = true,
       .EXT_custom_border_color = true,
+      .EXT_external_memory_dma_buf = true,
       .EXT_graphics_pipeline_library = true,
+      .EXT_image_drm_format_modifier = true,
       .EXT_index_type_uint8 = true,
+      .EXT_physical_device_drm = true,
       .EXT_pipeline_creation_cache_control = true,
       .EXT_pipeline_creation_feedback = true,
       .EXT_private_data = true,
@@ -197,7 +294,7 @@ get_features(const struct panvk_physical_device *device,
       .synchronization2 = true,
       .textureCompressionASTC_HDR = false,
       .shaderZeroInitializeWorkgroupMemory = false,
-      .dynamicRendering = false,
+      .dynamicRendering = true,
       .shaderIntegerDotProduct = false,
       .maintenance4 = false,
 
@@ -416,7 +513,7 @@ get_device_properties(const struct panvk_instance *instance,
       .maxDrawIndexedIndexValue = UINT32_MAX,
       /* Make it one for now. */
       .maxDrawIndirectCount = 1,
-      .maxSamplerLodBias = 255,
+      .maxSamplerLodBias = (float)INT16_MAX / 256.0f,
       .maxSamplerAnisotropy = 16,
       .maxViewports = 1,
       /* Same as the framebuffer limit. */
@@ -627,6 +724,18 @@ get_device_properties(const struct panvk_instance *instance,
    snprintf(properties->driverInfo, VK_MAX_DRIVER_INFO_SIZE,
             "Mesa " PACKAGE_VERSION MESA_GIT_SHA1);
 
+   /* VK_EXT_physical_device_drm */
+   if (device->drm.primary_rdev) {
+      properties->drmHasPrimary = true;
+      properties->drmPrimaryMajor = major(device->drm.primary_rdev);
+      properties->drmPrimaryMinor = minor(device->drm.primary_rdev);
+   }
+   if (device->drm.render_rdev) {
+      properties->drmHasRender = true;
+      properties->drmRenderMajor = major(device->drm.render_rdev);
+      properties->drmRenderMinor = minor(device->drm.render_rdev);
+   }
+
    /* VK_EXT_shader_module_identifier */
    STATIC_ASSERT(sizeof(vk_shaderModuleIdentifierAlgorithmUUID) ==
                  sizeof(properties->shaderModuleIdentifierAlgorithmUUID));
@@ -641,8 +750,6 @@ panvk_physical_device_finish(struct panvk_physical_device *device)
    panvk_wsi_finish(device);
 
    pan_kmod_dev_destroy(device->kmod.dev);
-   if (device->master_fd != -1)
-      close(device->master_fd);
 
    vk_physical_device_finish(&device->vk);
 }
@@ -652,55 +759,11 @@ panvk_physical_device_init(struct panvk_physical_device *device,
                            struct panvk_instance *instance,
                            drmDevicePtr drm_device)
 {
-   const char *path = drm_device->nodes[DRM_NODE_RENDER];
-   VkResult result = VK_SUCCESS;
-   drmVersionPtr version;
-   int fd;
-   int master_fd = -1;
+   VkResult result;
 
-   fd = open(path, O_RDWR | O_CLOEXEC);
-   if (fd < 0) {
-      return panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                          "failed to open device %s", path);
-   }
-
-   version = drmGetVersion(fd);
-   if (!version) {
-      close(fd);
-      return panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                          "failed to query kernel driver version for device %s",
-                          path);
-   }
-
-   if (strcmp(version->name, "panfrost") && strcmp(version->name, "panthor")) {
-      drmFreeVersion(version);
-      close(fd);
-      return panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                          "device %s does not use the panfrost kernel driver",
-                          path);
-   }
-
-   drmFreeVersion(version);
-
-   if (!getenv("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER")) {
-      close(fd);
-      return panvk_errorf(
-         instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-         "WARNING: panvk is not a conformant vulkan implementation, "
-         "pass PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1 if you know what you're doing.");
-   }
-
-   if (instance->debug_flags & PANVK_DEBUG_STARTUP)
-      vk_logi(VK_LOG_NO_OBJS(instance), "Found compatible device '%s'.", path);
-
-   device->kmod.dev = pan_kmod_dev_create(fd, PAN_KMOD_DEV_FLAG_OWNS_FD,
-                                          &instance->kmod.allocator);
-
-   if (!device->kmod.dev) {
-      result = panvk_errorf(instance, VK_ERROR_OUT_OF_HOST_MEMORY,
-                            "cannot create device");
-      goto fail;
-   }
+   result = create_kmod_dev(device, instance, drm_device);
+   if (result != VK_SUCCESS)
+      return result;
 
    pan_kmod_dev_query_props(device->kmod.dev, &device->kmod.props);
 
@@ -721,14 +784,9 @@ panvk_physical_device_init(struct panvk_physical_device *device,
       goto fail;
    }
 
-   if (instance->vk.enabled_extensions.KHR_display) {
-      master_fd = open(drm_device->nodes[DRM_NODE_PRIMARY], O_RDWR | O_CLOEXEC);
-      if (master_fd >= 0) {
-         /* TODO: free master_fd is accel is not working? */
-      }
-   }
-
-   device->master_fd = master_fd;
+   result = get_drm_device_ids(device, instance, drm_device);
+   if (result != VK_SUCCESS)
+      goto fail;
 
    device->formats.all = panfrost_format_table(arch);
    device->formats.blendable = panfrost_blendable_format_table(arch);
@@ -787,13 +845,8 @@ fail:
    if (device->vk.instance)
       vk_physical_device_finish(&device->vk);
 
-   if (device->kmod.dev)
-      pan_kmod_dev_destroy(device->kmod.dev);
+   pan_kmod_dev_destroy(device->kmod.dev);
 
-   if (fd != -1)
-      close(fd);
-   if (master_fd != -1)
-      close(master_fd);
    return result;
 }
 
@@ -854,43 +907,6 @@ panvk_GetPhysicalDeviceMemoryProperties2(
                                       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
       .memoryTypes[0].heapIndex = 0,
    };
-}
-
-VKAPI_ATTR void VKAPI_CALL
-panvk_GetPhysicalDeviceExternalSemaphoreProperties(
-   VkPhysicalDevice physicalDevice,
-   const VkPhysicalDeviceExternalSemaphoreInfo *pExternalSemaphoreInfo,
-   VkExternalSemaphoreProperties *pExternalSemaphoreProperties)
-{
-   if ((pExternalSemaphoreInfo->handleType ==
-           VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT ||
-        pExternalSemaphoreInfo->handleType ==
-           VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT)) {
-      pExternalSemaphoreProperties->exportFromImportedHandleTypes =
-         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT |
-         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
-      pExternalSemaphoreProperties->compatibleHandleTypes =
-         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT |
-         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
-      pExternalSemaphoreProperties->externalSemaphoreFeatures =
-         VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT |
-         VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT;
-   } else {
-      pExternalSemaphoreProperties->exportFromImportedHandleTypes = 0;
-      pExternalSemaphoreProperties->compatibleHandleTypes = 0;
-      pExternalSemaphoreProperties->externalSemaphoreFeatures = 0;
-   }
-}
-
-VKAPI_ATTR void VKAPI_CALL
-panvk_GetPhysicalDeviceExternalFenceProperties(
-   VkPhysicalDevice physicalDevice,
-   const VkPhysicalDeviceExternalFenceInfo *pExternalFenceInfo,
-   VkExternalFenceProperties *pExternalFenceProperties)
-{
-   pExternalFenceProperties->exportFromImportedHandleTypes = 0;
-   pExternalFenceProperties->compatibleHandleTypes = 0;
-   pExternalFenceProperties->externalFenceFeatures = 0;
 }
 
 #define DEVICE_PER_ARCH_FUNCS(_ver)                                            \
@@ -1054,16 +1070,18 @@ panvk_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
 
    VkDrmFormatModifierPropertiesListEXT *list = vk_find_struct(
       pFormatProperties->pNext, DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT);
-   if (list) {
+   if (list && pFormatProperties->formatProperties.linearTilingFeatures) {
       VK_OUTARRAY_MAKE_TYPED(VkDrmFormatModifierPropertiesEXT, out,
                              list->pDrmFormatModifierProperties,
                              &list->drmFormatModifierCount);
 
-      vk_outarray_append_typed(VkDrmFormatModifierProperties2EXT, &out,
+      vk_outarray_append_typed(VkDrmFormatModifierPropertiesEXT, &out,
                                mod_props)
       {
          mod_props->drmFormatModifier = DRM_FORMAT_MOD_LINEAR;
          mod_props->drmFormatModifierPlaneCount = 1;
+         mod_props->drmFormatModifierTilingFeatures =
+            pFormatProperties->formatProperties.linearTilingFeatures;
       }
    }
 }
@@ -1088,25 +1106,30 @@ get_image_format_properties(struct panvk_physical_device *physical_device,
    case VK_IMAGE_TILING_LINEAR:
       format_feature_flags = format_props.linearTilingFeatures;
       break;
+   case VK_IMAGE_TILING_OPTIMAL:
+      format_feature_flags = format_props.optimalTilingFeatures;
+      break;
+   case VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT: {
+      const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *mod_info =
+         vk_find_struct_const(
+            info->pNext, PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT);
+      if (mod_info->drmFormatModifier != DRM_FORMAT_MOD_LINEAR)
+         goto unsupported;
 
-   case VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT:
       /* The only difference between optimal and linear is currently whether
        * depth/stencil attachments are allowed on depth/stencil formats.
        * There's no reason to allow importing depth/stencil textures, so just
        * disallow it and then this annoying edge case goes away.
-       *
-       * TODO: If anyone cares, we could enable this by looking at the
-       * modifier and checking if it's LINEAR or not.
        */
       if (util_format_is_depth_or_stencil(format))
          goto unsupported;
 
       assert(format_props.optimalTilingFeatures ==
              format_props.linearTilingFeatures);
-      FALLTHROUGH;
-   case VK_IMAGE_TILING_OPTIMAL:
-      format_feature_flags = format_props.optimalTilingFeatures;
+
+      format_feature_flags = format_props.linearTilingFeatures;
       break;
+   }
    default:
       unreachable("bad VkPhysicalDeviceImageFormatInfo2");
    }
@@ -1150,28 +1173,41 @@ get_image_format_properties(struct panvk_physical_device *physical_device,
       sampleCounts |= VK_SAMPLE_COUNT_4_BIT;
    }
 
-   if (info->usage & VK_IMAGE_USAGE_SAMPLED_BIT) {
-      if (!(format_feature_flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) {
-         goto unsupported;
+   /* From the Vulkan 1.2.199 spec:
+   *
+   *    "VK_IMAGE_CREATE_EXTENDED_USAGE_BIT specifies that the image can be
+   *    created with usage flags that are not supported for the format the
+   *    image is created with but are supported for at least one format a
+   *    VkImageView created from the image can have."
+   *
+   * If VK_IMAGE_CREATE_EXTENDED_USAGE_BIT is set, views can be created with
+   * different usage than the image so we can't always filter on usage.
+   * There is one exception to this below for storage.
+   */
+   if (!(info->flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT)) {
+      if (info->usage & VK_IMAGE_USAGE_SAMPLED_BIT) {
+         if (!(format_feature_flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) {
+            goto unsupported;
+         }
       }
-   }
 
-   if (info->usage & VK_IMAGE_USAGE_STORAGE_BIT) {
-      if (!(format_feature_flags & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
-         goto unsupported;
+      if (info->usage & VK_IMAGE_USAGE_STORAGE_BIT) {
+         if (!(format_feature_flags & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
+            goto unsupported;
+         }
       }
-   }
 
-   if (info->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) {
-      if (!(format_feature_flags & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) {
-         goto unsupported;
+      if (info->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) {
+         if (!(format_feature_flags & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) {
+            goto unsupported;
+         }
       }
-   }
 
-   if (info->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) {
-      if (!(format_feature_flags &
-            VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
-         goto unsupported;
+      if (info->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+         if (!(format_feature_flags &
+               VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
+            goto unsupported;
+         }
       }
    }
 
@@ -1203,29 +1239,6 @@ unsupported:
    return VK_ERROR_FORMAT_NOT_SUPPORTED;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL
-panvk_GetPhysicalDeviceImageFormatProperties(
-   VkPhysicalDevice physicalDevice, VkFormat format, VkImageType type,
-   VkImageTiling tiling, VkImageUsageFlags usage,
-   VkImageCreateFlags createFlags,
-   VkImageFormatProperties *pImageFormatProperties)
-{
-   VK_FROM_HANDLE(panvk_physical_device, physical_device, physicalDevice);
-
-   const VkPhysicalDeviceImageFormatInfo2 info = {
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
-      .pNext = NULL,
-      .format = format,
-      .type = type,
-      .tiling = tiling,
-      .usage = usage,
-      .flags = createFlags,
-   };
-
-   return get_image_format_properties(physical_device, &info,
-                                      pImageFormatProperties, NULL);
-}
-
 static VkResult
 panvk_get_external_image_format_properties(
    const struct panvk_physical_device *physical_device,
@@ -1233,50 +1246,51 @@ panvk_get_external_image_format_properties(
    VkExternalMemoryHandleTypeFlagBits handleType,
    VkExternalMemoryProperties *external_properties)
 {
-   VkExternalMemoryFeatureFlagBits flags = 0;
-   VkExternalMemoryHandleTypeFlags export_flags = 0;
-   VkExternalMemoryHandleTypeFlags compat_flags = 0;
+   const VkExternalMemoryHandleTypeFlags supported_handle_types =
+      VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT |
+      VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
 
-   /* From the Vulkan 1.1.98 spec:
-    *
-    *    If handleType is not compatible with the format, type, tiling,
-    *    usage, and flags specified in VkPhysicalDeviceImageFormatInfo2,
-    *    then vkGetPhysicalDeviceImageFormatProperties2 returns
-    *    VK_ERROR_FORMAT_NOT_SUPPORTED.
-    */
-   switch (handleType) {
-   case VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT:
-   case VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT:
-      switch (pImageFormatInfo->type) {
-      case VK_IMAGE_TYPE_2D:
-         flags = VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT |
-                 VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT |
-                 VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
-         compat_flags = export_flags =
-            VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT |
-            VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-         break;
-      default:
-         return panvk_errorf(
-            physical_device, VK_ERROR_FORMAT_NOT_SUPPORTED,
-            "VkExternalMemoryTypeFlagBits(0x%x) unsupported for VkImageType(%d)",
-            handleType, pImageFormatInfo->type);
-      }
-      break;
-   case VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT:
-      flags = VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
-      compat_flags = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
-      break;
-   default:
+   if (!(handleType & supported_handle_types)) {
       return panvk_errorf(physical_device, VK_ERROR_FORMAT_NOT_SUPPORTED,
                           "VkExternalMemoryTypeFlagBits(0x%x) unsupported",
                           handleType);
    }
 
+   /* pan_image_layout_init requires 2D for explicit layout */
+   if (pImageFormatInfo->type != VK_IMAGE_TYPE_2D) {
+      return panvk_errorf(
+         physical_device, VK_ERROR_FORMAT_NOT_SUPPORTED,
+         "VkExternalMemoryTypeFlagBits(0x%x) unsupported for VkImageType(%d)",
+         handleType, pImageFormatInfo->type);
+   }
+
+   /* There is no restriction on opaque fds.  But for dma-bufs, we want to
+    * make sure vkGetImageSubresourceLayout can be used to query the image
+    * layout of an exported dma-buf.  We also want to make sure
+    * VkImageDrmFormatModifierExplicitCreateInfoEXT can be used to specify the
+    * image layout of an imported dma-buf.  These add restrictions on the
+    * image tilings.
+    */
+   VkExternalMemoryFeatureFlags features = 0;
+   if (handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
+       pImageFormatInfo->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
+      features |= VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT |
+                  VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
+   } else if (pImageFormatInfo->tiling == VK_IMAGE_TILING_LINEAR) {
+      features |= VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT;
+   }
+
+   if (!features) {
+      return panvk_errorf(
+         physical_device, VK_ERROR_FORMAT_NOT_SUPPORTED,
+         "VkExternalMemoryTypeFlagBits(0x%x) unsupported for VkImageTiling(%d)",
+         handleType, pImageFormatInfo->tiling);
+   }
+
    *external_properties = (VkExternalMemoryProperties){
-      .externalMemoryFeatures = flags,
-      .exportFromImportedHandleTypes = export_flags,
-      .compatibleHandleTypes = compat_flags,
+      .externalMemoryFeatures = features,
+      .exportFromImportedHandleTypes = supported_handle_types,
+      .compatibleHandleTypes = supported_handle_types,
    };
 
    return VK_SUCCESS;
@@ -1353,6 +1367,11 @@ panvk_GetPhysicalDeviceImageFormatProperties2(
          &external_props->externalMemoryProperties);
       if (result != VK_SUCCESS)
          goto fail;
+
+      /* pan_image_layout_init requirements for explicit layout */
+      base_props->imageFormatProperties.maxMipLevels = 1;
+      base_props->imageFormatProperties.maxArrayLayers = 1;
+      base_props->imageFormatProperties.sampleCounts = 1;
    }
 
    if (cubic_props) {
@@ -1417,5 +1436,27 @@ panvk_GetPhysicalDeviceExternalBufferProperties(
    const VkPhysicalDeviceExternalBufferInfo *pExternalBufferInfo,
    VkExternalBufferProperties *pExternalBufferProperties)
 {
-   panvk_stub();
+   const VkExternalMemoryHandleTypeFlags supported_handle_types =
+      VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT |
+      VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+
+   /* From the Vulkan 1.3.298 spec:
+    *
+    *    compatibleHandleTypes must include at least handleType.
+    */
+   VkExternalMemoryHandleTypeFlags handle_types =
+      pExternalBufferInfo->handleType;
+   VkExternalMemoryFeatureFlags features = 0;
+   if (pExternalBufferInfo->handleType & supported_handle_types) {
+      handle_types |= supported_handle_types;
+      features |= VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT |
+                  VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
+   }
+
+   pExternalBufferProperties->externalMemoryProperties =
+      (VkExternalMemoryProperties){
+         .externalMemoryFeatures = features,
+         .exportFromImportedHandleTypes = handle_types,
+         .compatibleHandleTypes = handle_types,
+      };
 }

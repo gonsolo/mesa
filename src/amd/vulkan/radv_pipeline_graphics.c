@@ -1792,10 +1792,7 @@ radv_pipeline_generate_ps_epilog_key(const struct radv_device *device, const str
             ps_epilog.mrt0_is_dual_src = true;
          }
 
-         if (eqRGB == VK_BLEND_OP_MIN || eqRGB == VK_BLEND_OP_MAX) {
-            srcRGB = VK_BLEND_FACTOR_ONE;
-            dstRGB = VK_BLEND_FACTOR_ONE;
-         }
+         radv_normalize_blend_factor(eqRGB, &srcRGB, &dstRGB);
 
          if (srcRGB == VK_BLEND_FACTOR_SRC_ALPHA || dstRGB == VK_BLEND_FACTOR_SRC_ALPHA ||
              srcRGB == VK_BLEND_FACTOR_SRC_ALPHA_SATURATE || dstRGB == VK_BLEND_FACTOR_SRC_ALPHA_SATURATE ||
@@ -1848,7 +1845,7 @@ radv_generate_graphics_state_key(const struct radv_device *device, const struct 
       u_foreach_bit (i, state->vi->attributes_valid) {
          uint32_t binding = state->vi->attributes[i].binding;
          uint32_t offset = state->vi->attributes[i].offset;
-         enum pipe_format format = vk_format_to_pipe_format(state->vi->attributes[i].format);
+         enum pipe_format format = radv_format_to_pipe_format(state->vi->attributes[i].format);
 
          key.vi.vertex_attribute_formats[i] = format;
          key.vi.vertex_attribute_bindings[i] = binding;
@@ -2670,6 +2667,9 @@ radv_graphics_shaders_compile(struct radv_device *device, struct vk_pipeline_cac
       NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, radv_nir_lower_fs_barycentric, gfx_state, rast_prim);
    }
 
+   if (stages[MESA_SHADER_VERTEX].nir && !gfx_state->vs.has_prolog)
+      NIR_PASS(_, stages[MESA_SHADER_VERTEX].nir, radv_nir_optimize_vs_inputs_to_const, gfx_state);
+
    radv_foreach_stage(i, active_nir_stages)
    {
       int64_t stage_start = os_time_get_nano();
@@ -3122,7 +3122,7 @@ radv_pipeline_init_vertex_input_state(const struct radv_device *device, struct r
 
          pipeline->vertex_input.offsets[i] = offset;
 
-         enum pipe_format format = vk_format_to_pipe_format(state->vi->attributes[i].format);
+         enum pipe_format format = radv_format_to_pipe_format(state->vi->attributes[i].format);
          const struct ac_vtx_format_info *vtx_info = &vtx_info_table[format];
 
          pipeline->vertex_input.formats[i] = format;

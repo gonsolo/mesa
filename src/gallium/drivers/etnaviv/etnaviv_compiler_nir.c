@@ -293,7 +293,7 @@ const_src(struct etna_compile *c, nir_const_value *value, unsigned num_component
 static const uint8_t
 reg_swiz[NUM_REG_TYPES] = {
    [REG_TYPE_VEC4] = INST_SWIZ_IDENTITY,
-   [REG_TYPE_VIRT_SCALAR_X] = INST_SWIZ_IDENTITY,
+   [REG_TYPE_VIRT_SCALAR_X] = SWIZZLE(X, X, X, X),
    [REG_TYPE_VIRT_SCALAR_Y] = SWIZZLE(Y, Y, Y, Y),
    [REG_TYPE_VIRT_VEC2_XY] = INST_SWIZ_IDENTITY,
    [REG_TYPE_VIRT_VEC2T_XY] = INST_SWIZ_IDENTITY,
@@ -375,6 +375,8 @@ get_src(struct etna_compile *c, nir_src *src)
       case nir_intrinsic_load_uniform:
       case nir_intrinsic_load_ubo:
       case nir_intrinsic_load_reg:
+      case nir_intrinsic_ddx:
+      case nir_intrinsic_ddy:
          return ra_src(c, src);
       case nir_intrinsic_load_front_face:
          return (hw_src) { .use = 1, .rgroup = ISA_REG_GROUP_INTERNAL };
@@ -575,6 +577,42 @@ emit_intrinsic(struct etna_compile *c, nir_intrinsic_instr * intr)
    case nir_intrinsic_terminate:
       etna_emit_discard(c, SRC_DISABLE);
       break;
+   case nir_intrinsic_ddx: {
+      unsigned dst_swiz;
+      struct etna_inst_dst dst = ra_def(c, &intr->def, &dst_swiz);
+      struct etna_inst_src src = get_src(c, &intr->src[0]);
+
+      src = src_swizzle(src, dst_swiz);
+
+      struct etna_inst inst = {
+         .dst = dst,
+         .opcode = ISA_OPC_DSX,
+         .cond = ISA_COND_TRUE,
+         .type = ISA_TYPE_F32,
+         .src[0] = src,
+         .src[1] = src,
+      };
+
+      emit_inst(c, &inst);
+   } break;
+   case nir_intrinsic_ddy: {
+      unsigned dst_swiz;
+      struct etna_inst_dst dst = ra_def(c, &intr->def, &dst_swiz);
+      struct etna_inst_src src = get_src(c, &intr->src[0]);
+
+      src = src_swizzle(src, dst_swiz);
+
+      struct etna_inst inst = {
+         .dst = dst,
+         .opcode = ISA_OPC_DSY,
+         .type = ISA_TYPE_F32,
+         .cond = ISA_COND_TRUE,
+         .src[0] = src,
+         .src[1] = src,
+      };
+
+      emit_inst(c, &inst);
+   } break;
    case nir_intrinsic_load_uniform: {
       unsigned dst_swiz;
       struct etna_inst_dst dst = ra_def(c, &intr->def, &dst_swiz);

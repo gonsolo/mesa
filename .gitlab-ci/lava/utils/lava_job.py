@@ -1,7 +1,7 @@
 import re
 import xmlrpc
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Any, Optional
 
 from lava.exceptions import (
@@ -21,9 +21,9 @@ from .lava_proxy import call_proxy
 class LAVAJob:
     COLOR_STATUS_MAP: dict[str, str] = {
         "pass": CONSOLE_LOG["FG_GREEN"],
-        "hung": CONSOLE_LOG["FG_YELLOW"],
-        "fail": CONSOLE_LOG["FG_RED"],
-        "canceled": CONSOLE_LOG["FG_MAGENTA"],
+        "hung": CONSOLE_LOG["FG_BOLD_YELLOW"],
+        "fail": CONSOLE_LOG["FG_BOLD_RED"],
+        "canceled": CONSOLE_LOG["FG_BOLD_MAGENTA"],
     }
 
     def __init__(self, proxy, definition, log=defaultdict(str)) -> None:
@@ -39,7 +39,7 @@ class LAVAJob:
         self.__exception: Optional[Exception] = None
 
     def heartbeat(self) -> None:
-        self.last_log_time: datetime = datetime.now()
+        self.last_log_time: datetime = datetime.now(tz=UTC)
         self.status = "running"
 
     @property
@@ -173,7 +173,7 @@ class LAVAJob:
                 self.status = result.group(1)
                 self.exit_code = int(result.group(2))
 
-                last_line = idx + 1
+                last_line = idx
                 # We reached the log end here. hwci script has finished.
                 break
         return lava_lines[:last_line]

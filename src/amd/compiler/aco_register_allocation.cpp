@@ -346,7 +346,9 @@ public:
    void fill_killed_operands(Instruction* instr)
    {
       for (Operand& op : instr->operands) {
-         if (op.isFixed() && op.isFirstKillBeforeDef()) {
+         if (op.isPrecolored()) {
+            block(op.physReg(), op.regClass());
+         } else if (op.isFixed() && op.isFirstKillBeforeDef()) {
             if (op.regClass().is_subdword())
                fill_subdword(op.physReg(), op.bytes(), op.tempId());
             else
@@ -799,7 +801,6 @@ adjust_max_used_regs(ra_ctx& ctx, RegClass rc, unsigned reg)
 
 enum UpdateRenames {
    rename_not_killed_ops = 0x1,
-   rename_precolored_ops = 0x4,
 };
 MESA_DEFINE_CPP_ENUM_BITFIELD_OPERATORS(UpdateRenames);
 
@@ -880,8 +881,7 @@ update_renames(ra_ctx& ctx, RegisterFile& reg_file,
             continue;
          if (op.tempId() == copy.first.tempId()) {
             /* only rename precolored operands if the copy-location matches */
-            bool omit_renaming = (flags & rename_precolored_ops) && op.isFixed() &&
-                                 op.physReg() != copy.second.physReg();
+            bool omit_renaming = op.isPrecolored() && op.physReg() != copy.second.physReg();
 
             /* Omit renaming in some cases for p_create_vector in order to avoid
              * unnecessary shuffle code. */
@@ -908,7 +908,7 @@ update_renames(ra_ctx& ctx, RegisterFile& reg_file,
             op.setTemp(copy.second.getTemp());
             op.setFixed(copy.second.physReg());
 
-            fill = !op.isKillBeforeDef() || (flags & rename_precolored_ops);
+            fill = !op.isKillBeforeDef() || op.isPrecolored();
          }
       }
 
@@ -2097,9 +2097,10 @@ handle_fixed_operands(ra_ctx& ctx, RegisterFile& register_file,
    for (unsigned i = 0; i < instr->operands.size(); i++) {
       Operand& op = instr->operands[i];
 
-      if (!op.isTemp() || !op.isFixed())
+      if (!op.isPrecolored())
          continue;
 
+      assert(op.isTemp());
       PhysReg src = ctx.assignments[op.tempId()].reg;
       adjust_max_used_regs(ctx, op.regClass(), op.physReg());
 
@@ -2117,7 +2118,8 @@ handle_fixed_operands(ra_ctx& ctx, RegisterFile& register_file,
 
       BITSET_SET(mask, i);
 
-      Operand pc_op(instr->operands[i].getTemp(), src);
+      Operand pc_op(instr->operands[i].getTemp());
+      pc_op.setFixed(src);
       Definition pc_def = Definition(op.physReg(), pc_op.regClass());
       parallelcopy.emplace_back(pc_op, pc_def);
    }
@@ -2138,8 +2140,7 @@ handle_fixed_operands(ra_ctx& ctx, RegisterFile& register_file,
    }
 
    get_regs_for_copies(ctx, tmp_file, parallelcopy, blocking_vars, instr, PhysRegInterval());
-   update_renames(ctx, register_file, parallelcopy, instr,
-                  rename_not_killed_ops | rename_precolored_ops);
+   update_renames(ctx, register_file, parallelcopy, instr, rename_not_killed_ops);
 }
 
 void
@@ -3085,7 +3086,7 @@ register_allocation(Program* program, ra_test_policy policy)
             assert(ctx.assignments[operand.tempId()].assigned);
 
             fixed |=
-               operand.isFixed() && ctx.assignments[operand.tempId()].reg != operand.physReg();
+               operand.isPrecolored() && ctx.assignments[operand.tempId()].reg != operand.physReg();
          }
 
          bool is_writelane = instr->opcode == aco_opcode::v_writelane_b32 ||
@@ -3095,7 +3096,7 @@ register_allocation(Program* program, ra_test_policy policy)
             /* v_writelane_b32 can take two sgprs but only if one is m0. */
             if (ctx.assignments[instr->operands[0].tempId()].reg != m0 &&
                 ctx.assignments[instr->operands[1].tempId()].reg != m0) {
-               instr->operands[0].setFixed(m0);
+               instr->operands[0].setPrecolored(m0);
                fixed = true;
             }
          }
@@ -3137,7 +3138,7 @@ register_allocation(Program* program, ra_test_policy policy)
           */
          int op_fixed_to_def = get_op_fixed_to_def(instr.get());
          if (op_fixed_to_def != -1)
-            instr->definitions[0].setFixed(instr->operands[op_fixed_to_def].physReg());
+            instr->definitions[0].setPrecolored(instr->operands[op_fixed_to_def].physReg());
 
          /* handle fixed definitions first */
          for (unsigned i = 0; i < instr->definitions.size(); ++i) {

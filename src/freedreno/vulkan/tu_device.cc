@@ -158,6 +158,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_draw_indirect_count = true,
       .KHR_driver_properties = true,
       .KHR_dynamic_rendering = true,
+      .KHR_dynamic_rendering_local_read = true,
       .KHR_external_fence = true,
       .KHR_external_fence_fd = true,
       .KHR_external_memory = true,
@@ -202,6 +203,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_sampler_mirror_clamp_to_edge = true,
       .KHR_sampler_ycbcr_conversion = true,
       .KHR_separate_depth_stencil_layouts = true,
+      .KHR_shader_atomic_int64 = device->info->a7xx.has_64b_ssbo_atomics,
       .KHR_shader_draw_parameters = true,
       .KHR_shader_expect_assume = true,
       .KHR_shader_float16_int8 = true,
@@ -255,6 +257,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_global_priority = true,
       .EXT_global_priority_query = true,
       .EXT_graphics_pipeline_library = true,
+      .EXT_host_image_copy = true,
       .EXT_host_query_reset = true,
       .EXT_image_2d_view_of_3d = true,
       .EXT_image_drm_format_modifier = true,
@@ -394,7 +397,8 @@ tu_get_features(struct tu_physical_device *pdevice,
    features->storageBuffer8BitAccess             = pdevice->info->a7xx.storage_8bit;
    features->uniformAndStorageBuffer8BitAccess   = false;
    features->storagePushConstant8                = false;
-   features->shaderBufferInt64Atomics            = false;
+   features->shaderBufferInt64Atomics =
+      pdevice->info->a7xx.has_64b_ssbo_atomics;
    features->shaderSharedInt64Atomics            = false;
    features->shaderFloat16                       = true;
    features->shaderInt8                          = true;
@@ -460,6 +464,9 @@ tu_get_features(struct tu_physical_device *pdevice,
    /* VK_KHR_compute_shader_derivatives */
    features->computeDerivativeGroupQuads = pdevice->info->chip >= 7;
    features->computeDerivativeGroupLinear = pdevice->info->chip >= 7;
+
+   /* VK_KHR_dynamic_rendering_local_read */
+   features->dynamicRenderingLocalRead = true;
 
    /* VK_KHR_index_type_uint8 */
    features->indexTypeUint8 = true;
@@ -606,6 +613,9 @@ tu_get_features(struct tu_physical_device *pdevice,
    /* VK_EXT_graphics_pipeline_library */
    features->graphicsPipelineLibrary = true;
 
+   /* VK_EXT_host_image_copy */
+   features->hostImageCopy = true;
+
    /* VK_EXT_image_2d_view_of_3d  */
    features->image2DViewOf3D = true;
    features->sampler2DViewOf3D = true;
@@ -637,6 +647,9 @@ tu_get_features(struct tu_physical_device *pdevice,
 
    /* VK_EXT_non_seamless_cube_map */
    features->nonSeamlessCubeMap = true;
+
+   /* VK_EXT_pipeline_robustness */
+   features->pipelineRobustness = true;
 
    /* VK_EXT_primitive_topology_list_restart */
    features->primitiveTopologyListRestart = true;
@@ -1072,6 +1085,12 @@ tu_get_properties(struct tu_physical_device *pdevice,
    /* see write_ubo_descriptor() */
    props->robustUniformBufferAccessSizeAlignment = 16;
 
+   /* VK_EXT_pipeline_robustness */
+   props->defaultRobustnessStorageBuffers = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_EXT;
+   props->defaultRobustnessUniformBuffers = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_EXT;
+   props->defaultRobustnessVertexInputs = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2_EXT;
+   props->defaultRobustnessImages = VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS_2_EXT;
+
    /* VK_EXT_provoking_vertex */
    props->provokingVertexModePerPipeline = true;
    props->transformFeedbackPreservesTriangleFanProvokingVertex = false;
@@ -1143,8 +1162,7 @@ tu_get_properties(struct tu_physical_device *pdevice,
       COND(pdevice->info->a7xx.storage_8bit, 1));
    props->robustStorageBufferDescriptorSize =
       props->storageBufferDescriptorSize;
-   props->inputAttachmentDescriptorSize = TU_DEBUG(DYNAMIC) ?
-      A6XX_TEX_CONST_DWORDS * 4 : 0;
+   props->inputAttachmentDescriptorSize = A6XX_TEX_CONST_DWORDS * 4;
    props->maxSamplerDescriptorBufferRange = ~0ull;
    props->maxResourceDescriptorBufferRange = ~0ull;
    props->samplerDescriptorBufferAddressSpaceSize = ~0ull;
@@ -1172,6 +1190,63 @@ tu_get_properties(struct tu_physical_device *pdevice,
    props->blockTexelViewCompatibleMultipleLayers = true;
    props->maxCombinedImageSamplerDescriptorCount = 1;
    props->fragmentShadingRateClampCombinerInputs = false; /* TODO */
+
+   /* VK_EXT_host_image_copy */
+
+   /* We don't use the layouts ATM so just report all layouts from
+    * extensions that we support as compatible.
+    */
+   static const VkImageLayout supported_layouts[] = {
+      VK_IMAGE_LAYOUT_GENERAL, /* required by spec */
+      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+      VK_IMAGE_LAYOUT_PREINITIALIZED,
+      VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT,
+      VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT,
+   };
+
+   props->pCopySrcLayouts = (VkImageLayout *)supported_layouts;
+   props->copySrcLayoutCount = ARRAY_SIZE(supported_layouts);
+   props->pCopyDstLayouts = (VkImageLayout *)supported_layouts;
+   props->copyDstLayoutCount = ARRAY_SIZE(supported_layouts);
+
+   /* We're a UMR so we can always map every kind of memory */
+   props->identicalMemoryTypeRequirements = true;
+
+   {
+      struct mesa_sha1 sha1_ctx;
+      uint8_t sha1[20];
+
+      _mesa_sha1_init(&sha1_ctx);
+
+      /* Make sure we don't match with other vendors */
+      const char *driver = "turnip-v1";
+      _mesa_sha1_update(&sha1_ctx, driver, strlen(driver));
+
+      /* Hash in UBWC configuration */
+      _mesa_sha1_update(&sha1_ctx, &pdevice->ubwc_config.highest_bank_bit,
+                        sizeof(pdevice->ubwc_config.highest_bank_bit));
+      _mesa_sha1_update(&sha1_ctx, &pdevice->ubwc_config.bank_swizzle_levels,
+                        sizeof(pdevice->ubwc_config.bank_swizzle_levels));
+      _mesa_sha1_update(&sha1_ctx, &pdevice->ubwc_config.macrotile_mode,
+                        sizeof(pdevice->ubwc_config.macrotile_mode));
+
+      _mesa_sha1_final(&sha1_ctx, sha1);
+
+      memcpy(props->optimalTilingLayoutUUID, sha1, VK_UUID_SIZE);
+   }
 }
 
 static const struct vk_pipeline_cache_object_ops *const cache_import_ops[] = {
@@ -1297,6 +1372,20 @@ tu_physical_device_init(struct tu_physical_device *device,
          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
          VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
       device->memory.type_count++;
+   }
+
+   /* Provide fallback UBWC config values if the kernel doesn't support
+    * providing them. This should match what the kernel programs.
+    */
+   if (!device->ubwc_config.highest_bank_bit) {
+      device->ubwc_config.highest_bank_bit = info.highest_bank_bit;
+   }
+   if (device->ubwc_config.bank_swizzle_levels == ~0) {
+      device->ubwc_config.bank_swizzle_levels = info.ubwc_swizzle;
+   }
+   if (device->ubwc_config.macrotile_mode == FDL_MACROTILE_INVALID) {
+      device->ubwc_config.macrotile_mode =
+         (enum fdl_macrotile_mode) info.macrotile_mode;
    }
 
    fd_get_driver_uuid(device->driver_uuid);
@@ -2360,7 +2449,6 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
 
    {
       struct ir3_compiler_options ir3_options = {
-         .robust_buffer_access2 = device->vk.enabled_features.robustBufferAccess2,
          .push_ubo_with_preamble = true,
          .disable_cache = true,
          .bindless_fb_read_descriptor = -1,

@@ -236,6 +236,10 @@ tu_emit_cache_flush_renderpass(struct tu_cmd_buffer *cmd_buffer)
       return;
    tu6_emit_flushes<CHIP>(cmd_buffer, &cmd_buffer->draw_cs,
                     &cmd_buffer->state.renderpass_cache);
+   if (cmd_buffer->state.renderpass_cache.flush_bits &
+       TU_CMD_FLAG_BLIT_CACHE_CLEAN) {
+      cmd_buffer->state.blit_cache_cleaned = true;
+   }
 }
 TU_GENX(tu_emit_cache_flush_renderpass);
 
@@ -449,54 +453,64 @@ tu6_emit_mrt(struct tu_cmd_buffer *cmd,
 
    enum a6xx_format mrt0_format = FMT6_NONE;
 
+   uint32_t written = 0;
    for (uint32_t i = 0; i < subpass->color_count; ++i) {
       uint32_t a = subpass->color_attachments[i].attachment;
-      if (a == VK_ATTACHMENT_UNUSED) {
-         /* From the VkPipelineRenderingCreateInfo definition:
-          *
-          *    Valid formats indicate that an attachment can be used - but it
-          *    is still valid to set the attachment to NULL when beginning
-          *    rendering.
-          *
-          * This means that with dynamic rendering, pipelines may write to
-          * some attachments that are UNUSED here. Setting the format to 0
-          * here should prevent them from writing to anything. This also seems
-          * to also be required for alpha-to-coverage which can use the alpha
-          * value for an otherwise-unused attachment.
-          */
-         tu_cs_emit_regs(cs,
-            RB_MRT_BUF_INFO(CHIP, i),
-            A6XX_RB_MRT_PITCH(i),
-            A6XX_RB_MRT_ARRAY_PITCH(i),
-            A6XX_RB_MRT_BASE(i),
-            A6XX_RB_MRT_BASE_GMEM(i),
-         );
-
-         tu_cs_emit_regs(cs,
-                         A6XX_SP_FS_MRT_REG(i, .dword = 0));
+      unsigned remapped = cmd->vk.dynamic_graphics_state.cal.color_map[i];
+      if (a == VK_ATTACHMENT_UNUSED ||
+          remapped == MESA_VK_ATTACHMENT_UNUSED)
          continue;
-      }
 
       const struct tu_image_view *iview = cmd->state.attachments[a];
 
       tu_cs_emit_regs(cs,
-         RB_MRT_BUF_INFO(CHIP, i, .dword = iview->view.RB_MRT_BUF_INFO),
-         A6XX_RB_MRT_PITCH(i, iview->view.pitch),
-         A6XX_RB_MRT_ARRAY_PITCH(i, iview->view.layer_size),
-         A6XX_RB_MRT_BASE(i, .qword = tu_layer_address(&iview->view, 0)),
-         A6XX_RB_MRT_BASE_GMEM(i,
+         RB_MRT_BUF_INFO(CHIP, remapped, .dword = iview->view.RB_MRT_BUF_INFO),
+         A6XX_RB_MRT_PITCH(remapped, iview->view.pitch),
+         A6XX_RB_MRT_ARRAY_PITCH(remapped, iview->view.layer_size),
+         A6XX_RB_MRT_BASE(remapped, .qword = tu_layer_address(&iview->view, 0)),
+         A6XX_RB_MRT_BASE_GMEM(remapped,
             tu_attachment_gmem_offset(cmd, &cmd->state.pass->attachments[a], 0)
          ),
       );
 
       tu_cs_emit_regs(cs,
-                      A6XX_SP_FS_MRT_REG(i, .dword = iview->view.SP_FS_MRT_REG));
+                      A6XX_SP_FS_MRT_REG(remapped, .dword = iview->view.SP_FS_MRT_REG));
 
-      tu_cs_emit_pkt4(cs, REG_A6XX_RB_MRT_FLAG_BUFFER_ADDR(i), 3);
+      tu_cs_emit_pkt4(cs, REG_A6XX_RB_MRT_FLAG_BUFFER_ADDR(remapped), 3);
       tu_cs_image_flag_ref(cs, &iview->view, 0);
 
-      if (i == 0)
+      if (remapped == 0)
          mrt0_format = (enum a6xx_format) (iview->view.SP_FS_MRT_REG & 0xff);
+
+      written |= 1u << remapped;
+   }
+
+   u_foreach_bit (i, ~written) {
+      if (i >= subpass->color_count)
+         break;
+
+      /* From the VkPipelineRenderingCreateInfo definition:
+       *
+       *    Valid formats indicate that an attachment can be used - but it
+       *    is still valid to set the attachment to NULL when beginning
+       *    rendering.
+       *
+       * This means that with dynamic rendering, pipelines may write to
+       * some attachments that are UNUSED here. Setting the format to 0
+       * here should prevent them from writing to anything. This also seems
+       * to also be required for alpha-to-coverage which can use the alpha
+       * value for an otherwise-unused attachment.
+       */
+       tu_cs_emit_regs(cs,
+         RB_MRT_BUF_INFO(CHIP, i),
+         A6XX_RB_MRT_PITCH(i),
+         A6XX_RB_MRT_ARRAY_PITCH(i),
+         A6XX_RB_MRT_BASE(i),
+         A6XX_RB_MRT_BASE_GMEM(i),
+       );
+
+       tu_cs_emit_regs(cs,
+                       A6XX_SP_FS_MRT_REG(i, .dword = 0));
    }
 
    tu_cs_emit_regs(cs, A6XX_GRAS_LRZ_MRT_BUF_INFO_0(.color_format = mrt0_format));
@@ -599,12 +613,14 @@ tu6_emit_render_cntl<A6XX>(struct tu_cmd_buffer *cmd,
       uint32_t mrts_ubwc_enable = 0;
       for (uint32_t i = 0; i < subpass->color_count; ++i) {
          uint32_t a = subpass->color_attachments[i].attachment;
-         if (a == VK_ATTACHMENT_UNUSED)
+         unsigned remapped = cmd->vk.dynamic_graphics_state.cal.color_map[i];
+         if (a == VK_ATTACHMENT_UNUSED ||
+             remapped == MESA_VK_ATTACHMENT_UNUSED)
             continue;
 
          const struct tu_image_view *iview = cmd->state.attachments[a];
          if (iview->view.ubwc_enabled)
-            mrts_ubwc_enable |= 1 << i;
+            mrts_ubwc_enable |= 1 << remapped;
       }
 
       cntl |= A6XX_RB_RENDER_CNTL_FLAG_MRTS(mrts_ubwc_enable);
@@ -2600,6 +2616,14 @@ tu_BeginCommandBuffer(VkCommandBuffer commandBuffer,
             tu_setup_dynamic_inheritance(cmd_buffer, rendering_info);
             cmd_buffer->state.pass = &cmd_buffer->dynamic_pass;
             cmd_buffer->state.subpass = &cmd_buffer->dynamic_subpass;
+
+            const VkRenderingAttachmentLocationInfoKHR *location_info =
+               vk_find_struct_const(pBeginInfo->pInheritanceInfo->pNext,
+                                    RENDERING_ATTACHMENT_LOCATION_INFO_KHR);
+            if (location_info) {
+               vk_common_CmdSetRenderingAttachmentLocationsKHR(commandBuffer,
+                                                               location_info);
+            }
          } else {
             cmd_buffer->state.pass = tu_render_pass_from_handle(pBeginInfo->pInheritanceInfo->renderPass);
             cmd_buffer->state.subpass =
@@ -3502,7 +3526,7 @@ tu_bind_fs(struct tu_cmd_buffer *cmd, struct tu_shader *fs)
 {
    if (cmd->state.shaders[MESA_SHADER_FRAGMENT] != fs) {
       cmd->state.shaders[MESA_SHADER_FRAGMENT] = fs;
-      cmd->state.dirty |= TU_CMD_DIRTY_LRZ;
+      cmd->state.dirty |= TU_CMD_DIRTY_LRZ | TU_CMD_DIRTY_FS;
    }
 }
 
@@ -4617,8 +4641,11 @@ tu_CmdBeginRenderPass2(VkCommandBuffer commandBuffer,
       cmd->state.cache.pending_flush_bits;
    cmd->state.renderpass_cache.flush_bits = 0;
 
-   if (pass->subpasses[0].feedback_invalidate)
-      cmd->state.renderpass_cache.flush_bits |= TU_CMD_FLAG_CACHE_INVALIDATE;
+   if (pass->subpasses[0].feedback_invalidate) {
+      cmd->state.renderpass_cache.flush_bits |=
+         TU_CMD_FLAG_CACHE_INVALIDATE | TU_CMD_FLAG_BLIT_CACHE_CLEAN |
+         TU_CMD_FLAG_WAIT_FOR_IDLE;
+   }
 
    tu_lrz_begin_renderpass<CHIP>(cmd);
 
@@ -4646,6 +4673,7 @@ tu_CmdBeginRendering(VkCommandBuffer commandBuffer,
    cmd->state.subpass = &cmd->dynamic_subpass;
    cmd->state.framebuffer = &cmd->dynamic_framebuffer;
    cmd->state.render_area = pRenderingInfo->renderArea;
+   cmd->state.blit_cache_cleaned = false;
 
    cmd->state.attachments = cmd->dynamic_attachments;
    cmd->state.clear_values = cmd->dynamic_clear_values;
@@ -4708,6 +4736,12 @@ tu_CmdBeginRendering(VkCommandBuffer commandBuffer,
       VK_FROM_HANDLE(tu_image_view, view, fdm_info->imageView);
       cmd->state.attachments[a] = view;
    }
+
+   const VkRenderingAttachmentLocationInfoKHR ral_info = {
+      .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO_KHR,
+      .colorAttachmentCount = pRenderingInfo->colorAttachmentCount,
+   };
+   vk_cmd_set_rendering_attachment_locations(&cmd->vk, &ral_info);
 
    if (cmd->dynamic_pass.has_fdm)
       cmd->patchpoints_ctx = ralloc_context(NULL);
@@ -4787,6 +4821,91 @@ TU_GENX(tu_CmdBeginRendering);
 
 template <chip CHIP>
 VKAPI_ATTR void VKAPI_CALL
+tu_CmdSetRenderingAttachmentLocationsKHR(
+   VkCommandBuffer commandBuffer,
+   const VkRenderingAttachmentLocationInfoKHR *pLocationInfo)
+{
+   VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
+
+   vk_common_CmdSetRenderingAttachmentLocationsKHR(commandBuffer, pLocationInfo);
+
+   tu6_emit_mrt<CHIP>(cmd, cmd->state.subpass, &cmd->draw_cs);
+   tu6_emit_render_cntl<CHIP>(cmd, cmd->state.subpass, &cmd->draw_cs, false);
+
+   /* Because this is just a remapping and not a different "reference", there
+    * doesn't need to be a barrier between accesses to the same attachment
+    * with a different index. This is different from "classic" renderpasses.
+    * Before a7xx the CCU includes the render target ID in the cache location
+    * calculation, so we need to manually flush/invalidate color CCU here
+    * since the same render target/attachment may be in a different location.
+    */
+   if (cmd->device->physical_device->info->chip == 6) {
+      struct tu_cache_state *cache = &cmd->state.renderpass_cache;
+      tu_flush_for_access(cache, TU_ACCESS_CCU_COLOR_INCOHERENT_WRITE,
+                          TU_ACCESS_CCU_COLOR_INCOHERENT_WRITE);
+      cache->flush_bits |= TU_CMD_FLAG_WAIT_FOR_IDLE;
+   }
+}
+TU_GENX(tu_CmdSetRenderingAttachmentLocationsKHR);
+
+VKAPI_ATTR void VKAPI_CALL
+tu_CmdSetRenderingInputAttachmentIndicesKHR(
+   VkCommandBuffer commandBuffer,
+   const VkRenderingInputAttachmentIndexInfoKHR *pLocationInfo)
+{
+   VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
+
+   vk_common_CmdSetRenderingInputAttachmentIndicesKHR(commandBuffer, pLocationInfo);
+
+   const struct vk_input_attachment_location_state *ial =
+      &cmd->vk.dynamic_graphics_state.ial;
+
+   struct tu_subpass *subpass = &cmd->dynamic_subpass;
+
+   for (unsigned i = 0; i < ARRAY_SIZE(cmd->dynamic_input_attachments); i++) {
+      subpass->input_attachments[i].attachment = VK_ATTACHMENT_UNUSED;
+   }
+
+   unsigned input_count = 0;
+   for (unsigned i = 0; i < subpass->color_count; i++) {
+      if (ial->color_map[i] == MESA_VK_ATTACHMENT_UNUSED)
+         continue;
+      subpass->input_attachments[ial->color_map[i] + TU_DYN_INPUT_ATT_OFFSET].attachment =
+         subpass->color_attachments[i].attachment;
+      input_count = MAX2(input_count, ial->color_map[i] + TU_DYN_INPUT_ATT_OFFSET + 1);
+   }
+
+   if (ial->depth_att != MESA_VK_ATTACHMENT_UNUSED) {
+      if (ial->depth_att == MESA_VK_ATTACHMENT_NO_INDEX) {
+         subpass->input_attachments[0].attachment =
+            subpass->depth_stencil_attachment.attachment;
+         input_count = MAX2(input_count, 1);
+      } else {
+         subpass->input_attachments[ial->depth_att + TU_DYN_INPUT_ATT_OFFSET].attachment =
+            subpass->depth_stencil_attachment.attachment;
+         input_count = MAX2(input_count, ial->depth_att + TU_DYN_INPUT_ATT_OFFSET + 1);
+      }
+   }
+
+   if (ial->stencil_att != MESA_VK_ATTACHMENT_UNUSED) {
+      if (ial->stencil_att == MESA_VK_ATTACHMENT_NO_INDEX) {
+         subpass->input_attachments[0].attachment =
+            subpass->depth_stencil_attachment.attachment;
+         input_count = MAX2(input_count, 1);
+      } else {
+         subpass->input_attachments[ial->stencil_att + TU_DYN_INPUT_ATT_OFFSET].attachment =
+            subpass->depth_stencil_attachment.attachment;
+         input_count = MAX2(input_count, ial->stencil_att + TU_DYN_INPUT_ATT_OFFSET + 1);
+      }
+   }
+
+   subpass->input_count = input_count;
+
+   tu_set_input_attachments(cmd, cmd->state.subpass);
+}
+
+template <chip CHIP>
+VKAPI_ATTR void VKAPI_CALL
 tu_CmdNextSubpass2(VkCommandBuffer commandBuffer,
                    const VkSubpassBeginInfo *pSubpassBeginInfo,
                    const VkSubpassEndInfo *pSubpassEndInfo)
@@ -4862,8 +4981,11 @@ tu_CmdNextSubpass2(VkCommandBuffer commandBuffer,
    /* Handle dependencies for the next subpass */
    tu_subpass_barrier(cmd, &cmd->state.subpass->start_barrier, false);
 
-   if (cmd->state.subpass->feedback_invalidate)
-      cmd->state.renderpass_cache.flush_bits |= TU_CMD_FLAG_CACHE_INVALIDATE;
+   if (cmd->state.subpass->feedback_invalidate) {
+      cmd->state.renderpass_cache.flush_bits |=
+         TU_CMD_FLAG_CACHE_INVALIDATE | TU_CMD_FLAG_BLIT_CACHE_CLEAN |
+         TU_CMD_FLAG_WAIT_FOR_IDLE;
+   }
 
    tu_emit_subpass_begin<CHIP>(cmd);
 }
@@ -5186,6 +5308,18 @@ tu6_writes_stencil(struct tu_cmd_buffer *cmd)
    return cmd->state.stencil_front_write || cmd->state.stencil_back_write;
 }
 
+static bool
+tu_fs_reads_dynamic_ds_input_attachment(struct tu_cmd_buffer *cmd,
+                                        const struct tu_shader *fs)
+{
+   uint8_t depth_att = cmd->vk.dynamic_graphics_state.ial.depth_att;
+   if (depth_att == MESA_VK_ATTACHMENT_UNUSED)
+      return false;
+   unsigned depth_idx =
+      (depth_att == MESA_VK_ATTACHMENT_NO_INDEX) ? 0 : depth_att + 1;
+   return fs->fs.dynamic_input_attachments_used & (1u << depth_idx);
+}
+
 static void
 tu6_build_depth_plane_z_mode(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
 {
@@ -5200,7 +5334,8 @@ tu6_build_depth_plane_z_mode(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    if ((fs->variant->has_kill ||
         (cmd->state.pipeline_feedback_loops & VK_IMAGE_ASPECT_DEPTH_BIT) ||
         (cmd->vk.dynamic_graphics_state.feedback_loops &
-         VK_IMAGE_ASPECT_DEPTH_BIT)) &&
+         VK_IMAGE_ASPECT_DEPTH_BIT) ||
+        tu_fs_reads_dynamic_ds_input_attachment(cmd, fs)) &&
        (depth_write || stencil_write)) {
       zmode = (cmd->state.lrz.valid && cmd->state.lrz.enabled)
                  ? A6XX_EARLY_LRZ_LATE_Z
@@ -5288,15 +5423,15 @@ tu_emit_fdm_params(struct tu_cmd_buffer *cmd,
                    struct tu_cs *cs, struct tu_shader *fs,
                    unsigned num_units)
 {
-   STATIC_ASSERT(IR3_DP_FS_FRAG_INVOCATION_COUNT == IR3_DP_FS_DYNAMIC);
+   STATIC_ASSERT(IR3_DP_FS(frag_invocation_count) == IR3_DP_FS_DYNAMIC);
    tu_cs_emit(cs, fs->fs.per_samp ?
               cmd->vk.dynamic_graphics_state.ms.rasterization_samples : 1);
    tu_cs_emit(cs, 0);
    tu_cs_emit(cs, 0);
    tu_cs_emit(cs, 0);
 
-   STATIC_ASSERT(IR3_DP_FS_FRAG_SIZE == IR3_DP_FS_DYNAMIC + 4);
-   STATIC_ASSERT(IR3_DP_FS_FRAG_OFFSET == IR3_DP_FS_DYNAMIC + 6);
+   STATIC_ASSERT(IR3_DP_FS(frag_size) == IR3_DP_FS_DYNAMIC + 4);
+   STATIC_ASSERT(IR3_DP_FS(frag_offset) == IR3_DP_FS_DYNAMIC + 6);
    if (num_units > 1) {
       if (fs->fs.has_fdm) {
          struct apply_fs_params_state state = {
@@ -5420,6 +5555,26 @@ tu_emit_fs_params(struct tu_cmd_buffer *cmd)
       tu6_emit_fs_params(cmd);
 }
 
+static void
+tu_flush_dynamic_input_attachments(struct tu_cmd_buffer *cmd)
+{
+   struct tu_shader *fs = cmd->state.shaders[MESA_SHADER_FRAGMENT];
+
+   if (!fs->fs.dynamic_input_attachments_used)
+      return;
+
+   /* Input attachments may read data from a load op, so we have to invalidate
+    * UCHE and force pending blits to complete unless we know it's already
+    * been invalidated. This is the same as tu_subpass::feedback_invalidate
+    * but for dynamic renderpasses.
+    */
+   if (!cmd->state.blit_cache_cleaned) {
+      cmd->state.renderpass_cache.flush_bits |=
+         TU_CMD_FLAG_CACHE_INVALIDATE | TU_CMD_FLAG_BLIT_CACHE_CLEAN |
+         TU_CMD_FLAG_WAIT_FOR_IDLE;
+   }
+}
+
 template <chip CHIP>
 static VkResult
 tu6_draw_common(struct tu_cmd_buffer *cmd,
@@ -5465,6 +5620,9 @@ tu6_draw_common(struct tu_cmd_buffer *cmd,
       cmd->state.bandwidth.stencil_cpp_per_sample;
    if (cmd->vk.dynamic_graphics_state.ds.stencil.test_enable)
       rp->drawcall_bandwidth_per_sample_sum += stencil_bandwidth * 2;
+
+   if (cmd->state.dirty & TU_CMD_DIRTY_FS)
+      tu_flush_dynamic_input_attachments(cmd);
 
    tu_emit_cache_flush_renderpass<CHIP>(cmd);
 
@@ -5727,9 +5885,9 @@ vs_params_offset(struct tu_cmd_buffer *cmd)
       return 0;
 
    /* this layout is required by CP_DRAW_INDIRECT_MULTI */
-   STATIC_ASSERT(IR3_DP_DRAWID == 0);
-   STATIC_ASSERT(IR3_DP_VTXID_BASE == 1);
-   STATIC_ASSERT(IR3_DP_INSTID_BASE == 2);
+   STATIC_ASSERT(IR3_DP_VS(draw_id) == 0);
+   STATIC_ASSERT(IR3_DP_VS(vtxid_base) == 1);
+   STATIC_ASSERT(IR3_DP_VS(instid_base) == 2);
 
    /* 0 means disabled for CP_DRAW_INDIRECT_MULTI */
    assert(const_state->offsets.driver_param != 0);
@@ -6175,6 +6333,29 @@ struct tu_dispatch_info
    uint64_t indirect_offset;
 };
 
+static inline struct ir3_driver_params_cs
+build_driver_params_cs(const struct ir3_shader_variant *variant,
+                       const struct tu_dispatch_info *info)
+{
+   unsigned subgroup_size = variant->info.subgroup_size;
+   unsigned subgroup_shift = util_logbase2(subgroup_size);
+
+   return (struct ir3_driver_params_cs) {
+      .num_work_groups_x = info->blocks[0],
+      .num_work_groups_y = info->blocks[1],
+      .num_work_groups_z = info->blocks[2],
+      .work_dim = 0,
+      .base_group_x = info->offsets[0],
+      .base_group_y = info->offsets[1],
+      .base_group_z = info->offsets[2],
+      .subgroup_size = subgroup_size,
+      .local_group_size_x = 0,
+      .local_group_size_y = 0,
+      .local_group_size_z = 0,
+      .subgroup_id_shift = subgroup_shift,
+   };
+}
+
 template <chip CHIP>
 static void
 tu_emit_compute_driver_params(struct tu_cmd_buffer *cmd,
@@ -6195,27 +6376,15 @@ tu_emit_compute_driver_params(struct tu_cmd_buffer *cmd,
 
       bool direct_indirect_load =
          !(info->indirect_offset & 0xf) &&
-         !(info->indirect && num_consts > IR3_DP_BASE_GROUP_X);
+         !(info->indirect && num_consts > IR3_DP_CS(base_group_x));
 
       uint64_t iova = 0;
 
       if (!info->indirect) {
-         uint32_t driver_params[12] = {
-            [IR3_DP_NUM_WORK_GROUPS_X] = info->blocks[0],
-            [IR3_DP_NUM_WORK_GROUPS_Y] = info->blocks[1],
-            [IR3_DP_NUM_WORK_GROUPS_Z] = info->blocks[2],
-            [IR3_DP_WORK_DIM] = 0,
-            [IR3_DP_BASE_GROUP_X] = info->offsets[0],
-            [IR3_DP_BASE_GROUP_Y] = info->offsets[1],
-            [IR3_DP_BASE_GROUP_Z] = info->offsets[2],
-            [IR3_DP_CS_SUBGROUP_SIZE] = subgroup_size,
-            [IR3_DP_LOCAL_GROUP_SIZE_X] = 0,
-            [IR3_DP_LOCAL_GROUP_SIZE_Y] = 0,
-            [IR3_DP_LOCAL_GROUP_SIZE_Z] = 0,
-            [IR3_DP_SUBGROUP_ID_SHIFT] = subgroup_shift,
-         };
+         struct ir3_driver_params_cs driver_params =
+            build_driver_params_cs(variant, info);
 
-         assert(num_consts <= ARRAY_SIZE(driver_params));
+         assert(num_consts <= dword_sizeof(driver_params));
 
          struct tu_cs_memory consts;
          uint32_t consts_vec4 = DIV_ROUND_UP(num_consts, 4);
@@ -6224,7 +6393,7 @@ tu_emit_compute_driver_params(struct tu_cmd_buffer *cmd,
             vk_command_buffer_set_error(&cmd->vk, result);
             return;
          }
-         memcpy(consts.map, driver_params, num_consts * sizeof(uint32_t));
+         memcpy(consts.map, &driver_params, num_consts * sizeof(uint32_t));
          iova = consts.iova;
       } else if (direct_indirect_load) {
          iova = info->indirect->iova + info->indirect_offset;
@@ -6248,12 +6417,12 @@ tu_emit_compute_driver_params(struct tu_cmd_buffer *cmd,
          /* Fill out IR3_DP_CS_SUBGROUP_SIZE and IR3_DP_SUBGROUP_ID_SHIFT for
           * indirect dispatch.
           */
-         if (info->indirect && num_consts > IR3_DP_BASE_GROUP_X) {
+         if (info->indirect && num_consts > IR3_DP_CS(base_group_x)) {
             uint32_t indirect_driver_params[8] = {
                0, 0, 0, subgroup_size,
                0, 0, 0, subgroup_shift,
             };
-            bool emit_local = num_consts > IR3_DP_LOCAL_GROUP_SIZE_X;
+            bool emit_local = num_consts > IR3_DP_CS(local_group_size_x);
             uint32_t emit_size = emit_local ? 8 : 4;
 
             tu_cs_emit_pkt7(cs, CP_MEM_WRITE, 2 + emit_size);
@@ -6290,22 +6459,10 @@ tu_emit_compute_driver_params(struct tu_cmd_buffer *cmd,
                                  (variant->constlen - offset) * 4);
 
       if (!info->indirect) {
-         uint32_t driver_params[12] = {
-            [IR3_DP_NUM_WORK_GROUPS_X] = info->blocks[0],
-            [IR3_DP_NUM_WORK_GROUPS_Y] = info->blocks[1],
-            [IR3_DP_NUM_WORK_GROUPS_Z] = info->blocks[2],
-            [IR3_DP_WORK_DIM] = 0,
-            [IR3_DP_BASE_GROUP_X] = info->offsets[0],
-            [IR3_DP_BASE_GROUP_Y] = info->offsets[1],
-            [IR3_DP_BASE_GROUP_Z] = info->offsets[2],
-            [IR3_DP_CS_SUBGROUP_SIZE] = subgroup_size,
-            [IR3_DP_LOCAL_GROUP_SIZE_X] = 0,
-            [IR3_DP_LOCAL_GROUP_SIZE_Y] = 0,
-            [IR3_DP_LOCAL_GROUP_SIZE_Z] = 0,
-            [IR3_DP_SUBGROUP_ID_SHIFT] = subgroup_shift,
-         };
+         struct ir3_driver_params_cs driver_params =
+            build_driver_params_cs(variant, info);
 
-         assert(num_consts <= ARRAY_SIZE(driver_params));
+         assert(num_consts <= dword_sizeof(driver_params));
 
          /* push constants */
          tu_cs_emit_pkt7(cs, tu6_stage2opcode(type), 3 + num_consts);
@@ -6316,9 +6473,7 @@ tu_emit_compute_driver_params(struct tu_cmd_buffer *cmd,
                   CP_LOAD_STATE6_0_NUM_UNIT(num_consts / 4));
          tu_cs_emit(cs, 0);
          tu_cs_emit(cs, 0);
-         uint32_t i;
-         for (i = 0; i < num_consts; i++)
-            tu_cs_emit(cs, driver_params[i]);
+         tu_cs_emit_array(cs, (uint32_t *)&driver_params, num_consts);
       } else if (!(info->indirect_offset & 0xf)) {
          tu_cs_emit_pkt7(cs, tu6_stage2opcode(type), 3);
          tu_cs_emit(cs, CP_LOAD_STATE6_0_DST_OFF(offset) |
@@ -6360,21 +6515,21 @@ tu_emit_compute_driver_params(struct tu_cmd_buffer *cmd,
       /* Fill out IR3_DP_CS_SUBGROUP_SIZE and IR3_DP_SUBGROUP_ID_SHIFT for
        * indirect dispatch.
        */
-      if (info->indirect && num_consts > IR3_DP_BASE_GROUP_X) {
-         bool emit_local = num_consts > IR3_DP_LOCAL_GROUP_SIZE_X;
+      if (info->indirect && num_consts > IR3_DP_CS(base_group_x)) {
+         bool emit_local = num_consts > IR3_DP_CS(local_group_size_x);
          tu_cs_emit_pkt7(cs, tu6_stage2opcode(type), 7 + (emit_local ? 4 : 0));
-         tu_cs_emit(cs, CP_LOAD_STATE6_0_DST_OFF(offset + (IR3_DP_BASE_GROUP_X / 4)) |
+         tu_cs_emit(cs, CP_LOAD_STATE6_0_DST_OFF(offset + (IR3_DP_CS(base_group_x) / 4)) |
                   CP_LOAD_STATE6_0_STATE_TYPE(ST6_CONSTANTS) |
                   CP_LOAD_STATE6_0_STATE_SRC(SS6_DIRECT) |
                   CP_LOAD_STATE6_0_STATE_BLOCK(tu6_stage2shadersb(type)) |
-                  CP_LOAD_STATE6_0_NUM_UNIT((num_consts - IR3_DP_BASE_GROUP_X) / 4));
+                  CP_LOAD_STATE6_0_NUM_UNIT((num_consts - IR3_DP_CS(base_group_x)) / 4));
          tu_cs_emit_qw(cs, 0);
          tu_cs_emit(cs, 0); /* BASE_GROUP_X */
          tu_cs_emit(cs, 0); /* BASE_GROUP_Y */
          tu_cs_emit(cs, 0); /* BASE_GROUP_Z */
          tu_cs_emit(cs, subgroup_size);
          if (emit_local) {
-            assert(num_consts == align(IR3_DP_SUBGROUP_ID_SHIFT, 4));
+            assert(num_consts == align(IR3_DP_CS(subgroup_id_shift), 4));
             tu_cs_emit(cs, 0); /* LOCAL_GROUP_SIZE_X */
             tu_cs_emit(cs, 0); /* LOCAL_GROUP_SIZE_Y */
             tu_cs_emit(cs, 0); /* LOCAL_GROUP_SIZE_Z */

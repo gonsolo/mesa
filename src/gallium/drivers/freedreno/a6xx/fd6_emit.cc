@@ -679,16 +679,16 @@ fd6_emit_3d_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
          fd6_state_take_group(&emit->state, state, FD6_GROUP_FS_BINDLESS);
          break;
       case FD6_GROUP_CONST:
-         state = fd6_build_user_consts<PIPELINE>(emit);
+         state = fd6_build_user_consts<CHIP, PIPELINE>(emit);
          fd6_state_take_group(&emit->state, state, FD6_GROUP_CONST);
          break;
       case FD6_GROUP_DRIVER_PARAMS:
-         state = fd6_build_driver_params<PIPELINE>(emit);
+         state = fd6_build_driver_params<CHIP, PIPELINE>(emit);
          fd6_state_take_group(&emit->state, state, FD6_GROUP_DRIVER_PARAMS);
          break;
       case FD6_GROUP_PRIMITIVE_PARAMS:
          if (PIPELINE == HAS_TESS_GS) {
-            state = fd6_build_tess_consts(emit);
+            state = fd6_build_tess_consts<CHIP>(emit);
             fd6_state_take_group(&emit->state, state, FD6_GROUP_PRIMITIVE_PARAMS);
          }
          break;
@@ -928,8 +928,6 @@ fd6_emit_static_regs(struct fd_context *ctx, struct fd_ringbuffer *ring)
          .shared_consts_enable = false,
       )
    );
-   WRITE(REG_A6XX_SP_MODE_CONTROL,
-         A6XX_SP_MODE_CONTROL_CONSTANT_DEMOTION_ENABLE | 4);
    WRITE(REG_A6XX_VFD_ADD_OFFSET, A6XX_VFD_ADD_OFFSET_VERTEX);
    WRITE(REG_A6XX_VPC_UNKNOWN_9107, 0);
    WRITE(REG_A6XX_RB_UNKNOWN_8811, 0x00000010);
@@ -958,6 +956,9 @@ fd6_emit_static_regs(struct fd_context *ctx, struct fd_ringbuffer *ring)
    WRITE(REG_A6XX_VPC_SO_DISABLE, A6XX_VPC_SO_DISABLE(true).value);
 
    OUT_REG(ring, PC_RASTER_CNTL(CHIP));
+
+   if (CHIP == A7XX)
+      OUT_REG(ring, A7XX_PC_RASTER_CNTL_V2());
 
    WRITE(REG_A6XX_PC_MULTIVIEW_CNTL, 0);
 

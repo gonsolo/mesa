@@ -129,7 +129,9 @@ ir3_shader_assemble(struct ir3_shader_variant *v)
     */
    v->constlen = MAX2(v->constlen, info->max_const + 1);
 
-   if (v->constlen > ir3_const_state(v)->offsets.driver_param)
+   const struct ir3_const_state *const_state = ir3_const_state(v);
+   if ((v->constlen > const_state->offsets.driver_param) ||
+       (const_state->driver_params_ubo.idx >= 0))
       v->need_driver_params = true;
 
    /* On a4xx and newer, constlen must be a multiple of 16 dwords even though
@@ -397,6 +399,9 @@ create_variant(struct ir3_shader *shader, const struct ir3_shader_key *key,
       v->cs.force_linear_dispatch = shader->cs.force_linear_dispatch;
    }
 
+   struct ir3_const_state *const_state = ir3_const_state_mut(v);
+   const_state->num_app_ubos = MAX2(1, shader->nir->info.num_ubos);
+
    if (!compile_variant(shader, v))
       goto fail;
 
@@ -493,9 +498,9 @@ ir3_shader_passthrough_tcs(struct ir3_shader *vs, unsigned patch_vertices)
 
       nir_shader_gather_info(tcs, nir_shader_get_entrypoint(tcs));
 
-      ir3_finalize_nir(vs->compiler, tcs);
-
       struct ir3_shader_options ir3_options = {};
+
+      ir3_finalize_nir(vs->compiler, &ir3_options.nir_options, tcs);
 
       vs->vs.passthrough_tcs[n] =
             ir3_shader_from_nir(vs->compiler, tcs, &ir3_options, NULL);

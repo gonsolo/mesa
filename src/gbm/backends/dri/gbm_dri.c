@@ -73,7 +73,7 @@ dri_validate_egl_image(void *image, void *data)
    return dri->validate_image(image, dri->lookup_user_data);
 }
 
-static __DRIimage *
+static struct dri_image *
 dri_lookup_egl_image_validated(void *image, void *data)
 {
    struct gbm_dri_device *dri = data;
@@ -85,7 +85,7 @@ dri_lookup_egl_image_validated(void *image, void *data)
 }
 
 static void
-dri_flush_front_buffer(__DRIdrawable * driDrawable, void *data)
+dri_flush_front_buffer(struct dri_drawable * driDrawable, void *data)
 {
    struct gbm_dri_surface *surf = data;
    struct gbm_dri_device *dri = gbm_dri_device(surf->base.gbm);
@@ -109,7 +109,7 @@ dri_get_capability(void *loaderPrivate, enum dri_loader_cap cap)
 }
 
 static int
-image_get_buffers(__DRIdrawable *driDrawable,
+image_get_buffers(struct dri_drawable *driDrawable,
                   unsigned int format,
                   uint32_t *stamp,
                   void *loaderPrivate,
@@ -127,7 +127,7 @@ image_get_buffers(__DRIdrawable *driDrawable,
 }
 
 static void
-swrast_get_drawable_info(__DRIdrawable *driDrawable,
+swrast_get_drawable_info(struct dri_drawable *driDrawable,
                          int           *x,
                          int           *y,
                          int           *width,
@@ -143,7 +143,7 @@ swrast_get_drawable_info(__DRIdrawable *driDrawable,
 }
 
 static void
-swrast_put_image2(__DRIdrawable *driDrawable,
+swrast_put_image2(struct dri_drawable *driDrawable,
                   int            op,
                   int            x,
                   int            y,
@@ -163,7 +163,7 @@ swrast_put_image2(__DRIdrawable *driDrawable,
 }
 
 static void
-swrast_put_image(__DRIdrawable *driDrawable,
+swrast_put_image(struct dri_drawable *driDrawable,
                  int            op,
                  int            x,
                  int            y,
@@ -177,7 +177,7 @@ swrast_put_image(__DRIdrawable *driDrawable,
 }
 
 static void
-swrast_get_image(__DRIdrawable *driDrawable,
+swrast_get_image(struct dri_drawable *driDrawable,
                  int            x,
                  int            y,
                  int            width,
@@ -426,7 +426,7 @@ gbm_dri_bo_get_fd(struct gbm_bo *_bo)
 }
 
 static int
-get_number_planes(struct gbm_dri_device *dri, __DRIimage *image)
+get_number_planes(struct gbm_dri_device *dri, struct dri_image *image)
 {
    int num_planes = 0;
 
@@ -471,7 +471,7 @@ gbm_dri_bo_get_handle_for_plane(struct gbm_bo *_bo, int plane)
       return ret;
    }
 
-   __DRIimage *image = dri2_from_planar(bo->image, plane, NULL);
+   struct dri_image *image = dri2_from_planar(bo->image, plane, NULL);
    if (image) {
       dri2_query_image(image, __DRI_IMAGE_ATTRIB_HANDLE, &ret.s32);
       dri2_destroy_image(image);
@@ -510,7 +510,7 @@ gbm_dri_bo_get_plane_fd(struct gbm_bo *_bo, int plane)
       return -1;
    }
 
-   __DRIimage *image = dri2_from_planar(bo->image, plane, NULL);
+   struct dri_image *image = dri2_from_planar(bo->image, plane, NULL);
    if (image) {
       dri2_query_image(image, __DRI_IMAGE_ATTRIB_FD, &fd);
       dri2_destroy_image(image);
@@ -527,7 +527,7 @@ gbm_dri_bo_get_stride(struct gbm_bo *_bo, int plane)
 {
    struct gbm_dri_device *dri = gbm_dri_device(_bo->gbm);
    struct gbm_dri_bo *bo = gbm_dri_bo(_bo);
-   __DRIimage *image;
+   struct dri_image *image;
    int stride = 0;
 
    if (!dri->has_dmabuf_import) {
@@ -577,7 +577,7 @@ gbm_dri_bo_get_offset(struct gbm_bo *_bo, int plane)
       return 0;
    }
 
-   __DRIimage *image = dri2_from_planar(bo->image, plane, NULL);
+   struct dri_image *image = dri2_from_planar(bo->image, plane, NULL);
    if (image) {
       dri2_query_image(image, __DRI_IMAGE_ATTRIB_OFFSET, &offset);
       dri2_destroy_image(image);
@@ -640,7 +640,7 @@ gbm_dri_bo_import(struct gbm_device *gbm,
 {
    struct gbm_dri_device *dri = gbm_dri_device(gbm);
    struct gbm_dri_bo *bo;
-   __DRIimage *image;
+   struct dri_image *image;
    unsigned dri_use = 0;
    int gbm_format;
 
@@ -1149,7 +1149,7 @@ dri_destroy(struct gbm_device *gbm)
 
    driDestroyScreen(dri->screen);
    for (i = 0; dri->driver_configs[i]; i++)
-      free((__DRIconfig *) dri->driver_configs[i]);
+      free((struct dri_config *) dri->driver_configs[i]);
    free(dri->driver_configs);
    free(dri->driver_name);
 
@@ -1208,7 +1208,7 @@ dri_device_create(int fd, uint32_t gbm_backend_version)
    if (ret)
       goto err_dri;
 
-   struct dri_screen *screen = dri_screen(dri->screen);
+   struct dri_screen *screen = dri->screen;
    struct pipe_screen *pscreen = screen->base.screen;
 #ifdef HAVE_LIBDRM
    if (pscreen->get_param(pscreen, PIPE_CAP_DMABUF) & DRM_PRIME_CAP_IMPORT)

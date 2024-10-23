@@ -233,6 +233,7 @@ enum brw_reg_type brw_type_for_nir_type(const struct intel_device_info *devinfo,
 bool brw_nir_should_vectorize_mem(unsigned align_mul, unsigned align_offset,
                                   unsigned bit_size,
                                   unsigned num_components,
+                                  unsigned hole_size,
                                   nir_intrinsic_instr *low,
                                   nir_intrinsic_instr *high,
                                   void *data);
@@ -289,8 +290,7 @@ brw_nir_no_indirect_mask(const struct brw_compiler *compiler,
    return indirect_mask;
 }
 
-void
-brw_nir_printf(nir_builder *b, const char *fmt, ...);
+bool brw_nir_uses_inline_data(nir_shader *shader);
 
 #ifdef __cplusplus
 }

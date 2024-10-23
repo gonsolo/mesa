@@ -493,6 +493,7 @@ if with_platform_android and get_option('platform-sdk-version') >= 29
   # ELF TLS, even when building targeting newer API levels.  Make it actually do
   # ELF TLS instead.
   c_cpp_args += '-fno-emulated-tls'
+  add_project_link_arguments('-Wl,-plugin-opt=-emulated-tls=0', language: ['c', 'cpp'])
 endif
 
 # -mtls-dialect=gnu2 speeds up non-initial-exec TLS significantly but requires
@@ -864,6 +865,7 @@ if with_platform_android
     dep_android = [
       dependency('cutils'),
       dependency('hardware'),
+      dependency('log'),
       dependency('sync'),
     ]
     if with_libbacktrace
@@ -1980,12 +1982,6 @@ else
 
   prog_flex = find_program('flex', required : needs_flex_bison, disabler : true)
   prog_flex_cpp = prog_flex
-endif
-
-dep_selinux = null_dep
-if get_option('selinux')
-  dep_selinux = dependency('libselinux')
-  pre_args += '-DMESA_SELINUX'
 endif
 
 _libunwind = get_option('libunwind') \

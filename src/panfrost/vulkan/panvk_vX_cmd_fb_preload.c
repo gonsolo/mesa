@@ -173,6 +173,7 @@ get_preload_shader(struct panvk_device *dev,
    struct panfrost_compile_inputs inputs = {
       .gpu_id = phys_dev->kmod.props.gpu_prod_id,
       .no_ubo_to_push = true,
+      .is_blit = true,
    };
 
    pan_shader_preprocess(nir, inputs.gpu_id);
@@ -456,7 +457,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
 #if PAN_ARCH >= 6
       /* Until we decide to support FB CRC, we can consider that untouched tiles
        * should never be written back. */
-      cfg.clean_fragment_write = false;
+      cfg.clean_fragment_write = true;
 #endif
    }
 
@@ -579,15 +580,20 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
    if (!zsd.cpu)
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 
+   bool preload_z =
+      key->aspects != VK_IMAGE_ASPECT_COLOR_BIT && fbinfo->zs.preload.z;
+   bool preload_s =
+      key->aspects != VK_IMAGE_ASPECT_COLOR_BIT && fbinfo->zs.preload.s;
+
    pan_pack(zsd.cpu, DEPTH_STENCIL, cfg) {
       cfg.depth_function = MALI_FUNC_ALWAYS;
-      cfg.depth_write_enable = fbinfo->zs.preload.z;
+      cfg.depth_write_enable = preload_z;
 
-      if (fbinfo->zs.preload.z)
+      if (preload_z)
          cfg.depth_source = MALI_DEPTH_SOURCE_SHADER;
 
-      cfg.stencil_test_enable = fbinfo->zs.preload.s;
-      cfg.stencil_from_shader = fbinfo->zs.preload.s;
+      cfg.stencil_test_enable = preload_s;
+      cfg.stencil_from_shader = preload_s;
 
       cfg.front_compare_function = MALI_FUNC_ALWAYS;
       cfg.front_stencil_fail = MALI_STENCIL_OP_REPLACE;
@@ -621,7 +627,8 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
 
          cfg.blend = bds.gpu;
          cfg.blend_count = bd_count;
-         cfg.render_target_mask = cmdbuf->state.gfx.render.bound_attachments;
+         cfg.render_target_mask = cmdbuf->state.gfx.render.bound_attachments &
+                                  MESA_VK_RP_ATTACHMENT_ANY_COLOR_BITS;
       } else {
          /* ZS_EMIT requires late update/kill */
          cfg.zs_update_operation = MALI_PIXEL_KILL_FORCE_LATE;
@@ -637,7 +644,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
       cfg.multisample_enable = key->samples > 1;
       cfg.evaluate_per_sample = key->samples > 1;
       cfg.maximum_z = 1.0;
-      cfg.clean_fragment_write = false;
+      cfg.clean_fragment_write = true;
       cfg.shader.resources = res_table.gpu | 1;
       cfg.shader.shader = panvk_priv_mem_dev_addr(shader->spd);
       cfg.shader.thread_storage = cmdbuf->state.gfx.tsd;

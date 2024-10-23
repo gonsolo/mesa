@@ -191,6 +191,7 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
       .EXT_custom_border_color = true,
       .EXT_depth_bias_control = true,
       .EXT_depth_clamp_control = true,
+      .EXT_depth_clamp_zero_one = true,
       .EXT_depth_clip_control = true,
       .EXT_depth_clip_enable = true,
       .EXT_depth_range_unrestricted = info->cls_eng3d >= VOLTA_A,
@@ -460,6 +461,9 @@ nvk_get_device_features(const struct nv_device_info *info,
       /* VK_KHR_shader_quad_control */
       .shaderQuadControl = nvk_use_nak(info),
 
+      /* VK_KHR_shader_relaxed_extended_instruction */
+      .shaderRelaxedExtendedInstruction = true,
+
       /* VK_KHR_shader_clock */
       .shaderSubgroupClock = true,
       .shaderDeviceClock = true,
@@ -476,6 +480,9 @@ nvk_get_device_features(const struct nv_device_info *info,
       /* VK_KHR_shader_subgroup_rotate */
       .shaderSubgroupRotate = nvk_use_nak(info),
       .shaderSubgroupRotateClustered = nvk_use_nak(info),
+
+      /* VK_KHR_shader_subgroup_uniform_control_flow */
+      .shaderSubgroupUniformControlFlow = nvk_use_nak(info),
 
       /* VK_KHR_vertex_attribute_divisor */
       .vertexAttributeInstanceRateDivisor = true,
@@ -520,6 +527,9 @@ nvk_get_device_features(const struct nv_device_info *info,
 
       /* VK_EXT_depth_clamp_control */
       .depthClampControl = true,
+
+      /* VK_EXT_depth_clamp_zero_one */
+      .depthClampZeroOne = true,
 
       /* VK_EXT_depth_clip_control */
       .depthClipControl = true,
@@ -660,9 +670,6 @@ nvk_get_device_features(const struct nv_device_info *info,
       /* VK_EXT_shader_replicated_composites */
       .shaderReplicatedComposites = true,
 
-      /* VK_KHR_shader_subgroup_uniform_control_flow */
-      .shaderSubgroupUniformControlFlow = nvk_use_nak(info),
-
       /* VK_EXT_texel_buffer_alignment */
       .texelBufferAlignment = true,
 
@@ -681,9 +688,6 @@ nvk_get_device_features(const struct nv_device_info *info,
 
       /* VK_NV_shader_sm_builtins */
       .shaderSMBuiltins = true,
-
-      /* VK_KHR_shader_relaxed_extended_instruction */
-      .shaderRelaxedExtendedInstruction = true,
    };
 }
 

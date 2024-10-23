@@ -2091,6 +2091,7 @@ emit_binding_table(struct anv_cmd_buffer *cmd_buffer,
             cmd_buffer->state.gfx.color_output_mapping[binding->index] :
             binding->index;
          if (index < cmd_buffer->state.gfx.color_att_count) {
+            assert(index < MAX_RTS);
             const struct anv_attachment *att =
                &cmd_buffer->state.gfx.color_att[index];
             surface_state = att->surface_state.state;
@@ -2100,29 +2101,6 @@ emit_binding_table(struct anv_cmd_buffer *cmd_buffer,
          assert(surface_state.map);
          bt_map[s] = surface_state.offset + state_offset;
          break;
-
-      case ANV_DESCRIPTOR_SET_NUM_WORK_GROUPS: {
-         /* This is always the first binding for compute shaders */
-         assert(shader->stage == MESA_SHADER_COMPUTE && s == 0);
-
-         struct anv_state surface_state =
-            anv_cmd_buffer_alloc_surface_states(cmd_buffer, 1);
-         if (surface_state.map == NULL)
-            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-
-         const enum isl_format format =
-            anv_isl_format_for_descriptor_type(cmd_buffer->device,
-                                               VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-         anv_fill_buffer_surface_state(cmd_buffer->device, surface_state.map,
-                                       format, ISL_SWIZZLE_IDENTITY,
-                                       ISL_SURF_USAGE_CONSTANT_BUFFER_BIT,
-                                       cmd_buffer->state.compute.num_workgroups,
-                                       12, 1);
-
-         assert(surface_state.map);
-         bt_map[s] = surface_state.offset + state_offset;
-         break;
-      }
 
       case ANV_DESCRIPTOR_SET_DESCRIPTORS: {
          struct anv_descriptor_set *set =
@@ -4237,6 +4215,8 @@ cmd_buffer_barrier(struct anv_cmd_buffer *cmd_buffer,
    VkAccessFlags2 src_flags = 0;
    VkAccessFlags2 dst_flags = 0;
 
+   VkPipelineStageFlags2 src_stages = 0;
+
 #if GFX_VER < 20
    bool apply_sparse_flushes = false;
    struct anv_device *device = cmd_buffer->device;
@@ -4249,6 +4229,8 @@ cmd_buffer_barrier(struct anv_cmd_buffer *cmd_buffer,
       for (uint32_t i = 0; i < dep_info->memoryBarrierCount; i++) {
          src_flags |= dep_info->pMemoryBarriers[i].srcAccessMask;
          dst_flags |= dep_info->pMemoryBarriers[i].dstAccessMask;
+
+         src_stages |= dep_info->pMemoryBarriers[i].srcStageMask;
 
          /* Shader writes to buffers that could then be written by a transfer
           * command (including queries).
@@ -4282,6 +4264,8 @@ cmd_buffer_barrier(struct anv_cmd_buffer *cmd_buffer,
          src_flags |= buf_barrier->srcAccessMask;
          dst_flags |= buf_barrier->dstAccessMask;
 
+         src_stages |= buf_barrier->srcStageMask;
+
          /* Shader writes to buffers that could then be written by a transfer
           * command (including queries).
           */
@@ -4311,6 +4295,8 @@ cmd_buffer_barrier(struct anv_cmd_buffer *cmd_buffer,
 
          src_flags |= img_barrier->srcAccessMask;
          dst_flags |= img_barrier->dstAccessMask;
+
+         src_stages |= img_barrier->srcStageMask;
 
          ANV_FROM_HANDLE(anv_image, image, img_barrier->image);
          const VkImageSubresourceRange *range = &img_barrier->subresourceRange;
@@ -4419,13 +4405,82 @@ cmd_buffer_barrier(struct anv_cmd_buffer *cmd_buffer,
       anv_pipe_flush_bits_for_access_flags(cmd_buffer, src_flags) |
       anv_pipe_invalidate_bits_for_access_flags(cmd_buffer, dst_flags);
 
+   /* What stage require a stall at pixel scoreboard */
+   VkPipelineStageFlags2 pb_stall_stages =
+      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+      VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+      VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT |
+      VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
+      VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+   if (anv_cmd_buffer_is_render_queue(cmd_buffer)) {
+      /* On a render queue, the following stages can also use a pixel shader.
+       */
+      pb_stall_stages |=
+         VK_PIPELINE_STAGE_2_TRANSFER_BIT |
+         VK_PIPELINE_STAGE_2_RESOLVE_BIT |
+         VK_PIPELINE_STAGE_2_BLIT_BIT |
+         VK_PIPELINE_STAGE_2_CLEAR_BIT;
+   }
+   VkPipelineStageFlags2 cs_stall_stages =
+      VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT |
+      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+      VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+      VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR |
+      VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+   if (anv_cmd_buffer_is_compute_queue(cmd_buffer)) {
+      /* On a compute queue, the following stages can also use a compute
+       * shader.
+       */
+      cs_stall_stages |=
+         VK_PIPELINE_STAGE_2_TRANSFER_BIT |
+         VK_PIPELINE_STAGE_2_RESOLVE_BIT |
+         VK_PIPELINE_STAGE_2_BLIT_BIT |
+         VK_PIPELINE_STAGE_2_CLEAR_BIT;
+   } else if (anv_cmd_buffer_is_render_queue(cmd_buffer) &&
+              cmd_buffer->state.current_pipeline == GPGPU) {
+      /* In GPGPU mode, the render queue can also use a compute shader for
+       * transfer operations.
+       */
+      cs_stall_stages |= VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+   }
+
+   /* Prior to Gfx20, we can restrict pb-stall/cs-stall to some pipeline
+    * modes. Gfx20 doesn't do pipeline switches so we have to assume the worse
+    * case.
+    */
+   const bool needs_pb_stall =
+      anv_cmd_buffer_is_render_queue(cmd_buffer) &&
 #if GFX_VER < 20
-   /* Our HW implementation of the sparse feature lives in the GAM unit
-    * (interface between all the GPU caches and external memory). As a result
-    * writes to NULL bound images & buffers that should be ignored are
-    * actually still visible in the caches. The only way for us to get correct
-    * NULL bound regions to return 0s is to evict the caches to force the
-    * caches to be repopulated with 0s.
+      cmd_buffer->state.current_pipeline == _3D &&
+#endif
+      (src_stages & pb_stall_stages);
+   if (needs_pb_stall) {
+      bits |= GFX_VERx10 >= 125 ?
+              ANV_PIPE_PSS_STALL_SYNC_BIT :
+              ANV_PIPE_STALL_AT_SCOREBOARD_BIT;
+   }
+   const bool needs_cs_stall =
+      anv_cmd_buffer_is_render_or_compute_queue(cmd_buffer) &&
+#if GFX_VER < 20
+      cmd_buffer->state.current_pipeline == GPGPU &&
+#endif
+      (src_stages & cs_stall_stages);
+   if (needs_cs_stall)
+      bits |= ANV_PIPE_CS_STALL_BIT;
+
+#if GFX_VER < 20
+   /* Our HW implementation of the sparse feature prior to Xe2 lives in the
+    * GAM unit (interface between all the GPU caches and external memory).
+    * As a result writes to NULL bound images & buffers that should be
+    * ignored are actually still visible in the caches. The only way for us
+    * to get correct NULL bound regions to return 0s is to evict the caches
+    * to force the caches to be repopulated with 0s.
+    *
+    * Our understanding is that Xe2 started to tag the L3 cache with some
+    * kind physical address information rather. It is therefore able to
+    * detect that a cache line in the cache is going to a null tile and so
+    * the L3 cache also has a sparse compatible behavior and we don't need
+    * to flush anymore.
     */
    if (apply_sparse_flushes)
       bits |= ANV_PIPE_FLUSH_BITS;
@@ -4689,6 +4744,20 @@ genX(flush_pipeline_select)(struct anv_cmd_buffer *cmd_buffer,
          scec1.GLKBarrierModeMask = 1;
       }
    }
+#endif
+
+#if GFX_VER == 9
+   /* Undocumented workaround, we need to reemit MEDIA_CURBE_LOAD on Gfx9 when
+    * switching from 3D->GPGPU, otherwise the shader gets corrupted push
+    * constants. Note that this doesn't trigger a push constant reallocation,
+    * we just reprogram the same pointer.
+    *
+    * The issue reproduces pretty much 100% on
+    * dEQP-VK.memory_model.transitive.* tests. Reducing the number of
+    * iteration in the test from 50 to < 10 makes the tests flaky.
+    */
+   if (pipeline == GPGPU)
+      cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_COMPUTE_BIT;
 #endif
 #endif /* else of if GFX_VER >= 20 */
    cmd_buffer->state.current_pipeline = pipeline;
@@ -5682,13 +5751,13 @@ void genX(CmdEndRendering)(
 
    if (!(gfx->rendering_flags & VK_RENDERING_SUSPENDING_BIT)) {
       bool has_color_resolve = false;
-      bool has_sparse_color_resolve = false;
+      UNUSED bool has_sparse_color_resolve = false;
 
       for (uint32_t i = 0; i < gfx->color_att_count; i++) {
          if (gfx->color_att[i].resolve_mode != VK_RESOLVE_MODE_NONE) {
             has_color_resolve = true;
-            if (anv_image_is_sparse(gfx->color_att[i].iview->image))
-                  has_sparse_color_resolve = true;
+            has_sparse_color_resolve |=
+               anv_image_is_sparse(gfx->color_att[i].iview->image);
          }
       }
 
@@ -5707,12 +5776,6 @@ void genX(CmdEndRendering)(
          gfx->depth_att.resolve_mode != VK_RESOLVE_MODE_NONE;
       const bool has_stencil_resolve =
          gfx->stencil_att.resolve_mode != VK_RESOLVE_MODE_NONE;
-      const bool has_sparse_depth_resolve =
-         has_depth_resolve &&
-         anv_image_is_sparse(gfx->depth_att.iview->image);
-      const bool has_sparse_stencil_resolve =
-         has_stencil_resolve &&
-         anv_image_is_sparse(gfx->stencil_att.iview->image);
 
       if (has_depth_resolve || has_stencil_resolve) {
          /* We are about to do some MSAA resolves.  We need to flush so that
@@ -5725,6 +5788,26 @@ void genX(CmdEndRendering)(
                                  "MSAA resolve");
       }
 
+#if GFX_VER < 20
+      const bool has_sparse_depth_resolve =
+         has_depth_resolve &&
+         anv_image_is_sparse(gfx->depth_att.iview->image);
+      const bool has_sparse_stencil_resolve =
+         has_stencil_resolve &&
+         anv_image_is_sparse(gfx->stencil_att.iview->image);
+      /* Our HW implementation of the sparse feature prior to Xe2 lives in the
+       * GAM unit (interface between all the GPU caches and external memory).
+       * As a result writes to NULL bound images & buffers that should be
+       * ignored are actually still visible in the caches. The only way for us
+       * to get correct NULL bound regions to return 0s is to evict the caches
+       * to force the caches to be repopulated with 0s.
+       *
+       * Our understanding is that Xe2 started to tag the L3 cache with some
+       * kind physical address information rather. It is therefore able to
+       * detect that a cache line in the cache is going to a null tile and so
+       * the L3 cache also has a sparse compatible behavior and we don't need
+       * to flush anymore.
+       */
       if (has_sparse_color_resolve || has_sparse_depth_resolve ||
           has_sparse_stencil_resolve) {
          /* If the resolve image is sparse we need some extra bits to make
@@ -5734,6 +5817,7 @@ void genX(CmdEndRendering)(
          anv_add_pending_pipe_bits(cmd_buffer, ANV_PIPE_TILE_CACHE_FLUSH_BIT,
                                    "sparse MSAA resolve");
       }
+#endif
 
       for (uint32_t i = 0; i < gfx->color_att_count; i++) {
          const struct anv_attachment *att = &gfx->color_att[i];

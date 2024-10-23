@@ -230,7 +230,6 @@ v3dv_pipeline_get_nir_options(const struct v3d_device_info *devinfo)
       .divergence_analysis_options =
          nir_divergence_multiple_workgroup_per_compute_subgroup,
       .discard_is_demote = true,
-      .has_ddx_intrinsics = true,
       .scalarize_ddx = true,
    };
 
@@ -659,13 +658,6 @@ lower_tex_src(nir_builder *b,
    struct v3dv_descriptor_set_binding_layout *binding_layout =
       &set_layout->binding[binding];
 
-   /* For input attachments, the shader includes the attachment_idx. As we are
-    * treating them as a texture, we only want the base_index
-    */
-   uint32_t array_index = binding_layout->type != VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT ?
-      deref->var->data.index + base_index :
-      base_index;
-
    uint8_t return_size;
    if (V3D_DBG(TMU_16BIT))
       return_size = 16;
@@ -681,7 +673,7 @@ lower_tex_src(nir_builder *b,
       descriptor_map_add(map,
                          deref->var->data.descriptor_set,
                          deref->var->data.binding,
-                         array_index,
+                         base_index,
                          binding_layout->array_size,
                          0,
                          return_size,
@@ -777,8 +769,6 @@ lower_image_deref(nir_builder *b,
    struct v3dv_descriptor_set_binding_layout *binding_layout =
       &set_layout->binding[binding];
 
-   uint32_t array_index = deref->var->data.index + base_index;
-
    assert(binding_layout->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE ||
           binding_layout->type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER);
 
@@ -790,7 +780,7 @@ lower_image_deref(nir_builder *b,
       descriptor_map_add(map,
                          deref->var->data.descriptor_set,
                          deref->var->data.binding,
-                         array_index,
+                         base_index,
                          binding_layout->array_size,
                          0,
                          32 /* return_size: doesn't apply for textures */,

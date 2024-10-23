@@ -732,7 +732,7 @@ static void vpe10_mpc_set3dlut_ram12_indirect(
 
     uint32_t data_array_size = (entries / 2 * 3); // DW size of config data array, actual size
 
-    config_writer_set_type(config_writer, CONFIG_TYPE_INDIRECT);
+    config_writer_set_type(config_writer, CONFIG_TYPE_INDIRECT, mpc->inst);
 
     // Optimized by single VPEP indirect config packet
     // Fill the 3dLut array pointer
@@ -743,7 +743,7 @@ static void vpe10_mpc_set3dlut_ram12_indirect(
         config_writer, REG_OFFSET(VPMPCC_MCM_3DLUT_INDEX), 0, REG_OFFSET(VPMPCC_MCM_3DLUT_DATA));
 
     // restore back to direct
-    config_writer_set_type(config_writer, CONFIG_TYPE_DIRECT);
+    config_writer_set_type(config_writer, CONFIG_TYPE_DIRECT, mpc->inst);
 }
 
 static void vpe10_mpc_set3dlut_ram10(struct mpc *mpc, const struct vpe_rgb *lut, uint32_t entries)
@@ -801,7 +801,7 @@ static void vpe10_mpc_set3dlut_ram10_indirect(
     // DW0: R1<<22 | G1<<12 | B1 <<2
     //...
 
-    config_writer_set_type(config_writer, CONFIG_TYPE_INDIRECT);
+    config_writer_set_type(config_writer, CONFIG_TYPE_INDIRECT, mpc->inst);
 
     // Optimized by single VPEP indirect config packet
     // Fill the 3dLut array pointer
@@ -812,7 +812,7 @@ static void vpe10_mpc_set3dlut_ram10_indirect(
         config_writer, REG_OFFSET(VPMPCC_MCM_3DLUT_INDEX), 0, REG_OFFSET(VPMPCC_MCM_3DLUT_DATA));
 
     // resume back to direct
-    config_writer_set_type(config_writer, CONFIG_TYPE_DIRECT);
+    config_writer_set_type(config_writer, CONFIG_TYPE_DIRECT, mpc->inst);
 }
 
 static void vpe10_mpc_set_3dlut_mode(
@@ -856,7 +856,7 @@ void vpe10_mpc_program_3dlut(struct mpc *mpc, const struct tetrahedral_params *p
     // always use LUT_RAM_A except for bypass mode which is not the case here
     mode = LUT_RAM_A;
 
-    is_17x17x17             = !params->use_tetrahedral_9;
+    is_17x17x17             = (params->lut_dim == LUT_DIM_17);
     is_12bits_color_channel = params->use_12bits;
     if (is_17x17x17) {
         lut0      = params->tetrahedral_17.lut0;
@@ -931,7 +931,7 @@ bool vpe10_mpc_program_3dlut_indirect(struct mpc *mpc,
     struct tetrahedral_9x9x9    *tetra9  = NULL;
 
     // make sure it is in DIRECT type
-    config_writer_set_type(config_writer, CONFIG_TYPE_DIRECT);
+    config_writer_set_type(config_writer, CONFIG_TYPE_DIRECT, mpc->inst);
 
     if (lut0_3_buf == NULL) {
         vpe10_mpc_set_3dlut_mode(mpc, LUT_BYPASS, false);
@@ -1253,8 +1253,8 @@ void vpe10_mpc_set_mpc_shaper_3dlut(
     // get the shaper lut params
     if (func_shaper) {
         if (func_shaper->type == TF_TYPE_DISTRIBUTED_POINTS) {
-            vpe10_cm_helper_translate_curve_to_hw_format(
-                func_shaper, &mpc->shaper_params, true); // should init shaper_params first
+            vpe10_cm_helper_translate_curve_to_hw_format(func_shaper, &mpc->shaper_params, true,
+                func_shaper->dirty[mpc->inst]);          // should init shaper_params first
             shaper_lut = &mpc->shaper_params;            // are there shaper prams in dpp instead?
         } else if (func_shaper->type == TF_TYPE_HWPWL) {
             shaper_lut = &func_shaper->pwl;
@@ -1263,12 +1263,12 @@ void vpe10_mpc_set_mpc_shaper_3dlut(
 
     bypass = (!shaper_lut || (func_shaper && func_shaper->type == TF_TYPE_BYPASS));
     CONFIG_CACHE(func_shaper, stream_ctx, vpe_priv->init.debug.disable_lut_caching, bypass,
-        mpc->funcs->program_shaper(mpc, shaper_lut));
+        mpc->funcs->program_shaper(mpc, shaper_lut), mpc->inst);
 
     bypass       = (!lut3d_func || !lut3d_func->state.bits.initialized);
     lut3d_params = (bypass) ? (NULL) : (&lut3d_func->lut_3d);
     CONFIG_CACHE(lut3d_func, stream_ctx, vpe_priv->init.debug.disable_lut_caching, bypass,
-        mpc->funcs->program_3dlut(mpc, lut3d_params));
+        mpc->funcs->program_3dlut(mpc, lut3d_params), mpc->inst);
 
     return;
 }
@@ -1286,7 +1286,7 @@ void vpe10_mpc_set_output_transfer_func(struct mpc *mpc, struct output_ctx *outp
         if (output_ctx->output_tf->type == TF_TYPE_DISTRIBUTED_POINTS) {
             vpe10_cm_helper_translate_curve_to_hw_format( // this is cm3.0 version instead 1.0
                                                           // as DCN3.2
-                output_ctx->output_tf, &mpc->regamma_params, false);
+                output_ctx->output_tf, &mpc->regamma_params, false, output_ctx->output_tf->dirty[mpc->inst]);
             params = &mpc->regamma_params;
         }
         /* there are no ROM LUTs in OUTGAM */
@@ -1298,7 +1298,7 @@ void vpe10_mpc_set_output_transfer_func(struct mpc *mpc, struct output_ctx *outp
               vpe_priv->init.debug.cm_in_bypass || vpe_priv->init.debug.bypass_ogam);
 
     CONFIG_CACHE(output_ctx->output_tf, output_ctx, vpe_priv->init.debug.disable_lut_caching,
-        bypass, mpc->funcs->set_output_gamma(mpc, params));
+        bypass, mpc->funcs->set_output_gamma(mpc, params), mpc->inst);
 }
 
 void vpe10_mpc_set_blend_lut(struct mpc *mpc, struct transfer_func *blend_tf)
@@ -1317,9 +1317,10 @@ void vpe10_mpc_set_blend_lut(struct mpc *mpc, struct transfer_func *blend_tf)
 
         if (gamma_type == CM_DEGAM)
             vpe10_cm_helper_translate_curve_to_degamma_hw_format(
-                blend_tf, &mpc->blender_params); // TODO should init regamma_params first
+                blend_tf, &mpc->blender_params, blend_tf->dirty[mpc->inst]); // TODO should init regamma_params first
         else
-            vpe10_cm_helper_translate_curve_to_hw_format(blend_tf, &mpc->blender_params, false);
+            vpe10_cm_helper_translate_curve_to_hw_format(
+                blend_tf, &mpc->blender_params, false, blend_tf->dirty[mpc->inst]);
 
         blend_lut = &mpc->blender_params;
     }
@@ -1328,7 +1329,7 @@ void vpe10_mpc_set_blend_lut(struct mpc *mpc, struct transfer_func *blend_tf)
         ((!blend_tf) || (blend_tf->type == TF_TYPE_BYPASS) || vpe_priv->init.debug.bypass_blndgam);
 
     CONFIG_CACHE(blend_tf, stream_ctx, vpe_priv->init.debug.disable_lut_caching, bypass,
-        mpc->funcs->program_1dlut(mpc, blend_lut, gamma_type));
+        mpc->funcs->program_1dlut(mpc, blend_lut, gamma_type), mpc->inst);
 }
 
 bool vpe10_mpc_program_movable_cm(struct mpc *mpc, struct transfer_func *func_shaper,

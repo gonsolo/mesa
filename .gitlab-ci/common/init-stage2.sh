@@ -47,6 +47,13 @@ for path in '/dut-env-vars.sh' '/set-job-env-vars.sh' './set-job-env-vars.sh'; d
 done
 . "$SCRIPTS_DIR"/setup-test-env.sh
 
+# Flush out anything which might be stuck in a serial buffer
+echo
+echo
+echo
+
+section_switch init_stage2 "Pre-testing hardware setup"
+
 set -ex
 
 # Set up any devices required by the jobs
@@ -200,13 +207,18 @@ if [ -n "$HWCI_START_WESTON" ]; then
   while [ ! -S "$WESTON_X11_SOCK" ]; do sleep 1; done
 fi
 
+set +x
+
+section_end init_stage2
+
+echo "Running ${HWCI_TEST_SCRIPT} ${HWCI_TEST_ARGS} ..."
+
 set +e
-$HWCI_TEST_SCRIPT ${HWCI_TEST_ARGS:-}
-EXIT_CODE=$?
+$HWCI_TEST_SCRIPT ${HWCI_TEST_ARGS:-}; EXIT_CODE=$?
 set -e
 
-# Let's make sure the results are always stored in current working directory
-mv -f ${RESULTS_DIR} ./ 2>/dev/null || true
+section_start post_test_cleanup "Cleaning up after testing, uploading results"
+set -x
 
 # Make sure that capture-devcoredump is done before we start trying to tar up
 # artifacts -- if it's writing while tar is reading, tar will throw an error and
@@ -224,6 +236,7 @@ fi
 [ ${EXIT_CODE} -eq 0 ] && RESULT=pass || RESULT=fail
 
 set +x
+section_end post_test_cleanup
 
 # Print the final result; both bare-metal and LAVA look for this string to get
 # the result of our run, so try really hard to get it out rather than losing

@@ -25,6 +25,7 @@
 #include "svga_resource.h"
 #include "svga_debug.h"
 
+#include "vm_basic_types.h"
 #include "svga3d_shaderdefs.h"
 #include "VGPU10ShaderTokens.h"
 
@@ -350,7 +351,7 @@ svga_get_param(struct pipe_screen *screen, enum pipe_cap param)
       /* According to the spec, max varyings does not include the components
        * for position, so remove one count from the max for position.
        */
-      return sws->have_vgpu10 ? VGPU10_MAX_FS_INPUTS-1 : 10;
+      return sws->have_vgpu10 ? VGPU10_MAX_PS_INPUTS-1 : 10;
    case PIPE_CAP_BUFFER_MAP_PERSISTENT_COHERENT:
       return sws->have_coherent;
 
@@ -632,7 +633,7 @@ vgpu10_get_shader_param(struct pipe_screen *screen,
       return 64;
    case PIPE_SHADER_CAP_MAX_INPUTS:
       if (shader == PIPE_SHADER_FRAGMENT)
-         return VGPU10_MAX_FS_INPUTS;
+         return VGPU10_MAX_PS_INPUTS;
       else if (shader == PIPE_SHADER_GEOMETRY)
          return svgascreen->max_gs_inputs;
       else if (shader == PIPE_SHADER_TESS_CTRL)
@@ -643,7 +644,7 @@ vgpu10_get_shader_param(struct pipe_screen *screen,
          return svgascreen->max_vs_inputs;
    case PIPE_SHADER_CAP_MAX_OUTPUTS:
       if (shader == PIPE_SHADER_FRAGMENT)
-         return VGPU10_MAX_FS_OUTPUTS;
+         return VGPU10_MAX_PS_OUTPUTS;
       else if (shader == PIPE_SHADER_GEOMETRY)
          return VGPU10_MAX_GS_OUTPUTS;
       else if (shader == PIPE_SHADER_TESS_CTRL)
@@ -717,8 +718,7 @@ vgpu10_get_shader_param(struct pipe_screen *screen,
    .lower_vector_cmp = true,                                                  \
    .lower_cs_local_index_to_id = true,                                        \
    .max_unroll_iterations = 32,                                               \
-   .use_interpolated_input_intrinsics = true,                                 \
-   .has_ddx_intrinsics = true
+   .use_interpolated_input_intrinsics = true
 
 #define VGPU10_OPTIONS                                                        \
    .lower_doubles_options = nir_lower_dfloor | nir_lower_dsign | nir_lower_dceil | nir_lower_dtrunc | nir_lower_dround_even, \

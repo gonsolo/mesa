@@ -1478,6 +1478,51 @@ iris_init_compute_context(struct iris_batch *batch)
 #endif
 
 #if GFX_VERx10 >= 125
+   /* Wa_14015782607 - Issue pipe control with HDC_flush and
+    * untyped cache flush set to 1 when CCS has NP state update with
+    * STATE_COMPUTE_MODE.
+    */
+   if (intel_needs_workaround(devinfo, 14015782607))
+      iris_emit_pipe_control_flush(batch, "Wa_14015782607",
+                                   PIPE_CONTROL_CS_STALL |
+                                   PIPE_CONTROL_UNTYPED_DATAPORT_CACHE_FLUSH |
+                                   PIPE_CONTROL_FLUSH_HDC);
+
+   /* Wa_14014427904/22013045878 - We need additional invalidate/flush when
+    * emitting NP state commands with ATS-M in compute mode.
+    */
+   if (intel_device_info_is_atsm(devinfo))
+      iris_emit_pipe_control_flush(batch, "Wa_14014427904/22013045878",
+                                   PIPE_CONTROL_CS_STALL |
+                                   PIPE_CONTROL_STATE_CACHE_INVALIDATE |
+                                   PIPE_CONTROL_CONST_CACHE_INVALIDATE |
+                                   PIPE_CONTROL_UNTYPED_DATAPORT_CACHE_FLUSH |
+                                   PIPE_CONTROL_TEXTURE_CACHE_INVALIDATE |
+                                   PIPE_CONTROL_INSTRUCTION_INVALIDATE |
+                                   PIPE_CONTROL_FLUSH_HDC);
+
+   iris_emit_cmd(batch, GENX(STATE_COMPUTE_MODE), cm) {
+#if GFX_VER >= 20
+      cm.AsyncComputeThreadLimit = ACTL_Max8;
+      cm.ZPassAsyncComputeThreadLimit = ZPACTL_Max60;
+      cm.ZAsyncThrottlesettings = ZATS_DefertoAsyncComputeThreadLimit;
+      cm.AsyncComputeThreadLimitMask = 0x7;
+      cm.ZPassAsyncComputeThreadLimitMask = 0x7;
+      cm.ZAsyncThrottlesettingsMask = 0x3;
+#else
+      cm.PixelAsyncComputeThreadLimit = PACTL_Max24;
+      cm.ZPassAsyncComputeThreadLimit = ZPACTL_Max60;
+      cm.PixelAsyncComputeThreadLimitMask = 0x7;
+      cm.ZPassAsyncComputeThreadLimitMask = 0x7;
+      if (intel_device_info_is_mtl_or_arl(devinfo)) {
+         cm.ZAsyncThrottlesettings = ZATS_DefertoPixelAsyncComputeThreadLimit;
+         cm.ZAsyncThrottlesettingsMask = 0x3;
+      }
+#endif
+   }
+#endif
+
+#if GFX_VERx10 >= 125
    iris_emit_cmd(batch, GENX(CFE_STATE), cfe) {
       cfe.MaximumNumberofThreads =
          devinfo->max_cs_threads * devinfo->subslice_total;
@@ -3696,6 +3741,9 @@ iris_set_framebuffer_state(struct pipe_context *ctx,
 
    unsigned samples = util_framebuffer_get_num_samples(state);
    unsigned layers = util_framebuffer_get_num_layers(state);
+
+   /* multiview not supported */
+   assert(!state->viewmask);
 
    if (cso->samples != samples) {
       ice->state.dirty |= IRIS_DIRTY_MULTISAMPLE;
@@ -8090,7 +8138,23 @@ iris_upload_dirty_render_state(struct iris_context *ice,
       }
    }
 
+   if (dirty & IRIS_DIRTY_VF_STATISTICS) {
+      iris_emit_cmd(batch, GENX(3DSTATE_VF_STATISTICS), vf) {
+         vf.StatisticsEnable = true;
+      }
+   }
+
    if (dirty & IRIS_DIRTY_VF) {
+#if INTEL_WA_16012775297_GFX_VER
+      /* Emit dummy VF statistics before each 3DSTATE_VF. */
+      if (intel_needs_workaround(batch->screen->devinfo, 16012775297) &&
+          (dirty & IRIS_DIRTY_VF_STATISTICS) == 0) {
+         iris_emit_cmd(batch, GENX(3DSTATE_VF_STATISTICS), vfs) {
+            vfs.StatisticsEnable = true;
+         }
+      }
+#endif
+
       iris_emit_cmd(batch, GENX(3DSTATE_VF), vf) {
 #if GFX_VERx10 >= 125
          vf.GeometryDistributionEnable = true;
@@ -8136,12 +8200,6 @@ iris_upload_dirty_render_state(struct iris_context *ice,
       }
    }
 #endif
-
-   if (dirty & IRIS_DIRTY_VF_STATISTICS) {
-      iris_emit_cmd(batch, GENX(3DSTATE_VF_STATISTICS), vf) {
-         vf.StatisticsEnable = true;
-      }
-   }
 
 #if GFX_VER == 8
    if (dirty & IRIS_DIRTY_PMA_FIX) {

@@ -599,6 +599,10 @@ nvk_cmd_buffer_dirty_render_pass(struct nvk_cmd_buffer *cmd)
 
    /* This may depend on render targets */
    BITSET_SET(dyn->dirty, MESA_VK_DYNAMIC_COLOR_ATTACHMENT_MAP);
+
+   /* Might be required for depthClampZeroOne */
+   BITSET_SET(dyn->dirty, MESA_VK_DYNAMIC_RS_DEPTH_CLAMP_ENABLE);
+   BITSET_SET(dyn->dirty, MESA_VK_DYNAMIC_RS_DEPTH_CLIP_ENABLE);
 }
 
 static void
@@ -989,7 +993,7 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
          if (level->tiling.gob_type != NIL_GOB_TYPE_LINEAR) {
             const enum pipe_format p_format =
-               vk_format_to_pipe_format(iview->vk.format);
+               nvk_format_to_pipe_format(iview->vk.format);
 
             /* We use the stride for depth/stencil targets because the Z/S
              * hardware has no concept of a tile width.  Instead, we just set
@@ -1026,7 +1030,7 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
             uint32_t pitch = level->row_stride_B;
             const enum pipe_format p_format =
-               vk_format_to_pipe_format(iview->vk.format);
+               nvk_format_to_pipe_format(iview->vk.format);
             /* When memory layout is set to LAYOUT_PITCH, the WIDTH field
              * takes row pitch
              */
@@ -1104,7 +1108,7 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       P_NV9097_SET_ZT_A(p, addr >> 32);
       P_NV9097_SET_ZT_B(p, addr);
       const enum pipe_format p_format =
-         vk_format_to_pipe_format(iview->vk.format);
+         nvk_format_to_pipe_format(iview->vk.format);
       const uint8_t zs_format = nil_format_to_depth_stencil(p_format);
       P_NV9097_SET_ZT_FORMAT(p, zs_format);
       assert(level->tiling.gob_type != NIL_GOB_TYPE_LINEAR);
@@ -1192,7 +1196,7 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       });
 
       const enum pipe_format p_format =
-         vk_format_to_pipe_format(iview->vk.format);
+         nvk_format_to_pipe_format(iview->vk.format);
       const uint32_t row_stride_el =
          level->row_stride_B / util_format_get_blocksize(p_format);
       P_NVC597_SET_SHADING_RATE_INDEX_SURFACE_ALLOCATED_SIZE(p, 0,
@@ -1777,6 +1781,8 @@ nvk_flush_ts_state(struct nvk_cmd_buffer *cmd)
 static void
 nvk_flush_vp_state(struct nvk_cmd_buffer *cmd)
 {
+   const struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
+
    const struct vk_dynamic_graphics_state *dyn =
       &cmd->vk.dynamic_graphics_state;
 
@@ -1834,6 +1840,11 @@ nvk_flush_vp_state(struct nvk_cmd_buffer *cmd)
          xmax = CLAMP(xmax, 0, max_dim);
          ymin = CLAMP(ymin, 0, max_dim);
          ymax = CLAMP(ymax, 0, max_dim);
+
+         if (!dev->vk.enabled_extensions.EXT_depth_range_unrestricted) {
+            assert(0.0 <= zmin && zmin <= 1.0);
+            assert(0.0 <= zmax && zmax <= 1.0);
+         }
 
          P_MTHD(p, NV9097, SET_VIEWPORT_CLIP_HORIZONTAL(i));
          P_NV9097_SET_VIEWPORT_CLIP_HORIZONTAL(p, i, {
@@ -2026,10 +2037,13 @@ nvk_mme_set_z_clamp(struct mme_builder *b)
 static void
 nvk_flush_rs_state(struct nvk_cmd_buffer *cmd)
 {
-   struct nv_push *p = nvk_cmd_buffer_push(cmd, 46);
-
+   const struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
    const struct vk_dynamic_graphics_state *dyn =
       &cmd->vk.dynamic_graphics_state;
+   const struct nvk_rendering_state *render =
+      &cmd->state.gfx.render;
+
+   struct nv_push *p = nvk_cmd_buffer_push(cmd, 46);
 
    if (BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_RASTERIZER_DISCARD_ENABLE))
       P_IMMD(p, NV9097, SET_RASTER_ENABLE, !dyn->rs.rasterizer_discard_enable);
@@ -2038,12 +2052,39 @@ nvk_flush_rs_state(struct nvk_cmd_buffer *cmd)
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_DEPTH_CLAMP_ENABLE)) {
       const bool z_clamp = dyn->rs.depth_clamp_enable;
       const bool z_clip = vk_rasterization_state_depth_clip_enable(&dyn->rs);
+      /* z_clamp_zero_one accounts for the interaction between
+       * depthClampZeroOne and depthRangeUnrestricted as mentioned in the
+       * Vulkan spec. depthClampZeroOne adds an additional clamp and doesn't
+       * modify the clip/clamp threshold.  We are expected to clamp to [0,1]
+       * when any one of these conditions are fulfilled:
+       * - depth_range_unrestricted is not enabled
+       * - depthClampZeroOne is enabled but depth
+       *    format is not floating point or depthRangeUnrestricted
+       *    is not enabled
+       * - fixed point depth format
+      */
+      const bool z_clamp_zero_one =
+         !vk_format_has_float_depth(render->depth_att.vk_format) ||
+         (dev->vk.enabled_features.depthClampZeroOne &&
+         !dev->vk.enabled_extensions.EXT_depth_range_unrestricted);
+
       P_IMMD(p, NVC397, SET_VIEWPORT_CLIP_CONTROL, {
          /* We only set Z clip range if clamp is requested.  Otherwise, we
           * leave it set to -/+INF and clip using the guardband below.
+          *
+          * depthClampZeroOne is independent of normal depth clamping and
+          * does not modify the clip/clamp threshold.  The Vulkan spec
+          * guarantees that, in the cases where depthClampZeroOne applies,
+          * the [zmin, zmax] is inside [0, 1].  This means that, if z_clamp
+          * is enabled, we can just do the regular clamp.  If z_clamp is
+          * disabled and z_clamp_zero_one is enabled then we need to
+          * apply the [0, 1] clamp.
           */
-         .min_z_zero_max_z_one = MIN_Z_ZERO_MAX_Z_ONE_FALSE,
-         .z_clip_range = nvk_cmd_buffer_3d_cls(cmd) >= VOLTA_A
+         .min_z_zero_max_z_one = (!z_clamp && z_clamp_zero_one)
+                                 ? MIN_Z_ZERO_MAX_Z_ONE_TRUE
+                                 : MIN_Z_ZERO_MAX_Z_ONE_FALSE,
+         .z_clip_range = (nvk_cmd_buffer_3d_cls(cmd) >= VOLTA_A &&
+                          (z_clamp || !z_clamp_zero_one))
                          ? (z_clamp ? Z_CLIP_RANGE_MIN_Z_MAX_Z
                                     : Z_CLIP_RANGE_MINUS_INF_PLUS_INF)
                          : Z_CLIP_RANGE_USE_FIELD_MIN_Z_ZERO_MAX_Z_ONE,

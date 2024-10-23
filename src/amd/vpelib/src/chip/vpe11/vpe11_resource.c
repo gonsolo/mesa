@@ -28,7 +28,8 @@
 #include "vpe10_resource.h"
 #include "vpe11_cmd_builder.h"
 #include "vpe10_vpec.h"
-#include "vpe10_cdc.h"
+#include "vpe10_cdc_be.h"
+#include "vpe10_cdc_fe.h"
 #include "vpe10_dpp.h"
 #include "vpe10_mpc.h"
 #include "vpe10_opp.h"
@@ -77,11 +78,13 @@ static struct vpe_caps caps = {
             .num_opp       = 1,
             .num_mpc_3dlut = 1,
             .num_queue     = 8,
+            .num_cdc_be    = 1,
         },
     .color_caps = {.dpp =
                        {
                            .pre_csc    = 1,
                            .luma_key   = 0,
+                           .color_key  = 1,
                            .dgam_ram   = 0,
                            .post_csc   = 1,
                            .gamma_corr = 1,
@@ -155,8 +158,8 @@ enum vpe_status vpe11_construct_resource(struct vpe_priv *vpe_priv, struct resou
 
     vpe10_construct_vpec(vpe_priv, &res->vpec);
 
-    res->cdc[0] = vpe10_cdc_create(vpe_priv, 0);
-    if (!res->cdc[0])
+    res->cdc_fe[0] = vpe10_cdc_fe_create(vpe_priv, 0);
+    if (!res->cdc_fe[0])
         goto err;
 
     res->dpp[0] = vpe10_dpp_create(vpe_priv, 0);
@@ -165,6 +168,10 @@ enum vpe_status vpe11_construct_resource(struct vpe_priv *vpe_priv, struct resou
 
     res->mpc[0] = vpe10_mpc_create(vpe_priv, 0);
     if (!res->mpc[0])
+        goto err;
+
+    res->cdc_be[0] = vpe10_cdc_be_create(vpe_priv, 0);
+    if (!res->cdc_be[0])
         goto err;
 
     res->opp[0] = vpe10_opp_create(vpe_priv, 0);
@@ -194,6 +201,7 @@ enum vpe_status vpe11_construct_resource(struct vpe_priv *vpe_priv, struct resou
     res->program_backend                   = vpe10_program_backend;
     res->get_bufs_req                      = vpe10_get_bufs_req;
     res->check_bg_color_support            = vpe10_check_bg_color_support;
+    res->check_mirror_rotation_support     = vpe10_check_mirror_rotation_support;
 
     return VPE_STATUS_OK;
 err:
@@ -203,9 +211,9 @@ err:
 
 void vpe11_destroy_resource(struct vpe_priv *vpe_priv, struct resource *res)
 {
-    if (res->cdc[0] != NULL) {
-        vpe_free(container_of(res->cdc[0], struct vpe10_cdc, base));
-        res->cdc[0] = NULL;
+    if (res->cdc_fe[0] != NULL) {
+        vpe_free(container_of(res->cdc_fe[0], struct vpe10_cdc_fe, base));
+        res->cdc_fe[0] = NULL;
     }
 
     if (res->dpp[0] != NULL) {
@@ -216,6 +224,11 @@ void vpe11_destroy_resource(struct vpe_priv *vpe_priv, struct resource *res)
     if (res->mpc[0] != NULL) {
         vpe_free(container_of(res->mpc[0], struct vpe10_mpc, base));
         res->mpc[0] = NULL;
+    }
+
+    if (res->cdc_be[0] != NULL) {
+        vpe_free(container_of(res->cdc_be[0], struct vpe10_cdc_be, base));
+        res->cdc_be[0] = NULL;
     }
 
     if (res->opp[0] != NULL) {

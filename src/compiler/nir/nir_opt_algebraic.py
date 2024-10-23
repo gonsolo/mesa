@@ -202,6 +202,8 @@ optimizations = [
    # floating point instruction, they should flush any input denormals and we
    # can replace -0.0 with 0.0 if the float execution mode allows it.
    (('fadd(is_only_used_as_float,nsz)', 'a', 0.0), a),
+   (('fadd(is_only_used_as_float)', a, '#b(is_negative_zero)'), a),
+   (('fadd', ('fneg', a), '#b(is_negative_zero)'), ('fneg', a)),
    (('iadd', a, 0), a),
    (('iadd_sat', a, 0), a),
    (('isub_sat', a, 0), a),
@@ -2891,18 +2893,6 @@ for op in ['fadd', 'fmul', 'fmulz', 'iadd', 'imul']:
    optimizations += [
       ((op, ('bcsel(is_used_once)', a, '#b', c), '#d'), ('bcsel', a, (op, b, d), (op, c, d)))
    ]
-
-# For derivatives in compute shaders, GLSL_NV_compute_shader_derivatives
-# states:
-#
-#     If neither layout qualifier is specified, derivatives in compute shaders
-#     return zero, which is consistent with the handling of built-in texture
-#     functions like texture() in GLSL 4.50 compute shaders.
-for op in ['fddx', 'fddx_fine', 'fddx_coarse',
-           'fddy', 'fddy_fine', 'fddy_coarse']:
-   optimizations += [
-      ((op, 'a'), 0.0, 'info->stage == MESA_SHADER_COMPUTE && info->derivative_group == DERIVATIVE_GROUP_NONE')
-]
 
 # Some optimizations for ir3-specific instructions.
 optimizations += [

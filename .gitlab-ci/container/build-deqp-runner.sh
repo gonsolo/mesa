@@ -4,13 +4,12 @@
 # When changing this file, you need to bump the following
 # .gitlab-ci/image-tags.yml tags:
 # DEBIAN_TEST_ANDROID_TAG
-# DEBIAN_TEST_GL_TAG
-# DEBIAN_TEST_VK_TAG
+# DEBIAN_BASE_TAG
 # KERNEL_ROOTFS_TAG
 
 set -uex
 
-DEQP_RUNNER_VERSION=0.20.0
+DEQP_RUNNER_VERSION=0.20.2
 
 commits_to_backport=(
 )
@@ -32,8 +31,12 @@ BASE_PWD=$PWD
 
 mkdir -p /deqp-runner
 pushd /deqp-runner
-git clone --branch "$DEQP_RUNNER_GIT_CHECKOUT" --depth 1 "$DEQP_RUNNER_GIT_URL" deqp-runner-git
+mkdir deqp-runner-git
 pushd deqp-runner-git
+git init
+git remote add origin "$DEQP_RUNNER_GIT_URL"
+git fetch --depth 1 origin "$DEQP_RUNNER_GIT_CHECKOUT"
+git checkout FETCH_HEAD
 
 for commit in "${commits_to_backport[@]}"
 do

@@ -9,6 +9,7 @@
 #include "nvk_descriptor_set_layout.h"
 #include "nvk_device.h"
 #include "nvk_entrypoints.h"
+#include "nvk_format.h"
 #include "nvk_image_view.h"
 #include "nvk_physical_device.h"
 #include "nvk_sampler.h"
@@ -135,6 +136,18 @@ get_storage_image_view_desc(const VkDescriptorImageInfo *const info,
          nil_px_extent_sa(view->planes[plane].sample_layout);
       desc.sw_log2 = util_logbase2(px_extent_sa.width);
       desc.sh_log2 = util_logbase2(px_extent_sa.height);
+
+      const enum nil_sample_layout slayout = view->planes[plane].sample_layout;
+      if (slayout != NIL_SAMPLE_LAYOUT_1X1) {
+         uint32_t samples = nil_sample_layout_samples(slayout);
+         assert(samples <= 16);
+         for (uint32_t s = 0; s < samples; s++) {
+            const struct nil_sample_offset off = nil_sample_offset(slayout, s);
+            assert(off.x < 4 && off.y < 4);
+            uint32_t s_xy = off.y << 2 | off.x;
+            desc.sample_map |= s_xy << (s * 4);
+         }
+      }
    }
 
    assert(sizeof(desc) <= dst_size);
@@ -256,7 +269,7 @@ get_edb_buffer_view_desc(struct nvk_device *dev,
 {
    struct nvk_edb_buffer_view_descriptor desc = { };
    if (info != NULL && info->address != 0) {
-      enum pipe_format format = vk_format_to_pipe_format(info->format);
+      enum pipe_format format = nvk_format_to_pipe_format(info->format);
       desc = nvk_edb_bview_cache_get_descriptor(dev, &dev->edb_bview_cache,
                                                 info->address, info->range,
                                                 format);

@@ -128,7 +128,6 @@ static void override_debug_option(
         debug->disable_lut_caching = user_debug->disable_lut_caching;
 }
 
-#ifdef VPE_BUILD_1_1
 static void verify_collaboration_mode(struct vpe_priv *vpe_priv)
 {
     if (vpe_priv->pub.level == VPE_IP_LEVEL_1_1) {
@@ -142,7 +141,44 @@ static void verify_collaboration_mode(struct vpe_priv *vpe_priv)
         vpe_priv->collaboration_mode = false;
     }
 }
-#endif
+
+static enum vpe_status create_output_config_vector(struct vpe_priv *vpe_priv)
+{
+    uint32_t i;
+
+    // output config vector stores all share-able configs that can be re-used later
+    for (i = 0; i < vpe_priv->pub.caps->resource_caps.num_cdc_be; i++) {
+        vpe_priv->output_ctx.configs[i] =
+            vpe_vector_create(vpe_priv, sizeof(struct config_record), MIN_NUM_CONFIG);
+        if (!vpe_priv->output_ctx.configs[i]) {
+            return VPE_STATUS_NO_MEMORY;
+        }
+    }
+    return VPE_STATUS_OK;
+}
+
+static void destroy_output_config_vector(struct vpe_priv *vpe_priv)
+{
+    uint32_t i;
+
+    for (i = 0; i < vpe_priv->pub.caps->resource_caps.num_cdc_be; i++) {
+        if (vpe_priv->output_ctx.configs[i]) {
+            vpe_vector_free(vpe_priv->output_ctx.configs[i]);
+            vpe_priv->output_ctx.configs[i] = NULL;
+        }
+    }
+}
+
+static void free_output_ctx(struct vpe_priv *vpe_priv)
+{
+    if (vpe_priv->output_ctx.gamut_remap)
+        vpe_free(vpe_priv->output_ctx.gamut_remap);
+
+    if (vpe_priv->output_ctx.output_tf)
+        vpe_free(vpe_priv->output_ctx.output_tf);
+
+    destroy_output_config_vector(vpe_priv);
+}
 
 struct vpe *vpe_create(const struct vpe_init_data *params)
 {
@@ -178,6 +214,14 @@ struct vpe *vpe_create(const struct vpe_init_data *params)
         vpe_free(vpe_priv);
         return NULL;
     }
+
+    status = create_output_config_vector(vpe_priv);
+    if (status != VPE_STATUS_OK) {
+        destroy_output_config_vector(vpe_priv);
+        vpe_free(vpe_priv);
+        return NULL;
+    }
+
     override_debug_option(&vpe_priv->init.debug, &params->debug);
 
     vpe_color_setup_x_points_distribution();
@@ -204,12 +248,12 @@ void vpe_destroy(struct vpe **vpe)
 
     vpe_destroy_resource(vpe_priv, &vpe_priv->resource);
 
-    vpe_free_output_ctx(vpe_priv);
+    free_output_ctx(vpe_priv);
 
     vpe_free_stream_ctx(vpe_priv);
 
     if (vpe_priv->vpe_cmd_vector)
-        vpe_vector_free(vpe_priv, vpe_priv->vpe_cmd_vector);
+        vpe_vector_free(vpe_priv->vpe_cmd_vector);
 
     if (vpe_priv->dummy_input_param)
         vpe_free(vpe_priv->dummy_input_param);
@@ -221,7 +265,6 @@ void vpe_destroy(struct vpe **vpe)
 
     *vpe = NULL;
 }
-
 
 /*****************************************************************************************
  * populate_bg_stream
@@ -346,10 +389,14 @@ static enum vpe_status populate_input_streams(struct vpe_priv *vpe_priv, const s
         stream_ctx = &stream_ctx_base[i];
         stream_ctx->stream_type = VPE_STREAM_TYPE_INPUT;
         stream_ctx->stream_idx = (int32_t)i;
+
         stream_ctx->per_pixel_alpha =
             vpe_has_per_pixel_alpha(param->streams[i].surface_info.format);
+
         if (vpe_priv->init.debug.bypass_per_pixel_alpha) {
             stream_ctx->per_pixel_alpha = false;
+        } else if (param->streams[i].enable_luma_key) {
+            stream_ctx->per_pixel_alpha = true;
         }
         if (param->streams[i].horizontal_mirror && !input_h_mirror && output_h_mirror)
             stream_ctx->flip_horizonal_output = true;
@@ -381,18 +428,19 @@ static enum vpe_status populate_virtual_streams(struct vpe_priv* vpe_priv, const
 
     vpe_priv->resource.check_h_mirror_support(&input_h_mirror, &output_h_mirror);
 
+    // Background generation stream
     if (param->num_streams == 0 || vpe_priv->init.debug.bg_color_fill_only) {
         if (num_virtual_streams != 1)
             result = VPE_STATUS_ERROR;
         else
-            result = populate_bg_stream(vpe_priv, param, &vpe_priv->stream_ctx[virtual_stream_idx++]);
+            result = populate_bg_stream(vpe_priv, param, &stream_ctx_base[virtual_stream_idx++]);
     }
 
     if (result != VPE_STATUS_OK)
         return result;
 
     for (virtual_stream_idx = 0; virtual_stream_idx < num_virtual_streams; virtual_stream_idx++) {
-        stream_ctx = &stream_ctx_base[virtual_stream_idx];
+        stream_ctx             = &stream_ctx_base[virtual_stream_idx];
         stream_ctx->stream_idx = virtual_stream_idx + vpe_priv->num_input_streams;
         stream_ctx->per_pixel_alpha =
             vpe_has_per_pixel_alpha(stream_ctx->stream.surface_info.format);
@@ -625,12 +673,13 @@ enum vpe_status vpe_build_commands(
     struct vpe_priv      *vpe_priv;
     struct cmd_builder   *builder;
     enum vpe_status       status = VPE_STATUS_OK;
-    uint32_t              cmd_idx, i, j;
+    uint32_t              cmd_idx, pipe_idx, stream_idx, cmd_type_idx;
     struct vpe_build_bufs curr_bufs;
     int64_t               cmd_buf_size;
     int64_t               emb_buf_size;
     uint64_t              cmd_buf_gpu_a, cmd_buf_cpu_a;
     uint64_t              emb_buf_gpu_a, emb_buf_cpu_a;
+    struct vpe_vector    *config_vector;
     struct vpe_cmd_info  *cmd_info;
 
     if (!vpe || !param || !bufs)
@@ -682,12 +731,27 @@ enum vpe_status vpe_build_commands(
     curr_bufs = *bufs;
 
     // copy the param, reset saved configs
-    for (i = 0; i < vpe_priv->num_streams; i++) {
-        vpe_priv->stream_ctx[i].num_configs = 0;
-        for (j = 0; j < VPE_CMD_TYPE_COUNT; j++)
-            vpe_priv->stream_ctx[i].num_stream_op_configs[j] = 0;
+    for (stream_idx = 0; stream_idx < vpe_priv->num_streams; stream_idx++) {
+        struct stream_ctx *stream_ctx = &vpe_priv->stream_ctx[stream_idx];
+
+        for (pipe_idx = 0; pipe_idx < MAX_INPUT_PIPE; pipe_idx++) {
+            config_vector = stream_ctx->configs[pipe_idx];
+            if (config_vector)
+                vpe_vector_clear(config_vector);
+
+            for (cmd_type_idx = 0; cmd_type_idx < VPE_CMD_TYPE_COUNT; cmd_type_idx++) {
+                config_vector = stream_ctx->stream_op_configs[pipe_idx][cmd_type_idx];
+                if (config_vector)
+                    vpe_vector_clear(config_vector);
+            }
+        }
     }
-    vpe_priv->output_ctx.num_configs = 0;
+
+    for (pipe_idx = 0; pipe_idx < vpe_priv->pub.caps->resource_caps.num_cdc_be; pipe_idx++) {
+        config_vector = vpe_priv->output_ctx.configs[pipe_idx];
+        if (config_vector)
+            vpe_vector_clear(config_vector);
+    }
 
     // Reset pipes
     vpe_pipe_reset(vpe_priv);

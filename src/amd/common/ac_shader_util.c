@@ -101,7 +101,6 @@ void ac_set_nir_options(struct radeon_info *info, bool use_llvm,
                          nir_io_prefer_scalar_fs_inputs |
                          nir_io_mix_convergent_flat_with_interpolated |
                          nir_io_vectorizer_ignores_types;
-   options->has_ddx_intrinsics = true;
    options->scalarize_ddx = true;
    options->skip_lower_packing_ops =
       BITFIELD_BIT(nir_lower_packing_op_unpack_64_2x32) |
@@ -113,10 +112,10 @@ void ac_set_nir_options(struct radeon_info *info, bool use_llvm,
 
 bool
 ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigned bit_size,
-                              unsigned num_components, nir_intrinsic_instr *low,
+                              unsigned num_components, unsigned hole_size, nir_intrinsic_instr *low,
                               nir_intrinsic_instr *high, void *data)
 {
-   if (num_components > 4)
+   if (num_components > 4 || hole_size)
       return false;
 
    bool is_scratch = false;

@@ -7,7 +7,6 @@ use crate::api::GetDebugFlags;
 use crate::api::DEBUG;
 use crate::builder::*;
 use crate::ir::*;
-use crate::nir_instr_printer::NirInstrPrinter;
 use crate::sph::{OutputTopology, PixelImap};
 
 use nak_bindings::*;
@@ -15,6 +14,7 @@ use nak_bindings::*;
 use compiler::bindings::*;
 use compiler::cfg::CFGBuilder;
 use compiler::nir::*;
+use compiler::nir_instr_printer::NirInstrPrinter;
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::ops::Index;
@@ -335,7 +335,7 @@ impl<'a> ShaderFromNir<'a> {
             end_block_id: 0,
             ssa_map: HashMap::new(),
             saturated: HashSet::new(),
-            nir_instr_printer: NirInstrPrinter::new(),
+            nir_instr_printer: NirInstrPrinter::new().unwrap(),
         }
     }
 
@@ -3302,6 +3302,7 @@ impl<'a> ShaderFromNir<'a> {
                 let annotation = self
                     .nir_instr_printer
                     .instr_to_string(ni)
+                    .unwrap()
                     .split_whitespace()
                     .collect::<Vec<_>>()
                     .join(" ");
@@ -3350,6 +3351,7 @@ impl<'a> ShaderFromNir<'a> {
                 let annotation = self
                     .nir_instr_printer
                     .instr_to_string(ni)
+                    .unwrap()
                     .split_whitespace()
                     .collect::<Vec<_>>()
                     .join(" ");
@@ -3430,6 +3432,7 @@ impl<'a> ShaderFromNir<'a> {
                     let annotation = self
                         .nir_instr_printer
                         .instr_to_string(ni)
+                        .unwrap()
                         .split_whitespace()
                         .collect::<Vec<_>>()
                         .join(" ");

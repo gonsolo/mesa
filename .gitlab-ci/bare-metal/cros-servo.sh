@@ -50,6 +50,10 @@ if [ -z "$BM_CMDLINE" ]; then
   exit 1
 fi
 
+. "${SCRIPTS_DIR}/setup-test-env.sh"
+
+section_start prepare_rootfs "Preparing rootfs components"
+
 set -ex
 
 # Clear out any previous run's artifacts.
@@ -104,11 +108,15 @@ python3 $CI_INSTALL/custom_logger.py ${STRUCTURED_LOG_FILE} --update dut_job_typ
 python3 $CI_INSTALL/custom_logger.py ${STRUCTURED_LOG_FILE} --update farm "${FARM}"
 python3 $CI_INSTALL/custom_logger.py ${STRUCTURED_LOG_FILE} --create-dut-job dut_name "${CI_RUNNER_DESCRIPTION}"
 python3 $CI_INSTALL/custom_logger.py ${STRUCTURED_LOG_FILE} --update-dut-time submit "${CI_JOB_STARTED_AT}"
+section_end prepare_rootfs
+
 python3 $BM/cros_servo_run.py \
         --cpu $BM_SERIAL \
         --ec $BM_SERIAL_EC \
         --test-timeout ${TEST_PHASE_TIMEOUT_MINUTES:-20}
 ret=$?
+
+section_start dut_cleanup "Cleaning up after job"
 python3 $CI_INSTALL/custom_logger.py ${STRUCTURED_LOG_FILE} --close-dut-job
 python3 $CI_INSTALL/custom_logger.py ${STRUCTURED_LOG_FILE} --close
 set -e
@@ -116,8 +124,6 @@ set -e
 # Bring artifacts back from the NFS dir to the build dir where gitlab-runner
 # will look for them.
 cp -Rp /nfs/results/. results/
-if [ -f "${STRUCTURED_LOG_FILE}" ]; then
-  echo "Structured log file is available at https://${CI_PROJECT_ROOT_NAMESPACE}.pages.freedesktop.org/-/${CI_PROJECT_NAME}/-/jobs/${CI_JOB_ID}/artifacts/results/${STRUCTURED_LOG_FILE}"
-fi
+section_end dut_cleanup
 
 exit $ret

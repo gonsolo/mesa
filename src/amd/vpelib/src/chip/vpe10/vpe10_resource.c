@@ -27,7 +27,8 @@
 #include "vpe10_resource.h"
 #include "vpe10_cmd_builder.h"
 #include "vpe10_vpec.h"
-#include "vpe10_cdc.h"
+#include "vpe10_cdc_fe.h"
+#include "vpe10_cdc_be.h"
 #include "vpe10_dpp.h"
 #include "vpe10_mpc.h"
 #include "vpe10_opp.h"
@@ -76,14 +77,23 @@
     .block##_##reg_name = {BASE(reg##block##_##reg_name##_BASE_IDX) + reg##block##_##reg_name,         \
         reg##block##_##reg_name##_##DEFAULT, reg##block##_##reg_name##_##DEFAULT, false}
 
-/***************** CDC registers ****************/
-#define cdc_regs(id) [id] = {CDC_REG_LIST_VPE10(id)}
+/***************** CDC FE registers ****************/
+#define cdc_fe_regs(id) [id] = {CDC_FE_REG_LIST_VPE10(id)}
 
-static struct vpe10_cdc_registers cdc_regs[] = {cdc_regs(0)};
+static struct vpe10_cdc_fe_registers cdc_fe_regs[] = {cdc_fe_regs(0)};
 
-static const struct vpe10_cdc_shift cdc_shift = {CDC_FLIED_LIST_VPE10(__SHIFT)};
+static const struct vpe10_cdc_fe_shift cdc_fe_shift = {CDC_FE_FIELD_LIST_VPE10(__SHIFT)};
 
-static const struct vpe10_cdc_mask cdc_mask = {CDC_FLIED_LIST_VPE10(_MASK)};
+static const struct vpe10_cdc_fe_mask cdc_fe_mask = {CDC_FE_FIELD_LIST_VPE10(_MASK)};
+
+/***************** CDC BE registers ****************/
+#define cdc_be_regs(id) [id] = {CDC_BE_REG_LIST_VPE10(id)}
+
+static struct vpe10_cdc_be_registers cdc_be_regs[] = {cdc_be_regs(0)};
+
+static const struct vpe10_cdc_be_shift cdc_be_shift = {CDC_BE_FIELD_LIST_VPE10(__SHIFT)};
+
+static const struct vpe10_cdc_be_mask cdc_be_mask = {CDC_BE_FIELD_LIST_VPE10(_MASK)};
 
 /***************** DPP registers ****************/
 #define dpp_regs(id) [id] = {DPP_REG_LIST_VPE10(id)}
@@ -125,11 +135,13 @@ static struct vpe_caps caps = {
             .num_opp       = 1,
             .num_mpc_3dlut = 1,
             .num_queue     = 8,
+            .num_cdc_be    = 1,
         },
     .color_caps = {.dpp =
                        {
                            .pre_csc    = 1,
                            .luma_key   = 0,
+                           .color_key  = 1,
                            .dgam_ram   = 0,
                            .post_csc   = 1,
                            .gamma_corr = 1,
@@ -275,20 +287,36 @@ static struct vpe_cap_funcs cap_funcs =
     .get_dcc_compression_input_cap  = vpe10_get_dcc_compression_input_cap
 };
 
-struct cdc *vpe10_cdc_create(struct vpe_priv *vpe_priv, int inst)
+struct cdc_fe *vpe10_cdc_fe_create(struct vpe_priv *vpe_priv, int inst)
 {
-    struct vpe10_cdc *vpe10_cdc = vpe_zalloc(sizeof(struct vpe10_cdc));
+    struct vpe10_cdc_fe *vpe10_cdc_fe = vpe_zalloc(sizeof(struct vpe10_cdc_fe));
 
-    if (!vpe10_cdc)
+    if (!vpe10_cdc_fe)
         return NULL;
 
-    vpe10_construct_cdc(vpe_priv, &vpe10_cdc->base);
+    vpe10_construct_cdc_fe(vpe_priv, &vpe10_cdc_fe->base);
 
-    vpe10_cdc->regs  = &cdc_regs[inst];
-    vpe10_cdc->mask  = &cdc_mask;
-    vpe10_cdc->shift = &cdc_shift;
+    vpe10_cdc_fe->regs  = &cdc_fe_regs[inst];
+    vpe10_cdc_fe->mask  = &cdc_fe_mask;
+    vpe10_cdc_fe->shift = &cdc_fe_shift;
 
-    return &vpe10_cdc->base;
+    return &vpe10_cdc_fe->base;
+}
+
+struct cdc_be *vpe10_cdc_be_create(struct vpe_priv *vpe_priv, int inst)
+{
+    struct vpe10_cdc_be *vpe10_cdc_be = vpe_zalloc(sizeof(struct vpe10_cdc_be));
+
+    if (!vpe10_cdc_be)
+        return NULL;
+
+    vpe10_construct_cdc_be(vpe_priv, &vpe10_cdc_be->base);
+
+    vpe10_cdc_be->regs  = &cdc_be_regs[inst];
+    vpe10_cdc_be->mask  = &cdc_be_mask;
+    vpe10_cdc_be->shift = &cdc_be_shift;
+
+    return &vpe10_cdc_be->base;
 }
 
 struct dpp *vpe10_dpp_create(struct vpe_priv *vpe_priv, int inst)
@@ -348,8 +376,8 @@ enum vpe_status vpe10_construct_resource(struct vpe_priv *vpe_priv, struct resou
 
     vpe10_construct_vpec(vpe_priv, &res->vpec);
 
-    res->cdc[0] = vpe10_cdc_create(vpe_priv, 0);
-    if (!res->cdc[0])
+    res->cdc_fe[0] = vpe10_cdc_fe_create(vpe_priv, 0);
+    if (!res->cdc_fe[0])
         goto err;
 
     res->dpp[0] = vpe10_dpp_create(vpe_priv, 0);
@@ -358,6 +386,10 @@ enum vpe_status vpe10_construct_resource(struct vpe_priv *vpe_priv, struct resou
 
     res->mpc[0] = vpe10_mpc_create(vpe_priv, 0);
     if (!res->mpc[0])
+        goto err;
+
+    res->cdc_be[0] = vpe10_cdc_be_create(vpe_priv, 0);
+    if (!res->cdc_be[0])
         goto err;
 
     res->opp[0] = vpe10_opp_create(vpe_priv, 0);
@@ -387,6 +419,7 @@ enum vpe_status vpe10_construct_resource(struct vpe_priv *vpe_priv, struct resou
     res->program_backend                   = vpe10_program_backend;
     res->get_bufs_req                      = vpe10_get_bufs_req;
     res->check_bg_color_support            = vpe10_check_bg_color_support;
+    res->check_mirror_rotation_support     = vpe10_check_mirror_rotation_support;
 
     return VPE_STATUS_OK;
 err:
@@ -396,9 +429,9 @@ err:
 
 void vpe10_destroy_resource(struct vpe_priv *vpe_priv, struct resource *res)
 {
-    if (res->cdc[0] != NULL) {
-        vpe_free(container_of(res->cdc[0], struct vpe10_cdc, base));
-        res->cdc[0] = NULL;
+    if (res->cdc_fe[0] != NULL) {
+        vpe_free(container_of(res->cdc_fe[0], struct vpe10_cdc_fe, base));
+        res->cdc_fe[0] = NULL;
     }
 
     if (res->dpp[0] != NULL) {
@@ -409,6 +442,11 @@ void vpe10_destroy_resource(struct vpe_priv *vpe_priv, struct resource *res)
     if (res->mpc[0] != NULL) {
         vpe_free(container_of(res->mpc[0], struct vpe10_mpc, base));
         res->mpc[0] = NULL;
+    }
+
+    if (res->cdc_be[0] != NULL) {
+        vpe_free(container_of(res->cdc_be[0], struct vpe10_cdc_be, base));
+        res->cdc_be[0] = NULL;
     }
 
     if (res->opp[0] != NULL) {
@@ -713,11 +751,12 @@ int32_t vpe10_program_frontend(struct vpe_priv *vpe_priv, uint32_t pipe_idx, uin
     struct vpe_cmd_input      *cmd_input    = &cmd_info->inputs[cmd_input_idx];
     struct stream_ctx         *stream_ctx   = &vpe_priv->stream_ctx[cmd_input->stream_idx];
     struct vpe_surface_info   *surface_info = &stream_ctx->stream.surface_info;
-    struct cdc                *cdc          = vpe_priv->resource.cdc[pipe_idx];
+    struct cdc_fe             *cdc_fe       = vpe_priv->resource.cdc_fe[pipe_idx];
     struct dpp                *dpp          = vpe_priv->resource.dpp[pipe_idx];
     struct mpc                *mpc          = vpe_priv->resource.mpc[pipe_idx];
     enum input_csc_select      select       = INPUT_CSC_SELECT_BYPASS;
     uint32_t                   hw_mult      = 0;
+    struct cnv_keyer_params    keyer_params;
     struct custom_float_format fmt;
 
     vpe_priv->fe_cb_ctx.stream_idx = cmd_input->stream_idx;
@@ -726,20 +765,24 @@ int32_t vpe10_program_frontend(struct vpe_priv *vpe_priv, uint32_t pipe_idx, uin
     config_writer_set_callback(
         &vpe_priv->config_writer, &vpe_priv->fe_cb_ctx, vpe_frontend_config_callback);
 
-    config_writer_set_type(&vpe_priv->config_writer, CONFIG_TYPE_DIRECT);
+    config_writer_set_type(&vpe_priv->config_writer, CONFIG_TYPE_DIRECT, pipe_idx);
 
     if (!seg_only) {
         /* start front-end programming that can be shared among segments */
         vpe_priv->fe_cb_ctx.stream_sharing = true;
 
-        cdc->funcs->program_surface_config(cdc, surface_info->format, stream_ctx->stream.rotation,
+        cdc_fe->funcs->program_surface_config(cdc_fe, surface_info->format,
+            stream_ctx->stream.rotation,
             // set to false as h_mirror is not supported by input, only supported in output
             false, surface_info->swizzle);
-        cdc->funcs->program_crossbar_config(cdc, surface_info->format);
+        cdc_fe->funcs->program_crossbar_config(cdc_fe, surface_info->format);
 
         dpp->funcs->program_cnv(dpp, surface_info->format, vpe_priv->expansion_mode);
         if (stream_ctx->bias_scale)
             dpp->funcs->program_cnv_bias_scale(dpp, stream_ctx->bias_scale);
+
+        dpp->funcs->build_keyer_params(dpp, stream_ctx, &keyer_params);
+        dpp->funcs->program_alpha_keyer(dpp, &keyer_params);
 
         /* If input adjustment exists, program the ICSC with those values. */
         if (stream_ctx->input_cs) {
@@ -789,8 +832,8 @@ int32_t vpe10_program_frontend(struct vpe_priv *vpe_priv, uint32_t pipe_idx, uin
     vpe_priv->fe_cb_ctx.stream_op_sharing = false;
     vpe_priv->fe_cb_ctx.cmd_type          = VPE_CMD_TYPE_COMPOSITING;
 
-    cdc->funcs->program_viewport(
-        cdc, &cmd_input->scaler_data.viewport, &cmd_input->scaler_data.viewport_c);
+    cdc_fe->funcs->program_viewport(
+        cdc_fe, &cmd_input->scaler_data.viewport, &cmd_input->scaler_data.viewport_c);
 
     dpp->funcs->set_segment_scaler(dpp, &cmd_input->scaler_data);
 
@@ -805,7 +848,7 @@ int32_t vpe10_program_backend(
     struct output_ctx       *output_ctx   = &vpe_priv->output_ctx;
     struct vpe_surface_info *surface_info = &vpe_priv->output_ctx.surface;
 
-    struct cdc *cdc = vpe_priv->resource.cdc[pipe_idx];
+    struct cdc_be *cdc_be = vpe_priv->resource.cdc_be[pipe_idx];
     struct opp *opp = vpe_priv->resource.opp[pipe_idx];
     struct mpc *mpc = vpe_priv->resource.mpc[pipe_idx];
 
@@ -819,15 +862,15 @@ int32_t vpe10_program_backend(
     config_writer_set_callback(
         &vpe_priv->config_writer, &vpe_priv->be_cb_ctx, vpe_backend_config_callback);
 
-    config_writer_set_type(&vpe_priv->config_writer, CONFIG_TYPE_DIRECT);
+    config_writer_set_type(&vpe_priv->config_writer, CONFIG_TYPE_DIRECT, pipe_idx);
 
     if (!seg_only) {
         /* start back-end programming that can be shared among segments */
         vpe_priv->be_cb_ctx.share = true;
 
-        cdc->funcs->program_p2b_config(
-            cdc, surface_info->format, surface_info->swizzle, &output_ctx->target_rect);
-        cdc->funcs->program_global_sync(cdc, VPE10_CDC_VUPDATE_OFFSET_DEFAULT,
+        cdc_be->funcs->program_p2b_config(
+            cdc_be, surface_info->format, surface_info->swizzle, &output_ctx->target_rect, NULL);
+        cdc_be->funcs->program_global_sync(cdc_be, VPE10_CDC_VUPDATE_OFFSET_DEFAULT,
             VPE10_CDC_VUPDATE_WIDTH_DEFAULT, VPE10_CDC_VREADY_OFFSET_DEFAULT);
 
         mpc->funcs->set_output_transfer_func(mpc, output_ctx);
@@ -908,7 +951,7 @@ enum vpe_status vpe10_populate_cmd_info(struct vpe_priv *vpe_priv)
             cmd_info.tm_enabled         = tm_enabled;
             cmd_info.insert_start_csync = false;
             cmd_info.insert_end_csync   = false;
-            vpe_vector_push(vpe_priv, vpe_priv->vpe_cmd_vector, &cmd_info);
+            vpe_vector_push(vpe_priv->vpe_cmd_vector, &cmd_info);
 
             // The following codes are only valid if blending is supported
             /*
@@ -936,6 +979,7 @@ void vpe10_create_stream_ops_config(struct vpe_priv *vpe_priv, uint32_t pipe_idx
     struct dpp          *dpp      = vpe_priv->resource.dpp[pipe_idx];
     struct mpc          *mpc      = vpe_priv->resource.mpc[pipe_idx];
     enum vpe_cmd_type    cmd_type = VPE_CMD_TYPE_COUNT;
+    struct vpe_vector   *config_vector;
 
     vpe_priv->fe_cb_ctx.stream_op_sharing = true;
     vpe_priv->fe_cb_ctx.stream_sharing    = false;
@@ -952,7 +996,8 @@ void vpe10_create_stream_ops_config(struct vpe_priv *vpe_priv, uint32_t pipe_idx
         return;
 
     // return if already generated
-    if (stream_ctx->num_stream_op_configs[cmd_type])
+    config_vector = stream_ctx->stream_op_configs[pipe_idx][cmd_type];
+    if (config_vector->num_elements)
         return;
 
     vpe_priv->fe_cb_ctx.cmd_type = cmd_type;
@@ -1093,4 +1138,17 @@ void vpe10_get_bufs_req(struct vpe_priv *vpe_priv, struct vpe_bufs_req *req)
 
         req->emb_buf_size += emb_req;
     }
+}
+
+enum vpe_status vpe10_check_mirror_rotation_support(const struct vpe_stream *stream)
+{
+    VPE_ASSERT(stream != NULL);
+
+    if (stream->rotation != VPE_ROTATION_ANGLE_0)
+        return VPE_STATUS_ROTATION_NOT_SUPPORTED;
+
+    if (stream->vertical_mirror)
+        return VPE_STATUS_MIRROR_NOT_SUPPORTED;
+
+    return VPE_STATUS_OK;
 }

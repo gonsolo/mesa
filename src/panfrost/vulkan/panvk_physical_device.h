@@ -7,6 +7,7 @@
 #define PANVK_PHYSICAL_DEVICE_H
 
 #include <stdint.h>
+#include <sys/types.h>
 
 #include "panvk_instance.h"
 
@@ -31,6 +32,12 @@ struct panvk_physical_device {
    } kmod;
 
    const struct panfrost_model *model;
+
+   struct {
+      dev_t primary_rdev;
+      dev_t render_rdev;
+   } drm;
+
    struct {
       const struct pan_blendable_format *blendable;
       const struct panfrost_format *all;
@@ -43,8 +50,6 @@ struct panvk_physical_device {
    const struct vk_sync_type *sync_types[2];
 
    struct wsi_device wsi_device;
-
-   int master_fd;
 };
 
 VK_DEFINE_HANDLE_CASTS(panvk_physical_device, vk.base, VkPhysicalDevice,

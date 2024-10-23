@@ -33,34 +33,25 @@ workflow:
     # merge pipeline
     - if: &is-merge-attempt $GITLAB_USER_LOGIN == "marge-bot" && $CI_PIPELINE_SOURCE == "merge_request_event"
       variables:
-        KERNEL_IMAGE_BASE: https://${S3_HOST}/${S3_KERNEL_BUCKET}/${KERNEL_REPO}/${KERNEL_TAG}
         MESA_CI_PERFORMANCE_ENABLED: 1
         VALVE_INFRA_VANGOGH_JOB_PRIORITY: ""  # Empty tags are ignored by gitlab
+        JOB_PRIORITY: 75
+        # fast-fail in merge pipelines: stop early if we get this many unexpected fails/crashes
+        DEQP_RUNNER_MAX_FAILS: 40
+        # Flag to advertise the CI scripts if we are in a merge pipeline
+        IS_MERGE_PIPELINE: 1
     # post-merge pipeline
     - if: &is-post-merge $GITLAB_USER_LOGIN == "marge-bot" && $CI_PIPELINE_SOURCE == "push"
+    # Pre-merge pipeline
+    - if: &is-pre-merge $CI_PIPELINE_SOURCE == "merge_request_event"
+    # Push to a branch on a fork
+    - if: &is-fork-push $CI_PROJECT_NAMESPACE != "mesa" && $CI_PIPELINE_SOURCE == "push"
     # nightly pipeline
     - if: &is-scheduled-pipeline $CI_PIPELINE_SOURCE == "schedule"
-      variables:
-        KERNEL_IMAGE_BASE: https://${S3_HOST}/${S3_KERNEL_BUCKET}/${KERNEL_REPO}/${KERNEL_TAG}
-        JOB_PRIORITY: 50
-        VALVE_INFRA_VANGOGH_JOB_PRIORITY: priority:low
     # pipeline for direct pushes that bypassed the CI
     - if: &is-direct-push $CI_PROJECT_NAMESPACE == "mesa" && $CI_PIPELINE_SOURCE == "push" && $GITLAB_USER_LOGIN != "marge-bot"
       variables:
-        KERNEL_IMAGE_BASE: https://${S3_HOST}/${S3_KERNEL_BUCKET}/${KERNEL_REPO}/${KERNEL_TAG}
         JOB_PRIORITY: 40
-        VALVE_INFRA_VANGOGH_JOB_PRIORITY: priority:low
-    # pre-merge or fork pipeline
-    - if: $FORCE_KERNEL_TAG != null
-      variables:
-        KERNEL_IMAGE_BASE: https://${S3_HOST}/${S3_KERNEL_BUCKET}/${KERNEL_REPO}/${FORCE_KERNEL_TAG}
-        JOB_PRIORITY: 50
-        VALVE_INFRA_VANGOGH_JOB_PRIORITY: priority:low
-    - if: $FORCE_KERNEL_TAG == null
-      variables:
-        KERNEL_IMAGE_BASE: https://${S3_HOST}/${S3_KERNEL_BUCKET}/${KERNEL_REPO}/${KERNEL_TAG}
-        JOB_PRIORITY: 50
-        VALVE_INFRA_VANGOGH_JOB_PRIORITY: priority:low
 
 
 variables:
@@ -101,12 +92,19 @@ variables:
   MESA_VK_ABORT_ON_DEVICE_LOSS: 1
   # Avoid the wall of "Unsupported SPIR-V capability" warnings in CI job log, hiding away useful output
   MESA_SPIRV_LOG_LEVEL: error
+  # Default priority for non-merge pipelines
+  VALVE_INFRA_VANGOGH_JOB_PRIORITY: priority:low
+  JOB_PRIORITY: 50
 
 default:
   id_tokens:
     S3_JWT:
       aud: https://s3.freedesktop.org
   before_script:
+    - |
+      if [ -z "${KERNEL_IMAGE_BASE:-}" ]; then
+        export KERNEL_IMAGE_BASE="https://${S3_HOST}/${S3_KERNEL_BUCKET}/${KERNEL_REPO}/${FORCE_KERNEL_TAG:-$KERNEL_TAG}"
+      fi
     - >
       export SCRIPTS_DIR=$(mktemp -d) &&
       curl -L -s --retry 4 -f --retry-all-errors --retry-delay 60 -O --output-dir "${SCRIPTS_DIR}" "${CI_PROJECT_URL}/-/raw/${CI_COMMIT_SHA}/.gitlab-ci/setup-test-env.sh" &&
@@ -188,15 +186,6 @@ include:
   - local: '.gitlab-ci/test-source-dep.yml'
   - local: 'docs/gitlab-ci.yml'
   - local: 'src/**/ci/gitlab-ci.yml'
-
-
-# YAML anchors for rule conditions
-# --------------------------------
-.rules-anchors:
-  # Pre-merge pipeline
-  - &is-pre-merge '$CI_PIPELINE_SOURCE == "merge_request_event"'
-  # Push to a branch on a fork
-  - &is-fork-push '$CI_PROJECT_NAMESPACE != "mesa" && $CI_PIPELINE_SOURCE == "push"'
 
 
 # Rules applied to every job in the pipeline

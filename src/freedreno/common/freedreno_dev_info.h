@@ -35,6 +35,14 @@ struct fd_dev_info {
 
    int wave_granularity;
 
+   /* These are fallback values that should match what drm/msm programs, for
+    * kernels that don't support returning them. Newer devices should not set
+    * them and just use the value from the kernel.
+    */
+   uint32_t highest_bank_bit;
+   uint32_t ubwc_swizzle;
+   uint32_t macrotile_mode;
+
    /* Information for private memory calculations */
    uint32_t fibers_per_sp;
 
@@ -216,6 +224,8 @@ struct fd_dev_info {
 
       /* Whether there is CP_EVENT_WRITE7::WRITE_SAMPLE_COUNT */
       bool has_event_write_sample_count;
+
+      bool has_64b_ssbo_atomics;
 
       /* Blob executes a special compute dispatch at the start of each
        * command buffers. We copy this dispatch as is.
