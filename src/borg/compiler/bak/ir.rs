@@ -325,3 +325,28 @@ impl From<RegFile> for u8 {
         value as u8
     }
 }
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct Label {
+    idx: u32
+}
+pub struct BasicBlock {
+    pub label: Label,
+    pub instrs: Vec<Box<Instr>>,
+}
+
+pub struct LabelAllocator {
+    count: u32,
+}
+
+impl LabelAllocator {
+    pub fn new() -> LabelAllocator {
+        LabelAllocator { count: 0 }
+    }
+
+    pub fn alloc(&mut self) -> Label {
+        let idx = self.count;
+        self.count += 1;
+        Label { idx: idx }
+    }
+}

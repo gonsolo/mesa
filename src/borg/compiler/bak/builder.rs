@@ -42,6 +42,15 @@ impl InstrBuilder {
             instrs: MappedInstrs::None,
         }
     }
+
+    pub fn as_vec(self) -> Vec<Box<Instr>> {
+        match self.instrs {
+            MappedInstrs::None => Vec::new(),
+            MappedInstrs::One(i) => vec![i],
+            MappedInstrs::Many(v) => v,
+        }
+    }
+
 }
 
 
@@ -58,6 +67,7 @@ pub struct SSAInstrBuilder<'a> {
 }
 
 impl<'a> SSAInstrBuilder<'a> {
+
     pub fn new(
         alloc: &'a mut SSAValueAllocator,
     ) ->Self {
@@ -66,6 +76,10 @@ impl<'a> SSAInstrBuilder<'a> {
             alloc: alloc
         }
     }
+
+     pub fn as_vec(self) -> Vec<Box<Instr>> {
+          self.b.as_vec()
+      }
 }
 
 

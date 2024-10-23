@@ -11,6 +11,7 @@ use crate::ir::*;
 use bak_bindings::*;
 
 use compiler::bindings::*;
+use compiler::cfg::CFGBuilder;
 use compiler::nir::*;
 
 use std::collections::HashMap;
@@ -31,6 +32,9 @@ impl<'a> PhiAllocMap<'a> {
 
 struct ShaderFromNir<'a> {
     nir: &'a nir_shader,
+    cfg: CFGBuilder<u32, BasicBlock>,
+    label_alloc: LabelAllocator,
+    block_label: HashMap<u32, Label>,
     ssa_map: HashMap<u32, Vec<SSAValue>>,
 }
 
@@ -39,8 +43,18 @@ impl<'a> ShaderFromNir<'a> {
     fn new(nir: &'a nir_shader) -> Self {
         Self {
             nir: nir,
+            cfg: CFGBuilder::new(),
+            label_alloc: LabelAllocator::new(),
+            block_label: HashMap::new(),
             ssa_map: HashMap::new(),
         }
+    }
+
+    fn get_block_label(&mut self, block: &nir_block) -> Label {
+        *self
+            .block_label
+            .entry(block.index)
+            .or_insert_with(|| self.label_alloc.alloc())
     }
 
     fn parse_load_const(
@@ -116,7 +130,12 @@ impl<'a> ShaderFromNir<'a> {
                 }
               }
         }
-        // TODO
+
+        let bb = BasicBlock {
+            label: self.get_block_label(nb),
+            instrs: b.as_vec(),
+        };
+        self.cfg.add_node(nb.index, bb);
     }
 
     fn parse_cf_list(
@@ -206,4 +225,3 @@ pub fn bak_shader_from_nir(ns: &nir_shader) -> Shader {
     println!("bak_shader_from_nir");
     ShaderFromNir::new(ns).parse_shader()
 }
-
