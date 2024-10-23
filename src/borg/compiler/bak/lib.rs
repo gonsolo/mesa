@@ -3,6 +3,5 @@
 
 mod api;
 mod builder;
-mod encode;
 mod from_nir;
 mod ir;

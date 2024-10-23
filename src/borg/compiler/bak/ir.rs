@@ -352,3 +352,14 @@ impl LabelAllocator {
         Label { idx: idx }
     }
 }
+
+pub struct ShaderModel {}
+
+impl ShaderModel {
+
+    pub fn encode_shader(&self, _shader: &Shader) -> Vec<u32> {
+        println!("Shader::encode");
+        let encoded = Vec::new();
+        encoded
+    }
+}

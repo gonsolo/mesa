@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::from_nir::*;
-
-//extern crate bak_bindings;
+use crate::ir::ShaderModel;
 use compiler::bindings::*;
 use bak_bindings::*;
 
@@ -32,16 +31,14 @@ pub extern "C" fn bak_compile_shader(
     println!("bak_compile_shader");
 
     unsafe { bak_postprocess_nir(nir, bak) };
-
     let nir = unsafe { &*nir };
 
+    let sm = ShaderModel {};
     let s = bak_shader_from_nir(nir);
 
-    // gonsolo
-    println!("{}", s);
-
-    let code = s.encode();
     // TODO
+
+    let code = sm.encode_shader(&s);
 
     let bin = Box::new(ShaderBin::new(code));
     Box::into_raw(bin) as *mut bak_shader_bin
