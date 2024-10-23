@@ -64,6 +64,8 @@ impl<'a> ShaderFromNir<'a> {
             _ => panic!("Unknown bit size: {}", load_const.def.bit_size),
         }
         self.set_ssa(&load_const.def, dst);
+
+        println!("{:?}", self.ssa_map);
     }
 
     fn parse_block(

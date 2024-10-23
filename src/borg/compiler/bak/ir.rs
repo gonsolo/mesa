@@ -185,7 +185,7 @@ impl<T: Into<SSARef>> From<T> for Dst {
     }
 }
 
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SSAValue {
     packed: u32,
 }
