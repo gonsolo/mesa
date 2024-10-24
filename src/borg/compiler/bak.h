@@ -10,8 +10,8 @@
 struct bak_compiler;
 
 struct bak_shader_bin {
-        const void *code;
         uint32_t code_size;
+        const void *code;
 };
 
 struct bak_shader_bin *

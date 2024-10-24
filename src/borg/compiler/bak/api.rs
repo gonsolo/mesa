@@ -1,22 +1,30 @@
 // Copyright © 2024 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
+
 use crate::from_nir::*;
 use crate::sm::*;
+
 use compiler::bindings::*;
 use bak_bindings::*;
 
+use std::os::raw::c_void;
+
 #[repr(C)]
 struct ShaderBin {
+    bin: bak_shader_bin,
     code: Vec<u32>
 }
 
 impl ShaderBin {
     pub fn new(code: Vec<u32>) -> ShaderBin {
-
-        // TODO
+        let bin = bak_shader_bin {
+            code_size: (code.len() * 4).try_into().unwrap(),
+            code: code.as_ptr() as *const c_void
+        };
 
         ShaderBin {
+            bin: bin,
             code: code
         }
     }
