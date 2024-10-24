@@ -192,7 +192,7 @@ impl<T: Into<SrcRef>> From<T> for Src {
 
 impl fmt::Display for Src {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TODO")
+        write!(f, "TODO: Display for Src")
     }
 }
 
@@ -463,6 +463,12 @@ impl Instr {
 
     pub fn new_boxed(op: impl Into<Op>) -> Box<Self> {
         Box::new(Instr::new(op))
+    }
+}
+
+impl fmt::Display for Instr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Instr: {}", self.op)
     }
 }
 

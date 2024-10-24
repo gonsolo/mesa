@@ -188,7 +188,6 @@ impl<'a> ShaderFromNir<'a> {
         f
     }
 
-
     pub fn parse_shader(mut self) -> Shader {
         println!("ShaderFromNir::parse_shader!");
         let mut functions = Vec::new();

@@ -44,7 +44,9 @@ pub extern "C" fn bak_compile_shader(
     let sm = ShaderModel {};
     let s = bak_shader_from_nir(nir);
 
-    // TODO
+    eprintln!("BAK IR:\n{}", &s);
+
+    // TODO: passes
 
     let code = sm.encode_shader(&s);
 

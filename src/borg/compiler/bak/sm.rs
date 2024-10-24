@@ -37,6 +37,7 @@ impl ShaderModel {
 
         for b in &func.blocks {
             for instr in &b.instrs {
+                println!("Encoding instr {}", instr);
                 let mut e = SMEncoder {
                     ip: encoded.len(),
                     inst: [0_u32; 4],
