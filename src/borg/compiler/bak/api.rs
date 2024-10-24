@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::from_nir::*;
-use crate::ir::ShaderModel;
+use crate::sm::*;
 use compiler::bindings::*;
 use bak_bindings::*;
 

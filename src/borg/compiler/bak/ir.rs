@@ -148,6 +148,23 @@ impl TryFrom<&[SSAValue]> for SSARef {
     }
 }
 
+impl fmt::Display for SSARef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.comps() == 1 {
+            write!(f, "{}", self[0])
+        } else {
+            write!(f, "{{")?;
+            for (i, v) in self.iter().enumerate() {
+                if i != 0 {
+                    write!(f, " ")?;
+                }
+                write!(f, "{}", v)?;
+            }
+            write!(f, "}}")
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub struct Src {
     //pub src_ref: SrcRef,
@@ -173,6 +190,12 @@ impl<T: Into<SrcRef>> From<T> for Src {
     }
 }
 
+impl fmt::Display for Src {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "TODO")
+    }
+}
+
 
 #[derive(Clone, Copy)]
 pub enum Dst {
@@ -181,8 +204,25 @@ pub enum Dst {
     // TODO Reg(RegRef),
 }
 
-impl<T: Into<SSARef>> From<T> for Dst {
-    fn from(ssa: T) -> Dst {
+impl Dst {
+    pub fn is_none(&self) -> bool {
+        matches!(self, Dst::None)
+    }
+}
+
+impl fmt::Display for Dst {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Dst::None => write!(f, "null")?,
+            Dst::SSA(v) => v.fmt(f)?,
+            //Dst::Reg(r) => r.fmt(f)?,
+        }
+        Ok(())
+    }
+}
+
+            impl<T: Into<SSARef>> From<T> for Dst {
+                fn from(ssa: T) -> Dst {
         Dst::SSA(ssa.into())
     }
 }
@@ -202,6 +242,19 @@ impl SSAValue {
         assert!(u8::from(file) < 8);
         packed |= u32::from(u8::from(file)) << 29;
         SSAValue { packed: packed }
+    }
+
+    fn fmt_plain(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // TODO write!(f, "{}{}", self.file().fmt_prefix(), self.idx())
+        write!(f, "TODO: SSAValue fmt_plain")
+    }
+
+}
+
+impl fmt::Display for SSAValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "%")?;
+        self.fmt_plain(f)
     }
 }
 
@@ -226,11 +279,102 @@ pub struct OpCopy {
     pub src: Src,
 }
 
+macro_rules! impl_display_for_op {
+    ($op: ident) => {
+        impl fmt::Display for $op {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                let s = String::new();
+                // TODO write!(s, "{}", Fmt(|f| self.fmt_dsts(f)))?;
+                if !s.is_empty() {
+                    write!(f, "{} = ", s)?;
+                }
+                self.fmt_op(f)
+            }
+        }
+    };
+}
+
+impl DisplayOp for OpCopy {
+    fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "copy {}", self.src)
+    }
+}
+impl_display_for_op!(OpCopy);
+
+fn fmt_dst_slice(f: &mut fmt::Formatter<'_>, dsts: &[Dst]) -> fmt::Result {
+    if dsts.is_empty() {
+        return Ok(());
+    }
+
+    // Figure out the last non-null dst
+    //
+    // Note: By making the top inclusive and starting at 0, we ensure that
+    // at least one dst always gets printed.
+    let mut last_dst = 0;
+    for (i, dst) in dsts.iter().enumerate() {
+        if !dst.is_none() {
+            last_dst = i;
+        }
+    }
+
+    for i in 0..(last_dst + 1) {
+        if i != 0 {
+            write!(f, " ")?;
+        }
+        write!(f, "{}", &dsts[i])?;
+    }
+    Ok(())
+}
+
+pub type SrcTypeList = AttrList<SrcType>;
+
 pub trait SrcsAsSlice: AsSlice<Src, Attr = SrcType> {
-    // TODO
+    fn srcs_as_slice(&self) -> &[Src] {
+        self.as_slice()
+    }
+
+    fn srcs_as_mut_slice(&mut self) -> &mut [Src] {
+        self.as_mut_slice()
+    }
+
+    fn src_types(&self) -> SrcTypeList {
+        self.attrs()
+    }
+
+    fn src_idx(&self, src: &Src) -> usize {
+        let r = self.srcs_as_slice().as_ptr_range();
+        assert!(r.contains(&(src as *const Src)));
+        unsafe { (src as *const Src).offset_from(r.start) as usize }
+    }
 }
 
 impl<T: AsSlice<Src, Attr = SrcType>> SrcsAsSlice for T {}
+
+pub type DstTypeList = AttrList<DstType>;
+
+pub trait DstsAsSlice: AsSlice<Dst, Attr = DstType> {
+    fn dsts_as_slice(&self) -> &[Dst] {
+        self.as_slice()
+    }
+
+    fn dsts_as_mut_slice(&mut self) -> &mut [Dst] {
+        self.as_mut_slice()
+    }
+
+    // Currently only used by test code
+    #[allow(dead_code)]
+    fn dst_types(&self) -> DstTypeList {
+        self.attrs()
+    }
+
+    fn dst_idx(&self, dst: &Dst) -> usize {
+        let r = self.dsts_as_slice().as_ptr_range();
+        assert!(r.contains(&(dst as *const Dst)));
+        unsafe { (dst as *const Dst).offset_from(r.start) as usize }
+    }
+}
+
+impl<T: AsSlice<Dst, Attr = DstType>> DstsAsSlice for T {}
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -271,23 +415,47 @@ impl DstType {
     const DEFAULT: DstType = DstType::Vec;
 }
 
-// TODO #[derive(DisplayOp, DstsAsSlice, SrcsAsSlice, FromVariants)]
-#[derive(DstsAsSlice, SrcsAsSlice, FromVariants)]
+pub trait DisplayOp: DstsAsSlice {
+
+    fn fmt_dsts(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_dst_slice(f, self.dsts_as_slice())
+    }
+
+    fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+
+}
+
+pub struct Fmt<F>(pub F)
+    where
+        F: Fn(&mut fmt::Formatter) -> fmt::Result;
+
+        impl<F> fmt::Display for Fmt<F>
+        where
+            F: Fn(&mut fmt::Formatter) -> fmt::Result,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        (self.0)(f)
+    }
+}
+
+
+#[derive(DisplayOp, DstsAsSlice, SrcsAsSlice, FromVariants)]
 pub enum Op {
     Copy(OpCopy),
 }
+impl_display_for_op!(Op);
 
 pub struct Instr {
     //pub pred: Pred,
-    //pub op: Op,
+    pub op: Op,
     //pub deps: InstrDeps,
 }
 
 impl Instr {
 
-    pub fn new(_op: impl Into<Op>) -> Instr {
+    pub fn new(op: impl Into<Op>) -> Instr {
         Instr {
-            //op: op.into(),
+            op: op.into(),
             //pred: true.into(),
             //deps: InstrDeps::new(),
         }
@@ -353,13 +521,3 @@ impl LabelAllocator {
     }
 }
 
-pub struct ShaderModel {}
-
-impl ShaderModel {
-
-    pub fn encode_shader(&self, _shader: &Shader) -> Vec<u32> {
-        println!("Shader::encode");
-        let encoded = Vec::new();
-        encoded
-    }
-}
