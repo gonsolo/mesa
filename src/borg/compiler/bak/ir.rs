@@ -18,7 +18,12 @@ pub struct Function {
 }
 
 impl fmt::Display for Function {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for b in &self.blocks {
+            for i in &b.instrs {
+                write!(f, "{}", i)?;
+            }
+        }
         Ok(())
     }
 }
@@ -468,7 +473,7 @@ impl Instr {
 
 impl fmt::Display for Instr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Instr: {}", self.op)
+        write!(f, "Instr op: {}", self.op)
     }
 }
 
