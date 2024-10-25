@@ -1,7 +1,6 @@
 // Copyright © 2024 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-
 use crate::from_nir::*;
 use crate::sm::*;
 
@@ -9,6 +8,13 @@ use compiler::bindings::*;
 use bak_bindings::*;
 
 use std::os::raw::c_void;
+
+macro_rules! pass {
+    ($s: expr, $pass: ident) => {
+        $s.$pass();
+        eprintln!("NAK IR after {}:\n{}", stringify!($pass), $s);
+    };
+}
 
 #[repr(C)]
 struct ShaderBin {
@@ -42,11 +48,11 @@ pub extern "C" fn bak_compile_shader(
     let nir = unsafe { &*nir };
 
     let sm = ShaderModel {};
-    let s = bak_shader_from_nir(nir);
+    let mut s = bak_shader_from_nir(nir);
 
-    eprintln!("BAK IR:\n{}", &s);
+    eprintln!("BAK IR before passes:\n{}", &s);
 
-    // TODO: passes
+    pass!(s, lower_copy);
 
     let code = sm.encode_shader(&s);
 

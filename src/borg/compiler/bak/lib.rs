@@ -5,4 +5,5 @@ mod api;
 mod builder;
 mod from_nir;
 mod ir;
+mod lower_copy;
 mod sm;

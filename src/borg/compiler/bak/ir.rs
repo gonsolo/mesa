@@ -17,6 +17,19 @@ pub struct Function {
     pub blocks: CFG<BasicBlock>,
 }
 
+impl Function {
+
+   pub fn map_instrs(
+          &mut self,
+          mut map: impl FnMut(Box<Instr>, &mut SSAValueAllocator) -> MappedInstrs,
+      ) {
+          let alloc = &mut self.ssa_alloc;
+          for b in &mut self.blocks {
+              b.map_instrs(|i| map(i, alloc));
+          }
+      }
+}
+
 impl fmt::Display for Function {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for b in &self.blocks {
@@ -41,6 +54,18 @@ impl PhiAllocator {
 pub struct Shader {
     //pub info: ShaderInfo,
     pub functions: Vec<Function>,
+}
+
+impl Shader {
+   pub fn map_instrs(
+          &mut self,
+          mut map: impl FnMut(Box<Instr>, &mut SSAValueAllocator) -> MappedInstrs,
+      ) {
+          for f in &mut self.functions {
+              f.map_instrs(&mut map);
+          }
+      }
+
 }
 
 impl fmt::Display for Shader {
@@ -170,9 +195,31 @@ impl fmt::Display for SSARef {
     }
 }
 
+pub trait HasRegFile {
+    fn file(&self) -> RegFile;
+}
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+pub struct RegRef {
+    packed: u32,
+}
+
+impl HasRegFile for RegRef {
+    fn file(&self) -> RegFile {
+        ((self.packed >> 29) & 0x7).try_into().unwrap()
+    }
+}
+
+impl fmt::Display for RegRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "TODO: fmt for RegRef")?;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub struct Src {
-    //pub src_ref: SrcRef,
+    pub src_ref: SrcRef,
     //pub src_mod: SrcMod,
     //pub src_swizzle: SrcSwizzle,
 }
@@ -186,9 +233,9 @@ impl Src {
 }
 
 impl<T: Into<SrcRef>> From<T> for Src {
-    fn from(_value: T) -> Src {
+    fn from(value: T) -> Src {
         Src {
-            //src_ref: value.into(),
+            src_ref: value.into(),
             //src_mod: SrcMod::None,
             //src_swizzle: SrcSwizzle::None,
         }
@@ -206,12 +253,19 @@ impl fmt::Display for Src {
 pub enum Dst {
     None,
     SSA(SSARef),
-    // TODO Reg(RegRef),
+    Reg(RegRef),
 }
 
 impl Dst {
     pub fn is_none(&self) -> bool {
         matches!(self, Dst::None)
+    }
+
+    pub fn as_reg(&self) -> Option<&RegRef> {
+        match self {
+            Dst::Reg(r) => Some(r),
+            _ => None,
+        }
     }
 }
 
@@ -220,7 +274,7 @@ impl fmt::Display for Dst {
         match self {
             Dst::None => write!(f, "null")?,
             Dst::SSA(v) => v.fmt(f)?,
-            //Dst::Reg(r) => r.fmt(f)?,
+            Dst::Reg(r) => r.fmt(f)?,
         }
         Ok(())
     }
@@ -270,12 +324,18 @@ pub enum RegFile {
     ///
     /// General-purpose registers are 32 bits per SIMT channel.
     GPR = 0,
-
-    /// The predicate reigster file
-    ///
-    /// Predicate registers are 1 bit per SIMT channel.
-    Pred = 2,
 }
+
+impl TryFrom<u32> for RegFile {
+      type Error = &'static str;
+
+      fn try_from(value: u32) -> Result<Self, Self::Error> {
+          match value {
+              0 => Ok(RegFile::GPR),
+              _ => Err("Invalid register file number"),
+          }
+      }
+  }
 
 #[repr(C)]
 #[derive(SrcsAsSlice, DstsAsSlice)]
@@ -305,6 +365,23 @@ impl DisplayOp for OpCopy {
     }
 }
 impl_display_for_op!(OpCopy);
+
+#[repr(C)]
+#[derive(SrcsAsSlice, DstsAsSlice)]
+pub struct OpMov {
+    #[dst_type(GPR)]
+    pub dst: Dst,
+
+    #[src_type(ALU)]
+    pub src: Src,
+}
+
+impl DisplayOp for OpMov {
+    fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "mov {}", self.src)
+    }
+}
+impl_display_for_op!(OpMov);
 
 fn fmt_dst_slice(f: &mut fmt::Formatter<'_>, dsts: &[Dst]) -> fmt::Result {
     if dsts.is_empty() {
@@ -447,6 +524,7 @@ pub struct Fmt<F>(pub F)
 #[derive(DisplayOp, DstsAsSlice, SrcsAsSlice, FromVariants)]
 pub enum Op {
     Copy(OpCopy),
+    Mov(OpMov),
 }
 impl_display_for_op!(Op);
 
@@ -514,6 +592,28 @@ pub struct Label {
 pub struct BasicBlock {
     pub label: Label,
     pub instrs: Vec<Box<Instr>>,
+}
+
+impl BasicBlock {
+
+   pub fn map_instrs(
+          &mut self,
+          mut map: impl FnMut(Box<Instr>) -> MappedInstrs,
+      ) {
+          let mut instrs = Vec::new();
+          for i in self.instrs.drain(..) {
+              match map(i) {
+                  MappedInstrs::None => (),
+                  MappedInstrs::One(i) => {
+                      instrs.push(i);
+                  }
+                  MappedInstrs::Many(mut v) => {
+                      instrs.append(&mut v);
+                  }
+              }
+          }
+          self.instrs = instrs;
+      }
 }
 
 pub struct LabelAllocator {

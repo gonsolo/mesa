@@ -22,11 +22,7 @@ pub trait SSABuilder: Builder {
     fn alloc_ssa(&mut self, file: RegFile, comps: u8) -> SSARef;
 
     fn copy(&mut self, src: Src) -> SSARef {
-        let dst = if src.is_predicate() {
-            self.alloc_ssa(RegFile::Pred, 1)
-        } else {
-            self.alloc_ssa(RegFile::GPR, 1)
-        };
+        let dst = self.alloc_ssa(RegFile::GPR, 1);
         self.copy_to(dst.into(), src);
         dst
     }
@@ -51,6 +47,9 @@ impl InstrBuilder {
         }
     }
 
+    pub fn as_mapped_instrs(self) -> MappedInstrs {
+        return self.instrs
+    }
 }
 
 
