@@ -280,8 +280,14 @@ impl fmt::Display for Dst {
     }
 }
 
-            impl<T: Into<SSARef>> From<T> for Dst {
-                fn from(ssa: T) -> Dst {
+impl From<RegRef> for Dst {
+    fn from(reg: RegRef) -> Dst {
+        Dst::Reg(reg)
+    }
+}
+
+impl<T: Into<SSARef>> From<T> for Dst {
+    fn from(ssa: T) -> Dst {
         Dst::SSA(ssa.into())
     }
 }
@@ -361,7 +367,7 @@ macro_rules! impl_display_for_op {
 
 impl DisplayOp for OpCopy {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "copy {}", self.src)
+        write!(f, "OpCopy dst: {}, src: {}", self.dst, self.src)
     }
 }
 impl_display_for_op!(OpCopy);
