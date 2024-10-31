@@ -333,15 +333,15 @@ pub enum RegFile {
 }
 
 impl TryFrom<u32> for RegFile {
-      type Error = &'static str;
+    type Error = &'static str;
 
-      fn try_from(value: u32) -> Result<Self, Self::Error> {
-          match value {
-              0 => Ok(RegFile::GPR),
-              _ => Err("Invalid register file number"),
-          }
-      }
-  }
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(RegFile::GPR),
+            _ => Err("Invalid register file number"),
+        }
+    }
+}
 
 #[repr(C)]
 #[derive(SrcsAsSlice, DstsAsSlice)]
@@ -590,6 +590,7 @@ impl From<RegFile> for u8 {
         value as u8
     }
 }
+
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct Label {

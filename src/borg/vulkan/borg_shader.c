@@ -136,6 +136,8 @@ borg_compile_shader(struct borg_device *dev,
         struct borg_shader *shader;
         VkResult result;
 
+        puts(__func__);
+
         shader = vk_shader_zalloc(&dev->vk, &borg_shader_ops, info->stage,
                         pAllocator, sizeof(*shader));
 

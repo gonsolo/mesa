@@ -63,14 +63,18 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
    VkResult result;
    struct borg_instance *instance = (struct borg_instance *)vk_instance;
 
+   puts(__func__);
+
    if (!(drm_device->available_nodes & (1 << DRM_NODE_RENDER))) {
+      puts("Incompatible driver.");
       return VK_ERROR_INCOMPATIBLE_DRIVER;
    }
    switch (drm_device->bustype) {
       case DRM_BUS_PCI:
-         if (drm_device->deviceinfo.pci->vendor_id != BORG_VENDOR_ID) {
-            return VK_ERROR_INCOMPATIBLE_DRIVER;
-         }
+         //if (drm_device->deviceinfo.pci->vendor_id != BORG_VENDOR_ID) {
+         //   puts("Incompatible pci driver.");
+         //   return VK_ERROR_INCOMPATIBLE_DRIVER;
+         //}
          break;
       case DRM_BUS_PLATFORM: {
          const char *compat_prefix = "borg,";
@@ -82,11 +86,13 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
             }
          }
          if (!found) {
+            puts("Incompatible driver: Not found");
             return VK_ERROR_INCOMPATIBLE_DRIVER;
          }
          break;
       }
       default:
+         puts("Incompatible driver: Default");
          return VK_ERROR_INCOMPATIBLE_DRIVER;
    }
 
@@ -95,6 +101,7 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
       result = vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
                          "fstat() failed on %s: %m",
                          drm_device->nodes[DRM_NODE_RENDER]);
+      puts("stat failed");
       return result;
    }
    const dev_t render_dev = st.st_rdev;
@@ -104,6 +111,7 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
                 8, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
    if (pdev == NULL) {
       result = vk_error(instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+      puts("pdev zero");
       return result;
    }
 
@@ -194,6 +202,8 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
 
 fail_init:
    vk_physical_device_finish(&pdev->vk);
+
+   printf("%s: result: %i\n", __func__, result);
 
    return result;
 }

@@ -4,6 +4,7 @@
 use crate::ir::{Op, Shader};
 
 struct SMEncoder {
+    #[allow(dead_code)]
     ip: usize,
     inst: [u32; 4]
 }

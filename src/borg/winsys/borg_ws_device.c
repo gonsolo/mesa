@@ -20,12 +20,12 @@ borg_ws_device_new(drmDevicePtr drm_device)
         if (!ver)
                 goto out_err;
 
-        if (strncmp("borg", ver->name, ver->name_len) != 0) {
-                fprintf(stderr,
-                        "DRM kernel driver '%.*s' in use. Borg requires borg.\n",
-                        ver->name_len, ver->name);
-                goto out_err;
-        }
+        //if (strncmp("borg", ver->name, ver->name_len) != 0) {
+        //        fprintf(stderr,
+        //                "DRM kernel driver '%.*s' in use. Borg requires borg.\n",
+        //                ver->name_len, ver->name);
+        //        goto out_err;
+        //}
         device->fd = fd;
         simple_mtx_init(&device->bos_lock, mtx_plain);
         return device;

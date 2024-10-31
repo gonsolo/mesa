@@ -9,6 +9,7 @@ pub trait Builder {
     fn push_instr(&mut self, instr: Box<Instr>) -> &mut Instr;
 
     fn copy_to(&mut self, dst: Dst, src: Src) {
+        println!("copy_to: dst: {}", dst);
         self.push_op(OpCopy { dst: dst, src: src });
     }
 
