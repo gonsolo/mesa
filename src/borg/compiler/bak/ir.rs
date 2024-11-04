@@ -10,7 +10,7 @@ use bak_ir_proc::*;
 use compiler::as_slice::*;
 use compiler::cfg::CFG;
 use compiler::smallvec::SmallVec;
-use std::ops::{Deref, DerefMut};
+use std::ops::{Deref, DerefMut, Range};
 use std::fmt::Write;
 
 pub struct Function {
@@ -133,21 +133,18 @@ impl SSARef {
         }
     }
 
-}
-
-macro_rules! impl_ssa_ref_from_arr {
-    ($n: expr) => {
-        impl From<[SSAValue; $n]> for SSARef {
-            fn from(comps: [SSAValue; $n]) -> Self {
-                SSARef::new(&comps[..])
+    pub fn file(&self) -> Option<RegFile> {
+        let comps = usize::from(self.comps());
+        let file = self.v[0].file();
+        for i in 1..comps {
+            if self.v[i].file() != file {
+                return None;
             }
         }
-    };
+        Some(file)
+    }
+
 }
-impl_ssa_ref_from_arr!(1);
-impl_ssa_ref_from_arr!(2);
-impl_ssa_ref_from_arr!(3);
-impl_ssa_ref_from_arr!(4);
 
 impl Deref for SSARef {
     type Target = [SSAValue];
@@ -179,6 +176,34 @@ impl TryFrom<&[SSAValue]> for SSARef {
     }
 }
 
+impl TryFrom<Vec<SSAValue>> for SSARef {
+    type Error = &'static str;
+
+    fn try_from(comps: Vec<SSAValue>) -> Result<Self, Self::Error> {
+        SSARef::try_from(&comps[..])
+    }
+}
+
+macro_rules! impl_ssa_ref_from_arr {
+    ($n: expr) => {
+        impl From<[SSAValue; $n]> for SSARef {
+            fn from(comps: [SSAValue; $n]) -> Self {
+                SSARef::new(&comps[..])
+            }
+        }
+    };
+}
+impl_ssa_ref_from_arr!(1);
+impl_ssa_ref_from_arr!(2);
+impl_ssa_ref_from_arr!(3);
+impl_ssa_ref_from_arr!(4);
+
+impl From<SSAValue> for SSARef { 
+    fn from(val: SSAValue) -> Self {
+        [val].into()
+    }
+}
+
 impl fmt::Display for SSARef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.comps() == 1 {
@@ -200,9 +225,44 @@ pub trait HasRegFile {
     fn file(&self) -> RegFile;
 }
 
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RegRef {
     packed: u32,
+}
+
+impl RegRef {
+
+    pub const MAX_IDX: u32 = (1 << 26) - 1;
+
+    fn zero_idx(file: RegFile) -> u32 {
+        match file {
+            RegFile::GPR => 255,
+        }
+    }
+
+    pub fn new(file: RegFile, base_idx: u32, comps: u8) -> RegRef {
+        assert!(base_idx <= Self::MAX_IDX);
+        let mut packed = base_idx;
+        assert!(comps > 0 && comps <= 8);
+        packed |= u32::from(comps - 1) << 26;
+        assert!(u8::from(file) < 8);
+        packed |= u32::from(u8::from(file)) << 29;
+        RegRef { packed: packed }
+    }
+
+    pub fn base_idx(&self) -> u32 {
+        self.packed & 0x03ffffff
+    }
+
+    pub fn idx_range(&self) -> Range<u32> {
+        let start = self.base_idx();
+        let end = start + u32::from(self.comps());
+        start..end
+    }
+
+    pub fn comps(&self) -> u8 {
+        (((self.packed >> 26) & 0x7) + 1).try_into().unwrap()
+    }
 }
 
 impl HasRegFile for RegRef {
@@ -213,7 +273,10 @@ impl HasRegFile for RegRef {
 
 impl fmt::Display for RegRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TODO: fmt for RegRef")?;
+        write!(f, "{}{}", self.file().fmt_prefix(), self.base_idx())?;
+        if self.comps() > 1 {
+            write!(f, "..{}", self.idx_range().end)?;
+        }
         Ok(())
     }
 }
@@ -263,6 +326,21 @@ impl Dst {
     }
 
     pub fn as_reg(&self) -> Option<&RegRef> {
+
+        println!("as_reg: self: {}", self);
+        match self {
+            Dst::Reg(_r) => {
+                println!("Dst::Reg");
+            },
+            Dst::SSA(_s) => {
+                println!("Dst::SSA");
+            },
+            _ => {
+                println!("None");
+            },
+
+        }
+
         match self {
             Dst::Reg(r) => Some(r),
             _ => None,

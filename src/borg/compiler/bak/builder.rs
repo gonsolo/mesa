@@ -10,6 +10,12 @@ pub trait Builder {
 
     fn copy_to(&mut self, dst: Dst, src: Src) {
         println!("copy_to: dst: {}", dst);
+
+        let bla = dst.as_reg();
+        println!("copy_to: as_reg ok!");
+        let _laber = bla.unwrap();
+        println!("copy_to: unwrap ok!");
+
         self.push_op(OpCopy { dst: dst, src: src });
     }
 
@@ -23,7 +29,16 @@ pub trait SSABuilder: Builder {
     fn alloc_ssa(&mut self, file: RegFile, comps: u8) -> SSARef;
 
     fn copy(&mut self, src: Src) -> SSARef {
-        let dst = self.alloc_ssa(RegFile::GPR, 1);
+        let dst: SSARef = self.alloc_ssa(RegFile::GPR, 1);
+        println!("copy: dst: {}", dst);
+
+        //let dst_into: Dst = dst.into();
+        //println!("copy: dst_into: {}", dst_into);
+        //blet bla = dst_into.as_reg();
+        //println!("copy: as_reg ok! bla: {:?}", bla);
+        //blet _laber = bla.unwrap();
+        //println!("copy: unwrap ok!");
+
         self.copy_to(dst.into(), src);
         dst
     }
