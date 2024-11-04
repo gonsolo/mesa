@@ -6,6 +6,8 @@
 #ifndef BORG_PHYSICAL_DEVICE_H
 #define BORG_PHYSICAL_DEVICE_H
 
+#include "borg_debug.h"
+
 #include "vk_physical_device.h"
 #include "vk_sync.h"
 
@@ -44,6 +46,8 @@ struct borg_physical_device {
    const struct vk_sync_type *sync_types[2];
 
    struct bak_compiler* bak;
+
+   enum borg_debug debug_flags;
 };
 
 VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,

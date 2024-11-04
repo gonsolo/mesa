@@ -39,6 +39,23 @@ borg_EnumerateInstanceExtensionProperties(const char *pLayerName,
       &instance_extensions, pPropertyCount, pProperties);
 }
 
+static void
+borg_init_debug_flags(struct borg_instance* instance)
+{
+   uint64_t flag = 0;
+   char* skip_drm = getenv("BORG_SKIP_DRM");
+   if (skip_drm) {
+      if (strcmp(skip_drm, "1") == 0) {
+         flag |= BORG_SKIP_DRM;
+      } else if (strcmp(skip_drm, "0") == 0) {
+         // Nothing to do
+      } else {
+         puts("Unknown value for BORG_SKIP_DRM");
+      }
+   }
+   instance->debug_flags = flag;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 borg_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
                    const VkAllocationCallbacks *pAllocator,
@@ -72,6 +89,7 @@ borg_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
       borg_create_drm_physical_device;
    instance->vk.physical_devices.destroy = borg_physical_device_destroy;
 
+   borg_init_debug_flags(instance);
    *pInstance = borg_instance_to_handle(instance);
 
    return VK_SUCCESS;

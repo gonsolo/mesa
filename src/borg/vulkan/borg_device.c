@@ -28,6 +28,7 @@ borg_CreateDevice(VkPhysicalDevice physicalDevice,
    //puts(__func__);
    VK_FROM_HANDLE(borg_physical_device, pdev, physicalDevice);
    struct borg_device *dev;
+   bool skip_drm;
 
    dev = vk_zalloc2(&pdev->vk.instance->alloc, pAllocator,
                     sizeof(*dev), 8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
@@ -59,7 +60,8 @@ borg_CreateDevice(VkPhysicalDevice physicalDevice,
       return result;
    }
 
-   dev->ws_dev = borg_ws_device_new(drm_device);
+   skip_drm = pdev->debug_flags & BORG_SKIP_DRM;
+   dev->ws_dev = borg_ws_device_new(drm_device, skip_drm);
 
    dev->vk.command_buffer_ops = &borg_cmd_buffer_ops;
 

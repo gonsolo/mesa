@@ -62,7 +62,7 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
 {
    VkResult result;
    struct borg_instance *instance = (struct borg_instance *)vk_instance;
-
+   int skip_drm;
    puts(__func__);
 
    if (!(drm_device->available_nodes & (1 << DRM_NODE_RENDER))) {
@@ -71,10 +71,13 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
    }
    switch (drm_device->bustype) {
       case DRM_BUS_PCI:
-         //if (drm_device->deviceinfo.pci->vendor_id != BORG_VENDOR_ID) {
-         //   puts("Incompatible pci driver.");
-         //   return VK_ERROR_INCOMPATIBLE_DRIVER;
-         //}
+         skip_drm = instance->debug_flags & BORG_SKIP_DRM;
+         if (!skip_drm) {
+            if (drm_device->deviceinfo.pci->vendor_id != BORG_VENDOR_ID) {
+               puts("Incompatible pci driver.");
+               return VK_ERROR_INCOMPATIBLE_DRIVER;
+            }
+         }
          break;
       case DRM_BUS_PLATFORM: {
          const char *compat_prefix = "borg,";
@@ -197,6 +200,8 @@ VkResult borg_create_drm_physical_device(struct vk_instance *vk_instance,
    pdev->vk.supported_sync_types = pdev->sync_types;
 
    pdev->render_dev = render_dev;
+
+   pdev->debug_flags = instance->debug_flags;
 
    *pdev_out = &pdev->vk;
 

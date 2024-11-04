@@ -13,6 +13,6 @@ struct borg_ws_device {
 };
  
 struct borg_ws_device *
-borg_ws_device_new(drmDevicePtr drm_device);
+borg_ws_device_new(drmDevicePtr drm_device, bool skip_drm);
 
 #endif

@@ -310,11 +310,20 @@ impl SSAValue {
         SSAValue { packed: packed }
     }
 
-    fn fmt_plain(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // TODO write!(f, "{}{}", self.file().fmt_prefix(), self.idx())
-        write!(f, "TODO: SSAValue fmt_plain")
+    pub fn idx(&self) -> u32 {
+        self.packed & 0x1fffffff
     }
 
+    fn fmt_plain(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", self.file().fmt_prefix(), self.idx())
+        //write!(f, "TODO: SSAValue fmt_plain")
+    }
+}
+
+impl HasRegFile for SSAValue {
+    fn file(&self) -> RegFile {
+        RegFile::try_from(self.packed >> 29).unwrap()
+    }
 }
 
 impl fmt::Display for SSAValue {
@@ -331,6 +340,14 @@ pub enum RegFile {
     ///
     /// General-purpose registers are 32 bits per SIMT channel.
     GPR = 0,
+}
+
+impl RegFile {
+   fn fmt_prefix(&self) -> &'static str {
+        match self {
+              RegFile::GPR => "r",
+          }
+      }
 }
 
 impl TryFrom<u32> for RegFile {

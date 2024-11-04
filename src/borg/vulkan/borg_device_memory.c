@@ -12,6 +12,7 @@
 #include "borg_device.h"
 #include "borg_device_memory.h"
 #include "borg_entrypoints.h"
+#include "borg_physical_device.h"
 
 #include "util/u_memory.h"
 #include "util/vma.h"
@@ -155,6 +156,12 @@ vm_bind(struct borg_device *dev,
         struct vk_object_base *log_obj,
         struct drm_borg_vm_bind_op *op)
 {
+   struct borg_physical_device *pdev = borg_device_physical(dev);
+   bool skip_drm = pdev->debug_flags & BORG_SKIP_DRM;
+   if (skip_drm) {
+      return VK_SUCCESS;
+   }
+
    struct drm_borg_vm_bind vmbind = {
       .op_count = 1,
       .op_ptr = (uint64_t)(uintptr_t)(void *)op,
