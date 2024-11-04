@@ -316,7 +316,6 @@ impl SSAValue {
 
     fn fmt_plain(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}{}", self.file().fmt_prefix(), self.idx())
-        //write!(f, "TODO: SSAValue fmt_plain")
     }
 }
 

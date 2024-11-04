@@ -24,7 +24,7 @@ SKIP_DRM = 1
 all: compile
 t: test
 test: #install
-	cd $(VULKAN_COMPUTE_DIR); BORG_SKIP_DRM=$(SKIP_DRM) VK_ICD_FILENAMES=$(ICD) $(APPLICATION); cd -
+	cd $(VULKAN_COMPUTE_DIR); RUST_BACKTRACE=1 BORG_SKIP_DRM=$(SKIP_DRM) VK_ICD_FILENAMES=$(ICD) $(APPLICATION); cd -
 gdb: #install
 	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) gdb $(APPLICATION); cd -
 rust-gdb: #install
