@@ -11,6 +11,7 @@ use compiler::as_slice::*;
 use compiler::cfg::CFG;
 use compiler::smallvec::SmallVec;
 use std::ops::{Deref, DerefMut};
+use std::fmt::Write;
 
 pub struct Function {
     pub ssa_alloc: SSAValueAllocator,
@@ -354,8 +355,8 @@ macro_rules! impl_display_for_op {
     ($op: ident) => {
         impl fmt::Display for $op {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                let s = String::new();
-                // TODO write!(s, "{}", Fmt(|f| self.fmt_dsts(f)))?;
+                let mut s = String::new();
+                write!(s, "{}", Fmt(|f| self.fmt_dsts(f)))?;
                 if !s.is_empty() {
                     write!(f, "{} = ", s)?;
                 }
