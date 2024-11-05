@@ -308,7 +308,7 @@ impl<T: Into<SrcRef>> From<T> for Src {
 
 impl fmt::Display for Src {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TODO: Display for Src")
+        write!(f, "{}", self.src_ref)
     }
 }
 
@@ -462,7 +462,7 @@ macro_rules! impl_display_for_op {
 
 impl DisplayOp for OpCopy {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "OpCopy dst: {}, src: {}", self.dst, self.src)
+        write!(f, "copy {}", self.src)
     }
 }
 impl_display_for_op!(OpCopy);
@@ -652,7 +652,7 @@ impl Instr {
 
 impl fmt::Display for Instr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Instr op: {}", self.op)
+        write!(f, " {}", self.op)
     }
 }
 
@@ -679,6 +679,17 @@ impl From<u32> for SrcRef {
         }
     }
 }
+
+impl fmt::Display for SrcRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SrcRef::Zero => write!(f, "rZ"),
+            SrcRef::True => write!(f, "pT"),
+            SrcRef::False => write!(f, "pF"),
+        }
+    }
+}
+
 
 impl From<RegFile> for u8 {
     fn from(value: RegFile) -> u8 {

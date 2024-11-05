@@ -51,6 +51,7 @@ pub extern "C" fn bak_compile_shader(
     let mut s = bak_shader_from_nir(nir);
 
     eprintln!("BAK IR before passes:\n{}", &s);
+    eprintln!("BAK IR done\n");
 
     pass!(s, lower_copy);
 
