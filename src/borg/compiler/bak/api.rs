@@ -53,6 +53,7 @@ pub extern "C" fn bak_compile_shader(
     eprintln!("BAK IR before passes:\n{}", &s);
     eprintln!("BAK IR done\n");
 
+    pass!(s, assign_regs);
     pass!(s, lower_copy);
 
     let code = sm.encode_shader(&s);

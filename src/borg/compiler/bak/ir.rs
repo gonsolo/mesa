@@ -648,6 +648,10 @@ impl Instr {
     pub fn new_boxed(op: impl Into<Op>) -> Box<Self> {
         Box::new(Instr::new(op))
     }
+
+    pub fn dsts_mut(&mut self) -> &mut [Dst] {
+        self.op.dsts_as_mut_slice()
+    }
 }
 
 impl fmt::Display for Instr {
