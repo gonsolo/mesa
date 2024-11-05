@@ -11,20 +11,26 @@ VULKAN_COMPUTE = $(VULKAN_COMPUTE_DIR)/VulkanCompute
 APPLICATION = $(VULKAN_COMPUTE)
 MACHINE = $(shell uname -m)
 NVIDIA_COUNT = $(shell lspci|grep -c NVIDIA)
+ICD_D = ~/bin/mesa/share/vulkan/icd.d
+NOUVEAU_ICD = $(ICD_D)/nouveau_icd.$(MACHINE).json
+BORG_ICD = $(ICD_D)/borg_icd.$(MACHINE).json
 ifeq ($(NVIDIA_COUNT), 0)
-	ICD = ~/bin/mesa/share/vulkan/icd.d/borg_icd.$(MACHINE).json
+	ICD = $(BORG_ICD)
 else
-	ICD = ~/bin/mesa/share/vulkan/icd.d/nouveau_icd.$(MACHINE).json
+	ICD = $(NOUVEAU_ICD)
 endif
 DRIVERS = nouveau,borg-experimental
-#DRIVERS = borg-experimental
 #VERBOSE = --verbose
 SKIP_DRM = 1
 
 all: compile
 t: test
-test: #install
-	cd $(VULKAN_COMPUTE_DIR); MESA_SHADER_CACHE_DISABLE=1 NAK_DEBUG=print RUST_BACKTRACE=1 BORG_SKIP_DRM=$(SKIP_DRM) VK_ICD_FILENAMES=$(ICD) $(APPLICATION); cd -
+test: test_nouveau
+test_nouveau:
+	cd $(VULKAN_COMPUTE_DIR); MESA_SHADER_CACHE_DISABLE=1 NAK_DEBUG=print RUST_BACKTRACE=1 BORG_SKIP_DRM=$(SKIP_DRM) VK_ICD_FILENAMES=$(NOUVEAU_ICD) $(APPLICATION); cd -
+tb: test_borg
+test_borg:
+	cd $(VULKAN_COMPUTE_DIR); MESA_SHADER_CACHE_DISABLE=1 NAK_DEBUG=print RUST_BACKTRACE=1 BORG_SKIP_DRM=$(SKIP_DRM) VK_ICD_FILENAMES=$(BORG_ICD) $(APPLICATION); cd -
 gdb: #install
 	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) gdb $(APPLICATION); cd -
 rust-gdb: #install
