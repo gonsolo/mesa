@@ -2,16 +2,24 @@
 // SPDX-License-Identifier: MIT
 
 use crate::ir::*;
+use std::ops::Range;
 
 struct SMEncoder {
     #[allow(dead_code)]
     ip: usize,
-    inst: [u32; 4]
+    inst: u32
 }
 
 impl SMEncoder {
-    fn set_opcode(&mut self, opcode: u16) {
-        // TODO
+
+    fn set_field(&mut self, range: Range<usize>, val: u8) {
+        let mask = u32::MAX >> (32 - range.len());
+        let val32 = val as u32;
+        self.inst= (self.inst & !(mask << range.start)) | (val32 << range.start);
+    }
+
+    fn set_opcode(&mut self, opcode: u8) {
+        self.set_field(0..7, opcode);
     }
 }
 
@@ -22,7 +30,10 @@ trait SMOp {
 impl SMOp for OpMov {
 
     fn encode(&self, e: &mut SMEncoder) {
-        e.set_opcode(0x666)
+        let lui: u8 = 0b0110111;
+        println!("pre encode inst: {:#034b}", e.inst);
+        e.set_opcode(lui);
+        println!("post encode inst: {:#034b}", e.inst);
     }
 }
 
@@ -55,10 +66,10 @@ impl ShaderModel {
                 println!("Encoding instr {}", instr);
                 let mut e = SMEncoder {
                     ip: encoded.len(),
-                    inst: [0_u32; 4],
+                    inst: 0_u32,
                 };
                 as_sm_op(&instr.op).encode(&mut e);
-                encoded.extend_from_slice(&e.inst[..]);
+                encoded.push(e.inst);
             }
         }
         encoded
