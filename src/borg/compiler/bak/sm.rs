@@ -12,14 +12,33 @@ struct SMEncoder {
 
 impl SMEncoder {
 
-    fn set_field(&mut self, range: Range<usize>, val: u8) {
+    fn set_reg(&mut self, range: Range<usize>, reg: RegRef) {
+        self.set_field32(range, reg.base_idx());
+    }
+
+    fn set_src(&mut self, _src: Src) {
+        // TODO
+    }
+
+    fn set_dst(&mut self, dst: Dst) {
+        match dst {
+            Dst::Reg(reg) => self.set_reg(7..12, reg),
+            _ => panic!("Not a register"),
+        }
+    }
+
+    fn set_field32(&mut self, range: Range<usize>, val: u32) {
         let mask = u32::MAX >> (32 - range.len());
+        self.inst= (self.inst & !(mask << range.start)) | (val << range.start);
+    }
+
+    fn set_field8(&mut self, range: Range<usize>, val: u8) {
         let val32 = val as u32;
-        self.inst= (self.inst & !(mask << range.start)) | (val32 << range.start);
+        self.set_field32(range, val32);
     }
 
     fn set_opcode(&mut self, opcode: u8) {
-        self.set_field(0..7, opcode);
+        self.set_field8(0..7, opcode);
     }
 }
 
@@ -30,10 +49,17 @@ trait SMOp {
 impl SMOp for OpMov {
 
     fn encode(&self, e: &mut SMEncoder) {
+
+        // Just use lui now, enhance later.
         let lui: u8 = 0b0110111;
-        println!("pre encode inst: {:#034b}", e.inst);
+        println!("pre  set_opcode: {:#034b}", e.inst);
         e.set_opcode(lui);
-        println!("post encode inst: {:#034b}", e.inst);
+        println!("post set_opcode: {:#034b}", e.inst);
+
+        e.set_dst(self.dst);
+        println!("post set_dst:    {:#034b}", e.inst);
+
+        e.set_src(self.src);
     }
 }
 
