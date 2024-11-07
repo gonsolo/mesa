@@ -13,14 +13,20 @@ struct SMEncoder {
 impl SMEncoder {
 
     fn set_reg(&mut self, range: Range<usize>, reg: RegRef) {
+        // RISCV ABI 1.1
         // a0 is x10, the 10th register, or 01010 in binary
         let a0 = 0b01010;
         let register = a0 + reg.base_idx();
         self.set_field32(range, register);
     }
 
-    fn set_src(&mut self, _src: Src) {
-        // TODO
+    fn set_src(&mut self, src: Src) {
+        match src.src_ref {
+            SrcRef::Zero => {
+                self.set_field32(20..32, 0);
+            },
+            _ => panic!("Unimplemented in set_src!")
+        }
     }
 
     fn set_dst(&mut self, dst: Dst) {
@@ -64,6 +70,7 @@ impl SMOp for OpMov {
         println!("post set_dst:    {:#034b}", e.inst);
 
         e.set_src(self.src);
+        println!("post set_src:    {:#034b}", e.inst);
     }
 }
 

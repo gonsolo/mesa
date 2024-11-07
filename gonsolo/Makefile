@@ -48,7 +48,6 @@ link_compile_commands:
 setup:
 	cd ..; $(MESON) setup $(BUILD_DIR_NAME) -Dbackend=ninja -Dgallium-drivers= \
 		-Dvulkan-drivers=$(DRIVERS) -Dprefix=~/bin/mesa; cd -
-c: clean
 clean:
 	cd ..; rm -rf $(BUILD_DIR_NAME); cd -
 
