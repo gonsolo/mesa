@@ -10,7 +10,7 @@ use bak_ir_proc::*;
 use compiler::as_slice::*;
 use compiler::cfg::CFG;
 use compiler::smallvec::SmallVec;
-use std::ops::{Deref, DerefMut, Range};
+use std::ops::{Deref, DerefMut};
 use std::fmt::Write;
 
 pub struct Function {
@@ -120,17 +120,13 @@ impl SSARef {
             r.v[i] = comps[i];
         }
         if comps.len() < 4 {
-            r.v[3].packed = (comps.len() as u32).wrapping_neg();
+            r.v[3].index = (comps.len() as u32).wrapping_neg();
         }
         r
     }
 
     pub fn comps(&self) -> u8 {
-        if self.v[3].packed >= u32::MAX - 2 {
-            self.v[3].packed.wrapping_neg() as u8
-        } else {
-            4
-        }
+        1
     }
 
     pub fn file(&self) -> Option<RegFile> {
@@ -227,12 +223,10 @@ pub trait HasRegFile {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RegRef {
-    packed: u32,
+    index: u32,
 }
 
 impl RegRef {
-
-    pub const MAX_IDX: u32 = (1 << 26) - 1;
 
     fn zero_idx(file: RegFile) -> u32 {
         match file {
@@ -240,43 +234,24 @@ impl RegRef {
         }
     }
 
-    pub fn new(file: RegFile, base_idx: u32, comps: u8) -> RegRef {
-        assert!(base_idx <= Self::MAX_IDX);
-        let mut packed = base_idx;
-        assert!(comps > 0 && comps <= 8);
-        packed |= u32::from(comps - 1) << 26;
-        assert!(u8::from(file) < 8);
-        packed |= u32::from(u8::from(file)) << 29;
-        RegRef { packed: packed }
-    }
-
     pub fn base_idx(&self) -> u32 {
-        self.packed & 0x03ffffff
+        return self.index;
     }
 
-    pub fn idx_range(&self) -> Range<u32> {
-        let start = self.base_idx();
-        let end = start + u32::from(self.comps());
-        start..end
-    }
-
-    pub fn comps(&self) -> u8 {
-        (((self.packed >> 26) & 0x7) + 1).try_into().unwrap()
+    pub fn new(_file: RegFile, base_idx: u32) -> RegRef {
+        RegRef { index: base_idx }
     }
 }
 
 impl HasRegFile for RegRef {
     fn file(&self) -> RegFile {
-        ((self.packed >> 29) & 0x7).try_into().unwrap()
+        (self.index).try_into().unwrap()
     }
 }
 
 impl fmt::Display for RegRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}{}", self.file().fmt_prefix(), self.base_idx())?;
-        if self.comps() > 1 {
-            write!(f, "..{}", self.idx_range().end)?;
-        }
         Ok(())
     }
 }
@@ -373,23 +348,23 @@ impl<T: Into<SSARef>> From<T> for Dst {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SSAValue {
-    packed: u32,
+    // The unique ssa value from zero to infinity
+    index: u32,
+
+    // the actual register file
+    file: u32
 }
 
 impl SSAValue {
 
-    pub const NONE: Self = SSAValue { packed: 0 };
+    pub const NONE: Self = SSAValue { index: 0, file: 0 };
 
     pub fn new(file: RegFile, idx: u32) -> SSAValue {
-        assert!(idx > 0 && idx < (1 << 29) - 2);
-        let mut packed = idx;
-        assert!(u8::from(file) < 8);
-        packed |= u32::from(u8::from(file)) << 29;
-        SSAValue { packed: packed }
+        SSAValue { index: idx, file: u32::from(u8::from(file)) }
     }
 
     pub fn idx(&self) -> u32 {
-        self.packed & 0x1fffffff
+        self.index
     }
 
     fn fmt_plain(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -399,7 +374,7 @@ impl SSAValue {
 
 impl HasRegFile for SSAValue {
     fn file(&self) -> RegFile {
-        RegFile::try_from(self.packed >> 29).unwrap()
+        RegFile::try_from(self.file).unwrap()
     }
 }
 

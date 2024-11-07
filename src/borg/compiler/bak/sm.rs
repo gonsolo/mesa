@@ -13,7 +13,10 @@ struct SMEncoder {
 impl SMEncoder {
 
     fn set_reg(&mut self, range: Range<usize>, reg: RegRef) {
-        self.set_field32(range, reg.base_idx());
+        // a0 is x10, the 10th register, or 01010 in binary
+        let a0 = 0b01010;
+        let register = a0 + reg.base_idx();
+        self.set_field32(range, register);
     }
 
     fn set_src(&mut self, _src: Src) {
@@ -51,9 +54,10 @@ impl SMOp for OpMov {
     fn encode(&self, e: &mut SMEncoder) {
 
         // Just use lui now, enhance later.
-        let lui: u8 = 0b0110111;
+        //let lui:  u8 = 0b0110111;
+        let addi: u8 = 0b0010011;
         println!("pre  set_opcode: {:#034b}", e.inst);
-        e.set_opcode(lui);
+        e.set_opcode(addi);
         println!("post set_opcode: {:#034b}", e.inst);
 
         e.set_dst(self.dst);

@@ -18,7 +18,7 @@ impl TrivialRegAlloc {
                 idx
             }
         };
-        let r = RegRef::new(file, idx, 1);
+        let r = RegRef::new(file, idx);
         Dst::Reg(r)
     }
 
