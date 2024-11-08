@@ -6,6 +6,8 @@
 #ifndef BORG_SHADER_H
 #define BORG_SHADER_H
 
+#include "bak.h"
+
 #include "vk_shader.h"
 
 #include "borg_physical_device.h"
@@ -14,9 +16,14 @@ extern const struct vk_device_shader_ops borg_device_shader_ops;
 
 struct borg_shader {
    struct vk_shader vk;
+
+   struct bak_shader_info info;
+
    struct bak_shader_bin *bak;
    uint32_t code_size;
    const void *code_ptr;
+
+   uint64_t upload_addr;
 };
 
 bool

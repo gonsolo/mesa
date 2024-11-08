@@ -9,6 +9,11 @@
 
 struct bak_compiler;
 
+struct bak_shader_info {
+
+   uint32_t hdr[32];
+};
+
 struct bak_shader_bin {
         uint32_t code_size;
         const void *code;

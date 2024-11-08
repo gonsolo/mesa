@@ -59,7 +59,6 @@ impl SMOp for OpMov {
 
     fn encode(&self, e: &mut SMEncoder) {
 
-        // Just use lui now, enhance later.
         //let lui:  u8 = 0b0110111;
         let addi: u8 = 0b0010011;
         println!("pre  set_opcode: {:#034b}", e.inst);
@@ -109,6 +108,7 @@ impl ShaderModel {
                 encoded.push(e.inst);
             }
         }
+        println!("encoded: {:?}", encoded);
         encoded
     }
 }

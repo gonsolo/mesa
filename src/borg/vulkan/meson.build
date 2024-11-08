@@ -18,6 +18,8 @@ borg_files = files(
   'borg_device_memory.c',
   'borg_device_memory.h',
   'borg_format.c',
+  'borg_heap.c',
+  'borg_heap.h',
   'borg_image.c',
   'borg_instance.c',
   'borg_instance.h',

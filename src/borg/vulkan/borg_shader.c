@@ -7,6 +7,7 @@
 #include "borg_cmd_buffer.h"
 #include "borg_device.h"
 #include "borg_entrypoints.h"
+#include "borg_heap.h"
 #include "borg_physical_device.h"
 #include "borg_shader.h"
 
@@ -127,6 +128,31 @@ borg_lower_nir(struct borg_device *dev,
 }
 
 static VkResult
+borg_shader_upload(struct borg_device *dev, struct borg_shader *shader)
+{
+   uint32_t total_size = 0;
+   uint32_t hdr_size = sizeof(shader->info.hdr);
+   const uint32_t hdr_offset = total_size;
+   total_size += hdr_size;
+   const uint32_t code_offset = total_size;
+   total_size += shader->code_size;
+
+   char *data = malloc(total_size);
+   if (data == NULL)
+        return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   memcpy(data + hdr_offset, shader->info.hdr, hdr_size);
+   memcpy(data + code_offset, shader->code_ptr, shader->code_size);
+
+   VkResult result = borg_heap_upload(dev, &dev->shader_heap, data,
+                                       total_size, &shader->upload_addr);
+
+   free(data);
+
+   return result;
+}
+
+static VkResult
 borg_compile_shader(struct borg_device *dev,
                 struct vk_shader_compile_info *info,
                 const struct vk_graphics_pipeline_state *state,
@@ -147,6 +173,12 @@ borg_compile_shader(struct borg_device *dev,
 
         result = borg_compile_nir(dev, nir, info->flags, info->robustness, shader);
         ralloc_free(nir);
+        if (result != VK_SUCCESS) {
+                borg_shader_destroy(&dev->vk, &shader->vk, pAllocator);
+                return result;
+        }
+
+        result = borg_shader_upload(dev, shader);
         if (result != VK_SUCCESS) {
                 borg_shader_destroy(&dev->vk, &shader->vk, pAllocator);
                 return result;

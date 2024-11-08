@@ -6,6 +6,7 @@
 #ifndef BORG_DEVICE_H
 #define BORG_DEVICE_H
 
+#include "borg_heap.h"
 #include "borg_queue.h"
 
 #include "util/simple_mtx.h"
@@ -22,6 +23,8 @@ struct borg_device {
 
    simple_mtx_t heap_mutex;
    struct util_vma_heap heap;
+
+   struct borg_heap shader_heap;
 
    struct borg_queue queue;
 };
