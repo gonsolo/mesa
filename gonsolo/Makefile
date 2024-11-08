@@ -37,6 +37,7 @@ rust-gdb: #install
 	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) rust-gdb $(APPLICATION); cd -
 lldb: install
 	cd $(VULKAN_COMPUTE_DIR); VK_ICD_FILENAMES=$(ICD) lldb -o run $(APPLICATION); cd -
+i: install
 install: #compile_and_tidy
 	cd $(BUILD_DIR); $(MESON) install; cd -
 ct: compile_and_tidy
