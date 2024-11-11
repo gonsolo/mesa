@@ -6,10 +6,17 @@
 #include "borg_device.h"
 #include "borg_queue.h"
 
+extern void *global_shader_pointer;
+
 static VkResult borg_driver_submit(struct vk_queue *queue,
                             struct vk_queue_submit *submit)
 {
+   puts(__func__);
+
    // TODO
+
+   printf("global_shader_pointer here is %p\n", global_shader_pointer);
+
    return VK_SUCCESS;
 }
 

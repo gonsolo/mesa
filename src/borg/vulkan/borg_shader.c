@@ -127,29 +127,41 @@ borg_lower_nir(struct borg_device *dev,
         }
 }
 
+const void *global_shader_pointer;
+uint32_t global_shader_size;
+
 static VkResult
 borg_shader_upload(struct borg_device *dev, struct borg_shader *shader)
 {
-   uint32_t total_size = 0;
-   uint32_t hdr_size = sizeof(shader->info.hdr);
-   const uint32_t hdr_offset = total_size;
-   total_size += hdr_size;
-   const uint32_t code_offset = total_size;
-   total_size += shader->code_size;
+   puts(__func__);
 
-   char *data = malloc(total_size);
-   if (data == NULL)
-        return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+   // TODO
+   //uint32_t total_size = 0;
+   //uint32_t hdr_size = sizeof(shader->info.hdr);
+   //const uint32_t hdr_offset = total_size;
+   //total_size += hdr_size;
+   //const uint32_t code_offset = total_size;
+   //total_size += shader->code_size;
 
-   memcpy(data + hdr_offset, shader->info.hdr, hdr_size);
-   memcpy(data + code_offset, shader->code_ptr, shader->code_size);
+   //char *data = malloc(total_size);
+   //if (data == NULL)
+   //     return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   VkResult result = borg_heap_upload(dev, &dev->shader_heap, data,
-                                       total_size, &shader->upload_addr);
+   //memcpy(data + hdr_offset, shader->info.hdr, hdr_size);
+   //memcpy(data + code_offset, shader->code_ptr, shader->code_size);
 
-   free(data);
+   //VkResult result = borg_heap_upload(dev, &dev->shader_heap, data,
+   //                                   total_size, &shader->upload_addr);
 
-   return result;
+   //free(data);
+
+   //return result;
+   global_shader_pointer = shader->code_ptr;
+   printf("global_shader_pointer is now %p\n", global_shader_pointer);
+   global_shader_size = shader->code_size;
+   printf("global_shader_size is now %i\n", global_shader_size);
+
+   return VK_SUCCESS;
 }
 
 static VkResult
