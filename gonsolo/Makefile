@@ -19,8 +19,8 @@ else
 	ICD = $(BORG_ICD)
 endif
 
-icd:
-	@echo $(ICD)
+#icd:
+#	@echo $(ICD)
 
 DRIVERS = nouveau,borg-experimental
 #VERBOSE = --verbose
