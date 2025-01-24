@@ -4,6 +4,7 @@
  */
 
 #include "brw_fs.h"
+#include "brw_generator.h"
 #include "brw_eu.h"
 #include "brw_nir.h"
 #include "brw_private.h"
@@ -45,16 +46,18 @@ run_vs(fs_visitor &s)
 
    brw_calculate_cfg(s);
 
-   brw_fs_optimize(s);
+   brw_optimize(s);
 
    s.assign_curb_setup();
    brw_assign_vs_urb_setup(s);
 
-   brw_fs_lower_3src_null_dest(s);
-   brw_fs_workaround_memory_fence_before_eot(s);
-   brw_fs_workaround_emit_dummy_mov_instruction(s);
+   brw_lower_3src_null_dest(s);
+   brw_workaround_memory_fence_before_eot(s);
+   brw_workaround_emit_dummy_mov_instruction(s);
 
    brw_allocate_registers(s, true /* allow_spilling */);
+
+   brw_workaround_source_arf_before_eot(s);
 
    return !s.failed;
 }
@@ -69,13 +72,13 @@ brw_compile_vs(const struct brw_compiler *compiler,
    const bool debug_enabled =
       brw_should_print_shader(nir, params->base.debug_flag ?
                                    params->base.debug_flag : DEBUG_VS);
+   const unsigned dispatch_width = brw_geometry_stage_dispatch_width(compiler->devinfo);
 
    prog_data->base.base.stage = MESA_SHADER_VERTEX;
    prog_data->base.base.ray_queries = nir->info.ray_queries;
    prog_data->base.base.total_scratch = 0;
 
-   brw_nir_apply_key(nir, compiler, &key->base,
-                     brw_geometry_stage_dispatch_width(compiler->devinfo));
+   brw_nir_apply_key(nir, compiler, &key->base, dispatch_width);
 
    prog_data->inputs_read = nir->info.inputs_read;
    prog_data->double_inputs_read = nir->info.vs.double_inputs;
@@ -144,7 +147,6 @@ brw_compile_vs(const struct brw_compiler *compiler,
       brw_print_vue_map(stderr, &prog_data->base.vue_map, MESA_SHADER_VERTEX);
    }
 
-   const unsigned dispatch_width = compiler->devinfo->ver >= 20 ? 16 : 8;
    prog_data->base.dispatch_mode = INTEL_DISPATCH_MODE_SIMD8;
 
    fs_visitor v(compiler, &params->base, &key->base,
@@ -160,7 +162,7 @@ brw_compile_vs(const struct brw_compiler *compiler,
    prog_data->base.base.dispatch_grf_start_reg =
       v.payload().num_regs / reg_unit(compiler->devinfo);
 
-   fs_generator g(compiler, &params->base,
+   brw_generator g(compiler, &params->base,
                   &prog_data->base.base,
                   MESA_SHADER_VERTEX);
    if (unlikely(debug_enabled)) {

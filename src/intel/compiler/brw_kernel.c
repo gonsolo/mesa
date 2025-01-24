@@ -307,7 +307,6 @@ brw_kernel_from_spirv(struct brw_compiler *compiler,
       spirv_to_nir(spirv, spirv_size / 4, NULL, 0, MESA_SHADER_KERNEL,
                    entrypoint_name, &spirv_options, nir_options);
    nir_validate_shader(nir, "after spirv_to_nir");
-   nir_validate_ssa_dominance(nir, "after spirv_to_nir");
    ralloc_steal(mem_ctx, nir);
    nir->info.name = ralloc_strdup(nir, entrypoint_name);
 
@@ -323,6 +322,7 @@ brw_kernel_from_spirv(struct brw_compiler *compiler,
 
    nir_lower_printf_options printf_opts = {
       .ptr_bit_size               = 64,
+      .max_buffer_size            = 1024 * 1024,
       .use_printf_base_identifier = true,
    };
    NIR_PASS_V(nir, nir_lower_printf, &printf_opts);
@@ -622,7 +622,6 @@ brw_nir_from_spirv(void *mem_ctx, unsigned gfx_version, const uint32_t *spirv,
       spirv_to_nir(spirv, spirv_size / 4, NULL, 0, MESA_SHADER_KERNEL,
                    "library", &spirv_options, nir_options);
    nir_validate_shader(nir, "after spirv_to_nir");
-   nir_validate_ssa_dominance(nir, "after spirv_to_nir");
    ralloc_steal(mem_ctx, nir);
    nir->info.name = ralloc_strdup(nir, "library");
 

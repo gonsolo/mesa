@@ -57,6 +57,72 @@ compiler_perf_log(UNUSED void *data, UNUSED unsigned *id, const char *fmt, ...)
    va_end(args);
 }
 
+struct anv_descriptor_limits {
+   uint32_t max_ubos;
+   uint32_t max_ssbos;
+   uint32_t max_samplers;
+   uint32_t max_images;
+   uint32_t max_resources;
+};
+
+static void
+get_device_descriptor_limits(const struct anv_physical_device *device,
+                             struct anv_descriptor_limits *limits)
+{
+   memset(limits, 0, sizeof(*limits));
+
+   /* It's a bit hard to exactly map our implementation to the limits
+    * described by Vulkan. The bindless surface handle in the extended message
+    * descriptors is 20 bits on <= Gfx12.0, 26 bits on >= Gfx12.5 and it's an
+    * index into the table of RENDER_SURFACE_STATE structs that starts at
+    * bindless surface base address. On <= Gfx12.0, this means that we can
+    * have at must 1M surface states allocated at any given time. Since most
+    * image views take two descriptors, this means we have a limit of about
+    * 500K image views. On >= Gfx12.5, we do not need 2 surfaces per
+    * descriptors and we have 33M+ descriptors (we have a 2GB limit, due to
+    * overlapping heaps for workarounds, but HW can do 4GB).
+    *
+    * However, on <= Gfx12.0, since we allocate surface states at
+    * vkCreateImageView time, this means our limit is actually something on
+    * the order of 500K image views allocated at any time. The actual limit
+    * describe by Vulkan, on the other hand, is a limit of how many you can
+    * have in a descriptor set. Assuming anyone using 1M descriptors will be
+    * using the same image view twice a bunch of times (or a bunch of null
+    * descriptors), we can safely advertise a larger limit here.
+    *
+    * Here we use the size of the heap in which the descriptors are stored and
+    * divide by the size of the descriptor to get a limit value.
+    */
+   const uint64_t descriptor_heap_size =
+      device->indirect_descriptors ?
+      device->va.indirect_descriptor_pool.size :
+      device->va.bindless_surface_state_pool.size;;
+
+   const uint32_t buffer_descriptor_size =
+      device->indirect_descriptors ?
+      sizeof(struct anv_address_range_descriptor) :
+      ANV_SURFACE_STATE_SIZE;
+   const uint32_t image_descriptor_size =
+      device->indirect_descriptors ?
+      sizeof(struct anv_address_range_descriptor) :
+      ANV_SURFACE_STATE_SIZE;
+   const uint32_t sampler_descriptor_size =
+      device->indirect_descriptors ?
+      sizeof(struct anv_sampled_image_descriptor) :
+      ANV_SAMPLER_STATE_SIZE;
+
+   limits->max_ubos = descriptor_heap_size / buffer_descriptor_size;
+   limits->max_ssbos = descriptor_heap_size / buffer_descriptor_size;
+   limits->max_images = descriptor_heap_size / image_descriptor_size;
+   limits->max_samplers = descriptor_heap_size / sampler_descriptor_size;
+
+   limits->max_resources = UINT32_MAX;
+   limits->max_resources = MIN2(limits->max_resources, limits->max_ubos);
+   limits->max_resources = MIN2(limits->max_resources, limits->max_ssbos);
+   limits->max_resources = MIN2(limits->max_resources, limits->max_images);
+   limits->max_resources = MIN2(limits->max_resources, limits->max_samplers);
+}
+
 static void
 get_device_extensions(const struct anv_physical_device *device,
                       struct vk_device_extension_table *ext)
@@ -74,8 +140,8 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_buffer_device_address             = true,
       .KHR_calibrated_timestamps             = device->has_reg_timestamp,
       .KHR_compute_shader_derivatives        = true,
-      .KHR_copy_commands2                    = true,
       .KHR_cooperative_matrix                = anv_has_cooperative_matrix(device),
+      .KHR_copy_commands2                    = true,
       .KHR_create_renderpass2                = true,
       .KHR_dedicated_allocation              = true,
       .KHR_deferred_host_operations          = true,
@@ -172,6 +238,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_video_decode_queue                = device->video_decode_enabled,
       .KHR_video_decode_h264                 = VIDEO_CODEC_H264DEC && device->video_decode_enabled,
       .KHR_video_decode_h265                 = VIDEO_CODEC_H265DEC && device->video_decode_enabled,
+      .KHR_video_decode_av1                  = device->info.ver >= 12 && VIDEO_CODEC_AV1DEC && device->video_decode_enabled,
       .KHR_video_encode_queue                = device->video_encode_enabled,
       .KHR_video_encode_h264                 = VIDEO_CODEC_H264ENC && device->video_encode_enabled,
       .KHR_video_encode_h265                 = device->info.ver >= 12 && VIDEO_CODEC_H265ENC && device->video_encode_enabled,
@@ -193,11 +260,11 @@ get_device_extensions(const struct anv_physical_device *device,
       .EXT_conservative_rasterization        = true,
       .EXT_custom_border_color               = true,
       .EXT_depth_bias_control                = true,
-      .EXT_depth_clamp_zero_one              = true,
       .EXT_depth_clamp_control               = true,
+      .EXT_depth_clamp_zero_one              = true,
       .EXT_depth_clip_control                = true,
-      .EXT_depth_range_unrestricted          = device->info.ver >= 20,
       .EXT_depth_clip_enable                 = true,
+      .EXT_depth_range_unrestricted          = device->info.ver >= 20,
       .EXT_descriptor_buffer                 = true,
       .EXT_descriptor_indexing               = true,
 #ifdef VK_USE_PLATFORM_DISPLAY_KHR
@@ -224,8 +291,8 @@ get_device_extensions(const struct anv_physical_device *device,
        */
       .EXT_image_compression_control         = device->instance->compression_control_enabled &&
                                                device->info.ver < 20,
-      .EXT_image_robustness                  = true,
       .EXT_image_drm_format_modifier         = true,
+      .EXT_image_robustness                  = true,
       .EXT_image_sliced_view_of_3d           = true,
       .EXT_image_view_min_lod                = true,
       .EXT_index_type_uint8                  = true,
@@ -242,6 +309,7 @@ get_device_extensions(const struct anv_physical_device *device,
                                                 device->vram_mappable.available > 0) &&
                                                device->sys.available,
       .EXT_mesh_shader                       = device->info.has_mesh_shading,
+      .EXT_multi_draw                        = true,
       .EXT_mutable_descriptor_type           = true,
       .EXT_nested_command_buffer             = true,
       .EXT_non_seamless_cube_map             = true,
@@ -253,8 +321,8 @@ get_device_extensions(const struct anv_physical_device *device,
       .EXT_pipeline_protected_access         = device->has_protected_contexts,
       .EXT_pipeline_robustness               = true,
       .EXT_post_depth_coverage               = true,
-      .EXT_primitives_generated_query        = true,
       .EXT_primitive_topology_list_restart   = true,
+      .EXT_primitives_generated_query        = true,
       .EXT_private_data                      = true,
       .EXT_provoking_vertex                  = true,
       .EXT_queue_family_foreign              = true,
@@ -295,9 +363,8 @@ get_device_extensions(const struct anv_physical_device *device,
       .INTEL_performance_query               = device->perf &&
                                                intel_perf_has_hold_preemption(device->perf),
       .INTEL_shader_integer_functions2       = true,
-      .EXT_multi_draw                        = true,
-      .NV_compute_shader_derivatives         = true,
       .MESA_image_alignment_control          = true,
+      .NV_compute_shader_derivatives         = true,
       .VALVE_mutable_descriptor_type         = true,
    };
 }
@@ -461,6 +528,9 @@ get_features(const struct anv_physical_device *pdevice,
       .dynamicRendering = true,
       .shaderIntegerDotProduct = true,
       .maintenance4 = true,
+
+      /* Vulkan 1.4 */
+      .pushDescriptor = true,
 
       /* VK_EXT_4444_formats */
       .formatA4R4G4B4 = true,
@@ -832,7 +902,7 @@ get_features(const struct anv_physical_device *pdevice,
       .dynamicRenderingLocalRead = true,
 
       /* VK_EXT_pipeline_protected_access */
-      .pipelineProtectedAccess = true,
+      .pipelineProtectedAccess = pdevice->has_protected_contexts,
 
       /* VK_EXT_host_image_copy */
       .hostImageCopy = true,
@@ -937,8 +1007,8 @@ get_properties_1_2(const struct anv_physical_device *pdevice,
 
    p->conformanceVersion = (VkConformanceVersion) {
       .major = 1,
-      .minor = 3,
-      .subminor = 6,
+      .minor = 4,
+      .subminor = 0,
       .patch = 0,
    };
 
@@ -972,25 +1042,10 @@ get_properties_1_2(const struct anv_physical_device *pdevice,
    p->shaderRoundingModeRTZFloat64           = true;
    p->shaderSignedZeroInfNanPreserveFloat64  = true;
 
-   /* It's a bit hard to exactly map our implementation to the limits
-    * described by Vulkan.  The bindless surface handle in the extended
-    * message descriptors is 20 bits and it's an index into the table of
-    * RENDER_SURFACE_STATE structs that starts at bindless surface base
-    * address.  This means that we can have at must 1M surface states
-    * allocated at any given time.  Since most image views take two
-    * descriptors, this means we have a limit of about 500K image views.
-    *
-    * However, since we allocate surface states at vkCreateImageView time,
-    * this means our limit is actually something on the order of 500K image
-    * views allocated at any time.  The actual limit describe by Vulkan, on
-    * the other hand, is a limit of how many you can have in a descriptor set.
-    * Assuming anyone using 1M descriptors will be using the same image view
-    * twice a bunch of times (or a bunch of null descriptors), we can safely
-    * advertise a larger limit here.
-    */
-   const unsigned max_bindless_views =
-      anv_physical_device_bindless_heap_size(pdevice, false) / ANV_SURFACE_STATE_SIZE;
-   p->maxUpdateAfterBindDescriptorsInAllPools            = max_bindless_views;
+   struct anv_descriptor_limits desc_limits;
+   get_device_descriptor_limits(pdevice, &desc_limits);
+
+   p->maxUpdateAfterBindDescriptorsInAllPools            = desc_limits.max_resources;
    p->shaderUniformBufferArrayNonUniformIndexingNative   = false;
    p->shaderSampledImageArrayNonUniformIndexingNative    = false;
    p->shaderStorageBufferArrayNonUniformIndexingNative   = true;
@@ -998,20 +1053,20 @@ get_properties_1_2(const struct anv_physical_device *pdevice,
    p->shaderInputAttachmentArrayNonUniformIndexingNative = false;
    p->robustBufferAccessUpdateAfterBind                  = true;
    p->quadDivergentImplicitLod                           = false;
-   p->maxPerStageDescriptorUpdateAfterBindSamplers       = max_bindless_views;
-   p->maxPerStageDescriptorUpdateAfterBindUniformBuffers = MAX_PER_STAGE_DESCRIPTOR_UNIFORM_BUFFERS;
-   p->maxPerStageDescriptorUpdateAfterBindStorageBuffers = UINT32_MAX;
-   p->maxPerStageDescriptorUpdateAfterBindSampledImages  = max_bindless_views;
-   p->maxPerStageDescriptorUpdateAfterBindStorageImages  = max_bindless_views;
+   p->maxPerStageDescriptorUpdateAfterBindSamplers       = desc_limits.max_samplers;
+   p->maxPerStageDescriptorUpdateAfterBindUniformBuffers = desc_limits.max_ubos;
+   p->maxPerStageDescriptorUpdateAfterBindStorageBuffers = desc_limits.max_ssbos;
+   p->maxPerStageDescriptorUpdateAfterBindSampledImages  = desc_limits.max_images;
+   p->maxPerStageDescriptorUpdateAfterBindStorageImages  = desc_limits.max_images;
    p->maxPerStageDescriptorUpdateAfterBindInputAttachments = MAX_PER_STAGE_DESCRIPTOR_INPUT_ATTACHMENTS;
-   p->maxPerStageUpdateAfterBindResources                = UINT32_MAX;
-   p->maxDescriptorSetUpdateAfterBindSamplers            = max_bindless_views;
-   p->maxDescriptorSetUpdateAfterBindUniformBuffers      = 6 * MAX_PER_STAGE_DESCRIPTOR_UNIFORM_BUFFERS;
+   p->maxPerStageUpdateAfterBindResources                = desc_limits.max_resources;
+   p->maxDescriptorSetUpdateAfterBindSamplers            = desc_limits.max_samplers;
+   p->maxDescriptorSetUpdateAfterBindUniformBuffers      = desc_limits.max_ubos;
    p->maxDescriptorSetUpdateAfterBindUniformBuffersDynamic = MAX_DYNAMIC_BUFFERS / 2;
-   p->maxDescriptorSetUpdateAfterBindStorageBuffers      = UINT32_MAX;
+   p->maxDescriptorSetUpdateAfterBindStorageBuffers      = desc_limits.max_ssbos;
    p->maxDescriptorSetUpdateAfterBindStorageBuffersDynamic = MAX_DYNAMIC_BUFFERS / 2;
-   p->maxDescriptorSetUpdateAfterBindSampledImages       = max_bindless_views;
-   p->maxDescriptorSetUpdateAfterBindStorageImages       = max_bindless_views;
+   p->maxDescriptorSetUpdateAfterBindSampledImages       = desc_limits.max_images;
+   p->maxDescriptorSetUpdateAfterBindStorageImages       = desc_limits.max_images;
    p->maxDescriptorSetUpdateAfterBindInputAttachments    = MAX_DESCRIPTOR_SET_INPUT_ATTACHMENTS;
 
    /* We support all of the depth resolve modes */
@@ -1125,14 +1180,7 @@ get_properties(const struct anv_physical_device *pdevice,
 
       const struct intel_device_info *devinfo = &pdevice->info;
 
-   const uint32_t max_ssbos = UINT16_MAX;
-   const uint32_t max_textures = UINT16_MAX;
-   const uint32_t max_samplers = UINT16_MAX;
-   const uint32_t max_images = UINT16_MAX;
    const VkDeviceSize max_heap_size = anx_get_physical_device_max_heap_size(pdevice);
-
-   /* Claim a high per-stage limit since we have bindless. */
-   const uint32_t max_per_stage = UINT32_MAX;
 
    const uint32_t max_workgroup_size =
       MIN2(1024, 32 * devinfo->max_cs_workgroup_threads);
@@ -1157,6 +1205,9 @@ get_properties(const struct anv_physical_device *pdevice,
       u_gralloc_destroy(&gralloc);
    }
 #endif /* DETECT_OS_ANDROID */
+
+   struct anv_descriptor_limits desc_limits;
+   get_device_descriptor_limits(pdevice, &desc_limits);
 
    *props = (struct vk_properties) {
       .apiVersion = ANV_API_VERSION,
@@ -1183,20 +1234,20 @@ get_properties(const struct anv_physical_device *pdevice,
       .bufferImageGranularity                   = 1,
       .sparseAddressSpaceSize                   = sparse_addr_space_size,
       .maxBoundDescriptorSets                   = MAX_SETS,
-      .maxPerStageDescriptorSamplers            = max_samplers,
-      .maxPerStageDescriptorUniformBuffers      = MAX_PER_STAGE_DESCRIPTOR_UNIFORM_BUFFERS,
-      .maxPerStageDescriptorStorageBuffers      = max_ssbos,
-      .maxPerStageDescriptorSampledImages       = max_textures,
-      .maxPerStageDescriptorStorageImages       = max_images,
+      .maxPerStageDescriptorSamplers            = desc_limits.max_samplers,
+      .maxPerStageDescriptorUniformBuffers      = desc_limits.max_ubos,
+      .maxPerStageDescriptorStorageBuffers      = desc_limits.max_ssbos,
+      .maxPerStageDescriptorSampledImages       = desc_limits.max_images,
+      .maxPerStageDescriptorStorageImages       = desc_limits.max_images,
       .maxPerStageDescriptorInputAttachments    = MAX_PER_STAGE_DESCRIPTOR_INPUT_ATTACHMENTS,
-      .maxPerStageResources                     = max_per_stage,
-      .maxDescriptorSetSamplers                 = 6 * max_samplers, /* number of stages * maxPerStageDescriptorSamplers */
-      .maxDescriptorSetUniformBuffers           = 6 * MAX_PER_STAGE_DESCRIPTOR_UNIFORM_BUFFERS,           /* number of stages * maxPerStageDescriptorUniformBuffers */
+      .maxPerStageResources                     = desc_limits.max_resources,
+      .maxDescriptorSetSamplers                 = desc_limits.max_samplers,
+      .maxDescriptorSetUniformBuffers           = desc_limits.max_ubos,
       .maxDescriptorSetUniformBuffersDynamic    = MAX_DYNAMIC_BUFFERS / 2,
-      .maxDescriptorSetStorageBuffers           = 6 * max_ssbos,    /* number of stages * maxPerStageDescriptorStorageBuffers */
+      .maxDescriptorSetStorageBuffers           = desc_limits.max_ssbos,
       .maxDescriptorSetStorageBuffersDynamic    = MAX_DYNAMIC_BUFFERS / 2,
-      .maxDescriptorSetSampledImages            = 6 * max_textures, /* number of stages * maxPerStageDescriptorSampledImages */
-      .maxDescriptorSetStorageImages            = 6 * max_images,   /* number of stages * maxPerStageDescriptorStorageImages */
+      .maxDescriptorSetSampledImages            = desc_limits.max_images,
+      .maxDescriptorSetStorageImages            = desc_limits.max_images,
       .maxDescriptorSetInputAttachments         = MAX_DESCRIPTOR_SET_INPUT_ATTACHMENTS,
       .maxVertexInputAttributes                 = MAX_VES,
       .maxVertexInputBindings                   = MAX_VBS,
@@ -1227,7 +1278,8 @@ get_properties(const struct anv_physical_device *pdevice,
       .maxFragmentInputComponents               = 116, /* 128 components - (PSIZ, CLIP_DIST0, CLIP_DIST1) */
       .maxFragmentOutputAttachments             = 8,
       .maxFragmentDualSrcAttachments            = 1,
-      .maxFragmentCombinedOutputResources       = MAX_RTS + max_ssbos + max_images,
+      .maxFragmentCombinedOutputResources       = MAX_RTS + desc_limits.max_ssbos +
+                                                  desc_limits.max_images,
       .maxComputeSharedMemorySize               = intel_device_info_get_max_slm_size(&pdevice->info),
       .maxComputeWorkGroupCount                 = { 65535, 65535, 65535 },
       .maxComputeWorkGroupInvocations           = max_workgroup_size,
@@ -1305,6 +1357,10 @@ get_properties(const struct anv_physical_device *pdevice,
 
       /* VK_KHR_cooperative_matrix */
       .cooperativeMatrixSupportedStages = VK_SHADER_STAGE_COMPUTE_BIT,
+
+      /* Vulkan 1.4 */
+      .dynamicRenderingLocalReadDepthStencilAttachments = true,
+      .dynamicRenderingLocalReadMultisampledAttachments = true,
    };
 
    snprintf(props->deviceName, sizeof(props->deviceName),
@@ -1637,7 +1693,7 @@ get_properties(const struct anv_physical_device *pdevice,
       /* Bounded by the maximum representable size in
        * 3DSTATE_MESH_SHADER_BODY::SharedLocalMemorySize.  Same for Task.
        */
-      const uint32_t max_slm_size = 64 * 1024;
+      const uint32_t max_slm_size = intel_device_info_get_max_slm_size(devinfo);
 
       /* Bounded by the maximum representable size in
        * 3DSTATE_MESH_SHADER_BODY::LocalXMaximum.  Same for Task.
@@ -2154,6 +2210,11 @@ anv_override_engine_counts(int *gc_count, int *g_count, int *c_count, int *v_cou
    int blit_override = -1;
    const char *env_ = os_get_option("ANV_QUEUE_OVERRIDE");
 
+   /* Override queues for Android HWUI that expects min 2 queues. */
+#if DETECT_OS_ANDROID
+   *gc_count = 2;
+#endif
+
    if (env_ == NULL)
       return;
 
@@ -2379,9 +2440,6 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
                          "Vulkan not yet supported on %s", devinfo.name);
       goto fail_fd;
    }
-
-   if (devinfo.ver == 20 && instance->disable_xe2_ccs)
-      intel_debug |= DEBUG_NO_CCS;
 
    /* Disable Wa_16013994831 on Gfx12.0 because we found other cases where we
     * need to always disable preemption :
@@ -2753,6 +2811,8 @@ void anv_GetPhysicalDeviceQueueFamilyProperties2(
                if (queue_family->queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR) {
                   prop->videoCodecOperations = VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR |
                                                VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR;
+                  if (pdevice->info.ver >= 12)
+                     prop->videoCodecOperations |= VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR;
                }
 
                if (queue_family->queueFlags & VK_QUEUE_VIDEO_ENCODE_BIT_KHR) {
@@ -3071,31 +3131,6 @@ VkResult anv_GetPhysicalDeviceCooperativeMatrixPropertiesKHR(
             prop->saturatingAccumulation = VK_TRUE;
             prop->scope = convert_scope(cfg->scope);
          }
-      }
-   }
-
-   return vk_outarray_status(&out);
-}
-
-static const VkTimeDomainKHR anv_time_domains[] = {
-   VK_TIME_DOMAIN_DEVICE_KHR,
-   VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR,
-#ifdef CLOCK_MONOTONIC_RAW
-   VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR,
-#endif
-};
-
-VkResult anv_GetPhysicalDeviceCalibrateableTimeDomainsKHR(
-   VkPhysicalDevice                             physicalDevice,
-   uint32_t                                     *pTimeDomainCount,
-   VkTimeDomainKHR                              *pTimeDomains)
-{
-   int d;
-   VK_OUTARRAY_MAKE_TYPED(VkTimeDomainKHR, out, pTimeDomains, pTimeDomainCount);
-
-   for (d = 0; d < ARRAY_SIZE(anv_time_domains); d++) {
-      vk_outarray_append_typed(VkTimeDomainKHR, &out, i) {
-         *i = anv_time_domains[d];
       }
    }
 

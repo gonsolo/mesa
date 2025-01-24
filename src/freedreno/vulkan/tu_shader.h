@@ -38,7 +38,7 @@ struct tu_inline_ubo
  */
 struct tu_push_constant_range
 {
-   uint32_t lo;
+   uint32_t lo_dwords;
    uint32_t dwords;
    enum ir3_push_consts_type type;
 };
@@ -111,12 +111,16 @@ struct tu_shader_key {
    uint8_t unscaled_input_fragcoord;
    bool robust_storage_access2;
    bool robust_uniform_access2;
+   bool lower_view_index_to_device_index;
    enum ir3_wavesize_option api_wavesize, real_wavesize;
 };
 
 extern const struct vk_pipeline_cache_object_ops tu_shader_ops;
 bool
 tu_nir_lower_multiview(nir_shader *nir, uint32_t mask, struct tu_device *dev);
+
+bool
+tu_nir_lower_ray_queries(nir_shader *nir);
 
 nir_shader *
 tu_spirv_to_nir(struct tu_device *dev,

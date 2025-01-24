@@ -82,6 +82,7 @@ DEPS=(
     liblz4-1
     libpng16-16
     libpython3.11
+    libubsan1
     libvulkan1
     libwayland-client0
     libwayland-server0
@@ -126,6 +127,8 @@ pip3 install --break-system-packages git+http://gitlab.freedesktop.org/freedeskt
 # Needed for manipulation with traces yaml files.
 pip3 install --break-system-packages yq
 
+section_end debian_setup
+
 ############### Download prebuilt kernel
 
 if [ "$DEBIAN_ARCH" = amd64 ]; then
@@ -137,42 +140,29 @@ fi
 
 ############### Build mold
 
-uncollapsed_section_switch mold "Building mold linker"
-
 . .gitlab-ci/container/build-mold.sh
 
 ############### Build LLVM-SPIRV translator
-
-uncollapsed_section_switch llvmspv "Building LLVM-SPIRV-Translator"
 
 . .gitlab-ci/container/build-llvm-spirv.sh
 
 ############### Build libclc
 
-uncollapsed_section_switch libclc "Building libclc"
-
 . .gitlab-ci/container/build-libclc.sh
 
 ############### Build Wayland
-
-uncollapsed_section_switch wayland "Building Wayland"
 
 . .gitlab-ci/container/build-wayland.sh
 
 ############### Install Rust toolchain
 
-uncollapsed_section_switch rust "Installing Rust toolchain"
-
 . .gitlab-ci/container/build-rust.sh
 
 ############### Build Crosvm
 
-uncollapsed_section_switch crosvm "Building crosvm"
 . .gitlab-ci/container/build-crosvm.sh
 
 ############### Build dEQP runner
-
-uncollapsed_section_switch deqpr "Building deqp-runner"
 
 . .gitlab-ci/container/build-deqp-runner.sh
 
@@ -185,3 +175,5 @@ apt-get purge -y "${EPHEMERAL[@]}"
 rm -rf /root/.rustup
 
 . .gitlab-ci/container/container_post_build.sh
+
+section_end debian_cleanup

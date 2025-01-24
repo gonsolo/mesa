@@ -123,7 +123,6 @@ fn nir_options(dev: &nv_device_info) -> nir_shader_compiler_options {
     op.lower_uadd_sat = dev.sm < 70;
     op.lower_usub_sat = dev.sm < 70;
     op.lower_iadd_sat = true; // TODO
-    op.use_interpolated_input_intrinsics = true;
     op.lower_doubles_options = nir_lower_drcp
         | nir_lower_dsqrt
         | nir_lower_drsq
@@ -205,7 +204,7 @@ pub extern "C" fn nak_nir_options(
 
 #[repr(C)]
 pub struct ShaderBin {
-    bin: nak_shader_bin,
+    pub bin: nak_shader_bin,
     code: Vec<u32>,
     asm: CString,
 }
@@ -231,10 +230,10 @@ impl ShaderBin {
                 ShaderStageInfo::Tessellation(_) => MESA_SHADER_TESS_EVAL,
             },
             sm: sm.sm(),
-            num_gprs: if sm.sm() >= 70 {
-                max(4, info.num_gprs + 2)
-            } else {
-                max(4, info.num_gprs)
+            num_gprs: {
+                max(4, info.num_gprs as u32 + sm.hw_reserved_gprs())
+                    .try_into()
+                    .unwrap()
             },
             num_control_barriers: info.num_control_barriers,
             _pad0: Default::default(),

@@ -25,8 +25,7 @@
  *
  */
 
-#ifndef ELK_FS_H
-#define ELK_FS_H
+#pragma once
 
 #include "elk_shader.h"
 #include "elk_ir_fs.h"
@@ -266,6 +265,7 @@ public:
                                                     elk_fs_inst *inst);
    void insert_gfx4_post_send_dependency_workarounds(elk_bblock_t *block,
                                                      elk_fs_inst *inst);
+   bool workaround_source_arf_before_eot();
    void vfail(const char *msg, va_list args);
    void fail(const char *msg, ...);
    void limit_dispatch_width(unsigned n, const char *msg);
@@ -587,5 +587,3 @@ int elk_get_subgroup_id_param_index(const intel_device_info *devinfo,
                                     const elk_stage_prog_data *prog_data);
 
 void nir_to_elk(elk_fs_visitor *s);
-
-#endif /* ELK_FS_H */

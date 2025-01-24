@@ -836,12 +836,20 @@ anv_get_image_format_features2(const struct anv_physical_device *physical_device
           */
          flags &= ~VK_FORMAT_FEATURE_2_DISJOINT_BIT;
 
-         /* When the hardware accesses a storage image, it bypasses the aux
-          * surface. We could support storage access on images with aux
-          * modifiers by resolving the aux surface prior to the storage access.
+         /* Gfx11 and prior bypass the aux surface when accessing storage
+          * images. We could support storage access on images with aux
+          * modifiers by resolving the aux surface prior to the storage
+          * access.
           */
-         flags &= ~VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT;
-         flags &= ~VK_FORMAT_FEATURE_2_STORAGE_IMAGE_ATOMIC_BIT;
+         if (devinfo->ver <= 11)
+            flags &= ~VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT;
+
+         /* Starting with gfx12.5, atomics are supported with compression.
+          * However, the performance of this combination is slow on gfx12.5.
+          * So, only allow atomic support on Xe2+.
+          */
+         if (devinfo->verx10 <= 125)
+            flags &= ~VK_FORMAT_FEATURE_2_STORAGE_IMAGE_ATOMIC_BIT;
 
          /* Host transfer don't touch the AUX data, so if that is required by
           * the modifier, just drop support on the format.
@@ -911,6 +919,7 @@ get_buffer_format_features2(const struct intel_device_info *devinfo,
       flags |= VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT;
 
    if (devinfo->has_ray_tracing) {
+#if ANV_SUPPORT_RT_GRL
       switch (vk_format) {
       case VK_FORMAT_R32G32_SFLOAT:
       case VK_FORMAT_R32G32B32_SFLOAT:
@@ -929,6 +938,10 @@ get_buffer_format_features2(const struct intel_device_info *devinfo,
       default:
          break;
       }
+#else
+      if (vk_acceleration_struct_vtx_format_supported(vk_format))
+         flags |= VK_FORMAT_FEATURE_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR;
+#endif
    }
 
    return flags;

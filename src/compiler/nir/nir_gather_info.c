@@ -221,11 +221,6 @@ mark_whole_variable(nir_shader *shader, nir_variable *var,
       type = glsl_get_array_element(type);
    }
 
-   if (var->data.per_view) {
-      assert(glsl_type_is_array(type));
-      type = glsl_get_array_element(type);
-   }
-
    const unsigned slots = nir_variable_count_slots(var, type);
    set_io_mask(shader, var, 0, slots, deref, is_output_read);
 }
@@ -548,6 +543,7 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
    case nir_intrinsic_load_input_vertex:
    case nir_intrinsic_load_interpolated_input:
    case nir_intrinsic_load_per_primitive_input:
+   case nir_intrinsic_load_attribute_pan:
       if (shader->info.stage == MESA_SHADER_TESS_EVAL &&
           instr->intrinsic == nir_intrinsic_load_input &&
           !is_patch_special) {
@@ -578,6 +574,7 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
 
    case nir_intrinsic_load_output:
    case nir_intrinsic_load_per_vertex_output:
+   case nir_intrinsic_load_per_view_output:
    case nir_intrinsic_load_per_primitive_output:
       if (shader->info.stage == MESA_SHADER_TESS_CTRL &&
           instr->intrinsic == nir_intrinsic_load_output &&
@@ -613,6 +610,7 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
 
    case nir_intrinsic_store_output:
    case nir_intrinsic_store_per_vertex_output:
+   case nir_intrinsic_store_per_view_output:
    case nir_intrinsic_store_per_primitive_output:
       if (shader->info.stage == MESA_SHADER_TESS_CTRL &&
           instr->intrinsic == nir_intrinsic_store_output &&
@@ -666,11 +664,13 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
    case nir_intrinsic_load_draw_id:
    case nir_intrinsic_load_invocation_id:
    case nir_intrinsic_load_frag_coord:
+   case nir_intrinsic_load_pixel_coord:
    case nir_intrinsic_load_frag_shading_rate:
    case nir_intrinsic_load_fully_covered:
    case nir_intrinsic_load_point_coord:
    case nir_intrinsic_load_line_coord:
    case nir_intrinsic_load_front_face:
+   case nir_intrinsic_load_front_face_fsign:
    case nir_intrinsic_load_sample_id:
    case nir_intrinsic_load_sample_pos:
    case nir_intrinsic_load_sample_pos_or_center:

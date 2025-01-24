@@ -543,24 +543,41 @@ impl<'a> ShaderFromNir<'a> {
                     }
                     8 => {
                         for dc in 0..bits.div_ceil(32) {
-                            let mut psrc = [Src::new_zero(); 4];
+                            let mut psrc = [None; 4];
                             let mut psel = [0_u8; 4];
 
                             for b in 0..4 {
                                 let sc = dc * 4 + b;
                                 if sc < srcs.len() {
                                     let (ssa, byte) = srcs[sc];
+                                    // Deduplicate psrc entries
                                     for i in 0..4_u8 {
                                         let psrc_i = &mut psrc[usize::from(i)];
-                                        if *psrc_i == Src::new_zero() {
-                                            *psrc_i = ssa.into();
-                                        } else if *psrc_i != Src::from(ssa) {
+                                        if psrc_i.is_none() {
+                                            *psrc_i = Some(ssa.into());
+                                        } else if *psrc_i
+                                            != Some(Src::from(ssa))
+                                        {
                                             continue;
                                         }
                                         psel[b] = i * 4 + byte;
+                                        break;
                                     }
                                 }
                             }
+
+                            let psrc = {
+                                let mut res = [Src::new_zero(); 4];
+
+                                for (idx, src) in psrc.iter().enumerate() {
+                                    if let Some(src) = src {
+                                        res[idx] = *src;
+                                    }
+                                }
+
+                                res
+                            };
+
                             comps.push(b.prmt4(psrc, psel)[0]);
                         }
                     }
@@ -573,10 +590,9 @@ impl<'a> ShaderFromNir<'a> {
                                 let sc = dc * 2 + w;
                                 if sc < srcs.len() {
                                     let (ssa, byte) = srcs[sc];
-                                    let w_u8 = u8::try_from(w).unwrap();
                                     psrc[w] = ssa.into();
-                                    psel[w * 2 + 0] = (w_u8 * 4) + byte;
-                                    psel[w * 2 + 1] = (w_u8 * 4) + byte + 1;
+                                    psel[w * 2 + 0] = (w as u8 * 4) + byte;
+                                    psel[w * 2 + 1] = (w as u8 * 4) + byte + 1;
                                 }
                             }
                             comps.push(b.prmt(psrc[0], psrc[1], psel)[0]);

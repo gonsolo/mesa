@@ -1015,6 +1015,9 @@ struct _mesa_glsl_parse_state {
     * so we can check totals aren't too large.
     */
    unsigned clip_dist_size, cull_dist_size;
+
+   /* for OVR_multiview */
+   uint32_t view_mask;
 };
 
 # define YYLLOC_DEFAULT(Current, Rhs, N)                        \
@@ -1084,6 +1087,14 @@ extern "C" {
 struct glcpp_parser;
 struct _mesa_glsl_parse_state;
 
+struct gl_context;
+struct gl_shader;
+
+extern void
+_mesa_glsl_compile_shader(struct gl_context *ctx, struct gl_shader *shader,
+                          FILE *dump_ir_file, bool dump_ast, bool dump_hir,
+                          bool force_recompile);
+
 typedef void (*glcpp_extension_iterator)(
               struct _mesa_glsl_parse_state *state,
               void (*add_builtin_define)(struct glcpp_parser *, const char *, int),
@@ -1095,11 +1106,6 @@ extern int glcpp_preprocess(void *ctx, const char **shader, char **info_log,
                             glcpp_extension_iterator extensions,
                             struct _mesa_glsl_parse_state *state,
                             struct gl_context *gl_ctx);
-
-extern void
-_mesa_glsl_copy_symbols_from_table(struct exec_list *shader_ir,
-                                   struct glsl_symbol_table *src,
-                                   struct glsl_symbol_table *dest);
 
 #ifdef __cplusplus
 }

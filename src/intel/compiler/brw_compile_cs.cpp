@@ -4,8 +4,9 @@
  */
 
 #include "brw_fs.h"
-#include "brw_fs_builder.h"
+#include "brw_builder.h"
 #include "brw_fs_live_variables.h"
+#include "brw_generator.h"
 #include "brw_nir.h"
 #include "brw_cfg.h"
 #include "brw_private.h"
@@ -63,13 +64,13 @@ static bool
 run_cs(fs_visitor &s, bool allow_spilling)
 {
    assert(gl_shader_stage_is_compute(s.stage));
-   const fs_builder bld = fs_builder(&s).at_end();
+   const brw_builder bld = brw_builder(&s).at_end();
 
    s.payload_ = new cs_thread_payload(s);
 
    if (s.devinfo->platform == INTEL_PLATFORM_HSW && s.prog_data->total_shared > 0) {
       /* Move SLM index from g0.0[27:24] to sr0.1[11:8] */
-      const fs_builder abld = bld.exec_all().group(1, 0);
+      const brw_builder abld = bld.exec_all().group(1, 0);
       abld.MOV(retype(brw_sr0_reg(1), BRW_TYPE_UW),
                suboffset(retype(brw_vec1_grf(0, 0), BRW_TYPE_UW), 1));
    }
@@ -83,17 +84,51 @@ run_cs(fs_visitor &s, bool allow_spilling)
 
    brw_calculate_cfg(s);
 
-   brw_fs_optimize(s);
+   brw_optimize(s);
 
    s.assign_curb_setup();
 
-   brw_fs_lower_3src_null_dest(s);
-   brw_fs_workaround_memory_fence_before_eot(s);
-   brw_fs_workaround_emit_dummy_mov_instruction(s);
+   brw_lower_3src_null_dest(s);
+   brw_workaround_memory_fence_before_eot(s);
+   brw_workaround_emit_dummy_mov_instruction(s);
 
    brw_allocate_registers(s, allow_spilling);
 
+   brw_workaround_source_arf_before_eot(s);
+
    return !s.failed;
+}
+
+static bool
+instr_uses_sampler(nir_builder *b, nir_instr *instr, void *cb_data)
+{
+   if (instr->type != nir_instr_type_tex)
+      return false;
+
+   switch (nir_instr_as_tex(instr)->op) {
+   case nir_texop_tex:
+   case nir_texop_txd:
+   case nir_texop_txf:
+   case nir_texop_txl:
+   case nir_texop_txb:
+   case nir_texop_txf_ms:
+   case nir_texop_txf_ms_mcs_intel:
+   case nir_texop_lod:
+   case nir_texop_tg4:
+   case nir_texop_texture_samples:
+      return true;
+
+   default:
+      return false;
+   }
+}
+
+static bool
+brw_nir_uses_sampler(nir_shader *shader)
+{
+   return nir_shader_instructions_pass(shader, instr_uses_sampler,
+                                       nir_metadata_all,
+                                       NULL);
 }
 
 const unsigned *
@@ -126,6 +161,8 @@ brw_compile_cs(const struct brw_compiler *compiler,
       .prog_data = prog_data,
       .required_width = brw_required_dispatch_width(&nir->info),
    };
+
+   prog_data->uses_sampler = brw_nir_uses_sampler(params->base.nir);
 
    std::unique_ptr<fs_visitor> v[3];
 
@@ -191,7 +228,7 @@ brw_compile_cs(const struct brw_compiler *compiler,
    if (!nir->info.workgroup_size_variable)
       prog_data->prog_mask = 1 << selected_simd;
 
-   fs_generator g(compiler, &params->base, &prog_data->base,
+   brw_generator g(compiler, &params->base, &prog_data->base,
                   MESA_SHADER_COMPUTE);
    if (unlikely(debug_enabled)) {
       char *name = ralloc_asprintf(params->base.mem_ctx,
