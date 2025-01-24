@@ -10,15 +10,18 @@ VULKAN_COMPUTE = $(VULKAN_COMPUTE_DIR)/VulkanCompute
 #APPLICATION = $(VULKANINFO)
 APPLICATION = $(VULKAN_COMPUTE)
 MACHINE = $(shell uname -m)
-NVIDIA_COUNT = $(shell lspci|grep -c NVIDIA)
 ICD_D = ~/bin/mesa/share/vulkan/icd.d
 NOUVEAU_ICD = $(ICD_D)/nouveau_icd.$(MACHINE).json
 BORG_ICD = $(ICD_D)/borg_icd.$(MACHINE).json
-ifeq ($(NVIDIA_COUNT), 0)
-	ICD = $(BORG_ICD)
-else
+ifeq (,$(wildcard /sys/devices/platform/soc/4000.borg-device))
 	ICD = $(NOUVEAU_ICD)
+else
+	ICD = $(BORG_ICD)
 endif
+
+icd:
+	@echo $(ICD)
+
 DRIVERS = nouveau,borg-experimental
 #VERBOSE = --verbose
 SKIP_DRM = 1
