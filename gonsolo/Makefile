@@ -29,6 +29,7 @@ SKIP_DRM = 1
 all: compile
 t: test
 test: test_nouveau
+tn: test_nouveau
 test_nouveau:
 	cd $(VULKAN_COMPUTE_DIR); MESA_SHADER_CACHE_DISABLE=1 NAK_DEBUG=print RUST_BACKTRACE=1 BORG_SKIP_DRM=$(SKIP_DRM) VK_ICD_FILENAMES=$(NOUVEAU_ICD) $(APPLICATION); cd -
 tb: test_borg
