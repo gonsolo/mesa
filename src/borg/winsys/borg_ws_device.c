@@ -48,6 +48,7 @@ borg_ws_param(int fd, uint64_t param, uint64_t *value)
    puts(__func__);
    struct drm_borg_getparam data = { .param = param };
 
+   printf("Attempting drmCommandWriteRead. fd: %i, param: %li\n", fd, param);
    int ret = drmCommandWriteRead(fd, DRM_BORG_GETPARAM, &data, sizeof(data));
    printf("ret from drmCommandWriteRead: %i\n", ret);
    if (ret)
