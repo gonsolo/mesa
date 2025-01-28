@@ -81,3 +81,8 @@ borg_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 {
    // TODO
 }
+
+uint64_t borg_get_status(struct borg_device *dev)
+{
+        return borg_ws_device_get_status(dev->ws_dev);
+}

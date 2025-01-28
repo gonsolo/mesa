@@ -15,4 +15,6 @@ struct borg_ws_device {
 struct borg_ws_device *
 borg_ws_device_new(drmDevicePtr drm_device, bool skip_drm);
 
+uint64_t borg_ws_device_get_status(struct borg_ws_device *ws_dev);
+
 #endif

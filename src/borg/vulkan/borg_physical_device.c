@@ -9,6 +9,8 @@
 #include "borg_physical_device.h"
 #include "borg_private.h"
 
+#include "borg_ws_device.h"
+
 #include "vk_alloc.h"
 #include "vk_log.h"
 #include "vk_util.h"

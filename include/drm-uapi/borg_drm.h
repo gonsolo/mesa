@@ -49,6 +49,15 @@ struct drm_borg_vm_bind {
 #define DRM_IOCTL_BORG_VM_BIND            DRM_IOWR(DRM_COMMAND_BASE + DRM_BORG_VM_BIND, struct drm_borg_vm_bind)
 #define DRM_IOCTL_BORG_GEM_NEW            DRM_IOWR(DRM_COMMAND_BASE + DRM_BORG_GEM_NEW, struct drm_borg_gem_new)
 
+#define BORG_GETPARAM_STATUS        0
+
+#define DRM_BORG_GETPARAM           0x01
+
+struct drm_borg_getparam {
+        __u64 param;
+        __u64 value;
+};
+
 #if defined(__cplusplus)
 }
 #endif

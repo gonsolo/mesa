@@ -1,5 +1,7 @@
 #include "borg_ws_device.h"
 
+#include "drm-uapi/borg_drm.h"
+
 #include "util/u_memory.h"
 
 #include <fcntl.h>
@@ -38,4 +40,26 @@ out_open:
    FREE(device);
    close(fd);
    return NULL;
+}
+
+static int
+borg_ws_param(int fd, uint64_t param, uint64_t *value)
+{
+   struct drm_borg_getparam data = { .param = param };
+
+   int ret = drmCommandWriteRead(fd, DRM_BORG_GETPARAM, &data, sizeof(data));
+   if (ret)
+      return ret;
+
+   *value = data.value;
+   return 0;
+}
+
+uint64_t borg_ws_device_get_status(struct borg_ws_device *device)
+{
+   uint64_t used = 0;
+   if (borg_ws_param(device->fd, BORG_GETPARAM_STATUS, &used))
+      return 666;
+
+   return used;
 }

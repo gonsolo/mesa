@@ -130,12 +130,6 @@ borg_lower_nir(struct borg_device *dev,
 const void *global_shader_pointer;
 uint32_t global_shader_size;
 
-static inline uint8_t reg_read8(uintptr_t addr)
-{
-        volatile uint8_t *ptr = (volatile uint8_t *) addr;
-        return *ptr;
-}
-
 static VkResult
 borg_shader_upload(struct borg_device *dev, struct borg_shader *shader)
 {
@@ -167,9 +161,10 @@ borg_shader_upload(struct borg_device *dev, struct borg_shader *shader)
    global_shader_size = shader->code_size;
    printf("global_shader_size is now %i\n", global_shader_size);
 
-   const int borg_status = 0x4000;
-   bool status = reg_read8(borg_status) & 0x1;
-   printf("borg status is %i\n", status);
+   //const int borg_status = 0x4000;
+   //bool status = reg_read8(borg_status) & 0x1;
+   uint64_t status = borg_get_status(dev);
+   printf("borg status is %li\n", status);
 
    return VK_SUCCESS;
 }

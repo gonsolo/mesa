@@ -37,4 +37,7 @@ borg_device_physical(struct borg_device *dev)
    return (struct borg_physical_device *)dev->vk.physical;
 }
 
+uint64_t borg_get_status(struct borg_device *dev);
+
+
 #endif
