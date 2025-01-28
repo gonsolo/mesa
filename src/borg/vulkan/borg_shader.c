@@ -163,6 +163,7 @@ borg_shader_upload(struct borg_device *dev, struct borg_shader *shader)
 
    //const int borg_status = 0x4000;
    //bool status = reg_read8(borg_status) & 0x1;
+   puts("borg_shader_upload: Attempting borg_get_status\n");
    uint64_t status = borg_get_status(dev);
    printf("borg status is %li\n", status);
 
