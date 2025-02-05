@@ -111,7 +111,7 @@ brw_emit_tcs_thread_end(fs_visitor &s)
    srcs[URB_LOGICAL_SRC_CHANNEL_MASK] = brw_imm_ud(WRITEMASK_X << 16);
    srcs[URB_LOGICAL_SRC_DATA] = brw_imm_ud(0);
    srcs[URB_LOGICAL_SRC_COMPONENTS] = brw_imm_ud(1);
-   fs_inst *inst = bld.emit(SHADER_OPCODE_URB_WRITE_LOGICAL,
+   brw_inst *inst = bld.emit(SHADER_OPCODE_URB_WRITE_LOGICAL,
                             reg_undef, srcs, ARRAY_SIZE(srcs));
    inst->eot = true;
 }
@@ -122,7 +122,7 @@ brw_assign_tcs_urb_setup(fs_visitor &s)
    assert(s.stage == MESA_SHADER_TESS_CTRL);
 
    /* Rewrite all ATTR file references to HW_REGs. */
-   foreach_block_and_inst(block, fs_inst, inst, s.cfg) {
+   foreach_block_and_inst(block, brw_inst, inst, s.cfg) {
       s.convert_attr_sources_to_hw_regs(inst);
    }
 }
@@ -154,7 +154,7 @@ run_tcs(fs_visitor &s)
       bld.IF(BRW_PREDICATE_NORMAL);
    }
 
-   nir_to_brw(&s);
+   brw_from_nir(&s);
 
    if (fix_dispatch_mask) {
       bld.emit(BRW_OPCODE_ENDIF);
@@ -287,6 +287,7 @@ brw_compile_tcs(const struct brw_compiler *compiler,
 
    assert(v.payload().num_regs % reg_unit(devinfo) == 0);
    prog_data->base.base.dispatch_grf_start_reg = v.payload().num_regs / reg_unit(devinfo);
+   prog_data->base.base.grf_used = v.grf_used;
 
    brw_generator g(compiler, &params->base,
                   &prog_data->base.base, MESA_SHADER_TESS_CTRL);

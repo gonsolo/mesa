@@ -119,6 +119,8 @@ vlVaDestroySurfaces(VADriverContextP ctx, VASurfaceID *surface_list, int num_sur
       }
       if (surf->buffer)
          surf->buffer->destroy(surf->buffer);
+      if (surf->pipe_fence)
+         drv->pipe->screen->fence_reference(drv->pipe->screen, &surf->pipe_fence, NULL);
       if (surf->ctx) {
          assert(_mesa_set_search(surf->ctx->surfaces, surf));
          _mesa_set_remove_key(surf->ctx->surfaces, surf);
@@ -176,30 +178,30 @@ _vlVaSyncSurface(VADriverContextP ctx, VASurfaceID render_target, uint64_t timeo
       fence = surf->fence;
    }
 
-   /* This is checked before getting the context below as
-    * surf->ctx is only set in begin_frame
-    * and not when the surface is created
-    * Some apps try to sync/map the surface right after creation and
-    * would get VA_STATUS_ERROR_INVALID_CONTEXT
-    */
-   if (!surf->buffer || !fence) {
-      // No outstanding encode/decode operation: nothing to do.
+   if (surf->pipe_fence) {
+      struct pipe_screen *pscreen = drv->pipe->screen;
+      if (!pscreen->fence_finish(pscreen, NULL, surf->pipe_fence, timeout_ns)) {
+         mtx_unlock(&drv->mutex);
+         return VA_STATUS_ERROR_TIMEDOUT;
+      }
+      pscreen->fence_reference(pscreen, &surf->pipe_fence, NULL);
+   }
+
+   /* No outstanding operation: nothing to do. */
+   if (!surf->fence) {
       mtx_unlock(&drv->mutex);
       return VA_STATUS_SUCCESS;
    }
 
-   if (!context) {
+   if (!context || !context->decoder) {
       mtx_unlock(&drv->mutex);
       return VA_STATUS_ERROR_INVALID_CONTEXT;
    }
 
-   if (!context->decoder) {
-      mtx_unlock(&drv->mutex);
-      return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
-   }
-
-   int ret = context->decoder->fence_wait(context->decoder, fence, timeout_ns);
+   mtx_lock(&context->mutex);
    mtx_unlock(&drv->mutex);
+   int ret = context->decoder->fence_wait(context->decoder, fence, timeout_ns);
+   mtx_unlock(&context->mutex);
    return ret ? VA_STATUS_SUCCESS : VA_STATUS_ERROR_TIMEDOUT;
 }
 
@@ -220,64 +222,14 @@ vlVaSyncSurface2(VADriverContextP ctx, VASurfaceID surface, uint64_t timeout_ns)
 VAStatus
 vlVaQuerySurfaceStatus(VADriverContextP ctx, VASurfaceID render_target, VASurfaceStatus *status)
 {
-   vlVaDriver *drv;
-   vlVaSurface *surf;
-   vlVaContext *context;
-   struct pipe_fence_handle *fence;
+   VAStatus ret = _vlVaSyncSurface(ctx, render_target, 0);
 
-   if (!ctx)
-      return VA_STATUS_ERROR_INVALID_CONTEXT;
-
-   drv = VL_VA_DRIVER(ctx);
-   if (!drv)
-      return VA_STATUS_ERROR_INVALID_CONTEXT;
-
-   mtx_lock(&drv->mutex);
-
-   surf = handle_table_get(drv->htab, render_target);
-   if (!surf) {
-      mtx_unlock(&drv->mutex);
-      return VA_STATUS_ERROR_INVALID_SURFACE;
-   }
-
-   if (surf->coded_buf) {
-      context = surf->coded_buf->ctx;
-      fence = surf->coded_buf->fence;
-   } else {
-      context = surf->ctx;
-      fence = surf->fence;
-   }
-
-   /* This is checked before getting the context below as
-    * surf->ctx is only set in begin_frame
-    * and not when the surface is created
-    * Some apps try to sync/map the surface right after creation and
-    * would get VA_STATUS_ERROR_INVALID_CONTEXT
-    */
-   if (!surf->buffer || !fence) {
-      // No outstanding encode/decode operation: nothing to do.
+   if (ret == VA_STATUS_SUCCESS)
       *status = VASurfaceReady;
-      mtx_unlock(&drv->mutex);
-      return VA_STATUS_SUCCESS;
-   }
-
-   if (!context) {
-      mtx_unlock(&drv->mutex);
-      return VA_STATUS_ERROR_INVALID_CONTEXT;
-   }
-
-   if (!context->decoder) {
-      mtx_unlock(&drv->mutex);
-      return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
-   }
-
-   int ret = context->decoder->fence_wait(context->decoder, fence, 0);
-   mtx_unlock(&drv->mutex);
-
-   if (ret)
-      *status = VASurfaceReady;
-   else
+   else if (ret == VA_STATUS_ERROR_TIMEDOUT)
       *status = VASurfaceRendering;
+   else
+      return ret;
 
    return VA_STATUS_SUCCESS;
 }
@@ -491,7 +443,7 @@ vlVaPutSurface(VADriverContextP ctx, VASurfaceID surface_id, void* draw, short s
    /* flush before calling flush_frontbuffer so that rendering is flushed
     * to back buffer so the texture can be copied in flush_frontbuffer
     */
-   drv->pipe->flush(drv->pipe, NULL, 0);
+   vlVaSurfaceFlush(drv, surf);
 
    screen->flush_frontbuffer(screen, drv->pipe, tex, 0, 0,
                              vscreen->get_private(vscreen), 0, NULL);
@@ -1046,7 +998,7 @@ vlVaHandleSurfaceAllocate(vlVaDriver *drv, vlVaSurface *surface,
                   surfaces[i]->width, surfaces[i]->height,
                   false);
       }
-      drv->pipe->flush(drv->pipe, NULL, 0);
+      vlVaSurfaceFlush(drv, surface);
    }
 
    return VA_STATUS_SUCCESS;
@@ -1061,6 +1013,13 @@ vlVaGetSurfaceBuffer(vlVaDriver *drv, vlVaSurface *surface)
       return surface->buffer;
    vlVaHandleSurfaceAllocate(drv, surface, &surface->templat, NULL, 0);
    return surface->buffer;
+}
+
+void
+vlVaSurfaceFlush(vlVaDriver *drv, vlVaSurface *surf)
+{
+   drv->pipe->flush(drv->pipe, &surf->pipe_fence,
+                    drv->has_external_handles ? 0 : PIPE_FLUSH_ASYNC);
 }
 
 static int

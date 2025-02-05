@@ -208,7 +208,9 @@ struct brw_base_prog_key {
 
    enum brw_robustness_flags robust_flags:2;
 
-   unsigned padding:22;
+   bool uses_inline_push_addr:1;
+
+   unsigned padding:21;
 
    /**
     * Apply workarounds for SIN and COS input range problems.
@@ -548,6 +550,9 @@ struct brw_stage_prog_data {
     */
    unsigned dispatch_grf_start_reg;
 
+   /** Number of GRF registers used. */
+   unsigned grf_used;
+
    bool use_alt_mode; /**< Use ALT floating point mode?  Otherwise, IEEE. */
 
    /* 32-bit identifiers for all push/pull parameters.  These can be anything
@@ -565,6 +570,17 @@ struct brw_stage_prog_data {
    uint32_t printf_info_count;
    u_printf_info *printf_info;
 };
+
+/**
+ * Convert a number of GRF registers used (grf_used in prog_data) into
+ * a number of GRF register blocks supported by the hardware on PTL+.
+ */
+static inline unsigned
+ptl_register_blocks(unsigned grf_used)
+{
+   const unsigned n = DIV_ROUND_UP(grf_used, 32) - 1;
+   return (n < 6 ? n : 7);
+}
 
 static inline uint32_t *
 brw_stage_prog_data_add_params(struct brw_stage_prog_data *prog_data,
@@ -877,6 +893,10 @@ struct brw_cs_prog_data {
    bool uses_barrier;
    bool uses_num_work_groups;
    bool uses_inline_data;
+   /** Whether inline push data is used to provide a 64bit pointer to push
+    * constants
+    */
+   bool uses_inline_push_addr;
    bool uses_btd_stack_ids;
    bool uses_systolic;
    uint8_t generate_local_id;
@@ -905,6 +925,11 @@ brw_cs_prog_data_prog_offset(const struct brw_cs_prog_data *prog_data,
 
 struct brw_bs_prog_data {
    struct brw_stage_prog_data base;
+
+   /** Whether inline push data is used to provide a 64bit pointer to push
+    * constants
+    */
+   bool uses_inline_push_addr;
 
    /** SIMD size of the root shader */
    uint8_t simd_size;

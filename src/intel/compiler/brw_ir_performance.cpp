@@ -71,7 +71,7 @@ namespace {
       /* Register part of the GRF. */
       EU_DEPENDENCY_ID_GRF0 = 0,
       /* Address register part of the ARF. */
-      EU_DEPENDENCY_ID_ADDR0 = EU_DEPENDENCY_ID_GRF0 + XE2_MAX_GRF,
+      EU_DEPENDENCY_ID_ADDR0 = EU_DEPENDENCY_ID_GRF0 + XE3_MAX_GRF,
       /* Accumulator register part of the ARF. */
       EU_DEPENDENCY_ID_ACCUM0 = EU_DEPENDENCY_ID_ADDR0 + 1,
       /* Flag register part of the ARF. */
@@ -117,7 +117,7 @@ namespace {
     * instructions.
     */
    struct instruction_info {
-      instruction_info(const struct brw_isa_info *isa, const fs_inst *inst) :
+      instruction_info(const struct brw_isa_info *isa, const brw_inst *inst) :
          isa(isa), devinfo(isa->devinfo), op(inst->opcode),
          td(inst->dst.type), sd(DIV_ROUND_UP(inst->size_written, REG_SIZE)),
          tx(get_exec_type(inst)), sx(0), ss(0),
@@ -130,6 +130,13 @@ namespace {
          if (inst->opcode == SHADER_OPCODE_SEND) {
             ss = DIV_ROUND_UP(inst->size_read(devinfo, 2), REG_SIZE) +
                  DIV_ROUND_UP(inst->size_read(devinfo, 3), REG_SIZE);
+         } else if (inst->opcode == SHADER_OPCODE_SEND_GATHER) {
+            ss = inst->mlen;
+            /* If haven't lowered yet, count the sources. */
+            if (!ss) {
+               for (int i = 3; i < inst->sources; i++)
+                  ss += DIV_ROUND_UP(inst->size_read(devinfo, i), REG_SIZE);
+            }
          } else {
             for (unsigned i = 0; i < inst->sources; i++)
                ss = MAX2(ss, DIV_ROUND_UP(inst->size_read(devinfo, i), REG_SIZE));
@@ -597,6 +604,7 @@ namespace {
                                0, 0, 0, 0, 0, 0);
 
       case SHADER_OPCODE_SEND:
+      case SHADER_OPCODE_SEND_GATHER:
          switch (info.sfid) {
          case GFX6_SFID_DATAPORT_CONSTANT_CACHE:
             /* See FS_OPCODE_UNIFORM_PULL_CONSTANT_LOAD */
@@ -855,7 +863,7 @@ namespace {
     */
    unsigned
    accum_reg_of_channel(const intel_device_info *devinfo,
-                        const fs_inst *inst,
+                        const brw_inst *inst,
                         brw_reg_type tx, unsigned i)
    {
       assert(inst->reads_accumulator_implicitly() ||
@@ -870,7 +878,7 @@ namespace {
     */
    void
    issue_inst(state &st, const struct brw_isa_info *isa,
-              const fs_inst *inst)
+              const brw_inst *inst)
    {
       const struct intel_device_info *devinfo = isa->devinfo;
       const instruction_info info(isa, inst);
@@ -1030,7 +1038,7 @@ namespace {
       foreach_block(block, s->cfg) {
          const unsigned elapsed0 = elapsed;
 
-         foreach_inst_in_block(fs_inst, inst, block) {
+         foreach_inst_in_block(brw_inst, inst, block) {
             const unsigned clock0 = st.unit_ready[EU_UNIT_FE];
 
             issue_inst(st, &s->compiler->isa, inst);

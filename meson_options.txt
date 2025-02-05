@@ -287,7 +287,10 @@ option(
   'vulkan-layers',
   type : 'array',
   value : [],
-  choices : ['device-select', 'intel-nullhw', 'overlay', 'screenshot'],
+  choices : [
+    'device-select', 'intel-nullhw', 'overlay', 'screenshot', 
+    'vram-report-limit',
+  ],
   description : 'List of vulkan layers to build'
 )
 
@@ -682,6 +685,15 @@ option(
   type : 'feature',
   deprecated: {'true': 'enabled', 'false': 'disabled'},
   description : 'Build Ray Tracing on supported hardware.'
+)
+
+option(
+  'intel-elk',
+  type : 'boolean',
+  value : true,
+  description : 'Build ELK compiler (used for Gfx8 and earlier). ' +
+                'This is required for Crocus and Hasvk, and it is ' +
+                'optional for Iris and various developer tools.'
 )
 
 option(

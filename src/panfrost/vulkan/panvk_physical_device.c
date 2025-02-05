@@ -185,6 +185,7 @@ get_device_extensions(const struct panvk_physical_device *device,
       .KHR_create_renderpass2 = true,
       .KHR_dedicated_allocation = true,
       .KHR_descriptor_update_template = true,
+      .KHR_depth_stencil_resolve = true,
       .KHR_device_group = true,
       .KHR_driver_properties = true,
       .KHR_dynamic_rendering = true,
@@ -208,6 +209,7 @@ get_device_extensions(const struct panvk_physical_device *device,
       .KHR_push_descriptor = true,
       .KHR_relaxed_block_layout = true,
       .KHR_sampler_mirror_clamp_to_edge = true,
+      .KHR_separate_depth_stencil_layouts = true,
       .KHR_shader_draw_parameters = true,
       .KHR_shader_expect_assume = true,
       .KHR_shader_float16_int8 = true,
@@ -287,8 +289,8 @@ get_features(const struct panvk_physical_device *device,
       /* Vulkan 1.1 */
       .storageBuffer16BitAccess = true,
       .uniformAndStorageBuffer16BitAccess = true,
-      .storagePushConstant16 = false,
-      .storageInputOutput16 = false,
+      .storagePushConstant16 = true,
+      .storageInputOutput16 = true,
       .multiview = arch >= 10,
       .multiviewGeometryShader = false,
       .multiviewTessellationShader = false,
@@ -336,7 +338,7 @@ get_features(const struct panvk_physical_device *device,
       .imagelessFramebuffer = false,
       .uniformBufferStandardLayout = false,
       .shaderSubgroupExtendedTypes = false,
-      .separateDepthStencilLayouts = false,
+      .separateDepthStencilLayouts = true,
       .hostQueryReset = true,
       .timelineSemaphore = true,
       .bufferDeviceAddress = true,
@@ -667,7 +669,7 @@ get_device_properties(const struct panvk_instance *instance,
       .lineWidthRange = {0.0, 7.9921875},
       .pointSizeGranularity = (1.0 / 16.0),
       .lineWidthGranularity = (1.0 / 128.0),
-      .strictLines = false,
+      .strictLines = true,
       .standardSampleLocations = true,
       .optimalBufferCopyOffsetAlignment = 64,
       .optimalBufferCopyRowPitchAlignment = 64,
@@ -716,9 +718,13 @@ get_device_properties(const struct panvk_instance *instance,
 
       /* Vulkan 1.2 properties */
       /* XXX: 1.2 support */
-      /* XXX: VK_KHR_depth_stencil_resolve */
-      .supportedDepthResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT,
-      .supportedStencilResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT,
+      .supportedDepthResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT |
+                                    VK_RESOLVE_MODE_AVERAGE_BIT |
+                                    VK_RESOLVE_MODE_MIN_BIT |
+                                    VK_RESOLVE_MODE_MAX_BIT,
+      .supportedStencilResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT |
+                                      VK_RESOLVE_MODE_MIN_BIT |
+                                      VK_RESOLVE_MODE_MAX_BIT,
       .independentResolveNone = true,
       .independentResolve = true,
       /* VK_KHR_driver_properties */
@@ -904,6 +910,14 @@ panvk_physical_device_init(struct panvk_physical_device *device,
                                       device->kmod.props.gpu_variant);
 
    unsigned arch = pan_arch(device->kmod.props.gpu_prod_id);
+
+   if (!device->model) {
+      result = panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
+                            "Unknown gpu_id (%#x) or variant (%#x)",
+                            device->kmod.props.gpu_prod_id,
+                            device->kmod.props.gpu_variant);
+      goto fail;
+   }
 
    switch (arch) {
    case 6:

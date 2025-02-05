@@ -41,7 +41,7 @@ impl PipeContext {
     pub(super) fn new(context: *mut pipe_context, screen: &Arc<PipeScreen>) -> Option<Self> {
         let s = Self {
             pipe: NonNull::new(context)?,
-            screen: screen.clone(),
+            screen: Arc::clone(screen),
         };
 
         if !has_required_cbs(unsafe { s.pipe.as_ref() }) {
@@ -588,6 +588,16 @@ impl PipeContext {
                     to_device,
                     content_undefined,
                 );
+            }
+        }
+    }
+
+    pub fn device_reset_status(&self) -> pipe_reset_status {
+        unsafe {
+            if let Some(get_device_reset_status) = self.pipe.as_ref().get_device_reset_status {
+                get_device_reset_status(self.pipe.as_ptr())
+            } else {
+                pipe_reset_status::PIPE_NO_RESET
             }
         }
     }

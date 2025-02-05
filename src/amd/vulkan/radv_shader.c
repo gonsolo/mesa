@@ -375,6 +375,7 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
          .force_ssbo_non_uniform = pdev->cache_key.ssbo_non_uniform,
          .lower_terminate_to_discard = pdev->cache_key.lower_terminate_to_discard,
          .emit_debug_break = !!device->trap_handler_shader,
+         .debug_info = !!(instance->debug_flags & RADV_DEBUG_NIR_DEBUG_INFO),
       };
       nir = spirv_to_nir(spirv, stage->spirv.size / 4, spec_entries, num_spec_entries, stage->stage, stage->entrypoint,
                          &spirv_options, &pdev->nir_options[stage->stage]);
@@ -481,8 +482,9 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
        */
       .lower_cs_local_id_to_index = nir->info.stage == MESA_SHADER_MESH && !pdev->mesh_fast_launch_2,
       .lower_local_invocation_index = nir->info.stage == MESA_SHADER_COMPUTE &&
-                                      ((nir->info.workgroup_size[0] == 1) + (nir->info.workgroup_size[1] == 1) +
-                                       (nir->info.workgroup_size[2] == 1)) == 2,
+                                      ((((nir->info.workgroup_size[0] == 1) + (nir->info.workgroup_size[1] == 1) +
+                                         (nir->info.workgroup_size[2] == 1)) == 2) ||
+                                       nir->info.derivative_group == DERIVATIVE_GROUP_QUADS),
    };
    NIR_PASS(_, nir, nir_lower_compute_system_values, &csv_options);
 
@@ -540,11 +542,7 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
    NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_function_temp, NULL);
 
    bool gfx7minus = pdev->info.gfx_level <= GFX7;
-   bool has_inverse_ballot = true;
    bool use_llvm = radv_use_llvm_for_stage(pdev, nir->info.stage);
-#if AMD_LLVM_AVAILABLE
-   has_inverse_ballot = !use_llvm || LLVM_VERSION_MAJOR >= 17;
-#endif
 
    NIR_PASS(_, nir, nir_lower_subgroups,
             &(struct nir_lower_subgroups_options){
@@ -562,7 +560,6 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
                .lower_quad_broadcast_dynamic_to_const = gfx7minus,
                .lower_shuffle_to_swizzle_amd = 1,
                .lower_ballot_bit_count_to_mbcnt_amd = 1,
-               .lower_inverse_ballot = !has_inverse_ballot,
                .lower_boolean_reduce = !use_llvm,
                .lower_boolean_shuffle = true,
             });
@@ -760,8 +757,7 @@ radv_lower_ngg(struct radv_device *device, struct radv_shader_stage *ngg_stage,
       nir->info.shared_size = info->ngg_info.lds_size;
 
    ac_nir_lower_ngg_options options = {0};
-   options.family = pdev->info.family;
-   options.gfx_level = pdev->info.gfx_level;
+   options.hw_info = &pdev->info;
    options.max_workgroup_size = info->workgroup_size;
    options.wave_size = info->wave_size;
    options.clip_cull_dist_mask = info->outinfo.clip_dist_mask | info->outinfo.cull_dist_mask;
@@ -803,7 +799,7 @@ radv_lower_ngg(struct radv_device *device, struct radv_shader_stage *ngg_stage,
       unsigned hw_workgroup_size = ALIGN(info->workgroup_size, info->wave_size);
 
       bool scratch_ring = false;
-      NIR_PASS_V(nir, ac_nir_lower_ngg_mesh, options.gfx_level, options.clip_cull_dist_mask,
+      NIR_PASS_V(nir, ac_nir_lower_ngg_mesh, &pdev->info, options.clip_cull_dist_mask,
                  options.vs_output_param_offset, options.has_param_exports, &scratch_ring, info->wave_size,
                  hw_workgroup_size, gfx_state->has_multiview_view_index, info->ms.has_query, pdev->mesh_fast_launch_2);
       ngg_stage->info.ms.needs_ms_scratch_ring = scratch_ring;
@@ -1664,6 +1660,13 @@ radv_precompute_registers_hw_ms(struct radv_device *device, struct radv_shader_b
 
    info->regs.ms.spi_shader_gs_meshlet_exp_alloc =
       S_00B2B4_MAX_EXP_VERTS(info->ngg_info.max_out_verts) | S_00B2B4_MAX_EXP_PRIMS(info->ngg_info.prim_amp_factor);
+
+   if (pdev->info.gfx_level >= GFX12) {
+      const bool derivative_group_quads = info->cs.derivative_group == DERIVATIVE_GROUP_QUADS;
+
+      info->regs.ms.spi_shader_gs_meshlet_ctrl =
+         S_00B2B8_INTERLEAVE_BITS_X(derivative_group_quads) | S_00B2B8_INTERLEAVE_BITS_Y(derivative_group_quads);
+   }
 }
 
 static void
@@ -1736,6 +1739,11 @@ radv_precompute_registers_hw_cs(struct radv_device *device, struct radv_shader_b
    if (pdev->info.gfx_level >= GFX12) {
       info->regs.cs.compute_num_thread_x = S_00B81C_NUM_THREAD_FULL_GFX12(info->cs.block_size[0]);
       info->regs.cs.compute_num_thread_y = S_00B820_NUM_THREAD_FULL_GFX12(info->cs.block_size[1]);
+
+      if (info->cs.derivative_group == DERIVATIVE_GROUP_QUADS) {
+         info->regs.cs.compute_num_thread_x |= S_00B81C_INTERLEAVE_BITS_X(1);
+         info->regs.cs.compute_num_thread_y |= S_00B820_INTERLEAVE_BITS_Y(1);
+      }
    } else {
       info->regs.cs.compute_num_thread_x = S_00B81C_NUM_THREAD_FULL_GFX6(info->cs.block_size[0]);
       info->regs.cs.compute_num_thread_y = S_00B820_NUM_THREAD_FULL_GFX6(info->cs.block_size[1]);
@@ -1933,7 +1941,7 @@ radv_postprocess_binary_config(struct radv_device *device, struct radv_shader_bi
    unsigned num_input_vgprs = args->ac.num_vgprs_used;
 
    if (stage == MESA_SHADER_FRAGMENT) {
-      num_input_vgprs = ac_get_fs_input_vgpr_cnt(config, NULL);
+      num_input_vgprs = ac_get_fs_input_vgpr_cnt(config);
    }
 
    unsigned num_vgprs = MAX2(config->num_vgprs, num_input_vgprs);

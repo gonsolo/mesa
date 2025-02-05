@@ -321,6 +321,7 @@ Khronos, ARB, and OES extensions that are not part of any OpenGL or OpenGL ES ve
   GL_EXT_shader_framebuffer_fetch_non_coherent          DONE (freedreno/a6xx, iris, llvmpipe, panfrost, virgl, zink, asahi)
   GL_EXT_clear_texture                                  DONE (all drivers)
   GL_EXT_color_buffer_half_float                        DONE (freedreno, iris, llvmpipe, nv50, nvc0, radeonsi, zink, crocus, asahi)
+  GL_EXT_conservative_depth                             DONE (all drivers that support GLES 3.0+)
   GL_EXT_depth_bounds_test                              DONE (freedreno/a6xx, nv50, nvc0, radeonsi, softpipe, zink, iris/gen12+)
   GL_EXT_memory_object                                  DONE (freedreno, radeonsi, llvmpipe, zink, d3d12, iris, crocus/gen7+)
   GL_EXT_memory_object_fd                               DONE (freedreno, radeonsi, llvmpipe, zink, iris, crocus/gen7+)
@@ -338,7 +339,7 @@ Khronos, ARB, and OES extensions that are not part of any OpenGL or OpenGL ES ve
   GL_EXT_texture_sRGB_R8                                DONE (all drivers that support GLES 3.0+)
   GL_EXT_texture_view                                   DONE (all drivers that support GL_OES_texture_view)
   GL_KHR_blend_equation_advanced_coherent               DONE (freedreno/a6xx, panfrost, zink, asahi, iris/gen9+)
-  GL_KHR_shader_subgroup                                DONE (radeonsi)
+  GL_KHR_shader_subgroup                                DONE (radeonsi, zink)
   GL_KHR_texture_compression_astc_hdr                   DONE (core only)
   GL_KHR_texture_compression_astc_sliced_3d             DONE (freedreno/a4xx+, r600, radeonsi, panfrost, softpipe, v3d, zink, lima, asahi, iris/gen9+)
   GL_OES_depth_texture_cube_map                         DONE (all drivers that support GLSL 1.30+)
@@ -459,13 +460,13 @@ Vulkan 1.2 -- all DONE: anv, nvk, tu, vn
   VK_KHR_8bit_storage                                   DONE (anv, dzn, hasvk, lvp, nvk, radv, tu/a750+, v3dv, vn, panvk)
   VK_KHR_buffer_device_address                          DONE (anv, hasvk, lvp, nvk, panvk, radv, tu, v3dv, vn)
   VK_KHR_create_renderpass2                             DONE (anv, dzn, hasvk, lvp, nvk, panvk, radv, tu, v3dv, vn)
-  VK_KHR_depth_stencil_resolve                          DONE (anv, dzn, hasvk, lvp, nvk, radv, tu, v3dv, vn)
+  VK_KHR_depth_stencil_resolve                          DONE (anv, dzn, hasvk, lvp, nvk, panvk, radv, tu, v3dv, vn)
   VK_KHR_draw_indirect_count                            DONE (anv, dzn, hasvk, lvp, nvk, radv, tu, vn)
   VK_KHR_driver_properties                              DONE (anv, dzn, hasvk, lvp, nvk, panvk, radv, tu, v3dv, vn)
   VK_KHR_image_format_list                              DONE (anv, dzn, hasvk, lvp, nvk, panvk, pvr, radv, tu, v3dv, vn)
   VK_KHR_imageless_framebuffer                          DONE (anv, dzn, hasvk, lvp, nvk, radv, tu, v3dv, vn)
   VK_KHR_sampler_mirror_clamp_to_edge                   DONE (anv, dzn, hasvk, lvp, nvk, panvk, radv, tu, v3dv, vn)
-  VK_KHR_separate_depth_stencil_layouts                 DONE (anv, dzn, hasvk, lvp, nvk, radv, tu, v3dv, vn)
+  VK_KHR_separate_depth_stencil_layouts                 DONE (anv, dzn, hasvk, lvp, nvk, panvk, radv, tu, v3dv, vn)
   VK_KHR_shader_atomic_int64                            DONE (anv, lvp, nvk, radv, vn, tu/a740+)
   VK_KHR_shader_float16_int8                            DONE (anv, dzn, nvk, hasvk, lvp, radv, tu, vn, panvk)
   VK_KHR_shader_float_controls                          DONE (anv, dzn, hasvk, lvp, nvk, radv, tu, v3dv, vn)
@@ -979,7 +980,7 @@ Rusticl extensions that are not part of any OpenCL version:
   cl_khr_pci_bus_info                                   DONE (iris, nvc0, radeonsi, zink)
   cl_khr_priority_hints                                 not started
   cl_khr_spirv_extended_debug_info                      not started
-  cl_khr_spirv_linkonce_odr                             not started
+  cl_khr_spirv_linkonce_odr                             DONE
   cl_khr_spirv_no_integer_wrap_decoration               DONE
   cl_khr_srgb_image_writes                              not started
   cl_khr_subgroup_ballot                                not started

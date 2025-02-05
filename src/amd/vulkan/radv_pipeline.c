@@ -37,9 +37,6 @@
 #include "vk_format.h"
 #include "vk_nir_convert_ycbcr.h"
 #include "vk_ycbcr_conversion.h"
-#if AMD_LLVM_AVAILABLE
-#include "ac_llvm_util.h"
-#endif
 
 bool
 radv_shader_need_indirect_descriptor_sets(const struct radv_shader *shader)
@@ -306,17 +303,13 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
 
    /* LLVM could support more of these in theory. */
    bool use_llvm = radv_use_llvm_for_stage(pdev, stage->stage);
-   bool has_inverse_ballot = true;
-#if AMD_LLVM_AVAILABLE
-   has_inverse_ballot = !use_llvm || LLVM_VERSION_MAJOR >= 17;
-#endif
    radv_nir_opt_tid_function_options tid_options = {
       .use_masked_swizzle_amd = true,
       .use_dpp16_shift_amd = !use_llvm && gfx_level >= GFX8,
       .use_clustered_rotate = !use_llvm,
       .hw_subgroup_size = stage->info.wave_size,
-      .hw_ballot_bit_size = has_inverse_ballot ? stage->info.wave_size : 0,
-      .hw_ballot_num_comp = has_inverse_ballot ? 1 : 0,
+      .hw_ballot_bit_size = stage->info.wave_size,
+      .hw_ballot_num_comp = 1,
    };
    NIR_PASS(_, stage->nir, radv_nir_opt_tid_function, &tid_options);
 
@@ -462,11 +455,6 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
          NIR_PASS_V(stage->nir, ac_nir_lower_legacy_gs, false, false, &gs_out_info);
       }
    } else if (stage->stage == MESA_SHADER_FRAGMENT) {
-      ac_nir_lower_ps_early_options early_options = {
-         .alpha_func = COMPARE_FUNC_ALWAYS,
-         .spi_shader_col_format_hint = ~0,
-      };
-
       ac_nir_lower_ps_late_options late_options = {
          .gfx_level = gfx_level,
          .family = pdev->info.family,
@@ -488,7 +476,7 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
          late_options.enable_mrt_output_nan_fixup =
             gfx_state->ps.epilog.enable_mrt_output_nan_fixup && !stage->nir->info.internal;
          /* Need to filter out unwritten color slots. */
-         early_options.spi_shader_col_format_hint = late_options.spi_shader_col_format =
+         late_options.spi_shader_col_format =
             gfx_state->ps.epilog.spi_shader_col_format & stage->info.ps.colors_written;
          late_options.alpha_to_one = gfx_state->ps.epilog.alpha_to_one;
       }
@@ -499,11 +487,10 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
           * ac_nir_lower_ps() require this field to reflect whether alpha via mrtz is really
           * present.
           */
-         early_options.keep_alpha_for_mrtz = late_options.alpha_to_coverage_via_mrtz = stage->info.ps.writes_mrt0_alpha;
+         late_options.alpha_to_coverage_via_mrtz = stage->info.ps.writes_mrt0_alpha;
       }
 
-      NIR_PASS_V(stage->nir, ac_nir_lower_ps_early, &early_options);
-      NIR_PASS_V(stage->nir, ac_nir_lower_ps_late, &late_options);
+      NIR_PASS(_, stage->nir, ac_nir_lower_ps_late, &late_options);
    }
 
    if (radv_shader_should_clear_lds(device, stage->nir)) {

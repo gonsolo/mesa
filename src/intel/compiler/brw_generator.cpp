@@ -161,15 +161,23 @@ brw_generator::patch_halt_jumps()
 }
 
 void
-brw_generator::generate_send(fs_inst *inst,
+brw_generator::generate_send(brw_inst *inst,
                             struct brw_reg dst,
                             struct brw_reg desc,
                             struct brw_reg ex_desc,
                             struct brw_reg payload,
                             struct brw_reg payload2)
 {
+   const bool gather = inst->opcode == SHADER_OPCODE_SEND_GATHER;
+   if (gather) {
+      assert(payload.file == ARF);
+      assert(payload.nr == BRW_ARF_SCALAR);
+      assert(payload2.file == ARF);
+      assert(payload2.nr == BRW_ARF_NULL);
+   }
+
    if (ex_desc.file == IMM && ex_desc.ud == 0) {
-      brw_send_indirect_message(p, inst->sfid, dst, payload, desc, inst->eot);
+      brw_send_indirect_message(p, inst->sfid, dst, payload, desc, inst->eot, gather);
       if (inst->check_tdr)
          brw_eu_inst_set_opcode(p->isa, brw_last_inst, BRW_OPCODE_SENDC);
    } else {
@@ -178,7 +186,7 @@ brw_generator::generate_send(fs_inst *inst,
        */
       brw_send_indirect_split_message(p, inst->sfid, dst, payload, payload2,
                                       desc, ex_desc, inst->ex_mlen,
-                                      inst->send_ex_bso, inst->eot);
+                                      inst->send_ex_bso, inst->eot, gather);
       if (inst->check_tdr)
          brw_eu_inst_set_opcode(p->isa, brw_last_inst,
                              devinfo->ver >= 12 ? BRW_OPCODE_SENDC : BRW_OPCODE_SENDSC);
@@ -186,7 +194,7 @@ brw_generator::generate_send(fs_inst *inst,
 }
 
 void
-brw_generator::generate_mov_indirect(fs_inst *inst,
+brw_generator::generate_mov_indirect(brw_inst *inst,
                                     struct brw_reg dst,
                                     struct brw_reg reg,
                                     struct brw_reg indirect_byte_offset)
@@ -317,7 +325,7 @@ brw_generator::generate_mov_indirect(fs_inst *inst,
 }
 
 void
-brw_generator::generate_shuffle(fs_inst *inst,
+brw_generator::generate_shuffle(brw_inst *inst,
                                struct brw_reg dst,
                                struct brw_reg src,
                                struct brw_reg idx)
@@ -447,7 +455,7 @@ brw_generator::generate_shuffle(fs_inst *inst,
 }
 
 void
-brw_generator::generate_quad_swizzle(const fs_inst *inst,
+brw_generator::generate_quad_swizzle(const brw_inst *inst,
                                     struct brw_reg dst, struct brw_reg src,
                                     unsigned swiz)
 {
@@ -517,7 +525,7 @@ brw_generator::generate_quad_swizzle(const fs_inst *inst,
 }
 
 void
-brw_generator::generate_barrier(fs_inst *, struct brw_reg src)
+brw_generator::generate_barrier(brw_inst *, struct brw_reg src)
 {
    brw_barrier(p, src);
    if (devinfo->ver >= 12) {
@@ -557,7 +565,7 @@ brw_generator::generate_barrier(fs_inst *, struct brw_reg src)
  * appropriate swizzling.
  */
 void
-brw_generator::generate_ddx(const fs_inst *inst,
+brw_generator::generate_ddx(const brw_inst *inst,
                            struct brw_reg dst, struct brw_reg src)
 {
    unsigned vstride, width;
@@ -590,7 +598,7 @@ brw_generator::generate_ddx(const fs_inst *inst,
  * left.
  */
 void
-brw_generator::generate_ddy(const fs_inst *inst,
+brw_generator::generate_ddy(const brw_inst *inst,
                            struct brw_reg dst, struct brw_reg src)
 {
    const uint32_t type_size = brw_type_size_bytes(src.type);
@@ -643,7 +651,7 @@ brw_generator::generate_ddy(const fs_inst *inst,
 }
 
 void
-brw_generator::generate_halt(fs_inst *)
+brw_generator::generate_halt(brw_inst *)
 {
    /* This HALT will be patched up at FB write time to point UIP at the end of
     * the program, and at brw_uip_jip() JIP will be set to the end of the
@@ -692,7 +700,7 @@ brw_generator::generate_halt(fs_inst *)
  * information required by either set of opcodes.
  */
 void
-brw_generator::generate_scratch_header(fs_inst *inst,
+brw_generator::generate_scratch_header(brw_inst *inst,
                                       struct brw_reg dst,
                                       struct brw_reg src)
 {
@@ -765,7 +773,7 @@ brw_generator::generate_code(const cfg_t *cfg, int dispatch_width,
    struct disasm_info *disasm_info = disasm_initialize(p->isa, cfg);
 
    enum opcode prev_opcode = BRW_OPCODE_ILLEGAL;
-   foreach_block_and_inst (block, fs_inst, inst, cfg) {
+   foreach_block_and_inst (block, brw_inst, inst, cfg) {
       if (inst->opcode == SHADER_OPCODE_UNDEF)
          continue;
 
@@ -852,7 +860,14 @@ brw_generator::generate_code(const cfg_t *cfg, int dispatch_width,
          brw_set_default_group(p, inst->group);
       }
 
-      for (unsigned int i = 0; i < inst->sources; i++) {
+      /* For SEND_GATHER, the payload sources are represented inside the
+       * scalar register in src[2], so we can skip them.
+       */
+      const unsigned num_sources =
+         inst->opcode == SHADER_OPCODE_SEND_GATHER ? 3 : inst->sources;
+      assert(num_sources <= ARRAY_SIZE(src));
+
+      for (unsigned int i = 0; i < num_sources; i++) {
          src[i] = normalize_brw_reg_for_encoding(&inst->src[i]);
 	 /* The accumulator result appears to get used for the
 	  * conditional modifier generation.  When negating a UD
@@ -1145,6 +1160,7 @@ brw_generator::generate_code(const cfg_t *cfg, int dispatch_width,
          break;
 
       case SHADER_OPCODE_SEND:
+      case SHADER_OPCODE_SEND_GATHER:
          generate_send(inst, dst, src[0], src[1], src[2],
                        inst->ex_mlen > 0 ? src[3] : brw_null_reg());
          send_count++;
@@ -1234,8 +1250,15 @@ brw_generator::generate_code(const cfg_t *cfg, int dispatch_width,
          assert(inst->force_writemask_all && inst->group == 0);
          assert(inst->dst.file == BAD_FILE);
          brw_set_default_exec_size(p, BRW_EXECUTE_1);
+         brw_set_default_swsb(p, tgl_swsb_dst_dep(swsb, 1));
          brw_MOV(p, retype(brw_flag_subreg(inst->flag_subreg), BRW_TYPE_UD),
                  retype(brw_mask_reg(0), BRW_TYPE_UD));
+         /* Reading certain ARF registers (like 'ce', the mask register) on
+          * Gfx12+ requires requires a dependency on all pipes on the read
+          * instruction and the next instructions
+          */
+         if (devinfo->ver >= 12)
+            brw_SYNC(p, TGL_SYNC_NOP);
          break;
       }
       case SHADER_OPCODE_BROADCAST:

@@ -232,7 +232,6 @@ vlVaPostProcCompositor(vlVaDriver *drv,
 
    drv->cstate.chroma_location = VL_COMPOSITOR_LOCATION_NONE;
 
-   drv->pipe->flush(drv->pipe, NULL, 0);
    return VA_STATUS_SUCCESS;
 }
 
@@ -560,7 +559,9 @@ vlVaHandleVAProcPipelineParameterBufferType(vlVaDriver *drv, vlVaContext *contex
                                 PIPE_VIDEO_ENTRYPOINT_PROCESSING,
                                 PIPE_VIDEO_CAP_SUPPORTED)) {
       if (!context->decoder) {
+         mtx_lock(&context->mutex);
          context->decoder = drv->pipe->create_video_codec(drv->pipe, &context->templat);
+         mtx_unlock(&context->mutex);
          if (!context->decoder)
             return VA_STATUS_ERROR_ALLOCATION_FAILED;
       }
@@ -572,6 +573,8 @@ vlVaHandleVAProcPipelineParameterBufferType(vlVaDriver *drv, vlVaContext *contex
          return VA_STATUS_SUCCESS;
    }
 
-   return vlVaPostProcCompositor(drv, src_region, dst_region,
-                                 src, context->target, deinterlace, param);
+   VAStatus ret = vlVaPostProcCompositor(drv, src_region, dst_region,
+                                         src, context->target, deinterlace, param);
+   vlVaSurfaceFlush(drv, dst_surface);
+   return ret;
 }

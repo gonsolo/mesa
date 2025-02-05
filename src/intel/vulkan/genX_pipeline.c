@@ -213,7 +213,7 @@ emit_ves_vf_instancing(struct anv_batch *batch,
    }
 
    u_foreach_bit(a, vi->attributes_valid) {
-      enum isl_format format = anv_get_isl_format(device->info,
+      enum isl_format format = anv_get_isl_format(device->physical,
                                                   vi->attributes[a].format,
                                                   VK_IMAGE_ASPECT_COLOR_BIT,
                                                   VK_IMAGE_TILING_LINEAR);
@@ -1183,6 +1183,10 @@ emit_3dstate_vs(struct anv_graphics_pipeline *pipeline)
       vs.ScratchSpaceBasePointer =
          get_scratch_address(&pipeline->base.base, MESA_SHADER_VERTEX, vs_bin);
 #endif
+
+#if GFX_VER >= 30
+      vs.RegistersPerThread = ptl_register_blocks(vs_prog_data->base.base.grf_used);
+#endif
    }
 
    anv_pipeline_emit_merge(pipeline, final.vs, vs_dwords, GENX(3DSTATE_VS), vs) {
@@ -1274,6 +1278,10 @@ emit_3dstate_hs_ds(struct anv_graphics_pipeline *pipeline,
       hs.DispatchMode = tcs_prog_data->base.dispatch_mode;
 #endif
       hs.IncludePrimitiveID = tcs_prog_data->include_primitive_id;
+
+#if GFX_VER >= 30
+      hs.RegistersPerThread = ptl_register_blocks(tcs_prog_data->base.base.grf_used);
+#endif
    };
 
    uint32_t ds_dwords[GENX(3DSTATE_DS_length)];
@@ -1316,6 +1324,10 @@ emit_3dstate_hs_ds(struct anv_graphics_pipeline *pipeline,
       ds.PerThreadScratchSpace = get_scratch_space(tes_bin);
       ds.ScratchSpaceBasePointer =
          get_scratch_address(&pipeline->base.base, MESA_SHADER_TESS_EVAL, tes_bin);
+#endif
+
+#if GFX_VER >= 30
+      ds.RegistersPerThread = ptl_register_blocks(tes_prog_data->base.base.grf_used);
 #endif
    }
 
@@ -1480,6 +1492,10 @@ emit_3dstate_gs(struct anv_graphics_pipeline *pipeline)
       gs.ScratchSpaceBasePointer =
          get_scratch_address(&pipeline->base.base, MESA_SHADER_GEOMETRY, gs_bin);
 #endif
+
+#if GFX_VER >= 30
+      gs.RegistersPerThread = ptl_register_blocks(gs_prog_data->base.base.grf_used);
+#endif
    }
 
    anv_pipeline_emit_merge(pipeline, partial.gs, gs_dwords, GENX(3DSTATE_GS), gs) {
@@ -1578,6 +1594,10 @@ emit_3dstate_ps(struct anv_graphics_pipeline *pipeline,
       ps.PerThreadScratchSpace   = get_scratch_space(fs_bin);
       ps.ScratchSpaceBasePointer =
          get_scratch_address(&pipeline->base.base, MESA_SHADER_FRAGMENT, fs_bin);
+#endif
+
+#if GFX_VER >= 30
+      ps.RegistersPerThread = ptl_register_blocks(wm_prog_data->base.grf_used);
 #endif
    }
    anv_pipeline_emit_merge(pipeline, partial.ps, ps_dwords, GENX(3DSTATE_PS), ps) {
@@ -1789,14 +1809,14 @@ emit_task_state(struct anv_graphics_pipeline *pipeline)
                                                       task_dispatch.group_size,
                                                       task_dispatch.simd_size);
 
-      /*
-       * 3DSTATE_TASK_SHADER_DATA.InlineData[0:1] will be used for an address
-       * of a buffer with push constants and descriptor set table and
-       * InlineData[2:7] will be used for first few push constants.
-       */
-      task.EmitInlineParameter = true;
+      task.EmitInlineParameter = task_prog_data->base.uses_inline_data;
+      task.IndirectDataLength = align(task_bin->bind_map.push_ranges[0].length * 32, 64);
 
       task.XP0Required = task_prog_data->uses_drawid;
+
+#if GFX_VER >= 30
+      task.RegistersPerThread = ptl_register_blocks(task_prog_data->base.base.grf_used);
+#endif
    }
 
    /* Recommended values from "Task and Mesh Distribution Programming". */
@@ -1888,14 +1908,14 @@ emit_mesh_state(struct anv_graphics_pipeline *pipeline)
                                                       mesh_dispatch.group_size,
                                                       mesh_dispatch.simd_size);
 
-      /*
-       * 3DSTATE_MESH_SHADER_DATA.InlineData[0:1] will be used for an address
-       * of a buffer with push constants and descriptor set table and
-       * InlineData[2:7] will be used for first few push constants.
-       */
-      mesh.EmitInlineParameter = true;
+      mesh.EmitInlineParameter = mesh_prog_data->base.uses_inline_data;
+      mesh.IndirectDataLength = align(mesh_bin->bind_map.push_ranges[0].length * 32, 64);
 
       mesh.XP0Required = mesh_prog_data->uses_drawid;
+
+#if GFX_VER >= 30
+      mesh.RegistersPerThread = ptl_register_blocks(mesh_prog_data->base.base.grf_used);
+#endif
    }
 
    /* Recommended values from "Task and Mesh Distribution Programming". */

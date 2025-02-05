@@ -111,6 +111,9 @@ radv_filter_minmax_enabled(const struct radv_physical_device *pdev)
 static bool
 radv_cooperative_matrix_enabled(const struct radv_physical_device *pdev)
 {
+   if (pdev->info.gfx_level == GFX12)
+      return false; /* TODO */
+
    return pdev->info.gfx_level >= GFX11 && !pdev->use_llvm;
 }
 
@@ -966,7 +969,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .depthClipEnable = true,
 
       /* VK_KHR_compute_shader_derivatives */
-      .computeDerivativeGroupQuads = false,
+      .computeDerivativeGroupQuads = pdev->info.gfx_level >= GFX12,
       .computeDerivativeGroupLinear = true,
 
       /* VK_EXT_ycbcr_image_arrays */

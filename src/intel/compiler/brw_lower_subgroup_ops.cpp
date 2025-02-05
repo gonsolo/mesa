@@ -251,7 +251,7 @@ brw_emit_scan(const brw_builder &bld, enum opcode opcode, const brw_reg &tmp,
 }
 
 static bool
-brw_lower_reduce(fs_visitor &s, bblock_t *block, fs_inst *inst)
+brw_lower_reduce(fs_visitor &s, bblock_t *block, brw_inst *inst)
 {
    const brw_builder bld(&s, block, inst);
 
@@ -303,7 +303,7 @@ brw_lower_reduce(fs_visitor &s, bblock_t *block, fs_inst *inst)
 }
 
 static bool
-brw_lower_scan(fs_visitor &s, bblock_t *block, fs_inst *inst)
+brw_lower_scan(fs_visitor &s, bblock_t *block, brw_inst *inst)
 {
    const brw_builder bld(&s, block, inst);
 
@@ -329,9 +329,15 @@ brw_lower_scan(fs_visitor &s, bblock_t *block, fs_inst *inst)
        * we can't do this with a normal stride; we have to use indirects.
        */
       brw_reg shifted = bld.vgrf(src.type);
-      brw_reg idx = bld.vgrf(BRW_TYPE_W);
+      brw_reg idx = bld.vgrf(BRW_TYPE_UW);
 
-      ubld.ADD(idx, bld.LOAD_SUBGROUP_INVOCATION(), brw_imm_w(-1));
+      /* Set the saturate modifier in the offset index to ensure it's
+       * normalized within the expected range without negative values,
+       * since the situation can cause us to read past the end of the
+       * register file leading to hangs on Xe3.
+       */
+      set_saturate(true, ubld.ADD(idx, bld.LOAD_SUBGROUP_INVOCATION(),
+                                  brw_imm_w(-1)));
       ubld.emit(SHADER_OPCODE_SHUFFLE, shifted, scan, idx);
       ubld.group(1, 0).MOV(horiz_offset(shifted, 0), info.identity);
       scan = shifted;
@@ -432,7 +438,7 @@ brw_lower_quad_vote_gfx9(const brw_builder &bld, enum opcode opcode, brw_reg dst
    const enum brw_predicate pred = any ? BRW_PREDICATE_ALIGN1_ANY4H
                                        : BRW_PREDICATE_ALIGN1_ALL4H;
 
-   fs_inst *mov = bld.MOV(retype(dst, BRW_TYPE_D), brw_imm_d(-1));
+   brw_inst *mov = bld.MOV(retype(dst, BRW_TYPE_D), brw_imm_d(-1));
    set_predicate(pred, mov);
 }
 
@@ -482,7 +488,7 @@ brw_lower_quad_vote_gfx20(const brw_builder &bld, enum opcode opcode, brw_reg ds
 }
 
 static bool
-brw_lower_vote(fs_visitor &s, bblock_t *block, fs_inst *inst)
+brw_lower_vote(fs_visitor &s, bblock_t *block, brw_inst *inst)
 {
    const brw_builder bld(&s, block, inst);
 
@@ -512,7 +518,7 @@ brw_lower_vote(fs_visitor &s, bblock_t *block, fs_inst *inst)
 }
 
 static bool
-brw_lower_ballot(fs_visitor &s, bblock_t *block, fs_inst *inst)
+brw_lower_ballot(fs_visitor &s, bblock_t *block, brw_inst *inst)
 {
    const brw_builder bld(&s, block, inst);
 
@@ -542,7 +548,7 @@ brw_lower_ballot(fs_visitor &s, bblock_t *block, fs_inst *inst)
 }
 
 static bool
-brw_lower_quad_swap(fs_visitor &s, bblock_t *block, fs_inst *inst)
+brw_lower_quad_swap(fs_visitor &s, bblock_t *block, brw_inst *inst)
 {
    const brw_builder bld(&s, block, inst);
 
@@ -598,7 +604,7 @@ brw_lower_quad_swap(fs_visitor &s, bblock_t *block, fs_inst *inst)
 }
 
 static bool
-brw_lower_read_from_live_channel(fs_visitor &s, bblock_t *block, fs_inst *inst)
+brw_lower_read_from_live_channel(fs_visitor &s, bblock_t *block, brw_inst *inst)
 {
    const brw_builder bld(&s, block, inst);
 
@@ -614,7 +620,7 @@ brw_lower_read_from_live_channel(fs_visitor &s, bblock_t *block, fs_inst *inst)
 }
 
 static bool
-brw_lower_read_from_channel(fs_visitor &s, bblock_t *block, fs_inst *inst)
+brw_lower_read_from_channel(fs_visitor &s, bblock_t *block, brw_inst *inst)
 {
    const brw_builder bld(&s, block, inst);
 
@@ -651,7 +657,7 @@ brw_lower_subgroup_ops(fs_visitor &s)
 {
    bool progress = false;
 
-   foreach_block_and_inst_safe(block, fs_inst, inst, s.cfg) {
+   foreach_block_and_inst_safe(block, brw_inst, inst, s.cfg) {
       switch (inst->opcode) {
       case SHADER_OPCODE_REDUCE:
          progress |= brw_lower_reduce(s, block, inst);

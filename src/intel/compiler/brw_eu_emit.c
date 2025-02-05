@@ -41,7 +41,7 @@ brw_set_dest(struct brw_codegen *p, brw_eu_inst *inst, struct brw_reg dest)
    const struct intel_device_info *devinfo = p->devinfo;
 
    if (dest.file == FIXED_GRF)
-      assert(dest.nr < XE2_MAX_GRF);
+      assert(dest.nr < XE3_MAX_GRF);
 
    /* The hardware has a restriction where a destination of size Byte with
     * a stride of 1 is only allowed for a packed byte MOV. For any other
@@ -135,7 +135,7 @@ brw_set_src0(struct brw_codegen *p, brw_eu_inst *inst, struct brw_reg reg)
    const struct intel_device_info *devinfo = p->devinfo;
 
    if (reg.file == FIXED_GRF)
-      assert(reg.nr < XE2_MAX_GRF);
+      assert(reg.nr < XE3_MAX_GRF);
 
    if (brw_eu_inst_opcode(p->isa, inst) == BRW_OPCODE_SEND  ||
        brw_eu_inst_opcode(p->isa, inst) == BRW_OPCODE_SENDC ||
@@ -260,7 +260,7 @@ brw_set_src1(struct brw_codegen *p, brw_eu_inst *inst, struct brw_reg reg)
    const struct intel_device_info *devinfo = p->devinfo;
 
    if (reg.file == FIXED_GRF)
-      assert(reg.nr < XE2_MAX_GRF);
+      assert(reg.nr < XE3_MAX_GRF);
 
    if (brw_eu_inst_opcode(p->isa, inst) == BRW_OPCODE_SENDS ||
        brw_eu_inst_opcode(p->isa, inst) == BRW_OPCODE_SENDSC ||
@@ -353,9 +353,10 @@ brw_set_src1(struct brw_codegen *p, brw_eu_inst *inst, struct brw_reg reg)
  */
 void
 brw_set_desc_ex(struct brw_codegen *p, brw_eu_inst *inst,
-                unsigned desc, unsigned ex_desc)
+                unsigned desc, unsigned ex_desc, bool gather)
 {
    const struct intel_device_info *devinfo = p->devinfo;
+   assert(!gather || devinfo->ver >= 30);
    assert(brw_eu_inst_opcode(p->isa, inst) == BRW_OPCODE_SEND ||
           brw_eu_inst_opcode(p->isa, inst) == BRW_OPCODE_SENDC);
    if (devinfo->ver < 12)
@@ -363,7 +364,7 @@ brw_set_desc_ex(struct brw_codegen *p, brw_eu_inst *inst,
                                   IMM, BRW_TYPE_UD);
    brw_eu_inst_set_send_desc(devinfo, inst, desc);
    if (devinfo->ver >= 9)
-      brw_eu_inst_set_send_ex_desc(devinfo, inst, ex_desc, false);
+      brw_eu_inst_set_send_ex_desc(devinfo, inst, ex_desc, gather);
 }
 
 static void
@@ -555,7 +556,7 @@ brw_alu3(struct brw_codegen *p, unsigned opcode, struct brw_reg dest,
    const struct intel_device_info *devinfo = p->devinfo;
    brw_eu_inst *inst = next_insn(p, opcode);
 
-   assert(dest.nr < XE2_MAX_GRF);
+   assert(dest.nr < XE3_MAX_GRF);
 
    if (devinfo->ver <= 9) {
       assert(src0.file != IMM && src2.file != IMM);
@@ -579,9 +580,9 @@ brw_alu3(struct brw_codegen *p, unsigned opcode, struct brw_reg dest,
    assert(opcode != BRW_OPCODE_BFI2 ||
           (src0.file != IMM && src2.file != IMM));
 
-   assert(src0.file == IMM || src0.nr < XE2_MAX_GRF);
-   assert(src1.file != IMM && src1.nr < XE2_MAX_GRF);
-   assert(src2.file == IMM || src2.nr < XE2_MAX_GRF);
+   assert(src0.file == IMM || src0.nr < XE3_MAX_GRF);
+   assert(src1.file != IMM && src1.nr < XE3_MAX_GRF);
+   assert(src2.file == IMM || src2.nr < XE3_MAX_GRF);
    assert(dest.address_mode == BRW_ADDRESS_DIRECT);
    assert(src0.address_mode == BRW_ADDRESS_DIRECT);
    assert(src1.address_mode == BRW_ADDRESS_DIRECT);
@@ -1438,7 +1439,8 @@ brw_send_indirect_message(struct brw_codegen *p,
                           struct brw_reg dst,
                           struct brw_reg payload,
                           struct brw_reg desc,
-                          bool eot)
+                          bool eot,
+                          bool gather)
 {
    const struct intel_device_info *devinfo = p->devinfo;
    struct brw_eu_inst *send;
@@ -1450,7 +1452,7 @@ brw_send_indirect_message(struct brw_codegen *p,
    if (desc.file == IMM) {
       send = next_insn(p, BRW_OPCODE_SEND);
       brw_set_src0(p, send, retype(payload, BRW_TYPE_UD));
-      brw_set_desc(p, send, desc.ud);
+      brw_set_desc(p, send, desc.ud, gather);
    } else {
       assert(desc.file == ADDRESS);
       assert(desc.subnr == 0);
@@ -1477,7 +1479,8 @@ brw_send_indirect_split_message(struct brw_codegen *p,
                                 struct brw_reg ex_desc,
                                 unsigned ex_mlen,
                                 bool ex_bso,
-                                bool eot)
+                                bool eot,
+                                bool gather)
 {
    const struct intel_device_info *devinfo = p->devinfo;
    struct brw_eu_inst *send;
@@ -1502,7 +1505,7 @@ brw_send_indirect_split_message(struct brw_codegen *p,
 
    if (ex_desc.file == IMM) {
       brw_eu_inst_set_send_sel_reg32_ex_desc(devinfo, send, 0);
-      brw_eu_inst_set_sends_ex_desc(devinfo, send, ex_desc.ud, false);
+      brw_eu_inst_set_sends_ex_desc(devinfo, send, ex_desc.ud, gather);
    } else {
       assert(ex_desc.file == ADDRESS);
       assert((ex_desc.subnr & 0x3) == 0);
@@ -1695,7 +1698,7 @@ brw_set_memory_fence_message(struct brw_codegen *p,
    const struct intel_device_info *devinfo = p->devinfo;
 
    brw_set_desc(p, insn, brw_message_desc(
-                   devinfo, 1, (commit_enable ? 1 : 0), true));
+                   devinfo, 1, (commit_enable ? 1 : 0), true), false);
 
    brw_eu_inst_set_sfid(devinfo, insn, sfid);
 
@@ -1735,7 +1738,8 @@ gfx12_set_memory_fence_message(struct brw_codegen *p,
     */
    if (sfid == BRW_SFID_URB && p->devinfo->ver < 20) {
       brw_set_desc(p, insn, brw_urb_fence_desc(p->devinfo) |
-                            brw_message_desc(p->devinfo, mlen, rlen, true));
+                            brw_message_desc(p->devinfo, mlen, rlen, true),
+                   false);
    } else {
       enum lsc_fence_scope scope = lsc_fence_msg_desc_scope(p->devinfo, desc);
       enum lsc_flush_type flush_type = lsc_fence_msg_desc_flush_type(p->devinfo, desc);
@@ -1764,7 +1768,8 @@ gfx12_set_memory_fence_message(struct brw_codegen *p,
 
       brw_set_desc(p, insn, lsc_fence_msg_desc(p->devinfo, scope,
                                                flush_type, false) |
-                            brw_message_desc(p->devinfo, mlen, rlen, false));
+                            brw_message_desc(p->devinfo, mlen, rlen, false),
+                   false);
    }
 }
 
@@ -1942,7 +1947,7 @@ brw_barrier(struct brw_codegen *p, struct brw_reg src)
    brw_set_src0(p, inst, src);
    brw_set_src1(p, inst, brw_null_reg());
    brw_set_desc(p, inst, brw_message_desc(devinfo,
-                                          1 * reg_unit(devinfo), 0, false));
+                                          1 * reg_unit(devinfo), 0, false), false);
 
    brw_eu_inst_set_sfid(devinfo, inst, BRW_SFID_MESSAGE_GATEWAY);
    brw_eu_inst_set_gateway_subfuncid(devinfo, inst,

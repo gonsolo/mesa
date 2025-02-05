@@ -759,12 +759,12 @@ brw_combine_constants(struct value *candidates, unsigned num_candidates)
 }
 
 /**
- * Box for storing fs_inst and some other necessary data
+ * Box for storing brw_inst and some other necessary data
  *
  * \sa box_instruction
  */
-struct fs_inst_box {
-   fs_inst *inst;
+struct brw_inst_box {
+   brw_inst *inst;
    unsigned ip;
    bblock_t *block;
 };
@@ -773,18 +773,18 @@ struct fs_inst_box {
 struct reg_link {
    DECLARE_RALLOC_CXX_OPERATORS(reg_link)
 
-   reg_link(fs_inst *inst, unsigned src, bool negate, enum interpreted_type type)
+   reg_link(brw_inst *inst, unsigned src, bool negate, enum interpreted_type type)
    : inst(inst), src(src), negate(negate), type(type) {}
 
    struct exec_node link;
-   fs_inst *inst;
+   brw_inst *inst;
    uint8_t src;
    bool negate;
    enum interpreted_type type;
 };
 
 static struct exec_node *
-link(void *mem_ctx, fs_inst *inst, unsigned src, bool negate,
+link(void *mem_ctx, brw_inst *inst, unsigned src, bool negate,
      enum interpreted_type type)
 {
    reg_link *l = new(mem_ctx) reg_link(inst, src, negate, type);
@@ -802,7 +802,7 @@ struct imm {
     * The instruction generating the immediate value, if all uses are contained
     * within a single basic block. Otherwise, NULL.
     */
-   fs_inst *inst;
+   brw_inst *inst;
 
    /**
     * A list of fs_regs that refer to this immediate.  If we promote it, we'll
@@ -847,7 +847,7 @@ struct table {
    struct imm *imm;
    int len;
 
-   struct fs_inst_box *boxes;
+   struct brw_inst_box *boxes;
    unsigned num_boxes;
    unsigned size_boxes;
 };
@@ -868,7 +868,7 @@ new_value(struct table *table, void *mem_ctx)
  * \returns the index into the dynamic array of boxes for the instruction.
  */
 static unsigned
-box_instruction(struct table *table, void *mem_ctx, fs_inst *inst,
+box_instruction(struct table *table, void *mem_ctx, brw_inst *inst,
                 unsigned ip, bblock_t *block)
 {
    /* It is common for box_instruction to be called consecutively for each
@@ -885,14 +885,14 @@ box_instruction(struct table *table, void *mem_ctx, fs_inst *inst,
 
    if (table->num_boxes == table->size_boxes) {
       table->size_boxes *= 2;
-      table->boxes = reralloc(mem_ctx, table->boxes, fs_inst_box,
+      table->boxes = reralloc(mem_ctx, table->boxes, brw_inst_box,
                               table->size_boxes);
    }
 
    assert(table->num_boxes < table->size_boxes);
 
    const unsigned idx = table->num_boxes++;
-   fs_inst_box *ib =  &table->boxes[idx];
+   brw_inst_box *ib =  &table->boxes[idx];
 
    ib->inst = inst;
    ib->block = block;
@@ -989,7 +989,7 @@ representable_as_uw(unsigned ud, uint16_t *uw)
 }
 
 static bool
-supports_src_as_imm(const struct intel_device_info *devinfo, const fs_inst *inst,
+supports_src_as_imm(const struct intel_device_info *devinfo, const brw_inst *inst,
                     unsigned src_idx)
 {
    switch (inst->opcode) {
@@ -1051,7 +1051,7 @@ supports_src_as_imm(const struct intel_device_info *devinfo, const fs_inst *inst
 }
 
 static bool
-can_promote_src_as_imm(const struct intel_device_info *devinfo, fs_inst *inst,
+can_promote_src_as_imm(const struct intel_device_info *devinfo, brw_inst *inst,
                        unsigned src_idx)
 {
    bool can_promote = false;
@@ -1107,7 +1107,7 @@ can_promote_src_as_imm(const struct intel_device_info *devinfo, fs_inst *inst,
 }
 
 static void
-add_candidate_immediate(struct table *table, fs_inst *inst, unsigned ip,
+add_candidate_immediate(struct table *table, brw_inst *inst, unsigned ip,
                         unsigned i,
                         bool allow_one_constant,
                         bblock_t *block,
@@ -1297,18 +1297,18 @@ brw_opt_combine_constants(fs_visitor &s)
    struct table table;
 
    /* For each of the dynamic arrays in the table, allocate about a page of
-    * memory.  On LP64 systems, this gives 126 value objects 169 fs_inst_box
+    * memory.  On LP64 systems, this gives 126 value objects 169 brw_inst_box
     * objects.  Even larger shaders that have been obverved rarely need more
     * than 20 or 30 values.  Most smaller shaders, which is most shaders, need
-    * at most a couple dozen fs_inst_box.
+    * at most a couple dozen brw_inst_box.
     */
    table.size = (4096 - (5 * sizeof(void *))) / sizeof(struct value);
    table.num_values = 0;
    table.values = ralloc_array(const_ctx, struct value, table.size);
 
-   table.size_boxes = (4096 - (5 * sizeof(void *))) / sizeof(struct fs_inst_box);
+   table.size_boxes = (4096 - (5 * sizeof(void *))) / sizeof(struct brw_inst_box);
    table.num_boxes = 0;
-   table.boxes = ralloc_array(const_ctx, fs_inst_box, table.size_boxes);
+   table.boxes = ralloc_array(const_ctx, brw_inst_box, table.size_boxes);
 
    const brw::idom_tree &idom = s.idom_analysis.require();
    unsigned ip = -1;
@@ -1316,7 +1316,7 @@ brw_opt_combine_constants(fs_visitor &s)
    /* Make a pass through all instructions and mark each constant is used in
     * instruction sources that cannot legally be immediate values.
     */
-   foreach_block_and_inst(block, fs_inst, inst, s.cfg) {
+   foreach_block_and_inst(block, brw_inst, inst, s.cfg) {
       ip++;
 
       switch (inst->opcode) {
@@ -1452,7 +1452,7 @@ brw_opt_combine_constants(fs_visitor &s)
 
       for (unsigned j = first_user; j < last_user; j++) {
          const unsigned idx = table.values[result->user_map[j].index].instr_index;
-         fs_inst_box *const ib = &table.boxes[idx];
+         brw_inst_box *const ib = &table.boxes[idx];
 
          const unsigned src = table.values[result->user_map[j].index].src;
 
@@ -1718,7 +1718,7 @@ brw_opt_combine_constants(fs_visitor &s)
     * so the other source (and destination) must be changed to match.
     */
    for (unsigned i = 0; i < table.num_boxes; i++) {
-      fs_inst *inst = table.boxes[i].inst;
+      brw_inst *inst = table.boxes[i].inst;
 
       if (inst->opcode != BRW_OPCODE_SEL)
          continue;

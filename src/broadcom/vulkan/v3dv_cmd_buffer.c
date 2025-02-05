@@ -2844,6 +2844,7 @@ cmd_buffer_binning_sync_required(struct v3dv_cmd_buffer *cmd_buffer,
 
       /* Texel Buffer read */
       if (buffer_access & (VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
+                           VK_ACCESS_2_SHADER_READ_BIT |
                            VK_ACCESS_2_MEMORY_READ_BIT)) {
          if (vs_bin_maps->texture_map.num_desc > 0)
             return true;
@@ -3405,6 +3406,15 @@ v3dv_cmd_buffer_emit_pipeline_barrier(struct v3dv_cmd_buffer *cmd_buffer,
                      pMemoryBarriers[i].dstStageMask,
                      pMemoryBarriers[i].dstAccessMask,
                      true, true, &state);
+   }
+
+   if (unlikely(V3D_DBG(SYNC))) {
+      state.src_mask_compute = V3DV_BARRIER_ALL;
+      state.src_mask_graphics = V3DV_BARRIER_ALL;
+      state.src_mask_transfer = V3DV_BARRIER_ALL;
+      state.dst_mask = V3DV_BARRIER_ALL;
+      state.bcl_image_access = ~0;
+      state.bcl_buffer_access = ~0;
    }
 
    /* Bail if we don't relevant barriers */

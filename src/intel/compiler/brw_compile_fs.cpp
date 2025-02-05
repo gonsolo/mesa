@@ -20,7 +20,7 @@
 
 using namespace brw;
 
-static fs_inst *
+static brw_inst *
 brw_emit_single_fb_write(fs_visitor &s, const brw_builder &bld,
                          brw_reg color0, brw_reg color1,
                          brw_reg src0_alpha, unsigned components,
@@ -47,7 +47,7 @@ brw_emit_single_fb_write(fs_visitor &s, const brw_builder &bld,
    if (s.nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_STENCIL))
       sources[FB_WRITE_LOGICAL_SRC_SRC_STENCIL] = s.frag_stencil;
 
-   fs_inst *write = bld.emit(FS_OPCODE_FB_WRITE_LOGICAL, brw_reg(),
+   brw_inst *write = bld.emit(FS_OPCODE_FB_WRITE_LOGICAL, brw_reg(),
                              sources, ARRAY_SIZE(sources));
 
    if (prog_data->uses_kill) {
@@ -62,7 +62,7 @@ static void
 brw_do_emit_fb_writes(fs_visitor &s, int nr_color_regions, bool replicate_alpha)
 {
    const brw_builder bld = brw_builder(&s).at_end();
-   fs_inst *inst = NULL;
+   brw_inst *inst = NULL;
 
    for (int target = 0; target < nr_color_regions; target++) {
       /* Skip over outputs that weren't written. */
@@ -378,9 +378,9 @@ brw_emit_interpolation_setup(fs_visitor &s)
                   int_pixel_offset_y);
 
          if (wm_prog_data->coarse_pixel_dispatch != INTEL_NEVER) {
-            fs_inst *addx = dbld.ADD(int_pixel_x, int_pixel_x,
+            brw_inst *addx = dbld.ADD(int_pixel_x, int_pixel_x,
                                      horiz_stride(half_int_pixel_offset_x, 0));
-            fs_inst *addy = dbld.ADD(int_pixel_y, int_pixel_y,
+            brw_inst *addy = dbld.ADD(int_pixel_y, int_pixel_y,
                                      horiz_stride(half_int_pixel_offset_y, 0));
             if (wm_prog_data->coarse_pixel_dispatch != INTEL_ALWAYS) {
                addx->predicate = BRW_PREDICATE_NORMAL;
@@ -608,7 +608,7 @@ static void
 brw_emit_repclear_shader(fs_visitor &s)
 {
    brw_wm_prog_key *key = (brw_wm_prog_key*) s.key;
-   fs_inst *write = NULL;
+   brw_inst *write = NULL;
 
    assert(s.devinfo->ver < 20);
    assert(s.uniforms == 0);
@@ -1284,7 +1284,7 @@ brw_assign_urb_setup(fs_visitor &s)
    /* Offset all the urb_setup[] index by the actual position of the
     * setup regs, now that the location of the constants has been chosen.
     */
-   foreach_block_and_inst(block, fs_inst, inst, s.cfg) {
+   foreach_block_and_inst(block, brw_inst, inst, s.cfg) {
       for (int i = 0; i < inst->sources; i++) {
          if (inst->src[i].file == ATTR) {
             /* ATTR brw_reg::nr in the FS is in units of logical scalar
@@ -1503,12 +1503,14 @@ run_fs(fs_visitor &s, bool allow_spilling, bool do_rep_send)
       if (nir->info.writes_memory)
          wm_prog_data->has_side_effects = true;
 
-      nir_to_brw(&s);
+      brw_from_nir(&s);
 
       if (s.failed)
 	 return false;
 
       brw_emit_fb_writes(s);
+      if (s.failed)
+	 return false;
 
       brw_calculate_cfg(s);
 
@@ -1576,6 +1578,14 @@ brw_compile_fs(const struct brw_compiler *compiler,
    brw_nir_populate_wm_prog_data(nir, compiler->devinfo, key, prog_data,
                                  params->mue_map);
 
+   /* Either an unrestricted or a fixed SIMD16 subgroup size are
+    * allowed -- The latter is needed for fast clear and replicated
+    * data clear shaders.
+    */
+   const unsigned reqd_dispatch_width = brw_required_dispatch_width(&nir->info);
+   assert(reqd_dispatch_width == SUBGROUP_SIZE_VARYING ||
+          reqd_dispatch_width == SUBGROUP_SIZE_REQUIRE_16);
+
    std::unique_ptr<fs_visitor> v8, v16, v32, vmulti;
    cfg_t *simd8_cfg = NULL, *simd16_cfg = NULL, *simd32_cfg = NULL,
       *multi_cfg = NULL;
@@ -1596,161 +1606,291 @@ brw_compile_fs(const struct brw_compiler *compiler,
 
          assert(v8->payload().num_regs % reg_unit(devinfo) == 0);
          prog_data->base.dispatch_grf_start_reg = v8->payload().num_regs / reg_unit(devinfo);
+         prog_data->base.grf_used = MAX2(prog_data->base.grf_used,
+                                         v8->grf_used);
 
          const performance &perf = v8->performance_analysis.require();
          throughput = MAX2(throughput, perf.throughput);
          has_spilled = v8->spilled_any_registers;
          allow_spilling = false;
       }
-   }
 
-   if (key->coarse_pixel && devinfo->ver < 20) {
-      if (prog_data->dual_src_blend) {
-         v8->limit_dispatch_width(8, "SIMD16 coarse pixel shading cannot"
-                                  " use SIMD8 messages.\n");
-      }
-      v8->limit_dispatch_width(16, "SIMD32 not supported with coarse"
-                               " pixel shading.\n");
-   }
-
-   if (!has_spilled &&
-       (!v8 || v8->max_dispatch_width >= 16) &&
-       (INTEL_SIMD(FS, 16) || params->use_rep_send)) {
-      /* Try a SIMD16 compile */
-      v16 = std::make_unique<fs_visitor>(compiler, &params->base, key,
-                                         prog_data, nir, 16, 1,
-                                         params->base.stats != NULL,
-                                         debug_enabled);
-      if (v8)
-         v16->import_uniforms(v8.get());
-      if (!run_fs(*v16, allow_spilling, params->use_rep_send)) {
-         brw_shader_perf_log(compiler, params->base.log_data,
-                             "SIMD16 shader failed to compile: %s\n",
-                             v16->fail_msg);
-      } else {
-         simd16_cfg = v16->cfg;
-
-         assert(v16->payload().num_regs % reg_unit(devinfo) == 0);
-         prog_data->dispatch_grf_start_reg_16 = v16->payload().num_regs / reg_unit(devinfo);
-
-         const performance &perf = v16->performance_analysis.require();
-         throughput = MAX2(throughput, perf.throughput);
-         has_spilled = v16->spilled_any_registers;
-         allow_spilling = false;
+      if (key->coarse_pixel) {
+         if (prog_data->dual_src_blend) {
+            v8->limit_dispatch_width(8, "SIMD16 coarse pixel shading cannot"
+                                     " use SIMD8 messages.\n");
+         }
+         v8->limit_dispatch_width(16, "SIMD32 not supported with coarse"
+                                  " pixel shading.\n");
       }
    }
 
-   const bool simd16_failed = v16 && !simd16_cfg;
+   if (devinfo->ver >= 30) {
+      unsigned max_dispatch_width = reqd_dispatch_width ? reqd_dispatch_width : 32;
+      fs_visitor *vbase = NULL;
 
-   /* Currently, the compiler only supports SIMD32 on SNB+ */
-   if (!has_spilled &&
-       (!v8 || v8->max_dispatch_width >= 32) &&
-       (!v16 || v16->max_dispatch_width >= 32) && !params->use_rep_send &&
-       !simd16_failed &&
-       INTEL_SIMD(FS, 32)) {
-      /* Try a SIMD32 compile */
-      v32 = std::make_unique<fs_visitor>(compiler, &params->base, key,
-                                         prog_data, nir, 32, 1,
-                                         params->base.stats != NULL,
-                                         debug_enabled);
-      if (v8)
-         v32->import_uniforms(v8.get());
-      else if (v16)
-         v32->import_uniforms(v16.get());
+      if (params->max_polygons >= 2 && !key->coarse_pixel) {
+         if (params->max_polygons >= 4 && max_dispatch_width >= 32 &&
+             4 * prog_data->num_varying_inputs <= MAX_VARYING &&
+             INTEL_SIMD(FS, 4X8)) {
+            /* Try a quad-SIMD8 compile */
+            vmulti = std::make_unique<fs_visitor>(compiler, &params->base, key,
+                                                  prog_data, nir, 32, 4,
+                                                  params->base.stats != NULL,
+                                                  debug_enabled);
+            max_dispatch_width = std::min(max_dispatch_width, vmulti->dispatch_width);
 
-      if (!run_fs(*v32, allow_spilling, false)) {
-         brw_shader_perf_log(compiler, params->base.log_data,
-                             "SIMD32 shader failed to compile: %s\n",
-                             v32->fail_msg);
-      } else {
-         const performance &perf = v32->performance_analysis.require();
+            if (!run_fs(*vmulti, false, false)) {
+               brw_shader_perf_log(compiler, params->base.log_data,
+                                   "Quad-SIMD8 shader failed to compile: %s\n",
+                                   vmulti->fail_msg);
+            } else {
+               vbase = vmulti.get();
+               multi_cfg = vmulti->cfg;
+               assert(!vmulti->spilled_any_registers);
+            }
+         }
 
-         if (!INTEL_DEBUG(DEBUG_DO32) && throughput >= perf.throughput) {
+         if (!vbase && max_dispatch_width >= 32 &&
+             2 * prog_data->num_varying_inputs <= MAX_VARYING &&
+             INTEL_SIMD(FS, 2X16)) {
+            /* Try a dual-SIMD16 compile */
+            vmulti = std::make_unique<fs_visitor>(compiler, &params->base, key,
+                                                  prog_data, nir, 32, 2,
+                                                  params->base.stats != NULL,
+                                                  debug_enabled);
+            max_dispatch_width = std::min(max_dispatch_width, vmulti->dispatch_width);
+
+            if (!run_fs(*vmulti, false, false)) {
+               brw_shader_perf_log(compiler, params->base.log_data,
+                                   "Dual-SIMD16 shader failed to compile: %s\n",
+                                   vmulti->fail_msg);
+            } else {
+               vbase = vmulti.get();
+               multi_cfg = vmulti->cfg;
+               assert(!vmulti->spilled_any_registers);
+            }
+         }
+
+         if (!vbase && max_dispatch_width >= 16 &&
+             2 * prog_data->num_varying_inputs <= MAX_VARYING &&
+             INTEL_SIMD(FS, 2X8)) {
+            /* Try a dual-SIMD8 compile */
+            vmulti = std::make_unique<fs_visitor>(compiler, &params->base, key,
+                                                  prog_data, nir, 16, 2,
+                                                  params->base.stats != NULL,
+                                                  debug_enabled);
+            max_dispatch_width = std::min(max_dispatch_width, vmulti->dispatch_width);
+
+            if (!run_fs(*vmulti, false, false)) {
+               brw_shader_perf_log(compiler, params->base.log_data,
+                                   "Dual-SIMD8 shader failed to compile: %s\n",
+                                   vmulti->fail_msg);
+            } else {
+               vbase = vmulti.get();
+               multi_cfg = vmulti->cfg;
+            }
+         }
+      }
+
+      if ((!vbase || vbase->dispatch_width < 32) &&
+          max_dispatch_width >= 32 &&
+          INTEL_SIMD(FS, 32) &&
+          !prog_data->base.ray_queries) {
+         /* Try a SIMD32 compile */
+         v32 = std::make_unique<fs_visitor>(compiler, &params->base, key,
+                                            prog_data, nir, 32, 1,
+                                            params->base.stats != NULL,
+                                            debug_enabled);
+         if (vbase)
+            v32->import_uniforms(vbase);
+
+         if (!run_fs(*v32, false, false)) {
             brw_shader_perf_log(compiler, params->base.log_data,
-                                "SIMD32 shader inefficient\n");
+                                "SIMD32 shader failed to compile: %s\n",
+                                v32->fail_msg);
          } else {
-            simd32_cfg = v32->cfg;
+            if (!vbase)
+               vbase = v32.get();
 
+            simd32_cfg = v32->cfg;
             assert(v32->payload().num_regs % reg_unit(devinfo) == 0);
             prog_data->dispatch_grf_start_reg_32 = v32->payload().num_regs / reg_unit(devinfo);
+            prog_data->base.grf_used = MAX2(prog_data->base.grf_used,
+                                            v32->grf_used);
+         }
+      }
 
+      if (!vbase && INTEL_SIMD(FS, 16)) {
+         /* Try a SIMD16 compile */
+         v16 = std::make_unique<fs_visitor>(compiler, &params->base, key,
+                                            prog_data, nir, 16, 1,
+                                            params->base.stats != NULL,
+                                            debug_enabled);
+
+         if (!run_fs(*v16, allow_spilling, params->use_rep_send)) {
+            brw_shader_perf_log(compiler, params->base.log_data,
+                                "SIMD16 shader failed to compile: %s\n",
+                                v16->fail_msg);
+         } else {
+            simd16_cfg = v16->cfg;
+
+            assert(v16->payload().num_regs % reg_unit(devinfo) == 0);
+            prog_data->dispatch_grf_start_reg_16 = v16->payload().num_regs / reg_unit(devinfo);
+            prog_data->base.grf_used = MAX2(prog_data->base.grf_used,
+                                            v16->grf_used);
+         }
+      }
+
+   } else {
+      if ((!has_spilled && (!v8 || v8->max_dispatch_width >= 16) &&
+           INTEL_SIMD(FS, 16)) ||
+          reqd_dispatch_width == SUBGROUP_SIZE_REQUIRE_16) {
+         /* Try a SIMD16 compile */
+         v16 = std::make_unique<fs_visitor>(compiler, &params->base, key,
+                                            prog_data, nir, 16, 1,
+                                            params->base.stats != NULL,
+                                            debug_enabled);
+         if (v8)
+            v16->import_uniforms(v8.get());
+         if (!run_fs(*v16, allow_spilling, params->use_rep_send)) {
+            brw_shader_perf_log(compiler, params->base.log_data,
+                                "SIMD16 shader failed to compile: %s\n",
+                                v16->fail_msg);
+         } else {
+            simd16_cfg = v16->cfg;
+
+            assert(v16->payload().num_regs % reg_unit(devinfo) == 0);
+            prog_data->dispatch_grf_start_reg_16 = v16->payload().num_regs / reg_unit(devinfo);
+            prog_data->base.grf_used = MAX2(prog_data->base.grf_used,
+                                            v16->grf_used);
+
+            const performance &perf = v16->performance_analysis.require();
             throughput = MAX2(throughput, perf.throughput);
+            has_spilled = v16->spilled_any_registers;
+            allow_spilling = false;
+         }
+      }
+
+      const bool simd16_failed = v16 && !simd16_cfg;
+
+      /* Currently, the compiler only supports SIMD32 on SNB+ */
+      if (!has_spilled &&
+          (!v8 || v8->max_dispatch_width >= 32) &&
+          (!v16 || v16->max_dispatch_width >= 32) &&
+          reqd_dispatch_width == SUBGROUP_SIZE_VARYING &&
+          !simd16_failed && INTEL_SIMD(FS, 32)) {
+         /* Try a SIMD32 compile */
+         v32 = std::make_unique<fs_visitor>(compiler, &params->base, key,
+                                            prog_data, nir, 32, 1,
+                                            params->base.stats != NULL,
+                                            debug_enabled);
+         if (v8)
+            v32->import_uniforms(v8.get());
+         else if (v16)
+            v32->import_uniforms(v16.get());
+
+         if (!run_fs(*v32, allow_spilling, false)) {
+            brw_shader_perf_log(compiler, params->base.log_data,
+                                "SIMD32 shader failed to compile: %s\n",
+                                v32->fail_msg);
+         } else {
+            const performance &perf = v32->performance_analysis.require();
+
+            if (!INTEL_DEBUG(DEBUG_DO32) && throughput >= perf.throughput) {
+               brw_shader_perf_log(compiler, params->base.log_data,
+                                   "SIMD32 shader inefficient\n");
+            } else {
+               simd32_cfg = v32->cfg;
+
+               assert(v32->payload().num_regs % reg_unit(devinfo) == 0);
+               prog_data->dispatch_grf_start_reg_32 = v32->payload().num_regs / reg_unit(devinfo);
+               prog_data->base.grf_used = MAX2(prog_data->base.grf_used,
+                                               v32->grf_used);
+
+               throughput = MAX2(throughput, perf.throughput);
+            }
+         }
+      }
+
+      if (devinfo->ver >= 12 && !has_spilled &&
+          params->max_polygons >= 2 && !key->coarse_pixel &&
+          reqd_dispatch_width == SUBGROUP_SIZE_VARYING) {
+         fs_visitor *vbase = v8 ? v8.get() : v16 ? v16.get() : v32.get();
+         assert(vbase);
+
+         if (devinfo->ver >= 20 &&
+             params->max_polygons >= 4 &&
+             vbase->max_dispatch_width >= 32 &&
+             4 * prog_data->num_varying_inputs <= MAX_VARYING &&
+             INTEL_SIMD(FS, 4X8)) {
+            /* Try a quad-SIMD8 compile */
+            vmulti = std::make_unique<fs_visitor>(compiler, &params->base, key,
+                                                  prog_data, nir, 32, 4,
+                                                  params->base.stats != NULL,
+                                                  debug_enabled);
+            vmulti->import_uniforms(vbase);
+            if (!run_fs(*vmulti, false, params->use_rep_send)) {
+               brw_shader_perf_log(compiler, params->base.log_data,
+                                   "Quad-SIMD8 shader failed to compile: %s\n",
+                                   vmulti->fail_msg);
+            } else {
+               multi_cfg = vmulti->cfg;
+               assert(!vmulti->spilled_any_registers);
+            }
+         }
+
+         if (!multi_cfg && devinfo->ver >= 20 &&
+             vbase->max_dispatch_width >= 32 &&
+             2 * prog_data->num_varying_inputs <= MAX_VARYING &&
+             INTEL_SIMD(FS, 2X16)) {
+            /* Try a dual-SIMD16 compile */
+            vmulti = std::make_unique<fs_visitor>(compiler, &params->base, key,
+                                                  prog_data, nir, 32, 2,
+                                                  params->base.stats != NULL,
+                                                  debug_enabled);
+            vmulti->import_uniforms(vbase);
+            if (!run_fs(*vmulti, false, params->use_rep_send)) {
+               brw_shader_perf_log(compiler, params->base.log_data,
+                                   "Dual-SIMD16 shader failed to compile: %s\n",
+                                   vmulti->fail_msg);
+            } else {
+               multi_cfg = vmulti->cfg;
+               assert(!vmulti->spilled_any_registers);
+            }
+         }
+
+         if (!multi_cfg && vbase->max_dispatch_width >= 16 &&
+             2 * prog_data->num_varying_inputs <= MAX_VARYING &&
+             INTEL_SIMD(FS, 2X8)) {
+            /* Try a dual-SIMD8 compile */
+            vmulti = std::make_unique<fs_visitor>(compiler, &params->base, key,
+                                                  prog_data, nir, 16, 2,
+                                                  params->base.stats != NULL,
+                                                  debug_enabled);
+            vmulti->import_uniforms(vbase);
+            if (!run_fs(*vmulti, allow_spilling, params->use_rep_send)) {
+               brw_shader_perf_log(compiler, params->base.log_data,
+                                   "Dual-SIMD8 shader failed to compile: %s\n",
+                                   vmulti->fail_msg);
+            } else {
+               multi_cfg = vmulti->cfg;
+            }
          }
       }
    }
 
-   if (devinfo->ver >= 12 && !has_spilled &&
-       params->max_polygons >= 2 && !key->coarse_pixel) {
-      fs_visitor *vbase = v8 ? v8.get() : v16 ? v16.get() : v32.get();
-      assert(vbase);
-
-      if (devinfo->ver >= 20 &&
-          params->max_polygons >= 4 &&
-          vbase->max_dispatch_width >= 32 &&
-          4 * prog_data->num_varying_inputs <= MAX_VARYING &&
-          INTEL_SIMD(FS, 4X8)) {
-         /* Try a quad-SIMD8 compile */
-         vmulti = std::make_unique<fs_visitor>(compiler, &params->base, key,
-                                               prog_data, nir, 32, 4,
-                                               params->base.stats != NULL,
-                                               debug_enabled);
-         vmulti->import_uniforms(vbase);
-         if (!run_fs(*vmulti, false, params->use_rep_send)) {
-            brw_shader_perf_log(compiler, params->base.log_data,
-                                "Quad-SIMD8 shader failed to compile: %s\n",
-                                vmulti->fail_msg);
-         } else {
-            multi_cfg = vmulti->cfg;
-            assert(!vmulti->spilled_any_registers);
-         }
-      }
-
-      if (!multi_cfg && devinfo->ver >= 20 &&
-          vbase->max_dispatch_width >= 32 &&
-          2 * prog_data->num_varying_inputs <= MAX_VARYING &&
-          INTEL_SIMD(FS, 2X16)) {
-         /* Try a dual-SIMD16 compile */
-         vmulti = std::make_unique<fs_visitor>(compiler, &params->base, key,
-                                               prog_data, nir, 32, 2,
-                                               params->base.stats != NULL,
-                                               debug_enabled);
-         vmulti->import_uniforms(vbase);
-         if (!run_fs(*vmulti, false, params->use_rep_send)) {
-            brw_shader_perf_log(compiler, params->base.log_data,
-                                "Dual-SIMD16 shader failed to compile: %s\n",
-                                vmulti->fail_msg);
-         } else {
-            multi_cfg = vmulti->cfg;
-            assert(!vmulti->spilled_any_registers);
-         }
-      }
-
-      if (!multi_cfg && vbase->max_dispatch_width >= 16 &&
-          2 * prog_data->num_varying_inputs <= MAX_VARYING &&
-          INTEL_SIMD(FS, 2X8)) {
-         /* Try a dual-SIMD8 compile */
-         vmulti = std::make_unique<fs_visitor>(compiler, &params->base, key,
-                                               prog_data, nir, 16, 2,
-                                               params->base.stats != NULL,
-                                               debug_enabled);
-         vmulti->import_uniforms(vbase);
-         if (!run_fs(*vmulti, allow_spilling, params->use_rep_send)) {
-            brw_shader_perf_log(compiler, params->base.log_data,
-                                "Dual-SIMD8 shader failed to compile: %s\n",
-                                vmulti->fail_msg);
-         } else {
-            multi_cfg = vmulti->cfg;
-         }
-      }
-
-      if (multi_cfg) {
-         assert(vmulti->payload().num_regs % reg_unit(devinfo) == 0);
-         prog_data->base.dispatch_grf_start_reg = vmulti->payload().num_regs / reg_unit(devinfo);
-      }
+   if (multi_cfg) {
+      assert(vmulti->payload().num_regs % reg_unit(devinfo) == 0);
+      prog_data->base.dispatch_grf_start_reg = vmulti->payload().num_regs / reg_unit(devinfo);
+      prog_data->base.grf_used = MAX2(prog_data->base.grf_used,
+                                      vmulti->grf_used);
    }
 
-   /* When the caller requests a repclear shader, they want SIMD16-only */
-   if (params->use_rep_send)
+   /* When the caller compiles a repclear or fast clear shader, they
+    * want SIMD16-only.
+    */
+   if (reqd_dispatch_width == SUBGROUP_SIZE_REQUIRE_16)
       simd8_cfg = NULL;
 
    brw_generator g(compiler, &params->base, &prog_data->base,

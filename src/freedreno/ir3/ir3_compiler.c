@@ -160,6 +160,9 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
    compiler->has_branch_and_or = false;
    compiler->has_rpt_bary_f = false;
    compiler->has_alias_tex = false;
+   compiler->delay_slots.alu_to_alu = 3;
+   compiler->delay_slots.non_alu = 6;
+   compiler->delay_slots.cat3_src2_read = 2;
 
    if (compiler->gen >= 6) {
       compiler->samgq_workaround = true;
@@ -239,6 +242,9 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
 
       if (compiler->gen >= 7) {
          compiler->has_alias_tex = true;
+         compiler->delay_slots.alu_to_alu = 2;
+         compiler->delay_slots.non_alu = 5;
+         compiler->delay_slots.cat3_src2_read = 1;
       }
    } else {
       compiler->max_const_pipeline = 512;

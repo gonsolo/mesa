@@ -65,6 +65,10 @@
 #define AMDGPU_TILING_GFX12_DCC_NUMBER_TYPE_MASK		0x7
 #define AMDGPU_TILING_GFX12_DCC_DATA_FORMAT_SHIFT		8
 #define AMDGPU_TILING_GFX12_DCC_DATA_FORMAT_MASK		0x3f
+/* When clearing the buffer or moving it from VRAM to GTT, don't compress and set DCC metadata
+ * to uncompressed. Set when parts of an allocation bypass DCC and read raw data. */
+#define AMDGPU_TILING_GFX12_DCC_WRITE_COMPRESS_DISABLE_SHIFT   14
+#define AMDGPU_TILING_GFX12_DCC_WRITE_COMPRESS_DISABLE_MASK    0x1
 #define AMDGPU_TILING_SET(field, value) \
 	(((__u64)(value) & AMDGPU_TILING_##field##_MASK) << AMDGPU_TILING_##field##_SHIFT)
 #define AMDGPU_TILING_GET(value, field) \
@@ -432,11 +436,6 @@ bool ac_get_supported_modifiers(const struct radeon_info *info,
               AMD_FMT_MOD_SET(TILE, AMD_FMT_MOD_TILE_GFX9_64K_R_X) |
               AMD_FMT_MOD_SET(PIPE_XOR_BITS, pipe_xor_bits) |
               AMD_FMT_MOD_SET(PACKERS, pkrs))
-
-      ADD_MOD(AMD_FMT_MOD |
-              AMD_FMT_MOD_SET(TILE_VERSION, AMD_FMT_MOD_TILE_VER_GFX10) |
-              AMD_FMT_MOD_SET(TILE, AMD_FMT_MOD_TILE_GFX9_64K_S_X) |
-              AMD_FMT_MOD_SET(PIPE_XOR_BITS, pipe_xor_bits))
 
       if (util_format_get_blocksizebits(format) != 32) {
          ADD_MOD(AMD_FMT_MOD |
@@ -2781,9 +2780,9 @@ static unsigned gfx12_select_swizzle_mode(struct ac_addrlib *addrlib,
    get_in.numMipLevels = in->numMipLevels;
    get_in.numSamples = in->numSamples;
 
-   if (surf->flags & RADEON_SURF_PREFER_4K_ALIGNMENT) {
+   if (surf && surf->flags & RADEON_SURF_PREFER_4K_ALIGNMENT) {
       get_in.maxAlign = 4 * 1024;
-   } else if (surf->flags & RADEON_SURF_PREFER_64K_ALIGNMENT) {
+   } else if (surf && surf->flags & RADEON_SURF_PREFER_64K_ALIGNMENT) {
       get_in.maxAlign = 64 * 1024;
    } else {
       get_in.maxAlign = info->has_dedicated_vram ? (256 * 1024) : (64 * 1024);
@@ -3280,7 +3279,6 @@ static bool gfx12_compute_surface(struct ac_addrlib *addrlib, const struct radeo
       surf->u.gfx9.uses_custom_pitch = true;
    }
 
-   bool supports_display_dcc = info->drm_minor >= 58;
    surf->u.gfx9.swizzle_mode = AddrSurfInfoIn.swizzleMode;
    surf->u.gfx9.resource_type = (enum gfx9_resource_type)AddrSurfInfoIn.resourceType;
    surf->u.gfx9.gfx12_enable_dcc = ac_modifier_has_dcc(surf->modifier) ||
@@ -3289,7 +3287,7 @@ static bool gfx12_compute_surface(struct ac_addrlib *addrlib, const struct radeo
                                     /* Always enable compression for Z/S and MSAA color by default. */
                                     (surf->flags & RADEON_SURF_Z_OR_SBUFFER ||
                                      config->info.samples > 1 ||
-                                     ((supports_display_dcc || !(surf->flags & RADEON_SURF_SCANOUT)) &&
+                                     ((info->gfx12_supports_display_dcc || !(surf->flags & RADEON_SURF_SCANOUT)) &&
                                       /* This one is not strictly necessary. */
                                       surf->u.gfx9.swizzle_mode != ADDR3_LINEAR)));
 
@@ -3297,7 +3295,7 @@ static bool gfx12_compute_surface(struct ac_addrlib *addrlib, const struct radeo
    surf->is_linear = surf->u.gfx9.swizzle_mode == ADDR3_LINEAR;
    surf->is_displayable = !(surf->flags & RADEON_SURF_Z_OR_SBUFFER) &&
                           surf->u.gfx9.resource_type != RADEON_RESOURCE_3D &&
-                          (supports_display_dcc || !surf->u.gfx9.gfx12_enable_dcc);
+                          (info->gfx12_supports_display_dcc || !surf->u.gfx9.gfx12_enable_dcc);
    surf->thick_tiling = surf->u.gfx9.swizzle_mode >= ADDR3_4KB_3D;
 
    if (surf->flags & RADEON_SURF_Z_OR_SBUFFER) {
@@ -3523,6 +3521,8 @@ void ac_surface_apply_bo_metadata(enum amd_gfx_level gfx_level, struct radeon_su
          AMDGPU_TILING_GET(tiling_flags, GFX12_DCC_DATA_FORMAT);
       surf->u.gfx9.color.dcc_number_type =
          AMDGPU_TILING_GET(tiling_flags, GFX12_DCC_NUMBER_TYPE);
+      surf->u.gfx9.color.dcc_write_compress_disable =
+         AMDGPU_TILING_GET(tiling_flags, GFX12_DCC_WRITE_COMPRESS_DISABLE);
       scanout = AMDGPU_TILING_GET(tiling_flags, GFX12_SCANOUT);
    } else if (gfx_level >= GFX9) {
       surf->u.gfx9.swizzle_mode = AMDGPU_TILING_GET(tiling_flags, SWIZZLE_MODE);
@@ -3570,6 +3570,7 @@ void ac_surface_compute_bo_metadata(const struct radeon_info *info, struct radeo
                                          surf->u.gfx9.color.dcc.max_compressed_block_size);
       *tiling_flags |= AMDGPU_TILING_SET(GFX12_DCC_NUMBER_TYPE, surf->u.gfx9.color.dcc_number_type);
       *tiling_flags |= AMDGPU_TILING_SET(GFX12_DCC_DATA_FORMAT, surf->u.gfx9.color.dcc_data_format);
+      *tiling_flags |= AMDGPU_TILING_SET(GFX12_DCC_WRITE_COMPRESS_DISABLE, surf->u.gfx9.color.dcc_write_compress_disable);
       *tiling_flags |= AMDGPU_TILING_SET(GFX12_SCANOUT, (surf->flags & RADEON_SURF_SCANOUT) != 0);
    } else if (info->gfx_level >= GFX9) {
       uint64_t dcc_offset = 0;
@@ -3703,6 +3704,9 @@ bool ac_surface_apply_umd_metadata(const struct radeon_info *info, struct radeon
          assert(0);
          return false;
       }
+
+      surf->num_meta_levels = desc_last_level + 1;
+      surf->flags &= ~RADEON_SURF_DISABLE_DCC;
    } else {
       /* Disable DCC. dcc_offset is always set by texture_from_handle
        * and must be cleared here.

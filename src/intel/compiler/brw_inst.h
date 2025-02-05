@@ -1,6 +1,6 @@
 /* -*- c++ -*- */
 /*
- * Copyright © 2010-2015 Intel Corporation
+ * Copyright © 2010-2016 Intel Corporation
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -24,32 +24,44 @@
 
 #pragma once
 
-#include "brw_ir.h"
+#include <assert.h>
 #include "brw_ir_allocator.h"
+#include "brw_reg.h"
+#include "compiler/glsl/list.h"
 
-struct fs_inst : public exec_node {
+#define MAX_SAMPLER_MESSAGE_SIZE 11
+
+/* The sampler can return a vec5 when sampling with sparse residency. In
+ * SIMD32, each component takes up 4 GRFs, so we need to allow up to size-20
+ * VGRFs to hold the result.
+ */
+#define MAX_VGRF_SIZE(devinfo) ((devinfo)->ver >= 20 ? 40 : 20)
+
+struct bblock_t;
+
+struct brw_inst : public exec_node {
 private:
-   fs_inst &operator=(const fs_inst &);
+   brw_inst &operator=(const brw_inst &);
 
    void init(enum opcode opcode, uint8_t exec_width, const brw_reg &dst,
              const brw_reg *src, unsigned sources);
 
 public:
-   DECLARE_RALLOC_CXX_OPERATORS(fs_inst)
+   DECLARE_RALLOC_CXX_OPERATORS(brw_inst)
 
-   fs_inst();
-   fs_inst(enum opcode opcode, uint8_t exec_size);
-   fs_inst(enum opcode opcode, uint8_t exec_size, const brw_reg &dst);
-   fs_inst(enum opcode opcode, uint8_t exec_size, const brw_reg &dst,
+   brw_inst();
+   brw_inst(enum opcode opcode, uint8_t exec_size);
+   brw_inst(enum opcode opcode, uint8_t exec_size, const brw_reg &dst);
+   brw_inst(enum opcode opcode, uint8_t exec_size, const brw_reg &dst,
            const brw_reg &src0);
-   fs_inst(enum opcode opcode, uint8_t exec_size, const brw_reg &dst,
+   brw_inst(enum opcode opcode, uint8_t exec_size, const brw_reg &dst,
            const brw_reg &src0, const brw_reg &src1);
-   fs_inst(enum opcode opcode, uint8_t exec_size, const brw_reg &dst,
+   brw_inst(enum opcode opcode, uint8_t exec_size, const brw_reg &dst,
            const brw_reg &src0, const brw_reg &src1, const brw_reg &src2);
-   fs_inst(enum opcode opcode, uint8_t exec_size, const brw_reg &dst,
+   brw_inst(enum opcode opcode, uint8_t exec_size, const brw_reg &dst,
            const brw_reg src[], unsigned sources);
-   fs_inst(const fs_inst &that);
-   ~fs_inst();
+   brw_inst(const brw_inst &that);
+   ~brw_inst();
 
    void resize_sources(uint8_t num_sources);
 
@@ -81,8 +93,8 @@ public:
    bool uses_indirect_addressing() const;
 
    void remove(bblock_t *block, bool defer_later_block_ip_updates = false);
-   void insert_after(bblock_t *block, fs_inst *inst);
-   void insert_before(bblock_t *block, fs_inst *inst);
+   void insert_after(bblock_t *block, brw_inst *inst);
+   void insert_before(bblock_t *block, brw_inst *inst);
 
    /**
     * True if the instruction has side effects other than writing to
@@ -234,9 +246,9 @@ public:
  * Make the execution of \p inst dependent on the evaluation of a possibly
  * inverted predicate.
  */
-static inline fs_inst *
+static inline brw_inst *
 set_predicate_inv(enum brw_predicate pred, bool inverse,
-                  fs_inst *inst)
+                  brw_inst *inst)
 {
    inst->predicate = pred;
    inst->predicate_inverse = inverse;
@@ -246,8 +258,8 @@ set_predicate_inv(enum brw_predicate pred, bool inverse,
 /**
  * Make the execution of \p inst dependent on the evaluation of a predicate.
  */
-static inline fs_inst *
-set_predicate(enum brw_predicate pred, fs_inst *inst)
+static inline brw_inst *
+set_predicate(enum brw_predicate pred, brw_inst *inst)
 {
    return set_predicate_inv(pred, false, inst);
 }
@@ -256,8 +268,8 @@ set_predicate(enum brw_predicate pred, fs_inst *inst)
  * Write the result of evaluating the condition given by \p mod to a flag
  * register.
  */
-static inline fs_inst *
-set_condmod(enum brw_conditional_mod mod, fs_inst *inst)
+static inline brw_inst *
+set_condmod(enum brw_conditional_mod mod, brw_inst *inst)
 {
    inst->conditional_mod = mod;
    return inst;
@@ -267,8 +279,8 @@ set_condmod(enum brw_conditional_mod mod, fs_inst *inst)
  * Clamp the result of \p inst to the saturation range of its destination
  * datatype.
  */
-static inline fs_inst *
-set_saturate(bool saturate, fs_inst *inst)
+static inline brw_inst *
+set_saturate(bool saturate, brw_inst *inst)
 {
    inst->saturate = saturate;
    return inst;
@@ -281,7 +293,7 @@ set_saturate(bool saturate, fs_inst *inst)
  * UNIFORM and IMM files and 32B for all other files.
  */
 inline unsigned
-regs_written(const fs_inst *inst)
+regs_written(const brw_inst *inst)
 {
    assert(inst->dst.file != UNIFORM && inst->dst.file != IMM);
    return DIV_ROUND_UP(reg_offset(inst->dst) % REG_SIZE +
@@ -297,7 +309,7 @@ regs_written(const fs_inst *inst)
  * UNIFORM files and 32B for all other files.
  */
 inline unsigned
-regs_read(const struct intel_device_info *devinfo, const fs_inst *inst, unsigned i)
+regs_read(const struct intel_device_info *devinfo, const brw_inst *inst, unsigned i)
 {
    if (inst->src[i].file == IMM)
       return 1;
@@ -309,60 +321,16 @@ regs_read(const struct intel_device_info *devinfo, const fs_inst *inst, unsigned
                        reg_size);
 }
 
-static inline enum brw_reg_type
-get_exec_type(const fs_inst *inst)
-{
-   brw_reg_type exec_type = BRW_TYPE_B;
-
-   for (int i = 0; i < inst->sources; i++) {
-      if (inst->src[i].file != BAD_FILE &&
-          !inst->is_control_source(i)) {
-         const brw_reg_type t = get_exec_type(inst->src[i].type);
-         if (brw_type_size_bytes(t) > brw_type_size_bytes(exec_type))
-            exec_type = t;
-         else if (brw_type_size_bytes(t) == brw_type_size_bytes(exec_type) &&
-                  brw_type_is_float(t))
-            exec_type = t;
-      }
-   }
-
-   if (exec_type == BRW_TYPE_B)
-      exec_type = inst->dst.type;
-
-   assert(exec_type != BRW_TYPE_B);
-
-   /* Promotion of the execution type to 32-bit for conversions from or to
-    * half-float seems to be consistent with the following text from the
-    * Cherryview PRM Vol. 7, "Execution Data Type":
-    *
-    * "When single precision and half precision floats are mixed between
-    *  source operands or between source and destination operand [..] single
-    *  precision float is the execution datatype."
-    *
-    * and from "Register Region Restrictions":
-    *
-    * "Conversion between Integer and HF (Half Float) must be DWord aligned
-    *  and strided by a DWord on the destination."
-    */
-   if (brw_type_size_bytes(exec_type) == 2 &&
-       inst->dst.type != exec_type) {
-      if (exec_type == BRW_TYPE_HF)
-         exec_type = BRW_TYPE_F;
-      else if (inst->dst.type == BRW_TYPE_HF)
-         exec_type = BRW_TYPE_D;
-   }
-
-   return exec_type;
-}
+enum brw_reg_type get_exec_type(const brw_inst *inst);
 
 static inline unsigned
-get_exec_type_size(const fs_inst *inst)
+get_exec_type_size(const brw_inst *inst)
 {
    return brw_type_size_bytes(get_exec_type(inst));
 }
 
 static inline bool
-is_send(const fs_inst *inst)
+is_send(const brw_inst *inst)
 {
    return inst->mlen || inst->is_send_from_grf();
 }
@@ -372,7 +340,7 @@ is_send(const fs_inst *inst)
  * assumed to complete in-order.
  */
 static inline bool
-is_unordered(const intel_device_info *devinfo, const fs_inst *inst)
+is_unordered(const intel_device_info *devinfo, const brw_inst *inst)
 {
    return is_send(inst) || (devinfo->ver < 20 && inst->is_math()) ||
           inst->opcode == BRW_OPCODE_DPAS ||
@@ -381,211 +349,51 @@ is_unordered(const intel_device_info *devinfo, const fs_inst *inst)
             inst->dst.type == BRW_TYPE_DF));
 }
 
-/**
- * Return whether the following regioning restriction applies to the specified
- * instruction.  From the Cherryview PRM Vol 7. "Register Region
- * Restrictions":
- *
- * "When source or destination datatype is 64b or operation is integer DWord
- *  multiply, regioning in Align1 must follow these rules:
- *
- *  1. Source and Destination horizontal stride must be aligned to the same qword.
- *  2. Regioning must ensure Src.Vstride = Src.Width * Src.Hstride.
- *  3. Source and Destination offset must be the same, except the case of
- *     scalar source."
- */
-static inline bool
-has_dst_aligned_region_restriction(const intel_device_info *devinfo,
-                                   const fs_inst *inst,
-                                   brw_reg_type dst_type)
-{
-   const brw_reg_type exec_type = get_exec_type(inst);
-   /* Even though the hardware spec claims that "integer DWord multiply"
-    * operations are restricted, empirical evidence and the behavior of the
-    * simulator suggest that only 32x32-bit integer multiplication is
-    * restricted.
-    */
-   const bool is_dword_multiply = !brw_type_is_float(exec_type) &&
-      ((inst->opcode == BRW_OPCODE_MUL &&
-        MIN2(brw_type_size_bytes(inst->src[0].type), brw_type_size_bytes(inst->src[1].type)) >= 4) ||
-       (inst->opcode == BRW_OPCODE_MAD &&
-        MIN2(brw_type_size_bytes(inst->src[1].type), brw_type_size_bytes(inst->src[2].type)) >= 4));
-
-   if (brw_type_size_bytes(dst_type) > 4 || brw_type_size_bytes(exec_type) > 4 ||
-       (brw_type_size_bytes(exec_type) == 4 && is_dword_multiply))
-      return intel_device_info_is_9lp(devinfo) || devinfo->verx10 >= 125;
-
-   else if (brw_type_is_float(dst_type))
-      return devinfo->verx10 >= 125;
-
-   else
-      return false;
-}
+bool has_dst_aligned_region_restriction(const intel_device_info *devinfo,
+                                        const brw_inst *inst,
+                                        brw_reg_type dst_type);
 
 static inline bool
 has_dst_aligned_region_restriction(const intel_device_info *devinfo,
-                                   const fs_inst *inst)
+                                   const brw_inst *inst)
 {
    return has_dst_aligned_region_restriction(devinfo, inst, inst->dst.type);
 }
 
-/**
- * Return true if the instruction can be potentially affected by the Xe2+
- * regioning restrictions that apply to integer types smaller than a dword.
- * The restriction isn't quoted here due to its length, see BSpec #56640 for
- * details.
- */
-static inline bool
-has_subdword_integer_region_restriction(const intel_device_info *devinfo,
-                                        const fs_inst *inst,
-                                        const brw_reg *srcs, unsigned num_srcs)
-{
-   if (devinfo->ver >= 20 &&
-       brw_type_is_int(inst->dst.type) &&
-       MAX2(byte_stride(inst->dst),
-            brw_type_size_bytes(inst->dst.type)) < 4) {
-      for (unsigned i = 0; i < num_srcs; i++) {
-         if (brw_type_is_int(srcs[i].type) &&
-             ((brw_type_size_bytes(srcs[i].type) < 4 &&
-               byte_stride(srcs[i]) >= 4) ||
-              (MAX2(byte_stride(inst->dst),
-                   brw_type_size_bytes(inst->dst.type)) == 1 &&
-               brw_type_size_bytes(srcs[i].type) == 1 &&
-               byte_stride(srcs[i]) >= 2)))
-            return true;
-      }
-   }
-
-   return false;
-}
+bool has_subdword_integer_region_restriction(const intel_device_info *devinfo,
+                                             const brw_inst *inst,
+                                             const brw_reg *srcs, unsigned num_srcs);
 
 static inline bool
 has_subdword_integer_region_restriction(const intel_device_info *devinfo,
-                                        const fs_inst *inst)
+                                        const brw_inst *inst)
 {
    return has_subdword_integer_region_restriction(devinfo, inst,
                                                   inst->src, inst->sources);
 }
 
-/**
- * Return whether the LOAD_PAYLOAD instruction is a plain copy of bits from
- * the specified register file into a VGRF.
- *
- * This implies identity register regions without any source-destination
- * overlap, but otherwise has no implications on the location of sources and
- * destination in the register file: Gathering any number of portions from
- * multiple virtual registers in any order is allowed.
- */
-inline bool
-is_copy_payload(const struct intel_device_info *devinfo,
-                brw_reg_file file, const fs_inst *inst)
-{
-   if (inst->opcode != SHADER_OPCODE_LOAD_PAYLOAD ||
-       inst->is_partial_write() || inst->saturate ||
-       inst->dst.file != VGRF)
-      return false;
+bool is_identity_payload(const struct intel_device_info *devinfo,
+                         brw_reg_file file, const brw_inst *inst);
 
-   for (unsigned i = 0; i < inst->sources; i++) {
-      if (inst->src[i].file != file ||
-          inst->src[i].abs || inst->src[i].negate)
-         return false;
+bool is_multi_copy_payload(const struct intel_device_info *devinfo,
+                           const brw_inst *inst);
 
-      if (!inst->src[i].is_contiguous())
-         return false;
+bool is_coalescing_payload(const struct intel_device_info *devinfo,
+                           const brw::simple_allocator &alloc, const brw_inst *inst);
 
-      if (regions_overlap(inst->dst, inst->size_written,
-                          inst->src[i], inst->size_read(devinfo, i)))
-         return false;
-   }
-
-   return true;
-}
-
-/**
- * Like is_copy_payload(), but the instruction is required to copy a single
- * contiguous block of registers from the given register file into the
- * destination without any reordering.
- */
-inline bool
-is_identity_payload(const struct intel_device_info *devinfo,
-                    brw_reg_file file, const fs_inst *inst)
-{
-   if (is_copy_payload(devinfo, file, inst)) {
-      brw_reg reg = inst->src[0];
-
-      for (unsigned i = 0; i < inst->sources; i++) {
-         reg.type = inst->src[i].type;
-         if (!inst->src[i].equals(reg))
-            return false;
-
-         reg = byte_offset(reg, inst->size_read(devinfo, i));
-      }
-
-      return true;
-   } else {
-      return false;
-   }
-}
-
-/**
- * Like is_copy_payload(), but the instruction is required to source data from
- * at least two disjoint VGRFs.
- *
- * This doesn't necessarily rule out the elimination of this instruction
- * through register coalescing, but due to limitations of the register
- * coalesce pass it might be impossible to do so directly until a later stage,
- * when the LOAD_PAYLOAD instruction is unrolled into a sequence of MOV
- * instructions.
- */
-inline bool
-is_multi_copy_payload(const struct intel_device_info *devinfo,
-                      const fs_inst *inst)
-{
-   if (is_copy_payload(devinfo, VGRF, inst)) {
-      for (unsigned i = 0; i < inst->sources; i++) {
-            if (inst->src[i].nr != inst->src[0].nr)
-               return true;
-      }
-   }
-
-   return false;
-}
-
-/**
- * Like is_identity_payload(), but the instruction is required to copy the
- * whole contents of a single VGRF into the destination.
- *
- * This means that there is a good chance that the instruction will be
- * eliminated through register coalescing, but it's neither a necessary nor a
- * sufficient condition for that to happen -- E.g. consider the case where
- * source and destination registers diverge due to other instructions in the
- * program overwriting part of their contents, which isn't something we can
- * predict up front based on a cheap strictly local test of the copy
- * instruction.
- */
-inline bool
-is_coalescing_payload(const struct intel_device_info *devinfo,
-                      const brw::simple_allocator &alloc, const fs_inst *inst)
-{
-   return is_identity_payload(devinfo, VGRF, inst) &&
-          inst->src[0].offset == 0 &&
-          alloc.sizes[inst->src[0].nr] * REG_SIZE == inst->size_written;
-}
-
-bool
-has_bank_conflict(const struct brw_isa_info *isa, const fs_inst *inst);
+bool has_bank_conflict(const struct brw_isa_info *isa, const brw_inst *inst);
 
 /* Return the subset of flag registers that an instruction could
  * potentially read or write based on the execution controls and flag
  * subregister number of the instruction.
  */
 static inline unsigned
-brw_fs_flag_mask(const fs_inst *inst, unsigned width)
+brw_fs_flag_mask(const brw_inst *inst, unsigned width)
 {
    assert(util_is_power_of_two_nonzero(width));
    const unsigned start = (inst->flag_subreg * 16 + inst->group) &
                           ~(width - 1);
-  const unsigned end = start + ALIGN(inst->exec_size, width);
+   const unsigned end = start + ALIGN(inst->exec_size, width);
    return ((1 << DIV_ROUND_UP(end, 8)) - 1) & ~((1 << (start / 8)) - 1);
 }
 

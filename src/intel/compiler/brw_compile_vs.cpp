@@ -20,12 +20,12 @@ brw_assign_vs_urb_setup(fs_visitor &s)
    assert(s.stage == MESA_SHADER_VERTEX);
 
    /* Each attribute is 4 regs. */
-   s.first_non_payload_grf += 4 * vs_prog_data->nr_attribute_slots;
+   s.first_non_payload_grf += 8 * vs_prog_data->base.urb_read_length;
 
    assert(vs_prog_data->base.urb_read_length <= 15);
 
    /* Rewrite all ATTR file references to the hw grf that they land in. */
-   foreach_block_and_inst(block, fs_inst, inst, s.cfg) {
+   foreach_block_and_inst(block, brw_inst, inst, s.cfg) {
       s.convert_attr_sources_to_hw_regs(inst);
    }
 }
@@ -37,7 +37,7 @@ run_vs(fs_visitor &s)
 
    s.payload_ = new vs_thread_payload(s);
 
-   nir_to_brw(&s);
+   brw_from_nir(&s);
 
    if (s.failed)
       return false;
@@ -161,6 +161,7 @@ brw_compile_vs(const struct brw_compiler *compiler,
    assert(v.payload().num_regs % reg_unit(compiler->devinfo) == 0);
    prog_data->base.base.dispatch_grf_start_reg =
       v.payload().num_regs / reg_unit(compiler->devinfo);
+   prog_data->base.base.grf_used = v.grf_used;
 
    brw_generator g(compiler, &params->base,
                   &prog_data->base.base,

@@ -278,6 +278,9 @@ PipeToProfile(enum pipe_video_profile profile)
    case PIPE_VIDEO_PROFILE_HEVC_MAIN_12:
    case PIPE_VIDEO_PROFILE_HEVC_MAIN_STILL:
    case PIPE_VIDEO_PROFILE_HEVC_MAIN_444:
+   case PIPE_VIDEO_PROFILE_HEVC_MAIN10_444:
+   case PIPE_VIDEO_PROFILE_HEVC_MAIN_422:
+   case PIPE_VIDEO_PROFILE_HEVC_MAIN10_422:
    case PIPE_VIDEO_PROFILE_UNKNOWN:
       return VAProfileNone;
    default:
@@ -376,7 +379,6 @@ typedef struct {
    VABufferInfo export_state;
    unsigned int coded_size;
    struct pipe_enc_feedback_metadata extended_metadata;
-   struct pipe_video_buffer *derived_image_buffer;
    void *feedback;
    struct vlVaContext *ctx;
    struct vlVaSurface *coded_surf;
@@ -427,6 +429,7 @@ typedef struct vlVaContext {
    struct set *buffers;
    unsigned slice_data_offset;
    bool have_slice_params;
+   mtx_t mutex;
 
    struct {
       void **buffers;
@@ -449,7 +452,8 @@ typedef struct vlVaSurface {
    vlVaContext *ctx;
    vlVaBuffer *coded_buf;
    bool full_range;
-   struct pipe_fence_handle *fence;
+   struct pipe_fence_handle *fence; /* pipe_video_codec fence */
+   struct pipe_fence_handle *pipe_fence; /* pipe_context fence */
    struct vlVaSurface *efc_surface; /* input surface for EFC */
    bool is_dpb;
 } vlVaSurface;
@@ -570,6 +574,7 @@ VAStatus vlVaHandleVAProcPipelineParameterBufferType(vlVaDriver *drv, vlVaContex
 VAStatus vlVaHandleSurfaceAllocate(vlVaDriver *drv, vlVaSurface *surface, struct pipe_video_buffer *templat,
                                    const uint64_t *modifiers, unsigned int modifiers_count);
 struct pipe_video_buffer *vlVaGetSurfaceBuffer(vlVaDriver *drv, vlVaSurface *surface);
+void vlVaSurfaceFlush(vlVaDriver *drv, vlVaSurface *surf);
 void vlVaAddRawHeader(struct util_dynarray *headers, uint8_t type, uint32_t size, uint8_t *buf,
                       bool is_slice, uint32_t emulation_bytes_start);
 void vlVaGetBufferFeedback(vlVaBuffer *buf);

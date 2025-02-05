@@ -178,7 +178,8 @@ get_ready_slot(struct ir3_legalize_state *state,
 }
 
 static unsigned
-delay_calc(struct ir3_legalize_state *state,
+delay_calc(struct ir3_legalize_ctx *ctx,
+           struct ir3_legalize_state *state,
            struct ir3_instruction *instr,
            unsigned cycle)
 {
@@ -193,19 +194,7 @@ delay_calc(struct ir3_legalize_state *state,
 
       unsigned elems = post_ra_reg_elems(src);
       unsigned num = post_ra_reg_num(src);
-      unsigned src_cycle = cycle;
-
-      /* gat and swz have scalar sources and each source is read in a
-       * subsequent cycle.
-       */
-      if (instr->opc == OPC_GAT || instr->opc == OPC_SWZ)
-         src_cycle += n;
-
-      /* cat3 instructions consume their last source two cycles later, so they
-       * only need a delay of 1.
-       */
-      if ((is_mad(instr->opc) || is_madsh(instr->opc)) && n == 2)
-         src_cycle += 2;
+      unsigned src_cycle = cycle + ir3_src_read_delay(ctx->compiler, instr, n);
 
       for (unsigned elem = 0; elem < elems; elem++, num++) {
          unsigned ready_cycle =
@@ -224,7 +213,8 @@ delay_calc(struct ir3_legalize_state *state,
 }
 
 static void
-delay_update(struct ir3_legalize_state *state,
+delay_update(struct ir3_legalize_ctx *ctx,
+             struct ir3_legalize_state *state,
              struct ir3_instruction *instr,
              unsigned cycle,
              bool mergedregs)
@@ -276,11 +266,13 @@ delay_update(struct ir3_legalize_state *state,
                   reset_ready_slot = true;
                } else if ((dst->flags & IR3_REG_PREDICATE) ||
                           reg_num(dst) == REG_A0) {
-                  delay = 6;
+                  delay = ctx->compiler->delay_slots.non_alu;
                   if (!matching_size)
                      continue;
                } else {
-                  delay = (consumer_alu && matching_size) ? 3 : 6;
+                  delay = (consumer_alu && matching_size)
+                             ? ctx->compiler->delay_slots.alu_to_alu
+                             : ctx->compiler->delay_slots.non_alu;
                }
 
                if (!matching_size) {
@@ -560,7 +552,7 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
          cycle++;
       }
 
-      unsigned delay = delay_calc(state, n, cycle);
+      unsigned delay = delay_calc(ctx, state, n, cycle);
 
       /* NOTE: I think the nopN encoding works for a5xx and
        * probably a4xx, but not a3xx.  So far only tested on
@@ -708,7 +700,7 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
       if (count)
          cycle += 1;
 
-      delay_update(state, n, cycle, mergedregs);
+      delay_update(ctx, state, n, cycle, mergedregs);
 
       if (count)
          cycle += n->repeat + n->nop;

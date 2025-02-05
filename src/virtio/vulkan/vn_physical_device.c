@@ -1802,6 +1802,38 @@ vn_GetPhysicalDeviceMemoryProperties2(
    pMemoryProperties->memoryProperties = physical_dev->memory_properties;
 }
 
+static inline void
+vn_sanitize_format_properties(VkFormat format,
+                              VkFormatProperties *props,
+                              VkFormatProperties3 *props3)
+{
+   // YCbCr formats only support a subset of format feature flags
+   static const VkFormatFeatureFlags allowed_ycbcr_feats =
+      VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+      VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+      VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_CUBIC_BIT_EXT |
+      VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+      VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
+      VK_FORMAT_FEATURE_MIDPOINT_CHROMA_SAMPLES_BIT |
+      VK_FORMAT_FEATURE_COSITED_CHROMA_SAMPLES_BIT |
+      VK_FORMAT_FEATURE_SAMPLED_IMAGE_YCBCR_CONVERSION_LINEAR_FILTER_BIT |
+      VK_FORMAT_FEATURE_SAMPLED_IMAGE_YCBCR_CONVERSION_SEPARATE_RECONSTRUCTION_FILTER_BIT |
+      VK_FORMAT_FEATURE_SAMPLED_IMAGE_YCBCR_CONVERSION_CHROMA_RECONSTRUCTION_EXPLICIT_BIT |
+      VK_FORMAT_FEATURE_SAMPLED_IMAGE_YCBCR_CONVERSION_CHROMA_RECONSTRUCTION_EXPLICIT_FORCEABLE_BIT |
+      VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_MINMAX_BIT |
+      VK_FORMAT_FEATURE_DISJOINT_BIT;
+
+   /* TODO drop this after supporting VK_EXT_rgba10x6_formats */
+   if (format == VK_FORMAT_R10X6G10X6B10X6A10X6_UNORM_4PACK16) {
+      props->linearTilingFeatures &= allowed_ycbcr_feats;
+      props->optimalTilingFeatures &= allowed_ycbcr_feats;
+      if (props3) {
+         props3->linearTilingFeatures &= allowed_ycbcr_feats;
+         props3->optimalTilingFeatures &= allowed_ycbcr_feats;
+      }
+   }
+}
+
 void
 vn_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
                                       VkFormat format,
@@ -1843,6 +1875,8 @@ vn_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
    vn_call_vkGetPhysicalDeviceFormatProperties2(ring, physicalDevice, format,
                                                 pFormatProperties);
 
+   vn_sanitize_format_properties(format, &pFormatProperties->formatProperties,
+                                 props3);
    if (entry) {
       vn_physical_device_add_format_properties(
          physical_dev, entry, &pFormatProperties->formatProperties, props3);
@@ -2276,6 +2310,56 @@ vn_image_store_format_in_cache(
    simple_mtx_unlock(&cache->mutex);
 }
 
+static inline void
+vn_sanitize_image_format_properties(
+   struct vn_physical_device *physical_dev,
+   const VkPhysicalDeviceImageFormatInfo2 *info,
+   const VkPhysicalDeviceExternalImageFormatInfo *external_info,
+   VkImageFormatProperties2 *props)
+{
+   const VkExternalMemoryHandleTypeFlagBits renderer_handle_type =
+      physical_dev->external_memory.renderer_handle_type;
+   const VkExternalMemoryHandleTypeFlags supported_handle_types =
+      physical_dev->external_memory.supported_handle_types;
+
+   /* TODO drop this after supporting VK_EXT_rgba10x6_formats */
+   if (info->format == VK_FORMAT_R10X6G10X6B10X6A10X6_UNORM_4PACK16) {
+      props->imageFormatProperties.sampleCounts = VK_SAMPLE_COUNT_1_BIT;
+   }
+
+   /* sanitize VkExternalMemoryProperties */
+   VkExternalImageFormatProperties *external_props =
+      vk_find_struct(props->pNext, EXTERNAL_IMAGE_FORMAT_PROPERTIES);
+   if (external_props) {
+      VkExternalMemoryProperties *mem_props =
+         &external_props->externalMemoryProperties;
+      if (external_info->handleType ==
+          VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID) {
+         assert(physical_dev->instance->renderer->info.has_dma_buf_import);
+         mem_props->externalMemoryFeatures =
+            VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT |
+            VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT |
+            VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
+         mem_props->exportFromImportedHandleTypes =
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
+         mem_props->compatibleHandleTypes =
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
+      } else {
+         /* export support is via virtgpu but import relies on the renderer */
+         if (!physical_dev->instance->renderer->info.has_dma_buf_import) {
+            mem_props->externalMemoryFeatures &=
+               ~VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
+         }
+
+         mem_props->compatibleHandleTypes = supported_handle_types;
+         mem_props->exportFromImportedHandleTypes =
+            (mem_props->exportFromImportedHandleTypes & renderer_handle_type)
+               ? supported_handle_types
+               : 0;
+      }
+   }
+}
+
 VkResult
 vn_GetPhysicalDeviceImageFormatProperties2(
    VkPhysicalDevice physicalDevice,
@@ -2377,6 +2461,10 @@ vn_GetPhysicalDeviceImageFormatProperties2(
             return vn_error(physical_dev->instance,
                             VK_ERROR_FORMAT_NOT_SUPPORTED);
          }
+      } else if (!physical_dev->instance->renderer->info.has_dma_buf_import) {
+         /* AHB backed image requires renderer to support import bit */
+         return vn_error(physical_dev->instance,
+                         VK_ERROR_FORMAT_NOT_SUPPORTED);
       }
 
       if (external_info->handleType != renderer_handle_type) {
@@ -2415,6 +2503,12 @@ vn_GetPhysicalDeviceImageFormatProperties2(
       result = vn_call_vkGetPhysicalDeviceImageFormatProperties2(
          ring, physicalDevice, pImageFormatInfo, pImageFormatProperties);
 
+      if (result == VK_SUCCESS) {
+         vn_sanitize_image_format_properties(physical_dev, pImageFormatInfo,
+                                             external_info,
+                                             pImageFormatProperties);
+      }
+
       /* If cacheable, cache successful and unsupported results. */
       if (cacheable &&
           (result == VK_SUCCESS || result == VK_ERROR_FORMAT_NOT_SUPPORTED ||
@@ -2424,11 +2518,10 @@ vn_GetPhysicalDeviceImageFormatProperties2(
       }
    }
 
-   if (result != VK_SUCCESS || !external_info)
-      return vn_result(physical_dev->instance, result);
-
-   if (external_info->handleType ==
-       VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID) {
+   /* VkAndroidHardwareBufferUsageANDROID is always populated directly */
+   if (result == VK_SUCCESS && external_info &&
+       external_info->handleType ==
+          VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID) {
       VkAndroidHardwareBufferUsageANDROID *ahb_usage =
          vk_find_struct(pImageFormatProperties->pNext,
                         ANDROID_HARDWARE_BUFFER_USAGE_ANDROID);
@@ -2441,46 +2534,7 @@ vn_GetPhysicalDeviceImageFormatProperties2(
       pImageFormatProperties->imageFormatProperties.maxMipLevels = 1;
    }
 
-   VkExternalImageFormatProperties *img_props = vk_find_struct(
-      pImageFormatProperties->pNext, EXTERNAL_IMAGE_FORMAT_PROPERTIES);
-   if (!img_props)
-      return VK_SUCCESS;
-
-   VkExternalMemoryProperties *mem_props =
-      &img_props->externalMemoryProperties;
-
-   if (renderer_handle_type ==
-          VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT &&
-       !physical_dev->instance->renderer->info.has_dma_buf_import) {
-      mem_props->externalMemoryFeatures &=
-         ~VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
-   }
-
-   if (external_info->handleType ==
-       VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID) {
-      /* AHB backed image requires renderer to support import bit */
-      if (!(mem_props->externalMemoryFeatures &
-            VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT))
-         return vn_error(physical_dev->instance,
-                         VK_ERROR_FORMAT_NOT_SUPPORTED);
-
-      mem_props->externalMemoryFeatures =
-         VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT |
-         VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT |
-         VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
-      mem_props->exportFromImportedHandleTypes =
-         VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
-      mem_props->compatibleHandleTypes =
-         VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
-   } else {
-      mem_props->compatibleHandleTypes = supported_handle_types;
-      mem_props->exportFromImportedHandleTypes =
-         (mem_props->exportFromImportedHandleTypes & renderer_handle_type)
-            ? supported_handle_types
-            : 0;
-   }
-
-   return VK_SUCCESS;
+   return vn_result(physical_dev->instance, result);
 }
 
 void

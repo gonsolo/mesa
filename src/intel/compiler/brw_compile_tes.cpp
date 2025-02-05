@@ -22,7 +22,7 @@ brw_assign_tes_urb_setup(fs_visitor &s)
    s.first_non_payload_grf += 8 * vue_prog_data->urb_read_length;
 
    /* Rewrite all ATTR file references to HW_REGs. */
-   foreach_block_and_inst(block, fs_inst, inst, s.cfg) {
+   foreach_block_and_inst(block, brw_inst, inst, s.cfg) {
       s.convert_attr_sources_to_hw_regs(inst);
    }
 }
@@ -34,7 +34,7 @@ run_tes(fs_visitor &s)
 
    s.payload_ = new tes_thread_payload(s);
 
-   nir_to_brw(&s);
+   brw_from_nir(&s);
 
    if (s.failed)
       return false;
@@ -164,7 +164,7 @@ brw_compile_tes(const struct brw_compiler *compiler,
 
    assert(v.payload().num_regs % reg_unit(devinfo) == 0);
    prog_data->base.base.dispatch_grf_start_reg = v.payload().num_regs / reg_unit(devinfo);
-
+   prog_data->base.base.grf_used = v.grf_used;
    prog_data->base.dispatch_mode = INTEL_DISPATCH_MODE_SIMD8;
 
    brw_generator g(compiler, &params->base,

@@ -277,6 +277,10 @@ radv_probe_video_decode(struct radv_physical_device *pdev)
 
    pdev->video_decode_enabled = false;
 
+   /* TODO: Add VCN 5.0+. */
+   if (pdev->info.vcn_ip_version >= VCN_5_0_0)
+      return;
+
    /* The support for decode events are available at the same time as encode */
    if (pdev->info.vcn_ip_version >= VCN_4_0_0) {
       if (pdev->info.vcn_enc_major_version > 1)
@@ -747,8 +751,8 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
       ext->maxLevelIdc = cap ? cap->max_level : 0;
       ext->maxSliceCount = 1;
       ext->maxPPictureL0ReferenceCount = 1;
-      ext->maxBPictureL0ReferenceCount = 0;
-      ext->maxL1ReferenceCount = 0;
+      ext->maxBPictureL0ReferenceCount = pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_3 ? 1 : 0;
+      ext->maxL1ReferenceCount = pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_3 ? 1 : 0;
       ext->maxTemporalLayerCount = 4;
       ext->expectDyadicTemporalLayerPattern = false;
       ext->minQp = 0;

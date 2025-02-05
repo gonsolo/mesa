@@ -27,6 +27,7 @@
 
 #include <assert.h>
 #include "c11/threads.h"
+#include "util/hash_table.h"
 #include "util/simple_mtx.h"
 #include "nir.h"
 #include "nir_xfb_info.h"
@@ -971,6 +972,11 @@ validate_call_instr(nir_call_instr *instr, validate_state *state)
 {
    validate_assert(state, instr->num_params == instr->callee->num_params);
 
+   if (instr->indirect_callee.ssa) {
+      validate_assert(state, !instr->callee->impl);
+      validate_src(&instr->indirect_callee, state);
+   }
+
    for (unsigned i = 0; i < instr->num_params; i++) {
       validate_sized_src(&instr->params[i], state,
                          instr->callee->params[i].bit_size,
@@ -1148,9 +1154,6 @@ validate_instr(nir_instr *instr, validate_state *state)
 
    case nir_instr_type_jump:
       validate_jump_instr(nir_instr_as_jump(instr), state);
-      break;
-
-   case nir_instr_type_debug_info:
       break;
 
    default:
@@ -1603,7 +1606,7 @@ validate_ssa_dominance(nir_function_impl *impl, validate_state *state)
 {
    nir_metadata_require(impl, nir_metadata_dominance);
 
-   nir_foreach_block(block, impl) {
+   nir_foreach_block_unstructured(block, impl) {
       state->block = block;
       nir_foreach_instr(instr, block) {
          state->instr = instr;
@@ -1865,13 +1868,19 @@ validate_loop_info(nir_function_impl *impl, validate_state *state)
          validate_assert(state, are_loop_terminators_equal(a, b));
       }
 
-      validate_assert(state, loop->info->num_induction_vars == md->num_induction_vars);
-      for (unsigned i = 0; i < MIN2(loop->info->num_induction_vars, md->num_induction_vars); i++) {
-         nir_loop_induction_variable *a = &loop->info->induction_vars[i];
-         nir_loop_induction_variable *b = &md->induction_vars[i];
-         validate_assert(state, a->def == b->def);
-         validate_assert(state, a->init_src == b->init_src);
-         validate_assert(state, a->update_src == b->update_src);
+      validate_assert(state, _mesa_hash_table_num_entries(loop->info->induction_vars) ==
+                                _mesa_hash_table_num_entries(md->induction_vars));
+      hash_table_foreach(loop->info->induction_vars, var) {
+         struct hash_entry *prev_var = _mesa_hash_table_search(md->induction_vars, var->key);
+         validate_assert(state, prev_var != NULL);
+         if (prev_var) {
+            nir_loop_induction_variable *a = var->data;
+            nir_loop_induction_variable *b = prev_var->data;
+            validate_assert(state, a->basis == b->basis);
+            validate_assert(state, a->def == b->def);
+            validate_assert(state, a->init_src == b->init_src);
+            validate_assert(state, a->update_src == b->update_src);
+         }
       }
    }
 

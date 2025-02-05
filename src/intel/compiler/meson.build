@@ -47,19 +47,19 @@ libintel_compiler_brw_files = files(
   'brw_eu_inst.h',
   'brw_eu.h',
   'brw_eu_validate.c',
+  'brw_from_nir.cpp',
   'brw_fs.cpp',
   'brw_fs.h',
   'brw_fs_live_variables.cpp',
   'brw_fs_live_variables.h',
-  'brw_fs_nir.cpp',
   'brw_fs_thread_payload.cpp',
   'brw_fs_visitor.cpp',
   'brw_generator.cpp',
   'brw_generator.h',
-  'brw_ir.h',
+  'brw_inst.cpp',
+  'brw_inst.h',
   'brw_ir_allocator.h',
   'brw_ir_analysis.h',
-  'brw_ir_fs.h',
   'brw_ir_performance.h',
   'brw_ir_performance.cpp',
   'brw_isa_info.h',
@@ -111,8 +111,8 @@ libintel_compiler_brw_files = files(
   'brw_reg_type.h',
   'brw_rt.h',
   'brw_schedule_instructions.cpp',
-  'brw_shader.cpp',
   'brw_simd_selection.cpp',
+  'brw_spirv.c',
   'brw_validate.cpp',
   'brw_vue_map.c',
   'brw_workaround.cpp',
@@ -161,37 +161,43 @@ idep_intel_compiler_brw = declare_dependency(
   dependencies : [
     idep_nir,
     idep_mesautil,
+    idep_vtn,
   ],
 )
 
 # For now this tool is only going to be used by Anv
-if get_option('intel-clc') == 'system' or get_option('precomp-compiler') == 'system'
-  prog_intel_clc = find_program('intel_clc', native : true)
-  dep_prog_intel_clc = []
-elif with_intel_clc
-  prog_intel_clc = executable(
-    'intel_clc',
-    [
-      'intel_clc.c',
-      'brw_kernel.c',
+if with_intel_bvh_grl
+  if get_option('intel-clc') == 'system' or get_option('precomp-compiler') == 'system'
+    prog_intel_clc = find_program('intel_clc', native : true)
+    dep_prog_intel_clc = []
+  elif with_intel_clc
+    prog_intel_clc = executable(
+      'intel_clc',
+      [
+        'intel_clc.c',
+        'brw_kernel.c',
 
-      # Use just the nir_options part of ELK instead of fully linking.
-      'elk/elk_nir_options.h',
-      'elk/elk_nir_options.c',
-    ],
-    link_with : [libisl],
-    include_directories : [inc_include, inc_src, inc_intel],
-    c_args : [pre_args, no_override_init_args],
-    link_args : [ld_args_build_id],
-    dependencies : [idep_nir, idep_vtn, idep_mesaclc, idep_mesautil, idep_intel_dev,
-                    idep_intel_compiler_brw],
-    # If we can run host binaries directly, just build intel_clc for the host.
-    # Most commonly this happens when doing a cross compile from an x86_64 build
-    # machine to an x86 host
-    native : not meson.can_run_host_binaries(),
-    install : get_option('install-intel-clc') or get_option('install-precomp-compiler'),
-  )
-  dep_prog_intel_clc = [prog_intel_clc]
+        # Use just the nir_options part of ELK instead of fully linking.
+        'elk/elk_nir_options.h',
+        'elk/elk_nir_options.c',
+        'elk/elk_spirv.c',
+      ],
+      link_with : [libisl],
+      include_directories : [inc_include, inc_src, inc_intel],
+      c_args : [pre_args, no_override_init_args],
+      link_args : [ld_args_build_id],
+      dependencies : [idep_nir, idep_mesaclc, idep_mesautil, idep_intel_dev,
+                      idep_intel_compiler_brw],
+      # If we can run host binaries directly, just build intel_clc for the host.
+      # Most commonly this happens when doing a cross compile from an x86_64 build
+      # machine to an x86 host
+      native : not meson.can_run_host_binaries(),
+      install : get_option('install-intel-clc') or get_option('install-precomp-compiler'),
+    )
+    dep_prog_intel_clc = [prog_intel_clc]
+  endif
+else
+  dep_prog_intel_clc = []
 endif
 
 if with_tests
@@ -320,4 +326,8 @@ brw_disasm_tool = executable(
 
 endif
 
-subdir('elk')
+if with_intel_elk
+  subdir('elk')
+else
+  idep_intel_compiler_elk = null_dep
+endif

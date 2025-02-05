@@ -1745,6 +1745,18 @@ impl<'a> ShaderFromNir<'a> {
         let flags: nak_nir_tex_flags =
             unsafe { std::mem::transmute_copy(&tex.backend_flags) };
 
+        let tex_ref = match flags.ref_type() {
+            NAK_NIR_TEX_REF_TYPE_BOUND => {
+                TexRef::Bound(tex.texture_index.try_into().unwrap())
+            }
+            NAK_NIR_TEX_REF_TYPE_CBUF => TexRef::CBuf(TexCBufRef {
+                idx: (tex.texture_index >> 16).try_into().unwrap(),
+                offset: tex.texture_index as u16,
+            }),
+            NAK_NIR_TEX_REF_TYPE_BINDLESS => TexRef::Bindless,
+            _ => panic!("Invalid tex ref type"),
+        };
+
         let mask = tex.def.components_read();
         let mut mask = u8::try_from(mask).unwrap();
         if flags.is_sparse() {
@@ -1774,6 +1786,7 @@ impl<'a> ShaderFromNir<'a> {
             assert!(fault.is_none());
             b.push_op(OpTxq {
                 dsts: dsts,
+                tex: tex_ref,
                 src: src,
                 query: TexQuery::Dimension,
                 mask: mask,
@@ -1783,6 +1796,7 @@ impl<'a> ShaderFromNir<'a> {
             assert!(fault.is_none());
             b.push_op(OpTxq {
                 dsts: dsts,
+                tex: tex_ref,
                 src: src,
                 query: TexQuery::TextureType,
                 mask: mask,
@@ -1814,6 +1828,7 @@ impl<'a> ShaderFromNir<'a> {
                 b.push_op(OpTxd {
                     dsts: dsts,
                     fault,
+                    tex: tex_ref,
                     srcs: srcs,
                     dim: dim,
                     offset: offset_mode == Tld4OffsetMode::AddOffI,
@@ -1823,6 +1838,7 @@ impl<'a> ShaderFromNir<'a> {
                 assert!(offset_mode == Tld4OffsetMode::None);
                 b.push_op(OpTmml {
                     dsts: dsts,
+                    tex: tex_ref,
                     srcs: srcs,
                     dim: dim,
                     mask: mask,
@@ -1832,6 +1848,7 @@ impl<'a> ShaderFromNir<'a> {
                 b.push_op(OpTld {
                     dsts: dsts,
                     fault,
+                    tex: tex_ref,
                     srcs: srcs,
                     dim: dim,
                     lod_mode: lod_mode,
@@ -1843,6 +1860,7 @@ impl<'a> ShaderFromNir<'a> {
                 b.push_op(OpTld4 {
                     dsts: dsts,
                     fault,
+                    tex: tex_ref,
                     srcs: srcs,
                     dim: dim,
                     comp: tex.component().try_into().unwrap(),
@@ -1855,6 +1873,7 @@ impl<'a> ShaderFromNir<'a> {
                 b.push_op(OpTex {
                     dsts: dsts,
                     fault,
+                    tex: tex_ref,
                     srcs: srcs,
                     dim: dim,
                     lod_mode: lod_mode,
@@ -2562,12 +2581,14 @@ impl<'a> ShaderFromNir<'a> {
                 let size_B =
                     (intrin.def.bit_size() / 8) * intrin.def.num_components();
                 assert!(u32::from(size_B) <= intrin.align());
-                let order =
-                    if intrin.intrinsic == nir_intrinsic_load_global_constant {
-                        MemOrder::Constant
-                    } else {
-                        MemOrder::Strong(MemScope::System)
-                    };
+                let order = if intrin.intrinsic
+                    == nir_intrinsic_load_global_constant
+                    || (intrin.access() & ACCESS_CAN_REORDER) != 0
+                {
+                    MemOrder::Constant
+                } else {
+                    MemOrder::Strong(MemScope::System)
+                };
                 let access = MemAccess {
                     mem_type: MemType::from_size(size_B, false),
                     space: MemSpace::Global(MemAddrType::A64),

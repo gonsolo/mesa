@@ -424,6 +424,8 @@ populate_task_prog_key(struct anv_pipeline_stage *stage,
    memset(&stage->key, 0, sizeof(stage->key));
 
    populate_base_prog_key(stage, device);
+
+   stage->key.base.uses_inline_push_addr = true;
 }
 
 static void
@@ -436,6 +438,7 @@ populate_mesh_prog_key(struct anv_pipeline_stage *stage,
    populate_base_prog_key(stage, device);
 
    stage->key.mesh.compact_mue = compact_mue;
+   stage->key.base.uses_inline_push_addr = true;
 }
 
 static uint32_t
@@ -561,6 +564,8 @@ populate_cs_prog_key(struct anv_pipeline_stage *stage,
    memset(&stage->key, 0, sizeof(stage->key));
 
    populate_base_prog_key(stage, device);
+
+   stage->key.base.uses_inline_push_addr = device->info->verx10 >= 125;
 }
 
 static void
@@ -3309,12 +3314,12 @@ compile_upload_rt_shader(struct anv_ray_tracing_pipeline *pipeline,
       NIR_PASS(_, nir, nir_lower_shader_calls, &opts,
                &resume_shaders, &num_resume_shaders, mem_ctx);
       NIR_PASS(_, nir, brw_nir_lower_shader_calls, &stage->key.bs);
-      NIR_PASS_V(nir, brw_nir_lower_rt_intrinsics, devinfo);
+      NIR_PASS_V(nir, brw_nir_lower_rt_intrinsics, &stage->key.base, devinfo);
    }
 
    for (unsigned i = 0; i < num_resume_shaders; i++) {
       NIR_PASS(_,resume_shaders[i], brw_nir_lower_shader_calls, &stage->key.bs);
-      NIR_PASS_V(resume_shaders[i], brw_nir_lower_rt_intrinsics, devinfo);
+      NIR_PASS_V(resume_shaders[i], brw_nir_lower_rt_intrinsics, &stage->key.base, devinfo);
    }
 
    struct brw_compile_bs_params params = {
@@ -3791,6 +3796,11 @@ anv_device_init_rt_shaders(struct anv_device *device)
       nir_shader *trampoline_nir =
          brw_nir_create_raygen_trampoline(device->physical->compiler, tmp_ctx);
 
+      if (device->info->ver >= 20)
+         trampoline_nir->info.subgroup_size = SUBGROUP_SIZE_REQUIRE_16;
+      else
+         trampoline_nir->info.subgroup_size = SUBGROUP_SIZE_REQUIRE_8;
+
       struct brw_cs_prog_data trampoline_prog_data = {
          .uses_btd_stack_ids = true,
       };
@@ -3848,7 +3858,8 @@ anv_device_init_rt_shaders(struct anv_device *device)
       nir_shader *trivial_return_nir =
          brw_nir_create_trivial_return_shader(device->physical->compiler, tmp_ctx);
 
-      NIR_PASS_V(trivial_return_nir, brw_nir_lower_rt_intrinsics, device->info);
+      NIR_PASS_V(trivial_return_nir, brw_nir_lower_rt_intrinsics,
+                 &return_key.key.base, device->info);
 
       struct brw_bs_prog_data return_prog_data = { 0, };
       struct brw_compile_bs_params params = {
@@ -4302,6 +4313,16 @@ VkResult anv_GetPipelineExecutableStatisticsKHR(
                 "pressure.");
       stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
       stat->value.u64 = prog_data->total_scratch;
+   }
+
+   if (pipeline->device->info->ver >= 30) {
+      vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
+         WRITE_STR(stat->name, "GRF registers");
+         WRITE_STR(stat->description,
+                   "Number of GRF registers required by the shader.");
+         stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
+         stat->value.u64 = prog_data->grf_used;
+      }
    }
 
    vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {

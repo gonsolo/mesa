@@ -248,7 +248,10 @@ init_common_queue_state(struct anv_queue *queue, struct anv_batch *batch)
    uint32_t mocs = device->isl_dev.mocs.internal;
    anv_batch_emit(batch, GENX(STATE_BASE_ADDRESS), sba) {
       sba.GeneralStateBaseAddress = (struct anv_address) { NULL, 0 };
-      sba.GeneralStateBufferSize  = 0xfffff;
+      sba.GeneralStateBufferSize  = DIV_ROUND_UP(
+         device->physical->va.first_2mb.size +
+         device->physical->va.general_state_pool.size +
+         device->physical->va.low_heap.size, 4096);
       sba.GeneralStateMOCS = mocs;
       sba.GeneralStateBaseAddressModifyEnable = true;
       sba.GeneralStateBufferSizeModifyEnable = true;
@@ -632,6 +635,9 @@ init_render_queue_state(struct anv_queue *queue, bool is_companion_rcs_batch)
 
 #if GFX_VERx10 >= 125
    anv_batch_emit(batch, GENX(STATE_COMPUTE_MODE), cm) {
+#if GFX_VER >= 30
+      cm.EnableVariableRegisterSizeAllocation = true;
+#endif
       cm.Mask1 = 0xffff;
 #if GFX_VERx10 >= 200
       cm.Mask2 = 0xffff;
@@ -766,6 +772,10 @@ init_compute_queue_state(struct anv_queue *queue)
    }
 
    anv_batch_emit(batch, GENX(STATE_COMPUTE_MODE), cm) {
+#if GFX_VER >= 30
+      cm.EnableVariableRegisterSizeAllocationMask = 1;
+      cm.EnableVariableRegisterSizeAllocation = true;
+#endif
 #if GFX_VER >= 20
       cm.AsyncComputeThreadLimit = ACTL_Max8;
       cm.ZPassAsyncComputeThreadLimit = ZPACTL_Max60;
@@ -1295,7 +1305,7 @@ VkResult genX(CreateSampler)(
 
       const struct anv_format *format_desc =
          sampler->vk.format != VK_FORMAT_UNDEFINED ?
-         anv_get_format(sampler->vk.format) : NULL;
+         anv_get_format(device->physical, sampler->vk.format) : NULL;
 
       if (format_desc && format_desc->n_planes == 1 &&
           !isl_swizzle_is_identity(format_desc->planes[0].swizzle)) {
@@ -1333,7 +1343,7 @@ VkResult genX(CreateSampler)(
        *   "Mip Mode Filter must be set to MIPFILTER_NONE for Planar YUV surfaces."
        */
       enum isl_format plane0_isl_format = sampler->vk.ycbcr_conversion ?
-         anv_get_format(sampler->vk.format)->planes[0].isl_format :
+         anv_get_format(device->physical, sampler->vk.format)->planes[0].isl_format :
          ISL_FORMAT_UNSUPPORTED;
       const bool isl_format_is_planar_yuv =
          plane0_isl_format != ISL_FORMAT_UNSUPPORTED &&

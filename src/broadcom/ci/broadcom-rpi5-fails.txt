@@ -191,7 +191,6 @@ spec@ext_packed_depth_stencil@texwrap formats offset,Fail
 spec@ext_packed_depth_stencil@texwrap formats offset@GL_DEPTH24_STENCIL8- NPOT,Fail
 spec@ext_packed_depth_stencil@texwrap formats,Fail
 spec@ext_packed_depth_stencil@texwrap formats@GL_DEPTH24_STENCIL8- NPOT,Fail
-spec@ext_packed_float@query-rgba-signed-components,Fail
 spec@ext_texture_integer@fbo-blending,Fail
 spec@ext_texture_integer@getteximage-clamping gl_arb_texture_rg,Fail
 spec@ext_texture_integer@getteximage-clamping,Fail
@@ -460,3 +459,25 @@ dEQP-VK.draw.renderpass.non_line_with_params.vtx_lines_geom_points_mode_line_lin
 dEQP-VK.draw.renderpass.non_line_with_params.vtx_lines_geom_points_mode_point_line_raster_smooth,Fail
 dEQP-VK.draw.renderpass.non_line_with_params.vtx_lines_geom_triangles_mode_fill_line_raster_smooth,Fail
 dEQP-VK.draw.renderpass.non_line_with_params.vtx_lines_geom_triangles_mode_point_line_raster_smooth,Fail
+
+# New fails in 1.4.1.0
+dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_linear.vk_image_type_3d.multiple.gradient.device.write,Fail
+dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_linear.vk_image_type_3d.multiple.random.device.write,Fail
+dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_linear.vk_image_type_3d.single.gradient.device.write,Fail
+dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_optimal.vk_image_type_3d.multiple.gradient.device.write,Fail
+dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_optimal.vk_image_type_3d.multiple.random.device.write,Fail
+dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_optimal.vk_image_type_3d.single.gradient.device.write,Fail
+dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_optimal.vk_image_type_3d.single.random.device.write,Fail
+dEQP-VK.image.concurrent_copy.vk_format_r8_unorm.vk_image_tiling_linear.vk_image_type_3d.multiple.gradient.device.write,Fail
+dEQP-VK.image.concurrent_copy.vk_format_r8_unorm.vk_image_tiling_linear.vk_image_type_3d.multiple.random.device.write,Fail
+dEQP-VK.image.concurrent_copy.vk_format_r8_unorm.vk_image_tiling_linear.vk_image_type_3d.single.gradient.device.write,Fail
+dEQP-VK.image.concurrent_copy.vk_format_r8_unorm.vk_image_tiling_linear.vk_image_type_3d.single.random.device.write,Fail
+dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_linear.vk_image_type_3d.multiple.random.device.write,Fail
+dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_linear.vk_image_type_3d.single.gradient.device.write,Fail
+dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_linear.vk_image_type_3d.single.random.device.write,Fail
+dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_optimal.vk_image_type_3d.multiple.random.device.write,Fail
+dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_optimal.vk_image_type_3d.single.gradient.device.write,Fail
+dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_optimal.vk_image_type_3d.single.random.device.write,Fail
+
+# New fails in 1.4.1.1
+dEQP-VK.glsl.texture_functions.query.texturequerylevels.usampler1darray_vertex,Fail

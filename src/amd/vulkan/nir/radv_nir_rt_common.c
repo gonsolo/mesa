@@ -8,10 +8,6 @@
 #include "bvh/bvh.h"
 #include "radv_debug.h"
 
-#if AMD_LLVM_AVAILABLE
-#include <llvm/Config/llvm-config.h>
-#endif
-
 static nir_def *build_node_to_addr(struct radv_device *device, nir_builder *b, nir_def *node, bool skip_type_and);
 
 static void
@@ -82,7 +78,7 @@ intersect_ray_amd_software_box(struct radv_device *device, nir_builder *b, nir_d
 
       /* If x of the aabb min is NaN, then this is an inactive aabb.
        * We don't need to care about any other components being NaN as that is UB.
-       * https://www.khronos.org/registry/vulkan/specs/1.2-extensions/html/chap36.html#VkAabbPositionsKHR
+       * https://registry.khronos.org/vulkan/specs/latest/html/vkspec.html#acceleration-structure-inactive-prims
        */
       nir_def *min_x = nir_channel(b, node_coords[0], 0);
       nir_def *min_x_is_not_nan = nir_inot(b, nir_fneu(b, min_x, min_x)); /* NaN != NaN -> true */
