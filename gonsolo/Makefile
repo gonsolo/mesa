@@ -60,5 +60,5 @@ tidy_compile_commands:
 	cd $(BUILD_DIR); sed -i 's/-mtls-dialect=gnu2 //g' compile_commands.json; cd -
 	cd $(BUILD_DIR); sed -i 's/-flifetime-dse=1 //g' compile_commands.json; cd -
 
-.PHONY: all c clean compile compile_and_tidy ct install link_compile_commands \
+.PHONY: all clean compile compile_and_tidy ct install link_compile_commands \
 	setup t test
