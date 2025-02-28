@@ -47,6 +47,7 @@ static const struct debug_control tu_debug_options[] = {
    { "noconcurrentresolves", TU_DEBUG_NO_CONCURRENT_RESOLVES },
    { "noconcurrentunresolves", TU_DEBUG_NO_CONCURRENT_UNRESOLVES },
    { "dumpas", TU_DEBUG_DUMPAS },
+   { "nobinmerging", TU_DEBUG_NO_BIN_MERGING },
    { NULL, 0 }
 };
 
@@ -56,13 +57,14 @@ static const struct debug_control tu_debug_options[] = {
  * or the hardware and would otherwise break when toggled should not be set here.
  * Note: Keep in sync with the list of flags in 'docs/drivers/freedreno.rst'.
  */
-const uint32_t tu_runtime_debug_flags =
+const uint64_t tu_runtime_debug_flags =
    TU_DEBUG_NIR | TU_DEBUG_NOBIN | TU_DEBUG_SYSMEM | TU_DEBUG_GMEM |
    TU_DEBUG_FORCEBIN | TU_DEBUG_LAYOUT | TU_DEBUG_NOLRZ | TU_DEBUG_NOLRZFC |
    TU_DEBUG_PERF | TU_DEBUG_FLUSHALL | TU_DEBUG_SYNCDRAW |
    TU_DEBUG_RAST_ORDER | TU_DEBUG_UNALIGNED_STORE |
    TU_DEBUG_LOG_SKIP_GMEM_OPS | TU_DEBUG_3D_LOAD | TU_DEBUG_FDM |
-   TU_DEBUG_NO_CONCURRENT_RESOLVES | TU_DEBUG_NO_CONCURRENT_UNRESOLVES;
+   TU_DEBUG_NO_CONCURRENT_RESOLVES | TU_DEBUG_NO_CONCURRENT_UNRESOLVES |
+   TU_DEBUG_NO_BIN_MERGING;
 
 os_file_notifier_t tu_debug_notifier;
 struct tu_env tu_env;
@@ -71,7 +73,7 @@ static void
 tu_env_notify(
    void *data, const char *path, bool created, bool deleted, bool dir_deleted)
 {
-   int file_flags = 0;
+   uint64_t file_flags = 0;
    if (!deleted) {
       FILE *file = fopen(path, "r");
       if (file) {
@@ -84,10 +86,10 @@ tu_env_notify(
       }
    }
 
-   int runtime_flags = file_flags & tu_runtime_debug_flags;
+   uint64_t runtime_flags = file_flags & tu_runtime_debug_flags;
    if (unlikely(runtime_flags != file_flags)) {
       mesa_logw(
-         "Certain options in TU_DEBUG_FILE don't support runtime changes: 0x%x, ignoring",
+         "Certain options in TU_DEBUG_FILE don't support runtime changes: 0x%" PRIx64 ", ignoring",
          file_flags & ~tu_runtime_debug_flags);
    }
 
@@ -113,7 +115,7 @@ tu_env_init_once(void)
    tu_env.env_debug = tu_env.debug & ~tu_runtime_debug_flags;
 
    if (TU_DEBUG(STARTUP))
-      mesa_logi("TU_DEBUG=0x%x", tu_env.env_debug);
+      mesa_logi("TU_DEBUG=0x%" PRIx64 " (ENV: 0x%" PRIx64 ")", tu_env.debug.load(), tu_env.env_debug);
 
    /* TU_DEBUG=rd functionality was moved to fd_rd_output. This debug option
     * should translate to the basic-level FD_RD_DUMP_ENABLE option.
@@ -125,8 +127,8 @@ tu_env_init_once(void)
    if (debug_file) {
       if (tu_env.debug != tu_env.env_debug) {
          mesa_logw("TU_DEBUG_FILE is set (%s), but TU_DEBUG is also set. "
-                   "Any runtime options (0x%x) in TU_DEBUG will be ignored.",
-                   debug_file, tu_env.debug & ~tu_runtime_debug_flags);
+                   "Any runtime options (0x%" PRIx64 ") in TU_DEBUG will be ignored.",
+                   debug_file, tu_env.debug & tu_runtime_debug_flags);
       }
 
       if (TU_DEBUG(STARTUP))
@@ -151,6 +153,16 @@ tu_env_init(void)
 
    static once_flag once = ONCE_FLAG_INIT;
    call_once(&once, tu_env_init_once);
+}
+
+const char *
+tu_env_debug_as_string(void)
+{
+   static thread_local char debug_string[96];
+   dump_debug_control_string(debug_string, sizeof(debug_string),
+                             tu_debug_options,
+                             tu_env.debug.load(std::memory_order_acquire));
+   return debug_string;
 }
 
 void PRINTFLIKE(3, 4)
@@ -307,10 +319,28 @@ tu_tiling_config_update_tile_layout(struct tu_framebuffer *fb,
 
 static void
 tu_tiling_config_update_pipe_layout(struct tu_tiling_config *tiling,
-                                    const struct tu_device *dev)
+                                    const struct tu_device *dev,
+                                    bool fdm)
 {
    const uint32_t max_pipe_count =
       dev->physical_device->info->num_vsc_pipes;
+
+   /* If there is a fragment density map and bin merging is enabled, we will
+    * likely be able to merge some bins. Bins can only be merged if they are
+    * in the same visibility stream, so making the pipes cover too small an
+    * area can prevent bin merging from happening. Maximize the size of each
+    * pipe instead of minimizing it.
+    */
+   if (fdm && dev->physical_device->info->a6xx.has_bin_mask &&
+       !TU_DEBUG(NO_BIN_MERGING)) {
+      tiling->pipe0.width = 4;
+      tiling->pipe0.height = 8;
+      tiling->pipe_count.width =
+         DIV_ROUND_UP(tiling->tile_count.width, tiling->pipe0.width);
+      tiling->pipe_count.height =
+         DIV_ROUND_UP(tiling->tile_count.height, tiling->pipe0.height);
+      return;
+   }
 
    /* start from 1 tile per pipe */
    tiling->pipe0 = (VkExtent2D) {
@@ -412,7 +442,7 @@ tu_framebuffer_tiling_config(struct tu_framebuffer *fb,
       if (!tiling->possible)
          continue;
 
-      tu_tiling_config_update_pipe_layout(tiling, device);
+      tu_tiling_config_update_pipe_layout(tiling, device, pass->has_fdm);
       tu_tiling_config_update_pipes(tiling, device);
       tu_tiling_config_update_binning(tiling, device);
    }

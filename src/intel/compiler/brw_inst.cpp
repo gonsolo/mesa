@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "brw_shader.h"
 #include "brw_eu.h"
+#include "brw_shader.h"
 #include "brw_cfg.h"
 #include "brw_compiler.h"
 #include "brw_inst.h"
@@ -195,10 +197,12 @@ brw_inst::is_control_source(unsigned arg) const
    case SHADER_OPCODE_BROADCAST:
    case SHADER_OPCODE_SHUFFLE:
    case SHADER_OPCODE_QUAD_SWIZZLE:
+      return arg == 1;
+
    case FS_OPCODE_INTERPOLATE_AT_SAMPLE:
    case FS_OPCODE_INTERPOLATE_AT_SHARED_OFFSET:
    case FS_OPCODE_INTERPOLATE_AT_PER_SLOT_OFFSET:
-      return arg == 1;
+      return arg == INTERP_SRC_MSG_DESC || arg == INTERP_SRC_NOPERSPECTIVE;
 
    case SHADER_OPCODE_MOV_INDIRECT:
    case SHADER_OPCODE_CLUSTER_BROADCAST:
@@ -477,7 +481,7 @@ brw_inst::components_read(unsigned i) const
          return 1;
 
    case SHADER_OPCODE_MEMORY_LOAD_LOGICAL:
-      if (i == MEMORY_LOGICAL_DATA0 || i == MEMORY_LOGICAL_DATA0)
+      if (i == MEMORY_LOGICAL_DATA0)
          return 0;
       /* fallthrough */
    case SHADER_OPCODE_MEMORY_STORE_LOGICAL:
@@ -529,12 +533,6 @@ brw_inst::size_read(const struct intel_device_info *devinfo, int arg) const
          const unsigned reg_unit = 2;
          return REG_SIZE * reg_unit;
       }
-      break;
-
-   case FS_OPCODE_INTERPOLATE_AT_SAMPLE:
-   case FS_OPCODE_INTERPOLATE_AT_SHARED_OFFSET:
-      if (arg == 0)
-         return mlen * REG_SIZE;
       break;
 
    case BRW_OPCODE_PLN:
@@ -645,13 +643,13 @@ brw_inst::flags_read(const intel_device_info *devinfo) const
        * f0.0 and f1.0 on Gfx7+.
        */
       const unsigned shift = 4;
-      return brw_fs_flag_mask(this, 1) << shift | brw_fs_flag_mask(this, 1);
+      return brw_flag_mask(this, 1) << shift | brw_flag_mask(this, 1);
    } else if (predicate) {
-      return brw_fs_flag_mask(this, predicate_width(devinfo, predicate));
+      return brw_flag_mask(this, predicate_width(devinfo, predicate));
    } else {
       unsigned mask = 0;
       for (int i = 0; i < sources; i++) {
-         mask |= brw_fs_flag_mask(src[i], size_read(devinfo, i));
+         mask |= brw_flag_mask(src[i], size_read(devinfo, i));
       }
       return mask;
    }
@@ -664,15 +662,15 @@ brw_inst::flags_written(const intel_device_info *devinfo) const
                            opcode != BRW_OPCODE_CSEL &&
                            opcode != BRW_OPCODE_IF &&
                            opcode != BRW_OPCODE_WHILE)) {
-      return brw_fs_flag_mask(this, 1);
+      return brw_flag_mask(this, 1);
    } else if (opcode == FS_OPCODE_LOAD_LIVE_CHANNELS ||
               opcode == SHADER_OPCODE_BALLOT ||
               opcode == SHADER_OPCODE_VOTE_ANY ||
               opcode == SHADER_OPCODE_VOTE_ALL ||
               opcode == SHADER_OPCODE_VOTE_EQUAL) {
-      return brw_fs_flag_mask(this, 32);
+      return brw_flag_mask(this, 32);
    } else {
-      return brw_fs_flag_mask(dst, size_written);
+      return brw_flag_mask(dst, size_written);
    }
 }
 
@@ -810,6 +808,7 @@ brw_inst::is_control_flow_end() const
    case BRW_OPCODE_ELSE:
    case BRW_OPCODE_WHILE:
    case BRW_OPCODE_ENDIF:
+   case SHADER_OPCODE_FLOW:
       return true;
    default:
       return false;
@@ -827,7 +826,19 @@ brw_inst::is_control_flow() const
    case BRW_OPCODE_ENDIF:
    case BRW_OPCODE_BREAK:
    case BRW_OPCODE_CONTINUE:
+   case BRW_OPCODE_JMPI:
+   case BRW_OPCODE_BRD:
+   case BRW_OPCODE_BRC:
+   case BRW_OPCODE_HALT:
+   case BRW_OPCODE_CALLA:
+   case BRW_OPCODE_CALL:
+   case BRW_OPCODE_GOTO:
+   case BRW_OPCODE_RET:
+   case SHADER_OPCODE_FLOW:
       return true;
+   case BRW_OPCODE_MOV:
+   case BRW_OPCODE_ADD:
+      return dst.is_ip();
    default:
       return false;
    }
@@ -1253,11 +1264,10 @@ is_multi_copy_payload(const struct intel_device_info *devinfo,
  * instruction.
  */
 bool
-is_coalescing_payload(const struct intel_device_info *devinfo,
-                      const brw::simple_allocator &alloc, const brw_inst *inst)
+is_coalescing_payload(const brw_shader &s, const brw_inst *inst)
 {
-   return is_identity_payload(devinfo, VGRF, inst) &&
+   return is_identity_payload(s.devinfo, VGRF, inst) &&
           inst->src[0].offset == 0 &&
-          alloc.sizes[inst->src[0].nr] * REG_SIZE == inst->size_written;
+          s.alloc.sizes[inst->src[0].nr] * REG_SIZE == inst->size_written;
 }
 

@@ -25,7 +25,7 @@
 #pragma once
 
 #include "brw_eu.h"
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_inst.h"
 
 static inline brw_reg offset(const brw_reg &, const brw_builder &,
@@ -40,7 +40,7 @@ public:
     * Construct an brw_builder that inserts instructions into \p shader.
     * \p dispatch_width gives the native execution width of the program.
     */
-   brw_builder(fs_visitor *shader,
+   brw_builder(brw_shader *shader,
                unsigned dispatch_width) :
       shader(shader), block(NULL), cursor(NULL),
       _dispatch_width(dispatch_width),
@@ -50,7 +50,7 @@ public:
    {
    }
 
-   explicit brw_builder(fs_visitor *s) : brw_builder(s, s->dispatch_width) {}
+   explicit brw_builder(brw_shader *s) : brw_builder(s, s->dispatch_width) {}
 
    /**
     * Construct an brw_builder that inserts instructions into \p shader
@@ -58,7 +58,7 @@ public:
     * execution controls and debug annotation are initialized from the
     * instruction passed as argument.
     */
-   brw_builder(fs_visitor *shader, bblock_t *block, brw_inst *inst) :
+   brw_builder(brw_shader *shader, bblock_t *block, brw_inst *inst) :
       shader(shader), block(block), cursor(inst),
       _dispatch_width(inst->exec_size),
       _group(inst->group),
@@ -199,14 +199,10 @@ public:
    brw_reg
    vgrf(enum brw_reg_type type, unsigned n = 1) const
    {
-      const unsigned unit = reg_unit(shader->devinfo);
       assert(dispatch_width() <= 32);
 
       if (n > 0)
-         return brw_vgrf(shader->alloc.allocate(
-                            DIV_ROUND_UP(n * brw_type_size_bytes(type) * dispatch_width(),
-                                         unit * REG_SIZE) * unit),
-                         type);
+         return brw_allocate_vgrf(*shader, type, n * dispatch_width());
       else
          return retype(null_reg_ud(), type);
    }
@@ -848,14 +844,24 @@ public:
       return component(dst, 0);
    }
 
-   fs_visitor *shader;
+   brw_shader *shader;
 
-   brw_inst *BREAK()    { return emit(BRW_OPCODE_BREAK); }
-   brw_inst *DO()       { return emit(BRW_OPCODE_DO); }
-   brw_inst *ENDIF()    { return emit(BRW_OPCODE_ENDIF); }
-   brw_inst *NOP()      { return emit(BRW_OPCODE_NOP); }
-   brw_inst *WHILE()    { return emit(BRW_OPCODE_WHILE); }
-   brw_inst *CONTINUE() { return emit(BRW_OPCODE_CONTINUE); }
+   brw_inst *BREAK()    const { return emit(BRW_OPCODE_BREAK); }
+   brw_inst *ENDIF()    const { return emit(BRW_OPCODE_ENDIF); }
+   brw_inst *NOP()      const { return emit(BRW_OPCODE_NOP); }
+   brw_inst *WHILE()    const { return emit(BRW_OPCODE_WHILE); }
+   brw_inst *CONTINUE() const { return emit(BRW_OPCODE_CONTINUE); }
+
+   void DO() const {
+      emit(BRW_OPCODE_DO);
+      /* Ensure that there'll always be a block after DO to add
+       * instructions and serve as sucessor for predicated WHILE
+       * and CONTINUE.
+       *
+       * See more details in brw_cfg::validate().
+       */
+      emit(SHADER_OPCODE_FLOW);
+   }
 
    bool has_writemask_all() const {
       return force_writemask_all;

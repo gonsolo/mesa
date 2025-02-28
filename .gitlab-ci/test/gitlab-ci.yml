@@ -40,8 +40,41 @@ rustfmt:
     - .lint-rustfmt-rules
   before_script:
     - shopt -s globstar
+    - source "$HOME/.cargo/env"
     - rustfmt --version
     - rustfmt --verbose src/**/lib.rs
+
+shader-db:
+  stage: code-validation
+  extends:
+    - .use-debian/x86_64_build
+  rules:
+    - !reference [.never-post-merge-rules, rules]
+    - !reference [.core-rules, rules]
+    # Keep this list in sync with the drivers tested in run-shader-db.sh
+    - !reference [.freedreno-common-rules, rules]
+    - !reference [.intel-common-rules, rules]
+    - !reference [.lima-rules, rules]
+    - !reference [.v3d-rules, rules]
+    - !reference [.vc4-rules, rules]
+    - !reference [.nouveau-rules, rules]
+    - !reference [.r300-rules, rules]
+    # Also run if this job's own config or script changes
+    - changes:
+        - .gitlab-ci/build/gitlab-ci.yml
+        - .gitlab-ci/run-shader-db.sh
+  needs:
+    - debian-build-testing
+  variables:
+    S3_ARTIFACT_NAME: debian-build-testing
+  before_script:
+    - !reference [.download_s3, before_script]
+  script: |
+    .gitlab-ci/run-shader-db.sh
+  artifacts:
+    paths:
+      - shader-db
+  timeout: 15m
 
 yaml-toml-shell-py-test:
   extends:
@@ -64,7 +97,8 @@ yaml-toml-shell-py-test:
     - !reference [.disable-farm-mr-rules, rules]
     - !reference [.never-post-merge-rules, rules]
     - !reference [.no_scheduled_pipelines-rules, rules]
-    - if: $GITLAB_USER_LOGIN == "marge-bot"
+    # merge pipeline
+    - if: $GITLAB_USER_LOGIN == "marge-bot" && $CI_PIPELINE_SOURCE == "merge_request_event"
       changes: &lint_files
         - .gitlab-ci/test/gitlab-ci.yml
         - .gitlab-ci/**/*.sh
@@ -73,6 +107,14 @@ yaml-toml-shell-py-test:
         - src/**/ci/*.toml
         - .gitlab-ci/tests/**/*
         - bin/ci/**/*
+      when: on_success
+    # direct pushes that bypassed the CI
+    - if: $CI_PROJECT_NAMESPACE == "mesa" && $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH
+      changes: *lint_files
+      when: on_success
+    # direct pushes from release manager
+    - if: $CI_PROJECT_NAMESPACE == "mesa" && $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_REF_NAME =~ /^staging\//
+      changes: *lint_files
       when: on_success
     - changes: *lint_files
       when: manual
@@ -136,6 +178,10 @@ yaml-toml-shell-py-test:
     paths:
       - results/
 
+.test-angle:
+  variables:
+    ANGLE_TAG: ${CONDITIONAL_BUILD_ANGLE_TAG}
+
 .b2c-vkd3d-proton-test:
   variables:
     HWCI_TEST_SCRIPT: install/vkd3d-runner.sh
@@ -158,7 +204,7 @@ yaml-toml-shell-py-test:
     HWCI_TEST_SCRIPT: "/install/piglit/piglit-runner.sh"
   script:
     - section_start variables "Variables passed through:"
-    - install/common/generate-env.sh
+    - install/common/export-gitlab-job-env-for-dut.sh
     - section_end variables
     - install/piglit/piglit-traces.sh
 
@@ -371,7 +417,7 @@ yaml-toml-shell-py-test:
       # Create a script to regenerate the CI environment when this job
       # begins running on the remote DUT.
       set +x
-      "$CI_COMMON_SCRIPTS"/generate-env.sh > ${JOB_FOLDER}/set-job-env-vars.sh
+      "$CI_COMMON_SCRIPTS"/export-gitlab-job-env-for-dut.sh > ${JOB_FOLDER}/set-job-env-vars.sh
       echo "export SCRIPTS_DIR=./install" >> ${JOB_FOLDER}/set-job-env-vars.sh
       echo "Variables passed through:"
       cat ${JOB_FOLDER}/set-job-env-vars.sh
@@ -428,6 +474,8 @@ yaml-toml-shell-py-test:
   extends:
     - .use-debian/x86_64_test-vk
     - .b2c-x86_64-test
+  variables:
+    S3_ARTIFACT_NAME: "debian-build-testing"
   needs:
     - job: debian/x86_64_test-vk
       artifacts: false
@@ -450,6 +498,8 @@ yaml-toml-shell-py-test:
   extends:
     - .use-debian/x86_64_test-gl
     - .b2c-x86_64-test
+  variables:
+    S3_ARTIFACT_NAME: "debian-build-testing"
   needs:
     - job: debian/x86_64_test-gl
       artifacts: false

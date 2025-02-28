@@ -18,7 +18,7 @@
    this_progress;                                        \
 })
 
-#define OPT_V(nir, pass, ...) NIR_PASS_V(nir, pass, ##__VA_ARGS__)
+#define OPT_V(nir, pass, ...) NIR_PASS(_, nir, pass, ##__VA_ARGS__)
 
 bool
 nak_nir_workgroup_has_one_subgroup(const nir_shader *nir)
@@ -136,7 +136,11 @@ optimize_nir(nir_shader *nir, const struct nak_compiler *nak, bool allow_copies)
       OPT(nir, nir_opt_dce);
       OPT(nir, nir_opt_cse);
 
-      OPT(nir, nir_opt_peephole_select, 0, false, false);
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = 0,
+         .discard_ok = true,
+      };
+      OPT(nir, nir_opt_peephole_select, &peephole_select_options);
       OPT(nir, nir_opt_intrinsics);
       OPT(nir, nir_opt_idiv_const, 32);
       OPT(nir, nir_opt_algebraic);
@@ -160,7 +164,6 @@ optimize_nir(nir_shader *nir, const struct nak_compiler *nak, bool allow_copies)
          OPT(nir, nir_opt_dce);
       }
       OPT(nir, nir_opt_if, nir_opt_if_optimize_phi_true_false);
-      OPT(nir, nir_opt_conditional_discard);
       if (nir->options->max_unroll_iterations != 0) {
          OPT(nir, nir_opt_loop_unroll);
       }
@@ -792,7 +795,7 @@ nak_nir_remove_barriers(nir_shader *nir)
    nir->info.uses_control_barrier = false;
 
    return nir_shader_intrinsics_pass(nir, nak_nir_remove_barrier_intrin,
-                                     nir_metadata_control_flow,
+                                     nir_metadata_control_flow | nir_metadata_divergence,
                                      NULL);
 }
 
@@ -903,6 +906,15 @@ type_size_vec4(const struct glsl_type *type, bool bindless)
    return glsl_count_vec4_slots(type, false, bindless);
 }
 
+static bool
+atomic_supported(const nir_instr *instr, const void *data)
+{
+   /* Shared atomics don't support 64-bit arithmetic */
+   const nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+   return !(intr->intrinsic == nir_intrinsic_shared_atomic &&
+            intr->def.bit_size == 64);
+}
+
 void
 nak_postprocess_nir(nir_shader *nir,
                     const struct nak_compiler *nak,
@@ -927,6 +939,7 @@ nak_postprocess_nir(nir_shader *nir,
       .lower_rotate_to_shuffle = true
    };
    OPT(nir, nir_lower_subgroups, &subgroups_options);
+   OPT(nir, nir_lower_atomics, atomic_supported);
    OPT(nir, nak_nir_lower_scan_reduce);
 
    if (nir_shader_has_local_variables(nir)) {
@@ -1045,8 +1058,16 @@ nak_postprocess_nir(nir_shader *nir,
    if (nak->sm < 70)
       OPT(nir, nak_nir_split_64bit_conversions);
 
+   /* Re-materialize load_const instructions in the blocks that use them.
+    * This is both a register pressure optimization and a ensures correctness
+    * in the presence of all of the control flow modifications we're about to
+    * do.  Without this, we can't rely on anything to be constant in NIR to
+    * NAK translation.
+    */
+   if (OPT(nir, nak_nir_rematerialize_load_const))
+      OPT(nir, nir_opt_dce);
+
    bool lcssa_progress = nir_convert_to_lcssa(nir, false, false);
-   nir_divergence_analysis(nir);
 
    if (nak->sm >= 75) {
       if (lcssa_progress) {
@@ -1055,11 +1076,13 @@ nak_postprocess_nir(nir_shader *nir,
       if (OPT(nir, nak_nir_lower_non_uniform_ldcx)) {
          OPT(nir, nir_copy_prop);
          OPT(nir, nir_opt_dce);
-         nir_divergence_analysis(nir);
       }
    }
 
    OPT(nir, nak_nir_remove_barriers);
+
+   /* Call divergence analysis regardless of sm version. */
+   nir_divergence_analysis(nir);
 
    if (nak->sm >= 70) {
       if (nak_should_print_nir()) {
@@ -1077,6 +1100,9 @@ nak_postprocess_nir(nir_shader *nir,
       if (func->impl) {
          nir_index_blocks(func->impl);
          nir_index_ssa_defs(func->impl);
+
+         /* Ensure that divergence information is correct. */
+         assert(func->impl->valid_metadata & nir_metadata_divergence);
       }
    }
 

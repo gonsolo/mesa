@@ -254,7 +254,7 @@ fill_textures(struct panvk_cmd_buffer *cmdbuf, struct pan_fb_info *fbinfo,
             cmdbuf->state.gfx.render.color_attachments.iviews[i];
 
          if (iview)
-            textures[i] = iview->descs.tex;
+            textures[i] = iview->descs.tex[0];
          else
             textures[i] = (struct mali_texture_packed){0};
       }
@@ -268,8 +268,8 @@ fill_textures(struct panvk_cmd_buffer *cmdbuf, struct pan_fb_info *fbinfo,
             ?: cmdbuf->state.gfx.render.s_attachment.iview;
 
       textures[idx++] = vk_format_has_depth(iview->vk.view_format)
-                           ? iview->descs.tex
-                           : iview->descs.other_aspect_tex;
+                           ? iview->descs.zs.tex
+                           : iview->descs.zs.other_aspect_tex;
    }
 
    if (key->aspects & VK_IMAGE_ASPECT_STENCIL_BIT) {
@@ -278,8 +278,8 @@ fill_textures(struct panvk_cmd_buffer *cmdbuf, struct pan_fb_info *fbinfo,
             ?: cmdbuf->state.gfx.render.z_attachment.iview;
 
       textures[idx++] = vk_format_has_depth(iview->vk.view_format)
-                           ? iview->descs.other_aspect_tex
-                           : iview->descs.tex;
+                           ? iview->descs.zs.other_aspect_tex
+                           : iview->descs.zs.tex;
    }
 }
 
@@ -620,29 +620,30 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf, struct pan_fb_info *fbinfo,
    pan_pack(&dcds[dcd_idx], DRAW, cfg) {
       if (key->aspects == VK_IMAGE_ASPECT_COLOR_BIT) {
          /* Skipping ATEST requires forcing Z/S */
-         cfg.zs_update_operation = MALI_PIXEL_KILL_FORCE_EARLY;
-         cfg.pixel_kill_operation = MALI_PIXEL_KILL_FORCE_EARLY;
+         cfg.flags_0.zs_update_operation = MALI_PIXEL_KILL_FORCE_EARLY;
+         cfg.flags_0.pixel_kill_operation = MALI_PIXEL_KILL_FORCE_EARLY;
 
          cfg.blend = bds.gpu;
          cfg.blend_count = bd_count;
-         cfg.render_target_mask = cmdbuf->state.gfx.render.bound_attachments &
-                                  MESA_VK_RP_ATTACHMENT_ANY_COLOR_BITS;
+         cfg.flags_1.render_target_mask =
+            cmdbuf->state.gfx.render.bound_attachments &
+            MESA_VK_RP_ATTACHMENT_ANY_COLOR_BITS;
       } else {
          /* ZS_EMIT requires late update/kill */
-         cfg.zs_update_operation = MALI_PIXEL_KILL_FORCE_LATE;
-         cfg.pixel_kill_operation = MALI_PIXEL_KILL_FORCE_LATE;
+         cfg.flags_0.zs_update_operation = MALI_PIXEL_KILL_FORCE_LATE;
+         cfg.flags_0.pixel_kill_operation = MALI_PIXEL_KILL_FORCE_LATE;
          cfg.blend_count = 0;
       }
 
-      cfg.allow_forward_pixel_to_kill =
+      cfg.flags_0.allow_forward_pixel_to_kill =
          key->aspects == VK_IMAGE_ASPECT_COLOR_BIT;
-      cfg.allow_forward_pixel_to_be_killed = true;
+      cfg.flags_0.allow_forward_pixel_to_be_killed = true;
       cfg.depth_stencil = zsd.gpu;
-      cfg.sample_mask = 0xFFFF;
-      cfg.multisample_enable = key->samples > 1;
-      cfg.evaluate_per_sample = key->samples > 1;
+      cfg.flags_1.sample_mask = 0xFFFF;
+      cfg.flags_0.multisample_enable = key->samples > 1;
+      cfg.flags_0.evaluate_per_sample = key->samples > 1;
       cfg.maximum_z = 1.0;
-      cfg.clean_fragment_write = true;
+      cfg.flags_0.clean_fragment_write = true;
       cfg.shader.resources = res_table.gpu | 1;
       cfg.shader.shader = panvk_priv_mem_dev_addr(shader->spd);
       cfg.shader.thread_storage = cmdbuf->state.gfx.tsd;

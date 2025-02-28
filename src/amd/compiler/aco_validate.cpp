@@ -1391,7 +1391,7 @@ validate_ra(Program* program)
    bool err = false;
    aco::live_var_analysis(program);
    std::vector<std::vector<Temp>> phi_sgpr_ops(program->blocks.size());
-   uint16_t sgpr_limit = get_addr_sgpr_from_waves(program, program->num_waves);
+   uint16_t sgpr_limit = get_addr_regs_from_waves(program, program->num_waves).sgpr;
 
    std::vector<Assignment> assignments(program->peekAllocationId());
    for (Block& block : program->blocks) {
@@ -1467,6 +1467,13 @@ validate_ra(Program* program)
             assignments[def.tempId()].defloc = loc;
             assignments[def.tempId()].reg = def.physReg();
             assignments[def.tempId()].valid = true;
+         }
+
+         int op_fixed_to_def = get_op_fixed_to_def(instr.get());
+         if (op_fixed_to_def != -1 &&
+             instr->definitions[0].physReg() != instr->operands[op_fixed_to_def].physReg()) {
+            err |= ra_fail(program, loc, Location(),
+                           "Operand %d must have the same register as definition", op_fixed_to_def);
          }
       }
    }

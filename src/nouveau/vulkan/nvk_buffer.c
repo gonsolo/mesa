@@ -28,6 +28,9 @@ nvk_get_buffer_alignment(const struct nvk_physical_device *pdev,
                       VK_BUFFER_USAGE_2_STORAGE_TEXEL_BUFFER_BIT_KHR))
       alignment = MAX2(alignment, NVK_MIN_TEXEL_BUFFER_ALIGNMENT);
 
+   if (usage_flags & VK_BUFFER_USAGE_2_PREPROCESS_BUFFER_BIT_EXT)
+      alignment = MAX2(alignment, NVK_DGC_ALIGN);
+
    if (create_flags & (VK_BUFFER_CREATE_SPARSE_BINDING_BIT |
                        VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT))
       alignment = MAX2(alignment, pdev->nvkmd->bind_align_B);
@@ -157,7 +160,7 @@ nvk_GetDeviceBufferMemoryRequirements(
    VkMemoryRequirements2 *pMemoryRequirements)
 {
    VK_FROM_HANDLE(nvk_device, dev, device);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    const uint32_t alignment =
       nvk_get_buffer_alignment(nvk_device_physical(dev),
@@ -236,7 +239,7 @@ nvk_bind_buffer_memory(struct nvk_device *dev,
 {
    VK_FROM_HANDLE(nvk_device_memory, mem, info->memory);
    VK_FROM_HANDLE(nvk_buffer, buffer, info->buffer);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    VkResult result = VK_SUCCESS;
 
    if ((pdev->debug_flags & NVK_DEBUG_PUSH_DUMP) &&

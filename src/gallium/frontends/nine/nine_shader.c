@@ -19,6 +19,7 @@
 #include "tgsi/tgsi_ureg.h"
 #include "tgsi/tgsi_dump.h"
 #include "nir/tgsi_to_nir.h"
+#include "nir.h"
 
 #define DBG_CHANNEL DBG_SHADER
 
@@ -4018,6 +4019,8 @@ nine_ureg_create_shader(struct ureg_program                  *ureg,
 
     if (so)
         state.stream_output = *so;
+
+    state.report_compile_error = false;
 
     switch (shader_type) {
     case PIPE_SHADER_VERTEX:

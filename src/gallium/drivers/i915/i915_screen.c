@@ -200,14 +200,24 @@ i915_optimize_nir(struct nir_shader *s)
       NIR_PASS(progress, s, nir_opt_algebraic);
       NIR_PASS(progress, s, nir_opt_constant_folding);
       NIR_PASS(progress, s, nir_opt_remove_phis);
-      NIR_PASS(progress, s, nir_opt_conditional_discard);
+
+      nir_opt_peephole_select_options peephole_discard_options = {
+         .limit = 0,
+         .discard_ok = true,
+      };
+      NIR_PASS(progress, s, nir_opt_peephole_select, &peephole_discard_options);
       NIR_PASS(progress, s, nir_opt_dce);
       NIR_PASS(progress, s, nir_opt_dead_cf);
       NIR_PASS(progress, s, nir_opt_cse);
       NIR_PASS(progress, s, nir_opt_find_array_copies);
       NIR_PASS(progress, s, nir_opt_if, nir_opt_if_optimize_phi_true_false);
-      NIR_PASS(progress, s, nir_opt_peephole_select, ~0 /* flatten all IFs. */,
-               true, true);
+
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = ~0, /* flatten all IFs. */
+         .indirect_load_ok = true,
+         .expensive_alu_ok = true,
+      };
+      NIR_PASS(progress, s, nir_opt_peephole_select, &peephole_select_options);
       NIR_PASS(progress, s, nir_opt_algebraic);
       NIR_PASS(progress, s, nir_opt_constant_folding);
       NIR_PASS(progress, s, nir_opt_shrink_stores, true);
@@ -225,31 +235,6 @@ i915_optimize_nir(struct nir_shader *s)
     * texture indirection phase limit.
     */
    NIR_PASS_V(s, nir_group_loads, nir_group_all, ~0);
-}
-
-static char *
-i915_check_control_flow(nir_shader *s)
-{
-   if (s->info.stage == MESA_SHADER_FRAGMENT) {
-      nir_function_impl *impl = nir_shader_get_entrypoint(s);
-      nir_block *first = nir_start_block(impl);
-      nir_cf_node *next = nir_cf_node_next(&first->cf_node);
-
-      if (next) {
-         switch (next->type) {
-         case nir_cf_node_if:
-            return "if/then statements not supported by i915 fragment shaders, "
-                   "should have been flattened by peephole_select.";
-         case nir_cf_node_loop:
-            return "looping not supported i915 fragment shaders, all loops "
-                   "must be statically unrollable.";
-         default:
-            return "Unknown control flow type";
-         }
-      }
-   }
-
-   return NULL;
 }
 
 static char *
@@ -275,20 +260,7 @@ i915_finalize_nir(struct pipe_screen *pscreen, struct nir_shader *s)
    nir_validate_shader(s, "after uniform var removal");
 
    nir_sweep(s);
-
-   char *msg = i915_check_control_flow(s);
-   if (msg) {
-      if (I915_DBG_ON(DBG_FS) && (!s->info.internal || NIR_DEBUG(PRINT_INTERNAL))) {
-         mesa_logi("failing shader:");
-         nir_log_shaderi(s);
-      }
-      return strdup(msg);
-   }
-
-   if (s->info.stage == MESA_SHADER_FRAGMENT)
-      return i915_test_fragment_shader_compile(pscreen, s);
-   else
-      return NULL;
+   return NULL;
 }
 
 static void
@@ -359,7 +331,6 @@ i915_init_screen_caps(struct i915_screen *is)
    caps->user_vertex_buffers = true;
    caps->mixed_color_depth_bits = true;
    caps->tgsi_texcoord = true;
-   caps->call_finalize_nir_in_linker = true;
 
    caps->texture_transfer_modes =
    caps->pci_group =

@@ -38,6 +38,7 @@
 #include "vk_util.h"
 
 #include "nir_serialize.h"
+#include "nir.h"
 
 #include "util/mesa-sha1.h"
 
@@ -823,7 +824,7 @@ vk_pipeline_precompile_shader(struct vk_device *device,
    const struct vk_device_shader_ops *ops = device->shader_ops;
    VkResult result;
 
-   struct vk_pipeline_robustness_state rs;
+   struct vk_pipeline_robustness_state rs = { 0 };
    vk_pipeline_robustness_state_fill(device, &rs,
                                      pipeline_info_pNext,
                                      info->pNext);
@@ -860,7 +861,7 @@ vk_pipeline_precompile_shader(struct vk_device *device,
       return result;
 
    if (ops->preprocess_nir != NULL)
-      ops->preprocess_nir(device->physical, nir);
+      ops->preprocess_nir(device->physical, nir, &rs);
 
    struct vk_pipeline_precomp_shader *shader =
       vk_pipeline_precomp_shader_create(device, stage_sha1,

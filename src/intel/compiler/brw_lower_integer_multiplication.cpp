@@ -3,10 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_builder.h"
-
-using namespace brw;
 
 /**
  * Factor an unsigned 32-bit integer.
@@ -139,7 +137,7 @@ factor_uint32(uint32_t x, unsigned *result_a, unsigned *result_b)
 }
 
 static void
-brw_lower_mul_dword_inst(fs_visitor &s, brw_inst *inst, bblock_t *block)
+brw_lower_mul_dword_inst(brw_shader &s, brw_inst *inst, bblock_t *block)
 {
    const intel_device_info *devinfo = s.devinfo;
    const brw_builder ibld(&s, block, inst);
@@ -222,12 +220,11 @@ brw_lower_mul_dword_inst(fs_visitor &s, brw_inst *inst, bblock_t *block)
                           inst->src[1], inst->size_read(devinfo, 1)) ||
           inst->dst.stride >= 4) {
          needs_mov = true;
-         low = brw_vgrf(s.alloc.allocate(regs_written(inst)),
-                        inst->dst.type);
+         low = retype(brw_allocate_vgrf_units(s, regs_written(inst)), inst->dst.type);
       }
 
       /* Get a new VGRF but keep the same stride as inst->dst */
-      brw_reg high = brw_vgrf(s.alloc.allocate(regs_written(inst)), inst->dst.type);
+      brw_reg high = retype(brw_allocate_vgrf_units(s, regs_written(inst)), inst->dst.type);
       high.stride = inst->dst.stride;
       high.offset = inst->dst.offset % REG_SIZE;
 
@@ -301,7 +298,7 @@ brw_lower_mul_dword_inst(fs_visitor &s, brw_inst *inst, bblock_t *block)
 }
 
 static void
-brw_lower_mul_qword_inst(fs_visitor &s, brw_inst *inst, bblock_t *block)
+brw_lower_mul_qword_inst(brw_shader &s, brw_inst *inst, bblock_t *block)
 {
    const intel_device_info *devinfo = s.devinfo;
    const brw_builder ibld(&s, block, inst);
@@ -319,17 +316,17 @@ brw_lower_mul_qword_inst(fs_visitor &s, brw_inst *inst, bblock_t *block)
    unsigned int q_regs = regs_written(inst);
    unsigned int d_regs = (q_regs + 1) / 2;
 
-   brw_reg bd = brw_vgrf(s.alloc.allocate(q_regs), BRW_TYPE_UQ);
-   brw_reg ad = brw_vgrf(s.alloc.allocate(d_regs), BRW_TYPE_UD);
-   brw_reg bc = brw_vgrf(s.alloc.allocate(d_regs), BRW_TYPE_UD);
+   brw_reg bd = retype(brw_allocate_vgrf_units(s, q_regs), BRW_TYPE_UQ);
+   brw_reg ad = retype(brw_allocate_vgrf_units(s, d_regs), BRW_TYPE_UD);
+   brw_reg bc = retype(brw_allocate_vgrf_units(s, d_regs), BRW_TYPE_UD);
 
    /* Here we need the full 64 bit result for 32b * 32b. */
    if (devinfo->has_integer_dword_mul) {
       ibld.MUL(bd, subscript(inst->src[0], BRW_TYPE_UD, 0),
                subscript(inst->src[1], BRW_TYPE_UD, 0));
    } else {
-      brw_reg bd_high = brw_vgrf(s.alloc.allocate(d_regs), BRW_TYPE_UD);
-      brw_reg bd_low  = brw_vgrf(s.alloc.allocate(d_regs), BRW_TYPE_UD);
+      brw_reg bd_high = retype(brw_allocate_vgrf_units(s, d_regs), BRW_TYPE_UD);
+      brw_reg bd_low  = retype(brw_allocate_vgrf_units(s, d_regs), BRW_TYPE_UD);
       const unsigned acc_width = reg_unit(devinfo) * 8;
       brw_reg acc = suboffset(retype(brw_acc_reg(inst->exec_size), BRW_TYPE_UD),
                              inst->group % acc_width);
@@ -370,7 +367,7 @@ brw_lower_mul_qword_inst(fs_visitor &s, brw_inst *inst, bblock_t *block)
 }
 
 static void
-brw_lower_mulh_inst(fs_visitor &s, brw_inst *inst, bblock_t *block)
+brw_lower_mulh_inst(brw_shader &s, brw_inst *inst, bblock_t *block)
 {
    const intel_device_info *devinfo = s.devinfo;
    const brw_builder ibld(&s, block, inst);
@@ -414,7 +411,7 @@ brw_lower_mulh_inst(fs_visitor &s, brw_inst *inst, bblock_t *block)
 }
 
 bool
-brw_lower_integer_multiplication(fs_visitor &s)
+brw_lower_integer_multiplication(brw_shader &s)
 {
    const intel_device_info *devinfo = s.devinfo;
    bool progress = false;
@@ -454,7 +451,8 @@ brw_lower_integer_multiplication(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS | DEPENDENCY_VARIABLES);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS |
+                            BRW_DEPENDENCY_VARIABLES);
 
    return progress;
 }

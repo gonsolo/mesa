@@ -7,6 +7,12 @@
 section_start cuttlefish_setup "cuttlefish: setup"
 set -xe
 
+# Structured tagging check for angle
+if [ -n "$ANGLE_TAG" ]; then
+    # Bail out if the ANGLE_TAG differs from what is offered in the system
+    ci_tag_test_time_check "ANGLE_TAG"
+fi
+
 export HOME=/cuttlefish
 export PATH=/cuttlefish/bin:$PATH
 export LD_LIBRARY_PATH=/cuttlefish/lib64:${CI_PROJECT_DIR}/install/lib:$LD_LIBRARY_PATH
@@ -123,7 +129,6 @@ $ADB push "$INSTALL/deqp-$DEQP_SUITE.toml" /data/deqp
 
 # remove 32 bits libs from /vendor/lib
 
-$ADB shell rm -f /vendor/lib/libglapi.so
 $ADB shell rm -f /vendor/lib/egl/libGLES_mesa.so
 
 $ADB shell rm -f /vendor/lib/egl/libEGL_angle.so
@@ -149,6 +154,17 @@ $ADB shell rm -f /vendor/lib64/egl/libEGL_emulation.so
 $ADB shell rm -f /vendor/lib64/egl/libGLESv1_CM_emulation.so
 $ADB shell rm -f /vendor/lib64/egl/libGLESv2_emulation.so
 
+# Remove built-in ANGLE, we'll supply our own if needed
+$ADB shell rm -f /vendor/lib64/egl/libEGL_angle.so
+$ADB shell rm -f /vendor/lib64/egl/libGLESv1_CM_angle.so
+$ADB shell rm -f /vendor/lib64/egl/libGLESv2_angle.so
+
+if [ -n "$ANGLE_TAG" ]; then
+  $ADB push /angle/libEGL_angle.so /vendor/lib64/egl/libEGL_angle.so
+  $ADB push /angle/libGLESv1_CM_angle.so /vendor/lib64/egl/libGLESv1_CM_angle.so
+  $ADB push /angle/libGLESv2_angle.so /vendor/lib64/egl/libGLESv2_angle.so
+fi
+
 # Check what GLES implementation Surfaceflinger is using before copying the new mesa libraries
 while [ "$($ADB shell dumpsys SurfaceFlinger | grep GLES:)" = "" ] ; do sleep 1; done
 $ADB shell dumpsys SurfaceFlinger | grep GLES
@@ -158,12 +174,23 @@ $ADB shell stop
 $ADB shell start
 
 # Check what GLES implementation Surfaceflinger is using after copying the new mesa libraries
+# Note: we are injecting the ANGLE libs in the vendor partition, so we need to check if the
+#       ANGLE libs are being used after the shell restart
 while [ "$($ADB shell dumpsys SurfaceFlinger | grep GLES:)" = "" ] ; do sleep 1; done
 MESA_RUNTIME_VERSION="$($ADB shell dumpsys SurfaceFlinger | grep GLES:)"
-MESA_BUILD_VERSION=$(cat "$INSTALL/VERSION")
-if ! printf "%s" "$MESA_RUNTIME_VERSION" | grep "${MESA_BUILD_VERSION}$"; then
-    echo "Fatal: Android is loading a wrong version of the Mesa3D libs: ${MESA_RUNTIME_VERSION}" 1>&2
+
+if [ -n "$ANGLE_TAG" ]; then
+  ANGLE_HASH=$(head -c 12 /angle/version)
+  if ! printf "%s" "$MESA_RUNTIME_VERSION" | grep --quiet "${ANGLE_HASH}"; then
+    echo "Fatal: Android is loading a wrong version of the ANGLE libs: ${ANGLE_HASH}" 1>&2
     exit 1
+  fi
+else
+  MESA_BUILD_VERSION=$(cat "$INSTALL/VERSION")
+  if ! printf "%s" "$MESA_RUNTIME_VERSION" | grep --quiet "${MESA_BUILD_VERSION}$"; then
+     echo "Fatal: Android is loading a wrong version of the Mesa3D libs: ${MESA_RUNTIME_VERSION}" 1>&2
+     exit 1
+  fi
 fi
 
 BASELINE=""
@@ -178,7 +205,7 @@ if [ -e "$INSTALL/$GPU_VERSION-skips.txt" ]; then
     DEQP_SKIPS="$DEQP_SKIPS /data/deqp/$GPU_VERSION-skips.txt"
 fi
 
-if [ -n "$USE_ANGLE" ]; then
+if [ -n "$ANGLE_TAG" ]; then
     DEQP_SKIPS="$DEQP_SKIPS /data/deqp/angle-skips.txt"
 fi
 

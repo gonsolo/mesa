@@ -783,7 +783,8 @@ x11_surface_get_capabilities2(VkIcdSurfaceBase *icd_surface,
       switch (ext->sType) {
       case VK_STRUCTURE_TYPE_SURFACE_PROTECTED_CAPABILITIES_KHR: {
          VkSurfaceProtectedCapabilitiesKHR *protected = (void *)ext;
-         protected->supportsProtected = VK_FALSE;
+         protected->supportsProtected =
+            wsi_device->supports_protected[VK_ICD_WSI_PLATFORM_XCB];
          break;
       }
 
@@ -1809,8 +1810,9 @@ x11_queue_present(struct wsi_swapchain *anv_chain,
    if (status < 0)
       return status;
 
-   if (damage && damage->pRectangles && damage->rectangleCount > 0 &&
-      damage->rectangleCount <= MAX_DAMAGE_RECTS) {
+   if (chain->images[image_index].update_region != None &&
+       damage && damage->pRectangles && damage->rectangleCount > 0 &&
+       damage->rectangleCount <= MAX_DAMAGE_RECTS) {
       xcb_rectangle_t *rects = chain->images[image_index].rects;
 
       update_area = chain->images[image_index].update_region;
@@ -2072,6 +2074,7 @@ x11_image_init(VkDevice device_h, struct x11_swapchain *chain,
    if (result != VK_SUCCESS)
       return result;
 
+   image->update_region = None;
    if (chain->base.wsi->sw && !chain->has_mit_shm)
       return VK_SUCCESS;
 
@@ -2167,7 +2170,7 @@ x11_image_init(VkDevice device_h, struct x11_swapchain *chain,
    if (chain->base.image_info.explicit_sync) {
       for (uint32_t i = 0; i < WSI_ES_COUNT; i++) {
          image->dri3_syncobj[i] = xcb_generate_id(chain->conn);
-         int fd = dup(image->base.explicit_sync[i].fd);
+         int fd = os_dupfd_cloexec(image->base.explicit_sync[i].fd);
          if (fd < 0)
             goto fail_image;
 

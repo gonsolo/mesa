@@ -22,11 +22,9 @@
  */
 
 #include <gtest/gtest.h>
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_builder.h"
 #include "brw_cfg.h"
-
-using namespace brw;
 
 class copy_propagation_test : public ::testing::Test {
 protected:
@@ -39,7 +37,7 @@ protected:
    void *ctx;
    struct brw_wm_prog_data *prog_data;
    struct gl_shader_program *shader_prog;
-   fs_visitor *v;
+   brw_shader *v;
    brw_builder bld;
 };
 
@@ -58,7 +56,7 @@ copy_propagation_test::copy_propagation_test()
    nir_shader *shader =
       nir_shader_create(ctx, MESA_SHADER_FRAGMENT, NULL, NULL);
 
-   v = new fs_visitor(compiler, &params, NULL, &prog_data->base, shader,
+   v = new brw_shader(compiler, &params, NULL, &prog_data->base, shader,
                       8, false, false);
 
    bld = brw_builder(v).at_end();
@@ -87,7 +85,7 @@ instruction(bblock_t *block, int num)
 }
 
 static bool
-copy_propagation(fs_visitor *v)
+copy_propagation(brw_shader *v)
 {
    const bool print = getenv("TEST_DEBUG");
 

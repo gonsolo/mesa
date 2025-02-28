@@ -28,12 +28,10 @@
  * immediate values to registers by emitting a mov(1) instruction.
  */
 
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_builder.h"
 #include "brw_cfg.h"
 #include "util/half_float.h"
-
-using namespace brw;
 
 static const bool debug = false;
 
@@ -1185,16 +1183,15 @@ struct register_allocation {
 };
 
 static brw_reg
-allocate_slots(const intel_device_info *devinfo,
+allocate_slots(brw_shader &s,
                struct register_allocation *regs, unsigned num_regs,
-               unsigned bytes, unsigned align_bytes,
-               brw::simple_allocator &alloc)
+               unsigned bytes, unsigned align_bytes)
 {
    assert(bytes == 2 || bytes == 4 || bytes == 8);
    assert(align_bytes == 2 || align_bytes == 4 || align_bytes == 8);
 
    const unsigned slots_per_reg =
-      REG_SIZE * reg_unit(devinfo) / sizeof(uint16_t);
+      REG_SIZE * reg_unit(s.devinfo) / sizeof(uint16_t);
 
    const unsigned words = bytes / 2;
    const unsigned align_words = align_bytes / 2;
@@ -1206,7 +1203,7 @@ allocate_slots(const intel_device_info *devinfo,
 
          if ((x & mask) == mask) {
             if (regs[i].nr == UINT_MAX)
-               regs[i].nr = alloc.allocate(reg_unit(devinfo));
+               regs[i].nr = brw_allocate_vgrf_units(s, reg_unit(s.devinfo)).nr;
 
             regs[i].avail &= ~(mask << j);
 
@@ -1245,10 +1242,9 @@ deallocate_slots(const struct intel_device_info *devinfo,
 }
 
 static void
-parcel_out_registers(const intel_device_info *devinfo,
+parcel_out_registers(brw_shader &s,
                      struct imm *imm, unsigned len, const bblock_t *cur_block,
-                     struct register_allocation *regs, unsigned num_regs,
-                     brw::simple_allocator &alloc)
+                     struct register_allocation *regs, unsigned num_regs)
 {
    /* Each basic block has two distinct set of constants.  There is the set of
     * constants that only have uses in that block, and there is the set of
@@ -1269,10 +1265,9 @@ parcel_out_registers(const intel_device_info *devinfo,
       for (unsigned i = 0; i < len; i++) {
          if (imm[i].block == cur_block &&
              imm[i].used_in_single_block == used_in_single_block) {
-            const brw_reg reg = allocate_slots(devinfo, regs, num_regs,
+            const brw_reg reg = allocate_slots(s, regs, num_regs,
                                                imm[i].size,
-                                               get_alignment_for_imm(&imm[i]),
-                                               alloc);
+                                               get_alignment_for_imm(&imm[i]));
 
             imm[i].nr = reg.nr;
             imm[i].subreg_offset = reg.offset;
@@ -1282,14 +1277,14 @@ parcel_out_registers(const intel_device_info *devinfo,
 
    for (unsigned i = 0; i < len; i++) {
       if (imm[i].block == cur_block && imm[i].used_in_single_block) {
-         deallocate_slots(devinfo, regs, num_regs, imm[i].nr,
+         deallocate_slots(s.devinfo, regs, num_regs, imm[i].nr,
                           imm[i].subreg_offset, imm[i].size);
       }
    }
 }
 
 bool
-brw_opt_combine_constants(fs_visitor &s)
+brw_opt_combine_constants(brw_shader &s)
 {
    const intel_device_info *devinfo = s.devinfo;
    void *const_ctx = ralloc_context(NULL);
@@ -1310,7 +1305,7 @@ brw_opt_combine_constants(fs_visitor &s)
    table.num_boxes = 0;
    table.boxes = ralloc_array(const_ctx, brw_inst_box, table.size_boxes);
 
-   const brw::idom_tree &idom = s.idom_analysis.require();
+   const brw_idom_tree &idom = s.idom_analysis.require();
    unsigned ip = -1;
 
    /* Make a pass through all instructions and mark each constant is used in
@@ -1531,13 +1526,10 @@ brw_opt_combine_constants(fs_visitor &s)
    }
 
    foreach_block(block, s.cfg) {
-      parcel_out_registers(devinfo, table.imm, table.len, block, regs,
-                           table.len, s.alloc);
+      parcel_out_registers(s, table.imm, table.len, block, regs, table.len);
    }
 
    free(regs);
-
-   bool rebuild_cfg = false;
 
    /* Insert MOVs to load the constant values into GRFs. */
    for (int i = 0; i < table.len; i++) {
@@ -1549,48 +1541,20 @@ brw_opt_combine_constants(fs_visitor &s)
       exec_node *n;
       bblock_t *insert_block;
       if (imm->inst != nullptr) {
-         n = imm->inst;
          insert_block = imm->block;
+         n = imm->inst;
       } else {
-         if (imm->block->start()->opcode == BRW_OPCODE_DO) {
+         insert_block = imm->block;
+         if (insert_block->start()->opcode == BRW_OPCODE_DO) {
             /* DO blocks are weird. They can contain only the single DO
              * instruction. As a result, MOV instructions cannot be added to
-             * the DO block.
+             * the DO block, so add to the next block which is guaranteed
+             * to not be a DO block.
              */
-            bblock_t *next_block = imm->block->next();
-            if (next_block->starts_with_control_flow()) {
-               /* This is the difficult case. This occurs for code like
-                *
-                *    do {
-                *       do {
-                *          ...
-                *       } while (...);
-                *    } while (...);
-                *
-                * when the MOV instructions need to be inserted between the
-                * two DO instructions.
-                *
-                * To properly handle this scenario, a new block would need to
-                * be inserted. Doing so would require modifying arbitrary many
-                * CONTINUE, BREAK, and WHILE instructions to point to the new
-                * block.
-                *
-                * It is unlikely that this would ever be correct. Instead,
-                * insert the MOV instructions in the known wrong place and
-                * rebuild the CFG at the end of the pass.
-                */
-               insert_block = imm->block;
-               n = insert_block->last_non_control_flow_inst()->next;
-
-               rebuild_cfg = true;
-            } else {
-               insert_block = next_block;
-               n = insert_block->start();
-            }
-         } else {
-            insert_block = imm->block;
-            n = insert_block->last_non_control_flow_inst()->next;
+            insert_block = insert_block->next();
+            assert(insert_block->start()->opcode != BRW_OPCODE_DO);
          }
+         n = insert_block->last_non_control_flow_inst()->next;
       }
 
       /* From the BDW and CHV PRM, 3D Media GPGPU, Special Restrictions:
@@ -1776,26 +1740,9 @@ brw_opt_combine_constants(fs_visitor &s)
       }
    }
 
-   if (rebuild_cfg) {
-      /* When the CFG is initially built, the instructions are removed from
-       * the list of instructions stored in fs_visitor -- the same exec_node
-       * is used for membership in that list and in a block list.  So we need
-       * to pull them back before rebuilding the CFG.
-       */
-      assert(exec_list_length(&s.instructions) == 0);
-      foreach_block(block, s.cfg) {
-         exec_list_append(&s.instructions, &block->instructions);
-      }
-
-      delete s.cfg;
-      s.cfg = NULL;
-      brw_calculate_cfg(s);
-   }
-
    ralloc_free(const_ctx);
 
-   s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS | DEPENDENCY_VARIABLES |
-                         (rebuild_cfg ? DEPENDENCY_BLOCKS : DEPENDENCY_NOTHING));
+   s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS | BRW_DEPENDENCY_VARIABLES);
 
    return true;
 }

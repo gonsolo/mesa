@@ -799,6 +799,7 @@ update_ps(struct anv_gfx_dynamic_state *hw_state,
    SET(PS, ps.Kernel0SIMDWidth,         ps.Kernel0SIMDWidth);
    SET(PS, ps.Kernel1SIMDWidth,         ps.Kernel1SIMDWidth);
    SET(PS, ps.Kernel0PolyPackingPolicy, ps.Kernel0PolyPackingPolicy);
+   SET(PS, ps.Kernel0MaximumPolysperThread, ps.Kernel0MaximumPolysperThread);
 #endif
 
    SET(PS, ps.PositionXYOffsetSelect,
@@ -1377,6 +1378,10 @@ update_blend_state(struct anv_gfx_dynamic_state *hw_state,
       SET(BLEND_STATE, blend.rts[rt].ColorClampRange, COLORCLAMP_RTFORMAT);
       SET(BLEND_STATE, blend.rts[rt].PreBlendColorClampEnable, true);
       SET(BLEND_STATE, blend.rts[rt].PostBlendColorClampEnable, true);
+
+#if GFX_VER >= 30
+      SET(BLEND_STATE, blend.rts[rt].SimpleFloatBlendEnable, true);
+#endif
 
       /* Setup blend equation. */
       SET(BLEND_STATE, blend.rts[rt].ColorBlendFunction,
@@ -2013,12 +2018,16 @@ genX(cmd_buffer_flush_gfx_runtime_state)(struct anv_cmd_buffer *cmd_buffer)
 static void
 emit_wa_18020335297_dummy_draw(struct anv_cmd_buffer *cmd_buffer)
 {
+   /* For Wa_16012775297, ensure VF_STATISTICS is emitted before 3DSTATE_VF
+    */
+   anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_VF_STATISTICS), zero);
 #if GFX_VERx10 >= 125
    anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_VFG), vfg) {
       vfg.DistributionMode = RR_STRICT;
    }
    anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_VF), vf) {
-      vf.GeometryDistributionEnable = true;
+      vf.GeometryDistributionEnable =
+         cmd_buffer->device->physical->instance->enable_vf_distribution;
    }
 #endif
 
@@ -2034,7 +2043,6 @@ emit_wa_18020335297_dummy_draw(struct anv_cmd_buffer *cmd_buffer)
       rr.BackFaceFillMode = FILL_MODE_SOLID;
    }
 
-   anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_VF_STATISTICS), zero);
    anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_VF_SGVS), zero);
 
 #if GFX_VER >= 11
@@ -2170,6 +2178,12 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
       anv_batch_emit_pipeline_state(&cmd_buffer->batch, pipeline, final.vf_sgvs_2);
 #endif
 
+   if (device->physical->instance->vf_component_packing &&
+       BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_VF_COMPONENT_PACKING)) {
+      anv_batch_emit_pipeline_state(&cmd_buffer->batch, pipeline,
+                                    final.vf_component_packing);
+   }
+
    if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_VS)) {
       anv_batch_emit_pipeline_state_protected(&cmd_buffer->batch, pipeline,
                                               final.vs, protected);
@@ -2293,6 +2307,7 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
          SET(ps, ps, Kernel0SIMDWidth);
          SET(ps, ps, Kernel1SIMDWidth);
          SET(ps, ps, Kernel0PolyPackingPolicy);
+         SET(ps, ps, Kernel0MaximumPolysperThread);
 #endif
          SET(ps, ps, PositionXYOffsetSelect);
       }
@@ -2653,8 +2668,11 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
    if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_VF)) {
       anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_VF), vf) {
 #if GFX_VERx10 >= 125
-         vf.GeometryDistributionEnable = true;
+         vf.GeometryDistributionEnable =
+            device->physical->instance->enable_vf_distribution;
 #endif
+         vf.ComponentPackingEnable =
+            device->physical->instance->vf_component_packing;
          SET(vf, vf, IndexedDrawCutIndexEnable);
          SET(vf, vf, CutIndex);
       }
@@ -2745,6 +2763,9 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
             INIT(blend.rts[i], LogicOpEnable),
             INIT(blend.rts[i], ColorBufferBlendEnable),
             INIT(blend.rts[i], ColorClampRange),
+#if GFX_VER >= 30
+            INIT(blend.rts[i], SimpleFloatBlendEnable),
+#endif
             INIT(blend.rts[i], PreBlendColorClampEnable),
             INIT(blend.rts[i], PostBlendColorClampEnable),
             INIT(blend.rts[i], SourceBlendFactor),

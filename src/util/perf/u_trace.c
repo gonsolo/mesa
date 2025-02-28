@@ -225,8 +225,13 @@ print_csv_event(struct u_trace_context *utctx,
                 int32_t delta,
                 const void *indirect)
 {
-   fprintf(utctx->out, "%u,%u,%"PRIu64",%s,\n",
+   fprintf(utctx->out, "%u,%u,%"PRIu64",%s,",
            utctx->frame_nr, utctx->batch_nr, ns, evt->tp->name);
+   if (evt->tp->print) {
+      evt->tp->print(utctx->out, evt->payload, indirect);
+   } else {
+      fprintf(utctx->out, "\n");
+   }
 }
 
 static struct u_trace_printer csv_printer = {
@@ -681,6 +686,7 @@ process_chunk(void *job, void *gdata, int thread_index)
       uint64_t ns = utctx->read_timestamp(utctx,
                                           chunk->timestamps,
                                           utctx->timestamp_size_bytes * idx,
+                                          evt->tp->flags,
                                           chunk->flush_data);
       int32_t delta;
 

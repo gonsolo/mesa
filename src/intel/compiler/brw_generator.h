@@ -5,7 +5,7 @@
 
 #pragma once
 
-#include "brw_fs.h"
+#include "brw_shader.h"
 
 /* Translates BRW IR to actual EU assembly code. */
 class brw_generator
@@ -20,7 +20,7 @@ public:
    void enable_debug(const char *shader_name);
    int generate_code(const cfg_t *cfg, int dispatch_width,
                      struct brw_shader_stats shader_stats,
-                     const brw::performance &perf,
+                     const brw_performance &perf,
                      struct brw_compile_stats *stats,
                      unsigned max_polygons = 0);
    void add_const_data(void *data, unsigned size);
@@ -76,3 +76,6 @@ private:
    gl_shader_stage stage;
    void *mem_ctx;
 };
+
+void brw_prog_data_init(struct brw_stage_prog_data *prog_data,
+                        const struct brw_compile_params *params);

@@ -58,34 +58,12 @@ if [[ "$DEBIAN_ARCH" = "arm64" ]]; then
     BUILD_VK="ON"
     GCC_ARCH="aarch64-linux-gnu"
     KERNEL_ARCH="arm64"
-    DEFCONFIG="arch/arm64/configs/defconfig"
-    DEVICE_TREES="rk3399-gru-kevin.dtb"
-    DEVICE_TREES+=" meson-g12b-a311d-khadas-vim3.dtb"
-    DEVICE_TREES+=" meson-gxl-s805x-libretech-ac.dtb"
-    DEVICE_TREES+=" meson-gxm-khadas-vim2.dtb"
-    DEVICE_TREES+=" sun50i-h6-pine-h64.dtb"
-    DEVICE_TREES+=" imx8mq-nitrogen.dtb"
-    DEVICE_TREES+=" mt8192-asurada-spherion-r0.dtb"
-    DEVICE_TREES+=" mt8183-kukui-jacuzzi-juniper-sku16.dtb"
-    DEVICE_TREES+=" tegra210-p3450-0000.dtb"
-    DEVICE_TREES+=" apq8016-sbc-usb-host.dtb"
-    DEVICE_TREES+=" apq8096-db820c.dtb"
-    DEVICE_TREES+=" sc7180-trogdor-lazor-limozeen-nots-r5.dtb"
-    DEVICE_TREES+=" sc7180-trogdor-kingoftown.dtb"
-    DEVICE_TREES+=" sm8350-hdk.dtb"
-    KERNEL_IMAGE_NAME="Image"
 
 elif [[ "$DEBIAN_ARCH" = "armhf" ]]; then
     BUILD_CL="OFF"
     BUILD_VK="OFF"
     GCC_ARCH="arm-linux-gnueabihf"
     KERNEL_ARCH="arm"
-    DEFCONFIG="arch/arm/configs/multi_v7_defconfig"
-    DEVICE_TREES="rk3288-veyron-jaq.dtb"
-    DEVICE_TREES+=" sun8i-h3-libretech-all-h3-cc.dtb"
-    DEVICE_TREES+=" imx6q-cubox-i.dtb"
-    DEVICE_TREES+=" tegra124-jetson-tk1.dtb"
-    KERNEL_IMAGE_NAME="zImage"
     . .gitlab-ci/container/create-cross-file.sh armhf
     CONTAINER_ARCH_PACKAGES=(
       libegl1-mesa-dev:armhf
@@ -105,9 +83,6 @@ else
     BUILD_VK="ON"
     GCC_ARCH="x86_64-linux-gnu"
     KERNEL_ARCH="x86_64"
-    DEFCONFIG="arch/x86/configs/x86_64_defconfig"
-    DEVICE_TREES=""
-    KERNEL_IMAGE_NAME="bzImage"
     CONTAINER_ARCH_PACKAGES=(
       libasound2-dev libcap-dev libfdt-dev libva-dev p7zip wine
     )
@@ -161,6 +136,7 @@ CONTAINER_EPHEMERAL=(
     libxcb-dri2-0-dev
     libxkbcommon-dev
     libwayland-dev
+    "lld-${LLVM_VERSION}"
     ninja-build
     openssh-server
     patch
@@ -304,7 +280,8 @@ mv /apitrace/build $ROOTFS/apitrace
 rm -rf /apitrace
 
 ############### Build ANGLE
-if [[ "$DEBIAN_ARCH" = "amd64" ]]; then
+if [ "$DEBIAN_ARCH" != "armhf" ]; then
+  ANGLE_TARGET=linux \
   . .gitlab-ci/container/build-angle.sh
   mv /angle $ROOTFS/.
   rm -rf /angle
@@ -335,9 +312,11 @@ if [ "$BUILD_VK" == "ON" ]; then
   DEQP_TARGET=default \
   . .gitlab-ci/container/build-deqp.sh
 
-  DEQP_API=VK-main \
-  DEQP_TARGET=default \
-  . .gitlab-ci/container/build-deqp.sh
+  if [ "$DEBIAN_ARCH" == "amd64" ]; then
+    DEQP_API=VK-main \
+    DEQP_TARGET=default \
+    . .gitlab-ci/container/build-deqp.sh
+  fi
 fi
 
 rm -rf /VK-GL-CTS
@@ -403,9 +382,10 @@ if [[ -e ".gitlab-ci/local/build-rootfs.sh" ]]; then
     . .gitlab-ci/local/build-rootfs.sh
 fi
 
-
-############### Download prebuilt kernel
-. .gitlab-ci/container/download-prebuilt-kernel.sh
+############### Download kernel modules
+curl -L --retry 4 -f --retry-all-errors --retry-delay 60 \
+  -O "${KERNEL_IMAGE_BASE}/${DEBIAN_ARCH}/modules.tar.zst"
+tar --keep-directory-symlink --zstd -xf modules.tar.zst -C "$ROOTFS/"
 
 ############### Delete rust, since the tests won't be compiling anything.
 rm -rf /root/.cargo
@@ -429,11 +409,14 @@ rm "$ROOTFS/setup-rootfs.sh"
 rm "$ROOTFS/strip-rootfs.sh"
 cp /etc/wgetrc $ROOTFS/etc/.
 
+# Copy all tags to the rootfs, so test jobs can check if they are using the intended version
+TAG_FILE_DIR="$(get_tag_file)"
+if [ -d "${TAG_FILE_DIR}" ]; then
+    cp --parents -r "${TAG_FILE_DIR}" $ROOTFS/.
+fi
+
 if [ "${DEBIAN_ARCH}" = "arm64" ]; then
     mkdir -p /lava-files/rootfs-arm64/lib/firmware/qcom/sm8350/  # for firmware imported later
-    # Make a gzipped copy of the Image for db410c.
-    gzip -k /lava-files/Image
-    KERNEL_IMAGE_NAME+=" Image.gz"
 fi
 
 ROOTFSTAR="lava-rootfs.tar.zst"

@@ -24,7 +24,7 @@
 #define XXH_INLINE_ALL
 #include "util/xxhash.h"
 
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_builder.h"
 #include "brw_cfg.h"
 
@@ -32,8 +32,6 @@
  *
  * Support for SSA-based global Common Subexpression Elimination (CSE).
  */
-
-using namespace brw;
 
 struct remap_entry {
    brw_inst *inst;
@@ -45,7 +43,7 @@ struct remap_entry {
 };
 
 static bool
-is_expression(const fs_visitor *v, const brw_inst *const inst)
+is_expression(const brw_shader *v, const brw_inst *const inst)
 {
    switch (inst->opcode) {
    case BRW_OPCODE_MOV:
@@ -133,7 +131,7 @@ is_expression(const fs_visitor *v, const brw_inst *const inst)
    case SHADER_OPCODE_MEMORY_LOAD_LOGICAL:
       return inst->src[MEMORY_LOGICAL_MODE].ud == MEMORY_MODE_CONSTANT;
    case SHADER_OPCODE_LOAD_PAYLOAD:
-      return !is_coalescing_payload(v->devinfo, v->alloc, inst);
+      return !is_coalescing_payload(*v, inst);
    default:
       return inst->is_send_from_grf() && !inst->has_side_effects() &&
          !inst->is_volatile();
@@ -252,7 +250,6 @@ instructions_match(brw_inst *a, brw_inst *b, bool *negate)
           a->size_written == b->size_written &&
           a->check_tdr == b->check_tdr &&
           a->header_size == b->header_size &&
-          a->target == b->target &&
           a->sources == b->sources &&
           a->bits == b->bits &&
           operands_match(a, b, negate);
@@ -296,7 +293,6 @@ hash_inst(const void *v)
       inst->ex_mlen,
       inst->sfid,
       inst->header_size,
-      inst->target,
 
       inst->conditional_mod,
       inst->predicate,
@@ -363,7 +359,7 @@ cmp_func(const void *data1, const void *data2)
 }
 
 static bool
-remap_sources(fs_visitor &s, const brw::def_analysis &defs,
+remap_sources(brw_shader &s, const brw_def_analysis &defs,
               brw_inst *inst, struct remap_entry *remap_table)
 {
    bool progress = false;
@@ -396,11 +392,11 @@ remap_sources(fs_visitor &s, const brw::def_analysis &defs,
 }
 
 bool
-brw_opt_cse_defs(fs_visitor &s)
+brw_opt_cse_defs(brw_shader &s)
 {
    const intel_device_info *devinfo = s.devinfo;
-   const idom_tree &idom = s.idom_analysis.require();
-   const brw::def_analysis &defs = s.def_analysis.require();
+   const brw_idom_tree &idom = s.idom_analysis.require();
+   const brw_def_analysis &defs = s.def_analysis.require();
    bool progress = false;
    bool need_remaps = false;
 
@@ -514,8 +510,8 @@ out:
 
    if (progress) {
       s.cfg->adjust_block_ips();
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTION_DATA_FLOW |
-                            DEPENDENCY_INSTRUCTION_DETAIL);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTION_DATA_FLOW |
+                            BRW_DEPENDENCY_INSTRUCTION_DETAIL);
    }
 
    return progress;

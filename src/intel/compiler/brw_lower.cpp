@@ -3,10 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_builder.h"
-
-using namespace brw;
 
 /**
  * Align16 3-source instructions cannot have scalar stride w/64-bit types.
@@ -25,7 +23,7 @@ using namespace brw;
  * clear is_scalar "just in case."
  */
 bool
-brw_lower_scalar_fp64_MAD(fs_visitor &s)
+brw_lower_scalar_fp64_MAD(brw_shader &s)
 {
    const intel_device_info *devinfo = s.devinfo;
    bool progress = false;
@@ -50,7 +48,7 @@ brw_lower_scalar_fp64_MAD(fs_visitor &s)
 }
 
 bool
-brw_lower_load_payload(fs_visitor &s)
+brw_lower_load_payload(brw_shader &s)
 {
    bool progress = false;
 
@@ -70,8 +68,10 @@ brw_lower_load_payload(fs_visitor &s)
           * instruction.
           */
          const unsigned n =
-            (i + 1 < inst->header_size && inst->src[i].stride == 1 &&
-             inst->src[i + 1].equals(byte_offset(inst->src[i], REG_SIZE))) ?
+            (i + 1 < inst->header_size &&
+             (inst->src[i].file == IMM ||
+              (inst->src[i].is_contiguous() &&
+               inst->src[i + 1].equals(byte_offset(inst->src[i], REG_SIZE))))) ?
             2 : 1;
 
          if (inst->src[i].file != BAD_FILE)
@@ -95,7 +95,7 @@ brw_lower_load_payload(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS);
 
    return progress;
 }
@@ -106,7 +106,7 @@ brw_lower_load_payload(fs_visitor &s)
  * Or, for unsigned ==/!= comparisons, simply change the types.
  */
 bool
-brw_lower_csel(fs_visitor &s)
+brw_lower_csel(brw_shader &s)
 {
    const intel_device_info *devinfo = s.devinfo;
    bool progress = false;
@@ -176,13 +176,13 @@ brw_lower_csel(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS);
 
    return progress;
 }
 
 bool
-brw_lower_sub_sat(fs_visitor &s)
+brw_lower_sub_sat(brw_shader &s)
 {
    bool progress = false;
 
@@ -260,7 +260,8 @@ brw_lower_sub_sat(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS | DEPENDENCY_VARIABLES);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS |
+                            BRW_DEPENDENCY_VARIABLES);
 
    return progress;
 }
@@ -282,7 +283,7 @@ brw_lower_sub_sat(fs_visitor &s)
  * component layout.
  */
 bool
-brw_lower_barycentrics(fs_visitor &s)
+brw_lower_barycentrics(brw_shader &s)
 {
    const intel_device_info *devinfo = s.devinfo;
 
@@ -342,7 +343,8 @@ brw_lower_barycentrics(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS | DEPENDENCY_VARIABLES);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS |
+                            BRW_DEPENDENCY_VARIABLES);
 
    return progress;
 }
@@ -352,7 +354,7 @@ brw_lower_barycentrics(fs_visitor &s)
  * swizzles of the source, specified as \p swz0 and \p swz1.
  */
 static bool
-lower_derivative(fs_visitor &s, bblock_t *block, brw_inst *inst,
+lower_derivative(brw_shader &s, bblock_t *block, brw_inst *inst,
                  unsigned swz0, unsigned swz1)
 {
    const brw_builder ubld = brw_builder(&s, block, inst).exec_all();
@@ -375,7 +377,7 @@ lower_derivative(fs_visitor &s, bblock_t *block, brw_inst *inst,
  * them efficiently (i.e. XeHP).
  */
 bool
-brw_lower_derivatives(fs_visitor &s)
+brw_lower_derivatives(brw_shader &s)
 {
    bool progress = false;
 
@@ -401,13 +403,14 @@ brw_lower_derivatives(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS | DEPENDENCY_VARIABLES);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS |
+                            BRW_DEPENDENCY_VARIABLES);
 
    return progress;
 }
 
 bool
-brw_lower_find_live_channel(fs_visitor &s)
+brw_lower_find_live_channel(brw_shader &s)
 {
    bool progress = false;
 
@@ -496,7 +499,8 @@ brw_lower_find_live_channel(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS | DEPENDENCY_VARIABLES);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS |
+                            BRW_DEPENDENCY_VARIABLES);
 
    return progress;
 }
@@ -512,7 +516,7 @@ brw_lower_find_live_channel(fs_visitor &s)
  * just adds a new vgrf for the second payload and copies it over.
  */
 bool
-brw_lower_sends_overlapping_payload(fs_visitor &s)
+brw_lower_sends_overlapping_payload(brw_shader &s)
 {
    bool progress = false;
 
@@ -523,8 +527,7 @@ brw_lower_sends_overlapping_payload(fs_visitor &s)
          const unsigned arg = inst->mlen < inst->ex_mlen ? 2 : 3;
          const unsigned len = MIN2(inst->mlen, inst->ex_mlen);
 
-         brw_reg tmp = brw_vgrf(s.alloc.allocate(len),
-                               BRW_TYPE_UD);
+         brw_reg tmp = retype(brw_allocate_vgrf_units(s, len), BRW_TYPE_UD);
 
          /* Sadly, we've lost all notion of channels and bit sizes at this
           * point.  Just WE_all it.
@@ -548,7 +551,8 @@ brw_lower_sends_overlapping_payload(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS | DEPENDENCY_VARIABLES);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS |
+                            BRW_DEPENDENCY_VARIABLES);
 
    return progress;
 }
@@ -558,21 +562,21 @@ brw_lower_sends_overlapping_payload(fs_visitor &s)
  * ARF NULL is not allowed.  Fix that up by allocating a temporary GRF.
  */
 bool
-brw_lower_3src_null_dest(fs_visitor &s)
+brw_lower_3src_null_dest(brw_shader &s)
 {
    bool progress = false;
 
    foreach_block_and_inst_safe (block, brw_inst, inst, s.cfg) {
       if (inst->is_3src(s.compiler) && inst->dst.is_null()) {
-         inst->dst = brw_vgrf(s.alloc.allocate(s.dispatch_width / 8),
-                              inst->dst.type);
+         inst->dst = retype(brw_allocate_vgrf_units(s, s.dispatch_width / 8),
+                            inst->dst.type);
          progress = true;
       }
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTION_DETAIL |
-                            DEPENDENCY_VARIABLES);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTION_DETAIL |
+                            BRW_DEPENDENCY_VARIABLES);
 
    return progress;
 }
@@ -593,7 +597,7 @@ unsupported_64bit_type(const intel_device_info *devinfo,
  * - Splitting 64-bit MOV/SEL into 2x32-bit where needed
  */
 bool
-brw_lower_alu_restrictions(fs_visitor &s)
+brw_lower_alu_restrictions(brw_shader &s)
 {
    const intel_device_info *devinfo = s.devinfo;
    bool progress = false;
@@ -657,8 +661,8 @@ brw_lower_alu_restrictions(fs_visitor &s)
    }
 
    if (progress) {
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTION_DATA_FLOW |
-                            DEPENDENCY_INSTRUCTION_DETAIL);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTION_DATA_FLOW |
+                            BRW_DEPENDENCY_INSTRUCTION_DETAIL);
    }
 
    return progress;
@@ -725,7 +729,7 @@ brw_lower_vgrf_to_fixed_grf(const struct intel_device_info *devinfo, brw_inst *i
 }
 
 void
-brw_lower_vgrfs_to_fixed_grfs(fs_visitor &s)
+brw_lower_vgrfs_to_fixed_grfs(brw_shader &s)
 {
    assert(s.grf_used || !"Must be called after register allocation");
 
@@ -753,8 +757,8 @@ brw_lower_vgrfs_to_fixed_grfs(fs_visitor &s)
       }
    }
 
-   s.invalidate_analysis(DEPENDENCY_INSTRUCTION_DATA_FLOW |
-                         DEPENDENCY_VARIABLES);
+   s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTION_DATA_FLOW |
+                         BRW_DEPENDENCY_VARIABLES);
 }
 
 static brw_reg
@@ -774,7 +778,7 @@ brw_s0(enum brw_reg_type type, unsigned subnr)
 }
 
 static bool
-brw_lower_send_gather_inst(fs_visitor &s, bblock_t *block, brw_inst *inst)
+brw_lower_send_gather_inst(brw_shader &s, bblock_t *block, brw_inst *inst)
 {
    const intel_device_info *devinfo = s.devinfo;
    assert(devinfo->ver >= 30);
@@ -824,7 +828,7 @@ brw_lower_send_gather_inst(fs_visitor &s, bblock_t *block, brw_inst *inst)
 }
 
 bool
-brw_lower_send_gather(fs_visitor &s)
+brw_lower_send_gather(brw_shader &s)
 {
    assert(s.devinfo->ver >= 30);
    assert(s.grf_used || !"Must be called after register allocation");
@@ -837,14 +841,14 @@ brw_lower_send_gather(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTION_DATA_FLOW |
-                            DEPENDENCY_VARIABLES);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTION_DATA_FLOW |
+                            BRW_DEPENDENCY_VARIABLES);
 
    return progress;
 }
 
 bool
-brw_lower_load_subgroup_invocation(fs_visitor &s)
+brw_lower_load_subgroup_invocation(brw_shader &s)
 {
    bool progress = false;
 
@@ -877,13 +881,14 @@ brw_lower_load_subgroup_invocation(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS | DEPENDENCY_VARIABLES);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS |
+                            BRW_DEPENDENCY_VARIABLES);
 
    return progress;
 }
 
 bool
-brw_lower_indirect_mov(fs_visitor &s)
+brw_lower_indirect_mov(brw_shader &s)
 {
    bool progress = false;
 
@@ -946,7 +951,8 @@ brw_lower_indirect_mov(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS | DEPENDENCY_VARIABLES);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS |
+                            BRW_DEPENDENCY_VARIABLES);
 
    return progress;
 }

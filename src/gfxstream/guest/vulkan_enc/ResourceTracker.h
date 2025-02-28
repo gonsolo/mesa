@@ -80,6 +80,16 @@ typedef uint64_t zx_koid_t;
 #include "gfxstream/guest/goldfish_sync.h"
 #endif
 
+#define vk_filter_struct(__start, __sType) { \
+    auto* curr = reinterpret_cast<VkBaseOutStructure*>(__start); \
+    while (curr != nullptr) { \
+        if (curr->pNext != nullptr && curr->pNext->sType == VK_STRUCTURE_TYPE_##__sType) { \
+            curr->pNext = curr->pNext->pNext; \
+        } \
+        curr = curr->pNext; \
+    } \
+} \
+
 // This should be ABI identical with the variant in ResourceTracker.h
 struct GfxStreamVkFeatureInfo {
     bool hasDirectMem;
@@ -630,7 +640,7 @@ class ResourceTracker {
 
     void setDeviceMemoryInfo(VkDevice device, VkDeviceMemory memory, VkDeviceSize allocationSize,
                              uint8_t* ptr, uint32_t memoryTypeIndex, void* ahw, bool imported,
-                             zx_handle_t vmoHandle, VirtGpuResourcePtr blobPtr);
+                             zx_handle_t vmoHandle, VirtGpuResourcePtr blobPtr, int importedFd);
 
     void setImageInfo(VkImage image, VkDevice device, const VkImageCreateInfo* pCreateInfo);
 
@@ -764,6 +774,7 @@ class ResourceTracker {
 #endif  // DETECT_OS_ANDROID
         CoherentMemoryPtr coherentMemory = nullptr;
         VirtGpuResourcePtr blobPtr = nullptr;
+        int importedFd = -1;
     };
 
     struct VkCommandBuffer_Info {

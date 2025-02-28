@@ -507,9 +507,6 @@ dri2_x11_create_surface(_EGLDisplay *disp, EGLint type, _EGLConfig *conf,
       swrastCreateDrawable(dri2_dpy, dri2_surf);
    }
 
-   /* we always copy the back buffer to front */
-   dri2_surf->base.PostSubBufferSupportedNV = EGL_TRUE;
-
    return &dri2_surf->base;
 
 cleanup_dri_drawable:
@@ -1127,52 +1124,6 @@ dri2_x11_swap_buffers(_EGLDisplay *disp, _EGLSurface *draw)
    return EGL_TRUE;
 }
 
-#ifdef HAVE_X11_DRI2
-static EGLBoolean
-dri2_x11_swap_buffers_region(_EGLDisplay *disp, _EGLSurface *draw,
-                             EGLint numRects, const EGLint *rects)
-{
-   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
-   struct dri2_egl_surface *dri2_surf = dri2_egl_surface(draw);
-   EGLBoolean ret;
-   xcb_xfixes_region_t region;
-   xcb_rectangle_t rectangles[16];
-
-   if (numRects > (int)ARRAY_SIZE(rectangles))
-      return dri2_copy_region(disp, draw, dri2_surf->region);
-
-   for (int i = 0; i < numRects; i++) {
-      rectangles[i].x = rects[i * 4];
-      rectangles[i].y =
-         dri2_surf->base.Height - rects[i * 4 + 1] - rects[i * 4 + 3];
-      rectangles[i].width = rects[i * 4 + 2];
-      rectangles[i].height = rects[i * 4 + 3];
-   }
-
-   region = xcb_generate_id(dri2_dpy->conn);
-   xcb_xfixes_create_region(dri2_dpy->conn, region, numRects, rectangles);
-   ret = dri2_copy_region(disp, draw, region);
-   xcb_xfixes_destroy_region(dri2_dpy->conn, region);
-
-   return ret;
-}
-
-static EGLBoolean
-dri2_x11_post_sub_buffer(_EGLDisplay *disp, _EGLSurface *draw, EGLint x,
-                         EGLint y, EGLint width, EGLint height)
-{
-   const EGLint rect[4] = {x, y, width, height};
-
-   if (x < 0 || y < 0 || width < 0 || height < 0)
-      _eglError(EGL_BAD_PARAMETER, "eglPostSubBufferNV");
-
-   return dri2_x11_swap_buffers_region(disp, draw, 1, rect);
-}
-#else
-#define dri2_x11_swap_buffers_region NULL
-#define dri2_x11_post_sub_buffer NULL
-#endif
-
 static EGLBoolean
 dri2_x11_kopper_swap_buffers_with_damage(_EGLDisplay *disp, _EGLSurface *draw,
                                          const EGLint *rects, EGLint numRects)
@@ -1545,9 +1496,7 @@ static const struct dri2_egl_display_vtbl dri2_x11_swrast_display_vtbl = {
    .destroy_surface = dri2_x11_destroy_surface,
    .create_image = dri2_create_image_khr,
    .swap_buffers = dri2_x11_swap_buffers,
-   .swap_buffers_region = dri2_x11_swap_buffers_region,
    .swap_buffers_with_damage = dri2_x11_swap_buffers_with_damage,
-   .post_sub_buffer = dri2_x11_post_sub_buffer,
    .copy_buffers = dri2_x11_copy_buffers,
    .query_buffer_age = dri2_swrast_query_buffer_age,
    /* XXX: should really implement this since X11 has pixmaps */
@@ -1565,9 +1514,7 @@ static const struct dri2_egl_display_vtbl dri2_x11_kopper_display_vtbl = {
    .create_image = dri2_create_image_khr,
    .swap_interval = dri2_kopper_swap_interval,
    .swap_buffers = dri2_x11_swap_buffers,
-   .swap_buffers_region = dri2_x11_swap_buffers_region,
    .swap_buffers_with_damage = dri2_x11_kopper_swap_buffers_with_damage,
-   .post_sub_buffer = dri2_x11_post_sub_buffer,
    .copy_buffers = dri2_x11_copy_buffers,
    .query_buffer_age = dri2_kopper_query_buffer_age,
    /* XXX: should really implement this since X11 has pixmaps */
@@ -1586,8 +1533,6 @@ static const struct dri2_egl_display_vtbl dri2_x11_display_vtbl = {
    .create_image = dri2_x11_create_image_khr,
    .swap_interval = dri2_x11_swap_interval,
    .swap_buffers = dri2_x11_swap_buffers,
-   .swap_buffers_region = dri2_x11_swap_buffers_region,
-   .post_sub_buffer = dri2_x11_post_sub_buffer,
    .copy_buffers = dri2_x11_copy_buffers,
    .query_surface = dri2_query_surface,
    .get_sync_values = dri2_x11_get_sync_values,
@@ -1650,7 +1595,6 @@ static const __DRIextension *kopper_loader_extensions[] = {
    &swrast_loader_extension.base,
    &image_lookup_extension.base,
    &kopper_loader_extension.base,
-   &use_invalidate.base,
    NULL,
 };
 
@@ -1765,7 +1709,7 @@ check_xshm(struct dri2_egl_display *dri2_dpy)
    shm_cookie = xcb_query_extension(dri2_dpy->conn, 7, "MIT-SHM");
    shm_reply = xcb_query_extension_reply(dri2_dpy->conn, shm_cookie, NULL);
 
-   has_mit_shm = shm_reply->present;
+   has_mit_shm = shm_reply && shm_reply->present;
    free(shm_reply);
    if (!has_mit_shm)
       return false;
@@ -1789,8 +1733,7 @@ dri2_x11_check_multibuffers(_EGLDisplay *disp)
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
 
 #ifdef HAVE_X11_DRM
-   bool err;
-   dri2_dpy->multibuffers_available = x11_dri3_check_multibuffer(dri2_dpy->conn, &err, &dri2_dpy->explicit_modifiers);
+   dri2_dpy->multibuffers_available = x11_dri3_has_multibuffer(dri2_dpy->conn);
 
    if (disp->Options.Zink && !disp->Options.ForceSoftware &&
        !dri2_dpy->multibuffers_available &&
@@ -1892,7 +1835,6 @@ cleanup:
 static const __DRIextension *dri3_image_loader_extensions[] = {
    &dri3_image_loader_extension.base,
    &image_lookup_extension.base,
-   &use_invalidate.base,
    &background_callable_extension.base,
    NULL,
 };
@@ -1994,7 +1936,6 @@ static const __DRIextension *dri2_loader_extensions_old[] = {
 static const __DRIextension *dri2_loader_extensions[] = {
    &dri2_loader_extension.base,
    &image_lookup_extension.base,
-   &use_invalidate.base,
    &background_callable_extension.base,
    NULL,
 };
@@ -2039,9 +1980,7 @@ dri2_initialize_x11_dri2(_EGLDisplay *disp)
    dri2_x11_setup_swap_interval(disp);
 
    disp->Extensions.KHR_image_pixmap = EGL_TRUE;
-   disp->Extensions.NOK_swap_region = EGL_TRUE;
    disp->Extensions.NOK_texture_from_pixmap = EGL_TRUE;
-   disp->Extensions.NV_post_sub_buffer = EGL_TRUE;
    disp->Extensions.CHROMIUM_sync_control = EGL_TRUE;
    disp->Extensions.ANGLE_sync_control_rate = EGL_TRUE;
 

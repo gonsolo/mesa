@@ -534,8 +534,9 @@ struct si_screen {
    bool use_aco;
 
    /* Force a single shader to use ACO, debug usage. */
-   bool force_shader_use_aco;
-   blake3_hash use_aco_shader_blake;
+   blake3_hash *use_aco_shader_blakes;
+   unsigned num_use_aco_shader_blakes;
+   enum pipe_shader_type use_aco_shader_type;
 
    struct {
 #define OPT_BOOL(name, dflt, description) bool name : 1;
@@ -1088,6 +1089,7 @@ struct si_context {
    unsigned num_vertex_elements;
    unsigned cs_max_waves_per_sh;
    uint32_t compute_tmpring_size;
+   bool vertex_elements_but_no_buffers;
    bool uses_nontrivial_vs_inputs;
    bool force_trivial_vs_inputs;
    bool do_update_shaders;
@@ -1129,7 +1131,6 @@ struct si_context {
 
    /* Vertex buffers. */
    bool vertex_buffers_dirty;
-   uint8_t num_vertex_buffers;
    uint16_t vertex_buffer_unaligned; /* bitmask of not dword-aligned buffers */
    struct pipe_vertex_buffer vertex_buffer[SI_NUM_VERTEX_BUFFERS];
 

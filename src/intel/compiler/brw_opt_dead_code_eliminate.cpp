@@ -21,8 +21,8 @@
  * IN THE SOFTWARE.
  */
 
-#include "brw_fs.h"
-#include "brw_fs_live_variables.h"
+#include "brw_shader.h"
+#include "brw_analysis.h"
 #include "brw_cfg.h"
 
 /** @file
@@ -33,8 +33,6 @@
  * have results that both aren't used in later blocks and haven't been read
  * yet in the tail end of this block.
  */
-
-using namespace brw;
 
 /**
  * Is it safe to eliminate the instruction?
@@ -97,13 +95,13 @@ can_eliminate_conditional_mod(const intel_device_info *devinfo,
 }
 
 bool
-brw_opt_dead_code_eliminate(fs_visitor &s)
+brw_opt_dead_code_eliminate(brw_shader &s)
 {
    const intel_device_info *devinfo = s.devinfo;
 
    bool progress = false;
 
-   const fs_live_variables &live_vars = s.live_analysis.require();
+   const brw_live_variables &live_vars = s.live_analysis.require();
    int num_vars = live_vars.num_vars;
    BITSET_WORD *live = rzalloc_array(NULL, BITSET_WORD, BITSET_WORDS(num_vars));
    BITSET_WORD *flag_live = rzalloc_array(NULL, BITSET_WORD, 1);
@@ -177,7 +175,7 @@ brw_opt_dead_code_eliminate(fs_visitor &s)
    ralloc_free(flag_live);
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS);
 
    return progress;
 }

@@ -23,7 +23,11 @@
 
 #include "nir_instr_set.h"
 #include "util/half_float.h"
+#include "nir.h"
 #include "nir_vla.h"
+
+#define XXH_INLINE_ALL
+#include "util/xxhash.h"
 
 /* This function determines if uses of an instruction can safely be rewritten
  * to use another identical instruction instead. Note that this function must

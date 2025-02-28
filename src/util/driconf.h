@@ -327,6 +327,15 @@
    DRI_CONF_OPT_B(fake_sparse, def, \
                   "Advertise support for sparse binding of textures regardless of real support")
 
+#define DRI_CONFIG_INTEL_TBIMR(def) \
+   DRI_CONF_OPT_B(intel_tbimr, def, "Enable TBIMR tiled rendering")
+
+#define DRI_CONFIG_INTEL_VF_DISTRIBUTION(def) \
+   DRI_CONF_OPT_B(intel_vf_distribution, def, "Enable geometry distribution")
+
+#define DRI_CONFIG_INTEL_TE_DISTRIBUTION(def) \
+   DRI_CONF_OPT_B(intel_te_distribution, def, "Enable tesselation distribution")
+
 #define DRI_CONF_INTEL_ENABLE_WA_14018912822(def) \
    DRI_CONF_OPT_B(intel_enable_wa_14018912822, def, \
                   "Intel workaround for using zero blend constants")
@@ -641,6 +650,10 @@
    DRI_CONF_OPT_B(hk_disable_rgba4_border_color_workaround, def, \
                   "Use hardware opaque_black, breaking certain RGBA4 formats")
 
+#define DRI_CONF_HK_FAKE_MINMAX(def) \
+   DRI_CONF_OPT_B(hk_fake_minmax, def, \
+                  "Fake support for min/max filtering")
+
 /**
  * \brief venus specific configuration options
  */
@@ -749,9 +762,9 @@
    DRI_CONF_OPT_B(radv_rt_wave64, def, \
                   "Force wave64 in RT shaders")
 
-#define DRI_CONF_RADV_LEGACY_SPARSE_BINDING(def) \
-   DRI_CONF_OPT_B(radv_legacy_sparse_binding, def, \
-                  "Enable legacy sparse binding (with implicit synchronization) on the graphics and compute queue")
+#define DRI_CONF_RADV_DISABLE_DEDICATED_SPARSE_QUEUE(def) \
+   DRI_CONF_OPT_B(radv_disable_dedicated_sparse_queue, def, \
+                  "Disables the dedicated sparse queue. This replaces radv_legacy_sparse_binding as a compatible drirc workaround for games that might not expect a separate SPARSE queue")
 
 #define DRI_CONF_RADV_FORCE_PSTATE_PEAK_GFX11_DGPU(def) \
    DRI_CONF_OPT_B(radv_force_pstate_peak_gfx11_dgpu, def, \
@@ -856,6 +869,10 @@
 #define DRI_CONF_ANV_UPPER_BOUND_DESCRIPTOR_POOL_SAMPLER(def) \
    DRI_CONF_OPT_B(anv_upper_bound_descriptor_pool_sampler, def, \
                   "Overallocate samplers in descriptor pools to workaround app bug")
+
+#define DRI_CONF_ANV_VF_COMPONENT_PACKING(def) \
+   DRI_CONF_OPT_B(anv_vf_component_packing, def, \
+                  "Vertex fetching component packing")
 
 /**
  * \brief HASVK specific configuration options

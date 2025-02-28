@@ -24,6 +24,7 @@
 #include "nir_schedule.h"
 #include "util/dag.h"
 #include "util/u_dynarray.h"
+#include "nir.h"
 
 /** @file
  *

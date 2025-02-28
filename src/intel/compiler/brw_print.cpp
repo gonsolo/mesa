@@ -5,19 +5,17 @@
 
 #include "brw_cfg.h"
 #include "brw_disasm.h"
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_private.h"
 #include "dev/intel_debug.h"
 #include "util/half_float.h"
 
-using namespace brw;
-
 void
-brw_print_instructions(const fs_visitor &s, FILE *file)
+brw_print_instructions(const brw_shader &s, FILE *file)
 {
    if (s.cfg && s.grf_used == 0) {
-      const brw::def_analysis &defs = s.def_analysis.require();
-      const register_pressure *rp =
+      const brw_def_analysis &defs = s.def_analysis.require();
+      const brw_register_pressure *rp =
          INTEL_DEBUG(DEBUG_REG_PRESSURE) ? &s.regpressure_analysis.require() : NULL;
 
       unsigned ip = 0, max_pressure = 0;
@@ -32,8 +30,14 @@ brw_print_instructions(const fs_visitor &s, FILE *file)
          fprintf(file, "\n");
 
          foreach_inst_in_block(brw_inst, inst, block) {
-            if (inst->is_control_flow_end())
+            /* SHADER_OPCODE_FLOW ends a block, but it does not change the
+             * control flow nested (i.e., the indentation).
+             */
+            if (inst->is_control_flow_end() && inst->opcode != SHADER_OPCODE_FLOW) {
+               /* If cf_count is 0 and decremented, bad things will happen. */
+               assert(cf_count > 0);
                cf_count -= 1;
+            }
 
             if (rp) {
                max_pressure = MAX2(max_pressure, rp->regs_live_at_ip[ip]);
@@ -296,6 +300,9 @@ brw_instruction_name(const struct brw_isa_info *isa, enum opcode op)
       return "read_from_live_channel";
    case SHADER_OPCODE_READ_FROM_CHANNEL:
       return "read_from_channel";
+
+   case SHADER_OPCODE_FLOW:
+      return "flow";
    }
 
    unreachable("not reached");
@@ -374,7 +381,7 @@ print_memory_logical_source(FILE *file, const brw_inst *inst, unsigned i)
 }
 
 void
-brw_print_instruction(const fs_visitor &s, const brw_inst *inst, FILE *file, const brw::def_analysis *defs)
+brw_print_instruction(const brw_shader &s, const brw_inst *inst, FILE *file, const brw_def_analysis *defs)
 {
    if (inst->predicate) {
       fprintf(file, "(%cf%d.%d) ",

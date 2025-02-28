@@ -8,6 +8,7 @@
 #include "ac_nir.h"
 #include "ac_nir_helpers.h"
 #include "nir_builder.h"
+#include "nir_tcs_info.h"
 #include "util/u_math.h"
 
 /*
@@ -831,9 +832,10 @@ hs_msg_group_vote_use_memory(nir_builder *b, lower_tess_io_state *st,
    nir_pop_if(&top_b, thread0);
 
    /* Insert a barrier to wait for initialization above if there hasn't been any other barrier
-    * in the shader.
+    * in the shader. If tcs_out_patch_fits_subgroup=true, then TCS barriers don't have a scope
+    * larger than a subgroup.
     */
-   if (!st->tcs_info.always_executes_barrier) {
+   if (!st->tcs_info.always_executes_barrier || st->tcs_out_patch_fits_subgroup) {
       nir_barrier(b, .execution_scope = SCOPE_WORKGROUP, .memory_scope = SCOPE_WORKGROUP,
                   .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_mem_shared);
    }
@@ -1111,7 +1113,7 @@ hs_finale(nir_shader *shader, lower_tess_io_state *st)
    }
    nir_pop_if(b, if_invocation_id_zero);
 
-   nir_metadata_preserve(impl, nir_metadata_none);
+   nir_progress(true, impl, nir_metadata_none);
 }
 
 static nir_def *
@@ -1133,7 +1135,8 @@ lower_tes_input_load(nir_builder *b,
    nir_def *load = NULL;
 
    AC_NIR_LOAD_IO(load, b, intrin->def.num_components, intrin->def.bit_size, io_sem.high_16bits,
-                  nir_load_buffer_amd, offchip_ring, off, offchip_offset, zero, .access = ACCESS_COHERENT);
+                  nir_load_buffer_amd, offchip_ring, off, offchip_offset, zero, .access = ACCESS_COHERENT,
+                  .memory_modes = nir_var_shader_in);
 
    return load;
 }
@@ -1165,7 +1168,7 @@ filter_any_input_access(const nir_instr *instr,
           intrin->intrinsic == nir_intrinsic_load_per_vertex_input;
 }
 
-void
+bool
 ac_nir_lower_ls_outputs_to_mem(nir_shader *shader,
                                ac_nir_map_io_driver_location map,
                                enum amd_gfx_level gfx_level,
@@ -1188,12 +1191,12 @@ ac_nir_lower_ls_outputs_to_mem(nir_shader *shader,
       state.tcs_inputs_via_lds = tcs_inputs_via_lds | tcs_inputs_via_temp;
    }
 
-   nir_shader_intrinsics_pass(shader, lower_ls_output_store,
-                                nir_metadata_control_flow,
-                                &state);
+   return nir_shader_intrinsics_pass(shader, lower_ls_output_store,
+                                     nir_metadata_control_flow,
+                                     &state);
 }
 
-void
+bool
 ac_nir_lower_hs_inputs_to_mem(nir_shader *shader,
                               ac_nir_map_io_driver_location map,
                               enum amd_gfx_level gfx_level,
@@ -1216,13 +1219,13 @@ ac_nir_lower_hs_inputs_to_mem(nir_shader *shader,
       state.tcs_inputs_via_lds = shader->info.inputs_read;
    }
 
-   nir_shader_lower_instructions(shader,
-                                 filter_load_tcs_per_vertex_input,
-                                 lower_hs_per_vertex_input_load,
-                                 &state);
+   return nir_shader_lower_instructions(shader,
+                                        filter_load_tcs_per_vertex_input,
+                                        lower_hs_per_vertex_input_load,
+                                        &state);
 }
 
-void
+bool
 ac_nir_lower_hs_outputs_to_mem(nir_shader *shader, const nir_tcs_info *info,
                                ac_nir_map_io_driver_location map,
                                enum amd_gfx_level gfx_level,
@@ -1263,9 +1266,11 @@ ac_nir_lower_hs_outputs_to_mem(nir_shader *shader, const nir_tcs_info *info,
       NIR_PASS(_, shader, nir_lower_alu_to_scalar, NULL, NULL);
       NIR_PASS(_, shader, nir_lower_phis_to_scalar, true);
    }
+
+   return true;
 }
 
-void
+bool
 ac_nir_lower_tes_inputs_to_mem(nir_shader *shader,
                                ac_nir_map_io_driver_location map)
 {
@@ -1277,10 +1282,10 @@ ac_nir_lower_tes_inputs_to_mem(nir_shader *shader,
       .tes_patch_inputs_read = shader->info.patch_inputs_read,
    };
 
-   nir_shader_lower_instructions(shader,
-                                 filter_any_input_access,
-                                 lower_tes_input_load,
-                                 &state);
+   return nir_shader_lower_instructions(shader,
+                                        filter_any_input_access,
+                                        lower_tes_input_load,
+                                        &state);
 }
 
 void

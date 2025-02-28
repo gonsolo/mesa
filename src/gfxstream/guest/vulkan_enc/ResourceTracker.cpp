@@ -1348,7 +1348,8 @@ void ResourceTracker::setDeviceInfo(VkDevice device, VkPhysicalDevice physdev,
 void ResourceTracker::setDeviceMemoryInfo(VkDevice device, VkDeviceMemory memory,
                                           VkDeviceSize allocationSize, uint8_t* ptr,
                                           uint32_t memoryTypeIndex, void* ahw, bool imported,
-                                          zx_handle_t vmoHandle, VirtGpuResourcePtr blobPtr) {
+                                          zx_handle_t vmoHandle, VirtGpuResourcePtr blobPtr,
+                                          int importedFd) {
     std::lock_guard<std::recursive_mutex> lock(mLock);
     auto& info = info_VkDeviceMemory[memory];
 
@@ -1362,6 +1363,7 @@ void ResourceTracker::setDeviceMemoryInfo(VkDevice device, VkDeviceMemory memory
     info.imported = imported;
     info.vmoHandle = vmoHandle;
     info.blobPtr = blobPtr;
+    info.importedFd = importedFd;
 }
 
 void ResourceTracker::setImageInfo(VkImage image, VkDevice device,
@@ -2101,6 +2103,42 @@ void ResourceTracker::on_vkGetPhysicalDeviceProperties2(void* context,
                                                         VkPhysicalDeviceProperties2* pProperties) {
     if (pProperties) {
         on_vkGetPhysicalDeviceProperties(context, physicalDevice, &pProperties->properties);
+
+        VkPhysicalDeviceDrmPropertiesEXT* drmProps =
+            vk_find_struct(pProperties, PHYSICAL_DEVICE_DRM_PROPERTIES_EXT);
+        if (drmProps) {
+            VirtGpuDrmInfo drmInfo;
+            if (VirtGpuDevice::getInstance()->getDrmInfo(&drmInfo)) {
+                drmProps->hasPrimary = drmInfo.hasPrimary;
+                drmProps->hasRender = drmInfo.hasRender;
+                drmProps->primaryMajor = drmInfo.primaryMajor;
+                drmProps->primaryMinor = drmInfo.primaryMinor;
+                drmProps->renderMajor = drmInfo.renderMajor;
+                drmProps->renderMinor = drmInfo.renderMinor;
+            } else {
+                mesa_logd(
+                    "%s: encountered VkPhysicalDeviceDrmPropertiesEXT in pProperties::pNext chain, "
+                    "but failed to query DrmInfo from the VirtGpuDevice",
+                    __func__);
+            }
+        }
+
+        VkPhysicalDevicePCIBusInfoPropertiesEXT* pciBusInfoProps =
+            vk_find_struct(pProperties, PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT);
+        if (pciBusInfoProps) {
+            VirtGpuPciBusInfo pciBusInfo;
+            if (VirtGpuDevice::getInstance()->getPciBusInfo(&pciBusInfo)) {
+                pciBusInfoProps->pciDomain = pciBusInfo.domain;
+                pciBusInfoProps->pciBus = pciBusInfo.bus;
+                pciBusInfoProps->pciDevice = pciBusInfo.device;
+                pciBusInfoProps->pciFunction = pciBusInfo.function;
+            } else {
+                mesa_logd(
+                    "%s: encountered VkPhysicalDevicePCIBusInfoPropertiesEXT in pProperties::pNext "
+                    "chain, but failed to query PciBusInfo from the VirtGpuDevice",
+                    __func__);
+            }
+        }
     }
 }
 
@@ -3297,13 +3335,6 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
     void* ahw = nullptr;
 #endif
 
-#ifdef LINUX_GUEST_BUILD
-    const VkImportMemoryFdInfoKHR* importFdInfoPtr =
-        vk_find_struct_const(pAllocateInfo, IMPORT_MEMORY_FD_INFO_KHR);
-#else
-    const VkImportMemoryFdInfoKHR* importFdInfoPtr = nullptr;
-#endif
-
 #ifdef VK_USE_PLATFORM_FUCHSIA
     const VkImportMemoryBufferCollectionFUCHSIA* importBufferCollectionInfoPtr =
         vk_find_struct_const(pAllocateInfo, IMPORT_MEMORY_BUFFER_COLLECTION_FUCHSIA);
@@ -3377,6 +3408,8 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
         importVmo = true;
     }
 
+    const VkImportMemoryFdInfoKHR* importFdInfoPtr =
+        vk_find_struct_const(pAllocateInfo, IMPORT_MEMORY_FD_INFO_KHR);
     if (importFdInfoPtr) {
         importDmabuf =
             (importFdInfoPtr->handleType & (VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT |
@@ -3752,8 +3785,27 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
 #endif
 
     VirtGpuResourcePtr bufferBlob = nullptr;
+    int importedFd = -1;
 #if defined(LINUX_GUEST_BUILD)
-    if (exportDmabuf) {
+    // Check for import first; this takes precedence over exportDmabuf in creating the
+    // VirtGpuResource
+    if (importDmabuf) {
+        VirtGpuExternalHandle importHandle = {};
+        // importBlob impl may close the receivedFd after it creates an GEM handle from it. dup()
+        // the FD here for input to that impl, then manage the original FD at the Vulkan level
+        importHandle.osHandle = dup(importFdInfoPtr->fd);
+        importHandle.type = kMemHandleDmabuf;
+
+        auto instance = VirtGpuDevice::getInstance();
+        bufferBlob = instance->importBlob(importHandle);
+        if (!bufferBlob) {
+            mesa_loge("%s: Failed to import colorBuffer resource\n", __func__);
+            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        }
+        // As per the Vulkan spec, the ownership of this FD has been transferred
+        // to the implementation
+        importedFd = importFdInfoPtr->fd;
+    } else if (exportDmabuf) {
         VirtGpuDevice* instance = VirtGpuDevice::getInstance();
         hasDedicatedImage =
             dedicatedAllocInfoPtr && (dedicatedAllocInfoPtr->image != VK_NULL_HANDLE);
@@ -3923,19 +3975,6 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
         }
     }
 
-    if (importDmabuf) {
-        VirtGpuExternalHandle importHandle = {};
-        importHandle.osHandle = importFdInfoPtr->fd;
-        importHandle.type = kMemHandleDmabuf;
-
-        auto instance = VirtGpuDevice::getInstance();
-        bufferBlob = instance->importBlob(importHandle);
-        if (!bufferBlob) {
-            mesa_loge("%s: Failed to import colorBuffer resource\n", __func__);
-            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-        }
-    }
-
     if (bufferBlob) {
         if (hasDedicatedBuffer) {
             importBufferInfo.buffer = bufferBlob->getResourceHandle();
@@ -3954,7 +3993,7 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
         if (input_result != VK_SUCCESS) _RETURN_FAILURE_WITH_DEVICE_MEMORY_REPORT(input_result);
 
         setDeviceMemoryInfo(device, *pMemory, 0, nullptr, finalAllocInfo.memoryTypeIndex, ahw,
-                            isImport, vmo_handle, bufferBlob);
+                            isImport, vmo_handle, bufferBlob, importedFd);
 
         uint64_t memoryObjectId = (uint64_t)(void*)*pMemory;
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
@@ -4001,7 +4040,8 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
 
         setDeviceMemoryInfo(device, *pMemory, finalAllocInfo.allocationSize,
                             reinterpret_cast<uint8_t*>(addr), finalAllocInfo.memoryTypeIndex,
-                            /*ahw=*/nullptr, isImport, vmo_handle, /*blobPtr=*/nullptr);
+                            /*ahw=*/nullptr, isImport, vmo_handle, /*blobPtr=*/nullptr,
+                            /*importedFd=*/-1);
         return VK_SUCCESS;
     }
 #endif
@@ -4040,6 +4080,10 @@ void ResourceTracker::on_vkFreeMemory(void* context, VkDevice device, VkDeviceMe
         memoryObjectId = getAHardwareBufferId(info.ahw);
     }
 #endif
+    if (info.importedFd >= 0) {
+        close(info.importedFd);
+        info.importedFd = -1;
+    }
 
     emitDeviceMemoryReport(info_VkDevice[device],
                            info.imported ? VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_UNIMPORT_EXT
@@ -4269,7 +4313,6 @@ VkResult ResourceTracker::on_vkCreateImage(void* context, VkResult, VkDevice dev
                 } else {
                     return VK_ERROR_VALIDATION_FAILED_EXT;
                 }
-               return VK_ERROR_VALIDATION_FAILED_EXT; // stub constant
             }
         }
 
@@ -6737,27 +6780,20 @@ VkResult ResourceTracker::on_vkGetPhysicalDeviceImageFormatProperties2_common(
     const VkPhysicalDeviceImageDrmFormatModifierInfoEXT* drmFmtMod =
         vk_find_struct_const(pImageFormatInfo, PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT);
     VkDrmFormatModifierPropertiesListEXT* emulatedDrmFmtModPropsList = nullptr;
-    if (drmFmtMod) {
-        if (getHostDeviceExtensionIndex(VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME) != -1) {
-            // Host supports DRM format modifiers => leave the input unchanged.
-        } else {
-            mesa_logd("emulating DRM_FORMAT_MOD_LINEAR with VK_IMAGE_TILING_LINEAR");
-            emulatedDrmFmtModPropsList =
-                vk_find_struct(pImageFormatProperties, DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT);
-
-            // Host doesn't support DRM format modifiers, try emulating.
-            if (drmFmtMod) {
-
-                if (drmFmtMod->drmFormatModifier == DRM_FORMAT_MOD_LINEAR) {
-                    localImageFormatInfo.tiling = VK_IMAGE_TILING_LINEAR;
-                    pImageFormatInfo = &localImageFormatInfo;
-                    // Leave drmFormatMod in the input; it should be ignored when
-                    // tiling is not VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT
-                } else {
-                    return VK_ERROR_FORMAT_NOT_SUPPORTED;
-                }
-            }
+    if (drmFmtMod &&
+        getHostDeviceExtensionIndex(VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME) == -1) {
+        if (drmFmtMod->drmFormatModifier != DRM_FORMAT_MOD_LINEAR) {
+            return VK_ERROR_FORMAT_NOT_SUPPORTED;
         }
+        mesa_logd("emulating DRM_FORMAT_MOD_LINEAR with VK_IMAGE_TILING_OPTIMAL");
+        emulatedDrmFmtModPropsList =
+            vk_find_struct(pImageFormatProperties, DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT);
+        localImageFormatInfo.tiling = VK_IMAGE_TILING_LINEAR;
+        localImageFormatInfo.usage &=
+            ~(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT);
+        pImageFormatInfo = &localImageFormatInfo;
+        // Leave drmFormatMod in the input; it should be ignored when
+        // tiling is not VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT
     }
 #endif  // LINUX_GUEST_BUILD
 
@@ -6787,6 +6823,14 @@ VkResult ResourceTracker::on_vkGetPhysicalDeviceImageFormatProperties2_common(
                 .drmFormatModifierTilingFeatures = formatProperties.linearTilingFeatures,
             };
         }
+    }
+    if (ext_img_info &&
+        ext_img_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) {
+        ext_img_properties->externalMemoryProperties.externalMemoryFeatures |=
+            VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
+        ext_img_properties->externalMemoryProperties.exportFromImportedHandleTypes =
+            ext_img_properties->externalMemoryProperties.compatibleHandleTypes =
+                VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
     }
 #endif  // LINUX_GUEST_BUILD
 

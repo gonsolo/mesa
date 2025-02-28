@@ -54,17 +54,9 @@
 #include "agx_tilebuffer.h"
 #include "shader_enums.h"
 
-/* Fake values, pending UAPI upstreaming */
-#ifndef DRM_FORMAT_MOD_APPLE_TWIDDLED
-#define DRM_FORMAT_MOD_APPLE_TWIDDLED (2)
-#endif
-#ifndef DRM_FORMAT_MOD_APPLE_TWIDDLED_COMPRESSED
-#define DRM_FORMAT_MOD_APPLE_TWIDDLED_COMPRESSED (3)
-#endif
-
 uint64_t agx_best_modifiers[] = {
-   DRM_FORMAT_MOD_APPLE_TWIDDLED_COMPRESSED,
-   DRM_FORMAT_MOD_APPLE_TWIDDLED,
+   DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED,
+   DRM_FORMAT_MOD_APPLE_GPU_TILED,
    DRM_FORMAT_MOD_LINEAR,
 };
 
@@ -90,8 +82,7 @@ void agx_init_state_functions(struct pipe_context *ctx);
 
 const static char *s_tiling[] = {
    [AIL_TILING_LINEAR] = "LINR",
-   [AIL_TILING_TWIDDLED] = "TWID",
-   [AIL_TILING_TWIDDLED_COMPRESSED] = "COMP",
+   [AIL_TILING_GPU] = "GPU",
 };
 
 #define rsrc_debug(res, ...)                                                   \
@@ -114,12 +105,13 @@ agx_resource_debug(struct agx_resource *res, const char *msg)
    }
 
    agx_msg(
-      "%s%s %dx%dx%d %dL %d/%dM %dS M:%llx %s %s%s S:0x%llx LS:0x%llx CS:0x%llx "
+      "%s%s %dx%dx%d %dL %d/%dM %dS M:%llx %s%s %s%s S:0x%llx LS:0x%llx CS:0x%llx "
       "Base=0x%llx Size=0x%llx Meta=0x%llx/0x%llx (%s) %s%s%s%s%s%sfd:%d(%d) B:%x @ %p\n",
       msg ?: "", util_format_short_name(res->base.format), res->base.width0,
       res->base.height0, res->base.depth0, res->base.array_size,
       res->base.last_level, res->layout.levels, res->layout.sample_count_sa,
       (long long)res->modifier, s_tiling[res->layout.tiling],
+      res->layout.compressed ? " COMP" : "",
       res->layout.mipmapped_z ? "MZ " : "",
       res->layout.page_aligned_layers ? "PL " : "",
       (long long)res->layout.linear_stride_B,
@@ -146,6 +138,7 @@ agx_resource_setup(struct agx_device *dev, struct agx_resource *nresource)
 
    nresource->layout = (struct ail_layout){
       .tiling = ail_drm_modifier_to_tiling(nresource->modifier),
+      .compressed = ail_is_drm_modifier_compressed(nresource->modifier),
       .mipmapped_z = templ->target == PIPE_TEXTURE_3D,
       .format = templ->format,
       .width_px = templ->width0,
@@ -431,13 +424,13 @@ agx_select_modifier_from_list(const struct agx_resource *pres,
                               const uint64_t *modifiers, int count)
 {
    if (agx_twiddled_allowed(pres) && agx_compression_allowed(pres) &&
-       drm_find_modifier(DRM_FORMAT_MOD_APPLE_TWIDDLED_COMPRESSED, modifiers,
+       drm_find_modifier(DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED, modifiers,
                          count))
-      return DRM_FORMAT_MOD_APPLE_TWIDDLED_COMPRESSED;
+      return DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED;
 
    if (agx_twiddled_allowed(pres) &&
-       drm_find_modifier(DRM_FORMAT_MOD_APPLE_TWIDDLED, modifiers, count))
-      return DRM_FORMAT_MOD_APPLE_TWIDDLED;
+       drm_find_modifier(DRM_FORMAT_MOD_APPLE_GPU_TILED, modifiers, count))
+      return DRM_FORMAT_MOD_APPLE_GPU_TILED;
 
    if (agx_linear_allowed(pres) &&
        drm_find_modifier(DRM_FORMAT_MOD_LINEAR, modifiers, count))
@@ -467,9 +460,9 @@ agx_select_best_modifier(const struct agx_resource *pres)
 
    if (agx_twiddled_allowed(pres)) {
       if (agx_compression_allowed(pres))
-         return DRM_FORMAT_MOD_APPLE_TWIDDLED_COMPRESSED;
+         return DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED;
       else
-         return DRM_FORMAT_MOD_APPLE_TWIDDLED;
+         return DRM_FORMAT_MOD_APPLE_GPU_TILED;
    }
 
    if (agx_linear_allowed(pres))
@@ -510,7 +503,7 @@ agx_resource_create_with_modifiers(struct pipe_screen *screen,
     * inferring the shader image flag. Do so to avoid reallocation in case the
     * resource is later used as an image.
     */
-   if (nresource->modifier != DRM_FORMAT_MOD_APPLE_TWIDDLED_COMPRESSED &&
+   if (nresource->modifier != DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED &&
        templ->depth0 == 1) {
 
       nresource->base.bind |= PIPE_BIND_SHADER_IMAGE;
@@ -1084,7 +1077,8 @@ agx_clear(struct pipe_context *pctx, unsigned buffers,
    unsigned fastclear = buffers & ~(batch->draw | batch->load);
    unsigned slowclear = buffers & ~fastclear;
 
-   assert(scissor_state == NULL && "we don't support pipe_caps.clear_scissored");
+   assert(scissor_state == NULL &&
+          "we don't support pipe_caps.clear_scissored");
 
    /* Fast clears configure the batch */
    for (unsigned rt = 0; rt < PIPE_MAX_COLOR_BUFS; ++rt) {
@@ -1166,7 +1160,7 @@ void
 agx_decompress(struct agx_context *ctx, struct agx_resource *rsrc,
                const char *reason)
 {
-   if (rsrc->layout.tiling == AIL_TILING_TWIDDLED_COMPRESSED) {
+   if (rsrc->layout.compressed) {
       perf_debug_ctx(ctx, "Decompressing resource due to %s", reason);
    } else if (!rsrc->layout.writeable_image) {
       perf_debug_ctx(ctx, "Reallocating image due to %s", reason);
@@ -1321,7 +1315,7 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
 
             assert(zres->layout.tiling != AIL_TILING_LINEAR && "must tile");
 
-            if (ail_is_compressed(&zres->layout)) {
+            if (zres->layout.compressed) {
                c->depth_meta_buffer_load =
                   agx_map_texture_gpu(zres, 0) +
                   zres->layout.metadata_offset_B +
@@ -1382,7 +1376,7 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
             c->stencil_buffer_store_stride = c->stencil_buffer_load_stride;
             c->stencil_buffer_partial_stride = c->stencil_buffer_load_stride;
 
-            if (ail_is_compressed(&sres->layout)) {
+            if (sres->layout.compressed) {
                c->stencil_meta_buffer_load =
                   agx_map_texture_gpu(sres, 0) +
                   sres->layout.metadata_offset_B +
@@ -1973,10 +1967,8 @@ agx_init_shader_caps(struct pipe_screen *pscreen)
       struct pipe_shader_caps *caps =
          (struct pipe_shader_caps *)&pscreen->shader_caps[i];
 
-      caps->max_instructions =
-      caps->max_alu_instructions =
-      caps->max_tex_instructions =
-      caps->max_tex_indirections = 16384;
+      caps->max_instructions = caps->max_alu_instructions =
+         caps->max_tex_instructions = caps->max_tex_indirections = 16384;
 
       caps->max_control_flow_depth = 1024;
 
@@ -1987,7 +1979,8 @@ agx_init_shader_caps(struct pipe_screen *pscreen)
        * shenanigans to handle.
        */
       caps->max_outputs = i == PIPE_SHADER_FRAGMENT ? 8
-         : i == PIPE_SHADER_VERTEX ? 24 : 32;
+                          : i == PIPE_SHADER_VERTEX ? 24
+                                                    : 32;
 
       caps->max_temps = 256; /* GL_MAX_PROGRAM_TEMPORARIES_ARB */
 
@@ -2001,9 +1994,7 @@ agx_init_shader_caps(struct pipe_screen *pscreen)
       caps->indirect_const_addr = true;
       caps->integers = true;
 
-      caps->fp16 =
-      caps->glsl_16bit_consts =
-      caps->fp16_derivatives = !is_no16;
+      caps->fp16 = caps->glsl_16bit_consts = caps->fp16_derivatives = !is_no16;
       /* GLSL compiler is broken. Flip this on when Panfrost does. */
       caps->int16 = false;
       /* This cap is broken, see 9a38dab2d18 ("zink: disable
@@ -2033,7 +2024,8 @@ agx_init_shader_caps(struct pipe_screen *pscreen)
 static void
 agx_init_compute_caps(struct pipe_screen *pscreen)
 {
-   struct pipe_compute_caps *caps = (struct pipe_compute_caps *)&pscreen->compute_caps;
+   struct pipe_compute_caps *caps =
+      (struct pipe_compute_caps *)&pscreen->compute_caps;
    struct agx_device *dev = agx_device(pscreen);
 
    caps->address_bits = 64;
@@ -2042,26 +2034,22 @@ agx_init_compute_caps(struct pipe_screen *pscreen)
 
    caps->grid_dimension = 3;
 
-   caps->max_grid_size[0] =
-   caps->max_grid_size[1] =
-   caps->max_grid_size[2] = 65535;
+   caps->max_grid_size[0] = caps->max_grid_size[1] = caps->max_grid_size[2] =
+      65535;
 
-   caps->max_block_size[0] =
-   caps->max_block_size[1] =
-   caps->max_block_size[2] = 1024;
+   caps->max_block_size[0] = caps->max_block_size[1] = caps->max_block_size[2] =
+      1024;
 
    caps->max_threads_per_block = 1024;
 
    uint64_t system_memory;
    if (os_get_total_physical_memory(&system_memory)) {
-      caps->max_global_size =
-      caps->max_mem_alloc_size = system_memory;
+      caps->max_global_size = caps->max_mem_alloc_size = system_memory;
    }
 
    caps->max_local_size = 32768;
 
-   caps->max_private_size =
-   caps->max_input_size = 4096;
+   caps->max_private_size = caps->max_input_size = 4096;
 
    caps->max_clock_frequency = dev->params.max_frequency_khz / 1000;
 
@@ -2096,8 +2084,7 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->glsl_tess_levels_as_inputs = true;
    caps->doubles = true;
 
-   caps->max_render_targets =
-   caps->fbfetch = 8;
+   caps->max_render_targets = caps->fbfetch = 8;
    caps->fbfetch_coherent = true;
 
    caps->max_dual_source_render_targets = 1;
@@ -2161,15 +2148,14 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->max_stream_output_buffers = PIPE_MAX_SO_BUFFERS;
 
    caps->max_stream_output_separate_components =
-   caps->max_stream_output_interleaved_components = PIPE_MAX_SO_OUTPUTS;
+      caps->max_stream_output_interleaved_components = PIPE_MAX_SO_OUTPUTS;
 
    caps->stream_output_pause_resume = true;
    caps->stream_output_interleave_buffers = true;
 
    caps->max_texture_array_layers = 2048;
 
-   caps->glsl_feature_level =
-   caps->glsl_feature_level_compatibility = 460;
+   caps->glsl_feature_level = caps->glsl_feature_level_compatibility = 460;
    caps->essl_feature_level = 320;
 
    /* Settings from iris, may need tuning */
@@ -2189,7 +2175,7 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
 
    caps->max_texture_2d_size = 16384;
    caps->max_texture_cube_levels = 15; /* Max 16384x16384 */
-   caps->max_texture_3d_levels = 12; /* Max 2048x2048x2048 */
+   caps->max_texture_3d_levels = 12;   /* Max 2048x2048x2048 */
 
    caps->fs_coord_origin_upper_left = true;
    caps->fs_coord_pixel_center_integer = true;
@@ -2221,8 +2207,8 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->max_viewports = AGX_MAX_VIEWPORTS;
 
    uint64_t system_memory;
-   caps->video_memory = os_get_total_physical_memory(&system_memory) ?
-      (system_memory >> 20) : 0;
+   caps->video_memory =
+      os_get_total_physical_memory(&system_memory) ? (system_memory >> 20) : 0;
 
    caps->device_reset_status_query = true;
    caps->robust_buffer_access_behavior = true;
@@ -2241,13 +2227,12 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
 
    caps->query_buffer_object = true;
 
-   caps->texture_border_color_quirk = PIPE_QUIRK_TEXTURE_BORDER_COLOR_SWIZZLE_FREEDRENO;
+   caps->texture_border_color_quirk =
+      PIPE_QUIRK_TEXTURE_BORDER_COLOR_SWIZZLE_FREEDRENO;
 
-   caps->supported_prim_modes =
-   caps->supported_prim_modes_with_restart =
+   caps->supported_prim_modes = caps->supported_prim_modes_with_restart =
       BITFIELD_BIT(MESA_PRIM_POINTS) | BITFIELD_BIT(MESA_PRIM_LINES) |
-      BITFIELD_BIT(MESA_PRIM_LINE_STRIP) |
-      BITFIELD_BIT(MESA_PRIM_LINE_LOOP) |
+      BITFIELD_BIT(MESA_PRIM_LINE_STRIP) | BITFIELD_BIT(MESA_PRIM_LINE_LOOP) |
       BITFIELD_BIT(MESA_PRIM_TRIANGLES) |
       BITFIELD_BIT(MESA_PRIM_TRIANGLE_STRIP) |
       BITFIELD_BIT(MESA_PRIM_TRIANGLE_FAN) |
@@ -2266,19 +2251,15 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       PIPE_CONTEXT_PRIORITY_LOW | PIPE_CONTEXT_PRIORITY_MEDIUM |
       PIPE_CONTEXT_PRIORITY_HIGH | PIPE_CONTEXT_PRIORITY_REALTIME;
 
-   caps->min_line_width =
-   caps->min_line_width_aa =
-   caps->min_point_size =
-   caps->min_point_size_aa = 1;
+   caps->min_line_width = caps->min_line_width_aa = caps->min_point_size =
+      caps->min_point_size_aa = 1;
 
-   caps->point_size_granularity =
-   caps->line_width_granularity = 0.1;
+   caps->point_size_granularity = caps->line_width_granularity = 0.1;
 
-   caps->max_line_width =
-   caps->max_line_width_aa = 16.0; /* Off-by-one fixed point 4:4 encoding */
+   caps->max_line_width = caps->max_line_width_aa =
+      16.0; /* Off-by-one fixed point 4:4 encoding */
 
-   caps->max_point_size =
-   caps->max_point_size_aa = 511.95f;
+   caps->max_point_size = caps->max_point_size_aa = 511.95f;
 
    caps->max_texture_anisotropy = 16.0;
 

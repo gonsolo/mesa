@@ -28,7 +28,7 @@
 
 #include "util/simple_mtx.h"
 
-#include "compiler/nir/nir.h"
+#include "compiler/shader_enums.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,6 +57,11 @@ struct vk_meta_copy_image_properties {
           */
          VkFormat view_format;
       } color;
+
+      struct {
+         /* Format to use for a specific image plane. */
+         VkFormat view_format;
+      } plane[3];
 
       struct {
          struct {

@@ -30,10 +30,12 @@
 #include "genxml/gen_macros.h"
 
 #include "panvk_cmd_buffer.h"
+#include "panvk_descriptor_set_layout.h"
 #include "panvk_device.h"
 #include "panvk_instance.h"
 #include "panvk_mempool.h"
 #include "panvk_physical_device.h"
+#include "panvk_sampler.h"
 #include "panvk_shader.h"
 
 #include "spirv/nir_spirv.h"
@@ -45,7 +47,9 @@
 #include "nir_deref.h"
 
 #include "vk_graphics_state.h"
+#include "vk_nir_convert_ycbcr.h"
 #include "vk_shader_module.h"
+#include "vk_ycbcr_conversion.h"
 
 #include "compiler/bifrost_nir.h"
 #include "pan_shader.h"
@@ -112,6 +116,13 @@ panvk_lower_sysvals(nir_builder *b, nir_instr *instr, void *data)
        * multidraw. */
       assert(b->shader->info.stage == MESA_SHADER_VERTEX);
       val = nir_imm_int(b, 0);
+      break;
+
+   case nir_intrinsic_load_printf_buffer_address:
+      if (b->shader->info.stage == MESA_SHADER_COMPUTE)
+         val = load_sysval(b, compute, bit_size, printf_buffer_address);
+      else
+         val = load_sysval(b, graphics, bit_size, printf_buffer_address);
       break;
 
    default:
@@ -289,7 +300,9 @@ panvk_get_spirv_options(UNUSED struct vk_physical_device *vk_pdev,
 }
 
 static void
-panvk_preprocess_nir(UNUSED struct vk_physical_device *vk_pdev, nir_shader *nir)
+panvk_preprocess_nir(UNUSED struct vk_physical_device *vk_pdev,
+                     nir_shader *nir,
+                     UNUSED const struct vk_pipeline_robustness_state *rs)
 {
    /* Ensure to regroup output variables at the same location */
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
@@ -578,7 +591,12 @@ lower_load_push_consts(nir_shader *nir, struct panvk_shader *shader)
       NIR_PASS(progress, nir, nir_opt_dce);
       NIR_PASS(progress, nir, nir_opt_dead_cf);
       NIR_PASS(progress, nir, nir_opt_cse);
-      NIR_PASS(progress, nir, nir_opt_peephole_select, 64, false, true);
+
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = 64,
+         .expensive_alu_ok = true,
+      };
+      NIR_PASS(progress, nir, nir_opt_peephole_select, &peephole_select_options);
       NIR_PASS(progress, nir, nir_opt_algebraic);
       NIR_PASS(progress, nir, nir_opt_constant_folding);
    } while (progress);
@@ -618,6 +636,37 @@ lower_load_push_consts(nir_shader *nir, struct panvk_shader *shader)
 
    NIR_PASS(_, nir, nir_shader_intrinsics_pass, move_push_constant,
             nir_metadata_control_flow, shader);
+}
+
+struct lower_ycbcr_state {
+   uint32_t set_layout_count;
+   struct vk_descriptor_set_layout *const *set_layouts;
+};
+
+static const struct vk_ycbcr_conversion_state *
+lookup_ycbcr_conversion(const void *_state, uint32_t set,
+                        uint32_t binding, uint32_t array_index)
+{
+   const struct lower_ycbcr_state *state = _state;
+   assert(set < state->set_layout_count);
+   assert(state->set_layouts[set] != NULL);
+   const struct panvk_descriptor_set_layout *set_layout =
+      to_panvk_descriptor_set_layout(state->set_layouts[set]);
+   assert(binding < set_layout->binding_count);
+
+   const struct panvk_descriptor_set_binding_layout *bind_layout =
+      &set_layout->bindings[binding];
+
+   if (bind_layout->immutable_samplers == NULL)
+      return NULL;
+
+   array_index = MIN2(array_index, bind_layout->desc_count - 1);
+
+   const struct panvk_sampler *sampler =
+      bind_layout->immutable_samplers[array_index];
+
+   return sampler && sampler->vk.ycbcr_conversion ?
+          &sampler->vk.ycbcr_conversion->state : NULL;
 }
 
 static void
@@ -660,6 +709,15 @@ panvk_lower_nir(struct panvk_device *dev, nir_shader *nir,
       shader->desc_info.max_varying_loads = nir->num_inputs;
 #endif
    }
+
+#if PAN_ARCH >= 10
+   const struct lower_ycbcr_state ycbcr_state = {
+      .set_layout_count = set_layout_count,
+      .set_layouts = set_layouts,
+   };
+   NIR_PASS(_, nir, nir_vk_lower_ycbcr_tex, lookup_ycbcr_conversion,
+            &ycbcr_state);
+#endif
 
    panvk_per_arch(nir_lower_descriptors)(nir, dev, rs, set_layout_count,
                                          set_layouts, shader);
@@ -1021,7 +1079,9 @@ panvk_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
    }
 #endif
 
-   free((void *)shader->bin_ptr);
+   if (shader->own_bin)
+      free((void *)shader->bin_ptr);
+
    vk_shader_free(&dev->vk, pAllocator, &shader->vk);
 }
 
@@ -1049,6 +1109,7 @@ panvk_compile_shader(struct panvk_device *dev,
    if (shader == NULL)
       return panvk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
+   shader->own_bin = true;
    struct panfrost_compile_inputs inputs = {
       .gpu_id = phys_dev->kmod.props.gpu_prod_id,
       .no_ubo_to_push = true,
@@ -1087,6 +1148,41 @@ panvk_compile_shader(struct panvk_device *dev,
    }
 
    *shader_out = &shader->vk;
+
+   return result;
+}
+
+VkResult
+panvk_per_arch(create_shader_from_binary)(struct panvk_device *dev,
+                                          const struct pan_shader_info *info,
+                                          struct pan_compute_dim local_size,
+                                          const void *bin_ptr, size_t bin_size,
+                                          struct panvk_shader **shader_out)
+{
+   struct panvk_shader *shader;
+   VkResult result;
+
+   shader = vk_shader_zalloc(&dev->vk, &panvk_shader_ops, info->stage,
+                             &dev->vk.alloc, sizeof(*shader));
+   if (shader == NULL)
+      return panvk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   shader->info = *info;
+   shader->local_size = local_size;
+   shader->bin_ptr = bin_ptr;
+   shader->bin_size = bin_size;
+   shader->own_bin = false;
+   shader->nir_str = NULL;
+   shader->asm_str = NULL;
+
+   result = panvk_shader_upload(dev, shader, &dev->vk.alloc);
+
+   if (result != VK_SUCCESS) {
+      panvk_shader_destroy(&dev->vk, &shader->vk, &dev->vk.alloc);
+      return result;
+   }
+
+   *shader_out = shader;
 
    return result;
 }
@@ -1191,6 +1287,7 @@ shader_desc_info_deserialize(struct blob_reader *blob,
 #else
    shader->desc_info.dyn_bufs.count = blob_read_uint32(blob);
    blob_copy_bytes(blob, shader->desc_info.dyn_bufs.map,
+                   sizeof(*shader->desc_info.dyn_bufs.map) *
                    shader->desc_info.dyn_bufs.count);
 #endif
 
@@ -1291,7 +1388,7 @@ shader_desc_info_serialize(struct blob *blob, const struct panvk_shader *shader)
    blob_write_uint32(blob, shader->desc_info.dyn_bufs.count);
    blob_write_bytes(blob, shader->desc_info.dyn_bufs.map,
                     sizeof(*shader->desc_info.dyn_bufs.map) *
-                       shader->desc_info.dyn_bufs.count);
+                    shader->desc_info.dyn_bufs.count);
 #endif
 }
 

@@ -21,7 +21,7 @@
  * IN THE SOFTWARE.
  */
 
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_cfg.h"
 #include "brw_eu.h"
 
@@ -47,8 +47,6 @@
  * we can recognize that the CMP is generating the flag value that already
  * exists and therefore remove the instruction.
  */
-
-using namespace brw;
 
 static bool
 cmod_propagate_cmp_to_add(const intel_device_info *devinfo, bblock_t *block,
@@ -250,7 +248,7 @@ opt_cmod_propagation_local(const intel_device_info *devinfo, bblock_t *block)
          continue;
 
       /* Only an AND.NZ can be propagated.  Many AND.Z instructions are
-       * generated (for ir_unop_not in fs_visitor::emit_bool_to_cond_code).
+       * generated (for ir_unop_not in brw_shader::emit_bool_to_cond_code).
        * Propagating those would require inverting the condition on the CMP.
        * This changes both the flag value and the register destination of the
        * CMP.  That result may be used elsewhere, so we can't change its value
@@ -558,7 +556,7 @@ opt_cmod_propagation_local(const intel_device_info *devinfo, bblock_t *block)
 }
 
 bool
-brw_opt_cmod_propagation(fs_visitor &s)
+brw_opt_cmod_propagation(brw_shader &s)
 {
    bool progress = false;
 
@@ -569,7 +567,7 @@ brw_opt_cmod_propagation(fs_visitor &s)
    if (progress) {
       s.cfg->adjust_block_ips();
 
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS);
    }
 
    return progress;

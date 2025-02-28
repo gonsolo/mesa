@@ -3,11 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_builder.h"
 #include "util/half_float.h"
-
-using namespace brw;
 
 static uint64_t
 src_as_uint(const brw_reg &src)
@@ -320,7 +318,7 @@ brw_opt_constant_fold_instruction(const intel_device_info *devinfo, brw_inst *in
 }
 
 bool
-brw_opt_algebraic(fs_visitor &s)
+brw_opt_algebraic(brw_shader &s)
 {
    const intel_device_info *devinfo = s.devinfo;
    bool progress = false;
@@ -725,8 +723,8 @@ brw_opt_algebraic(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTION_DATA_FLOW |
-                            DEPENDENCY_INSTRUCTION_DETAIL);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTION_DATA_FLOW |
+                            BRW_DEPENDENCY_INSTRUCTION_DETAIL);
 
    return progress;
 }

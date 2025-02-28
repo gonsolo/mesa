@@ -8,6 +8,7 @@
 #include "ac_nir.h"
 #include "ac_nir_to_llvm.h"
 #include "ac_rtld.h"
+#include "nir.h"
 #include "si_pipe.h"
 #include "si_shader_internal.h"
 #include "si_shader_llvm.h"
@@ -455,7 +456,7 @@ static void si_build_wrapper_function(struct si_shader_context *ctx,
        * block.
        */
 
-      /* Second part params are same as the preceeding params of the first part. */
+      /* Second part params are same as the preceding params of the first part. */
       num_params = LLVMCountParams(parts[1].value);
    }
 

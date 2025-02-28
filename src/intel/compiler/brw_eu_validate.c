@@ -1888,7 +1888,7 @@ instruction_restrictions(const struct brw_isa_info *isa,
        *
        * The same text also appears for OR, NOT, and XOR instructions.
        *
-       * Per the comment around nir_op_imod in brw_fs_nir.cpp, we have
+       * Per the comment around nir_op_imod in brw_from_nir.cpp, we have
        * determined this to not be true. The only conditions that seem
        * absolutely sketchy are O, R, and U.  Some OpenGL shaders from Doom
        * 2016 have been observed to generate and.g and operate correctly.
@@ -2141,9 +2141,9 @@ send_descriptor_restrictions(const struct brw_isa_info *isa,
       if (devinfo->ver < 20)
          break;
       FALLTHROUGH;
-   case GFX12_SFID_TGM:
-   case GFX12_SFID_SLM:
-   case GFX12_SFID_UGM:
+   case BRW_SFID_TGM:
+   case BRW_SFID_SLM:
+   case BRW_SFID_UGM:
       ERROR_IF(!devinfo->has_lsc, "Platform does not support LSC");
 
       ERROR_IF(lsc_opcode_has_transpose(lsc_msg_desc_opcode(devinfo, desc)) &&

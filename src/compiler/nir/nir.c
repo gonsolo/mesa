@@ -48,6 +48,10 @@ static const struct debug_named_value nir_debug_control[] = {
      "Test serialize and deserialize shader at each successful lowering/optimization call" },
    { "novalidate", NIR_DEBUG_NOVALIDATE,
      "Disable shader validation at each successful lowering/optimization call" },
+   { "extended_validation", NIR_DEBUG_EXTENDED_VALIDATION,
+     "Validate even if a pass does not make progress and test that it properly preserves all types of metadata. This can be very slow" },
+   { "invalidate_metadata", NIR_DEBUG_INVALIDATE_METADATA,
+     "Invalidate metadata before passes to try to find passes which don't require metadata that they use. This overrides NIR_DEBUG=extended_validation somewhat" },
    { "tgsi", NIR_DEBUG_TGSI,
      "Dump NIR/TGSI shaders when doing a NIR<->TGSI translation" },
    { "print", NIR_DEBUG_PRINT,
@@ -209,6 +213,11 @@ nir_shader_create(void *mem_ctx,
       shader->info = *si;
    } else {
       shader->info.stage = stage;
+
+      /* Assume there is no known next stage, this is the case for
+       * nir_builder_init_simple_shaders for example.
+       */
+      shader->info.next_stage = MESA_SHADER_NONE;
    }
 
    exec_list_make_empty(&shader->functions);
@@ -420,12 +429,13 @@ nir_find_state_variable(nir_shader *s,
    return NULL;
 }
 
-nir_variable *nir_find_sampler_variable_with_tex_index(nir_shader *shader,
-                                                       unsigned texture_index)
+nir_variable *
+nir_find_sampler_variable_with_tex_index(nir_shader *shader,
+                                         unsigned texture_index)
 {
    nir_foreach_variable_with_modes(var, shader, nir_var_uniform) {
       unsigned size =
-          glsl_type_is_array(var->type) ? glsl_array_size(var->type) : 1;
+         glsl_type_is_array(var->type) ? glsl_array_size(var->type) : 1;
       if ((glsl_type_is_texture(glsl_without_array(var->type)) ||
            glsl_type_is_sampler(glsl_without_array(var->type))) &&
           (var->data.binding == texture_index ||
@@ -2228,13 +2238,7 @@ nir_function_impl_lower_instructions(nir_function_impl *impl,
       }
    }
 
-   if (progress) {
-      nir_metadata_preserve(impl, preserved);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
-
-   return progress;
+   return nir_progress(progress, impl, preserved);
 }
 
 bool
@@ -2894,7 +2898,7 @@ nir_alu_type
 nir_get_nir_type_for_glsl_base_type(enum glsl_base_type base_type)
 {
    switch (base_type) {
-   /* clang-format off */
+      /* clang-format off */
    case GLSL_TYPE_BOOL:    return nir_type_bool1;
    case GLSL_TYPE_UINT:    return nir_type_uint32;
    case GLSL_TYPE_INT:     return nir_type_int32;
@@ -3167,6 +3171,7 @@ nir_tex_instr_need_sampler(const nir_tex_instr *instr)
    case nir_texop_texture_samples:
    case nir_texop_samples_identical:
    case nir_texop_descriptor_amd:
+   case nir_texop_image_min_lod_agx:
       return false;
    default:
       return true;
@@ -3212,6 +3217,7 @@ nir_tex_instr_result_size(const nir_tex_instr *instr)
    case nir_texop_samples_identical:
    case nir_texop_fragment_mask_fetch_amd:
    case nir_texop_lod_bias_agx:
+   case nir_texop_image_min_lod_agx:
    case nir_texop_has_custom_border_color_agx:
       return 1;
 
@@ -3247,6 +3253,7 @@ nir_tex_instr_is_query(const nir_tex_instr *instr)
    case nir_texop_descriptor_amd:
    case nir_texop_sampler_descriptor_amd:
    case nir_texop_lod_bias_agx:
+   case nir_texop_image_min_lod_agx:
    case nir_texop_custom_border_color_agx:
    case nir_texop_has_custom_border_color_agx:
    case nir_texop_hdr_dim_nv:
@@ -3335,6 +3342,7 @@ nir_tex_instr_src_type(const nir_tex_instr *instr, unsigned src)
    case nir_tex_src_sampler_deref_intrinsic:
    case nir_tex_src_texture_deref_intrinsic:
    case nir_tex_src_ms_mcs_intel:
+   case nir_tex_src_lod_bias_min_agx:
    case nir_tex_src_texture_deref:
    case nir_tex_src_sampler_deref:
    case nir_tex_src_texture_offset:
@@ -3641,4 +3649,3 @@ nir_atomic_op_to_alu(nir_atomic_op op)
 
    unreachable("Invalid nir_atomic_op");
 }
-

@@ -3,10 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_builder.h"
-
-using namespace brw;
 
 /**
  * Split large virtual GRFs into separate components if we can.
@@ -22,7 +20,7 @@ using namespace brw;
  * elimination and coalescing.
  */
 bool
-brw_opt_split_virtual_grfs(fs_visitor &s)
+brw_opt_split_virtual_grfs(brw_shader &s)
 {
    /* Compact the register file so we eliminate dead vgrfs.  This
     * only defines split points for live registers, so if we have
@@ -117,7 +115,7 @@ brw_opt_split_virtual_grfs(fs_visitor &s)
             has_splits = true;
             vgrf_has_split[i] = true;
             assert(offset <= MAX_VGRF_SIZE(s.devinfo));
-            unsigned grf = s.alloc.allocate(offset);
+            unsigned grf = brw_allocate_vgrf_units(s, offset).nr;
             for (unsigned k = reg - offset; k < reg; k++)
                new_virtual_grf[k] = grf;
             offset = 0;
@@ -197,7 +195,8 @@ brw_opt_split_virtual_grfs(fs_visitor &s)
          }
       }
    }
-   s.invalidate_analysis(DEPENDENCY_INSTRUCTION_DETAIL | DEPENDENCY_VARIABLES);
+   s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTION_DETAIL |
+                         BRW_DEPENDENCY_VARIABLES);
 
    progress = true;
 
@@ -221,7 +220,7 @@ cleanup:
  * overhead.
  */
 bool
-brw_opt_compact_virtual_grfs(fs_visitor &s)
+brw_opt_compact_virtual_grfs(brw_shader &s)
 {
    bool progress = false;
    int *remap_table = new int[s.alloc.count];
@@ -249,7 +248,8 @@ brw_opt_compact_virtual_grfs(fs_visitor &s)
       } else {
          remap_table[i] = new_index;
          s.alloc.sizes[new_index] = s.alloc.sizes[i];
-         s.invalidate_analysis(DEPENDENCY_INSTRUCTION_DETAIL | DEPENDENCY_VARIABLES);
+         s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTION_DETAIL |
+                               BRW_DEPENDENCY_VARIABLES);
          ++new_index;
       }
    }

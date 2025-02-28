@@ -118,7 +118,7 @@ static int r300_get_video_param(struct pipe_screen *screen,
       case PIPE_VIDEO_CAP_MAX_WIDTH:
       case PIPE_VIDEO_CAP_MAX_HEIGHT:
          return vl_video_buffer_max_size(screen);
-      case PIPE_VIDEO_CAP_PREFERED_FORMAT:
+      case PIPE_VIDEO_CAP_PREFERRED_FORMAT:
          return PIPE_FORMAT_NV12;
       case PIPE_VIDEO_CAP_PREFERS_INTERLACED:
          return false;
@@ -543,7 +543,6 @@ static void r300_init_screen_caps(struct r300_screen* r300screen)
    caps->allow_mapped_buffers_during_execution = true;
    caps->legacy_math_rules = true;
    caps->tgsi_texcoord = true;
-   caps->call_finalize_nir_in_linker = true;
 
    caps->texture_transfer_modes = PIPE_TEXTURE_TRANSFER_BLIT;
 

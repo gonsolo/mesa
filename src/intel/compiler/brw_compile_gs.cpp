@@ -4,15 +4,13 @@
  */
 
 #include "brw_eu.h"
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_builder.h"
 #include "brw_generator.h"
 #include "brw_prim.h"
 #include "brw_nir.h"
 #include "brw_private.h"
 #include "dev/intel_debug.h"
-
-using namespace brw;
 
 static const GLuint gl_prim_to_hw_prim[MESA_PRIM_TRIANGLE_STRIP_ADJACENCY+1] = {
    [MESA_PRIM_POINTS] =_3DPRIM_POINTLIST,
@@ -32,7 +30,7 @@ static const GLuint gl_prim_to_hw_prim[MESA_PRIM_TRIANGLE_STRIP_ADJACENCY+1] = {
 };
 
 static void
-brw_emit_gs_thread_end(fs_visitor &s)
+brw_emit_gs_thread_end(brw_shader &s)
 {
    assert(s.stage == MESA_SHADER_GEOMETRY);
 
@@ -70,7 +68,7 @@ brw_emit_gs_thread_end(fs_visitor &s)
 }
 
 static void
-brw_assign_gs_urb_setup(fs_visitor &s)
+brw_assign_gs_urb_setup(brw_shader &s)
 {
    assert(s.stage == MESA_SHADER_GEOMETRY);
 
@@ -86,11 +84,11 @@ brw_assign_gs_urb_setup(fs_visitor &s)
 }
 
 static bool
-run_gs(fs_visitor &s)
+run_gs(brw_shader &s)
 {
    assert(s.stage == MESA_SHADER_GEOMETRY);
 
-   s.payload_ = new gs_thread_payload(s);
+   s.payload_ = new brw_gs_thread_payload(s);
 
    const brw_builder bld = brw_builder(&s).at_end();
 
@@ -151,9 +149,7 @@ brw_compile_gs(const struct brw_compiler *compiler,
 
    const bool debug_enabled = brw_should_print_shader(nir, DEBUG_GS);
 
-   prog_data->base.base.stage = MESA_SHADER_GEOMETRY;
-   prog_data->base.base.ray_queries = nir->info.ray_queries;
-   prog_data->base.base.total_scratch = 0;
+   brw_prog_data_init(&prog_data->base.base, &params->base);
 
    /* The GLSL linker will have already matched up GS inputs and the outputs
     * of prior stages.  The driver does extend VS outputs in some cases, but
@@ -351,7 +347,7 @@ brw_compile_gs(const struct brw_compiler *compiler,
       brw_print_vue_map(stderr, &prog_data->base.vue_map, MESA_SHADER_GEOMETRY);
    }
 
-   fs_visitor v(compiler, &params->base, &key->base, &prog_data->base.base,
+   brw_shader v(compiler, &params->base, &key->base, &prog_data->base.base,
                 nir, dispatch_width,
                 params->base.stats != NULL, debug_enabled);
    v.gs.control_data_bits_per_vertex = control_data_bits_per_vertex;
@@ -384,4 +380,3 @@ brw_compile_gs(const struct brw_compiler *compiler,
 
    return NULL;
 }
-

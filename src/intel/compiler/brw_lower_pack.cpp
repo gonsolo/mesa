@@ -22,14 +22,12 @@
  */
 
 #include "util/half_float.h"
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_cfg.h"
 #include "brw_builder.h"
 
-using namespace brw;
-
 bool
-brw_lower_pack(fs_visitor &s)
+brw_lower_pack(brw_shader &s)
 {
    bool progress = false;
 
@@ -79,7 +77,7 @@ brw_lower_pack(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS);
 
    return progress;
 }

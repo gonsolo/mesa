@@ -191,6 +191,7 @@
 
 .intel-manual-rules:
   stage: intel-postmerge
+  extends: .no-auto-retry
   rules:
     - !reference [.test, rules]
     - !reference [.iris-manual-rules, rules]
@@ -217,6 +218,30 @@
     HWCI_KERNEL_MODULES: xe
     RUNNER_TAG: mesa-ci-x86-64-lava-acer-cbv514-1h-34uz-brya
     LAVA_CMDLINE: "i915.force_probe=!46b3 xe.force_probe=46b3"
+    INTEL_XE_IGNORE_EXPERIMENTAL_WARNING: 1
+
+# Status: https://lava.collabora.dev/scheduler/device_type/acer-chromebox-cxi5-brask
+.lava-acer-chromebox-cxi5-brask:x86_64:
+  variables:
+    DEVICE_TYPE: acer-chromebox-cxi5-brask
+    FARM: collabora
+    FDO_CI_CONCURRENT: 6
+    GPU_VERSION: anv-adl
+    HWCI_KERNEL_MODULES: xe
+    RUNNER_TAG: mesa-ci-x86-64-lava-acer-chromebox-cxi5-brask
+    LAVA_CMDLINE: "i915.force_probe=!46b3 xe.force_probe=46b3"
+    INTEL_XE_IGNORE_EXPERIMENTAL_WARNING: 1
+
+# Status: https://lava.collabora.dev/scheduler/device_type/acer-n20q11-r856ltn-p1s2-nissa
+.lava-acer-n20q11-r856ltn-p1s2-nissa:x86_64:
+  variables:
+    DEVICE_TYPE: acer-n20q11-r856ltn-p1s2-nissa
+    FARM: collabora
+    FDO_CI_CONCURRENT: 5
+    GPU_VERSION: anv-adl
+    HWCI_KERNEL_MODULES: xe
+    RUNNER_TAG: mesa-ci-x86-64-lava-acer-n20q11-r856ltn-p1s2-nissa
+    LAVA_CMDLINE: "i915.force_probe=!46d0 xe.force_probe=46d0"
     INTEL_XE_IGNORE_EXPERIMENTAL_WARNING: 1
 
 # Status: https://lava.collabora.dev/scheduler/device_type/asus-C523NA-A20057-coral
@@ -326,6 +351,8 @@
     - .anv-rules
   variables:
     DRIVER_NAME: anv
+    ANV_VIDEO_DECODE: "true"
+    ANV_VIDEO_ENCODE: "true"
 
 .iris-test:
   extends:
@@ -343,11 +370,9 @@
 .anv-angle-test:
   extends:
     - .anv-test
+    - .test-angle
   variables:
     VK_DRIVER: intel
-    USE_ANGLE: 1
-    # ANGLE requires X11 running for some reason.
-    HWCI_START_XORG: 1
 
 ## Iris only
 .iris-apl-test:

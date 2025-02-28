@@ -26,12 +26,10 @@
  */
 
 #include "brw_eu.h"
-#include "brw_fs.h"
-#include "brw_fs_live_variables.h"
+#include "brw_shader.h"
+#include "brw_analysis.h"
 #include "brw_cfg.h"
 #include <new>
-
-using namespace brw;
 
 /** @file
  *
@@ -359,12 +357,12 @@ schedule_node::set_latency(const struct brw_isa_info *isa)
          break;
       }
 
-      case GFX6_SFID_DATAPORT_CONSTANT_CACHE:
+      case BRW_SFID_HDC_READ_ONLY:
          /* See FS_OPCODE_UNIFORM_PULL_CONSTANT_LOAD */
          latency = 200;
          break;
 
-      case GFX6_SFID_DATAPORT_RENDER_CACHE:
+      case BRW_SFID_RENDER_CACHE:
          switch (brw_fb_desc_msg_type(isa->devinfo, inst->desc)) {
          case GFX7_DATAPORT_RC_TYPED_SURFACE_WRITE:
          case GFX7_DATAPORT_RC_TYPED_SURFACE_READ:
@@ -373,6 +371,7 @@ schedule_node::set_latency(const struct brw_isa_info *isa)
             break;
 
          case GFX7_DATAPORT_RC_TYPED_ATOMIC_OP:
+         case GFX7_DATAPORT_RC_MEMORY_FENCE:
             /* See also SHADER_OPCODE_TYPED_ATOMIC */
             latency = 14000;
             break;
@@ -387,7 +386,7 @@ schedule_node::set_latency(const struct brw_isa_info *isa)
          }
          break;
 
-      case GFX7_SFID_DATAPORT_DATA_CACHE:
+      case BRW_SFID_HDC0:
          switch ((inst->desc >> 14) & 0x1f) {
          case BRW_DATAPORT_READ_MESSAGE_OWORD_BLOCK_READ:
          case GFX7_DATAPORT_DC_UNALIGNED_OWORD_BLOCK_READ:
@@ -450,12 +449,16 @@ schedule_node::set_latency(const struct brw_isa_info *isa)
             latency = 14000;
             break;
 
+         case GFX7_DATAPORT_DC_MEMORY_FENCE:
+            latency = 14000;
+            break;
+
          default:
             unreachable("Unknown data cache message");
          }
          break;
 
-      case HSW_SFID_DATAPORT_DATA_CACHE_1:
+      case BRW_SFID_HDC1:
          switch (brw_dp_desc_msg_type(isa->devinfo, inst->desc)) {
          case HSW_DATAPORT_DC_PORT1_UNTYPED_SURFACE_READ:
          case HSW_DATAPORT_DC_PORT1_UNTYPED_SURFACE_WRITE:
@@ -489,13 +492,13 @@ schedule_node::set_latency(const struct brw_isa_info *isa)
          }
          break;
 
-      case GFX7_SFID_PIXEL_INTERPOLATOR:
+      case BRW_SFID_PIXEL_INTERPOLATOR:
          latency = 50; /* TODO */
          break;
 
-      case GFX12_SFID_UGM:
-      case GFX12_SFID_TGM:
-      case GFX12_SFID_SLM:
+      case BRW_SFID_UGM:
+      case BRW_SFID_TGM:
+      case BRW_SFID_SLM:
          switch (lsc_msg_desc_opcode(isa->devinfo, inst->desc)) {
          case LSC_OP_LOAD:
          case LSC_OP_STORE:
@@ -531,8 +534,8 @@ schedule_node::set_latency(const struct brw_isa_info *isa)
          break;
 
       case BRW_SFID_MESSAGE_GATEWAY:
-      case GEN_RT_SFID_BINDLESS_THREAD_DISPATCH: /* or THREAD_SPAWNER */
-      case GEN_RT_SFID_RAY_TRACE_ACCELERATOR:
+      case BRW_SFID_BINDLESS_THREAD_DISPATCH: /* or THREAD_SPAWNER */
+      case BRW_SFID_RAY_TRACE_ACCELERATOR:
          /* TODO.
           *
           * We'll assume for the moment that this is pretty quick as it
@@ -580,7 +583,7 @@ schedule_node::set_latency(const struct brw_isa_info *isa)
 
 class brw_instruction_scheduler {
 public:
-   brw_instruction_scheduler(void *mem_ctx, const fs_visitor *s, int grf_count, int hw_reg_count,
+   brw_instruction_scheduler(void *mem_ctx, const brw_shader *s, int grf_count, int hw_reg_count,
                          int block_count, bool post_reg_alloc);
 
    void add_barrier_deps(schedule_node *n);
@@ -643,7 +646,7 @@ public:
 
    bool post_reg_alloc;
    int grf_count;
-   const fs_visitor *s;
+   const brw_shader *s;
 
    /**
     * Last instruction to have written the grf (or a channel in the grf, for the
@@ -698,7 +701,7 @@ public:
    int *hw_reads_remaining;
 };
 
-brw_instruction_scheduler::brw_instruction_scheduler(void *mem_ctx, const fs_visitor *s,
+brw_instruction_scheduler::brw_instruction_scheduler(void *mem_ctx, const brw_shader *s,
                                              int grf_count, int hw_reg_count,
                                              int block_count, bool post_reg_alloc)
    : s(s)
@@ -822,7 +825,7 @@ brw_instruction_scheduler::count_reads_remaining(const brw_inst *inst)
 void
 brw_instruction_scheduler::setup_liveness(cfg_t *cfg)
 {
-   const fs_live_variables &live = s->live_analysis.require();
+   const brw_live_variables &live = s->live_analysis.require();
 
    /* First, compute liveness on a per-GRF level using the in/out sets from
     * liveness calculation.
@@ -1084,7 +1087,7 @@ static bool
 is_scheduling_barrier(const brw_inst *inst)
 {
    return inst->opcode == SHADER_OPCODE_HALT_TARGET ||
-          inst->is_control_flow() ||
+          (inst->is_control_flow() && inst->opcode != BRW_OPCODE_HALT) ||
           inst->has_side_effects();
 }
 
@@ -1253,7 +1256,7 @@ brw_instruction_scheduler::calculate_deps()
       /* Address registers have virtual identifier, allowing us to identify
        * what instructions needs the values written to the register. The
        * address register is written/read in pairs of instructions (enforced
-       * by the brw_fs_validate.cpp).
+       * by the brw_validate.cpp).
        *
        * To allow scheduling of SEND messages, out of order, without the
        * address register tracking generating serialized dependency between
@@ -1821,7 +1824,7 @@ brw_instruction_scheduler::run(brw_instruction_scheduler_mode mode)
 }
 
 brw_instruction_scheduler *
-brw_prepare_scheduler(fs_visitor &s, void *mem_ctx)
+brw_prepare_scheduler(brw_shader &s, void *mem_ctx)
 {
    const int grf_count = s.alloc.count;
 
@@ -1831,7 +1834,7 @@ brw_prepare_scheduler(fs_visitor &s, void *mem_ctx)
 }
 
 void
-brw_schedule_instructions_pre_ra(fs_visitor &s, brw_instruction_scheduler *sched,
+brw_schedule_instructions_pre_ra(brw_shader &s, brw_instruction_scheduler *sched,
                                  brw_instruction_scheduler_mode mode)
 {
    if (mode == BRW_SCHEDULE_NONE)
@@ -1839,11 +1842,11 @@ brw_schedule_instructions_pre_ra(fs_visitor &s, brw_instruction_scheduler *sched
 
    sched->run(mode);
 
-   s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS);
+   s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS);
 }
 
 void
-brw_schedule_instructions_post_ra(fs_visitor &s)
+brw_schedule_instructions_post_ra(brw_shader &s)
 {
    const bool post_reg_alloc = true;
    const int grf_count = reg_unit(s.devinfo) * s.grf_used;
@@ -1856,5 +1859,5 @@ brw_schedule_instructions_post_ra(fs_visitor &s)
 
    ralloc_free(mem_ctx);
 
-   s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS);
+   s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS);
 }

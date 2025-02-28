@@ -13,6 +13,7 @@
 #include "nir/nir.h"
 #include "nir/nir_builder.h"
 #include "nir/nir_xfb_info.h"
+#include "nir/radv_meta_nir.h"
 #include "nir/radv_nir.h"
 #include "spirv/nir_spirv.h"
 #include "util/memstream.h"
@@ -183,10 +184,18 @@ radv_optimize_nir(struct nir_shader *shader, bool optimize_conservatively)
       }
       NIR_LOOP_PASS_NOT_IDEMPOTENT(progress, skip, shader, nir_opt_if, nir_opt_if_optimize_phi_true_false);
       NIR_LOOP_PASS(progress, skip, shader, nir_opt_cse);
-      NIR_LOOP_PASS(progress, skip, shader, nir_opt_peephole_select, 8, true, true);
+
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = 8,
+         .indirect_load_ok = true,
+         .expensive_alu_ok = true,
+         .discard_ok = true,
+      };
+      NIR_LOOP_PASS(progress, skip, shader, nir_opt_peephole_select, &peephole_select_options);
       NIR_LOOP_PASS(progress, skip, shader, nir_opt_constant_folding);
       NIR_LOOP_PASS(progress, skip, shader, nir_opt_intrinsics);
       NIR_LOOP_PASS_NOT_IDEMPOTENT(progress, skip, shader, nir_opt_algebraic);
+      NIR_LOOP_PASS(progress, skip, shader, nir_opt_phi_to_bool);
 
       NIR_LOOP_PASS(progress, skip, shader, nir_opt_undef);
 
@@ -200,10 +209,8 @@ radv_optimize_nir(struct nir_shader *shader, bool optimize_conservatively)
    NIR_PASS(progress, shader, nir_remove_dead_variables,
             nir_var_function_temp | nir_var_shader_in | nir_var_shader_out | nir_var_mem_shared, NULL);
 
-   if (shader->info.stage == MESA_SHADER_FRAGMENT && shader->info.fs.uses_discard) {
-      NIR_PASS(progress, shader, nir_opt_conditional_discard);
+   if (shader->info.stage == MESA_SHADER_FRAGMENT && shader->info.fs.uses_discard)
       NIR_PASS(progress, shader, nir_opt_move_discards_to_top);
-   }
 
    NIR_PASS(progress, shader, nir_opt_move, nir_move_load_ubo);
 }
@@ -218,7 +225,15 @@ radv_optimize_nir_algebraic(nir_shader *nir, bool opt_offsets, bool opt_mqsad)
       NIR_PASS(_, nir, nir_opt_dce);
       NIR_PASS(_, nir, nir_opt_constant_folding);
       NIR_PASS(_, nir, nir_opt_cse);
-      NIR_PASS(_, nir, nir_opt_peephole_select, 3, true, true);
+
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = 3,
+         .indirect_load_ok = true,
+         .expensive_alu_ok = true,
+         .discard_ok = true,
+      };
+      NIR_PASS(_, nir, nir_opt_peephole_select, &peephole_select_options);
+      NIR_PASS(_, nir, nir_opt_phi_to_bool);
       NIR_PASS(more_algebraic, nir, nir_opt_algebraic);
       NIR_PASS(_, nir, nir_opt_generate_bfi);
       NIR_PASS(_, nir, nir_opt_remove_phis);
@@ -390,7 +405,7 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
       const struct nir_lower_sysvals_to_varyings_options sysvals_to_varyings = {
          .point_coord = true,
       };
-      NIR_PASS_V(nir, nir_lower_sysvals_to_varyings, &sysvals_to_varyings);
+      NIR_PASS(_, nir, nir_lower_sysvals_to_varyings, &sysvals_to_varyings);
 
       /* We have to lower away local constant initializers right before we
        * inline functions.  That way they get properly initialized at the top
@@ -419,7 +434,7 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
        */
       NIR_PASS(_, nir, nir_lower_variable_initializers, ~0);
 
-      NIR_PASS(_, nir, radv_nir_lower_cooperative_matrix, subgroup_size);
+      NIR_PASS(_, nir, radv_nir_lower_cooperative_matrix, pdev->info.gfx_level, subgroup_size);
 
       /* Split member structs.  We do this before lower_io_to_temporaries so that
        * it doesn't lower system values to temporaries by accident.
@@ -455,7 +470,7 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
 
       if (nir->info.stage == MESA_SHADER_VERTEX || nir->info.stage == MESA_SHADER_TESS_EVAL ||
           nir->info.stage == MESA_SHADER_GEOMETRY)
-         NIR_PASS_V(nir, nir_shader_gather_xfb_info);
+         nir_shader_gather_xfb_info(nir);
 
       nir_lower_doubles_options lower_doubles = nir->options->lower_doubles_options;
 
@@ -531,9 +546,9 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
 
    if (nir->info.stage == MESA_SHADER_VERTEX || nir->info.stage == MESA_SHADER_GEOMETRY ||
        nir->info.stage == MESA_SHADER_FRAGMENT) {
-      NIR_PASS_V(nir, nir_lower_io_to_temporaries, nir_shader_get_entrypoint(nir), true, true);
+      NIR_PASS(_, nir, nir_lower_io_to_temporaries, nir_shader_get_entrypoint(nir), true, true);
    } else if (nir->info.stage == MESA_SHADER_TESS_EVAL) {
-      NIR_PASS_V(nir, nir_lower_io_to_temporaries, nir_shader_get_entrypoint(nir), true, false);
+      NIR_PASS(_, nir, nir_lower_io_to_temporaries, nir_shader_get_entrypoint(nir), true, false);
    }
 
    NIR_PASS(_, nir, nir_split_var_copies);
@@ -784,7 +799,7 @@ radv_lower_ngg(struct radv_device *device, struct radv_shader_stage *ngg_stage,
       options.export_primitive_id_per_prim = info->outinfo.export_prim_id_per_primitive;
       options.instance_rate_inputs = gfx_state->vi.instance_rate_inputs << VERT_ATTRIB_GENERIC0;
 
-      NIR_PASS_V(nir, ac_nir_lower_ngg_nogs, &options);
+      NIR_PASS(_, nir, ac_nir_lower_ngg_nogs, &options);
 
       /* Increase ESGS ring size so the LLVM binary contains the correct LDS size. */
       ngg_stage->info.ngg_info.esgs_ring_size = nir->info.shared_size;
@@ -793,13 +808,13 @@ radv_lower_ngg(struct radv_device *device, struct radv_shader_stage *ngg_stage,
 
       options.gs_out_vtx_bytes = info->gs.gsvs_vertex_size;
 
-      NIR_PASS_V(nir, ac_nir_lower_ngg_gs, &options);
+      NIR_PASS(_, nir, ac_nir_lower_ngg_gs, &options);
    } else if (nir->info.stage == MESA_SHADER_MESH) {
       /* ACO aligns the workgroup size to the wave size. */
       unsigned hw_workgroup_size = ALIGN(info->workgroup_size, info->wave_size);
 
       bool scratch_ring = false;
-      NIR_PASS_V(nir, ac_nir_lower_ngg_mesh, &pdev->info, options.clip_cull_dist_mask,
+      NIR_PASS(_, nir, ac_nir_lower_ngg_mesh, &pdev->info, options.clip_cull_dist_mask,
                  options.vs_output_param_offset, options.has_param_exports, &scratch_ring, info->wave_size,
                  hw_workgroup_size, gfx_state->has_multiview_view_index, info->ms.has_query, pdev->mesh_fast_launch_2);
       ngg_stage->info.ms.needs_ms_scratch_ring = scratch_ring;
@@ -2478,7 +2493,7 @@ radv_shader_dma_get_submission(struct radv_device *device, struct radeon_winsys_
          goto fail;
    }
 
-   radv_sdma_copy_buffer(device, cs, radv_buffer_get_va(submission->bo), va, size);
+   radv_sdma_copy_memory(device, cs, radv_buffer_get_va(submission->bo), va, size);
    radv_cs_add_buffer(ws, cs, submission->bo);
    radv_cs_add_buffer(ws, cs, bo);
 
@@ -3136,7 +3151,7 @@ radv_create_trap_handler_shader(struct radv_device *device)
    radv_fill_nir_compiler_options(&options, device, NULL, radv_should_use_wgp_mode(device, stage, &info), dump_shader,
                                   false, false);
 
-   nir_builder b = radv_meta_init_shader(device, stage, "meta_trap_handler");
+   nir_builder b = radv_meta_nir_init_shader(device, stage, "meta_trap_handler");
 
    info.wave_size = 64;
    info.workgroup_size = 64;

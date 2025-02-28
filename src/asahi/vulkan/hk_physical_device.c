@@ -53,7 +53,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_16bit_storage = true,
       .KHR_bind_memory2 = true,
       .KHR_buffer_device_address = true,
-      .KHR_calibrated_timestamps = false,
+      .KHR_calibrated_timestamps = true,
       .KHR_copy_commands2 = true,
       .KHR_create_renderpass2 = true,
       .KHR_dedicated_allocation = true,
@@ -134,7 +134,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .EXT_attachment_feedback_loop_layout = true,
       .EXT_border_color_swizzle = true,
       .EXT_buffer_device_address = true,
-      .EXT_calibrated_timestamps = false,
+      .EXT_calibrated_timestamps = true,
       .EXT_conditional_rendering = false,
       .EXT_color_write_enable = true,
       .EXT_custom_border_color = true,
@@ -153,13 +153,14 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .EXT_global_priority = true,
       .EXT_global_priority_query = true,
       .EXT_graphics_pipeline_library = true,
+      .EXT_hdr_metadata = true,
       .EXT_host_query_reset = true,
       .EXT_host_image_copy = true,
       .EXT_image_2d_view_of_3d = true,
       .EXT_image_drm_format_modifier = true,
       .EXT_image_robustness = true,
       .EXT_image_sliced_view_of_3d = false,
-      .EXT_image_view_min_lod = false,
+      .EXT_image_view_min_lod = true,
       .EXT_index_type_uint8 = true,
       .EXT_inline_uniform_block = true,
       .EXT_line_rasterization = true,
@@ -212,6 +213,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
 
 static void
 hk_get_device_features(
+   const struct agx_device *dev, const struct hk_instance *instance,
    const struct vk_device_extension_table *supported_extensions,
    struct vk_features *features)
 {
@@ -260,15 +262,28 @@ hk_get_device_features(
       .shaderFloat64 = false,
       .shaderInt64 = true,
       .shaderInt16 = true,
-      .shaderResourceResidency = false,
+      .shaderResourceResidency = true,
       .shaderResourceMinLod = true,
-      .sparseBinding = false,
+      .sparseBinding = true,
+
+      /* We probably could advertise multisampled sparse but we don't have a use
+       * case yet and it isn't trivial.
+       */
       .sparseResidency2Samples = false,
       .sparseResidency4Samples = false,
       .sparseResidency8Samples = false,
-      .sparseResidencyAliased = false,
-      .sparseResidencyBuffer = false,
-      .sparseResidencyImage2D = false,
+      .sparseResidencyAliased = true,
+      .sparseResidencyImage2D = true,
+
+      /* We depend on soft fault to implement sparse residency on buffers with
+       * the appropriate semantics. Lifting this requirement would be possible
+       * but challenging, given the requirements imposed by
+       * sparseResidencyNonResidentStrict.
+       */
+      .sparseResidencyBuffer =
+         (dev->params.feat_compat & DRM_ASAHI_FEAT_SOFT_FAULTS),
+
+      /* This needs investigation. */
       .sparseResidencyImage3D = false,
       .variableMultisampleRate = false,
       .inheritedQueries = true,
@@ -317,7 +332,7 @@ hk_get_device_features(
       .descriptorBindingPartiallyBound = true,
       .descriptorBindingVariableDescriptorCount = true,
       .runtimeDescriptorArray = true,
-      .samplerFilterMinmax = false,
+      .samplerFilterMinmax = instance->fake_minmax,
       .scalarBlockLayout = true,
       .imagelessFramebuffer = true,
       .uniformBufferStandardLayout = true,
@@ -326,7 +341,7 @@ hk_get_device_features(
       .hostQueryReset = true,
       .timelineSemaphore = true,
       .bufferDeviceAddress = true,
-      .bufferDeviceAddressCaptureReplay = false,
+      .bufferDeviceAddressCaptureReplay = true,
       .bufferDeviceAddressMultiDevice = false,
       .vulkanMemoryModel = true,
       .vulkanMemoryModelDeviceScope = true,
@@ -516,7 +531,7 @@ hk_get_device_features(
 #endif
 
       /* VK_EXT_image_view_min_lod */
-      .minLod = false,
+      .minLod = true,
 
       /* VK_EXT_map_memory_placed */
       .memoryMapPlaced = false,
@@ -736,10 +751,18 @@ hk_get_device_properties(const struct agx_device *dev,
       .nonCoherentAtomSize = 64,
 
       /* Vulkan 1.0 sparse properties */
-      .sparseResidencyNonResidentStrict = false,
+      .sparseResidencyNonResidentStrict = true,
       .sparseResidencyAlignedMipSize = false,
-      .sparseResidencyStandard2DBlockShape = false,
+      .sparseResidencyStandard2DBlockShape = true,
+
+      /* We can implement the standard block size for MSAA 4x but maybe not MSAA
+       * 2x?
+       */
       .sparseResidencyStandard2DMultisampleBlockShape = false,
+
+      /* As far as I can tell, there is no way to implement this on G13. This
+       * is a shame because D3D12 requires it for FL12.2.
+       */
       .sparseResidencyStandard3DBlockShape = false,
 
       /* Vulkan 1.1 properties */
@@ -816,7 +839,7 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxDescriptorSetUpdateAfterBindSampledImages = HK_MAX_DESCRIPTORS,
       .maxDescriptorSetUpdateAfterBindStorageImages = HK_MAX_DESCRIPTORS,
       .maxDescriptorSetUpdateAfterBindInputAttachments = HK_MAX_DESCRIPTORS,
-      .filterMinmaxSingleComponentFormats = false,
+      .filterMinmaxSingleComponentFormats = instance->fake_minmax,
       .filterMinmaxImageComponentMapping = false,
       .maxTimelineSemaphoreValueDifference = UINT64_MAX,
       .framebufferIntegerColorSampleCounts = sample_counts,
@@ -1166,7 +1189,8 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    hk_get_device_extensions(instance, &supported_extensions);
 
    struct vk_features supported_features;
-   hk_get_device_features(&supported_extensions, &supported_features);
+   hk_get_device_features(&pdev->dev, instance, &supported_extensions,
+                          &supported_features);
 
    struct vk_properties properties;
    hk_get_device_properties(&pdev->dev, instance, &properties);
@@ -1216,10 +1240,9 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    assert(pdev->mem_heap_count <= ARRAY_SIZE(pdev->mem_heaps));
    assert(pdev->mem_type_count <= ARRAY_SIZE(pdev->mem_types));
 
-   /* TODO: VK_QUEUE_SPARSE_BINDING_BIT*/
    pdev->queue_families[pdev->queue_family_count++] = (struct hk_queue_family){
-      .queue_flags =
-         VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
+      .queue_flags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT |
+                     VK_QUEUE_TRANSFER_BIT | VK_QUEUE_SPARSE_BINDING_BIT,
 
       .queue_count = 1,
    };

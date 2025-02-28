@@ -19,7 +19,7 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
- * 
+ *
  * Authors:
  *    Mike Blumenkrantz <michael.blumenkrantz@gmail.com>
  */
@@ -29,7 +29,8 @@
 
 #include <vulkan/vulkan_core.h>
 
-#include "compiler/nir/nir.h"
+#include "compiler/nir/nir_defines.h"
+#include "compiler/nir/nir_shader_compiler_options.h"
 
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
@@ -38,6 +39,7 @@
 #include "pipebuffer/pb_cache.h"
 #include "pipebuffer/pb_slab.h"
 
+#include "util/blob.h"
 #include "util/disk_cache.h"
 #include "util/hash_table.h"
 #include "util/list.h"
@@ -100,15 +102,15 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
- 
+
 extern uint32_t zink_debug;
 extern bool zink_tracing;
- 
+
 #ifdef __cplusplus
 }
 #endif
 
- 
+
 /** enums */
 
 /* features for draw/program templates */
@@ -991,8 +993,9 @@ struct zink_shader_module {
 };
 
 struct zink_program {
-   struct pipe_reference reference;
+   EXCLUSIVE_CACHELINE(struct pipe_reference reference);
    struct zink_context *ctx;
+   void *ralloc_ctx;
    blake3_hash blake3;
    struct util_queue_fence cache_fence;
    struct u_rwlock pipeline_cache_lock;
@@ -1454,6 +1457,7 @@ struct zink_screen {
    uint8_t heap_map[ZINK_HEAP_MAX][VK_MAX_MEMORY_TYPES];  // mapping from zink heaps to memory type indices
    uint8_t heap_count[ZINK_HEAP_MAX];  // number of memory types per zink heap
    bool resizable_bar;
+   bool always_cached_upload;
 
    uint64_t total_video_mem;
    uint64_t clamp_video_mem;

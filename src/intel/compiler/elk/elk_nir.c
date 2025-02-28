@@ -663,9 +663,16 @@ elk_nir_optimize(nir_shader *nir, bool is_scalar,
       const bool is_vec4_tessellation = !is_scalar &&
          (nir->info.stage == MESA_SHADER_TESS_CTRL ||
           nir->info.stage == MESA_SHADER_TESS_EVAL);
-      OPT(nir_opt_peephole_select, 0, !is_vec4_tessellation, false);
-      OPT(nir_opt_peephole_select, 8, !is_vec4_tessellation,
-          devinfo->ver >= 6);
+
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = 0,
+         .indirect_load_ok = !is_vec4_tessellation,
+      };
+      OPT(nir_opt_peephole_select, &peephole_select_options);
+
+      peephole_select_options.limit = 8;
+      peephole_select_options.expensive_alu_ok = devinfo->ver >= 6;
+      OPT(nir_opt_peephole_select, &peephole_select_options);
 
       OPT(nir_opt_intrinsics);
       OPT(nir_opt_idiv_const, 32);
@@ -703,7 +710,12 @@ elk_nir_optimize(nir_shader *nir, bool is_scalar,
          OPT(nir_opt_dce);
       }
       OPT(nir_opt_if, nir_opt_if_optimize_phi_true_false);
-      OPT(nir_opt_conditional_discard);
+
+      nir_opt_peephole_select_options peephole_discard_options = {
+         .limit = 0,
+         .discard_ok = true,
+      };
+      OPT(nir_opt_peephole_select, &peephole_discard_options);
       if (nir->options->max_unroll_iterations != 0) {
          OPT(nir_opt_loop_unroll);
       }
@@ -1421,9 +1433,16 @@ elk_postprocess_nir(nir_shader *nir, const struct elk_compiler *compiler,
       const bool is_vec4_tessellation = !is_scalar &&
          (nir->info.stage == MESA_SHADER_TESS_CTRL ||
           nir->info.stage == MESA_SHADER_TESS_EVAL);
-      OPT(nir_opt_peephole_select, 0, is_vec4_tessellation, false);
-      OPT(nir_opt_peephole_select, 1, is_vec4_tessellation,
-          compiler->devinfo->ver >= 6);
+
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = 0,
+         .indirect_load_ok = !is_vec4_tessellation,
+      };
+      OPT(nir_opt_peephole_select, &peephole_select_options);
+
+      peephole_select_options.limit = 1;
+      peephole_select_options.expensive_alu_ok = compiler->devinfo->ver >= 6;
+      OPT(nir_opt_peephole_select, &peephole_select_options);
    }
 
    do {
@@ -1468,9 +1487,6 @@ elk_postprocess_nir(nir_shader *nir, const struct elk_compiler *compiler,
    OPT(nir_opt_move, nir_move_comparisons);
    OPT(nir_opt_dead_cf);
 
-   bool divergence_analysis_dirty = false;
-   NIR_PASS_V(nir, nir_divergence_analysis);
-
    /* TODO: Enable nir_opt_uniform_atomics on Gfx7.x too.
     * It currently fails Vulkan tests on Haswell for an unknown reason.
     */
@@ -1486,16 +1502,10 @@ elk_postprocess_nir(nir_shader *nir, const struct elk_compiler *compiler,
 
       if (OPT(nir_lower_int64))
          elk_nir_optimize(nir, is_scalar, devinfo);
-
-      divergence_analysis_dirty = true;
    }
 
    /* Do this only after the last opt_gcm. GCM will undo this lowering. */
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      if (divergence_analysis_dirty) {
-         NIR_PASS_V(nir, nir_divergence_analysis);
-      }
-
       OPT(intel_nir_lower_non_uniform_barycentric_at_sample);
    }
 

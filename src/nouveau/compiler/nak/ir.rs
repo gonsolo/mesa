@@ -1305,6 +1305,10 @@ impl Src {
         }
     }
 
+    pub fn is_nonzero(&self) -> bool {
+        matches!(self.as_u32(), Some(x) if x != 0)
+    }
+
     pub fn is_fneg_zero(&self, src_type: SrcType) -> bool {
         match self.fold_imm(src_type).src_ref {
             SrcRef::Imm32(0x00008000) => src_type == SrcType::F16,
@@ -2402,7 +2406,9 @@ pub enum MemEvictionPriority {
     First,
     Normal,
     Last,
+    LastUse,
     Unchanged,
+    NoAllocate,
 }
 
 impl fmt::Display for MemEvictionPriority {
@@ -2411,7 +2417,9 @@ impl fmt::Display for MemEvictionPriority {
             MemEvictionPriority::First => write!(f, ".ef"),
             MemEvictionPriority::Normal => Ok(()),
             MemEvictionPriority::Last => write!(f, ".el"),
-            MemEvictionPriority::Unchanged => write!(f, ".lu"),
+            MemEvictionPriority::LastUse => write!(f, ".lu"),
+            MemEvictionPriority::Unchanged => write!(f, ".eu"),
+            MemEvictionPriority::NoAllocate => write!(f, ".na"),
         }
     }
 }
@@ -3781,6 +3789,162 @@ impl_display_for_op!(OpISetP);
 
 #[repr(C)]
 #[derive(Clone, SrcsAsSlice, DstsAsSlice)]
+pub struct OpLea {
+    #[dst_type(GPR)]
+    pub dst: Dst,
+
+    #[dst_type(Pred)]
+    pub overflow: Dst,
+
+    #[src_type(ALU)]
+    pub a: Src,
+
+    #[src_type(I32)]
+    pub b: Src,
+
+    #[src_type(ALU)]
+    pub a_high: Src, // High 32-bits of a if .dst_high is set
+
+    pub shift: u8,
+    pub dst_high: bool,
+    pub intermediate_mod: SrcMod, // Modifier for shifted temporary (a << shift)
+}
+
+impl Foldable for OpLea {
+    fn fold(&self, _sm: &dyn ShaderModel, f: &mut OpFoldData<'_>) {
+        let a = f.get_u32_src(self, &self.a);
+        let mut b = f.get_u32_src(self, &self.b);
+        let a_high = f.get_u32_src(self, &self.a_high);
+
+        let mut overflow = false;
+
+        let mut shift_result = if self.dst_high {
+            let a = a as u64;
+            let a_high = a_high as u64;
+            let a = (a_high << 32) | a;
+
+            (a >> (32 - self.shift)) as u32
+        } else {
+            a << self.shift
+        };
+
+        if self.intermediate_mod.is_ineg() {
+            let o;
+            (shift_result, o) = u32::overflowing_add(!shift_result, 1);
+            overflow |= o;
+        }
+
+        if self.b.src_mod.is_ineg() {
+            let o;
+            (b, o) = u32::overflowing_add(!b, 1);
+            overflow |= o;
+        }
+
+        let (dst, o) = u32::overflowing_add(shift_result, b);
+        overflow |= o;
+
+        f.set_u32_dst(self, &self.dst, dst as u32);
+        f.set_pred_dst(self, &self.overflow, overflow);
+    }
+}
+
+impl DisplayOp for OpLea {
+    fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "lea")?;
+        if self.dst_high {
+            write!(f, ".hi")?;
+        }
+        write!(f, " {} {} {}", self.a, self.shift, self.b)?;
+        if self.dst_high {
+            write!(f, " {}", self.a_high)?;
+        }
+        Ok(())
+    }
+}
+impl_display_for_op!(OpLea);
+
+#[repr(C)]
+#[derive(Clone, SrcsAsSlice, DstsAsSlice)]
+pub struct OpLeaX {
+    #[dst_type(GPR)]
+    pub dst: Dst,
+
+    #[dst_type(Pred)]
+    pub overflow: Dst,
+
+    #[src_type(ALU)]
+    pub a: Src,
+
+    #[src_type(B32)]
+    pub b: Src,
+
+    #[src_type(ALU)]
+    pub a_high: Src, // High 32-bits of a if .dst_high is set
+
+    #[src_type(Pred)]
+    pub carry: Src,
+
+    pub shift: u8,
+    pub dst_high: bool,
+    pub intermediate_mod: SrcMod, // Modifier for shifted temporary (a << shift)
+}
+
+impl Foldable for OpLeaX {
+    fn fold(&self, _sm: &dyn ShaderModel, f: &mut OpFoldData<'_>) {
+        let a = f.get_u32_src(self, &self.a);
+        let mut b = f.get_u32_src(self, &self.b);
+        let a_high = f.get_u32_src(self, &self.a_high);
+        let carry = f.get_pred_src(self, &self.carry);
+
+        let mut overflow = false;
+
+        let mut shift_result = if self.dst_high {
+            let a = a as u64;
+            let a_high = a_high as u64;
+            let a = (a_high << 32) | a;
+
+            (a >> (32 - self.shift)) as u32
+        } else {
+            a << self.shift
+        };
+
+        if self.intermediate_mod.is_bnot() {
+            shift_result = !shift_result;
+        }
+
+        if self.b.src_mod.is_bnot() {
+            b = !b;
+        }
+
+        let (dst, o) = u32::overflowing_add(shift_result, b);
+        overflow |= o;
+
+        let (dst, o) = u32::overflowing_add(dst, if carry { 1 } else { 0 });
+        overflow |= o;
+
+        f.set_u32_dst(self, &self.dst, dst as u32);
+        f.set_pred_dst(self, &self.overflow, overflow);
+    }
+}
+
+impl DisplayOp for OpLeaX {
+    fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "lea.x")?;
+        if self.dst_high {
+            write!(f, ".hi")?;
+        }
+        write!(f, " {} {} {}", self.a, self.shift, self.b)?;
+        if self.dst_high {
+            write!(f, " {}", self.a_high)?;
+        }
+        write!(f, " {}", self.carry)?;
+        Ok(())
+    }
+}
+impl_display_for_op!(OpLeaX);
+
+#[repr(C)]
+#[derive(Clone, SrcsAsSlice, DstsAsSlice)]
 pub struct OpLop2 {
     #[dst_type(GPR)]
     pub dst: Dst,
@@ -4671,6 +4835,7 @@ pub struct OpTex {
     pub lod_mode: TexLodMode,
     pub z_cmpr: bool,
     pub offset: bool,
+    pub mem_eviction_priority: MemEvictionPriority,
     pub mask: u8,
 }
 
@@ -4686,6 +4851,7 @@ impl DisplayOp for OpTex {
         if self.z_cmpr {
             write!(f, ".dc")?;
         }
+        write!(f, "{}", self.mem_eviction_priority)?;
         write!(f, " {} {} {}", self.tex, self.srcs[0], self.srcs[1])
     }
 }
@@ -4706,6 +4872,7 @@ pub struct OpTld {
     pub is_ms: bool,
     pub lod_mode: TexLodMode,
     pub offset: bool,
+    pub mem_eviction_priority: MemEvictionPriority,
     pub mask: u8,
 }
 
@@ -4721,6 +4888,7 @@ impl DisplayOp for OpTld {
         if self.is_ms {
             write!(f, ".ms")?;
         }
+        write!(f, "{}", self.mem_eviction_priority)?;
         write!(f, " {} {} {}", self.tex, self.srcs[0], self.srcs[1])
     }
 }
@@ -4741,6 +4909,7 @@ pub struct OpTld4 {
     pub comp: u8,
     pub offset_mode: Tld4OffsetMode,
     pub z_cmpr: bool,
+    pub mem_eviction_priority: MemEvictionPriority,
     pub mask: u8,
 }
 
@@ -4750,6 +4919,10 @@ impl DisplayOp for OpTld4 {
         if self.offset_mode != Tld4OffsetMode::None {
             write!(f, ".{}", self.offset_mode)?;
         }
+        if self.z_cmpr {
+            write!(f, ".dc")?;
+        }
+        write!(f, "{}", self.mem_eviction_priority)?;
         write!(f, " {} {} {}", self.tex, self.srcs[0], self.srcs[1])
     }
 }
@@ -4793,6 +4966,7 @@ pub struct OpTxd {
 
     pub dim: TexDim,
     pub offset: bool,
+    pub mem_eviction_priority: MemEvictionPriority,
     pub mask: u8,
 }
 
@@ -4802,6 +4976,7 @@ impl DisplayOp for OpTxd {
         if self.offset {
             write!(f, ".aoffi")?;
         }
+        write!(f, "{}", self.mem_eviction_priority)?;
         write!(f, " {} {} {}", self.tex, self.srcs[0], self.srcs[1])
     }
 }
@@ -6219,6 +6394,8 @@ pub enum Op {
     IMul(OpIMul),
     IMnMx(OpIMnMx),
     ISetP(OpISetP),
+    Lea(OpLea),
+    LeaX(OpLeaX),
     Lop2(OpLop2),
     Lop3(OpLop3),
     PopC(OpPopC),
@@ -6712,6 +6889,8 @@ impl Instr {
             | Op::IMad64(_)
             | Op::IMnMx(_)
             | Op::ISetP(_)
+            | Op::Lea(_)
+            | Op::LeaX(_)
             | Op::Lop2(_)
             | Op::Lop3(_)
             | Op::Shf(_)
@@ -7274,9 +7453,15 @@ pub enum ShaderIoInfo {
 
 #[derive(Debug)]
 pub struct ShaderInfo {
+    pub max_warps_per_sm: u32,
     pub num_gprs: u8,
     pub num_control_barriers: u8,
     pub num_instrs: u32,
+    pub num_static_cycles: u32,
+    pub num_spills_to_mem: u32,
+    pub num_fills_from_mem: u32,
+    pub num_spills_to_reg: u32,
+    pub num_fills_from_reg: u32,
     pub slm_size: u32,
     pub max_crs_depth: u32,
     pub uses_global_mem: bool,
@@ -7315,6 +7500,19 @@ pub fn gpr_limit_from_local_size(local_size: &[u16; 3]) -> u32 {
     // GPRs are allocated in multiples of 8
     let out = prev_multiple_of(out, 8);
     min(out, 255)
+}
+
+pub fn max_warps_per_sm(gprs: u32) -> u32 {
+    fn prev_multiple_of(x: u32, y: u32) -> u32 {
+        (x / y) * y
+    }
+
+    // TODO: Take local_size and shared mem limit into account for compute
+    let total_regs: u32 = 65536;
+    // GPRs are allocated in multiples of 8
+    let gprs = gprs.next_multiple_of(8);
+    let max_warps = prev_multiple_of((total_regs / 32) / gprs, 4);
+    min(max_warps, 48)
 }
 
 pub struct Shader<'a> {
@@ -7356,11 +7554,13 @@ impl Shader<'_> {
 
     pub fn gather_info(&mut self) {
         let mut num_instrs = 0;
+        let mut num_static_cycles = 0;
         let mut uses_global_mem = false;
         let mut writes_global_mem = false;
 
         self.for_each_instr(&mut |instr| {
             num_instrs += 1;
+            num_static_cycles += instr.deps.delay as u32;
 
             if !uses_global_mem {
                 uses_global_mem = instr.uses_global_mem();
@@ -7372,8 +7572,13 @@ impl Shader<'_> {
         });
 
         self.info.num_instrs = num_instrs;
+        self.info.num_static_cycles = num_static_cycles;
         self.info.uses_global_mem = uses_global_mem;
         self.info.writes_global_mem = writes_global_mem;
+
+        self.info.max_warps_per_sm = max_warps_per_sm(
+            self.info.num_gprs as u32 + self.sm.hw_reserved_gprs(),
+        );
     }
 }
 

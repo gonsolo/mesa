@@ -254,7 +254,7 @@ radv_use_dcc_for_image_early(struct radv_device *device, struct radv_image *imag
       return false;
    }
 
-   if (image->shareable && image->vk.tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT)
+   if (image->vk.external_handle_types && image->vk.tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT)
       return false;
 
    /*
@@ -408,7 +408,7 @@ radv_use_htile_for_image(const struct radv_device *device, const struct radv_ima
        !(gfx_level == GFX10_3 && device->vk.enabled_features.attachmentFragmentShadingRate))
       return false;
 
-   return (image->vk.mip_levels == 1 || use_htile_for_mips) && !image->shareable;
+   return (image->vk.mip_levels == 1 || use_htile_for_mips) && !image->vk.external_handle_types;
 }
 
 static bool
@@ -781,8 +781,7 @@ radv_image_bo_set_metadata(struct radv_device *device, struct radv_image *image,
       md.u.gfx12.dcc_write_compress_disable = surface->u.gfx9.color.dcc_write_compress_disable;
       md.u.gfx12.scanout = (surface->flags & RADEON_SURF_SCANOUT) != 0;
    } else if (pdev->info.gfx_level >= GFX9) {
-      uint64_t dcc_offset =
-         image->bindings[0].offset + (surface->display_dcc_offset ? surface->display_dcc_offset : surface->meta_offset);
+      const uint64_t dcc_offset = surface->display_dcc_offset ? surface->display_dcc_offset : surface->meta_offset;
       md.u.gfx9.swizzle_mode = surface->u.gfx9.swizzle_mode;
       md.u.gfx9.dcc_offset_256b = dcc_offset >> 8;
       md.u.gfx9.dcc_pitch_max = surface->u.gfx9.color.display_dcc_pitch_max;
@@ -1047,7 +1046,7 @@ radv_get_ac_surf_info(struct radv_device *device, const struct radv_image *image
    info.levels = image->vk.mip_levels;
    info.num_channels = vk_format_get_nr_components(image->vk.format);
 
-   if (!vk_format_is_depth_or_stencil(image->vk.format) && !image->shareable &&
+   if (!vk_format_is_depth_or_stencil(image->vk.format) && !image->vk.external_handle_types &&
        !(image->vk.create_flags & (VK_IMAGE_CREATE_SPARSE_ALIASED_BIT | VK_IMAGE_CREATE_ALIAS_BIT |
                                    VK_IMAGE_CREATE_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT)) &&
        image->vk.tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
@@ -1206,6 +1205,16 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
             ac_surface_zero_dcc_fields(&image->planes[0].surface);
       }
 
+      if (pdev->info.gfx_level >= GFX12 &&
+          (!radv_surface_has_scanout(device, &create_info) || pdev->info.gfx12_supports_display_dcc)) {
+         const enum pipe_format format = vk_format_to_pipe_format(image->vk.format);
+
+         /* Set DCC tilings for both color and depth/stencil. */
+         image->planes[plane].surface.u.gfx9.color.dcc_number_type = ac_get_cb_number_type(format);
+         image->planes[plane].surface.u.gfx9.color.dcc_data_format = ac_get_cb_format(pdev->info.gfx_level, format);
+         image->planes[plane].surface.u.gfx9.color.dcc_write_compress_disable = false;
+      }
+
       if (create_info.bo_metadata && !mod_info &&
           !ac_surface_apply_umd_metadata(&pdev->info, &image->planes[plane].surface, image->vk.samples,
                                          image->vk.mip_levels, create_info.bo_metadata->size_metadata,
@@ -1282,11 +1291,11 @@ radv_destroy_image(struct radv_device *device, const VkAllocationCallbacks *pAll
    }
 
    for (uint32_t i = 0; i < ARRAY_SIZE(image->bindings); i++) {
-      if (!image->bindings[i].bo_va)
+      if (!image->bindings[i].addr)
          continue;
 
-      vk_address_binding_report(&instance->vk, &image->vk.base, image->bindings[i].bo_va + image->bindings[i].offset,
-                                image->bindings[i].range, VK_DEVICE_ADDRESS_BINDING_TYPE_UNBIND_EXT);
+      vk_address_binding_report(&instance->vk, &image->vk.base, image->bindings[i].addr, image->bindings[i].range,
+                                VK_DEVICE_ADDRESS_BINDING_TYPE_UNBIND_EXT);
    }
 
    radv_rmv_log_resource_destroy(device, (uint64_t)radv_image_to_handle(image));
@@ -1318,12 +1327,13 @@ radv_image_print_info(struct radv_device *device, struct radv_image *image)
    }
 }
 
-static uint64_t
+static VkResult
 radv_select_modifier(const struct radv_device *dev, VkFormat format,
-                     const struct VkImageDrmFormatModifierListCreateInfoEXT *mod_list)
+                     const struct VkImageDrmFormatModifierListCreateInfoEXT *mod_list, uint64_t *modifier)
 {
    const struct radv_physical_device *pdev = radv_device_physical(dev);
    unsigned mod_count;
+   uint64_t *mods;
 
    assert(mod_list->drmFormatModifierCount);
 
@@ -1336,11 +1346,9 @@ radv_select_modifier(const struct radv_device *dev, VkFormat format,
 
    ac_get_supported_modifiers(&pdev->info, &modifier_options, radv_format_to_pipe_format(format), &mod_count, NULL);
 
-   uint64_t *mods = calloc(mod_count, sizeof(*mods));
-
-   /* If allocations fail, fall back to a dumber solution. */
+   mods = calloc(mod_count, sizeof(*mods));
    if (!mods)
-      return mod_list->pDrmFormatModifiers[0];
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
 
    ac_get_supported_modifiers(&pdev->info, &modifier_options, radv_format_to_pipe_format(format), &mod_count, mods);
 
@@ -1348,7 +1356,8 @@ radv_select_modifier(const struct radv_device *dev, VkFormat format,
       for (uint32_t j = 0; j < mod_list->drmFormatModifierCount; ++j) {
          if (mods[i] == mod_list->pDrmFormatModifiers[j]) {
             free(mods);
-            return mod_list->pDrmFormatModifiers[j];
+            *modifier = mod_list->pDrmFormatModifiers[j];
+            return VK_SUCCESS;
          }
       }
    }
@@ -1373,6 +1382,7 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO);
    const struct VkVideoProfileListInfoKHR *profile_list =
       vk_find_struct_const(pCreateInfo->pNext, VIDEO_PROFILE_LIST_INFO_KHR);
+   VkResult result;
 
    unsigned plane_count = radv_get_internal_plane_count(pdev, format);
 
@@ -1400,15 +1410,15 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
       image->queue_family_mask &= ~(1u << RADV_QUEUE_SPARSE);
    }
 
-   const VkExternalMemoryImageCreateInfo *external_info =
-      vk_find_struct_const(pCreateInfo->pNext, EXTERNAL_MEMORY_IMAGE_CREATE_INFO);
-
-   image->shareable = external_info;
-
-   if (mod_list)
-      modifier = radv_select_modifier(device, format, mod_list);
-   else if (explicit_mod)
+   if (mod_list) {
+      result = radv_select_modifier(device, format, mod_list, &modifier);
+      if (result != VK_SUCCESS) {
+         radv_destroy_image(device, alloc, image);
+         return vk_error(device, result);
+      }
+   } else if (explicit_mod) {
       modifier = explicit_mod->drmFormatModifier;
+   }
 
    for (unsigned plane = 0; plane < plane_count; ++plane) {
       image->planes[plane].surface.flags = radv_get_surface_flags(device, image, plane, pCreateInfo, format);
@@ -1425,7 +1435,7 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
       return VK_SUCCESS;
    }
 
-   VkResult result = radv_image_create_layout(device, *create_info, explicit_mod, profile_list, image);
+   result = radv_image_create_layout(device, *create_info, explicit_mod, profile_list, image);
    if (result != VK_SUCCESS) {
       radv_destroy_image(device, alloc, image);
       return result;
@@ -1434,7 +1444,6 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
    if (image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) {
       image->alignment = MAX2(image->alignment, 4096);
       image->size = align64(image->size, image->alignment);
-      image->bindings[0].offset = 0;
 
       result = radv_bo_create(device, &image->vk.base, image->size, image->alignment, 0, RADEON_FLAG_VIRTUAL,
                               RADV_BO_PRIORITY_VIRTUAL, 0, true, &image->bindings[0].bo);
@@ -1442,6 +1451,8 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
          radv_destroy_image(device, alloc, image);
          return vk_error(device, result);
       }
+
+      image->bindings[0].addr = radv_buffer_get_va(image->bindings[0].bo);
    }
 
    if (instance->debug_flags & RADV_DEBUG_IMG) {
@@ -1495,8 +1506,8 @@ radv_get_aspect_format(struct radv_image *image, VkImageAspectFlags mask)
 }
 
 bool
-radv_layout_is_htile_compressed(const struct radv_device *device, const struct radv_image *image, VkImageLayout layout,
-                                unsigned queue_mask)
+radv_layout_is_htile_compressed(const struct radv_device *device, const struct radv_image *image, unsigned level,
+                                VkImageLayout layout, unsigned queue_mask)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
@@ -1512,10 +1523,10 @@ radv_layout_is_htile_compressed(const struct radv_device *device, const struct r
    case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL:
    case VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL:
    case VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL:
-      return radv_image_has_htile(image);
+      return radv_htile_enabled(image, level);
    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
-      return radv_image_is_tc_compat_htile(image) ||
-             (radv_image_has_htile(image) && queue_mask == (1u << RADV_QUEUE_GENERAL));
+      return radv_tc_compat_htile_enabled(image, level) ||
+             (radv_htile_enabled(image, level) && queue_mask == (1u << RADV_QUEUE_GENERAL));
    case VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR:
    case VK_IMAGE_LAYOUT_GENERAL:
       /* It should be safe to enable TC-compat HTILE with
@@ -1525,7 +1536,7 @@ radv_layout_is_htile_compressed(const struct radv_device *device, const struct r
        * depth pass because this allows compression and this reduces
        * the number of decompressions from/to GENERAL.
        */
-      if (radv_image_is_tc_compat_htile(image) && queue_mask & (1u << RADV_QUEUE_GENERAL) &&
+      if (radv_tc_compat_htile_enabled(image, level) && queue_mask & (1u << RADV_QUEUE_GENERAL) &&
           !instance->drirc.disable_tc_compat_htile_in_general) {
          return true;
       } else {
@@ -1538,8 +1549,8 @@ radv_layout_is_htile_compressed(const struct radv_device *device, const struct r
       return false;
    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
    case VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL:
-      if (radv_image_is_tc_compat_htile(image) ||
-          (radv_image_has_htile(image) &&
+      if (radv_tc_compat_htile_enabled(image, level) ||
+          (radv_htile_enabled(image, level) &&
            !(image->vk.usage & (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)))) {
          /* Keep HTILE compressed if the image is only going to
           * be used as a depth/stencil read-only attachment.
@@ -1550,7 +1561,7 @@ radv_layout_is_htile_compressed(const struct radv_device *device, const struct r
       }
       break;
    default:
-      return radv_image_is_tc_compat_htile(image);
+      return radv_tc_compat_htile_enabled(image, level);
    }
 }
 
@@ -1728,7 +1739,7 @@ radv_DestroyImage(VkDevice _device, VkImage _image, const VkAllocationCallbacks 
 
 static void
 radv_bind_image_memory(struct radv_device *device, struct radv_image *image, uint32_t bind_idx,
-                       struct radeon_winsys_bo *bo, uint64_t offset, uint64_t range)
+                       struct radeon_winsys_bo *bo, uint64_t addr, uint64_t range)
 {
    struct radv_physical_device *pdev = radv_device_physical(device);
    struct radv_instance *instance = radv_physical_device_instance(pdev);
@@ -1736,14 +1747,12 @@ radv_bind_image_memory(struct radv_device *device, struct radv_image *image, uin
    assert(bind_idx < 3);
 
    image->bindings[bind_idx].bo = bo;
-   image->bindings[bind_idx].offset = offset;
-   image->bindings[bind_idx].bo_va = radv_buffer_get_va(bo);
+   image->bindings[bind_idx].addr = addr;
    image->bindings[bind_idx].range = range;
 
    radv_rmv_log_image_bind(device, bind_idx, radv_image_to_handle(image));
 
-   vk_address_binding_report(&instance->vk, &image->vk.base,
-                             image->bindings[bind_idx].bo_va + image->bindings[bind_idx].offset,
+   vk_address_binding_report(&instance->vk, &image->vk.base, image->bindings[bind_idx].addr,
                              image->bindings[bind_idx].range, VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT);
 }
 
@@ -1769,8 +1778,7 @@ radv_BindImageMemory2(VkDevice _device, uint32_t bindInfoCount, const VkBindImag
          struct radv_image *swapchain_img =
             radv_image_from_handle(wsi_common_get_image(swapchain_info->swapchain, swapchain_info->imageIndex));
 
-         radv_bind_image_memory(device, image, 0,
-                                swapchain_img->bindings[0].bo, swapchain_img->bindings[0].offset,
+         radv_bind_image_memory(device, image, 0, swapchain_img->bindings[0].bo, swapchain_img->bindings[0].addr,
                                 swapchain_img->bindings[0].range);
          continue;
       }
@@ -1807,8 +1815,9 @@ radv_BindImageMemory2(VkDevice _device, uint32_t bindInfoCount, const VkBindImag
          }
       }
 
-      radv_bind_image_memory(device, image, bind_idx, mem->bo, pBindInfos[i].memoryOffset,
-                             reqs.memoryRequirements.size);
+      const uint64_t addr = radv_buffer_get_va(mem->bo) + pBindInfos[i].memoryOffset;
+
+      radv_bind_image_memory(device, image, bind_idx, mem->bo, addr, reqs.memoryRequirements.size);
    }
    return VK_SUCCESS;
 }

@@ -332,9 +332,10 @@ should_move_rt_instruction(nir_intrinsic_instr *instr)
    }
 }
 
-static void
+static bool
 move_rt_instructions(nir_shader *shader)
 {
+   bool progress = false;
    nir_cursor target = nir_before_impl(nir_shader_get_entrypoint(shader));
 
    nir_foreach_block (block, nir_shader_get_entrypoint(shader)) {
@@ -347,11 +348,12 @@ move_rt_instructions(nir_shader *shader)
          if (!should_move_rt_instruction(intrinsic))
             continue;
 
+         progress = true;
          nir_instr_move(target, instr);
       }
    }
 
-   nir_metadata_preserve(nir_shader_get_entrypoint(shader), nir_metadata_all & (~nir_metadata_instr_index));
+   return nir_progress(progress, nir_shader_get_entrypoint(shader), nir_metadata_control_flow);
 }
 
 static VkResult
@@ -387,7 +389,7 @@ radv_rt_nir_to_asm(struct radv_device *device, struct vk_pipeline_cache *cache,
    /* Move ray tracing system values to the top that are set by rt_trace_ray
     * to prevent them from being overwritten by other rt_trace_ray calls.
     */
-   NIR_PASS_V(stage->nir, move_rt_instructions);
+   NIR_PASS(_, stage->nir, move_rt_instructions);
 
    uint32_t num_resume_shaders = 0;
    nir_shader **resume_shaders = NULL;
@@ -437,8 +439,9 @@ radv_rt_nir_to_asm(struct radv_device *device, struct vk_pipeline_cache *cache,
 
    bool dump_shader = radv_can_dump_shader(device, shaders[0]);
    bool dump_nir = dump_shader && (instance->debug_flags & RADV_DEBUG_DUMP_NIR);
-   bool replayable =
-      pipeline->base.base.create_flags & VK_PIPELINE_CREATE_2_RAY_TRACING_SHADER_GROUP_HANDLE_CAPTURE_REPLAY_BIT_KHR;
+   bool replayable = (pipeline->base.base.create_flags &
+                      VK_PIPELINE_CREATE_2_RAY_TRACING_SHADER_GROUP_HANDLE_CAPTURE_REPLAY_BIT_KHR) &&
+                     stage->stage != MESA_SHADER_INTERSECTION;
 
    if (dump_shader) {
       simple_mtx_lock(&instance->shader_dump_mtx);

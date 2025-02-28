@@ -77,7 +77,16 @@ genX(emit_simpler_shader_init_fragment)(struct anv_simple_shader *state)
          .Component3Control   = VFCOMP_STORE_1_FP,
       });
 
-   anv_batch_emit(batch, GENX(3DSTATE_VF_STATISTICS), vf);
+   anv_batch_emit(batch, GENX(3DSTATE_VF_STATISTICS), vfs);
+   anv_batch_emit(batch, GENX(3DSTATE_VF), vf) {
+#if GFX_VERx10 >= 125
+      /* Simple shaders have no requirement that we need to disable geometry
+       * distribution.
+       */
+      vf.GeometryDistributionEnable =
+         device->physical->instance->enable_vf_distribution;
+#endif
+   }
    anv_batch_emit(batch, GENX(3DSTATE_VF_SGVS), sgvs) {
       sgvs.InstanceIDEnable = true;
       sgvs.InstanceIDComponentNumber = COMP_1;
@@ -285,7 +294,7 @@ genX(emit_simpler_shader_init_fragment)(struct anv_simple_shader *state)
    /* Allocate a binding table for Gfx9 for 2 reason :
     *
     *   1. we need a to emit a 3DSTATE_BINDING_TABLE_POINTERS_PS to make the
-    *      HW apply the preceeding 3DSTATE_CONSTANT_PS
+    *      HW apply the preceding 3DSTATE_CONSTANT_PS
     *
     *   2. Emitting an empty 3DSTATE_BINDING_TABLE_POINTERS_PS would cause RT
     *      writes (even though they're empty) to disturb later writes

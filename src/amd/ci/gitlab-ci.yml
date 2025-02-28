@@ -15,20 +15,20 @@ radv-stoney-angle:
   extends:
     - .lava-test-deqp:x86_64
     - .radv-stoney-test:x86_64
+    - .test-angle
   variables:
     DEQP_SUITE: radv-stoney-angle
-    USE_ANGLE: 1
-    HWCI_START_XORG: 1
     GPU_VERSION: angle-radv-stoney-aco
     DEQP_FRACTION: 3
 
 radv-stoney-angle-full:
   extends:
     - radv-stoney-angle
-    - .radv-valve-manual-rules
+    - .radv-collabora-manual-rules
   parallel: 2
   variables:
     DEQP_SUITE: radv-stoney-angle-full
+    DEQP_FRACTION: 1
 
 radeonsi-stoney-gl:
   extends:
@@ -94,7 +94,7 @@ radv-raven-traces-restricted:
     - .lava-piglit-traces:x86_64
     - .radv-raven-test:x86_64
     - .lava-lenovo-TPad-C13-Yoga-zork:x86_64
-    - .radv-collabora-rules-restricted
+    - .radv-collabora-restricted-rules
   variables:
     HWCI_START_WESTON: 1
     PIGLIT_REPLAY_ANGLE_TAG: "2023-02-10-1"
@@ -236,6 +236,7 @@ vkcts-renoir-valve:
     B2C_TIMEOUT_BOOT_MINUTES: 130
     B2C_TIMEOUT_OVERALL_MINUTES: 130
     RADV_PERFTEST: transfer_queue
+    FDO_CI_CONCURRENT: 12  # HACK: Reduce the memory pressure
 
 vkcts-navi10-valve:
   parallel: 2
@@ -304,7 +305,20 @@ glcts-vangogh-full-valve:
     - .radeonsi-valve-manual-rules
   timeout: 90m
 
+vkcts-raphael-valve:
+  extends:
+    - .vkcts-test-valve
+    - .raphael-test-valve
+    - .radv-valve-manual-rules
+  timeout: 45m
+  variables:
+    GPU_VERSION: radv-raphael-aco
+    B2C_TIMEOUT_BOOT_MINUTES: 35
+    B2C_TIMEOUT_OVERALL_MINUTES: 40
+    RADV_PERFTEST: transfer_queue
+
 vkcts-navi31-valve:
+  timeout: 25m
   parallel: 2
   extends:
     - .vkcts-test-valve
@@ -314,6 +328,8 @@ vkcts-navi31-valve:
     GPU_VERSION: radv-navi31-aco
     RADV_DEBUG: nomeshshader # Disable mesh shaders until task shaders stop hanging
     RADV_PERFTEST: transfer_queue
+    B2C_TIMEOUT_BOOT_MINUTES: 20
+    B2C_TIMEOUT_OVERALL_MINUTES: 20
 
 ############### Fossilize
 radv-fossils:
@@ -425,6 +441,17 @@ vkd3d-vangogh-valve:
     - .radv-valve-manual-rules
   variables:
     GPU_VERSION: radv-vangogh
+    # Random tests fail/crash when trying to run them in parallel
+    FDO_CI_CONCURRENT: 1
+
+vkd3d-raphael-valve:
+  extends:
+    - .b2c-test-radv-vk
+    - .b2c-vkd3d-proton-test
+    - .raphael-test-valve
+    - .radv-valve-manual-rules
+  variables:
+    GPU_VERSION: radv-raphael
     # Random tests fail/crash when trying to run them in parallel
     FDO_CI_CONCURRENT: 1
 

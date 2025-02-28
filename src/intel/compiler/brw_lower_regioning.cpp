@@ -21,11 +21,9 @@
  * IN THE SOFTWARE.
  */
 
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_cfg.h"
 #include "brw_builder.h"
-
-using namespace brw;
 
 namespace {
    /* From the SKL PRM Vol 2a, "Move":
@@ -458,7 +456,7 @@ namespace {
    }
 
    bool
-   lower_instruction(fs_visitor *v, bblock_t *block, brw_inst *inst);
+   lower_instruction(brw_shader *v, bblock_t *block, brw_inst *inst);
 }
 
 /**
@@ -468,7 +466,7 @@ namespace {
  * MOV instruction prior to the original instruction.
  */
 bool
-brw_lower_src_modifiers(fs_visitor &s, bblock_t *block, brw_inst *inst, unsigned i)
+brw_lower_src_modifiers(brw_shader &s, bblock_t *block, brw_inst *inst, unsigned i)
 {
    assert(inst->components_read(i) == 1);
    assert(s.devinfo->has_integer_dword_mul ||
@@ -495,7 +493,7 @@ namespace {
     * instruction.
     */
    bool
-   lower_dst_modifiers(fs_visitor *v, bblock_t *block, brw_inst *inst)
+   lower_dst_modifiers(brw_shader *v, bblock_t *block, brw_inst *inst)
    {
       const brw_builder ibld(v, block, inst);
       const brw_reg_type type = get_exec_type(inst);
@@ -544,7 +542,7 @@ namespace {
     * copies into a temporary with the same channel layout as the destination.
     */
    bool
-   lower_src_region(fs_visitor *v, bblock_t *block, brw_inst *inst, unsigned i)
+   lower_src_region(brw_shader *v, bblock_t *block, brw_inst *inst, unsigned i)
    {
       assert(inst->components_read(i) == 1);
       const intel_device_info *devinfo = v->devinfo;
@@ -562,7 +560,7 @@ namespace {
                       inst->exec_size * stride *
                       brw_type_size_bytes(inst->src[i].type),
                       reg_unit(devinfo) * REG_SIZE) * reg_unit(devinfo);
-      brw_reg tmp = brw_vgrf(v->alloc.allocate(size), inst->src[i].type);
+      brw_reg tmp = retype(brw_allocate_vgrf_units(*v, size), inst->src[i].type);
       ibld.UNDEF(tmp);
       tmp = byte_offset(horiz_stride(tmp, stride),
                         required_src_byte_offset(devinfo, inst, i));
@@ -606,7 +604,7 @@ namespace {
     * sources.
     */
    bool
-   lower_dst_region(fs_visitor *v, bblock_t *block, brw_inst *inst)
+   lower_dst_region(brw_shader *v, bblock_t *block, brw_inst *inst)
    {
       /* We cannot replace the result of an integer multiply which writes the
        * accumulator because MUL+MACH pairs act on the accumulator as a 66-bit
@@ -681,7 +679,7 @@ namespace {
     * where the execution type of an instruction is unsupported.
     */
    bool
-   lower_exec_type(fs_visitor *v, bblock_t *block, brw_inst *inst)
+   lower_exec_type(brw_shader *v, bblock_t *block, brw_inst *inst)
    {
       assert(inst->dst.type == get_exec_type(inst));
       const unsigned mask = has_invalid_exec_type(v->devinfo, inst);
@@ -731,7 +729,7 @@ namespace {
     * the general lowering in lower_src_modifiers or lower_src_region.
     */
    void
-   lower_src_conversion(fs_visitor *v, bblock_t *block, brw_inst *inst)
+   lower_src_conversion(brw_shader *v, bblock_t *block, brw_inst *inst)
    {
       const intel_device_info *devinfo = v->devinfo;
       const brw_builder ibld = brw_builder(v, block, inst).scalar_group();
@@ -760,7 +758,7 @@ namespace {
     * instruction.
     */
    bool
-   lower_instruction(fs_visitor *v, bblock_t *block, brw_inst *inst)
+   lower_instruction(brw_shader *v, bblock_t *block, brw_inst *inst)
    {
       const intel_device_info *devinfo = v->devinfo;
       bool progress = false;
@@ -801,7 +799,7 @@ namespace {
 }
 
 bool
-brw_lower_regioning(fs_visitor &s)
+brw_lower_regioning(brw_shader &s)
 {
    bool progress = false;
 
@@ -809,7 +807,8 @@ brw_lower_regioning(fs_visitor &s)
       progress |= lower_instruction(&s, block, inst);
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS | DEPENDENCY_VARIABLES);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS |
+                            BRW_DEPENDENCY_VARIABLES);
 
    return progress;
 }

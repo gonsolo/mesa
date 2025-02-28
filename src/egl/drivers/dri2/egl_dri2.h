@@ -140,14 +140,6 @@ struct dri2_egl_display_vtbl {
                                           const EGLint *rects, EGLint n_rects);
 
    /* optional */
-   EGLBoolean (*swap_buffers_region)(_EGLDisplay *disp, _EGLSurface *surf,
-                                     EGLint numRects, const EGLint *rects);
-
-   /* optional */
-   EGLBoolean (*post_sub_buffer)(_EGLDisplay *disp, _EGLSurface *surf, EGLint x,
-                                 EGLint y, EGLint width, EGLint height);
-
-   /* optional */
    EGLBoolean (*copy_buffers)(_EGLDisplay *disp, _EGLSurface *surf,
                               void *native_pixmap_target);
 
@@ -450,7 +442,6 @@ dri2_egl_error_unlock(struct dri2_egl_display *dri2_dpy, EGLint err,
 }
 
 extern const __DRIimageLookupExtension image_lookup_extension;
-extern const __DRIuseInvalidateExtension use_invalidate;
 extern const __DRIbackgroundCallableExtension background_callable_extension;
 extern const __DRIswrastLoaderExtension swrast_pbuffer_loader_extension;
 

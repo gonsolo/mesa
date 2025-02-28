@@ -83,6 +83,8 @@ impl ShaderModel for ShaderModel70 {
             | Op::IMad(_)
             | Op::IMad64(_)
             | Op::ISetP(_)
+            | Op::Lea(_)
+            | Op::LeaX(_)
             | Op::Lop3(_)
             | Op::Mov(_)
             | Op::PLop3(_)
@@ -1747,6 +1749,114 @@ impl SM70Op for OpISetP {
     }
 }
 
+impl SM70Op for OpLea {
+    fn legalize(&mut self, b: &mut LegalizeBuilder) {
+        let gpr = op_gpr(self);
+        b.copy_alu_src_if_not_reg(&mut self.a, gpr, SrcType::ALU);
+        if self.dst_high {
+            b.copy_alu_src_if_both_not_reg(
+                &self.b,
+                &mut self.a_high,
+                gpr,
+                SrcType::ALU,
+            );
+        }
+    }
+
+    fn encode(&self, e: &mut SM70Encoder<'_>) {
+        assert!(self.a.src_mod == SrcMod::None);
+        assert!(
+            self.intermediate_mod == SrcMod::None
+                || self.b.src_mod == SrcMod::None
+        );
+
+        let c = if self.dst_high {
+            Some(&self.a_high)
+        } else {
+            None
+        };
+
+        if self.is_uniform() {
+            e.encode_ualu(
+                0x091,
+                Some(&self.dst),
+                Some(&self.a),
+                Some(&self.b),
+                c,
+            );
+        } else {
+            e.encode_alu(
+                0x011,
+                Some(&self.dst),
+                Some(&self.a),
+                Some(&self.b),
+                c,
+            );
+        }
+
+        e.set_bit(72, self.intermediate_mod.is_ineg());
+        e.set_field(75..80, self.shift);
+        e.set_bit(80, self.dst_high);
+        e.set_pred_dst(81..84, self.overflow);
+        e.set_bit(74, false); // .X
+    }
+}
+
+impl SM70Op for OpLeaX {
+    fn legalize(&mut self, b: &mut LegalizeBuilder) {
+        let gpr = op_gpr(self);
+        b.copy_alu_src_if_not_reg(&mut self.a, gpr, SrcType::ALU);
+        if self.dst_high {
+            b.copy_alu_src_if_both_not_reg(
+                &self.b,
+                &mut self.a_high,
+                gpr,
+                SrcType::ALU,
+            );
+        }
+    }
+
+    fn encode(&self, e: &mut SM70Encoder<'_>) {
+        assert!(self.a.src_mod == SrcMod::None);
+        assert!(
+            self.intermediate_mod == SrcMod::None
+                || self.b.src_mod == SrcMod::None
+        );
+
+        let c = if self.dst_high {
+            Some(&self.a_high)
+        } else {
+            None
+        };
+
+        if self.is_uniform() {
+            e.encode_ualu(
+                0x091,
+                Some(&self.dst),
+                Some(&self.a),
+                Some(&self.b),
+                c,
+            );
+            e.set_upred_src(87..90, 90, self.carry);
+        } else {
+            e.encode_alu(
+                0x011,
+                Some(&self.dst),
+                Some(&self.a),
+                Some(&self.b),
+                c,
+            );
+            e.set_pred_src(87..90, 90, self.carry);
+        }
+
+        e.set_bit(72, self.intermediate_mod.is_bnot());
+        e.set_field(75..80, self.shift);
+        e.set_bit(80, self.dst_high);
+        e.set_pred_dst(81..84, self.overflow);
+        e.set_bit(74, true); // .X
+    }
+}
+
 fn src_as_lop_imm(src: &Src) -> Option<bool> {
     let x = match src.src_ref {
         SrcRef::Zero => false,
@@ -2320,9 +2430,26 @@ impl SM70Encoder<'_> {
     }
 }
 
+fn legalize_tex_instr(op: &mut impl SrcsAsSlice, b: &mut LegalizeBuilder) {
+    // Texture instructions have one or two sources.  When they have two, the
+    // second one is optional and we can set rZ instead.
+    let srcs = op.srcs_as_mut_slice();
+    assert!(matches!(&srcs[0].src_ref, SrcRef::SSA(_)));
+    if let SrcRef::SSA(ssa) = &mut srcs[0].src_ref {
+        b.copy_ssa_ref_if_uniform(ssa);
+    }
+    if srcs.len() > 1 {
+        debug_assert!(srcs.len() == 2);
+        assert!(matches!(&srcs[1].src_ref, SrcRef::SSA(_) | SrcRef::Zero));
+        if let SrcRef::SSA(ssa) = &mut srcs[1].src_ref {
+            b.copy_ssa_ref_if_uniform(ssa);
+        }
+    }
+}
+
 impl SM70Op for OpTex {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
-        legalize_ext_instr(self, b);
+        legalize_tex_instr(self, b);
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
@@ -2356,7 +2483,7 @@ impl SM70Op for OpTex {
         e.set_bit(76, self.offset);
         e.set_bit(77, false); // ToDo: NDV
         e.set_bit(78, self.z_cmpr);
-        e.set_field(84..87, 1);
+        e.set_eviction_priority(&self.mem_eviction_priority);
         e.set_tex_lod_mode(87..90, self.lod_mode);
         e.set_bit(90, false); // TODO: .NODEP
     }
@@ -2364,7 +2491,7 @@ impl SM70Op for OpTex {
 
 impl SM70Op for OpTld {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
-        legalize_ext_instr(self, b);
+        legalize_tex_instr(self, b);
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
@@ -2403,6 +2530,7 @@ impl SM70Op for OpTld {
             self.lod_mode == TexLodMode::Zero
                 || self.lod_mode == TexLodMode::Lod
         );
+        e.set_eviction_priority(&self.mem_eviction_priority);
         e.set_tex_lod_mode(87..90, self.lod_mode);
         e.set_bit(90, false); // TODO: .NODEP
     }
@@ -2410,7 +2538,7 @@ impl SM70Op for OpTld {
 
 impl SM70Op for OpTld4 {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
-        legalize_ext_instr(self, b);
+        legalize_tex_instr(self, b);
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
@@ -2451,7 +2579,7 @@ impl SM70Op for OpTld4 {
         );
         // bit 77: .CL
         e.set_bit(78, self.z_cmpr);
-        e.set_bit(84, true); // !.EF
+        e.set_eviction_priority(&self.mem_eviction_priority);
         e.set_field(87..89, self.comp);
         e.set_bit(90, false); // TODO: .NODEP
     }
@@ -2459,7 +2587,7 @@ impl SM70Op for OpTld4 {
 
 impl SM70Op for OpTmml {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
-        legalize_ext_instr(self, b);
+        legalize_tex_instr(self, b);
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
@@ -2496,7 +2624,7 @@ impl SM70Op for OpTmml {
 
 impl SM70Op for OpTxd {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
-        legalize_ext_instr(self, b);
+        legalize_tex_instr(self, b);
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
@@ -2529,13 +2657,14 @@ impl SM70Op for OpTxd {
         e.set_field(72..76, self.mask);
         e.set_bit(76, self.offset);
         e.set_bit(77, false); // ToDo: NDV
+        e.set_eviction_priority(&self.mem_eviction_priority);
         e.set_bit(90, false); // TODO: .NODEP
     }
 }
 
 impl SM70Op for OpTxq {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
-        legalize_ext_instr(self, b);
+        legalize_tex_instr(self, b);
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
@@ -2615,12 +2744,14 @@ impl SM70Encoder<'_> {
 
     fn set_eviction_priority(&mut self, pri: &MemEvictionPriority) {
         self.set_field(
-            84..86,
+            84..87,
             match pri {
                 MemEvictionPriority::First => 0_u8,
                 MemEvictionPriority::Normal => 1_u8,
                 MemEvictionPriority::Last => 2_u8,
-                MemEvictionPriority::Unchanged => 3_u8,
+                MemEvictionPriority::LastUse => 3_u8,
+                MemEvictionPriority::Unchanged => 4_u8,
+                MemEvictionPriority::NoAllocate => 5_u8,
             },
         );
     }
@@ -2963,6 +3094,11 @@ impl SM70Op for OpAtom {
                     e.set_opcode(0x38c);
 
                     e.set_reg_src(32..40, self.data);
+                    assert!(
+                        self.atom_type != AtomType::U64
+                            || self.atom_op == AtomOp::Exch,
+                        "64-bit Shared atomics only support CmpExch or Exch"
+                    );
                     e.set_atom_op(87..91, self.atom_op);
                 }
 
@@ -3497,6 +3633,8 @@ macro_rules! as_sm70_op_match {
             Op::IMad64(op) => op,
             Op::IMnMx(op) => op,
             Op::ISetP(op) => op,
+            Op::Lea(op) => op,
+            Op::LeaX(op) => op,
             Op::Lop3(op) => op,
             Op::PopC(op) => op,
             Op::Shf(op) => op,

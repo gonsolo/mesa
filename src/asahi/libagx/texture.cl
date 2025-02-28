@@ -18,7 +18,7 @@ libagx_txs(constant struct agx_texture_packed *ptr, uint16_t lod,
     *
     *    OpImageQuery*...  return 0 if the bound descriptor is a null descriptor
     */
-   if (d.null)
+   if (d.mode == AGX_IMAGE_MODE_NULL)
       return 0;
 
    /* Buffer textures are lowered to 2D so the original size is irrecoverable.
@@ -67,7 +67,7 @@ libagx_texture_samples(constant struct agx_texture_packed *ptr)
    agx_unpack(NULL, ptr, TEXTURE, d);
 
    /* As above */
-   if (d.null)
+   if (d.mode == AGX_IMAGE_MODE_NULL)
       return 0;
 
    /* We may assume the input is multisampled, so just check the samples */
@@ -79,8 +79,7 @@ libagx_texture_levels(constant struct agx_texture_packed *ptr)
 {
    agx_unpack(NULL, ptr, TEXTURE, d);
 
-   /* As above */
-   if (d.null)
+   if (d.mode == AGX_IMAGE_MODE_NULL)
       return 0;
    else
       return (d.last_level - d.first_level) + 1;
@@ -99,8 +98,9 @@ libagx_texture_levels(constant struct agx_texture_packed *ptr)
  */
 uint
 libagx_lower_txf_robustness(constant struct agx_texture_packed *ptr,
-                            bool check_lod, ushort lod, bool check_layer,
-                            uint layer, uint x)
+                            bool check_lod, ushort lod, bool check_min_lod,
+                            ushort min_lod, bool check_layer, uint layer,
+                            uint x)
 {
    agx_unpack(NULL, ptr, TEXTURE, d);
 
@@ -108,6 +108,9 @@ libagx_lower_txf_robustness(constant struct agx_texture_packed *ptr,
 
    if (check_lod)
       valid &= lod <= (d.last_level - d.first_level);
+
+   if (check_min_lod)
+      valid &= lod >= min_lod;
 
    if (check_layer) {
       bool linear = (d.layout == AGX_LAYOUT_LINEAR);
@@ -197,7 +200,7 @@ libagx_image_texel_address(constant const struct agx_pbe_packed *ptr,
       return total_sa;
    else
       return (d.buffer + (is_msaa ? 0 : d.level_offset_sw)) +
-             (uint64_t)(total_sa * bytes_per_sample_B);
+             (uint64_t)total_sa * bytes_per_sample_B;
 }
 
 uint64_t

@@ -816,10 +816,10 @@ analyze_shader_before_culling_walk(nir_def *ssa,
 static void
 analyze_shader_before_culling(nir_shader *shader, lower_ngg_nogs_state *s)
 {
-   /* We need divergence info for culling shaders. */
-   nir_divergence_analysis(shader);
-
    nir_foreach_function_impl(impl, shader) {
+      /* We need divergence info for culling shaders. */
+      nir_metadata_require(impl, nir_metadata_divergence);
+
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
             instr->pass_flags = 0;
@@ -837,6 +837,8 @@ analyze_shader_before_culling(nir_shader *shader, lower_ngg_nogs_state *s)
             analyze_shader_before_culling_walk(store_val, flag, s);
          }
       }
+
+      nir_no_progress(impl);
    }
 }
 
@@ -1201,7 +1203,7 @@ add_deferred_attribute_culling(nir_builder *b, nir_cf_list *original_extracted_c
    nir_store_var(b, s->gs_accepted_var, gs_thread, 0x1u);
 
    /* Remove all non-position outputs, and put the position output into the variable. */
-   nir_metadata_preserve(impl, nir_metadata_none);
+   nir_progress(true, impl, nir_metadata_none);
    remove_culling_shader_outputs(b->shader, s);
    b->cursor = nir_after_impl(impl);
 
@@ -1636,7 +1638,7 @@ ngg_nogs_gather_outputs(nir_builder *b, struct exec_list *cf_list, lower_ngg_nog
    }
 }
 
-void
+bool
 ac_nir_lower_ngg_nogs(nir_shader *shader, const ac_nir_lower_ngg_options *options)
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
@@ -1927,7 +1929,7 @@ ac_nir_lower_ngg_nogs(nir_shader *shader, const ac_nir_lower_ngg_options *option
       }
    }
 
-   nir_metadata_preserve(impl, nir_metadata_none);
+   nir_progress(true, impl, nir_metadata_none);
    nir_validate_shader(shader, "after emitting NGG VS/TES");
 
    /* Cleanup */
@@ -1953,6 +1955,8 @@ ac_nir_lower_ngg_nogs(nir_shader *shader, const ac_nir_lower_ngg_options *option
       if (options->can_cull)
          progress |= cleanup_culling_shader_after_dce(shader, b->impl, &state);
    } while (progress);
+
+   return true;
 }
 
 unsigned

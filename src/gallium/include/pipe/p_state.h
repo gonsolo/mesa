@@ -306,6 +306,14 @@ struct pipe_shader_state
       struct nir_shader *nir;
    } ir;
    struct pipe_stream_output_info stream_output;
+
+   /* If the caller sets report_compile_error=true, the driver can fail
+    * compilation and should allocate a string with the error message and
+    * store it in the pointer below. The caller is responsible for reading
+    * and freeing the error message.
+    */
+   bool report_compile_error;
+   char *error_message;
 };
 
 static inline void
@@ -938,7 +946,7 @@ struct pipe_blit_info
 struct pipe_grid_info
 {
    /**
-    * For drivers that use PIPE_SHADER_IR_NATIVE as their prefered IR, this
+    * For drivers that use PIPE_SHADER_IR_NATIVE as their preferred IR, this
     * value will be the index of the kernel in the opencl.kernels metadata
     * list.
     */

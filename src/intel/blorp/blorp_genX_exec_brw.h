@@ -593,6 +593,18 @@ blorp_emit_vertex_elements(struct blorp_batch *batch,
       }
    }
 
+   if (batch->flags & BLORP_BATCH_EMIT_3DSTATE_VF) {
+      blorp_emit(batch, GENX(3DSTATE_VF), vf) {
+#if GFX_VERx10 >= 125
+         /* Blorp shaders have no requirements that we need to disable geometry
+          * distribution.
+          */
+         vf.GeometryDistributionEnable =
+            (batch->flags & BLORP_BATCH_DISABLE_VF_DISTRIBUTION) ? false : true;
+#endif
+      }
+   }
+
    blorp_emit(batch, GENX(3DSTATE_VF_TOPOLOGY), topo) {
       topo.PrimitiveTopologyType = _3DPRIM_RECTLIST;
    }
@@ -975,6 +987,9 @@ blorp_emit_blend_state(struct blorp_batch *batch,
             .WriteDisableGreen = params->color_write_disable & 2,
             .WriteDisableBlue = params->color_write_disable & 4,
             .WriteDisableAlpha = params->color_write_disable & 8,
+#if GFX_VER >= 30
+            .SimpleFloatBlendEnable = true,
+#endif
          };
          GENX(BLEND_STATE_ENTRY_pack)(NULL, pos, &entry);
          pos += GENX(BLEND_STATE_ENTRY_length);

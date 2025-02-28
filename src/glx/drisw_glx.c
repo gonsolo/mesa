@@ -410,7 +410,6 @@ static const __DRIextension *loader_extensions_noshm[] = {
 static const __DRIextension *kopper_extensions_noshm[] = {
    &swrastLoaderExtension.base,
    &kopperLoaderExtension.base,
-   &dri2UseInvalidate.base,
    &driBackgroundCallable.base,
    NULL
 };
@@ -572,16 +571,21 @@ check_xshm(Display *dpy)
    int ret = True;
    xcb_query_extension_cookie_t shm_cookie;
    xcb_query_extension_reply_t *shm_reply;
-   bool has_mit_shm;
 
    shm_cookie = xcb_query_extension(c, 7, "MIT-SHM");
    shm_reply = xcb_query_extension_reply(c, shm_cookie, NULL);
-   xshm_opcode = shm_reply->major_opcode;
 
-   has_mit_shm = shm_reply->present;
-   free(shm_reply);
-   if (!has_mit_shm)
-      return False;
+   if (shm_reply) {
+      bool has_mit_shm = shm_reply->present;
+
+      if (has_mit_shm)
+         xshm_opcode = shm_reply->major_opcode;
+
+      free(shm_reply);
+
+      if (!has_mit_shm)
+         return False;
+   }
 
    cookie = xcb_shm_detach_checked(c, 0);
    if ((error = xcb_request_check(c, cookie))) {

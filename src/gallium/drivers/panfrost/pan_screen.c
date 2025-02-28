@@ -576,7 +576,8 @@ panfrost_init_screen_caps(struct panfrost_screen *screen)
       dev->kmod.props.gpu_can_query_timestamp &&
       dev->kmod.props.timestamp_frequency != 0;
 
-   caps->timer_resolution = pan_gpu_time_to_ns(dev, 1);
+   if (caps->query_timestamp)
+      caps->timer_resolution = pan_gpu_time_to_ns(dev, 1);
 
    /* The hardware requires element alignment for data conversion to work
     * as expected. If data conversion is not required, this restriction is
@@ -882,20 +883,30 @@ panfrost_create_screen(int fd, const struct pipe_screen_config *config,
       return NULL;
    }
 
-   if (dev->arch == 4)
+   switch (dev->arch) {
+   case 4:
       panfrost_cmdstream_screen_init_v4(screen);
-   else if (dev->arch == 5)
+      break;
+   case 5:
       panfrost_cmdstream_screen_init_v5(screen);
-   else if (dev->arch == 6)
+      break;
+   case 6:
       panfrost_cmdstream_screen_init_v6(screen);
-   else if (dev->arch == 7)
+      break;
+   case 7:
       panfrost_cmdstream_screen_init_v7(screen);
-   else if (dev->arch == 9)
+      break;
+   case 9:
       panfrost_cmdstream_screen_init_v9(screen);
-   else if (dev->arch == 10)
+      break;
+   case 10:
       panfrost_cmdstream_screen_init_v10(screen);
-   else
-      unreachable("Unhandled architecture major");
+      break;
+   default:
+      debug_printf("panfrost: Unhandled architecture major %d", dev->arch);
+      panfrost_destroy_screen(&(screen->base));
+      return NULL;
+   }
 
    return &screen->base;
 }

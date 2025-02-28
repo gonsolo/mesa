@@ -179,7 +179,12 @@ r300_optimize_nir(struct nir_shader *s, struct pipe_screen *screen)
       }
       NIR_PASS(progress, s, nir_opt_constant_folding);
       NIR_PASS(progress, s, nir_opt_remove_phis);
-      NIR_PASS(progress, s, nir_opt_conditional_discard);
+
+      nir_opt_peephole_select_options peephole_discard_options = {
+         .limit = 0,
+         .discard_ok = true,
+      };
+      NIR_PASS(progress, s, nir_opt_peephole_select, &peephole_discard_options);
       NIR_PASS(progress, s, nir_opt_dce);
       NIR_PASS(progress, s, nir_opt_dead_cf);
       NIR_PASS(progress, s, nir_opt_cse);
@@ -190,7 +195,13 @@ r300_optimize_nir(struct nir_shader *s, struct pipe_screen *screen)
       NIR_PASS(progress, s, nir_opt_if, nir_opt_if_optimize_phi_true_false);
       if (is_r500)
          nir_shader_intrinsics_pass(s, set_speculate, nir_metadata_control_flow, NULL);
-      NIR_PASS(progress, s, nir_opt_peephole_select, is_r500 ? 8 : ~0, true, true);
+
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = is_r500 ? 8 : ~0,
+         .indirect_load_ok = true,
+         .expensive_alu_ok = true,
+      };
+      NIR_PASS(progress, s, nir_opt_peephole_select, &peephole_select_options);
       if (s->info.stage == MESA_SHADER_FRAGMENT) {
          NIR_PASS(progress, s, r300_nir_lower_bool_to_float_fs);
       }
@@ -228,7 +239,7 @@ r300_optimize_nir(struct nir_shader *s, struct pipe_screen *screen)
    NIR_PASS(progress, s, nir_remove_dead_variables, nir_var_function_temp, NULL);
 }
 
-static char *
+char *
 r300_check_control_flow(nir_shader *s)
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(s);
@@ -272,13 +283,6 @@ r300_finalize_nir(struct pipe_screen *pscreen, struct nir_shader *s)
    nir_validate_shader(s, "after uniform var removal");
 
    nir_sweep(s);
-
-   if (!r300_screen(pscreen)->caps.is_r500 &&
-       (r300_screen(pscreen)->caps.has_tcl || s->info.stage == MESA_SHADER_FRAGMENT)) {
-      char *msg = r300_check_control_flow(s);
-      if (msg)
-         return strdup(msg);
-   }
 
    return NULL;
 }

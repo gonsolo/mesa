@@ -406,12 +406,15 @@ brw_nir_lower_vs_inputs(nir_shader *nir)
     * whether it is a double-precision type or not.
     */
    nir_lower_io(nir, nir_var_shader_in, type_size_vec4,
-                nir_lower_io_lower_64bit_to_32);
+                nir_lower_io_lower_64bit_to_32_new);
 
    /* This pass needs actual constants */
    nir_opt_constant_folding(nir);
 
    nir_io_add_const_offset_to_base(nir, nir_var_shader_in);
+
+   /* Update shader_info::dual_slot_inputs */
+   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
    /* The last step is to remap VERT_ATTRIB_* to actual registers */
 
@@ -424,7 +427,14 @@ brw_nir_lower_vs_inputs(nir_shader *nir)
       BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_VERTEX_ID_ZERO_BASE) ||
       BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_INSTANCE_ID);
 
-   const unsigned num_inputs = util_bitcount64(nir->info.inputs_read);
+   const unsigned num_inputs = util_bitcount64(nir->info.inputs_read) +
+      util_bitcount64(nir->info.inputs_read & nir->info.dual_slot_inputs);
+
+   /* In the following loop, the intrinsic base value is the offset in
+    * register slots (2 slots can make up in single input for double/64bit
+    * values). The io_semantics location field is the offset in terms of
+    * attributes.
+    */
 
    nir_foreach_function_impl(impl, nir) {
       nir_builder b = nir_builder_create(impl);
@@ -453,7 +463,8 @@ brw_nir_lower_vs_inputs(nir_shader *nir)
                   nir_intrinsic_instr_create(nir, nir_intrinsic_load_input);
                load->src[0] = nir_src_for_ssa(nir_imm_int(&b, 0));
 
-               nir_intrinsic_set_base(load, num_inputs);
+               unsigned input_offset = 0;
+               unsigned location = BRW_SVGS_VE_INDEX;
                switch (intrin->intrinsic) {
                case nir_intrinsic_load_first_vertex:
                   nir_intrinsic_set_component(load, 0);
@@ -472,7 +483,8 @@ brw_nir_lower_vs_inputs(nir_shader *nir)
                   /* gl_DrawID and IsIndexedDraw are stored right after
                    * gl_VertexID and friends if any of them exist.
                    */
-                  nir_intrinsic_set_base(load, num_inputs + has_sgvs);
+                  input_offset += has_sgvs ? 1 : 0;
+                  location = BRW_DRAWID_VE_INDEX;
                   if (intrin->intrinsic == nir_intrinsic_load_draw_id)
                      nir_intrinsic_set_component(load, 0);
                   else
@@ -482,6 +494,16 @@ brw_nir_lower_vs_inputs(nir_shader *nir)
                   unreachable("Invalid system value intrinsic");
                }
 
+               /* Position the value behind the app's inputs, for base we
+                * account for the double inputs, for the io_semantics
+                * location, it's just the input count.
+                */
+               nir_intrinsic_set_base(load, num_inputs + input_offset);
+               struct nir_io_semantics io = {
+                  .location = VERT_ATTRIB_GENERIC0 + location,
+                  .num_slots = 1,
+               };
+               nir_intrinsic_set_io_semantics(load, io);
                load->num_components = 1;
                nir_def_init(&load->instr, &load->def, 1, 32);
                nir_builder_instr_insert(&b, &load->instr);
@@ -496,9 +518,14 @@ brw_nir_lower_vs_inputs(nir_shader *nir)
                 * number for an attribute by masking out the enabled attributes
                 * before it and counting the bits.
                 */
-               int attr = nir_intrinsic_base(intrin);
-               int slot = util_bitcount64(nir->info.inputs_read &
-                                          BITFIELD64_MASK(attr));
+               const struct nir_io_semantics io =
+                  nir_intrinsic_io_semantics(intrin);
+               const int attr = nir_intrinsic_base(intrin);
+               const int slot = util_bitcount64(nir->info.inputs_read &
+                                                BITFIELD64_MASK(attr)) +
+                                util_bitcount64(nir->info.dual_slot_inputs &
+                                                BITFIELD64_MASK(attr)) +
+                                io.high_dvec2;
                nir_intrinsic_set_base(intrin, slot);
                break;
             }
@@ -850,8 +877,15 @@ brw_nir_optimize(nir_shader *nir,
        * indices will nearly always be in bounds and the cost of the load is
        * low.  Therefore there shouldn't be a performance benefit to avoid it.
        */
-      LOOP_OPT(nir_opt_peephole_select, 0, true, false);
-      LOOP_OPT(nir_opt_peephole_select, 8, true, true);
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = 0,
+         .indirect_load_ok = true,
+      };
+      LOOP_OPT(nir_opt_peephole_select, &peephole_select_options);
+
+      peephole_select_options.limit = 8;
+      peephole_select_options.expensive_alu_ok = true;
+      LOOP_OPT(nir_opt_peephole_select, &peephole_select_options);
 
       LOOP_OPT(nir_opt_intrinsics);
       LOOP_OPT(nir_opt_idiv_const, 32);
@@ -886,7 +920,12 @@ brw_nir_optimize(nir_shader *nir,
          LOOP_OPT(nir_opt_dce);
       }
       LOOP_OPT_NOT_IDEMPOTENT(nir_opt_if, nir_opt_if_optimize_phi_true_false);
-      LOOP_OPT(nir_opt_conditional_discard);
+
+      nir_opt_peephole_select_options peephole_discard_options = {
+         .limit = 0,
+         .discard_ok = true,
+      };
+      LOOP_OPT(nir_opt_peephole_select, &peephole_discard_options);
       if (nir->options->max_unroll_iterations != 0) {
          LOOP_OPT_NOT_IDEMPOTENT(nir_opt_loop_unroll);
       }
@@ -1664,7 +1703,6 @@ brw_vectorize_lower_mem_access(nir_shader *nir,
     *   - fewer send messages
     *   - reduced register pressure
     */
-   nir_divergence_analysis(nir);
    if (OPT(intel_nir_blockify_uniform_loads, compiler->devinfo)) {
       OPT(nir_opt_load_store_vectorize, &options);
 
@@ -1813,8 +1851,14 @@ brw_postprocess_nir(nir_shader *nir, const struct brw_compiler *compiler,
        * instruction from one of the branches of the if-statement, so now it
        * might be under the threshold of conversion to bcsel.
        */
-      OPT(nir_opt_peephole_select, 0, false, false);
-      OPT(nir_opt_peephole_select, 1, false, true);
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = 0,
+      };
+      OPT(nir_opt_peephole_select, &peephole_select_options);
+
+      peephole_select_options.limit = 1;
+      peephole_select_options.expensive_alu_ok = true;
+      OPT(nir_opt_peephole_select, &peephole_select_options);
    }
 
    do {
@@ -1853,9 +1897,6 @@ brw_postprocess_nir(nir_shader *nir, const struct brw_compiler *compiler,
    OPT(nir_opt_move, nir_move_comparisons);
    OPT(nir_opt_dead_cf);
 
-   bool divergence_analysis_dirty = false;
-   NIR_PASS_V(nir, nir_divergence_analysis);
-
    static const nir_lower_subgroups_options subgroups_options = {
       .ballot_bit_size = 32,
       .ballot_components = 1,
@@ -1870,8 +1911,6 @@ brw_postprocess_nir(nir_shader *nir, const struct brw_compiler *compiler,
 
       if (OPT(nir_lower_int64))
          brw_nir_optimize(nir, devinfo);
-
-      divergence_analysis_dirty = true;
    }
 
    /* nir_opt_uniform_subgroup can create some operations (e.g.,
@@ -1902,10 +1941,6 @@ brw_postprocess_nir(nir_shader *nir, const struct brw_compiler *compiler,
 
    /* Do this only after the last opt_gcm. GCM will undo this lowering. */
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      if (divergence_analysis_dirty) {
-         NIR_PASS_V(nir, nir_divergence_analysis);
-      }
-
       OPT(intel_nir_lower_non_uniform_barycentric_at_sample);
    }
 
@@ -2413,8 +2448,7 @@ brw_nir_move_interpolation_to_top(nir_shader *nir)
 
       progress = progress || impl_progress;
 
-      nir_metadata_preserve(impl, impl_progress ? nir_metadata_control_flow
-                                                : nir_metadata_all);
+      nir_progress(impl_progress, impl, nir_metadata_control_flow);
    }
 
    return progress;
@@ -2469,5 +2503,3 @@ brw_nir_lower_simd(nir_shader *nir, unsigned dispatch_width)
    return nir_shader_lower_instructions(nir, filter_simd, lower_simd,
                                  (void *)(uintptr_t)dispatch_width);
 }
-
-

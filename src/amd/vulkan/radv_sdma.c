@@ -10,7 +10,6 @@
 #include "radv_sdma.h"
 #include "util/macros.h"
 #include "util/u_memory.h"
-#include "radv_buffer.h"
 #include "radv_cs.h"
 #include "radv_formats.h"
 
@@ -165,8 +164,8 @@ radv_sdma_get_bpe(const struct radv_image *const image, VkImageAspectFlags aspec
 }
 
 struct radv_sdma_surf
-radv_sdma_get_buf_surf(const struct radv_buffer *const buffer, const struct radv_image *const image,
-                       const VkBufferImageCopy2 *const region, const VkImageAspectFlags aspect_mask)
+radv_sdma_get_buf_surf(uint64_t buffer_va, const struct radv_image *const image, const VkBufferImageCopy2 *const region,
+                       const VkImageAspectFlags aspect_mask)
 {
    assert(util_bitcount(aspect_mask) == 1);
 
@@ -179,7 +178,7 @@ radv_sdma_get_buf_surf(const struct radv_buffer *const buffer, const struct radv
    const uint32_t bpe = radv_sdma_get_bpe(image, region->imageSubresource.aspectMask);
 
    const struct radv_sdma_surf info = {
-      .va = radv_buffer_get_va(buffer->bo) + buffer->offset + region->bufferOffset,
+      .va = buffer_va + region->bufferOffset,
       .pitch = pitch,
       .slice_pitch = slice_pitch,
       .bpp = bpe,
@@ -199,7 +198,7 @@ radv_sdma_get_metadata_config(const struct radv_device *const device, const stru
    const struct radv_physical_device *pdev = radv_device_physical(device);
 
    if (!pdev->info.sdma_supports_compression ||
-       !(radv_dcc_enabled(image, subresource.mipLevel) || radv_image_has_htile(image))) {
+       !(radv_dcc_enabled(image, subresource.mipLevel) || radv_htile_enabled(image, subresource.mipLevel))) {
       return 0;
    }
 
@@ -272,7 +271,7 @@ radv_sdma_get_surf(const struct radv_device *const device, const struct radv_ima
    const unsigned plane_idx = radv_plane_from_aspect(aspect_mask);
    const unsigned binding_idx = image->disjoint ? plane_idx : 0;
    const struct radeon_surf *const surf = &image->planes[plane_idx].surface;
-   const uint64_t va = radv_image_get_va(image, binding_idx);
+   const uint64_t va = image->bindings[binding_idx].addr;
    const uint32_t bpe = radv_sdma_get_bpe(image, aspect_mask);
    struct radv_sdma_surf info = {
       .extent =
@@ -313,7 +312,7 @@ radv_sdma_get_surf(const struct radv_device *const device, const struct radv_ima
       info.header_dword = radv_sdma_get_tiled_header_dword(device, image, subresource);
 
       if (pdev->info.sdma_supports_compression &&
-          (radv_dcc_enabled(image, subresource.mipLevel) || radv_image_has_htile(image))) {
+          (radv_dcc_enabled(image, subresource.mipLevel) || radv_htile_enabled(image, subresource.mipLevel))) {
          info.meta_va = va + surf->meta_offset;
          info.meta_config = radv_sdma_get_metadata_config(device, image, surf, subresource, aspect_mask);
       }
@@ -331,7 +330,7 @@ radv_sdma_emit_nop(const struct radv_device *device, struct radeon_cmdbuf *cs)
 }
 
 void
-radv_sdma_copy_buffer(const struct radv_device *device, struct radeon_cmdbuf *cs, uint64_t src_va, uint64_t dst_va,
+radv_sdma_copy_memory(const struct radv_device *device, struct radeon_cmdbuf *cs, uint64_t src_va, uint64_t dst_va,
                       uint64_t size)
 {
    if (size == 0)
@@ -376,7 +375,7 @@ radv_sdma_copy_buffer(const struct radv_device *device, struct radeon_cmdbuf *cs
 }
 
 void
-radv_sdma_fill_buffer(const struct radv_device *device, struct radeon_cmdbuf *cs, const uint64_t va,
+radv_sdma_fill_memory(const struct radv_device *device, struct radeon_cmdbuf *cs, const uint64_t va,
                       const uint64_t size, const uint32_t value)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
@@ -664,7 +663,7 @@ radv_sdma_copy_buffer_image_unaligned(const struct radv_device *device, struct r
             const uint64_t buf_va =
                buf->va + slice * buf_slice_pitch_blocks * img.bpp + (row + r) * buf_pitch_blocks * img.bpp;
             const uint64_t tmp_va = tmp.va + r * info.aligned_row_pitch * img.bpp;
-            radv_sdma_copy_buffer(device, cs, to_image ? buf_va : tmp_va, to_image ? tmp_va : buf_va,
+            radv_sdma_copy_memory(device, cs, to_image ? buf_va : tmp_va, to_image ? tmp_va : buf_va,
                                   info.extent_horizontal_blocks * img.bpp);
          }
 

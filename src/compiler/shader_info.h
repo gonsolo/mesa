@@ -185,9 +185,6 @@ typedef struct shader_info {
    /* Whether texture size, levels, or samples is queried. */
    bool uses_resource_info_query:1;
 
-   /** Has divergence analysis ever been run? */
-   bool divergence_analysis_run:1;
-
    /* Bitmask of bit-sizes used with ALU instructions. */
    uint8_t bit_sizes_float;
    uint8_t bit_sizes_int;
@@ -255,6 +252,14 @@ typedef struct shader_info {
 
    /* Use ACO instead of LLVM on AMD. */
    bool use_aco_amd:1;
+
+   /**
+    * Whether image intrinsics have been lowered to global intrinsics
+    *
+    * This is potentially useful on some implementation that need to know that
+    * an image barrier needs to include global barriers due to the lowering.
+    */
+   bool use_lowered_image_to_global:1;
 
    /**
      * Set if this shader uses legacy (DX9 or ARB assembly) math rules.

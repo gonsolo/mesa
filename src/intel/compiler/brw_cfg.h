@@ -32,7 +32,6 @@ struct bblock_t;
 #ifdef __cplusplus
 
 #include "brw_inst.h"
-#include "brw_ir_analysis.h"
 
 struct bblock_t;
 
@@ -72,7 +71,7 @@ struct bblock_link {
    enum bblock_link_kind kind;
 };
 
-struct fs_visitor;
+struct brw_shader;
 struct cfg_t;
 
 struct bblock_t {
@@ -215,7 +214,8 @@ bblock_ends_with_control_flow(const struct bblock_t *block)
           op == BRW_OPCODE_ELSE ||
           op == BRW_OPCODE_WHILE ||
           op == BRW_OPCODE_BREAK ||
-          op == BRW_OPCODE_CONTINUE;
+          op == BRW_OPCODE_CONTINUE ||
+          op == SHADER_OPCODE_FLOW;
 }
 
 static inline brw_inst *
@@ -319,7 +319,7 @@ bblock_t::last_non_control_flow_inst()
 struct cfg_t {
    DECLARE_RALLOC_CXX_OPERATORS(cfg_t)
 
-   cfg_t(const fs_visitor *s, exec_list *instructions);
+   cfg_t(const brw_shader *s, exec_list *instructions);
    ~cfg_t();
 
    void remove_block(bblock_t *block);
@@ -347,7 +347,7 @@ struct cfg_t {
     */
    inline void adjust_block_ips();
 
-   const struct fs_visitor *s;
+   const struct brw_shader *s;
    void *mem_ctx;
 
    /** Ordered list (by ip) of basic blocks */
@@ -469,67 +469,6 @@ cfg_t::adjust_block_ips()
 
       block->end_ip_delta = 0;
    }
-}
-
-namespace brw {
-   /**
-    * Immediate dominator tree analysis of a shader.
-    */
-   struct idom_tree {
-      idom_tree(const fs_visitor *s);
-      ~idom_tree();
-
-      bool
-      validate(const fs_visitor *) const
-      {
-         /* FINISHME */
-         return true;
-      }
-
-      analysis_dependency_class
-      dependency_class() const
-      {
-         return DEPENDENCY_BLOCKS;
-      }
-
-      const bblock_t *
-      parent(const bblock_t *b) const
-      {
-         assert(unsigned(b->num) < num_parents);
-         return parents[b->num];
-      }
-
-      bblock_t *
-      parent(bblock_t *b) const
-      {
-         assert(unsigned(b->num) < num_parents);
-         return parents[b->num];
-      }
-
-      bblock_t *
-      intersect(bblock_t *b1, bblock_t *b2) const;
-
-      /**
-       * Returns true if block `a` dominates block `b`.
-       */
-      bool
-      dominates(const bblock_t *a, const bblock_t *b) const
-      {
-         while (a != b) {
-            if (b->num == 0)
-               return false;
-
-            b = parent(b);
-         }
-         return true;
-      }
-
-      void dump(FILE *file = stderr) const;
-
-   private:
-      unsigned num_parents;
-      bblock_t **parents;
-   };
 }
 
 #endif

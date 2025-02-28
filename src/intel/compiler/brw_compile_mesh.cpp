@@ -24,7 +24,7 @@
 #include <list>
 #include <vector>
 #include "brw_compiler.h"
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_builder.h"
 #include "brw_generator.h"
 #include "brw_nir.h"
@@ -33,8 +33,6 @@
 #include "dev/intel_debug.h"
 
 #include <memory>
-
-using namespace brw;
 
 static inline int
 type_size_scalar_dwords(const struct glsl_type *type, bool bindless)
@@ -281,7 +279,7 @@ brw_nir_lower_mesh_primitive_count(nir_shader *nir)
    }
    nir_pop_if(b, NULL);
 
-   nir_metadata_preserve(impl, nir_metadata_none);
+   nir_progress(true, impl, nir_metadata_none);
 
    nir->info.outputs_written |= VARYING_BIT_PRIMITIVE_COUNT;
 
@@ -289,14 +287,14 @@ brw_nir_lower_mesh_primitive_count(nir_shader *nir)
 }
 
 static void
-brw_emit_urb_fence(fs_visitor &s)
+brw_emit_urb_fence(brw_shader &s)
 {
    const brw_builder bld1 = brw_builder(&s).at_end().exec_all().group(1, 0);
    brw_reg dst = bld1.vgrf(BRW_TYPE_UD);
    brw_inst *fence = bld1.emit(SHADER_OPCODE_MEMORY_FENCE, dst,
                               brw_vec8_grf(0, 0),
-                              brw_imm_ud(true),
-                              brw_imm_ud(0));
+                              brw_imm_ud(true));
+   fence->size_written = REG_SIZE * reg_unit(s.devinfo);
    fence->sfid = BRW_SFID_URB;
    /* The logical thing here would likely be a THREADGROUP fence but that's
     * still failing some tests like in dEQP-VK.mesh_shader.ext.query.*
@@ -316,12 +314,12 @@ brw_emit_urb_fence(fs_visitor &s)
 }
 
 static bool
-run_task_mesh(fs_visitor &s, bool allow_spilling)
+run_task_mesh(brw_shader &s, bool allow_spilling)
 {
    assert(s.stage == MESA_SHADER_TASK ||
           s.stage == MESA_SHADER_MESH);
 
-   s.payload_ = new task_mesh_thread_payload(s);
+   s.payload_ = new brw_task_mesh_thread_payload(s);
 
    brw_from_nir(&s);
 
@@ -375,9 +373,7 @@ brw_compile_task(const struct brw_compiler *compiler,
 
    NIR_PASS(_, nir, brw_nir_lower_launch_mesh_workgroups);
 
-   prog_data->base.base.stage = MESA_SHADER_TASK;
-   prog_data->base.base.total_shared = nir->info.shared_size;
-   prog_data->base.base.total_scratch = 0;
+   brw_prog_data_init(&prog_data->base.base, &params->base);
 
    prog_data->base.local_size[0] = nir->info.workgroup_size[0];
    prog_data->base.local_size[1] = nir->info.workgroup_size[1];
@@ -395,7 +391,7 @@ brw_compile_task(const struct brw_compiler *compiler,
       .required_width = brw_required_dispatch_width(&nir->info),
    };
 
-   std::unique_ptr<fs_visitor> v[3];
+   std::unique_ptr<brw_shader> v[3];
 
    for (unsigned i = 0; i < 3; i++) {
       const unsigned simd = devinfo->ver >= 30 ? 2 - i : i;
@@ -413,7 +409,7 @@ brw_compile_task(const struct brw_compiler *compiler,
       brw_postprocess_nir(shader, compiler, debug_enabled,
                           key->base.robust_flags);
 
-      v[simd] = std::make_unique<fs_visitor>(compiler, &params->base,
+      v[simd] = std::make_unique<brw_shader>(compiler, &params->base,
                                              &key->base,
                                              &prog_data->base.base,
                                              shader, dispatch_width,
@@ -448,7 +444,7 @@ brw_compile_task(const struct brw_compiler *compiler,
       return NULL;
    }
 
-   fs_visitor *selected = v[selected_simd].get();
+   brw_shader *selected = v[selected_simd].get();
    prog_data->base.prog_mask = 1 << selected_simd;
    prog_data->base.base.grf_used = MAX2(prog_data->base.base.grf_used,
                                         selected->grf_used);
@@ -1342,9 +1338,9 @@ brw_nir_initialize_mue(nir_shader *nir,
    }
 
    if (remaining) {
-      nir_metadata_preserve(entrypoint, nir_metadata_none);
+      nir_progress(true, entrypoint, nir_metadata_none);
    } else {
-      nir_metadata_preserve(entrypoint, nir_metadata_control_flow);
+      nir_progress(true, entrypoint, nir_metadata_control_flow);
    }
 }
 
@@ -1659,9 +1655,7 @@ brw_compile_mesh(const struct brw_compiler *compiler,
    struct brw_mesh_prog_data *prog_data = params->prog_data;
    const bool debug_enabled = brw_should_print_shader(nir, DEBUG_MESH);
 
-   prog_data->base.base.stage = MESA_SHADER_MESH;
-   prog_data->base.base.total_shared = nir->info.shared_size;
-   prog_data->base.base.total_scratch = 0;
+   brw_prog_data_init(&prog_data->base.base, &params->base);
 
    prog_data->base.local_size[0] = nir->info.workgroup_size[0];
    prog_data->base.local_size[1] = nir->info.workgroup_size[1];
@@ -1706,7 +1700,7 @@ brw_compile_mesh(const struct brw_compiler *compiler,
       .required_width = brw_required_dispatch_width(&nir->info),
    };
 
-   std::unique_ptr<fs_visitor> v[3];
+   std::unique_ptr<brw_shader> v[3];
 
    for (unsigned i = 0; i < 3; i++) {
       const unsigned simd = devinfo->ver >= 30 ? 2 - i : i;
@@ -1736,7 +1730,7 @@ brw_compile_mesh(const struct brw_compiler *compiler,
       brw_postprocess_nir(shader, compiler, debug_enabled,
                           key->base.robust_flags);
 
-      v[simd] = std::make_unique<fs_visitor>(compiler, &params->base,
+      v[simd] = std::make_unique<brw_shader>(compiler, &params->base,
                                              &key->base,
                                              &prog_data->base.base,
                                              shader, dispatch_width,
@@ -1771,7 +1765,7 @@ brw_compile_mesh(const struct brw_compiler *compiler,
       return NULL;
    }
 
-   fs_visitor *selected = v[selected_simd].get();
+   brw_shader *selected = v[selected_simd].get();
    prog_data->base.prog_mask = 1 << selected_simd;
    prog_data->base.base.grf_used = MAX2(prog_data->base.base.grf_used,
                                         selected->grf_used);

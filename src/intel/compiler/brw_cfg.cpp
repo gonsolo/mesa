@@ -27,15 +27,13 @@
 
 #include "brw_cfg.h"
 #include "util/u_dynarray.h"
-#include "brw_fs.h"
+#include "brw_shader.h"
 
 /** @file
  *
  * Walks the shader instructions generated and creates a set of basic
  * blocks with successor/predecessor edges connecting them.
  */
-
-using namespace brw;
 
 static bblock_t *
 pop_stack(exec_list *list)
@@ -157,7 +155,7 @@ bblock_t::combine_with(bblock_t *that)
 void
 bblock_t::dump(FILE *file) const
 {
-   const fs_visitor *s = this->cfg->s;
+   const brw_shader *s = this->cfg->s;
 
    int ip = this->start_ip;
    foreach_inst_in_block(brw_inst, inst, this) {
@@ -189,7 +187,7 @@ bblock_t::unlink_list(exec_list *list)
    }
 }
 
-cfg_t::cfg_t(const fs_visitor *s, exec_list *instructions) :
+cfg_t::cfg_t(const brw_shader *s, exec_list *instructions) :
    s(s)
 {
    mem_ctx = ralloc_context(NULL);
@@ -217,6 +215,13 @@ cfg_t::cfg_t(const fs_visitor *s, exec_list *instructions) :
       inst->exec_node::remove();
 
       switch (inst->opcode) {
+      case SHADER_OPCODE_FLOW:
+         cur->instructions.push_tail(inst);
+         next = new_block();
+         cur->add_successor(mem_ctx, next, bblock_link_logical);
+         set_next_block(&cur, next, ip);
+         break;
+
       case BRW_OPCODE_IF:
          cur->instructions.push_tail(inst);
 
@@ -617,7 +622,7 @@ sort_links(util_dynarray *scratch, exec_list *list)
 void
 cfg_t::dump(FILE *file)
 {
-   const idom_tree *idom = (s ? &s->idom_analysis.require() : NULL);
+   const brw_idom_tree *idom = (s ? &s->idom_analysis.require() : NULL);
 
    /* Temporary storage to sort the lists of blocks.  This normalizes the
     * output, making it possible to use it for certain tests.
@@ -650,76 +655,6 @@ cfg_t::dump(FILE *file)
    util_dynarray_fini(&scratch);
 }
 
-/* Calculates the immediate dominator of each block, according to "A Simple,
- * Fast Dominance Algorithm" by Keith D. Cooper, Timothy J. Harvey, and Ken
- * Kennedy.
- *
- * The authors claim that for control flow graphs of sizes normally encountered
- * (less than 1000 nodes) that this algorithm is significantly faster than
- * others like Lengauer-Tarjan.
- */
-idom_tree::idom_tree(const fs_visitor *s) :
-   num_parents(s->cfg->num_blocks),
-   parents(new bblock_t *[num_parents]())
-{
-   bool changed;
-
-   parents[0] = s->cfg->blocks[0];
-
-   do {
-      changed = false;
-
-      foreach_block(block, s->cfg) {
-         if (block->num == 0)
-            continue;
-
-         bblock_t *new_idom = NULL;
-         foreach_list_typed(bblock_link, parent_link, link, &block->parents) {
-            if (parent(parent_link->block)) {
-               new_idom = (new_idom ? intersect(new_idom, parent_link->block) :
-                           parent_link->block);
-            }
-         }
-
-         if (parent(block) != new_idom) {
-            parents[block->num] = new_idom;
-            changed = true;
-         }
-      }
-   } while (changed);
-}
-
-idom_tree::~idom_tree()
-{
-   delete[] parents;
-}
-
-bblock_t *
-idom_tree::intersect(bblock_t *b1, bblock_t *b2) const
-{
-   /* Note, the comparisons here are the opposite of what the paper says
-    * because we index blocks from beginning -> end (i.e. reverse post-order)
-    * instead of post-order like they assume.
-    */
-   while (b1->num != b2->num) {
-      while (b1->num > b2->num)
-         b1 = parent(b1);
-      while (b2->num > b1->num)
-         b2 = parent(b2);
-   }
-   assert(b1);
-   return b1;
-}
-
-void
-idom_tree::dump(FILE *file) const
-{
-   fprintf(file, "digraph DominanceTree {\n");
-   for (unsigned i = 0; i < num_parents; i++)
-      fprintf(file, "\t%d -> %d\n", parents[i]->num, i);
-   fprintf(file, "}\n");
-}
-
 void
 cfg_t::dump_cfg()
 {
@@ -735,7 +670,7 @@ cfg_t::dump_cfg()
 }
 
 void
-brw_calculate_cfg(fs_visitor &s)
+brw_calculate_cfg(brw_shader &s)
 {
    if (s.cfg)
       return;
@@ -808,6 +743,8 @@ cfg_t::validate(const char *stage_abbrev)
          }
       }
 
+      cfgv_assert(!block->instructions.is_empty());
+
       brw_inst *first_inst = block->start();
       if (first_inst->opcode == BRW_OPCODE_DO) {
          /* DO instructions both begin and end a block, so the DO instruction
@@ -835,6 +772,24 @@ cfg_t::validate(const char *stage_abbrev)
 
          cfgv_assert(logical_block != nullptr);
          cfgv_assert(physical_block != nullptr);
+
+         /* A flow block (block ending with SHADER_OPCODE_FLOW) is
+          * used to ensure that the block right after DO is always
+          * present even if it doesn't have actual instructions.
+          *
+          * This way predicated WHILE and CONTINUE don't need to be
+          * repaired when adding instructions right after the DO.
+          * They will point to the flow block whether is empty or not.
+          */
+         cfgv_assert(logical_block->end()->opcode == SHADER_OPCODE_FLOW);
+      }
+
+      brw_inst *last_inst = block->end();
+      if (last_inst->opcode == SHADER_OPCODE_FLOW) {
+         /* A flow block only has one successor -- the instruction disappears
+          * when generating code.
+          */
+         cfgv_assert(block->children.length() == 1);
       }
    }
 }

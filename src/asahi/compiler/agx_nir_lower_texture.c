@@ -18,6 +18,9 @@
 #include "nir_intrinsics_indices.h"
 #include "shader_enums.h"
 
+/* Residency flags are inverted from NIR */
+#define AGX_RESIDENT (0)
+
 static bool
 fence_image(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
@@ -156,7 +159,18 @@ lower_buffer_texture(nir_builder *b, nir_tex_instr *tex)
 
    nir_def *rgb32 = nir_trim_vector(
       b, libagx_texture_load_rgb32(b, desc, coord, nir_imm_bool(b, is_float)),
-      nir_tex_instr_dest_size(tex));
+      nir_tex_instr_result_size(tex));
+
+   /* Raw loads do not return residency information, but residency queries are
+    * supported on buffer textures. Fortunately, we do not need to support
+    * sparse RGB32 buffers, so we simply claim all RGB32 loads were resident.
+    * Nothing should hit this in practice, but if we don't do *something* here
+    * we'll get vector size mismatches which blow up in vkd3d-proton.
+    */
+   if (tex->is_sparse) {
+      rgb32 = nir_pad_vector_imm_int(b, rgb32, AGX_RESIDENT,
+                                     rgb32->num_components + 1);
+   }
 
    nir_push_else(b, nif);
 
@@ -213,11 +227,16 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, UNUSED void *data)
    /* Apply txf workaround, see libagx_lower_txf_robustness */
    bool is_txf = ((tex->op == nir_texop_txf) || (tex->op == nir_texop_txf_ms));
 
-   if (is_txf && (has_nonzero_lod(tex) || tex->is_array) &&
+   if (is_txf &&
+       (has_nonzero_lod(tex) || tex->is_array ||
+        nir_tex_instr_src_index(tex, nir_tex_src_min_lod) >= 0) &&
        !(tex->backend_flags & AGX_TEXTURE_FLAG_NO_CLAMP)) {
+
       int lod_idx = nir_tex_instr_src_index(tex, nir_tex_src_lod);
       nir_def *lod =
          lod_idx >= 0 ? tex->src[lod_idx].src.ssa : nir_undef(b, 1, 16);
+
+      nir_def *min_lod = nir_steal_tex_src(tex, nir_tex_src_min_lod);
 
       unsigned lidx = coord->num_components - 1;
       nir_def *layer = nir_channel(b, coord, lidx);
@@ -225,6 +244,7 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, UNUSED void *data)
       nir_def *replaced = libagx_lower_txf_robustness(
          b, texture_descriptor_ptr(b, tex),
          nir_imm_bool(b, has_nonzero_lod(tex)), lod,
+         nir_imm_bool(b, min_lod != NULL), min_lod ?: nir_undef(b, 1, 16),
          nir_imm_bool(b, tex->is_array), layer, nir_channel(b, coord, 0));
 
       coord = nir_vector_insert_imm(b, coord, replaced, 0);
@@ -313,6 +333,15 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, UNUSED void *data)
       }
 
       nir_tex_instr_add_src(tex, nir_tex_src_backend2, packed);
+   }
+
+   if (nir_tex_instr_src_index(tex, nir_tex_src_bias) >= 0 &&
+       nir_tex_instr_src_index(tex, nir_tex_src_min_lod) >= 0) {
+
+      nir_def *bias = nir_steal_tex_src(tex, nir_tex_src_bias);
+      nir_def *min_lod = nir_steal_tex_src(tex, nir_tex_src_min_lod);
+      nir_def *packed = nir_pack_32_2x16_split(b, bias, min_lod);
+      nir_tex_instr_add_src(tex, nir_tex_src_lod_bias_min_agx, packed);
    }
 
    /* We reserve bound sampler #0, so we offset bound samplers by 1 and
@@ -423,6 +452,7 @@ legalize_image_lod(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
 
    switch (intr->intrinsic) {
       CASE(image_load, 3)
+      CASE(image_sparse_load, 3)
       CASE(image_store, 4)
       CASE(image_size, 1)
    default:
@@ -513,7 +543,9 @@ lower_buffer_image(nir_builder *b, nir_intrinsic_instr *intr)
    nir_def *coord = nir_channel(b, coord_vector, 0);
 
    /* If we're not bindless, assume we don't need an offset (GL driver) */
-   if (intr->intrinsic == nir_intrinsic_bindless_image_load) {
+   if (intr->intrinsic == nir_intrinsic_bindless_image_load ||
+       intr->intrinsic == nir_intrinsic_bindless_image_sparse_load) {
+
       nir_def *desc = nir_load_from_texture_handle_agx(b, intr->src[0].ssa);
       coord = libagx_buffer_texture_offset(b, desc, coord);
    } else if (intr->intrinsic == nir_intrinsic_bindless_image_store) {
@@ -557,7 +589,7 @@ lower_1d_image(nir_builder *b, nir_intrinsic_instr *intr)
 static bool
 lower_image_load_robustness(nir_builder *b, nir_intrinsic_instr *intr)
 {
-   if (nir_intrinsic_access(intr) & ACCESS_IN_BOUNDS_AGX)
+   if (nir_intrinsic_access(intr) & ACCESS_IN_BOUNDS)
       return false;
 
    /* We only need to worry about array-like loads */
@@ -581,6 +613,7 @@ lower_image_load_robustness(nir_builder *b, nir_intrinsic_instr *intr)
    nir_def *replaced = libagx_lower_txf_robustness(
       b, nir_load_from_texture_handle_agx(b, intr->src[0].ssa),
       nir_imm_bool(b, false /* lower LOD */), lod,
+      nir_imm_bool(b, false /* lower min LOD */), lod,
       nir_imm_bool(b, true /* lower layer */), layer, nir_channel(b, coord, 0));
 
    nir_src_rewrite(&intr->src[1], nir_vector_insert_imm(b, coord, replaced, 0));
@@ -596,12 +629,14 @@ lower_images(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
    case nir_intrinsic_image_load:
    case nir_intrinsic_image_store:
    case nir_intrinsic_bindless_image_load:
+   case nir_intrinsic_bindless_image_sparse_load:
    case nir_intrinsic_bindless_image_store: {
       /* Legalize MSAA index */
       nir_src_rewrite(&intr->src[2], nir_u2u16(b, intr->src[2].ssa));
 
       if (intr->intrinsic == nir_intrinsic_image_load ||
-          intr->intrinsic == nir_intrinsic_bindless_image_load) {
+          intr->intrinsic == nir_intrinsic_bindless_image_load ||
+          intr->intrinsic == nir_intrinsic_bindless_image_sparse_load) {
          lower_image_load_robustness(b, intr);
       }
 
@@ -632,6 +667,20 @@ lower_images(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
       nir_def_rewrite_uses(&intr->def, image_texel_address(b, intr, false));
       return true;
 
+   case nir_intrinsic_is_sparse_texels_resident:
+      /* Residency information is in bit 0, so we need to mask. Unclear what's
+       * in the upper bits. For now, let's match the blob.
+       */
+      nir_def_replace(
+         &intr->def,
+         nir_ieq_imm(b, nir_iand_imm(b, intr->src[0].ssa, 1), AGX_RESIDENT));
+      return true;
+
+   case nir_intrinsic_sparse_residency_code_and:
+      nir_def_replace(&intr->def,
+                      nir_iand(b, intr->src[0].ssa, intr->src[1].ssa));
+      return true;
+
    case nir_intrinsic_image_size:
    case nir_intrinsic_image_texel_address:
       unreachable("should've been lowered");
@@ -653,6 +702,7 @@ lower_robustness(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
 
    switch (intr->intrinsic) {
    case nir_intrinsic_image_deref_load:
+   case nir_intrinsic_image_deref_sparse_load:
    case nir_intrinsic_image_deref_store:
       break;
    default:
@@ -765,7 +815,7 @@ agx_nir_lower_texture(nir_shader *s)
    NIR_PASS(progress, s, nir_shader_intrinsics_pass, fence_image,
             nir_metadata_control_flow, NULL);
 
-   NIR_PASS(progress, s, nir_lower_image_atomics_to_global);
+   NIR_PASS(progress, s, nir_lower_image_atomics_to_global, NULL, NULL);
 
    NIR_PASS(progress, s, nir_shader_intrinsics_pass, legalize_image_lod,
             nir_metadata_control_flow, NULL);

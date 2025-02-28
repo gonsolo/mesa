@@ -160,7 +160,6 @@ visit_alu(nir_alu_instr *instr, struct divergence_state *state)
    return false;
 }
 
-
 /* On some HW uniform loads where there is a pending store/atomic from another
  * wave can "tear" so that different invocations see the pre-store value and
  * the post-store value even though they are loading from the same location.
@@ -348,11 +347,11 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_polygon_stipple_buffer_amd:
    case nir_intrinsic_load_printf_buffer_address:
    case nir_intrinsic_load_printf_buffer_size:
-   case nir_intrinsic_load_printf_base_identifier:
    case nir_intrinsic_load_core_id_agx:
    case nir_intrinsic_load_samples_log2_agx:
    case nir_intrinsic_load_active_subgroup_count_agx:
    case nir_intrinsic_load_constant_base_ptr:
+   case nir_intrinsic_load_const_buf_base_addr_lvp:
       is_divergent = false;
       break;
 
@@ -1449,16 +1448,17 @@ nir_divergence_analysis_impl(nir_function_impl *impl, nir_divergence_options opt
 
    visit_cf_list(&impl->body, &state);
 
-   nir_metadata_preserve(impl, nir_metadata_all);
+   /* Unless this pass is called with shader->options->divergence_analysis_options,
+    * it invalidates nir_metadata_divergence.
+    */
+   nir_progress(true, impl, ~nir_metadata_divergence);
 }
 
 void
 nir_divergence_analysis(nir_shader *shader)
 {
-   shader->info.divergence_analysis_run = true;
    nir_foreach_function_impl(impl, shader) {
-      nir_divergence_analysis_impl(impl,
-                                   shader->options->divergence_analysis_options);
+      nir_metadata_require(impl, nir_metadata_divergence);
    }
 }
 
@@ -1469,8 +1469,6 @@ nir_divergence_analysis(nir_shader *shader)
 void
 nir_vertex_divergence_analysis(nir_shader *shader)
 {
-   shader->info.divergence_analysis_run = false;
-
    struct divergence_state state = {
       .stage = shader->info.stage,
       .shader = shader,
@@ -1485,7 +1483,7 @@ nir_vertex_divergence_analysis(nir_shader *shader)
       nir_metadata_require(impl, nir_metadata_block_index);
       state.impl = impl;
       visit_cf_list(&impl->body, &state);
-      nir_metadata_preserve(impl, nir_metadata_all);
+      nir_progress(true, impl, nir_metadata_all & ~nir_metadata_divergence);
    }
 }
 

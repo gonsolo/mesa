@@ -159,6 +159,14 @@ anv_blorp_batch_init(struct anv_cmd_buffer *cmd_buffer,
    assert((flags & BLORP_BATCH_USE_BLITTER) == 0 ||
           (flags & BLORP_BATCH_USE_COMPUTE) == 0);
 
+   /* If blorp needs a VS shader, we can't have the component packing of the
+    * driver interfere with blorp's shader.
+    */
+   flags |= BLORP_BATCH_EMIT_3DSTATE_VF;
+
+   if (!cmd_buffer->device->physical->instance->enable_vf_distribution)
+      flags |= BLORP_BATCH_DISABLE_VF_DISTRIBUTION;
+
    blorp_batch_init(&cmd_buffer->device->blorp.context, batch, cmd_buffer, flags);
 }
 

@@ -854,6 +854,7 @@ radv_device_init_cache_key(struct radv_device *device)
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
    struct radv_device_cache_key *key = &device->cache_key;
+   struct mesa_blake3 ctx;
 
    key->keep_shader_info = device->keep_shader_info;
    key->trap_excp_flags = device->trap_handler_shader && instance->trap_excp_flags;
@@ -875,7 +876,10 @@ radv_device_init_cache_key(struct radv_device *device)
       key->primitives_generated_query = true;
    }
 
-   _mesa_blake3_compute(key, sizeof(*key), device->cache_hash);
+   _mesa_blake3_init(&ctx);
+   _mesa_blake3_update(&ctx, &pdev->cache_key, sizeof(pdev->cache_key));
+   _mesa_blake3_update(&ctx, &device->cache_key, sizeof(device->cache_key));
+   _mesa_blake3_final(&ctx, device->cache_hash);
 }
 
 static void
@@ -1431,7 +1435,8 @@ radv_GetImageMemoryRequirements2(VkDevice _device, const VkImageMemoryRequiremen
       switch (ext->sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *req = (VkMemoryDedicatedRequirements *)ext;
-         req->requiresDedicatedAllocation = image->shareable && image->vk.tiling != VK_IMAGE_TILING_LINEAR;
+         req->requiresDedicatedAllocation =
+            image->vk.external_handle_types && image->vk.tiling != VK_IMAGE_TILING_LINEAR;
          req->prefersDedicatedAllocation = req->requiresDedicatedAllocation;
          break;
       }
@@ -1448,9 +1453,8 @@ radv_GetDeviceImageMemoryRequirements(VkDevice device, const VkDeviceImageMemory
    UNUSED VkResult result;
    VkImage image;
 
-   /* Determining the image size/alignment require to create a surface, which is complicated without
-    * creating an image.
-    * TODO: Avoid creating an image.
+   /* Determining the image size/alignment require to create a surface, which isn't really possible
+    * without creating an image.
     */
    result =
       radv_image_create(device, &(struct radv_image_create_info){.vk_info = pInfo->pCreateInfo}, NULL, &image, true);
@@ -1524,7 +1528,7 @@ radv_initialise_color_surface(struct radv_device *device, struct radv_color_buff
    ac_init_cb_surface(&pdev->info, &cb_state, &cb->ac);
 
    uint32_t plane_id = iview->image->disjoint ? iview->plane_id : 0;
-   va = radv_image_get_va(iview->image, plane_id);
+   va = iview->image->bindings[plane_id].addr;
 
    const struct ac_mutable_cb_state mutable_cb_state = {
       .surf = surf,
@@ -1586,7 +1590,7 @@ radv_initialise_ds_surface(const struct radv_device *device, struct radv_ds_buff
 
    const struct ac_ds_state ds_state = {
       .surf = &iview->image->planes[0].surface,
-      .va = radv_image_get_va(iview->image, 0),
+      .va = iview->image->bindings[0].addr,
       .format = radv_format_to_pipe_format(iview->image->vk.format),
       .width = iview->image->vk.extent.width,
       .height = iview->image->vk.extent.height,
@@ -1608,7 +1612,7 @@ radv_initialise_ds_surface(const struct radv_device *device, struct radv_ds_buff
    const struct ac_mutable_ds_state mutable_ds_state = {
       .ds = &ds->ac,
       .format = radv_format_to_pipe_format(iview->image->vk.format),
-      .tc_compat_htile_enabled = radv_htile_enabled(iview->image, level) && radv_image_is_tc_compat_htile(iview->image),
+      .tc_compat_htile_enabled = radv_tc_compat_htile_enabled(iview->image, level),
       .zrange_precision = true,
       .no_d16_compression = true,
    };
@@ -1663,7 +1667,6 @@ radv_GetMemoryFdKHR(VkDevice _device, const VkMemoryGetFdInfoKHR *pGetFdInfo, in
    if (memory->image) {
       struct radv_image *image = memory->image;
 
-      assert(memory->image->bindings[0].offset == 0);
       radv_image_bo_set_metadata(device, image, memory->bo);
    }
 

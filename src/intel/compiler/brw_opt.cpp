@@ -4,15 +4,13 @@
  */
 
 #include "brw_eu.h"
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_builder.h"
 
 #include "dev/intel_debug.h"
 
-using namespace brw;
-
 void
-brw_optimize(fs_visitor &s)
+brw_optimize(brw_shader &s)
 {
    const nir_shader *nir = s.nir;
 
@@ -23,7 +21,7 @@ brw_optimize(fs_visitor &s)
 
    /* Track how much non-SSA at this point. */
    {
-      const brw::def_analysis &defs = s.def_analysis.require();
+      const brw_def_analysis &defs = s.def_analysis.require();
       s.shader_stats.non_ssa_registers_after_nir =
          defs.count() - defs.ssa_count();
    }
@@ -187,7 +185,7 @@ brw_optimize(fs_visitor &s)
 
    if (OPT(brw_lower_send_descriptors)) {
       /* No need for standard copy_propagation since
-       * brw_fs_opt_address_reg_load will only optimize defs.
+       * brw_opt_address_reg_load will only optimize defs.
        */
       if (OPT(brw_opt_copy_propagation_defs))
          OPT(brw_opt_algebraic);
@@ -232,7 +230,7 @@ load_payload_sources_read_for_size(brw_inst *lp, unsigned size_read)
  */
 
 bool
-brw_opt_zero_samples(fs_visitor &s)
+brw_opt_zero_samples(brw_shader &s)
 {
    bool progress = false;
 
@@ -287,7 +285,7 @@ brw_opt_zero_samples(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTION_DETAIL);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTION_DETAIL);
 
    return progress;
 }
@@ -309,7 +307,7 @@ brw_opt_zero_samples(fs_visitor &s)
  * payload concatenation altogether.
  */
 bool
-brw_opt_split_sends(fs_visitor &s)
+brw_opt_split_sends(brw_shader &s)
 {
    bool progress = false;
 
@@ -361,8 +359,8 @@ brw_opt_split_sends(fs_visitor &s)
       assert(lp2->size_written % REG_SIZE == 0);
       assert((lp1->size_written + lp2->size_written) / REG_SIZE == send->mlen);
 
-      lp1->dst = brw_vgrf(s.alloc.allocate(lp1->size_written / REG_SIZE), lp1->dst.type);
-      lp2->dst = brw_vgrf(s.alloc.allocate(lp2->size_written / REG_SIZE), lp2->dst.type);
+      lp1->dst = retype(brw_allocate_vgrf_units(s, lp1->size_written / REG_SIZE), lp1->dst.type);
+      lp2->dst = retype(brw_allocate_vgrf_units(s, lp2->size_written / REG_SIZE), lp2->dst.type);
 
       send->resize_sources(4);
       send->src[2] = lp1->dst;
@@ -374,7 +372,8 @@ brw_opt_split_sends(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS | DEPENDENCY_VARIABLES);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS |
+                            BRW_DEPENDENCY_VARIABLES);
 
    return progress;
 }
@@ -389,7 +388,7 @@ brw_opt_split_sends(fs_visitor &s)
  * halt-target
  */
 bool
-brw_opt_remove_redundant_halts(fs_visitor &s)
+brw_opt_remove_redundant_halts(brw_shader &s)
 {
    bool progress = false;
 
@@ -427,7 +426,7 @@ brw_opt_remove_redundant_halts(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS);
 
    return progress;
 }
@@ -438,7 +437,7 @@ brw_opt_remove_redundant_halts(fs_visitor &s)
  * analysis.
  */
 bool
-brw_opt_eliminate_find_live_channel(fs_visitor &s)
+brw_opt_eliminate_find_live_channel(brw_shader &s)
 {
    bool progress = false;
    unsigned depth = 0;
@@ -518,7 +517,7 @@ brw_opt_eliminate_find_live_channel(fs_visitor &s)
 
 out:
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTION_DETAIL);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTION_DETAIL);
 
    return progress;
 }
@@ -532,7 +531,7 @@ out:
  * mode once is enough for the full vector/matrix
  */
 bool
-brw_opt_remove_extra_rounding_modes(fs_visitor &s)
+brw_opt_remove_extra_rounding_modes(brw_shader &s)
 {
    bool progress = false;
    unsigned execution_mode = s.nir->info.float_controls_execution_mode;
@@ -567,13 +566,13 @@ brw_opt_remove_extra_rounding_modes(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS);
 
    return progress;
 }
 
 bool
-brw_opt_send_to_send_gather(fs_visitor &s)
+brw_opt_send_to_send_gather(brw_shader &s)
 {
    const intel_device_info *devinfo = s.devinfo;
    bool progress = false;
@@ -643,8 +642,8 @@ brw_opt_send_to_send_gather(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTION_DETAIL |
-                            DEPENDENCY_INSTRUCTION_DATA_FLOW);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTION_DETAIL |
+                            BRW_DEPENDENCY_INSTRUCTION_DATA_FLOW);
 
    return progress;
 }
@@ -654,7 +653,7 @@ brw_opt_send_to_send_gather(fs_visitor &s)
  * having to write the ARF scalar register.
  */
 bool
-brw_opt_send_gather_to_send(fs_visitor &s)
+brw_opt_send_gather_to_send(brw_shader &s)
 {
    const intel_device_info *devinfo = s.devinfo;
    bool progress = false;
@@ -724,9 +723,9 @@ brw_opt_send_gather_to_send(fs_visitor &s)
        *
        * TODO: Pass LSC address length or infer it so valid splits can work.
        */
-      if (payload2_len && (inst->sfid == GFX12_SFID_UGM ||
-                           inst->sfid == GFX12_SFID_TGM ||
-                           inst->sfid == GFX12_SFID_SLM ||
+      if (payload2_len && (inst->sfid == BRW_SFID_UGM ||
+                           inst->sfid == BRW_SFID_TGM ||
+                           inst->sfid == BRW_SFID_SLM ||
                            inst->sfid == BRW_SFID_URB)) {
          enum lsc_opcode lsc_op = lsc_msg_desc_opcode(devinfo, inst->desc);
          if (lsc_op_num_data_values(lsc_op) > 0)
@@ -744,8 +743,8 @@ brw_opt_send_gather_to_send(fs_visitor &s)
    }
 
    if (progress) {
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTION_DETAIL |
-                            DEPENDENCY_INSTRUCTION_DATA_FLOW);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTION_DETAIL |
+                            BRW_DEPENDENCY_INSTRUCTION_DATA_FLOW);
    }
 
    return progress;

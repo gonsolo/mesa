@@ -26,13 +26,11 @@
  */
 
 #include "brw_eu.h"
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_builder.h"
 #include "brw_cfg.h"
 #include "util/set.h"
 #include "util/register_allocate.h"
-
-using namespace brw;
 
 static void
 assign_reg(const struct intel_device_info *devinfo,
@@ -45,7 +43,7 @@ assign_reg(const struct intel_device_info *devinfo,
 }
 
 void
-brw_assign_regs_trivial(fs_visitor &s)
+brw_assign_regs_trivial(brw_shader &s)
 {
    const struct intel_device_info *devinfo = s.devinfo;
    unsigned *hw_reg_mapping = ralloc_array(NULL, unsigned, s.alloc.count + 1);
@@ -79,7 +77,7 @@ brw_assign_regs_trivial(fs_visitor &s)
 }
 
 extern "C" void
-brw_fs_alloc_reg_sets(struct brw_compiler *compiler)
+brw_alloc_reg_sets(struct brw_compiler *compiler)
 {
    const struct intel_device_info *devinfo = compiler->devinfo;
    int base_reg_count = (devinfo->ver >= 30 ? XE3_MAX_GRF / reg_unit(devinfo) :
@@ -154,7 +152,7 @@ count_to_loop_end(const bblock_t *block)
    unreachable("not reached");
 }
 
-void fs_visitor::calculate_payload_ranges(bool allow_spilling,
+void brw_shader::calculate_payload_ranges(bool allow_spilling,
                                           unsigned payload_node_count,
                                           int *payload_last_use_ip) const
 {
@@ -238,7 +236,7 @@ void fs_visitor::calculate_payload_ranges(bool allow_spilling,
 
 class brw_reg_alloc {
 public:
-   brw_reg_alloc(fs_visitor *fs):
+   brw_reg_alloc(brw_shader *fs):
       fs(fs), devinfo(fs->devinfo), compiler(fs->compiler),
       live(fs->live_analysis.require()), g(NULL),
       have_spill_costs(false)
@@ -310,10 +308,10 @@ private:
    void spill_reg(unsigned spill_reg);
 
    void *mem_ctx;
-   fs_visitor *fs;
+   brw_shader *fs;
    const intel_device_info *devinfo;
    const brw_compiler *compiler;
-   const fs_live_variables &live;
+   const brw_live_variables &live;
    int live_instr_count;
 
    set *spill_insts;
@@ -353,7 +351,7 @@ namespace {
     * into multiple (force_writemask_all) scratch messages.
     */
    unsigned
-   spill_max_size(const fs_visitor *s)
+   spill_max_size(const brw_shader *s)
    {
       /* LSC is limited to SIMD16 sends (SIMD32 on Xe2) */
       if (s->devinfo->has_lsc)
@@ -363,10 +361,6 @@ namespace {
        *            altogether by spilling directly from the temporary GRF
        *            allocated to hold the result of the instruction (and the
        *            scratch write header).
-       */
-      /* FINISHME - The shader's dispatch width probably belongs in
-       *            backend_shader (or some nonexistent fs_shader class?)
-       *            rather than in the visitor class.
        */
       return s->dispatch_width / 8;
    }
@@ -711,13 +705,12 @@ brw_reg_alloc::build_ex_desc(const brw_builder &bld, unsigned reg_size, bool uns
    } else {
       if (unspill) {
          inst = bld.exec_all().group(1, 0).OR(
-            ex_desc, ex_desc, brw_imm_ud(GFX12_SFID_UGM));
+            ex_desc, ex_desc, brw_imm_ud(BRW_SFID_UGM));
          _mesa_set_add(spill_insts, inst);
       } else {
          inst = bld.exec_all().group(1, 0).OR(
             ex_desc, ex_desc,
-            brw_imm_ud(brw_message_ex_desc(devinfo, reg_size) |
-                       GFX12_SFID_UGM));
+            brw_imm_ud(brw_message_ex_desc(devinfo, reg_size) | BRW_SFID_UGM));
          _mesa_set_add(spill_insts, inst);
       }
    }
@@ -847,7 +840,7 @@ brw_reg_alloc::emit_unspill(const brw_builder &bld,
 
          unspill_inst = ubld.emit(SHADER_OPCODE_SEND, dst,
                                   srcs, ARRAY_SIZE(srcs));
-         unspill_inst->sfid = GFX12_SFID_UGM;
+         unspill_inst->sfid = BRW_SFID_UGM;
          unspill_inst->header_size = 0;
          unspill_inst->mlen = lsc_msg_addr_len(devinfo, LSC_ADDR_SIZE_A32,
                                                unspill_inst->exec_size);
@@ -880,7 +873,7 @@ brw_reg_alloc::emit_unspill(const brw_builder &bld,
          unspill_inst->size_written = reg_size * REG_SIZE;
          unspill_inst->send_has_side_effects = false;
          unspill_inst->send_is_volatile = true;
-         unspill_inst->sfid = GFX7_SFID_DATAPORT_DATA_CACHE;
+         unspill_inst->sfid = BRW_SFID_HDC0;
 
          unspill_inst->src[0] = brw_imm_ud(
             brw_dp_desc(devinfo, bti,
@@ -924,7 +917,7 @@ brw_reg_alloc::emit_spill(const brw_builder &bld,
          };
          spill_inst = bld.emit(SHADER_OPCODE_SEND, bld.null_reg_f(),
                                srcs, ARRAY_SIZE(srcs));
-         spill_inst->sfid = GFX12_SFID_UGM;
+         spill_inst->sfid = BRW_SFID_UGM;
          uint32_t desc = lsc_msg_desc(devinfo, LSC_OP_STORE,
                                       LSC_ADDR_SURFTYPE_SS,
                                       LSC_ADDR_SIZE_A32,
@@ -964,7 +957,7 @@ brw_reg_alloc::emit_spill(const brw_builder &bld,
          spill_inst->header_size = 1;
          spill_inst->send_has_side_effects = true;
          spill_inst->send_is_volatile = false;
-         spill_inst->sfid = GFX7_SFID_DATAPORT_DATA_CACHE;
+         spill_inst->sfid = BRW_SFID_HDC0;
 
          spill_inst->src[0] = brw_imm_ud(
             brw_dp_desc(devinfo, bti,
@@ -1084,7 +1077,7 @@ brw_reg_alloc::choose_spill_reg()
 brw_reg
 brw_reg_alloc::alloc_spill_reg(unsigned size, int ip)
 {
-   int vgrf = fs->alloc.allocate(ALIGN(size, reg_unit(devinfo)));
+   int vgrf = brw_allocate_vgrf_units(*fs, ALIGN(size, reg_unit(devinfo))).nr;
    int class_idx = DIV_ROUND_UP(size, reg_unit(devinfo)) - 1;
    int n = ra_add_node(g, compiler->reg_set.classes[class_idx]);
    assert(n == first_vgrf_node + vgrf);
@@ -1303,7 +1296,8 @@ brw_reg_alloc::assign_regs(bool allow_spilling, bool spill_all)
    }
 
    if (spilled)
-      fs->invalidate_analysis(DEPENDENCY_INSTRUCTIONS | DEPENDENCY_VARIABLES);
+      fs->invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS |
+                              BRW_DEPENDENCY_VARIABLES);
 
    /* Get the chosen virtual registers for each node, and map virtual
     * regs in the register classes back down to real hardware reg
@@ -1335,7 +1329,7 @@ brw_reg_alloc::assign_regs(bool allow_spilling, bool spill_all)
 }
 
 bool
-brw_assign_regs(fs_visitor &s, bool allow_spilling, bool spill_all)
+brw_assign_regs(brw_shader &s, bool allow_spilling, bool spill_all)
 {
    brw_reg_alloc alloc(&s);
    bool success = alloc.assign_regs(allow_spilling, spill_all);

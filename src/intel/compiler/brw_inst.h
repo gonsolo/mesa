@@ -25,7 +25,6 @@
 #pragma once
 
 #include <assert.h>
-#include "brw_ir_allocator.h"
 #include "brw_reg.h"
 #include "compiler/glsl/list.h"
 
@@ -163,7 +162,6 @@ public:
    uint8_t sfid; /**< SFID for SEND instructions */
    /** The number of hardware registers used for a message header. */
    uint8_t header_size;
-   uint8_t target; /**< MRT target. */
    uint32_t desc; /**< SEND[S] message descriptor immediate */
    uint32_t ex_desc; /**< SEND[S] extended message descriptor immediate */
 
@@ -193,7 +191,7 @@ public:
           */
          unsigned rcount:4;
 
-         unsigned pad:2;
+         unsigned pad:5;
 
          bool predicate_inverse:1;
          bool writes_accumulator:1; /**< instruction implicitly writes accumulator */
@@ -201,7 +199,6 @@ public:
          bool no_dd_clear:1;
          bool no_dd_check:1;
          bool saturate:1;
-         bool shadow_compare:1;
          bool check_tdr:1; /**< Only valid for SEND; turns it into a SENDC */
          bool send_has_side_effects:1; /**< Only valid for SHADER_OPCODE_SEND */
          bool send_is_volatile:1; /**< Only valid for SHADER_OPCODE_SEND */
@@ -216,8 +213,6 @@ public:
           */
          bool predicate_trivial:1;
          bool eot:1;
-         bool last_rt:1;
-         bool pi_noperspective:1;   /**< Pixel interpolator noperspective flag */
          bool keep_payload_trailing_zeros:1;
          /**
           * Whether the parameters of the SEND instructions are build with
@@ -378,8 +373,7 @@ bool is_identity_payload(const struct intel_device_info *devinfo,
 bool is_multi_copy_payload(const struct intel_device_info *devinfo,
                            const brw_inst *inst);
 
-bool is_coalescing_payload(const struct intel_device_info *devinfo,
-                           const brw::simple_allocator &alloc, const brw_inst *inst);
+bool is_coalescing_payload(const struct brw_shader &s, const brw_inst *inst);
 
 bool has_bank_conflict(const struct brw_isa_info *isa, const brw_inst *inst);
 
@@ -388,7 +382,7 @@ bool has_bank_conflict(const struct brw_isa_info *isa, const brw_inst *inst);
  * subregister number of the instruction.
  */
 static inline unsigned
-brw_fs_flag_mask(const brw_inst *inst, unsigned width)
+brw_flag_mask(const brw_inst *inst, unsigned width)
 {
    assert(util_is_power_of_two_nonzero(width));
    const unsigned start = (inst->flag_subreg * 16 + inst->group) &
@@ -398,18 +392,18 @@ brw_fs_flag_mask(const brw_inst *inst, unsigned width)
 }
 
 static inline unsigned
-brw_fs_bit_mask(unsigned n)
+brw_bit_mask(unsigned n)
 {
-   return (n >= CHAR_BIT * sizeof(brw_fs_bit_mask(n)) ? ~0u : (1u << n) - 1);
+   return (n >= CHAR_BIT * sizeof(brw_bit_mask(n)) ? ~0u : (1u << n) - 1);
 }
 
 static inline unsigned
-brw_fs_flag_mask(const brw_reg &r, unsigned sz)
+brw_flag_mask(const brw_reg &r, unsigned sz)
 {
    if (r.file == ARF) {
       const unsigned start = (r.nr - BRW_ARF_FLAG) * 4 + r.subnr;
       const unsigned end = start + sz;
-      return brw_fs_bit_mask(end) & ~brw_fs_bit_mask(start);
+      return brw_bit_mask(end) & ~brw_bit_mask(start);
    } else {
       return 0;
    }

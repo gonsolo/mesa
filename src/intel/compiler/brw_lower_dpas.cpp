@@ -3,10 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_builder.h"
-
-using namespace brw;
 
 static void
 f16_using_mac(const brw_builder &bld, brw_inst *inst)
@@ -271,7 +269,7 @@ int8_using_mul_add(const brw_builder &bld, brw_inst *inst)
 }
 
 bool
-brw_lower_dpas(fs_visitor &v)
+brw_lower_dpas(brw_shader &v)
 {
    bool progress = false;
 
@@ -297,7 +295,7 @@ brw_lower_dpas(fs_visitor &v)
    }
 
    if (progress)
-      v.invalidate_analysis(DEPENDENCY_INSTRUCTIONS);
+      v.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS);
 
    return progress;
 }

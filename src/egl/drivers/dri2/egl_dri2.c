@@ -157,10 +157,6 @@ const __DRIbackgroundCallableExtension background_callable_extension = {
    .isThreadSafe = dri_is_thread_safe,
 };
 
-const __DRIuseInvalidateExtension use_invalidate = {
-   .base = {__DRI_USE_INVALIDATE, 1},
-};
-
 static void
 dri2_get_pbuffer_drawable_info(struct dri_drawable *draw, int *x, int *y, int *w,
                                int *h, void *loaderPrivate)
@@ -629,11 +625,8 @@ dri2_setup_screen(_EGLDisplay *disp)
 
 #ifdef HAVE_LIBDRM
    unsigned caps = pscreen->caps.dmabuf;
-   /* set if both import and export are suported */
-   if (dri2_dpy->multibuffers_available) {
-      dri2_dpy->has_dmabuf_import = (caps & DRM_PRIME_CAP_IMPORT) > 0;
-      dri2_dpy->has_dmabuf_export = (caps & DRM_PRIME_CAP_EXPORT) > 0;
-   }
+   dri2_dpy->has_dmabuf_import = (caps & DRM_PRIME_CAP_IMPORT) > 0;
+   dri2_dpy->has_dmabuf_export = (caps & DRM_PRIME_CAP_EXPORT) > 0;
 #endif
 #ifdef HAVE_ANDROID_PLATFORM
    dri2_dpy->has_native_fence_fd = pscreen->caps.native_fence_fd;
@@ -1690,27 +1683,6 @@ dri2_swap_buffers_with_damage(_EGLDisplay *disp, _EGLSurface *surf,
 }
 
 static EGLBoolean
-dri2_swap_buffers_region(_EGLDisplay *disp, _EGLSurface *surf, EGLint numRects,
-                         const EGLint *rects)
-{
-   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
-   struct dri_drawable *dri_drawable = dri2_dpy->vtbl->get_dri_drawable(surf);
-   EGLBoolean ret;
-
-   if (!dri2_dpy->vtbl->swap_buffers_region)
-      return EGL_FALSE;
-   ret = dri2_dpy->vtbl->swap_buffers_region(disp, surf, numRects, rects);
-
-   /* SwapBuffers marks the end of the frame; reset the damage region for
-    * use again next time.
-    */
-   if (ret && disp->Extensions.KHR_partial_update)
-      dri_set_damage_region(dri_drawable, 0, NULL);
-
-   return ret;
-}
-
-static EGLBoolean
 dri2_set_damage_region(_EGLDisplay *disp, _EGLSurface *surf, EGLint *rects,
                        EGLint n_rects)
 {
@@ -1725,21 +1697,6 @@ dri2_set_damage_region(_EGLDisplay *disp, _EGLSurface *surf, EGLint *rects,
    dri_set_damage_region(drawable, n_rects, rects);
    mtx_unlock(&dri2_dpy->lock);
    return EGL_TRUE;
-}
-
-static EGLBoolean
-dri2_post_sub_buffer(_EGLDisplay *disp, _EGLSurface *surf, EGLint x, EGLint y,
-                     EGLint width, EGLint height)
-{
-   struct dri2_egl_display *dri2_dpy = dri2_egl_display_lock(disp);
-   EGLBoolean ret = EGL_FALSE;
-
-   if (dri2_dpy->vtbl->post_sub_buffer)
-      ret = dri2_dpy->vtbl->post_sub_buffer(disp, surf, x, y, width, height);
-
-   mtx_unlock(&dri2_dpy->lock);
-
-   return ret;
 }
 
 static EGLBoolean
@@ -3373,9 +3330,7 @@ const _EGLDriver _eglDriver = {
    .SwapInterval = dri2_swap_interval,
    .SwapBuffers = dri2_swap_buffers,
    .SwapBuffersWithDamageEXT = dri2_swap_buffers_with_damage,
-   .SwapBuffersRegionNOK = dri2_swap_buffers_region,
    .SetDamageRegion = dri2_set_damage_region,
-   .PostSubBufferNV = dri2_post_sub_buffer,
    .CopyBuffers = dri2_copy_buffers,
    .QueryBufferAge = dri2_query_buffer_age,
    .CreateImageKHR = dri2_create_image,
