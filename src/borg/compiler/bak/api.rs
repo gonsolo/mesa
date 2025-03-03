@@ -12,7 +12,7 @@ use std::os::raw::c_void;
 macro_rules! pass {
     ($s: expr, $pass: ident) => {
         $s.$pass();
-        eprintln!("NAK IR after {}:\n{}", stringify!($pass), $s);
+        eprintln!("BAK IR after {}:\n{}", stringify!($pass), $s);
     };
 }
 

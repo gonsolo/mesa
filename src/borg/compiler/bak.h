@@ -27,6 +27,6 @@ bak_nir_options(const struct bak_compiler *bak);
 
 struct bak_compiler *bak_compiler_create();
 
-void bak_postprocess_nir(nir_shader *nir, const struct bak_compiler *nak);
+void bak_postprocess_nir(nir_shader *nir, const struct bak_compiler *bak);
 
 #endif
