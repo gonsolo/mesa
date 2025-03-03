@@ -406,7 +406,7 @@ print_src(const nir_src *src, print_state *state, nir_alu_type src_type)
    fprintf(fp, "%s%u", state->def_prefix, src->ssa->index);
    nir_instr *instr = src->ssa->parent_instr;
 
-   if (state->shader->has_debug_info) {
+   if (state->shader && state->shader->has_debug_info) {
       nir_instr_debug_info *debug_info = nir_instr_get_debug_info(instr);
       if (debug_info->variable_name)
          fprintf(fp, ".%s", debug_info->variable_name);
