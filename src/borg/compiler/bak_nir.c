@@ -15,7 +15,7 @@
       this_progress;                                        \
       })
 
-   static void
+static void
 optimize_nir(nir_shader *nir, const struct bak_compiler *bak)
 {
    bool progress;
@@ -77,13 +77,13 @@ optimize_nir(nir_shader *nir, const struct bak_compiler *bak)
    OPT(nir, nir_remove_dead_variables, nir_var_function_temp, NULL);
 }
 
-   void
+void
 bak_optimize_nir(nir_shader *nir, const struct bak_compiler *bak)
 {
    optimize_nir(nir, bak);
 }
 
-   static bool
+static bool
 bak_nir_lower_workgroup_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
       void *data)
 {
@@ -104,7 +104,7 @@ bak_nir_lower_workgroup_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
    return true;
 }
 
-   static bool
+static bool
 bak_nir_lower_workgroup(nir_shader *nir, const struct bak_compiler *bak)
 {
    return nir_shader_intrinsics_pass(nir, bak_nir_lower_workgroup_intrin,
@@ -112,7 +112,7 @@ bak_nir_lower_workgroup(nir_shader *nir, const struct bak_compiler *bak)
          (void *)bak);
 }
 
-   void
+void
 bak_postprocess_nir(nir_shader *nir, const struct bak_compiler *bak)
 {
    UNUSED bool progress = false;
@@ -129,5 +129,7 @@ bak_postprocess_nir(nir_shader *nir, const struct bak_compiler *bak)
 
    nir_convert_to_lcssa(nir, true, true);
    nir_divergence_analysis(nir);
+
+   nir_print_shader(nir, stderr);
 }
 

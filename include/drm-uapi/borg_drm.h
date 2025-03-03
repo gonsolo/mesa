@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Andreas Wendleder
+ * Copyright 2024-25 Andreas Wendleder
  * All Rights Reserved.
  *
  */
