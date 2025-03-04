@@ -30,6 +30,8 @@ struct drm_borg_getparam {
 
 struct drm_borg_submit {
    __u64 dummy;
+   __u64 shader_pointer;
+   __u64 shader_size;
 };
 
 struct drm_borg_vm_bind {
