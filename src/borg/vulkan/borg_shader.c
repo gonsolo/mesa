@@ -156,13 +156,12 @@ borg_shader_upload(struct borg_device *dev, struct borg_shader *shader)
    //free(data);
 
    //return result;
+   printf("sizeof global_shader_pointer is: %li\n", sizeof(global_shader_pointer));
    global_shader_pointer = shader->code_ptr;
    printf("global_shader_pointer is now %p\n", global_shader_pointer);
    global_shader_size = shader->code_size;
    printf("global_shader_size is now %i\n", global_shader_size);
 
-   //const int borg_status = 0x4000;
-   //bool status = reg_read8(borg_status) & 0x1;
    puts("borg_shader_upload: Attempting borg_get_status\n");
    uint64_t status = borg_get_status(dev);
    printf("borg status is %li\n", status);
