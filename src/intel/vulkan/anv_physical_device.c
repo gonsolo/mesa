@@ -267,6 +267,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .EXT_depth_range_unrestricted          = device->info.ver >= 20,
       .EXT_descriptor_buffer                 = true,
       .EXT_descriptor_indexing               = true,
+      .EXT_device_memory_report              = true,
 #ifdef VK_USE_PLATFORM_DISPLAY_KHR
       .EXT_display_control                   = true,
 #endif
@@ -578,6 +579,9 @@ get_features(const struct anv_physical_device *pdevice,
       /* VK_EXT_depth_clip_enable */
       .depthClipEnable = true,
 
+      /* VK_EXT_device_memory_report */
+      .deviceMemoryReport = true,
+
       /* VK_EXT_fragment_shader_interlock */
       .fragmentShaderSampleInterlock = true,
       .fragmentShaderPixelInterlock = true,
@@ -585,6 +589,9 @@ get_features(const struct anv_physical_device *pdevice,
 
       /* VK_EXT_global_priority_query */
       .globalPriorityQuery = true,
+
+      /* VK_EXT_device_memory_report */
+      .deviceMemoryReport = true,
 
       /* VK_EXT_graphics_pipeline_library */
       .graphicsPipelineLibrary =
@@ -2027,6 +2034,18 @@ anv_physical_device_init_heaps(struct anv_physical_device *device, int fd)
       break;
    }
 
+   if (device->has_protected_contexts) {
+      /* Add a memory type for protected buffers, local and not host
+       * visible.
+       */
+      device->memory.types[device->memory.type_count++] =
+         (struct anv_memory_type) {
+            .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+                             VK_MEMORY_PROPERTY_PROTECTED_BIT,
+            .heapIndex = 0,
+      };
+   }
+
    assert(device->memory.type_count < ARRAY_SIZE(device->memory.types));
 
    if (result != VK_SUCCESS)
@@ -2331,11 +2350,14 @@ anv_physical_device_init_queue_families(struct anv_physical_device *pdevice)
          };
       }
       if (c_count > 0) {
+         /* TODO: CCS don't support MI_SET_APPID instruction, that might be
+          * the reason some tests protected memory tests fail on CCS.
+          * Re-enable it if a workaround/solution is found.
+          */
          pdevice->queue.families[family_count++] = (struct anv_queue_family) {
             .queueFlags = VK_QUEUE_COMPUTE_BIT |
                           VK_QUEUE_TRANSFER_BIT |
-                          sparse_flags |
-                          protected_flag,
+                          sparse_flags,
             .queueCount = c_count,
             .engine_class = compute_class,
          };

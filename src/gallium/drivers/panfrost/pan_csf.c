@@ -952,8 +952,16 @@ GENX(csf_launch_grid)(struct panfrost_batch *batch,
       /* Wait for the stores */
       cs_wait_slot(b, 0, false);
 
-      cs_run_compute_indirect(b, DIV_ROUND_UP(max_thread_cnt, threads_per_wg),
-                              false, cs_shader_res_sel(0, 0, 0, 0));
+      /* Use run_compute with a set task axis instead of run_compute_indirect as
+       * run_compute_indirect has been found to cause intermittent hangs. This
+       * is safe, as the task increment will be clamped by the job size along
+       * the specified axis.
+       * The chosen task axis is potentially suboptimal, as choosing good
+       * increment/axis parameters requires knowledge of job dimensions, but
+       * this is somewhat offset by run_compute being a native instruction. */
+      unsigned task_axis = MALI_TASK_AXIS_X;
+      cs_run_compute(b, DIV_ROUND_UP(max_thread_cnt, threads_per_wg), task_axis,
+                     false, cs_shader_res_sel(0, 0, 0, 0));
    } else {
       /* Set size in workgroups per dimension immediately */
       cs_move32_to(b, cs_sr_reg32(b, COMPUTE, JOB_SIZE_X), info->grid[0]);
@@ -1202,8 +1210,8 @@ csf_emit_draw_state(struct panfrost_batch *batch,
             ctx->blend->base.alpha_to_coverage,
             ctx->depth_stencil->zs_always_passes);
 
-         cfg.pixel_kill_operation = earlyzs.kill;
-         cfg.zs_update_operation = earlyzs.update;
+         cfg.pixel_kill_operation = (enum mali_pixel_kill)earlyzs.kill;
+         cfg.zs_update_operation = (enum mali_pixel_kill)earlyzs.update;
 
          cfg.allow_forward_pixel_to_kill =
             pan_allow_forward_pixel_to_kill(ctx, fs);
@@ -1483,7 +1491,6 @@ GENX(csf_init_context)(struct panfrost_context *ctx)
    const struct cs_builder_conf bconf = {
       .nr_registers = csif_info->cs_reg_count,
       .nr_kernel_registers = MAX2(csif_info->unpreserved_cs_reg_count, 4),
-      .nr_kernel_registers = 4,
    };
    struct cs_builder b;
    cs_builder_init(&b, &bconf, init_buffer);

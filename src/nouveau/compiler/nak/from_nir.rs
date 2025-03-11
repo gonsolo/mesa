@@ -1812,6 +1812,7 @@ impl<'a> ShaderFromNir<'a> {
                 tex: tex_ref,
                 src: src,
                 query: TexQuery::Dimension,
+                nodep: flags.nodep(),
                 mask: mask,
             });
         } else if tex.op == nir_texop_tex_type_nv {
@@ -1822,6 +1823,7 @@ impl<'a> ShaderFromNir<'a> {
                 tex: tex_ref,
                 src: src,
                 query: TexQuery::TextureType,
+                nodep: flags.nodep(),
                 mask: mask,
             });
         } else {
@@ -1862,6 +1864,7 @@ impl<'a> ShaderFromNir<'a> {
                     dim: dim,
                     offset: offset_mode == Tld4OffsetMode::AddOffI,
                     mem_eviction_priority: MemEvictionPriority::Normal,
+                    nodep: flags.nodep(),
                     mask: mask,
                 });
             } else if tex.op == nir_texop_lod {
@@ -1871,6 +1874,7 @@ impl<'a> ShaderFromNir<'a> {
                     tex: tex_ref,
                     srcs: srcs,
                     dim: dim,
+                    nodep: flags.nodep(),
                     mask: mask,
                 });
             } else if tex.op == nir_texop_txf || tex.op == nir_texop_txf_ms {
@@ -1885,6 +1889,7 @@ impl<'a> ShaderFromNir<'a> {
                     is_ms: tex.op == nir_texop_txf_ms,
                     offset: offset_mode == Tld4OffsetMode::AddOffI,
                     mem_eviction_priority: MemEvictionPriority::Normal,
+                    nodep: flags.nodep(),
                     mask: mask,
                 });
             } else if tex.op == nir_texop_tg4 {
@@ -1898,6 +1903,7 @@ impl<'a> ShaderFromNir<'a> {
                     offset_mode: offset_mode,
                     z_cmpr: flags.has_z_cmpr(),
                     mem_eviction_priority: MemEvictionPriority::Normal,
+                    nodep: flags.nodep(),
                     mask: mask,
                 });
             } else {
@@ -1912,6 +1918,7 @@ impl<'a> ShaderFromNir<'a> {
                     z_cmpr: flags.has_z_cmpr(),
                     offset: offset_mode == Tld4OffsetMode::AddOffI,
                     mem_eviction_priority: MemEvictionPriority::Normal,
+                    nodep: flags.nodep(),
                     mask: mask,
                 });
             }
@@ -2046,19 +2053,15 @@ impl<'a> ShaderFromNir<'a> {
                 let flags: nak_nir_attr_io_flags =
                     unsafe { std::mem::transmute_copy(&flags) };
 
-                let access = AttrAccess {
-                    addr: addr,
-                    comps: 1,
-                    patch: flags.patch(),
-                    output: flags.output(),
-                    phys: false,
-                };
+                assert!(!flags.patch());
 
                 let dst = b.alloc_ssa(RegFile::GPR, 1);
                 b.push_op(OpAL2P {
                     dst: dst.into(),
-                    offset: offset,
-                    access: access,
+                    offset,
+                    addr,
+                    output: flags.output(),
+                    comps: 1,
                 });
                 self.set_dst(&intrin.def, dst);
             }
@@ -2100,25 +2103,23 @@ impl<'a> ShaderFromNir<'a> {
                     panic!("Must be a VTG stage");
                 }
 
-                let access = AttrAccess {
-                    addr: addr,
-                    comps: intrin.num_components,
-                    patch: flags.patch(),
-                    output: flags.output(),
-                    phys: flags.phys(),
-                };
+                let comps = intrin.num_components;
 
                 if intrin.intrinsic == nir_intrinsic_ald_nv {
                     let vtx = self.get_src(&srcs[0]);
                     let offset = self.get_src(&srcs[1]);
 
                     assert!(intrin.def.bit_size() == 32);
-                    let dst = b.alloc_ssa(RegFile::GPR, access.comps);
+                    let dst = b.alloc_ssa(RegFile::GPR, comps);
                     b.push_op(OpALd {
                         dst: dst.into(),
-                        vtx: vtx,
-                        offset: offset,
-                        access: access,
+                        vtx,
+                        addr,
+                        offset,
+                        comps,
+                        patch: flags.patch(),
+                        output: flags.output(),
+                        phys: flags.phys(),
                     });
                     self.set_dst(&intrin.def, dst);
                 } else if intrin.intrinsic == nir_intrinsic_ast_nv {
@@ -2128,10 +2129,13 @@ impl<'a> ShaderFromNir<'a> {
                     let offset = self.get_src(&srcs[2]);
 
                     b.push_op(OpASt {
-                        data: data,
-                        vtx: vtx,
-                        offset: offset,
-                        access: access,
+                        data,
+                        vtx,
+                        addr,
+                        offset,
+                        comps,
+                        patch: flags.patch(),
+                        phys: flags.phys(),
                     });
                 } else {
                     panic!("Invalid VTG I/O intrinsic");
@@ -2730,24 +2734,21 @@ impl<'a> ShaderFromNir<'a> {
                     idx: 0,
                 });
 
-                let access = AttrAccess {
-                    addr: NAK_ATTR_TESS_COORD,
-                    comps: 2,
-                    patch: false,
-                    output: true,
-                    phys: false,
-                };
-
                 // This is recorded as a patch output in parse_shader() because
                 // the hardware requires it be in the SPH, whether we use it or
                 // not.
 
-                let dst = b.alloc_ssa(RegFile::GPR, access.comps);
+                let comps = 2;
+                let dst = b.alloc_ssa(RegFile::GPR, comps);
                 b.push_op(OpALd {
                     dst: dst.into(),
                     vtx: vtx.into(),
+                    addr: NAK_ATTR_TESS_COORD,
                     offset: 0.into(),
-                    access: access,
+                    comps,
+                    patch: false,
+                    output: true,
+                    phys: false,
                 });
                 self.set_dst(&intrin.def, dst);
             }

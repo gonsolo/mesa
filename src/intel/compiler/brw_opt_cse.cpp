@@ -35,7 +35,6 @@
 
 struct remap_entry {
    brw_inst *inst;
-   bblock_t *block;
    enum brw_reg_type type;
    unsigned nr;
    bool negate;
@@ -427,7 +426,7 @@ brw_opt_cse_defs(brw_shader &s)
                 * which is redundant with the previous flag write in our
                 * basic block.  So we can simply remove it.
                 */
-               inst->remove(block, true);
+               inst->remove(true);
                last = NULL;
                progress = true;
             }
@@ -450,7 +449,7 @@ brw_opt_cse_defs(brw_shader &s)
             if (match == inst)
                continue;
 
-            bblock_t *def_block = defs.get_block(match->dst);
+            bblock_t *def_block = match->block;
             if (block != def_block && (local_only(inst) ||
                 !idom.dominates(def_block, block))) {
                /* If `match` doesn't dominate `inst` then remove it from
@@ -484,7 +483,6 @@ brw_opt_cse_defs(brw_shader &s)
 
             need_remaps = true;
             remap_table[inst->dst.nr].inst = inst;
-            remap_table[inst->dst.nr].block = block;
             remap_table[inst->dst.nr].type = match->dst.type;
             remap_table[inst->dst.nr].nr = match->dst.nr;
             remap_table[inst->dst.nr].negate = negate;
@@ -499,7 +497,7 @@ brw_opt_cse_defs(brw_shader &s)
          continue;
 
       if (!remap_table[i].still_used) {
-         remap_table[i].inst->remove(remap_table[i].block, true);
+         remap_table[i].inst->remove(true);
          progress = true;
       }
    }

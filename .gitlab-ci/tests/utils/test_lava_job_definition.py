@@ -83,7 +83,7 @@ def clear_env_vars(autouse=True):
 @pytest.fixture
 def mock_collabora_farm(clear_env_vars, monkeypatch):
     # Mock a Collabora farm-like device runner tag to enable SSH execution
-    monkeypatch.setenv("RUNNER_TAG", "mesa-ci-1234-lava-collabora")
+    monkeypatch.setenv("FARM", "collabora")
 
 
 @pytest.mark.parametrize("force_uart", [True, False], ids=["SSH", "UART"])
@@ -211,7 +211,7 @@ def test_lava_job_definition(
     job_dict = yaml.load(job_definition)
 
     # Uncomment the following to update the expected YAML files
-    # yaml.dump(job_dict, Path(f"../../data/{mode}_force_uart={force_uart}_job_definition.yaml"))
+    # yaml.dump(job_dict, load_data_file(f"{mode}_force_uart={force_uart}_job_definition.yaml"))
 
     # Check that the generated job definition matches the expected one
     assert job_dict == expected_job_dict

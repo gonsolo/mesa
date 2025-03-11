@@ -2485,7 +2485,7 @@ impl SM70Op for OpTex {
         e.set_bit(78, self.z_cmpr);
         e.set_eviction_priority(&self.mem_eviction_priority);
         e.set_tex_lod_mode(87..90, self.lod_mode);
-        e.set_bit(90, false); // TODO: .NODEP
+        e.set_bit(90, self.nodep);
     }
 }
 
@@ -2532,7 +2532,7 @@ impl SM70Op for OpTld {
         );
         e.set_eviction_priority(&self.mem_eviction_priority);
         e.set_tex_lod_mode(87..90, self.lod_mode);
-        e.set_bit(90, false); // TODO: .NODEP
+        e.set_bit(90, self.nodep);
     }
 }
 
@@ -2581,7 +2581,7 @@ impl SM70Op for OpTld4 {
         e.set_bit(78, self.z_cmpr);
         e.set_eviction_priority(&self.mem_eviction_priority);
         e.set_field(87..89, self.comp);
-        e.set_bit(90, false); // TODO: .NODEP
+        e.set_bit(90, self.nodep);
     }
 }
 
@@ -2618,7 +2618,7 @@ impl SM70Op for OpTmml {
         e.set_tex_dim(61..64, self.dim);
         e.set_field(72..76, self.mask);
         e.set_bit(77, false); // ToDo: NDV
-        e.set_bit(90, false); // TODO: .NODEP
+        e.set_bit(90, self.nodep);
     }
 }
 
@@ -2658,7 +2658,7 @@ impl SM70Op for OpTxd {
         e.set_bit(76, self.offset);
         e.set_bit(77, false); // ToDo: NDV
         e.set_eviction_priority(&self.mem_eviction_priority);
-        e.set_bit(90, false); // TODO: .NODEP
+        e.set_bit(90, self.nodep);
     }
 }
 
@@ -2699,6 +2699,7 @@ impl SM70Op for OpTxq {
             },
         );
         e.set_field(72..76, self.mask);
+        e.set_bit(90, self.nodep);
     }
 }
 
@@ -3127,10 +3128,9 @@ impl SM70Op for OpAL2P {
         e.set_dst(self.dst);
         e.set_reg_src(24..32, self.offset);
 
-        e.set_field(40..50, self.access.addr);
+        e.set_field(40..50, self.addr);
         e.set_field(74..76, 0_u8); // comps
-        assert!(!self.access.patch);
-        e.set_bit(79, self.access.output);
+        e.set_bit(79, self.output);
     }
 }
 
@@ -3146,11 +3146,11 @@ impl SM70Op for OpALd {
         e.set_reg_src(32..40, self.vtx);
         e.set_reg_src(24..32, self.offset);
 
-        e.set_field(40..50, self.access.addr);
-        e.set_field(74..76, self.access.comps - 1);
-        e.set_field(76..77, self.access.patch);
-        e.set_field(77..78, self.access.phys);
-        e.set_field(79..80, self.access.output);
+        e.set_field(40..50, self.addr);
+        e.set_field(74..76, self.comps - 1);
+        e.set_field(76..77, self.patch);
+        e.set_field(77..78, self.phys);
+        e.set_field(79..80, self.output);
     }
 }
 
@@ -3166,11 +3166,10 @@ impl SM70Op for OpASt {
         e.set_reg_src(64..72, self.vtx);
         e.set_reg_src(24..32, self.offset);
 
-        e.set_field(40..50, self.access.addr);
-        e.set_field(74..76, self.access.comps - 1);
-        e.set_field(76..77, self.access.patch);
-        e.set_field(77..78, self.access.phys);
-        assert!(self.access.output);
+        e.set_field(40..50, self.addr);
+        e.set_field(74..76, self.comps - 1);
+        e.set_field(76..77, self.patch);
+        e.set_field(77..78, self.phys);
     }
 }
 

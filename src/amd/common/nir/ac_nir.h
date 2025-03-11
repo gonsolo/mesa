@@ -160,6 +160,10 @@ typedef struct {
    bool kill_layer;
    bool force_vrs;
    bool compact_primitives;
+   /* Skip culling dependent on the viewport state, which is frustum culling and small prim
+    * culling. Set this when the shader writes the viewport index.
+    */
+   bool skip_viewport_culling;
 
    /* VS */
    unsigned num_vertices_per_primitive;
@@ -333,6 +337,7 @@ typedef struct {
 
    /* Exports. */
    bool uses_discard;
+   bool dcc_decompress_gfx11;
    bool alpha_to_coverage_via_mrtz;
    bool dual_src_blend_swizzle;
    unsigned spi_shader_col_format;

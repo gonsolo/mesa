@@ -602,7 +602,11 @@ radv_rt_compile_shaders(struct radv_device *device, struct vk_pipeline_cache *ca
 
    bool library = pipeline->base.base.create_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR;
 
-   bool monolithic = !library;
+   /* Beyond 50 shader stages, inlining everything bloats the shader a ton, increasing compile times and
+    * potentially even reducing runtime performance because of instruction cache coherency issues in the
+    * traversal loop.
+    */
+   bool monolithic = !library && pipeline->stage_count < 50;
    for (uint32_t i = 0; i < pCreateInfo->stageCount; i++) {
       if (rt_stages[i].shader || rt_stages[i].nir)
          continue;
@@ -1152,6 +1156,8 @@ radv_rt_pipeline_create(VkDevice _device, VkPipelineCache _cache, const VkRayTra
             pipeline->groups[i].handle.recursive_shader_ptr = shader->va | radv_get_rt_priority(shader->info.stage);
       }
    }
+
+   radv_pipeline_report_pso_history(device, &pipeline->base.base);
 
    *pPipeline = radv_pipeline_to_handle(&pipeline->base.base);
    radv_rmv_log_rt_pipeline_create(device, pipeline);

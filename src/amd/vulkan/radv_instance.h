@@ -63,7 +63,6 @@ struct radv_instance {
       bool tex_non_uniform;
       bool ssbo_non_uniform;
       bool flush_before_timestamp_write;
-      bool force_rt_wave64;
       bool disable_dedicated_sparse_queue;
       bool force_pstate_peak_gfx11_dgpu;
       bool clear_lds;
@@ -81,6 +80,8 @@ struct radv_instance {
       int override_vram_size;
       int override_uniform_offset_alignment;
    } drirc;
+
+   FILE *pso_history_logfile;
 };
 
 VK_DEFINE_HANDLE_CASTS(radv_instance, vk.base, VkInstance, VK_OBJECT_TYPE_INSTANCE)

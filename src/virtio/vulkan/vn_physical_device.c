@@ -152,12 +152,19 @@ vn_physical_device_init_features(struct vn_physical_device *physical_dev)
       VkPhysicalDeviceVertexAttributeDivisorFeatures vertex_attribute_divisor;
 
       /* KHR */
+      VkPhysicalDeviceAccelerationStructureFeaturesKHR acceleration_structure;
       VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR
          compute_shader_derivatives;
       VkPhysicalDeviceDepthClampZeroOneFeaturesKHR depth_clamp_zero_one;
       VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR
          fragment_shader_barycentric;
       VkPhysicalDeviceFragmentShadingRateFeaturesKHR fragment_shading_rate;
+      VkPhysicalDeviceRayQueryFeaturesKHR ray_query;
+      VkPhysicalDeviceRayTracingMaintenance1FeaturesKHR
+         ray_tracing_maintenance_1;
+      VkPhysicalDeviceRayTracingPipelineFeaturesKHR ray_tracing_pipeline;
+      VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR
+         ray_tracing_position_fetch;
       VkPhysicalDeviceShaderClockFeaturesKHR shader_clock;
       VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR shader_maximal_reconvergence;
       VkPhysicalDeviceShaderQuadControlFeaturesKHR shader_quad_control;
@@ -295,10 +302,15 @@ vn_physical_device_init_features(struct vn_physical_device *physical_dev)
    VN_ADD_PNEXT_EXT(feats2, DYNAMIC_RENDERING_LOCAL_READ_FEATURES, local_feats.dynamic_rendering_local_read, exts->KHR_dynamic_rendering_local_read);
 
    /* KHR */
+   VN_ADD_PNEXT_EXT(feats2, ACCELERATION_STRUCTURE_FEATURES_KHR, local_feats.acceleration_structure, exts->KHR_acceleration_structure);
    VN_ADD_PNEXT_EXT(feats2, COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR, local_feats.compute_shader_derivatives, exts->KHR_compute_shader_derivatives || exts->NV_compute_shader_derivatives);
    VN_ADD_PNEXT_EXT(feats2, DEPTH_CLAMP_ZERO_ONE_FEATURES_KHR, local_feats.depth_clamp_zero_one, exts->KHR_depth_clamp_zero_one || exts->EXT_depth_clamp_zero_one);
    VN_ADD_PNEXT_EXT(feats2, FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR, local_feats.fragment_shader_barycentric, exts->KHR_fragment_shader_barycentric);
    VN_ADD_PNEXT_EXT(feats2, FRAGMENT_SHADING_RATE_FEATURES_KHR, local_feats.fragment_shading_rate, exts->KHR_fragment_shading_rate);
+   VN_ADD_PNEXT_EXT(feats2, RAY_QUERY_FEATURES_KHR, local_feats.ray_query, exts->KHR_ray_query);
+   VN_ADD_PNEXT_EXT(feats2, RAY_TRACING_MAINTENANCE_1_FEATURES_KHR, local_feats.ray_tracing_maintenance_1, exts->KHR_ray_tracing_maintenance1);
+   VN_ADD_PNEXT_EXT(feats2, RAY_TRACING_PIPELINE_FEATURES_KHR, local_feats.ray_tracing_pipeline, exts->KHR_ray_tracing_pipeline);
+   VN_ADD_PNEXT_EXT(feats2, RAY_TRACING_POSITION_FETCH_FEATURES_KHR, local_feats.ray_tracing_position_fetch, exts->KHR_ray_tracing_position_fetch);
    VN_ADD_PNEXT_EXT(feats2, SHADER_CLOCK_FEATURES_KHR, local_feats.shader_clock, exts->KHR_shader_clock);
    VN_ADD_PNEXT_EXT(feats2, SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR, local_feats.shader_maximal_reconvergence, exts->KHR_shader_maximal_reconvergence);
    VN_ADD_PNEXT_EXT(feats2, SHADER_SUBGROUP_UNIFORM_CONTROL_FLOW_FEATURES_KHR, local_feats.shader_subgroup_uniform_control_flow, exts->KHR_shader_subgroup_uniform_control_flow);
@@ -350,6 +362,12 @@ vn_physical_device_init_features(struct vn_physical_device *physical_dev)
     */
    feats->deviceMemoryReport = true;
    feats->swapchainMaintenance1 = true;
+
+   /* Host commands require custom protocol level support. Disable it
+    * since it'd be non-trivial to make it performant.
+    */
+   if (exts->KHR_acceleration_structure)
+      feats->accelerationStructureHostCommands = false;
 
    /* Disable unsupported ExtendedDynamicState3Features */
    if (exts->EXT_extended_dynamic_state3) {
@@ -524,11 +542,14 @@ vn_physical_device_init_properties(struct vn_physical_device *physical_dev)
          vertex_attribute_divisor;
 
       /* KHR */
+      VkPhysicalDeviceAccelerationStructurePropertiesKHR
+         acceleration_structure;
       VkPhysicalDeviceComputeShaderDerivativesPropertiesKHR
          compute_shader_derivatives;
       VkPhysicalDeviceFragmentShaderBarycentricPropertiesKHR
          fragment_shader_barycentric;
       VkPhysicalDeviceFragmentShadingRatePropertiesKHR fragment_shading_rate;
+      VkPhysicalDeviceRayTracingPipelinePropertiesKHR ray_tracing_pipeline;
 
       /* EXT */
       VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT
@@ -616,9 +637,11 @@ vn_physical_device_init_properties(struct vn_physical_device *physical_dev)
    }
 
    /* KHR */
+   VN_ADD_PNEXT_EXT(props2, ACCELERATION_STRUCTURE_PROPERTIES_KHR, local_props.acceleration_structure, exts->KHR_acceleration_structure);
    VN_ADD_PNEXT_EXT(props2, COMPUTE_SHADER_DERIVATIVES_PROPERTIES_KHR, local_props.compute_shader_derivatives, exts->KHR_compute_shader_derivatives);
    VN_ADD_PNEXT_EXT(props2, FRAGMENT_SHADER_BARYCENTRIC_PROPERTIES_KHR, local_props.fragment_shader_barycentric, exts->KHR_fragment_shader_barycentric);
    VN_ADD_PNEXT_EXT(props2, FRAGMENT_SHADING_RATE_PROPERTIES_KHR, local_props.fragment_shading_rate, exts->KHR_fragment_shading_rate);
+   VN_ADD_PNEXT_EXT(props2, RAY_TRACING_PIPELINE_PROPERTIES_KHR, local_props.ray_tracing_pipeline, exts->KHR_ray_tracing_pipeline);
 
    /* EXT */
    VN_ADD_PNEXT_EXT(props2, BLEND_OPERATION_ADVANCED_PROPERTIES_EXT, local_props.blend_operation_advanced, exts->EXT_blend_operation_advanced);
@@ -693,9 +716,11 @@ vn_physical_device_init_properties(struct vn_physical_device *physical_dev)
    }
 
    /* KHR */
+   VN_SET_VK_PROPS_EXT(props, &local_props.acceleration_structure, exts->KHR_acceleration_structure);
    VN_SET_VK_PROPS_EXT(props, &local_props.compute_shader_derivatives, exts->KHR_compute_shader_derivatives);
    VN_SET_VK_PROPS_EXT(props, &local_props.fragment_shader_barycentric, exts->KHR_fragment_shader_barycentric);
    VN_SET_VK_PROPS_EXT(props, &local_props.fragment_shading_rate, exts->KHR_fragment_shading_rate);
+   VN_SET_VK_PROPS_EXT(props, &local_props.ray_tracing_pipeline, exts->KHR_ray_tracing_pipeline);
 
    /* EXT */
    VN_SET_VK_PROPS_EXT(props, &local_props.blend_operation_advanced, exts->EXT_blend_operation_advanced);
@@ -1087,6 +1112,13 @@ vn_physical_device_get_native_extensions(
       physical_dev->renderer_extensions.EXT_pci_bus_info;
 #endif
 
+   /* Use common implementation but enable only when the renderer supports
+    * VK_KHR_acceleration_structure because VK_KHR_deferred_host_operations is
+    * not passthrough from the renderer side.
+    */
+   exts->KHR_deferred_host_operations =
+      physical_dev->ray_tracing &&
+      physical_dev->renderer_extensions.KHR_acceleration_structure;
    exts->KHR_map_memory2 = true;
    exts->EXT_physical_device_drm = true;
    /* use common implementation */
@@ -1100,6 +1132,17 @@ vn_physical_device_get_passthrough_extensions(
    struct vk_device_extension_table *exts)
 {
    struct vn_renderer *renderer = physical_dev->instance->renderer;
+
+#if DETECT_OS_ANDROID || defined(VN_USE_WSI_PLATFORM)
+   /* WSI support currently requires semaphore sync fd import for
+    * VK_KHR_synchronization2 for code simplicity. This requirement can be
+    * dropped by implementing external semaphore purely on the driver side
+    * (aka no corresponding renderer side object).
+    */
+   const bool can_sync2 = physical_dev->renderer_sync_fd.semaphore_importable;
+#else
+   static const bool can_sync2 = true;
+#endif
 
    *exts = (struct vk_device_extension_table){
       /* promoted to VK_VERSION_1_1 */
@@ -1156,11 +1199,7 @@ vn_physical_device_get_passthrough_extensions(
       .KHR_shader_integer_dot_product = true,
       .KHR_shader_non_semantic_info = true,
       .KHR_shader_terminate_invocation = true,
-      /* Our implementation requires semaphore sync fd import
-       * for VK_KHR_synchronization2.
-       */
-      .KHR_synchronization2 =
-         physical_dev->renderer_sync_fd.semaphore_importable,
+      .KHR_synchronization2 = can_sync2,
       .KHR_zero_initialize_workgroup_memory = true,
       .EXT_4444_formats = true,
       .EXT_extended_dynamic_state = true,
@@ -1197,12 +1236,17 @@ vn_physical_device_get_passthrough_extensions(
       .EXT_pipeline_robustness = true,
 
       /* KHR */
+      .KHR_acceleration_structure = physical_dev->ray_tracing,
       .KHR_calibrated_timestamps = true,
       .KHR_compute_shader_derivatives = true,
       .KHR_depth_clamp_zero_one = true,
       .KHR_fragment_shader_barycentric = true,
       .KHR_fragment_shading_rate = true,
       .KHR_pipeline_library = true,
+      .KHR_ray_query = physical_dev->ray_tracing,
+      .KHR_ray_tracing_maintenance1 = physical_dev->ray_tracing,
+      .KHR_ray_tracing_pipeline = physical_dev->ray_tracing,
+      .KHR_ray_tracing_position_fetch = physical_dev->ray_tracing,
       .KHR_shader_clock = true,
       .KHR_shader_maximal_reconvergence = true,
       .KHR_shader_quad_control = true,
@@ -1273,6 +1317,9 @@ vn_physical_device_init_supported_extensions(
 {
    struct vk_device_extension_table native;
    struct vk_device_extension_table passthrough;
+
+   physical_dev->ray_tracing = VN_DEBUG(RAY_TRACING);
+
    vn_physical_device_get_native_extensions(physical_dev, &native);
    vn_physical_device_get_passthrough_extensions(physical_dev, &passthrough);
 

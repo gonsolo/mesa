@@ -2595,14 +2595,6 @@ impl fmt::Display for InterpLoc {
     }
 }
 
-pub struct AttrAccess {
-    pub addr: u16,
-    pub comps: u8,
-    pub patch: bool,
-    pub output: bool,
-    pub phys: bool,
-}
-
 #[repr(C)]
 #[derive(SrcsAsSlice, DstsAsSlice)]
 pub struct OpFAdd {
@@ -4836,6 +4828,7 @@ pub struct OpTex {
     pub z_cmpr: bool,
     pub offset: bool,
     pub mem_eviction_priority: MemEvictionPriority,
+    pub nodep: bool,
     pub mask: u8,
 }
 
@@ -4852,6 +4845,9 @@ impl DisplayOp for OpTex {
             write!(f, ".dc")?;
         }
         write!(f, "{}", self.mem_eviction_priority)?;
+        if self.nodep {
+            write!(f, ".nodep")?;
+        }
         write!(f, " {} {} {}", self.tex, self.srcs[0], self.srcs[1])
     }
 }
@@ -4873,6 +4869,7 @@ pub struct OpTld {
     pub lod_mode: TexLodMode,
     pub offset: bool,
     pub mem_eviction_priority: MemEvictionPriority,
+    pub nodep: bool,
     pub mask: u8,
 }
 
@@ -4889,6 +4886,9 @@ impl DisplayOp for OpTld {
             write!(f, ".ms")?;
         }
         write!(f, "{}", self.mem_eviction_priority)?;
+        if self.nodep {
+            write!(f, ".nodep")?;
+        }
         write!(f, " {} {} {}", self.tex, self.srcs[0], self.srcs[1])
     }
 }
@@ -4910,6 +4910,7 @@ pub struct OpTld4 {
     pub offset_mode: Tld4OffsetMode,
     pub z_cmpr: bool,
     pub mem_eviction_priority: MemEvictionPriority,
+    pub nodep: bool,
     pub mask: u8,
 }
 
@@ -4923,6 +4924,9 @@ impl DisplayOp for OpTld4 {
             write!(f, ".dc")?;
         }
         write!(f, "{}", self.mem_eviction_priority)?;
+        if self.nodep {
+            write!(f, ".nodep")?;
+        }
         write!(f, " {} {} {}", self.tex, self.srcs[0], self.srcs[1])
     }
 }
@@ -4939,16 +4943,17 @@ pub struct OpTmml {
     pub srcs: [Src; 2],
 
     pub dim: TexDim,
+    pub nodep: bool,
     pub mask: u8,
 }
 
 impl DisplayOp for OpTmml {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "tmml.lod{} {} {} {}",
-            self.dim, self.tex, self.srcs[0], self.srcs[1]
-        )
+        write!(f, "tmml.lod{}", self.dim)?;
+        if self.nodep {
+            write!(f, ".nodep")?;
+        }
+        write!(f, " {} {} {}", self.tex, self.srcs[0], self.srcs[1])
     }
 }
 impl_display_for_op!(OpTmml);
@@ -4967,6 +4972,7 @@ pub struct OpTxd {
     pub dim: TexDim,
     pub offset: bool,
     pub mem_eviction_priority: MemEvictionPriority,
+    pub nodep: bool,
     pub mask: u8,
 }
 
@@ -4977,6 +4983,9 @@ impl DisplayOp for OpTxd {
             write!(f, ".aoffi")?;
         }
         write!(f, "{}", self.mem_eviction_priority)?;
+        if self.nodep {
+            write!(f, ".nodep")?;
+        }
         write!(f, " {} {} {}", self.tex, self.srcs[0], self.srcs[1])
     }
 }
@@ -4993,12 +5002,17 @@ pub struct OpTxq {
     pub src: Src,
 
     pub query: TexQuery,
+    pub nodep: bool,
     pub mask: u8,
 }
 
 impl DisplayOp for OpTxq {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "txq {} {} {}", self.tex, self.src, self.query)
+        write!(f, "txq")?;
+        if self.nodep {
+            write!(f, ".nodep")?;
+        }
+        write!(f, " {} {} {}", self.tex, self.src, self.query)
     }
 }
 impl_display_for_op!(OpTxq);
@@ -5274,19 +5288,18 @@ pub struct OpAL2P {
     #[src_type(GPR)]
     pub offset: Src,
 
-    pub access: AttrAccess,
+    pub addr: u16,
+    pub comps: u8,
+    pub output: bool,
 }
 
 impl DisplayOp for OpAL2P {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "al2p")?;
-        if self.access.output {
+        if self.output {
             write!(f, ".o")?;
         }
-        if self.access.patch {
-            write!(f, ".p")?;
-        }
-        write!(f, " a[{:#x}", self.access.addr)?;
+        write!(f, " a[{:#x}", self.addr)?;
         if !self.offset.is_zero() {
             write!(f, "+{}", self.offset)?;
         }
@@ -5306,26 +5319,30 @@ pub struct OpALd {
     #[src_type(GPR)]
     pub offset: Src,
 
-    pub access: AttrAccess,
+    pub addr: u16,
+    pub comps: u8,
+    pub patch: bool,
+    pub output: bool,
+    pub phys: bool,
 }
 
 impl DisplayOp for OpALd {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ald")?;
-        if self.access.output {
+        if self.output {
             write!(f, ".o")?;
         }
-        if self.access.patch {
+        if self.patch {
             write!(f, ".p")?;
         }
-        if self.access.phys {
+        if self.phys {
             write!(f, ".phys")?;
         }
         write!(f, " a")?;
         if !self.vtx.is_zero() {
             write!(f, "[{}]", self.vtx)?;
         }
-        write!(f, "[{:#x}", self.access.addr)?;
+        write!(f, "[{:#x}", self.addr)?;
         if !self.offset.is_zero() {
             write!(f, "+{}", self.offset)?;
         }
@@ -5346,23 +5363,26 @@ pub struct OpASt {
     #[src_type(SSA)]
     pub data: Src,
 
-    pub access: AttrAccess,
+    pub addr: u16,
+    pub comps: u8,
+    pub patch: bool,
+    pub phys: bool,
 }
 
 impl DisplayOp for OpASt {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ast")?;
-        if self.access.patch {
+        if self.patch {
             write!(f, ".p")?;
         }
-        if self.access.phys {
+        if self.phys {
             write!(f, ".phys")?;
         }
         write!(f, " a")?;
         if !self.vtx.is_zero() {
             write!(f, "[{}]", self.vtx)?;
         }
-        write!(f, "[{:#x}", self.access.addr)?;
+        write!(f, "[{:#x}", self.addr)?;
         if !self.offset.is_zero() {
             write!(f, "+{}", self.offset)?;
         }

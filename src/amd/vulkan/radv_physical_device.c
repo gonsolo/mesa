@@ -218,7 +218,7 @@ radv_physical_device_init_cache_key(struct radv_physical_device *pdev)
    key->disable_aniso_single_level = instance->drirc.disable_aniso_single_level && pdev->info.gfx_level < GFX8;
    key->disable_shrink_image_store = instance->drirc.disable_shrink_image_store;
    key->disable_sinking_load_input_fs = instance->drirc.disable_sinking_load_input_fs;
-   key->emulate_rt = !!(instance->perftest_flags & RADV_PERFTEST_EMULATE_RT);
+   key->emulate_rt = radv_emulate_rt(pdev);
    key->ge_wave32 = pdev->ge_wave_size == 32;
    key->invariant_geom = !!(instance->debug_flags & RADV_DEBUG_INVARIANT_GEOM);
    key->no_fmask = !!(instance->debug_flags & RADV_DEBUG_NO_FMASK);
@@ -669,6 +669,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_device_address_binding_report = true,
       .EXT_device_fault = pdev->info.has_gpuvm_fault_query,
       .EXT_device_generated_commands = pdev->info.gfx_level >= GFX8,
+      .EXT_device_memory_report = true,
       .EXT_discard_rectangles = true,
 #ifdef VK_USE_PLATFORM_DISPLAY_KHR
       .EXT_display_control = true,
@@ -1325,6 +1326,9 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_KHR_maintenance8 */
       .maintenance8 = true,
+
+      /* VK_EXT_device_memory_report */
+      .deviceMemoryReport = true,
    };
 }
 
@@ -2195,7 +2199,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       if (instance->perftest_flags & RADV_PERFTEST_RT_WAVE_32 || pdev->info.gfx_level < GFX11)
          pdev->rt_wave_size = 32;
 
-      if (instance->perftest_flags & RADV_PERFTEST_RT_WAVE_64 || instance->drirc.force_rt_wave64)
+      if (instance->perftest_flags & RADV_PERFTEST_RT_WAVE_64)
          pdev->rt_wave_size = 64;
    }
 

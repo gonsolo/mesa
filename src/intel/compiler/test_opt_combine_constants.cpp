@@ -65,15 +65,9 @@ struct FSCombineConstantsTest : public ::testing::Test {
    }
 };
 
-static brw_builder
-make_builder(brw_shader *s)
-{
-   return brw_builder(s, s->dispatch_width).at_end();
-}
-
 TEST_F(FSCombineConstantsTest, Simple)
 {
-   brw_builder bld = make_builder(shader);
+   brw_builder bld = brw_builder(shader);
 
    brw_reg r = brw_vec8_grf(1, 0);
    brw_reg imm_a = brw_imm_ud(1);
@@ -86,19 +80,19 @@ TEST_F(FSCombineConstantsTest, Simple)
    ASSERT_TRUE(progress);
 
    ASSERT_EQ(shader->cfg->num_blocks, 1);
-   bblock_t *block = cfg_first_block(shader->cfg);
+   bblock_t *block = shader->cfg->first_block();
    ASSERT_NE(block, nullptr);
 
    /* We can do better but for now sanity check that
     * there's a MOV and a SEL.
     */
-   ASSERT_EQ(bblock_start(block)->opcode, BRW_OPCODE_MOV);
-   ASSERT_EQ(bblock_end(block)->opcode, BRW_OPCODE_SEL);
+   ASSERT_EQ(block->start()->opcode, BRW_OPCODE_MOV);
+   ASSERT_EQ(block->end()->opcode, BRW_OPCODE_SEL);
 }
 
 TEST_F(FSCombineConstantsTest, DoContainingDo)
 {
-   brw_builder bld = make_builder(shader);
+   brw_builder bld = brw_builder(shader);
 
    brw_reg r1 = brw_vec8_grf(1, 0);
    brw_reg r2 = brw_vec8_grf(2, 0);

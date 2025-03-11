@@ -2438,7 +2438,7 @@ brw_shader::gs_urb_per_slot_dword_index(const brw_reg &vertex_count)
     *    Similarly, if the control data header is <= 32 bits, there is only one
     *    DWord, so we can skip channel masks.
     */
-   const brw_builder bld = brw_builder(this).at_end();
+   const brw_builder bld = brw_builder(this);
    const brw_builder abld = bld.annotate("urb per slot offset");
 
    /* Figure out which DWord we're trying to write to using the formula:
@@ -2483,7 +2483,7 @@ brw_shader::gs_urb_channel_mask(const brw_reg &dword_index)
    if (gs.control_data_header_size_bits <= 32)
       return channel_mask;
 
-   const brw_builder bld = brw_builder(this).at_end();
+   const brw_builder bld = brw_builder(this);
    const brw_builder ubld = bld.exec_all();
 
    /* Set the channel masks to 1 << (dword_index % 4), so that we'll
@@ -2502,7 +2502,7 @@ brw_shader::emit_gs_control_data_bits(const brw_reg &vertex_count)
 
    const struct brw_gs_prog_data *gs_prog_data = brw_gs_prog_data(prog_data);
 
-   const brw_builder bld = brw_builder(this).at_end();
+   const brw_builder bld = brw_builder(this);
    const brw_builder abld = bld.annotate("emit control data bits");
 
    brw_reg dword_index = gs_urb_per_slot_dword_index(vertex_count);
@@ -6920,6 +6920,24 @@ brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
    case nir_intrinsic_image_store:
    case nir_intrinsic_image_atomic:
    case nir_intrinsic_image_atomic_swap:
+      /* Bspec 73734 (r50040):
+       *
+       * Instruction_StoreCmaskMSRT::Src0 Length:
+       *
+       *    "num_coordinates is the number of address coordinates used in
+       *    message. For TGM it will be 4 (U, V, R, SAMPLE_INDEX)."
+       *
+       */
+      srcs[MEMORY_LOGICAL_COORD_COMPONENTS] = brw_imm_ud(
+         (devinfo->ver >= 30 &&
+          nir_intrinsic_image_dim(instr) == GLSL_SAMPLER_DIM_MS) ? 4 :
+         nir_image_intrinsic_coord_components(instr));
+
+      /* MSAA image atomic accesses not supported, must be lowered to UGM */
+      assert((instr->intrinsic != nir_intrinsic_bindless_image_atomic &&
+             instr->intrinsic != nir_intrinsic_bindless_image_atomic_swap) ||
+             nir_intrinsic_image_dim(instr) != GLSL_SAMPLER_DIM_MS);
+
       srcs[MEMORY_LOGICAL_MODE] = brw_imm_ud(MEMORY_MODE_TYPED);
       srcs[MEMORY_LOGICAL_BINDING] =
          get_nir_image_intrinsic_image(ntb, bld, instr);
@@ -6928,8 +6946,6 @@ brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
          srcs[MEMORY_LOGICAL_BINDING_TYPE] = brw_imm_ud(LSC_ADDR_SURFTYPE_BTI);
 
       srcs[MEMORY_LOGICAL_ADDRESS] = get_nir_src(ntb, instr->src[1]);
-      srcs[MEMORY_LOGICAL_COORD_COMPONENTS] =
-         brw_imm_ud(nir_image_intrinsic_coord_components(instr));
 
       data_src = 3;
       break;
@@ -7833,7 +7849,7 @@ brw_from_nir(brw_shader *s)
       .nir     = s->nir,
       .devinfo = s->devinfo,
       .mem_ctx = ralloc_context(NULL),
-      .bld     = brw_builder(s).at_end(),
+      .bld     = brw_builder(s),
    };
 
    if (INTEL_DEBUG(DEBUG_ANNOTATION))

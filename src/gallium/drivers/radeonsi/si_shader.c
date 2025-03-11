@@ -294,15 +294,7 @@ static void declare_vs_blit_inputs(struct si_shader *shader, struct si_shader_ar
    ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL);                /* depth */
 
    if (info->vs.blit_sgprs_amd ==
-       SI_VS_BLIT_SGPRS_POS_COLOR + has_attribute_ring_address) {
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* color0 */
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* color1 */
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* color2 */
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* color3 */
-      if (has_attribute_ring_address)
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL); /* attribute ring address */
-   } else if (info->vs.blit_sgprs_amd ==
-              SI_VS_BLIT_SGPRS_POS_TEXCOORD + has_attribute_ring_address) {
+       SI_VS_BLIT_SGPRS_POS_TEXCOORD + has_attribute_ring_address) {
       ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* texcoord.x1 */
       ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* texcoord.y1 */
       ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* texcoord.x2 */
@@ -1814,6 +1806,7 @@ static void si_lower_ngg(struct si_shader *shader, nir_shader *nir)
       .kill_layer = key->ge.opt.kill_layer,
       .force_vrs = sel->screen->options.vrs2x2,
       .use_gfx12_xfb_intrinsic = !nir->info.use_aco_amd,
+      .skip_viewport_culling = sel->info.writes_viewport_index,
    };
 
    if (nir->info.stage == MESA_SHADER_VERTEX ||
@@ -2036,8 +2029,7 @@ static bool si_nir_lower_ps_color_input(nir_shader *nir, const union si_shader_k
       nir_def *back_color = NULL;
       if (interp_mode == INTERP_MODE_FLAT) {
          colors[i] = nir_load_input(b, 4, 32, nir_imm_int(b, 0),
-                                   .io_semantics.location = VARYING_SLOT_COL0 + i,
-                                   .io_semantics.num_slots = 1);
+                                   .io_semantics.location = VARYING_SLOT_COL0 + i);
 
          if (key->ps.part.prolog.color_two_side) {
             back_color = nir_load_input(b, 4, 32, nir_imm_int(b, 0),
@@ -2065,14 +2057,12 @@ static bool si_nir_lower_ps_color_input(nir_shader *nir, const union si_shader_k
 
          colors[i] =
             nir_load_interpolated_input(b, 4, 32, barycentric, nir_imm_int(b, 0),
-                                        .io_semantics.location = VARYING_SLOT_COL0 + i,
-                                        .io_semantics.num_slots = 1);
+                                        .io_semantics.location = VARYING_SLOT_COL0 + i);
 
          if (key->ps.part.prolog.color_two_side) {
             back_color =
                nir_load_interpolated_input(b, 4, 32, barycentric, nir_imm_int(b, 0),
-                                           .io_semantics.location = VARYING_SLOT_BFC0 + i,
-                                           .io_semantics.num_slots = 1);
+                                           .io_semantics.location = VARYING_SLOT_BFC0 + i);
          }
       }
 

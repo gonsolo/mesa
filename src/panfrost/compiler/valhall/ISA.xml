@@ -165,7 +165,7 @@
     <value desc="Lane ID">lane_id</value>
     <reserved/>
     <value desc="Core ID">core_id</value>
-    <reserved/>
+    <value desc="Shader Output">shader_output</value>
     <reserved/>
     <reserved/>
     <reserved/>
@@ -1739,8 +1739,10 @@
 
   <group name="FREXP" title="Fraction/exponent extract" dests="1" opcode="0x99" unused="true" unit="CVT">
     <ins name="FREXPM.f32" opcode2="0"/>
+    <!-- Removed on v11 -->
     <ins name="FREXPM.v2f16" opcode2="1"/>
     <ins name="FREXPE.f32" opcode2="2"/>
+    <!-- Removed on v11 -->
     <ins name="FREXPE.v2f16" opcode2="3"/>
     <desc>
       Breaks up the floating-point input into its fractional (mantissa) and

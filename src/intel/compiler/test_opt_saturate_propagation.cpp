@@ -42,7 +42,6 @@ protected:
 };
 
 saturate_propagation_test::saturate_propagation_test()
-   : bld(NULL, 0)
 {
    ctx = ralloc_context(NULL);
    compiler = rzalloc(ctx, struct brw_compiler);
@@ -59,7 +58,7 @@ saturate_propagation_test::saturate_propagation_test()
    v = new brw_shader(compiler, &params, NULL, &prog_data->base, shader,
                       16, false, false);
 
-   bld = brw_builder(v).at_end();
+   bld = brw_builder(v);
 
    devinfo->ver = 9;
    devinfo->verx10 = devinfo->ver * 10;

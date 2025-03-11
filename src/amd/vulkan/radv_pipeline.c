@@ -61,8 +61,8 @@ radv_pipeline_capture_shader_stats(const struct radv_device *device, VkPipelineC
 
    /* Capture shader statistics when RGP is enabled to correlate shader hashes with Fossilize. */
    return (flags & VK_PIPELINE_CREATE_2_CAPTURE_STATISTICS_BIT_KHR) ||
-          (instance->debug_flags & RADV_DEBUG_DUMP_SHADER_STATS) || device->keep_shader_info ||
-          (instance->vk.trace_mode & RADV_TRACE_MODE_RGP);
+          (instance->debug_flags & (RADV_DEBUG_DUMP_SHADER_STATS | RADV_DEBUG_PSO_HISTORY)) ||
+          device->keep_shader_info || (instance->vk.trace_mode & RADV_TRACE_MODE_RGP);
 }
 
 bool
@@ -397,7 +397,6 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
    if (constant_fold_for_push_const && stage->args.ac.inline_push_const_mask)
       NIR_PASS(_, stage->nir, nir_opt_constant_folding);
 
-   /* TODO: vectorize loads after this to vectorize loading adjacent descriptors */
    NIR_PASS(_, stage->nir, radv_nir_apply_pipeline_layout, device, stage);
 
    NIR_PASS(_, stage->nir, nir_lower_alu_width, opt_vectorize_callback, device);
@@ -450,7 +449,8 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
                                   G_0286CC_PERSP_CENTROID_ENA(stage->info.ps.spi_ps_input_ena),
          .bc_optimize_for_linear = G_0286CC_LINEAR_CENTER_ENA(stage->info.ps.spi_ps_input_ena) &&
                                    G_0286CC_LINEAR_CENTROID_ENA(stage->info.ps.spi_ps_input_ena),
-         .uses_discard = true,
+         .uses_discard = stage->info.ps.can_discard,
+         .dcc_decompress_gfx11 = gfx_state->dcc_decompress_gfx11,
          .no_color_export = stage->info.ps.has_epilog,
          .no_depth_export = stage->info.ps.exports_mrtz_via_epilog,
 
@@ -695,17 +695,6 @@ radv_get_shader_from_executable_index(struct radv_pipeline *pipeline, int index,
    return NULL;
 }
 
-/* Basically strlcpy (which does not exist on linux) specialized for
- * descriptions. */
-static void
-desc_copy(char *desc, const char *src)
-{
-   int len = strlen(src);
-   assert(len < VK_MAX_DESCRIPTION_SIZE);
-   memcpy(desc, src, len);
-   memset(desc + len, 0, VK_MAX_DESCRIPTION_SIZE - len);
-}
-
 VKAPI_ATTR VkResult VKAPI_CALL
 radv_GetPipelineExecutablePropertiesKHR(VkDevice _device, const VkPipelineInfoKHR *pPipelineInfo,
                                         uint32_t *pExecutableCount, VkPipelineExecutablePropertiesKHR *pProperties)
@@ -797,8 +786,8 @@ radv_GetPipelineExecutablePropertiesKHR(VkDevice _device, const VkPipelineInfoKH
       }
 
       pProperties[executable_idx].subgroupSize = shader->info.wave_size;
-      desc_copy(pProperties[executable_idx].name, name);
-      desc_copy(pProperties[executable_idx].description, description);
+      VK_COPY_STR(pProperties[executable_idx].name, name);
+      VK_COPY_STR(pProperties[executable_idx].description, description);
    }
 
    VkResult result = *pExecutableCount < total_count ? VK_INCOMPLETE : VK_SUCCESS;
@@ -827,80 +816,80 @@ radv_GetPipelineExecutableStatisticsKHR(VkDevice _device, const VkPipelineExecut
    VkResult result = VK_SUCCESS;
 
    if (s < end) {
-      desc_copy(s->name, "Driver pipeline hash");
-      desc_copy(s->description, "Driver pipeline hash used by RGP");
+      VK_COPY_STR(s->name, "Driver pipeline hash");
+      VK_COPY_STR(s->description, "Driver pipeline hash used by RGP");
       s->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
       s->value.u64 = pipeline->pipeline_hash;
    }
    ++s;
 
    if (s < end) {
-      desc_copy(s->name, "SGPRs");
-      desc_copy(s->description, "Number of SGPR registers allocated per subgroup");
+      VK_COPY_STR(s->name, "SGPRs");
+      VK_COPY_STR(s->description, "Number of SGPR registers allocated per subgroup");
       s->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
       s->value.u64 = shader->config.num_sgprs;
    }
    ++s;
 
    if (s < end) {
-      desc_copy(s->name, "VGPRs");
-      desc_copy(s->description, "Number of VGPR registers allocated per subgroup");
+      VK_COPY_STR(s->name, "VGPRs");
+      VK_COPY_STR(s->description, "Number of VGPR registers allocated per subgroup");
       s->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
       s->value.u64 = shader->config.num_vgprs;
    }
    ++s;
 
    if (s < end) {
-      desc_copy(s->name, "Spilled SGPRs");
-      desc_copy(s->description, "Number of SGPR registers spilled per subgroup");
+      VK_COPY_STR(s->name, "Spilled SGPRs");
+      VK_COPY_STR(s->description, "Number of SGPR registers spilled per subgroup");
       s->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
       s->value.u64 = shader->config.spilled_sgprs;
    }
    ++s;
 
    if (s < end) {
-      desc_copy(s->name, "Spilled VGPRs");
-      desc_copy(s->description, "Number of VGPR registers spilled per subgroup");
+      VK_COPY_STR(s->name, "Spilled VGPRs");
+      VK_COPY_STR(s->description, "Number of VGPR registers spilled per subgroup");
       s->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
       s->value.u64 = shader->config.spilled_vgprs;
    }
    ++s;
 
    if (s < end) {
-      desc_copy(s->name, "Code size");
-      desc_copy(s->description, "Code size in bytes");
+      VK_COPY_STR(s->name, "Code size");
+      VK_COPY_STR(s->description, "Code size in bytes");
       s->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
       s->value.u64 = shader->exec_size;
    }
    ++s;
 
    if (s < end) {
-      desc_copy(s->name, "LDS size");
-      desc_copy(s->description, "LDS size in bytes per workgroup");
+      VK_COPY_STR(s->name, "LDS size");
+      VK_COPY_STR(s->description, "LDS size in bytes per workgroup");
       s->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
       s->value.u64 = shader->config.lds_size * lds_increment;
    }
    ++s;
 
    if (s < end) {
-      desc_copy(s->name, "Scratch size");
-      desc_copy(s->description, "Private memory in bytes per subgroup");
+      VK_COPY_STR(s->name, "Scratch size");
+      VK_COPY_STR(s->description, "Private memory in bytes per subgroup");
       s->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
       s->value.u64 = shader->config.scratch_bytes_per_wave;
    }
    ++s;
 
    if (s < end) {
-      desc_copy(s->name, "Subgroups per SIMD");
-      desc_copy(s->description, "The maximum number of subgroups in flight on a SIMD unit");
+      VK_COPY_STR(s->name, "Subgroups per SIMD");
+      VK_COPY_STR(s->description, "The maximum number of subgroups in flight on a SIMD unit");
       s->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
       s->value.u64 = shader->max_waves;
    }
    ++s;
 
    if (s < end) {
-      desc_copy(s->name, "Combined inputs");
-      desc_copy(s->description, "Number of input slots reserved for the shader (including merged stages)");
+      VK_COPY_STR(s->name, "Combined inputs");
+      VK_COPY_STR(s->description, "Number of input slots reserved for the shader (including merged stages)");
       s->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
       s->value.u64 = 0;
 
@@ -960,8 +949,8 @@ radv_GetPipelineExecutableStatisticsKHR(VkDevice _device, const VkPipelineExecut
    ++s;
 
    if (s < end) {
-      desc_copy(s->name, "Combined outputs");
-      desc_copy(s->description, "Number of output slots reserved for the shader (including merged stages)");
+      VK_COPY_STR(s->name, "Combined outputs");
+      VK_COPY_STR(s->description, "Number of output slots reserved for the shader (including merged stages)");
       s->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
       s->value.u64 = 0;
 
@@ -1046,8 +1035,8 @@ radv_GetPipelineExecutableStatisticsKHR(VkDevice _device, const VkPipelineExecut
       for (unsigned i = 0; i < aco_num_statistics; i++) {
          const struct aco_compiler_statistic_info *info = &aco_statistic_infos[i];
          if (s < end) {
-            desc_copy(s->name, info->name);
-            desc_copy(s->description, info->desc);
+            VK_COPY_STR(s->name, info->name);
+            VK_COPY_STR(s->description, info->desc);
             s->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
             s->value.u64 = shader->statistics[i];
          }
@@ -1104,8 +1093,8 @@ radv_GetPipelineExecutableInternalRepresentationsKHR(
    /* optimized NIR */
    if (p < end) {
       p->isText = true;
-      desc_copy(p->name, "NIR Shader(s)");
-      desc_copy(p->description, "The optimized NIR shader(s)");
+      VK_COPY_STR(p->name, "NIR Shader(s)");
+      VK_COPY_STR(p->description, "The optimized NIR shader(s)");
       if (radv_copy_representation(p->pData, &p->dataSize, shader->nir_string) != VK_SUCCESS)
          result = VK_INCOMPLETE;
    }
@@ -1115,11 +1104,11 @@ radv_GetPipelineExecutableInternalRepresentationsKHR(
    if (p < end) {
       p->isText = true;
       if (radv_use_llvm_for_stage(pdev, stage)) {
-         desc_copy(p->name, "LLVM IR");
-         desc_copy(p->description, "The LLVM IR after some optimizations");
+         VK_COPY_STR(p->name, "LLVM IR");
+         VK_COPY_STR(p->description, "The LLVM IR after some optimizations");
       } else {
-         desc_copy(p->name, "ACO IR");
-         desc_copy(p->description, "The ACO IR after some optimizations");
+         VK_COPY_STR(p->name, "ACO IR");
+         VK_COPY_STR(p->description, "The ACO IR after some optimizations");
       }
       if (radv_copy_representation(p->pData, &p->dataSize, shader->ir_string) != VK_SUCCESS)
          result = VK_INCOMPLETE;
@@ -1129,8 +1118,8 @@ radv_GetPipelineExecutableInternalRepresentationsKHR(
    /* Disassembler */
    if (p < end && shader->disasm_string) {
       p->isText = true;
-      desc_copy(p->name, "Assembly");
-      desc_copy(p->description, "Final Assembly");
+      VK_COPY_STR(p->name, "Assembly");
+      VK_COPY_STR(p->description, "Final Assembly");
       if (radv_copy_representation(p->pData, &p->dataSize, shader->disasm_string) != VK_SUCCESS)
          result = VK_INCOMPLETE;
    }
@@ -1249,4 +1238,62 @@ radv_pipeline_hash_shader_stage(VkPipelineCreateFlags2 pipeline_flags, const VkP
 
    _mesa_sha1_update(ctx, shader_sha1, sizeof(shader_sha1));
    _mesa_sha1_update(ctx, stage_key, sizeof(*stage_key));
+}
+
+static void
+radv_print_pso_history(const struct radv_pipeline *pipeline, const struct radv_shader *shader, FILE *output)
+{
+   const uint64_t start_addr = radv_shader_get_va(shader) & ((1ull << 48) - 1);
+   const uint64_t end_addr = start_addr + shader->code_size;
+
+   fprintf(output, "pipeline_hash=%.16llx, VA=%.16llx-%.16llx, stage=%s\n", (long long)pipeline->pipeline_hash,
+           (long long)start_addr, (long long)end_addr, _mesa_shader_stage_to_string(shader->info.stage));
+   fflush(output);
+}
+
+void
+radv_pipeline_report_pso_history(const struct radv_device *device, struct radv_pipeline *pipeline)
+{
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const struct radv_instance *instance = radv_physical_device_instance(pdev);
+   FILE *output = instance->pso_history_logfile ? instance->pso_history_logfile : stderr;
+
+   if (!(instance->debug_flags & RADV_DEBUG_PSO_HISTORY))
+      return;
+
+   /* Only report PSO history for application pipelines. */
+   if (pipeline->is_internal)
+      return;
+
+   switch (pipeline->type) {
+   case RADV_PIPELINE_GRAPHICS:
+      for (uint32_t i = 0; i < MESA_VULKAN_SHADER_STAGES; i++) {
+         const struct radv_shader *shader = pipeline->shaders[i];
+
+         if (shader)
+            radv_print_pso_history(pipeline, shader, output);
+      }
+
+      if (pipeline->gs_copy_shader)
+         radv_print_pso_history(pipeline, pipeline->gs_copy_shader, output);
+      break;
+   case RADV_PIPELINE_COMPUTE:
+      radv_print_pso_history(pipeline, pipeline->shaders[MESA_SHADER_COMPUTE], output);
+      break;
+   case RADV_PIPELINE_RAY_TRACING: {
+      struct radv_ray_tracing_pipeline *rt_pipeline = radv_pipeline_to_ray_tracing(pipeline);
+
+      radv_print_pso_history(pipeline, rt_pipeline->prolog, output);
+
+      for (uint32_t i = 0; i < rt_pipeline->stage_count; i++) {
+         const struct radv_shader *shader = rt_pipeline->stages[i].shader;
+
+         if (shader)
+            radv_print_pso_history(pipeline, shader, output);
+      }
+      break;
+   }
+   default:
+      break;
+   }
 }

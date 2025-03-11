@@ -645,6 +645,11 @@ bool ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
                                             ip_info.ib_size_alignment, 256);
    }
 
+   /* GFX1013 is known to have broken compute queue */
+   if (device_info.family == FAMILY_NV && ASICREV_IS(device_info.external_rev, GFX1013)) {
+      info->ip[AMD_IP_COMPUTE].num_queues = 0;
+   }
+
    /* Set dword padding minus 1. */
    info->ip[AMD_IP_GFX].ib_pad_dw_mask = 0x7;
    info->ip[AMD_IP_COMPUTE].ib_pad_dw_mask = 0x7;
@@ -804,6 +809,7 @@ bool ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
          identify_chip(NAVI10);
          identify_chip(NAVI12);
          identify_chip(NAVI14);
+         identify_chip(GFX1013);
          identify_chip(NAVI21);
          identify_chip(NAVI22);
          identify_chip(NAVI23);
@@ -1208,7 +1214,7 @@ bool ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
     */
    info->has_accelerated_dot_product =
       info->family == CHIP_VEGA20 ||
-      (info->family >= CHIP_MI100 && info->family != CHIP_NAVI10);
+      (info->family >= CHIP_MI100 && info->family != CHIP_NAVI10 && info->family != CHIP_GFX1013);
 
    /* TODO: Figure out how to use LOAD_CONTEXT_REG on GFX6-GFX7. */
    info->has_load_ctx_reg_pkt =
@@ -1254,6 +1260,15 @@ bool ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
    /* GFX10+Navi21: NGG->legacy transitions require VGT_FLUSH. */
    info->has_vgt_flush_ngg_legacy_bug = info->gfx_level == GFX10 ||
                                         info->family == CHIP_NAVI21;
+
+   /* GFX10-GFX10.3 (tested on NAVI10, NAVI21 and NAVI24 but likely all) are
+    * affected by a hw bug when primitive restart is updated and no context
+    * registers are written between draws. One workaround is to emit
+    * SQ_NON_EVENT(0) which is a NOP packet that adds a small delay and seems
+    * to fix it reliably.
+    */
+   info->has_prim_restart_sync_bug = info->gfx_level == GFX10 ||
+                                     info->gfx_level == GFX10_3;
 
    /* First Navi2x chips have a hw bug that doesn't allow to write
     * depth/stencil from a FS for multi-pixel fragments.
@@ -1339,7 +1354,7 @@ bool ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
    info->sdma_supports_sparse = info->sdma_ip_version >= SDMA_4_0;
 
    /* SDMA v5.0+ (GFX10+) supports DCC and HTILE, but Navi 10 has issues with it according to PAL. */
-   info->sdma_supports_compression = info->sdma_ip_version >= SDMA_5_0 && info->family != CHIP_NAVI10;
+   info->sdma_supports_compression = info->sdma_ip_version >= SDMA_5_0 && info->family != CHIP_NAVI10 && info->family != CHIP_GFX1013;
 
    /* Get the number of good compute units. */
    info->num_cu = 0;
@@ -1476,6 +1491,7 @@ bool ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       case CHIP_RENOIR:
       case CHIP_NAVI10:
       case CHIP_NAVI12:
+      case CHIP_GFX1013:
       case CHIP_NAVI21:
       case CHIP_NAVI22:
       case CHIP_NAVI23:
@@ -1584,7 +1600,7 @@ bool ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
     * We can decrease the number to make it fit into the infinity cache.
     */
    const unsigned max_waves_per_tg = 32; /* 1024 threads in Wave32 */
-   info->max_scratch_waves = MAX2(32 * info->min_good_cu_per_sa * info->max_sa_per_se * info->num_se,
+   info->max_scratch_waves = MAX2(32 * info->max_good_cu_per_sa * info->max_sa_per_se * info->num_se,
                                   max_waves_per_tg);
    info->has_scratch_base_registers = info->gfx_level >= GFX11 ||
                                       (!info->has_graphics && info->family >= CHIP_GFX940);
@@ -1725,7 +1741,9 @@ bool ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       info->has_set_sh_pairs_packed = info->register_shadowing_required;
    }
 
-   info->has_image_bvh_intersect_ray = info->gfx_level >= GFX10_3;
+   /* GFX1013 is GFX10 plus ray tracing instructions */
+   info->has_image_bvh_intersect_ray = info->gfx_level >= GFX10_3 ||
+                                       info->family == CHIP_GFX1013;
 
    set_custom_cu_en_mask(info);
 

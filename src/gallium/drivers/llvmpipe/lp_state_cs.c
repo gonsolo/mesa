@@ -573,10 +573,17 @@ generate_compute(struct llvmpipe_context *lp,
    LLVMValueRef vec_length = lp_build_const_int32(gallivm, cs_type.length);
 
    if (use_coro) {
+      lp_function_add_debug_info(gallivm, function, func_type);
+
       block = LLVMAppendBasicBlockInContext(gallivm->context, function, "entry");
       builder = gallivm->builder;
       assert(builder);
       LLVMPositionBuilderAtEnd(builder, block);
+
+      if (gallivm->di_function) {
+         LLVMSetCurrentDebugLocation2(
+           gallivm->builder, LLVMDIBuilderCreateDebugLocation(gallivm->context, 0, 0, gallivm->di_function, NULL));
+      }
 
       if (is_mesh) {
          LLVMTypeRef output_type = create_mesh_jit_output_type_deref(gallivm);
@@ -704,9 +711,16 @@ generate_compute(struct llvmpipe_context *lp,
          output_array = LLVMGetParam(coro, CS_ARG_CORO_OUTPUTS);
    }
 
+   lp_function_add_debug_info(gallivm, coro, coro_func_type);
+
    block = LLVMAppendBasicBlockInContext(gallivm->context, coro, "entry");
    builder = gallivm->builder;
    LLVMPositionBuilderAtEnd(builder, block);
+
+   if (gallivm->di_function) {
+      LLVMSetCurrentDebugLocation2(
+         gallivm->builder, LLVMDIBuilderCreateDebugLocation(gallivm->context, 0, 0, gallivm->di_function, NULL));
+   }
 
    struct lp_build_loop_state loop_state;
 
@@ -2105,7 +2119,10 @@ lp_mesh_call_draw(struct llvmpipe_context *lp,
    draw_collect_primitives_generated(lp->draw,
                                      lp->active_primgen_queries &&
                                      !lp->queries_disabled);
-   draw_mesh(lp->draw, &vert_out, &prim_out);
+
+   const unsigned pos = draw_current_shader_position_output(lp->draw);
+   if (pos != UINT32_MAX)
+      draw_mesh(lp->draw, &vert_out, &prim_out);
 
    free(vert_out.verts);
    free(prim_out.primitive_lengths);

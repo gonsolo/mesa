@@ -249,6 +249,17 @@ static bool si_update_shaders(struct si_context *sctx)
 
    struct si_shader *hw_vs = si_get_vs_inline(sctx, HAS_TESS, HAS_GS)->current;
 
+   bool fixed_func_face_culling_needed = !NGG || !si_shader_culling_enabled(hw_vs);
+   bool fixed_func_face_culling_has_effect = (!HAS_TESS && !HAS_GS) ||
+                                             hw_vs->selector->rast_prim == MESA_PRIM_TRIANGLES;
+
+   if (sctx->fixed_func_face_culling_needed != fixed_func_face_culling_needed ||
+       sctx->fixed_func_face_culling_has_effect != fixed_func_face_culling_has_effect) {
+      sctx->fixed_func_face_culling_needed = fixed_func_face_culling_needed;
+      sctx->fixed_func_face_culling_has_effect = fixed_func_face_culling_has_effect;
+      sctx->dirty_atoms |= SI_STATE_BIT(rasterizer);
+   }
+
    if (old_pa_cl_vs_out_cntl != hw_vs->pa_cl_vs_out_cntl)
       si_mark_atom_dirty(sctx, &sctx->atoms.s.clip_regs);
 
@@ -1093,7 +1104,7 @@ static void si_emit_ia_multi_vgt_param(struct si_context *sctx,
 template <amd_gfx_level GFX_VERSION, si_has_tess HAS_TESS, si_has_gs HAS_GS, si_has_ngg NGG,
           si_is_draw_vertex_state IS_DRAW_VERTEX_STATE> ALWAYS_INLINE
 static void si_emit_draw_registers(struct si_context *sctx,
-                                   const struct pipe_draw_indirect_info *indirect,
+                                   const struct pipe_draw_indirect_info *restrict indirect,
                                    enum mesa_prim prim, unsigned index_size,
                                    unsigned instance_count, bool primitive_restart,
                                    unsigned restart_index, unsigned min_vertex_count)
@@ -1235,12 +1246,12 @@ void si_emit_buffered_compute_sh_regs(struct si_context *sctx)
 template <amd_gfx_level GFX_VERSION, si_has_tess HAS_TESS, si_has_gs HAS_GS, si_has_ngg NGG,
           si_is_draw_vertex_state IS_DRAW_VERTEX_STATE, si_has_sh_pairs_packed HAS_SH_PAIRS_PACKED,
           si_alt_hiz_logic ALT_HIZ_LOGIC> ALWAYS_INLINE
-static void si_emit_draw_packets(struct si_context *sctx, const struct pipe_draw_info *info,
+static void si_emit_draw_packets(struct si_context *sctx, const struct pipe_draw_info *restrict info,
                                  unsigned drawid_base,
-                                 const struct pipe_draw_indirect_info *indirect,
-                                 const struct pipe_draw_start_count_bias *draws,
+                                 const struct pipe_draw_indirect_info *restrict indirect,
+                                 const struct pipe_draw_start_count_bias *restrict draws,
                                  unsigned num_draws,
-                                 struct pipe_resource *indexbuf, unsigned index_size,
+                                 struct pipe_resource *restrict indexbuf, unsigned index_size,
                                  unsigned index_offset, unsigned instance_count)
 {
    struct radeon_cmdbuf *cs = &sctx->gfx_cs;
@@ -2049,12 +2060,12 @@ template <amd_gfx_level GFX_VERSION, si_has_tess HAS_TESS, si_has_gs HAS_GS, si_
           si_is_draw_vertex_state IS_DRAW_VERTEX_STATE, si_has_sh_pairs_packed HAS_SH_PAIRS_PACKED,
           util_popcnt POPCNT, si_alt_hiz_logic ALT_HIZ_LOGIC> ALWAYS_INLINE
 static void si_draw(struct pipe_context *ctx,
-                    const struct pipe_draw_info *info,
+                    const struct pipe_draw_info *restrict info,
                     unsigned drawid_offset,
-                    const struct pipe_draw_indirect_info *indirect,
-                    const struct pipe_draw_start_count_bias *draws,
+                    const struct pipe_draw_indirect_info *restrict indirect,
+                    const struct pipe_draw_start_count_bias *restrict draws,
                     unsigned num_draws,
-                    struct pipe_vertex_state *state,
+                    struct pipe_vertex_state *restrict state,
                     uint32_t partial_velem_mask)
 {
    /* Keep code that uses the least number of local variables as close to the beginning
@@ -2074,8 +2085,10 @@ static void si_draw(struct pipe_context *ctx,
 
    si_need_gfx_cs_space(sctx, num_draws, ALT_HIZ_LOGIC ? 8 : 0);
 
-   if (u_trace_perfetto_active(&sctx->ds.trace_context))
+#ifdef HAVE_PERFETTO
+   if (unlikely(sctx->perfetto_enabled))
       trace_si_begin_draw(&sctx->trace);
+#endif
 
    unsigned instance_count = info->instance_count;
 
@@ -2426,10 +2439,12 @@ static void si_draw(struct pipe_context *ctx,
       zstex->depth_cleared_level_mask &= ~BITFIELD_BIT(sctx->framebuffer.state.zsbuf->u.tex.level);
    }
 
-   if (u_trace_perfetto_active(&sctx->ds.trace_context)) {
+#ifdef HAVE_PERFETTO
+   if (unlikely(sctx->perfetto_enabled)) {
       /* Just use the draw[0] vertex count for perfetto. */
       trace_si_end_draw(&sctx->trace, draws[0].count);
    }
+#endif
 
    DRAW_CLEANUP;
 }
@@ -2437,10 +2452,10 @@ static void si_draw(struct pipe_context *ctx,
 template <amd_gfx_level GFX_VERSION, si_has_tess HAS_TESS, si_has_gs HAS_GS, si_has_ngg NGG,
           si_has_sh_pairs_packed HAS_SH_PAIRS_PACKED, si_alt_hiz_logic ALT_HIZ_LOGIC>
 static void si_draw_vbo(struct pipe_context *ctx,
-                        const struct pipe_draw_info *info,
+                        const struct pipe_draw_info *restrict info,
                         unsigned drawid_offset,
-                        const struct pipe_draw_indirect_info *indirect,
-                        const struct pipe_draw_start_count_bias *draws,
+                        const struct pipe_draw_indirect_info *restrict indirect,
+                        const struct pipe_draw_start_count_bias *restrict draws,
                         unsigned num_draws)
 {
    si_draw<GFX_VERSION, HAS_TESS, HAS_GS, NGG, DRAW_VERTEX_STATE_OFF, HAS_SH_PAIRS_PACKED,
@@ -2455,7 +2470,7 @@ static void si_draw_vertex_state(struct pipe_context *ctx,
                                  struct pipe_vertex_state *vstate,
                                  uint32_t partial_velem_mask,
                                  struct pipe_draw_vertex_state_info info,
-                                 const struct pipe_draw_start_count_bias *draws,
+                                 const struct pipe_draw_start_count_bias *restrict draws,
                                  unsigned num_draws)
 {
    struct si_vertex_state *state = (struct si_vertex_state *)vstate;
@@ -2477,7 +2492,7 @@ static void si_draw_vertex_state(struct pipe_context *ctx,
 static void si_draw_rectangle(struct blitter_context *blitter, void *vertex_elements_cso,
                               blitter_get_vs_func get_vs, int x1, int y1, int x2, int y2,
                               float depth, unsigned num_instances, enum blitter_attrib_type type,
-                              const union blitter_attrib *attrib)
+                              const struct blitter_attrib *attrib)
 {
    struct pipe_context *pipe = util_blitter_get_pipe(blitter);
    struct si_context *sctx = (struct si_context *)pipe;
@@ -2498,10 +2513,6 @@ static void si_draw_rectangle(struct blitter_context *blitter, void *vertex_elem
    sctx->vs_blit_sh_data[2] = fui(depth);
 
    switch (type) {
-   case UTIL_BLITTER_ATTRIB_COLOR:
-      memcpy(&sctx->vs_blit_sh_data[3], attrib->color, sizeof(float) * 4);
-      sctx->vs_blit_sh_data[7] = attribute_ring_address_lo;
-      break;
    case UTIL_BLITTER_ATTRIB_TEXCOORD_XY:
    case UTIL_BLITTER_ATTRIB_TEXCOORD_XYZW:
       memcpy(&sctx->vs_blit_sh_data[3], &attrib->texcoord, sizeof(attrib->texcoord));

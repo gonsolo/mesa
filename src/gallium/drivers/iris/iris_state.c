@@ -5251,7 +5251,10 @@ iris_store_tes_state(const struct intel_device_info *devinfo,
       STATIC_ASSERT(TEDMODE_OFF == 0);
 
    #if GFX_VER >= 20
-      te.TessellationDistributionLevel = TEDLEVEL_REGION;
+      if (intel_needs_workaround(devinfo, 16025857284))
+         te.TessellationDistributionLevel = TEDLEVEL_PATCH;
+      else
+         te.TessellationDistributionLevel = TEDLEVEL_REGION;
    #else
       te.TessellationDistributionLevel = TEDLEVEL_PATCH;
    #endif
@@ -7531,7 +7534,6 @@ iris_upload_dirty_render_state(struct iris_context *ice,
                MERGE_SCRATCH_ADDR(3DSTATE_DS);
                break;
             }
-            case MESA_SHADER_GEOMETRY:  MERGE_SCRATCH_ADDR(3DSTATE_GS); break;
             }
          } else {
             iris_batch_emit(batch, shader->derived_data,

@@ -3657,7 +3657,6 @@ static void *si_create_shader_selector(struct pipe_context *ctx,
       sscreen->info.gfx_level >= GFX10 &&
       sscreen->use_ngg_culling &&
       sel->info.writes_position &&
-      !sel->info.writes_viewport_index && /* cull only against viewport 0 */
       !sel->nir->info.writes_memory &&
       /* NGG GS supports culling with streamout because it culls after streamout. */
       (sel->stage == MESA_SHADER_GEOMETRY || !sel->info.enabled_streamout_buffer_mask) &&
@@ -3821,17 +3820,25 @@ static void si_update_last_vgt_stage_state(struct si_context *sctx,
 static void si_bind_vs_shader(struct pipe_context *ctx, void *state)
 {
    struct si_context *sctx = (struct si_context *)ctx;
-   struct si_shader_selector *old_hw_vs = si_get_vs(sctx)->cso;
-   struct si_shader *old_hw_vs_variant = si_get_vs(sctx)->current;
    struct si_shader_selector *sel = (struct si_shader_selector*)state;
 
    if (sctx->shader.vs.cso == sel)
       return;
 
+   struct si_shader_selector *old_hw_vs = si_get_vs(sctx)->cso;
+   struct si_shader *old_hw_vs_variant = si_get_vs(sctx)->current;
+   bool old_uses_vbos = si_vs_uses_vbos(sctx->shader.vs.cso);
+   bool new_uses_vbos = si_vs_uses_vbos(sel);
+
    sctx->shader.vs.cso = sel;
    sctx->shader.vs.current = (sel && sel->variants_count) ? sel->variants[0] : NULL;
    sctx->num_vs_blit_sgprs = sel ? sel->info.base.vs.blit_sgprs_amd : 0;
    sctx->vs_uses_draw_id = sel ? sel->info.uses_drawid : false;
+
+   if (old_uses_vbos != new_uses_vbos) {
+      sctx->num_vertex_elements = new_uses_vbos ? sctx->vertex_elements->count : 0;
+      sctx->vertex_buffers_dirty = new_uses_vbos;
+   }
 
    if (si_update_ngg(sctx))
       si_shader_change_notify(sctx);

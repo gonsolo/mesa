@@ -37,8 +37,10 @@ static inline brw_reg offset(const brw_reg &, const brw_builder &,
 class brw_builder {
 public:
    /**
-    * Construct an brw_builder that inserts instructions into \p shader.
-    * \p dispatch_width gives the native execution width of the program.
+    * Construct an brw_builder that inserts instructions
+    * at the end of \p shader. The \p dispatch_width gives
+    * the execution width, that may differ from the shader
+    * dispatch_width.
     */
    brw_builder(brw_shader *shader,
                unsigned dispatch_width) :
@@ -48,18 +50,27 @@ public:
       force_writemask_all(false),
       annotation()
    {
+      if (shader)
+         cursor = (exec_node *)&shader->instructions.tail_sentinel;
    }
 
-   explicit brw_builder(brw_shader *s) : brw_builder(s, s->dispatch_width) {}
+   /**
+    * Construct an brw_builder that inserts instructions into \p shader,
+    * using its dispatch width.
+    */
+   explicit brw_builder(brw_shader *s = NULL) :
+      brw_builder(s, s ? s->dispatch_width : 0)
+   {
+   }
 
    /**
-    * Construct an brw_builder that inserts instructions into \p shader
-    * before instruction \p inst in basic block \p block.  The default
+    * Construct an brw_builder that inserts instructions before
+    * instruction \p inst in the same basic block.  The default
     * execution controls and debug annotation are initialized from the
     * instruction passed as argument.
     */
-   brw_builder(brw_shader *shader, bblock_t *block, brw_inst *inst) :
-      shader(shader), block(block), cursor(inst),
+   explicit brw_builder(brw_inst *inst) :
+      shader(inst->block->cfg->s), block(inst->block), cursor(inst),
       _dispatch_width(inst->exec_size),
       _group(inst->group),
       force_writemask_all(inst->force_writemask_all)
@@ -83,17 +94,6 @@ public:
       bld.block = block;
       bld.cursor = cursor;
       return bld;
-   }
-
-   /**
-    * Construct an brw_builder appending instructions at the end of the
-    * instruction list of the shader, inheriting other code generation
-    * parameters from this.
-    */
-   brw_builder
-   at_end() const
-   {
-      return at(NULL, (exec_node *)&shader->instructions.tail_sentinel);
    }
 
    /**

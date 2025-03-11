@@ -209,7 +209,7 @@ brw_opt_combine_convergent_txf(brw_shader &s)
             if (!txf)
                break;
 
-            const brw_builder ibld = brw_builder(&s, block, txf);
+            const brw_builder ibld = brw_builder(txf);
 
             /* Replace each of the original TXFs with MOVs from our new one */
             const unsigned dest_comps = dest_comps_for_txf(s, txf);
@@ -220,7 +220,7 @@ brw_opt_combine_convergent_txf(brw_shader &s)
                v[c] = component(offset(div, ubld, c), i);
             ibld.VEC(retype(txf->dst, BRW_TYPE_UD), v, dest_comps);
 
-            txf->remove(block);
+            txf->remove();
          }
 
          progress = true;

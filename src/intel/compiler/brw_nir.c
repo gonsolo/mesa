@@ -1432,17 +1432,6 @@ brw_nir_link_shaders(const struct brw_compiler *compiler,
       NIR_PASS(_, producer, nir_lower_global_vars_to_local);
       NIR_PASS(_, consumer, nir_lower_global_vars_to_local);
 
-      /* The backend might not be able to handle indirects on
-       * temporaries so we need to lower indirects on any of the
-       * varyings we have demoted here.
-       */
-      NIR_PASS(_, producer, nir_lower_indirect_derefs,
-                  brw_nir_no_indirect_mask(compiler, producer->info.stage),
-                  UINT32_MAX);
-      NIR_PASS(_, consumer, nir_lower_indirect_derefs,
-                  brw_nir_no_indirect_mask(compiler, consumer->info.stage),
-                  UINT32_MAX);
-
       brw_nir_optimize(producer, devinfo);
       brw_nir_optimize(consumer, devinfo);
 
@@ -1793,6 +1782,9 @@ brw_postprocess_nir(nir_shader *nir, const struct brw_compiler *compiler,
       };
       OPT(nir_lower_idiv, &options);
    }
+
+   if (devinfo->ver >= 30)
+      NIR_PASS(_, nir, brw_nir_lower_sample_index_in_coord);
 
    if (gl_shader_stage_can_set_fragment_shading_rate(nir->info.stage))
       NIR_PASS(_, nir, intel_nir_lower_shading_rate_output);
@@ -2170,11 +2162,15 @@ lsc_op_for_nir_intrinsic(const nir_intrinsic_instr *intrin)
 
    case nir_intrinsic_image_load:
    case nir_intrinsic_bindless_image_load:
-      return LSC_OP_LOAD_CMASK;
+      return nir_intrinsic_image_dim(intrin) == GLSL_SAMPLER_DIM_MS ?
+             LSC_OP_LOAD_CMASK_MSRT :
+             LSC_OP_LOAD_CMASK;
 
    case nir_intrinsic_image_store:
    case nir_intrinsic_bindless_image_store:
-      return LSC_OP_STORE_CMASK;
+      return nir_intrinsic_image_dim(intrin) == GLSL_SAMPLER_DIM_MS ?
+             LSC_OP_STORE_CMASK_MSRT :
+             LSC_OP_STORE_CMASK;
 
    default:
       assert(nir_intrinsic_has_atomic_op(intrin));

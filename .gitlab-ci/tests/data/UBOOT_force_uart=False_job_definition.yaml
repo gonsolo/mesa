@@ -11,11 +11,11 @@ timeouts:
     minutes: 10
   actions:
     depthcharge-retry:
-      minutes: 4
-    depthcharge-start:
-      minutes: 1
+      minutes: 6
     depthcharge-action:
-      minutes: 15
+      minutes: 5
+    uboot-action:
+      seconds: 200
 actions:
 - deploy:
     timeout:
@@ -32,9 +32,9 @@ actions:
     dtb:
       url: None/my_dtb_filename.dtb
     namespace: dut
-    failure_retry: 3
+    failure_retry: 2
 - boot:
-    failure_retry: 3
+    failure_retry: 2
     method: u-boot
     prompts:
     - 'lava-shell:'
@@ -90,7 +90,7 @@ actions:
             ping -c 5 -w 60 $(lava-target-ip)
 
             lava_ssh_test_case() {
-                set -x
+                set -ex
                 local test_case="${1}"
                 shift
                 lava-test-case "${test_case}" --shell \
@@ -109,6 +109,6 @@ actions:
             sed -i '/S3_RESULTS_UPLOAD/d' /set-job-env-vars.sh
             EOF
           - export SSH_PTY_ARGS=-tt
-          - lava_ssh_test_case 'test-project_dut' '"cd / && /init-stage2.sh"'
+          - lava_ssh_test_case 'test-project_dut' 'cd / && /init-stage2.sh'
     docker:
       image:

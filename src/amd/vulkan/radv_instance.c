@@ -85,6 +85,7 @@ static const struct debug_control radv_debug_options[] = {{"nofastclears", RADV_
                                                           {"nir", RADV_DEBUG_DUMP_NIR},
                                                           {"asm", RADV_DEBUG_DUMP_ASM},
                                                           {"ir", RADV_DEBUG_DUMP_BACKEND_IR},
+                                                          {"pso_history", RADV_DEBUG_PSO_HISTORY},
                                                           {NULL, 0}};
 
 const char *
@@ -118,10 +119,10 @@ static const struct debug_control radv_perftest_options[] = {{"localbos", RADV_P
                                                              {NULL, 0}};
 
 static const struct debug_control radv_trap_excp_options[] = {
-   {"mem_viol", RADV_PERFTEST_LOCAL_BOS},
-   {"float_div_by_zero", RADV_PERFTEST_DCC_MSAA},
-   {"float_overflow", RADV_PERFTEST_BO_LIST},
-   {"float_underflow", RADV_PERFTEST_CS_WAVE_32},
+   {"mem_viol", RADV_TRAP_EXCP_MEM_VIOL},
+   {"float_div_by_zero", RADV_TRAP_EXCP_FLOAT_DIV_BY_ZERO},
+   {"float_overflow", RADV_TRAP_EXCP_FLOAT_OVERFLOW},
+   {"float_underflow", RADV_TRAP_EXCP_FLOAT_UNDERFLOW},
    {NULL, 0},
 };
 
@@ -256,7 +257,8 @@ radv_init_dri_options(struct radv_instance *instance)
    instance->drirc.flush_before_timestamp_write =
       driQueryOptionb(&instance->drirc.options, "radv_flush_before_timestamp_write");
 
-   instance->drirc.force_rt_wave64 = driQueryOptionb(&instance->drirc.options, "radv_rt_wave64");
+   if (driQueryOptionb(&instance->drirc.options, "radv_rt_wave64"))
+      instance->perftest_flags |= RADV_PERFTEST_RT_WAVE_64;
 
    instance->drirc.disable_dedicated_sparse_queue = driQueryOptionb(&instance->drirc.options, "radv_disable_dedicated_sparse_queue");
 
@@ -399,6 +401,14 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
       instance->debug_flags |= shader_stage_flags;
    }
 
+   if (instance->debug_flags & RADV_DEBUG_PSO_HISTORY) {
+      const char *filename = "/tmp/radv_pso_history.log";
+
+      instance->pso_history_logfile = fopen(filename, "w");
+      if (!instance->pso_history_logfile)
+         fprintf(stderr, "radv: Failed to open log file: %s.\n", filename);
+   }
+
    /* When RADV_FORCE_FAMILY is set, the driver creates a null
     * device that allows to test the compiler without having an
     * AMDGPU instance.
@@ -431,6 +441,9 @@ radv_DestroyInstance(VkInstance _instance, const VkAllocationCallbacks *pAllocat
       return;
 
    VG(VALGRIND_DESTROY_MEMPOOL(instance));
+
+   if (instance->pso_history_logfile)
+      fclose(instance->pso_history_logfile);
 
    simple_mtx_destroy(&instance->shader_dump_mtx);
 

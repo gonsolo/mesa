@@ -2099,7 +2099,6 @@ tu_pipeline_builder_parse_libraries(struct tu_pipeline_builder *builder,
          pipeline->output = library->base.output;
          pipeline->lrz_blend.reads_dest |= library->base.lrz_blend.reads_dest;
          pipeline->lrz_blend.valid |= library->base.lrz_blend.valid;
-         pipeline->prim_order = library->base.prim_order;
       }
 
       if ((library->state &
@@ -2108,6 +2107,9 @@ tu_pipeline_builder_parse_libraries(struct tu_pipeline_builder *builder,
            VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT)) {
          pipeline->prim_order = library->base.prim_order;
       }
+
+      if (library->base.bandwidth.valid)
+         pipeline->bandwidth = library->base.bandwidth;
 
       pipeline->set_state_mask |= library->base.set_state_mask;
 
@@ -2896,6 +2898,8 @@ tu_calc_bandwidth(struct tu_bandwidth *bandwidth,
             vk_format_to_pipe_format(rp->stencil_attachment_format),
             UTIL_FORMAT_COLORSPACE_ZS, 1) / 8;
    }
+
+   bandwidth->valid = true;
 }
 
 /* Return true if the blend state reads the color attachments. */
@@ -2905,6 +2909,22 @@ tu6_calc_blend_lrz(const struct vk_color_blend_state *cb,
 {
    if (cb->logic_op_enable && tu_logic_op_reads_dst((VkLogicOp)cb->logic_op))
       return true;
+
+   bool has_enabled_attachments = false;
+   for (unsigned i = 0; i < cb->attachment_count; i++) {
+      if (rp->color_attachment_formats[i] == VK_FORMAT_UNDEFINED)
+         continue;
+
+      const struct vk_color_blend_attachment_state *att = &cb->attachments[i];
+      if ((cb->color_write_enables & (1u << i)) && att->write_mask != 0) {
+         has_enabled_attachments = true;
+         break;
+      }
+   }
+
+   /* There is no partial write if there is no writes at all. */
+   if (!has_enabled_attachments)
+      return false;
 
    for (unsigned i = 0; i < cb->attachment_count; i++) {
       if (rp->color_attachment_formats[i] == VK_FORMAT_UNDEFINED)

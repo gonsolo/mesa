@@ -811,6 +811,8 @@ vn_ResetCommandPool(VkDevice device,
                                &pool->free_query_records, head)
          vk_free(&pool->allocator, record);
 
+      list_inithead(&pool->free_query_records);
+
       vn_cached_storage_fini(&pool->storage);
       vn_cached_storage_init(&pool->storage, &pool->allocator);
    }
@@ -2369,12 +2371,15 @@ vn_CmdPushDescriptorSetWithTemplate(
    STACK_ARRAY(VkBufferView, bview_handles, templ->bview_count);
    STACK_ARRAY(VkWriteDescriptorSetInlineUniformBlock, iubs,
                templ->iub_count);
+   STACK_ARRAY(VkWriteDescriptorSetAccelerationStructureKHR, accels,
+               templ->accel_count);
    struct vn_descriptor_set_update update = {
       .writes = writes,
       .img_infos = img_infos,
       .buf_infos = buf_infos,
       .bview_handles = bview_handles,
       .iubs = iubs,
+      .accels = accels,
    };
    vn_descriptor_set_fill_update_with_template(templ, VK_NULL_HANDLE, pData,
                                                &update);
@@ -2388,6 +2393,7 @@ vn_CmdPushDescriptorSetWithTemplate(
    STACK_ARRAY_FINISH(buf_infos);
    STACK_ARRAY_FINISH(bview_handles);
    STACK_ARRAY_FINISH(iubs);
+   STACK_ARRAY_FINISH(accels);
 }
 
 void
@@ -2405,24 +2411,49 @@ vn_CmdPushDescriptorSetWithTemplate2(VkCommandBuffer commandBuffer,
    STACK_ARRAY(VkBufferView, bview_handles, templ->bview_count);
    STACK_ARRAY(VkWriteDescriptorSetInlineUniformBlock, iubs,
                templ->iub_count);
+   STACK_ARRAY(VkWriteDescriptorSetAccelerationStructureKHR, accels,
+               templ->accel_count);
    struct vn_descriptor_set_update update = {
       .writes = writes,
       .img_infos = img_infos,
       .buf_infos = buf_infos,
       .bview_handles = bview_handles,
       .iubs = iubs,
+      .accels = accels,
    };
    vn_descriptor_set_fill_update_with_template(
       templ, VK_NULL_HANDLE, pPushDescriptorSetWithTemplateInfo->pData,
       &update);
 
+   /* Per spec:
+    *
+    * If stageFlags specifies a subset of all stages corresponding to one or
+    * more pipeline bind points, the binding operation still affects all
+    * stages corresponding to the given pipeline bind point(s) as if the
+    * equivalent original version of this command had been called with the
+    * same parameters.
+    *
+    * So we just need to pick a single stage belonging to the pipeline type.
+    */
+   VkShaderStageFlags stage_flags;
+   switch (templ->push.pipeline_bind_point) {
+   case VK_PIPELINE_BIND_POINT_GRAPHICS:
+      stage_flags = VK_SHADER_STAGE_ALL_GRAPHICS;
+      break;
+   case VK_PIPELINE_BIND_POINT_COMPUTE:
+      stage_flags = VK_SHADER_STAGE_COMPUTE_BIT;
+      break;
+   case VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR:
+      stage_flags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+      break;
+   default:
+      unreachable("bad pipeline bind point in the template");
+      break;
+   }
    const VkPushDescriptorSetInfo info = {
       .sType = VK_STRUCTURE_TYPE_PUSH_DESCRIPTOR_SET_INFO,
       .pNext = pPushDescriptorSetWithTemplateInfo->pNext,
-      .stageFlags =
-         templ->push.pipeline_bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS
-            ? VK_SHADER_STAGE_ALL_GRAPHICS
-            : VK_SHADER_STAGE_COMPUTE_BIT,
+      .stageFlags = stage_flags,
       .layout = pPushDescriptorSetWithTemplateInfo->layout,
       .set = pPushDescriptorSetWithTemplateInfo->set,
       .descriptorWriteCount = update.write_count,
@@ -2435,6 +2466,7 @@ vn_CmdPushDescriptorSetWithTemplate2(VkCommandBuffer commandBuffer,
    STACK_ARRAY_FINISH(buf_infos);
    STACK_ARRAY_FINISH(bview_handles);
    STACK_ARRAY_FINISH(iubs);
+   STACK_ARRAY_FINISH(accels);
 }
 
 void
@@ -2663,4 +2695,126 @@ vn_CmdSetRenderingInputAttachmentIndices(
 {
    VN_CMD_ENQUEUE(vkCmdSetRenderingInputAttachmentIndices, commandBuffer,
                   pInputAttachmentIndexInfo);
+}
+
+void
+vn_CmdBuildAccelerationStructuresIndirectKHR(
+   VkCommandBuffer commandBuffer,
+   uint32_t infoCount,
+   const VkAccelerationStructureBuildGeometryInfoKHR *pInfos,
+   const VkDeviceAddress *pIndirectDeviceAddresses,
+   const uint32_t *pIndirectStrides,
+   const uint32_t *const *ppMaxPrimitiveCounts)
+{
+   VN_CMD_ENQUEUE(vkCmdBuildAccelerationStructuresIndirectKHR, commandBuffer,
+                  infoCount, pInfos, pIndirectDeviceAddresses,
+                  pIndirectStrides, ppMaxPrimitiveCounts);
+}
+
+void
+vn_CmdBuildAccelerationStructuresKHR(
+   VkCommandBuffer commandBuffer,
+   uint32_t infoCount,
+   const VkAccelerationStructureBuildGeometryInfoKHR *pInfos,
+   const VkAccelerationStructureBuildRangeInfoKHR *const *ppBuildRangeInfos)
+{
+   VN_CMD_ENQUEUE(vkCmdBuildAccelerationStructuresKHR, commandBuffer,
+                  infoCount, pInfos, ppBuildRangeInfos);
+}
+
+void
+vn_CmdCopyAccelerationStructureKHR(
+   VkCommandBuffer commandBuffer,
+   const VkCopyAccelerationStructureInfoKHR *pInfo)
+{
+   VN_CMD_ENQUEUE(vkCmdCopyAccelerationStructureKHR, commandBuffer, pInfo);
+}
+
+void
+vn_CmdCopyAccelerationStructureToMemoryKHR(
+   VkCommandBuffer commandBuffer,
+   const VkCopyAccelerationStructureToMemoryInfoKHR *pInfo)
+{
+   VN_CMD_ENQUEUE(vkCmdCopyAccelerationStructureToMemoryKHR, commandBuffer,
+                  pInfo);
+}
+
+void
+vn_CmdCopyMemoryToAccelerationStructureKHR(
+   VkCommandBuffer commandBuffer,
+   const VkCopyMemoryToAccelerationStructureInfoKHR *pInfo)
+{
+   VN_CMD_ENQUEUE(vkCmdCopyMemoryToAccelerationStructureKHR, commandBuffer,
+                  pInfo);
+}
+
+void
+vn_CmdWriteAccelerationStructuresPropertiesKHR(
+   VkCommandBuffer commandBuffer,
+   uint32_t accelerationStructureCount,
+   const VkAccelerationStructureKHR *pAccelerationStructures,
+   VkQueryType queryType,
+   VkQueryPool queryPool,
+   uint32_t firstQuery)
+{
+   /* Per spec:
+    *
+    * VUID-vkCmdWriteAccelerationStructuresPropertiesKHR-renderpass
+    * This command must only be called outside of a render pass instance
+    *
+    * So no need to consider view mask impact on query count.
+    */
+   VN_CMD_ENQUEUE(vkCmdWriteAccelerationStructuresPropertiesKHR,
+                  commandBuffer, accelerationStructureCount,
+                  pAccelerationStructures, queryType, queryPool, firstQuery);
+
+   vn_cmd_record_query(commandBuffer, queryPool, firstQuery,
+                       accelerationStructureCount, true);
+}
+
+void
+vn_CmdSetRayTracingPipelineStackSizeKHR(VkCommandBuffer commandBuffer,
+                                        uint32_t pipelineStackSize)
+{
+   VN_CMD_ENQUEUE(vkCmdSetRayTracingPipelineStackSizeKHR, commandBuffer,
+                  pipelineStackSize);
+}
+
+void
+vn_CmdTraceRaysIndirectKHR(
+   VkCommandBuffer commandBuffer,
+   const VkStridedDeviceAddressRegionKHR *pRaygenShaderBindingTable,
+   const VkStridedDeviceAddressRegionKHR *pMissShaderBindingTable,
+   const VkStridedDeviceAddressRegionKHR *pHitShaderBindingTable,
+   const VkStridedDeviceAddressRegionKHR *pCallableShaderBindingTable,
+   VkDeviceAddress indirectDeviceAddress)
+{
+   VN_CMD_ENQUEUE(vkCmdTraceRaysIndirectKHR, commandBuffer,
+                  pRaygenShaderBindingTable, pMissShaderBindingTable,
+                  pHitShaderBindingTable, pCallableShaderBindingTable,
+                  indirectDeviceAddress);
+}
+
+void
+vn_CmdTraceRaysKHR(
+   VkCommandBuffer commandBuffer,
+   const VkStridedDeviceAddressRegionKHR *pRaygenShaderBindingTable,
+   const VkStridedDeviceAddressRegionKHR *pMissShaderBindingTable,
+   const VkStridedDeviceAddressRegionKHR *pHitShaderBindingTable,
+   const VkStridedDeviceAddressRegionKHR *pCallableShaderBindingTable,
+   uint32_t width,
+   uint32_t height,
+   uint32_t depth)
+{
+   VN_CMD_ENQUEUE(vkCmdTraceRaysKHR, commandBuffer, pRaygenShaderBindingTable,
+                  pMissShaderBindingTable, pHitShaderBindingTable,
+                  pCallableShaderBindingTable, width, height, depth);
+}
+
+void
+vn_CmdTraceRaysIndirect2KHR(VkCommandBuffer commandBuffer,
+                            VkDeviceAddress indirectDeviceAddress)
+{
+   VN_CMD_ENQUEUE(vkCmdTraceRaysIndirect2KHR, commandBuffer,
+                  indirectDeviceAddress);
 }

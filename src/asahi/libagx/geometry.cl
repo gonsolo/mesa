@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "compiler/libcl/libcl_vk.h"
 #include "geometry.h"
 #include "libagx_intrinsics.h"
 #include "query.h"
@@ -566,8 +567,7 @@ libagx_setup_xfb_buffer(global struct agx_geometry_params *p, uint i)
  */
 void
 libagx_end_primitive(global int *index_buffer, uint total_verts,
-                     uint verts_in_prim, uint total_prims,
-                     uint invocation_vertex_base, uint invocation_prim_base,
+                     uint verts_in_prim, uint total_prims, uint index_offs,
                      uint geometry_base, bool restart)
 {
    /* Previous verts/prims are from previous invocations plus earlier
@@ -575,14 +575,15 @@ libagx_end_primitive(global int *index_buffer, uint total_verts,
     * subtract the count for this prim from the inclusive sum NIR gives us.
     */
    uint previous_verts_in_invoc = (total_verts - verts_in_prim);
-   uint previous_verts = invocation_vertex_base + previous_verts_in_invoc;
-   uint previous_prims = restart ? invocation_prim_base + (total_prims - 1) : 0;
+   uint previous_verts = previous_verts_in_invoc;
+   uint previous_prims = restart ? (total_prims - 1) : 0;
 
    /* The indices are encoded as: (unrolled ID * output vertices) + vertex. */
    uint index_base = geometry_base + previous_verts_in_invoc;
 
    /* Index buffer contains 1 index for each vertex and 1 for each prim */
-   global int *out = &index_buffer[previous_verts + previous_prims];
+   global int *out =
+      &index_buffer[index_offs + previous_verts + previous_prims];
 
    /* Write out indices for the strip */
    for (uint i = 0; i < verts_in_prim; ++i) {
@@ -594,27 +595,12 @@ libagx_end_primitive(global int *index_buffer, uint total_verts,
 }
 
 void
-libagx_build_gs_draw(global struct agx_geometry_params *p, uint vertices,
-                     uint primitives)
+libagx_pad_index_gs(global int *index_buffer, uint total_verts,
+                    uint total_prims, uint id, uint alloc)
 {
-   global uint *descriptor = p->indirect_desc;
-   global struct agx_geometry_state *state = p->state;
-
-   /* Setup the indirect draw descriptor */
-   uint indices = vertices + primitives; /* includes restart indices */
-
-   /* Allocate the index buffer */
-   uint index_buffer_offset_B = state->heap_bottom;
-   p->output_index_buffer =
-      (global uint *)(state->heap + index_buffer_offset_B);
-   state->heap_bottom += (indices * 4);
-   assert(state->heap_bottom < state->heap_size);
-
-   descriptor[0] = indices;                   /* count */
-   descriptor[1] = 1;                         /* instance count */
-   descriptor[2] = index_buffer_offset_B / 4; /* start */
-   descriptor[3] = 0;                         /* index bias */
-   descriptor[4] = 0;                         /* start instance */
+   for (uint i = total_verts + total_prims; i < alloc; ++i) {
+      index_buffer[(id * alloc) + i] = -1;
+   }
 }
 
 KERNEL(1)
@@ -626,7 +612,8 @@ libagx_gs_setup_indirect(
    uint64_t vs_outputs /* Vertex (TES) output mask */,
    uint32_t index_size_B /* 0 if no index bffer */,
    uint32_t index_buffer_range_el,
-   uint32_t prim /* Input primitive type, enum mesa_prim */)
+   uint32_t prim /* Input primitive type, enum mesa_prim */,
+   int is_prefix_summing, uint indices_per_in_prim)
 {
    /* Determine the (primitives, instances) grid size. */
    uint vertex_count = draw[0];
@@ -666,9 +653,11 @@ libagx_gs_setup_indirect(
    uint vertex_buffer_size =
       libagx_tcs_in_size(vertex_count * instance_count, vs_outputs);
 
-   p->count_buffer = (global uint *)(state->heap + state->heap_bottom);
-   state->heap_bottom +=
-      align(p->input_primitives * p->count_buffer_stride, 16);
+   if (is_prefix_summing) {
+      p->count_buffer = (global uint *)(state->heap + state->heap_bottom);
+      state->heap_bottom +=
+         align(p->input_primitives * p->count_buffer_stride, 16);
+   }
 
    p->input_buffer = (uintptr_t)(state->heap + state->heap_bottom);
    *vertex_buffer = p->input_buffer;
@@ -676,6 +665,21 @@ libagx_gs_setup_indirect(
    assert(state->heap_bottom < state->heap_size);
 
    p->input_mask = vs_outputs;
+
+   /* Allocate the index buffer and write the draw consuming it */
+   global VkDrawIndexedIndirectCommand *cmd = (global void *)p->indirect_desc;
+   uint index_buffer_offset_B = state->heap_bottom;
+
+   *cmd = (VkDrawIndexedIndirectCommand){
+      .indexCount = p->input_primitives * indices_per_in_prim,
+      .instanceCount = 1,
+      .firstIndex = index_buffer_offset_B / 4,
+   };
+
+   p->output_index_buffer =
+      (global uint *)(state->heap + index_buffer_offset_B);
+   state->heap_bottom += (cmd->indexCount * 4);
+   assert(state->heap_bottom < state->heap_size);
 }
 
 /*

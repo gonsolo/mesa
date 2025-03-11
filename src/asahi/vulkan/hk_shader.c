@@ -176,8 +176,7 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
 }
 
 static void
-hk_preprocess_nir(struct vk_physical_device *vk_pdev,
-                  nir_shader *nir,
+hk_preprocess_nir(struct vk_physical_device *vk_pdev, nir_shader *nir,
                   UNUSED const struct vk_pipeline_robustness_state *rs)
 {
    hk_preprocess_nir_internal(vk_pdev, nir);
@@ -964,7 +963,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    if (lock)
       simple_mtx_lock(lock);
 
-   agx_compile_shader_nir(nir, &backend_key, NULL, &shader->b);
+   agx_compile_shader_nir(nir, &backend_key, &shader->b);
 
    if (lock)
       simple_mtx_unlock(lock);
@@ -1076,9 +1075,6 @@ hk_lower_hw_vs(nir_shader *nir, struct hk_shader *shader)
    NIR_PASS(_, nir, agx_nir_lower_cull_distance_vs);
 
    NIR_PASS(_, nir, agx_nir_lower_uvs, &shader->info.uvs);
-
-   shader->info.vs.cull_distance_array_size =
-      nir->info.cull_distance_array_size;
 }
 
 VkResult
@@ -1135,6 +1131,7 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
    /* Compile all variants up front */
    if (sw_stage == MESA_SHADER_GEOMETRY) {
       for (unsigned rast_disc = 0; rast_disc < 2; ++rast_disc) {
+         struct hk_shader *main_variant = hk_main_gs_variant(obj, rast_disc);
          struct hk_shader *count_variant = hk_count_gs_variant(obj, rast_disc);
          bool last = (rast_disc + 1) == 2;
 
@@ -1142,19 +1139,19 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
           * original NIR for the last stage.
           */
          nir_shader *clone = last ? nir : nir_shader_clone(NULL, nir);
-
-         enum mesa_prim out_prim = MESA_PRIM_MAX;
          nir_shader *count = NULL, *rast = NULL, *pre_gs = NULL;
 
          NIR_PASS(_, clone, agx_nir_lower_gs, rast_disc, &count, &rast, &pre_gs,
-                  &out_prim, &count_variant->info.gs.count_words);
+                  &count_variant->info.gs);
 
          if (!rast_disc) {
             struct hk_shader *shader = &obj->variants[HK_GS_VARIANT_RAST];
 
             hk_lower_hw_vs(rast, shader);
-            shader->info.gs.out_prim = out_prim;
+            shader->info.gs = count_variant->info.gs;
          }
+
+         main_variant->info.gs = count_variant->info.gs;
 
          struct {
             nir_shader *in;
@@ -1420,13 +1417,6 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
    return !blob->out_of_memory;
 }
 
-#define WRITE_STR(field, ...)                                                  \
-   ({                                                                          \
-      memset(field, 0, sizeof(field));                                         \
-      UNUSED int i = snprintf(field, sizeof(field), __VA_ARGS__);              \
-      assert(i > 0 && i < sizeof(field));                                      \
-   })
-
 static VkResult
 hk_shader_get_executable_properties(
    UNUSED struct vk_device *device, const struct vk_shader *vk_shader,
@@ -1442,9 +1432,9 @@ hk_shader_get_executable_properties(
    {
       props->stages = mesa_to_vk_shader_stage(obj->vk.stage);
       props->subgroupSize = 32;
-      WRITE_STR(props->name, "%s", _mesa_shader_stage_to_string(obj->vk.stage));
-      WRITE_STR(props->description, "%s shader",
-                _mesa_shader_stage_to_string(obj->vk.stage));
+      VK_COPY_STR(props->name, _mesa_shader_stage_to_string(obj->vk.stage));
+      VK_PRINT_STR(props->description, "%s shader",
+                   _mesa_shader_stage_to_string(obj->vk.stage));
    }
 
    return vk_outarray_status(&out);
@@ -1468,24 +1458,7 @@ hk_shader_get_executable_statistics(
     * with zink.
     */
    struct hk_shader *shader = hk_any_variant(obj);
-
-   vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat)
-   {
-      WRITE_STR(stat->name, "Code Size");
-      WRITE_STR(stat->description,
-                "Size of the compiled shader binary, in bytes");
-      stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
-      stat->value.u64 = shader->code_size;
-   }
-
-   vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat)
-   {
-      WRITE_STR(stat->name, "Number of GPRs");
-      WRITE_STR(stat->description, "Number of GPRs used by this pipeline");
-      stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
-      stat->value.u64 = shader->b.info.nr_gprs;
-   }
-
+   vk_add_agx2_stats(out, &shader->b.info.stats);
    return vk_outarray_status(&out);
 }
 
@@ -1526,8 +1499,8 @@ hk_shader_get_executable_internal_representations(
    /* TODO */
 #if 0
    vk_outarray_append_typed(VkPipelineExecutableInternalRepresentationKHR, &out, ir) {
-      WRITE_STR(ir->name, "AGX assembly");
-      WRITE_STR(ir->description, "AGX assembly");
+      VK_COPY_STR(ir->name, "AGX assembly");
+      VK_COPY_STR(ir->description, "AGX assembly");
       if (!write_ir_text(ir, TODO))
          incomplete_text = true;
    }

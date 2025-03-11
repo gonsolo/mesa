@@ -193,6 +193,7 @@ enum opcode {
    BRW_OPCODE_CALL,
    BRW_OPCODE_RET,
    BRW_OPCODE_GOTO,
+   BRW_OPCODE_JOIN,
    BRW_OPCODE_WAIT,
    BRW_OPCODE_SEND,
    BRW_OPCODE_SENDC,
@@ -1574,7 +1575,9 @@ enum lsc_opcode {
    LSC_OP_ATOMIC_AND      = 24,
    LSC_OP_ATOMIC_OR       = 25,
    LSC_OP_ATOMIC_XOR      = 26,
-   LSC_OP_FENCE           = 31
+   LSC_OP_FENCE           = 31,
+   LSC_OP_LOAD_CMASK_MSRT     = 49,
+   LSC_OP_STORE_CMASK_MSRT    = 50
 };
 
 /*

@@ -176,6 +176,8 @@ get_device_extensions(const struct panvk_physical_device *device,
 {
    const unsigned arch = pan_arch(device->kmod.props.gpu_prod_id);
 
+   bool has_vk1_1 = arch >= 10;
+
    *ext = (struct vk_device_extension_table){
       .KHR_8bit_storage = true,
       .KHR_16bit_storage = true,
@@ -215,12 +217,13 @@ get_device_extensions(const struct panvk_physical_device *device,
       .KHR_shader_draw_parameters = true,
       .KHR_shader_expect_assume = true,
       .KHR_shader_float16_int8 = true,
-      .KHR_shader_maximal_reconvergence = arch >= 10, /* requires vk1.1 */
+      .KHR_shader_maximal_reconvergence = has_vk1_1,
       .KHR_shader_non_semantic_info = true,
-      .KHR_shader_quad_control = arch >= 10, /* requires vk1.1 */
+      .KHR_shader_quad_control = has_vk1_1,
       .KHR_shader_relaxed_extended_instruction = true,
+      .KHR_shader_subgroup_extended_types = has_vk1_1,
       .KHR_shader_subgroup_rotate = true,
-      .KHR_shader_subgroup_uniform_control_flow = arch >= 10, /* requires vk1.1 */
+      .KHR_shader_subgroup_uniform_control_flow = has_vk1_1,
       .KHR_storage_buffer_storage_class = true,
 #ifdef PANVK_USE_WSI_PLATFORM
       .KHR_swapchain = true,
@@ -236,6 +239,9 @@ get_device_extensions(const struct panvk_physical_device *device,
       .EXT_buffer_device_address = true,
       .EXT_custom_border_color = true,
       .EXT_depth_clip_enable = true,
+#ifdef VK_USE_PLATFORM_DISPLAY_KHR
+      .EXT_display_control = true,
+#endif
       .EXT_external_memory_dma_buf = true,
       .EXT_global_priority = true,
       .EXT_global_priority_query = true,
@@ -256,7 +262,7 @@ get_device_extensions(const struct panvk_physical_device *device,
       .EXT_scalar_block_layout = true,
       .EXT_separate_stencil_usage = true,
       .EXT_shader_module_identifier = true,
-      .EXT_subgroup_size_control = arch >= 10, /* requires vk1.1 */
+      .EXT_subgroup_size_control = has_vk1_1,
       .EXT_tooling_info = true,
       .EXT_ycbcr_2plane_444_formats = arch >= 10,
       .EXT_ycbcr_image_arrays = arch >= 10,
@@ -289,6 +295,7 @@ get_features(const struct panvk_physical_device *device,
       .textureCompressionETC2 = true,
       .textureCompressionASTC_LDR = true,
       .fragmentStoresAndAtomics = arch >= 10,
+      .shaderStorageImageExtendedFormats = true,
       .shaderUniformBufferArrayDynamicIndexing = true,
       .shaderSampledImageArrayDynamicIndexing = true,
       .shaderStorageBufferArrayDynamicIndexing = true,
@@ -319,7 +326,7 @@ get_features(const struct panvk_physical_device *device,
       .storagePushConstant8 = false,
       .shaderBufferInt64Atomics = false,
       .shaderSharedInt64Atomics = false,
-      .shaderFloat16 = true,
+      .shaderFloat16 = arch >= 10,
       .shaderInt8 = true,
 
       .descriptorIndexing = false,
@@ -348,7 +355,7 @@ get_features(const struct panvk_physical_device *device,
       .scalarBlockLayout = true,
       .imagelessFramebuffer = true,
       .uniformBufferStandardLayout = true,
-      .shaderSubgroupExtendedTypes = false,
+      .shaderSubgroupExtendedTypes = true,
       .separateDepthStencilLayouts = true,
       .hostQueryReset = true,
       .timelineSemaphore = true,
@@ -1235,6 +1242,7 @@ get_image_plane_format_features(struct panvk_physical_device *physical_device,
          features |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
 
       features |= VK_FORMAT_FEATURE_BLIT_SRC_BIT;
+      features |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
    }
 
    if (fmt.bind & PAN_BIND_RENDER_TARGET) {
@@ -1380,18 +1388,20 @@ panvk_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
 
    VkDrmFormatModifierPropertiesListEXT *list = vk_find_struct(
       pFormatProperties->pNext, DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT);
-   if (list && pFormatProperties->formatProperties.linearTilingFeatures) {
+   if (list) {
       VK_OUTARRAY_MAKE_TYPED(VkDrmFormatModifierPropertiesEXT, out,
                              list->pDrmFormatModifierProperties,
                              &list->drmFormatModifierCount);
 
-      vk_outarray_append_typed(VkDrmFormatModifierPropertiesEXT, &out,
-                               mod_props)
-      {
-         mod_props->drmFormatModifier = DRM_FORMAT_MOD_LINEAR;
-         mod_props->drmFormatModifierPlaneCount = 1;
-         mod_props->drmFormatModifierTilingFeatures =
-            pFormatProperties->formatProperties.linearTilingFeatures;
+      if (pFormatProperties->formatProperties.linearTilingFeatures) {
+         vk_outarray_append_typed(VkDrmFormatModifierPropertiesEXT, &out,
+                                  mod_props)
+         {
+            mod_props->drmFormatModifier = DRM_FORMAT_MOD_LINEAR;
+            mod_props->drmFormatModifierPlaneCount = 1;
+            mod_props->drmFormatModifierTilingFeatures =
+               pFormatProperties->formatProperties.linearTilingFeatures;
+         }
       }
    }
 }

@@ -160,7 +160,8 @@ static void radeon_vcn_enc_get_roi_param(struct radeon_encoder *enc,
    else {
       uint32_t width_in_block, height_in_block;
       uint32_t block_length;
-      int32_t i, j, pa_format = 0;
+      int32_t i, j;
+      bool pa_format = false;
 
       qp_map->version = sscreen->info.vcn_ip_version >= VCN_5_0_0
                         ? RENCODE_QP_MAP_VCN5 : RENCODE_QP_MAP_LEGACY;
@@ -170,7 +171,7 @@ static void radeon_vcn_enc_get_roi_param(struct radeon_encoder *enc,
       if (enc->enc_pic.rc_session_init.rate_control_method &&
             (qp_map->version ==  RENCODE_QP_MAP_LEGACY)) {
          enc->enc_pic.enc_qp_map.qp_map_type = RENCODE_QP_MAP_TYPE_MAP_PA;
-         pa_format = 1;
+         pa_format = true;
       }
       else
          enc->enc_pic.enc_qp_map.qp_map_type = RENCODE_QP_MAP_TYPE_DELTA;
@@ -194,7 +195,7 @@ static void radeon_vcn_enc_get_roi_param(struct radeon_encoder *enc,
             /* mapped av1 qi into the legacy qp range by dividing by 5 and
              * rounding up in any rate control mode.
              */
-            if (is_av1 && (pa_format || (qp_map->version ==  RENCODE_QP_MAP_VCN5))) {
+            if (is_av1 && pa_format) {
                if (region->qp_value > 0)
                   av1_qi_value = (region->qp_value + 2) / 5;
                else if (region->qp_value < 0)
@@ -296,7 +297,9 @@ static void radeon_vcn_enc_h264_get_spec_misc_param(struct radeon_encoder *enc,
       pic->pic_ctrl.constrained_intra_pred_flag;
    enc->enc_pic.spec_misc.half_pel_enabled = 1;
    enc->enc_pic.spec_misc.quarter_pel_enabled = 1;
-   enc->enc_pic.spec_misc.weighted_bipred_idc = 0;
+   enc->enc_pic.spec_misc.weighted_bipred_idc =
+      pic->pic_ctrl.weighted_bipred_idc != 1 ?
+      pic->pic_ctrl.weighted_bipred_idc : 0;
    enc->enc_pic.spec_misc.transform_8x8_mode =
       sscreen->info.vcn_ip_version >= VCN_5_0_0 &&
       pic->pic_ctrl.transform_8x8_mode_flag;
@@ -499,10 +502,7 @@ static void radeon_vcn_enc_h264_get_param(struct radeon_encoder *enc,
    enc->enc_pic.picture_type = pic->picture_type;
    enc->enc_pic.bit_depth_luma_minus8 = 0;
    enc->enc_pic.bit_depth_chroma_minus8 = 0;
-   enc->enc_pic.enc_params.reference_picture_index =
-      pic->ref_list0[0] == PIPE_H2645_LIST_REF_INVALID_ENTRY ? 0xffffffff : pic->ref_list0[0];
-   enc->enc_pic.h264_enc_params.l1_reference_picture0_index =
-      pic->ref_list1[0] == PIPE_H2645_LIST_REF_INVALID_ENTRY ? 0xffffffff : pic->ref_list1[0];
+   enc->enc_pic.h264_enc_params.input_pic_order_cnt = pic->pic_order_cnt;
    enc->enc_pic.h264_enc_params.input_picture_structure = RENCODE_H264_PICTURE_STRUCTURE_FRAME;
    enc->enc_pic.h264_enc_params.interlaced_mode = RENCODE_H264_INTERLACING_MODE_PROGRESSIVE;
    enc->enc_pic.h264_enc_params.l0_reference_picture1_index = 0xffffffff;
@@ -510,6 +510,34 @@ static void radeon_vcn_enc_h264_get_param(struct radeon_encoder *enc,
    enc->enc_pic.h264_enc_params.is_reference = !pic->not_referenced;
    enc->enc_pic.h264_enc_params.is_long_term = pic->is_ltr;
    enc->enc_pic.not_referenced = pic->not_referenced;
+
+   if (pic->ref_list0[0] != PIPE_H2645_LIST_REF_INVALID_ENTRY) {
+      uint8_t ref_l0 = pic->ref_list0[0];
+
+      enc->enc_pic.enc_params.reference_picture_index = ref_l0;
+      enc->enc_pic.h264_enc_params.picture_info_l0_reference_picture0.pic_type =
+         radeon_enc_h2645_picture_type(pic->dpb[ref_l0].picture_type);
+      enc->enc_pic.h264_enc_params.picture_info_l0_reference_picture0.pic_order_cnt =
+         pic->dpb[ref_l0].pic_order_cnt;
+      enc->enc_pic.h264_enc_params.picture_info_l0_reference_picture0.is_long_term =
+         pic->dpb[ref_l0].is_ltr;
+   } else {
+      enc->enc_pic.enc_params.reference_picture_index = 0xffffffff;
+   }
+
+   if (pic->ref_list1[0] != PIPE_H2645_LIST_REF_INVALID_ENTRY) {
+      uint8_t ref_l1 = pic->ref_list1[0];
+
+      enc->enc_pic.h264_enc_params.l1_reference_picture0_index = ref_l1;
+      enc->enc_pic.h264_enc_params.picture_info_l1_reference_picture0.pic_type =
+         radeon_enc_h2645_picture_type(pic->dpb[ref_l1].picture_type);
+      enc->enc_pic.h264_enc_params.picture_info_l1_reference_picture0.pic_order_cnt =
+         pic->dpb[ref_l1].pic_order_cnt;
+      enc->enc_pic.h264_enc_params.picture_info_l1_reference_picture0.is_long_term =
+         pic->dpb[ref_l1].is_ltr;
+   } else {
+      enc->enc_pic.h264_enc_params.l1_reference_picture0_index = 0xffffffff;
+   }
 
    if ((pic->ref_list0[0] != PIPE_H2645_LIST_REF_INVALID_ENTRY &&
         pic->dpb[pic->ref_list0[0]].picture_type == PIPE_H2645_ENC_PICTURE_TYPE_B) ||
@@ -2078,6 +2106,39 @@ unsigned int radeon_enc_av1_tile_log2(unsigned int blk_size, unsigned int max)
    for (k = 0; (blk_size << k) < max; k++) {}
 
    return k;
+}
+
+unsigned int radeon_enc_h2645_picture_type(enum pipe_h2645_enc_picture_type type)
+{
+   switch (type) {
+   case PIPE_H2645_ENC_PICTURE_TYPE_I:
+   case PIPE_H2645_ENC_PICTURE_TYPE_IDR:
+      return RENCODE_PICTURE_TYPE_I;
+   case PIPE_H2645_ENC_PICTURE_TYPE_P:
+      return RENCODE_PICTURE_TYPE_P;
+   case PIPE_H2645_ENC_PICTURE_TYPE_SKIP:
+      return RENCODE_PICTURE_TYPE_P_SKIP;
+   case PIPE_H2645_ENC_PICTURE_TYPE_B:
+      return RENCODE_PICTURE_TYPE_B;
+   default:
+      assert(false);
+      return 0;
+   }
+}
+
+unsigned int radeon_enc_av1_picture_type(enum pipe_av1_enc_frame_type type)
+{
+   switch (type) {
+   case PIPE_AV1_ENC_FRAME_TYPE_KEY:
+   case PIPE_AV1_ENC_FRAME_TYPE_INTRA_ONLY:
+      return RENCODE_PICTURE_TYPE_I;
+   case PIPE_AV1_ENC_FRAME_TYPE_INTER:
+   case PIPE_AV1_ENC_FRAME_TYPE_SWITCH:
+      return RENCODE_PICTURE_TYPE_P;
+   default:
+      assert(false);
+      return 0;
+   }
 }
 
 /* dummy function for re-using the same pipeline */

@@ -1094,7 +1094,7 @@ hk_rast_prim(struct hk_cmd_buffer *cmd)
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
 
    if (gs != NULL) {
-      return gs->variants[HK_GS_VARIANT_RAST].info.gs.out_prim;
+      return gs->variants[HK_GS_VARIANT_RAST].info.gs.mode;
    } else {
       switch (dyn->ia.primitive_topology) {
       case VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY:
@@ -1132,7 +1132,6 @@ hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 
    struct agx_geometry_params params = {
       .state = hk_geometry_state(cmd),
-      .indirect_desc = cmd->geom_indirect,
       .flat_outputs = fs ? fs->info.fs.interp.flat : 0,
       .input_topology = mode,
 
@@ -1165,7 +1164,17 @@ hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
     */
    params.count_buffer_stride = count->info.gs.count_words * 4;
 
+   if (!count->info.gs.prefix_sum && params.count_buffer_stride) {
+      struct agx_ptr T = hk_pool_alloc(cmd, 16, 4);
+      memset(T.cpu, 0, 16);
+      params.count_buffer = T.gpu;
+   }
+
    if (indirect) {
+      /* TODO: size */
+      cmd->geom_indirect = hk_pool_alloc(cmd, 64, 4).gpu;
+
+      params.indirect_desc = cmd->geom_indirect;
       params.vs_grid[2] = params.gs_grid[2] = 1;
    } else {
       uint32_t verts = draw.b.count[0], instances = draw.b.count[1];
@@ -1177,9 +1186,17 @@ hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       params.input_primitives = params.gs_grid[0] * instances;
 
       unsigned size = params.input_primitives * params.count_buffer_stride;
-      if (size) {
+      if (count->info.gs.prefix_sum && size) {
          params.count_buffer = hk_pool_alloc(cmd, size, 4).gpu;
       }
+
+      cmd->geom_index_count =
+         params.input_primitives * count->info.gs.max_indices;
+
+      params.output_index_buffer =
+         hk_pool_alloc(cmd, cmd->geom_index_count * 4, 4).gpu;
+
+      cmd->geom_index_buffer = params.output_index_buffer;
    }
 
    desc->root_dirty = true;
@@ -1433,6 +1450,8 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          .p = desc->root.draw.geometry_params,
          .vs_outputs = vs->b.info.outputs,
          .prim = mode,
+         .is_prefix_summing = count->info.gs.prefix_sum,
+         .indices_per_in_prim = count->info.gs.max_indices,
       };
 
       if (cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL]) {
@@ -1471,26 +1490,51 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                                                : vs->only_linked),
                         grid_vs, agx_workgroup(1, 1, 1));
 
-   /* If we need counts, launch the count shader and prefix sum the results. */
-   if (count_words) {
-      hk_dispatch_with_local_size(cmd, cs, count, grid_gs,
+   /* Transform feedback and various queries require extra dispatching,
+    * determine if we need that here.
+    */
+   VkQueryPipelineStatisticFlagBits gs_queries =
+      VK_QUERY_PIPELINE_STATISTIC_GEOMETRY_SHADER_INVOCATIONS_BIT |
+      VK_QUERY_PIPELINE_STATISTIC_GEOMETRY_SHADER_PRIMITIVES_BIT |
+      VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT |
+      VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT;
+
+   struct hk_root_descriptor_table *root = &cmd->state.gfx.descriptors.root;
+   bool xfb_or_queries =
+      main->info.gs.xfb || (root->draw.pipeline_stats_flags & gs_queries);
+
+   if (xfb_or_queries) {
+      /* If we need counts, launch the count shader and prefix sum the results. */
+      if (count_words) {
+         perf_debug(dev, "Geometry shader count");
+         hk_dispatch_with_local_size(cmd, cs, count, grid_gs,
+                                     agx_workgroup(1, 1, 1));
+      }
+
+      if (count->info.gs.prefix_sum) {
+         perf_debug(dev, "Geometry shader transform feedback prefix sum");
+         libagx_prefix_sum_geom(cmd, agx_1d(1024 * count_words),
+                                AGX_BARRIER_ALL | AGX_PREGFX, geometry_params);
+      }
+
+      /* Transform feedback / query program */
+      perf_debug(dev, "Transform feedback / geometry query");
+      hk_dispatch_with_local_size(cmd, cs, pre_gs, agx_1d(1),
                                   agx_workgroup(1, 1, 1));
-
-      libagx_prefix_sum_geom(cmd, agx_1d(1024 * count_words),
-                             AGX_BARRIER_ALL | AGX_PREGFX, geometry_params);
    }
-
-   /* Pre-GS shader */
-   hk_dispatch_with_local_size(cmd, cs, pre_gs, agx_1d(1),
-                               agx_workgroup(1, 1, 1));
 
    /* Pre-rast geometry shader */
    hk_dispatch_with_local_size(cmd, cs, main, grid_gs, agx_workgroup(1, 1, 1));
 
-   bool restart = cmd->state.gfx.topology != AGX_PRIMITIVE_POINTS;
-   return agx_draw_indexed_indirect(cmd->geom_indirect, dev->heap->va->addr,
-                                    dev->heap->size, AGX_INDEX_SIZE_U32,
-                                    restart);
+   if (agx_is_indirect(draw.b)) {
+      return agx_draw_indexed_indirect(cmd->geom_indirect, dev->heap->va->addr,
+                                       dev->heap->size, AGX_INDEX_SIZE_U32,
+                                       true);
+   } else {
+      return agx_draw_indexed(cmd->geom_index_count, 1, 0, 0, 0,
+                              cmd->geom_index_buffer, cmd->geom_index_count * 4,
+                              AGX_INDEX_SIZE_U32, true);
+   }
 }
 
 static struct agx_draw
@@ -1672,7 +1716,7 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
    struct agx_shader_part *part =
       rzalloc(dev->prolog_epilog.ht, struct agx_shader_part);
 
-   agx_compile_shader_nir(b.shader, &backend_key, NULL, part);
+   agx_compile_shader_nir(b.shader, &backend_key, part);
 
    ralloc_free(b.shader);
 
@@ -2639,9 +2683,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       unsigned api_sample_mask = dyn->ms.sample_mask & tib_sample_mask;
       bool has_sample_mask = api_sample_mask != tib_sample_mask;
 
-      if (hw_vs->info.vs.cull_distance_array_size) {
+      if (hw_vs->info.cull_distance_array_size) {
          perf_debug(cmd, "Emulating cull distance (size %u, %s a frag shader)",
-                    hw_vs->info.vs.cull_distance_array_size,
+                    hw_vs->info.cull_distance_array_size,
                     fs ? "with" : "without");
       }
 
@@ -2660,8 +2704,7 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                cmd,
                VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT),
 
-            .prolog.cull_distance_size =
-               hw_vs->info.vs.cull_distance_array_size,
+            .prolog.cull_distance_size = hw_vs->info.cull_distance_array_size,
             .prolog.api_sample_mask = has_sample_mask ? api_sample_mask : 0xff,
             .nr_samples_shaded = samples_shaded,
          };
@@ -2951,9 +2994,6 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    }
 
    if (gfx->shaders[MESA_SHADER_GEOMETRY]) {
-      /* TODO: size */
-      cmd->geom_indirect = hk_pool_alloc(cmd, 64, 4).gpu;
-
       gfx->descriptors.root.draw.geometry_params =
          hk_upload_geometry_params(cmd, draw);
 

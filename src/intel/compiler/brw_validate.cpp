@@ -159,7 +159,8 @@ validate_memory_logical(const brw_shader &s, const brw_inst *inst)
 
    switch (inst->opcode) {
    case SHADER_OPCODE_MEMORY_LOAD_LOGICAL:
-      fsv_assert(op == LSC_OP_LOAD || op == LSC_OP_LOAD_CMASK);
+      fsv_assert(op == LSC_OP_LOAD || op == LSC_OP_LOAD_CMASK ||
+                 op == LSC_OP_LOAD_CMASK_MSRT);
       fsv_assert(inst->src[MEMORY_LOGICAL_DATA0].file == BAD_FILE);
       fsv_assert(inst->src[MEMORY_LOGICAL_DATA1].file == BAD_FILE);
       break;
@@ -275,10 +276,11 @@ brw_validate(const brw_shader &s)
 {
    const intel_device_info *devinfo = s.devinfo;
 
+   if (s.cfg)
+      s.cfg->validate(_mesa_shader_stage_to_abbrev(s.stage));
+
    if (s.phase <= BRW_SHADER_PHASE_AFTER_NIR)
       return;
-
-   s.cfg->validate(_mesa_shader_stage_to_abbrev(s.stage));
 
    foreach_block(block, s.cfg) {
       /* Track the last used address register. Usage of the address register

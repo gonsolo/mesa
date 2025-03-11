@@ -12,7 +12,7 @@
 #include "radeonsi/si_pipe.h"
 #include "util/u_memory.h"
 #include "util/u_video.h"
-#include "vl/vl_mpeg12_decoder.h"
+#include "util/vl_zscan_data.h"
 #include "vl/vl_probs_table.h"
 #include "pspdecryptionparam.h"
 
@@ -890,12 +890,6 @@ static rvcn_dec_message_av1_t get_av1_msg(struct radeon_decoder *dec,
    result.height = pic->picture_parameter.frame_height;
    result.superres_upscaled_width = pic->picture_parameter.frame_width;
    result.order_hint_bits = pic->picture_parameter.order_hint_bits_minus_1 + 1;
-
-   /* Limit to target size in case applications try to decode into smaller
-    * target buffer. */
-   result.width = MIN2(target->width, result.width);
-   result.height = MIN2(target->height, result.height);
-   result.superres_upscaled_width = MIN2(target->width, result.superres_upscaled_width);
 
    result.curr_pic_idx = 0x7F;
    memset(result.ref_frame_map, 0x7F, sizeof(result.ref_frame_map));
@@ -2743,8 +2737,6 @@ struct pipe_video_codec *radeon_create_decoder(struct pipe_context *context,
 
    switch (u_reduce_video_profile(templ->profile)) {
    case PIPE_VIDEO_FORMAT_MPEG12:
-      if (templ->entrypoint > PIPE_VIDEO_ENTRYPOINT_BITSTREAM)
-         return vl_create_mpeg12_decoder(context, templ);
       stream_type = RDECODE_CODEC_MPEG2_VLD;
       break;
    case PIPE_VIDEO_FORMAT_MPEG4:
