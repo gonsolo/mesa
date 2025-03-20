@@ -1,4 +1,3 @@
-import os
 import sys
 import subprocess
 import yaml
@@ -13,37 +12,58 @@ from bin.ci.update_tag import (
     from_component_to_tag_var,
     from_script_name_to_component,
     from_script_name_to_tag_var,
-    load_container_yaml,
     load_image_tags_yaml,
     update_image_tag_in_yaml,
     run_build_script,
     main,
+    PATHS,
 )
 
 
 @pytest.fixture
 def temp_image_tags_file(tmp_path, monkeypatch):
     """
-    Fixture that creates a temporary YAML file (to simulate CONDITIONAL_TAGS_FILE)
+    Fixture that creates a temporary YAML file (to simulate conditional_tags)
     and updates the global variable accordingly.
     """
+    # Create a temporary test file
     temp_file = tmp_path / "conditional-build-image-tags.yml"
-    # Write initial dummy content.
     temp_file.write_text(yaml.dump({"variables": {}}))
-    monkeypatch.setattr("bin.ci.update_tag.CONDITIONAL_TAGS_FILE", str(temp_file))
-    return temp_file
+
+    # Create a copy of the original PATHS values
+    original_conditional_tags = PATHS.conditional_tags
+
+    # Patch the PATHS instance with our test file
+    PATHS.conditional_tags = temp_file
+
+    # Yield the test file for the test to use
+    yield temp_file
+
+    # Restore the original value after the test
+    PATHS.conditional_tags = original_conditional_tags
 
 
 @pytest.fixture
 def temp_container_ci_file(tmp_path, monkeypatch):
     """
-    Fixture that creates a temporary container CI file (to simulate CONTAINER_CI_FILE)
+    Fixture that creates a temporary container CI file (to simulate container_ci)
     and updates the global variable accordingly.
     """
+    # Create a temporary test file
     temp_file = tmp_path / "container-ci.yml"
     temp_file.touch()
-    monkeypatch.setattr("bin.ci.update_tag.CONTAINER_CI_FILE", temp_file)
-    return temp_file
+
+    # Create a copy of the original PATHS values
+    original_container_ci = PATHS.container_ci
+
+    # Patch the PATHS instance with our test file
+    PATHS.container_ci = temp_file
+
+    # Yield the test file for the test to use
+    yield temp_file
+
+    # Restore the original value after the test
+    PATHS.container_ci = original_container_ci
 
 
 @pytest.fixture
@@ -51,21 +71,28 @@ def mock_container_dir(tmp_path, monkeypatch):
     """
     Fixture that creates a dummy container directory and build script.
     """
-    # Create a dummy container directory and build script.
+    # Create a dummy container directory
     container_dir = tmp_path / "container"
     container_dir.mkdir()
 
-    # Patch CONTAINER_DIR so that the build script is found.
-    monkeypatch.setattr("bin.ci.update_tag.CONTAINER_DIR", container_dir)
-
-    # Create a dummy setup-test-env.sh file and patch set_dummy_env_vars.
+    # Create a dummy setup-test-env.sh file
     dummy_setup_path = tmp_path / "setup-test-env.sh"
     dummy_setup_path.write_text("echo Setup")
-    monkeypatch.setattr(
-        "bin.ci.update_tag.prepare_setup_env_script", lambda: dummy_setup_path
-    )
 
-    return container_dir
+    # Save original values
+    original_container_dir = PATHS.container_dir
+    original_setup_test_env = PATHS.setup_test_env
+
+    # Patch the PATHS instance
+    PATHS.container_dir = container_dir
+    PATHS.setup_test_env = dummy_setup_path
+
+    # Yield the directory for the test to use
+    yield container_dir
+
+    # Restore original values
+    PATHS.container_dir = original_container_dir
+    PATHS.setup_test_env = original_setup_test_env
 
 
 @pytest.fixture
@@ -267,9 +294,7 @@ def test_main_list(monkeypatch, capsys, mock_container_dir, temp_container_ci_fi
     """
     # Monkeypatch find_components to return a known list.
     for comp in ["comp-a", "comp-b"]:
-        setup_build_script_and_container_ci_file(
-            mock_container_dir, temp_container_ci_file, comp
-        )
+        setup_build_script_and_container_ci_file(mock_container_dir, temp_container_ci_file, comp)
     # Set sys.argv to simulate passing --list.
     monkeypatch.setattr(sys, "argv", ["bin/ci/update_tag.py", "--list"])
 
@@ -351,9 +376,7 @@ def test_build_script_error_exit_codes(
     )
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: fake_result)
     monkeypatch.setattr(sys, "argv", ["bin/ci/update_tag.py", "--check", "foo"])
-    monkeypatch.setattr(
-        "bin.ci.update_tag.get_current_tag_value", lambda *args: "current_tag"
-    )
+    monkeypatch.setattr("bin.ci.update_tag.get_current_tag_value", lambda *args: "current_tag")
 
     # Mock sys.exit to capture the exit code instead of exiting the test
     with pytest.raises(SystemExit) as e:

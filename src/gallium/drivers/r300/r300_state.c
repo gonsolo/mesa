@@ -829,7 +829,8 @@ static void r300_print_fb_surf_info(struct pipe_surface *surf, unsigned index,
             "r300:     TEX: Macro: %s, Micro: %s, "
             "Dim: %ix%ix%i, LastLevel: %i, Format: %s\n",
 
-            binding, index, surf->width, surf->height,
+            binding, index, pipe_surface_width(surf),
+            pipe_surface_height(surf),
             surf->u.tex.first_layer, surf->u.tex.last_layer, surf->u.tex.level,
             util_format_short_name(surf->format),
 
@@ -1032,6 +1033,8 @@ static void* r300_create_fs_state(struct pipe_context* pipe,
     fs->state = *shader;
 
     if (fs->state.type == PIPE_SHADER_IR_NIR) {
+        r300_optimize_nir(shader->ir.nir, r300->screen);
+
         /* R300/R400 can not do any kind of control flow, so abort early here. */
         if (!r300->screen->caps.is_r500) {
             char *msg = r300_check_control_flow(shader->ir.nir);
@@ -1304,15 +1307,17 @@ static void* r300_create_rs_state(struct pipe_context* pipe,
     clip_rule = state->scissor ? 0xAAAA : 0xFFFF;
 
     /* Point sprites coord mode */
-    switch (state->sprite_coord_mode) {
-        case PIPE_SPRITE_COORD_UPPER_LEFT:
-            point_texcoord_top = 0.0f;
-            point_texcoord_bottom = 1.0f;
-            break;
-        case PIPE_SPRITE_COORD_LOWER_LEFT:
-            point_texcoord_top = 1.0f;
-            point_texcoord_bottom = 0.0f;
-            break;
+    if (rs->rs.sprite_coord_enable) {
+        switch (state->sprite_coord_mode) {
+            case PIPE_SPRITE_COORD_UPPER_LEFT:
+                point_texcoord_top = 0.0f;
+                point_texcoord_bottom = 1.0f;
+                break;
+            case PIPE_SPRITE_COORD_LOWER_LEFT:
+                point_texcoord_top = 1.0f;
+                point_texcoord_bottom = 0.0f;
+                break;
+        }
     }
 
     if (r300_screen(pipe->screen)->caps.has_tcl) {
@@ -1571,7 +1576,6 @@ static void r300_set_sampler_views(struct pipe_context* pipe,
                                    enum pipe_shader_type shader,
                                    unsigned start, unsigned count,
                                    unsigned unbind_num_trailing_slots,
-                                   bool take_ownership,
                                    struct pipe_sampler_view** views)
 {
     struct r300_context* r300 = r300_context(pipe);
@@ -1585,12 +1589,6 @@ static void r300_set_sampler_views(struct pipe_context* pipe,
     assert(start == 0);  /* non-zero not handled yet */
 
     if (shader != PIPE_SHADER_FRAGMENT || count > tex_units) {
-       if (take_ownership) {
-          for (unsigned i = 0; i < count; i++) {
-             struct pipe_sampler_view *view = views[i];
-             pipe_sampler_view_reference(&view, NULL);
-          }
-       }
        return;
     }
 
@@ -1601,15 +1599,9 @@ static void r300_set_sampler_views(struct pipe_context* pipe,
     }
 
     for (i = 0; i < count; i++) {
-        if (take_ownership) {
-            pipe_sampler_view_reference(
-                    (struct pipe_sampler_view**)&state->sampler_views[i], NULL);
-            state->sampler_views[i] = (struct r300_sampler_view*)views[i];
-        } else {
-            pipe_sampler_view_reference(
-                    (struct pipe_sampler_view**)&state->sampler_views[i],
-                    views[i]);
-        }
+        pipe_sampler_view_reference(
+                (struct pipe_sampler_view**)&state->sampler_views[i],
+                views[i]);
 
         if (!views[i]) {
             continue;
@@ -1961,6 +1953,8 @@ static void* r300_create_vs_state(struct pipe_context* pipe,
     vs->state = *shader;
 
     if (vs->state.type == PIPE_SHADER_IR_NIR) {
+        r300_optimize_nir(shader->ir.nir, r300->screen);
+
         /* R300/R400 can not do any kind of control flow, so abort early here. */
         if (!r300->screen->caps.is_r500 && r300->screen->caps.has_tcl) {
             char *msg = r300_check_control_flow(shader->ir.nir);
@@ -2183,6 +2177,7 @@ void r300_init_state_functions(struct r300_context* r300)
     r300->context.set_sampler_views = r300_set_sampler_views;
     r300->context.create_sampler_view = r300_create_sampler_view;
     r300->context.sampler_view_destroy = r300_sampler_view_destroy;
+    r300->context.sampler_view_release = u_default_sampler_view_release;
 
     r300->context.set_scissor_states = r300_set_scissor_states;
 

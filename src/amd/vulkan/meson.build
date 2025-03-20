@@ -313,7 +313,7 @@ devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
 # Deprecated: replaced by VK_DRIVER_FILES above
 devenv.append('VK_ICD_FILENAMES', _dev_icd.full_path())
 
-if with_tests
+if with_radv_tests
   test(
     'radv_tests',
     executable(
@@ -321,6 +321,10 @@ if with_tests
       files(
         'nir/radv_nir_lower_hit_attrib_derefs.c',
         'tests/radv_nir_lower_hit_attrib_derefs_tests.cpp',
+        'tests/helpers.cpp',
+        'tests/helpers.h',
+        'tests/drirc.cpp',
+        'tests/misc.cpp',
       ),
       cpp_args : [cpp_msvc_compat_args],
       gnu_symbol_visibility : 'hidden',
@@ -333,7 +337,8 @@ if with_tests
         inc_util,
         include_directories('.'),
       ],
-      dependencies : [dep_thread, idep_gtest, idep_nir, idep_mesautil],
+      link_with  : [ libvulkan_radeon ],
+      dependencies : [dep_thread, idep_gtest, idep_nir, idep_mesautil, idep_vulkan_util_headers],
     ),
     suite : ['compiler', 'nir'],
     protocol : 'gtest',

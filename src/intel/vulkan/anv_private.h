@@ -555,6 +555,7 @@ anv_bo_needs_host_cache_flush(enum anv_bo_alloc_flags alloc_flags)
 struct anv_address {
    struct anv_bo *bo;
    int64_t offset;
+   bool protected;
 };
 
 #define ANV_NULL_ADDRESS ((struct anv_address) { NULL, 0 })
@@ -1313,6 +1314,7 @@ struct anv_instance {
      */
     uint8_t                                     assume_full_subgroups;
     bool                                        assume_full_subgroups_with_barrier;
+    bool                                        assume_full_subgroups_with_shared_memory;
     bool                                        limit_trig_input_range;
     bool                                        sample_mask_out_opengl_behaviour;
     bool                                        force_filter_addr_rounding;
@@ -3467,7 +3469,7 @@ enum anv_cmd_dirty_bits {
    ANV_CMD_DIRTY_RENDER_AREA                         = 1 << 2,
    ANV_CMD_DIRTY_RENDER_TARGETS                      = 1 << 3,
    ANV_CMD_DIRTY_XFB_ENABLE                          = 1 << 4,
-   ANV_CMD_DIRTY_RESTART_INDEX                       = 1 << 5,
+   ANV_CMD_DIRTY_INDEX_TYPE                          = 1 << 5,
    ANV_CMD_DIRTY_OCCLUSION_QUERY_ACTIVE              = 1 << 6,
    ANV_CMD_DIRTY_INDIRECT_DATA_STRIDE                = 1 << 7,
 };
@@ -3678,15 +3680,15 @@ anv_pipe_flush_bit_to_ds_stall_flag(enum anv_pipe_bits bits);
    VK_IMAGE_ASPECT_PLANES_BITS_ANV)
 
 struct anv_vertex_binding {
-   struct anv_buffer *                          buffer;
-   VkDeviceSize                                 offset;
-   VkDeviceSize                                 size;
+   uint64_t      addr;
+   uint32_t      mocs;
+   VkDeviceSize  size;
 };
 
 struct anv_xfb_binding {
-   struct anv_buffer *                          buffer;
-   VkDeviceSize                                 offset;
-   VkDeviceSize                                 size;
+   uint64_t      addr;
+   uint32_t      mocs;
+   VkDeviceSize  size;
 };
 
 struct anv_push_constants {
@@ -4008,9 +4010,9 @@ struct anv_cmd_graphics_state {
 
    bool used_task_shader;
 
-   struct anv_buffer *index_buffer;
-   uint32_t index_type; /**< 3DSTATE_INDEX_BUFFER.IndexFormat */
-   uint32_t index_offset;
+   uint64_t index_addr;
+   uint32_t index_mocs;
+   VkIndexType index_type;
    uint32_t index_size;
 
    uint32_t indirect_data_stride;
@@ -6026,8 +6028,7 @@ void
 anv_cmd_buffer_fill_area(struct anv_cmd_buffer *cmd_buffer,
                          struct anv_address address,
                          VkDeviceSize size,
-                         uint32_t data,
-                         bool protected);
+                         uint32_t data);
 void
 anv_cmd_fill_buffer_addr(VkCommandBuffer cmd_buffer,
                          VkDeviceAddress dstAddr,
@@ -6036,10 +6037,8 @@ anv_cmd_fill_buffer_addr(VkCommandBuffer cmd_buffer,
 void
 anv_cmd_buffer_update_addr(struct anv_cmd_buffer *cmd_buffer,
                            struct anv_address address,
-                           VkDeviceSize dstOffset,
                            VkDeviceSize dataSize,
-                           const void* pData,
-                           bool is_protected);
+                           const void* pData);
 void
 anv_cmd_write_buffer_cp(VkCommandBuffer cmd_buffer,
                         VkDeviceAddress dstAddr,

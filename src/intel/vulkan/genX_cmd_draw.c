@@ -681,28 +681,25 @@ cmd_buffer_flush_vertex_buffers(struct anv_cmd_buffer *cmd_buffer,
                                  GENX(3DSTATE_VERTEX_BUFFERS));
    uint32_t i = 0;
    u_foreach_bit(vb, vb_emit) {
-      struct anv_buffer *buffer = cmd_buffer->state.vertex_bindings[vb].buffer;
-      uint32_t offset = cmd_buffer->state.vertex_bindings[vb].offset;
+      const struct anv_vertex_binding *binding =
+         &cmd_buffer->state.vertex_bindings[vb];
 
       struct GENX(VERTEX_BUFFER_STATE) state;
-      if (buffer) {
+      if (binding->size > 0) {
          uint32_t stride = dyn->vi_binding_strides[vb];
-         UNUSED uint32_t size = cmd_buffer->state.vertex_bindings[vb].size;
 
          state = (struct GENX(VERTEX_BUFFER_STATE)) {
             .VertexBufferIndex = vb,
 
-            .MOCS = anv_mocs(cmd_buffer->device, buffer->address.bo,
-                             ISL_SURF_USAGE_VERTEX_BUFFER_BIT),
+            .MOCS = binding->mocs,
             .AddressModifyEnable = true,
             .BufferPitch = stride,
-            .BufferStartingAddress = anv_address_add(buffer->address, offset),
-            .NullVertexBuffer = offset >= buffer->vk.size,
+            .BufferStartingAddress = anv_address_from_u64(binding->addr),
 #if GFX_VER >= 12
             .L3BypassDisable = true,
 #endif
 
-            .BufferSize = size,
+            .BufferSize = binding->size,
          };
       } else {
          state = (struct GENX(VERTEX_BUFFER_STATE)) {
@@ -824,11 +821,10 @@ cmd_buffer_flush_gfx_state(struct anv_cmd_buffer *cmd_buffer)
             sob._3DCommandSubOpcode = SO_BUFFER_INDEX_0_CMD + idx;
 #endif
 
-            if (cmd_buffer->state.xfb_enabled && xfb->buffer && xfb->size != 0) {
-               sob.MOCS = anv_mocs(cmd_buffer->device, xfb->buffer->address.bo,
-                                   ISL_SURF_USAGE_STREAM_OUT_BIT);
-               sob.SurfaceBaseAddress = anv_address_add(xfb->buffer->address,
-                                                        xfb->offset);
+            if (cmd_buffer->state.xfb_enabled &&
+                xfb->addr != 0 && xfb->size != 0) {
+               sob.MOCS = xfb->mocs;
+               sob.SurfaceBaseAddress = anv_address_from_u64(xfb->addr);
                sob.SOBufferEnable = true;
                sob.StreamOffsetWriteEnable = false;
                /* Size is in DWords - 1 */
@@ -1664,7 +1660,7 @@ load_indirect_parameters(struct anv_cmd_buffer *cmd_buffer,
 #endif
 }
 
-static const inline bool
+static inline bool
 execute_indirect_draw_supported(const struct anv_cmd_buffer *cmd_buffer)
 {
 #if GFX_VERx10 >= 125
@@ -1768,7 +1764,7 @@ emit_indirect_draws(struct anv_cmd_buffer *cmd_buffer,
    }
 }
 
-static inline const uint32_t xi_argument_format_for_vk_cmd(enum vk_cmd_type cmd)
+static inline uint32_t xi_argument_format_for_vk_cmd(enum vk_cmd_type cmd)
 {
 #if GFX_VERx10 >= 125
    switch (cmd) {

@@ -237,7 +237,7 @@ impl PipeResource {
 
         // write the entire union field because u_sampler_view_default_template might have left it
         // in an undefined state.
-        res.u.buf = pipe_sampler_view__bindgen_ty_2__bindgen_ty_2 {
+        res.u.buf = pipe_sampler_view__bindgen_ty_1__bindgen_ty_2 {
             offset: 0,
             size: size,
         };
@@ -324,7 +324,8 @@ impl<'c, 'r> PipeSamplerView<'c, 'r> {
 impl Drop for PipeSamplerView<'_, '_> {
     fn drop(&mut self) {
         unsafe {
-            pipe_sampler_view_reference(&mut ptr::null_mut(), self.view.as_ptr());
+            let ctx = self.view.as_ref().context;
+            (*ctx).sampler_view_release.unwrap()(ctx, self.view.as_ptr())
         }
     }
 }

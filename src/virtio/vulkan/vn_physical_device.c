@@ -173,6 +173,8 @@ vn_physical_device_init_features(struct vn_physical_device *physical_dev)
          workgroup_memory_explicit_layout;
 
       /* EXT */
+      VkPhysicalDeviceAttachmentFeedbackLoopDynamicStateFeaturesEXT
+         attachment_feedback_loop_dynamic_state;
       VkPhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT attachment_feedback_loop_layout;
       VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT
          blend_operation_advanced;
@@ -180,6 +182,8 @@ vn_physical_device_init_features(struct vn_physical_device *physical_dev)
       VkPhysicalDeviceColorWriteEnableFeaturesEXT color_write_enable;
       VkPhysicalDeviceConditionalRenderingFeaturesEXT conditional_rendering;
       VkPhysicalDeviceCustomBorderColorFeaturesEXT custom_border_color;
+      VkPhysicalDeviceDepthBiasControlFeaturesEXT depth_bias_control;
+      VkPhysicalDeviceDepthClampControlFeaturesEXT depth_clamp_control;
       VkPhysicalDeviceDepthClipControlFeaturesEXT depth_clip_control;
       VkPhysicalDeviceDepthClipEnableFeaturesEXT depth_clip_enable;
       VkPhysicalDeviceDynamicRenderingUnusedAttachmentsFeaturesEXT
@@ -191,12 +195,16 @@ vn_physical_device_init_features(struct vn_physical_device *physical_dev)
       VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT
          graphics_pipeline_library;
       VkPhysicalDeviceImage2DViewOf3DFeaturesEXT image_2d_view_of_3d;
+      VkPhysicalDeviceImageSlicedViewOf3DFeaturesEXT image_sliced_view_of_3d;
       VkPhysicalDeviceImageViewMinLodFeaturesEXT image_view_min_lod;
+      VkPhysicalDeviceLegacyDitheringFeaturesEXT legacy_dithering;
       VkPhysicalDeviceLegacyVertexAttributesFeaturesEXT
          legacy_vertex_attributes;
       VkPhysicalDeviceMultiDrawFeaturesEXT multi_draw;
       VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT mutable_descriptor_type;
+      VkPhysicalDeviceNestedCommandBufferFeaturesEXT nested_command_buffer;
       VkPhysicalDeviceNonSeamlessCubeMapFeaturesEXT non_seamless_cube_map;
+      VkPhysicalDevicePipelineLibraryGroupHandlesFeaturesEXT pipeline_library_group_handles;
       VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT
          primitive_topology_list_restart;
       VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT
@@ -318,24 +326,31 @@ vn_physical_device_init_features(struct vn_physical_device *physical_dev)
    VN_ADD_PNEXT_EXT(feats2, WORKGROUP_MEMORY_EXPLICIT_LAYOUT_FEATURES_KHR, local_feats.workgroup_memory_explicit_layout, exts->KHR_workgroup_memory_explicit_layout);
 
    /* EXT */
+   VN_ADD_PNEXT_EXT(feats2, ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_FEATURES_EXT, local_feats.attachment_feedback_loop_dynamic_state, exts->EXT_attachment_feedback_loop_dynamic_state);
    VN_ADD_PNEXT_EXT(feats2, ATTACHMENT_FEEDBACK_LOOP_LAYOUT_FEATURES_EXT, local_feats.attachment_feedback_loop_layout, exts->EXT_attachment_feedback_loop_layout);
    VN_ADD_PNEXT_EXT(feats2, BLEND_OPERATION_ADVANCED_FEATURES_EXT, local_feats.blend_operation_advanced, exts->EXT_blend_operation_advanced);
    VN_ADD_PNEXT_EXT(feats2, BORDER_COLOR_SWIZZLE_FEATURES_EXT, local_feats.border_color_swizzle, exts->EXT_border_color_swizzle);
    VN_ADD_PNEXT_EXT(feats2, COLOR_WRITE_ENABLE_FEATURES_EXT, local_feats.color_write_enable, exts->EXT_color_write_enable);
    VN_ADD_PNEXT_EXT(feats2, CONDITIONAL_RENDERING_FEATURES_EXT, local_feats.conditional_rendering, exts->EXT_conditional_rendering);
    VN_ADD_PNEXT_EXT(feats2, CUSTOM_BORDER_COLOR_FEATURES_EXT, local_feats.custom_border_color, exts->EXT_custom_border_color);
+   VN_ADD_PNEXT_EXT(feats2, DEPTH_BIAS_CONTROL_FEATURES_EXT, local_feats.depth_bias_control, exts->EXT_depth_bias_control);
+   VN_ADD_PNEXT_EXT(feats2, DEPTH_CLAMP_CONTROL_FEATURES_EXT, local_feats.depth_clamp_control, exts->EXT_depth_clamp_control);
    VN_ADD_PNEXT_EXT(feats2, DEPTH_CLIP_CONTROL_FEATURES_EXT, local_feats.depth_clip_control, exts->EXT_depth_clip_control);
    VN_ADD_PNEXT_EXT(feats2, DEPTH_CLIP_ENABLE_FEATURES_EXT, local_feats.depth_clip_enable, exts->EXT_depth_clip_enable);
    VN_ADD_PNEXT_EXT(feats2, DYNAMIC_RENDERING_UNUSED_ATTACHMENTS_FEATURES_EXT, local_feats.dynamic_rendering_unused_attachments, exts->EXT_dynamic_rendering_unused_attachments);
    VN_ADD_PNEXT_EXT(feats2, EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT, local_feats.extended_dynamic_state_3, exts->EXT_extended_dynamic_state3);
    VN_ADD_PNEXT_EXT(feats2, FRAGMENT_SHADER_INTERLOCK_FEATURES_EXT, local_feats.fragment_shader_interlock, exts->EXT_fragment_shader_interlock);
    VN_ADD_PNEXT_EXT(feats2, GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT, local_feats.graphics_pipeline_library, exts->EXT_graphics_pipeline_library);
+   VN_ADD_PNEXT_EXT(feats2, LEGACY_DITHERING_FEATURES_EXT, local_feats.legacy_dithering, exts->EXT_legacy_dithering);
    VN_ADD_PNEXT_EXT(feats2, LEGACY_VERTEX_ATTRIBUTES_FEATURES_EXT, local_feats.legacy_vertex_attributes, exts->EXT_legacy_vertex_attributes);
    VN_ADD_PNEXT_EXT(feats2, IMAGE_2D_VIEW_OF_3D_FEATURES_EXT, local_feats.image_2d_view_of_3d, exts->EXT_image_2d_view_of_3d);
+   VN_ADD_PNEXT_EXT(feats2, IMAGE_SLICED_VIEW_OF_3D_FEATURES_EXT, local_feats.image_sliced_view_of_3d, exts->EXT_image_sliced_view_of_3d);
    VN_ADD_PNEXT_EXT(feats2, IMAGE_VIEW_MIN_LOD_FEATURES_EXT, local_feats.image_view_min_lod, exts->EXT_image_view_min_lod);
    VN_ADD_PNEXT_EXT(feats2, MULTI_DRAW_FEATURES_EXT, local_feats.multi_draw, exts->EXT_multi_draw);
    VN_ADD_PNEXT_EXT(feats2, MUTABLE_DESCRIPTOR_TYPE_FEATURES_EXT, local_feats.mutable_descriptor_type, exts->EXT_mutable_descriptor_type || exts->VALVE_mutable_descriptor_type);
+   VN_ADD_PNEXT_EXT(feats2, NESTED_COMMAND_BUFFER_FEATURES_EXT, local_feats.nested_command_buffer, exts->EXT_nested_command_buffer);
    VN_ADD_PNEXT_EXT(feats2, NON_SEAMLESS_CUBE_MAP_FEATURES_EXT, local_feats.non_seamless_cube_map, exts->EXT_non_seamless_cube_map);
+   VN_ADD_PNEXT_EXT(feats2, PIPELINE_LIBRARY_GROUP_HANDLES_FEATURES_EXT, local_feats.pipeline_library_group_handles, exts->EXT_pipeline_library_group_handles);
    VN_ADD_PNEXT_EXT(feats2, PRIMITIVE_TOPOLOGY_LIST_RESTART_FEATURES_EXT, local_feats.primitive_topology_list_restart, exts->EXT_primitive_topology_list_restart);
    VN_ADD_PNEXT_EXT(feats2, PRIMITIVES_GENERATED_QUERY_FEATURES_EXT, local_feats.primitives_generated_query, exts->EXT_primitives_generated_query);
    VN_ADD_PNEXT_EXT(feats2, PROVOKING_VERTEX_FEATURES_EXT, local_feats.provoking_vertex, exts->EXT_provoking_vertex);
@@ -354,7 +369,7 @@ vn_physical_device_init_features(struct vn_physical_device *physical_dev)
    vn_call_vkGetPhysicalDeviceFeatures2(
       ring, vn_physical_device_to_handle(physical_dev), &feats2);
 
-   struct vk_features *feats = &physical_dev->base.base.supported_features;
+   struct vk_features *feats = &physical_dev->base.vk.supported_features;
    vk_set_physical_device_features(feats, &feats2);
 
    /* Enable features for extensions natively implemented in Venus driver.
@@ -388,7 +403,7 @@ vn_physical_device_init_features(struct vn_physical_device *physical_dev)
 static void
 vn_physical_device_init_uuids(struct vn_physical_device *physical_dev)
 {
-   struct vk_properties *props = &physical_dev->base.base.properties;
+   struct vk_properties *props = &physical_dev->base.vk.properties;
    struct mesa_sha1 sha1_ctx;
    uint8_t sha1[SHA1_DIGEST_LENGTH];
 
@@ -424,7 +439,7 @@ static void
 vn_physical_device_sanitize_properties(struct vn_physical_device *physical_dev)
 {
    struct vn_instance *instance = physical_dev->instance;
-   struct vk_properties *props = &physical_dev->base.base.properties;
+   struct vk_properties *props = &physical_dev->base.vk.properties;
 
    const uint32_t version_override = vk_get_version_override();
    if (version_override) {
@@ -449,14 +464,14 @@ vn_physical_device_sanitize_properties(struct vn_physical_device *physical_dev)
        * is required for 1.3.
        * See vn_physical_device_get_passthrough_extensions()
        */
-      if (!physical_dev->base.base.supported_extensions.KHR_synchronization2)
+      if (!physical_dev->base.vk.supported_extensions.KHR_synchronization2)
          ver = MIN2(VK_API_VERSION_1_2, ver);
 
       props->apiVersion = ver;
    }
 
    /* ANGLE relies on ARM proprietary driver version for workarounds */
-   const char *engine_name = instance->base.base.app_info.engine_name;
+   const char *engine_name = instance->base.vk.app_info.engine_name;
    const bool forward_driver_version =
       props->driverID == VK_DRIVER_ID_ARM_PROPRIETARY && engine_name &&
       strcmp(engine_name, "ANGLE") == 0;
@@ -496,7 +511,7 @@ vn_physical_device_init_properties(struct vn_physical_device *physical_dev)
    const uint32_t renderer_version = physical_dev->renderer_version;
    struct vn_instance *instance = physical_dev->instance;
    const struct vn_renderer_info *renderer_info = &instance->renderer->info;
-   struct vk_properties *props = &physical_dev->base.base.properties;
+   struct vk_properties *props = &physical_dev->base.vk.properties;
    const struct vk_device_extension_table *exts =
       &physical_dev->renderer_extensions;
    VkPhysicalDeviceProperties2 props2 = {
@@ -564,6 +579,7 @@ vn_physical_device_init_properties(struct vn_physical_device *physical_dev)
       VkPhysicalDeviceLegacyVertexAttributesPropertiesEXT
          legacy_vertex_attributes;
       VkPhysicalDeviceMultiDrawPropertiesEXT multi_draw;
+      VkPhysicalDeviceNestedCommandBufferPropertiesEXT nested_command_buffer;
       VkPhysicalDevicePCIBusInfoPropertiesEXT pci_bus_info;
       VkPhysicalDeviceProvokingVertexPropertiesEXT provoking_vertex;
       VkPhysicalDeviceRobustness2PropertiesEXT robustness_2;
@@ -651,6 +667,7 @@ vn_physical_device_init_properties(struct vn_physical_device *physical_dev)
    VN_ADD_PNEXT_EXT(props2, GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT, local_props.graphics_pipeline_library, exts->EXT_graphics_pipeline_library);
    VN_ADD_PNEXT_EXT(props2, LEGACY_VERTEX_ATTRIBUTES_PROPERTIES_EXT, local_props.legacy_vertex_attributes, exts->EXT_legacy_vertex_attributes);
    VN_ADD_PNEXT_EXT(props2, MULTI_DRAW_PROPERTIES_EXT, local_props.multi_draw, exts->EXT_multi_draw);
+   VN_ADD_PNEXT_EXT(props2, NESTED_COMMAND_BUFFER_PROPERTIES_EXT, local_props.nested_command_buffer, exts->EXT_nested_command_buffer);
    VN_ADD_PNEXT_EXT(props2, PCI_BUS_INFO_PROPERTIES_EXT, local_props.pci_bus_info, exts->EXT_pci_bus_info);
    VN_ADD_PNEXT_EXT(props2, PROVOKING_VERTEX_PROPERTIES_EXT, local_props.provoking_vertex, exts->EXT_provoking_vertex);
    VN_ADD_PNEXT_EXT(props2, ROBUSTNESS_2_PROPERTIES_EXT, local_props.robustness_2, exts->EXT_robustness2);
@@ -730,6 +747,7 @@ vn_physical_device_init_properties(struct vn_physical_device *physical_dev)
    VN_SET_VK_PROPS_EXT(props, &local_props.graphics_pipeline_library, exts->EXT_graphics_pipeline_library);
    VN_SET_VK_PROPS_EXT(props, &local_props.legacy_vertex_attributes, exts->EXT_legacy_vertex_attributes);
    VN_SET_VK_PROPS_EXT(props, &local_props.multi_draw, exts->EXT_multi_draw);
+   VN_SET_VK_PROPS_EXT(props, &local_props.nested_command_buffer, exts->EXT_nested_command_buffer);
    VN_SET_VK_PROPS_EXT(props, &local_props.pci_bus_info, exts->EXT_pci_bus_info);
    VN_SET_VK_PROPS_EXT(props, &local_props.provoking_vertex, exts->EXT_provoking_vertex);
    VN_SET_VK_PROPS_EXT(props, &local_props.robustness_2, exts->EXT_robustness2);
@@ -767,14 +785,14 @@ vn_physical_device_init_queue_family_properties(
 {
    struct vn_instance *instance = physical_dev->instance;
    struct vn_ring *ring = instance->ring.ring;
-   const VkAllocationCallbacks *alloc = &instance->base.base.alloc;
+   const VkAllocationCallbacks *alloc = &instance->base.vk.alloc;
    uint32_t count = 0;
 
    vn_call_vkGetPhysicalDeviceQueueFamilyProperties2(
       ring, vn_physical_device_to_handle(physical_dev), &count, NULL);
 
    const bool can_query_prio =
-      physical_dev->base.base.supported_features.globalPriorityQuery;
+      physical_dev->base.vk.supported_features.globalPriorityQuery;
    VkQueueFamilyProperties2 *props;
    VkQueueFamilyGlobalPriorityProperties *prio_props;
 
@@ -801,7 +819,7 @@ vn_physical_device_init_queue_family_properties(
    /* Starting from Android 14 (Android U), framework HWUI has required a
     * second graphics queue to avoid racing between webview and skiavk.
     */
-   const char *engine_name = instance->base.base.app_info.engine_name;
+   const char *engine_name = instance->base.vk.app_info.engine_name;
    const bool require_second_queue =
       engine_name && strcmp(engine_name, "android framework") == 0;
    ;
@@ -1097,6 +1115,7 @@ vn_physical_device_get_native_extensions(
       exts->KHR_incremental_present = true;
       exts->KHR_swapchain = true;
       exts->KHR_swapchain_mutable_format = true;
+      exts->EXT_hdr_metadata = true;
       exts->EXT_swapchain_maintenance1 = true;
    }
 
@@ -1254,6 +1273,7 @@ vn_physical_device_get_passthrough_extensions(
       .KHR_workgroup_memory_explicit_layout = true,
 
       /* EXT */
+      .EXT_attachment_feedback_loop_dynamic_state = true,
       .EXT_attachment_feedback_loop_layout = true,
       .EXT_blend_operation_advanced = true,
       .EXT_border_color_swizzle = true,
@@ -1262,6 +1282,8 @@ vn_physical_device_get_passthrough_extensions(
       .EXT_conditional_rendering = true,
       .EXT_conservative_rasterization = true,
       .EXT_custom_border_color = true,
+      .EXT_depth_bias_control = true,
+      .EXT_depth_clamp_control = true,
       .EXT_depth_clamp_zero_one = true,
       .EXT_depth_clip_control = true,
       .EXT_depth_clip_enable = true,
@@ -1269,22 +1291,26 @@ vn_physical_device_get_passthrough_extensions(
       .EXT_extended_dynamic_state3 = true,
       .EXT_dynamic_rendering_unused_attachments = true,
       .EXT_external_memory_acquire_unmodified = true,
+      .EXT_filter_cubic = true,
       .EXT_fragment_shader_interlock = true,
       .EXT_global_priority = true,
       .EXT_global_priority_query = true,
       .EXT_graphics_pipeline_library = !VN_DEBUG(NO_GPL),
       .EXT_image_2d_view_of_3d = true,
       .EXT_image_drm_format_modifier = true,
+      .EXT_image_sliced_view_of_3d = true,
       .EXT_image_view_min_lod = true,
       .EXT_index_type_uint8 = true,
+      .EXT_legacy_dithering = true,
       .EXT_legacy_vertex_attributes = true,
       .EXT_line_rasterization = true,
       .EXT_load_store_op_none = true,
-      /* TODO: re-enable after generic app compat issues are resolved */
-      .EXT_memory_budget = false,
+      .EXT_memory_budget = VN_DEBUG(MEM_BUDGET),
       .EXT_multi_draw = true,
       .EXT_mutable_descriptor_type = true,
+      .EXT_nested_command_buffer = true,
       .EXT_non_seamless_cube_map = true,
+      .EXT_pipeline_library_group_handles = physical_dev->ray_tracing,
       .EXT_post_depth_coverage = true,
       .EXT_primitive_topology_list_restart = true,
       .EXT_primitives_generated_query = true,
@@ -1306,6 +1332,10 @@ vn_physical_device_get_passthrough_extensions(
 
       /* vendor */
       .ARM_rasterization_order_attachment_access = true,
+      .GOOGLE_decorate_string = true,
+      .GOOGLE_hlsl_functionality1 = true,
+      .GOOGLE_user_type = true,
+      .IMG_filter_cubic = true,
       .NV_compute_shader_derivatives = true,
       .VALVE_mutable_descriptor_type = true,
    };
@@ -1318,7 +1348,7 @@ vn_physical_device_init_supported_extensions(
    struct vk_device_extension_table native;
    struct vk_device_extension_table passthrough;
 
-   physical_dev->ray_tracing = VN_DEBUG(RAY_TRACING);
+   physical_dev->ray_tracing = !VN_DEBUG(NO_RAY_TRACING);
 
    vn_physical_device_get_native_extensions(physical_dev, &native);
    vn_physical_device_get_passthrough_extensions(physical_dev, &passthrough);
@@ -1332,11 +1362,11 @@ vn_physical_device_init_supported_extensions(
 #endif
 
       if (native.extensions[i]) {
-         physical_dev->base.base.supported_extensions.extensions[i] = true;
+         physical_dev->base.vk.supported_extensions.extensions[i] = true;
          physical_dev->extension_spec_versions[i] = props->specVersion;
       } else if (passthrough.extensions[i] &&
                  physical_dev->renderer_extensions.extensions[i]) {
-         physical_dev->base.base.supported_extensions.extensions[i] = true;
+         physical_dev->base.vk.supported_extensions.extensions[i] = true;
          physical_dev->extension_spec_versions[i] = MIN2(
             physical_dev->extension_spec_versions[i], props->specVersion);
       }
@@ -1349,7 +1379,7 @@ vn_physical_device_init_renderer_extensions(
 {
    struct vn_instance *instance = physical_dev->instance;
    struct vn_ring *ring = instance->ring.ring;
-   const VkAllocationCallbacks *alloc = &instance->base.base.alloc;
+   const VkAllocationCallbacks *alloc = &instance->base.vk.alloc;
 
    /* get renderer extensions */
    uint32_t count = 0;
@@ -1471,7 +1501,7 @@ static void
 vn_image_format_cache_fini(struct vn_physical_device *physical_dev)
 {
    const VkAllocationCallbacks *alloc =
-      &physical_dev->base.base.instance->alloc;
+      &physical_dev->base.vk.instance->alloc;
    struct vn_image_format_properties_cache *cache =
       &physical_dev->image_format_cache;
 
@@ -1504,7 +1534,7 @@ vn_physical_device_disable_sparse_binding(
     * get filtered out then disable the feature.
     */
 
-   struct vk_features *feats = &physical_dev->base.base.supported_features;
+   struct vk_features *feats = &physical_dev->base.vk.supported_features;
    feats->sparseBinding = false;
    feats->sparseResidencyBuffer = false;
    feats->sparseResidencyImage2D = false;
@@ -1515,7 +1545,7 @@ vn_physical_device_disable_sparse_binding(
    feats->sparseResidency16Samples = false;
    feats->sparseResidencyAliased = false;
 
-   struct vk_properties *props = &physical_dev->base.base.properties;
+   struct vk_properties *props = &physical_dev->base.vk.properties;
    props->sparseAddressSpaceSize = 0;
    props->sparseResidencyStandard2DBlockShape = 0;
    props->sparseResidencyStandard2DMultisampleBlockShape = 0;
@@ -1528,7 +1558,7 @@ static VkResult
 vn_physical_device_init(struct vn_physical_device *physical_dev)
 {
    struct vn_instance *instance = physical_dev->instance;
-   const VkAllocationCallbacks *alloc = &instance->base.base.alloc;
+   const VkAllocationCallbacks *alloc = &instance->base.vk.alloc;
    VkResult result;
 
    result = vn_physical_device_init_renderer_extensions(physical_dev);
@@ -1575,7 +1605,7 @@ void
 vn_physical_device_fini(struct vn_physical_device *physical_dev)
 {
    struct vn_instance *instance = physical_dev->instance;
-   const VkAllocationCallbacks *alloc = &instance->base.base.alloc;
+   const VkAllocationCallbacks *alloc = &instance->base.vk.alloc;
 
    vn_image_format_cache_fini(physical_dev);
 
@@ -1609,7 +1639,7 @@ vn_instance_enumerate_physical_device_groups_locked(
 {
    VkInstance instance_handle = vn_instance_to_handle(instance);
    struct vn_ring *ring = instance->ring.ring;
-   const VkAllocationCallbacks *alloc = &instance->base.base.alloc;
+   const VkAllocationCallbacks *alloc = &instance->base.vk.alloc;
    VkResult result;
 
    uint32_t count = 0;
@@ -1644,7 +1674,7 @@ vn_instance_enumerate_physical_device_groups_locked(
       for (uint32_t j = 0; j < VK_MAX_DEVICE_GROUP_SIZE; j++) {
          struct vn_physical_device_base *temp_obj =
             &temp_objs[VK_MAX_DEVICE_GROUP_SIZE * i + j];
-         temp_obj->base.base.type = VK_OBJECT_TYPE_PHYSICAL_DEVICE;
+         temp_obj->vk.base.type = VK_OBJECT_TYPE_PHYSICAL_DEVICE;
          group->physicalDevices[j] = (VkPhysicalDevice)temp_obj;
       }
    }
@@ -1702,7 +1732,7 @@ enumerate_physical_devices(struct vn_instance *instance,
                            struct vn_physical_device **out_physical_devs,
                            uint32_t *out_count)
 {
-   const VkAllocationCallbacks *alloc = &instance->base.base.alloc;
+   const VkAllocationCallbacks *alloc = &instance->base.vk.alloc;
    struct vn_ring *ring = instance->ring.ring;
    struct vn_physical_device *physical_devs = NULL;
    VkResult result;
@@ -1791,7 +1821,7 @@ filter_physical_devices(struct vn_physical_device *physical_devs,
 static VkResult
 vn_instance_enumerate_physical_devices_and_groups(struct vn_instance *instance)
 {
-   const VkAllocationCallbacks *alloc = &instance->base.base.alloc;
+   const VkAllocationCallbacks *alloc = &instance->base.vk.alloc;
    struct vn_physical_device *physical_devs = NULL;
    uint32_t count = 0;
    VkResult result = VK_SUCCESS;
@@ -1910,7 +1940,7 @@ vn_EnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice,
    VK_OUTARRAY_MAKE_TYPED(VkExtensionProperties, out, pProperties,
                           pPropertyCount);
    for (uint32_t i = 0; i < VK_DEVICE_EXTENSION_COUNT; i++) {
-      if (physical_dev->base.base.supported_extensions.extensions[i]) {
+      if (physical_dev->base.vk.supported_extensions.extensions[i]) {
          vk_outarray_append_typed(VkExtensionProperties, &out, prop) {
             *prop = vk_device_extensions[i];
             prop->specVersion = physical_dev->extension_spec_versions[i];
@@ -1996,7 +2026,7 @@ vn_GetPhysicalDeviceMemoryProperties2(
    VkPhysicalDeviceMemoryBudgetPropertiesEXT *memory_budget = NULL;
 
    /* Don't waste time searching for unsupported structs. */
-   if (physical_dev->base.base.supported_extensions.EXT_memory_budget) {
+   if (physical_dev->base.vk.supported_extensions.EXT_memory_budget) {
       memory_budget =
          vk_find_struct(pMemoryProperties->pNext,
                         PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT);
@@ -2105,6 +2135,7 @@ struct vn_physical_device_image_format_info {
    VkImageFormatListCreateInfo list;
    VkImageStencilUsageCreateInfo stencil_usage;
    VkPhysicalDeviceImageDrmFormatModifierInfoEXT modifier;
+   VkPhysicalDeviceImageViewImageFormatInfoEXT filter_cubic;
 };
 
 static const VkPhysicalDeviceImageFormatInfo2 *
@@ -2143,6 +2174,11 @@ vn_physical_device_fix_image_format_info(
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT:
          memcpy(&local_info->modifier, src, sizeof(local_info->modifier));
          pnext = &local_info->modifier;
+         break;
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_IMAGE_FORMAT_INFO_EXT:
+         memcpy(&local_info->filter_cubic, src,
+                sizeof(local_info->filter_cubic));
+         pnext = &local_info->filter_cubic;
          break;
       default:
          break;
@@ -2355,6 +2391,7 @@ vn_image_get_image_format_key(
          case VK_STRUCTURE_TYPE_HOST_IMAGE_COPY_DEVICE_PERFORMANCE_QUERY:
          case VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_PROPERTIES_EXT:
          case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES:
+         case VK_STRUCTURE_TYPE_FILTER_CUBIC_IMAGE_VIEW_IMAGE_FORMAT_PROPERTIES_EXT:
             _mesa_sha1_update(&sha1_ctx, &src->sType,
                               sizeof(VkStructureType));
             break;
@@ -2443,6 +2480,15 @@ vn_image_init_format_from_cache(
                      .combinedImageSamplerDescriptorCount;
                break;
             }
+            case VK_STRUCTURE_TYPE_FILTER_CUBIC_IMAGE_VIEW_IMAGE_FORMAT_PROPERTIES_EXT: {
+               VkFilterCubicImageViewImageFormatPropertiesEXT *filter_cubic =
+                  (VkFilterCubicImageViewImageFormatPropertiesEXT *)src;
+               filter_cubic->filterCubic =
+                  cache_entry->properties.filter_cubic.filterCubic;
+               filter_cubic->filterCubicMinmax =
+                  cache_entry->properties.filter_cubic.filterCubicMinmax;
+               break;
+            }
             default:
                unreachable("unexpected format props pNext");
             }
@@ -2467,7 +2513,7 @@ vn_image_store_format_in_cache(
    VkResult cached_result)
 {
    const VkAllocationCallbacks *alloc =
-      &physical_dev->base.base.instance->alloc;
+      &physical_dev->base.vk.instance->alloc;
    struct vn_image_format_properties_cache *cache =
       &physical_dev->image_format_cache;
    struct vn_image_format_cache_entry *cache_entry = NULL;
@@ -2520,6 +2566,11 @@ vn_image_store_format_in_cache(
          case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES: {
             cache_entry->properties.ycbcr_conversion =
                *((VkSamplerYcbcrConversionImageFormatProperties *)src);
+            break;
+         }
+         case VK_STRUCTURE_TYPE_FILTER_CUBIC_IMAGE_VIEW_IMAGE_FORMAT_PROPERTIES_EXT: {
+            cache_entry->properties.filter_cubic =
+               *((VkFilterCubicImageViewImageFormatPropertiesEXT *)src);
             break;
          }
          default:

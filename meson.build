@@ -80,6 +80,7 @@ with_moltenvk_dir = get_option('moltenvk-dir')
 with_vulkan_icd_dir = get_option('vulkan-icd-dir')
 with_tests = get_option('build-tests')
 with_glcpp_tests = get_option('enable-glcpp-tests')
+with_radv_tests = get_option('build-radv-tests')
 with_aco_tests = get_option('build-aco-tests')
 with_glx_read_only_text = get_option('glx-read-only-text')
 with_glx_direct = get_option('glx-direct')
@@ -167,10 +168,8 @@ if gallium_drivers.contains('auto')
           host_machine.system()))
   endif
 elif gallium_drivers.contains('all')
-   # Build-test everything except for i915, which depends on libdrm-intel which
-   # is not available on non-Intel distros.
    gallium_drivers = [
-     'r300', 'r600', 'radeonsi', 'crocus', 'v3d', 'vc4', 'freedreno', 'etnaviv',
+     'r300', 'r600', 'radeonsi', 'crocus', 'v3d', 'vc4', 'freedreno', 'etnaviv', 'i915',
      'nouveau', 'svga', 'tegra', 'virgl', 'lima', 'panfrost', 'llvmpipe', 'softpipe', 'iris',
      'zink', 'd3d12', 'asahi'
    ]
@@ -352,6 +351,9 @@ endif
 if with_aco_tests and not with_amd_vk
   error('ACO tests require Radv')
 endif
+if with_radv_tests and not with_amd_vk
+  error('RADV tests require RADV')
+endif
 
 with_microsoft_clc = get_option('microsoft-clc').enabled()
 with_spirv_to_dxil = get_option('spirv-to-dxil')
@@ -387,13 +389,7 @@ all_codecs = patent_codecs + free_codecs
 if _codecs.contains('all')
   _codecs = all_codecs
 elif _codecs.contains('all_free')
-  selected_codecs = _codecs
-  _codecs = free_codecs
-  foreach c : patent_codecs
-    if selected_codecs.contains(c)
-      _codecs += c
-    endif
-  endforeach
+  _codecs += free_codecs
 endif
 foreach c : all_codecs
    pre_args += '-DVIDEO_CODEC_@0@=@1@'.format(c.to_upper(), _codecs.contains(c).to_int())
@@ -765,6 +761,8 @@ endif
 _opencl = get_option('gallium-opencl')
 _rtti = get_option('cpp_rtti')
 if _opencl != 'disabled'
+  warning('Clover will be removed in Mesa 25.2')
+
   if not with_gallium
     error('OpenCL Clover implementation requires at least one gallium driver.')
   endif
@@ -1561,10 +1559,6 @@ endif
 
 if with_any_intel and ['x86', 'x86_64'].contains(host_machine.cpu_family())
   pre_args += '-DSUPPORT_INTEL_INTEGRATED_GPUS'
-endif
-
-if with_gallium_i915 and host_machine.cpu_family().startswith('x86') == false
-  error('Intel "i915" Gallium driver requires x86 or x86_64 CPU family')
 endif
 
 # Determine whether or not the rt library is needed for time functions

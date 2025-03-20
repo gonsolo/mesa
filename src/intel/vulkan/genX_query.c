@@ -202,7 +202,7 @@ VkResult genX(CreateQueryPool)(
       uint64s_per_slot = 1 + 1; /* availability + length of written bitstream data */
       break;
    default:
-      assert(!"Invalid query type");
+      unreachable("Invalid query type");
    }
 
    if (!vk_multialloc_zalloc2(&ma, &device->vk.alloc, pAllocator,
@@ -841,8 +841,7 @@ void genX(CmdResetQueryPool)(
 
       anv_cmd_buffer_fill_area(cmd_buffer,
                                anv_query_address(pool, firstQuery),
-                               queryCount * pool->stride,
-                               0, false);
+                               queryCount * pool->stride, 0);
 
       /* The pending clearing writes are in compute if we're in gpgpu mode on
        * the render engine or on the compute engine.

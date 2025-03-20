@@ -20,7 +20,6 @@
 #include "r300_screen_buffer.h"
 #include "r300_state_inlines.h"
 #include "r300_public.h"
-#include "compiler/r300_nir.h"
 
 #include "draw/draw_context.h"
 
@@ -542,7 +541,6 @@ static void r300_init_screen_caps(struct r300_screen* r300screen)
    caps->clip_halfz = true;
    caps->allow_mapped_buffers_during_execution = true;
    caps->legacy_math_rules = true;
-   caps->tgsi_texcoord = true;
 
    caps->texture_transfer_modes = PIPE_TEXTURE_TRANSFER_BLIT;
 
@@ -711,7 +709,6 @@ struct pipe_screen* r300_screen_create(struct radeon_winsys *rws,
     r300screen->screen.get_name = r300_get_name;
     r300screen->screen.get_vendor = r300_get_vendor;
     r300screen->screen.get_compiler_options = r300_get_compiler_options;
-    r300screen->screen.finalize_nir = r300_finalize_nir;
     r300screen->screen.get_device_vendor = r300_get_device_vendor;
     r300screen->screen.get_disk_shader_cache = r300_get_disk_shader_cache;
     r300screen->screen.get_screen_fd = r300_screen_get_fd;

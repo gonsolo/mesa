@@ -151,6 +151,7 @@ option(
   choices : ['icd', 'standalone', 'disabled'],
   value : 'disabled',
   description : 'build gallium "clover" OpenCL frontend.',
+  deprecated: true,
 )
 
 option(
@@ -462,6 +463,13 @@ option(
   type : 'boolean',
   value : true,
   description : 'Build glcpp unit tests. These are flaky on CI.'
+)
+
+option(
+  'build-radv-tests',
+  type : 'boolean',
+  value : false,
+  description : 'Build RADV tests. These do not require an AMD GPU.'
 )
 
 option(

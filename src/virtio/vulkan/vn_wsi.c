@@ -69,14 +69,14 @@ vn_wsi_proc_addr(VkPhysicalDevice physicalDevice, const char *pName)
    struct vn_physical_device *physical_dev =
       vn_physical_device_from_handle(physicalDevice);
    return vk_instance_get_proc_addr_unchecked(
-      &physical_dev->instance->base.base, pName);
+      &physical_dev->instance->base.vk, pName);
 }
 
 VkResult
 vn_wsi_init(struct vn_physical_device *physical_dev)
 {
    const VkAllocationCallbacks *alloc =
-      &physical_dev->instance->base.base.alloc;
+      &physical_dev->instance->base.vk.alloc;
    VkResult result = wsi_device_init(
       &physical_dev->wsi_device, vn_physical_device_to_handle(physical_dev),
       vn_wsi_proc_addr, alloc, -1, &physical_dev->instance->dri_options,
@@ -88,7 +88,7 @@ vn_wsi_init(struct vn_physical_device *physical_dev)
       return result;
 
    physical_dev->wsi_device.supports_modifiers = true;
-   physical_dev->base.base.wsi_device = &physical_dev->wsi_device;
+   physical_dev->base.vk.wsi_device = &physical_dev->wsi_device;
 
    return VK_SUCCESS;
 }
@@ -97,8 +97,8 @@ void
 vn_wsi_fini(struct vn_physical_device *physical_dev)
 {
    const VkAllocationCallbacks *alloc =
-      &physical_dev->instance->base.base.alloc;
-   physical_dev->base.base.wsi_device = NULL;
+      &physical_dev->instance->base.vk.alloc;
+   physical_dev->base.vk.wsi_device = NULL;
    wsi_device_finish(&physical_dev->wsi_device, alloc);
 }
 
@@ -295,7 +295,7 @@ vn_QueuePresentKHR(VkQueue _queue, const VkPresentInfoKHR *pPresentInfo)
 {
    VN_TRACE_FUNC();
    struct vk_queue *queue_vk = vk_queue_from_handle(_queue);
-   struct vn_device *dev = (void *)queue_vk->base.device;
+   struct vn_device *dev = vn_device_from_vk(queue_vk->base.device);
 
    VkResult result = wsi_common_queue_present(
       &dev->physical_device->wsi_device, vn_device_to_handle(dev), _queue,

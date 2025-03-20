@@ -47,6 +47,8 @@ main_cts_patch_files=(
 
 # shellcheck disable=SC2034
 vk_cts_commits_to_backport=(
+  # Stop querying device address from unbound buffers
+  046343f46f7d39d53b47842d7fd8ed3279528046
 )
 
 # shellcheck disable=SC2034
@@ -290,6 +292,7 @@ if [ "$DEQP_API" = tools ]; then
 fi
 
 # Remove other mustpass files, since we saved off the ones we wanted to conventient locations above.
+rm -rf assets/**/mustpass/
 rm -rf external/**/mustpass/
 rm -rf external/vulkancts/modules/vulkan/vk-main*
 rm -rf external/vulkancts/modules/vulkan/vk-default

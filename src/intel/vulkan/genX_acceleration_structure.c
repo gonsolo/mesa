@@ -550,8 +550,7 @@ anv_init_header(VkCommandBuffer commandBuffer,
       uint32_t *header_ptr = (uint32_t *)((char *)&header + base);
 
       struct anv_address addr = anv_address_from_u64(header_addr + base);
-      anv_cmd_buffer_update_addr(cmd_buffer, addr, 0, header_size,
-                                 header_ptr, false);
+      anv_cmd_buffer_update_addr(cmd_buffer, addr, header_size, header_ptr);
    }
 
    if (INTEL_DEBUG(DEBUG_BVH_ANY)) {
@@ -758,7 +757,7 @@ genX(CmdCopyAccelerationStructureKHR)(
    }
 
    anv_genX(cmd_buffer->device->info, CmdDispatchIndirect)(
-      commandBuffer, src->buffer,
+      commandBuffer, vk_buffer_to_handle(src->buffer),
       src->offset + offsetof(struct anv_accel_struct_header,
                              copy_dispatch_size));
 
@@ -829,7 +828,7 @@ genX(CmdCopyAccelerationStructureToMemoryKHR)(
    }
 
    anv_genX(device->info, CmdDispatchIndirect)(
-      commandBuffer, src->buffer,
+      commandBuffer, vk_buffer_to_handle(src->buffer),
       src->offset + offsetof(struct anv_accel_struct_header,
                              copy_dispatch_size));
 

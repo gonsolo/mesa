@@ -1088,15 +1088,15 @@ void anv_CmdBindVertexBuffers2(
       ANV_FROM_HANDLE(anv_buffer, buffer, pBuffers[i]);
 
       if (buffer == NULL) {
-         vb[firstBinding + i] = (struct anv_vertex_binding) {
-            .buffer = NULL,
-         };
+         vb[firstBinding + i] = (struct anv_vertex_binding) { 0 };
       } else {
          vb[firstBinding + i] = (struct anv_vertex_binding) {
-            .buffer = buffer,
-            .offset = pOffsets[i],
+            .addr = anv_address_physical(
+               anv_address_add(buffer->address, pOffsets[i])),
             .size = vk_buffer_range(&buffer->vk, pOffsets[i],
                                     pSizes ? pSizes[i] : VK_WHOLE_SIZE),
+            .mocs = anv_mocs(cmd_buffer->device, buffer->address.bo,
+                             ISL_SURF_USAGE_VERTEX_BUFFER_BIT),
          };
       }
       cmd_buffer->state.gfx.vb_dirty |= 1 << (firstBinding + i);
@@ -1107,6 +1107,36 @@ void anv_CmdBindVertexBuffers2(
                                         bindingCount, pStrides);
    }
 }
+
+void anv_CmdBindIndexBuffer2KHR(
+    VkCommandBuffer                             commandBuffer,
+    VkBuffer                                    _buffer,
+    VkDeviceSize                                offset,
+    VkDeviceSize                                size,
+    VkIndexType                                 indexType)
+{
+   ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+   ANV_FROM_HANDLE(anv_buffer, buffer, _buffer);
+
+   if (cmd_buffer->state.gfx.index_type != indexType) {
+      cmd_buffer->state.gfx.index_type = indexType;
+      cmd_buffer->state.gfx.dirty |= ANV_CMD_DIRTY_INDEX_TYPE;
+   }
+
+   uint64_t index_addr = buffer ?
+      anv_address_physical(anv_address_add(buffer->address, offset)) : 0;
+   uint32_t index_size = buffer ? vk_buffer_range(&buffer->vk, offset, size) : 0;
+   if (cmd_buffer->state.gfx.index_addr != index_addr ||
+       cmd_buffer->state.gfx.index_size != index_size) {
+      cmd_buffer->state.gfx.index_addr = index_addr;
+      cmd_buffer->state.gfx.index_size = index_size;
+      cmd_buffer->state.gfx.index_mocs =
+         anv_mocs(cmd_buffer->device, buffer->address.bo,
+                  ISL_SURF_USAGE_INDEX_BUFFER_BIT);
+      cmd_buffer->state.gfx.dirty |= ANV_CMD_DIRTY_INDEX_BUFFER;
+   }
+}
+
 
 void anv_CmdBindTransformFeedbackBuffersEXT(
     VkCommandBuffer                             commandBuffer,
@@ -1125,14 +1155,17 @@ void anv_CmdBindTransformFeedbackBuffersEXT(
    assert(firstBinding + bindingCount <= MAX_XFB_BUFFERS);
    for (uint32_t i = 0; i < bindingCount; i++) {
       if (pBuffers[i] == VK_NULL_HANDLE) {
-         xfb[firstBinding + i].buffer = NULL;
+         xfb[firstBinding + i] = (struct anv_xfb_binding) { 0 };
       } else {
          ANV_FROM_HANDLE(anv_buffer, buffer, pBuffers[i]);
-         xfb[firstBinding + i].buffer = buffer;
-         xfb[firstBinding + i].offset = pOffsets[i];
-         xfb[firstBinding + i].size =
-            vk_buffer_range(&buffer->vk, pOffsets[i],
-                            pSizes ? pSizes[i] : VK_WHOLE_SIZE);
+         xfb[firstBinding + i] = (struct anv_xfb_binding) {
+            .addr = anv_address_physical(
+               anv_address_add(buffer->address, pOffsets[i])),
+            .size = vk_buffer_range(&buffer->vk, pOffsets[i],
+                                    pSizes ? pSizes[i] : VK_WHOLE_SIZE),
+            .mocs = anv_mocs(cmd_buffer->device, buffer->address.bo,
+                             ISL_SURF_USAGE_STREAM_OUT_BIT),
+         };
       }
    }
 }
