@@ -44,8 +44,6 @@ brw_shader::emit_urb_writes(const brw_reg &gs_vertex_count)
    int starting_urb_offset = 0;
    const struct brw_vue_prog_data *vue_prog_data =
       brw_vue_prog_data(this->prog_data);
-   const GLbitfield64 psiz_mask =
-      VARYING_BIT_LAYER | VARYING_BIT_VIEWPORT | VARYING_BIT_PSIZ | VARYING_BIT_PRIMITIVE_SHADING_RATE;
    const struct intel_vue_map *vue_map = &vue_prog_data->vue_map;
    bool flush;
    brw_reg sources[8];
@@ -123,12 +121,12 @@ brw_shader::emit_urb_writes(const brw_reg &gs_vertex_count)
       switch (varying) {
       case VARYING_SLOT_PSIZ: {
          /* The point size varying slot is the vue header and is always in the
-          * vue map. But often none of the special varyings that live there
-          * are written and for the vertex shaders we can skip writing to the
-          * VUE header because it is setup by the VF fixed function. All other
-          * pre-rasterization stages should setup the VUE header properly as
-          * describe in the SKL PRMs, Volume 7: 3D-Media-GPGPU, Vertex URB
-          * Entry (VUE) Formats:
+          * vue map. If anything in the header is going to be read back by HW,
+          * we need to initialize it, in particular the viewport & layer
+          * values.
+          *
+          * SKL PRMs, Volume 7: 3D-Media-GPGPU, Vertex URB Entry (VUE)
+          * Formats:
           *
           *    "VUEs are written in two ways:
           *
@@ -157,13 +155,6 @@ brw_shader::emit_urb_writes(const brw_reg &gs_vertex_count)
           *       - If Rendering is disabled, VertexHeaders are not required
           *         anywhere."
           */
-         if ((vue_map->slots_valid & psiz_mask) == 0 &&
-             stage == MESA_SHADER_VERTEX) {
-            assert(length == 0);
-            urb_offset++;
-            break;
-         }
-
          brw_reg zero =
             retype(brw_allocate_vgrf_units(*this, dispatch_width / 8), BRW_TYPE_UD);
          bld.MOV(zero, brw_imm_ud(0u));
@@ -418,6 +409,7 @@ brw_shader::brw_shader(const struct brw_compiler *compiler,
      key(key), prog_data(prog_data),
      live_analysis(this), regpressure_analysis(this),
      performance_analysis(this), idom_analysis(this), def_analysis(this),
+     ip_ranges_analysis(this),
      needs_register_pressure(needs_register_pressure),
      dispatch_width(dispatch_width),
      max_polygons(0),
@@ -442,6 +434,7 @@ brw_shader::brw_shader(const struct brw_compiler *compiler,
      key(&key->base), prog_data(&prog_data->base),
      live_analysis(this), regpressure_analysis(this),
      performance_analysis(this), idom_analysis(this), def_analysis(this),
+     ip_ranges_analysis(this),
      needs_register_pressure(needs_register_pressure),
      dispatch_width(dispatch_width),
      max_polygons(max_polygons),
@@ -966,6 +959,7 @@ brw_shader::invalidate_analysis(brw_analysis_dependency_class c)
    performance_analysis.invalidate(c);
    idom_analysis.invalidate(c);
    def_analysis.invalidate(c);
+   ip_ranges_analysis.invalidate(c);
 }
 
 void
@@ -1018,12 +1012,11 @@ save_instruction_order(const struct cfg_t *cfg)
     * of brw_inst *.  This way, we can reset it between scheduling passes to
     * prevent dependencies between the different scheduling modes.
     */
-   int num_insts = cfg->last_block()->end_ip + 1;
+   int num_insts = cfg->total_instructions;
    brw_inst **inst_arr = new brw_inst * [num_insts];
 
    int ip = 0;
    foreach_block_and_inst(block, brw_inst, inst, cfg) {
-      assert(ip >= block->start_ip && ip <= block->end_ip);
       inst_arr[ip++] = inst;
    }
    assert(ip == num_insts);
@@ -1034,15 +1027,14 @@ save_instruction_order(const struct cfg_t *cfg)
 static void
 restore_instruction_order(struct cfg_t *cfg, brw_inst **inst_arr)
 {
-   ASSERTED int num_insts = cfg->last_block()->end_ip + 1;
+   ASSERTED int num_insts = cfg->total_instructions;
 
    int ip = 0;
    foreach_block (block, cfg) {
       block->instructions.make_empty();
 
-      assert(ip == block->start_ip);
-      for (; ip <= block->end_ip; ip++)
-         block->instructions.push_tail(inst_arr[ip]);
+      for (unsigned i = 0; i < block->num_instructions; i++)
+         block->instructions.push_tail(inst_arr[ip++]);
    }
    assert(ip == num_insts);
 }
@@ -1140,6 +1132,7 @@ brw_allocate_registers(brw_shader &s, bool allow_spilling)
 
       /* Reset back to the original order before trying the next mode */
       restore_instruction_order(s.cfg, orig_order);
+
       s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS);
    }
 

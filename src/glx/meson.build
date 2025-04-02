@@ -50,7 +50,6 @@ files_libglx = files(
   'render2.c',
   'renderpix.c',
   'single2.c',
-  'singlepix.c',
   'vertarr.c',
   'xfont.c',
 )
@@ -137,8 +136,7 @@ libgl_link = with_glvnd ? [] : [libglapi_bridge]
 libgl = shared_library(
   gl_lib_name,
   [],
-  link_with : libgl_link,
-  link_whole : libglx,
+  link_whole : [libglx, libgl_link],
   link_args : [ld_args_bsymbolic, ld_args_gc_sections, extra_ld_args_libgl],
   dependencies : [
     dep_libdrm, dep_dl, dep_m, dep_thread, dep_x11, dep_xcb_glx, dep_xcb,
@@ -149,3 +147,18 @@ libgl = shared_library(
   darwin_versions : '4.0.0',
   install : true,
 )
+
+if with_symbols_check
+  libgl_symbols_file = with_glvnd ? 'glvnd-symbols.txt' : 'libgl-symbols.txt'
+
+  test(
+    'libGL-ABI-check',
+    symbols_check,
+    args : [
+      '--lib', libgl,
+      '--symbols-file', files(libgl_symbols_file),
+      symbols_check_args,
+    ],
+    suite : ['glx'],
+  )
+endif

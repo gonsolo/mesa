@@ -1028,7 +1028,6 @@ tu_lower_io(nir_shader *shader, struct tu_device *dev,
 struct lower_fdm_options {
    unsigned num_views;
    bool adjust_fragcoord;
-   bool multiview;
 };
 
 static bool
@@ -1055,7 +1054,7 @@ lower_fdm_instr(struct nir_builder *b, nir_instr *instr, void *data)
    nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
 
    nir_def *view;
-   if (options->multiview) {
+   if (options->num_views > 1) {
       nir_variable *view_var =
          nir_find_variable_with_location(b->shader, nir_var_shader_in,
                                          VARYING_SLOT_VIEW_INDEX);
@@ -2080,7 +2079,6 @@ tu6_emit_fs(struct tu_cs *cs,
 
    if (CHIP >= A7XX) {
       tu_cs_emit_regs(cs, A6XX_GRAS_UNKNOWN_8110(0x2));
-      tu_cs_emit_regs(cs, A7XX_HLSQ_FS_UNKNOWN_A9AA(.consts_load_disable = false));
    }
 
    if (fs) {

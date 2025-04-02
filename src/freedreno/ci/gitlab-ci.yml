@@ -48,6 +48,8 @@ a306-traces:
   extends:
     - .google-freedreno-test-traces
     - .a306-test
+  rules:
+    - when: never # Google nginx needs updating
   variables:
     PIGLIT_REPLAY_DEVICE_NAME: "freedreno-a306"
     PIGLIT_RESULTS: "freedreno-a306-replay"
@@ -65,6 +67,8 @@ a530-traces:
   extends:
     - .google-freedreno-test-traces
     - .a530-test
+  rules:
+    - when: never # Google nginx needs updating
   variables:
     PIGLIT_REPLAY_DEVICE_NAME: "freedreno-a530"
     PIGLIT_RESULTS: "freedreno-a530-replay"
@@ -375,10 +379,12 @@ a630-piglit-full:
     DEQP_SUITE: freedreno-a630-piglit-full
     TEST_PHASE_TIMEOUT_MINUTES: 55
 
-.a630-traces:
+a630-traces:
   extends:
     - .google-freedreno-test-traces
     - .a630-test
+  rules:
+    - when: never # Google nginx needs updating
   variables:
     PIGLIT_REPLAY_DEVICE_NAME: "freedreno-a630"
     PIGLIT_RESULTS: "freedreno-a630-replay"
@@ -390,8 +396,10 @@ a630-piglit-full:
 
 a630-traces-restricted:
   extends:
-    - .a630-traces
+    - a630-traces
     - .google-freedreno-rules-restricted
+  rules:
+    - when: never # Google nginx needs updating
   variables:
     PIGLIT_TRACES_FILE: restricted-traces-freedreno.yml
     PIGLIT_REPLAY_EXTRA_ARGS: "--download-caching-proxy-url=http://10.42.0.1:8888/cache/?uri= --db-path ${CI_PROJECT_DIR}/replayer-db/ --minio_bucket=${S3_TRACIE_PRIVATE_BUCKET} --jwt-file=${S3_JWT_FILE}"
@@ -399,8 +407,10 @@ a630-traces-restricted:
 
 a630-traces-performance:
   extends:
-    - .a630-traces
+    - a630-traces
     - .google-freedreno-rules-performance
+  rules:
+    - when: never # Google nginx needs updating
   variables:
     PIGLIT_REPLAY_SUBCOMMAND: "profile"
     PIGLIT_REPLAY_EXTRA_ARGS: "--download-caching-proxy-url=http://10.42.0.1:8888/cache/?uri= --db-path ${CI_PROJECT_DIR}/replayer-db/"

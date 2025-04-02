@@ -801,6 +801,16 @@ impl SrcRef {
         }
     }
 
+    pub fn is_bindless_cbuf(&self) -> bool {
+        match self {
+            SrcRef::CBuf(cbuf) => match cbuf.buf {
+                CBuf::BindlessSSA(_) | CBuf::BindlessUGPR(_) => true,
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     pub fn is_predicate(&self) -> bool {
         match self {
             SrcRef::Zero | SrcRef::Imm32(_) | SrcRef::CBuf(_) => false,
@@ -1286,6 +1296,10 @@ impl Src {
             SrcRef::SSA(ssa) => ssa.is_uniform(),
             SrcRef::Reg(reg) => reg.is_uniform(),
         }
+    }
+
+    pub fn is_bindless_cbuf(&self) -> bool {
+        self.src_ref.is_bindless_cbuf()
     }
 
     pub fn is_predicate(&self) -> bool {
@@ -6504,6 +6518,164 @@ impl Op {
             _ => false,
         }
     }
+
+    pub fn has_fixed_latency(&self, sm: u8) -> bool {
+        match self {
+            // Float ALU
+            Op::F2FP(_)
+            | Op::FAdd(_)
+            | Op::FFma(_)
+            | Op::FMnMx(_)
+            | Op::FMul(_)
+            | Op::FSet(_)
+            | Op::FSetP(_)
+            | Op::HAdd2(_)
+            | Op::HFma2(_)
+            | Op::HMul2(_)
+            | Op::HSet2(_)
+            | Op::HSetP2(_)
+            | Op::HMnMx2(_)
+            | Op::FSwzAdd(_) => true,
+
+            // Multi-function unit is variable latency
+            Op::Rro(_) | Op::MuFu(_) => false,
+
+            // Double-precision float ALU
+            Op::DAdd(_)
+            | Op::DFma(_)
+            | Op::DMnMx(_)
+            | Op::DMul(_)
+            | Op::DSetP(_) => false,
+
+            // Integer ALU
+            Op::BRev(_) | Op::Flo(_) | Op::PopC(_) => false,
+            Op::IMad(_) | Op::IMul(_) => sm >= 70,
+            Op::BMsk(_)
+            | Op::IAbs(_)
+            | Op::IAdd2(_)
+            | Op::IAdd2X(_)
+            | Op::IAdd3(_)
+            | Op::IAdd3X(_)
+            | Op::IDp4(_)
+            | Op::IMad64(_)
+            | Op::IMnMx(_)
+            | Op::ISetP(_)
+            | Op::Lea(_)
+            | Op::LeaX(_)
+            | Op::Lop2(_)
+            | Op::Lop3(_)
+            | Op::Shf(_)
+            | Op::Shl(_)
+            | Op::Shr(_)
+            | Op::Bfe(_) => true,
+
+            // Conversions are variable latency?!?
+            Op::F2F(_) | Op::F2I(_) | Op::I2F(_) | Op::I2I(_) | Op::FRnd(_) => {
+                false
+            }
+
+            // Move ops
+            Op::Mov(_) | Op::Prmt(_) | Op::Sel(_) => true,
+            Op::Shfl(_) => false,
+
+            // Predicate ops
+            Op::PLop3(_) | Op::PSetP(_) => true,
+
+            // Uniform ops
+            Op::R2UR(_) => false,
+
+            // Texture ops
+            Op::Tex(_)
+            | Op::Tld(_)
+            | Op::Tld4(_)
+            | Op::Tmml(_)
+            | Op::Txd(_)
+            | Op::Txq(_) => false,
+
+            // Surface ops
+            Op::SuLd(_) | Op::SuSt(_) | Op::SuAtom(_) => false,
+
+            // Memory ops
+            Op::Ld(_)
+            | Op::Ldc(_)
+            | Op::St(_)
+            | Op::Atom(_)
+            | Op::AL2P(_)
+            | Op::ALd(_)
+            | Op::ASt(_)
+            | Op::Ipa(_)
+            | Op::CCtl(_)
+            | Op::LdTram(_)
+            | Op::MemBar(_) => false,
+
+            // Control-flow ops
+            Op::BClear(_)
+            | Op::Break(_)
+            | Op::BSSy(_)
+            | Op::BSync(_)
+            | Op::SSy(_)
+            | Op::Sync(_)
+            | Op::Brk(_)
+            | Op::PBk(_)
+            | Op::Cont(_)
+            | Op::PCnt(_)
+            | Op::Bra(_)
+            | Op::Exit(_)
+            | Op::WarpSync(_) => false,
+
+            // The barrier half is HW scoreboarded by the GPR isn't.  When
+            // moving from a GPR to a barrier, we still need a token for WaR
+            // hazards.
+            Op::BMov(_) => false,
+
+            // Geometry ops
+            Op::Out(_) | Op::OutFinal(_) => false,
+
+            // Miscellaneous ops
+            Op::Bar(_)
+            | Op::CS2R(_)
+            | Op::Isberd(_)
+            | Op::Kill(_)
+            | Op::PixLd(_)
+            | Op::S2R(_) => false,
+            Op::Nop(_) | Op::Vote(_) => true,
+
+            // Virtual ops
+            Op::Undef(_)
+            | Op::SrcBar(_)
+            | Op::PhiSrcs(_)
+            | Op::PhiDsts(_)
+            | Op::Copy(_)
+            | Op::Pin(_)
+            | Op::Unpin(_)
+            | Op::Swap(_)
+            | Op::ParCopy(_)
+            | Op::RegOut(_)
+            | Op::Annotate(_) => {
+                panic!("Not a hardware opcode")
+            }
+        }
+    }
+
+    /// Some decoupled instructions don't need
+    /// scoreboards, due to our usage.
+    pub fn no_scoreboard(&self) -> bool {
+        match self {
+            Op::BClear(_)
+            | Op::Break(_)
+            | Op::BSSy(_)
+            | Op::BSync(_)
+            | Op::SSy(_)
+            | Op::Sync(_)
+            | Op::Brk(_)
+            | Op::PBk(_)
+            | Op::Cont(_)
+            | Op::PCnt(_)
+            | Op::Bra(_)
+            | Op::Exit(_) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
@@ -6672,7 +6844,6 @@ impl InstrDeps {
     }
 
     pub fn set_delay(&mut self, delay: u8) {
-        assert!(delay <= MAX_INSTR_DELAY);
         self.delay = delay;
     }
 
@@ -6865,140 +7036,6 @@ impl Instr {
         match &self.op {
             Op::PhiDsts(_) => false,
             op => op.is_uniform(),
-        }
-    }
-
-    pub fn has_fixed_latency(&self, sm: u8) -> bool {
-        match &self.op {
-            // Float ALU
-            Op::F2FP(_)
-            | Op::FAdd(_)
-            | Op::FFma(_)
-            | Op::FMnMx(_)
-            | Op::FMul(_)
-            | Op::FSet(_)
-            | Op::FSetP(_)
-            | Op::HAdd2(_)
-            | Op::HFma2(_)
-            | Op::HMul2(_)
-            | Op::HSet2(_)
-            | Op::HSetP2(_)
-            | Op::HMnMx2(_)
-            | Op::FSwzAdd(_) => true,
-
-            // Multi-function unit is variable latency
-            Op::Rro(_) | Op::MuFu(_) => false,
-
-            // Double-precision float ALU
-            Op::DAdd(_)
-            | Op::DFma(_)
-            | Op::DMnMx(_)
-            | Op::DMul(_)
-            | Op::DSetP(_) => false,
-
-            // Integer ALU
-            Op::BRev(_) | Op::Flo(_) | Op::PopC(_) => false,
-            Op::IMad(_) | Op::IMul(_) => sm >= 70,
-            Op::BMsk(_)
-            | Op::IAbs(_)
-            | Op::IAdd2(_)
-            | Op::IAdd2X(_)
-            | Op::IAdd3(_)
-            | Op::IAdd3X(_)
-            | Op::IDp4(_)
-            | Op::IMad64(_)
-            | Op::IMnMx(_)
-            | Op::ISetP(_)
-            | Op::Lea(_)
-            | Op::LeaX(_)
-            | Op::Lop2(_)
-            | Op::Lop3(_)
-            | Op::Shf(_)
-            | Op::Shl(_)
-            | Op::Shr(_)
-            | Op::Bfe(_) => true,
-
-            // Conversions are variable latency?!?
-            Op::F2F(_) | Op::F2I(_) | Op::I2F(_) | Op::I2I(_) | Op::FRnd(_) => {
-                false
-            }
-
-            // Move ops
-            Op::Mov(_) | Op::Prmt(_) | Op::Sel(_) => true,
-            Op::Shfl(_) => false,
-
-            // Predicate ops
-            Op::PLop3(_) | Op::PSetP(_) => true,
-
-            // Uniform ops
-            Op::R2UR(_) => false,
-
-            // Texture ops
-            Op::Tex(_)
-            | Op::Tld(_)
-            | Op::Tld4(_)
-            | Op::Tmml(_)
-            | Op::Txd(_)
-            | Op::Txq(_) => false,
-
-            // Surface ops
-            Op::SuLd(_) | Op::SuSt(_) | Op::SuAtom(_) => false,
-
-            // Memory ops
-            Op::Ld(_)
-            | Op::Ldc(_)
-            | Op::St(_)
-            | Op::Atom(_)
-            | Op::AL2P(_)
-            | Op::ALd(_)
-            | Op::ASt(_)
-            | Op::Ipa(_)
-            | Op::CCtl(_)
-            | Op::LdTram(_)
-            | Op::MemBar(_) => false,
-
-            // Control-flow ops
-            Op::BClear(_) | Op::Break(_) | Op::BSSy(_) | Op::BSync(_) => true,
-            Op::SSy(_)
-            | Op::Sync(_)
-            | Op::Brk(_)
-            | Op::PBk(_)
-            | Op::Cont(_)
-            | Op::PCnt(_) => true,
-            Op::Bra(_) | Op::Exit(_) => true,
-            Op::WarpSync(_) => false,
-
-            // The barrier half is HW scoreboarded by the GPR isn't.  When
-            // moving from a GPR to a barrier, we still need a token for WaR
-            // hazards.
-            Op::BMov(_) => false,
-
-            // Geometry ops
-            Op::Out(_) | Op::OutFinal(_) => false,
-
-            // Miscellaneous ops
-            Op::Bar(_)
-            | Op::CS2R(_)
-            | Op::Isberd(_)
-            | Op::Kill(_)
-            | Op::PixLd(_)
-            | Op::S2R(_) => false,
-            Op::Nop(_) | Op::Vote(_) => true,
-
-            // Virtual ops
-            Op::Undef(_)
-            | Op::SrcBar(_)
-            | Op::PhiSrcs(_)
-            | Op::PhiDsts(_)
-            | Op::Copy(_)
-            | Op::Pin(_)
-            | Op::Unpin(_)
-            | Op::Swap(_)
-            | Op::ParCopy(_)
-            | Op::RegOut(_)
-            | Op::Annotate(_) => {
-                panic!("Not a hardware opcode")
-            }
         }
     }
 
@@ -7493,11 +7530,113 @@ pub struct ShaderInfo {
 
 pub trait ShaderModel {
     fn sm(&self) -> u8;
+
+    #[allow(dead_code)]
+    fn is_fermi(&self) -> bool {
+        self.sm() >= 20 && self.sm() < 30
+    }
+
+    #[allow(dead_code)]
+    fn is_kepler_a(&self) -> bool {
+        self.sm() >= 30 && self.sm() < 32
+    }
+
+    #[allow(dead_code)]
+    fn is_kepler_b(&self) -> bool {
+        // TK1 is SM 3.2 and desktop Kepler B is SM 3.3+
+        self.sm() >= 32 && self.sm() < 40
+    }
+
+    // The following helpers are pulled from GetSpaVersion in the open-source
+    // NVIDIA kernel driver sources
+
+    #[allow(dead_code)]
+    fn is_maxwell(&self) -> bool {
+        self.sm() >= 50 && self.sm() < 60
+    }
+
+    #[allow(dead_code)]
+    fn is_pascal(&self) -> bool {
+        self.sm() >= 60 && self.sm() < 70
+    }
+
+    #[allow(dead_code)]
+    fn is_volta(&self) -> bool {
+        self.sm() >= 70 && self.sm() < 73
+    }
+
+    #[allow(dead_code)]
+    fn is_turing(&self) -> bool {
+        self.sm() >= 73 && self.sm() < 80
+    }
+
+    #[allow(dead_code)]
+    fn is_ampere(&self) -> bool {
+        self.sm() >= 80 && self.sm() < 89
+    }
+
+    #[allow(dead_code)]
+    fn is_ada(&self) -> bool {
+        self.sm() == 89
+    }
+
+    #[allow(dead_code)]
+    fn is_hopper(&self) -> bool {
+        self.sm() >= 90 && self.sm() < 100
+    }
+
+    #[allow(dead_code)]
+    fn is_blackwell(&self) -> bool {
+        self.sm() >= 100 && self.sm() < 110
+    }
+
     fn num_regs(&self, file: RegFile) -> u32;
     fn hw_reserved_gprs(&self) -> u32;
     fn crs_size(&self, max_crs_depth: u32) -> u32;
 
     fn op_can_be_uniform(&self, op: &Op) -> bool;
+
+    // Scheduling information
+    fn op_needs_scoreboard(&self, op: &Op) -> bool {
+        !op.no_scoreboard() && !op.has_fixed_latency(self.sm())
+    }
+
+    /// Latency before another non-NOP can execute
+    fn exec_latency(&self, op: &Op) -> u32;
+
+    /// Read-after-read latency
+    fn raw_latency(
+        &self,
+        write: &Op,
+        dst_idx: usize,
+        read: &Op,
+        src_idx: usize,
+    ) -> u32;
+
+    /// Write-after-read latency
+    fn war_latency(
+        &self,
+        read: &Op,
+        src_idx: usize,
+        write: &Op,
+        dst_idx: usize,
+    ) -> u32;
+
+    /// Write-after-write latency
+    fn waw_latency(
+        &self,
+        a: &Op,
+        a_dst_idx: usize,
+        a_has_pred: bool,
+        b: &Op,
+        b_dst_idx: usize,
+    ) -> u32;
+
+    /// Predicate read-after-write latency
+    fn paw_latency(&self, write: &Op, dst_idx: usize) -> u32;
+
+    /// Worst-case access-after-write latency
+    fn worst_latency(&self, write: &Op, dst_idx: usize) -> u32;
 
     fn legalize_op(&self, b: &mut LegalizeBuilder, op: &mut Op);
     fn encode_shader(&self, s: &Shader<'_>) -> Vec<u32>;
@@ -7574,13 +7713,11 @@ impl Shader<'_> {
 
     pub fn gather_info(&mut self) {
         let mut num_instrs = 0;
-        let mut num_static_cycles = 0;
         let mut uses_global_mem = false;
         let mut writes_global_mem = false;
 
         self.for_each_instr(&mut |instr| {
             num_instrs += 1;
-            num_static_cycles += instr.deps.delay as u32;
 
             if !uses_global_mem {
                 uses_global_mem = instr.uses_global_mem();
@@ -7592,7 +7729,6 @@ impl Shader<'_> {
         });
 
         self.info.num_instrs = num_instrs;
-        self.info.num_static_cycles = num_static_cycles;
         self.info.uses_global_mem = uses_global_mem;
         self.info.writes_global_mem = writes_global_mem;
 

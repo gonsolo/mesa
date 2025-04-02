@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+# When changing this file, you need to bump the following
+# .gitlab-ci/image-tags.yml and .gitlab-ci/container/gitlab-ci.yml tags:
+# DEBIAN_BUILD_TAG
+# ANDROID_LLVM_ARTIFACT_NAME
+
 set -exu
 
 # If CI vars are not set, assign an empty value, this prevents -u to fail
@@ -34,9 +39,8 @@ if curl -s -o /dev/null -I -L -f --retry 4 --retry-delay 15 "https://${S3_HOST}/
   exit
 fi
 
-# Install some dependencies needed to build LLVM
+# Ephemeral packages (installed for this script and removed again at the end)
 EPHEMERAL=(
-  ninja-build
   unzip
 )
 
@@ -110,10 +114,8 @@ tar --zstd -cf "${ANDROID_LLVM_ARTIFACT_NAME}.tar.zst" "$LLVM_INSTALL_PREFIX"
 # version does not change, and delete it.
 # The file is not deleted for non-CI because it can be useful in local runs.
 if [ -n "$CI" ]; then
-  ci-fairy s3cp --token-file "${S3_JWT_FILE}" "${ANDROID_LLVM_ARTIFACT_NAME}.tar.zst" "https://${S3_HOST}/${S3_ANDROID_BUCKET}/${CI_PROJECT_PATH}/${ANDROID_LLVM_ARTIFACT_NAME}.tar.zst"
+  s3_upload "${ANDROID_LLVM_ARTIFACT_NAME}.tar.zst" "https://${S3_HOST}/${S3_ANDROID_BUCKET}/${CI_PROJECT_PATH}/"
   rm "${ANDROID_LLVM_ARTIFACT_NAME}.tar.zst"
 fi
-
-rm -rf "$LLVM_INSTALL_PREFIX"
 
 apt-get purge -y "${EPHEMERAL[@]}"

@@ -202,6 +202,7 @@ get_device_extensions(const struct panvk_physical_device *device,
       .KHR_image_format_list = true,
       .KHR_imageless_framebuffer = true,
       .KHR_index_type_uint8 = true,
+      .KHR_line_rasterization = true,
       .KHR_maintenance1 = true,
       .KHR_maintenance2 = true,
       .KHR_maintenance3 = true,
@@ -251,6 +252,7 @@ get_device_extensions(const struct panvk_physical_device *device,
       .EXT_image_drm_format_modifier = true,
       .EXT_image_robustness = true,
       .EXT_index_type_uint8 = true,
+      .EXT_line_rasterization = true,
       .EXT_physical_device_drm = true,
       .EXT_pipeline_creation_cache_control = true,
       .EXT_pipeline_creation_feedback = true,
@@ -270,6 +272,43 @@ get_device_extensions(const struct panvk_physical_device *device,
       .GOOGLE_hlsl_functionality1 = true,
       .GOOGLE_user_type = true,
    };
+}
+
+static bool
+has_compressed_formats(const struct panvk_physical_device *physical_device,
+                       const uint32_t required_formats)
+{
+   uint32_t supported_compr_fmts =
+      panfrost_query_compressed_formats(&physical_device->kmod.props);
+
+   return (supported_compr_fmts & required_formats) == required_formats;
+}
+
+static bool
+has_texture_compression_etc2(const struct panvk_physical_device *physical_device)
+{
+   return has_compressed_formats(physical_device,
+      BITFIELD_BIT(MALI_ETC2_RGB8) |
+      BITFIELD_BIT(MALI_ETC2_RGB8A1) | BITFIELD_BIT(MALI_ETC2_RGBA8) |
+      BITFIELD_BIT(MALI_ETC2_R11_UNORM) | BITFIELD_BIT(MALI_ETC2_R11_SNORM) |
+      BITFIELD_BIT(MALI_ETC2_RG11_UNORM) | BITFIELD_BIT(MALI_ETC2_RG11_SNORM));
+}
+
+static bool
+has_texture_compression_astc_ldr(const struct panvk_physical_device *physical_device)
+{
+   return has_compressed_formats(physical_device, BITFIELD_BIT(MALI_ASTC_2D_LDR));
+}
+
+static bool
+has_texture_compression_bc(const struct panvk_physical_device *physical_device)
+{
+   return has_compressed_formats(physical_device,
+      BITFIELD_BIT(MALI_BC1_UNORM) | BITFIELD_BIT(MALI_BC2_UNORM) |
+      BITFIELD_BIT(MALI_BC3_UNORM) | BITFIELD_BIT(MALI_BC4_UNORM) |
+      BITFIELD_BIT(MALI_BC4_SNORM) | BITFIELD_BIT(MALI_BC5_UNORM) |
+      BITFIELD_BIT(MALI_BC5_SNORM) | BITFIELD_BIT(MALI_BC6H_SF16) |
+      BITFIELD_BIT(MALI_BC6H_UF16) | BITFIELD_BIT(MALI_BC7_UNORM));
 }
 
 static void
@@ -292,9 +331,11 @@ get_features(const struct panvk_physical_device *device,
       .largePoints = true,
       .occlusionQueryPrecise = true,
       .samplerAnisotropy = true,
-      .textureCompressionETC2 = true,
-      .textureCompressionASTC_LDR = true,
+      .textureCompressionETC2 = has_texture_compression_etc2(device),
+      .textureCompressionASTC_LDR = has_texture_compression_astc_ldr(device),
+      .textureCompressionBC = has_texture_compression_bc(device),
       .fragmentStoresAndAtomics = arch >= 10,
+      .shaderImageGatherExtended = true,
       .shaderStorageImageExtendedFormats = true,
       .shaderUniformBufferArrayDynamicIndexing = true,
       .shaderSampledImageArrayDynamicIndexing = true,
@@ -389,6 +430,10 @@ get_features(const struct panvk_physical_device *device,
       /* Vulkan 1.4 */
       .shaderSubgroupRotate = true,
       .shaderSubgroupRotateClustered = true,
+
+      /* VK_KHR_line_rasterization */
+      .rectangularLines = true,
+      .bresenhamLines = true,
 
       /* VK_EXT_graphics_pipeline_library */
       .graphicsPipelineLibrary = true,
@@ -502,7 +547,8 @@ get_device_properties(const struct panvk_instance *instance,
    *properties = (struct vk_properties){
       .apiVersion = get_api_version(arch),
       .driverVersion = vk_get_driver_version(),
-      .vendorID = ARM_VENDOR_ID,
+      .vendorID = instance->force_vk_vendor ? instance->force_vk_vendor :
+                                              ARM_VENDOR_ID,
 
       /* Collect arch_major, arch_minor, arch_rev and product_major,
        * as done by the Arm driver.
@@ -853,6 +899,9 @@ get_device_properties(const struct panvk_instance *instance,
       .uniformTexelBufferOffsetSingleTexelAlignment = true,
       /* XXX: VK_KHR_maintenance4 */
       .maxBufferSize = 1 << 30,
+
+      /* VK_KHR_line_rasterization */
+      .lineSubPixelPrecisionBits = 8,
 
       /* VK_EXT_custom_border_color */
       .maxCustomBorderColorSamplers = 32768,

@@ -97,6 +97,14 @@ vn_image_get_image_reqs_key(struct vn_device *dev,
    if (!dev->image_reqs_cache.ht)
       return false;
 
+   /* Strip the alias bit as the memory requirements are identical. */
+   VkImageCreateInfo local_info;
+   if (create_info->flags & VK_IMAGE_CREATE_ALIAS_BIT) {
+      local_info = *create_info;
+      local_info.flags &= ~VK_IMAGE_CREATE_ALIAS_BIT;
+      create_info = &local_info;
+   }
+
    _mesa_sha1_init(&sha1_ctx);
 
    /* Hash relevant fields in the pNext chain */
@@ -1102,7 +1110,7 @@ vn_GetDeviceImageMemoryRequirements(
    if (cacheable) {
       uint32_t plane = 0;
       if (pInfo->pCreateInfo->flags & VK_IMAGE_CREATE_DISJOINT_BIT)
-         vn_image_get_plane(pInfo->planeAspect);
+         plane = vn_image_get_plane(pInfo->planeAspect);
 
       const struct vn_image_memory_requirements *cached_reqs =
          vn_image_get_reqs_from_cache(dev, key, plane);

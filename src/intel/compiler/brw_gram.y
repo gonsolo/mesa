@@ -333,6 +333,7 @@ i965_asm_set_instruction_options(struct brw_codegen *p,
    struct instoption instoption;
    struct msgdesc msgdesc;
    struct tgl_swsb depinfo;
+   struct { int sdepth; int rcount; } dpas_params;
    brw_eu_inst *instruction;
 }
 
@@ -355,6 +356,7 @@ i965_asm_set_instruction_options(struct brw_codegen *p,
 %token <integer> TYPE_Q TYPE_UQ
 %token <integer> TYPE_V TYPE_UV
 %token <integer> TYPE_F TYPE_HF
+%token <integer> TYPE_BF
 %token <integer> TYPE_DF
 %token <integer> TYPE_VF
 
@@ -367,7 +369,7 @@ i965_asm_set_instruction_options(struct brw_codegen *p,
 %token <integer> ADD ADD3 ADDC AND ASR AVG
 %token <integer> BFE BFI1 BFI2 BFB BFREV BRC BRD BREAK
 %token <integer> CALL CALLA CASE CBIT CMP CMPN CONT CSEL
-%token <integer> DIM DO DPAS DPASW DP2 DP3 DP4 DP4A DPH
+%token <integer> DIM DO DPAS DP2 DP3 DP4 DP4A DPH
 %token <integer> ELSE ENDIF FBH FBL FORK FRC
 %token <integer> GOTO
 %token <integer> HALT
@@ -541,6 +543,9 @@ i965_asm_set_instruction_options(struct brw_codegen *p,
 %token <integer> SBID_WAIT_DST
 
 %type <depinfo> depinfo
+
+/* DPAS */
+%token <dpas_params> DPAS_PARAMS
 
 %code {
 
@@ -861,6 +866,26 @@ ternaryinstruction:
       brw_eu_inst_set_saturate(p->devinfo, brw_last_inst, $3);
       brw_eu_inst_set_exec_size(p->devinfo, brw_last_inst, $5);
       brw_eu_inst_set_group(p->devinfo, brw_last_inst, $10.chan_offset);
+   }
+   |
+   predicate DPAS DPAS_PARAMS saturate cond_mod execsize dst src src src instoptions
+   {
+      assert(p->devinfo->verx10 >= 125);
+
+      brw_set_default_access_mode(p, $11.access_mode);
+
+      brw_DPAS(p, translate_systolic_depth($3.sdepth), $3.rcount, $7, $8, $9, $10);
+      brw_pop_insn_state(p);
+      i965_asm_set_instruction_options(p, $11);
+      if ($5.cond_modifier) {
+         brw_eu_inst_set_cond_modifier(p->devinfo,
+                                       brw_last_inst,
+                                       $5.cond_modifier);
+      }
+
+      brw_eu_inst_set_saturate(p->devinfo, brw_last_inst, $4);
+      brw_eu_inst_set_exec_size(p->devinfo, brw_last_inst, $6);
+      brw_eu_inst_set_group(p->devinfo, brw_last_inst, $11.chan_offset);
    }
    ;
 
@@ -1859,6 +1884,7 @@ reg_type:
    | TYPE_UQ   { $$ = BRW_TYPE_UQ; }
    | TYPE_Q    { $$ = BRW_TYPE_Q;  }
    | TYPE_HF   { $$ = BRW_TYPE_HF; }
+   | TYPE_BF   { $$ = BRW_TYPE_BF; }
    ;
 
 imm_type:

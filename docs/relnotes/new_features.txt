@@ -24,3 +24,8 @@ EXT_shader_framebuffer_image_fetch on v3d
 EXT_shader_framebuffer_image_fetch_coherent on v3d
 KHR_blend_equation_advanced on v3d
 KHR_blend_equation_advanced_coherent on v3d
+KHR_partial_update on etnaviv
+VK_KHR_line_rasterization on panvk
+shaderImageGatherExtended on panvk
+textureCompressionBC on panvk
+VK_EXT_sample_locations on RADV for GFX10+

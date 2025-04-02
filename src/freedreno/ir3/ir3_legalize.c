@@ -255,6 +255,10 @@ delay_update(struct ir3_legalize_ctx *ctx,
          continue;
 
       for (unsigned elem = 0; elem < elems; elem++, num++) {
+         /* Don't update delays for registers that aren't actually written. */
+         if (!(dst->flags & IR3_REG_RELATIV) && !(dst->wrmask & (1 << elem)))
+            continue;
+
          for (unsigned consumer_alu = 0; consumer_alu < 2; consumer_alu++) {
             for (unsigned matching_size = 0; matching_size < 2; matching_size++) {
                unsigned *ready_slot =
@@ -1392,7 +1396,7 @@ kill_sched(struct ir3 *ir, struct ir3_shader_variant *so)
 
    foreach_block_rev (block, &ir->block_list) {
       for (unsigned i = 0; i < 2 && block->successors[i]; i++) {
-         if (block->successors[i]->start_ip <= block->end_ip)
+         if (block->successors[i]->start_ip < block->end_ip)
             always_ends = false;
       }
 

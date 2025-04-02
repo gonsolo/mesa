@@ -48,24 +48,6 @@
     <value name=".xyz" value="2" />
     <value name=".xyzw" value="3" />
   </enum>
-  <enum name="COMPONENT_ENABLES" prefix="CE">
-    <value name="NONE" value="0" />
-    <value name="X" value="1" />
-    <value name="Y" value="2" />
-    <value name="XY" value="3" />
-    <value name="Z" value="4" />
-    <value name="XZ" value="5" />
-    <value name="YZ" value="6" />
-    <value name="XYZ" value="7" />
-    <value name="W" value="8" />
-    <value name="XW" value="9" />
-    <value name="YW" value="10" />
-    <value name="XYW" value="11" />
-    <value name="ZW" value="12" />
-    <value name="XZW" value="13" />
-    <value name="YZW" value="14" />
-    <value name="XYZW" value="15" />
-  </enum>
   <struct name="COLOR_CALC_STATE" length="6">
     <field name="Alpha Test Format" start="0" end="0" type="uint">
       <value name="ALPHATEST_UNORM8" value="0" />
@@ -78,14 +60,6 @@
     <field name="Blend Constant Color Green" start="96" end="127" type="float" />
     <field name="Blend Constant Color Blue" start="128" end="159" type="float" />
     <field name="Blend Constant Color Alpha" start="160" end="191" type="float" />
-  </struct>
-  <struct name="EXECUTION_UNIT_EXTENDED_MESSAGE_DESCRIPTOR" length="1">
-    <field name="Target Function ID" start="0" end="3" type="uint" />
-    <field name="End Of Thread" start="5" end="5" type="uint">
-      <value name="No Termination" value="0" />
-      <value name="EOT" value="1" />
-    </field>
-    <field name="Extended Message Length" start="6" end="9" type="uint" />
   </struct>
   <struct name="FRAMEDELTAQP" length="2">
     <group count="8" start="0" size="8">
@@ -3443,12 +3417,16 @@
     <field name="Display Buffer Base Address" start="76" end="95" type="address" />
     <field name="Left Eye Display Buffer Base Address" start="108" end="127" type="address" />
   </instruction>
-  <instruction name="MI_FLUSH_DW" bias="2" length="5" engine="video">
+  <instruction name="MI_FLUSH_DW" bias="2" length="5" engine="blitter|video">
     <field name="DWord Length" start="0" end="5" type="uint" default="3" />
     <field name="Video Pipeline Cache Invalidate" start="7" end="7" type="bool" />
     <field name="Notify Enable" start="8" end="8" type="bool" />
     <field name="Flush LLC" start="9" end="9" type="bool" />
-    <field name="Post-Sync Operation" start="14" end="15" type="uint" />
+    <field name="Post-Sync Operation" start="14" end="15" type="uint">
+      <value name="No Write" value="0" />
+      <value name="Write Immediate Data" value="1" />
+      <value name="Write Timestamp" value="3" />
+    </field>
     <field name="TLB Invalidate" start="18" end="18" type="bool" />
     <field name="Store Data Index" start="21" end="21" type="uint" />
     <field name="MI Command Opcode" start="23" end="28" type="uint" default="38" />

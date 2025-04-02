@@ -97,8 +97,8 @@ radv_null_winsys_query_info(struct radeon_winsys *rws, struct radeon_info *gpu_i
    }
 
    gpu_info->pci_id = pci_ids[gpu_info->family].pci_id;
-   gpu_info->max_se = 4;
-   gpu_info->num_se = 4;
+   gpu_info->max_se = pci_ids[gpu_info->family].has_dedicated_vram ? 4 : 1;
+   gpu_info->num_se = gpu_info->max_se;
    if (gpu_info->gfx_level >= GFX10_3)
       gpu_info->max_waves_per_simd = 16;
    else if (gpu_info->gfx_level >= GFX10)
@@ -123,7 +123,7 @@ radv_null_winsys_query_info(struct radeon_winsys *rws, struct radeon_info *gpu_i
    gpu_info->has_ngg_fully_culled_bug = gpu_info->gfx_level == GFX10;
    gpu_info->has_ngg_passthru_no_msg = gpu_info->family >= CHIP_NAVI23;
 
-   if (gpu_info->family == CHIP_NAVI31 || gpu_info->family == CHIP_NAVI32)
+   if (gpu_info->family == CHIP_NAVI31 || gpu_info->family == CHIP_NAVI32 || gpu_info->gfx_level >= GFX12)
       gpu_info->num_physical_wave64_vgprs_per_simd = 768;
    else if (gpu_info->gfx_level >= GFX10)
       gpu_info->num_physical_wave64_vgprs_per_simd = 512;
@@ -142,6 +142,9 @@ radv_null_winsys_query_info(struct radeon_winsys *rws, struct radeon_info *gpu_i
 
    gpu_info->has_image_load_dcc_bug = gpu_info->family == CHIP_NAVI23 || gpu_info->family == CHIP_VANGOGH;
 
+   gpu_info->has_distributed_tess =
+      gpu_info->gfx_level >= GFX10 || (gpu_info->gfx_level >= GFX8 && gpu_info->max_se >= 2);
+
    gpu_info->has_accelerated_dot_product =
       gpu_info->family == CHIP_VEGA20 ||
       (gpu_info->family >= CHIP_MI100 && gpu_info->family != CHIP_NAVI10 && gpu_info->family != CHIP_GFX1013);
@@ -159,6 +162,8 @@ radv_null_winsys_query_info(struct radeon_winsys *rws, struct radeon_info *gpu_i
 
    gpu_info->has_scheduled_fence_dependency = true;
    gpu_info->has_gang_submit = true;
+
+   gpu_info->gart_page_size = 4096;
 }
 
 static const char *

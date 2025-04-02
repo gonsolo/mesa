@@ -387,6 +387,10 @@ radv_use_htile_for_image(const struct radv_device *device, const struct radv_ima
        (compression && compression->flags == VK_IMAGE_COMPRESSION_DISABLED_EXT))
       return false;
 
+   /* HTILE compression is only useful for depth/stencil attachments. */
+   if (!(image->vk.usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))
+      return false;
+
    if (image->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT)
       return false;
 
@@ -1582,7 +1586,7 @@ radv_layout_can_fast_clear(const struct radv_device *device, const struct radv_i
     * images can only be fast-cleared if comp-to-single is supported because we don't yet support
     * FCE on the compute queue.
     */
-   return queue_mask == (1u << RADV_QUEUE_GENERAL) || radv_image_use_comp_to_single(device, image);
+   return queue_mask == (1u << RADV_QUEUE_GENERAL) || image->support_comp_to_single;
 }
 
 bool

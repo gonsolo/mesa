@@ -956,36 +956,22 @@ brw_inst::is_volatile() const
             opcode == SHADER_OPCODE_SEND_GATHER) && send_is_volatile);
 }
 
-static void
-adjust_later_block_ips(bblock_t *start_block, int ip_adjustment)
-{
-   for (bblock_t *block_iter = start_block->next();
-        block_iter;
-        block_iter = block_iter->next()) {
-      block_iter->start_ip += ip_adjustment;
-      block_iter->end_ip += ip_adjustment;
-   }
-}
-
 void
 brw_inst::insert_before(bblock_t *block, brw_inst *inst)
 {
    assert(this != inst);
-   assert(block->end_ip_delta == 0);
 
    assert(!inst->block || inst->block == block);
-
-   block->end_ip++;
-
-   adjust_later_block_ips(block, 1);
 
    exec_node::insert_before(inst);
 
    inst->block = block;
+   inst->block->num_instructions++;
+   inst->block->cfg->total_instructions++;
 }
 
 void
-brw_inst::remove(bool defer_later_block_ip_updates)
+brw_inst::remove()
 {
    assert(block);
 
@@ -997,23 +983,13 @@ brw_inst::remove(bool defer_later_block_ip_updates)
       return;
    }
 
-   if (defer_later_block_ip_updates) {
-      block->end_ip_delta--;
-   } else {
-      assert(block->end_ip_delta == 0);
-      adjust_later_block_ips(block, -1);
-   }
+   assert(block->num_instructions > 0);
+   assert(block->cfg->total_instructions > 0);
+   block->num_instructions--;
+   block->cfg->total_instructions--;
 
-   if (block->start_ip == block->end_ip) {
-      if (block->end_ip_delta != 0) {
-         adjust_later_block_ips(block, block->end_ip_delta);
-         block->end_ip_delta = 0;
-      }
-
+   if (block->num_instructions == 0)
       block->cfg->remove_block(block);
-   } else {
-      block->end_ip--;
-   }
 
    exec_node::remove();
    block = NULL;
@@ -1031,7 +1007,7 @@ get_exec_type(const brw_inst *inst)
          if (brw_type_size_bytes(t) > brw_type_size_bytes(exec_type))
             exec_type = t;
          else if (brw_type_size_bytes(t) == brw_type_size_bytes(exec_type) &&
-                  brw_type_is_float(t))
+                  brw_type_is_float_or_bfloat(t))
             exec_type = t;
       }
    }
@@ -1089,7 +1065,7 @@ has_dst_aligned_region_restriction(const intel_device_info *devinfo,
     * simulator suggest that only 32x32-bit integer multiplication is
     * restricted.
     */
-   const bool is_dword_multiply = !brw_type_is_float(exec_type) &&
+   const bool is_dword_multiply = brw_type_is_int(exec_type) &&
       ((inst->opcode == BRW_OPCODE_MUL &&
         MIN2(brw_type_size_bytes(inst->src[0].type), brw_type_size_bytes(inst->src[1].type)) >= 4) ||
        (inst->opcode == BRW_OPCODE_MAD &&

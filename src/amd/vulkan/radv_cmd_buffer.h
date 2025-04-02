@@ -492,7 +492,7 @@ struct radv_cmd_state {
 };
 
 struct radv_enc_state {
-   uint32_t task_size_offset;
+   uint32_t *p_task_size;
    uint32_t total_task_size;
    unsigned shifter;
    unsigned bits_in_shifter;
@@ -668,39 +668,6 @@ radv_get_num_pipeline_stat_queries(struct radv_cmd_buffer *cmd_buffer)
    /* SAMPLE_STREAMOUTSTATS also requires PIPELINESTAT_START to be enabled. */
    return cmd_buffer->state.active_pipeline_queries + cmd_buffer->state.active_prims_gen_queries +
           cmd_buffer->state.active_prims_xfb_queries;
-}
-
-static inline void
-radv_emit_shader_pointer_head(struct radeon_cmdbuf *cs, unsigned sh_offset, unsigned pointer_count,
-                              bool use_32bit_pointers)
-{
-   radeon_emit(cs, PKT3(PKT3_SET_SH_REG, pointer_count * (use_32bit_pointers ? 1 : 2), 0));
-   radeon_emit(cs, (sh_offset - SI_SH_REG_OFFSET) >> 2);
-}
-
-static inline void
-radv_emit_shader_pointer_body(const struct radv_device *device, struct radeon_cmdbuf *cs, uint64_t va,
-                              bool use_32bit_pointers)
-{
-   const struct radv_physical_device *pdev = radv_device_physical(device);
-
-   radeon_emit(cs, va);
-
-   if (use_32bit_pointers) {
-      assert(va == 0 || (va >> 32) == pdev->info.address32_hi);
-   } else {
-      radeon_emit(cs, va >> 32);
-   }
-}
-
-static inline void
-radv_emit_shader_pointer(const struct radv_device *device, struct radeon_cmdbuf *cs, uint32_t sh_offset, uint64_t va,
-                         bool global)
-{
-   bool use_32bit_pointers = !global;
-
-   radv_emit_shader_pointer_head(cs, sh_offset, 1, use_32bit_pointers);
-   radv_emit_shader_pointer_body(device, cs, va, use_32bit_pointers);
 }
 
 bool radv_cmd_buffer_uses_mec(struct radv_cmd_buffer *cmd_buffer);

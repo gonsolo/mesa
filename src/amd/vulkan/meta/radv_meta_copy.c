@@ -80,11 +80,9 @@ transfer_copy_memory_image(struct radv_cmd_buffer *cmd_buffer, uint64_t buffer_v
 {
    const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    struct radeon_cmdbuf *cs = cmd_buffer->cs;
-   const VkImageAspectFlags aspect_mask = region->imageSubresource.aspectMask;
 
-   struct radv_sdma_surf buf = radv_sdma_get_buf_surf(buffer_va, image, region, aspect_mask);
-   const struct radv_sdma_surf img =
-      radv_sdma_get_surf(device, image, region->imageSubresource, region->imageOffset, aspect_mask);
+   struct radv_sdma_surf buf = radv_sdma_get_buf_surf(buffer_va, image, region);
+   const struct radv_sdma_surf img = radv_sdma_get_surf(device, image, region->imageSubresource, region->imageOffset);
    const VkExtent3D extent = radv_sdma_get_copy_extent(image, region->imageSubresource, region->imageExtent);
 
    if (radv_sdma_use_unaligned_buffer_image_copy(device, &buf, &img, extent)) {
@@ -395,15 +393,16 @@ transfer_copy_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_i
    struct radeon_cmdbuf *cs = cmd_buffer->cs;
    unsigned int dst_aspect_mask_remaining = region->dstSubresource.aspectMask;
 
-   u_foreach_bit (b, region->srcSubresource.aspectMask) {
-      const VkImageAspectFlags src_aspect_mask = BITFIELD_BIT(b);
-      const VkImageAspectFlags dst_aspect_mask = BITFIELD_BIT(u_bit_scan(&dst_aspect_mask_remaining));
+   VkImageSubresourceLayers src_subresource = region->srcSubresource;
+   VkImageSubresourceLayers dst_subresource = region->dstSubresource;
 
-      const struct radv_sdma_surf src =
-         radv_sdma_get_surf(device, src_image, region->srcSubresource, region->srcOffset, src_aspect_mask);
-      const struct radv_sdma_surf dst =
-         radv_sdma_get_surf(device, dst_image, region->dstSubresource, region->dstOffset, dst_aspect_mask);
-      const VkExtent3D extent = radv_sdma_get_copy_extent(src_image, region->srcSubresource, region->extent);
+   u_foreach_bit (b, region->srcSubresource.aspectMask) {
+      src_subresource.aspectMask = BITFIELD_BIT(b);
+      dst_subresource.aspectMask = BITFIELD_BIT(u_bit_scan(&dst_aspect_mask_remaining));
+
+      const struct radv_sdma_surf src = radv_sdma_get_surf(device, src_image, src_subresource, region->srcOffset);
+      const struct radv_sdma_surf dst = radv_sdma_get_surf(device, dst_image, dst_subresource, region->dstOffset);
+      const VkExtent3D extent = radv_sdma_get_copy_extent(src_image, src_subresource, region->extent);
 
       if (radv_sdma_use_t2t_scanline_copy(device, &src, &dst, extent)) {
          if (!alloc_transfer_temp_bo(cmd_buffer))
@@ -413,6 +412,31 @@ transfer_copy_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_i
       } else {
          radv_sdma_copy_image(device, cs, &src, &dst, extent);
       }
+   }
+}
+
+static VkFormat
+radv_get_compat_color_ds_format(VkFormat format)
+{
+   switch (format) {
+   case VK_FORMAT_R8_UNORM:
+   case VK_FORMAT_R8_SNORM:
+   case VK_FORMAT_R8_UINT:
+   case VK_FORMAT_R8_SINT:
+      return VK_FORMAT_R8_UINT;
+      break;
+   case VK_FORMAT_R16_SFLOAT:
+   case VK_FORMAT_R16_UNORM:
+   case VK_FORMAT_R16_SNORM:
+   case VK_FORMAT_R16_UINT:
+   case VK_FORMAT_R16_SINT:
+      return VK_FORMAT_R16_UNORM;
+   case VK_FORMAT_R32_SFLOAT:
+   case VK_FORMAT_R32_SINT:
+   case VK_FORMAT_R32_UINT:
+      return VK_FORMAT_R32_SFLOAT;
+   default:
+      unreachable("invalid color format for color to depth/stencil image copy.");
    }
 }
 
@@ -522,6 +546,13 @@ copy_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_image, VkI
       b_dst.disable_compression = true;
 
       radv_describe_barrier_end(cmd_buffer);
+   }
+
+   /* Select a compatible color format for color<->depth/stencil copies. */
+   if (vk_format_is_color(src_image->vk.format) && vk_format_is_depth_or_stencil(dst_image->vk.format)) {
+      b_src.format = radv_get_compat_color_ds_format(src_image->vk.format);
+   } else if (vk_format_is_depth_or_stencil(src_image->vk.format) && vk_format_is_color(dst_image->vk.format)) {
+      b_dst.format = radv_get_compat_color_ds_format(dst_image->vk.format);
    }
 
    /**

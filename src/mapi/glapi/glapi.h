@@ -54,21 +54,13 @@ extern "C" {
 #endif
 
 
-#ifdef _GLAPI_NO_EXPORTS
+#ifdef _WIN32
 #  define _GLAPI_EXPORT
-#else /* _GLAPI_NO_EXPORTS */
-#  ifdef _WIN32
-#    ifdef _GLAPI_DLL_EXPORTS
-#      define _GLAPI_EXPORT __declspec(dllexport)
-#    else
-#      define _GLAPI_EXPORT __declspec(dllimport)
-#    endif
-#  elif defined(__GNUC__)
-#    define _GLAPI_EXPORT __attribute__((visibility("default")))
-#  else
-#    define _GLAPI_EXPORT
-#  endif
-#endif /* _GLAPI_NO_EXPORTS */
+#elif defined(__GNUC__)
+#  define _GLAPI_EXPORT __attribute__((visibility("default")))
+#else
+#  define _GLAPI_EXPORT
+#endif
 
 
 typedef void (*_glapi_proc)(void);
@@ -85,9 +77,7 @@ _GLAPI_EXPORT extern __THREAD_INITIAL_EXEC struct _glapi_table * _mesa_glapi_tls
 _GLAPI_EXPORT extern __THREAD_INITIAL_EXEC void * _mesa_glapi_tls_Context;
 #endif
 
-_GLAPI_EXPORT extern const struct _glapi_table *_mesa_glapi_Dispatch;
-
-#if DETECT_OS_WINDOWS && !defined(MAPI_MODE_GLAPI)
+#if DETECT_OS_WINDOWS && !defined(MAPI_MODE_SHARED_GLAPI)
 # define GET_DISPATCH() _mesa_glapi_get_dispatch()
 # define GET_CURRENT_CONTEXT(C)  struct gl_context *C = (struct gl_context *) _mesa_glapi_get_context()
 #else
@@ -136,9 +126,6 @@ _GLAPI_EXPORT void
 _glapi_table_patch(struct _glapi_table *, const char *name, void *wrapper);
 #endif
 
-
-void
-_glapi_set_nop_handler(_glapi_nop_handler_proc func);
 
 /** Return pointer to new dispatch table filled with no-op functions */
 struct _glapi_table *

@@ -178,6 +178,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_maintenance5                      = true,
       .KHR_maintenance6                      = true,
       .KHR_maintenance7                      = true,
+      .KHR_maintenance8                      = true,
       .KHR_map_memory2                       = true,
       .KHR_multiview                         = true,
       .KHR_performance_query =
@@ -243,6 +244,10 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_video_encode_h264                 = VIDEO_CODEC_H264ENC && device->video_encode_enabled,
       .KHR_video_encode_h265                 = device->info.ver >= 12 && VIDEO_CODEC_H265ENC && device->video_encode_enabled,
       .KHR_video_maintenance1                = (device->video_decode_enabled &&
+                                               (VIDEO_CODEC_H264DEC || VIDEO_CODEC_H265DEC)) ||
+                                               (device->video_encode_enabled &&
+                                               (VIDEO_CODEC_H264ENC || VIDEO_CODEC_H265ENC)),
+      .KHR_video_maintenance2                = (device->video_decode_enabled &&
                                                (VIDEO_CODEC_H264DEC || VIDEO_CODEC_H265DEC)) ||
                                                (device->video_encode_enabled &&
                                                (VIDEO_CODEC_H264ENC || VIDEO_CODEC_H265ENC)),
@@ -887,6 +892,9 @@ get_features(const struct anv_physical_device *pdevice,
       /* VK_KHR_video_maintenance1 */
       .videoMaintenance1 = true,
 
+      /* VK_KHR_video_maintenance2 */
+      .videoMaintenance2 = true,
+
       /* VK_EXT_image_compression_control */
       .imageCompressionControl = true,
 
@@ -920,6 +928,9 @@ get_features(const struct anv_physical_device *pdevice,
       /* VK_EXT_shader_image_atomic_int64 */
       .shaderImageInt64Atomics = true,
       .sparseImageInt64Atomics = false,
+
+      /* VK_KHR_maintenance8 */
+      .maintenance8 = true,
    };
 
    /* The new DOOM and Wolfenstein games require depthBounds without
@@ -2649,6 +2660,8 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
    device->isl_dev.buffer_length_in_aux_addr = !intel_needs_workaround(device->isl_dev.info, 14019708328);
    device->isl_dev.sampler_route_to_lsc =
       driQueryOptionb(&instance->dri_options, "intel_sampler_route_to_lsc");
+   device->isl_dev.l1_storage_wt =
+      driQueryOptionb(&instance->dri_options, "intel_storage_cache_policy_wt");
 
    result = anv_physical_device_init_uuids(device);
    if (result != VK_SUCCESS)

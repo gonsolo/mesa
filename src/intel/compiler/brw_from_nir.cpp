@@ -85,38 +85,6 @@ static void brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
 static void brw_combine_with_vec(const brw_builder &bld, const brw_reg &dst,
                                  const brw_reg &src, unsigned n);
 
-static bool
-brw_texture_offset(const nir_tex_instr *tex, unsigned src,
-                   uint32_t *offset_bits_out)
-{
-   if (!nir_src_is_const(tex->src[src].src))
-      return false;
-
-   const unsigned num_components = nir_tex_instr_src_size(tex, src);
-
-   /* Combine all three offsets into a single unsigned dword:
-    *
-    *    bits 11:8 - U Offset (X component)
-    *    bits  7:4 - V Offset (Y component)
-    *    bits  3:0 - R Offset (Z component)
-    */
-   uint32_t offset_bits = 0;
-   for (unsigned i = 0; i < num_components; i++) {
-      int offset = nir_src_comp_as_int(tex->src[src].src, i);
-
-      /* offset out of bounds; caller will handle it. */
-      if (offset > 7 || offset < -8)
-         return false;
-
-      const unsigned shift = 4 * (2 - i);
-      offset_bits |= (offset & 0xF) << shift;
-   }
-
-   *offset_bits_out = offset_bits;
-
-   return true;
-}
-
 static brw_reg
 setup_imm_b(const brw_builder &bld, int8_t v)
 {
@@ -470,8 +438,6 @@ brw_from_nir_emit_loop(nir_to_brw_state &ntb, nir_loop *loop)
 
    assert(!nir_loop_has_continue_construct(loop));
    bld.DO();
-
-   bld.emit(SHADER_OPCODE_FLOW);
 
    brw_from_nir_emit_cf_list(ntb, &loop->body);
 
@@ -1126,6 +1092,16 @@ brw_from_nir_emit_alu(nir_to_brw_state &ntb, nir_alu_instr *instr,
          }
       }
 
+      /* If narrowing (e.g. 32 -> 16), don't do a D -> W or UD -> UW mov,
+       * instead just read the source as W/UW with a stride (discarding
+       * the top bits).  This avoids the need for the destination to be
+       * DWord aligned due to regioning restrictions.
+       */
+      if (brw_type_size_bits(result.type) < brw_type_size_bits(op[0].type)) {
+         const unsigned bits = brw_type_size_bits(result.type);
+         op[0] = subscript(op[0], brw_type_with_size(op[0].type, bits), 0);
+      }
+
       bld.MOV(result, op[0]);
       break;
    }
@@ -1348,7 +1324,7 @@ brw_from_nir_emit_alu(nir_to_brw_state &ntb, nir_alu_instr *instr,
       const uint32_t bit_size =  nir_src_bit_size(instr->src[0].src);
       if (bit_size != 32) {
          dest = bld.vgrf(op[0].type);
-         bld.UNDEF(dest);
+         bld.emit_undef_for_partial_reg(dest);
       }
 
       bld.CMP(dest, op[0], op[1], brw_cmod_for_nir_comparison(instr->op));
@@ -1384,7 +1360,7 @@ brw_from_nir_emit_alu(nir_to_brw_state &ntb, nir_alu_instr *instr,
       const uint32_t bit_size = brw_type_size_bits(op[0].type);
       if (bit_size != 32) {
          dest = bld.vgrf(op[0].type);
-         bld.UNDEF(dest);
+         bld.emit_undef_for_partial_reg(dest);
       }
 
       bld.CMP(dest, op[0], op[1],
@@ -1702,9 +1678,9 @@ brw_from_nir_emit_alu(nir_to_brw_state &ntb, nir_alu_instr *instr,
     */
    case nir_op_ishl:
       if (instr->def.bit_size < 32) {
-         bld.SHL(result,
-                 op[0],
-                 bld.AND(op[1], brw_imm_ud(instr->def.bit_size - 1)));
+         bld.SHL(result, op[0],
+                 bld.AND(subscript(op[1], BRW_TYPE_UW, 0),
+                         brw_imm_uw(instr->def.bit_size - 1)));
       } else {
          bld.SHL(result, op[0], op[1]);
       }
@@ -1712,9 +1688,9 @@ brw_from_nir_emit_alu(nir_to_brw_state &ntb, nir_alu_instr *instr,
       break;
    case nir_op_ishr:
       if (instr->def.bit_size < 32) {
-         bld.ASR(result,
-                 op[0],
-                 bld.AND(op[1], brw_imm_ud(instr->def.bit_size - 1)));
+         bld.ASR(result, op[0],
+                 bld.AND(subscript(op[1], BRW_TYPE_UW, 0),
+                         brw_imm_uw(instr->def.bit_size - 1)));
       } else {
          bld.ASR(result, op[0], op[1]);
       }
@@ -1722,9 +1698,9 @@ brw_from_nir_emit_alu(nir_to_brw_state &ntb, nir_alu_instr *instr,
       break;
    case nir_op_ushr:
       if (instr->def.bit_size < 32) {
-         bld.SHR(result,
-                 op[0],
-                 bld.AND(op[1], brw_imm_ud(instr->def.bit_size - 1)));
+         bld.SHR(result, op[0],
+                 bld.AND(subscript(op[1], BRW_TYPE_UW, 0),
+                         brw_imm_uw(instr->def.bit_size - 1)));
       } else {
          bld.SHR(result, op[0], op[1]);
       }
@@ -2036,8 +2012,7 @@ get_nir_def(nir_to_brw_state &ntb, const nir_def &def, bool all_sources_uniform)
 
       ntb.ssa_values[def.index].is_scalar = is_scalar;
 
-      if (def.bit_size * bld.dispatch_width() < 8 * REG_SIZE)
-         bld.UNDEF(ntb.ssa_values[def.index]);
+      bld.emit_undef_for_partial_reg(ntb.ssa_values[def.index]);
 
       return ntb.ssa_values[def.index];
    } else {
@@ -7325,21 +7300,15 @@ brw_from_nir_emit_texture(nir_to_brw_state &ntb,
          srcs[TEX_LOGICAL_SRC_SAMPLE_INDEX] = retype(src, BRW_TYPE_UD);
          break;
 
-      case nir_tex_src_offset: {
-         uint32_t offset_bits = 0;
-         if (brw_texture_offset(instr, i, &offset_bits)) {
-            header_bits |= offset_bits;
-         } else {
-            /* On gfx12.5+, if the offsets are not both constant and in the
-             * {-8,7} range, nir_lower_tex() will have already lowered the
-             * source offset. So we should never reach this point.
-             */
-            assert(devinfo->verx10 < 125);
-            srcs[TEX_LOGICAL_SRC_TG4_OFFSET] =
-               retype(src, BRW_TYPE_D);
-         }
+      case nir_tex_src_offset:
+         /* On gfx12.5+, if the offsets are not both constant and in the
+          * {-8,7} range, nir_lower_tex() will have already lowered the
+          * source offset. So we should never reach this point.
+          */
+         assert(devinfo->verx10 < 125);
+         srcs[TEX_LOGICAL_SRC_TG4_OFFSET] =
+            retype(src, BRW_TYPE_D);
          break;
-      }
 
       case nir_tex_src_projector:
          unreachable("should be lowered");
@@ -7383,10 +7352,20 @@ brw_from_nir_emit_texture(nir_to_brw_state &ntb,
        * into a single (32-bit) value.
        */
       case nir_tex_src_backend2:
-         assert(instr->op == nir_texop_tg4);
-         pack_lod_bias_and_offset = true;
-         srcs[TEX_LOGICAL_SRC_LOD] =
-            retype(get_nir_src_imm(ntb, instr->src[i].src), BRW_TYPE_F);
+         /* For TG4, if there is a LOD, it would have been packed together
+          * with offsets, just put everything into SRC_LOD.
+          *
+          * Otherwise this is a packed offset.
+          */
+         if (instr->op == nir_texop_tg4 &&
+             (nir_tex_instr_src_index(instr, nir_tex_src_lod) != -1 ||
+              nir_tex_instr_src_index(instr, nir_tex_src_bias) != -1)) {
+            pack_lod_bias_and_offset = true;
+            srcs[TEX_LOGICAL_SRC_LOD] =
+               retype(get_nir_src_imm(ntb, instr->src[i].src), BRW_TYPE_F);
+         } else {
+            srcs[TEX_LOGICAL_SRC_PACKED_OFFSET] = bld.emit_uniformize(src);
+         }
          break;
 
       /* If this parameter is present, we are packing either the explicit LOD

@@ -31,8 +31,6 @@
   timeout: 10m
   script:
     - git diff --color=always --exit-code  # Fails if there are diffs
-  tags:
-    - placeholder-job
 
 rustfmt:
   extends:
@@ -75,6 +73,9 @@ shader-db:
     paths:
       - shader-db
   timeout: 15m
+  tags:
+    # FIXME: kvm is a hack, should not be needed
+    - $FDO_RUNNER_JOB_PRIORITY_TAG_X86_64_KVM
 
 yaml-toml-shell-py-test:
   extends:
@@ -118,8 +119,6 @@ yaml-toml-shell-py-test:
       when: on_success
     - changes: *lint_files
       when: manual
-  tags:
-    - placeholder-job
 
 .test-gl:
   extends:

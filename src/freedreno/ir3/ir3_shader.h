@@ -853,6 +853,10 @@ struct ir3_shader_variant {
 
    bool post_depth_coverage;
 
+   bool empty;
+   /* Doesn't have side-effects, no kill, no D/S write, etc. */
+   bool writes_only_color;
+
    /* Are we using split or merged register file? */
    bool mergedregs;
 

@@ -4090,6 +4090,8 @@ struct anv_cmd_ray_tracing_state {
    uint32_t debug_marker_count;
    uint32_t num_tlas;
    uint32_t num_blas;
+   uint32_t num_leaves;
+   uint32_t num_ir_nodes;
    enum vk_acceleration_structure_build_step debug_markers[5];
 
    struct anv_address build_priv_mem_addr;
@@ -5518,7 +5520,7 @@ struct anv_image {
     * Assuming all view formats have the same bits-per-channel, we support the
     * largest number of variations which may exist.
     */
-   enum isl_format view_formats[5];
+   enum isl_format view_formats[6];
    unsigned num_view_formats;
 
    /**
@@ -6432,6 +6434,7 @@ struct anv_video_session {
    struct vk_video_session vk;
 
    bool cdf_initialized;
+   VkVideoEncodeRateControlModeFlagBitsKHR rc_mode;
    /* the decoder needs some private memory allocations */
    struct anv_vid_mem vid_mem[ANV_VID_MEM_AV1_MAX];
    struct anv_av1_video_refs_info prev_refs[STD_VIDEO_AV1_NUM_REF_FRAMES];
@@ -6439,7 +6442,6 @@ struct anv_video_session {
 
 struct anv_video_session_params {
    struct vk_video_session_parameters vk;
-   VkVideoEncodeRateControlModeFlagBitsKHR rc_mode;
 };
 
 void anv_init_av1_cdf_tables(struct anv_cmd_buffer *cmd,

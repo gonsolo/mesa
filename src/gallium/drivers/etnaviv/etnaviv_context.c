@@ -279,7 +279,7 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       /* Add start to index offset, when rendering indexed */
       index_offset += draws[0].start * info->index_size;
 
-      ctx->index_buffer.FE_INDEX_STREAM_BASE_ADDR.bo = etna_resource(indexbuf)->bo;
+      ctx->index_buffer.FE_INDEX_STREAM_BASE_ADDR.bo = etna_buffer_resource(indexbuf)->bo;
       ctx->index_buffer.FE_INDEX_STREAM_BASE_ADDR.offset = index_offset;
       ctx->index_buffer.FE_INDEX_STREAM_BASE_ADDR.flags = ETNA_RELOC_READ;
       ctx->index_buffer.FE_INDEX_STREAM_CONTROL = translate_index_size(info->index_size);
@@ -387,7 +387,7 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
        *
        * This isn't implemented right now, so we don't support GPU written indirect buffers for now.
        */
-      assert(!(etna_resource_status(ctx, etna_resource(indirect->buffer)) & ETNA_PENDING_WRITE));
+      assert(!(etna_resource_status(ctx, indirect->buffer) & ETNA_PENDING_WRITE));
       resource_read(ctx, indirect->buffer);
    }
 

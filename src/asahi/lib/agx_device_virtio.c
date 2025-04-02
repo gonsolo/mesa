@@ -11,9 +11,7 @@
 #include "drm-uapi/virtgpu_drm.h"
 #include "unstable_asahi_drm.h"
 
-#define VIRGL_RENDERER_UNSTABLE_APIS 1
 #include "vdrm.h"
-#include "virglrenderer_hw.h"
 
 #include "asahi_proto.h"
 

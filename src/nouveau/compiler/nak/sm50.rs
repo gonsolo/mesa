@@ -10,6 +10,43 @@ use bitview::*;
 use std::collections::HashMap;
 use std::ops::Range;
 
+pub fn instr_latency(_sm: u8, op: &Op, dst_idx: usize) -> u32 {
+    let file = match op.dsts_as_slice()[dst_idx] {
+        Dst::None => return 0,
+        Dst::SSA(vec) => vec.file().unwrap(),
+        Dst::Reg(reg) => reg.file(),
+    };
+
+    let (gpr_latency, pred_latency) = match op {
+            // Double-precision float ALU
+            Op::DAdd(_)
+            | Op::DFma(_)
+            | Op::DMnMx(_)
+            | Op::DMul(_)
+            | Op::DSetP(_)
+            // Half-precision float ALU
+            | Op::HAdd2(_)
+            | Op::HFma2(_)
+            | Op::HMul2(_)
+            | Op::HSet2(_)
+            | Op::HSetP2(_)
+            | Op::HMnMx2(_) => {
+                (13, 14)
+            }
+            _ => (6, 13)
+    };
+
+    // This is BS and we know it
+    match file {
+        RegFile::GPR => gpr_latency,
+        RegFile::Pred => pred_latency,
+        RegFile::UGPR | RegFile::UPred => panic!("No uniform registers"),
+        RegFile::Bar => 0, // Barriers have a HW scoreboard
+        RegFile::Carry => 6,
+        RegFile::Mem => panic!("Not a register"),
+    }
+}
+
 pub struct ShaderModel50 {
     sm: u8,
 }
@@ -54,6 +91,75 @@ impl ShaderModel for ShaderModel50 {
 
     fn op_can_be_uniform(&self, _op: &Op) -> bool {
         false
+    }
+
+    fn exec_latency(&self, op: &Op) -> u32 {
+        match op {
+            Op::CCtl(_)
+            | Op::MemBar(_)
+            | Op::Bra(_)
+            | Op::SSy(_)
+            | Op::Sync(_)
+            | Op::Brk(_)
+            | Op::PBk(_)
+            | Op::Cont(_)
+            | Op::PCnt(_)
+            | Op::Exit(_)
+            | Op::Bar(_)
+            | Op::Kill(_)
+            | Op::OutFinal(_) => 13,
+            _ => 1,
+        }
+    }
+
+    fn raw_latency(
+        &self,
+        write: &Op,
+        dst_idx: usize,
+        _read: &Op,
+        _src_idx: usize,
+    ) -> u32 {
+        instr_latency(self.sm, write, dst_idx)
+    }
+
+    fn war_latency(
+        &self,
+        _read: &Op,
+        _src_idx: usize,
+        _write: &Op,
+        _dst_idx: usize,
+    ) -> u32 {
+        // We assume the source gets read in the first 4 cycles.  We don't know
+        // how quickly the write will happen.  This is all a guess.
+        4
+    }
+
+    fn waw_latency(
+        &self,
+        a: &Op,
+        a_dst_idx: usize,
+        _a_has_pred: bool,
+        _b: &Op,
+        _b_dst_idx: usize,
+    ) -> u32 {
+        // We know our latencies are wrong so assume the wrote could happen
+        // anywhere between 0 and instr_latency(a) cycles
+        instr_latency(self.sm, a, a_dst_idx)
+    }
+
+    fn paw_latency(&self, write: &Op, _dst_idx: usize) -> u32 {
+        if self.sm == 70 {
+            match write {
+                Op::DSetP(_) | Op::HSetP2(_) => 15,
+                _ => 13,
+            }
+        } else {
+            13
+        }
+    }
+
+    fn worst_latency(&self, write: &Op, dst_idx: usize) -> u32 {
+        instr_latency(self.sm, write, dst_idx)
     }
 
     fn legalize_op(&self, b: &mut LegalizeBuilder, op: &mut Op) {
@@ -410,6 +516,13 @@ impl SM50Op for OpFAdd {
         let [src0, src1] = &mut self.srcs;
         swap_srcs_if_not_reg(src0, src1, GPR);
         b.copy_alu_src_if_not_reg(src0, GPR, SrcType::F32);
+
+        if src1.as_imm_not_f20().is_some()
+            && self.rnd_mode != FRndMode::NearestEven
+        {
+            // Hardware cannot encode long-immediate + rounding mode
+            b.copy_alu_src(src1, GPR, SrcType::F32);
+        }
     }
 
     fn encode(&self, e: &mut SM50Encoder<'_>) {
@@ -418,6 +531,7 @@ impl SM50Op for OpFAdd {
             e.set_dst(self.dst);
             e.set_reg_fmod_src(8..16, 54, 56, self.srcs[0]);
             e.set_src_imm32(20..52, imm32);
+            assert!(self.rnd_mode == FRndMode::NearestEven);
             e.set_bit(55, self.ftz);
         } else {
             match &self.srcs[1].src_ref {
@@ -562,6 +676,13 @@ impl SM50Op for OpFMul {
         b.copy_alu_src_if_fabs(src1, SrcType::F32);
         swap_srcs_if_not_reg(src0, src1, GPR);
         b.copy_alu_src_if_not_reg(src0, GPR, SrcType::F32);
+
+        if src1.as_imm_not_f20().is_some()
+            && self.rnd_mode != FRndMode::NearestEven
+        {
+            // Hardware cannot encode long-immediate + rounding mode
+            b.copy_alu_src(src1, GPR, SrcType::F32);
+        }
     }
 
     fn encode(&self, e: &mut SM50Encoder<'_>) {
@@ -579,6 +700,7 @@ impl SM50Op for OpFMul {
             e.set_bit(53, self.ftz);
             e.set_bit(54, self.dnz);
             e.set_bit(55, self.saturate);
+            assert!(self.rnd_mode == FRndMode::NearestEven);
 
             if fneg {
                 // Flip the immediate sign bit

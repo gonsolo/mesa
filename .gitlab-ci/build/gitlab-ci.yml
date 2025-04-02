@@ -4,15 +4,17 @@
   # Cancel job if a newer commit is pushed to the same branch
   interruptible: true
   variables:
-    # Build jobs don't take more than 1-3 minutes. 5-8 min max on a fresh runner
-    # without a populated ccache.
-    # These jobs are never slow, either they finish within reasonable time or
-    # something has gone wrong and the job will never terminate, so we should
-    # instead timeout so that the retry mechanism can kick in.
-    # A few exception are made, see overrides in the rest of this file.
-    BUILD_JOB_TIMEOUT: 15m
+    # Build jobs are typically taking between 5-12 minutes, depending on how
+    # much they build and how many new Rust compilers we have to build twice.
+    # Allow 25 minutes as a reasonable margin: beyond this point, something
+    # has gone badly wrong, and we should try again to see if we can get
+    # something from it.
+    #
+    # Some jobs not in the critical path use a higher timeout, particularly
+    # when building with ASan or UBSan.
+    BUILD_JOB_TIMEOUT: 12m
     RUN_MESON_TESTS: "true"
-  timeout: 1h
+  timeout: 16m
   # We don't want to download any previous job's artifacts
   dependencies: []
   artifacts:
@@ -23,6 +25,12 @@
       - _build/meson-logs/strace
       - _build/.ninja_log
       - artifacts
+
+.build-run-long:
+  variables:
+    BUILD_JOB_TIMEOUT: 18m
+  timeout: 25m
+
 
 # Just Linux
 .build-linux:
@@ -76,9 +84,9 @@ debian-testing:
   extends:
     - .meson-build-for-tests
     - .use-debian/x86_64_build
+    - .build-run-long # but it really shouldn't! tracked in mesa#12544
     - .ci-deqp-artifacts
   variables:
-    BUILD_JOB_TIMEOUT: 30m
     UNWIND: "enabled"
     DRI_LOADERS: >
       -D egl=enabled
@@ -108,8 +116,8 @@ debian-testing-asan:
   extends:
     - debian-testing
     - .meson-build-for-tests
+    - .build-run-long
   variables:
-    BUILD_JOB_TIMEOUT: 30m
     VULKAN_DRIVERS: "swrast"
     GALLIUM_DRIVERS: "llvmpipe,softpipe"
     C_ARGS: >
@@ -147,8 +155,8 @@ debian-testing-msan:
   extends:
     - debian-clang
     - .meson-build-only
+    - .build-run-long
   variables:
-    BUILD_JOB_TIMEOUT: 30m
     # l_undef is incompatible with msan
     EXTRA_OPTION:
       -D b_sanitize=memory
@@ -184,15 +192,14 @@ debian-testing-ubsan:
   extends:
     - debian-testing
     - .meson-build-for-tests
-  timeout: 40m
+    - .build-run-long
   variables:
-    BUILD_JOB_TIMEOUT: 30m
     C_ARGS: >
       -Wno-error=stringop-overflow
       -Wno-error=stringop-truncation
     CPP_ARGS: >
       -Wno-error=array-bounds
-    GALLIUM_DRIVERS: "swrast"
+    GALLIUM_DRIVERS: "llvmpipe,softpipe"
     VULKAN_DRIVERS: "swrast"
     EXTRA_OPTION: >
       -D b_sanitize=undefined
@@ -288,7 +295,6 @@ alpine-build-testing:
     - .meson-build-only
     - .use-alpine/x86_64_build
   variables:
-    BUILD_JOB_TIMEOUT: 30m
     BUILDTYPE: "release"
     C_ARGS: >
       -Wno-error=cpp
@@ -316,12 +322,16 @@ alpine-build-testing:
       -D microsoft-clc=disabled
       -D shared-llvm=enabled
     UNWIND: "disabled"
-    VULKAN_DRIVERS: "amd,asahi,broadcom,freedreno,intel,imagination-experimental"
+    VULKAN_DRIVERS: "amd,broadcom,freedreno,intel,imagination-experimental"
 
 fedora-release:
   extends:
     - .meson-build-only
     - .use-fedora/x86_64_build
+    - .build-run-long
+  # LTO builds can be really very slow, and we have no way to specify different
+  # timeouts for pre-merge and nightly jobs
+  timeout: 1h
   variables:
     BUILDTYPE: "release"
     # array-bounds are pure non-LTO gcc buggy warning
@@ -419,22 +429,27 @@ debian-android:
       -D install-mesa-clc=true
       -D precomp-compiler=enabled
       -D install-precomp-compiler=true
-    ARTIFACTS_DEBUG_SYMBOLS: 1
     S3_ARTIFACT_NAME: mesa-x86_64-android-${BUILDTYPE}
   script:
-    - export CROSS=aarch64-linux-android
-    - export GALLIUM_DRIVERS=etnaviv,freedreno,lima,panfrost,vc4,v3d
-    - export VULKAN_DRIVERS=freedreno,broadcom,virtio
-    - *meson-build
     # x86_64 build:
     # Can't do AMD drivers because they require LLVM, which is currently
     # problematic in our Android builds.
     - export CROSS=x86_64-linux-android
-    - export GALLIUM_DRIVERS=iris,virgl,zink,softpipe,llvmpipe,swrast
+    - export GALLIUM_DRIVERS=iris,virgl,zink,softpipe
     - export VULKAN_DRIVERS=intel,virtio,swrast
     - .gitlab-ci/create-llvm-meson-wrap-file.sh
     - *meson-build
     - .gitlab-ci/prepare-artifacts.sh
+    # remove all the files created by the previous build before the next build
+    - git clean -dxf .
+    # aarch64 build:
+    # build-only, to catch compilation regressions
+    # without calling .gitlab-ci/prepare-artifacts.sh so that the
+    # artifacts are not shipped in mesa-x86_64-android-${BUILDTYPE}
+    - export CROSS=aarch64-linux-android
+    - export GALLIUM_DRIVERS=etnaviv,freedreno,lima,panfrost,vc4,v3d
+    - export VULKAN_DRIVERS=freedreno,broadcom,virtio
+    - *meson-build
 
 .meson-cross:
   extends:
@@ -461,8 +476,6 @@ debian-android:
     VULKAN_DRIVERS: "asahi,broadcom,freedreno"
     GALLIUM_DRIVERS: "etnaviv,freedreno,lima,nouveau,panfrost,llvmpipe,softpipe,tegra,v3d,vc4,zink"
     BUILDTYPE: "debugoptimized"
-  tags:
-    - aarch64
 
 debian-arm32:
   extends:
@@ -504,8 +517,8 @@ debian-arm32-asan:
   extends:
     - debian-arm32
     - .meson-build-for-tests
+    - .build-run-long
   variables:
-    BUILD_JOB_TIMEOUT: 30m
     GALLIUM_DRIVERS: "etnaviv"
     VULKAN_DRIVERS: ""
     DRI_LOADERS:
@@ -547,8 +560,8 @@ debian-arm64-asan:
   extends:
     - debian-arm64
     - .meson-build-for-tests
+    - .build-run-long
   variables:
-    BUILD_JOB_TIMEOUT: 30m
     VULKAN_DRIVERS: "broadcom,freedreno"
     GALLIUM_DRIVERS: "freedreno,vc4,v3d"
     DRI_LOADERS:
@@ -566,8 +579,8 @@ debian-arm64-ubsan:
   extends:
     - debian-arm64
     - .meson-build-for-tests
+    - .build-run-long
   variables:
-    BUILD_JOB_TIMEOUT: 30m
     VULKAN_DRIVERS: "broadcom"
     GALLIUM_DRIVERS: "v3d,vc4"
     C_ARGS: >
@@ -690,8 +703,8 @@ debian-clang-release:
   extends:
     - debian-clang
     - .meson-build-only
+    - .build-run-long
   variables:
-    BUILD_JOB_TIMEOUT: 30m
     BUILDTYPE: "release"
     DRI_LOADERS: >
       -D glx=xlib
@@ -726,7 +739,6 @@ debian-vulkan:
     - .meson-build-only
     - .use-debian/x86_64_build
   variables:
-    BUILD_JOB_TIMEOUT: 30m
     BUILDTYPE: debug
     UNWIND: "disabled"
     DRI_LOADERS: >
@@ -761,6 +773,7 @@ debian-x86_32:
     - .meson-cross
     - .use-debian/x86_32_build
     - .meson-build-only
+    - .build-run-long # it's not clear why this runs long, but it also doesn't matter much
   variables:
     BUILDTYPE: debug
     CROSS: i386
@@ -796,7 +809,7 @@ debian-s390x:
     - .use-debian/s390x_build
     - .meson-build-only
   tags:
-    - kvm
+    - $FDO_RUNNER_JOB_PRIORITY_TAG_X86_64_KVM
   variables:
     BUILDTYPE: debug
     CROSS: s390x
@@ -832,5 +845,3 @@ python-artifacts:
   timeout: 10m
   script:
     - .gitlab-ci/prepare-artifacts-python.sh
-  tags:
-    - placeholder-job

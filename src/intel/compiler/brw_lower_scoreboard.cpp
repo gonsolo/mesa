@@ -83,7 +83,7 @@ namespace {
             if (inst->src[i].file != BAD_FILE &&
                 !inst->is_control_source(i)) {
                const brw_reg_type t = inst->src[i].type;
-               has_int_src |= !brw_type_is_float(t);
+               has_int_src |= brw_type_is_int(t);
                has_long_src |= brw_type_size_bytes(t) >= 8;
             }
          }
@@ -116,7 +116,7 @@ namespace {
    inferred_exec_pipe(const struct intel_device_info *devinfo, const brw_inst *inst)
    {
       const brw_reg_type t = get_exec_type(inst);
-      const bool is_dword_multiply = !brw_type_is_float(t) &&
+      const bool is_dword_multiply = brw_type_is_int(t) &&
          ((inst->opcode == BRW_OPCODE_MUL &&
            MIN2(brw_type_size_bytes(inst->src[0].type),
                 brw_type_size_bytes(inst->src[1].type)) >= 4) ||
@@ -156,7 +156,7 @@ namespace {
          assert(devinfo->has_64bit_float || devinfo->has_64bit_int ||
                 devinfo->has_integer_dword_mul);
          return TGL_PIPE_LONG;
-      } else if (brw_type_is_float(inst->dst.type))
+      } else if (brw_type_is_float_or_bfloat(inst->dst.type))
          return TGL_PIPE_FLOAT;
       else
          return TGL_PIPE_INT;
@@ -263,7 +263,7 @@ namespace {
    unsigned
    num_instructions(const brw_shader *shader)
    {
-      return shader->cfg->blocks[shader->cfg->num_blocks - 1]->end_ip + 1;
+      return shader->cfg->total_instructions;
    }
 
    /**
@@ -1126,6 +1126,7 @@ namespace {
       const scoreboard *delta_sbs = gather_block_scoreboards(shader, jps);
       scoreboard *in_sbs = new scoreboard[shader->cfg->num_blocks];
       scoreboard *out_sbs = new scoreboard[shader->cfg->num_blocks];
+      const brw_ip_ranges &ips = shader->ip_ranges_analysis.require();
 
       for (bool progress = true; progress;) {
          progress = false;
@@ -1141,8 +1142,8 @@ namespace {
                   int delta[IDX(TGL_PIPE_ALL)];
 
                   for (unsigned p = 0; p < IDX(TGL_PIPE_ALL); p++)
-                     delta[p] = jps[child_link->block->start_ip].jp[p]
-                        - jps[block->end_ip].jp[p]
+                     delta[p] = jps[ips.start(child_link->block)].jp[p]
+                        - jps[ips.end(block)].jp[p]
                         - ordered_unit(shader->devinfo,
                                        static_cast<const brw_inst *>(block->end()), p);
 

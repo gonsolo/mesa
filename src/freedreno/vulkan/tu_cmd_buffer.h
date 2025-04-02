@@ -74,8 +74,9 @@ enum tu_cmd_dirty_bits
    TU_CMD_DIRTY_FEEDBACK_LOOPS = BIT(13),
    TU_CMD_DIRTY_FS = BIT(14),
    TU_CMD_DIRTY_SHADING_RATE = BIT(15),
+   TU_CMD_DIRTY_DISABLE_FS = BIT(16),
    /* all draw states were disabled and need to be re-enabled: */
-   TU_CMD_DIRTY_DRAW_STATE = BIT(16)
+   TU_CMD_DIRTY_DRAW_STATE = BIT(17)
 };
 
 /* There are only three cache domains we have to care about: the CCU, or
@@ -514,6 +515,7 @@ struct tu_cmd_state
    bool predication_active;
    bool msaa_disable;
    bool blend_reads_dest;
+   bool disable_fs;
    bool stencil_front_write;
    bool stencil_back_write;
    bool pipeline_sysmem_single_prim_mode;
@@ -527,7 +529,7 @@ struct tu_cmd_state
    bool pipeline_reads_shading_rate;
    bool pipeline_accesses_smask;
 
-   bool pipeline_blend_lrz, pipeline_bandwidth;
+   bool pipeline_blend_lrz, pipeline_bandwidth, pipeline_disable_fs;
    uint32_t pipeline_draw_states;
 
    /* VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT and
@@ -651,7 +653,8 @@ tu_attachment_gmem_offset_stencil(struct tu_cmd_buffer *cmd,
 {
    assert(cmd->state.gmem_layout < TU_GMEM_LAYOUT_COUNT);
    return att->gmem_offset_stencil[cmd->state.gmem_layout] +
-      layer * cmd->state.tiling->tile0.width * cmd->state.tiling->tile0.height;
+      layer * cmd->state.tiling->tile0.width * cmd->state.tiling->tile0.height *
+      att->samples;
 }
 
 void tu_render_pass_state_merge(struct tu_render_pass_state *dst,

@@ -39,7 +39,7 @@ nvk_push_dispatch_state_init(struct nvk_queue *queue, struct nv_push *p)
    if (pdev->info.cls_compute == MAXWELL_COMPUTE_A)
       P_IMMD(p, NVB0C0, SET_SELECT_MAXWELL_TEXTURE_HEADERS, V_TRUE);
 
-   if (pdev->info.cls_eng3d < VOLTA_COMPUTE_A) {
+   if (pdev->info.cls_compute < VOLTA_COMPUTE_A) {
       uint64_t shader_base_addr =
          nvk_heap_contiguous_base_address(&dev->shader_heap);
 
@@ -190,9 +190,13 @@ nvk_cmd_upload_qmd(struct nvk_cmd_buffer *cmd,
       uint32_t qmd[64];
       nak_fill_qmd(&pdev->info, &shader->info, &qmd_info, qmd, sizeof(qmd));
 
-      result = nvk_cmd_buffer_upload_data(cmd, qmd, sizeof(qmd), 0x100, &qmd_addr);
+      void *qmd_map;
+      result = nvk_cmd_buffer_alloc_qmd(cmd, sizeof(qmd), 0x100,
+                                        &qmd_addr, &qmd_map);
       if (unlikely(result != VK_SUCCESS))
          return result;
+
+      memcpy(qmd_map, qmd, sizeof(qmd));
    }
 
    *qmd_addr_out = qmd_addr;

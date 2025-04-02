@@ -4274,14 +4274,15 @@ agx_draw_without_restart(struct agx_batch *batch,
       .out_draw = out_draws.gpu,
       .restart_index = info->restart_index,
       .index_buffer_size_el = ib_extent / info->index_size,
+      .index_size_log2 = util_logbase2(info->index_size),
       .flatshade_first = batch->ctx->rast->base.flatshade_first,
       .in_draw = agx_indirect_buffer_ptr(batch, indirect),
    };
 
    /* Unroll the index buffer for each draw */
-   libagx_unroll_restart_struct(
-      batch, agx_1d(1024 * indirect->draw_count), AGX_BARRIER_ALL, unroll,
-      util_logbase2(info->index_size), libagx_compact_prim(info->mode));
+   libagx_unroll_restart_struct(batch, agx_1d(1024 * indirect->draw_count),
+                                AGX_BARRIER_ALL, unroll,
+                                libagx_compact_prim(info->mode));
 
    /* Now draw the results without restart */
    struct pipe_draw_info new_info = {
@@ -4809,6 +4810,40 @@ agx_draw_patches(struct agx_context *ctx, const struct pipe_draw_info *info,
  * group texels that intersects a compressed tile being written out.
  */
 static void
+agx_legalize_feedback_loop_surf(struct agx_context *ctx,
+                                struct agx_resource *rsrc,
+                                struct pipe_surface *surf, unsigned bit)
+{
+   if (!surf || agx_resource(surf->texture) != rsrc || !rsrc->layout.compressed)
+      return;
+
+   /* Decompress if we can and shadow if we can't. */
+   if (rsrc->base.bind & PIPE_BIND_SHARED) {
+      struct agx_batch *batch = agx_get_batch(ctx);
+
+      /* If we already did in-place decompression for this one */
+      if (batch->feedback & bit)
+         return;
+
+      /* Use our current context batch. If it already touched
+       * this buffer, that will have been flushed above.
+       */
+      agx_decompress_inplace(batch, surf, "Texture feedback loop");
+
+      /* Mark it as a feedback cbuf, so it will be written to
+       * uncompressed despite having a compressed layout.
+       */
+      batch->feedback |= bit;
+   } else {
+      agx_decompress(ctx, rsrc, "Texture feedback loop");
+   }
+
+   /* Not required by the spec, just for debug */
+   if (agx_device(ctx->base.screen)->debug & AGX_DBG_FEEDBACK)
+      agx_flush_writer(ctx, rsrc, "Feedback loop");
+}
+
+static void
 agx_legalize_feedback_loops(struct agx_context *ctx)
 {
    /* Trust that u_blitter knows what it's doing */
@@ -4826,38 +4861,13 @@ agx_legalize_feedback_loops(struct agx_context *ctx)
          struct agx_resource *rsrc = ctx->stage[stage].textures[i]->rsrc;
 
          for (unsigned cb = 0; cb < ctx->framebuffer.nr_cbufs; ++cb) {
-            if (ctx->framebuffer.cbufs[cb] &&
-                agx_resource(ctx->framebuffer.cbufs[cb]->texture) == rsrc) {
-
-               if (rsrc->layout.compressed) {
-                  /* Decompress if we can and shadow if we can't. */
-                  if (rsrc->base.bind & PIPE_BIND_SHARED) {
-                     struct agx_batch *batch = agx_get_batch(ctx);
-
-                     /* If we already did in-place decompression for this one */
-                     if (batch->feedback & (PIPE_CLEAR_COLOR0 << i))
-                        continue;
-
-                     /* Use our current context batch. If it already touched
-                      * this buffer, that will have been flushed above.
-                      */
-                     agx_decompress_inplace(batch, ctx->framebuffer.cbufs[cb],
-                                            "Texture feedback loop");
-
-                     /* Mark it as a feedback cbuf, so it will be written to
-                      * uncompressed despite having a compressed layout.
-                      */
-                     batch->feedback |= PIPE_CLEAR_COLOR0 << i;
-                  } else {
-                     agx_decompress(ctx, rsrc, "Texture feedback loop");
-                  }
-               }
-
-               /* Not required by the spec, just for debug */
-               if (agx_device(ctx->base.screen)->debug & AGX_DBG_FEEDBACK)
-                  agx_flush_writer(ctx, rsrc, "Feedback loop");
-            }
+            agx_legalize_feedback_loop_surf(
+               ctx, rsrc, ctx->framebuffer.cbufs[cb], PIPE_CLEAR_COLOR0 << i);
          }
+
+         /* TODO: Separate stencil? */
+         agx_legalize_feedback_loop_surf(ctx, rsrc, ctx->framebuffer.zsbuf,
+                                         PIPE_CLEAR_DEPTH);
       }
    }
 }
