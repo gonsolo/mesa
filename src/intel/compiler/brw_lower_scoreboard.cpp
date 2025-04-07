@@ -1287,11 +1287,12 @@ namespace {
     * inserting additional SYNC instructions for dependencies that can't be
     * represented directly by annotating existing instructions.
     */
-   void
+   bool
    emit_inst_dependencies(brw_shader *shader,
                           const ordered_address *jps,
                           const dependency_list *deps)
    {
+      bool progress = false;
       const struct intel_device_info *devinfo = shader->devinfo;
       unsigned ip = 0;
 
@@ -1303,6 +1304,9 @@ namespace {
             baked_unordered_dependency_mode(devinfo, inst, deps[ip], jps[ip]);
          tgl_swsb swsb = !ordered_mode ? tgl_swsb() :
             ordered_dependency_swsb(deps[ip], jps[ip], exec_all);
+
+         if (deps[ip].size())
+            progress = true;
 
          for (unsigned i = 0; i < deps[ip].size(); i++) {
             const dependency &dep = deps[ip][i];
@@ -1322,8 +1326,8 @@ namespace {
                   /* Emit dependency into the SWSB of an extra SYNC
                    * instruction.
                    */
-                  const brw_builder ibld = brw_builder(inst).exec_all().group(1, 0);
-                  brw_inst *sync = ibld.SYNC(TGL_SYNC_NOP);
+                  const brw_builder ubld = brw_builder(inst).uniform();
+                  brw_inst *sync = ubld.SYNC(TGL_SYNC_NOP);
                   sync->sched.sbid = dep.id;
                   sync->sched.mode = dep.unordered;
                   assert(!(sync->sched.mode & TGL_SBID_SET));
@@ -1344,9 +1348,8 @@ namespace {
                 * scenario with unordered dependencies should have been
                 * handled above.
                 */
-               const brw_builder ibld = brw_builder(inst)
-                                        .exec_all().group(1, 0);
-               brw_inst *sync = ibld.SYNC(TGL_SYNC_NOP);
+               const brw_builder ubld = brw_builder(inst).uniform();
+               brw_inst *sync = ubld.SYNC(TGL_SYNC_NOP);
                sync->sched = ordered_dependency_swsb(deps[ip], jps[ip], true);
                break;
             }
@@ -1357,21 +1360,25 @@ namespace {
          inst->no_dd_check = inst->no_dd_clear = false;
          ip++;
       }
+
+      return progress;
    }
 }
 
 bool
 brw_lower_scoreboard(brw_shader &s)
 {
+   bool progress = false;
+
    if (s.devinfo->ver >= 12) {
       const ordered_address *jps = ordered_inst_addresses(&s);
       const dependency_list *deps0 = gather_inst_dependencies(&s, jps);
       const dependency_list *deps1 = allocate_inst_dependencies(&s, deps0);
-      emit_inst_dependencies(&s, jps, deps1);
+      progress = emit_inst_dependencies(&s, jps, deps1);
       delete[] deps1;
       delete[] deps0;
       delete[] jps;
    }
 
-   return true;
+   return progress;
 }

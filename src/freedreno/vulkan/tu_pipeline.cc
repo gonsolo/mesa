@@ -2548,44 +2548,49 @@ struct apply_viewport_state {
    bool share_scale;
 };
 
-/* It's a hardware restriction that the window offset (i.e. bin.offset) must
- * be the same for all views. This means that GMEM coordinates cannot be a
- * simple scaling of framebuffer coordinates, because this would require us to
- * scale the window offset and the scale may be different per view. Instead we
- * have to apply a per-bin offset to the GMEM coordinate transform to make
- * sure that the window offset maps to itself. Specifically we need an offset
- * o to the transform:
+/* It's a hardware restriction that the window offset (i.e. common_bin_offset)
+ * must be the same for all views. This means that GMEM coordinates cannot be
+ * a simple scaling of framebuffer coordinates, because this would require us
+ * to scale the window offset and the scale may be different per view. Instead
+ * we have to apply a per-bin offset to the GMEM coordinate transform to make
+ * sure that the window offset maps to the per-view bin coordinate, which will
+ * be the same if there is no offset. Specifically we need an offset o to the
+ * transform:
  *
  * x' = s * x + o
  *
- * so that when we plug in the bin start b_s:
+ * so that when we plug in the per-view bin start b_s and the common window
+ * offset b_cs:
  * 
- * b_s = s * b_s + o
+ * b_cs = s * b_s + o
  *
  * and we get:
  *
- * o = b_s - s * b_s
+ * o = b_cs - s * b_s
  *
- * We use this form exactly, because we know the bin offset is a multiple of
+ * We use this form exactly, because we know the bin start is a multiple of
  * the frag area so s * b_s is an integer and we can compute an exact result
- * easily.
+ * easily. We also have to make sure that the bin offset is a multiple of the
+ * frag area by restricting the frag area.
  */
 
 VkOffset2D
-tu_fdm_per_bin_offset(VkExtent2D frag_area, VkRect2D bin)
+tu_fdm_per_bin_offset(VkExtent2D frag_area, VkRect2D bin,
+                      VkOffset2D common_bin_offset)
 {
    assert(bin.offset.x % frag_area.width == 0);
    assert(bin.offset.y % frag_area.height == 0);
 
    return (VkOffset2D) {
-      bin.offset.x - bin.offset.x / frag_area.width,
-      bin.offset.y - bin.offset.y / frag_area.height
+      common_bin_offset.x - bin.offset.x / frag_area.width,
+      common_bin_offset.y - bin.offset.y / frag_area.height
    };
 }
 
 static void
 fdm_apply_viewports(struct tu_cmd_buffer *cmd, struct tu_cs *cs, void *data,
-                    VkRect2D bin, unsigned views, const VkExtent2D *frag_areas)
+                    VkOffset2D common_bin_offset, unsigned views,
+                    const VkExtent2D *frag_areas, const VkRect2D *bins)
 {
    const struct apply_viewport_state *state =
       (const struct apply_viewport_state *)data;
@@ -2603,9 +2608,12 @@ fdm_apply_viewports(struct tu_cmd_buffer *cmd, struct tu_cs *cs, void *data,
        * replicate it across all viewports.
        */
       VkExtent2D frag_area = state->share_scale ? frag_areas[0] : frag_areas[i];
+      VkRect2D bin = state->share_scale ? bins[0] : bins[i];
       VkViewport viewport =
          state->share_scale ? state->vp.viewports[i] : state->vp.viewports[0];
-      if (frag_area.width == 1 && frag_area.height == 1) {
+      if (frag_area.width == 1 && frag_area.height == 1 &&
+          common_bin_offset.x == bin.offset.x &&
+          common_bin_offset.y == bin.offset.y) {
          vp.viewports[i] = viewport;
          continue;
       }
@@ -2618,7 +2626,8 @@ fdm_apply_viewports(struct tu_cmd_buffer *cmd, struct tu_cs *cs, void *data,
       vp.viewports[i].width = viewport.width * scale_x;
       vp.viewports[i].height = viewport.height * scale_y;
 
-      VkOffset2D offset = tu_fdm_per_bin_offset(frag_area, bin);
+      VkOffset2D offset = tu_fdm_per_bin_offset(frag_area, bin,
+                                                common_bin_offset);
 
       vp.viewports[i].x = scale_x * viewport.x + offset.x;
       vp.viewports[i].y = scale_y * viewport.y + offset.y;
@@ -2642,7 +2651,8 @@ tu6_emit_viewport_fdm(struct tu_cs *cs, struct tu_cmd_buffer *cmd,
       state.vp.viewport_count = num_views;
    unsigned size = TU_CALLX(cmd->device, tu6_viewport_size)(cmd->device, &state.vp, &state.rs);
    tu_cs_begin_sub_stream(&cmd->sub_cs, size, cs);
-   tu_create_fdm_bin_patchpoint(cmd, cs, size, fdm_apply_viewports, state);
+   tu_create_fdm_bin_patchpoint(cmd, cs, size, TU_FDM_NONE,
+                                fdm_apply_viewports, state);
    cmd->state.rp.shared_viewport |= !cmd->state.per_view_viewport;
 }
 
@@ -2693,7 +2703,8 @@ tu6_emit_scissor(struct tu_cs *cs, const struct vk_viewport_state *vp)
 
 static void
 fdm_apply_scissors(struct tu_cmd_buffer *cmd, struct tu_cs *cs, void *data,
-                   VkRect2D bin, unsigned views, const VkExtent2D *frag_areas)
+                   VkOffset2D common_bin_offset, unsigned views,
+                   const VkExtent2D *frag_areas, const VkRect2D *bins)
 {
    const struct apply_viewport_state *state =
       (const struct apply_viewport_state *)data;
@@ -2702,12 +2713,9 @@ fdm_apply_scissors(struct tu_cmd_buffer *cmd, struct tu_cs *cs, void *data,
 
    for (unsigned i = 0; i < vp.scissor_count; i++) {
       VkExtent2D frag_area = state->share_scale ? frag_areas[0] : frag_areas[i];
+      VkRect2D bin = state->share_scale ? bins[0] : bins[i];
       VkRect2D scissor =
          state->share_scale ? state->vp.scissors[i] : state->vp.scissors[0];
-      if (frag_area.width == 1 && frag_area.height == 1) {
-         vp.scissors[i] = scissor;
-         continue;
-      }
 
       /* Transform the scissor following the viewport. It's unclear how this
        * is supposed to handle cases where the scissor isn't aligned to the
@@ -2715,7 +2723,8 @@ fdm_apply_scissors(struct tu_cmd_buffer *cmd, struct tu_cs *cs, void *data,
        * fragments if the scissor size equals the framebuffer size and it
        * isn't aligned to the fragment area.
        */
-      VkOffset2D offset = tu_fdm_per_bin_offset(frag_area, bin);
+      VkOffset2D offset = tu_fdm_per_bin_offset(frag_area, bin,
+                                                common_bin_offset);
       VkOffset2D min = {
          scissor.offset.x / frag_area.width + offset.x,
          scissor.offset.y / frag_area.width + offset.y,
@@ -2730,12 +2739,12 @@ fdm_apply_scissors(struct tu_cmd_buffer *cmd, struct tu_cs *cs, void *data,
        */
       uint32_t scaled_width = bin.extent.width / frag_area.width;
       uint32_t scaled_height = bin.extent.height / frag_area.height;
-      vp.scissors[i].offset.x = MAX2(min.x, bin.offset.x);
-      vp.scissors[i].offset.y = MAX2(min.y, bin.offset.y);
+      vp.scissors[i].offset.x = MAX2(min.x, common_bin_offset.x);
+      vp.scissors[i].offset.y = MAX2(min.y, common_bin_offset.y);
       vp.scissors[i].extent.width =
-         MIN2(max.x, bin.offset.x + scaled_width) - vp.scissors[i].offset.x;
+         MIN2(max.x, common_bin_offset.x + scaled_width) - vp.scissors[i].offset.x;
       vp.scissors[i].extent.height =
-         MIN2(max.y, bin.offset.y + scaled_height) - vp.scissors[i].offset.y;
+         MIN2(max.y, common_bin_offset.y + scaled_height) - vp.scissors[i].offset.y;
    }
 
    TU_CALLX(cs->device, tu6_emit_scissor)(cs, &vp);
@@ -2754,7 +2763,8 @@ tu6_emit_scissor_fdm(struct tu_cs *cs, struct tu_cmd_buffer *cmd,
       state.vp.scissor_count = num_views;
    unsigned size = TU_CALLX(cmd->device, tu6_scissor_size)(cmd->device, &state.vp);
    tu_cs_begin_sub_stream(&cmd->sub_cs, size, cs);
-   tu_create_fdm_bin_patchpoint(cmd, cs, size, fdm_apply_scissors, state);
+   tu_create_fdm_bin_patchpoint(cmd, cs, size, TU_FDM_NONE, fdm_apply_scissors,
+                                state);
 }
 
 static const enum mesa_vk_dynamic_graphics_state tu_sample_locations_state[] = {
@@ -3031,6 +3041,7 @@ static unsigned
 tu6_blend_size(struct tu_device *dev,
                const struct vk_color_blend_state *cb,
                const struct vk_color_attachment_location_state *cal,
+               const struct vk_render_pass_state *rp,
                bool alpha_to_coverage_enable,
                bool alpha_to_one_enable,
                uint32_t sample_mask)
@@ -3045,6 +3056,7 @@ static void
 tu6_emit_blend(struct tu_cs *cs,
                const struct vk_color_blend_state *cb,
                const struct vk_color_attachment_location_state *cal,
+               const struct vk_render_pass_state *rp,
                bool alpha_to_coverage_enable,
                bool alpha_to_one_enable,
                uint32_t sample_mask)
@@ -3059,8 +3071,14 @@ tu6_emit_blend(struct tu_cs *cs,
          continue;
 
       const struct vk_color_blend_attachment_state *att = &cb->attachments[i];
+      VkFormat att_format = rp->color_attachment_formats[i];
+      bool is_float_or_srgb = vk_format_is_float(att_format) || vk_format_is_srgb(att_format);
 
-      if (rop_reads_dst || att->blend_enable) {
+      /* Logic op overrides any blending. Even when logic op is present, blending
+       * should be kept disabled for any ops that don't read dst values or for
+       * attachments of float or sRGB formats.
+       */
+      if ((att->blend_enable && !cb->logic_op_enable) || (rop_reads_dst && !is_float_or_srgb)) {
          blend_enable_mask |= 1u << cal->color_map[i];
       }
    }
@@ -3109,12 +3127,21 @@ tu6_emit_blend(struct tu_cs *cs,
             tu6_blend_factor((VkBlendFactor)att->src_alpha_blend_factor);
          const enum adreno_rb_blend_factor dst_alpha_factor =
             tu6_blend_factor((VkBlendFactor)att->dst_alpha_blend_factor);
+         VkFormat att_format = rp->color_attachment_formats[i];
+         bool is_float_or_srgb = vk_format_is_float(att_format) || vk_format_is_srgb(att_format);
+
+         /* Keep blend and logic op flags tidy. These conditions match the blend-enable
+          * mask construction above, except for the dst-reading rop condition that doesn't
+          * apply here.
+          */
+         bool blend_enable = att->blend_enable && !cb->logic_op_enable;
+         bool logic_op_enable = cb->logic_op_enable && !is_float_or_srgb;
 
          tu_cs_emit_regs(cs,
                          A6XX_RB_MRT_CONTROL(remapped_idx,
-                                             .blend = att->blend_enable,
-                                             .blend2 = att->blend_enable,
-                                             .rop_enable = cb->logic_op_enable,
+                                             .blend = blend_enable,
+                                             .blend2 = blend_enable,
+                                             .rop_enable = logic_op_enable,
                                              .rop_code = rop,
                                              .component_enable = att->write_mask),
                          A6XX_RB_MRT_BLEND_CONTROL(remapped_idx,
@@ -3666,11 +3693,12 @@ tu_pipeline_builder_emit_state(struct tu_pipeline_builder *builder,
       BITSET_SET(pipeline_set, MESA_VK_DYNAMIC_CB_WRITE_MASKS);
       BITSET_SET(pipeline_set, MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS);
    }
-   DRAW_STATE(blend, TU_DYNAMIC_STATE_BLEND, cb,
-              builder->graphics_state.cal,
-              builder->graphics_state.ms->alpha_to_coverage_enable,
-              builder->graphics_state.ms->alpha_to_one_enable,
-              builder->graphics_state.ms->sample_mask);
+   DRAW_STATE_COND(blend, TU_DYNAMIC_STATE_BLEND, attachments_valid, cb,
+                   builder->graphics_state.cal,
+                   builder->graphics_state.rp,
+                   builder->graphics_state.ms->alpha_to_coverage_enable,
+                   builder->graphics_state.ms->alpha_to_one_enable,
+                   builder->graphics_state.ms->sample_mask);
    if (EMIT_STATE(blend_lrz, attachments_valid))
       tu_emit_blend_lrz(&pipeline->lrz_blend, cb,
                         builder->graphics_state.rp);
@@ -3903,12 +3931,14 @@ tu_emit_draw_state(struct tu_cmd_buffer *cmd)
               cmd->vk.dynamic_graphics_state.ms.sample_locations);
    DRAW_STATE(depth_bias, TU_DYNAMIC_STATE_DEPTH_BIAS,
               &cmd->vk.dynamic_graphics_state.rs);
-   DRAW_STATE(blend, TU_DYNAMIC_STATE_BLEND,
-              &cmd->vk.dynamic_graphics_state.cb,
-              &cmd->vk.dynamic_graphics_state.cal,
-              cmd->vk.dynamic_graphics_state.ms.alpha_to_coverage_enable,
-              cmd->vk.dynamic_graphics_state.ms.alpha_to_one_enable,
-              cmd->vk.dynamic_graphics_state.ms.sample_mask);
+   DRAW_STATE_COND(blend, TU_DYNAMIC_STATE_BLEND,
+                   cmd->state.dirty & TU_CMD_DIRTY_SUBPASS,
+                   &cmd->vk.dynamic_graphics_state.cb,
+                   &cmd->vk.dynamic_graphics_state.cal,
+                   &cmd->state.vk_rp,
+                   cmd->vk.dynamic_graphics_state.ms.alpha_to_coverage_enable,
+                   cmd->vk.dynamic_graphics_state.ms.alpha_to_one_enable,
+                   cmd->vk.dynamic_graphics_state.ms.sample_mask);
    if (!cmd->state.pipeline_blend_lrz &&
        (EMIT_STATE(blend_lrz) || (cmd->state.dirty & TU_CMD_DIRTY_SUBPASS))) {
       bool blend_reads_dest = tu6_calc_blend_lrz(&cmd->vk.dynamic_graphics_state.cb,

@@ -72,6 +72,7 @@ tu_device_get_cache_uuid(struct tu_physical_device *device, void *uuid)
 
    _mesa_sha1_update(&ctx, &family, sizeof(family));
    _mesa_sha1_update(&ctx, &driver_flags, sizeof(driver_flags));
+   _mesa_sha1_update(&ctx, &device->uche_trap_base, sizeof(device->uche_trap_base));
    _mesa_sha1_final(&ctx, sha1);
 
    memcpy(uuid, sha1, VK_UUID_SIZE);
@@ -222,6 +223,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_sampler_ycbcr_conversion = true,
       .KHR_separate_depth_stencil_layouts = true,
       .KHR_shader_atomic_int64 = device->info->a7xx.has_64b_ssbo_atomics,
+      .KHR_shader_clock = true,
       .KHR_shader_draw_parameters = true,
       .KHR_shader_expect_assume = true,
       .KHR_shader_float16_int8 = true,
@@ -273,6 +275,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_external_memory_dma_buf = true,
       .EXT_filter_cubic = device->info->a6xx.has_tex_filter_cubic,
       .EXT_fragment_density_map = true,
+      .EXT_fragment_density_map_offset = true,
       .EXT_global_priority = true,
       .EXT_global_priority_query = true,
       .EXT_graphics_pipeline_library = true,
@@ -333,6 +336,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .GOOGLE_user_type = true,
       .IMG_filter_cubic = device->info->a6xx.has_tex_filter_cubic,
       .NV_compute_shader_derivatives = device->info->chip >= 7,
+      .QCOM_fragment_density_map_offset = true,
       .VALVE_mutable_descriptor_type = true,
    } };
 
@@ -536,6 +540,10 @@ tu_get_features(struct tu_physical_device *pdevice,
 
    /* VK_KHR_present_wait */
    features->presentWait = pdevice->vk.supported_extensions.KHR_present_wait;
+
+   /* VK_KHR_shader_clock */
+   features->shaderSubgroupClock = true;
+   features->shaderDeviceClock = true;
 
    /* VK_KHR_shader_expect_assume */
    features->shaderExpectAssume = true;
@@ -747,6 +755,9 @@ tu_get_features(struct tu_physical_device *pdevice,
    /* VK_KHR_subgroup_rotate */
    features->shaderSubgroupRotate = true;
    features->shaderSubgroupRotateClustered = true;
+
+   /* VK_EXT_fragment_density_map_offset */
+   features->fragmentDensityMapOffset = true;
 }
 
 static void
@@ -1385,6 +1396,11 @@ tu_get_properties(struct tu_physical_device *pdevice,
    props->degenerateLinesRasterized = false;
    props->fullyCoveredFragmentShaderInputVariable = false;
    props->conservativeRasterizationPostDepthCoverage = false;
+
+   /* VK_QCOM_fragment_density_map_offset */
+   props->fragmentDensityOffsetGranularity = (VkExtent2D) { 
+      TU_FDM_OFFSET_GRANULARITY, TU_FDM_OFFSET_GRANULARITY
+   };
 }
 
 static const struct vk_pipeline_cache_object_ops *const cache_import_ops[] = {
@@ -1626,6 +1642,7 @@ static const driOptionDescription tu_dri_options[] = {
       DRI_CONF_TU_DONT_RESERVE_DESCRIPTOR_SET(false)
       DRI_CONF_TU_ALLOW_OOB_INDIRECT_UBO_LOADS(false)
       DRI_CONF_TU_DISABLE_D24S8_BORDER_COLOR_WORKAROUND(false)
+      DRI_CONF_TU_USE_TEX_COORD_ROUND_NEAREST_EVEN_MODE(false)
    DRI_CONF_SECTION_END
 };
 
@@ -1648,6 +1665,8 @@ tu_init_dri_options(struct tu_instance *instance)
          driQueryOptionb(&instance->dri_options, "tu_allow_oob_indirect_ubo_loads");
    instance->disable_d24s8_border_color_workaround =
          driQueryOptionb(&instance->dri_options, "tu_disable_d24s8_border_color_workaround");
+   instance->use_tex_coord_round_nearest_even_mode =
+         driQueryOptionb(&instance->dri_options, "tu_use_tex_coord_round_nearest_even_mode");
 }
 
 static uint32_t instance_count = 0;
@@ -2576,6 +2595,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
          .storage_16bit = physical_device->info->a6xx.storage_16bit,
          .storage_8bit = physical_device->info->a7xx.storage_8bit,
          .shared_push_consts = !TU_DEBUG(PUSH_CONSTS_PER_STAGE),
+         .uche_trap_base = physical_device->uche_trap_base,
       };
       device->compiler = ir3_compiler_create(
          NULL, &physical_device->dev_id, physical_device->info, &ir3_options);
@@ -3357,7 +3377,8 @@ tu_setup_dynamic_framebuffer(struct tu_cmd_buffer *cmd_buffer,
       pRenderingInfo->renderArea.extent.width;
    framebuffer->height = pRenderingInfo->renderArea.offset.y +
       pRenderingInfo->renderArea.extent.height;
-   framebuffer->layers = pRenderingInfo->layerCount;
+   framebuffer->layers =
+      pRenderingInfo->viewMask != 0 ? 1 : pRenderingInfo->layerCount;
 
    tu_framebuffer_tiling_config(framebuffer, cmd_buffer->device, pass);
 }

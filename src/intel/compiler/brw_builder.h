@@ -153,6 +153,15 @@ public:
    }
 
    /**
+    * Construct a builder for SIMD1 operations.
+    */
+   brw_builder
+   uniform() const
+   {
+      return exec_all().group(1, 0);
+   }
+
+   /**
     * Construct a builder for SIMD8-as-scalar
     */
    brw_builder
@@ -661,15 +670,6 @@ public:
    }
 
    /**
-    * Gfx4 predicated IF.
-    */
-   brw_inst *
-   IF(brw_predicate predicate) const
-   {
-      return set_predicate(predicate, emit(BRW_OPCODE_IF));
-   }
-
-   /**
     * CSEL: dst = src2 <op> 0.0f ? src0 : src1
     */
    brw_inst *
@@ -859,15 +859,58 @@ public:
       return component(dst, 0);
    }
 
+   brw_reg
+   LOAD_REG(const brw_reg &src0, brw_inst **out = NULL) const
+   {
+      /* LOAD_REG is a raw, bulk copy of one VGRF to another. The type is
+       * irrelevant. The pass that inserts LOAD_REG to encourage results to be
+       * defs will force all types to be integer types.  Forcing the type to
+       * always be integer here helps with uniformity, and it will also help
+       * implement unit tests that want to compare two shaders for equality.
+       */
+      brw_reg_type t = brw_type_with_size(BRW_TYPE_UD,
+                                          brw_type_size_bits(src0.type));
+      brw_reg dst = retype(brw_allocate_vgrf_units(*shader,
+                                                   shader->alloc.sizes[src0.nr]),
+                           t);
+
+      assert(src0.file == VGRF);
+      assert(shader->alloc.sizes[dst.nr] == shader->alloc.sizes[src0.nr]);
+
+      brw_inst *inst = emit(SHADER_OPCODE_LOAD_REG, dst, retype(src0, t));
+
+      inst->size_written = REG_SIZE * shader->alloc.sizes[src0.nr];
+
+      assert(shader->alloc.sizes[inst->dst.nr] * REG_SIZE == inst->size_written);
+      assert(!inst->is_partial_write());
+
+      if (out) *out = inst;
+      return retype(inst->dst, src0.type);
+   }
+
    brw_shader *shader;
 
    brw_inst *BREAK()    const { return emit(BRW_OPCODE_BREAK); }
+   brw_inst *ELSE()     const { return emit(BRW_OPCODE_ELSE); }
    brw_inst *ENDIF()    const { return emit(BRW_OPCODE_ENDIF); }
    brw_inst *NOP()      const { return emit(BRW_OPCODE_NOP); }
-   brw_inst *WHILE()    const { return emit(BRW_OPCODE_WHILE); }
    brw_inst *CONTINUE() const { return emit(BRW_OPCODE_CONTINUE); }
 
-   void DO() const {
+   brw_inst *
+   IF(brw_predicate predicate = BRW_PREDICATE_NORMAL) const
+   {
+      return set_predicate(predicate, emit(BRW_OPCODE_IF));
+   }
+
+   brw_inst *
+   WHILE(brw_predicate predicate = BRW_PREDICATE_NONE) const
+   {
+      return set_predicate(predicate, emit(BRW_OPCODE_WHILE));
+   }
+
+   void
+   DO() const
+   {
       emit(BRW_OPCODE_DO);
       /* Ensure that there'll always be a block after DO to add
        * instructions and serve as sucessor for predicated WHILE

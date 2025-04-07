@@ -89,7 +89,7 @@ begin_end_tp('render_pass',
     tp_struct=[Arg(type='uint16_t', name='width',               var='fb->width',                                            c_format='%u'),
                Arg(type='uint16_t', name='height',              var='fb->height',                                           c_format='%u'),
                Arg(type='uint8_t',  name='attachment_count',    var='fb->attachment_count',                                 c_format='%u'),
-               Arg(type='uint16_t', name='numberOfBins',        var='tiling->tile_count.width * tiling->tile_count.height', c_format='%u'),
+               Arg(type='uint16_t', name='numberOfBins',        var='tiling->vsc.tile_count.width * tiling->vsc.tile_count.height', c_format='%u'),
                Arg(type='uint16_t', name='binWidth',            var='tiling->tile0.width',                                  c_format='%u'),
                Arg(type='uint16_t', name='binHeight',           var='tiling->tile0.height',                                 c_format='%u'),],
     # Args known only at the end of the renderpass:
@@ -99,7 +99,8 @@ begin_end_tp('render_pass',
               Arg(type='uint32_t',                              var='avgPerSampleBandwidth',                                c_format='%u'),
               Arg(type='bool',                                  var='lrz',                                                  c_format='%s', to_prim_type='({} ? "true" : "false")'),
               Arg(type='const char *',                          var='lrzDisableReason',                                     c_format='%s'),
-              Arg(type='uint32_t',                              var='lrzDisabledAtDraw',                                    c_format='%u'),
+              Arg(type='int32_t',                               var='lrzDisabledAtDraw',                                    c_format='%d'),
+              Arg(type='int32_t',                               var='lrzWriteDisabledAtDraw',                               c_format='%d'),
               Arg(type='uint32_t',                              var='lrzStatus', c_format='%s', to_prim_type='(fd_lrz_gpu_dir_to_str((enum fd_lrz_gpu_dir)({} & 0xff)))', is_indirect=True),])
 
 

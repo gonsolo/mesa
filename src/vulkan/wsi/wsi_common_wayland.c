@@ -2315,7 +2315,7 @@ wsi_CreateWaylandSurfaceKHR(VkInstance _instance,
    surface->surface = pCreateInfo->surface;
 
    wsi_wl_surface->instance = instance;
-   wsi_wl_surface->color.colorspace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+   wsi_wl_surface->color.colorspace = VK_COLOR_SPACE_PASS_THROUGH_EXT;
 
    *pSurface = VkIcdSurfaceBase_to_handle(&surface->base);
 
@@ -2972,16 +2972,23 @@ wsi_wl_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
    assert(image_index < chain->base.image_count);
    wl_surface_attach(wsi_wl_surface->surface, chain->images[image_index].buffer, 0, 0);
 
-   if (wl_surface_get_version(wsi_wl_surface->surface) >= 4 && damage &&
-       damage->pRectangles && damage->rectangleCount > 0) {
-      for (unsigned i = 0; i < damage->rectangleCount; i++) {
-         const VkRectLayerKHR *rect = &damage->pRectangles[i];
-         assert(rect->layer == 0);
-         wl_surface_damage_buffer(wsi_wl_surface->surface,
-                                  rect->offset.x, rect->offset.y,
-                                  rect->extent.width, rect->extent.height);
+   if (wl_surface_get_version(wsi_wl_surface->surface) >= WL_SURFACE_DAMAGE_BUFFER_SINCE_VERSION) {
+      if (damage && damage->pRectangles && damage->rectangleCount > 0) {
+         for (unsigned i = 0; i < damage->rectangleCount; i++) {
+            const VkRectLayerKHR *rect = &damage->pRectangles[i];
+            assert(rect->layer == 0);
+            wl_surface_damage_buffer(wsi_wl_surface->surface,
+                                     rect->offset.x, rect->offset.y,
+                                     rect->extent.width, rect->extent.height);
+         }
+      } else {
+         wl_surface_damage_buffer(wsi_wl_surface->surface, 0, 0, INT32_MAX, INT32_MAX);
       }
    } else {
+      /* If the compositor doesn't support damage_buffer, we deliberately
+       * ignore the damage region and post maximum damage, because
+       * we are unaware how to map the damage region from the buffer local
+       * coordinate space to the surface local coordinate space */
       wl_surface_damage(wsi_wl_surface->surface, 0, 0, INT32_MAX, INT32_MAX);
    }
 

@@ -1382,6 +1382,11 @@ opt_copy_propagation_local(brw_shader &s, linear_ctx *lin_ctx,
    bool progress = false;
 
    foreach_inst_in_block(brw_inst, inst, block) {
+      /* The non-defs copy propagation passes should not be called while
+       * LOAD_REG instructions still exist.
+       */
+      assert(inst->opcode != SHADER_OPCODE_LOAD_REG);
+
       /* Try propagating into this instruction. */
       bool constant_progress = false;
       for (int i = inst->sources - 1; i >= 0; i--) {
@@ -1638,6 +1643,16 @@ try_copy_propagate_def(brw_shader &s,
    if (instruction_requires_packed_data(inst) && entry_stride != 1)
       return false;
 
+   /* load_reg loads a whole VGRF into a def. It is not allowed for the source
+    * to have a stride or a non-zero offset (unless stride == 0). It is
+    * allowed for the source to to be uniform.
+    */
+   if (inst->opcode == SHADER_OPCODE_LOAD_REG &&
+       !is_uniform(val) &&
+       (val.offset != 0 || entry_stride > 1)) {
+      return false;
+   }
+
    const brw_reg_type dst_type = (has_source_modifiers &&
                                   def->dst.type != inst->src[arg].type) ?
       def->dst.type : inst->dst.type;
@@ -1845,6 +1860,21 @@ find_value_for_offset(brw_inst *def, const brw_reg &src, unsigned src_size)
       }
       break;
    }
+   case SHADER_OPCODE_LOAD_REG: {
+      val = def->src[0];
+
+      unsigned rel_offset = src.offset - def->dst.offset;
+
+      if (val.stride == 0)
+         rel_offset %= brw_type_size_bytes(def->dst.type);
+
+      if (val.file == IMM)
+         val = extract_imm(val, src.type, rel_offset);
+      else
+         val = byte_offset(def->src[0], rel_offset);
+
+      break;
+   }
    default:
       break;
    }
@@ -1888,6 +1918,15 @@ brw_opt_copy_propagation_defs(brw_shader &s)
 
                continue;
             }
+         }
+
+         /* Only propagate through a load_reg if the source is a def or a
+          * UNIFORM (since these are also always invariant). The destination
+          * of a load_reg is always a def (by definition).
+          */
+         if (def->opcode == SHADER_OPCODE_LOAD_REG &&
+             (defs.get(def->src[0]) == NULL && def->src[0].file != UNIFORM)) {
+            continue;
          }
 
          brw_reg val =

@@ -582,9 +582,7 @@ emit_alu(struct ir3_context *ctx, nir_alu_instr *alu)
       alu->op != nir_op_sdot_4x8_iadd &&
       alu->op != nir_op_sdot_4x8_iadd_sat &&
       alu->op != nir_op_sudot_4x8_iadd &&
-      alu->op != nir_op_sudot_4x8_iadd_sat &&
-      /* not supported in HW, we have to fall back to normal registers */
-      alu->op != nir_op_ffma;
+      alu->op != nir_op_sudot_4x8_iadd_sat;
 
    struct ir3_instruction **def = ir3_get_def(ctx, &alu->def, dst_sz);
 
@@ -721,7 +719,22 @@ emit_alu(struct ir3_context *ctx, nir_alu_instr *alu)
       dst = ir3_ADD_F_rpt(b, dst_sz, src[0], 0, src[1], IR3_REG_FNEG);
       break;
    case nir_op_ffma:
-      dst = ir3_MAD_F32_rpt(b, dst_sz, src[0], 0, src[1], 0, src[2], 0);
+      /* The scalar ALU doesn't support mad, so expand to mul+add so that we
+       * don't unnecessarily fall back to non-earlypreamble. This is safe
+       * because at least on a6xx+ mad is unfused.
+       */
+      if (use_shared) {
+         struct ir3_instruction_rpt mul01 =
+            ir3_MUL_F_rpt(b, dst_sz, src[0], 0, src[1], 0);
+
+         if (is_half(src[0].rpts[0])) {
+            set_dst_flags(mul01.rpts, dst_sz, IR3_REG_HALF);
+         }
+
+         dst = ir3_ADD_F_rpt(b, dst_sz, mul01, 0, src[2], 0);
+      } else {
+         dst = ir3_MAD_F32_rpt(b, dst_sz, src[0], 0, src[1], 0, src[2], 0);
+      }
       break;
    case nir_op_flt:
       dst = ir3_CMPS_F_rpt(b, dst_sz, src[0], 0, src[1], 0);
@@ -3350,9 +3363,7 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
       break;
 
    case nir_intrinsic_preamble_end_ir3: {
-      struct ir3_instruction *instr = ir3_SHPE(b);
-      instr->barrier_class = instr->barrier_conflict = IR3_BARRIER_CONST_W;
-      array_insert(ctx->block, ctx->block->keeps, instr);
+      ir3_SHPE(b);
       break;
    }
    case nir_intrinsic_store_const_ir3: {
@@ -5972,12 +5983,10 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
     * know what we might have to wait on when coming in from VS chsh.
     */
    if (so->type == MESA_SHADER_TESS_CTRL || so->type == MESA_SHADER_GEOMETRY) {
-      foreach_block (block, &ir->block_list) {
-         foreach_instr (instr, &block->instr_list) {
-            instr->flags |= IR3_INSTR_SS | IR3_INSTR_SY;
-            break;
-         }
-      }
+      struct ir3_block *first_block = ir3_start_block(ir);
+      struct ir3_instruction *first_instr = list_first_entry(
+         &first_block->instr_list, struct ir3_instruction, node);
+      first_instr->flags |= IR3_INSTR_SS | IR3_INSTR_SY;
    }
 
    if (ctx->compiler->gen >= 7 && so->type == MESA_SHADER_COMPUTE) {
@@ -6042,7 +6051,8 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
    }
 
    if (so->type == MESA_SHADER_FRAGMENT) {
-      so->empty = is_empty(ir) && so->num_sampler_prefetch == 0;
+      so->empty = is_empty(ir) && so->outputs_count == 0 &&
+                  so->num_sampler_prefetch == 0;
       so->writes_only_color = !ctx->s->info.writes_memory && !so->has_kill &&
                               !so->writes_pos && !so->writes_smask &&
                               !so->writes_stencilref;

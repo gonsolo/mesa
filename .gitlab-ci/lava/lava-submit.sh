@@ -52,7 +52,7 @@ cp artifacts/ci-common/init-*.sh results/job-rootfs-overlay/
 cp "$SCRIPTS_DIR"/setup-test-env.sh results/job-rootfs-overlay/
 
 tar zcf job-rootfs-overlay.tar.gz -C results/job-rootfs-overlay/ .
-s3_upload job-rootfs-overlay.tar.gz "https://${JOB_ARTIFACTS_BASE}"
+s3_upload job-rootfs-overlay.tar.gz "https://${JOB_ARTIFACTS_BASE}/"
 
 # Prepare env vars for upload.
 section_switch variables "Environment variables passed through to device:"
@@ -98,6 +98,12 @@ PYTHONPATH=artifacts/ artifacts/lava/lava_job_submitter.py \
 		--name=job-overlay \
 		--url="https://${JOB_ROOTFS_OVERLAY_PATH}" \
 		--compression=gz \
+		--path="/" \
+		--format=tar \
+	- append-overlay \
+		--name=extra-modules \
+		--url="${KERNEL_IMAGE_BASE}/${DEBIAN_ARCH}/modules.tar.zst" \
+		--compression=zstd \
 		--path="/" \
 		--format=tar \
 	- submit \

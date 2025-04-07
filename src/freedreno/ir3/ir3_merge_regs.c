@@ -511,13 +511,18 @@ ir3_create_parallel_copies(struct ir3 *ir)
 }
 
 static void
-index_merge_sets(struct ir3_liveness *live, struct ir3 *ir)
+index_merge_sets(struct ir3_liveness *live, struct ir3 *ir, bool update)
 {
-   unsigned offset = 0;
+   unsigned offset = update ? live->interval_offset : 0;
    foreach_block (block, &ir->block_list) {
       foreach_instr (instr, &block->instr_list) {
          for (unsigned i = 0; i < instr->dsts_count; i++) {
             struct ir3_register *dst = instr->dsts[i];
+
+            if (update &&
+                (dst->interval_start != 0 || dst->interval_end != 0)) {
+               continue;
+            }
 
             unsigned dst_offset;
             struct ir3_merge_set *merge_set = dst->merge_set;
@@ -540,6 +545,12 @@ index_merge_sets(struct ir3_liveness *live, struct ir3 *ir)
    }
 
    live->interval_offset = offset;
+}
+
+void
+ir3_update_merge_sets_index(struct ir3_liveness *live, struct ir3 *ir)
+{
+   index_merge_sets(live, ir, true);
 }
 
 #define RESET      "\x1b[0m"
@@ -580,6 +591,25 @@ dump_merge_sets(struct ir3 *ir)
 }
 
 void
+ir3_aggressive_coalesce(struct ir3_liveness *live,
+                        struct ir3_instruction *instr)
+{
+   switch (instr->opc) {
+   case OPC_META_SPLIT:
+      aggressive_coalesce_split(live, instr);
+      break;
+   case OPC_META_COLLECT:
+      aggressive_coalesce_collect(live, instr);
+      break;
+   case OPC_META_PARALLEL_COPY:
+      aggressive_coalesce_parallel_copy(live, instr);
+      break;
+   default:
+      break;
+   }
+}
+
+void
 ir3_merge_regs(struct ir3_liveness *live, struct ir3 *ir)
 {
    /* First pass: coalesce phis, which must be together. */
@@ -595,19 +625,7 @@ ir3_merge_regs(struct ir3_liveness *live, struct ir3 *ir)
    /* Second pass: aggressively coalesce parallelcopy, split, collect */
    foreach_block (block, &ir->block_list) {
       foreach_instr (instr, &block->instr_list) {
-         switch (instr->opc) {
-         case OPC_META_SPLIT:
-            aggressive_coalesce_split(live, instr);
-            break;
-         case OPC_META_COLLECT:
-            aggressive_coalesce_collect(live, instr);
-            break;
-         case OPC_META_PARALLEL_COPY:
-            aggressive_coalesce_parallel_copy(live, instr);
-            break;
-         default:
-            break;
-         }
+         ir3_aggressive_coalesce(live, instr);
       }
    }
 
@@ -617,7 +635,7 @@ ir3_merge_regs(struct ir3_liveness *live, struct ir3 *ir)
       }
    }
 
-   index_merge_sets(live, ir);
+   index_merge_sets(live, ir, false);
 
    if (ir3_shader_debug & IR3_DBG_RAMSGS)
       dump_merge_sets(ir);
