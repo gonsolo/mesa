@@ -651,6 +651,15 @@ typedef struct nir_variable {
       unsigned per_vertex : 1;
 
       /**
+       * Whether the shared memory block that this variable represent alias
+       * with other similarly decorated shared memory blocks.  These are Blocks
+       * marked as Aliased in SPIR-V.
+       *
+       * See SPV_KHR_workgroup_storage_explicit_layout for details.
+       */
+      unsigned aliased_shared_memory : 1;
+
+      /**
        * Layout qualifier for gl_FragDepth. See nir_depth_layout.
        *
        * This is not equal to ``ir_depth_layout_none`` if and only if this
@@ -2309,6 +2318,8 @@ typedef enum nir_texop {
    nir_texop_samples_identical,
    /** Regular texture look-up, eligible for pre-dispatch */
    nir_texop_tex_prefetch,
+   /** Returns the sampler's LOD bias (if sampler LOD bias is lowered) */
+   nir_texop_lod_bias,
    /** Multisample fragment color texture fetch */
    nir_texop_fragment_fetch_amd,
    /** Multisample fragment mask texture fetch */
@@ -2317,8 +2328,6 @@ typedef enum nir_texop {
    nir_texop_descriptor_amd,
    /** Returns a sampler descriptor. */
    nir_texop_sampler_descriptor_amd,
-   /** Returns the sampler's LOD bias */
-   nir_texop_lod_bias_agx,
    /** Returns the image view's min LOD */
    nir_texop_image_min_lod_agx,
    /** Returns a bool indicating that the sampler uses a custom border colour */
@@ -5579,6 +5588,12 @@ typedef struct nir_lower_tex_options {
     * absolute values of derivatives is 0 for all coordinates.
     */
    bool lower_lod_zero_width;
+
+   /**
+    * If true, emulates sampler descriptor LOD bias by adding the sampler
+    * LOD bias to every texture instruction's LOD.
+    */
+   bool lower_sampler_lod_bias;
 
    /* Turns nir_op_tex and other ops with an implicit derivative, in stages
     * without implicit derivatives (like the vertex shader) to have an explicit

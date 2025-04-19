@@ -8,8 +8,6 @@ anv-jsl-vk:
   variables:
     DEQP_SUITE: anv-jsl
     VK_DRIVER: intel
-    # force fixed kernel, since too many flakes and unexpected results seen with 6.13-rc4 and 6.11-rc7
-    EXTERNAL_KERNEL_TAG: "v6.6.21-mesa-f8ea"
   parallel: 5
 
 anv-jsl-vk-full:
@@ -206,13 +204,12 @@ iris-amly-egl:
 iris-kbl-piglit:
   extends:
     - .iris-kbl-test
-    - .lava-piglit
+    - .test-piglit
   parallel: 2
   variables:
     HWCI_START_XORG: 1
     PIGLIT_NO_WINDOW: 0
-    PIGLIT_PLATFORM: mixed_glx_egl
-    PIGLIT_PROFILES: gpu
+    DEQP_SUITE: iris-kbl-piglit
 
 iris-apl-traces:
   variables:
@@ -284,6 +281,7 @@ intel-adl-cl:
     - .intel-adl-test
     - .lava-acer-n20q11-r856ltn-p1s2-nissa:x86_64
     - .intel-rules
+    - .test-piglit
   rules:
     - !reference [.intel-adl-test, rules]
     - !reference [.intel-rules, rules]

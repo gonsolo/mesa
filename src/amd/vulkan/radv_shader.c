@@ -394,6 +394,7 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
             },
          .emit_debug_break = !!device->trap_handler_shader,
          .debug_info = !!(instance->debug_flags & RADV_DEBUG_NIR_DEBUG_INFO),
+         .printf = !!device->printf.buffer_addr,
       };
       nir = spirv_to_nir(spirv, stage->spirv.size / 4, spec_entries, num_spec_entries, stage->stage, stage->entrypoint,
                          &spirv_options, &pdev->nir_options[stage->stage]);
@@ -404,6 +405,9 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
       free(spec_entries);
 
       radv_device_associate_nir(device, nir);
+
+      if (device->printf.buffer_addr)
+         NIR_PASS(_, nir, radv_nir_lower_printf);
 
       const struct nir_lower_sysvals_to_varyings_options sysvals_to_varyings = {
          .point_coord = true,
@@ -515,9 +519,7 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
       /* Lower shared variables early to prevent the over allocation of shared memory in
        * radv_nir_lower_ray_queries.  */
       if (nir->info.stage == MESA_SHADER_COMPUTE) {
-         if (!nir->info.shared_memory_explicit_layout)
-            NIR_PASS(_, nir, nir_lower_vars_to_explicit_types, nir_var_mem_shared, shared_var_info);
-
+         NIR_PASS(_, nir, nir_lower_vars_to_explicit_types, nir_var_mem_shared, shared_var_info);
          NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_shared, nir_address_format_32bit_offset);
       }
 
@@ -622,10 +624,7 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
       if (nir->info.stage == MESA_SHADER_TASK || nir->info.stage == MESA_SHADER_MESH)
          var_modes |= nir_var_mem_task_payload;
 
-      if (!nir->info.shared_memory_explicit_layout)
-         NIR_PASS(_, nir, nir_lower_vars_to_explicit_types, var_modes, shared_var_info);
-      else if (var_modes & ~nir_var_mem_shared)
-         NIR_PASS(_, nir, nir_lower_vars_to_explicit_types, var_modes & ~nir_var_mem_shared, shared_var_info);
+      NIR_PASS(_, nir, nir_lower_vars_to_explicit_types, var_modes, shared_var_info);
       NIR_PASS(_, nir, nir_lower_explicit_io, var_modes, nir_address_format_32bit_offset);
 
       if (nir->info.zero_initialize_shared_memory && nir->info.shared_size > 0) {
@@ -2292,9 +2291,11 @@ radv_shader_combine_cfg_vs_tcs(const struct radv_shader *vs, const struct radv_s
 }
 
 void
-radv_shader_combine_cfg_vs_gs(const struct radv_shader *vs, const struct radv_shader *gs, uint32_t *rsrc1_out,
-                              uint32_t *rsrc2_out)
+radv_shader_combine_cfg_vs_gs(const struct radv_device *device, const struct radv_shader *vs,
+                              const struct radv_shader *gs, uint32_t *rsrc1_out, uint32_t *rsrc2_out)
 {
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+
    assert(G_00B12C_USER_SGPR(vs->config.rsrc2) == G_00B12C_USER_SGPR(gs->config.rsrc2));
 
    if (rsrc1_out) {
@@ -2312,22 +2313,30 @@ radv_shader_combine_cfg_vs_gs(const struct radv_shader *vs, const struct radv_sh
 
    if (rsrc2_out) {
       uint32_t rsrc2 = vs->config.rsrc2;
+      uint32_t lds_size;
 
       if (G_00B22C_ES_VGPR_COMP_CNT(gs->config.rsrc2) > G_00B22C_ES_VGPR_COMP_CNT(rsrc2))
          rsrc2 = (rsrc2 & C_00B22C_ES_VGPR_COMP_CNT) | (gs->config.rsrc2 & ~C_00B22C_ES_VGPR_COMP_CNT);
 
       rsrc2 |= gs->config.rsrc2 & ~(C_00B12C_SCRATCH_EN & C_00B12C_SO_EN & C_00B12C_SO_BASE0_EN & C_00B12C_SO_BASE1_EN &
                                     C_00B12C_SO_BASE2_EN & C_00B12C_SO_BASE3_EN);
+      if (gs->info.is_ngg) {
+         lds_size = DIV_ROUND_UP(gs->info.ngg_info.lds_size, pdev->info.lds_encode_granularity);
+      } else {
+         lds_size = gs->info.gs_ring_info.lds_size;
+      }
+
+      rsrc2 |= S_00B22C_LDS_SIZE(lds_size);
 
       *rsrc2_out = rsrc2;
    }
 }
 
 void
-radv_shader_combine_cfg_tes_gs(const struct radv_shader *tes, const struct radv_shader *gs, uint32_t *rsrc1_out,
-                               uint32_t *rsrc2_out)
+radv_shader_combine_cfg_tes_gs(const struct radv_device *device, const struct radv_shader *tes,
+                               const struct radv_shader *gs, uint32_t *rsrc1_out, uint32_t *rsrc2_out)
 {
-   radv_shader_combine_cfg_vs_gs(tes, gs, rsrc1_out, rsrc2_out);
+   radv_shader_combine_cfg_vs_gs(device, tes, gs, rsrc1_out, rsrc2_out);
 
    if (rsrc2_out) {
       *rsrc2_out |= S_00B22C_OC_LDS_EN(1);

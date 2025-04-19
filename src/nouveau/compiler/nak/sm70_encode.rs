@@ -47,6 +47,19 @@ impl SetFieldU64 for SM70Encoder<'_> {
 }
 
 impl SM70Encoder<'_> {
+    fn zero_reg(&self, file: RegFile) -> RegRef {
+        let nr = match file {
+            RegFile::GPR => 255,
+            RegFile::UGPR => 63,
+            _ => panic!("Not a GPR"),
+        };
+        RegRef::new(file, nr, 1)
+    }
+
+    fn true_reg(&self, file: RegFile) -> RegRef {
+        RegRef::new(file, 7, 1)
+    }
+
     fn set_opcode(&mut self, opcode: u16) {
         self.set_field(0..12, opcode);
     }
@@ -75,7 +88,7 @@ impl SM70Encoder<'_> {
     fn set_reg_src(&mut self, range: Range<usize>, src: Src) {
         assert!(src.src_mod.is_none());
         match src.src_ref {
-            SrcRef::Zero => self.set_reg(range, RegRef::zero(RegFile::GPR, 1)),
+            SrcRef::Zero => self.set_reg(range, self.zero_reg(RegFile::GPR)),
             SrcRef::Reg(reg) => self.set_reg(range, reg),
             _ => panic!("Not a register"),
         }
@@ -83,9 +96,7 @@ impl SM70Encoder<'_> {
 
     fn set_pred_dst(&mut self, range: Range<usize>, dst: Dst) {
         match dst {
-            Dst::None => {
-                self.set_pred_reg(range, RegRef::zero(RegFile::Pred, 1));
-            }
+            Dst::None => self.set_pred_reg(range, self.true_reg(RegFile::Pred)),
             Dst::Reg(reg) => self.set_pred_reg(range, reg),
             _ => panic!("Not a register"),
         }
@@ -98,12 +109,9 @@ impl SM70Encoder<'_> {
         src: Src,
         file: RegFile,
     ) {
-        // The default for predicates is true
-        let true_reg = RegRef::new(file, 7, 1);
-
         let (not, reg) = match src.src_ref {
-            SrcRef::True => (false, true_reg),
-            SrcRef::False => (true, true_reg),
+            SrcRef::True => (false, self.true_reg(file)),
+            SrcRef::False => (true, self.true_reg(file)),
             SrcRef::Reg(reg) => {
                 assert!(reg.file() == file);
                 (false, reg)
@@ -145,7 +153,7 @@ impl SM70Encoder<'_> {
         self.set_pred_reg(
             12..15,
             match pred.pred_ref {
-                PredRef::None => RegRef::zero(RegFile::Pred, 1),
+                PredRef::None => self.true_reg(RegFile::Pred),
                 PredRef::Reg(reg) => reg,
                 PredRef::SSA(_) => panic!("SSA values must be lowered"),
             },
@@ -155,7 +163,7 @@ impl SM70Encoder<'_> {
 
     fn set_dst(&mut self, dst: Dst) {
         match dst {
-            Dst::None => self.set_reg(16..24, RegRef::zero(RegFile::GPR, 1)),
+            Dst::None => self.set_reg(16..24, self.zero_reg(RegFile::GPR)),
             Dst::Reg(reg) => self.set_reg(16..24, reg),
             _ => panic!("Not a register"),
         }
@@ -163,7 +171,7 @@ impl SM70Encoder<'_> {
 
     fn set_udst(&mut self, dst: Dst) {
         match dst {
-            Dst::None => self.set_ureg(16..24, RegRef::zero(RegFile::UGPR, 1)),
+            Dst::None => self.set_ureg(16..24, self.zero_reg(RegFile::UGPR)),
             Dst::Reg(reg) => self.set_ureg(16..24, reg),
             _ => panic!("Not a register"),
         }
@@ -260,7 +268,11 @@ fn dst_is_bar(dst: Dst) -> bool {
 }
 
 impl ALUSrc {
-    fn from_src(src: Option<&Src>, op_is_uniform: bool) -> ALUSrc {
+    fn from_src(
+        e: &SM70Encoder<'_>,
+        src: Option<&Src>,
+        op_is_uniform: bool,
+    ) -> ALUSrc {
         let Some(src) = src else {
             return ALUSrc::None;
         };
@@ -274,7 +286,7 @@ impl ALUSrc {
                         } else {
                             RegFile::GPR
                         };
-                        RegRef::zero(file, 1)
+                        e.zero_reg(file)
                     }
                     SrcRef::Reg(reg) => reg,
                     _ => panic!("Invalid source ref"),
@@ -463,9 +475,9 @@ impl SM70Encoder<'_> {
             self.set_dst(*dst);
         }
 
-        let src0 = ALUSrc::from_src(src0, false);
-        let src1 = ALUSrc::from_src(src1, false);
-        let src2 = ALUSrc::from_src(src2, false);
+        let src0 = ALUSrc::from_src(self, src0, false);
+        let src1 = ALUSrc::from_src(self, src1, false);
+        let src2 = ALUSrc::from_src(self, src2, false);
 
         // Bits 74..76 are used both for the swizzle on src0 and for the source
         // modifier for the register source of src1 and src2.  When both are
@@ -474,7 +486,7 @@ impl SM70Encoder<'_> {
         let bit74_75_are_mod = !is_fp16_alu
             || matches!(src1, ALUSrc::None)
             || matches!(src2, ALUSrc::None);
-        debug_assert!(bit74_75_are_mod || !src0.has_src_mod());
+        debug_assert!(bit74_75_are_mod || !src2.has_src_mod());
 
         self.encode_alu_src0(&src0, RegFile::GPR, is_fp16_alu);
 
@@ -577,9 +589,9 @@ impl SM70Encoder<'_> {
             self.set_udst(*dst);
         }
 
-        let src0 = ALUSrc::from_src(src0, true);
-        let src1 = ALUSrc::from_src(src1, true);
-        let src2 = ALUSrc::from_src(src2, true);
+        let src0 = ALUSrc::from_src(self, src0, true);
+        let src1 = ALUSrc::from_src(self, src1, true);
+        let src2 = ALUSrc::from_src(self, src2, true);
 
         // All uniform ALU requires bit 91 set
         self.set_bit(91, true);
@@ -827,6 +839,8 @@ impl SM70Encoder<'_> {
         self.set_field(
             range,
             match op {
+                IntCmpOp::False => 0_u8,
+                IntCmpOp::True => 7_u8,
                 IntCmpOp::Eq => 2_u8,
                 IntCmpOp::Ne => 5_u8,
                 IntCmpOp::Lt => 1_u8,
@@ -1101,7 +1115,7 @@ impl SM70Op for OpHFma2 {
 
         // HFMA2 doesn't have fabs or fneg on SRC2.
         if !src2.src_mod.is_none() {
-            b.copy_alu_src_and_lower_fmod(src2, SrcType::F16v2);
+            b.copy_alu_src_and_lower_fmod(src2, gpr, SrcType::F16v2);
         }
     }
 
@@ -1348,13 +1362,7 @@ impl SM70Op for OpIAdd3 {
         if !src0.src_mod.is_none() && !src1.src_mod.is_none() {
             assert!(self.overflow[0].is_none());
             assert!(self.overflow[1].is_none());
-            let val = b.alloc_ssa(gpr, 1);
-            b.push_op(OpIAdd3 {
-                srcs: [Src::new_zero(), *src0, Src::new_zero()],
-                overflow: [Dst::None; 2],
-                dst: val.into(),
-            });
-            *src0 = val.into();
+            b.copy_alu_src_and_lower_ineg(src0, gpr, SrcType::I32);
         }
         b.copy_alu_src_if_not_reg(src0, gpr, SrcType::I32);
         b.copy_alu_src_if_both_not_reg(src1, src2, gpr, SrcType::I32);
@@ -2029,7 +2037,7 @@ impl SM70Op for OpMov {
             e.set_udst(self.dst);
 
             // umov is encoded like a non-uniform ALU op
-            let src = ALUSrc::from_src(Some(&self.src), true);
+            let src = ALUSrc::from_src(e, Some(&self.src), true);
             let form: u8 = match &src {
                 ALUSrc::Reg(reg) => {
                     e.encode_alu_ureg(reg, false);
@@ -2325,6 +2333,27 @@ impl SM70Encoder<'_> {
             },
         );
     }
+
+    fn set_tex_channel_mask(
+        &mut self,
+        range: Range<usize>,
+        channel_mask: ChannelMask,
+    ) {
+        self.set_field(range, channel_mask.to_bits());
+    }
+
+    fn set_image_channel_mask(
+        &mut self,
+        range: Range<usize>,
+        channel_mask: ChannelMask,
+    ) {
+        assert!(
+            channel_mask.to_bits() == 0x1
+                || channel_mask.to_bits() == 0x3
+                || channel_mask.to_bits() == 0xf
+        );
+        self.set_field(range, channel_mask.to_bits());
+    }
 }
 
 fn legalize_tex_instr(op: &mut impl SrcsAsSlice, b: &mut LegalizeBuilder) {
@@ -2376,7 +2405,7 @@ impl SM70Op for OpTex {
         e.set_reg_src(32..40, self.srcs[1]);
 
         e.set_tex_dim(61..64, self.dim);
-        e.set_field(72..76, self.mask);
+        e.set_tex_channel_mask(72..76, self.channel_mask);
         e.set_bit(76, self.offset);
         e.set_bit(77, false); // ToDo: NDV
         e.set_bit(78, self.z_cmpr);
@@ -2418,7 +2447,7 @@ impl SM70Op for OpTld {
         e.set_reg_src(32..40, self.srcs[1]);
 
         e.set_tex_dim(61..64, self.dim);
-        e.set_field(72..76, self.mask);
+        e.set_tex_channel_mask(72..76, self.channel_mask);
         e.set_bit(76, self.offset);
         // bit 77: .CL
         e.set_bit(78, self.is_ms);
@@ -2465,7 +2494,7 @@ impl SM70Op for OpTld4 {
         e.set_reg_src(32..40, self.srcs[1]);
 
         e.set_tex_dim(61..64, self.dim);
-        e.set_field(72..76, self.mask);
+        e.set_tex_channel_mask(72..76, self.channel_mask);
         e.set_field(
             76..78,
             match self.offset_mode {
@@ -2513,7 +2542,7 @@ impl SM70Op for OpTmml {
         e.set_reg_src(32..40, self.srcs[1]);
 
         e.set_tex_dim(61..64, self.dim);
-        e.set_field(72..76, self.mask);
+        e.set_tex_channel_mask(72..76, self.channel_mask);
         e.set_bit(77, false); // ToDo: NDV
         e.set_bit(90, self.nodep);
     }
@@ -2551,7 +2580,7 @@ impl SM70Op for OpTxd {
         e.set_reg_src(32..40, self.srcs[1]);
 
         e.set_tex_dim(61..64, self.dim);
-        e.set_field(72..76, self.mask);
+        e.set_tex_channel_mask(72..76, self.channel_mask);
         e.set_bit(76, self.offset);
         e.set_bit(77, false); // ToDo: NDV
         e.set_eviction_priority(&self.mem_eviction_priority);
@@ -2595,7 +2624,7 @@ impl SM70Op for OpTxq {
                 TexQuery::SamplerPos => 2_u8,
             },
         );
-        e.set_field(72..76, self.mask);
+        e.set_tex_channel_mask(72..76, self.channel_mask);
         e.set_bit(90, self.nodep);
     }
 }
@@ -2690,7 +2719,16 @@ impl SM70Op for OpSuLd {
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
-        e.set_opcode(0x998);
+        match self.image_access {
+            ImageAccess::Binary(mem_type) => {
+                e.set_opcode(0x99a);
+                e.set_mem_type(73..76, mem_type);
+            }
+            ImageAccess::Formatted(channel_mask) => {
+                e.set_opcode(0x998);
+                e.set_image_channel_mask(72..76, channel_mask);
+            }
+        }
 
         e.set_dst(self.dst);
         e.set_reg_src(24..32, self.coord);
@@ -2700,9 +2738,6 @@ impl SM70Op for OpSuLd {
         e.set_image_dim(61..64, self.image_dim);
         e.set_mem_order(&self.mem_order);
         e.set_eviction_priority(&self.mem_eviction_priority);
-
-        assert!(self.mask == 0x1 || self.mask == 0x3 || self.mask == 0xf);
-        e.set_field(72..76, self.mask);
     }
 }
 
@@ -2712,7 +2747,16 @@ impl SM70Op for OpSuSt {
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
-        e.set_opcode(0x99c);
+        match self.image_access {
+            ImageAccess::Binary(mem_type) => {
+                e.set_opcode(0x99e);
+                e.set_mem_type(73..76, mem_type);
+            }
+            ImageAccess::Formatted(channel_mask) => {
+                e.set_opcode(0x99c);
+                e.set_image_channel_mask(72..76, channel_mask);
+            }
+        }
 
         e.set_reg_src(24..32, self.coord);
         e.set_reg_src(32..40, self.data);
@@ -2721,9 +2765,6 @@ impl SM70Op for OpSuSt {
         e.set_image_dim(61..64, self.image_dim);
         e.set_mem_order(&self.mem_order);
         e.set_eviction_priority(&self.mem_eviction_priority);
-
-        assert!(self.mask == 0x1 || self.mask == 0x3 || self.mask == 0xf);
-        e.set_field(72..76, self.mask);
     }
 }
 
@@ -3119,7 +3160,7 @@ impl SM70Op for OpLdTram {
     fn encode(&self, e: &mut SM70Encoder<'_>) {
         e.set_opcode(0x3ad);
         e.set_dst(self.dst);
-        e.set_ureg(24..32, RegRef::zero(RegFile::UGPR, 1));
+        e.set_ureg(24..32, e.zero_reg(RegFile::UGPR));
 
         assert!(self.addr % 4 == 0);
         e.set_field(64..72, self.addr >> 2);

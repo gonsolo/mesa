@@ -296,7 +296,7 @@ call_accept_func(nir_builder *b, nir_def *accepted, ac_nir_cull_accepted accept_
 
 static nir_def *
 ac_nir_cull_triangle(nir_builder *b,
-                     bool skip_viewport_culling,
+                     bool skip_viewport_state_culling,
                      bool use_point_tri_intersection,
                      nir_def *initially_accepted,
                      nir_def *pos[3][4],
@@ -308,11 +308,6 @@ ac_nir_cull_triangle(nir_builder *b,
    accepted = nir_iand(b, accepted, nir_inot(b, w_info->all_w_negative_or_zero_or_nan));
    accepted = nir_iand(b, accepted, nir_inot(b, cull_face_triangle(b, pos, w_info)));
 
-   if (skip_viewport_culling) {
-      call_accept_func(b, accepted, accept_func, state);
-      return accepted;
-   }
-
    nir_def *bbox_accepted = NULL;
 
    nir_if *if_accepted = nir_push_if(b, accepted);
@@ -323,17 +318,19 @@ ac_nir_cull_triangle(nir_builder *b,
       nir_def *prim_outside_view = cull_frustrum(b, bbox_min, bbox_max);
       nir_def *bbox_rejected = prim_outside_view;
 
-      nir_if *if_cull_small_prims = nir_push_if(b, nir_load_cull_small_triangles_enabled_amd(b));
-      {
-         nir_def *small_prim_rejected = cull_small_primitive_triangle(b, use_point_tri_intersection,
-                                                                      bbox_min, bbox_max, pos);
-         bbox_rejected = nir_ior(b, bbox_rejected, small_prim_rejected);
+      if (!skip_viewport_state_culling) {
+         nir_if *if_cull_small_prims = nir_push_if(b, nir_load_cull_small_triangles_enabled_amd(b));
+         {
+            nir_def *small_prim_rejected = cull_small_primitive_triangle(b, use_point_tri_intersection,
+                                                                         bbox_min, bbox_max, pos);
+            bbox_rejected = nir_ior(b, bbox_rejected, small_prim_rejected);
+         }
+         nir_pop_if(b, if_cull_small_prims);
+
+         bbox_rejected = nir_if_phi(b, bbox_rejected, prim_outside_view);
       }
-      nir_pop_if(b, if_cull_small_prims);
 
-      bbox_rejected = nir_if_phi(b, bbox_rejected, prim_outside_view);
       bbox_accepted = nir_ior(b, nir_inot(b, bbox_rejected), w_info->any_w_negative);
-
       call_accept_func(b, bbox_accepted, accept_func, state);
    }
    nir_pop_if(b, if_accepted);
@@ -475,7 +472,7 @@ cull_small_primitive_line(nir_builder *b, nir_def *pos[3][4],
 
 static nir_def *
 ac_nir_cull_line(nir_builder *b,
-                 bool skip_viewport_culling,
+                 bool skip_viewport_state_culling,
                  nir_def *initially_accepted,
                  nir_def *pos[3][4],
                  position_w_info *w_info,
@@ -485,7 +482,7 @@ ac_nir_cull_line(nir_builder *b,
    nir_def *accepted = initially_accepted;
    accepted = nir_iand(b, accepted, nir_inot(b, w_info->all_w_negative_or_zero_or_nan));
 
-   if (skip_viewport_culling) {
+   if (skip_viewport_state_culling) {
       call_accept_func(b, accepted, accept_func, state);
       return accepted;
    }
@@ -512,7 +509,7 @@ ac_nir_cull_line(nir_builder *b,
 
 nir_def *
 ac_nir_cull_primitive(nir_builder *b,
-                      bool skip_viewport_culling,
+                      bool skip_viewport_state_culling,
                       bool use_point_tri_intersection,
                       nir_def *initially_accepted,
                       nir_def *pos[3][4],
@@ -524,10 +521,10 @@ ac_nir_cull_primitive(nir_builder *b,
    analyze_position_w(b, pos, num_vertices, &w_info);
 
    if (num_vertices == 3) {
-      return ac_nir_cull_triangle(b, skip_viewport_culling, use_point_tri_intersection,
+      return ac_nir_cull_triangle(b, skip_viewport_state_culling, use_point_tri_intersection,
                                   initially_accepted, pos, &w_info, accept_func, state);
    } else if (num_vertices == 2) {
-      return ac_nir_cull_line(b, skip_viewport_culling, initially_accepted, pos, &w_info,
+      return ac_nir_cull_line(b, skip_viewport_state_culling, initially_accepted, pos, &w_info,
                               accept_func, state);
    } else {
       unreachable("point culling not implemented");

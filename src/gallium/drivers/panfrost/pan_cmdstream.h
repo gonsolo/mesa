@@ -157,6 +157,7 @@ panfrost_overdraw_alpha(const struct panfrost_context *ctx, bool zero)
 }
 #endif
 
+#if PAN_ARCH < 13
 static inline void
 panfrost_emit_primitive_size(struct panfrost_context *ctx, bool points,
                              uint64_t size_array,
@@ -172,6 +173,7 @@ panfrost_emit_primitive_size(struct panfrost_context *ctx, bool points,
       }
    }
 }
+#endif
 
 static inline uint8_t
 pan_draw_mode(enum mesa_prim mode)
@@ -256,11 +258,13 @@ panfrost_get_position_shader(struct panfrost_batch *batch,
    return vs_ptr;
 }
 
+#if PAN_ARCH < 12
 static inline uint64_t
 panfrost_get_varying_shader(struct panfrost_batch *batch)
 {
    return batch->rsd[PIPE_SHADER_VERTEX] + (2 * pan_size(SHADER_PROGRAM));
 }
+#endif
 
 static inline unsigned
 panfrost_vertex_attribute_stride(struct panfrost_compiled_shader *vs,

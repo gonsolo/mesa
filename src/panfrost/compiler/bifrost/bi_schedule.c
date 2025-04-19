@@ -154,6 +154,9 @@ bi_message_type_for_instr(bi_instr *ins)
    if (ld_var_special && ins->varying_name == BI_VARYING_NAME_FRAG_Z)
       return BIFROST_MESSAGE_Z_STENCIL;
 
+   if (ins->op == BI_OPCODE_LD_TILE && ins->z_stencil)
+      return BIFROST_MESSAGE_Z_STENCIL;
+
    if (msg == BIFROST_MESSAGE_LOAD && ins->seg == BI_SEG_UBO)
       return BIFROST_MESSAGE_ATTRIBUTE;
 
@@ -700,7 +703,7 @@ bi_impacted_t_modifiers(bi_instr *I, unsigned src)
    case BI_OPCODE_S8_TO_S32:
    case BI_OPCODE_U8_TO_F32:
    case BI_OPCODE_U8_TO_U32:
-      return (swizzle != BI_SWIZZLE_B0000);
+      return (swizzle != BI_SWIZZLE_B0);
 
    case BI_OPCODE_V2S8_TO_V2F16:
    case BI_OPCODE_V2S8_TO_V2S16:
@@ -1016,16 +1019,35 @@ bi_write_count(bi_instr *instr, uint64_t live_after_temp)
    return count;
 }
 
-/*
- * Test if an instruction required flush-to-zero mode. Currently only supported
- * for f16<-->f32 conversions to implement fquantize16
- */
-static bool
-bi_needs_ftz(bi_instr *I)
+/* Test if an instruction requires a specific flush-to-zero mode. */
+static enum bi_ftz_state
+bi_instr_ftz(bi_context *ctx, bi_instr *I)
 {
-   return (I->op == BI_OPCODE_F16_TO_F32 ||
-           I->op == BI_OPCODE_V2F32_TO_V2F16) &&
-          I->ftz;
+   /* f16<->f32 conversions have a ftz override flag to implement fquantize16 */
+   if ((I->op == BI_OPCODE_F16_TO_F32 || I->op == BI_OPCODE_V2F32_TO_V2F16) &&
+       I->ftz)
+      return BI_FTZ_STATE_ENABLE;
+
+   struct bi_op_props props = bi_opcode_props[I->op];
+   if (!props.is_float)
+      return BI_FTZ_STATE_NONE;
+
+   enum bi_size size = bi_opcode_props[I->op].size;
+   unsigned bitsize;
+   if (size == BI_SIZE_16)
+      bitsize = 16;
+   else if (size == BI_SIZE_32)
+      bitsize = 32;
+   else
+      return BI_FTZ_STATE_NONE;
+
+   unsigned execution_mode = ctx->nir->info.float_controls_execution_mode;
+   if (nir_is_denorm_flush_to_zero(execution_mode, bitsize))
+      return BI_FTZ_STATE_ENABLE;
+   else if (nir_is_denorm_preserve(execution_mode, bitsize))
+      return BI_FTZ_STATE_DISABLE;
+   else
+      return BI_FTZ_STATE_NONE;
 }
 
 /*
@@ -1033,10 +1055,13 @@ bi_needs_ftz(bi_instr *I)
  * present we only consider flush-to-zero modes.
  */
 static bool
-bi_numerically_incompatible(struct bi_clause_state *clause, bi_instr *instr)
+bi_numerically_incompatible(bi_context *ctx, struct bi_clause_state *clause,
+                            bi_instr *instr)
 {
+   enum bi_ftz_state instr_ftz = bi_instr_ftz(ctx, instr);
    return (clause->ftz != BI_FTZ_STATE_NONE) &&
-          ((clause->ftz == BI_FTZ_STATE_ENABLE) != bi_needs_ftz(instr));
+          (instr_ftz != BI_FTZ_STATE_NONE) &&
+          (clause->ftz != instr_ftz);
 }
 
 /* Instruction placement entails two questions: what subset of instructions in
@@ -1047,7 +1072,8 @@ bi_numerically_incompatible(struct bi_clause_state *clause, bi_instr *instr)
  * whitepaper. The cost function is a heuristic. */
 
 static bool
-bi_instr_schedulable(bi_instr *instr, struct bi_clause_state *clause,
+bi_instr_schedulable(bi_context *ctx, bi_instr *instr,
+                     struct bi_clause_state *clause,
                      struct bi_tuple_state *tuple, uint64_t live_after_temp,
                      bool fma)
 {
@@ -1067,7 +1093,7 @@ bi_instr_schedulable(bi_instr *instr, struct bi_clause_state *clause,
       return false;
 
    /* Numerical properties must be compatible with the clause */
-   if (bi_numerically_incompatible(clause, instr))
+   if (bi_numerically_incompatible(ctx, clause, instr))
       return false;
 
    /* Message-passing instructions are not guaranteed write within the
@@ -1190,9 +1216,9 @@ bi_instr_cost(bi_instr *instr, struct bi_tuple_state *tuple)
 }
 
 static unsigned
-bi_choose_index(struct bi_worklist st, struct bi_clause_state *clause,
-                struct bi_tuple_state *tuple, uint64_t live_after_temp,
-                bool fma)
+bi_choose_index(bi_context *ctx, struct bi_worklist st,
+                struct bi_clause_state *clause, struct bi_tuple_state *tuple,
+                uint64_t live_after_temp, bool fma)
 {
    unsigned i, best_idx = ~0;
    signed best_cost = INT_MAX;
@@ -1200,7 +1226,7 @@ bi_choose_index(struct bi_worklist st, struct bi_clause_state *clause,
    BITSET_FOREACH_SET(i, st.worklist, st.count) {
       bi_instr *instr = st.instructions[i];
 
-      if (!bi_instr_schedulable(instr, clause, tuple, live_after_temp, fma))
+      if (!bi_instr_schedulable(ctx, instr, clause, tuple, live_after_temp, fma))
          continue;
 
       signed cost = bi_instr_cost(instr, tuple);
@@ -1220,8 +1246,9 @@ bi_choose_index(struct bi_worklist st, struct bi_clause_state *clause,
 }
 
 static void
-bi_pop_instr(struct bi_clause_state *clause, struct bi_tuple_state *tuple,
-             bi_instr *instr, uint64_t live_after_temp, bool fma)
+bi_pop_instr(bi_context *ctx, struct bi_clause_state *clause,
+             struct bi_tuple_state *tuple, bi_instr *instr,
+             uint64_t live_after_temp, bool fma)
 {
    bi_update_fau(clause, tuple, instr, fma, true);
 
@@ -1243,12 +1270,9 @@ bi_pop_instr(struct bi_clause_state *clause, struct bi_tuple_state *tuple,
          tuple->reg.reads[tuple->reg.nr_reads++] = instr->src[s];
    }
 
-   /* This could be optimized to allow pairing integer instructions with
-    * special flush-to-zero instructions, but punting on this until we have
-    * a workload that cares.
-    */
-   clause->ftz =
-      bi_needs_ftz(instr) ? BI_FTZ_STATE_ENABLE : BI_FTZ_STATE_DISABLE;
+   enum bi_ftz_state ftz = bi_instr_ftz(ctx, instr);
+   if (ftz != BI_FTZ_STATE_NONE)
+      clause->ftz = ftz;
 }
 
 /* Choose the best instruction and pop it off the worklist. Returns NULL if no
@@ -1281,7 +1305,7 @@ bi_take_instr(bi_context *ctx, struct bi_worklist st,
       /* Schedule the spill */
       bi_builder b = bi_init_builder(ctx, bi_before_tuple(tuple->prev));
       bi_instr *mov = bi_mov_i32_to(&b, src, src);
-      bi_pop_instr(clause, tuple, mov, live_after_temp, fma);
+      bi_pop_instr(ctx, clause, tuple, mov, live_after_temp, fma);
       return mov;
    }
 
@@ -1291,7 +1315,7 @@ bi_take_instr(bi_context *ctx, struct bi_worklist st,
       return NULL;
 #endif
 
-   unsigned idx = bi_choose_index(st, clause, tuple, live_after_temp, fma);
+   unsigned idx = bi_choose_index(ctx, st, clause, tuple, live_after_temp, fma);
 
    if (idx >= st.count)
       return NULL;
@@ -1301,7 +1325,7 @@ bi_take_instr(bi_context *ctx, struct bi_worklist st,
 
    BITSET_CLEAR(st.worklist, idx);
    bi_update_worklist(st, idx);
-   bi_pop_instr(clause, tuple, instr, live_after_temp, fma);
+   bi_pop_instr(ctx, clause, tuple, instr, live_after_temp, fma);
 
    /* Fixups */
    bi_builder b = bi_init_builder(ctx, bi_before_instr(instr));
@@ -1780,6 +1804,11 @@ bi_schedule_clause(bi_context *ctx, bi_block *block, struct bi_worklist st,
                clause->dependencies |= (1 << BIFROST_SLOT_ELDEST_DEPTH);
                break;
             case BI_OPCODE_LD_TILE:
+               if (clause->message_type == BIFROST_MESSAGE_Z_STENCIL)
+                  clause->dependencies |= (1 << BIFROST_SLOT_ELDEST_DEPTH);
+               else
+                  clause->dependencies |= (1 << BIFROST_SLOT_ELDEST_COLOUR);
+               break;
             case BI_OPCODE_ST_TILE:
                clause->dependencies |= (1 << BIFROST_SLOT_ELDEST_COLOUR);
                break;

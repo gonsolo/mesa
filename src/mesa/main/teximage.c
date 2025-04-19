@@ -31,6 +31,7 @@
 
 #include <stdbool.h>
 #include "util/glheader.h"
+#include "util/perf/cpu_trace.h"
 #include "bufferobj.h"
 #include "context.h"
 #include "enums.h"
@@ -1876,6 +1877,12 @@ texture_formats_agree(GLenum internalFormat,
    if (_mesa_is_ycbcr_format(internalFormat) != _mesa_is_ycbcr_format(format))
       return false;
 
+   if ((_mesa_is_depth_format(internalFormat) ||
+        _mesa_is_stencil_format(internalFormat)) &&
+       _mesa_is_color_format(format)) {
+      return false;
+   }
+
    return true;
 }
 
@@ -3158,6 +3165,8 @@ teximage(struct gl_context *ctx, GLboolean compressed, GLuint dims,
    mesa_format texFormat;
    bool dimensionsOK = true, sizeOK = true;
 
+   MESA_TRACE_FUNC();
+
    FLUSH_VERTICES(ctx, 0, 0);
 
    if (MESA_VERBOSE & (VERBOSE_API|VERBOSE_TEXTURE)) {
@@ -3822,6 +3831,8 @@ texture_sub_image(struct gl_context *ctx, GLuint dims,
                   GLsizei width, GLsizei height, GLsizei depth,
                   GLenum format, GLenum type, const GLvoid *pixels)
 {
+   MESA_TRACE_FUNC();
+
    FLUSH_VERTICES(ctx, 0, 0);
 
    _mesa_update_pixel(ctx);
@@ -4454,6 +4465,8 @@ copy_texture_sub_image(struct gl_context *ctx, GLuint dims,
 {
    struct gl_texture_image *texImage;
 
+   MESA_TRACE_FUNC();
+
    _mesa_lock_texture(ctx, texObj);
 
    texImage = _mesa_select_tex_image(texObj, target, level);
@@ -4553,6 +4566,8 @@ copyteximage(struct gl_context *ctx, GLuint dims, struct gl_texture_object *texO
 {
    struct gl_texture_image *texImage;
    mesa_format texFormat;
+
+   MESA_TRACE_FUNC();
 
    FLUSH_VERTICES(ctx, 0, 0);
 
@@ -5284,9 +5299,23 @@ check_clear_tex_image(struct gl_context *ctx,
       return false;
    }
 
-   if (_mesa_is_compressed_format(ctx, internalFormat)) {
+   if (_mesa_is_compressed_format(ctx, internalFormat) ||
+       _mesa_is_generic_compressed_format(ctx, internalFormat)) {
       _mesa_error(ctx, GL_INVALID_OPERATION,
                   "%s(compressed texture)", function);
+      return false;
+   }
+
+   /* This is a special case where we might throw GL_INVALID_ENUM
+    * below but should do GL_INVALID_OPERATION with glClearTexImage.
+    */
+   if (_mesa_is_color_format(internalFormat) &&
+       _mesa_is_depthstencil_format(format)) {
+      _mesa_error(ctx, GL_INVALID_OPERATION,
+                  "%s(incompatible internalFormat = %s, format = %s)",
+                  function,
+                  _mesa_enum_to_string(internalFormat),
+                  _mesa_enum_to_string(format));
       return false;
    }
 
@@ -5437,12 +5466,19 @@ _mesa_ClearTexSubImage(GLuint texture, GLint level,
       maxDepth = numImages;
    }
 
+   /* Nothing to clear, skip. */
+   if (width == 0 || height == 0 || depth == 0)
+      goto out;
+
+   if (width < 0 || height < 0 || depth < 0) {
+      _mesa_error(ctx, GL_INVALID_VALUE,
+                  "glClearSubTexImage(invalid dimensions)");
+      goto out;
+   }
+
    if (xoffset < -(GLint) texImages[0]->Border ||
        yoffset < -(GLint) texImages[0]->Border ||
        zoffset < minDepth ||
-       width < 0 ||
-       height < 0 ||
-       depth < 0 ||
        xoffset + width > texImages[0]->Width ||
        yoffset + height > texImages[0]->Height ||
        zoffset + depth > maxDepth) {

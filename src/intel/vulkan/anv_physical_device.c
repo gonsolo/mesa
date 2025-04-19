@@ -147,6 +147,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_create_renderpass2                = true,
       .KHR_dedicated_allocation              = true,
       .KHR_deferred_host_operations          = true,
+      .KHR_depth_clamp_zero_one              = true,
       .KHR_depth_stencil_resolve             = true,
       .KHR_descriptor_update_template        = true,
       .KHR_device_group                      = true,
@@ -580,7 +581,7 @@ get_features(const struct anv_physical_device *pdevice,
       .customBorderColorWithoutFormat =
          pdevice->instance->custom_border_colors_without_format,
 
-      /* VK_EXT_depth_clamp_zero_one */
+      /* VK_KHR_depth_clamp_zero_one */
       .depthClampZeroOne = true,
 
       /* VK_EXT_depth_clip_enable */
@@ -946,7 +947,6 @@ get_features(const struct anv_physical_device *pdevice,
 #define MAX_PER_STAGE_DESCRIPTOR_UNIFORM_BUFFERS   64
 
 #define MAX_PER_STAGE_DESCRIPTOR_INPUT_ATTACHMENTS 64
-#define MAX_DESCRIPTOR_SET_INPUT_ATTACHMENTS       256
 
 static VkDeviceSize
 anx_get_physical_device_max_heap_size(const struct anv_physical_device *pdevice)
@@ -1955,13 +1955,69 @@ get_properties(const struct anv_physical_device *pdevice,
    }
 }
 
+/* This function restricts the maximum size of system memory heap. The
+ * reasoning is that if we allow all the RAM to be used by graphics, nothing
+ * will remain for the rest of the system.
+ *
+ * In practice, applications should really be using VK_EXT_memory_budget
+ * instead of relying on our heuristics.
+ *
+ * The i915.ko driver has always reported 100% of the total available RAM.
+ * The xe.ko driver changed its behavior after commit d2d5f6d57884 ("drm/xe:
+ * Increase the XE_PL_TT watermark"), so we need to detect that and make a
+ * choice based on it.
+ */
+static uint64_t
+anv_restrict_sys_heap_size(struct anv_physical_device *device,
+                           uint64_t kmd_reported_sram)
+{
+   if (device->info.kmd_type == INTEL_KMD_TYPE_XE) {
+      uint64_t sys_reported_sram;
+      if (!os_get_total_physical_memory(&sys_reported_sram))
+         return kmd_reported_sram;
+
+      /* From what I could gather, kmd_reported_sram always seems to be
+       * exactly half of sys_reported_sram in older Kernels, but let's leave
+       * some room for imprecision here in case the interfaces chosen to
+       * report memory end up changing, accounting things differently somehow.
+       *
+       * If we detect an older Kernel (i.e., kmd_reported_sram == ~50% of
+       * sys_reported_sram) we just return the values reported by the KMD
+       * since they are already restricted. If we detect a newer Kernel, we
+       * deal with the value below, along with i915.ko (which is expected to
+       * always report 100% of SRAM).
+       */
+      uint64_t ratio = kmd_reported_sram * 10 / sys_reported_sram;
+      assert(ratio <= 11);
+      if (ratio <= 6)
+         return kmd_reported_sram;
+   }
+
+   const char *env_limit = os_get_option("ANV_SYS_MEM_LIMIT");
+   if (env_limit) {
+      int64_t limit_percent = debug_parse_num_option(env_limit, 75);
+      if (limit_percent < 10)
+         limit_percent = 10;
+      else if (limit_percent > 100)
+         limit_percent = 100;
+
+      return kmd_reported_sram * limit_percent / 100;
+   }
+
+   if (kmd_reported_sram <= 4ull * 1024ull * 1024ull * 1024ull)
+      return kmd_reported_sram / 2;
+   else
+      return kmd_reported_sram * 3 / 4;
+}
+
 static VkResult MUST_CHECK
 anv_init_meminfo(struct anv_physical_device *device, int fd)
 {
    const struct intel_device_info *devinfo = &device->info;
 
    device->sys.region = &devinfo->mem.sram.mem;
-   device->sys.size = devinfo->mem.sram.mappable.size;
+   device->sys.size =
+      anv_restrict_sys_heap_size(device, devinfo->mem.sram.mappable.size);
    device->sys.available = devinfo->mem.sram.mappable.free;
 
    device->vram_mappable.region = &devinfo->mem.vram.mem;

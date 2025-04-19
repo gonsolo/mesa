@@ -697,6 +697,7 @@ endif
 
 with_gallium_st_nine =  get_option('gallium-nine')
 if with_gallium_st_nine
+  warning('The nine state tracker will be removed in Mesa 25.2')
   if not with_gallium_swrast
     error('The nine state tracker requires gallium softpipe/llvmpipe.')
   elif not [
@@ -721,27 +722,18 @@ if with_gallium_st_d3d10umd
     error('The d3d10umd state tracker requires gallium softpipe/llvmpipe.')
   endif
 endif
-_power8 = get_option('power8')
-if _power8.allowed()
-  if host_machine.cpu_family() == 'ppc64' and host_machine.endian() == 'little'
-    if cc.get_id() == 'gcc' and cc.version().version_compare('< 4.8')
-      error('Altivec is not supported with gcc version < 4.8.')
-    endif
-    if cc.compiles('''
-        #include <altivec.h>
-        int main() {
-          vector unsigned char r;
-          vector unsigned int v = vec_splat_u32 (1);
-          r = __builtin_vec_vgbbd ((vector unsigned char) v);
-          return 0;
-        }''',
-        args : '-mpower8-vector',
-        name : 'POWER8 intrinsics')
-      pre_args += ['-D_ARCH_PWR8']
-      c_cpp_args += '-mpower8-vector'
-    elif _power8.enabled()
-      error('POWER8 intrinsic support required but not found.')
-    endif
+
+if host_machine.cpu_family() == 'ppc64' and host_machine.endian() == 'little'
+  if cc.compiles('''
+      #include <altivec.h>
+      int main() {
+        vector unsigned char r;
+        vector unsigned int v = vec_splat_u32 (1);
+        r = __builtin_vec_vgbbd ((vector unsigned char) v);
+        return 0;
+      }''',
+      name : 'POWER8 intrinsics')
+    pre_args += ['-D_ARCH_PWR8']
   endif
 endif
 
@@ -752,24 +744,7 @@ if get_option('vmware-mks-stats')
   pre_args += '-DVMX86_STATS=1'
 endif
 
-_opencl = get_option('gallium-opencl')
 _rtti = get_option('cpp_rtti')
-if _opencl != 'disabled'
-  warning('Clover will be removed in Mesa 25.2')
-
-  if not with_gallium
-    error('OpenCL Clover implementation requires at least one gallium driver.')
-  endif
-  if not _rtti
-    error('The Clover OpenCL state tracker requires rtti')
-  endif
-
-  with_gallium_clover = true
-  with_opencl_icd = _opencl == 'icd'
-else
-  with_gallium_clover = false
-  with_opencl_icd = false
-endif
 
 with_gallium_rusticl = get_option('gallium-rusticl')
 if with_gallium_rusticl
@@ -838,7 +813,7 @@ else
 endif
 
 dep_clc = null_dep
-if with_gallium_clover or with_clc
+if with_clc
   dep_clc = dependency('libclc')
 endif
 
@@ -1725,15 +1700,6 @@ if with_amd_vk or with_gallium_radeonsi or with_gallium_r600
     llvm_modules += 'asmparser'
   endif
 endif
-if with_gallium_clover
-  llvm_modules += [
-    'linker', 'coverage', 'instrumentation', 'ipo', 'irreader',
-    'lto', 'option', 'objcarcopts', 'profiledata'
-  ]
-  # all-targets is needed to support static linking LLVM build with multiple targets
-  # windowsdriver is needded with LLVM>=15, but we don't know what LLVM verrsion we are using yet
-  llvm_optional_modules += ['all-targets', 'frontendopenmp', 'windowsdriver']
-endif
 if with_clc
   llvm_modules += ['coverage', 'target', 'linker', 'irreader', 'option', 'libdriver', 'lto']
   # all-targets is needed to support static linking LLVM build with multiple targets.
@@ -1759,8 +1725,6 @@ if with_amd_vk or with_gallium_radeonsi
   _llvm_version = '>= 18.0.0'
 elif with_clc or llvm_with_orcjit
   _llvm_version = '>= 15.0.0'
-elif with_gallium_clover
-  _llvm_version = '>= 11.0.0'
 else
   _llvm_version = '>= 5.0.0'
 endif
@@ -1780,7 +1744,7 @@ if _llvm.allowed()
     modules : llvm_modules,
     optional_modules : llvm_optional_modules,
     required : (
-      with_amd_vk or with_gallium_radeonsi or with_gallium_clover or with_clc
+      with_amd_vk or with_gallium_radeonsi or with_clc
       or _llvm.enabled()
     ),
     static : not _shared_llvm,
@@ -1834,8 +1798,6 @@ elif with_swrast_vk
   error('lavapipe requires LLVM and is enabled, but LLVM is disabled.')
 elif with_any_llvmpipe
   error('llvmpipe requires LLVM and is enabled, but LLVM is disabled.')
-elif with_gallium_clover
-  error('The OpenCL "Clover" state tracker requires LLVM, but LLVM is disabled.')
 elif with_clc
   error('The CLC compiler requires LLVM, but LLVM is disabled.')
 else
@@ -1885,7 +1847,7 @@ if dep_spirv_tools.found()
 endif
 
 dep_clang = null_dep
-if with_clc or with_gallium_clover
+if with_clc
   llvm_libdir = dep_llvm.get_variable(cmake : 'LLVM_LIBRARY_DIR', configtool: 'libdir')
 
   dep_clang = cpp.find_library('clang-cpp', dirs : llvm_libdir, required : false)
@@ -1900,7 +1862,7 @@ if with_clc or with_gallium_clover
     if dep_llvm.version().version_compare('>= 15.0')
       clang_modules += 'clangSupport'
     endif
-    if dep_llvm.version().version_compare('>= 16.0') or with_gallium_clover
+    if dep_llvm.version().version_compare('>= 16.0')
       clang_modules += 'clangASTMatchers'
     endif
     if dep_llvm.version().version_compare('>= 18.0')
@@ -2366,7 +2328,7 @@ summary(egl_summary, section: 'EGL', bool_yn: true, list_sep: ' ')
 
 gbm_summary = {'Enabled': with_gbm}
 if with_gbm
-  gbm_summary += {'Backends path': gbm_backends_path}
+  gbm_summary += {'External libgbm': get_option('libgbm-external'), 'Backends path': gbm_backends_path}
 endif
 summary(gbm_summary, section: 'GBM', bool_yn: true, list_sep: ' ')
 
@@ -2393,6 +2355,7 @@ if with_any_vk
   video_apis += 'vulkan'
 endif
 if with_gallium_xa
+  warning('XA will be removed in Mesa 25.2')
   video_apis += 'xa'
 endif
 video_summary += {'APIs': video_apis.length() != 0 ? video_apis : false}
@@ -2421,9 +2384,6 @@ if with_gallium
   endif
   if with_gallium_st_nine
     gallium_frontends += 'nine'
-  endif
-  if with_gallium_clover
-    gallium_frontends += 'clover'
   endif
   if with_gallium_rusticl
     gallium_frontends += 'rusticl'

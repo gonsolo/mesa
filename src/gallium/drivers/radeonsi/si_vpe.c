@@ -481,16 +481,17 @@ si_vpe_set_color_space(const struct pipe_vpp_desc *process_properties,
    case PIPE_VIDEO_VPP_CHROMA_COLOR_RANGE_REDUCED:
       color_space->range = VPE_COLOR_RANGE_STUDIO;
       break;
-   default:
    case PIPE_VIDEO_VPP_CHROMA_COLOR_RANGE_FULL:
       color_space->range = VPE_COLOR_RANGE_FULL;
       break;
-   }
-
-   /* Force RGB output range is Full to have better color performance */
-   /* TO-DO: Should Mesa have to know the display console is TV or PC Monitor? */
-   if (!util_format_is_yuv(format) && (which_surface == USE_DST_SURFACE))
+   case PIPE_VIDEO_VPP_CHROMA_COLOR_RANGE_NONE:
+   default:
+      if (util_format_is_yuv(format))
+         color_space->range = VPE_COLOR_RANGE_STUDIO;
+      else
          color_space->range = VPE_COLOR_RANGE_FULL;
+      break;
+   }
 
    /* Default use VPE_CHROMA_COSITING_NONE (CENTER | CENTER) */
    color_space->cositing = VPE_CHROMA_COSITING_NONE;
@@ -1108,7 +1109,7 @@ si_vpe_construct_blt(struct vpe_video_processor *vpeproc,
    /* Map EmbBuf for CPU access */
    vpe_ptr = (uint64_t *)vpeproc->ws->buffer_map(vpeproc->ws,
                                                  emb_buf->res->buf,
-                                                 &vpeproc->cs,
+                                                 NULL,
                                                  PIPE_MAP_WRITE | RADEON_MAP_TEMPORARY);
    if (!vpe_ptr) {
       SIVPE_ERR("Mapping Embbuf failed\n");
@@ -1266,12 +1267,14 @@ si_vpe_processor_process_frame(struct pipe_video_codec *codec,
    dst_rect_width  = process_properties->dst_region.x1 - process_properties->dst_region.x0;
    dst_rect_height = process_properties->dst_region.y1 - process_properties->dst_region.y0;
 
-   scaling_ratio[0] = src_rect_width  / dst_rect_width;
-   scaling_ratio[1] = src_rect_height / dst_rect_height;
+   scaling_ratio[0] = (float)src_rect_width  / dst_rect_width;
+   scaling_ratio[1] = (float)src_rect_height / dst_rect_height;
 
    /* Perform general processing */
-   if ((scaling_ratio[0] <= VPE_MAX_GEOMETRIC_DOWNSCALE) && (scaling_ratio[1] <= VPE_MAX_GEOMETRIC_DOWNSCALE))
-      return si_vpe_construct_blt(vpeproc, process_properties, vpeproc->src_surfaces, vpeproc->dst_surfaces);
+   if ((scaling_ratio[0] <= VPE_MAX_GEOMETRIC_DOWNSCALE) && (scaling_ratio[1] <= VPE_MAX_GEOMETRIC_DOWNSCALE)) {
+      result = si_vpe_construct_blt(vpeproc, process_properties, vpeproc->src_surfaces, vpeproc->dst_surfaces);
+      return result == VPE_STATUS_OK ? 0 : 1;
+   }
 
    /* If fast scaling is required, the geometric scaling should not be performed */
    if (process_properties->filter_flags & PIPE_VIDEO_VPP_FILTER_FLAG_SCALING_FAST)
@@ -1454,7 +1457,7 @@ si_vpe_processor_process_frame(struct pipe_video_codec *codec,
       }
    }
 
-   return result;
+   return result == VPE_STATUS_OK ? 0 : 1;
 }
 
 static int

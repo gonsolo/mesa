@@ -31,6 +31,16 @@ if [ -n "$ANGLE_TAG" ]; then
   export LD_LIBRARY_PATH=/angle:$LD_LIBRARY_PATH
 fi
 
+if [ -n "$PIGLIT_TAG" ]; then
+  # Are we using the right Piglit version?
+  ci_tag_test_time_check "PIGLIT_TAG"
+elif [ -d "/piglit" ]; then
+  # The job does not inherit from .test-piglit, so we move it out of the way.
+  # This makes sure that we can both do the right version checks when needed,
+  # and also optimise our dependencies so we don't pull unneeded stuff.
+  mv /piglit /piglit.unused
+fi
+
 # Ensure Mesa Shader Cache resides on tmpfs.
 SHADER_CACHE_HOME=${XDG_CACHE_HOME:-${HOME}/.cache}
 SHADER_CACHE_DIR=${MESA_SHADER_CACHE_DIR:-${SHADER_CACHE_HOME}/mesa_shader_cache}
@@ -67,14 +77,6 @@ fi
 
 if [ -e "$INSTALL/$GPU_VERSION-slow-skips.txt" ] && [[ $CI_JOB_NAME != *full* ]]; then
     DEQP_SKIPS="$DEQP_SKIPS $INSTALL/$GPU_VERSION-slow-skips.txt"
-fi
-
-if [ "$PIGLIT_PLATFORM" != "gbm" ] ; then
-    DEQP_SKIPS="$DEQP_SKIPS $INSTALL/x11-skips.txt"
-fi
-
-if [ "$PIGLIT_PLATFORM" = "gbm" ]; then
-    DEQP_SKIPS="$DEQP_SKIPS $INSTALL/gbm-skips.txt"
 fi
 
 if [ -n "$ANGLE_TAG" ]; then

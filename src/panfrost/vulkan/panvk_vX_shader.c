@@ -62,12 +62,18 @@
 #include "vk_shader.h"
 #include "vk_util.h"
 
+struct panvk_lower_sysvals_context {
+   struct panvk_shader *shader;
+   const struct vk_graphics_pipeline_state *state;
+};
+
 static bool
 panvk_lower_sysvals(nir_builder *b, nir_instr *instr, void *data)
 {
    if (instr->type != nir_instr_type_intrinsic)
       return false;
 
+   const struct panvk_lower_sysvals_context *ctx = data;
    nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
    unsigned bit_size = intr->def.bit_size;
    nir_def *val = NULL;
@@ -126,6 +132,52 @@ panvk_lower_sysvals(nir_builder *b, nir_instr *instr, void *data)
       else
          val = load_sysval(b, graphics, bit_size, printf_buffer_address);
       break;
+
+   case nir_intrinsic_load_input_attachment_target_pan: {
+      const struct vk_input_attachment_location_state *ial =
+         ctx->state ? ctx->state->ial : NULL;
+
+      if (ial) {
+         uint32_t index = nir_src_as_uint(intr->src[0]);
+         uint32_t depth_idx = ial->depth_att == MESA_VK_ATTACHMENT_NO_INDEX
+                                 ? 0
+                                 : ial->depth_att + 1;
+         uint32_t stencil_idx = ial->stencil_att == MESA_VK_ATTACHMENT_NO_INDEX
+                                   ? 0
+                                   : ial->stencil_att + 1;
+         uint32_t target = ~0;
+
+         if (depth_idx == index || stencil_idx == index) {
+            target = PANVK_ZS_ATTACHMENT;
+         } else {
+            for (unsigned i = 0; i < ial->color_attachment_count; i++) {
+               if (ial->color_map[i] == MESA_VK_ATTACHMENT_UNUSED)
+                  continue;
+
+               if (ial->color_map[i] + 1 == index) {
+                  target = PANVK_COLOR_ATTACHMENT(i);
+                  break;
+               }
+            }
+         }
+
+         val = nir_imm_int(b, target);
+      } else {
+         nir_def *ia_info =
+            load_sysval_entry(b, graphics, bit_size, iam, intr->src[0].ssa);
+
+         val = nir_channel(b, ia_info, 0);
+      }
+      break;
+   }
+
+   case nir_intrinsic_load_input_attachment_conv_pan: {
+      nir_def *ia_info =
+         load_sysval_entry(b, graphics, bit_size, iam, intr->src[0].ssa);
+
+      val = nir_channel(b, ia_info, 1);
+      break;
+   }
 
    default:
       return false;
@@ -298,6 +350,7 @@ panvk_get_spirv_options(UNUSED struct vk_physical_device *vk_pdev,
       .ubo_addr_format = panvk_buffer_ubo_addr_format(rs->uniform_buffers),
       .ssbo_addr_format = panvk_buffer_ssbo_addr_format(rs->storage_buffers),
       .phys_ssbo_addr_format = nir_address_format_64bit_global,
+      .shared_addr_format = nir_address_format_32bit_offset,
    };
 }
 
@@ -325,15 +378,6 @@ panvk_preprocess_nir(UNUSED struct vk_physical_device *vk_pdev,
    NIR_PASS(_, nir, nir_opt_copy_prop_vars);
    NIR_PASS(_, nir, nir_opt_combine_stores, nir_var_all);
    NIR_PASS(_, nir, nir_opt_loop);
-
-   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      struct nir_input_attachment_options lower_input_attach_opts = {
-         .use_fragcoord_sysval = true,
-         .use_layer_id_sysval = true,
-      };
-
-      NIR_PASS(_, nir, nir_lower_input_attachments, &lower_input_attach_opts);
-   }
 
    /* Do texture lowering here.  Yes, it's a duplication of the texture
     * lowering in bifrost_compile.  However, we need to lower texture stuff
@@ -399,6 +443,9 @@ panvk_hash_graphics_state(struct vk_physical_device *device,
 
    _mesa_blake3_update(&blake3_ctx, &state->rp->view_mask,
                        sizeof(state->rp->view_mask));
+
+   if (state->ial)
+      _mesa_blake3_update(&blake3_ctx, state->ial, sizeof(*state->ial));
 
    _mesa_blake3_final(&blake3_ctx, blake3_out);
 }
@@ -677,6 +724,7 @@ panvk_lower_nir(struct panvk_device *dev, nir_shader *nir,
                 struct vk_descriptor_set_layout *const *set_layouts,
                 const struct vk_pipeline_robustness_state *rs,
                 uint32_t *noperspective_varyings,
+                const struct vk_graphics_pipeline_state *state,
                 const struct panfrost_compile_inputs *compile_input,
                 struct panvk_shader *shader)
 {
@@ -722,7 +770,7 @@ panvk_lower_nir(struct panvk_device *dev, nir_shader *nir,
 #endif
 
    panvk_per_arch(nir_lower_descriptors)(nir, dev, rs, set_layout_count,
-                                         set_layouts, shader);
+                                         set_layouts, state, shader);
 
    NIR_PASS(_, nir, nir_split_var_copies);
    NIR_PASS(_, nir, nir_lower_var_copies);
@@ -744,10 +792,8 @@ panvk_lower_nir(struct panvk_device *dev, nir_shader *nir,
 #endif
 
    if (gl_shader_stage_uses_workgroup(stage)) {
-      if (!nir->info.shared_memory_explicit_layout) {
-         NIR_PASS(_, nir, nir_lower_vars_to_explicit_types, nir_var_mem_shared,
-                  shared_type_info);
-      }
+      NIR_PASS(_, nir, nir_lower_vars_to_explicit_types, nir_var_mem_shared,
+               shared_type_info);
 
       NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_shared,
                nir_address_format_32bit_offset);
@@ -813,8 +859,13 @@ panvk_lower_nir(struct panvk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, pan_nir_lower_static_noperspective,
                *noperspective_varyings);
 
+   struct panvk_lower_sysvals_context lower_sysvals_ctx = {
+      .shader = shader,
+      .state = state,
+   };
+
    NIR_PASS(_, nir, nir_shader_instructions_pass, panvk_lower_sysvals,
-            nir_metadata_control_flow, NULL);
+            nir_metadata_control_flow, &lower_sysvals_ctx);
 
    lower_load_push_consts(nir, shader);
 }
@@ -913,9 +964,21 @@ panvk_compile_nir(struct panvk_device *dev, nir_shader *nir,
          (nir->info.stage == MESA_SHADER_VERTEX ? MAX_VS_ATTRIBS : 0);
 #endif
 
-   shader->local_size.x = nir->info.workgroup_size[0];
-   shader->local_size.y = nir->info.workgroup_size[1];
-   shader->local_size.z = nir->info.workgroup_size[2];
+   switch (shader->info.stage) {
+   case MESA_SHADER_COMPUTE:
+   case MESA_SHADER_KERNEL:
+      shader->cs.local_size.x = nir->info.workgroup_size[0];
+      shader->cs.local_size.y = nir->info.workgroup_size[1];
+      shader->cs.local_size.z = nir->info.workgroup_size[2];
+      break;
+
+   case MESA_SHADER_FRAGMENT:
+      shader->fs.earlyzs_lut = pan_earlyzs_analyze(&shader->info, PAN_ARCH);
+      break;
+
+   default:
+      break;
+   }
 
    return VK_SUCCESS;
 }
@@ -984,8 +1047,10 @@ panvk_shader_upload(struct panvk_device *dev, struct panvk_shader *shader,
 
          if (cfg.stage == MALI_SHADER_STAGE_FRAGMENT)
             cfg.fragment_coverage_bitmask_type = MALI_COVERAGE_BITMASK_TYPE_GL;
+#if PAN_ARCH < 12
          else if (cfg.stage == MALI_SHADER_STAGE_VERTEX)
             cfg.vertex_warp_limit = MALI_WARP_LIMIT_HALF;
+#endif
 
          cfg.register_allocation =
             pan_register_allocation(shader->info.work_reg_count);
@@ -997,6 +1062,38 @@ panvk_shader_upload(struct panvk_device *dev, struct panvk_shader *shader,
             cfg.requires_helper_threads = shader->info.contains_barrier;
       }
    } else {
+#if PAN_ARCH >= 12
+      shader->spds.all_points =
+         panvk_pool_alloc_desc(&dev->mempools.rw, SHADER_PROGRAM);
+      if (!panvk_priv_mem_dev_addr(shader->spds.all_points))
+         return panvk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+
+      pan_cast_and_pack(panvk_priv_mem_host_addr(shader->spds.all_points),
+                        SHADER_PROGRAM, cfg) {
+         cfg.stage = pan_shader_stage(&shader->info);
+         cfg.register_allocation =
+            pan_register_allocation(shader->info.work_reg_count);
+         cfg.binary = panvk_shader_get_dev_addr(shader);
+         cfg.preload.r48_r63 = (shader->info.preload >> 48);
+         cfg.flush_to_zero_mode = shader_ftz_mode(shader);
+      }
+
+      shader->spds.all_triangles =
+         panvk_pool_alloc_desc(&dev->mempools.rw, SHADER_PROGRAM);
+      if (!panvk_priv_mem_dev_addr(shader->spds.all_triangles))
+         return panvk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+
+      pan_cast_and_pack(panvk_priv_mem_host_addr(shader->spds.all_triangles),
+                        SHADER_PROGRAM, cfg) {
+         cfg.stage = pan_shader_stage(&shader->info);
+         cfg.register_allocation =
+            pan_register_allocation(shader->info.work_reg_count);
+         cfg.binary =
+            panvk_shader_get_dev_addr(shader) + shader->info.vs.no_psiz_offset;
+         cfg.preload.r48_r63 = (shader->info.preload >> 48);
+         cfg.flush_to_zero_mode = shader_ftz_mode(shader);
+      }
+#else
       shader->spds.pos_points =
          panvk_pool_alloc_desc(&dev->mempools.rw, SHADER_PROGRAM);
       if (!panvk_priv_mem_dev_addr(shader->spds.pos_points))
@@ -1049,6 +1146,7 @@ panvk_shader_upload(struct panvk_device *dev, struct panvk_shader *shader,
             cfg.flush_to_zero_mode = shader_ftz_mode(shader);
          }
       }
+#endif
    }
 #endif
 
@@ -1075,9 +1173,14 @@ panvk_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
    if (shader->info.stage != MESA_SHADER_VERTEX) {
       panvk_pool_free_mem(&shader->spd);
    } else {
+#if PAN_ARCH >= 12
+      panvk_pool_free_mem(&shader->spds.all_points);
+      panvk_pool_free_mem(&shader->spds.all_triangles);
+#else
       panvk_pool_free_mem(&shader->spds.var);
       panvk_pool_free_mem(&shader->spds.pos_points);
       panvk_pool_free_mem(&shader->spds.pos_triangles);
+#endif
    }
 #endif
 
@@ -1114,7 +1217,6 @@ panvk_compile_shader(struct panvk_device *dev,
    shader->own_bin = true;
    struct panfrost_compile_inputs inputs = {
       .gpu_id = phys_dev->kmod.props.gpu_prod_id,
-      .no_ubo_to_push = true,
       .view_mask = (state && state->rp) ? state->rp->view_mask : 0,
    };
 
@@ -1123,7 +1225,8 @@ panvk_compile_shader(struct panvk_device *dev,
       nir->info.fs.uses_sample_shading = true;
 
    panvk_lower_nir(dev, nir, info->set_layout_count, info->set_layouts,
-                   info->robustness, noperspective_varyings, &inputs, shader);
+                   info->robustness, noperspective_varyings, state, &inputs,
+                   shader);
 
 #if PAN_ARCH >= 9
    if (info->stage == MESA_SHADER_FRAGMENT)
@@ -1170,7 +1273,7 @@ panvk_per_arch(create_shader_from_binary)(struct panvk_device *dev,
       return panvk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    shader->info = *info;
-   shader->local_size = local_size;
+   shader->cs.local_size = local_size;
    shader->bin_ptr = bin_ptr;
    shader->bin_size = bin_size;
    shader->own_bin = false;
@@ -1304,19 +1407,10 @@ panvk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
 {
    struct panvk_device *device = to_panvk_device(vk_dev);
    struct panvk_shader *shader;
+   struct pan_shader_info info;
    VkResult result;
 
-   struct pan_shader_info info;
    blob_copy_bytes(blob, &info, sizeof(info));
-
-   struct panvk_shader_fau_info fau;
-   blob_copy_bytes(blob, &fau, sizeof(fau));
-
-   struct pan_compute_dim local_size;
-   blob_copy_bytes(blob, &local_size, sizeof(local_size));
-
-   const uint32_t bin_size = blob_read_uint32(blob);
-
    if (blob->overrun)
       return panvk_error(device, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
 
@@ -1326,11 +1420,33 @@ panvk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
       return panvk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    shader->info = info;
-   shader->fau = fau;
-   shader->local_size = local_size;
-   shader->bin_size = bin_size;
+   blob_copy_bytes(blob, &shader->fau, sizeof(shader->fau));
 
-   shader->bin_ptr = malloc(bin_size);
+   switch (shader->info.stage) {
+   case MESA_SHADER_COMPUTE:
+   case MESA_SHADER_KERNEL:
+      blob_copy_bytes(blob, &shader->cs.local_size,
+                      sizeof(shader->cs.local_size));
+      break;
+
+   case MESA_SHADER_FRAGMENT:
+      shader->fs.earlyzs_lut = pan_earlyzs_analyze(&shader->info, PAN_ARCH);
+      blob_copy_bytes(blob, &shader->fs.input_attachment_read,
+                      sizeof(shader->fs.input_attachment_read));
+      break;
+
+   default:
+      break;
+   }
+
+   shader->bin_size = blob_read_uint32(blob);
+
+   if (blob->overrun) {
+      panvk_shader_destroy(vk_dev, &shader->vk, pAllocator);
+      return panvk_error(device, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
+   }
+
+   shader->bin_ptr = malloc(shader->bin_size);
    if (shader->bin_ptr == NULL) {
       panvk_shader_destroy(vk_dev, &shader->vk, pAllocator);
       return panvk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
@@ -1410,7 +1526,23 @@ panvk_shader_serialize(struct vk_device *vk_dev,
 
    blob_write_bytes(blob, &shader->info, sizeof(shader->info));
    blob_write_bytes(blob, &shader->fau, sizeof(shader->fau));
-   blob_write_bytes(blob, &shader->local_size, sizeof(shader->local_size));
+
+   switch (shader->info.stage) {
+   case MESA_SHADER_COMPUTE:
+   case MESA_SHADER_KERNEL:
+      blob_write_bytes(blob, &shader->cs.local_size,
+                       sizeof(shader->cs.local_size));
+      break;
+
+   case MESA_SHADER_FRAGMENT:
+      blob_write_bytes(blob, &shader->fs.input_attachment_read,
+                       sizeof(shader->fs.input_attachment_read));
+      break;
+
+   default:
+      break;
+   }
+
    blob_write_uint32(blob, shader->bin_size);
    blob_write_bytes(blob, shader->bin_ptr, shader->bin_size);
    shader_desc_info_serialize(blob, shader);

@@ -81,17 +81,22 @@ VkResult
 hk_bind_scratch(struct hk_device *dev, struct agx_va *va, unsigned offset_B,
                 size_t size_B)
 {
-   VkResult result = VK_SUCCESS;
+   uint64_t addr = va->addr + offset_B;
+   uint32_t flags = DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_SINGLE_PAGE;
 
-   for (unsigned i = 0; i < size_B; i += AIL_PAGESIZE) {
-      result = dev->dev.ops.bo_bind(&dev->dev, dev->sparse.write,
-                                    va->addr + offset_B + i, AIL_PAGESIZE, 0,
-                                    ASAHI_BIND_READ | ASAHI_BIND_WRITE, false);
-      if (result != VK_SUCCESS)
-         return result;
-   }
+   /* Map read-write scratch to the primary (bottom half) VA range */
+   int ret = agx_bo_bind(&dev->dev, dev->sparse.write, addr, size_B, 0,
+                         flags | DRM_ASAHI_BIND_WRITE);
+   if (ret)
+      return VK_ERROR_UNKNOWN;
 
-   return result;
+   /* Map read-only scratch to the secondary (top half) VA range */
+   ret = agx_bo_bind(&dev->dev, dev->dev.zero_bo,
+                     addr + dev->dev.sparse_ro_offset, size_B, 0, flags);
+   if (ret)
+      return VK_ERROR_UNKNOWN;
+
+   return VK_SUCCESS;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -140,6 +145,9 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
                           "Sparse VMA allocation failed");
       }
       buffer->vk.device_address = buffer->va->addr;
+
+      /* Bind scratch pages to make read/write across the VA valid */
+      hk_bind_scratch(dev, buffer->va, 0, vma_size_B);
    }
 
    *pBuffer = hk_buffer_to_handle(buffer);
@@ -253,11 +261,19 @@ hk_BindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
       if (buffer->va) {
          VK_FROM_HANDLE(hk_device, dev, device);
          size_t size = MIN2(mem->bo->size, buffer->va->size_B);
-         int ret =
-            dev->dev.ops.bo_bind(&dev->dev, mem->bo, buffer->vk.device_address,
-                                 size, pBindInfos[i].memoryOffset,
-                                 ASAHI_BIND_READ | ASAHI_BIND_WRITE, false);
 
+         /* Lower mapping: read-write */
+         int ret = agx_bo_bind(&dev->dev, mem->bo, buffer->vk.device_address,
+                               size, pBindInfos[i].memoryOffset,
+                               DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE);
+         if (ret)
+            return VK_ERROR_UNKNOWN;
+
+         /* Upper mapping: read-only */
+         ret =
+            agx_bo_bind(&dev->dev, mem->bo,
+                        buffer->vk.device_address + dev->dev.sparse_ro_offset,
+                        size, pBindInfos[i].memoryOffset, DRM_ASAHI_BIND_READ);
          if (ret)
             return VK_ERROR_UNKNOWN;
       } else {
@@ -280,5 +296,25 @@ hk_GetBufferOpaqueCaptureAddress(UNUSED VkDevice device,
 {
    VK_FROM_HANDLE(hk_buffer, buffer, pInfo->buffer);
 
-   return hk_buffer_address(buffer, 0);
+   return hk_buffer_address_rw(buffer, 0);
+}
+
+uint64_t
+hk_buffer_address(const struct hk_buffer *buffer, uint64_t offset,
+                  bool read_only)
+{
+   struct hk_device *dev = (struct hk_device *)buffer->vk.base.device;
+   uint64_t addr = vk_buffer_address(&buffer->vk, offset);
+
+   /* If we are accessing the buffer read-only, we want to return the read-only
+    * shadow mapping so non-resident pages return zeroes. That only applies to
+    * sparse resident buffers, which will have buffer->va != NULL. If buffer->va
+    * is NULL, the buffer is not sparse resident, so we don't need the fix up...
+    * and indeed, there may not be a shadow map available.
+    */
+   if (read_only && buffer->va) {
+      addr = agx_rw_addr_to_ro(&dev->dev, addr);
+   }
+
+   return addr;
 }

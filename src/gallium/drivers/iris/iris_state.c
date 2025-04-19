@@ -3551,14 +3551,6 @@ iris_set_sampler_views(struct pipe_context *ctx,
 }
 
 static void
-iris_set_compute_resources(struct pipe_context *ctx,
-                           unsigned start, unsigned count,
-                           struct pipe_surface **resources)
-{
-   assert(count == 0);
-}
-
-static void
 iris_set_global_binding(struct pipe_context *ctx,
                         unsigned start_slot, unsigned count,
                         struct pipe_resource **resources,
@@ -4017,28 +4009,21 @@ upload_sysvals(struct iris_context *ice,
    struct iris_shader_state *shs = &ice->state.shaders[stage];
 
    struct iris_compiled_shader *shader = ice->shaders.prog[stage];
-   if (!shader || (shader->num_system_values == 0 &&
-                   shader->kernel_input_size == 0))
+   if (!shader || shader->num_system_values == 0)
       return;
 
    assert(shader->num_cbufs > 0);
 
    unsigned sysval_cbuf_index = shader->num_cbufs - 1;
    struct pipe_shader_buffer *cbuf = &shs->constbuf[sysval_cbuf_index];
-   unsigned system_values_start =
-      ALIGN(shader->kernel_input_size, sizeof(uint32_t));
-   unsigned upload_size = system_values_start +
-                          shader->num_system_values * sizeof(uint32_t);
+   unsigned upload_size = shader->num_system_values * sizeof(uint32_t);
    void *map = NULL;
 
    assert(sysval_cbuf_index < PIPE_MAX_CONSTANT_BUFFERS);
    u_upload_alloc(ice->ctx.const_uploader, 0, upload_size, 64,
                   &cbuf->buffer_offset, &cbuf->buffer, &map);
 
-   if (shader->kernel_input_size > 0)
-      memcpy(map, grid->input, shader->kernel_input_size);
-
-   uint32_t *sysval_map = map + system_values_start;
+   uint32_t *sysval_map = map;
    for (int i = 0; i < shader->num_system_values; i++) {
       uint32_t sysval = shader->system_values[i];
       uint32_t value = 0;
@@ -9356,9 +9341,8 @@ iris_upload_compute_state(struct iris_context *ice,
     */
    iris_use_pinned_bo(batch, ice->state.binder.bo, false, IRIS_DOMAIN_NONE);
 
-   if (((stage_dirty & IRIS_STAGE_DIRTY_CONSTANTS_CS) &&
-        shs->sysvals_need_upload) ||
-       shader->kernel_input_size > 0)
+   if ((stage_dirty & IRIS_STAGE_DIRTY_CONSTANTS_CS) &&
+        shs->sysvals_need_upload)
       upload_sysvals(ice, MESA_SHADER_COMPUTE, grid);
 
    if (stage_dirty & IRIS_STAGE_DIRTY_BINDINGS_CS)
@@ -9479,7 +9463,6 @@ iris_rebind_buffer(struct iris_context *ice,
                                  PIPE_BIND_BLENDABLE |
                                  PIPE_BIND_DISPLAY_TARGET |
                                  PIPE_BIND_CURSOR |
-                                 PIPE_BIND_COMPUTE_RESOURCE |
                                  PIPE_BIND_GLOBAL)));
 
    if (res->bind_history & PIPE_BIND_VERTEX_BUFFER) {
@@ -10121,16 +10104,43 @@ iris_emit_raw_pipe_control(struct iris_batch *batch,
       flags |= PIPE_CONTROL_DEPTH_STALL;
    }
 
-   /* Wa_14014966230: For COMPUTE Workload - Any PIPE_CONTROL command with
-    * POST_SYNC Operation Enabled MUST be preceded by a PIPE_CONTROL
-    * with CS_STALL Bit set (with No POST_SYNC ENABLED)
+#if INTEL_WA_1607156449_GFX_VER || INTEL_NEEDS_WA_18040903259
+   /* Wa_1607156449: For COMPUTE Workload - Any PIPE_CONTROL command with
+    * POST_SYNC Operation Enabled MUST be preceded by a PIPE_CONTROL with
+    * CS_STALL Bit set (with No POST_SYNC ENABLED)
+    *
+    * Wa_18040903259 says that timestamp are incorrect (not doing the CS Stall
+    * prior to writing the timestamp) with a command like this:
+    *
+    *   PIPE_CONTROL(CS Stall, Post Sync = Timestamp)
+    *
+    * should be turned into :
+    *
+    *   PIPE_CONTROL(CS Stall)
+    *   PIPE_CONTROL(CS Stall, Post Sync = Timestamp)
+    *
+    * Also : "This WA needs to be applied only when we have done a Compute
+    *         Walker and there is a request for a Timestamp."
+    *
+    * At the moment it's unclear whether all other parameters should go in the
+    * first or second PIPE_CONTROL. It seems logical that it should go to the
+    * first so that the timestamp accounts for all the associated flushes.
     */
-   if (intel_device_info_is_adln(devinfo) &&
+   if ((intel_needs_workaround(devinfo, 1607156449) ||
+        intel_needs_workaround(devinfo, 18040903259)) &&
        IS_COMPUTE_PIPELINE(batch) &&
-       flags_to_post_sync_op(flags) != NoWrite) {
-      iris_emit_raw_pipe_control(batch, "Wa_14014966230",
-                                 PIPE_CONTROL_CS_STALL, NULL, 0, 0);
+       (flags & (PIPE_CONTROL_WRITE_TIMESTAMP |
+                 PIPE_CONTROL_WRITE_IMMEDIATE))) {
+      iris_emit_raw_pipe_control(batch,
+                                 "workaround: Wa_1607156449/Wa_18040903259",
+                                 (flags & ~(PIPE_CONTROL_WRITE_TIMESTAMP |
+                                            PIPE_CONTROL_WRITE_IMMEDIATE)),
+                                 NULL, 0, 0);
+      flags &= (PIPE_CONTROL_CS_STALL |
+                PIPE_CONTROL_WRITE_IMMEDIATE |
+                PIPE_CONTROL_WRITE_TIMESTAMP);
    }
+#endif
 
    batch_mark_sync_for_pipe_control(batch, flags);
 
@@ -10530,7 +10540,6 @@ genX(init_state)(struct iris_context *ice)
    ctx->set_shader_buffers = iris_set_shader_buffers;
    ctx->set_shader_images = iris_set_shader_images;
    ctx->set_sampler_views = iris_set_sampler_views;
-   ctx->set_compute_resources = iris_set_compute_resources;
    ctx->set_global_binding = iris_set_global_binding;
    ctx->set_tess_state = iris_set_tess_state;
    ctx->set_patch_vertices = iris_set_patch_vertices;

@@ -65,41 +65,9 @@ struct radv_meta_saved_state {
    unsigned active_occlusion_queries;
 };
 
-enum radv_blit_ds_layout {
-   RADV_BLIT_DS_LAYOUT_TILE_ENABLE,
-   RADV_BLIT_DS_LAYOUT_TILE_DISABLE,
-   RADV_BLIT_DS_LAYOUT_COUNT,
+enum radv_copy_flags {
+   RADV_COPY_FLAGS_DEVICE_LOCAL = 1 << 0,
 };
-
-static inline enum radv_blit_ds_layout
-radv_meta_blit_ds_to_type(VkImageLayout layout)
-{
-   return (layout == VK_IMAGE_LAYOUT_GENERAL) ? RADV_BLIT_DS_LAYOUT_TILE_DISABLE : RADV_BLIT_DS_LAYOUT_TILE_ENABLE;
-}
-
-static inline VkImageLayout
-radv_meta_blit_ds_to_layout(enum radv_blit_ds_layout ds_layout)
-{
-   return ds_layout == RADV_BLIT_DS_LAYOUT_TILE_ENABLE ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL;
-}
-
-enum radv_meta_dst_layout {
-   RADV_META_DST_LAYOUT_GENERAL,
-   RADV_META_DST_LAYOUT_OPTIMAL,
-   RADV_META_DST_LAYOUT_COUNT,
-};
-
-static inline enum radv_meta_dst_layout
-radv_meta_dst_layout_from_layout(VkImageLayout layout)
-{
-   return (layout == VK_IMAGE_LAYOUT_GENERAL) ? RADV_META_DST_LAYOUT_GENERAL : RADV_META_DST_LAYOUT_OPTIMAL;
-}
-
-static inline VkImageLayout
-radv_meta_dst_layout_to_layout(enum radv_meta_dst_layout layout)
-{
-   return layout == RADV_META_DST_LAYOUT_OPTIMAL ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL;
-}
 
 extern const VkFormat radv_fs_key_format_exemplars[NUM_META_FS_KEYS];
 
@@ -110,8 +78,8 @@ enum radv_meta_object_key_type {
    RADV_META_OBJECT_KEY_BLIT2D_COLOR,
    RADV_META_OBJECT_KEY_BLIT2D_DEPTH,
    RADV_META_OBJECT_KEY_BLIT2D_STENCIL,
-   RADV_META_OBJECT_KEY_FILL_BUFFER,
-   RADV_META_OBJECT_KEY_COPY_BUFFER,
+   RADV_META_OBJECT_KEY_FILL_MEMORY,
+   RADV_META_OBJECT_KEY_COPY_MEMORY,
    RADV_META_OBJECT_KEY_COPY_IMAGE_TO_BUFFER,
    RADV_META_OBJECT_KEY_COPY_BUFFER_TO_IMAGE,
    RADV_META_OBJECT_KEY_COPY_BUFFER_TO_IMAGE_R32G32B32,
@@ -180,8 +148,8 @@ struct radv_meta_blit2d_buffer {
    uint64_t size;
    uint32_t offset;
    uint32_t pitch;
-   uint8_t bs;
    VkFormat format;
+   enum radv_copy_flags copy_flags;
 };
 
 struct radv_meta_blit2d_rect {
@@ -190,13 +158,9 @@ struct radv_meta_blit2d_rect {
    uint32_t width, height;
 };
 
-void radv_meta_begin_blit2d(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_saved_state *save);
-
 void radv_meta_blit2d(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_blit2d_surf *src_img,
                       struct radv_meta_blit2d_buffer *src_buf, struct radv_meta_blit2d_surf *dst,
                       struct radv_meta_blit2d_rect *rect);
-
-void radv_meta_end_blit2d(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_saved_state *save);
 
 void radv_meta_image_to_buffer(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_blit2d_surf *src,
                                struct radv_meta_blit2d_buffer *dst, struct radv_meta_blit2d_rect *rect);
@@ -253,17 +217,24 @@ uint32_t radv_clear_dcc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *i
 uint32_t radv_clear_htile(struct radv_cmd_buffer *cmd_buffer, const struct radv_image *image,
                           const VkImageSubresourceRange *range, uint32_t value, bool is_clear);
 
-void radv_update_buffer_cp(struct radv_cmd_buffer *cmd_buffer, uint64_t va, const void *data, uint64_t size);
+void radv_update_memory_cp(struct radv_cmd_buffer *cmd_buffer, uint64_t va, const void *data, uint64_t size);
 
 void radv_meta_decode_etc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image, VkImageLayout layout,
                           const VkImageSubresourceLayers *subresource, VkOffset3D offset, VkExtent3D extent);
 void radv_meta_decode_astc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image, VkImageLayout layout,
                            const VkImageSubresourceLayers *subresource, VkOffset3D offset, VkExtent3D extent);
 
-uint32_t radv_fill_buffer(struct radv_cmd_buffer *cmd_buffer, const struct radv_image *image,
-                          struct radeon_winsys_bo *bo, uint64_t va, uint64_t size, uint32_t value);
+uint32_t radv_fill_buffer(struct radv_cmd_buffer *cmd_buffer, struct radeon_winsys_bo *bo, uint64_t va, uint64_t size,
+                          uint32_t value);
 
-void radv_copy_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, uint64_t dst_va, uint64_t size);
+uint32_t radv_fill_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t va, uint64_t size, uint32_t value,
+                          enum radv_copy_flags copy_flags);
+
+uint32_t radv_fill_image(struct radv_cmd_buffer *cmd_buffer, const struct radv_image *image, uint64_t offset,
+                         uint64_t size, uint32_t value);
+
+void radv_copy_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, uint64_t dst_va, uint64_t size,
+                      enum radv_copy_flags src_copy_flags, enum radv_copy_flags dst_copy_flags);
 
 void radv_cmd_buffer_clear_attachment(struct radv_cmd_buffer *cmd_buffer, const VkClearAttachment *attachment);
 

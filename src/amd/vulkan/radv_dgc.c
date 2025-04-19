@@ -7,6 +7,7 @@
 #include "radv_dgc.h"
 #include "meta/radv_meta.h"
 #include "nir/radv_meta_nir.h"
+#include "radv_debug.h"
 #include "radv_entrypoints.h"
 #include "radv_pipeline_rt.h"
 
@@ -205,6 +206,7 @@ radv_get_sequence_size_graphics(const struct radv_indirect_command_layout *layou
 {
    const struct radv_device *device = container_of(layout->vk.base.device, struct radv_device, vk);
    const struct radv_physical_device *pdev = radv_device_physical(device);
+   const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
    const VkGeneratedCommandsPipelineInfoEXT *pipeline_info =
       vk_find_struct_const(pNext, GENERATED_COMMANDS_PIPELINE_INFO_EXT);
@@ -284,6 +286,11 @@ radv_get_sequence_size_graphics(const struct radv_indirect_command_layout *layou
             *cmd_size += (5 + 2 + 3) * 4;
          }
       }
+   }
+
+   if (pdev->info.gfx_level == GFX12 && !(instance->debug_flags & RADV_DEBUG_NO_HIZ)) {
+      /* HiZ/HiS hw workaround */
+      *cmd_size += 8 * 4;
    }
 
    if (device->sqtt.bo) {
@@ -1130,6 +1137,43 @@ build_dgc_buffer_preamble_ace(nir_builder *b, nir_def *sequence_count, const str
  * Draw
  */
 static void
+dgc_gfx12_emit_hiz_his_wa(struct dgc_cmdbuf *cs)
+{
+   const struct radv_device *device = cs->dev;
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const struct radv_instance *instance = radv_physical_device_instance(pdev);
+
+   if (pdev->info.gfx_level == GFX12 && !(instance->debug_flags & RADV_DEBUG_NO_HIZ)) {
+      dgc_cs_begin(cs);
+      dgc_cs_emit_imm(PKT3(PKT3_RELEASE_MEM, 6, 0));
+      dgc_cs_emit_imm(S_490_EVENT_TYPE(V_028A90_BOTTOM_OF_PIPE_TS) | S_490_EVENT_INDEX(5));
+      dgc_cs_emit_imm(0); /* DST_SEL, INT_SEL = no write confirm, DATA_SEL = no data */
+      dgc_cs_emit_imm(0); /* ADDRESS_LO */
+      dgc_cs_emit_imm(0); /* ADDRESS_HI */
+      dgc_cs_emit_imm(0); /* DATA_LO */
+      dgc_cs_emit_imm(0); /* DATA_HI */
+      dgc_cs_emit_imm(0); /* INT_CTXID */
+      dgc_cs_end();
+   }
+}
+
+static void
+dgc_emit_before_draw(struct dgc_cmdbuf *cs, nir_def *sequence_id, enum rgp_sqtt_marker_general_api_type api_type,
+                     enum rgp_sqtt_marker_event_type event)
+{
+   dgc_emit_sqtt_begin_api_marker(cs, api_type);
+   dgc_emit_sqtt_marker_event(cs, sequence_id, event);
+}
+
+static void
+dgc_emit_after_draw(struct dgc_cmdbuf *cs, enum rgp_sqtt_marker_general_api_type api_type)
+{
+   dgc_gfx12_emit_hiz_his_wa(cs);
+   dgc_emit_sqtt_thread_trace_marker(cs);
+   dgc_emit_sqtt_end_api_marker(cs, api_type);
+}
+
+static void
 dgc_emit_userdata_vertex(struct dgc_cmdbuf *cs, nir_def *first_vertex, nir_def *first_instance, nir_def *drawid)
 {
    nir_builder *b = cs->b;
@@ -1265,14 +1309,13 @@ dgc_emit_draw_indirect(struct dgc_cmdbuf *cs, nir_def *stream_addr, nir_def *seq
 
    nir_def *va = nir_iadd_imm(b, stream_addr, layout->vk.draw_src_offset_B);
 
-   dgc_emit_sqtt_begin_api_marker(cs, indexed ? ApiCmdDrawIndexedIndirect : ApiCmdDrawIndirect);
-   dgc_emit_sqtt_marker_event(cs, sequence_id, indexed ? EventCmdDrawIndexedIndirect : EventCmdDrawIndirect);
+   dgc_emit_before_draw(cs, sequence_id, indexed ? ApiCmdDrawIndexedIndirect : ApiCmdDrawIndirect,
+                        indexed ? EventCmdDrawIndexedIndirect : EventCmdDrawIndirect);
 
    dgc_emit_pkt3_set_base(cs, va);
    dgc_emit_pkt3_draw_indirect(cs, indexed);
 
-   dgc_emit_sqtt_thread_trace_marker(cs);
-   dgc_emit_sqtt_end_api_marker(cs, indexed ? ApiCmdDrawIndexedIndirect : ApiCmdDrawIndirect);
+   dgc_emit_after_draw(cs, indexed ? ApiCmdDrawIndexedIndirect : ApiCmdDrawIndirect);
 }
 
 static void
@@ -1290,15 +1333,13 @@ dgc_emit_draw(struct dgc_cmdbuf *cs, nir_def *stream_addr, nir_def *sequence_id)
 
    nir_push_if(b, nir_iand(b, nir_ine_imm(b, vertex_count, 0), nir_ine_imm(b, instance_count, 0)));
    {
-      dgc_emit_sqtt_begin_api_marker(cs, ApiCmdDraw);
-      dgc_emit_sqtt_marker_event(cs, sequence_id, EventCmdDraw);
+      dgc_emit_before_draw(cs, sequence_id, ApiCmdDraw, EventCmdDraw);
 
       dgc_emit_userdata_vertex(cs, vertex_offset, first_instance, nir_imm_int(b, 0));
       dgc_emit_instance_count(cs, instance_count);
       dgc_emit_draw_index_auto(cs, vertex_count);
 
-      dgc_emit_sqtt_thread_trace_marker(cs);
-      dgc_emit_sqtt_end_api_marker(cs, ApiCmdDraw);
+      dgc_emit_after_draw(cs, ApiCmdDraw);
    }
    nir_pop_if(b, 0);
 }
@@ -1322,15 +1363,13 @@ dgc_emit_draw_indexed(struct dgc_cmdbuf *cs, nir_def *stream_addr, nir_def *sequ
 
    nir_push_if(b, nir_iand(b, nir_ine_imm(b, index_count, 0), nir_ine_imm(b, instance_count, 0)));
    {
-      dgc_emit_sqtt_begin_api_marker(cs, ApiCmdDrawIndexed);
-      dgc_emit_sqtt_marker_event(cs, sequence_id, EventCmdDrawIndexed);
+      dgc_emit_before_draw(cs, sequence_id, ApiCmdDrawIndexed, EventCmdDrawIndexed);
 
       dgc_emit_userdata_vertex(cs, vertex_offset, first_instance, nir_imm_int(b, 0));
       dgc_emit_instance_count(cs, instance_count);
       dgc_emit_draw_index_offset_2(cs, first_index, index_count, max_index_count);
 
-      dgc_emit_sqtt_thread_trace_marker(cs);
-      dgc_emit_sqtt_end_api_marker(cs, ApiCmdDrawIndexed);
+      dgc_emit_after_draw(cs, ApiCmdDrawIndexed);
    }
    nir_pop_if(b, 0);
 }
@@ -1363,8 +1402,8 @@ dgc_emit_draw_with_count(struct dgc_cmdbuf *cs, nir_def *stream_addr, nir_def *s
 
    nir_def *di_src_sel = nir_imm_int(b, indexed ? V_0287F0_DI_SRC_SEL_DMA : V_0287F0_DI_SRC_SEL_AUTO_INDEX);
 
-   dgc_emit_sqtt_begin_api_marker(cs, indexed ? ApiCmdDrawIndexedIndirectCount : ApiCmdDrawIndirectCount);
-   dgc_emit_sqtt_marker_event(cs, sequence_id, indexed ? EventCmdDrawIndexedIndirectCount : EventCmdDrawIndirectCount);
+   dgc_emit_before_draw(cs, sequence_id, indexed ? ApiCmdDrawIndexedIndirectCount : ApiCmdDrawIndirectCount,
+                        indexed ? EventCmdDrawIndexedIndirectCount : EventCmdDrawIndirectCount);
 
    dgc_cs_begin(cs);
    dgc_cs_emit_imm(PKT3(indexed ? PKT3_DRAW_INDEX_INDIRECT_MULTI : PKT3_DRAW_INDIRECT_MULTI, 8, false));
@@ -1379,8 +1418,7 @@ dgc_emit_draw_with_count(struct dgc_cmdbuf *cs, nir_def *stream_addr, nir_def *s
    dgc_cs_emit(di_src_sel);
    dgc_cs_end();
 
-   dgc_emit_sqtt_thread_trace_marker(cs);
-   dgc_emit_sqtt_end_api_marker(cs, indexed ? ApiCmdDrawIndexedIndirectCount : ApiCmdDrawIndirectCount);
+   dgc_emit_after_draw(cs, indexed ? ApiCmdDrawIndexedIndirectCount : ApiCmdDrawIndirectCount);
 }
 
 /**
@@ -1653,8 +1691,7 @@ dgc_emit_push_constant(struct dgc_cmdbuf *cs, nir_def *stream_addr, nir_def *seq
    nir_builder *b = cs->b;
 
    nir_def *push_constant_stages = dgc_get_push_constant_stages(cs);
-   radv_foreach_stage(s, stages)
-   {
+   radv_foreach_stage (s, stages) {
       nir_push_if(b, nir_test_mask(b, push_constant_stages, mesa_to_vk_shader_stage(s)));
       {
          dgc_emit_push_constant_for_stage(cs, stream_addr, sequence_id, &params, s);
@@ -2065,8 +2102,7 @@ dgc_emit_dispatch_taskmesh_gfx(struct dgc_cmdbuf *cs, nir_def *sequence_id)
       nir_bcsel(b, has_linear_dispatch_en, nir_imm_int(b, S_4D1_LINEAR_DISPATCH_ENABLE(1)), nir_imm_int(b, 0));
    nir_def *sqtt_enable = nir_imm_int(b, device->sqtt.bo ? S_4D1_THREAD_TRACE_MARKER_ENABLE(1) : 0);
 
-   dgc_emit_sqtt_begin_api_marker(cs, ApiCmdDrawMeshTasksEXT);
-   dgc_emit_sqtt_marker_event(cs, sequence_id, EventCmdDrawMeshTasksEXT);
+   dgc_emit_before_draw(cs, sequence_id, ApiCmdDrawMeshTasksEXT, EventCmdDrawMeshTasksEXT);
 
    dgc_cs_begin(cs);
    dgc_cs_emit_imm(PKT3(PKT3_DISPATCH_TASKMESH_GFX, 2, 0) | PKT3_RESET_FILTER_CAM_S(1));
@@ -2080,8 +2116,7 @@ dgc_emit_dispatch_taskmesh_gfx(struct dgc_cmdbuf *cs, nir_def *sequence_id)
    dgc_cs_emit_imm(V_0287F0_DI_SRC_SEL_AUTO_INDEX);
    dgc_cs_end();
 
-   dgc_emit_sqtt_thread_trace_marker(cs);
-   dgc_emit_sqtt_end_api_marker(cs, ApiCmdDrawMeshTasksEXT);
+   dgc_emit_after_draw(cs, ApiCmdDrawMeshTasksEXT);
 }
 
 static void
@@ -2106,8 +2141,7 @@ dgc_emit_draw_mesh_tasks_gfx(struct dgc_cmdbuf *cs, nir_def *stream_addr, nir_de
       }
       nir_push_else(b, NULL);
       {
-         dgc_emit_sqtt_begin_api_marker(cs, ApiCmdDrawMeshTasksEXT);
-         dgc_emit_sqtt_marker_event(cs, sequence_id, EventCmdDrawMeshTasksEXT);
+         dgc_emit_before_draw(cs, sequence_id, ApiCmdDrawMeshTasksEXT, EventCmdDrawMeshTasksEXT);
 
          dgc_emit_userdata_mesh(cs, x, y, z, sequence_id);
          dgc_emit_instance_count(cs, nir_imm_int(b, 1));
@@ -2119,8 +2153,7 @@ dgc_emit_draw_mesh_tasks_gfx(struct dgc_cmdbuf *cs, nir_def *stream_addr, nir_de
             dgc_emit_draw_index_auto(cs, vertex_count);
          }
 
-         dgc_emit_sqtt_thread_trace_marker(cs);
-         dgc_emit_sqtt_end_api_marker(cs, ApiCmdDrawMeshTasksEXT);
+         dgc_emit_after_draw(cs, ApiCmdDrawMeshTasksEXT);
       }
       nir_pop_if(b, NULL);
    }
@@ -2169,8 +2202,7 @@ dgc_emit_draw_mesh_tasks_with_count_gfx(struct dgc_cmdbuf *cs, nir_def *stream_a
          nir_bcsel(b, has_drawid, nir_imm_int(b, S_4C2_DRAW_INDEX_ENABLE(1)), nir_imm_int(b, 0));
       nir_def *xyz_dim_enable = nir_bcsel(b, has_grid_size, nir_imm_int(b, S_4C2_XYZ_DIM_ENABLE(1)), nir_imm_int(b, 0));
 
-      dgc_emit_sqtt_begin_api_marker(cs, ApiCmdDrawMeshTasksIndirectCountEXT);
-      dgc_emit_sqtt_marker_event(cs, sequence_id, EventCmdDrawMeshTasksIndirectCountEXT);
+      dgc_emit_before_draw(cs, sequence_id, ApiCmdDrawMeshTasksIndirectCountEXT, EventCmdDrawMeshTasksIndirectCountEXT);
 
       dgc_cs_begin(cs);
       dgc_cs_emit(nir_imm_int(b, PKT3(PKT3_DISPATCH_MESH_INDIRECT_MULTI, 7, false) | PKT3_RESET_FILTER_CAM_S(1)));
@@ -2191,8 +2223,7 @@ dgc_emit_draw_mesh_tasks_with_count_gfx(struct dgc_cmdbuf *cs, nir_def *stream_a
       dgc_cs_emit_imm(V_0287F0_DI_SRC_SEL_AUTO_INDEX);
       dgc_cs_end();
 
-      dgc_emit_sqtt_thread_trace_marker(cs);
-      dgc_emit_sqtt_end_api_marker(cs, ApiCmdDrawMeshTasksIndirectCountEXT);
+      dgc_emit_after_draw(cs, ApiCmdDrawMeshTasksIndirectCountEXT);
    }
    nir_pop_if(b, NULL);
 }

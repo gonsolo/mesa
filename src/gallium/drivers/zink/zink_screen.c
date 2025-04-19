@@ -651,8 +651,6 @@ zink_init_compute_caps(struct zink_screen *screen)
 
    caps->address_bits = 64;
 
-   snprintf(caps->ir_target, sizeof(caps->ir_target), "nir");
-
    caps->grid_dimension = 3;
 
    caps->max_grid_size[0] = screen->info.props.limits.maxComputeWorkGroupCount[0];
@@ -861,8 +859,9 @@ zink_init_screen_caps(struct zink_screen *screen)
        screen->info.have_EXT_shader_subgroup_ballot);
 
    caps->demote_to_helper_invocation =
-      screen->spirv_version >= SPIRV_VERSION(1, 6) ||
-      screen->info.have_EXT_shader_demote_to_helper_invocation;
+      (screen->spirv_version >= SPIRV_VERSION(1, 6) ||
+       screen->info.have_EXT_shader_demote_to_helper_invocation) &&
+      !screen->driver_compiler_workarounds.broken_demote;
 
    caps->sample_shading = screen->info.feats.features.sampleRateShading;
 
@@ -2932,6 +2931,16 @@ init_driver_workarounds(struct zink_screen *screen)
       break;
    default:
       screen->driver_compiler_workarounds.broken_const = false;
+      break;
+   }
+
+   /* these drivers do not implement demote properly */
+   switch (zink_driverid(screen)) {
+   case VK_DRIVER_ID_IMAGINATION_PROPRIETARY:
+      screen->driver_compiler_workarounds.broken_demote = true;
+      break;
+   default:
+      screen->driver_compiler_workarounds.broken_demote = false;
       break;
    }
 

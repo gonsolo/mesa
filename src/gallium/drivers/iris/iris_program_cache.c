@@ -36,6 +36,7 @@
 #include "pipe/p_screen.h"
 #include "util/u_atomic.h"
 #include "util/u_upload_mgr.h"
+#include "compiler/brw_disasm.h"
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
 #include "intel/compiler/brw_compiler.h"
@@ -217,6 +218,19 @@ iris_upload_shader(struct iris_screen *screen,
       struct keybox *keybox = make_keybox(shader, cache_id, key, key_size);
       _mesa_hash_table_insert(driver_shaders, keybox, shader);
    }
+
+   if (INTEL_DEBUG(DEBUG_SHADERS_LINENO) && screen->brw) {
+      int start = 0;
+      /* dump each simd variant of shader */
+      while (start < shader->brw_prog_data->program_size) {
+         brw_disassemble_with_lineno(&screen->brw->isa, shader->stage, -1,
+                                    ish ? ish->source_hash : 0, assembly, start,
+                                    res->bo->address + shader->assembly.offset,
+                                    stderr);
+         start += align64(brw_disassemble_find_end(&screen->brw->isa,
+                                                   assembly, start), 64);
+      }
+   }
 }
 
 bool
@@ -281,7 +295,7 @@ iris_blorp_upload_shader(struct blorp_batch *blorp_batch, uint32_t stage,
 #endif
    }
 
-   iris_finalize_program(shader, NULL, NULL, 0, 0, 0, &bt);
+   iris_finalize_program(shader, NULL, NULL, 0, 0, &bt);
 
    iris_upload_shader(screen, NULL, shader, ice->shaders.cache,
                       ice->shaders.uploader_driver,
@@ -494,7 +508,7 @@ iris_ensure_indirect_generation_shader(struct iris_batch *batch)
    struct iris_binding_table bt;
    memset(&bt, 0, sizeof(bt));
 
-   iris_finalize_program(shader, NULL, NULL, 0, 0, 0, &bt);
+   iris_finalize_program(shader, NULL, NULL, 0, 0, &bt);
 
    iris_upload_shader(screen, NULL, shader, ice->shaders.cache,
                       ice->shaders.uploader_driver,

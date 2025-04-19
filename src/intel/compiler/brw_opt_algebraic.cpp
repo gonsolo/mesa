@@ -324,6 +324,17 @@ brw_opt_constant_fold_instruction(const intel_device_info *devinfo, brw_inst *in
       }
       break;
 
+   case FS_OPCODE_DDX_COARSE:
+   case FS_OPCODE_DDX_FINE:
+   case FS_OPCODE_DDY_COARSE:
+   case FS_OPCODE_DDY_FINE:
+      if (is_uniform(inst->src[0]) || inst->src[0].is_scalar) {
+         inst->opcode = BRW_OPCODE_MOV;
+         inst->src[0] = retype(brw_imm_uq(0), inst->dst.type);
+         progress = true;
+      }
+      break;
+
    default:
       break;
    }
@@ -535,10 +546,20 @@ brw_opt_algebraic(brw_shader &s)
          }
          break;
       case BRW_OPCODE_SEL:
-         if (inst->src[0].equals(inst->src[1])) {
+         /* Floating point SEL.CMOD may flush denorms to zero. We don't have
+          * enough information at this point in compilation to know whether or
+          * not it is safe to remove that.
+          *
+          * Integer SEL or SEL without a conditional modifier is just a fancy
+          * MOV. Those are always safe to eliminate.
+          */
+         if (inst->src[0].equals(inst->src[1]) &&
+             (!brw_type_is_float(inst->dst.type) ||
+              inst->conditional_mod == BRW_CONDITIONAL_NONE)) {
             inst->opcode = BRW_OPCODE_MOV;
             inst->predicate = BRW_PREDICATE_NONE;
             inst->predicate_inverse = false;
+            inst->conditional_mod = BRW_CONDITIONAL_NONE;
             inst->resize_sources(1);
             progress = true;
          } else if (inst->saturate && inst->src[1].file == IMM) {

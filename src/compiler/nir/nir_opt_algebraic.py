@@ -476,6 +476,9 @@ optimizations.extend([
    (('ffract@32', a), ('fsub', a, ('ffloor', a)), 'options->lower_ffract'),
    (('ffract@64', a), ('fsub', a, ('ffloor', a)),
     '(options->lower_ffract || (options->lower_doubles_options & nir_lower_dfract)) && !(options->lower_doubles_options & nir_lower_dfloor)'),
+   (('fadd@16', a, ('fneg(is_used_once)', ('ffloor(is_used_once)', a))), ('ffract', a), '!options->lower_ffract'),
+   (('fadd@32', a, ('fneg(is_used_once)', ('ffloor(is_used_once)', a))), ('ffract', a), '!options->lower_ffract'),
+   (('fadd@64', a, ('fneg(is_used_once)', ('ffloor(is_used_once)', a))), ('ffract', a), '!options->lower_ffract && !(options->lower_doubles_options & nir_lower_dfract)'),
    (('fceil', a), ('fneg', ('ffloor', ('fneg', a))), 'options->lower_fceil'),
    (('ffma@16', a, b, c), ('fadd', ('fmul', a, b), c), 'options->lower_ffma16'),
    (('ffma@32', a, b, c), ('fadd', ('fmul', a, b), c), 'options->lower_ffma32'),
@@ -885,8 +888,12 @@ optimizations.extend([
    (('bcsel', a, b, a), ('iand', a, b)),
    (('bcsel', a, b, True), ('ior', ('inot', a), b)),
    (('bcsel', a, False, b), ('iand', ('inot', a), b)),
-   (('~fmin', a, a), a),
-   (('~fmax', a, a), a),
+   (('fmin', 'a@64', a), a, '!nir_is_denorm_flush_to_zero(info->float_controls_execution_mode, 64)'),
+   (('fmin', 'a@32', a), a, '!nir_is_denorm_flush_to_zero(info->float_controls_execution_mode, 32)'),
+   (('fmin', 'a@16', a), a, '!nir_is_denorm_flush_to_zero(info->float_controls_execution_mode, 16)'),
+   (('fmax', 'a@64', a), a, '!nir_is_denorm_flush_to_zero(info->float_controls_execution_mode, 64)'),
+   (('fmax', 'a@32', a), a, '!nir_is_denorm_flush_to_zero(info->float_controls_execution_mode, 32)'),
+   (('fmax', 'a@16', a), a, '!nir_is_denorm_flush_to_zero(info->float_controls_execution_mode, 16)'),
    (('imin', a, a), a),
    (('imax', a, a), a),
    (('umin', a, a), a),
@@ -2671,6 +2678,9 @@ optimizations.extend([
    (('imul24', a, '#b@32(is_pos_power_of_two)'), ('ishl', a, ('find_lsb', b)), '!options->lower_bitops'),
    (('imul24', a, '#b@32(is_neg_power_of_two)'), ('ineg', ('ishl', a, ('find_lsb', ('iabs', b)))), '!options->lower_bitops'),
    (('imul24', a, 0), (0)),
+
+   (('imul_high@16', a, b), ('i2i16', ('ishr', ('imul24_relaxed', ('i2i32', a), ('i2i32', b)), 16)), 'options->lower_mul_high16'),
+   (('umul_high@16', a, b), ('u2u16', ('ushr', ('umul24_relaxed', ('u2u32', a), ('u2u32', b)), 16)), 'options->lower_mul_high16'),
 ])
 
 for bit_size in [8, 16, 32, 64]:

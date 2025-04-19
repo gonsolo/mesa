@@ -127,8 +127,8 @@ option(
 option(
   'gallium-xa',
   type : 'feature',
-  deprecated: {'true': 'enabled', 'false': 'disabled'},
   description : 'enable gallium xa frontend.',
+  deprecated: true,
 )
 
 option(
@@ -136,6 +136,7 @@ option(
   type : 'boolean',
   value : false,
   description : 'build gallium "nine" Direct3D 9.x frontend.',
+  deprecated: true,
 )
 
 option(
@@ -143,15 +144,6 @@ option(
   type : 'boolean',
   value : false,
   description : 'build gallium D3D10 WDDM UMD frontend.',
-)
-
-option(
-  'gallium-opencl',
-  type : 'combo',
-  choices : ['icd', 'standalone', 'disabled'],
-  value : 'disabled',
-  description : 'build gallium "clover" OpenCL frontend.',
-  deprecated: true,
 )
 
 option(
@@ -328,6 +320,13 @@ option(
   type : 'feature',
   deprecated: {'true': 'enabled', 'false': 'disabled'},
   description : 'Build support for gbm platform'
+)
+
+option(
+  'libgbm-external',
+  type: 'boolean',
+  value: false,
+  description: 'Whether to use external libgbm (default: use in-tree copy)'
 )
 
 option(
@@ -537,8 +536,8 @@ option(
 option(
   'power8',
   type : 'feature',
-  deprecated: {'true': 'enabled', 'false': 'disabled'},
-  description : 'Enable power8 optimizations.',
+  description : 'Does nothing, left here for a while to avoid build breakages.',
+  deprecated: true,
 )
 
 option(
@@ -573,8 +572,8 @@ option(
   type : 'integer',
   min : 25,
   max : 10000,
-  value : 25,
-  description : 'Android Platform SDK version. Default: Nougat version.'
+  value : 34,
+  description : 'Android Platform SDK version. Default: Android14 version.'
 )
 
 option(

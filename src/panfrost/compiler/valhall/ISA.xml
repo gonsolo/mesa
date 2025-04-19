@@ -95,7 +95,7 @@
     <value name="Wait on slots 0, 1, 2, 6, 7">wait</value>
     <value name="Perform branch reconverge">reconverge</value>
     <reserved/>
-    <reserved/>
+    <value name="Wait for resource read">wait_resource</value>
     <value name="Terminate discarded threads">discard</value>
     <reserved/>
     <value name="Return from shader">end</value>
@@ -733,6 +733,20 @@
     <value desc="Retrieve previous state">retrieve</value>
   </enum>
 
+  <enum name="Source">
+    <desc>
+      Clock source for LD_GCLK instruction.
+    </desc>
+    <reserved/>
+    <reserved/>
+    <reserved/>
+    <reserved/>
+    <reserved/>
+    <reserved/>
+    <value desc="Cycle counter">cycle_counter</value>
+    <value desc="System timestamp">system_timestamp</value>
+  </enum>
+
   <enum name="Source format">
     <desc>
       In-memory format of varyings.
@@ -1016,6 +1030,13 @@
     <src>Vertex ID</src>
     <src>Instance ID</src>
     <src>Index and table</src>
+  </ins>
+
+  <ins name="LD_GCLK_U64" title="Global clock load" opcode="0x44" unused="true" unit="LS">
+    <desc>Load the 64-bit global clock, either a cycle counter or the system clock.</desc>
+    <sr write="true"/>
+    <sr_count count="2"/>
+    <slot/>
   </ins>
 
   <ins name="LD_TEX_IMM" title="Load immediate texture" opcode="0x66" opcode2="1" message="attribute" unit="LS">
@@ -1797,6 +1818,7 @@
     <desc>$A + B$</desc>
     <roundmode/>
     <clamp/>
+    <roundmode/>
     <src absneg="true" swizzle="true">A</src>
     <src absneg="true" swizzle="true">B</src>
   </group>
@@ -1903,8 +1925,8 @@
 
   <ins name="MKVEC.v2i16" title="Make 16-bit vector" dests="1" opcode="0xA1" opcode2="0x5" unused="true" unit="CVT">
     <desc>Calculates $A | (B \ll 16)$. Used to implement `(ushort2)(A, B)`</desc>
-    <src swizzle="true">A</src>
-    <src swizzle="true">B</src>
+    <src lane="28">A</src>
+    <src lane="26">B</src>
   </ins>
 
   <group name="ISUB" title="Integer subtract" dests="1" opcode2="1" unused="true" unit="CVT">
@@ -2017,6 +2039,7 @@
     <ins name="FMA.v2f16" opcode="0xB3"/>
     <desc>$A \cdot B + C$</desc>
     <clamp/>
+    <roundmode/>
     <src absneg="true" swizzle="true">A</src>
     <src absneg="true" swizzle="true">B</src>
     <src absneg="true" swizzle="true">C</src>

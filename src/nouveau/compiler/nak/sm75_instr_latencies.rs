@@ -119,6 +119,7 @@ impl RegLatencySM75 {
 
             // Conversion functions all decoupled
             Op::F2F(_) => Decoupled,
+            Op::F2FP(_) => CoupledAlu, // undocumented, copy Ampere
             Op::F2I(_) => Decoupled,
             Op::I2F(_) => Decoupled,
             Op::FRnd(_) => Decoupled,
@@ -882,6 +883,7 @@ impl URegLatencySM75 {
             Op::Flo(_) => vdecoupled,
             Op::IAdd3(_) | Op::IAdd3X(_) => vcoupled,
             Op::IAbs(_) => vcoupled,
+            Op::IDp4(_) => vcoupled,
             Op::IMnMx(_) => vcoupled,
             Op::IMad(_) => vcoupled,
 

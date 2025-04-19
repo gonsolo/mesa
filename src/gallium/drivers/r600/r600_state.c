@@ -539,6 +539,7 @@ static void *r600_create_rs_state(struct pipe_context *ctx,
 	r600_store_context_reg(&rs->buffer, R_028A4C_PA_SC_MODE_CNTL, sc_mode_cntl);
 	r600_store_context_reg(&rs->buffer, R_028C08_PA_SU_VTX_CNTL,
 			       S_028C08_PIX_CENTER_HALF(state->half_pixel_center) |
+			       S_028C08_ROUND_MODE(V_028C08_X_ROUND_TO_EVEN) |
 			       S_028C08_QUANT_MODE(V_028C08_X_1_256TH));
 	r600_store_context_reg(&rs->buffer, R_028DFC_PA_SU_POLY_OFFSET_CLAMP, fui(state->offset_clamp));
 
@@ -3104,6 +3105,7 @@ void r600_init_state_functions(struct r600_context *rctx)
 	r600_add_atom(rctx, &rctx->b.render_cond_atom, id++);
 	r600_add_atom(rctx, &rctx->b.streamout.begin_atom, id++);
 	r600_add_atom(rctx, &rctx->b.streamout.enable_atom, id++);
+	r600_add_atom(rctx, &rctx->b.window_rectangles.atom, id++);
 	for (i = 0; i < R600_NUM_HW_STAGES; i++)
 		r600_init_atom(rctx, &rctx->hw_shader_stages[i].atom, id++, r600_emit_shader, 0);
 	r600_init_atom(rctx, &rctx->shader_stages.atom, id++, r600_emit_shader_stages, 0);

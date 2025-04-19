@@ -180,7 +180,7 @@ static int amdgpu_bo_va_op_common(struct amdgpu_winsys *aws, struct amdgpu_winsy
 {
    int r;
 
-   if (aws->info.use_userq) {
+   if (aws->info.userq_ip_mask) {
       uint32_t syncobj_arr[AMDGPU_MAX_QUEUES + 1];
       uint32_t num_fences = 0;
 
@@ -700,6 +700,7 @@ static struct amdgpu_winsys_bo *amdgpu_create_bo(struct amdgpu_winsys *aws,
    bo->bo = buf_handle;
    bo->va_handle = va_handle;
    bo->kms_handle = kms_handle;
+   bo->vm_always_valid = request.flags & AMDGPU_GEM_CREATE_VM_ALWAYS_VALID;
 
    if (initial_domain & RADEON_DOMAIN_VRAM)
       aws->allocated_vram += align64(size, aws->info.gart_page_size);
@@ -1898,6 +1899,13 @@ static bool amdgpu_bo_is_suballocated(struct pb_buffer_lean *buf)
    return bo->type == AMDGPU_BO_SLAB_ENTRY;
 }
 
+static bool amdgpu_bo_has_vm_always_valid(struct pb_buffer_lean *buf)
+{
+   struct amdgpu_winsys_bo *bo = (struct amdgpu_winsys_bo*)buf;
+
+   return get_real_bo(bo)->vm_always_valid;
+}
+
 uint64_t amdgpu_bo_get_va(struct pb_buffer_lean *buf)
 {
    struct amdgpu_winsys_bo *bo = amdgpu_winsys_bo(buf);
@@ -1939,6 +1947,7 @@ void amdgpu_bo_init_functions(struct amdgpu_screen_winsys *sws)
    sws->base.buffer_from_ptr = amdgpu_bo_from_ptr;
    sws->base.buffer_is_user_ptr = amdgpu_bo_is_user_ptr;
    sws->base.buffer_is_suballocated = amdgpu_bo_is_suballocated;
+   sws->base.buffer_has_vm_always_valid = amdgpu_bo_has_vm_always_valid;
    sws->base.buffer_get_handle = amdgpu_bo_get_handle;
    sws->base.buffer_commit = amdgpu_bo_sparse_commit;
    sws->base.buffer_find_next_committed_memory = amdgpu_bo_find_next_committed_memory;

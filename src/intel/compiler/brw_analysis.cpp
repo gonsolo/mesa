@@ -112,8 +112,7 @@ brw_ip_ranges::validate(const brw_shader *s) const
 
    if (num_blocks) {
       bblock_t *last_block = s->cfg->blocks[num_blocks - 1];
-      unsigned last_ip = end(last_block);
-      if (last_ip + 1 != s->cfg->total_instructions)
+      if (range(last_block).end != (int)s->cfg->total_instructions)
          return false;
    }
 
@@ -128,7 +127,8 @@ brw_register_pressure::brw_register_pressure(const brw_shader *v)
    regs_live_at_ip = new unsigned[num_instructions]();
 
    for (unsigned reg = 0; reg < v->alloc.count; reg++) {
-      for (int ip = live.vgrf_start[reg]; ip <= live.vgrf_end[reg]; ip++)
+      brw_range range = live.vgrf_range[reg];
+      for (int ip = range.start; ip < range.end; ip++)
          regs_live_at_ip[ip] += v->alloc.sizes[reg];
    }
 

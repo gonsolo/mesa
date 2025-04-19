@@ -31,7 +31,9 @@ enum r600_blitter_op /* bitmask */
 
 	R600_DECOMPRESS    = R600_SAVE_FRAGMENT_STATE | R600_SAVE_FRAMEBUFFER | R600_DISABLE_RENDER_COND,
 
-	R600_COLOR_RESOLVE = R600_SAVE_FRAGMENT_STATE | R600_SAVE_FRAMEBUFFER
+	R600_COLOR_RESOLVE = R600_SAVE_FRAGMENT_STATE | R600_SAVE_FRAMEBUFFER,
+
+	R600_DEPTH_STENCIL = R600_SAVE_FRAGMENT_STATE | R600_SAVE_FRAMEBUFFER
 };
 
 static void r600_blitter_begin(struct pipe_context *ctx, enum r600_blitter_op op)
@@ -63,6 +65,9 @@ static void r600_blitter_begin(struct pipe_context *ctx, enum r600_blitter_op op
 		util_blitter_save_depth_stencil_alpha(rctx->blitter, rctx->dsa_state.cso);
 		util_blitter_save_stencil_ref(rctx->blitter, &rctx->stencil_ref.pipe_state);
                 util_blitter_save_sample_mask(rctx->blitter, rctx->sample_mask.sample_mask, rctx->ps_iter_samples);
+		util_blitter_save_window_rectangles(rctx->blitter, rctx->b.window_rectangles.include,
+						    rctx->b.window_rectangles.number,
+						    rctx->b.window_rectangles.states);
 	}
 
 	if (op & R600_SAVE_CONST_BUF0) {
@@ -552,7 +557,7 @@ static void r600_clear_depth_stencil(struct pipe_context *ctx,
 {
 	struct r600_context *rctx = (struct r600_context *)ctx;
 
-	r600_blitter_begin(ctx, R600_CLEAR_SURFACE |
+	r600_blitter_begin(ctx, R600_DEPTH_STENCIL |
 			   (render_condition_enabled ? 0 : R600_DISABLE_RENDER_COND));
 	util_blitter_clear_depth_stencil(rctx->blitter, dst, clear_flags, depth, stencil,
 					 dstx, dsty, width, height);

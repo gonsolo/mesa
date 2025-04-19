@@ -3678,7 +3678,7 @@ void si_make_buffer_descriptor(struct si_screen *screen, struct si_resource *buf
       .gfx10_oob_select = V_008F0C_OOB_SELECT_STRUCTURED_WITH_OFFSET,
    };
 
-   ac_build_buffer_descriptor(screen->info.gfx_level, &buffer_state, &state[4]);
+   ac_build_buffer_descriptor(screen->info.gfx_level, &buffer_state, &state[0]);
 }
 
 /**
@@ -5123,8 +5123,16 @@ static void gfx10_init_gfx_preamble_state(struct si_context *sctx)
          ac_pm4_cmd_add(&pm4->base, EVENT_TYPE(V_028A90_BREAK_BATCH) | EVENT_INDEX(0));
       }
 
-      ac_pm4_cmd_add(&pm4->base, PKT3(PKT3_CLEAR_STATE, 0, 0));
-      ac_pm4_cmd_add(&pm4->base, 0);
+      if (sscreen->info.has_clear_state) {
+         ac_pm4_cmd_add(&pm4->base, PKT3(PKT3_CLEAR_STATE, 0, 0));
+         ac_pm4_cmd_add(&pm4->base, 0);
+      } else {
+         /* PA_SC_TILE_STEERING_OVERRIDE needs to be written else observing corruption in
+          * gfx11 with userq.
+          */
+         ac_pm4_set_reg(&pm4->base, R_02835C_PA_SC_TILE_STEERING_OVERRIDE,
+                        sscreen->info.pa_sc_tile_steering_override);
+      }
    }
 
    si_init_compute_preamble_state(sctx, pm4);

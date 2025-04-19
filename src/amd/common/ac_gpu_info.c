@@ -202,6 +202,9 @@ struct drm_amdgpu_info_device {
 	uint32_t csa_size;
 	/* context save area base virtual alignment for gfx11 */
 	uint32_t csa_alignment;
+	/* Userq IP mask (1 << AMDGPU_HW_IP_*) */
+	uint32_t userq_ip_mask;
+	uint32_t pad;
 };
 struct drm_amdgpu_info_hw_ip {
    uint32_t hw_ip_version_major;
@@ -320,35 +323,6 @@ static uint64_t fix_vram_size(uint64_t size)
     * it's used to compute the number of memory modules for harvesting.
     */
    return align64(size, 256 * 1024 * 1024);
-}
-
-static bool
-has_tmz_support(ac_drm_device *dev, struct radeon_info *info, uint32_t ids_flags)
-{
-   struct amdgpu_bo_alloc_request request = {0};
-   int r;
-   ac_drm_bo bo;
-
-   if (ids_flags & AMDGPU_IDS_FLAGS_TMZ)
-      return true;
-
-   /* AMDGPU_IDS_FLAGS_TMZ is supported starting from drm_minor 40 */
-   if (info->drm_minor >= 40)
-      return false;
-
-   /* Find out ourselves if TMZ is enabled */
-   if (info->gfx_level < GFX9)
-      return false;
-
-   request.alloc_size = 256;
-   request.phys_alignment = 1024;
-   request.preferred_heap = AMDGPU_GEM_DOMAIN_VRAM;
-   request.flags = AMDGPU_GEM_CREATE_ENCRYPTED;
-   r = ac_drm_bo_alloc(dev, &request, &bo);
-   if (r)
-      return false;
-   ac_drm_bo_free(dev, bo);
-   return true;
 }
 
 static void set_custom_cu_en_mask(struct radeon_info *info)
@@ -597,12 +571,27 @@ bool ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       return false;
    }
 
+   info->userq_ip_mask = device_info.userq_ip_mask;
+
    for (unsigned ip_type = 0; ip_type < AMD_NUM_IP_TYPES; ip_type++) {
       struct drm_amdgpu_info_hw_ip ip_info = {0};
 
       r = ac_drm_query_hw_ip_info(dev, ip_type, 0, &ip_info);
-      if (r || !ip_info.available_rings)
+      if (r)
          continue;
+
+      if (ip_info.available_rings) {
+         info->ip[ip_type].num_queues = util_bitcount(ip_info.available_rings);
+         /* Kernel can set both available_rings and userq_ip_mask. Clear userq_ip_mask. */
+         info->userq_ip_mask &= ~BITFIELD_BIT(ip_type);
+      } else if (info->userq_ip_mask & BITFIELD_BIT(ip_type)) {
+         /* info[ip_type].num_queues variable is also used to describe if that ip_type is
+          * supported or not. Setting this variable to 1 for userqueues.
+          */
+         info->ip[ip_type].num_queues = 1;
+      } else {
+         continue;
+      }
 
       /* Gfx6-8 don't set ip_discovery_version. */
       if (info->drm_minor >= 48 && ip_info.ip_discovery_version) {
@@ -626,7 +615,6 @@ bool ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
                   device_info.family == FAMILY_MDN)
             info->ip[AMD_IP_GFX].ver_minor = info->ip[AMD_IP_COMPUTE].ver_minor = 3;
       }
-      info->ip[ip_type].num_queues = util_bitcount(ip_info.available_rings);
 
       /* query ip count */
       r = ac_drm_query_hw_ip_count(dev, ip_type, &num_instances);
@@ -1020,7 +1008,7 @@ bool ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
    info->has_sparse_vm_mappings = info->gfx_level >= GFX7;
    info->has_gang_submit = info->drm_minor >= 49;
    info->has_gpuvm_fault_query = info->drm_minor >= 55;
-   info->has_tmz_support = has_tmz_support(dev, info, device_info.ids_flags);
+   info->has_tmz_support = device_info.ids_flags & AMDGPU_IDS_FLAGS_TMZ;
    info->kernel_has_modifiers = has_modifiers(fd);
    info->uses_kernel_cu_mask = false; /* Not implemented in the kernel. */
    info->has_graphics = info->ip[AMD_IP_GFX].num_queues > 0;
@@ -1159,7 +1147,8 @@ bool ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
     * on GFX6. Some CLEAR_STATE cause asic hang on radeon kernel, etc.
     * SPI_VS_OUT_CONFIG. So only enable GFX7 CLEAR_STATE on amdgpu kernel.
     */
-   info->has_clear_state = info->gfx_level >= GFX7 && info->gfx_level < GFX12;
+   info->has_clear_state = info->gfx_level >= GFX7 && info->gfx_level < GFX12 &&
+                           !(info->userq_ip_mask & BITFIELD_BIT(AMD_IP_GFX));
 
    info->has_distributed_tess =
       info->gfx_level >= GFX10 || (info->gfx_level >= GFX8 && info->max_se >= 2);
@@ -1579,6 +1568,10 @@ bool ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
                                        info->has_dedicated_vram &&
                                        info->drm_minor >= 47;
 
+   /* Compute the scratch WAVESIZE granularity in bytes. */
+   info->scratch_wavesize_granularity_shift = info->gfx_level >= GFX11 ? 8 : 10;
+   info->scratch_wavesize_granularity = BITFIELD_BIT(info->scratch_wavesize_granularity_shift);
+
    /* The maximum number of scratch waves. The number is only a function of the number of CUs.
     * It should be large enough to hold at least 1 threadgroup. Use the minimum per-SA CU count.
     *
@@ -1651,7 +1644,21 @@ bool ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       unsigned num_prim_exports = 0, num_pos_exports = 0;
 
       if (info->gfx_level >= GFX12) {
-         info->attribute_ring_size_per_se = 1024 * 1024;
+         /* Navi48 results:
+          *
+          * Without NGG culling:
+          * - 1024 is the best for <=4 varyings, though longer GS waves may need more (see below).
+          * - 1400 is in between (a tiny bit slower for <=4 varyings, faster for >=6 varyings).
+          * - 1900 is the best for >=6 varyings because smaller sizes are throttled by not enough space.
+          *
+          * With NGG culling:
+          * - 1024 is the worst because NGG culling has longer GS waves, so it needs more space to
+          *   prevent getting throttled even if it doesn't end up using it. gs_alloc_req doesn't
+          *   deallocate the unused portion.
+          * - 1400 is the best for <=4 varyings.
+          * - 1900 is the best for >=6 varyings.
+          */
+         info->attribute_ring_size_per_se = 1400 * 1024;
          num_prim_exports = 16368; /* also includes gs_alloc_req */
          num_pos_exports = 16384;
       } else if (info->l3_cache_size_mb || info->family_overridden) {
@@ -1729,6 +1736,13 @@ bool ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
    /* GFX1013 is GFX10 plus ray tracing instructions */
    info->has_image_bvh_intersect_ray = info->gfx_level >= GFX10_3 ||
                                        info->family == CHIP_GFX1013;
+
+   if (info->gfx_level >= GFX12)
+      info->rt_ip_version = RT_3_1;
+   else if (info->gfx_level >= GFX11)
+      info->rt_ip_version = RT_2_0;
+   else if (info->has_image_bvh_intersect_ray)
+      info->rt_ip_version = RT_1_1;
 
    set_custom_cu_en_mask(info);
 
@@ -2514,11 +2528,46 @@ static uint16_t get_task_num_entries(enum radeon_family fam)
 void ac_get_task_info(const struct radeon_info *info,
                       struct ac_task_info *task_info)
 {
+   /* Size of each payload entry in the task payload ring.
+    * Spec requires minimum 16K bytes.
+    *
+    * Add 256B to make consecutive payloads start on different memory channels to increase memory
+    * performance. (each 256B region maps to a different memory channel)
+    *
+    * Navi48 improvement from adding 256B to the payload entry size:
+    * (using https://github.com/zeux/niagara/discussions/41 at commit 745700c)
+    *
+    *    With cluster culling (press K):
+    *               |FPS for 16K        |FPS for 16K+256    |
+    *    num_entries|(payload ring size)|(payload ring size)|diff for +256
+    *    -----------|-------------------|-------------------|-------------
+    *    1K         | 582 (16 MB)       | 582 (17 MB)       | +0%
+    *    2K         | 587 (32 MB)       | 591 (33 MB)       | +0.7%
+    *    4K         | 608 (64 MB)       | 611 (65 MB)       | +0.5%
+    *    8K         | 653 (128 MB)      | 660 (130 MB)      | +1.1%
+    *    16K        | 765 (256 MB)      | 789 (260 MB)      | +3.1%
+    *    32K        | 880 (512 MB)      | 984 (520 MB)      | +11.8%
+    *    64K        | 874 (1024 MB)     | 970 (1040 MB)     | +11%
+    *
+    *    Without cluster culling (don't press K):
+    *    num_entries|FPS for 16K        |FPS for 16K+256    |diff for +256
+    *    -----------|-------------------|-------------------|-------------
+    *    1K         | 578               | 578               | +0%
+    *    2K         | 578               | 578               | +0%
+    *    4K         | 574               | 578               | +0.7%
+    *    8K         | 573               | 578               | +0.9%
+    *    16K        | 565               | 579               | +2.4%
+    *    32K        | 550               | 574               | +4.3%
+    *    64K        | 550               | 574               | +4.3%
+    *    # Adding 256 mitigates the performance loss from increasing num_entries.
+    */
+   const uint32_t payload_entry_size = 16384 + 256;
    const uint16_t num_entries = get_task_num_entries(info->family);
    const uint32_t draw_ring_bytes = num_entries * AC_TASK_DRAW_ENTRY_BYTES;
-   const uint32_t payload_ring_bytes = num_entries * AC_TASK_PAYLOAD_ENTRY_BYTES;
+   const uint32_t payload_ring_bytes = num_entries * payload_entry_size;
 
    /* Ensure that the addresses of each ring are 256 byte aligned. */
+   task_info->payload_entry_size = payload_entry_size;
    task_info->num_entries = num_entries;
    task_info->draw_ring_offset = ALIGN(AC_TASK_CTRLBUF_BYTES, 256);
    task_info->payload_ring_offset = ALIGN(task_info->draw_ring_offset + draw_ring_bytes, 256);

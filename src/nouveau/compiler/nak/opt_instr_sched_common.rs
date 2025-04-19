@@ -96,6 +96,7 @@ pub fn side_effect_type(op: &Op) -> SideEffect {
         | Op::HSet2(_)
         | Op::HSetP2(_)
         | Op::HMnMx2(_)
+        | Op::FSwz(_)
         | Op::FSwzAdd(_) => SideEffect::None,
 
         // Multi-function unit
@@ -193,9 +194,12 @@ pub fn side_effect_type(op: &Op) -> SideEffect {
         Op::Out(_) | Op::OutFinal(_) => SideEffect::Barrier,
 
         // Miscellaneous ops
-        Op::Bar(_) | Op::CS2R(_) | Op::Isberd(_) | Op::Kill(_) | Op::S2R(_) => {
-            SideEffect::Barrier
-        }
+        Op::Bar(_)
+        | Op::TexDepBar(_)
+        | Op::CS2R(_)
+        | Op::Isberd(_)
+        | Op::Kill(_)
+        | Op::S2R(_) => SideEffect::Barrier,
         Op::PixLd(_) | Op::Nop(_) | Op::Vote(_) => SideEffect::None,
 
         // Virtual ops
@@ -282,6 +286,7 @@ pub fn estimate_variable_latency(sm: u8, op: &Op) -> u32 {
 
         // Miscellaneous ops
         Op::Bar(_)
+        | Op::TexDepBar(_)
         | Op::CS2R(_)
         | Op::Isberd(_)
         | Op::Kill(_)

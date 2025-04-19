@@ -978,8 +978,7 @@ amdgpu_cs_create(struct radeon_cmdbuf *rcs,
    if (!amdgpu_get_new_ib(ctx->aws, rcs, &acs->main_ib, acs))
       goto fail;
 
-   /* Currently only gfx, compute and sdma queues supports user queue. */
-   if (acs->aws->info.use_userq && ip_type <= AMD_IP_SDMA) {
+   if (acs->aws->info.userq_ip_mask & BITFIELD_BIT(acs->ip_type)) {
       if (!amdgpu_userq_init(acs->aws, &acs->aws->queues[acs->queue_index].userq, ip_type))
          goto fail;
    }
@@ -1202,7 +1201,8 @@ static void amdgpu_cs_add_fence_dependency(struct radeon_cmdbuf *rcs,
    util_queue_fence_wait(&fence->submitted);
 
    if (!fence->imported) {
-      if (!aws->info.use_userq || fence->ip_type != acs->ip_type || acs->ip_type > AMD_IP_SDMA) {
+      if (!(aws->info.userq_ip_mask & BITFIELD_BIT(acs->ip_type)) ||
+          fence->ip_type != acs->ip_type) {
          /* Ignore idle fences. This will only check the user fence in memory. */
          if (!amdgpu_fence_wait((struct pipe_fence_handle *)fence, 0, false)) {
             add_seq_no_to_list(acs->aws, &csc->seq_no_dependencies, fence->queue_index,
@@ -1495,6 +1495,7 @@ static int amdgpu_cs_submit_ib_userq(struct amdgpu_userq *userq,
 
    struct drm_amdgpu_userq_fence_info *fence_info;
    struct drm_amdgpu_userq_wait userq_wait_data = {
+      .waitq_id = userq->userq_handle,
       .syncobj_handles = (uintptr_t)syncobj_dependencies_list,
       .syncobj_timeline_handles = (uintptr_t)&syncobj_timeline_dependency,
       .syncobj_timeline_points = (uintptr_t)&syncobj_timeline_dependency_point,
@@ -1751,6 +1752,8 @@ static void amdgpu_cs_submit_ib(void *job, void *gdata, int thread_index)
     */
    unsigned num_shared_buf_write;
    unsigned num_shared_buf_read;
+   unsigned num_submit_real_buffers;
+
    /* Store write handles in the begining and read handles at the end in shared_buf_kms_handles.
     * If usage is read and write then store the handle in write list.
     */
@@ -1758,6 +1761,7 @@ static void amdgpu_cs_submit_ib(void *job, void *gdata, int thread_index)
    if (queue_type != USERQ) {
       bo_list = (struct drm_amdgpu_bo_list_entry *)
          alloca(num_real_buffers * sizeof(struct drm_amdgpu_bo_list_entry));
+      num_submit_real_buffers = 0;
    } else {
       num_shared_buf_write = 0;
       num_shared_buf_read = 0;
@@ -1777,7 +1781,8 @@ static void amdgpu_cs_submit_ib(void *job, void *gdata, int thread_index)
          amdgpu_set_bo_seq_no(queue_index, bo, next_seq_no);
 
       if (queue_type != USERQ) {
-         amdgpu_add_to_kernel_bo_list(&bo_list[i], bo, buffer->usage);
+         if (!get_real_bo(buffer->bo)->vm_always_valid)
+            amdgpu_add_to_kernel_bo_list(&bo_list[num_submit_real_buffers++], bo, buffer->usage);
       } else {
          vm_timeline_point = MAX2(vm_timeline_point, get_real_bo(bo)->vm_timeline_point);
 
@@ -1806,7 +1811,8 @@ static void amdgpu_cs_submit_ib(void *job, void *gdata, int thread_index)
          amdgpu_set_bo_seq_no(queue_index, bo, next_seq_no);
 
       if (queue_type != USERQ) {
-         amdgpu_add_to_kernel_bo_list(&bo_list[i], bo, buffer->usage);
+         if (!get_real_bo(buffer->bo)->vm_always_valid)
+            amdgpu_add_to_kernel_bo_list(&bo_list[num_submit_real_buffers++], bo, buffer->usage);
       } else {
          vm_timeline_point = MAX2(vm_timeline_point, get_real_bo(bo)->vm_timeline_point);
 
@@ -1829,7 +1835,8 @@ static void amdgpu_cs_submit_ib(void *job, void *gdata, int thread_index)
       struct amdgpu_cs_buffer *buffer = &real_buffers[i];
 
       if (queue_type != USERQ) {
-         amdgpu_add_to_kernel_bo_list(&bo_list[i], buffer->bo, buffer->usage);
+         if (!get_real_bo(buffer->bo)->vm_always_valid)
+            amdgpu_add_to_kernel_bo_list(&bo_list[num_submit_real_buffers++], buffer->bo, buffer->usage);
       } else {
          if (!get_real_bo(buffer->bo)->is_shared)
             continue;
@@ -1908,11 +1915,13 @@ static void amdgpu_cs_submit_ib(void *job, void *gdata, int thread_index)
       if (queue_type != USERQ) {
          bo_list = (struct drm_amdgpu_bo_list_entry *)
                    alloca(aws->num_buffers * sizeof(struct drm_amdgpu_bo_list_entry));
-         num_real_buffers = 0;
+         num_submit_real_buffers = 0;
          list_for_each_entry(struct amdgpu_bo_real, bo, &aws->global_bo_list, global_list_item) {
-            bo_list[num_real_buffers].bo_handle = bo->kms_handle;
-            bo_list[num_real_buffers].bo_priority = 0;
-            ++num_real_buffers;
+            if (!bo->vm_always_valid) {
+               bo_list[num_submit_real_buffers].bo_handle = bo->kms_handle;
+               bo_list[num_submit_real_buffers].bo_priority = 0;
+               ++num_submit_real_buffers;
+            }
          }
       } else {
          shared_buf_kms_handles = (uint32_t*)alloca(aws->num_buffers * sizeof(uint32_t));
@@ -1927,8 +1936,8 @@ static void amdgpu_cs_submit_ib(void *job, void *gdata, int thread_index)
    }
 #endif
 
-   if (acs->ip_type == AMD_IP_GFX)
-      aws->gfx_bo_list_counter += num_real_buffers;
+   if (acs->ip_type == AMD_IP_GFX && queue_type != USERQ)
+      aws->gfx_bo_list_counter += num_submit_real_buffers;
 
    if (out_of_memory) {
       r = -ENOMEM;
@@ -1951,7 +1960,7 @@ static void amdgpu_cs_submit_ib(void *job, void *gdata, int thread_index)
             if (r == -ENOMEM)
                os_time_sleep(1000);
 
-            r = amdgpu_cs_submit_ib_kernelq(acs, num_real_buffers, bo_list, &seq_no);
+            r = amdgpu_cs_submit_ib_kernelq(acs, num_submit_real_buffers, bo_list, &seq_no);
          } while (r == -ENOMEM);
 
          if (!r) {
@@ -2154,8 +2163,7 @@ static int amdgpu_cs_flush(struct radeon_cmdbuf *rcs,
       csc_current = amdgpu_csc_get_current(acs);
       struct amdgpu_cs_context *csc_submitted = amdgpu_csc_get_submitted(acs);
 
-      /* only gfx, compute and sdma queues are supported in userqueues. */
-      if (aws->info.use_userq && acs->ip_type <= AMD_IP_SDMA) {
+      if (aws->info.userq_ip_mask & BITFIELD_BIT(acs->ip_type)) {
          util_queue_add_job(&aws->cs_queue, acs, &acs->flush_completed,
                             amdgpu_cs_submit_ib<USERQ>, NULL, 0);
       } else {

@@ -24,7 +24,7 @@ set -x
 # - the GL release produces `glcts`, and
 # - the GLES release produces `deqp-gles*` and `deqp-egl`
 
-DEQP_MAIN_COMMIT=ba86fb95004331f2cf571dd9adefe2458290ee11
+DEQP_MAIN_COMMIT=76c1572eaba42d7ddd9bb8eb5788e52dd932068e
 DEQP_VK_VERSION=1.4.1.1
 DEQP_GL_VERSION=4.6.5.0
 DEQP_GLES_VERSION=3.2.11.0
@@ -168,6 +168,14 @@ done
 # always goes through ssh or https.
 python3 external/fetch_sources.py --insecure
 
+case "${DEQP_API}" in
+  VK-main)
+    # Video tests rely on external files
+    python3 external/fetch_video_decode_samples.py
+    python3 external/fetch_video_encode_samples.py
+    ;;
+esac
+
 if [[ "$DEQP_API" = tools ]]; then
   # Save the testlog stylesheets:
   cp doc/testlog-stylesheet/testlog.{css,xsl} /deqp-$deqp_api
@@ -281,7 +289,7 @@ if [ "$DEQP_API" != tools ]; then
 
     # Compress the caselists, since Vulkan's in particular are gigantic; higher
     # compression levels provide no real measurable benefit.
-    zstd -1 --rm mustpass/*.txt
+    zstd -f -1 --rm mustpass/*.txt
 fi
 
 if [ "$DEQP_API" = tools ]; then

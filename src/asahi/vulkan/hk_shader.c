@@ -582,8 +582,11 @@ lower_min_lod(nir_builder *b, nir_tex_instr *tex, UNUSED void *_data)
       assert(other_min_lod == NULL && "txl doesn't have an API min lod");
 
       nir_def *lod = nir_steal_tex_src(tex, nir_tex_src_lod);
-      lod = lod ? nir_fmax(b, lod, min_lod) : min_lod;
-      nir_tex_instr_add_src(tex, nir_tex_src_lod, lod);
+      if (lod) {
+         min_lod = nir_fmax(b, nir_f2fN(b, lod, min_lod->bit_size), min_lod);
+      }
+
+      nir_tex_instr_add_src(tex, nir_tex_src_lod, min_lod);
    } else {
       if (other_min_lod) {
          assert(!int_coords && "no API min lod");
@@ -710,7 +713,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_robust_access, should_lower_robust, NULL);
 
    /* We must do early lowering before hk_nir_lower_descriptors, since this will
-    * create lod_bias_agx instructions.
+    * create lod_bias instructions.
     */
    NIR_PASS(_, nir, agx_nir_lower_texture_early, true /* support_lod_bias */);
 
@@ -747,16 +750,10 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
             lower_load_global_constant_offset_instr, nir_metadata_none,
             &soft_fault);
 
-   if (!nir->info.shared_memory_explicit_layout) {
-      /* There may be garbage in shared_size, but it's the job of
-       * nir_lower_vars_to_explicit_types to allocate it. We have to reset to
-       * avoid overallocation.
-       */
-      nir->info.shared_size = 0;
+   assert(nir->info.shared_size == 0);
 
-      NIR_PASS(_, nir, nir_lower_vars_to_explicit_types, nir_var_mem_shared,
-               shared_var_info);
-   }
+   NIR_PASS(_, nir, nir_lower_vars_to_explicit_types, nir_var_mem_shared,
+            shared_var_info);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_shared,
             nir_address_format_32bit_offset);
 

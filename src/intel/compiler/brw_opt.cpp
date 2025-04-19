@@ -196,12 +196,15 @@ brw_optimize(brw_shader &s)
 
    OPT(brw_lower_uniform_pull_constant_loads);
 
+   /* Do this before brw_lower_send_descriptors. */
+   OPT(brw_workaround_memory_fence_before_eot);
+
    if (OPT(brw_lower_send_descriptors)) {
       /* No need for standard copy_propagation since
        * brw_opt_address_reg_load will only optimize defs.
        */
-      if (OPT(brw_opt_copy_propagation_defs))
-         OPT(brw_opt_algebraic);
+      OPT(brw_opt_copy_propagation_defs);
+      OPT(brw_opt_algebraic);
       OPT(brw_opt_address_reg_load);
       OPT(brw_opt_dead_code_eliminate);
    }

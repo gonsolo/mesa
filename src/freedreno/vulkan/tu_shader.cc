@@ -310,23 +310,6 @@ lower_ssbo_ubo_intrinsic(struct tu_device *dev,
       }
    }
 
-   /* Descriptor index has to be adjusted in the following cases:
-    *  - isam loads, when the 16-bit descriptor cannot also be used for 32-bit
-    *    loads -- next-index descriptor will be able to do that;
-    *  - 8-bit SSBO loads and stores -- next-index descriptor is dedicated to
-    *    storage accesses of that size.
-    */
-   if ((dev->physical_device->info->a6xx.storage_16bit &&
-        !dev->physical_device->info->a6xx.has_isam_v &&
-        intrin->intrinsic == nir_intrinsic_load_ssbo &&
-        (nir_intrinsic_access(intrin) & ACCESS_CAN_REORDER) &&
-        intrin->def.bit_size > 16) ||
-       (dev->physical_device->info->a7xx.storage_8bit &&
-        ((intrin->intrinsic == nir_intrinsic_load_ssbo && intrin->def.bit_size == 8) ||
-         (intrin->intrinsic == nir_intrinsic_store_ssbo && intrin->src[0].ssa->bit_size == 8)))) {
-      descriptor_idx = nir_iadd_imm(b, descriptor_idx, 1);
-   }
-
    nir_def *results[MAX_SETS] = { NULL };
 
    if (nir_scalar_is_const(scalar_idx)) {
@@ -760,7 +743,7 @@ lower_inline_ubo(nir_builder *b, nir_intrinsic_instr *intrin, void *cb_data)
       val = nir_load_global_ir3(b, intrin->num_components,
                                 intrin->def.bit_size,
                                 base_addr, nir_ishr_imm(b, offset, 2),
-                                .access = 
+                                .access =
                                  (enum gl_access_qualifier)(
                                     (enum gl_access_qualifier)(ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER) |
                                     ACCESS_CAN_SPECULATE),
@@ -1097,6 +1080,62 @@ tu_nir_lower_fdm(nir_shader *shader, const struct lower_fdm_options *options)
 {
    return nir_shader_lower_instructions(shader, lower_fdm_filter,
                                         lower_fdm_instr, (void *)options);
+}
+
+static bool
+lower_ssbo_descriptor_instr(nir_builder *b, nir_intrinsic_instr *intrin,
+                            void *cb_data)
+{
+   struct tu_device *dev = (struct tu_device *)cb_data;
+
+   /* Descriptor index has to be adjusted in the following cases:
+    *  - isam loads, when the 16-bit descriptor cannot also be used for 32-bit
+    *    loads -- next-index descriptor will be able to do that;
+    *  - 8-bit SSBO loads and stores -- next-index descriptor is dedicated to
+    *    storage accesses of that size.
+    */
+   if ((dev->physical_device->info->a6xx.storage_16bit &&
+        !dev->physical_device->info->a6xx.has_isam_v &&
+        intrin->intrinsic == nir_intrinsic_load_ssbo &&
+        (nir_intrinsic_access(intrin) & ACCESS_CAN_REORDER) &&
+        intrin->def.bit_size > 16) ||
+       (dev->physical_device->info->a7xx.storage_8bit &&
+        ((intrin->intrinsic == nir_intrinsic_load_ssbo && intrin->def.bit_size == 8) ||
+         (intrin->intrinsic == nir_intrinsic_store_ssbo && intrin->src[0].ssa->bit_size == 8)))) {
+      unsigned buffer_src;
+      if (intrin->intrinsic == nir_intrinsic_store_ssbo) {
+         /* This has the value first */
+         buffer_src = 1;
+      } else {
+         buffer_src = 0;
+      }
+
+      b->cursor = nir_before_instr(&intrin->instr);
+      nir_def *buffer = intrin->src[buffer_src].ssa;
+      assert(buffer->parent_instr->type == nir_instr_type_intrinsic);
+      nir_intrinsic_instr *bindless =
+         nir_instr_as_intrinsic(buffer->parent_instr);
+      assert(bindless->intrinsic == nir_intrinsic_bindless_resource_ir3);
+      nir_def *descriptor_idx = bindless->src[0].ssa;
+      descriptor_idx = nir_iadd_imm(b, descriptor_idx, 1);
+      nir_def *new_buffer =
+         nir_bindless_resource_ir3(b, 32, descriptor_idx,
+                                   .desc_set = nir_intrinsic_desc_set(bindless));
+      nir_src_rewrite(&intrin->src[buffer_src], new_buffer);
+
+      return true;
+   }
+
+   return false;
+}
+
+static bool
+tu_nir_lower_ssbo_descriptor(nir_shader *shader,
+                             struct tu_device *dev)
+{
+   return nir_shader_intrinsics_pass(shader, lower_ssbo_descriptor_instr,
+                                     nir_metadata_control_flow,
+                                     (void *)dev);
 }
 
 static void
@@ -1546,7 +1585,7 @@ tu6_emit_cs_config(struct tu_cs *cs,
       tu_cs_emit_regs(
          cs, HLSQ_CS_CNTL_1(CHIP,
                    .linearlocalidregid = regid(63, 0), .threadsize = thrsz_cs,
-                   .workgrouprastorderzfirsten = true, 
+                   .workgrouprastorderzfirsten = true,
                    .wgtilewidth = 4, .wgtileheight = tile_height));
 
       tu_cs_emit_regs(cs, HLSQ_FS_CNTL_0(CHIP, .threadsize = THREAD64));
@@ -1646,9 +1685,9 @@ tu6_emit_fs_inputs(struct tu_cs *cs, const struct ir3_shader_variant *fs)
       ij_regid[i] = ir3_find_sysval_regid(fs, SYSTEM_VALUE_BARYCENTRIC_PERSP_PIXEL + i);
 
    if (fs->num_sampler_prefetch > 0) {
-      /* It seems like ij_pix is *required* to be r0.x */
-      assert(!VALIDREG(ij_regid[IJ_PERSP_PIXEL]) ||
-             ij_regid[IJ_PERSP_PIXEL] == regid(0, 0));
+      /* FS prefetch reads coordinates from r0.x */
+      assert(!VALIDREG(ij_regid[fs->prefetch_bary_type]) ||
+             ij_regid[fs->prefetch_bary_type] == regid(0, 0));
    }
 
    tu_cs_emit_pkt4(cs, REG_A6XX_SP_FS_PREFETCH_CNTL, 1 + fs->num_sampler_prefetch);
@@ -2548,10 +2587,8 @@ tu_shader_create(struct tu_device *dev,
             nir_address_format_64bit_global);
 
    if (nir->info.stage == MESA_SHADER_COMPUTE) {
-      if (!nir->info.shared_memory_explicit_layout) {
-         NIR_PASS(_, nir, nir_lower_vars_to_explicit_types,
-                  nir_var_mem_shared, shared_type_info);
-      }
+      NIR_PASS(_, nir, nir_lower_vars_to_explicit_types,
+               nir_var_mem_shared, shared_type_info);
       NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_shared,
                nir_address_format_32bit_offset);
 
@@ -2619,6 +2656,11 @@ tu_shader_create(struct tu_device *dev,
    init_ir3_nir_options(&nir_options, key);
 
    ir3_finalize_nir(dev->compiler, &nir_options, nir);
+
+   /* This has to happen after finalizing, so that we know the final bitsize
+    * after vectorizing.
+    */
+   NIR_PASS(_, nir, tu_nir_lower_ssbo_descriptor, dev);
 
    const struct ir3_shader_options options = {
       .api_wavesize = key->api_wavesize,

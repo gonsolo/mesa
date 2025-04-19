@@ -27,8 +27,9 @@ bool ir3_nir_lower_push_consts_to_preamble(nir_shader *nir,
 bool ir3_nir_lower_driver_params_to_ubo(nir_shader *nir,
                                         struct ir3_shader_variant *v);
 bool ir3_nir_move_varying_inputs(nir_shader *shader);
-int ir3_nir_coord_offset(nir_def *ssa);
-bool ir3_nir_lower_tex_prefetch(nir_shader *shader);
+int ir3_nir_coord_offset(nir_def *ssa, gl_system_value *bary_type);
+bool ir3_nir_lower_tex_prefetch(nir_shader *shader,
+                                enum ir3_bary *prefetch_bary_type);
 bool ir3_nir_lower_layer_id(nir_shader *shader);
 bool ir3_nir_lower_frag_shading_rate(nir_shader *shader);
 bool ir3_nir_lower_primitive_shading_rate(nir_shader *shader);
@@ -195,6 +196,13 @@ is_intrinsic_load(nir_intrinsic_op op)
 }
 
 uint32_t ir3_nir_max_imm_offset(nir_intrinsic_instr *intrin, const void *data);
+
+/* TODO: make this a common NIR helper?
+ * there is a nir_system_value_from_intrinsic but it takes nir_intrinsic_op so
+ * it can't be extended to work with this
+ */
+gl_system_value
+ir3_nir_intrinsic_barycentric_sysval(nir_intrinsic_instr *intr);
 
 ENDC;
 

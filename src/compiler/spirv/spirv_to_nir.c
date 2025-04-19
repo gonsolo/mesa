@@ -38,6 +38,7 @@
 #include "util/u_math.h"
 #include "util/u_string.h"
 #include "util/u_debug.h"
+#include "util/u_printf.h"
 #include "util/mesa-blake3.h"
 
 #include <stdio.h>
@@ -804,6 +805,67 @@ vtn_foreach_instruction(struct vtn_builder *b, const uint32_t *start,
 }
 
 static bool
+vtn_handle_debug_printf(struct vtn_builder *b, SpvOp ext_opcode,
+                        const uint32_t *w, unsigned count)
+{
+   vtn_assert(ext_opcode == 1);
+
+   struct vtn_value *format = vtn_value(b, w[5], vtn_value_type_string);
+
+   b->shader->printf_info_count++;
+   b->shader->printf_info = reralloc(b->shader,
+                                     b->shader->printf_info,
+                                     u_printf_info,
+                                     b->shader->printf_info_count);
+
+   u_printf_info *info =
+      &b->shader->printf_info[b->shader->printf_info_count - 1];
+
+   uint32_t argc = count - 6;
+   *info = (u_printf_info) {
+      .arg_sizes = ralloc_array(b->shader, unsigned, argc),
+      .num_args = argc,
+      .strings = ralloc_strdup(b->shader, format->str),
+      .string_size = strlen(format->str) + 1,
+   };
+
+   uint32_t info_index = b->shader->printf_info_count - 1;
+
+   if (argc) {
+      glsl_struct_field *fields = calloc(argc, sizeof(glsl_struct_field));
+      for (uint32_t i = 0; i < argc; i++) {
+         struct vtn_ssa_value *arg = vtn_ssa_value(b, w[6 + i]);
+
+         fields[i].type = glsl_intN_t_type(arg->def->bit_size);
+         if (arg->def->num_components > 1)
+            fields[i].type = glsl_vector_type(fields[i].type->base_type, arg->def->num_components);
+
+         fields[i].name = "";
+
+         info->arg_sizes[i] = arg->def->bit_size / 8;
+      }
+
+      nir_variable *packed_args = nir_local_variable_create(
+         b->nb.impl, glsl_struct_type(fields, argc, "packed_args", false), "packed_args");
+      nir_deref_instr *var_deref = nir_build_deref_var(&b->nb, packed_args);
+      for (uint32_t i = 0; i < argc; i++) {
+         struct vtn_ssa_value *arg = vtn_ssa_value(b, w[6 + i]);
+         nir_deref_instr *arg_deref = nir_build_deref_struct(&b->nb, var_deref, i);
+         nir_store_deref(&b->nb, arg_deref, arg->def, BITFIELD_MASK(NIR_MAX_VEC_COMPONENTS));
+      }
+
+      nir_printf(&b->nb, &var_deref->def, .fmt_idx = info_index);
+
+      free(fields);
+   } else {
+      nir_printf(&b->nb, nir_undef(&b->nb, 1, 32), .fmt_idx = info_index);
+   }
+
+   /* Do nothing. */
+   return true;
+}
+
+static bool
 vtn_handle_non_semantic_instruction(struct vtn_builder *b, SpvOp ext_opcode,
                                     const uint32_t *w, unsigned count)
 {
@@ -873,6 +935,9 @@ vtn_handle_extension(struct vtn_builder *b, SpvOp opcode,
       } else if ((strcmp(ext, "NonSemantic.Shader.DebugInfo.100") == 0)
                 && (b->options && b->options->debug_info)) {
          val->ext_handler = vtn_handle_non_semantic_debug_info;
+      } else if (strcmp(ext, "NonSemantic.DebugPrintf") == 0
+                && (b->options && b->options->printf)) {
+         val->ext_handler = vtn_handle_debug_printf;
       } else if (strstr(ext, "NonSemantic.") == ext) {
          val->ext_handler = vtn_handle_non_semantic_instruction;
       } else {
@@ -3317,11 +3382,13 @@ vtn_handle_texture(struct vtn_builder *b, SpvOp opcode,
    case nir_texop_tex_prefetch:
       vtn_fail("unexpected nir_texop_tex_prefetch");
       break;
+   case nir_texop_lod_bias:
+      vtn_fail("unexpected nir_texop_lod_bias");
+      break;
    case nir_texop_descriptor_amd:
    case nir_texop_sampler_descriptor_amd:
       vtn_fail("unexpected nir_texop_*descriptor_amd");
       break;
-   case nir_texop_lod_bias_agx:
    case nir_texop_image_min_lod_agx:
    case nir_texop_custom_border_color_agx:
    case nir_texop_has_custom_border_color_agx:
@@ -7121,26 +7188,6 @@ spirv_to_nir(const uint32_t *words, size_t word_count,
     * validator a bit of heartburn.  Run dead code to get rid of them.
     */
    nir_opt_dce(b->shader);
-
-   /* Per SPV_KHR_workgroup_storage_explicit_layout, if one shared variable is
-    * a Block, all of them will be and Blocks are explicitly laid out.
-    */
-   nir_foreach_variable_with_modes(var, b->shader, nir_var_mem_shared) {
-      if (glsl_type_is_interface(var->type)) {
-         assert(b->supported_capabilities.WorkgroupMemoryExplicitLayoutKHR);
-         b->shader->info.shared_memory_explicit_layout = true;
-         break;
-      }
-   }
-   if (b->shader->info.shared_memory_explicit_layout) {
-      unsigned size = 0;
-      nir_foreach_variable_with_modes(var, b->shader, nir_var_mem_shared) {
-         assert(glsl_type_is_interface(var->type));
-         const bool align_to_stride = false;
-         size = MAX2(size, glsl_get_explicit_size(var->type, align_to_stride));
-      }
-      b->shader->info.shared_size = size;
-   }
 
    if (stage == MESA_SHADER_FRAGMENT) {
       /* From the Vulkan 1.2.199 spec:

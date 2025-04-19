@@ -231,11 +231,12 @@ pub trait LegalizeBuildHelpers: SSABuilder {
     fn copy_alu_src_and_lower_fmod(
         &mut self,
         src: &mut Src,
+        reg_file: RegFile,
         src_type: SrcType,
     ) {
         match src_type {
             SrcType::F16 | SrcType::F16v2 => {
-                let val = self.alloc_ssa(RegFile::GPR, 1);
+                let val = self.alloc_ssa(reg_file, 1);
                 self.push_op(OpHAdd2 {
                     dst: val.into(),
                     srcs: [Src::new_zero().fneg(), *src],
@@ -246,7 +247,7 @@ pub trait LegalizeBuildHelpers: SSABuilder {
                 *src = val.into();
             }
             SrcType::F32 => {
-                let val = self.alloc_ssa(RegFile::GPR, 1);
+                let val = self.alloc_ssa(reg_file, 1);
                 self.push_op(OpFAdd {
                     dst: val.into(),
                     srcs: [Src::new_zero().fneg(), *src],
@@ -257,7 +258,7 @@ pub trait LegalizeBuildHelpers: SSABuilder {
                 *src = val.into();
             }
             SrcType::F64 => {
-                let val = self.alloc_ssa(RegFile::GPR, 2);
+                let val = self.alloc_ssa(reg_file, 2);
                 self.push_op(OpDAdd {
                     dst: val.into(),
                     srcs: [Src::new_zero().fneg(), *src],
@@ -266,6 +267,63 @@ pub trait LegalizeBuildHelpers: SSABuilder {
                 *src = val.into();
             }
             _ => panic!("Invalid ffabs srouce type"),
+        }
+    }
+
+    fn copy_alu_src_and_lower_ineg(
+        &mut self,
+        src: &mut Src,
+        reg_file: RegFile,
+        src_type: SrcType,
+    ) {
+        assert!(src_type == SrcType::I32);
+        let val = self.alloc_ssa(reg_file, 1);
+        if self.sm() >= 70 {
+            self.push_op(OpIAdd3 {
+                srcs: [Src::new_zero(), *src, Src::new_zero()],
+                overflow: [Dst::None; 2],
+                dst: val.into(),
+            });
+        } else {
+            self.push_op(OpIAdd2 {
+                dst: val.into(),
+                carry_out: Dst::None,
+                srcs: [Src::new_zero(), *src],
+            });
+        }
+        *src = val.into();
+    }
+
+    fn copy_alu_src_if_fabs(
+        &mut self,
+        src: &mut Src,
+        reg_file: RegFile,
+        src_type: SrcType,
+    ) {
+        if src.src_mod.has_fabs() {
+            self.copy_alu_src_and_lower_fmod(src, reg_file, src_type);
+        }
+    }
+
+    fn copy_alu_src_if_i20_overflow(
+        &mut self,
+        src: &mut Src,
+        reg_file: RegFile,
+        src_type: SrcType,
+    ) {
+        if src.as_imm_not_i20().is_some() {
+            self.copy_alu_src(src, reg_file, src_type);
+        }
+    }
+
+    fn copy_alu_src_if_f20_overflow(
+        &mut self,
+        src: &mut Src,
+        reg_file: RegFile,
+        src_type: SrcType,
+    ) {
+        if src.as_imm_not_f20().is_some() {
+            self.copy_alu_src(src, reg_file, src_type);
         }
     }
 

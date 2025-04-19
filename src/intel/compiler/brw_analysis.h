@@ -232,6 +232,79 @@ private:
    bblock_t **parents;
 };
 
+struct brw_range {
+   int start;
+   int end;
+
+   /* If range not empty, this is the last value inside the range. */
+   inline int last() const
+   {
+      return end - 1;
+   }
+
+   inline bool is_empty() const
+   {
+      return end <= start;
+   }
+
+   inline int len() const
+   {
+      return end - start;
+   }
+
+   inline bool contains(int x) const
+   {
+      return start <= x && x < end;
+   }
+
+   inline bool contains(brw_range r) const
+   {
+      return start <= r.start && r.end <= end;
+   }
+};
+
+inline brw_range
+merge(brw_range a, brw_range b)
+{
+   if (a.is_empty())
+      return b;
+   if (b.is_empty())
+      return a;
+   return { MIN2(a.start, b.start), MAX2(a.end, b.end) };
+}
+
+inline brw_range
+merge(brw_range r, int x)
+{
+   if (r.is_empty())
+      return { x, x + 1 };
+   return { MIN2(r.start, x), MAX2(r.end, x + 1) };
+}
+
+inline bool
+overlaps(brw_range a, brw_range b)
+{
+   return a.start < b.end &&
+          b.start < a.end;
+}
+
+inline brw_range
+intersect(brw_range a, brw_range b)
+{
+   if (overlaps(a, b))
+      return { MAX2(a.start, b.start),
+               MIN2(a.end, b.end) };
+   else
+      return { 0, 0 };
+}
+
+inline brw_range
+clip_end(brw_range r, int n)
+{
+   assert(n >= 0);
+   return { r.start, r.end - n };
+}
+
 struct brw_ip_ranges {
    brw_ip_ranges(const brw_shader *s);
    ~brw_ip_ranges();
@@ -245,18 +318,9 @@ struct brw_ip_ranges {
              BRW_DEPENDENCY_BLOCKS;
    }
 
-   int
-   start(const bblock_t *block) const
-   {
-      assert(block->num < num_blocks);
-      return start_ip[block->num];
-   }
-
-   int
-   end(const bblock_t *block) const
-   {
-      assert(block->num < num_blocks);
-      return start_ip[block->num] + block->num_instructions - 1;
+   brw_range range(const bblock_t *block) const {
+      int start = start_ip[block->num];
+      return { start, start + (int)block->num_instructions };
    }
 
 private:
@@ -375,8 +439,7 @@ public:
       BITSET_WORD flag_livein[1];
       BITSET_WORD flag_liveout[1];
 
-      int start_ip;
-      int end_ip;
+      brw_range ip_range;
    };
 
    brw_live_variables(const brw_shader *s);
@@ -414,19 +477,19 @@ public:
    int num_vgrfs;
    int bitset_words;
 
+   unsigned max_vgrf_size;
+
    /** @{
     * Final computed live ranges for each var (each component of each virtual
     * GRF).
     */
-   int *start;
-   int *end;
+   brw_range *vars_range;
    /** @} */
 
    /** @{
     * Final computed live ranges for each VGRF.
     */
-   int *vgrf_start;
-   int *vgrf_end;
+   brw_range *vgrf_range;
    /** @} */
 
    /** Per-basic-block information on live variables */

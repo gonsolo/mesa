@@ -14,7 +14,6 @@ class LogSectionType(Enum):
     LAVA_QUEUE = auto()
     LAVA_DEPLOY = auto()
     LAVA_BOOT = auto()
-    TEST_DUT_SUITE = auto()
     TEST_SUITE = auto()
     TEST_CASE = auto()
     LAVA_POST_PROCESSING = auto()
@@ -44,12 +43,9 @@ LAVA_BOOT_TIMEOUT = int(getenv("LAVA_BOOT_TIMEOUT", 5))
 # including LAVA scheduling and boot duration
 LAVA_TEST_OVERHEAD_MIN = 5
 
-# Test DUT suite phase is where the initialization happens in DUT, not on docker.
-# The device will be listening to SSH session until the end of the job.
-LAVA_TEST_DUT_SUITE_TIMEOUT = int(getenv("CI_JOB_TIMEOUT")) // 60 - LAVA_TEST_OVERHEAD_MIN
-
-# Test suite phase is where the initialization happens on docker.
-LAVA_TEST_SUITE_TIMEOUT = int(getenv("LAVA_TEST_SUITE_TIMEOUT", 5))
+# Test suite phase is where initialization occurs on both the DUT and the Docker container.
+# The device will be listening to the SSH session until the end of the job.
+LAVA_TEST_SUITE_TIMEOUT = int(getenv("CI_JOB_TIMEOUT")) // 60 - LAVA_TEST_OVERHEAD_MIN
 
 # Test cases may take a long time, this script has no right to interrupt
 # them. But if the test case takes almost 1h, it will never succeed due to
@@ -66,7 +62,6 @@ DEFAULT_GITLAB_SECTION_TIMEOUTS = {
     LogSectionType.LAVA_QUEUE: timedelta(minutes=LAVA_QUEUE_TIMEOUT),
     LogSectionType.LAVA_DEPLOY: timedelta(minutes=LAVA_DEPLOY_TIMEOUT),
     LogSectionType.LAVA_BOOT: timedelta(minutes=LAVA_BOOT_TIMEOUT),
-    LogSectionType.TEST_DUT_SUITE: timedelta(minutes=LAVA_TEST_DUT_SUITE_TIMEOUT),
     LogSectionType.TEST_SUITE: timedelta(minutes=LAVA_TEST_SUITE_TIMEOUT),
     LogSectionType.TEST_CASE: timedelta(minutes=LAVA_TEST_CASE_TIMEOUT),
     LogSectionType.LAVA_POST_PROCESSING: timedelta(
@@ -95,10 +90,9 @@ class LogSection:
             section_id = self.section_id.format(*match.groups())
             section_header = self.section_header.format(*match.groups())
             is_main_test_case = section_id == main_test_case
-            timeout = DEFAULT_GITLAB_SECTION_TIMEOUTS[self.section_type]
             return GitlabSection(
                 id=section_id,
-                header=f"{section_header} - Timeout: {timeout}",
+                header=section_header,
                 type=self.section_type,
                 start_collapsed=self.collapsed,
                 suppress_start=is_main_test_case,
@@ -122,27 +116,22 @@ LOG_SECTIONS = (
         section_id="{}",
         section_header="test_case {}",
         section_type=LogSectionType.TEST_CASE,
+        collapsed=True,
     ),
     LogSection(
         regex=re.compile(r"<?STARTRUN>? ([^>]*ssh.*server.*)"),
         levels=("debug"),
         section_id="{}",
-        section_header="[dut] test_suite {}",
-        section_type=LogSectionType.TEST_DUT_SUITE,
-    ),
-    LogSection(
-        regex=re.compile(r"<?STARTRUN>? ([^>]*)"),
-        levels=("debug"),
-        section_id="{}",
-        section_header="[docker] test_suite {}",
+        section_header="Setting up hardware device for remote control",
         section_type=LogSectionType.TEST_SUITE,
+        collapsed=True,
     ),
     LogSection(
         regex=re.compile(r"ENDTC>? ([^>]+)"),
         levels=("target", "debug"),
         section_id="post-{}",
         section_header="Post test_case {}",
-        collapsed=True,
         section_type=LogSectionType.LAVA_POST_PROCESSING,
+        collapsed=True,
     ),
 )

@@ -1348,41 +1348,6 @@ emit_intrinsic_load_ubo(struct ir3_context *ctx, nir_intrinsic_instr *intr,
    }
 }
 
-/* Load a kernel param: src[] = { address }. */
-static void
-emit_intrinsic_load_kernel_input(struct ir3_context *ctx,
-                                 nir_intrinsic_instr *intr,
-                                 struct ir3_instruction **dst)
-{
-   const struct ir3_const_state *const_state = ir3_const_state(ctx->so);
-   struct ir3_builder *b = &ctx->build;
-   unsigned offset = nir_intrinsic_base(intr);
-   unsigned p = ir3_const_reg(const_state, IR3_CONST_ALLOC_KERNEL_PARAMS, 0);
-
-   struct ir3_instruction *src0 = ir3_get_src(ctx, &intr->src[0])[0];
-
-   if (is_same_type_mov(src0) && (src0->srcs[0]->flags & IR3_REG_IMMED)) {
-      offset += src0->srcs[0]->iim_val;
-
-      /* kernel param position is in bytes, but constant space is 32b registers: */
-      compile_assert(ctx, !(offset & 0x3));
-
-      dst[0] = create_uniform(b, p + (offset / 4));
-   } else {
-      /* kernel param position is in bytes, but constant space is 32b registers: */
-      compile_assert(ctx, !(offset & 0x3));
-
-      /* TODO we should probably be lowering this in nir, and also handling
-       * non-32b inputs.. Also we probably don't want to be using
-       * SP_MODE_CONTROL.CONSTANT_DEMOTION_ENABLE for KERNEL shaders..
-       */
-      src0 = ir3_SHR_B(b, src0, 0, create_immed(b, 2), 0);
-
-      dst[0] = create_uniform_indirect(b, offset / 4, TYPE_U32,
-                                       ir3_get_addr0(ctx, src0, 1));
-   }
-}
-
 /* src[] = { block_index } */
 static void
 emit_intrinsic_ssbo_size(struct ir3_context *ctx, nir_intrinsic_instr *intr,
@@ -2251,47 +2216,11 @@ get_barycentric(struct ir3_context *ctx, enum ir3_bary bary)
    return ctx->ij[bary];
 }
 
-/* TODO: make this a common NIR helper?
- * there is a nir_system_value_from_intrinsic but it takes nir_intrinsic_op so
- * it can't be extended to work with this
- */
-static gl_system_value
-nir_intrinsic_barycentric_sysval(nir_intrinsic_instr *intr)
-{
-   enum glsl_interp_mode interp_mode = nir_intrinsic_interp_mode(intr);
-   gl_system_value sysval;
-
-   switch (intr->intrinsic) {
-   case nir_intrinsic_load_barycentric_pixel:
-      if (interp_mode == INTERP_MODE_NOPERSPECTIVE)
-         sysval = SYSTEM_VALUE_BARYCENTRIC_LINEAR_PIXEL;
-      else
-         sysval = SYSTEM_VALUE_BARYCENTRIC_PERSP_PIXEL;
-      break;
-   case nir_intrinsic_load_barycentric_centroid:
-      if (interp_mode == INTERP_MODE_NOPERSPECTIVE)
-         sysval = SYSTEM_VALUE_BARYCENTRIC_LINEAR_CENTROID;
-      else
-         sysval = SYSTEM_VALUE_BARYCENTRIC_PERSP_CENTROID;
-      break;
-   case nir_intrinsic_load_barycentric_sample:
-      if (interp_mode == INTERP_MODE_NOPERSPECTIVE)
-         sysval = SYSTEM_VALUE_BARYCENTRIC_LINEAR_SAMPLE;
-      else
-         sysval = SYSTEM_VALUE_BARYCENTRIC_PERSP_SAMPLE;
-      break;
-   default:
-      unreachable("invalid barycentric intrinsic");
-   }
-
-   return sysval;
-}
-
 static void
 emit_intrinsic_barycentric(struct ir3_context *ctx, nir_intrinsic_instr *intr,
                            struct ir3_instruction **dst)
 {
-   gl_system_value sysval = nir_intrinsic_barycentric_sysval(intr);
+   gl_system_value sysval = ir3_nir_intrinsic_barycentric_sysval(intr);
 
    if (!ctx->so->key.msaa && ctx->compiler->gen < 6) {
       switch (sysval) {
@@ -2877,9 +2806,6 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
    case nir_intrinsic_load_interpolated_input:
    case nir_intrinsic_load_input:
       setup_input(ctx, intr);
-      break;
-   case nir_intrinsic_load_kernel_input:
-      emit_intrinsic_load_kernel_input(ctx, intr, dst);
       break;
    /* All SSBO intrinsics should have been lowered by 'lower_io_offsets'
     * pass and replaced by an ir3-specifc version that adds the
@@ -3928,7 +3854,7 @@ emit_tex(struct ir3_context *ctx, nir_tex_instr *tex)
          ir3_builder_at(ir3_before_terminator(ctx->in_block));
       sam = ir3_SAM(&build, opc, type, MASK(ncomp), 0, NULL,
                     get_barycentric(ctx, IJ_PERSP_PIXEL), 0);
-      sam->prefetch.input_offset = ir3_nir_coord_offset(tex->src[idx].src.ssa);
+      sam->prefetch.input_offset = ir3_nir_coord_offset(tex->src[idx].src.ssa, NULL);
       /* make sure not to add irrelevant flags like S2EN */
       sam->flags = flags | (info.flags & IR3_INSTR_B);
       sam->prefetch.tex = info.tex_idx;
@@ -5805,7 +5731,7 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
       /* the folding doesn't seem to work reliably on a4xx */
       if (ctx->compiler->gen != 4)
          progress |= IR3_PASS(ir, ir3_cf);
-      progress |= IR3_PASS(ir, ir3_cp, so);
+      progress |= IR3_PASS(ir, ir3_cp, so, true);
       progress |= IR3_PASS(ir, ir3_cse);
       progress |= IR3_PASS(ir, ir3_dce, so);
       progress |= IR3_PASS(ir, ir3_opt_predicates, so);
@@ -5817,6 +5743,11 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
 
    if (IR3_PASS(ir, ir3_imm_const_to_preamble, so)) {
       progress = true;
+
+      /* Propagate immediates created by ir3_imm_const_to_preamble but make sure
+       * we don't lower any more immediates to const registers.
+       */
+      IR3_PASS(ir, ir3_cp, so, false);
 
       /* ir3_imm_const_to_preamble might create duplicate a1.x movs. */
       IR3_PASS(ir, ir3_cse);
@@ -5879,7 +5810,8 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
       int idx = 0;
 
       foreach_input (instr, ir) {
-         if (instr->input.sysval != SYSTEM_VALUE_BARYCENTRIC_PERSP_PIXEL)
+         if (instr->input.sysval !=
+             (SYSTEM_VALUE_BARYCENTRIC_PERSP_PIXEL + so->prefetch_bary_type))
             continue;
 
          assert(idx < 2);

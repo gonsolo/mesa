@@ -99,7 +99,9 @@ enum radv_cmd_dirty_bits {
    RADV_CMD_DIRTY_TASK_STATE = 1ull << 15,
    RADV_CMD_DIRTY_DEPTH_STENCIL_STATE = 1ull << 16,
    RADV_CMD_DIRTY_RASTER_STATE = 1ull << 17,
-   RADV_CMD_DIRTY_ALL = (1ull << 18) - 1,
+   RADV_CMD_DIRTY_MSAA_STATE = 1ull << 18,
+   RADV_CMD_DIRTY_CLIP_RECTS_STATE = 1ull << 19,
+   RADV_CMD_DIRTY_ALL = (1ull << 20) - 1,
 
    RADV_CMD_DIRTY_SHADER_QUERY = RADV_CMD_DIRTY_NGG_STATE | RADV_CMD_DIRTY_TASK_STATE,
 };
@@ -206,6 +208,7 @@ struct radv_rendering_state {
    struct radv_attachment color_att[MAX_RTS];
    struct radv_attachment ds_att;
    VkImageAspectFlags ds_att_aspects;
+   bool has_hiz_his; /* GFX12+ */
    struct radv_attachment vrs_att;
    VkExtent2D vrs_texel_size;
 };
@@ -328,6 +331,18 @@ enum radv_tracked_reg {
 
    RADV_TRACKED_PA_SU_LINE_CNTL,
    RADV_TRACKED_PA_SU_SC_MODE_CNTL,
+
+   /* 2 consecutive registers */
+   RADV_TRACKED_PA_SC_AA_MASK_X0Y0_X1Y0,
+
+   RADV_TRACKED_DB_EQAA,
+   RADV_TRACKED_DB_ALPHA_TO_MASK,
+   RADV_TRACKED_PA_SC_CONSERVATIVE_RASTERIZATION_CNTL, /* GFX9+ */
+   RADV_TRACKED_PA_SC_AA_CONFIG,
+   RADV_TRACKED_PA_SC_MODE_CNTL_0,
+   RADV_TRACKED_PA_SC_SAMPLE_PROPERTIES, /* GFX12+ */
+
+   RADV_TRACKED_DB_RENDER_OVERRIDE, /* GFX12+ */
 
    RADV_NUM_ALL_TRACKED_REGS,
 };

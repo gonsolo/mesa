@@ -945,9 +945,8 @@ hk_image_plane_alloc_vma(struct hk_device *dev, struct hk_image_plane *plane,
    assert(sparse_bound || !sparse_resident);
 
    if (sparse_bound) {
-      plane->va =
-         agx_va_alloc(&dev->dev, align(plane->layout.size_B, HK_SPARSE_ALIGN_B),
-                      AIL_PAGESIZE, 0, 0);
+      size_t size = align(plane->layout.size_B, HK_SPARSE_ALIGN_B);
+      plane->va = agx_va_alloc(&dev->dev, size, AIL_PAGESIZE, 0, 0);
       plane->addr = plane->va->addr;
       if (plane->addr == 0) {
          return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
@@ -961,7 +960,7 @@ hk_image_plane_alloc_vma(struct hk_device *dev, struct hk_image_plane *plane,
        * In the future we could optimize this out using the PBE sparse support
        * but that needs more reverse-engineering.
        */
-      hk_bind_scratch(dev, plane->va, 0, plane->layout.size_B);
+      hk_bind_scratch(dev, plane->va, 0, size);
    }
 
    if (sparse_resident) {
@@ -1697,8 +1696,15 @@ hk_copy_image_to_image_cpu(struct hk_device *device, struct hk_image *src_image,
          unsigned dst_level = info->dstSubresource.mipLevel;
          uint32_t block_width = src_layout->tilesize_el[src_level].width_el;
          uint32_t block_height = src_layout->tilesize_el[src_level].height_el;
+
+         /* Twiddled images have a single "tile" sized to the entire image, so
+          * break it up so we'll fit.
+          */
+         if (src_layout->tiling == AIL_TILING_TWIDDLED) {
+            block_width = block_height = MIN2(block_width, 32);
+         }
+
          uint32_t temp_pitch = block_width * src_block_B;
-         ;
 
          for (unsigned by = src_offset.y / block_height;
               by * block_height < src_offset.y + extent.height; by++) {
@@ -1714,6 +1720,8 @@ hk_copy_image_to_image_cpu(struct hk_device *device, struct hk_image *src_image,
                uint32_t width =
                   MIN2((bx + 1) * block_width, src_offset.x + extent.width) -
                   src_x_start;
+
+               assert(height * temp_pitch <= ARRAY_SIZE(temp_tile));
 
                ail_detile((void *)src, temp_tile, src_layout, src_level,
                           temp_pitch, src_x_start, src_y_start, width, height);

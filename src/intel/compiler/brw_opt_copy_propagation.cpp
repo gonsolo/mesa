@@ -547,8 +547,9 @@ void
 brw_copy_prop_dataflow::dump_block_data() const
 {
    foreach_block (block, cfg) {
+      brw_range range = ips.range(block);
       fprintf(stderr, "Block %d [%d, %d] (parents ", block->num,
-             ips.start(block), ips.end(block));
+              range.start, range.end);
       foreach_list_typed(bblock_link, link, link, &block->parents) {
          bblock_t *parent = link->block;
          fprintf(stderr, "%d ", parent->num);
@@ -852,21 +853,29 @@ try_copy_propagate(brw_shader &s, brw_inst *inst,
         brw_type_size_bytes(inst->src[arg].type)) % brw_type_size_bytes(entry->src.type) != 0)
       return false;
 
-   /* Since semantics of source modifiers are type-dependent we need to
-    * ensure that the meaning of the instruction remains the same if we
-    * change the type. If the sizes of the types are different the new
-    * instruction will read a different amount of data than the original
-    * and the semantics will always be different.
-    */
-   if (has_source_modifiers &&
-       entry->dst.type != inst->src[arg].type &&
-       (!inst->can_change_types() ||
-        brw_type_size_bits(entry->dst.type) != brw_type_size_bits(inst->src[arg].type)))
-      return false;
+   if (has_source_modifiers) {
+      /* If the sizes of the types are different the new instruction will read
+       * a different amount of data than the original and the semantics will
+       * always be different.
+       */
+      if (brw_type_size_bits(entry->dst.type) !=
+          brw_type_size_bits(inst->src[arg].type))
+         return false;
 
-   if ((entry->src.negate || entry->src.abs) &&
-       is_logic_op(inst->opcode)) {
-      return false;
+      if (is_logic_op(inst->opcode)) {
+         /* For any value of X, X & 1 = -X & 1. In this case, source modifiers
+          * from entry will not be applied to inst (far below).
+          */
+         if (inst->opcode != BRW_OPCODE_AND || !inst->src[1 - arg].is_one())
+            return false;
+      } else if (entry->dst.type != inst->src[arg].type &&
+                 !inst->can_change_types()) {
+         /* Since semantics of source modifiers are type-dependent we need to
+          * ensure that the meaning of the instruction remains the same if we
+          * change the type.
+          */
+         return false;
+      }
    }
 
    /* Save the offset of inst->src[arg] relative to entry->dst for it to be
@@ -917,7 +926,7 @@ try_copy_propagate(brw_shader &s, brw_inst *inst,
    inst->src[arg] = byte_offset(inst->src[arg],
       component * entry_stride * brw_type_size_bytes(entry->src.type) + suboffset);
 
-   if (has_source_modifiers) {
+   if (has_source_modifiers && !is_logic_op(inst->opcode)) {
       if (entry->dst.type != inst->src[arg].type) {
          /* We are propagating source modifiers from a MOV with a different
           * type.  If we got here, then we can just change the source and
@@ -1516,10 +1525,12 @@ brw_opt_copy_propagation(brw_shader &s)
       for (auto iter = out_acp[block->num].begin();
            iter != out_acp[block->num].end(); ++iter) {
          assert((*iter)->dst.file == VGRF);
-         if (ips.start(block) <= live.vgrf_start[(*iter)->dst.nr] &&
-             live.vgrf_end[(*iter)->dst.nr] <= ips.end(block)) {
+
+         brw_range block_range = ips.range(block);
+         brw_range vgrf_range  = live.vgrf_range[(*iter)->dst.nr];
+
+         if (block_range.contains(vgrf_range))
             out_acp[block->num].remove(*iter);
-         }
       }
    }
 
@@ -1582,20 +1593,32 @@ try_copy_propagate_def(brw_shader &s,
    const bool has_source_modifiers = val.abs || val.negate;
 
    if (has_source_modifiers) {
-      if (is_logic_op(inst->opcode) || !inst->can_do_source_mods(devinfo))
+      if (!inst->can_do_source_mods(devinfo))
          return false;
 
-      /* Since semantics of source modifiers are type-dependent we need to
-       * ensure that the meaning of the instruction remains the same if we
-       * change the type. If the sizes of the types are different the new
-       * instruction will read a different amount of data than the original
-       * and the semantics will always be different.
+      /* If the sizes of the types are different the new instruction will read
+       * a different amount of data than the original and the semantics will
+       * always be different.
        */
-      if (def->dst.type != inst->src[arg].type &&
-          (!inst->can_change_types() ||
-           brw_type_size_bits(def->dst.type) !=
-           brw_type_size_bits(inst->src[arg].type)))
+      if (brw_type_size_bits(def->dst.type) !=
+          brw_type_size_bits(inst->src[arg].type)) {
          return false;
+      }
+
+      if (is_logic_op(inst->opcode)) {
+         /* For any value of X, X & 1 = -X & 1. In this case, source modifiers
+          * from entry will not be applied to inst (far below).
+          */
+         if (inst->opcode != BRW_OPCODE_AND || !inst->src[1 - arg].is_one())
+            return false;
+      } else if (def->dst.type != inst->src[arg].type &&
+                 !inst->can_change_types()) {
+         /* Since semantics of source modifiers are type-dependent we need to
+          * ensure that the meaning of the instruction remains the same if we
+          * change the type.
+          */
+         return false;
+      }
    }
 
    /* Send messages with EOT set are restricted to use g112-g127 (and we
@@ -1778,7 +1801,7 @@ try_copy_propagate_def(brw_shader &s,
       inst->exec_size = def->exec_size;
    }
 
-   if (has_source_modifiers) {
+   if (has_source_modifiers && !is_logic_op(inst->opcode)) {
       if (def->dst.type != inst->src[arg].type) {
          /* We are propagating source modifiers from a MOV with a different
           * type.  If we got here, then we can just change the source and

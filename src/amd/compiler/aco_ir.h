@@ -292,6 +292,7 @@ struct RegClass {
       v6 = 6 | (1 << 5),
       v7 = 7 | (1 << 5),
       v8 = 8 | (1 << 5),
+      v10 = 10 | (1 << 5),
       /* byte-sized register class */
       v1b = v1 | (1 << 7),
       v2b = v2 | (1 << 7),
@@ -360,6 +361,7 @@ static constexpr RegClass v5{RegClass::v5};
 static constexpr RegClass v6{RegClass::v6};
 static constexpr RegClass v7{RegClass::v7};
 static constexpr RegClass v8{RegClass::v8};
+static constexpr RegClass v10{RegClass::v10};
 static constexpr RegClass v1b{RegClass::v1b};
 static constexpr RegClass v2b{RegClass::v2b};
 static constexpr RegClass v3b{RegClass::v3b};
@@ -2137,8 +2139,9 @@ public:
    std::vector<ac_shader_debug_info> debug_info;
 
    std::vector<uint8_t> constant_data;
-   Temp private_segment_buffer;
-   Temp scratch_offset;
+   /* Private segment buffers and scratch offsets. One entry per start/resume block */
+   aco::small_vec<Temp, 2> private_segment_buffers;
+   aco::small_vec<Temp, 2> scratch_offsets;
 
    uint16_t num_waves = 0;
    uint16_t min_waves = 0;
@@ -2320,7 +2323,7 @@ void _aco_err(Program* program, const char* file, unsigned line, const char* fmt
 
 #define aco_err(program, ...)      _aco_err(program, __FILE__, __LINE__, __VA_ARGS__)
 
-int get_op_fixed_to_def(Instruction* instr);
+aco::small_vec<uint32_t, 2> get_ops_fixed_to_def(Instruction* instr);
 
 /* utilities for dealing with register demand */
 RegisterDemand get_live_changes(Instruction* instr);

@@ -164,17 +164,18 @@ lower_tex(nir_builder *b, nir_tex_instr *tex, const struct nak_compiler *nak)
       offset_mode = NAK_NIR_OFFSET_MODE_PER_PX;
    }
 
-   nir_def *src0[4] = { NULL, };
-   nir_def *src1[4] = { NULL, };
-   unsigned src0_comps = 0, src1_comps = 0;
-
 #define PUSH(a, x) do { \
    nir_def *val = (x); \
    assert(a##_comps < ARRAY_SIZE(a)); \
    a[a##_comps++] = val; \
 } while(0)
 
+   unsigned num_backend_srcs = 0;
    if (nak->sm >= 50) {
+      nir_def *src0[4] = { NULL, };
+      nir_def *src1[4] = { NULL, };
+      unsigned src0_comps = 0, src1_comps = 0;
+
       if (tex->op == nir_texop_txd) {
          if (tex_h != NULL)
             PUSH(src0, tex_h);
@@ -224,18 +225,78 @@ lower_tex(nir_builder *b, nir_tex_instr *tex, const struct nak_compiler *nak)
          if (z_cmpr != NULL)
             PUSH(src1, z_cmpr);
       }
+
+      num_backend_srcs = 1;
+      tex->src[0].src_type = nir_tex_src_backend1;
+      nir_src_rewrite(&tex->src[0].src, nir_vec(b, src0, src0_comps));
+
+      if (src1_comps > 0) {
+         while (src1_comps < 4)
+            PUSH(src1, nir_undef(b, 1, 32));
+         num_backend_srcs = 2;
+         tex->src[1].src_type = nir_tex_src_backend2;
+         nir_src_rewrite(&tex->src[1].src, nir_vec(b, src1, src1_comps));
+      }
+   } else if (nak->sm >= 30) {
+      nir_def *src[8] = { NULL, };
+      unsigned src_comps = 0;
+
+      if (tex_h != NULL)
+         PUSH(src, tex_h);
+
+      if (offset != NULL && tex->op == nir_texop_txd) {
+         nir_def *arr_idx_or_zero = arr_idx ? arr_idx : nir_imm_int(b, 0);
+         // TODO: This may be backwards?
+         nir_def *arr_off = nir_prmt_nv(b, nir_imm_int(b, 0x1054),
+                                        offset, arr_idx_or_zero);
+         PUSH(src, arr_off);
+      } else if (arr_idx != NULL) {
+         PUSH(src, arr_idx);
+      }
+
+      for (uint32_t i = 0; i < coord_components; i++)
+         PUSH(src, nir_channel(b, coord, i));
+
+      if (ms_idx != NULL)
+         PUSH(src, ms_idx);
+      if (lod != NULL)
+         PUSH(src, lod);
+
+      if (tex->op != nir_texop_txd) {
+         if (offset_mode == NAK_NIR_OFFSET_MODE_AOFFI) {
+            PUSH(src, offset);
+         } else if (offset_mode == NAK_NIR_OFFSET_MODE_PER_PX) {
+            PUSH(src, nir_channel(b, offset, 0));
+            PUSH(src, nir_channel(b, offset, 1));
+         }
+      }
+
+      if (z_cmpr != NULL)
+         PUSH(src, z_cmpr);
+
+      if (tex->op == nir_texop_txd) {
+         assert(ddx->num_components == coord_components);
+         for (uint32_t i = 0; i < coord_components; i++) {
+            PUSH(src, nir_channel(b, ddx, i));
+            PUSH(src, nir_channel(b, ddy, i));
+         }
+      }
+
+      /* Both sources are vec4s so we need an even multiple of 4 */
+      while (src_comps % 4)
+         PUSH(src, nir_undef(b, 1, 32));
+
+      num_backend_srcs = 1;
+      tex->src[0].src_type = nir_tex_src_backend1;
+      nir_src_rewrite(&tex->src[0].src, nir_vec(b, src, 4));
+
+      if (src_comps > 4) {
+         num_backend_srcs = 2;
+         tex->src[1].src_type = nir_tex_src_backend2;
+         nir_src_rewrite(&tex->src[1].src, nir_vec(b, src + 4, 4));
+      }
    } else {
       unreachable("Unsupported shader model");
-   }
-
-   unsigned num_backend_srcs = 1;
-   tex->src[0].src_type = nir_tex_src_backend1;
-   nir_src_rewrite(&tex->src[0].src, nir_vec(b, src0, src0_comps));
-
-   if (src1_comps > 0) {
-      num_backend_srcs = 2;
-      tex->src[1].src_type = nir_tex_src_backend2;
-      nir_src_rewrite(&tex->src[1].src, nir_vec(b, src1, src1_comps));
    }
 
    /* Remove any extras */
@@ -352,6 +413,69 @@ lower_txq(nir_builder *b, nir_tex_instr *tex, const struct nak_compiler *nak)
    tex->def.num_components = 4;
    nir_def *res = nir_channels(b, &tex->def, mask);
    nir_def_rewrite_uses_after(&tex->def, res, res->parent_instr);
+
+   return true;
+}
+
+static enum pipe_format
+format_for_bits(unsigned bits)
+{
+   switch (bits) {
+   case 8:   return PIPE_FORMAT_R8_UINT;
+   case 16:  return PIPE_FORMAT_R16_UINT;
+   case 32:  return PIPE_FORMAT_R32_UINT;
+   case 64:  return PIPE_FORMAT_R32G32_UINT;
+   case 128: return PIPE_FORMAT_R32G32B32A32_UINT;
+   default: unreachable("Unknown number of image format bits");
+   }
+}
+
+static bool
+lower_formatted_image_load(nir_builder *b, nir_intrinsic_instr *intrin,
+                           const struct nak_compiler *nak)
+{
+   enum pipe_format format = nir_intrinsic_format(intrin);
+   if (format == PIPE_FORMAT_NONE)
+      return false;
+
+   unsigned bits = util_format_get_blocksizebits(format);
+
+   switch (intrin->intrinsic) {
+   case nir_intrinsic_bindless_image_load:
+      intrin->intrinsic = nir_intrinsic_bindless_image_load_raw_nv;
+      break;
+   default:
+      unreachable("Unknown image intrinsic");
+   }
+
+   nir_intrinsic_set_format(intrin, format_for_bits(bits));
+
+   ASSERTED const unsigned rgba_bit_size = intrin->def.bit_size;
+   intrin->def.bit_size = 32;
+
+   nir_intrinsic_set_dest_type(intrin, nir_type_uint32);
+   const unsigned num_raw_components = DIV_ROUND_UP(bits, 32);
+   intrin->num_components = num_raw_components;
+   intrin->def.num_components = num_raw_components;
+
+   b->cursor = nir_after_instr(&intrin->instr);
+   nir_def *rgba = NULL;
+   switch (format) {
+   case PIPE_FORMAT_R64_UINT:
+   case PIPE_FORMAT_R64_SINT:
+      assert(rgba_bit_size == 64);
+      rgba = nir_vec4(b, nir_pack_64_2x32(b, &intrin->def),
+                         nir_imm_int64(b, 0),
+                         nir_imm_int64(b, 0),
+                         nir_imm_int64(b, 1));
+      break;
+   default:
+      assert(rgba_bit_size == 32);
+      rgba = nir_format_unpack_rgba(b, &intrin->def, format);
+      break;
+   }
+
+   nir_def_rewrite_uses_after(&intrin->def, rgba, rgba->parent_instr);
 
    return true;
 }
@@ -614,6 +738,9 @@ lower_tex_instr(nir_builder *b, nir_instr *instr, void *_data)
       nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
       switch (intrin->intrinsic) {
       case nir_intrinsic_bindless_image_load:
+         if (nak->sm < 50 && lower_formatted_image_load(b, intrin, nak))
+            return true;
+         FALLTHROUGH;
       case nir_intrinsic_bindless_image_sparse_load:
          return shrink_image_load(b, intrin, nak);
       case nir_intrinsic_bindless_image_store:

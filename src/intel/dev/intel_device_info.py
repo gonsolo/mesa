@@ -279,6 +279,7 @@ Struct("intel_device_info",
         Member("bool", "has_64bit_int", compiler_field=True),
         Member("bool", "has_bfloat16", compiler_field=True),
         Member("bool", "has_integer_dword_mul", compiler_field=True),
+        Member("bool", "has_systolic", compiler_field=True),
         Member("bool", "supports_simd16_3src", compiler_field=True),
         Member("bool", "disable_ccs_repack"),
 
@@ -317,8 +318,6 @@ Struct("intel_device_info",
                that affects draw calls with a pixel shader that has 0 push constant cycles
                when TBIMR is enabled, which has been seen to lead to hangs.  To avoid the
                issue we simply pad the push constant payload to be at least 1 register.""")),
-
-        Member("bool", "is_adl_n", comment="We need this for ADL-N specific Wa_14014966230."),
 
         Member("unsigned", "num_slices",
                comment=dedent("""\

@@ -86,6 +86,7 @@ static const struct debug_control radv_debug_options[] = {{"nofastclears", RADV_
                                                           {"asm", RADV_DEBUG_DUMP_ASM},
                                                           {"ir", RADV_DEBUG_DUMP_BACKEND_IR},
                                                           {"pso_history", RADV_DEBUG_PSO_HISTORY},
+                                                          {"bvh4", RADV_DEBUG_BVH4},
                                                           {NULL, 0}};
 
 const char *
@@ -192,6 +193,8 @@ static const driOptionDescription radv_dri_options[] = {
       DRI_CONF_RADV_SSBO_NON_UNIFORM(false)
       DRI_CONF_RADV_LOWER_TERMINATE_TO_DISCARD(false)
       DRI_CONF_RADV_APP_LAYER()
+      DRI_CONF_RADV_EMULATE_RT(false)
+      DRI_CONF_RADV_ENABLE_FLOAT16_GFX8(false)
    DRI_CONF_SECTION_END
 };
 // clang-format on
@@ -236,6 +239,12 @@ radv_init_dri_options(struct radv_instance *instance)
       driQueryOptionb(&instance->drirc.options, "radv_disable_aniso_single_level");
 
    instance->drirc.disable_trunc_coord = driQueryOptionb(&instance->drirc.options, "radv_disable_trunc_coord");
+   if (instance->vk.app_info.engine_name && !strcmp(instance->vk.app_info.engine_name, "DXVK")) {
+      /* Since 2.3.1+, DXVK uses the application version to notify the driver about D3D9. */
+      const bool is_d3d9 = instance->vk.app_info.app_version & 0x1;
+
+      instance->drirc.disable_trunc_coord &= !is_d3d9;
+   }
 
    instance->drirc.disable_sinking_load_input_fs =
       driQueryOptionb(&instance->drirc.options, "radv_disable_sinking_load_input_fs");
@@ -286,6 +295,10 @@ radv_init_dri_options(struct radv_instance *instance)
 
    instance->drirc.lower_terminate_to_discard =
       driQueryOptionb(&instance->drirc.options, "radv_lower_terminate_to_discard");
+
+   instance->drirc.emulate_rt = driQueryOptionb(&instance->drirc.options, "radv_emulate_rt");
+
+   instance->drirc.expose_float16_gfx8 = driQueryOptionb(&instance->drirc.options, "radv_enable_float16_gfx8");
 }
 
 static const struct vk_instance_extension_table radv_instance_extensions_supported = {

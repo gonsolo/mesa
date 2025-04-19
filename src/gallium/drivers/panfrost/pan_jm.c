@@ -168,7 +168,8 @@ jm_submit_jc(struct panfrost_batch *batch, uint64_t first_job_desc,
    if (ctx->is_noop)
       ret = 0;
    else
-      ret = drmIoctl(panfrost_device_fd(dev), DRM_IOCTL_PANFROST_SUBMIT, &submit);
+      ret = pan_kmod_ioctl(panfrost_device_fd(dev), DRM_IOCTL_PANFROST_SUBMIT,
+                           &submit);
    free(bo_handles);
 
    if (ret)
@@ -581,7 +582,8 @@ jm_emit_tiler_draw(struct mali_draw_packed *out, struct panfrost_batch *batch,
          struct pan_earlyzs_state earlyzs = pan_earlyzs_get(
             fs->earlyzs, ctx->depth_stencil->writes_zs || has_oq,
             ctx->blend->base.alpha_to_coverage,
-            ctx->depth_stencil->zs_always_passes);
+            ctx->depth_stencil->zs_always_passes,
+            PAN_EARLYZS_ZS_TILEBUF_NOT_READ);
 
          cfg.flags_0.pixel_kill_operation = earlyzs.kill;
          cfg.flags_0.zs_update_operation = earlyzs.update;

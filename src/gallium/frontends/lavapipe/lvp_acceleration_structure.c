@@ -640,11 +640,13 @@ lvp_get_as_size(VkDevice device,
 
    nodes_size += leaf_count * output_leaf_node_size;
 
+   nodes_size = util_align_npot(nodes_size, LVP_BVH_NODE_PREFETCH_SIZE);
+
    return sizeof(struct lvp_bvh_header) + nodes_size;
 }
 
 static uint32_t
-lvp_get_encode_key(VkAccelerationStructureTypeKHR type,
+lvp_get_encode_key(struct vk_device *device, VkAccelerationStructureTypeKHR type,
                    VkBuildAccelerationStructureFlagBitsKHR flags)
 {
    return 0;

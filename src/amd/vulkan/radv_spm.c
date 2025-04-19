@@ -20,7 +20,7 @@ radv_spm_init_bo(struct radv_device *device)
    VkResult result;
 
    struct radeon_winsys_bo *bo = NULL;
-   result = radv_bo_create(device, NULL, device->spm.buffer_size, 4096, RADEON_DOMAIN_VRAM,
+   result = radv_bo_create(device, NULL, device->spm.buffer_size, 4096, RADEON_DOMAIN_GTT,
                            RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_ZERO_VRAM,
                            RADV_BO_PRIORITY_SCRATCH, 0, true, &bo);
    device->spm.bo = bo;
@@ -282,8 +282,10 @@ radv_spm_init(struct radv_device *device)
    struct ac_perfcounters *pc = &pdev->ac_perfcounters;
 
    /* We failed to initialize the performance counters. */
-   if (!pc->blocks)
+   if (!pc->blocks) {
+      fprintf(stderr, "radv: Failed to initialize SPM because perf counters aren't implemented.\n");
       return false;
+   }
 
    if (!ac_init_spm(gpu_info, pc, &device->spm))
       return false;

@@ -105,27 +105,25 @@ can_coalesce_vars(const intel_device_info *devinfo,
    if (!live.vars_interfere(src_var, dst_var))
       return true;
 
-   int dst_start = live.start[dst_var];
-   int dst_end = live.end[dst_var];
-   int src_start = live.start[src_var];
-   int src_end = live.end[src_var];
+   brw_range dst_range = live.vars_range[dst_var];
+   brw_range src_range = live.vars_range[src_var];
 
-   /* Variables interfere and one line range isn't a subset of the other. */
-   if ((dst_end > src_end && src_start < dst_start) ||
-       (src_end > dst_end && dst_start < src_start))
+   /* Variables interfere and one live range isn't a subset of the other. */
+   if (!dst_range.contains(src_range) &&
+       !src_range.contains(dst_range))
       return false;
 
    /* Check for a write to either register in the intersection of their live
     * ranges.
     */
-   int start_ip = MAX2(dst_start, src_start);
-   int end_ip = MIN2(dst_end, src_end);
+   brw_range intersection = intersect(dst_range, src_range);
+   assert(!intersection.is_empty());
 
    foreach_block(scan_block, cfg) {
-      if (ips.end(scan_block) < start_ip)
+      if (ips.range(scan_block).last() < intersection.start)
          continue;
 
-      int scan_ip = ips.start(scan_block) - 1;
+      int scan_ip = ips.range(scan_block).start - 1;
 
       bool seen_src_write = false;
       bool seen_copy = false;
@@ -133,7 +131,7 @@ can_coalesce_vars(const intel_device_info *devinfo,
          scan_ip++;
 
          /* Ignore anything before the intersection of the live ranges */
-         if (scan_ip < start_ip)
+         if (scan_ip < intersection.start)
             continue;
 
          /* Ignore the copying instruction itself */
@@ -142,7 +140,7 @@ can_coalesce_vars(const intel_device_info *devinfo,
             continue;
          }
 
-         if (scan_ip > end_ip)
+         if (scan_ip > intersection.last())
             return true; /* registers do not interfere */
 
          if (seen_src_write && !seen_copy) {
@@ -236,10 +234,10 @@ brw_opt_register_coalesce(brw_shader &s)
    int src_size = 0;
    int channels_remaining = 0;
    unsigned src_reg = ~0u, dst_reg = ~0u;
-   int *dst_reg_offset = new int[MAX_VGRF_SIZE(devinfo)];
-   brw_inst **mov = new brw_inst *[MAX_VGRF_SIZE(devinfo)];
-   int *dst_var = new int[MAX_VGRF_SIZE(devinfo)];
-   int *src_var = new int[MAX_VGRF_SIZE(devinfo)];
+   int *dst_reg_offset = new int[live.max_vgrf_size];
+   brw_inst **mov = new brw_inst *[live.max_vgrf_size];
+   int *dst_var = new int[live.max_vgrf_size];
+   int *src_var = new int[live.max_vgrf_size];
    const brw_def_analysis &defs = s.def_analysis.require();
 
    foreach_block_and_inst(block, brw_inst, inst, s.cfg) {
@@ -270,10 +268,10 @@ brw_opt_register_coalesce(brw_shader &s)
          src_reg = inst->src[0].nr;
 
          src_size = s.alloc.sizes[inst->src[0].nr];
-         assert(src_size <= MAX_VGRF_SIZE(devinfo));
+         assert(src_size <= (int) live.max_vgrf_size);
 
          channels_remaining = src_size;
-         memset(mov, 0, sizeof(*mov) * MAX_VGRF_SIZE(devinfo));
+         memset(mov, 0, sizeof(*mov) * live.max_vgrf_size);
 
          dst_reg = inst->dst.nr;
       }
@@ -376,10 +374,8 @@ brw_opt_register_coalesce(brw_shader &s)
       }
 
       for (int i = 0; i < src_size; i++) {
-         live.start[dst_var[i]] = MIN2(live.start[dst_var[i]],
-                                       live.start[src_var[i]]);
-         live.end[dst_var[i]] = MAX2(live.end[dst_var[i]],
-                                     live.end[src_var[i]]);
+         live.vars_range[dst_var[i]] = merge(live.vars_range[dst_var[i]],
+                                             live.vars_range[src_var[i]]);
       }
       src_reg = ~0u;
    }

@@ -1732,7 +1732,8 @@ special_requirements_for_handling_double_precision_data_types(
       if (devinfo->verx10 >= 125 &&
           (brw_type_is_float(dst_type) ||
            is_double_precision)) {
-         ERROR_IF(!is_scalar_region &&
+         ERROR_IF(!brw_type_is_bfloat(type) &&
+                  !is_scalar_region &&
                   BRW_ADDRESS_REGISTER_INDIRECT_REGISTER != address_mode &&
                   (!is_linear(vstride, width, hstride) ||
                    src_stride != dst_stride ||
@@ -2195,24 +2196,21 @@ instruction_restrictions(const struct brw_isa_info *isa,
 
       if (brw_eu_inst_dpas_3src_exec_type(devinfo, inst->raw) ==
           BRW_ALIGN1_3SRC_EXEC_TYPE_FLOAT) {
+         ERROR_IF(src1_type != BRW_TYPE_HF &&
+                  src1_type != BRW_TYPE_BF,
+                  "DPAS src1 type must be HF or BF.");
+         ERROR_IF(src2_type != BRW_TYPE_HF &&
+                  src2_type != BRW_TYPE_BF,
+                  "DPAS src2 type must be HF or BF.");
+         ERROR_IF(src1_type != src2_type,
+                  "DPAS src1 and src2 with types must match when using float types.");
+
          if (devinfo->ver < 20) {
-            ERROR_IF(src1_type != BRW_TYPE_HF,
-                     "DPAS src1 type must be HF in Gfx12.");
-            ERROR_IF(src2_type != BRW_TYPE_HF,
-                     "DPAS src2 type must be HF in Gfx12.");
             ERROR_IF(dst_type != BRW_TYPE_F,
                      "DPAS destination type must be F in Gfx12.");
             ERROR_IF(src0_type != BRW_TYPE_F,
                      "DPAS src0 type must be F in Gfx12.");
          } else {
-            ERROR_IF(src1_type != BRW_TYPE_HF &&
-                     src1_type != BRW_TYPE_BF,
-                     "DPAS src1 type must be HF or BF in Gfx20+.");
-            ERROR_IF(src2_type != BRW_TYPE_HF &&
-                     src2_type != BRW_TYPE_BF,
-                     "DPAS src2 type must be HF or BF in Gfx20+.");
-            ERROR_IF(src1_type != src2_type,
-                     "DPAS src1 and src2 with types must match when using float types.");
             ERROR_IF(dst_type != BRW_TYPE_F &&
                      dst_type != src1_type,
                      "DPAS destination type must be F or match Src1/Src2 in Gfx20+.");

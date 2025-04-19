@@ -332,6 +332,9 @@ index("unsigned", "repeat_count")
 # coordinates in compute.
 index("bool", "explicit_coord")
 
+# The index of the format string used by a printf. (u_printf_info element of the shader)
+index("unsigned", "fmt_idx")
+
 intrinsic("nop", flags=[CAN_ELIMINATE])
 
 # Uses a value and cannot be eliminated.
@@ -1283,10 +1286,9 @@ intrinsic("load_frag_shading_rate", dest_comp=1, bit_sizes=[32],
 system_value("fully_covered", dest_comp=1, bit_sizes=[1])
 
 # OpenCL printf instruction
-# First source is an index to the format string (u_printf_info element of the shader)
 # Second source is a deref to a struct containing the args
 # Dest is success or failure
-intrinsic("printf", src_comp=[1, 1], dest_comp=1, bit_sizes=[32])
+intrinsic("printf", src_comp=[1], dest_comp=1, bit_sizes=[32], indices=[FMT_IDX])
 # Since most drivers will want to lower to just dumping args
 # in a buffer, nir_lower_printf will do that, but requires
 # the driver to at least provide a base location and size
@@ -1334,6 +1336,7 @@ intrinsic("cmat_load", src_comp=[-1, -1, 1], indices=[MATRIX_LAYOUT])
 intrinsic("cmat_store", src_comp=[-1, -1, 1], indices=[MATRIX_LAYOUT])
 intrinsic("cmat_length", src_comp=[], dest_comp=1, indices=[CMAT_DESC], bit_sizes=[32])
 intrinsic("cmat_muladd", src_comp=[-1, -1, -1, -1], indices=[SATURATE, CMAT_SIGNED_MASK])
+intrinsic("cmat_convert", src_comp=[-1, -1], indices=[CMAT_SIGNED_MASK])
 intrinsic("cmat_unary_op", src_comp=[-1, -1], indices=[ALU_OP])
 intrinsic("cmat_binary_op", src_comp=[-1, -1, -1], indices=[ALU_OP])
 intrinsic("cmat_scalar_op", src_comp=[-1, -1, -1], indices=[ALU_OP])
@@ -1548,8 +1551,30 @@ intrinsic("load_frag_coord_zw_pan", [2], dest_comp=1, indices=[COMPONENT], flags
 # src[] = { sampler_index }
 load("sampler_lod_parameters_pan", [1], flags=[CAN_ELIMINATE, CAN_REORDER])
 
-# Like load_output but using a specified render target conversion descriptor
-load("converted_output_pan", [1], indices=[DEST_TYPE, IO_SEMANTICS], flags=[CAN_ELIMINATE])
+# Like load_output but using a specified render target and conversion descriptor
+# src[] = { target, sample, conversion }
+# target must be in the [0..7] range when io_semantics.location is FRAG_RESULT_DATA0
+# and is ignored otherwise
+load("converted_output_pan", [1, 1, 1], indices=[DEST_TYPE, IO_SEMANTICS], flags=[CAN_ELIMINATE])
+
+# Like converted_output_pan but for case where the output is never written by the shader
+# This is used to relax waits on tile-buffer accesses and the target is read-only
+# src[] = { target, sample, conversion }
+# target must be in the [0..7] range when io_semantics.location is FRAG_RESULT_DATA0
+# and is ignored otherwise
+load("readonly_output_pan", [1, 1, 1], indices=[DEST_TYPE, IO_SEMANTICS], flags=[CAN_ELIMINATE])
+
+# Load input attachment target
+# src[] = { input_attachment_index }
+# valid targets are:
+# 0..7: Color[0..7]
+# 255:  Depth or stencil (the actual target is known based on the nir_alu_type)
+# ~0:   No target (input attachment load must be lowered to texture load in that case)
+intrinsic("load_input_attachment_target_pan", [1], dest_comp=1, flags=[CAN_ELIMINATE, CAN_REORDER], bit_sizes=[32])
+
+# Load input attachment conversion descriptor
+# src[] = { input_attachment_index }
+intrinsic("load_input_attachment_conv_pan", [1], dest_comp=1, flags=[CAN_ELIMINATE, CAN_REORDER], bit_sizes=[32])
 
 # Load the render target conversion descriptor for a given render target given
 # in the BASE index. Converts to a type with size given by the source type.
@@ -1751,6 +1776,32 @@ system_value("sbt_base_amd", 1, bit_sizes=[64])
 # 5. ray direction
 # 6. inverse ray direction (componentwise 1.0/ray direction)
 intrinsic("bvh64_intersect_ray_amd", [4, 2, 1, 3, 3, 3], 4, flags=[CAN_ELIMINATE, CAN_REORDER])
+
+# 1. HW descriptor
+# 2. BVH base
+# 3. instance cull mask
+# 4. ray extent
+# 5. ray origin
+# 6. ray direction
+# 7. node ID
+#
+# dst:
+# | component | box node    | instance node        | triangle node                     | procedural node                   |
+# |-----------|-------------|----------------------|-----------------------------------|-----------------------------------|
+# | 0         | child_id[0] |                      | t[0]                              |                                   |
+# | 1         | child_id[1] |                      | u[0]                              |                                   |
+# | 2         | child_id[2] | blas_addr_lo         | v[0]                              |                                   |
+# | 3         | child_id[3] | blas_addr_hi         | primitive_index_hit_kind[0]       | primitive_index                   |
+# | 4         | child_id[4] |                      | t[1]                              |                                   |
+# | 5         | child_id[5] |                      | u[1]                              |                                   |
+# | 6         | child_id[6] | user_data            | v[1]                              |                                   |
+# | 7         | child_id[7] | next_node_ids        | primitive_index_hit_kind[1]       |                                   |
+# | 8         |             |                      | geometry_index_navigation_bits[0] | geometry_index_navigation_bits[0] |
+# | 9         |             |                      | geometry_index_navigation_bits[1] | geometry_index_navigation_bits[1] |
+# | [10,12]   |             | object_ray_origin    |                                   |                                   |
+# | [13,15]   |             | object_ray_direction |                                   |                                   |
+#
+intrinsic("bvh8_intersect_ray_amd", [4, 2, 1, 1, 3, 3, 1], 16, flags=[CAN_ELIMINATE, CAN_REORDER])
 
 # Return of a callable in raytracing pipelines
 intrinsic("rt_return_amd")
@@ -2403,6 +2454,9 @@ intrinsic("ipa_nv", dest_comp=1, src_comp=[1, 1], bit_sizes=[32],
 # FLAGS indicate if we load vertex_id == 2
 intrinsic("ldtram_nv", dest_comp=2, bit_sizes=[32],
           indices=[BASE, FLAGS], flags=[CAN_ELIMINATE, CAN_REORDER])
+
+# NVIDIA-specific Image intrinsics
+image("load_raw_nv", src_comp=[4, 1, 1], extra_indices=[DEST_TYPE], dest_comp=0, flags=[CAN_ELIMINATE])
 
 # NVIDIA-specific Geometry Shader intrinsics.
 # These contain an additional integer source and destination with the primitive handle input/output.

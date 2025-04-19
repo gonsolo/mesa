@@ -218,6 +218,7 @@ struct radeon_info {
 
    enum vcn_version vcn_ip_version;
    enum sdma_version sdma_ip_version;
+   enum rt_version rt_ip_version;
 
    /* Kernel & winsys capabilities. */
    uint32_t drm_major; /* version */
@@ -243,7 +244,7 @@ struct radeon_info {
    bool has_tmz_support;
    bool has_trap_handler_support;
    bool kernel_has_modifiers;
-   bool use_userq;
+   uint32_t userq_ip_mask; /* AMD_IP_* bits */
 
    /* If the kernel driver uses CU reservation for high priority compute on gfx10+, it programs
     * a global CU mask in the hw that is AND'ed with CU_EN register fields set by userspace.
@@ -278,6 +279,8 @@ struct radeon_info {
    uint32_t min_wave64_vgpr_alloc;
    uint32_t max_vgpr_alloc;
    uint32_t wave64_vgpr_alloc_granularity;
+   uint32_t scratch_wavesize_granularity_shift;
+   uint32_t scratch_wavesize_granularity;
    uint32_t max_scratch_waves;
    bool has_scratch_base_registers;
 
@@ -382,12 +385,8 @@ struct ac_task_info {
    uint32_t payload_ring_offset;
    uint32_t bo_size_bytes;
    uint16_t num_entries;
+   uint32_t payload_entry_size;
 };
-
-/* Size of each payload entry in the task payload ring.
- * Spec requires minimum 16K bytes.
- */
-#define AC_TASK_PAYLOAD_ENTRY_BYTES 16384
 
 /* Size of each draw entry in the task draw ring.
  * 4 DWORDs per entry.

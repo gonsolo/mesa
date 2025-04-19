@@ -32,6 +32,7 @@
 #include "nir/tgsi_to_nir.h"
 #include "util/u_memory.h"
 #include "util/u_prim.h"
+#include "util/perf/cpu_trace.h"
 #include "nir_builder.h"
 #include "nir_serialize.h"
 #include "pan_bo.h"
@@ -115,6 +116,8 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
                         unsigned fixed_varying_mask,
                         struct panfrost_shader_binary *out)
 {
+   MESA_TRACE_FUNC();
+
    struct panfrost_device *dev = pan_device(&screen->base);
 
    nir_shader *s = nir_shader_clone(NULL, ir);
@@ -130,6 +133,7 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
 
    struct panfrost_compile_inputs inputs = {
       .gpu_id = panfrost_device_gpu_id(dev),
+      .push_uniforms = true,
    };
 
    if (dev->arch >= 9)
@@ -354,6 +358,7 @@ panfrost_new_variant_locked(struct panfrost_context *ctx,
                             struct panfrost_uncompiled_shader *uncompiled,
                             struct panfrost_shader_key *key)
 {
+   struct panfrost_device *dev = pan_device(ctx->base.screen);
    struct panfrost_compiled_shader *prog = panfrost_alloc_variant(uncompiled);
 
    *prog = (struct panfrost_compiled_shader){
@@ -364,7 +369,7 @@ panfrost_new_variant_locked(struct panfrost_context *ctx,
    panfrost_shader_get(ctx->base.screen, &ctx->shaders, &ctx->descs, uncompiled,
                        &ctx->base.debug, prog, 0);
 
-   prog->earlyzs = pan_earlyzs_analyze(&prog->info);
+   prog->earlyzs = pan_earlyzs_analyze(&prog->info, dev->arch);
 
    return prog;
 }
@@ -450,6 +455,8 @@ static void *
 panfrost_create_shader_state(struct pipe_context *pctx,
                              const struct pipe_shader_state *cso)
 {
+   MESA_TRACE_FUNC();
+
    nir_shader *nir = (cso->type == PIPE_SHADER_IR_TGSI)
                         ? tgsi_to_nir(cso->tokens, pctx->screen, false)
                         : cso->ir.nir;

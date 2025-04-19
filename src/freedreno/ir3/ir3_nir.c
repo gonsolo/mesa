@@ -363,6 +363,9 @@ ir3_optimize_loop(struct ir3_compiler *compiler,
       progress |= OPT(s, nir_lower_bit_size, ir3_lower_bit_size, NULL);
       progress |= OPT(s, nir_opt_constant_folding);
 
+      /* Remove unused components from IO loads. */
+      progress |= OPT(s, nir_opt_shrink_vectors, true);
+
       const nir_opt_offsets_options offset_options = {
          /* How large an offset we can encode in the instr's immediate field.
           */
@@ -379,14 +382,6 @@ ir3_optimize_loop(struct ir3_compiler *compiler,
          .allow_offset_wrap = true,
       };
       progress |= OPT(s, nir_opt_offsets, &offset_options);
-
-      nir_load_store_vectorize_options vectorize_opts = {
-         .modes = nir_var_mem_ubo | nir_var_mem_ssbo | nir_var_uniform,
-         .callback = ir3_nir_should_vectorize_mem,
-         .robust_modes = options->robust_modes,
-         .cb_data = compiler,
-      };
-      progress |= OPT(s, nir_opt_load_store_vectorize, &vectorize_opts);
 
       if (lower_flrp != 0) {
          if (OPT(s, nir_lower_flrp, lower_flrp, false /* always_precise */)) {
@@ -652,7 +647,20 @@ ir3_finalize_nir(struct ir3_compiler *compiler,
    bool idiv_progress = OPT(s, nir_opt_idiv_const, 8);
    idiv_progress |= OPT(s, nir_lower_idiv, &idiv_options);
 
-   if (idiv_progress)
+   /* Do load/store vectorization after the first opt loop to give us a chance
+    * to optimize lowered SSBO pointers. Without the first opt loop every
+    * SSBO load/store with a different pointer looks like it has a different
+    * descriptor, even when it doesn't.
+    */
+   nir_load_store_vectorize_options vectorize_opts = {
+      .modes = nir_var_mem_ubo | nir_var_mem_ssbo | nir_var_mem_shared | nir_var_uniform,
+      .callback = ir3_nir_should_vectorize_mem,
+      .robust_modes = options->robust_modes,
+      .cb_data = compiler,
+   };
+   bool vectorize_progress = OPT(s, nir_opt_load_store_vectorize, &vectorize_opts);
+
+   if (idiv_progress || vectorize_progress)
       ir3_optimize_loop(compiler, options, s);
 
    OPT(s, nir_remove_dead_variables, nir_var_function_temp, NULL);
@@ -1540,12 +1548,6 @@ ir3_setup_const_state(nir_shader *nir, struct ir3_shader_variant *v,
                               align(const_state->image_dims.count, 4) / 4, 1);
    }
 
-   if (v->type == MESA_SHADER_KERNEL && v->cs.req_input_mem) {
-      ir3_const_reserve_space(&const_state->allocs,
-                              IR3_CONST_ALLOC_KERNEL_PARAMS,
-                              align(v->cs.req_input_mem, 4) / 4, 1);
-   }
-
    if ((v->type == MESA_SHADER_VERTEX) && (compiler->gen < 5) &&
        v->stream_output.num_outputs > 0) {
       ir3_const_reserve_space(&const_state->allocs, IR3_CONST_ALLOC_TFBO,
@@ -1594,4 +1596,37 @@ ir3_const_state_get_free_space(const struct ir3_shader_variant *v,
                               const_state->allocs.reserved_vec4;
    free_space_vec4 = ROUND_DOWN_TO(free_space_vec4, align_vec4);
    return free_space_vec4;
+}
+
+gl_system_value
+ir3_nir_intrinsic_barycentric_sysval(nir_intrinsic_instr *intr)
+{
+   enum glsl_interp_mode interp_mode =
+      (enum glsl_interp_mode)nir_intrinsic_interp_mode(intr);
+   gl_system_value sysval;
+
+   switch (intr->intrinsic) {
+   case nir_intrinsic_load_barycentric_pixel:
+      if (interp_mode == INTERP_MODE_NOPERSPECTIVE)
+         sysval = SYSTEM_VALUE_BARYCENTRIC_LINEAR_PIXEL;
+      else
+         sysval = SYSTEM_VALUE_BARYCENTRIC_PERSP_PIXEL;
+      break;
+   case nir_intrinsic_load_barycentric_centroid:
+      if (interp_mode == INTERP_MODE_NOPERSPECTIVE)
+         sysval = SYSTEM_VALUE_BARYCENTRIC_LINEAR_CENTROID;
+      else
+         sysval = SYSTEM_VALUE_BARYCENTRIC_PERSP_CENTROID;
+      break;
+   case nir_intrinsic_load_barycentric_sample:
+      if (interp_mode == INTERP_MODE_NOPERSPECTIVE)
+         sysval = SYSTEM_VALUE_BARYCENTRIC_LINEAR_SAMPLE;
+      else
+         sysval = SYSTEM_VALUE_BARYCENTRIC_PERSP_SAMPLE;
+      break;
+   default:
+      unreachable("invalid barycentric intrinsic");
+   }
+
+   return sysval;
 }

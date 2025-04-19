@@ -4,8 +4,23 @@
 # source file, output name, defines
 bvh_shaders = [
   [
+    'copy_blas_addrs_gfx12.comp',
+    'copy_blas_addrs_gfx12',
+    [],
+  ],
+  [
     'copy.comp',
     'copy',
+    ['GFX12=0'],
+  ],
+  [
+    'copy.comp',
+    'copy_gfx12',
+    ['GFX12=1'],
+  ],
+  [
+    'encode_gfx12.comp',
+    'encode_gfx12',
     [],
   ],
   [
@@ -29,6 +44,11 @@ bvh_shaders = [
     [],
   ],
   [
+    'update_gfx12.comp',
+    'update_gfx12',
+    [],
+  ],
+  [
     'leaf.comp',
     'radv_leaf',
     ['ALWAYS_ACTIVE=0'],
@@ -47,6 +67,8 @@ bvh_includes = files(
   'build_helpers.h',
   'build_interface.h',
   'bvh.h',
+  'encode.h',
+  'update.h',
   vk_bvh_include_dir + '/vk_build_helpers.h',
   vk_bvh_include_dir + '/vk_bvh.h',
 )

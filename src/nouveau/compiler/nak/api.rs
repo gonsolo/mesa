@@ -3,6 +3,8 @@
 
 use crate::from_nir::*;
 use crate::ir::{ShaderInfo, ShaderIoInfo, ShaderModel, ShaderStageInfo};
+use crate::sm20::ShaderModel20;
+use crate::sm32::ShaderModel32;
 use crate::sm50::ShaderModel50;
 use crate::sm70::ShaderModel70;
 use crate::sph;
@@ -20,6 +22,7 @@ use std::sync::OnceLock;
 
 #[repr(u8)]
 enum DebugFlags {
+    Panic,
     Print,
     Serial,
     Spill,
@@ -45,6 +48,7 @@ impl Debug {
         let mut flags = 0;
         for flag in debug_str.split(',') {
             match flag.trim() {
+                "panic" => flags |= 1 << DebugFlags::Panic as u8,
                 "print" => flags |= 1 << DebugFlags::Print as u8,
                 "serial" => flags |= 1 << DebugFlags::Serial as u8,
                 "spill" => flags |= 1 << DebugFlags::Spill as u8,
@@ -60,6 +64,10 @@ impl Debug {
 
 pub trait GetDebugFlags {
     fn debug_flags(&self) -> u32;
+
+    fn panic(&self) -> bool {
+        self.debug_flags() & (1 << DebugFlags::Panic as u8) != 0
+    }
 
     fn print(&self) -> bool {
         self.debug_flags() & (1 << DebugFlags::Print as u8) != 0
@@ -148,6 +156,9 @@ fn nir_options(dev: &nv_device_info) -> nir_shader_compiler_options {
         | nir_lower_shift64
         | nir_lower_imul_2x32_64
         | nir_lower_conv64);
+    if dev.sm < 32 {
+        op.lower_int64_options |= nir_lower_shift64;
+    }
     op.lower_ldexp = true;
     op.lower_fmod = true;
     op.lower_ffract = true;
@@ -415,6 +426,10 @@ fn nak_compile_shader_internal(
         Box::new(ShaderModel70::new(nak.sm))
     } else if nak.sm >= 50 {
         Box::new(ShaderModel50::new(nak.sm))
+    } else if nak.sm >= 32 {
+        Box::new(ShaderModel32::new(nak.sm))
+    } else if nak.sm >= 20 {
+        Box::new(ShaderModel20::new(nak.sm))
     } else {
         panic!("Unsupported shader model");
     };
@@ -469,8 +484,12 @@ pub extern "C" fn nak_compile_shader(
     robust2_modes: nir_variable_mode,
     fs_key: *const nak_fs_key,
 ) -> *mut nak_shader_bin {
-    panic::catch_unwind(|| {
+    let compile = || {
         nak_compile_shader_internal(nir, dump_asm, nak, robust2_modes, fs_key)
-    })
-    .unwrap_or(std::ptr::null_mut())
+    };
+    if DEBUG.panic() {
+        compile()
+    } else {
+        panic::catch_unwind(compile).unwrap_or(std::ptr::null_mut())
+    }
 }

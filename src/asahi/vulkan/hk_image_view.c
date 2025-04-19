@@ -121,7 +121,11 @@ vk_swizzle_to_pipe(VkComponentSwizzle swizzle)
 static enum pipe_format
 get_stencil_format(enum pipe_format format)
 {
+   /* Note: R8 is not a stencil format, but our copy code will internally cast
+    * between R8 and S8. It's simplest to handle here.
+    */
    switch (format) {
+   case PIPE_FORMAT_R8_UINT:
    case PIPE_FORMAT_S8_UINT:
       return PIPE_FORMAT_S8_UINT;
    case PIPE_FORMAT_Z24_UNORM_S8_UINT:
@@ -497,11 +501,11 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
             cfg.aligned_width_msaa_sw =
                align(u_minify(layout->width_px, level),
                      layout->tilesize_el[level].width_el);
+
+            cfg.sample_count_log2_sw = util_logbase2(image->vk.samples);
          } else {
             cfg.level_offset_sw = ail_get_level_offset_B(layout, cfg.level);
          }
-
-         cfg.sample_count_log2_sw = util_logbase2(image->vk.samples);
 
          if (layout->tiling != AIL_TILING_LINEAR) {
             struct ail_tile tile_size = layout->tilesize_el[level];

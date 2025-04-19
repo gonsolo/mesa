@@ -781,6 +781,8 @@ iris_slab_alloc(void *priv,
       flags |= BO_ALLOC_COMPRESSED;
       break;
    case IRIS_HEAP_SYSTEM_MEMORY_CACHED_COHERENT:
+      flags |= BO_ALLOC_CACHED_COHERENT | BO_ALLOC_SMEM;
+      break;
    case IRIS_HEAP_SYSTEM_MEMORY_UNCACHED:
       flags |= BO_ALLOC_SMEM;
       break;
@@ -1035,6 +1037,12 @@ alloc_bo_from_cache(struct iris_bufmgr *bufmgr,
 
       if (cur->real.capture != !!(flags & BO_ALLOC_CAPTURE))
          continue;
+
+      /* Make sure we don't recycle compressed vs non-compressed. */
+      if ((iris_heap_is_compressed(flags_to_heap(bufmgr, flags))) !=
+          iris_heap_is_compressed(cur->real.heap)) {
+            continue;
+      }
 
       /* If the last BO in the cache is busy, there are no idle BOs.  Bail,
        * either falling back to a non-matching memzone, or if that fails,

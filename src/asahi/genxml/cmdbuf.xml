@@ -271,10 +271,10 @@
     -->
     <field name="Level offset (sw)" size="27" start="128" type="uint" modifier="shr(7)"/>
     <field name="Aligned width MSAA (sw)" size="15" start="128" type="uint"/>
-    <field name="Tile width (sw)" size="3" start="155" type="uint" modifier="log2"/>
-    <field name="Tile height (sw)" size="3" start="158" type="uint" modifier="log2"/>
-    <field name="Layer stride (sw)" size="27" start="161" type="uint" modifier="shr(7)"/>
-    <field name="Sample count log2 (sw)" size="2" start="188" type="uint"/>
+    <field name="Sample count log2 (sw)" size="2" start="143" type="uint"/>
+    <field name="Tile width (sw)" size="4" start="155" type="uint" modifier="log2"/>
+    <field name="Tile height (sw)" size="4" start="159" type="uint" modifier="log2"/>
+    <field name="Layer stride (sw)" size="27" start="163" type="uint" modifier="shr(7)"/>
     <field name="Buffer offset (sw)" size="32" start="128" type="uint"/>
   </struct>
 
@@ -1100,23 +1100,33 @@
     <value name="16" value="2"/>
   </enum>
 
+  <enum name="ZLS Tiling">
+    <value name="GPU" value="0"/>
+    <value name="Twiddled" value="1"/>
+  </enum>
+
   <struct name="ZLS Control" size="8">
     <field name="Unknown 0" start="0" size="1" type="bool"/>
-    <field name="Unknown 1" start="1" size="1" type="bool"/>
-    <field name="Z Compress 1" start="2" size="1" type="bool"/>
-    <field name="Unknown 3" start="3" size="1" type="bool"/>
-    <field name="S Compress 1" start="4" size="1" type="bool"/>
-    <field name="Unknown 5" start="5" size="1" type="bool"/>
-    <field name="Z Compress 2" start="6" size="1" type="bool"/>
-    <field name="Unknown 7" start="7" size="1" type="bool"/>
-    <field name="S Compress 2" start="8" size="1" type="bool"/>
-    <field name="S Load Enable" start="14" size="1" type="bool"/>
-    <field name="Z Load Enable" start="15" size="1" type="bool"/>
-    <field name="S Store Enable" start="18" size="1" type="bool"/>
-    <field name="Z Store Enable" start="19" size="1" type="bool"/>
+    <field name="Z Load Tiling" start="1" size="1" type="ZLS Tiling"/>
+    <field name="Z Load Compress" start="2" size="1" type="bool"/>
+    <field name="S Load Tiling" start="3" size="1" type="ZLS Tiling"/>
+    <field name="S Load Compress" start="4" size="1" type="bool"/>
+    <field name="Z Store Tiling" start="5" size="1" type="ZLS Tiling"/>
+    <field name="Z Store Compress" start="6" size="1" type="bool"/>
+    <field name="S Store Tiling" start="7" size="1" type="ZLS Tiling"/>
+    <field name="S Store Compress" start="8" size="1" type="bool"/>
+    <field name="S Load" start="14" size="1" type="bool"/>
+    <field name="Z Load" start="15" size="1" type="bool"/>
+    <field name="S Store" start="18" size="1" type="bool"/>
+    <field name="Z Store" start="19" size="1" type="bool"/>
     <field name="Z Format" start="25" size="2" type="ZLS Format"/>
     <field name="Z Resolve" start="56" size="1" type="bool"/>
     <field name="S Resolve" start="58" size="1" type="bool"/>
+  </struct>
+
+  <struct name="CR ISP ZLS Pixels" size="4">
+    <field name="X" start="0" size="15" type="uint" modifier="minus(1)"/>
+    <field name="Y" start="15" size="15" type="uint" modifier="minus(1)"/>
   </struct>
 
 </genxml>

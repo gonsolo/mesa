@@ -139,6 +139,13 @@ csf_oom_handler_init(struct panfrost_context *ctx)
       struct cs_index completed_bottom = cs_reg64(&b, 54);
       struct cs_index completed_chunks = cs_reg_tuple(&b, 52, 4);
 
+      /* Ensure that the OTHER endpoint is valid */
+#if PAN_ARCH >= 11
+      cs_set_state_imm32(&b, MALI_CS_SET_STATE_TYPE_SB_SEL_OTHER, 0);
+#else
+      cs_set_scoreboard_entry(&b, 0, 0);
+#endif
+
       /* Use different framebuffer descriptor depending on whether incremental
        * rendering has already been triggered */
       cs_load32_to(&b, counter, tiler_oom_ctx, FIELD_OFFSET(counter));
@@ -161,7 +168,7 @@ csf_oom_handler_init(struct panfrost_context *ctx)
       cs_wait_slot(&b, 0, false);
 
       /* Run the fragment job and wait */
-      cs_set_scoreboard_entry(&b, 3, 0);
+      cs_select_sb_entries_for_async_ops(&b, 3);
       cs_run_fragment(&b, false, MALI_TILE_RENDER_ORDER_Z_ORDER, false);
       cs_wait_slot(&b, 3, false);
 
@@ -191,7 +198,7 @@ csf_oom_handler_init(struct panfrost_context *ctx)
 
       cs_wait_slot(&b, 0, false);
 
-      cs_set_scoreboard_entry(&b, 2, 0);
+      cs_select_sb_entries_for_async_ops(&b, 2);
    }
 
    assert(cs_is_valid(&b));
@@ -274,7 +281,7 @@ GENX(csf_init_batch)(struct panfrost_batch *batch)
 
    /* Set up entries */
    struct cs_builder *b = batch->csf.cs.builder;
-   cs_set_scoreboard_entry(b, 2, 0);
+   cs_select_sb_entries_for_async_ops(b, 2);
 
    batch->framebuffer = alloc_fbd(batch);
    if (!batch->framebuffer.gpu)
@@ -324,8 +331,8 @@ csf_submit_gsubmit(struct panfrost_context *ctx,
    int ret = 0;
 
    if (!ctx->is_noop) {
-      ret = drmIoctl(panfrost_device_fd(dev), DRM_IOCTL_PANTHOR_GROUP_SUBMIT,
-                     gsubmit);
+      ret = pan_kmod_ioctl(panfrost_device_fd(dev),
+                           DRM_IOCTL_PANTHOR_GROUP_SUBMIT, gsubmit);
    }
 
    if (ret)
@@ -523,8 +530,8 @@ csf_check_ctx_state_and_reinit(struct panfrost_context *ctx)
    };
    int ret;
 
-   ret = drmIoctl(panfrost_device_fd(dev), DRM_IOCTL_PANTHOR_GROUP_GET_STATE,
-                  &state);
+   ret = pan_kmod_ioctl(panfrost_device_fd(dev),
+                        DRM_IOCTL_PANTHOR_GROUP_GET_STATE, &state);
    if (ret) {
       mesa_loge("DRM_IOCTL_PANTHOR_GROUP_GET_STATE failed (err=%d)", errno);
       return;
@@ -690,9 +697,17 @@ csf_emit_tiler_desc(struct panfrost_batch *batch, const struct pan_fb_info *fb)
                                          batch->key.height,
                                          dev->tiler_features.max_levels);
 
-      /* For effective tile size larger than 16x16, disable first level */
-      if (fb->tile_size > 16 * 16)
-         tiler.hierarchy_mask &= ~1;
+      /* Disable hierarchies falling under the effective tile size. */
+      uint32_t disable_hierarchies;
+      for (disable_hierarchies = 0;
+           fb->tile_size > (16 * 16) << (disable_hierarchies * 2);
+           disable_hierarchies++)
+         ;
+      tiler.hierarchy_mask &= ~BITFIELD_MASK(disable_hierarchies);
+
+#if PAN_ARCH >= 12
+      tiler.effective_tile_size = fb->tile_size;
+#endif
 
       tiler.fb_width = batch->key.width;
       tiler.fb_height = batch->key.height;
@@ -869,7 +884,12 @@ csf_emit_shader_regs(struct panfrost_batch *batch, enum pipe_shader_type stage,
    assert(stage == PIPE_SHADER_VERTEX || stage == PIPE_SHADER_FRAGMENT ||
           stage == PIPE_SHADER_COMPUTE);
 
+#if PAN_ARCH >= 12
+   unsigned offset = (stage == PIPE_SHADER_FRAGMENT) ? 2 : 0;
+#else
    unsigned offset = (stage == PIPE_SHADER_FRAGMENT) ? 4 : 0;
+#endif
+
    unsigned fau_count = DIV_ROUND_UP(batch->nr_push_uniforms[stage], 2);
 
    struct cs_builder *b = batch->csf.cs.builder;
@@ -1088,7 +1108,7 @@ csf_emit_draw_state(struct panfrost_batch *batch,
    }
 
    csf_emit_shader_regs(batch, PIPE_SHADER_VERTEX,
-                        panfrost_get_position_shader(batch, info));
+      panfrost_get_position_shader(batch, info));
 
    if (fs_required) {
       csf_emit_shader_regs(batch, PIPE_SHADER_FRAGMENT,
@@ -1099,12 +1119,18 @@ csf_emit_draw_state(struct panfrost_batch *batch,
       cs_move64_to(b, cs_sr_reg64(b, IDVS, FRAGMENT_SPD), 0);
    }
 
+#if PAN_ARCH >= 12
+   cs_move64_to(b, cs_reg64(b, MALI_IDVS_SR_VERTEX_TSD), batch->tls.gpu);
+   cs_move64_to(b, cs_reg64(b, MALI_IDVS_SR_FRAGMENT_TSD), batch->tls.gpu);
+#else
    if (secondary_shader) {
       cs_move64_to(b, cs_sr_reg64(b, IDVS, VERTEX_VARY_SPD),
                    panfrost_get_varying_shader(batch));
    }
 
    cs_move64_to(b, cs_sr_reg64(b, IDVS, TSD_0), batch->tls.gpu);
+#endif
+
    cs_move32_to(b, cs_sr_reg32(b, IDVS, GLOBAL_ATTRIBUTE_OFFSET), 0);
    cs_move32_to(b, cs_sr_reg32(b, IDVS, INSTANCE_OFFSET), 0);
    cs_move32_to(b, cs_sr_reg32(b, IDVS, DCD2), 0);
@@ -1116,10 +1142,16 @@ csf_emit_draw_state(struct panfrost_batch *batch,
    uint64_t *sbd = (uint64_t *)&batch->scissor[0];
    cs_move64_to(b, cs_sr_reg64(b, IDVS, SCISSOR_BOX), *sbd);
 
+#if PAN_ARCH >= 12
+   uint64_t *avalon_viewport = (uint64_t *)batch->avalon_viewport;
+   cs_move64_to(b, cs_sr_reg64(b, IDVS, VIEWPORT_HIGH), avalon_viewport[0]);
+   cs_move64_to(b, cs_sr_reg64(b, IDVS, VIEWPORT_LOW), avalon_viewport[1]);
+#else
    cs_move32_to(b, cs_sr_reg32(b, IDVS, LOW_DEPTH_CLAMP),
                 fui(batch->minimum_z));
    cs_move32_to(b, cs_sr_reg32(b, IDVS, HIGH_DEPTH_CLAMP),
                 fui(batch->maximum_z));
+#endif
 
    if (ctx->occlusion_query && ctx->active_queries) {
       struct panfrost_resource *rsrc = pan_resource(ctx->occlusion_query->rsrc);
@@ -1140,8 +1172,10 @@ csf_emit_draw_state(struct panfrost_batch *batch,
 
    struct mali_primitive_flags_packed primitive_flags;
    pan_pack(&primitive_flags, PRIMITIVE_FLAGS, cfg) {
+#if PAN_ARCH < 13
       if (panfrost_writes_point_size(ctx))
          cfg.point_size_array_format = MALI_POINT_SIZE_ARRAY_FORMAT_FP16;
+#endif
 
       cfg.allow_rotating_primitives = allow_rotating_primitives(fs, info);
 
@@ -1208,7 +1242,8 @@ csf_emit_draw_state(struct panfrost_batch *batch,
          struct pan_earlyzs_state earlyzs = pan_earlyzs_get(
             fs->earlyzs, ctx->depth_stencil->writes_zs || has_oq,
             ctx->blend->base.alpha_to_coverage,
-            ctx->depth_stencil->zs_always_passes);
+            ctx->depth_stencil->zs_always_passes,
+            PAN_EARLYZS_ZS_TILEBUF_NOT_READ);
 
          cfg.pixel_kill_operation = (enum mali_pixel_kill)earlyzs.kill;
          cfg.zs_update_operation = (enum mali_pixel_kill)earlyzs.update;
@@ -1269,12 +1304,17 @@ csf_emit_draw_state(struct panfrost_batch *batch,
    cs_move32_to(b, cs_sr_reg32(b, IDVS, DCD0), dcd_flags0.opaque[0]);
    cs_move32_to(b, cs_sr_reg32(b, IDVS, DCD1), dcd_flags1.opaque[0]);
 
+#if PAN_ARCH >= 13
+   cs_move32_to(b, cs_reg32(b, MALI_IDVS_SR_LINE_WIDTH),
+                fui(ctx->rasterizer->base.line_width));
+#else
    struct mali_primitive_size_packed primsize;
    panfrost_emit_primitive_size(ctx, info->mode == MESA_PRIM_POINTS, 0,
                                 &primsize);
    struct mali_primitive_size_packed *primsize_ptr = &primsize;
    cs_move64_to(b, cs_sr_reg64(b, IDVS, PRIMITIVE_SIZE),
                 *((uint64_t *)primsize_ptr));
+#endif
 
    struct mali_primitive_flags_packed flags_override;
    /* Pack with nodefaults so only explicitly set override fields affect the
@@ -1331,8 +1371,13 @@ GENX(csf_launch_draw)(struct panfrost_batch *batch,
       cs_move32_to(b, cs_sr_reg32(b, IDVS, INDEX_BUFFER_SIZE), 0);
    }
 
+#if PAN_ARCH >= 12
+   cs_run_idvs2(b, flags_override, false, true, drawid,
+                MALI_IDVS_SHADING_MODE_EARLY);
+#else
    cs_run_idvs(b, flags_override, false, true, cs_shader_res_sel(0, 0, 1, 0),
                cs_shader_res_sel(2, 2, 2, 0), drawid);
+#endif
 }
 
 void
@@ -1373,8 +1418,13 @@ GENX(csf_launch_draw_indirect)(struct panfrost_batch *batch,
       }
 
       cs_wait_slot(b, 0, false);
+#if PAN_ARCH >= 12
+      cs_run_idvs2(b, flags_override, false, true, drawid,
+                  MALI_IDVS_SHADING_MODE_EARLY);
+#else
       cs_run_idvs(b, flags_override, false, true, cs_shader_res_sel(0, 0, 1, 0),
                   cs_shader_res_sel(2, 2, 2, 0), drawid);
+#endif
 
       cs_add64(b, address, address, indirect->stride);
       cs_add32(b, counter, counter, (unsigned int)-1);
@@ -1401,6 +1451,7 @@ get_panthor_group_priority(struct panfrost_context *ctx)
 int
 GENX(csf_init_context)(struct panfrost_context *ctx)
 {
+   struct panfrost_screen *screen = pan_screen(ctx->base.screen);
    struct panfrost_device *dev = pan_device(ctx->base.screen);
    struct drm_panthor_queue_create qc[] = {{
       .priority = 1,
@@ -1408,11 +1459,11 @@ GENX(csf_init_context)(struct panfrost_context *ctx)
    }};
 
    struct drm_panthor_group_create gc = {
-      .compute_core_mask = dev->kmod.props.shader_present,
-      .fragment_core_mask = dev->kmod.props.shader_present,
+      .compute_core_mask = screen->compute_core_mask,
+      .fragment_core_mask = screen->fragment_core_mask,
       .tiler_core_mask = 1,
-      .max_compute_cores = util_bitcount64(dev->kmod.props.shader_present),
-      .max_fragment_cores = util_bitcount64(dev->kmod.props.shader_present),
+      .max_compute_cores = util_bitcount64(screen->compute_core_mask),
+      .max_fragment_cores = util_bitcount64(screen->fragment_core_mask),
       .max_tiler_cores = 1,
       .priority = get_panthor_group_priority(ctx),
       .queues = DRM_PANTHOR_OBJ_ARRAY(ARRAY_SIZE(qc), qc),
@@ -1420,7 +1471,8 @@ GENX(csf_init_context)(struct panfrost_context *ctx)
    };
 
    int ret =
-      drmIoctl(panfrost_device_fd(dev), DRM_IOCTL_PANTHOR_GROUP_CREATE, &gc);
+      pan_kmod_ioctl(panfrost_device_fd(dev), DRM_IOCTL_PANTHOR_GROUP_CREATE,
+                     &gc);
 
    if (ret)
       goto err_group_create;
@@ -1440,8 +1492,8 @@ GENX(csf_init_context)(struct panfrost_context *ctx)
       .max_chunks = pan_screen(ctx->base.screen)->csf_tiler_heap.max_chunks,
       .target_in_flight = 65535,
    };
-   ret = drmIoctl(panfrost_device_fd(dev), DRM_IOCTL_PANTHOR_TILER_HEAP_CREATE,
-                  &thc);
+   ret = pan_kmod_ioctl(panfrost_device_fd(dev),
+                        DRM_IOCTL_PANTHOR_TILER_HEAP_CREATE, &thc);
 
    if (ret)
       goto err_tiler_heap;
@@ -1549,10 +1601,11 @@ err_tiler_heap_cs_bo:
 err_tiler_heap_tmp_geom_bo:
    panfrost_bo_unreference(ctx->csf.heap.desc_bo);
 err_tiler_heap_desc_bo:
-   drmIoctl(panfrost_device_fd(dev), DRM_IOCTL_PANTHOR_TILER_HEAP_DESTROY,
-            &thd);
+   pan_kmod_ioctl(panfrost_device_fd(dev),
+                  DRM_IOCTL_PANTHOR_TILER_HEAP_DESTROY, &thd);
 err_tiler_heap:
-   drmIoctl(panfrost_device_fd(dev), DRM_IOCTL_PANTHOR_GROUP_DESTROY, &gd);
+   pan_kmod_ioctl(panfrost_device_fd(dev), DRM_IOCTL_PANTHOR_GROUP_DESTROY,
+                  &gd);
 err_group_create:
    return -1;
 }
@@ -1574,8 +1627,8 @@ GENX(csf_cleanup_context)(struct panfrost_context *ctx)
                         NULL);
    assert(!ret);
 
-   ret = drmIoctl(panfrost_device_fd(dev), DRM_IOCTL_PANTHOR_TILER_HEAP_DESTROY,
-                  &thd);
+   ret = pan_kmod_ioctl(panfrost_device_fd(dev),
+                        DRM_IOCTL_PANTHOR_TILER_HEAP_DESTROY, &thd);
    assert(!ret);
 
    struct drm_panthor_group_destroy gd = {
@@ -1583,7 +1636,8 @@ GENX(csf_cleanup_context)(struct panfrost_context *ctx)
    };
 
    ret =
-      drmIoctl(panfrost_device_fd(dev), DRM_IOCTL_PANTHOR_GROUP_DESTROY, &gd);
+      pan_kmod_ioctl(panfrost_device_fd(dev), DRM_IOCTL_PANTHOR_GROUP_DESTROY,
+                     &gd);
    assert(!ret);
 
    panfrost_bo_unreference(ctx->csf.tmp_geom_bo);

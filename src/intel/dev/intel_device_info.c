@@ -984,12 +984,6 @@ static const struct intel_device_info intel_device_info_adl_gt1 = {
    .platform = INTEL_PLATFORM_ADL,
 };
 
-static const struct intel_device_info intel_device_info_adl_n = {
-   GFX12_GT_CONFIG(1),
-   .platform = INTEL_PLATFORM_ADL,
-   .is_adl_n = true,
-};
-
 static const struct intel_device_info intel_device_info_adl_gt2 = {
    GFX12_GT_CONFIG(2),
    .platform = INTEL_PLATFORM_ADL,
@@ -1046,6 +1040,7 @@ static const struct intel_device_info intel_device_info_sg1 = {
    .has_ray_tracing = true,                                     \
    .has_mesh_shading = true,                                    \
    .has_bfloat16 = true,                                        \
+   .has_systolic = true,                                        \
    .has_coarse_pixel_primitive_and_cb = true,                   \
    .needs_null_push_constant_tbimr_workaround = true,           \
    .simulator_id = 29
@@ -1110,6 +1105,9 @@ static const struct intel_device_info intel_device_info_atsm_g11 = {
    .platform = INTEL_PLATFORM_ ## platform_suffix,              \
    .has_64bit_float = true,                                     \
    .has_64bit_float_via_math_pipe = true,                       \
+   .has_bfloat16 = false,                                       \
+   /* BSpec 55414 (r53716). */                                  \
+   .has_systolic = false,                                       \
    /* BSpec 45101 (r51017) */                                   \
    .pat = {                                                     \
          /* CPU: WB, GPU: PAT 3 => WB, 1WAY */                  \
@@ -1136,6 +1134,9 @@ static const struct intel_device_info intel_device_info_arl_u = {
 
 static const struct intel_device_info intel_device_info_arl_h = {
    MTL_CONFIG(ARL_H),
+   .has_bfloat16 = true,
+   /* BSpec 55414 (r53716). */
+   .has_systolic = true,
 };
 
 #define XE2_FEATURES                                            \
@@ -1858,7 +1859,7 @@ intel_get_device_info_from_fd(int fd, struct intel_device_info *devinfo, int min
       drmFreeDevice(&drmdev);
       return false;
    }
-   
+
    if ((min_ver > 0 && devinfo->ver < min_ver) || (max_ver > 0 && devinfo->ver > max_ver)) {
       drmFreeDevice(&drmdev);
       return false;

@@ -38,6 +38,7 @@
 #include "util/u_screen.h"
 #include "util/u_video.h"
 #include "util/xmlconfig.h"
+#include "util/perf/cpu_trace.h"
 
 #include <fcntl.h>
 
@@ -401,8 +402,6 @@ panfrost_init_compute_caps(struct panfrost_screen *screen)
 
    caps->address_bits = 64;
 
-   snprintf(caps->ir_target, sizeof(caps->ir_target), "panfrost");
-
    caps->grid_dimension = 3;
 
    caps->max_grid_size[0] =
@@ -497,6 +496,10 @@ panfrost_init_screen_caps(struct panfrost_screen *screen)
    /* Removed in v9 (Valhall) */
    caps->depth_clip_disable_separate = dev->arch < 9;
 
+   /* On v13+, point size cannot be set in the command stream anymore. */
+   caps->point_size_fixed = dev->arch >= 13 ? PIPE_POINT_SIZE_LOWER_USER_ONLY
+                                            : PIPE_POINT_SIZE_LOWER_NEVER;
+
    caps->max_render_targets =
    caps->fbfetch = has_mrt ? 8 : 1;
    caps->fbfetch_coherent = true;
@@ -514,7 +517,7 @@ panfrost_init_screen_caps(struct panfrost_screen *screen)
     * work to turn on, since CYCLE_COUNT_START needs to be issued. In
     * kbase, userspace requests this via BASE_JD_REQ_PERMON. There is not
     * yet way to request this with mainline TODO */
-   caps->shader_clock = false;
+   caps->shader_clock = dev->arch >= 6;
 
    caps->vs_instanceid = true;
    caps->texture_multisample = true;
@@ -780,6 +783,24 @@ panfrost_get_timestamp(struct pipe_screen *pscreen)
    return pan_gpu_time_to_ns(dev, pan_kmod_query_timestamp(dev->kmod.dev));
 }
 
+static int
+get_core_mask(const struct panfrost_device *dev,
+              const struct pipe_screen_config *config,
+              const char *option_name, uint64_t *mask)
+{
+   uint64_t present = dev->kmod.props.shader_present;
+   *mask = driQueryOptionu64(config->options, option_name) & present;
+
+   if (!*mask) {
+      debug_printf("panfrost: None of the cores specified in %s are present. "
+                   "Available shader cores are 0x%" PRIx64 ".\n",
+                   option_name, present);
+      return -1;
+   }
+
+   return 0;
+}
+
 struct pipe_screen *
 panfrost_create_screen(int fd, const struct pipe_screen_config *config,
                        struct renderonly *ro)
@@ -800,6 +821,8 @@ panfrost_create_screen(int fd, const struct pipe_screen_config *config,
       debug_get_flags_option("PAN_MESA_DEBUG", panfrost_debug_options, 0);
    screen->max_afbc_packing_ratio = debug_get_num_option(
       "PAN_MAX_AFBC_PACKING_RATIO", DEFAULT_MAX_AFBC_PACKING_RATIO);
+
+   util_cpu_trace_init();
 
    if (panfrost_open_device(screen, fd, dev)) {
       ralloc_free(screen);
@@ -834,6 +857,19 @@ panfrost_create_screen(int fd, const struct pipe_screen_config *config,
       int64_t rate =
          debug_parse_num_option(option, PIPE_COMPRESSION_FIXED_RATE_NONE);
       screen->force_afrc_rate = rate;
+   }
+
+   int result = get_core_mask(dev, config, "pan_compute_core_mask",
+                              &screen->compute_core_mask);
+   if (result) {
+      panfrost_destroy_screen(&(screen->base));
+      return NULL;
+   }
+   result = get_core_mask(dev, config, "pan_fragment_core_mask",
+                          &screen->fragment_core_mask);
+   if (result) {
+      panfrost_destroy_screen(&(screen->base));
+      return NULL;
    }
 
    screen->csf_tiler_heap.chunk_size = driQueryOptioni(config->options,
@@ -904,6 +940,12 @@ panfrost_create_screen(int fd, const struct pipe_screen_config *config,
       break;
    case 10:
       panfrost_cmdstream_screen_init_v10(screen);
+      break;
+   case 12:
+      panfrost_cmdstream_screen_init_v12(screen);
+      break;
+   case 13:
+      panfrost_cmdstream_screen_init_v13(screen);
       break;
    default:
       debug_printf("panfrost: Unhandled architecture major %d", dev->arch);

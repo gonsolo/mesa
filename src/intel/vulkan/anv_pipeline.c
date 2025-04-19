@@ -978,8 +978,7 @@ anv_pipeline_lower_nir(struct anv_pipeline *pipeline,
                });
    }
 
-   if (nir->info.stage == MESA_SHADER_MESH ||
-         nir->info.stage == MESA_SHADER_TASK) {
+   if (gl_shader_stage_is_mesh(nir->info.stage)) {
       nir_lower_compute_system_values_options options = {
             .lower_workgroup_id_to_index = true,
             /* nir_lower_idiv generates expensive code */
@@ -1127,10 +1126,8 @@ anv_pipeline_lower_nir(struct anv_pipeline *pipeline,
               pipeline->layout.type);
 
    if (gl_shader_stage_uses_workgroup(nir->info.stage)) {
-      if (!nir->info.shared_memory_explicit_layout) {
-         NIR_PASS(_, nir, nir_lower_vars_to_explicit_types,
-                  nir_var_mem_shared, shared_type_info);
-      }
+      NIR_PASS(_, nir, nir_lower_vars_to_explicit_types,
+               nir_var_mem_shared, shared_type_info);
 
       NIR_PASS(_, nir, nir_lower_explicit_io,
                nir_var_mem_shared, nir_address_format_32bit_offset);
@@ -1682,7 +1679,8 @@ anv_pipeline_add_executable(struct anv_pipeline *pipeline,
        * do it for every binary.
        */
       brw_disassemble_with_errors(&pipeline->device->physical->compiler->isa,
-                                  stage->code, code_offset, stream);
+                                  stage->code, code_offset,
+                                  &stage->bin->kernel.offset, stream);
 
       fclose(stream);
 
@@ -1692,6 +1690,13 @@ anv_pipeline_add_executable(struct anv_pipeline *pipeline,
       disasm[stream_size] = 0;
 
       free(stream_data);
+   }
+
+   if (INTEL_DEBUG(DEBUG_SHADERS_LINENO) && stage->code) {
+      brw_disassemble_with_lineno(&pipeline->device->physical->compiler->isa,
+                                  stage->stage, (int)stats->dispatch_width,
+                                  stage->source_hash, stage->code, code_offset,
+                                  stage->bin->kernel.offset, stderr);
    }
 
    const struct anv_pipeline_executable exe = {

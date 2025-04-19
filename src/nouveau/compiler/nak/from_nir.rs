@@ -1804,6 +1804,7 @@ impl<'a> ShaderFromNir<'a> {
         } else {
             debug_assert!(mask != 0);
         }
+        let channel_mask = ChannelMask::new(mask);
 
         let dst_comps = u8::try_from(mask.count_ones()).unwrap();
         let dst = b.alloc_ssa(RegFile::GPR, dst_comps);
@@ -1832,7 +1833,7 @@ impl<'a> ShaderFromNir<'a> {
                 src: src,
                 query: TexQuery::Dimension,
                 nodep: flags.nodep(),
-                mask: mask,
+                channel_mask,
             });
         } else if tex.op == nir_texop_tex_type_nv {
             let src = self.get_src(&srcs[0].src);
@@ -1843,7 +1844,7 @@ impl<'a> ShaderFromNir<'a> {
                 src: src,
                 query: TexQuery::TextureType,
                 nodep: flags.nodep(),
-                mask: mask,
+                channel_mask,
             });
         } else {
             let lod_mode = match flags.lod_mode() {
@@ -1884,7 +1885,7 @@ impl<'a> ShaderFromNir<'a> {
                     offset: offset_mode == Tld4OffsetMode::AddOffI,
                     mem_eviction_priority: MemEvictionPriority::Normal,
                     nodep: flags.nodep(),
-                    mask: mask,
+                    channel_mask,
                 });
             } else if tex.op == nir_texop_lod {
                 assert!(offset_mode == Tld4OffsetMode::None);
@@ -1894,7 +1895,7 @@ impl<'a> ShaderFromNir<'a> {
                     srcs: srcs,
                     dim: dim,
                     nodep: flags.nodep(),
-                    mask: mask,
+                    channel_mask,
                 });
             } else if tex.op == nir_texop_txf || tex.op == nir_texop_txf_ms {
                 assert!(offset_mode != Tld4OffsetMode::PerPx);
@@ -1909,7 +1910,7 @@ impl<'a> ShaderFromNir<'a> {
                     offset: offset_mode == Tld4OffsetMode::AddOffI,
                     mem_eviction_priority: MemEvictionPriority::Normal,
                     nodep: flags.nodep(),
-                    mask: mask,
+                    channel_mask,
                 });
             } else if tex.op == nir_texop_tg4 {
                 b.push_op(OpTld4 {
@@ -1923,7 +1924,7 @@ impl<'a> ShaderFromNir<'a> {
                     z_cmpr: flags.has_z_cmpr(),
                     mem_eviction_priority: MemEvictionPriority::Normal,
                     nodep: flags.nodep(),
-                    mask: mask,
+                    channel_mask,
                 });
             } else {
                 assert!(offset_mode != Tld4OffsetMode::PerPx);
@@ -1938,7 +1939,7 @@ impl<'a> ShaderFromNir<'a> {
                     offset: offset_mode == Tld4OffsetMode::AddOffI,
                     mem_eviction_priority: MemEvictionPriority::Normal,
                     nodep: flags.nodep(),
-                    mask: mask,
+                    channel_mask,
                 });
             }
         }
@@ -1957,6 +1958,13 @@ impl<'a> ShaderFromNir<'a> {
                 nir_dst.push(dst[di]);
                 di += 1;
             }
+        }
+
+        if self.sm.sm() < 50 {
+            // TODO: texbar should be created by calc_instr_deps() and
+            // should be less conservative than textures_left=0.
+            // See the old pass: NVC0LegalizePostRA::insertTextureBarriers
+            b.push_op(OpTexDepBar { textures_left: 0 });
         }
         self.set_ssa(tex.def.as_def(), nir_dst);
     }
@@ -2043,6 +2051,19 @@ impl<'a> ShaderFromNir<'a> {
                 ImageDim::_1DBuffer
             }
             _ => panic!("Unsupported image dimension: {}", image_dim),
+        }
+    }
+
+    fn get_image_mem_type(&self, intrin: &nir_intrinsic_instr) -> MemType {
+        match intrin.format() {
+            PIPE_FORMAT_R8_UINT => MemType::U8,
+            PIPE_FORMAT_R8_SINT => MemType::I8,
+            PIPE_FORMAT_R16_UINT => MemType::U16,
+            PIPE_FORMAT_R16_SINT => MemType::I16,
+            PIPE_FORMAT_R32_UINT => MemType::B32,
+            PIPE_FORMAT_R32G32_UINT => MemType::B64,
+            PIPE_FORMAT_R32G32B32A32_UINT => MemType::B128,
+            _ => panic!("Unknown format"),
         }
     }
 
@@ -2164,7 +2185,7 @@ impl<'a> ShaderFromNir<'a> {
                 let src = self.get_ssa(srcs[0].as_def());
                 let mut dst = Vec::new();
                 for comp in src {
-                    let u = b.alloc_ssa(RegFile::UGPR, 1);
+                    let u = b.alloc_ssa(comp.file().to_uniform().unwrap(), 1);
                     b.push_op(OpR2UR {
                         src: [*comp].into(),
                         dst: u.into(),
@@ -2272,31 +2293,48 @@ impl<'a> ShaderFromNir<'a> {
 
                 assert!(intrin.def.bit_size() == 32);
                 let ftype = FloatType::F32;
-                let scratch = b.alloc_ssa(RegFile::GPR, 1);
-
-                b.push_op(OpShfl {
-                    dst: scratch[0].into(),
-                    in_bounds: Dst::None,
-                    src: self.get_src(&srcs[0]),
-                    lane: 1_u32.into(),
-                    c: (0x3_u32 | 0x1c_u32 << 8).into(),
-                    op: ShflOp::Bfly,
-                });
 
                 let dst = b.alloc_ssa(RegFile::GPR, 1);
 
-                b.push_op(OpFSwzAdd {
-                    dst: dst[0].into(),
-                    srcs: [scratch[0].into(), self.get_src(&srcs[0])],
-                    ops: [
-                        FSwzAddOp::SubLeft,
-                        FSwzAddOp::SubRight,
-                        FSwzAddOp::SubLeft,
-                        FSwzAddOp::SubRight,
-                    ],
-                    rnd_mode: self.float_ctl[ftype].rnd_mode,
-                    ftz: self.float_ctl[ftype].ftz,
-                });
+                if self.sm.sm() >= 50 {
+                    let scratch = b.alloc_ssa(RegFile::GPR, 1);
+
+                    b.push_op(OpShfl {
+                        dst: scratch[0].into(),
+                        in_bounds: Dst::None,
+                        src: self.get_src(&srcs[0]),
+                        lane: 1_u32.into(),
+                        c: (0x3_u32 | 0x1c_u32 << 8).into(),
+                        op: ShflOp::Bfly,
+                    });
+
+                    b.push_op(OpFSwzAdd {
+                        dst: dst[0].into(),
+                        srcs: [scratch[0].into(), self.get_src(&srcs[0])],
+                        ops: [
+                            FSwzAddOp::SubLeft,
+                            FSwzAddOp::SubRight,
+                            FSwzAddOp::SubLeft,
+                            FSwzAddOp::SubRight,
+                        ],
+                        rnd_mode: self.float_ctl[ftype].rnd_mode,
+                        ftz: self.float_ctl[ftype].ftz,
+                    });
+                } else {
+                    b.push_op(OpFSwz {
+                        dst: dst[0].into(),
+                        srcs: [self.get_src(&srcs[0]), self.get_src(&srcs[0])],
+                        ops: [
+                            FSwzAddOp::SubLeft,
+                            FSwzAddOp::SubRight,
+                            FSwzAddOp::SubLeft,
+                            FSwzAddOp::SubRight,
+                        ],
+                        rnd_mode: self.float_ctl[ftype].rnd_mode,
+                        ftz: self.float_ctl[ftype].ftz,
+                        shuffle: FSwzShuffle::SwapHorizontal,
+                    });
+                }
 
                 self.set_dst(&intrin.def, dst);
             }
@@ -2307,31 +2345,47 @@ impl<'a> ShaderFromNir<'a> {
 
                 assert!(intrin.def.bit_size() == 32);
                 let ftype = FloatType::F32;
-                let scratch = b.alloc_ssa(RegFile::GPR, 1);
-
-                b.push_op(OpShfl {
-                    dst: scratch[0].into(),
-                    in_bounds: Dst::None,
-                    src: self.get_src(&srcs[0]),
-                    lane: 2_u32.into(),
-                    c: (0x3_u32 | 0x1c_u32 << 8).into(),
-                    op: ShflOp::Bfly,
-                });
-
                 let dst = b.alloc_ssa(RegFile::GPR, 1);
 
-                b.push_op(OpFSwzAdd {
-                    dst: dst[0].into(),
-                    srcs: [scratch[0].into(), self.get_src(&srcs[0])],
-                    ops: [
-                        FSwzAddOp::SubLeft,
-                        FSwzAddOp::SubLeft,
-                        FSwzAddOp::SubRight,
-                        FSwzAddOp::SubRight,
-                    ],
-                    rnd_mode: self.float_ctl[ftype].rnd_mode,
-                    ftz: self.float_ctl[ftype].ftz,
-                });
+                if self.sm.sm() >= 50 {
+                    let scratch = b.alloc_ssa(RegFile::GPR, 1);
+
+                    b.push_op(OpShfl {
+                        dst: scratch[0].into(),
+                        in_bounds: Dst::None,
+                        src: self.get_src(&srcs[0]),
+                        lane: 2_u32.into(),
+                        c: (0x3_u32 | 0x1c_u32 << 8).into(),
+                        op: ShflOp::Bfly,
+                    });
+
+                    b.push_op(OpFSwzAdd {
+                        dst: dst[0].into(),
+                        srcs: [scratch[0].into(), self.get_src(&srcs[0])],
+                        ops: [
+                            FSwzAddOp::SubLeft,
+                            FSwzAddOp::SubLeft,
+                            FSwzAddOp::SubRight,
+                            FSwzAddOp::SubRight,
+                        ],
+                        rnd_mode: self.float_ctl[ftype].rnd_mode,
+                        ftz: self.float_ctl[ftype].ftz,
+                    });
+                } else {
+                    b.push_op(OpFSwz {
+                        dst: dst[0].into(),
+                        srcs: [self.get_src(&srcs[0]), self.get_src(&srcs[0])],
+                        ops: [
+                            FSwzAddOp::SubLeft,
+                            FSwzAddOp::SubLeft,
+                            FSwzAddOp::SubRight,
+                            FSwzAddOp::SubRight,
+                        ],
+                        rnd_mode: self.float_ctl[ftype].rnd_mode,
+                        ftz: self.float_ctl[ftype].ftz,
+                        shuffle: FSwzShuffle::SwapVertical,
+                    });
+                }
 
                 self.set_dst(&intrin.def, dst);
             }
@@ -2459,7 +2513,8 @@ impl<'a> ShaderFromNir<'a> {
                 });
                 self.set_dst(&intrin.def, dst);
             }
-            nir_intrinsic_bindless_image_load => {
+            nir_intrinsic_bindless_image_load
+            | nir_intrinsic_bindless_image_load_raw_nv => {
                 let handle = self.get_src(&srcs[0]);
                 let dim = self.get_image_dim(intrin);
                 let coord = self.get_image_coord(intrin, dim);
@@ -2477,18 +2532,27 @@ impl<'a> ShaderFromNir<'a> {
 
                 let comps = intrin.num_components;
                 assert!(intrin.def.bit_size() == 32);
-                assert!(comps == 1 || comps == 2 || comps == 4);
+                let image_access = if intrin.intrinsic
+                    == nir_intrinsic_bindless_image_load_raw_nv
+                {
+                    let mem_type = self.get_image_mem_type(intrin);
+                    assert!(mem_type.bits().div_ceil(32) == comps.into());
+                    ImageAccess::Binary(mem_type)
+                } else {
+                    assert!(comps == 1 || comps == 2 || comps == 4);
+                    ImageAccess::Formatted(ChannelMask::for_comps(comps))
+                };
 
                 let dst = b.alloc_ssa(RegFile::GPR, comps);
 
                 b.push_op(OpSuLd {
                     dst: dst.into(),
                     fault: Dst::None,
+                    image_access,
                     image_dim: dim,
                     mem_order,
                     mem_eviction_priority: self
                         .get_eviction_priority(intrin.access()),
-                    mask: (1 << comps) - 1,
                     handle: handle,
                     coord: coord,
                 });
@@ -2513,6 +2577,8 @@ impl<'a> ShaderFromNir<'a> {
                 let comps = intrin.num_components;
                 assert!(intrin.def.bit_size() == 32);
                 assert!(comps == 5);
+                let image_access =
+                    ImageAccess::Formatted(ChannelMask::for_comps(comps - 1));
 
                 let dst = b.alloc_ssa(RegFile::GPR, comps - 1);
                 let fault = b.alloc_ssa(RegFile::Pred, 1);
@@ -2520,11 +2586,11 @@ impl<'a> ShaderFromNir<'a> {
                 b.push_op(OpSuLd {
                     dst: dst.into(),
                     fault: fault.into(),
+                    image_access,
                     image_dim: dim,
                     mem_order,
                     mem_eviction_priority: self
                         .get_eviction_priority(intrin.access()),
-                    mask: (1 << (comps - 1)) - 1,
                     handle: handle,
                     coord: coord,
                 });
@@ -2547,13 +2613,15 @@ impl<'a> ShaderFromNir<'a> {
                 let comps = intrin.num_components;
                 assert!(srcs[3].bit_size() == 32);
                 assert!(comps == 1 || comps == 2 || comps == 4);
+                let image_access =
+                    ImageAccess::Formatted(ChannelMask::for_comps(comps));
 
                 b.push_op(OpSuSt {
+                    image_access,
                     image_dim: dim,
                     mem_order: MemOrder::Strong(MemScope::GPU),
                     mem_eviction_priority: self
                         .get_eviction_priority(intrin.access()),
-                    mask: (1 << comps) - 1,
                     handle: handle,
                     coord: coord,
                     data: data,

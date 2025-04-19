@@ -95,7 +95,7 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
    /* apparently gfx702 also has 16-bank LDS but I can't find a family for that */
    program->dev.has_16bank_lds = family == CHIP_KABINI || family == CHIP_STONEY;
 
-   program->dev.vgpr_limit = stage == raytracing_cs ? 128 : 256;
+   program->dev.vgpr_limit = 256;
    program->dev.physical_vgprs = 256;
    program->dev.vgpr_alloc_granule = 4;
 
@@ -127,6 +127,9 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
       program->dev.sgpr_alloc_granule = 8;
       program->dev.sgpr_limit = 104;
    }
+
+   if (program->stage == raytracing_cs)
+      program->dev.vgpr_limit = util_align_npot(128, program->dev.vgpr_alloc_granule);
 
    program->dev.scratch_alloc_granule = gfx_level >= GFX11 ? 256 : 1024;
 
@@ -1380,8 +1383,11 @@ should_form_clause(const Instruction* a, const Instruction* b)
    if (a->definitions.empty() != b->definitions.empty())
       return false;
 
-   if (a->format != b->format)
+   /* MUBUF and MTBUF can appear in the same clause. */
+   if ((a->isMTBUF() && b->isMUBUF()) || (a->isMUBUF() && b->isMTBUF())) {
+   } else if (a->format != b->format) {
       return false;
+   }
 
    if (a->operands.empty() || b->operands.empty())
       return false;
@@ -1404,9 +1410,10 @@ should_form_clause(const Instruction* a, const Instruction* b)
    return false;
 }
 
-int
-get_op_fixed_to_def(Instruction* instr)
+aco::small_vec<uint32_t, 2>
+get_ops_fixed_to_def(Instruction* instr)
 {
+   aco::small_vec<uint32_t, 2> ops;
    if (instr->opcode == aco_opcode::v_interp_p2_f32 || instr->opcode == aco_opcode::v_mac_f32 ||
        instr->opcode == aco_opcode::v_fmac_f32 || instr->opcode == aco_opcode::v_mac_f16 ||
        instr->opcode == aco_opcode::v_fmac_f16 || instr->opcode == aco_opcode::v_mac_legacy_f32 ||
@@ -1415,23 +1422,28 @@ get_op_fixed_to_def(Instruction* instr)
        instr->opcode == aco_opcode::v_writelane_b32_e64 ||
        instr->opcode == aco_opcode::v_dot4c_i32_i8 || instr->opcode == aco_opcode::s_fmac_f32 ||
        instr->opcode == aco_opcode::s_fmac_f16) {
-      return 2;
+      ops.push_back(2);
    } else if (instr->opcode == aco_opcode::s_addk_i32 || instr->opcode == aco_opcode::s_mulk_i32 ||
               instr->opcode == aco_opcode::s_cmovk_i32) {
-      return 0;
+      ops.push_back(0);
    } else if (instr->isMUBUF() && instr->definitions.size() == 1 && instr->operands.size() == 4) {
-      return 3;
+      ops.push_back(3);
    } else if (instr->isMIMG() && instr->definitions.size() == 1 &&
               !instr->operands[2].isUndefined()) {
-      return 2;
+      ops.push_back(2);
+   } else if (instr->opcode == aco_opcode::image_bvh8_intersect_ray) {
+      /* VADDR starts at 3. */
+      ops.push_back(3 + 2);
+      ops.push_back(3 + 3);
    }
-   return -1;
+   return ops;
 }
 
 uint8_t
 get_vmem_type(enum amd_gfx_level gfx_level, Instruction* instr)
 {
-   if (instr->opcode == aco_opcode::image_bvh64_intersect_ray)
+   if (instr->opcode == aco_opcode::image_bvh64_intersect_ray ||
+       instr->opcode == aco_opcode::image_bvh8_intersect_ray)
       return vmem_bvh;
    else if (gfx_level >= GFX12 && instr->opcode == aco_opcode::image_msaa_load)
       return vmem_sampler;

@@ -887,6 +887,8 @@ validate_ir(Program* program)
                            program->gfx_level >= GFX12 ? (instr->operands.size() - 4) : 4;
                         if (instr->opcode != aco_opcode::image_bvh_intersect_ray &&
                             instr->opcode != aco_opcode::image_bvh64_intersect_ray &&
+                            instr->opcode != aco_opcode::image_bvh_dual_intersect_ray &&
+                            instr->opcode != aco_opcode::image_bvh8_intersect_ray &&
                             i < 3 + num_scalar) {
                            check(instr->operands[i].regClass() == v1,
                                  "first 4 GFX11 MIMG VADDR must be v1 if NSA is used", instr.get());
@@ -1472,11 +1474,13 @@ validate_ra(Program* program)
             assignments[def.tempId()].valid = true;
          }
 
-         int op_fixed_to_def = get_op_fixed_to_def(instr.get());
-         if (op_fixed_to_def != -1 &&
-             instr->definitions[0].physReg() != instr->operands[op_fixed_to_def].physReg()) {
-            err |= ra_fail(program, loc, Location(),
-                           "Operand %d must have the same register as definition", op_fixed_to_def);
+         unsigned fixed_def_idx = 0;
+         for (auto op_idx : get_ops_fixed_to_def(instr.get())) {
+            if (instr->definitions[fixed_def_idx++].physReg() !=
+                instr->operands[op_idx].physReg()) {
+               err |= ra_fail(program, loc, Location(),
+                              "Operand %d must have the same register as definition", op_idx);
+            }
          }
       }
    }

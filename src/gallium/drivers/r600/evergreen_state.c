@@ -555,10 +555,12 @@ static void *evergreen_create_rs_state(struct pipe_context *ctx,
 	if (rctx->b.gfx_level == CAYMAN) {
 		r600_store_context_reg(&rs->buffer, CM_R_028BE4_PA_SU_VTX_CNTL,
 				       S_028C08_PIX_CENTER_HALF(state->half_pixel_center) |
+				       S_028C08_ROUND_MODE(V_028C08_X_ROUND_TO_EVEN) |
 				       S_028C08_QUANT_MODE(V_028C08_X_1_256TH));
 	} else {
 		r600_store_context_reg(&rs->buffer, R_028C08_PA_SU_VTX_CNTL,
 				       S_028C08_PIX_CENTER_HALF(state->half_pixel_center) |
+				       S_028C08_ROUND_MODE(V_028C08_X_ROUND_TO_EVEN) |
 				       S_028C08_QUANT_MODE(V_028C08_X_1_256TH));
 	}
 
@@ -4670,6 +4672,7 @@ void evergreen_init_state_functions(struct r600_context *rctx)
 	r600_add_atom(rctx, &rctx->b.render_cond_atom, id++);
 	r600_add_atom(rctx, &rctx->b.streamout.begin_atom, id++);
 	r600_add_atom(rctx, &rctx->b.streamout.enable_atom, id++);
+	r600_add_atom(rctx, &rctx->b.window_rectangles.atom, id++);
 	for (i = 0; i < EG_NUM_HW_STAGES; i++)
 		r600_init_atom(rctx, &rctx->hw_shader_stages[i].atom, id++, r600_emit_shader, 0);
 	r600_init_atom(rctx, &rctx->shader_stages.atom, id++, evergreen_emit_shader_stages, 15);
