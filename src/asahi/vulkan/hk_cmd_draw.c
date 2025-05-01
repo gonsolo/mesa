@@ -994,11 +994,10 @@ hk_CmdEndRendering(VkCommandBuffer commandBuffer)
 }
 
 static uint64_t
-hk_geometry_state(struct hk_cmd_buffer *cmd)
+hk_heap(struct hk_cmd_buffer *cmd)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
-   /* We tie heap allocation to geometry state allocation, so allocate now. */
    if (unlikely(!dev->heap)) {
       perf_debug(cmd, "Allocating heap");
 
@@ -1008,29 +1007,28 @@ hk_geometry_state(struct hk_cmd_buffer *cmd)
       /* The geometry state buffer is initialized here and then is treated by
        * the CPU as rodata, even though the GPU uses it for scratch internally.
        */
-      off_t off = dev->rodata.geometry_state - dev->rodata.bo->va->addr;
-      struct agx_geometry_state *map = agx_bo_map(dev->rodata.bo) + off;
+      off_t off = dev->rodata.heap - dev->rodata.bo->va->addr;
+      struct agx_heap *map = agx_bo_map(dev->rodata.bo) + off;
 
-      *map = (struct agx_geometry_state){
-         .heap = dev->heap->va->addr,
-         .heap_size = size,
+      *map = (struct agx_heap){
+         .base = dev->heap->va->addr,
+         .size = size,
       };
    }
 
    /* We need to free all allocations after each command buffer execution */
    if (!cmd->uses_heap) {
       perf_debug(cmd, "Freeing heap");
-      uint64_t addr = dev->rodata.geometry_state;
+      uint64_t addr = dev->rodata.heap;
 
       /* Zeroing the allocated index frees everything */
-      hk_queue_write(cmd,
-                     addr + offsetof(struct agx_geometry_state, heap_bottom), 0,
+      hk_queue_write(cmd, addr + offsetof(struct agx_heap, bottom), 0,
                      true /* after gfx */);
 
       cmd->uses_heap = true;
    }
 
-   return dev->rodata.geometry_state;
+   return dev->rodata.heap;
 }
 
 static uint64_t
@@ -1092,6 +1090,7 @@ hk_rast_prim(struct hk_cmd_buffer *cmd)
 static uint64_t
 hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 {
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_descriptor_state *desc = &cmd->state.gfx.descriptors;
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    struct hk_graphics_state *gfx = &cmd->state.gfx;
@@ -1111,7 +1110,6 @@ hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    }
 
    struct agx_geometry_params params = {
-      .state = hk_geometry_state(cmd),
       .flat_outputs = fs->info.fs.interp.flat,
       .input_topology = mode,
 
@@ -1150,12 +1148,24 @@ hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
       params.count_buffer = T.gpu;
    }
 
+   /* Workgroup size */
+   params.vs_grid[3] = params.gs_grid[3] = 64;
+   params.vs_grid[4] = params.gs_grid[4] = 1;
+   params.vs_grid[5] = params.gs_grid[5] = 1;
+
+   struct agx_gs_info *gsi = &count->info.gs;
+
    if (indirect) {
       /* TODO: size */
       cmd->geom_indirect = hk_pool_alloc(cmd, 64, 4).gpu;
 
       params.indirect_desc = cmd->geom_indirect;
       params.vs_grid[2] = params.gs_grid[2] = 1;
+
+      if (gsi->shape == AGX_GS_SHAPE_DYNAMIC_INDEXED) {
+         cmd->geom_index_buffer = dev->heap->va->addr;
+         cmd->geom_index_count = dev->heap->size;
+      }
    } else {
       uint32_t verts = draw.b.count[0], instances = draw.b.count[1];
 
@@ -1170,13 +1180,23 @@ hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
          params.count_buffer = hk_pool_alloc(cmd, size, 4).gpu;
       }
 
-      cmd->geom_index_count =
-         params.input_primitives * count->info.gs.max_indices;
+      cmd->geom_index_count = agx_gs_rast_vertices(
+         gsi->shape, gsi->max_indices, params.gs_grid[0], instances);
 
-      params.output_index_buffer =
-         hk_pool_alloc(cmd, cmd->geom_index_count * 4, 4).gpu;
+      cmd->geom_instance_count = agx_gs_rast_instances(
+         gsi->shape, gsi->max_indices, params.gs_grid[0], instances);
 
-      cmd->geom_index_buffer = params.output_index_buffer;
+      if (gsi->shape == AGX_GS_SHAPE_DYNAMIC_INDEXED) {
+         params.output_index_buffer =
+            hk_pool_alloc(cmd, cmd->geom_index_count * 4, 4).gpu;
+
+         cmd->geom_index_buffer = params.output_index_buffer;
+      }
+   }
+
+   if (gsi->shape == AGX_GS_SHAPE_STATIC_INDEXED) {
+      cmd->geom_index_buffer =
+         hk_pool_upload(cmd, count->info.gs.topology, gsi->max_indices * 4, 4);
    }
 
    desc->root_dirty = true;
@@ -1200,7 +1220,7 @@ hk_upload_tess_params(struct hk_cmd_buffer *cmd, struct libagx_tess_args *out,
          : LIBAGX_TESS_PARTITIONING_FRACTIONAL_EVEN;
 
    struct libagx_tess_args args = {
-      .heap = hk_geometry_state(cmd),
+      .heap = hk_heap(cmd),
       .tcs_stride_el = tcs->info.tess.tcs_output_stride / 4,
       .statistic = hk_pipeline_stat_addr(
          cmd,
@@ -1224,7 +1244,7 @@ hk_upload_tess_params(struct hk_cmd_buffer *cmd, struct libagx_tess_args *out,
    uint32_t draw_stride_el = 5;
    size_t draw_stride_B = draw_stride_el * sizeof(uint32_t);
 
-   /* heap is allocated by hk_geometry_state */
+   /* heap is allocated by hk_heap */
    args.patch_coord_buffer = dev->heap->va->addr;
 
    if (!agx_is_indirect(draw.b)) {
@@ -1367,7 +1387,7 @@ hk_draw_without_restart(struct hk_cmd_buffer *cmd, struct agx_draw draw,
    assert(draw_count == 1 && "TODO: multidraw");
 
    struct libagx_unroll_restart_args ia = {
-      .heap = hk_geometry_state(cmd),
+      .heap = hk_heap(cmd),
       .index_buffer = draw.index_buffer,
       .in_draw = draw.b.ptr,
       .out_draw = hk_pool_alloc(cmd, 5 * sizeof(uint32_t) * draw_count, 4).gpu,
@@ -1408,6 +1428,7 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    uint64_t geometry_params = desc->root.draw.geometry_params;
    unsigned count_words = count->info.gs.count_words;
+   struct agx_workgroup wg = agx_workgroup(64, 1, 1);
 
    if (false /* TODO */)
       perf_debug(cmd, "Transform feedbck");
@@ -1426,6 +1447,7 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    /* Setup grids */
    if (agx_is_indirect(draw.b)) {
       struct libagx_gs_setup_indirect_args gsi = {
+         .heap = hk_heap(cmd),
          .index_buffer = draw.index_buffer,
          .draw = draw.b.ptr,
          .ia = desc->root.draw.input_assembly,
@@ -1433,7 +1455,8 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          .vs_outputs = vs->b.info.outputs,
          .prim = mode,
          .is_prefix_summing = count->info.gs.prefix_sum,
-         .indices_per_in_prim = count->info.gs.max_indices,
+         .max_indices = count->info.gs.max_indices,
+         .shape = count->info.gs.shape,
       };
 
       if (cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL]) {
@@ -1453,10 +1476,10 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       libagx_gs_setup_indirect_struct(cmd, agx_1d(1),
                                       AGX_BARRIER_ALL | AGX_PREGFX, gsi);
 
-      grid_vs = agx_grid_indirect(
+      grid_vs = agx_grid_indirect_local(
          geometry_params + offsetof(struct agx_geometry_params, vs_grid));
 
-      grid_gs = agx_grid_indirect(
+      grid_gs = agx_grid_indirect_local(
          geometry_params + offsetof(struct agx_geometry_params, gs_grid));
    } else {
       grid_vs = grid_gs = draw.b;
@@ -1470,7 +1493,7 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                                             vs->info.stage == MESA_SHADER_VERTEX
                                                ? gfx->linked[MESA_SHADER_VERTEX]
                                                : vs->only_linked),
-                        grid_vs, agx_workgroup(1, 1, 1));
+                        grid_vs, wg);
 
    /* Transform feedback and various queries require extra dispatching,
     * determine if we need that here.
@@ -1489,8 +1512,7 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       /* If we need counts, launch the count shader and prefix sum the results. */
       if (count_words) {
          perf_debug(dev, "Geometry shader count");
-         hk_dispatch_with_local_size(cmd, cs, count, grid_gs,
-                                     agx_workgroup(1, 1, 1));
+         hk_dispatch_with_local_size(cmd, cs, count, grid_gs, wg);
       }
 
       if (count->info.gs.prefix_sum) {
@@ -1506,16 +1528,30 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    }
 
    /* Pre-rast geometry shader */
-   hk_dispatch_with_local_size(cmd, cs, main, grid_gs, agx_workgroup(1, 1, 1));
+   hk_dispatch_with_local_size(cmd, cs, main, grid_gs, wg);
 
-   if (agx_is_indirect(draw.b)) {
-      return agx_draw_indexed_indirect(cmd->geom_indirect, dev->heap->va->addr,
-                                       dev->heap->size, AGX_INDEX_SIZE_U32,
-                                       true);
+   if (agx_gs_indexed(count->info.gs.shape)) {
+      enum agx_index_size index_size =
+         agx_translate_index_size(agx_gs_index_size(count->info.gs.shape));
+
+      if (agx_is_indirect(draw.b)) {
+         return agx_draw_indexed_indirect(
+            cmd->geom_indirect, cmd->geom_index_buffer, cmd->geom_index_count,
+            index_size, true);
+      } else {
+         return agx_draw_indexed(cmd->geom_index_count,
+                                 cmd->geom_instance_count, 0, 0, 0,
+                                 cmd->geom_index_buffer,
+                                 cmd->geom_index_count * 4, index_size, true);
+      }
    } else {
-      return agx_draw_indexed(cmd->geom_index_count, 1, 0, 0, 0,
-                              cmd->geom_index_buffer, cmd->geom_index_count * 4,
-                              AGX_INDEX_SIZE_U32, true);
+      if (agx_is_indirect(draw.b)) {
+         return agx_draw_indirect(cmd->geom_indirect);
+      } else {
+         return (struct agx_draw){
+            .b = agx_3d(cmd->geom_index_count, cmd->geom_instance_count, 1),
+         };
+      }
    }
 }
 
@@ -2139,9 +2175,13 @@ translate_ppp_vertex(unsigned vtx)
 static void
 hk_flush_index(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
 {
-   uint32_t index = cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY]
-                       ? BITFIELD_MASK(32)
-                       : cmd->state.gfx.index.restart;
+   struct hk_api_shader *gs = cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY];
+   uint32_t index = cmd->state.gfx.index.restart;
+
+   if (gs) {
+      enum agx_gs_shape shape = gs->variants[HK_GS_VARIANT_COUNT].info.gs.shape;
+      index = BITFIELD_MASK(8 * agx_gs_index_size(shape));
+   }
 
    /* VDM State updates are relatively expensive, so only emit them when the
     * restart index changes. This is simpler than accurate dirty tracking.
@@ -3492,7 +3532,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
          uint64_t target = hk_cs_alloc_for_indirect(cs, size_B);
 
          libagx_draw_robust_index(cmd, agx_1d(32), AGX_BARRIER_ALL | AGX_PREGFX,
-                                  target, hk_geometry_state(cmd), draw.b.ptr,
+                                  target, hk_heap(cmd), draw.b.ptr,
                                   draw.index_buffer, draw.index_buffer_range_B,
                                   draw.restart, topology, draw.index_size);
       } else {

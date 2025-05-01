@@ -119,6 +119,10 @@ panvk_lower_sysvals(nir_builder *b, nir_instr *instr, void *data)
 #endif
 
    case nir_intrinsic_load_draw_id:
+      /* Multidraw is supported on v10. */
+      if (PAN_ARCH >= 10)
+         return false;
+
       /* TODO: We only implement single-draw direct and indirect draws, so this
        * is sufficient. We'll revisit this when we get around to implementing
        * multidraw. */
@@ -203,9 +207,7 @@ panvk_lower_load_vs_input(nir_builder *b, nir_intrinsic_instr *intrin,
       PAN_ARCH <= 7 ?
          nir_load_raw_vertex_id_pan(b) :
          nir_load_vertex_id(b),
-      PAN_ARCH >= 9 ?
-         nir_iadd(b, nir_load_instance_id(b), nir_load_base_instance(b)) :
-         nir_load_instance_id(b),
+      nir_load_instance_id(b),
       nir_get_io_offset_src(intrin)->ssa,
       .base = nir_intrinsic_base(intrin),
       .component = nir_intrinsic_component(intrin),
@@ -508,10 +510,11 @@ valhall_lower_get_ssbo_size(struct nir_builder *b,
 
    b->cursor = nir_before_instr(&intr->instr);
 
-   nir_def *table_idx =
-      nir_ushr_imm(b, nir_channel(b, intr->src[0].ssa, 0), 24);
+   nir_def *res_handle = nir_channel(b, intr->src[0].ssa, 0);
+   nir_def *table_idx = nir_ushr_imm(b, res_handle, 24);
+   nir_def *res_idx = nir_iand_imm(b, res_handle, BITFIELD_MASK(24));
    nir_def *res_table = nir_ior_imm(b, table_idx, pan_res_handle(62, 0));
-   nir_def *buf_idx = nir_channel(b, intr->src[0].ssa, 1);
+   nir_def *buf_idx = nir_iadd(b, res_idx, nir_channel(b, intr->src[0].ssa, 1));
    nir_def *desc_offset = nir_imul_imm(b, buf_idx, PANVK_DESCRIPTOR_SIZE);
    nir_def *size = nir_load_ubo(
       b, 1, 32, res_table, nir_iadd_imm(b, desc_offset, 4), .range = ~0u,

@@ -109,6 +109,9 @@ export LIBGL_DRIVERS_PATH=/install/lib/dri
 # telling it to look in /usr/local/lib.
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
+# The Broadcom devices need /usr/local/bin unconditionally added to the path
+export PATH=/usr/local/bin:$PATH
+
 # Store Mesa's disk cache under /tmp, rather than sending it out over NFS.
 export XDG_CACHE_HOME=/tmp
 
@@ -230,7 +233,7 @@ cleanup
 # upload artifacts (lava jobs)
 if [ -n "$S3_RESULTS_UPLOAD" ]; then
   tar --zstd -cf results.tar.zst results/;
-  s3_upload results.tar.zst "https://${S3_RESULTS_UPLOAD}/"
+  ci-fairy s3cp --token-file "${S3_JWT_FILE}" results.tar.zst https://"$S3_RESULTS_UPLOAD"/results.tar.zst
 fi
 
 # We still need to echo the hwci: mesa message, as some scripts rely on it, such

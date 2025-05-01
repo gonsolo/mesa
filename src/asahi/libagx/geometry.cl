@@ -443,9 +443,8 @@ first_true_thread_in_workgroup(bool cond, local uint *scratch)
  * sets up most of the new draw descriptor.
  */
 static global void *
-setup_unroll_for_draw(global struct agx_geometry_state *heap,
-                      constant uint *in_draw, global uint *out,
-                      enum mesa_prim mode, uint index_size_B)
+setup_unroll_for_draw(global struct agx_heap *heap, constant uint *in_draw,
+                      global uint *out, enum mesa_prim mode, uint index_size_B)
 {
    /* Determine an upper bound on the memory required for the index buffer.
     * Restarts only decrease the unrolled index buffer size, so the maximum size
@@ -469,16 +468,15 @@ setup_unroll_for_draw(global struct agx_geometry_state *heap,
    out[4] = in_draw[4];                       /* base instance */
 
    /* Return the index buffer we allocated */
-   return (global uchar *)heap->heap + old_heap_bottom_B;
+   return (global uchar *)heap->base + old_heap_bottom_B;
 }
 
 KERNEL(1024)
-libagx_unroll_restart(global struct agx_geometry_state *heap,
-                      uint64_t index_buffer, constant uint *in_draw,
-                      global uint32_t *out_draw, uint32_t max_draws,
-                      uint32_t restart_index, uint32_t index_buffer_size_el,
-                      uint32_t index_size_log2, uint32_t flatshade_first,
-                      uint mode__11)
+libagx_unroll_restart(global struct agx_heap *heap, uint64_t index_buffer,
+                      constant uint *in_draw, global uint32_t *out_draw,
+                      uint32_t max_draws, uint32_t restart_index,
+                      uint32_t index_buffer_size_el, uint32_t index_size_log2,
+                      uint32_t flatshade_first, uint mode__11)
 {
    uint32_t index_size_B = 1 << index_size_log2;
    enum mesa_prim mode = libagx_uncompact_prim(mode__11);
@@ -555,43 +553,13 @@ libagx_setup_xfb_buffer(global struct agx_geometry_params *p, uint i)
    return off;
 }
 
-/*
- * Translate EndPrimitive for LINE_STRIP or TRIANGLE_STRIP output prims into
- * writes into the 32-bit output index buffer. We write the sequence (b, b + 1,
- * b + 2, ..., b + n - 1, -1), where b (base) is the first vertex in the prim, n
- * (count) is the number of verts in the prims, and -1 is the prim restart index
- * used to signal the end of the prim.
- *
- * For points, we write index buffers without restart, just as a sideband to
- * pass data into the vertex shader.
- */
 void
-libagx_end_primitive(global int *index_buffer, uint total_verts,
+libagx_end_primitive(global uint32_t *index_buffer, uint total_verts,
                      uint verts_in_prim, uint total_prims, uint index_offs,
                      uint geometry_base, bool restart)
 {
-   /* Previous verts/prims are from previous invocations plus earlier
-    * prims in this invocation. For the intra-invocation counts, we
-    * subtract the count for this prim from the inclusive sum NIR gives us.
-    */
-   uint previous_verts_in_invoc = (total_verts - verts_in_prim);
-   uint previous_verts = previous_verts_in_invoc;
-   uint previous_prims = restart ? (total_prims - 1) : 0;
-
-   /* The indices are encoded as: (unrolled ID * output vertices) + vertex. */
-   uint index_base = geometry_base + previous_verts_in_invoc;
-
-   /* Index buffer contains 1 index for each vertex and 1 for each prim */
-   global int *out =
-      &index_buffer[index_offs + previous_verts + previous_prims];
-
-   /* Write out indices for the strip */
-   for (uint i = 0; i < verts_in_prim; ++i) {
-      out[i] = index_base + i;
-   }
-
-   if (restart)
-      out[verts_in_prim] = -1;
+   _libagx_end_primitive(index_buffer, total_verts, verts_in_prim, total_prims,
+                         index_offs, geometry_base, restart);
 }
 
 void
@@ -609,11 +577,12 @@ libagx_gs_setup_indirect(
    global uintptr_t *vertex_buffer /* output */,
    global struct agx_ia_state *ia /* output */,
    global struct agx_geometry_params *p /* output */,
+   global struct agx_heap *heap,
    uint64_t vs_outputs /* Vertex (TES) output mask */,
    uint32_t index_size_B /* 0 if no index bffer */,
    uint32_t index_buffer_range_el,
    uint32_t prim /* Input primitive type, enum mesa_prim */,
-   int is_prefix_summing, uint indices_per_in_prim)
+   int is_prefix_summing, uint max_indices, enum agx_gs_shape shape)
 {
    /* Determine the (primitives, instances) grid size. */
    uint vertex_count = draw[0];
@@ -648,35 +617,37 @@ libagx_gs_setup_indirect(
    }
 
    /* We need to allocate VS and GS count buffers, do so now */
-   global struct agx_geometry_state *state = p->state;
-
    uint vertex_buffer_size =
       libagx_tcs_in_size(vertex_count * instance_count, vs_outputs);
 
    if (is_prefix_summing) {
       p->count_buffer = agx_heap_alloc_nonatomic(
-         state, p->input_primitives * p->count_buffer_stride);
+         heap, p->input_primitives * p->count_buffer_stride);
    }
 
    p->input_buffer =
-      (uintptr_t)agx_heap_alloc_nonatomic(state, vertex_buffer_size);
+      (uintptr_t)agx_heap_alloc_nonatomic(heap, vertex_buffer_size);
    *vertex_buffer = p->input_buffer;
 
    p->input_mask = vs_outputs;
 
    /* Allocate the index buffer and write the draw consuming it */
    global VkDrawIndexedIndirectCommand *cmd = (global void *)p->indirect_desc;
-   uint count = p->input_primitives * indices_per_in_prim;
-   uint index_buffer_offset_B = agx_heap_alloc_nonatomic_offs(state, count * 4);
 
    *cmd = (VkDrawIndexedIndirectCommand){
-      .indexCount = count,
-      .instanceCount = 1,
-      .firstIndex = index_buffer_offset_B / 4,
+      .indexCount = agx_gs_rast_vertices(shape, max_indices, prim_per_instance,
+                                         instance_count),
+      .instanceCount = agx_gs_rast_instances(shape, max_indices,
+                                             prim_per_instance, instance_count),
    };
 
-   p->output_index_buffer =
-      (global uint *)(state->heap + index_buffer_offset_B);
+   if (shape == AGX_GS_SHAPE_DYNAMIC_INDEXED) {
+      cmd->firstIndex =
+         agx_heap_alloc_nonatomic_offs(heap, cmd->indexCount * 4) / 4;
+
+      p->output_index_buffer =
+         (global uint *)(heap->base + (cmd->firstIndex * 4));
+   }
 }
 
 /*
@@ -777,7 +748,7 @@ libagx_prefix_sum_tess(global struct libagx_tess_args *p, global uint *c_prims,
    uint32_t elsize_B = sizeof(uint32_t);
    uint32_t size_B = total * elsize_B;
    uint alloc_B = agx_heap_alloc_nonatomic_offs(p->heap, size_B);
-   p->index_buffer = (global uint32_t *)(((uintptr_t)p->heap->heap) + alloc_B);
+   p->index_buffer = (global uint32_t *)(((uintptr_t)p->heap->base) + alloc_B);
 
    /* ...and now we can generate the API indexed draw */
    global uint32_t *desc = p->out_draws;

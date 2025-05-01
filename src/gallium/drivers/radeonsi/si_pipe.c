@@ -643,6 +643,13 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen, unsign
       }
    }
 
+#if !AMD_LLVM_AVAILABLE
+   sctx->shader.vs.key.ge.use_aco = 1;
+   sctx->shader.gs.key.ge.use_aco = 1;
+   sctx->shader.tcs.key.ge.use_aco = 1;
+   sctx->shader.tes.key.ge.use_aco = 1;
+#endif
+
    sctx->ngg = sscreen->use_ngg;
    si_shader_change_notify(sctx);
 
@@ -1016,9 +1023,6 @@ void si_destroy_screen(struct pipe_screen *pscreen)
    pipe_resource_reference(&sscreen->tess_rings, NULL);
    pipe_resource_reference(&sscreen->tess_rings_tmz, NULL);
 
-   util_queue_destroy(&sscreen->shader_compiler_queue);
-   util_queue_destroy(&sscreen->shader_compiler_queue_opt_variants);
-
    for (unsigned i = 0; i < ARRAY_SIZE(sscreen->aux_contexts); i++) {
       if (!sscreen->aux_contexts[i].ctx)
          continue;
@@ -1035,6 +1039,9 @@ void si_destroy_screen(struct pipe_screen *pscreen)
       mtx_unlock(&sscreen->aux_contexts[i].lock);
       mtx_destroy(&sscreen->aux_contexts[i].lock);
    }
+
+   util_queue_destroy(&sscreen->shader_compiler_queue);
+   util_queue_destroy(&sscreen->shader_compiler_queue_opt_variants);
 
    simple_mtx_destroy(&sscreen->async_compute_context_lock);
    if (sscreen->async_compute_context) {
@@ -1341,13 +1348,26 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
 
    sscreen->nir_options = CALLOC_STRUCT(nir_shader_compiler_options);
 
-   si_init_screen_get_functions(sscreen);
    si_init_screen_buffer_functions(sscreen);
    si_init_screen_fence_functions(sscreen);
    si_init_screen_state_functions(sscreen);
    si_init_screen_texture_functions(sscreen);
    si_init_screen_query_functions(sscreen);
    si_init_screen_live_shader_cache(sscreen);
+
+   if (sscreen->info.gfx_level >= GFX11) {
+      sscreen->use_ngg = true;
+      sscreen->use_ngg_culling = sscreen->info.max_render_backends >= 2 &&
+                                 !(sscreen->debug_flags & DBG(NO_NGG_CULLING));
+   } else {
+      sscreen->use_ngg = !(sscreen->debug_flags & DBG(NO_NGG)) &&
+                         sscreen->info.gfx_level >= GFX10 &&
+                         (sscreen->info.family != CHIP_NAVI14 ||
+                          sscreen->info.is_pro_graphics);
+      sscreen->use_ngg_culling = sscreen->use_ngg &&
+                                 sscreen->info.max_render_backends >= 2 &&
+                                 !(sscreen->debug_flags & DBG(NO_NGG_CULLING));
+   }
 
    sscreen->has_draw_indirect_multi =
       (sscreen->info.family >= CHIP_POLARIS10) ||
@@ -1358,6 +1378,7 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
       (sscreen->info.gfx_level == GFX6 && sscreen->info.pfp_fw_version >= 79 &&
        sscreen->info.me_fw_version >= 142);
 
+   si_init_screen_get_functions(sscreen);
    si_init_shader_caps(sscreen);
    si_init_compute_caps(sscreen);
    si_init_screen_caps(sscreen);
@@ -1461,24 +1482,8 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
    if (!debug_get_bool_option("RADEON_DISABLE_PERFCOUNTERS", false))
       si_init_perfcounters(sscreen);
 
-   ac_get_hs_info(&sscreen->info, &sscreen->hs);
-
    if (sscreen->debug_flags & DBG(NO_OUT_OF_ORDER))
       sscreen->info.has_out_of_order_rast = false;
-
-   if (sscreen->info.gfx_level >= GFX11) {
-      sscreen->use_ngg = true;
-      sscreen->use_ngg_culling = sscreen->info.max_render_backends >= 2 &&
-                                 !(sscreen->debug_flags & DBG(NO_NGG_CULLING));
-   } else {
-      sscreen->use_ngg = !(sscreen->debug_flags & DBG(NO_NGG)) &&
-                         sscreen->info.gfx_level >= GFX10 &&
-                         (sscreen->info.family != CHIP_NAVI14 ||
-                          sscreen->info.is_pro_graphics);
-      sscreen->use_ngg_culling = sscreen->use_ngg &&
-                                 sscreen->info.max_render_backends >= 2 &&
-                                 !(sscreen->debug_flags & DBG(NO_NGG_CULLING));
-   }
 
    /* Only set this for the cases that are known to work, which are:
     * - GFX9 if bpp >= 4 (in bytes)

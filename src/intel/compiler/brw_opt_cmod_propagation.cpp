@@ -24,6 +24,7 @@
 #include "brw_shader.h"
 #include "brw_cfg.h"
 #include "brw_eu.h"
+#include "util/half_float.h"
 
 /** @file
  *
@@ -48,11 +49,72 @@
  * exists and therefore remove the instruction.
  */
 
+static double
+src_as_float(const brw_reg &src)
+{
+   assert(src.file == IMM);
+
+   switch (src.type) {
+   case BRW_TYPE_HF:
+      return _mesa_half_to_float((uint16_t)src.d);
+
+   case BRW_TYPE_F:
+      return src.f;
+
+   case BRW_TYPE_DF:
+      return src.df;
+
+   default:
+      unreachable("Invalid float type.");
+   }
+}
+
 static bool
 cmod_propagate_cmp_to_add(const intel_device_info *devinfo, brw_inst *inst)
 {
    bool read_flag = false;
    const unsigned flags_written = inst->flags_written(devinfo);
+
+   /* The floating point comparison can only be removed if we can prove that
+    * either the addition is not ±Inf - (±Inf) or that ±Inf - (±Inf) compared
+    * with zero has the same result as ±Inf compared with ±Inf.
+    *
+    * The former can only be proven at this point in compilation if src[1] is
+    * an immediate value. Otherwise we can't know that nether value is
+    * ±Inf. For the latter, consider this table:
+    *
+    *      A     B   A+(-B)  A<B  A-B<0  A<=B  A-B<=0  A>B  A-B>0  A>=B  A-B>=0  A==B  A-B==0  A!=B  A-B!=0
+    *     Inf   Inf   NaN     F     F     T       F     F     F     T      F      T      F      F       T
+    *     Inf  -Inf   Inf     F     F     F       F     T     T     T      T      F      F      T       T
+    *    -Inf   Inf  -Inf     T     T     T       T     F     F     F      F      F      F      T       T
+    *    -Inf  -Inf   NaN     F     F     T       F     F     F     T      F      T      F      F       T
+    *
+    * The column for A<B and A-B<0 is identical, and the column for A>B and
+    * A-B>0 are identical.
+    *
+    * If src[1] is NaN, the transformation is always valid.
+    */
+   if (brw_type_is_float(inst->src[0].type)) {
+      if (inst->conditional_mod != BRW_CONDITIONAL_L &&
+          inst->conditional_mod != BRW_CONDITIONAL_G) {
+         if (inst->src[1].file != IMM)
+            return false;
+
+         if (isinf(src_as_float(inst->src[1])) != 0)
+            return false;
+      }
+   } else {
+      /* This optimization can fail for integers.  For inputs a = 0x80000000,
+       * b = 4, int(0x80000000) < 4, but int(0x80000000) - 4 overflows and
+       * results in 0x7ffffffc.  that's not less than zero, so the flags get
+       * set differently than for (a < b).
+       *
+       * However, it is safe if the comparison is Z or NZ.
+       */
+      if (inst->conditional_mod != BRW_CONDITIONAL_Z &&
+          inst->conditional_mod != BRW_CONDITIONAL_NZ)
+         return false;
+   }
 
    foreach_inst_in_block_reverse_starting_from(brw_inst, scan_inst, inst) {
       if (scan_inst->opcode == BRW_OPCODE_ADD &&
@@ -116,17 +178,36 @@ cmod_propagate_cmp_to_add(const intel_device_info *devinfo, brw_inst *inst)
           * For negative values:
           * (sat(x) >  0) == (x >  0) --- false
           * (sat(x) <= 0) == (x <= 0) --- true
+          *
+          * Except for the x = NaN cases. sat(NaN) is 0, so add.sat.le of a
+          * NaN result will be true. add.sat.g of a NaN result is false, so
+          * the optimization is also incorrect when the second source of the
+          * comparison is less than zero. All of the fsat(x) > is_negative
+          * cases should have been eliminated in NIR.
           */
          const enum brw_conditional_mod cond =
             negate ? brw_swap_cmod(inst->conditional_mod)
             : inst->conditional_mod;
 
-         if (scan_inst->saturate &&
-             (brw_type_is_float(scan_inst->dst.type) ||
-              brw_type_is_uint(scan_inst->dst.type)) &&
-             (cond != BRW_CONDITIONAL_G &&
-              cond != BRW_CONDITIONAL_LE))
-            goto not_match;
+         if (scan_inst->saturate) {
+            /* Note: Integer types can only have NZ or Z, so this path does
+             * not need to worry about integer handling.
+             */
+            if (cond != BRW_CONDITIONAL_G)
+               goto not_match;
+
+            assert(!brw_type_is_int(scan_inst->dst.type));
+
+            if (inst->src[1].file != IMM)
+               goto not_match;
+
+            double v = src_as_float(inst->src[1]);
+            if (negate)
+               v = -v;
+
+            if (v < 0.0)
+               goto not_match;
+         }
 
          /* Otherwise, try propagating the conditional. */
          if (scan_inst->can_do_cmod() &&
@@ -151,74 +232,6 @@ cmod_propagate_cmp_to_add(const intel_device_info *devinfo, brw_inst *inst)
    return false;
 }
 
-/**
- * Propagate conditional modifiers from NOT instructions
- *
- * Attempt to convert sequences like
- *
- *    or(8)           g78<8,8,1>      g76<8,8,1>UD    g77<8,8,1>UD
- *    ...
- *    not.nz.f0(8)    null            g78<8,8,1>UD
- *
- * into
- *
- *    or.z.f0(8)      g78<8,8,1>      g76<8,8,1>UD    g77<8,8,1>UD
- */
-static bool
-cmod_propagate_not(const intel_device_info *devinfo, brw_inst *inst)
-{
-   const enum brw_conditional_mod cond = brw_negate_cmod(inst->conditional_mod);
-   bool read_flag = false;
-   const unsigned flags_written = inst->flags_written(devinfo);
-
-   if (cond != BRW_CONDITIONAL_Z && cond != BRW_CONDITIONAL_NZ)
-      return false;
-
-   foreach_inst_in_block_reverse_starting_from(brw_inst, scan_inst, inst) {
-      if (regions_overlap(scan_inst->dst, scan_inst->size_written,
-                          inst->src[0], inst->size_read(devinfo, 0))) {
-         if (scan_inst->opcode != BRW_OPCODE_OR &&
-             scan_inst->opcode != BRW_OPCODE_AND)
-            break;
-
-         if (scan_inst->predicate ||
-             !scan_inst->dst.is_contiguous() ||
-             scan_inst->dst.offset != inst->src[0].offset ||
-             scan_inst->exec_size != inst->exec_size)
-            break;
-
-         /* If the scan instruction writes a different flag register than the
-          * instruction we're trying to propagate from, bail.
-          *
-          * FINISHME: The second part of the condition may be too strong.
-          * Perhaps (scan_inst->flags_written() & flags_written) !=
-          * flags_written?
-          */
-         if (scan_inst->flags_written(devinfo) != 0 &&
-             scan_inst->flags_written(devinfo) != flags_written)
-            break;
-
-         if (scan_inst->can_do_cmod() &&
-             ((!read_flag && scan_inst->conditional_mod == BRW_CONDITIONAL_NONE) ||
-              scan_inst->conditional_mod == cond)) {
-            scan_inst->conditional_mod = cond;
-            scan_inst->flag_subreg = inst->flag_subreg;
-            inst->remove();
-            return true;
-         }
-         break;
-      }
-
-      if ((scan_inst->flags_written(devinfo) & flags_written) != 0)
-         break;
-
-      read_flag = read_flag ||
-                  (scan_inst->flags_read(devinfo) & flags_written) != 0;
-   }
-
-   return false;
-}
-
 static bool
 opt_cmod_propagation_local(const intel_device_info *devinfo, bblock_t *block)
 {
@@ -227,8 +240,7 @@ opt_cmod_propagation_local(const intel_device_info *devinfo, bblock_t *block)
    foreach_inst_in_block_reverse_safe(brw_inst, inst, block) {
       if ((inst->opcode != BRW_OPCODE_AND &&
            inst->opcode != BRW_OPCODE_CMP &&
-           inst->opcode != BRW_OPCODE_MOV &&
-           inst->opcode != BRW_OPCODE_NOT) ||
+           inst->opcode != BRW_OPCODE_MOV) ||
           inst->predicate != BRW_PREDICATE_NONE ||
           !inst->dst.is_null() ||
           (inst->src[0].file != VGRF && inst->src[0].file != ATTR &&
@@ -242,12 +254,10 @@ opt_cmod_propagation_local(const intel_device_info *devinfo, bblock_t *block)
           (inst->opcode != BRW_OPCODE_CMP || inst->src[1].is_zero()))
          continue;
 
-      /* Only an AND.NZ can be propagated.  Many AND.Z instructions are
-       * generated (for ir_unop_not in brw_shader::emit_bool_to_cond_code).
-       * Propagating those would require inverting the condition on the CMP.
-       * This changes both the flag value and the register destination of the
-       * CMP.  That result may be used elsewhere, so we can't change its value
-       * on a whim.
+      /* Only an AND.NZ can be propagated. Propagating AND.Z would require
+       * inverting the condition on the CMP. This changes both the flag value
+       * and the register destination of the CMP. That result may be used
+       * elsewhere, so we can't change its value on a whim.
        */
       if (inst->opcode == BRW_OPCODE_AND &&
           !(inst->src[1].is_one() &&
@@ -258,22 +268,11 @@ opt_cmod_propagation_local(const intel_device_info *devinfo, bblock_t *block)
       /* A CMP with a second source of zero can match with anything.  A CMP
        * with a second source that is not zero can only match with an ADD
        * instruction.
-       *
-       * Only apply this optimization to float-point sources.  It can fail for
-       * integers.  For inputs a = 0x80000000, b = 4, int(0x80000000) < 4, but
-       * int(0x80000000) - 4 overflows and results in 0x7ffffffc.  that's not
-       * less than zero, so the flags get set differently than for (a < b).
        */
       if (inst->opcode == BRW_OPCODE_CMP && !inst->src[1].is_zero()) {
-         if (brw_type_is_float(inst->src[0].type) &&
-             cmod_propagate_cmp_to_add(devinfo, inst))
+         if (cmod_propagate_cmp_to_add(devinfo, inst))
             progress = true;
 
-         continue;
-      }
-
-      if (inst->opcode == BRW_OPCODE_NOT) {
-         progress = cmod_propagate_not(devinfo, inst) || progress;
          continue;
       }
 

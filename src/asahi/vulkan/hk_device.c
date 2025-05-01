@@ -101,7 +101,7 @@ hk_upload_rodata(struct hk_device *dev)
    *image_heap_ptr = dev->images.bo->va->addr;
    offs += sizeof(uint64_t);
 
-   /* The geometry state buffer isn't strictly readonly data, but we only have a
+   /* The heap descriptor isn't strictly readonly data, but we only have a
     * single instance of it device-wide and -- after initializing at heap
     * allocate time -- it is read-only from the CPU perspective. The GPU uses it
     * for scratch, but is required to reset it after use to ensure resubmitting
@@ -110,8 +110,8 @@ hk_upload_rodata(struct hk_device *dev)
     * So, we allocate it here for convenience.
     */
    offs = align(offs, sizeof(uint64_t));
-   dev->rodata.geometry_state = dev->rodata.bo->va->addr + offs;
-   offs += sizeof(struct agx_geometry_state);
+   dev->rodata.heap = dev->rodata.bo->va->addr + offs;
+   offs += sizeof(struct agx_heap);
 
    /* For null storage descriptors, we need to reserve 16 bytes to catch writes.
     * No particular content is required; we cannot get robustness2 semantics
@@ -307,7 +307,7 @@ hk_upload_null_descriptors(struct hk_device *dev)
    struct agx_pbe_packed null_pbe;
    uint32_t offset_tex, offset_pbe;
 
-   agx_set_null_texture(&null_tex, dev->rodata.null_sink);
+   agx_set_null_texture(&null_tex);
    agx_set_null_pbe(&null_pbe, dev->rodata.null_sink);
 
    hk_descriptor_table_add(dev, &dev->images, &null_tex, sizeof(null_tex),

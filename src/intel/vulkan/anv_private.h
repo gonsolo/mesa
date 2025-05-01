@@ -61,6 +61,7 @@
 #include "util/macros.h"
 #include "util/hash_table.h"
 #include "util/list.h"
+#include "util/pb_slab.h"
 #include "util/perf/u_trace.h"
 #include "util/set.h"
 #include "util/sparse_array.h"
@@ -455,12 +456,33 @@ enum anv_bo_alloc_flags {
 
    /** Compressed buffer, only supported in Xe2+ */
    ANV_BO_ALLOC_COMPRESSED =              (1 << 21),
+
+   /** Specifies that this bo is a slab parent */
+   ANV_BO_ALLOC_SLAB_PARENT =             (1 << 22),
 };
 
 /** Specifies that the BO should be cached and coherent. */
 #define ANV_BO_ALLOC_HOST_CACHED_COHERENT (ANV_BO_ALLOC_HOST_COHERENT | \
                                            ANV_BO_ALLOC_HOST_CACHED)
 
+#define ANV_BO_ALLOC_DYNAMIC_VISIBLE_POOL_FLAGS (ANV_BO_ALLOC_CAPTURE |              \
+                                                 ANV_BO_ALLOC_MAPPED |               \
+                                                 ANV_BO_ALLOC_HOST_CACHED_COHERENT | \
+                                                 ANV_BO_ALLOC_DYNAMIC_VISIBLE_POOL)
+
+#define ANV_BO_ALLOC_DESCRIPTOR_POOL_FLAGS (ANV_BO_ALLOC_CAPTURE |              \
+                                            ANV_BO_ALLOC_MAPPED |               \
+                                            ANV_BO_ALLOC_HOST_CACHED_COHERENT | \
+                                            ANV_BO_ALLOC_DESCRIPTOR_POOL)
+
+#define ANV_BO_ALLOC_BATCH_BUFFER_FLAGS (ANV_BO_ALLOC_MAPPED |               \
+                                         ANV_BO_ALLOC_HOST_CACHED_COHERENT | \
+                                         ANV_BO_ALLOC_CAPTURE)
+
+#define ANV_BO_ALLOC_BATCH_BUFFER_INTERNAL_FLAGS (ANV_BO_ALLOC_MAPPED |        \
+                                                  ANV_BO_ALLOC_HOST_COHERENT | \
+                                                  ANV_BO_ALLOC_INTERNAL |      \
+                                                  ANV_BO_ALLOC_CAPTURE)
 
 struct anv_bo {
    const char *name;
@@ -514,12 +536,23 @@ struct anv_bo {
 
    enum anv_bo_alloc_flags alloc_flags;
 
+   /** If slab_parent is set, this bo is a slab */
+   struct anv_bo *slab_parent;
+   struct pb_slab_entry slab_entry;
+
    /** True if this BO wraps a host pointer */
    bool from_host_ptr:1;
 
    /** True if this BO is mapped in the GTT (only used for RMV) */
    bool gtt_mapped:1;
 };
+
+/* If bo is a slab, return the real/slab_parent bo */
+static inline struct anv_bo *
+anv_bo_get_real(struct anv_bo *bo)
+{
+   return bo->slab_parent ? bo->slab_parent : bo;
+}
 
 static inline bool
 anv_bo_is_external(const struct anv_bo *bo)
@@ -1300,6 +1333,7 @@ enum anv_debug {
    ANV_DEBUG_VIDEO_DECODE      = BITFIELD_BIT(5),
    ANV_DEBUG_VIDEO_ENCODE      = BITFIELD_BIT(6),
    ANV_DEBUG_SHADER_HASH       = BITFIELD_BIT(7),
+   ANV_DEBUG_NO_SLAB           = BITFIELD_BIT(8),
 };
 
 struct anv_instance {
@@ -2172,6 +2206,8 @@ struct anv_device {
    } accel_struct_build;
 
    struct vk_meta_device meta_device;
+
+   struct pb_slabs bo_slabs[3];
 };
 
 static inline uint32_t
@@ -2260,6 +2296,7 @@ void anv_device_finish_blorp(struct anv_device *device);
 
 static inline void
 anv_sanitize_map_params(struct anv_device *device,
+                        struct anv_bo *bo,
                         uint64_t in_offset,
                         uint64_t in_size,
                         uint64_t *out_offset,
@@ -2273,13 +2310,19 @@ anv_sanitize_map_params(struct anv_device *device,
    assert(in_offset >= *out_offset);
    *out_size = (in_offset + in_size) - *out_offset;
 
+   /* Don't round up slab bos to not fail mmap() of slabs at the end of slab
+    * parent, all the adjustment for slabs will be done in anv_device_map_bo().
+    */
+   if (anv_bo_get_real(bo) != bo)
+      return;
+
    /* Let's map whole pages */
    *out_size = align64(*out_size, 4096);
 }
 
 
 VkResult anv_device_alloc_bo(struct anv_device *device,
-                             const char *name, uint64_t size,
+                             const char *name, const uint64_t size,
                              enum anv_bo_alloc_flags alloc_flags,
                              uint64_t explicit_address,
                              struct anv_bo **bo);
@@ -2363,7 +2406,7 @@ anv_queue_post_submit(struct anv_queue *queue, VkResult submit_result)
 
 #if ANV_SUPPORT_RT && !ANV_SUPPORT_RT_GRL
    /* The recorded bvh is dumped to files upon command buffer completion */
-   if (INTEL_DEBUG(DEBUG_BVH_ANY))
+   if (INTEL_DEBUG_BVH_ANY)
       anv_dump_bvh_to_files(queue->device);
 #endif
 
@@ -2395,6 +2438,16 @@ uint64_t anv_vma_alloc(struct anv_device *device,
 void anv_vma_free(struct anv_device *device,
                   struct util_vma_heap *vma_heap,
                   uint64_t address, uint64_t size);
+
+static inline bool
+anv_bo_is_small_heap(enum anv_bo_alloc_flags alloc_flags)
+{
+   if (alloc_flags & ANV_BO_ALLOC_SLAB_PARENT)
+      return false;
+   return alloc_flags & (ANV_BO_ALLOC_DESCRIPTOR_POOL |
+                         ANV_BO_ALLOC_DYNAMIC_VISIBLE_POOL |
+                         ANV_BO_ALLOC_32BIT_ADDRESS);
+}
 
 struct anv_reloc_list {
    bool                                         uses_relocs;
@@ -5627,9 +5680,12 @@ anv_image_is_externally_shared(const struct anv_image *image)
 static inline bool
 anv_image_has_private_binding(const struct anv_image *image)
 {
-   const struct anv_image_binding private_binding =
-      image->bindings[ANV_IMAGE_MEMORY_BINDING_PRIVATE];
-   return private_binding.memory_range.size != 0;
+   if (image->bindings[ANV_IMAGE_MEMORY_BINDING_PRIVATE].memory_range.size > 0) {
+      assert(anv_image_is_externally_shared(image));
+      return true;
+   } else {
+      return false;
+   }
 }
 
 static inline bool

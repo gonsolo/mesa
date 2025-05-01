@@ -3829,7 +3829,9 @@ static void si_bind_vs_shader(struct pipe_context *ctx, void *state)
 
    sctx->shader.vs.cso = sel;
    sctx->shader.vs.current = (sel && sel->variants_count) ? sel->variants[0] : NULL;
+#if AMD_LLVM_AVAILABLE
    sctx->shader.vs.key.ge.use_aco = sel ? sel->info.base.use_aco_amd : 0;
+#endif
    sctx->num_vs_blit_sgprs = sel ? sel->info.base.vs.blit_sgprs_amd : 0;
    sctx->vs_uses_draw_id = sel ? sel->info.uses_drawid : false;
 
@@ -3921,7 +3923,9 @@ static void si_bind_gs_shader(struct pipe_context *ctx, void *state)
 
    sctx->shader.gs.cso = sel;
    sctx->shader.gs.current = (sel && sel->variants_count) ? sel->variants[0] : NULL;
+#if AMD_LLVM_AVAILABLE
    sctx->shader.gs.key.ge.use_aco = sel ? sel->info.base.use_aco_amd : 0;
+#endif
    sctx->ia_multi_vgt_param_key.u.uses_gs = sel != NULL;
 
    si_update_common_shader_state(sctx, sel, PIPE_SHADER_GEOMETRY);
@@ -3953,7 +3957,9 @@ static void si_bind_tcs_shader(struct pipe_context *ctx, void *state)
 
    sctx->shader.tcs.cso = sel;
    sctx->shader.tcs.current = (sel && sel->variants_count) ? sel->variants[0] : NULL;
+#if AMD_LLVM_AVAILABLE
    sctx->shader.tcs.key.ge.use_aco = sel ? sel->info.base.use_aco_amd : 0;
+#endif
    si_update_tess_uses_prim_id(sctx);
    si_update_tess_in_out_patch_vertices(sctx);
 
@@ -3976,7 +3982,9 @@ static void si_bind_tes_shader(struct pipe_context *ctx, void *state)
 
    sctx->shader.tes.cso = sel;
    sctx->shader.tes.current = (sel && sel->variants_count) ? sel->variants[0] : NULL;
+#if AMD_LLVM_AVAILABLE
    sctx->shader.tes.key.ge.use_aco = sel ? sel->info.base.use_aco_amd : 0;
+#endif
    sctx->ia_multi_vgt_param_key.u.uses_tess = sel != NULL;
    si_update_tess_uses_prim_id(sctx);
 
@@ -4544,8 +4552,7 @@ void si_init_tess_factor_ring(struct si_context *sctx)
                                                        SI_RESOURCE_FLAG_DRIVER_INTERNAL |
                                                        SI_RESOURCE_FLAG_DISCARDABLE,
                                                        PIPE_USAGE_DEFAULT,
-                                                       sscreen->hs.tess_offchip_ring_size +
-                                                       sscreen->hs.tess_factor_ring_size,
+                                                       sscreen->info.total_tess_ring_size,
                                                        2 * 1024 * 1024);
       if (!sscreen->tess_rings) {
          simple_mtx_unlock(&sscreen->tess_ring_lock);
@@ -4560,8 +4567,7 @@ void si_init_tess_factor_ring(struct si_context *sctx)
                                                               SI_RESOURCE_FLAG_DRIVER_INTERNAL |
                                                               SI_RESOURCE_FLAG_DISCARDABLE,
                                                               PIPE_USAGE_DEFAULT,
-                                                              sscreen->hs.tess_offchip_ring_size +
-                                                              sscreen->hs.tess_factor_ring_size,
+                                                              sscreen->info.total_tess_ring_size,
                                                               2 * 1024 * 1024);
       }
    }
@@ -4808,7 +4814,10 @@ void si_update_tess_io_layout_state(struct si_context *sctx)
    unsigned num_patches, lds_size;
 
    /* Compute NUM_PATCHES and LDS_SIZE. */
-   ac_nir_compute_tess_wg_info(&sctx->screen->info, &tcs->info.base, ls_current->wave_size,
+   ac_nir_compute_tess_wg_info(&sctx->screen->info, tcs->info.base.outputs_read,
+                               tcs->info.base.outputs_written, tcs->info.base.patch_outputs_read,
+                               tcs->info.base.patch_outputs_written,
+                               tcs->info.base.tess.tcs_vertices_out, ls_current->wave_size,
                                tess_uses_primid, tcs->info.tessfactors_are_def_in_all_invocs,
                                num_tcs_input_cp, lds_input_vertex_size,
                                num_mem_tcs_outputs, num_mem_tcs_patch_outputs,
@@ -5087,9 +5096,9 @@ static void si_emit_spi_ge_ring_state(struct si_context *sctx, unsigned index)
       struct pipe_resource *tf_ring =
          sctx->ws->cs_is_secure(&sctx->gfx_cs) ? sscreen->tess_rings_tmz : sscreen->tess_rings;
       uint64_t factor_va = si_resource(tf_ring)->gpu_address +
-                           sscreen->hs.tess_offchip_ring_size;
+                           sscreen->info.tess_offchip_ring_size;
 
-      unsigned tf_ring_size_field = sscreen->hs.tess_factor_ring_size / 4;
+      unsigned tf_ring_size_field = sscreen->info.tess_factor_ring_size / 4;
       if (sctx->gfx_level >= GFX11)
          tf_ring_size_field /= sscreen->info.max_se;
 
@@ -5106,7 +5115,7 @@ static void si_emit_spi_ge_ring_state(struct si_context *sctx, unsigned index)
       if (sctx->gfx_level >= GFX7) {
          radeon_set_uconfig_reg_seq(R_030938_VGT_TF_RING_SIZE, 3);
          radeon_emit(S_030938_SIZE(tf_ring_size_field)); /* R_030938_VGT_TF_RING_SIZE */
-         radeon_emit(sscreen->hs.hs_offchip_param);      /* R_03093C_VGT_HS_OFFCHIP_PARAM */
+         radeon_emit(sscreen->info.hs_offchip_param);      /* R_03093C_VGT_HS_OFFCHIP_PARAM */
          radeon_emit(factor_va >> 8);                    /* R_030940_VGT_TF_MEMORY_BASE */
 
          if (sctx->gfx_level >= GFX12)
@@ -5118,7 +5127,7 @@ static void si_emit_spi_ge_ring_state(struct si_context *sctx, unsigned index)
       } else {
          radeon_set_config_reg(R_008988_VGT_TF_RING_SIZE, S_008988_SIZE(tf_ring_size_field));
          radeon_set_config_reg(R_0089B8_VGT_TF_MEMORY_BASE, factor_va >> 8);
-         radeon_set_config_reg(R_0089B0_VGT_HS_OFFCHIP_PARAM, sscreen->hs.hs_offchip_param);
+         radeon_set_config_reg(R_0089B0_VGT_HS_OFFCHIP_PARAM, sscreen->info.hs_offchip_param);
       }
       radeon_end();
    }

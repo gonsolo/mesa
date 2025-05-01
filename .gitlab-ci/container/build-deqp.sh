@@ -6,14 +6,13 @@
 # DEBIAN_TEST_ANDROID_TAG
 # DEBIAN_TEST_GL_TAG
 # DEBIAN_TEST_VK_TAG
-# KERNEL_ROOTFS_TAG
 
 set -ue -o pipefail
 
 # shellcheck disable=SC2153
 deqp_api=${DEQP_API,,}
 
-uncollapsed_section_start deqp-$deqp_api "Building dEQP $DEQP_API"
+section_start deqp-$deqp_api "Building dEQP $DEQP_API"
 
 set -x
 

@@ -28,11 +28,11 @@ The following hardware is currently supported:
 +--------------------+---------------+-----------+--------+--------+
 | G57                | Valhall (v9)  | 3.1       | 3.1    |        |
 +--------------------+---------------+-----------+--------+--------+
-| G310, G610         | Valhall (v10) | 3.1       | 3.1    | 1.1    |
+| G310, G610         | Valhall (v10) | 3.1       | 3.1    | 1.2    |
 +--------------------+---------------+-----------+--------+--------+
-| G720               | 5th Gen (v12) | 3.1       | 3.1    | 1.1    |
+| G720               | 5th Gen (v12) | 3.1       | 3.1    | 1.2    |
 +--------------------+---------------+-----------+--------+--------+
-| G725               | 5th Gen (v13) | 3.1       | 3.1    | 1.1    |
+| G725               | 5th Gen (v13) | 3.1       | 3.1    | 1.2    |
 +--------------------+---------------+-----------+--------+--------+
 
 Other Midgard and Bifrost chips (e.g. G71) are not yet supported.
@@ -60,8 +60,8 @@ LLVM is required by Panfrost's compilers at build time.
 
 In case of cross compilation without LLVM,
 you can build and install the required tools on the host (with LLVM installed) with
-``meson . build-host/ -Dvulkan-drivers=panfrost -Dgallium-drivers=panfrost
--Dmesa-clc=enabled -Dinstall-mesa-clc=true -Dprecomp-compiler=enabled -Dinstall-precomp-compiler=true``
+``meson . build-host/ -Dtools=panfrost -Dmesa-clc=enabled -Dinstall-mesa-clc=true
+-Dprecomp-compiler=enabled -Dinstall-precomp-compiler=true``
 and then use ``-Dmesa-clc=system -Dprecomp-compiler=system`` on the cross compile side.
 
 For general information on building Mesa, read :doc:`the install documentation

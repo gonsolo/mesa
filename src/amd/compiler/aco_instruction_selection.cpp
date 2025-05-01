@@ -1732,6 +1732,9 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
       } else if (dst.regClass() == v1 && instr->def.bit_size == 16) {
          emit_vop3p_instruction(ctx, instr, aco_opcode::v_pk_add_u16, dst);
          break;
+      } else if (dst.regClass() == s2 && ctx->program->gfx_level >= GFX12) {
+         emit_sop2_instruction(ctx, instr, aco_opcode::s_add_u64, dst, false);
+         break;
       }
 
       Temp src0 = get_alu_src(ctx, instr->src[0]);
@@ -1930,6 +1933,9 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
          break;
       } else if (dst.regClass() == v1 && instr->def.bit_size == 16) {
          emit_vop3p_instruction(ctx, instr, aco_opcode::v_pk_sub_u16, dst);
+         break;
+      } else if (dst.regClass() == s2 && ctx->program->gfx_level >= GFX12) {
+         emit_sop2_instruction(ctx, instr, aco_opcode::s_sub_u64, dst, false);
          break;
       }
 
@@ -4777,7 +4783,7 @@ lower_global_address(Builder& bld, uint32_t offset_in, Temp* address_inout,
    if (bld.program->gfx_level >= GFX9)
       max_const_offset_plus_one = bld.program->dev.scratch_global_offset_max;
    else if (bld.program->gfx_level == GFX6)
-      max_const_offset_plus_one = 4096; /* MUBUF has a 12-bit unsigned offset field */
+      max_const_offset_plus_one = bld.program->dev.buf_offset_max + 1;
    uint64_t excess_offset = const_offset - (const_offset % max_const_offset_plus_one);
    const_offset %= max_const_offset_plus_one;
 
@@ -5291,9 +5297,10 @@ create_vec_from_array(isel_context* ctx, Temp arr[], unsigned cnt, RegType reg_t
 inline unsigned
 resolve_excess_vmem_const_offset(Builder& bld, Temp& voffset, unsigned const_offset)
 {
-   if (const_offset >= 4096) {
-      unsigned excess_const_offset = const_offset / 4096u * 4096u;
-      const_offset %= 4096u;
+   uint32_t limit = bld.program->dev.buf_offset_max + 1;
+   if (const_offset >= limit) {
+      unsigned excess_const_offset = const_offset / limit * limit;
+      const_offset %= limit;
 
       if (!voffset.id())
          voffset = bld.copy(bld.def(v1), Operand::c32(excess_const_offset));
@@ -6667,7 +6674,9 @@ visit_load_global(isel_context* ctx, nir_intrinsic_instr* instr)
          info.resource = bld.as_uniform(info.resource);
       info.offset = Operand(bld.as_uniform(info.offset));
       info.cache = get_cache_flags(ctx, access | ACCESS_TYPE_SMEM);
-      emit_load(ctx, bld, info, smem_load_params);
+      EmitLoadParameters params = smem_load_params;
+      params.max_const_offset_plus_one = ctx->program->dev.smem_offset_max + 1;
+      emit_load(ctx, bld, info, params);
    } else {
       EmitLoadParameters params = global_load_params;
       info.cache = get_cache_flags(ctx, access);
@@ -6982,14 +6991,18 @@ visit_load_buffer(isel_context* ctx, nir_intrinsic_instr* intrin)
       info.component_stride = can_split ? vtx_info->chan_byte_size : 0;
       info.split_by_component_stride = false;
 
-      emit_load(ctx, bld, info, mtbuf_load_params);
+      EmitLoadParameters params = mtbuf_load_params;
+      params.max_const_offset_plus_one = ctx->program->dev.buf_offset_max + 1;
+      emit_load(ctx, bld, info, params);
    } else {
       assert(intrin->intrinsic == nir_intrinsic_load_buffer_amd);
 
       if (nir_intrinsic_access(intrin) & ACCESS_USES_FORMAT_AMD) {
          assert(!swizzled);
 
-         emit_load(ctx, bld, info, mubuf_load_format_params);
+         EmitLoadParameters params = mubuf_load_format_params;
+         params.max_const_offset_plus_one = ctx->program->dev.buf_offset_max + 1;
+         emit_load(ctx, bld, info, params);
       } else {
          const unsigned swizzle_element_size =
             swizzled ? (ctx->program->gfx_level <= GFX8 ? 4 : 16) : 0;
@@ -6999,7 +7012,9 @@ visit_load_buffer(isel_context* ctx, nir_intrinsic_instr* intrin)
          info.align_mul = align_mul;
          info.align_offset = align_offset;
 
-         emit_load(ctx, bld, info, mubuf_load_params);
+         EmitLoadParameters params = mubuf_load_params;
+         params.max_const_offset_plus_one = ctx->program->dev.buf_offset_max + 1;
+         emit_load(ctx, bld, info, params);
       }
    }
 }
@@ -7960,12 +7975,30 @@ create_fs_dual_src_export_gfx11(isel_context* ctx, const struct aco_export_mrt* 
    ctx->program->has_color_exports = true;
 }
 
+static bool
+get_replicated_constant(nir_def* def, unsigned stride, uint32_t* constant)
+{
+   nir_scalar comp = nir_scalar_resolved(def, 0);
+   if (!nir_scalar_is_const(comp))
+      return false;
+
+   *constant = nir_scalar_as_uint(comp);
+
+   for (unsigned i = stride; i < def->num_components; i += stride) {
+      comp = nir_scalar_resolved(def, i);
+      if (!nir_scalar_is_const(comp) || nir_scalar_as_uint(comp) != *constant)
+         return false;
+   }
+   return true;
+}
+
 static void
 visit_cmat_muladd(isel_context* ctx, nir_intrinsic_instr* instr)
 {
    aco_opcode opcode = aco_opcode::num_opcodes;
-   unsigned signed_mask = 0;
-   bool clamp = false;
+
+   bitarray8 neg_lo = nir_intrinsic_neg_lo_amd(instr);
+   bitarray8 neg_hi = nir_intrinsic_neg_hi_amd(instr);
 
    switch (instr->src[0].ssa->bit_size) {
    case 16:
@@ -7974,11 +8007,13 @@ visit_cmat_muladd(isel_context* ctx, nir_intrinsic_instr* instr)
       case 16: opcode = aco_opcode::v_wmma_f16_16x16x16_f16; break;
       }
       break;
-   case 8:
+   case 8: {
       opcode = aco_opcode::v_wmma_i32_16x16x16_iu8;
-      signed_mask = nir_intrinsic_cmat_signed_mask(instr);
-      clamp = nir_intrinsic_saturate(instr);
+      unsigned signed_mask = nir_intrinsic_cmat_signed_mask(instr);
+      neg_lo[0] = signed_mask & NIR_CMAT_A_SIGNED;
+      neg_lo[1] = signed_mask & NIR_CMAT_B_SIGNED;
       break;
+   }
    }
 
    if (opcode == aco_opcode::num_opcodes)
@@ -7991,10 +8026,27 @@ visit_cmat_muladd(isel_context* ctx, nir_intrinsic_instr* instr)
    Operand B(as_vgpr(ctx, get_ssa_temp(ctx, instr->src[1].ssa)));
    Operand C(as_vgpr(ctx, get_ssa_temp(ctx, instr->src[2].ssa)));
 
-   VALU_instruction& vop3p = bld.vop3p(opcode, Definition(dst), A, B, C, 0, 0)->valu();
-   vop3p.neg_lo[0] = (signed_mask & 0x1) != 0;
-   vop3p.neg_lo[1] = (signed_mask & 0x2) != 0;
-   vop3p.clamp = clamp;
+   uint32_t constant;
+   uint32_t acc_stride = ctx->program->gfx_level < GFX12 && instr->def.bit_size == 16 ? 2 : 1;
+   if (get_replicated_constant(instr->src[2].ssa, acc_stride, &constant)) {
+      Operand constC =
+         Operand::get_const(ctx->program->gfx_level, constant, instr->def.bit_size / 8);
+      if (!constC.isLiteral()) {
+         C = constC;
+      } else if (opcode != aco_opcode::v_wmma_i32_16x16x16_iu8) {
+         constant ^= 1 << (instr->def.bit_size - 1);
+         constC = Operand::get_const(ctx->program->gfx_level, constant, instr->def.bit_size / 8);
+         if (!constC.isLiteral()) {
+            C = constC;
+            neg_lo[2] ^= !neg_hi[2];
+         }
+      }
+   }
+
+   VALU_instruction& vop3p = bld.vop3p(opcode, Definition(dst), A, B, C, 0, 0x7)->valu();
+   vop3p.neg_lo = neg_lo;
+   vop3p.neg_hi = neg_hi;
+   vop3p.clamp = nir_intrinsic_saturate(instr);
 
    emit_split_vector(ctx, dst, instr->def.num_components);
 }

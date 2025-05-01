@@ -830,14 +830,11 @@ smem_combine(opt_ctx& ctx, aco_ptr<Instruction>& instr)
 
       Temp base;
       uint32_t offset;
-      if (info.is_constant_or_literal(32) &&
-          ((ctx.program->gfx_level == GFX6 && info.val <= 0x3FF) ||
-           (ctx.program->gfx_level == GFX7 && info.val <= 0xFFFFFFFF) ||
-           (ctx.program->gfx_level >= GFX8 && info.val <= 0xFFFFF))) {
+      if (info.is_constant_or_literal(32) && info.val <= ctx.program->dev.smem_offset_max) {
          instr->operands[1] = Operand::c32(info.val);
       } else if (parse_base_offset(ctx, instr.get(), 1, &base, &offset, true) &&
-                 base.regClass() == s1 && offset <= 0xFFFFF && ctx.program->gfx_level >= GFX9 &&
-                 offset % 4u == 0) {
+                 base.regClass() == s1 && offset <= ctx.program->dev.smem_offset_max &&
+                 ctx.program->gfx_level >= GFX9 && offset % 4u == 0) {
          bool soe = smem.operands.size() >= (!smem.definitions.empty() ? 3 : 4);
          if (soe) {
             if (ctx.info[smem.operands.back().tempId()].is_constant_or_literal(32) &&
@@ -1502,35 +1499,38 @@ label_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
           * MUBUF accesses. */
          bool vaddr_prevent_overflow = swizzled && ctx.program->gfx_level < GFX9;
 
+         uint32_t const_max = ctx.program->dev.buf_offset_max;
+
          if (mubuf.offen && mubuf.idxen && i == 1 && info.is_vec() &&
              info.instr->operands.size() == 2 && info.instr->operands[0].isTemp() &&
              info.instr->operands[0].regClass() == v1 && info.instr->operands[1].isConstant() &&
-             mubuf.offset + info.instr->operands[1].constantValue() < 4096) {
+             mubuf.offset + info.instr->operands[1].constantValue() <= const_max) {
             instr->operands[1] = info.instr->operands[0];
             mubuf.offset += info.instr->operands[1].constantValue();
             mubuf.offen = false;
             continue;
          } else if (mubuf.offen && i == 1 && info.is_constant_or_literal(32) &&
-                    mubuf.offset + info.val < 4096) {
+                    mubuf.offset + info.val <= const_max) {
             assert(!mubuf.idxen);
             instr->operands[1] = Operand(v1);
             mubuf.offset += info.val;
             mubuf.offen = false;
             continue;
-         } else if (i == 2 && info.is_constant_or_literal(32) && mubuf.offset + info.val < 4096) {
+         } else if (i == 2 && info.is_constant_or_literal(32) &&
+                    mubuf.offset + info.val <= const_max) {
             instr->operands[2] = Operand::c32(0);
             mubuf.offset += info.val;
             continue;
          } else if (mubuf.offen && i == 1 &&
                     parse_base_offset(ctx, instr.get(), i, &base, &offset,
                                       vaddr_prevent_overflow) &&
-                    base.regClass() == v1 && mubuf.offset + offset < 4096) {
+                    base.regClass() == v1 && mubuf.offset + offset <= const_max) {
             assert(!mubuf.idxen);
             instr->operands[1].setTemp(base);
             mubuf.offset += offset;
             continue;
          } else if (i == 2 && parse_base_offset(ctx, instr.get(), i, &base, &offset, true) &&
-                    base.regClass() == s1 && mubuf.offset + offset < 4096 && !swizzled) {
+                    base.regClass() == s1 && mubuf.offset + offset <= const_max && !swizzled) {
             instr->operands[i].setTemp(base);
             mubuf.offset += offset;
             continue;
@@ -1545,7 +1545,8 @@ label_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
          if (mtbuf.offen && mtbuf.idxen && i == 1 && info.is_vec() &&
              info.instr->operands.size() == 2 && info.instr->operands[0].isTemp() &&
              info.instr->operands[0].regClass() == v1 && info.instr->operands[1].isConstant() &&
-             mtbuf.offset + info.instr->operands[1].constantValue() < 4096) {
+             mtbuf.offset + info.instr->operands[1].constantValue() <=
+                ctx.program->dev.buf_offset_max) {
             instr->operands[1] = info.instr->operands[0];
             mtbuf.offset += info.instr->operands[1].constantValue();
             mtbuf.offen = false;

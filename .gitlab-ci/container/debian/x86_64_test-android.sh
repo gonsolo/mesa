@@ -12,22 +12,25 @@ set -e
 
 set -o xtrace
 
+section_start debian_setup "Base Debian system setup"
+
 export DEBIAN_FRONTEND=noninteractive
 
 # Ephemeral packages (installed for this script and removed again at the end)
 EPHEMERAL=(
-   build-essential:native
-   ccache
-   cmake
-   config-package-dev
-   debhelper-compat
-   dpkg-dev
-   ninja-build
-   sudo
-   unzip
+    build-essential:native
+    ccache
+    cmake
+    config-package-dev
+    debhelper-compat
+    dpkg-dev
+    ninja-build
+    sudo
+    unzip
 )
 
 DEPS=(
+    aapt
     iproute2
 )
 apt-get install -y --no-remove --no-install-recommends \
@@ -37,14 +40,20 @@ apt-get install -y --no-remove --no-install-recommends \
 
 . .gitlab-ci/container/container_pre_build.sh
 
+section_end debian_setup
+
 ############### Downloading NDK for native builds for the guest ...
+
+section_start android-ndk "Downloading Android NDK"
 
 # Fetch the NDK and extract just the toolchain we want.
 ndk="android-ndk-${ANDROID_NDK_VERSION}"
 curl -L --retry 4 -f --retry-all-errors --retry-delay 60 \
   -o "$ndk.zip" "https://dl.google.com/android/repository/$ndk-linux.zip"
-unzip -d / "$ndk.zip"
+unzip -q -d / "$ndk.zip"
 rm "$ndk.zip"
+
+section_end android-ndk
 
 ############### Build ANGLE
 
@@ -83,7 +92,7 @@ rm -rf /VK-GL-CTS
 
 ############### Downloading Cuttlefish resources ...
 
-uncollapsed_section_start cuttlefish "Downloading, building and installing Cuttlefish"
+section_start cuttlefish "Downloading, building and installing Cuttlefish"
 
 CUTTLEFISH_PROJECT_PATH=ao2/aosp-manifest
 CUTTLEFISH_BUILD_VERSION_TAGS=mesa-venus
@@ -138,40 +147,29 @@ usermod -a -G kvm,cvdnetwork root
 
 section_end cuttlefish
 
-############### Downloading Android CTS tools
+############### Downloading Android CTS
 
-uncollapsed_section_start android-cts "Downloading Android CTS tools"
+section_start android-cts "Downloading Android CTS"
 
 ANDROID_CTS_VERSION="${ANDROID_VERSION}_r1"
 ANDROID_CTS_DEVICE_ARCH="x86"
 
-mkdir /android-tools
-pushd /android-tools
-
 curl -L --retry 4 -f --retry-all-errors --retry-delay 60 \
   -o "android-cts-${ANDROID_CTS_VERSION}-linux_x86-${ANDROID_CTS_DEVICE_ARCH}.zip" \
   "https://dl.google.com/dl/android/cts/android-cts-${ANDROID_CTS_VERSION}-linux_x86-${ANDROID_CTS_DEVICE_ARCH}.zip"
-unzip "android-cts-${ANDROID_CTS_VERSION}-linux_x86-${ANDROID_CTS_DEVICE_ARCH}.zip"
+unzip -q -d / "android-cts-${ANDROID_CTS_VERSION}-linux_x86-${ANDROID_CTS_DEVICE_ARCH}.zip"
 rm "android-cts-${ANDROID_CTS_VERSION}-linux_x86-${ANDROID_CTS_DEVICE_ARCH}.zip"
 
 # Keep only the interesting tests to save space
 # shellcheck disable=SC2086 # we want word splitting
 ANDROID_CTS_MODULES_KEEP_EXPRESSION=$(printf "%s|" $ANDROID_CTS_MODULES | sed -e 's/|$//g')
-find android-cts/testcases/ -mindepth 1 -type d | grep -v -E "$ANDROID_CTS_MODULES_KEEP_EXPRESSION" | xargs rm -rf
-
-curl -L --retry 4 -f --retry-all-errors --retry-delay 60 \
-  -o "build-tools_r${ANDROID_SDK_VERSION}-linux.zip" "https://dl.google.com/android/repository/build-tools_r${ANDROID_SDK_VERSION}-linux.zip"
-unzip "build-tools_r${ANDROID_SDK_VERSION}-linux.zip"
-rm "build-tools_r${ANDROID_SDK_VERSION}-linux.zip"
-mv "android-$ANDROID_VERSION" build-tools
-
-popd
+find /android-cts/testcases/ -mindepth 1 -type d | grep -v -E "$ANDROID_CTS_MODULES_KEEP_EXPRESSION" | xargs rm -rf
 
 section_end android-cts
 
 ############### Uninstall the build software
 
-uncollapsed_section_switch debian_cleanup "Cleaning up base Debian system"
+section_switch debian_cleanup "Cleaning up base Debian system"
 
 rm -rf "/${ndk:?}"
 

@@ -41,7 +41,7 @@
     - !reference [.zink-common-rules, rules]
 
 .zink-venus-lvp-manual-rules:
-  stage: layered-backends-postmerge
+  stage: layered-backends-nightly
   extends: .no-auto-retry
   rules:
     - !reference [.test, rules]
@@ -57,7 +57,7 @@
     - !reference [.zink-common-rules, rules]
 
 .zink-anv-manual-rules:
-  stage: layered-backends-postmerge
+  stage: layered-backends-nightly
   extends: .no-auto-retry
   rules:
     - !reference [.test, rules]
@@ -80,7 +80,7 @@
     - !reference [.zink-common-rules, rules]
 
 .zink-nvk-manual-rules:
-  stage: layered-backends-postmerge
+  stage: layered-backends-nightly
   extends: .no-auto-retry
   rules:
     - !reference [.test, rules]
@@ -97,7 +97,7 @@
     ZINK_DEBUG: optimal_keys
 
 .zink-turnip-collabora-manual-rules:
-  stage: layered-backends-postmerge
+  stage: layered-backends-nightly
   extends: .no-auto-retry
   rules:
     - !reference [.test, rules]
@@ -105,7 +105,7 @@
     - !reference [.zink-common-manual-rules, rules]
 
 .zink-turnip-valve-manual-rules:
-  stage: layered-backends-postmerge
+  stage: layered-backends-nightly
   extends: .no-auto-retry
   rules:
     - !reference [.test, rules]
@@ -120,7 +120,7 @@
     - !reference [.zink-common-rules, rules]
 
 .zink-radv-manual-rules:
-  stage: layered-backends-postmerge
+  stage: layered-backends-nightly
   extends: .no-auto-retry
   rules:
     - !reference [.test, rules]
@@ -184,6 +184,7 @@
 
 .zink-anv-adl-test:
   extends:
+    - .lava-x86_64-test-gl
     - .anv-test
     - .lava-acer-cbv514-1h-34uz-brya:x86_64
     - .zink-anv-rules
@@ -194,7 +195,7 @@
 
 .zink-anv-adl-trace-test:
   extends:
-    - .lava-piglit-traces:x86_64
+    - .lava-x86_64-piglit-traces
     - .anv-test
     - .lava-acer-n20q11-r856ltn-p1s2-nissa:x86_64
     - .zink-anv-rules
@@ -205,6 +206,7 @@
 
 .zink-anv-tgl-test:
   extends:
+    - .lava-x86_64-test-gl
     - .anv-test
     - .lava-acer-cp514-2h-1160g7-volteer:x86_64
     - .zink-anv-rules
@@ -215,7 +217,7 @@
 
 .zink-anv-tgl-trace-test:
   extends:
-    - .lava-piglit-traces:x86_64
+    - .lava-x86_64-piglit-traces
     - .anv-test
     - .lava-acer-cp514-2h-1130g7-volteer:x86_64
     - .zink-anv-rules

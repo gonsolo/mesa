@@ -585,11 +585,11 @@ impl SM20Op for OpFFma {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
         use RegFile::GPR;
         let [src0, src1, src2] = &mut self.srcs;
-        swap_srcs_if_not_reg(src0, src1, GPR);
-        b.copy_alu_src_if_not_reg(src0, GPR, SrcType::F32);
         b.copy_alu_src_if_fabs(src0, GPR, SrcType::F32);
         b.copy_alu_src_if_fabs(src1, GPR, SrcType::F32);
         b.copy_alu_src_if_fabs(src2, GPR, SrcType::F32);
+        swap_srcs_if_not_reg(src0, src1, GPR);
+        b.copy_alu_src_if_not_reg(src0, GPR, SrcType::F32);
         if src1.as_imm_not_f20().is_some()
             && (self.saturate
                 || self.rnd_mode != FRndMode::NearestEven
@@ -598,7 +598,11 @@ impl SM20Op for OpFFma {
         {
             b.copy_alu_src(src1, GPR, SrcType::F32);
         }
-        b.copy_alu_src_if_not_reg(src2, GPR, SrcType::F32);
+        if src_is_reg(src1, GPR) {
+            b.copy_alu_src_if_imm(src2, GPR, SrcType::F32);
+        } else {
+            b.copy_alu_src_if_not_reg(src2, GPR, SrcType::F32);
+        }
     }
 
     fn encode(&self, e: &mut SM20Encoder<'_>) {
@@ -676,10 +680,10 @@ impl SM20Op for OpFMul {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
         use RegFile::GPR;
         let [src0, src1] = &mut self.srcs;
-        swap_srcs_if_not_reg(src0, src1, GPR);
-        b.copy_alu_src_if_not_reg(src0, GPR, SrcType::F32);
         b.copy_alu_src_if_fabs(src0, GPR, SrcType::F32);
         b.copy_alu_src_if_fabs(src1, GPR, SrcType::F32);
+        swap_srcs_if_not_reg(src0, src1, GPR);
+        b.copy_alu_src_if_not_reg(src0, GPR, SrcType::F32);
         if src1.as_imm_not_f20().is_some()
             && self.rnd_mode != FRndMode::NearestEven
         {
@@ -752,7 +756,7 @@ impl SM20Op for OpRro {
 impl SM20Op for OpMuFu {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
         use RegFile::GPR;
-        b.copy_alu_src_if_not_reg(&mut self.src, GPR, SrcType::I32);
+        b.copy_alu_src_if_not_reg(&mut self.src, GPR, SrcType::F32);
     }
 
     fn encode(&self, e: &mut SM20Encoder<'_>) {
@@ -788,8 +792,8 @@ impl SM20Op for OpFSet {
         if swap_srcs_if_not_reg(src0, src1, GPR) {
             self.cmp_op = self.cmp_op.flip();
         }
-        b.copy_alu_src_if_not_reg(src0, GPR, SrcType::ALU);
-        b.copy_alu_src_if_f20_overflow(src1, GPR, SrcType::ALU);
+        b.copy_alu_src_if_not_reg(src0, GPR, SrcType::F32);
+        b.copy_alu_src_if_f20_overflow(src1, GPR, SrcType::F32);
     }
 
     fn encode(&self, e: &mut SM20Encoder<'_>) {
@@ -818,8 +822,8 @@ impl SM20Op for OpFSetP {
         if swap_srcs_if_not_reg(src0, src1, GPR) {
             self.cmp_op = self.cmp_op.flip();
         }
-        b.copy_alu_src_if_not_reg(src0, GPR, SrcType::ALU);
-        b.copy_alu_src_if_f20_overflow(src1, GPR, SrcType::ALU);
+        b.copy_alu_src_if_not_reg(src0, GPR, SrcType::F32);
+        b.copy_alu_src_if_f20_overflow(src1, GPR, SrcType::F32);
     }
 
     fn encode(&self, e: &mut SM20Encoder<'_>) {
@@ -925,7 +929,11 @@ impl SM20Op for OpDFma {
         swap_srcs_if_not_reg(src0, src1, GPR);
         b.copy_alu_src_if_not_reg(src0, GPR, SrcType::F64);
         b.copy_alu_src_if_f20_overflow(src1, GPR, SrcType::F64);
-        b.copy_alu_src_if_not_reg(src2, GPR, SrcType::F64);
+        if src_is_reg(src1, GPR) {
+            b.copy_alu_src_if_imm(src2, GPR, SrcType::F64);
+        } else {
+            b.copy_alu_src_if_not_reg(src2, GPR, SrcType::F64);
+        }
     }
 
     fn encode(&self, e: &mut SM20Encoder<'_>) {
@@ -1036,7 +1044,7 @@ impl SM20Op for OpDSetP {
 impl SM20Op for OpBfe {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
         use RegFile::GPR;
-        b.copy_alu_src_if_not_reg(&mut self.base, GPR, SrcType::I32);
+        b.copy_alu_src_if_not_reg(&mut self.base, GPR, SrcType::ALU);
         if let SrcRef::Imm32(imm32) = &mut self.range.src_ref {
             // Only the bottom 16 bits of the immediate matter
             *imm32 &= 0xffff;
@@ -1081,6 +1089,9 @@ impl SM20Op for OpIAdd2 {
             b.copy_alu_src_and_lower_ineg(src0, GPR, SrcType::I32);
         }
         b.copy_alu_src_if_not_reg(src0, GPR, SrcType::I32);
+        if !self.carry_out.is_none() {
+            b.copy_alu_src_if_ineg_imm(src1, GPR, SrcType::I32);
+        }
     }
 
     fn encode(&self, e: &mut SM20Encoder<'_>) {
@@ -1119,7 +1130,7 @@ impl SM20Op for OpIAdd2X {
         use RegFile::GPR;
         let [src0, src1] = &mut self.srcs;
         swap_srcs_if_not_reg(src0, src1, GPR);
-        b.copy_alu_src_if_not_reg(src0, GPR, SrcType::I32);
+        b.copy_alu_src_if_not_reg(src0, GPR, SrcType::B32);
     }
 
     fn encode(&self, e: &mut SM20Encoder<'_>) {
@@ -1159,18 +1170,18 @@ impl SM20Op for OpIMad {
         use RegFile::GPR;
         let [src0, src1, src2] = &mut self.srcs;
         swap_srcs_if_not_reg(src0, src1, GPR);
-        b.copy_alu_src_if_not_reg(src0, GPR, SrcType::I32);
-        b.copy_alu_src_if_i20_overflow(src1, GPR, SrcType::I32);
+        b.copy_alu_src_if_not_reg(src0, GPR, SrcType::ALU);
+        b.copy_alu_src_if_i20_overflow(src1, GPR, SrcType::ALU);
 
         let neg_ab = src0.src_mod.is_ineg() ^ src1.src_mod.is_ineg();
         let neg_c = src2.src_mod.is_ineg();
         if neg_ab && neg_c {
-            b.copy_alu_src_and_lower_ineg(src2, GPR, SrcType::I32);
+            b.copy_alu_src_and_lower_ineg(src2, GPR, SrcType::ALU);
         }
         if src_is_reg(src1, GPR) {
             b.copy_alu_src_if_imm(src2, GPR, SrcType::ALU);
         } else {
-            b.copy_alu_src_if_not_reg(src2, GPR, SrcType::I32);
+            b.copy_alu_src_if_not_reg(src2, GPR, SrcType::ALU);
         }
     }
 
@@ -1202,8 +1213,10 @@ impl SM20Op for OpIMul {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
         use RegFile::GPR;
         let [src0, src1] = &mut self.srcs;
-        swap_srcs_if_not_reg(src0, src1, GPR);
-        b.copy_alu_src_if_not_reg(src0, GPR, SrcType::I32);
+        if swap_srcs_if_not_reg(src0, src1, GPR) {
+            self.signed.swap(0, 1);
+        }
+        b.copy_alu_src_if_not_reg(src0, GPR, SrcType::ALU);
     }
 
     fn encode(&self, e: &mut SM20Encoder<'_>) {
@@ -1626,34 +1639,20 @@ impl SM20Op for OpShfl {
         e.set_dst(14..20, self.dst);
         e.set_reg_src(20..26, self.src);
 
-        assert!(self.lane.src_mod.is_none());
-        match AluSrc::from_src(Some(&self.lane)) {
-            AluSrc::Reg(reg) => {
-                e.set_reg(26..32, reg);
-                e.set_bit(5, false);
-            }
-            AluSrc::Imm(imm) => {
-                e.set_field(26..32, imm & 0x1f);
-                e.set_bit(5, true);
-            }
-            AluSrc::None | AluSrc::CBuf(_) => {
-                panic!("Unsupported shfl lane: {}", self.lane);
-            }
+        if let Some(u) = self.lane.as_u32() {
+            e.set_field(26..32, u & 0x1f);
+            e.set_bit(5, true);
+        } else {
+            e.set_reg_src(26..32, self.lane);
+            e.set_bit(5, false);
         }
 
-        assert!(self.c.src_mod.is_none());
-        match AluSrc::from_src(Some(&self.c)) {
-            AluSrc::Reg(reg) => {
-                e.set_reg(49..55, reg);
-                e.set_bit(6, false);
-            }
-            AluSrc::Imm(imm) => {
-                e.set_field(42..55, imm & 0x1fff);
-                e.set_bit(6, true);
-            }
-            AluSrc::None | AluSrc::CBuf(_) => {
-                panic!("Unsupported shfl lane: {}", self.lane);
-            }
+        if let Some(u) = self.c.as_u32() {
+            e.set_field(42..55, u & 0x1fff);
+            e.set_bit(6, true);
+        } else {
+            e.set_reg_src(49..55, self.c);
+            e.set_bit(6, false);
         }
 
         e.set_field(
@@ -2589,7 +2588,7 @@ impl SM20Op for OpS2R {
     fn encode(&self, e: &mut SM20Encoder<'_>) {
         e.set_opcode(SM20Unit::Move, 0xb);
         e.set_dst(14..20, self.dst);
-        e.set_field(26..32, self.idx);
+        e.set_field(26..36, self.idx);
     }
 }
 

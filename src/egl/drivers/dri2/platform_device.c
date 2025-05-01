@@ -282,27 +282,27 @@ device_probe_device(_EGLDisplay *disp)
    if (!dri2_dpy->driver_name)
       goto err_name;
 
-   /* When doing software rendering, some times user still want to explicitly
-    * choose the render node device since cross node import doesn't work between
-    * vgem/virtio_gpu yet. It would be nice to have a new EXTENSION for this.
-    * For now, just fallback to kms_swrast. */
-   if (disp->Options.ForceSoftware && !request_software &&
-       (strcmp(dri2_dpy->driver_name, "vgem") == 0 ||
-        strcmp(dri2_dpy->driver_name, "virtio_gpu") == 0)) {
-      free(dri2_dpy->driver_name);
-      _eglLog(_EGL_WARNING, "NEEDS EXTENSION: falling back to kms_swrast");
-      dri2_dpy->driver_name = strdup("kms_swrast");
+   /* this is software fallback */
+   if (disp->Options.ForceSoftware && !request_software) {
+      /* When doing software rendering, some times user still want to explicitly
+      * choose the render node device since cross node import doesn't work between
+      * vgem/virtio_gpu yet. It would be nice to have a new EXTENSION for this.
+      * For now, just fallback to kms_swrast. */
+      if (strcmp(dri2_dpy->driver_name, "vgem") == 0 ||
+          strcmp(dri2_dpy->driver_name, "virtio_gpu") == 0) {
+         free(dri2_dpy->driver_name);
+         _eglLog(_EGL_WARNING, "NEEDS EXTENSION: falling back to kms_swrast");
+         dri2_dpy->driver_name = strdup("kms_swrast");
+      } else if (strcmp(dri2_dpy->driver_name, "vmwgfx")) {
+         /* this is software fallback; deny progress since a hardware device was requested */
+         return false;
+      }
    }
 
-   if (!dri2_load_driver(disp))
-      goto err_load;
+   dri2_detect_swrast(disp);
 
    dri2_dpy->loader_extensions = image_loader_extensions;
    return true;
-
-err_load:
-   free(dri2_dpy->driver_name);
-   dri2_dpy->driver_name = NULL;
 
 err_name:
    close(dri2_dpy->fd_render_gpu);
@@ -322,11 +322,7 @@ device_probe_device_sw(_EGLDisplay *disp)
       return false;
 
    /* HACK: should be driver_swrast_null */
-   if (!dri2_load_driver(disp)) {
-      free(dri2_dpy->driver_name);
-      dri2_dpy->driver_name = NULL;
-      return false;
-   }
+   dri2_detect_swrast(disp);
 
    dri2_dpy->loader_extensions = swrast_loader_extensions;
    return true;

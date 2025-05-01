@@ -200,7 +200,7 @@ get_stride(RegClass rc)
       uint32_t size = rc.size();
       if (size == 2) {
          return 2;
-      } else if (size >= 4) {
+      } else if (size >= 4 && util_is_power_of_two_or_zero(size)) {
          return 4;
       } else {
          return 1;
@@ -1271,7 +1271,7 @@ get_reg_impl(ra_ctx& ctx, const RegisterFile& reg_file, std::vector<parallelcopy
 {
    const PhysRegInterval& bounds = info.bounds;
    uint32_t size = info.size;
-   uint32_t stride = info.stride;
+   uint32_t stride = info.rc.is_subdword() ? DIV_ROUND_UP(info.stride, 4) : info.stride;
    RegClass rc = info.rc;
 
    /* check how many free regs we have */
@@ -1525,17 +1525,34 @@ compact_relocate_vars(ra_ctx& ctx, const std::vector<IDAndRegClass>& vars,
 
    std::sort(
       sorted.begin(), sorted.end(),
-      [&ctx](const IDAndInfo& a, const IDAndInfo& b)
+      [=, &ctx](const IDAndInfo& a, const IDAndInfo& b)
       {
-         unsigned a_stride = a.info.stride * (a.info.rc.is_subdword() ? 1 : 4);
-         unsigned b_stride = b.info.stride * (b.info.rc.is_subdword() ? 1 : 4);
-         if (a_stride > b_stride)
-            return true;
-         if (a_stride < b_stride)
-            return false;
+         unsigned a_stride = MAX2(a.info.stride * (a.info.rc.is_subdword() ? 1 : 4), 4);
+         unsigned b_stride = MAX2(b.info.stride * (b.info.rc.is_subdword() ? 1 : 4), 4);
+         /* Since the SGPR bounds should always be a multiple of two, we can place
+          * variables in this order:
+          * - the usual 4 SGPR aligned variables
+          * - then the 0xffffffff variable
+          * - then the unaligned variables
+          * - and finally the 2 SGPR aligned variables
+          * This way, we should always be able to place variables if the 0xffffffff one
+          * had a NPOT size.
+          *
+          * This also lets us avoid placing the 0xffffffff variable in VCC if it's s1/s2
+          * (required for pseudo-scalar transcendental) and places it first if it's a
+          * VGPR variable (required for ImageGather4D16Bug).
+          */
+         assert(a.info.rc.type() != RegType::sgpr || get_reg_bounds(ctx, a.info.rc).size % 2 == 0);
+         assert(a_stride == 16 || a_stride == 8 || a_stride == 4);
+         assert(b_stride == 16 || b_stride == 8 || b_stride == 4);
+         assert(a.info.rc.size() % (a_stride / 4u) == 0);
+         assert(b.info.rc.size() % (b_stride / 4u) == 0);
+         if ((a_stride == 16) != (b_stride == 16))
+            return a_stride > b_stride;
          if (a.id == 0xffffffff || b.id == 0xffffffff)
-            return a.id ==
-                   0xffffffff; /* place 0xffffffff before others if possible, not for any reason */
+            return a.id == 0xffffffff;
+         if (a_stride != b_stride)
+            return a_stride < b_stride;
          return ctx.assignments[a.id].reg < ctx.assignments[b.id].reg;
       });
 
@@ -1832,7 +1849,7 @@ get_reg(ra_ctx& ctx, const RegisterFile& reg_file, Temp temp,
 
    DefInfo info(ctx, instr, temp.regClass(), operand_index);
 
-   if (!ctx.policy.skip_optimistic_path) {
+   if (!ctx.policy.skip_optimistic_path && !ctx.policy.use_compact_relocate) {
       /* try to find space without live-range splits */
       res = get_reg_simple(ctx, reg_file, info);
 
@@ -1840,11 +1857,13 @@ get_reg(ra_ctx& ctx, const RegisterFile& reg_file, Temp temp,
          return *res;
    }
 
-   /* try to find space with live-range splits */
-   res = get_reg_impl(ctx, reg_file, parallelcopies, info, instr);
+   if (!ctx.policy.use_compact_relocate) {
+      /* try to find space with live-range splits */
+      res = get_reg_impl(ctx, reg_file, parallelcopies, info, instr);
 
-   if (res)
-      return *res;
+      if (res)
+         return *res;
+   }
 
    /* try compacting the linear vgprs to make more space */
    std::vector<parallelcopy> pc;
@@ -1869,19 +1888,33 @@ get_reg(ra_ctx& ctx, const RegisterFile& reg_file, Temp temp,
    if (!increase_register_file(ctx, info.rc)) {
       /* fallback algorithm: reallocate all variables at once (linear VGPRs should already be
        * compact at the end) */
+      const PhysRegInterval regs = get_reg_bounds(ctx, info.rc);
+
       unsigned def_size = info.rc.size();
+      std::vector<IDAndRegClass> def_vars;
       for (Definition def : instr->definitions) {
-         if (ctx.assignments[def.tempId()].assigned && def.regClass().type() == info.rc.type())
+         if (def.isPrecolored()) {
+            assert(!regs.contains({def.physReg(), def.size()}));
+            continue;
+         }
+         if (ctx.assignments[def.tempId()].assigned && def.regClass().type() == info.rc.type()) {
             def_size += def.regClass().size();
+            def_vars.emplace_back(def.tempId(), def.regClass());
+         }
       }
 
       unsigned killed_op_size = 0;
+      std::vector<IDAndRegClass> killed_op_vars;
       for (Operand op : instr->operands) {
-         if (op.isTemp() && op.isFirstKillBeforeDef() && op.regClass().type() == info.rc.type())
+         if (op.isPrecolored()) {
+            assert(!regs.contains({op.physReg(), op.size()}));
+            continue;
+         }
+         if (op.isTemp() && op.isFirstKillBeforeDef() && op.regClass().type() == info.rc.type()) {
             killed_op_size += op.regClass().size();
+            killed_op_vars.emplace_back(op.tempId(), op.regClass());
+         }
       }
-
-      const PhysRegInterval regs = get_reg_bounds(ctx, info.rc);
 
       /* reallocate passthrough variables and non-killed operands */
       std::vector<IDAndRegClass> vars;
@@ -1892,19 +1925,9 @@ get_reg(ra_ctx& ctx, const RegisterFile& reg_file, Temp temp,
       PhysReg space = compact_relocate_vars(ctx, vars, parallelcopies, regs.lo());
 
       /* reallocate killed operands */
-      std::vector<IDAndRegClass> killed_op_vars;
-      for (Operand op : instr->operands) {
-         if (op.isFirstKillBeforeDef() && op.regClass().type() == info.rc.type())
-            killed_op_vars.emplace_back(op.tempId(), op.regClass());
-      }
       compact_relocate_vars(ctx, killed_op_vars, parallelcopies, space);
 
       /* reallocate definitions */
-      std::vector<IDAndRegClass> def_vars;
-      for (Definition def : instr->definitions) {
-         if (ctx.assignments[def.tempId()].assigned && def.regClass().type() == info.rc.type())
-            def_vars.emplace_back(def.tempId(), def.regClass());
-      }
       def_vars.emplace_back(0xffffffff, info.rc);
       return compact_relocate_vars(ctx, def_vars, parallelcopies, space);
    }
@@ -3372,19 +3395,16 @@ register_allocation(Program* program, ra_test_policy policy)
 
             if (!definition->isFixed()) {
                Temp tmp = definition->getTemp();
-               if (definition->regClass().is_subdword() && definition->bytes() < 4) {
-                  PhysReg reg = get_reg(ctx, register_file, tmp, parallelcopy, instr);
-                  definition->setFixed(reg);
-                  if (reg.byte() || register_file.test(reg, 4)) {
-                     bool allow_16bit_write = reg.byte() % 2 == 0 && !register_file.test(reg, 2);
-                     add_subdword_definition(program, instr, reg, allow_16bit_write);
-                     definition = &instr->definitions[i]; /* add_subdword_definition can invalidate
-                                                             the reference */
-                  }
-               } else {
-                  definition->setFixed(get_reg(ctx, register_file, tmp, parallelcopy, instr));
-               }
+               PhysReg reg = get_reg(ctx, register_file, tmp, parallelcopy, instr);
+               definition->setFixed(reg);
                update_renames(ctx, register_file, parallelcopy, instr);
+               if (definition->regClass().is_subdword() && definition->bytes() < 4 &&
+                   (reg.byte() || register_file.test(reg, 4))) {
+                  bool allow_16bit_write = reg.byte() % 2 == 0 && !register_file.test(reg, 2);
+                  add_subdword_definition(program, instr, reg, allow_16bit_write);
+                  /* add_subdword_definition can invalidate the reference */
+                  definition = &instr->definitions[i];
+               }
             }
 
             assert(

@@ -21,6 +21,8 @@ sed -i -e 's/http:\/\/deb/https:\/\/deb/g' /etc/apt/sources.list.d/*
 
 echo "deb [trusted=yes] https://gitlab.freedesktop.org/gfx-ci/ci-deb-repo/-/raw/${PKG_REPO_REV}/ ${FDO_DISTRIBUTION_VERSION%-*} main" | tee /etc/apt/sources.list.d/gfx-ci_.list
 
+echo "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://deb.debian.org/debian ${FDO_DISTRIBUTION_VERSION%-*} non-free-firmware" | tee /etc/apt/sources.list.d/non-free-firmware.list
+
 : "${LLVM_VERSION:?llvm version not set!}"
 
 . .gitlab-ci/container/debian/maybe-add-llvm-repo.sh
@@ -71,13 +73,13 @@ EPHEMERAL=(
     "llvm-${LLVM_VERSION}-dev"
     make
     meson
-    openssh-server
     patch
     pkgconf
     protobuf-compiler
     python3-dev
     python3-pip
     python3-setuptools
+    python3-venv
     python3-wheel
     wayland-protocols
     xz-utils
@@ -87,6 +89,7 @@ DEPS=(
     apt-utils
     clinfo
     curl
+    dropbear
     git
     git-lfs
     inetutils-syslogd
@@ -129,6 +132,7 @@ DEPS=(
     python3-simplejson
     python3-six
     python3-yaml
+    sntp
     socat
     spirv-tools
     sysvinit-core
@@ -142,7 +146,28 @@ DEPS=(
     xauth
     xvfb
     zlib1g
+)
+
+HW_DEPS=(
+    firmware-realtek
+    netcat-openbsd
+    mount
+    python3-distutils
+    python3-serial
+    tzdata
     zstd
+)
+
+[ "$DEBIAN_ARCH" = "arm64" ] && ARCH_DEPS=(
+    firmware-linux-nonfree
+    firmware-qcom-media
+)
+[ "$DEBIAN_ARCH" = "armhf" ] && ARCH_DEPS=(
+    firmware-misc-nonfree
+)
+[ "$DEBIAN_ARCH" = "amd64" ] && ARCH_DEPS=(
+    firmware-amd-graphics
+    firmware-misc-nonfree
 )
 
 apt-get update
@@ -151,25 +176,28 @@ apt-get dist-upgrade -y
 apt-get install --purge -y \
       sysvinit-core libelogind0
 
-apt-get install -y --no-remove "${DEPS[@]}"
+apt-get install -y --no-remove "${DEPS[@]}" "${HW_DEPS[@]}" "${ARCH_DEPS[@]}"
 
 apt-get install -y --no-install-recommends "${EPHEMERAL[@]}"
 
 . .gitlab-ci/container/container_pre_build.sh
 
-# Needed for ci-fairy, this revision is able to upload files to MinIO
-# and doesn't depend on git
-pip3 install --break-system-packages git+http://gitlab.freedesktop.org/freedesktop/ci-templates@ffe4d1b10aab7534489f0c4bbc4c5899df17d3f2
+# Needed for ci-fairy s3cp
+pip3 install --break-system-packages "ci-fairy[s3] @ git+https://gitlab.freedesktop.org/freedesktop/ci-templates@$MESA_TEMPLATES_COMMIT"
 
 # Needed for manipulation with traces yaml files.
 pip3 install --break-system-packages yq
 
 section_end debian_setup
 
-############### Download prebuilt kernel
+############### Build ci-kdl
+
+. .gitlab-ci/container/build-kdl.sh
+
+############### Download prebuilt kernel and firmware
 
 if [ "$DEBIAN_ARCH" = amd64 ]; then
-  uncollapsed_section_start kernel "Downloading kernel for crosvm"
+  uncollapsed_section_start kernel "Downloading kernel and firmware"
   export KERNEL_IMAGE_NAME=bzImage
   mkdir -p /kernel
   # shellcheck disable=SC2153 # KERNEL_IMAGE_BASE is set in the root .gitlab-ci.yml file
@@ -177,6 +205,7 @@ if [ "$DEBIAN_ARCH" = amd64 ]; then
       -o "/kernel/${KERNEL_IMAGE_NAME}" "${KERNEL_IMAGE_BASE}/${DEBIAN_ARCH}/${KERNEL_IMAGE_NAME}"
   section_end kernel
 fi
+. .gitlab-ci/container/get-firmware-from-source.sh / "$FIRMWARE_FILES"
 
 ############### Build mold
 

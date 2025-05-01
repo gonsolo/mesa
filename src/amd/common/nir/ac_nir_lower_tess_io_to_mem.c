@@ -595,6 +595,9 @@ lower_hs_output_store(nir_builder *b,
             ac_nir_store_var_components(b, st->tcs_tess_level_outer, store_val,
                                         component, write_mask);
       }
+
+      if (semantics.no_varying)
+         st->tes_inputs_read &= ~BITFIELD64_BIT(semantics.location);
    }
 
    return NIR_LOWER_INSTR_PROGRESS_REPLACE;
@@ -1289,19 +1292,20 @@ ac_nir_lower_tes_inputs_to_mem(nir_shader *shader,
 }
 
 void
-ac_nir_compute_tess_wg_info(const struct radeon_info *info, const struct shader_info *tcs_info,
+ac_nir_compute_tess_wg_info(const struct radeon_info *info, uint64_t outputs_read, uint64_t outputs_written,
+                            uint32_t patch_outputs_read, uint32_t patch_outputs_written, unsigned tcs_vertices_out,
                             unsigned wave_size, bool tess_uses_primid, bool all_invocations_define_tess_levels,
                             unsigned num_tcs_input_cp, unsigned lds_input_vertex_size,
                             unsigned num_mem_tcs_outputs, unsigned num_mem_tcs_patch_outputs,
                             unsigned *num_patches_per_wg, unsigned *hw_lds_size)
 {
-   unsigned num_tcs_output_cp = tcs_info->tess.tcs_vertices_out;
+   unsigned num_tcs_output_cp = tcs_vertices_out;
    unsigned lds_output_vertex_size =
-      util_bitcount64(tcs_info->outputs_read & tcs_info->outputs_written & ~TESS_LVL_MASK) * 16;
+      util_bitcount64(outputs_read & outputs_written & ~TESS_LVL_MASK) * 16;
    unsigned lds_perpatch_output_patch_size =
       (util_bitcount64(all_invocations_define_tess_levels ?
-                          0 : tcs_info->outputs_written & TESS_LVL_MASK) +
-       util_bitcount(tcs_info->patch_outputs_read & tcs_info->patch_outputs_written)) * 16;
+                          0 : outputs_written & TESS_LVL_MASK) +
+       util_bitcount(patch_outputs_read & patch_outputs_written)) * 16;
 
    unsigned lds_per_patch = num_tcs_input_cp * lds_input_vertex_size +
                             num_tcs_output_cp * lds_output_vertex_size +
@@ -1310,21 +1314,22 @@ ac_nir_compute_tess_wg_info(const struct radeon_info *info, const struct shader_
    unsigned num_patches = ac_compute_num_tess_patches(info, num_tcs_input_cp, num_tcs_output_cp, mem_per_patch,
                                                       lds_per_patch, wave_size, tess_uses_primid);
    unsigned lds_size = lds_per_patch * num_patches;
-   unsigned mem_size = mem_per_patch * num_patches;
 
    /* The first vec4 is reserved for the tf0/1 shader message group vote. */
    if (info->gfx_level >= GFX11)
       lds_size += AC_HS_MSG_VOTE_LDS_BYTES;
 
-   /* SPI_SHADER_PGM_RSRC2_HS.LDS_SIZE specifies the allocation size for both LDS and the HS
-    * offchip ring buffer. LDS is only used for TCS inputs (with cross-invocation or indirect
-    * access only or if TCS in/out vertex counts are different) and for TCS outputs that are read
-    * (including tess level outputs if they need to be re-read in invocation 0), while the HS ring
-    * buffer is only used for TCS outputs consumed by TES.
+   /* SPI_SHADER_PGM_RSRC2_HS.LDS_SIZE specifies the allocation size only for LDS. The HS offchip
+    * ring buffer always uses a fixed allocation size per workgroup determined by
+    * info->hs_offchip_workgroup_dw_size.
+    *
+    * LDS is only used for TCS inputs (with cross-invocation or indirect access only or if TCS in/out
+    * vertex counts are different) and for TCS outputs that are read (including tess level outputs
+    * if they need to be re-read in invocation 0), while the HS ring buffer is only used for TCS
+    * outputs consumed by TES.
     */
-   unsigned merged_size = MAX2(lds_size, mem_size);
-   assert(merged_size <= (info->gfx_level >= GFX9 ? 65536 : 32768));
+   assert(lds_size <= (info->gfx_level >= GFX9 ? 65536 : 32768));
 
    *num_patches_per_wg = num_patches;
-   *hw_lds_size = DIV_ROUND_UP(merged_size, info->lds_encode_granularity);
+   *hw_lds_size = DIV_ROUND_UP(lds_size, info->lds_encode_granularity);
 }

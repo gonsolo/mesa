@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2025 Arm Ltd.
  * Copyright (c) 2022 Amazon.com, Inc. or its affiliates.
  * Copyright (C) 2019-2022 Collabora, Ltd.
  * Copyright (C) 2019 Red Hat Inc.
@@ -109,11 +110,18 @@ lower_sample_mask_writes(nir_builder *b, nir_intrinsic_instr *intrin,
    return true;
 }
 
+static bool
+panfrost_use_ld_var_buf(const nir_shader *ir)
+{
+   const uint64_t allowed = VARYING_BIT_POS | VARYING_BIT_PSIZ |
+      BITFIELD64_MASK(16) << VARYING_SLOT_VAR0;
+   return (ir->info.inputs_read & ~allowed) == 0;
+}
+
 static void
 panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
                         struct util_debug_callback *dbg,
                         struct panfrost_shader_key *key, unsigned req_local_mem,
-                        unsigned fixed_varying_mask,
                         struct panfrost_shader_binary *out)
 {
    MESA_TRACE_FUNC();
@@ -133,21 +141,17 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
 
    struct panfrost_compile_inputs inputs = {
       .gpu_id = panfrost_device_gpu_id(dev),
-      .push_uniforms = true,
    };
-
-   if (dev->arch >= 9)
-      /* Use LD_VAR_BUF for varying lookups. */
-      inputs.valhall.use_ld_var_buf = true;
 
    /* Lower this early so the backends don't have to worry about it */
    if (s->info.stage == MESA_SHADER_FRAGMENT) {
-      inputs.fixed_varying_mask = key->fs.fixed_varying_mask;
+      inputs.fixed_varying_mask =
+         panfrost_get_fixed_varying_mask(s->info.inputs_read);
    } else if (s->info.stage == MESA_SHADER_VERTEX) {
-      inputs.fixed_varying_mask = fixed_varying_mask;
-
       /* No IDVS for internal XFB shaders */
       inputs.no_idvs = s->info.has_transform_feedback_varyings;
+      inputs.fixed_varying_mask =
+         panfrost_get_fixed_varying_mask(s->info.outputs_written);
 
       if (s->info.has_transform_feedback_varyings) {
          NIR_PASS(_, s, nir_io_add_const_offset_to_base,
@@ -174,6 +178,8 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
       if (key->fs.clip_plane_enable) {
          NIR_PASS(_, s, nir_lower_clip_fs, key->fs.clip_plane_enable,
                   false, true);
+         inputs.fixed_varying_mask =
+            panfrost_get_fixed_varying_mask(s->info.inputs_read);
       }
 
       if (key->fs.line_smooth) {
@@ -200,8 +206,23 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
 
    NIR_PASS(_, s, panfrost_nir_lower_sysvals, dev->arch, &out->sysvals);
 
+   /* For now, we only allow pushing the default UBO 0, and the sysval UBO (if
+    * present). Both of these are mapped on the CPU, but other UBOs are not.
+    * When we switch to pushing UBOs with a compute kernel (or CSF instructions)
+    * we can relax this. */
+   assert(s->info.first_ubo_is_default_ubo);
+   inputs.pushable_ubos = BITFIELD_BIT(0);
+
+   if (out->sysvals.sysval_count != 0) {
+      unsigned sysval_ubo = s->info.num_ubos - 1;
+      inputs.pushable_ubos |= BITFIELD_BIT(sysval_ubo);
+   }
+
    /* Lower resource indices */
    NIR_PASS(_, s, panfrost_nir_lower_res_indices, &inputs);
+
+   if (dev->arch >= 9)
+      inputs.valhall.use_ld_var_buf = panfrost_use_ld_var_buf(s);
 
    screen->vtbl.compile_shader(s, &inputs, &out->binary, &out->info);
 
@@ -242,8 +263,7 @@ panfrost_shader_get(struct pipe_screen *pscreen,
    if (!panfrost_disk_cache_retrieve(screen->disk_cache, uncompiled,
                                      &state->key, &res)) {
       panfrost_shader_compile(screen, uncompiled->nir, dbg, &state->key,
-                              req_local_mem, uncompiled->fixed_varying_mask,
-                              &res);
+                              req_local_mem, &res);
 
       panfrost_disk_cache_store(screen->disk_cache, uncompiled, &state->key,
                                 &res);
@@ -293,7 +313,6 @@ panfrost_build_fs_key(struct panfrost_context *ctx,
    struct panfrost_device *dev = pan_device(ctx->base.screen);
    struct pipe_framebuffer_state *fb = &ctx->pipe_framebuffer;
    struct pipe_rasterizer_state *rast = (void *)ctx->rasterizer;
-   struct panfrost_uncompiled_shader *vs = ctx->uncompiled[MESA_SHADER_VERTEX];
 
    /* gl_FragColor lowering needs the number of colour buffers */
    if (uncompiled->fragcolor_lowered) {
@@ -325,12 +344,6 @@ panfrost_build_fs_key(struct panfrost_context *ctx,
 
          key->rt_formats[i] = fmt;
       }
-   }
-
-   /* Funny desktop GL varying lowering on Valhall */
-   if (dev->arch >= 9) {
-      assert(vs != NULL && "too early");
-      key->fixed_varying_mask = vs->fixed_varying_mask;
    }
 }
 
@@ -470,13 +483,6 @@ panfrost_create_shader_state(struct pipe_context *pctx,
 
    so->stream_output = cso->stream_output;
    so->nir = nir;
-
-   /* Fix linkage early */
-   if (so->nir->info.stage == MESA_SHADER_VERTEX) {
-      so->fixed_varying_mask =
-         (so->nir->info.outputs_written & BITFIELD_MASK(VARYING_SLOT_VAR0)) &
-         ~VARYING_BIT_POS & ~VARYING_BIT_PSIZ;
-   }
 
    /* gl_FragColor needs to be lowered before lowering I/O, do that now */
    if (nir->info.stage == MESA_SHADER_FRAGMENT &&

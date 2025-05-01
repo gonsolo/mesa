@@ -5222,6 +5222,13 @@ bool nir_lower_vec_to_regs(nir_shader *shader, nir_instr_writemask_filter_cb cb,
 bool nir_lower_alpha_test(nir_shader *shader, enum compare_func func,
                           bool alpha_to_one,
                           const gl_state_index16 *alpha_ref_state_tokens);
+
+bool nir_lower_alpha_to_coverage(nir_shader *shader,
+                                 uint8_t nr_samples,
+                                 bool has_intrinsic);
+
+bool nir_lower_alpha_to_one(nir_shader *shader);
+
 bool nir_lower_alu(nir_shader *shader);
 
 bool nir_lower_flrp(nir_shader *shader, unsigned lowering_mask,
@@ -6446,6 +6453,51 @@ bool nir_instr_dominates_use(nir_use_dominance_state *state,
 void nir_print_use_dominators(nir_use_dominance_state *state,
                               nir_instr **instructions,
                               unsigned num_instructions);
+
+static inline unsigned
+nir_verts_in_output_prim(nir_shader *gs)
+{
+   assert(gs->info.stage == MESA_SHADER_GEOMETRY);
+   return mesa_vertices_per_prim(gs->info.gs.output_primitive);
+}
+
+typedef struct {
+   struct {
+      /* The list of instructions that affect this output including the output
+       * store itself. If NULL, the output isn't stored.
+       */
+      nir_instr **instr_list;
+      unsigned num_instr;
+   } output[NUM_TOTAL_VARYING_SLOTS];
+} nir_output_deps;
+
+void nir_gather_output_dependencies(nir_shader *nir, nir_output_deps *deps);
+void nir_free_output_dependencies(nir_output_deps *deps);
+
+typedef struct {
+   struct {
+      /* Per component mask of input slots. */
+      BITSET_DECLARE(inputs, NUM_TOTAL_VARYING_SLOTS * 8);
+      bool defined;
+      bool uses_ssbo_reads;
+      bool uses_image_reads;
+   } output[NUM_TOTAL_VARYING_SLOTS];
+} nir_input_to_output_deps;
+
+void nir_gather_input_to_output_dependencies(nir_shader *nir,
+                                             nir_input_to_output_deps *out_deps);
+void nir_print_input_to_output_deps(nir_input_to_output_deps *deps,
+                                    nir_shader *nir, FILE *f);
+
+typedef struct {
+   /* 1 bit per 16-bit component. */
+   BITSET_DECLARE(pos_only, NUM_TOTAL_VARYING_SLOTS * 8);
+   BITSET_DECLARE(var_only, NUM_TOTAL_VARYING_SLOTS * 8);
+   BITSET_DECLARE(both, NUM_TOTAL_VARYING_SLOTS * 8);
+} nir_output_clipper_var_groups;
+
+void nir_gather_output_clipper_var_groups(nir_shader *nir,
+                                          nir_output_clipper_var_groups *groups);
 
 #include "nir_inline_helpers.h"
 

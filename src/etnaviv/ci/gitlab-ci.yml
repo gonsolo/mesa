@@ -21,7 +21,7 @@
       when: on_success
 
 .etnaviv-manual-rules:
-  stage: etnaviv-postmerge
+  stage: etnaviv-nightly
   extends: .no-auto-retry
   rules:
     - !reference [.test, rules]
@@ -166,7 +166,7 @@ gc7000-imx8mq-gles2:
 
 gc7000-imx8mp-gles2:
   extends:
-    - .lava-test-deqp:arm64
+    - .lava-arm64-test-gl
     - .pengutronix-imx8mp-mba8mpxl:arm64
     - .etnaviv-manual-rules
   variables:

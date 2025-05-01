@@ -64,6 +64,9 @@ struct panvk_rendering_state {
       struct pan_fb_info info;
       bool crc_valid[MAX_RTS];
 
+      /* nr_samples to be used before framebuffer / tiler descriptor are emitted */
+      uint32_t nr_samples;
+
 #if PAN_ARCH <= 7
       uint32_t bo_count;
       struct pan_kmod_bo *bos[MAX_RTS + 2];
@@ -146,10 +149,19 @@ struct panvk_cmd_graphics_state {
       unsigned count;
    } vb;
 
+#if PAN_ARCH >= 10
+   struct {
+      uint32_t attribs_changing_on_base_instance;
+   } vi;
+#endif
+
    /* Index buffer */
    struct {
-      struct panvk_buffer *buffer;
-      uint64_t offset;
+      uint64_t dev_addr;
+#if PAN_ARCH <= 7
+      void *host_addr;
+#endif
+      uint64_t size;
       uint8_t index_size;
    } ib;
 
@@ -200,23 +212,16 @@ struct panvk_cmd_graphics_state {
 
 static inline uint32_t
 panvk_select_tiler_hierarchy_mask(const struct panvk_physical_device *phys_dev,
-                                  const struct panvk_cmd_graphics_state *state)
+                                  const struct panvk_cmd_graphics_state *state,
+                                  unsigned bin_ptr_mem_budget)
 {
    struct panfrost_tiler_features tiler_features =
       panfrost_query_tiler_features(&phys_dev->kmod.props);
 
-   uint32_t hierarchy_mask =
-      pan_select_tiler_hierarchy_mask(state->render.fb.info.width,
-                                      state->render.fb.info.height,
-                                      tiler_features.max_levels);
-
-   /* Disable hierarchies falling under the effective tile size. */
-   uint32_t disable_hierarchies;
-   for (disable_hierarchies = 0; state->render.fb.info.tile_size >
-                                 (16 * 16) << (disable_hierarchies * 2);
-        disable_hierarchies++)
-      ;
-   hierarchy_mask &= ~BITFIELD_MASK(disable_hierarchies);
+   uint32_t hierarchy_mask = GENX(pan_select_tiler_hierarchy_mask)(
+      state->render.fb.info.width, state->render.fb.info.height,
+      tiler_features.max_levels, state->render.fb.info.tile_size,
+      bin_ptr_mem_budget);
 
    return hierarchy_mask;
 }
@@ -324,6 +329,7 @@ panvk_per_arch(cmd_preload_render_area_border)(struct panvk_cmd_buffer *cmdbuf,
                                                const VkRenderingInfo *render_info);
 
 void panvk_per_arch(cmd_resolve_attachments)(struct panvk_cmd_buffer *cmdbuf);
+void panvk_per_arch(cmd_select_tile_size)(struct panvk_cmd_buffer *cmdbuf);
 
 struct panvk_draw_info {
    struct {
@@ -346,6 +352,7 @@ struct panvk_draw_info {
 
    struct {
       uint64_t buffer_dev_addr;
+      uint64_t count_buffer_dev_addr;
       uint32_t draw_count;
       uint32_t stride;
    } indirect;

@@ -223,6 +223,11 @@ index("nir_alu_type", "src_type")
 # The nir_alu_type of the data output from a load or conversion
 index("nir_alu_type", "dest_type")
 
+# Source and destination data types for dpas_intel.  Needed here to
+# represent types that won't have a nir_alu_type.
+index("enum glsl_base_type", "src_base_type")
+index("enum glsl_base_type", "dest_base_type")
+
 # The swizzle mask for quad_swizzle_amd & masked_swizzle_amd
 index("unsigned", "swizzle_mask")
 
@@ -322,6 +327,8 @@ index("struct glsl_cmat_description", "cmat_desc")
 index("enum glsl_matrix_layout", "matrix_layout")
 index("nir_cmat_signed", "cmat_signed_mask")
 index("nir_op", "alu_op")
+index("unsigned", "neg_lo_amd")
+index("unsigned", "neg_hi_amd")
 
 # For Intel DPAS instrinsic.
 index("unsigned", "systolic_depth")
@@ -1117,6 +1124,14 @@ barycentric("coord_at_offset", 3, [2])
 # interpolateAtSample() to interpolateAtOffset()
 intrinsic("load_sample_pos_from_id", src_comp=[1], dest_comp=2,
           flags=[CAN_ELIMINATE, CAN_REORDER])
+
+# Demote a subset of samples given by a specified sample mask. This acts like a
+# per-sample demote, or an inverted accumulating gl_SampleMask write.
+intrinsic("demote_samples", src_comp=[1])
+
+# Convert float value to coverage mask.
+intrinsic("alpha_to_coverage", src_comp=[1], dest_comp=1, indices=[],
+          flags=[CAN_ELIMINATE, CAN_REORDER], bit_sizes=[16])
 
 intrinsic("load_persp_center_rhw_ir3", dest_comp=1,
           flags=[CAN_ELIMINATE, CAN_REORDER])
@@ -1967,7 +1982,7 @@ intrinsic("strict_wqm_coord_amd", src_comp=[0], dest_comp=0, bit_sizes=[32], ind
           flags=[CAN_ELIMINATE])
 
 intrinsic("cmat_muladd_amd", src_comp=[-1, -1, 0], dest_comp=0, bit_sizes=src2,
-          indices=[SATURATE, CMAT_SIGNED_MASK], flags=[CAN_ELIMINATE])
+          indices=[SATURATE, NEG_LO_AMD, NEG_HI_AMD, CMAT_SIGNED_MASK], flags=[CAN_ELIMINATE])
 
 # Get the debug log buffer descriptor.
 intrinsic("load_debug_log_desc_amd", bit_sizes=[32], dest_comp=4, flags=[CAN_ELIMINATE, CAN_REORDER])
@@ -2170,12 +2185,6 @@ load("sysval_agx", [], [DESC_SET, BINDING, FLAGS], [CAN_REORDER, CAN_ELIMINATE])
 # masks. Maps to the corresponding AGX instruction, the actual workings are
 # documented elsewhere as they are too complicated for this comment.
 intrinsic("sample_mask_agx", src_comp=[1, 1])
-
-# Discard a subset of samples given by a specified sample mask. This acts like a
-# per-sample discard, or an inverted accumulating gl_SampleMask write. The
-# compiler will lower to sample_mask_agx, but that lowering is nontrivial as
-# sample_mask_agx also triggers depth/stencil testing.
-intrinsic("discard_agx", src_comp=[1])
 
 # For a given row of the polygon stipple given as an integer source in [0, 31],
 # load the 32-bit stipple pattern for that row.
@@ -2417,7 +2426,7 @@ system_value("ray_query_global_intel", 1, bit_sizes=[64])
 # its value. Some supported configurations will have the component count of
 # that matrix different than the others.
 intrinsic("dpas_intel", dest_comp=0, src_comp=[0, -1, 0],
-          indices=[DEST_TYPE, SRC_TYPE, SATURATE, SYSTOLIC_DEPTH, REPEAT_COUNT],
+          indices=[DEST_BASE_TYPE, SRC_BASE_TYPE, SATURATE, SYSTOLIC_DEPTH, REPEAT_COUNT],
           flags=[CAN_ELIMINATE])
 
 # NVIDIA-specific intrinsics

@@ -193,8 +193,7 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
        *
        * TODO: is this true on earlier gen's?
        */
-      compiler->max_const_compute =
-         (compiler->gen >= 7 && !dev_info->a7xx.compute_constlen_quirk) ? 512 : 256;
+      compiler->max_const_compute = compiler->gen >= 7 ? 512 : 256;
 
       /* TODO: implement clip+cull distances on earlier gen's */
       compiler->has_clip_cull = true;
@@ -261,6 +260,14 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
       compiler->has_isam_v = false;
       compiler->has_ssbo_imm_offsets = false;
       compiler->has_early_preamble = false;
+   }
+
+   if (dev_info->compute_lb_size) {
+      compiler->compute_lb_size = dev_info->compute_lb_size;
+   } else {
+      compiler->compute_lb_size =
+         compiler->max_const_compute * 16 /* bytes/vec4 */ *
+         compiler->wave_granularity + compiler->local_mem_size;
    }
 
    /* This is just a guess for a4xx. */

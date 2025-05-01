@@ -78,12 +78,11 @@ workflow:
 
 variables:
   FDO_UPSTREAM_REPO: mesa/mesa
-  MESA_TEMPLATES_COMMIT: &ci-templates-commit 48e4b6c9a2015f969fbe648999d16d5fb3eef6c4
+  MESA_TEMPLATES_COMMIT: &ci-templates-commit c6aeb16f86e32525fa630fb99c66c4f3e62fc3cb
   CI_PRE_CLONE_SCRIPT: |-
           set -o xtrace
-          wget -q -O download-git-cache.sh ${CI_PROJECT_URL}/-/raw/${CI_COMMIT_SHA}/.gitlab-ci/download-git-cache.sh
-          bash download-git-cache.sh
-          rm download-git-cache.sh
+          curl --silent --location --fail --retry-connrefused --retry 3 --retry-delay 10 \
+            ${CI_PROJECT_URL}/-/raw/${CI_COMMIT_SHA}/.gitlab-ci/download-git-cache.sh | bash
           set +o xtrace
   S3_JWT_FILE: /s3_jwt
   S3_JWT_FILE_SCRIPT: |-
@@ -170,37 +169,34 @@ stages:
   - build-only
   - code-validation
   - amd
-  - amd-postmerge
+  - amd-nightly
   - intel
-  - intel-postmerge
+  - intel-nightly
   - nouveau
-  - nouveau-postmerge
+  - nouveau-nightly
   - arm
-  - arm-postmerge
+  - arm-nightly
   - broadcom
-  - broadcom-postmerge
+  - broadcom-nightly
   - freedreno
-  - freedreno-postmerge
+  - freedreno-nightly
   - etnaviv
-  - etnaviv-postmerge
+  - etnaviv-nightly
   - software-renderer
-  - software-renderer-postmerge
+  - software-renderer-nightly
   - layered-backends
-  - layered-backends-postmerge
+  - layered-backends-nightly
   - performance
   - deploy
 
 include:
-  - project: 'freedesktop/ci-templates'
-    ref: 16bc29078de5e0a067ff84a1a199a3760d3b3811
-    file:
-      - '/templates/ci-fairy.yml'
   - project: 'freedesktop/ci-templates'
     ref: *ci-templates-commit
     file:
       - '/templates/alpine.yml'
       - '/templates/debian.yml'
       - '/templates/fedora.yml'
+      - '/templates/ci-fairy.yml'
   - local: '.gitlab-ci/image-tags.yml'
   - local: '.gitlab-ci/lava/lava-gitlab-ci.yml'
   - local: '.gitlab-ci/container/gitlab-ci.yml'
@@ -341,7 +337,7 @@ include:
 
 # Git archive
 
-make git archive:
+make-git-archive:
   extends:
     - .fdo.ci-fairy
   stage: git-archive
@@ -355,7 +351,7 @@ make git archive:
     # compress the current folder
     - tar -cvzf ../$CI_PROJECT_NAME.tar.gz .
 
-    - s3_upload ../$CI_PROJECT_NAME.tar.gz "https://$S3_HOST/git-cache/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/"
+    - ci-fairy s3cp --token-file "${S3_JWT_FILE}" ../$CI_PROJECT_NAME.tar.gz https://$S3_HOST/git-cache/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/$CI_PROJECT_NAME.tar.gz
 
 # Sanity checks of MR settings and commit logs
 sanity:
@@ -385,7 +381,6 @@ sanity:
         DEBIAN_TEST_GL_TAG
         DEBIAN_TEST_VK_TAG
         FEDORA_X86_64_BUILD_TAG
-        KERNEL_ROOTFS_TAG
         KERNEL_TAG
         PKG_REPO_REV
         WINDOWS_X64_BUILD_TAG

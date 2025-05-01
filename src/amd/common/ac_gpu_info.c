@@ -1733,6 +1733,79 @@ bool ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       info->has_set_sh_pairs_packed = info->register_shadowing_required;
    }
 
+   /* This is the size of all TCS outputs in memory per workgroup.
+    * Hawaii can't handle num_workgroups > 256 with 8K per workgroup, so use 4K.
+    */
+   unsigned max_hs_out_vram_dwords_per_wg = info->family == CHIP_HAWAII ? 4096 : 8192;
+   unsigned max_hs_out_vram_dwords_enum;
+   unsigned max_workgroups_per_se;
+
+   switch (max_hs_out_vram_dwords_per_wg) {
+   case 8192:
+      max_hs_out_vram_dwords_enum = V_03093C_X_8K_DWORDS;
+      break;
+   case 4096:
+      max_hs_out_vram_dwords_enum = V_03093C_X_4K_DWORDS;
+      break;
+   case 2048:
+      max_hs_out_vram_dwords_enum = V_03093C_X_2K_DWORDS;
+      break;
+   case 1024:
+      max_hs_out_vram_dwords_enum = V_03093C_X_1K_DWORDS;
+      break;
+   default:
+      unreachable("invalid TCS workgroup size");
+   }
+
+   /* Vega10 should limit num_workgroups to 508 (127 per SE)
+    * Gfx7 should limit num_workgroups to 508 (127 per SE)
+    * Gfx6 should limit num_workgroups to 126 (63 per SE)
+    */
+   if (info->gfx_level >= GFX11) {
+      max_workgroups_per_se = 256;
+   } else if (info->gfx_level >= GFX10 ||
+              info->family == CHIP_VEGA12 || info->family == CHIP_VEGA20) {
+      max_workgroups_per_se = 128;
+   } else if (info->gfx_level >= GFX7 && info->family != CHIP_CARRIZO && info->family != CHIP_STONEY) {
+      max_workgroups_per_se = 127;
+   } else {
+      max_workgroups_per_se = 63;
+   }
+
+   /* Limit to 4 workgroups per CU for TCS, which exhausts LDS if each workgroup occupies 16KB.
+    * Note that the offchip allocation isn't deallocated until the corresponding TES waves finish.
+    */
+   unsigned num_offchip_wg_per_cu = 4;
+   unsigned num_workgroups_per_se = MIN2(num_offchip_wg_per_cu * info->max_good_cu_per_sa *
+                                         info->max_sa_per_se, max_workgroups_per_se);
+   unsigned num_workgroups = num_workgroups_per_se * info->max_se;
+
+   if (info->gfx_level >= GFX11) {
+      /* OFFCHIP_BUFFERING is per SE. */
+      info->hs_offchip_param = S_03093C_OFFCHIP_BUFFERING_GFX103(num_workgroups_per_se - 1) |
+                               S_03093C_OFFCHIP_GRANULARITY_GFX103(max_hs_out_vram_dwords_enum);
+   } else if (info->gfx_level >= GFX10_3) {
+      info->hs_offchip_param = S_03093C_OFFCHIP_BUFFERING_GFX103(num_workgroups - 1) |
+                               S_03093C_OFFCHIP_GRANULARITY_GFX103(max_hs_out_vram_dwords_enum);
+   } else if (info->gfx_level >= GFX7) {
+      info->hs_offchip_param = S_03093C_OFFCHIP_BUFFERING_GFX7(num_workgroups -
+                                                               (info->gfx_level >= GFX8 ? 1 : 0)) |
+                               S_03093C_OFFCHIP_GRANULARITY_GFX7(max_hs_out_vram_dwords_enum);
+   } else {
+      info->hs_offchip_param = S_0089B0_OFFCHIP_BUFFERING(num_workgroups) |
+                               S_0089B0_OFFCHIP_GRANULARITY(max_hs_out_vram_dwords_enum);
+   }
+
+   /* The typical size of tess factors of 1 TCS workgroup if all patches are triangles. */
+   unsigned typical_tess_factor_size_per_wg = (192 / 3) * 16;
+   unsigned num_tess_factor_wg_per_cu = 3;
+
+   info->hs_offchip_workgroup_dw_size = max_hs_out_vram_dwords_per_wg;
+   info->tess_offchip_ring_size = num_workgroups * max_hs_out_vram_dwords_per_wg * 4;
+   info->tess_factor_ring_size = typical_tess_factor_size_per_wg * num_tess_factor_wg_per_cu *
+                                 info->max_good_cu_per_sa * info->max_sa_per_se * info->max_se;
+   info->total_tess_ring_size = info->tess_offchip_ring_size + info->tess_factor_ring_size;
+
    /* GFX1013 is GFX10 plus ray tracing instructions */
    info->has_image_bvh_intersect_ray = info->gfx_level >= GFX10_3 ||
                                        info->family == CHIP_GFX1013;
@@ -2062,15 +2135,19 @@ void ac_print_gpu_info(const struct radeon_info *info, FILE *f)
    fprintf(f, "    max_scratch_waves = %i\n", info->max_scratch_waves);
    fprintf(f, "    has_scratch_base_registers = %i\n", info->has_scratch_base_registers);
    fprintf(f, "Ring info:\n");
-   fprintf(f, "    attribute_ring_size_per_se = %u KB\n",
-           DIV_ROUND_UP(info->attribute_ring_size_per_se, 1024));
-   if (info->gfx_level >= GFX12) {
-      fprintf(f, "    pos_ring_size_per_se = %u KB\n", DIV_ROUND_UP(info->pos_ring_size_per_se, 1024));
-      fprintf(f, "    prim_ring_size_per_se = %u KB\n", DIV_ROUND_UP(info->prim_ring_size_per_se, 1024));
+   if (info->gfx_level >= GFX11) {
+      fprintf(f, "    attribute_ring_size_per_se = %u KB\n",
+              DIV_ROUND_UP(info->attribute_ring_size_per_se, 1024));
+      if (info->gfx_level >= GFX12) {
+         fprintf(f, "    pos_ring_size_per_se = %u KB\n", DIV_ROUND_UP(info->pos_ring_size_per_se, 1024));
+         fprintf(f, "    prim_ring_size_per_se = %u KB\n", DIV_ROUND_UP(info->prim_ring_size_per_se, 1024));
+      }
+      fprintf(f, "    total_attribute_pos_prim_ring_size = %u KB\n",
+              DIV_ROUND_UP(info->total_attribute_pos_prim_ring_size, 1024));
    }
-   fprintf(f, "    total_attribute_pos_prim_ring_size = %u KB\n",
-           DIV_ROUND_UP(info->total_attribute_pos_prim_ring_size, 1024));
-
+   fprintf(f, "    hs_offchip_workgroup_size = %u B\n", info->hs_offchip_workgroup_dw_size * 4);
+   fprintf(f, "    tess_factor_ring_size = %u KB\n", DIV_ROUND_UP(info->tess_factor_ring_size, 1024));
+   fprintf(f, "    tess_offchip_ring_size = %u KB\n", DIV_ROUND_UP(info->tess_offchip_ring_size, 1024));
    fprintf(f, "Render backend info:\n");
    fprintf(f, "    pa_sc_tile_steering_override = 0x%x\n", info->pa_sc_tile_steering_override);
    fprintf(f, "    max_render_backends = %i\n", info->max_render_backends);
@@ -2408,96 +2485,6 @@ ac_get_compute_resource_limits(const struct radeon_info *info, unsigned waves_pe
       }
    }
    return compute_resource_limits;
-}
-
-void ac_get_hs_info(const struct radeon_info *info,
-                    struct ac_hs_info *hs)
-{
-   bool double_offchip_buffers = info->gfx_level >= GFX7 &&
-                                 info->family != CHIP_CARRIZO &&
-                                 info->family != CHIP_STONEY;
-   unsigned max_offchip_buffers_per_se;
-   unsigned max_offchip_buffers;
-   unsigned offchip_granularity;
-   unsigned hs_offchip_param;
-
-   hs->tess_offchip_block_dw_size =
-      info->family == CHIP_HAWAII ? 4096 : 8192;
-
-   /*
-    * Per RadeonSI:
-    * This must be one less than the maximum number due to a hw limitation.
-    * Various hardware bugs need this.
-    *
-    * Per AMDVLK:
-    * Vega10 should limit max_offchip_buffers to 508 (4 * 127).
-    * Gfx7 should limit max_offchip_buffers to 508
-    * Gfx6 should limit max_offchip_buffers to 126 (2 * 63)
-    *
-    * Follow AMDVLK here.
-    */
-   if (info->gfx_level >= GFX11) {
-      max_offchip_buffers_per_se = 256; /* TODO: we could decrease this to reduce memory/cache usage */
-   } else if (info->gfx_level >= GFX10) {
-      max_offchip_buffers_per_se = 128;
-   } else if (info->family == CHIP_VEGA12 || info->family == CHIP_VEGA20) {
-      /* Only certain chips can use the maximum value. */
-      max_offchip_buffers_per_se = double_offchip_buffers ? 128 : 64;
-   } else {
-      max_offchip_buffers_per_se = double_offchip_buffers ? 127 : 63;
-   }
-
-   max_offchip_buffers = max_offchip_buffers_per_se * info->max_se;
-
-   /* Hawaii has a bug with offchip buffers > 256 that can be worked
-    * around by setting 4K granularity.
-    */
-   if (hs->tess_offchip_block_dw_size == 4096) {
-      assert(info->family == CHIP_HAWAII);
-      offchip_granularity = V_03093C_X_4K_DWORDS;
-   } else {
-      assert(hs->tess_offchip_block_dw_size == 8192);
-      offchip_granularity = V_03093C_X_8K_DWORDS;
-   }
-
-   switch (info->gfx_level) {
-   case GFX6:
-      max_offchip_buffers = MIN2(max_offchip_buffers, 126);
-      break;
-   case GFX7:
-   case GFX8:
-   case GFX9:
-      max_offchip_buffers = MIN2(max_offchip_buffers, 508);
-      break;
-   case GFX10:
-      break;
-   default:
-      break;
-   }
-
-   hs->max_offchip_buffers = max_offchip_buffers;
-
-   if (info->gfx_level >= GFX11) {
-      /* OFFCHIP_BUFFERING is per SE. */
-      hs_offchip_param = S_03093C_OFFCHIP_BUFFERING_GFX103(max_offchip_buffers_per_se - 1) |
-                         S_03093C_OFFCHIP_GRANULARITY_GFX103(offchip_granularity);
-   } else if (info->gfx_level >= GFX10_3) {
-      hs_offchip_param = S_03093C_OFFCHIP_BUFFERING_GFX103(max_offchip_buffers - 1) |
-                         S_03093C_OFFCHIP_GRANULARITY_GFX103(offchip_granularity);
-   } else if (info->gfx_level >= GFX7) {
-      if (info->gfx_level >= GFX8)
-         --max_offchip_buffers;
-      hs_offchip_param = S_03093C_OFFCHIP_BUFFERING_GFX7(max_offchip_buffers) |
-                         S_03093C_OFFCHIP_GRANULARITY_GFX7(offchip_granularity);
-   } else {
-      hs_offchip_param = S_0089B0_OFFCHIP_BUFFERING(max_offchip_buffers);
-   }
-
-   hs->hs_offchip_param = hs_offchip_param;
-
-   hs->tess_factor_ring_size = 48 * 1024 * info->max_se;
-   hs->tess_offchip_ring_offset = align(hs->tess_factor_ring_size, 64 * 1024);
-   hs->tess_offchip_ring_size = hs->max_offchip_buffers * hs->tess_offchip_block_dw_size * 4;
 }
 
 static uint16_t get_task_num_entries(enum radeon_family fam)

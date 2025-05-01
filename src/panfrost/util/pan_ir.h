@@ -103,8 +103,10 @@ struct panfrost_compile_inputs {
       uint64_t bifrost_blend_desc;
    } blend;
    bool no_idvs;
-   bool push_uniforms;
    uint32_t view_mask;
+
+   /* Mask of UBOs that may be moved to push constants */
+   uint32_t pushable_ubos;
 
    /* Used on Valhall.
     *
@@ -294,6 +296,9 @@ struct pan_shader_info {
 
       /* Bitfield of noperspective varyings, starting at VARYING_SLOT_VAR0 */
       uint32_t noperspective;
+
+      /* Bitfield of special varyings. */
+      uint32_t fixed_varyings;
    } varyings;
 
    /* UBOs to push to Register Mapped Uniforms (Midgard) or Fast Access

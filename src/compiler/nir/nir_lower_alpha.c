@@ -4,16 +4,31 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "agx_tilebuffer.h"
 #include "nir.h"
 #include "nir_builder.h"
+
+static nir_def *
+alpha_to_coverage(nir_builder *b, nir_def *alpha, uint8_t nr_samples, bool has_intrinsic)
+{
+   if (has_intrinsic)
+      return nir_alpha_to_coverage(b, alpha);
+
+   /* Calculate a coverage mask (alpha * nr_samples) bits set. The way we do
+    * this isn't particularly clever:
+    *
+    *    # of bits = (unsigned int) (alpha * nr_samples)
+    *    mask = (1 << (# of bits)) - 1
+    */
+   nir_def *bits = nir_f2u32(b, nir_fmul_imm(b, alpha, nr_samples));
+   return nir_iadd_imm(b, nir_ishl(b, nir_imm_intN_t(b, 1, 16), bits), -1);
+}
 
 /*
  * Lower alpha-to-coverage to sample_mask and some math. May run on either a
  * monolithic pixel shader or a fragment epilogue.
  */
 bool
-agx_nir_lower_alpha_to_coverage(nir_shader *shader, uint8_t nr_samples)
+nir_lower_alpha_to_coverage(nir_shader *shader, uint8_t nr_samples, bool has_intrinsic)
 {
    /* nir_lower_io_to_temporaries ensures that stores are in the last block */
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
@@ -53,19 +68,11 @@ agx_nir_lower_alpha_to_coverage(nir_shader *shader, uint8_t nr_samples)
    nir_builder _b = nir_builder_at(nir_before_instr(&store->instr));
    nir_builder *b = &_b;
 
-   /* Calculate a coverage mask (alpha * nr_samples) bits set. The way we do
-    * this isn't particularly clever:
-    *
-    *    # of bits = (unsigned int) (alpha * nr_samples)
-    *    mask = (1 << (# of bits)) - 1
-    */
    nir_def *alpha = nir_channel(b, rgba, 3);
-   nir_def *bits = nir_f2u32(b, nir_fmul_imm(b, alpha, nr_samples));
-   nir_def *mask =
-      nir_iadd_imm(b, nir_ishl(b, nir_imm_intN_t(b, 1, 16), bits), -1);
+   nir_def *mask = alpha_to_coverage(b, alpha, nr_samples, has_intrinsic);
 
    /* Discard samples that aren't covered */
-   nir_discard_agx(b, nir_inot(b, mask));
+   nir_demote_samples(b, nir_inot(b, mask));
    shader->info.fs.uses_discard = true;
    return nir_progress(true, impl, nir_metadata_control_flow);
 }
@@ -76,7 +83,7 @@ agx_nir_lower_alpha_to_coverage(nir_shader *shader, uint8_t nr_samples)
  * fragment epilogue.
  */
 bool
-agx_nir_lower_alpha_to_one(nir_shader *shader)
+nir_lower_alpha_to_one(nir_shader *shader)
 {
    bool progress = false;
 

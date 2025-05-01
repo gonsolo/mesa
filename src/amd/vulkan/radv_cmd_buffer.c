@@ -9323,6 +9323,8 @@ radv_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRe
 
    cmd_buffer->state.dirty_dynamic |=
       RADV_DYNAMIC_DEPTH_BIAS | RADV_DYNAMIC_STENCIL_TEST_ENABLE | RADV_DYNAMIC_COLOR_BLEND_ENABLE;
+   if (pdev->info.gfx_level >= GFX10_3)
+      cmd_buffer->state.dirty_dynamic |= RADV_DYNAMIC_FRAGMENT_SHADING_RATE;
    if (pdev->info.gfx_level >= GFX12)
       cmd_buffer->state.dirty_dynamic |= RADV_DYNAMIC_RASTERIZATION_SAMPLES;
 
@@ -11070,6 +11072,8 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
                                     RADV_TRACKED_PA_SC_CONSERVATIVE_RASTERIZATION_CNTL, pa_sc_conservative_rast);
       radeon_end();
    }
+
+   cmd_buffer->state.dirty &= ~RADV_CMD_DIRTY_MSAA_STATE;
 }
 
 static void
@@ -11123,6 +11127,8 @@ radv_emit_clip_rects_state(struct radv_cmd_buffer *cmd_buffer)
 
    radeon_set_context_reg(R_02820C_PA_SC_CLIPRECT_RULE, cliprect_rule);
    radeon_end();
+
+   cmd_buffer->state.dirty &= ~RADV_CMD_DIRTY_CLIP_RECTS_STATE;
 }
 
 static void
@@ -13337,10 +13343,28 @@ radv_barrier(struct radv_cmd_buffer *cmd_buffer, uint32_t dep_count, const VkDep
                          sample_locs_info->sampleLocationsCount);
          }
 
+         uint32_t src_qf_index = dep_info->pImageMemoryBarriers[i].srcQueueFamilyIndex;
+         uint32_t dst_qf_index = dep_info->pImageMemoryBarriers[i].dstQueueFamilyIndex;
+
+         /* The src and dst queue family indices may contrain arbitrary values
+          * that should be ignored if they are equal. For example, see
+          * VUID-VkBufferMemoryBarrier-buffer-09095 (Vulkan spec 1.4.313).
+          *
+          *   If buffer was created with a sharing mode of
+          *   VK_SHARING_MODE_EXCLUSIVE, and srcQueueFamilyIndex and
+          *   dstQueueFamilyIndex are not equal, srcQueueFamilyIndex must be
+          *   VK_QUEUE_FAMILY_EXTERNAL, VK_QUEUE_FAMILY_FOREIGN_EXT, or a valid
+          *   queue family
+          */
+         if (src_qf_index == dst_qf_index)
+         {
+            src_qf_index = VK_QUEUE_FAMILY_IGNORED;
+            dst_qf_index = VK_QUEUE_FAMILY_IGNORED;
+         }
+
          radv_handle_image_transition(
             cmd_buffer, image, dep_info->pImageMemoryBarriers[i].oldLayout, dep_info->pImageMemoryBarriers[i].newLayout,
-            dep_info->pImageMemoryBarriers[i].srcQueueFamilyIndex,
-            dep_info->pImageMemoryBarriers[i].dstQueueFamilyIndex, &dep_info->pImageMemoryBarriers[i].subresourceRange,
+            src_qf_index, dst_qf_index, &dep_info->pImageMemoryBarriers[i].subresourceRange,
             sample_locs_info ? &sample_locations : NULL);
       }
    }

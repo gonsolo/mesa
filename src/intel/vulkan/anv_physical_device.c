@@ -123,6 +123,21 @@ get_device_descriptor_limits(const struct anv_physical_device *device,
    limits->max_resources = MIN2(limits->max_resources, limits->max_samplers);
 }
 
+
+static const bool
+anv_device_has_bfloat16_cooperative_matrix(const struct anv_physical_device *pdevice)
+{
+   const struct intel_device_info *devinfo = &pdevice->info;
+
+   for (int i = 0; i < ARRAY_SIZE(devinfo->cooperative_matrix_configurations); i++) {
+      const struct intel_cooperative_matrix_configuration *cfg =
+         &devinfo->cooperative_matrix_configurations[i];
+      if (cfg->a == INTEL_CMAT_BFLOAT16 || cfg->b == INTEL_CMAT_BFLOAT16)
+         return true;
+   }
+   return false;
+}
+
 static void
 get_device_extensions(const struct anv_physical_device *device,
                       struct vk_device_extension_table *ext)
@@ -283,6 +298,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .EXT_extended_dynamic_state            = true,
       .EXT_extended_dynamic_state2           = true,
       .EXT_extended_dynamic_state3           = true,
+      .EXT_external_memory_acquire_unmodified = true,
       .EXT_external_memory_dma_buf           = true,
       .EXT_external_memory_host              = true,
       .EXT_fragment_shader_interlock         = true,
@@ -377,6 +393,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .MESA_image_alignment_control          = true,
       .NV_compute_shader_derivatives         = true,
       .VALVE_mutable_descriptor_type         = true,
+      .KHR_shader_bfloat16                   = device->info.has_bfloat16,
    };
 }
 
@@ -934,6 +951,12 @@ get_features(const struct anv_physical_device *pdevice,
 
       /* VK_KHR_maintenance8 */
       .maintenance8 = true,
+
+      /* VK_KHR_shader_bfloat16 */
+      .shaderBFloat16Type = pdevice->info.has_bfloat16,
+      .shaderBFloat16CooperativeMatrix =
+         anv_device_has_bfloat16_cooperative_matrix(pdevice),
+      .shaderBFloat16DotProduct = pdevice->info.has_bfloat16,
    };
 
    /* The new DOOM and Wolfenstein games require depthBounds without
@@ -1497,8 +1520,15 @@ get_properties(const struct anv_physical_device *pdevice,
       /* TODO */
       props->shaderGroupHandleSize = 32;
       props->maxRayRecursionDepth = 31;
-      /* MemRay::hitGroupSRStride is 16 bits */
-      props->maxShaderGroupStride = UINT16_MAX;
+      if (pdevice->info.ver >= 30) {
+         /* RTDispatchGlobals::missShaderStride is 13-bit wide. The maximum
+          * here is a 13-bit wide max value.
+          */
+         props->maxShaderGroupStride = (1U << 13) - 1;
+      } else {
+         /* MemRay::hitGroupSRStride is 16 bits */
+         props->maxShaderGroupStride = UINT16_MAX;
+      }
       /* MemRay::hitGroupSRBasePtr requires 16B alignment */
       props->shaderGroupBaseAlignment = 16;
       props->shaderGroupHandleAlignment = 16;
@@ -3111,12 +3141,13 @@ static VkComponentTypeKHR
 convert_component_type(enum intel_cooperative_matrix_component_type t)
 {
    switch (t) {
-   case INTEL_CMAT_FLOAT16: return VK_COMPONENT_TYPE_FLOAT16_KHR;
-   case INTEL_CMAT_FLOAT32: return VK_COMPONENT_TYPE_FLOAT32_KHR;
-   case INTEL_CMAT_SINT32:  return VK_COMPONENT_TYPE_SINT32_KHR;
-   case INTEL_CMAT_SINT8:   return VK_COMPONENT_TYPE_SINT8_KHR;
-   case INTEL_CMAT_UINT32:  return VK_COMPONENT_TYPE_UINT32_KHR;
-   case INTEL_CMAT_UINT8:   return VK_COMPONENT_TYPE_UINT8_KHR;
+   case INTEL_CMAT_FLOAT16:  return VK_COMPONENT_TYPE_FLOAT16_KHR;
+   case INTEL_CMAT_FLOAT32:  return VK_COMPONENT_TYPE_FLOAT32_KHR;
+   case INTEL_CMAT_SINT32:   return VK_COMPONENT_TYPE_SINT32_KHR;
+   case INTEL_CMAT_SINT8:    return VK_COMPONENT_TYPE_SINT8_KHR;
+   case INTEL_CMAT_UINT32:   return VK_COMPONENT_TYPE_UINT32_KHR;
+   case INTEL_CMAT_UINT8:    return VK_COMPONENT_TYPE_UINT8_KHR;
+   case INTEL_CMAT_BFLOAT16: return VK_COMPONENT_TYPE_BFLOAT16_KHR;
    }
    unreachable("invalid cooperative matrix component type in configuration");
 }

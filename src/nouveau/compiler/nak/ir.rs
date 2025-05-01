@@ -2104,6 +2104,18 @@ pub enum TexLodMode {
     BiasClamp,
 }
 
+impl TexLodMode {
+    pub fn is_explicit_lod(&self) -> bool {
+        match self {
+            TexLodMode::Auto
+            | TexLodMode::Bias
+            | TexLodMode::Clamp
+            | TexLodMode::BiasClamp => false,
+            TexLodMode::Zero | TexLodMode::Lod => true,
+        }
+    }
+}
+
 impl fmt::Display for TexLodMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -2521,6 +2533,15 @@ impl AtomType {
             AtomType::F16x2 | AtomType::F32 => 32,
             AtomType::U32 | AtomType::I32 => 32,
             AtomType::U64 | AtomType::I64 | AtomType::F64 => 64,
+        }
+    }
+
+    pub fn is_float(&self) -> bool {
+        match self {
+            AtomType::F16x2 | AtomType::F32 | AtomType::F64 => true,
+            AtomType::U32 | AtomType::I32 | AtomType::U64 | AtomType::I64 => {
+                false
+            }
         }
     }
 }
@@ -6676,6 +6697,9 @@ impl Op {
             Op::F2F(op) => op.src_type.bits() == 64 || op.dst_type.bits() == 64,
             Op::F2I(op) => op.src_type.bits() == 64 || op.dst_type.bits() == 64,
             Op::I2F(op) => op.src_type.bits() == 64 || op.dst_type.bits() == 64,
+            Op::FRnd(op) => {
+                op.src_type.bits() == 64 || op.dst_type.bits() == 64
+            }
             _ => false,
         }
     }

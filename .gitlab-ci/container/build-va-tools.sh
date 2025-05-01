@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2086 # we want word splitting
+
 # When changing this file, you need to bump the following
 # .gitlab-ci/image-tags.yml tags:
-# KERNEL_ROOTFS_TAG
+# DEBIAN_TEST_VIDEO_TAG
 
 set -uex
 
-uncollapsed_section_start va-tools "Building va-tools"
+section_start va-tools "Building va-tools"
 
 git config --global user.email "mesa@example.com"
 git config --global user.name "Mesa CI"

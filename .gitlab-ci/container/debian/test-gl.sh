@@ -27,12 +27,15 @@ EPHEMERAL=(
     libcap-dev
     "libclang-cpp${LLVM_VERSION}-dev"
     libdrm-dev
+    libfontconfig-dev
+    libgl-dev
     libgles2-mesa-dev
+    libglu1-mesa-dev
     libgtest-dev
+    libglx-dev
     libpciaccess-dev
     libpng-dev
     libudev-dev
-    libvulkan-dev
     libwaffle-dev
     libwayland-dev
     libx11-xcb-dev
@@ -50,11 +53,15 @@ EPHEMERAL=(
     ocl-icd-opencl-dev
     patch
     pkgconf
+    python-is-python3
     python3-distutils
     xz-utils
 )
 
 DEPS=(
+    libfontconfig1
+    libglu1-mesa
+    libvulkan-dev
 )
 
 apt-get update
@@ -69,7 +76,7 @@ section_end debian_setup
 
 ############### Build ANGLE
 
-if [ "$DEBIAN_ARCH" == "arm64" ]; then
+if [ "$DEBIAN_ARCH" != "armhf" ]; then
   ANGLE_TARGET=linux \
   . .gitlab-ci/container/build-angle.sh
 fi
@@ -111,6 +118,13 @@ rm -rf /VK-GL-CTS
 ############### Build validation layer for zink
 
 . .gitlab-ci/container/build-vulkan-validation.sh
+
+
+############### Build SKQP
+
+if [ "$DEBIAN_ARCH" != "armhf" ]; then
+  . .gitlab-ci/container/build-skqp.sh
+fi
 
 ############### Build nine tests
 

@@ -1114,6 +1114,10 @@ v3d_fixup_fs_output_types(struct v3d_compile *c)
                 case FRAG_RESULT_DATA1:
                 case FRAG_RESULT_DATA2:
                 case FRAG_RESULT_DATA3:
+                case FRAG_RESULT_DATA4:
+                case FRAG_RESULT_DATA5:
+                case FRAG_RESULT_DATA6:
+                case FRAG_RESULT_DATA7:
                         mask = 1 << (var->data.location - FRAG_RESULT_DATA0);
                         break;
                 }
@@ -1136,15 +1140,29 @@ v3d_nir_lower_fs_early(struct v3d_compile *c)
         if (c->fs_key->int_color_rb || c->fs_key->uint_color_rb)
                 v3d_fixup_fs_output_types(c);
 
-        NIR_PASS(_, c->s, v3d_nir_lower_load_output, c);
-        NIR_PASS(_, c->s, v3d_nir_lower_logic_ops, c);
-
         if (c->fs_key->line_smoothing) {
                 NIR_PASS(_, c->s, v3d_nir_lower_line_smooth);
                 NIR_PASS(_, c->s, nir_lower_global_vars_to_local);
                 /* The lowering pass can introduce new sysval reads */
                 nir_shader_gather_info(c->s, nir_shader_get_entrypoint(c->s));
         }
+
+        if (c->fs_key->software_blend) {
+                if (c->fs_key->sample_alpha_to_coverage) {
+                        assert(c->fs_key->msaa);
+
+                        NIR_PASS(_, c->s, nir_lower_alpha_to_coverage,
+                                 V3D_MAX_SAMPLES, true);
+                }
+
+                if (c->fs_key->sample_alpha_to_one)
+                        NIR_PASS(_, c->s, nir_lower_alpha_to_one);
+
+                NIR_PASS(_, c->s, v3d_nir_lower_blend, c);
+        }
+
+        NIR_PASS(_, c->s, v3d_nir_lower_load_output, c);
+        NIR_PASS(_, c->s, v3d_nir_lower_logic_ops, c);
 }
 
 static void

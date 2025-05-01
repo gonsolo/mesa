@@ -1842,6 +1842,31 @@ brw_from_nir_emit_alu(nir_to_brw_state &ntb, nir_alu_instr *instr,
       break;
    }
 
+   /* BFloat16 values in NIR are represented by uint16_t,
+    * but BRW can handle them natively.
+    */
+
+   case nir_op_bf2f:
+      bld.MOV(result, retype(op[0], BRW_TYPE_BF));
+      break;
+
+   case nir_op_f2bf:
+      bld.MOV(retype(result, BRW_TYPE_BF), op[0]);
+      break;
+
+   case nir_op_bfmul:
+      bld.MUL(retype(result, BRW_TYPE_BF),
+              retype(op[0], BRW_TYPE_BF),
+              retype(op[1], BRW_TYPE_BF));
+      break;
+
+   case nir_op_bffma:
+      bld.MAD(retype(result, BRW_TYPE_BF),
+              retype(op[2], BRW_TYPE_BF),
+              retype(op[1], BRW_TYPE_BF),
+              retype(op[0], BRW_TYPE_BF));
+      break;
+
    default:
       unreachable("unhandled instruction");
    }
@@ -4693,9 +4718,9 @@ brw_from_nir_emit_cs_intrinsic(nir_to_brw_state &ntb,
       const unsigned rcount = nir_intrinsic_repeat_count(instr);
 
       const brw_reg_type dest_type =
-         brw_type_for_nir_type(devinfo, nir_intrinsic_dest_type(instr));
+         brw_type_for_base_type(nir_intrinsic_dest_base_type(instr));
       const brw_reg_type src_type =
-         brw_type_for_nir_type(devinfo, nir_intrinsic_src_type(instr));
+         brw_type_for_base_type(nir_intrinsic_src_base_type(instr));
 
       brw_reg src[3] = {};
       for (unsigned i = 0; i < ARRAY_SIZE(src); i++) {

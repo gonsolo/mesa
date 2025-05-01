@@ -326,14 +326,6 @@ impl ALUSrc {
             _ => panic!("Invalid ALU source"),
         }
     }
-
-    pub fn has_src_mod(&self) -> bool {
-        match self {
-            ALUSrc::Reg(reg) | ALUSrc::UReg(reg) => reg.abs || reg.neg,
-            ALUSrc::CBuf(cb) => cb.abs || cb.neg,
-            _ => false,
-        }
-    }
 }
 
 impl SM70Encoder<'_> {
@@ -358,7 +350,6 @@ impl SM70Encoder<'_> {
         swizzle_range: Range<usize>,
         file: RegFile,
         is_fp16_alu: bool,
-        has_mod: bool,
         reg: &ALURegRef,
     ) {
         match file {
@@ -367,12 +358,8 @@ impl SM70Encoder<'_> {
             _ => panic!("Invalid ALU src register file"),
         }
 
-        if has_mod {
-            self.set_bit(abs_bit, reg.abs);
-            self.set_bit(neg_bit, reg.neg);
-        } else {
-            assert!(!reg.abs && !reg.neg);
-        }
+        self.set_bit(abs_bit, reg.abs);
+        self.set_bit(neg_bit, reg.neg);
 
         if is_fp16_alu {
             self.set_swizzle(swizzle_range, reg.swizzle);
@@ -392,7 +379,7 @@ impl SM70Encoder<'_> {
             ALUSrc::Reg(reg) => reg,
             _ => panic!("Invalid ALU src"),
         };
-        self.set_alu_reg(24..32, 73, 72, 74..76, file, is_fp16_alu, true, reg);
+        self.set_alu_reg(24..32, 73, 72, 74..76, file, is_fp16_alu, reg);
     }
 
     fn encode_alu_src2(
@@ -400,7 +387,6 @@ impl SM70Encoder<'_> {
         src: &ALUSrc,
         file: RegFile,
         is_fp16_alu: bool,
-        bit74_75_are_mod: bool,
     ) {
         let reg = match src {
             ALUSrc::None => return,
@@ -409,12 +395,11 @@ impl SM70Encoder<'_> {
         };
         self.set_alu_reg(
             64..72,
-            74,
-            75,
+            if is_fp16_alu { 83 } else { 74 },
+            if is_fp16_alu { 84 } else { 75 },
             81..83,
             file,
             is_fp16_alu,
-            bit74_75_are_mod,
             reg,
         );
     }
@@ -427,7 +412,6 @@ impl SM70Encoder<'_> {
             60..62,
             RegFile::GPR,
             is_fp16_alu,
-            true,
             reg,
         );
     }
@@ -479,25 +463,11 @@ impl SM70Encoder<'_> {
         let src1 = ALUSrc::from_src(self, src1, false);
         let src2 = ALUSrc::from_src(self, src2, false);
 
-        // Bits 74..76 are used both for the swizzle on src0 and for the source
-        // modifier for the register source of src1 and src2.  When both are
-        // registers, it's used for src2.  The hardware elects to always support
-        // a swizzle and not support source modifiers in that case.
-        let bit74_75_are_mod = !is_fp16_alu
-            || matches!(src1, ALUSrc::None)
-            || matches!(src2, ALUSrc::None);
-        debug_assert!(bit74_75_are_mod || !src2.has_src_mod());
-
         self.encode_alu_src0(&src0, RegFile::GPR, is_fp16_alu);
 
         let form = match &src2 {
             ALUSrc::None | ALUSrc::Reg(_) => {
-                self.encode_alu_src2(
-                    &src2,
-                    RegFile::GPR,
-                    is_fp16_alu,
-                    bit74_75_are_mod,
-                );
+                self.encode_alu_src2(&src2, RegFile::GPR, is_fp16_alu);
                 match &src1 {
                     ALUSrc::None => 1_u8, // form
                     ALUSrc::Reg(reg1) => {
@@ -520,33 +490,18 @@ impl SM70Encoder<'_> {
             }
             ALUSrc::UReg(reg2) => {
                 self.encode_alu_ureg(reg2, is_fp16_alu);
-                self.encode_alu_src2(
-                    &src1,
-                    RegFile::GPR,
-                    is_fp16_alu,
-                    bit74_75_are_mod,
-                );
+                self.encode_alu_src2(&src1, RegFile::GPR, is_fp16_alu);
                 7_u8 // form
             }
             ALUSrc::Imm32(imm2) => {
                 self.encode_alu_imm(imm2);
-                self.encode_alu_src2(
-                    &src1,
-                    RegFile::GPR,
-                    is_fp16_alu,
-                    bit74_75_are_mod,
-                );
+                self.encode_alu_src2(&src1, RegFile::GPR, is_fp16_alu);
                 2_u8 // form
             }
             ALUSrc::CBuf(cb2) => {
                 // TODO set_src_cx
                 self.encode_alu_cb(cb2, is_fp16_alu);
-                self.encode_alu_src2(
-                    &src1,
-                    RegFile::GPR,
-                    is_fp16_alu,
-                    bit74_75_are_mod,
-                );
+                self.encode_alu_src2(&src1, RegFile::GPR, is_fp16_alu);
                 3_u8 // form
             }
         };
@@ -599,7 +554,7 @@ impl SM70Encoder<'_> {
         self.encode_alu_src0(&src0, RegFile::UGPR, false);
         let form = match &src2 {
             ALUSrc::None | ALUSrc::Reg(_) => {
-                self.encode_alu_src2(&src2, RegFile::UGPR, false, true);
+                self.encode_alu_src2(&src2, RegFile::UGPR, false);
                 match &src1 {
                     ALUSrc::None => 1_u8, // form
                     ALUSrc::Reg(reg1) => {
@@ -617,7 +572,7 @@ impl SM70Encoder<'_> {
             ALUSrc::UReg(_) => panic!("UALU never has UReg"),
             ALUSrc::Imm32(imm2) => {
                 self.encode_alu_imm(imm2);
-                self.encode_alu_src2(&src1, RegFile::UGPR, false, true);
+                self.encode_alu_src2(&src1, RegFile::UGPR, false);
                 2_u8 // form
             }
             ALUSrc::CBuf(_) => panic!("UALU does not support cbufs"),
@@ -1112,17 +1067,9 @@ impl SM70Op for OpHFma2 {
         b.copy_alu_src_if_not_reg(src0, gpr, SrcType::F16v2);
         b.copy_alu_src_if_not_reg(src1, gpr, SrcType::F16v2);
         b.copy_alu_src_if_both_not_reg(src1, src2, gpr, SrcType::F16v2);
-
-        // HFMA2 doesn't have fabs or fneg on SRC2.
-        if !src2.src_mod.is_none() {
-            b.copy_alu_src_and_lower_fmod(src2, gpr, SrcType::F16v2);
-        }
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
-        // HFMA2 doesn't have fneg and fabs on SRC2.
-        assert!(self.srcs[2].src_mod.is_none());
-
         e.encode_fp16_alu(
             0x031,
             Some(&self.dst),
@@ -2306,17 +2253,36 @@ impl SM70Encoder<'_> {
 
     fn set_tex_lod_mode(&mut self, range: Range<usize>, lod_mode: TexLodMode) {
         assert!(range.len() == 3);
-        self.set_field(
-            range,
-            match lod_mode {
-                TexLodMode::Auto => 0_u8,
-                TexLodMode::Zero => 1_u8,
-                TexLodMode::Bias => 2_u8,
-                TexLodMode::Lod => 3_u8,
-                TexLodMode::Clamp => 4_u8,
-                TexLodMode::BiasClamp => 5_u8,
-            },
-        );
+        if self.sm >= 100 {
+            self.set_field(
+                range,
+                match lod_mode {
+                    TexLodMode::Auto => 0_u8,
+                    TexLodMode::Bias => 1_u8,
+                    TexLodMode::Clamp => 2_u8,
+                    // ulb => 0x3
+                    // ulc => 0x4
+                    // lb.ulc => 0x5
+                    TexLodMode::BiasClamp => todo!(),
+
+                    TexLodMode::Zero => 0_u8,
+                    TexLodMode::Lod => 1_u8,
+                    // ull => 3
+                },
+            );
+        } else {
+            self.set_field(
+                range,
+                match lod_mode {
+                    TexLodMode::Auto => 0_u8,
+                    TexLodMode::Zero => 1_u8,
+                    TexLodMode::Bias => 2_u8,
+                    TexLodMode::Lod => 3_u8,
+                    TexLodMode::Clamp => 4_u8,
+                    TexLodMode::BiasClamp => 5_u8,
+                },
+            );
+        }
     }
 
     fn set_image_dim(&mut self, range: Range<usize>, dim: ImageDim) {
@@ -2384,12 +2350,18 @@ impl SM70Op for OpTex {
                 panic!("SM70+ doesn't have legacy bound textures");
             }
             TexRef::CBuf(cb) => {
+                assert!(e.sm < 100);
                 e.set_opcode(0xb60);
                 e.set_tex_cb_ref(40..59, cb);
             }
             TexRef::Bindless => {
-                e.set_opcode(0x361);
-                e.set_bit(59, true); // .B
+                if e.sm >= 100 {
+                    e.set_opcode(0xd61);
+                    e.set_bit(91, true);
+                } else {
+                    e.set_opcode(0x361);
+                    e.set_bit(59, true); // .B
+                }
             }
         }
 
@@ -2403,6 +2375,11 @@ impl SM70Op for OpTex {
 
         e.set_reg_src(24..32, self.srcs[0]);
         e.set_reg_src(32..40, self.srcs[1]);
+
+        if e.sm >= 100 {
+            e.set_field(48..56, 0xff_u8); // ureg
+            e.set_bit(59, self.lod_mode.is_explicit_lod());
+        }
 
         e.set_tex_dim(61..64, self.dim);
         e.set_tex_channel_mask(72..76, self.channel_mask);
@@ -2426,12 +2403,18 @@ impl SM70Op for OpTld {
                 panic!("SM70+ doesn't have legacy bound textures");
             }
             TexRef::CBuf(cb) => {
+                assert!(e.sm < 100);
                 e.set_opcode(0xb66);
                 e.set_tex_cb_ref(40..59, cb);
             }
             TexRef::Bindless => {
-                e.set_opcode(0x367);
-                e.set_bit(59, true); // .B
+                if e.sm >= 100 {
+                    e.set_opcode(0xd67);
+                    e.set_bit(91, true);
+                } else {
+                    e.set_opcode(0x367);
+                    e.set_bit(59, true); // .B
+                }
             }
         }
 
@@ -2446,17 +2429,18 @@ impl SM70Op for OpTld {
         e.set_reg_src(24..32, self.srcs[0]);
         e.set_reg_src(32..40, self.srcs[1]);
 
+        if e.sm >= 100 {
+            e.set_field(48..56, 0xff_u8); // ureg
+        }
+
         e.set_tex_dim(61..64, self.dim);
         e.set_tex_channel_mask(72..76, self.channel_mask);
         e.set_bit(76, self.offset);
         // bit 77: .CL
         e.set_bit(78, self.is_ms);
         // bits 79..81: .F16
-        assert!(
-            self.lod_mode == TexLodMode::Zero
-                || self.lod_mode == TexLodMode::Lod
-        );
         e.set_eviction_priority(&self.mem_eviction_priority);
+        assert!(self.lod_mode.is_explicit_lod());
         e.set_tex_lod_mode(87..90, self.lod_mode);
         e.set_bit(90, self.nodep);
     }
@@ -2473,12 +2457,18 @@ impl SM70Op for OpTld4 {
                 panic!("SM70+ doesn't have legacy bound textures");
             }
             TexRef::CBuf(cb) => {
+                assert!(e.sm < 100);
                 e.set_opcode(0xb63);
                 e.set_tex_cb_ref(40..59, cb);
             }
             TexRef::Bindless => {
-                e.set_opcode(0x364);
-                e.set_bit(59, true); // .B
+                if e.sm >= 100 {
+                    e.set_opcode(0xd64);
+                    e.set_bit(91, true);
+                } else {
+                    e.set_opcode(0x364);
+                    e.set_bit(59, true); // .B
+                }
             }
         }
 
@@ -2492,6 +2482,10 @@ impl SM70Op for OpTld4 {
 
         e.set_reg_src(24..32, self.srcs[0]);
         e.set_reg_src(32..40, self.srcs[1]);
+
+        if e.sm >= 100 {
+            e.set_field(48..56, 0xff_u8); // ureg
+        }
 
         e.set_tex_dim(61..64, self.dim);
         e.set_tex_channel_mask(72..76, self.channel_mask);
@@ -2522,6 +2516,7 @@ impl SM70Op for OpTmml {
                 panic!("SM70+ doesn't have legacy bound textures");
             }
             TexRef::CBuf(cb) => {
+                assert!(e.sm < 100);
                 e.set_opcode(0xb69);
                 e.set_tex_cb_ref(40..59, cb);
             }
@@ -2559,12 +2554,18 @@ impl SM70Op for OpTxd {
                 panic!("SM70+ doesn't have legacy bound textures");
             }
             TexRef::CBuf(cb) => {
+                assert!(e.sm < 100);
                 e.set_opcode(0xb6c);
                 e.set_tex_cb_ref(40..59, cb);
             }
             TexRef::Bindless => {
-                e.set_opcode(0x36d);
-                e.set_bit(59, true); // .B
+                if e.sm >= 100 {
+                    e.set_opcode(0xd6d);
+                    e.set_bit(91, true);
+                } else {
+                    e.set_opcode(0x36d);
+                    e.set_bit(59, true); // .B
+                }
             }
         }
 
@@ -2578,6 +2579,10 @@ impl SM70Op for OpTxd {
 
         e.set_reg_src(24..32, self.srcs[0]);
         e.set_reg_src(32..40, self.srcs[1]);
+
+        if e.sm >= 100 {
+            e.set_field(48..56, 0xff_u8); // ureg
+        }
 
         e.set_tex_dim(61..64, self.dim);
         e.set_tex_channel_mask(72..76, self.channel_mask);
@@ -2599,6 +2604,7 @@ impl SM70Op for OpTxq {
                 panic!("SM70+ doesn't have legacy bound textures");
             }
             TexRef::CBuf(cb) => {
+                assert!(e.sm < 100);
                 e.set_opcode(0xb6f);
                 e.set_tex_cb_ref(40..59, cb);
             }
@@ -2796,7 +2802,7 @@ impl SM70Op for OpSuAtom {
         e.set_eviction_priority(&self.mem_eviction_priority);
 
         e.set_bit(72, false); // .BA
-        e.set_atom_type(73..76, self.atom_type);
+        e.set_atom_type(self.atom_type);
     }
 }
 
@@ -2965,20 +2971,47 @@ impl SM70Encoder<'_> {
         );
     }
 
-    fn set_atom_type(&mut self, range: Range<usize>, atom_type: AtomType) {
-        assert!(range.len() == 3);
-        self.set_field(
-            range,
-            match atom_type {
-                AtomType::U32 => 0_u8,
-                AtomType::I32 => 1_u8,
-                AtomType::U64 => 2_u8,
-                AtomType::F32 => 3_u8,
-                AtomType::F16x2 => 4_u8,
-                AtomType::I64 => 5_u8,
-                AtomType::F64 => 6_u8,
-            },
-        );
+    fn set_atom_type(&mut self, atom_type: AtomType) {
+        if self.sm >= 90 {
+            // Float/int is differentiated by opcode
+            self.set_field(
+                73..77,
+                match atom_type {
+                    AtomType::F16x2 => 0_u8,
+                    // f16x4 => 1
+                    // f16x8 => 2
+                    // bf16x2 => 3
+                    // bf16x4 => 4
+                    // bf16x8 => 5
+                    AtomType::F32 => 9_u8, // .ftz
+                    // f32x2.ftz => 10
+                    // f32x4.ftz => 11
+                    // f32x1 => 12
+                    // f32x2 => 13
+                    // f32x4 => 14
+                    AtomType::F64 => 15_u8,
+
+                    AtomType::U32 => 0,
+                    AtomType::I32 => 1,
+                    AtomType::U64 => 2,
+                    AtomType::I64 => 3,
+                    // u128 => 4,
+                },
+            );
+        } else {
+            self.set_field(
+                73..76,
+                match atom_type {
+                    AtomType::U32 => 0_u8,
+                    AtomType::I32 => 1_u8,
+                    AtomType::U64 => 2_u8,
+                    AtomType::F32 => 3_u8,
+                    AtomType::F16x2 => 4_u8,
+                    AtomType::I64 => 5_u8,
+                    AtomType::F64 => 6_u8,
+                },
+            );
+        }
     }
 }
 
@@ -2991,7 +3024,11 @@ impl SM70Op for OpAtom {
         match self.mem_space {
             MemSpace::Global(_) => {
                 if self.dst.is_none() {
-                    e.set_opcode(0x98e);
+                    if e.sm >= 90 && self.atom_type.is_float() {
+                        e.set_opcode(0x9a6);
+                    } else {
+                        e.set_opcode(0x98e);
+                    }
 
                     e.set_reg_src(32..40, self.data);
                     e.set_atom_op(87..90, self.atom_op);
@@ -3002,7 +3039,11 @@ impl SM70Op for OpAtom {
                     e.set_reg_src(32..40, self.cmpr);
                     e.set_reg_src(64..72, self.data);
                 } else {
-                    e.set_opcode(0x3a8);
+                    if e.sm >= 90 && self.atom_type.is_float() {
+                        e.set_opcode(0x3a3);
+                    } else {
+                        e.set_opcode(0x3a8);
+                    }
 
                     e.set_reg_src(32..40, self.data);
                     e.set_atom_op(87..91, self.atom_op);
@@ -3038,6 +3079,10 @@ impl SM70Op for OpAtom {
                             || self.atom_op == AtomOp::Exch,
                         "64-bit Shared atomics only support CmpExch or Exch"
                     );
+                    assert!(
+                        !self.atom_type.is_float(),
+                        "Shared atomics don't support float"
+                    );
                     e.set_atom_op(87..91, self.atom_op);
                 }
 
@@ -3051,7 +3096,7 @@ impl SM70Op for OpAtom {
         e.set_dst(self.dst);
         e.set_reg_src(24..32, self.addr);
         e.set_field(40..64, self.addr_offset);
-        e.set_atom_type(73..76, self.atom_type);
+        e.set_atom_type(self.atom_type);
     }
 }
 
