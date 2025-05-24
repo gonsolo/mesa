@@ -14,6 +14,8 @@ use compiler::bindings::*;
 use compiler::cfg::CFGBuilder;
 use compiler::nir::*;
 
+use rustc_hash::{FxBuildHasher};
+
 use std::collections::HashMap;
 
 struct PhiAllocMap<'a> {
@@ -32,7 +34,7 @@ impl<'a> PhiAllocMap<'a> {
 
 struct ShaderFromNir<'a> {
     nir: &'a nir_shader,
-    cfg: CFGBuilder<u32, BasicBlock>,
+    cfg: CFGBuilder<u32, BasicBlock, FxBuildHasher>,
     label_alloc: LabelAllocator,
     block_label: HashMap<u32, Label>,
     ssa_map: HashMap<u32, Vec<SSAValue>>,

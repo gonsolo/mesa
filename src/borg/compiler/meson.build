@@ -4,6 +4,11 @@
 add_languages('rust', required: true)
 rust = import('rust')
 
+dep_rustc_hash = dependency('rustc-hash',
+  fallback: ['rustc-hash', 'dep_rustc_hash'],
+  required: true,
+)
+
 libbak_deps = [
   idep_mesautil,
   idep_nir_headers
@@ -64,6 +69,7 @@ _libbak_rs = static_library(
   rust_abi : 'c',
   rust_args : bak_rust_args,
   dependencies : [
+    dep_rustc_hash,
     idep_compiler_rs
   ],
   link_with: [
