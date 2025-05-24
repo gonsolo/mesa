@@ -1190,7 +1190,9 @@ static const struct intel_device_info intel_device_info_arl_h = {
       /* CPU: WC, GPU: PAT 0 => WB */                           \
       .writecombining = PAT_ENTRY(0, WC),                       \
       /* CPU: WC, GPU: PAT 11 => XD, compressed */              \
-      .compressed = PAT_ENTRY(11, WC)                           \
+      .compressed_scanout = PAT_ENTRY(11, WC),                  \
+      /* CPU: WC, GPU: PAT 9 => WB, compressed */               \
+      .compressed = PAT_ENTRY(9, WC)                            \
    }
 
 #define XE2_CONFIG(platform_suffix)                             \
@@ -1992,7 +1994,16 @@ intel_device_info_wa_stepping(struct intel_device_info *devinfo)
     * 'compiler_field' in intel_device_info.py
     */
 
-   if (devinfo->platform == INTEL_PLATFORM_BMG) {
+   if (devinfo->platform == INTEL_PLATFORM_PTL) {
+      switch (devinfo->revision) {
+      case 0:
+         return INTEL_STEPPING_A0;
+      case 4:
+         return INTEL_STEPPING_B0;
+      default:
+         return INTEL_STEPPING_RELEASE;
+      }
+   } else if (devinfo->platform == INTEL_PLATFORM_BMG) {
       switch (devinfo->revision) {
       case 0:
          return INTEL_STEPPING_A0;

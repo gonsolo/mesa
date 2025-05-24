@@ -4,6 +4,7 @@
 use crate::ir::*;
 use crate::sm70::ShaderModel70;
 use compiler::cfg::CFGBuilder;
+use rustc_hash::FxBuildHasher;
 
 use std::io::Write;
 use std::mem;
@@ -55,7 +56,7 @@ fn disassemble_instrs(instrs: Vec<Box<Instr>>, sm: u8) -> Vec<String> {
         instrs,
     };
 
-    let mut cfg = CFGBuilder::new();
+    let mut cfg = CFGBuilder::<_, _, FxBuildHasher>::new();
     cfg.add_node(0, block);
 
     let f = Function {
@@ -165,6 +166,101 @@ pub fn test_nop() {
     for sm in SM_LIST {
         let mut c = DisasmCheck::new();
         c.push(OpNop { label: None }, "nop;");
+        c.check(sm);
+    }
+}
+
+#[test]
+pub fn test_ldc() {
+    let reg_files = [RegFile::GPR, RegFile::UGPR];
+
+    let ur2_4 = RegRef::new(RegFile::UGPR, 2, 2);
+    let cbufs = [
+        (CBuf::Binding(5), "c[0x5]"),
+        (CBuf::BindlessUGPR(ur2_4), "cx[ur2]"),
+    ];
+
+    let mem_types = [
+        (MemType::U8, ".u8"),
+        (MemType::I8, ".s8"),
+        (MemType::U16, ".u16"),
+        (MemType::I16, ".s16"),
+        (MemType::B32, ""),
+        (MemType::B64, ".64"),
+        (MemType::B128, ".128"),
+    ];
+
+    for sm in SM_LIST {
+        let mut c = DisasmCheck::new();
+        for reg_file in reg_files {
+            if reg_file == RegFile::UGPR && sm < 73 {
+                continue;
+            }
+
+            let ldc_op_str = match reg_file {
+                RegFile::GPR => "ldc",
+                RegFile::UGPR => {
+                    if sm >= 100 {
+                        "ldcu"
+                    } else {
+                        "uldc"
+                    }
+                }
+                _ => panic!("Unsupported register file"),
+            };
+
+            for (cbuf, cbuf_str) in &cbufs {
+                if matches!(cbuf, CBuf::BindlessUGPR(_)) && sm < 73 {
+                    continue;
+                }
+
+                for (mem_type, mem_type_str) in mem_types {
+                    if mem_type == MemType::B128
+                        && (reg_file == RegFile::GPR || sm < 100)
+                    {
+                        continue;
+                    }
+
+                    let dst_regs = mem_type.bits().div_ceil(32);
+                    let r4 = RegRef::new(reg_file, 4, dst_regs as u8);
+                    let r4_str = format!("{}4", reg_file.fmt_prefix());
+
+                    let cb = CBufRef {
+                        buf: cbuf.clone(),
+                        offset: 0x248,
+                    };
+                    let mut instr = OpLdc {
+                        dst: r4.into(),
+                        cb: cb.into(),
+                        offset: 0.into(),
+                        mode: LdcMode::Indexed,
+                        mem_type,
+                    };
+
+                    c.push(
+                        instr.clone(),
+                        format!(
+                            "{ldc_op_str}{mem_type_str} {r4_str}, {cbuf_str}[0x248];"
+                        ),
+                    );
+
+                    if reg_file == RegFile::GPR
+                        || (sm >= 100 && matches!(cbuf, CBuf::Binding(_)))
+                        || sm >= 120
+                    {
+                        let r6 = RegRef::new(reg_file, 6, 1);
+                        instr.offset = r6.into();
+
+                        c.push(
+                            instr.clone(),
+                            format!(
+                                "{ldc_op_str}{mem_type_str} {r4_str}, {cbuf_str}[{r6}+0x248];"
+                            ),
+                        );
+                    }
+                }
+            }
+        }
         c.check(sm);
     }
 }
@@ -324,9 +420,9 @@ pub fn test_texture() {
     ];
 
     let tld4_offset_modes = [
-        Tld4OffsetMode::None,
-        Tld4OffsetMode::AddOffI,
-        Tld4OffsetMode::PerPx,
+        TexOffsetMode::None,
+        TexOffsetMode::AddOffI,
+        TexOffsetMode::PerPx,
     ];
 
     let tex_queries = [
@@ -358,7 +454,7 @@ pub fn test_texture() {
                 dim: TexDim::_2D,
                 lod_mode,
                 z_cmpr: false,
-                offset: false,
+                offset_mode: TexOffsetMode::None,
                 mem_eviction_priority: MemEvictionPriority::First,
                 nodep: true,
                 channel_mask: ChannelMask::for_comps(3),
@@ -382,7 +478,7 @@ pub fn test_texture() {
                     dim: TexDim::_2D,
                     is_ms: false,
                     lod_mode,
-                    offset: false,
+                    offset_mode: TexOffsetMode::None,
                     mem_eviction_priority: MemEvictionPriority::First,
                     nodep: true,
                     channel_mask: ChannelMask::for_comps(3),
@@ -395,10 +491,10 @@ pub fn test_texture() {
         }
 
         for offset_mode in tld4_offset_modes {
-            let offset_mode_str = if offset_mode == Tld4OffsetMode::None {
+            let offset_mode_str = if offset_mode == TexOffsetMode::None {
                 String::new()
             } else {
-                format!(".{offset_mode}")
+                format!("{offset_mode}")
             };
 
             let instr = OpTld4 {
@@ -445,7 +541,7 @@ pub fn test_texture() {
             srcs: [SrcRef::Reg(r1).into(), SrcRef::Reg(r3).into()],
 
             dim: TexDim::_2D,
-            offset: false,
+            offset_mode: TexOffsetMode::None,
             mem_eviction_priority: MemEvictionPriority::First,
             nodep: true,
             channel_mask: ChannelMask::for_comps(3),

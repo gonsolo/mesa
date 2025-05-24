@@ -13,6 +13,7 @@ use acorn::Acorn;
 use compiler::bindings::MESA_SHADER_COMPUTE;
 use compiler::cfg::CFGBuilder;
 use nak_bindings::*;
+use rustc_hash::FxBuildHasher;
 use std::mem::offset_of;
 use std::str::FromStr;
 use std::sync::OnceLock;
@@ -68,19 +69,19 @@ impl<'a> TestShaderBuilder<'a> {
         let mut b = SSAInstrBuilder::new(sm, &mut alloc);
 
         // Fill out the start block
-        let lane = b.alloc_ssa(RegFile::GPR, 1);
+        let lane = b.alloc_ssa(RegFile::GPR);
         b.push_op(OpS2R {
             dst: lane.into(),
             idx: NAK_SV_LANE_ID,
         });
 
-        let cta = b.alloc_ssa(RegFile::GPR, 1);
+        let cta = b.alloc_ssa(RegFile::GPR);
         b.push_op(OpS2R {
             dst: cta.into(),
             idx: NAK_SV_CTAID,
         });
 
-        let invoc_id = b.alloc_ssa(RegFile::GPR, 1);
+        let invoc_id = b.alloc_ssa(RegFile::GPR);
         b.push_op(OpIMad {
             dst: invoc_id.into(),
             srcs: [cta.into(), u32::from(LOCAL_SIZE_X).into(), lane.into()],
@@ -95,7 +96,7 @@ impl<'a> TestShaderBuilder<'a> {
             buf: CBuf::Binding(0),
             offset: offset_of!(CB0, data_addr_hi).try_into().unwrap(),
         };
-        let data_addr = b.alloc_ssa(RegFile::GPR, 2);
+        let data_addr = b.alloc_ssa_vec(RegFile::GPR, 2);
         b.copy_to(data_addr[0].into(), data_addr_lo.into());
         b.copy_to(data_addr[1].into(), data_addr_hi.into());
 
@@ -103,14 +104,16 @@ impl<'a> TestShaderBuilder<'a> {
             buf: CBuf::Binding(0),
             offset: offset_of!(CB0, data_stride).try_into().unwrap(),
         };
+        let data_stride = b.copy(data_stride.into());
         let invocations = CBufRef {
             buf: CBuf::Binding(0),
             offset: offset_of!(CB0, invocations).try_into().unwrap(),
         };
+        let invocations = b.copy(invocations.into());
 
         let data_offset = SSARef::from([
-            b.imul(invoc_id.into(), data_stride.into())[0],
-            b.copy(0.into())[0],
+            b.imul(invoc_id.into(), data_stride.into()),
+            b.copy(0.into()),
         ]);
         let data_addr =
             b.iadd64(data_addr.into(), data_offset.into(), 0.into());
@@ -122,12 +125,12 @@ impl<'a> TestShaderBuilder<'a> {
             invoc_id.into(),
             invocations.into(),
         );
-        b.predicate(oob[0].into()).push_op(OpExit {});
+        b.predicate(oob.into()).push_op(OpExit {});
 
         let start_block = BasicBlock {
             label: label_alloc.alloc(),
             uniform: true,
-            instrs: b.as_vec(),
+            instrs: b.into_vec(),
         };
 
         TestShaderBuilder {
@@ -148,10 +151,10 @@ impl<'a> TestShaderBuilder<'a> {
             eviction_priority: MemEvictionPriority::Normal,
         };
         let comps: u8 = mem_type.bits().div_ceil(32).try_into().unwrap();
-        let dst = self.alloc_ssa(RegFile::GPR, comps);
+        let dst = self.alloc_ssa_vec(RegFile::GPR, comps);
         self.push_op(OpLd {
-            dst: dst.into(),
-            addr: self.data_addr.into(),
+            dst: dst.clone().into(),
+            addr: self.data_addr.clone().into(),
             offset: offset.into(),
             access: access,
         });
@@ -173,7 +176,7 @@ impl<'a> TestShaderBuilder<'a> {
         let comps: u8 = mem_type.bits().div_ceil(32).try_into().unwrap();
         assert!(data.comps() == comps);
         self.push_op(OpSt {
-            addr: self.data_addr.into(),
+            addr: self.data_addr.clone().into(),
             data: data.into(),
             offset: offset.into(),
             access: access,
@@ -185,10 +188,10 @@ impl<'a> TestShaderBuilder<'a> {
         let block = BasicBlock {
             label: self.label,
             uniform: true,
-            instrs: self.b.as_vec(),
+            instrs: self.b.into_vec(),
         };
 
-        let mut cfg = CFGBuilder::new();
+        let mut cfg = CFGBuilder::<_, _, FxBuildHasher>::new();
         cfg.add_node(0, self.start_block);
         cfg.add_node(1, block);
         cfg.add_edge(0, 1);
@@ -260,7 +263,11 @@ impl Builder for TestShaderBuilder<'_> {
 }
 
 impl SSABuilder for TestShaderBuilder<'_> {
-    fn alloc_ssa(&mut self, file: RegFile, comps: u8) -> SSARef {
+    fn alloc_ssa(&mut self, file: RegFile) -> SSAValue {
+        self.alloc.alloc(file)
+    }
+
+    fn alloc_ssa_vec(&mut self, file: RegFile, comps: u8) -> SSARef {
         self.alloc.alloc_vec(file, comps)
     }
 }
@@ -344,8 +351,8 @@ pub fn test_foldable_op_with(
                 let data = b.ld_test_data(comps * 4, MemType::B32);
                 comps += 1;
 
-                let dst = b.alloc_ssa(RegFile::GPR, 1);
-                let carry = b.alloc_ssa(RegFile::Carry, 1);
+                let dst = b.alloc_ssa(RegFile::GPR);
+                let carry = b.alloc_ssa(RegFile::Carry);
                 b.push_op(OpIAdd2 {
                     dst: dst.into(),
                     carry_out: carry.into(),
@@ -364,19 +371,19 @@ pub fn test_foldable_op_with(
     for (i, dst) in op.dsts_as_mut_slice().iter_mut().enumerate() {
         match dst_types[i] {
             DstType::Pred => {
-                *dst = b.alloc_ssa(RegFile::Pred, 1).into();
+                *dst = b.alloc_ssa(RegFile::Pred).into();
                 fold_dst.push(FoldData::Pred(false));
             }
             DstType::GPR | DstType::F32 => {
-                *dst = b.alloc_ssa(RegFile::GPR, 1).into();
+                *dst = b.alloc_ssa(RegFile::GPR).into();
                 fold_dst.push(FoldData::U32(0));
             }
             DstType::F64 => {
-                *dst = b.alloc_ssa(RegFile::GPR, 2).into();
+                *dst = b.alloc_ssa_vec(RegFile::GPR, 2).into();
                 fold_dst.push(FoldData::Vec2([0, 0]));
             }
             DstType::Carry => {
-                *dst = b.alloc_ssa(RegFile::Carry, 1).into();
+                *dst = b.alloc_ssa(RegFile::Carry).into();
                 fold_dst.push(FoldData::Carry(false));
             }
             typ => panic!("Can't auto-test {typ:?} data"),
@@ -396,7 +403,7 @@ pub fn test_foldable_op_with(
                 RegFile::Pred => b.sel((*ssa).into(), 1.into(), 0.into()),
                 RegFile::GPR => (*ssa).into(),
                 RegFile::Carry => {
-                    let gpr = b.alloc_ssa(RegFile::GPR, 1);
+                    let gpr = b.alloc_ssa(RegFile::GPR);
                     b.push_op(OpIAdd2X {
                         dst: gpr.into(),
                         carry_out: Dst::None,
@@ -407,7 +414,7 @@ pub fn test_foldable_op_with(
                 }
                 file => panic!("Can't auto-test {file:?} data"),
             };
-            b.st_test_data(comps * 4, MemType::B32, u);
+            b.st_test_data(comps * 4, MemType::B32, u.into());
             comps += 1;
         }
     }
@@ -944,6 +951,61 @@ fn test_op_shf() {
         let mut a = Acorn::new();
         test_foldable_op_with(op, &mut |i| {
             if i == shift_idx {
+                a.get_uint(7) as u32
+            } else {
+                a.get_u32()
+            }
+        });
+    }
+}
+
+#[test]
+fn test_op_shr() {
+    let sm = &RunSingleton::get().sm;
+    if sm.sm() >= 70 {
+        return;
+    }
+
+    for i in 0..4 {
+        let op = OpShr {
+            dst: Dst::None,
+            src: 0.into(),
+            shift: 0.into(),
+            wrap: i & 0x1 != 0,
+            signed: i & 0x2 != 0,
+        };
+
+        let shift_idx = op.src_idx(&op.shift);
+        let mut a = Acorn::new();
+        test_foldable_op_with(op, &mut |i| {
+            if i == shift_idx {
+                a.get_uint(6) as u32
+            } else {
+                a.get_u32()
+            }
+        });
+    }
+}
+
+#[test]
+fn test_op_shl() {
+    let sm = &RunSingleton::get().sm;
+    if sm.sm() >= 70 {
+        return;
+    }
+
+    for i in 0..2 {
+        let op = OpShl {
+            dst: Dst::None,
+            src: 0.into(),
+            shift: 0.into(),
+            wrap: i & 0x1 != 0,
+        };
+
+        let shift_idx = op.src_idx(&op.shift);
+        let mut a = Acorn::new();
+        test_foldable_op_with(op, &mut |i| {
+            if i == shift_idx {
                 a.get_uint(6) as u32
             } else {
                 a.get_u32()
@@ -1347,21 +1409,21 @@ fn test_f2fp_pack_ab() {
         b.ld_test_data(4, MemType::B32)[0],
     ]);
 
-    let dst = b.alloc_ssa(RegFile::GPR, 1);
+    let dst = b.alloc_ssa(RegFile::GPR);
     b.push_op(OpF2FP {
         dst: dst.into(),
         srcs: [srcs[0].into(), srcs[1].into()],
         rnd_mode: FRndMode::NearestEven,
     });
-    b.st_test_data(8, MemType::B32, dst[0].into());
+    b.st_test_data(8, MemType::B32, dst.into());
 
-    let dst = b.alloc_ssa(RegFile::GPR, 1);
+    let dst = b.alloc_ssa(RegFile::GPR);
     b.push_op(OpF2FP {
         dst: dst.into(),
         srcs: [srcs[0].into(), 2.0.into()],
         rnd_mode: FRndMode::Zero,
     });
-    b.st_test_data(12, MemType::B32, dst[0].into());
+    b.st_test_data(12, MemType::B32, dst.into());
 
     let bin = b.compile();
 

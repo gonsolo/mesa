@@ -2737,7 +2737,7 @@ tu_shader_create(struct tu_device *dev,
       shader->fs.has_fdm = key->fragment_density_map;
       if (fs->has_kill)
          shader->fs.lrz.status |= TU_LRZ_FORCE_DISABLE_WRITE;
-      if (fs->no_earlyz || (fs->writes_pos && !fs->fs.early_fragment_tests))
+      if (fs->no_earlyz)
          shader->fs.lrz.status = TU_LRZ_FORCE_DISABLE_LRZ;
       /* FDM isn't compatible with LRZ, because the LRZ image uses the original
        * resolution and we would need to use the low resolution.
@@ -2747,7 +2747,7 @@ tu_shader_create(struct tu_device *dev,
       if (key->fragment_density_map)
          shader->fs.lrz.status = TU_LRZ_FORCE_DISABLE_LRZ;
       if (!fs->fs.early_fragment_tests &&
-          (fs->no_earlyz || fs->writes_pos || fs->writes_stencilref || fs->writes_smask)) {
+          (fs->no_earlyz || fs->writes_stencilref)) {
          shader->fs.lrz.force_late_z = true;
       }
       break;
@@ -2767,6 +2767,45 @@ tu_shader_create(struct tu_device *dev,
 }
 
 static void
+lower_io_to_scalar_early(nir_shader *nir, nir_variable_mode mask)
+{
+   bool progress = false;
+   NIR_PASS(progress, nir, nir_lower_io_to_scalar_early, mask);
+
+   if (progress) {
+      /* Optimize the new vector code and then remove dead vars. */
+      NIR_PASS(_, nir, nir_copy_prop);
+
+      if (mask & nir_var_shader_out) {
+         /* Optimize swizzled movs of load_const for nir_link_opt_varyings's
+          * constant propagation.
+          */
+         NIR_PASS(_, nir, nir_opt_constant_folding);
+
+         /* For nir_link_opt_varyings's duplicate input opt. */
+         NIR_PASS(_, nir, nir_opt_cse);
+      }
+
+      /* Run copy-propagation to help remove dead output variables (some
+       * shaders have useless copies to/from an output), so compaction later
+       * will be more effective.
+       *
+       * This will have been done earlier but it might not have worked because
+       * the outputs were vector.
+       */
+      NIR_PASS(_, nir, nir_opt_copy_prop_vars);
+
+      NIR_PASS(_, nir, nir_opt_dce);
+
+      const nir_remove_dead_variables_options var_opts = {
+         .can_remove_var =
+            (mask & nir_var_shader_out) ? nir_vk_is_not_xfb_output : NULL,
+      };
+      NIR_PASS(_, nir, nir_remove_dead_variables, mask, &var_opts);
+   }
+}
+
+static void
 tu_link_shaders(nir_shader **shaders, unsigned shaders_count)
 {
    nir_shader *consumer = NULL;
@@ -2780,6 +2819,9 @@ tu_link_shaders(nir_shader **shaders, unsigned shaders_count)
          consumer = producer;
          continue;
       }
+
+      lower_io_to_scalar_early(producer, nir_var_shader_out);
+      lower_io_to_scalar_early(consumer, nir_var_shader_in);
 
       if (nir_link_opt_varyings(producer, consumer)) {
          NIR_PASS(_, consumer, nir_opt_constant_folding);
@@ -2809,6 +2851,8 @@ tu_link_shaders(nir_shader **shaders, unsigned shaders_count)
          nir_lower_global_vars_to_local(consumer);
       }
 
+      NIR_PASS(_, producer, nir_lower_io_to_vector, nir_var_shader_out);
+      NIR_PASS(_, consumer, nir_lower_io_to_vector, nir_var_shader_in);
       consumer = producer;
    }
 

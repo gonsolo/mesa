@@ -8,11 +8,15 @@
 # .gitlab-ci/image-tags.yml tags:
 # DEBIAN_TEST_VIDEO_TAG
 
-# Install fluster in /usr/local.
+# Install fluster in /fluster.
+
+# Do a very early check to make sure the tag is correct without the need of
+# setting up the environment variables locally
+ci_tag_build_time_check "FLUSTER_TAG"
 
 set -uex
 
-section_start fluster "Install fluster"
+section_start fluster "Installing fluster"
 
 FLUSTER_REVISION="e997402978f62428fffc8e5a4a709690d9ca9bc5"
 
@@ -22,9 +26,9 @@ export SKIP_UPDATE_FLUSTER_VECTORS=false
 
 check_fluster()
 {
-    S3_PATH_FLUSTER="${S3_HOST}/${S3_KERNEL_BUCKET}/$1/${DATA_STORAGE_PATH}/fluster/${FLUSTER_VECTORS_VERSION}/vectors.tar.zst"
+    S3_FLUSTER_TAR="${S3_HOST}/${S3_KERNEL_BUCKET}/$1/${DATA_STORAGE_PATH}/fluster/${FLUSTER_TAG}/vectors.tar.zst"
     if curl -L --retry 4 -f --retry-connrefused --retry-delay 30 -s --head \
-      "https://${S3_PATH_FLUSTER}"; then
+      "https://${S3_FLUSTER_TAR}"; then
         echo "Fluster vectors are up-to-date, skip rebuilding them."
         export SKIP_UPDATE_FLUSTER_VECTORS=true
     fi
@@ -50,15 +54,14 @@ if ! $SKIP_UPDATE_FLUSTER_VECTORS; then
 
     # Build fluster vectors archive and upload it
     tar --zstd -cf "vectors.tar.zst" fluster/resources/
-    ci-fairy s3cp --token-file "${S3_JWT_FILE}" "vectors.tar.zst" \
-      "https://${S3_PATH_FLUSTER}/vectors.tar.zst"
+    ci-fairy s3cp --token-file "${S3_JWT_FILE}" "vectors.tar.zst" "https://${S3_FLUSTER_TAR}"
 fi
 
-mv fluster/ /usr/local/
+mv fluster/ /
 
 if $SKIP_UPDATE_FLUSTER_VECTORS; then
     curl -L --retry 4 -f --retry-connrefused --retry-delay 30 \
-      "${FDO_HTTP_CACHE_URI:-}https://${S3_PATH_FLUSTER}" | tar --zstd -x -C /usr/local/
+      "${FDO_HTTP_CACHE_URI:-}https://${S3_FLUSTER_TAR}" | tar --zstd -x -C /
 fi
 
 section_end fluster

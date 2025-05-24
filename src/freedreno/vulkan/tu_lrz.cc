@@ -222,6 +222,7 @@ tu_lrz_init_state(struct tu_cmd_buffer *cmd,
       return;
 
    cmd->state.lrz.valid = true;
+   cmd->state.lrz.valid_at_start = true;
    cmd->state.lrz.disable_write_for_rp = false;
    cmd->state.lrz.prev_direction = TU_LRZ_UNKNOWN;
    /* Be optimistic and unconditionally enable fast-clear in
@@ -249,13 +250,14 @@ tu_lrz_init_secondary(struct tu_cmd_buffer *cmd,
    if (!has_gpu_tracking)
       return;
 
-   if (!cmd->device->use_lrz)
+   if (!cmd->device->use_lrz || TU_DEBUG(NOLRZ))
       return;
 
    if (!vk_format_has_depth(att->format))
       return;
 
    cmd->state.lrz.valid = true;
+   cmd->state.lrz.valid_at_start = true;
    cmd->state.lrz.disable_write_for_rp = false;
    cmd->state.lrz.prev_direction = TU_LRZ_UNKNOWN;
    cmd->state.lrz.gpu_dir_tracking = has_gpu_tracking;
@@ -290,6 +292,11 @@ tu_lrz_begin_resumed_renderpass(struct tu_cmd_buffer *cmd)
 {
     /* Track LRZ valid state */
    memset(&cmd->state.lrz, 0, sizeof(cmd->state.lrz));
+
+   if (TU_DEBUG(NOLRZ)) {
+      cmd->state.dirty |= TU_CMD_DIRTY_LRZ;
+      return;
+   }
 
    uint32_t a;
    for (a = 0; a < cmd->state.pass->attachment_count; a++) {
@@ -352,7 +359,7 @@ tu_lrz_begin_renderpass(struct tu_cmd_buffer *cmd)
     /* Track LRZ valid state */
    tu_lrz_begin_resumed_renderpass<CHIP>(cmd);
 
-   if (!cmd->state.lrz.valid || TU_DEBUG(NOLRZ)) {
+   if (!cmd->state.lrz.valid_at_start) {
       tu6_write_lrz_cntl<CHIP>(cmd, &cmd->cs, {});
       tu6_emit_lrz_buffer<CHIP>(&cmd->cs, NULL);
    }
@@ -397,15 +404,19 @@ tu_lrz_tiling_begin(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
       return;
    }
 
-   if (lrz->disable_for_rp) {
-      /* We may deem necessary to disable LRZ for the whole renderpass.
+   if (!lrz->valid_at_start) {
+      /* If LRZ was never valid so disable it manually here.
        * This is accomplished by making later GRAS_LRZ_CNTL (in binning pass)
        * to fail the comparison of depth views.
-       * TODO: Find if there are conditions where it is beneficial.
        */
-      tu6_disable_lrz_via_depth_view<CHIP>(cmd, cs);
-      tu6_write_lrz_reg(cmd, cs, A6XX_GRAS_LRZ_DEPTH_VIEW(.dword = 0));
-   } else if (lrz->fast_clear || lrz->gpu_dir_tracking) {
+      if (lrz->gpu_dir_tracking) {
+         tu6_disable_lrz_via_depth_view<CHIP>(cmd, cs);
+         tu6_write_lrz_reg(cmd, cs, A6XX_GRAS_LRZ_DEPTH_VIEW(.dword = 0));
+      }
+      return;
+   }
+
+   if (lrz->fast_clear || lrz->gpu_dir_tracking) {
       if (lrz->gpu_dir_tracking) {
          tu6_write_lrz_reg(cmd, cs,
             A6XX_GRAS_LRZ_DEPTH_VIEW(.dword = lrz->image_view->view.GRAS_LRZ_DEPTH_VIEW));
@@ -426,7 +437,7 @@ tu_lrz_tiling_begin(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
       tu_emit_event_write<CHIP>(cmd, cs, FD_LRZ_CLEAR);
    }
 
-   if (!lrz->fast_clear && !lrz->disable_for_rp) {
+   if (!lrz->fast_clear) {
       tu6_clear_lrz<CHIP>(cmd, cs, lrz->image_view->image, &lrz->depth_clear_value);
       /* Even though we disable fast-clear we still have to dirty
        * fast-clear buffer because both secondary cmdbufs and following
@@ -456,7 +467,7 @@ tu_lrz_before_tile(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
       tu6_emit_lrz_buffer<CHIP>(cs, lrz->image_view->image);
 
       if (lrz->gpu_dir_tracking) {
-         if (lrz->disable_for_rp) {
+         if (!lrz->valid_at_start) {
             /* Make sure we fail the comparison of depth views */
             tu6_write_lrz_reg(cmd, cs, A6XX_GRAS_LRZ_DEPTH_VIEW(.dword = 0));
          } else {
@@ -493,8 +504,18 @@ tu_lrz_tiling_end(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    /* If we haven't disabled LRZ during renderpass, we need to disable it here
     * for next renderpass to not use invalid LRZ values.
     */
-   if (cmd->state.lrz.gpu_dir_tracking && !cmd->state.lrz.disable_for_rp &&
-       !cmd->state.lrz.valid) {
+   bool disable_for_next_rp = cmd->state.lrz.valid_at_start &&
+       !cmd->state.lrz.valid;
+   /* If the render pass writes depth (with direction) but doesn't set
+    * direction on the GPU, the LRZ buffer cannot be used in subsequent
+    * render passes because the direction information is lost.
+    */
+   if (!cmd->state.lrz.gpu_dir_set &&
+       cmd->state.lrz.prev_direction != TU_LRZ_UNKNOWN) {
+      disable_for_next_rp = true;
+   }
+
+   if (cmd->state.lrz.gpu_dir_tracking && disable_for_next_rp) {
       tu6_write_lrz_reg(cmd, cs, A6XX_GRAS_LRZ_DEPTH_VIEW(
          .base_layer = 0b11111111111,
          .layer_count = 0b11111111111,
@@ -686,9 +707,6 @@ void
 tu_lrz_flush_valid_during_renderpass(struct tu_cmd_buffer *cmd,
                                      struct tu_cs *cs)
 {
-   if (cmd->state.lrz.disable_for_rp)
-      return;
-
    /* Even if state is valid, we cannot be sure that secondary
     * command buffer has the same sticky disable_write_for_rp.
     */
@@ -703,30 +721,6 @@ tu_lrz_flush_valid_during_renderpass(struct tu_cmd_buffer *cmd,
 }
 TU_GENX(tu_lrz_flush_valid_during_renderpass);
 
-/* Returns true if stencil may be written when depth test fails.
- * This could be either from stencil written on depth test fail itself,
- * or stencil written on the stencil test failure where subsequent depth
- * test may also fail.
- */
-static bool
-tu6_stencil_written_on_depth_fail(struct vk_stencil_test_face_state *face)
-{
-   switch (face->op.compare) {
-   case VK_COMPARE_OP_ALWAYS:
-      /* The stencil op always passes, no need to worry about failOp. */
-      return face->op.depth_fail != VK_STENCIL_OP_KEEP;
-   case VK_COMPARE_OP_NEVER:
-      /* The stencil op always fails, so failOp will always be used. */
-      return face->op.fail != VK_STENCIL_OP_KEEP;
-   default:
-      /* If the stencil test fails, depth may fail as well, so we can write
-       * stencil when the depth fails if failOp is not VK_STENCIL_OP_KEEP.
-       */
-      return face->op.fail != VK_STENCIL_OP_KEEP ||
-             face->op.depth_fail != VK_STENCIL_OP_KEEP;
-   }
-}
-
 template <chip CHIP>
 static struct A6XX_GRAS_LRZ_CNTL
 tu6_calculate_lrz_state(struct tu_cmd_buffer *cmd,
@@ -740,6 +734,9 @@ tu6_calculate_lrz_state(struct tu_cmd_buffer *cmd,
       cmd->vk.dynamic_graphics_state.ds.depth.compare_op;
 
    struct A6XX_GRAS_LRZ_CNTL gras_lrz_cntl = { 0 };
+
+   cmd->state.lrz.force_late_z =
+      fs->variant->writes_pos && !fs->variant->fs.early_fragment_tests;
 
    if (!cmd->state.lrz.valid) {
       return gras_lrz_cntl;
@@ -784,7 +781,43 @@ tu6_calculate_lrz_state(struct tu_cmd_buffer *cmd,
     * fragment tests.  We have to skip LRZ testing and updating, but as long as
     * the depth direction stayed the same we can continue with LRZ testing later.
     */
-   if (fs->fs.lrz.status & TU_LRZ_FORCE_DISABLE_LRZ) {
+   bool disable_lrz_due_to_fs = fs->fs.lrz.status & TU_LRZ_FORCE_DISABLE_LRZ;
+
+   /* Specifying depth write direction in shader may help us. E.g.
+    * If depth test is GREATER and FS specifies FRAG_DEPTH_LAYOUT_LESS
+    * it means that LRZ won't kill any fragment that shouldn't be killed,
+    * in other words, FS can only reduce the depth value which could
+    * make fragment to NOT pass with GREATER depth test. We just have to
+    * enable late Z test.
+    */
+   if (!disable_lrz_due_to_fs && fs->variant->writes_pos &&
+       !fs->variant->fs.early_fragment_tests &&
+       !cmd->device->instance->ignore_frag_depth_direction) {
+      if (fs->variant->fs.depth_layout == FRAG_DEPTH_LAYOUT_NONE ||
+          fs->variant->fs.depth_layout == FRAG_DEPTH_LAYOUT_ANY) {
+         disable_lrz_due_to_fs = true;
+      } else {
+         if (fs->variant->fs.depth_layout == FRAG_DEPTH_LAYOUT_GREATER) {
+            disable_lrz_due_to_fs =
+               depth_compare_op != VK_COMPARE_OP_LESS &&
+               depth_compare_op != VK_COMPARE_OP_LESS_OR_EQUAL;
+         } else if (fs->variant->fs.depth_layout == FRAG_DEPTH_LAYOUT_LESS) {
+            disable_lrz_due_to_fs =
+               depth_compare_op != VK_COMPARE_OP_GREATER &&
+               depth_compare_op != VK_COMPARE_OP_GREATER_OR_EQUAL;
+         }
+         /* FRAG_DEPTH_LAYOUT_UNCHANGED is always OK.*/
+      }
+
+      cmd->state.lrz.force_late_z = disable_lrz_due_to_fs;
+   } else if (fs->variant->writes_pos && !fs->variant->fs.early_fragment_tests) {
+      disable_lrz_due_to_fs = true;
+      cmd->state.lrz.force_late_z = true;
+   } else {
+      cmd->state.lrz.force_late_z = false;
+   }
+
+   if (disable_lrz_due_to_fs) {
       if (cmd->state.lrz.prev_direction != TU_LRZ_UNKNOWN || !cmd->state.lrz.gpu_dir_tracking) {
          perf_debug(cmd->device, "Skipping LRZ due to FS");
          temporary_disable_lrz = true;
@@ -878,21 +911,6 @@ tu6_calculate_lrz_state(struct tu_cmd_buffer *cmd,
       cmd->state.lrz.prev_direction = lrz_direction;
 
    if (cmd->vk.dynamic_graphics_state.ds.stencil.test_enable) {
-      /* Because the LRZ test runs first, failing the LRZ test may result in
-       * skipping the stencil test and subsequent stencil write. This is ok if
-       * stencil is only written when the depth test passes, because then the
-       * LRZ test will also pass, but if it may be written when the depth or
-       * stencil test fails then we need to disable the LRZ test for the draw.
-       */
-      bool writes_stencil_on_ds_fail =
-         cmd->state.stencil_front_write &&
-         tu6_stencil_written_on_depth_fail(
-            &cmd->vk.dynamic_graphics_state.ds.stencil.front);
-      writes_stencil_on_ds_fail |=
-         cmd->state.stencil_back_write &&
-         tu6_stencil_written_on_depth_fail(
-            &cmd->vk.dynamic_graphics_state.ds.stencil.back);
-
       bool frag_may_be_killed_by_stencil =
          !(cmd->vk.dynamic_graphics_state.ds.stencil.front.op.compare ==
               VK_COMPARE_OP_ALWAYS &&
@@ -908,7 +926,13 @@ tu6_calculate_lrz_state(struct tu_cmd_buffer *cmd,
          cmd->state.lrz.disable_write_for_rp = true;
       }
 
-      if (writes_stencil_on_ds_fail)
+      /* Because the LRZ test runs first, failing the LRZ test may result in
+       * skipping the stencil test and subsequent stencil write. This is ok if
+       * stencil is only written when the depth test passes, because then the
+       * LRZ test will also pass, but if it may be written when the depth or
+       * stencil test fails then we need to disable the LRZ test for the draw.
+       */
+      if (cmd->state.stencil_written_on_depth_fail)
          temporary_disable_lrz = true;
    }
 
@@ -934,9 +958,10 @@ tu6_calculate_lrz_state(struct tu_cmd_buffer *cmd,
     * fragments from draw A which should be visible due to draw B.
     */
    if (reads_dest && z_write_enable && cmd->device->instance->conservative_lrz) {
-      tu_lrz_write_disable_reason(cmd, "Depth write + blending");
-      cmd->state.lrz.disable_write_for_rp = true;
-      temporary_disable_lrz = true;
+      if (!cmd->state.lrz.disable_write_for_rp) {
+         tu_lrz_write_disable_reason(cmd, "Depth write + blending");
+         cmd->state.lrz.disable_write_for_rp = true;
+      }
    }
 
    if (disable_lrz)
@@ -951,6 +976,11 @@ tu6_calculate_lrz_state(struct tu_cmd_buffer *cmd,
    cmd->state.lrz.enabled = cmd->state.lrz.valid && gras_lrz_cntl.enable;
    if (!cmd->state.lrz.enabled)
       memset(&gras_lrz_cntl, 0, sizeof(gras_lrz_cntl));
+
+   if (cmd->state.lrz.enabled && gras_lrz_cntl.lrz_write &&
+       cmd->state.lrz.prev_direction != TU_LRZ_UNKNOWN) {
+      cmd->state.lrz.gpu_dir_set = true;
+   }
 
    return gras_lrz_cntl;
 }

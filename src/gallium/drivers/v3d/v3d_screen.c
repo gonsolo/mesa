@@ -218,16 +218,12 @@ v3d_init_compute_caps(struct v3d_screen *screen)
         /* GL_MAX_COMPUTE_SHARED_MEMORY_SIZE */
         caps->max_local_size = 32768;
 
-        caps->max_private_size =
-        caps->max_input_size = 4096;
-
         struct sysinfo si;
         sysinfo(&si);
         caps->max_global_size = si.totalram;
         caps->max_mem_alloc_size = MIN2(V3D_MAX_BUFFER_RANGE, si.totalram);
 
         caps->max_compute_units = 1;
-        caps->images_supported = true;
         caps->subgroup_sizes = 16;
 }
 

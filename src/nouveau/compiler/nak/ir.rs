@@ -10,6 +10,7 @@ use nak_bindings::*;
 pub use crate::builder::{Builder, InstrBuilder, SSABuilder, SSAInstrBuilder};
 use crate::legalize::LegalizeBuilder;
 use crate::sph::{OutputTopology, PixelImap};
+pub use crate::ssa_value::*;
 use compiler::as_slice::*;
 use compiler::cfg::CFG;
 use compiler::smallvec::SmallVec;
@@ -96,7 +97,7 @@ pub enum RegFile {
 const NUM_REG_FILES: usize = 7;
 
 impl RegFile {
-    /// Returns true if the register file is uniform across a wave
+    /// Returns true if the register file is uniform across a wave.
     pub fn is_uniform(&self) -> bool {
         match self {
             RegFile::GPR
@@ -108,7 +109,10 @@ impl RegFile {
         }
     }
 
-    pub fn to_uniform(&self) -> Option<RegFile> {
+    /// Returns the uniform form of this register file, if any.  For `GPR` and
+    /// `UGPR, this returns `UGPR` and for `Pred` and `UPred`, this returns
+    /// `UPred`.
+    pub fn to_uniform(self) -> Option<RegFile> {
         match self {
             RegFile::GPR | RegFile::UGPR => Some(RegFile::UGPR),
             RegFile::Pred | RegFile::UPred => Some(RegFile::UPred),
@@ -116,15 +120,16 @@ impl RegFile {
         }
     }
 
-    pub fn to_warp(&self) -> RegFile {
+    /// Returns warp-wide version of this register file.
+    pub fn to_warp(self) -> RegFile {
         match self {
             RegFile::GPR | RegFile::UGPR => RegFile::GPR,
             RegFile::Pred | RegFile::UPred => RegFile::Pred,
-            RegFile::Carry | RegFile::Bar | RegFile::Mem => *self,
+            RegFile::Carry | RegFile::Bar | RegFile::Mem => self,
         }
     }
 
-    /// Returns true if the register file is general-purpose
+    /// Returns true if the register file is GPR or UGPR.
     pub fn is_gpr(&self) -> bool {
         match self {
             RegFile::GPR | RegFile::UGPR => true,
@@ -136,7 +141,7 @@ impl RegFile {
         }
     }
 
-    /// Returns true if the register file is a predicate register file
+    /// Returns true if the register file is a predicate register file.
     pub fn is_predicate(&self) -> bool {
         match self {
             RegFile::GPR
@@ -148,7 +153,7 @@ impl RegFile {
         }
     }
 
-    fn fmt_prefix(&self) -> &'static str {
+    pub fn fmt_prefix(&self) -> &'static str {
         match self {
             RegFile::GPR => "r",
             RegFile::UGPR => "ur",
@@ -300,12 +305,23 @@ impl Iterator for RegFileSet {
     }
 }
 
+/// A container mapping register files to items.
+///
+/// This is used by several passes which need to replicate a data structure
+/// per-register-file.
 #[derive(Clone, Copy)]
 pub struct PerRegFile<T> {
     per_file: [T; NUM_REG_FILES],
 }
 
 impl<T> PerRegFile<T> {
+    /// Creates a new per-register-file container.
+    ///
+    /// Because this container assumes it always has an item for each register
+    /// file, it takes a callback which maps register files to initial values
+    /// to avoid adding a bunch of `Option<T>` or requiring `T` to implement
+    /// `Default`.  If `T` does implement `Default`, then so does
+    /// `PerRefFile<T>`.
     pub fn new_with<F: Fn(RegFile) -> T>(f: F) -> Self {
         PerRegFile {
             per_file: [
@@ -320,10 +336,12 @@ impl<T> PerRegFile<T> {
         }
     }
 
+    /// Iterates over the values in this container.
     pub fn values(&self) -> slice::Iter<T> {
         self.per_file.iter()
     }
 
+    /// Iterates over the mutable values in this container.
     pub fn values_mut(&mut self) -> slice::IterMut<T> {
         self.per_file.iter_mut()
     }
@@ -351,256 +369,8 @@ impl<T> IndexMut<RegFile> for PerRegFile<T> {
     }
 }
 
-/// An SSA value
-///
-/// Each SSA in NAK represents a single 32-bit or 1-bit (if a predicate) value
-/// which must either be spilled to memory or allocated space in the specified
-/// register file.  Whenever more data is required such as a 64-bit memory
-/// address, double-precision float, or a vec4 texture result, multiple SSA
-/// values are used.
-///
-/// Each SSA value logically contains two things: an index and a register file.
-/// It is required that each index refers to a unique SSA value, regardless of
-/// register file.  This way the index can be used to index tightly-packed data
-/// structures such as bitsets without having to determine separate ranges for
-/// each register file.
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
-pub struct SSAValue {
-    packed: u32,
-}
-
-impl SSAValue {
-    /// A special SSA value which is always invalid
-    pub const NONE: Self = SSAValue { packed: 0 };
-
-    /// Returns an SSA value with the given register file and index
-    pub fn new(file: RegFile, idx: u32) -> SSAValue {
-        assert!(idx > 0 && idx < (1 << 29) - 2);
-        let mut packed = idx;
-        assert!(u8::from(file) < 8);
-        packed |= u32::from(u8::from(file)) << 29;
-        SSAValue { packed: packed }
-    }
-
-    /// Returns the index of this SSA value
-    pub fn idx(&self) -> u32 {
-        self.packed & 0x1fffffff
-    }
-
-    /// Returns true if this SSA value is equal to SSAValue::NONE
-    pub fn is_none(&self) -> bool {
-        self.packed == 0
-    }
-
-    fn fmt_plain(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", self.file().fmt_prefix(), self.idx())
-    }
-}
-
-impl HasRegFile for SSAValue {
-    /// Returns the register file of this SSA value
-    fn file(&self) -> RegFile {
-        RegFile::try_from(self.packed >> 29).unwrap()
-    }
-}
-
-impl fmt::Display for SSAValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "%")?;
-        self.fmt_plain(f)
-    }
-}
-
-/// A reference to one or more SSA values
-///
-/// Because each SSA value represents a single 1 or 32-bit scalar, we need a way
-/// to reference multiple SSA values for instructions which read or write
-/// multiple registers in the same source.  When the register allocator runs,
-/// all the SSA values in a given SSA ref will be placed in consecutive
-/// registers, with the base register aligned to the number of values, aligned
-/// to the next power of two.
-///
-/// An SSA reference can reference between 1 and 4 SSA values.  It dereferences
-/// to a slice for easy access to individual SSA values.  The structure is
-/// designed so that is always 16B, regardless of how many SSA values are
-/// referenced so it's easy and fairly cheap to copy around and embed in other
-/// structures.
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
-pub struct SSARef {
-    v: [SSAValue; 4],
-}
-
-impl SSARef {
-    /// Returns a new SSA reference
-    #[inline]
-    fn new(comps: &[SSAValue]) -> SSARef {
-        assert!(comps.len() > 0 && comps.len() <= 4);
-        let mut r = SSARef {
-            v: [SSAValue::NONE; 4],
-        };
-        for i in 0..comps.len() {
-            r.v[i] = comps[i];
-        }
-        if comps.len() < 4 {
-            r.v[3].packed = (comps.len() as u32).wrapping_neg();
-        }
-        r
-    }
-
-    /// Returns the number of components in this SSA reference
-    pub fn comps(&self) -> u8 {
-        if self.v[3].packed >= u32::MAX - 2 {
-            self.v[3].packed.wrapping_neg() as u8
-        } else {
-            4
-        }
-    }
-
-    pub fn file(&self) -> Option<RegFile> {
-        let comps = usize::from(self.comps());
-        let file = self.v[0].file();
-        for i in 1..comps {
-            if self.v[i].file() != file {
-                return None;
-            }
-        }
-        Some(file)
-    }
-
-    pub fn is_uniform(&self) -> bool {
-        for ssa in &self[..] {
-            if !ssa.is_uniform() {
-                return false;
-            }
-        }
-        true
-    }
-
-    pub fn is_gpr(&self) -> bool {
-        for ssa in &self[..] {
-            if !ssa.is_gpr() {
-                return false;
-            }
-        }
-        true
-    }
-
-    pub fn is_predicate(&self) -> bool {
-        if self.v[0].is_predicate() {
-            true
-        } else {
-            for ssa in &self[..] {
-                debug_assert!(!ssa.is_predicate());
-            }
-            false
-        }
-    }
-}
-
-impl Deref for SSARef {
-    type Target = [SSAValue];
-
-    fn deref(&self) -> &[SSAValue] {
-        let comps = usize::from(self.comps());
-        &self.v[..comps]
-    }
-}
-
-impl DerefMut for SSARef {
-    fn deref_mut(&mut self) -> &mut [SSAValue] {
-        let comps = usize::from(self.comps());
-        &mut self.v[..comps]
-    }
-}
-
-impl TryFrom<&[SSAValue]> for SSARef {
-    type Error = &'static str;
-
-    fn try_from(comps: &[SSAValue]) -> Result<Self, Self::Error> {
-        if comps.len() == 0 {
-            Err("Empty vector")
-        } else if comps.len() > 4 {
-            Err("Too many vector components")
-        } else {
-            Ok(SSARef::new(comps))
-        }
-    }
-}
-
-impl TryFrom<Vec<SSAValue>> for SSARef {
-    type Error = &'static str;
-
-    fn try_from(comps: Vec<SSAValue>) -> Result<Self, Self::Error> {
-        SSARef::try_from(&comps[..])
-    }
-}
-
-macro_rules! impl_ssa_ref_from_arr {
-    ($n: expr) => {
-        impl From<[SSAValue; $n]> for SSARef {
-            fn from(comps: [SSAValue; $n]) -> Self {
-                SSARef::new(&comps[..])
-            }
-        }
-    };
-}
-impl_ssa_ref_from_arr!(1);
-impl_ssa_ref_from_arr!(2);
-impl_ssa_ref_from_arr!(3);
-impl_ssa_ref_from_arr!(4);
-
-impl From<SSAValue> for SSARef {
-    fn from(val: SSAValue) -> Self {
-        [val].into()
-    }
-}
-
-impl fmt::Display for SSARef {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.comps() == 1 {
-            write!(f, "{}", self[0])
-        } else {
-            write!(f, "{{")?;
-            for (i, v) in self.iter().enumerate() {
-                if i != 0 {
-                    write!(f, " ")?;
-                }
-                write!(f, "{}", v)?;
-            }
-            write!(f, "}}")
-        }
-    }
-}
-
-pub struct SSAValueAllocator {
-    count: u32,
-}
-
-impl SSAValueAllocator {
-    pub fn new() -> SSAValueAllocator {
-        SSAValueAllocator { count: 0 }
-    }
-
-    #[allow(dead_code)]
-    pub fn max_idx(&self) -> u32 {
-        self.count
-    }
-
-    pub fn alloc(&mut self, file: RegFile) -> SSAValue {
-        self.count += 1;
-        SSAValue::new(file, self.count)
-    }
-
-    pub fn alloc_vec(&mut self, file: RegFile, comps: u8) -> SSARef {
-        assert!(comps >= 1 && comps <= 4);
-        let mut vec = [SSAValue::NONE; 4];
-        for c in 0..comps {
-            vec[usize::from(c)] = self.alloc(file);
-        }
-        vec[0..usize::from(comps)].try_into().unwrap()
-    }
-}
-
+/// A reference to a contiguous range of registers in a particular register
+/// file.
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub struct RegRef {
     packed: u32,
@@ -609,6 +379,11 @@ pub struct RegRef {
 impl RegRef {
     pub const MAX_IDX: u32 = (1 << 26) - 1;
 
+    /// Creates a new register reference.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if `base_idx > RegRef::MAX_IDX` or if `comps > 8`.
     pub fn new(file: RegFile, base_idx: u32, comps: u8) -> RegRef {
         assert!(base_idx <= Self::MAX_IDX);
         let mut packed = base_idx;
@@ -619,20 +394,24 @@ impl RegRef {
         RegRef { packed: packed }
     }
 
+    /// Returns the index of the first register referenced.
     pub fn base_idx(&self) -> u32 {
         self.packed & 0x03ffffff
     }
 
+    /// Returns the range of register indices referenced.
     pub fn idx_range(&self) -> Range<u32> {
         let start = self.base_idx();
         let end = start + u32::from(self.comps());
         start..end
     }
 
+    /// Returns the number of registers referenced.
     pub fn comps(&self) -> u8 {
         (((self.packed >> 26) & 0x7) + 1).try_into().unwrap()
     }
 
+    /// Returns a reference to the single register at `base_idx() + c`.
     pub fn comp(&self, c: u8) -> RegRef {
         assert!(c < self.comps());
         RegRef::new(self.file(), self.base_idx() + u32::from(c), 1)
@@ -655,7 +434,7 @@ impl fmt::Display for RegRef {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum Dst {
     None,
     SSA(SSARef),
@@ -678,6 +457,14 @@ impl Dst {
         match self {
             Dst::SSA(r) => Some(r),
             _ => None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn to_ssa(self) -> SSARef {
+        match self {
+            Dst::SSA(r) => r,
+            _ => panic!("Expected ssa"),
         }
     }
 
@@ -710,6 +497,15 @@ impl<T: Into<SSARef>> From<T> for Dst {
     }
 }
 
+impl From<Option<SSAValue>> for Dst {
+    fn from(ssa: Option<SSAValue>) -> Dst {
+        match ssa {
+            Some(ssa) => Dst::SSA(ssa.into()),
+            None => Dst::None,
+        }
+    }
+}
+
 impl fmt::Display for Dst {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -721,7 +517,7 @@ impl fmt::Display for Dst {
     }
 }
 
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 pub enum CBuf {
     Binding(u8),
 
@@ -742,7 +538,7 @@ impl fmt::Display for CBuf {
     }
 }
 
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 pub struct CBufRef {
     pub buf: CBuf,
     pub offset: u16,
@@ -763,7 +559,7 @@ impl fmt::Display for CBufRef {
     }
 }
 
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 pub enum SrcRef {
     Zero,
     True,
@@ -787,10 +583,9 @@ impl SrcRef {
 
     pub fn is_bindless_cbuf(&self) -> bool {
         match self {
-            SrcRef::CBuf(cbuf) => match cbuf.buf {
-                CBuf::BindlessSSA(_) | CBuf::BindlessUGPR(_) => true,
-                _ => false,
-            },
+            SrcRef::CBuf(cbuf) => {
+                matches!(cbuf.buf, CBuf::BindlessSSA(_) | CBuf::BindlessUGPR(_))
+            }
             _ => false,
         }
     }
@@ -832,6 +627,13 @@ impl SrcRef {
         match self {
             SrcRef::SSA(r) => Some(r),
             _ => None,
+        }
+    }
+
+    pub fn to_ssa(self) -> SSARef {
+        match self {
+            SrcRef::SSA(r) => r,
+            _ => panic!(),
         }
     }
 
@@ -1074,7 +876,7 @@ impl fmt::Display for SrcSwizzle {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Src {
     pub src_ref: SrcRef,
     pub src_mod: SrcMod,
@@ -1082,9 +884,11 @@ pub struct Src {
 }
 
 impl Src {
-    pub fn new_zero() -> Src {
-        SrcRef::Zero.into()
-    }
+    pub const ZERO: Src = Src {
+        src_ref: SrcRef::Zero,
+        src_mod: SrcMod::None,
+        src_swizzle: SrcSwizzle::None,
+    };
 
     pub fn new_imm_u32(u: u32) -> Src {
         u.into()
@@ -1094,7 +898,11 @@ impl Src {
         b.into()
     }
 
-    pub fn fabs(&self) -> Src {
+    pub fn is_unmodified(&self) -> bool {
+        self.src_mod.is_none() && self.src_swizzle.is_none()
+    }
+
+    pub fn fabs(self) -> Src {
         Src {
             src_ref: self.src_ref,
             src_mod: self.src_mod.fabs(),
@@ -1102,7 +910,7 @@ impl Src {
         }
     }
 
-    pub fn fneg(&self) -> Src {
+    pub fn fneg(self) -> Src {
         Src {
             src_ref: self.src_ref,
             src_mod: self.src_mod.fneg(),
@@ -1110,7 +918,7 @@ impl Src {
         }
     }
 
-    pub fn ineg(&self) -> Src {
+    pub fn ineg(self) -> Src {
         Src {
             src_ref: self.src_ref,
             src_mod: self.src_mod.ineg(),
@@ -1118,7 +926,7 @@ impl Src {
         }
     }
 
-    pub fn bnot(&self) -> Src {
+    pub fn bnot(self) -> Src {
         Src {
             src_ref: self.src_ref,
             src_mod: self.src_mod.bnot(),
@@ -1126,13 +934,20 @@ impl Src {
         }
     }
 
-    pub fn fold_imm(&self, src_type: SrcType) -> Src {
-        let SrcRef::Imm32(mut u) = self.src_ref else {
-            return *self;
+    pub fn modify(mut self, src_mod: SrcMod) -> Src {
+        self.src_mod = self.src_mod.modify(src_mod);
+        self
+    }
+
+    pub fn as_u32(&self, src_type: SrcType) -> Option<u32> {
+        let u = match &self.src_ref {
+            SrcRef::Zero => 0,
+            SrcRef::Imm32(u) => *u,
+            _ => return None,
         };
 
-        if self.src_mod.is_none() && self.src_swizzle.is_none() {
-            return *self;
+        if self.is_unmodified() {
+            return Some(u);
         }
 
         assert!(src_type == SrcType::F16v2 || self.src_swizzle.is_none());
@@ -1141,10 +956,10 @@ impl Src {
         // trivially folded.  In fact, -imm may not be representable as a 32-bit
         // immediate at all.
         if src_type == SrcType::I32 {
-            return *self;
+            return None;
         }
 
-        u = match src_type {
+        Some(match src_type {
             SrcType::F16 => {
                 let low = u & 0xFFFF;
 
@@ -1189,28 +1004,30 @@ impl Src {
                 _ => panic!("Not a bitwise source modifier"),
             },
             _ => {
-                assert!(self.src_mod.is_none());
+                assert!(self.is_unmodified());
                 u
             }
-        };
-
-        Src {
-            src_mod: SrcMod::None,
-            src_ref: u.into(),
-            src_swizzle: SrcSwizzle::None,
-        }
+        })
     }
 
     pub fn as_ssa(&self) -> Option<&SSARef> {
-        if self.src_mod.is_none() {
+        if self.is_unmodified() {
             self.src_ref.as_ssa()
         } else {
             None
         }
     }
 
+    pub fn to_ssa(self) -> SSARef {
+        if self.is_unmodified() {
+            self.src_ref.to_ssa()
+        } else {
+            panic!("Did not expect src_mod");
+        }
+    }
+
     pub fn as_bool(&self) -> Option<bool> {
-        match self.src_ref {
+        match &self.src_ref {
             SrcRef::True => Some(!self.src_mod.is_bnot()),
             SrcRef::False => Some(self.src_mod.is_bnot()),
             SrcRef::SSA(vec) => {
@@ -1225,18 +1042,10 @@ impl Src {
         }
     }
 
-    pub fn as_u32(&self) -> Option<u32> {
-        if self.src_mod.is_none() {
-            self.src_ref.as_u32()
-        } else {
-            None
-        }
-    }
-
     pub fn as_imm_not_i20(&self) -> Option<u32> {
         match self.src_ref {
             SrcRef::Imm32(i) => {
-                assert!(self.src_mod.is_none());
+                assert!(self.is_unmodified());
                 let top = i & 0xfff80000;
                 if top == 0 || top == 0xfff80000 {
                     None
@@ -1251,7 +1060,7 @@ impl Src {
     pub fn as_imm_not_f20(&self) -> Option<u32> {
         match self.src_ref {
             SrcRef::Imm32(i) => {
-                assert!(self.src_mod.is_none());
+                assert!(self.is_unmodified());
                 if (i & 0xfff) == 0 {
                     None
                 } else {
@@ -1271,7 +1080,7 @@ impl Src {
     }
 
     pub fn is_uniform(&self) -> bool {
-        match self.src_ref {
+        match &self.src_ref {
             SrcRef::Zero
             | SrcRef::True
             | SrcRef::False
@@ -1304,15 +1113,17 @@ impl Src {
     }
 
     pub fn is_nonzero(&self) -> bool {
-        matches!(self.as_u32(), Some(x) if x != 0)
+        assert!(self.is_unmodified());
+        matches!(self.src_ref, SrcRef::Imm32(x) if x != 0)
     }
 
     pub fn is_fneg_zero(&self, src_type: SrcType) -> bool {
-        match self.fold_imm(src_type).src_ref {
-            SrcRef::Zero => self.src_mod == SrcMod::FNeg,
-            SrcRef::Imm32(0x00008000) => src_type == SrcType::F16,
-            SrcRef::Imm32(0x80000000) => src_type == SrcType::F32,
-            SrcRef::Imm32(0x80008000) => src_type == SrcType::F16v2,
+        match self.as_u32(src_type) {
+            Some(0x00008000) => src_type == SrcType::F16,
+            Some(0x80000000) => {
+                src_type == SrcType::F32 || src_type == SrcType::F64
+            }
+            Some(0x80008000) => src_type == SrcType::F16v2,
             _ => false,
         }
     }
@@ -1321,14 +1132,14 @@ impl Src {
     pub fn supports_type(&self, src_type: &SrcType) -> bool {
         match src_type {
             SrcType::SSA => {
-                if !self.src_mod.is_none() {
+                if !self.is_unmodified() {
                     return false;
                 }
 
                 matches!(self.src_ref, SrcRef::SSA(_) | SrcRef::Reg(_))
             }
             SrcType::GPR => {
-                if !self.src_mod.is_none() {
+                if !self.is_unmodified() {
                     return false;
                 }
 
@@ -1337,7 +1148,7 @@ impl Src {
                     SrcRef::Zero | SrcRef::SSA(_) | SrcRef::Reg(_)
                 )
             }
-            SrcType::ALU => self.src_mod.is_none() && self.src_ref.is_alu(),
+            SrcType::ALU => self.is_unmodified() && self.src_ref.is_alu(),
             SrcType::F16 | SrcType::F32 | SrcType::F64 | SrcType::F16v2 => {
                 match self.src_mod {
                     SrcMod::None
@@ -1373,8 +1184,8 @@ impl Src {
 
                 self.src_ref.is_predicate()
             }
-            SrcType::Carry => self.src_mod.is_none() && self.src_ref.is_carry(),
-            SrcType::Bar => self.src_mod.is_none() && self.src_ref.is_barrier(),
+            SrcType::Carry => self.is_unmodified() && self.src_ref.is_carry(),
+            SrcType::Bar => self.is_unmodified() && self.src_ref.is_barrier(),
         }
     }
 }
@@ -1457,7 +1268,7 @@ fn all_dsts_uniform(dsts: &[Dst]) -> bool {
             Dst::Reg(r) => r.is_uniform(),
             Dst::SSA(r) => r.file().unwrap().is_uniform(),
         };
-        assert!(uniform == None || uniform == Some(dst_uniform));
+        assert!(uniform.is_none() || uniform == Some(dst_uniform));
         uniform = Some(dst_uniform);
     }
     uniform == Some(true)
@@ -2161,18 +1972,18 @@ impl fmt::Display for ChannelMask {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub enum Tld4OffsetMode {
+pub enum TexOffsetMode {
     None,
     AddOffI,
-    PerPx,
+    PerPx, // tld4 only
 }
 
-impl fmt::Display for Tld4OffsetMode {
+impl fmt::Display for TexOffsetMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Tld4OffsetMode::None => write!(f, "no_off"),
-            Tld4OffsetMode::AddOffI => write!(f, "aoffi"),
-            Tld4OffsetMode::PerPx => write!(f, "ptp"),
+            TexOffsetMode::None => write!(f, ""),
+            TexOffsetMode::AddOffI => write!(f, ".aoffi"),
+            TexOffsetMode::PerPx => write!(f, ".ptp"),
         }
     }
 }
@@ -3496,7 +3307,7 @@ pub struct OpIAbs {
 impl Foldable for OpIAbs {
     fn fold(&self, _sm: &dyn ShaderModel, f: &mut OpFoldData<'_>) {
         let src = f.get_u32_src(self, &self.src);
-        let dst = (src as i32).abs() as u32;
+        let dst = (src as i32).unsigned_abs();
         f.set_u32_dst(self, &self.dst, dst);
     }
 }
@@ -3972,7 +3783,7 @@ impl Foldable for OpLea {
         let (dst, o) = u32::overflowing_add(shift_result, b);
         overflow |= o;
 
-        f.set_u32_dst(self, &self.dst, dst as u32);
+        f.set_u32_dst(self, &self.dst, dst);
         f.set_pred_dst(self, &self.overflow, overflow);
     }
 }
@@ -4051,7 +3862,7 @@ impl Foldable for OpLeaX {
         let (dst, o) = u32::overflowing_add(dst, if carry { 1 } else { 0 });
         overflow |= o;
 
-        f.set_u32_dst(self, &self.dst, dst as u32);
+        f.set_u32_dst(self, &self.dst, dst);
         f.set_pred_dst(self, &self.overflow, overflow);
     }
 }
@@ -4181,6 +3992,26 @@ pub struct OpShf {
     pub dst_high: bool,
 }
 
+fn reduce_shift_imm(shift: &mut Src, wrap: bool, bits: u32) {
+    debug_assert!(shift.src_mod.is_none());
+    if let SrcRef::Imm32(shift) = &mut shift.src_ref {
+        if wrap {
+            *shift = *shift & (bits - 1);
+        } else {
+            *shift = std::cmp::min(*shift, bits)
+        }
+    }
+}
+
+impl OpShf {
+    /// Reduces the shift immediate, if any.  Out-of-range shifts are either
+    /// clamped to the maximum or wrapped as needed.
+    pub fn reduce_shift_imm(&mut self) {
+        let bits = self.data_type.bits().try_into().unwrap();
+        reduce_shift_imm(&mut self.shift, self.wrap, bits);
+    }
+}
+
 impl Foldable for OpShf {
     fn fold(&self, sm: &dyn ShaderModel, f: &mut OpFoldData<'_>) {
         let low = f.get_u32_src(self, &self.low);
@@ -4200,21 +4031,22 @@ impl Foldable for OpShf {
             && self.data_type != IntType::I64
         {
             if self.right {
-                x.checked_shr(shift).unwrap_or(0) as u64
+                x.checked_shr(shift).unwrap_or(0)
             } else {
-                x.checked_shl(shift).unwrap_or(0) as u64
+                x.checked_shl(shift).unwrap_or(0)
             }
         } else if self.data_type.is_signed() {
             if self.right {
-                (x as i64).checked_shr(shift).unwrap_or(0) as u64
+                let x = x as i64;
+                x.checked_shr(shift).unwrap_or(x >> 63) as u64
             } else {
-                (x as i64).checked_shl(shift).unwrap_or(0) as u64
+                x.checked_shl(shift).unwrap_or(0)
             }
         } else {
             if self.right {
-                x.checked_shr(shift).unwrap_or(0) as u64
+                x.checked_shr(shift).unwrap_or(0)
             } else {
-                x.checked_shl(shift).unwrap_or(0) as u64
+                x.checked_shl(shift).unwrap_or(0)
             }
         };
 
@@ -4250,7 +4082,7 @@ impl_display_for_op!(OpShf);
 
 /// Only used on SM50
 #[repr(C)]
-#[derive(SrcsAsSlice, DstsAsSlice)]
+#[derive(Clone, SrcsAsSlice, DstsAsSlice)]
 pub struct OpShl {
     #[dst_type(GPR)]
     pub dst: Dst,
@@ -4264,6 +4096,14 @@ pub struct OpShl {
     pub wrap: bool,
 }
 
+impl OpShl {
+    /// Reduces the shift immediate, if any.  Out-of-range shifts are either
+    /// clamped to the maximum or wrapped as needed.
+    pub fn reduce_shift_imm(&mut self) {
+        reduce_shift_imm(&mut self.shift, self.wrap, 32);
+    }
+}
+
 impl DisplayOp for OpShl {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "shl")?;
@@ -4274,9 +4114,24 @@ impl DisplayOp for OpShl {
     }
 }
 
+impl Foldable for OpShl {
+    fn fold(&self, _sm: &dyn ShaderModel, f: &mut OpFoldData<'_>) {
+        let x = f.get_u32_src(self, &self.src);
+        let shift = f.get_u32_src(self, &self.shift);
+
+        let shift = if self.wrap {
+            shift & 31
+        } else {
+            min(shift, 32)
+        };
+        let dst = x.checked_shl(shift).unwrap_or(0);
+        f.set_u32_dst(self, &self.dst, dst);
+    }
+}
+
 /// Only used on SM50
 #[repr(C)]
-#[derive(SrcsAsSlice, DstsAsSlice)]
+#[derive(Clone, SrcsAsSlice, DstsAsSlice)]
 pub struct OpShr {
     #[dst_type(GPR)]
     pub dst: Dst,
@@ -4301,6 +4156,34 @@ impl DisplayOp for OpShr {
             write!(f, ".u32")?;
         }
         write!(f, " {} {}", self.src, self.shift)
+    }
+}
+
+impl OpShr {
+    /// Reduces the shift immediate, if any.  Out-of-range shifts are either
+    /// clamped to the maximum or wrapped as needed.
+    pub fn reduce_shift_imm(&mut self) {
+        reduce_shift_imm(&mut self.shift, self.wrap, 32);
+    }
+}
+
+impl Foldable for OpShr {
+    fn fold(&self, _sm: &dyn ShaderModel, f: &mut OpFoldData<'_>) {
+        let x = f.get_u32_src(self, &self.src);
+        let shift = f.get_u32_src(self, &self.shift);
+
+        let shift = if self.wrap {
+            shift & 31
+        } else {
+            min(shift, 32)
+        };
+        let dst = if self.signed {
+            let x = x as i32;
+            x.checked_shr(shift).unwrap_or(x >> 31) as u32
+        } else {
+            x.checked_shr(shift).unwrap_or(0)
+        };
+        f.set_u32_dst(self, &self.dst, dst);
     }
 }
 
@@ -4730,25 +4613,28 @@ impl OpPrmt {
             return None;
         }
 
-        if let Some(sel) = self.sel.as_u32() {
+        self.sel.as_u32(SrcType::ALU).map(|sel| {
             // The top 16 bits are ignored
-            Some(PrmtSel(sel as u16))
-        } else {
-            None
+            PrmtSel(sel as u16)
+        })
+    }
+
+    /// Reduces the sel immediate, if any.
+    pub fn reduce_sel_imm(&mut self) {
+        assert!(self.sel.src_mod.is_none());
+        if let SrcRef::Imm32(sel) = &mut self.sel.src_ref {
+            // Only the bottom 16 bits matter anyway
+            *sel &= 0xffff;
         }
     }
 
     pub fn as_u32(&self) -> Option<u32> {
-        let Some(sel) = self.get_sel() else {
-            return None;
-        };
+        let sel = self.get_sel()?;
 
         let mut imm = 0_u32;
         for b in 0..4 {
             let sel_byte = sel.get(b);
-            let Some(src_u32) = self.srcs[sel_byte.src()].as_u32() else {
-                return None;
-            };
+            let src_u32 = self.srcs[sel_byte.src()].as_u32(SrcType::ALU)?;
 
             let sb = sel_byte.fold_u32(src_u32);
             imm |= u32::from(sb) << (b * 8);
@@ -4830,6 +4716,24 @@ pub struct OpShfl {
     pub c: Src,
 
     pub op: ShflOp,
+}
+
+impl OpShfl {
+    /// Reduces the lane and c immediates, if any.  The hardware only uses
+    /// some of the bits of `lane` and `c` and ignores the rest.  This method
+    /// masks off the unused bits and ensures that any immediate values fit
+    /// in the limited encoding space in the instruction.
+    pub fn reduce_lane_c_imm(&mut self) {
+        debug_assert!(self.lane.src_mod.is_none());
+        if let SrcRef::Imm32(lane) = &mut self.lane.src_ref {
+            *lane &= 0x1f;
+        }
+
+        debug_assert!(self.c.src_mod.is_none());
+        if let SrcRef::Imm32(c) = &mut self.c.src_ref {
+            *c &= 0x1f1f;
+        }
+    }
 }
 
 impl DisplayOp for OpShfl {
@@ -4963,7 +4867,7 @@ pub struct OpTex {
     pub dim: TexDim,
     pub lod_mode: TexLodMode,
     pub z_cmpr: bool,
-    pub offset: bool,
+    pub offset_mode: TexOffsetMode,
     pub mem_eviction_priority: MemEvictionPriority,
     pub nodep: bool,
     pub channel_mask: ChannelMask,
@@ -4975,9 +4879,7 @@ impl DisplayOp for OpTex {
         if self.lod_mode != TexLodMode::Auto {
             write!(f, ".{}", self.lod_mode)?;
         }
-        if self.offset {
-            write!(f, ".aoffi")?;
-        }
+        write!(f, "{}", self.offset_mode)?;
         if self.z_cmpr {
             write!(f, ".dc")?;
         }
@@ -5005,7 +4907,7 @@ pub struct OpTld {
     pub dim: TexDim,
     pub is_ms: bool,
     pub lod_mode: TexLodMode,
-    pub offset: bool,
+    pub offset_mode: TexOffsetMode,
     pub mem_eviction_priority: MemEvictionPriority,
     pub nodep: bool,
     pub channel_mask: ChannelMask,
@@ -5017,9 +4919,7 @@ impl DisplayOp for OpTld {
         if self.lod_mode != TexLodMode::Auto {
             write!(f, ".{}", self.lod_mode)?;
         }
-        if self.offset {
-            write!(f, ".aoffi")?;
-        }
+        write!(f, "{}", self.offset_mode)?;
         if self.is_ms {
             write!(f, ".ms")?;
         }
@@ -5046,7 +4946,7 @@ pub struct OpTld4 {
 
     pub dim: TexDim,
     pub comp: u8,
-    pub offset_mode: Tld4OffsetMode,
+    pub offset_mode: TexOffsetMode,
     pub z_cmpr: bool,
     pub mem_eviction_priority: MemEvictionPriority,
     pub nodep: bool,
@@ -5055,10 +4955,7 @@ pub struct OpTld4 {
 
 impl DisplayOp for OpTld4 {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "tld4.g{}", self.dim)?;
-        if self.offset_mode != Tld4OffsetMode::None {
-            write!(f, ".{}", self.offset_mode)?;
-        }
+        write!(f, "tld4.g{}{}", self.dim, self.offset_mode)?;
         if self.z_cmpr {
             write!(f, ".dc")?;
         }
@@ -5111,7 +5008,7 @@ pub struct OpTxd {
     pub srcs: [Src; 2],
 
     pub dim: TexDim,
-    pub offset: bool,
+    pub offset_mode: TexOffsetMode,
     pub mem_eviction_priority: MemEvictionPriority,
     pub nodep: bool,
     pub channel_mask: ChannelMask,
@@ -5119,11 +5016,11 @@ pub struct OpTxd {
 
 impl DisplayOp for OpTxd {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "txd{}", self.dim)?;
-        if self.offset {
-            write!(f, ".aoffi")?;
-        }
-        write!(f, "{}", self.mem_eviction_priority)?;
+        write!(
+            f,
+            "txd{}{}{}",
+            self.dim, self.offset_mode, self.mem_eviction_priority
+        )?;
         if self.nodep {
             write!(f, ".nodep")?;
         }
@@ -5330,7 +5227,7 @@ impl fmt::Display for LdcMode {
 }
 
 #[repr(C)]
-#[derive(SrcsAsSlice, DstsAsSlice)]
+#[derive(Clone, SrcsAsSlice, DstsAsSlice)]
 pub struct OpLdc {
     pub dst: Dst,
 
@@ -5346,7 +5243,7 @@ pub struct OpLdc {
 
 impl DisplayOp for OpLdc {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let SrcRef::CBuf(cb) = self.cb.src_ref else {
+        let SrcRef::CBuf(cb) = &self.cb.src_ref else {
             panic!("Not a cbuf");
         };
         write!(f, "ldc{}{} {}[", self.mode, self.mem_type, cb.buf)?;
@@ -5961,6 +5858,41 @@ impl DisplayOp for OpIsberd {
 }
 impl_display_for_op!(OpIsberd);
 
+/// Vertex Index Load
+/// (Only available in Kepler)
+///
+/// Takes as input the vertex index and loads the vertex address in
+/// attribute space.
+#[repr(C)]
+#[derive(SrcsAsSlice, DstsAsSlice)]
+pub struct OpViLd {
+    #[dst_type(GPR)]
+    pub dst: Dst,
+
+    #[src_type(SSA)]
+    pub idx: Src,
+
+    pub off: i8,
+}
+
+impl DisplayOp for OpViLd {
+    fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "vild v[")?;
+
+        if !self.idx.is_zero() {
+            write!(f, "{}", self.idx)?;
+            if self.off != 0 {
+                write!(f, "{:+}", self.off)?;
+            }
+        } else {
+            write!(f, "{}", self.off)?;
+        }
+
+        write!(f, "]")
+    }
+}
+impl_display_for_op!(OpViLd);
+
 #[repr(C)]
 #[derive(SrcsAsSlice, DstsAsSlice)]
 pub struct OpKill {}
@@ -6203,26 +6135,88 @@ impl<A: Clone, B: Clone> VecPair<A, B> {
     }
 }
 
-pub struct PhiAllocator {
-    count: u32,
-}
+mod phi {
+    #[allow(unused_imports)]
+    use crate::ir::{OpPhiDsts, OpPhiSrcs};
+    use compiler::bitset::IntoBitIndex;
+    use std::fmt;
 
-impl PhiAllocator {
-    pub fn new() -> PhiAllocator {
-        PhiAllocator { count: 0 }
+    /// A phi node
+    ///
+    /// Phis in NAK are implemented differently from NIR and similar IRs.
+    /// Instead of having a single phi instruction which lives in the successor
+    /// block, each `Phi` represents a single merged 32-bit (or 1-bit for
+    /// predicates) value and we have separate [`OpPhiSrcs`] and [`OpPhiDsts`]
+    /// instructions which map phis to sources and destinations.
+    ///
+    /// One of the problems fundamental to phis is that they really live on the
+    /// edges between blocks.  Regardless of where the phi instruction lives in
+    /// the IR data structures, its sources are consumed at the end of the
+    /// predecessor block and its destinations are defined at the start of the
+    /// successor block and all phi sources and destinations get consumed and go
+    /// live simultaneously for any given CFG edge.  For a phi that participates
+    /// in a back-edge, this means that the source of the phi may be consumed
+    /// after (in block order) the destination goes live.
+    ///
+    /// In NIR, this has caused no end of headaches.  Most passes which need to
+    /// process phis ignore phis when first processing a block and then have a
+    /// special case at the end of each block which walks the successors and
+    /// processes the successor's phis, looking only at the phi sources whose
+    /// predecessor matches the block.  This is clunky and often forgotten by
+    /// optimization and lowering pass authors.  It's also easy to get missed by
+    /// testing since it only really breaks if you have a phi which participates
+    /// in a back-edge so it often gets found later when something breaks in the
+    /// wild.
+    ///
+    /// To work around this (and also make things a little more Rust-friendly),
+    /// NAK places the instruction which consumes phi sources at the end of the
+    /// predecessor block and the instruction which defines phi destinations at
+    /// the start of the successor block.  This structurally eliminates the
+    /// problem that has plagued NIR for years.  The cost to this solution is
+    /// that we have to create maps from phis to/from SSA values whenever we
+    /// want to optimize the phis themselves.  However, this affects few enough
+    /// passes that the benefits to the rest of the IR are worth the trade-off,
+    /// at least for a back-end compiler.
+    #[derive(Clone, Copy, Eq, Hash, PartialEq)]
+    pub struct Phi {
+        idx: u32,
     }
 
-    pub fn alloc(&mut self) -> u32 {
-        let idx = self.count;
-        self.count = idx + 1;
-        idx
+    impl IntoBitIndex for Phi {
+        fn into_bit_index(self) -> usize {
+            self.idx.try_into().unwrap()
+        }
+    }
+
+    impl fmt::Display for Phi {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "φ{}", self.idx)
+        }
+    }
+
+    pub struct PhiAllocator {
+        count: u32,
+    }
+
+    impl PhiAllocator {
+        pub fn new() -> PhiAllocator {
+            PhiAllocator { count: 0 }
+        }
+
+        pub fn alloc(&mut self) -> Phi {
+            let idx = self.count;
+            self.count = idx + 1;
+            Phi { idx }
+        }
     }
 }
+pub use phi::{Phi, PhiAllocator};
 
+/// An instruction which maps [Phi]s to sources in the predecessor block
 #[repr(C)]
 #[derive(DstsAsSlice)]
 pub struct OpPhiSrcs {
-    pub srcs: VecPair<u32, Src>,
+    pub srcs: VecPair<Phi, Src>,
 }
 
 impl OpPhiSrcs {
@@ -6256,21 +6250,22 @@ impl DisplayOp for OpPhiSrcs {
 
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "phi_src ")?;
-        for (i, (id, src)) in self.srcs.iter().enumerate() {
+        for (i, (phi, src)) in self.srcs.iter().enumerate() {
             if i > 0 {
                 write!(f, ", ")?;
             }
-            write!(f, "φ{} = {}", id, src)?;
+            write!(f, "{phi} = {src}")?;
         }
         Ok(())
     }
 }
 impl_display_for_op!(OpPhiSrcs);
 
+/// An instruction which maps [Phi]s to destinations in the succeessor block
 #[repr(C)]
 #[derive(SrcsAsSlice)]
 pub struct OpPhiDsts {
-    pub dsts: VecPair<u32, Dst>,
+    pub dsts: VecPair<Phi, Dst>,
 }
 
 impl OpPhiDsts {
@@ -6304,11 +6299,11 @@ impl DisplayOp for OpPhiDsts {
 
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "phi_dst ")?;
-        for (i, (id, dst)) in self.dsts.iter().enumerate() {
+        for (i, (phi, dst)) in self.dsts.iter().enumerate() {
             if i > 0 {
                 write!(f, ", ")?;
             }
-            write!(f, "{} = φ{}", dst, id)?;
+            write!(f, "{dst} = {phi}")?;
         }
         Ok(())
     }
@@ -6653,6 +6648,7 @@ pub enum Op {
     TexDepBar(OpTexDepBar),
     CS2R(OpCS2R),
     Isberd(OpIsberd),
+    ViLd(OpViLd),
     Kill(OpKill),
     Nop(OpNop),
     PixLd(OpPixLd),
@@ -6822,6 +6818,7 @@ impl Op {
             | Op::TexDepBar(_)
             | Op::CS2R(_)
             | Op::Isberd(_)
+            | Op::ViLd(_)
             | Op::Kill(_)
             | Op::PixLd(_)
             | Op::S2R(_) => false,
@@ -6926,7 +6923,7 @@ impl fmt::Display for PredRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PredRef::None => write!(f, "pT"),
-            PredRef::SSA(ssa) => ssa.fmt_plain(f),
+            PredRef::SSA(ssa) => ssa.fmt(f),
             PredRef::Reg(reg) => reg.fmt(f),
         }
     }

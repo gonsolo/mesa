@@ -319,7 +319,6 @@ bool vpe_has_per_pixel_alpha(enum vpe_surface_pixel_format format)
     case VPE_SURFACE_PIXEL_FORMAT_GRPH_ABGR16161616F:
     case VPE_SURFACE_PIXEL_FORMAT_GRPH_RGBA16161616F:
     case VPE_SURFACE_PIXEL_FORMAT_GRPH_BGRA16161616F:
-    case VPE_SURFACE_PIXEL_FORMAT_GRPH_RGBE_ALPHA:
     case VPE_SURFACE_PIXEL_FORMAT_VIDEO_ACrYCb2101010:
     case VPE_SURFACE_PIXEL_FORMAT_VIDEO_CrYCbA1010102:
     case VPE_SURFACE_PIXEL_FORMAT_VIDEO_AYCrCb8888:
@@ -390,7 +389,7 @@ enum vpe_status vpe_check_output_support(struct vpe *vpe, const struct vpe_build
         return VPE_STATUS_PITCH_ALIGNMENT_NOT_SUPPORTED;
     }
 
-    // target rect shouldn't exceed width/height
+    // target rect should not exceed width/height
     if ((param->target_rect.x < surface_info->plane_size.surface_size.x ||
             param->target_rect.x + (int32_t)param->target_rect.width >
                 surface_info->plane_size.surface_size.x +

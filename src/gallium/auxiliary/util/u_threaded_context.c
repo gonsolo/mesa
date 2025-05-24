@@ -27,6 +27,7 @@
 #include "util/u_threaded_context.h"
 #include "util/u_cpu_detect.h"
 #include "util/format/u_format.h"
+#include "util/u_framebuffer.h"
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
 #include "util/u_upload_mgr.h"
@@ -1415,12 +1416,8 @@ tc_call_set_framebuffer_state(struct pipe_context *pipe, void *call)
    struct pipe_framebuffer_state *p = &to_call(call, tc_framebuffer)->state;
 
    pipe->set_framebuffer_state(pipe, p);
+   util_unreference_framebuffer_state(p);
 
-   unsigned nr_cbufs = p->nr_cbufs;
-   for (unsigned i = 0; i < nr_cbufs; i++)
-      tc_drop_surface_reference(p->cbufs[i]);
-   tc_drop_surface_reference(p->zsbuf);
-   tc_drop_resource_reference(p->resolve);
    return call_size(tc_framebuffer);
 }
 
@@ -1433,12 +1430,7 @@ tc_set_framebuffer_state(struct pipe_context *_pipe,
       tc_add_call(tc, TC_CALL_set_framebuffer_state, tc_framebuffer);
    unsigned nr_cbufs = fb->nr_cbufs;
 
-   p->state.width = fb->width;
-   p->state.height = fb->height;
-   p->state.samples = fb->samples;
-   p->state.layers = fb->layers;
-   p->state.nr_cbufs = nr_cbufs;
-   p->state.viewmask = fb->viewmask;
+   p->state = *fb;
 
    /* when unbinding, mark attachments as used for the current batch */
    for (unsigned i = 0; i < tc->nr_cbufs; i++) {
@@ -1449,11 +1441,11 @@ tc_set_framebuffer_state(struct pipe_context *_pipe,
    tc_set_resource_batch_usage_persistent(tc, tc->fb_resolve, false);
 
    for (unsigned i = 0; i < nr_cbufs; i++) {
-      p->state.cbufs[i] = NULL;
-      pipe_surface_reference(&p->state.cbufs[i], fb->cbufs[i]);
+      /* ref for cmd */
+      struct pipe_resource *ref = NULL;
+      pipe_resource_reference(&ref, fb->cbufs[i].texture);
       /* full tracking requires storing the fb attachment resources */
-      if (fb->cbufs[i])
-         pipe_resource_reference(&tc->fb_resources[i], fb->cbufs[i]->texture);
+      pipe_resource_reference(&tc->fb_resources[i], fb->cbufs[i].texture);
       tc_set_resource_batch_usage_persistent(tc, tc->fb_resources[i], true);
    }
    tc->nr_cbufs = nr_cbufs;
@@ -1469,8 +1461,7 @@ tc_set_framebuffer_state(struct pipe_context *_pipe,
       uint8_t zsbuf = tc->renderpass_info_recording->has_draw ?
                       0 :
                       tc->renderpass_info_recording->data8[3];
-      bool zsbuf_changed = tc->fb_resources[PIPE_MAX_COLOR_BUFS] !=
-                           (fb->zsbuf ? fb->zsbuf->texture : NULL);
+      bool zsbuf_changed = tc->fb_resources[PIPE_MAX_COLOR_BUFS] != fb->zsbuf.texture;
 
       if (tc->seen_fb_state) {
          /* this is the end of a renderpass, so increment the renderpass info */
@@ -1489,16 +1480,19 @@ tc_set_framebuffer_state(struct pipe_context *_pipe,
       /* future fb state changes will increment the index */
       tc->seen_fb_state = true;
    }
-   pipe_resource_reference(&tc->fb_resources[PIPE_MAX_COLOR_BUFS],
-                           fb->zsbuf ? fb->zsbuf->texture : NULL);
+   /* ref for cmd */
+   struct pipe_resource *zsref = NULL;
+   pipe_resource_reference(&zsref, fb->zsbuf.texture);
+   pipe_resource_reference(&tc->fb_resources[PIPE_MAX_COLOR_BUFS], fb->zsbuf.texture);
+
+   /* ref for cmd */
+   struct pipe_resource *rref = NULL;
+   pipe_resource_reference(&rref, fb->resolve);
    pipe_resource_reference(&tc->fb_resolve, fb->resolve);
    tc_set_resource_batch_usage_persistent(tc, tc->fb_resources[PIPE_MAX_COLOR_BUFS], true);
    tc_set_resource_batch_usage_persistent(tc, tc->fb_resolve, true);
    tc->in_renderpass = false;
-   p->state.zsbuf = NULL;
-   pipe_surface_reference(&p->state.zsbuf, fb->zsbuf);
    p->state.resolve = NULL;
-   pipe_resource_reference(&p->state.resolve, fb->resolve);
 }
 
 struct tc_tess_state {
@@ -2219,17 +2213,6 @@ tc_set_stream_output_targets(struct pipe_context *_pipe,
    tc_unbind_buffers(&tc->streamout_buffers[count], PIPE_MAX_SO_BUFFERS - count);
    if (count)
       tc->seen_streamout_buffers = true;
-}
-
-static void
-tc_set_compute_resources(struct pipe_context *_pipe, unsigned start,
-                         unsigned count, struct pipe_surface **resources)
-{
-   struct threaded_context *tc = threaded_context(_pipe);
-   struct pipe_context *pipe = tc->pipe;
-
-   tc_sync(tc);
-   pipe->set_compute_resources(pipe, start, count, resources);
 }
 
 static void
@@ -4426,7 +4409,6 @@ tc_launch_grid(struct pipe_context *_pipe,
    struct threaded_context *tc = threaded_context(_pipe);
    struct tc_launch_grid_call *p = tc_add_call(tc, TC_CALL_launch_grid,
                                                tc_launch_grid_call);
-   assert(info->input == NULL);
 
    tc_set_resource_reference(&p->info.indirect, info->indirect);
    memcpy(&p->info, info, sizeof(*info));
@@ -5483,7 +5465,6 @@ threaded_context_create(struct pipe_context *pipe,
    CTX_INIT(resource_commit);
    CTX_INIT(create_video_codec);
    CTX_INIT(create_video_buffer);
-   CTX_INIT(set_compute_resources);
    CTX_INIT(set_global_binding);
    CTX_INIT(get_sample_position);
    CTX_INIT(invalidate_resource);

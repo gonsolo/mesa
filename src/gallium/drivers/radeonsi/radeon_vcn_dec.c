@@ -15,6 +15,7 @@
 #include "util/vl_zscan_data.h"
 #include "vl/vl_probs_table.h"
 #include "pspdecryptionparam.h"
+#include "cencdecryptionparam.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -260,13 +261,9 @@ static rvcn_dec_message_hevc_t get_h265_msg(struct radeon_decoder *dec,
    result.sps_info_flags |= pic->pps->sps->separate_colour_plane_flag << 8;
    if (((struct si_screen *)dec->screen)->info.family == CHIP_CARRIZO)
       result.sps_info_flags |= 1 << 9;
-   if (pic->UseRefPicList == true) {
-      result.sps_info_flags |= 1 << 10;
-      result.sps_info_flags |= 1 << 12;
-   }
-   if (pic->UseStRpsBits == true && pic->pps->st_rps_bits != 0) {
+   if (pic->NumShortTermPictureSliceHeaderBits != 0) {
       result.sps_info_flags |= 1 << 11;
-      result.st_rps_bits = pic->pps->st_rps_bits;
+      result.st_rps_bits = pic->NumShortTermPictureSliceHeaderBits;
    }
 
    result.chroma_format = pic->pps->sps->chroma_format_idc;
@@ -397,11 +394,6 @@ static rvcn_dec_message_hevc_t get_h265_msg(struct radeon_decoder *dec,
    memcpy(dec->it + 96, pic->pps->sps->ScalingList8x8, 6 * 64);
    memcpy(dec->it + 480, pic->pps->sps->ScalingList16x16, 6 * 64);
    memcpy(dec->it + 864, pic->pps->sps->ScalingList32x32, 2 * 64);
-
-   for (i = 0; i < 2; i++) {
-      for (j = 0; j < 15; j++)
-         result.direct_reflist[i][j] = pic->RefPicList[0][i][j];
-   }
 
    if (pic->base.profile == PIPE_VIDEO_PROFILE_HEVC_MAIN_10) {
       if (target->buffer_format == PIPE_FORMAT_P010 || target->buffer_format == PIPE_FORMAT_P016) {
@@ -642,16 +634,37 @@ static rvcn_dec_message_vp9_t get_vp9_msg(struct radeon_decoder *dec,
    return result;
 }
 
-static void get_h265_reflist(rvcn_dec_message_hevc_direct_ref_list_t *hevc_reflist,
-                             struct pipe_h265_picture_desc *pic)
+static void set_drm_keyblob(rvcn_dec_message_drm_keyblob_t *drm_keyblob, amd_secure_buffer_format *secure_buf)
 {
-   hevc_reflist->num_direct_reflist = pic->slice_parameter.slice_count;
-   for (int i = 0; i <hevc_reflist->num_direct_reflist; i++) {
-      for (int j = 0; j < 2; j++) {
-         for (int k = 0; k < 15; k++)
-            hevc_reflist->multi_direct_reflist[i][j][k] = pic->RefPicList[i][j][k];
-      }
-   }
+   memcpy(drm_keyblob->contentKey, secure_buf->key_blob.local_policy.wrapped_key, 16);
+   memcpy(drm_keyblob->signature, secure_buf->key_blob.local_policy.signature, 16);
+   memcpy(&drm_keyblob->policyIndex, secure_buf->key_blob.local_policy.native_policy.enabled_policy_index, 4);
+   memcpy(drm_keyblob->policyArray, secure_buf->key_blob.local_policy.native_policy.policy_array, 32);
+}
+
+static void set_drm_keys_cenc(rvcn_dec_message_drm_t *drm, amd_secure_buffer_format *secure_buf)
+{
+   drm->drm_offset = 0;
+   drm->drm_cmd = 0;
+   drm->drm_cntl = 0;
+   drm->drm_max_res = 0;
+
+   memcpy(drm->drm_wrapped_key, secure_buf->key_blob.wrapped_key, 16);
+   memcpy(drm->drm_key, secure_buf->key_blob.wrapped_key_iv, 16);
+   memcpy(drm->drm_counter, secure_buf->desc.iv, 16);
+
+   drm->drm_subsample_size = secure_buf->desc.subsamples_length;
+
+   drm->drm_cmd |= 1 << DRM_CMD_KEY_SHIFT;
+   drm->drm_cmd |= 1 << DRM_CMD_CNT_KEY_SHIFT;
+   drm->drm_cmd |= 1 << DRM_CMD_CNT_DATA_SHIFT;
+   drm->drm_cmd |= 1 << DRM_CMD_OFFSET_SHIFT;
+   drm->drm_cmd |= 1 << DRM_CMD_GEN_MASK_SHIFT;
+   drm->drm_cmd |= 0xFF << DRM_CMD_BYTE_MASK_SHIFT;
+   drm->drm_cmd |= secure_buf->key_blob.u.s.drm_session_id << DRM_CMD_SESSION_SEL_SHIFT;
+   drm->drm_cmd |= 1 << DRM_CMD_UNWRAP_KEY_SHIFT;
+
+   drm->drm_cntl |= 0x3 << DRM_CNTL_CENC_ENABLE_SHIFT;
 }
 
 static void set_drm_keys(rvcn_dec_message_drm_t *drm, DECRYPT_PARAMETERS *decrypted)
@@ -1326,7 +1339,6 @@ static void rvcn_dec_message_create(struct radeon_decoder *dec)
    header->total_size = sizes;
    header->num_buffers = 1;
    header->msg_type = RDECODE_MSG_CREATE;
-   header->stream_handle = dec->stream_handle;
    header->status_report_feedback_number = 0;
 
    header->index[0].message_id = RDECODE_MESSAGE_CREATE;
@@ -1488,6 +1500,7 @@ static struct pb_buffer_lean *rvcn_dec_message_decode(struct radeon_decoder *dec
                                                       struct pipe_picture_desc *picture)
 {
    DECRYPT_PARAMETERS *decrypt = (DECRYPT_PARAMETERS *)picture->decrypt_key;
+   amd_secure_buffer_format *secure_buf = (amd_secure_buffer_format *)picture->decrypt_key;
    bool encrypted = picture->protected_playback;
    struct si_texture *luma;
    struct si_texture *chroma;
@@ -1496,16 +1509,16 @@ static struct pb_buffer_lean *rvcn_dec_message_decode(struct radeon_decoder *dec
    rvcn_dec_message_header_t *header;
    rvcn_dec_message_index_t *index_codec;
    rvcn_dec_message_index_t *index_drm = NULL;
+   rvcn_dec_message_index_t *index_drm_keyblob = NULL;
    rvcn_dec_message_index_t *index_dynamic_dpb = NULL;
-   rvcn_dec_message_index_t *index_hevc_direct_reflist = NULL;
    rvcn_dec_message_decode_t *decode;
    unsigned sizes = 0, offset_decode, offset_codec;
-   unsigned offset_drm = 0, offset_dynamic_dpb = 0, offset_hevc_direct_reflist = 0;
+   unsigned offset_drm = 0, offset_drm_keyblob = 0, offset_dynamic_dpb = 0;
    void *codec;
    rvcn_dec_message_drm_t *drm = NULL;
+   rvcn_dec_message_drm_keyblob_t *drm_keyblob = NULL;
    rvcn_dec_message_dynamic_dpb_t *dynamic_dpb = NULL;
    rvcn_dec_message_dynamic_dpb_t2_t *dynamic_dpb_t2 = NULL;
-   rvcn_dec_message_hevc_direct_ref_list_t *hevc_reflist = NULL;
    bool dpb_resize = false;
 
    if (dec->stream_type == RDECODE_CODEC_AV1)
@@ -1528,13 +1541,13 @@ static struct pb_buffer_lean *rvcn_dec_message_decode(struct radeon_decoder *dec
       sizes += sizeof(rvcn_dec_message_index_t);
    }
 
-   if (dec->dpb_type == DPB_DYNAMIC_TIER_1 || dec->dpb_type == DPB_DYNAMIC_TIER_2) {
-      index_dynamic_dpb = (void*)header + sizes;
+   if (picture->cenc) {
+      index_drm_keyblob = (void*)header + sizes;
       sizes += sizeof(rvcn_dec_message_index_t);
    }
 
-   if (u_reduce_video_profile(picture->profile) == PIPE_VIDEO_FORMAT_HEVC) {
-      index_hevc_direct_reflist = (void*)header + sizes;
+   if (dec->dpb_type == DPB_DYNAMIC_TIER_1 || dec->dpb_type == DPB_DYNAMIC_TIER_2) {
+      index_dynamic_dpb = (void*)header + sizes;
       sizes += sizeof(rvcn_dec_message_index_t);
    }
 
@@ -1546,6 +1559,12 @@ static struct pb_buffer_lean *rvcn_dec_message_decode(struct radeon_decoder *dec
       offset_drm = sizes;
       drm = (void*)header + sizes;
       sizes += sizeof(rvcn_dec_message_drm_t);
+   }
+
+   if (picture->cenc) {
+      offset_drm_keyblob = sizes;
+      drm_keyblob = (void*)header + sizes;
+      sizes += sizeof(rvcn_dec_message_drm_keyblob_t);
    }
 
    if (dec->dpb_type == DPB_DYNAMIC_TIER_1 || dec->dpb_type == DPB_DYNAMIC_TIER_2) {
@@ -1560,12 +1579,6 @@ static struct pb_buffer_lean *rvcn_dec_message_decode(struct radeon_decoder *dec
       }
    }
 
-   if (u_reduce_video_profile(picture->profile) == PIPE_VIDEO_FORMAT_HEVC) {
-      offset_hevc_direct_reflist = sizes;
-      hevc_reflist = (void*)header + sizes;
-      sizes += align((4 + 2 * 15 * ((struct pipe_h265_picture_desc *)picture)->slice_parameter.slice_count), 4);
-   }
-
    offset_codec = sizes;
    codec = (void*)header + sizes;
 
@@ -1573,7 +1586,6 @@ static struct pb_buffer_lean *rvcn_dec_message_decode(struct radeon_decoder *dec
    header->header_size = sizeof(rvcn_dec_message_header_t);
    header->total_size = sizes;
    header->msg_type = RDECODE_MSG_DECODE;
-   header->stream_handle = dec->stream_handle;
    header->status_report_feedback_number = dec->frame_number;
 
    header->index[0].message_id = RDECODE_MESSAGE_DECODE;
@@ -1595,6 +1607,14 @@ static struct pb_buffer_lean *rvcn_dec_message_decode(struct radeon_decoder *dec
       ++header->num_buffers;
    }
 
+   if (picture->cenc) {
+      index_drm_keyblob->message_id = RDECODE_MESSAGE_DRM_KEYBLOB;
+      index_drm_keyblob->offset = offset_drm_keyblob;
+      index_drm_keyblob->size = sizeof(rvcn_dec_message_drm_keyblob_t);
+      index_drm_keyblob->filled = 0;
+      ++header->num_buffers;
+   }
+
    if (dec->dpb_type == DPB_DYNAMIC_TIER_1 || dec->dpb_type == DPB_DYNAMIC_TIER_2) {
       index_dynamic_dpb->message_id = RDECODE_MESSAGE_DYNAMIC_DPB;
       index_dynamic_dpb->offset = offset_dynamic_dpb;
@@ -1604,14 +1624,6 @@ static struct pb_buffer_lean *rvcn_dec_message_decode(struct radeon_decoder *dec
          index_dynamic_dpb->size = sizeof(rvcn_dec_message_dynamic_dpb_t);
       else if (dec->dpb_type == DPB_DYNAMIC_TIER_2)
          index_dynamic_dpb->size = sizeof(rvcn_dec_message_dynamic_dpb_t2_t);
-   }
-
-   if (u_reduce_video_profile(picture->profile) == PIPE_VIDEO_FORMAT_HEVC) {
-      index_hevc_direct_reflist->message_id = RDECODE_MESSAGE_HEVC_DIRECT_REF_LIST;
-      index_hevc_direct_reflist->offset = offset_hevc_direct_reflist;
-      index_hevc_direct_reflist->size = align((4 + 2 * 15 * ((struct pipe_h265_picture_desc *)picture)->slice_parameter.slice_count), 4);
-      index_hevc_direct_reflist->filled = 0;
-      ++header->num_buffers;
    }
 
    decode->stream_type = dec->stream_type;
@@ -1738,6 +1750,10 @@ static struct pb_buffer_lean *rvcn_dec_message_decode(struct radeon_decoder *dec
       dec->ws->cs_flush(&dec->cs, RADEON_FLUSH_TOGGLE_SECURE_SUBMISSION, NULL);
    }
 
+   if (picture->cenc) {
+      set_drm_keyblob(drm_keyblob, secure_buf);
+   }
+
    decode->dpb_size = (dec->dpb_type < DPB_DYNAMIC_TIER_2) ? dec->dpb.res->buf->size : 0;
 
    /* When texture being created, the bo will be created with total size of planes,
@@ -1791,9 +1807,32 @@ static struct pb_buffer_lean *rvcn_dec_message_decode(struct radeon_decoder *dec
    if (dec->stream_type == RDECODE_CODEC_AV1)
       decode->db_pitch_uv = chroma->surface.u.gfx9.surf_pitch * chroma->surface.blk_w;
 
+   if (picture->cenc) {
+      if (!dec->subsample.res && !si_vid_create_buffer(dec->screen, &dec->subsample,
+                                                       RDECODE_MAX_SUBSAMPLE_SIZE,
+                                                       PIPE_USAGE_DEFAULT)) {
+         RADEON_DEC_ERR("Can't allocate subsample buffer.\n");
+         return NULL;
+      }
+      int ss_length = MIN2(secure_buf->desc.subsamples_length, MAX_SUBSAMPLES);
+      uint32_t *ss_ptr = dec->ws->buffer_map(dec->ws, dec->subsample.res->buf, &dec->cs,
+                                             PIPE_MAP_WRITE | RADEON_MAP_TEMPORARY);
+      if (!ss_ptr) {
+         RADEON_DEC_ERR("Failed to map subsample buffer memory.\n");
+         return NULL;
+      }
+      for (int i = 0; i < ss_length; i++)
+         memcpy(&ss_ptr[i * 2], &secure_buf->desc.subsamples[i].num_bytes_clear, 8);
+      ss_ptr[ss_length * 2 - 1] = align(ss_ptr[ss_length * 2 - 1], 256);
+      dec->ws->buffer_unmap(dec->ws, dec->subsample.res->buf);
+   }
+
    if (encrypted) {
       assert(sscreen->info.has_tmz_support);
-      set_drm_keys(drm, decrypt);
+      if (picture->cenc)
+         set_drm_keys_cenc(drm, secure_buf);
+      else
+         set_drm_keys(drm, decrypt);
    }
 
    if (dec->dpb_type == DPB_DYNAMIC_TIER_1) {
@@ -1818,9 +1857,6 @@ static struct pb_buffer_lean *rvcn_dec_message_decode(struct radeon_decoder *dec
          dynamic_dpb->dpbChromaAlignedSize = dynamic_dpb->dpbChromaAlignedSize * 3 / 2;
       }
    }
-
-   if (u_reduce_video_profile(picture->profile) == PIPE_VIDEO_FORMAT_HEVC)
-      get_h265_reflist(hevc_reflist, (struct pipe_h265_picture_desc *)picture);
 
    switch (u_reduce_video_profile(picture->profile)) {
    case PIPE_VIDEO_FORMAT_MPEG4_AVC: {
@@ -1931,7 +1967,6 @@ static void rvcn_dec_message_destroy(struct radeon_decoder *dec)
    header->total_size = sizeof(rvcn_dec_message_header_t) - sizeof(rvcn_dec_message_index_t);
    header->num_buffers = 0;
    header->msg_type = RDECODE_MSG_DESTROY;
-   header->stream_handle = dec->stream_handle;
    header->status_report_feedback_number = 0;
 }
 
@@ -2064,6 +2099,11 @@ static void send_cmd(struct radeon_decoder *dec, unsigned cmd, struct pb_buffer_
             dec->decode_buffer->context_buffer_address_hi = (addr >> 32);
             dec->decode_buffer->context_buffer_address_lo = (addr);
          break;
+      case RDECODE_CMD_SUBSAMPLE:
+            dec->decode_buffer->valid_buf_flag |= (RDECODE_CMDBUF_FLAGS_SUBSAMPLE_SIZE_INFO_BUFFER);
+            dec->decode_buffer->subsample_hi = (addr >> 32);
+            dec->decode_buffer->subsample_lo = (addr);
+         break;
       default:
             printf("Not Support!");
    }
@@ -2124,9 +2164,8 @@ static void send_msg_buf(struct radeon_decoder *dec)
    dec->it = NULL;
    dec->probs = NULL;
 
-   if (dec->sessionctx.res)
-      send_cmd(dec, RDECODE_CMD_SESSION_CONTEXT_BUFFER, dec->sessionctx.res->buf, 0,
-               RADEON_USAGE_READWRITE, RADEON_DOMAIN_VRAM);
+   send_cmd(dec, RDECODE_CMD_SESSION_CONTEXT_BUFFER, dec->sessionctx.res->buf, 0,
+            RADEON_USAGE_READWRITE, RADEON_DOMAIN_VRAM);
 
    /* and send it to the hardware */
    send_cmd(dec, RDECODE_CMD_MSG_BUFFER, buf->res->buf, 0, RADEON_USAGE_READ, RADEON_DOMAIN_GTT);
@@ -2393,6 +2432,7 @@ static void radeon_dec_destroy(struct pipe_video_codec *decoder)
    }
    si_vid_destroy_buffer(&dec->ctx);
    si_vid_destroy_buffer(&dec->sessionctx);
+   si_vid_destroy_buffer(&dec->subsample);
 
    FREE(dec->jcs);
    FREE(dec->jctx);
@@ -2599,6 +2639,9 @@ bool send_cmd_dec(struct radeon_decoder *dec, struct pipe_video_buffer *target,
    else if (have_probs(dec))
       send_cmd(dec, RDECODE_CMD_PROB_TBL_BUFFER, msg_fb_it_probs_buf->res->buf,
                FB_BUFFER_OFFSET + FB_BUFFER_SIZE, RADEON_USAGE_READ, RADEON_DOMAIN_GTT);
+   if (picture->cenc)
+      send_cmd(dec, RDECODE_CMD_SUBSAMPLE, dec->subsample.res->buf, 0, RADEON_USAGE_READ,
+               RADEON_DOMAIN_VRAM);
 
    if (dec->dpb_type == DPB_DYNAMIC_TIER_3)
       send_ref_buffers(dec);
@@ -2804,7 +2847,6 @@ struct pipe_video_codec *radeon_create_decoder(struct pipe_context *context,
    dec->base.destroy_fence = radeon_dec_destroy_fence;
 
    dec->stream_type = stream_type;
-   dec->stream_handle = si_vid_alloc_stream_handle();
    dec->screen = context->screen;
    dec->ws = ws;
 

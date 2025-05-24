@@ -22,7 +22,8 @@ static const struct debug_control aco_debug_options[] = {
    {"validateir", DEBUG_VALIDATE_IR},
    {"validatera", DEBUG_VALIDATE_RA},
    {"validate-livevars", DEBUG_VALIDATE_LIVE_VARS},
-   {"novalidateir", DEBUG_NO_VALIDATE_IR},
+   {"validateopt", DEBUG_VALIDATE_OPT},
+   {"novalidate", DEBUG_NO_VALIDATE},
    {"force-waitcnt", DEBUG_FORCE_WAITCNT},
    {"force-waitdeps", DEBUG_FORCE_WAITDEPS},
    {"novn", DEBUG_NO_VN},
@@ -43,11 +44,10 @@ init_once()
 
 #ifndef NDEBUG
    /* enable some flags by default on debug builds */
-   debug_flags |= aco::DEBUG_VALIDATE_IR;
+   if (!(debug_flags & aco::DEBUG_NO_VALIDATE)) {
+      debug_flags |= aco::DEBUG_VALIDATE_IR | DEBUG_VALIDATE_OPT;
+   }
 #endif
-
-   if (debug_flags & aco::DEBUG_NO_VALIDATE_IR)
-      debug_flags &= ~aco::DEBUG_VALIDATE_IR;
 }
 
 void
@@ -75,6 +75,7 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
       case GFX10: program->family = CHIP_NAVI10; break;
       case GFX10_3: program->family = CHIP_NAVI21; break;
       case GFX11: program->family = CHIP_NAVI31; break;
+      case GFX11_5: program->family = CHIP_GFX1150; break;
       case GFX12: program->family = CHIP_GFX1200; break;
       default: program->family = CHIP_UNKNOWN; break;
       }
@@ -154,7 +155,9 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
    default: break;
    }
 
-   program->dev.sram_ecc_enabled = program->family == CHIP_MI100;
+   program->dev.sram_ecc_enabled = program->family == CHIP_VEGA20 ||
+                                   program->family == CHIP_MI100 || program->family == CHIP_MI200 ||
+                                   program->family == CHIP_GFX940;
    /* apparently gfx702 also has fast v_fma_f32 but I can't find a family for that */
    program->dev.has_fast_fma32 = program->gfx_level >= GFX9;
    if (program->family == CHIP_TAHITI || program->family == CHIP_CARRIZO ||
@@ -527,11 +530,7 @@ can_use_input_modifiers(amd_gfx_level gfx_level, aco_opcode op, int idx)
    if (op == aco_opcode::v_mov_b32)
       return gfx_level >= GFX10;
 
-   if (op == aco_opcode::v_ldexp_f16 || op == aco_opcode::v_ldexp_f32 ||
-       op == aco_opcode::v_ldexp_f64)
-      return idx == 0;
-
-   return instr_info.can_use_input_modifiers[(int)op];
+   return instr_info.alu_opcode_infos[(int)op].input_modifiers & BITFIELD_BIT(idx);
 }
 
 bool
@@ -836,28 +835,17 @@ get_reduction_identity(ReduceOp op, unsigned idx)
    return 0;
 }
 
-unsigned
-get_operand_size(aco_ptr<Instruction>& instr, unsigned index)
+aco_type
+get_operand_type(aco_ptr<Instruction>& alu, unsigned index)
 {
-   if (instr->isPseudo())
-      return instr->operands[index].bytes() * 8u;
-   else if (instr->opcode == aco_opcode::v_mad_u64_u32 ||
-            instr->opcode == aco_opcode::v_mad_i64_i32)
-      return index == 2 ? 64 : 32;
-   else if (instr->opcode == aco_opcode::v_fma_mix_f32 ||
-            instr->opcode == aco_opcode::v_fma_mixlo_f16 ||
-            instr->opcode == aco_opcode::v_fma_mixhi_f16)
-      return instr->valu().opsel_hi[index] ? 16 : 32;
-   else if (instr->opcode == aco_opcode::v_interp_p10_f16_f32_inreg ||
-            instr->opcode == aco_opcode::v_interp_p10_rtz_f16_f32_inreg)
-      return index == 1 ? 32 : 16;
-   else if (instr->opcode == aco_opcode::v_interp_p2_f16_f32_inreg ||
-            instr->opcode == aco_opcode::v_interp_p2_rtz_f16_f32_inreg)
-      return index == 0 ? 16 : 32;
-   else if (instr->isVALU() || instr->isSALU())
-      return instr_info.operand_size[(int)instr->opcode];
-   else
-      return 0;
+   assert(alu->isVALU() || alu->isSALU());
+   aco_type type = instr_info.alu_opcode_infos[(int)alu->opcode].op_types[index];
+
+   if (alu->opcode == aco_opcode::v_fma_mix_f32 || alu->opcode == aco_opcode::v_fma_mixlo_f16 ||
+       alu->opcode == aco_opcode::v_fma_mixhi_f16)
+      type.bit_size = alu->valu().opsel_hi[index] ? 16 : 32;
+
+   return type;
 }
 
 bool
@@ -1019,34 +1007,21 @@ is_cmpx(aco_opcode op)
    return !get_cmp_info(op, &info);
 }
 
-bool
-can_swap_operands(aco_ptr<Instruction>& instr, aco_opcode* new_op, unsigned idx0, unsigned idx1)
+aco_opcode
+get_swapped_opcode(aco_opcode opcode, unsigned idx0, unsigned idx1)
 {
-   if (idx0 == idx1) {
-      *new_op = instr->opcode;
-      return true;
-   }
+   if (idx0 == idx1)
+      return opcode;
 
    if (idx0 > idx1)
       std::swap(idx0, idx1);
 
-   if (instr->isDPP())
-      return false;
-
-   if (!instr->isVOP3() && !instr->isVOP3P() && !instr->operands[0].isOfType(RegType::vgpr))
-      return false;
-
-   if (instr->isVOPC()) {
-      CmpInfo info;
-      if (get_cmp_info(instr->opcode, &info) && info.swapped != aco_opcode::num_opcodes) {
-         *new_op = info.swapped;
-         return true;
-      }
-   }
+   CmpInfo info;
+   if (get_cmp_info(opcode, &info) && info.swapped != aco_opcode::num_opcodes)
+      return info.swapped;
 
    /* opcodes not relevant for DPP or SGPRs optimizations are not included. */
-   switch (instr->opcode) {
-   case aco_opcode::v_med3_f32: return false; /* order matters for clamp+GFX8+denorm ftz. */
+   switch (opcode) {
    case aco_opcode::v_add_u32:
    case aco_opcode::v_add_co_u32:
    case aco_opcode::v_add_co_u32_e64:
@@ -1106,19 +1081,19 @@ can_swap_operands(aco_ptr<Instruction>& instr, aco_opcode* new_op, unsigned idx0
    case aco_opcode::v_max_i16_e64:
    case aco_opcode::v_min_i16_e64:
    case aco_opcode::v_max_u16_e64:
-   case aco_opcode::v_min_u16_e64: *new_op = instr->opcode; return true;
-   case aco_opcode::v_sub_f16: *new_op = aco_opcode::v_subrev_f16; return true;
-   case aco_opcode::v_sub_f32: *new_op = aco_opcode::v_subrev_f32; return true;
-   case aco_opcode::v_sub_co_u32: *new_op = aco_opcode::v_subrev_co_u32; return true;
-   case aco_opcode::v_sub_u16: *new_op = aco_opcode::v_subrev_u16; return true;
-   case aco_opcode::v_sub_u32: *new_op = aco_opcode::v_subrev_u32; return true;
-   case aco_opcode::v_sub_co_u32_e64: *new_op = aco_opcode::v_subrev_co_u32_e64; return true;
-   case aco_opcode::v_subrev_f16: *new_op = aco_opcode::v_sub_f16; return true;
-   case aco_opcode::v_subrev_f32: *new_op = aco_opcode::v_sub_f32; return true;
-   case aco_opcode::v_subrev_co_u32: *new_op = aco_opcode::v_sub_co_u32; return true;
-   case aco_opcode::v_subrev_u16: *new_op = aco_opcode::v_sub_u16; return true;
-   case aco_opcode::v_subrev_u32: *new_op = aco_opcode::v_sub_u32; return true;
-   case aco_opcode::v_subrev_co_u32_e64: *new_op = aco_opcode::v_sub_co_u32_e64; return true;
+   case aco_opcode::v_min_u16_e64: return opcode;
+   case aco_opcode::v_sub_f16: return aco_opcode::v_subrev_f16;
+   case aco_opcode::v_sub_f32: return aco_opcode::v_subrev_f32;
+   case aco_opcode::v_sub_co_u32: return aco_opcode::v_subrev_co_u32;
+   case aco_opcode::v_sub_u16: return aco_opcode::v_subrev_u16;
+   case aco_opcode::v_sub_u32: return aco_opcode::v_subrev_u32;
+   case aco_opcode::v_sub_co_u32_e64: return aco_opcode::v_subrev_co_u32_e64;
+   case aco_opcode::v_subrev_f16: return aco_opcode::v_sub_f16;
+   case aco_opcode::v_subrev_f32: return aco_opcode::v_sub_f32;
+   case aco_opcode::v_subrev_co_u32: return aco_opcode::v_sub_co_u32;
+   case aco_opcode::v_subrev_u16: return aco_opcode::v_sub_u16;
+   case aco_opcode::v_subrev_u32: return aco_opcode::v_sub_u32;
+   case aco_opcode::v_subrev_co_u32_e64: return aco_opcode::v_sub_co_u32_e64;
    case aco_opcode::v_addc_co_u32:
    case aco_opcode::v_mad_i32_i24:
    case aco_opcode::v_mad_u32_u24:
@@ -1162,24 +1137,44 @@ can_swap_operands(aco_ptr<Instruction>& instr, aco_opcode* new_op, unsigned idx0
    case aco_opcode::v_fma_mixhi_f16:
    case aco_opcode::v_pk_fmac_f16: {
       if (idx1 == 2)
-         return false;
-      *new_op = instr->opcode;
-      return true;
+         return aco_opcode::num_opcodes;
+      return opcode;
    }
    case aco_opcode::v_subb_co_u32: {
       if (idx1 == 2)
-         return false;
-      *new_op = aco_opcode::v_subbrev_co_u32;
-      return true;
+         return aco_opcode::num_opcodes;
+      return aco_opcode::v_subbrev_co_u32;
    }
    case aco_opcode::v_subbrev_co_u32: {
       if (idx1 == 2)
-         return false;
-      *new_op = aco_opcode::v_subb_co_u32;
+         return aco_opcode::num_opcodes;
+      return aco_opcode::v_subb_co_u32;
+   }
+   case aco_opcode::v_med3_f32: /* order matters for clamp+GFX8+denorm ftz. */
+   default: return aco_opcode::num_opcodes;
+   }
+}
+
+bool
+can_swap_operands(aco_ptr<Instruction>& instr, aco_opcode* new_op, unsigned idx0, unsigned idx1)
+{
+   if (idx0 == idx1) {
+      *new_op = instr->opcode;
       return true;
    }
-   default: return false;
-   }
+
+   if (instr->isDPP())
+      return false;
+
+   if (!instr->isVOP3() && !instr->isVOP3P() && !instr->operands[0].isOfType(RegType::vgpr))
+      return false;
+
+   aco_opcode candidate = get_swapped_opcode(instr->opcode, idx0, idx1);
+   if (candidate == aco_opcode::num_opcodes)
+      return false;
+
+   *new_op = candidate;
+   return true;
 }
 
 wait_imm::wait_imm()
@@ -1428,7 +1423,7 @@ should_form_clause(const Instruction* a, const Instruction* b)
 }
 
 aco::small_vec<uint32_t, 2>
-get_ops_fixed_to_def(Instruction* instr)
+get_tied_defs(Instruction* instr)
 {
    aco::small_vec<uint32_t, 2> ops;
    if (instr->opcode == aco_opcode::v_interp_p2_f32 || instr->opcode == aco_opcode::v_mac_f32 ||
@@ -1460,15 +1455,20 @@ uint8_t
 get_vmem_type(enum amd_gfx_level gfx_level, Instruction* instr)
 {
    if (instr->opcode == aco_opcode::image_bvh64_intersect_ray ||
-       instr->opcode == aco_opcode::image_bvh8_intersect_ray)
+       instr->opcode == aco_opcode::image_bvh8_intersect_ray) {
       return vmem_bvh;
-   else if (gfx_level >= GFX12 && instr->opcode == aco_opcode::image_msaa_load)
+   } else if (gfx_level >= GFX12 && instr->opcode == aco_opcode::image_msaa_load) {
       return vmem_sampler;
-   else if (instr->isMIMG() && !instr->operands[1].isUndefined() &&
-            instr->operands[1].regClass() == s4)
-      return vmem_sampler;
-   else if (instr->isVMEM() || instr->isScratch() || instr->isGlobal())
+   } else if (instr->isMIMG() && !instr->operands[1].isUndefined() &&
+              instr->operands[1].regClass() == s4) {
+      bool point_sample_accel =
+         gfx_level == GFX11_5 && (instr->opcode == aco_opcode::image_sample ||
+                                  instr->opcode == aco_opcode::image_sample_l ||
+                                  instr->opcode == aco_opcode::image_sample_lz);
+      return vmem_sampler | (point_sample_accel ? vmem_nosampler : 0);
+   } else if (instr->isVMEM() || instr->isScratch() || instr->isGlobal()) {
       return vmem_nosampler;
+   }
    return 0;
 }
 

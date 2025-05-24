@@ -198,6 +198,7 @@ pub fn side_effect_type(op: &Op) -> SideEffect {
         | Op::TexDepBar(_)
         | Op::CS2R(_)
         | Op::Isberd(_)
+        | Op::ViLd(_)
         | Op::Kill(_)
         | Op::S2R(_) => SideEffect::Barrier,
         Op::PixLd(_) | Op::Nop(_) | Op::Vote(_) => SideEffect::None,
@@ -220,8 +221,8 @@ pub fn side_effect_type(op: &Op) -> SideEffect {
 
 /// Try to guess how many cycles a variable latency instruction will take
 ///
-/// These values are based on the cycle estimates from "Dissecting the NVidia
-/// Turing T4 GPU via Microbenchmarking" https://arxiv.org/pdf/1903.07486
+/// These values are based on the cycle estimates from ["Dissecting the NVidia
+/// Turing T4 GPU via Microbenchmarking"](https://arxiv.org/pdf/1903.07486).
 /// Memory instructions were copied from L1 data cache latencies.
 /// For instructions not mentioned in the paper, I made up numbers.
 /// This could probably be improved.
@@ -289,6 +290,7 @@ pub fn estimate_variable_latency(sm: u8, op: &Op) -> u32 {
         | Op::TexDepBar(_)
         | Op::CS2R(_)
         | Op::Isberd(_)
+        | Op::ViLd(_)
         | Op::Kill(_)
         | Op::PixLd(_)
         | Op::S2R(_) => 16,
@@ -333,7 +335,8 @@ pub fn calc_statistics(g: &mut DepGraph) -> Vec<usize> {
             initial_ready_list.push(i);
         }
     }
-    return initial_ready_list;
+
+    initial_ready_list
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]

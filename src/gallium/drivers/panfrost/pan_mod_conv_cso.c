@@ -24,6 +24,7 @@
 #include "pan_mod_conv_cso.h"
 #include "nir/pipe_nir.h"
 #include "nir_builder.h"
+#include "pan_afbc.h"
 #include "pan_context.h"
 #include "pan_resource.h"
 #include "pan_screen.h"
@@ -219,7 +220,7 @@ panfrost_create_afbc_size_shader(struct panfrost_screen *screen, unsigned bpp,
    struct panfrost_device *dev = pan_device(&screen->base);
 
    nir_builder b = nir_builder_init_simple_shader(
-      MESA_SHADER_COMPUTE, screen->vtbl.get_compiler_options(),
+      MESA_SHADER_COMPUTE, pan_shader_get_compiler_options(dev->arch),
       "panfrost_afbc_size(bpp=%d)", bpp);
 
    panfrost_afbc_add_info_ubo(size, b);
@@ -252,8 +253,9 @@ static nir_shader *
 panfrost_create_afbc_pack_shader(struct panfrost_screen *screen, unsigned align,
                                  bool tiled)
 {
+   struct panfrost_device *dev = pan_device(&screen->base);
    nir_builder b = nir_builder_init_simple_shader(
-      MESA_SHADER_COMPUTE, screen->vtbl.get_compiler_options(),
+      MESA_SHADER_COMPUTE, pan_shader_get_compiler_options(dev->arch),
       "panfrost_afbc_pack");
 
    panfrost_afbc_add_info_ubo(pack, b);
@@ -337,7 +339,7 @@ panfrost_create_mtk_detile_shader(struct panfrost_screen *screen, unsigned align
    const struct panfrost_device *device = &screen->dev;
    bool tint_yuv = (device->debug & PAN_DBG_YUV) != 0;
    nir_builder b = nir_builder_init_simple_shader(
-      MESA_SHADER_COMPUTE, screen->vtbl.get_compiler_options(),
+      MESA_SHADER_COMPUTE, pan_shader_get_compiler_options(device->arch),
       "panfrost_mtk_detile");
    b.shader->info.workgroup_size[0] = 4;
    b.shader->info.workgroup_size[1] = 16;
@@ -447,7 +449,7 @@ panfrost_get_mod_convert_shaders(struct panfrost_context *ctx,
 {
    struct pipe_context *pctx = &ctx->base;
    struct panfrost_screen *screen = pan_screen(ctx->base.screen);
-   bool tiled = rsrc->image.layout.modifier & AFBC_FORMAT_MOD_TILED;
+   bool tiled = rsrc->image.props.modifier & AFBC_FORMAT_MOD_TILED;
    struct pan_mod_convert_shader_key key = {
       .bpp = util_format_get_blocksizebits(rsrc->base.format),
       .align = align,

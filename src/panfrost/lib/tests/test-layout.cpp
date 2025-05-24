@@ -21,7 +21,8 @@
  * SOFTWARE.
  */
 
-#include "pan_texture.h"
+#include "pan_afbc.h"
+#include "pan_image.h"
 
 #include <gtest/gtest.h>
 
@@ -32,8 +33,8 @@ TEST(BlockSize, Linear)
                                 PIPE_FORMAT_ASTC_5x5};
 
    for (unsigned i = 0; i < ARRAY_SIZE(format); ++i) {
-      struct pan_block_size blk =
-         panfrost_block_size(DRM_FORMAT_MOD_LINEAR, format[i]);
+      struct pan_image_block_size blk =
+         pan_image_block_size_el(DRM_FORMAT_MOD_LINEAR, format[i]);
 
       EXPECT_EQ(blk.width, 1);
       EXPECT_EQ(blk.height, 1);
@@ -48,7 +49,7 @@ TEST(BlockSize, UInterleavedRegular)
    };
 
    for (unsigned i = 0; i < ARRAY_SIZE(format); ++i) {
-      struct pan_block_size blk = panfrost_block_size(
+      struct pan_image_block_size blk = pan_image_block_size_el(
          DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED, format[i]);
 
       EXPECT_EQ(blk.width, 16);
@@ -61,7 +62,7 @@ TEST(BlockSize, UInterleavedBlockCompressed)
    enum pipe_format format[] = {PIPE_FORMAT_ETC2_RGB8, PIPE_FORMAT_ASTC_5x5};
 
    for (unsigned i = 0; i < ARRAY_SIZE(format); ++i) {
-      struct pan_block_size blk = panfrost_block_size(
+      struct pan_image_block_size blk = pan_image_block_size_el(
          DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED, format[i]);
 
       EXPECT_EQ(blk.width, 4);
@@ -80,7 +81,8 @@ TEST(BlockSize, AFBCFormatInvariant16x16)
                               AFBC_FORMAT_MOD_SPARSE | AFBC_FORMAT_MOD_YTR);
 
    for (unsigned i = 0; i < ARRAY_SIZE(format); ++i) {
-      struct pan_block_size blk = panfrost_block_size(modifier, format[i]);
+      struct pan_image_block_size blk =
+         pan_image_block_size_el(modifier, format[i]);
 
       EXPECT_EQ(blk.width, 16);
       EXPECT_EQ(blk.height, 16);
@@ -98,7 +100,8 @@ TEST(BlockSize, AFBCFormatInvariant32x8)
                               AFBC_FORMAT_MOD_SPARSE | AFBC_FORMAT_MOD_YTR);
 
    for (unsigned i = 0; i < ARRAY_SIZE(format); ++i) {
-      struct pan_block_size blk = panfrost_block_size(modifier, format[i]);
+      struct pan_image_block_size blk =
+         pan_image_block_size_el(modifier, format[i]);
 
       EXPECT_EQ(blk.width, 32);
       EXPECT_EQ(blk.height, 8);
@@ -111,13 +114,13 @@ TEST(BlockSize, AFBCSuperblock16x16)
       DRM_FORMAT_MOD_ARM_AFBC(AFBC_FORMAT_MOD_BLOCK_SIZE_16x16 |
                               AFBC_FORMAT_MOD_SPARSE | AFBC_FORMAT_MOD_YTR);
 
-   EXPECT_EQ(panfrost_afbc_superblock_size(modifier).width, 16);
-   EXPECT_EQ(panfrost_afbc_superblock_width(modifier), 16);
+   EXPECT_EQ(pan_afbc_superblock_size(modifier).width, 16);
+   EXPECT_EQ(pan_afbc_superblock_width(modifier), 16);
 
-   EXPECT_EQ(panfrost_afbc_superblock_size(modifier).height, 16);
-   EXPECT_EQ(panfrost_afbc_superblock_height(modifier), 16);
+   EXPECT_EQ(pan_afbc_superblock_size(modifier).height, 16);
+   EXPECT_EQ(pan_afbc_superblock_height(modifier), 16);
 
-   EXPECT_FALSE(panfrost_afbc_is_wide(modifier));
+   EXPECT_FALSE(pan_afbc_is_wide(modifier));
 }
 
 TEST(BlockSize, AFBCSuperblock32x8)
@@ -125,13 +128,13 @@ TEST(BlockSize, AFBCSuperblock32x8)
    uint64_t modifier = DRM_FORMAT_MOD_ARM_AFBC(AFBC_FORMAT_MOD_BLOCK_SIZE_32x8 |
                                                AFBC_FORMAT_MOD_SPARSE);
 
-   EXPECT_EQ(panfrost_afbc_superblock_size(modifier).width, 32);
-   EXPECT_EQ(panfrost_afbc_superblock_width(modifier), 32);
+   EXPECT_EQ(pan_afbc_superblock_size(modifier).width, 32);
+   EXPECT_EQ(pan_afbc_superblock_width(modifier), 32);
 
-   EXPECT_EQ(panfrost_afbc_superblock_size(modifier).height, 8);
-   EXPECT_EQ(panfrost_afbc_superblock_height(modifier), 8);
+   EXPECT_EQ(pan_afbc_superblock_size(modifier).height, 8);
+   EXPECT_EQ(pan_afbc_superblock_height(modifier), 8);
 
-   EXPECT_TRUE(panfrost_afbc_is_wide(modifier));
+   EXPECT_TRUE(pan_afbc_is_wide(modifier));
 }
 
 TEST(BlockSize, AFBCSuperblock64x4)
@@ -139,13 +142,13 @@ TEST(BlockSize, AFBCSuperblock64x4)
    uint64_t modifier = DRM_FORMAT_MOD_ARM_AFBC(AFBC_FORMAT_MOD_BLOCK_SIZE_64x4 |
                                                AFBC_FORMAT_MOD_SPARSE);
 
-   EXPECT_EQ(panfrost_afbc_superblock_size(modifier).width, 64);
-   EXPECT_EQ(panfrost_afbc_superblock_width(modifier), 64);
+   EXPECT_EQ(pan_afbc_superblock_size(modifier).width, 64);
+   EXPECT_EQ(pan_afbc_superblock_width(modifier), 64);
 
-   EXPECT_EQ(panfrost_afbc_superblock_size(modifier).height, 4);
-   EXPECT_EQ(panfrost_afbc_superblock_height(modifier), 4);
+   EXPECT_EQ(pan_afbc_superblock_size(modifier).height, 4);
+   EXPECT_EQ(pan_afbc_superblock_height(modifier), 4);
 
-   EXPECT_TRUE(panfrost_afbc_is_wide(modifier));
+   EXPECT_TRUE(pan_afbc_is_wide(modifier));
 }
 
 /* Calculate Bifrost line stride, since we have reference formulas for Bifrost
@@ -176,7 +179,7 @@ TEST(AFBCStride, Linear)
    for (unsigned m = 0; m < ARRAY_SIZE(modifiers); ++m) {
       uint64_t modifier = modifiers[m];
 
-      uint32_t sw = panfrost_afbc_superblock_width(modifier);
+      uint32_t sw = pan_afbc_superblock_width(modifier);
       uint32_t cases[] = {1, 4, 17, 39};
 
       for (unsigned i = 0; i < ARRAY_SIZE(cases); ++i) {
@@ -205,7 +208,7 @@ TEST(AFBCStride, Tiled)
    for (unsigned m = 0; m < ARRAY_SIZE(modifiers); ++m) {
       uint64_t modifier = modifiers[m];
 
-      uint32_t sw = panfrost_afbc_superblock_width(modifier);
+      uint32_t sw = pan_afbc_superblock_width(modifier);
       uint32_t cases[] = {1, 4, 17, 39};
 
       for (unsigned i = 0; i < ARRAY_SIZE(cases); ++i) {
@@ -220,92 +223,128 @@ TEST(AFBCStride, Tiled)
    }
 }
 
-TEST(LegacyStride, FromLegacyLinear)
+static unsigned
+row_stride_from_wsi_pitch(unsigned row_pitch_B, unsigned width_px,
+                          enum pipe_format fmt, uint64_t mod)
 {
-   EXPECT_EQ(panfrost_from_legacy_stride(1920 * 4, PIPE_FORMAT_R8G8B8A8_UINT,
-                                         DRM_FORMAT_MOD_LINEAR),
-             1920 * 4);
-   EXPECT_EQ(panfrost_from_legacy_stride(53, PIPE_FORMAT_R8_SNORM,
-                                         DRM_FORMAT_MOD_LINEAR),
-             53);
-   EXPECT_EQ(panfrost_from_legacy_stride(60, PIPE_FORMAT_ETC2_RGB8,
-                                         DRM_FORMAT_MOD_LINEAR),
-             60);
+   const struct pan_image_wsi_layout wsi_l = {
+      .row_pitch_B = row_pitch_B,
+   };
+   struct pan_image_props p = {
+      .modifier = mod,
+      .format = fmt,
+      .extent_px = {
+         .width = width_px,
+         .height = 1,
+         .depth = 1,
+      },
+      .nr_samples = 1,
+      .dim = MALI_TEXTURE_DIMENSION_2D,
+      .nr_slices = 1,
+      .array_size = 1,
+   };
+   struct pan_image_layout l = {};
+
+   pan_image_layout_init(0, &p, &wsi_l, &l);
+
+   return l.slices[0].row_stride_B;
 }
 
-TEST(LegacyStride, FromLegacyInterleaved)
+TEST(WSI, FromWSILinear)
 {
    EXPECT_EQ(
-      panfrost_from_legacy_stride(1920 * 4, PIPE_FORMAT_R8G8B8A8_UINT,
-                                  DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED),
+      row_stride_from_wsi_pitch(1920 * 4, 1920, PIPE_FORMAT_R8G8B8A8_UINT,
+                                DRM_FORMAT_MOD_LINEAR),
+      1920 * 4);
+   EXPECT_EQ(row_stride_from_wsi_pitch(64, 53, PIPE_FORMAT_R8_SNORM,
+                                       DRM_FORMAT_MOD_LINEAR),
+             64);
+   EXPECT_EQ(row_stride_from_wsi_pitch(64, 32, PIPE_FORMAT_ETC2_RGB8,
+                                       DRM_FORMAT_MOD_LINEAR),
+             64);
+}
+
+TEST(WSI, FromWSIInterleaved)
+{
+   EXPECT_EQ(
+      row_stride_from_wsi_pitch(1920 * 4, 1920, PIPE_FORMAT_R8G8B8A8_UINT,
+                                DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED),
       1920 * 4 * 16);
 
    EXPECT_EQ(
-      panfrost_from_legacy_stride(53, PIPE_FORMAT_R8_SNORM,
-                                  DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED),
-      53 * 16);
+      row_stride_from_wsi_pitch(64, 53, PIPE_FORMAT_R8_SNORM,
+                                DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED),
+      64 * 16);
 
    EXPECT_EQ(
-      panfrost_from_legacy_stride(60, PIPE_FORMAT_ETC2_RGB8,
-                                  DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED),
-      60 * 4);
+      row_stride_from_wsi_pitch(64, 32, PIPE_FORMAT_ETC2_RGB8,
+                                DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED),
+      64 * 4);
 }
 
-TEST(LegacyStride, FromLegacyAFBC)
+TEST(WSI, FromWSIAFBC)
 {
    uint64_t modifier =
       DRM_FORMAT_MOD_ARM_AFBC(AFBC_FORMAT_MOD_BLOCK_SIZE_32x8 |
                               AFBC_FORMAT_MOD_SPARSE | AFBC_FORMAT_MOD_YTR);
 
-   EXPECT_EQ(panfrost_from_legacy_stride(1920 * 4, PIPE_FORMAT_R8G8B8A8_UINT,
-                                         modifier),
+   EXPECT_EQ(row_stride_from_wsi_pitch(1920 * 4, 1920,
+                                       PIPE_FORMAT_R8G8B8A8_UINT, modifier),
              60 * 16);
-   EXPECT_EQ(panfrost_from_legacy_stride(64, PIPE_FORMAT_R8_SNORM, modifier),
+   EXPECT_EQ(row_stride_from_wsi_pitch(64, 64, PIPE_FORMAT_R8_SNORM, modifier),
              2 * 16);
 }
 
 /* dEQP-GLES3.functional.texture.format.compressed.etc1_2d_pot */
 TEST(Layout, ImplicitLayoutInterleavedETC2)
 {
-   struct pan_image_layout l = {
+   struct pan_image_props p = {
       .modifier = DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED,
       .format = PIPE_FORMAT_ETC2_RGB8,
-      .width = 128,
-      .height = 128,
-      .depth = 1,
+      .extent_px = {
+         .width = 128,
+         .height = 128,
+         .depth = 1,
+      },
       .nr_samples = 1,
       .dim = MALI_TEXTURE_DIMENSION_2D,
-      .nr_slices = 8};
+      .nr_slices = 8,
+   };
+   struct pan_image_layout l = {};
 
    unsigned offsets[9] = {0,     8192,  10240, 10752, 10880,
                           11008, 11136, 11264, 11392};
 
-   ASSERT_TRUE(pan_image_layout_init(0, &l, NULL));
+   ASSERT_TRUE(pan_image_layout_init(0, &p, NULL, &l));
 
    for (unsigned i = 0; i < 8; ++i) {
       unsigned size = (offsets[i + 1] - offsets[i]);
-      EXPECT_EQ(l.slices[i].offset, offsets[i]);
+      EXPECT_EQ(l.slices[i].offset_B, offsets[i]);
 
       if (size == 64)
-         EXPECT_TRUE(l.slices[i].size < 64);
+         EXPECT_TRUE(l.slices[i].size_B < 64);
       else
-         EXPECT_EQ(l.slices[i].size, size);
+         EXPECT_EQ(l.slices[i].size_B, size);
    }
 }
 
 TEST(Layout, ImplicitLayoutInterleavedASTC5x5)
 {
-   struct pan_image_layout l = {
+   struct pan_image_props p = {
       .modifier = DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED,
       .format = PIPE_FORMAT_ASTC_5x5,
-      .width = 50,
-      .height = 50,
-      .depth = 1,
+      .extent_px = {
+         .width = 50,
+         .height = 50,
+         .depth = 1,
+      },
       .nr_samples = 1,
       .dim = MALI_TEXTURE_DIMENSION_2D,
-      .nr_slices = 1};
+      .nr_slices = 1,
+   };
+   struct pan_image_layout l = {};
 
-   ASSERT_TRUE(pan_image_layout_init(0, &l, NULL));
+   ASSERT_TRUE(pan_image_layout_init(0, &p, NULL, &l));
 
    /* The image is 50x50 pixels, with 5x5 blocks. So it is a 10x10 grid of ASTC
     * blocks. 4x4 tiles of ASTC blocks are u-interleaved, so we have to round up
@@ -313,34 +352,39 @@ TEST(Layout, ImplicitLayoutInterleavedASTC5x5)
     * 16 bytes (128-bits), so we require 2304 bytes, with a row stride of 12 *
     * 16 * 4 = 192 bytes.
     */
-   EXPECT_EQ(l.slices[0].offset, 0);
-   EXPECT_EQ(l.slices[0].row_stride, 768);
-   EXPECT_EQ(l.slices[0].surface_stride, 2304);
-   EXPECT_EQ(l.slices[0].size, 2304);
+   EXPECT_EQ(l.slices[0].offset_B, 0);
+   EXPECT_EQ(l.slices[0].row_stride_B, 768);
+   EXPECT_EQ(l.slices[0].surface_stride_B, 2304);
+   EXPECT_EQ(l.slices[0].size_B, 2304);
 }
 
 TEST(Layout, ImplicitLayoutLinearASTC5x5)
 {
-   struct pan_image_layout l = {.modifier = DRM_FORMAT_MOD_LINEAR,
-                                .format = PIPE_FORMAT_ASTC_5x5,
-                                .width = 50,
-                                .height = 50,
-                                .depth = 1,
-                                .nr_samples = 1,
-                                .dim = MALI_TEXTURE_DIMENSION_2D,
-                                .nr_slices = 1};
+   struct pan_image_props p = {
+      .modifier = DRM_FORMAT_MOD_LINEAR,
+      .format = PIPE_FORMAT_ASTC_5x5,
+      .extent_px = {
+         .width = 50,
+         .height = 50,
+         .depth = 1,
+      },
+      .nr_samples = 1,
+      .dim = MALI_TEXTURE_DIMENSION_2D,
+      .nr_slices = 1,
+   };
+   struct pan_image_layout l = {};
 
-   ASSERT_TRUE(pan_image_layout_init(0, &l, NULL));
+   ASSERT_TRUE(pan_image_layout_init(0, &p, NULL, &l));
 
    /* The image is 50x50 pixels, with 5x5 blocks. So it is a 10x10 grid of ASTC
     * blocks. Each ASTC block is 16 bytes, so the row stride is 160 bytes,
     * rounded up to the cache line (192 bytes).  There are 10 rows, so we have
     * 1920 bytes total.
     */
-   EXPECT_EQ(l.slices[0].offset, 0);
-   EXPECT_EQ(l.slices[0].row_stride, 192);
-   EXPECT_EQ(l.slices[0].surface_stride, 1920);
-   EXPECT_EQ(l.slices[0].size, 1920);
+   EXPECT_EQ(l.slices[0].offset_B, 0);
+   EXPECT_EQ(l.slices[0].row_stride_B, 192);
+   EXPECT_EQ(l.slices[0].surface_stride_B, 1920);
+   EXPECT_EQ(l.slices[0].size_B, 1920);
 }
 
 /* dEQP-GLES3.functional.texture.format.unsized.rgba_unsigned_byte_3d_pot */
@@ -349,16 +393,21 @@ TEST(AFBCLayout, Linear3D)
    uint64_t modifier = DRM_FORMAT_MOD_ARM_AFBC(
       AFBC_FORMAT_MOD_BLOCK_SIZE_16x16 | AFBC_FORMAT_MOD_SPARSE);
 
-   struct pan_image_layout l = {.modifier = modifier,
-                                .format = PIPE_FORMAT_R8G8B8A8_UNORM,
-                                .width = 8,
-                                .height = 32,
-                                .depth = 16,
-                                .nr_samples = 1,
-                                .dim = MALI_TEXTURE_DIMENSION_3D,
-                                .nr_slices = 1};
+   struct pan_image_props p = {
+      .modifier = modifier,
+      .format = PIPE_FORMAT_R8G8B8A8_UNORM,
+      .extent_px = {
+         .width = 8,
+         .height = 32,
+         .depth = 16,
+      },
+      .nr_samples = 1,
+      .dim = MALI_TEXTURE_DIMENSION_3D,
+      .nr_slices = 1,
+   };
+   struct pan_image_layout l = {};
 
-   ASSERT_TRUE(pan_image_layout_init(0, &l, NULL));
+   ASSERT_TRUE(pan_image_layout_init(0, &p, NULL, &l));
 
    /* AFBC Surface stride is bytes between consecutive surface headers, which is
     * the header size since this is a 3D texture. At superblock size 16x16, the
@@ -373,13 +422,13 @@ TEST(AFBCLayout, Linear3D)
     * Each 16x16 superblock consumes 16 * 16 * 4 = 1024 bytes. There are 2 * 1 *
     * 16 superblocks in the image, so body size is 32768.
     */
-   EXPECT_EQ(l.slices[0].offset, 0);
-   EXPECT_EQ(l.slices[0].row_stride, 16);
-   EXPECT_EQ(l.slices[0].afbc.header_size, 1024);
-   EXPECT_EQ(l.slices[0].afbc.body_size, 32768);
-   EXPECT_EQ(l.slices[0].afbc.surface_stride, 64);
-   EXPECT_EQ(l.slices[0].surface_stride, 2048); /* XXX: Not meaningful? */
-   EXPECT_EQ(l.slices[0].size, 32768); /* XXX: Not used by anything and wrong */
+   EXPECT_EQ(l.slices[0].offset_B, 0);
+   EXPECT_EQ(l.slices[0].row_stride_B, 16);
+   EXPECT_EQ(l.slices[0].afbc.header_size_B, 1024);
+   EXPECT_EQ(l.slices[0].afbc.body_size_B, 32768);
+   EXPECT_EQ(l.slices[0].afbc.surface_stride_B, 64);
+   EXPECT_EQ(l.slices[0].surface_stride_B, 2048); /* XXX: Not meaningful? */
+   EXPECT_EQ(l.slices[0].size_B, 32768); /* XXX: Not used by anything and wrong */
 }
 
 TEST(AFBCLayout, Tiled16x16)
@@ -388,16 +437,21 @@ TEST(AFBCLayout, Tiled16x16)
       DRM_FORMAT_MOD_ARM_AFBC(AFBC_FORMAT_MOD_BLOCK_SIZE_16x16 |
                               AFBC_FORMAT_MOD_TILED | AFBC_FORMAT_MOD_SPARSE);
 
-   struct pan_image_layout l = {.modifier = modifier,
-                                .format = PIPE_FORMAT_R8G8B8A8_UNORM,
-                                .width = 917,
-                                .height = 417,
-                                .depth = 1,
-                                .nr_samples = 1,
-                                .dim = MALI_TEXTURE_DIMENSION_2D,
-                                .nr_slices = 1};
+   struct pan_image_props p = {
+      .modifier = modifier,
+      .format = PIPE_FORMAT_R8G8B8A8_UNORM,
+      .extent_px = {
+         .width = 917,
+         .height = 417,
+         .depth = 1,
+      },
+      .nr_samples = 1,
+      .dim = MALI_TEXTURE_DIMENSION_2D,
+      .nr_slices = 1,
+   };
+   struct pan_image_layout l = {};
 
-   ASSERT_TRUE(pan_image_layout_init(0, &l, NULL));
+   ASSERT_TRUE(pan_image_layout_init(0, &p, NULL, &l));
 
    /* The image is 917x417. Superblocks are 16x16, so there are 58x27
     * superblocks. Superblocks are grouped into 8x8 tiles, so there are 8x4
@@ -411,12 +465,12 @@ TEST(AFBCLayout, Tiled16x16)
     *
     * In total, the AFBC surface is 32768 + 2097152 = 2129920 bytes.
     */
-   EXPECT_EQ(l.slices[0].offset, 0);
-   EXPECT_EQ(l.slices[0].row_stride, 8192);
-   EXPECT_EQ(l.slices[0].afbc.header_size, 32768);
-   EXPECT_EQ(l.slices[0].afbc.body_size, 2097152);
-   EXPECT_EQ(l.slices[0].surface_stride, 2129920);
-   EXPECT_EQ(l.slices[0].size, 2129920);
+   EXPECT_EQ(l.slices[0].offset_B, 0);
+   EXPECT_EQ(l.slices[0].row_stride_B, 8192);
+   EXPECT_EQ(l.slices[0].afbc.header_size_B, 32768);
+   EXPECT_EQ(l.slices[0].afbc.body_size_B, 2097152);
+   EXPECT_EQ(l.slices[0].surface_stride_B, 2129920);
+   EXPECT_EQ(l.slices[0].size_B, 2129920);
 }
 
 TEST(AFBCLayout, Linear16x16Minimal)
@@ -424,24 +478,29 @@ TEST(AFBCLayout, Linear16x16Minimal)
    uint64_t modifier = DRM_FORMAT_MOD_ARM_AFBC(
       AFBC_FORMAT_MOD_BLOCK_SIZE_16x16 | AFBC_FORMAT_MOD_SPARSE);
 
-   struct pan_image_layout l = {.modifier = modifier,
-                                .format = PIPE_FORMAT_R8_UNORM,
-                                .width = 1,
-                                .height = 1,
-                                .depth = 1,
-                                .nr_samples = 1,
-                                .dim = MALI_TEXTURE_DIMENSION_2D,
-                                .nr_slices = 1};
+   struct pan_image_props p = {
+      .modifier = modifier,
+      .format = PIPE_FORMAT_R8_UNORM,
+      .extent_px = {
+         .width = 1,
+         .height = 1,
+         .depth = 1,
+      },
+      .nr_samples = 1,
+      .dim = MALI_TEXTURE_DIMENSION_2D,
+      .nr_slices = 1,
+   };
+   struct pan_image_layout l = {};
 
-   ASSERT_TRUE(pan_image_layout_init(0, &l, NULL));
+   ASSERT_TRUE(pan_image_layout_init(0, &p, NULL, &l));
 
    /* Image is 1x1 to test for correct alignment everywhere. */
-   EXPECT_EQ(l.slices[0].offset, 0);
-   EXPECT_EQ(l.slices[0].row_stride, 16);
-   EXPECT_EQ(l.slices[0].afbc.header_size, 64);
-   EXPECT_EQ(l.slices[0].afbc.body_size, 32 * 8);
-   EXPECT_EQ(l.slices[0].surface_stride, 64 + (32 * 8));
-   EXPECT_EQ(l.slices[0].size, 64 + (32 * 8));
+   EXPECT_EQ(l.slices[0].offset_B, 0);
+   EXPECT_EQ(l.slices[0].row_stride_B, 16);
+   EXPECT_EQ(l.slices[0].afbc.header_size_B, 64);
+   EXPECT_EQ(l.slices[0].afbc.body_size_B, 32 * 8);
+   EXPECT_EQ(l.slices[0].surface_stride_B, 64 + (32 * 8));
+   EXPECT_EQ(l.slices[0].size_B, 64 + (32 * 8));
 }
 
 TEST(AFBCLayout, Linear16x16Minimalv6)
@@ -449,24 +508,29 @@ TEST(AFBCLayout, Linear16x16Minimalv6)
    uint64_t modifier = DRM_FORMAT_MOD_ARM_AFBC(
       AFBC_FORMAT_MOD_BLOCK_SIZE_16x16 | AFBC_FORMAT_MOD_SPARSE);
 
-   struct pan_image_layout l = {.modifier = modifier,
-                                .format = PIPE_FORMAT_R8_UNORM,
-                                .width = 1,
-                                .height = 1,
-                                .depth = 1,
-                                .nr_samples = 1,
-                                .dim = MALI_TEXTURE_DIMENSION_2D,
-                                .nr_slices = 1};
+   struct pan_image_props p = {
+      .modifier = modifier,
+      .format = PIPE_FORMAT_R8_UNORM,
+      .extent_px = {
+         .width = 1,
+         .height = 1,
+         .depth = 1,
+      },
+      .nr_samples = 1,
+      .dim = MALI_TEXTURE_DIMENSION_2D,
+      .nr_slices = 1,
+   };
+   struct pan_image_layout l = {};
 
-   ASSERT_TRUE(pan_image_layout_init(6, &l, NULL));
+   ASSERT_TRUE(pan_image_layout_init(6, &p, NULL, &l));
 
    /* Image is 1x1 to test for correct alignment everywhere. */
-   EXPECT_EQ(l.slices[0].offset, 0);
-   EXPECT_EQ(l.slices[0].row_stride, 16);
-   EXPECT_EQ(l.slices[0].afbc.header_size, 128);
-   EXPECT_EQ(l.slices[0].afbc.body_size, 32 * 8);
-   EXPECT_EQ(l.slices[0].surface_stride, 128 + (32 * 8));
-   EXPECT_EQ(l.slices[0].size, 128 + (32 * 8));
+   EXPECT_EQ(l.slices[0].offset_B, 0);
+   EXPECT_EQ(l.slices[0].row_stride_B, 16);
+   EXPECT_EQ(l.slices[0].afbc.header_size_B, 128);
+   EXPECT_EQ(l.slices[0].afbc.body_size_B, 32 * 8);
+   EXPECT_EQ(l.slices[0].surface_stride_B, 128 + (32 * 8));
+   EXPECT_EQ(l.slices[0].size_B, 128 + (32 * 8));
 }
 
 TEST(AFBCLayout, Tiled16x16Minimal)
@@ -475,22 +539,27 @@ TEST(AFBCLayout, Tiled16x16Minimal)
       DRM_FORMAT_MOD_ARM_AFBC(AFBC_FORMAT_MOD_BLOCK_SIZE_16x16 |
                               AFBC_FORMAT_MOD_TILED | AFBC_FORMAT_MOD_SPARSE);
 
-   struct pan_image_layout l = {.modifier = modifier,
-                                .format = PIPE_FORMAT_R8_UNORM,
-                                .width = 1,
-                                .height = 1,
-                                .depth = 1,
-                                .nr_samples = 1,
-                                .dim = MALI_TEXTURE_DIMENSION_2D,
-                                .nr_slices = 1};
+   struct pan_image_props p = {
+      .modifier = modifier,
+      .format = PIPE_FORMAT_R8_UNORM,
+      .extent_px = {
+         .width = 1,
+         .height = 1,
+         .depth = 1,
+      },
+      .nr_samples = 1,
+      .dim = MALI_TEXTURE_DIMENSION_2D,
+      .nr_slices = 1,
+   };
+   struct pan_image_layout l = {};
 
-   ASSERT_TRUE(pan_image_layout_init(0, &l, NULL));
+   ASSERT_TRUE(pan_image_layout_init(0, &p, NULL, &l));
 
    /* Image is 1x1 to test for correct alignment everywhere. */
-   EXPECT_EQ(l.slices[0].offset, 0);
-   EXPECT_EQ(l.slices[0].row_stride, 16 * 8 * 8);
-   EXPECT_EQ(l.slices[0].afbc.header_size, 4096);
-   EXPECT_EQ(l.slices[0].afbc.body_size, 32 * 8 * 8 * 8);
-   EXPECT_EQ(l.slices[0].surface_stride, 4096 + (32 * 8 * 8 * 8));
-   EXPECT_EQ(l.slices[0].size, 4096 + (32 * 8 * 8 * 8));
+   EXPECT_EQ(l.slices[0].offset_B, 0);
+   EXPECT_EQ(l.slices[0].row_stride_B, 16 * 8 * 8);
+   EXPECT_EQ(l.slices[0].afbc.header_size_B, 4096);
+   EXPECT_EQ(l.slices[0].afbc.body_size_B, 32 * 8 * 8 * 8);
+   EXPECT_EQ(l.slices[0].surface_stride_B, 4096 + (32 * 8 * 8 * 8));
+   EXPECT_EQ(l.slices[0].size_B, 4096 + (32 * 8 * 8 * 8));
 }

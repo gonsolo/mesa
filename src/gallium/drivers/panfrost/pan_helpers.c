@@ -70,11 +70,16 @@ panfrost_analyze_sysvals(struct panfrost_compiled_shader *ss)
          dirty |= PAN_DIRTY_DRAWID;
          break;
 
+      case PAN_SYSVAL_BLEND_CONSTANTS:
+         dirty |= PAN_DIRTY_BLEND;
+         break;
+
       case PAN_SYSVAL_SAMPLE_POSITIONS:
       case PAN_SYSVAL_MULTISAMPLED:
       case PAN_SYSVAL_RT_CONVERSION:
          /* Nothing beyond the batch itself */
          break;
+
       default:
          unreachable("Invalid sysval");
       }
@@ -104,7 +109,7 @@ panfrost_get_index_buffer(struct panfrost_batch *batch,
    } else {
       /* Otherwise, we need to upload to transient memory */
       const uint8_t *ibuf8 = (const uint8_t *)info->index.user;
-      struct panfrost_ptr T = pan_pool_alloc_aligned(
+      struct pan_ptr T = pan_pool_alloc_aligned(
          &batch->pool.base, draw->count * info->index_size, info->index_size);
 
       memcpy(T.cpu, ibuf8 + offset, draw->count * info->index_size);
@@ -140,9 +145,9 @@ panfrost_get_index_buffer_bounded(struct panfrost_batch *batch,
       needs_indices = false;
    } else if (!info->has_user_indices) {
       /* Check the cache */
-      needs_indices = !panfrost_minmax_cache_get(
-         rsrc->index_cache, info->index_size, draw->start, draw->count,
-         min_index, max_index);
+      needs_indices =
+         !pan_minmax_cache_get(rsrc->index_cache, info->index_size, draw->start,
+                               draw->count, min_index, max_index);
    }
 
    if (needs_indices) {
@@ -150,9 +155,8 @@ panfrost_get_index_buffer_bounded(struct panfrost_batch *batch,
       u_vbuf_get_minmax_index(&ctx->base, info, draw, min_index, max_index);
 
       if (!info->has_user_indices)
-         panfrost_minmax_cache_add(rsrc->index_cache, info->index_size,
-                                   draw->start, draw->count,
-                                   *min_index, *max_index);
+         pan_minmax_cache_add(rsrc->index_cache, info->index_size, draw->start,
+                              draw->count, *min_index, *max_index);
    }
 
    return panfrost_get_index_buffer(batch, info, draw);
@@ -210,7 +214,7 @@ panfrost_set_batch_masks_blend(struct panfrost_batch *batch)
    struct panfrost_blend_state *blend = ctx->blend;
 
    for (unsigned i = 0; i < batch->key.nr_cbufs; ++i) {
-      if (blend->info[i].enabled && batch->key.cbufs[i])
+      if (blend->info[i].enabled && batch->key.cbufs[i].texture)
          panfrost_draw_target(batch, PIPE_CLEAR_COLOR0 << i);
    }
 }

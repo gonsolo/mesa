@@ -54,6 +54,9 @@ extern "C" {
 #define PIPE_DEFAULT_INTRA_IDR_PERIOD 30
 #define PIPE_H2645_EXTENDED_SAR       255
 #define PIPE_ENC_ROI_REGION_NUM_MAX   32
+#define PIPE_ENC_DIRTY_RECTS_NUM_MAX 256
+#define PIPE_ENC_MOVE_RECTS_NUM_MAX 256
+#define PIPE_ENC_MOVE_MAP_MAX_HINTS 31
 #define PIPE_H2645_LIST_REF_INVALID_ENTRY 0xff
 #define PIPE_H265_MAX_LONG_TERM_REF_PICS_SPS 32
 #define PIPE_H265_MAX_LONG_TERM_PICS 16
@@ -226,6 +229,7 @@ struct pipe_picture_desc
    enum pipe_video_profile profile;
    enum pipe_video_entrypoint entry_point;
    bool protected_playback;
+   bool cenc;
    uint8_t *decrypt_key;
    uint32_t key_size;
    enum pipe_format input_format;
@@ -521,6 +525,91 @@ struct pipe_enc_roi
    struct pipe_enc_region_in_roi region[PIPE_ENC_ROI_REGION_NUM_MAX];
 };
 
+enum pipe_enc_dirty_info_type
+{
+   PIPE_ENC_DIRTY_INFO_TYPE_DIRTY = 0,
+   PIPE_ENC_DIRTY_INFO_TYPE_SKIP = 1,
+};
+
+enum pipe_enc_dirty_info_input_mode
+{
+   /* Requires PIPE_VIDEO_CAP_ENC_DIRTY_RECTS */
+   PIPE_ENC_DIRTY_INFO_INPUT_MODE_RECTS = 0,
+   /* Requires PIPE_VIDEO_CAP_ENC_DIRTY_MAPS */
+   PIPE_ENC_DIRTY_INFO_INPUT_MODE_MAP = 1,
+};
+
+struct pipe_enc_dirty_info
+{
+   uint8_t dpb_reference_index; /* index in dpb for the recon pic the info refers to */
+   bool full_frame_skip;
+   enum pipe_enc_dirty_info_type dirty_info_type;
+
+   /* Selects the input mode and app sets different params below */
+   enum pipe_enc_dirty_info_input_mode input_mode;
+
+   /* Used with PIPE_ENC_DIRTY_INFO_INPUT_MODE_RECTS */
+   unsigned int num_rects;
+   struct
+   {
+      uint32_t top;
+      uint32_t left;
+      uint32_t right;
+      uint32_t bottom;
+   } rects[PIPE_ENC_DIRTY_RECTS_NUM_MAX];
+
+   /* Used with PIPE_ENC_DIRTY_INFO_INPUT_MODE_MAP */
+   struct pipe_resource *map;
+};
+
+enum pipe_enc_move_info_precision_unit
+{
+   PIPE_ENC_MOVE_INFO_PRECISION_UNIT_FULL_PIXEL = 0,
+   PIPE_ENC_MOVE_INFO_PRECISION_UNIT_HALF_PIXEL = 1,
+   PIPE_ENC_MOVE_INFO_PRECISION_UNIT_QUARTER_PIXEL = 2,
+};
+
+enum pipe_enc_move_info_input_mode
+{
+   PIPE_ENC_MOVE_INFO_INPUT_MODE_DISABLED = 0,
+   /* Requires PIPE_VIDEO_CAP_ENC_MOVE_RECTS */
+   PIPE_ENC_MOVE_INFO_INPUT_MODE_RECTS = 1,
+   /* Requires PIPE_VIDEO_CAP_ENC_MOTION_VECTOR_MAPS */
+   PIPE_ENC_MOVE_INFO_INPUT_MODE_MAP = 2,
+};
+
+struct pipe_enc_move_info
+{
+   enum pipe_enc_move_info_input_mode input_mode;
+
+   /* Used with PIPE_ENC_MOVE_INFO_INPUT_MODE_MAP */
+   /* Contains the motion hints */
+   struct pipe_resource *gpu_motion_vectors_map[PIPE_ENC_MOVE_MAP_MAX_HINTS];
+   /* contains the DPB index the motion hints apply to, or 255 if no motion hint */
+   struct pipe_resource *gpu_motion_metadata_map[PIPE_ENC_MOVE_MAP_MAX_HINTS];
+   /* Indicates how many entries to gpu_motion_vectors_map and gpu_motion_metadata_map */
+   uint32_t num_hints;
+
+   /* Used with PIPE_ENC_MOVE_INFO_INPUT_MODE_RECTS */
+   unsigned int num_rects;
+   struct
+   {
+      struct {
+         uint32_t x;
+         uint32_t y;
+      } source_point;
+      struct {
+         uint32_t top;
+         uint32_t left;
+         uint32_t right;
+         uint32_t bottom;
+      } dest_rect;
+   } rects[PIPE_ENC_MOVE_RECTS_NUM_MAX];
+   uint8_t dpb_reference_index; /* index in dpb for the recon pic the rects refer to */
+   enum pipe_enc_move_info_precision_unit precision;
+   bool overlapping_rects;
+};
+
 struct pipe_enc_raw_header
 {
    uint8_t type; /* nal_unit_type or obu_type */
@@ -802,6 +891,18 @@ struct pipe_h264_enc_picture_desc
    struct pipe_enc_quality_modes quality_modes;
    struct pipe_enc_intra_refresh intra_refresh;
    struct pipe_enc_roi roi;
+   struct pipe_enc_dirty_info dirty_info;
+   struct pipe_enc_move_info move_info;
+
+   /* See PIPE_VIDEO_CAP_ENC_GPU_STATS_QP_MAP */
+   struct pipe_resource *gpu_stats_qp_map;
+   /* See PIPE_VIDEO_CAP_ENC_GPU_STATS_SATD_MAP */
+   struct pipe_resource *gpu_stats_satd_map;
+   /* See PIPE_VIDEO_CAP_ENC_GPU_STATS_RATE_CONTROL_BITS_MAP */
+   struct pipe_resource *gpu_stats_rc_bitallocation_map;
+
+   /* See PIPE_VIDEO_CAP_ENC_QP_MAPS */
+   struct pipe_resource *input_gpu_qpmap;
 
    bool not_referenced;
    bool is_ltr;
@@ -1185,6 +1286,19 @@ struct pipe_h265_enc_picture_desc
    struct pipe_enc_quality_modes quality_modes;
    struct pipe_enc_intra_refresh intra_refresh;
    struct pipe_enc_roi roi;
+   struct pipe_enc_dirty_info dirty_info;
+   struct pipe_enc_move_info move_info;
+
+   /* See PIPE_VIDEO_CAP_ENC_GPU_STATS_QP_MAP */
+   struct pipe_resource *gpu_stats_qp_map;
+   /* See PIPE_VIDEO_CAP_ENC_GPU_STATS_SATD_MAP */
+   struct pipe_resource *gpu_stats_satd_map;
+   /* See PIPE_VIDEO_CAP_ENC_GPU_STATS_RATE_CONTROL_BITS_MAP */
+   struct pipe_resource *gpu_stats_rc_bitallocation_map;
+
+   /* See PIPE_VIDEO_CAP_ENC_QP_MAPS */
+   struct pipe_resource *input_gpu_qpmap;
+
    unsigned num_ref_idx_l0_active_minus1;
    unsigned num_ref_idx_l1_active_minus1;
    unsigned ref_idx_l0_list[PIPE_H265_MAX_NUM_LIST_REF];
@@ -1364,6 +1478,8 @@ struct pipe_av1_enc_picture_desc
    struct pipe_enc_quality_modes quality_modes;
    struct pipe_enc_intra_refresh intra_refresh;
    struct pipe_enc_roi roi;
+   /* See PIPE_VIDEO_CAP_ENC_QP_MAPS */
+   struct pipe_resource *input_gpu_qpmap;
    uint32_t tile_rows;
    uint32_t tile_cols;
    unsigned num_tile_groups;
@@ -1553,7 +1669,6 @@ struct pipe_h265_pps
    uint8_t lists_modification_present_flag;
    uint8_t log2_parallel_merge_level_minus2;
    uint8_t slice_segment_header_extension_present_flag;
-   uint16_t st_rps_bits;
 };
 
 struct pipe_h265_picture_desc
@@ -1590,9 +1705,8 @@ struct pipe_h265_picture_desc
    uint8_t RefPicSetStCurrBefore[8];
    uint8_t RefPicSetStCurrAfter[8];
    uint8_t RefPicSetLtCurr[8];
-   uint8_t RefPicList[PIPE_H265_MAX_SLICES][2][15];
-   bool UseRefPicList;
-   bool UseStRpsBits;
+   uint8_t RefPicList[2][15];
+   bool LtCurrDone;
 
    struct
    {
@@ -2405,7 +2519,12 @@ union pipe_enc_cap_roi {
        * because ROI delta QP is always required when VAConfigAttribRateControl == VA_RC_CQP.
        */
       uint32_t roi_rc_qp_delta_support         : 1;
-      uint32_t reserved                        : 22;
+      /*
+       * Indicates the minimum driver granularity to set a ROI region with a specific QP value.
+       * In other words, the QP delta block granularity pixel size of the hardware encoder.
+       */
+      uint32_t log2_roi_min_block_pixel_size   : 4;
+      uint32_t reserved                        : 18;
 
    } bits;
    uint32_t value;
@@ -2511,6 +2630,194 @@ union pipe_h265_enc_cap_range_extension_flags {
        * Driver Output. Indicates pipe_enc_feature values for setting chroma_qp_offset_list_enabled_flag
        */
       uint32_t supports_chroma_qp_offset_list_enabled_flag: 2;
+   } bits;
+  uint32_t value;
+};
+
+/* Used with PIPE_VIDEO_CAP_ENC_DIRTY_RECTS */
+/* Used with PIPE_VIDEO_CAP_ENC_DIRTY_MAPS */
+union pipe_enc_cap_dirty_info {
+   struct {
+      /*
+       * Driver Output. Indicates support values for setting pipe_enc_dirty_info.full_frame_skip
+       */
+      uint32_t supports_full_frame_skip: 1;
+      /*
+       * Driver Output. Indicates support values for setting pipe_enc_dirty_info.dirty_info_type = PIPE_ENC_DIRTY_INFO_TYPE_SKIP
+       */
+      uint32_t supports_info_type_skip: 1;
+      /*
+       * Driver Output. Indicates support values for setting pipe_enc_dirty_info.dirty_info_type = PIPE_ENC_DIRTY_INFO_TYPE_DIRTY
+       */
+      uint32_t supports_info_type_dirty: 1;
+      /*
+       * Driver Output. Indicates pipe_enc_dirty_info.rects/input_map must cover an entire row of the frame
+       */
+      uint32_t supports_require_full_row: 1;
+      /*
+       * Driver Output. Indicates that to use pipe_enc_dirty_info.rects/input_map the frame must be encoded with PIPE_VIDEO_SLICE_MODE_AUTO
+       * where the driver decides the slice partition for the frame.
+       */
+      uint32_t supports_require_auto_slice_mode: 1;
+      /*
+       * Driver Output. Indicates that to use pipe_enc_dirty_info.rects/input_map the frame must be encoded with SAO filter disabled
+       * For example for HEVC would correspond to pipe_h265_enc_picture_desc.seq.sample_adaptive_offset_enabled_flag)
+       */
+      uint32_t supports_require_sao_filter_disabled: 1;
+      /*
+       * Driver Output. Indicates that to use pipe_enc_dirty_info.rects/input_map the frame must be encoded with LOOP filter disabled
+       * For example for HEVC would correspond to pipe_h265_enc_picture_desc.pic.pps_loop_filter_across_slices_enabled_flag)
+       */
+      uint32_t supports_require_loop_filter_disabled: 1;
+   } bits;
+  uint32_t value;
+};
+
+/* Used with PIPE_VIDEO_CAP_ENC_MOVE_RECTS */
+union pipe_enc_cap_move_rect {
+   struct {
+      /*
+       * Driver Output. Indicates support for setting up to max_motion_hints in pipe_enc_move_info.rects when max_motion_hints > 0.
+       */
+      uint32_t max_motion_hints: 16;
+      /*
+       * Driver Output. Indicates support for sending overlapped rects in pipe_enc_move_info.rects
+       */
+      uint32_t supports_overlapped_rects: 1;
+      /*
+       * Driver Output. Indicates support for setting in pipe_enc_move_info.precision = PIPE_ENC_MOVE_INFO_PRECISION_UNIT_FULL_PIXEL
+       */
+      uint32_t supports_precision_full_pixel: 1;
+      /*
+       * Driver Output. Indicates support for setting in pipe_enc_move_info.precision = PIPE_ENC_MOVE_INFO_PRECISION_UNIT_HALF_PIXEL
+       */
+      uint32_t supports_precision_half_pixel: 1;
+      /*
+       * Driver Output. Indicates support for setting in pipe_enc_move_info.precision = PIPE_ENC_MOVE_INFO_PRECISION_UNIT_QUARTER_PIXEL
+       */
+      uint32_t supports_precision_quarter_pixel: 1;
+   } bits;
+  uint32_t value;
+};
+
+/* Used with PIPE_VIDEO_CAP_ENC_GPU_STATS_QP_MAP */
+/* Used with PIPE_VIDEO_CAP_ENC_GPU_STATS_SATD_MAP */
+/* Used with PIPE_VIDEO_CAP_ENC_GPU_STATS_RATE_CONTROL_BITS_MAP */
+union pipe_enc_cap_gpu_stats_map {
+   struct {
+      /*
+       * Driver Output. Indicates support for writing this map
+         into a GPU resource during encode frame execution
+       */
+      uint32_t supported: 1;
+      /*
+       * Driver Output. Indicates the pipe_format required for
+         the pipe_resource allocation passed to the driver
+       */
+      uint32_t pipe_pixel_format: 9; /* 9 bits for pipe_format < PIPE_FORMAT_COUNT */
+      /*
+       * Driver Output. Indicates the pixel size of the blocks containing
+         the stats. For example log2_values_block_size=4 indicates that
+         the stats blocks will correspond to 16x16 blocks. This also indicates
+         the dimensions of the pipe_resource allocation passed to the driver
+         as the encoded frame dimensions (rounded up to codec block size) divided
+         by 2^log2_values_block_size
+       */
+      uint32_t log2_values_block_size: 4;
+   } bits;
+  uint32_t value;
+};
+
+/* Used with PIPE_VIDEO_CAP_ENC_SLICED_NOTIFICATIONS */
+union pipe_enc_cap_sliced_notifications {
+   struct {
+      /*
+       * Driver Output. Indicates support for sliced notifications
+       */
+      uint32_t supported: 1;
+      /*
+       * Driver Output. When reported indicates that encode_bitstream_sliced
+       * parameter slice_destinations[i] must contain different pipe_resource
+       * allocations for each slice i.
+       *
+       * When NOT reported, indicates that encode_bitstream_sliced
+       * parameter slice_destinations[i] must contain the same pipe_resource
+       * allocation for each slice i. In this case the driver will take care
+       * of suballocating and calculating offsets within the single allocation
+       */
+      uint32_t multiple_buffers_required: 1;
+   } bits;
+  uint32_t value;
+};
+
+/* Used with PIPE_VIDEO_CAP_ENC_QP_MAPS */
+union pipe_enc_cap_qpmap {
+   struct {
+      /*
+       * Driver Output. Indicates support for accepting a QP map input_gpu_qpmap
+         as a GPU resource input during encode frame execution
+       */
+      uint32_t supported: 1;
+      /*
+       * Driver Output. Indicates the pipe_format required for
+         the pipe_resource allocation passed to the driver
+       */
+      uint32_t pipe_pixel_format: 9; /* 9 bits for pipe_format < PIPE_FORMAT_COUNT */
+      /*
+       * Driver Output. Indicates the pixel size of the blocks containing
+         the QP values. For example log2_values_block_size=4 indicates that
+         the QP blocks will correspond to 16x16 blocks. This also indicates
+         the dimensions of the pipe_resource allocation passed to the driver
+         as the encoded frame dimensions (rounded up to codec block size) divided
+         by 2^log2_values_block_size
+       */
+      uint32_t log2_values_block_size: 4;
+   } bits;
+  uint32_t value;
+};
+
+/* Used with PIPE_VIDEO_CAP_ENC_MOTION_VECTOR_MAPS */
+union pipe_enc_cap_motion_vector_map {
+   struct {
+      /*
+       * Driver Output. Indicates how many hint maps are supported in the
+       * motion maps array. Zero indicates no support
+       * for the feature.
+       */
+      uint32_t max_motion_hints: 5; /* Max 31 hints. */
+      /*
+       * Driver Output. Indicates the precision of the motion vectors passed in the motion vectors map
+       */
+      /*
+       * Driver Output. Indicates support for setting in pipe_enc_move_info.precision = PIPE_ENC_MOVE_INFO_PRECISION_UNIT_FULL_PIXEL
+       */
+      uint32_t supports_precision_full_pixel: 1;
+      /*
+       * Driver Output. Indicates support for setting in pipe_enc_move_info.precision = PIPE_ENC_MOVE_INFO_PRECISION_UNIT_HALF_PIXEL
+       */
+      uint32_t supports_precision_half_pixel: 1;
+      /*
+       * Driver Output. Indicates support for setting in pipe_enc_move_info.precision = PIPE_ENC_MOVE_INFO_PRECISION_UNIT_QUARTER_PIXEL
+       */
+      uint32_t supports_precision_quarter_pixel: 1;
+      /*
+       * Driver Output. Indicates if the different motion vectors
+       * in the maps can point to different references in the DPB
+       *  or all must point to the same one on a given frame.
+       */
+      uint32_t support_multiple_dpb_refs: 1;
+      /*
+       * Driver Output. Indicates the pipe_format required for
+       * the pipe_resource allocation with the motion vectors map
+       *  passed to the driver
+       */
+      uint32_t pipe_pixel_vectors_map_format: 9; /* 9 bits for pipe_format < PIPE_FORMAT_COUNT */
+      /*
+       * Driver Output. Indicates the pipe_format required for
+       * the pipe_resource allocation with the motion vectors metadata map
+       * passed to the driver
+       */
+      uint32_t pipe_pixel_vectors_metadata_map_format: 9; /* 9 bits for pipe_format < PIPE_FORMAT_COUNT */
    } bits;
   uint32_t value;
 };

@@ -246,7 +246,7 @@ unsafe impl CLInfo<cl_device_info> for cl_device_id {
             CL_DEVICE_PREFERRED_VECTOR_WIDTH_LONG => v.write::<cl_uint>(1),
             CL_DEVICE_PREFERRED_VECTOR_WIDTH_SHORT => v.write::<cl_uint>(1),
             CL_DEVICE_PREFERRED_WORK_GROUP_SIZE_MULTIPLE => {
-                v.write::<usize>(dev.subgroup_sizes()[0])
+                v.write::<usize>(dev.subgroup_sizes().next().unwrap())
             }
             CL_DEVICE_PRINTF_BUFFER_SIZE => v.write::<usize>(dev.printf_buffer_size()),
             CL_DEVICE_PROFILE => v.write::<&CStr>(if dev.embedded {
@@ -275,11 +275,11 @@ unsafe impl CLInfo<cl_device_info> for cl_device_id {
             ),
             CL_DEVICE_SUB_GROUP_INDEPENDENT_FORWARD_PROGRESS => v.write::<bool>(false),
             CL_DEVICE_SUB_GROUP_SIZES_INTEL => {
-                v.write::<Vec<usize>>(if dev.subgroups_supported() {
-                    dev.subgroup_sizes()
+                if dev.subgroups_supported() {
+                    v.write_iter::<usize>(dev.subgroup_sizes())
                 } else {
-                    vec![0; 1]
-                })
+                    v.write::<&[usize]>(&[0; 1])
+                }
             }
             CL_DEVICE_SVM_CAPABILITIES | CL_DEVICE_SVM_CAPABILITIES_ARM => {
                 v.write::<cl_device_svm_capabilities>(

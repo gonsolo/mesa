@@ -40,9 +40,10 @@ enum {
    DEBUG_PERF_INFO = 0x80,
    DEBUG_LIVE_INFO = 0x100,
    DEBUG_FORCE_WAITDEPS = 0x200,
-   DEBUG_NO_VALIDATE_IR = 0x400,
+   DEBUG_NO_VALIDATE = 0x400,
    DEBUG_NO_SCHED_ILP = 0x800,
    DEBUG_NO_SCHED_VOPD = 0x1000,
+   DEBUG_VALIDATE_OPT = 0x2000,
 };
 
 enum storage_class : uint8_t {
@@ -1888,6 +1889,7 @@ aco_opcode get_vcmp_swapped(aco_opcode op);
 aco_opcode get_vcmpx(aco_opcode op);
 bool is_cmpx(aco_opcode op);
 
+aco_opcode get_swapped_opcode(aco_opcode opcode, unsigned idx0, unsigned idx1);
 bool can_swap_operands(aco_ptr<Instruction>& instr, aco_opcode* new_op, unsigned idx0 = 0,
                        unsigned idx1 = 1);
 
@@ -1896,8 +1898,6 @@ uint32_t get_reduction_identity(ReduceOp op, unsigned idx);
 unsigned get_mimg_nsa_dwords(const Instruction* instr);
 
 unsigned get_vopd_opy_start(const Instruction* instr);
-
-unsigned get_operand_size(aco_ptr<Instruction>& instr, unsigned index);
 
 bool should_form_clause(const Instruction* a, const Instruction* b);
 
@@ -1954,15 +1954,14 @@ enum block_kind {
    block_kind_loop_exit = 1 << 4,
    block_kind_continue = 1 << 5,
    block_kind_break = 1 << 6,
-   block_kind_continue_or_break = 1 << 7,
-   block_kind_branch = 1 << 8,
-   block_kind_merge = 1 << 9,
-   block_kind_invert = 1 << 10,
-   block_kind_discard_early_exit = 1 << 11,
-   block_kind_uses_discard = 1 << 12,
-   block_kind_resume = 1 << 13,
-   block_kind_export_end = 1 << 14,
-   block_kind_end_with_regs = 1 << 15,
+   block_kind_branch = 1 << 7,
+   block_kind_merge = 1 << 8,
+   block_kind_invert = 1 << 9,
+   block_kind_discard_early_exit = 1 << 10,
+   block_kind_uses_discard = 1 << 11,
+   block_kind_resume = 1 << 12,
+   block_kind_export_end = 1 << 13,
+   block_kind_end_with_regs = 1 << 14,
 };
 
 /* CFG */
@@ -2329,7 +2328,8 @@ void _aco_err(Program* program, const char* file, unsigned line, const char* fmt
 
 #define aco_err(program, ...)      _aco_err(program, __FILE__, __LINE__, __VA_ARGS__)
 
-aco::small_vec<uint32_t, 2> get_ops_fixed_to_def(Instruction* instr);
+/* Returns the indices of operands to which definitions are tied to. */
+aco::small_vec<uint32_t, 2> get_tied_defs(Instruction* instr);
 
 /* utilities for dealing with register demand */
 RegisterDemand get_live_changes(Instruction* instr);
@@ -2362,22 +2362,69 @@ dominates_linear(const Block& parent, const Block& child)
           child.linear_dom_post_index <= parent.linear_dom_post_index;
 }
 
+struct aco_type {
+   aco_base_type base_type : 4;
+   uint8_t num_components : 4;
+   uint8_t bit_size;
+
+   inline unsigned bytes() const { return (bit_size * num_components) / 8; }
+   inline unsigned dwords() const { return DIV_ROUND_UP(bytes(), 4); }
+
+   /* Constant size used by Operand::c16/c32/c64/get_const.
+    * 0 means no inline constants are supported for this type.
+    */
+   inline unsigned constant_bits() const
+   {
+      switch (base_type) {
+      case aco_base_type_bfloat: /* XXX might be useful some day. */
+      case aco_base_type_none:
+      case aco_base_type_lanemask: return 0;
+      case aco_base_type_float:
+         if (bit_size == 16 && (num_components == 1 || num_components == 2))
+            return 16;
+         else if (bit_size == 32 && num_components == 1)
+            return 32;
+         else if (bit_size == 64 && num_components == 1)
+            return 64;
+         return 0;
+      case aco_base_type_uint:
+         if (bit_size == 16 && (num_components == 1 || num_components == 2))
+            return 32; /* 16bit int alu uses 32bit float constants. */
+         else if (bit_size == 32 && num_components == 1)
+            return 32;
+         else if (bit_size == 64 && num_components == 1)
+            return 64;
+         return 0;
+      case aco_base_type_int: assert(bit_size == 64 && num_components == 1); return 64;
+      }
+      return 0;
+   }
+};
+
+aco_type get_operand_type(aco_ptr<Instruction>& alu, unsigned index);
+
+struct aco_alu_opcode_info {
+   uint8_t num_operands : 3;
+   uint8_t num_defs : 2;
+   uint8_t input_modifiers : 3;
+   uint8_t output_modifiers : 1;
+   aco_type op_types[4];
+   aco_type def_types[3];
+   fixed_reg op_fixed_reg[4];
+   fixed_reg def_fixed_reg[3];
+};
+
 typedef struct {
    const int16_t opcode_gfx7[static_cast<int>(aco_opcode::num_opcodes)];
    const int16_t opcode_gfx9[static_cast<int>(aco_opcode::num_opcodes)];
    const int16_t opcode_gfx10[static_cast<int>(aco_opcode::num_opcodes)];
    const int16_t opcode_gfx11[static_cast<int>(aco_opcode::num_opcodes)];
    const int16_t opcode_gfx12[static_cast<int>(aco_opcode::num_opcodes)];
-   const std::bitset<static_cast<int>(aco_opcode::num_opcodes)> can_use_input_modifiers;
-   const std::bitset<static_cast<int>(aco_opcode::num_opcodes)> can_use_output_modifiers;
    const std::bitset<static_cast<int>(aco_opcode::num_opcodes)> is_atomic;
    const char* name[static_cast<int>(aco_opcode::num_opcodes)];
    const aco::Format format[static_cast<int>(aco_opcode::num_opcodes)];
-   /* sizes used for input/output modifiers and constants */
-   const unsigned operand_size[static_cast<int>(aco_opcode::num_opcodes)];
    const instr_class classes[static_cast<int>(aco_opcode::num_opcodes)];
-   const uint32_t definitions[static_cast<int>(aco_opcode::num_opcodes)];
-   const uint32_t operands[static_cast<int>(aco_opcode::num_opcodes)];
+   const aco_alu_opcode_info alu_opcode_infos[static_cast<int>(aco_opcode::num_opcodes)];
 } Info;
 
 extern const Info instr_info;

@@ -408,16 +408,12 @@ static inline uint8_t v3d_slot_get_component(struct v3d_varying_slot slot)
 }
 
 struct v3d_key {
-        struct {
-                uint8_t swizzle[4];
-        } tex[V3D_MAX_TEXTURE_SAMPLERS];
-        struct {
-                uint8_t return_size;
-                uint8_t return_channels;
-        } sampler[V3D_MAX_TEXTURE_SAMPLERS];
+        /* Mask of sampler return sizes.
+         * 0 is 16bit
+         * 1 is 32bit
+         */
+        uint32_t sampler_is_32b;
 
-        uint8_t num_tex_used;
-        uint8_t num_samplers_used;
         uint8_t ucp_enables;
         bool is_last_geometry_stage;
         bool robust_uniform_access;
@@ -441,11 +437,6 @@ struct v3d_fs_key {
         uint8_t swap_color_rb;
         /* Mask of which render targets need to be written as 32-bit floats */
         uint8_t f32_color_rb;
-        /* Masks of which render targets need to be written as ints/uints.
-         * Used by gallium to work around lost information in TGSI.
-         */
-        uint8_t int_color_rb;
-        uint8_t uint_color_rb;
 
         /* Color format information per render target. Only set when logic
          * operations are enabled, when fbfetch is in use or when falling back

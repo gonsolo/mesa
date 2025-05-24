@@ -216,20 +216,16 @@ if with_gallium_vdpau
     subdir('targets/vdpau')
   endif
 endif
+if with_gallium_mediafoundation
+  subdir('frontends/mediafoundation')
+  subdir('targets/mediafoundation')
+endif
 if with_dri
   subdir('frontends/dri')
   subdir('targets/dri')
 endif
-if with_gallium_xa
-  subdir('frontends/xa')
-  subdir('targets/xa')
-endif
 if with_platform_haiku
   subdir('frontends/hgl')
-endif
-if with_gallium_st_nine
-  subdir('frontends/nine')
-  subdir('targets/d3dadapter9')
 endif
 if with_gallium_st_d3d10umd
   subdir('frontends/d3d10umd')

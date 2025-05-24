@@ -74,6 +74,7 @@ static void r600_destroy_context(struct pipe_context *context)
 	if (rctx->custom_blend_fastclear) {
 		rctx->b.b.delete_blend_state(&rctx->b.b, rctx->custom_blend_fastclear);
 	}
+	util_framebuffer_init(context, NULL, rctx->framebuffer.fb_cbufs, &rctx->framebuffer.fb_zsbuf);
 	util_unreference_framebuffer_state(&rctx->framebuffer.state);
 
 	if (rctx->gs_rings.gsvs_ring.buffer)
@@ -88,6 +89,16 @@ static void r600_destroy_context(struct pipe_context *context)
 
 	if (rctx->blitter) {
 		util_blitter_destroy(rctx->blitter);
+
+		for (i = 0; i < 4; i++)
+			if (rctx->vs_pos_only[i])
+				rctx->b.b.delete_vs_state(&rctx->b.b, rctx->vs_pos_only[i]);
+
+		for (i = 0; i < 4; i++) {
+			if (rctx->velem_state_readbuf[i]) {
+				rctx->b.b.delete_vertex_elements_state(&rctx->b.b, rctx->velem_state_readbuf[i]);
+			}
+		}
 	}
 	u_suballocator_destroy(&rctx->allocator_fetch_shader);
 
@@ -207,6 +218,24 @@ static struct pipe_context *r600_create_context(struct pipe_screen *screen,
 	rctx->blitter = util_blitter_create(&rctx->b.b);
 	if (rctx->blitter == NULL)
 		goto fail;
+
+	static enum pipe_format formats[4] = {
+		PIPE_FORMAT_R32_UINT,
+		PIPE_FORMAT_R32G32_UINT,
+		PIPE_FORMAT_R32G32B32_UINT,
+		PIPE_FORMAT_R32G32B32A32_UINT
+	};
+
+	struct pipe_vertex_element velem;
+	memset(&velem, 0, sizeof(velem));
+	for (int i = 0; i < 4; i++) {
+		velem.src_format = formats[i];
+		velem.vertex_buffer_index = 0;
+		velem.src_stride = 0;
+		rctx->velem_state_readbuf[i] =
+			rctx->b.b.create_vertex_elements_state(&rctx->b.b, 1, &velem);
+	}
+
 	util_blitter_set_texture_multisample(rctx->blitter, rscreen->has_msaa);
 	rctx->blitter->draw_rectangle = r600_draw_rectangle;
 
@@ -273,8 +302,6 @@ static void r600_init_shader_caps(struct r600_screen *rscreen)
 		caps->max_sampler_views = 16;
 
 		caps->supported_irs = 1 << PIPE_SHADER_IR_NIR;
-		if (i == PIPE_SHADER_COMPUTE)
-			caps->supported_irs |= 1 << PIPE_SHADER_IR_NATIVE;
 
 		caps->max_shader_buffers =
 		caps->max_shader_images =
@@ -299,9 +326,6 @@ static void r600_init_compute_caps(struct r600_screen *screen)
 	struct pipe_compute_caps *caps =
 		(struct pipe_compute_caps *)&rscreen->b.compute_caps;
 
-	snprintf(caps->ir_target, sizeof(caps->ir_target), "%s-r600--",
-		 r600_get_llvm_processor_name(rscreen->family));
-
 	caps->grid_dimension = 3;
 
 	caps->max_grid_size[0] =
@@ -312,12 +336,7 @@ static void r600_init_compute_caps(struct r600_screen *screen)
 	caps->max_block_size[1] =
 	caps->max_block_size[2] = rscreen->gfx_level >= EVERGREEN ? 1024 : 256;
 
-	caps->max_block_size_clover[0] =
-	caps->max_block_size_clover[1] =
-	caps->max_block_size_clover[2] = 256;
-
 	caps->max_threads_per_block = rscreen->gfx_level >= EVERGREEN ? 1024 : 256;
-	caps->max_threads_per_block_clover = 256;
 	caps->address_bits = 32;
 	caps->max_mem_alloc_size = (rscreen->info.max_heap_size_kb / 4) * 1024ull;
 
@@ -332,7 +351,6 @@ static void r600_init_compute_caps(struct r600_screen *screen)
 
 	/* Value reported by the closed source driver. */
 	caps->max_local_size = 32768;
-	caps->max_input_size = 1024;
 	caps->max_clock_frequency = rscreen->info.max_gpu_freq_mhz;
 	caps->max_compute_units = rscreen->info.num_cu;
 	caps->subgroup_sizes = r600_wavefront_size(rscreen->family);
@@ -451,7 +469,8 @@ static void r600_init_screen_caps(struct r600_screen *rscreen)
 	caps->shader_array_components =
 	caps->query_buffer_object =
 	caps->image_store_formatted =
-	caps->alpha_to_coverage_dither_control = family >= CHIP_CEDAR;
+	caps->alpha_to_coverage_dither_control =
+	caps->image_atomic_inc_wrap = family >= CHIP_CEDAR;
 	caps->max_texture_gather_components = family >= CHIP_CEDAR ? 4 : 0;
 	/* kernel command checker support is also required */
 	caps->draw_indirect = family >= CHIP_CEDAR;

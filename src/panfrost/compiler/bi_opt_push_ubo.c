@@ -84,6 +84,15 @@ bi_analyze_ranges(bi_context *ctx)
       assert(ubo < res.nr_blocks);
       assert(channels > 0 && channels <= 4);
 
+      /* Blend constants are handled by bi_pick_blend_constants, don't push
+       * them a second time. */
+      if (ctx->stage == MESA_SHADER_FRAGMENT) {
+         /* PAN_UBO_SYSVALS from the gallium driver */
+         unsigned sysval_ubo = 1;
+         if(ubo == sysval_ubo && word == 0)
+            continue;
+      }
+
       if (word >= MAX_UBO_WORDS)
          continue;
 
@@ -96,12 +105,40 @@ bi_analyze_ranges(bi_context *ctx)
    return res;
 }
 
+/* We always map blend constants from the first slot in the sysval UBO to the
+ * first four FAU words, so that they can be accessed from a consistent
+ * location from the blend shader. */
+static void
+bi_pick_blend_constants(bi_context *ctx, struct bi_ubo_analysis *analysis)
+{
+   /* PAN_UBO_SYSVALS from the gallium driver */
+   unsigned sysval_ubo = 1;
+   unsigned offset = 0;
+
+   assert(ctx->inputs->pushable_ubos & BITFIELD_BIT(sysval_ubo));
+   assert(ctx->info.push->count == 0);
+
+   for (unsigned channel = 0; channel < 4; channel++) {
+      struct pan_ubo_word word = {
+         .ubo = sysval_ubo,
+         .offset = offset + channel * 4,
+      };
+      ctx->info.push->words[ctx->info.push->count++] = word;
+      assert(ctx->info.push->count < PAN_MAX_PUSH);
+   }
+
+   BITSET_SET(analysis->blocks[sysval_ubo].pushed, offset);
+
+   /* The blend constant FAU slots cannot be reordered */
+   ctx->info.push_offset = MAX2(ctx->info.push_offset, ctx->info.push->count);
+}
+
 /* Select UBO words to push. A sophisticated implementation would consider the
  * number of uses and perhaps the control flow to estimate benefit. This is not
  * sophisticated. Select from the last UBO first to prioritize sysvals. */
 
 static void
-bi_pick_ubo(struct panfrost_ubo_push *push, struct bi_ubo_analysis *analysis)
+bi_pick_ubo(struct pan_ubo_push *push, struct bi_ubo_analysis *analysis)
 {
    for (signed ubo = analysis->nr_blocks - 1; ubo >= 0; --ubo) {
       struct bi_ubo_block *block = &analysis->blocks[ubo];
@@ -118,7 +155,7 @@ bi_pick_ubo(struct panfrost_ubo_push *push, struct bi_ubo_analysis *analysis)
             return;
 
          for (unsigned offs = 0; offs < range; ++offs) {
-            struct panfrost_ubo_word word = {
+            struct pan_ubo_word word = {
                .ubo = ubo,
                .offset = (r + offs) * 4,
             };
@@ -136,6 +173,9 @@ void
 bi_opt_push_ubo(bi_context *ctx)
 {
    struct bi_ubo_analysis analysis = bi_analyze_ranges(ctx);
+
+   if (ctx->stage == MESA_SHADER_FRAGMENT)
+      bi_pick_blend_constants(ctx, &analysis);
    bi_pick_ubo(ctx->info.push, &analysis);
 
    ctx->ubo_mask = 0;
@@ -279,7 +319,7 @@ bi_create_fau_interference_graph(bi_context *ctx, adjacency_row *adjacency)
  * together arbitrarily.
  *
  * After a new ordering is selected, pushed uniforms in the program and the
- * panfrost_ubo_push data structure must be remapped to use the new ordering.
+ * pan_ubo_push data structure must be remapped to use the new ordering.
  */
 void
 bi_opt_reorder_push(bi_context *ctx)
@@ -291,7 +331,7 @@ bi_opt_reorder_push(bi_context *ctx)
    unsigned unpaired[PAN_MAX_PUSH] = {0};
    unsigned pushed = 0, unpaired_count = 0;
 
-   struct panfrost_ubo_push *push = ctx->info.push;
+   struct pan_ubo_push *push = ctx->info.push;
    unsigned push_offset = ctx->info.push_offset;
 
    bi_create_fau_interference_graph(ctx, adjacency);
@@ -347,7 +387,7 @@ bi_opt_reorder_push(bi_context *ctx)
    }
 
    /* Use new ordering for push */
-   struct panfrost_ubo_push old = *push;
+   struct pan_ubo_push old = *push;
    for (unsigned i = 0; i < pushed; ++i)
       push->words[push_offset + i] = old.words[ordering[i]];
 

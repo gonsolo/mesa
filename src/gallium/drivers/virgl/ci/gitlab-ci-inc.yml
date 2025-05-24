@@ -2,8 +2,6 @@
   stage: layered-backends
   rules:
     - !reference [.test, rules]
-    - if: $EXTERNAL_KERNEL_TAG != null
-      when: never
     - !reference [.gl-rules, rules]
     - !reference [.llvmpipe-rules, rules]
     - changes: &virgl_file_list
@@ -60,6 +58,7 @@
 .virgl-test:
   extends:
     - .test-gl
+    - .test-crosvm
     - .virgl-rules
   timeout: 15m
   variables:
@@ -73,9 +72,10 @@
   extends:
     - .lava-x86_64-piglit-traces
     - .lava-acer-cp514-2h-1130g7-volteer:x86_64
+    - .test-crosvm
   variables:
     HWCI_KERNEL_MODULES: vhost_vsock
-    HWCI_KVM: "true"
+    HWCI_ENABLE_X86_KVM: 1
     HWCI_TEST_SCRIPT: "/install/crosvm-runner.sh"
     HWCI_TEST_ARGS: "/install/piglit/piglit-traces.sh"
     PARALLELISE_VIA_LP_THREADS: 1

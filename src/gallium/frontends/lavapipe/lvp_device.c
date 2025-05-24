@@ -34,6 +34,7 @@
 #include "pipe/p_defines.h"
 #include "pipe/p_state.h"
 #include "pipe/p_context.h"
+#include "draw/draw_context.h"
 #include "frontend/drisw_api.h"
 
 #include "util/u_inlines.h"
@@ -176,6 +177,7 @@ static const struct vk_device_extension_table lvp_device_extensions_supported = 
    .KHR_shader_integer_dot_product        = true,
    .KHR_shader_maximal_reconvergence      = true,
    .KHR_shader_non_semantic_info          = true,
+   .KHR_shader_quad_control               = true,
    .KHR_shader_relaxed_extended_instruction = true,
    .KHR_shader_subgroup_extended_types    = true,
    .KHR_shader_subgroup_rotate            = true,
@@ -212,6 +214,7 @@ static const struct vk_device_extension_table lvp_device_extensions_supported = 
    .EXT_extended_dynamic_state2           = true,
    .EXT_extended_dynamic_state3           = true,
    .EXT_external_memory_host              = true,
+   .EXT_fragment_shader_interlock         = true,
    .EXT_graphics_pipeline_library         = true,
    .EXT_hdr_metadata = true,
    .EXT_host_image_copy                   = true,
@@ -253,6 +256,7 @@ static const struct vk_device_extension_table lvp_device_extensions_supported = 
    .EXT_shader_atomic_float               = true,
    .EXT_shader_atomic_float2              = true,
    .EXT_shader_demote_to_helper_invocation= true,
+   .EXT_shader_image_atomic_int64         = true,
    .EXT_shader_object                     = true,
    .EXT_shader_replicated_composites      = true,
    .EXT_shader_stencil_export             = true,
@@ -273,6 +277,7 @@ static const struct vk_device_extension_table lvp_device_extensions_supported = 
    .EXT_provoking_vertex                  = true,
    .EXT_line_rasterization                = true,
    .EXT_robustness2                       = true,
+   .EXT_zero_initialize_device_memory     = true,
    .AMDX_shader_enqueue                   = true,
 #if DETECT_OS_ANDROID
    .ANDROID_native_buffer                 = true,
@@ -383,6 +388,7 @@ lvp_get_features(const struct lvp_physical_device *pdevice,
       .shaderInt16                              = AND_SHADER_CAP(pdevice->pscreen, int16),
       .variableMultisampleRate                  = false,
       .inheritedQueries                         = false,
+      .shaderResourceMinLod                     = true,
       .sparseBinding                            = DETECT_OS_LINUX,
       .sparseResidencyBuffer                    = DETECT_OS_LINUX,
       .sparseResidencyImage2D                   = DETECT_OS_LINUX,
@@ -614,6 +620,9 @@ lvp_get_features(const struct lvp_physical_device *pdevice,
       /* VK_EXT_multi_draw */
       .multiDraw = true,
 
+      /* VK_EXT_zero_initialize_device_memory */
+      .zeroInitializeDeviceMemory = true,
+
       /* VK_EXT_depth_clip_enable */
       .depthClipEnable = (pdevice->pscreen->caps.depth_clamp_enable != 0),
 
@@ -702,6 +711,10 @@ lvp_get_features(const struct lvp_physical_device *pdevice,
       .shaderImageFloat32AtomicMinMax  = LLVM_VERSION_MAJOR >= 15,
       .sparseImageFloat32AtomicMinMax  = false,
 
+      /* VK_EXT_shader_image_atomic_int64 */
+      .shaderImageInt64Atomics = true,
+      .sparseImageInt64Atomics = true,
+
       /* VK_EXT_memory_priority */
       .memoryPriority = true,
 
@@ -753,6 +766,14 @@ lvp_get_features(const struct lvp_physical_device *pdevice,
       /* VK_KHR_compute_shader_derivatives */
       .computeDerivativeGroupQuads = true,
       .computeDerivativeGroupLinear = true,
+
+      /* VK_KHR_shader_quad_control */
+      .shaderQuadControl = true,
+
+      /* VK_EXT_fragment_shader_interlock */
+      .fragmentShaderSampleInterlock = true,
+      .fragmentShaderPixelInterlock = true,
+      .fragmentShaderShadingRateInterlock = false,
    };
 }
 
@@ -1439,6 +1460,9 @@ static struct drisw_loader_funcs lvp_sw_lf = {
 static VkResult
 lvp_enumerate_physical_devices(struct vk_instance *vk_instance)
 {
+   if (!draw_get_option_use_llvm())
+      return VK_SUCCESS;
+
    struct lvp_instance *instance =
       container_of(vk_instance, struct lvp_instance, vk);
 
@@ -1908,6 +1932,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_AllocateMemory(
    struct lvp_device_memory *mem;
    ASSERTED const VkExportMemoryAllocateInfo *export_info = NULL;
    ASSERTED const VkImportMemoryFdInfoKHR *import_info = NULL;
+   const VkMemoryAllocateFlagsInfo *mem_flags = NULL;
 #if DETECT_OS_ANDROID
    ASSERTED const VkImportAndroidHardwareBufferInfoANDROID *ahb_import_info = NULL;
 #endif
@@ -1941,6 +1966,9 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_AllocateMemory(
          priority = get_mem_priority(prio->priority);
          break;
       }
+      case VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO:
+         mem_flags = (void*)ext;
+         break;
 #if DETECT_OS_ANDROID
       case VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID: {
          ahb_import_info = (VkImportAndroidHardwareBufferInfoANDROID*)ext;
@@ -2028,6 +2056,9 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_AllocateMemory(
 
       mem->map = device->pscreen->map_memory(device->pscreen, mem->pmem);
       mem->memory_type = dmabuf ? LVP_DEVICE_MEMORY_TYPE_DMA_BUF : LVP_DEVICE_MEMORY_TYPE_OPAQUE_FD;
+      /* XXX: this should be memset_s or memset_explicit but they are not supported */
+      if (mem_flags && mem_flags->flags & VK_MEMORY_ALLOCATE_ZERO_INITIALIZE_BIT_EXT)
+         memset(mem->map, 0, pAllocateInfo->allocationSize);
    }
 #endif
    else {
@@ -2041,6 +2072,9 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_AllocateMemory(
          memset(mem->map, UINT8_MAX / 2 + 1, pAllocateInfo->allocationSize);
       }
       set_mem_priority(mem, priority);
+      /* XXX: this should be memset_s or memset_explicit but they are not supported */
+      if (mem_flags && mem_flags->flags & VK_MEMORY_ALLOCATE_ZERO_INITIALIZE_BIT_EXT)
+         memset(mem->map, 0, pAllocateInfo->allocationSize);
    }
 
    mem->type_index = pAllocateInfo->memoryTypeIndex;

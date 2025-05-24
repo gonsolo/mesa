@@ -723,8 +723,10 @@ anv_h265_decode_video(struct anv_cmd_buffer *cmd_buffer,
          slice.SliceCrQPOffset = slice_params[s].slice_cr_qp_offset;
          slice.SliceHeaderDisableDeblockingFilter = pps->flags.deblocking_filter_override_enabled_flag ?
                slice_params[s].disable_deblocking_filter_idc : pps->flags.pps_deblocking_filter_disabled_flag;
-         slice.SliceTCOffsetDiv2 = slice_params[s].tc_offset_div2;
-         slice.SliceBetaOffsetDiv2 = slice_params[s].beta_offset_div2;
+         slice.SliceTCOffsetDiv2 = pps->flags.deblocking_filter_override_enabled_flag ?
+               slice_params[s].tc_offset_div2 : pps->pps_tc_offset_div2;
+         slice.SliceBetaOffsetDiv2 = pps->flags.deblocking_filter_override_enabled_flag ?
+               slice_params[s].beta_offset_div2 : pps->pps_beta_offset_div2;
          slice.SliceLoopFilterEnable = slice_params[s].loop_filter_across_slices_enable;
          slice.SliceSAOChroma = slice_params[s].sao_chroma_flag;
          slice.SliceSAOLuma = slice_params[s].sao_luma_flag;
@@ -2098,7 +2100,7 @@ anv_av1_decode_video_tile(struct anv_cmd_buffer *cmd_buffer,
       pic.AllowScreenContentToolsFlag = std_pic_info->flags.allow_screen_content_tools;
       pic.ForceIntegerMVFlag = std_pic_info->flags.force_integer_mv;
       pic.AllowWarpedMotionFlag = std_pic_info->flags.allow_warped_motion;
-      pic.UseCDEFFilterFlag = !frame_lossless && seq_hdr->flags.enable_cdef;
+      pic.UseCDEFFilterFlag = !frame_lossless && seq_hdr->flags.enable_cdef && !std_pic_info->flags.allow_intrabc;
       pic.UseSuperResFlag = std_pic_info->flags.use_superres;
       pic.FrameLevelLoopRestorationFilterEnable = frame_restoration_type[0] || frame_restoration_type[1] || frame_restoration_type[2];
       pic.FrameType = std_pic_info->frame_type;

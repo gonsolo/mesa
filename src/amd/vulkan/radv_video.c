@@ -184,16 +184,6 @@ radv_vcn_sq_start(struct radv_cmd_buffer *cmd_buffer)
    memset(cmd_buffer->video.decode_buffer, 0, sizeof(struct rvcn_decode_buffer_s));
 }
 
-/* generate an stream handle */
-static unsigned
-radv_vid_alloc_stream_handle(struct radv_physical_device *pdev)
-{
-   unsigned stream_handle = pdev->stream_handle_base;
-
-   stream_handle ^= ++pdev->stream_handle_counter;
-   return stream_handle;
-}
-
 static void
 init_uvd_decoder(struct radv_physical_device *pdev)
 {
@@ -273,10 +263,7 @@ radv_init_physical_device_decoder(struct radv_physical_device *pdev)
       pdev->vid_decode_ip = AMD_IP_VCN_DEC;
    pdev->av1_version = RDECODE_AV1_VER_0;
 
-   pdev->stream_handle_counter = 0;
-   pdev->stream_handle_base = 0;
-
-   pdev->stream_handle_base = util_bitreverse(getpid());
+   ac_uvd_init_stream_handle(&pdev->stream_handle);
 
    pdev->vid_addr_gfx_mode = RDECODE_ARRAY_MODE_LINEAR;
 
@@ -520,7 +507,7 @@ radv_CreateVideoSessionKHR(VkDevice _device, const VkVideoSessionCreateInfoKHR *
       return VK_ERROR_FEATURE_NOT_PRESENT;
    }
 
-   vid->stream_handle = radv_vid_alloc_stream_handle(pdev);
+   vid->stream_handle = ac_uvd_alloc_stream_handle(&pdev->stream_handle);
    vid->dbg_frame_cnt = 0;
    vid->db_alignment = radv_video_get_db_alignment(
       pdev, vid->vk.max_coded.width,
@@ -686,6 +673,7 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
       break;
    }
    case VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR: {
+      const bool have_10bit = pdev->info.family >= CHIP_STONEY;
       /* H265 allows different luma and chroma bit depths */
       if (pVideoProfile->lumaBitDepth != pVideoProfile->chromaBitDepth)
          return VK_ERROR_VIDEO_PROFILE_FORMAT_NOT_SUPPORTED_KHR;
@@ -697,12 +685,12 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
          vk_find_struct_const(pVideoProfile->pNext, VIDEO_DECODE_H265_PROFILE_INFO_KHR);
 
       if (h265_profile->stdProfileIdc != STD_VIDEO_H265_PROFILE_IDC_MAIN &&
-          h265_profile->stdProfileIdc != STD_VIDEO_H265_PROFILE_IDC_MAIN_10 &&
+          (!have_10bit || h265_profile->stdProfileIdc != STD_VIDEO_H265_PROFILE_IDC_MAIN_10) &&
           h265_profile->stdProfileIdc != STD_VIDEO_H265_PROFILE_IDC_MAIN_STILL_PICTURE)
          return VK_ERROR_VIDEO_PROFILE_OPERATION_NOT_SUPPORTED_KHR;
 
       if (pVideoProfile->lumaBitDepth != VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR &&
-          pVideoProfile->lumaBitDepth != VK_VIDEO_COMPONENT_BIT_DEPTH_10_BIT_KHR)
+          (!have_10bit || pVideoProfile->lumaBitDepth != VK_VIDEO_COMPONENT_BIT_DEPTH_10_BIT_KHR))
          return VK_ERROR_VIDEO_PROFILE_FORMAT_NOT_SUPPORTED_KHR;
 
       pCapabilities->maxDpbSlots = RADV_VIDEO_H264_MAX_DPB_SLOTS;
@@ -763,7 +751,7 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
       ext->flags = VK_VIDEO_ENCODE_H264_CAPABILITY_HRD_COMPLIANCE_BIT_KHR |
                    VK_VIDEO_ENCODE_H264_CAPABILITY_PER_PICTURE_TYPE_MIN_MAX_QP_BIT_KHR;
       ext->maxLevelIdc = cap ? cap->max_level : 0;
-      ext->maxSliceCount = 1;
+      ext->maxSliceCount = 128;
       ext->maxPPictureL0ReferenceCount = 1;
       ext->maxBPictureL0ReferenceCount = pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_3 ? 1 : 0;
       ext->maxL1ReferenceCount = pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_3 ? 1 : 0;
@@ -808,7 +796,7 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
 
       ext->flags = VK_VIDEO_ENCODE_H265_CAPABILITY_PER_PICTURE_TYPE_MIN_MAX_QP_BIT_KHR;
       ext->maxLevelIdc = cap ? cap->max_level : 0;
-      ext->maxSliceSegmentCount = 1;
+      ext->maxSliceSegmentCount = 128;
       ext->maxTiles.width = 1;
       ext->maxTiles.height = 1;
       ext->ctbSizes = VK_VIDEO_ENCODE_H265_CTB_SIZE_64_BIT_KHR;
@@ -1344,7 +1332,6 @@ get_h265_msg(struct radv_device *device, struct radv_video_session *vid, struct 
              uint32_t *height_in_samples,
              void *it_ptr)
 {
-   const struct radv_physical_device *pdev = radv_device_physical(device);
    rvcn_dec_message_hevc_t result;
    int i, j;
    const struct VkVideoDecodeH265PictureInfoKHR *h265_pic_info =
@@ -1366,9 +1353,6 @@ get_h265_msg(struct radv_device *device, struct radv_video_session *vid, struct 
    result.sps_info_flags |= sps->flags.sps_temporal_mvp_enabled_flag << 6;
    result.sps_info_flags |= sps->flags.strong_intra_smoothing_enabled_flag << 7;
    result.sps_info_flags |= sps->flags.separate_colour_plane_flag << 8;
-
-   if (pdev->info.family == CHIP_CARRIZO)
-      result.sps_info_flags |= 1 << 9;
 
    if (!h265_pic_info->pStdPictureInfo->flags.short_term_ref_pic_set_sps_flag) {
       result.sps_info_flags |= 1 << 11;

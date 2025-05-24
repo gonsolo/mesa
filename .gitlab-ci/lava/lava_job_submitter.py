@@ -407,7 +407,6 @@ class LAVAJobSubmitter(PathResolver):
     kernel_image_name: str = None
     kernel_image_type: str = ""
     kernel_url_prefix: str = None
-    kernel_external: str = None
     lava_tags: str | tuple[str, ...] = ()  # Comma-separated LAVA tags for the job
     mesa_job_name: str = "mesa_ci_job"
     pipeline_info: str = ""
@@ -437,27 +436,28 @@ class LAVAJobSubmitter(PathResolver):
         return self
 
     def append_overlay(
-        self, compression: str, name: str, path: str, url: str, format: str = "tar"
+        self, name: str, path: str, url: str, format: str = "tar", compression: str = ""
     ) -> Self:
         """
         Append an overlay to the LAVA job definition.
 
         Args:
-            compression (str): The compression type of the overlay (e.g., "gz", "xz").
             name (str): The name of the overlay.
-            path (str): The path where the overlay should be applied.
             url (str): The URL from where the overlay can be downloaded.
+            path (str): The path where the overlay should be applied.
             format (str, optional): The format of the overlay (default is "tar").
+            compression (str, optional): The compression type of the overlay (e.g., "gz", "xz").
 
         Returns:
             Self: The instance of LAVAJobSubmitter with the overlay appended.
         """
         self._overlays[name] = {
-            "compression": compression,
-            "format": format,
-            "path": path,
             "url": url,
+            "path": path,
+            "format": format,
         }
+        if compression:
+            self._overlays[name]["compression"] = compression
         return self
 
     def print(self) -> Self:

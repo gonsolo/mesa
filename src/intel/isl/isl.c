@@ -3468,6 +3468,105 @@ isl_surf_init_s(const struct isl_device *dev,
    return true;
 }
 
+/* Returns divisor+1 if divisor >= num. */
+static int64_t
+find_next_divisor(int64_t divisor, int64_t num)
+{
+   if (divisor >= num) {
+      return divisor + 1;
+   } else {
+      while (num % ++divisor != 0);
+      return divisor;
+   }
+}
+
+/* Return an extent which holds at most the given number of tiles and has a
+ * minimum array length.
+ */
+static struct isl_extent4d
+get_2d_array_extent(const struct isl_device *isl_dev,
+                    const struct isl_tile_info *tile_info, int64_t max_tiles)
+{
+   int max_surface_dim = 1 << (ISL_GFX_VER(isl_dev) >= 7 ? 14 : 13);
+   int max_array_len = 2048;
+
+   for (int64_t tiles = max_tiles; tiles > 0; tiles--) {
+      for (int array_len = 1; array_len <= MIN2(tiles, max_array_len);
+            array_len = find_next_divisor(array_len, tiles)) {
+         int64_t layer_tiles = tiles / array_len;
+         for (int64_t h_tl = 1; h_tl <= layer_tiles;
+               h_tl = find_next_divisor(h_tl, layer_tiles))  {
+            int64_t w_tl = layer_tiles / h_tl;
+            int64_t w_el = w_tl * tile_info->logical_extent_el.w;
+            int64_t h_el = h_tl * tile_info->logical_extent_el.h;
+
+            if (w_el > max_surface_dim)
+               continue;
+
+            if (h_el > max_surface_dim)
+               continue;
+
+            /* SurfaceQPitch must be multiple of 4. */
+            if (array_len > 1 && h_el % 4 != 0)
+               continue;
+
+            return isl_extent4d(w_el, h_el, 1, array_len);
+         }
+      }
+   }
+
+   unreachable("extent not found for given number of tiles.");
+}
+
+void
+isl_surf_from_mem(const struct isl_device *isl_dev,
+                  struct isl_surf *surf,
+                  int64_t offset,
+                  int64_t mem_size_B,
+                  enum isl_tiling tiling)
+{
+   /* Get the surface format. */
+   const struct isl_format_layout *fmtl;
+   switch (ffs(offset | mem_size_B)) {
+   default: fmtl = isl_format_get_layout(ISL_FORMAT_R32G32B32A32_UINT); break;
+   case  4: fmtl = isl_format_get_layout(ISL_FORMAT_R32G32_UINT); break;
+   case  3: fmtl = isl_format_get_layout(ISL_FORMAT_R32_UINT); break;
+   case  2: fmtl = isl_format_get_layout(ISL_FORMAT_R16_UINT); break;
+   case  1: fmtl = isl_format_get_layout(ISL_FORMAT_R8_UINT); break;
+   }
+
+   /* Get the surface extent. */
+   struct isl_tile_info tile_info;
+   isl_tiling_get_info(tiling, ISL_SURF_DIM_2D, ISL_MSAA_LAYOUT_NONE,
+                       fmtl->bpb, 1 /* samples */, &tile_info);
+   int tile_size_B = tile_info.phys_extent_B.w * tile_info.phys_extent_B.h;
+   int64_t max_tiles = mem_size_B / tile_size_B;
+   struct isl_extent4d extent =
+      get_2d_array_extent(isl_dev, &tile_info, max_tiles);
+
+   /* Create the surface. */
+   isl_surf_usage_flags_t usage = ISL_SURF_USAGE_TEXTURE_BIT |
+                                  ISL_SURF_USAGE_RENDER_TARGET_BIT |
+                                  ISL_SURF_USAGE_NO_AUX_TT_ALIGNMENT_BIT;
+   ASSERTED bool ok = isl_surf_init(isl_dev, surf,
+                                    .dim = ISL_SURF_DIM_2D,
+                                    .format = fmtl->format,
+                                    .width = extent.w,
+                                    .height = extent.h,
+                                    .depth = extent.d,
+                                    .levels = 1,
+                                    .array_len = extent.a,
+                                    .samples = 1,
+                                    .row_pitch_B = extent.w * fmtl->bpb / 8,
+                                    .usage = usage,
+                                    .tiling_flags = 1 << tiling);
+   assert(ok);
+   if (extent.a > 1)
+      assert(surf->array_pitch_el_rows == extent.h);
+   assert(surf->size_B == surf->row_pitch_B * extent.h * extent.a);
+   assert(surf->size_B <= max_tiles * tile_size_B);
+}
+
 void
 isl_surf_get_tile_info(const struct isl_surf *surf,
                        struct isl_tile_info *tile_info)
@@ -4275,6 +4374,69 @@ isl_surf_get_image_offset_B_tile_el(const struct isl_surf *surf,
       assert(z_offset_el == 0);
       assert(array_offset == 0);
    }
+}
+
+bool
+isl_surf_image_has_unique_tiles(const struct isl_surf *surf,
+                                uint32_t level,
+                                uint32_t start_layer,
+                                uint32_t num_layers,
+                                uint64_t *start_tile_B,
+                                uint64_t *end_tile_B)
+{
+   /* Get the memory range of the specified subresource range. */
+   bool dim_is_3d = surf->dim == ISL_SURF_DIM_3D;
+   uint32_t end_layer = start_layer + num_layers - 1;
+   isl_surf_get_image_range_B_tile(surf, level,
+                                   dim_is_3d ? 0 : start_layer,
+                                   dim_is_3d ? start_layer : 0,
+                                   start_tile_B, end_tile_B);
+   if (num_layers > 1) {
+      /* end_tile_B may be incorrect, recompute it with end_layer. */
+      UNUSED uint64_t unused_start_tile_B;
+      isl_surf_get_image_range_B_tile(surf, level,
+                                      dim_is_3d ? 0 : end_layer,
+                                      dim_is_3d ? end_layer : 0,
+                                      &unused_start_tile_B, end_tile_B);
+   }
+
+   /* Check if the memory range of other subresource ranges overlap. */
+   for (int lod = 0; lod < surf->levels; lod++) {
+      int surf_layers = dim_is_3d ? u_minify(surf->logical_level0_px.d, lod) :
+                        surf->logical_level0_px.a;
+      for (int layer = 0; layer < surf_layers; layer++) {
+
+         /* Skip the subresource range of interest. */
+         if (level == lod && layer >= start_layer && layer <= end_layer)
+            continue;
+
+         uint64_t start_tile_B_i, end_tile_B_i;
+         isl_surf_get_image_range_B_tile(surf, level,
+                                         dim_is_3d ? 0 : layer,
+                                         dim_is_3d ? layer : 0,
+                                         &start_tile_B_i, &end_tile_B_i);
+
+         /* Check if the specified range is in this subresource. */
+         if (*start_tile_B >= start_tile_B_i &&
+             *start_tile_B <= end_tile_B_i)
+            return false;
+
+         if (*end_tile_B >= start_tile_B_i &&
+             *end_tile_B <= end_tile_B_i)
+            return false;
+
+         /* Check if this subresource is in the specified range. */
+         if (start_tile_B_i >= *start_tile_B &&
+             start_tile_B_i <= *end_tile_B)
+            return false;
+
+         if (end_tile_B_i >= *start_tile_B &&
+             end_tile_B_i <= *end_tile_B)
+            return false;
+      }
+   }
+
+   return true;
 }
 
 void

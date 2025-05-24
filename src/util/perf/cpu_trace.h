@@ -8,6 +8,7 @@
 
 #include "u_perfetto.h"
 #include "u_gpuvis.h"
+#include "u_sysprof.h"
 
 #include "util/detect_os.h"
 #include "util/macros.h"
@@ -93,6 +94,18 @@
 
 #endif /* HAVE_GPUVIS */
 
+#if defined(HAVE_SYSPROF)
+
+#define _MESA_SYSPROF_TRACE_BEGIN(name) util_sysprof_begin(name)
+#define _MESA_SYSPROF_TRACE_END(scope) util_sysprof_end(scope)
+
+#else
+
+#define _MESA_SYSPROF_TRACE_BEGIN(name) NULL
+#define _MESA_SYSPROF_TRACE_END(scope)
+
+#endif /* HAVE_SYSPROF */
+
 #if __has_attribute(cleanup) && __has_attribute(unused)
 
 #include <stdarg.h>
@@ -112,20 +125,21 @@
  * to work.
  */
 #define _MESA_TRACE_SCOPE(format, ...)                                       \
-   int _MESA_TRACE_SCOPE_VAR(__LINE__)                                       \
+   void *_MESA_TRACE_SCOPE_VAR(__LINE__)                                     \
       __attribute__((cleanup(_mesa_trace_scope_end), unused)) =              \
          _mesa_trace_scope_begin(format, ##__VA_ARGS__)
 
 #define _MESA_TRACE_SCOPE_FLOW(name, id)                                     \
-   int _MESA_TRACE_SCOPE_VAR(__LINE__)                                       \
+   void *_MESA_TRACE_SCOPE_VAR(__LINE__)                                     \
       __attribute__((cleanup(_mesa_trace_scope_end), unused)) =              \
          _mesa_trace_scope_flow_begin(name, id)
 
 __attribute__((format(printf, 1, 2)))
-static inline int
+static inline void *
 _mesa_trace_scope_begin(const char *format, ...)
 {
    char name[_MESA_TRACE_SCOPE_MAX_NAME_LENGTH];
+   void *scope = NULL;
    va_list args;
 
    va_start(args, format);
@@ -136,24 +150,29 @@ _mesa_trace_scope_begin(const char *format, ...)
 
    _MESA_TRACE_BEGIN(name);
    _MESA_GPUVIS_TRACE_BEGIN(name);
-   return 0;
+   scope = _MESA_SYSPROF_TRACE_BEGIN(name);
+   return scope;
 }
 
-static inline int
+static inline void *
 _mesa_trace_scope_flow_begin(const char *name, uint64_t *id)
 {
+   void *scope = NULL;
+
    if (*id == 0)
       *id = util_perfetto_next_id();
    _MESA_TRACE_FLOW_BEGIN(name, *id);
    _MESA_GPUVIS_TRACE_BEGIN(name);
-   return 0;
+   scope = _MESA_SYSPROF_TRACE_BEGIN(name);
+   return scope;
 }
 
 static inline void
-_mesa_trace_scope_end(UNUSED int *scope)
+_mesa_trace_scope_end(UNUSED void **scope)
 {
    _MESA_GPUVIS_TRACE_END();
    _MESA_TRACE_END();
+   _MESA_SYSPROF_TRACE_END(scope);
 }
 
 #else

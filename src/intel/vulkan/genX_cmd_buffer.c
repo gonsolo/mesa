@@ -66,7 +66,7 @@ convert_pc_to_bits(struct GENX(PIPE_CONTROL) *pc) {
    bits |= (pc->StallAtPixelScoreboard) ?  ANV_PIPE_STALL_AT_SCOREBOARD_BIT : 0;
    bits |= (pc->DepthStallEnable) ?  ANV_PIPE_DEPTH_STALL_BIT : 0;
    bits |= (pc->CommandStreamerStallEnable) ?  ANV_PIPE_CS_STALL_BIT : 0;
-#if GFX_VERx10 == 125
+#if GFX_VERx10 >= 125
    bits |= (pc->UntypedDataPortCacheFlushEnable) ? ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT : 0;
    bits |= (pc->CCSFlushEnable) ? ANV_PIPE_CCS_CACHE_FLUSH_BIT : 0;
 #endif
@@ -1077,6 +1077,16 @@ transition_color_buffer(struct anv_cmd_buffer *cmd_buffer,
       image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT
       ? isl_drm_modifier_get_info(image->vk.drm_format_mod)
       : NULL;
+
+   /**
+    * Vulkan 1.4.313, 7.7.4. Queue Family Ownership Transfer:
+    *
+    *    If the values of srcQueueFamilyIndex and dstQueueFamilyIndex are equal,
+    *    no ownership transfer is performed, and the barrier operates as if they
+    *    were both set to VK_QUEUE_FAMILY_IGNORED.
+    */
+   if (src_queue_family == dst_queue_family)
+      src_queue_family = dst_queue_family = VK_QUEUE_FAMILY_IGNORED;
 
    const bool src_queue_external = queue_family_is_external(src_queue_family);
    const bool dst_queue_external = queue_family_is_external(dst_queue_family);
@@ -3134,14 +3144,6 @@ genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
    } else {
       cmd_buffer->state.color_aux_op = next_aux_op;
    }
-
-   if (next_aux_op == ISL_AUX_OP_FAST_CLEAR) {
-      if (aux_op_clears(last_aux_op)) {
-         cmd_buffer->num_dependent_clears++;
-      } else {
-         cmd_buffer->num_independent_clears++;
-      }
-   }
 }
 
 static void
@@ -3426,7 +3428,9 @@ end_command_buffer(struct anv_cmd_buffer *cmd_buffer)
 
    if (anv_cmd_buffer_is_video_queue(cmd_buffer) ||
        anv_cmd_buffer_is_blitter_queue(cmd_buffer)) {
-      trace_intel_end_cmd_buffer(&cmd_buffer->trace, cmd_buffer->vk.level);
+      trace_intel_end_cmd_buffer(&cmd_buffer->trace,
+                                 (uintptr_t)(vk_command_buffer_to_handle(&cmd_buffer->vk)),
+                                 cmd_buffer->vk.level);
       genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
       anv_cmd_buffer_end_batch_buffer(cmd_buffer);
       return VK_SUCCESS;
@@ -3473,7 +3477,9 @@ end_command_buffer(struct anv_cmd_buffer *cmd_buffer)
       genX(cmd_buffer_set_protected_memory)(cmd_buffer, false);
 #endif
 
-   trace_intel_end_cmd_buffer(&cmd_buffer->trace, cmd_buffer->vk.level);
+   trace_intel_end_cmd_buffer(&cmd_buffer->trace,
+                              (uintptr_t)(vk_command_buffer_to_handle(&cmd_buffer->vk)),
+                              cmd_buffer->vk.level);
 
    anv_cmd_buffer_end_batch_buffer(cmd_buffer);
 
@@ -6034,6 +6040,7 @@ void genX(CmdEndRendering)(
    }
 
    trace_intel_end_render_pass(&cmd_buffer->trace,
+                               (uintptr_t)(vk_command_buffer_to_handle(&cmd_buffer->vk)),
                                gfx->render_area.extent.width,
                                gfx->render_area.extent.height,
                                gfx->color_att_count,

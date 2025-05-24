@@ -477,6 +477,9 @@ brw_shader::init()
 
    this->gs.control_data_bits_per_vertex = 0;
    this->gs.control_data_header_size_bits = 0;
+
+   memset(&this->fs.per_primitive_offsets, -1,
+          sizeof(this->fs.per_primitive_offsets));
 }
 
 brw_shader::~brw_shader()
@@ -546,6 +549,16 @@ void
 brw_shader::import_uniforms(brw_shader *v)
 {
    this->uniforms = v->uniforms;
+}
+
+/* For SIMD16, we need to follow from the uniform setup of SIMD8 dispatch.
+ * This brings in those uniform definitions
+ */
+void
+brw_shader::import_per_primitive_offsets(const int *per_primitive_offsets)
+{
+   memcpy(this->fs.per_primitive_offsets, per_primitive_offsets,
+          sizeof(this->fs.per_primitive_offsets));
 }
 
 enum intel_barycentric_mode
@@ -967,7 +980,8 @@ brw_shader::debug_optimizer(const nir_shader *nir,
                             const char *pass_name,
                             int iteration, int pass_num) const
 {
-   if (!brw_should_print_shader(nir, DEBUG_OPTIMIZER))
+   /* source_hash is not readily accessible in this context */
+   if (!brw_should_print_shader(nir, DEBUG_OPTIMIZER, 0))
       return;
 
    char *filename;
@@ -1273,8 +1287,12 @@ brw_shader_phase_update(brw_shader &s, enum brw_shader_phase phase)
    brw_validate(s);
 }
 
-bool brw_should_print_shader(const nir_shader *shader, uint64_t debug_flag)
+bool brw_should_print_shader(const nir_shader *shader, uint64_t debug_flag, uint32_t source_hash)
 {
+   if (intel_shader_dump_filter && intel_shader_dump_filter != source_hash) {
+      return false;
+   }
+
    return INTEL_DEBUG(debug_flag) && (!shader->info.internal || NIR_DEBUG(PRINT_INTERNAL));
 }
 
@@ -1309,4 +1327,3 @@ brw_allocate_vgrf_units(brw_shader &s, unsigned units_of_REGSIZE)
 {
    return brw_vgrf(brw_allocate_vgrf_number(s, units_of_REGSIZE), BRW_TYPE_UD);
 }
-

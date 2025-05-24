@@ -750,32 +750,20 @@ pipe_compute_caps
 Compute-specific capabilities. They can be queried using
 pipe_screen::get_compute_param.
 
-* ``pipe_compute_caps.ir_target``: A description of the target of the form
-  ``processor-arch-manufacturer-os`` that will be passed on to the compiler.
-  This CAP is only relevant for drivers that specify PIPE_SHADER_IR_NATIVE for
-  their preferred IR.
 * ``pipe_compute_caps.grid_dimension``: Number of supported dimensions
   for grid and block coordinates.
 * ``pipe_compute_caps.max_grid_size``: Maximum grid size in block
   units.
 * ``pipe_compute_caps.max_block_size``: Maximum block size in thread
   units.
-* ``pipe_compute_caps.max_block_size_clover``: Same as ``pipe_compute_caps.max_block_size``
-  but used by clover only.
 * ``pipe_compute_caps.max_threads_per_block``: Maximum number of threads that
   a single block can contain.
   This may be less than the product of the components of MAX_BLOCK_SIZE and is
   usually limited by the number of threads that can be resident simultaneously
   on a compute unit.
-* ``pipe_compute_caps.max_threads_per_block_clover``: Same as
-  ``pipe_compute_caps.max_threads_per_block`` but used by clover only.
 * ``pipe_compute_caps.max_global_size``: Maximum size of the GLOBAL
   resource.
 * ``pipe_compute_caps.max_local_size``: Maximum size of the LOCAL
-  resource.
-* ``pipe_compute_caps.max_private_size``: Maximum size of the PRIVATE
-  resource.
-* ``pipe_compute_caps.max_input_size``: Maximum size of the INPUT
   resource.
 * ``pipe_compute_caps.max_mem_alloc_size``: Maximum size of a memory object
   allocation in bytes.
@@ -786,8 +774,6 @@ pipe_screen::get_compute_param.
   inside a block. Non 0 indicates support for OpenCL subgroups including
   implementing ``get_compute_state_subgroup_size`` if multiple subgroup sizes
   are supported.
-* ``pipe_compute_caps.images_supported``: Whether images are supported
-  non-zero means yes, zero means no
 * ``pipe_compute_caps.subgroup_sizes``: Ored power of two sizes of a basic execution
   unit in threads. Also known as wavefront size, warp size or SIMD width.
   E.g. ``64 | 32``.
@@ -839,8 +825,6 @@ resources might be created and handled quite differently.
   to a shader and can be used with load, store, and atomic instructions.
 * ``PIPE_BIND_SHADER_IMAGE``: A buffer or texture with a format that can be
   bound to a shader and can be used with load, store, and atomic instructions.
-* ``PIPE_BIND_COMPUTE_RESOURCE``: A buffer or texture that can be
-  bound to the compute program as a shader resource.
 * ``PIPE_BIND_COMMAND_ARGS_BUFFER``: A buffer that may be sourced by the
   GPU command processor. It can contain, for example, the arguments to
   indirect draw calls.

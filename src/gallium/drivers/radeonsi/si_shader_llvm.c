@@ -173,10 +173,6 @@ void si_llvm_create_func(struct si_shader_context *ctx, const char *name, LLVMTy
                                            ctx->screen->info.address32_hi);
    }
 
-   if (ctx->screen->info.gfx_level < GFX12 && ctx->stage <= MESA_SHADER_GEOMETRY &&
-       ctx->shader->key.ge.as_ngg && si_shader_uses_streamout(ctx->shader))
-      ac_llvm_add_target_dep_function_attr(ctx->main_fn.value, "amdgpu-gds-size", 256);
-
    ac_llvm_set_workgroup_size(ctx->main_fn.value, max_workgroup_size);
    ac_llvm_set_target_features(ctx->main_fn.value, &ctx->ac, false);
 }
@@ -608,7 +604,7 @@ static bool si_llvm_translate_nir(struct si_shader_context *ctx, struct si_shade
     * compaction is enabled.
     */
    if (is_nogs_ngg_stage &&
-       (si_shader_uses_streamout(shader) || si_shader_culling_enabled(shader))) {
+       (shader->info.num_streamout_vec4s || si_shader_culling_enabled(shader))) {
       LLVMTypeRef asi32 = LLVMArrayType(ctx->ac.i32, gfx10_ngg_get_scratch_dw_size(shader));
       ctx->gs_ngg_scratch = (struct ac_llvm_pointer) {
          .value = LLVMAddGlobalInAddressSpace(ctx->ac.module, asi32, "ngg_scratch",
@@ -801,11 +797,11 @@ bool si_llvm_compile_shader(struct si_screen *sscreen, struct ac_llvm_compiler *
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       exports_color_null = sel->info.colors_written;
-      exports_mrtz = shader->ps.writes_z || shader->ps.writes_stencil ||
-                     shader->ps.writes_samplemask ||
+      exports_mrtz = shader->info.writes_z || shader->info.writes_stencil ||
+                     shader->info.writes_sample_mask ||
                      shader->key.ps.part.epilog.alpha_to_coverage_via_mrtz;
       if (!exports_mrtz && !exports_color_null)
-         exports_color_null = si_shader_uses_discard(shader) || sscreen->info.gfx_level < GFX10;
+         exports_color_null = shader->info.uses_discard || sscreen->info.gfx_level < GFX10;
    }
 
    si_llvm_context_init(&ctx, sscreen, compiler, shader->wave_size, exports_color_null, exports_mrtz,

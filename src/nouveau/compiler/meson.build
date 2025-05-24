@@ -22,6 +22,11 @@ dep_paste = dependency('paste',
   required : true,
 )
 
+dep_rustc_hash = dependency('rustc-hash',
+  fallback: ['rustc-hash', 'dep_rustc_hash'],
+  required: true,
+)
+
 libnak_c_files = files(
   'nak.h',
   'nak_nir.c',
@@ -74,10 +79,8 @@ _nak_bindings_rs = rust.bindgen(
     pre_args,
   ],
   args : [
+    bindgen_output_args,
     compiler_rs_bindgen_blocklist,
-    '--raw-line', '#![allow(non_camel_case_types)]',
-    '--raw-line', '#![allow(non_snake_case)]',
-    '--raw-line', '#![allow(non_upper_case_globals)]',
     '--raw-line', 'use compiler::bindings::*;',
     '--allowlist-type', 'drm.*',
     '--allowlist-type', 'nak_.*',
@@ -124,6 +127,7 @@ _libnak_rs = static_library(
   ],
   dependencies : [
     dep_paste,
+    dep_rustc_hash,
     idep_compiler_rs,
     idep_nvidia_headers_rs,
   ],

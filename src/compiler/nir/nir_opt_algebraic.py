@@ -1450,6 +1450,11 @@ optimizations.extend([
    (('fany_nequal4', a, b), ('fsat', ('fdot4', ('sne', a, b), ('sne', a, b))), 'options->lower_vector_cmp'),
    (('fany_nequal8', a, b), ('fsat', ('fdot8', ('sne', a, b), ('sne', a, b))), 'options->lower_vector_cmp'),
    (('fany_nequal16', a, b), ('fsat', ('fdot16', ('sne', a, b), ('sne', a, b))), 'options->lower_vector_cmp'),
+
+   # Vulkan allows us to use any rounding mode, so choose rtz because it's simple.
+   # Avoid some NaNs being converted to Inf if the lsb are cut off.
+   (('f2bf', a), ('bcsel', ('!fneu', a, a), -1, ('unpack_32_2x16_split_y', a)), 'options->lower_bfloat16_conversions'),
+   (('bf2f', a), ('pack_32_2x16', ('vec2', 0, a)), 'options->lower_bfloat16_conversions'),
 ])
 
 def vector_cmp(reduce_op, cmp_op, comps):
@@ -1695,9 +1700,9 @@ optimizations.extend([
    # bfi is either b or c.
    (('bfi', ('ineg', ('b2i', 'a@1')), b, c), ('bcsel', a, b, c)),
 
-   # bfi(a, 0, 0) = ((0 << find_lsb(a)) & a) | (0 & ~a)
-   #              = 0
-   (('bfi', a, 0, 0), 0),
+   # bfi(a, 0, b) = (0 << find_lsb(a)) & a) | (b & ~a)
+   #              = b & ~a
+   (('bfi', a, 0, b), ('iand', ('inot', a), b)),
 
    # bfi(a, b, b) = ((b << find_lsb(a)) & a) | (b & ~a)
    #              = (a & b) | (b & ~a)    If a is odd, find_lsb(a) == 0
@@ -2015,6 +2020,31 @@ optimizations.extend([
    (('extract_u8', ('iand', a, 0x00ff0000), 2), ('extract_u8', a, 2)),
    (('extract_u8', ('iand', a, 0xff000000), 3), ('extract_u8', a, 3)),
 
+   (('ior', ('bcsel', ('ieq', ('iand', a, 0x00000080), 0), 0, ~0xff), ('extract_u8', a, 0)), ('extract_i8', a, 0)),
+   (('ior', ('bcsel', ('ieq', ('iand', a, 0x00008000), 0), 0, ~0xff), ('extract_u8', a, 1)), ('extract_i8', a, 1)),
+   (('ior', ('bcsel', ('ieq', ('iand', a, 0x00800000), 0), 0, ~0xff), ('extract_u8', a, 2)), ('extract_i8', a, 2)),
+   (('ior', ('bcsel', ('ige',          'a@32',         0), 0, ~0xff), ('extract_u8', a, 3)), ('extract_i8', a, 3)),
+   (('ior', ('bcsel', ('ine', ('iand', a, 0x00000080), 0), ~0xff, 0), ('extract_u8', a, 0)), ('extract_i8', a, 0)),
+   (('ior', ('bcsel', ('ine', ('iand', a, 0x00008000), 0), ~0xff, 0), ('extract_u8', a, 1)), ('extract_i8', a, 1)),
+   (('ior', ('bcsel', ('ine', ('iand', a, 0x00800000), 0), ~0xff, 0), ('extract_u8', a, 2)), ('extract_i8', a, 2)),
+   (('ior', ('bcsel', ('ilt',          'a@32',         0), ~0xff, 0), ('extract_u8', a, 3)), ('extract_i8', a, 3)),
+
+   (('extract_i8', ('ushr', a, 8), 0), ('extract_i8', a, 1)),
+   (('extract_i8', ('ushr', a, 8), 1), ('extract_i8', a, 2)),
+   (('extract_i8', ('ushr', a, 8), 2), ('extract_i8', a, 3)),
+   (('extract_u8', ('ushr', a, 8), 0), ('extract_u8', a, 1)),
+   (('extract_u8', ('ushr', a, 8), 1), ('extract_u8', a, 2)),
+   (('extract_u8', ('ushr', a, 8), 2), ('extract_u8', a, 3)),
+
+   (('extract_i8', ('extract_i16', a, 1), 0), ('extract_i8', a, 2)),
+   (('extract_i8', ('extract_i16', a, 1), 1), ('extract_i8', a, 3)),
+   (('extract_i8', ('extract_u16', a, 1), 0), ('extract_i8', a, 2)),
+   (('extract_i8', ('extract_u16', a, 1), 1), ('extract_i8', a, 3)),
+   (('extract_u8', ('extract_i16', a, 1), 0), ('extract_u8', a, 2)),
+   (('extract_u8', ('extract_i16', a, 1), 1), ('extract_u8', a, 3)),
+   (('extract_u8', ('extract_u16', a, 1), 0), ('extract_u8', a, 2)),
+   (('extract_u8', ('extract_u16', a, 1), 1), ('extract_u8', a, 3)),
+
    (('iand', ('extract_u8',  a, 0), '#b'), ('iand', a, ('iand', b, 0x00ff))),
    (('iand', ('extract_u16', a, 0), '#b'), ('iand', a, ('iand', b, 0xffff))),
 
@@ -2038,6 +2068,12 @@ optimizations.extend([
    # Packing a u8vec4 to write to an SSBO.
    (('ior', ('ishl', ('u2u32', 'a@8'), 24), ('ior', ('ishl', ('u2u32', 'b@8'), 16), ('ior', ('ishl', ('u2u32', 'c@8'), 8), ('u2u32', 'd@8')))),
     ('pack_32_4x8', ('vec4', d, c, b, a)), 'options->has_pack_32_4x8'),
+
+   # Mixed 16-bit/8-bit loads vectorized to 8-bit vector load and then lowered to 32-bit
+   (('ior', ('u2u16', ('unpack_32_4x8', a)), ('ishl', ('u2u16', ('unpack_32_4x8.y', a)), 8)),
+    ('unpack_32_2x16_split_x', a), '!options->lower_unpack_32_2x16_split'),
+   (('ior', ('u2u16', ('unpack_32_4x8.z', a)), ('ishl', ('u2u16', ('unpack_32_4x8.w', a)), 8)),
+    ('unpack_32_2x16_split_y', a), '!options->lower_unpack_32_2x16_split'),
 
    (('extract_u16', ('extract_i16', a, b), 0), ('extract_u16', a, b)),
    (('extract_u16', ('extract_u16', a, b), 0), ('extract_u16', a, b)),
@@ -2426,9 +2462,25 @@ optimizations.extend([
               ('ubfe', 'value', 'offset', 'bits')),
     'options->lower_bitfield_extract && options->has_bfe'),
 
-   # (src0 & src1) | (~src0 & src2). Constant fold if src2 is 0.
+   # (src0 & src1) | (~src0 & src2). Constant fold if a src is 0/-1.
    (('bitfield_select', a, b, 0), ('iand', a, b)),
+   (('bitfield_select', a, 0, b), ('iand', ('inot', a), b)),
+   (('bitfield_select', 0, a, b), b),
+   (('bitfield_select', a, b, -1), ('ior', ('inot', a), b)),
+   (('bitfield_select', a, -1, b), ('ior', a, b)),
+   (('bitfield_select', -1, a, b), a),
+   (('bitfield_select', a, b, b), b),
+   (('bitfield_select', a, ('inot', b), b), ('ixor', a, b)),
+   (('bitfield_select', a, b, ('inot', b)), ('inot', ('ixor', a, b))),
    (('bitfield_select', a, ('iand', a, b), c), ('bitfield_select', a, b, c)),
+   (('bitfield_select', a, b, ('iand', ('inot', a), c)), ('bitfield_select', a, b, c)),
+   (('bitfield_select', ('inot', a), b, c), ('bitfield_select', a, c, b)),
+   (('bitfield_select', ('ineg', ('b2i', 'a@1')), b, c), ('bcsel', a, b, c)),
+
+   (('ior@32', ('iand', a, b), ('iand', ('inot', a), c)), ('bitfield_select', a, b, c), 'options->has_bitfield_select'),
+   (('iadd@32', ('iand', a, b), ('iand', ('inot', a), c)), ('bitfield_select', a, b, c), 'options->has_bitfield_select'),
+   (('ixor@32', ('iand', a, b), ('iand', ('inot', a), c)), ('bitfield_select', a, b, c), 'options->has_bitfield_select'),
+   (('ixor@32', ('iand', a, ('ixor', b, c)), c), ('bitfield_select', a, b, c), 'options->has_bitfield_select'),
 
    # Note that these opcodes are defined to only use the five least significant bits of 'offset' and 'bits'
    (('ubfe', 'value', 'offset', ('iand', 31, 'bits')), ('ubfe', 'value', 'offset', 'bits')),
@@ -3885,6 +3937,30 @@ before_lower_int64_optimizations = [
     (('iadd', ('u2u64', a), ('u2u64', a)), ('ishl', ('u2u64', a), 1)),
 ]
 
+# Those optimizations try to reverse integer promotion found in e.g. OpenCL C. Those should be ran
+# before any bit_size lowering is done.
+integer_promotion_optimizations = []
+for s in [8, 16]:
+    u2u = 'u2u{}'.format(s)
+    aN = 'a@{}'.format(s)
+    bN = 'b@{}'.format(s)
+
+    for op in ['ineg', 'inot']:
+        integer_promotion_optimizations.extend([
+            ((u2u, (op, 'a@32')), (op, (u2u, a))),
+        ])
+
+    for op in ['iadd', 'imul', 'iand', 'ior', 'ixor']:
+        integer_promotion_optimizations.extend([
+            ((u2u, (op, 'a@32', 'b@32')), (op, (u2u, a), (u2u, b))),
+        ])
+
+    # idiv and irem are more restrictive because we can't simply trim the inputs arbitrarily.
+    for op in ['idiv', 'irem']:
+        integer_promotion_optimizations.extend([
+            ((u2u, (op, ('i2i32', aN), ('i2i32', bN))), (op, a, b)),
+        ])
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--out', required=True)
 args = parser.parse_args()
@@ -3899,3 +3975,5 @@ with open(args.out, "w", encoding='utf-8') as f:
                                         late_optimizations).render())
     f.write(nir_algebraic.AlgebraicPass("nir_opt_algebraic_distribute_src_mods",
                                         distribute_src_mods).render())
+    f.write(nir_algebraic.AlgebraicPass("nir_opt_algebraic_integer_promotion",
+                                        integer_promotion_optimizations).render())

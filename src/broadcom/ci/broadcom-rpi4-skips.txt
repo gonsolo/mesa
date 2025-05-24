@@ -3,6 +3,7 @@ spec@!opengl 1.1@streaming-texture-leak
 spec@!opengl 1.2@tex3d-maxsize
 
 # Slow CL tests (> 5 minute to run)
+program@execute@builtin@builtin-float-lgamma_r-1.0.generated
 program@execute@builtin@builtin-float-sincos-1.0.generated
 
 # Versions / Extensions not supported
@@ -29,13 +30,20 @@ dEQP-VK.rasterization.depth_bias.d32_sfloat
 spec@arb_shading_language_420pack@active sampler conflict
 spec@arb_texture_buffer_object@render-no-bo
 
+# When running these tests in parallel with others, quite a few of the
+# tests reach the execution time limit of 1 minute, which generates a
+# lot of flakes (sometimes they pass, sometimes they are timeout). And
+# moving those tests to skip list won't fix the issue, as new tests
+# that were passing fastly now they take 1 minute. Requires
+# investigation.
+dEQP-VK.synchronization.implicit.*
+dEQP-VK.synchronization2.implicit.*
+
 # Slow CTS tests (> 1 minute to run)
-dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_linear.vk_image_type_3d.single.gradient.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_linear.vk_image_type_3d.single.random.device.write
-dEQP-VK.rasterization.culling.back_triangle_fan_reverse
+dEQP-VK.memory.mapping.dedicated_alloc.buffer.full.variable.implicit_unmap
 dEQP-VK.spirv_assembly.instruction.graphics.spirv_ids_abuse.lots_ids_geom
-dEQP-VK.ssbo.layout.random.8bit.all_per_block_buffers.5
 dEQP-VK.ssbo.layout.random.16bit.all_shared_buffer.31
+dEQP-VK.ssbo.layout.random.8bit.all_per_block_buffers.5
 dEQP-VK.ssbo.layout.random.nested_structs_arrays.17
 dEQP-VK.ssbo.phys.layout.random.8bit.all_per_block_buffers.46
 dEQP-VK.ssbo.phys.layout.random.8bit.nested_structs_arrays.17
@@ -94,6 +102,7 @@ dEQP-VK.draw.renderpass.basic_draw.draw_indexed_indirect.line_strip.45_single_co
 dEQP-VK.glsl.texture_functions.query.texturesize.isampler1darray_fragment
 dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_linear.vk_image_type_3d.multiple.gradient.device.write
 dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_linear.vk_image_type_3d.multiple.random.device.write
+dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_linear.vk_image_type_3d.single.gradient.device.write
 dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_linear.vk_image_type_3d.single.random.device.write
 dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_optimal.vk_image_type_3d.multiple.gradient.device.write
 dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_optimal.vk_image_type_3d.multiple.random.device.write
@@ -110,6 +119,7 @@ dEQP-VK.image.concurrent_copy.vk_format_r8_unorm.vk_image_tiling_optimal.vk_imag
 dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_linear.vk_image_type_3d.multiple.gradient.device.write
 dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_linear.vk_image_type_3d.multiple.random.device.write
 dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_linear.vk_image_type_3d.single.gradient.device.write
+dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_linear.vk_image_type_3d.single.random.device.write
 dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_optimal.vk_image_type_3d.multiple.gradient.device.write
 dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_optimal.vk_image_type_3d.multiple.random.device.write
 dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_optimal.vk_image_type_3d.single.gradient.device.write

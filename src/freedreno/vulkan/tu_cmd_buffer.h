@@ -521,6 +521,7 @@ struct tu_cmd_state
    bool disable_fs;
    bool stencil_front_write;
    bool stencil_back_write;
+   bool stencil_written_on_depth_fail;
    bool pipeline_sysmem_single_prim_mode;
    bool pipeline_has_tess;
    bool pipeline_disable_gmem;
@@ -542,6 +543,8 @@ struct tu_cmd_state
    uint32_t prim_counters_running;
 
    bool prim_generated_query_running_before_rp;
+
+   bool occlusion_query_may_be_running;
 
    enum tu_suspend_resume_state suspend_resume;
 
@@ -584,6 +587,9 @@ struct tu_cmd_buffer
 
    struct tu_cmd_state state;
    uint32_t queue_family_index;
+
+   /* For TU_DEBUG_ENV(CHECK_CMD_BUFFER_STATUS) functionality. */
+   struct tu_bo *status_bo;
 
    uint32_t push_constants[MAX_PUSH_CONSTANTS_SIZE / 4];
    VkShaderStageFlags push_constant_stages;

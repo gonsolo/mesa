@@ -335,16 +335,11 @@ fd_init_compute_caps(struct fd_screen *screen)
 
    caps->max_local_size = screen->info->cs_shared_mem_size;
 
-   caps->max_private_size =
-   caps->max_input_size = 4096;
-
    caps->max_mem_alloc_size = screen->ram_size;
 
    caps->max_clock_frequency = screen->max_freq / 1000000;
 
    caps->max_compute_units = 9999; // TODO
-
-   caps->images_supported = true;
 
    caps->subgroup_sizes = 32; // TODO
 
@@ -923,8 +918,11 @@ fd_screen_create(int fd,
    if (fd_device_version(dev) >= FD_VERSION_ROBUSTNESS)
       screen->has_robustness = true;
 
-   if (fd_pipe_get_param(screen->pipe, FD_UCHE_TRAP_BASE, &val))
+   if (fd_pipe_get_param(screen->pipe, FD_UCHE_TRAP_BASE, &val)) {
       screen->uche_trap_base = screen->gen >= 6 ? 0x1fffffffff000ull : 0ull;
+   } else {
+      screen->uche_trap_base = val;
+   }
 
    screen->has_syncobj = fd_has_syncobj(screen->dev);
 

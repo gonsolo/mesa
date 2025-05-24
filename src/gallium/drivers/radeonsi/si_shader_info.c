@@ -7,6 +7,7 @@
 #include "si_pipe.h"
 #include "si_shader_internal.h"
 #include "util/mesa-sha1.h"
+#include "pipe/p_shader_tokens.h"
 #include "sid.h"
 #include "nir.h"
 #include "nir_tcs_info.h"
@@ -172,19 +173,7 @@ static void scan_io_usage(const nir_shader *nir, struct si_shader_info *info,
 
                if (new_mask & (1 << i)) {
                   info->output_streams[loc] |= stream << (i * 2);
-                  info->num_stream_output_components[stream]++;
-               }
-
-               if (nir_intrinsic_has_io_xfb(intr)) {
-                  nir_io_xfb xfb = i < 2 ? nir_intrinsic_io_xfb(intr) :
-                                           nir_intrinsic_io_xfb2(intr);
-                  if (xfb.out[i % 2].num_components) {
-                     unsigned stream = (gs_streams >> (i * 2)) & 0x3;
-                     info->enabled_streamout_buffer_mask |=
-                        BITFIELD_BIT(stream * 4 + xfb.out[i % 2].buffer);
-                  }
-
-                  info->output_xfb_writemask[loc] |= nir_instr_xfb_write_mask(intr);
+                  info->num_gs_stream_components[stream]++;
                }
             }
 
@@ -260,113 +249,19 @@ static void scan_io_usage(const nir_shader *nir, struct si_shader_info *info,
    }
 }
 
-static bool is_bindless_handle_indirect(nir_instr *src)
-{
-   /* Check if the bindless handle comes from indirect load_ubo. */
-   if (src->type == nir_instr_type_intrinsic &&
-       nir_instr_as_intrinsic(src)->intrinsic == nir_intrinsic_load_ubo) {
-      if (!nir_src_is_const(nir_instr_as_intrinsic(src)->src[0]))
-         return true;
-   } else {
-      /* Some other instruction. Return the worst-case result. */
-      return true;
-   }
-   return false;
-}
-
 /* TODO: convert to nir_shader_instructions_pass */
 static void scan_instruction(const struct nir_shader *nir, struct si_shader_info *info,
                              nir_instr *instr, bool colors_lowered)
 {
    if (instr->type == nir_instr_type_tex) {
       nir_tex_instr *tex = nir_instr_as_tex(instr);
-      const nir_src *handle = get_texture_src(tex, nir_tex_src_texture_handle);
 
-      /* Gather the types of used VMEM instructions that return something. */
-      switch (tex->op) {
-      case nir_texop_tex:
-      case nir_texop_txb:
-      case nir_texop_txl:
-      case nir_texop_txd:
-      case nir_texop_lod:
-      case nir_texop_tg4:
-         info->uses_vmem_sampler_or_bvh = true;
-         break;
-      default:
-         info->uses_vmem_load_other = true;
-         break;
-      }
-
-      if (handle) {
-         info->uses_bindless_samplers = true;
-
-         if (is_bindless_handle_indirect(handle->ssa->parent_instr))
-            info->uses_indirect_descriptor = true;
-      } else {
-         const nir_src *deref = get_texture_src(tex, nir_tex_src_texture_deref);
-
-         if (nir_deref_instr_has_indirect(nir_src_as_deref(*deref)))
-            info->uses_indirect_descriptor = true;
-      }
-
-      info->has_non_uniform_tex_access |=
-         tex->texture_non_uniform || tex->sampler_non_uniform;
-
-      info->has_shadow_comparison |= tex->is_shadow;
+      info->uses_bindless_samplers |= get_texture_src(tex, nir_tex_src_texture_handle) != NULL;
    } else if (instr->type == nir_instr_type_intrinsic) {
       nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
       const char *intr_name = nir_intrinsic_infos[intr->intrinsic].name;
-      bool is_ssbo = strstr(intr_name, "ssbo");
-      bool is_image = strstr(intr_name, "image") == intr_name;
-      bool is_bindless_image = strstr(intr_name, "bindless_image") == intr_name;
 
-      /* Gather the types of used VMEM instructions that return something. */
-      if (nir_intrinsic_infos[intr->intrinsic].has_dest) {
-         switch (intr->intrinsic) {
-         case nir_intrinsic_load_ubo:
-            if (!nir_src_is_const(intr->src[1]))
-               info->uses_vmem_load_other = true;
-            break;
-
-         case nir_intrinsic_load_input:
-         case nir_intrinsic_load_input_vertex:
-         case nir_intrinsic_load_per_vertex_input:
-            if (nir->info.stage == MESA_SHADER_VERTEX ||
-                nir->info.stage == MESA_SHADER_TESS_EVAL)
-               info->uses_vmem_load_other = true;
-            break;
-
-         case nir_intrinsic_load_constant:
-         case nir_intrinsic_load_barycentric_at_sample: /* This loads sample positions. */
-         case nir_intrinsic_load_buffer_amd:
-            info->uses_vmem_load_other = true;
-            break;
-
-         default:
-            if (is_image ||
-                is_bindless_image ||
-                is_ssbo ||
-                (strstr(intr_name, "global") == intr_name ||
-                 intr->intrinsic == nir_intrinsic_load_global ||
-                 intr->intrinsic == nir_intrinsic_store_global) ||
-                strstr(intr_name, "scratch"))
-               info->uses_vmem_load_other = true;
-            break;
-         }
-      }
-
-      if (is_bindless_image)
-         info->uses_bindless_images = true;
-
-      if (is_image && nir_deref_instr_has_indirect(nir_src_as_deref(intr->src[0])))
-         info->uses_indirect_descriptor = true;
-
-      if (is_bindless_image && is_bindless_handle_indirect(intr->src[0].ssa->parent_instr))
-         info->uses_indirect_descriptor = true;
-
-      if (intr->intrinsic != nir_intrinsic_store_ssbo && is_ssbo &&
-          !nir_src_is_const(intr->src[0]))
-         info->uses_indirect_descriptor = true;
+      info->uses_bindless_images |= strstr(intr_name, "bindless_image") == intr_name;
 
       if (nir_intrinsic_has_atomic_op(intr)) {
          if (nir_intrinsic_atomic_op(intr) == nir_atomic_op_ordered_add_gfx12_amd)
@@ -374,14 +269,6 @@ static void scan_instruction(const struct nir_shader *nir, struct si_shader_info
       }
 
       switch (intr->intrinsic) {
-      case nir_intrinsic_store_ssbo:
-         if (!nir_src_is_const(intr->src[1]))
-            info->uses_indirect_descriptor = true;
-         break;
-      case nir_intrinsic_load_ubo:
-         if (!nir_src_is_const(intr->src[0]))
-            info->uses_indirect_descriptor = true;
-         break;
       case nir_intrinsic_load_local_invocation_id:
       case nir_intrinsic_load_workgroup_id: {
          unsigned mask = nir_def_components_read(&intr->def);
@@ -484,6 +371,9 @@ static void scan_instruction(const struct nir_shader *nir, struct si_shader_info
 void si_nir_scan_shader(struct si_screen *sscreen, struct nir_shader *nir,
                         struct si_shader_info *info, bool colors_lowered)
 {
+   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+   nir_divergence_analysis(nir);
+
 #if AMD_LLVM_AVAILABLE
    bool force_use_aco = sscreen->use_aco_shader_type == nir->info.stage;
    for (unsigned i = 0; i < sscreen->num_use_aco_shader_blakes; i++) {
@@ -511,7 +401,74 @@ void si_nir_scan_shader(struct si_screen *sscreen, struct nir_shader *nir,
    }
 
    memset(info, 0, sizeof(*info));
-   info->base = nir->info;
+   memcpy(info->base.source_blake3, nir->info.source_blake3, sizeof(nir->info.source_blake3));
+
+   info->base.use_aco_amd = nir->info.use_aco_amd;
+   info->base.writes_memory = nir->info.writes_memory;
+   info->base.subgroup_size = nir->info.subgroup_size;
+
+   info->base.outputs_read = nir->info.outputs_read;
+   info->base.outputs_written = nir->info.outputs_written;
+   info->base.patch_outputs_read = nir->info.patch_outputs_read;
+   info->base.patch_outputs_written = nir->info.patch_outputs_written;
+
+   info->base.num_ubos = nir->info.num_ubos;
+   info->base.num_ssbos = nir->info.num_ssbos;
+   info->base.num_images = nir->info.num_images;
+   info->base.textures_used = nir->info.textures_used[0];
+   info->base.image_buffers = nir->info.image_buffers[0];
+   info->base.msaa_images = nir->info.msaa_images[0];
+
+   info->base.shared_size = nir->info.shared_size;
+   memcpy(info->base.workgroup_size, nir->info.workgroup_size, sizeof(nir->info.workgroup_size));
+   info->base.workgroup_size_variable = nir->info.workgroup_size_variable;
+   info->base.derivative_group = nir->info.derivative_group;
+
+   memcpy(info->base.xfb_stride, nir->info.xfb_stride, sizeof(nir->info.xfb_stride));
+   info->base.num_inlinable_uniforms = nir->info.num_inlinable_uniforms;
+
+   switch (nir->info.stage) {
+   case MESA_SHADER_VERTEX:
+      info->base.vs.blit_sgprs_amd = nir->info.vs.blit_sgprs_amd;
+      info->base.vs.window_space_position = nir->info.vs.window_space_position;
+      break;
+
+   case MESA_SHADER_TESS_CTRL:
+   case MESA_SHADER_TESS_EVAL:
+      info->base.tess._primitive_mode = nir->info.tess._primitive_mode;
+      info->base.tess.spacing = nir->info.tess.spacing;
+      info->base.tess.tcs_vertices_out = nir->info.tess.tcs_vertices_out;
+      info->base.tess.ccw = nir->info.tess.ccw;
+      info->base.tess.point_mode = nir->info.tess.point_mode;
+      break;
+
+   case MESA_SHADER_GEOMETRY:
+      info->base.gs.output_primitive = nir->info.gs.output_primitive;
+      info->base.gs.input_primitive = nir->info.gs.input_primitive;
+      info->base.gs.vertices_out = nir->info.gs.vertices_out;
+      info->base.gs.invocations = nir->info.gs.invocations;
+      info->base.gs.active_stream_mask = nir->info.gs.active_stream_mask;
+      break;
+
+   case MESA_SHADER_FRAGMENT:
+      info->base.fs.uses_discard = nir->info.fs.uses_discard;
+      info->base.fs.uses_fbfetch_output = nir->info.fs.uses_fbfetch_output;
+      info->base.fs.needs_coarse_quad_helper_invocations = nir->info.fs.needs_coarse_quad_helper_invocations;
+      info->base.fs.uses_sample_shading = nir->info.fs.uses_sample_shading;
+      info->base.fs.early_fragment_tests = nir->info.fs.early_fragment_tests;
+      info->base.fs.post_depth_coverage = nir->info.fs.post_depth_coverage;
+      info->base.fs.pixel_center_integer = nir->info.fs.pixel_center_integer;
+      info->base.fs.depth_layout = nir->info.fs.depth_layout;
+      break;
+
+   case MESA_SHADER_COMPUTE:
+   case MESA_SHADER_KERNEL:
+      info->base.cs.user_data_components_amd = nir->info.cs.user_data_components_amd;
+      break;
+
+   default:
+      unreachable("unexpected shader stage");
+   }
 
    /* Get options from shader profiles. */
    for (unsigned i = 0; i < ARRAY_SIZE(si_shader_profiles); i++) {
@@ -558,9 +515,6 @@ void si_nir_scan_shader(struct si_screen *sscreen, struct nir_shader *nir,
 
    info->uses_frontface = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_FRONT_FACE) |
                           BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_FRONT_FACE_FSIGN);
-   info->uses_instanceid = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_INSTANCE_ID);
-   info->uses_base_vertex = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_BASE_VERTEX);
-   info->uses_base_instance = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_BASE_INSTANCE);
    info->uses_invocationid = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_INVOCATION_ID);
    info->uses_grid_size = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_NUM_WORKGROUPS);
    info->uses_tg_size = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_NUM_SUBGROUPS);
@@ -570,7 +524,6 @@ void si_nir_scan_shader(struct si_screen *sscreen, struct nir_shader *nir,
                             si_should_clear_lds(sscreen, nir);
    }
    info->uses_variable_block_size = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_WORKGROUP_SIZE);
-   info->uses_drawid = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_DRAW_ID);
    info->uses_primid = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_PRIMITIVE_ID) ||
                        nir->info.inputs_read & VARYING_BIT_PRIMITIVE_ID;
    info->reads_samplemask = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_SAMPLE_MASK_IN);
@@ -601,20 +554,19 @@ void si_nir_scan_shader(struct si_screen *sscreen, struct nir_shader *nir,
       info->writes_psize = nir->info.outputs_written & VARYING_BIT_PSIZ;
       info->writes_clipvertex = nir->info.outputs_written & VARYING_BIT_CLIP_VERTEX;
       info->writes_edgeflag = nir->info.outputs_written & VARYING_BIT_EDGE;
-      info->writes_position = nir->info.outputs_written & VARYING_BIT_POS;
+
+      if (nir->xfb_info) {
+         u_foreach_bit(buf, nir->xfb_info->buffers_written) {
+            unsigned stream = nir->xfb_info->buffer_to_stream[buf];
+            info->enabled_streamout_buffer_mask |= BITFIELD_BIT(buf) << (stream * 4);
+         }
+      }
    }
 
-   nir_function_impl *impl = nir_shader_get_entrypoint((nir_shader*)nir);
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    nir_foreach_block (block, impl) {
       nir_foreach_instr (instr, block)
          scan_instruction(nir, info, instr, colors_lowered);
-   }
-
-   if (nir->info.stage == MESA_SHADER_VERTEX || nir->info.stage == MESA_SHADER_TESS_EVAL ||
-       nir->info.stage == MESA_SHADER_GEOMETRY) {
-      info->num_streamout_components = 0;
-      for (unsigned i = 0; i < info->num_outputs; i++)
-         info->num_streamout_components += util_bitcount(info->output_xfb_writemask[i]);
    }
 
    if (nir->info.stage == MESA_SHADER_VERTEX || nir->info.stage == MESA_SHADER_TESS_EVAL) {
@@ -642,8 +594,6 @@ void si_nir_scan_shader(struct si_screen *sscreen, struct nir_shader *nir,
                                    BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_SAMPLE_MASK_IN) ||
                                    BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_HELPER_INVOCATION));
 
-      info->uses_vmem_load_other |= nir->info.fs.uses_fbfetch_output;
-
       /* Add both front and back color inputs. */
       unsigned num_inputs_with_colors = info->num_inputs;
       for (unsigned back = 0; back < 2; back++) {
@@ -665,8 +615,7 @@ void si_nir_scan_shader(struct si_screen *sscreen, struct nir_shader *nir,
       }
    }
 
-   info->uses_vmem_load_other |= info->uses_indirect_descriptor;
-   info->has_divergent_loop = nir_has_divergent_loop((nir_shader*)nir);
+   info->has_divergent_loop = nir_has_divergent_loop(nir);
 
    if (nir->info.stage == MESA_SHADER_VERTEX) {
       info->num_vs_inputs =

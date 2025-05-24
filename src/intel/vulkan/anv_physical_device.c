@@ -177,6 +177,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_external_semaphore                = true,
       .KHR_external_semaphore_fd             = true,
       .KHR_format_feature_flags2             = true,
+      .KHR_fragment_shader_barycentric       = device->info.ver >= 20,
       .KHR_fragment_shading_rate             = device->info.ver >= 11,
       .KHR_get_memory_requirements2          = true,
       .KHR_global_priority                   = device->max_context_priority >=
@@ -223,6 +224,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_ray_tracing_pipeline              = rt_enabled,
       .KHR_ray_tracing_position_fetch        = rt_enabled,
       .KHR_relaxed_block_layout              = true,
+      .KHR_robustness2                       = true,
       .KHR_sampler_mirror_clamp_to_edge      = true,
       .KHR_sampler_ycbcr_conversion          = true,
       .KHR_separate_depth_stencil_layouts    = true,
@@ -703,7 +705,7 @@ get_features(const struct anv_physical_device *pdevice,
       .rayTracingPipelineTraceRaysIndirect = rt_enabled,
       .rayTraversalPrimitiveCulling = rt_enabled,
 
-      /* VK_EXT_robustness2 */
+      /* VK_KHR_robustness2 */
       .robustBufferAccess2 = true,
       .robustImageAccess2 = true,
       .nullDescriptor = true,
@@ -957,6 +959,10 @@ get_features(const struct anv_physical_device *pdevice,
       .shaderBFloat16CooperativeMatrix =
          anv_device_has_bfloat16_cooperative_matrix(pdevice),
       .shaderBFloat16DotProduct = pdevice->info.has_bfloat16,
+
+      /* VK_KHR_fragment_shader_barycentric */
+      .fragmentShaderBarycentric =
+         pdevice->vk.supported_extensions.KHR_fragment_shader_barycentric,
    };
 
    /* The new DOOM and Wolfenstein games require depthBounds without
@@ -1439,6 +1445,11 @@ get_properties(const struct anv_physical_device *pdevice,
       props->meshAndTaskShaderDerivatives = pdevice->info.has_mesh_shading;
    }
 
+   /* VK_KHR_fragment_shader_barycentric */
+   {
+      props->triStripVertexOrderIndependentOfProvokingVertex = false;
+   }
+
    /* VK_KHR_fragment_shading_rate */
    {
       props->primitiveFragmentShadingRateWithMultipleViewports =
@@ -1535,6 +1546,14 @@ get_properties(const struct anv_physical_device *pdevice,
       props->shaderGroupHandleCaptureReplaySize = 32;
       props->maxRayDispatchInvocationCount = 1U << 30; /* required min limit */
       props->maxRayHitAttributeSize = BRW_RT_SIZEOF_HIT_ATTRIB_DATA;
+   }
+
+   /* VK_KHR_robustness2 */
+   {
+      props->robustStorageBufferAccessSizeAlignment =
+         ANV_SSBO_BOUNDS_CHECK_ALIGNMENT;
+      props->robustUniformBufferAccessSizeAlignment =
+         ANV_UBO_ALIGNMENT;
    }
 
    /* VK_KHR_vertex_attribute_divisor */
@@ -1921,14 +1940,6 @@ get_properties(const struct anv_physical_device *pdevice,
    {
       props->provokingVertexModePerPipeline = true;
       props->transformFeedbackPreservesTriangleFanProvokingVertex = false;
-   }
-
-   /* VK_EXT_robustness2 */
-   {
-      props->robustStorageBufferAccessSizeAlignment =
-         ANV_SSBO_BOUNDS_CHECK_ALIGNMENT;
-      props->robustUniformBufferAccessSizeAlignment =
-         ANV_UBO_ALIGNMENT;
    }
 
    /* VK_EXT_sample_locations */
@@ -2550,14 +2561,6 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
                          "Vulkan not yet supported on %s", devinfo.name);
       goto fail_fd;
    }
-
-   /* Disable Wa_16013994831 on Gfx12.0 because we found other cases where we
-    * need to always disable preemption :
-    *    - https://gitlab.freedesktop.org/mesa/mesa/-/issues/5963
-    *    - https://gitlab.freedesktop.org/mesa/mesa/-/issues/5662
-    */
-   if (devinfo.verx10 == 120)
-      BITSET_CLEAR(devinfo.workarounds, INTEL_WA_16013994831);
 
    if (!devinfo.has_context_isolation) {
       result = vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,

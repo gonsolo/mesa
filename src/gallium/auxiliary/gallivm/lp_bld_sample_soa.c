@@ -2354,6 +2354,7 @@ lp_build_sample_common(struct lp_build_sample_context *bld,
                        const struct lp_derivatives *derivs, /* optional */
                        LLVMValueRef lod_bias, /* optional */
                        LLVMValueRef explicit_lod, /* optional */
+                       LLVMValueRef min_lod, /* optional */
                        LLVMValueRef *lod_pos_or_zero,
                        LLVMValueRef *lod,
                        LLVMValueRef *lod_fpart,
@@ -2455,7 +2456,7 @@ lp_build_sample_common(struct lp_build_sample_context *bld,
                             first_level_vec,
                             coords[0], coords[1], coords[2],
                             derivs, lod_bias, explicit_lod,
-                            mip_filter, lod,
+                            min_lod, mip_filter, lod,
                             &lod_ipart, lod_fpart, lod_pos_or_zero,
                             aniso_values);
       if (is_lodq) {
@@ -3114,6 +3115,10 @@ struct lp_type
 lp_build_texel_type(struct lp_type texel_type,
                     const struct util_format_description *format_desc)
 {
+   if (format_desc->channel[0].size == 64 && format_desc->block.width == 1 &&
+       format_desc->block.height == 1 && format_desc->block.depth == 1)
+      texel_type.width = 64;
+
    /* always using the first channel hopefully should be safe,
     * if not things WILL break in other places anyway.
     */
@@ -3158,6 +3163,7 @@ lp_build_sample_soa_code(struct gallivm_state *gallivm,
                          const LLVMValueRef *offsets,
                          const struct lp_derivatives *derivs, /* optional */
                          LLVMValueRef lod, /* optional */
+                         LLVMValueRef min_lod, /* optional */
                          LLVMValueRef ms_index, /* optional */
                          LLVMValueRef *texel_out)
 {
@@ -3607,7 +3613,7 @@ lp_build_sample_soa_code(struct gallivm_state *gallivm,
 
       lp_build_sample_common(&bld, op_is_lodq, texture_index, sampler_index,
                              newcoords, derivs, lod_bias, explicit_lod,
-                             &lod_positive, &lod, &lod_fpart,
+                             min_lod, &lod_positive, &lod, &lod_fpart,
                              &ilevel0, &ilevel1, &aniso_values);
 
       if (op_is_lodq) {
@@ -3830,6 +3836,10 @@ lp_build_sample_soa_code(struct gallivm_state *gallivm,
    if (!bld.texel_type.floating) {
       unsigned chan;
       for (chan = 0; chan < 4; chan++) {
+         if (bld.texel_type.width == 64) {
+            texel_out[chan] =
+               LLVMBuildTrunc(builder, texel_out[chan], lp_build_int_vec_type(gallivm, type), "");
+         }
          texel_out[chan] = LLVMBuildBitCast(builder, texel_out[chan],
                                             lp_build_vec_type(gallivm, type), "");
       }
@@ -3979,6 +3989,7 @@ lp_build_sample_gen_func(struct gallivm_state *gallivm,
                             offsets,
                             deriv_ptr,
                             lod,
+                            NULL,
                             ms_index,
                             texel_out);
 
@@ -4243,6 +4254,7 @@ lp_build_sample_soa(const struct lp_static_texture_state *static_texture_state,
                                params->offsets,
                                params->derivs,
                                params->lod,
+                               NULL,
                                params->ms_index,
                                params->texel);
    }
@@ -4539,7 +4551,9 @@ lp_build_do_atomic_soa(struct gallivm_state *gallivm,
 {
    const enum pipe_format format = format_desc->format;
 
-   bool valid = format == PIPE_FORMAT_R32_UINT ||
+   bool valid = format == PIPE_FORMAT_R64_UINT ||
+                format == PIPE_FORMAT_R64_SINT ||
+                format == PIPE_FORMAT_R32_UINT ||
                 format == PIPE_FORMAT_R32_SINT ||
                 format == PIPE_FORMAT_R32_FLOAT;
 
@@ -4581,6 +4595,10 @@ lp_build_do_atomic_soa(struct gallivm_state *gallivm,
    LLVMTypeRef ref_type = (format == PIPE_FORMAT_R32_FLOAT) ?
       LLVMFloatTypeInContext(gallivm->context) :
       LLVMInt32TypeInContext(gallivm->context);
+   if (format_desc->block.bits == 64) {
+      assert(integer);
+      ref_type = LLVMInt64TypeInContext(gallivm->context);
+   }
 
    LLVMTypeRef atom_res_elem_type =
       LLVMVectorType(ref_type, type.length);

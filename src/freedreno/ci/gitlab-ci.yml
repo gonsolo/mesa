@@ -166,7 +166,7 @@ a618-skqp:
     HWCI_START_XORG: 1
     DEQP_SUITE: freedreno-a618-skqp
 
-.a618-piglit:
+a618-piglit:
   extends:
     - .lava-arm64-test-gl
     - .lava-sc7180-trogdor-lazor-limozeen:arm64
@@ -303,6 +303,8 @@ a630-gl:
     - .baremetal-deqp-test
     - .google-freedreno-test-gl
     - .a630-test
+  rules:
+    - when: never  # Cheza DUTs are retired and no longer active
   parallel: 3
   variables:
     DEQP_SUITE: freedreno-a630
@@ -315,6 +317,8 @@ a630-gles-asan:
     - .google-freedreno-test-gl
     - .a630-test
     - .baremetal-arm64-asan-test-gl
+  rules:
+    - when: never  # Cheza DUTs are retired and no longer active
   variables:
     DEQP_SUITE: freedreno-a630-gles-asan
     FDO_CI_CONCURRENT: 2 # We get OOMkills if we go too wide with asan enabled
@@ -328,16 +332,20 @@ a630-gles-asan-full:
     - a630-gles-asan
     - .a630-full
     - .google-freedreno-manual-rules
+  rules:
+    - when: never  # Cheza DUTs are retired and no longer active
   variables:
     DEQP_SUITE: freedreno-a630-gles-asan-full
     TEST_PHASE_TIMEOUT_MINUTES: 55
 
-.a630-vk:
+a630-vk:
   extends:
     - .google-freedreno-test-vk
     - .a630-test
     - .baremetal-deqp-test
     - .google-turnip-rules
+  rules:
+    - when: never  # Cheza DUTs are retired and no longer active
   variables:
     DEQP_SUITE: freedreno-a630-vk
 
@@ -348,9 +356,11 @@ a630-vk-full:
   # blocking up normal merges, so going more parallel doesn't make any sense.
   timeout: 2h
   extends:
-    - .a630-vk
+    - a630-vk
     - .a630-full
     - .google-turnip-manual-rules
+  rules:
+    - when: never  # Cheza DUTs are retired and no longer active
   parallel: 2
   variables:
     DEQP_SUITE: freedreno-a630-vk-full
@@ -363,6 +373,8 @@ a630-vk-asan:
     - .baremetal-deqp-test
     - .baremetal-arm64-asan-test-vk
     - .google-turnip-rules
+  rules:
+    - when: never  # Cheza DUTs are retired and no longer active
   variables:
     DEQP_SUITE: freedreno-a630-vk-asan
     FDO_CI_CONCURRENT: 2 # We get OOMkills if we go too wide with asan enabled
@@ -375,6 +387,8 @@ a630-piglit:
     - .test-piglit
     # Note that piglit has GL+VK integration testing.
     - .google-freedreno-turnip-rules
+  rules:
+    - when: never  # Cheza DUTs are retired and no longer active
   variables:
     HWCI_START_WESTON: 1
     DEQP_SUITE: freedreno-a630-piglit
@@ -387,6 +401,8 @@ a630-piglit-full:
     - .test-piglit
     # Note that piglit has GL+VK integration testing.
     - .google-freedreno-turnip-manual-rules
+  rules:
+    - when: never  # Cheza DUTs are retired and no longer active
   timeout: 60m
   variables:
     HWCI_START_WESTON: 1
@@ -399,7 +415,7 @@ a630-traces:
     - .google-freedreno-test-gl
     - .a630-test
   rules:
-    - when: never # Google nginx needs updating
+    - when: never  # Cheza DUTs are retired and no longer active
   variables:
     PIGLIT_REPLAY_DEVICE_NAME: "freedreno-a630"
     PIGLIT_RESULTS: "freedreno-a630-replay"
@@ -414,7 +430,7 @@ a630-traces-restricted:
     - a630-traces
     - .google-freedreno-rules-restricted
   rules:
-    - when: never # Google nginx needs updating
+    - when: never  # Cheza DUTs are retired and no longer active
   variables:
     PIGLIT_TRACES_FILE: restricted-traces-freedreno.yml
     PIGLIT_REPLAY_EXTRA_ARGS: "--download-caching-proxy-url=http://10.42.0.1:8888/cache/?uri= --db-path ${CI_PROJECT_DIR}/replayer-db/ --minio_bucket=${S3_TRACIE_PRIVATE_BUCKET} --jwt-file=${S3_JWT_FILE}"
@@ -425,7 +441,7 @@ a630-traces-performance:
     - a630-traces
     - .google-freedreno-rules-performance
   rules:
-    - when: never # Google nginx needs updating
+    - when: never  # Cheza DUTs are retired and no longer active
   variables:
     PIGLIT_REPLAY_SUBCOMMAND: "profile"
     PIGLIT_REPLAY_EXTRA_ARGS: "--download-caching-proxy-url=http://10.42.0.1:8888/cache/?uri= --db-path ${CI_PROJECT_DIR}/replayer-db/"
@@ -442,32 +458,30 @@ a630-traces-performance:
 
 a750-angle:
   extends:
-    - .b2c-arm64-test-gl
+    - .ci-tron-arm64-test-gl
     - .a750-mupuf
     - .valve-turnip-manual-rules
     - .test-angle
   timeout: 25m  # base runtime 10min total, 7min of testing
   variables:
-    B2C_TIMEOUT_BOOT_MINUTES: 17
-    B2C_TIMEOUT_OVERALL_MINUTES: 20
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 20
     DEQP_SUITE: tu-angle
     HWCI_TEST_SCRIPT: ./install/deqp-runner.sh
 
 a750-gl:
   extends:
-    - .b2c-arm64-test-gl
+    - .ci-tron-arm64-test-gl
     - .a750-mupuf
     - .valve-freedreno-manual-rules
   timeout: 30m  # base runtime 11min total, 8min of testing
   variables:
-    B2C_TIMEOUT_BOOT_MINUTES: 22
-    B2C_TIMEOUT_OVERALL_MINUTES: 25
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 25
     HWCI_TEST_SCRIPT: install/deqp-runner.sh
     DEQP_SUITE: freedreno-a750
 
 a750-piglit-cl:
   extends:
-    - .b2c-arm64-test-gl
+    - .ci-tron-arm64-test-gl
     - .test-piglit
     - .a750-mupuf
     - .valve-freedreno-manual-rules
@@ -482,25 +496,23 @@ a750-piglit-cl:
 
 a750-vk:
   extends:
-    - .b2c-arm64-test-vk
+    - .ci-tron-arm64-test-vk
     - .a750-mupuf
     - .valve-turnip-manual-rules
   timeout: 75m  # base runtime 54min total, 51min of testing
   variables:
-    B2C_TIMEOUT_BOOT_MINUTES: 65
-    B2C_TIMEOUT_OVERALL_MINUTES: 70
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 70
     DEQP_SUITE: freedreno-a750-vk
     HWCI_TEST_SCRIPT: ./install/deqp-runner.sh
 
 a750-vkd3d:
   extends:
-    - .b2c-arm64-test-vk
+    - .ci-tron-arm64-test-vk
     - .a750-mupuf
     - .valve-turnip-manual-rules
   timeout: 15m  # base runtime 3min
   variables:
-    B2C_TIMEOUT_OVERALL_MINUTES: 12
-    B2C_TIMEOUT_BOOT_MINUTES: 10
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 12
     HWCI_TEST_SCRIPT: install/vkd3d-runner.sh
     GPU_VERSION: freedreno-a750
     FDO_CI_CONCURRENT: 1

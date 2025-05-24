@@ -91,6 +91,7 @@ extern bool nir_debug_print_shader[MESA_SHADER_KERNEL + 1];
 #define NIR_DEBUG_PRINT_INTERNAL         (1u << 21)
 #define NIR_DEBUG_PRINT_PASS_FLAGS       (1u << 22)
 #define NIR_DEBUG_INVALIDATE_METADATA    (1u << 23)
+#define NIR_DEBUG_PRINT_STRUCT_DECLS     (1u << 24)
 
 #define NIR_DEBUG_PRINT (NIR_DEBUG_PRINT_VS |  \
                          NIR_DEBUG_PRINT_TCS | \
@@ -124,6 +125,12 @@ static inline unsigned
 nir_round_up_components(unsigned n)
 {
    return (n > 5) ? util_next_power_of_two(n) : n;
+}
+
+static inline unsigned
+nir_round_down_components(unsigned n)
+{
+   return (n > 5) ? MAX2(1 << util_logbase2(n), 5) : n;
 }
 
 static inline nir_component_mask_t
@@ -4999,7 +5006,6 @@ bool nir_lower_io(nir_shader *shader,
                   nir_lower_io_options);
 
 bool nir_io_add_const_offset_to_base(nir_shader *nir, nir_variable_mode modes);
-bool nir_lower_color_inputs(nir_shader *nir);
 void nir_lower_io_passes(nir_shader *nir, bool renumber_vs_inputs);
 bool nir_io_add_intrinsic_xfb_info(nir_shader *nir);
 
@@ -5872,6 +5878,8 @@ bool nir_legalize_16bit_sampler_srcs(nir_shader *nir,
 
 bool nir_lower_point_size(nir_shader *shader, float min, float max);
 
+bool nir_lower_default_point_size(nir_shader *nir);
+
 bool nir_lower_texcoord_replace(nir_shader *s, unsigned coord_replace,
                                 bool point_coord_is_sysval, bool yinvert);
 
@@ -5892,6 +5900,7 @@ bool nir_lower_interpolation(nir_shader *shader,
 typedef enum {
    nir_lower_demote_if_to_cf = (1 << 0),
    nir_lower_terminate_if_to_cf = (1 << 1),
+   nir_move_terminate_out_of_loops = (1 << 2),
 } nir_lower_discard_if_options;
 
 bool nir_lower_discard_if(nir_shader *shader, nir_lower_discard_if_options options);
@@ -6011,6 +6020,7 @@ bool nir_opt_algebraic_before_ffma(nir_shader *shader);
 bool nir_opt_algebraic_before_lower_int64(nir_shader *shader);
 bool nir_opt_algebraic_late(nir_shader *shader);
 bool nir_opt_algebraic_distribute_src_mods(nir_shader *shader);
+bool nir_opt_algebraic_integer_promotion(nir_shader *shader);
 bool nir_opt_constant_folding(nir_shader *shader);
 
 /* Try to combine a and b into a.  Return true if combination was possible,
@@ -6023,6 +6033,7 @@ typedef bool (*nir_combine_barrier_cb)(
 bool nir_opt_combine_barriers(nir_shader *shader,
                               nir_combine_barrier_cb combine_cb,
                               void *data);
+bool nir_opt_acquire_release_barriers(nir_shader *shader, mesa_scope max_scope);
 bool nir_opt_barrier_modes(nir_shader *shader);
 
 bool nir_minimize_call_live_states(nir_shader *shader);

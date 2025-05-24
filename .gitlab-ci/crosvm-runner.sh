@@ -3,6 +3,14 @@
 
 set -ue
 
+if [ -z "$CROSVM_TAG" ]; then
+    echo "CROSVM_TAG must be set to the conditional build tag"
+    exit 1
+fi
+
+# Are we using the right crosvm version?
+ci_tag_test_time_check "CROSVM_TAG"
+
 # Instead of starting one dEQP instance per available CPU core, pour our
 # concurrency at llvmpipe threads instead. This is mostly useful for VirGL and
 # Venus, which serialise quite a bit at the host level. So instead of smashing
@@ -110,6 +118,13 @@ set +e
 if [ "${INSIDE_DEQP_RUNNER:-}" != "true" ]
 then
   set -x
+fi
+
+if [ ! -f "/kernel/${KERNEL_IMAGE_NAME:-bzImage}" ]; then
+  mkdir -p /kernel
+  # shellcheck disable=SC2153
+  curl -L --retry 4 -f --retry-connrefused --retry-delay 30 \
+    -o "/kernel/${KERNEL_IMAGE_NAME:-bzImage}" "${KERNEL_IMAGE_BASE}/${DEBIAN_ARCH:-amd64}/${KERNEL_IMAGE_NAME:-bzImage}"
 fi
 
 # We aren't testing the host driver here, so we don't need to validate NIR on the host

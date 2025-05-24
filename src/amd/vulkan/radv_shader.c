@@ -586,6 +586,13 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
 
    NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
    NIR_PASS(_, nir, nir_opt_shrink_stores, !instance->drirc.disable_shrink_image_store);
+   if (nir->info.stage == MESA_SHADER_FRAGMENT && nir->info.fs.uses_discard)
+      NIR_PASS(_, nir, nir_lower_discard_if, nir_move_terminate_out_of_loops);
+
+   const nir_opt_access_options opt_access_options = {
+      .is_vulkan = true,
+   };
+   NIR_PASS(_, nir, nir_opt_access, &opt_access_options);
 
    if (!stage->key.optimisations_disabled)
       radv_optimize_nir(nir, false);
@@ -603,11 +610,6 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
       if (progress)
          NIR_PASS(_, nir, nir_opt_constant_folding);
    }
-
-   const nir_opt_access_options opt_access_options = {
-      .is_vulkan = true,
-   };
-   NIR_PASS(_, nir, nir_opt_access, &opt_access_options);
 
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_push_const, nir_address_format_32bit_offset);
 
@@ -1953,7 +1955,10 @@ radv_postprocess_binary_config(struct radv_device *device, struct radv_shader_bi
    const struct radv_shader_info *info = &binary->info;
    gl_shader_stage stage = binary->info.stage;
    bool scratch_enabled = config->scratch_bytes_per_wave > 0;
-   bool trap_enabled = !!device->trap_handler_shader;
+   const bool trap_enabled = !!device->trap_handler_shader;
+   /* On GFX12, TRAP_PRESENT doesn't exist for compute shaders and it's enabled by default. */
+   const enum ac_hw_stage hw_stage = radv_select_hw_stage(info, pdev->info.gfx_level);
+   const bool trap_present = trap_enabled && (pdev->info.gfx_level < GFX12 || hw_stage != AC_HW_COMPUTE_SHADER);
    unsigned vgpr_comp_cnt = 0;
    unsigned num_input_vgprs = args->ac.num_vgprs_used;
 
@@ -1977,7 +1982,7 @@ radv_postprocess_binary_config(struct radv_device *device, struct radv_shader_bi
    config->num_shared_vgprs = num_shared_vgprs;
 
    config->rsrc2 = S_00B12C_USER_SGPR(args->num_user_sgprs) | S_00B12C_SCRATCH_EN(scratch_enabled) |
-                   S_00B12C_TRAP_PRESENT(trap_enabled);
+                   S_00B12C_TRAP_PRESENT(trap_present);
 
    if (trap_enabled) {
       /* Configure the shader exceptions like memory violation, etc. */

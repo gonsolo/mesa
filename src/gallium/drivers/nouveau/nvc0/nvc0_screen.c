@@ -176,10 +176,7 @@ nvc0_init_compute_caps(struct nvc0_screen *screen)
       obj_class == GM200_COMPUTE_CLASS ? 96 << 10 :
       (obj_class == GM107_COMPUTE_CLASS ? 64 << 10 : 48 << 10);
 
-   caps->max_private_size = 512 << 10; /* l[] */
-   caps->max_input_size = 4096; /* c[], arbitrary limit */
    caps->subgroup_sizes = 32;
-   caps->images_supported = !!NVC0_MAX_IMAGES;
    caps->max_compute_units = screen->mp_count_compute;
    caps->max_clock_frequency = 512; /* FIXME: arbitrary limit */
    caps->address_bits = 64;

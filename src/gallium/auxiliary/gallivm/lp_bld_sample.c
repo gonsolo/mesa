@@ -827,6 +827,7 @@ lp_build_lod_selector(struct lp_build_sample_context *bld,
                       const struct lp_derivatives *derivs,
                       LLVMValueRef lod_bias, /* optional */
                       LLVMValueRef explicit_lod, /* optional */
+                      LLVMValueRef min_lod, /* optional */
                       enum pipe_tex_mipfilter mip_filter,
                       LLVMValueRef *out_lod,
                       LLVMValueRef *out_lod_ipart,
@@ -992,10 +993,19 @@ lp_build_lod_selector(struct lp_build_sample_context *bld,
          lod = lp_build_min(lodf_bld, lod, max_lod);
       }
       if (bld->static_sampler_state->apply_min_lod) {
-         LLVMValueRef min_lod =
+         LLVMValueRef desc_min_lod =
             dynamic_state->min_lod(bld->gallivm, bld->resources_type,
                                    bld->resources_ptr, sampler_unit);
-         min_lod = lp_build_broadcast_scalar(lodf_bld, min_lod);
+         desc_min_lod = lp_build_broadcast_scalar(lodf_bld, desc_min_lod);
+
+         lod = lp_build_max(lodf_bld, lod, desc_min_lod);
+      }
+
+      if (min_lod) {
+         if (bld->num_lods != bld->coord_type.length) {
+            min_lod = lp_build_pack_aos_scalars(bld->gallivm, bld->coord_bld.type,
+                                                lodf_bld->type, min_lod, 0);
+         }
 
          lod = lp_build_max(lodf_bld, lod, min_lod);
       }

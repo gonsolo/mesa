@@ -32,6 +32,7 @@
 #include "compiler/nir/nir_lower_blend.h"
 #include "nir/nir_serialize.h"
 
+#include "util/format/u_format.h"
 #include "util/shader_stats.h"
 #include "util/u_atomic.h"
 #include "util/os_time.h"
@@ -395,11 +396,10 @@ descriptor_map_add(struct v3dv_descriptor_map *map,
                    int array_index,
                    int array_size,
                    int start_index,
-                   uint8_t return_size,
+                   bool sampler_is_32b,
                    uint8_t plane)
 {
    assert(array_index < array_size);
-   assert(return_size == 16 || return_size == 32);
 
    unsigned index = start_index;
    for (; index < map->num_desc; index++) {
@@ -409,14 +409,13 @@ descriptor_map_add(struct v3dv_descriptor_map *map,
           array_index == map->array_index[index] &&
           plane == map->plane[index]) {
          assert(array_size == map->array_size[index]);
-         if (return_size != map->return_size[index]) {
-            /* It the return_size is different it means that the same sampler
-             * was used for operations with different precision
-             * requirement. In this case we need to ensure that we use the
-             * larger one.
-             */
-            map->return_size[index] = 32;
-         }
+         /* It the return_size is different it means that the same sampler
+          * was used for operations with different precision
+          * requirement. In this case we need to ensure that we use the
+          * larger one.
+          */
+         if (sampler_is_32b != map->sampler_is_32b[index])
+            map->sampler_is_32b[index] = true;
          return index;
       } else if (!map->used[index]) {
          break;
@@ -431,7 +430,7 @@ descriptor_map_add(struct v3dv_descriptor_map *map,
    map->binding[index] = binding;
    map->array_index[index] = array_index;
    map->array_size[index] = array_size;
-   map->return_size[index] = return_size;
+   map->sampler_is_32b[index] = sampler_is_32b;
    map->plane[index] = plane;
    map->num_desc = MAX2(map->num_desc, index + 1);
 
@@ -540,7 +539,7 @@ lower_vulkan_resource_index(nir_builder *b,
                                  const_val->u32,
                                  binding_layout->array_size,
                                  start_index,
-                                 32 /* return_size: doesn't really apply for this case */,
+                                 true /* sampler_is_32b: doesn't really apply for this case */,
                                  0);
       break;
    }
@@ -569,10 +568,10 @@ tex_instr_get_and_remove_plane_src(nir_tex_instr *tex)
    return plane;
 }
 
-/* Returns return_size, so it could be used for the case of not having a
- * sampler object
+/* Returns true if we need 32bit, so we know what size to use when we do not
+ * have a sampler object
  */
-static uint8_t
+static bool
 lower_tex_src(nir_builder *b,
               nir_tex_instr *instr,
               unsigned src_idx,
@@ -643,13 +642,13 @@ lower_tex_src(nir_builder *b,
    struct v3dv_descriptor_set_binding_layout *binding_layout =
       &set_layout->binding[binding];
 
-   uint8_t return_size;
+   uint8_t sampler_is_32b;
    if (V3D_DBG(TMU_16BIT))
-      return_size = 16;
+      sampler_is_32b = false;
    else  if (V3D_DBG(TMU_32BIT))
-      return_size = 32;
+      sampler_is_32b = true;
    else
-      return_size = relaxed_precision ? 16 : 32;
+      sampler_is_32b = !relaxed_precision;
 
    struct v3dv_descriptor_map *map =
       pipeline_get_descriptor_map(state->pipeline, binding_layout->type,
@@ -661,7 +660,7 @@ lower_tex_src(nir_builder *b,
                          base_index,
                          binding_layout->array_size,
                          0,
-                         return_size,
+                         sampler_is_32b,
                          plane);
 
    if (is_sampler)
@@ -669,7 +668,7 @@ lower_tex_src(nir_builder *b,
    else
       instr->texture_index = desc_index;
 
-   return return_size;
+   return sampler_is_32b;
 }
 
 static bool
@@ -677,13 +676,13 @@ lower_sampler(nir_builder *b,
               nir_tex_instr *instr,
               struct lower_pipeline_layout_state *state)
 {
-   uint8_t return_size = 0;
+   bool sampler_is_32b = false;
 
    int texture_idx =
       nir_tex_instr_src_index(instr, nir_tex_src_texture_deref);
 
    if (texture_idx >= 0)
-      return_size = lower_tex_src(b, instr, texture_idx, state);
+      sampler_is_32b = lower_tex_src(b, instr, texture_idx, state);
 
    int sampler_idx =
       nir_tex_instr_src_index(instr, nir_tex_src_sampler_deref);
@@ -701,8 +700,8 @@ lower_sampler(nir_builder *b,
     */
    if (sampler_idx < 0) {
       state->needs_default_sampler_state = true;
-      instr->backend_flags = return_size == 16 ?
-         V3DV_NO_SAMPLER_16BIT_IDX : V3DV_NO_SAMPLER_32BIT_IDX;
+      instr->backend_flags = sampler_is_32b ?
+         V3DV_NO_SAMPLER_32BIT_IDX : V3DV_NO_SAMPLER_16BIT_IDX;
    }
 
    return true;
@@ -768,7 +767,7 @@ lower_image_deref(nir_builder *b,
                          base_index,
                          binding_layout->array_size,
                          0,
-                         32 /* return_size: doesn't apply for textures */,
+                         true /* return_size: doesn't apply for textures */,
                          0);
 
    /* Note: we don't need to do anything here in relation to the precision and
@@ -961,27 +960,11 @@ pipeline_populate_v3d_key(struct v3d_key *key,
     */
    struct v3dv_descriptor_map *sampler_map =
       &p_stage->pipeline->shared_data->maps[p_stage->stage]->sampler_map;
-   struct v3dv_descriptor_map *texture_map =
-      &p_stage->pipeline->shared_data->maps[p_stage->stage]->texture_map;
 
-   key->num_tex_used = texture_map->num_desc;
-   assert(key->num_tex_used <= V3D_MAX_TEXTURE_SAMPLERS);
-   for (uint32_t tex_idx = 0; tex_idx < texture_map->num_desc; tex_idx++) {
-      key->tex[tex_idx].swizzle[0] = PIPE_SWIZZLE_X;
-      key->tex[tex_idx].swizzle[1] = PIPE_SWIZZLE_Y;
-      key->tex[tex_idx].swizzle[2] = PIPE_SWIZZLE_Z;
-      key->tex[tex_idx].swizzle[3] = PIPE_SWIZZLE_W;
-   }
-
-   key->num_samplers_used = sampler_map->num_desc;
-   assert(key->num_samplers_used <= V3D_MAX_TEXTURE_SAMPLERS);
    for (uint32_t sampler_idx = 0; sampler_idx < sampler_map->num_desc;
         sampler_idx++) {
-      key->sampler[sampler_idx].return_size =
-         sampler_map->return_size[sampler_idx];
-
-      key->sampler[sampler_idx].return_channels =
-         key->sampler[sampler_idx].return_size == 32 ? 4 : 2;
+      if (sampler_map->sampler_is_32b[sampler_idx])
+         key->sampler_is_32b |= 1 << sampler_idx;
    }
 
    switch (p_stage->stage) {
@@ -1124,7 +1107,6 @@ v3d_fs_key_set_color_attachment(struct v3d_fs_key *key,
     * need to know the color buffer format and swizzle for that
     */
    if (key->logicop_func != PIPE_LOGICOP_COPY ||
-       p_stage->nir->info.fs.uses_fbfetch_output ||
        key->software_blend) {
       /* Framebuffer formats should be single plane */
       assert(vk_format_get_plane_count(fb_format) == 1);
@@ -1163,12 +1145,10 @@ v3d_fs_key_set_color_attachment(struct v3d_fs_key *key,
       key->f32_color_rb |= 1 << index;
    }
 
-   if (p_stage->nir->info.fs.untyped_color_outputs) {
-      if (util_format_is_pure_uint(fb_pipe_format))
-         key->uint_color_rb |= 1 << index;
-      else if (util_format_is_pure_sint(fb_pipe_format))
-         key->int_color_rb |= 1 << index;
-   }
+   if (util_format_is_pure_uint(fb_pipe_format))
+      key->f32_color_rb |= 1 << index;
+   else if (util_format_is_pure_sint(fb_pipe_format))
+      key->f32_color_rb |= 1 << index;
 }
 
 static void
@@ -1784,10 +1764,10 @@ pipeline_lower_nir(struct v3dv_pipeline *pipeline,
       pipeline->shared_data->maps[p_stage->stage];
 
    UNUSED unsigned index;
-   index = descriptor_map_add(&maps->sampler_map, -1, -1, -1, 0, 0, 16, 0);
+   index = descriptor_map_add(&maps->sampler_map, -1, -1, -1, 0, 0, false, 0);
    assert(index == V3DV_NO_SAMPLER_16BIT_IDX);
 
-   index = descriptor_map_add(&maps->sampler_map, -2, -2, -2, 0, 0, 32, 0);
+   index = descriptor_map_add(&maps->sampler_map, -2, -2, -2, 0, 0, true, 0);
    assert(index == V3DV_NO_SAMPLER_32BIT_IDX);
 
    /* Apply the actual pipeline layout to UBOs, SSBOs, and textures */
@@ -2069,6 +2049,11 @@ pipeline_populate_graphics_key(struct v3dv_pipeline *pipeline,
           desc->channel[0].size == 32) {
          key->f32_color_rb |= 1 << i;
       }
+
+      if (util_format_is_pure_uint(fb_pipe_format))
+         key->f32_color_rb |= 1 << i;
+      else if (util_format_is_pure_sint(fb_pipe_format))
+         key->f32_color_rb |= 1 << i;
    }
 
    const VkPipelineVertexInputStateCreateInfo *vi_info =

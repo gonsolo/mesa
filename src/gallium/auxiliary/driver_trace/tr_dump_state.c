@@ -413,7 +413,6 @@ void trace_dump_compute_state(const struct pipe_compute_state *state)
    trace_dump_member_end();
 
    trace_dump_member(uint, state, static_shared_mem);
-   trace_dump_member(uint, state, req_input_mem);
 
    trace_dump_struct_end();
 }
@@ -561,8 +560,10 @@ void trace_dump_framebuffer_state(const struct pipe_framebuffer_state *state)
    trace_dump_member(uint, state, samples);
    trace_dump_member(uint, state, layers);
    trace_dump_member(uint, state, nr_cbufs);
-   trace_dump_member_array(ptr, state, cbufs);
-   trace_dump_member(ptr, state, zsbuf);
+   trace_dump_member_begin("cbufs");
+   trace_dump_array_impl(surface, state->cbufs, state->nr_cbufs, &);
+   trace_dump_member_end();
+   trace_dump_member_val(surface, state, zsbuf);
 
    trace_dump_struct_end();
 }
@@ -579,8 +580,10 @@ void trace_dump_framebuffer_state_deep(const struct pipe_framebuffer_state *stat
    trace_dump_member(uint, state, samples);
    trace_dump_member(uint, state, layers);
    trace_dump_member(uint, state, nr_cbufs);
-   trace_dump_member_array(surface, state, cbufs);
-   trace_dump_member(surface, state, zsbuf);
+   trace_dump_member_begin("cbufs");
+   trace_dump_array_impl(surface, state->cbufs, state->nr_cbufs, &);
+   trace_dump_member_end();
+   trace_dump_member_val(surface, state, zsbuf);
 
    trace_dump_struct_end();
 }
@@ -678,7 +681,7 @@ void trace_dump_sampler_view_template(const struct pipe_sampler_view *state)
 
 void trace_dump_surface(const struct pipe_surface *surface)
 {
-   trace_dump_surface_template(surface, surface ? surface->texture->target : 0);
+   trace_dump_surface_template(surface, surface && surface->texture ? surface->texture->target : 0);
 }
 
 
@@ -1165,8 +1168,6 @@ void trace_dump_grid_info(const struct pipe_grid_info *state)
 
    trace_dump_struct_begin("pipe_grid_info");
 
-   trace_dump_member(uint, state, pc);
-   trace_dump_member(ptr, state, input);
    trace_dump_member(uint, state, variable_shared_mem);
 
    trace_dump_member_begin("block");

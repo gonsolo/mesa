@@ -34,7 +34,6 @@
 #define TU_MAX_QUEUE_FAMILIES 1
 
 #define TU_BORDER_COLOR_COUNT 4096
-#define TU_BORDER_COLOR_BUILTIN 6
 
 #define TU_BLIT_SHADER_SIZE 4096
 
@@ -209,6 +208,9 @@ struct tu_instance
 
    /* D3D emulation requires texture coordinates to be rounded to nearest even value. */
    bool use_tex_coord_round_nearest_even_mode;
+
+   /* Apps may be accidentally incorrect  */
+   bool ignore_frag_depth_direction;
 };
 VK_DEFINE_HANDLE_CASTS(tu_instance, vk.base, VkInstance,
                        VK_OBJECT_TYPE_INSTANCE)
@@ -261,8 +263,7 @@ struct tu6_global
    volatile uint32_t userspace_fence;
    uint32_t _pad5;
 
-   /* note: larger global bo will be used for customBorderColors */
-   struct bcolor_entry bcolor_builtin[TU_BORDER_COLOR_BUILTIN], bcolor[];
+   struct bcolor_entry bcolor[];
 };
 #define gb_offset(member) offsetof(struct tu6_global, member)
 #define global_iova(cmd, member) ((cmd)->device->global_bo->iova + gb_offset(member))

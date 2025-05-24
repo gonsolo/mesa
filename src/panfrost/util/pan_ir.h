@@ -79,23 +79,23 @@ enum { PAN_VERTEX_ID = 16, PAN_INSTANCE_ID = 17, PAN_MAX_ATTRIBUTE };
 /* Architectural invariants (Midgard and Bifrost): UBO must be <= 2^16 bytes so
  * an offset to a word must be < 2^16. There are less than 2^8 UBOs */
 
-struct panfrost_ubo_word {
+struct pan_ubo_word {
    uint16_t ubo;
    uint16_t offset;
 };
 
-struct panfrost_ubo_push {
+struct pan_ubo_push {
    unsigned count;
-   struct panfrost_ubo_word words[PAN_MAX_PUSH];
+   struct pan_ubo_word words[PAN_MAX_PUSH];
 };
 
 /* Helper for searching the above. Note this is O(N) to the number of pushed
  * constants, do not run in the draw call hot path */
 
-unsigned pan_lookup_pushed_ubo(struct panfrost_ubo_push *push, unsigned ubo,
+unsigned pan_lookup_pushed_ubo(struct pan_ubo_push *push, unsigned ubo,
                                unsigned offs);
 
-struct panfrost_compile_inputs {
+struct pan_compile_inputs {
    unsigned gpu_id;
    bool is_blend, is_blit;
    struct {
@@ -197,7 +197,7 @@ struct pan_shader_info {
    unsigned tls_size;
    unsigned wls_size;
 
-   struct panfrost_stats stats, stats_idvs_varying;
+   struct pan_stats stats, stats_idvs_varying;
 
    /* Bit mask of preloaded registers */
    uint64_t preload;
@@ -303,7 +303,7 @@ struct pan_shader_info {
 
    /* UBOs to push to Register Mapped Uniforms (Midgard) or Fast Access
     * Uniforms (Bifrost) */
-   struct panfrost_ubo_push push;
+   struct pan_ubo_push push;
 
    uint32_t ubo_mask;
 
@@ -316,81 +316,7 @@ struct pan_shader_info {
    };
 };
 
-typedef struct pan_block {
-   /* Link to next block. Must be first for mir_get_block */
-   struct list_head link;
-
-   /* List of instructions emitted for the current block */
-   struct list_head instructions;
-
-   /* Index of the block in source order */
-   unsigned name;
-
-   /* Control flow graph */
-   struct pan_block *successors[2];
-   struct set *predecessors;
-   bool unconditional_jumps;
-
-   /* In liveness analysis, these are live masks (per-component) for
-    * indices for the block. Scalar compilers have the luxury of using
-    * simple bit fields, but for us, liveness is a vector idea. */
-   uint16_t *live_in;
-   uint16_t *live_out;
-} pan_block;
-
-struct pan_instruction {
-   struct list_head link;
-};
-
-#define pan_foreach_instr_in_block_rev(block, v)                               \
-   list_for_each_entry_rev(struct pan_instruction, v, &block->instructions,    \
-                           link)
-
-#define pan_foreach_successor(blk, v)                                          \
-   pan_block *v;                                                               \
-   pan_block **_v;                                                             \
-   for (_v = (pan_block **)&blk->successors[0], v = *_v;                       \
-        v != NULL && _v < (pan_block **)&blk->successors[2]; _v++, v = *_v)
-
-#define pan_foreach_predecessor(blk, v)                                        \
-   struct set_entry *_entry_##v;                                               \
-   struct pan_block *v;                                                        \
-   for (_entry_##v = _mesa_set_next_entry(blk->predecessors, NULL),            \
-       v = (struct pan_block *)(_entry_##v ? _entry_##v->key : NULL);          \
-        _entry_##v != NULL;                                                    \
-        _entry_##v = _mesa_set_next_entry(blk->predecessors, _entry_##v),      \
-       v = (struct pan_block *)(_entry_##v ? _entry_##v->key : NULL))
-
-static inline pan_block *
-pan_exit_block(struct list_head *blocks)
-{
-   pan_block *last = list_last_entry(blocks, pan_block, link);
-   assert(!last->successors[0] && !last->successors[1]);
-   return last;
-}
-
-typedef void (*pan_liveness_update)(uint16_t *, void *, unsigned max);
-
-void pan_liveness_gen(uint16_t *live, unsigned node, unsigned max,
-                      uint16_t mask);
-void pan_liveness_kill(uint16_t *live, unsigned node, unsigned max,
-                       uint16_t mask);
-bool pan_liveness_get(uint16_t *live, unsigned node, uint16_t max);
-
-void pan_compute_liveness(struct list_head *blocks, unsigned temp_count,
-                          pan_liveness_update callback);
-
-void pan_free_liveness(struct list_head *blocks);
-
 uint16_t pan_to_bytemask(unsigned bytes, unsigned mask);
-
-void pan_block_add_successor(pan_block *block, pan_block *successor);
-
-/* IR indexing */
-#define PAN_IS_REG (1)
-
-/* IR printing helpers */
-void pan_print_alu_type(nir_alu_type t, FILE *fp);
 
 /* NIR passes to do some backend-specific lowering */
 

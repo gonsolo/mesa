@@ -29,8 +29,6 @@
 .vc4-rules:
   stage: broadcom
   rules:
-    - if: $EXTERNAL_KERNEL_TAG != null
-      when: never
     - !reference [.test, rules]
     - !reference [.igalia-farm-rules, rules]
     - !reference [.gl-rules, rules]
@@ -56,8 +54,6 @@
 .v3d-rules:
   stage: broadcom
   rules:
-    - if: $EXTERNAL_KERNEL_TAG != null
-      when: never
     - !reference [.test, rules]
     - !reference [.igalia-farm-rules, rules]
     - !reference [.gl-rules, rules]
@@ -97,8 +93,6 @@
 .v3dv-rules:
   stage: broadcom
   rules:
-    - if: $EXTERNAL_KERNEL_TAG != null
-      when: never
     - !reference [.test, rules]
     - !reference [.igalia-farm-rules, rules]
     - !reference [.vulkan-rules, rules]
@@ -117,6 +111,14 @@
     - !reference [.broadcom-common-manual-rules, rules]
     - changes: *v3dv_file_list
       when: manual
+
+.v3d-v3dv-manual-rules:
+  stage: broadcom-nightly
+  extends: .no-auto-retry
+  rules:
+    - !reference [.test, rules]
+    - !reference [.v3d-manual-rules, rules]
+    - !reference [.v3dv-manual-rules, rules]
 
 # 8 devices (2023-12-18)
 .igalia-bcm2837-rpi-3-b:

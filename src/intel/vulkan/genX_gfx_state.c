@@ -193,10 +193,6 @@ genX(streamout_prologue)(struct anv_cmd_buffer *cmd_buffer)
 #if INTEL_WA_16013994831_GFX_VER
    /* Wa_16013994831 - Disable preemption during streamout, enable back
     * again if XFB not used by the current pipeline.
-    *
-    * Although this workaround applies to Gfx12+, we already disable object
-    * level preemption for another reason in genX_state.c so we can skip this
-    * for Gfx12.
     */
    if (!intel_needs_workaround(cmd_buffer->device->info, 16013994831))
       return;
@@ -756,6 +752,24 @@ calculate_tile_dimensions(const struct anv_device *device,
       unreachable("Invalid provoking vertex mode");                    \
    }                                                                   \
 
+#define SETUP_PROVOKING_VERTEX_FSB(bit, cmd, mode)                  \
+   switch (mode) {                                                  \
+   case VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT:                  \
+      SET(bit, cmd.TriangleStripListProvokingVertexSelect, 0);      \
+      SET(bit, cmd.LineStripListProvokingVertexSelect,     0);      \
+      SET(bit, cmd.TriangleFanProvokingVertexSelect,       1);      \
+      SET(bit, cmd.TriangleStripOddProvokingVertexSelect,  0);      \
+      break;                                                        \
+   case VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT:                   \
+      SET(bit, cmd.TriangleStripListProvokingVertexSelect, 0);      \
+      SET(bit, cmd.LineStripListProvokingVertexSelect,     0);      \
+      SET(bit, cmd.TriangleFanProvokingVertexSelect,       0);      \
+      SET(bit, cmd.TriangleStripOddProvokingVertexSelect,  1);      \
+      break;                                                        \
+   default:                                                         \
+      unreachable("Invalid provoking vertex mode");                 \
+   }                                                                \
+
 ALWAYS_INLINE static void
 update_fs_msaa_flags(struct anv_gfx_dynamic_state *hw_state,
                      const struct vk_dynamic_graphics_state *dyn,
@@ -769,9 +783,7 @@ update_fs_msaa_flags(struct anv_gfx_dynamic_state *hw_state,
    /* If we have any dynamic bits here, we might need to update the value
     * in the push constant for the shader.
     */
-   if (wm_prog_data->coarse_pixel_dispatch != INTEL_SOMETIMES &&
-       wm_prog_data->persample_dispatch != INTEL_SOMETIMES &&
-       wm_prog_data->alpha_to_coverage != INTEL_SOMETIMES)
+   if (!brw_wm_prog_data_is_dynamic(wm_prog_data))
       return;
 
    enum intel_msaa_flags fs_msaa_flags =
@@ -782,6 +794,8 @@ update_fs_msaa_flags(struct anv_gfx_dynamic_state *hw_state,
             .rasterization_samples     = dyn->ms.rasterization_samples,
             .coarse_pixel              = !vk_fragment_shading_rate_is_disabled(&dyn->fsr),
             .alpha_to_coverage         = dyn->ms.alpha_to_coverage_enable,
+            .provoking_vertex_last     = dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT,
+            .primitive_id_index        = pipeline->primitive_id_index,
          });
 
    SET(FS_MSAA_FLAGS, fs_msaa_flags, fs_msaa_flags);
@@ -976,8 +990,32 @@ update_provoking_vertex(struct anv_gfx_dynamic_state *hw_state,
                         const struct vk_dynamic_graphics_state *dyn,
                         const struct anv_graphics_pipeline *pipeline)
 {
+#if GFX_VERx10 >= 200
+   const struct brw_wm_prog_data *wm_prog_data = get_wm_prog_data(pipeline);
+
+   /* In order to respect the table indicated by Vulkan 1.4.312,
+    * 28.9. Barycentric Interpolation, we need to program the provoking
+    * vertex state differently depending on whether we need to set
+    * vertex_attributes_bypass or not.
+    * At this point we only deal with full pipelines, so if we don't have
+    * a wm_prog_data, there is no fragment shader and none of this matters.
+    */
+   if (wm_prog_data && wm_prog_data->vertex_attributes_bypass) {
+      SETUP_PROVOKING_VERTEX_FSB(SF, sf, dyn->rs.provoking_vertex);
+      SETUP_PROVOKING_VERTEX_FSB(CLIP, clip, dyn->rs.provoking_vertex);
+   } else {
+      /* If we are not setting vertex attributes bypass, we can just use
+       * the same macro as older generations. There's one bit missing from
+       * it, but that one is only used for the case above and ignored
+       * otherwise, so we can pretend it doesn't exist here.
+       */
+      SETUP_PROVOKING_VERTEX(SF, sf, dyn->rs.provoking_vertex);
+      SETUP_PROVOKING_VERTEX(CLIP, clip, dyn->rs.provoking_vertex);
+   }
+#else
    SETUP_PROVOKING_VERTEX(SF, sf, dyn->rs.provoking_vertex);
    SETUP_PROVOKING_VERTEX(CLIP, clip, dyn->rs.provoking_vertex);
+#endif
 
    switch (dyn->rs.provoking_vertex) {
    case VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT:
@@ -1198,6 +1236,12 @@ update_clip_raster(struct anv_gfx_dynamic_state *hw_state,
    SET(RASTER, raster.ConservativeRasterizationEnable,
                dyn->rs.conservative_mode !=
                VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT);
+
+#if GFX_VERx10 >= 200
+   const struct brw_wm_prog_data *wm_prog_data = get_wm_prog_data(pipeline);
+   SET(RASTER, raster.LegacyBaryAssignmentDisable,
+       wm_prog_data && wm_prog_data->vertex_attributes_bypass);
+#endif
 }
 
 ALWAYS_INLINE static void
@@ -1840,6 +1884,7 @@ cmd_buffer_flush_gfx_runtime_state(struct anv_gfx_dynamic_state *hw_state,
    if ((gfx->dirty & ANV_CMD_DIRTY_PIPELINE) ||
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_MS_ALPHA_TO_COVERAGE_ENABLE) ||
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES) ||
+       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_PROVOKING_VERTEX) ||
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_FSR))
       update_fs_msaa_flags(hw_state, dyn, pipeline);
 
@@ -1867,7 +1912,12 @@ cmd_buffer_flush_gfx_runtime_state(struct anv_gfx_dynamic_state *hw_state,
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_RASTERIZATION_STREAM))
       update_streamout(hw_state, dyn, gfx, pipeline);
 
-   if (BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_PROVOKING_VERTEX))
+   if (
+#if GFX_VERx10 >= 200
+      /* Xe2+ might need to update this if the FS changed */
+      (gfx->dirty & ANV_CMD_DIRTY_PIPELINE) ||
+#endif
+       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_PROVOKING_VERTEX))
       update_provoking_vertex(hw_state, dyn, pipeline);
 
    if ((gfx->dirty & ANV_CMD_DIRTY_PIPELINE) ||
@@ -2020,7 +2070,8 @@ cmd_buffer_flush_gfx_runtime_state(struct anv_gfx_dynamic_state *hw_state,
     * the pipeline change or the dynamic value change, check the value and
     * reemit if needed.
     */
-   if (pipeline->dynamic_patch_control_points &&
+   const struct brw_tcs_prog_data *tcs_prog_data = get_tcs_prog_data(pipeline);
+   if (tcs_prog_data && tcs_prog_data->input_vertices == 0 &&
        ((gfx->dirty & ANV_CMD_DIRTY_PIPELINE) ||
         BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_TS_PATCH_CONTROL_POINTS)))
       SET(TCS_INPUT_VERTICES, tcs_input_vertices, dyn->ts.patch_control_points);
@@ -2406,6 +2457,9 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
          SET(clip, clip, TriangleStripListProvokingVertexSelect);
          SET(clip, clip, LineStripListProvokingVertexSelect);
          SET(clip, clip, TriangleFanProvokingVertexSelect);
+#if GFX_VERx10 >= 200
+         SET(clip, clip, TriangleStripOddProvokingVertexSelect);
+#endif
          SET(clip, clip, MaximumVPIndex);
       }
    }
@@ -2591,6 +2645,9 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
          SET(sf, sf, TriangleStripListProvokingVertexSelect);
          SET(sf, sf, LineStripListProvokingVertexSelect);
          SET(sf, sf, TriangleFanProvokingVertexSelect);
+#if GFX_VERx10 >= 200
+         SET(sf, sf, TriangleStripOddProvokingVertexSelect);
+#endif
          SET(sf, sf, LegacyGlobalDepthBiasEnable);
       }
    }
@@ -2624,6 +2681,9 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
          SET(raster, raster, ViewportZFarClipTestEnable);
          SET(raster, raster, ViewportZNearClipTestEnable);
          SET(raster, raster, ConservativeRasterizationEnable);
+#if GFX_VERx10 >= 200
+         SET(raster, raster, LegacyBaryAssignmentDisable);
+#endif
       }
    }
 
@@ -2912,8 +2972,13 @@ genX(cmd_buffer_flush_gfx_hw_state)(struct anv_cmd_buffer *cmd_buffer)
     * because of another one is changing.
     */
 
-   /* Reproduce the programming done on Windows drivers.
-    * Fixes flickering issues with multiple workloads.
+   /* Reprogram SF_CLIP & CC_STATE together. This reproduces the programming
+    * done on Windows drivers. Fixes flickering issues with multiple
+    * workloads.
+    *
+    * Since blorp disables 3DSTATE_CLIP::ClipEnable and dirties CC_STATE, this
+    * also takes care of Wa_14016820455 which requires SF_CLIP to be
+    * reprogrammed whenever 3DSTATE_CLIP::ClipEnable is enabled.
     */
    if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_VIEWPORT_SF_CLIP) ||
        BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_VIEWPORT_CC_PTR)) {

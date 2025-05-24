@@ -39,14 +39,13 @@ d3d12_video_encoder_update_current_rate_control_av1(struct d3d12_video_encoder *
 
    struct D3D12EncodeRateControlState m_prevRCState = pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[picture->temporal_id];
    pD3D12Enc->m_currentEncodeConfig.m_activeRateControlIndex = picture->temporal_id;
+   bool wasDeltaQPRequested = (pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[picture->temporal_id].m_Flags & D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_DELTA_QP) != 0;
    pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[picture->temporal_id] = {};
+   if (wasDeltaQPRequested)
+      pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[picture->temporal_id].m_Flags |= D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_DELTA_QP;
+
    pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[picture->temporal_id].m_FrameRate.Numerator = picture->rc[picture->temporal_id].frame_rate_num;
    pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[picture->temporal_id].m_FrameRate.Denominator = picture->rc[picture->temporal_id].frame_rate_den;
-   pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[picture->temporal_id].m_Flags = D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_NONE;
-
-   if (picture->roi.num > 0)
-      pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[picture->temporal_id].m_Flags |=
-         D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_DELTA_QP;
 
    switch (picture->rc[picture->temporal_id].rate_ctrl_method) {
       case PIPE_H2645_ENC_RATE_CONTROL_METHOD_VARIABLE_SKIP:
@@ -1184,7 +1183,11 @@ d3d12_video_encoder_update_current_encoder_config_state_av1(struct d3d12_video_e
 
    // Will call for d3d12 driver support based on the initial requested (non codec specific) features, then
    // try to fallback if any of them is not supported and return the negotiated d3d12 settings
+#if D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
+   D3D12_FEATURE_DATA_VIDEO_ENCODER_SUPPORT2 capEncoderSupportData1 = {};
+#else
    D3D12_FEATURE_DATA_VIDEO_ENCODER_SUPPORT1 capEncoderSupportData1 = {};
+#endif
    if (!d3d12_video_encoder_negotiate_requested_features_and_d3d12_driver_caps(pD3D12Enc, capEncoderSupportData1)) {
       debug_printf("[d3d12_video_encoder_av1] After negotiating caps, D3D12_FEATURE_VIDEO_ENCODER_SUPPORT1 "
                    "arguments are not supported - "
@@ -1627,7 +1630,8 @@ d3d12_video_encoder_update_current_frame_pic_params_info_av1(struct d3d12_video_
    // pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot]
    //   .m_CodecSpecificData.AV1HeadersInfo.temporal_delim_rendered = pAV1Pic->temporal_delim_rendered;
 
-   if ((pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[pAV1Pic->temporal_id].m_Flags & D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_DELTA_QP) != 0)
+#if D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
+   if (pD3D12Enc->m_currentEncodeConfig.m_QuantizationMatrixDesc.CPUInput.AppRequested)
    {
       // Use 16 bit qpmap array for AV1 picparams (-255, 255 range and int16_t pRateControlQPMap type)
       const int32_t av1_min_delta_qp = -255;
@@ -1637,10 +1641,11 @@ d3d12_video_encoder_update_current_frame_pic_params_info_av1(struct d3d12_video_
          &pAV1Pic->roi,
          av1_min_delta_qp,
          av1_max_delta_qp,
-         pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[pAV1Pic->temporal_id].m_pRateControlQPMap16Bit);
-      picParams.pAV1PicData->pRateControlQPMap = pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[pAV1Pic->temporal_id].m_pRateControlQPMap16Bit.data();
-      picParams.pAV1PicData->QPMapValuesCount = static_cast<UINT>(pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[pAV1Pic->temporal_id].m_pRateControlQPMap16Bit.size());
+         pD3D12Enc->m_currentEncodeConfig.m_QuantizationMatrixDesc.CPUInput.m_pRateControlQPMap16Bit);
+      picParams.pAV1PicData->pRateControlQPMap = pD3D12Enc->m_currentEncodeConfig.m_QuantizationMatrixDesc.CPUInput.m_pRateControlQPMap16Bit.data();
+      picParams.pAV1PicData->QPMapValuesCount = static_cast<UINT>(pD3D12Enc->m_currentEncodeConfig.m_QuantizationMatrixDesc.CPUInput.m_pRateControlQPMap16Bit.size());
    }
+#endif // D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
 }
 
 void
@@ -2309,7 +2314,7 @@ d3d12_video_encoder_build_post_encode_codec_bitstream_av1(struct d3d12_video_enc
    size_t writtenTileBytes = 0;
 
    pipe_resource *src_driver_bitstream =
-      d3d12_resource_from_resource(&pD3D12Enc->m_pD3D12Screen->base, associatedMetadata.spStagingBitstream.Get());
+      d3d12_resource_from_resource(&pD3D12Enc->m_pD3D12Screen->base, associatedMetadata.spStagingBitstreams[0/*first slice*/].Get());
    assert(src_driver_bitstream);
 
    size_t comp_bitstream_offset = 0;
@@ -2354,12 +2359,12 @@ d3d12_video_encoder_build_post_encode_codec_bitstream_av1(struct d3d12_video_enc
       debug_printf("Uploading %" PRIu64
                    " bytes from OBU sequence and/or picture headers to comp_bit_destination %p at offset 0\n",
                    static_cast<uint64_t>(pD3D12Enc->m_BitstreamHeadersBuffer.size()),
-                   associatedMetadata.comp_bit_destination);
+                   associatedMetadata.comp_bit_destinations[0/*first slice*/]);
 
       // Upload headers to the finalized compressed bitstream buffer
       // Note: The buffer_subdata is queued in pD3D12Enc->base.context but doesn't execute immediately
       pD3D12Enc->base.context->buffer_subdata(pD3D12Enc->base.context,                   // context
-                                              associatedMetadata.comp_bit_destination,   // comp. bitstream
+                                              associatedMetadata.comp_bit_destinations[0/*first slice*/],   // comp. bitstream
                                               PIPE_MAP_WRITE,                            // usage PIPE_MAP_x
                                               0,                                         // offset
                                               static_cast<unsigned int>(pD3D12Enc->m_BitstreamHeadersBuffer.size()),
@@ -2375,7 +2380,7 @@ d3d12_video_encoder_build_post_encode_codec_bitstream_av1(struct d3d12_video_enc
          associatedMetadata.m_StagingBitstreamConstruction,
          0,   // staging_bitstream_buffer_offset,
          src_driver_bitstream,
-         associatedMetadata.comp_bit_destination,
+         associatedMetadata.comp_bit_destinations[0/*first slice*/],
          comp_bitstream_offset,
          pFrameSubregionMetadata,
          associatedMetadata.m_associatedEncodeCapabilities.m_encoderCodecSpecificConfigCaps.m_AV1TileCaps
@@ -2431,12 +2436,12 @@ d3d12_video_encoder_build_post_encode_codec_bitstream_av1(struct d3d12_video_enc
 
       debug_printf("Uploading %" PRIu64 " bytes from OBU headers to comp_bit_destination %p at offset 0\n",
                    static_cast<uint64_t>(pD3D12Enc->m_BitstreamHeadersBuffer.size()),
-                   associatedMetadata.comp_bit_destination);
+                   associatedMetadata.comp_bit_destinations[0/*first slice*/]);
 
       // Upload headers to the finalized compressed bitstream buffer
       // Note: The buffer_subdata is queued in pD3D12Enc->base.context but doesn't execute immediately
       pD3D12Enc->base.context->buffer_subdata(pD3D12Enc->base.context,                   // context
-                                              associatedMetadata.comp_bit_destination,   // comp. bitstream
+                                              associatedMetadata.comp_bit_destinations[0/*first slice*/],   // comp. bitstream
                                               PIPE_MAP_WRITE,                            // usage PIPE_MAP_x
                                               0,                                         // offset
                                               static_cast<unsigned int>(pD3D12Enc->m_BitstreamHeadersBuffer.size()),
@@ -2454,7 +2459,7 @@ d3d12_video_encoder_build_post_encode_codec_bitstream_av1(struct d3d12_video_enc
 
          debug_printf("Uploading tile group %d to comp_bit_destination %p at offset %" PRIu64 "\n",
                       tg_idx,
-                      associatedMetadata.comp_bit_destination,
+                      associatedMetadata.comp_bit_destinations[0/*first slice*/],
                       static_cast<uint64_t>(comp_bitstream_offset));
 
          size_t tile_group_obu_size = 0;
@@ -2491,7 +2496,7 @@ d3d12_video_encoder_build_post_encode_codec_bitstream_av1(struct d3d12_video_enc
          // Note: The buffer_subdata is queued in pD3D12Enc->base.context but doesn't execute immediately
          pD3D12Enc->base.context->buffer_subdata(
             pD3D12Enc->base.context,                   // context
-            associatedMetadata.comp_bit_destination,   // comp. bitstream
+            associatedMetadata.comp_bit_destinations[0/*first slice*/],   // comp. bitstream
             PIPE_MAP_WRITE,                            // usage PIPE_MAP_x
             static_cast<unsigned int>(comp_bitstream_offset),                     // offset
             static_cast<unsigned int>(writtenTileObuPrefixBytes),
@@ -2501,7 +2506,7 @@ d3d12_video_encoder_build_post_encode_codec_bitstream_av1(struct d3d12_video_enc
                       "and obu_size: %" PRIu64 " to comp_bit_destination %p at offset %" PRIu64 "\n",
                       static_cast<uint64_t>(writtenTileObuPrefixBytes),
                       static_cast<uint64_t>(tile_group_obu_size),
-                      associatedMetadata.comp_bit_destination,
+                      associatedMetadata.comp_bit_destinations[0/*first slice*/],
                       static_cast<uint64_t>(comp_bitstream_offset));
 
          staging_bitstream_buffer_offset += writtenTileObuPrefixBytes;
@@ -2516,7 +2521,7 @@ d3d12_video_encoder_build_post_encode_codec_bitstream_av1(struct d3d12_video_enc
             associatedMetadata.m_StagingBitstreamConstruction,
             staging_bitstream_buffer_offset,
             src_driver_bitstream,
-            associatedMetadata.comp_bit_destination,
+            associatedMetadata.comp_bit_destinations[0/*first slice*/],
             comp_bitstream_offset,
             pFrameSubregionMetadata,
             associatedMetadata.m_associatedEncodeCapabilities.m_encoderCodecSpecificConfigCaps.m_AV1TileCaps
@@ -2647,7 +2652,7 @@ d3d12_video_encoder_build_post_encode_codec_bitstream_av1(struct d3d12_video_enc
             // Upload headers to the finalized compressed bitstream buffer
             // Note: The buffer_subdata is queued in pD3D12Enc->base.context but doesn't execute immediately
             pD3D12Enc->base.context->buffer_subdata(pD3D12Enc->base.context,                   // context
-                                                    associatedMetadata.comp_bit_destination,   // comp. bitstream
+                                                    associatedMetadata.comp_bit_destinations[0/*first slice*/],   // comp. bitstream
                                                     PIPE_MAP_WRITE,                            // usage PIPE_MAP_x
                                                     static_cast<unsigned int>(comp_bitstream_offset),                     // offset
                                                     static_cast<unsigned int>(writtenShowExistingFrameBytes + writtenTemporalDelimBytes),
@@ -2694,9 +2699,9 @@ d3d12_video_encoder_build_post_encode_codec_bitstream_av1(struct d3d12_video_enc
    }
 
    // d3d12_resource_from_resource calls AddRef to it so this should only be deleting
-   // the pipe_resource wrapping object and not the underlying spStagingBitstream
+   // the pipe_resource wrapping object and not the underlying spStagingBitstreams
    pipe_resource_reference(&src_driver_bitstream, NULL);
-   assert(associatedMetadata.spStagingBitstream.Get());
+   assert(associatedMetadata.spStagingBitstreams[0/*first slice*/].Get());
 
    // Unmap the metadata buffer tmp storage
    pipe_buffer_unmap(pD3D12Enc->base.context, mapTransferMetadata);

@@ -470,7 +470,7 @@ enum pipe_flush_flags
 #define PIPE_BIND_GLOBAL               (1 << 13) /* set_global_binding */
 #define PIPE_BIND_SHADER_BUFFER        (1 << 14) /* set_shader_buffers */
 #define PIPE_BIND_SHADER_IMAGE         (1 << 15) /* set_shader_images */
-#define PIPE_BIND_COMPUTE_RESOURCE     (1 << 16) /* set_compute_resources */
+/* gap */
 #define PIPE_BIND_COMMAND_ARGS_BUFFER  (1 << 17) /* pipe_draw_info.indirect */
 #define PIPE_BIND_QUERY_BUFFER         (1 << 18) /* get_query_result_resource */
 
@@ -750,7 +750,6 @@ enum pipe_endian
 enum pipe_shader_ir
 {
    PIPE_SHADER_IR_TGSI = 0,
-   PIPE_SHADER_IR_NATIVE,
    PIPE_SHADER_IR_NIR,
 };
 
@@ -795,12 +794,8 @@ struct pipe_compute_caps {
    unsigned grid_dimension;
    unsigned max_grid_size[3];
    unsigned max_block_size[3];
-   unsigned max_block_size_clover[3];
    unsigned max_threads_per_block;
-   unsigned max_threads_per_block_clover;
    unsigned max_local_size;
-   unsigned max_private_size;
-   unsigned max_input_size;
    unsigned max_clock_frequency;
    unsigned max_compute_units;
    unsigned max_subgroups;
@@ -808,8 +803,6 @@ struct pipe_compute_caps {
    unsigned max_variable_threads_per_block;
    uint64_t max_mem_alloc_size;
    uint64_t max_global_size;
-   char ir_target[32];
-   bool images_supported;
 };
 
 struct pipe_caps {

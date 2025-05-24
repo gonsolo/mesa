@@ -156,10 +156,6 @@ static void *si_create_compute_state(struct pipe_context *ctx, const struct pipe
 {
    struct si_context *sctx = (struct si_context *)ctx;
    struct si_screen *sscreen = (struct si_screen *)ctx->screen;
-
-   if (cso->ir_type == PIPE_SHADER_IR_NATIVE)
-      return NULL;
-
    struct si_compute *program = CALLOC_STRUCT(si_compute);
    struct si_shader_selector *sel = &program->sel;
 
@@ -332,18 +328,16 @@ static bool si_setup_compute_scratch_buffer(struct si_context *sctx, struct si_s
 }
 
 static bool si_switch_compute_shader(struct si_context *sctx, struct si_compute *program,
-                                     struct si_shader *shader, unsigned offset, bool *prefetch,
+                                     struct si_shader *shader, bool *prefetch,
                                      unsigned variable_shared_size)
 {
    struct radeon_cmdbuf *cs = &sctx->gfx_cs;
    const struct ac_shader_config *config = &shader->config;
    unsigned rsrc2;
-   unsigned stage = shader->selector->info.base.stage;
 
    *prefetch = false;
 
-   assert(variable_shared_size == 0 || stage == MESA_SHADER_KERNEL);
-   if (sctx->cs_shader_state.emitted_program == program && sctx->cs_shader_state.offset == offset &&
+   if (sctx->cs_shader_state.emitted_program == program &&
        sctx->cs_shader_state.variable_shared_size == variable_shared_size)
       return true;
 
@@ -351,7 +345,7 @@ static bool si_switch_compute_shader(struct si_context *sctx, struct si_compute 
    rsrc2 = config->rsrc2;
 
    /* only do this for OpenCL */
-   if (stage == MESA_SHADER_KERNEL) {
+   if (variable_shared_size) {
       unsigned shared_size = program->sel.info.base.shared_size + variable_shared_size;
       unsigned lds_blocks = 0;
 
@@ -390,7 +384,7 @@ static bool si_switch_compute_shader(struct si_context *sctx, struct si_compute 
                                 RADEON_USAGE_READWRITE | RADEON_PRIO_SCRATCH_BUFFER);
    }
 
-   uint64_t shader_va = shader->bo->gpu_address + offset;
+   uint64_t shader_va = shader->bo->gpu_address;
 
    radeon_add_to_buffer_list(sctx, &sctx->gfx_cs, shader->bo,
                              RADEON_USAGE_READ | RADEON_PRIO_SHADER_BINARY);
@@ -466,7 +460,6 @@ static bool si_switch_compute_shader(struct si_context *sctx, struct si_compute 
                config->rsrc1, config->rsrc2);
 
    sctx->cs_shader_state.emitted_program = program;
-   sctx->cs_shader_state.offset = offset;
    sctx->cs_shader_state.variable_shared_size = variable_shared_size;
 
    *prefetch = true;
@@ -854,7 +847,7 @@ static bool si_check_needs_implicit_sync(struct si_context *sctx, uint32_t usage
     */
    struct si_shader_info *info = &sctx->cs_shader_state.program->sel.info;
    struct si_samplers *samplers = &sctx->samplers[PIPE_SHADER_COMPUTE];
-   unsigned mask = samplers->enabled_mask & info->base.textures_used[0];
+   unsigned mask = samplers->enabled_mask & info->base.textures_used;
 
    while (mask) {
       int i = u_bit_scan(&mask);
@@ -959,7 +952,7 @@ static void si_launch_grid(struct pipe_context *ctx, const struct pipe_grid_info
 
    /* First emit registers. */
    bool prefetch;
-   if (!si_switch_compute_shader(sctx, program, &program->shader, info->pc, &prefetch,
+   if (!si_switch_compute_shader(sctx, program, &program->shader, &prefetch,
                                  info->variable_shared_mem))
       return;
 
@@ -1052,18 +1045,12 @@ static void si_delete_compute_state(struct pipe_context *ctx, void *state)
    si_compute_reference(&program, NULL);
 }
 
-static void si_set_compute_resources(struct pipe_context *ctx_, unsigned start, unsigned count,
-                                     struct pipe_surface **surfaces)
-{
-}
-
 void si_init_compute_functions(struct si_context *sctx)
 {
    sctx->b.create_compute_state = si_create_compute_state;
    sctx->b.delete_compute_state = si_delete_compute_state;
    sctx->b.bind_compute_state = si_bind_compute_state;
    sctx->b.get_compute_state_info = si_get_compute_state_info;
-   sctx->b.set_compute_resources = si_set_compute_resources;
    sctx->b.set_global_binding = si_set_global_binding;
    sctx->b.launch_grid = si_launch_grid;
 

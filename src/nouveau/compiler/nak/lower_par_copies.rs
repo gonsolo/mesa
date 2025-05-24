@@ -6,7 +6,7 @@ use crate::{
     ir::*,
 };
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 struct CopyNode {
     num_reads: usize,
@@ -93,12 +93,12 @@ fn cycle_use_swap(pc: &OpParCopy, file: RegFile) -> bool {
 fn lower_par_copy(pc: OpParCopy, sm: &dyn ShaderModel) -> MappedInstrs {
     let mut graph = CopyGraph::new();
     let mut vals = Vec::new();
-    let mut reg_to_idx = HashMap::new();
+    let mut reg_to_idx = FxHashMap::default();
 
     for (i, (dst, _)) in pc.dsts_srcs.iter().enumerate() {
         // Destinations must be pairwise unique
         let reg = dst.as_reg().unwrap();
-        assert!(reg_to_idx.get(reg).is_none());
+        assert!(!reg_to_idx.contains_key(reg));
 
         // Everything must be scalar
         assert!(reg.comps() == 1);
@@ -110,17 +110,17 @@ fn lower_par_copy(pc: OpParCopy, sm: &dyn ShaderModel) -> MappedInstrs {
     }
 
     for (dst_idx, (_, src)) in pc.dsts_srcs.iter().enumerate() {
-        assert!(src.src_mod.is_none());
-        let src = src.src_ref;
+        assert!(src.is_unmodified());
+        let src = &src.src_ref;
 
         let src_idx = if let SrcRef::Reg(reg) = src {
             // Everything must be scalar
             assert!(reg.comps() == 1);
 
-            *reg_to_idx.entry(reg).or_insert_with(|| {
+            *reg_to_idx.entry(*reg).or_insert_with(|| {
                 let node_idx = graph.add_node();
                 assert!(node_idx == vals.len());
-                vals.push(src);
+                vals.push(src.clone());
                 node_idx
             })
         } else {
@@ -130,7 +130,7 @@ fn lower_par_copy(pc: OpParCopy, sm: &dyn ShaderModel) -> MappedInstrs {
 
             let node_idx = graph.add_node();
             assert!(node_idx == vals.len());
-            vals.push(src);
+            vals.push(src.clone());
             node_idx
         };
 
@@ -150,7 +150,7 @@ fn lower_par_copy(pc: OpParCopy, sm: &dyn ShaderModel) -> MappedInstrs {
     while let Some(dst_idx) = ready.pop() {
         if let Some(src_idx) = graph.src(dst_idx) {
             let dst = *vals[dst_idx].as_reg().unwrap();
-            let src = vals[src_idx];
+            let src = vals[src_idx].clone();
             if copy_needs_tmp(&dst, &src) {
                 let tmp = pc.tmp.expect("This copy needs a temporary").comp(0);
                 b.copy_to(tmp.into(), src.into());
@@ -248,7 +248,7 @@ fn lower_par_copy(pc: OpParCopy, sm: &dyn ShaderModel) -> MappedInstrs {
         }
     }
 
-    b.as_mapped_instrs()
+    b.into_mapped_instrs()
 }
 
 impl Shader<'_> {

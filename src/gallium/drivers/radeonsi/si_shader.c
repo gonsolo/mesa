@@ -4,22 +4,15 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "si_shader.h"
-#include "ac_nir.h"
 #include "ac_rtld.h"
-#include "nir.h"
 #include "nir_builder.h"
 #include "nir_serialize.h"
 #include "nir_tcs_info.h"
 #include "nir_xfb_info.h"
 #include "si_pipe.h"
 #include "si_shader_internal.h"
-#include "sid.h"
-#include "tgsi/tgsi_from_mesa.h"
-#include "util/u_memory.h"
-#include "util/mesa-sha1.h"
-#include "util/ralloc.h"
 #include "util/u_upload_mgr.h"
+#include "pipe/p_shader_tokens.h"
 
 static const char scratch_rsrc_dword0_symbol[] = "SCRATCH_RSRC_DWORD0";
 static const char scratch_rsrc_dword1_symbol[] = "SCRATCH_RSRC_DWORD1";
@@ -120,33 +113,6 @@ unsigned si_shader_io_get_unique_index(unsigned semantic)
    }
 }
 
-static void declare_streamout_params(struct si_shader_args *args, struct si_shader *shader,
-                                     const shader_info *info)
-{
-   if (shader->selector->screen->info.gfx_level >= GFX11) {
-      /* NGG streamout. */
-      if (info->stage == MESA_SHADER_TESS_EVAL)
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL);
-      return;
-   }
-
-   /* Streamout SGPRs. */
-   if (si_shader_uses_streamout(shader)) {
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.streamout_config);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.streamout_write_index);
-
-      /* A streamout buffer offset is loaded if the stride is non-zero. */
-      for (int i = 0; i < 4; i++) {
-         if (!info->xfb_stride[i])
-            continue;
-
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.streamout_offset[i]);
-      }
-   } else if (info->stage == MESA_SHADER_TESS_EVAL) {
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL);
-   }
-}
-
 unsigned si_get_max_workgroup_size(const struct si_shader *shader)
 {
    gl_shader_stage stage = shader->is_gs_copy_shader ?
@@ -159,7 +125,7 @@ unsigned si_get_max_workgroup_size(const struct si_shader *shader)
    case MESA_SHADER_TESS_EVAL:
       /* Use the largest workgroup size for streamout */
       if (shader->key.ge.as_ngg)
-         return si_shader_uses_streamout(shader) ? 256 : 128;
+         return shader->info.num_streamout_vec4s ? 256 : 128;
 
       /* As part of merged shader. */
       return shader->selector->screen->info.gfx_level >= GFX9 &&
@@ -191,566 +157,6 @@ unsigned si_get_max_workgroup_size(const struct si_shader *shader)
                                   (uint32_t)local_size[2];
    assert(max_work_group_size);
    return max_work_group_size;
-}
-
-static void declare_const_and_shader_buffers(struct si_shader_args *args, struct si_shader *shader,
-                                             const shader_info *info, bool assign_params)
-{
-   enum ac_arg_type const_shader_buf_type;
-
-   if (info->num_ubos == 1 && info->num_ssbos == 0)
-      const_shader_buf_type = AC_ARG_CONST_FLOAT_PTR;
-   else
-      const_shader_buf_type = AC_ARG_CONST_DESC_PTR;
-
-   ac_add_arg(
-      &args->ac, AC_ARG_SGPR, 1, const_shader_buf_type,
-      assign_params ? &args->const_and_shader_buffers : &args->other_const_and_shader_buffers);
-}
-
-static void declare_samplers_and_images(struct si_shader_args *args, bool assign_params)
-{
-   ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_CONST_IMAGE_PTR,
-              assign_params ? &args->samplers_and_images : &args->other_samplers_and_images);
-}
-
-static void declare_per_stage_desc_pointers(struct si_shader_args *args, struct si_shader *shader,
-                                            const shader_info *info, bool assign_params)
-{
-   declare_const_and_shader_buffers(args, shader, info, assign_params);
-   declare_samplers_and_images(args, assign_params);
-}
-
-static void declare_global_desc_pointers(struct si_shader_args *args)
-{
-   ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_CONST_DESC_PTR, &args->internal_bindings);
-   ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_CONST_IMAGE_PTR,
-              &args->bindless_samplers_and_images);
-}
-
-static void declare_vb_descriptor_input_sgprs(struct si_shader_args *args,
-                                              struct si_shader *shader)
-{
-   ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_CONST_DESC_PTR, &args->ac.vertex_buffers);
-
-   unsigned num_vbos_in_user_sgprs = shader->selector->info.num_vbos_in_user_sgprs;
-   if (num_vbos_in_user_sgprs) {
-      unsigned user_sgprs = args->ac.num_sgprs_used;
-
-      if (si_is_merged_shader(shader))
-         user_sgprs -= 8;
-      assert(user_sgprs <= SI_SGPR_VS_VB_DESCRIPTOR_FIRST);
-
-      /* Declare unused SGPRs to align VB descriptors to 4 SGPRs (hw requirement). */
-      for (unsigned i = user_sgprs; i < SI_SGPR_VS_VB_DESCRIPTOR_FIRST; i++)
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL); /* unused */
-
-      assert(num_vbos_in_user_sgprs <= ARRAY_SIZE(args->vb_descriptors));
-      for (unsigned i = 0; i < num_vbos_in_user_sgprs; i++)
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 4, AC_ARG_INT, &args->vb_descriptors[i]);
-   }
-}
-
-static void declare_vs_input_vgprs(struct si_shader_args *args, struct si_shader *shader)
-{
-   ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.vertex_id);
-
-   if (shader->selector->screen->info.gfx_level >= GFX12) {
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.instance_id);
-   } else if (shader->key.ge.as_ls) {
-      if (shader->selector->screen->info.gfx_level >= GFX11) {
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, NULL); /* user VGPR */
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, NULL); /* user VGPR */
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.instance_id);
-      } else if (shader->selector->screen->info.gfx_level >= GFX10) {
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.vs_rel_patch_id);
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, NULL); /* user VGPR */
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.instance_id);
-      } else {
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.vs_rel_patch_id);
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.instance_id);
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, NULL); /* unused */
-      }
-   } else if (shader->selector->screen->info.gfx_level >= GFX10) {
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, NULL); /* user VGPR */
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT,
-                 /* user vgpr or PrimID (legacy) */
-                 shader->key.ge.as_ngg ? NULL : &args->ac.vs_prim_id);
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.instance_id);
-   } else {
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.instance_id);
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.vs_prim_id);
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, NULL); /* unused */
-   }
-}
-
-static void declare_vs_blit_inputs(struct si_shader *shader, struct si_shader_args *args,
-                                   const shader_info *info)
-{
-   bool has_attribute_ring_address = shader->selector->screen->info.gfx_level >= GFX11;
-
-   ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->vs_blit_inputs); /* i16 x1, y1 */
-   ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL);                  /* i16 x1, y1 */
-   ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL);                /* depth */
-
-   if (info->vs.blit_sgprs_amd ==
-       SI_VS_BLIT_SGPRS_POS_TEXCOORD + has_attribute_ring_address) {
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* texcoord.x1 */
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* texcoord.y1 */
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* texcoord.x2 */
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* texcoord.y2 */
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* texcoord.z */
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* texcoord.w */
-      if (has_attribute_ring_address)
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL); /* attribute ring address */
-   }
-}
-
-static void declare_tes_input_vgprs(struct si_shader_args *args)
-{
-   ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, &args->ac.tes_u);
-   ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, &args->ac.tes_v);
-   ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.tes_rel_patch_id);
-   ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.tes_patch_id);
-}
-
-enum
-{
-   /* Convenient merged shader definitions. */
-   SI_SHADER_MERGED_VERTEX_TESSCTRL = MESA_ALL_SHADER_STAGES,
-   SI_SHADER_MERGED_VERTEX_OR_TESSEVAL_GEOMETRY,
-};
-
-static void si_add_arg_checked(struct ac_shader_args *args, enum ac_arg_regfile file, unsigned registers,
-                               enum ac_arg_type type, struct ac_arg *arg, unsigned idx)
-{
-   assert(args->arg_count == idx);
-   ac_add_arg(args, file, registers, type, arg);
-}
-
-static void si_init_shader_args(struct si_shader *shader, struct si_shader_args *args,
-                                const shader_info *info)
-{
-   unsigned i, num_returns, num_return_sgprs;
-   unsigned num_prolog_vgprs = 0;
-   struct si_shader_selector *sel = shader->selector;
-   unsigned stage = shader->is_gs_copy_shader ? MESA_SHADER_VERTEX : info->stage;
-   unsigned stage_case = stage;
-
-   memset(args, 0, sizeof(*args));
-
-   /* Set MERGED shaders. */
-   if (sel->screen->info.gfx_level >= GFX9 && stage <= MESA_SHADER_GEOMETRY) {
-      if (shader->key.ge.as_ls || stage == MESA_SHADER_TESS_CTRL)
-         stage_case = SI_SHADER_MERGED_VERTEX_TESSCTRL; /* LS or HS */
-      else if (shader->key.ge.as_es || shader->key.ge.as_ngg || stage == MESA_SHADER_GEOMETRY)
-         stage_case = SI_SHADER_MERGED_VERTEX_OR_TESSEVAL_GEOMETRY;
-   }
-
-   switch (stage_case) {
-   case MESA_SHADER_VERTEX:
-      declare_global_desc_pointers(args);
-
-      if (info->vs.blit_sgprs_amd) {
-         declare_vs_blit_inputs(shader, args, info);
-      } else {
-         declare_per_stage_desc_pointers(args, shader, info, true);
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->vs_state_bits);
-
-         if (shader->is_gs_copy_shader) {
-            declare_streamout_params(args, shader, info);
-         } else {
-            ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.base_vertex);
-            ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.draw_id);
-            ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.start_instance);
-            declare_vb_descriptor_input_sgprs(args, shader);
-
-            if (shader->key.ge.as_es) {
-               ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.es2gs_offset);
-            } else if (shader->key.ge.as_ls) {
-               /* no extra parameters */
-            } else {
-               declare_streamout_params(args, shader, info);
-            }
-         }
-      }
-
-      /* GFX11 set FLAT_SCRATCH directly instead of using this arg. */
-      if (info->use_aco_amd && sel->screen->info.gfx_level < GFX11)
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.scratch_offset);
-
-      /* VGPRs */
-      declare_vs_input_vgprs(args, shader);
-
-      break;
-
-   case MESA_SHADER_TESS_CTRL: /* GFX6-GFX8 */
-      declare_global_desc_pointers(args);
-      declare_per_stage_desc_pointers(args, shader, info, true);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->tcs_offchip_layout);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->tes_offchip_addr);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->vs_state_bits);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.tess_offchip_offset);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.tcs_factor_offset);
-
-      /* GFX11 set FLAT_SCRATCH directly instead of using this arg. */
-      if (info->use_aco_amd && sel->screen->info.gfx_level < GFX11)
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.scratch_offset);
-
-      /* VGPRs */
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.tcs_patch_id);
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.tcs_rel_ids);
-      break;
-
-   case SI_SHADER_MERGED_VERTEX_TESSCTRL:
-      /* Merged stages have 8 system SGPRs at the beginning. */
-      /* Gfx9-10: SPI_SHADER_USER_DATA_ADDR_LO/HI_HS */
-      /* Gfx11+:  SPI_SHADER_PGM_LO/HI_HS */
-      declare_per_stage_desc_pointers(args, shader, info, stage == MESA_SHADER_TESS_CTRL);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.tess_offchip_offset);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.merged_wave_info);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.tcs_factor_offset);
-      if (sel->screen->info.gfx_level >= GFX11)
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.tcs_wave_id);
-      else
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.scratch_offset);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL); /* unused */
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL); /* unused */
-
-      declare_global_desc_pointers(args);
-      declare_per_stage_desc_pointers(args, shader, info, stage == MESA_SHADER_VERTEX);
-
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->vs_state_bits);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.base_vertex);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.draw_id);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.start_instance);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->tcs_offchip_layout);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->tes_offchip_addr);
-
-      /* VGPRs (first TCS, then VS) */
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.tcs_patch_id);
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.tcs_rel_ids);
-
-      if (stage == MESA_SHADER_VERTEX) {
-         declare_vs_input_vgprs(args, shader);
-
-         /* Need to keep LS/HS arg index same for shared args when ACO,
-          * so this is not able to be before shared VGPRs.
-          */
-         declare_vb_descriptor_input_sgprs(args, shader);
-
-         /* LS return values are inputs to the TCS main shader part. */
-         if (!shader->is_monolithic || shader->key.ge.opt.same_patch_vertices) {
-            for (i = 0; i < 8 + GFX9_TCS_NUM_USER_SGPR; i++)
-               ac_add_return(&args->ac, AC_ARG_SGPR);
-            for (i = 0; i < 2; i++)
-               ac_add_return(&args->ac, AC_ARG_VGPR);
-
-            /* VS outputs passed via VGPRs to TCS. */
-            if (shader->key.ge.opt.same_patch_vertices && !info->use_aco_amd) {
-               unsigned num_outputs = util_last_bit64(shader->selector->info.ls_es_outputs_written);
-               for (i = 0; i < num_outputs * 4; i++)
-                  ac_add_return(&args->ac, AC_ARG_VGPR);
-            }
-         }
-      } else {
-         /* TCS inputs are passed via VGPRs from VS. */
-         if (shader->key.ge.opt.same_patch_vertices && !info->use_aco_amd) {
-            unsigned num_inputs = util_last_bit64(shader->previous_stage_sel->info.ls_es_outputs_written);
-            for (i = 0; i < num_inputs * 4; i++)
-               ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, NULL);
-         }
-      }
-      break;
-
-   case SI_SHADER_MERGED_VERTEX_OR_TESSEVAL_GEOMETRY:
-      /* Merged stages have 8 system SGPRs at the beginning. */
-      /* Gfx9-10: SPI_SHADER_USER_DATA_ADDR_LO/HI_GS */
-      /* Gfx11+:  SPI_SHADER_PGM_LO/HI_GS */
-      declare_per_stage_desc_pointers(args, shader, info, stage == MESA_SHADER_GEOMETRY);
-
-      if (shader->key.ge.as_ngg)
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.gs_tg_info);
-      else
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.gs2vs_offset);
-
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.merged_wave_info);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.tess_offchip_offset);
-      if (sel->screen->info.gfx_level >= GFX11)
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.gs_attr_offset);
-      else
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.scratch_offset);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL); /* unused */
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL); /* unused */
-
-      declare_global_desc_pointers(args);
-      if (stage != MESA_SHADER_VERTEX || !info->vs.blit_sgprs_amd) {
-         declare_per_stage_desc_pointers(
-            args, shader, info, (stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_TESS_EVAL));
-      }
-
-      if (stage == MESA_SHADER_VERTEX && info->vs.blit_sgprs_amd) {
-         declare_vs_blit_inputs(shader, args, info);
-      } else {
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->vs_state_bits);
-
-         if (stage == MESA_SHADER_VERTEX) {
-            ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.base_vertex);
-            ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.draw_id);
-            ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.start_instance);
-         } else if (stage == MESA_SHADER_TESS_EVAL) {
-            ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->tcs_offchip_layout);
-            ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->tes_offchip_addr);
-            ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL); /* unused */
-         } else {
-            /* GS */
-            ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL); /* unused */
-            ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL); /* unused */
-            ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL); /* unused */
-         }
-
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_CONST_DESC_PTR, &args->small_prim_cull_info);
-         if (sel->screen->info.gfx_level >= GFX11)
-            ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->gs_attr_address);
-         else
-            ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL); /* unused */
-      }
-
-      /* VGPRs (first GS, then VS/TES) */
-      if (sel->screen->info.gfx_level >= GFX12) {
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.gs_vtx_offset[0]);
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.gs_prim_id);
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.gs_vtx_offset[1]);
-      } else {
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.gs_vtx_offset[0]);
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.gs_vtx_offset[1]);
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.gs_prim_id);
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.gs_invocation_id);
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.gs_vtx_offset[2]);
-      }
-
-      if (stage == MESA_SHADER_VERTEX) {
-         declare_vs_input_vgprs(args, shader);
-
-         /* Need to keep ES/GS arg index same for shared args when ACO,
-          * so this is not able to be before shared VGPRs.
-          */
-         if (!info->vs.blit_sgprs_amd)
-            declare_vb_descriptor_input_sgprs(args, shader);
-      } else if (stage == MESA_SHADER_TESS_EVAL) {
-         declare_tes_input_vgprs(args);
-      }
-
-      if (shader->key.ge.as_es && !shader->is_monolithic &&
-          (stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_TESS_EVAL)) {
-         /* ES return values are inputs to GS. */
-         for (i = 0; i < 8 + GFX9_GS_NUM_USER_SGPR; i++)
-            ac_add_return(&args->ac, AC_ARG_SGPR);
-         for (i = 0; i < (sel->screen->info.gfx_level >= GFX12 ? 3 : 5); i++)
-            ac_add_return(&args->ac, AC_ARG_VGPR);
-      }
-      break;
-
-   case MESA_SHADER_TESS_EVAL:
-      declare_global_desc_pointers(args);
-      declare_per_stage_desc_pointers(args, shader, info, true);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->vs_state_bits);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->tcs_offchip_layout);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->tes_offchip_addr);
-
-      if (shader->key.ge.as_es) {
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.tess_offchip_offset);
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL);
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.es2gs_offset);
-      } else {
-         declare_streamout_params(args, shader, info);
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.tess_offchip_offset);
-      }
-
-      /* GFX11 set FLAT_SCRATCH directly instead of using this arg. */
-      if (info->use_aco_amd && sel->screen->info.gfx_level < GFX11)
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.scratch_offset);
-
-      /* VGPRs */
-      declare_tes_input_vgprs(args);
-      break;
-
-   case MESA_SHADER_GEOMETRY:
-      declare_global_desc_pointers(args);
-      declare_per_stage_desc_pointers(args, shader, info, true);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.gs2vs_offset);
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.gs_wave_id);
-
-      /* GFX11 set FLAT_SCRATCH directly instead of using this arg. */
-      if (info->use_aco_amd && sel->screen->info.gfx_level < GFX11)
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.scratch_offset);
-
-      /* VGPRs */
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.gs_vtx_offset[0]);
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.gs_vtx_offset[1]);
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.gs_prim_id);
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.gs_vtx_offset[2]);
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.gs_vtx_offset[3]);
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.gs_vtx_offset[4]);
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.gs_vtx_offset[5]);
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.gs_invocation_id);
-      break;
-
-   case MESA_SHADER_FRAGMENT:
-      declare_global_desc_pointers(args);
-      declare_per_stage_desc_pointers(args, shader, info, true);
-      si_add_arg_checked(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->sample_locs[0],
-                         SI_PARAM_SAMPLE_LOCS0);
-      si_add_arg_checked(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->sample_locs[1],
-                         SI_PARAM_SAMPLE_LOCS1);
-      si_add_arg_checked(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->alpha_reference,
-                         SI_PARAM_ALPHA_REF);
-      si_add_arg_checked(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.prim_mask,
-                         SI_PARAM_PRIM_MASK);
-
-      si_add_arg_checked(&args->ac, AC_ARG_VGPR, 2, AC_ARG_INT, &args->ac.persp_sample,
-                         SI_PARAM_PERSP_SAMPLE);
-      si_add_arg_checked(&args->ac, AC_ARG_VGPR, 2, AC_ARG_INT, &args->ac.persp_center,
-                         SI_PARAM_PERSP_CENTER);
-      si_add_arg_checked(&args->ac, AC_ARG_VGPR, 2, AC_ARG_INT, &args->ac.persp_centroid,
-                         SI_PARAM_PERSP_CENTROID);
-      si_add_arg_checked(&args->ac, AC_ARG_VGPR, 3, AC_ARG_INT, NULL, SI_PARAM_PERSP_PULL_MODEL);
-      si_add_arg_checked(&args->ac, AC_ARG_VGPR, 2, AC_ARG_INT, &args->ac.linear_sample,
-                         SI_PARAM_LINEAR_SAMPLE);
-      si_add_arg_checked(&args->ac, AC_ARG_VGPR, 2, AC_ARG_INT, &args->ac.linear_center,
-                         SI_PARAM_LINEAR_CENTER);
-      si_add_arg_checked(&args->ac, AC_ARG_VGPR, 2, AC_ARG_INT, &args->ac.linear_centroid,
-                         SI_PARAM_LINEAR_CENTROID);
-      si_add_arg_checked(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, NULL, SI_PARAM_LINE_STIPPLE_TEX);
-      si_add_arg_checked(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, &args->ac.frag_pos[0],
-                         SI_PARAM_POS_X_FLOAT);
-      si_add_arg_checked(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, &args->ac.frag_pos[1],
-                         SI_PARAM_POS_Y_FLOAT);
-      si_add_arg_checked(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, &args->ac.frag_pos[2],
-                         SI_PARAM_POS_Z_FLOAT);
-      si_add_arg_checked(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, &args->ac.frag_pos[3],
-                         SI_PARAM_POS_W_FLOAT);
-      si_add_arg_checked(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, &args->ac.front_face,
-                         SI_PARAM_FRONT_FACE);
-      si_add_arg_checked(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.ancillary,
-                         SI_PARAM_ANCILLARY);
-      si_add_arg_checked(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, &args->ac.sample_coverage,
-                         SI_PARAM_SAMPLE_COVERAGE);
-      si_add_arg_checked(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.pos_fixed_pt,
-                         SI_PARAM_POS_FIXED_PT);
-
-      if (info->use_aco_amd) {
-         ac_compact_ps_vgpr_args(&args->ac, shader->config.spi_ps_input_addr);
-
-         /* GFX11 set FLAT_SCRATCH directly instead of using this arg. */
-         if (sel->screen->info.gfx_level < GFX11)
-            ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.scratch_offset);
-      }
-
-      /* Monolithic PS emit prolog and epilog in NIR directly. */
-      if (!shader->is_monolithic) {
-         /* Color inputs from the prolog. */
-         if (shader->selector->info.colors_read) {
-            unsigned num_color_elements = util_bitcount(shader->selector->info.colors_read);
-
-            for (i = 0; i < num_color_elements; i++)
-               ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, i ? NULL : &args->color_start);
-
-            num_prolog_vgprs += num_color_elements;
-         }
-
-         /* Outputs for the epilog. */
-         num_return_sgprs = SI_SGPR_ALPHA_REF + 1;
-         /* These must always be declared even if Z/stencil/samplemask are killed. */
-         num_returns = num_return_sgprs + util_bitcount(shader->selector->info.colors_written) * 4 +
-                       sel->info.writes_z + sel->info.writes_stencil + sel->info.writes_samplemask +
-                       1 /* SampleMaskIn */;
-
-         for (i = 0; i < num_return_sgprs; i++)
-            ac_add_return(&args->ac, AC_ARG_SGPR);
-         for (; i < num_returns; i++)
-            ac_add_return(&args->ac, AC_ARG_VGPR);
-      }
-      break;
-
-   case MESA_SHADER_COMPUTE:
-   case MESA_SHADER_KERNEL:
-      declare_global_desc_pointers(args);
-      declare_per_stage_desc_pointers(args, shader, info, true);
-      if (shader->selector->info.uses_grid_size)
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 3, AC_ARG_INT, &args->ac.num_work_groups);
-      if (shader->selector->info.uses_variable_block_size)
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->block_size);
-
-      unsigned cs_user_data_dwords =
-         info->cs.user_data_components_amd;
-      if (cs_user_data_dwords) {
-         ac_add_arg(&args->ac, AC_ARG_SGPR, MIN2(cs_user_data_dwords, 4), AC_ARG_INT,
-                    &args->cs_user_data[0]);
-         if (cs_user_data_dwords > 4) {
-            ac_add_arg(&args->ac, AC_ARG_SGPR, cs_user_data_dwords - 4, AC_ARG_INT,
-                       &args->cs_user_data[1]);
-         }
-      }
-
-      /* Some descriptors can be in user SGPRs. */
-      /* Shader buffers in user SGPRs. */
-      for (unsigned i = 0; i < shader->selector->cs_num_shaderbufs_in_user_sgprs; i++) {
-         while (args->ac.num_sgprs_used % 4 != 0)
-            ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL);
-
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 4, AC_ARG_INT, &args->cs_shaderbuf[i]);
-      }
-      /* Images in user SGPRs. */
-      for (unsigned i = 0; i < shader->selector->cs_num_images_in_user_sgprs; i++) {
-         unsigned num_sgprs = BITSET_TEST(info->image_buffers, i) ? 4 : 8;
-
-         while (args->ac.num_sgprs_used % num_sgprs != 0)
-            ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL);
-
-         ac_add_arg(&args->ac, AC_ARG_SGPR, num_sgprs, AC_ARG_INT, &args->cs_image[i]);
-      }
-
-      /* Hardware SGPRs. */
-      for (i = 0; i < 3; i++) {
-         if (shader->selector->info.uses_block_id[i]) {
-            /* GFX12 loads workgroup IDs into ttmp registers, so they are not input SGPRs, but we
-             * still need to set this to indicate that they are enabled (for ac_nir_to_llvm).
-             */
-            if (sel->screen->info.gfx_level >= GFX12)
-               args->ac.workgroup_ids[i].used = true;
-            else
-               ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.workgroup_ids[i]);
-         }
-      }
-      if (shader->selector->info.uses_tg_size)
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.tg_size);
-
-      /* GFX11 set FLAT_SCRATCH directly instead of using this arg. */
-      if (info->use_aco_amd && sel->screen->info.gfx_level < GFX11)
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.scratch_offset);
-
-      /* Hardware VGPRs. */
-      /* Thread IDs are packed in VGPR0, 10 bits per component or stored in 3 separate VGPRs */
-      if (sel->screen->info.gfx_level >= GFX11 ||
-          (!sel->screen->info.has_graphics && sel->screen->info.family >= CHIP_MI200)) {
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.local_invocation_ids_packed);
-      } else {
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.local_invocation_id_x);
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.local_invocation_id_y);
-         ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.local_invocation_id_z);
-      }
-      break;
-   default:
-      assert(0 && "unimplemented shader");
-      return;
-   }
-
-   shader->info.num_input_sgprs = args->ac.num_sgprs_used;
-   shader->info.num_input_vgprs = args->ac.num_vgprs_used;
-
-   assert(shader->info.num_input_vgprs >= num_prolog_vgprs);
-   shader->info.num_input_vgprs -= num_prolog_vgprs;
 }
 
 static unsigned get_lds_granularity(struct si_screen *screen, gl_shader_stage stage)
@@ -1324,9 +730,9 @@ void si_shader_dump_stats_for_shader_db(struct si_screen *screen, struct si_shad
          unreachable("invalid shader key");
    } else if (shader->selector->stage == MESA_SHADER_FRAGMENT) {
       num_ps_outputs = util_bitcount(shader->selector->info.colors_written) +
-                       (shader->ps.writes_z ||
-                        shader->ps.writes_stencil ||
-                        shader->ps.writes_samplemask);
+                       (shader->info.writes_z ||
+                        shader->info.writes_stencil ||
+                        shader->info.writes_sample_mask);
    }
 
    util_debug_message(debug, SHADER_INFO,
@@ -1635,85 +1041,6 @@ static void si_dump_shader_key(const struct si_shader *shader, FILE *f)
    }
 }
 
-/* TODO: convert to nir_shader_instructions_pass */
-static bool si_nir_kill_outputs(nir_shader *nir, const union si_shader_key *key)
-{
-   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-   assert(impl);
-   assert(nir->info.stage <= MESA_SHADER_GEOMETRY);
-
-   if (!key->ge.opt.kill_outputs &&
-       !key->ge.opt.kill_pointsize &&
-       !key->ge.opt.kill_layer &&
-       !key->ge.opt.kill_clip_distances &&
-       !(nir->info.outputs_written & BITFIELD64_BIT(VARYING_SLOT_LAYER))) {
-      return nir_no_progress(impl);
-   }
-
-   bool progress = false;
-
-   nir_foreach_block(block, impl) {
-      nir_foreach_instr_safe(instr, block) {
-         if (instr->type != nir_instr_type_intrinsic)
-            continue;
-
-         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-         if (intr->intrinsic != nir_intrinsic_store_output)
-            continue;
-
-         /* No indirect indexing allowed. */
-         ASSERTED nir_src offset = *nir_get_io_offset_src(intr);
-         assert(nir_src_is_const(offset) && nir_src_as_uint(offset) == 0);
-
-         assert(intr->num_components == 1); /* only scalar stores expected */
-         nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
-
-         if (nir_slot_is_varying(sem.location, MESA_SHADER_FRAGMENT) &&
-             key->ge.opt.kill_outputs &
-             (1ull << si_shader_io_get_unique_index(sem.location)))
-            progress |= nir_remove_varying(intr, MESA_SHADER_FRAGMENT);
-
-         switch (sem.location) {
-         case VARYING_SLOT_PSIZ:
-            if (key->ge.opt.kill_pointsize)
-               progress |= nir_remove_sysval_output(intr, MESA_SHADER_FRAGMENT);
-            break;
-
-         case VARYING_SLOT_CLIP_VERTEX:
-            /* TODO: We should only kill specific clip planes as required by kill_clip_distance,
-             * not whole gl_ClipVertex. Lower ClipVertex in NIR.
-             */
-            if ((key->ge.opt.kill_clip_distances & SI_USER_CLIP_PLANE_MASK) ==
-                SI_USER_CLIP_PLANE_MASK)
-               progress |= nir_remove_sysval_output(intr, MESA_SHADER_FRAGMENT);
-            break;
-
-         case VARYING_SLOT_CLIP_DIST0:
-         case VARYING_SLOT_CLIP_DIST1:
-            if (key->ge.opt.kill_clip_distances) {
-               assert(nir_intrinsic_src_type(intr) == nir_type_float32);
-               unsigned index = (sem.location - VARYING_SLOT_CLIP_DIST0) * 4 +
-                                nir_intrinsic_component(intr);
-
-               if (key->ge.opt.kill_clip_distances & BITFIELD_BIT(index))
-                  progress |= nir_remove_sysval_output(intr, MESA_SHADER_FRAGMENT);
-            }
-            break;
-
-         case VARYING_SLOT_LAYER:
-            /* LAYER is never passed to FS. Instead, we load it there as a system value. */
-            progress |= nir_remove_varying(intr, MESA_SHADER_FRAGMENT);
-
-            if (key->ge.opt.kill_layer)
-               progress |= nir_remove_sysval_output(intr, MESA_SHADER_FRAGMENT);
-            break;
-         }
-      }
-   }
-
-   return nir_progress(progress, impl, nir_metadata_control_flow);
-}
-
 static unsigned si_map_io_driver_location(unsigned semantic)
 {
    if ((semantic >= VARYING_SLOT_PATCH0 && semantic < VARYING_SLOT_TESS_MAX) ||
@@ -1784,7 +1111,8 @@ static bool si_lower_io_to_mem(struct si_shader *shader, nir_shader *nir)
    return false;
 }
 
-static void si_lower_ngg(struct si_shader *shader, nir_shader *nir)
+static void si_lower_ngg(struct si_shader *shader, nir_shader *nir,
+                         struct si_temp_shader_variant_info *temp_info)
 {
    struct si_shader_selector *sel = shader->selector;
    const union si_shader_key *key = &shader->key;
@@ -1799,8 +1127,8 @@ static void si_lower_ngg(struct si_shader *shader, nir_shader *nir)
       .max_workgroup_size = si_get_max_workgroup_size(shader),
       .wave_size = shader->wave_size,
       .can_cull = si_shader_culling_enabled(shader),
-      .disable_streamout = !si_shader_uses_streamout(shader),
-      .vs_output_param_offset = shader->info.vs_output_param_offset,
+      .disable_streamout = !shader->info.num_streamout_vec4s,
+      .vs_output_param_offset = temp_info->vs_output_param_offset,
       .has_param_exports = shader->info.nr_param_exports,
       .clip_cull_dist_mask = clip_cull_dist_mask,
       .kill_pointsize = key->ge.opt.kill_pointsize,
@@ -1875,10 +1203,11 @@ struct nir_shader *si_deserialize_shader(struct si_shader_selector *sel)
 }
 
 static void si_nir_assign_param_offsets(nir_shader *nir, struct si_shader *shader,
-                                        int8_t slot_remap[NUM_TOTAL_VARYING_SLOTS])
+                                        int8_t slot_remap[NUM_TOTAL_VARYING_SLOTS],
+                                        struct si_temp_shader_variant_info *temp_info)
 {
    struct si_shader_selector *sel = shader->selector;
-   struct si_shader_binary_info *info = &shader->info;
+   struct si_shader_variant_info *info = &shader->info;
 
    uint64_t outputs_written = 0;
    uint32_t outputs_written_16bit = 0;
@@ -1910,13 +1239,13 @@ static void si_nir_assign_param_offsets(nir_shader *nir, struct si_shader *shade
          /* Assign the param index if it's unassigned. */
          if (nir_slot_is_varying(sem.location, MESA_SHADER_FRAGMENT) && !sem.no_varying &&
              (sem.gs_streams & 0x3) == 0 &&
-             info->vs_output_param_offset[sem.location] == AC_EXP_PARAM_DEFAULT_VAL_0000) {
+             temp_info->vs_output_param_offset[sem.location] == AC_EXP_PARAM_DEFAULT_VAL_0000) {
             /* The semantic and the base should be the same as in si_shader_info. */
             assert(sem.location == sel->info.output_semantic[nir_intrinsic_base(intr)]);
             /* It must not be remapped (duplicated). */
             assert(slot_remap[sem.location] == -1);
 
-            info->vs_output_param_offset[sem.location] = info->nr_param_exports++;
+            temp_info->vs_output_param_offset[sem.location] = info->nr_param_exports++;
          }
       }
    }
@@ -1924,11 +1253,11 @@ static void si_nir_assign_param_offsets(nir_shader *nir, struct si_shader *shade
    /* Duplicated outputs are redirected here. */
    for (unsigned i = 0; i < NUM_TOTAL_VARYING_SLOTS; i++) {
       if (slot_remap[i] >= 0)
-         info->vs_output_param_offset[i] = info->vs_output_param_offset[slot_remap[i]];
+         temp_info->vs_output_param_offset[i] = temp_info->vs_output_param_offset[slot_remap[i]];
    }
 
    if (shader->key.ge.mono.u.vs_export_prim_id) {
-      info->vs_output_param_offset[VARYING_SLOT_PRIMITIVE_ID] = info->nr_param_exports++;
+      temp_info->vs_output_param_offset[VARYING_SLOT_PRIMITIVE_ID] = info->nr_param_exports++;
    }
 
    /* Update outputs written info, we may remove some outputs before. */
@@ -1936,14 +1265,15 @@ static void si_nir_assign_param_offsets(nir_shader *nir, struct si_shader *shade
    nir->info.outputs_written_16bit = outputs_written_16bit;
 }
 
-static void si_assign_param_offsets(nir_shader *nir, struct si_shader *shader)
+static void si_assign_param_offsets(nir_shader *nir, struct si_shader *shader,
+                                    struct si_temp_shader_variant_info *temp_info)
 {
    /* Initialize this first. */
    shader->info.nr_param_exports = 0;
 
-   STATIC_ASSERT(sizeof(shader->info.vs_output_param_offset[0]) == 1);
-   memset(shader->info.vs_output_param_offset, AC_EXP_PARAM_DEFAULT_VAL_0000,
-          sizeof(shader->info.vs_output_param_offset));
+   STATIC_ASSERT(sizeof(temp_info->vs_output_param_offset[0]) == 1);
+   memset(temp_info->vs_output_param_offset, AC_EXP_PARAM_DEFAULT_VAL_0000,
+          sizeof(temp_info->vs_output_param_offset));
 
    /* A slot remapping table for duplicated outputs, so that 1 vertex shader output can be
     * mapped to multiple fragment shader inputs.
@@ -1954,11 +1284,11 @@ static void si_assign_param_offsets(nir_shader *nir, struct si_shader *shader)
    /* This sets DEFAULT_VAL for constant outputs in vs_output_param_offset. */
    /* TODO: This doesn't affect GS. */
    NIR_PASS_V(nir, ac_nir_optimize_outputs, false, slot_remap,
-              shader->info.vs_output_param_offset);
+              temp_info->vs_output_param_offset);
 
    /* Assign the non-constant outputs. */
    /* TODO: Use this for the GS copy shader too. */
-   si_nir_assign_param_offsets(nir, shader, slot_remap);
+   si_nir_assign_param_offsets(nir, shader, slot_remap, temp_info);
 }
 
 static unsigned si_get_nr_pos_exports(const struct si_shader_selector *sel,
@@ -1987,208 +1317,40 @@ static unsigned si_get_nr_pos_exports(const struct si_shader_selector *sel,
    return nr_pos_exports;
 }
 
-static bool lower_ps_load_color_intrinsic(nir_builder *b, nir_instr *instr, void *state)
-{
-   nir_def **colors = (nir_def **)state;
-
-   if (instr->type != nir_instr_type_intrinsic)
-      return false;
-
-   nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
-
-   if (intrin->intrinsic != nir_intrinsic_load_color0 &&
-       intrin->intrinsic != nir_intrinsic_load_color1)
-      return false;
-
-   unsigned index = intrin->intrinsic == nir_intrinsic_load_color0 ? 0 : 1;
-   assert(colors[index]);
-
-   nir_def_replace(&intrin->def, colors[index]);
-   return true;
-}
-
-static bool si_nir_lower_ps_color_input(nir_shader *nir, const union si_shader_key *key,
-                                        const struct si_shader_info *info)
-{
-   bool progress = false;
-   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-
-   nir_builder builder = nir_builder_at(nir_before_impl(impl));
-   nir_builder *b = &builder;
-
-   /* Build ready to be used colors at the beginning of the shader. */
-   nir_def *colors[2] = {0};
-   for (int i = 0; i < 2; i++) {
-      if (!(info->colors_read & (0xf << (i * 4))))
-         continue;
-
-      enum glsl_interp_mode interp_mode = info->color_interpolate[i];
-      if (interp_mode == INTERP_MODE_COLOR) {
-         interp_mode = key->ps.part.prolog.flatshade_colors ?
-            INTERP_MODE_FLAT : INTERP_MODE_SMOOTH;
-      }
-
-      nir_def *back_color = NULL;
-      if (interp_mode == INTERP_MODE_FLAT) {
-         colors[i] = nir_load_input(b, 4, 32, nir_imm_int(b, 0),
-                                   .io_semantics.location = VARYING_SLOT_COL0 + i);
-
-         if (key->ps.part.prolog.color_two_side) {
-            back_color = nir_load_input(b, 4, 32, nir_imm_int(b, 0),
-                                        .io_semantics.location = VARYING_SLOT_BFC0 + i,
-                                        .io_semantics.num_slots = 1);
-         }
-      } else {
-         nir_intrinsic_op op = 0;
-         switch (info->color_interpolate_loc[i]) {
-         case TGSI_INTERPOLATE_LOC_CENTER:
-            op = nir_intrinsic_load_barycentric_pixel;
-            break;
-         case TGSI_INTERPOLATE_LOC_CENTROID:
-            op = nir_intrinsic_load_barycentric_centroid;
-            break;
-         case TGSI_INTERPOLATE_LOC_SAMPLE:
-            op = nir_intrinsic_load_barycentric_sample;
-            break;
-         default:
-            unreachable("invalid color interpolate location");
-            break;
-         }
-
-         nir_def *barycentric = nir_load_barycentric(b, op, interp_mode);
-
-         colors[i] =
-            nir_load_interpolated_input(b, 4, 32, barycentric, nir_imm_int(b, 0),
-                                        .io_semantics.location = VARYING_SLOT_COL0 + i);
-
-         if (key->ps.part.prolog.color_two_side) {
-            back_color =
-               nir_load_interpolated_input(b, 4, 32, barycentric, nir_imm_int(b, 0),
-                                           .io_semantics.location = VARYING_SLOT_BFC0 + i);
-         }
-      }
-
-      if (back_color) {
-         nir_def *is_front_face = nir_load_front_face(b, 1);
-         colors[i] = nir_bcsel(b, is_front_face, colors[i], back_color);
-      }
-
-      progress = true;
-   }
-
-   /* lower nir_load_color0/1 to use the color value. */
-   return nir_shader_instructions_pass(nir, lower_ps_load_color_intrinsic,
-                                       nir_metadata_control_flow,
-                                       colors) || progress;
-}
-
-static bool si_nir_emit_polygon_stipple(nir_shader *nir)
-{
-   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-
-   nir_builder builder = nir_builder_at(nir_before_impl(impl));
-   nir_builder *b = &builder;
-
-   /* Load the buffer descriptor. */
-   nir_def *desc = nir_load_polygon_stipple_buffer_amd(b);
-
-   /* Use the fixed-point gl_FragCoord input.
-    * Since the stipple pattern is 32x32 and it repeats, just get 5 bits
-    * per coordinate to get the repeating effect.
-    */
-   nir_def *pixel_coord = nir_u2u32(b, nir_iand_imm(b, nir_load_pixel_coord(b), 0x1f));
-
-   nir_def *zero = nir_imm_int(b, 0);
-   /* The stipple pattern is 32x32, each row has 32 bits. */
-   nir_def *offset = nir_ishl_imm(b, nir_channel(b, pixel_coord, 1), 2);
-   nir_def *row = nir_load_buffer_amd(b, 1, 32, desc, offset, zero, zero);
-   nir_def *bit = nir_ubfe(b, row, nir_channel(b, pixel_coord, 0), nir_imm_int(b, 1));
-
-   nir_def *pass = nir_i2b(b, bit);
-   nir_discard_if(b, nir_inot(b, pass));
-
-   return nir_progress(true, impl, nir_metadata_control_flow);
-}
-
 bool si_should_clear_lds(struct si_screen *sscreen, const struct nir_shader *shader)
 {
    return gl_shader_stage_is_compute(shader->info.stage) &&
       shader->info.shared_size > 0 && sscreen->options.clear_lds;
 }
 
-static bool clamp_shadow_comparison_value(nir_builder *b, nir_tex_instr *tex,
-                                          void *state)
-{
-   if (!tex->is_shadow)
-      return false;
-
-   b->cursor = nir_before_instr(&tex->instr);
-
-   int samp_index = nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle);
-   int comp_index = nir_tex_instr_src_index(tex, nir_tex_src_comparator);
-   assert(samp_index >= 0 && comp_index >= 0);
-
-   nir_def *sampler = tex->src[samp_index].src.ssa;
-   nir_def *compare = tex->src[comp_index].src.ssa;
-   /* Must have been lowered to descriptor. */
-   assert(sampler->num_components > 1);
-
-   nir_def *upgraded = nir_channel(b, sampler, 3);
-   upgraded = nir_i2b(b, nir_ubfe_imm(b, upgraded, 29, 1));
-
-   nir_def *clamped = nir_fsat(b, compare);
-   compare = nir_bcsel(b, upgraded, clamped, compare);
-
-   nir_src_rewrite(&tex->src[comp_index].src, compare);
-   return true;
-}
-
-static bool si_nir_clamp_shadow_comparison_value(nir_shader *nir)
-{
-   /* Section 8.23.1 (Depth Texture Comparison Mode) of the
-    * OpenGL 4.5 spec says:
-    *
-    *    "If the texture’s internal format indicates a fixed-point
-    *     depth texture, then D_t and D_ref are clamped to the
-    *     range [0, 1]; otherwise no clamping is performed."
-    *
-    * TC-compatible HTILE promotes Z16 and Z24 to Z32_FLOAT,
-    * so the depth comparison value isn't clamped for Z16 and
-    * Z24 anymore. Do it manually here for GFX8-9; GFX10 has
-    * an explicitly clamped 32-bit float format.
-    */
-   return nir_shader_tex_pass(nir, clamp_shadow_comparison_value,
-                              nir_metadata_control_flow, NULL);
-}
-
 static void
-si_init_gs_output_info(struct si_shader_info *info, struct si_gs_output_info *out_info)
+si_init_gs_output_info(struct si_shader_info *info, struct si_temp_shader_variant_info *out_info)
 {
    for (int i = 0; i < info->num_outputs; i++) {
       unsigned slot = info->output_semantic[i];
       if (slot < VARYING_SLOT_VAR0_16BIT) {
-         out_info->streams[slot] = info->output_streams[i];
-         out_info->usage_mask[slot] = info->output_usagemask[i];
+         out_info->gs_streams[slot] = info->output_streams[i];
+         out_info->gs_out_usage_mask[slot] = info->output_usagemask[i];
       } else {
          unsigned index = slot - VARYING_SLOT_VAR0_16BIT;
          /* TODO: 16bit need separated fields for lo/hi part. */
-         out_info->streams_16bit_lo[index] = info->output_streams[i];
-         out_info->streams_16bit_hi[index] = info->output_streams[i];
-         out_info->usage_mask_16bit_lo[index] = info->output_usagemask[i];
-         out_info->usage_mask_16bit_hi[index] = info->output_usagemask[i];
+         out_info->gs_streams_16bit_lo[index] = info->output_streams[i];
+         out_info->gs_streams_16bit_hi[index] = info->output_streams[i];
+         out_info->gs_out_usage_mask_16bit_lo[index] = info->output_usagemask[i];
+         out_info->gs_out_usage_mask_16bit_hi[index] = info->output_usagemask[i];
       }
    }
 
-   ac_nir_gs_output_info *ac_info = &out_info->info;
+   ac_nir_gs_output_info *ac_info = &out_info->gs_out_info;
 
-   ac_info->streams = out_info->streams;
-   ac_info->streams_16bit_lo = out_info->streams_16bit_lo;
-   ac_info->streams_16bit_hi = out_info->streams_16bit_hi;
+   ac_info->streams = out_info->gs_streams;
+   ac_info->streams_16bit_lo = out_info->gs_streams_16bit_lo;
+   ac_info->streams_16bit_hi = out_info->gs_streams_16bit_hi;
 
-   ac_info->sysval_mask = out_info->usage_mask;
-   ac_info->varying_mask = out_info->usage_mask;
-   ac_info->varying_mask_16bit_lo = out_info->usage_mask_16bit_lo;
-   ac_info->varying_mask_16bit_hi = out_info->usage_mask_16bit_hi;
+   ac_info->sysval_mask = out_info->gs_out_usage_mask;
+   ac_info->varying_mask = out_info->gs_out_usage_mask;
+   ac_info->varying_mask_16bit_lo = out_info->gs_out_usage_mask_16bit_lo;
+   ac_info->varying_mask_16bit_hi = out_info->gs_out_usage_mask_16bit_hi;
 
    /* TODO: construct 16bit slot per component store type. */
    ac_info->types_16bit_lo = ac_info->types_16bit_hi = NULL;
@@ -2199,7 +1361,7 @@ si_init_gs_output_info(struct si_shader_info *info, struct si_gs_output_info *ou
  * better code or lower undesirable representations (like derefs). Lowering passes that prevent
  * linking optimizations or destroy shader_info shouldn't be run here.
  */
-static bool run_pre_link_optimization_passes(struct si_nir_shader_ctx *ctx)
+static void run_pre_link_optimization_passes(struct si_nir_shader_ctx *ctx)
 {
    struct si_shader *shader = ctx->shader;
    struct si_shader_selector *sel = shader->selector;
@@ -2267,7 +1429,7 @@ static bool run_pre_link_optimization_passes(struct si_nir_shader_ctx *ctx)
           * selection.
           */
          if (sel->info.colors_read)
-            NIR_PASS(progress, nir, si_nir_lower_ps_color_input, &shader->key, &sel->info);
+            NIR_PASS(progress, nir, si_nir_lower_ps_color_inputs, &shader->key, &sel->info);
 
          /* This adds discard and barycentrics. */
          if (key->ps.mono.point_smoothing)
@@ -2318,7 +1480,7 @@ static bool run_pre_link_optimization_passes(struct si_nir_shader_ctx *ctx)
 
          /* This adds discard. */
          if (key->ps.part.prolog.poly_stipple)
-            NIR_PASS(progress, nir, si_nir_emit_polygon_stipple);
+            NIR_PASS(progress, nir, si_nir_lower_polygon_stipple);
       } else {
          ac_nir_lower_ps_early_options early_options = {
             .optimize_frag_coord = true,
@@ -2356,7 +1518,9 @@ static bool run_pre_link_optimization_passes(struct si_nir_shader_ctx *ctx)
 
    /* Lower all other indirect indexing to if-else ladders or scratch. */
    progress |= ac_nir_lower_indirect_derefs(nir, sel->screen->info.gfx_level);
-   return progress;
+
+   if (progress)
+      si_nir_opts(shader->selector->screen, nir, false);
 }
 
 /* Late optimization passes and lowering passes. The majority of lowering passes are here.
@@ -2364,13 +1528,13 @@ static bool run_pre_link_optimization_passes(struct si_nir_shader_ctx *ctx)
  * (those should be run before this) because any changes in shader_info won't be reflected
  * in hw registers from now on.
  */
-static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *ctx,
-                                                      bool progress)
+static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *ctx)
 {
    struct si_shader *shader = ctx->shader;
    struct si_shader_selector *sel = shader->selector;
    const union si_shader_key *key = &shader->key;
    nir_shader *nir = ctx->nir;
+   bool progress = false;
 
    si_init_shader_args(shader, &ctx->args, &nir->info);
 
@@ -2391,7 +1555,7 @@ static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *
       NIR_PASS(progress, nir, ac_nir_lower_image_opcodes);
 
    /* LLVM does not work well with this, so is handled in llvm backend waterfall. */
-   if (nir->info.use_aco_amd && sel->info.has_non_uniform_tex_access) {
+   if (nir->info.use_aco_amd && ctx->temp_info.has_non_uniform_tex_access) {
       nir_lower_non_uniform_access_options options = {
          .types = nir_lower_non_uniform_texture_access,
       };
@@ -2412,14 +1576,14 @@ static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *
 
    if (is_last_vgt_stage) {
       /* Assign param export indices. */
-      si_assign_param_offsets(nir, shader);
+      si_assign_param_offsets(nir, shader, &ctx->temp_info);
 
       /* Assign num of position exports. */
       shader->info.nr_pos_exports = si_get_nr_pos_exports(sel, key);
 
       if (key->ge.as_ngg) {
          /* Lower last VGT NGG shader stage. */
-         si_lower_ngg(shader, nir);
+         si_lower_ngg(shader, nir, &ctx->temp_info);
       } else if (nir->info.stage == MESA_SHADER_VERTEX ||
                  nir->info.stage == MESA_SHADER_TESS_EVAL) {
          /* Lower last VGT none-NGG VS/TES shader stage. */
@@ -2430,19 +1594,19 @@ static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *
          NIR_PASS_V(nir, ac_nir_lower_legacy_vs,
                     sel->screen->info.gfx_level,
                     clip_cull_mask,
-                    shader->info.vs_output_param_offset,
+                    ctx->temp_info.vs_output_param_offset,
                     shader->info.nr_param_exports,
                     shader->key.ge.mono.u.vs_export_prim_id,
-                    !si_shader_uses_streamout(shader),
+                    !shader->info.num_streamout_vec4s,
                     key->ge.opt.kill_pointsize,
                     key->ge.opt.kill_layer,
                     sel->screen->options.vrs2x2);
       }
       progress = true;
    } else if (nir->info.stage == MESA_SHADER_GEOMETRY && !key->ge.as_ngg) {
-      si_init_gs_output_info(&sel->info, &ctx->legacy_gs_output_info);
+      si_init_gs_output_info(&sel->info, &ctx->temp_info);
       NIR_PASS_V(nir, ac_nir_lower_legacy_gs, false, sel->screen->use_ngg,
-                 &ctx->legacy_gs_output_info.info);
+                 &ctx->temp_info.gs_out_info);
       progress = true;
    } else if (nir->info.stage == MESA_SHADER_FRAGMENT && shader->is_monolithic) {
       ac_nir_lower_ps_late_options late_options = {
@@ -2451,7 +1615,7 @@ static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *
          .use_aco = nir->info.use_aco_amd,
          .bc_optimize_for_persp = key->ps.part.prolog.bc_optimize_for_persp,
          .bc_optimize_for_linear = key->ps.part.prolog.bc_optimize_for_linear,
-         .uses_discard = si_shader_uses_discard(shader),
+         .uses_discard = shader->info.uses_discard,
          .alpha_to_coverage_via_mrtz = key->ps.part.epilog.alpha_to_coverage_via_mrtz,
          .dual_src_blend_swizzle = key->ps.part.epilog.dual_src_blend_swizzle,
          .spi_shader_col_format = key->ps.part.epilog.spi_shader_col_format,
@@ -2498,7 +1662,7 @@ static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *
       NIR_PASS_V(nir, nir_clear_shared_memory, shared_size, chunk_size);
    }
 
-   NIR_PASS_V(nir, nir_divergence_analysis); /* required by ac_nir_flag_smem_for_loads */
+   nir_divergence_analysis(nir); /* required by ac_nir_flag_smem_for_loads */
    /* This is required by ac_nir_scalarize_overfetching_loads_callback. */
    NIR_PASS(progress, nir, ac_nir_flag_smem_for_loads, sel->screen->info.gfx_level,
             !sel->info.base.use_aco_amd, false);
@@ -2542,16 +1706,15 @@ static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *
    NIR_PASS(progress, nir, ac_nir_lower_mem_access_bit_sizes,
             sel->screen->info.gfx_level, !nir->info.use_aco_amd);
 
-   if (nir->info.stage == MESA_SHADER_KERNEL) {
+   if (nir->info.stage == MESA_SHADER_KERNEL)
       NIR_PASS(progress, nir, ac_nir_lower_global_access);
 
-      if (nir->info.bit_sizes_int & (8 | 16)) {
-         if (sel->screen->info.gfx_level >= GFX8)
-            nir_divergence_analysis(nir);
+   if (ac_nir_might_lower_bit_size(nir)) {
+      if (sel->screen->info.gfx_level >= GFX8)
+         nir_divergence_analysis(nir);
 
-         NIR_PASS(progress, nir, nir_lower_bit_size, ac_nir_lower_bit_size_callback,
-                  &sel->screen->info.gfx_level);
-      }
+      NIR_PASS(progress, nir, nir_lower_bit_size, ac_nir_lower_bit_size_callback,
+               &sel->screen->info.gfx_level);
    }
 
    /* This must be after lowering resources to descriptor loads and before lowering intrinsics
@@ -2570,7 +1733,7 @@ static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *
    /* LLVM keep non-uniform sampler as index, so can't do this in NIR.
     * Must be done after si_nir_lower_resource().
     */
-   if (nir->info.use_aco_amd && sel->info.has_shadow_comparison &&
+   if (nir->info.use_aco_amd && ctx->temp_info.has_shadow_comparison &&
        sel->screen->info.gfx_level >= GFX8 && sel->screen->info.gfx_level <= GFX9) {
       NIR_PASS(progress, nir, si_nir_clamp_shadow_comparison_value);
    }
@@ -2662,200 +1825,6 @@ static void get_prev_stage_input_nir(struct si_shader *shader, struct si_linked_
    get_input_nir(&linked->producer_shader, &linked->producer);
 }
 
-static void si_set_spi_ps_input_config_for_separate_prolog(struct si_shader *shader)
-{
-   const union si_shader_key *key = &shader->key;
-
-   /* Enable POS_FIXED_PT if polygon stippling is enabled. */
-   if (key->ps.part.prolog.poly_stipple)
-      shader->config.spi_ps_input_ena |= S_0286CC_POS_FIXED_PT_ENA(1);
-
-   /* Set up the enable bits for per-sample shading if needed. */
-   if (key->ps.part.prolog.force_persp_sample_interp &&
-       (G_0286CC_PERSP_CENTER_ENA(shader->config.spi_ps_input_ena) ||
-        G_0286CC_PERSP_CENTROID_ENA(shader->config.spi_ps_input_ena))) {
-      shader->config.spi_ps_input_ena &= C_0286CC_PERSP_CENTER_ENA;
-      shader->config.spi_ps_input_ena &= C_0286CC_PERSP_CENTROID_ENA;
-      shader->config.spi_ps_input_ena |= S_0286CC_PERSP_SAMPLE_ENA(1);
-   }
-   if (key->ps.part.prolog.force_linear_sample_interp &&
-       (G_0286CC_LINEAR_CENTER_ENA(shader->config.spi_ps_input_ena) ||
-        G_0286CC_LINEAR_CENTROID_ENA(shader->config.spi_ps_input_ena))) {
-      shader->config.spi_ps_input_ena &= C_0286CC_LINEAR_CENTER_ENA;
-      shader->config.spi_ps_input_ena &= C_0286CC_LINEAR_CENTROID_ENA;
-      shader->config.spi_ps_input_ena |= S_0286CC_LINEAR_SAMPLE_ENA(1);
-   }
-   if (key->ps.part.prolog.force_persp_center_interp &&
-       (G_0286CC_PERSP_SAMPLE_ENA(shader->config.spi_ps_input_ena) ||
-        G_0286CC_PERSP_CENTROID_ENA(shader->config.spi_ps_input_ena))) {
-      shader->config.spi_ps_input_ena &= C_0286CC_PERSP_SAMPLE_ENA;
-      shader->config.spi_ps_input_ena &= C_0286CC_PERSP_CENTROID_ENA;
-      shader->config.spi_ps_input_ena |= S_0286CC_PERSP_CENTER_ENA(1);
-   }
-   if (key->ps.part.prolog.force_linear_center_interp &&
-       (G_0286CC_LINEAR_SAMPLE_ENA(shader->config.spi_ps_input_ena) ||
-        G_0286CC_LINEAR_CENTROID_ENA(shader->config.spi_ps_input_ena))) {
-      shader->config.spi_ps_input_ena &= C_0286CC_LINEAR_SAMPLE_ENA;
-      shader->config.spi_ps_input_ena &= C_0286CC_LINEAR_CENTROID_ENA;
-      shader->config.spi_ps_input_ena |= S_0286CC_LINEAR_CENTER_ENA(1);
-   }
-
-   /* The sample mask fixup requires the sample ID. */
-   if (key->ps.part.prolog.samplemask_log_ps_iter)
-      shader->config.spi_ps_input_ena |= S_0286CC_ANCILLARY_ENA(1);
-
-   if (key->ps.part.prolog.force_samplemask_to_helper_invocation) {
-      assert(key->ps.part.prolog.samplemask_log_ps_iter == 0);
-      assert(!key->ps.mono.poly_line_smoothing);
-      shader->config.spi_ps_input_ena &= C_0286CC_SAMPLE_COVERAGE_ENA;
-   }
-
-   /* The sample mask fixup has an optimization that replaces the sample mask with the sample ID. */
-   if (key->ps.part.prolog.samplemask_log_ps_iter == 3)
-      shader->config.spi_ps_input_ena &= C_0286CC_SAMPLE_COVERAGE_ENA;
-
-   if (key->ps.part.prolog.get_frag_coord_from_pixel_coord) {
-      shader->config.spi_ps_input_ena &= C_0286CC_POS_X_FLOAT_ENA;
-      shader->config.spi_ps_input_ena &= C_0286CC_POS_Y_FLOAT_ENA;
-      shader->config.spi_ps_input_ena |= S_0286CC_POS_FIXED_PT_ENA(1);
-   }
-}
-
-static void si_fixup_spi_ps_input_config(struct si_shader *shader)
-{
-   /* POW_W_FLOAT requires that one of the perspective weights is enabled. */
-   if (G_0286CC_POS_W_FLOAT_ENA(shader->config.spi_ps_input_ena) &&
-       !(shader->config.spi_ps_input_ena & 0xf)) {
-      shader->config.spi_ps_input_ena |= S_0286CC_PERSP_SAMPLE_ENA(1);
-   }
-
-   /* At least one pair of interpolation weights must be enabled. */
-   if (!(shader->config.spi_ps_input_ena & 0x7f))
-      shader->config.spi_ps_input_ena |= S_0286CC_PERSP_SAMPLE_ENA(1);
-}
-
-static void
-si_get_shader_variant_info(struct si_shader *shader, nir_shader *nir)
-{
-   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
-   assert(nir->info.use_aco_amd == si_shader_uses_aco(shader));
-   const BITSET_WORD *sysvals = nir->info.system_values_read;
-
-   /* ACO needs spi_ps_input_ena before si_init_shader_args. */
-   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      /* Find out which frag coord components are used. */
-      uint8_t frag_coord_mask = 0;
-
-      /* Since flat+convergent and non-flat components can occur in the same vec4, start with
-       * all PS inputs as flat and change them to smooth when we find a component that's
-       * interpolated.
-       */
-      for (unsigned i = 0; i < ARRAY_SIZE(shader->info.ps_inputs); i++)
-         shader->info.ps_inputs[i].interpolate = INTERP_MODE_FLAT;
-
-      nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
-         nir_foreach_instr(instr, block) {
-            if (instr->type == nir_instr_type_intrinsic) {
-               nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-
-               switch (intr->intrinsic) {
-               case nir_intrinsic_load_frag_coord:
-               case nir_intrinsic_load_sample_pos:
-                  frag_coord_mask |= nir_def_components_read(&intr->def);
-                  break;
-               case nir_intrinsic_load_input:
-               case nir_intrinsic_load_interpolated_input: {
-                  nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
-                  unsigned index = nir_intrinsic_base(intr);
-                  assert(sem.num_slots == 1);
-
-                  shader->info.num_ps_inputs = MAX2(shader->info.num_ps_inputs, index + 1);
-                  shader->info.ps_inputs[index].semantic = sem.location;
-                  /* Determine interpolation mode. This only cares about FLAT/SMOOTH/COLOR.
-                   * COLOR is only for nir_intrinsic_load_color0/1.
-                   */
-                  if (intr->intrinsic == nir_intrinsic_load_interpolated_input) {
-                     shader->info.ps_inputs[index].interpolate = INTERP_MODE_SMOOTH;
-                     if (intr->def.bit_size == 16)
-                        shader->info.ps_inputs[index].fp16_lo_hi_valid |= 0x1 << sem.high_16bits;
-                  }
-                  break;
-               }
-               case nir_intrinsic_load_color0:
-                  assert(!shader->is_monolithic);
-                  shader->info.ps_colors_read |= nir_def_components_read(&intr->def);
-                  break;
-               case nir_intrinsic_load_color1:
-                  assert(!shader->is_monolithic);
-                  shader->info.ps_colors_read |= nir_def_components_read(&intr->def) << 4;
-                  break;
-               default:
-                  break;
-               }
-            }
-         }
-      }
-
-      /* Add both front and back color inputs. */
-      if (!shader->is_monolithic) {
-         unsigned index = shader->info.num_ps_inputs;
-
-         for (unsigned back = 0; back < 2; back++) {
-            for (unsigned i = 0; i < 2; i++) {
-               if ((shader->info.ps_colors_read >> (i * 4)) & 0xf) {
-                  assert(index < ARRAY_SIZE(shader->info.ps_inputs));
-                  shader->info.ps_inputs[index].semantic =
-                     (back ? VARYING_SLOT_BFC0 : VARYING_SLOT_COL0) + i;
-
-                  enum glsl_interp_mode mode = i ? nir->info.fs.color1_interp
-                                                 : nir->info.fs.color0_interp;
-                  shader->info.ps_inputs[index].interpolate =
-                     mode == INTERP_MODE_NONE ? INTERP_MODE_COLOR : mode;
-                  index++;
-
-                  /* Back-face colors don't increment num_ps_inputs. si_emit_spi_map will use
-                   * back-face colors conditionally only when needed.
-                   */
-                  if (!back)
-                     shader->info.num_ps_inputs++;
-               }
-            }
-         }
-      }
-
-      shader->config.spi_ps_input_ena =
-         S_0286CC_PERSP_SAMPLE_ENA(BITSET_TEST(sysvals, SYSTEM_VALUE_BARYCENTRIC_PERSP_SAMPLE)) |
-         S_0286CC_PERSP_CENTER_ENA(BITSET_TEST(sysvals, SYSTEM_VALUE_BARYCENTRIC_PERSP_PIXEL)) |
-         S_0286CC_PERSP_CENTROID_ENA(BITSET_TEST(sysvals, SYSTEM_VALUE_BARYCENTRIC_PERSP_CENTROID)) |
-         S_0286CC_LINEAR_SAMPLE_ENA(BITSET_TEST(sysvals, SYSTEM_VALUE_BARYCENTRIC_LINEAR_SAMPLE)) |
-         S_0286CC_LINEAR_CENTER_ENA(BITSET_TEST(sysvals, SYSTEM_VALUE_BARYCENTRIC_LINEAR_PIXEL)) |
-         S_0286CC_LINEAR_CENTROID_ENA(BITSET_TEST(sysvals, SYSTEM_VALUE_BARYCENTRIC_LINEAR_CENTROID)) |
-         S_0286CC_POS_X_FLOAT_ENA(!!(frag_coord_mask & 0x1)) |
-         S_0286CC_POS_Y_FLOAT_ENA(!!(frag_coord_mask & 0x2)) |
-         S_0286CC_POS_Z_FLOAT_ENA(!!(frag_coord_mask & 0x4)) |
-         S_0286CC_POS_W_FLOAT_ENA(!!(frag_coord_mask & 0x8)) |
-         S_0286CC_FRONT_FACE_ENA(BITSET_TEST(sysvals, SYSTEM_VALUE_FRONT_FACE) |
-                                 BITSET_TEST(sysvals, SYSTEM_VALUE_FRONT_FACE_FSIGN)) |
-         S_0286CC_ANCILLARY_ENA(BITSET_TEST(sysvals, SYSTEM_VALUE_SAMPLE_ID) |
-                                BITSET_TEST(sysvals, SYSTEM_VALUE_LAYER_ID)) |
-         S_0286CC_SAMPLE_COVERAGE_ENA(BITSET_TEST(sysvals, SYSTEM_VALUE_SAMPLE_MASK_IN)) |
-         S_0286CC_POS_FIXED_PT_ENA(BITSET_TEST(sysvals, SYSTEM_VALUE_PIXEL_COORD));
-
-      if (shader->is_monolithic) {
-         si_fixup_spi_ps_input_config(shader);
-         shader->config.spi_ps_input_addr = shader->config.spi_ps_input_ena;
-      } else {
-         /* Part mode will call si_fixup_spi_ps_input_config() when combining multi
-          * shader part in si_shader_select_ps_parts().
-          *
-          * Reserve register locations for VGPR inputs the PS prolog may need.
-          */
-         shader->config.spi_ps_input_addr = shader->config.spi_ps_input_ena |
-                                            SI_SPI_PS_INPUT_ADDR_FOR_PROLOG;
-      }
-   }
-}
-
 static void get_nir_shaders(struct si_shader *shader, struct si_linked_shaders *linked)
 {
    memset(linked, 0, sizeof(*linked));
@@ -2866,62 +1835,24 @@ static void get_nir_shaders(struct si_shader *shader, struct si_linked_shaders *
         shader->selector->stage == MESA_SHADER_GEOMETRY))
       get_prev_stage_input_nir(shader, linked);
 
-   bool progress[SI_NUM_LINKED_SHADERS] = {0};
-
    for (unsigned i = 0; i < SI_NUM_LINKED_SHADERS; i++) {
-      if (linked->shader[i].nir) {
-         progress[i] = run_pre_link_optimization_passes(&linked->shader[i]);
-      }
+      if (linked->shader[i].nir)
+         run_pre_link_optimization_passes(&linked->shader[i]);
    }
 
    /* TODO: run linking optimizations here if we have LS+HS or ES+GS */
 
-   /* TODO: gather shader_info here */
-   if (shader->selector->stage <= MESA_SHADER_GEOMETRY) {
-      shader->info.uses_instanceid |=
-         shader->key.ge.mono.instance_divisor_is_one ||
-         shader->key.ge.mono.instance_divisor_is_fetched;
-
-      if (linked->producer.nir) {
-         shader->info.uses_instanceid |=
-            linked->producer.shader->selector->info.uses_instanceid ||
-            linked->producer.shader->info.uses_instanceid;
-      }
-   }
-
-   if (shader->selector->stage == MESA_SHADER_FRAGMENT) {
-      if (progress[1]) {
-         si_nir_opts(shader->selector->screen, linked->consumer.nir, false);
-         progress[1] = false;
-      }
-
-      /* Remove holes after removed PS inputs by renumbering them. Holes can only occur with
-       * monolithic PS.
-       */
-      if (shader->is_monolithic)
-         NIR_PASS_V(linked->consumer.nir, nir_recompute_io_bases, nir_var_shader_in);
-
-      si_get_shader_variant_info(shader, linked->consumer.nir);
-   }
+   /* Remove holes after removed PS inputs by renumbering them. Holes can only occur with
+    * monolithic PS.
+    */
+   if (shader->selector->stage == MESA_SHADER_FRAGMENT && shader->is_monolithic)
+      NIR_PASS_V(linked->consumer.nir, nir_recompute_io_bases, nir_var_shader_in);
 
    for (unsigned i = 0; i < SI_NUM_LINKED_SHADERS; i++) {
       if (linked->shader[i].nir) {
-         run_late_optimization_and_lowering_passes(&linked->shader[i], progress[i]);
-      }
-   }
-
-   /* TODO: gather this where other shader_info is gathered */
-   for (unsigned i = 0; i < SI_NUM_LINKED_SHADERS; i++) {
-      if (linked->shader[i].nir) {
-         struct si_shader_info info;
-
-         /* Save and restore use_aco_amd because si_nir_scan_shader changes it. */
-         bool use_aco_amd = linked->shader[i].nir->info.use_aco_amd;
-         si_nir_scan_shader(shader->selector->screen, linked->shader[i].nir, &info, true);
-         linked->shader[i].nir->info.use_aco_amd = use_aco_amd;
-
-         shader->info.uses_vmem_load_other |= info.uses_vmem_load_other;
-         shader->info.uses_vmem_sampler_or_bvh |= info.uses_vmem_sampler_or_bvh;
+         si_get_shader_variant_info(shader, &linked->shader[i].temp_info, linked->shader[i].nir);
+         run_late_optimization_and_lowering_passes(&linked->shader[i]);
+         si_get_late_shader_variant_info(shader, &linked->shader[i].args, linked->shader[i].nir);
       }
    }
 }
@@ -2931,9 +1862,9 @@ static struct si_shader *
 si_nir_generate_gs_copy_shader(struct si_screen *sscreen,
                                struct ac_llvm_compiler *compiler,
                                struct si_shader *gs_shader,
+                               struct si_temp_shader_variant_info *temp_info,
                                nir_shader *gs_nir,
-                               struct util_debug_callback *debug,
-                               ac_nir_gs_output_info *output_info)
+                               struct util_debug_callback *debug)
 {
    struct si_shader *shader;
    struct si_shader_selector *gs_selector = gs_shader->selector;
@@ -2951,23 +1882,24 @@ si_nir_generate_gs_copy_shader(struct si_screen *sscreen,
    shader->selector = gs_selector;
    shader->is_gs_copy_shader = true;
    shader->wave_size = si_determine_wave_size(sscreen, shader);
+   shader->info.num_streamout_vec4s = gs_shader->info.num_streamout_vec4s;
 
-   STATIC_ASSERT(sizeof(shader->info.vs_output_param_offset[0]) == 1);
-   memset(shader->info.vs_output_param_offset, AC_EXP_PARAM_DEFAULT_VAL_0000,
-          sizeof(shader->info.vs_output_param_offset));
+   STATIC_ASSERT(sizeof(temp_info->vs_output_param_offset[0]) == 1);
+   memset(temp_info->vs_output_param_offset, AC_EXP_PARAM_DEFAULT_VAL_0000,
+          sizeof(temp_info->vs_output_param_offset));
 
    for (unsigned i = 0; i < gsinfo->num_outputs; i++) {
       unsigned semantic = gsinfo->output_semantic[i];
 
       /* Skip if no channel writes to stream 0. */
       if (!nir_slot_is_varying(semantic, MESA_SHADER_FRAGMENT) ||
-          (gsinfo->output_streams[i] & 0x03 &&
-           gsinfo->output_streams[i] & 0x0c &&
-           gsinfo->output_streams[i] & 0x30 &&
-           gsinfo->output_streams[i] & 0xc0))
+          (gsinfo->output_streams[i] & 0x03 && /* whether component 0 writes to non-zero stream */
+           gsinfo->output_streams[i] & 0x0c && /* whether component 1 writes to non-zero stream */
+           gsinfo->output_streams[i] & 0x30 && /* whether component 2 writes to non-zero stream */
+           gsinfo->output_streams[i] & 0xc0))  /* whether component 3 writes to non-zero stream */
          continue;
 
-      shader->info.vs_output_param_offset[semantic] = shader->info.nr_param_exports++;
+      temp_info->vs_output_param_offset[semantic] = shader->info.nr_param_exports++;
    }
 
    shader->info.nr_pos_exports = si_get_nr_pos_exports(gs_selector, gskey);
@@ -2979,13 +1911,13 @@ si_nir_generate_gs_copy_shader(struct si_screen *sscreen,
       ac_nir_create_gs_copy_shader(gs_nir,
                                    sscreen->info.gfx_level,
                                    clip_cull_mask,
-                                   shader->info.vs_output_param_offset,
+                                   temp_info->vs_output_param_offset,
                                    shader->info.nr_param_exports,
-                                   !si_shader_uses_streamout(gs_shader),
+                                   !gs_shader->info.num_streamout_vec4s,
                                    gskey->ge.opt.kill_pointsize,
                                    gskey->ge.opt.kill_layer,
                                    sscreen->options.vrs2x2,
-                                   output_info);
+                                   &temp_info->gs_out_info);
 
    struct si_linked_shaders linked;
    memset(&linked, 0, sizeof(linked));
@@ -3041,29 +1973,13 @@ debug_message_stderr(void *data, unsigned *id, enum util_debug_type ptype,
    fprintf(stderr, "\n");
 }
 
-static void
-determine_shader_variant_info(struct si_screen *sscreen, struct si_shader *shader)
-{
-   struct si_shader_selector *sel = shader->selector;
-
-   if (sel->stage == MESA_SHADER_FRAGMENT) {
-      shader->ps.writes_z = sel->info.writes_z && !shader->key.ps.part.epilog.kill_z;
-      shader->ps.writes_stencil = sel->info.writes_stencil &&
-                                  !shader->key.ps.part.epilog.kill_stencil;
-      shader->ps.writes_samplemask = sel->info.writes_samplemask &&
-                                     !shader->key.ps.part.epilog.kill_samplemask;
-   }
-}
-
 bool si_compile_shader(struct si_screen *sscreen, struct ac_llvm_compiler *compiler,
                        struct si_shader *shader, struct util_debug_callback *debug)
 {
    bool ret = true;
    struct si_shader_selector *sel = shader->selector;
-
-   determine_shader_variant_info(sscreen, shader);
-
    struct si_linked_shaders linked;
+
    get_nir_shaders(shader, &linked);
    nir_shader *nir = linked.consumer.nir;
 
@@ -3081,8 +1997,6 @@ bool si_compile_shader(struct si_screen *sscreen, struct ac_llvm_compiler *compi
       shader->info.vs_output_ps_input_cntl[i] = SI_PS_INPUT_CNTL_UNUSED;
    shader->info.vs_output_ps_input_cntl[VARYING_SLOT_COL0] = SI_PS_INPUT_CNTL_UNUSED_COLOR0;
 
-   /* uses_instanceid may be set by si_nir_lower_vs_inputs(). */
-   shader->info.uses_instanceid |= sel->info.uses_instanceid;
    shader->info.private_mem_vgprs = DIV_ROUND_UP(nir->scratch_size, 4);
 
    /* Set the FP ALU behavior. */
@@ -3131,8 +2045,8 @@ bool si_compile_shader(struct si_screen *sscreen, struct ac_llvm_compiler *compi
    /* The GS copy shader is compiled next. */
    if (nir->info.stage == MESA_SHADER_GEOMETRY && !shader->key.ge.as_ngg) {
       shader->gs_copy_shader =
-         si_nir_generate_gs_copy_shader(sscreen, compiler, shader, nir, debug,
-                                        &linked.consumer.legacy_gs_output_info.info);
+         si_nir_generate_gs_copy_shader(sscreen, compiler, shader, &linked.consumer.temp_info,
+                                        nir, debug);
       if (!shader->gs_copy_shader) {
          fprintf(stderr, "radeonsi: can't create GS copy shader\n");
          ret = false;
@@ -3145,10 +2059,7 @@ bool si_compile_shader(struct si_screen *sscreen, struct ac_llvm_compiler *compi
         nir->info.stage == MESA_SHADER_TESS_EVAL ||
         nir->info.stage == MESA_SHADER_GEOMETRY) &&
        !shader->key.ge.as_ls && !shader->key.ge.as_es) {
-      uint8_t *vs_output_param_offset = shader->info.vs_output_param_offset;
-
-      if (nir->info.stage == MESA_SHADER_GEOMETRY && !shader->key.ge.as_ngg)
-         vs_output_param_offset = shader->gs_copy_shader->info.vs_output_param_offset;
+      uint8_t *vs_output_param_offset = linked.consumer.temp_info.vs_output_param_offset;
 
       /* We must use the original shader info before the removal of duplicated shader outputs. */
       /* VS and TES should also set primitive ID output if it's used. */
@@ -3491,7 +2402,9 @@ static void si_get_ps_epilog_key(struct si_shader *shader, union si_shader_part_
    memset(key, 0, sizeof(*key));
    key->ps_epilog.use_aco = info->base.use_aco_amd;
    key->ps_epilog.wave32 = shader->wave_size == 32;
-   key->ps_epilog.uses_discard = si_shader_uses_discard(shader);
+   key->ps_epilog.uses_discard = shader->info.uses_discard ||
+                                 shader->key.ps.part.prolog.poly_stipple ||
+                                 shader->key.ps.part.epilog.alpha_func != PIPE_FUNC_ALWAYS;
    key->ps_epilog.colors_written = info->colors_written;
    key->ps_epilog.color_types = info->output_color_types;
    key->ps_epilog.writes_all_cbufs = info->color0_writes_all_cbufs &&
@@ -3611,8 +2524,6 @@ bool si_create_shader_variant(struct si_screen *sscreen, struct ac_llvm_compiler
       if (!mainp)
          return false;
 
-      determine_shader_variant_info(sscreen, shader);
-
       /* Copy the compiled shader data over. */
       shader->is_binary_shared = true;
       shader->binary = mainp->binary;
@@ -3659,6 +2570,12 @@ bool si_create_shader_variant(struct si_screen *sscreen, struct ac_llvm_compiler
           * are allocated inputs.
           */
          shader->config.num_vgprs = MAX2(shader->config.num_vgprs, shader->info.num_input_vgprs);
+
+         shader->info.writes_z &= !shader->key.ps.part.epilog.kill_z;
+         shader->info.writes_stencil &= !shader->key.ps.part.epilog.kill_stencil;
+         shader->info.writes_sample_mask &= !shader->key.ps.part.epilog.kill_samplemask;
+         shader->info.uses_discard |= shader->key.ps.part.prolog.poly_stipple ||
+                                      shader->key.ps.part.epilog.alpha_func != PIPE_FUNC_ALWAYS;
          break;
       default:;
       }
@@ -3687,9 +2604,15 @@ bool si_create_shader_variant(struct si_screen *sscreen, struct ac_llvm_compiler
          shader->config.scratch_bytes_per_wave =
             MAX2(shader->config.scratch_bytes_per_wave,
                  shader->previous_stage->config.scratch_bytes_per_wave);
-         shader->info.uses_instanceid |= shader->previous_stage->info.uses_instanceid;
+
          shader->info.uses_vmem_load_other |= shader->previous_stage->info.uses_vmem_load_other;
          shader->info.uses_vmem_sampler_or_bvh |= shader->previous_stage->info.uses_vmem_sampler_or_bvh;
+         shader->info.uses_instance_id |= shader->previous_stage->info.uses_instance_id;
+         shader->info.uses_base_instance |= shader->previous_stage->info.uses_base_instance;
+         shader->info.uses_draw_id |= shader->previous_stage->info.uses_draw_id;
+         shader->info.uses_vs_state_indexed |= shader->previous_stage->info.uses_vs_state_indexed;
+         shader->info.uses_gs_state_provoking_vtx_first |= shader->previous_stage->info.uses_gs_state_provoking_vtx_first;
+         shader->info.uses_gs_state_outprim |= shader->previous_stage->info.uses_gs_state_outprim;
       }
       if (shader->epilog) {
          shader->config.num_sgprs =
@@ -3708,38 +2631,6 @@ bool si_create_shader_variant(struct si_screen *sscreen, struct ac_llvm_compiler
       }
    } else if (sscreen->info.gfx_level >= GFX9 && sel->stage == MESA_SHADER_GEOMETRY) {
       gfx9_get_gs_info(shader->previous_stage_sel, sel, &shader->gs_info);
-   }
-
-   shader->uses_vs_state_provoking_vertex =
-      sscreen->use_ngg &&
-      /* Used to convert triangle strips from GS to triangles. */
-      ((sel->stage == MESA_SHADER_GEOMETRY &&
-        util_rast_prim_is_triangles(sel->info.base.gs.output_primitive)) ||
-       (sel->stage == MESA_SHADER_VERTEX &&
-        /* Used to export PrimitiveID from the correct vertex. */
-        shader->key.ge.mono.u.vs_export_prim_id));
-
-   shader->uses_gs_state_outprim = sscreen->use_ngg &&
-                                   /* Only used by streamout and the PrimID export in vertex
-                                    * shaders. */
-                                   sel->stage == MESA_SHADER_VERTEX &&
-                                   (si_shader_uses_streamout(shader) ||
-                                    shader->uses_vs_state_provoking_vertex);
-
-   if (sel->stage == MESA_SHADER_VERTEX) {
-      shader->uses_base_instance = sel->info.uses_base_instance ||
-                                   shader->key.ge.mono.instance_divisor_is_one ||
-                                   shader->key.ge.mono.instance_divisor_is_fetched;
-   } else if (sel->stage == MESA_SHADER_TESS_CTRL) {
-      shader->uses_base_instance = shader->previous_stage_sel &&
-                                   (shader->previous_stage_sel->info.uses_base_instance ||
-                                    shader->key.ge.mono.instance_divisor_is_one ||
-                                    shader->key.ge.mono.instance_divisor_is_fetched);
-   } else if (sel->stage == MESA_SHADER_GEOMETRY) {
-      shader->uses_base_instance = shader->previous_stage_sel &&
-                                   (shader->previous_stage_sel->info.uses_base_instance ||
-                                    shader->key.ge.mono.instance_divisor_is_one ||
-                                    shader->key.ge.mono.instance_divisor_is_fetched);
    }
 
    si_fix_resource_usage(sscreen, shader);
@@ -3780,68 +2671,4 @@ void si_shader_destroy(struct si_shader *shader)
       si_shader_binary_clean(&shader->binary);
 
    free(shader->shader_log);
-}
-
-void si_get_ps_prolog_args(struct si_shader_args *args,
-                           const union si_shader_part_key *key)
-{
-   memset(args, 0, sizeof(*args));
-
-   const unsigned num_input_sgprs = key->ps_prolog.num_input_sgprs;
-
-   struct ac_arg input_sgprs[num_input_sgprs];
-   for (unsigned i = 0; i < num_input_sgprs; i++)
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, input_sgprs + i);
-
-   args->internal_bindings = input_sgprs[SI_SGPR_INTERNAL_BINDINGS];
-   /* Use the absolute location of the input. */
-   args->ac.prim_mask = input_sgprs[SI_PS_NUM_USER_SGPR];
-
-   ac_add_arg(&args->ac, AC_ARG_VGPR, 2, AC_ARG_FLOAT, &args->ac.persp_sample);
-   ac_add_arg(&args->ac, AC_ARG_VGPR, 2, AC_ARG_FLOAT, &args->ac.persp_center);
-   ac_add_arg(&args->ac, AC_ARG_VGPR, 2, AC_ARG_FLOAT, &args->ac.persp_centroid);
-   /* skip PERSP_PULL_MODEL */
-   ac_add_arg(&args->ac, AC_ARG_VGPR, 2, AC_ARG_FLOAT, &args->ac.linear_sample);
-   ac_add_arg(&args->ac, AC_ARG_VGPR, 2, AC_ARG_FLOAT, &args->ac.linear_center);
-   ac_add_arg(&args->ac, AC_ARG_VGPR, 2, AC_ARG_FLOAT, &args->ac.linear_centroid);
-   /* skip LINE_STIPPLE_TEX */
-
-   /* POS_X|Y|Z|W_FLOAT */
-   u_foreach_bit(i, key->ps_prolog.fragcoord_usage_mask)
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, &args->ac.frag_pos[i]);
-
-   ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, &args->ac.front_face);
-   ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, &args->ac.ancillary);
-   ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, &args->ac.sample_coverage);
-   ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, &args->ac.pos_fixed_pt);
-}
-
-void si_get_ps_epilog_args(struct si_shader_args *args,
-                           const union si_shader_part_key *key,
-                           struct ac_arg colors[MAX_DRAW_BUFFERS],
-                           struct ac_arg *depth, struct ac_arg *stencil,
-                           struct ac_arg *sample_mask)
-{
-   memset(args, 0, sizeof(*args));
-
-   ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL);
-   ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL);
-   ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL);
-   ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL);
-   ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL);
-   ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL);
-   ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, &args->alpha_reference);
-
-   u_foreach_bit (i, key->ps_epilog.colors_written) {
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 4, AC_ARG_FLOAT, colors + i);
-   }
-
-   if (key->ps_epilog.writes_z)
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, depth);
-
-   if (key->ps_epilog.writes_stencil)
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, stencil);
-
-   if (key->ps_epilog.writes_samplemask)
-      ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, sample_mask);
 }

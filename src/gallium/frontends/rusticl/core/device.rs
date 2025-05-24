@@ -568,15 +568,21 @@ impl Device {
         }
 
         if !exts.contains(&"cl_khr_byte_addressable_store")
-         || !exts.contains(&"cl_khr_global_int32_base_atomics")
-         || !exts.contains(&"cl_khr_global_int32_extended_atomics")
-         || !exts.contains(&"cl_khr_local_int32_base_atomics")
-         || !exts.contains(&"cl_khr_local_int32_extended_atomics")
-         // The following modifications are made to the OpenCL 1.1 platform layer and runtime (sections 4 and 5):
-         // The minimum FULL_PROFILE value for CL_DEVICE_MAX_PARAMETER_SIZE increased from 256 to 1024 bytes
-         || self.param_max_size() < 1024
-         // The minimum FULL_PROFILE value for CL_DEVICE_LOCAL_MEM_SIZE increased from 16 KB to 32 KB.
-         || self.local_mem_size() < 32 * 1024
+            || !exts.contains(&"cl_khr_global_int32_base_atomics")
+            || !exts.contains(&"cl_khr_global_int32_extended_atomics")
+            || !exts.contains(&"cl_khr_local_int32_base_atomics")
+            || !exts.contains(&"cl_khr_local_int32_extended_atomics")
+        {
+            res = CLVersion::Cl1_0;
+        }
+
+        if !self.embedded &&
+            // Quoting OpenCL 1.1:
+            // The following modifications are made to the OpenCL platform layer and runtime (sections 4 and 5):
+            // The minimum FULL_PROFILE value for CL_DEVICE_MAX_PARAMETER_SIZE increased from 256 to 1024 bytes
+            (self.param_max_size() < 1024
+             // The minimum FULL_PROFILE value for CL_DEVICE_LOCAL_MEM_SIZE increased from 16 KB to 32 KB.
+             || self.local_mem_size() < 32 * 1024)
         {
             res = CLVersion::Cl1_0;
         }
@@ -1104,12 +1110,10 @@ impl Device {
         }
     }
 
-    pub fn subgroup_sizes(&self) -> Vec<usize> {
+    pub fn subgroup_sizes(&self) -> impl ExactSizeIterator<Item = usize> {
         let subgroup_size = self.screen.compute_caps().subgroup_sizes;
 
-        SetBitIndices::from_msb(subgroup_size)
-            .map(|bit| 1 << bit)
-            .collect()
+        SetBitIndices::from_msb(subgroup_size).map(|bit| 1 << bit)
     }
 
     pub fn max_subgroups(&self) -> u32 {
@@ -1182,7 +1186,7 @@ impl Device {
     }
 }
 
-pub fn devs() -> &'static Vec<Device> {
+pub fn devs() -> &'static [Device] {
     &Platform::get().devs
 }
 

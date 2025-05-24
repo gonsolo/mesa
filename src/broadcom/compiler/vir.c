@@ -601,9 +601,8 @@ lower_tex_packing_cb(const nir_tex_instr *tex, const void *data)
    int sampler_index = nir_tex_instr_need_sampler(tex) ?
       tex->sampler_index : tex->backend_flags;
 
-   assert(sampler_index < c->key->num_samplers_used);
-   return c->key->sampler[sampler_index].return_size == 16 ?
-      nir_lower_tex_packing_16 : nir_lower_tex_packing_none;
+   return (c->key->sampler_is_32b & (1 << sampler_index)) ?
+      nir_lower_tex_packing_none : nir_lower_tex_packing_16;
 }
 
 static bool
@@ -740,19 +739,8 @@ v3d_lower_nir(struct v3d_compile *c)
 
                 .lower_rect = false, /* XXX: Use this on V3D 3.x */
                 .lower_txp = ~0,
-                /* Apply swizzles to all samplers. */
-                .swizzle_result = ~0,
                 .lower_invalid_implicit_lod = true,
         };
-
-        /* Lower the format swizzle and (for 32-bit returns)
-         * ARB_texture_swizzle-style swizzle.
-         */
-        assert(c->key->num_tex_used <= ARRAY_SIZE(c->key->tex));
-        for (int i = 0; i < c->key->num_tex_used; i++) {
-                for (int j = 0; j < 4; j++)
-                        tex_options.swizzles[i][j] = c->key->tex[i].swizzle[j];
-        }
 
         tex_options.lower_tex_packing_cb = lower_tex_packing_cb;
         tex_options.lower_tex_packing_data = c;
@@ -1101,45 +1089,8 @@ v3d_nir_lower_gs_early(struct v3d_compile *c)
 }
 
 static void
-v3d_fixup_fs_output_types(struct v3d_compile *c)
-{
-        nir_foreach_shader_out_variable(var, c->s) {
-                uint32_t mask = 0;
-
-                switch (var->data.location) {
-                case FRAG_RESULT_COLOR:
-                        mask = ~0;
-                        break;
-                case FRAG_RESULT_DATA0:
-                case FRAG_RESULT_DATA1:
-                case FRAG_RESULT_DATA2:
-                case FRAG_RESULT_DATA3:
-                case FRAG_RESULT_DATA4:
-                case FRAG_RESULT_DATA5:
-                case FRAG_RESULT_DATA6:
-                case FRAG_RESULT_DATA7:
-                        mask = 1 << (var->data.location - FRAG_RESULT_DATA0);
-                        break;
-                }
-
-                if (c->fs_key->int_color_rb & mask) {
-                        var->type =
-                                glsl_vector_type(GLSL_TYPE_INT,
-                                                 glsl_get_components(var->type));
-                } else if (c->fs_key->uint_color_rb & mask) {
-                        var->type =
-                                glsl_vector_type(GLSL_TYPE_UINT,
-                                                 glsl_get_components(var->type));
-                }
-        }
-}
-
-static void
 v3d_nir_lower_fs_early(struct v3d_compile *c)
 {
-        if (c->fs_key->int_color_rb || c->fs_key->uint_color_rb)
-                v3d_fixup_fs_output_types(c);
-
         if (c->fs_key->line_smoothing) {
                 NIR_PASS(_, c->s, v3d_nir_lower_line_smooth);
                 NIR_PASS(_, c->s, nir_lower_global_vars_to_local);
@@ -1843,7 +1794,7 @@ v3d_attempt_compile(struct v3d_compile *c)
 
         NIR_PASS(_, c->s, nir_lower_bool_to_int32);
         NIR_PASS(_, c->s, nir_convert_to_lcssa, true, true);
-        NIR_PASS_V(c->s, nir_divergence_analysis);
+        nir_divergence_analysis(c->s);
         NIR_PASS(_, c->s, nir_convert_from_ssa, true, true);
 
         struct nir_schedule_options schedule_options = {

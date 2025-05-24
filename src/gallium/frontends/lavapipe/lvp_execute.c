@@ -1727,11 +1727,11 @@ handle_begin_rendering(struct vk_cmd_queue_entry *cmd,
          if (state->forced_sample_count && imgv->image->vk.samples == 1)
             state->color_att[i].imgv = create_multisample_surface(state, imgv, state->forced_sample_count,
                                                                   att_needs_replicate(state, imgv, state->color_att[i].load_op));
-         state->framebuffer.cbufs[i] = state->color_att[i].imgv->surface;
-         assert(state->render_area.offset.x + state->render_area.extent.width <= state->framebuffer.cbufs[i]->texture->width0);
-         assert(state->render_area.offset.y + state->render_area.extent.height <= state->framebuffer.cbufs[i]->texture->height0);
+         state->framebuffer.cbufs[i] = *state->color_att[i].imgv->surface;
+         assert(state->render_area.offset.x + state->render_area.extent.width <= state->framebuffer.cbufs[i].texture->width0);
+         assert(state->render_area.offset.y + state->render_area.extent.height <= state->framebuffer.cbufs[i].texture->height0);
       } else {
-         state->framebuffer.cbufs[i] = NULL;
+         memset(&state->framebuffer.cbufs[i], 0, sizeof(state->framebuffer.cbufs[i]));
       }
    }
 
@@ -1761,12 +1761,12 @@ handle_begin_rendering(struct vk_cmd_queue_entry *cmd,
          state->ds_imgv = create_multisample_surface(state, imgv, state->forced_sample_count,
                                                      att_needs_replicate(state, imgv, load_op));
       }
-      state->framebuffer.zsbuf = state->ds_imgv->surface;
-      assert(state->render_area.offset.x + state->render_area.extent.width <= state->framebuffer.zsbuf->texture->width0);
-      assert(state->render_area.offset.y + state->render_area.extent.height <= state->framebuffer.zsbuf->texture->height0);
+      state->framebuffer.zsbuf = *state->ds_imgv->surface;
+      assert(state->render_area.offset.x + state->render_area.extent.width <= state->framebuffer.zsbuf.texture->width0);
+      assert(state->render_area.offset.y + state->render_area.extent.height <= state->framebuffer.zsbuf.texture->height0);
    } else {
       state->ds_imgv = NULL;
-      state->framebuffer.zsbuf = NULL;
+      memset(&state->framebuffer.zsbuf, 0, sizeof(state->framebuffer.zsbuf));
    }
 
    state->pctx->set_framebuffer_state(state->pctx,
@@ -3034,9 +3034,15 @@ static void handle_clear_color_image(struct vk_cmd_queue_entry *cmd,
                                      struct rendering_state *state)
 {
    LVP_FROM_HANDLE(lvp_image, image, cmd->u.clear_color_image.image);
+
+   enum pipe_format format = image->planes[0].bo->format;
+   const struct util_format_description *desc = util_format_description(format);
+   if (util_format_is_int64(desc))
+      format = util_format_get_array(desc->channel[0].type, 32, desc->nr_channels * 2, false, true);
+
    union util_color uc;
    uint32_t *col_val = uc.ui;
-   util_pack_color_union(image->planes[0].bo->format, &uc, (void*)cmd->u.clear_color_image.color);
+   util_pack_color_union(format, &uc, (void*)cmd->u.clear_color_image.color);
    for (unsigned i = 0; i < cmd->u.clear_color_image.range_count; i++) {
       VkImageSubresourceRange *range = &cmd->u.clear_color_image.ranges[i];
       struct pipe_box box;
@@ -3386,6 +3392,7 @@ static void handle_draw_indirect_byte_count(struct vk_cmd_queue_entry *cmd,
                     dibc->counter_buffer_offset,
                     4, &draw.count);
 
+   draw.count -= dibc->counter_offset;
    state->info.start_instance = cmd->u.draw_indirect_byte_count_ext.first_instance;
    state->info.instance_count = cmd->u.draw_indirect_byte_count_ext.instance_count;
    state->info.index_size = 0;

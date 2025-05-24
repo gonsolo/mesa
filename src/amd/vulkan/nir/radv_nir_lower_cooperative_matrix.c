@@ -181,6 +181,26 @@ radv_get_base_row(nir_builder *b, struct glsl_cmat_description desc, const lower
    return base_row;
 }
 
+static nir_def *
+convert_base_type(nir_builder *b, nir_def *src, enum glsl_base_type src_type, enum glsl_base_type dst_type)
+{
+   if (dst_type == src_type)
+      return src;
+
+   if (src_type == GLSL_TYPE_BFLOAT16) {
+      src = nir_bf2f(b, src);
+      return convert_base_type(b, src, GLSL_TYPE_FLOAT, dst_type);
+   } else if (dst_type == GLSL_TYPE_BFLOAT16) {
+      src = convert_base_type(b, src, src_type, GLSL_TYPE_FLOAT);
+      return nir_f2bf(b, src);
+   }
+
+   nir_op op = nir_type_conversion_op(nir_get_nir_type_for_glsl_base_type(src_type),
+                                      nir_get_nir_type_for_glsl_base_type(dst_type), nir_rounding_mode_undef);
+
+   return nir_build_alu1(b, op, src);
+}
+
 bool
 radv_nir_lower_cooperative_matrix(nir_shader *shader, enum amd_gfx_level gfx_level, unsigned wave_size)
 {
@@ -417,11 +437,22 @@ radv_nir_lower_cooperative_matrix(nir_shader *shader, enum amd_gfx_level gfx_lev
                nir_def *B = radv_nir_load_cmat(&b, &params, intr->src[2].ssa);
                nir_def *C = radv_nir_load_cmat(&b, &params, intr->src[3].ssa);
 
-               nir_deref_instr *dst_deref = nir_instr_as_deref(intr->src[0].ssa->parent_instr);
+               nir_deref_instr *a_deref = nir_src_as_deref(intr->src[1]);
+               nir_deref_instr *b_deref = nir_src_as_deref(intr->src[2]);
+               struct glsl_cmat_description a_desc = *glsl_get_cmat_description(a_deref->type);
+               struct glsl_cmat_description b_desc = *glsl_get_cmat_description(b_deref->type);
+
+               const nir_cmat_signed cmat_signed_mask = nir_intrinsic_cmat_signed_mask(intr);
+
+               enum glsl_base_type a_element_type =
+                  glsl_apply_signedness_to_base_type(a_desc.element_type, cmat_signed_mask & NIR_CMAT_A_SIGNED);
+               enum glsl_base_type b_element_type =
+                  glsl_apply_signedness_to_base_type(b_desc.element_type, cmat_signed_mask & NIR_CMAT_B_SIGNED);
 
                nir_def *ret = nir_cmat_muladd_amd(&b, A, B, C, .saturate = nir_intrinsic_saturate(intr),
-                                                  .cmat_signed_mask = nir_intrinsic_cmat_signed_mask(intr));
+                                                  .src_base_type = a_element_type, .src_base_type2 = b_element_type);
 
+               nir_deref_instr *dst_deref = nir_src_as_deref(intr->src[0]);
                nir_store_deref(&b, dst_deref, ret, nir_component_mask(ret->num_components));
                nir_instr_remove(instr);
                progress = true;
@@ -441,10 +472,6 @@ radv_nir_lower_cooperative_matrix(nir_shader *shader, enum amd_gfx_level gfx_lev
                enum glsl_base_type src_element_type = glsl_apply_signedness_to_base_type(
                   src_desc.element_type, cmat_signed_mask & NIR_CMAT_A_SIGNED);
 
-               nir_op op = nir_type_conversion_op(nir_get_nir_type_for_glsl_base_type(src_element_type),
-                                                  nir_get_nir_type_for_glsl_base_type(dst_element_type),
-                                                  nir_rounding_mode_undef);
-
                unsigned dst_mul = radv_nir_cmat_length_mul(dst_desc, &params);
                unsigned src_mul = radv_nir_cmat_length_mul(src_desc, &params);
 
@@ -457,7 +484,7 @@ radv_nir_lower_cooperative_matrix(nir_shader *shader, enum amd_gfx_level gfx_lev
                   src = nir_vec(&b, components, src->num_components / scale);
                }
 
-               nir_def *ret = nir_build_alu1(&b, op, src);
+               nir_def *ret = convert_base_type(&b, src, src_element_type, dst_element_type);
 
                if (dst_mul > src_mul) {
                   nir_def *components[NIR_MAX_VEC_COMPONENTS];
@@ -637,12 +664,20 @@ opt_cmat(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
    if (intrin->intrinsic != nir_intrinsic_cmat_muladd_amd)
       return false;
 
+   enum glsl_base_type a_type = nir_intrinsic_src_base_type(intrin);
+
+   if (glsl_base_type_is_integer(a_type))
+      return false;
+
    bool progress = false;
 
-   if (intrin->src[0].ssa->bit_size != 8) {
-      for (unsigned i = 0; i < 3; i++)
+   if (a_type == GLSL_TYPE_FLOAT16) {
+      for (unsigned i = 0; i < 2; i++)
          progress |= opt_cmat_modifiers(b, intrin, gfx_level, i);
    }
+
+   if (a_type == GLSL_TYPE_FLOAT16 || intrin->def.bit_size == 32)
+      progress |= opt_cmat_modifiers(b, intrin, gfx_level, 2);
 
    return progress;
 }

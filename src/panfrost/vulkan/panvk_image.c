@@ -26,6 +26,7 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+#include "pan_afbc.h"
 #include "pan_props.h"
 
 #include "panvk_device.h"
@@ -79,8 +80,8 @@ panvk_image_can_use_mod(struct panvk_image *image, uint64_t mod)
           ((image->vk.usage | image->vk.stencil_usage) &
            VK_IMAGE_USAGE_STORAGE_BIT) ||
           image->vk.samples > 1 ||
-          !panfrost_query_afbc(&phys_dev->kmod.props) ||
-          !panfrost_format_supports_afbc(arch, pfmt) ||
+          !pan_query_afbc(&phys_dev->kmod.props) ||
+          !pan_format_supports_afbc(arch, pfmt) ||
           image->vk.tiling == VK_IMAGE_TILING_LINEAR ||
           image->vk.image_type == VK_IMAGE_TYPE_1D ||
           (image->vk.image_type == VK_IMAGE_TYPE_3D && arch < 7) ||
@@ -148,13 +149,15 @@ static uint64_t
 panvk_image_get_mod_from_list(struct panvk_image *image,
                               const uint64_t *mods, uint32_t mod_count)
 {
-   for (unsigned i = 0; i < PAN_MODIFIER_COUNT; ++i) {
-      if (!panvk_image_can_use_mod(image, pan_best_modifiers[i]))
+   PAN_SUPPORTED_MODIFIERS(supported_mods);
+
+   for (unsigned i = 0; i < ARRAY_SIZE(supported_mods); ++i) {
+      if (!panvk_image_can_use_mod(image, supported_mods[i]))
          continue;
 
       if (!mod_count ||
-          drm_find_modifier(pan_best_modifiers[i], mods, mod_count))
-         return pan_best_modifiers[i];
+          drm_find_modifier(supported_mods[i], mods, mod_count))
+         return supported_mods[i];
    }
 
    /* If we reached that point without finding a proper modifier, there's
@@ -234,29 +237,33 @@ panvk_image_init_layouts(struct panvk_image *image,
       else
          format = vk_format_get_plane_format(image->vk.format, plane);
 
-      struct pan_image_explicit_layout plane_layout;
-      if (explicit_info)
-         plane_layout = (struct pan_image_explicit_layout){
-            .offset = explicit_info->pPlaneLayouts[plane].offset,
-            .row_stride = explicit_info->pPlaneLayouts[plane].rowPitch,
+      struct pan_image_wsi_layout plane_layout;
+      if (explicit_info) {
+         plane_layout = (struct pan_image_wsi_layout){
+            .offset_B = explicit_info->pPlaneLayouts[plane].offset,
+            .row_pitch_B = explicit_info->pPlaneLayouts[plane].rowPitch,
          };
+      }
 
-      image->planes[plane].layout = (struct pan_image_layout){
+      image->planes[plane].props = (struct pan_image_props){
+         .modifier = image->vk.drm_format_mod,
          .format = vk_format_to_pipe_format(format),
          .dim = panvk_image_type_to_mali_tex_dim(image->vk.image_type),
-         .width = vk_format_get_plane_width(image->vk.format, plane,
-                                            image->vk.extent.width),
-         .height = vk_format_get_plane_height(image->vk.format, plane,
-                                              image->vk.extent.height),
-         .depth = image->vk.extent.depth,
+         .extent_px = {
+            .width = vk_format_get_plane_width(image->vk.format, plane,
+                                               image->vk.extent.width),
+            .height = vk_format_get_plane_height(image->vk.format, plane,
+                                                 image->vk.extent.height),
+            .depth = image->vk.extent.depth,
+         },
          .array_size = image->vk.array_layers,
          .nr_samples = image->vk.samples,
          .nr_slices = image->vk.mip_levels,
       };
 
-      image->planes[plane].layout.modifier = image->vk.drm_format_mod;
-      pan_image_layout_init(arch, &image->planes[plane].layout,
-                            explicit_info ? &plane_layout : NULL);
+      pan_image_layout_init(arch, &image->planes[plane].props,
+                            explicit_info ? &plane_layout : NULL,
+                            &image->planes[plane].layout);
    }
 }
 
@@ -321,7 +328,7 @@ panvk_image_get_total_size(const struct panvk_image *image)
 {
    uint64_t size = 0;
    for (uint8_t plane = 0; plane < image->plane_count; plane++)
-      size += image->planes[plane].layout.data_size;
+      size += image->planes[plane].layout.data_size_B;
    return size;
 }
 
@@ -421,16 +428,16 @@ get_image_subresource_layout(const struct panvk_image *image,
    uint64_t base_offset = 0;
    if (!is_disjoint(image)) {
       for (uint8_t plane_idx = 0; plane_idx < plane; plane_idx++)
-         base_offset += image->planes[plane_idx].layout.data_size;
+         base_offset += image->planes[plane_idx].layout.data_size_B;
    }
 
-   layout->offset = base_offset +
-      slice_layout->offset + (subres->arrayLayer *
-                              image->planes[plane].layout.array_stride);
-   layout->size = slice_layout->size;
-   layout->rowPitch = slice_layout->row_stride;
-   layout->arrayPitch = image->planes[plane].layout.array_stride;
-   layout->depthPitch = slice_layout->surface_stride;
+   layout->offset =
+      base_offset + slice_layout->offset_B +
+      (subres->arrayLayer * image->planes[plane].layout.array_stride_B);
+   layout->size = slice_layout->size_B;
+   layout->rowPitch = slice_layout->row_stride_B;
+   layout->arrayPitch = image->planes[plane].layout.array_stride_B;
+   layout->depthPitch = slice_layout->surface_stride_B;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -472,7 +479,7 @@ panvk_GetImageMemoryRequirements2(VkDevice device,
       plane_info ? plane_info->planeAspect : image->vk.aspects;
    uint8_t plane = panvk_plane_index(image->vk.format, aspects);
    const uint64_t size =
-      disjoint ? image->planes[plane].layout.data_size :
+      disjoint ? image->planes[plane].layout.data_size_B :
       panvk_image_get_total_size(image);
 
    pMemoryRequirements->memoryRequirements.memoryTypeBits = 1;
@@ -537,25 +544,24 @@ static void
 panvk_image_plane_bind(struct pan_image *plane, struct pan_kmod_bo *bo,
                        uint64_t base, uint64_t offset)
 {
-   plane->data.base = base;
-   plane->data.offset = offset;
+   plane->data.base = base + offset;
    /* Reset the AFBC headers */
-   if (drm_is_afbc(plane->layout.modifier)) {
+   if (drm_is_afbc(plane->props.modifier)) {
       /* Transient CPU mapping */
       void *bo_base = pan_kmod_bo_mmap(bo, 0, pan_kmod_bo_size(bo),
                                        PROT_WRITE, MAP_SHARED, NULL);
 
       assert(bo_base != MAP_FAILED);
 
-      for (unsigned layer = 0; layer < plane->layout.array_size;
+      for (unsigned layer = 0; layer < plane->props.array_size;
            layer++) {
-         for (unsigned level = 0; level < plane->layout.nr_slices;
+         for (unsigned level = 0; level < plane->props.nr_slices;
               level++) {
-            void *header = bo_base + plane->data.offset +
-                           (layer * plane->layout.array_stride) +
-                           plane->layout.slices[level].offset;
+            void *header = bo_base + offset +
+                           (layer * plane->layout.array_stride_B) +
+                           plane->layout.slices[level].offset_B;
             memset(header, 0,
-                   plane->layout.slices[level].afbc.header_size);
+                   plane->layout.slices[level].afbc.header_size_B);
          }
       }
 
@@ -585,8 +591,7 @@ panvk_BindImageMemory2(VkDevice device, uint32_t bindInfoCount,
 
          image->bo = pan_kmod_bo_get(wsi_image->bo);
          panvk_image_plane_bind(&image->planes[0], image->bo,
-                                wsi_image->planes[0].data.base,
-                                wsi_image->planes[0].data.offset);
+                                wsi_image->planes[0].data.base, 0);
       } else {
          VK_FROM_HANDLE(panvk_device_memory, mem, pBindInfos[i].memory);
          assert(mem);
@@ -604,7 +609,7 @@ panvk_BindImageMemory2(VkDevice device, uint32_t bindInfoCount,
             for (unsigned plane = 0; plane < image->plane_count; plane++) {
                panvk_image_plane_bind(&image->planes[plane], image->bo,
                                       mem->addr.dev, offset);
-               offset += image->planes[plane].layout.data_size;
+               offset += image->planes[plane].layout.data_size_B;
             }
          }
       }

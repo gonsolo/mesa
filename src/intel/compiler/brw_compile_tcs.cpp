@@ -191,7 +191,7 @@ brw_compile_tcs(const struct brw_compiler *compiler,
    struct brw_vue_prog_data *vue_prog_data = &prog_data->base;
    const unsigned dispatch_width = brw_geometry_stage_dispatch_width(compiler->devinfo);
 
-   const bool debug_enabled = brw_should_print_shader(nir, DEBUG_TCS);
+   const bool debug_enabled = brw_should_print_shader(nir, DEBUG_TCS, params->base.source_hash);
 
    brw_prog_data_init(&prog_data->base.base, &params->base);
 
@@ -200,7 +200,7 @@ brw_compile_tcs(const struct brw_compiler *compiler,
 
    struct intel_vue_map input_vue_map;
    brw_compute_vue_map(devinfo, &input_vue_map, nir->info.inputs_read,
-                       nir->info.separate_shader, 1);
+                       key->base.vue_layout, 1);
    brw_compute_tess_vue_map(&vue_prog_data->vue_map,
                             nir->info.outputs_written,
                             nir->info.patch_outputs_written);
@@ -210,7 +210,7 @@ brw_compile_tcs(const struct brw_compiler *compiler,
    brw_nir_lower_tcs_outputs(nir, &vue_prog_data->vue_map,
                              key->_tes_primitive_mode);
    if (key->input_vertices > 0)
-      intel_nir_lower_patch_vertices_in(nir, key->input_vertices);
+      intel_nir_lower_patch_vertices_in(nir, key->input_vertices, NULL, NULL);
 
    brw_postprocess_nir(nir, compiler, debug_enabled,
                        key->base.robust_flags);
@@ -218,6 +218,7 @@ brw_compile_tcs(const struct brw_compiler *compiler,
    bool has_primitive_id =
       BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_PRIMITIVE_ID);
 
+   prog_data->input_vertices = key->input_vertices;
    prog_data->patch_count_threshold = get_patch_count_threshold(key->input_vertices);
 
    if (compiler->use_tcs_multi_patch) {

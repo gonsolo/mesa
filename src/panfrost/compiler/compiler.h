@@ -880,9 +880,9 @@ bi_block_add_successor(bi_block *block, bi_block *successor)
 
 /* Subset of pan_shader_info needed per-variant, in order to support IDVS */
 struct bi_shader_info {
-   struct panfrost_ubo_push *push;
+   struct pan_ubo_push *push;
    struct bifrost_shader_info *bifrost;
-   struct panfrost_stats stats;
+   struct pan_stats stats;
    unsigned tls_size;
    unsigned work_reg_count;
    unsigned push_offset;
@@ -904,7 +904,7 @@ enum bi_idvs_mode {
 };
 
 typedef struct {
-   const struct panfrost_compile_inputs *inputs;
+   const struct pan_compile_inputs *inputs;
    nir_shader *nir;
    struct bi_shader_info info;
    gl_shader_stage stage;
@@ -917,6 +917,7 @@ typedef struct {
    /* Floating point rounding mode controls */
    bool rtz_fp16;
    bool rtz_fp32;
+   bool ftz_fp32;
 
    /* In any graphics shader, whether the "IDVS with memory
     * allocation" flow is used. This affects how varyings are loaded and

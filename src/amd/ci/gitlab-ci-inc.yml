@@ -202,7 +202,8 @@
     RUNNER_TAG: mesa-ci-x86-64-lava-asus-CM1400CXA-dalboz
     # Force fixed 6.6 kernel, amdgpu doesn't revcover from GPU resets on 6.13
     # https://gitlab.freedesktop.org/drm/amd/-/issues/3861
-    EXTERNAL_KERNEL_TAG: "v6.6.21-mesa-f8ea"
+    # https://gitlab.freedesktop.org/mesa/mesa/-/issues/12676
+    KERNEL_TAG: "v6.6.21-mesa-83d9"
 
 # Status: https://lava.collabora.dev/scheduler/device_type/lenovo-TPad-C13-Yoga-zork
 .lava-lenovo-TPad-C13-Yoga-zork:x86_64:
@@ -218,7 +219,8 @@
     RUNNER_TAG: mesa-ci-x86-64-lava-lenovo-TPad-C13-Yoga-zork
     # Force fixed 6.6 kernel, amdgpu doesn't revcover from GPU resets on 6.13
     # https://gitlab.freedesktop.org/drm/amd/-/issues/3861
-    EXTERNAL_KERNEL_TAG: "v6.6.21-mesa-f8ea"
+    # https://gitlab.freedesktop.org/mesa/mesa/-/issues/12676
+    KERNEL_TAG: "v6.6.21-mesa-83d9"
 
 # Status: https://lava.collabora.dev/scheduler/device_type/hp-x360-14a-cb0001xx-zork
 .lava-hp-x360-14a-cb0001xx-zork:x86_64:
@@ -234,7 +236,8 @@
     RUNNER_TAG: mesa-ci-x86-64-lava-hp-x360-14a-cb0001xx-zork
     # Force fixed 6.6 kernel, amdgpu doesn't revcover from GPU resets on 6.13
     # https://gitlab.freedesktop.org/drm/amd/-/issues/3861
-    EXTERNAL_KERNEL_TAG: "v6.6.21-mesa-f8ea"
+    # https://gitlab.freedesktop.org/mesa/mesa/-/issues/12676
+    KERNEL_TAG: "v6.6.21-mesa-83d9"
 
 
 ############### LAVA
@@ -242,6 +245,7 @@
 .stoney-test:x86_64:
   variables:
     FLAKES_CHANNEL: "#amd-ci"
+    LAVA_FIRMWARE: amdgpu-lava
 
 .radeonsi-stoney-test:x86_64:
   extends:
@@ -268,6 +272,7 @@
   variables:
     GPU_VERSION: radeonsi-raven
     DRIVER_NAME: radeonsi
+    LAVA_FIRMWARE: amdgpu-lava
 
 .radv-raven-test:x86_64:
   extends:
@@ -276,6 +281,7 @@
     DRIVER_NAME: radv
     GPU_VERSION: radv-raven
     VK_DRIVER: radeon
+    LAVA_FIRMWARE: amdgpu-lava
 
 .amd-raven-test:x86_64:
   extends:
@@ -284,9 +290,16 @@
     DRIVER_NAME: radeonsi
     GPU_VERSION: amd-raven
     VK_DRIVER: radeon
+    LAVA_FIRMWARE: amdgpu-lava
 
-############### Valve Infra
-.test-radv:
+############### CI-tron
+.ci-tron-test-amdgpu:
+  variables:
+    CI_TRON_PATTERN__JOB_WARN__REGEX: '\*ERROR\* ring .* timeout'
+    CI_TRON_KERNEL__URL: https://fs.mupuf.org/linux-6.6-b2c-radv-ci # 6.6
+
+.ci-tron-test-radv:
+  extends: .ci-tron-test-amdgpu
   variables:
     VK_DRIVER: radeon
     DRIVER_NAME: radv
@@ -299,56 +312,39 @@
     MESA_VK_IGNORE_CONFORMANCE_WARNING: 1
     # Enable ETC2 emulation on non-native platforms (RENOIR,RDNA+, GFX6-8 dGPUs)
     vk_require_etc2: 'true'
-    B2C_JOB_WARN_REGEX: '\*ERROR\* ring .* timeout'
+    CI_TRON__B2C_SWAP_SIZE: '16g'
 
-.b2c-test-radv-vk:
+.ci-tron-test-radv-vk:
   extends:
+    - .ci-tron-x86_64-test-vk
     - .radv-valve-rules
-    - .test-radv
-    - .b2c-x86_64-test-vk
-  variables:
-    B2C_KERNEL_URL: https://fs.mupuf.org/linux-6.6-b2c-radv-ci # 6.6
+    - .ci-tron-test-radv
+
 
 .tahiti-test-valve:
   variables:
     FDO_CI_CONCURRENT: 24
     RUNNER_FARM_LOCATION: mupuf
-    B2C_MARS_SETUP_TAGS: amdgpu:codename:TAHITI
-    B2C_KERNEL_CMDLINE_EXTRAS: 'b2c.swap=16g'
-  tags:
-    - farm:$RUNNER_FARM_LOCATION
-    - $B2C_MARS_SETUP_TAGS
+    CI_TRON_DUT_SETUP_TAGS: amdgpu:codename:TAHITI
 
 .hawaii-test-valve:
   variables:
     FDO_CI_CONCURRENT: 24
     RUNNER_FARM_LOCATION: mupuf
-    B2C_MARS_SETUP_TAGS: amdgpu:codename:HAWAII
-    B2C_KERNEL_CMDLINE_EXTRAS: 'b2c.swap=16g'
-  tags:
-    - farm:$RUNNER_FARM_LOCATION
-    - $B2C_MARS_SETUP_TAGS
+    CI_TRON_DUT_SETUP_TAGS: amdgpu:codename:HAWAII
 
 .kabini-test-valve:
   variables:
     RUNNER_FARM_LOCATION: mupuf
-    B2C_MARS_SETUP_TAGS: amdgpu:codename:KABINI
-    B2C_KERNEL_CMDLINE_EXTRAS: 'b2c.swap=8g'
-  tags:
-    - farm:$RUNNER_FARM_LOCATION
-    - $B2C_MARS_SETUP_TAGS
+    CI_TRON_DUT_SETUP_TAGS: amdgpu:codename:KABINI
 
 .polaris10-test-valve:
   variables:
     FDO_CI_CONCURRENT: 16
-    B2C_TIMEOUT_BOOT_RETRIES: 4
-    B2C_MARS_SETUP_TAGS: amdgpu:codename:POLARIS10
+    CI_TRON_DUT_SETUP_TAGS: amdgpu:codename:POLARIS10
     # (2022-01) tsc=unstable was added in response to this message in kmsg,
     #    TSC found unstable after boot, most likely due to broken BIOS. Use 'tsc=unstable'.
-    B2C_KERNEL_CMDLINE_EXTRAS: 'b2c.swap=16g tsc=unstable'
-  tags:
-    - farm:$RUNNER_FARM_LOCATION
-    - $B2C_MARS_SETUP_TAGS
+    CI_TRON_KERNEL_CMDLINE__TSC_WORKAROUND: 'tsc=unstable'
 
 .polaris10-test-valve-mupuf:
   extends: .polaris10-test-valve
@@ -363,24 +359,14 @@
 .vega10-test-valve:
   variables:
     RUNNER_FARM_LOCATION: keywords
-    B2C_MARS_SETUP_TAGS: amdgpu:codename:VEGA10
+    CI_TRON_DUT_SETUP_TAGS: amdgpu:codename:VEGA10
     FDO_CI_CONCURRENT: 16
-    B2C_KERNEL_CMDLINE_EXTRAS: 'b2c.swap=16g'
-  tags:
-    - farm:$RUNNER_FARM_LOCATION
-    - $B2C_MARS_SETUP_TAGS
 
 .renoir-test-valve:
   variables:
     RUNNER_FARM_LOCATION: mupuf
-    B2C_MARS_SETUP_TAGS: amdgpu:codename:RENOIR
+    CI_TRON_DUT_SETUP_TAGS: amdgpu:codename:RENOIR
     FDO_CI_CONCURRENT: 16
-    B2C_KERNEL_CMDLINE_EXTRAS: 'b2c.swap=16g'
-    B2C_TIMEOUT_BOOT_MINUTES: 60
-    B2C_TIMEOUT_OVERALL_MINUTES: 120
-  tags:
-    - farm:$RUNNER_FARM_LOCATION
-    - $B2C_MARS_SETUP_TAGS
 
 .navi10-test-valve:
   variables:
@@ -388,11 +374,8 @@
     # machine is using non-MSI IRQs and is generating a lot of
     # IRQs. This tends to confuse the interrupt controller and breaks
     # MSI IRQs leading to GPU hangs on amdgpu.
-    B2C_KERNEL_CMDLINE_EXTRAS: 'b2c.swap=16g noapic'
-    B2C_MARS_SETUP_TAGS: amdgpu:codename:NAVI10
-  tags:
-    - farm:$RUNNER_FARM_LOCATION
-    - $B2C_MARS_SETUP_TAGS
+    CI_TRON_KERNEL_CMDLINE__APIC_WORKAROUND: 'noapic'
+    CI_TRON_DUT_SETUP_TAGS: amdgpu:codename:NAVI10
 
 .navi10-test-valve-mupuf:
   extends:
@@ -411,66 +394,38 @@
 .navi21-test-valve:
   variables:
     RUNNER_FARM_LOCATION: keywords
-    B2C_MARS_SETUP_TAGS: amdgpu:codename:NAVI21
+    CI_TRON_DUT_SETUP_TAGS: amdgpu:codename:NAVI21
     FDO_CI_CONCURRENT: 32
-    B2C_KERNEL_CMDLINE_EXTRAS: 'b2c.swap=16g'
-  tags:
-    - farm:$RUNNER_FARM_LOCATION
-    - $B2C_MARS_SETUP_TAGS
 
 .vangogh-test-valve:
   variables:
     RUNNER_FARM_LOCATION: mupuf
-    B2C_MARS_SETUP_TAGS: amdgpu:codename:VANGOGH
+    CI_TRON_DUT_SETUP_TAGS: amdgpu:codename:VANGOGH
     FDO_CI_CONCURRENT: 8
-    B2C_TIMEOUT_BOOT_MINUTES: 85
-    B2C_TIMEOUT_OVERALL_MINUTES: 120
-    B2C_KERNEL_CMDLINE_EXTRAS: 'b2c.swap=16g'
   tags:
     - farm:$RUNNER_FARM_LOCATION
-    - $B2C_MARS_SETUP_TAGS
+    - $CI_TRON_DUT_SETUP_TAGS
     - $CI_TRON_JOB_PRIORITY_TAG
 
 .raphael-test-valve:
   variables:
     RUNNER_FARM_LOCATION: keywords
-    B2C_MARS_SETUP_TAGS: amdgpu:codename:RAPHAEL
+    CI_TRON_DUT_SETUP_TAGS: amdgpu:codename:RAPHAEL
     FDO_CI_CONCURRENT: 32
-    B2C_KERNEL_CMDLINE_EXTRAS: 'b2c.swap=16g'
-  tags:
-    - farm:$RUNNER_FARM_LOCATION
-    - $B2C_MARS_SETUP_TAGS
 
 .navi31-test-valve:
   variables:
     RUNNER_FARM_LOCATION: keywords
-    B2C_MARS_SETUP_TAGS: amdgpu:codename:NAVI31
+    CI_TRON_DUT_SETUP_TAGS: amdgpu:codename:NAVI31
     FDO_CI_CONCURRENT: 32
-    B2C_KERNEL_CMDLINE_EXTRAS: 'b2c.swap=16g'
-  tags:
-    - farm:$RUNNER_FARM_LOCATION
-    - $B2C_MARS_SETUP_TAGS
-
-############### VKCTS tests ###############
-
-# A note on the variables to control fractional VKCTS runs
-#  parallel: N means to split the test list into chunks of 1/N lines, and
-#  DEQP_FRACTION: M means to run every Mth test from the resulting lines.
-#  So parallel: 2 and DEQP_FRACTION: 5 would imply running 1/10th of the suite.
-.vkcts-test-valve:
-  extends:
-    - .b2c-test-radv-vk
-  variables:
-    DEQP_SUITE: radv-valve
 
 ############### Fluster tests ###############
-.radeonsi-raven-vaapi-fluster:
+.radeonsi-vaapi-fluster-rules:
   extends:
-    - .lava-fluster:x86_64
+    - .test-fluster
   rules:
     - !reference [.radeonsi-vaapi-rules, rules]
     - changes:
-        - .gitlab-ci/fluster/*
         - src/amd/ci/$GPU_VERSION-fluster-fails.txt
         - src/amd/ci/$GPU_VERSION-fluster-flakes.txt
         - src/amd/ci/$GPU_VERSION-fluster-skips.txt

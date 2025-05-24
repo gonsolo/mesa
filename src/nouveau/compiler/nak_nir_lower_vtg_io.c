@@ -138,13 +138,17 @@ lower_vtg_io_intrin(nir_builder *b,
       mask = nir_component_mask(intrin->num_components);
 
    if (vtx != NULL && !is_output) {
-      nir_def *info = nir_load_sysval_nv(b, 32,
-                                         .base = NAK_SV_INVOCATION_INFO,
-                                         .access = ACCESS_CAN_REORDER);
-      nir_def *lo = nir_extract_u8_imm(b, info, 0);
-      nir_def *hi = nir_extract_u8_imm(b, info, 2);
-      nir_def *idx = nir_iadd(b, nir_imul(b, lo, hi), vtx);
-      vtx = nir_isberd_nv(b, idx);
+      if (nak->sm >= 50) {
+         nir_def *info = nir_load_sysval_nv(b, 32,
+                                            .base = NAK_SV_INVOCATION_INFO,
+                                            .access = ACCESS_CAN_REORDER);
+         nir_def *lo = nir_extract_u8_imm(b, info, 0);
+         nir_def *hi = nir_extract_u8_imm(b, info, 2);
+         nir_def *idx = nir_iadd(b, nir_imul(b, lo, hi), vtx);
+         vtx = nir_isberd_nv(b, idx);
+      } else {
+         vtx = nir_vild_nv(b, vtx);
+      }
    }
 
    if (vtx == NULL)
@@ -182,10 +186,6 @@ lower_vtg_io_intrin(nir_builder *b,
       .phys = !offset_is_const && !is_patch,
    };
 
-   uint32_t flags_u32;
-   STATIC_ASSERT(sizeof(flags_u32) == sizeof(flags));
-   memcpy(&flags_u32, &flags, sizeof(flags_u32));
-
    nir_def *dst_comps[NIR_MAX_VEC_COMPONENTS];
    while (mask) {
       const unsigned c = ffs(mask) - 1;
@@ -213,7 +213,7 @@ lower_vtg_io_intrin(nir_builder *b,
 
          /* Use al2p to compute a physical address */
          c_offset = nir_al2p_nv(b, offset, .base = c_addr,
-                                .flags = flags_u32);
+                                .flags = NAK_AS_U32(flags));
          c_addr = 0;
       }
 
@@ -221,14 +221,14 @@ lower_vtg_io_intrin(nir_builder *b,
          nir_def *c_data = nir_channels(b, data, BITFIELD_RANGE(c, comps));
          nir_ast_nv(b, c_data, vtx, c_offset,
                     .base = c_addr,
-                    .flags = flags_u32,
+                    .flags = NAK_AS_U32(flags),
                     .range_base = base_addr,
                     .range = range);
       } else {
          uint32_t access = flags.output ? 0 : ACCESS_CAN_REORDER;
          nir_def *c_data = nir_ald_nv(b, comps, vtx, c_offset,
                                       .base = c_addr,
-                                      .flags = flags_u32,
+                                      .flags = NAK_AS_U32(flags),
                                       .range_base = base_addr,
                                       .range = range,
                                       .access = access);

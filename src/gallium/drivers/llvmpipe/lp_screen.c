@@ -180,9 +180,6 @@ llvmpipe_init_compute_caps(struct pipe_screen *screen)
    caps->grid_dimension = 3;
    caps->max_global_size = 1 << 31;
    caps->max_mem_alloc_size = 1 << 31;
-   caps->max_private_size = 1 << 31;
-   caps->max_input_size = 1576;
-   caps->images_supported = !!LP_MAX_TGSI_SHADER_IMAGES;
    caps->subgroup_sizes = lp_native_vector_width / 32;
    caps->max_subgroups = 1024 / (lp_native_vector_width / 32);
    caps->max_compute_units = 8;
@@ -540,22 +537,28 @@ lp_storage_image_format_supported(enum pipe_format format)
    case PIPE_FORMAT_R11G11B10_FLOAT:
    case PIPE_FORMAT_R32_FLOAT:
    case PIPE_FORMAT_R16_FLOAT:
+   case PIPE_FORMAT_R64G64B64A64_UINT:
    case PIPE_FORMAT_R32G32B32A32_UINT:
    case PIPE_FORMAT_R16G16B16A16_UINT:
    case PIPE_FORMAT_R10G10B10A2_UINT:
    case PIPE_FORMAT_R8G8B8A8_UINT:
+   case PIPE_FORMAT_R64G64_UINT:
    case PIPE_FORMAT_R32G32_UINT:
    case PIPE_FORMAT_R16G16_UINT:
    case PIPE_FORMAT_R8G8_UINT:
+   case PIPE_FORMAT_R64_UINT:
    case PIPE_FORMAT_R32_UINT:
    case PIPE_FORMAT_R16_UINT:
    case PIPE_FORMAT_R8_UINT:
+   case PIPE_FORMAT_R64G64B64A64_SINT:
    case PIPE_FORMAT_R32G32B32A32_SINT:
    case PIPE_FORMAT_R16G16B16A16_SINT:
    case PIPE_FORMAT_R8G8B8A8_SINT:
+   case PIPE_FORMAT_R64G64_SINT:
    case PIPE_FORMAT_R32G32_SINT:
    case PIPE_FORMAT_R16G16_SINT:
    case PIPE_FORMAT_R8G8_SINT:
+   case PIPE_FORMAT_R64_SINT:
    case PIPE_FORMAT_R32_SINT:
    case PIPE_FORMAT_R16_SINT:
    case PIPE_FORMAT_R8_SINT:
@@ -634,17 +637,15 @@ llvmpipe_is_format_supported(struct pipe_screen *_screen,
           format_desc->block.bits != 96) {
          return false;
       }
+   }
 
+   if (bind & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_VERTEX_BUFFER)) {
       /* Disable 64-bit integer formats for RT/samplers.
        * VK CTS crashes with these and they don't make much sense.
+       * Vertex fetch also does not handle them correctly.
        */
-      int c = util_format_get_first_non_void_channel(format_desc->format);
-      if (c >= 0) {
-         if (format_desc->channel[c].pure_integer &&
-             format_desc->channel[c].size == 64)
-            return false;
-      }
-
+      if (util_format_is_int64(format_desc))
+         return false;
    }
 
    if (!(bind & PIPE_BIND_VERTEX_BUFFER) &&
@@ -681,13 +682,22 @@ llvmpipe_is_format_supported(struct pipe_screen *_screen,
        target == PIPE_BUFFER)
       return false;
 
-   if (format_desc->colorspace == UTIL_FORMAT_COLORSPACE_YUV) {
-      if (format == PIPE_FORMAT_UYVY ||
-          format == PIPE_FORMAT_YUYV ||
-          format == PIPE_FORMAT_NV12)
-         return true;
+   if (format_desc->colorspace == UTIL_FORMAT_COLORSPACE_YUV)
       return false;
-   }
+
+   /* Prevent YUV formats from taking incomplete fast paths in
+    * st_get_sampler_view_format.
+    */
+   if (format == PIPE_FORMAT_R8G8_R8B8_UNORM ||
+       format == PIPE_FORMAT_R8B8_R8G8_UNORM ||
+       format == PIPE_FORMAT_G8R8_B8R8_UNORM ||
+       format == PIPE_FORMAT_B8R8_G8R8_UNORM ||
+       format == PIPE_FORMAT_R8_G8B8_420_UNORM ||
+       format == PIPE_FORMAT_R8_B8G8_420_UNORM ||
+       format == PIPE_FORMAT_R8_G8B8_422_UNORM ||
+       format == PIPE_FORMAT_R8_G8_B8_420_UNORM ||
+       format == PIPE_FORMAT_R8_B8_G8_420_UNORM)
+      return false;
 
    /*
     * Everything can be supported by u_format
@@ -808,11 +818,11 @@ update_cache_sha1_cpu(struct mesa_sha1 *ctx)
    const struct util_cpu_caps_t *cpu_caps = util_get_cpu_caps();
    /*
     * Don't need the cpu cache affinity stuff. The rest
-    * is contained in first 5 dwords.
+    * is contained in first 4 dwords.
     */
    STATIC_ASSERT(offsetof(struct util_cpu_caps_t, num_L3_caches)
-                 == 5 * sizeof(uint32_t));
-   _mesa_sha1_update(ctx, cpu_caps, 5 * sizeof(uint32_t));
+                 == 4 * sizeof(uint32_t));
+   _mesa_sha1_update(ctx, cpu_caps, 4 * sizeof(uint32_t));
 }
 
 

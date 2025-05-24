@@ -4,12 +4,14 @@
 # When changing this file, you need to bump the following
 # .gitlab-ci/image-tags.yml tags:
 # DEBIAN_BASE_TAG
-# DEBIAN_TEST_GL_TAG
-# DEBIAN_TEST_VK_TAG
+
+# Do a very early check to make sure the tag is correct without the need of
+# setting up the environment variables locally
+ci_tag_build_time_check "CROSVM_TAG"
 
 set -uex
 
-uncollapsed_section_start crosvm "Building crosvm"
+section_start crosvm "Building crosvm"
 
 git config --global user.email "mesa@example.com"
 git config --global user.name "Mesa CI"

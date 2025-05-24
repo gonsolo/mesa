@@ -10,6 +10,7 @@
 #include "tu_cmd_buffer.h"
 
 #include "vk_common_entrypoints.h"
+#include "vk_log.h"
 #include "vk_render_pass.h"
 #include "vk_util.h"
 
@@ -18,10 +19,78 @@
 #include "tu_cs.h"
 #include "tu_event.h"
 #include "tu_image.h"
+#include "tu_knl.h"
 #include "tu_tracepoints.h"
 
 #include "common/freedreno_gpu_event.h"
 #include "common/freedreno_lrz.h"
+
+enum tu_cmd_buffer_status {
+   TU_CMD_BUFFER_STATUS_IDLE = 0,
+   TU_CMD_BUFFER_STATUS_ACTIVE = 1,
+};
+
+static struct tu_bo *
+tu_cmd_buffer_setup_status_tracking(struct tu_device *device)
+{
+   struct tu_bo *status_bo;
+   VkResult result;
+
+   result = tu_bo_init_new_explicit_iova(
+      device, NULL, &status_bo, sizeof(enum tu_cmd_buffer_status), 0,
+      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+      TU_BO_ALLOC_INTERNAL_RESOURCE, "cmd_buffer_status");
+   if (result != VK_SUCCESS)
+      return NULL;
+
+   result = tu_bo_map(device, status_bo, NULL);
+   if (result != VK_SUCCESS)
+      return NULL;
+
+   return status_bo;
+}
+
+static VkResult
+tu_cmd_buffer_status_check_idle(struct tu_cmd_buffer *cmd_buffer)
+{
+   if (cmd_buffer->status_bo == NULL)
+      return VK_SUCCESS;
+
+   const enum tu_cmd_buffer_status status =
+      *(enum tu_cmd_buffer_status *)cmd_buffer->status_bo->map;
+
+   switch (status) {
+   case TU_CMD_BUFFER_STATUS_IDLE:
+      return VK_SUCCESS;
+
+   case TU_CMD_BUFFER_STATUS_ACTIVE:
+      mesa_loge("Trying to reset or destroy cmd_buffer %p while in use",
+                cmd_buffer);
+      return vk_errorf(cmd_buffer, VK_ERROR_UNKNOWN,
+                       "Trying to reset or destroy while being used");
+   default:
+      mesa_loge("Something went wrong with cmd_buffer status tracking");
+      return vk_error(cmd_buffer, VK_ERROR_UNKNOWN);
+   }
+}
+
+static inline void
+tu_cmd_buffer_status_gpu_write(struct tu_cmd_buffer *cmd_buffer,
+                               enum tu_cmd_buffer_status status)
+{
+   struct tu_cs *cs = &cmd_buffer->cs;
+
+   if (cmd_buffer->status_bo == NULL)
+      return;
+
+   static_assert(sizeof(uint32_t) == sizeof(status),
+                 "Code below needs adjusting");
+   tu_cs_emit_pkt7(cs, CP_MEM_WRITE, 3);
+   tu_cs_emit_qw(cs, cmd_buffer->status_bo->iova);
+   tu_cs_emit(cs, (uint32_t)status);
+}
 
 static void
 tu_clone_trace_range(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
@@ -1182,8 +1251,8 @@ tu6_emit_tile_select(struct tu_cmd_buffer *cmd,
          .buffers_location = BUFFERS_IN_GMEM,
          .lrz_feedback_zmode_mask =
             phys_dev->info->a6xx.has_lrz_feedback
-               ? (hw_binning ? LRZ_FEEDBACK_EARLY_Z_OR_EARLY_LRZ_LATE_Z :
-                  LRZ_FEEDBACK_EARLY_LRZ_LATE_Z)
+               ? (hw_binning ? LRZ_FEEDBACK_EARLY_Z_OR_EARLY_Z_LATE_Z :
+                  LRZ_FEEDBACK_EARLY_Z_LATE_Z)
                : LRZ_FEEDBACK_NONE,
       });
 
@@ -1489,8 +1558,7 @@ tu6_init_static_regs(struct tu_device *dev, struct tu_cs *cs)
                                             .isammode = ISAMMODE_GL,
                                             .shared_consts_enable = false));
 
-   /* TODO: set A6XX_VFD_ADD_OFFSET_INSTANCE and fix ir3 to avoid adding base instance */
-   tu_cs_emit_write_reg(cs, REG_A6XX_VFD_ADD_OFFSET, A6XX_VFD_ADD_OFFSET_VERTEX);
+   tu_cs_emit_regs(cs, A6XX_VFD_ADD_OFFSET(.vertex = true, .instance = true));
    tu_cs_emit_write_reg(cs, REG_A6XX_RB_UNKNOWN_8811, 0x00000010);
    tu_cs_emit_write_reg(cs, REG_A6XX_PC_MODE_CNTL,
                         phys_dev->info->a6xx.magic.PC_MODE_CNTL);
@@ -1543,10 +1611,10 @@ tu6_init_static_regs(struct tu_device *dev, struct tu_cs *cs)
 
    tu_cs_emit_regs(cs,
                    A6XX_SP_TP_BORDER_COLOR_BASE_ADDR(.bo = dev->global_bo,
-                                                     .bo_offset = gb_offset(bcolor_builtin)));
+                                                     .bo_offset = gb_offset(bcolor)));
    tu_cs_emit_regs(cs,
                    A6XX_SP_PS_TP_BORDER_COLOR_BASE_ADDR(.bo = dev->global_bo,
-                                                        .bo_offset = gb_offset(bcolor_builtin)));
+                                                        .bo_offset = gb_offset(bcolor)));
 
    if (CHIP == A7XX) {
       tu_cs_emit_regs(cs, TPL1_BICUBIC_WEIGHTS_TABLE_0(CHIP, 0),
@@ -1923,7 +1991,7 @@ tu6_emit_binning_pass(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
    tu_cs_emit_regs(cs,
                    A6XX_SP_TP_WINDOW_OFFSET(.x = 0, .y = 0));
 
-   trace_start_binning_ib(&cmd->trace, cs);
+   trace_start_binning_ib(&cmd->trace, cs, cmd);
 
    /* emit IB to binning drawcmds: */
    tu_cs_emit_call(cs, &cmd->draw_cs);
@@ -2191,7 +2259,7 @@ tu_trace_start_render_pass(struct tu_cmd_buffer *cmd)
       max_samples = MAX2(max_samples, cmd->state.pass->subpasses[i].samples);
    }
 
-   trace_start_render_pass(&cmd->trace, &cmd->cs, cmd->state.framebuffer,
+   trace_start_render_pass(&cmd->trace, &cmd->cs, cmd, cmd->state.framebuffer,
                            cmd->state.tiling, max_samples, clear_cpp,
                            load_cpp, store_cpp, has_depth, ubwc);
 }
@@ -2278,7 +2346,7 @@ tu6_sysmem_render_begin(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
       .buffers_location = BUFFERS_IN_SYSMEM,
       .lrz_feedback_zmode_mask =
          cmd->device->physical_device->info->a6xx.has_lrz_feedback
-            ? LRZ_FEEDBACK_EARLY_Z_OR_EARLY_LRZ_LATE_Z
+            ? LRZ_FEEDBACK_EARLY_Z_OR_EARLY_Z_LATE_Z
             : LRZ_FEEDBACK_NONE,
    });
 
@@ -2384,7 +2452,7 @@ tu6_tile_render_begin(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
                                  .buffers_location = BUFFERS_IN_GMEM,
                                  .lrz_feedback_zmode_mask =
                                     phys_dev->info->a6xx.has_lrz_feedback
-                                       ? LRZ_FEEDBACK_EARLY_LRZ_LATE_Z
+                                       ? LRZ_FEEDBACK_EARLY_Z_LATE_Z
                                        : LRZ_FEEDBACK_NONE
                               });
 
@@ -2440,7 +2508,7 @@ tu6_render_tile(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
    tu6_emit_tile_select<CHIP>(cmd, &cmd->cs, tile, fdm, fdm_offsets);
    tu_lrz_before_tile<CHIP>(cmd, &cmd->cs);
 
-   trace_start_draw_ib_gmem(&cmd->trace, &cmd->cs);
+   trace_start_draw_ib_gmem(&cmd->trace, &cmd->cs, cmd);
 
    /* Primitives that passed all tests are still counted in in each
     * tile even with HW binning beforehand. Do not permit it.
@@ -2912,7 +2980,7 @@ tu_cmd_render_sysmem(struct tu_cmd_buffer *cmd,
 
    tu6_sysmem_render_begin<CHIP>(cmd, &cmd->cs, autotune_result);
 
-   trace_start_draw_ib_sysmem(&cmd->trace, &cmd->cs);
+   trace_start_draw_ib_sysmem(&cmd->trace, &cmd->cs, cmd);
 
    tu_cs_emit_call(&cmd->cs, &cmd->draw_cs);
 
@@ -3000,6 +3068,14 @@ tu_create_cmd_buffer(struct vk_command_pool *pool,
    u_trace_init(&cmd_buffer->trace, &device->trace_context);
    list_inithead(&cmd_buffer->renderpass_autotune_results);
 
+   if (TU_DEBUG_ENV(CHECK_CMD_BUFFER_STATUS)) {
+      cmd_buffer->status_bo = tu_cmd_buffer_setup_status_tracking(device);
+      if (cmd_buffer->status_bo == NULL) {
+         mesa_logw("Failed creating cmd_buffer status_bo. "
+                   "Won't track status for this cmd_buffer.");
+      }
+   }
+
    tu_cs_init(&cmd_buffer->cs, device, TU_CS_MODE_GROW, 4096, "cmd cs");
    tu_cs_init(&cmd_buffer->draw_cs, device, TU_CS_MODE_GROW, 4096, "draw cs");
    tu_cs_init(&cmd_buffer->tile_store_cs, device, TU_CS_MODE_GROW, 2048, "tile store cs");
@@ -3030,6 +3106,12 @@ tu_cmd_buffer_destroy(struct vk_command_buffer *vk_cmd_buffer)
    tu_cs_finish(&cmd_buffer->pre_chain.draw_cs);
    tu_cs_finish(&cmd_buffer->pre_chain.draw_epilogue_cs);
 
+   if (TU_DEBUG_ENV(CHECK_CMD_BUFFER_STATUS)) {
+      tu_cmd_buffer_status_check_idle(cmd_buffer);
+      tu_bo_unmap(cmd_buffer->device, cmd_buffer->status_bo, false);
+      tu_bo_finish(cmd_buffer->device, cmd_buffer->status_bo);
+   }
+
    u_trace_fini(&cmd_buffer->trace);
 
    tu_autotune_free_results(cmd_buffer->device, &cmd_buffer->renderpass_autotune_results);
@@ -3059,7 +3141,16 @@ tu_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    struct tu_cmd_buffer *cmd_buffer =
       container_of(vk_cmd_buffer, struct tu_cmd_buffer, vk);
 
-   vk_command_buffer_reset(&cmd_buffer->vk);
+   VkResult status_check_result = VK_SUCCESS;
+   if (TU_DEBUG_ENV(CHECK_CMD_BUFFER_STATUS))
+      status_check_result = tu_cmd_buffer_status_check_idle(cmd_buffer);
+
+    vk_command_buffer_reset(&cmd_buffer->vk);
+
+    if (TU_DEBUG_ENV(CHECK_CMD_BUFFER_STATUS) &&
+        status_check_result != VK_SUCCESS) {
+       cmd_buffer->vk.record_result = status_check_result;
+    }
 
    tu_cs_reset(&cmd_buffer->cs);
    tu_cs_reset(&cmd_buffer->draw_cs);
@@ -3141,6 +3232,8 @@ tu_cmd_buffer_begin(struct tu_cmd_buffer *cmd_buffer,
    tu_cs_begin(&cmd_buffer->draw_cs);
    tu_cs_begin(&cmd_buffer->draw_epilogue_cs);
 
+   tu_cmd_buffer_status_gpu_write(cmd_buffer, TU_CMD_BUFFER_STATUS_ACTIVE);
+
    return VK_SUCCESS;
 }
 
@@ -3183,6 +3276,9 @@ tu_BeginCommandBuffer(VkCommandBuffer commandBuffer,
 
       cmd_buffer->inherited_pipeline_statistics =
          pBeginInfo->pInheritanceInfo->pipelineStatistics;
+
+      cmd_buffer->state.occlusion_query_may_be_running =
+         pBeginInfo->pInheritanceInfo->occlusionQueryEnable;
 
       vk_foreach_struct_const(ext, pBeginInfo->pInheritanceInfo) {
          switch (ext->sType) {
@@ -4080,6 +4176,9 @@ tu_EndCommandBuffer(VkCommandBuffer commandBuffer)
          cmd_buffer->state.pass ? &cmd_buffer->draw_cs : &cmd_buffer->cs);
    }
 
+   if (TU_DEBUG_ENV(CHECK_CMD_BUFFER_STATUS))
+      tu_cmd_buffer_status_gpu_write(cmd_buffer, TU_CMD_BUFFER_STATUS_IDLE);
+
    tu_cs_end(&cmd_buffer->cs);
    tu_cs_end(&cmd_buffer->draw_cs);
    tu_cs_end(&cmd_buffer->draw_epilogue_cs);
@@ -4960,6 +5059,12 @@ tu_CmdExecuteCommands(VkCommandBuffer commandBuffer,
           */
          if (!secondary->state.lrz.valid)
             cmd->state.lrz.valid = false;
+         if (secondary->state.lrz.gpu_dir_set)
+            cmd->state.lrz.gpu_dir_set = true;
+         if (cmd->state.lrz.prev_direction == TU_LRZ_UNKNOWN &&
+             secondary->state.lrz.prev_direction != TU_LRZ_UNKNOWN)
+            cmd->state.lrz.prev_direction =
+               secondary->state.lrz.prev_direction;
 
          tu_clone_trace(cmd, &cmd->draw_cs, &secondary->trace);
          tu_render_pass_state_merge(&cmd->state.rp, &secondary->state.rp);
@@ -6015,6 +6120,31 @@ tu_emit_consts(struct tu_cmd_buffer *cmd, bool compute)
    return tu_cs_end_draw_state(&cmd->sub_cs, &cs);
 }
 
+/* Returns true if stencil may be written when depth test fails.
+ * This could be either from stencil written on depth test fail itself,
+ * or stencil written on the stencil test failure where subsequent depth
+ * test may also fail.
+ */
+static bool
+tu6_stencil_written_on_depth_fail(
+   const struct vk_stencil_test_face_state *face)
+{
+   switch (face->op.compare) {
+   case VK_COMPARE_OP_ALWAYS:
+      /* The stencil op always passes, no need to worry about failOp. */
+      return face->op.depth_fail != VK_STENCIL_OP_KEEP;
+   case VK_COMPARE_OP_NEVER:
+      /* The stencil op always fails, so failOp will always be used. */
+      return face->op.fail != VK_STENCIL_OP_KEEP;
+   default:
+      /* If the stencil test fails, depth may fail as well, so we can write
+       * stencil when the depth fails if failOp is not VK_STENCIL_OP_KEEP.
+       */
+      return face->op.fail != VK_STENCIL_OP_KEEP ||
+             face->op.depth_fail != VK_STENCIL_OP_KEEP;
+   }
+}
+
 /* Various frontends (ANGLE, zink at least) will enable stencil testing with
  * what works out to be no-op writes.  Simplify what they give us into flags
  * that LRZ can use.
@@ -6029,6 +6159,7 @@ tu6_update_simplified_stencil_state(struct tu_cmd_buffer *cmd)
    if (!stencil_test_enable) {
       cmd->state.stencil_front_write = false;
       cmd->state.stencil_back_write = false;
+      cmd->state.stencil_written_on_depth_fail = false;
       return;
    }
 
@@ -6056,6 +6187,11 @@ tu6_update_simplified_stencil_state(struct tu_cmd_buffer *cmd)
       stencil_front_op_writes && stencil_front_writemask;
    cmd->state.stencil_back_write =
       stencil_back_op_writes && stencil_back_writemask;
+   cmd->state.stencil_written_on_depth_fail =
+      (cmd->state.stencil_front_write &&
+       tu6_stencil_written_on_depth_fail(&ds->stencil.front)) ||
+      (cmd->state.stencil_back_write &&
+       tu6_stencil_written_on_depth_fail(&ds->stencil.back));
 }
 
 static bool
@@ -6096,33 +6232,59 @@ tu6_build_depth_plane_z_mode(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    enum a6xx_ztest_mode zmode = A6XX_EARLY_Z;
    bool depth_test_enable = cmd->vk.dynamic_graphics_state.ds.depth.test_enable;
    bool stencil_test_enable = cmd->vk.dynamic_graphics_state.ds.stencil.test_enable;
+   bool ds_test_enable = depth_test_enable || stencil_test_enable;
    bool depth_write = tu6_writes_depth(cmd, depth_test_enable);
    bool stencil_write = tu6_writes_stencil(cmd);
    const struct tu_shader *fs = cmd->state.shaders[MESA_SHADER_FRAGMENT];
    const struct tu_render_pass *pass = cmd->state.pass;
    const struct tu_subpass *subpass = cmd->state.subpass;
 
-   if ((fs->variant->has_kill ||
+   VkFormat depth_format = VK_FORMAT_UNDEFINED;
+   if (subpass->depth_stencil_attachment.attachment != VK_ATTACHMENT_UNUSED)
+      depth_format = pass->attachments[subpass->depth_stencil_attachment.attachment].format;
+
+   bool fs_kill_fragments =
+      fs->variant->has_kill ||
+      /* EARLY_Z causes D/S to be written before FS but gl_SampleMask can
+       * kill fragments, we cannot have EARLY_Z + gl_SampleMask + D/S writes.
+       */
+      fs->variant->writes_smask ||
+      /* Alpha-to-coverage behaves like a discard. */
+      cmd->vk.dynamic_graphics_state.ms.alpha_to_coverage_enable;
+
+   if ((fs_kill_fragments ||
         (cmd->state.pipeline_feedback_loops & VK_IMAGE_ASPECT_DEPTH_BIT) ||
         (cmd->vk.dynamic_graphics_state.feedback_loops &
          VK_IMAGE_ASPECT_DEPTH_BIT) ||
         tu_fs_reads_dynamic_ds_input_attachment(cmd, fs)) &&
        (depth_write || stencil_write)) {
-      zmode = (cmd->state.lrz.valid && cmd->state.lrz.enabled)
-                 ? A6XX_EARLY_LRZ_LATE_Z
-                 : A6XX_LATE_Z;
+      zmode = A6XX_EARLY_Z_LATE_Z;
    }
 
-   bool ds_test_enable = depth_test_enable || stencil_test_enable;
-   bool force_late_z = 
-      (subpass->depth_stencil_attachment.attachment != VK_ATTACHMENT_UNUSED &&
-       pass->attachments[subpass->depth_stencil_attachment.attachment].format
-       == VK_FORMAT_S8_UINT) ||
-      fs->fs.lrz.force_late_z ||
-      /* alpha-to-coverage can behave like a discard. */
-      cmd->vk.dynamic_graphics_state.ms.alpha_to_coverage_enable;
-   if ((force_late_z && !fs->variant->fs.early_fragment_tests) ||
-       !ds_test_enable)
+   /* If there is explicit depth direction in FS writing gl_FragDepth
+    * may be compatible with LRZ test.
+    */
+   if (cmd->state.lrz.enabled && fs->variant->writes_pos &&
+       zmode == A6XX_EARLY_Z) {
+      zmode = A6XX_EARLY_Z_LATE_Z;
+   }
+
+   /* "EARLY_Z + discard" would yield incorrect occlusion query result,
+    * since Vulkan expects occlusion query to happen after fragment shader.
+    */
+   if (zmode == A6XX_EARLY_Z && fs_kill_fragments &&
+       cmd->state.occlusion_query_may_be_running)
+      zmode = A6XX_EARLY_Z_LATE_Z;
+
+   if (zmode == A6XX_EARLY_Z_LATE_Z &&
+       (cmd->state.stencil_written_on_depth_fail || fs->fs.per_samp ||
+        !vk_format_has_depth(depth_format) || !ds_test_enable)) {
+      zmode = A6XX_LATE_Z;
+   }
+
+   if ((stencil_test_enable && depth_format == VK_FORMAT_S8_UINT) ||
+       (ds_test_enable &&
+        (fs->fs.lrz.force_late_z || cmd->state.lrz.force_late_z)))
       zmode = A6XX_LATE_Z;
 
    /* User defined early tests take precedence above all else */
@@ -7578,7 +7740,7 @@ tu_dispatch(struct tu_cmd_buffer *cmd,
    }
 
    if (info->indirect) {
-      trace_start_compute_indirect(&cmd->trace, cs, info->unaligned);
+      trace_start_compute_indirect(&cmd->trace, cs, cmd, info->unaligned);
 
       if (info->unaligned) {
          tu_cs_emit_pkt7(cs, CP_RUN_OPENCL, 1);
@@ -7600,7 +7762,7 @@ tu_dispatch(struct tu_cmd_buffer *cmd,
                                     .offset = info->indirect,
                                  });
    } else {
-      trace_start_compute(&cmd->trace, cs, info->indirect != 0,
+      trace_start_compute(&cmd->trace, cs, cmd, info->indirect != 0,
                           info->unaligned, local_size[0], local_size[1],
                           local_size[2], info->blocks[0], info->blocks[1],
                           info->blocks[2]);

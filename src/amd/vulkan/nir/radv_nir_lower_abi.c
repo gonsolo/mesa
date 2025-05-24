@@ -349,13 +349,9 @@ lower_abi_instr(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
          }
       }
 
-      if (s->gfx_level >= GFX12) {
+      if (s->gfx_level >= GFX11) {
          nir_def *va = nir_pack_64_2x32_split(b, ac_nir_load_arg(b, &s->args->ac, s->args->ngg_query_buf_va),
                                               nir_imm_int(b, s->address32_hi));
-
-         /* Only generated/written primitives query are emulated on GFX12+. */
-         offset -= RADV_SHADER_QUERY_PRIM_GEN_OFFSET(0);
-         assert(offset <= RADV_SHADER_QUERY_PRIM_XFB_OFFSET(3));
 
          nir_global_atomic_amd(b, 32, va, intrin->src[0].ssa, nir_imm_int(b, offset), .atomic_op = nir_atomic_op_iadd);
       } else {

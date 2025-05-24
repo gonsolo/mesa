@@ -120,8 +120,6 @@ struct aco_shader_info {
       bool has_prolog;
    } vs;
    struct {
-      struct ac_arg tcs_offchip_layout;
-
       /* Vulkan only */
       uint32_t num_lds_blocks;
    } tcs;
@@ -211,14 +209,32 @@ struct aco_trap_handler_layout {
    uint32_t ttmp0;
    uint32_t ttmp1;
 
-   struct {
-      uint32_t status;
-      uint32_t mode;
-      uint32_t trap_sts;
-      uint32_t hw_id1;
-      uint32_t gpr_alloc;
-      uint32_t lds_alloc;
-      uint32_t ib_sts;
+   union {
+      struct {
+         uint32_t state_priv;
+         uint32_t mode;
+         uint32_t status;
+         uint32_t gpr_alloc;
+         uint32_t lds_alloc;
+         uint32_t ib_sts;
+         uint32_t excp_flag_priv;
+         uint32_t excp_flag_user;
+         uint32_t trap_ctrl;
+         uint32_t hw_id1;
+      } gfx12;
+
+      struct {
+         uint32_t status;
+         uint32_t mode;
+         uint32_t trap_sts;
+         uint32_t hw_id1;
+         uint32_t gpr_alloc;
+         uint32_t lds_alloc;
+         uint32_t ib_sts;
+         uint32_t reserved0;
+         uint32_t reserved1;
+         uint32_t reserved2;
+      } gfx8;
    } sq_wave_regs;
 
    uint32_t m0;

@@ -5887,9 +5887,11 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
     */
    if (so->type == MESA_SHADER_TESS_CTRL || so->type == MESA_SHADER_GEOMETRY) {
       struct ir3_block *first_block = ir3_start_block(ir);
-      struct ir3_instruction *first_instr = list_first_entry(
-         &first_block->instr_list, struct ir3_instruction, node);
-      first_instr->flags |= IR3_INSTR_SS | IR3_INSTR_SY;
+      if (!list_is_empty(&first_block->instr_list)) {
+         struct ir3_instruction *first_instr = list_first_entry(
+            &first_block->instr_list, struct ir3_instruction, node);
+         first_instr->flags |= IR3_INSTR_SS | IR3_INSTR_SY;
+      }
    }
 
    if (ctx->compiler->gen >= 7 && so->type == MESA_SHADER_COMPUTE) {
@@ -5920,6 +5922,10 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
    if ((ctx->so->type == MESA_SHADER_FRAGMENT) &&
        ctx->s->info.fs.post_depth_coverage)
       so->post_depth_coverage = true;
+
+   if (ctx->so->type == MESA_SHADER_FRAGMENT) {
+      so->fs.depth_layout = ctx->s->info.fs.depth_layout;
+   }
 
    ctx->so->per_samp = ctx->s->info.fs.uses_sample_shading;
 

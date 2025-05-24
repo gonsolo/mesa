@@ -101,7 +101,8 @@ typedef struct shader_info {
    uint16_t outputs_written_16bit;
    uint16_t outputs_read_16bit;
    uint16_t inputs_read_indirectly_16bit;
-   uint16_t outputs_accessed_indirectly_16bit;
+   uint16_t outputs_read_indirectly_16bit;
+   uint16_t outputs_written_indirectly_16bit;
 
    /* Which patch inputs are actually read */
    uint32_t patch_inputs_read;
@@ -113,11 +114,13 @@ typedef struct shader_info {
    /* Which inputs are read indirectly (subset of inputs_read) */
    uint64_t inputs_read_indirectly;
    /* Which outputs are read or written indirectly */
-   uint64_t outputs_accessed_indirectly;
+   uint64_t outputs_read_indirectly;
+   uint64_t outputs_written_indirectly;
    /* Which patch inputs are read indirectly (subset of patch_inputs_read) */
    uint64_t patch_inputs_read_indirectly;
    /* Which patch outputs are read or written indirectly */
-   uint64_t patch_outputs_accessed_indirectly;
+   uint64_t patch_outputs_read_indirectly;
+   uint64_t patch_outputs_written_indirectly;
 
    /** Bitfield of which textures are used */
    BITSET_DECLARE(textures_used, 128);
@@ -519,15 +522,20 @@ typedef struct shader_info {
           */
          uint64_t tcs_same_invocation_inputs_read;
 
-         /* Bit mask of TCS per-vertex inputs (VS outputs) that are used
+         /* Bit mask of TCS per-vertex inputs (VS outputs) that are read
           * with a vertex index that is NOT the invocation id
           */
          uint64_t tcs_cross_invocation_inputs_read;
 
-         /* Bit mask of TCS per-vertex outputs that are used
+         /* Bit mask of TCS per-vertex outputs that are read
           * with a vertex index that is NOT the invocation id
           */
          uint64_t tcs_cross_invocation_outputs_read;
+
+         /* Bit mask of TCS per-vertex outputs that are written
+          * with a vertex index that is NOT the invocation id
+          */
+         uint64_t tcs_cross_invocation_outputs_written;
       } tess;
 
       /* Applies to MESH and TASK. */

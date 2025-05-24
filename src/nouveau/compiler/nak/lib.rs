@@ -35,6 +35,7 @@ mod sm75_instr_latencies;
 mod sm80_instr_latencies;
 mod sph;
 mod spill_values;
+mod ssa_value;
 mod to_cssa;
 mod union_find;
 

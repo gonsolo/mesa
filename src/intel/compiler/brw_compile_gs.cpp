@@ -146,7 +146,7 @@ brw_compile_gs(const struct brw_compiler *compiler,
    unsigned control_data_bits_per_vertex = 0;
    unsigned control_data_header_size_bits = 0;
 
-   const bool debug_enabled = brw_should_print_shader(nir, DEBUG_GS);
+   const bool debug_enabled = brw_should_print_shader(nir, DEBUG_GS, params->base.source_hash);
 
    brw_prog_data_init(&prog_data->base.base, &params->base);
 
@@ -161,7 +161,7 @@ brw_compile_gs(const struct brw_compiler *compiler,
    GLbitfield64 inputs_read = nir->info.inputs_read;
    brw_compute_vue_map(compiler->devinfo,
                        &input_vue_map, inputs_read,
-                       nir->info.separate_shader, 1);
+                       key->base.vue_layout, 1);
 
    brw_nir_apply_key(nir, compiler, &key->base, dispatch_width);
    brw_nir_lower_vue_inputs(nir, &input_vue_map);

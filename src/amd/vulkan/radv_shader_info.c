@@ -998,7 +998,8 @@ gather_shader_info_fs(const struct radv_device *device, const nir_shader *nir,
       info->ps.spi_shader_col_format = gfx_state->ps.epilog.spi_shader_col_format;
 
       /* Clear color attachments that aren't exported by the FS to match IO shader arguments. */
-      info->ps.spi_shader_col_format &= info->ps.colors_written;
+      if (!info->ps.mrt0_is_dual_src)
+         info->ps.spi_shader_col_format &= info->ps.colors_written;
 
       info->ps.cb_shader_mask = ac_get_cb_shader_mask(info->ps.spi_shader_col_format);
    }
@@ -1799,14 +1800,16 @@ radv_link_shaders_info(struct radv_device *device, struct radv_shader_stage *pro
                vs_stage->nir->info.float_controls_execution_mode == tcs_stage->nir->info.float_controls_execution_mode;
 
             if (vs_stage->info.vs.tcs_in_out_eq) {
-               vs_stage->info.vs.tcs_inputs_via_temp = vs_stage->nir->info.outputs_written &
-                                                       ~vs_stage->nir->info.outputs_accessed_indirectly &
-                                                       tcs_stage->nir->info.tess.tcs_same_invocation_inputs_read;
-               vs_stage->info.vs.tcs_inputs_via_lds = tcs_stage->nir->info.tess.tcs_cross_invocation_inputs_read |
-                                                      (tcs_stage->nir->info.tess.tcs_same_invocation_inputs_read &
-                                                       tcs_stage->nir->info.inputs_read_indirectly) |
-                                                      (tcs_stage->nir->info.tess.tcs_same_invocation_inputs_read &
-                                                       vs_stage->nir->info.outputs_accessed_indirectly);
+               vs_stage->info.vs.tcs_inputs_via_temp =
+                  vs_stage->nir->info.outputs_written &
+                  ~(vs_stage->nir->info.outputs_read_indirectly | vs_stage->nir->info.outputs_written_indirectly) &
+                  tcs_stage->nir->info.tess.tcs_same_invocation_inputs_read;
+               vs_stage->info.vs.tcs_inputs_via_lds =
+                  tcs_stage->nir->info.tess.tcs_cross_invocation_inputs_read |
+                  (tcs_stage->nir->info.tess.tcs_same_invocation_inputs_read &
+                   tcs_stage->nir->info.inputs_read_indirectly) |
+                  (tcs_stage->nir->info.tess.tcs_same_invocation_inputs_read &
+                   (vs_stage->nir->info.outputs_read_indirectly | vs_stage->nir->info.outputs_written_indirectly));
             }
          }
       }

@@ -64,6 +64,21 @@ tail -f results/lava.log &
 # Ensure that we are printing the commands that are being executed,
 # making it easier to debug the job in case it fails.
 set -x
+
+# List of optional overlays
+LAVA_EXTRA_OVERLAYS=()
+if [ -n "${LAVA_FIRMWARE:-}" ]; then
+    for fw in $LAVA_FIRMWARE; do
+        LAVA_EXTRA_OVERLAYS+=(
+            - append-overlay
+              --name=linux-firmware
+              --url="https://${BASE_SYSTEM_HOST_PREFIX}/${FIRMWARE_REPO}/${fw}-${FIRMWARE_TAG}.tar"
+              --path="/"
+              --format=tar
+        )
+    done
+fi
+
 PYTHONPATH=artifacts/ artifacts/lava/lava_job_submitter.py \
 	--farm "${FARM}" \
 	--device-type "${DEVICE_TYPE}" \
@@ -73,7 +88,6 @@ PYTHONPATH=artifacts/ artifacts/lava/lava_job_submitter.py \
 	--pipeline-info "$CI_JOB_NAME: $CI_PIPELINE_URL on $CI_COMMIT_REF_NAME ${CI_NODE_INDEX}/${CI_NODE_TOTAL}" \
 	--rootfs-url "${ROOTFS_URL}" \
 	--kernel-url-prefix "${KERNEL_IMAGE_BASE}/${DEBIAN_ARCH}" \
-	--kernel-external "${EXTERNAL_KERNEL_TAG}" \
 	--first-stage-init artifacts/ci-common/init-stage1.sh \
 	--dtb-filename "${DTB}" \
 	--jwt-file "${S3_JWT_FILE}" \
@@ -100,10 +114,11 @@ PYTHONPATH=artifacts/ artifacts/lava/lava_job_submitter.py \
 		--path="/" \
 		--format=tar \
 	- append-overlay \
-		--name=extra-modules \
+		--name=kernel-modules \
 		--url="${KERNEL_IMAGE_BASE}/${DEBIAN_ARCH}/modules.tar.zst" \
 		--compression=zstd \
 		--path="/" \
 		--format=tar \
+	"${LAVA_EXTRA_OVERLAYS[@]}" \
 	- submit \
 	>> results/lava.log

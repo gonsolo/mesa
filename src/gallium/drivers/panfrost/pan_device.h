@@ -39,7 +39,7 @@
 #include "util/u_dynarray.h"
 
 #include "panfrost/util/pan_ir.h"
-#include "pan_blend.h"
+#include "pan_blend_cso.h"
 #include "pan_fb_preload.h"
 #include "pan_indirect_dispatch.h"
 #include "pan_pool.h"
@@ -116,13 +116,13 @@ struct panfrost_device {
    unsigned optimal_z_tib_size;
 
    unsigned thread_tls_alloc;
-   struct panfrost_tiler_features tiler_features;
-   const struct panfrost_model *model;
+   struct pan_tiler_features tiler_features;
+   const struct pan_model *model;
    bool has_afbc;
    bool has_afrc;
 
    /* Table of formats, indexed by a PIPE format */
-   const struct panfrost_format *formats;
+   const struct pan_format *formats;
    const struct pan_blendable_format *blendable_formats;
 
    /* Bitmask of supported compressed texture formats */

@@ -30,7 +30,6 @@
 
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
-#include "pipe/p_shader_tokens.h"
 #include "pipe/p_state.h"
 #include "pipe/p_screen.h"
 #include "util/compiler.h"
@@ -155,7 +154,7 @@ pipe_surface_reference(struct pipe_surface **dst, struct pipe_surface *src)
  * that's shared by multiple contexts.
  */
 static inline void
-pipe_surface_release(struct pipe_context *pipe, struct pipe_surface **ptr)
+pipe_surface_unref(struct pipe_context *pipe, struct pipe_surface **ptr)
 {
    struct pipe_surface *old = *ptr;
 
@@ -211,11 +210,11 @@ pipe_drop_resource_references(struct pipe_resource *dst, int num_refs)
 }
 
 /**
- * Same as pipe_surface_release, but used when pipe_context doesn't exist
+ * Same as pipe_surface_unref, but used when pipe_context doesn't exist
  * anymore.
  */
 static inline void
-pipe_surface_release_no_context(struct pipe_surface **ptr)
+pipe_surface_unref_no_context(struct pipe_surface **ptr)
 {
    struct pipe_surface *surf = *ptr;
 
@@ -422,15 +421,15 @@ pipe_surface_size(const struct pipe_surface *ps, uint16_t *width, uint16_t *heig
 
 /* Return true if the surfaces are equal. */
 static inline bool
-pipe_surface_equal(struct pipe_surface *s1, struct pipe_surface *s2)
+pipe_surface_equal(const struct pipe_surface *s1, const struct pipe_surface *s2)
 {
-   return s1->texture == s2->texture &&
+   return !!s1 == !!s2 && s1->texture == s2->texture &&
           s1->format == s2->format &&
           s1->nr_samples == s2->nr_samples &&
-          (s1->texture->target != PIPE_BUFFER ||
+          ((s1->texture && s1->texture->target != PIPE_BUFFER) ||
            (s1->u.buf.first_element == s2->u.buf.first_element &&
             s1->u.buf.last_element == s2->u.buf.last_element)) &&
-          (s1->texture->target == PIPE_BUFFER ||
+          ((s1->texture && s1->texture->target == PIPE_BUFFER) ||
            (s1->u.tex.level == s2->u.tex.level &&
             s1->u.tex.first_layer == s2->u.tex.first_layer &&
             s1->u.tex.last_layer == s2->u.tex.last_layer));
@@ -787,52 +786,6 @@ util_query_clear_result(union pipe_query_result *result, unsigned type)
       memset(result, 0, sizeof(*result));
    }
 }
-
-/** Convert PIPE_TEXTURE_x to TGSI_TEXTURE_x */
-static inline enum tgsi_texture_type
-util_pipe_tex_to_tgsi_tex(enum pipe_texture_target pipe_tex_target,
-                          unsigned nr_samples)
-{
-   switch (pipe_tex_target) {
-   case PIPE_BUFFER:
-      return TGSI_TEXTURE_BUFFER;
-
-   case PIPE_TEXTURE_1D:
-      assert(nr_samples <= 1);
-      return TGSI_TEXTURE_1D;
-
-   case PIPE_TEXTURE_2D:
-      return nr_samples > 1 ? TGSI_TEXTURE_2D_MSAA : TGSI_TEXTURE_2D;
-
-   case PIPE_TEXTURE_RECT:
-      assert(nr_samples <= 1);
-      return TGSI_TEXTURE_RECT;
-
-   case PIPE_TEXTURE_3D:
-      assert(nr_samples <= 1);
-      return TGSI_TEXTURE_3D;
-
-   case PIPE_TEXTURE_CUBE:
-      assert(nr_samples <= 1);
-      return TGSI_TEXTURE_CUBE;
-
-   case PIPE_TEXTURE_1D_ARRAY:
-      assert(nr_samples <= 1);
-      return TGSI_TEXTURE_1D_ARRAY;
-
-   case PIPE_TEXTURE_2D_ARRAY:
-      return nr_samples > 1 ? TGSI_TEXTURE_2D_ARRAY_MSAA :
-                              TGSI_TEXTURE_2D_ARRAY;
-
-   case PIPE_TEXTURE_CUBE_ARRAY:
-      return TGSI_TEXTURE_CUBE_ARRAY;
-
-   default:
-      assert(0 && "unexpected texture target");
-      return TGSI_TEXTURE_UNKNOWN;
-   }
-}
-
 
 static inline void
 util_copy_constant_buffer(struct pipe_constant_buffer *dst,

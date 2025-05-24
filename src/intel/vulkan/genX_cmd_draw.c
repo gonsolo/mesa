@@ -196,6 +196,7 @@ get_push_range_address(struct anv_cmd_buffer *cmd_buffer,
    }
 
    case ANV_DESCRIPTOR_SET_NULL:
+   case ANV_DESCRIPTOR_SET_PER_PRIM_PADDING:
       return cmd_buffer->device->workaround_address;
 
    default: {
@@ -263,6 +264,7 @@ get_push_range_bound_size(struct anv_cmd_buffer *cmd_buffer,
 
    case ANV_DESCRIPTOR_SET_NULL:
    case ANV_DESCRIPTOR_SET_PUSH_CONSTANTS:
+   case ANV_DESCRIPTOR_SET_PER_PRIM_PADDING:
       return (range->start + range->length) * 32;
 
    default: {
@@ -459,6 +461,12 @@ cmd_buffer_flush_gfx_push_constants(struct anv_cmd_buffer *cmd_buffer,
             if (range->length == 0)
                continue;
 
+            /* Never clear this padding register as it might contain payload
+             * data.
+             */
+            if (range->set == ANV_DESCRIPTOR_SET_PER_PRIM_PADDING)
+               continue;
+
             unsigned bound_size =
                get_push_range_bound_size(cmd_buffer, shader, range);
             if (bound_size >= range->start * 32) {
@@ -479,7 +487,7 @@ cmd_buffer_flush_gfx_push_constants(struct anv_cmd_buffer *cmd_buffer,
       }
    }
 
-    /* Setting NULL resets the push constant state so that we allocate a new one
+   /* Setting NULL resets the push constant state so that we allocate a new one
     * if needed. If push constant data not dirty, get_push_range_address can
     * re-use existing allocation.
     *
@@ -511,14 +519,21 @@ cmd_buffer_flush_gfx_push_constants(struct anv_cmd_buffer *cmd_buffer,
             if (range->length == 0)
                break;
 
+            if (range->set == ANV_DESCRIPTOR_SET_PER_PRIM_PADDING &&
+                anv_pipeline_has_stage(pipeline, MESA_SHADER_MESH))
+               break;
+
             buffers[i] = get_push_range_address(cmd_buffer, shader, range);
             max_push_range = MAX2(max_push_range, range->length);
             buffer_count++;
          }
 
          /* We have at most 4 buffers but they should be tightly packed */
-         for (unsigned i = buffer_count; i < 4; i++)
-            assert(bind_map->push_ranges[i].length == 0);
+         for (unsigned i = buffer_count; i < 4; i++) {
+            assert(bind_map->push_ranges[i].length == 0 ||
+                   bind_map->push_ranges[i].set ==
+                   ANV_DESCRIPTOR_SET_PER_PRIM_PADDING);
+         }
       }
 
 #if GFX_VER >= 12
@@ -900,8 +915,14 @@ cmd_buffer_flush_gfx_state(struct anv_cmd_buffer *cmd_buffer)
        */
       dirty |= cmd_buffer->state.push_constants_dirty &
                pipeline->base.base.active_stages;
+#if INTEL_NEEDS_WA_1604061319
+      /* Testing shows that all the 3DSTATE_CONSTANT_XS need to be emitted if
+       * any stage has 3DSTATE_CONSTANT_XS emitted.
+       */
+      dirty |= pipeline->base.base.active_stages;
+#endif
       cmd_buffer_flush_gfx_push_constants(cmd_buffer,
-                                      dirty & VK_SHADER_STAGE_ALL_GRAPHICS);
+                                          dirty & VK_SHADER_STAGE_ALL_GRAPHICS);
 #if GFX_VERx10 >= 125
       cmd_buffer_flush_mesh_inline_data(
          cmd_buffer, dirty & (VK_SHADER_STAGE_TASK_BIT_EXT |

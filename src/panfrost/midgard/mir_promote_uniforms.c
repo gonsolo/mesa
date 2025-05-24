@@ -88,6 +88,15 @@ mir_analyze_ranges(compiler_context *ctx)
 
       assert(ubo < res.nr_blocks);
 
+      /* Blend constants are always loaded from the sysval UBO in blend shaders,
+       * do not push them. */
+      if (ctx->stage == MESA_SHADER_FRAGMENT) {
+         /* PAN_UBO_SYSVALS from the gallium driver */
+         unsigned sysval_ubo = 1;
+         if(ubo == sysval_ubo && offset == 0)
+            continue;
+      }
+
       if (offset < MAX_UBO_QWORDS)
          BITSET_SET(res.blocks[ubo].uses, offset);
    }
@@ -100,7 +109,7 @@ mir_analyze_ranges(compiler_context *ctx)
  * sophisticated. Select from the last UBO first to prioritize sysvals. */
 
 static void
-mir_pick_ubo(struct panfrost_ubo_push *push, struct mir_ubo_analysis *analysis,
+mir_pick_ubo(struct pan_ubo_push *push, struct mir_ubo_analysis *analysis,
              unsigned max_qwords)
 {
    unsigned max_words = MIN2(PAN_MAX_PUSH, max_qwords * 4);
@@ -115,7 +124,7 @@ mir_pick_ubo(struct panfrost_ubo_push *push, struct mir_ubo_analysis *analysis,
             return;
 
          for (unsigned offs = 0; offs < 4; ++offs) {
-            struct panfrost_ubo_word word = {
+            struct pan_ubo_word word = {
                .ubo = ubo,
                .offset = (vec4 * 16) + (offs * 4),
             };
@@ -193,7 +202,7 @@ mir_estimate_pressure(compiler_context *ctx)
    mir_foreach_block(ctx, _block) {
       midgard_block *block = (midgard_block *)_block;
       uint16_t *live =
-         mem_dup(block->base.live_out, ctx->temp_count * sizeof(uint16_t));
+         mem_dup(block->live_out, ctx->temp_count * sizeof(uint16_t));
 
       mir_foreach_instr_in_block_rev(block, ins) {
          unsigned count = mir_count_live(live, ctx->temp_count);

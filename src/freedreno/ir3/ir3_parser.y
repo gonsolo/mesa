@@ -57,6 +57,8 @@ struct ir3 * ir3_parse(struct ir3_shader_variant *v,
 #define IR3_REG_ABS     IR3_REG_FABS
 #define IR3_REG_NEGATE  IR3_REG_FNEG
 
+static pthread_mutex_t ir3_parse_mtx = PTHREAD_MUTEX_INITIALIZER;
+
 static struct ir3_kernel_info    *info;
 static struct ir3_shader_variant *variant;
 /* NOTE the assembler doesn't really use the ir3_block construction
@@ -337,6 +339,8 @@ static void yyerror(const char *error)
 struct ir3 * ir3_parse(struct ir3_shader_variant *v,
 		struct ir3_kernel_info *k, FILE *f)
 {
+	pthread_mutex_lock(&ir3_parse_mtx);
+
 	ir3_yyset_lineno(1);
 	ir3_yyset_input(f);
 #ifdef YYDEBUG
@@ -354,7 +358,10 @@ struct ir3 * ir3_parse(struct ir3_shader_variant *v,
 	}
 	ralloc_free(labels);
 	ralloc_free(ir3_parser_dead_ctx);
-	return variant->ir;
+
+	struct ir3 *ir = variant->ir;
+	pthread_mutex_unlock(&ir3_parse_mtx);
+	return ir;
 }
 %}
 
@@ -893,12 +900,16 @@ in_header:         T_A_IN '(' T_REGISTER ')' T_IDENTIFIER '(' T_IDENTIFIER '=' i
 
 out_header:        T_A_OUT '(' T_REGISTER ')' T_IDENTIFIER '(' T_IDENTIFIER '=' integer ')' { }
 
+/* The only used OPC for texture prefetches seems to be SAM */
+tex_header_opc:    T_OP_SAM
+
 tex_header:        T_A_TEX '(' T_REGISTER ')'
                        T_IDENTIFIER '=' integer ',' /* src */
+                       T_IDENTIFIER '=' integer ',' /* bindless */
                        T_IDENTIFIER '=' integer ',' /* samp */
-                       T_IDENTIFIER '=' integer ',' /* tex */
+                       T_MOD_TEX '=' integer ',' /* tex */
                        T_IDENTIFIER '=' integer ',' /* wrmask */
-                       T_IDENTIFIER '=' integer     /* cmd */ { }
+                       T_IDENTIFIER '=' tex_header_opc /* cmd */ { }
 
 fullnop_start_section: T_A_FULLNOPSTART { is_in_fullnop_section = true; }
 fullnop_end_section: T_A_FULLNOPEND { is_in_fullnop_section = false; }

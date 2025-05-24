@@ -36,6 +36,8 @@
 .build-linux:
   extends: .build-common
   variables:
+    C_ARGS: >
+      -Wno-error=deprecated-declarations
     CCACHE_COMPILERCHECK: "content"
     CCACHE_COMPRESS: "true"
     CCACHE_DIR: /cache/mesa/ccache
@@ -95,7 +97,6 @@ debian-testing:
       -D glx=dri
       -D platforms=x11,wayland
     GALLIUM_ST: >
-      -D gallium-nine=false
       -D gallium-rusticl=true
       -D gallium-va=enabled
     GALLIUM_DRIVERS: "llvmpipe,softpipe,virgl,radeonsi,zink,iris,svga"
@@ -122,10 +123,10 @@ debian-testing-asan:
     GALLIUM_DRIVERS: "llvmpipe,softpipe"
     C_ARGS: >
       -Wno-error=stringop-truncation
+      -Wno-error=deprecated-declarations
     EXTRA_OPTION: >
       -D b_sanitize=address
       -D gallium-va=false
-      -D gallium-nine=false
       -D gallium-rusticl=false
       -D mesa-clc=system
       -D tools=dlclose-skip
@@ -139,7 +140,6 @@ debian-testing-asan:
       -D build-tests=false
       -D enable-glcpp-tests=false
       -D gallium-rusticl=false
-      -D gallium-nine=false
       -D gallium-drivers=
       -D glx=disabled
       -D install-mesa-clc=true
@@ -156,6 +156,11 @@ debian-testing-msan:
     - .meson-build-only
     - .build-run-long
   variables:
+    CPP_ARGS: >
+      -Wno-error=c99-designator
+      -Wno-error=overloaded-virtual
+      -Wno-error=tautological-constant-out-of-range-compare
+      -Wno-error=unused-private-field
     # l_undef is incompatible with msan
     EXTRA_OPTION:
       -D b_sanitize=memory
@@ -170,6 +175,20 @@ debian-testing-msan:
     MESON_TEST_ARGS: "--suite glcpp --suite format"
     GALLIUM_DRIVERS: "freedreno,iris,nouveau,r300,r600,llvmpipe,softpipe,svga,v3d,vc4,virgl,etnaviv,panfrost,lima,zink,radeonsi,tegra,d3d12,crocus"
     VULKAN_DRIVERS: intel,amd,broadcom,virtio
+    C_ARGS: >
+      -Wno-error=constant-conversion
+      -Wno-error=enum-conversion
+      -Wno-error=initializer-overrides
+      -Wno-error=sometimes-uninitialized
+      -Werror=misleading-indentation
+      -Wno-error=deprecated-declarations
+    CPP_ARGS: >
+      -Wno-error=c99-designator
+      -Wno-error=overloaded-virtual
+      -Wno-error=tautological-constant-out-of-range-compare
+      -Wno-error=unused-private-field
+      -Wno-error=vla-cxx-extension
+      -Wno-error=deprecated-declarations
     RUN_MESON_TESTS: "false" # just too slow
     # Do a host build for mesa-clc and precomp-compiler (msan complains about uninitialized
     # values in the LLVM libs)
@@ -196,6 +215,7 @@ debian-testing-ubsan:
     C_ARGS: >
       -Wno-error=stringop-overflow
       -Wno-error=stringop-truncation
+      -Wno-error=deprecated-declarations
     CPP_ARGS: >
       -Wno-error=array-bounds
     GALLIUM_DRIVERS: "llvmpipe,softpipe"
@@ -205,7 +225,6 @@ debian-testing-ubsan:
       -D mesa-clc=system
       -D gallium-rusticl=false
       -D gallium-va=false
-      -D gallium-nine=false
     S3_ARTIFACT_NAME: ""
     ARTIFACTS_DEBUG_SYMBOLS: 1
     RUN_MESON_TESTS: "false" # just too slow
@@ -227,6 +246,10 @@ debian-build-testing:
     - .use-debian/x86_64_build
   variables:
     UNWIND: "enabled"
+    C_ARGS: >
+      -Wno-error=deprecated-declarations
+    CPP_ARGS: >
+      -Wno-error=deprecated-declarations
     DRI_LOADERS: >
       -D glx=dri
       -D gbm=enabled
@@ -238,8 +261,6 @@ debian-build-testing:
       -D gallium-extra-hud=true
       -D gallium-vdpau=enabled
       -D gallium-va=enabled
-      -D gallium-xa=enabled
-      -D gallium-nine=true
       -D gallium-rusticl=false
     GALLIUM_DRIVERS: "i915,iris,nouveau,r300,r600,freedreno,llvmpipe,softpipe,svga,v3d,vc4,virgl,etnaviv,panfrost,lima,zink,d3d12,asahi,crocus"
     VULKAN_DRIVERS: "intel_hasvk,imagination-experimental,microsoft-experimental,nouveau,swrast"
@@ -259,6 +280,9 @@ debian-release:
     UNWIND: "enabled"
     C_ARGS: >
       -Wno-error=stringop-overread
+      -Wno-error=deprecated-declarations
+    CPP_ARGS: >
+      -Wno-error=deprecated-declarations
     DRI_LOADERS: >
       -D glx=dri
       -D gbm=enabled
@@ -269,8 +293,6 @@ debian-release:
       -D gallium-extra-hud=true
       -D gallium-vdpau=enabled
       -D gallium-va=enabled
-      -D gallium-xa=enabled
-      -D gallium-nine=false
       -D gallium-rusticl=false
       -D llvm=enabled
     GALLIUM_DRIVERS: "i915,iris,nouveau,r300,freedreno,llvmpipe,softpipe,svga,v3d,vc4,virgl,etnaviv,panfrost,lima,zink,d3d12,asahi,crocus"
@@ -299,6 +321,7 @@ alpine-build-testing:
       -Wno-error=array-bounds
       -Wno-error=stringop-overflow
       -Wno-error=stringop-overread
+      -Wno-error=deprecated-declarations
     DRI_LOADERS: >
       -D glx=disabled
       -D gbm=enabled
@@ -310,8 +333,6 @@ alpine-build-testing:
       -D gallium-extra-hud=true
       -D gallium-vdpau=disabled
       -D gallium-va=enabled
-      -D gallium-xa=disabled
-      -D gallium-nine=true
       -D gallium-rusticl=false
       -D gles1=disabled
       -D gles2=enabled
@@ -340,9 +361,11 @@ fedora-release:
       -Wno-error=stringop-overread
       -Wno-error=array-bounds
       -Wno-error=maybe-uninitialized
+      -Wno-error=deprecated-declarations
     CPP_ARGS: >
       -Wno-error=dangling-reference
       -Wno-error=overloaded-virtual
+      -Wno-error=deprecated-declarations
     DRI_LOADERS: >
       -D glx=dri
       -D gbm=enabled
@@ -360,8 +383,6 @@ fedora-release:
       -D gallium-extra-hud=true
       -D gallium-vdpau=enabled
       -D gallium-va=enabled
-      -D gallium-xa=enabled
-      -D gallium-nine=false
       -D gallium-rusticl=true
       -D gles1=disabled
       -D gles2=enabled
@@ -387,11 +408,13 @@ debian-android:
       -Wno-error=enum-conversion
       -Wno-error=initializer-overrides
       -Wno-error=sometimes-uninitialized
+      -Wno-error=deprecated-declarations
     CPP_ARGS: >
       -Wno-error=c99-designator
       -Wno-error=unused-variable
       -Wno-error=unused-but-set-variable
       -Wno-error=self-assign
+      -Wno-error=deprecated-declarations
     DRI_LOADERS: >
       -D glx=disabled
       -D gbm=disabled
@@ -410,8 +433,6 @@ debian-android:
     GALLIUM_ST: >
       -D gallium-vdpau=disabled
       -D gallium-va=disabled
-      -D gallium-xa=disabled
-      -D gallium-nine=false
       -D gallium-rusticl=false
     PKG_CONFIG_LIBDIR: "/disable/non/android/system/pc/files"
     HOST_BUILD_OPTIONS: >
@@ -463,8 +484,6 @@ debian-android:
     GALLIUM_ST: >
       -D gallium-vdpau=disabled
       -D gallium-va=disabled
-      -D gallium-xa=disabled
-      -D gallium-nine=false
 
 .meson-arm:
   extends:
@@ -540,6 +559,7 @@ debian-arm64:
     C_ARGS: >
       -Wno-error=array-bounds
       -Wno-error=stringop-truncation
+      -Wno-error=deprecated-declarations
     GALLIUM_DRIVERS: "etnaviv,freedreno,lima,panfrost,v3d,vc4,zink"
     VULKAN_DRIVERS: "broadcom,freedreno,panfrost"
     DRI_LOADERS:
@@ -562,6 +582,8 @@ debian-arm64-asan:
   variables:
     VULKAN_DRIVERS: "broadcom,freedreno"
     GALLIUM_DRIVERS: "freedreno,vc4,v3d"
+    C_ARGS: >
+      -Wno-error=deprecated-declarations
     DRI_LOADERS:
       -D glvnd=disabled
     EXTRA_OPTION: >
@@ -585,6 +607,7 @@ debian-arm64-ubsan:
       -Wno-error=array-bounds
       -Wno-error=stringop-overflow
       -Wno-error=stringop-truncation
+      -Wno-error=deprecated-declarations
     CPP_ARGS: >
       -Wno-error=array-bounds
       -fno-var-tracking-assignments
@@ -619,8 +642,8 @@ debian-arm64-release:
     S3_ARTIFACT_NAME: mesa-arm64-default-${BUILDTYPE}
     C_ARGS: >
       -Wno-error=array-bounds
-      -Wno-error=stringop-truncation
       -Wno-error=stringop-overread
+      -Wno-error=deprecated-declarations
   script:
     - *meson-build
     - 'if [ -n "$MESA_CI_PERFORMANCE_ENABLED" ]; then .gitlab-ci/prepare-artifacts.sh; fi'
@@ -634,9 +657,8 @@ debian-no-libdrm:
     GALLIUM_DRIVERS: "zink,llvmpipe"
     BUILDTYPE: release
     C_ARGS: >
-      -Wno-error=array-bounds
-      -Wno-error=stringop-truncation
       -Wno-error=stringop-overread
+      -Wno-error=deprecated-declarations
     EXTRA_OPTION: >
       -D freedreno-kmds=kgsl
       -D glx=disabled
@@ -657,12 +679,14 @@ debian-clang:
       -Wno-error=initializer-overrides
       -Wno-error=sometimes-uninitialized
       -Werror=misleading-indentation
+      -Wno-error=deprecated-declarations
     CPP_ARGS: >
       -Wno-error=c99-designator
       -Wno-error=overloaded-virtual
       -Wno-error=tautological-constant-out-of-range-compare
       -Wno-error=unused-private-field
       -Wno-error=vla-cxx-extension
+      -Wno-error=deprecated-declarations
     DRI_LOADERS: >
       -D glx=dri
       -D gbm=enabled
@@ -673,8 +697,6 @@ debian-clang:
       -D gallium-extra-hud=true
       -D gallium-vdpau=enabled
       -D gallium-va=enabled
-      -D gallium-xa=enabled
-      -D gallium-nine=true
       -D gles1=enabled
       -D gles2=enabled
       -D llvm=enabled
@@ -704,6 +726,19 @@ debian-clang-release:
     - .build-run-long
   variables:
     BUILDTYPE: "release"
+    C_ARGS: >
+      -Wno-error=constant-conversion
+      -Wno-error=enum-conversion
+      -Wno-error=initializer-overrides
+      -Wno-error=sometimes-uninitialized
+      -Wno-error=deprecated-declarations
+    CPP_ARGS: >
+      -Wno-error=c99-designator
+      -Wno-error=overloaded-virtual
+      -Wno-error=tautological-constant-out-of-range-compare
+      -Wno-error=unused-private-field
+      -Wno-error=vla-cxx-extension
+      -Wno-error=deprecated-declarations
     DRI_LOADERS: >
       -D glx=xlib
       -D platforms=x11,wayland
@@ -711,8 +746,6 @@ debian-clang-release:
       -D gallium-extra-hud=true
       -D gallium-vdpau=enabled
       -D gallium-va=enabled
-      -D gallium-xa=enabled
-      -D gallium-nine=true
       -D gles1=disabled
       -D gles2=disabled
       -D llvm=enabled
@@ -751,8 +784,6 @@ debian-vulkan:
     GALLIUM_ST: >
       -D gallium-vdpau=disabled
       -D gallium-va=disabled
-      -D gallium-xa=disabled
-      -D gallium-nine=false
       -D gallium-rusticl=false
       -D b_sanitize=undefined
       -D c_args=-fno-sanitize-recover=all
@@ -782,6 +813,8 @@ debian-x86_32:
     EXTRA_OPTION: >
       -D vulkan-layers=device-select,overlay
       -D mesa-clc=system
+    CPP_ARGS: >
+      -Wno-error=deprecated-declarations
     C_LINK_ARGS: >
       -Wl,--no-warn-rwx-segments
     CPP_LINK_ARGS: >
@@ -833,7 +866,7 @@ debian-ppc64el:
 python-artifacts:
   stage: build-for-tests
   extends:
-    - .use-debian/x86_64_pyutils
+    - .use-debian/arm64_build
     - .build-common
     - .meson-build-for-tests
   variables:
@@ -842,3 +875,7 @@ python-artifacts:
   timeout: 10m
   script:
     - .gitlab-ci/prepare-artifacts-python.sh
+  # Nothing uses the gitlab artifacts from this job anymore, stop uploading it
+  artifacts: null
+  tags:
+    - $FDO_RUNNER_JOB_PRIORITY_TAG_AARCH64

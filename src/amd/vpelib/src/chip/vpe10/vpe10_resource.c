@@ -175,7 +175,7 @@ static struct vpe_caps caps = {
                     .p010            = 1, /**< planar 4:2:0 10-bit */
                     .p016            = 0, /**< planar 4:2:0 16-bit */
                     .ayuv            = 0, /**< packed 4:4:4 */
-                    .yuy2 = 0
+                    .yuy2            = 0, /**< packed 4:2:2 */
                 },
             .output_pixel_format_support =
                 {
@@ -185,7 +185,7 @@ static struct vpe_caps caps = {
                     .p010            = 0, /**< planar 4:2:0 10-bit */
                     .p016            = 0, /**< planar 4:2:0 16-bit */
                     .ayuv            = 0, /**< packed 4:4:4 */
-                    .yuy2 = 0
+                    .yuy2            = 0, /**< packed 4:2:2 */
                 },
             .max_upscale_factor = 64000,
 
@@ -221,7 +221,7 @@ static bool vpe10_init_scaler_data(struct vpe_priv *vpe_priv, struct stream_ctx 
     }
 
     if ((stream_ctx->stream.use_external_scaling_coeffs ==
-            false) || /* don't try to optimize is the scaler is configured externally*/
+            false) || /* do not try to optimize is the scaler is configured externally*/
         (stream_ctx->stream.polyphase_scaling_coeffs.taps.h_taps == 0) ||
         (stream_ctx->stream.polyphase_scaling_coeffs.taps.v_taps == 0)) {
         scl_data->polyphase_filter_coeffs = 0;
@@ -249,9 +249,10 @@ enum vpe_status vpe10_set_num_segments(struct vpe_priv *vpe_priv, struct stream_
     struct scaler_data *scl_data, struct vpe_rect *src_rect, struct vpe_rect *dst_rect,
     uint32_t *max_seg_width, uint32_t recout_width_alignment)
 {
-    uint16_t       num_segs;
-    struct dpp    *dpp         = vpe_priv->resource.dpp[0];
-    const uint32_t max_lb_size = dpp->funcs->get_line_buffer_size();
+    uint16_t        num_segs;
+    struct dpp     *dpp         = vpe_priv->resource.dpp[0];
+    const uint32_t  max_lb_size = dpp->funcs->get_line_buffer_size();
+    enum vpe_status res         = VPE_STATUS_OK;
 
     (void)recout_width_alignment;
 
@@ -259,13 +260,13 @@ enum vpe_status vpe10_set_num_segments(struct vpe_priv *vpe_priv, struct stream_
 
     num_segs = vpe_get_num_segments(vpe_priv, src_rect, dst_rect, *max_seg_width);
 
-    stream_ctx->segment_ctx = vpe_alloc_segment_ctx(vpe_priv, num_segs);
-    if (!stream_ctx->segment_ctx)
-        return VPE_STATUS_NO_MEMORY;
+    res = vpe_alloc_segment_ctx(vpe_priv, stream_ctx, num_segs);
 
-    stream_ctx->num_segments = num_segs;
+    if (res == VPE_STATUS_OK) {
+        stream_ctx->num_segments = num_segs;
+    }
 
-    return VPE_STATUS_OK;
+    return res;
 }
 
 bool vpe10_get_dcc_compression_output_cap(const struct vpe *vpe, const struct vpe_dcc_surface_param *params, struct vpe_surface_dcc_cap *cap)
@@ -411,6 +412,7 @@ enum vpe_status vpe10_construct_resource(struct vpe_priv *vpe_priv, struct resou
     res->set_num_segments                  = vpe10_set_num_segments;
     res->split_bg_gap                      = vpe10_split_bg_gap;
     res->calculate_dst_viewport_and_active = vpe10_calculate_dst_viewport_and_active;
+    res->get_bg_stream_idx                 = vpe10_get_bg_stream_idx;
     res->find_bg_gaps                      = vpe_find_bg_gaps;
     res->create_bg_segments                = vpe_create_bg_segments;
     res->populate_cmd_info                 = vpe10_populate_cmd_info;
@@ -420,6 +422,7 @@ enum vpe_status vpe10_construct_resource(struct vpe_priv *vpe_priv, struct resou
     res->check_bg_color_support            = vpe10_check_bg_color_support;
     res->check_mirror_rotation_support     = vpe10_check_mirror_rotation_support;
     res->update_blnd_gamma                 = vpe10_update_blnd_gamma;
+    res->update_output_gamma               = vpe10_update_output_gamma;
     res->validate_cached_param             = vpe10_validate_cached_param;
 
     return VPE_STATUS_OK;
@@ -582,7 +585,7 @@ static uint16_t get_max_gap_num(
     */
 
     if (!is_color_fill) {
-        // full colorfillOnly case, no need to + 1 as the gap won't be seaprated by stream dst
+        // full colorfillOnly case, no need to + 1 as the gap will not be seaprated by stream dst
         // for non-colorfillOnly case, +1 for worst case the gap is separated by stream dst
         max_gaps += 1;
     }
@@ -592,6 +595,11 @@ static uint16_t get_max_gap_num(
     }
 
     return max_gaps;
+}
+
+uint16_t vpe10_get_bg_stream_idx(struct vpe_priv *vpe_priv)
+{
+    return 0;
 }
 
 enum vpe_status vpe10_calculate_segments(
@@ -963,7 +971,7 @@ enum vpe_status vpe10_populate_cmd_info(struct vpe_priv *vpe_priv)
         for (segment_idx = 0; segment_idx < stream_ctx->num_segments; segment_idx++) {
 
             cmd_info.inputs[0].stream_idx  = stream_idx;
-            cmd_info.cd                    = (uint8_t)(stream_ctx->num_segments - segment_idx - 1);
+            cmd_info.cd                    = (uint16_t)(stream_ctx->num_segments - segment_idx - 1);
             cmd_info.inputs[0].scaler_data = stream_ctx->segment_ctx[segment_idx].scaler_data;
             cmd_info.num_outputs           = 1;
 
@@ -1262,6 +1270,50 @@ enum vpe_status vpe10_update_blnd_gamma(struct vpe_priv *vpe_priv,
                 vpe_priv, tf, x_scale, y_scale, y_bias, can_bypass, blnd_tf);
         }
     }
+    return status;
+}
+
+/* This function generates software points for the ogam gamma programming block.
+   The logic for the blndgam/ogam programming sequence is a function of:
+   1. Output Range (Studio Full)
+   2. 3DLUT usage
+   3. Output format (HDR SDR)
+   SDR Out or studio range out
+      TM Case
+         BLNDGAM : NL -> NL*S + B
+         OGAM    : Bypass
+      Non TM Case
+         BLNDGAM : L -> NL*S + B
+         OGAM    : Bypass
+   Full range HDR Out
+      TM Case
+         BLNDGAM : NL -> L
+         OGAM    : L -> NL
+      Non TM Case
+         BLNDGAM : Bypass
+         OGAM    : L -> NL
+*/
+enum vpe_status vpe10_update_output_gamma(struct vpe_priv *vpe_priv,
+    const struct vpe_build_param *param, struct transfer_func *output_tf, bool geometric_scaling)
+{
+    bool               can_bypass = false;
+    struct output_ctx *output_ctx = &vpe_priv->output_ctx;
+    bool               is_studio  = (param->dst_surface.cs.range == VPE_COLOR_RANGE_STUDIO);
+    enum vpe_status    status     = VPE_STATUS_OK;
+    struct fixed31_32  y_scale    = vpe_fixpt_one;
+
+    if (vpe_is_fp16(param->dst_surface.format)) {
+        y_scale = vpe_fixpt_mul_int(y_scale, CCCS_NORM);
+    }
+
+    if (!geometric_scaling && vpe_is_HDR(output_ctx->tf) && !is_studio)
+        can_bypass = false; // Blending is done in linear light so ogam needs to handle the regam
+    else
+        can_bypass = true;
+
+    vpe_color_update_regamma_tf(
+        vpe_priv, output_ctx->tf, vpe_fixpt_one, y_scale, vpe_fixpt_zero, can_bypass, output_tf);
+
     return status;
 }
 

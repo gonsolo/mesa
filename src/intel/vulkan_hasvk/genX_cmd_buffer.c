@@ -928,6 +928,16 @@ transition_color_buffer(struct anv_cmd_buffer *cmd_buffer,
       ? isl_drm_modifier_get_info(image->vk.drm_format_mod)
       : NULL;
 
+   /**
+    * Vulkan 1.4.313, 7.7.4. Queue Family Ownership Transfer:
+    *
+    *    If the values of srcQueueFamilyIndex and dstQueueFamilyIndex are equal,
+    *    no ownership transfer is performed, and the barrier operates as if they
+    *    were both set to VK_QUEUE_FAMILY_IGNORED.
+    */
+   if (src_queue_family == dst_queue_family)
+      src_queue_family = dst_queue_family = VK_QUEUE_FAMILY_IGNORED;
+
    const bool src_queue_external =
       src_queue_family == VK_QUEUE_FAMILY_FOREIGN_EXT ||
       src_queue_family == VK_QUEUE_FAMILY_EXTERNAL;
@@ -1502,7 +1512,9 @@ genX(EndCommandBuffer)(
 
    emit_isp_disable(cmd_buffer);
 
-   trace_intel_end_cmd_buffer(&cmd_buffer->trace, cmd_buffer->vk.level);
+   trace_intel_end_cmd_buffer(&cmd_buffer->trace,
+                              (uintptr_t)(vk_command_buffer_to_handle(&cmd_buffer->vk)),
+                              cmd_buffer->vk.level);
 
    anv_cmd_buffer_end_batch_buffer(cmd_buffer);
 

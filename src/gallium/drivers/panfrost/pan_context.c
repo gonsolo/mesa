@@ -49,7 +49,7 @@
 #include "util/u_vbuf.h"
 #include "util/perf/cpu_trace.h"
 
-#include "clc/panfrost_compile.h"
+#include "clc/pan_compile.h"
 #include "compiler/nir/nir_serialize.h"
 #include "util/pan_lower_framebuffer.h"
 #include "decode.h"
@@ -170,14 +170,13 @@ panfrost_set_blend_color(struct pipe_context *pipe,
 /* Create a final blend given the context */
 
 uint64_t
-panfrost_get_blend(struct panfrost_batch *batch, unsigned rti,
-                   struct panfrost_bo **bo, unsigned *shader_offset)
+panfrost_get_blend(struct panfrost_batch *batch, unsigned rti)
 {
    struct panfrost_context *ctx = batch->ctx;
    struct panfrost_device *dev = pan_device(ctx->base.screen);
    struct panfrost_blend_state *blend = ctx->blend;
    struct pan_blend_info info = blend->info[rti];
-   struct pipe_surface *surf = batch->key.cbufs[rti];
+   struct pipe_surface *surf = &batch->key.cbufs[rti];
    enum pipe_format fmt = surf->format;
 
    /* Use fixed-function if the equation permits, the format is blendable,
@@ -212,16 +211,6 @@ panfrost_get_blend(struct panfrost_batch *batch, unsigned rti,
    memcpy(pan_blend.constants, ctx->blend_color.color,
           sizeof(pan_blend.constants));
 
-   /* Upload the shader, sharing a BO */
-   if (!(*bo)) {
-      *bo = panfrost_batch_create_bo(batch, 4096, PAN_BO_EXECUTE,
-                                     PIPE_SHADER_FRAGMENT, "Blend shader");
-      if (!(*bo)) {
-         mesa_loge("failed to allocate blend-shader");
-         return 0;
-      }
-   }
-
    struct panfrost_compiled_shader *ss = ctx->prog[PIPE_SHADER_FRAGMENT];
 
    /* Default for Midgard */
@@ -235,19 +224,14 @@ panfrost_get_blend(struct panfrost_batch *batch, unsigned rti,
    }
 
    pthread_mutex_lock(&dev->blend_shaders.lock);
-   struct pan_blend_shader_variant *shader =
+   struct pan_blend_shader *shader =
       pan_screen(ctx->base.screen)
          ->vtbl.get_blend_shader(&dev->blend_shaders, &pan_blend, col0_type,
                                  col1_type, rti);
-
-   /* Size check and upload */
-   unsigned offset = *shader_offset;
-   assert((offset + shader->binary.size) < 4096);
-   memcpy((*bo)->ptr.cpu + offset, shader->binary.data, shader->binary.size);
-   *shader_offset += shader->binary.size;
+   uint64_t address = shader->address;
    pthread_mutex_unlock(&dev->blend_shaders.lock);
 
-   return ((*bo)->ptr.gpu + offset) | shader->first_tag;
+   return address;
 }
 
 static void
@@ -294,8 +278,8 @@ panfrost_set_shader_images(struct pipe_context *pctx,
 
       /* Images don't work with AFBC/AFRC, since they require pixel-level
        * granularity */
-      if (drm_is_afbc(rsrc->image.layout.modifier) ||
-          drm_is_afrc(rsrc->image.layout.modifier)) {
+      if (drm_is_afbc(rsrc->image.props.modifier) ||
+          drm_is_afrc(rsrc->image.props.modifier)) {
          pan_resource_modifier_convert(
             ctx, rsrc, DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED, true,
             "Shader image");
@@ -467,7 +451,7 @@ panfrost_set_framebuffer_state(struct pipe_context *pctx,
    ctx->fb_rt_mask = 0;
 
    for (unsigned i = 0; i < ctx->pipe_framebuffer.nr_cbufs; ++i) {
-      if (ctx->pipe_framebuffer.cbufs[i])
+      if (ctx->pipe_framebuffer.cbufs[i].texture)
          ctx->fb_rt_mask |= BITFIELD_BIT(i);
    }
 }

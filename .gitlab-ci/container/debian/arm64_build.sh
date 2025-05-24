@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2086 # we want word splitting
 
+# When changing this file, you need to bump the following
+# .gitlab-ci/image-tags.yml tags:
+# DEBIAN_BUILD_TAG
+
 set -e
 
 . .gitlab-ci/setup-test-env.sh
@@ -76,8 +80,11 @@ DEPS=(
     python3-pycparser
     python3-requests
     python3-setuptools
+    python3-venv
+    shellcheck
     u-boot-tools
     xz-utils
+    yamllint
     zlib1g-dev
     zstd
 )
@@ -88,6 +95,8 @@ apt-get -y install "${DEPS[@]}" "${EPHEMERAL[@]}"
 
 # Needed for ci-fairy s3cp
 pip3 install --break-system-packages "ci-fairy[s3] @ git+https://gitlab.freedesktop.org/freedesktop/ci-templates@$MESA_TEMPLATES_COMMIT"
+
+pip3 install --break-system-packages -r bin/ci/test/requirements.txt
 
 arch=armhf
 . .gitlab-ci/container/cross_build.sh

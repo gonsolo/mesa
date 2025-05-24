@@ -34,7 +34,13 @@ private:
 
    void emit_adj_fix();
 
-   bool emit_load_per_vertex_input(nir_intrinsic_instr *instr);
+   bool emit_indirect_vertex_at_index(nir_intrinsic_instr *instr);
+
+   bool emit_load_per_vertex_input_direct(nir_intrinsic_instr *instr);
+
+   bool emit_load_per_vertex_input_indirect(nir_intrinsic_instr *instr);
+
+   bool load_per_vertex_input_at_addr(nir_intrinsic_instr *instr, PRegister addr);
 
    bool load_input(UNUSED nir_intrinsic_instr *intr) override
    {
@@ -43,7 +49,7 @@ private:
    bool store_output(nir_intrinsic_instr *instr) override;
    bool emit_vertex(nir_intrinsic_instr *instr, bool cut);
 
-   std::array<PRegister, 6> m_per_vertex_offsets{nullptr};
+   std::array<PRegister, R600_GS_VERTEX_INDIRECT_TOTAL> m_per_vertex_offsets{nullptr};
    PRegister m_primitive_id{nullptr};
    PRegister m_invocation_id{nullptr};
    std::array<PRegister, 4> m_export_base{nullptr};

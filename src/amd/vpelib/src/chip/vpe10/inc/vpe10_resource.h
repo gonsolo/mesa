@@ -51,6 +51,8 @@ bool vpe10_check_h_mirror_support(bool *input_mirror, bool *output_mirror);
 
 enum vpe_status vpe10_check_bg_color_support(struct vpe_priv* vpe_priv, struct vpe_color* bg_color);
 
+uint16_t vpe10_get_bg_stream_idx(struct vpe_priv *vpe_priv);
+
 enum vpe_status vpe10_calculate_segments(
     struct vpe_priv *vpe_priv, const struct vpe_build_param *params);
 
@@ -75,6 +77,9 @@ enum vpe_status vpe10_check_mirror_rotation_support(const struct vpe_stream *str
 enum vpe_status vpe10_update_blnd_gamma(struct vpe_priv *vpe_priv,
     const struct vpe_build_param *param, const struct vpe_stream *stream,
     struct transfer_func *blnd_tf);
+
+enum vpe_status vpe10_update_output_gamma(struct vpe_priv *vpe_priv,
+    const struct vpe_build_param *param, struct transfer_func *output_tf, bool geometric_scaling);
 
 struct opp *vpe10_opp_create(struct vpe_priv *vpe_priv, int inst);
 

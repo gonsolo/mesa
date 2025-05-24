@@ -157,9 +157,12 @@ can_fast_clear_color(struct iris_context *ice,
       return false;
    }
 
-   /* Wa_16021232440: Disable fast clear when height is 16k */
+   /* Wa_16021232440, HSD_16023071695: Disable fast clear when height
+    * or width is 16k.
+    */
    if (intel_needs_workaround(devinfo, 16021232440) &&
-       res->surf.logical_level0_px.h == 16 * 1024) {
+       (res->surf.logical_level0_px.h == 16 * 1024 ||
+        res->surf.logical_level0_px.w == 16 * 1024)) {
       return false;
    }
 
@@ -740,7 +743,7 @@ iris_clear(struct pipe_context *ctx,
    }
 
    if (buffers & PIPE_CLEAR_DEPTHSTENCIL) {
-      struct pipe_surface *psurf = cso_fb->zsbuf;
+      struct pipe_surface *psurf = &cso_fb->zsbuf;
 
       box.depth = psurf->u.tex.last_layer - psurf->u.tex.first_layer + 1;
       box.z = psurf->u.tex.first_layer,
@@ -753,7 +756,7 @@ iris_clear(struct pipe_context *ctx,
    if (buffers & PIPE_CLEAR_COLOR) {
       for (unsigned i = 0; i < cso_fb->nr_cbufs; i++) {
          if (buffers & (PIPE_CLEAR_COLOR0 << i)) {
-            struct pipe_surface *psurf = cso_fb->cbufs[i];
+            struct pipe_surface *psurf = ice->state.fb_cbufs[i];
             struct iris_surface *isurf = (void *) psurf;
             box.depth = psurf->u.tex.last_layer - psurf->u.tex.first_layer + 1,
             box.z = psurf->u.tex.first_layer,

@@ -113,6 +113,9 @@ radeonsi-raven-piglit:
     - .test-piglit
     - .lava-lenovo-TPad-C13-Yoga-zork:x86_64
   parallel: 2
+  rules:
+    - !reference [.radeonsi-rules, rules]
+    - !reference [.rusticl-rules, rules]
   variables:
     DEQP_SUITE: radeonsi-raven
     HWCI_START_WESTON: 1
@@ -148,13 +151,11 @@ radeonsi-raven-va:
 radeonsi-raven-vaapi-fluster:
   extends:
     - radeonsi-raven-va
-    - .radeonsi-raven-vaapi-fluster
+    - .radeonsi-vaapi-fluster-rules
   timeout: 30m
   parallel: 2
   variables:
     FLUSTER_CODECS: VP9 H.264 H.265
-    # FIXME: Downloading the vectors can take about 4-5 minutes
-    DEVICE_HANGING_TIMEOUT_SEC: 1200
 
 
 ############### VKCTS tests ###############
@@ -163,87 +164,87 @@ radeonsi-raven-vaapi-fluster:
 # Hence, disable it for now.
 .radv-kabini-vkcts:
   extends:
-    - .vkcts-test-valve
+    - .ci-tron-test-radv-vk
     - .kabini-test-valve
     - .radv-valve-manual-rules  # Make sure this job is *always* run manually
   timeout: 12h
   variables:
+    DEQP_SUITE: radv-valve
     GPU_VERSION: radv-kabini
-    B2C_TIMEOUT_BOOT_MINUTES: 710
-    B2C_TIMEOUT_OVERALL_MINUTES: 710
-    B2C_TIMEOUT_BOOT_RETRIES: 0
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 710
 
 radv-tahiti-vkcts:
   extends:
-    - .vkcts-test-valve
+    - .ci-tron-test-radv-vk
     - .tahiti-test-valve
     - .radv-valve-manual-rules  # Make sure this job is *always* run manually
   timeout: 1h
   variables:
+    DEQP_SUITE: radv-valve
     GPU_VERSION: radv-tahiti
-    B2C_TIMEOUT_BOOT_MINUTES: 50
-    B2C_TIMEOUT_OVERALL_MINUTES: 50
-    B2C_TIMEOUT_BOOT_RETRIES: 0
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 50
     RADV_PERFTEST: video_decode,video_encode
 
 radv-hawaii-vkcts:
   extends:
-    - .vkcts-test-valve
+    - .ci-tron-test-radv-vk
     - .hawaii-test-valve
     - .radv-valve-manual-rules
   timeout: 1h
   variables:
+    DEQP_SUITE: radv-valve
     GPU_VERSION: radv-hawaii
-    B2C_TIMEOUT_BOOT_MINUTES: 50
-    B2C_TIMEOUT_OVERALL_MINUTES: 50
-    B2C_TIMEOUT_BOOT_RETRIES: 0
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 50
     RADV_PERFTEST: video_decode,video_encode
 
 radv-polaris10-vkcts:
   extends:
-    - .vkcts-test-valve
+    - .ci-tron-test-radv-vk
     - .polaris10-test-valve-kws
     - .radv-valve-manual-rules
   timeout: 1h 15m
   variables:
+    DEQP_SUITE: radv-valve
     GPU_VERSION: radv-polaris10
-    B2C_TIMEOUT_BOOT_MINUTES: 70
-    B2C_TIMEOUT_OVERALL_MINUTES: 70
+    CI_TRON_TIMEOUT__BOOT_CYCLE__RETRIES: 4
+    CI_TRON_TIMEOUT__BOOT_CYCLE__MINUTES: 70
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 70
     RADV_PERFTEST: video_decode,video_encode
     radv_enable_float16_gfx8: true
 
 radv-vega10-vkcts:
   extends:
-    - .vkcts-test-valve
+    - .ci-tron-test-radv-vk
     - .vega10-test-valve
     - .radv-valve-manual-rules
   timeout: 1h 15m
   variables:
+    DEQP_SUITE: radv-valve
     GPU_VERSION: radv-vega10
-    B2C_TIMEOUT_BOOT_MINUTES: 70
-    B2C_TIMEOUT_OVERALL_MINUTES: 70
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 70
     RADV_PERFTEST: transfer_queue,video_decode,video_encode
 
 radv-renoir-vkcts:
   extends:
-    - .vkcts-test-valve
+    - .ci-tron-test-radv-vk
     - .renoir-test-valve
     - .radv-valve-manual-rules
   timeout: 2h 15m
   variables:
+    DEQP_SUITE: radv-valve
     GPU_VERSION: radv-renoir
-    B2C_TIMEOUT_BOOT_MINUTES: 130
-    B2C_TIMEOUT_OVERALL_MINUTES: 130
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 130
     RADV_PERFTEST: transfer_queue,video_decode,video_encode
     FDO_CI_CONCURRENT: 12  # HACK: Reduce the memory pressure
 
 radv-navi10-vkcts:
   parallel: 2
   extends:
-    - .vkcts-test-valve
+    - .ci-tron-test-radv-vk
     - .navi10-test-valve-kws
     - .radv-valve-manual-rules
   variables:
+    DEQP_SUITE: radv-valve
     GPU_VERSION: radv-navi10
     RADV_PERFTEST: transfer_queue,video_decode,video_encode
 
@@ -251,81 +252,82 @@ radv-navi21-vkcts:
   timeout: 35m
   parallel: 3
   extends:
-    - .vkcts-test-valve
+    - .ci-tron-test-radv-vk
     - .navi21-test-valve
     - .radv-valve-rules
   variables:
+    DEQP_SUITE: radv-valve
     GPU_VERSION: radv-navi21
-    B2C_TIMEOUT_BOOT_MINUTES: 30
-    B2C_TIMEOUT_OVERALL_MINUTES: 30
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 30
     RADV_PERFTEST: transfer_queue
 
 radv-vangogh-vkcts:
   parallel: 2
   extends:
-    - .vkcts-test-valve
+    - .ci-tron-test-radv-vk
     - .vangogh-test-valve
     - .radv-valve-manual-rules
-  timeout: 2h 10m
+  timeout: 90m
   variables:
+    DEQP_SUITE: radv-valve
     GPU_VERSION: radv-vangogh
     RADV_PERFTEST: transfer_queue
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 89
 
-.radeonsi-vangogh-glcts-common:
+radeonsi-vangogh-glcts-full:
   extends:
-    - .b2c-x86_64-test-gl
+    - .ci-tron-x86_64-test-gl
+    - .ci-tron-test-amdgpu
     - .test-piglit
     - .vangogh-test-valve
+    - .radeonsi-valve-manual-rules
+  timeout: 90m
   variables:
     GPU_VERSION: radeonsi-vangogh
     DEQP_SUITE: radeonsi-vangogh
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 89
 
 radeonsi-vangogh-glcts:
   extends:
-    - .radeonsi-vangogh-glcts-common
+    - radeonsi-vangogh-glcts-full
     - .radeonsi-valve-rules
   timeout: 30m
   variables:
     DEQP_FRACTION: 4
-
-radeonsi-vangogh-glcts-full:
-  extends:
-    - .radeonsi-vangogh-glcts-common
-    - .radeonsi-valve-manual-rules
-  timeout: 90m
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 29
 
 radv-raphael-vkcts:
   extends:
-    - .vkcts-test-valve
+    - .ci-tron-test-radv-vk
     - .raphael-test-valve
     - .radv-valve-manual-rules
   timeout: 45m
   variables:
+    DEQP_SUITE: radv-valve
     GPU_VERSION: radv-raphael
-    B2C_TIMEOUT_BOOT_MINUTES: 35
-    B2C_TIMEOUT_OVERALL_MINUTES: 40
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 40
     RADV_PERFTEST: transfer_queue,video_decode,video_encode
 
 radv-navi31-vkcts:
   timeout: 25m
   parallel: 2
   extends:
-    - .vkcts-test-valve
+    - .ci-tron-test-radv-vk
     - .navi31-test-valve
     - .radv-valve-rules
   variables:
+    DEQP_SUITE: radv-valve
     GPU_VERSION: radv-navi31
     RADV_DEBUG: nomeshshader # Disable mesh shaders until task shaders stop hanging
     RADV_PERFTEST: transfer_queue,video_decode,video_encode
-    B2C_TIMEOUT_BOOT_MINUTES: 20
-    B2C_TIMEOUT_OVERALL_MINUTES: 20
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 20
 
 ############### Fossilize
 radv-fossils:
   extends:
     - .radv-valve-rules
     - .test-vk
-    - .test-radv
+    - .ci-tron-test-radv
     - .fossilize-test
   rules:
     - when: never # disabled due to broken job (no git in container)
@@ -360,7 +362,7 @@ radv-fossils:
 
 radv-tahiti-vkd3d:
   extends:
-    - .b2c-test-radv-vk
+    - .ci-tron-test-radv-vk
     - .test-vkd3d-proton
     - .tahiti-test-valve
     - .radv-valve-manual-rules
@@ -371,7 +373,7 @@ radv-tahiti-vkd3d:
 
 radv-hawaii-vkd3d:
   extends:
-    - .b2c-test-radv-vk
+    - .ci-tron-test-radv-vk
     - .test-vkd3d-proton
     - .hawaii-test-valve
     - .radv-valve-manual-rules
@@ -382,7 +384,7 @@ radv-hawaii-vkd3d:
 
 radv-polaris10-vkd3d:
   extends:
-    - .b2c-test-radv-vk
+    - .ci-tron-test-radv-vk
     - .test-vkd3d-proton
     - .polaris10-test-valve-kws
     - .radv-valve-manual-rules
@@ -393,7 +395,7 @@ radv-polaris10-vkd3d:
 
 radv-vega10-vkd3d:
   extends:
-    - .b2c-test-radv-vk
+    - .ci-tron-test-radv-vk
     - .test-vkd3d-proton
     - .vega10-test-valve
     - .radv-valve-manual-rules
@@ -404,7 +406,7 @@ radv-vega10-vkd3d:
 
 radv-renoir-vkd3d:
   extends:
-    - .b2c-test-radv-vk
+    - .ci-tron-test-radv-vk
     - .test-vkd3d-proton
     - .renoir-test-valve
     - .radv-valve-manual-rules
@@ -415,7 +417,7 @@ radv-renoir-vkd3d:
 
 radv-navi10-vkd3d:
   extends:
-    - .b2c-test-radv-vk
+    - .ci-tron-test-radv-vk
     - .test-vkd3d-proton
     - .navi10-test-valve-mupuf
     - .radv-valve-manual-rules
@@ -426,7 +428,7 @@ radv-navi10-vkd3d:
 
 radv-navi21-vkd3d:
   extends:
-    - .b2c-test-radv-vk
+    - .ci-tron-test-radv-vk
     - .test-vkd3d-proton
     - .navi21-test-valve
     - .radv-valve-manual-rules
@@ -437,7 +439,7 @@ radv-navi21-vkd3d:
 
 radv-vangogh-vkd3d:
   extends:
-    - .b2c-test-radv-vk
+    - .ci-tron-test-radv-vk
     - .test-vkd3d-proton
     - .vangogh-test-valve
     - .radv-valve-manual-rules
@@ -448,7 +450,7 @@ radv-vangogh-vkd3d:
 
 radv-raphael-vkd3d:
   extends:
-    - .b2c-test-radv-vk
+    - .ci-tron-test-radv-vk
     - .test-vkd3d-proton
     - .raphael-test-valve
     - .radv-valve-manual-rules
@@ -459,7 +461,7 @@ radv-raphael-vkd3d:
 
 radv-navi31-vkd3d:
   extends:
-    - .b2c-test-radv-vk
+    - .ci-tron-test-radv-vk
     - .test-vkd3d-proton
     - .navi31-test-valve
     - .radv-valve-manual-rules
@@ -470,7 +472,7 @@ radv-navi31-vkd3d:
 
 .radv-kabini-vkd3d:
   extends:
-    - .b2c-test-radv-vk
+    - .ci-tron-test-radv-vk
     - .test-vkd3d-proton
     - .kabini-test-valve
     - .radv-valve-manual-rules

@@ -17,6 +17,8 @@
 
 #include "tu_tracepoints.h"
 #include "tu_tracepoints_perfetto.h"
+#include "vk_object.h"
+#include "vk_util.h"
 
 /* we can't include tu_knl.h and tu_device.h */
 
@@ -109,12 +111,8 @@ static uint64_t last_suspend_count;
 static uint64_t gpu_max_timestamp;
 static uint64_t gpu_timestamp_offset;
 
-struct TuRenderpassIncrementalState {
-   bool was_cleared = true;
-};
-
 struct TuRenderpassTraits : public perfetto::DefaultDataSourceTraits {
-   using IncrementalStateType = TuRenderpassIncrementalState;
+   using IncrementalStateType = MesaRenderpassIncrementalState;
 };
 
 class TuRenderpassDataSource : public MesaRenderpassDataSource<TuRenderpassDataSource,
@@ -140,8 +138,14 @@ PERFETTO_DECLARE_DATA_SOURCE_STATIC_MEMBERS(TuRenderpassDataSource);
 PERFETTO_DEFINE_DATA_SOURCE_STATIC_MEMBERS(TuRenderpassDataSource);
 
 static void
-send_descriptors(TuRenderpassDataSource::TraceContext &ctx)
+setup_incremental_state(TuRenderpassDataSource::TraceContext &ctx)
 {
+   auto state = ctx.GetIncrementalState();
+   if (!state->was_cleared)
+      return;
+
+   state->was_cleared = false;
+
    PERFETTO_LOG("Sending renderstage descriptors");
 
    auto packet = ctx.NewTracePacket();
@@ -273,10 +277,7 @@ stage_end(struct tu_device *dev, uint64_t ts_ns, enum tu_stage_id stage_id,
       return;
 
    TuRenderpassDataSource::Trace([=](TuRenderpassDataSource::TraceContext tctx) {
-      if (auto state = tctx.GetIncrementalState(); state->was_cleared) {
-         send_descriptors(tctx);
-         state->was_cleared = false;
-      }
+      setup_incremental_state(tctx);
 
       auto packet = tctx.NewTracePacket();
 
@@ -662,6 +663,28 @@ tu_perfetto_log_destroy_image(struct tu_device *dev, struct tu_image *image)
 }
 
 
+
+void
+tu_perfetto_set_debug_utils_object_name(const VkDebugUtilsObjectNameInfoEXT *pNameInfo)
+{
+   TuRenderpassDataSource::Trace([=](auto tctx) {
+      /* Do we need this for SEQ_INCREMENTAL_STATE_CLEARED for the object name to stick? */
+      setup_incremental_state(tctx);
+
+      tctx.GetDataSourceLocked()->SetDebugUtilsObjectNameEXT(tctx, pNameInfo);
+   });
+}
+
+void
+tu_perfetto_refresh_debug_utils_object_name(const struct vk_object_base *object)
+{
+   TuRenderpassDataSource::Trace([=](auto tctx) {
+      /* Do we need this for SEQ_INCREMENTAL_STATE_CLEARED for the object name to stick? */
+      setup_incremental_state(tctx);
+
+      tctx.GetDataSourceLocked()->RefreshSetDebugUtilsObjectNameEXT(tctx, object);
+   });
+}
 
 #ifdef __cplusplus
 }

@@ -246,7 +246,7 @@ get_device_extensions(const struct panvk_physical_device *device,
       .KHR_maintenance4 = has_vk1_1,
       .KHR_maintenance5 = has_vk1_1,
       .KHR_map_memory2 = true,
-      .KHR_multiview = arch >= 10,
+      .KHR_multiview = true,
       .KHR_pipeline_executable_properties = true,
       .KHR_pipeline_library = true,
       .KHR_push_descriptor = true,
@@ -296,6 +296,7 @@ get_device_extensions(const struct panvk_physical_device *device,
       .EXT_graphics_pipeline_library = true,
       .EXT_hdr_metadata = true,
       .EXT_host_query_reset = true,
+      .EXT_image_2d_view_of_3d = true,
       /* EXT_image_drm_format_modifier depends on KHR_sampler_ycbcr_conversion */
       .EXT_image_drm_format_modifier = arch >= 10,
       .EXT_image_robustness = true,
@@ -306,6 +307,7 @@ get_device_extensions(const struct panvk_physical_device *device,
       .EXT_pipeline_creation_feedback = true,
       .EXT_pipeline_robustness = true,
       .EXT_private_data = true,
+      .EXT_primitive_topology_list_restart = true,
       .EXT_provoking_vertex = true,
       .EXT_queue_family_foreign = true,
       .EXT_sampler_filter_minmax = arch >= 10,
@@ -331,7 +333,7 @@ has_compressed_formats(const struct panvk_physical_device *physical_device,
                        const uint32_t required_formats)
 {
    uint32_t supported_compr_fmts =
-      panfrost_query_compressed_formats(&physical_device->kmod.props);
+      pan_query_compressed_formats(&physical_device->kmod.props);
 
    return (supported_compr_fmts & required_formats) == required_formats;
 }
@@ -406,7 +408,7 @@ get_features(const struct panvk_physical_device *device,
       .uniformAndStorageBuffer16BitAccess = true,
       .storagePushConstant16 = true,
       .storageInputOutput16 = true,
-      .multiview = arch >= 10,
+      .multiview = true,
       .multiviewGeometryShader = false,
       .multiviewTessellationShader = false,
       .variablePointersStorageBuffer = true,
@@ -533,6 +535,14 @@ get_features(const struct panvk_physical_device *device,
       .borderColorSwizzle = true,
       .borderColorSwizzleFromImage = true,
 
+      /* VK_EXT_image_2d_view_of_3d */
+      .image2DViewOf3D = true,
+      .sampler2DViewOf3D = true,
+
+      /* VK_EXT_primitive_topology_list_restart */
+      .primitiveTopologyListRestart = true,
+      .primitiveTopologyPatchListRestart = false,
+
       /* VK_EXT_provoking_vertex */
       .provokingVertexLast = true,
       .transformFeedbackPreservesProvokingVertex = false,
@@ -618,6 +628,9 @@ get_sample_counts(unsigned arch, unsigned max_tib_size,
       pan_get_max_msaa(arch, max_tib_size, max_cbuf_atts, format_size);
 
    assert(max_msaa >= 4);
+
+   if (arch >= 12)
+      sample_counts |= VK_SAMPLE_COUNT_2_BIT;
 
    if (max_msaa >= 8)
       sample_counts |= VK_SAMPLE_COUNT_8_BIT;
@@ -888,7 +901,6 @@ get_device_properties(const struct panvk_instance *instance,
       .sparseResidencyStandard3DBlockShape = false,
 
       /* Vulkan 1.1 properties */
-      /* XXX: 1.1 support */
       .subgroupSize = pan_subgroup_size(arch),
       /* We only support VS, FS, and CS.
        *
@@ -912,15 +924,14 @@ get_device_properties(const struct panvk_instance *instance,
          VK_SUBGROUP_FEATURE_ROTATE_CLUSTERED_BIT,
       .subgroupQuadOperationsInAllStages = false,
       .pointClippingBehavior = VK_POINT_CLIPPING_BEHAVIOR_ALL_CLIP_PLANES,
-      .maxMultiviewViewCount = arch >= 10 ? 8 : 0,
-      .maxMultiviewInstanceIndex = arch >= 10 ? UINT32_MAX : 0,
+      .maxMultiviewViewCount = 8,
+      .maxMultiviewInstanceIndex = UINT32_MAX,
       .protectedNoFault = false,
       .maxPerSetDescriptors = UINT16_MAX,
       /* Our buffer size fields allow only this much */
       .maxMemoryAllocationSize = UINT32_MAX,
 
       /* Vulkan 1.2 properties */
-      /* XXX: 1.2 support */
       .supportedDepthResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT |
                                     VK_RESOLVE_MODE_AVERAGE_BIT |
                                     VK_RESOLVE_MODE_MIN_BIT |
@@ -983,12 +994,14 @@ get_device_properties(const struct panvk_instance *instance,
 
       /* Vulkan 1.3 properties */
       /* XXX: 1.3 support */
-      /* XXX: VK_EXT_subgroup_size_control */
+
+      /* VK_EXT_subgroup_size_control */
       .minSubgroupSize = pan_subgroup_size(arch),
       .maxSubgroupSize = pan_subgroup_size(arch),
       .maxComputeWorkgroupSubgroups =
          device->kmod.props.max_threads_per_wg / pan_subgroup_size(arch),
       .requiredSubgroupSizeStages = VK_SHADER_STAGE_COMPUTE_BIT,
+
       /* XXX: VK_EXT_inline_uniform_block */
       .maxInlineUniformBlockSize = MAX_INLINE_UNIFORM_BLOCK_SIZE,
       .maxPerStageDescriptorInlineUniformBlocks =
@@ -1001,17 +1014,20 @@ get_device_properties(const struct panvk_instance *instance,
          MAX_INLINE_UNIFORM_BLOCK_DESCRIPTORS,
       .maxInlineUniformTotalSize =
          MAX_INLINE_UNIFORM_BLOCK_DESCRIPTORS * MAX_INLINE_UNIFORM_BLOCK_SIZE,
-      /* XXX: VK_KHR_shader_integer_dot_product */
+
+      /* VK_KHR_shader_integer_dot_product */
       .integerDotProduct8BitUnsignedAccelerated = true,
       .integerDotProduct8BitSignedAccelerated = true,
       .integerDotProduct4x8BitPackedUnsignedAccelerated = true,
       .integerDotProduct4x8BitPackedSignedAccelerated = true,
+
       /* XXX: VK_EXT_texel_buffer_alignment */
       .storageTexelBufferOffsetAlignmentBytes = 64,
       .storageTexelBufferOffsetSingleTexelAlignment = false,
       .uniformTexelBufferOffsetAlignmentBytes = 4,
       .uniformTexelBufferOffsetSingleTexelAlignment = true,
-      /* XXX: VK_KHR_maintenance4 */
+
+      /* VK_KHR_maintenance4 */
       .maxBufferSize = 1 << 30,
 
       /* VK_KHR_line_rasterization */
@@ -1113,8 +1129,8 @@ panvk_physical_device_init(struct panvk_physical_device *device,
 
    pan_kmod_dev_query_props(device->kmod.dev, &device->kmod.props);
 
-   device->model = panfrost_get_model(device->kmod.props.gpu_prod_id,
-                                      device->kmod.props.gpu_variant);
+   device->model = pan_get_model(device->kmod.props.gpu_prod_id,
+                                 device->kmod.props.gpu_variant);
 
    unsigned arch = pan_arch(device->kmod.props.gpu_prod_id);
 
@@ -1153,8 +1169,8 @@ panvk_physical_device_init(struct panvk_physical_device *device,
    if (result != VK_SUCCESS)
       goto fail;
 
-   device->formats.all = panfrost_format_table(arch);
-   device->formats.blendable = panfrost_blendable_format_table(arch);
+   device->formats.all = pan_format_table(arch);
+   device->formats.blendable = pan_blendable_format_table(arch);
 
    memset(device->name, 0, sizeof(device->name));
    sprintf(device->name, "%s", device->model->name);
@@ -1370,8 +1386,7 @@ unsupported_yuv_format(enum pipe_format pfmt)
 
 static bool
 format_is_supported(struct panvk_physical_device *physical_device,
-                    const struct panfrost_format fmt,
-                    enum pipe_format pfmt)
+                    const struct pan_format fmt, enum pipe_format pfmt)
 {
    if (pfmt == PIPE_FORMAT_NONE)
       return false;
@@ -1387,7 +1402,7 @@ format_is_supported(struct panvk_physical_device *physical_device,
     * the supported formats reported by the GPU. */
    if (util_format_is_compressed(pfmt)) {
       uint32_t supported_compr_fmts =
-         panfrost_query_compressed_formats(&physical_device->kmod.props);
+         pan_query_compressed_formats(&physical_device->kmod.props);
 
       if (!(BITFIELD_BIT(fmt.texfeat_bit) & supported_compr_fmts))
          return false;
@@ -1402,7 +1417,7 @@ get_image_plane_format_features(struct panvk_physical_device *physical_device,
 {
    VkFormatFeatureFlags2 features = 0;
    enum pipe_format pfmt = vk_format_to_pipe_format(format);
-   const struct panfrost_format fmt = physical_device->formats.all[pfmt];
+   const struct pan_format fmt = physical_device->formats.all[pfmt];
    unsigned arch = pan_arch(physical_device->kmod.props.gpu_prod_id);
 
    if (!format_is_supported(physical_device, fmt, pfmt))
@@ -1544,7 +1559,7 @@ get_buffer_format_features(struct panvk_physical_device *physical_device,
 {
    VkFormatFeatureFlags2 features = 0;
    enum pipe_format pfmt = vk_format_to_pipe_format(format);
-   const struct panfrost_format fmt = physical_device->formats.all[pfmt];
+   const struct pan_format fmt = physical_device->formats.all[pfmt];
 
    if (!format_is_supported(physical_device, fmt, pfmt))
       return 0;

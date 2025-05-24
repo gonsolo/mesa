@@ -18,6 +18,9 @@
 #include "panvk_image_view.h"
 #include "panvk_priv_bo.h"
 
+#include "pan_afbc.h"
+#include "pan_texture.h"
+
 #include "genxml/gen_macros.h"
 
 static enum mali_texture_dimension
@@ -102,9 +105,9 @@ prepare_tex_descs(struct panvk_image_view *view)
    }
 #if PAN_ARCH == 7
    /* v7 requires AFBC reswizzle. */
-   else if (!panfrost_format_is_yuv(view->pview.format) &&
-            panfrost_format_supports_afbc(PAN_ARCH, view->pview.format))
-      GENX(panfrost_texture_afbc_reswizzle)(&pview);
+   else if (!pan_format_is_yuv(view->pview.format) &&
+            pan_format_supports_afbc(PAN_ARCH, view->pview.format))
+      GENX(pan_texture_afbc_reswizzle)(&pview);
 #endif
 
    /* If the view contains both stencil and depth, we need to keep only the
@@ -114,8 +117,7 @@ prepare_tex_descs(struct panvk_image_view *view)
       pview.format = PIPE_FORMAT_Z32_FLOAT;
 
    uint32_t plane_count = vk_format_get_plane_count(view->vk.format);
-   uint32_t tex_payload_size =
-      GENX(panfrost_estimate_texture_payload_size)(&pview);
+   uint32_t tex_payload_size = GENX(pan_texture_estimate_payload_size)(&pview);
 
    struct panvk_pool_alloc_info alloc_info = {
 #if PAN_ARCH == 6
@@ -131,14 +133,32 @@ prepare_tex_descs(struct panvk_image_view *view)
       .size = tex_payload_size * (can_preload_other_aspect ? 2 : plane_count),
    };
 
+#if PAN_ARCH >= 9
+   uint32_t storage_payload_size = 0;
+   if (view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) {
+      /* We'll need a second set of Texture Descriptors for storage use. */
+      storage_payload_size = tex_payload_size * plane_count;
+      alloc_info.size += storage_payload_size;
+   }
+#endif
+
    view->mem = panvk_pool_alloc_mem(&dev->mempools.rw, alloc_info);
    if (!panvk_priv_mem_host_addr(view->mem))
       return panvk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
 
-   struct panfrost_ptr ptr = {
+   struct pan_ptr ptr = {
       .gpu = panvk_priv_mem_dev_addr(view->mem),
       .cpu = panvk_priv_mem_host_addr(view->mem),
    };
+
+#if PAN_ARCH >= 9
+   struct pan_ptr storage_ptr = ptr;
+   if (view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) {
+      uint32_t storage_payload_offset = alloc_info.size - storage_payload_size;
+      storage_ptr.gpu += storage_payload_offset;
+      storage_ptr.cpu += storage_payload_offset;
+   }
+#endif
 
    if (plane_count > 1) {
       memset(pview.planes, 0, sizeof(pview.planes));
@@ -151,13 +171,26 @@ prepare_tex_descs(struct panvk_image_view *view)
          pview.planes[0] = view->pview.planes[plane];
          pview.format = vk_format_to_pipe_format(plane_format);
 
-         GENX(panfrost_new_texture)(&pview, &view->descs.tex[plane], &ptr);
+         GENX(pan_sampled_texture_emit)(&pview, &view->descs.tex[plane], &ptr);
+#if PAN_ARCH >= 9
+         if (view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) {
+            GENX(pan_storage_texture_emit)(
+               &pview, &view->descs.storage_tex[plane], &storage_ptr);
+            storage_ptr.cpu += tex_payload_size;
+            storage_ptr.gpu += tex_payload_size;
+         }
+#endif
 
          ptr.cpu += tex_payload_size;
          ptr.gpu += tex_payload_size;
       }
    } else {
-      GENX(panfrost_new_texture)(&pview, &view->descs.tex[0], &ptr);
+      GENX(pan_sampled_texture_emit)(&pview, &view->descs.tex[0], &ptr);
+#if PAN_ARCH >= 9
+      if (view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT)
+         GENX(pan_storage_texture_emit)(&pview, &view->descs.storage_tex[0],
+                                        &storage_ptr);
+#endif
    }
 
    if (!can_preload_other_aspect)
@@ -184,7 +217,8 @@ prepare_tex_descs(struct panvk_image_view *view)
    ptr.cpu += tex_payload_size;
    ptr.gpu += tex_payload_size;
 
-   GENX(panfrost_new_texture)(&pview, &view->descs.zs.other_aspect_tex, &ptr);
+   GENX(pan_sampled_texture_emit)(&pview, &view->descs.zs.other_aspect_tex,
+                                  &ptr);
    return VK_SUCCESS;
 }
 
@@ -207,11 +241,12 @@ prepare_attr_buf_descs(struct panvk_image_view *view)
          vk_format_get_blocksize(view->vk.view_format) == 1)))
       plane_idx = 1;
 
-   bool is_3d =
-      image->planes[plane_idx].layout.dim == MALI_TEXTURE_DIMENSION_3D;
-   unsigned offset = image->planes[plane_idx].data.offset;
-   offset += panfrost_texture_offset(
-      &image->planes[plane_idx].layout, view->pview.first_level,
+   const struct pan_image_props *plane_props = &image->planes[plane_idx].props;
+   const struct pan_image_layout *plane_layout =
+      &image->planes[plane_idx].layout;
+   bool is_3d = plane_props->dim == MALI_TEXTURE_DIMENSION_3D;
+   unsigned offset = pan_image_surface_offset(
+      plane_layout, view->pview.first_level,
       is_3d ? 0 : view->pview.first_layer, is_3d ? view->pview.first_layer : 0);
 
    pan_pack(&view->descs.img_attrib_buf[0], ATTRIBUTE_BUFFER, cfg) {
@@ -223,7 +258,7 @@ prepare_attr_buf_descs(struct panvk_image_view *view)
        */
       uint32_t fmt_blksize = util_format_get_blocksize(view->pview.format);
       uint32_t hw_fmt =
-         GENX(panfrost_format_from_pipe_format)(view->pview.format)->hw;
+         GENX(pan_format_from_pipe_format)(view->pview.format)->hw;
 
       assert(fmt_blksize < BITFIELD_MASK(10));
       assert(hw_fmt < BITFIELD_MASK(22));
@@ -233,7 +268,8 @@ prepare_attr_buf_descs(struct panvk_image_view *view)
                     : MALI_ATTRIBUTE_TYPE_3D_INTERLEAVED;
       cfg.pointer = image->planes[plane_idx].data.base + offset;
       cfg.stride = fmt_blksize | (hw_fmt << 10);
-      cfg.size = pan_kmod_bo_size(image->bo) - offset;
+      cfg.size = pan_image_mip_level_size(plane_props, plane_layout,
+                                          view->pview.first_level);
    }
 
    struct mali_attribute_buffer_packed *buf = &view->descs.img_attrib_buf[1];
@@ -247,10 +283,12 @@ prepare_attr_buf_descs(struct panvk_image_view *view)
          view->pview.dim == MALI_TEXTURE_DIMENSION_3D
             ? extent.depth
             : (view->pview.last_layer - view->pview.first_layer + 1);
-      cfg.row_stride = image->planes[plane_idx].layout.slices[level].row_stride;
+      cfg.row_stride =
+         image->planes[plane_idx].layout.slices[level].row_stride_B;
       if (cfg.r_dimension > 1) {
          cfg.slice_stride =
-            panfrost_get_layer_stride(&image->planes[plane_idx].layout, level);
+            pan_image_surface_stride(&image->planes[plane_idx].props,
+                                     &image->planes[plane_idx].layout, level);
       }
    }
 }

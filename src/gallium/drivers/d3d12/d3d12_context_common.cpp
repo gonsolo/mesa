@@ -24,8 +24,14 @@
 #include "d3d12_blit.h"
 #include "d3d12_cmd_signature.h"
 #include "d3d12_context.h"
+#ifdef HAVE_GALLIUM_D3D12_GRAPHICS
 #include "d3d12_compiler.h"
 #include "d3d12_compute_transforms.h"
+#include "nir_to_dxil.h"
+#ifdef _WIN32
+#include "dxil_validator.h"
+#endif
+#endif // HAVE_GALLIUM_D3D12_GRAPHICS
 #include "d3d12_debug.h"
 #include "d3d12_fence.h"
 #include "d3d12_format.h"
@@ -52,15 +58,8 @@
 #include "util/u_pstipple.h"
 #include "util/u_sample_positions.h"
 #include "util/u_dl.h"
-#include "nir_to_dxil.h"
-
 #include <dxguids/dxguids.h>
-
 #include <string.h>
-
-#ifdef _WIN32
-#include "dxil_validator.h"
-#endif
 
 static void
 d3d12_context_destroy(struct pipe_context *pctx)
@@ -105,6 +104,7 @@ d3d12_context_destroy(struct pipe_context *pctx)
       if (ctx->timestamp_query)
          pctx->destroy_query(pctx, ctx->timestamp_query);
 
+      util_framebuffer_init(pctx, NULL, ctx->fb_cbufs, &ctx->fb_zsbuf);
       util_unreference_framebuffer_state(&ctx->fb);
       d3d12_compute_pipeline_state_cache_destroy(ctx);
       d3d12_root_signature_cache_destroy(ctx);

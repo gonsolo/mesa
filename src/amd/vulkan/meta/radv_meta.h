@@ -67,6 +67,7 @@ struct radv_meta_saved_state {
 
 enum radv_copy_flags {
    RADV_COPY_FLAGS_DEVICE_LOCAL = 1 << 0,
+   RADV_COPY_FLAGS_SPARSE = 1 << 1,
 };
 
 extern const VkFormat radv_fs_key_format_exemplars[NUM_META_FS_KEYS];
@@ -115,6 +116,11 @@ enum radv_meta_object_key_type {
    RADV_META_OBJECT_KEY_QUERY_TIMESTAMP,
    RADV_META_OBJECT_KEY_QUERY_PRIMS_GEN,
    RADV_META_OBJECT_KEY_QUERY_MESH_PRIMS_GEN,
+   RADV_META_OBJECT_KEY_BVH_COPY,
+   RADV_META_OBJECT_KEY_BVH_COPY_BLAS_ADDRS_GFX12,
+   RADV_META_OBJECT_KEY_BVH_ENCODE,
+   RADV_META_OBJECT_KEY_BVH_UPDATE,
+   RADV_META_OBJECT_KEY_BVH_HEADER,
 };
 
 VkResult radv_device_init_meta(struct radv_device *device);
@@ -129,6 +135,24 @@ void radv_meta_save(struct radv_meta_saved_state *saved_state, struct radv_cmd_b
 void radv_meta_restore(const struct radv_meta_saved_state *state, struct radv_cmd_buffer *cmd_buffer);
 
 VkImageViewType radv_meta_get_view_type(const struct radv_image *image);
+
+static inline VkFormat
+radv_meta_get_96bit_channel_format(VkFormat format)
+{
+   switch (format) {
+   case VK_FORMAT_R32G32B32_UINT:
+      return VK_FORMAT_R32_UINT;
+      break;
+   case VK_FORMAT_R32G32B32_SINT:
+      return VK_FORMAT_R32_SINT;
+      break;
+   case VK_FORMAT_R32G32B32_SFLOAT:
+      return VK_FORMAT_R32_SFLOAT;
+      break;
+   default:
+      unreachable("invalid R32G32B32 format");
+   }
+}
 
 struct radv_meta_blit2d_surf {
    /** The size of an element in bytes. */
@@ -218,6 +242,9 @@ uint32_t radv_clear_htile(struct radv_cmd_buffer *cmd_buffer, const struct radv_
                           const VkImageSubresourceRange *range, uint32_t value, bool is_clear);
 
 void radv_update_memory_cp(struct radv_cmd_buffer *cmd_buffer, uint64_t va, const void *data, uint64_t size);
+
+void radv_update_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t va, uint64_t size, const void *data,
+                        enum radv_copy_flags dst_copy_flags);
 
 void radv_meta_decode_etc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image, VkImageLayout layout,
                           const VkImageSubresourceLayers *subresource, VkOffset3D offset, VkExtent3D extent);

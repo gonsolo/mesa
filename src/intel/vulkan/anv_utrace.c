@@ -580,11 +580,26 @@ void anv_CmdEndDebugUtilsLabelEXT(VkCommandBuffer _commandBuffer)
          util_dynarray_top_ptr(&cmd_buffer->vk.labels, VkDebugUtilsLabelEXT);
 
       trace_intel_end_cmd_buffer_annotation(&cmd_buffer->trace,
+                                            (uintptr_t)(vk_command_buffer_to_handle(&cmd_buffer->vk)),
                                             strlen(label->pLabelName),
                                             label->pLabelName);
    }
 
    vk_common_CmdEndDebugUtilsLabelEXT(_commandBuffer);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+anv_SetDebugUtilsObjectNameEXT(
+   VkDevice _device,
+   const VkDebugUtilsObjectNameInfoEXT *pNameInfo)
+{
+   VK_FROM_HANDLE(anv_device, device, _device);
+   VkResult result = vk_common_SetDebugUtilsObjectNameEXT(_device, pNameInfo);
+
+   if (result == VK_SUCCESS)
+      intel_ds_perfetto_set_debug_utils_object_name(&device->ds, pNameInfo);
+
+   return result;
 }
 
 void

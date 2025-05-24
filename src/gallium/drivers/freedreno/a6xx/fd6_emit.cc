@@ -98,7 +98,7 @@ compute_ztest_mode(struct fd6_emit *emit, bool lrz_valid) assert_dt
        * that could discard samples that would otherwise only be
        * hidden by a later draw.
        */
-      return lrz_valid ? A6XX_EARLY_LRZ_LATE_Z : A6XX_LATE_Z;
+      return lrz_valid ? A6XX_EARLY_Z_LATE_Z : A6XX_LATE_Z;
    } else {
       return A6XX_EARLY_Z;
    }
@@ -116,7 +116,7 @@ compute_lrz_state(struct fd6_emit *emit) assert_dt
    struct pipe_framebuffer_state *pfb = &ctx->batch->framebuffer;
    struct fd6_lrz_state lrz;
 
-   if (!pfb->zsbuf) {
+   if (!pfb->zsbuf.texture) {
       memset(&lrz, 0, sizeof(lrz));
       lrz.z_mode = compute_ztest_mode(emit, false);
       return lrz;
@@ -124,7 +124,7 @@ compute_lrz_state(struct fd6_emit *emit) assert_dt
 
    struct fd6_blend_stateobj *blend = fd6_blend_stateobj(ctx->blend);
    struct fd6_zsa_stateobj *zsa = fd6_zsa_stateobj(ctx->zsa);
-   struct fd_resource *rsc = fd_resource(pfb->zsbuf->texture);
+   struct fd_resource *rsc = fd_resource(pfb->zsbuf.texture);
    bool reads_dest = blend->reads_dest;
 
    lrz = zsa->lrz;
@@ -329,7 +329,7 @@ build_prog_fb_rast(struct fd6_emit *emit) assert_dt
 
    unsigned mrt_components = 0;
    for (unsigned i = 0; i < pfb->nr_cbufs; i++) {
-      if (!pfb->cbufs[i])
+      if (!pfb->cbufs[i].texture)
          continue;
       mrt_components |= 0xf << (i * 4);
    }
@@ -611,7 +611,7 @@ fd6_emit_3d_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
       case FD6_GROUP_ZSA:
          state = fd6_zsa_state(
             ctx,
-            util_format_is_pure_integer(pipe_surface_format(pfb->cbufs[0])),
+            util_format_is_pure_integer(pipe_surface_format(&pfb->cbufs[0])),
             fd_depth_clamp_enabled(ctx));
          fd6_state_add_group(&emit->state, state, FD6_GROUP_ZSA);
          break;
@@ -928,7 +928,7 @@ fd6_emit_static_regs(struct fd_context *ctx, struct fd_ringbuffer *ring)
          .shared_consts_enable = false,
       )
    );
-   WRITE(REG_A6XX_VFD_ADD_OFFSET, A6XX_VFD_ADD_OFFSET_VERTEX);
+   OUT_REG(ring, A6XX_VFD_ADD_OFFSET(.vertex = true, .instance = true));
    WRITE(REG_A6XX_VPC_UNKNOWN_9107, 0);
    WRITE(REG_A6XX_RB_UNKNOWN_8811, 0x00000010);
    WRITE(REG_A6XX_PC_MODE_CNTL, screen->info->a6xx.magic.PC_MODE_CNTL);

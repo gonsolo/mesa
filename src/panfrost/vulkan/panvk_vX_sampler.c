@@ -9,6 +9,7 @@
 #include "panvk_entrypoints.h"
 #include "panvk_sampler.h"
 
+#include "pan_afbc.h"
 #include "pan_encoder.h"
 #include "pan_format.h"
 
@@ -54,7 +55,7 @@ panvk_translate_sampler_compare_func(const VkSamplerCreateInfo *pCreateInfo)
    if (!pCreateInfo->compareEnable)
       return MALI_FUNC_NEVER;
 
-   return panfrost_flip_compare_func((enum mali_func)pCreateInfo->compareOp);
+   return pan_flip_compare_func((enum mali_func)pCreateInfo->compareOp);
 }
 
 #if PAN_ARCH >= 10
@@ -82,8 +83,8 @@ panvk_afbc_reswizzle_border_color(VkClearColorValue *border_color, VkFormat fmt)
     * customBorderColorWithoutFormat. */
 
    enum pipe_format pfmt = vk_format_to_pipe_format(fmt);
-   if (panfrost_format_is_yuv(pfmt) || util_format_is_depth_or_stencil(pfmt) ||
-       !panfrost_format_supports_afbc(PAN_ARCH, pfmt))
+   if (pan_format_is_yuv(pfmt) || util_format_is_depth_or_stencil(pfmt) ||
+       !pan_format_supports_afbc(PAN_ARCH, pfmt))
       return;
 
    const struct util_format_description *fdesc = util_format_description(pfmt);

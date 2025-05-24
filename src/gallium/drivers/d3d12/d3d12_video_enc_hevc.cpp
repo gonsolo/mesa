@@ -41,16 +41,15 @@ d3d12_video_encoder_update_current_rate_control_hevc(struct d3d12_video_encoder 
 
    struct D3D12EncodeRateControlState m_prevRCState = pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[picture->pic.temporal_id];
    pD3D12Enc->m_currentEncodeConfig.m_activeRateControlIndex = picture->pic.temporal_id;
+   bool wasDeltaQPRequested = (pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[picture->pic.temporal_id].m_Flags & D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_DELTA_QP) != 0;
    pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[picture->pic.temporal_id] = {};
+   if (wasDeltaQPRequested)
+      pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[picture->pic.temporal_id].m_Flags |= D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_DELTA_QP;
+
    pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[picture->pic.temporal_id].m_FrameRate.Numerator =
       picture->rc[picture->pic.temporal_id].frame_rate_num;
    pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[picture->pic.temporal_id].m_FrameRate.Denominator =
       picture->rc[picture->pic.temporal_id].frame_rate_den;
-   pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[picture->pic.temporal_id].m_Flags = D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_NONE;
-
-   if (picture->roi.num > 0)
-      pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[picture->pic.temporal_id].m_Flags |=
-         D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_DELTA_QP;
 
    switch (picture->rc[picture->pic.temporal_id].rate_ctrl_method) {
       case PIPE_H2645_ENC_RATE_CONTROL_METHOD_VARIABLE_SKIP:
@@ -544,8 +543,8 @@ d3d12_video_encoder_update_current_frame_pic_params_info_hevc(struct d3d12_video
    if ((pD3D12Enc->m_currentEncodeConfig.m_encoderCodecSpecificConfigDesc.m_HEVCConfig.ConfigurationFlags 
       & D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_ALLOW_REQUEST_INTRA_CONSTRAINED_SLICES) != 0)
       picParams.pHEVCPicData->Flags |= D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC_FLAG_REQUEST_INTRA_CONSTRAINED_SLICES;
-
-   if ((pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[hevcPic->pic.temporal_id].m_Flags & D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_DELTA_QP) != 0)
+#if D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
+   if (pD3D12Enc->m_currentEncodeConfig.m_QuantizationMatrixDesc.CPUInput.AppRequested)
    {
       // Use 8 bit qpmap array for HEVC picparams (-51, 51 range and int8_t pRateControlQPMap type)
       const int32_t hevc_min_delta_qp = -51;
@@ -555,10 +554,11 @@ d3d12_video_encoder_update_current_frame_pic_params_info_hevc(struct d3d12_video
          &hevcPic->roi,
          hevc_min_delta_qp,
          hevc_max_delta_qp,
-         pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[hevcPic->pic.temporal_id].m_pRateControlQPMap8Bit);
-      picParams.pHEVCPicData->pRateControlQPMap = pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[hevcPic->pic.temporal_id].m_pRateControlQPMap8Bit.data();
-      picParams.pHEVCPicData->QPMapValuesCount = static_cast<UINT>(pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[hevcPic->pic.temporal_id].m_pRateControlQPMap8Bit.size());
+         pD3D12Enc->m_currentEncodeConfig.m_QuantizationMatrixDesc.CPUInput.m_pRateControlQPMap8Bit);
+      picParams.pHEVCPicData->pRateControlQPMap = pD3D12Enc->m_currentEncodeConfig.m_QuantizationMatrixDesc.CPUInput.m_pRateControlQPMap8Bit.data();
+      picParams.pHEVCPicData->QPMapValuesCount = static_cast<UINT>(pD3D12Enc->m_currentEncodeConfig.m_QuantizationMatrixDesc.CPUInput.m_pRateControlQPMap8Bit.size());
    }
+#endif // D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
 
    pD3D12Enc->m_upDPBManager->begin_frame(picParams, bUsedAsReference, picture);
    pD3D12Enc->m_upDPBManager->get_current_frame_picture_control_data(picParams);
@@ -682,10 +682,28 @@ d3d12_video_encoder_negotiate_current_hevc_slices_configuration(struct d3d12_vid
                          "have the same number of macroblocks.\n");
          return false;
       }
-   } else {
+   }
+#if D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
+   else if(picture->slice_mode == PIPE_VIDEO_SLICE_MODE_AUTO) {
+      if (d3d12_video_encoder_check_subregion_mode_support(
+         pD3D12Enc,
+         D3D12_VIDEO_ENCODER_FRAME_SUBREGION_LAYOUT_MODE_AUTO)) {
+            requestedSlicesMode =
+               D3D12_VIDEO_ENCODER_FRAME_SUBREGION_LAYOUT_MODE_AUTO;
+            requestedSlicesConfig = {};
+            debug_printf("[d3d12_video_encoder_hevc] Using multi slice encoding mode: "
+                           "D3D12_VIDEO_ENCODER_FRAME_SUBREGION_LAYOUT_MODE_AUTO");
+      } else {
+         debug_printf("[d3d12_video_encoder_hevc] Requested slice control mode is not supported: No HW support for "
+                         "D3D12_VIDEO_ENCODER_FRAME_SUBREGION_LAYOUT_MODE_AUTO.\n");
+         return false;
+      }
+   }
+#endif // D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
+   else {
       requestedSlicesMode = D3D12_VIDEO_ENCODER_FRAME_SUBREGION_LAYOUT_MODE_FULL_FRAME;
       requestedSlicesConfig.NumberOfSlicesPerFrame = 1;
-      debug_printf("[d3d12_video_encoder_hevc] Requested slice control mode is full frame. m_SlicesPartition_H264.NumberOfSlicesPerFrame = %d - m_encoderSliceConfigMode = %d \n",
+      debug_printf("[d3d12_video_encoder_hevc] Requested slice control mode is full frame. m_SlicesPartition_HEVC.NumberOfSlicesPerFrame = %d - m_encoderSliceConfigMode = %d \n",
       requestedSlicesConfig.NumberOfSlicesPerFrame, requestedSlicesMode);
    }
 
@@ -868,13 +886,17 @@ d3d12_video_encoder_convert_hevc_codec_configuration(struct d3d12_video_encoder 
          }
    }
 
+   if (pD3D12Enc->max_num_ltr_frames > 0) {
+      config.ConfigurationFlags |= D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_ENABLE_LONG_TERM_REFERENCES;
+   }
+
    if (picture->seq.amp_enabled_flag)
       config.ConfigurationFlags |= D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_USE_ASYMETRIC_MOTION_PARTITION;
 
    if (picture->seq.sample_adaptive_offset_enabled_flag)
       config.ConfigurationFlags |= D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_ENABLE_SAO_FILTER;
 
-   if (picture->pic.pps_loop_filter_across_slices_enabled_flag)
+   if (!picture->pic.pps_loop_filter_across_slices_enabled_flag)
       config.ConfigurationFlags |= D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_DISABLE_LOOP_FILTER_ACROSS_SLICES;
 
    if (picture->pic.transform_skip_enabled_flag)
@@ -1307,7 +1329,11 @@ d3d12_video_encoder_update_current_encoder_config_state_hevc(struct d3d12_video_
 
    // Will call for d3d12 driver support based on the initial requested features, then
    // try to fallback if any of them is not supported and return the negotiated d3d12 settings
+#if D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
+   D3D12_FEATURE_DATA_VIDEO_ENCODER_SUPPORT2 capEncoderSupportData1 = {};
+#else
    D3D12_FEATURE_DATA_VIDEO_ENCODER_SUPPORT1 capEncoderSupportData1 = {};
+#endif
    // Get max number of slices per frame supported
    if (hevcPic->num_slice_descriptors > 1)
       pD3D12Enc->m_currentEncodeConfig.m_encoderSliceConfigMode =
@@ -1316,18 +1342,18 @@ d3d12_video_encoder_update_current_encoder_config_state_hevc(struct d3d12_video_
       pD3D12Enc->m_currentEncodeConfig.m_encoderSliceConfigMode =
          D3D12_VIDEO_ENCODER_FRAME_SUBREGION_LAYOUT_MODE_FULL_FRAME;
 
+   // Set slices config  (configure before calling d3d12_video_encoder_calculate_max_slices_count_in_output)
+   if(!d3d12_video_encoder_negotiate_current_hevc_slices_configuration(pD3D12Enc, hevcPic)) {
+      debug_printf("d3d12_video_encoder_negotiate_current_hevc_slices_configuration failed!\n");
+      return false;
+   }
+
    if (!d3d12_video_encoder_negotiate_requested_features_and_d3d12_driver_caps(pD3D12Enc, capEncoderSupportData1)) {
       debug_printf("[d3d12_video_encoder_hevc] After negotiating caps, D3D12_FEATURE_VIDEO_ENCODER_SUPPORT1 "
                       "arguments are not supported - "
                       "ValidationFlags: 0x%x - SupportFlags: 0x%x\n",
                       capEncoderSupportData1.ValidationFlags,
                       capEncoderSupportData1.SupportFlags);
-      return false;
-   }
-
-   // Set slices config  (configure before calling d3d12_video_encoder_calculate_max_slices_count_in_output)
-   if(!d3d12_video_encoder_negotiate_current_hevc_slices_configuration(pD3D12Enc, hevcPic)) {
-      debug_printf("d3d12_video_encoder_negotiate_current_hevc_slices_configuration failed!\n");
       return false;
    }
 

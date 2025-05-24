@@ -120,6 +120,7 @@ struct radeon_info {
    bool has_ngg_passthru_no_msg;
    bool has_export_conflict_bug;
    bool has_attr_ring_wait_bug;
+   bool has_cp_dma_with_null_prt_bug;
    bool has_vrs_ds_export_bug;
    bool has_taskmesh_indirect0_bug;
    bool sdma_supports_sparse;      /* Whether SDMA can safely access sparse resources. */
@@ -241,6 +242,7 @@ struct radeon_info {
    bool has_stable_pstate;
    /* Whether SR-IOV is enabled or amdgpu.mcbp=1 was set on the kernel command line. */
    bool register_shadowing_required;
+   bool has_default_zerovram_support;
    bool has_tmz_support;
    bool has_trap_handler_support;
    bool kernel_has_modifiers;
@@ -338,8 +340,14 @@ struct radeon_info {
    bool has_image_bvh_intersect_ray;
 };
 
-bool ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
-                       bool require_pci_bus_info);
+enum ac_query_gpu_info_result {
+   AC_QUERY_GPU_INFO_SUCCESS,
+   AC_QUERY_GPU_INFO_FAIL,
+   AC_QUERY_GPU_INFO_UNIMPLEMENTED_HW,
+};
+
+enum ac_query_gpu_info_result ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
+                                                bool require_pci_bus_info);
 
 void ac_compute_driver_uuid(char *uuid, size_t size);
 

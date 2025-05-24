@@ -1238,8 +1238,9 @@ wsi_wl_swapchain_update_colorspace(struct wsi_wl_swapchain *chain)
 
    bool new_color_surface = !surface->color.color_surface;
    bool needs_color_surface_new = needs_color_surface(display, chain->color.colorspace);
-   bool needs_color_surface_old = needs_color_surface(display, surface->color.colorspace);
-   if ((new_color_surface || !needs_color_surface_old) && needs_color_surface_new) {
+   bool needs_color_surface_old = surface->color.color_surface &&
+      needs_color_surface(display, surface->color.colorspace);
+   if (!needs_color_surface_old && needs_color_surface_new) {
       wsi_wl_surface_add_color_refcount(surface);
    } else if (needs_color_surface_old && !needs_color_surface_new) {
       wsi_wl_surface_remove_color_refcount(surface);
@@ -1856,7 +1857,7 @@ wsi_wl_surface_get_capabilities2(VkIcdSurfaceBase *surface,
 
 static VkResult
 wsi_wl_surface_get_formats(VkIcdSurfaceBase *icd_surface,
-			   struct wsi_device *wsi_device,
+                           struct wsi_device *wsi_device,
                            uint32_t* pSurfaceFormatCount,
                            VkSurfaceFormatKHR* pSurfaceFormats)
 {
@@ -1900,7 +1901,7 @@ wsi_wl_surface_get_formats(VkIcdSurfaceBase *icd_surface,
 
 static VkResult
 wsi_wl_surface_get_formats2(VkIcdSurfaceBase *icd_surface,
-			    struct wsi_device *wsi_device,
+                            struct wsi_device *wsi_device,
                             const void *info_next,
                             uint32_t* pSurfaceFormatCount,
                             VkSurfaceFormat2KHR* pSurfaceFormats)

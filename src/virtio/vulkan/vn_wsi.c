@@ -81,7 +81,8 @@ vn_wsi_init(struct vn_physical_device *physical_dev)
       &physical_dev->wsi_device, vn_physical_device_to_handle(physical_dev),
       vn_wsi_proc_addr, alloc, -1, &physical_dev->instance->dri_options,
       &(struct wsi_device_options){
-         .sw_device = false,
+         .sw_device = !physical_dev->base.vk.supported_extensions
+                          .EXT_external_memory_dma_buf,
          .extra_xwayland_image = true,
       });
    if (result != VK_SUCCESS)
@@ -111,28 +112,14 @@ vn_wsi_create_image(struct vn_device *dev,
                     const VkAllocationCallbacks *alloc,
                     struct vn_image **out_img)
 {
-   VkImageCreateInfo local_create_info = *create_info;
-   create_info = &local_create_info;
-
+   VkImageCreateInfo local_create_info;
    if (dev->physical_device->renderer_driver_id ==
-       VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA) {
+          VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA &&
+       (create_info->flags & VK_IMAGE_CREATE_ALIAS_BIT)) {
       /* See explanation in vn_GetPhysicalDeviceImageFormatProperties2() */
+      local_create_info = *create_info;
       local_create_info.flags &= ~VK_IMAGE_CREATE_ALIAS_BIT;
-   }
-
-   if (VN_PERF(NO_TILED_WSI_IMAGE)) {
-      const VkImageDrmFormatModifierListCreateInfoEXT *modifier_info =
-         vk_find_struct_const(
-            create_info->pNext,
-            IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT);
-      assert(modifier_info);
-      assert(modifier_info->drmFormatModifierCount == 1 &&
-             modifier_info->pDrmFormatModifiers[0] ==
-                DRM_FORMAT_MOD_LINEAR);
-      if (VN_DEBUG(WSI)) {
-         vn_log(dev->instance,
-                "forcing image linear (given no_tiled_wsi_image)");
-      }
+      create_info = &local_create_info;
    }
 
    struct vn_image *img;
@@ -303,17 +290,63 @@ vn_AcquireNextImage2KHR(VkDevice device,
              vk_Result_to_str(result));
    }
 
-   /* XXX this relies on implicit sync */
-   if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) {
-      struct vn_semaphore *sem =
-         vn_semaphore_from_handle(pAcquireInfo->semaphore);
-      if (sem)
-         vn_semaphore_signal_wsi(dev, sem);
+   if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+      return vn_error(dev->instance, result);
 
-      struct vn_fence *fence = vn_fence_from_handle(pAcquireInfo->fence);
-      if (fence)
-         vn_fence_signal_wsi(dev, fence);
+   /* XXX this relies on implicit sync */
+   int sync_fd = -1;
+
+   int sem_fd = -1, fence_fd = -1;
+   if (sync_fd >= 0) {
+      if (pAcquireInfo->semaphore != VK_NULL_HANDLE &&
+          pAcquireInfo->fence != VK_NULL_HANDLE) {
+         sem_fd = sync_fd;
+         fence_fd = dup(sync_fd);
+         if (fence_fd < 0) {
+            result = errno == EMFILE ? VK_ERROR_TOO_MANY_OBJECTS
+                                     : VK_ERROR_OUT_OF_HOST_MEMORY;
+            close(sync_fd);
+            return vn_error(dev->instance, result);
+         }
+      } else if (pAcquireInfo->semaphore != VK_NULL_HANDLE) {
+         sem_fd = sync_fd;
+      } else {
+         assert(pAcquireInfo->fence != VK_NULL_HANDLE);
+         fence_fd = sync_fd;
+      }
    }
+
+   if (pAcquireInfo->semaphore != VK_NULL_HANDLE) {
+      /* venus waits on the driver side when this semaphore is submitted */
+      const VkImportSemaphoreFdInfoKHR info = {
+         .sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
+         .semaphore = pAcquireInfo->semaphore,
+         .flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT,
+         .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+         .fd = sem_fd,
+      };
+      result = vn_ImportSemaphoreFdKHR(device, &info);
+      if (result == VK_SUCCESS)
+         sem_fd = -1;
+   }
+
+   if (result == VK_SUCCESS && pAcquireInfo->fence != VK_NULL_HANDLE) {
+      const VkImportFenceFdInfoKHR info = {
+         .sType = VK_STRUCTURE_TYPE_IMPORT_FENCE_FD_INFO_KHR,
+         .fence = pAcquireInfo->fence,
+         .flags = VK_FENCE_IMPORT_TEMPORARY_BIT,
+         .handleType = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT,
+         .fd = fence_fd,
+      };
+      result = vn_ImportFenceFdKHR(device, &info);
+      if (result == VK_SUCCESS)
+         fence_fd = -1;
+   }
+
+   if (sem_fd >= 0)
+      close(sem_fd);
+   if (fence_fd >= 0)
+      close(fence_fd);
 
    return vn_result(dev->instance, result);
 }

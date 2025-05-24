@@ -202,18 +202,8 @@ brw_generator::generate_mov_indirect(brw_inst *inst,
    assert(indirect_byte_offset.type == BRW_TYPE_UD);
    assert(indirect_byte_offset.file == FIXED_GRF);
    assert(!reg.abs && !reg.negate);
-
-   /* Gen12.5 adds the following region restriction:
-    *
-    *    "Vx1 and VxH indirect addressing for Float, Half-Float, Double-Float
-    *    and Quad-Word data must not be used."
-    *
-    * We require the source and destination types to match so stomp to an
-    * unsigned integer type.
-    */
+   assert(brw_type_is_uint(reg.type));
    assert(reg.type == dst.type);
-   reg.type = dst.type =
-      brw_type_with_size(BRW_TYPE_UD, brw_type_size_bits(reg.type));
 
    unsigned imm_byte_offset = reg.nr * REG_SIZE + reg.subnr;
 
@@ -337,18 +327,8 @@ brw_generator::generate_shuffle(brw_inst *inst,
     * implement for 64-bit values so we just don't bother.
     */
    assert(devinfo->has_64bit_float || brw_type_size_bytes(src.type) <= 4);
-
-   /* Gen12.5 adds the following region restriction:
-    *
-    *    "Vx1 and VxH indirect addressing for Float, Half-Float, Double-Float
-    *    and Quad-Word data must not be used."
-    *
-    * We require the source and destination types to match so stomp to an
-    * unsigned integer type.
-    */
+   assert(brw_type_is_uint(src.type));
    assert(src.type == dst.type);
-   src.type = dst.type =
-      brw_type_with_size(BRW_TYPE_UD, brw_type_size_bits(src.type));
 
    /* Because we're using the address register, we're limited to 16-wide
     * by the address register file and 8-wide for 64-bit types.  We could try
@@ -1423,33 +1403,44 @@ brw_generator::generate_code(const cfg_t *cfg, int dispatch_width,
       brw_dump_shader_bin(p->store, start_offset, p->next_insn_offset,
                           sha1buf);
 
-   if (unlikely(debug_flag)) {
-      fprintf(stderr, "Native code for %s (src_hash 0x%08x) (sha1 %s)\n"
-              "SIMD%d shader: %d instructions. %d loops. %u cycles. "
-              "%d:%d spills:fills, %u sends, "
-              "scheduled with mode %s. "
-              "Promoted %u constants. "
-              "Non-SSA regs (after NIR): %u. "
-              "Compacted %d to %d bytes (%.0f%%)\n",
-              shader_name, params->source_hash, sha1buf,
-              dispatch_width,
-              before_size / 16 - nop_count - sync_nop_count,
-              loop_count, perf.latency,
-              shader_stats.spill_count,
-              shader_stats.fill_count,
-              send_count,
-              shader_stats.scheduler_mode,
-              shader_stats.promoted_constants,
-              shader_stats.non_ssa_registers_after_nir,
-              before_size, after_size,
-              100.0f * (before_size - after_size) / before_size);
+   const char *override_path = getenv("INTEL_SHADER_ASM_READ_PATH");
+   if (override_path && brw_try_override_assembly(p, start_offset, sha1buf)) {
+      fprintf(stderr, "Successfully overrode shader with sha1 %s\n", sha1buf);
+      /* disasm_info and stats are no longer valid as we gathered
+       * them based on the original shader.
+       */
+      if (debug_flag) {
+         fprintf(stderr, "Skipping disassembly and statistics "
+                 "output for this shader.\n\n");
+      }
+      ralloc_free(disasm_info);
+      return start_offset;
+   }
 
-      /* overriding the shader makes disasm_info invalid */
-      if (!brw_try_override_assembly(p, start_offset, sha1buf)) {
+   if (unlikely(debug_flag)) {
+      if (!intel_shader_dump_filter ||
+          (intel_shader_dump_filter && intel_shader_dump_filter == params->source_hash)) {
+         fprintf(stderr, "Native code for %s (src_hash 0x%08x) (sha1 %s)\n"
+                 "SIMD%d shader: %d instructions. %d loops. %u cycles. "
+                 "%d:%d spills:fills, %u sends, "
+                 "scheduled with mode %s. "
+                 "Promoted %u constants. "
+                 "Non-SSA regs (after NIR): %u. "
+                 "Compacted %d to %d bytes (%.0f%%)\n",
+                 shader_name, params->source_hash, sha1buf,
+                 dispatch_width,
+                 before_size / 16 - nop_count - sync_nop_count,
+                 loop_count, perf.latency,
+                 shader_stats.spill_count,
+                 shader_stats.fill_count,
+                 send_count,
+                 shader_stats.scheduler_mode,
+                 shader_stats.promoted_constants,
+                 shader_stats.non_ssa_registers_after_nir,
+                 before_size, after_size,
+                 100.0f * (before_size - after_size) / before_size);
          dump_assembly(p->store, start_offset, p->next_insn_offset,
                        disasm_info, perf.block_latency);
-      } else {
-         fprintf(stderr, "Successfully overrode shader with sha1 %s\n\n", sha1buf);
       }
    }
    ralloc_free(disasm_info);

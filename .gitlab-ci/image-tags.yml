@@ -19,14 +19,14 @@ include:
   - .gitlab-ci/conditional-build-image-tags.yml
 
 variables:
-  DEBIAN_BASE_TAG: "20250424-rootfs"
+  DEBIAN_BASE_TAG: "20250515-firmware"
 
-  DEBIAN_BUILD_TAG: "20250422-ci-fairy"
+  DEBIAN_BUILD_TAG: "20250515-aarch64"
 
-  DEBIAN_TEST_ANDROID_TAG: "20250423-rootfs"
-  DEBIAN_TEST_GL_TAG: "20250423-rootfs"
-  DEBIAN_TEST_VIDEO_TAG: "20250423-rootfs"
-  DEBIAN_TEST_VK_TAG: "20250423-rootfs"
+  DEBIAN_TEST_ANDROID_TAG: "20250524-angle-ec"
+  DEBIAN_TEST_GL_TAG: "20250524-angle-ec"
+  DEBIAN_TEST_VIDEO_TAG: "20250503-fluster"
+  DEBIAN_TEST_VK_TAG: "20250520-vkd3d"
 
   DEBIAN_PYUTILS_TAG: "20250422-ci-fairy"
 
@@ -37,8 +37,8 @@ variables:
   KERNEL_TAG: "v6.14-mesa-dea4"
   KERNEL_REPO: "gfx-ci/linux"
   PKG_REPO_REV: "95bf62c"
-
-  FLUSTER_VECTORS_VERSION: "5"
+  FIRMWARE_TAG: "36f9bbfa"
+  FIRMWARE_REPO: "gfx-ci/firmware"
 
   WINDOWS_X64_MSVC_TAG: "20250129-llvm19"
 

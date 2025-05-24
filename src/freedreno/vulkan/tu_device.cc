@@ -1643,6 +1643,7 @@ static const driOptionDescription tu_dri_options[] = {
       DRI_CONF_TU_ALLOW_OOB_INDIRECT_UBO_LOADS(false)
       DRI_CONF_TU_DISABLE_D24S8_BORDER_COLOR_WORKAROUND(false)
       DRI_CONF_TU_USE_TEX_COORD_ROUND_NEAREST_EVEN_MODE(false)
+      DRI_CONF_TU_IGNORE_FRAG_DEPTH_DIRECTION(false)
    DRI_CONF_SECTION_END
 };
 
@@ -1667,6 +1668,8 @@ tu_init_dri_options(struct tu_instance *instance)
          driQueryOptionb(&instance->dri_options, "tu_disable_d24s8_border_color_workaround");
    instance->use_tex_coord_round_nearest_even_mode =
          driQueryOptionb(&instance->dri_options, "tu_use_tex_coord_round_nearest_even_mode");
+   instance->ignore_frag_depth_direction =
+         driQueryOptionb(&instance->dri_options, "tu_ignore_frag_depth_direction");
 }
 
 static uint32_t instance_count = 0;
@@ -2689,11 +2692,6 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    global->dbg_gmem_taken_loads = 0;
    global->dbg_gmem_total_stores = 0;
    global->dbg_gmem_taken_stores = 0;
-   for (int i = 0; i < TU_BORDER_COLOR_BUILTIN; i++) {
-      VkClearColorValue border_color = vk_border_color_value((VkBorderColor) i);
-      tu6_pack_border_color(&global->bcolor_builtin[i], &border_color,
-                            vk_border_color_is_int((VkBorderColor) i));
-   }
 
    /* initialize to ones so ffs can be used to find unused slots */
    BITSET_ONES(device->custom_border_color);
@@ -3646,10 +3644,10 @@ tu_CmdBeginDebugUtilsLabelEXT(VkCommandBuffer _commandBuffer,
    const char *label = pLabelInfo->pLabelName;
    if (cmd_buffer->state.pass) {
       trace_start_cmd_buffer_annotation_rp(
-         &cmd_buffer->trace, &cmd_buffer->draw_cs, strlen(label), label);
+         &cmd_buffer->trace, &cmd_buffer->draw_cs, cmd_buffer, strlen(label), label);
    } else {
       trace_start_cmd_buffer_annotation(&cmd_buffer->trace, &cmd_buffer->cs,
-                                        strlen(label), label);
+                                        cmd_buffer, strlen(label), label);
    }
 }
 
@@ -3668,4 +3666,19 @@ tu_CmdEndDebugUtilsLabelEXT(VkCommandBuffer _commandBuffer)
    }
 
    vk_common_CmdEndDebugUtilsLabelEXT(_commandBuffer);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+tu_SetDebugUtilsObjectNameEXT(
+   VkDevice device,
+   const VkDebugUtilsObjectNameInfoEXT *pNameInfo)
+{
+   VkResult result = vk_common_SetDebugUtilsObjectNameEXT(device, pNameInfo);
+
+#ifdef HAVE_PERFETTO
+   if (result == VK_SUCCESS)
+      tu_perfetto_set_debug_utils_object_name(pNameInfo);
+#endif
+
+   return result;
 }

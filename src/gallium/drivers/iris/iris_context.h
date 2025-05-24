@@ -30,6 +30,7 @@
 #include "util/slab.h"
 #include "util/u_debug.h"
 #include "util/macros.h"
+#include "util/u_framebuffer.h"
 #include "util/u_threaded_context.h"
 #include "intel/blorp/blorp.h"
 #include "intel/dev/intel_debug.h"
@@ -231,7 +232,8 @@ struct iris_vue_prog_key {
    struct iris_base_prog_key base;
 
    unsigned nr_userclip_plane_consts:4;
-   unsigned padding:28;
+   enum intel_vue_layout layout:2;
+   unsigned padding:26;
 };
 
 struct iris_vs_prog_key {
@@ -284,7 +286,8 @@ struct iris_fs_prog_key {
    bool multisample_fbo:1;
    bool force_dual_color_blend:1;
    bool coherent_fb_fetch:1;
-   uint64_t padding:43;
+   enum intel_vue_layout vue_layout:2;
+   uint64_t padding:41;
 };
 
 struct iris_cs_prog_key {
@@ -1006,6 +1009,7 @@ struct iris_context {
       struct pipe_viewport_state viewports[IRIS_MAX_VIEWPORTS];
       struct pipe_scissor_state scissors[IRIS_MAX_VIEWPORTS];
       struct pipe_stencil_ref stencil_ref;
+      PIPE_FB_SURFACES; //STOP USING THIS
       struct pipe_framebuffer_state framebuffer;
       struct pipe_clip_state clip_planes;
       /* width and height treated like x2 and y2 */

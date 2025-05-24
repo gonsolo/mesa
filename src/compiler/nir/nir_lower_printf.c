@@ -199,8 +199,8 @@ nir_lower_printf_buffer(nir_shader *nir, uint64_t address, uint32_t size)
                                      nir_metadata_control_flow, &opts);
 }
 
-void
-nir_printf_fmt(nir_builder *b, unsigned ptr_bit_size, const char *fmt, ...)
+static void
+nir_vprintf_fmt(nir_builder *b, unsigned ptr_bit_size, const char *fmt, va_list aq)
 {
    u_printf_info info = {
       .strings = ralloc_strdup(b->shader, fmt),
@@ -211,7 +211,7 @@ nir_printf_fmt(nir_builder *b, unsigned ptr_bit_size, const char *fmt, ...)
    size_t pos = 0;
    size_t args_size = 0;
 
-   va_start(ap, fmt);
+   va_copy(ap, aq);
    while ((pos = util_printf_next_spec_pos(fmt, pos)) != -1) {
       unsigned arg_size;
       switch (fmt[pos]) {
@@ -263,6 +263,7 @@ nir_printf_fmt(nir_builder *b, unsigned ptr_bit_size, const char *fmt, ...)
 
       ASSERTED nir_def *def = va_arg(ap, nir_def *);
       assert(def->bit_size / 8 == arg_size);
+      arg_size *= def->num_components;
 
       info.num_args++;
       info.arg_sizes = reralloc(b->shader, info.arg_sizes, unsigned,
@@ -294,13 +295,13 @@ nir_printf_fmt(nir_builder *b, unsigned ptr_bit_size, const char *fmt, ...)
       nir_store_global(b, store_addr, 4, identifier, 0x1);
 
       /* Arguments */
-      va_start(ap, fmt);
+      va_copy(ap, aq);
       unsigned store_offset = sizeof(uint32_t);
       for (unsigned a = 0; a < info.num_args; a++) {
          nir_def *def = va_arg(ap, nir_def *);
 
          nir_store_global(b, nir_iadd_imm(b, store_addr, store_offset),
-                          4, def, 0x1);
+                          4, def, nir_component_mask(def->num_components));
 
          store_offset += info.arg_sizes[a];
       }
@@ -319,4 +320,28 @@ nir_printf_fmt(nir_builder *b, unsigned ptr_bit_size, const char *fmt, ...)
     * cache while debugging compiler issues is a good practice anyway.
     */
    u_printf_singleton_add(&info, 1);
+}
+
+void
+nir_printf_fmt(nir_builder *b, unsigned ptr_bit_size, const char *fmt, ...)
+{
+   va_list ap;
+   va_start(ap, fmt);
+   nir_vprintf_fmt(b, ptr_bit_size, fmt, ap);
+   va_end(ap);
+}
+
+/* Debug helper to allow us to printf at a single pixel */
+void nir_printf_fmt_at_px(nir_builder *b, unsigned ptr_bit_size, unsigned x_px, unsigned y_px, const char *fmt, ...)
+{
+   va_list ap;
+
+   nir_def *xy_px = nir_f2u32(b,nir_load_frag_coord(b));
+   nir_def *is_at_px = nir_ball_iequal(b, nir_imm_ivec2(b, x_px, y_px), xy_px);
+
+   nir_push_if(b, is_at_px);
+   va_start(ap, fmt);
+   nir_vprintf_fmt(b, ptr_bit_size, fmt, ap);
+   va_end(ap);
+   nir_pop_if(b, NULL);
 }

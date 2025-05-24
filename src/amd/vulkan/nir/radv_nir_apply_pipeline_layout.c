@@ -208,16 +208,14 @@ get_sampler_desc(nir_builder *b, apply_layout_state *state, nir_deref_instr *der
     * index or if all samplers in the array are the same. Note that indexing is forbidden with
     * embedded samplers.
     */
-   if (desc_type == AC_DESC_SAMPLER && binding->immutable_samplers_offset &&
-       (!indirect || binding->immutable_samplers_equal)) {
+   if (desc_type == AC_DESC_SAMPLER && binding->immutable_samplers_offset && !indirect) {
       unsigned constant_index = 0;
-      if (!binding->immutable_samplers_equal) {
-         while (deref->deref_type != nir_deref_type_var) {
-            assert(deref->deref_type == nir_deref_type_array);
-            unsigned array_size = MAX2(glsl_get_aoa_size(deref->type), 1);
-            constant_index += nir_src_as_uint(deref->arr.index) * array_size;
-            deref = nir_deref_instr_parent(deref);
-         }
+
+      while (deref->deref_type != nir_deref_type_var) {
+         assert(deref->deref_type == nir_deref_type_array);
+         unsigned array_size = MAX2(glsl_get_aoa_size(deref->type), 1);
+         constant_index += nir_src_as_uint(deref->arr.index) * array_size;
+         deref = nir_deref_instr_parent(deref);
       }
 
       uint32_t dword0_mask =
@@ -398,7 +396,11 @@ load_push_constant(nir_builder *b, apply_layout_state *state, nir_intrinsic_inst
          addr = convert_pointer_to_64_bit(b, state, addr);
          offset = nir_iadd_imm_nuw(b, intrin->src[0].ssa, base);
       }
-      unsigned size = 1 << (util_last_bit(count - start) - 1); /* Round down to power of two. */
+
+      /* Decrease to supported size. */
+      unsigned size = count - start;
+      size = state->gfx_level >= GFX12 && size == 3 ? 3 : (1 << (util_last_bit(size) - 1));
+
       /* Try to round up to power of two instead. */
       if (size < (count - start) && can_increase_load_size(intrin, start * 4, size, size * 2))
          size *= 2;

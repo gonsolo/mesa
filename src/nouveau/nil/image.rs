@@ -271,7 +271,7 @@ impl Image {
             extent_px: info.extent_px,
             sample_layout,
             num_levels: info.levels,
-            levels: [ImageLevel::default(); MAX_LEVELS as usize],
+            levels: [ImageLevel::default(); MAX_LEVELS],
             array_stride_B: 0,
             align_B,
             size_B,
@@ -352,7 +352,7 @@ impl Image {
             extent_px: info.extent_px,
             sample_layout,
             num_levels: info.levels,
-            levels: [ImageLevel::default(); MAX_LEVELS as usize],
+            levels: [ImageLevel::default(); MAX_LEVELS],
             array_stride_B: 0,
             align_B: 0,
             size_B: 0,
@@ -434,8 +434,8 @@ impl Image {
             assert!(bl_mod.pte_kind() == image.pte_kind);
         }
 
-        image.tile_mode = u16::from(image.levels[0].tiling.y_log2) << 4
-            | u16::from(image.levels[0].tiling.z_log2) << 8;
+        image.tile_mode = (u16::from(image.levels[0].tiling.y_log2) << 4)
+            | (u16::from(image.levels[0].tiling.z_log2) << 8);
 
         image.align_B = std::cmp::max(image.align_B, 4096);
         if image.pte_kind >= 0xb && image.pte_kind <= 0xe {
@@ -632,7 +632,7 @@ impl Image {
             size_B -= next_lvl_offset_in_bytes - lvl.offset_B;
         }
 
-        let mut levels: [ImageLevel; MAX_LEVELS as usize] = Default::default();
+        let mut levels: [ImageLevel; MAX_LEVELS] = Default::default();
         levels[0] = lvl;
 
         *offset_in_bytes_out = lvl.offset_B;
@@ -938,9 +938,9 @@ impl Image {
         );
 
         let tiling_extent_B = lvl_tiling.extent_B();
-        let offset_B = offset_B
-            + u64::from(tiling_extent_B.width * tiling_extent_B.height * z_gob);
+
         offset_B
+            + u64::from(tiling_extent_B.width * tiling_extent_B.height * z_gob)
     }
 }
 

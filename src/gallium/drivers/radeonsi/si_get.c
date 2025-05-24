@@ -295,8 +295,9 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
             attrib.bits.support_superres = PIPE_ENC_FEATURE_NOT_SUPPORTED;
             attrib.bits.support_restoration = PIPE_ENC_FEATURE_NOT_SUPPORTED;
             attrib.bits.support_allow_intrabc = PIPE_ENC_FEATURE_NOT_SUPPORTED;
-            attrib.bits.support_cdef_channel_strength = PIPE_ENC_FEATURE_SUPPORTED;
-
+            attrib.bits.support_cdef_channel_strength = PIPE_ENC_FEATURE_NOT_SUPPORTED;
+            if (sscreen->info.vcn_ip_version >= VCN_5_0_0)
+               attrib.bits.support_cdef_channel_strength = PIPE_ENC_FEATURE_SUPPORTED;
             return attrib.value;
          } else
             return 0;
@@ -972,9 +973,6 @@ void si_init_compute_caps(struct si_screen *sscreen)
    struct pipe_compute_caps *caps =
       (struct pipe_compute_caps *)&sscreen->b.compute_caps;
 
-   snprintf(caps->ir_target, sizeof(caps->ir_target), "%s-amdgcn-mesa-mesa3d",
-            ac_get_llvm_processor_name(sscreen->info.family));
-
    caps->grid_dimension = 3;
 
    /* Use this size, so that internal counters don't overflow 64 bits. */
@@ -1005,7 +1003,6 @@ void si_init_compute_caps(struct si_screen *sscreen)
 
    /* Value reported by the closed source driver. */
    caps->max_local_size = sscreen->info.gfx_level == GFX6 ? 32 * 1024 : 64 * 1024;
-   caps->max_input_size = 1024;
 
    caps->max_clock_frequency = sscreen->info.max_gpu_freq_mhz;
    caps->max_compute_units = sscreen->info.num_cu;
