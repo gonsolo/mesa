@@ -750,7 +750,8 @@ if with_gallium_rusticl or with_nouveau_vk or with_tools.contains('etnaviv')
     endif
   endif
 
-  add_languages('rust', required: true)
+  add_languages('rust', native: true, required: true)
+  add_languages('rust', native: false, required: true)
   rustc = meson.get_compiler('rust')
   rust = import('rust')
 
