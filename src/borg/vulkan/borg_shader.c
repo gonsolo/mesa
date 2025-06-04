@@ -211,6 +211,7 @@ borg_compile_shaders(struct vk_device *vk_dev,
                 uint32_t shader_count,
                 struct vk_shader_compile_info *infos,
                 const struct vk_graphics_pipeline_state *state,
+                const struct vk_features *enabled_features,
                 const VkAllocationCallbacks* pAllocator,
                 struct vk_shader **shaders_out)
 {
