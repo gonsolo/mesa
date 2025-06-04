@@ -1469,9 +1469,6 @@ print_intrinsic_instr(nir_intrinsic_instr *instr, print_state *state)
          if (io.high_16bits)
             fprintf(fp, " high_16bits");
 
-         if (io.invariant)
-            fprintf(fp, " invariant");
-
          if (io.high_dvec2)
             fprintf(fp, " high_dvec2");
 
@@ -2660,9 +2657,9 @@ print_shader_info(const struct shader_info *info, FILE *fp)
    print_nz_x64(fp, "inputs_read_indirectly", info->inputs_read_indirectly);
    print_nz_x64(fp, "outputs_read_indirectly", info->outputs_read_indirectly);
    print_nz_x64(fp, "outputs_written_indirectly", info->outputs_written_indirectly);
-   print_nz_x64(fp, "patch_inputs_read_indirectly", info->patch_inputs_read_indirectly);
-   print_nz_x64(fp, "patch_outputs_read_indirectly", info->patch_outputs_read_indirectly);
-   print_nz_x64(fp, "patch_outputs_written_indirectly", info->patch_outputs_written_indirectly);
+   print_nz_x32(fp, "patch_inputs_read_indirectly", info->patch_inputs_read_indirectly);
+   print_nz_x32(fp, "patch_outputs_read_indirectly", info->patch_outputs_read_indirectly);
+   print_nz_x32(fp, "patch_outputs_written_indirectly", info->patch_outputs_written_indirectly);
 
    print_nz_bitset(fp, "textures_used", info->textures_used, ARRAY_SIZE(info->textures_used));
    print_nz_bitset(fp, "textures_used_by_txf", info->textures_used_by_txf, ARRAY_SIZE(info->textures_used_by_txf));
@@ -2903,6 +2900,9 @@ nir_print_shader_annotated(nir_shader *shader, FILE *fp,
 void
 nir_print_shader(nir_shader *shader, FILE *fp)
 {
+   nir_foreach_function_impl(impl, shader) {
+      nir_index_ssa_defs(impl);
+   }
    nir_print_shader_annotated(shader, fp, NULL);
    fflush(fp);
 }

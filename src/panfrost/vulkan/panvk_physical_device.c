@@ -240,6 +240,7 @@ get_device_extensions(const struct panvk_physical_device *device,
       .KHR_imageless_framebuffer = true,
       .KHR_index_type_uint8 = true,
       .KHR_line_rasterization = true,
+      .KHR_load_store_op_none = true,
       .KHR_maintenance1 = true,
       .KHR_maintenance2 = true,
       .KHR_maintenance3 = true,
@@ -302,6 +303,7 @@ get_device_extensions(const struct panvk_physical_device *device,
       .EXT_image_robustness = true,
       .EXT_index_type_uint8 = true,
       .EXT_line_rasterization = true,
+      .EXT_load_store_op_none = true,
       .EXT_physical_device_drm = true,
       .EXT_pipeline_creation_cache_control = true,
       .EXT_pipeline_creation_feedback = true,
@@ -316,7 +318,10 @@ get_device_extensions(const struct panvk_physical_device *device,
       .EXT_shader_module_identifier = true,
       .EXT_shader_demote_to_helper_invocation = true,
       .EXT_shader_replicated_composites = true,
+      .EXT_shader_subgroup_ballot = true,
+      .EXT_shader_subgroup_vote = true,
       .EXT_subgroup_size_control = has_vk1_1,
+      .EXT_texel_buffer_alignment = true,
       .EXT_tooling_info = true,
       .EXT_vertex_attribute_divisor = true,
       .EXT_vertex_input_dynamic_state = true,
@@ -366,7 +371,8 @@ has_texture_compression_bc(const struct panvk_physical_device *physical_device)
 }
 
 static void
-get_features(const struct panvk_physical_device *device,
+get_features(const struct panvk_instance *instance,
+             const struct panvk_physical_device *device,
              struct vk_features *features)
 {
    unsigned arch = pan_arch(device->kmod.props.gpu_prod_id);
@@ -402,6 +408,11 @@ get_features(const struct panvk_physical_device *device,
       .shaderInt16 = true,
       .shaderInt64 = true,
       .drawIndirectFirstInstance = true,
+
+      /* On v13+, the hardware isn't speculatively referencing to invalid
+         indices anymore. */
+      .vertexPipelineStoresAndAtomics =
+         arch >= 13 && instance->enable_vertex_pipeline_stores_atomics,
 
       /* Vulkan 1.1 */
       .storageBuffer16BitAccess = true,
@@ -584,6 +595,9 @@ get_features(const struct panvk_physical_device *device,
       /* VK_EXT_shader_replicated_composites */
       .shaderReplicatedComposites = true,
 
+      /* VK_EXT_texel_buffer_alignment */
+      .texelBufferAlignment = true,
+
       /* VK_EXT_ycbcr_2plane_444_formats */
       .ycbcr2plane444Formats = arch >= 10,
 
@@ -705,10 +719,13 @@ get_device_properties(const struct panvk_instance *instance,
        * descriptors, where the size is a 32-bit field.
        */
       .maxStorageBufferRange = UINT32_MAX,
-      /* 128 bytes of push constants, so we're aligned with the minimum Vulkan
-       * requirements.
+      /* Vulkan 1.4 minimum. We currently implement push constants in terms of
+       * FAUs so we're limited by how many user-defined FAUs the hardware
+       * offers, minus driver-internal needs. If we ever need go to higher,
+       * we'll have to implement push constants in terms of both FAUs and global
+       * loads.
        */
-      .maxPushConstantsSize = 128,
+      .maxPushConstantsSize = 256,
       /* On our kernel drivers we're limited by the available memory rather
        * than available allocations. This is better expressed through memory
        * properties and budget queries, and by returning
@@ -1024,8 +1041,8 @@ get_device_properties(const struct panvk_instance *instance,
       /* XXX: VK_EXT_texel_buffer_alignment */
       .storageTexelBufferOffsetAlignmentBytes = 64,
       .storageTexelBufferOffsetSingleTexelAlignment = false,
-      .uniformTexelBufferOffsetAlignmentBytes = 4,
-      .uniformTexelBufferOffsetSingleTexelAlignment = true,
+      .uniformTexelBufferOffsetAlignmentBytes = 64,
+      .uniformTexelBufferOffsetSingleTexelAlignment = false,
 
       /* VK_KHR_maintenance4 */
       .maxBufferSize = 1 << 30,
@@ -1203,7 +1220,7 @@ panvk_physical_device_init(struct panvk_physical_device *device,
    get_device_extensions(device, &supported_extensions);
 
    struct vk_features supported_features;
-   get_features(device, &supported_features);
+   get_features(instance, device, &supported_features);
 
    struct vk_properties properties;
    get_device_properties(instance, device, &properties);
@@ -1238,14 +1255,6 @@ fail:
    return result;
 }
 
-static const VkQueueFamilyProperties panvk_queue_family_properties = {
-   .queueFlags =
-      VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
-   .queueCount = 1,
-   .timestampValidBits = 0,
-   .minImageTransferGranularity = {1, 1, 1},
-};
-
 static void
 panvk_fill_global_priority(const struct panvk_physical_device *physical_device,
                            VkQueueFamilyGlobalPriorityPropertiesKHR *prio)
@@ -1277,10 +1286,19 @@ panvk_GetPhysicalDeviceQueueFamilyProperties2(
    VK_FROM_HANDLE(panvk_physical_device, physical_device, physicalDevice);
    VK_OUTARRAY_MAKE_TYPED(VkQueueFamilyProperties2, out, pQueueFamilyProperties,
                           pQueueFamilyPropertyCount);
+   unsigned arch = pan_arch(physical_device->kmod.props.gpu_prod_id);
 
    vk_outarray_append_typed(VkQueueFamilyProperties2, &out, p)
    {
-      p->queueFamilyProperties = panvk_queue_family_properties;
+      p->queueFamilyProperties = (VkQueueFamilyProperties){
+         .queueFlags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT |
+                       VK_QUEUE_TRANSFER_BIT,
+         /* On v10+ we can support up to 127 queues but this causes timeout on
+            some CTS tests */
+         .queueCount = arch >= 10 ? 2 : 1,
+         .timestampValidBits = 0,
+         .minImageTransferGranularity = (VkExtent3D){1, 1, 1},
+      };
 
       VkQueueFamilyGlobalPriorityPropertiesKHR *prio =
          vk_find_struct(p->pNext, QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR);

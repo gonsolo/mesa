@@ -308,29 +308,12 @@ with_any_broadcom = [
 
 with_intel_vk_rt = get_option('intel-rt') \
    .disable_auto_if(not with_intel_vk) \
-   .disable_if(get_option('intel-bvh-grl') and \
-               host_machine.cpu_family() != 'x86_64', \
-               error_message : 'Intel Ray Tracing is only supported on x86_64') \
   .allowed()
-
-with_intel_bvh_grl = get_option('intel-bvh-grl')
-
-if get_option('intel-clc') != 'system' and \
-   get_option('precomp-compiler') != 'system' and \
-   with_intel_bvh_grl
-  # Require intel-clc with Anv & Iris (for internal shaders)
-  with_intel_clc = get_option('intel-clc') == 'enabled' or \
-                   get_option('precomp-compiler') == 'enabled' or \
-                   with_intel_bvh_grl
-else
-  with_intel_clc = false
-endif
 
 with_any_intel = [
   with_gallium_crocus,
   with_gallium_i915,
   with_gallium_iris,
-  with_intel_clc,
   with_intel_hasvk,
   with_intel_tools,
   with_intel_vk,
@@ -1671,12 +1654,18 @@ if _drm_blame != ''
   message('libdrm @0@ needed because @1@ has the highest requirement'.format(_drm_ver, _drm_blame))
 endif
 
+allow_fallback_for_libdrm = get_option('allow-fallback-for').contains('libdrm')
+
 # Then get each libdrm module
 foreach d : _libdrm_checks
   if d[1]
     set_variable(
       'dep_libdrm_' + d[0],
-      dependency('libdrm_' + d[0], version : '>=' + _drm_ver)
+      dependency(
+        'libdrm_' + d[0],
+        version : '>=' + _drm_ver,
+        allow_fallback: allow_fallback_for_libdrm,
+      )
     )
   endif
 endforeach
@@ -1685,7 +1674,8 @@ with_gallium_drisw_kms = false
 if system_has_kms_drm
   dep_libdrm = dependency(
     'libdrm', version : '>=' + _drm_ver,
-    required : with_dri2 or with_dri or with_gbm
+    required : with_dri2 or with_dri or with_gbm,
+    allow_fallback: allow_fallback_for_libdrm,
   )
 else
   # We should prevent libdrm from being available when the target doesn't have it to avoid transitive

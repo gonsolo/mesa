@@ -469,7 +469,9 @@ unsigned int radeon_enc_write_pps_hevc(struct radeon_encoder *enc, uint8_t *out)
    radeon_bs_set_emulation_prevention(&bs, true);
    radeon_bs_code_ue(&bs, 0x0); /* pps_pic_parameter_set_id */
    radeon_bs_code_ue(&bs, 0x0); /* pps_seq_parameter_set_id */
-   radeon_bs_code_fixed_bits(&bs, 0x1, 1); /* dependent_slice_segments_enabled_flag */
+   unsigned dependent_slice_segments_enabled_flag =
+      enc->enc_pic.has_dependent_slice_instructions ? pps->dependent_slice_segments_enabled_flag : 0x1;
+   radeon_bs_code_fixed_bits(&bs, dependent_slice_segments_enabled_flag, 1);
    radeon_bs_code_fixed_bits(&bs, pps->output_flag_present_flag, 1);
    radeon_bs_code_fixed_bits(&bs, 0x0, 3); /* num_extra_slice_header_bits */
    radeon_bs_code_fixed_bits(&bs, 0x0, 1); /* sign_data_hiding_enabled_flag */
@@ -668,7 +670,7 @@ static void radeon_enc_slice_header(struct radeon_encoder *enc)
       }
    }
 
-   if (!enc->enc_pic.not_referenced) {
+   if (enc->enc_pic.h264_enc_params.is_reference) {
       if (enc->enc_pic.picture_type == PIPE_H2645_ENC_PICTURE_TYPE_IDR) {
          radeon_bs_code_fixed_bits(&bs, slice->no_output_of_prior_pics_flag, 1);
          radeon_bs_code_fixed_bits(&bs, slice->long_term_reference_flag, 1);
@@ -781,8 +783,17 @@ static void radeon_enc_slice_header_hevc(struct radeon_encoder *enc)
    bits_copied = bs.bits_output;
    inst_index++;
 
-   instruction[inst_index] = RENCODE_HEVC_HEADER_INSTRUCTION_SLICE_SEGMENT;
-   inst_index++;
+   if (enc->enc_pic.has_dependent_slice_instructions) {
+      if (pps->dependent_slice_segments_enabled_flag) {
+         instruction[inst_index] = RENCODE_HEVC_HEADER_INSTRUCTION_DEPENDENT_SLICE_SEGMENT_FLAG;
+         inst_index++;
+      }
+      instruction[inst_index] = RENCODE_HEVC_HEADER_INSTRUCTION_SLICE_SEGMENT_ADDRESS;
+      inst_index++;
+   } else {
+      instruction[inst_index] = RENCODE_HEVC_HEADER_INSTRUCTION_SLICE_SEGMENT;
+      inst_index++;
+   }
 
    instruction[inst_index] = RENCODE_HEVC_HEADER_INSTRUCTION_DEPENDENT_SLICE_END;
    inst_index++;

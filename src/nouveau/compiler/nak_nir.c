@@ -299,10 +299,9 @@ nak_preprocess_nir(nir_shader *nir, const struct nak_compiler *nak)
 
    nir_validate_ssa_dominance(nir, "before nak_preprocess_nir");
 
-   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      nir_lower_io_to_temporaries(nir, nir_shader_get_entrypoint(nir),
-                                  true /* outputs */, false /* inputs */);
-   }
+   OPT(nir, nir_lower_io_to_temporaries,
+       nir_shader_get_entrypoint(nir),
+       true /* outputs */, false /* inputs */);
 
    const nir_lower_tex_options tex_options = {
       .lower_txd_3d = true,
@@ -958,8 +957,14 @@ nak_postprocess_nir(nir_shader *nir,
       .lower_rotate_to_shuffle = true
    };
    OPT(nir, nir_lower_subgroups, &subgroups_options);
-   OPT(nir, nir_lower_atomics, atomic_supported);
-   OPT(nir, nak_nir_lower_scan_reduce);
+   if (nak->sm >= 50) {
+      // On Maxwell+ we need to lower shared 64-bit atomics into
+      // compare-and-swap loops
+      OPT(nir, nir_lower_atomics, atomic_supported);
+   } else {
+      // On Kepler we need to lower shared atomics into locked ld-st
+      OPT(nir, nak_nir_lower_kepler_shared_atomics);
+   }
 
    if (nir_shader_has_local_variables(nir)) {
       OPT(nir, nir_lower_vars_to_explicit_types, nir_var_function_temp,
@@ -989,12 +994,14 @@ nak_postprocess_nir(nir_shader *nir,
 
    OPT(nir, nir_opt_combine_barriers, NULL, NULL);
 
+   OPT(nir, nir_convert_to_lcssa, true, true);
+   nir_divergence_analysis(nir);
+   if (nir->info.stage == MESA_SHADER_FRAGMENT)
+      OPT(nir, nir_opt_tex_skip_helpers, true);
+   OPT(nir, nak_nir_lower_scan_reduce, nak);
+
    nak_optimize_nir(nir, nak);
 
-   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      nir_divergence_analysis(nir);
-      OPT(nir, nir_opt_tex_skip_helpers, true);
-   }
    OPT(nir, nak_nir_lower_tex, nak);
    OPT(nir, nir_lower_idiv, NULL);
 
@@ -1095,12 +1102,10 @@ nak_postprocess_nir(nir_shader *nir,
    if (OPT(nir, nak_nir_rematerialize_load_const))
       OPT(nir, nir_opt_dce);
 
-   bool lcssa_progress = nir_convert_to_lcssa(nir, false, false);
+   OPT(nir, nir_convert_to_lcssa, false, false);
 
    if (nak->sm >= 73) {
-      if (lcssa_progress) {
-         OPT(nir, nak_nir_mark_lcssa_invariants);
-      }
+      OPT(nir, nak_nir_mark_lcssa_invariants);
       if (OPT(nir, nak_nir_lower_non_uniform_ldcx)) {
          OPT(nir, nir_copy_prop);
          OPT(nir, nir_opt_dce);

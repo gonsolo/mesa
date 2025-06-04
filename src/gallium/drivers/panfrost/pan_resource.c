@@ -70,6 +70,11 @@ panfrost_clear_depth_stencil(struct pipe_context *pipe,
    if (render_condition_enabled && !panfrost_render_condition_check(ctx))
       return;
 
+   /* Legalize here because it could trigger a recursive blit otherwise */
+   struct panfrost_resource *rdst = pan_resource(dst->texture);
+   enum pipe_format dst_view_format = util_format_linear(dst->format);
+   pan_legalize_format(ctx, rdst, dst_view_format, true, false);
+
    panfrost_blitter_save(
       ctx, render_condition_enabled ? PAN_RENDER_COND : PAN_RENDER_BASE);
    util_blitter_clear_depth_stencil(ctx->blitter, dst, clear_flags, depth,
@@ -87,6 +92,11 @@ panfrost_clear_render_target(struct pipe_context *pipe,
 
    if (render_condition_enabled && !panfrost_render_condition_check(ctx))
       return;
+
+   /* Legalize here because it could trigger a recursive blit otherwise */
+   struct panfrost_resource *rdst = pan_resource(dst->texture);
+   enum pipe_format dst_view_format = util_format_linear(dst->format);
+   pan_legalize_format(ctx, rdst, dst_view_format, true, false);
 
    panfrost_blitter_save(
       ctx, (render_condition_enabled ? PAN_RENDER_COND : PAN_RENDER_BASE) | PAN_SAVE_FRAGMENT_CONSTANT);
@@ -269,17 +279,11 @@ panfrost_create_surface(struct pipe_context *pipe, struct pipe_resource *pt,
       ps->context = pipe;
       ps->format = surf_tmpl->format;
 
-      if (pt->target != PIPE_BUFFER) {
-         assert(surf_tmpl->u.tex.level <= pt->last_level);
-         ps->nr_samples = surf_tmpl->nr_samples;
-         ps->u.tex.level = surf_tmpl->u.tex.level;
-         ps->u.tex.first_layer = surf_tmpl->u.tex.first_layer;
-         ps->u.tex.last_layer = surf_tmpl->u.tex.last_layer;
-      } else {
-         ps->u.buf.first_element = surf_tmpl->u.buf.first_element;
-         ps->u.buf.last_element = surf_tmpl->u.buf.last_element;
-         assert(ps->u.buf.first_element <= ps->u.buf.last_element);
-      }
+      assert(surf_tmpl->level <= pt->last_level);
+      ps->nr_samples = surf_tmpl->nr_samples;
+      ps->level = surf_tmpl->level;
+      ps->first_layer = surf_tmpl->first_layer;
+      ps->last_layer = surf_tmpl->last_layer;
    }
 
    return ps;

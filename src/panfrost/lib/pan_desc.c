@@ -874,7 +874,10 @@ GENX(pan_emit_fbd)(const struct pan_fb_info *fb, unsigned layer_idx,
       cfg.bound_max_y = fb->height - 1;
 
       cfg.effective_tile_size = fb->tile_size;
-      cfg.tie_break_rule = MALI_TIE_BREAK_RULE_MINUS_180_IN_0_OUT;
+      /* Ensure we cover the samples on the edge for 16x MSAA */
+      cfg.tie_break_rule = fb->nr_samples == 16 ?
+         MALI_TIE_BREAK_RULE_MINUS_180_OUT_0_IN :
+         MALI_TIE_BREAK_RULE_MINUS_180_IN_0_OUT;
       cfg.render_target_count = MAX2(fb->rt_count, 1);
 
       /* Default to 24 bit depth if there's no surface. */
@@ -1218,7 +1221,19 @@ GENX(pan_select_tiler_hierarchy_mask)(unsigned width, unsigned height,
 
    uint32_t max_fb_wh = MAX2(width, height);
    uint32_t last_hierarchy_bit = util_last_bit(DIV_ROUND_UP(max_fb_wh, 16));
-   uint32_t hierarchy_mask = BITFIELD_MASK(max_levels);
+   uint32_t hierarchy_mask;
+
+   if (max_levels < 8) {
+      /* spread the bits out somewhat */
+      static uint32_t default_mask[] = {
+         0, 0x80, 0x82, 0xa2,
+         0xaa, 0xea, 0xee, 0xfe
+      };
+      hierarchy_mask = default_mask[max_levels];
+      max_levels = 8; /* the high bit of the mask is always set */
+   } else {
+      hierarchy_mask = BITFIELD_MASK(max_levels);
+   }
 
    /* Always enable the level covering the whole FB, and disable the finest
     * levels if we don't have enough to cover everything.

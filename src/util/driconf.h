@@ -324,6 +324,10 @@
    DRI_CONF_OPT_B(vk_dont_care_as_load, def, \
                   "Treat VK_ATTACHMENT_LOAD_OP_DONT_CARE as LOAD_OP_LOAD, workaround on tiler GPUs for games that confuse these two load ops")
 
+#define DRI_CONF_VK_LOWER_TERMINATE_TO_DISCARD(def) \
+   DRI_CONF_OPT_B(vk_lower_terminate_to_discard, def, \
+                  "Lower terminate to discard (which is implicitly demote)")
+
 #define DRI_CONF_LIMIT_TRIG_INPUT_RANGE(def) \
    DRI_CONF_OPT_B(limit_trig_input_range, def, \
                   "Limit trig input range to [-2p : 2p] to improve sin/cos calculation precision on Intel")
@@ -603,6 +607,10 @@
    DRI_CONF_OPT_U64(pan_fragment_core_mask, def, 0, UINT64_MAX, \
                     "Bitmask of shader cores that may be used for fragment jobs. If unset, defaults to scheduling across all available cores.")
 
+#define DRI_CONF_PAN_ENABLE_VERTEX_PIPELINE_STORES_ATOMICS(def) \
+   DRI_CONF_OPT_B(pan_enable_vertex_pipeline_stores_atomics, def, \
+                  "Enable vertexPipelineStoresAndAtomics on v13+ (This cannot work on older generation because of speculative behaviors around vertices)")
+
 /**
  * \brief Turnip specific configuration options
  */
@@ -706,10 +714,6 @@
    DRI_CONF_OPT_B(radv_disable_dcc_stores, def, \
                   "Disable DCC for color storage images on GFX10-GFX11.5")
 
-#define DRI_CONF_RADV_LOWER_TERMINATE_TO_DISCARD(def) \
-   DRI_CONF_OPT_B(radv_lower_terminate_to_discard, def, \
-                  "Lower terminate to discard (which is implicitly demote)")
-
 #define DRI_CONF_RADV_DISABLE_ANISO_SINGLE_LEVEL(def) \
   DRI_CONF_OPT_B(radv_disable_aniso_single_level, def, \
                  "Disable anisotropic filtering for single level images")
@@ -791,6 +795,11 @@
 #define DRI_CONF_RADV_FORCE_64K_SPARSE_ALIGNMENT(def) \
    DRI_CONF_OPT_B(radv_force_64k_sparse_alignment, def, \
                   "Force the alignment of sparse buffers to 64KiB")
+
+#define DRI_CONF_RADV_DISABLE_HIZ_HIS_GFX12(def) \
+   DRI_CONF_OPT_B(radv_disable_hiz_his_gfx12, def, \
+                  "Disable HiZ/HiS on GFX12 (RDNA4) to workaround a hw bug that causes random GPU hangs")
+
 /**
  * \brief ANV specific configuration options
  */

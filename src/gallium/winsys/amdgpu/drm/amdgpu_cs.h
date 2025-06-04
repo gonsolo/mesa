@@ -31,13 +31,9 @@ struct amdgpu_ctx {
    uint32_t user_fence_bo_kms_handle;
    uint64_t *user_fence_cpu_address_base;
 
-   /* If true, report lost contexts and skip command submission.
-    * If false, terminate the process.
-    */
-   bool allow_context_lost;
-
    /* Lost context status due to ioctl and allocation failures. */
    enum pipe_reset_status sw_status;
+   unsigned flags;
 };
 
 struct amdgpu_cs_buffer {
@@ -125,7 +121,7 @@ struct amdgpu_cs {
     */
    struct drm_amdgpu_cs_chunk_fence fence_chunk;
    enum amd_ip_type ip_type;
-   unsigned queue_index;
+   enum amdgpu_queue_index queue_index;
 
    /* Whether this queue uses amdgpu_winsys_bo::alt_fence instead of generating its own
     * sequence numbers for synchronization.

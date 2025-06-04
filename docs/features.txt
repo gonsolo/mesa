@@ -340,7 +340,7 @@ Khronos, ARB, and OES extensions that are not part of any OpenGL or OpenGL ES ve
   GL_EXT_texture_view                                   DONE (all drivers that support GL_OES_texture_view)
   GL_KHR_blend_equation_advanced_coherent               DONE (freedreno/a6xx, panfrost, zink, asahi, iris/gen9+, v3d)
   GL_KHR_shader_subgroup                                DONE (radeonsi, zink)
-  GL_KHR_texture_compression_astc_hdr                   DONE (core only)
+  GL_KHR_texture_compression_astc_hdr                   DONE (panfrost, asahi)
   GL_KHR_texture_compression_astc_sliced_3d             DONE (freedreno/a4xx+, r600, radeonsi, panfrost, softpipe, v3d, zink, lima, asahi, iris/gen9+)
   GL_OES_depth_texture_cube_map                         DONE (all drivers that support GLSL 1.30+)
   GL_OES_EGL_image                                      DONE (all drivers)
@@ -478,7 +478,7 @@ Vulkan 1.2 -- all DONE: anv, hk, nvk, panvk, tu, vn
   VK_EXT_descriptor_indexing                            DONE (anv, dzn, lvp, nvk, radv, tu, vn)
   VK_EXT_host_query_reset                               DONE (anv, hasvk, lvp, nvk, panvk, pvr, radv, tu, v3dv, vn)
   VK_EXT_sampler_filter_minmax                          DONE (anv, lvp, nvk, panvk/v10+, radv, tu, vn)
-  VK_EXT_scalar_block_layout                            DONE (anv, dzn, hasvk, lvp, nvk, panvk, pvr, radv/gfx7+, tu, vn, v3dv/vc7+)
+  VK_EXT_scalar_block_layout                            DONE (anv, dzn, hasvk, lvp, nvk, panvk, pvr, radv, tu, vn, v3dv/vc7+)
   VK_EXT_separate_stencil_usage                         DONE (anv, dzn, hasvk, lvp, nvk, panvk, radv, tu, v3dv, vn)
   VK_EXT_shader_viewport_index_layer                    DONE (anv, hasvk, lvp, nvk, radv, tu, vn)
 
@@ -503,7 +503,7 @@ Vulkan 1.3 -- all DONE: anv, hk, lvp, nvk, radv, tu, vn, v3dv
   VK_EXT_image_robustness                               DONE (anv, hasvk, lvp, nvk, panvk, radv, tu, v3dv, vn)
   VK_EXT_shader_demote_to_helper_invocation             DONE (anv, hasvk, lvp, nvk, panvk, radv, tu, v3dv, vn)
   VK_EXT_subgroup_size_control                          DONE (anv, hasvk, lvp, nvk, panvk/v10+, radv, tu, v3dv, vn)
-  VK_EXT_texel_buffer_alignment                         DONE (anv, hasvk, lvp, nvk, pvr, radv, tu, v3dv, vn)
+  VK_EXT_texel_buffer_alignment                         DONE (anv, hasvk, lvp, nvk, panvk, pvr, radv, tu, v3dv, vn)
   VK_EXT_texture_compression_astc_hdr                   DONE (vn)
   VK_EXT_tooling_info                                   DONE (anv, hasvk, nvk, panvk, pvr, radv, tu, v3dv, vn)
   VK_EXT_ycbcr_2plane_444_formats                       DONE (anv, lvp, nvk, panvk/v10+, vn)
@@ -514,7 +514,7 @@ Vulkan 1.4 -- all DONE: anv, hk, lvp, nvk, radv/gfx8+, tu/a7xx+, vn
   VK_KHR_global_priority                                DONE (anv, lvp, nvk, panvk, radv, tu, vn)
   VK_KHR_index_type_uint8                               DONE (anv, lvp, nvk, panvk, pvr, radv, tu, v3dv, vn)
   VK_KHR_line_rasterization                             DONE (anv, lvp, nvk, panvk, radv, tu, v3dv, vn)
-  VK_KHR_load_store_op_none                             DONE (anv, lvp, nvk, radv, tu, v3dv, vn)
+  VK_KHR_load_store_op_none                             DONE (anv, lvp, nvk, panvk, radv, tu, v3dv, vn)
   VK_KHR_maintenance5                                   DONE (anv, lvp, nvk, panvk/v10+, radv, tu, v3dv, vn)
   VK_KHR_maintenance6                                   DONE (anv, lvp, nvk, radv, tu, vn)
   VK_KHR_map_memory2                                    DONE (anv, lvp, nvk, panvk, radv, tu, vn)
@@ -625,7 +625,7 @@ Khronos extensions that are not part of any Vulkan version:
   VK_EXT_index_type_uint8                               DONE (anv, hasvk, hk, nvk, lvp, panvk, pvr, radv/gfx8+, tu, v3dv, vn)
   VK_EXT_legacy_vertex_attributes                       DONE (anv, lvp, nvk, radv, tu, vn)
   VK_EXT_line_rasterization                             DONE (anv, hasvk, hk, nvk, panvk, lvp, radv, tu, v3dv, vn)
-  VK_EXT_load_store_op_none                             DONE (anv, hk, nvk, radv, tu, v3dv, vn)
+  VK_EXT_load_store_op_none                             DONE (anv, hk, nvk, panvk, radv, tu, v3dv, vn)
   VK_EXT_memory_budget                                  DONE (anv, hasvk, lvp, nvk, pvr, radv, tu, v3dv, vn)
   VK_EXT_memory_priority                                DONE (lvp, radv)
   VK_EXT_mesh_shader                                    DONE (anv/gfx12.5+, lvp, radv)
@@ -651,8 +651,8 @@ Khronos extensions that are not part of any Vulkan version:
   VK_EXT_shader_object                                  DONE (lvp, hk, nvk, radv)
   VK_EXT_shader_replicated_composites                   DONE (anv, dzn, hasvk, lvp, nvk, panvk, radv, tu, vn)
   VK_EXT_shader_stencil_export                          DONE (anv, hk, lvp, radv, tu, vn)
-  VK_EXT_shader_subgroup_ballot                         DONE (anv, dzn, hasvk, hk, lvp, nvk, radv, vn)
-  VK_EXT_shader_subgroup_vote                           DONE (anv, dzn, hasvk, hk, lvp, nvk, radv, vn)
+  VK_EXT_shader_subgroup_ballot                         DONE (anv, dzn, hasvk, hk, lvp, nvk, panvk, radv, vn)
+  VK_EXT_shader_subgroup_vote                           DONE (anv, dzn, hasvk, hk, lvp, nvk, panvk, radv, vn)
   VK_EXT_shader_module_identifier                       DONE (anv, hasvk, hk, nvk, panvk, radv, tu, v3dv)
   VK_EXT_surface_maintenance1                           DONE (anv, hk, lvp, nvk, radv, tu, v3dv, vn)
   VK_EXT_swapchain_maintenance1                         DONE (anv, hk, lvp, nvk, radv, tu, v3dv, vn)
@@ -756,7 +756,7 @@ Rusticl OpenCL 1.2 -- all DONE:
 
 Rusticl OpenCL 2.0 -- all DONE:
 
-  Shared virtual memory                                 in progress (nvc0, llvmpipe)
+  Shared virtual memory                                 DONE (nvc0, llvmpipe)
   Device queues                                         not started
   - cl_khr_create_command_queue                         DONE
   - Additional queries for clGetDeviceInfo              DONE
@@ -828,6 +828,7 @@ Rusticl extensions that are not part of any OpenCL version:
   cl_khr_int64_base_atomics                             not started
   cl_khr_int64_extended_atomics                         not started
   cl_khr_integer_dot_product                            DONE
+  cl_khr_kernel_clock                                   DONE (freedreno, iris, llvmpipe, nvc0, panfrost, radeonsi, zink, needs llvm-19)
   cl_khr_mipmap_image                                   not started
   cl_khr_pci_bus_info                                   DONE (iris, nvc0, radeonsi, zink)
   cl_khr_priority_hints                                 not started
@@ -848,8 +849,10 @@ Rusticl extensions that are not part of any OpenCL version:
   cl_khr_terminate_context                              not started
   cl_khr_throttle_hints                                 not started
   cl_khr_work_group_uniform_arithmetic                  not started
+  cl_ext_buffer_device_address                          DONE (llvmpipe, zink)
   cl_arm_non_uniform_work_group_size                    not started
   cl_arm_shared_virtual_memory                          in progress (nvc0)
+  cl_intel_subgroups                                    in progress (available with RUSTICL_FEATURES=intel)
   cl_intel_unified_shared_memory                        not started
 
 

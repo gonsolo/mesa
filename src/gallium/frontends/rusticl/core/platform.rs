@@ -3,18 +3,38 @@ use crate::api::icd::DISPATCH;
 use crate::core::device::*;
 use crate::core::version::*;
 
+use mesa_rust::pipe::screen::ScreenVMAllocation;
+use mesa_rust::util::vm::VM;
 use mesa_rust_gen::*;
 use mesa_rust_util::string::char_arr_to_cstr;
 use rusticl_opencl_gen::*;
 
+use std::cmp;
 use std::env;
+use std::num::NonZeroU64;
+use std::ops::Deref;
 use std::ptr;
 use std::ptr::addr_of;
 use std::ptr::addr_of_mut;
+use std::sync::Mutex;
 use std::sync::Once;
 
 /// Maximum size a pixel can be across all supported image formats.
 pub const MAX_PIXEL_SIZE_BYTES: u64 = 4 * 4;
+
+pub struct PlatformVM<'a> {
+    vm: Mutex<VM>,
+    // we make use of the drop to automatically free the reserved VM
+    _dev_allocs: Vec<ScreenVMAllocation<'a>>,
+}
+
+impl Deref for PlatformVM<'_> {
+    type Target = Mutex<VM>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.vm
+    }
+}
 
 #[repr(C)]
 pub struct Platform {
@@ -22,6 +42,8 @@ pub struct Platform {
     pub devs: Vec<Device>,
     pub extension_string: String,
     pub extensions: Vec<cl_name_version>,
+    // lifetime has to match the one of devs
+    pub vm: Option<PlatformVM<'static>>,
 }
 
 pub enum PerfDebugLevel {
@@ -34,6 +56,7 @@ pub struct PlatformDebug {
     pub allow_invalid_spirv: bool,
     pub clc: bool,
     pub max_grid_size: u32,
+    pub memory: bool,
     pub nir: bool,
     pub no_variants: bool,
     pub perf: PerfDebugLevel,
@@ -46,6 +69,7 @@ pub struct PlatformDebug {
 pub struct PlatformFeatures {
     pub fp16: bool,
     pub fp64: bool,
+    pub intel: bool,
 }
 
 static PLATFORM_ENV_ONCE: Once = Once::new();
@@ -56,11 +80,13 @@ static mut PLATFORM: Platform = Platform {
     devs: Vec::new(),
     extension_string: String::new(),
     extensions: Vec::new(),
+    vm: None,
 };
 static mut PLATFORM_DBG: PlatformDebug = PlatformDebug {
     allow_invalid_spirv: false,
     clc: false,
     max_grid_size: 0,
+    memory: false,
     nir: false,
     no_variants: false,
     perf: PerfDebugLevel::None,
@@ -72,6 +98,7 @@ static mut PLATFORM_DBG: PlatformDebug = PlatformDebug {
 static mut PLATFORM_FEATURES: PlatformFeatures = PlatformFeatures {
     fp16: false,
     fp64: false,
+    intel: false,
 };
 
 fn load_env() {
@@ -82,6 +109,7 @@ fn load_env() {
             match flag {
                 "allow_invalid_spirv" => debug.allow_invalid_spirv = true,
                 "clc" => debug.clc = true,
+                "memory" => debug.memory = true,
                 "nir" => debug.nir = true,
                 "no_reuse_context" => debug.reuse_context = false,
                 "no_variants" => debug.no_variants = true,
@@ -108,6 +136,7 @@ fn load_env() {
             match flag {
                 "fp16" => features.fp16 = true,
                 "fp64" => features.fp64 = true,
+                "intel" => features.intel = true,
                 "" => (),
                 _ => eprintln!("Unknown RUSTICL_FEATURES flag found: {}", flag),
             }
@@ -136,12 +165,55 @@ impl Platform {
         unsafe { &*addr_of!(PLATFORM_FEATURES) }
     }
 
-    fn init(&mut self) {
+    fn alloc_vm(devs: &[Device]) -> Option<PlatformVM<'_>> {
+        // We support buffer SVM only on 64 bit platforms
+        if cfg!(not(target_pointer_width = "64")) {
+            return None;
+        }
+
+        // No need to check system SVM devices
+        let devs = devs.iter().filter(|dev| !dev.system_svm_supported());
+
+        let (start, end) = devs.clone().filter_map(|dev| dev.vm_alloc_range()).reduce(
+            |(min_a, max_a), (min_b, max_b)| (cmp::max(min_a, min_b), cmp::min(max_a, max_b)),
+        )?;
+
+        // Allocate 1/8 of the available VM. No specific reason for this limit. Might have to bump
+        // this later, but it's probably fine as there is plenty of VM available.
+        let size = NonZeroU64::new((end.get() / 8).next_power_of_two())?;
+        if start > size {
+            return None;
+        }
+
+        let mut allocs = Vec::new();
+        for dev in devs {
+            allocs.push(dev.screen().alloc_vm(size, size)?);
+        }
+
+        Some(PlatformVM {
+            vm: Mutex::new(VM::new(size, size)),
+            _dev_allocs: allocs,
+        })
+    }
+
+    fn init(&'static mut self) {
         unsafe {
             glsl_type_singleton_init_or_ref();
         }
 
         self.devs = Device::all();
+
+        self.vm = Self::alloc_vm(&self.devs);
+
+        if self
+            .devs
+            .iter()
+            .any(|dev| !dev.system_svm_supported() && dev.svm_supported())
+            && self.vm.is_none()
+        {
+            // TODO: in theory we should also remove the exposed SVM extension, but...
+            eprintln!("rusticl: could not initialize SVM support");
+        }
 
         let mut exts_str: Vec<&str> = Vec::new();
         let mut add_ext = |major, minor, patch, ext: &'static str| {

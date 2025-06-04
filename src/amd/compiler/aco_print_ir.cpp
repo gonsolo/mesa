@@ -979,14 +979,16 @@ aco_print_operand(const Operand* operand, FILE* output, unsigned flags)
       print_reg_class(operand->regClass(), output);
       fprintf(output, "undef");
    } else {
-      if (operand->isLateKill())
-         fprintf(output, "(latekill)");
       if (operand->is16bit())
          fprintf(output, "(is16bit)");
       if (operand->is24bit())
          fprintf(output, "(is24bit)");
-      if ((flags & print_kill) && operand->isKill())
-         fprintf(output, "(kill)");
+      if ((flags & print_kill) && operand->isKill()) {
+         if (operand->isLateKill())
+            fprintf(output, "(lateKill)");
+         else
+            fprintf(output, "(kill)");
+      }
 
       if (!(flags & print_no_ssa))
          fprintf(output, "%%%d%s", operand->tempId(), operand->isFixed() ? ":" : "");
@@ -1047,11 +1049,14 @@ aco_print_instr(enum amd_gfx_level gfx_level, const Instruction* instr, FILE* ou
          neg = valu.neg;
          opsel = valu.opsel;
       }
+      bool is_vector_op = false;
       for (unsigned i = 0; i < num_operands; ++i) {
          if (i)
             fprintf(output, ", ");
          else
             fprintf(output, " ");
+         if (!is_vector_op && instr->operands[i].isVectorAligned())
+            fprintf(output, "(");
 
          if (i < 3) {
             if (neg[i] && instr->operands[i].isConstant())
@@ -1084,6 +1089,10 @@ aco_print_instr(enum amd_gfx_level gfx_level, const Instruction* instr, FILE* ou
             if (neg_hi[i])
                fprintf(output, "*[1,-1]");
          }
+
+         if (is_vector_op && !instr->operands[i].isVectorAligned())
+            fprintf(output, ")");
+         is_vector_op = instr->operands[i].isVectorAligned();
       }
    }
    print_instr_format_specific(gfx_level, instr, output);

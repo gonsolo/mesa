@@ -30,6 +30,7 @@
 #include "nir_xfb_info.h"
 #include "shader_enums.h"
 #include "vk_nir_convert_ycbcr.h"
+#include "vk_physical_device_features.h"
 #include "vk_pipeline.h"
 #include "vk_pipeline_layout.h"
 #include "vk_shader.h"
@@ -221,14 +222,30 @@ hk_populate_fs_key(struct hk_fs_key *key,
       key->force_sample_shading = true;
 }
 
+enum hk_feature_key {
+   HK_FEAT_MIN_LOD = BITFIELD_BIT(0),
+   HK_FEAT_CUSTOM_BORDER = BITFIELD_BIT(1),
+};
+
+static enum hk_feature_key
+hk_make_feature_key(const struct vk_features *features)
+{
+   if (!features)
+      return ~0U;
+
+   return (features->minLod ? HK_FEAT_MIN_LOD : 0) |
+          (features->customBorderColors ? HK_FEAT_CUSTOM_BORDER : 0);
+}
+
 static void
 hk_hash_graphics_state(struct vk_physical_device *device,
                        const struct vk_graphics_pipeline_state *state,
+                       const struct vk_features *features,
                        VkShaderStageFlags stages, blake3_hash blake3_out)
 {
    struct mesa_blake3 blake3_ctx;
    _mesa_blake3_init(&blake3_ctx);
-   if (stages & VK_SHADER_STAGE_FRAGMENT_BIT) {
+   if (state && (stages & VK_SHADER_STAGE_FRAGMENT_BIT)) {
       struct hk_fs_key key;
       hk_populate_fs_key(&key, state);
       _mesa_blake3_update(&blake3_ctx, &key, sizeof(key));
@@ -236,6 +253,10 @@ hk_hash_graphics_state(struct vk_physical_device *device,
       const bool is_multiview = state->rp->view_mask != 0;
       _mesa_blake3_update(&blake3_ctx, &is_multiview, sizeof(is_multiview));
    }
+
+   enum hk_feature_key feature_key = hk_make_feature_key(features);
+   _mesa_blake3_update(&blake3_ctx, &feature_key, sizeof(feature_key));
+
    _mesa_blake3_final(&blake3_ctx, blake3_out);
 }
 
@@ -630,11 +651,12 @@ should_lower_robust(const nir_intrinsic_instr *intr, const void *_)
           intr->intrinsic == nir_intrinsic_image_deref_atomic_swap;
 }
 
-void
+static void
 hk_lower_nir(struct hk_device *dev, nir_shader *nir,
              const struct vk_pipeline_robustness_state *rs, bool is_multiview,
              uint32_t set_layout_count,
-             struct vk_descriptor_set_layout *const *set_layouts)
+             struct vk_descriptor_set_layout *const *set_layouts,
+             enum hk_feature_key features)
 {
    if (HK_PERF(dev, NOROBUST)) {
       rs = &vk_robustness_disabled;
@@ -692,9 +714,11 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
     */
    NIR_PASS(_, nir, agx_nir_lower_texture_early, true /* support_lod_bias */);
 
-   NIR_PASS(_, nir, agx_nir_lower_image_view_min_lod);
+   if (features & HK_FEAT_MIN_LOD) {
+      NIR_PASS(_, nir, agx_nir_lower_image_view_min_lod);
+   }
 
-   if (!HK_PERF(dev, NOBORDER)) {
+   if ((features & HK_FEAT_CUSTOM_BORDER) && !HK_PERF(dev, NOBORDER)) {
       NIR_PASS(_, nir, agx_nir_lower_custom_border);
    }
 
@@ -1052,10 +1076,12 @@ hk_lower_hw_vs(nir_shader *nir, struct hk_shader *shader)
 VkResult
 hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
                   const struct vk_graphics_pipeline_state *state,
+                  const struct vk_features *vk_features,
                   const VkAllocationCallbacks *pAllocator,
                   struct hk_api_shader **shader_out)
 {
    VkResult result;
+   enum hk_feature_key features = hk_make_feature_key(vk_features);
 
    /* We consume the NIR, regardless of success or failure */
    nir_shader *nir = info->nir;
@@ -1074,7 +1100,7 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
    const bool is_multiview = state && state->rp->view_mask != 0;
 
    hk_lower_nir(dev, nir, info->robustness, is_multiview,
-                info->set_layout_count, info->set_layouts);
+                info->set_layout_count, info->set_layouts, features);
 
    gl_shader_stage sw_stage = nir->info.stage;
 
@@ -1253,6 +1279,7 @@ static VkResult
 hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
                    struct vk_shader_compile_info *infos,
                    const struct vk_graphics_pipeline_state *state,
+                   const struct vk_features *features,
                    const VkAllocationCallbacks *pAllocator,
                    struct vk_shader **shaders_out)
 {
@@ -1260,7 +1287,7 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
 
    for (uint32_t i = 0; i < shader_count; i++) {
       VkResult result =
-         hk_compile_shader(dev, &infos[i], state, pAllocator,
+         hk_compile_shader(dev, &infos[i], state, features, pAllocator,
                            (struct hk_api_shader **)&shaders_out[i]);
       if (result != VK_SUCCESS) {
          /* Clean up all the shaders before this point */
@@ -1494,7 +1521,7 @@ const struct vk_device_shader_ops hk_device_shader_ops = {
    .get_nir_options = hk_get_nir_options,
    .get_spirv_options = hk_get_spirv_options,
    .preprocess_nir = hk_preprocess_nir,
-   .hash_graphics_state = hk_hash_graphics_state,
+   .hash_state = hk_hash_graphics_state,
    .compile = hk_compile_shaders,
    .deserialize = hk_deserialize_api_shader,
    .cmd_set_dynamic_graphics_state = vk_cmd_set_dynamic_graphics_state,

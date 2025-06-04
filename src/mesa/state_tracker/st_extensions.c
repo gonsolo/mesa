@@ -366,6 +366,8 @@ void st_init_limits(struct pipe_screen *screen,
          screen->shader_caps[sh].glsl_16bit_consts;
       options->LowerPrecisionFloat16Uniforms =
          screen->shader_caps[sh].fp16_const_buffers;
+      options->LowerPrecision16BitLoadDst =
+         screen->shader_caps[sh].glsl_16bit_load_dst;
    }
 
    c->MaxUserAssignableUniformLocations =
@@ -888,6 +890,22 @@ void st_init_extensions(struct pipe_screen *screen,
           PIPE_FORMAT_ASTC_10x10_SRGB,
           PIPE_FORMAT_ASTC_12x10_SRGB,
           PIPE_FORMAT_ASTC_12x12_SRGB } },
+
+      { { o(KHR_texture_compression_astc_hdr) },
+          { PIPE_FORMAT_ASTC_4x4_FLOAT,
+            PIPE_FORMAT_ASTC_5x4_FLOAT,
+            PIPE_FORMAT_ASTC_5x5_FLOAT,
+            PIPE_FORMAT_ASTC_6x5_FLOAT,
+            PIPE_FORMAT_ASTC_6x6_FLOAT,
+            PIPE_FORMAT_ASTC_8x5_FLOAT,
+            PIPE_FORMAT_ASTC_8x6_FLOAT,
+            PIPE_FORMAT_ASTC_8x8_FLOAT,
+            PIPE_FORMAT_ASTC_10x5_FLOAT,
+            PIPE_FORMAT_ASTC_10x6_FLOAT,
+            PIPE_FORMAT_ASTC_10x8_FLOAT,
+            PIPE_FORMAT_ASTC_10x10_FLOAT,
+            PIPE_FORMAT_ASTC_12x10_FLOAT,
+            PIPE_FORMAT_ASTC_12x12_FLOAT } },
 
       { { o(EXT_texture_shared_exponent) },
         { PIPE_FORMAT_R9G9B9E5_FLOAT } },

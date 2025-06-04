@@ -1268,8 +1268,8 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
       if (zsres->separate_stencil)
          sres = zsres->separate_stencil;
 
-      unsigned level = zsbuf->u.tex.level;
-      unsigned first_layer = zsbuf->u.tex.first_layer;
+      unsigned level = zsbuf->level;
+      unsigned first_layer = zsbuf->first_layer;
 
       if (zres) {
          c->depth.base = agx_map_texture_gpu(zres, first_layer) +
@@ -1898,6 +1898,7 @@ agx_init_shader_caps(struct pipe_screen *pscreen)
       /* This cap is broken, see 9a38dab2d18 ("zink: disable
        * pipe_shader_caps.fp16_const_buffers") */
       caps->fp16_const_buffers = false;
+      caps->glsl_16bit_load_dst = true;
 
       /* TODO: Enable when fully baked */
       if (strcmp(util_get_process_name(), "blender") == 0)

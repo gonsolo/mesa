@@ -407,9 +407,9 @@ create_clear_surface(struct pipe_context *pctx, struct pipe_resource *pres, unsi
    struct pipe_surface tmpl = {{0}};
 
    tmpl.format = pres->format;
-   tmpl.u.tex.first_layer = box->z;
-   tmpl.u.tex.last_layer = box->z + box->depth - 1;
-   tmpl.u.tex.level = level;
+   tmpl.first_layer = box->z;
+   tmpl.last_layer = box->z + box->depth - 1;
+   tmpl.level = level;
    return tmpl;
 }
 
@@ -452,7 +452,7 @@ zink_clear_texture_dynamic(struct pipe_context *pctx,
 
    VkRenderingAttachmentInfo att = {0};
    att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-   att.imageView = zink_csurface(surf)->image_view;
+   att.imageView = zink_surface(surf)->image_view;
    att.imageLayout = res->aspect & VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
    att.loadOp = full_clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
    att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -513,59 +513,6 @@ zink_clear_texture_dynamic(struct pipe_context *pctx,
    VKCTX(CmdEndRendering)(cmdbuf);
    zink_batch_reference_resource_rw(ctx, res, true);
    pctx->surface_destroy(pctx, surf);
-}
-
-void
-zink_clear_texture(struct pipe_context *pctx,
-                   struct pipe_resource *pres,
-                   unsigned level,
-                   const struct pipe_box *box,
-                   const void *data)
-{
-   struct zink_context *ctx = zink_context(pctx);
-   struct zink_resource *res = zink_resource(pres);
-   struct pipe_surface surf = create_clear_surface(pctx, pres, level, box);
-   struct pipe_scissor_state scissor = {box->x, box->y, box->x + box->width, box->y + box->height};
-
-   if (res->aspect & VK_IMAGE_ASPECT_COLOR_BIT) {
-      union pipe_color_union color;
-
-      util_format_unpack_rgba(pres->format, color.ui, data, 1);
-
-      util_blitter_save_framebuffer(ctx->blitter, &ctx->fb_state);
-      set_clear_fb(pctx, &surf, NULL);
-      zink_blit_barriers(ctx, NULL, res, false);
-      ctx->blitting = true;
-      ctx->queries_disabled = true;
-      pctx->clear(pctx, PIPE_CLEAR_COLOR0, &scissor, &color, 0, 0);
-      util_blitter_restore_fb_state(ctx->blitter);
-      ctx->queries_disabled = false;
-      ctx->blitting = false;
-   } else {
-      float depth = 0.0;
-      uint8_t stencil = 0;
-
-      if (res->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)
-         util_format_unpack_z_float(pres->format, &depth, data, 1);
-
-      if (res->aspect & VK_IMAGE_ASPECT_STENCIL_BIT)
-         util_format_unpack_s_8uint(pres->format, &stencil, data, 1);
-
-      unsigned flags = 0;
-      if (res->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)
-         flags |= PIPE_CLEAR_DEPTH;
-      if (res->aspect & VK_IMAGE_ASPECT_STENCIL_BIT)
-         flags |= PIPE_CLEAR_STENCIL;
-      util_blitter_save_framebuffer(ctx->blitter, &ctx->fb_state);
-      zink_blit_barriers(ctx, NULL, res, false);
-      ctx->blitting = true;
-      set_clear_fb(pctx, NULL, &surf);
-      ctx->queries_disabled = true;
-      pctx->clear(pctx, flags, &scissor, NULL, depth, stencil);
-      util_blitter_restore_fb_state(ctx->blitter);
-      ctx->queries_disabled = false;
-      ctx->blitting = false;
-   }
 }
 
 void
@@ -653,7 +600,7 @@ zink_clear_depth_stencil(struct pipe_context *pctx, struct pipe_surface *dst,
       zink_stop_conditional_render(ctx);
       ctx->render_condition_active = false;
    }
-   bool cur_attachment = zink_csurface(ctx->fb_zsbuf) == zink_csurface(dst);
+   bool cur_attachment = ctx->fb_zsbuf == dst;
    if (dstx > ctx->fb_state.width || dsty > ctx->fb_state.height ||
        dstx + width > ctx->fb_state.width ||
        dsty + height > ctx->fb_state.height)
@@ -707,8 +654,7 @@ fb_clears_apply_internal(struct zink_context *ctx, struct pipe_resource *pres, i
       /* slightly different than the u_blitter handling:
        * this can be called recursively while unordered_blitting=true
        */
-      bool can_reorder = zink_screen(ctx->base.screen)->info.have_KHR_dynamic_rendering &&
-                         !ctx->render_condition_active &&
+      bool can_reorder = !ctx->render_condition_active &&
                          !ctx->unordered_blitting &&
                          zink_get_cmdbuf(ctx, NULL, res) == ctx->bs->reordered_cmdbuf;
       if (can_reorder) {
@@ -753,8 +699,8 @@ zink_fb_clear_reset(struct zink_context *ctx, unsigned i)
 static bool
 fb_depth_intersects(const struct pipe_surface *psurf, int z, int depth)
 {
-   return (z >= psurf->u.tex.first_layer && z + depth - 1 <= psurf->u.tex.last_layer) ||
-          (psurf->u.tex.first_layer >= z && psurf->u.tex.last_layer <= z + depth - 1);
+   return (z >= psurf->first_layer && z + depth - 1 <= psurf->last_layer) ||
+          (psurf->first_layer >= z && psurf->last_layer <= z + depth - 1);
 }
 
 void
@@ -850,7 +796,7 @@ fb_clears_apply_or_discard_internal(struct zink_context *ctx, struct pipe_resour
 static bool
 fb_depth_fills(const struct pipe_surface *psurf, int z, int depth)
 {
-   return z == psurf->u.tex.first_layer && z + depth - 1 >= psurf->u.tex.last_layer;
+   return z == psurf->first_layer && z + depth - 1 >= psurf->last_layer;
 }
 
 void

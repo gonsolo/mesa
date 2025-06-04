@@ -24,3 +24,14 @@ VK_KHR_robustness2 on RADV
 VK_EXT_zero_initialize_device_memory on RADV and NVK
 VK_EXT_primitive_topology_list_restart on panvk
 VK_EXT_image_2d_view_of_3d on panvk
+VK_EXT_texel_buffer_alignment on panvk
+cl_khr_kernel_clock on freedreno, iris, llvmpipe, nvc0, panfrost, radeonsi and zink with llvm-19 or newer
+GL_KHR_texture_compression_astc_hdr on panfrost and asahi
+cl_ext_buffer_device_address on llvmpipe and zink
+Completed OpenCL 2.0 coarse grain buffer SVM support
+VK_EXT_shader_subgroup_ballot on panvk
+VK_EXT_shader_subgroup_vote on panvk
+Vulkan video support on GFX12 (RDNA4) for RADV
+VK_KHR_load_store_op_none on panvk
+VK_EXT_load_store_op_none on panvk
+VK_EXT_scalar_block_layout on radv/gfx6

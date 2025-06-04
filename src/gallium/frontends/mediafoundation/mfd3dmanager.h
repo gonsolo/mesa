@@ -65,22 +65,10 @@ typedef union
    uint64_t version;   // bits field
 } MFAdapterDriverVersion;
 
-typedef struct MFTAdapterInfo
-{
-   // DXCoreAdapterProperty::InstanceLuid
-   LUID adapter_luid;
-   // DXCoreAdapterProperty::IsIntegrated
-   uint32_t is_integrated;
-   // DXCoreAdapterProperty::HardwareID
-   DXCoreHardwareID hardware_id;
-   // DXCoreAdapterProperty::DriverVersion
-   MFAdapterDriverVersion driver_version;
-} MFTAdapterInfo;
-
 class CMFD3DManager
 {
  public:
-   CMFD3DManager();
+   CMFD3DManager( void *logId );
    ~CMFD3DManager();
 
    HRESULT Initialize( D3D12_VIDEO_ENCODER_CODEC codec );
@@ -91,6 +79,8 @@ class CMFD3DManager
 
  protected:
    HRESULT xReopenDeviceManager( bool bNewDevice );
+   HRESULT GetDeviceInfo();
+   void UpdateGPUFeatureFlags();
 
    ComPtr<IMFDXGIDeviceManager> m_spDeviceManager;
    ComPtr<ID3D11Device5> m_spDevice11;
@@ -100,11 +90,24 @@ class CMFD3DManager
    ComPtr<IMFVideoSampleAllocatorEx> m_spVideoSampleAllocator;   // Used for software input samples that need to be copied
    UINT32 m_uiResetToken = 0;
    HANDLE m_hDevice = NULL;
-   LUID m_currentDXAdapterLuid = { 0 };
    struct vl_screen *m_pVlScreen = nullptr;
    struct sw_winsys *m_pWinsys = nullptr;
    struct pipe_context *m_pPipeContext = nullptr;
 
+   uint32_t m_deviceVendorId {};
+   uint32_t m_deviceDeviceId {};
+   MFAdapterDriverVersion m_deviceDriverVersion {};
+
+   // MFT features that are dependent on GPU / version (ensure these are named to be false by default so we can easily reset this
+   // struct)
+   struct GPUFeatureFlags
+   {
+      bool m_bDisableAsync = false;
+      bool m_bH264SendUnwrappedPOC = false;
+   };
+   GPUFeatureFlags m_gpuFeatureFlags;
+
  private:
    D3D12_VIDEO_ENCODER_CODEC m_codec;
+   const void *m_logId = {};
 };

@@ -73,6 +73,7 @@ enum radv_video_enc_hw_ver {
    RADV_VIDEO_ENC_HW_2,
    RADV_VIDEO_ENC_HW_3,
    RADV_VIDEO_ENC_HW_4,
+   RADV_VIDEO_ENC_HW_5,
 };
 
 struct radv_physical_device {
@@ -99,6 +100,9 @@ struct radv_physical_device {
 
    /* Whether to enable FMASK compression for MSAA textures (GFX6-GFX10.3) */
    bool use_fmask;
+
+   /* Whether to enable HTILE compression for depth/stencil images. */
+   bool use_hiz;
 
    /* Whether to enable NGG. */
    bool use_ngg;

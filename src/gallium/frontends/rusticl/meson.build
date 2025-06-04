@@ -25,6 +25,7 @@ libmesa_rust_files = files(
   'mesa/pipe/transfer.rs',
   'mesa/util.rs',
   'mesa/util/disk_cache.rs',
+  'mesa/util/vm.rs',
 )
 
 rusticl_proc_macros_files = files(
@@ -182,7 +183,7 @@ rusticl_llvm_bindings_rs = rust.bindgen(
   args : [
     bindgen_output_args,
     # we want to limit what to generate bindings for
-    '--generate', 'constructors,functions,types',
+    '--generate', 'constructors,functions,types,vars',
     # and all types will be opaque
     '--opaque-type', '.*',
     # LLVM/Clang/Translator stuff, only used for build-id
@@ -190,6 +191,7 @@ rusticl_llvm_bindings_rs = rust.bindgen(
     '--allowlist-function', 'clang::getClangFullVersion',
     '--allowlist-function', 'llvm::LLVMContext::LLVMContext',
     '--allowlist-function', 'llvm::writeSpirv',
+    '--allowlist-var', 'LLVM_VERSION_.*'
   ],
 )
 
@@ -259,6 +261,8 @@ rusticl_mesa_bindings = rust.bindgen(
     '--allowlist-var',          'SHA1_.*',
     '--allowlist-function',     'u_.*',
     '--allowlist-function',     'util_format_.*',
+    '--allowlist-function',     'util_vma_.*',
+    '--no-copy',                'util_vma_heap', # it's a linked list
 
     # CL API
     '--allowlist-type',         'cl_sampler_.*_mode',
@@ -303,6 +307,12 @@ rusticl_mesa_bindings = rust.bindgen(
     # rusticl C functions
     '--allowlist-function',     'rusticl_.*',
     '--allowlist-function',     'std(err|out)_ptr',
+
+    # libc
+    '--allowlist-function',     'mmap',
+    '--allowlist-function',     'munmap',
+    '--allowlist-var',          'MAP_.*',
+    '--allowlist-var',          'PROT_.*',
 
     # winsys
     '--allowlist-var',          'WINSYS_HANDLE_TYPE_.*',

@@ -103,7 +103,8 @@ enum radv_cmd_dirty_bits {
    RADV_CMD_DIRTY_RASTER_STATE = 1ull << 17,
    RADV_CMD_DIRTY_MSAA_STATE = 1ull << 18,
    RADV_CMD_DIRTY_CLIP_RECTS_STATE = 1ull << 19,
-   RADV_CMD_DIRTY_ALL = (1ull << 20) - 1,
+   RADV_CMD_DIRTY_TESS_STATE = 1ull << 20,
+   RADV_CMD_DIRTY_ALL = (1ull << 21) - 1,
 
    RADV_CMD_DIRTY_SHADER_QUERY = RADV_CMD_DIRTY_NGG_STATE | RADV_CMD_DIRTY_TASK_STATE,
 };
@@ -538,10 +539,21 @@ struct radv_cmd_buffer_upload {
    struct list_head list;
 };
 
+/* A pair of values for SET_*_REG_PAIRS. */
+struct gfx12_reg {
+   uint32_t reg_offset;
+   uint32_t reg_value;
+};
+
 struct radv_cmd_buffer {
    struct vk_command_buffer vk;
 
    struct radv_tracked_regs tracked_regs;
+
+   uint32_t num_buffered_sh_regs;
+   struct {
+      struct gfx12_reg buffered_sh_regs[64];
+   } gfx12;
 
    VkCommandBufferUsageFlags usage_flags;
    struct radeon_cmdbuf *cs;

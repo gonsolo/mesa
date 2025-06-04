@@ -30,7 +30,6 @@
 #include "zink_fence.h"
 #include "vk_format.h"
 #include "zink_format.h"
-#include "zink_framebuffer.h"
 #include "zink_program.h"
 #include "zink_public.h"
 #include "zink_query.h"
@@ -600,6 +599,7 @@ zink_init_shader_caps(struct zink_screen *screen)
          screen->info.feats12.shaderFloat16 ||
          (screen->info.have_KHR_shader_float16_int8 &&
           screen->info.shader_float16_int8_feats.shaderFloat16);
+      caps->glsl_16bit_load_dst = true;
 
       caps->int16 = screen->info.feats.features.shaderInt16;
 
@@ -723,9 +723,9 @@ zink_init_screen_caps(struct zink_screen *screen)
 #if defined(MVK_VERSION)
    caps->fbfetch = 0;
 #else
-   caps->fbfetch = 1;
+   caps->fbfetch = screen->info.have_KHR_dynamic_rendering_local_read;
 #endif
-   caps->fbfetch_coherent = screen->info.have_EXT_rasterization_order_attachment_access;
+   caps->fbfetch_coherent = caps->fbfetch && screen->info.have_EXT_rasterization_order_attachment_access;
 
    caps->memobj =
       screen->instance_info->have_KHR_external_memory_capabilities &&
@@ -790,8 +790,6 @@ zink_init_screen_caps(struct zink_screen *screen)
    caps->texture_mirror_clamp_to_edge =
       screen->info.have_KHR_sampler_mirror_clamp_to_edge ||
       (screen->info.have_vulkan12 && screen->info.feats12.samplerMirrorClampToEdge);
-
-   caps->polygon_offset_units_unscaled = true;
 
    caps->polygon_offset_clamp = screen->info.feats.features.depthBiasClamp;
 
@@ -2818,7 +2816,6 @@ init_driver_workarounds(struct zink_screen *screen)
                                                         ((zink_debug & ZINK_DEBUG_GPL) ||
                                                          screen->info.dynamic_state2_feats.extendedDynamicState2PatchControlPoints) &&
                                                         screen->info.have_EXT_extended_dynamic_state3 &&
-                                                        screen->info.have_KHR_dynamic_rendering &&
                                                         screen->info.have_EXT_non_seamless_cube_map &&
                                                         (!(zink_debug & ZINK_DEBUG_GPL) ||
                                                          screen->info.gpl_props.graphicsPipelineLibraryFastLinking ||
@@ -2861,17 +2858,6 @@ init_driver_workarounds(struct zink_screen *screen)
       break;
    }
 
-   if (zink_driverid(screen) == VK_DRIVER_ID_AMD_OPEN_SOURCE || 
-       zink_driverid(screen) == VK_DRIVER_ID_AMD_PROPRIETARY || 
-       zink_driverid(screen) == VK_DRIVER_ID_NVIDIA_PROPRIETARY || 
-       zink_driverid(screen) == VK_DRIVER_ID_MESA_RADV)
-      screen->driver_workarounds.z24_unscaled_bias = 1<<23;
-   else
-      screen->driver_workarounds.z24_unscaled_bias = 1<<24;
-   if (zink_driverid(screen) == VK_DRIVER_ID_NVIDIA_PROPRIETARY)
-      screen->driver_workarounds.z16_unscaled_bias = 1<<15;
-   else
-      screen->driver_workarounds.z16_unscaled_bias = 1<<16;
    /* these drivers don't use VK_PIPELINE_CREATE_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT, so it can always be set */
    switch (zink_driverid(screen)) {
    case VK_DRIVER_ID_MESA_RADV:
@@ -3289,8 +3275,10 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
    if (++instance_refcount == 1) {
       instance_info.loader_version = zink_get_loader_version(screen);
       instance = zink_create_instance(screen, &instance_info);
-      if (!instance)
+      if (!instance) {
+         simple_mtx_unlock(&instance_lock);
          goto fail;
+      }
    } else {
       assert(instance);
    }

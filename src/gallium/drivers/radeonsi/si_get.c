@@ -900,8 +900,10 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
     *
     * For OpenCL, rounding mode is explicit. This will only lower f2f16 to f2f16_rtz
     * when execution mode is rtz instead of rtne.
+    *
+    * GFX8 has precision issues with this option.
     */
-   options->force_f2f16_rtz = true;
+   options->force_f2f16_rtz = sscreen->info.gfx_level >= GFX9;
    options->io_options |= (!has_mediump ? nir_io_mediump_is_32bit : 0) | nir_io_has_intrinsics |
                           (sscreen->use_ngg_culling ?
                               nir_io_compaction_groups_tes_inputs_into_pos_and_var_groups : 0);
@@ -958,13 +960,14 @@ void si_init_shader_caps(struct si_screen *sscreen)
       /* We need F16C for fast FP16 conversions in glUniform.
        * It's supported since Intel Ivy Bridge and AMD Bulldozer.
        */
-      bool has_16bit_alu = sscreen->info.gfx_level >= GFX9 && util_get_cpu_caps()->has_f16c;
+      bool has_16bit_alu = sscreen->info.gfx_level >= GFX8 && util_get_cpu_caps()->has_f16c;
 
       caps->fp16 = has_16bit_alu;
       caps->fp16_derivatives = has_16bit_alu;
       caps->fp16_const_buffers = has_16bit_alu;
       caps->int16 = has_16bit_alu;
       caps->glsl_16bit_consts = has_16bit_alu;
+      caps->glsl_16bit_load_dst = sscreen->info.gfx_level >= GFX9;
    }
 }
 
@@ -1097,7 +1100,6 @@ void si_init_screen_caps(struct si_screen *sscreen)
    caps->shader_pack_half_float = true;
    caps->framebuffer_no_attachment = true;
    caps->robust_buffer_access_behavior = true;
-   caps->polygon_offset_units_unscaled = true;
    caps->string_marker = true;
    caps->cull_distance = true;
    caps->shader_array_components = true;
@@ -1122,7 +1124,6 @@ void si_init_screen_caps(struct si_screen *sscreen)
    caps->compute_grid_info_last_block = true;
    caps->image_load_formatted = true;
    caps->prefer_compute_for_multimedia = true;
-   caps->tgsi_div = true;
    caps->packed_uniforms = true;
    caps->gl_spirv = true;
    caps->alpha_to_coverage_dither_control = true;

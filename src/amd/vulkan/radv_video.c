@@ -247,6 +247,14 @@ init_vcn_decoder(struct radv_physical_device *pdev)
       pdev->vid_addr_gfx_mode = RDECODE_ARRAY_MODE_ADDRLIB_SEL_GFX11;
       pdev->av1_version = RDECODE_AV1_VER_1;
       break;
+   case VCN_5_0_0:
+      pdev->vid_addr_gfx_mode = RDECODE_ARRAY_MODE_ADDRLIB_SEL_GFX11;
+      pdev->av1_version = RDECODE_AV1_VER_2;
+      break;
+   case VCN_5_0_1:
+      pdev->vid_addr_gfx_mode = RDECODE_ARRAY_MODE_ADDRLIB_SEL_GFX9;
+      pdev->av1_version = RDECODE_AV1_VER_2;
+      break;
    default:
       break;
    }
@@ -280,12 +288,10 @@ radv_probe_video_decode(struct radv_physical_device *pdev)
 
    pdev->video_decode_enabled = false;
 
-   /* TODO: Add VCN 5.0+. */
-   if (pdev->info.vcn_ip_version >= VCN_5_0_0)
-      return;
-
    /* The support for decode events are available at the same time as encode */
-   if (pdev->info.vcn_ip_version >= VCN_4_0_0) {
+   if (pdev->info.vcn_ip_version >= VCN_5_0_0) {
+      pdev->video_decode_enabled = true;
+   } else if (pdev->info.vcn_ip_version >= VCN_4_0_0) {
       if (pdev->info.vcn_enc_major_version > 1)
          pdev->video_decode_enabled = true;
       /* VCN 4 FW 1.22 has all the necessary pieces to pass CTS */
@@ -637,6 +643,8 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
       }
       pCapabilities->minBitstreamBufferOffsetAlignment = 16;
       pCapabilities->minBitstreamBufferSizeAlignment = 16;
+      if (pdev->info.vcn_ip_version >= VCN_5_0_0)
+         pCapabilities->flags |= VK_VIDEO_CAPABILITY_SEPARATE_REFERENCE_IMAGES_BIT_KHR;
    }
 
    switch (pVideoProfile->videoCodecOperation) {
@@ -771,6 +779,8 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
       pCapabilities->stdHeaderVersion.specVersion = VK_STD_VULKAN_VIDEO_CODEC_H264_ENCODE_SPEC_VERSION;
       pCapabilities->maxDpbSlots = RADV_VIDEO_H264_MAX_DPB_SLOTS;
       pCapabilities->maxActiveReferencePictures = MAX2(ext->maxPPictureL0ReferenceCount, ext->maxBPictureL0ReferenceCount + ext->maxL1ReferenceCount);
+      pCapabilities->minCodedExtent.width = pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_5 ? 96 : 128;
+      pCapabilities->minCodedExtent.height = pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_5 ? 32 : 128;
       break;
    }
    case VK_VIDEO_CODEC_OPERATION_ENCODE_H265_BIT_KHR: {
@@ -826,6 +836,8 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
       pCapabilities->stdHeaderVersion.specVersion = VK_STD_VULKAN_VIDEO_CODEC_H265_ENCODE_SPEC_VERSION;
       pCapabilities->maxDpbSlots = RADV_VIDEO_H265_MAX_DPB_SLOTS;
       pCapabilities->maxActiveReferencePictures = MAX2(ext->maxPPictureL0ReferenceCount, ext->maxBPictureL0ReferenceCount + ext->maxL1ReferenceCount);
+      pCapabilities->minCodedExtent.width = pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_5 ? 384 : 130;
+      pCapabilities->minCodedExtent.height = 128;
       break;
    }
    default:

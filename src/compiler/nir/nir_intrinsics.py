@@ -2439,10 +2439,10 @@ system_value("ray_query_global_intel", 1, bit_sizes=[64])
 # infrastructure in NIR uses to determine the number of components in the
 # result.
 #
-# The number of components for the second source is -1 to avoid validation of
-# its value. Some supported configurations will have the component count of
-# that matrix different than the others.
-intrinsic("dpas_intel", dest_comp=0, src_comp=[0, -1, 0],
+# The number of components for the second and third sources is -1 to avoid
+# validation of its value. Some supported configurations will have the
+# component count of that matrix different than the others.
+intrinsic("dpas_intel", dest_comp=0, src_comp=[0, -1, -1],
           indices=[DEST_BASE_TYPE, SRC_BASE_TYPE, SATURATE, SYSTOLIC_DEPTH, REPEAT_COUNT],
           flags=[CAN_ELIMINATE])
 
@@ -2484,7 +2484,35 @@ intrinsic("ldtram_nv", dest_comp=2, bit_sizes=[32],
           indices=[BASE, FLAGS], flags=[CAN_ELIMINATE, CAN_REORDER])
 
 # NVIDIA-specific Image intrinsics
-image("load_raw_nv", src_comp=[4, 1, 1], extra_indices=[DEST_TYPE], dest_comp=0, flags=[CAN_ELIMINATE])
+# only used for kepler address calculations.
+intrinsic("image_deref_load_info_nv", dest_comp=0, src_comp=[-1], bit_sizes=[32],
+          indices=[BASE], flags=[CAN_ELIMINATE, CAN_REORDER])
+# FLAGS is struct nak_nir_suclamp_flags
+intrinsic("suclamp_nv", dest_comp=2, src_comp=[1, 1], bit_sizes=[32],
+          indices=[FLAGS], flags=[CAN_ELIMINATE, CAN_REORDER])
+# FLAGS is 1 if .is3d, otherwise 0
+intrinsic("subfm_nv", dest_comp=2, src_comp=[1, 1, 1], bit_sizes=[32],
+          indices=[FLAGS], flags=[CAN_ELIMINATE, CAN_REORDER])
+# src[] = { offset, bitfield, address }.
+intrinsic("sueau_nv", dest_comp=1, src_comp=[1, 1, 1], bit_sizes=[32],
+          flags=[CAN_ELIMINATE, CAN_REORDER])
+# src0 * src1 + src2 (with variable bit sizes)
+# FLAGS is struct nak_nir_imadsp_flags
+intrinsic("imadsp_nv", dest_comp=1, src_comp=[1, 1, 1], bit_sizes=[32],
+          indices=[FLAGS], flags=[CAN_ELIMINATE, CAN_REORDER])
+# src[] = { address, fmt, pred }.
+# FORMAT describes how many bits to load from memory
+# FLAGS is enum nak_su_ga_offset_mode
+intrinsic("suldga_nv", dest_comp=0, src_comp=[2, 1, 1], bit_sizes=[32],
+          indices=[FORMAT, ACCESS, FLAGS], flags=[CAN_ELIMINATE])
+# src[] = { address, fmt, pred, data }.
+# FLAGS is enum nak_su_ga_offset_mode
+intrinsic("sustga_nv", src_comp=[2, 1, 1, 0],
+          indices=[ACCESS, FLAGS], bit_sizes=[32])
+# Nvidia Kepler specific load-lock store-unlock
+# used to lower shared atomics.
+intrinsic("load_shared_lock_nv", src_comp=[1], dest_comp=2)
+intrinsic("store_shared_unlock_nv", src_comp=[1, 1], dest_comp=1)
 
 # NVIDIA-specific Geometry Shader intrinsics.
 # These contain an additional integer source and destination with the primitive handle input/output.

@@ -81,6 +81,53 @@ static uint64_t etna_resource_modifier(struct etna_resource *rsc)
    return layout_to_modifier(rsc->layout);
 }
 
+bool
+etna_resource_is_render_compatible(struct pipe_screen *pscreen,
+                                   struct etna_resource *rsc)
+{
+   struct etna_screen *screen = etna_screen(pscreen);
+
+   if (rsc->layout == ETNA_LAYOUT_LINEAR) {
+      if (!VIV_FEATURE(screen, ETNA_FEATURE_LINEAR_PE))
+         return false;
+
+      if (VIV_FEATURE(screen, ETNA_FEATURE_FAST_CLEAR)) {
+         unsigned int min_tilesize = etna_screen_get_tile_size(screen, TS_MODE_128B,
+                                                               rsc->base.nr_samples > 1);
+
+         if (rsc->levels[rsc->base.last_level].stride % min_tilesize != 0)
+            return false;
+      }
+   }
+
+   if (screen->specs.pixel_pipes > 1 && !screen->specs.single_buffer &&
+       !(rsc->layout & ETNA_LAYOUT_BIT_MULTI))
+      return false;
+
+   return true;
+}
+
+static bool
+etna_resource_can_use_ts(struct etna_screen *screen,
+                         struct etna_resource *rsc)
+{
+   struct pipe_resource *prsc = &rsc->base;
+
+   /* GPU capable of using TS */
+   if (!VIV_FEATURE(screen, ETNA_FEATURE_FAST_CLEAR))
+      return false;
+
+   /* No array layers or 3D slices */
+   if (prsc->depth0 != 1 || prsc->array_size != 1)
+      return false;
+
+   /* Can be handled by the resolve engine */
+   if (!etna_resource_hw_tileable(screen->specs.use_blt, prsc))
+      return false;
+
+   return true;
+}
+
 /* A tile is either 64 bytes or, when the GPU has the CACHE128B256BPERLINE
  * feature, 128/256 bytes of color/depth data, tracked by
  * 'screen->specs.bits_per_tile' bits of tile status.
@@ -95,9 +142,11 @@ etna_screen_resource_alloc_ts(struct pipe_screen *pscreen,
    size_t tile_size, ts_size, ts_bo_size, ts_layer_stride, ts_data_offset = 0;
    uint8_t ts_mode = TS_MODE_128B;
    int8_t ts_compress_fmt = -1;
-   unsigned layers;
 
    assert(!rsc->ts_bo);
+
+   assert(prsc->depth0 == 1);
+   assert(prsc->array_size == 1);
 
    /* pre-v4 compression is largely useless, so disable it when not wanted for MSAA
     * v4 compression can be enabled everywhere without any known drawback,
@@ -131,11 +180,10 @@ etna_screen_resource_alloc_ts(struct pipe_screen *pscreen,
    }
 
    tile_size = etna_screen_get_tile_size(screen, ts_mode, prsc->nr_samples > 1);
-   layers = prsc->target == PIPE_TEXTURE_3D ? prsc->depth0 : prsc->array_size;
    ts_layer_stride = align(DIV_ROUND_UP(lvl->layer_stride,
                                         tile_size * 8 / screen->specs.bits_per_tile),
                            0x100 * screen->specs.pixel_pipes);
-   ts_size = ts_bo_size = ts_layer_stride * layers;
+   ts_size = ts_bo_size = ts_layer_stride;
    if (ts_size == 0)
       return true;
 
@@ -434,10 +482,10 @@ etna_resource_alloc(struct pipe_screen *pscreen, unsigned layout,
       }
    }
 
-   /* If TS is externally visible set it up now, so it can be exported before
-    * the first rendering to a surface.
-    */
-   if (etna_resource_ext_ts(rsc))
+   /* Allocate TS for the resource if it is renderable and may use TS */
+   if ((templat->bind & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_DEPTH_STENCIL)) &&
+       etna_resource_is_render_compatible(pscreen, rsc) &&
+       etna_resource_can_use_ts(screen, rsc))
       etna_screen_resource_alloc_ts(pscreen, rsc, modifier);
 
    if (DBG_ENABLED(ETNA_DBG_ZERO)) {

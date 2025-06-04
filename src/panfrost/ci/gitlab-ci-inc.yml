@@ -87,8 +87,7 @@
     - changes: &panfrost_vulkan_file_list
         - src/panfrost/vulkan/**/*
       when: on_success
-    - changes: &panfrost_bifrost_file_list
-        - src/panfrost/compiler/**/*
+    - changes: *panfrost_bifrost_file_list
       when: on_success
 
 .panfrost-vk-manual-rules:
@@ -204,7 +203,7 @@
     KERNEL_IMAGE_TYPE: ""
     RUNNER_TAG: mesa-ci-x86-64-lava-mt8192-asurada-spherion-r0
     # Force fixed 6.6 kernel, we're not reliably getting a GPU on 6.13
-    KERNEL_TAG: "v6.6.21-mesa-f8ea"
+    KERNEL_TAG: "v6.6.21-mesa-1978"
 
 # Status: https://lava.collabora.dev/scheduler/device_type/mt8195-cherry-tomato-r2
 .lava-mt8195-cherry-tomato-r2:arm64:

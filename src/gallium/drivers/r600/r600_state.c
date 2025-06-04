@@ -247,24 +247,22 @@ static void r600_emit_polygon_offset(struct r600_context *rctx, struct r600_atom
 	float offset_scale = state->offset_scale;
 	uint32_t pa_su_poly_offset_db_fmt_cntl = 0;
 
-	if (!state->offset_units_unscaled) {
-		switch (state->zs_format) {
-		case PIPE_FORMAT_Z24X8_UNORM:
-		case PIPE_FORMAT_Z24_UNORM_S8_UINT:
-			offset_units *= 2.0f;
-			pa_su_poly_offset_db_fmt_cntl =
-				S_028DF8_POLY_OFFSET_NEG_NUM_DB_BITS((char)-24);
-			break;
-		case PIPE_FORMAT_Z16_UNORM:
-			offset_units *= 4.0f;
-			pa_su_poly_offset_db_fmt_cntl =
-				S_028DF8_POLY_OFFSET_NEG_NUM_DB_BITS((char)-16);
-			break;
-		default:
-			pa_su_poly_offset_db_fmt_cntl =
-				S_028DF8_POLY_OFFSET_NEG_NUM_DB_BITS((char)-23) |
-				S_028DF8_POLY_OFFSET_DB_IS_FLOAT_FMT(1);
-		}
+	switch (state->zs_format) {
+	case PIPE_FORMAT_Z24X8_UNORM:
+	case PIPE_FORMAT_Z24_UNORM_S8_UINT:
+		offset_units *= 2.0f;
+		pa_su_poly_offset_db_fmt_cntl =
+			S_028DF8_POLY_OFFSET_NEG_NUM_DB_BITS((char)-24);
+		break;
+	case PIPE_FORMAT_Z16_UNORM:
+		offset_units *= 4.0f;
+		pa_su_poly_offset_db_fmt_cntl =
+			S_028DF8_POLY_OFFSET_NEG_NUM_DB_BITS((char)-16);
+		break;
+	default:
+		pa_su_poly_offset_db_fmt_cntl =
+			S_028DF8_POLY_OFFSET_NEG_NUM_DB_BITS((char)-23) |
+			S_028DF8_POLY_OFFSET_DB_IS_FLOAT_FMT(1);
 	}
 
 	radeon_set_context_reg_seq(cs, R_028E00_PA_SU_POLY_OFFSET_FRONT_SCALE, 4);
@@ -482,12 +480,12 @@ static void *r600_create_rs_state(struct pipe_context *ctx,
 			S_028810_DX_RASTERIZATION_KILL(state->rasterizer_discard);
 	}
 	rs->multisample_enable = state->multisample;
+	rs->line_width = state->line_width;
 
 	/* offset */
 	rs->offset_units = state->offset_units;
 	rs->offset_scale = state->offset_scale * 16.0f;
 	rs->offset_enable = state->offset_point || state->offset_line || state->offset_tri;
-	rs->offset_units_unscaled = state->offset_units_unscaled;
 
 	if (state->point_size_per_vertex) {
 		psize_min = util_get_min_point_size(state);
@@ -497,6 +495,7 @@ static void *r600_create_rs_state(struct pipe_context *ctx,
 		psize_min = state->point_size;
 		psize_max = state->point_size;
 	}
+	rs->max_point_size = psize_max;
 
 	sc_mode_cntl = S_028A4C_MSAA_ENABLE(state->multisample) |
 		       S_028A4C_LINE_STIPPLE_ENABLE(state->line_stipple_enable) |
@@ -804,7 +803,7 @@ static void r600_init_color_surface(struct r600_context *rctx,
 {
 	struct r600_screen *rscreen = rctx->screen;
 	struct r600_texture *rtex = (struct r600_texture*)surf->base.texture;
-	unsigned level = surf->base.u.tex.level;
+	unsigned level = surf->base.level;
 	unsigned pitch, slice;
 	unsigned color_info;
 	unsigned color_view;
@@ -821,8 +820,8 @@ static void r600_init_color_surface(struct r600_context *rctx,
 	}
 
 	offset = (uint64_t)rtex->surface.u.legacy.level[level].offset_256B * 256;
-	color_view = S_028080_SLICE_START(surf->base.u.tex.first_layer) |
-		     S_028080_SLICE_MAX(surf->base.u.tex.last_layer);
+	color_view = S_028080_SLICE_START(surf->base.first_layer) |
+		     S_028080_SLICE_MAX(surf->base.last_layer);
 
 	pitch = rtex->surface.u.legacy.level[level].nblk_x / 8 - 1;
 	slice = (rtex->surface.u.legacy.level[level].nblk_x * rtex->surface.u.legacy.level[level].nblk_y) / 64;
@@ -1032,7 +1031,7 @@ static void r600_init_depth_surface(struct r600_context *rctx,
 	struct r600_texture *rtex = (struct r600_texture*)surf->base.texture;
 	unsigned level, pitch, slice, format, offset, array_mode;
 
-	level = surf->base.u.tex.level;
+	level = surf->base.level;
 	offset = (uint64_t)rtex->surface.u.legacy.level[level].offset_256B * 256;
 	pitch = rtex->surface.u.legacy.level[level].nblk_x / 8 - 1;
 	slice = (rtex->surface.u.legacy.level[level].nblk_x * rtex->surface.u.legacy.level[level].nblk_y) / 64;
@@ -1055,8 +1054,8 @@ static void r600_init_depth_surface(struct r600_context *rctx,
 
 	surf->db_depth_info = S_028010_ARRAY_MODE(array_mode) | S_028010_FORMAT(format);
 	surf->db_depth_base = offset >> 8;
-	surf->db_depth_view = S_028004_SLICE_START(surf->base.u.tex.first_layer) |
-			      S_028004_SLICE_MAX(surf->base.u.tex.last_layer);
+	surf->db_depth_view = S_028004_SLICE_START(surf->base.first_layer) |
+			      S_028004_SLICE_MAX(surf->base.last_layer);
 	surf->db_depth_size = S_028000_PITCH_TILE_MAX(pitch) | S_028000_SLICE_TILE_MAX(slice);
 	surf->db_prefetch_limit = (rtex->surface.u.legacy.level[level].nblk_y / 8) - 1;
 

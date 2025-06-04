@@ -44,10 +44,11 @@ radv_choose_tiling(struct radv_device *device, const VkImageCreateInfo *pCreateI
       return RADEON_SURF_MODE_LINEAR_ALIGNED;
    }
 
-   if (pCreateInfo->usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR))
+   if (pdev->info.vcn_ip_version < VCN_1_0_0 &&
+       pCreateInfo->usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR | VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR))
       return RADEON_SURF_MODE_LINEAR_ALIGNED;
 
-   if (pCreateInfo->usage & (VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR | VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR))
+   if (pCreateInfo->usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR))
       return RADEON_SURF_MODE_LINEAR_ALIGNED;
 
    /* MSAA resources must be 2D tiled. */
@@ -381,11 +382,12 @@ radv_use_htile_for_image(const struct radv_device *device, const struct radv_ima
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
    const enum amd_gfx_level gfx_level = pdev->info.gfx_level;
 
+   if (!pdev->use_hiz)
+      return false;
+
    const VkImageCompressionControlEXT *compression =
       vk_find_struct_const(pCreateInfo->pNext, IMAGE_COMPRESSION_CONTROL_EXT);
-
-   if (instance->debug_flags & RADV_DEBUG_NO_HIZ ||
-       (compression && compression->flags == VK_IMAGE_COMPRESSION_DISABLED_EXT))
+   if (compression && compression->flags == VK_IMAGE_COMPRESSION_DISABLED_EXT)
       return false;
 
    /* HTILE compression is only useful for depth/stencil attachments. */
@@ -710,6 +712,9 @@ radv_get_surface_flags(struct radv_device *device, struct radv_image *image, uns
       flags |= RADEON_SURF_VRS_RATE | RADEON_SURF_DISABLE_DCC;
    if (!(pCreateInfo->usage & (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT)))
       flags |= RADEON_SURF_NO_TEXTURE;
+   if (pCreateInfo->usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR | VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR) &&
+       !(pCreateInfo->usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_VIDEO_ENCODE_DST_BIT_KHR)))
+      flags |= RADEON_SURF_VIDEO_REFERENCE;
 
    if (alignment && alignment->maximumRequestedAlignment && !(instance->debug_flags & RADV_DEBUG_FORCE_COMPRESS)) {
       bool is_4k_capable;
@@ -1387,6 +1392,7 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO);
    const struct VkVideoProfileListInfoKHR *profile_list =
       vk_find_struct_const(pCreateInfo->pNext, VIDEO_PROFILE_LIST_INFO_KHR);
+   uint64_t replay_address = 0;
    VkResult result;
 
    unsigned plane_count = radv_get_internal_plane_count(pdev, format);
@@ -1447,11 +1453,22 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
    }
 
    if (image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) {
+      enum radeon_bo_flag flags = RADEON_FLAG_VIRTUAL;
+
+      if (image->vk.create_flags & VK_IMAGE_CREATE_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT) {
+         flags |= RADEON_FLAG_REPLAYABLE;
+
+         const VkOpaqueCaptureDescriptorDataCreateInfoEXT *opaque_info =
+            vk_find_struct_const(create_info->vk_info->pNext, OPAQUE_CAPTURE_DESCRIPTOR_DATA_CREATE_INFO_EXT);
+         if (opaque_info)
+            replay_address = *((const uint64_t *)opaque_info->opaqueCaptureDescriptorData);
+      }
+
       image->alignment = MAX2(image->alignment, 4096);
       image->size = align64(image->size, image->alignment);
 
-      result = radv_bo_create(device, &image->vk.base, image->size, image->alignment, 0, RADEON_FLAG_VIRTUAL,
-                              RADV_BO_PRIORITY_VIRTUAL, 0, true, &image->bindings[0].bo);
+      result = radv_bo_create(device, &image->vk.base, image->size, image->alignment, 0, flags,
+                              RADV_BO_PRIORITY_VIRTUAL, replay_address, true, &image->bindings[0].bo);
       if (result != VK_SUCCESS) {
          radv_destroy_image(device, alloc, image);
          return vk_error(device, result);
@@ -1912,5 +1929,15 @@ radv_GetImageDrmFormatModifierPropertiesEXT(VkDevice _device, VkImage _image,
    VK_FROM_HANDLE(radv_image, image, _image);
 
    pProperties->drmFormatModifier = image->planes[0].surface.modifier;
+   return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+radv_GetImageOpaqueCaptureDescriptorDataEXT(VkDevice device, const VkImageCaptureDescriptorDataInfoEXT *pInfo,
+                                            void *pData)
+{
+   VK_FROM_HANDLE(radv_image, image, pInfo->image);
+
+   *(uint64_t *)pData = image->bindings[0].addr;
    return VK_SUCCESS;
 }

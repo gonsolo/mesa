@@ -304,7 +304,6 @@ llvmpipe_init_screen_caps(struct pipe_screen *screen)
    caps->doubles = true;
    caps->int64 = true;
    caps->query_so_overflow = true;
-   caps->tgsi_div = true;
    caps->vendor_id = 0xFFFFFFFF;
    caps->device_id = 0xFFFFFFFF;
 
@@ -992,7 +991,6 @@ llvmpipe_create_screen(struct sw_winsys *winsys)
    screen->base.get_disk_shader_cache = lp_get_disk_shader_cache;
    llvmpipe_init_screen_resource_funcs(&screen->base);
 
-   screen->allow_cl = !!getenv("LP_CL");
    screen->num_threads = util_get_cpu_caps()->nr_cpus > 1
       ? util_get_cpu_caps()->nr_cpus : 0;
    screen->num_threads = debug_get_num_option("LP_NUM_THREADS",

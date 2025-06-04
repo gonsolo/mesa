@@ -366,7 +366,7 @@ dst.x |= ((uint32_t) pack_fmt_1x8(src0.w)) << 24;
 def unpack_2x16(fmt):
    unop_horiz("unpack_" + fmt + "_2x16", 2, tfloat32, 1, tuint32, """
 dst.x = unpack_fmt_1x16((uint16_t)(src0.x & 0xffff));
-dst.y = unpack_fmt_1x16((uint16_t)(src0.x << 16));
+dst.y = unpack_fmt_1x16((uint16_t)(src0.x >> 16));
 """.replace("fmt", fmt))
 
 def unpack_4x8(fmt):
@@ -459,11 +459,11 @@ unop_convert("unpack_64_2x32_split_y", tuint32, tuint64, "src0 >> 32")
 # Bit operations, part of ARB_gpu_shader5.
 
 
-unop("bitfield_reverse", tuint32, """
+unop("bitfield_reverse", tuint, """
 /* we're not winning any awards for speed here, but that's ok */
 dst = 0;
-for (unsigned bit = 0; bit < 32; bit++)
-   dst |= ((src0 >> bit) & 1) << (31 - bit);
+for (unsigned bit = 0; bit < bit_size; bit++)
+   dst |= ((src0 >> bit) & 1) << ((bit_size - 1) - bit);
 """)
 unop_convert("bit_count", tuint32, tuint, """
 dst = 0;
@@ -945,10 +945,10 @@ binop("umax", tuint, _2src_commutative + associative, "MAX2(src0, src1)")
 binop("fpow", tfloat, "", "bit_size == 64 ? pow(src0, src1) : powf(src0, src1)")
 
 binop_horiz("pack_half_2x16_split", 1, tuint32, 1, tfloat32, 1, tfloat32,
-            "pack_half_1x16(src0.x) | ((uint32_t)(pack_half_1x16(src1.x)) << 16)")
+            "pack_half_1x16(src0.x) | ((uint32_t)pack_half_1x16(src1.x) << 16)")
 
 binop_horiz("pack_half_2x16_rtz_split", 1, tuint32, 1, tfloat32, 1, tfloat32,
-            "pack_half_1x16_rtz(src0.x) | (uint32_t)(pack_half_1x16_rtz(src1.x) << 16)")
+            "pack_half_1x16_rtz(src0.x) | ((uint32_t)pack_half_1x16_rtz(src1.x) << 16)")
 
 binop_convert("pack_64_2x32_split", tuint64, tuint32, "",
               "src0 | ((uint64_t)src1 << 32)")
@@ -1108,21 +1108,21 @@ if (bits == 0) {
 """)
 opcode("ibfe", 0, tint32,
        [0, 0, 0], [tint32, tuint32, tuint32], False, "", """
-int base = src0;
+uint32_t base = src0;
 unsigned offset = src1 & 0x1F;
 unsigned bits = src2 & 0x1F;
 if (bits == 0) {
    dst = 0;
 } else if (offset + bits < 32) {
-   dst = (base << (32 - bits - offset)) >> (32 - bits);
+   dst = util_mask_sign_extend(base >> offset, bits);
 } else {
-   dst = base >> offset;
+   dst = util_mask_sign_extend(base >> offset, 32 - offset);
 }
 """)
 
 # GLSL bitfieldExtract()
-opcode("ubitfield_extract", 0, tuint32,
-       [0, 0, 0], [tuint32, tint32, tint32], False, "", """
+opcode("ubitfield_extract", 0, tuint,
+       [0, 0, 0], [tuint, tint32, tint32], False, "", """
 unsigned base = src0;
 int offset = src1, bits = src2;
 if (bits == 0) {
@@ -1133,8 +1133,8 @@ if (bits == 0) {
    dst = (base >> offset) & ((1ull << bits) - 1);
 }
 """)
-opcode("ibitfield_extract", 0, tint32,
-       [0, 0, 0], [tint32, tint32, tint32], False, "", """
+opcode("ibitfield_extract", 0, tint,
+       [0, 0, 0], [tint, tint32, tint32], False, "", """
 int base = src0;
 int offset = src1, bits = src2;
 if (bits == 0) {
@@ -1181,8 +1181,8 @@ def quadop_horiz(name, output_size, src1_size, src2_size, src3_size,
           [tuint, tuint, tuint, tuint],
           False, "", const_expr)
 
-opcode("bitfield_insert", 0, tuint32, [0, 0, 0, 0],
-       [tuint32, tuint32, tint32, tint32], False, "", """
+opcode("bitfield_insert", 0, tuint, [0, 0, 0, 0],
+       [tuint, tuint, tint32, tint32], False, "", """
 unsigned base = src0, insert = src1;
 int offset = src2, bits = src3;
 if (bits == 0) {

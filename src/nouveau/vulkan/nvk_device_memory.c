@@ -70,29 +70,40 @@ nvk_GetMemoryFdPropertiesKHR(VkDevice device,
    VkResult result;
 
    switch (handleType) {
-   case VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT:
    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT:
       result = nvkmd_dev_import_dma_buf(dev->nvkmd, &dev->vk.base, fd, &mem);
       if (result != VK_SUCCESS)
          return result;
       break;
+   case VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT:
+      /* From the Vulkan 1.4.315 spec:
+       *
+       *     VUID-vkGetMemoryFdPropertiesKHR-handleType-00674
+       *
+       *     "handleType must not be
+       *     VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT"
+       */
+      return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
    default:
       return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
    }
 
    uint32_t type_bits = 0;
-   if (handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) {
-      /* We allow a dma-buf to be imported anywhere because there's no way
-       * for us to actually know where it came from.
+   for (unsigned t = 0; t < ARRAY_SIZE(pdev->mem_types); t++) {
+      const VkMemoryType *type = &pdev->mem_types[t];
+      const enum nvkmd_mem_flags type_flags =
+         nvk_memory_type_flags(type, handleType);
+
+      /* Flags required to be set on mem to be imported as type
+       *
+       * If we're importing into a host-visible heap, we have to be able to
+       * map the memory.
        */
-      type_bits = BITFIELD_MASK(pdev->mem_type_count);
-   } else {
-      for (unsigned t = 0; t < ARRAY_SIZE(pdev->mem_types); t++) {
-         const enum nvkmd_mem_flags flags =
-            nvk_memory_type_flags(&pdev->mem_types[t], handleType);
-         if (!(flags & ~mem->flags))
-            type_bits |= (1 << t);
-      }
+      const enum nvkmd_mem_flags req_flags = type_flags & NVKMD_MEM_CAN_MAP;
+      if (req_flags & ~mem->flags)
+         continue;
+
+      type_bits |= (1 << t);
    }
 
    pMemoryFdProperties->memoryTypeBits = type_bits;
@@ -178,8 +189,7 @@ nvk_AllocateMemory(VkDevice device,
       /* We can't really assert anything for dma-bufs because they could come
        * in from some other device.
        */
-      if (fd_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT)
-         assert(!(flags & ~mem->mem->flags));
+      assert(!(flags & ~mem->mem->flags & ~NVKMD_MEM_PLACEMENT_FLAGS));
    } else if (pte_kind != 0 || tile_mode != 0) {
       result = nvkmd_dev_alloc_tiled_mem(dev->nvkmd, &dev->vk.base,
                                          aligned_size, alignment,

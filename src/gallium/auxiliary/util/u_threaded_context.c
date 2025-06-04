@@ -312,8 +312,7 @@ tc_set_resource_batch_usage(struct threaded_context *tc, struct pipe_resource *p
 {
    /* ignore batch usage when persistent */
    if (threaded_resource(pres)->last_batch_usage != INT8_MAX)
-      threaded_resource(pres)->last_batch_usage = tc->next;
-   threaded_resource(pres)->batch_generation = tc->batch_generation;
+      threaded_resource(pres)->last_batch_usage = tc->batch_generation;
 }
 
 ALWAYS_INLINE static void
@@ -322,8 +321,7 @@ tc_set_resource_batch_usage_persistent(struct threaded_context *tc, struct pipe_
    if (!pres)
       return;
    /* mark with special value to block any unsynchronized access */
-   threaded_resource(pres)->last_batch_usage = enable ? INT8_MAX : tc->next;
-   threaded_resource(pres)->batch_generation = tc->batch_generation;
+   threaded_resource(pres)->last_batch_usage = enable ? INT8_MAX : tc->batch_generation;
 }
 
 /* this can ONLY be used to check against the currently recording batch */
@@ -347,31 +345,15 @@ tc_resource_batch_usage_test_busy(const struct threaded_context *tc, const struc
    if (tc->last_completed == -1)
       return true;
 
-   /* begin comparisons checking number of times batches have cycled */
-   unsigned diff = tc->batch_generation - tbuf->batch_generation;
-   /* resource has been seen, batches have fully cycled at least once */
-   if (diff > 1)
-      return false;
+   int diff;
+   if (tbuf->last_batch_usage < tc->last_completed)
+      /* account for wrapping */
+      diff = (tbuf->last_batch_usage + (INT8_MAX - 1)) - tc->last_completed;
+   else
+      diff = tbuf->last_batch_usage - tc->last_completed;
 
-   /* resource has been seen in current batch cycle: return whether batch has definitely completed */
-   if (diff == 0)
-      return tc->last_completed >= tbuf->last_batch_usage;
-
-   /* resource has been seen within one batch cycle: check for batch wrapping */
-   if (tc->last_completed >= tbuf->last_batch_usage)
-      /* this or a subsequent pre-wrap batch was the last to definitely complete: resource is idle */
-      return false;
-
-   /* batch execution has not definitely wrapped: resource is definitely not idle */
-   if (tc->last_completed > tc->next)
-      return true;
-
-   /* resource was seen pre-wrap, batch execution has definitely wrapped: idle */
-   if (tbuf->last_batch_usage > tc->last_completed)
-      return false;
-
-   /* tc->last_completed is not an exact measurement, so anything else is considered busy */
-   return true;
+   /* if diff is positive, then batch usage has completed: resource is not busy */
+   return diff > 0;
 }
 
 /* Assign src to dst while dst is uninitialized. */
@@ -480,6 +462,15 @@ tc_add_call_end(struct tc_batch *next)
 }
 
 static void
+tc_update_batch_generation(struct threaded_context *tc, struct tc_batch *next)
+{
+   /* -1 and INT8_MAX are special values */
+   next->batch_idx = tc->batch_generation;
+   tc->batch_generation = (tc->batch_generation + 1) % INT8_MAX;
+   assert(next->batch_idx >= 0 && next->batch_idx < INT8_MAX);
+}
+
+static void
 tc_batch_flush(struct threaded_context *tc, bool full_copy)
 {
    struct tc_batch *next = &tc->batch_slots[tc->next];
@@ -509,12 +500,11 @@ tc_batch_flush(struct threaded_context *tc, bool full_copy)
       tc_batch_increment_renderpass_info(tc, next_id, full_copy);
    }
 
+   tc_update_batch_generation(tc, next);
    util_queue_add_job(&tc->queue, next, &next->fence, tc_batch_execute,
                       NULL, 0);
    tc->last = tc->next;
    tc->next = next_id;
-   if (next_id == 0)
-      tc->batch_generation++;
    tc_begin_next_buffer_list(tc);
 
 }
@@ -673,6 +663,7 @@ _tc_sync(struct threaded_context *tc, UNUSED const char *info, UNUSED const char
       tc->bytes_mapped_estimate = 0;
       tc->bytes_replaced_estimate = 0;
       tc_add_call_end(next);
+      tc_update_batch_generation(tc, next);
       tc_batch_execute(next, NULL, 0);
       tc_begin_next_buffer_list(tc);
       synced = true;
@@ -2231,29 +2222,6 @@ tc_set_global_binding(struct pipe_context *_pipe, unsigned first,
 /********************************************************************
  * views
  */
-
-static struct pipe_surface *
-tc_create_surface(struct pipe_context *_pipe,
-                  struct pipe_resource *resource,
-                  const struct pipe_surface *surf_tmpl)
-{
-   struct pipe_context *pipe = threaded_context(_pipe)->pipe;
-   struct pipe_surface *view =
-         pipe->create_surface(pipe, resource, surf_tmpl);
-
-   if (view)
-      view->context = _pipe;
-   return view;
-}
-
-static void
-tc_surface_destroy(struct pipe_context *_pipe,
-                   struct pipe_surface *surf)
-{
-   struct pipe_context *pipe = threaded_context(_pipe)->pipe;
-
-   pipe->surface_destroy(pipe, surf);
-}
 
 static struct pipe_sampler_view *
 tc_create_sampler_view(struct pipe_context *_pipe,
@@ -4716,7 +4684,7 @@ struct tc_clear_render_target {
    unsigned width;
    unsigned height;
    union pipe_color_union color;
-   struct pipe_surface *dst;
+   struct pipe_surface dst;
 };
 
 static uint16_t ALWAYS_INLINE
@@ -4724,9 +4692,9 @@ tc_call_clear_render_target(struct pipe_context *pipe, void *call)
 {
    struct tc_clear_render_target *p = to_call(call, tc_clear_render_target);
 
-   pipe->clear_render_target(pipe, p->dst, &p->color, p->dstx, p->dsty, p->width, p->height,
+   pipe->clear_render_target(pipe, &p->dst, &p->color, p->dstx, p->dsty, p->width, p->height,
                              p->render_condition_enabled);
-   tc_drop_surface_reference(p->dst);
+   tc_drop_resource_reference(p->dst.texture);
    return call_size(tc_clear_render_target);
 }
 
@@ -4740,8 +4708,9 @@ tc_clear_render_target(struct pipe_context *_pipe,
 {
    struct threaded_context *tc = threaded_context(_pipe);
    struct tc_clear_render_target *p = tc_add_call(tc, TC_CALL_clear_render_target, tc_clear_render_target);
-   p->dst = NULL;
-   pipe_surface_reference(&p->dst, dst);
+   p->dst.texture = NULL;
+   pipe_resource_reference(&p->dst.texture, dst->texture);
+   p->dst = *dst;
    p->color = *color;
    p->dstx = dstx;
    p->dsty = dsty;
@@ -4761,7 +4730,7 @@ struct tc_clear_depth_stencil {
    unsigned dsty;
    unsigned width;
    unsigned height;
-   struct pipe_surface *dst;
+   struct pipe_surface dst;
 };
 
 
@@ -4770,10 +4739,10 @@ tc_call_clear_depth_stencil(struct pipe_context *pipe, void *call)
 {
    struct tc_clear_depth_stencil *p = to_call(call, tc_clear_depth_stencil);
 
-   pipe->clear_depth_stencil(pipe, p->dst, p->clear_flags, p->depth, p->stencil,
+   pipe->clear_depth_stencil(pipe, &p->dst, p->clear_flags, p->depth, p->stencil,
                              p->dstx, p->dsty, p->width, p->height,
                              p->render_condition_enabled);
-   tc_drop_surface_reference(p->dst);
+   tc_drop_resource_reference(p->dst.texture);
    return call_size(tc_clear_depth_stencil);
 }
 
@@ -4786,8 +4755,9 @@ tc_clear_depth_stencil(struct pipe_context *_pipe,
 {
    struct threaded_context *tc = threaded_context(_pipe);
    struct tc_clear_depth_stencil *p = tc_add_call(tc, TC_CALL_clear_depth_stencil, tc_clear_depth_stencil);
-   p->dst = NULL;
-   pipe_surface_reference(&p->dst, dst);
+   p->dst.texture = NULL;
+   pipe_resource_reference(&p->dst.texture, dst->texture);
+   p->dst = *dst;
    p->clear_flags = clear_flags;
    p->depth = depth;
    p->stencil = stencil;
@@ -5339,7 +5309,6 @@ threaded_context_create(struct pipe_context *pipe,
       tc->batch_slots[i].sentinel = TC_SENTINEL;
 #endif
       tc->batch_slots[i].tc = tc;
-      tc->batch_slots[i].batch_idx = i;
       util_queue_fence_init(&tc->batch_slots[i].fence);
       tc->batch_slots[i].renderpass_info_idx = -1;
       if (tc->options.parse_renderpass_info) {
@@ -5451,8 +5420,6 @@ threaded_context_create(struct pipe_context *pipe,
    CTX_INIT(create_sampler_view);
    CTX_INIT(sampler_view_destroy);
    CTX_INIT(sampler_view_release);
-   CTX_INIT(create_surface);
-   CTX_INIT(surface_destroy);
    CTX_INIT(buffer_map);
    CTX_INIT(texture_map);
    CTX_INIT(transfer_flush_region);

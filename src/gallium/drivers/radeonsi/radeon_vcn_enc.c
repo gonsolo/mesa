@@ -509,7 +509,6 @@ static void radeon_vcn_enc_h264_get_param(struct radeon_encoder *enc,
    enc->enc_pic.enc_params.reconstructed_picture_index = pic->dpb_curr_pic;
    enc->enc_pic.h264_enc_params.is_reference = !pic->not_referenced;
    enc->enc_pic.h264_enc_params.is_long_term = pic->is_ltr;
-   enc->enc_pic.not_referenced = pic->not_referenced;
 
    if (pic->ref_list0[0] != PIPE_H2645_LIST_REF_INVALID_ENTRY) {
       uint8_t ref_l0 = pic->ref_list0[0];
@@ -2035,10 +2034,14 @@ struct pipe_video_codec *radeon_create_encoder(struct pipe_context *context,
          /* this limits tile splitting scheme to use legacy method */
          enc->enc_pic.av1_tile_splitting_legacy_flag = true;
       }
+      if (sscreen->info.vcn_enc_minor_version >= 8)
+         enc->enc_pic.has_dependent_slice_instructions = true;
    }
    else if (sscreen->info.vcn_ip_version >= VCN_4_0_0) {
       if (sscreen->info.vcn_enc_minor_version >= 1)
          enc->enc_pic.use_rc_per_pic_ex = true;
+      if (sscreen->info.vcn_enc_minor_version >= 23)
+         enc->enc_pic.has_dependent_slice_instructions = true;
       radeon_enc_4_0_init(enc);
    }
    else if (sscreen->info.vcn_ip_version >= VCN_3_0_0) {

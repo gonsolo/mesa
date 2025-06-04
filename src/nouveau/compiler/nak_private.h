@@ -198,16 +198,65 @@ static_assert(sizeof(struct nak_nir_tex_flags) == 4,
    _u; \
 })
 
-bool nak_nir_lower_scan_reduce(nir_shader *shader);
+bool nak_nir_lower_scan_reduce(nir_shader *shader, const struct nak_compiler *nak);
 bool nak_nir_lower_tex(nir_shader *nir, const struct nak_compiler *nak);
 bool nak_nir_lower_gs_intrinsics(nir_shader *shader);
 bool nak_nir_lower_algebraic_late(nir_shader *nir, const struct nak_compiler *nak);
+bool nak_nir_lower_kepler_shared_atomics(nir_shader *shader);
 
 struct nak_nir_attr_io_flags {
    bool output : 1;
    bool patch : 1;
    bool phys : 1;
    uint32_t pad:29;
+};
+
+enum nak_suclamp_mode {
+   NAK_SUCLAMP_MODE_STORED_DESCRIPTOR,
+   NAK_SUCLAMP_MODE_PITCH_LINEAR,
+   NAK_SUCLAMP_MODE_BLOCK_LINEAR,
+};
+
+enum nak_suclamp_round {
+   NAK_SUCLAMP_ROUND_R1,
+   NAK_SUCLAMP_ROUND_R2,
+   NAK_SUCLAMP_ROUND_R4,
+   NAK_SUCLAMP_ROUND_R8,
+   NAK_SUCLAMP_ROUND_R16,
+};
+
+struct nak_nir_suclamp_flags {
+   enum nak_suclamp_mode mode : 2;
+   enum nak_suclamp_round round : 3;
+   bool is_s32 : 1;
+   bool is_2d : 1;
+   uint32_t pad:25;
+};
+
+enum nak_su_ga_offset_mode {
+   NAK_SUGA_OFF_MODE_U32,
+   NAK_SUGA_OFF_MODE_S32,
+   NAK_SUGA_OFF_MODE_U8,
+   NAK_SUGA_OFF_MODE_S8,
+};
+
+enum nak_imad_src_type {// 3 bits
+   NAK_IMAD_TYPE_U32,
+   NAK_IMAD_TYPE_U24,
+   NAK_IMAD_TYPE_U16_LO,
+   NAK_IMAD_TYPE_U16_HI,
+   NAK_IMAD_TYPE_S32,
+   NAK_IMAD_TYPE_S24,
+   NAK_IMAD_TYPE_S16_LO,
+   NAK_IMAD_TYPE_S16_HI,
+};
+
+struct nak_nir_imadsp_flags {
+   enum nak_imad_src_type src0 : 3;
+   enum nak_imad_src_type src1 : 3;
+   enum nak_imad_src_type src2 : 3;
+   bool params_from_src1 : 1;
+   uint32_t pad:22;
 };
 
 bool nak_nir_lower_vtg_io(nir_shader *nir, const struct nak_compiler *nak);

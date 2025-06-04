@@ -259,8 +259,6 @@ static rvcn_dec_message_hevc_t get_h265_msg(struct radeon_decoder *dec,
    result.sps_info_flags |= pic->pps->sps->sps_temporal_mvp_enabled_flag << 6;
    result.sps_info_flags |= pic->pps->sps->strong_intra_smoothing_enabled_flag << 7;
    result.sps_info_flags |= pic->pps->sps->separate_colour_plane_flag << 8;
-   if (((struct si_screen *)dec->screen)->info.family == CHIP_CARRIZO)
-      result.sps_info_flags |= 1 << 9;
    if (pic->NumShortTermPictureSliceHeaderBits != 0) {
       result.sps_info_flags |= 1 << 11;
       result.st_rps_bits = pic->NumShortTermPictureSliceHeaderBits;
@@ -2742,7 +2740,7 @@ static int radeon_dec_jpeg_end_frame(struct pipe_video_codec *decoder, struct pi
    if (dec->jpg.crop_y + dec->jpg.crop_height > pic->picture_parameter.picture_height)
       dec->jpg.crop_height = 0;
    dec->send_cmd(dec, target, picture);
-   dec->ws->cs_flush(&dec->jcs[dec->cb_idx], picture->flush_flags, NULL);
+   dec->ws->cs_flush(&dec->jcs[dec->cb_idx], picture->flush_flags, picture->fence);
    next_buffer(dec);
    dec->cb_idx = (dec->cb_idx+1) % dec->njctx;
    return 0;
@@ -2882,8 +2880,7 @@ struct pipe_video_codec *radeon_create_decoder(struct pipe_context *context,
          goto err;
       for (i = 0; i < dec->njctx; i++) {
       /* Initialize the context handle and the command stream. */
-         dec->jctx[i] = dec->ws->ctx_create(dec->ws, RADEON_CTX_PRIORITY_MEDIUM,
-                                            sctx->context_flags & PIPE_CONTEXT_LOSE_CONTEXT_ON_RESET);
+         dec->jctx[i] = dec->ws->ctx_create(dec->ws, sctx->context_flags);
          if (!sctx->ctx)
             goto error;
          if (!dec->ws->cs_create(&dec->jcs[i], dec->jctx[i], ring, NULL, NULL)) {

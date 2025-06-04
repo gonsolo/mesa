@@ -150,7 +150,13 @@ unsafe impl CLInfo<cl_device_info> for cl_device_id {
                     )
                 })
             }
-
+            CL_DEVICE_KERNEL_CLOCK_CAPABILITIES_KHR if dev.kernel_clock_supported() => {
+                v.write::<cl_device_kernel_clock_capabilities_khr>(
+                    (CL_DEVICE_KERNEL_CLOCK_SCOPE_DEVICE_KHR
+                        | CL_DEVICE_KERNEL_CLOCK_SCOPE_SUB_GROUP_KHR)
+                        .into(),
+                )
+            }
             CL_DEVICE_LATEST_CONFORMANCE_VERSION_PASSED => {
                 v.write::<&CStr>(dev.screen().cl_cts_version())
             }
@@ -282,16 +288,17 @@ unsafe impl CLInfo<cl_device_info> for cl_device_id {
                 }
             }
             CL_DEVICE_SVM_CAPABILITIES | CL_DEVICE_SVM_CAPABILITIES_ARM => {
-                v.write::<cl_device_svm_capabilities>(
-                    if dev.svm_supported() {
-                        CL_DEVICE_SVM_COARSE_GRAIN_BUFFER
-                            | CL_DEVICE_SVM_FINE_GRAIN_BUFFER
-                            | CL_DEVICE_SVM_FINE_GRAIN_SYSTEM
-                    } else {
-                        0
-                    }
-                    .into(),
-                )
+                let mut caps = 0;
+
+                if dev.api_svm_supported() {
+                    caps |= CL_DEVICE_SVM_COARSE_GRAIN_BUFFER;
+                }
+
+                if dev.system_svm_supported() {
+                    caps |= CL_DEVICE_SVM_FINE_GRAIN_BUFFER | CL_DEVICE_SVM_FINE_GRAIN_SYSTEM;
+                }
+
+                v.write::<cl_device_svm_capabilities>(caps.into())
             }
             CL_DEVICE_TYPE => {
                 // CL_DEVICE_TYPE_DEFAULT ... will never be returned in CL_DEVICE_TYPE for any

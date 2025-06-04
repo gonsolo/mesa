@@ -251,6 +251,8 @@ zink_resource_destroy(struct pipe_screen *pscreen,
    /* no need to do anything for the caches, these objects own the resource lifetimes */
 
    free(res->modifiers);
+   struct pipe_resource *pres_transient = res->transient ? &res->transient->base.b : NULL;
+   pipe_resource_reference(&pres_transient, NULL);
    zink_resource_object_reference(screen, &res->obj, NULL);
    threaded_resource_deinit(pres);
    FREE_CL(res);
@@ -2134,6 +2136,10 @@ invalidate_buffer(struct zink_context *ctx, struct zink_resource *res)
    if (res->base.b.flags & PIPE_RESOURCE_FLAG_SPARSE)
       return false;
 
+   /* never invalidate a resource with a fixed address */
+   if (res->base.b.flags & PIPE_RESOURCE_FLAG_FIXED_ADDRESS)
+      return false;
+
    struct pipe_box box;
    u_box_3d(0, 0, 0, res->base.b.width0, 0, 0, &box);
    if (res->valid_buffer_range.start > res->valid_buffer_range.end &&
@@ -2343,7 +2349,9 @@ zink_buffer_map(struct pipe_context *pctx,
    /* ideally never ever read or write to non-cached mem */
    bool is_cached_mem = (screen->info.mem_props.memoryTypes[res->obj->bo->base.base.placement].propertyFlags & VK_STAGING_RAM) == VK_STAGING_RAM;
    /* but this is only viable with a certain amount of vram since it may fully duplicate lots of large buffers */
-   bool host_mem_type_check = screen->always_cached_upload ? is_cached_mem : res->obj->host_visible;
+   bool host_mem_type_check = res->obj->host_visible;
+   if (screen->always_cached_upload)
+      host_mem_type_check &= is_cached_mem;
    if (usage & PIPE_MAP_DISCARD_RANGE && !(usage & PIPE_MAP_PERSISTENT) &&
        (!host_mem_type_check || !(usage & (PIPE_MAP_UNSYNCHRONIZED)))) {
 
@@ -3079,6 +3087,14 @@ zink_buffer_subdata(struct pipe_context *ctx, struct pipe_resource *buffer,
    zink_buffer_unmap(ctx, transfer);
 }
 
+static uint64_t
+zink_resource_get_address_gallium(struct pipe_screen *pscreen, struct pipe_resource *pres)
+{
+   if (pres->flags & PIPE_RESOURCE_FLAG_FIXED_ADDRESS)
+      return zink_resource_get_address(zink_screen(pres->screen), zink_resource(pres));
+   return 0;
+}
+
 static struct pipe_resource *
 zink_resource_get_separate_stencil(struct pipe_resource *pres)
 {
@@ -3247,6 +3263,8 @@ zink_screen_resource_init(struct pipe_screen *pscreen)
       pscreen->memobj_destroy = zink_memobj_destroy;
       pscreen->resource_from_memobj = zink_resource_from_memobj;
    }
+   if (screen->info.have_KHR_buffer_device_address)
+      pscreen->resource_get_address = zink_resource_get_address_gallium;
    pscreen->resource_get_param = zink_resource_get_param;
    return true;
 }

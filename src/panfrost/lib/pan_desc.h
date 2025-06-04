@@ -38,6 +38,7 @@ struct pan_buffer_view {
    enum pipe_format format;
    struct {
       unsigned narrow;
+      unsigned hdr;
    } astc;
    unsigned width_el;
    uint64_t base;
@@ -247,8 +248,10 @@ pan_sample_pattern(unsigned samples)
       return MALI_SAMPLE_PATTERN_ROTATED_4X_GRID;
    case 8:
       return MALI_SAMPLE_PATTERN_D3D_8X_GRID;
+#if PAN_ARCH >= 5
    case 16:
       return MALI_SAMPLE_PATTERN_D3D_16X_GRID;
+#endif
    default:
       unreachable("Unsupported sample count");
    }

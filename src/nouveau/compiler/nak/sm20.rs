@@ -7,7 +7,6 @@ use crate::legalize::{
 };
 use bitview::{
     BitMutView, BitMutViewable, BitView, BitViewable, SetBit, SetField,
-    SetFieldU64,
 };
 
 use rustc_hash::FxHashMap;
@@ -209,12 +208,6 @@ impl BitViewable for SM20Encoder<'_> {
 impl BitMutViewable for SM20Encoder<'_> {
     fn set_bit_range_u64(&mut self, range: Range<usize>, val: u64) {
         BitMutView::new(&mut self.inst).set_bit_range_u64(range, val);
-    }
-}
-
-impl SetFieldU64 for SM20Encoder<'_> {
-    fn set_field_u64(&mut self, range: Range<usize>, val: u64) {
-        BitMutView::new(&mut self.inst).set_field_u64(range, val);
     }
 }
 
@@ -575,7 +568,7 @@ impl SM20Op for OpFAdd {
             // should fold any modifiers on immediates for us.
             assert!(self.srcs[1].src_mod.is_none());
             e.encode_form_a_imm32(0xa, &self.dst, &self.srcs[0], imm32);
-            assert!(self.saturate);
+            assert!(!self.saturate);
             assert!(self.rnd_mode == FRndMode::NearestEven);
         } else {
             e.encode_form_a(
@@ -730,7 +723,7 @@ impl SM20Op for OpFMul {
             e.set_rnd_mode(55..57, self.rnd_mode);
             let neg0 = self.srcs[0].src_mod.has_fneg();
             let neg1 = self.srcs[1].src_mod.has_fneg();
-            e.set_bit(25, neg0 ^ neg1);
+            e.set_bit(57, neg0 ^ neg1);
         }
 
         e.set_bit(5, self.saturate);
@@ -812,12 +805,14 @@ impl SM20Op for OpFSet {
             None,
         );
 
-        e.set_bit(5, self.ftz);
+        e.set_bit(5, true); // .bf
         e.set_bit(6, self.srcs[1].src_mod.has_fabs());
         e.set_bit(7, self.srcs[0].src_mod.has_fabs());
         e.set_bit(8, self.srcs[1].src_mod.has_fneg());
         e.set_bit(9, self.srcs[0].src_mod.has_fneg());
+        e.set_pred_src(49..53, &SrcRef::True.into());
         e.set_float_cmp_op(55..59, self.cmp_op);
+        e.set_bit(59, self.ftz);
     }
 }
 
@@ -1193,7 +1188,7 @@ impl SM20Op for OpIMad {
         e.set_bit(8, neg_c);
         e.set_bit(9, neg_ab);
 
-        e.set_bit(24, false); // saturate
+        e.set_bit(56, false); // saturate
     }
 }
 
@@ -1943,6 +1938,177 @@ impl SM20Op for OpTxq {
     }
 }
 
+impl SM20Op for OpSuClamp {
+    fn legalize(&mut self, b: &mut LegalizeBuilder) {
+        use RegFile::GPR;
+        b.copy_alu_src_if_not_reg(&mut self.coords, GPR, SrcType::ALU);
+        b.copy_alu_src_if_i20_overflow(&mut self.params, GPR, SrcType::ALU);
+    }
+
+    fn encode(&self, e: &mut SM20Encoder<'_>) {
+        use SuClampMode::*;
+        e.encode_form_a(
+            SM20Unit::Move,
+            0x16,
+            &self.dst,
+            &self.coords,
+            &self.params,
+            None,
+        );
+
+        e.set_field(
+            5..9,
+            match (self.mode, self.round) {
+                (StoredInDescriptor, SuClampRound::R1) => 0_u8,
+                (StoredInDescriptor, SuClampRound::R2) => 1_u8,
+                (StoredInDescriptor, SuClampRound::R4) => 2_u8,
+                (StoredInDescriptor, SuClampRound::R8) => 3_u8,
+                (StoredInDescriptor, SuClampRound::R16) => 4_u8,
+                (PitchLinear, SuClampRound::R1) => 5_u8,
+                (PitchLinear, SuClampRound::R2) => 6_u8,
+                (PitchLinear, SuClampRound::R4) => 7_u8,
+                (PitchLinear, SuClampRound::R8) => 8_u8,
+                (PitchLinear, SuClampRound::R16) => 9_u8,
+                (BlockLinear, SuClampRound::R1) => 10_u8,
+                (BlockLinear, SuClampRound::R2) => 11_u8,
+                (BlockLinear, SuClampRound::R4) => 12_u8,
+                (BlockLinear, SuClampRound::R8) => 13_u8,
+                (BlockLinear, SuClampRound::R16) => 14_u8,
+            },
+        );
+        e.set_bit(9, self.is_s32);
+        e.set_bit(48, self.is_2d);
+        e.set_field(49..55, self.imm);
+        e.set_pred_dst(55..58, &self.out_of_bounds);
+    }
+}
+
+impl SM20Op for OpSuBfm {
+    fn legalize(&mut self, b: &mut LegalizeBuilder) {
+        use RegFile::GPR;
+        let [src0, src1, src2] = &mut self.srcs;
+        b.copy_alu_src_if_not_reg(src0, GPR, SrcType::ALU);
+        b.copy_alu_src_if_i20_overflow(src1, GPR, SrcType::ALU);
+        if src_is_reg(src1, GPR) {
+            b.copy_alu_src_if_imm(src2, GPR, SrcType::ALU);
+        } else {
+            b.copy_alu_src_if_not_reg(src2, GPR, SrcType::ALU);
+        }
+    }
+
+    fn encode(&self, e: &mut SM20Encoder<'_>) {
+        e.encode_form_a(
+            SM20Unit::Move,
+            0x17,
+            &self.dst,
+            &self.srcs[0],
+            &self.srcs[1],
+            Some(&self.srcs[2]),
+        );
+        e.set_bit(48, self.is_3d);
+        e.set_pred_dst(55..58, &self.pdst);
+    }
+}
+
+impl SM20Op for OpSuEau {
+    fn legalize(&mut self, b: &mut LegalizeBuilder) {
+        use RegFile::GPR;
+        b.copy_alu_src_if_not_reg(&mut self.off, GPR, SrcType::ALU);
+        b.copy_alu_src_if_i20_overflow(&mut self.bit_field, GPR, SrcType::ALU);
+        if src_is_reg(&self.bit_field, GPR) {
+            b.copy_alu_src_if_imm(&mut self.addr, GPR, SrcType::ALU);
+        } else {
+            b.copy_alu_src_if_not_reg(&mut self.addr, GPR, SrcType::ALU);
+        }
+    }
+
+    fn encode(&self, e: &mut SM20Encoder<'_>) {
+        e.encode_form_a(
+            SM20Unit::Move,
+            0x18,
+            &self.dst,
+            &self.off,
+            &self.bit_field,
+            Some(&self.addr),
+        );
+    }
+}
+
+impl SM20Op for OpIMadSp {
+    fn legalize(&mut self, b: &mut LegalizeBuilder) {
+        use RegFile::GPR;
+        let [src0, src1, src2] = &mut self.srcs;
+
+        b.copy_alu_src_if_not_reg(src0, GPR, SrcType::ALU);
+        b.copy_alu_src_if_i20_overflow(src1, GPR, SrcType::ALU);
+        if src_is_reg(src1, GPR) {
+            b.copy_alu_src_if_imm(src2, GPR, SrcType::ALU);
+        } else {
+            b.copy_alu_src_if_not_reg(src2, GPR, SrcType::ALU);
+        }
+    }
+
+    fn encode(&self, e: &mut SM20Encoder<'_>) {
+        e.encode_form_a(
+            SM20Unit::Int,
+            0x0,
+            &self.dst,
+            &self.srcs[0],
+            &self.srcs[1],
+            Some(&self.srcs[2]),
+        );
+
+        match self.mode {
+            IMadSpMode::Explicit([src0, src1, src2]) => {
+                use IMadSpSrcType::*;
+                assert!(
+                    src2.sign() == (src1.sign() || src0.sign()),
+                    "Cannot encode imadsp signed combination"
+                );
+
+                e.set_bit(5, src1.sign());
+                // Don't trust nvdisasm on this, this is inverted
+                e.set_field(
+                    6..7,
+                    match src1.unsigned() {
+                        U24 => 1_u8,
+                        U16Lo => 0,
+                        _ => panic!("imadsp src[1] can only be 16 or 24 bits"),
+                    },
+                );
+
+                e.set_bit(7, src0.sign());
+                e.set_field(
+                    8..10,
+                    match src0.unsigned() {
+                        U32 => 0_u8,
+                        U24 => 1,
+                        U16Lo => 2,
+                        U16Hi => 3,
+                        _ => unreachable!(),
+                    },
+                );
+
+                e.set_field(
+                    55..57,
+                    match src2.unsigned() {
+                        U32 => 0_u8,
+                        U24 => 1,
+                        U16Lo => 2,
+                        U16Hi => {
+                            panic!("src2 u16h1 not encodable")
+                        }
+                        _ => unreachable!(),
+                    },
+                );
+            }
+            IMadSpMode::FromSrc1 => {
+                e.set_field(55..57, 3_u8);
+            }
+        }
+    }
+}
+
 impl SM20Encoder<'_> {
     fn set_mem_type(&mut self, range: Range<usize>, mem_type: MemType) {
         assert!(range.len() == 3);
@@ -1987,13 +2153,137 @@ fn legalize_ext_instr(op: &mut impl SrcsAsSlice, _b: &mut LegalizeBuilder) {
                 panic!("ALU srcs must be legalized explicitly");
             }
             SrcType::Pred => {
-                panic!("Predicates must be legalized explicitly");
+                assert!(src_is_reg(src, RegFile::Pred));
             }
             SrcType::Carry => {
                 panic!("Carry values must be legalized explicitly");
             }
             SrcType::Bar => panic!("Barrier regs are Volta+"),
         }
+    }
+}
+
+impl SM20Encoder<'_> {
+    fn set_ld_cache_op(&mut self, range: Range<usize>, op: LdCacheOp) {
+        let cache_op = match op {
+            LdCacheOp::CacheAll => 0_u8,
+            LdCacheOp::CacheGlobal => 1_u8,
+            LdCacheOp::CacheStreaming => 2_u8,
+            LdCacheOp::CacheInvalidate => 3_u8,
+            _ => panic!("Unsupported cache op: ld{op}"),
+        };
+        self.set_field(range, cache_op);
+    }
+
+    fn set_st_cache_op(&mut self, range: Range<usize>, op: StCacheOp) {
+        let cache_op = match op {
+            StCacheOp::WriteBack => 0_u8,
+            StCacheOp::CacheGlobal => 1_u8,
+            StCacheOp::CacheStreaming => 2_u8,
+            StCacheOp::WriteThrough => 3_u8,
+        };
+        self.set_field(range, cache_op);
+    }
+
+    fn set_su_ga_offset_mode(
+        &mut self,
+        range: Range<usize>,
+        off_type: SuGaOffsetMode,
+    ) {
+        assert!(range.len() == 2);
+        self.set_field(
+            range,
+            match off_type {
+                SuGaOffsetMode::U32 => 0_u8,
+                SuGaOffsetMode::S32 => 1_u8,
+                SuGaOffsetMode::U8 => 2_u8,
+                SuGaOffsetMode::S8 => 3_u8,
+            },
+        );
+    }
+}
+
+impl SM20Op for OpSuLdGa {
+    fn legalize(&mut self, b: &mut LegalizeBuilder) {
+        legalize_ext_instr(self, b);
+    }
+
+    fn encode(&self, e: &mut SM20Encoder<'_>) {
+        assert!(e.sm.sm() >= 30);
+
+        e.set_opcode(SM20Unit::Mem, 0x35);
+        e.set_mem_type(5..8, self.mem_type);
+        e.set_ld_cache_op(8..10, self.cache_op);
+        e.set_dst(14..20, &self.dst);
+        e.set_reg_src(20..26, &self.addr);
+
+        assert!(self.format.src_mod.is_none());
+        match &self.format.src_ref {
+            SrcRef::Zero | SrcRef::Reg(_) => {
+                e.set_reg_src(26..32, &self.format);
+                e.set_bit(53, false); // reg form
+            }
+            SrcRef::CBuf(cb) => {
+                let CBuf::Binding(idx) = cb.buf else {
+                    panic!("Must be a bound constant buffer");
+                };
+                assert!(cb.offset & 0x3 == 0);
+                e.set_field(26..40, cb.offset >> 2);
+                e.set_field(40..45, idx);
+                e.set_bit(53, true); // cbuf form
+            }
+            _ => panic!("Invalid format source"),
+        }
+
+        e.set_su_ga_offset_mode(45..47, self.offset_mode);
+        e.set_field(47..49, 0_u8); // 0: .z, 2: .trap, 3: .sdcl
+        e.set_pred_src(49..53, &self.out_of_bounds);
+    }
+}
+
+impl SM20Op for OpSuStGa {
+    fn legalize(&mut self, b: &mut LegalizeBuilder) {
+        legalize_ext_instr(self, b);
+    }
+
+    fn encode(&self, e: &mut SM20Encoder<'_>) {
+        assert!(e.sm.sm() >= 30);
+
+        e.set_opcode(SM20Unit::Mem, 0x37);
+        match self.image_access {
+            ImageAccess::Binary(mem_type) => {
+                e.set_mem_type(5..8, mem_type);
+                e.set_field(54..58, 0_u8); // .b
+            }
+            ImageAccess::Formatted(channel_mask) => {
+                e.set_field(54..58, channel_mask.to_bits());
+            }
+        }
+        e.set_st_cache_op(8..10, self.cache_op);
+        e.set_reg_src(14..20, &self.data);
+        e.set_reg_src(20..26, &self.addr);
+
+        assert!(self.format.src_mod.is_none());
+        match &self.format.src_ref {
+            SrcRef::Zero | SrcRef::Reg(_) => {
+                e.set_reg_src(26..32, &self.format);
+                e.set_bit(53, false); // reg form
+            }
+            SrcRef::CBuf(cb) => {
+                let CBuf::Binding(idx) = cb.buf else {
+                    panic!("Must be a bound constant buffer");
+                };
+                assert!(cb.offset & 0x3 == 0);
+                e.set_field(26..40, cb.offset >> 2);
+                e.set_field(40..45, idx);
+                e.set_bit(53, true); // cbuf form
+            }
+            _ => panic!("Invalid format source"),
+        }
+
+        e.set_su_ga_offset_mode(45..47, self.offset_mode);
+        e.set_field(47..49, 0_u8); // 0: .ign, 1: .trap, 3: .sdc1
+        e.set_pred_src(49..53, &self.out_of_bounds);
     }
 }
 
@@ -2021,7 +2311,7 @@ impl SM20Op for OpLd {
             }
         }
         e.set_mem_type(5..8, self.access.mem_type);
-        // 8..9: cache hints (.ca, .cg, .lu, .cv)
+        e.set_ld_cache_op(8..10, self.access.ld_cache_op(e.sm));
         e.set_dst(14..20, &self.dst);
         e.set_reg_src(20..26, &self.addr);
     }
@@ -2061,6 +2351,21 @@ impl SM20Op for OpLdc {
     }
 }
 
+impl SM20Op for OpLdSharedLock {
+    fn legalize(&mut self, b: &mut LegalizeBuilder) {
+        legalize_ext_instr(self, b);
+    }
+
+    fn encode(&self, e: &mut SM20Encoder<'_>) {
+        e.set_opcode(SM20Unit::Mem, 0x2a);
+        e.set_mem_type(5..8, self.mem_type);
+        e.set_dst(14..20, &self.dst);
+        e.set_reg_src(20..26, &self.addr);
+        e.set_field(26..50, self.offset);
+        e.set_pred_dst2(8..10, 58..59, &self.locked);
+    }
+}
+
 impl SM20Op for OpSt {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
         legalize_ext_instr(self, b);
@@ -2085,9 +2390,24 @@ impl SM20Op for OpSt {
             }
         }
         e.set_mem_type(5..8, self.access.mem_type);
-        // 8..9: cache hints (.ca, .cg, .lu, .cv)
+        e.set_st_cache_op(8..10, self.access.st_cache_op(e.sm));
         e.set_reg_src(14..20, &self.data);
         e.set_reg_src(20..26, &self.addr);
+    }
+}
+
+impl SM20Op for OpStSCheckUnlock {
+    fn legalize(&mut self, b: &mut LegalizeBuilder) {
+        legalize_ext_instr(self, b);
+    }
+
+    fn encode(&self, e: &mut SM20Encoder<'_>) {
+        e.set_opcode(SM20Unit::Mem, 0x2e);
+        e.set_mem_type(5..8, self.mem_type);
+        e.set_reg_src(14..20, &self.data);
+        e.set_reg_src(20..26, &self.addr);
+        e.set_field(26..50, self.offset);
+        e.set_pred_dst2(8..10, 58..59, &self.locked);
     }
 }
 
@@ -2164,14 +2484,24 @@ impl SM20Op for OpAtom {
             // AtomType::U16 => 0x2_u8,
             // AtomType::I16 => 0x3_u8,
             AtomType::U32 => 0x4_u8,
-            AtomType::U64 => 0x5_u8,
             //AtomType::U128 => 0x6_u8,
             AtomType::I32 => 0x7_u8,
-            AtomType::I64 => 0x8_u8,
             //AtomType::I128 => 0x9_u8,
             //AtomType::F16 => 0xa_u8,
-            AtomType::F64 => 0xc_u8,
             AtomType::F32 => 0xd_u8,
+
+            AtomType::U64 | AtomType::I64 | AtomType::F64 => {
+                // They encode fine:
+                //
+                //     AtomType::U64 => 0x5_u8,
+                //     AtomType::I64 => 0x8_u8,
+                //     AtomType::F64 => 0xc_u8,
+                //
+                // but the hardware throws an ILLEGAL_INSTRUCTION_ENCODING error
+                // if we ever actually execute one.  Also, the proprietary
+                // driver doesn't expose any 64-bit atomic features on Kepler A.
+                panic!("64-bit atomics are not supported");
+            }
         };
         e.set_field(9..10, typ & 0x1);
         e.set_field(59..62, typ >> 1);
@@ -2201,6 +2531,21 @@ impl SM20Op for OpAtom {
         } else if !self.dst.is_none() {
             e.set_reg_src(49..55, &0.into());
         }
+    }
+}
+
+impl SM20Op for OpAL2P {
+    fn legalize(&mut self, b: &mut LegalizeBuilder) {
+        legalize_ext_instr(self, b);
+    }
+
+    fn encode(&self, e: &mut SM20Encoder<'_>) {
+        e.set_opcode(SM20Unit::Tex, 0x3);
+        e.set_field(5..7, self.comps.ilog2());
+        e.set_bit(9, self.output);
+        e.set_dst(14..20, &self.dst);
+        e.set_reg_src(20..26, &self.offset);
+        e.set_field(32..43, self.addr);
     }
 }
 
@@ -2484,16 +2829,16 @@ impl SM20Op for OpTexDepBar {
     }
 }
 
-impl SM20Op for OpIsberd {
-    fn legalize(&mut self, b: &mut LegalizeBuilder) {
-        legalize_ext_instr(self, b);
+impl SM20Op for OpViLd {
+    fn legalize(&mut self, _b: &mut LegalizeBuilder) {
+        // Nothing to do
     }
 
     fn encode(&self, e: &mut SM20Encoder<'_>) {
         e.set_opcode(SM20Unit::Tex, 0x0);
         e.set_dst(14..20, &self.dst);
         e.set_reg_src(20..26, &self.idx);
-        e.set_field(26..42, 0_u16); // offset
+        e.set_field(26..42, self.off);
     }
 }
 
@@ -2648,10 +2993,19 @@ macro_rules! as_sm20_op_match {
             Op::Tmml(op) => op,
             Op::Txd(op) => op,
             Op::Txq(op) => op,
+            Op::SuClamp(op) => op,
+            Op::SuBfm(op) => op,
+            Op::SuEau(op) => op,
+            Op::IMadSp(op) => op,
+            Op::SuLdGa(op) => op,
+            Op::SuStGa(op) => op,
             Op::Ld(op) => op,
             Op::Ldc(op) => op,
+            Op::LdSharedLock(op) => op,
             Op::St(op) => op,
+            Op::StSCheckUnlock(op) => op,
             Op::Atom(op) => op,
+            Op::AL2P(op) => op,
             Op::ALd(op) => op,
             Op::ASt(op) => op,
             Op::Ipa(op) => op,
@@ -2667,7 +3021,7 @@ macro_rules! as_sm20_op_match {
             Op::Exit(op) => op,
             Op::Bar(op) => op,
             Op::TexDepBar(op) => op,
-            Op::Isberd(op) => op,
+            Op::ViLd(op) => op,
             Op::Kill(op) => op,
             Op::Nop(op) => op,
             Op::PixLd(op) => op,

@@ -436,26 +436,30 @@ panvk_preprocess_nir(UNUSED struct vk_physical_device *vk_pdev,
 }
 
 static void
-panvk_hash_graphics_state(struct vk_physical_device *device,
-                          const struct vk_graphics_pipeline_state *state,
-                          VkShaderStageFlags stages, blake3_hash blake3_out)
+panvk_hash_state(struct vk_physical_device *device,
+                 const struct vk_graphics_pipeline_state *state,
+                 const struct vk_features *enabled_features,
+                 VkShaderStageFlags stages, blake3_hash blake3_out)
 {
    struct mesa_blake3 blake3_ctx;
    _mesa_blake3_init(&blake3_ctx);
 
-   /* This doesn't impact the shader compile but it does go in the
-    * panvk_shader and gets [de]serialized along with the binary so
-    * we need to hash it.
-    */
-   bool sample_shading_enable = state->ms && state->ms->sample_shading_enable;
-   _mesa_blake3_update(&blake3_ctx, &sample_shading_enable,
-                       sizeof(sample_shading_enable));
+   if (state != NULL) {
+      /* This doesn't impact the shader compile but it does go in the
+       * panvk_shader and gets [de]serialized along with the binary so
+       * we need to hash it.
+       */
+      bool sample_shading_enable =
+         state->ms && state->ms->sample_shading_enable;
+      _mesa_blake3_update(&blake3_ctx, &sample_shading_enable,
+                          sizeof(sample_shading_enable));
 
-   _mesa_blake3_update(&blake3_ctx, &state->rp->view_mask,
-                       sizeof(state->rp->view_mask));
+      _mesa_blake3_update(&blake3_ctx, &state->rp->view_mask,
+                          sizeof(state->rp->view_mask));
 
-   if (state->ial)
-      _mesa_blake3_update(&blake3_ctx, state->ial, sizeof(*state->ial));
+      if (state->ial)
+         _mesa_blake3_update(&blake3_ctx, state->ial, sizeof(*state->ial));
+   }
 
    _mesa_blake3_final(&blake3_ctx, blake3_out);
 }
@@ -688,8 +692,12 @@ lower_load_push_consts(nir_shader *nir, struct panvk_shader *shader)
     * blend constants are never loaded from the fragment shader, but might be
     * needed in the blend shader. */
    shader->fau.sysval_count = BITSET_COUNT(shader->fau.used_sysvals);
+   /* 32 FAUs (256 bytes) are reserved for API push constants */
+   assert(shader->fau.sysval_count <= 64 - 32 && "too many sysval FAUs");
    shader->fau.total_count =
       shader->fau.sysval_count + BITSET_COUNT(shader->fau.used_push_consts);
+   assert(shader->fau.total_count <= 64 &&
+          "asking for more FAUs than the hardware has to offer");
 
    if (!progress)
       return;
@@ -1307,6 +1315,7 @@ static VkResult
 panvk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
                       struct vk_shader_compile_info *infos,
                       const struct vk_graphics_pipeline_state *state,
+                      const struct vk_features *enabled_features,
                       const VkAllocationCallbacks *pAllocator,
                       struct vk_shader **shaders_out)
 {
@@ -1950,7 +1959,7 @@ const struct vk_device_shader_ops panvk_per_arch(device_shader_ops) = {
    .get_nir_options = panvk_get_nir_options,
    .get_spirv_options = panvk_get_spirv_options,
    .preprocess_nir = panvk_preprocess_nir,
-   .hash_graphics_state = panvk_hash_graphics_state,
+   .hash_state = panvk_hash_state,
    .compile = panvk_compile_shaders,
    .deserialize = panvk_deserialize_shader,
    .cmd_set_dynamic_graphics_state = vk_cmd_set_dynamic_graphics_state,

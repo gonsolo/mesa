@@ -200,12 +200,6 @@ impl BitMutViewable for SM50Encoder<'_> {
     }
 }
 
-impl SetFieldU64 for SM50Encoder<'_> {
-    fn set_field_u64(&mut self, range: Range<usize>, val: u64) {
-        BitMutView::new(&mut self.inst).set_field_u64(range, val);
-    }
-}
-
 fn zero_reg() -> RegRef {
     RegRef::new(RegFile::GPR, 255, 1)
 }
@@ -2392,10 +2386,6 @@ impl SM50Encoder<'_> {
         );
     }
 
-    fn set_mem_order(&mut self, _order: &MemOrder) {
-        // TODO: order and scope aren't present before SM70, what should we do?
-    }
-
     fn set_mem_access(&mut self, access: &MemAccess) {
         self.set_field(
             45..46,
@@ -2405,7 +2395,27 @@ impl SM50Encoder<'_> {
             },
         );
         self.set_mem_type(48..51, access.mem_type);
-        self.set_mem_order(&access.order);
+    }
+
+    fn set_ld_cache_op(&mut self, range: Range<usize>, op: LdCacheOp) {
+        let cache_op = match op {
+            LdCacheOp::CacheAll => 0_u8,
+            LdCacheOp::CacheGlobal => 1_u8,
+            LdCacheOp::CacheIncoherent => 2_u8,
+            LdCacheOp::CacheInvalidate => 3_u8,
+            _ => panic!("Unsupported cache op: ld{op}"),
+        };
+        self.set_field(range, cache_op);
+    }
+
+    fn set_st_cache_op(&mut self, range: Range<usize>, op: StCacheOp) {
+        let cache_op = match op {
+            StCacheOp::WriteBack => 0_u8,
+            StCacheOp::CacheGlobal => 1_u8,
+            StCacheOp::CacheStreaming => 2_u8,
+            StCacheOp::WriteThrough => 3_u8,
+        };
+        self.set_field(range, cache_op);
     }
 
     fn set_image_dim(&mut self, range: Range<usize>, dim: ImageDim) {
@@ -2457,23 +2467,13 @@ impl SM50Op for OpSuLd {
         }
         e.set_image_dim(33..36, self.image_dim);
 
-        // mem_eviction_policy not a thing for sm < 70
-
-        let scope = match self.mem_order {
-            MemOrder::Constant => MemScope::System,
-            MemOrder::Weak => MemScope::CTA,
-            MemOrder::Strong(s) => s,
-        };
-
-        e.set_field(
-            24..26,
-            match scope {
-                MemScope::CTA => 0_u8,
-                /* SM => 1_u8, */
-                MemScope::GPU => 2_u8,
-                MemScope::System => 3_u8,
-            },
+        let cache_op = LdCacheOp::select(
+            e.sm,
+            MemSpace::Global(MemAddrType::A64),
+            self.mem_order,
+            self.mem_eviction_priority,
         );
+        e.set_ld_cache_op(24..26, cache_op);
 
         e.set_dst(&self.dst);
 
@@ -2505,8 +2505,15 @@ impl SM50Op for OpSuSt {
         e.set_reg_src(0..8, &self.data);
         e.set_reg_src(39..47, &self.handle);
 
+        let cache_op = StCacheOp::select(
+            e.sm,
+            MemSpace::Global(MemAddrType::A64),
+            self.mem_order,
+            self.mem_eviction_priority,
+        );
+        e.set_st_cache_op(24..26, cache_op);
+
         e.set_image_dim(33..36, self.image_dim);
-        e.set_mem_order(&self.mem_order);
     }
 }
 
@@ -2589,6 +2596,7 @@ impl SM50Op for OpLd {
         e.set_field(20..44, self.offset);
 
         e.set_mem_access(&self.access);
+        e.set_ld_cache_op(46..48, self.access.ld_cache_op(e.sm));
     }
 }
 
@@ -2642,6 +2650,7 @@ impl SM50Op for OpSt {
         e.set_reg_src(8..16, &self.addr);
         e.set_field(20..44, self.offset);
         e.set_mem_access(&self.access);
+        e.set_st_cache_op(46..48, self.access.st_cache_op(e.sm));
     }
 }
 
@@ -2751,8 +2760,6 @@ impl SM50Op for OpAtom {
                     e.set_field(49..52, data_type);
                     e.set_atom_op(52..56, self.atom_op);
                 }
-
-                e.set_mem_order(&self.mem_order);
 
                 e.set_reg_src(8..16, &self.addr);
                 e.set_field(28..48, self.addr_offset);

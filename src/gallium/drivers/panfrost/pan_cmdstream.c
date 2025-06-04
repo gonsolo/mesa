@@ -1712,14 +1712,18 @@ panfrost_create_sampler_view_bo(struct panfrost_sampler_view *so,
          util_format_description(format);
       struct pan_buffer_view bview = {
          .format = format,
-         .astc.narrow =
-             desc->layout == UTIL_FORMAT_LAYOUT_ASTC &&
-             so->base.astc_decode_format == PIPE_ASTC_DECODE_FORMAT_UNORM8,
          .width_el =
             MIN2(so->base.u.buf.size / util_format_get_blocksize(format),
                  PAN_MAX_TEXEL_BUFFER_ELEMENTS),
          .base = prsrc->image.data.base + so->base.u.buf.offset,
       };
+
+      if (desc->layout == UTIL_FORMAT_LAYOUT_ASTC) {
+         bview.astc.narrow =
+            so->base.astc_decode_format == PIPE_ASTC_DECODE_FORMAT_UNORM8;
+         bview.astc.hdr = util_format_is_astc_hdr(format);
+      }
+
 #if PAN_ARCH >= 9
       unsigned payload_size = pan_size(PLANE);
 #elif PAN_ARCH >= 6
@@ -1826,9 +1830,10 @@ panfrost_create_sampler_view_bo(struct panfrost_sampler_view *so,
       }
    }
 
-   if (desc->layout == UTIL_FORMAT_LAYOUT_ASTC &&
-       so->base.astc_decode_format == PIPE_ASTC_DECODE_FORMAT_UNORM8) {
-      iview.astc.narrow = true;
+   if (desc->layout == UTIL_FORMAT_LAYOUT_ASTC) {
+      iview.astc.narrow =
+         so->base.astc_decode_format == PIPE_ASTC_DECODE_FORMAT_UNORM8;
+      iview.astc.hdr = util_format_is_astc_hdr(format);
    }
 
    GENX(pan_sampled_texture_emit)(&iview, tex, &payload);
@@ -2814,11 +2819,11 @@ panfrost_initialize_surface(struct panfrost_batch *batch,
 {
    if (surf->texture) {
       struct panfrost_resource *rsrc = pan_resource(surf->texture);
-      BITSET_SET(rsrc->valid.data, surf->u.tex.level);
+      BITSET_SET(rsrc->valid.data, surf->level);
       if (rsrc->separate_stencil)
-         BITSET_SET(rsrc->separate_stencil->valid.data, surf->u.tex.level);
+         BITSET_SET(rsrc->separate_stencil->valid.data, surf->level);
       if (rsrc->shadow_image)
-         BITSET_SET(rsrc->shadow_image->valid.data, surf->u.tex.level);
+         BITSET_SET(rsrc->shadow_image->valid.data, surf->level);
    }
 }
 
@@ -2952,7 +2957,8 @@ panfrost_emit_varying_descriptors(struct panfrost_batch *batch)
          cfg.table = 61;
          cfg.frequency = MALI_ATTRIBUTE_FREQUENCY_VERTEX;
          cfg.offset = 1024 + (index * 16);
-         cfg.buffer_index = 0;
+         /* On v12+, the hardware-controlled buffer is at index 1 for varyings */
+         cfg.buffer_index = PAN_ARCH >= 12 ? 1 : 0;
          cfg.attribute_stride = varying_size;
          cfg.packet_stride = varying_size + 16;
       }

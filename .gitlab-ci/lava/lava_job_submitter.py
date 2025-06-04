@@ -7,6 +7,10 @@
 #
 # SPDX-License-Identifier: MIT
 
+# When changing this file, you need to bump the following
+# .gitlab-ci/image-tags.yml tags:
+# ALPINE_X86_64_LAVA_TRIGGER_TAG
+
 """Send a job to LAVA, track it and collect log back"""
 
 import contextlib
@@ -256,7 +260,7 @@ def follow_job_execution(job, log_follower):
         raise_lava_error(job)
 
     # LogFollower does some cleanup after the early exit (trigger by
-    # `hwci: pass|fail` regex), let's update the phases after the cleanup.
+    # `hwci: mesa: exit_code: \d+` regex), let's update the phases after the cleanup.
     structural_log_phases(job, log_follower)
 
 
@@ -403,6 +407,7 @@ class LAVAJobSubmitter(PathResolver):
     dtb_filename: str = None
     dump_yaml: bool = False  # Whether to dump the YAML payload to stdout
     first_stage_init: str = None
+    env_file: pathlib.Path = None
     jwt_file: pathlib.Path = None
     kernel_image_name: str = None
     kernel_image_type: str = ""
@@ -415,6 +420,7 @@ class LAVAJobSubmitter(PathResolver):
     visibility_group: str = None  # Only affects LAVA farm maintainers
     structured_log_file: pathlib.Path = None  # Log file path with structured LAVA log
     ssh_client_image: str = None  # x86_64 SSH client image to follow the job's output
+    project_dir: str = None  # Project directory to be used to find Mesa artifacts
     project_name: str = None  # Project name to be used in the job name
     starting_section: str = None # GitLab section used to start
     job_submitted_at: [str | datetime] = None

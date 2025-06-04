@@ -1,3 +1,7 @@
+# When changing this file, you need to bump the following
+# .gitlab-ci/image-tags.yml tags:
+# ALPINE_X86_64_LAVA_TRIGGER_TAG
+
 import re
 import xmlrpc
 from collections import defaultdict
@@ -171,10 +175,10 @@ class LAVAJob:
         last_line = None  # Print all lines. lines[:None] == lines[:]
 
         for idx, line in enumerate(lava_lines):
-            if result := re.search(r"hwci: mesa: (pass|fail), exit_code: (\d+)", line):
+            if result := re.search(r"hwci: mesa: exit_code: (\d+)", line):
                 self._is_finished = True
-                self.status = result.group(1)
-                self.exit_code = int(result.group(2))
+                self.exit_code = int(result.group(1))
+                self.status = "pass" if self.exit_code == 0 else "fail"
 
                 last_line = idx
                 # We reached the log end here. hwci script has finished.

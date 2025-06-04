@@ -460,12 +460,11 @@ static constexpr PhysReg scc{253};
  */
 class Operand final {
 public:
-   constexpr Operand()
-       : reg_(PhysReg{128}), isTemp_(false), isFixed_(true), isPrecolored_(false),
-         isConstant_(false), isKill_(false), isUndef_(true), isFirstKill_(false),
-         isLateKill_(false), isClobbered_(false), isCopyKill_(false), is16bit_(false),
-         is24bit_(false), signext(false), constSize(0)
-   {}
+   constexpr Operand() noexcept
+   {
+      isUndef_ = true;
+      setFixed(PhysReg{128});
+   }
 
    explicit Operand(Temp r) noexcept
    {
@@ -857,6 +856,12 @@ public:
 
    constexpr bool isFirstKillBeforeDef() const noexcept { return isFirstKill() && !isLateKill(); }
 
+   /* Indicates that the Operand is part of a vector consisting of multiple operands.
+    * Therefore, it must reside in a register aligned with the next Operand.
+    */
+   constexpr void setVectorAligned(bool flag) noexcept { isVectorAligned_ = flag; }
+   constexpr bool isVectorAligned() const noexcept { return isVectorAligned_; }
+
    constexpr bool operator==(Operand other) const noexcept
    {
       if (other.bytes() != bytes())
@@ -907,6 +912,7 @@ private:
          uint8_t isLateKill_ : 1;
          uint8_t isClobbered_ : 1;
          uint8_t isCopyKill_ : 1;
+         uint8_t isVectorAligned_ : 1;
          uint8_t is16bit_ : 1;
          uint8_t is24bit_ : 1;
          uint8_t signext : 1;

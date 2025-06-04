@@ -40,12 +40,6 @@ impl BitMutViewable for SM70Encoder<'_> {
     }
 }
 
-impl SetFieldU64 for SM70Encoder<'_> {
-    fn set_field_u64(&mut self, range: Range<usize>, val: u64) {
-        BitMutView::new(&mut self.inst).set_field_u64(range, val);
-    }
-}
-
 impl SM70Encoder<'_> {
     /// Maximum encodable UGPR
     ///
@@ -1921,9 +1915,7 @@ impl SM70Op for OpF2F {
 impl SM70Op for OpF2FP {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
         let gpr = op_gpr(self);
-        let [src0, src1] = &mut self.srcs;
-        swap_srcs_if_not_reg(src0, src1, gpr);
-
+        let [src0, _src1] = &mut self.srcs;
         b.copy_alu_src_if_not_reg(src0, gpr, SrcType::ALU);
     }
 
@@ -2258,6 +2250,39 @@ impl SM70Op for OpR2UR {
         e.set_udst(&self.dst);
         e.set_reg_src(24..32, &self.src);
         e.set_pred_dst(81..84, &Dst::None);
+    }
+}
+
+impl SM70Op for OpRedux {
+    fn legalize(&mut self, b: &mut LegalizeBuilder) {
+        b.copy_alu_src_if_not_reg(&mut self.src, RegFile::GPR, SrcType::GPR);
+    }
+
+    fn encode(&self, e: &mut SM70Encoder<'_>) {
+        e.set_opcode(0x3c4);
+        e.set_udst(&self.dst);
+        e.set_reg_src(24..32, &self.src);
+
+        e.set_bit(
+            73,
+            match self.op {
+                ReduxOp::Min(cmp_type) | ReduxOp::Max(cmp_type) => {
+                    cmp_type == IntCmpType::I32
+                }
+                _ => false,
+            },
+        );
+        e.set_field(
+            78..81,
+            match self.op {
+                ReduxOp::And => 0_u8,
+                ReduxOp::Or => 1,
+                ReduxOp::Xor => 2,
+                ReduxOp::Sum => 3,
+                ReduxOp::Min(_) => 4,
+                ReduxOp::Max(_) => 5,
+            },
+        );
     }
 }
 
@@ -2758,6 +2783,12 @@ impl SM70Encoder<'_> {
 impl SM70Op for OpSuLd {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
         legalize_ext_instr(self, b);
+
+        // suld.constant doesn't exist on Volta or Turing but it's always safe
+        // to silently degrade to suld.weak
+        if self.mem_order == MemOrder::Constant && b.sm() < 80 {
+            self.mem_order = MemOrder::Weak;
+        }
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
@@ -3714,6 +3745,7 @@ macro_rules! as_sm70_op_match {
             Op::Shfl(op) => op,
             Op::PLop3(op) => op,
             Op::R2UR(op) => op,
+            Op::Redux(op) => op,
             Op::Tex(op) => op,
             Op::Tld(op) => op,
             Op::Tld4(op) => op,

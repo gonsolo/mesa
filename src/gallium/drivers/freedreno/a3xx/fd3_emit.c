@@ -312,9 +312,9 @@ fd3_emit_gmem_restore_tex(struct fd_ringbuffer *ring,
       }
 
       /* note: PIPE_BUFFER disallowed for surfaces */
-      unsigned lvl = psurf[i].u.tex.level;
+      unsigned lvl = psurf[i].level;
 
-      assert(psurf[i].u.tex.first_layer == psurf[i].u.tex.last_layer);
+      assert(psurf[i].first_layer == psurf[i].last_layer);
 
       OUT_RING(ring, A3XX_TEX_CONST_0_TILE_MODE(rsc->layout.tile_mode) |
                         A3XX_TEX_CONST_0_FMT(fd3_pipe2tex(format)) |
@@ -342,9 +342,9 @@ fd3_emit_gmem_restore_tex(struct fd_ringbuffer *ring,
          /* Matches above logic for blit_zs shader */
          if (rsc->stencil && i == 0)
             rsc = rsc->stencil;
-         unsigned lvl = psurf[i].u.tex.level;
+         unsigned lvl = psurf[i].level;
          uint32_t offset =
-            fd_resource_offset(rsc, lvl, psurf[i].u.tex.first_layer);
+            fd_resource_offset(rsc, lvl, psurf[i].first_layer);
          OUT_RELOC(ring, rsc->bo, offset, 0, 0);
       } else {
          OUT_RING(ring, 0x00000000);
@@ -763,8 +763,10 @@ fd3_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
             control |= A3XX_RB_MRT_CONTROL_ROP_CODE(ROP_COPY);
          }
 
-         if (format == PIPE_FORMAT_NONE)
-            control &= ~A3XX_RB_MRT_CONTROL_COMPONENT_ENABLE__MASK;
+         if (format == PIPE_FORMAT_NONE) {
+            control =
+               pkt_field_set(A3XX_RB_MRT_CONTROL_COMPONENT_ENABLE, control, 0);
+         }
 
          if (!has_alpha) {
             control &= ~A3XX_RB_MRT_CONTROL_BLEND2;

@@ -1087,7 +1087,7 @@ v3d_create_surface(struct pipe_context *pctx,
                 return NULL;
 
         struct pipe_surface *psurf = &surface->base;
-        unsigned level = surf_tmpl->u.tex.level;
+        unsigned level = surf_tmpl->level;
         struct v3d_resource_slice *slice = &rsc->slices[level];
 
         pipe_reference_init(&psurf->reference, 1);
@@ -1095,12 +1095,12 @@ v3d_create_surface(struct pipe_context *pctx,
 
         psurf->context = pctx;
         psurf->format = surf_tmpl->format;
-        psurf->u.tex.level = level;
-        psurf->u.tex.first_layer = surf_tmpl->u.tex.first_layer;
-        psurf->u.tex.last_layer = surf_tmpl->u.tex.last_layer;
+        psurf->level = level;
+        psurf->first_layer = surf_tmpl->first_layer;
+        psurf->last_layer = surf_tmpl->last_layer;
 
         surface->offset = v3d_layer_offset(ptex, level,
-                                           psurf->u.tex.first_layer);
+                                           psurf->first_layer);
         surface->tiling = slice->tiling;
 
         surface->format = v3d_get_rt_format(devinfo, psurf->format);
@@ -1212,8 +1212,7 @@ v3d_flush_resource(struct pipe_context *pctx, struct pipe_resource *prsc)
                 rsc->size = new_rsc->size;
                 rsc->tiled = new_rsc->tiled;
 
-                struct pipe_resource *new_prsc = (struct pipe_resource *)&new_rsc;
-                pipe_resource_reference(&new_prsc, NULL);
+                pipe_resource_reference((struct pipe_resource **)&new_rsc, NULL);
         }
 }
 

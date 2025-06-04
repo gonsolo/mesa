@@ -7,7 +7,6 @@ extern crate nvidia_headers;
 use crate::ir::{ShaderInfo, ShaderIoInfo, ShaderModel, ShaderStageInfo};
 use bitview::{
     BitMutView, BitMutViewable, BitView, BitViewable, SetBit, SetField,
-    SetFieldU64,
 };
 use nak_bindings::*;
 use nvidia_headers::classes::cla097::sph::*;
@@ -88,12 +87,6 @@ impl BitViewable for ShaderProgramHeader {
 impl BitMutViewable for ShaderProgramHeader {
     fn set_bit_range_u64(&mut self, range: Range<usize>, val: u64) {
         BitMutView::new(&mut self.data).set_bit_range_u64(range, val);
-    }
-}
-
-impl SetFieldU64 for ShaderProgramHeader {
-    fn set_field_u64(&mut self, range: Range<usize>, val: u64) {
-        BitMutView::new(&mut self.data).set_field_u64(range, val);
     }
 }
 
@@ -473,12 +466,14 @@ pub fn encode_header(
     let mut sph =
         ShaderProgramHeader::new(ShaderType::from(&shader_info.stage), sm.sm());
 
+    let slm_size = shader_info.slm_size.next_multiple_of(16);
     sph.set_sass_version(1);
-    sph.set_does_load_or_store(shader_info.uses_global_mem);
+    sph.set_does_load_or_store(
+        shader_info.uses_global_mem || (sm.is_kepler() && slm_size > 0),
+    );
     sph.set_does_global_store(shader_info.writes_global_mem);
     sph.set_does_fp64(shader_info.uses_fp64);
 
-    let slm_size = shader_info.slm_size.next_multiple_of(16);
     sph.set_shader_local_memory_size(slm_size.into());
     let crs_size = sm.crs_size(shader_info.max_crs_depth);
     sph.set_shader_local_memory_crs_size(crs_size);

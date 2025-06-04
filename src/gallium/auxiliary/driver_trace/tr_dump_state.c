@@ -705,26 +705,9 @@ void trace_dump_surface_template(const struct pipe_surface *state,
    trace_dump_enum(tr_util_pipe_texture_target_name(target));
    trace_dump_member_end();
 
-   trace_dump_member_begin("u");
-   trace_dump_struct_begin(""); /* anonymous */
-   if (target == PIPE_BUFFER) {
-      trace_dump_member_begin("buf");
-      trace_dump_struct_begin(""); /* anonymous */
-      trace_dump_member(uint, &state->u.buf, first_element);
-      trace_dump_member(uint, &state->u.buf, last_element);
-      trace_dump_struct_end(); /* anonymous */
-      trace_dump_member_end(); /* buf */
-   } else {
-      trace_dump_member_begin("tex");
-      trace_dump_struct_begin(""); /* anonymous */
-      trace_dump_member(uint, &state->u.tex, level);
-      trace_dump_member(uint, &state->u.tex, first_layer);
-      trace_dump_member(uint, &state->u.tex, last_layer);
-      trace_dump_struct_end(); /* anonymous */
-      trace_dump_member_end(); /* tex */
-   }
-   trace_dump_struct_end(); /* anonymous */
-   trace_dump_member_end(); /* u */
+   trace_dump_member(uint, state, level);
+   trace_dump_member(uint, state, first_layer);
+   trace_dump_member(uint, state, last_layer);
 
    trace_dump_struct_end();
 }
@@ -1181,6 +1164,10 @@ void trace_dump_grid_info(const struct pipe_grid_info *state)
    trace_dump_member(ptr, state, indirect);
    trace_dump_member(uint, state, indirect_offset);
 
+   trace_dump_member_begin("globals");
+   trace_dump_array(ptr, state->globals, state->num_globals);
+   trace_dump_member_end();
+
    trace_dump_struct_end();
 }
 
@@ -1292,5 +1279,21 @@ void trace_dump_pipe_vpp_desc(const struct pipe_vpp_desc *process_properties)
    trace_dump_member_enum(pipe_video_vpp_orientation, process_properties, orientation);
    trace_dump_member_struct(pipe_vpp_blend, process_properties, blend);
    trace_dump_member(ptr, process_properties, src_surface_fence);
+   trace_dump_struct_end();
+}
+
+void trace_dump_vm_allocation(struct pipe_vm_allocation *alloc)
+{
+   if (!trace_dumping_enabled_locked())
+      return;
+
+   if (!alloc) {
+      trace_dump_null();
+      return;
+   }
+
+   trace_dump_struct_begin("pipe_vma_allocation");
+   trace_dump_member(uint, alloc, start);
+   trace_dump_member(uint, alloc, size);
    trace_dump_struct_end();
 }

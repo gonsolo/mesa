@@ -62,24 +62,24 @@
 
 /* clang-format off */
 static const struct debug_named_value panfrost_debug_options[] = {
-   {"perf",       PAN_DBG_PERF,     "Enable performance warnings"},
-   {"trace",      PAN_DBG_TRACE,    "Trace the command stream"},
-   {"dirty",      PAN_DBG_DIRTY,    "Always re-emit all state"},
-   {"sync",       PAN_DBG_SYNC,     "Wait for each job's completion and abort on GPU faults"},
-   {"nofp16",     PAN_DBG_NOFP16,    "Disable 16-bit support"},
-   {"gl3",        PAN_DBG_GL3,      "Enable experimental GL 3.x implementation, up to 3.3"},
-   {"noafbc",     PAN_DBG_NO_AFBC,  "Disable AFBC support"},
-   {"nocrc",      PAN_DBG_NO_CRC,   "Disable transaction elimination"},
-   {"msaa16",     PAN_DBG_MSAA16,   "Enable MSAA 8x and 16x support"},
-   {"linear",     PAN_DBG_LINEAR,   "Force linear textures"},
-   {"nocache",    PAN_DBG_NO_CACHE, "Disable BO cache"},
-   {"dump",       PAN_DBG_DUMP,     "Dump all graphics memory"},
+   {"perf",       PAN_DBG_PERF,       "Enable performance warnings"},
+   {"trace",      PAN_DBG_TRACE,      "Trace the command stream"},
+   {"dirty",      PAN_DBG_DIRTY,      "Always re-emit all state"},
+   {"sync",       PAN_DBG_SYNC,       "Wait for each job's completion and abort on GPU faults"},
+   {"nofp16",     PAN_DBG_NOFP16,     "Disable 16-bit support"},
+   {"gl3",        PAN_DBG_GL3,        "Enable experimental GL 3.x implementation, up to 3.3"},
+   {"noafbc",     PAN_DBG_NO_AFBC,    "Disable AFBC support"},
+   {"nocrc",      PAN_DBG_NO_CRC,     "Disable transaction elimination"},
+   {"msaa16",     PAN_DBG_MSAA16,     "Enable MSAA 8x and 16x support"},
+   {"linear",     PAN_DBG_LINEAR,     "Force linear textures"},
+   {"nocache",    PAN_DBG_NO_CACHE,   "Disable BO cache"},
+   {"dump",       PAN_DBG_DUMP,       "Dump all graphics memory"},
 #ifdef PAN_DBG_OVERFLOW
-   {"overflow",   PAN_DBG_OVERFLOW, "Check for buffer overflows in pool uploads"},
+   {"overflow",   PAN_DBG_OVERFLOW,   "Check for buffer overflows in pool uploads"},
 #endif
-   {"yuv",        PAN_DBG_YUV,      "Tint YUV textures with blue for 1-plane and green for 2-plane"},
-   {"forcepack",  PAN_DBG_FORCE_PACK,  "Force packing of AFBC textures on upload"},
-   {"cs",         PAN_DBG_CS,       "Enable extra checks in command stream"},
+   {"yuv",        PAN_DBG_YUV,        "Tint YUV textures with blue for 1-plane and green for 2-plane"},
+   {"forcepack",  PAN_DBG_FORCE_PACK, "Force packing of AFBC textures on upload"},
+   {"cs",         PAN_DBG_CS,         "Enable extra checks in command stream"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
@@ -140,6 +140,23 @@ pipe_to_pan_bind_flags(uint32_t pipe_bind_flags)
    return pan_bind_flags;
 }
 
+static unsigned
+get_max_msaa(struct panfrost_device *dev, enum pipe_format format)
+{
+   unsigned max_tib_size = pan_get_max_tib_size(dev->arch, dev->model);
+   unsigned max_cbuf_atts = pan_get_max_cbufs(dev->arch, max_tib_size);
+   unsigned format_size = util_format_get_blocksize(format);
+
+   unsigned max_msaa = pan_get_max_msaa(dev->arch, max_tib_size,
+                                        max_cbuf_atts, format_size);
+   assert(format_size > 16 || max_msaa >= 4);
+
+   if (dev->model->quirks.max_4x_msaa)
+      max_msaa = 4;
+
+   return max_msaa;
+}
+
 /**
  * Query format support for creating a texture, drawing surface, etc.
  * \param format  the format to test
@@ -153,6 +170,11 @@ panfrost_is_format_supported(struct pipe_screen *screen,
                              unsigned storage_sample_count, unsigned bind)
 {
    struct panfrost_device *dev = pan_device(screen);
+
+   unsigned max_msaa = get_max_msaa(dev, format);
+   if (!util_is_power_of_two_or_zero(sample_count) ||
+       MAX2(sample_count, 1) > max_msaa)
+      return false;
 
    /* MSAA 2x gets rounded up to 4x. MSAA 8x/16x only supported on v5+.
     * TODO: debug MSAA 8x/16x */
@@ -392,6 +414,7 @@ panfrost_init_shader_caps(struct panfrost_screen *screen)
       caps->glsl_16bit_consts = !is_nofp16;
       caps->fp16_derivatives =
       caps->fp16_const_buffers = dev->arch >= 6 && !is_nofp16;
+      caps->glsl_16bit_load_dst = true;
       /* Blocked on https://gitlab.freedesktop.org/mesa/mesa/-/issues/6075 */
       caps->int16 = false;
       STATIC_ASSERT(PIPE_MAX_SAMPLERS < 0x10000);
@@ -485,8 +508,8 @@ panfrost_init_screen_caps(struct panfrost_screen *screen)
    /* Our GL 3.x implementation is WIP */
    bool is_gl3 = dev->debug & PAN_DBG_GL3;
 
-   /* Native MRT is introduced with v5 */
-   bool has_mrt = (dev->arch >= 5);
+   unsigned max_tib_size =
+      pan_get_max_tib_size(dev->arch, dev->model);
 
    caps->npot_textures = true;
    caps->mixed_color_depth_bits = true;
@@ -510,7 +533,7 @@ panfrost_init_screen_caps(struct panfrost_screen *screen)
                                             : PIPE_POINT_SIZE_LOWER_NEVER;
 
    caps->max_render_targets =
-   caps->fbfetch = has_mrt ? 8 : 1;
+   caps->fbfetch = pan_get_max_cbufs(dev->arch, max_tib_size);
    caps->fbfetch_coherent = true;
 
    caps->max_dual_source_render_targets = 1;

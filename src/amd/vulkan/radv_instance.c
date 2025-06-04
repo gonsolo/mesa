@@ -165,6 +165,7 @@ static const driOptionDescription radv_dri_options[] = {
 
    DRI_CONF_SECTION_DEBUG
       DRI_CONF_OVERRIDE_VRAM_SIZE()
+      DRI_CONF_VK_LOWER_TERMINATE_TO_DISCARD(false)
       DRI_CONF_VK_WSI_FORCE_BGRA8_UNORM_FIRST(false)
       DRI_CONF_VK_WSI_FORCE_SWAPCHAIN_TO_CURRENT_EXTENT(false)
       DRI_CONF_VK_X11_IGNORE_SUBOPTIMAL(false)
@@ -191,11 +192,11 @@ static const driOptionDescription radv_dri_options[] = {
       DRI_CONF_RADV_OVERRIDE_COMPUTE_SHADER_VERSION(0)
       DRI_CONF_RADV_OVERRIDE_RAY_TRACING_SHADER_VERSION(0)
       DRI_CONF_RADV_SSBO_NON_UNIFORM(false)
-      DRI_CONF_RADV_LOWER_TERMINATE_TO_DISCARD(false)
       DRI_CONF_RADV_APP_LAYER()
       DRI_CONF_RADV_EMULATE_RT(false)
       DRI_CONF_RADV_ENABLE_FLOAT16_GFX8(false)
       DRI_CONF_RADV_FORCE_64K_SPARSE_ALIGNMENT(false)
+      DRI_CONF_RADV_DISABLE_HIZ_HIS_GFX12(false)
    DRI_CONF_SECTION_END
 };
 // clang-format on
@@ -295,13 +296,15 @@ radv_init_dri_options(struct radv_instance *instance)
    instance->drirc.disable_dcc_stores = driQueryOptionb(&instance->drirc.options, "radv_disable_dcc_stores");
 
    instance->drirc.lower_terminate_to_discard =
-      driQueryOptionb(&instance->drirc.options, "radv_lower_terminate_to_discard");
+      driQueryOptionb(&instance->drirc.options, "vk_lower_terminate_to_discard");
 
    instance->drirc.emulate_rt = driQueryOptionb(&instance->drirc.options, "radv_emulate_rt");
 
    instance->drirc.expose_float16_gfx8 = driQueryOptionb(&instance->drirc.options, "radv_enable_float16_gfx8");
 
    instance->drirc.force_64k_sparse_alignment = driQueryOptionb(&instance->drirc.options, "radv_force_64k_sparse_alignment");
+
+   instance->drirc.disable_hiz_his_gfx12 = driQueryOptionb(&instance->drirc.options, "radv_disable_hiz_his_gfx12");
 }
 
 static const struct vk_instance_extension_table radv_instance_extensions_supported = {

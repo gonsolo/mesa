@@ -1,3 +1,7 @@
+# When changing this file, you need to bump the following
+# .gitlab-ci/image-tags.yml tags:
+# ALPINE_X86_64_LAVA_TRIGGER_TAG
+
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -137,7 +141,7 @@ def uart_test_actions(
         "sleep 1",
         # Putting CI_JOB name as the testcase name, it may help LAVA farm
         # maintainers with monitoring
-        f"lava-test-case '{args.project_name}_{args.mesa_job_name}' --shell /init-stage2.sh",
+        f"lava-test-case '{args.project_name}_{args.mesa_job_name}' --shell {args.project_dir}/install/common/init-stage2.sh",
     ]
 
     return (test,)

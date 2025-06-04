@@ -17,6 +17,7 @@ use mesa_rust::pipe::transfer::PipeTransfer;
 use mesa_rust_gen::*;
 use mesa_rust_util::math::SetBitIndices;
 use mesa_rust_util::static_assert;
+use rusticl_llvm_gen::*;
 use rusticl_opencl_gen::*;
 
 use std::cmp::max;
@@ -25,7 +26,9 @@ use std::collections::HashMap;
 use std::convert::TryInto;
 use std::env;
 use std::ffi::CStr;
+use std::fmt::Debug;
 use std::mem::transmute;
+use std::num::NonZeroU64;
 use std::os::raw::*;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -103,6 +106,13 @@ pub trait HelperContextWrapper {
     where
         F: Fn(&HelperContext);
 
+    fn buffer_map(
+        &self,
+        res: &PipeResource,
+        offset: i32,
+        size: i32,
+        rw: RWFlags,
+    ) -> Option<PipeTransfer>;
     fn create_compute_state(&self, nir: &NirShader, static_local_mem: u32) -> *mut c_void;
     fn delete_compute_state(&self, cso: *mut c_void);
     fn compute_state_info(&self, state: *mut c_void) -> pipe_compute_state_object_info;
@@ -162,6 +172,16 @@ impl HelperContextWrapper for HelperContext<'_> {
     {
         func(self);
         self.lock.flush()
+    }
+
+    fn buffer_map(
+        &self,
+        res: &PipeResource,
+        offset: i32,
+        size: i32,
+        rw: RWFlags,
+    ) -> Option<PipeTransfer> {
+        self.lock.buffer_map(res, offset, size, rw)
     }
 
     fn create_compute_state(&self, nir: &NirShader, static_local_mem: u32) -> *mut c_void {
@@ -684,6 +704,13 @@ impl Device {
             add_feat(1, 0, 0, "__opencl_c_int64");
         }
 
+        if self.kernel_clock_supported() {
+            add_ext(1, 0, 0, "cl_khr_kernel_clock");
+            add_feat(1, 0, 0, "__opencl_c_kernel_clock_scope_device");
+            add_feat(1, 0, 0, "__opencl_c_kernel_clock_scope_sub_group");
+            add_spirv(c"SPV_KHR_shader_clock");
+        }
+
         if self.caps.has_images {
             add_feat(1, 0, 0, "__opencl_c_images");
 
@@ -724,10 +751,18 @@ impl Device {
             // we have lowering in `nir_lower_subgroups`, drivers can just use that
             add_ext(1, 0, 0, "cl_khr_subgroup_shuffle");
             add_ext(1, 0, 0, "cl_khr_subgroup_shuffle_relative");
+            if self.intel_subgroups_supported() {
+                add_ext(1, 0, 0, "cl_intel_subgroups");
+                add_spirv(c"SPV_INTEL_subgroups");
+            }
         }
 
         if self.svm_supported() {
             add_ext(1, 0, 0, "cl_arm_shared_virtual_memory");
+        }
+
+        if self.bda_supported() {
+            add_ext(1, 0, 2, "cl_ext_buffer_device_address");
         }
 
         self.extensions = exts;
@@ -866,6 +901,14 @@ impl Device {
         }
 
         self.screen.caps().doubles
+    }
+
+    pub fn bda_supported(&self) -> bool {
+        self.screen().is_fixed_address_supported()
+    }
+
+    pub fn intel_subgroups_supported(&self) -> bool {
+        Platform::features().intel && self.subgroups_supported()
     }
 
     pub fn is_gl_sharing_supported(&self) -> bool {
@@ -1120,6 +1163,10 @@ impl Device {
         self.screen.compute_caps().max_subgroups
     }
 
+    pub fn kernel_clock_supported(&self) -> bool {
+        self.screen.caps().shader_clock && LLVM_VERSION_MAJOR >= 19
+    }
+
     pub fn subgroups_supported(&self) -> bool {
         let subgroup_sizes = self.subgroup_sizes().len();
 
@@ -1129,8 +1176,34 @@ impl Device {
             && (subgroup_sizes == 1 || (subgroup_sizes > 1 && self.shareable_shaders()))
     }
 
-    pub fn svm_supported(&self) -> bool {
+    pub fn system_svm_supported(&self) -> bool {
         self.screen.caps().system_svm
+    }
+
+    pub fn svm_supported(&self) -> bool {
+        if cfg!(any(
+            not(target_pointer_width = "64"),
+            not(any(target_os = "linux", target_os = "freebsd"))
+        )) {
+            return false;
+        }
+
+        self.system_svm_supported() || self.screen().is_vm_supported()
+    }
+
+    /// Checks if the device supports SVM _and_ that we were able to initialize SVM support on a
+    /// platform level.
+    pub fn api_svm_supported(&self) -> bool {
+        self.system_svm_supported()
+            || (self.screen().is_vm_supported() && Platform::get().vm.is_some())
+    }
+
+    // returns (start, end)
+    pub fn vm_alloc_range(&self) -> Option<(NonZeroU64, NonZeroU64)> {
+        let min = self.screen.caps().min_vma;
+        let max = self.screen.caps().max_vma;
+
+        Some((NonZeroU64::new(min)?, NonZeroU64::new(max)?))
     }
 
     pub fn unified_memory(&self) -> bool {
@@ -1178,11 +1251,21 @@ impl Device {
             images_read_write: self.caps.has_rw_images,
             images_write_3d: self.caps.has_3d_image_writes,
             integer_dot_product: true,
+            intel_subgroups: self.intel_subgroups_supported(),
+            kernel_clock: self.kernel_clock_supported(),
             subgroups: subgroups_supported,
             subgroups_shuffle: subgroups_supported,
             subgroups_shuffle_relative: subgroups_supported,
             ..Default::default()
         }
+    }
+}
+
+impl Debug for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(&format!("Device@{:?}", self as *const _))
+            .field("name", &self.screen().name())
+            .finish()
     }
 }
 

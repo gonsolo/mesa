@@ -10,6 +10,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "drm-uapi/panthor_drm.h"
+
 #include "vk_cmd_enqueue_entrypoints.h"
 #include "vk_common_entrypoints.h"
 
@@ -17,6 +19,7 @@
 #include "panvk_cmd_alloc.h"
 #include "panvk_cmd_buffer.h"
 #include "panvk_device.h"
+#include "panvk_cmd_draw.h"
 #include "panvk_entrypoints.h"
 #include "panvk_instance.h"
 #include "panvk_macros.h"
@@ -315,11 +318,38 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
       goto err_destroy_kdev;
    }
 
+#if PAN_ARCH >= 10
+   const struct drm_panthor_csif_info *csif_info =
+      panthor_kmod_get_csif_props(device->kmod.dev);
+
+   assert(csif_info->scoreboard_slot_count < UINT8_MAX);
+   device->csf.sb.count = csif_info->scoreboard_slot_count;
+   device->csf.sb.all_mask = BITFIELD_MASK(device->csf.sb.count);
+
+   assert(device->csf.sb.count > PANVK_SB_ITER_START);
+   device->csf.sb.iter_count =
+      MIN2(device->csf.sb.count - PANVK_SB_ITER_START, PANVK_SB_ITER_COUNT);
+   device->csf.sb.all_iters_mask =
+      BITFIELD_RANGE(PANVK_SB_ITER_START, device->csf.sb.iter_count);
+#endif
+
    simple_mtx_init(&device->as.lock, mtx_plain);
    util_vma_heap_init(&device->as.heap, user_va_start,
                       user_va_end - user_va_start);
 
    panvk_device_init_mempools(device);
+
+#if PAN_ARCH >= 10
+   /* The only reason this is a heap allocation is that PANVK_SUBQUEUE_COUNT
+    * isn't available in the header */
+   device->dump_region_size =
+      vk_zalloc(&device->vk.alloc, PANVK_SUBQUEUE_COUNT * sizeof(uint32_t),
+                alignof(uint32_t), VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+   if (!device->dump_region_size) {
+      result = panvk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+      goto err_free_priv_bos;
+   }
+#endif
 
 #if PAN_ARCH <= 9
    result = panvk_priv_bo_create(
@@ -361,9 +391,15 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
    if (result != VK_SUCCESS)
       goto err_free_priv_bos;
 
-   result = panvk_meta_init(device);
+#if PAN_ARCH >= 10
+   result = panvk_per_arch(device_draw_context_init)(device);
    if (result != VK_SUCCESS)
       goto err_free_precomp;
+#endif
+
+   result = panvk_meta_init(device);
+   if (result != VK_SUCCESS)
+      goto err_free_draw_ctx;
 
    for (unsigned i = 0; i < pCreateInfo->queueCreateInfoCount; i++) {
       const VkDeviceQueueCreateInfo *queue_create =
@@ -413,7 +449,11 @@ err_finish_queues:
 
    panvk_meta_cleanup(device);
 
+err_free_draw_ctx:
+#if PAN_ARCH >= 10
+   panvk_per_arch(device_draw_context_cleanup)(device);
 err_free_precomp:
+#endif
    panvk_precomp_cleanup(device);
 err_free_priv_bos:
    if (device->printf.bo)
@@ -423,6 +463,7 @@ err_free_priv_bos:
    panvk_priv_bo_unref(device->sample_positions);
    panvk_priv_bo_unref(device->tiler_heap);
    panvk_device_cleanup_mempools(device);
+   vk_free(&device->vk.alloc, device->dump_region_size);
    pan_kmod_vm_destroy(device->kmod.vm);
    util_vma_heap_finish(&device->as.heap);
    simple_mtx_destroy(&device->as.lock);
@@ -455,6 +496,9 @@ panvk_per_arch(destroy_device)(struct panvk_device *device,
    }
 
    panvk_precomp_cleanup(device);
+#if PAN_ARCH >= 10
+   panvk_per_arch(device_draw_context_cleanup)(device);
+#endif
    panvk_meta_cleanup(device);
    u_printf_destroy(&device->printf.ctx);
    panvk_priv_bo_unref(device->printf.bo);
@@ -462,6 +506,7 @@ panvk_per_arch(destroy_device)(struct panvk_device *device,
    panvk_priv_bo_unref(device->tiler_heap);
    panvk_priv_bo_unref(device->sample_positions);
    panvk_device_cleanup_mempools(device);
+   vk_free(&device->vk.alloc, device->dump_region_size);
    pan_kmod_vm_destroy(device->kmod.vm);
    util_vma_heap_finish(&device->as.heap);
    simple_mtx_destroy(&device->as.lock);

@@ -294,7 +294,7 @@ option(
   type : 'array',
   value : [],
   choices : [
-    'device-select', 'intel-nullhw', 'overlay', 'screenshot', 
+    'device-select', 'intel-nullhw', 'overlay', 'screenshot',
     'vram-report-limit',
   ],
   description : 'List of vulkan layers to build'
@@ -694,13 +694,6 @@ option(
 )
 
 option(
-  'intel-bvh-grl',
-  type : 'boolean',
-  value : false,
-  description : 'Build the BVH structure using GRL.'
-)
-
-option(
   'install-intel-clc',
   type : 'boolean',
   value : false,
@@ -831,4 +824,14 @@ option(
   type : 'boolean',
   value : false,
   description : 'Install the drivers internal shader compilers (if needed for cross builds).'
+)
+
+option(
+  'allow-fallback-for',
+  type : 'array',
+  value : [],
+  choices : [
+    'libdrm',
+  ],
+  description : 'Allows the fallback mechanism if the dependency is not available on the system, or too old.'
 )
