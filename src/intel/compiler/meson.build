@@ -73,6 +73,7 @@ libintel_compiler_brw_files = files(
   'brw_nir_lower_alpha_to_coverage.c',
   'brw_nir_lower_fs_barycentrics.c',
   'brw_nir_lower_fs_msaa.c',
+  'brw_nir_lower_immediate_offsets.c',
   'brw_nir_lower_intersection_shader.c',
   'brw_nir_lower_ray_queries.c',
   'brw_nir_lower_rt_intrinsics.c',
@@ -82,6 +83,7 @@ libintel_compiler_brw_files = files(
   'brw_nir_lower_storage_image.c',
   'brw_nir_lower_texel_address.c',
   'brw_nir_lower_texture.c',
+  'brw_nir_wa_18019110168.c',
   'brw_nir_opt_fsat.c',
   'brw_nir_rt.h',
   'brw_nir_rt.c',
@@ -161,7 +163,7 @@ libintel_compiler_brw = static_library(
 )
 
 idep_intel_compiler_brw = declare_dependency(
-  link_with : [libintel_compiler_brw],
+  link_with : [libintel_compiler_brw, libisl],
   dependencies : [
     idep_nir,
     idep_mesautil,

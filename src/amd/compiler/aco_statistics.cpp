@@ -263,7 +263,7 @@ BlockCycleEstimator::cycles_until_res_available(aco_ptr<Instruction>& instr)
 }
 
 static std::array<unsigned, wait_type_num>
-get_wait_counter_info(amd_gfx_level gfx_level, aco_ptr<Instruction>& instr)
+get_wait_counter_info(Program* program, aco_ptr<Instruction>& instr)
 {
    /* These numbers are all a bit nonsense. LDS/VMEM/SMEM/EXP performance
     * depends a lot on the situation. */
@@ -276,12 +276,12 @@ get_wait_counter_info(amd_gfx_level gfx_level, aco_ptr<Instruction>& instr)
       info[wait_type_exp] = 13;
    } else if (instr->isFlatLike()) {
       info[wait_type_lgkm] = instr->isFlat() ? 20 : 0;
-      if (!instr->definitions.empty() || gfx_level < GFX10)
+      if (!instr->definitions.empty() || program->gfx_level < GFX10)
          info[wait_type_vm] = 320;
       else
          info[wait_type_vs] = 320;
    } else if (instr->isSMEM()) {
-      wait_type type = gfx_level >= GFX12 ? wait_type_km : wait_type_lgkm;
+      wait_type type = program->gfx_level >= GFX12 ? wait_type_km : wait_type_lgkm;
       if (instr->definitions.empty()) {
          info[type] = 200;
       } else if (instr->operands.empty()) { /* s_memtime and s_memrealtime */
@@ -299,14 +299,14 @@ get_wait_counter_info(amd_gfx_level gfx_level, aco_ptr<Instruction>& instr)
       }
    } else if (instr->isDS()) {
       info[wait_type_lgkm] = 20;
-   } else if (instr->isVMEM() && instr->definitions.empty() && gfx_level >= GFX10) {
+   } else if (instr->isVMEM() && instr->definitions.empty() && program->gfx_level >= GFX10) {
       info[wait_type_vs] = 320;
    } else if (instr->isVMEM()) {
-      uint8_t vm_type = get_vmem_type(gfx_level, instr.get());
+      uint8_t vm_type = get_vmem_type(program->gfx_level, program->family, instr.get());
       wait_type type = wait_type_vm;
-      if (gfx_level >= GFX12 && vm_type == vmem_bvh)
+      if (program->gfx_level >= GFX12 && vm_type == vmem_bvh)
          type = wait_type_bvh;
-      else if (gfx_level >= GFX12 && vm_type == vmem_sampler)
+      else if (program->gfx_level >= GFX12 && vm_type == vmem_sampler)
          type = wait_type_sample;
       info[type] = 320;
    }
@@ -328,8 +328,7 @@ get_wait_imm(Program* program, aco_ptr<Instruction>& instr)
          imm.exp = wait_imm::unset_counter;
    } else {
       /* If an instruction increases a counter, it waits for it to be below maximum first. */
-      std::array<unsigned, wait_type_num> wait_info =
-         get_wait_counter_info(program->gfx_level, instr);
+      std::array<unsigned, wait_type_num> wait_info = get_wait_counter_info(program, instr);
       wait_imm max = wait_imm::max(program->gfx_level);
       for (unsigned i = 0; i < wait_type_num; i++) {
          if (wait_info[i])
@@ -418,7 +417,7 @@ BlockCycleEstimator::add(aco_ptr<Instruction>& instr)
          mem_ops[i].pop_front();
    }
 
-   std::array<unsigned, wait_type_num> wait_info = get_wait_counter_info(program->gfx_level, instr);
+   std::array<unsigned, wait_type_num> wait_info = get_wait_counter_info(program, instr);
    for (unsigned i = 0; i < wait_type_num; i++) {
       if (wait_info[i])
          mem_ops[i].push_back(cur_cycle + wait_info[i]);
@@ -471,8 +470,8 @@ collect_presched_stats(Program* program)
    RegisterDemand presched_demand;
    for (Block& block : program->blocks)
       presched_demand.update(block.register_demand);
-   program->statistics[aco_statistic_sgpr_presched] = presched_demand.sgpr;
-   program->statistics[aco_statistic_vgpr_presched] = presched_demand.vgpr;
+   program->statistics.presgprs = presched_demand.sgpr;
+   program->statistics.prevgprs = presched_demand.vgpr;
 }
 
 /* instructions/branches/vmem_clauses/smem_clauses/cycles */
@@ -483,31 +482,31 @@ collect_preasm_stats(Program* program)
       std::set<Instruction*> vmem_clause;
       std::set<Instruction*> smem_clause;
 
-      program->statistics[aco_statistic_instructions] += block.instructions.size();
+      program->statistics.instrs += block.instructions.size();
 
       for (aco_ptr<Instruction>& instr : block.instructions) {
          const bool is_branch =
             instr->isSOPP() && instr_info.classes[(int)instr->opcode] == instr_class::branch;
          if (is_branch)
-            program->statistics[aco_statistic_branches]++;
+            program->statistics.branches++;
 
          if (instr->isVALU() || instr->isVINTRP())
-            program->statistics[aco_statistic_valu]++;
+            program->statistics.valu++;
          if (instr->isSALU() && !instr->isSOPP() &&
              instr_info.classes[(int)instr->opcode] != instr_class::waitcnt)
-            program->statistics[aco_statistic_salu]++;
+            program->statistics.salu++;
          if (instr->isVOPD())
-            program->statistics[aco_statistic_vopd]++;
+            program->statistics.vopd++;
 
          if ((instr->isVMEM() || instr->isScratch() || instr->isGlobal()) &&
              !instr->operands.empty()) {
             if (std::none_of(vmem_clause.begin(), vmem_clause.end(),
                              [&](Instruction* other)
                              { return should_form_clause(instr.get(), other); }))
-               program->statistics[aco_statistic_vmem_clauses]++;
+               program->statistics.vclause++;
             vmem_clause.insert(instr.get());
 
-            program->statistics[aco_statistic_vmem]++;
+            program->statistics.vmem++;
          } else {
             vmem_clause.clear();
          }
@@ -516,10 +515,10 @@ collect_preasm_stats(Program* program)
             if (std::none_of(smem_clause.begin(), smem_clause.end(),
                              [&](Instruction* other)
                              { return should_form_clause(instr.get(), other); }))
-               program->statistics[aco_statistic_smem_clauses]++;
+               program->statistics.sclause++;
             smem_clause.insert(instr.get());
 
-            program->statistics[aco_statistic_smem]++;
+            program->statistics.smem++;
          } else {
             smem_clause.clear();
          }
@@ -599,8 +598,8 @@ collect_preasm_stats(Program* program)
          program->workgroup_size / (double)align(program->workgroup_size, program->wave_size);
    wave64_per_cycle *= max_utilization;
 
-   program->statistics[aco_statistic_latency] = round(latency);
-   program->statistics[aco_statistic_inv_throughput] = round(1.0 / wave64_per_cycle);
+   program->statistics.latency = round(latency);
+   program->statistics.invthroughput = round(1.0 / wave64_per_cycle);
 
    if (debug_flags & DEBUG_PERF_INFO) {
       aco_print_program(program, stderr, print_no_ssa | print_perf_info);
@@ -625,7 +624,7 @@ collect_preasm_stats(Program* program)
 void
 collect_postasm_stats(Program* program, const std::vector<uint32_t>& code)
 {
-   program->statistics[aco_statistic_hash] = util_hash_crc32(code.data(), code.size() * 4);
+   program->statistics.hash = util_hash_crc32(code.data(), code.size() * 4);
 }
 
 Instruction_cycle_info

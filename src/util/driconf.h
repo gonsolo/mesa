@@ -611,6 +611,10 @@
    DRI_CONF_OPT_B(pan_enable_vertex_pipeline_stores_atomics, def, \
                   "Enable vertexPipelineStoresAndAtomics on v13+ (This cannot work on older generation because of speculative behaviors around vertices)")
 
+#define DRI_CONF_PAN_FORCE_ENABLE_SHADER_ATOMICS(def) \
+   DRI_CONF_OPT_B(pan_force_enable_shader_atomics, def, \
+                  "Enable fragmentStoresAndAtomics and vertexPipelineStoresAndAtomics on any architecture. (This may not work reliably and is for debug purposes only!)")
+
 /**
  * \brief Turnip specific configuration options
  */
@@ -642,10 +646,6 @@
 #define DRI_CONF_HK_DISABLE_BORDER_EMULATION(def) \
    DRI_CONF_OPT_B(hk_disable_border_emulation, def, \
                   "Disable custom border colour emulation")
-
-#define DRI_CONF_HK_DISABLE_RGBA4_BORDER_COLOR_WORKAROUND(def) \
-   DRI_CONF_OPT_B(hk_disable_rgba4_border_color_workaround, def, \
-                  "Use hardware opaque_black, breaking certain RGBA4 formats")
 
 #define DRI_CONF_HK_FAKE_MINMAX(def) \
    DRI_CONF_OPT_B(hk_fake_minmax, def, \
@@ -755,10 +755,6 @@
    DRI_CONF_OPT_B(radv_rt_wave64, def, \
                   "Force wave64 in RT shaders")
 
-#define DRI_CONF_RADV_DISABLE_DEDICATED_SPARSE_QUEUE(def) \
-   DRI_CONF_OPT_B(radv_disable_dedicated_sparse_queue, def, \
-                  "Disables the dedicated sparse queue. This replaces radv_legacy_sparse_binding as a compatible drirc workaround for games that might not expect a separate SPARSE queue")
-
 /**
  * Overrides for forcing re-compilation of pipelines when RADV_BUILD_ID_OVERRIDE is enabled.
  * These need to be bumped every time a compiler bugfix is backported (up to 8 shader
@@ -792,13 +788,13 @@
    DRI_CONF_OPT_B(radv_enable_float16_gfx8, def, \
                   "Expose float16 on GFX8, where it's supported but usually not beneficial.")
 
-#define DRI_CONF_RADV_FORCE_64K_SPARSE_ALIGNMENT(def) \
-   DRI_CONF_OPT_B(radv_force_64k_sparse_alignment, def, \
-                  "Force the alignment of sparse buffers to 64KiB")
-
 #define DRI_CONF_RADV_DISABLE_HIZ_HIS_GFX12(def) \
    DRI_CONF_OPT_B(radv_disable_hiz_his_gfx12, def, \
                   "Disable HiZ/HiS on GFX12 (RDNA4) to workaround a hw bug that causes random GPU hangs")
+
+#define DRI_CONF_RADV_COOPERATIVE_MATRIX2_NV(def) \
+   DRI_CONF_OPT_B(radv_cooperative_matrix2_nv, def, \
+                  "Expose VK_NV_cooperative_matrix2 on supported hardware.")
 
 /**
  * \brief ANV specific configuration options
@@ -816,6 +812,10 @@
    DRI_CONF_OPT_B(anv_assume_full_subgroups_with_shared_memory, def, \
                   "Allow assuming full subgroups requirement for shaders using shared memory even when it's not specified explicitly")
 
+#define DRI_CONF_ANV_EMULATE_READ_WITHOUT_FORMAT(def) \
+   DRI_CONF_OPT_B(anv_emulate_read_without_format, def, \
+                  "Emulate shaderStorageImageReadWithoutFormat with shader conversions")
+
 #define DRI_CONF_ANV_SAMPLE_MASK_OUT_OPENGL_BEHAVIOUR(def) \
    DRI_CONF_OPT_B(anv_sample_mask_out_opengl_behaviour, def, \
                   "Ignore sample mask out when having single sampled target")
@@ -823,15 +823,6 @@
 #define DRI_CONF_ANV_FORCE_FILTER_ADDR_ROUNDING(def) \
    DRI_CONF_OPT_B(anv_force_filter_addr_rounding, def, \
                   "Force min/mag filter address rounding to be enabled even for NEAREST sampling")
-
-#define DRI_CONF_ANV_MESH_CONV_PRIM_ATTRS_TO_VERT_ATTRS(def) \
-   DRI_CONF_OPT_E(anv_mesh_conv_prim_attrs_to_vert_attrs, def, -2, 2, \
-                  "Apply workaround for gfx12.5 per-prim attribute corruption HW bug", \
-                  DRI_CONF_ENUM(-2, "enable attribute conversion and vertex duplication ONLY if needed") \
-                  DRI_CONF_ENUM(-1, "enable attribute conversion ONLY if needed") \
-                  DRI_CONF_ENUM(0,  "disable workaround") \
-                  DRI_CONF_ENUM(1,  "enable attribute conversion ALWAYS") \
-                  DRI_CONF_ENUM(2,  "enable attribute conversion and vertex duplication ALWAYS") )
 
 #define DRI_CONF_ANV_FP64_WORKAROUND_ENABLED(def) \
    DRI_CONF_OPT_B(fp64_workaround_enabled, def, \

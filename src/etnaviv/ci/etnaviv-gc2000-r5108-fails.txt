@@ -4,9 +4,6 @@ dEQP-GLES2.functional.clipping.line.wide_line_clip_viewport_center,Fail
 dEQP-GLES2.functional.clipping.line.wide_line_clip_viewport_corner,Fail
 dEQP-GLES2.functional.clipping.triangle_vertex.clip_three.clip_pos_y_pos_z_and_neg_x_neg_y_pos_z_and_pos_x_pos_y_neg_z,Fail
 dEQP-GLES2.functional.draw.draw_elements.triangle_fan.single_attribute,Fail
-dEQP-GLES2.functional.fbo.render.color_clear.rbo_rgba4_depth_component16,Fail
-dEQP-GLES2.functional.fbo.render.color_clear.rbo_rgba4,Fail
-dEQP-GLES2.functional.fbo.render.color_clear.rbo_rgba4_stencil_index8,Fail
 dEQP-GLES2.functional.fbo.render.resize.rbo_rgb565_depth_component16,Fail
 dEQP-GLES2.functional.fbo.render.resize.rbo_rgb565,Fail
 dEQP-GLES2.functional.fbo.render.resize.rbo_rgb565_stencil_index8,Fail
@@ -121,14 +118,8 @@ dEQP-GLES2.functional.texture.vertex.cube.filtering.nearest_mipmap_linear_linear
 dEQP-GLES2.functional.texture.vertex.cube.filtering.nearest_mipmap_nearest_linear_clamp,Fail
 dEQP-GLES2.functional.texture.vertex.cube.filtering.nearest_mipmap_nearest_linear_mirror,Fail
 dEQP-GLES2.functional.texture.vertex.cube.filtering.nearest_mipmap_nearest_linear_repeat,Fail
-fast_color_clear@fcc-read-after-clear blit tex,Fail
-fast_color_clear@fcc-read-after-clear copy rb,Fail
-fast_color_clear@fcc-read-after-clear copy tex,Fail
 
 shaders@glsl-fs-pointcoord,Fail
-
-# segfault
-shaders@glsl-kwin-blur-1,Crash
 
 shaders@glsl-uniform-interstage-limits@subdivide 5- statechanges,Timeout
 shaders@glsl-uniform-interstage-limits@subdivide 5,Timeout
@@ -263,8 +254,6 @@ spec@ext_direct_state_access@textures,Crash
 
 spec@ext_framebuffer_blit@fbo-blit-check-limits,Fail
 
-spec@ext_framebuffer_object@fbo-copyteximage,Fail
-spec@ext_framebuffer_object@fbo-copyteximage-simple,Fail
 spec@ext_framebuffer_object@fbo-cubemap,Fail
 spec@ext_framebuffer_object@fbo-readpixels,Fail
 spec@ext_framebuffer_object@fbo-stencil-gl_stencil_index16-blit,Fail
@@ -414,8 +403,6 @@ spec@khr_texture_compression_astc@miptree-gles srgb-fp,Fail
 spec@khr_texture_compression_astc@miptree-gl srgb-fp,Fail
 spec@khr_texture_compression_astc@miptree-gl srgb-fp@sRGB decode full precision,Fail
 spec@nv_conditional_render@copypixels,Fail
-spec@nv_conditional_render@copyteximage,Fail
-spec@nv_conditional_render@copytexsubimage,Fail
 spec@nv_conditional_render@dlist,Fail
 spec@nv_conditional_render@drawpixels,Fail
 spec@nv_conditional_render@vertex_array,Fail
@@ -560,7 +547,6 @@ spec@!opengl 1.1@texwrap formats bordercolor-swizzled@GL_RGBA4- swizzled- border
 spec@!opengl 1.1@texwrap formats bordercolor-swizzled@GL_RGBA8- swizzled- border color only,Fail
 spec@!opengl 1.1@two-sided-lighting,Fail
 spec@!opengl 1.1@user-clip,Fail
-spec@!opengl 1.2@copyteximage 3d,Fail
 spec@!opengl 1.2@lodclamp-between-max,Fail
 spec@!opengl 1.2@texwrap 3d bordercolor,Fail
 spec@!opengl 1.2@texwrap 3d bordercolor@GL_RGBA8- border color only,Fail
@@ -657,6 +643,3 @@ spec@glsl-1.10@execution@variable-indexing@fs-input-array-vec4-index-rd,Fail
 
 # uprev Piglit in Mesa
 spec@!opengl 1.1@push-pop-color-material,Fail
-spec@ext_framebuffer_multisample@clip-and-scissor-blit 2 normal,Fail
-spec@ext_framebuffer_multisample@clip-and-scissor-blit 4 normal,Fail
-

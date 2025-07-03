@@ -1296,18 +1296,23 @@ preprocess_shader(const struct gl_constants *consts,
    }
 
    /* Set the next shader stage hint for VS and TES. */
-   if (!nir->info.separate_shader &&
-       (nir->info.stage == MESA_SHADER_VERTEX ||
-        nir->info.stage == MESA_SHADER_TESS_EVAL)) {
+   if (!nir->info.separate_shader) {
+      unsigned prev_stages = shader_program->data->linked_stages &
+                             BITFIELD_MASK(prog->info.stage);
+      unsigned next_stages = shader_program->data->linked_stages &
+                             ~BITFIELD_MASK(prog->info.stage + 1);
 
-      unsigned prev_stages = (1 << (prog->info.stage + 1)) - 1;
-      unsigned stages_mask =
-         ~prev_stages & shader_program->data->linked_stages;
+      if (prev_stages) {
+         nir->info.prev_stage = util_last_bit(prev_stages) - 1;
 
-      nir->info.next_stage = stages_mask ?
-         (gl_shader_stage) u_bit_scan(&stages_mask) : MESA_SHADER_FRAGMENT;
-   } else {
-      nir->info.next_stage = MESA_SHADER_FRAGMENT;
+         if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+            nir->info.prev_stage_has_xfb =
+               shader_program->TransformFeedback.NumVarying > 0;
+         }
+      }
+
+      if (next_stages)
+         nir->info.next_stage = u_bit_scan(&next_stages);
    }
 
    prog->skip_pointsize_xfb = !(nir->info.outputs_written & VARYING_BIT_PSIZ);
@@ -1321,7 +1326,7 @@ preprocess_shader(const struct gl_constants *consts,
        (nir->info.outputs_written & (VARYING_BIT_CLIP_DIST0 | VARYING_BIT_CLIP_DIST1)))
       NIR_PASS(_, nir, gl_nir_zero_initialize_clip_distance);
 
-   NIR_PASS(_, nir, nir_lower_io_to_temporaries,
+   NIR_PASS(_, nir, nir_lower_io_vars_to_temporaries,
             nir_shader_get_entrypoint(nir), true,
             options->lower_all_io_to_temps ||
             nir->info.stage == MESA_SHADER_VERTEX ||
@@ -1422,7 +1427,7 @@ prelink_lowering(const struct gl_constants *consts,
 
       if (!nir->options->compact_arrays) {
          NIR_PASS(_, nir, nir_lower_clip_cull_distance_to_vec4s);
-         NIR_PASS(_, nir, nir_vectorize_tess_levels);
+         NIR_PASS(_, nir, nir_lower_tess_level_array_vars_to_vec);
       }
 
       /* Combine clip and cull outputs into one array and set:
@@ -1431,7 +1436,7 @@ prelink_lowering(const struct gl_constants *consts,
        */
       if (!(nir->options->io_options &
             nir_io_separate_clip_cull_distance_arrays))
-         NIR_PASS(_, nir, nir_lower_clip_cull_distance_arrays);
+         NIR_PASS(_, nir, nir_lower_clip_cull_distance_array_vars);
    }
 
    return true;
@@ -1597,10 +1602,11 @@ gl_nir_link_spirv(const struct gl_constants *consts,
       }
    }
 
+   gl_nir_link_assign_xfb_resources(consts, prog);
+
    if (!prelink_lowering(consts, exts, prog, linked_shader, num_shaders))
       return false;
 
-   gl_nir_link_assign_xfb_resources(consts, prog);
    gl_nir_lower_optimize_varyings(consts, prog, true);
 
    for (unsigned i = 0; i < MESA_SHADER_STAGES; i++) {

@@ -113,11 +113,11 @@ visit_tex(isel_context* ctx, nir_tex_instr* instr)
    bool a16 = false, g16 = false;
 
    int coord_idx = nir_tex_instr_src_index(instr, nir_tex_src_coord);
-   if (coord_idx > 0)
+   if (coord_idx >= 0)
       a16 = instr->src[coord_idx].src.ssa->bit_size == 16;
 
    int ddx_idx = nir_tex_instr_src_index(instr, nir_tex_src_ddx);
-   if (ddx_idx > 0)
+   if (ddx_idx >= 0)
       g16 = instr->src[ddx_idx].src.ssa->bit_size == 16;
 
    for (unsigned i = 0; i < instr->num_srcs; i++) {
@@ -298,11 +298,16 @@ visit_tex(isel_context* ctx, nir_tex_instr* instr)
    }
 
    /* Build tex instruction */
-   unsigned dmask = nir_def_components_read(&instr->def) & 0xf;
+   unsigned dmask = nir_def_components_read(&instr->def);
+   /* Mask out the bit set for the sparse info. */
+   if (instr->is_sparse)
+      dmask &= ~(1u << (instr->def.num_components - 1));
    if (instr->sampler_dim == GLSL_SAMPLER_DIM_BUF)
       dmask = u_bit_consecutive(0, util_last_bit(dmask));
+   /* Set the 5th bit for the sparse code. */
    if (instr->is_sparse)
       dmask = MAX2(dmask, 1) | 0x10;
+
    bool d16 = instr->def.bit_size == 16;
    Temp dst = get_ssa_temp(ctx, &instr->def);
    Temp tmp_dst = dst;
@@ -706,6 +711,13 @@ visit_tex(isel_context* ctx, nir_tex_instr* instr)
                               val[3]);
    }
    unsigned mask = instr->op == nir_texop_tg4 ? (instr->is_sparse ? 0x1F : 0xF) : dmask;
+
+   /* Move the bit for the sparse residency code from the 5th bit to the last component. */
+   if (mask & 0x10) {
+      mask &= ~0x10;
+      mask |= 1u << (instr->def.num_components - 1);
+   }
+
    expand_vector(ctx, tmp_dst, dst, instr->def.num_components, mask);
 }
 
@@ -1358,6 +1370,7 @@ select_program_merged(isel_context& ctx, const unsigned shader_count, nir_shader
 {
    if_context ic_merged_wave_info;
    const bool ngg_gs = ctx.stage.hw == AC_HW_NEXT_GEN_GEOMETRY_SHADER && ctx.stage.has(SWStage::GS);
+   const bool hs = ctx.stage.hw == AC_HW_HULL_SHADER;
 
    for (unsigned i = 0; i < shader_count; i++) {
       nir_shader* nir = shaders[i];
@@ -1378,9 +1391,9 @@ select_program_merged(isel_context& ctx, const unsigned shader_count, nir_shader
 
       /* See if we need to emit a check of the merged wave info SGPR. */
       const bool check_merged_wave_info =
-         ctx.tcs_in_out_eq ? i == 0 : (shader_count >= 2 && !empty_shader && !(ngg_gs && i == 1));
-      const bool endif_merged_wave_info =
-         ctx.tcs_in_out_eq ? i == 1 : (check_merged_wave_info && !(ngg_gs && i == 1));
+         ctx.tcs_in_out_eq ? i == 0
+                           : (shader_count >= 2 && !empty_shader && ((!ngg_gs && !hs) || i != 1));
+      const bool endif_merged_wave_info = ctx.tcs_in_out_eq ? i == 1 : check_merged_wave_info;
 
       /* Skip s_barrier from TCS when VS outputs are not stored in the LDS. */
       const bool tcs_skip_barrier =

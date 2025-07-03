@@ -893,6 +893,7 @@ struct pipe_caps {
    bool generate_mipmap;
    bool string_marker;
    bool surface_reinterpret_blocks;
+   bool compressed_surface_reinterpret_blocks_layered;
    bool query_buffer_object;
    bool query_memory_info;
    bool framebuffer_no_attachment;
@@ -909,6 +910,7 @@ struct pipe_caps {
    bool int64;
    bool tgsi_tex_txf_lz;
    bool shader_clock;
+   bool shader_realtime_clock;
    bool polygon_mode_fill_rectangle;
    bool shader_ballot;
    bool tes_layer_viewport;

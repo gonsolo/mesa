@@ -206,6 +206,7 @@ struct radeon_info {
    uint32_t vcn_dec_version;
    uint32_t vcn_enc_major_version;
    uint32_t vcn_enc_minor_version;
+   uint32_t vcn_fw_revision;
    struct video_caps_info {
       struct video_codec_cap {
          uint32_t valid;
@@ -220,6 +221,7 @@ struct radeon_info {
    enum vcn_version vcn_ip_version;
    enum sdma_version sdma_ip_version;
    enum rt_version rt_ip_version;
+   enum vpe_version vpe_ip_version;
 
    /* Kernel & winsys capabilities. */
    uint32_t drm_major; /* version */
@@ -232,7 +234,7 @@ struct radeon_info {
    bool has_syncobj;
    bool has_timeline_syncobj;
    bool has_fence_to_handle;
-   bool has_local_buffers;
+   bool has_vm_always_valid;
    bool has_bo_metadata;
    bool has_eqaa_surface_allocator;
    bool has_sparse_vm_mappings;

@@ -2,7 +2,7 @@
 # shellcheck disable=SC2086 # we want word splitting
 set -uex
 
-uncollapsed_section_start piglit "Building piglit"
+section_start piglit "Building piglit"
 
 # When changing this file, you need to bump the following
 # .gitlab-ci/image-tags.yml tags:
@@ -13,7 +13,7 @@ uncollapsed_section_start piglit "Building piglit"
 # setting up the environment variables locally
 ci_tag_build_time_check "PIGLIT_TAG"
 
-REV="685ea49b47ae52560975cfcdb0ea0d4d27fead16"
+REV="a0a27e528f643dfeb785350a1213bfff09681950"
 
 git clone https://gitlab.freedesktop.org/mesa/piglit.git --single-branch --no-checkout /piglit
 pushd /piglit

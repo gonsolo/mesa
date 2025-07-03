@@ -83,8 +83,16 @@ pan_afrc_get_format_info(enum pipe_format format)
    const struct util_format_description *desc = util_format_description(format);
    struct pan_afrc_format_info info = {0};
 
+   /* No AFRC(compressed) */
+   if (util_format_is_compressed(format))
+      return info;
+
    /* No AFRC(ZS). */
    if (desc->colorspace == UTIL_FORMAT_COLORSPACE_ZS)
+      return info;
+
+   /* No AFRC(YUV) yet. */
+   if (pan_format_is_yuv(format))
       return info;
 
    unsigned bpc = 0;
@@ -97,19 +105,9 @@ pan_afrc_get_format_info(enum pipe_format format)
 
    info.bpc = bpc;
 
-   if (desc->colorspace == UTIL_FORMAT_COLORSPACE_YUV) {
-      if (desc->layout != UTIL_FORMAT_LAYOUT_SUBSAMPLED)
-         info.ichange_fmt = PAN_AFRC_ICHANGE_FORMAT_YUV444;
-      else if (util_format_is_subsampled_422(format))
-         info.ichange_fmt = PAN_AFRC_ICHANGE_FORMAT_YUV422;
-      else
-         info.ichange_fmt = PAN_AFRC_ICHANGE_FORMAT_YUV420;
-   } else {
-      assert(desc->colorspace == UTIL_FORMAT_COLORSPACE_RGB ||
-             desc->colorspace == UTIL_FORMAT_COLORSPACE_SRGB);
-      info.ichange_fmt = PAN_AFRC_ICHANGE_FORMAT_RAW;
-   }
-
+   assert(desc->colorspace == UTIL_FORMAT_COLORSPACE_RGB ||
+          desc->colorspace == UTIL_FORMAT_COLORSPACE_SRGB);
+   info.ichange_fmt = PAN_AFRC_ICHANGE_FORMAT_RAW;
    info.num_planes = util_format_get_num_planes(format);
    info.num_comps = util_format_get_nr_components(format);
    return info;
@@ -165,21 +163,17 @@ pan_afrc_clump_get_nr_components(enum pipe_format format, bool scan)
 }
 
 static inline bool
-pan_format_supports_afrc(enum pipe_format format)
+pan_afrc_supports_format(enum pipe_format format)
 {
-   const struct util_format_description *desc = util_format_description(format);
-   int c = util_format_get_first_non_void_channel(desc->format);
+   struct pan_afrc_format_info finfo = pan_afrc_get_format_info(format);
 
-   if (c == -1)
-      return false;
-
-   return desc->is_array && desc->channel[c].size == 8;
+   return finfo.num_comps != 0;
 }
 
 static inline unsigned
 pan_afrc_query_rates(enum pipe_format format, unsigned max, uint32_t *rates)
 {
-   if (!pan_format_supports_afrc(format))
+   if (!pan_afrc_supports_format(format))
       return 0;
 
    unsigned clump_comps = pan_afrc_clump_get_nr_components(format, false);
@@ -222,7 +216,7 @@ static inline unsigned
 pan_afrc_get_modifiers(enum pipe_format format, uint32_t rate, unsigned max,
                        uint64_t *modifiers)
 {
-   if (!pan_format_supports_afrc(format))
+   if (!pan_afrc_supports_format(format))
       return 0;
 
    /* For now, the number of components in a clump is always the same no
@@ -278,7 +272,7 @@ pan_afrc_block_size_from_modifier(uint64_t modifier)
 static inline uint32_t
 pan_afrc_get_rate(enum pipe_format format, uint64_t modifier)
 {
-   if (!drm_is_afrc(modifier) || !pan_format_supports_afrc(format))
+   if (!drm_is_afrc(modifier) || !pan_afrc_supports_format(format))
       return PAN_AFRC_RATE_NONE;
 
    bool scan = pan_afrc_is_scan(modifier);

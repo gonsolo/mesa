@@ -1222,6 +1222,16 @@ nir_umod_imm(nir_builder *build, nir_def *x, uint64_t y)
 }
 
 static inline nir_def *
+nir_align_imm(nir_builder *b, nir_def *x, uint64_t align)
+{
+   if (align == 1)
+      return x;
+
+   assert(util_is_power_of_two_nonzero64(align));
+   return nir_iand_imm(b, nir_iadd_imm(b, x, align - 1), ~(align - 1));
+}
+
+static inline nir_def *
 nir_ibfe_imm(nir_builder *build, nir_def *x, uint32_t offset, uint32_t size)
 {
    return nir_ibfe(build, x, nir_imm_int(build, offset), nir_imm_int(build, size));
@@ -2135,23 +2145,6 @@ DEF_DERIV(ddx_coarse)
 DEF_DERIV(ddy)
 DEF_DERIV(ddy_fine)
 DEF_DERIV(ddy_coarse)
-
-/*
- * Find a texture source, remove it, and return its nir_def. If the texture
- * source does not exist, return NULL. This is useful for texture lowering pass
- * that consume their input sources and produce a new lowered source.
- */
-static inline nir_def *
-nir_steal_tex_src(nir_tex_instr *tex, nir_tex_src_type type_)
-{
-   int idx = nir_tex_instr_src_index(tex, type_);
-   if (idx < 0)
-      return NULL;
-
-   nir_def *ssa = tex->src[idx].src.ssa;
-   nir_tex_instr_remove_src(tex, idx);
-   return ssa;
-}
 
 static inline nir_def *
 nir_tex_deref(nir_builder *b, nir_deref_instr *t, nir_deref_instr *s,

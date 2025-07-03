@@ -7,6 +7,7 @@
 
 #include "agx_compile.h"
 #include "asahi/clc/asahi_clc.h"
+#include "asahi/isa/disasm.h"
 #include "asahi/layout/layout.h"
 #include "asahi/lib/agx_abi.h"
 #include "compiler/nir/nir_builder.h"
@@ -145,9 +146,12 @@ gather_cf(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
    /* First handle frag coord loads */
    struct coefficient_info *info = data;
-   if (intr->intrinsic == nir_intrinsic_load_frag_coord_zw) {
-      BITSET_SET(info->noperspective,
-                 VARYING_SLOT_POS + nir_intrinsic_component(intr));
+   if (intr->intrinsic == nir_intrinsic_load_frag_coord_z) {
+      BITSET_SET(info->noperspective, VARYING_SLOT_POS + 2);
+      return false;
+   }
+   if (intr->intrinsic == nir_intrinsic_load_frag_coord_w) {
+      BITSET_SET(info->noperspective, VARYING_SLOT_POS + 3);
       return false;
    }
 
@@ -1379,9 +1383,14 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
             agx_get_sr(b, 16, AGX_SR_THREAD_POSITION_IN_GRID_Y),
          });
 
-   case nir_intrinsic_load_frag_coord_zw: {
-      agx_index cf = agx_get_cf(b->shader, VARYING_SLOT_POS,
-                                nir_intrinsic_component(instr));
+   case nir_intrinsic_load_frag_coord_z: {
+      agx_index cf = agx_get_cf(b->shader, VARYING_SLOT_POS, 2);
+
+      return agx_iter_to(b, dst, cf, agx_zero(), 1, AGX_INTERPOLATION_CENTER);
+   }
+
+   case nir_intrinsic_load_frag_coord_w: {
+      agx_index cf = agx_get_cf(b->shader, VARYING_SLOT_POS, 3);
 
       return agx_iter_to(b, dst, cf, agx_zero(), 1, AGX_INTERPOLATION_CENTER);
    }
@@ -3340,6 +3349,14 @@ lower_bit_size_callback(const nir_instr *instr, UNUSED void *_)
        * implemented natively.
        */
       nir_alu_instr *alu = nir_instr_as_alu(instr);
+
+      switch (alu->op) {
+      case nir_op_bitfield_reverse:
+         return alu->def.bit_size < 32 ? 32 : 0;
+      default:
+         break;
+      }
+
       if (alu->def.bit_size == 8 && !is_conversion_to_8bit(alu->op))
          return 16;
       else if (alu->def.bit_size == 1 && alu->src[0].src.ssa->bit_size == 8)
@@ -3647,8 +3664,41 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       }
    }
 
-   ralloc_free(ctx);
+   /*
+    * Disassemble if the environment variable is set. Also disassemble to
+    * /dev/null in debug builds as a smoke test - a legally encoded shader
+    * should not hit any disassembler errors.
+    */
+   bool dump_shaders = agx_should_dump(nir, AGX_DBG_SHADERS);
+#ifndef NDEBUG
+   bool selftest = !dump_shaders;
+#else
+   bool selftest = false;
+#endif
 
+   if (dump_shaders || selftest) {
+      FILE *fp = selftest ? fopen("/dev/null", "w") : stdout;
+      bool errors =
+         agx2_disassemble(binary->data + offset, binary->size - offset, fp);
+
+      if (errors) {
+         /* In a self-test, disassemble again to get something the user can look
+          * at to figure out what went wrong.
+          */
+         if (selftest) {
+            agx2_disassemble(binary->data + offset, binary->size - offset,
+                             stderr);
+         }
+
+         unreachable("Disassembly error hit.");
+      }
+
+      if (selftest) {
+         fclose(fp);
+      }
+   }
+
+   ralloc_free(ctx);
    return offset;
 }
 
@@ -3723,16 +3773,6 @@ agx_preprocess_nir(nir_shader *nir)
    /* Clean up deref gunk after lowering I/O */
    NIR_PASS(_, nir, nir_opt_dce);
 
-   /* Runs before we lower away idiv, to work at all. But runs after lowering
-    * textures, since the cube map array lowering generates division by 6.
-    */
-   NIR_PASS(_, nir, nir_opt_idiv_const, 16);
-
-   nir_lower_idiv_options idiv_options = {
-      .allow_fp16 = true,
-   };
-
-   NIR_PASS(_, nir, nir_lower_idiv, &idiv_options);
    NIR_PASS(_, nir, nir_lower_frexp);
    NIR_PASS(_, nir, nir_lower_alu);
    NIR_PASS(_, nir, nir_lower_alu_to_scalar, NULL, NULL);
@@ -3752,6 +3792,16 @@ agx_preprocess_nir(nir_shader *nir)
     */
    agx_optimize_loop_nir(nir);
 
+   /* Lower idiv after an optimization loop so we can constant fold more before
+    * nir_opt_idiv_const.
+    */
+   NIR_PASS(_, nir, nir_opt_idiv_const, 16);
+
+   nir_lower_idiv_options idiv_options = {
+      .allow_fp16 = true,
+   };
+
+   NIR_PASS(_, nir, nir_lower_idiv, &idiv_options);
    NIR_PASS(_, nir, nir_opt_deref);
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
 

@@ -12,13 +12,23 @@
 
 #define PANVK_MAX_PLANES 3
 
+struct panvk_device_memory;
+
+/* Right now, planar YUV images are treated as N different images, hence the 1:1
+ * association between pan_image and pan_image_plane, but this can be optimized
+ * once planar YUV support is hooked up. */
+struct panvk_image_plane {
+   struct pan_image image;
+   struct pan_image_plane plane;
+};
+
 struct panvk_image {
    struct vk_image vk;
 
-   struct pan_kmod_bo *bo;
+   struct panvk_device_memory *mem;
 
    uint8_t plane_count;
-   struct pan_image planes[PANVK_MAX_PLANES];
+   struct panvk_image_plane planes[PANVK_MAX_PLANES];
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_image, vk.base, VkImage,

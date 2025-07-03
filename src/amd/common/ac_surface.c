@@ -1129,7 +1129,7 @@ static int gfx6_surface_settings(ADDR_HANDLE addrlib, const struct radeon_info *
          return r;
 
       assert(AddrBaseSwizzleOut.tileSwizzle <=
-             u_bit_consecutive(0, sizeof(surf->tile_swizzle) * 8));
+             BITFIELD_MASK(sizeof(surf->tile_swizzle) * 8));
       surf->tile_swizzle = AddrBaseSwizzleOut.tileSwizzle;
    }
    return 0;
@@ -1691,7 +1691,7 @@ static int gfx6_compute_surface(ADDR_HANDLE addrlib, const struct radeon_info *i
          if (r != ADDR_OK)
             return r;
 
-         assert(xout.tileSwizzle <= u_bit_consecutive(0, sizeof(surf->tile_swizzle) * 8));
+         assert(xout.tileSwizzle <= BITFIELD_MASK(sizeof(surf->tile_swizzle) * 8));
          surf->fmask_tile_swizzle = xout.tileSwizzle;
       }
    }
@@ -1813,7 +1813,7 @@ static int gfx9_get_preferred_swizzle_mode(ADDR_HANDLE addrlib, const struct rad
    /* With PRT images we want to force 64 KiB block size so that the image
     * created is consistent with the format properties returned in Vulkan
     * independent of the image. */
-   if (sin.flags.prt) {
+   if (surf->flags & RADEON_SURF_PRT) {
       sin.forbiddenBlock.macroThin4KB = 1;
       sin.forbiddenBlock.macroThick4KB = 1;
       if (info->gfx_level >= GFX11) {
@@ -1821,6 +1821,9 @@ static int gfx9_get_preferred_swizzle_mode(ADDR_HANDLE addrlib, const struct rad
          sin.forbiddenBlock.gfx11.thick256KB = 1;
       }
       sin.forbiddenBlock.linear = 1;
+
+      if (in->numSamples > 1 && info->gfx_level >= GFX10)
+         assert(sin.flags.prt == 0);
    } else if (surf->flags & RADEON_SURF_PREFER_4K_ALIGNMENT) {
       sin.forbiddenBlock.macroThin64KB = 1;
       sin.forbiddenBlock.macroThick64KB = 1;
@@ -2260,7 +2263,7 @@ static int gfx9_compute_miptree(struct ac_addrlib *addrlib, const struct radeon_
          if (ret != ADDR_OK)
             return ret;
 
-         assert(xout.pipeBankXor <= u_bit_consecutive(0, sizeof(surf->tile_swizzle) * 8));
+         assert(xout.pipeBankXor <= BITFIELD_MASK(sizeof(surf->tile_swizzle) * 8));
          surf->tile_swizzle = xout.pipeBankXor;
 
          /* Gfx11 should shift it by 10 bits instead of 8, and drivers already shift it by 8 bits,
@@ -2462,7 +2465,7 @@ static int gfx9_compute_miptree(struct ac_addrlib *addrlib, const struct radeon_
             if (ret != ADDR_OK)
                return ret;
 
-            assert(xout.pipeBankXor <= u_bit_consecutive(0, sizeof(surf->fmask_tile_swizzle) * 8));
+            assert(xout.pipeBankXor <= BITFIELD_MASK(sizeof(surf->fmask_tile_swizzle) * 8));
             surf->fmask_tile_swizzle = xout.pipeBankXor;
          }
       }
@@ -2546,7 +2549,10 @@ static int gfx9_compute_surface(struct ac_addrlib *addrlib, const struct radeon_
    AddrSurfInfoIn.flags.texture = (is_color_surface && !(surf->flags & RADEON_SURF_NO_TEXTURE)) ||
                                   (surf->flags & RADEON_SURF_TC_COMPATIBLE_HTILE);
    AddrSurfInfoIn.flags.opt4space = 1;
-   AddrSurfInfoIn.flags.prt = (surf->flags & RADEON_SURF_PRT) != 0;
+   /* For GFX10+ MSAA PRT surface won't use the prt flag because it's not supported. */
+   AddrSurfInfoIn.flags.prt = (surf->flags & RADEON_SURF_PRT) != 0 &&
+                              (config->info.samples <= 1 || info->gfx_level < GFX10) &&
+                              is_color_surface;
 
    AddrSurfInfoIn.numMipLevels = config->info.levels;
    AddrSurfInfoIn.numSamples = MAX2(1, config->info.samples);
@@ -3305,7 +3311,7 @@ static bool gfx12_compute_miptree(struct ac_addrlib *addrlib, const struct radeo
       if (ret != ADDR_OK)
          return false;
 
-      assert(xout.pipeBankXor <= u_bit_consecutive(0, sizeof(surf->tile_swizzle) * 8 + 2));
+      assert(xout.pipeBankXor <= BITFIELD_MASK(sizeof(surf->tile_swizzle) * 8 + 2));
       surf->tile_swizzle = xout.pipeBankXor;
    }
 
@@ -3626,11 +3632,11 @@ void ac_surface_apply_bo_metadata(enum amd_gfx_level gfx_level, struct radeon_su
       surf->u.gfx9.swizzle_mode = AMDGPU_TILING_GET(tiling_flags, GFX12_SWIZZLE_MODE);
       surf->u.gfx9.color.dcc.max_compressed_block_size =
          AMDGPU_TILING_GET(tiling_flags, GFX12_DCC_MAX_COMPRESSED_BLOCK);
-      surf->u.gfx9.color.dcc_data_format =
+      surf->u.gfx9.dcc_data_format =
          AMDGPU_TILING_GET(tiling_flags, GFX12_DCC_DATA_FORMAT);
-      surf->u.gfx9.color.dcc_number_type =
+      surf->u.gfx9.dcc_number_type =
          AMDGPU_TILING_GET(tiling_flags, GFX12_DCC_NUMBER_TYPE);
-      surf->u.gfx9.color.dcc_write_compress_disable =
+      surf->u.gfx9.dcc_write_compress_disable =
          AMDGPU_TILING_GET(tiling_flags, GFX12_DCC_WRITE_COMPRESS_DISABLE);
       scanout = AMDGPU_TILING_GET(tiling_flags, GFX12_SCANOUT);
    } else if (gfx_level >= GFX9) {
@@ -3677,9 +3683,9 @@ void ac_surface_compute_bo_metadata(const struct radeon_info *info, struct radeo
       *tiling_flags |= AMDGPU_TILING_SET(GFX12_SWIZZLE_MODE, surf->u.gfx9.swizzle_mode);
       *tiling_flags |= AMDGPU_TILING_SET(GFX12_DCC_MAX_COMPRESSED_BLOCK,
                                          surf->u.gfx9.color.dcc.max_compressed_block_size);
-      *tiling_flags |= AMDGPU_TILING_SET(GFX12_DCC_NUMBER_TYPE, surf->u.gfx9.color.dcc_number_type);
-      *tiling_flags |= AMDGPU_TILING_SET(GFX12_DCC_DATA_FORMAT, surf->u.gfx9.color.dcc_data_format);
-      *tiling_flags |= AMDGPU_TILING_SET(GFX12_DCC_WRITE_COMPRESS_DISABLE, surf->u.gfx9.color.dcc_write_compress_disable);
+      *tiling_flags |= AMDGPU_TILING_SET(GFX12_DCC_NUMBER_TYPE, surf->u.gfx9.dcc_number_type);
+      *tiling_flags |= AMDGPU_TILING_SET(GFX12_DCC_DATA_FORMAT, surf->u.gfx9.dcc_data_format);
+      *tiling_flags |= AMDGPU_TILING_SET(GFX12_DCC_WRITE_COMPRESS_DISABLE, surf->u.gfx9.dcc_write_compress_disable);
       *tiling_flags |= AMDGPU_TILING_SET(GFX12_SCANOUT, (surf->flags & RADEON_SURF_SCANOUT) != 0);
    } else if (info->gfx_level >= GFX9) {
       uint64_t dcc_offset = 0;

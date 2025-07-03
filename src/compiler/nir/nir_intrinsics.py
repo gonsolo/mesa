@@ -335,6 +335,10 @@ index("unsigned", "neg_hi_amd")
 index("unsigned", "systolic_depth")
 index("unsigned", "repeat_count")
 
+# For Intel convert_cmat_intel intrinsic.
+index("struct glsl_cmat_description", "dst_cmat_desc")
+index("struct glsl_cmat_description", "src_cmat_desc")
+
 # For an AGX tilebuffer intrinsics, whether the coordinates are implicit or
 # explicit. Implicit coordinates are used in fragment shaders, explicit
 # coordinates in compute.
@@ -612,16 +616,12 @@ intrinsic("end_primitive", indices=[STREAM_ID])
 # Alternatively, drivers may implement these intrinsics, and use
 # nir_lower_gs_intrinsics() to convert from the basic intrinsics.
 #
-# These contain four additional unsigned integer sources:
+# These contain two additional unsigned integer sources:
 # 1. The total number of vertices emitted so far.
 # 2. The number of vertices emitted for the current primitive
 #    so far if we're counting, otherwise undef.
-# 3. The total number of primitives emitted so far.
-# 4. The total number of decomposed primitives emitted so far. This counts like
-#    the PRIMITIVES_GENERATED query: a triangle strip with 5 vertices is counted
-#    as 3 primitives (not 1).
-intrinsic("emit_vertex_with_counter", src_comp=[1, 1, 1, 1], indices=[STREAM_ID])
-intrinsic("end_primitive_with_counter", src_comp=[1, 1, 1, 1], indices=[STREAM_ID])
+intrinsic("emit_vertex_with_counter", src_comp=[1, 1], indices=[STREAM_ID])
+intrinsic("end_primitive_with_counter", src_comp=[1, 1], indices=[STREAM_ID])
 # Contains the final total vertex, primitive, and decomposed primitives counts
 # in the current GS thread.
 intrinsic("set_vertex_and_primitive_count", src_comp=[1, 1, 1], indices=[STREAM_ID])
@@ -884,7 +884,6 @@ intrinsic("task_payload_atomic",  src_comp=[1, 1], dest_comp=1, indices=[BASE, A
 intrinsic("global_atomic",  src_comp=[1, 1], dest_comp=1, indices=[ATOMIC_OP])
 intrinsic("global_atomic_2x32",  src_comp=[2, 1], dest_comp=1, indices=[ATOMIC_OP])
 intrinsic("global_atomic_amd",  src_comp=[1, 1, 1], dest_comp=1, indices=[BASE, ATOMIC_OP])
-intrinsic("global_atomic_ir3",  src_comp=[2, 1], dest_comp=1, indices=[BASE, ATOMIC_OP])
 intrinsic("global_atomic_agx",  src_comp=[1, 1, 1], dest_comp=1, indices=[ATOMIC_OP, SIGN_EXTEND])
 
 intrinsic("deref_atomic_swap",  src_comp=[-1, 1, 1], dest_comp=1, indices=[ACCESS, ATOMIC_OP])
@@ -894,7 +893,6 @@ intrinsic("task_payload_atomic_swap",  src_comp=[1, 1, 1], dest_comp=1, indices=
 intrinsic("global_atomic_swap",  src_comp=[1, 1, 1], dest_comp=1, indices=[ATOMIC_OP])
 intrinsic("global_atomic_swap_2x32",  src_comp=[2, 1, 1], dest_comp=1, indices=[ATOMIC_OP])
 intrinsic("global_atomic_swap_amd",  src_comp=[1, 1, 1, 1], dest_comp=1, indices=[BASE, ATOMIC_OP])
-intrinsic("global_atomic_swap_ir3",  src_comp=[2, 1, 1], dest_comp=1, indices=[BASE, ATOMIC_OP])
 intrinsic("global_atomic_swap_agx",  src_comp=[1, 1, 1, 1], dest_comp=1, indices=[ATOMIC_OP, SIGN_EXTEND])
 
 def system_value(name, dest_comp, indices=[], bit_sizes=[32], can_reorder=True):
@@ -906,10 +904,11 @@ def system_value(name, dest_comp, indices=[], bit_sizes=[32], can_reorder=True):
 system_value("frag_coord", 4)
 # 16-bit integer vec2 of the pixel X/Y in the framebuffer.
 system_value("pixel_coord", 2, bit_sizes=[16])
-# Scalar load of frag_coord Z/W components (component=2 for Z, component=3 for
-# W). Backends can lower frag_coord to pixel_coord + frag_coord_zw, in case
-# X/Y is available as an integer but Z/W requires interpolation.
-system_value("frag_coord_zw", 1, indices=[COMPONENT])
+# Scalar load of frag_coord Z/W component. Backends can lower frag_coord to
+# pixel_coord + frag_coord_z/w, in case X/Y is available as an integer but Z/W
+# requires interpolation.
+system_value("frag_coord_z", 1)
+system_value("frag_coord_w", 1)
 system_value("point_coord", 2)
 system_value("line_coord", 1)
 system_value("front_face", 1, bit_sizes=[1, 32])
@@ -1008,6 +1007,9 @@ system_value("xfb_size", 1, bit_sizes=[32], indices=[BASE])
 # indexed draw. This will be used so transform feedback can pull the gl_VertexID
 # from the index buffer.
 system_value("xfb_index_buffer", 1, bit_sizes=[32,64])
+
+# Currently active rasterization stream [0..3]
+system_value("rasterization_stream", 1)
 
 system_value("frag_size", 2)
 system_value("frag_invocation_count", 1)
@@ -1126,6 +1128,13 @@ barycentric("coord_at_offset", 3, [2])
 intrinsic("load_sample_pos_from_id", src_comp=[1], dest_comp=2,
           flags=[CAN_ELIMINATE, CAN_REORDER])
 
+# Load input attachment coordinate:
+#
+# Takes an input attachment index and returns an ivec with the position in
+# input attachment space in .xy and the input attachment array index in .z.
+intrinsic("load_input_attachment_coord", src_comp=[1], dest_comp=3,
+          bit_sizes=[32], flags=[CAN_ELIMINATE, CAN_REORDER])
+
 # Demote a subset of samples given by a specified sample mask. This acts like a
 # per-sample demote, or an inverted accumulating gl_SampleMask write.
 intrinsic("demote_samples", src_comp=[1])
@@ -1233,6 +1242,9 @@ load("constant", [1], [BASE, RANGE, ACCESS, ALIGN_MUL, ALIGN_OFFSET],
      [CAN_ELIMINATE, CAN_REORDER])
 # src[] = { address }.
 load("global", [1], [ACCESS, ALIGN_MUL, ALIGN_OFFSET], [CAN_ELIMINATE])
+# src[] = { base_address, offset, bound }.
+load("global_bounded", [1, 1, 1], [ACCESS, ALIGN_MUL, ALIGN_OFFSET],
+     [CAN_ELIMINATE])
 # src[] = { address }.
 load("global_2x32", [2], [ACCESS, ALIGN_MUL, ALIGN_OFFSET], [CAN_ELIMINATE])
 # src[] = { address }.
@@ -1352,7 +1364,7 @@ intrinsic("cmat_load", src_comp=[-1, -1, 1], indices=[MATRIX_LAYOUT])
 intrinsic("cmat_store", src_comp=[-1, -1, 1], indices=[MATRIX_LAYOUT])
 intrinsic("cmat_length", src_comp=[], dest_comp=1, indices=[CMAT_DESC], bit_sizes=[32])
 intrinsic("cmat_muladd", src_comp=[-1, -1, -1, -1], indices=[SATURATE, CMAT_SIGNED_MASK])
-intrinsic("cmat_convert", src_comp=[-1, -1], indices=[CMAT_SIGNED_MASK])
+intrinsic("cmat_convert", src_comp=[-1, -1], indices=[SATURATE, CMAT_SIGNED_MASK])
 intrinsic("cmat_unary_op", src_comp=[-1, -1], indices=[ALU_OP])
 intrinsic("cmat_binary_op", src_comp=[-1, -1, -1], indices=[ALU_OP])
 intrinsic("cmat_scalar_op", src_comp=[-1, -1, -1], indices=[ALU_OP])
@@ -1360,6 +1372,33 @@ intrinsic("cmat_bitcast", src_comp=[-1, -1])
 intrinsic("cmat_extract", src_comp=[-1, 1], dest_comp=1)
 intrinsic("cmat_insert", src_comp=[-1, 1, -1, 1])
 intrinsic("cmat_copy", src_comp=[-1, -1])
+intrinsic("cmat_transpose", src_comp=[-1, -1])
+
+# Select an output vertex in a poly GS. Takes the stream-local vertex ID.
+intrinsic("select_vertex_poly", src_comp=[1], indices=[STREAM_ID])
+
+# Emit a primitive (a point list, a line strip, or a triangle strip).
+# Sources: (index offset, first vertex, number of vertices, # of XFB primitives before).
+intrinsic("emit_primitive_poly", src_comp=[1, 1, 1, 1], indices=[STREAM_ID])
+
+# mesa_prim for the input topology (in a geometry shader)
+system_value("input_topology_poly", 1)
+
+# Pointer to the buffer passing outputs VS->TCS, VS->GS, or TES->GS linkage.
+system_value("vs_output_buffer_poly", 1, bit_sizes=[64])
+
+# Mask of VS->TCS, VS->GS, or TES->GS outputs. This is modelled as a sysval
+# so it can be dynamic with shader objects or constant folded with monolithic.
+system_value("vs_outputs_poly", 1, bit_sizes=[64])
+
+# Address of state for poly input assembly lowering for geometry/tessellation
+system_value("input_assembly_buffer_poly", 1, bit_sizes=[64])
+
+# Address of the parameter buffer for poly geometry shaders
+system_value("geometry_param_buffer_poly", 1, bit_sizes=[64])
+
+# Address of the parameter buffer for poly tessellation shaders
+system_value("tess_param_buffer_poly", 1, bit_sizes=[64])
 
 # IR3-specific version of most SSBO intrinsics. The only different
 # compare to the originals is that they add an extra source to hold
@@ -1435,11 +1474,11 @@ load("shared_ir3", [1], [BASE, ALIGN_MUL, ALIGN_OFFSET], [CAN_ELIMINATE])
 
 # src[] = { value, address(vec2 of hi+lo uint32_t), offset }.
 # const_index[] = { write_mask, align_mul, align_offset }
-store("global_ir3", [2, 1], indices=[ACCESS, ALIGN_MUL, ALIGN_OFFSET])
+store("global_ir3", [1, 1], indices=[ACCESS, ALIGN_MUL, ALIGN_OFFSET])
 # src[] = { address(vec2 of hi+lo uint32_t), offset }.
 # const_index[] = { access, align_mul, align_offset }
 # the alignment applies to the base address
-load("global_ir3", [2, 1], indices=[ACCESS, ALIGN_MUL, ALIGN_OFFSET, RANGE_BASE, RANGE], flags=[CAN_ELIMINATE])
+load("global_ir3", [1, 1], indices=[ACCESS, ALIGN_MUL, ALIGN_OFFSET, RANGE_BASE, RANGE], flags=[CAN_ELIMINATE])
 
 # Etnaviv-specific load/glboal intrinsics. They take a 32-bit base address and
 # a 32-bit offset, which doesn't need to be an immediate.
@@ -1489,7 +1528,7 @@ intrinsic("copy_ubo_to_uniform_ir3", [1, 1], indices=[BASE, RANGE])
 # IR3-specific intrinsic for ldg.k.
 # base is an offset to apply to the address in bytes, range_base is the
 # const file base in components, range is the amount to copy in vec4's.
-intrinsic("copy_global_to_uniform_ir3", [2], indices=[BASE, RANGE_BASE, RANGE])
+intrinsic("copy_global_to_uniform_ir3", [1], indices=[BASE, RANGE_BASE, RANGE])
 
 # IR3-specific intrinsic for stsc. Loads from push consts to constant file
 # Should be used in the shader preamble.
@@ -1571,14 +1610,14 @@ load("sampler_lod_parameters_pan", [1], flags=[CAN_ELIMINATE, CAN_REORDER])
 # src[] = { target, sample, conversion }
 # target must be in the [0..7] range when io_semantics.location is FRAG_RESULT_DATA0
 # and is ignored otherwise
-load("converted_output_pan", [1, 1, 1], indices=[DEST_TYPE, IO_SEMANTICS], flags=[CAN_ELIMINATE])
+load("converted_output_pan", [1, 1, 1], indices=[ACCESS, DEST_TYPE, IO_SEMANTICS], flags=[CAN_ELIMINATE])
 
 # Like converted_output_pan but for case where the output is never written by the shader
 # This is used to relax waits on tile-buffer accesses and the target is read-only
 # src[] = { target, sample, conversion }
 # target must be in the [0..7] range when io_semantics.location is FRAG_RESULT_DATA0
 # and is ignored otherwise
-load("readonly_output_pan", [1, 1, 1], indices=[DEST_TYPE, IO_SEMANTICS], flags=[CAN_ELIMINATE])
+load("readonly_output_pan", [1, 1, 1], indices=[ACCESS, DEST_TYPE, IO_SEMANTICS], flags=[CAN_ELIMINATE])
 
 # Load input attachment target
 # src[] = { input_attachment_index }
@@ -1709,6 +1748,8 @@ system_value("rasterization_primitive_amd", 1);
 
 # Number of patches processed by each TCS workgroup
 system_value("tcs_num_patches_amd", 1)
+# The stride of 1 TCS per-vertex output in memory / 256
+system_value("tcs_mem_attrib_stride", 1)
 # Whether TCS should store tessellation level outputs for TES to read
 system_value("tcs_tess_levels_to_tes_amd", dest_comp=1, bit_sizes=[1])
 # Tessellation primitive mode for TCS
@@ -1959,8 +2000,6 @@ intrinsic("atomic_add_xfb_prim_count_amd", [1], indices=[STREAM_ID])
 # src[] = { invocation_count }.
 intrinsic("atomic_add_shader_invocation_count_amd", [1])
 
-# LDS offset for scratch section in NGG shader
-system_value("lds_ngg_scratch_base_amd", 1)
 # LDS offset for NGG GS shader vertex emit
 system_value("lds_ngg_gs_out_vertex_base_amd", 1)
 
@@ -2057,8 +2096,8 @@ system_value("clip_z_coeff_agx", 1)
 # This affects flatshading, which is defined weirdly for fans with first.
 system_value("is_first_fan_agx", 1, bit_sizes=[1])
 
-# mesa_prim for the input topology (in a geometry shader)
-system_value("input_topology_agx", 1)
+# Root descriptor address
+system_value("root_agx", 1, bit_sizes=[64])
 
 # Load a bindless sampler handle mapping a binding table sampler.
 intrinsic("load_sampler_handle_agx", [1], 1, [],
@@ -2247,23 +2286,6 @@ barrier("fence_pbe_to_tex_pixel_agx")
 # Unknown fence used in the helper program on exit.
 barrier("fence_helper_exit_agx")
 
-# Pointer to the buffer passing outputs VS->TCS, VS->GS, or TES->GS linkage.
-system_value("vs_output_buffer_agx", 1, bit_sizes=[64])
-
-# Mask of VS->TCS, VS->GS, or TES->GS outputs. This is modelled as a sysval
-# directly so it can be dynamic with shader objects or constant folded with
-# pipelines (including GPL)
-system_value("vs_outputs_agx", 1, bit_sizes=[64])
-
-# Address of state for AGX input assembly lowering for geometry/tessellation
-system_value("input_assembly_buffer_agx", 1, bit_sizes=[64])
-
-# Address of the parameter buffer for AGX geometry shaders
-system_value("geometry_param_buffer_agx", 1, bit_sizes=[64])
-
-# Address of the parameter buffer for AGX tessellation shaders
-system_value("tess_param_buffer_agx", 1, bit_sizes=[64])
-
 # Address of the pipeline statistic query result indexed by BASE
 system_value("stat_query_address_agx", 1, bit_sizes=[64], indices=[BASE])
 
@@ -2317,6 +2339,10 @@ intrinsic("read_attribute_payload_intel", dest_comp=1, bit_sizes=[32],
           src_comp=[1],
           flags=[CAN_ELIMINATE, CAN_REORDER])
 
+# Populate the per-primitive payload at an offset
+# src[] = { value, offset }
+intrinsic("store_per_primitive_payload_intel", src_comp=[-1], indices=[BASE, COMPONENT])
+
 # Number of data items being operated on for a SIMD program.
 system_value("simd_width_intel", 1)
 
@@ -2345,6 +2371,14 @@ intrinsic("load_deref_block_intel", dest_comp=0, src_comp=[-1],
           indices=[ACCESS], flags=[CAN_ELIMINATE])
 intrinsic("store_deref_block_intel", src_comp=[-1, 0], indices=[WRITE_MASK, ACCESS])
 
+# Special load_ssbo intrinsic with an additional BASE value for Xe2+ offsets
+# src[] = { buffer_index, offset }.
+load("ssbo_intel", [-1, 1], [ACCESS, BASE, ALIGN_MUL, ALIGN_OFFSET], [CAN_ELIMINATE])
+
+# Special store_ssbo intrinsic with an additional BASE value for Xe2+ offsets
+# src[] = { value, buffer_index, offset }
+store("ssbo_intel", [-1, 1], [WRITE_MASK, ACCESS, BASE, ALIGN_MUL, ALIGN_OFFSET])
+
 # src[] = { address }.
 load("global_block_intel", [1], [ACCESS, ALIGN_MUL, ALIGN_OFFSET], [CAN_ELIMINATE])
 
@@ -2371,12 +2405,12 @@ load("global_constant_uniform_block_intel", [1],
 # offset should be uniform
 # src[] = { buffer_index, offset }.
 load("ubo_uniform_block_intel", [-1, 1],
-     [ACCESS, ALIGN_MUL, ALIGN_OFFSET, RANGE_BASE, RANGE], [CAN_ELIMINATE, CAN_REORDER])
+     [ACCESS, ALIGN_MUL, ALIGN_OFFSET, BASE, RANGE], [CAN_ELIMINATE, CAN_REORDER])
 
 # Similar to load_global_const_block_intel but for SSBOs
 # offset should be uniform
 # src[] = { buffer_index, offset }.
-load("ssbo_uniform_block_intel", [-1, 1], [ACCESS, ALIGN_MUL, ALIGN_OFFSET], [CAN_ELIMINATE])
+load("ssbo_uniform_block_intel", [-1, 1], [ACCESS, ALIGN_MUL, ALIGN_OFFSET, BASE], [CAN_ELIMINATE])
 
 # Similar to load_global_const_block_intel but for shared memory
 # src[] = { offset }.
@@ -2389,6 +2423,9 @@ intrinsic("load_inline_data_intel", [], dest_comp=0,
 
 # Dynamic fragment shader parameters.
 system_value("fs_msaa_intel", 1)
+
+# Per primitive remapping table offset.
+system_value("per_primitive_remap_intel", 1)
 
 # Intrinsics for Intel bindless thread dispatch
 # BASE=brw_topoloy_id
@@ -2444,6 +2481,10 @@ system_value("ray_query_global_intel", 1, bit_sizes=[64])
 # component count of that matrix different than the others.
 intrinsic("dpas_intel", dest_comp=0, src_comp=[0, -1, -1],
           indices=[DEST_BASE_TYPE, SRC_BASE_TYPE, SATURATE, SYSTOLIC_DEPTH, REPEAT_COUNT],
+          flags=[CAN_ELIMINATE])
+
+intrinsic("convert_cmat_intel", dest_comp=0, src_comp=[-1],
+          indices=[DST_CMAT_DESC, SRC_CMAT_DESC],
           flags=[CAN_ELIMINATE])
 
 # NVIDIA-specific intrinsics

@@ -59,7 +59,7 @@ nvk_CreateBufferView(VkDevice _device,
    if (!view)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   const uint64_t addr = nvk_buffer_address(buffer, view->vk.offset);
+   const uint64_t addr = vk_buffer_address(&buffer->vk, view->vk.offset);
    enum pipe_format format = nvk_format_to_pipe_format(view->vk.format);
 
    if (nvk_use_edb_buffer_views(pdev)) {
@@ -69,14 +69,14 @@ nvk_CreateBufferView(VkDevice _device,
    } else {
       if (pdev->info.cls_eng3d >= MAXWELL_A ||
           (buffer->vk.usage & VK_BUFFER_USAGE_2_UNIFORM_TEXEL_BUFFER_BIT_KHR)) {
-         uint32_t desc[8];
-         nil_buffer_fill_tic(&pdev->info, addr, nil_format(format),
-                           view->vk.elements, &desc);
+         const struct nil_descriptor desc =
+            nil_buffer_descriptor(&pdev->info, addr, nil_format(format),
+                                  view->vk.elements);
 
          uint32_t desc_index;
          result = nvk_descriptor_table_add(dev, &dev->images,
-                                          desc, sizeof(desc),
-                                          &desc_index);
+                                           &desc, sizeof(desc),
+                                           &desc_index);
          if (result != VK_SUCCESS) {
             vk_buffer_view_destroy(&dev->vk, pAllocator, &view->vk);
             return result;

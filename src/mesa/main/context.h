@@ -491,6 +491,20 @@ _mesa_has_texture_view(const struct gl_context *ctx)
 }
 
 static inline bool
+_mesa_has_texture_multisample(const struct gl_context *ctx)
+{
+   return _mesa_has_ARB_texture_multisample(ctx) ||
+          _mesa_is_gles31(ctx);
+}
+
+static inline bool
+_mesa_has_texture_multisample_array(const struct gl_context *ctx)
+{
+   return _mesa_has_ARB_texture_multisample(ctx) ||
+          _mesa_has_OES_texture_storage_multisample_2d_array(ctx);
+}
+
+static inline bool
 _mesa_hw_select_enabled(const struct gl_context *ctx)
 {
    return ctx->RenderMode == GL_SELECT &&
@@ -518,6 +532,13 @@ _mesa_has_pipeline_statistics(const struct gl_context *ctx)
 {
    return _mesa_has_ARB_pipeline_statistics_query(ctx) ||
           (_mesa_is_desktop_gl(ctx) && ctx->Version >= 46);
+}
+
+static inline bool
+_mesa_has_internalformat_query(const struct gl_context *ctx)
+{
+   return _mesa_has_ARB_internalformat_query(ctx) ||
+          _mesa_is_gles3(ctx);
 }
 
 #ifdef __cplusplus

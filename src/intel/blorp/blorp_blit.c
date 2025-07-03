@@ -2779,11 +2779,11 @@ blorp_copy_get_color_format(const struct isl_device *isl_dev,
        * to properly interpret the clear color of imported dmabuf surfaces.
        */
       return surf_format;
-   } else if (ISL_GFX_VER(isl_dev) <= 12 &&
+   } else if (ISL_GFX_VERX10(isl_dev) <= 120 &&
               isl_format_supports_ccs_e(isl_dev->info, surf_format)) {
-      /* On gfx9-12, choose a copy format that maintains compatibility with
+      /* On gfx9-12.0, choose a copy format that maintains compatibility with
        * CCS_E. Although format reinterpretation doesn't affect compression
-       * support while rendering on gfx12, the sampler does have reduced
+       * support while rendering on gfx12.0, the sampler does have reduced
        * support for compression when the bits-per-channel changes.
        */
       return get_ccs_compatible_uint_format(fmtl);
@@ -2998,8 +2998,9 @@ blorp_copy(struct blorp_batch *batch,
        */
       ASSERTED enum isl_format src_view_fmt = params.src.view.format;
       ASSERTED enum isl_format src_surf_fmt = params.src.surf.format;
-      assert(isl_get_sampler_clear_field_offset(devinfo, src_view_fmt) ==
-             isl_get_sampler_clear_field_offset(devinfo, src_surf_fmt));
+      ASSERTED bool hiz = params.src.aux_usage == ISL_AUX_USAGE_HIZ_CCS_WT;
+      assert(isl_get_sampler_clear_field_offset(devinfo, src_view_fmt, hiz) ==
+             isl_get_sampler_clear_field_offset(devinfo, src_surf_fmt, hiz));
    }
 
    if (params.src.view.format != params.dst.view.format) {

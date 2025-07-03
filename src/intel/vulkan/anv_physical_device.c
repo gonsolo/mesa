@@ -198,6 +198,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_maintenance6                      = true,
       .KHR_maintenance7                      = true,
       .KHR_maintenance8                      = true,
+      .KHR_maintenance9                      = true,
       .KHR_map_memory2                       = true,
       .KHR_multiview                         = true,
       .KHR_performance_query =
@@ -219,6 +220,8 @@ get_device_extensions(const struct anv_physical_device *device,
          driQueryOptionb(&device->instance->dri_options, "vk_khr_present_wait") ||
          wsi_common_vk_instance_supports_present_wait(&device->instance->vk),
       .KHR_push_descriptor                   = true,
+      .KHR_present_id2                       = true,
+      .KHR_present_wait2                     = true,
       .KHR_ray_query                         = rt_enabled,
       .KHR_ray_tracing_maintenance1          = rt_enabled,
       .KHR_ray_tracing_pipeline              = rt_enabled,
@@ -260,6 +263,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_video_decode_h264                 = VIDEO_CODEC_H264DEC && video_decode_enabled,
       .KHR_video_decode_h265                 = VIDEO_CODEC_H265DEC && video_decode_enabled,
       .KHR_video_decode_av1                  = device->info.ver >= 12 && VIDEO_CODEC_AV1DEC && video_decode_enabled,
+      .KHR_video_decode_vp9                  = VIDEO_CODEC_VP9DEC && video_decode_enabled,
       .KHR_video_encode_queue                = video_encode_enabled,
       .KHR_video_encode_h264                 = VIDEO_CODEC_H264ENC && video_encode_enabled,
       .KHR_video_encode_h265                 = device->info.ver >= 12 && VIDEO_CODEC_H265ENC && video_encode_enabled,
@@ -447,9 +451,10 @@ get_features(const struct anv_physical_device *pdevice,
       .shaderStorageImageExtendedFormats        = true,
       .shaderStorageImageMultisample            = false,
       /* Gfx12.5 has all the required format supported in HW for typed
-       * read/writes
+       * read/writes, on Gfx11 & Gfx12.0 we emulate for 3 formats.
        */
-      .shaderStorageImageReadWithoutFormat      = pdevice->info.verx10 >= 125,
+      .shaderStorageImageReadWithoutFormat      = pdevice->info.verx10 >= 125 ||
+                                                  pdevice->instance->emulate_read_without_format,
       .shaderStorageImageWriteWithoutFormat     = true,
       .shaderUniformBufferArrayDynamicIndexing  = true,
       .shaderSampledImageArrayDynamicIndexing   = true,
@@ -917,6 +922,9 @@ get_features(const struct anv_physical_device *pdevice,
       /* VK_KHR_video_maintenance2 */
       .videoMaintenance2 = true,
 
+      /* VK_KHR_video_decode_vp9 */
+      .videoDecodeVP9 = true,
+
       /* VK_EXT_image_compression_control */
       .imageCompressionControl = true,
 
@@ -963,6 +971,9 @@ get_features(const struct anv_physical_device *pdevice,
       /* VK_KHR_fragment_shader_barycentric */
       .fragmentShaderBarycentric =
          pdevice->vk.supported_extensions.KHR_fragment_shader_barycentric,
+
+      /* VK_KHR_maintenance9 */
+      .maintenance9 = true,
    };
 
    /* The new DOOM and Wolfenstein games require depthBounds without
@@ -1252,16 +1263,6 @@ get_properties(const struct anv_physical_device *pdevice,
    VkSampleCountFlags sample_counts =
       isl_device_get_sample_counts(&pdevice->isl_dev);
 
-#if DETECT_OS_ANDROID
-   /* Used to fill struct VkPhysicalDevicePresentationPropertiesANDROID */
-   uint64_t front_rendering_usage = 0;
-   struct u_gralloc *gralloc = u_gralloc_create(U_GRALLOC_TYPE_AUTO);
-   if (gralloc != NULL) {
-      u_gralloc_get_front_rendering_usage(gralloc, &front_rendering_usage);
-      u_gralloc_destroy(&gralloc);
-   }
-#endif /* DETECT_OS_ANDROID */
-
    struct anv_descriptor_limits desc_limits;
    get_device_descriptor_limits(pdevice, &desc_limits);
 
@@ -1306,7 +1307,7 @@ get_properties(const struct anv_physical_device *pdevice,
       .maxDescriptorSetStorageImages            = desc_limits.max_images,
       .maxDescriptorSetInputAttachments         = MAX_DESCRIPTOR_SET_INPUT_ATTACHMENTS,
       .maxVertexInputAttributes                 = MAX_VES,
-      .maxVertexInputBindings                   = MAX_VBS,
+      .maxVertexInputBindings                   = get_max_vbs(devinfo),
       /* Broadwell PRMs: Volume 2d: Command Reference: Structures:
        *
        * VERTEX_ELEMENT_STATE::Source Element Offset: [0,2047]
@@ -1514,6 +1515,14 @@ get_properties(const struct anv_physical_device *pdevice,
       props->maxDescriptorSetUpdateAfterBindTotalUniformBuffersDynamic = MAX_DYNAMIC_BUFFERS;
       props->maxDescriptorSetUpdateAfterBindTotalStorageBuffersDynamic = MAX_DYNAMIC_BUFFERS;
       props->maxDescriptorSetUpdateAfterBindTotalBuffersDynamic = MAX_DYNAMIC_BUFFERS;
+   }
+
+   /* VK_KHR_maintenance9 */
+   {
+      /* Swizzling of Tile64 images is different in 2D/3D */
+      props->image2DViewOf3DSparse = false;
+      props->defaultVertexAttributeValue =
+         VK_DEFAULT_VERTEX_ATTRIBUTE_VALUE_ZERO_ZERO_ZERO_ZERO_KHR;
    }
 
    /* VK_KHR_performance_query */
@@ -1945,7 +1954,7 @@ get_properties(const struct anv_physical_device *pdevice,
    /* VK_EXT_sample_locations */
    {
       props->sampleLocationSampleCounts =
-         isl_device_get_sample_counts(&pdevice->isl_dev);
+         ~VK_SAMPLE_COUNT_1_BIT & isl_device_get_sample_counts(&pdevice->isl_dev);
 
       /* See also anv_GetPhysicalDeviceMultisamplePropertiesEXT */
       props->maxSampleLocationGridSize.width = 1;
@@ -1984,7 +1993,7 @@ get_properties(const struct anv_physical_device *pdevice,
    /* VK_ANDROID_native_buffer */
 #if DETECT_OS_ANDROID
    {
-      props->sharedImage = front_rendering_usage ? VK_TRUE : VK_FALSE;
+      props->sharedImage = !!vk_android_get_front_buffer_usage();
    }
 #endif /* DETECT_OS_ANDROID */
 
@@ -2562,6 +2571,14 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
       goto fail_fd;
    }
 
+   /* Disable Wa_16013994831 on Gfx12.0 because we found other cases where we
+    * need to always disable preemption :
+    *    - https://gitlab.freedesktop.org/mesa/mesa/-/issues/5963
+    *    - https://gitlab.freedesktop.org/mesa/mesa/-/issues/5662
+    */
+   if (devinfo.verx10 == 120)
+      BITSET_CLEAR(devinfo.workarounds, INTEL_WA_16013994831);
+
    if (!devinfo.has_context_isolation) {
       result = vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
                          "Vulkan requires context isolation for %s", devinfo.name);
@@ -2913,7 +2930,8 @@ void anv_GetPhysicalDeviceQueueFamilyProperties2(
                   (VkQueueFamilyVideoPropertiesKHR *)ext;
                if (queue_family->queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR) {
                   prop->videoCodecOperations = VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR |
-                                               VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR;
+                                               VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR |
+                                               VK_VIDEO_CODEC_OPERATION_DECODE_VP9_BIT_KHR;
                   if (pdevice->info.ver >= 12)
                      prop->videoCodecOperations |= VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR;
                }
@@ -2924,6 +2942,17 @@ void anv_GetPhysicalDeviceQueueFamilyProperties2(
                }
                break;
             }
+
+            case VK_STRUCTURE_TYPE_QUEUE_FAMILY_OWNERSHIP_TRANSFER_PROPERTIES_KHR: {
+               VkQueueFamilyOwnershipTransferPropertiesKHR *prop =
+                  (VkQueueFamilyOwnershipTransferPropertiesKHR *)ext;
+               if (pdevice->info.ver >= 20)
+                  prop->optimalImageTransferToQueueFamilies = BITSET_MASK(pdevice->queue.family_count);
+               else
+                  prop->optimalImageTransferToQueueFamilies = 0;
+               break;
+            }
+
             default:
                vk_debug_ignored_stype(ext->sType);
             }
@@ -3057,8 +3086,11 @@ void anv_GetPhysicalDeviceMultisamplePropertiesEXT(
    assert(pMultisampleProperties->sType ==
           VK_STRUCTURE_TYPE_MULTISAMPLE_PROPERTIES_EXT);
 
+   VkSampleCountFlags sample_counts =
+      ~VK_SAMPLE_COUNT_1_BIT & isl_device_get_sample_counts(&physical_device->isl_dev);
+
    VkExtent2D grid_size;
-   if (samples & isl_device_get_sample_counts(&physical_device->isl_dev)) {
+   if (samples & sample_counts) {
       grid_size.width = 1;
       grid_size.height = 1;
    } else {

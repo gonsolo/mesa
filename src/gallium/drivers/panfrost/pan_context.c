@@ -278,8 +278,7 @@ panfrost_set_shader_images(struct pipe_context *pctx,
 
       /* Images don't work with AFBC/AFRC, since they require pixel-level
        * granularity */
-      if (drm_is_afbc(rsrc->image.props.modifier) ||
-          drm_is_afrc(rsrc->image.props.modifier)) {
+      if (drm_is_afbc(rsrc->modifier) || drm_is_afrc(rsrc->modifier)) {
          pan_resource_modifier_convert(
             ctx, rsrc, DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED, true,
             "Shader image");
@@ -478,13 +477,6 @@ panfrost_set_min_samples(struct pipe_context *pipe, unsigned min_samples)
    struct panfrost_context *ctx = pan_context(pipe);
    ctx->min_samples = min_samples;
    ctx->dirty |= PAN_DIRTY_MSAA;
-}
-
-static void
-panfrost_set_clip_state(struct pipe_context *pipe,
-                        const struct pipe_clip_state *clip)
-{
-   // struct panfrost_context *panfrost = pan_context(pipe);
 }
 
 static void
@@ -1046,7 +1038,6 @@ panfrost_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    gallium->set_sample_mask = panfrost_set_sample_mask;
    gallium->set_min_samples = panfrost_set_min_samples;
 
-   gallium->set_clip_state = panfrost_set_clip_state;
    gallium->set_viewport_states = panfrost_set_viewport_states;
    gallium->set_scissor_states = panfrost_set_scissor_states;
    gallium->set_polygon_stipple = panfrost_set_polygon_stipple;

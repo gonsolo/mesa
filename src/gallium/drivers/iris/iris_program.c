@@ -1872,7 +1872,7 @@ iris_compile_vs(struct iris_screen *screen,
       /* Check if variables were found. */
       if (nir_lower_clip_vs(nir, (1 << key->vue.nr_userclip_plane_consts) - 1,
                             true, false, NULL)) {
-         nir_lower_io_to_temporaries(nir, impl, true, false);
+         nir_lower_io_vars_to_temporaries(nir, impl, true, false);
          nir_lower_global_vars_to_local(nir);
          nir_lower_vars_to_ssa(nir);
          nir_shader_gather_info(nir, impl);
@@ -2311,7 +2311,7 @@ iris_compile_tes(struct iris_screen *screen,
       nir_function_impl *impl = nir_shader_get_entrypoint(nir);
       nir_lower_clip_vs(nir, (1 << key->vue.nr_userclip_plane_consts) - 1,
                         true, false, NULL);
-      nir_lower_io_to_temporaries(nir, impl, true, false);
+      nir_lower_io_vars_to_temporaries(nir, impl, true, false);
       nir_lower_global_vars_to_local(nir);
       nir_lower_vars_to_ssa(nir);
       nir_shader_gather_info(nir, impl);
@@ -2500,7 +2500,7 @@ iris_compile_gs(struct iris_screen *screen,
       nir_function_impl *impl = nir_shader_get_entrypoint(nir);
       nir_lower_clip_gs(nir, (1 << key->vue.nr_userclip_plane_consts) - 1,
                         false, NULL);
-      nir_lower_io_to_temporaries(nir, impl, true, false);
+      nir_lower_io_vars_to_temporaries(nir, impl, true, false);
       nir_lower_global_vars_to_local(nir);
       nir_lower_vars_to_ssa(nir);
       nir_shader_gather_info(nir, impl);
@@ -2690,7 +2690,6 @@ iris_compile_fs(struct iris_screen *screen,
    brw_nir_lower_fs_outputs(nir);
 
    int null_rts = brw_nir_fs_needs_null_rt(devinfo, nir,
-                                           key->multisample_fbo,
                                            key->alpha_to_coverage) ? 1 : 0;
 
    struct iris_binding_table bt;
@@ -3786,7 +3785,6 @@ static char *
 iris_finalize_nir(struct pipe_screen *_screen, struct nir_shader *nir)
 {
    struct iris_screen *screen = (struct iris_screen *)_screen;
-   const struct intel_device_info *devinfo = screen->devinfo;
 
    NIR_PASS_V(nir, iris_fix_edge_flags);
 
@@ -3795,13 +3793,14 @@ iris_finalize_nir(struct pipe_screen *_screen, struct nir_shader *nir)
       brw_preprocess_nir(screen->brw, nir, &opts);
 
       NIR_PASS_V(nir, brw_nir_lower_storage_image,
+                 screen->brw,
                  &(struct brw_nir_lower_storage_image_opts) {
-                    .devinfo      = devinfo,
                     .lower_loads  = true,
                     .lower_stores = true,
                  });
    } else {
 #ifdef INTEL_USE_ELK
+      const struct intel_device_info *devinfo = screen->devinfo;
       assert(screen->elk);
 
       struct elk_nir_compiler_opts opts = {};

@@ -30,11 +30,6 @@ struct si_shader_info {
       bool writes_memory:1;
       enum gl_subgroup_size subgroup_size;
 
-      uint64_t outputs_read;
-      uint64_t outputs_written;
-      uint32_t patch_outputs_read;
-      uint32_t patch_outputs_written;
-
       uint8_t num_ubos;
       uint8_t num_ssbos;
       uint8_t num_images;
@@ -89,6 +84,8 @@ struct si_shader_info {
       };
    } base;
 
+   ac_nir_tess_io_info tess_io_info;
+
    uint32_t options; /* bitmask of SI_PROFILE_* */
 
    uint8_t num_inputs;
@@ -111,15 +108,12 @@ struct si_shader_info {
    /* For VS before {TCS, TES, GS} and TES before GS. */
    uint64_t ls_es_outputs_written;     /* "get_unique_index" bits */
    uint64_t outputs_written_before_ps; /* "get_unique_index" bits */
-   uint64_t tcs_outputs_written_for_tes;   /* "get_unique_index" bits */
-   uint32_t patch_outputs_written_for_tes; /* "get_unique_index_patch" bits */
-   uint32_t tess_levels_written_for_tes;   /* "get_unique_index_patch" bits */
+   uint8_t num_tess_level_vram_outputs; /* max "get_unique_index_patch" + 1*/
 
    uint8_t clipdist_mask;
    uint8_t culldist_mask;
 
    uint16_t esgs_vertex_stride;
-   uint16_t gsvs_vertex_size;
    uint8_t gs_input_verts_per_prim;
    unsigned max_gsvs_emit_size;
 
@@ -175,9 +169,6 @@ struct si_shader_info {
    bool uses_bindless_images;
    bool has_divergent_loop;
 
-   /** Whether all codepaths write tess factors in all invocations. */
-   bool tessfactors_are_def_in_all_invocs;
-
    /* A flag to check if vrs2x2 can be enabled to reduce number of
     * fragment shader invocations if flat shading.
     */
@@ -198,17 +189,6 @@ struct si_shader_info {
  * finished.
  */
 struct si_temp_shader_variant_info {
-   /* Legacy GS output info. */
-   uint8_t gs_streams[64];
-   uint8_t gs_streams_16bit_lo[16];
-   uint8_t gs_streams_16bit_hi[16];
-
-   uint8_t gs_out_usage_mask[64];
-   uint8_t gs_out_usage_mask_16bit_lo[16];
-   uint8_t gs_out_usage_mask_16bit_hi[16];
-
-   ac_nir_gs_output_info gs_out_info;
-
    uint8_t vs_output_param_offset[NUM_TOTAL_VARYING_SLOTS];
    bool has_non_uniform_tex_access : 1;
    bool has_shadow_comparison : 1;
@@ -246,8 +226,10 @@ struct si_shader_variant_info {
    uint8_t nr_pos_exports;
    uint8_t nr_param_exports;
    uint8_t num_streamout_vec4s;
+   uint8_t ngg_lds_scratch_size;
    unsigned private_mem_vgprs;
    unsigned max_simd_waves;
+   uint32_t ngg_lds_vertex_size; /* VS,TES: Cull+XFB, GS: GSVS size */
 };
 
 #endif

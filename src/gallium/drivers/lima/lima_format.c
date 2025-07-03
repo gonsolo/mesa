@@ -100,7 +100,10 @@ static const struct lima_format lima_texel_formats[] = {
    LIMA_TEXEL_FORMAT(ETC1_RGB8,          ETC1_RGB8, false, SWIZ(X, Y, Z, W)),
    LIMA_TEXEL_FORMAT(R8_UNORM,           L8,        false, SWIZ(X, 0, 0, 1)),
    LIMA_TEXEL_FORMAT(R8G8_UNORM,         L8A8,      false, SWIZ(X, W, 0, 1)),
+#if 0
+   /* TODO: re-enable this */
    LIMA_TEXEL_FORMAT(R16G16B16_FLOAT,    R16G16B16_FLOAT, true, SWIZ(X, Y, Z, W)),
+#endif
    LIMA_TEXEL_FORMAT(R16G16B16A16_FLOAT, R16G16B16A16_FLOAT, true, SWIZ(X, Y, Z, W)),
    LIMA_TEXEL_FORMAT(L16_FLOAT,          L16_FLOAT, false, SWIZ(X, Y, Z, W)),
    LIMA_TEXEL_FORMAT(A16_FLOAT,          A16_FLOAT, false, SWIZ(X, Y, Z, W)),
@@ -119,6 +122,8 @@ static const struct lima_format lima_pixel_formats[] = {
    LIMA_PIXEL_FORMAT(B5G5R5A1_UNORM,     B5G5R5A1, false, LAYOUT(8, 5, 6, 5)),
    LIMA_PIXEL_FORMAT(B4G4R4A4_UNORM,     B4G4R4A4, false, LAYOUT(8, 4, 4, 4)),
    LIMA_PIXEL_FORMAT(R8_UNORM,           B8,       true,  LAYOUT(8, 8, 8, 8)),
+   LIMA_PIXEL_FORMAT(L8_UNORM,           B8,       true,  LAYOUT(8, 8, 8, 8)),
+   LIMA_PIXEL_FORMAT(I8_UNORM,           B8,       true,  LAYOUT(8, 8, 8, 8)),
    LIMA_PIXEL_FORMAT(R8G8_UNORM,         G8B8,     true,  LAYOUT(0, 0, 0, 0)),
    LIMA_PIXEL_FORMAT(Z16_UNORM,          Z16,      false, LAYOUT(0, 0, 0, 0)),
    LIMA_PIXEL_FORMAT(Z24_UNORM_S8_UINT,  Z24S8,    false, LAYOUT(0, 0, 0, 0)),

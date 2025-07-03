@@ -112,10 +112,6 @@ struct dri_screen
 
    bool swrast_no_present;
 
-   /* DRI exts that vary based on gallium pipe_screen caps. */
-   __DRIimageExtension image_extension;
-   __DRI2bufferDamageExtension buffer_damage_extension;
-
    /* DRI exts on this screen. Populated at init time based on device caps. */
    const __DRIextension *screen_extensions[14];
 
@@ -143,7 +139,6 @@ struct dri_image {
    unsigned layer;
    uint32_t dri_format;
    uint32_t dri_fourcc;
-   uint32_t dri_components;
    /* Provided by eglCreateImageKHR if creating from a
     * texture or a renderbuffer. 0 otherwise.
     */

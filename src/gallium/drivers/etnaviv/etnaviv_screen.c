@@ -244,6 +244,8 @@ etna_init_screen_caps(struct etna_screen *screen)
    caps->primitive_restart =
    caps->primitive_restart_fixed_index = VIV_FEATURE(screen, ETNA_FEATURE_HALTI0);
 
+   caps->anisotropic_filter &= !VIV_FEATURE(screen, ETNA_FEATURE_NO_ANISO);
+
    caps->alpha_test = !VIV_FEATURE(screen, ETNA_FEATURE_PE_NO_ALPHA_TEST);
 
    caps->draw_indirect = VIV_FEATURE(screen, ETNA_FEATURE_HALTI5);
@@ -277,7 +279,8 @@ etna_init_screen_caps(struct etna_screen *screen)
 
    caps->min_texel_offset = -8;
    caps->max_texel_offset = 7;
-   caps->seamless_cube_map_per_texture = screen->specs.seamless_cube_map;
+   caps->seamless_cube_map_per_texture =
+   caps->seamless_cube_map = VIV_FEATURE(screen, ETNA_FEATURE_SEAMLESS_CUBE_MAP);
 
    /* Render targets. */
    caps->max_render_targets = VIV_FEATURE(screen, ETNA_FEATURE_HALTI2) ?
@@ -576,7 +579,7 @@ static int etna_get_num_modifiers(struct etna_screen *screen)
    int num = ARRAY_SIZE(supported_modifiers);
 
    /* don't advertise split tiled formats on single pipe/buffer GPUs */
-   if (screen->specs.pixel_pipes == 1 || screen->specs.single_buffer)
+   if (!screen->specs.pe_multitiled)
       num = 3;
 
    return num;
@@ -825,9 +828,9 @@ etna_get_specs(struct etna_screen *screen)
       VIV_FEATURE(screen, ETNA_FEATURE_SH_NO_ONECONST_LIMIT);
    screen->specs.v4_compression =
       VIV_FEATURE(screen, ETNA_FEATURE_V4_COMPRESSION);
-   screen->specs.seamless_cube_map =
-      (screen->info->model != 0x880) && /* Seamless cubemap is broken on GC880? */
-      VIV_FEATURE(screen, ETNA_FEATURE_SEAMLESS_CUBE_MAP);
+
+   /* XXX: The feature bit gating the bugfix is an educated guess */
+   screen->specs.correct_stencil_valuemask = VIV_FEATURE(screen, ETNA_FEATURE_PE_DITHER_FIX);
 
    if (screen->info->halti >= 5) {
       /* GC7000 - this core must load shaders from memory. */
@@ -906,6 +909,8 @@ etna_get_specs(struct etna_screen *screen)
    screen->specs.single_buffer = VIV_FEATURE(screen, ETNA_FEATURE_SINGLE_BUFFER);
    if (screen->specs.single_buffer)
       DBG("etnaviv: Single buffer mode enabled with %d pixel pipes", screen->specs.pixel_pipes);
+   screen->specs.pe_multitiled = screen->specs.pixel_pipes > 1 &&
+                                 !screen->specs.single_buffer;
 
    screen->specs.tex_astc = VIV_FEATURE(screen, ETNA_FEATURE_TEXTURE_ASTC) &&
                             !VIV_FEATURE(screen, ETNA_FEATURE_NO_ASTC);

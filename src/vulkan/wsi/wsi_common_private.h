@@ -146,6 +146,10 @@ struct wsi_image {
       VkImage image;
       VkDeviceMemory memory;
       VkCommandBuffer *cmd_buffers;
+      /* Whether the backing memory of the blit dst buffer is shared directly
+       * with the compositor instead of being mapped via vkMapMemory locally.
+       */
+      bool to_foreign_queue;
    } blit;
    /* Whether or not the image has been acquired
     * on the CPU side via acquire_next_image.
@@ -220,6 +224,9 @@ struct wsi_swapchain {
    VkResult (*wait_for_present)(struct wsi_swapchain *swap_chain,
                                 uint64_t present_id,
                                 uint64_t timeout);
+   VkResult (*wait_for_present2)(struct wsi_swapchain *swap_chain,
+                                 uint64_t present_id,
+                                 uint64_t timeout);
    VkResult (*release_images)(struct wsi_swapchain *swap_chain,
                               uint32_t count,
                               const uint32_t *indices);

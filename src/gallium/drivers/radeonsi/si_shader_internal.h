@@ -47,25 +47,6 @@ struct si_shader_args {
    struct ac_arg vs_blit_inputs;
 
    /* API TCS & TES */
-   /* Layout of TCS outputs in the offchip buffer
-    * # 7 bits
-    *   [0:6] = the number of patches per threadgroup - 1, max = 127
-    * # 5 bits
-    *   [7:11] = the number of output vertices per patch - 1, max = 31
-    * # 5 bits
-    *   [12:16] = the number of input vertices per patch - 1, max = 31 (TCS only)
-    * # 6 bits
-    *   [17:22] = the number of LS outputs in LDS, max = 63
-    * # 6 bits
-    *   [23:28] = the number of HS per-vertex outputs in memory, max = 63
-    * # 2 bits
-    *   [29:30] = TES output primitive type
-    * # 1 bit
-    *   [31] = whether TES reads tess factor outputs from TCS
-    */
-   struct ac_arg tcs_offchip_layout;
-
-   /* API TCS & TES */
    struct ac_arg tes_offchip_addr;
    /* PS */
    struct ac_arg sample_locs[2];
@@ -83,6 +64,7 @@ struct si_nir_shader_ctx {
    struct si_shader_args args;
    struct si_temp_shader_variant_info temp_info;
    nir_shader *nir;
+   nir_shader *gs_copy_shader;
    bool free_nir;
 };
 
@@ -127,7 +109,6 @@ void si_get_ps_epilog_args(struct si_shader_args *args,
 
 /* gfx10_shader_ngg.c */
 bool gfx10_ngg_export_prim_early(struct si_shader *shader);
-unsigned gfx10_ngg_get_scratch_dw_size(struct si_shader *shader);
 bool gfx10_ngg_calculate_subgroup_info(struct si_shader *shader);
 
 struct nir_def;

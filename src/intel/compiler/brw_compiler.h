@@ -41,13 +41,22 @@ extern "C" {
 #endif
 
 struct ra_regs;
+struct nir_builder;
+struct nir_def;
 struct nir_shader;
 struct shader_info;
 
 struct nir_shader_compiler_options;
+typedef struct nir_builder nir_builder;
+typedef struct nir_def nir_def;
 typedef struct nir_shader nir_shader;
 
 #define REG_CLASS_COUNT 20
+
+struct brw_storage_format {
+   uint32_t num_formats;
+   uint32_t isl_formats[3];
+};
 
 struct brw_compiler {
    const struct intel_device_info *devinfo;
@@ -122,6 +131,15 @@ struct brw_compiler {
    int spilling_rate;
 
    struct nir_shader *clc_shader;
+
+   /**
+    * A list of storage formats to lower from the matching return HW format.
+    *
+    * This list is used to build the lowering of read without format in
+    * brw_nir_lower_storage_image.c
+    */
+   uint32_t num_lowered_storage_formats;
+   uint32_t *lowered_storage_formats;
 };
 
 #define brw_shader_debug_log(compiler, data, fmt, ... ) do {    \
@@ -515,6 +533,7 @@ enum brw_shader_reloc_id {
    BRW_SHADER_RELOC_RESUME_SBT_ADDR_HIGH,
    BRW_SHADER_RELOC_DESCRIPTORS_ADDR_HIGH,
    BRW_SHADER_RELOC_DESCRIPTORS_BUFFER_ADDR_HIGH,
+   BRW_SHADER_RELOC_INSTRUCTION_BASE_ADDR_HIGH,
    BRW_SHADER_RELOC_EMBEDDED_SAMPLER_HANDLE,
    BRW_SHADER_RELOC_LAST_EMBEDDED_SAMPLER_HANDLE =
    BRW_SHADER_RELOC_EMBEDDED_SAMPLER_HANDLE + BRW_MAX_EMBEDDED_SAMPLERS - 1,
@@ -778,6 +797,12 @@ struct brw_wm_prog_data {
     * pixel shader).
     */
    unsigned msaa_flags_param;
+
+   /**
+    * Push constant location of the remapping offset in the instruction heap
+    * for Wa_18019110168.
+    */
+   unsigned per_primitive_remap_param;
 
    /**
     * Mask of which interpolation modes are required by the fragment shader.
@@ -1257,6 +1282,8 @@ struct brw_mue_map {
    /* VUE map for the per vertex attributes */
    struct intel_vue_map vue_map;
 
+   bool wa_18019110168_active;
+
    /* Offset in bytes of each per primitive relative to
     * per_primitive_offset (-1 if unused)
     */
@@ -1286,6 +1313,15 @@ struct brw_mesh_prog_data {
 
    bool uses_drawid;
    bool autostrip_enable;
+
+   /**
+    * Offset in the program where the remapping table for Wa_18019110168 is
+    * located.
+    *
+    * The remapping table has the same format as
+    * intel_vue_map::varying_to_slot[]
+    */
+   uint32_t wa_18019110168_mapping_offset;
 };
 
 /* brw_any_prog_data is prog_data for any stage that maps to an API stage */
@@ -1506,6 +1542,13 @@ struct brw_compile_mesh_params {
    const struct brw_mesh_prog_key *key;
    struct brw_mesh_prog_data *prog_data;
    const struct brw_tue_map *tue_map;
+
+   /** Load provoking vertex
+    *
+    * The callback returns a 32bit integer representing the provoking vertex.
+    */
+   void *load_provoking_vertex_data;
+   nir_def *(*load_provoking_vertex)(nir_builder *b, void *data);
 };
 
 const unsigned *
@@ -1685,12 +1728,13 @@ brw_compute_first_fs_urb_slot_required(uint64_t inputs_read,
 
 void
 brw_compute_sbe_per_vertex_urb_read(const struct intel_vue_map *prev_stage_vue_map,
-                                    bool mesh,
+                                    bool mesh, bool per_primitive_remapping,
                                     const struct brw_wm_prog_data *wm_prog_data,
                                     uint32_t *out_first_slot,
                                     uint32_t *num_slots,
                                     uint32_t *out_num_varyings,
-                                    uint32_t *out_primitive_id_offset);
+                                    uint32_t *out_primitive_id_offset,
+                                    uint32_t *out_flat_inputs);
 
 /**
  * Computes the URB offset at which SBE should read the per primitive date

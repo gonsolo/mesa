@@ -118,9 +118,9 @@ trace_context_draw_vbo(struct pipe_context *_pipe,
 
    trace_dump_trace_flush();
 
-   pipe->draw_vbo(pipe, info, drawid_offset, indirect, draws, num_draws);
-
    trace_dump_call_end();
+
+   pipe->draw_vbo(pipe, info, drawid_offset, indirect, draws, num_draws);
 }
 
 static void
@@ -139,9 +139,9 @@ trace_context_draw_mesh_tasks(struct pipe_context *_pipe,
 
    trace_dump_trace_flush();
 
-   pipe->draw_mesh_tasks(pipe, drawid_offset, info);
-
    trace_dump_call_end();
+
+   pipe->draw_mesh_tasks(pipe, drawid_offset, info);
 }
 
 
@@ -172,9 +172,9 @@ trace_context_draw_vertex_state(struct pipe_context *_pipe,
 
    trace_dump_trace_flush();
 
+   trace_dump_call_end();
    pipe->draw_vertex_state(pipe, state, partial_velem_mask, info, draws,
                            num_draws);
-   trace_dump_call_end();
 }
 
 
@@ -1342,6 +1342,37 @@ trace_context_resource_copy_region(struct pipe_context *_pipe,
 
 
 static void
+trace_context_image_copy_buffer(struct pipe_context *_pipe,
+                                struct pipe_resource *dst,
+                                struct pipe_resource *src,
+                                unsigned buffer_offset,
+                                unsigned buffer_stride,
+                                unsigned buffer_layer_stride,
+                                unsigned level,
+                                const struct pipe_box *box)
+{
+   struct trace_context *tr_ctx = trace_context(_pipe);
+   struct pipe_context *pipe = tr_ctx->pipe;
+
+   trace_dump_call_begin("pipe_context", "image_copy_buffer");
+
+   trace_dump_arg(ptr, pipe);
+   trace_dump_arg(ptr, dst);
+   trace_dump_arg(ptr, src);
+   trace_dump_arg(uint, buffer_offset);
+   trace_dump_arg(uint, buffer_stride);
+   trace_dump_arg(uint, buffer_layer_stride);
+   trace_dump_arg(uint, level);
+   trace_dump_arg(box, box);
+
+   pipe->image_copy_buffer(pipe,
+                           dst, src, buffer_offset, buffer_stride, buffer_layer_stride, level, box);
+
+   trace_dump_call_end();
+}
+
+
+static void
 trace_context_blit(struct pipe_context *_pipe,
                    const struct pipe_blit_info *_info)
 {
@@ -2231,9 +2262,9 @@ static void trace_context_launch_grid(struct pipe_context *_pipe,
 
    trace_dump_trace_flush();
 
-   pipe->launch_grid(pipe, info);
-
    trace_dump_call_end();
+
+   pipe->launch_grid(pipe, info);
 }
 
 static void trace_context_get_compute_state_info(struct pipe_context *_pipe, void *cso,
@@ -2532,6 +2563,7 @@ trace_context_create(struct trace_screen *tr_scr,
    /* this is lavapipe-only and can't be traced */
    tr_ctx->base.stream_output_target_offset = pipe->stream_output_target_offset;
    TR_CTX_INIT(resource_copy_region);
+   TR_CTX_INIT(image_copy_buffer);
    TR_CTX_INIT(blit);
    TR_CTX_INIT(flush_resource);
    TR_CTX_INIT(clear);

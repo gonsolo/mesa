@@ -14,10 +14,10 @@
 #include <inttypes.h>
 #include <stdbool.h>
 
-#include "nir_tcs_info.h"
+#include "util/set.h"
+#include "ac_nir.h"
 #include "radv_constants.h"
 #include "radv_shader_args.h"
-#include "util/set.h"
 
 struct radv_device;
 struct nir_shader;
@@ -75,7 +75,6 @@ struct gfx10_ngg_info {
    uint32_t prim_amp_factor;
    uint32_t vgt_esgs_ring_itemsize;
    uint32_t esgs_ring_size;
-   uint32_t scratch_lds_base;
    uint32_t lds_size;
    bool max_vert_out_per_gs_instance;
 };
@@ -98,8 +97,10 @@ struct radv_shader_info {
    bool has_ngg_early_prim_export;
    bool has_prim_query;
    bool has_xfb_query;
+   uint8_t ngg_lds_scratch_size;
    uint32_t num_tess_patches;
    uint32_t esgs_itemsize; /* Only for VS or TES as ES */
+   uint32_t ngg_lds_vertex_size; /* VS,TES: Cull+XFB, GS: GSVS size */
    struct radv_vs_output_info outinfo;
    unsigned workgroup_size;
    bool force_vrs_per_vertex;
@@ -238,19 +239,13 @@ struct radv_shader_info {
       unsigned derivative_group : 2;
    } cs;
    struct {
+      ac_nir_tess_io_info io_info;
       uint64_t tes_inputs_read;
       uint64_t tes_patch_inputs_read;
-      uint64_t tcs_outputs_read;
-      uint64_t tcs_outputs_written;
-      uint32_t tcs_patch_outputs_read;
-      uint32_t tcs_patch_outputs_written;
       unsigned tcs_vertices_out;
       uint32_t num_lds_blocks;
-      uint8_t num_linked_inputs;          /* Number of reserved per-vertex input slots in LDS. */
-      uint8_t num_linked_outputs;         /* Number of reserved per-vertex output slots in VRAM. */
-      uint8_t num_linked_patch_outputs;   /* Number of reserved per-patch output slots in VRAM. */
+      uint8_t num_linked_inputs; /* Number of reserved per-vertex input slots in LDS. */
       bool tes_reads_tess_factors : 1;
-      nir_tcs_info info;
    } tcs;
    struct {
       enum mesa_prim output_prim;
@@ -339,6 +334,9 @@ void radv_nir_shader_info_pass(struct radv_device *device, const struct nir_shad
 
 void gfx10_get_ngg_info(const struct radv_device *device, struct radv_shader_info *es_info,
                         struct radv_shader_info *gs_info, struct gfx10_ngg_info *out);
+
+void gfx10_ngg_set_esgs_ring_itemsize(const struct radv_device *device, struct radv_shader_info *es_info,
+                                      struct radv_shader_info *gs_info, struct gfx10_ngg_info *out);
 
 void radv_nir_shader_info_link(struct radv_device *device, const struct radv_graphics_state_key *gfx_state,
                                struct radv_shader_stage *stages);

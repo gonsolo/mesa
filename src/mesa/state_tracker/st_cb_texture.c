@@ -1144,7 +1144,7 @@ guess_and_alloc_texture(struct st_context *st,
    unsigned nr_samples = 0;
    if (stObj->TargetIndex == TEXTURE_2D_MULTISAMPLE_INDEX ||
        stObj->TargetIndex == TEXTURE_2D_MULTISAMPLE_ARRAY_INDEX) {
-      int samples[16];
+      int samples[MAX_SAMPLES];
       st_QueryInternalFormat(st->ctx, 0, stImage->InternalFormat, GL_SAMPLES, samples);
       nr_samples = samples[0];
    }
@@ -2559,26 +2559,28 @@ st_CompressedTexSubImage(struct gl_context *ctx, GLuint dims,
    templ.first_layer = MIN2(layer, max_layer);
    templ.last_layer = MIN2(layer + d - 1, max_layer);
 
-   if (st_try_pbo_compressed_texsubimage(ctx, buf, buf_offset, &addr,
-                                         &templ))
-      return;
-
-   /* Some drivers can re-interpret surfaces but only one layer at a time.
-    * Fall back to doing a single try_pbo_upload_common per layer.
-    */
-   while (layer <= max_layer) {
-      templ.first_layer = MIN2(layer, max_layer);
-      templ.last_layer = templ.first_layer;
-      if (!st_try_pbo_compressed_texsubimage(ctx, buf, buf_offset, &addr,
-                                             &templ))
-         goto fallback;
-
-      /* By incrementing layer here, we ensure the fallback only uploads
-       * layers we failed to upload.
+   if (templ.first_layer != templ.last_layer &&
+       !screen->caps.compressed_surface_reinterpret_blocks_layered) {
+      /* Some drivers can re-interpret surfaces but only one layer at a time.
+       * Fall back to doing a single try_pbo_upload_common per layer.
        */
-      buf_offset += addr.pixels_per_row * addr.image_height;
-      layer++;
-      addr.depth--;
+      while (layer <= max_layer) {
+         templ.first_layer = MIN2(layer, max_layer);
+         templ.last_layer = templ.first_layer;
+         if (!st_try_pbo_compressed_texsubimage(ctx, buf, buf_offset, &addr,
+                                                &templ))
+            goto fallback;
+
+         /* By incrementing layer here, we ensure the fallback only uploads
+         * layers we failed to upload.
+         */
+         buf_offset += addr.pixels_per_row * addr.image_height;
+         layer++;
+         addr.depth--;
+      }
+      success = true;
+   } else {
+      success = st_try_pbo_compressed_texsubimage(ctx, buf, buf_offset, &addr, &templ);
    }
 
    if (success)
@@ -3470,7 +3472,7 @@ st_texture_storage(struct gl_context *ctx,
          num_samples = 2;
       }
 
-      for (; num_samples <= ctx->Const.MaxSamples; num_samples++) {
+      for (; num_samples <= MAX_SAMPLES; num_samples++) {
          if (screen->is_format_supported(screen, fmt, ptarget,
                                          num_samples, num_samples,
                                          PIPE_BIND_SAMPLER_VIEW)) {

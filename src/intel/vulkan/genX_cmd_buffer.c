@@ -480,32 +480,14 @@ transition_depth_buffer(struct anv_cmd_buffer *cmd_buffer,
       return;
 
    /* Initialize the indirect clear color prior to first use. */
-   const enum isl_format depth_format =
-      image->planes[depth_plane].primary_surface.isl.format;
-   const struct anv_address clear_color_addr =
-      anv_image_get_clear_color_addr(cmd_buffer->device, image, depth_format,
-                                     VK_IMAGE_ASPECT_DEPTH_BIT, true);
-   if (!anv_address_is_null(clear_color_addr) &&
+   if (image->planes[depth_plane].fast_clear_memory_range.size > 0 &&
        (initial_layout == VK_IMAGE_LAYOUT_UNDEFINED ||
         initial_layout == VK_IMAGE_LAYOUT_PREINITIALIZED)) {
-      const union isl_color_value clear_value =
-         anv_image_hiz_clear_value(image);
-
-      uint32_t depth_value[4] = {};
-      isl_color_value_pack(&clear_value, depth_format, depth_value);
-
-      const uint32_t clear_pixel_offset = clear_color_addr.offset +
-         isl_get_sampler_clear_field_offset(cmd_buffer->device->info,
-                                            depth_format);
-      const struct anv_address clear_pixel_addr = {
-         .bo = clear_color_addr.bo,
-         .offset = clear_pixel_offset,
-      };
-
-      struct mi_builder b;
-      mi_builder_init(&b, cmd_buffer->device->info, &cmd_buffer->batch);
-      mi_builder_set_write_check(&b, true);
-      mi_store(&b, mi_mem32(clear_pixel_addr), mi_imm(depth_value[0]));
+      const enum isl_format depth_format =
+         image->planes[depth_plane].primary_surface.isl.format;
+      genX(set_fast_clear_state)(cmd_buffer, image, depth_format,
+                                 ISL_SWIZZLE_IDENTITY,
+                                 anv_image_hiz_clear_value(image));
    }
 
    /* If will_full_fast_clear is set, the caller promises to fast-clear the
@@ -938,21 +920,11 @@ set_image_clear_color(struct anv_cmd_buffer *cmd_buffer,
       union isl_color_value clear_color;
       if (image->view_formats[i] == ISL_FORMAT_RAW) {
          /* Only used for cross aspect copies (color <-> depth/stencil) */
-         assert(vk_format_get_blocksize(image->vk.format) <= 32);
          assert(vk_format_is_color_depth_stencil_capable(image->vk.format));
+         assert(vk_format_get_blocksizebits(image->vk.format) <= 32);
          memcpy(clear_color.u32, pixel, sizeof(clear_color.u32));
       } else {
          isl_color_value_unpack(&clear_color, image->view_formats[i], pixel);
-      }
-
-      UNUSED union isl_color_value sample_color = clear_color;
-      if (isl_format_is_srgb(image->view_formats[i])) {
-         sample_color.f32[0] =
-            util_format_linear_to_srgb_float(clear_color.f32[0]);
-         sample_color.f32[1] =
-            util_format_linear_to_srgb_float(clear_color.f32[1]);
-         sample_color.f32[2] =
-            util_format_linear_to_srgb_float(clear_color.f32[2]);
       }
 
       const struct anv_address addr =
@@ -966,12 +938,19 @@ set_image_clear_color(struct anv_cmd_buffer *cmd_buffer,
       uint32_t *dw = anv_batch_emitn(&cmd_buffer->batch, 3 + 6,
                                      GENX(MI_STORE_DATA_IMM),
                                      .StoreQword = true, .Address = addr);
+
+      bool is_depth = aspect & VK_IMAGE_ASPECT_DEPTH_BIT;
+      uint64_t sampler_offset =
+         isl_get_sampler_clear_field_offset(cmd_buffer->device->info,
+                                            image->view_formats[i], is_depth);
       dw[3] = clear_color.u32[0];
       dw[4] = clear_color.u32[1];
       dw[5] = clear_color.u32[2];
       dw[6] = clear_color.u32[3];
-      dw[7] = pixel[0];
-      dw[8] = pixel[1];
+      dw[7] = 0;
+      dw[8] = 0;
+      dw[3 + sampler_offset / 4] = pixel[0];
+      dw[4 + sampler_offset / 4] = pixel[1];
 #else
       assert(cmd_buffer->device->isl_dev.ss.clear_color_state_size == 0);
       assert(cmd_buffer->device->isl_dev.ss.clear_value_size == 16);
@@ -982,10 +961,10 @@ set_image_clear_color(struct anv_cmd_buffer *cmd_buffer,
       dw[4] = clear_color.u32[1];
       dw[5] = clear_color.u32[2];
       dw[6] = clear_color.u32[3];
-      dw[7]  = sample_color.u32[0];
-      dw[8]  = sample_color.u32[1];
-      dw[9]  = sample_color.u32[2];
-      dw[10] = sample_color.u32[3];
+      dw[7] = fui(util_format_linear_to_srgb_float(clear_color.f32[0]));
+      dw[8] = fui(util_format_linear_to_srgb_float(clear_color.f32[1]));
+      dw[9] = fui(util_format_linear_to_srgb_float(clear_color.f32[2]));
+      dw[10] = clear_color.u32[3];
 #endif
    }
 }
@@ -997,11 +976,14 @@ genX(set_fast_clear_state)(struct anv_cmd_buffer *cmd_buffer,
                            const struct isl_swizzle swizzle,
                            union isl_color_value clear_color)
 {
+   VkImageAspectFlagBits aspect = image->vk.aspects &
+      (VK_IMAGE_ASPECT_COLOR_BIT | VK_IMAGE_ASPECT_DEPTH_BIT);
+
    uint32_t pixel[4] = {};
    union isl_color_value swiz_color =
       isl_color_value_swizzle_inv(clear_color, swizzle);
    isl_color_value_pack(&swiz_color, format, pixel);
-   set_image_clear_color(cmd_buffer, image, VK_IMAGE_ASPECT_COLOR_BIT, pixel);
+   set_image_clear_color(cmd_buffer, image, aspect, pixel);
 
    if (isl_color_value_is_zero(clear_color, format)) {
       /* This image has the auxiliary buffer enabled. We can mark the
@@ -1009,12 +991,10 @@ genX(set_fast_clear_state)(struct anv_cmd_buffer *cmd_buffer,
        * will match what's in every RENDER_SURFACE_STATE object when
        * it's being used for sampling.
        */
-      set_image_fast_clear_state(cmd_buffer, image,
-                                 VK_IMAGE_ASPECT_COLOR_BIT,
+      set_image_fast_clear_state(cmd_buffer, image, aspect,
                                  ANV_FAST_CLEAR_DEFAULT_VALUE);
    } else {
-      set_image_fast_clear_state(cmd_buffer, image,
-                                 VK_IMAGE_ASPECT_COLOR_BIT,
+      set_image_fast_clear_state(cmd_buffer, image, aspect,
                                  ANV_FAST_CLEAR_ANY);
    }
 }
@@ -1171,6 +1151,10 @@ transition_color_buffer(struct anv_cmd_buffer *cmd_buffer,
    enum anv_fast_clear_type final_fast_clear =
       anv_layout_to_fast_clear_type(devinfo, image, aspect, final_layout,
                                     dst_queue_flags);
+
+   /* We make this guarantee with optimalImageTransferToQueueFamilies */
+   if (devinfo->ver >= 20 && (src_queue_external || dst_queue_external))
+      assert(initial_aux_usage == final_aux_usage);
 
    /* We must override the anv_layout_to_* functions because they are unaware
     * of acquire/release direction.
@@ -4333,9 +4317,9 @@ cmd_buffer_accumulate_barrier_bits(struct anv_cmd_buffer *cmd_buffer,
    VkPipelineStageFlags2 src_stages = 0;
    VkPipelineStageFlags2 dst_stages = 0;
 
+   struct anv_device *device = cmd_buffer->device;
 #if GFX_VER < 20
    bool apply_sparse_flushes = false;
-   struct anv_device *device = cmd_buffer->device;
 #endif
    bool flush_query_copies = false;
 
@@ -4452,8 +4436,26 @@ cmd_buffer_accumulate_barrier_bits(struct anv_cmd_buffer *cmd_buffer,
 
          uint32_t base_layer, layer_count;
          if (image->vk.image_type == VK_IMAGE_TYPE_3D) {
-            base_layer = 0;
-            layer_count = u_minify(image->vk.extent.depth, range->baseMipLevel);
+            const uint32_t depth_at_base_mip =
+               u_minify(image->vk.extent.depth, range->baseMipLevel);
+            /* VK_KHR_maintenance9:
+             *
+             *    "The effects of image memory barriers and image layout
+             *    transitions on 3D images created with
+             *    VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT are scoped to the
+             *    slices specified by the user-provided
+             *    VkImageSubresourceRange."
+             */
+            if ((image->vk.create_flags & VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT) &&
+                device->vk.enabled_features.maintenance9) {
+               base_layer = range->baseArrayLayer;
+               layer_count = range->layerCount == VK_REMAINING_ARRAY_LAYERS ?
+                             (depth_at_base_mip - range->baseArrayLayer) :
+                             range->layerCount;
+            } else {
+               base_layer = 0;
+               layer_count = depth_at_base_mip;
+            }
          } else {
             base_layer = range->baseArrayLayer;
             layer_count = vk_image_subresource_layer_count(&image->vk, range);
@@ -5434,7 +5436,7 @@ void genX(CmdBeginRendering)(
       enum isl_aux_usage aux_usage =
          anv_layout_to_aux_usage(cmd_buffer->device->info,
                                  iview->image,
-                                 VK_IMAGE_ASPECT_COLOR_BIT,
+                                 iview->vk.aspects,
                                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
                                  att->imageLayout,
                                  cmd_buffer->queue_family->queueFlags);
@@ -5464,6 +5466,7 @@ void genX(CmdBeginRendering)(
          const bool fast_clear =
             (!is_multiview || (gfx->view_mask & 1)) &&
             anv_can_fast_clear_color(cmd_buffer, iview->image,
+                                     iview->vk.aspects,
                                      iview->vk.base_mip_level,
                                      &clear_rect, att->imageLayout,
                                      iview->planes[0].isl.format,
@@ -5476,7 +5479,7 @@ void genX(CmdBeginRendering)(
             if (is_multiview) {
                u_foreach_bit(view, gfx->view_mask) {
                   transition_color_buffer(cmd_buffer, iview->image,
-                                          VK_IMAGE_ASPECT_COLOR_BIT,
+                                          iview->vk.aspects,
                                           iview->vk.base_mip_level, 1,
                                           iview->vk.base_array_layer + view,
                                           1, /* layer_count */
@@ -5488,7 +5491,7 @@ void genX(CmdBeginRendering)(
                }
             } else {
                transition_color_buffer(cmd_buffer, iview->image,
-                                       VK_IMAGE_ASPECT_COLOR_BIT,
+                                       iview->vk.aspects,
                                        iview->vk.base_mip_level, 1,
                                        iview->vk.base_array_layer,
                                        gfx->layer_count,
@@ -5511,7 +5514,7 @@ void genX(CmdBeginRendering)(
                anv_image_ccs_op(cmd_buffer, iview->image,
                                 iview->planes[0].isl.format,
                                 iview->planes[0].isl.swizzle,
-                                VK_IMAGE_ASPECT_COLOR_BIT,
+                                iview->vk.aspects,
                                 0, 0, 1, ISL_AUX_OP_FAST_CLEAR,
                                 &fast_clear_color,
                                 false);
@@ -5519,7 +5522,7 @@ void genX(CmdBeginRendering)(
                anv_image_mcs_op(cmd_buffer, iview->image,
                                 iview->planes[0].isl.format,
                                 iview->planes[0].isl.swizzle,
-                                VK_IMAGE_ASPECT_COLOR_BIT,
+                                iview->vk.aspects,
                                 0, 1, ISL_AUX_OP_FAST_CLEAR,
                                 &fast_clear_color,
                                 false);
@@ -5538,7 +5541,7 @@ void genX(CmdBeginRendering)(
          if (is_multiview) {
             u_foreach_bit(view, clear_view_mask) {
                anv_image_clear_color(cmd_buffer, iview->image,
-                                     VK_IMAGE_ASPECT_COLOR_BIT,
+                                     iview->vk.aspects,
                                      aux_usage,
                                      iview->planes[0].isl.format,
                                      iview->planes[0].isl.swizzle,
@@ -5548,7 +5551,7 @@ void genX(CmdBeginRendering)(
             }
          } else if (clear_rect.layerCount > 0) {
             anv_image_clear_color(cmd_buffer, iview->image,
-                                  VK_IMAGE_ASPECT_COLOR_BIT,
+                                  iview->vk.aspects,
                                   aux_usage,
                                   iview->planes[0].isl.format,
                                   iview->planes[0].isl.swizzle,
@@ -5573,7 +5576,7 @@ void genX(CmdBeginRendering)(
 
       anv_image_fill_surface_state(cmd_buffer->device,
                                    iview->image,
-                                   VK_IMAGE_ASPECT_COLOR_BIT,
+                                   iview->vk.aspects,
                                    &isl_view,
                                    ISL_SURF_USAGE_RENDER_TARGET_BIT,
                                    aux_usage, &fast_clear_color,
@@ -5681,11 +5684,11 @@ void genX(CmdBeginRendering)(
 
       if (clear_aspects != 0) {
          const bool hiz_clear =
-            anv_can_hiz_clear_ds_view(cmd_buffer->device, d_iview,
-                                      depth_layout, clear_aspects,
-                                      clear_value.depth,
-                                      render_area,
-                                      cmd_buffer->queue_family->queueFlags);
+            anv_can_hiz_clear_image(cmd_buffer, ds_iview->image,
+                                    depth_layout, clear_aspects,
+                                    clear_value.depth,
+                                    render_area,
+                                    ds_iview->vk.base_mip_level);
 
          if (depth_layout != initial_depth_layout) {
             assert(render_area.offset.x == 0 && render_area.offset.y == 0 &&
@@ -5876,6 +5879,9 @@ cmd_buffer_mark_attachment_written(struct anv_cmd_buffer *cmd_buffer,
    if (iview == NULL)
       return;
 
+   if (aspect == 0)
+      aspect = iview->vk.aspects;
+
    if (gfx->view_mask == 0) {
       genX(cmd_buffer_mark_image_written)(cmd_buffer, iview->image,
                                           aspect, att->aux_usage,
@@ -5912,8 +5918,7 @@ void genX(CmdEndRendering)(
       is_multiview ? util_last_bit(gfx->view_mask) : gfx->layer_count;
 
    for (uint32_t i = 0; i < gfx->color_att_count; i++) {
-      cmd_buffer_mark_attachment_written(cmd_buffer, &gfx->color_att[i],
-                                         VK_IMAGE_ASPECT_COLOR_BIT);
+      cmd_buffer_mark_attachment_written(cmd_buffer, &gfx->color_att[i], 0);
    }
 
    cmd_buffer_mark_attachment_written(cmd_buffer, &gfx->depth_att,

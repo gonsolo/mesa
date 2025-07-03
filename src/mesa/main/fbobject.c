@@ -2759,8 +2759,12 @@ _mesa_renderbuffer_storage(struct gl_context *ctx, struct gl_renderbuffer *rb,
    if (samples != 0) {
       assert(samples > 0);
       assert(_mesa_check_sample_count(ctx, GL_RENDERBUFFER,
-                                      internalFormat, samples,
-                                      storageSamples) == GL_NO_ERROR);
+                                      internalFormat, samples) == GL_NO_ERROR);
+   }
+   if (samples != storageSamples) {
+      assert(_mesa_check_storage_sample_count(ctx,
+                                              internalFormat, samples,
+                                              storageSamples) == GL_NO_ERROR);
    }
 
    FLUSH_VERTICES(ctx, _NEW_BUFFERS, 0);
@@ -2850,7 +2854,7 @@ renderbuffer_storage(struct gl_context *ctx, struct gl_renderbuffer *rb,
        * note: driver may choose to use more samples than what's requested
        */
       sample_count_error = _mesa_check_sample_count(ctx, GL_RENDERBUFFER,
-            internalFormat, samples, storageSamples);
+            internalFormat, samples);
 
       /* Section 2.5 (GL Errors) of OpenGL 3.0 specification, page 16:
        *
@@ -2951,7 +2955,6 @@ renderbuffer_storage_target(GLenum target, GLenum internalFormat,
                         height, samples, storageSamples, func);
 }
 
-
 void GLAPIENTRY
 _mesa_EGLImageTargetRenderbufferStorageOES(GLenum target, GLeglImageOES image)
 {
@@ -3037,6 +3040,17 @@ _mesa_RenderbufferStorageMultisampleAdvancedAMD(
       GLenum target, GLsizei samples, GLsizei storageSamples,
       GLenum internalFormat, GLsizei width, GLsizei height)
 {
+   GET_CURRENT_CONTEXT(ctx);
+   GLenum sample_count_error =
+      _mesa_check_storage_sample_count(ctx, internalFormat, samples,
+                                       storageSamples);
+   if (sample_count_error != GL_NO_ERROR) {
+      _mesa_error(ctx, sample_count_error,
+                  "glRenderbufferStorageMultisampleAdvancedAMD(samples=%d)",
+                  samples);
+      return;
+   }
+
    renderbuffer_storage_target(target, internalFormat, width, height,
                                samples, storageSamples,
                                "glRenderbufferStorageMultisampleAdvancedAMD");
@@ -3113,6 +3127,17 @@ _mesa_NamedRenderbufferStorageMultisampleAdvancedAMD(
       GLuint renderbuffer, GLsizei samples, GLsizei storageSamples,
       GLenum internalformat, GLsizei width, GLsizei height)
 {
+   GET_CURRENT_CONTEXT(ctx);
+   GLenum sample_count_error =
+      _mesa_check_storage_sample_count(ctx, internalformat, samples,
+                                       storageSamples);
+   if (sample_count_error != GL_NO_ERROR) {
+      _mesa_error(ctx, sample_count_error,
+                  "glNamedRenderbufferStorageMultisampleAdvancedAMD(samples=%d)",
+                  samples);
+      return;
+   }
+
    renderbuffer_storage_named(renderbuffer, internalformat, width, height,
                               samples, storageSamples,
                               "glNamedRenderbufferStorageMultisampleAdvancedAMD");
@@ -3893,10 +3918,12 @@ check_textarget(struct gl_context *ctx, int dims, GLenum target,
             (_mesa_is_gles(ctx) && ctx->Version < 30);
       break;
    case GL_TEXTURE_2D_MULTISAMPLE:
+      err = dims != 2 ||
+            !_mesa_has_texture_multisample(ctx);
+      break;
    case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
       err = dims != 2 ||
-            !ctx->Extensions.ARB_texture_multisample ||
-            (_mesa_is_gles(ctx) && ctx->Version < 31);
+            !_mesa_has_texture_multisample_array(ctx);
       break;
    case GL_TEXTURE_RECTANGLE:
       err = dims != 2 || _mesa_is_gles(ctx) ||
@@ -4025,6 +4052,32 @@ check_level(struct gl_context *ctx, struct gl_texture_object *texObj,
    return true;
 }
 
+/**
+ * Common code called by all gl*FramebufferTexture*() entry points to verify
+ * the samples.
+ *
+ * \return true if no errors, false if errors
+ */
+static bool
+check_samples(struct gl_context *ctx, struct gl_texture_object *texObj,
+            GLenum target, GLint level, GLint samples, const char *caller)
+{
+   if (samples > 0) {
+      const struct gl_texture_image *texImage =
+         texObj->Image[_mesa_tex_target_to_face(target)][level];
+      assert(texImage);
+      GLenum sample_count_error =
+         _mesa_check_sample_count(ctx, target, texImage->InternalFormat,
+                                 samples);
+      if (sample_count_error != GL_NO_ERROR) {
+         _mesa_error(ctx, sample_count_error, "%s(samples=%d)", caller,
+                     samples);
+         return false;
+      }
+   }
+
+   return true;
+}
 
 struct gl_renderbuffer_attachment *
 _mesa_get_and_validate_attachment(struct gl_context *ctx,
@@ -4193,6 +4246,9 @@ framebuffer_texture_with_dims(int dims, GLenum target, GLuint framebuffer,
 
       if (!check_level(ctx, texObj, textarget, level, caller))
          return;
+
+      if (!check_samples(ctx, texObj, textarget, level, samples, caller))
+         return;
    }
 
    struct gl_renderbuffer_attachment *att =
@@ -4352,25 +4408,6 @@ frame_buffer_texture(GLuint framebuffer, GLenum target,
       }
 
       if (!no_error) {
-         /* EXT_multisampled_render_to_texture:
-
-            If samples is greater than the 
-            value of MAX_SAMPLES_EXT, then the error INVALID_VALUE is generated. 
-            An INVALID_OPERATION error is generated if samples is greater than
-            the maximum number of samples supported for target and its
-            internalformat. If samples is zero, then TEXTURE_SAMPLES_EXT is set
-            to zero, and FramebufferTexture2DMultisampleEXT behaves like
-            FramebufferTexture2D.
-          */
-         if (samples > ctx->Const.MaxSamples) {
-            _mesa_error(ctx, GL_INVALID_VALUE, "%s(invalid sample count %u)",
-                        func, samples);
-         }
-         if (samples > ctx->Const.MaxFramebufferSamples) {
-            _mesa_error(ctx, GL_INVALID_OPERATION, "%s(invalid sample count %u)",
-                        func, samples);
-         }
-
          if (!check_layered) {
             if (!check_texture_target(ctx, texObj->Target, func))
                return;
@@ -4380,6 +4417,9 @@ frame_buffer_texture(GLuint framebuffer, GLenum target,
          }
 
          if (!check_level(ctx, texObj, texObj->Target, level, func))
+            return;
+
+         if (!check_samples(ctx, texObj, texObj->Target, level, samples, func))
             return;
       }
 

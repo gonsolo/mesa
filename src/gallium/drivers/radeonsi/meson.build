@@ -154,6 +154,11 @@ if with_amdgpu_virtio
   libradeonsi_cflags += ['-DHAVE_AMDGPU_VIRTIO']
 endif
 
+radeonsi_build_id = get_option('radeonsi-build-id')
+if radeonsi_build_id != ''
+  libradeonsi_cflags += '-DRADEONSI_BUILD_ID_OVERRIDE="' + radeonsi_build_id + '"'
+endif
+
 libradeonsi = static_library(
   'radeonsi',
   [files_libradeonsi, sid_tables_h],
@@ -166,7 +171,7 @@ libradeonsi = static_library(
 driver_radeonsi = declare_dependency(
   compile_args : ['-DGALLIUM_RADEONSI'] + libradeonsi_cflags,
   link_with : radeonsi_gfx_libs + [
-    libradeonsi, libradeonwinsys, libamdgpuwinsys, libamd_common, libamd_common_llvm, libvpe, libgm
+    libradeonsi, libradeonwinsys, libamdgpuwinsys, libamd_common, libamd_common_llvm, libvpe, libgm, liblanczos
   ],
   dependencies : idep_nir,
 )

@@ -128,6 +128,12 @@ static const struct dri2_wl_visual {
       WL_DRM_FORMAT_XRGB8888,
    },
    {
+      WL_DRM_FORMAT_RGB888,
+      PIPE_FORMAT_B8G8R8_UNORM,
+      PIPE_FORMAT_NONE,
+      WL_DRM_FORMAT_RGB888,
+   },
+   {
       WL_DRM_FORMAT_ABGR8888,
       PIPE_FORMAT_RGBA8888_UNORM,
       PIPE_FORMAT_NONE,
@@ -138,6 +144,12 @@ static const struct dri2_wl_visual {
       PIPE_FORMAT_RGBX8888_UNORM,
       PIPE_FORMAT_NONE,
       WL_DRM_FORMAT_XBGR8888,
+   },
+   {
+      WL_DRM_FORMAT_BGR888,
+      PIPE_FORMAT_R8G8B8_UNORM,
+      PIPE_FORMAT_NONE,
+      WL_DRM_FORMAT_BGR888,
    },
    {
       WL_DRM_FORMAT_RGB565,
@@ -865,7 +877,7 @@ dri2_wl_destroy_surface(_EGLDisplay *disp, _EGLSurface *surf)
 
    for (int i = 0; i < ARRAY_SIZE(dri2_surf->color_buffers); i++) {
       if (dri2_surf->color_buffers[i].wayland_buffer.buffer)
-         wl_buffer_destroy(dri2_surf->color_buffers[i].wayland_buffer.buffer);
+         loader_wayland_buffer_destroy(&dri2_surf->color_buffers[i].wayland_buffer);
       if (dri2_surf->color_buffers[i].dri_image)
          dri2_destroy_image(dri2_surf->color_buffers[i].dri_image);
       if (dri2_surf->color_buffers[i].linear_copy)
@@ -1078,7 +1090,11 @@ create_dri_image(struct dri2_egl_surface *dri2_surf,
       }
 
       if (!implicit_mod_supported) {
-         return;
+         if (surf_modifiers_count > 0) {
+            u_vector_finish(&modifiers_subset);
+         }
+
+         goto cleanup_present;
       }
 
       num_modifiers = 0;
@@ -1441,7 +1457,7 @@ update_buffers(struct dri2_egl_surface *dri2_surf,
       if (!dri2_surf->color_buffers[i].locked &&
           dri2_surf->color_buffers[i].wayland_buffer.buffer &&
           dri2_surf->color_buffers[i].age > BUFFER_TRIM_AGE_HYSTERESIS) {
-         wl_buffer_destroy(dri2_surf->color_buffers[i].wayland_buffer.buffer);
+         loader_wayland_buffer_destroy(&dri2_surf->color_buffers[i].wayland_buffer);
          dri2_destroy_image(dri2_surf->color_buffers[i].dri_image);
          if (dri2_dpy->fd_render_gpu != dri2_dpy->fd_display_gpu)
             dri2_destroy_image(
@@ -2262,9 +2278,14 @@ dri2_wl_add_configs_for_visuals(_EGLDisplay *disp)
          conversion = true;
       }
 
+      EGLint attr_list[] = {
+         EGL_NATIVE_VISUAL_ID, dri2_wl_visuals[idx].wl_drm_format,
+         EGL_NONE,
+      };
+
       /* The format is supported one way or another; add the EGLConfig */
       dri2_conf = dri2_add_config(disp, dri2_dpy->driver_configs[i],
-                                  EGL_WINDOW_BIT, NULL);
+                                  EGL_WINDOW_BIT, attr_list);
       if (!dri2_conf)
          continue;
 

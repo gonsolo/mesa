@@ -838,98 +838,6 @@ static void si_shader_es(struct si_screen *sscreen, struct si_shader *shader)
    ac_pm4_finalize(&pm4->base);
 }
 
-void gfx9_get_gs_info(struct si_shader_selector *es, struct si_shader_selector *gs,
-                      struct gfx9_gs_info *out)
-{
-   unsigned gs_num_invocations = MAX2(gs->info.base.gs.invocations, 1);
-   unsigned input_prim = gs->info.base.gs.input_primitive;
-   bool uses_adjacency = mesa_prim_has_adjacency((enum mesa_prim)input_prim);
-
-   /* All these are in dwords: */
-   /* We can't allow using the whole LDS, because GS waves compete with
-    * other shader stages for LDS space. */
-   const unsigned max_lds_size = 8 * 1024;
-   const unsigned esgs_itemsize = es->info.esgs_vertex_stride / 4;
-   unsigned esgs_lds_size;
-
-   /* All these are per subgroup: */
-   const unsigned max_out_prims = 32 * 1024;
-   const unsigned max_es_verts = 255;
-   const unsigned ideal_gs_prims = 64;
-   unsigned max_gs_prims, gs_prims;
-   unsigned min_es_verts, es_verts, worst_case_es_verts;
-
-   if (uses_adjacency || gs_num_invocations > 1)
-      max_gs_prims = 127 / gs_num_invocations;
-   else
-      max_gs_prims = 255;
-
-   /* MAX_PRIMS_PER_SUBGROUP = gs_prims * max_vert_out * gs_invocations.
-    * Make sure we don't go over the maximum value.
-    */
-   if (gs->info.base.gs.vertices_out > 0) {
-      max_gs_prims =
-         MIN2(max_gs_prims, max_out_prims / (gs->info.base.gs.vertices_out * gs_num_invocations));
-   }
-   assert(max_gs_prims > 0);
-
-   /* If the primitive has adjacency, halve the number of vertices
-    * that will be reused in multiple primitives.
-    */
-   min_es_verts = gs->info.gs_input_verts_per_prim / (uses_adjacency ? 2 : 1);
-
-   gs_prims = MIN2(ideal_gs_prims, max_gs_prims);
-   worst_case_es_verts = MIN2(min_es_verts * gs_prims, max_es_verts);
-
-   /* Compute ESGS LDS size based on the worst case number of ES vertices
-    * needed to create the target number of GS prims per subgroup.
-    */
-   esgs_lds_size = esgs_itemsize * worst_case_es_verts;
-
-   /* If total LDS usage is too big, refactor partitions based on ratio
-    * of ESGS item sizes.
-    */
-   if (esgs_lds_size > max_lds_size) {
-      /* Our target GS Prims Per Subgroup was too large. Calculate
-       * the maximum number of GS Prims Per Subgroup that will fit
-       * into LDS, capped by the maximum that the hardware can support.
-       */
-      gs_prims = MIN2((max_lds_size / (esgs_itemsize * min_es_verts)), max_gs_prims);
-      assert(gs_prims > 0);
-      worst_case_es_verts = MIN2(min_es_verts * gs_prims, max_es_verts);
-
-      esgs_lds_size = esgs_itemsize * worst_case_es_verts;
-      assert(esgs_lds_size <= max_lds_size);
-   }
-
-   /* Now calculate remaining ESGS information. */
-   if (esgs_lds_size)
-      es_verts = MIN2(esgs_lds_size / esgs_itemsize, max_es_verts);
-   else
-      es_verts = max_es_verts;
-
-   /* Vertices for adjacency primitives are not always reused, so restore
-    * it for ES_VERTS_PER_SUBGRP.
-    */
-   min_es_verts = gs->info.gs_input_verts_per_prim;
-
-   /* For normal primitives, the VGT only checks if they are past the ES
-    * verts per subgroup after allocating a full GS primitive and if they
-    * are, kick off a new subgroup.  But if those additional ES verts are
-    * unique (e.g. not reused) we need to make sure there is enough LDS
-    * space to account for those ES verts beyond ES_VERTS_PER_SUBGRP.
-    */
-   es_verts -= min_es_verts - 1;
-
-   out->es_verts_per_subgroup = es_verts;
-   out->gs_prims_per_subgroup = gs_prims;
-   out->gs_inst_prims_in_subgroup = gs_prims * gs_num_invocations;
-   out->max_prims_per_subgroup = out->gs_inst_prims_in_subgroup * gs->info.base.gs.vertices_out;
-   out->esgs_ring_size = esgs_lds_size;
-
-   assert(out->max_prims_per_subgroup <= max_out_prims);
-}
-
 static void gfx9_set_gs_sgpr_num_es_outputs(struct si_context *sctx, unsigned esgs_vertex_stride)
 {
    /* The stride must always be odd (e.g. a multiple of 4 + 1) to reduce LDS bank conflicts. */
@@ -1603,11 +1511,11 @@ static void gfx10_shader_ngg(struct si_screen *sscreen, struct si_shader *shader
                                                                   : V_02870C_SPI_SHADER_NONE) |
       S_02870C_POS3_EXPORT_FORMAT(shader->info.nr_pos_exports > 3 ? V_02870C_SPI_SHADER_4COMP
                                                                   : V_02870C_SPI_SHADER_NONE);
-   shader->ngg.ge_max_output_per_subgroup = S_0287FC_MAX_VERTS_PER_SUBGROUP(shader->ngg.max_out_verts);
+   shader->ngg.ge_max_output_per_subgroup = S_0287FC_MAX_VERTS_PER_SUBGROUP(shader->ngg.info.max_out_verts);
    shader->ngg.vgt_gs_instance_cnt =
       S_028B90_ENABLE(gs_num_invocations > 1) |
       S_028B90_CNT(gs_num_invocations) |
-      S_028B90_EN_MAX_VERT_OUT_PER_GS_INSTANCE(shader->ngg.max_vert_out_per_gs_instance);
+      S_028B90_EN_MAX_VERT_OUT_PER_GS_INSTANCE(shader->ngg.info.max_vert_out_per_gs_instance);
    shader->pa_cl_vs_out_cntl = si_get_vs_out_cntl(shader->selector, shader, true);
 
    if (gs_stage == MESA_SHADER_GEOMETRY) {
@@ -1710,19 +1618,19 @@ static void gfx10_shader_ngg(struct si_screen *sscreen, struct si_shader *shader
       unsigned prim_amp_factor = gs_stage == MESA_SHADER_GEOMETRY ?
                                     gs_sel->info.base.gs.vertices_out : 1;
 
-      shader->ge_cntl = S_03096C_PRIMS_PER_SUBGRP(shader->ngg.max_gsprims) |
-                        S_03096C_VERTS_PER_SUBGRP(shader->ngg.hw_max_esverts) |
+      shader->ge_cntl = S_03096C_PRIMS_PER_SUBGRP(shader->ngg.info.max_gsprims) |
+                        S_03096C_VERTS_PER_SUBGRP(shader->ngg.info.hw_max_esverts) |
                         S_03096C_PRIM_GRP_SIZE_GFX11(
                            CLAMP(max_prim_grp_size / MAX2(prim_amp_factor, 1), 1, 256)) |
                         S_03096C_DIS_PG_SIZE_ADJUST_FOR_STRIP(sscreen->info.gfx_level >= GFX12);
    } else {
-      shader->ge_cntl = S_03096C_PRIM_GRP_SIZE_GFX10(shader->ngg.max_gsprims) |
-                        S_03096C_VERT_GRP_SIZE(shader->ngg.hw_max_esverts);
+      shader->ge_cntl = S_03096C_PRIM_GRP_SIZE_GFX10(shader->ngg.info.max_gsprims) |
+                        S_03096C_VERT_GRP_SIZE(shader->ngg.info.hw_max_esverts);
 
       shader->ngg.vgt_gs_onchip_cntl =
-         S_028A44_ES_VERTS_PER_SUBGRP(shader->ngg.hw_max_esverts) |
-         S_028A44_GS_PRIMS_PER_SUBGRP(shader->ngg.max_gsprims) |
-         S_028A44_GS_INST_PRIMS_IN_SUBGRP(shader->ngg.max_gsprims * gs_num_invocations);
+         S_028A44_ES_VERTS_PER_SUBGRP(shader->ngg.info.hw_max_esverts) |
+         S_028A44_GS_PRIMS_PER_SUBGRP(shader->ngg.info.max_gsprims) |
+         S_028A44_GS_INST_PRIMS_IN_SUBGRP(shader->ngg.info.max_gsprims * gs_num_invocations);
 
       /* On gfx10, the GE only checks against the maximum number of ES verts after
        * allocating a full GS primitive. So we need to ensure that whenever
@@ -1734,13 +1642,13 @@ static void gfx10_shader_ngg(struct si_screen *sscreen, struct si_shader *shader
        */
       if ((sscreen->info.gfx_level == GFX10) &&
           (es_stage == MESA_SHADER_VERTEX || gs_stage == MESA_SHADER_VERTEX) && /* = no tess */
-          shader->ngg.hw_max_esverts != 256 &&
-          shader->ngg.hw_max_esverts > 5) {
+          shader->ngg.info.hw_max_esverts != 256 &&
+          shader->ngg.info.hw_max_esverts > 5) {
          /* This could be based on the input primitive type. 5 is the worst case
           * for primitive types with adjacency.
           */
          shader->ge_cntl &= C_03096C_VERT_GRP_SIZE;
-         shader->ge_cntl |= S_03096C_VERT_GRP_SIZE(shader->ngg.hw_max_esverts - 5);
+         shader->ge_cntl |= S_03096C_VERT_GRP_SIZE(shader->ngg.info.hw_max_esverts - 5);
       }
    }
 
@@ -3483,42 +3391,6 @@ static void si_init_shader_selector_async(void *job, void *gdata, int thread_ind
       }
 
       *si_get_main_shader_part(sel, &shader->key, shader->wave_size) = shader;
-
-      /* Unset "outputs_written" flags for outputs converted to
-       * DEFAULT_VAL, so that later inter-shader optimizations don't
-       * try to eliminate outputs that don't exist in the final
-       * shader.
-       *
-       * This is only done if non-monolithic shaders are enabled.
-       */
-      if ((sel->stage == MESA_SHADER_VERTEX ||
-           sel->stage == MESA_SHADER_TESS_EVAL ||
-           sel->stage == MESA_SHADER_GEOMETRY) &&
-          !shader->key.ge.as_ls && !shader->key.ge.as_es) {
-         unsigned i;
-
-         for (i = 0; i < sel->info.num_outputs; i++) {
-            unsigned semantic = sel->info.output_semantic[i];
-            unsigned ps_input_cntl = shader->info.vs_output_ps_input_cntl[semantic];
-
-            /* OFFSET=0x20 means DEFAULT_VAL, which means VS doesn't export it. */
-            if (G_028644_OFFSET(ps_input_cntl) != 0x20)
-               continue;
-
-            unsigned id;
-
-            /* Remove the output from the mask. */
-            if ((semantic <= VARYING_SLOT_VAR31 || semantic >= VARYING_SLOT_VAR0_16BIT) &&
-                semantic != VARYING_SLOT_POS &&
-                semantic != VARYING_SLOT_PSIZ &&
-                semantic != VARYING_SLOT_CLIP_VERTEX &&
-                semantic != VARYING_SLOT_EDGE &&
-                semantic != VARYING_SLOT_LAYER) {
-               id = si_shader_io_get_unique_index(semantic);
-               sel->info.outputs_written_before_ps &= ~(1ull << id);
-            }
-         }
-      }
    }
 
    /* Free NIR. We only keep serialized NIR after this point. */
@@ -3569,7 +3441,7 @@ void si_get_active_slot_masks(struct si_screen *sscreen, const struct si_shader_
 
    /* The layout is: sb[last] ... sb[0], cb[0] ... cb[last] */
    start = si_get_shaderbuf_slot(num_shaderbufs - 1);
-   *const_and_shader_buffers = u_bit_consecutive64(start, num_shaderbufs + num_constbufs);
+   *const_and_shader_buffers = BITFIELD64_RANGE(start, num_shaderbufs + num_constbufs);
 
    /* The layout is:
     *   - fmask[last] ... fmask[0]     go to [15-last .. 15]
@@ -3584,7 +3456,7 @@ void si_get_active_slot_masks(struct si_screen *sscreen, const struct si_shader_
       num_images = SI_NUM_IMAGES + num_msaa_images; /* add FMASK descriptors */
 
    start = si_get_image_slot(num_images - 1) / 2;
-   *samplers_and_images = u_bit_consecutive64(start, num_images / 2 + num_samplers);
+   *samplers_and_images = BITFIELD64_RANGE(start, num_images / 2 + num_samplers);
 }
 
 static void *si_create_shader_selector(struct pipe_context *ctx,
@@ -4809,22 +4681,16 @@ void si_update_tess_io_layout_state(struct si_context *sctx)
     */
    unsigned num_tcs_output_cp = tcs->info.base.tess.tcs_vertices_out;
    unsigned lds_input_vertex_size = si_shader_lshs_vertex_stride(ls_current);
-   unsigned num_mem_tcs_outputs = util_last_bit64(tcs->info.tcs_outputs_written_for_tes);
-   unsigned num_mem_tcs_patch_outputs =
-      util_last_bit(tcs->info.patch_outputs_written_for_tes |
-                    (!ls_current->is_monolithic || ls_current->key.ge.opt.tes_reads_tess_factors ?
-                        tcs->info.tess_levels_written_for_tes : 0));
+   unsigned num_remapped_tess_level_outputs =
+      !ls_current->is_monolithic || ls_current->key.ge.opt.tes_reads_tess_factors ?
+            tcs->info.num_tess_level_vram_outputs : 0;
    unsigned num_patches, lds_size;
 
    /* Compute NUM_PATCHES and LDS_SIZE. */
-   ac_nir_compute_tess_wg_info(&sctx->screen->info, tcs->info.base.outputs_read,
-                               tcs->info.base.outputs_written, tcs->info.base.patch_outputs_read,
-                               tcs->info.base.patch_outputs_written,
+   ac_nir_compute_tess_wg_info(&sctx->screen->info, &tcs->info.tess_io_info,
                                tcs->info.base.tess.tcs_vertices_out, ls_current->wave_size,
-                               tess_uses_primid, tcs->info.tessfactors_are_def_in_all_invocs,
-                               num_tcs_input_cp, lds_input_vertex_size,
-                               num_mem_tcs_outputs, num_mem_tcs_patch_outputs,
-                               &num_patches, &lds_size);
+                               tess_uses_primid, num_tcs_input_cp, lds_input_vertex_size,
+                               num_remapped_tess_level_outputs, &num_patches, &lds_size);
 
    if (sctx->num_patches_per_workgroup != num_patches) {
       sctx->num_patches_per_workgroup = num_patches;
@@ -4833,24 +4699,30 @@ void si_update_tess_io_layout_state(struct si_context *sctx)
 
    /* Compute userdata SGPRs. */
    unsigned num_lds_vs_outputs = lds_input_vertex_size / 16;
+   unsigned tcs_mem_attrib_stride = align(num_patches * num_tcs_output_cp * 16, 256) / 256;
+
    assert(ls_current->config.lds_size == 0);
    assert(num_tcs_input_cp <= 32);
    assert(num_tcs_output_cp <= 32);
-   assert(num_patches <= 128);
+   assert(num_patches <= 127);
+   assert(tcs_mem_attrib_stride <= 31);
    assert(num_lds_vs_outputs <= 63);
-   assert(num_mem_tcs_outputs <= 63);
+   assert(tcs->info.tess_io_info.highest_remapped_vram_output <= 63);
 
    uint64_t ring_va =
       sctx->ws->cs_is_secure(&sctx->gfx_cs) ?
           si_resource(sctx->screen->tess_rings_tmz)->gpu_address :
           si_resource(sctx->screen->tess_rings)->gpu_address;
-   assert((ring_va & u_bit_consecutive(0, 19)) == 0);
+   assert((ring_va & BITFIELD_MASK(19)) == 0);
+
+   unsigned shared_fields = num_patches | (tcs_mem_attrib_stride << 12) |
+                            (num_lds_vs_outputs << 17) |
+                            (tcs->info.tess_io_info.highest_remapped_vram_output << 23);
 
    sctx->tes_offchip_ring_va_sgpr = ring_va;
-   sctx->tcs_offchip_layout &= 0xe0000000;
-   sctx->tcs_offchip_layout |=
-      (num_patches - 1) | ((num_tcs_output_cp - 1) << 7) | ((num_tcs_input_cp - 1) << 12) |
-      (num_lds_vs_outputs << 17) | (num_mem_tcs_outputs << 23);
+   sctx->tcs_offchip_layout = (sctx->tcs_offchip_layout & 0xe0000000) |
+                              shared_fields | ((num_tcs_input_cp - 1) << 7);
+   sctx->tes_offchip_layout = shared_fields | ((num_tcs_output_cp - 1) << 7);
 
    unsigned ls_hs_rsrc2;
 
@@ -4939,18 +4811,18 @@ static void gfx6_emit_tess_io_layout_state(struct si_context *sctx, unsigned ind
    if (sctx->screen->info.has_set_sh_pairs_packed) {
       gfx11_opt_push_gfx_sh_reg(tes_sh_base + SI_SGPR_TES_OFFCHIP_LAYOUT * 4,
                                 SI_TRACKED_SPI_SHADER_USER_DATA_ES__BASE_VERTEX,
-                                sctx->tcs_offchip_layout);
+                                sctx->tes_offchip_layout);
       gfx11_opt_push_gfx_sh_reg(tes_sh_base + SI_SGPR_TES_OFFCHIP_ADDR * 4,
                                 SI_TRACKED_SPI_SHADER_USER_DATA_ES__DRAWID,
                                 sctx->tes_offchip_ring_va_sgpr);
    } else if (sctx->ngg || sctx->shader.gs.cso) {
       radeon_opt_set_sh_reg2(tes_sh_base + SI_SGPR_TES_OFFCHIP_LAYOUT * 4,
                              SI_TRACKED_SPI_SHADER_USER_DATA_ES__BASE_VERTEX,
-                             sctx->tcs_offchip_layout, sctx->tes_offchip_ring_va_sgpr);
+                             sctx->tes_offchip_layout, sctx->tes_offchip_ring_va_sgpr);
    } else {
       radeon_opt_set_sh_reg2(tes_sh_base + SI_SGPR_TES_OFFCHIP_LAYOUT * 4,
                              SI_TRACKED_SPI_SHADER_USER_DATA_VS__BASE_VERTEX,
-                             sctx->tcs_offchip_layout, sctx->tes_offchip_ring_va_sgpr);
+                             sctx->tes_offchip_layout, sctx->tes_offchip_ring_va_sgpr);
    }
    radeon_end();
 
@@ -4994,7 +4866,7 @@ static void gfx12_emit_tess_io_layout_state(struct si_context *sctx, unsigned in
     */
    gfx12_opt_push_gfx_sh_reg(tes_sh_base + SI_SGPR_TES_OFFCHIP_LAYOUT * 4,
                              SI_TRACKED_SPI_SHADER_USER_DATA_ES__BASE_VERTEX,
-                             sctx->tcs_offchip_layout);
+                             sctx->tes_offchip_layout);
    gfx12_opt_push_gfx_sh_reg(tes_sh_base + SI_SGPR_TES_OFFCHIP_ADDR * 4,
                              SI_TRACKED_SPI_SHADER_USER_DATA_ES__DRAWID,
                              sctx->tes_offchip_ring_va_sgpr);
@@ -5132,7 +5004,9 @@ static void si_emit_spi_ge_ring_state(struct si_context *sctx, unsigned index)
       si_cp_release_acquire_mem_pws(sctx, &sctx->gfx_cs, V_028A90_BOTTOM_OF_PIPE_TS, 0,
                                     V_580_CP_ME, 0);
 
-      uint64_t attr_address = sscreen->attribute_pos_prim_ring->gpu_address;
+      uint64_t attr_address = sctx->ws->cs_is_secure(&sctx->gfx_cs) ?
+         sscreen->attribute_pos_prim_ring_tmz->gpu_address :
+         sscreen->attribute_pos_prim_ring->gpu_address;
       assert((attr_address >> 32) == sscreen->info.address32_hi);
 
       radeon_begin(&sctx->gfx_cs);
@@ -5161,7 +5035,7 @@ static void si_emit_spi_ge_ring_state(struct si_context *sctx, unsigned index)
                      S_0309AC_FORCE_SE_SCOPE(1) |
                      S_0309AC_PAB_NOFILL(1));         /* R_0309AC_GE_PRIM_RING_SIZE */
 
-         if (sctx->gfx_level == GFX12) {
+         if (sctx->gfx_level == GFX12 && sscreen->info.pfp_fw_version >= 2680) {
             /* Mitigate the HiZ GPU hang by increasing a timeout when
              * BOTTOM_OF_PIPE_TS is used as the workaround. This must be
              * emitted when the gfx queue is idle.

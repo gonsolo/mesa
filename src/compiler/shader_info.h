@@ -52,10 +52,14 @@ typedef struct shader_info {
    /** The shader stage, such as MESA_SHADER_VERTEX. */
    gl_shader_stage stage:8;
 
-   /** The shader stage in a non SSO linked program that follows this stage,
-     * such as MESA_SHADER_FRAGMENT.
-     */
+   /* If the shader is linked, this is the previous shader, else MESA_SHADER_NONE. */
+   gl_shader_stage prev_stage:8;
+
+   /* If the shader is linked, this is the next shader, else MESA_SHADER_NONE. */
    gl_shader_stage next_stage:8;
+
+   /* Whether the previous stage has XFB if the shader is linked (prev_stage != NONE). */
+   bool prev_stage_has_xfb;
 
    /* Number of textures used by this shader */
    uint8_t num_textures;
@@ -536,6 +540,17 @@ typedef struct shader_info {
           * with a vertex index that is NOT the invocation id
           */
          uint64_t tcs_cross_invocation_outputs_written;
+
+         /* Bit mask of TCS per-vertex outputs that are read by TES. */
+         uint64_t tcs_outputs_read_by_tes;
+
+         /* Bit mask of TCS per-patch outputs that are read by TES. */
+         uint32_t tcs_patch_outputs_read_by_tes;
+
+         /* Bit mask of TCS per-vertex 16-bit outputs that are read by TES.
+          * (VARYING_SLOT_VAR0_16BIT + 0..15)
+          */
+         uint16_t tcs_outputs_read_by_tes_16bit;
       } tess;
 
       /* Applies to MESH and TASK. */

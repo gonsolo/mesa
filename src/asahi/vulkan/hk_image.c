@@ -40,16 +40,12 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
 {
    VkFormatFeatureFlags2 features = 0;
 
-   /* Conformance fails with these optional formats. Just drop them for now.
-    * TODO: Investigate later if we have a use case.
+   /* These optional formats need custom borders for opaque black, so hide for
+    * performance. We might specially enable this for Proton / behind a driconf.
     */
-   switch (vk_format) {
-   case VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR:
-   case VK_FORMAT_A8_UNORM_KHR:
+   if (vk_format == VK_FORMAT_A8_UNORM_KHR ||
+       vk_format == VK_FORMAT_B4G4R4A4_UNORM_PACK16)
       return 0;
-   default:
-      break;
-   }
 
    enum pipe_format p_format = hk_format_to_pipe_format(vk_format);
    if (p_format == PIPE_FORMAT_NONE)
@@ -59,26 +55,11 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
    if (!util_is_power_of_two_nonzero(util_format_get_blocksize(p_format)))
       return 0;
 
-   if (util_format_is_compressed(p_format)) {
-      /* Linear block-compressed images are all sorts of problematic, not sure
-       * if AGX even supports them. Don't try.
-       */
-      if (tiling != VK_IMAGE_TILING_OPTIMAL)
-         return 0;
-
-      /* XXX: Conformance fails, e.g.:
-       * dEQP-VK.pipeline.monolithic.sampler.view_type.2d.format.etc2_r8g8b8a1_unorm_block.mipmap.linear.lod.select_bias_3_7
-       *
-       * I suspect ail bug with mipmapping of compressed :-/
-       */
-      switch (util_format_description(p_format)->layout) {
-      case UTIL_FORMAT_LAYOUT_ETC:
-      case UTIL_FORMAT_LAYOUT_ASTC:
-         return 0;
-      default:
-         break;
-      }
-   }
+   /* Linear block-compressed images are all sorts of problematic, not sure
+    * if AGX even supports them. Don't try.
+    */
+   if (util_format_is_compressed(p_format) && tiling != VK_IMAGE_TILING_OPTIMAL)
+      return 0;
 
    if (ail_pixel_format[p_format].texturable) {
       features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT;
@@ -97,17 +78,10 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
    }
 
    if (ail_pixel_format[p_format].renderable) {
-      /* For now, disable snorm rendering due to nir_lower_blend bugs.
-       *
-       * TODO: revisit.
-       */
-      if (!util_format_is_snorm(p_format)) {
-         features |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT;
-         features |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT;
-      }
-
-      features |= VK_FORMAT_FEATURE_2_BLIT_DST_BIT;
-      features |= VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
+      features |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT |
+                  VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT |
+                  VK_FORMAT_FEATURE_2_BLIT_DST_BIT |
+                  VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
                   VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT |
                   VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT;
    }

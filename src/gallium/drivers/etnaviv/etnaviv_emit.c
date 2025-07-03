@@ -481,7 +481,7 @@ etna_emit_state(struct etna_context *ctx)
       /*0140C*/ EMIT_STATE(PE_DEPTH_NORMALIZE, ctx->framebuffer.PE_DEPTH_NORMALIZE);
 
       if (screen->info->halti < 0 || screen->info->model == 0x880) {
-         /*01410*/ EMIT_STATE_RELOC(PE_DEPTH_ADDR, &ctx->framebuffer.PE_DEPTH_ADDR);
+         /*01410*/ EMIT_STATE_RELOC(PE_DEPTH_ADDR, &ctx->framebuffer.PE_PIPE_DEPTH_ADDR[0]);
       }
 
       /*01414*/ EMIT_STATE(PE_DEPTH_STRIDE, ctx->framebuffer.PE_DEPTH_STRIDE);
@@ -520,12 +520,12 @@ etna_emit_state(struct etna_context *ctx)
       if (screen->info->halti >= 0 && screen->info->model != 0x880) {
          /*01434*/ EMIT_STATE(PE_COLOR_STRIDE, ctx->framebuffer.PE_COLOR_STRIDE);
          /*01454*/ EMIT_STATE(PE_HDEPTH_CONTROL, ctx->framebuffer.PE_HDEPTH_CONTROL);
-         /*01460*/ EMIT_STATE_RELOC(PE_PIPE_COLOR_ADDR(0), &ctx->framebuffer.PE_PIPE_COLOR_ADDR[0]);
-         /*01464*/ EMIT_STATE_RELOC(PE_PIPE_COLOR_ADDR(1), &ctx->framebuffer.PE_PIPE_COLOR_ADDR[1]);
+         /*01460*/ EMIT_STATE_RELOC(PE_PIPE_COLOR_ADDR(0), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[0][0]);
+         /*01464*/ EMIT_STATE_RELOC(PE_PIPE_COLOR_ADDR(1), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[0][1]);
          /*01480*/ EMIT_STATE_RELOC(PE_PIPE_DEPTH_ADDR(0), &ctx->framebuffer.PE_PIPE_DEPTH_ADDR[0]);
          /*01484*/ EMIT_STATE_RELOC(PE_PIPE_DEPTH_ADDR(1), &ctx->framebuffer.PE_PIPE_DEPTH_ADDR[1]);
       } else {
-         /*01430*/ EMIT_STATE_RELOC(PE_COLOR_ADDR, &ctx->framebuffer.PE_COLOR_ADDR);
+         /*01430*/ EMIT_STATE_RELOC(PE_COLOR_ADDR, &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[0][0]);
          /*01434*/ EMIT_STATE(PE_COLOR_STRIDE, ctx->framebuffer.PE_COLOR_STRIDE);
          /*01454*/ EMIT_STATE(PE_HDEPTH_CONTROL, ctx->framebuffer.PE_HDEPTH_CONTROL);
       }
@@ -533,19 +533,16 @@ etna_emit_state(struct etna_context *ctx)
    if (unlikely(dirty & (ETNA_DIRTY_STENCIL_REF | ETNA_DIRTY_RASTERIZER | ETNA_DIRTY_ZSA))) {
       uint32_t val = etna_zsa_state(ctx->zsa)->PE_STENCIL_CONFIG_EXT;
       if (!ctx->zsa->stencil[1].enabled &&
-          ctx->zsa->stencil[0].enabled &&
-          ctx->zsa->stencil[0].valuemask)
-	  val |= ctx->stencil_ref.PE_STENCIL_CONFIG_EXT[!ccw];
+          (screen->specs.correct_stencil_valuemask || ctx->zsa->stencil[0].valuemask))
+         val |= ctx->stencil_ref.PE_STENCIL_CONFIG_EXT[!ccw];
       else
-	  val |= ctx->stencil_ref.PE_STENCIL_CONFIG_EXT[ccw];
+         val |= ctx->stencil_ref.PE_STENCIL_CONFIG_EXT[ccw];
       /*014A0*/ EMIT_STATE(PE_STENCIL_CONFIG_EXT, val);
    }
    if (unlikely(dirty & (ETNA_DIRTY_BLEND | ETNA_DIRTY_FRAMEBUFFER))) {
       struct etna_blend_state *blend = etna_blend_state(ctx->blend);
       /*014A4*/ EMIT_STATE(PE_LOGIC_OP, blend->PE_LOGIC_OP | ctx->framebuffer.PE_LOGIC_OP);
-   }
-   if (unlikely(dirty & (ETNA_DIRTY_BLEND))) {
-      struct etna_blend_state *blend = etna_blend_state(ctx->blend);
+
       for (int x = 0; x < 2; ++x) {
          /*014A8*/ EMIT_STATE(PE_DITHER(x), blend->PE_DITHER[x]);
       }
@@ -563,10 +560,10 @@ etna_emit_state(struct etna_context *ctx)
    if (unlikely(dirty & (ETNA_DIRTY_FRAMEBUFFER | ETNA_DIRTY_TS))) {
       /*01654*/ EMIT_STATE(TS_MEM_CONFIG, ctx->framebuffer.TS_MEM_CONFIG);
       /*01658*/ EMIT_STATE_RELOC(TS_COLOR_STATUS_BASE, &ctx->framebuffer.TS_COLOR_STATUS_BASE);
-      /*0165C*/ EMIT_STATE_RELOC(TS_COLOR_SURFACE_BASE, &ctx->framebuffer.TS_COLOR_SURFACE_BASE);
+      /*0165C*/ EMIT_STATE_RELOC(TS_COLOR_SURFACE_BASE, &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[0][0]);
       /*01660*/ EMIT_STATE(TS_COLOR_CLEAR_VALUE, ctx->framebuffer.TS_COLOR_CLEAR_VALUE);
       /*01664*/ EMIT_STATE_RELOC(TS_DEPTH_STATUS_BASE, &ctx->framebuffer.TS_DEPTH_STATUS_BASE);
-      /*01668*/ EMIT_STATE_RELOC(TS_DEPTH_SURFACE_BASE, &ctx->framebuffer.TS_DEPTH_SURFACE_BASE);
+      /*01668*/ EMIT_STATE_RELOC(TS_DEPTH_SURFACE_BASE, &ctx->framebuffer.PE_PIPE_DEPTH_ADDR[0]);
       /*0166C*/ EMIT_STATE(TS_DEPTH_CLEAR_VALUE, ctx->framebuffer.TS_DEPTH_CLEAR_VALUE);
       /*016BC*/ EMIT_STATE(TS_COLOR_CLEAR_VALUE_EXT, ctx->framebuffer.TS_COLOR_CLEAR_VALUE_EXT);
    }
@@ -578,15 +575,15 @@ etna_emit_state(struct etna_context *ctx)
       if (screen->specs.num_rts == 4) {
          for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
             const uint8_t rt = i - 1;
-            /*01500*/ EMIT_STATE_RELOC(PE_RT_ADDR_4_PIPE(rt, 0), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[rt][0]);
-            /*01520*/ EMIT_STATE_RELOC(PE_RT_ADDR_4_PIPE(rt, 1), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[rt][1]);
+            /*01500*/ EMIT_STATE_RELOC(PE_RT_ADDR_4_PIPE(rt, 0), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][0]);
+            /*01520*/ EMIT_STATE_RELOC(PE_RT_ADDR_4_PIPE(rt, 1), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][1]);
             /*01580*/ EMIT_STATE(PE_RT_CONFIG_4(rt), ctx->framebuffer.PE_RT_CONFIG[rt]);
          }
       } else if (screen->specs.num_rts == 8) {
          for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
             const uint8_t rt = i - 1;
-            /*14800*/ EMIT_STATE_RELOC(PE_RT_ADDR_8_PIPE(rt, 0), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[rt][0]);
-            /*14800*/ EMIT_STATE_RELOC(PE_RT_ADDR_8_PIPE(rt, 1), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[rt][1]);
+            /*14800*/ EMIT_STATE_RELOC(PE_RT_ADDR_8_PIPE(rt, 0), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][0]);
+            /*14800*/ EMIT_STATE_RELOC(PE_RT_ADDR_8_PIPE(rt, 1), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][1]);
             /*14900*/ EMIT_STATE(PE_RT_CONFIG_8(rt), ctx->framebuffer.PE_RT_CONFIG[rt]);
          }
       }
@@ -600,7 +597,7 @@ etna_emit_state(struct etna_context *ctx)
          EMIT_STATE(TS_RT_CLEAR_VALUE(i), ctx->framebuffer.RT_TS_COLOR_CLEAR_VALUE[rt]);
          EMIT_STATE(TS_RT_CLEAR_VALUE2(i), ctx->framebuffer.RT_TS_COLOR_CLEAR_VALUE_EXT[rt]);
          EMIT_STATE_RELOC(TS_RT_STATUS_BASE(i), &ctx->framebuffer.RT_TS_COLOR_STATUS_BASE[rt]);
-         EMIT_STATE_RELOC(TS_RT_SURFACE_BASE(i), &ctx->framebuffer.RT_TS_COLOR_SURFACE_BASE[rt]);
+         EMIT_STATE_RELOC(TS_RT_SURFACE_BASE(i), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][0]);
       }
    }
 

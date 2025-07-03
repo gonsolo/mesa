@@ -39,10 +39,14 @@ Under "CI / CD" → "General pipelines", make sure "Custom CI config path" is
 empty (or set to the default ``.gitlab-ci.yml``), and that the
 "Public pipelines" box is checked.
 
-If you're having issues with the GitLab CI, your best bet is to ask
+If a specific CI farm is failing for reasons unrelated to your changes, make an
+MR to disable the farm following the `farm management <#farm-management>`__
+instructions.
+
+If you're having other issues with the GitLab CI, your best bet is to ask
 about it on ``#freedesktop`` on OFTC and tag `Daniel Stone
 <https://gitlab.freedesktop.org/daniels>`__ (``daniels`` on IRC) or
-`Emma Anholt <https://gitlab.freedesktop.org/anholt>`__ (``anholt`` on
+`Eric Engestrom <https://gitlab.freedesktop.org/eric>`__ (``eric_engestrom`` on
 IRC).
 
 The three GitLab CI systems currently integrated are:
@@ -68,7 +72,12 @@ When the farm starts failing for any reason (power, network, out-of-space), it n
 
    git mv .ci-farms{,-disabled}/$farm_name
 
-After farm restore functionality can be enabled by pushing a new merge request, which contains
+Find the GitLab handle of the farm's admin in ``.gitlab-ci/farm-rules.yml`` and
+ping them on the MR. MRs to disable farms do not need to go through review, and
+can be assigned to ``Marge`` directly.
+
+After farm restore functionality can be enabled by pushing a new merge request,
+which contains
 
 .. code-block:: sh
 
@@ -301,6 +310,8 @@ and cancel the rest to avoid wasting resources.
 
 See ``bin/ci/ci_run_n_monitor.py --help`` for all the options.
 
+**Target jobs**
+
 The ``--target`` argument takes a regex that you can use to select the
 jobs names you want to run, e.g. ``--target 'zink.*'`` will run all the
 Zink jobs, leaving the other drivers' jobs free for others to use.
@@ -310,6 +321,22 @@ changed **since the last push**, so you might not get the jobs you expect.
 You can work around that by adding a dummy change in a file core to what you're
 working on and then making a new push with that change, and removing that change
 before you create the MR.
+
+**GitLab token**
+
+The ``--token`` argument is used to provide a GitLab token with rights to
+interact with the pipeline. Using the argument, one can provide the value or
+the name of the file having the value. If the argument is not provided, then
+it checks if the value of ``$XDG_CONFIG_HOME`` has a valid directory (if not,
+then uses ``$HOME/.config``), and there is a file called ``gitlab-token`` that
+contains a token. The token required to work with this tool needs ``api``
+scope permissions.
+
+.. note::
+    To create that token, refer to
+    `create-a-personal-access-token <https://docs.gitlab.com/user/profile/personal_access_tokens/#create-a-personal-access-token>`_
+    and select the ``api`` scope. The token will only be shown once after creation,
+    so make sure you store it securely.
 
 Conformance Tests
 -----------------

@@ -83,15 +83,17 @@ impl PipeScreen {
         &self.screen().caps
     }
 
-    pub fn create_context(self: &Arc<Self>) -> Option<PipeContext> {
+    pub fn create_context(self: &Arc<Self>, prio: PipeContextPrio) -> Option<PipeContext> {
+        let flags: u32 = prio.into();
         PipeContext::new(
             unsafe {
                 self.screen().context_create.unwrap()(
                     self.screen.as_ptr(),
                     ptr::null_mut(),
-                    PIPE_CONTEXT_COMPUTE_ONLY | PIPE_CONTEXT_NO_LOD_BIAS,
+                    flags | PIPE_CONTEXT_COMPUTE_ONLY | PIPE_CONTEXT_NO_LOD_BIAS,
                 )
             },
+            prio,
             self,
         )
     }
@@ -107,6 +109,14 @@ impl PipeScreen {
 
     pub fn resource_assign_vma(&self, res: &PipeResource, address: u64) -> bool {
         if let Some(resource_assign_vma) = self.screen().resource_assign_vma {
+            // Validate that we already acquired the vm range
+            if cfg!(debug_assertions) {
+                if let Some(address) = NonZeroU64::new(address) {
+                    debug_assert!(self
+                        .alloc_vm(address, NonZeroU64::new(1).unwrap())
+                        .is_none());
+                }
+            }
             unsafe { resource_assign_vma(self.screen.as_ptr(), res.pipe(), address) }
         } else {
             false

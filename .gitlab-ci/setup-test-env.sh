@@ -122,7 +122,7 @@ export -f _uncollapsed_section_switch
 export -f _error_msg
 
 # Freedesktop requirement (needed for Wayland)
-[ -n "${XDG_RUNTIME_DIR:-}" ] || export XDG_RUNTIME_DIR="$(mktemp -p "$PWD" -d xdg-runtime-XXXXXX)"
+[ -n "${XDG_RUNTIME_DIR:-}" ] || export XDG_RUNTIME_DIR="$(mktemp --tmpdir -d xdg-runtime-XXXXXX)"
 
 if [ -z "${RESULTS_DIR:-}" ]; then
 	export RESULTS_DIR="${PWD%/}/results"
@@ -291,6 +291,29 @@ export -f get_tag_file
 
 # Structured tagging ------
 
+curl-with-retry() {
+    curl --fail --location --retry-connrefused --retry 4 --retry-delay 15 "$@"
+}
+export -f curl-with-retry
+
+function find_s3_project_artifact() {
+    x_off
+    local artifact_path="$1"
+
+    for project in "${FDO_UPSTREAM_REPO}" "${CI_PROJECT_PATH}"; do
+        local full_path="${FDO_HTTP_CACHE_URI:-}${S3_BASE_PATH}/${project}/${artifact_path}"
+        if curl-with-retry -s --head "https://${full_path}" >/dev/null; then
+            echo "https://${full_path}"
+            x_restore
+            return 0
+        fi
+    done
+
+    x_restore
+    return 1
+}
+export -f find_s3_project_artifact
+
 export -f error
 export -f trap_err
 
@@ -329,7 +352,6 @@ function filter_env_vars() {
     env -0 | sort -z | while IFS= read -r -d '' line; do
         [[ "$line" == *=* ]] || continue
         local varname="${line%%=*}"
-        local value="${line#*=}"
 
         # Skip certain Mesa-specific variables
         if echo "$varname" | grep -qxE "$CI_EXCLUDE_ENV_VAR_REGEX"; then
@@ -346,7 +368,7 @@ function filter_env_vars() {
             continue
         fi
 
-        printf "export %s=%s\n" "$varname" "${value@Q}"
+        echo "${!varname@A}"
     done
     x_restore
 }

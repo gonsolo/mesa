@@ -535,8 +535,8 @@ panvk_draw_emit_attrib_buf(const struct panvk_draw_data *draw,
       }
    } else {
       unsigned divisor_r = 0, divisor_e = 0;
-      unsigned divisor_num =
-         pan_compute_magic_divisor(divisor, &divisor_r, &divisor_e);
+      unsigned divisor_d =
+         pan_compute_npot_divisor(divisor, &divisor_r, &divisor_e);
       pan_pack(desc, ATTRIBUTE_BUFFER, cfg) {
          cfg.type = MALI_ATTRIBUTE_TYPE_1D_NPOT_DIVISOR;
          cfg.stride = stride;
@@ -547,7 +547,7 @@ panvk_draw_emit_attrib_buf(const struct panvk_draw_data *draw,
       }
 
       pan_cast_and_pack(buf_ext, ATTRIBUTE_BUFFER_CONTINUATION_NPOT, cfg) {
-         cfg.divisor_numerator = divisor_num;
+         cfg.divisor_numerator = divisor_d;
          cfg.divisor = buf_info->divisor;
       }
 
@@ -673,11 +673,11 @@ panvk_emit_viewport(struct panvk_cmd_buffer *cmdbuf,
    if (vp->viewport_count < 1)
       return;
 
-   struct panvk_graphics_sysvals *sysvals = &cmdbuf->state.gfx.sysvals;
    const VkViewport *viewport = &vp->viewports[0];
    const VkRect2D *scissor = &vp->scissors[0];
-   float minz = sysvals->viewport.offset.z;
-   float maxz = minz + sysvals->viewport.scale.z;
+   float minz, maxz;
+   panvk_depth_range(&cmdbuf->state.gfx, &cmdbuf->vk.dynamic_graphics_state.vp,
+                     &minz, &maxz);
 
    /* The spec says "width must be greater than 0.0" */
    assert(viewport->width >= 0);
@@ -709,8 +709,8 @@ panvk_emit_viewport(struct panvk_cmd_buffer *cmdbuf,
       cfg.scissor_minimum_y = miny;
       cfg.scissor_maximum_x = maxx;
       cfg.scissor_maximum_y = maxy;
-      cfg.minimum_z = MIN2(minz, maxz);
-      cfg.maximum_z = MAX2(minz, maxz);
+      cfg.minimum_z = minz;
+      cfg.maximum_z = maxz;
    }
 }
 
@@ -723,6 +723,7 @@ panvk_draw_prepare_viewport(struct panvk_cmd_buffer *cmdbuf,
     * As a result, we define an empty one.
     */
    if (!cmdbuf->state.gfx.vpd || dyn_gfx_state_dirty(cmdbuf, VP_VIEWPORTS) ||
+       dyn_gfx_state_dirty(cmdbuf, VP_DEPTH_CLIP_NEGATIVE_ONE_TO_ONE) ||
        dyn_gfx_state_dirty(cmdbuf, VP_SCISSORS) ||
        dyn_gfx_state_dirty(cmdbuf, RS_DEPTH_CLIP_ENABLE) ||
        dyn_gfx_state_dirty(cmdbuf, RS_DEPTH_CLAMP_ENABLE)) {
@@ -835,11 +836,14 @@ panvk_emit_tiler_primitive(struct panvk_cmd_buffer *cmdbuf,
       vs->info.vs.writes_point_size &&
       ia->primitive_topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
    bool secondary_shader = vs->info.vs.secondary_enable && fs != NULL;
+   bool fs_reads_primitive_id = fs ? fs->info.fs.reads_primitive_id : false;
 
    pan_pack(prim, PRIMITIVE, cfg) {
       cfg.draw_mode = translate_prim_topology(ia->primitive_topology);
       if (writes_point_size)
          cfg.point_size_array_format = MALI_POINT_SIZE_ARRAY_FORMAT_FP16;
+      cfg.primitive_index_enable = fs_reads_primitive_id;
+      cfg.primitive_index_writeback = fs_reads_primitive_id;
 
       cfg.first_provoking_vertex =
          cmdbuf->state.gfx.render.first_provoking_vertex != U_TRISTATE_NO;
@@ -852,7 +856,7 @@ panvk_emit_tiler_primitive(struct panvk_cmd_buffer *cmdbuf,
          cfg.index_count = draw->info.vertex.count;
          cfg.indices = draw->indices;
          cfg.base_vertex_offset =
-            draw->info.vertex.base - draw->info.vertex.raw_offset;
+            (int64_t)draw->info.vertex.base - draw->info.vertex.raw_offset;
 
          switch (draw->info.index.size) {
          case 4:
@@ -900,6 +904,24 @@ panvk_emit_tiler_primitive_size(struct panvk_cmd_buffer *cmdbuf,
    }
 }
 
+static uint32_t
+primitive_vertex_count(enum mali_draw_mode in)
+{
+   switch (in) {
+   case MALI_DRAW_MODE_POINTS:
+      return 1;
+   case MALI_DRAW_MODE_LINES:
+   case MALI_DRAW_MODE_LINE_STRIP:
+      return 2;
+   case MALI_DRAW_MODE_TRIANGLES:
+   case MALI_DRAW_MODE_TRIANGLE_STRIP:
+   case MALI_DRAW_MODE_TRIANGLE_FAN:
+      return 3;
+   default:
+      unreachable("Invalid draw mode");
+   }
+}
+
 static void
 panvk_emit_tiler_dcd(struct panvk_cmd_buffer *cmdbuf,
                      const struct panvk_draw_data *draw,
@@ -936,6 +958,14 @@ panvk_emit_tiler_dcd(struct panvk_cmd_buffer *cmdbuf,
       cfg.offset_start = draw->info.vertex.raw_offset;
       cfg.instance_size =
          draw->info.instance.count > 1 ? draw->padded_vertex_count : 1;
+      uint32_t primitives_per_instance =
+         DIV_ROUND_UP(draw->padded_vertex_count,
+                      primitive_vertex_count(
+                         translate_prim_topology(ia->primitive_topology)));
+      /* instance_primitive_size has the same restrictions as
+       * padded_vertex_count, so we can use pan_padded_vertex_count here. */
+      cfg.instance_primitive_size =
+         pan_padded_vertex_count(primitives_per_instance);
       cfg.uniform_buffers = fs_desc_state->tables[PANVK_BIFROST_DESC_TABLE_UBO];
       cfg.push_uniforms = cmdbuf->state.gfx.fs.push_uniforms;
       cfg.textures = fs_desc_state->tables[PANVK_BIFROST_DESC_TABLE_TEXTURE];

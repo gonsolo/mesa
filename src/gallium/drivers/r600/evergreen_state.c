@@ -693,8 +693,7 @@ static void evergreen_fill_buffer_resource_words(struct r600_context *rctx,
 
 static struct pipe_sampler_view *
 texture_buffer_sampler_view(struct r600_context *rctx,
-			    struct r600_pipe_sampler_view *view,
-			    unsigned width0, unsigned height0)
+			    struct r600_pipe_sampler_view *view)
 {
 	struct r600_texture *tmp = (struct r600_texture*)view->base.texture;
 	struct eg_buf_res_params params;
@@ -703,7 +702,9 @@ texture_buffer_sampler_view(struct r600_context *rctx,
 
 	params.pipe_format = view->base.format;
 	params.offset = view->base.u.buf.offset;
-	params.size = view->base.u.buf.size;
+	params.size = MIN2(util_format_get_blocksize(view->base.format) *
+			   rctx->screen->b.b.caps.max_texel_buffer_elements,
+			   view->base.u.buf.size);
 	params.swizzle[0] = view->base.swizzle_r;
 	params.swizzle[1] = view->base.swizzle_g;
 	params.swizzle[2] = view->base.swizzle_b;
@@ -944,7 +945,7 @@ evergreen_create_sampler_view_custom(struct pipe_context *ctx,
 	view->base.context = ctx;
 
 	if (state->target == PIPE_BUFFER)
-		return texture_buffer_sampler_view(rctx, view, width0, height0);
+		return texture_buffer_sampler_view(rctx, view);
 
 	memset(&params, 0, sizeof(params));
 	params.pipe_format = state->format;
@@ -2459,6 +2460,39 @@ static void border_swizzle_nr_channels_2(const unsigned *swizzle,
 	}
 }
 
+/* These two functions cayman_sint8() and cayman_sint16() calculate
+ * the sint border color value in a way compatible with cayman.
+ * The functions check first that the value is in the representable
+ * range, if not the value is clamped. In both cases the value is
+ * truncated to be compatible with what cayman expects. */
+static inline unsigned cayman_sint8(const unsigned value)
+{
+	const unsigned mask = 0xffffff80U;
+	const unsigned value_masked = value & mask;
+
+	if (likely(!value_masked ||
+		   value_masked == mask))
+		return value & 0xff;
+
+	return value & (1U<<31) ?
+		0x80 :
+		0x7f;
+}
+
+static inline unsigned cayman_sint16(const unsigned value)
+{
+	const unsigned mask = 0xffff8000U;
+	const unsigned value_masked = value & mask;
+
+	if (likely(!value_masked ||
+		   value_masked == mask))
+		return value & 0xffff;
+
+	return value & (1U<<31) ?
+		0x8000 :
+		0x7fff;
+}
+
 static void cayman_convert_border_color(union pipe_color_union *in,
                                         union pipe_color_union *out,
                                         struct pipe_sampler_view *view)
@@ -2494,10 +2528,28 @@ static void cayman_convert_border_color(union pipe_color_union *in,
 		} else {
 			memcpy(output_swz, neutral_swz, sizeof(output_swz));
 		}
-		out->f[output_swz[0]] = in->f[0];
-		out->f[output_swz[1]] = in->f[1];
-		out->f[output_swz[2]] = in->f[2];
-		out->f[output_swz[3]] = in->f[3];
+		switch(format) {
+		case PIPE_FORMAT_R8_SINT:
+		case PIPE_FORMAT_R8G8_SINT:
+			out->ui[output_swz[0]] = cayman_sint8(in->ui[0]);
+			out->ui[output_swz[1]] = cayman_sint8(in->ui[1]);
+			out->ui[output_swz[2]] = cayman_sint8(in->ui[2]);
+			out->ui[output_swz[3]] = cayman_sint8(in->ui[3]);
+			break;
+		case PIPE_FORMAT_R16_SINT:
+		case PIPE_FORMAT_R16G16_SINT:
+			out->ui[output_swz[0]] = cayman_sint16(in->ui[0]);
+			out->ui[output_swz[1]] = cayman_sint16(in->ui[1]);
+			out->ui[output_swz[2]] = cayman_sint16(in->ui[2]);
+			out->ui[output_swz[3]] = cayman_sint16(in->ui[3]);
+			break;
+		default:
+			out->f[output_swz[0]] = in->f[0];
+			out->f[output_swz[1]] = in->f[1];
+			out->f[output_swz[2]] = in->f[2];
+			out->f[output_swz[3]] = in->f[3];
+			break;
+		}
 	} else if ((!util_format_is_alpha(format) &&
 		    !util_format_is_luminance(format) &&
 		    !util_format_is_luminance_alpha(format) &&
@@ -2523,6 +2575,23 @@ static void cayman_convert_border_color(union pipe_color_union *in,
                 out->f[1] = values[view->swizzle_g];
                 out->f[2] = values[view->swizzle_b];
                 out->f[3] = values[view->swizzle_a];
+
+		switch(format) {
+		case PIPE_FORMAT_R8G8B8X8_SINT:
+			out->ui[0] = cayman_sint8(out->ui[0]);
+			out->ui[1] = cayman_sint8(out->ui[1]);
+			out->ui[2] = cayman_sint8(out->ui[2]);
+			out->ui[3] = cayman_sint8(out->ui[3]);
+			break;
+		case PIPE_FORMAT_R16G16B16X16_SINT:
+			out->ui[0] = cayman_sint16(out->ui[0]);
+			out->ui[1] = cayman_sint16(out->ui[1]);
+			out->ui[2] = cayman_sint16(out->ui[2]);
+			out->ui[3] = cayman_sint16(out->ui[3]);
+			break;
+		default:
+			break;
+		}
 	} else {
 		memcpy(out->f, in->f, 4 * sizeof(float));
 	}
@@ -4415,6 +4484,9 @@ static void evergreen_set_shader_images(struct pipe_context *ctx,
 			istate->compressed_colortex_mask |= 1 << i;
 		else
 			istate->compressed_colortex_mask &= ~(1 << i);
+
+		unsigned buffer_size = iview->u.buf.size;
+
 		if (!is_buffer) {
 
 			evergreen_set_color_surface_common(rctx, rtex,
@@ -4426,12 +4498,16 @@ static void evergreen_set_shader_images(struct pipe_context *ctx,
 			color.dim = S_028C78_WIDTH_MAX(u_minify(image->width0, iview->u.tex.level) - 1) |
 			  S_028C78_HEIGHT_MAX(u_minify(image->height0, iview->u.tex.level) - 1);
 		} else {
+			buffer_size = MIN2(util_format_get_blocksize(iview->format) *
+					   rctx->screen->b.b.caps.max_texel_buffer_elements,
+					   buffer_size);
+
 			color.offset = 0;
 			color.view = 0;
 			evergreen_set_color_surface_buffer(rctx, resource,
 							   iview->format,
 							   iview->u.buf.offset,
-							   iview->u.buf.size,
+							   buffer_size,
 							   &color);
 		}
 
@@ -4497,7 +4573,7 @@ static void evergreen_set_shader_images(struct pipe_context *ctx,
 		} else {
 			memset(&buf_params, 0, sizeof(buf_params));
 			buf_params.pipe_format = iview->format;
-			buf_params.size = iview->u.buf.size;
+			buf_params.size = buffer_size;
 			buf_params.offset = iview->u.buf.offset;
 			buf_params.swizzle[0] = PIPE_SWIZZLE_X;
 			buf_params.swizzle[1] = PIPE_SWIZZLE_Y;
@@ -5002,7 +5078,7 @@ void eg_trace_emit(struct r600_context *rctx)
 }
 
 static void evergreen_emit_set_append_cnt(struct r600_context *rctx,
-					  struct r600_shader_atomic *atomic,
+					  const struct r600_shader_atomic *atomic,
 					  struct r600_resource *resource,
 					  uint32_t pkt_flags)
 {
@@ -5016,6 +5092,8 @@ static void evergreen_emit_set_append_cnt(struct r600_context *rctx,
 
 	uint32_t reg_val = (base_reg_0 + atomic->hw_idx * 4 - EVERGREEN_CONTEXT_REG_OFFSET) >> 2;
 
+	assert(atomic->count == 1);
+
 	radeon_emit(cs, PKT3(PKT3_SET_APPEND_CNT, 2, 0) | pkt_flags);
 	radeon_emit(cs, (reg_val << 16) | 0x3);
 	radeon_emit(cs, dst_offset & 0xfffffffc);
@@ -5025,7 +5103,7 @@ static void evergreen_emit_set_append_cnt(struct r600_context *rctx,
 }
 
 static void evergreen_emit_event_write_eos(struct r600_context *rctx,
-					   struct r600_shader_atomic *atomic,
+					   const struct r600_shader_atomic *atomic,
 					   struct r600_resource *resource,
 					   uint32_t pkt_flags)
 {
@@ -5038,6 +5116,8 @@ static void evergreen_emit_event_write_eos(struct r600_context *rctx,
 						   RADEON_PRIO_SHADER_RW_BUFFER);
 	uint64_t dst_offset = resource->gpu_address + (atomic->start * 4);
 	uint32_t reg_val = (base_reg_0 + atomic->hw_idx * 4) >> 2;
+
+	assert(atomic->count == 1);
 
 	if (pkt_flags == RADEON_CP_PACKET3_COMPUTE_MODE)
 		event = EVENT_TYPE_CS_DONE;
@@ -5052,7 +5132,7 @@ static void evergreen_emit_event_write_eos(struct r600_context *rctx,
 }
 
 static void cayman_emit_event_write_eos(struct r600_context *rctx,
-					struct r600_shader_atomic *atomic,
+					const struct r600_shader_atomic *atomic,
 					struct r600_resource *resource,
 					uint32_t pkt_flags)
 {
@@ -5071,16 +5151,16 @@ static void cayman_emit_event_write_eos(struct r600_context *rctx,
 	radeon_emit(cs, EVENT_TYPE(event) | EVENT_INDEX(6));
 	radeon_emit(cs, (dst_offset) & 0xffffffff);
 	radeon_emit(cs, (1 << 29) | ((dst_offset >> 32) & 0xff));
-	radeon_emit(cs, (atomic->hw_idx) | (1 << 16));
+	radeon_emit(cs, (atomic->hw_idx) | (atomic->count << 16));
 	radeon_emit(cs, PKT3(PKT3_NOP, 0, 0));
 	radeon_emit(cs, reloc);
 }
 
 /* writes count from a buffer into GDS */
 static void cayman_write_count_to_gds(struct r600_context *rctx,
-				      struct r600_shader_atomic *atomic,
+				      const struct r600_shader_atomic *atomic,
 				      struct r600_resource *resource,
-				      uint32_t pkt_flags)
+				      const uint32_t pkt_flags)
 {
 	struct radeon_cmdbuf *cs = &rctx->b.gfx.cs;
 	unsigned reloc = radeon_add_to_buffer_list(&rctx->b, &rctx->b.gfx,
@@ -5094,22 +5174,24 @@ static void cayman_write_count_to_gds(struct r600_context *rctx,
 	radeon_emit(cs, PKT3_CP_DMA_CP_SYNC | PKT3_CP_DMA_DST_SEL(1) | ((dst_offset >> 32) & 0xff));// GDS
 	radeon_emit(cs, atomic->hw_idx * 4);
 	radeon_emit(cs, 0);
-	radeon_emit(cs, PKT3_CP_DMA_CMD_DAS | 4);
+	radeon_emit(cs, PKT3_CP_DMA_CMD_DAS | (atomic->count * 4));
 	radeon_emit(cs, PKT3(PKT3_NOP, 0, 0));
 	radeon_emit(cs, reloc);
 }
 
-void evergreen_emit_atomic_buffer_setup_count(struct r600_context *rctx,
-					      struct r600_pipe_shader *cs_shader,
-					      struct r600_shader_atomic *combined_atomics,
-					      uint8_t *atomic_used_mask_p)
+/* The evergreen_emit_atomic_buffer_setup_count() implementation is designed to map one atomic counter
+ * per R_02872C_GDS_APPEND_COUNT_x register which limits the total number of atomic counters to 12. */
+unsigned evergreen_emit_atomic_buffer_setup_count(struct r600_context *rctx,
+						  struct r600_pipe_shader *cs_shader,
+						  struct r600_shader_atomic *combined_atomics,
+						  unsigned global_atomic_count)
 {
-	uint8_t atomic_used_mask = 0;
+	const bool is_compute = !!cs_shader;
+	unsigned atomic_used_mask = 0;
 	int i, j, k;
-	bool is_compute = cs_shader ? true : false;
 
 	for (i = 0; i < (is_compute ? 1 : EG_NUM_HW_STAGES); i++) {
-		uint8_t num_atomic_stage;
+		unsigned num_atomic_ranges;
 		struct r600_pipe_shader *pshader;
 
 		if (is_compute)
@@ -5119,50 +5201,99 @@ void evergreen_emit_atomic_buffer_setup_count(struct r600_context *rctx,
 		if (!pshader)
 			continue;
 
-		num_atomic_stage = pshader->shader.nhwatomic_ranges;
-		if (!num_atomic_stage)
+		num_atomic_ranges = pshader->shader.nhwatomic_ranges;
+		if (!num_atomic_ranges)
 			continue;
 
-		for (j = 0; j < num_atomic_stage; j++) {
-			struct r600_shader_atomic *atomic = &pshader->shader.atomics[j];
-			int natomics = atomic->end - atomic->start + 1;
+		for (j = 0; j < num_atomic_ranges; j++) {
+			const struct r600_shader_atomic *atomic = &pshader->shader.atomics[j];
 
-			for (k = 0; k < natomics; k++) {
+			for (k = 0; k < atomic->count; k++) {
+				const unsigned hw_index = atomic->hw_idx + k;
+
 				/* seen this in a previous stage */
-				if (atomic_used_mask & (1u << (atomic->hw_idx + k)))
+				if (atomic_used_mask & (1u << hw_index))
 					continue;
 
-				combined_atomics[atomic->hw_idx + k].hw_idx = atomic->hw_idx + k;
-				combined_atomics[atomic->hw_idx + k].buffer_id = atomic->buffer_id;
-				combined_atomics[atomic->hw_idx + k].start = atomic->start + k;
-				combined_atomics[atomic->hw_idx + k].end = combined_atomics[atomic->hw_idx + k].start + 1;
-				atomic_used_mask |= (1u << (atomic->hw_idx + k));
+				combined_atomics[global_atomic_count].hw_idx = hw_index;
+				combined_atomics[global_atomic_count].resource_id = atomic->resource_id;
+				combined_atomics[global_atomic_count].start = atomic->start + k;
+				combined_atomics[global_atomic_count].count = 1;
+				atomic_used_mask |= (1u << hw_index);
+				global_atomic_count++;
 			}
 		}
 	}
-	*atomic_used_mask_p = atomic_used_mask;
+
+	return global_atomic_count;
+}
+
+unsigned cayman_emit_atomic_buffer_setup_count(struct r600_context *rctx,
+					       struct r600_pipe_shader *cs_shader,
+					       struct r600_shader_atomic *combined_atomics,
+					       unsigned global_atomic_count)
+{
+	const bool is_compute = !!cs_shader;
+	int i, j;
+
+	for (i = 0; i < (is_compute ? 1 : EG_NUM_HW_STAGES); i++) {
+		unsigned num_atomic_ranges;
+		struct r600_pipe_shader *pshader;
+
+		if (is_compute)
+			pshader = cs_shader;
+		else
+			pshader = rctx->hw_shader_stages[i].shader;
+		if (!pshader)
+			continue;
+
+		num_atomic_ranges = pshader->shader.nhwatomic_ranges;
+		if (!num_atomic_ranges)
+			continue;
+
+		for (j = 0; j < num_atomic_ranges; j++) {
+			const struct r600_shader_atomic *atomic = &pshader->shader.atomics[j];
+			const int k = global_atomic_count;
+			bool found = false;
+
+			for (int atomic_offset = 0; atomic_offset < k; atomic_offset++) {
+				if (combined_atomics[atomic_offset].resource_id == atomic->resource_id &&
+				    combined_atomics[atomic_offset].hw_idx == atomic->hw_idx &&
+				    combined_atomics[atomic_offset].start == atomic->start &&
+				    combined_atomics[atomic_offset].count == atomic->count) {
+					found = true;
+					break;
+				}
+			}
+
+			if (!found) {
+				assert(k < EG_MAX_ATOMIC_BUFFERS);
+				combined_atomics[k].hw_idx = atomic->hw_idx;
+				combined_atomics[k].resource_id = atomic->resource_id;
+				combined_atomics[k].start = atomic->start;
+				combined_atomics[k].count = atomic->count;
+				global_atomic_count = k + 1;
+			}
+		}
+	}
+
+	return global_atomic_count;
 }
 
 void evergreen_emit_atomic_buffer_setup(struct r600_context *rctx,
-					bool is_compute,
-					struct r600_shader_atomic *combined_atomics,
-					uint8_t atomic_used_mask)
+					const bool is_compute,
+					const struct r600_shader_atomic *combined_atomics,
+					const unsigned global_atomic_count)
 {
 	struct r600_atomic_buffer_state *astate = &rctx->atomic_buffer_state;
 	unsigned pkt_flags = 0;
-	uint32_t mask;
 
 	if (is_compute)
 		pkt_flags = RADEON_CP_PACKET3_COMPUTE_MODE;
 
-	mask = atomic_used_mask;
-	if (!mask)
-		return;
-
-	while (mask) {
-		unsigned atomic_index = u_bit_scan(&mask);
-		struct r600_shader_atomic *atomic = &combined_atomics[atomic_index];
-		struct r600_resource *resource = r600_resource(astate->buffer[atomic->buffer_id].buffer);
+	for (int i = 0; i < global_atomic_count; i++) {
+		const struct r600_shader_atomic *atomic = &combined_atomics[i];
+		struct r600_resource *resource = r600_resource(astate->buffer[atomic->resource_id].buffer);
 		assert(resource);
 
 		if (rctx->b.gfx_level == CAYMAN)
@@ -5173,29 +5304,26 @@ void evergreen_emit_atomic_buffer_setup(struct r600_context *rctx,
 }
 
 void evergreen_emit_atomic_buffer_save(struct r600_context *rctx,
-				       bool is_compute,
-				       struct r600_shader_atomic *combined_atomics,
-				       uint8_t *atomic_used_mask_p)
+				       const bool is_compute,
+				       const struct r600_shader_atomic *combined_atomics,
+				       const unsigned global_atomic_count)
 {
 	struct radeon_cmdbuf *cs = &rctx->b.gfx.cs;
 	struct r600_atomic_buffer_state *astate = &rctx->atomic_buffer_state;
 	uint32_t pkt_flags = 0;
 	uint32_t event = EVENT_TYPE_PS_DONE;
-	uint32_t mask;
 	uint64_t dst_offset;
 	unsigned reloc;
+
+	if (!global_atomic_count)
+		return;
 
 	if (is_compute)
 		pkt_flags = RADEON_CP_PACKET3_COMPUTE_MODE;
 
-	mask = *atomic_used_mask_p;
-	if (!mask)
-		return;
-
-	while (mask) {
-		unsigned atomic_index = u_bit_scan(&mask);
-		struct r600_shader_atomic *atomic = &combined_atomics[atomic_index];
-		struct r600_resource *resource = r600_resource(astate->buffer[atomic->buffer_id].buffer);
+	for (int i = 0; i < global_atomic_count; i++) {
+		const struct r600_shader_atomic *atomic = &combined_atomics[i];
+		struct r600_resource *resource = r600_resource(astate->buffer[atomic->resource_id].buffer);
 		assert(resource);
 
 		if (rctx->b.gfx_level == CAYMAN)

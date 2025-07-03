@@ -85,6 +85,7 @@ RESOURCE_TRACKER_ENTRIES = [
     "vkQueueSignalReleaseImageANDROID",
     "vkCmdPipelineBarrier",
     "vkCreateGraphicsPipelines",
+    "vkCmdClearColorImage",
     # Fuchsia
     "vkGetMemoryZirconHandleFUCHSIA",
     "vkGetMemoryZirconHandlePropertiesFUCHSIA",
@@ -95,6 +96,14 @@ RESOURCE_TRACKER_ENTRIES = [
     "vkSetBufferCollectionImageConstraintsFUCHSIA",
     "vkSetBufferCollectionBufferConstraintsFUCHSIA",
     "vkGetBufferCollectionPropertiesFUCHSIA",
+    "vkSetPrivateData",
+    "vkSetPrivateDataKHR",
+    "vkGetPrivateData",
+    "vkGetPrivateDataKHR",
+    "vkCreatePrivateDataSlot",
+    "vkCreatePrivateDataSlotEXT",
+    "vkDestroyPrivateDataSlot",
+    "vkDestroyPrivateDataSlotEXT",
 ]
 
 SUCCESS_VAL = {

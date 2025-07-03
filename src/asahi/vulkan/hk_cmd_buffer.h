@@ -10,6 +10,7 @@
 #include "util/macros.h"
 
 #include "util/list.h"
+#include "agx_abi.h"
 #include "agx_helpers.h"
 #include "agx_linker.h"
 #include "agx_pack.h"
@@ -92,6 +93,9 @@ struct hk_root_descriptor_table {
          uint16_t api_gs;
          uint16_t _pad5;
 
+         uint16_t rasterization_stream;
+         uint16_t _pad6;
+
          /* Mapping from varying slots written by the last vertex stage to UVS
           * indices. This mapping must be compatible with the fragment shader.
           */
@@ -138,6 +142,9 @@ struct hk_attachment {
 
    VkResolveModeFlagBits resolve_mode;
    struct hk_image_view *resolve_iview;
+
+   bool clear;
+   uint32_t clear_colour[4];
 };
 
 struct hk_bg_eot {
@@ -268,6 +275,9 @@ struct hk_graphics_state {
    struct hk_linked_shader *linked[PIPE_SHADER_TYPES];
    bool generate_primitive_id;
 
+   /* Whether blend constants are required by the active blend state */
+   bool uses_blend_constant;
+
    /* Tessellation state */
    struct {
       uint64_t out_draws;
@@ -364,7 +374,7 @@ struct hk_cs {
 
    /* Statistics */
    struct {
-      uint32_t calls, cmds, flushes;
+      uint32_t calls, cmds, flushes, merged;
    } stats;
 
    /* Timestamp writes. Currently just compute end / fragment end. We could
@@ -399,6 +409,32 @@ struct hk_cs {
     */
    uint32_t restart_index;
 };
+
+/*
+ * Helper to merge two compute control streams, concatenating the second control
+ * stream to the first one. Must sync with hk_cs.
+ */
+static inline void
+hk_cs_merge_cdm(struct hk_cs *a, const struct hk_cs *b)
+{
+   assert(a->type == HK_CS_CDM && b->type == HK_CS_CDM);
+   assert(a->cmd == b->cmd);
+   assert(!a->timestamp.end.handle);
+
+   agx_cdm_jump(a->current, b->addr);
+   a->current = b->current;
+   a->stream_linked = true;
+
+   a->scratch.cs.main |= b->scratch.cs.main;
+   a->scratch.cs.preamble |= b->scratch.cs.preamble;
+
+   a->timestamp = b->timestamp;
+
+   a->stats.calls += b->stats.calls;
+   a->stats.cmds += b->stats.cmds;
+   a->stats.flushes += b->stats.flushes;
+   a->stats.merged++;
+}
 
 static inline uint64_t
 hk_cs_current_addr(struct hk_cs *cs)
@@ -654,8 +690,6 @@ hk_cmd_buffer_end_compute_internal(struct hk_cmd_buffer *cmd,
       if (cs->imm_writes.size) {
          hk_dispatch_imm_writes(cmd, cs);
       }
-
-      cs->current = agx_cdm_terminate(cs->current);
    }
 
    *ptr = NULL;
@@ -667,15 +701,19 @@ hk_cmd_buffer_end_compute(struct hk_cmd_buffer *cmd)
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.cs);
 }
 
+void hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd);
+
 static void
 hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
 {
    struct hk_cs *cs = cmd->current_cs.gfx;
 
-   if (cs) {
-      /* Scissor and depth bias arrays are staged to dynamic arrays on the CPU.
-       * When we end the control stream, they're done growing and are ready for
-       * upload.
+   if (cs && cs->stats.cmds == 0) {
+      hk_optimize_empty_vdm(cmd);
+   } else if (cs) {
+      /* Scissor and depth bias arrays are staged to dynamic arrays on the
+       * CPU. When we end the control stream, they're done growing and are
+       * ready for upload.
        */
       cs->uploaded_scissor =
          hk_pool_upload(cmd, cs->scissor.data, cs->scissor.size, 64);
@@ -684,15 +722,14 @@ hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
          hk_pool_upload(cmd, cs->depth_bias.data, cs->depth_bias.size, 64);
 
       /* TODO: maybe free scissor/depth_bias now? */
-
-      cmd->current_cs.gfx->current = agx_vdm_terminate(cs->current);
-      cmd->current_cs.gfx = NULL;
+      cs->current = agx_vdm_terminate(cs->current);
    }
+
+   cmd->current_cs.gfx = NULL;
 
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.pre_gfx);
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.post_gfx);
 
-   assert(cmd->current_cs.gfx == NULL);
    assert(cmd->current_cs.pre_gfx == NULL);
    assert(cmd->current_cs.post_gfx == NULL);
 
@@ -719,8 +756,14 @@ hk_pipeline_stat_addr(struct hk_cmd_buffer *cmd,
       return root->draw.pipeline_stats + (sizeof(uint64_t) * index);
    } else {
       /* Query disabled */
-      return 0;
+      return AGX_SCRATCH_PAGE_ADDRESS;
    }
+}
+
+static inline bool
+hk_stat_enabled(uint64_t addr)
+{
+   return addr != AGX_SCRATCH_PAGE_ADDRESS;
 }
 
 void hk_cmd_buffer_begin_graphics(struct hk_cmd_buffer *cmd,

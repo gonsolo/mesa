@@ -484,6 +484,179 @@ d3d12_video_encoder_update_qpmap_input(struct d3d12_video_encoder *pD3D12Enc,
 #endif
 }
 
+/*
+* Called on encoder creation with the encoder creation parameters
+*/
+void d3d12_video_encoder_initialize_two_pass(struct d3d12_video_encoder *pD3D12Enc,
+                                             const struct pipe_enc_two_pass_encoder_config& two_pass)
+{
+#if D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
+
+   pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc = {};
+
+   pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.two_pass_support.value = 
+      pD3D12Enc->m_screen->get_video_param(pD3D12Enc->m_screen,
+                                           pD3D12Enc->base.profile,
+                                           pD3D12Enc->base.entrypoint,
+                                           PIPE_VIDEO_CAP_ENC_TWO_PASS);
+
+   pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.AppRequested = two_pass.enable;
+   if (two_pass.pow2_downscale_factor > 0)
+   {
+      pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.Pow2DownscaleFactor = two_pass.pow2_downscale_factor;
+      pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.bUseExternalDPBScaling = two_pass.skip_1st_dpb_texture;
+   }
+   
+#endif // D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
+}
+
+#if D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
+static
+struct pipe_enc_two_pass_frame_config
+d3d12_video_encoder_get_two_pass_config_from_picparams(struct pipe_picture_desc* picture,
+                                                       enum pipe_video_format codec)
+{
+   struct pipe_enc_two_pass_frame_config twopass_frame_config = {};
+   switch (codec) {
+#if VIDEO_CODEC_H264ENC
+      case PIPE_VIDEO_FORMAT_MPEG4_AVC:
+      {
+         twopass_frame_config = ((struct pipe_h264_enc_picture_desc *)picture)->twopass_frame_config;
+      } break;
+#endif
+#if VIDEO_CODEC_H265ENC
+      case PIPE_VIDEO_FORMAT_HEVC:
+      {
+         twopass_frame_config = ((struct pipe_h265_enc_picture_desc *)picture)->twopass_frame_config;
+      } break;
+#endif
+      default:
+      {
+         unreachable("Unsupported pipe_video_format");
+      } break;
+   }
+return twopass_frame_config;
+}
+#endif // D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
+
+/*
+* Caller once per frame to update the frame specific two pass settings
+* such as the skip_1st_pass_on_frame flag.
+*
+* This is called after the encoder has been created and the
+* encoder settings have been initialized in d3d12_video_encoder_initialize_two_pass
+* with the encoder creation two pass parameters.
+*/
+void
+d3d12_video_encoder_update_two_pass_frame_settings(struct d3d12_video_encoder *pD3D12Enc,
+                                                   enum pipe_video_format codec,
+                                                   struct pipe_picture_desc* picture)
+{
+#if D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
+   if (pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.AppRequested)
+   {
+      struct pipe_enc_two_pass_frame_config two_pass_frame_cfg = d3d12_video_encoder_get_two_pass_config_from_picparams(picture, codec);
+
+      // Assume two pass enabled for all frames unless supports_dynamic_1st_pass_skip is not supported and skip requested
+      pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.bSkipTwoPassInCurrentFrame = false;
+      if (pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.two_pass_support.bits.supports_dynamic_1st_pass_skip)
+      {
+         // Honor the app's request to skip the 1st pass if supports_dynamic_1st_pass_skip supported
+         pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.bSkipTwoPassInCurrentFrame = two_pass_frame_cfg.skip_1st_pass != 0;
+      }
+
+      //
+      // For when two pass is enabled for this frame AND Pow2DownscaleFactor > 0
+      // also convert input downscaled texture and input recon pics (in/out)
+      //
+      if ((!pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.bSkipTwoPassInCurrentFrame) &&
+         (pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.Pow2DownscaleFactor > 0))
+      {
+
+         //
+         // Convert the input downscaled texture from the pic params
+         //
+         struct d3d12_video_buffer *pDownscaledInputBuffer12 = (struct d3d12_video_buffer *) two_pass_frame_cfg.downscaled_source;
+         pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.pDownscaledInputTexture = pDownscaledInputBuffer12 ? d3d12_resource_resource(pDownscaledInputBuffer12->texture) : NULL;
+
+         //
+         // Convert the DPB input and output params from the picparams DPB array
+         //
+         switch (codec) {
+#if VIDEO_CODEC_H264ENC
+            case PIPE_VIDEO_FORMAT_MPEG4_AVC:
+            {
+               struct pipe_h264_enc_picture_desc *h264Pic = (struct pipe_h264_enc_picture_desc *) picture;
+               pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pResources.resize(h264Pic->dpb_size);
+               pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pSubresources.resize(h264Pic->dpb_size);
+               pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.FrameAnalysisReconstructedPictureOutput = { NULL, 0u };
+               for (uint8_t i = 0; i < h264Pic->dpb_size; i++) {
+                  struct d3d12_video_buffer *vidbuf = (struct d3d12_video_buffer *) h264Pic->dpb[i].downscaled_buffer;
+                  pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pResources[i] = d3d12_resource_resource(vidbuf->texture);
+                  pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pSubresources[i] = vidbuf->idx_texarray_slots;
+                  if (!pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.bUseExternalDPBScaling && // Pass NULL to the output recon pic 1st pass if bUseExternalDPBScaling set
+                      (h264Pic->dpb[i].pic_order_cnt == h264Pic->pic_order_cnt))
+                  {
+                     pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.FrameAnalysisReconstructedPictureOutput.pReconstructedPicture =
+                        pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pResources[i];
+                     pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.FrameAnalysisReconstructedPictureOutput.ReconstructedPictureSubresource =
+                        pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pSubresources[i];
+                  }
+               }
+
+               // Now that we found the recon pio in the loop above
+               // only fill the references for frame types as DX12 expects
+               if ((h264Pic->picture_type == PIPE_H2645_ENC_PICTURE_TYPE_I) ||
+                   (h264Pic->picture_type == PIPE_H2645_ENC_PICTURE_TYPE_IDR))
+               {
+                  pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pResources.clear();
+                  pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pSubresources.clear();
+               }
+
+            } break;
+#endif
+#if VIDEO_CODEC_H265ENC
+            case PIPE_VIDEO_FORMAT_HEVC:
+            {
+               struct pipe_h265_enc_picture_desc *h265Pic = (struct pipe_h265_enc_picture_desc *) picture;
+               pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pResources.resize(h265Pic->dpb_size);
+               pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pSubresources.resize(h265Pic->dpb_size);
+               pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.FrameAnalysisReconstructedPictureOutput = { NULL, 0u };
+               for (uint8_t i = 0; i < h265Pic->dpb_size; i++) {
+                  struct d3d12_video_buffer *vidbuf = (struct d3d12_video_buffer *) h265Pic->dpb[i].downscaled_buffer;
+                  pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pResources[i] = d3d12_resource_resource(vidbuf->texture);
+                  pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pSubresources[i] = vidbuf->idx_texarray_slots;
+                  
+                  if (!pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.bUseExternalDPBScaling && // Pass NULL to the output recon pic 1st pass if bUseExternalDPBScaling set
+                      (h265Pic->dpb[i].pic_order_cnt == h265Pic->pic_order_cnt))
+                  {
+                     pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.FrameAnalysisReconstructedPictureOutput.pReconstructedPicture =
+                        pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pResources[i];
+                     pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.FrameAnalysisReconstructedPictureOutput.ReconstructedPictureSubresource =
+                        pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pSubresources[i];
+                  }
+               }
+                            
+               // Now that we found the recon pio in the loop above
+               // only fill the references for frame types as DX12 expects
+               if (h265Pic->picture_type == PIPE_H2645_ENC_PICTURE_TYPE_IDR)
+               {
+                  pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pResources.clear();
+                  pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pSubresources.clear();
+               }
+
+            } break;
+#endif
+            default:
+            {
+               unreachable("Unsupported pipe_video_format");
+            } break;
+         }
+      }
+   }
+#endif // D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
+}
+
 void
 d3d12_video_encoder_update_dirty_rects(struct d3d12_video_encoder *pD3D12Enc,
                                        const struct pipe_enc_dirty_info& rects)
@@ -538,8 +711,13 @@ d3d12_video_encoder_update_picparams_tracking(struct d3d12_video_encoder *pD3D12
                                               struct pipe_video_buffer *  srcTexture,
                                               struct pipe_picture_desc *  picture)
 {
-   D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA currentPicParams =
-      d3d12_video_encoder_get_current_picture_param_settings(pD3D12Enc);
+#if D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
+      D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA1 currentPicParams =
+         d3d12_video_encoder_get_current_picture_param_settings1(pD3D12Enc);
+#else
+      D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA currentPicParams =
+         d3d12_video_encoder_get_current_picture_param_settings(pD3D12Enc);
+#endif // D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
 
    enum pipe_video_format codec = u_reduce_video_profile(pD3D12Enc->base.profile);
    bool bUsedAsReference = false;
@@ -547,19 +725,19 @@ d3d12_video_encoder_update_picparams_tracking(struct d3d12_video_encoder *pD3D12
 #if VIDEO_CODEC_H264ENC
       case PIPE_VIDEO_FORMAT_MPEG4_AVC:
       {
-         d3d12_video_encoder_update_current_frame_pic_params_info_h264(pD3D12Enc, srcTexture, picture, currentPicParams, bUsedAsReference);
+         d3d12_video_encoder_update_current_frame_pic_params_info_h264(pD3D12Enc, srcTexture, picture, currentPicParams.pH264PicData, bUsedAsReference);
       } break;
 #endif
 #if VIDEO_CODEC_H265ENC
       case PIPE_VIDEO_FORMAT_HEVC:
       {
-         d3d12_video_encoder_update_current_frame_pic_params_info_hevc(pD3D12Enc, srcTexture, picture, currentPicParams, bUsedAsReference);
+         d3d12_video_encoder_update_current_frame_pic_params_info_hevc(pD3D12Enc, srcTexture, picture, currentPicParams.pHEVCPicData, bUsedAsReference);
       } break;
 #endif
 #if VIDEO_CODEC_AV1ENC
       case PIPE_VIDEO_FORMAT_AV1:
       {
-         d3d12_video_encoder_update_current_frame_pic_params_info_av1(pD3D12Enc, srcTexture, picture, currentPicParams, bUsedAsReference);
+         d3d12_video_encoder_update_current_frame_pic_params_info_av1(pD3D12Enc, srcTexture, picture, currentPicParams.pAV1PicData, bUsedAsReference);
       } break;
 #endif
       default:
@@ -775,44 +953,81 @@ d3d12_video_encoder_reconfigure_encoder_objects(struct d3d12_video_encoder *pD3D
          reCreatedEncoderHeap = true;
       }
 
+      HRESULT hr = S_OK;
 #if D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
-      D3D12_VIDEO_ENCODER_HEAP_FLAGS heapFlags = D3D12_VIDEO_ENCODER_HEAP_FLAG_NONE;
-      if (pD3D12Enc->m_currentEncodeCapabilities.m_currentResolutionSupportCaps.DirtyRegions.DirtyRegionsSupportFlags) {
-         heapFlags |= D3D12_VIDEO_ENCODER_HEAP_FLAG_ALLOW_DIRTY_REGIONS;
-      }
-
-      //
-      // Prefer individual slice buffers when possible
-      //
-      if (pD3D12Enc->m_currentEncodeCapabilities.m_SupportFlags &
-         D3D12_VIDEO_ENCODER_SUPPORT_FLAG_SUBREGION_NOTIFICATION_ARRAY_OF_BUFFERS_AVAILABLE)
+      ComPtr<ID3D12VideoDevice4> spVideoDevice4;
+      if (SUCCEEDED(pD3D12Enc->m_spD3D12VideoDevice->QueryInterface(
+          IID_PPV_ARGS(spVideoDevice4.GetAddressOf()))))
       {
-         heapFlags |= D3D12_VIDEO_ENCODER_HEAP_FLAG_ALLOW_SUBREGION_NOTIFICATION_ARRAY_OF_BUFFERS;
+         D3D12_VIDEO_ENCODER_HEAP_FLAGS heapFlags = D3D12_VIDEO_ENCODER_HEAP_FLAG_NONE;
+         if (pD3D12Enc->m_currentEncodeCapabilities.m_currentResolutionSupportCaps.DirtyRegions.DirtyRegionsSupportFlags) {
+            heapFlags |= D3D12_VIDEO_ENCODER_HEAP_FLAG_ALLOW_DIRTY_REGIONS;
+         }
+
+         //
+         // Prefer individual slice buffers when possible
+         //
+         if (pD3D12Enc->m_currentEncodeCapabilities.m_SupportFlags &
+            D3D12_VIDEO_ENCODER_SUPPORT_FLAG_SUBREGION_NOTIFICATION_ARRAY_OF_BUFFERS_AVAILABLE)
+         {
+            heapFlags |= D3D12_VIDEO_ENCODER_HEAP_FLAG_ALLOW_SUBREGION_NOTIFICATION_ARRAY_OF_BUFFERS;
+         }
+         else if (pD3D12Enc->m_currentEncodeCapabilities.m_SupportFlags &
+            D3D12_VIDEO_ENCODER_SUPPORT_FLAG_SUBREGION_NOTIFICATION_SINGLE_BUFFER_AVAILABLE)
+         {
+            heapFlags |= D3D12_VIDEO_ENCODER_HEAP_FLAG_ALLOW_SUBREGION_NOTIFICATION_SINGLE_BUFFER;
+         }
+
+         if (pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.AppRequested)
+         {
+            heapFlags |= D3D12_VIDEO_ENCODER_HEAP_FLAG_ALLOW_RATE_CONTROL_FRAME_ANALYSIS;
+         }
+
+         D3D12_VIDEO_ENCODER_HEAP_DESC1 heapDesc1 = {
+            pD3D12Enc->m_NodeMask,
+            heapFlags,
+            pD3D12Enc->m_currentEncodeConfig.m_encoderCodecDesc,
+            d3d12_video_encoder_get_current_profile_desc(pD3D12Enc),
+            d3d12_video_encoder_get_current_level_desc(pD3D12Enc),
+            // resolution list count
+            1,
+            // resolution list
+            &pD3D12Enc->m_currentEncodeConfig.m_currentResolution,
+            // UINT Pow2DownscaleFactor
+            pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.AppRequested ?
+               pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.Pow2DownscaleFactor
+               : 0,
+         };
+
+         // Create encoder heap
+         pD3D12Enc->m_spVideoEncoderHeap.Reset();
+         ComPtr<ID3D12VideoEncoderHeap1> spVideoEncoderHeap1;
+         hr = spVideoDevice4->CreateVideoEncoderHeap1(&heapDesc1,
+                                                              IID_PPV_ARGS(spVideoEncoderHeap1.GetAddressOf()));
+         if (SUCCEEDED(hr))
+         {
+            hr = spVideoEncoderHeap1->QueryInterface(IID_PPV_ARGS(pD3D12Enc->m_spVideoEncoderHeap.GetAddressOf())); 
+         }
       }
-      else if (pD3D12Enc->m_currentEncodeCapabilities.m_SupportFlags &
-         D3D12_VIDEO_ENCODER_SUPPORT_FLAG_SUBREGION_NOTIFICATION_SINGLE_BUFFER_AVAILABLE)
+      else
+#endif // D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
       {
-         heapFlags |= D3D12_VIDEO_ENCODER_HEAP_FLAG_ALLOW_SUBREGION_NOTIFICATION_SINGLE_BUFFER;
+         D3D12_VIDEO_ENCODER_HEAP_DESC heapDesc = { pD3D12Enc->m_NodeMask,
+                                                   D3D12_VIDEO_ENCODER_HEAP_FLAG_NONE,
+                                                   pD3D12Enc->m_currentEncodeConfig.m_encoderCodecDesc,
+                                                   d3d12_video_encoder_get_current_profile_desc(pD3D12Enc),
+                                                   d3d12_video_encoder_get_current_level_desc(pD3D12Enc),
+                                                   // resolution list count
+                                                   1,
+                                                   // resolution list
+                                                   &pD3D12Enc->m_currentEncodeConfig.m_currentResolution };
+
+         // Create encoder heap
+         pD3D12Enc->m_spVideoEncoderHeap.Reset();
+         hr = pD3D12Enc->m_spD3D12VideoDevice->CreateVideoEncoderHeap(&heapDesc,
+                                                                              IID_PPV_ARGS(pD3D12Enc->m_spVideoEncoderHeap.GetAddressOf()));
       }
 
-      D3D12_VIDEO_ENCODER_HEAP_DESC heapDesc = { pD3D12Enc->m_NodeMask,
-                                                 heapFlags,
-#else
-      D3D12_VIDEO_ENCODER_HEAP_DESC heapDesc = { pD3D12Enc->m_NodeMask,
-                                                 D3D12_VIDEO_ENCODER_HEAP_FLAG_NONE,
-#endif
-                                                 pD3D12Enc->m_currentEncodeConfig.m_encoderCodecDesc,
-                                                 d3d12_video_encoder_get_current_profile_desc(pD3D12Enc),
-                                                 d3d12_video_encoder_get_current_level_desc(pD3D12Enc),
-                                                 // resolution list count
-                                                 1,
-                                                 // resolution list
-                                                 &pD3D12Enc->m_currentEncodeConfig.m_currentResolution };
-
-      // Create encoder heap
-      pD3D12Enc->m_spVideoEncoderHeap.Reset();
-      HRESULT hr = pD3D12Enc->m_spD3D12VideoDevice->CreateVideoEncoderHeap(&heapDesc,
-                                                                           IID_PPV_ARGS(pD3D12Enc->m_spVideoEncoderHeap.GetAddressOf()));
       if (FAILED(hr)) {
          debug_printf("CreateVideoEncoderHeap failed with HR %x\n", hr);
          return false;
@@ -958,34 +1173,32 @@ d3d12_video_encoder_get_current_slice_param_settings(struct d3d12_video_encoder 
    return subregionData;
 }
 
-D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA
-d3d12_video_encoder_get_current_picture_param_settings(struct d3d12_video_encoder *pD3D12Enc)
+#if D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
+D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA1
+d3d12_video_encoder_get_current_picture_param_settings1(struct d3d12_video_encoder *pD3D12Enc)
 {
    enum pipe_video_format codec = u_reduce_video_profile(pD3D12Enc->base.profile);
+   D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA1 curPicParamsData = {};
    switch (codec) {
 #if VIDEO_CODEC_H264ENC
       case PIPE_VIDEO_FORMAT_MPEG4_AVC:
       {
-         D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA curPicParamsData = {};
          curPicParamsData.pH264PicData = &pD3D12Enc->m_currentEncodeConfig.m_encoderPicParamsDesc.m_H264PicData;
          curPicParamsData.DataSize     = sizeof(pD3D12Enc->m_currentEncodeConfig.m_encoderPicParamsDesc.m_H264PicData);
-         return curPicParamsData;
       } break;
 #endif
 #if VIDEO_CODEC_H265ENC
       case PIPE_VIDEO_FORMAT_HEVC:
       {
-         return ConvertHEVCPicParamsFromProfile(pD3D12Enc->m_currentEncodeConfig.m_encoderProfileDesc.m_HEVCProfile,
-                                                &pD3D12Enc->m_currentEncodeConfig.m_encoderPicParamsDesc.m_HEVCPicData);
+         curPicParamsData.pHEVCPicData  = &pD3D12Enc->m_currentEncodeConfig.m_encoderPicParamsDesc.m_HEVCPicData;
+         curPicParamsData.DataSize      = sizeof(D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC2);
       } break;
 #endif
 #if VIDEO_CODEC_AV1ENC
       case PIPE_VIDEO_FORMAT_AV1:
       {
-         D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA curPicParamsData = {};
          curPicParamsData.pAV1PicData = &pD3D12Enc->m_currentEncodeConfig.m_encoderPicParamsDesc.m_AV1PicData;
          curPicParamsData.DataSize     = sizeof(pD3D12Enc->m_currentEncodeConfig.m_encoderPicParamsDesc.m_AV1PicData);
-         return curPicParamsData;
       } break;
 #endif
       default:
@@ -993,6 +1206,44 @@ d3d12_video_encoder_get_current_picture_param_settings(struct d3d12_video_encode
          unreachable("Unsupported pipe_video_format");
       } break;
    }
+   return curPicParamsData;
+}
+#endif // D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
+
+D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA
+d3d12_video_encoder_get_current_picture_param_settings(struct d3d12_video_encoder *pD3D12Enc)
+{
+   enum pipe_video_format codec = u_reduce_video_profile(pD3D12Enc->base.profile);
+   D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA curPicParamsData = {};
+   switch (codec) {
+#if VIDEO_CODEC_H264ENC
+      case PIPE_VIDEO_FORMAT_MPEG4_AVC:
+      {
+         curPicParamsData.pH264PicData = &pD3D12Enc->m_currentEncodeConfig.m_encoderPicParamsDesc.m_H264PicData;
+         curPicParamsData.DataSize     = sizeof(pD3D12Enc->m_currentEncodeConfig.m_encoderPicParamsDesc.m_H264PicData);
+      } break;
+#endif
+#if VIDEO_CODEC_H265ENC
+      case PIPE_VIDEO_FORMAT_HEVC:
+      {
+         // D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC2 binary-compatible with D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC
+         curPicParamsData.pHEVCPicData  = reinterpret_cast<D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC*>(&pD3D12Enc->m_currentEncodeConfig.m_encoderPicParamsDesc.m_HEVCPicData);
+         curPicParamsData.DataSize      = sizeof(D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC);
+      } break;
+#endif
+#if VIDEO_CODEC_AV1ENC
+      case PIPE_VIDEO_FORMAT_AV1:
+      {
+         curPicParamsData.pAV1PicData = &pD3D12Enc->m_currentEncodeConfig.m_encoderPicParamsDesc.m_AV1PicData;
+         curPicParamsData.DataSize     = sizeof(pD3D12Enc->m_currentEncodeConfig.m_encoderPicParamsDesc.m_AV1PicData);
+      } break;
+#endif
+      default:
+      {
+         unreachable("Unsupported pipe_video_format");
+      } break;
+   }
+   return curPicParamsData;
 }
 
 D3D12_VIDEO_ENCODER_RATE_CONTROL
@@ -1631,6 +1882,11 @@ bool d3d12_video_encoder_negotiate_requested_features_and_d3d12_driver_caps(stru
          0) {
          debug_printf("[d3d12_video_encoder] Requested input dirty regions is not supported\n");
       }
+
+      if ((capEncoderSupportData1.ValidationFlags & D3D12_VIDEO_ENCODER_VALIDATION_FLAG_FRAME_ANALYSIS_NOT_SUPPORTED ) !=
+         0) {
+         debug_printf("[d3d12_video_encoder] Requested two pass encode is not supported\n");
+      }
 #else
 
 #endif
@@ -1682,6 +1938,12 @@ bool d3d12_video_encoder_query_d3d12_driver_caps(struct d3d12_video_encoder *pD3
    {
       capEncoderSupportData1.MotionSearch.MotionSearchMode = D3D12_VIDEO_ENCODER_FRAME_MOTION_SEARCH_MODE_FULL_SEARCH;
       capEncoderSupportData1.MotionSearch.BidirectionalRefFrameEnabled = TRUE;
+   }
+
+   capEncoderSupportData1.FrameAnalysis.Enabled = pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.AppRequested;
+   if (capEncoderSupportData1.FrameAnalysis.Enabled)
+   {
+      capEncoderSupportData1.FrameAnalysis.Pow2DownscaleFactor = pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.Pow2DownscaleFactor;
    }
 
 #endif
@@ -2014,12 +2276,14 @@ void
 d3d12_video_encoder_update_output_stats_resources(struct d3d12_video_encoder *pD3D12Enc,
                                                   struct pipe_resource* qpmap,
                                                   struct pipe_resource* satdmap,
-                                                  struct pipe_resource* rcbitsmap)
+                                                  struct pipe_resource* rcbitsmap,
+                                                  struct pipe_resource* psnrmap)
 {
 #if D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
    pD3D12Enc->m_currentEncodeConfig.m_GPUQPStatsResource = d3d12_resource(qpmap);
    pD3D12Enc->m_currentEncodeConfig.m_GPUSATDStatsResource = d3d12_resource(satdmap);
    pD3D12Enc->m_currentEncodeConfig.m_GPURCBitAllocationStatsResource = d3d12_resource(rcbitsmap);
+   pD3D12Enc->m_currentEncodeConfig.m_GPUPSNRAllocationStatsResource = d3d12_resource(psnrmap);
 #endif // D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
 }
 
@@ -2039,13 +2303,15 @@ d3d12_video_encoder_update_current_encoder_config_state(struct d3d12_video_encod
          d3d12_video_encoder_update_output_stats_resources(pD3D12Enc,
                                                            ((struct pipe_h264_enc_picture_desc *)picture)->gpu_stats_qp_map,
                                                            ((struct pipe_h264_enc_picture_desc *)picture)->gpu_stats_satd_map,
-                                                           ((struct pipe_h264_enc_picture_desc *)picture)->gpu_stats_rc_bitallocation_map);
+                                                           ((struct pipe_h264_enc_picture_desc *)picture)->gpu_stats_rc_bitallocation_map,
+                                                           ((struct pipe_h264_enc_picture_desc *)picture)->gpu_stats_psnr);
 
          d3d12_video_encoder_update_move_rects(pD3D12Enc, ((struct pipe_h264_enc_picture_desc *)picture)->move_info);
          d3d12_video_encoder_update_dirty_rects(pD3D12Enc, ((struct pipe_h264_enc_picture_desc *)picture)->dirty_info);
          d3d12_video_encoder_update_qpmap_input(pD3D12Enc, ((struct pipe_h264_enc_picture_desc *)picture)->input_gpu_qpmap,
                                                            ((struct pipe_h264_enc_picture_desc *)picture)->roi,
                                                            ((struct pipe_h264_enc_picture_desc *)picture)->pic_ctrl.temporal_id);
+         d3d12_video_encoder_update_two_pass_frame_settings(pD3D12Enc, codec, picture);
          // ...encoder_config_state_h264 calls encoder support cap, set any state before this call
          bCodecUpdatesSuccess = d3d12_video_encoder_update_current_encoder_config_state_h264(pD3D12Enc, srcTextureDesc, picture);
       } break;
@@ -2056,13 +2322,15 @@ d3d12_video_encoder_update_current_encoder_config_state(struct d3d12_video_encod
          d3d12_video_encoder_update_output_stats_resources(pD3D12Enc,
                                                            ((struct pipe_h265_enc_picture_desc *)picture)->gpu_stats_qp_map,
                                                            ((struct pipe_h265_enc_picture_desc *)picture)->gpu_stats_satd_map,
-                                                           ((struct pipe_h265_enc_picture_desc *)picture)->gpu_stats_rc_bitallocation_map);
+                                                           ((struct pipe_h265_enc_picture_desc *)picture)->gpu_stats_rc_bitallocation_map,
+                                                           ((struct pipe_h264_enc_picture_desc *)picture)->gpu_stats_psnr);
 
          d3d12_video_encoder_update_move_rects(pD3D12Enc, ((struct pipe_h265_enc_picture_desc *)picture)->move_info);
          d3d12_video_encoder_update_dirty_rects(pD3D12Enc, ((struct pipe_h265_enc_picture_desc *)picture)->dirty_info);
          d3d12_video_encoder_update_qpmap_input(pD3D12Enc, ((struct pipe_h265_enc_picture_desc *)picture)->input_gpu_qpmap,
                                                            ((struct pipe_h265_enc_picture_desc *)picture)->roi,
                                                            ((struct pipe_h265_enc_picture_desc *)picture)->pic.temporal_id);
+         d3d12_video_encoder_update_two_pass_frame_settings(pD3D12Enc, codec, picture);
          // ...encoder_config_state_hevc calls encoder support cap, set any state before this call
          bCodecUpdatesSuccess = d3d12_video_encoder_update_current_encoder_config_state_hevc(pD3D12Enc, srcTextureDesc, picture);
       } break;
@@ -2222,6 +2490,7 @@ d3d12_video_encoder_create_encoder(struct pipe_context *context, const struct pi
    pD3D12Enc->supports_sliced_fences.value = context->screen->get_video_param(context->screen, codec->profile,
                                                                               codec->entrypoint,
                                                                               PIPE_VIDEO_CAP_ENC_SLICED_NOTIFICATIONS);
+   d3d12_video_encoder_initialize_two_pass(pD3D12Enc, codec->two_pass);
 
    return &pD3D12Enc->base;
 
@@ -2987,11 +3256,9 @@ d3d12_video_encoder_encode_bitstream_impl(struct pipe_video_codec *codec,
       }
    }
 
-   memset(&pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].m_FenceData,
-            0,
-            sizeof(pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].m_FenceData));
-   pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].m_FenceData.value = pD3D12Enc->m_fenceValue;
-   pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].m_FenceData.cmdqueue_fence = pD3D12Enc->m_spFence.Get();
+   ASSERTED bool success = d3d12_reset_fence(&pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].m_FenceData, pD3D12Enc->m_spFence.Get(), pD3D12Enc->m_fenceValue);
+   assert(success);
+
    *feedback = (void*) &pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].m_FenceData;
 
    std::vector<D3D12_RESOURCE_BARRIER> rgCurrentFrameStateTransitions = {
@@ -3166,6 +3433,18 @@ d3d12_video_encoder_encode_bitstream_impl(struct pipe_video_codec *codec,
    if (SUCCEEDED(pD3D12Enc->m_spEncodeCommandList->QueryInterface(
       IID_PPV_ARGS(spEncodeCommandList4.GetAddressOf())))) {
 
+      // Update current frame pic params state after reconfiguring above.
+      D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA1 currentPicParams1 =
+         d3d12_video_encoder_get_current_picture_param_settings1(pD3D12Enc);
+
+      if (!pD3D12Enc->m_upDPBManager->get_current_frame_picture_control_data1(currentPicParams1)) {
+         debug_printf("[d3d12_video_encoder_encode_bitstream] get_current_frame_picture_control_data1 failed!\n");
+         pD3D12Enc->m_inflightResourcesPool[d3d12_video_encoder_pool_current_index(pD3D12Enc)].encode_result = PIPE_VIDEO_FEEDBACK_METADATA_ENCODE_FLAG_FAILED;
+         pD3D12Enc->m_spEncodedFrameMetadata[d3d12_video_encoder_metadata_current_index(pD3D12Enc)].encode_result = PIPE_VIDEO_FEEDBACK_METADATA_ENCODE_FLAG_FAILED;
+         assert(false);
+         return;
+      }
+
       std::vector<D3D12_RESOURCE_BARRIER> pResolveInputDataBarriers;
       D3D12_VIDEO_ENCODER_DIRTY_REGIONS dirtyRegions = { };
       dirtyRegions.MapSource = pD3D12Enc->m_currentEncodeConfig.m_DirtyRectsDesc.MapSource;
@@ -3307,7 +3586,7 @@ d3d12_video_encoder_encode_bitstream_impl(struct pipe_video_codec *codec,
             ResolveInputData.MotionVectors.pMotionVectorMapsSubresources = pD3D12Enc->m_currentEncodeConfig.m_MoveRectsDesc.MapInfo.pMotionVectorMapsSubresources;
             ResolveInputData.MotionVectors.pMotionVectorMapsMetadataSubresources = pD3D12Enc->m_currentEncodeConfig.m_MoveRectsDesc.MapInfo.pMotionVectorMapsMetadataSubresources;
             ResolveInputData.MotionVectors.MotionUnitPrecision = pD3D12Enc->m_currentEncodeConfig.m_MoveRectsDesc.MapInfo.MotionUnitPrecision;
-            ResolveInputData.MotionVectors.PictureControlConfiguration = currentPicParams;
+            ResolveInputData.MotionVectors.PictureControlConfiguration = currentPicParams1;
 
             D3D12_VIDEO_ENCODER_RESOLVE_INPUT_PARAM_LAYOUT_INPUT_ARGUMENTS resolveInputParamLayoutInput =
             {
@@ -3365,6 +3644,105 @@ d3d12_video_encoder_encode_bitstream_impl(struct pipe_video_codec *codec,
          d12_gpu_stats_rc_bitallocation_map = d3d12_resource_resource(pD3D12Enc->m_currentEncodeConfig.m_GPURCBitAllocationStatsResource);
       }
 
+      ID3D12Resource* d12_gpu_stats_psnr = NULL;
+      if (pD3D12Enc->m_currentEncodeConfig.m_GPUPSNRAllocationStatsResource) {
+         optionalMetadataFlags |= D3D12_VIDEO_ENCODER_OPTIONAL_METADATA_ENABLE_FLAG_FRAME_PSNR;
+         d3d12_promote_to_permanent_residency(pD3D12Enc->m_pD3D12Screen, pD3D12Enc->m_currentEncodeConfig.m_GPUPSNRAllocationStatsResource);
+         d3d12_transition_resource_state(d3d12_context(pD3D12Enc->base.context),
+                                       pD3D12Enc->m_currentEncodeConfig.m_GPUPSNRAllocationStatsResource,
+                                       D3D12_RESOURCE_STATE_COMMON,
+                                       D3D12_TRANSITION_FLAG_INVALIDATE_BINDINGS);
+         d3d12_resource_wait_idle(d3d12_context(pD3D12Enc->base.context), pD3D12Enc->m_currentEncodeConfig.m_GPUPSNRAllocationStatsResource, true /*wantToWrite*/);
+         d12_gpu_stats_psnr = d3d12_resource_resource(pD3D12Enc->m_currentEncodeConfig.m_GPUPSNRAllocationStatsResource);
+      }
+
+      D3D12_VIDEO_ENCODER_FRAME_ANALYSIS FrameAnalysis = {};
+      D3D12_VIDEO_ENCODER_RECONSTRUCTED_PICTURE FrameAnalysisReconstructedPicture = {};
+      std::vector<D3D12_RESOURCE_BARRIER> pTwoPassExtraBarriers;
+      pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[pD3D12Enc->m_currentEncodeConfig.m_activeRateControlIndex].m_Flags &=
+            ~D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_FRAME_ANALYSIS;
+
+      if ((pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.AppRequested) &&
+         (!pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.bSkipTwoPassInCurrentFrame))
+      {
+         pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc[pD3D12Enc->m_currentEncodeConfig.m_activeRateControlIndex].m_Flags |=
+            D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_FRAME_ANALYSIS;
+
+         //
+         // When Pow2DownscaleFactor is zero, is full resolution two pass, which leaves FrameAnalysis empty/zero filled.
+         // For lower 1st pass resolution, we fill FrameAnalysis appropiately
+         //         
+
+         if (pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.Pow2DownscaleFactor > 0)
+         {
+            //
+            // Schedule barrier transitions (reverse ones are scheduled later by doing swap to pTwoPassExtraBarriers)
+            //
+
+            if (pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.pDownscaledInputTexture)
+            {
+                 pTwoPassExtraBarriers.push_back(CD3DX12_RESOURCE_BARRIER::Transition(
+                                                 pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.pDownscaledInputTexture,
+                                                 D3D12_RESOURCE_STATE_COMMON,
+                                                 D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ));
+            }
+
+            if (pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pResources.size() > 0)
+            {
+               if ((pD3D12Enc->m_currentEncodeCapabilities.m_SupportFlags &
+                   D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RECONSTRUCTED_FRAMES_REQUIRE_TEXTURE_ARRAYS) != 0)
+               {
+                  pTwoPassExtraBarriers.push_back(CD3DX12_RESOURCE_BARRIER::Transition(
+                                                  pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pResources[0],
+                                                  D3D12_RESOURCE_STATE_COMMON,
+                                                  D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ));
+               }
+               else
+               {
+                  for (unsigned i = 0; i < pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pResources.size(); i++)
+                     pTwoPassExtraBarriers.push_back(CD3DX12_RESOURCE_BARRIER::Transition(
+                                                     pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pResources[i],
+                                                     D3D12_RESOURCE_STATE_COMMON,
+                                                     D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ));
+               }
+            }
+
+            if (pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.FrameAnalysisReconstructedPictureOutput.pReconstructedPicture) // can be NULL if external dpb scaling
+            {
+               pTwoPassExtraBarriers.push_back(CD3DX12_RESOURCE_BARRIER::Transition(
+                                             pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.FrameAnalysisReconstructedPictureOutput.pReconstructedPicture,
+                                             D3D12_RESOURCE_STATE_COMMON,
+                                             D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE));
+            }
+
+            //
+            // Set EncodeFrame params
+            //
+
+            FrameAnalysisReconstructedPicture = pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.FrameAnalysisReconstructedPictureOutput;
+
+            FrameAnalysis =
+            {
+               // ID3D12Resource *pDownscaledFrame;
+               pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.pDownscaledInputTexture,
+               // UINT64 Subresource;
+               0u,
+               // D3D12_VIDEO_ENCODE_REFERENCE_FRAMES DownscaledReferences;
+               {
+                  // UINT NumTexture2Ds;
+                  static_cast<UINT>(pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pResources.size()),
+                  // _Field_size_full_(NumTexture2Ds)  ID3D12Resource **ppTexture2Ds;
+                  pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pResources.data(),
+                  // _Field_size_full_(NumTexture2Ds)  UINT *pSubresources;
+                  pD3D12Enc->m_currentEncodeConfig.m_TwoPassEncodeDesc.DownscaledReferences.pSubresources.data(),
+               },
+            };
+         }
+
+         spEncodeCommandList4->ResourceBarrier(static_cast<uint32_t>(pTwoPassExtraBarriers.size()),
+                                               pTwoPassExtraBarriers.data());
+      }
+
       const D3D12_VIDEO_ENCODER_ENCODEFRAME_INPUT_ARGUMENTS1 inputStreamArguments = {
          // D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_DESC
          { // D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAGS
@@ -3377,13 +3755,13 @@ d3d12_video_encoder_encode_bitstream_impl(struct pipe_video_codec *codec,
          pD3D12Enc->m_currentEncodeConfig.m_encoderSliceConfigMode,
          d3d12_video_encoder_get_current_slice_param_settings(pD3D12Enc),
          d3d12_video_encoder_get_current_gop_desc(pD3D12Enc) },
-         // D3D12_VIDEO_ENCODER_PICTURE_CONTROL_DESC/D3D12_VIDEO_ENCODER_PICTURE_CONTROL_DESC1
+         // D3D12_VIDEO_ENCODER_PICTURE_CONTROL_DESC1
          { // uint32_t IntraRefreshFrameIndex;
          pD3D12Enc->m_currentEncodeConfig.m_IntraRefreshCurrentFrameIndex,
          // D3D12_VIDEO_ENCODER_PICTURE_CONTROL_FLAGS Flags;
          picCtrlFlags,
-         // D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA PictureControlCodecData;
-         currentPicParams,
+         // D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA1 PictureControlCodecData;
+         currentPicParams1,
          // D3D12_VIDEO_ENCODE_REFERENCE_FRAMES ReferenceFrames;
          referenceFramesDescriptor,
             // D3D12_VIDEO_ENCODER_FRAME_MOTION_VECTORS MotionVectors;
@@ -3392,6 +3770,8 @@ d3d12_video_encoder_encode_bitstream_impl(struct pipe_video_codec *codec,
             dirtyRegions,
             // D3D12_VIDEO_ENCODER_QUANTIZATION_OPAQUE_MAP QuantizationTextureMap;
             QuantizationTextureMap,
+            // D3D12_VIDEO_ENCODER_FRAME_ANALYSIS FrameAnalysis;
+            FrameAnalysis,
          },
          pInputVideoD3D12Res,
          inputVideoD3D12Subresource,
@@ -3408,9 +3788,6 @@ d3d12_video_encoder_encode_bitstream_impl(struct pipe_video_codec *codec,
 
       std::vector<D3D12_RESOURCE_BARRIER> pSlicedEncodingExtraBarriers;
 
-      pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].pspSubregionSizes.clear();
-      pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].pspSubregionOffsets.clear();
-      pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].pspSubregionFences.clear();
       pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].pSubregionPipeFences.clear();
       pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].ppSubregionFenceValues.clear();
       pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].ppSubregionSizes.clear();
@@ -3457,15 +3834,15 @@ d3d12_video_encoder_encode_bitstream_impl(struct pipe_video_codec *codec,
          //
          // Create sizes and offsets results buffers
          //
-         pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].pspSubregionSizes.resize(num_slice_objects, 0u);
-         pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].pspSubregionOffsets.resize(num_slice_objects, 0u);
+         pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].pspSubregionSizes.resize(num_slice_objects, {});
+         pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].pspSubregionOffsets.resize(num_slice_objects, {});
          pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].pspSubregionFences.resize(num_slice_objects, NULL);
          pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].pSubregionPipeFences.resize(num_slice_objects, {});
-         pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].ppSubregionFenceValues.resize(num_slice_objects, 1u);
+         pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].ppSubregionFenceValues.resize(num_slice_objects, pD3D12Enc->m_fenceValue);
 
-         pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].ppSubregionSizes.resize(num_slice_objects, 0u);
-         pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].ppSubregionOffsets.resize(num_slice_objects, 0u);
-         pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].ppSubregionFences.resize(num_slice_objects, 0u);
+         pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].ppSubregionSizes.resize(num_slice_objects, NULL);
+         pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].ppSubregionOffsets.resize(num_slice_objects, NULL);
+         pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].ppSubregionFences.resize(num_slice_objects, NULL);
          pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].ppResolvedSubregionSizes.resize(num_slice_objects, 0u);
          pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].ppResolvedSubregionOffsets.resize(num_slice_objects, 0u);
          D3D12_HEAP_PROPERTIES Properties = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
@@ -3576,7 +3953,9 @@ d3d12_video_encoder_encode_bitstream_impl(struct pipe_video_codec *codec,
          // D3D12_VIDEO_ENCODER_RECONSTRUCTED_PICTURE
          reconPicOutputTextureDesc,
          // D3D12_VIDEO_ENCODER_ENCODE_OPERATION_METADATA_BUFFER
-         { pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].m_spMetadataOutputBuffer.Get(), 0 }
+         { pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].m_spMetadataOutputBuffer.Get(), 0 },
+         // D3D12_VIDEO_ENCODER_RECONSTRUCTED_PICTURE FrameAnalysisReconstructedPicture;
+         FrameAnalysisReconstructedPicture,
       };
 
       debug_printf("DX12 EncodeFrame submission fenceValue %" PRIu64 " current_metadata_slot %" PRIu64 " - POC %d picture_type %s LayoutMode %d SlicesCount %d IRMode %d IRIndex %d\n",
@@ -3589,9 +3968,13 @@ d3d12_video_encoder_encode_bitstream_impl(struct pipe_video_codec *codec,
                   static_cast<uint32_t>(pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].m_associatedEncodeConfig.m_IntraRefresh.Mode),
                   pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].m_associatedEncodeConfig.m_IntraRefreshCurrentFrameIndex);
 
+
+      ComPtr<ID3D12VideoEncoderHeap1> spVideoEncoderHeap1;
+      pD3D12Enc->m_spVideoEncoderHeap->QueryInterface(IID_PPV_ARGS(spVideoEncoderHeap1.GetAddressOf()));
+
       // Record EncodeFrame
       spEncodeCommandList4->EncodeFrame1(pD3D12Enc->m_spVideoEncoder.Get(),
-                                                   pD3D12Enc->m_spVideoEncoderHeap.Get(),
+                                                   spVideoEncoderHeap1.Get(),
                                                    &inputStreamArguments,
                                                    &outputStreamArguments);
 
@@ -3637,6 +4020,12 @@ d3d12_video_encoder_encode_bitstream_impl(struct pipe_video_codec *codec,
                                                                               D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE));
       }
 
+      if (d12_gpu_stats_psnr) {
+         output_stats_barriers.push_back(CD3DX12_RESOURCE_BARRIER::Transition(d12_gpu_stats_psnr,
+                                                                              D3D12_RESOURCE_STATE_COMMON,
+                                                                              D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE));
+      }
+
       spEncodeCommandList4->ResourceBarrier(static_cast<uint32_t>(output_stats_barriers.size()),
                                                       output_stats_barriers.data());
       const D3D12_VIDEO_ENCODER_RESOLVE_METADATA_INPUT_ARGUMENTS1 inputMetadataCmd = {
@@ -3661,6 +4050,15 @@ d3d12_video_encoder_encode_bitstream_impl(struct pipe_video_codec *codec,
          d12_gpu_stats_satd_map,
          // ID3D12Resource *pOutputBitAllocationMap;
          d12_gpu_stats_rc_bitallocation_map,
+         // D3D12_VIDEO_ENCODER_ENCODE_OPERATION_METADATA_BUFFER ResolvedFramePSNRData;
+         {
+         // ID3D12Resource *pBuffer;
+            d12_gpu_stats_psnr,
+         // UINT64 Offset;
+            0u,
+         },
+         // D3D12_VIDEO_ENCODER_ENCODE_OPERATION_METADATA_BUFFER ResolvedSubregionsPSNRData;
+         {},
       };
 
       spEncodeCommandList4->ResolveEncoderOutputMetadata1(&inputMetadataCmd, &outputMetadataCmd);
@@ -3712,6 +4110,12 @@ d3d12_video_encoder_encode_bitstream_impl(struct pipe_video_codec *codec,
       }
       spEncodeCommandList4->ResourceBarrier(static_cast<uint32_t>(pSlicedEncodingExtraBarriers.size()),
                                                       pSlicedEncodingExtraBarriers.data());
+
+      for (auto &BarrierDesc : pTwoPassExtraBarriers) {
+         std::swap(BarrierDesc.Transition.StateBefore, BarrierDesc.Transition.StateAfter);
+      }
+      spEncodeCommandList4->ResourceBarrier(static_cast<uint32_t>(pTwoPassExtraBarriers.size()),
+                                                      pTwoPassExtraBarriers.data());
    }
    else
 #endif // D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
@@ -3728,7 +4132,7 @@ d3d12_video_encoder_encode_bitstream_impl(struct pipe_video_codec *codec,
             pD3D12Enc->m_currentEncodeConfig.m_encoderSliceConfigMode,
             d3d12_video_encoder_get_current_slice_param_settings(pD3D12Enc),
             d3d12_video_encoder_get_current_gop_desc(pD3D12Enc) },
-         // D3D12_VIDEO_ENCODER_PICTURE_CONTROL_DESC/D3D12_VIDEO_ENCODER_PICTURE_CONTROL_DESC1
+         // D3D12_VIDEO_ENCODER_PICTURE_CONTROL_DESC
          { // uint32_t IntraRefreshFrameIndex;
             pD3D12Enc->m_currentEncodeConfig.m_IntraRefreshCurrentFrameIndex,
             // D3D12_VIDEO_ENCODER_PICTURE_CONTROL_FLAGS Flags;

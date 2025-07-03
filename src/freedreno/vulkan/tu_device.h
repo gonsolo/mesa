@@ -346,6 +346,9 @@ struct tu_device
    struct tu_suballocator event_suballoc;
    mtx_t event_mutex;
 
+   struct tu_suballocator *trace_suballoc;
+   mtx_t trace_mutex;
+
    /* the blob seems to always use 8K factor and 128K param sizes, copy them */
 #define TU_TESS_FACTOR_SIZE (8 * 1024)
 #define TU_TESS_PARAM_SIZE (128 * 1024)
@@ -439,6 +442,7 @@ struct tu_device
    uint64_t fault_count;
 
    struct u_trace_context trace_context;
+   struct list_head copy_timestamp_cs_pool;
 
    #ifdef HAVE_PERFETTO
    struct tu_perfetto_state perfetto;
@@ -554,16 +558,16 @@ tu_copy_buffer(struct u_trace_context *utctx, void *cmdstream,
                void *ts_to, uint64_t to_offset_B,
                uint64_t size_B);
 
-
 VkResult
-tu_create_copy_timestamp_cs(struct tu_cmd_buffer *cmdbuf, struct tu_cs** cs,
-                            struct u_trace **trace_copy);
+tu_create_copy_timestamp_cs(struct tu_u_trace_submission_data *submission_data,
+                            struct tu_cmd_buffer **cmd_buffers,
+                            uint32_t cmd_buffer_count,
+                            uint32_t trace_chunks_to_copy);
 
-/* If we copy trace and timestamps we will have to free them. */
-struct tu_u_trace_cmd_data
-{
-   struct tu_cs *timestamp_copy_cs;
-   struct u_trace *trace;
+struct tu_copy_timestamp_data {
+   struct list_head node;
+   struct tu_cs cs;
+   struct u_trace trace;
 };
 
 /* Data necessary to retrieve timestamps and clean all
@@ -581,7 +585,9 @@ struct tu_u_trace_submission_data
 
    uint32_t cmd_buffer_count;
    uint32_t last_buffer_with_tracepoints;
-   struct tu_u_trace_cmd_data *cmd_trace_data;
+   void *mem_ctx;
+   struct u_trace **trace_per_cmd_buffer;
+   struct tu_copy_timestamp_data *timestamp_copy_data;
 
    /* GPU time is reset on GPU power cycle and the GPU time
     * offset may change between submissions due to power cycle.
@@ -615,6 +621,23 @@ void
 tu_dump_bo_init(struct tu_device *dev, struct tu_bo *bo);
 void
 tu_dump_bo_del(struct tu_device *dev, struct tu_bo *bo);
+
+/* Use cached-coherent when available, for faster CPU readback.
+ */
+static inline VkResult
+tu_bo_init_new_cached(struct tu_device *dev, struct vk_object_base *base,
+                      struct tu_bo **out_bo, uint64_t size,
+                      enum tu_bo_alloc_flags flags, const char *name)
+{
+   return tu_bo_init_new_explicit_iova(
+      dev, base, out_bo, size, 0,
+      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+         (dev->physical_device->has_cached_coherent_memory ? 
+          VK_MEMORY_PROPERTY_HOST_CACHED_BIT : 0),
+      flags, name);
+}
 
 
 #endif /* TU_DEVICE_H */

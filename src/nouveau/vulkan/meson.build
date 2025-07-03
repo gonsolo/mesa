@@ -45,6 +45,10 @@ nvk_files = files(
   'nvk_indirect_execution_set.h',
   'nvk_instance.c',
   'nvk_instance.h',
+  'nvk_mem_arena.c',
+  'nvk_mem_arena.h',
+  'nvk_mem_stream.c',
+  'nvk_mem_stream.h',
   'nvk_mme.c',
   'nvk_mme.h',
   'nvk_nir_lower_descriptors.c',
@@ -175,6 +179,7 @@ nouveau_icd = custom_target(
   command : [
     prog_python, '@INPUT0@',
     '--api-version', '1.4', '--xml', '@INPUT1@',
+    '--sizeof-pointer', sizeof_pointer,
     '--lib-path', join_paths(icd_lib_path, icd_file_name),
     '--out', '@OUTPUT@',
   ],
@@ -192,6 +197,7 @@ custom_target(
   command : [
     prog_python, '@INPUT0@',
     '--api-version', '1.4', '--xml', '@INPUT1@',
+    '--sizeof-pointer', sizeof_pointer,
     '--lib-path', meson.current_build_dir() / icd_file_name,
     '--out', '@OUTPUT@',
   ],

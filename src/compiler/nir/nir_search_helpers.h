@@ -499,6 +499,15 @@ is_not_const_and_not_fsign(struct hash_table *ht, const nir_alu_instr *instr,
 }
 
 static inline bool
+has_multiple_uses(struct hash_table *ht, const nir_alu_instr *instr,
+                  unsigned src, unsigned num_components,
+                  const uint8_t *swizzle)
+{
+   return !list_is_empty(&instr->def.uses) &&
+          !list_is_singular(&instr->def.uses);
+}
+
+static inline bool
 is_used_once(const nir_alu_instr *instr)
 {
    return list_is_singular(&instr->def.uses);
@@ -738,7 +747,7 @@ is_lower_half_zero(UNUSED struct hash_table *ht, const nir_alu_instr *instr,
       return false;
 
    for (unsigned i = 0; i < num_components; i++) {
-      uint64_t low_bits = u_bit_consecutive64(0, nir_src_bit_size(instr->src[src].src) / 2);
+      uint64_t low_bits = BITFIELD64_MASK(nir_src_bit_size(instr->src[src].src) / 2);
       if ((nir_src_comp_as_uint(instr->src[src].src, swizzle[i]) & low_bits) != 0)
          return false;
    }
@@ -776,7 +785,7 @@ is_lower_half_negative_one(UNUSED struct hash_table *ht, const nir_alu_instr *in
       return false;
 
    for (unsigned i = 0; i < num_components; i++) {
-      uint64_t low_bits = u_bit_consecutive64(0, nir_src_bit_size(instr->src[src].src) / 2);
+      uint64_t low_bits = BITFIELD64_MASK(nir_src_bit_size(instr->src[src].src) / 2);
       if ((nir_src_comp_as_uint(instr->src[src].src, swizzle[i]) & low_bits) != low_bits)
          return false;
    }

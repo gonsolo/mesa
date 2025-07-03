@@ -196,14 +196,15 @@ static bool si_shader_binary_open(struct si_screen *screen, struct si_shader *sh
         (sel->stage <= MESA_SHADER_GEOMETRY && shader->key.ge.as_ngg))) {
       struct ac_rtld_symbol *sym = &lds_symbols[num_lds_symbols++];
       sym->name = "esgs_ring";
-      sym->size = shader->gs_info.esgs_ring_size * 4;
+      sym->size = (shader->key.ge.as_ngg ? shader->ngg.info.esgs_lds_size
+                                         : shader->gs_info.esgs_lds_size) * 4;
       sym->align = 64 * 1024;
    }
 
    if (sel->stage == MESA_SHADER_GEOMETRY && shader->key.ge.as_ngg) {
       struct ac_rtld_symbol *sym = &lds_symbols[num_lds_symbols++];
       sym->name = "ngg_emit";
-      sym->size = shader->ngg.ngg_emit_size * 4;
+      sym->size = shader->ngg.info.ngg_out_lds_size * 4;
       sym->align = 4;
    }
 
@@ -454,19 +455,11 @@ static void calculate_needed_lds_size(struct si_screen *sscreen, struct si_shade
 
    if (sscreen->info.gfx_level >= GFX9 && stage <= MESA_SHADER_GEOMETRY &&
        (stage == MESA_SHADER_GEOMETRY || shader->key.ge.as_ngg)) {
-      unsigned size_in_dw = shader->gs_info.esgs_ring_size;
+      unsigned size_in_dw = shader->key.ge.as_ngg ? shader->ngg.info.esgs_lds_size
+                                                  : shader->gs_info.esgs_lds_size;
 
       if (stage == MESA_SHADER_GEOMETRY && shader->key.ge.as_ngg)
-         size_in_dw += shader->ngg.ngg_emit_size;
-
-      if (shader->key.ge.as_ngg) {
-         unsigned scratch_dw_size = gfx10_ngg_get_scratch_dw_size(shader);
-         if (scratch_dw_size) {
-            /* scratch base address needs to be 8 byte aligned */
-            size_in_dw = ALIGN(size_in_dw, 2);
-            size_in_dw += scratch_dw_size;
-         }
-      }
+         size_in_dw += shader->ngg.info.ngg_out_lds_size;
 
       shader->config.lds_size =
          DIV_ROUND_UP(size_in_dw * 4, get_lds_granularity(sscreen, stage));
@@ -716,7 +709,7 @@ void si_shader_dump_stats_for_shader_db(struct si_screen *screen, struct si_shad
       if (shader->key.ge.as_ls)
          num_ls_outputs = si_shader_lshs_vertex_stride(shader) / 16;
       else if (shader->selector->stage == MESA_SHADER_TESS_CTRL)
-         num_hs_outputs = util_last_bit64(shader->selector->info.tcs_outputs_written_for_tes);
+         num_hs_outputs = shader->selector->info.tess_io_info.highest_remapped_vram_output;
       else if (shader->key.ge.as_es)
          num_es_outputs = shader->selector->info.esgs_vertex_stride / 16;
       else if (shader->gs_copy_shader)
@@ -745,7 +738,7 @@ void si_shader_dump_stats_for_shader_db(struct si_screen *screen, struct si_shad
                       conf->lds_size, conf->scratch_bytes_per_wave, shader->info.max_simd_waves,
                       conf->spilled_sgprs, conf->spilled_vgprs, shader->info.private_mem_vgprs,
                       num_ls_outputs, num_hs_outputs,
-                      util_last_bit(shader->selector->info.patch_outputs_written_for_tes),
+                      shader->selector->info.tess_io_info.highest_remapped_vram_patch_output,
                       num_es_outputs, num_gs_outputs, num_vs_outputs, num_ps_outputs,
                       shader->selector->info.base.num_inlinable_uniforms,
                       shader->selector->info.has_divergent_loop,
@@ -1041,7 +1034,7 @@ static void si_dump_shader_key(const struct si_shader *shader, FILE *f)
    }
 }
 
-static unsigned si_map_io_driver_location(unsigned semantic)
+unsigned si_map_io_driver_location(unsigned semantic)
 {
    if ((semantic >= VARYING_SLOT_PATCH0 && semantic < VARYING_SLOT_TESS_MAX) ||
        semantic == VARYING_SLOT_TESS_LEVEL_INNER ||
@@ -1087,11 +1080,12 @@ static bool si_lower_io_to_mem(struct si_shader *shader, nir_shader *nir)
       nir_tcs_info tcs_info;
       nir_gather_tcs_info(nir, &tcs_info, nir->info.tess._primitive_mode,
                           nir->info.tess.spacing);
+      ac_nir_tess_io_info tess_io_info;
+      ac_nir_get_tess_io_info(nir, &tcs_info, ~0ull, ~0, si_map_io_driver_location, false,
+                              &tess_io_info);
 
-      NIR_PASS_V(nir, ac_nir_lower_hs_outputs_to_mem, &tcs_info, si_map_io_driver_location,
-                 sel->screen->info.gfx_level,
-                 ~0ULL, ~0U, /* no TES inputs filter */
-                 shader->wave_size);
+      NIR_PASS_V(nir, ac_nir_lower_hs_outputs_to_mem, &tcs_info, &tess_io_info, si_map_io_driver_location,
+                 sel->screen->info.gfx_level, shader->wave_size);
       return true;
    } else if (nir->info.stage == MESA_SHADER_TESS_EVAL) {
       NIR_PASS_V(nir, ac_nir_lower_tes_inputs_to_mem, si_map_io_driver_location);
@@ -1130,9 +1124,7 @@ static void si_lower_ngg(struct si_shader *shader, nir_shader *nir,
       .disable_streamout = !shader->info.num_streamout_vec4s,
       .vs_output_param_offset = temp_info->vs_output_param_offset,
       .has_param_exports = shader->info.nr_param_exports,
-      .clip_cull_dist_mask = clip_cull_dist_mask,
-      .kill_pointsize = key->ge.opt.kill_pointsize,
-      .kill_layer = key->ge.opt.kill_layer,
+      .export_clipdist_mask = clip_cull_dist_mask,
       .force_vrs = sel->screen->options.vrs2x2,
       .use_gfx12_xfb_intrinsic = !nir->info.use_aco_amd,
       .skip_viewport_state_culling = sel->info.writes_viewport_index,
@@ -1169,13 +1161,13 @@ static void si_lower_ngg(struct si_shader *shader, nir_shader *nir,
          sel->screen->info.gfx_level >= GFX11 && !nir->info.vs.blit_sgprs_amd;
       options.export_primitive_id = key->ge.mono.u.vs_export_prim_id;
       options.instance_rate_inputs = instance_rate_inputs;
-      options.user_clip_plane_enable_mask = clip_plane_enable;
+      options.cull_clipdist_mask = clip_plane_enable;
 
-      NIR_PASS_V(nir, ac_nir_lower_ngg_nogs, &options);
+      NIR_PASS_V(nir, ac_nir_lower_ngg_nogs, &options, &shader->info.ngg_lds_vertex_size,
+                 &shader->info.ngg_lds_scratch_size);
    } else {
       assert(nir->info.stage == MESA_SHADER_GEOMETRY);
 
-      options.gs_out_vtx_bytes = sel->info.gsvs_vertex_size;
       options.has_gen_prim_query = options.has_xfb_prim_query =
          sel->screen->info.gfx_level >= GFX11;
       options.has_gs_invocations_query = sel->screen->info.gfx_level < GFX11;
@@ -1185,7 +1177,8 @@ static void si_lower_ngg(struct si_shader *shader, nir_shader *nir,
       if (key->ge.part.gs.es)
          nir->info.writes_memory |= key->ge.part.gs.es->info.base.writes_memory;
 
-      NIR_PASS_V(nir, ac_nir_lower_ngg_gs, &options);
+      NIR_PASS_V(nir, ac_nir_lower_ngg_gs, &options, &shader->info.ngg_lds_vertex_size,
+                 &shader->info.ngg_lds_scratch_size);
    }
 
    /* may generate some vector output store */
@@ -1239,7 +1232,7 @@ static void si_nir_assign_param_offsets(nir_shader *nir, struct si_shader *shade
          /* Assign the param index if it's unassigned. */
          if (nir_slot_is_varying(sem.location, MESA_SHADER_FRAGMENT) && !sem.no_varying &&
              (sem.gs_streams & 0x3) == 0 &&
-             temp_info->vs_output_param_offset[sem.location] == AC_EXP_PARAM_DEFAULT_VAL_0000) {
+             temp_info->vs_output_param_offset[sem.location] == AC_EXP_PARAM_UNDEFINED) {
             /* The semantic and the base should be the same as in si_shader_info. */
             assert(sem.location == sel->info.output_semantic[nir_intrinsic_base(intr)]);
             /* It must not be remapped (duplicated). */
@@ -1272,7 +1265,7 @@ static void si_assign_param_offsets(nir_shader *nir, struct si_shader *shader,
    shader->info.nr_param_exports = 0;
 
    STATIC_ASSERT(sizeof(temp_info->vs_output_param_offset[0]) == 1);
-   memset(temp_info->vs_output_param_offset, AC_EXP_PARAM_DEFAULT_VAL_0000,
+   memset(temp_info->vs_output_param_offset, AC_EXP_PARAM_UNDEFINED,
           sizeof(temp_info->vs_output_param_offset));
 
    /* A slot remapping table for duplicated outputs, so that 1 vertex shader output can be
@@ -1289,6 +1282,12 @@ static void si_assign_param_offsets(nir_shader *nir, struct si_shader *shader,
    /* Assign the non-constant outputs. */
    /* TODO: Use this for the GS copy shader too. */
    si_nir_assign_param_offsets(nir, shader, slot_remap, temp_info);
+
+   /* Any unwritten output will default to (0,0,0,0). */
+   for (unsigned i = 0; i < NUM_TOTAL_VARYING_SLOTS; i++) {
+      if (temp_info->vs_output_param_offset[i] == AC_EXP_PARAM_UNDEFINED)
+         temp_info->vs_output_param_offset[i] = AC_EXP_PARAM_DEFAULT_VAL_0000;
+   }
 }
 
 static unsigned si_get_nr_pos_exports(const struct si_shader_selector *sel,
@@ -1321,39 +1320,6 @@ bool si_should_clear_lds(struct si_screen *sscreen, const struct nir_shader *sha
 {
    return gl_shader_stage_is_compute(shader->info.stage) &&
       shader->info.shared_size > 0 && sscreen->options.clear_lds;
-}
-
-static void
-si_init_gs_output_info(struct si_shader_info *info, struct si_temp_shader_variant_info *out_info)
-{
-   for (int i = 0; i < info->num_outputs; i++) {
-      unsigned slot = info->output_semantic[i];
-      if (slot < VARYING_SLOT_VAR0_16BIT) {
-         out_info->gs_streams[slot] = info->output_streams[i];
-         out_info->gs_out_usage_mask[slot] = info->output_usagemask[i];
-      } else {
-         unsigned index = slot - VARYING_SLOT_VAR0_16BIT;
-         /* TODO: 16bit need separated fields for lo/hi part. */
-         out_info->gs_streams_16bit_lo[index] = info->output_streams[i];
-         out_info->gs_streams_16bit_hi[index] = info->output_streams[i];
-         out_info->gs_out_usage_mask_16bit_lo[index] = info->output_usagemask[i];
-         out_info->gs_out_usage_mask_16bit_hi[index] = info->output_usagemask[i];
-      }
-   }
-
-   ac_nir_gs_output_info *ac_info = &out_info->gs_out_info;
-
-   ac_info->streams = out_info->gs_streams;
-   ac_info->streams_16bit_lo = out_info->gs_streams_16bit_lo;
-   ac_info->streams_16bit_hi = out_info->gs_streams_16bit_hi;
-
-   ac_info->sysval_mask = out_info->gs_out_usage_mask;
-   ac_info->varying_mask = out_info->gs_out_usage_mask;
-   ac_info->varying_mask_16bit_lo = out_info->gs_out_usage_mask_16bit_lo;
-   ac_info->varying_mask_16bit_hi = out_info->gs_out_usage_mask_16bit_hi;
-
-   /* TODO: construct 16bit slot per component store type. */
-   ac_info->types_16bit_lo = ac_info->types_16bit_hi = NULL;
 }
 
 /* Run passes that eliminate code and affect shader_info. These should be run before linking
@@ -1594,19 +1560,48 @@ static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *
          NIR_PASS_V(nir, ac_nir_lower_legacy_vs,
                     sel->screen->info.gfx_level,
                     clip_cull_mask,
+                    false, false,
                     ctx->temp_info.vs_output_param_offset,
                     shader->info.nr_param_exports,
                     shader->key.ge.mono.u.vs_export_prim_id,
                     !shader->info.num_streamout_vec4s,
-                    key->ge.opt.kill_pointsize,
-                    key->ge.opt.kill_layer,
                     sel->screen->options.vrs2x2);
       }
       progress = true;
    } else if (nir->info.stage == MESA_SHADER_GEOMETRY && !key->ge.as_ngg) {
-      si_init_gs_output_info(&sel->info, &ctx->temp_info);
-      NIR_PASS_V(nir, ac_nir_lower_legacy_gs, false, sel->screen->use_ngg,
-                 &ctx->temp_info.gs_out_info);
+      STATIC_ASSERT(sizeof(ctx->temp_info.vs_output_param_offset[0]) == 1);
+      memset(ctx->temp_info.vs_output_param_offset, AC_EXP_PARAM_DEFAULT_VAL_0000,
+             sizeof(ctx->temp_info.vs_output_param_offset));
+
+      for (unsigned i = 0; i < sel->info.num_outputs; i++) {
+         unsigned semantic = sel->info.output_semantic[i];
+
+         /* Skip if no channel writes to stream 0. */
+         if (!nir_slot_is_varying(semantic, MESA_SHADER_FRAGMENT) ||
+             (sel->info.output_streams[i] & 0x03 && /* whether component 0 writes to non-zero stream */
+              sel->info.output_streams[i] & 0x0c && /* whether component 1 writes to non-zero stream */
+              sel->info.output_streams[i] & 0x30 && /* whether component 2 writes to non-zero stream */
+              sel->info.output_streams[i] & 0xc0))  /* whether component 3 writes to non-zero stream */
+            continue;
+
+         ctx->temp_info.vs_output_param_offset[semantic] = shader->info.nr_param_exports++;
+      }
+
+      unsigned clip_cull_mask =
+         (sel->info.clipdist_mask & ~shader->key.ge.opt.kill_clip_distances) | sel->info.culldist_mask;
+
+      ac_nir_lower_legacy_gs_options options = {
+         .has_gen_prim_query = false,
+         .has_pipeline_stats_query = sel->screen->use_ngg,
+         .gfx_level = sel->screen->info.gfx_level,
+         .export_clipdist_mask = clip_cull_mask,
+         .param_offsets = ctx->temp_info.vs_output_param_offset,
+         .has_param_exports = shader->info.nr_param_exports,
+         .disable_streamout = !shader->info.num_streamout_vec4s,
+         .force_vrs = sel->screen->options.vrs2x2,
+      };
+
+      NIR_PASS(_, nir, ac_nir_lower_legacy_gs, &options, &ctx->gs_copy_shader);
       progress = true;
    } else if (nir->info.stage == MESA_SHADER_FRAGMENT && shader->is_monolithic) {
       ac_nir_lower_ps_late_options late_options = {
@@ -1639,7 +1634,8 @@ static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *
                .lower_relative_shuffle = true,
                .lower_rotate_to_shuffle = !nir->info.use_aco_amd,
                .lower_shuffle_to_32bit = true,
-               .lower_vote_eq = true,
+               .lower_vote_feq = true,
+               .lower_vote_ieq = true,
                .lower_vote_bool_eq = true,
                .lower_quad_broadcast_dynamic = true,
                .lower_quad_broadcast_dynamic_to_const = sel->screen->info.gfx_level <= GFX7,
@@ -1862,14 +1858,11 @@ static struct si_shader *
 si_nir_generate_gs_copy_shader(struct si_screen *sscreen,
                                struct ac_llvm_compiler *compiler,
                                struct si_shader *gs_shader,
-                               struct si_temp_shader_variant_info *temp_info,
-                               nir_shader *gs_nir,
+                               nir_shader *gs_nir, nir_shader *gs_copy_shader,
                                struct util_debug_callback *debug)
 {
    struct si_shader *shader;
    struct si_shader_selector *gs_selector = gs_shader->selector;
-   struct si_shader_info *gsinfo = &gs_selector->info;
-   union si_shader_key *gskey = &gs_shader->key;
 
    shader = CALLOC_STRUCT(si_shader);
    if (!shader)
@@ -1883,42 +1876,10 @@ si_nir_generate_gs_copy_shader(struct si_screen *sscreen,
    shader->is_gs_copy_shader = true;
    shader->wave_size = si_determine_wave_size(sscreen, shader);
    shader->info.num_streamout_vec4s = gs_shader->info.num_streamout_vec4s;
+   shader->info.nr_pos_exports = si_get_nr_pos_exports(gs_selector, &gs_shader->key);
+   shader->info.nr_param_exports = gs_shader->info.nr_param_exports;
 
-   STATIC_ASSERT(sizeof(temp_info->vs_output_param_offset[0]) == 1);
-   memset(temp_info->vs_output_param_offset, AC_EXP_PARAM_DEFAULT_VAL_0000,
-          sizeof(temp_info->vs_output_param_offset));
-
-   for (unsigned i = 0; i < gsinfo->num_outputs; i++) {
-      unsigned semantic = gsinfo->output_semantic[i];
-
-      /* Skip if no channel writes to stream 0. */
-      if (!nir_slot_is_varying(semantic, MESA_SHADER_FRAGMENT) ||
-          (gsinfo->output_streams[i] & 0x03 && /* whether component 0 writes to non-zero stream */
-           gsinfo->output_streams[i] & 0x0c && /* whether component 1 writes to non-zero stream */
-           gsinfo->output_streams[i] & 0x30 && /* whether component 2 writes to non-zero stream */
-           gsinfo->output_streams[i] & 0xc0))  /* whether component 3 writes to non-zero stream */
-         continue;
-
-      temp_info->vs_output_param_offset[semantic] = shader->info.nr_param_exports++;
-   }
-
-   shader->info.nr_pos_exports = si_get_nr_pos_exports(gs_selector, gskey);
-
-   unsigned clip_cull_mask =
-      (gsinfo->clipdist_mask & ~gskey->ge.opt.kill_clip_distances) | gsinfo->culldist_mask;
-
-   nir_shader *nir =
-      ac_nir_create_gs_copy_shader(gs_nir,
-                                   sscreen->info.gfx_level,
-                                   clip_cull_mask,
-                                   temp_info->vs_output_param_offset,
-                                   shader->info.nr_param_exports,
-                                   !gs_shader->info.num_streamout_vec4s,
-                                   gskey->ge.opt.kill_pointsize,
-                                   gskey->ge.opt.kill_layer,
-                                   sscreen->options.vrs2x2,
-                                   &temp_info->gs_out_info);
-
+   nir_shader *nir = gs_copy_shader;
    struct si_linked_shaders linked;
    memset(&linked, 0, sizeof(linked));
    linked.consumer.nir = nir;
@@ -2045,8 +2006,8 @@ bool si_compile_shader(struct si_screen *sscreen, struct ac_llvm_compiler *compi
    /* The GS copy shader is compiled next. */
    if (nir->info.stage == MESA_SHADER_GEOMETRY && !shader->key.ge.as_ngg) {
       shader->gs_copy_shader =
-         si_nir_generate_gs_copy_shader(sscreen, compiler, shader, &linked.consumer.temp_info,
-                                        nir, debug);
+         si_nir_generate_gs_copy_shader(sscreen, compiler, shader, nir,
+                                        linked.consumer.gs_copy_shader, debug);
       if (!shader->gs_copy_shader) {
          fprintf(stderr, "radeonsi: can't create GS copy shader\n");
          ret = false;
@@ -2630,7 +2591,11 @@ bool si_create_shader_variant(struct si_screen *sscreen, struct ac_llvm_compiler
          return false;
       }
    } else if (sscreen->info.gfx_level >= GFX9 && sel->stage == MESA_SHADER_GEOMETRY) {
-      gfx9_get_gs_info(shader->previous_stage_sel, sel, &shader->gs_info);
+      ac_legacy_gs_compute_subgroup_info(sel->info.base.gs.input_primitive,
+                                         sel->info.base.gs.vertices_out,
+                                         sel->info.base.gs.invocations,
+                                         shader->previous_stage_sel->info.esgs_vertex_stride,
+                                         &shader->gs_info);
    }
 
    si_fix_resource_usage(sscreen, shader);

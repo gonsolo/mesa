@@ -60,6 +60,11 @@ struct panfrost_resource {
 
    /* Description of the resource layout */
    struct pan_image image;
+   struct pan_image_plane plane;
+
+   /* In case of emulated modifiers, the image.props.modifier won't match this
+    * modifier. */
+   uint64_t modifier;
 
    struct panfrost_bo *bo;
 
@@ -86,12 +91,27 @@ struct panfrost_resource {
 
    /* Cached min/max values for index buffers */
    struct pan_minmax_cache *index_cache;
+
+   /* Whether the resource owns the backing BO's label */
+   bool owns_label;
 };
 
 static inline struct panfrost_resource *
 pan_resource(struct pipe_resource *p)
 {
    return (struct panfrost_resource *)p;
+}
+
+static inline unsigned
+pan_resource_plane_index(const struct panfrost_resource *rsc)
+{
+   for (unsigned i = 0; i < ARRAY_SIZE(rsc->image.planes); i++) {
+      if (rsc->image.planes[i] == &rsc->plane)
+         return i;
+   }
+
+   assert(!"Invalid image props");
+   return 0;
 }
 
 struct panfrost_transfer {
@@ -180,10 +200,14 @@ panfrost_translate_texture_dimension(enum pipe_texture_target t)
    }
 }
 
-struct pipe_resource *
-panfrost_resource_create_with_modifier(struct pipe_screen *screen,
-                                       const struct pipe_resource *template,
-                                       uint64_t modifier);
+void
+panfrost_resource_change_format(struct panfrost_resource *rsrc,
+                                enum pipe_format new_format,
+                                struct panfrost_resource *save);
+
+void
+panfrost_resource_restore_format(struct panfrost_resource *rsrc,
+                                 const struct panfrost_resource *saved);
 
 bool panfrost_should_pack_afbc(struct panfrost_device *dev,
                                const struct panfrost_resource *rsrc);

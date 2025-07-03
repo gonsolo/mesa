@@ -190,7 +190,7 @@ st_pipe_format_to_mesa_format(enum pipe_format format)
 struct format_mapping
 {
    GLenum glFormats[18];       /**< list of GLenum formats, 0-terminated */
-   enum pipe_format pipeFormats[14]; /**< list of pipe formats, 0-terminated */
+   enum pipe_format pipeFormats[16]; /**< list of pipe formats, 0-terminated */
 };
 
 
@@ -201,10 +201,19 @@ struct format_mapping
       PIPE_FORMAT_A8B8G8R8_UNORM, \
       0
 
+#define DEFAULT_BGRA_FORMATS \
+      PIPE_FORMAT_B8G8R8A8_UNORM, \
+      PIPE_FORMAT_R8G8B8A8_UNORM, \
+      PIPE_FORMAT_A8B8G8R8_UNORM, \
+      PIPE_FORMAT_A8R8G8B8_UNORM, \
+      0
+
 #define DEFAULT_RGB_FORMATS \
       PIPE_FORMAT_R8G8B8X8_UNORM, \
       PIPE_FORMAT_B8G8R8X8_UNORM, \
+      PIPE_FORMAT_R8G8B8_UNORM, \
       PIPE_FORMAT_X8R8G8B8_UNORM, \
+      PIPE_FORMAT_B8G8R8_UNORM, \
       PIPE_FORMAT_X8B8G8R8_UNORM, \
       PIPE_FORMAT_B5G6R5_UNORM, \
       DEFAULT_RGBA_FORMATS
@@ -257,11 +266,11 @@ static const struct format_mapping format_map[] = {
    },
    {
       { GL_BGRA, GL_BGRA8_EXT, 0 },
-      { DEFAULT_RGBA_FORMATS }
+      { DEFAULT_BGRA_FORMATS }
    },
    {
       { 3, GL_RGB, GL_RGB8, 0 },
-      { PIPE_FORMAT_R8G8B8X8_UNORM, DEFAULT_RGB_FORMATS }
+      { DEFAULT_RGB_FORMATS }
    },
    {
       { GL_RGB12, GL_RGB16, 0 },
@@ -1483,7 +1492,7 @@ st_ChooseTextureFormat(struct gl_context *ctx, GLenum target,
  */
 static size_t
 st_QuerySamplesForFormat(struct gl_context *ctx, GLenum target,
-                         GLenum internalFormat, int samples[16])
+                         GLenum internalFormat, int samples[MAX_SAMPLES])
 {
    struct st_context *st = st_context(ctx);
    enum pipe_format format;
@@ -1512,7 +1521,7 @@ st_QuerySamplesForFormat(struct gl_context *ctx, GLenum target,
    }
 
    /* Set sample counts in descending order. */
-   for (i = 16; i > 1; i--) {
+   for (i = MAX_SAMPLES; i > 1; i--) {
       format = st_choose_format(st, internalFormat, GL_NONE, GL_NONE,
                                 PIPE_TEXTURE_2D, i, i, bind,
                                 false, false);
@@ -1545,7 +1554,7 @@ st_QueryTextureFormatSupport(struct gl_context *ctx, GLenum target, GLenum inter
    /* multisample textures need >= 2 samples */
    unsigned min_samples = target == GL_TEXTURE_2D_MULTISAMPLE ||
                           target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ? 1 : 0;
-   unsigned max_samples = min_samples ? 16 : 1;
+   unsigned max_samples = min_samples ? MAX_SAMPLES : 1;
 
    /* compressed textures will be allocated as e.g., RGBA8, so check that instead */
    enum pipe_format pf = st_choose_format(st, internalFormat, GL_NONE, GL_NONE,
@@ -1628,7 +1637,7 @@ st_QueryInternalFormat(struct gl_context *ctx, GLenum target,
       break;
 
    case GL_NUM_SAMPLE_COUNTS: {
-      int samples[16];
+      int samples[MAX_SAMPLES];
       size_t num_samples;
       num_samples = st_QuerySamplesForFormat(ctx, target, internalFormat,
                                              samples);

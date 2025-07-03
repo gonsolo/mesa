@@ -964,6 +964,39 @@ validate_ir(Program* program)
       }
    }
 
+   auto check_edge = [&program, &is_valid](const char* msg, const Block::edge_vec& vec,
+                                           Block* block, Block* other, bool other_is_pred) -> void
+   {
+      if (std::find(vec.begin(), vec.end(), block->index) == vec.end()) {
+         Block* pred = other_is_pred ? other : block;
+         Block* succ = other_is_pred ? block : other;
+         aco_err(program, "%s: BB%u->BB%u", msg, pred->index, succ->index);
+         is_valid = false;
+      }
+   };
+
+   for (Block& block : program->blocks) {
+      for (unsigned pred_idx : block.linear_preds) {
+         Block* pred = &program->blocks[pred_idx];
+         check_edge("Block is missing in linear_succs", pred->linear_succs, &block, pred, true);
+      }
+
+      for (unsigned pred_idx : block.logical_preds) {
+         Block* pred = &program->blocks[pred_idx];
+         check_edge("Block is missing in logical_succs", pred->logical_succs, &block, pred, true);
+      }
+
+      for (unsigned succ_idx : block.linear_succs) {
+         Block* succ = &program->blocks[succ_idx];
+         check_edge("Block is missing in linear_preds", succ->linear_preds, &block, succ, false);
+      }
+
+      for (unsigned succ_idx : block.logical_succs) {
+         Block* succ = &program->blocks[succ_idx];
+         check_edge("Block is missing in logical_preds", succ->logical_preds, &block, succ, false);
+      }
+   }
+
    return is_valid;
 }
 
@@ -1270,7 +1303,6 @@ validate_subdword_definition(amd_gfx_level gfx_level, const aco_ptr<Instruction>
    case aco_opcode::global_load_short_d16_hi:
    case aco_opcode::ds_read_u8_d16_hi:
    case aco_opcode::ds_read_u16_d16_hi: return byte == 2;
-   case aco_opcode::p_v_cvt_pk_u8_f32: return true;
    default: break;
    }
 
@@ -1287,8 +1319,6 @@ get_subdword_bytes_written(Program* program, const aco_ptr<Instruction>& instr, 
       return gfx_level >= GFX8 ? def.bytes() : def.size() * 4u;
    if (instr->isVALU() || instr->isVINTRP()) {
       assert(def.bytes() <= 2);
-      if (instr->opcode == aco_opcode::p_v_cvt_pk_u8_f32)
-         return 1;
 
       if (instr->isSDWA())
          return instr->sdwa().dst_sel.size();

@@ -46,7 +46,36 @@ static void
 fd6_image_descriptor(struct fd_context *ctx, const struct pipe_image_view *buf,
                      uint32_t *descriptor)
 {
-   if (buf->resource->target == PIPE_BUFFER) {
+   if (buf->access & PIPE_IMAGE_ACCESS_TEX2D_FROM_BUFFER) {
+      struct fdl_view_args args = {
+         .chip = ctx->screen->gen,
+
+         .iova = rsc_iova(buf->resource, 0),
+         .base_miplevel = 0,
+         .level_count = 1,
+         .base_array_layer = 0,
+         .layer_count = 1,
+         .swiz = {PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y, PIPE_SWIZZLE_Z,
+                  PIPE_SWIZZLE_W},
+         .format = buf->format,
+
+         .type = FDL_VIEW_TYPE_2D,
+         .chroma_offsets = {FDL_CHROMA_LOCATION_COSITED_EVEN,
+                            FDL_CHROMA_LOCATION_COSITED_EVEN},
+      };
+
+      struct fdl_layout layout;
+      const struct fdl_layout *layouts = &layout;
+
+      fd6_layout_tex2d_from_buf(&layout, ctx->screen->info, buf->format,
+                                &buf->u.tex2d_from_buf);
+
+      struct fdl6_view view;
+      fdl6_view_init(&view, &layouts, &args,
+                     ctx->screen->info->a6xx.has_z24uint_s8uint);
+
+      memcpy(descriptor, view.storage_descriptor, sizeof(view.storage_descriptor));
+   } else if (buf->resource->target == PIPE_BUFFER) {
       uint32_t size = fd_clamp_buffer_size(buf->format, buf->u.buf.size,
                                            A4XX_MAX_TEXEL_BUFFER_ELEMENTS_UINT);
 
@@ -111,7 +140,7 @@ clear_descriptor(struct fd6_descriptor_set *set, unsigned slot)
    /* The 2nd dword of the descriptor contains the width and height.
     * so a non-zero value means the slot was previously valid and
     * must be cleared.  We can't leave dangling descriptors as the
-    * shader could use variable indexing into the set of IBOs to
+    * shader could use variable indexing into the set of UAVs to
     * get at them.  See piglit arb_shader_image_load_store-invalid.
     */
    if (!set->descriptor[slot][1])
@@ -232,7 +261,7 @@ fd6_build_bindless_state(struct fd_context *ctx, enum pipe_shader_type shader,
     * set and CP_LOAD_STATE packets to preload the state.
     *
     * Note that unless the app is using the max # of SSBOs there will
-    * be a gap between the IBO descriptors used for SSBOs and for images,
+    * be a gap between the UAV descriptors used for SSBOs and for images,
     * so emit this as two CP_LOAD_STATE packets:
     */
 
@@ -242,7 +271,7 @@ fd6_build_bindless_state(struct fd_context *ctx, enum pipe_shader_type shader,
 
    if (shader == PIPE_SHADER_COMPUTE) {
       OUT_REG(ring,
-         HLSQ_INVALIDATE_CMD(
+         SP_UPDATE_CNTL(
             CHIP,
             .cs_bindless = CHIP == A6XX ? 0x1f : 0xff,
          )
@@ -261,7 +290,7 @@ fd6_build_bindless_state(struct fd_context *ctx, enum pipe_shader_type shader,
          OUT_PKT(ring, CP_LOAD_STATE6_FRAG,
             CP_LOAD_STATE6_0(
                   .dst_off     = IR3_BINDLESS_SSBO_OFFSET,
-                  .state_type  = ST6_IBO,
+                  .state_type  = ST6_UAV,
                   .state_src   = SS6_BINDLESS,
                   .state_block = SB6_CS_SHADER,
                   .num_unit    = util_last_bit(bufso->enabled_mask),
@@ -278,7 +307,7 @@ fd6_build_bindless_state(struct fd_context *ctx, enum pipe_shader_type shader,
          OUT_PKT(ring, CP_LOAD_STATE6_FRAG,
             CP_LOAD_STATE6_0(
                   .dst_off     = IR3_BINDLESS_IMAGE_OFFSET,
-                  .state_type  = ST6_IBO,
+                  .state_type  = ST6_UAV,
                   .state_src   = SS6_BINDLESS,
                   .state_block = SB6_CS_SHADER,
                   .num_unit    = util_last_bit(imgso->enabled_mask),
@@ -292,12 +321,12 @@ fd6_build_bindless_state(struct fd_context *ctx, enum pipe_shader_type shader,
       }
    } else {
       OUT_REG(ring,
-         HLSQ_INVALIDATE_CMD(
+         SP_UPDATE_CNTL(
             CHIP,
             .gfx_bindless = CHIP == A6XX ? 0x1f : 0xff,
          )
       );
-      OUT_REG(ring, SP_BINDLESS_BASE_DESCRIPTOR(CHIP,
+      OUT_REG(ring, SP_GFX_BINDLESS_BASE_DESCRIPTOR(CHIP,
             idx, .desc_size = BINDLESS_DESCRIPTOR_64B, .bo = set->bo,
       ));
       if (CHIP == A6XX) {
@@ -312,7 +341,7 @@ fd6_build_bindless_state(struct fd_context *ctx, enum pipe_shader_type shader,
                   .dst_off     = IR3_BINDLESS_SSBO_OFFSET,
                   .state_type  = ST6_SHADER,
                   .state_src   = SS6_BINDLESS,
-                  .state_block = SB6_IBO,
+                  .state_block = SB6_UAV,
                   .num_unit    = util_last_bit(bufso->enabled_mask),
             ),
             CP_LOAD_STATE6_EXT_SRC_ADDR(
@@ -329,7 +358,7 @@ fd6_build_bindless_state(struct fd_context *ctx, enum pipe_shader_type shader,
                   .dst_off     = IR3_BINDLESS_IMAGE_OFFSET,
                   .state_type  = ST6_SHADER,
                   .state_src   = SS6_BINDLESS,
-                  .state_block = SB6_IBO,
+                  .state_block = SB6_UAV,
                   .num_unit    = util_last_bit(imgso->enabled_mask),
             ),
             CP_LOAD_STATE6_EXT_SRC_ADDR(

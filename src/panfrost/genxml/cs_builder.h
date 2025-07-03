@@ -180,6 +180,8 @@ struct cs_label {
 struct cs_if_else {
    struct cs_block block;
    struct cs_label end_label;
+   struct cs_load_store_tracker *orig_ls_state;
+   struct cs_load_store_tracker ls_state;
 };
 
 struct cs_maybe {
@@ -903,6 +905,71 @@ cs_load_ip_to(struct cs_builder *b, struct cs_index dest)
 }
 
 static inline void
+cs_wait_slots(struct cs_builder *b, unsigned wait_mask)
+{
+   struct cs_load_store_tracker *ls_tracker = b->cur_ls_tracker;
+   assert(ls_tracker != NULL);
+
+   cs_emit(b, WAIT, I) {
+      I.wait_mask = wait_mask;
+   }
+
+   /* We don't do advanced tracking of cs_defer(), and assume that
+    * load/store will be flushed with an explicit wait on the load/store
+    * scoreboard. */
+   if (wait_mask & BITFIELD_BIT(b->conf.ls_sb_slot)) {
+      BITSET_CLEAR_RANGE(ls_tracker->pending_loads, 0, 255);
+      ls_tracker->pending_stores = false;
+   }
+}
+
+static inline void
+cs_wait_slot(struct cs_builder *b, unsigned slot)
+{
+   assert(slot < CS_MAX_SB_COUNT && "invalid slot");
+
+   cs_wait_slots(b, BITFIELD_BIT(slot));
+}
+
+static inline void
+cs_flush_load_to(struct cs_builder *b, struct cs_index to, uint16_t mask)
+{
+   struct cs_load_store_tracker *ls_tracker = b->cur_ls_tracker;
+   assert(ls_tracker != NULL);
+
+   unsigned count = util_last_bit(mask);
+   unsigned reg = cs_to_reg_tuple(to, count);
+
+   for (unsigned i = reg; i < reg + count; i++) {
+      if ((mask & BITFIELD_BIT(i - reg)) &&
+          BITSET_TEST(ls_tracker->pending_loads, i)) {
+         cs_wait_slots(b, BITFIELD_BIT(b->conf.ls_sb_slot));
+         break;
+      }
+   }
+}
+
+static inline void
+cs_flush_loads(struct cs_builder *b)
+{
+   struct cs_load_store_tracker *ls_tracker = b->cur_ls_tracker;
+   assert(ls_tracker != NULL);
+
+   if (!BITSET_IS_EMPTY(ls_tracker->pending_loads))
+      cs_wait_slots(b, BITFIELD_BIT(b->conf.ls_sb_slot));
+}
+
+static inline void
+cs_flush_stores(struct cs_builder *b)
+{
+   struct cs_load_store_tracker *ls_tracker = b->cur_ls_tracker;
+   assert(ls_tracker != NULL);
+
+   if (ls_tracker->pending_stores)
+      cs_wait_slots(b, BITFIELD_BIT(b->conf.ls_sb_slot));
+}
+
+static inline void
 cs_block_start(struct cs_builder *b, struct cs_block *block)
 {
    cs_flush_pending_if(b);
@@ -934,8 +1001,8 @@ cs_branch(struct cs_builder *b, int offset, enum mali_cs_condition cond,
 }
 
 static inline void
-cs_branch_label(struct cs_builder *b, struct cs_label *label,
-                enum mali_cs_condition cond, struct cs_index val)
+cs_branch_label_cond32(struct cs_builder *b, struct cs_label *label,
+                       enum mali_cs_condition cond, struct cs_index val)
 {
    assert(cs_cur_block(b) != NULL);
 
@@ -1007,6 +1074,63 @@ cs_invert_cond(enum mali_cs_condition cond)
    }
 }
 
+static inline void
+cs_branch_label_cond64(struct cs_builder *b, struct cs_label *label,
+                       enum mali_cs_condition cond, struct cs_index val)
+{
+   struct cs_label false_label;
+   cs_label_init(&false_label);
+
+   struct cs_index val_lo = cs_extract32(b, val, 0);
+   struct cs_index val_hi = cs_extract32(b, val, 1);
+
+   switch (cond) {
+   case MALI_CS_CONDITION_ALWAYS:
+      cs_branch_label_cond32(b, label, MALI_CS_CONDITION_ALWAYS, cs_undef());
+      break;
+   case MALI_CS_CONDITION_LEQUAL:
+      cs_branch_label_cond32(b, label, MALI_CS_CONDITION_LESS, val_hi);
+      cs_branch_label_cond32(b, &false_label, MALI_CS_CONDITION_NEQUAL, val_hi);
+      cs_branch_label_cond32(b, label, MALI_CS_CONDITION_EQUAL, val_lo);
+      break;
+   case MALI_CS_CONDITION_GREATER:
+      cs_branch_label_cond32(b, &false_label, MALI_CS_CONDITION_LESS, val_hi);
+      cs_branch_label_cond32(b, label, MALI_CS_CONDITION_NEQUAL, val_hi);
+      cs_branch_label_cond32(b, label, MALI_CS_CONDITION_NEQUAL, val_lo);
+      break;
+   case MALI_CS_CONDITION_GEQUAL:
+      cs_branch_label_cond32(b, &false_label, MALI_CS_CONDITION_LESS, val_hi);
+      cs_branch_label_cond32(b, label, MALI_CS_CONDITION_ALWAYS, cs_undef());
+      break;
+   case MALI_CS_CONDITION_LESS:
+      cs_branch_label_cond32(b, label, MALI_CS_CONDITION_LESS, val_hi);
+      break;
+   case MALI_CS_CONDITION_NEQUAL:
+      cs_branch_label_cond32(b, label, MALI_CS_CONDITION_NEQUAL, val_lo);
+      cs_branch_label_cond32(b, label, MALI_CS_CONDITION_NEQUAL, val_hi);
+      break;
+   case MALI_CS_CONDITION_EQUAL:
+      cs_branch_label_cond32(b, &false_label, MALI_CS_CONDITION_NEQUAL, val_lo);
+      cs_branch_label_cond32(b, label, MALI_CS_CONDITION_EQUAL, val_hi);
+      break;
+   default:
+      unreachable("unsupported 64bit condition");
+   }
+
+   cs_set_label(b, &false_label);
+}
+
+static inline void
+cs_branch_label(struct cs_builder *b, struct cs_label *label,
+                enum mali_cs_condition cond, struct cs_index val)
+{
+   if (val.size == 2) {
+      cs_branch_label_cond64(b, label, cond, val);
+   } else {
+      cs_branch_label_cond32(b, label, cond, val);
+   }
+}
+
 static inline struct cs_if_else *
 cs_if_start(struct cs_builder *b, struct cs_if_else *if_else,
             enum mali_cs_condition cond, struct cs_index val)
@@ -1014,6 +1138,11 @@ cs_if_start(struct cs_builder *b, struct cs_if_else *if_else,
    cs_block_start(b, &if_else->block);
    cs_label_init(&if_else->end_label);
    cs_branch_label(b, &if_else->end_label, cs_invert_cond(cond), val);
+
+   if_else->orig_ls_state = b->cur_ls_tracker;
+   if_else->ls_state = *if_else->orig_ls_state;
+   b->cur_ls_tracker = &if_else->ls_state;
+
    return if_else;
 }
 
@@ -1025,6 +1154,15 @@ cs_if_end(struct cs_builder *b, struct cs_if_else *if_else)
    b->blocks.pending_if.block.next = if_else->block.next;
    b->blocks.stack = &b->blocks.pending_if.block;
    b->blocks.pending_if.end_label = if_else->end_label;
+
+   b->blocks.pending_if.orig_ls_state = if_else->orig_ls_state;
+   b->blocks.pending_if.ls_state = if_else->ls_state;
+
+   BITSET_OR(if_else->orig_ls_state->pending_loads,
+             if_else->orig_ls_state->pending_loads,
+             if_else->ls_state.pending_loads);
+   if_else->orig_ls_state->pending_stores |= if_else->ls_state.pending_stores;
+   b->cur_ls_tracker = if_else->orig_ls_state;
 }
 
 static inline struct cs_if_else *
@@ -1040,14 +1178,27 @@ cs_else_start(struct cs_builder *b, struct cs_if_else *if_else)
    cs_set_label(b, &b->blocks.pending_if.end_label);
    cs_label_init(&b->blocks.pending_if.end_label);
 
+   /* Restore the ls_tracker state from before the if block. */
+   if_else->orig_ls_state = b->blocks.pending_if.orig_ls_state;
+   if_else->ls_state = *if_else->orig_ls_state;
+   b->cur_ls_tracker = &if_else->ls_state;
+
    return if_else;
 }
 
 static inline void
 cs_else_end(struct cs_builder *b, struct cs_if_else *if_else)
 {
+   struct cs_load_store_tracker if_ls_state = b->blocks.pending_if.ls_state;
+
    cs_set_label(b, &if_else->end_label);
    cs_block_end(b, &if_else->block);
+
+   BITSET_OR(if_else->orig_ls_state->pending_loads, if_ls_state.pending_loads,
+             if_else->ls_state.pending_loads);
+   if_else->orig_ls_state->pending_stores =
+      if_ls_state.pending_stores | if_else->ls_state.pending_stores;
+   b->cur_ls_tracker = if_else->orig_ls_state;
 }
 
 #define cs_if(__b, __cond, __val)                                              \
@@ -1066,27 +1217,42 @@ struct cs_loop {
    enum mali_cs_condition cond;
    struct cs_index val;
    struct cs_load_store_tracker *orig_ls_state;
+   /* On continue we need to compare the original loads to the current ones.
+    * orig_ls_state can get updated from inside the loop. */
+   struct cs_load_store_tracker orig_ls_state_copy;
    struct cs_load_store_tracker ls_state;
 };
 
 static inline void
 cs_loop_diverge_ls_update(struct cs_builder *b, struct cs_loop *loop)
 {
-   if (!loop->orig_ls_state) {
-      loop->orig_ls_state = b->cur_ls_tracker;
-      loop->ls_state = *loop->orig_ls_state;
-      b->cur_ls_tracker = &loop->ls_state;
-   } else {
-      BITSET_OR(loop->orig_ls_state->pending_loads,
-                loop->orig_ls_state->pending_loads,
-                loop->ls_state.pending_loads);
-      loop->orig_ls_state->pending_stores |= loop->ls_state.pending_stores;
-   }
+   assert(loop->orig_ls_state);
+
+   BITSET_OR(loop->orig_ls_state->pending_loads,
+             loop->orig_ls_state->pending_loads,
+             b->cur_ls_tracker->pending_loads);
+   loop->orig_ls_state->pending_stores |= b->cur_ls_tracker->pending_stores;
+}
+
+static inline bool
+cs_loop_continue_need_flush(struct cs_builder *b, struct cs_loop *loop)
+{
+   assert(loop->orig_ls_state);
+
+   /* We need to flush on continue/loop-again, if there are loads to registers
+    * that did not already have loads in-flight before the loop.
+    * Those would have already gotten WAITs inserted because they were marked
+    * already.
+    */
+   BITSET_DECLARE(new_pending_loads, 256);
+   BITSET_ANDNOT(new_pending_loads, b->cur_ls_tracker->pending_loads,
+                 loop->orig_ls_state_copy.pending_loads);
+   return !BITSET_IS_EMPTY(new_pending_loads);
 }
 
 static inline struct cs_loop *
-cs_do_while_start(struct cs_builder *b, struct cs_loop *loop,
-                  enum mali_cs_condition cond, struct cs_index val)
+cs_loop_init(struct cs_builder *b, struct cs_loop *loop,
+             enum mali_cs_condition cond, struct cs_index val)
 {
    *loop = (struct cs_loop){
       .cond = cond,
@@ -1096,7 +1262,6 @@ cs_do_while_start(struct cs_builder *b, struct cs_loop *loop,
    cs_block_start(b, &loop->block);
    cs_label_init(&loop->start);
    cs_label_init(&loop->end);
-   cs_set_label(b, &loop->start);
    return loop;
 }
 
@@ -1104,16 +1269,23 @@ static inline struct cs_loop *
 cs_while_start(struct cs_builder *b, struct cs_loop *loop,
                enum mali_cs_condition cond, struct cs_index val)
 {
-   cs_do_while_start(b, loop, cond, val);
+   cs_loop_init(b, loop, cond, val);
 
    /* Do an initial check on the condition, and if it's false, jump to
     * the end of the loop block. For 'while(true)' loops, skip the
     * conditional branch.
     */
-   if (cond != MALI_CS_CONDITION_ALWAYS) {
+   if (cond != MALI_CS_CONDITION_ALWAYS)
       cs_branch_label(b, &loop->end, cs_invert_cond(cond), val);
-      cs_loop_diverge_ls_update(b, loop);
-   }
+
+   /* The loops ls tracker only needs to track the actual loop body, not the
+    * check to skip the whole body. */
+   loop->orig_ls_state = b->cur_ls_tracker;
+   loop->orig_ls_state_copy = *loop->orig_ls_state;
+   loop->ls_state = *loop->orig_ls_state;
+   b->cur_ls_tracker = &loop->ls_state;
+
+   cs_set_label(b, &loop->start);
 
    return loop;
 }
@@ -1123,6 +1295,10 @@ cs_loop_conditional_continue(struct cs_builder *b, struct cs_loop *loop,
                              enum mali_cs_condition cond, struct cs_index val)
 {
    cs_flush_pending_if(b);
+
+   if (cs_loop_continue_need_flush(b, loop))
+      cs_flush_loads(b);
+
    cs_branch_label(b, &loop->start, cond, val);
    cs_loop_diverge_ls_update(b, loop);
 }
@@ -1140,6 +1316,10 @@ static inline void
 cs_while_end(struct cs_builder *b, struct cs_loop *loop)
 {
    cs_flush_pending_if(b);
+
+   if (cs_loop_continue_need_flush(b, loop))
+      cs_flush_loads(b);
+
    cs_branch_label(b, &loop->start, loop->cond, loop->val);
    cs_set_label(b, &loop->end);
    cs_block_end(b, &loop->block);
@@ -1176,6 +1356,8 @@ cs_while_end(struct cs_builder *b, struct cs_loop *loop)
 struct cs_maybe_state {
    struct cs_block block;
    uint32_t patch_pos;
+   struct cs_load_store_tracker ls_state;
+   struct cs_load_store_tracker *orig_ls_state;
 };
 
 static inline struct cs_maybe_state *
@@ -1183,6 +1365,13 @@ cs_maybe_start(struct cs_builder *b, struct cs_maybe_state *state)
 {
    cs_block_start(b, &state->block);
    state->patch_pos = cs_block_next_pos(b);
+
+   /* store the original ls_tracker state so that we can revert to it after
+    * the maybe-block */
+   state->orig_ls_state = b->cur_ls_tracker;
+   state->ls_state = *b->cur_ls_tracker;
+   b->cur_ls_tracker = &state->ls_state;
+
    return state;
 }
 
@@ -1191,6 +1380,18 @@ cs_maybe_end(struct cs_builder *b, struct cs_maybe_state *state,
              struct cs_maybe **maybe)
 {
    assert(cs_cur_block(b) == &state->block);
+
+   /* Flush any new loads and stores */
+   BITSET_DECLARE(new_loads, 256);
+   BITSET_ANDNOT(new_loads, b->cur_ls_tracker->pending_loads,
+                 state->orig_ls_state->pending_loads);
+   bool new_stores =
+      b->cur_ls_tracker->pending_stores && !state->orig_ls_state->pending_stores;
+   if (!BITSET_IS_EMPTY(new_loads) || new_stores)
+      cs_wait_slots(b, BITFIELD_BIT(b->conf.ls_sb_slot));
+
+   /* Restore the original ls tracker state */
+   b->cur_ls_tracker = state->orig_ls_state;
 
    uint32_t num_instrs = cs_block_next_pos(b) - state->patch_pos;
    size_t size = num_instrs * sizeof(uint64_t);
@@ -1238,6 +1439,15 @@ cs_patch_maybe(struct cs_builder *b, struct cs_maybe *maybe)
    }
 }
 
+struct cs_single_link_list_node {
+   uint64_t next;
+};
+
+struct cs_single_link_list {
+   uint64_t head;
+   uint64_t tail;
+};
+
 /* Pseudoinstructions follow */
 
 static inline void
@@ -1250,71 +1460,6 @@ cs_move64_to(struct cs_builder *b, struct cs_index dest, uint64_t imm)
       cs_move32_to(b, cs_extract32(b, dest, 0), imm);
       cs_move32_to(b, cs_extract32(b, dest, 1), imm >> 32);
    }
-}
-
-static inline void
-cs_wait_slots(struct cs_builder *b, unsigned wait_mask)
-{
-   struct cs_load_store_tracker *ls_tracker = b->cur_ls_tracker;
-   assert(ls_tracker != NULL);
-
-   cs_emit(b, WAIT, I) {
-      I.wait_mask = wait_mask;
-   }
-
-   /* We don't do advanced tracking of cs_defer(), and assume that
-    * load/store will be flushed with an explicit wait on the load/store
-    * scoreboard. */
-   if (wait_mask & BITFIELD_BIT(b->conf.ls_sb_slot)) {
-      BITSET_CLEAR_RANGE(ls_tracker->pending_loads, 0, 255);
-      ls_tracker->pending_stores = false;
-   }
-}
-
-static inline void
-cs_wait_slot(struct cs_builder *b, unsigned slot)
-{
-   assert(slot < CS_MAX_SB_COUNT && "invalid slot");
-
-   cs_wait_slots(b, BITFIELD_BIT(slot));
-}
-
-static inline void
-cs_flush_load_to(struct cs_builder *b, struct cs_index to, uint16_t mask)
-{
-   struct cs_load_store_tracker *ls_tracker = b->cur_ls_tracker;
-   assert(ls_tracker != NULL);
-
-   unsigned count = util_last_bit(mask);
-   unsigned reg = cs_to_reg_tuple(to, count);
-
-   for (unsigned i = reg; i < reg + count; i++) {
-      if ((mask & BITFIELD_BIT(i - reg)) &&
-          BITSET_TEST(ls_tracker->pending_loads, i)) {
-         cs_wait_slots(b, BITFIELD_BIT(b->conf.ls_sb_slot));
-         break;
-      }
-   }
-}
-
-static inline void
-cs_flush_loads(struct cs_builder *b)
-{
-   struct cs_load_store_tracker *ls_tracker = b->cur_ls_tracker;
-   assert(ls_tracker != NULL);
-
-   if (!BITSET_IS_EMPTY(ls_tracker->pending_loads))
-      cs_wait_slots(b, BITFIELD_BIT(b->conf.ls_sb_slot));
-}
-
-static inline void
-cs_flush_stores(struct cs_builder *b)
-{
-   struct cs_load_store_tracker *ls_tracker = b->cur_ls_tracker;
-   assert(ls_tracker != NULL);
-
-   if (ls_tracker->pending_stores)
-      cs_wait_slots(b, BITFIELD_BIT(b->conf.ls_sb_slot));
 }
 
 struct cs_shader_res_sel {
@@ -1476,7 +1621,7 @@ cs_finish_fragment(struct cs_builder *b, bool increment_frag_completed,
 
 static inline void
 cs_add32(struct cs_builder *b, struct cs_index dest, struct cs_index src,
-         unsigned imm)
+         int32_t imm)
 {
    cs_emit(b, ADD_IMM32, I) {
       I.destination = cs_dst32(b, dest);
@@ -1487,7 +1632,7 @@ cs_add32(struct cs_builder *b, struct cs_index dest, struct cs_index src,
 
 static inline void
 cs_add64(struct cs_builder *b, struct cs_index dest, struct cs_index src,
-         unsigned imm)
+         int32_t imm)
 {
    cs_emit(b, ADD_IMM64, I) {
       I.destination = cs_dst64(b, dest);
@@ -2446,6 +2591,55 @@ cs_trace_run_compute_indirect(struct cs_builder *b,
                cs_trace_field_offset(run_compute, sr[0]) + i * sizeof(uint32_t));
    cs_store(b, cs_reg_tuple(b, 32, 8), tracebuf_addr, BITFIELD_MASK(8),
             cs_trace_field_offset(run_compute, sr[32]));
+   cs_flush_stores(b);
+}
+
+#define cs_single_link_list_for_each_from(b, current, node_type, base_name)    \
+   cs_while(b, MALI_CS_CONDITION_NEQUAL, current)                              \
+      for (bool done = false; !done;                                           \
+           cs_load64_to(b, current, current,                                   \
+                        offsetof(node_type, base_name.next)),                  \
+                done = true)
+
+/**
+ * Append an item to a cs_single_link_list.
+ *
+ * @param b The current cs_builder.
+ * @param list_base CS register with the base address for the list pointer.
+ * @param list_offset Offset added to list_base.
+ * @param new_node_gpu GPU address of the node to insert.
+ * @param base_offset Offset of cs_single_link_list_node in the new node.
+ * @param head_tail Temporary register pair used in the function.
+ */
+static inline void
+cs_single_link_list_add_tail(struct cs_builder *b, struct cs_index list_base,
+                             int list_offset, struct cs_index new_node_gpu,
+                             int base_offset, struct cs_index head_tail)
+{
+   assert(head_tail.size == 4);
+   assert(head_tail.reg % 2 == 0);
+
+   STATIC_ASSERT(offsetof(struct cs_single_link_list, tail) ==
+                 offsetof(struct cs_single_link_list, head) + sizeof(uint64_t));
+   struct cs_index head = cs_reg64(b, head_tail.reg);
+   struct cs_index tail = cs_reg64(b, head_tail.reg + 2);
+
+   /* Offset of the next pointer inside the node pointed to by new_node_gpu. */
+   const int offset_next =
+      base_offset + offsetof(struct cs_single_link_list_node, next);
+
+   STATIC_ASSERT(offsetof(struct cs_single_link_list, head) == 0);
+   cs_load_to(b, head_tail, list_base, BITFIELD_MASK(4), list_offset);
+
+   /* If the list is empty (head == NULL), set the head, otherwise append to the
+    * last node. */
+   cs_if(b, MALI_CS_CONDITION_EQUAL, head)
+      cs_add64(b, head, new_node_gpu, 0);
+   cs_else(b)
+      cs_store64(b, new_node_gpu, tail, offset_next);
+
+   cs_add64(b, tail, new_node_gpu, 0);
+   cs_store(b, head_tail, list_base, BITFIELD_MASK(4), list_offset);
    cs_flush_stores(b);
 }
 

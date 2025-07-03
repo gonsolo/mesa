@@ -296,7 +296,11 @@ struct D3D12EncodeConfiguration
    union
    {
       D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_H264 m_H264PicData;
-      D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC1 m_HEVCPicData;
+#if D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
+      D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC2 m_HEVCPicData;
+#else
+      D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC m_HEVCPicData;
+#endif // D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
       D3D12_VIDEO_ENCODER_AV1_PICTURE_CONTROL_CODEC_DATA m_AV1PicData;
    } m_encoderPicParamsDesc = {};
 
@@ -364,7 +368,7 @@ struct D3D12EncodeConfiguration
             std::vector<ID3D12Resource*> ppMotionVectorMapsMetadata;
             UINT*            pMotionVectorMapsMetadataSubresources;
             D3D12_VIDEO_ENCODER_FRAME_INPUT_MOTION_UNIT_PRECISION MotionUnitPrecision;
-            D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA PictureControlConfiguration;
+            D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA1 PictureControlConfiguration;
             D3D12_FEATURE_DATA_VIDEO_ENCODER_RESOLVE_INPUT_PARAM_LAYOUT capInputLayoutMotionVectors;
          } MapInfo;
       };
@@ -374,6 +378,51 @@ struct D3D12EncodeConfiguration
    struct d3d12_resource *m_GPUQPStatsResource = NULL;
    struct d3d12_resource *m_GPUSATDStatsResource = NULL;
    struct d3d12_resource *m_GPURCBitAllocationStatsResource = NULL;
+   struct d3d12_resource *m_GPUPSNRAllocationStatsResource = NULL;
+   struct
+   {
+      //
+      // Cached caps on encoder creation members
+      //
+      union pipe_enc_cap_two_pass two_pass_support;
+
+      //
+      // Encoder scope members
+      //
+
+         // Indicates if two pass enabled
+         bool AppRequested;
+
+         // Indicates, if enabled, the downscale factor for two pass
+         UINT Pow2DownscaleFactor;
+
+         // If enabled, disable 1st pass recon pic output
+         // as app will generate that by downscaling the
+         // 2nd pass dpn recon externally
+         bool bUseExternalDPBScaling;
+
+      //
+      // Per frame scope members
+      //
+
+         // If AppRequested is set, this
+         // indicates when a specific frame two pass
+         // will be disabled and its updated per frame
+         // from the pipe pic params
+         //
+         // Note: IHV drivers may not support two pass
+         // on all frame types, so the ones not supported
+         // will naturally be always "skipped" anyways
+         bool bSkipTwoPassInCurrentFrame;
+         ID3D12Resource* pDownscaledInputTexture;
+         struct
+         {
+            std::vector<ID3D12Resource *> pResources;
+            std::vector<uint32_t> pSubresources;
+         } DownscaledReferences;
+         D3D12_VIDEO_ENCODER_RECONSTRUCTED_PICTURE FrameAnalysisReconstructedPictureOutput;
+
+   } m_TwoPassEncodeDesc = {};
 #endif
 };
 
@@ -536,7 +585,7 @@ struct d3d12_video_encoder
       // we need to keep a reference alive to the ones that
       // are currently in-flight
       ComPtr<ID3D12VideoEncoder> m_spEncoder;
-      ComPtr<ID3D12VideoEncoderHeap> m_spEncoderHeap;
+      ComPtr<ID3D12VideoEncoderHeap>        m_spEncoderHeap;
       std::shared_ptr<d3d12_video_dpb_storage_manager_interface> m_References;
 
       ComPtr<ID3D12CommandAllocator> m_spCommandAllocator;
@@ -583,6 +632,10 @@ d3d12_video_encoder_reconfigure_encoder_objects(struct d3d12_video_encoder *pD3D
                                                 struct pipe_picture_desc *  picture);
 D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA
 d3d12_video_encoder_get_current_picture_param_settings(struct d3d12_video_encoder *pD3D12Enc);
+#if D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
+D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA1
+d3d12_video_encoder_get_current_picture_param_settings1(struct d3d12_video_encoder *pD3D12Enc);
+#endif // D3D12_VIDEO_USE_NEW_ENCODECMDLIST4_INTERFACE
 D3D12_VIDEO_ENCODER_LEVEL_SETTING
 d3d12_video_encoder_get_current_level_desc(struct d3d12_video_encoder *pD3D12Enc);
 D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION
@@ -685,7 +738,8 @@ void
 d3d12_video_encoder_update_output_stats_resources(struct d3d12_video_encoder *pD3D12Enc,
                                                   struct pipe_resource* qpmap,
                                                   struct pipe_resource* satdmap,
-                                                  struct pipe_resource* rcbitsmap);
+                                                  struct pipe_resource* rcbitsmap,
+                                                  struct pipe_resource* psnrmap);
 
 bool
 d3d12_video_encoder_prepare_input_buffers(struct d3d12_video_encoder *pD3D12Enc);
@@ -695,6 +749,13 @@ d3d12_video_encoder_update_qpmap_input(struct d3d12_video_encoder *pD3D12Enc,
                                        struct pipe_resource* qpmap,
                                        struct pipe_enc_roi roi,
                                        uint32_t temporal_id);
+void
+d3d12_video_encoder_initialize_two_pass(struct d3d12_video_encoder *pD3D12Enc,
+                                        const struct pipe_enc_two_pass_encoder_config& two_pass);
+void
+d3d12_video_encoder_update_two_pass_frame_settings(struct d3d12_video_encoder *pD3D12Enc,
+                                                   enum pipe_video_format codec,
+                                                   struct pipe_picture_desc* picture);
 ///
 /// d3d12_video_encoder functions ends
 ///

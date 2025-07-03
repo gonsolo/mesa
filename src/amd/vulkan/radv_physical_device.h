@@ -205,19 +205,16 @@ radv_physical_device_instance(const struct radv_physical_device *pdev)
 static inline bool
 radv_dedicated_sparse_queue_enabled(const struct radv_physical_device *pdev)
 {
-   const struct radv_instance *instance = radv_physical_device_instance(pdev);
-
    /* Dedicated sparse queue requires VK_QUEUE_SUBMIT_MODE_THREADED, which is incompatible with
     * VK_DEVICE_TIMELINE_MODE_EMULATED. */
-   return pdev->info.has_timeline_syncobj && !instance->drirc.disable_dedicated_sparse_queue;
+   return pdev->info.has_timeline_syncobj;
 }
 
 static inline bool
 radv_has_shader_buffer_float_minmax(const struct radv_physical_device *pdev, unsigned bitsize)
 {
    return (pdev->info.gfx_level <= GFX7 && !pdev->use_llvm) || pdev->info.gfx_level == GFX10 ||
-          pdev->info.gfx_level == GFX10_3 ||
-          ((pdev->info.gfx_level == GFX11 || pdev->info.gfx_level == GFX11_5) && bitsize == 32);
+          pdev->info.gfx_level == GFX10_3 || (pdev->info.gfx_level >= GFX11 && bitsize == 32);
 }
 
 static inline bool
@@ -274,5 +271,12 @@ VkResult create_drm_physical_device(struct vk_instance *vk_instance, struct _drm
 void radv_physical_device_destroy(struct vk_physical_device *vk_pdev);
 
 bool radv_compute_queue_enabled(const struct radv_physical_device *pdev);
+
+static inline uint32_t
+radv_get_sampled_image_desc_size(const struct radv_physical_device *pdev)
+{
+   /* Main descriptor + FMASK desccriptor if needed. */
+   return 32 + (pdev->use_fmask ? 32 : 0);
+}
 
 #endif /* RADV_PHYSICAL_DEVICE_H */

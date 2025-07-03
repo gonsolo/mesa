@@ -16,12 +16,11 @@ renaming_overrides_prefixing = true
 "nv_device_info" = "struct nv_device_info"
 "pipe_format" = "enum pipe_format"
 "pipe_swizzle" = "enum pipe_swizzle"
-"GOB_DEPTH" = "NIL_GOB_DEPTH"
-"GOB_WIDTH_B" = "NIL_GOB_WIDTH_B"
 "MAX_LEVELS" = "NIL_MAX_LEVELS"
 "MAX_DRM_FORMAT_MODS" = "NIL_MAX_DRM_FORMAT_MODS"
 
 # This is annoying. rename_types doesn't seem to work
+"Descriptor" = "nil_descriptor"
 "Format" = "nil_format"
 "GOBType" = "nil_gob_type"
 "Image" = "nil_image"

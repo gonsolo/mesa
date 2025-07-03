@@ -181,6 +181,7 @@ lp_mem_type_from_format_desc(const struct util_format_description *format_desc,
    }
 
    int chan = util_format_get_first_non_void_channel(format_desc->format);
+   assert(chan >= 0);
 
    memset(type, 0, sizeof(struct lp_type));
    type->floating = format_desc->channel[chan].type == UTIL_FORMAT_TYPE_FLOAT;
@@ -1783,7 +1784,8 @@ lp_blend_type_from_format_desc(const struct util_format_description *format_desc
       return;
    }
 
-   const int chan = util_format_get_first_non_void_channel(format_desc->format);
+   int chan = util_format_get_first_non_void_channel(format_desc->format);
+   assert(chan >= 0);
 
    memset(type, 0, sizeof(struct lp_type));
    type->floating = format_desc->channel[chan].type == UTIL_FORMAT_TYPE_FLOAT;
@@ -4728,7 +4730,7 @@ llvmpipe_update_fs(struct llvmpipe_context *lp)
                          "\t%u instrs,\t%u instrs/variant\n",
                          shader->variants_cached,
                          lp->nr_fs_variants, lp->nr_fs_instrs,
-                         lp->nr_fs_instrs / lp->nr_fs_variants);
+                         lp->nr_fs_variants ? lp->nr_fs_instrs / lp->nr_fs_variants : 0);
          }
 
          /*

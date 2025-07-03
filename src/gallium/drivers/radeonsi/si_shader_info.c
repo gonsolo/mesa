@@ -194,14 +194,9 @@ static void scan_io_usage(const nir_shader *nir, struct si_shader_info *info,
                if (slot_semantic == VARYING_SLOT_TESS_LEVEL_INNER ||
                    slot_semantic == VARYING_SLOT_TESS_LEVEL_OUTER) {
                   if (!nir_intrinsic_io_semantics(intr).no_varying) {
-                     info->tess_levels_written_for_tes |=
-                        BITFIELD_BIT(ac_shader_io_get_unique_index_patch(slot_semantic));
-                  }
-               } else if (slot_semantic >= VARYING_SLOT_PATCH0 &&
-                          slot_semantic < VARYING_SLOT_TESS_MAX) {
-                  if (!nir_intrinsic_io_semantics(intr).no_varying) {
-                     info->patch_outputs_written_for_tes |=
-                        BITFIELD_BIT(ac_shader_io_get_unique_index_patch(slot_semantic));
+                     unsigned index = ac_shader_io_get_unique_index_patch(slot_semantic);
+                     info->num_tess_level_vram_outputs =
+                        MAX2(info->num_tess_level_vram_outputs, index + 1);
                   }
                } else if ((slot_semantic <= VARYING_SLOT_VAR31 ||
                            slot_semantic >= VARYING_SLOT_VAR0_16BIT) &&
@@ -217,12 +212,8 @@ static void scan_io_usage(const nir_shader *nir, struct si_shader_info *info,
 
                   /* LAYER and VIEWPORT have no effect if they don't feed the rasterizer. */
                   if (slot_semantic != VARYING_SLOT_LAYER &&
-                      slot_semantic != VARYING_SLOT_VIEWPORT) {
+                      slot_semantic != VARYING_SLOT_VIEWPORT)
                      info->ls_es_outputs_written |= bit;
-
-                     if (!nir_intrinsic_io_semantics(intr).no_varying)
-                        info->tcs_outputs_written_for_tes |= bit;
-                  }
                }
             }
 
@@ -384,12 +375,16 @@ void si_nir_scan_shader(struct si_screen *sscreen, struct nir_shader *nir,
       }
    }
 
-   nir->info.use_aco_amd = aco_is_gpu_supported(&sscreen->info) &&
-                           sscreen->info.has_image_opcodes &&
-                           (sscreen->use_aco || nir->info.use_aco_amd || force_use_aco ||
-                            /* Use ACO for streamout on gfx12 because it's faster. */
-                            (sscreen->info.gfx_level >= GFX12 && nir->xfb_info &&
-                             nir->xfb_info->output_count));
+   if (sscreen->debug_flags & DBG(USE_LLVM)) {
+      nir->info.use_aco_amd = false;
+   } else {
+      nir->info.use_aco_amd = aco_is_gpu_supported(&sscreen->info) &&
+                              sscreen->info.has_image_opcodes &&
+                              (sscreen->use_aco || nir->info.use_aco_amd || force_use_aco ||
+                               /* Use ACO for streamout on gfx12 because it's faster. */
+                               (sscreen->info.gfx_level >= GFX12 && nir->xfb_info &&
+                                nir->xfb_info->output_count));
+   }
 #else
    assert(aco_is_gpu_supported(&sscreen->info));
    nir->info.use_aco_amd = true;
@@ -406,11 +401,6 @@ void si_nir_scan_shader(struct si_screen *sscreen, struct nir_shader *nir,
    info->base.use_aco_amd = nir->info.use_aco_amd;
    info->base.writes_memory = nir->info.writes_memory;
    info->base.subgroup_size = nir->info.subgroup_size;
-
-   info->base.outputs_read = nir->info.outputs_read;
-   info->base.outputs_written = nir->info.outputs_written;
-   info->base.patch_outputs_read = nir->info.patch_outputs_read;
-   info->base.patch_outputs_written = nir->info.patch_outputs_written;
 
    info->base.num_ubos = nir->info.num_ubos;
    info->base.num_ssbos = nir->info.num_ssbos;
@@ -504,8 +494,8 @@ void si_nir_scan_shader(struct si_screen *sscreen, struct nir_shader *nir,
       nir_tcs_info tcs_info;
       nir_gather_tcs_info(nir, &tcs_info, nir->info.tess._primitive_mode,
                           nir->info.tess.spacing);
-
-      info->tessfactors_are_def_in_all_invocs = tcs_info.all_invocations_define_tess_levels;
+      ac_nir_get_tess_io_info(nir, &tcs_info, ~0ull, ~0, si_map_io_driver_location, false,
+                              &info->tess_io_info);
    }
 
    /* tess factors are loaded as input instead of system value */
@@ -647,8 +637,7 @@ void si_nir_scan_shader(struct si_screen *sscreen, struct nir_shader *nir,
    }
 
    if (nir->info.stage == MESA_SHADER_GEOMETRY) {
-      info->gsvs_vertex_size = info->num_outputs * 16;
-      info->max_gsvs_emit_size = info->gsvs_vertex_size * nir->info.gs.vertices_out;
+      info->max_gsvs_emit_size = info->num_outputs * 16 * nir->info.gs.vertices_out;
       info->gs_input_verts_per_prim =
          mesa_vertices_per_prim(nir->info.gs.input_primitive);
    }

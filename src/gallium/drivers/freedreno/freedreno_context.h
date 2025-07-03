@@ -630,6 +630,9 @@ struct fd_context {
     */
    struct fd_vertex_state blit_vbuf_state;
 
+   /* Custom f16 blit shader: */
+   void *f16_blit_fs[PIPE_MAX_TEXTURE_TYPES] dt;
+
    /*
     * Info about state of previous draw, for state that comes from
     * pipe_draw_info (ie. not part of a CSO).  This allows us to
@@ -785,7 +788,7 @@ void fd_context_switch_from(struct fd_context *ctx) assert_dt;
 void fd_context_switch_to(struct fd_context *ctx,
                           struct fd_batch *batch) assert_dt;
 struct fd_batch *fd_context_batch(struct fd_context *ctx) assert_dt;
-struct fd_batch *fd_context_batch_locked(struct fd_context *ctx) assert_dt;
+struct fd_batch *fd_context_batch_draw(struct fd_context *ctx) assert_dt;
 struct fd_batch *fd_context_batch_nondraw(struct fd_context *ctx) assert_dt;
 
 void fd_context_setup_common_vbos(struct fd_context *ctx);

@@ -520,6 +520,7 @@ typedef struct {
       bool combine;              /* BRANCHC */
       bool format;               /* LEA_TEX */
       bool z_stencil;            /* LD_TILE */
+      bool scheduling_barrier;   /* NOP */
 
       struct {
          enum bi_special special;   /* FADD_RSCALE, FMA_RSCALE */
@@ -631,6 +632,12 @@ static inline bool
 bi_is_staging_src(const bi_instr *I, unsigned s)
 {
    return (s == 0 || s == 4) && bi_get_opcode_props(I)->sr_read;
+}
+
+static inline bool
+bi_is_scheduling_barrier(const bi_instr *I)
+{
+   return I->op == BI_OPCODE_NOP && I->scheduling_barrier;
 }
 
 /*
@@ -886,6 +893,7 @@ struct bi_shader_info {
    unsigned tls_size;
    unsigned work_reg_count;
    unsigned push_offset;
+   bool has_ld_gclk_instr;
 };
 
 /* State of index-driven vertex shading for current shader */

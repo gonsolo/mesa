@@ -89,7 +89,7 @@ actions:
           steps:
           - |-
             echo test FASTBOOT
-            echo "eval \"$(echo ZWNobyB0ZXN0IEZBU1RCT09U | base64 -d)\"" >> /set-job-env-vars.sh
+            echo ZWNobyB0ZXN0IEZBU1RCT09U | base64 -d >> /set-job-env-vars.sh
             export CURRENT_SECTION=dut_boot
           - export -p > /dut-env-vars.sh
 - test:
@@ -125,7 +125,9 @@ actions:
                 shift
                 lava-test-case "${test_case}" --shell \
                     ssh ${SSH_PTY_ARGS:--T} \
-                    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                    -o StrictHostKeyChecking=no \
+                    -o UserKnownHostsFile=/dev/null \
+                    -o ConnectTimeout=60 \
                     root@$(lava-target-ip) "${@}"
             }
           - lava_ssh_test_case 'wait_for_dut_login' << EOF

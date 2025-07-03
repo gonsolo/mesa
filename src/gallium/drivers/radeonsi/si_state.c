@@ -897,18 +897,18 @@ static void si_emit_clip_regs(struct si_context *sctx, unsigned index)
    struct si_state_rasterizer *rs = sctx->queued.named.rasterizer;
    bool window_space = vs_sel->stage == MESA_SHADER_VERTEX ?
                           info->base.vs.window_space_position : 0;
-   unsigned clipdist_mask = vs_sel->info.clipdist_mask;
-   unsigned ucp_mask = clipdist_mask ? 0 : rs->clip_plane_enable & SI_USER_CLIP_PLANE_MASK;
-   unsigned culldist_mask = vs_sel->info.culldist_mask;
+   unsigned ucp_mask = 0, clipdist_mask = 0, culldist_mask = 0;
 
-   /* Clip distances on points have no effect, so need to be implemented
-    * as cull distances. This applies for the clipvertex case as well.
-    *
-    * Setting this for primitives other than points should have no adverse
-    * effects.
-    */
-   clipdist_mask &= rs->clip_plane_enable;
-   culldist_mask |= clipdist_mask;
+   if (!vs_sel->info.clipdist_mask && !vs_sel->info.culldist_mask) {
+      assert(!vs_sel->info.culldist_mask);
+      ucp_mask = SI_USER_CLIP_PLANE_MASK & rs->clip_plane_enable;
+   } else {
+      clipdist_mask = vs_sel->info.clipdist_mask & rs->clip_plane_enable;
+      /* For points, we need to set the cull distance bits too because the clip distance bits have
+       * no effect on them.
+       */
+      culldist_mask = vs_sel->info.culldist_mask | clipdist_mask;
+   }
 
    unsigned pa_cl_cntl = S_02881C_BYPASS_VTX_RATE_COMBINER(sctx->gfx_level >= GFX10_3 &&
                                                            !sctx->screen->options.vrs2x2) |
@@ -5065,43 +5065,12 @@ done:
 static void cdna_init_compute_preamble_state(struct si_context *sctx)
 {
    struct si_screen *sscreen = sctx->screen;
-   uint64_t border_color_va =
-      sctx->border_color_buffer ? sctx->border_color_buffer->gpu_address : 0;
-   uint32_t compute_cu_en = S_00B858_SH0_CU_EN(sscreen->info.spi_cu_en) |
-                            S_00B858_SH1_CU_EN(sscreen->info.spi_cu_en);
 
    struct si_pm4_state *pm4 = si_pm4_create_sized(sscreen, 48, true);
    if (!pm4)
       return;
 
-   /* Compute registers. */
-   /* Disable profiling on compute chips. */
-   ac_pm4_set_reg(&pm4->base, R_00B82C_COMPUTE_PERFCOUNT_ENABLE, 0);
-   ac_pm4_set_reg(&pm4->base, R_00B834_COMPUTE_PGM_HI, S_00B834_DATA(sctx->screen->info.address32_hi >> 8));
-   ac_pm4_set_reg(&pm4->base, R_00B858_COMPUTE_STATIC_THREAD_MGMT_SE0, compute_cu_en);
-   ac_pm4_set_reg(&pm4->base, R_00B85C_COMPUTE_STATIC_THREAD_MGMT_SE1, compute_cu_en);
-   ac_pm4_set_reg(&pm4->base, R_00B864_COMPUTE_STATIC_THREAD_MGMT_SE2, compute_cu_en);
-   ac_pm4_set_reg(&pm4->base, R_00B868_COMPUTE_STATIC_THREAD_MGMT_SE3, compute_cu_en);
-   ac_pm4_set_reg(&pm4->base, R_00B878_COMPUTE_THREAD_TRACE_ENABLE, 0);
-
-   if (sscreen->info.family >= CHIP_GFX940) {
-      ac_pm4_set_reg(&pm4->base, R_00B89C_COMPUTE_TG_CHUNK_SIZE, 0);
-      ac_pm4_set_reg(&pm4->base, R_00B8B4_COMPUTE_PGM_RSRC3, 0);
-   } else {
-      ac_pm4_set_reg(&pm4->base, R_00B894_COMPUTE_STATIC_THREAD_MGMT_SE4, compute_cu_en);
-      ac_pm4_set_reg(&pm4->base, R_00B898_COMPUTE_STATIC_THREAD_MGMT_SE5, compute_cu_en);
-      ac_pm4_set_reg(&pm4->base, R_00B89C_COMPUTE_STATIC_THREAD_MGMT_SE6, compute_cu_en);
-      ac_pm4_set_reg(&pm4->base, R_00B8A0_COMPUTE_STATIC_THREAD_MGMT_SE7, compute_cu_en);
-   }
-
-   ac_pm4_set_reg(&pm4->base, R_0301EC_CP_COHER_START_DELAY, 0);
-
-   /* Set the pointer to border colors. Only MI100 supports border colors. */
-   if (sscreen->info.family == CHIP_MI100) {
-      ac_pm4_set_reg(&pm4->base, R_030E00_TA_CS_BC_BASE_ADDR, border_color_va >> 8);
-      ac_pm4_set_reg(&pm4->base, R_030E04_TA_CS_BC_BASE_ADDR_HI,
-                     S_030E04_ADDRESS(border_color_va >> 40));
-   }
+   si_init_compute_preamble_state(sctx, pm4);
 
    ac_pm4_finalize(&pm4->base);
    sctx->cs_preamble_state = pm4;

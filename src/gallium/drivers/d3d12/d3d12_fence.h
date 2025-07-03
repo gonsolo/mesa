@@ -98,8 +98,11 @@ d3d12_fence(struct pipe_fence_handle *pfence)
    return (struct d3d12_fence *)pfence;
 }
 
+bool
+d3d12_reset_fence(struct d3d12_fence *fence, ID3D12Fence *d3d12_fence_obj, uint64_t fence_value);
+
 struct d3d12_fence *
-d3d12_create_fence(struct d3d12_screen *screen);
+d3d12_create_fence(struct d3d12_screen *screen, bool signal_new);
 
 struct d3d12_fence *
 d3d12_open_fence(struct d3d12_screen *screen, HANDLE handle, const void *name);

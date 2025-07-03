@@ -274,13 +274,13 @@ anv_descriptor_data_size(enum anv_descriptor_data data,
    unsigned sampler_size = 0;
 
    if (data & ANV_DESCRIPTOR_INDIRECT_SAMPLED_IMAGE)
-      surface_size += sizeof(struct anv_sampled_image_descriptor);
+      surface_size += align(sizeof(struct anv_sampled_image_descriptor), 8);
 
    if (data & ANV_DESCRIPTOR_INDIRECT_STORAGE_IMAGE)
-      surface_size += sizeof(struct anv_storage_image_descriptor);
+      surface_size += align(sizeof(struct anv_storage_image_descriptor), 8);
 
    if (data & ANV_DESCRIPTOR_INDIRECT_ADDRESS_RANGE)
-      surface_size += sizeof(struct anv_address_range_descriptor);
+      surface_size += align(sizeof(struct anv_address_range_descriptor), 8);
 
    if (data & ANV_DESCRIPTOR_SURFACE)
       surface_size += ANV_SURFACE_STATE_SIZE;
@@ -1036,13 +1036,11 @@ sha1_update_immutable_sampler(struct mesa_sha1 *ctx,
                               bool embedded_sampler,
                               const struct anv_sampler *sampler)
 {
-   if (!sampler->vk.ycbcr_conversion)
-      return;
-
-   /* Hash the conversion if any as this affect placement of descriptors in
-    * the set due to the number of planes.
+   /* Hash the conversion if any as this affect shader compilation due to NIR
+    * lowering.
     */
-   SHA1_UPDATE_VALUE(ctx, sampler->vk.ycbcr_conversion->state);
+   if (sampler->vk.ycbcr_conversion)
+      SHA1_UPDATE_VALUE(ctx, sampler->vk.ycbcr_conversion->state);
 
    /* For embedded samplers, we need to hash the sampler parameters as the
     * sampler handle is baked into the shader and this ultimately is part of
@@ -1352,6 +1350,7 @@ anv_descriptor_pool_heap_reset(struct anv_device *device,
 
    util_vma_heap_finish(&heap->heap);
    util_vma_heap_init(&heap->heap, POOL_HEAP_OFFSET, heap->size);
+   heap->alloc_size = 0;
 }
 
 static VkResult
@@ -2271,6 +2270,7 @@ anv_descriptor_set_write_image_view(struct anv_device *device,
             .tile_mode = image_view->image->planes[0].primary_surface.isl.tiling == ISL_TILING_LINEAR ? 0 : 0xffffffff,
             .row_pitch_B = image_view->image->planes[0].primary_surface.isl.row_pitch_B,
             .qpitch = image_view->image->planes[0].primary_surface.isl.array_pitch_el_rows,
+            .format = image_view->planes[0].isl.format,
          };
          memcpy(desc_surface_map, &desc_data, sizeof(desc_data));
       } else {
@@ -2407,6 +2407,7 @@ anv_descriptor_set_write_buffer_view(struct anv_device *device,
             device->physical, buffer_view->storage.state),
          .image_address = anv_address_physical(buffer_view->address),
          /* tile_mode, row_pitch_B, qpitch = 0 */
+         .format = buffer_view->format,
       };
       memcpy(desc_map, &desc_data, sizeof(desc_data));
    }

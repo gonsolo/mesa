@@ -147,15 +147,8 @@ impl ShaderModel for ShaderModel50 {
         instr_latency(self.sm, a, a_dst_idx)
     }
 
-    fn paw_latency(&self, write: &Op, _dst_idx: usize) -> u32 {
-        if self.sm == 70 {
-            match write {
-                Op::DSetP(_) | Op::HSetP2(_) => 15,
-                _ => 13,
-            }
-        } else {
-            13
-        }
+    fn paw_latency(&self, _write: &Op, _dst_idx: usize) -> u32 {
+        13
     }
 
     fn worst_latency(&self, write: &Op, dst_idx: usize) -> u32 {
@@ -937,7 +930,7 @@ impl SM50Op for OpFSwzAdd {
             );
         }
 
-        e.set_bit(38, false); /* .NDV */
+        e.set_tex_ndv(38, self.deriv_mode);
         e.set_bit(44, self.ftz);
         e.set_bit(47, false); /* dst.CC */
     }
@@ -2128,6 +2121,15 @@ impl SM50Encoder<'_> {
         );
     }
 
+    fn set_tex_ndv(&mut self, bit: usize, deriv_mode: TexDerivMode) {
+        let ndv = match deriv_mode {
+            TexDerivMode::Auto => false,
+            TexDerivMode::NonDivergent => true,
+            _ => panic!("{deriv_mode} is not supported"),
+        };
+        self.set_bit(bit, ndv);
+    }
+
     fn set_tex_channel_mask(
         &mut self,
         range: Range<usize>,
@@ -2179,7 +2181,7 @@ impl SM50Op for OpTex {
 
         e.set_tex_dim(28..31, self.dim);
         e.set_tex_channel_mask(31..35, self.channel_mask);
-        e.set_bit(35, false); // ToDo: NDV
+        e.set_tex_ndv(35, self.deriv_mode);
         e.set_bit(49, self.nodep);
         e.set_bit(50, self.z_cmpr);
     }
@@ -2292,7 +2294,7 @@ impl SM50Op for OpTmml {
 
         e.set_tex_dim(28..31, self.dim);
         e.set_tex_channel_mask(31..35, self.channel_mask);
-        e.set_bit(35, false); // ToDo: NDV
+        e.set_tex_ndv(35, self.deriv_mode);
         e.set_bit(49, self.nodep);
     }
 }

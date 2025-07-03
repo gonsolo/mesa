@@ -1553,7 +1553,7 @@ handle_instruction_gfx11(State& state, NOP_ctx_gfx11& ctx, aco_ptr<Instruction>&
       }
    } else {
       /* VALUReadSGPRHazard
-       * VALU reads SGPR and later written by SALU cannot safely be read by VALU/SALU.
+       * VALU reads SGPR and later written by VALU/SALU cannot safely be read by VALU/SALU.
        */
       if (instr->isVALU() || instr->isSALU()) {
          unsigned expiry_count = instr->isSALU() ? 10 : 11;
@@ -1606,9 +1606,9 @@ handle_instruction_gfx11(State& state, NOP_ctx_gfx11& ctx, aco_ptr<Instruction>&
       }
 
       if (instr->isVALU() && !instr->definitions.empty()) {
-         PhysReg reg = instr->definitions[0].physReg();
+         PhysReg reg = instr->definitions.back().physReg();
          if (reg < m0 && ctx.sgpr_read_by_valu[reg / 2]) {
-            for (unsigned i = 0; i < instr->definitions[0].size(); i++)
+            for (unsigned i = 0; i < instr->definitions.back().size(); i++)
                ctx.sgpr_read_by_valu_then_wr_by_valu.set(reg + i);
          }
       } else if (instr->isSALU() && !instr->definitions.empty()) {
@@ -1628,9 +1628,10 @@ handle_instruction_gfx11(State& state, NOP_ctx_gfx11& ctx, aco_ptr<Instruction>&
          for (Operand& op : instr->operands)
             fill_vgpr_bitset(ctx.vgpr_used_by_vmem_store, op.physReg(), op.bytes());
       } else {
-         uint8_t vmem_type = state.program->gfx_level >= GFX12
-                                ? get_vmem_type(state.program->gfx_level, instr.get())
-                                : vmem_nosampler;
+         uint8_t vmem_type =
+            state.program->gfx_level >= GFX12
+               ? get_vmem_type(state.program->gfx_level, state.program->family, instr.get())
+               : vmem_nosampler;
          std::bitset<256>* vgprs = &ctx.vgpr_used_by_vmem_load;
          if (vmem_type == vmem_sampler)
             vgprs = &ctx.vgpr_used_by_vmem_sample;

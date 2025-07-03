@@ -81,6 +81,21 @@ enum pan_afbc_mode {
    PAN_AFBC_MODE_R11G11B10,
    PAN_AFBC_MODE_S8,
 
+   /* YUV special modes */
+   PAN_AFBC_MODE_YUV420_6C8,
+   PAN_AFBC_MODE_YUV420_2C8,
+   PAN_AFBC_MODE_YUV420_1C8,
+   PAN_AFBC_MODE_YUV420_6C10,
+   PAN_AFBC_MODE_YUV420_2C10,
+   PAN_AFBC_MODE_YUV420_1C10,
+
+   PAN_AFBC_MODE_YUV422_4C8,
+   PAN_AFBC_MODE_YUV422_2C8,
+   PAN_AFBC_MODE_YUV422_1C8,
+   PAN_AFBC_MODE_YUV422_4C10,
+   PAN_AFBC_MODE_YUV422_2C10,
+   PAN_AFBC_MODE_YUV422_1C10,
+
    /* Sentintel signalling a format that cannot be compressed */
    PAN_AFBC_MODE_INVALID
 };
@@ -112,6 +127,22 @@ pan_afbc_superblock_size(uint64_t modifier)
    }
 }
 
+/* Same as pan_afbc_superblock_size_el() but counted in block elements
+ * instead of pixels. For anything non-YUV this is the same. */
+static inline struct pan_image_block_size
+pan_afbc_superblock_size_el(enum pipe_format format, uint64_t modifier)
+{
+   struct pan_image_block_size sb_size_px = pan_afbc_superblock_size(modifier);
+
+   assert(sb_size_px.width % util_format_get_blockwidth(format) == 0);
+   assert(sb_size_px.height % util_format_get_blockheight(format) == 0);
+
+   return (struct pan_image_block_size){
+      .width = sb_size_px.width / util_format_get_blockwidth(format),
+      .height = sb_size_px.height / util_format_get_blockheight(format),
+   };
+}
+
 /*
  * Given an AFBC modifier, return the render size.
  */
@@ -125,6 +156,23 @@ pan_afbc_renderblock_size(uint64_t modifier)
     */
    blk_size.height = ALIGN_POT(blk_size.height, 16);
    return blk_size;
+}
+
+
+/* Same as pan_afbc_renderblock_size() but counted in block elements
+ * instead of pixels. For anything non-YUV this is the same. */
+static inline struct pan_image_block_size
+pan_afbc_renderblock_size_el(enum pipe_format format, uint64_t modifier)
+{
+   struct pan_image_block_size rb_size_px = pan_afbc_renderblock_size(modifier);
+
+   assert(rb_size_px.width % util_format_get_blockwidth(format) == 0);
+   assert(rb_size_px.height % util_format_get_blockheight(format) == 0);
+
+   return (struct pan_image_block_size){
+      .width = rb_size_px.width / util_format_get_blockwidth(format),
+      .height = rb_size_px.height / util_format_get_blockheight(format),
+   };
 }
 
 /*
@@ -167,6 +215,30 @@ pan_afbc_subblock_size(uint64_t modifier)
    return (struct pan_image_block_size){4, 4};
 }
 
+static inline uint32_t
+pan_afbc_header_row_stride_align(unsigned arch, enum pipe_format format,
+                                 uint64_t modifier)
+{
+   if (arch <= 7 || !(modifier & AFBC_FORMAT_MOD_TILED))
+      return 16;
+
+   if (util_format_get_blocksizebits(format) <= 32)
+      return 1024;
+   else
+      return 256;
+}
+
+static inline uint32_t
+pan_afbc_header_align(unsigned arch, uint64_t modifier)
+{
+   if (modifier & AFBC_FORMAT_MOD_TILED)
+      return 4096;
+   else if (arch >= 6)
+      return 128;
+   else
+      return 64;
+}
+
 /*
  * Determine the required alignment for the body offset of an AFBC image. For
  * now, this depends only on whether tiling is in use. These minimum alignments
@@ -175,13 +247,15 @@ pan_afbc_subblock_size(uint64_t modifier)
 static inline uint32_t
 pan_afbc_body_align(unsigned arch, uint64_t modifier)
 {
-   if (modifier & AFBC_FORMAT_MOD_TILED)
-      return 4096;
+   /* Body and header alignments are actually the same. */
+   return pan_afbc_header_align(arch, modifier);
+}
 
-   if (arch >= 6)
-      return 128;
-
-   return 64;
+/* Get the body offset for a given AFBC header size. */
+static inline uint32_t
+pan_afbc_body_offset(unsigned arch, uint64_t modifier, uint32_t header_size)
+{
+   return ALIGN_POT(header_size, pan_afbc_body_align(arch, modifier));
 }
 
 /*
@@ -221,6 +295,17 @@ pan_afbc_stride_blocks(uint64_t modifier, uint32_t row_stride_bytes)
 {
    return row_stride_bytes /
           (AFBC_HEADER_BYTES_PER_TILE * pan_afbc_tile_size(modifier));
+}
+
+/* Returns a height in superblocks taking into account the tile alignment
+ * requirement coming from the modifier.
+ */
+static inline uint32_t
+pan_afbc_height_blocks(uint64_t modifier, uint32_t height_px)
+{
+   return ALIGN_POT(
+      DIV_ROUND_UP(height_px, pan_afbc_superblock_height(modifier)),
+      pan_afbc_tile_size(modifier));
 }
 
 static inline enum pipe_format
@@ -277,8 +362,35 @@ pan_afbc_unswizzled_format(unsigned arch, enum pipe_format format)
  * cannot be compressed. */
 
 static inline enum pan_afbc_mode
-pan_afbc_format(unsigned arch, enum pipe_format format)
+pan_afbc_format(unsigned arch, enum pipe_format format, unsigned plane_idx)
 {
+   assert(plane_idx < util_format_get_num_planes(format));
+
+   switch (format) {
+   case PIPE_FORMAT_R8_G8B8_420_UNORM:
+   case PIPE_FORMAT_R8_B8G8_420_UNORM:
+      return plane_idx == 0 ? PAN_AFBC_MODE_YUV420_1C8
+                            : PAN_AFBC_MODE_YUV420_2C8;
+   case PIPE_FORMAT_R8_G8_B8_420_UNORM:
+   case PIPE_FORMAT_R8_B8_G8_420_UNORM:
+      return PAN_AFBC_MODE_YUV420_1C8;
+   case PIPE_FORMAT_R8_G8B8_422_UNORM:
+      return plane_idx == 0 ? PAN_AFBC_MODE_YUV422_1C8
+                            : PAN_AFBC_MODE_YUV422_2C8;
+   case PIPE_FORMAT_R10_G10B10_420_UNORM:
+      return plane_idx == 0 ? PAN_AFBC_MODE_YUV420_1C10
+                            : PAN_AFBC_MODE_YUV420_2C10;
+   case PIPE_FORMAT_R10_G10B10_422_UNORM:
+      return plane_idx == 0 ? PAN_AFBC_MODE_YUV422_1C10
+                            : PAN_AFBC_MODE_YUV422_2C10;
+   case PIPE_FORMAT_R8G8B8_420_UNORM_PACKED:
+      return PAN_AFBC_MODE_YUV420_6C8;
+   case PIPE_FORMAT_R10G10B10_420_UNORM_PACKED:
+      return PAN_AFBC_MODE_YUV420_6C10;
+   default:
+      break;
+   }
+
    /* sRGB does not change the pixel format itself, only the
     * interpretation. The interpretation is handled by conversion hardware
     * independent to the compression hardware, so we can compress sRGB
@@ -327,9 +439,16 @@ pan_afbc_format(unsigned arch, enum pipe_format format)
 /* A format may be compressed as AFBC if it has an AFBC internal format */
 
 static inline bool
-pan_format_supports_afbc(unsigned arch, enum pipe_format format)
+pan_afbc_supports_format(unsigned arch, enum pipe_format format)
 {
-   return pan_afbc_format(arch, format) != PAN_AFBC_MODE_INVALID;
+   unsigned plane_count = util_format_get_num_planes(format);
+
+   for (unsigned i = 0; i < plane_count; i++) {
+      if (pan_afbc_format(arch, format, i) == PAN_AFBC_MODE_INVALID)
+         return false;
+   }
+
+   return true;
 }
 
 /* The lossless colour transform (AFBC_FORMAT_MOD_YTR) requires RGB. */
@@ -348,7 +467,8 @@ pan_afbc_can_ytr(enum pipe_format format)
 }
 
 static inline bool
-pan_afbc_can_split(unsigned arch, enum pipe_format format, uint64_t modifier)
+pan_afbc_can_split(unsigned arch, enum pipe_format format, uint64_t modifier,
+                   unsigned plane_idx)
 {
    unsigned block_width = pan_afbc_superblock_width(modifier);
 
@@ -358,7 +478,7 @@ pan_afbc_can_split(unsigned arch, enum pipe_format format, uint64_t modifier)
    if (block_width == 16) {
       return true;
    } else if (block_width == 32) {
-      enum pan_afbc_mode mode = pan_afbc_format(arch, format);
+      enum pan_afbc_mode mode = pan_afbc_format(arch, format, plane_idx);
       return (mode == PAN_AFBC_MODE_R8G8B8A8 ||
               mode == PAN_AFBC_MODE_R10G10B10A2);
    }
@@ -388,7 +508,7 @@ pan_afbc_can_tile(unsigned arch)
 
 #if PAN_ARCH >= 9
 static inline enum mali_afbc_compression_mode
-pan_afbc_compression_mode(enum pipe_format format)
+pan_afbc_compression_mode(enum pipe_format format, unsigned plane_idx)
 {
    /* There's a special case for texturing the stencil part from a combined
     * depth/stencil texture, handle it separately.
@@ -400,7 +520,7 @@ pan_afbc_compression_mode(enum pipe_format format)
     * needs to handle the subset of formats returned by
     * pan_afbc_format.
     */
-   switch (pan_afbc_format(PAN_ARCH, format)) {
+   switch (pan_afbc_format(PAN_ARCH, format, plane_idx)) {
    case PAN_AFBC_MODE_R8:
       return MALI_AFBC_COMPRESSION_MODE_R8;
    case PAN_AFBC_MODE_R8G8:
@@ -421,6 +541,30 @@ pan_afbc_compression_mode(enum pipe_format format)
       return MALI_AFBC_COMPRESSION_MODE_R11G11B10;
    case PAN_AFBC_MODE_S8:
       return MALI_AFBC_COMPRESSION_MODE_S8;
+   case PAN_AFBC_MODE_YUV420_6C8:
+      return MALI_AFBC_COMPRESSION_MODE_YUV420_6C8;
+   case PAN_AFBC_MODE_YUV420_2C8:
+      return MALI_AFBC_COMPRESSION_MODE_YUV420_2C8;
+   case PAN_AFBC_MODE_YUV420_1C8:
+      return MALI_AFBC_COMPRESSION_MODE_YUV420_1C8;
+   case PAN_AFBC_MODE_YUV420_6C10:
+      return MALI_AFBC_COMPRESSION_MODE_YUV420_6C10;
+   case PAN_AFBC_MODE_YUV420_2C10:
+      return MALI_AFBC_COMPRESSION_MODE_YUV420_2C10;
+   case PAN_AFBC_MODE_YUV420_1C10:
+      return MALI_AFBC_COMPRESSION_MODE_YUV420_1C10;
+   case PAN_AFBC_MODE_YUV422_4C8:
+      return MALI_AFBC_COMPRESSION_MODE_YUV422_4C8;
+   case PAN_AFBC_MODE_YUV422_2C8:
+      return MALI_AFBC_COMPRESSION_MODE_YUV422_2C8;
+   case PAN_AFBC_MODE_YUV422_1C8:
+      return MALI_AFBC_COMPRESSION_MODE_YUV422_1C8;
+   case PAN_AFBC_MODE_YUV422_4C10:
+      return MALI_AFBC_COMPRESSION_MODE_YUV422_4C10;
+   case PAN_AFBC_MODE_YUV422_2C10:
+      return MALI_AFBC_COMPRESSION_MODE_YUV422_2C10;
+   case PAN_AFBC_MODE_YUV422_1C10:
+      return MALI_AFBC_COMPRESSION_MODE_YUV422_1C10;
    case PAN_AFBC_MODE_INVALID:
       unreachable("Invalid AFBC format");
    }

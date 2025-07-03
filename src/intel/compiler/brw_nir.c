@@ -43,6 +43,8 @@ type_size_xvec4(const struct glsl_type *type, bool as_vec4, bool bindless)
    case GLSL_TYPE_FLOAT:
    case GLSL_TYPE_FLOAT16:
    case GLSL_TYPE_BFLOAT16:
+   case GLSL_TYPE_FLOAT_E4M3FN:
+   case GLSL_TYPE_FLOAT_E5M2:
    case GLSL_TYPE_BOOL:
    case GLSL_TYPE_DOUBLE:
    case GLSL_TYPE_UINT16:
@@ -695,46 +697,102 @@ brw_needs_vertex_attributes_bypass(const nir_shader *shader)
    return false;
 }
 
+/* Build the per-vertex offset into the attribute section of the per-vertex
+ * thread payload. There is always one GRF of padding in front.
+ *
+ * The computation is fairly complicated due to the layout of the payload. You
+ * can find a description of the layout in brw_compile_fs.cpp
+ * brw_assign_urb_setup().
+ *
+ * Gfx < 20 packs 2 slots per GRF (hence the %/ 2 in the formula)
+ * Gfx >= 20 pack 5 slots per GRF (hence the %/ 5 in the formula)
+ *
+ * Then an additional offset needs to added to handle how multiple polygon
+ * data is interleaved.
+ */
+nir_def *
+brw_nir_vertex_attribute_offset(nir_builder *b,
+                                nir_def *attr_idx,
+                                const struct intel_device_info *devinfo)
+{
+   nir_def *max_poly = nir_load_max_polygon_intel(b);
+   return devinfo->ver >= 20 ?
+         nir_iadd(b,
+                  nir_imul(b, nir_udiv_imm(b, attr_idx, 5), nir_imul_imm(b, max_poly, 64)),
+                  nir_imul_imm(b, nir_umod_imm(b, attr_idx, 5), 12)) :
+      nir_iadd_imm(
+         b,
+         nir_iadd(
+            b,
+            nir_imul(b, nir_udiv_imm(b, attr_idx, 2), nir_imul_imm(b, max_poly, 32)),
+            nir_imul_imm(b, nir_umod_imm(b, attr_idx, 2), 16)),
+         12);
+}
+
+static nir_block *
+fragment_top_block_or_after_wa_18019110168(nir_function_impl *impl)
+{
+   nir_if *first_if =
+      nir_block_get_following_if(nir_start_block(impl));
+   nir_block *post_wa_18019110168_block = NULL;
+   if (first_if) {
+      nir_block *last_if_block = nir_if_last_then_block(first_if);
+      nir_foreach_block_in_cf_node(block, &first_if->cf_node) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+            if (intrin->intrinsic == nir_intrinsic_store_per_primitive_payload_intel) {
+               post_wa_18019110168_block = last_if_block->successors[0];
+               break;
+            }
+         }
+
+         if (post_wa_18019110168_block)
+            break;
+      }
+   }
+
+   return post_wa_18019110168_block ?
+      post_wa_18019110168_block : nir_start_block(impl);
+}
+
 void
 brw_nir_lower_fs_inputs(nir_shader *nir,
                         const struct intel_device_info *devinfo,
                         const struct brw_wm_prog_key *key)
 {
+   /* Always pull the PrimitiveID from the per-primitive block if mesh can be
+    * involved.
+    */
+   if (key->mesh_input != INTEL_NEVER) {
+      nir_foreach_shader_in_variable(var, nir) {
+         if (var->data.location == VARYING_SLOT_PRIMITIVE_ID) {
+            var->data.per_primitive = true;
+            nir->info.per_primitive_inputs |= VARYING_BIT_PRIMITIVE_ID;
+         }
+      }
+   }
+
    nir_def *indirect_primitive_id = NULL;
    if (key->base.vue_layout == INTEL_VUE_LAYOUT_SEPARATE_MESH &&
        (nir->info.inputs_read & VARYING_BIT_PRIMITIVE_ID)) {
-      nir_builder _b = nir_builder_at(nir_before_impl(nir_shader_get_entrypoint(nir))), *b = &_b;
-      nir_def *index = nir_ushr_imm(b,
-                                    nir_load_fs_msaa_intel(b),
-                                    INTEL_MSAA_FLAG_PRIMITIVE_ID_INDEX_OFFSET);
-      nir_def *max_poly = nir_load_max_polygon_intel(b);
-      /* Build the per-vertex offset into the attribute section of the thread
-       * payload. There is always one GRF of padding in front.
-       *
-       * The computation is fairly complicated due to the layout of the
-       * payload. You can find a description of the layout in
-       * brw_compile_fs.cpp brw_assign_urb_setup().
-       *
-       * Gfx < 20 packs 2 slots per GRF (hence the %/ 2 in the formula)
-       * Gfx >= 20 pack 5 slots per GRF (hence the %/ 5 in the formula)
-       *
-       * Then an additional offset needs to added to handle how multiple
-       * polygon data is interleaved.
-       */
-      nir_def *per_vertex_offset = nir_iadd_imm(
+      nir_builder _b = nir_builder_at(
+         nir_before_block(
+            fragment_top_block_or_after_wa_18019110168(
+               nir_shader_get_entrypoint(nir)))), *b = &_b;
+      nir_def *index = nir_ubitfield_extract_imm(
          b,
-         devinfo->ver >= 20 ?
-         nir_iadd(b,
-                  nir_imul(b, nir_udiv_imm(b, index, 5), nir_imul_imm(b, max_poly, 64)),
-                  nir_imul_imm(b, nir_umod_imm(b, index, 5), 12)) :
+         nir_load_fs_msaa_intel(b),
+         INTEL_MSAA_FLAG_PRIMITIVE_ID_INDEX_OFFSET,
+         INTEL_MSAA_FLAG_PRIMITIVE_ID_INDEX_SIZE);
+     nir_def *per_vertex_offset =
          nir_iadd_imm(
             b,
-            nir_iadd(
-               b,
-               nir_imul(b, nir_udiv_imm(b, index, 2), nir_imul_imm(b, max_poly, 32)),
-               nir_imul_imm(b, nir_umod_imm(b, index, 2), 16)),
-            12),
-         devinfo->grf_size);
+            brw_nir_vertex_attribute_offset(
+               b, nir_imul_imm(b, index, 4), devinfo),
+            devinfo->grf_size);
       /* When the attribute index is INTEL_MSAA_FLAG_PRIMITIVE_ID_MESH_INDEX,
        * it means the value is coming from the per-primitive block. We always
        * lay out PrimitiveID at offset 0 in the per-primitive block.
@@ -762,14 +820,6 @@ brw_nir_lower_fs_inputs(nir_shader *nir,
 
          var->data.interpolation = flat ? INTERP_MODE_FLAT
                                         : INTERP_MODE_SMOOTH;
-      }
-
-      /* Always pull the PrimitiveID from the per-primitive block if mesh can be involved.
-       */
-      if (var->data.location == VARYING_SLOT_PRIMITIVE_ID &&
-         key->mesh_input != INTEL_NEVER) {
-         var->data.per_primitive = true;
-         nir->info.per_primitive_inputs |= VARYING_BIT_PRIMITIVE_ID;
       }
    }
 
@@ -1072,6 +1122,8 @@ lower_bit_size_callback(const nir_instr *instr, UNUSED void *data)
        * fewer MOV instructions.
        */
       switch (alu->op) {
+      case nir_op_bitfield_reverse:
+         return alu->def.bit_size != 32 ? 32 : 0;
       case nir_op_idiv:
       case nir_op_imod:
       case nir_op_irem:
@@ -1481,12 +1533,12 @@ brw_nir_link_shaders(const struct brw_compiler *compiler,
          NIR_PASS(_, consumer, brw_nir_zero_inputs, &zero_inputs);
    }
 
-   nir_lower_io_arrays_to_elements(producer, consumer);
+   nir_lower_io_array_vars_to_elements(producer, consumer);
    nir_validate_shader(producer, "after nir_lower_io_arrays_to_elements");
    nir_validate_shader(consumer, "after nir_lower_io_arrays_to_elements");
 
-   NIR_PASS(_, producer, nir_lower_io_to_scalar_early, nir_var_shader_out);
-   NIR_PASS(_, consumer, nir_lower_io_to_scalar_early, nir_var_shader_in);
+   NIR_PASS(_, producer, nir_lower_io_vars_to_scalar, nir_var_shader_out);
+   NIR_PASS(_, consumer, nir_lower_io_vars_to_scalar, nir_var_shader_in);
    brw_nir_optimize(producer, devinfo);
    brw_nir_optimize(consumer, devinfo);
 
@@ -1518,21 +1570,21 @@ brw_nir_link_shaders(const struct brw_compiler *compiler,
       }
    }
 
-   NIR_PASS(_, producer, nir_lower_io_to_vector, nir_var_shader_out);
+   NIR_PASS(_, producer, nir_opt_vectorize_io_vars, nir_var_shader_out);
 
    if (producer->info.stage == MESA_SHADER_TESS_CTRL &&
        producer->options->vectorize_tess_levels)
-   NIR_PASS_V(producer, nir_vectorize_tess_levels);
+   NIR_PASS_V(producer, nir_lower_tess_level_array_vars_to_vec);
 
    NIR_PASS(_, producer, nir_opt_combine_stores, nir_var_shader_out);
-   NIR_PASS(_, consumer, nir_lower_io_to_vector, nir_var_shader_in);
+   NIR_PASS(_, consumer, nir_opt_vectorize_io_vars, nir_var_shader_in);
 
    if (producer->info.stage != MESA_SHADER_TESS_CTRL &&
        producer->info.stage != MESA_SHADER_MESH &&
        producer->info.stage != MESA_SHADER_TASK) {
       /* Calling lower_io_to_vector creates output variable writes with
        * write-masks.  On non-TCS outputs, the back-end can't handle it and we
-       * need to call nir_lower_io_to_temporaries to get rid of them.  This,
+       * need to call nir_lower_io_vars_to_temporaries to get rid of them.  This,
        * in turn, creates temporary variables and extra copy_deref intrinsics
        * that we need to clean up.
        *
@@ -1540,7 +1592,7 @@ brw_nir_link_shaders(const struct brw_compiler *compiler,
        * between whole workgroup, possibly using multiple HW threads). For
        * those write-mask in output is handled by I/O lowering.
        */
-      NIR_PASS_V(producer, nir_lower_io_to_temporaries,
+      NIR_PASS_V(producer, nir_lower_io_vars_to_temporaries,
                  nir_shader_get_entrypoint(producer), true, false);
       NIR_PASS(_, producer, nir_lower_global_vars_to_local);
       NIR_PASS(_, producer, nir_split_var_copies);
@@ -1754,6 +1806,58 @@ get_mem_access_size_align(nir_intrinsic_op intrin, uint8_t bytes,
    }
 }
 
+static bool
+brw_nir_ssbo_intel_instr(nir_builder *b,
+                         nir_intrinsic_instr *intrin,
+                         void *cb_data)
+{
+   switch (intrin->intrinsic) {
+   case nir_intrinsic_load_ssbo: {
+      b->cursor = nir_before_instr(&intrin->instr);
+      nir_def *value = nir_load_ssbo_intel(
+         b,
+         intrin->def.num_components,
+         intrin->def.bit_size,
+         intrin->src[0].ssa,
+         intrin->src[1].ssa,
+         .access = nir_intrinsic_access(intrin),
+         .align_mul = nir_intrinsic_align_mul(intrin),
+         .align_offset = nir_intrinsic_align_offset(intrin),
+         .base = 0);
+      value->loop_invariant = intrin->def.loop_invariant;
+      value->divergent = intrin->def.divergent;
+      nir_def_replace(&intrin->def, value);
+      return true;
+   }
+
+   case nir_intrinsic_store_ssbo: {
+      b->cursor = nir_instr_remove(&intrin->instr);
+      nir_store_ssbo_intel(
+         b,
+         intrin->src[0].ssa,
+         intrin->src[1].ssa,
+         intrin->src[2].ssa,
+         .access = nir_intrinsic_access(intrin),
+         .align_mul = nir_intrinsic_align_mul(intrin),
+         .align_offset = nir_intrinsic_align_offset(intrin),
+         .base = 0);
+      return true;
+   }
+
+   default:
+      return false;
+   }
+}
+
+static bool
+brw_nir_ssbo_intel(nir_shader *shader)
+{
+   return nir_shader_intrinsics_pass(shader,
+                                     brw_nir_ssbo_intel_instr,
+                                     nir_metadata_control_flow,
+                                     NULL);
+}
+
 static void
 brw_vectorize_lower_mem_access(nir_shader *nir,
                                const struct brw_compiler *compiler,
@@ -1806,7 +1910,6 @@ brw_vectorize_lower_mem_access(nir_shader *nir,
       }
    }
 
-
    struct brw_mem_access_cb_data cb_data = {
       .devinfo = compiler->devinfo,
    };
@@ -1833,6 +1936,23 @@ brw_vectorize_lower_mem_access(nir_shader *nir,
       OPT(nir_opt_cse);
       OPT(nir_opt_algebraic);
       OPT(nir_opt_constant_folding);
+   }
+
+   /* Do this after the vectorization & brw_nir_rebase_const_offset_ubo_loads
+    * so that we maximize the offset put into the messages.
+    */
+   if (compiler->devinfo->ver >= 20) {
+      OPT(brw_nir_ssbo_intel);
+
+      const nir_opt_offsets_options offset_options = {
+         .buffer_max        = UINT32_MAX,
+         .shared_max        = UINT32_MAX,
+         .shared_atomic_max = UINT32_MAX,
+         .uniform_max       = UINT32_MAX,
+      };
+      OPT(nir_opt_offsets, &offset_options);
+
+      OPT(brw_nir_lower_immediate_offsets);
    }
 }
 
@@ -2266,6 +2386,7 @@ lsc_op_for_nir_intrinsic(const nir_intrinsic_instr *intrin)
 {
    switch (intrin->intrinsic) {
    case nir_intrinsic_load_ssbo:
+   case nir_intrinsic_load_ssbo_intel:
    case nir_intrinsic_load_shared:
    case nir_intrinsic_load_global:
    case nir_intrinsic_load_global_block_intel:
@@ -2280,6 +2401,7 @@ lsc_op_for_nir_intrinsic(const nir_intrinsic_instr *intrin)
       return LSC_OP_LOAD;
 
    case nir_intrinsic_store_ssbo:
+   case nir_intrinsic_store_ssbo_intel:
    case nir_intrinsic_store_shared:
    case nir_intrinsic_store_global:
    case nir_intrinsic_store_global_block_intel:
@@ -2554,7 +2676,7 @@ brw_nir_move_interpolation_to_top(nir_shader *nir)
    bool progress = false;
 
    nir_foreach_function_impl(impl, nir) {
-      nir_block *top = nir_start_block(impl);
+      nir_block *top = fragment_top_block_or_after_wa_18019110168(impl);
       nir_cursor cursor = nir_before_instr(nir_block_first_instr(top));
       bool impl_progress = false;
 

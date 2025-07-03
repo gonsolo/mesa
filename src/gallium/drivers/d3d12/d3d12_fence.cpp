@@ -37,8 +37,27 @@ destroy_fence(struct d3d12_fence *fence)
    FREE(fence);
 }
 
+bool
+d3d12_reset_fence(struct d3d12_fence *fence, ID3D12Fence *d3d12_fence_obj, uint64_t fence_value)
+{
+   d3d12_fence_close_event(fence->event, fence->event_fd);
+   fence->cmdqueue_fence = d3d12_fence_obj;
+   fence->value = fence_value;
+   fence->event = d3d12_fence_create_event(&fence->event_fd);
+   fence->signaled = false;
+
+   if (FAILED(fence->cmdqueue_fence->SetEventOnCompletion(fence->value, fence->event)))
+      goto fail;
+
+   return true;
+
+fail:
+   d3d12_fence_close_event(fence->event, fence->event_fd);
+   return false;
+}
+
 struct d3d12_fence *
-d3d12_create_fence(struct d3d12_screen *screen)
+d3d12_create_fence(struct d3d12_screen *screen, bool signal_new)
 {
    struct d3d12_fence *ret = CALLOC_STRUCT(d3d12_fence);
    if (!ret) {
@@ -46,12 +65,13 @@ d3d12_create_fence(struct d3d12_screen *screen)
       return NULL;
    }
 
-   ret->cmdqueue_fence = screen->fence;
-   ret->value = ++screen->fence_value;
-   ret->event = d3d12_fence_create_event(&ret->event_fd);
-   if (FAILED(screen->cmdqueue->Signal(screen->fence, ret->value)))
-      goto fail;
-   if (FAILED(screen->fence->SetEventOnCompletion(ret->value, ret->event)))
+   uint64_t value = screen->fence_value;
+   if (signal_new) {
+      value = ++screen->fence_value;
+      if (FAILED(screen->cmdqueue->Signal(screen->fence, value)))
+         goto fail;
+   }
+   if(!d3d12_reset_fence(ret, screen->fence, value))
       goto fail;
 
    pipe_reference_init(&ret->reference, 1);

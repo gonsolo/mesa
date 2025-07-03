@@ -6,6 +6,7 @@
  */
 #include "pipe/p_defines.h"
 #include "vulkan/vulkan_core.h"
+#include "agx_abi.h"
 #include "agx_nir_texture.h"
 #include "hk_cmd_buffer.h"
 #include "hk_descriptor_set.h"
@@ -54,10 +55,7 @@ static nir_def *
 load_root(nir_builder *b, unsigned num_components, unsigned bit_size,
           nir_def *offset, unsigned align)
 {
-   nir_def *root = nir_load_preamble(b, 1, 64, .base = HK_ROOT_UNIFORM);
-
-   /* We've bound the address of the root descriptor, index in. */
-   nir_def *addr = nir_iadd(b, root, nir_u2u64(b, offset));
+   nir_def *addr = nir_iadd(b, nir_load_root_agx(b), nir_u2u64(b, offset));
 
    return load_speculatable(b, num_components, bit_size, addr, align);
 }
@@ -317,16 +315,6 @@ load_resource_deref_desc(nir_builder *b, unsigned num_components,
                           offset_B, ctx);
 }
 
-/*
- * Returns an AGX bindless handle to access an indexed image within the global
- * image heap.
- */
-static nir_def *
-image_heap_handle(nir_builder *b, nir_def *offset)
-{
-   return nir_vec2(b, nir_imm_int(b, HK_IMAGE_HEAP_UNIFORM), offset);
-}
-
 static bool
 lower_image_intrin(nir_builder *b, nir_intrinsic_instr *intr,
                    const struct lower_descriptors_ctx *ctx)
@@ -347,7 +335,8 @@ lower_image_intrin(nir_builder *b, nir_intrinsic_instr *intr,
    }
 
    nir_def *offset = load_resource_deref_desc(b, 1, 32, deref, offs, ctx);
-   nir_rewrite_image_intrinsic(intr, image_heap_handle(b, offset), true);
+   nir_rewrite_image_intrinsic(intr, nir_load_texture_handle_agx(b, offset),
+                               true);
 
    return true;
 }
@@ -390,7 +379,7 @@ translate_pipeline_stat_bit(enum pipe_statistics_query_index pipe)
 static bool
 lower_uvs_index(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
 {
-   unsigned *vs_uniform_base = data;
+   unsigned *nr_vbos = data;
 
    switch (intrin->intrinsic) {
    case nir_intrinsic_load_uvs_index_agx: {
@@ -415,17 +404,20 @@ lower_uvs_index(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
    case nir_intrinsic_load_depth_never_agx:
       return lower_sysval_to_root_table(b, intrin, draw.force_never_in_shader);
 
-   case nir_intrinsic_load_geometry_param_buffer_agx:
+   case nir_intrinsic_load_geometry_param_buffer_poly:
       return lower_sysval_to_root_table(b, intrin, draw.geometry_params);
 
-   case nir_intrinsic_load_vs_output_buffer_agx:
+   case nir_intrinsic_load_vs_output_buffer_poly:
       return lower_sysval_to_root_table(b, intrin, draw.vertex_output_buffer);
 
-   case nir_intrinsic_load_vs_outputs_agx:
+   case nir_intrinsic_load_vs_outputs_poly:
       return lower_sysval_to_root_table(b, intrin, draw.vertex_outputs);
 
-   case nir_intrinsic_load_tess_param_buffer_agx:
+   case nir_intrinsic_load_tess_param_buffer_poly:
       return lower_sysval_to_root_table(b, intrin, draw.tess_params);
+
+   case nir_intrinsic_load_rasterization_stream:
+      return lower_sysval_to_root_table(b, intrin, draw.rasterization_stream);
 
    case nir_intrinsic_load_is_first_fan_agx: {
       unsigned offset = hk_root_descriptor_offset(draw.provoking);
@@ -447,20 +439,20 @@ lower_uvs_index(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
    case nir_intrinsic_load_first_vertex:
    case nir_intrinsic_load_base_instance:
    case nir_intrinsic_load_draw_id:
-   case nir_intrinsic_load_input_assembly_buffer_agx: {
+   case nir_intrinsic_load_input_assembly_buffer_poly: {
       b->cursor = nir_instr_remove(&intrin->instr);
 
-      unsigned base = *vs_uniform_base;
+      unsigned base = AGX_ABI_VUNI_FIRST_VERTEX(*nr_vbos);
       unsigned size = 32;
 
       if (intrin->intrinsic == nir_intrinsic_load_base_instance) {
-         base += 2;
+         base = AGX_ABI_VUNI_BASE_INSTANCE(*nr_vbos);
       } else if (intrin->intrinsic == nir_intrinsic_load_draw_id) {
-         base += 4;
+         base = AGX_ABI_VUNI_DRAW_ID(*nr_vbos);
          size = 16;
       } else if (intrin->intrinsic ==
-                 nir_intrinsic_load_input_assembly_buffer_agx) {
-         base += 8;
+                 nir_intrinsic_load_input_assembly_buffer_poly) {
+         base = AGX_ABI_VUNI_INPUT_ASSEMBLY(*nr_vbos);
          size = 64;
       }
 
@@ -508,7 +500,8 @@ lower_uvs_index(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
          present = nir_iand(b, present, nir_ine_imm(b, api_gs, 0));
       }
 
-      addr = nir_bcsel(b, present, addr, nir_imm_int64(b, 0));
+      addr = nir_bcsel(b, present, addr,
+                       nir_imm_int64(b, AGX_SCRATCH_PAGE_ADDRESS));
 
       nir_def_rewrite_uses(&intrin->def, addr);
       return true;
@@ -520,10 +513,10 @@ lower_uvs_index(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
 }
 
 bool
-hk_lower_uvs_index(nir_shader *s, unsigned vs_uniform_base)
+hk_lower_uvs_index(nir_shader *s, unsigned nr_vbos)
 {
-   return nir_shader_intrinsics_pass(
-      s, lower_uvs_index, nir_metadata_control_flow, &vs_uniform_base);
+   return nir_shader_intrinsics_pass(s, lower_uvs_index,
+                                     nir_metadata_control_flow, &nr_vbos);
 }
 
 static bool
@@ -661,7 +654,7 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
          b, 1, 32, nir_src_as_deref(nir_src_for_ssa(texture)),
          plane_offset_B + offs, ctx);
 
-      nir_def *handle = image_heap_handle(b, offset);
+      nir_def *handle = nir_load_texture_handle_agx(b, offset);
       nir_tex_instr_add_src(tex, nir_tex_src_texture_handle, handle);
    }
 

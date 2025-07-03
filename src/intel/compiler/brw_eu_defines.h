@@ -686,6 +686,9 @@ enum memory_logical_srcs {
    /** Coordinate/address/offset for where to access memory */
    MEMORY_LOGICAL_ADDRESS,
 
+   /** Xe2+: offset for where to access memory (as UD immediate) */
+   MEMORY_LOGICAL_ADDRESS_OFFSET,
+
    /** Dimensionality of the "address" source (as UD immediate) */
    MEMORY_LOGICAL_COORD_COMPONENTS,
 
@@ -1134,6 +1137,7 @@ tgl_swsb_decode(const struct intel_device_info *devinfo,
                                             (x & 0x38) == 0x18 ? TGL_PIPE_INT :
                                             (x & 0x38) == 0x20 ? TGL_PIPE_LONG :
                                             (x & 0x38) == 0x28 ? TGL_PIPE_MATH :
+                                            (x & 0x38) == 0x30 ? TGL_PIPE_SCALAR :
                                             (x & 0x38) == 0x8 ? TGL_PIPE_ALL :
                                             TGL_PIPE_NONE) };
             return swsb;

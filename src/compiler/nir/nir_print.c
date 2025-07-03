@@ -714,6 +714,15 @@ print_constant(nir_constant *c, const struct glsl_type *type, print_state *state
       }
       break;
 
+   case GLSL_TYPE_COOPERATIVE_MATRIX:
+      // This occurs as the constant initializer for a cmat variable.
+      // In this case it's a scalar constant, and its word value is
+      // c->values[0], but we have to interpet it via the component type.
+      fprintf(fp, "%s(", glsl_get_type_name(type));
+      print_constant(c, glsl_get_cmat_element(type), state);
+      fprintf(fp, ")");
+      break;
+
    default:
       unreachable("not reached");
    }
@@ -2623,6 +2632,8 @@ print_shader_info(const struct shader_info *info, FILE *fp)
               info->workgroup_size_variable ? " (variable)" : "");
    }
 
+   if (info->prev_stage != MESA_SHADER_NONE)
+      fprintf(fp, "prev_stage: %s\n", gl_shader_stage_name(info->prev_stage));
    if (info->next_stage != MESA_SHADER_NONE)
       fprintf(fp, "next_stage: %s\n", gl_shader_stage_name(info->next_stage));
 

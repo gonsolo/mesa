@@ -68,9 +68,9 @@ add_ud_arg(struct radv_shader_args *args, unsigned size, enum ac_arg_type type, 
 }
 
 static void
-add_descriptor_set(struct radv_shader_args *args, enum ac_arg_type type, struct ac_arg *arg, uint32_t set)
+add_descriptor_set(struct radv_shader_args *args, uint32_t set)
 {
-   ac_add_arg(&args->ac, AC_ARG_SGPR, 1, type, arg);
+   ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_CONST_PTR, &args->descriptor_sets[set]);
 
    struct radv_userdata_info *ud_info = &args->user_sgprs_locs.descriptor_sets[set];
    ud_info->sgpr_idx = args->num_user_sgprs;
@@ -92,7 +92,7 @@ declare_global_input_sgprs(const enum amd_gfx_level gfx_level, const struct radv
          while (mask) {
             int i = u_bit_scan(&mask);
 
-            add_descriptor_set(args, AC_ARG_CONST_PTR, &args->descriptor_sets[i], i);
+            add_descriptor_set(args, i);
          }
       } else {
          add_ud_arg(args, 1, AC_ARG_CONST_PTR_PTR, &args->descriptor_sets[0], AC_UD_INDIRECT_DESCRIPTOR_SETS);
@@ -285,6 +285,8 @@ declare_ps_input_vgprs(const struct radv_shader_info *info, struct radv_shader_a
 static void
 declare_ngg_sgprs(const struct radv_shader_info *info, struct radv_shader_args *args, bool ngg_needs_state_sgpr)
 {
+   add_ud_arg(args, 1, AC_ARG_INT, &args->ngg_lds_layout, AC_UD_NGG_LDS_LAYOUT);
+
    if (ngg_needs_state_sgpr)
       add_ud_arg(args, 1, AC_ARG_INT, &args->ngg_state, AC_UD_NGG_STATE);
 
@@ -402,7 +404,7 @@ declare_unmerged_vs_tcs_args(const enum amd_gfx_level gfx_level, const struct ra
    declare_global_input_sgprs(gfx_level, info, user_sgpr_info, args);
 
    add_ud_arg(args, 1, AC_ARG_INT, &args->ac.view_index, AC_UD_VIEW_INDEX);
-   add_ud_arg(args, 1, AC_ARG_INT, &args->tcs_offchip_layout, AC_UD_TCS_OFFCHIP_LAYOUT);
+   add_ud_arg(args, 1, AC_ARG_INT, &args->ac.tcs_offchip_layout, AC_UD_TCS_OFFCHIP_LAYOUT);
    add_ud_arg(args, 1, AC_ARG_INT, &args->epilog_pc, AC_UD_EPILOG_PC);
    add_ud_arg(args, 1, AC_ARG_INT, &args->next_stage_pc, AC_UD_NEXT_STAGE_PC);
 
@@ -427,7 +429,7 @@ declare_unmerged_vs_tcs_args(const enum amd_gfx_level gfx_level, const struct ra
    ac_add_preserved(&args->ac, &args->descriptor_sets[0]);
    ac_add_preserved(&args->ac, &args->ac.push_constants);
    ac_add_preserved(&args->ac, &args->ac.view_index);
-   ac_add_preserved(&args->ac, &args->tcs_offchip_layout);
+   ac_add_preserved(&args->ac, &args->ac.tcs_offchip_layout);
    ac_add_preserved(&args->ac, &args->epilog_pc);
 
    /* Preserved VGPRs */
@@ -449,7 +451,7 @@ declare_unmerged_vs_tes_gs_args(const enum amd_gfx_level gfx_level, const struct
    declare_global_input_sgprs(gfx_level, info, user_sgpr_info, args);
 
    add_ud_arg(args, 1, AC_ARG_INT, &args->ac.view_index, AC_UD_VIEW_INDEX);
-   add_ud_arg(args, 1, AC_ARG_INT, &args->tcs_offchip_layout, AC_UD_TCS_OFFCHIP_LAYOUT);
+   add_ud_arg(args, 1, AC_ARG_INT, &args->ac.tcs_offchip_layout, AC_UD_TCS_OFFCHIP_LAYOUT);
 
    if (info->is_ngg) {
       add_ud_arg(args, 1, AC_ARG_INT, &args->ngg_state, AC_UD_NGG_STATE);
@@ -495,7 +497,7 @@ declare_unmerged_vs_tes_gs_args(const enum amd_gfx_level gfx_level, const struct
    if (gfx_level >= GFX12)
       ac_add_preserved(&args->ac, &args->streamout_state);
    ac_add_preserved(&args->ac, &args->ac.view_index);
-   ac_add_preserved(&args->ac, &args->tcs_offchip_layout);
+   ac_add_preserved(&args->ac, &args->ac.tcs_offchip_layout);
    if (info->is_ngg) {
       ac_add_preserved(&args->ac, &args->ngg_state);
       if (gfx_level >= GFX11)
@@ -620,7 +622,7 @@ declare_shader_args(const struct radv_device *device, const struct radv_graphics
          ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.scratch_offset);
       }
 
-      if (gfx_level >= GFX11) {
+      if (gfx_level >= GFX11 || (!pdev->info.has_graphics && pdev->info.family >= CHIP_MI200)) {
          ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.local_invocation_ids_packed);
       } else {
          ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.local_invocation_id_x);
@@ -686,7 +688,7 @@ declare_shader_args(const struct radv_device *device, const struct radv_graphics
             }
 
             if (radv_tcs_needs_state_sgpr(info, gfx_state)) {
-               add_ud_arg(args, 1, AC_ARG_INT, &args->tcs_offchip_layout, AC_UD_TCS_OFFCHIP_LAYOUT);
+               add_ud_arg(args, 1, AC_ARG_INT, &args->ac.tcs_offchip_layout, AC_UD_TCS_OFFCHIP_LAYOUT);
             }
 
             ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_INT, &args->ac.tcs_patch_id);
@@ -702,7 +704,7 @@ declare_shader_args(const struct radv_device *device, const struct radv_graphics
          }
 
          if (radv_tcs_needs_state_sgpr(info, gfx_state)) {
-            add_ud_arg(args, 1, AC_ARG_INT, &args->tcs_offchip_layout, AC_UD_TCS_OFFCHIP_LAYOUT);
+            add_ud_arg(args, 1, AC_ARG_INT, &args->ac.tcs_offchip_layout, AC_UD_TCS_OFFCHIP_LAYOUT);
          }
 
          ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.tess_offchip_offset);
@@ -724,7 +726,7 @@ declare_shader_args(const struct radv_device *device, const struct radv_graphics
          add_ud_arg(args, 1, AC_ARG_INT, &args->ac.view_index, AC_UD_VIEW_INDEX);
 
       if (radv_tes_needs_state_sgpr(info))
-         add_ud_arg(args, 1, AC_ARG_INT, &args->tcs_offchip_layout, AC_UD_TCS_OFFCHIP_LAYOUT);
+         add_ud_arg(args, 1, AC_ARG_INT, &args->ac.tcs_offchip_layout, AC_UD_TCS_OFFCHIP_LAYOUT);
 
       if (info->tes.as_es) {
          ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, &args->ac.tess_offchip_offset);
@@ -776,7 +778,7 @@ declare_shader_args(const struct radv_device *device, const struct radv_graphics
             }
 
             if (previous_stage == MESA_SHADER_TESS_EVAL && radv_tes_needs_state_sgpr(info))
-               add_ud_arg(args, 1, AC_ARG_INT, &args->tcs_offchip_layout, AC_UD_TCS_OFFCHIP_LAYOUT);
+               add_ud_arg(args, 1, AC_ARG_INT, &args->ac.tcs_offchip_layout, AC_UD_TCS_OFFCHIP_LAYOUT);
 
             /* Legacy GS force vrs is handled by GS copy shader. */
             if (info->force_vrs_per_vertex && info->is_ngg) {

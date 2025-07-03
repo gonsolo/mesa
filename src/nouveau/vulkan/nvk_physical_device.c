@@ -146,6 +146,8 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
                         wsi_common_vk_instance_supports_present_wait(&instance->vk),
       .KHR_present_wait = driQueryOptionb(&instance->dri_options, "vk_khr_present_wait") ||
                           wsi_common_vk_instance_supports_present_wait(&instance->vk),
+      .KHR_present_id2 = true,
+      .KHR_present_wait2 = true,
 #endif
       .KHR_push_descriptor = true,
       .KHR_relaxed_block_layout = true,
@@ -267,7 +269,8 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
       .EXT_ycbcr_image_arrays = true,
       .EXT_zero_initialize_device_memory = true,
 #if DETECT_OS_ANDROID
-      .ANDROID_native_buffer = vk_android_get_ugralloc() != NULL,
+      .ANDROID_native_buffer = vk_android_get_ugralloc() &&
+         u_gralloc_get_type(vk_android_get_ugralloc()) != U_GRALLOC_TYPE_FALLBACK,
 #endif
       .GOOGLE_decorate_string = true,
       .GOOGLE_hlsl_functionality1 = true,

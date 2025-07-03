@@ -33,6 +33,19 @@
 #include "anv_private.h"
 #include "vk_enum_to_str.h"
 
+#ifdef NO_REGEX
+typedef int regex_t;
+#define REG_EXTENDED 0
+#define REG_NOSUB 0
+#define REG_NOMATCH 1
+static inline int regcomp(regex_t *r, const char *s, int f) { return 0; }
+static inline int regexec(regex_t *r, const char *s, int n, void *p, int f) { return REG_NOMATCH; }
+static inline void regfree(regex_t* r) {}
+#else
+#include <regex.h>
+#endif
+#include "util/u_process.h"
+
 void
 __anv_perf_warn(struct anv_device *device,
                 const struct vk_object_base *object,
@@ -174,6 +187,10 @@ anv_gfx_state_bit_to_str(enum anv_gfx_state_bits state)
       NAME(PMA_FIX);
       NAME(WA_18019816803);
       NAME(TBIMR_TILE_PASS_INFO);
+      NAME(FS_MSAA_FLAGS);
+      NAME(TCS_INPUT_VERTICES);
+      NAME(COARSE_STATE);
+      NAME(MESH_PROVOKING_VERTEX);
    default: unreachable("invalid state");
    }
 }
@@ -287,5 +304,33 @@ void anv_dump_bvh_to_files(struct anv_device *device)
       anv_device_release_bo(device, bvh_dump->bo);
       list_del(&bvh_dump->link);
       free(bvh_dump);
+   }
+}
+
+DEBUG_GET_ONCE_OPTION(anv_debug_wait_for_attach, "ANV_DEBUG_WAIT_FOR_ATTACH", NULL);
+
+void anv_wait_for_attach() {
+   const char *attach_regex =
+      debug_get_option_anv_debug_wait_for_attach();
+   if (unlikely(attach_regex != NULL)) {
+      bool wait_for_attach = false;
+      const char *exec_name = util_get_process_name();
+      regex_t re;
+      int compile_res = regcomp(&re, attach_regex, REG_EXTENDED|REG_NOSUB);
+      if (compile_res != 0) {
+         char compile_err[256];
+         regerror(compile_res, &re, compile_err, 256);
+         fprintf(stderr, "ANV_DEBUG_WAIT_FOR_ATTACH regex compile fail: %s\n",
+                 compile_err);
+      } else {
+         wait_for_attach = (regexec(&re, exec_name, 0, NULL, 0) == 0);
+         regfree(&re);
+      }
+
+      if (wait_for_attach) {
+         fprintf(stderr, "Sleeping 30 seconds for debugger attach...\n");
+         fprintf(stderr, "PID for debugger: %d\n", getpid());
+         sleep(30);
+      }
    }
 }

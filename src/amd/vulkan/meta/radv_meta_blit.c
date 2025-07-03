@@ -6,8 +6,8 @@
 
 #include "nir/radv_meta_nir.h"
 #include "radv_meta.h"
+#include "radv_sampler.h"
 #include "vk_command_pool.h"
-#include "vk_common_entrypoints.h"
 
 static enum glsl_sampler_dim
 translate_sampler_dim(VkImageType type)
@@ -260,8 +260,16 @@ meta_emit_blit(struct radv_cmd_buffer *cmd_buffer, struct radv_image_view *src_i
       src_offset_1[1] / (float)src_height, src_offset_0[2] / (float)src_depth,
    };
 
-   vk_common_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 20,
-                              vertex_push_constants);
+   const VkPushConstantsInfoKHR pc_info = {
+      .sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO_KHR,
+      .layout = layout,
+      .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+      .offset = 0,
+      .size = sizeof(vertex_push_constants),
+      .pValues = vertex_push_constants,
+   };
+
+   radv_CmdPushConstants2(radv_cmd_buffer_to_handle(cmd_buffer), &pc_info);
 
    radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
@@ -359,7 +367,7 @@ blit_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_image, VkI
    const VkImageSubresourceLayers *src_res = &region->srcSubresource;
    const VkImageSubresourceLayers *dst_res = &region->dstSubresource;
    struct radv_meta_saved_state saved_state;
-   VkSampler sampler;
+   struct radv_sampler sampler;
 
    /* From the Vulkan 1.0 spec:
     *
@@ -369,16 +377,15 @@ blit_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_image, VkI
    assert(src_image->vk.samples == 1);
    assert(dst_image->vk.samples == 1);
 
-   radv_CreateSampler(radv_device_to_handle(device),
-                      &(VkSamplerCreateInfo){
-                         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-                         .magFilter = filter,
-                         .minFilter = filter,
-                         .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-                         .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-                         .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-                      },
-                      &cmd_buffer->vk.pool->alloc, &sampler);
+   radv_sampler_init(device, &sampler,
+                     &(VkSamplerCreateInfo){
+                        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+                        .magFilter = filter,
+                        .minFilter = filter,
+                        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                     });
 
    radv_meta_save(&saved_state, cmd_buffer,
                   RADV_META_SAVE_GRAPHICS_PIPELINE | RADV_META_SAVE_CONSTANTS | RADV_META_SAVE_DESCRIPTORS);
@@ -504,7 +511,7 @@ blit_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_image, VkI
                            },
                            NULL);
       meta_emit_blit(cmd_buffer, &src_iview, src_image_layout, src_offset_0, src_offset_1, &dst_iview, dst_image_layout,
-                     dst_box, sampler);
+                     dst_box, radv_sampler_to_handle(&sampler));
 
       radv_image_view_finish(&dst_iview);
       radv_image_view_finish(&src_iview);
@@ -512,7 +519,7 @@ blit_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_image, VkI
 
    radv_meta_restore(&saved_state, cmd_buffer);
 
-   radv_DestroySampler(radv_device_to_handle(device), sampler, &cmd_buffer->vk.pool->alloc);
+   radv_sampler_finish(device, &sampler);
 }
 
 VKAPI_ATTR void VKAPI_CALL

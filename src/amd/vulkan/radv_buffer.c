@@ -63,19 +63,28 @@ radv_create_buffer(struct radv_device *device, const VkBufferCreateInfo *pCreate
    buffer->bo = NULL;
    buffer->range = 0;
 
-   uint64_t replay_address = 0;
-   const VkBufferOpaqueCaptureAddressCreateInfo *replay_info =
-      vk_find_struct_const(pCreateInfo->pNext, BUFFER_OPAQUE_CAPTURE_ADDRESS_CREATE_INFO);
-   if (replay_info && replay_info->opaqueCaptureAddress)
-      replay_address = replay_info->opaqueCaptureAddress;
-
-   if (pCreateInfo->flags & VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT)
-      buffer->vk.device_address = replay_address;
-
    if (pCreateInfo->flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT) {
       enum radeon_bo_flag flags = RADEON_FLAG_VIRTUAL;
-      if (pCreateInfo->flags & VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT)
+      uint64_t replay_address = 0;
+
+      if (pCreateInfo->flags & VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT) {
          flags |= RADEON_FLAG_REPLAYABLE;
+
+         const VkBufferOpaqueCaptureAddressCreateInfo *opaque_addr_info =
+            vk_find_struct_const(pCreateInfo->pNext, BUFFER_OPAQUE_CAPTURE_ADDRESS_CREATE_INFO);
+         if (opaque_addr_info)
+            replay_address = opaque_addr_info->opaqueCaptureAddress;
+      }
+
+      if (buffer->vk.create_flags & VK_BUFFER_CREATE_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT) {
+         flags |= RADEON_FLAG_REPLAYABLE;
+
+         const VkOpaqueCaptureDescriptorDataCreateInfoEXT *opaque_info =
+            vk_find_struct_const(pCreateInfo->pNext, OPAQUE_CAPTURE_DESCRIPTOR_DATA_CREATE_INFO_EXT);
+         if (opaque_info)
+            replay_address = *((const uint64_t *)opaque_info->opaqueCaptureDescriptorData);
+      }
+
       if (buffer->vk.usage &
           (VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT | VK_BUFFER_USAGE_2_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT))
          flags |= RADEON_FLAG_32BIT;
@@ -167,7 +176,6 @@ radv_get_buffer_memory_requirements(struct radv_device *device, VkDeviceSize siz
                                     VkBufferUsageFlags2 usage, VkMemoryRequirements2 *pMemoryRequirements)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
    pMemoryRequirements->memoryRequirements.memoryTypeBits =
       ((1u << pdev->memory_properties.memoryTypeCount) - 1u) & ~pdev->memory_types_32bit;
@@ -180,10 +188,7 @@ radv_get_buffer_memory_requirements(struct radv_device *device, VkDeviceSize siz
       pMemoryRequirements->memoryRequirements.memoryTypeBits = pdev->memory_types_32bit;
 
    if (flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT) {
-      if (instance->drirc.force_64k_sparse_alignment)
-         pMemoryRequirements->memoryRequirements.alignment = 65536;
-      else
-         pMemoryRequirements->memoryRequirements.alignment = 4096;
+      pMemoryRequirements->memoryRequirements.alignment = 4096;
    } else {
       if (usage & VK_BUFFER_USAGE_2_PREPROCESS_BUFFER_BIT_EXT)
          pMemoryRequirements->memoryRequirements.alignment = radv_dgc_get_buffer_alignment(device);
@@ -238,6 +243,16 @@ radv_GetBufferOpaqueCaptureAddress(VkDevice device, const VkBufferDeviceAddressI
 {
    VK_FROM_HANDLE(radv_buffer, buffer, pInfo->buffer);
    return buffer->vk.device_address;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+radv_GetBufferOpaqueCaptureDescriptorDataEXT(VkDevice device, const VkBufferCaptureDescriptorDataInfoEXT *pInfo,
+                                             void *pData)
+{
+   VK_FROM_HANDLE(radv_buffer, buffer, pInfo->buffer);
+
+   *((uint64_t *)pData) = buffer->vk.device_address;
+   return VK_SUCCESS;
 }
 
 VkResult

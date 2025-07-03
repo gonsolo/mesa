@@ -3536,15 +3536,6 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
                                           nir_src_comp_as_uint(instr->src[0], 0)));
                 break;
 
-        case nir_intrinsic_load_user_clip_plane:
-                for (int i = 0; i < nir_intrinsic_dest_components(instr); i++) {
-                        ntq_store_def(c, &instr->def, i,
-                                      vir_uniform(c, QUNIFORM_USER_CLIP_PLANE,
-                                                  nir_intrinsic_ucp_id(instr) *
-                                                  4 + i));
-                }
-                break;
-
         case nir_intrinsic_load_viewport_x_scale:
                 ntq_store_def(c, &instr->def, 0,
                               vir_uniform(c, QUNIFORM_VIEWPORT_X_SCALE, 0));
@@ -5056,30 +5047,24 @@ v3d_nir_to_vir(struct v3d_compile *c)
                         break;
                 }
 
-                if (c->threads == min_threads &&
-                    V3D_DBG(RA)) {
-                        fprintf(stderr,
-                                "Failed to register allocate using %s\n",
-                                c->fallback_scheduler ? "the fallback scheduler:" :
-                                "the normal scheduler: \n");
-
-                        vir_dump(c);
-
-                        char *shaderdb;
-                        int ret = v3d_shaderdb_dump(c, &shaderdb);
-                        if (ret > 0) {
-                                fprintf(stderr, "%s\n", shaderdb);
-                                free(shaderdb);
-                        }
-                }
-
                 if (c->threads <= MAX2(c->min_threads_for_reg_alloc, min_threads)) {
-                        if (V3D_DBG(PERF)) {
+                        if (V3D_DBG(PERF) || V3D_DBG(RA)) {
                                 fprintf(stderr,
                                         "Failed to register allocate %s "
                                         "prog %d/%d at %d threads.\n",
                                         vir_get_stage_name(c),
                                         c->program_id, c->variant_id, c->threads);
+                        }
+                        if (V3D_DBG(RA)) {
+                                vir_dump(c);
+
+                                char *shaderdb;
+                                int ret = v3d_shaderdb_dump(c, &shaderdb);
+                                if (ret > 0) {
+                                        fprintf(stderr, "%s\n", shaderdb);
+                                        free(shaderdb);
+                                }
+
                         }
                         c->compilation_result =
                                 V3D_COMPILATION_FAILED_REGISTER_ALLOCATION;

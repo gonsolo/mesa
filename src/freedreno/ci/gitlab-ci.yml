@@ -227,15 +227,11 @@ a618-traces:
 a618-traces-performance:
   extends:
     - a618-traces
-    - .piglit-performance:arm64
     - .collabora-freedreno-rules-performance
   variables:
     # Always use the same device
     # a618 tag starts with cbg-1 (not cbg-0) for some reason
     LAVA_TAGS: "cbg-1"
-  needs:
-    - !reference [a618-traces, needs]
-    - !reference [.piglit-performance:arm64, needs]
 
 a660-angle:
   extends:
@@ -285,6 +281,7 @@ a660-vk:
   parallel: 5
   variables:
     DEQP_SUITE: freedreno-a660-vk
+    FLAKES_CHANNEL: "#freedreno-ci"
     DEQP_FRACTION: 6
 
 a660-vk-full:
@@ -510,9 +507,9 @@ a750-vkd3d:
     - .ci-tron-arm64-test-vk
     - .a750-mupuf
     - .valve-turnip-manual-rules
+    - .test-vkd3d-proton
   timeout: 15m  # base runtime 3min
   variables:
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 12
-    HWCI_TEST_SCRIPT: install/vkd3d-runner.sh
     GPU_VERSION: freedreno-a750
     FDO_CI_CONCURRENT: 1

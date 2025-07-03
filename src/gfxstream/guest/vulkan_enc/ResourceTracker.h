@@ -24,6 +24,7 @@
 #include "goldfish_vk_transform_guest.h"
 #include "util/perf/cpu_trace.h"
 #include "util/detect_os.h"
+#include "vulkan/vulkan_core.h"
 
 /// Use installed headers or locally defined Fuchsia-specific bits
 #ifdef VK_USE_PLATFORM_FUCHSIA
@@ -395,6 +396,35 @@ class ResourceTracker {
                                 uint32_t fenceCount, const VkFence* pFences, VkBool32 waitAll,
                                 uint64_t timeout);
 
+    VkResult on_vkSetPrivateData(void* context, VkResult input_result, VkDevice device,
+                                 VkObjectType objectType, uint64_t objectHandle,
+                                 VkPrivateDataSlot privateDataSlot, uint64_t data);
+    VkResult on_vkSetPrivateDataEXT(void* context, VkResult input_result, VkDevice device,
+                                    VkObjectType objectType, uint64_t objectHandle,
+                                    VkPrivateDataSlot privateDataSlot, uint64_t data);
+
+    void on_vkGetPrivateData(void* context, VkDevice device, VkObjectType objectType,
+                             uint64_t objectHandle, VkPrivateDataSlot privateDataSlot,
+                             uint64_t* pData);
+    void on_vkGetPrivateDataEXT(void* context, VkDevice device, VkObjectType objectType,
+                                uint64_t objectHandle, VkPrivateDataSlot privateDataSlot,
+                                uint64_t* pData);
+
+    VkResult on_vkCreatePrivateDataSlot(void* context, VkResult input_result, VkDevice device,
+                                        const VkPrivateDataSlotCreateInfo* pCreateInfo,
+                                        const VkAllocationCallbacks* pAllocator,
+                                        VkPrivateDataSlot* pPrivateDataSlot);
+    VkResult on_vkCreatePrivateDataSlotEXT(void* context, VkResult input_result, VkDevice device,
+                                           const VkPrivateDataSlotCreateInfo* pCreateInfo,
+                                           const VkAllocationCallbacks* pAllocator,
+                                           VkPrivateDataSlot* pPrivateDataSlot);
+    void on_vkDestroyPrivateDataSlot(void* context, VkDevice device,
+                                     VkPrivateDataSlot privateDataSlot,
+                                     const VkAllocationCallbacks* pAllocator);
+    void on_vkDestroyPrivateDataSlotEXT(void* context, VkDevice device,
+                                        VkPrivateDataSlot privateDataSlot,
+                                        const VkAllocationCallbacks* pAllocator);
+
     VkResult on_vkCreateDescriptorPool(void* context, VkResult input_result, VkDevice device,
                                        const VkDescriptorPoolCreateInfo* pCreateInfo,
                                        const VkAllocationCallbacks* pAllocator,
@@ -533,6 +563,10 @@ class ResourceTracker {
         uint32_t bufferMemoryBarrierCount, const VkBufferMemoryBarrier* pBufferMemoryBarriers,
         uint32_t imageMemoryBarrierCount, const VkImageMemoryBarrier* pImageMemoryBarriers);
 
+    void on_vkCmdClearColorImage(void* context, VkCommandBuffer commandBuffer, VkImage image,
+                                 VkImageLayout imageLayout, const VkClearColorValue* pColor,
+                                 uint32_t rangeCount, const VkImageSubresourceRange* pRanges);
+
     void on_vkDestroyDescriptorSetLayout(void* context, VkDevice device,
                                          VkDescriptorSetLayout descriptorSetLayout,
                                          const VkAllocationCallbacks* pAllocator);
@@ -636,7 +670,7 @@ class ResourceTracker {
         const VkPhysicalDeviceExternalBufferInfo* pExternalBufferInfo,
         VkExternalBufferProperties* pExternalBufferProperties);
 
-    template <typename VkSubmitInfoType>
+    template <typename VkSubmitInfoType, typename VkSemaphoreInfoType>
     VkResult on_vkQueueSubmitTemplate(void* context, VkResult input_result, VkQueue queue,
                                       uint32_t submitCount, const VkSubmitInfoType* pSubmits,
                                       VkFence fence);
@@ -811,6 +845,7 @@ class ResourceTracker {
         bool hasExternalFormat = false;
         unsigned externalFourccFormat = 0;
         std::vector<int> pendingQsriSyncFds;
+        bool hasAnb = false;
 #endif
 #ifdef VK_USE_PLATFORM_FUCHSIA
         bool isSysmemBackedMemory = false;
@@ -887,6 +922,28 @@ class ResourceTracker {
         uint32_t unused;
     };
 
+    struct VkPrivateDataSlot_Info {
+        // We need special handling for device memory and swapchain object types for private data
+        // management. For memory, we can use a single handle on the host side, so setting a
+        // private data slot for guest handle can also set any other data set previously.
+        // For swapchains, we don't actually get create/destroy calls to keep track of object
+        // handles to be able to pass the call to the underlying host driver. Rather than handling
+        // the 2 cases separately, we handle all the private data management directly here with a
+        // single table, so vkSetPrivateData and vkGetPrivateData calls don't need to be encoded for
+        // the host.
+        typedef std::pair<uint64_t, VkObjectType> PrivateDataKey;
+        struct PrivateDataKeyHash {
+            template <class T1, class T2>
+            std::size_t operator()(const std::pair<T1, T2>& p) const {
+                std::size_t h1 = std::hash<T1>{}(p.first);
+                std::size_t h2 = std::hash<T2>{}(p.second);
+                return h1 ^ h2;
+            }
+        };
+
+        std::unordered_map<PrivateDataKey, uint64_t, PrivateDataKeyHash> privateDataTable;
+    };
+
     struct VkBufferCollectionFUCHSIA_Info {
 #ifdef VK_USE_PLATFORM_FUCHSIA
         std::optional<fuchsia_sysmem::wire::BufferCollectionConstraints> constraints;
@@ -923,7 +980,7 @@ class ResourceTracker {
 
     std::unique_ptr<gfxstream::SyncHelper> mSyncHelper = nullptr;
 
-    struct VirtGpuCaps mCaps;
+    struct VirtGpuCaps mCaps = {};
     std::vector<VkExtensionProperties> mHostInstanceExtensions;
     std::vector<VkExtensionProperties> mHostDeviceExtensions;
 

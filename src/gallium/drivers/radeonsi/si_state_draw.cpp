@@ -542,6 +542,7 @@ static void si_cp_dma_prefetch_inline(struct si_context *sctx, uint64_t address,
    assert(size % SI_CPDMA_ALIGNMENT == 0);
    assert(address % SI_CPDMA_ALIGNMENT == 0);
    assert(size < S_415_BYTE_COUNT_GFX6(~0u));
+   assert(address || size == 0);
 
    uint32_t header = S_411_SRC_SEL(V_411_SRC_ADDR_TC_L2);
    uint32_t command = S_415_BYTE_COUNT_GFX6(size);
@@ -1677,7 +1678,7 @@ static void si_emit_draw_packets(struct si_context *sctx, const struct pipe_draw
             }
          }
       } else {
-         if (GFX_VERSION == GFX12 && !IS_DRAW_VERTEX_STATE &&
+         if ((GFX_VERSION == GFX11_5 || GFX_VERSION == GFX12) && !IS_DRAW_VERTEX_STATE &&
              indirect && indirect->count_from_stream_output) {
             /* DrawTransformFeedback requires 3 SQ_NON_EVENTs after the packet. */
             assert(num_draws == 1);
@@ -2097,9 +2098,9 @@ static void si_draw(struct pipe_context *ctx,
    si_check_dirty_buffers_textures(sctx);
 
    if (GFX_VERSION < GFX11)
-      gfx6_decompress_textures(sctx, u_bit_consecutive(0, SI_NUM_GRAPHICS_SHADERS));
+      gfx6_decompress_textures(sctx, BITFIELD_MASK(SI_NUM_GRAPHICS_SHADERS));
    else if (GFX_VERSION < GFX12)
-      gfx11_decompress_textures(sctx, u_bit_consecutive(0, SI_NUM_GRAPHICS_SHADERS));
+      gfx11_decompress_textures(sctx, BITFIELD_MASK(SI_NUM_GRAPHICS_SHADERS));
 
    si_need_gfx_cs_space(sctx, num_draws, ALT_HIZ_LOGIC ? 8 : 0);
 

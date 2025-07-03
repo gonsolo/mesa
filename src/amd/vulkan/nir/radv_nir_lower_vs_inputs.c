@@ -196,6 +196,11 @@ lower_load_vs_input(nir_builder *b, nir_intrinsic_instr *intrin, lower_vs_inputs
    const unsigned bit_size = intrin->def.bit_size;
    const unsigned dest_num_components = intrin->def.num_components;
 
+   if (!(s->gfx_state->vi.attributes_valid & (1 << location))) {
+      /* Return early for unassigned attribute reads. */
+      return nir_imm_zero(b, intrin->def.num_components, intrin->def.bit_size);
+   }
+
    /* Convert the component offset to bit_size units.
     * (Intrinsic component offset is in 32-bit units.)
     *
@@ -225,7 +230,7 @@ lower_load_vs_input(nir_builder *b, nir_intrinsic_instr *intrin, lower_vs_inputs
    const struct ac_vtx_format_info *vtx_info =
       ac_get_vtx_format_info(s->gpu_info->gfx_level, s->gpu_info->family, attrib_format);
    const unsigned binding_index = s->info->vs.use_per_attribute_vb_descs ? location : attrib_binding;
-   const unsigned desc_index = util_bitcount(s->info->vs.vb_desc_usage_mask & u_bit_consecutive(0, binding_index));
+   const unsigned desc_index = util_bitcount(s->info->vs.vb_desc_usage_mask & BITFIELD_MASK(binding_index));
 
    nir_def *vertex_buffers_arg = ac_nir_load_arg(b, &s->args->ac, s->args->ac.vertex_buffers);
    nir_def *vertex_buffers = nir_pack_64_2x32_split(b, vertex_buffers_arg, nir_imm_int(b, s->gpu_info->address32_hi));
@@ -442,19 +447,25 @@ opt_vs_input_to_const(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
    const unsigned bit_size = intrin->def.bit_size;
    const unsigned component = var->data.location_frac >> (bit_size == 64 ? 1 : 0);
 
-   const enum pipe_format attrib_format = gfx_state->vi.vertex_attribute_formats[location];
-   const struct util_format_description *f = util_format_description(attrib_format);
-
    b->cursor = nir_after_instr(&intrin->instr);
 
    nir_def *res = &intrin->def;
-   for (unsigned i = 0; i < intrin->def.num_components; i++) {
-      const unsigned c = i + component;
-      if (f->swizzle[c] >= f->nr_channels) {
-         /* Handle input loads that are larger than their format. */
-         nir_def *channel = oob_input_load_value(b, c, bit_size, !is_integer);
-         res = nir_vector_insert_imm(b, res, channel, i);
+
+   if (gfx_state->vi.attributes_valid & (1 << location)) {
+      const enum pipe_format attrib_format = gfx_state->vi.vertex_attribute_formats[location];
+      const struct util_format_description *f = util_format_description(attrib_format);
+
+      for (unsigned i = 0; i < intrin->def.num_components; i++) {
+         const unsigned c = i + component;
+         if (f->swizzle[c] >= f->nr_channels) {
+            /* Handle input loads that are larger than their format. */
+            nir_def *channel = oob_input_load_value(b, c, bit_size, !is_integer);
+            res = nir_vector_insert_imm(b, res, channel, i);
+         }
       }
+   } else {
+      /* Use (0,0,0,0) for unassigned attribute reads. */
+      res = nir_imm_zero(b, intrin->def.num_components, intrin->def.bit_size);
    }
 
    if (res != &intrin->def) {

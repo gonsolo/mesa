@@ -701,7 +701,7 @@ radv_emit_ge_rings(struct radv_device *device, struct radeon_cmdbuf *cs, struct 
                   S_0309AC_PAB_TEMPORAL(gfx12_load_last_use_discard) | S_0309AC_SPEC_DATA_READ(gfx12_spec_read_auto) |
                   S_0309AC_FORCE_SE_SCOPE(1) | S_0309AC_PAB_NOFILL(1)); /* R_0309AC_GE_PRIM_RING_SIZE */
 
-      if (pdev->info.gfx_level == GFX12) {
+      if (pdev->info.gfx_level == GFX12 && pdev->info.pfp_fw_version >= 2680) {
          /* Mitigate the HiZ GPU hang by increasing a timeout when BOTTOM_OF_PIPE_TS is used as the
           * workaround. This must be emitted when the gfx queue is idle.
           */
@@ -862,7 +862,8 @@ radv_emit_graphics(struct radv_device *device, struct radeon_cmdbuf *cs)
    if (pdev->info.family >= CHIP_POLARIS10) {
       unsigned small_prim_filter_cntl = S_028830_SMALL_PRIM_FILTER_ENABLE(1) |
                                         /* Workaround for a hw line bug. */
-                                        S_028830_LINE_FILTER_DISABLE(pdev->info.family <= CHIP_POLARIS12);
+                                        S_028830_LINE_FILTER_DISABLE(pdev->info.family <= CHIP_POLARIS12) |
+                                        S_028830_SC_1XMSAA_COMPATIBLE_DISABLE(pdev->info.gfx_level >= GFX10);
 
       ac_pm4_set_reg(pm4, R_028830_PA_SU_SMALL_PRIM_FILTER_CNTL, small_prim_filter_cntl);
    }

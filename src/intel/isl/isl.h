@@ -1558,8 +1558,16 @@ struct isl_drm_modifier_info {
    /** ISL tiling implied by this modifier */
    enum isl_tiling tiling;
 
-   /** Compression types supported by this modifier */
+   /**
+    * Whether or not this modifier supports one of the following isl_aux_usage
+    * values, depending on the hardware configuration:
+    *
+    * - ISL_AUX_USAGE_CCS_E
+    * - ISL_AUX_USAGE_FCV_CCS_E
+    */
    bool supports_render_compression;
+
+   /** Whether or not this modifier supports ISL_AUX_USAGE_MC. */
    bool supports_media_compression;
 
    /** Whether or not this modifier supports clear color */
@@ -1990,6 +1998,7 @@ enum isl_surf_param {
    ISL_SURF_PARAM_TILE_MODE,
    ISL_SURF_PARAM_PITCH,
    ISL_SURF_PARAM_QPITCH,
+   ISL_SURF_PARAM_FORMAT,
 };
 
 /*
@@ -2054,7 +2063,7 @@ isl_device_get_sample_counts(const struct isl_device *dev);
  */
 uint64_t
 isl_get_sampler_clear_field_offset(const struct intel_device_info *devinfo,
-                                   enum isl_format format);
+                                   enum isl_format format, bool is_depth);
 
 /**
  * :returns: The isl_format_layout for the given isl_format

@@ -107,7 +107,7 @@ _legal_parameters(struct gl_context *ctx, GLenum target, GLenum internalformat,
        * ARB_internalformat_query implementation like an error.
        */
       if (!query2 &&
-          !(_mesa_has_ARB_texture_multisample(ctx) || _mesa_is_gles31(ctx))) {
+          !_mesa_has_texture_multisample(ctx)) {
          _mesa_error(ctx, GL_INVALID_ENUM,
                      "glGetInternalformativ(target=%s)",
                      _mesa_enum_to_string(target));
@@ -484,9 +484,12 @@ _is_target_supported(struct gl_context *ctx, GLenum target)
       break;
 
    case GL_TEXTURE_2D_MULTISAMPLE:
+      if (!_mesa_has_texture_multisample(ctx))
+         return false;
+      break;
+
    case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
-      if (!_mesa_has_ARB_texture_multisample(ctx) &&
-          !_mesa_is_gles31(ctx))
+      if (!_mesa_has_texture_multisample_array(ctx))
          return false;
       break;
 
@@ -906,7 +909,7 @@ void GLAPIENTRY
 _mesa_GetInternalformativ(GLenum target, GLenum internalformat, GLenum pname,
                           GLsizei bufSize, GLint *params)
 {
-   GLint buffer[16];
+   GLint buffer[MAX_SAMPLES];
    GET_CURRENT_CONTEXT(ctx);
 
    ASSERT_OUTSIDE_BEGIN_END(ctx);
@@ -922,7 +925,7 @@ _mesa_GetInternalformativ(GLenum target, GLenum internalformat, GLenum pname,
       return;
 
    /* initialize the contents of the temporary buffer */
-   memcpy(buffer, params, MIN2(bufSize, 16) * sizeof(GLint));
+   memcpy(buffer, params, MIN2(bufSize, MAX_SAMPLES) * sizeof(GLint));
 
    /* Use the 'unsupported' response defined by the spec for every pname
     * as the default answer.

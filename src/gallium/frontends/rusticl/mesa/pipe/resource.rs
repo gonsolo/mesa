@@ -84,6 +84,19 @@ impl PipeResource {
         Some(Self { pipe: res })
     }
 
+    /// Creates a new reference to the underlying GPU resource
+    pub fn new_ref(&self) -> Self {
+        let mut ptr = ptr::null_mut();
+        // SAFETY: pipe_resource_reference will copy the ptr from src to dest, therefore ptr can't
+        //         be NULL.
+        unsafe {
+            pipe_resource_reference(&mut ptr, self.pipe.as_ptr());
+            Self {
+                pipe: NonNull::new_unchecked(ptr),
+            }
+        }
+    }
+
     pub(super) fn pipe(&self) -> *mut pipe_resource {
         self.pipe.as_ptr()
     }
@@ -166,6 +179,7 @@ impl PipeResource {
         format: pipe_format,
         read_write: bool,
         size: u32,
+        offset_bytes: u32,
     ) -> PipeImageView {
         debug_assert!(self.is_buffer());
 
@@ -182,7 +196,7 @@ impl PipeResource {
             shader_access: shader_access,
             u: pipe_image_view__bindgen_ty_1 {
                 buf: pipe_image_view__bindgen_ty_1__bindgen_ty_2 {
-                    offset: 0,
+                    offset: offset_bytes,
                     size: size,
                 },
             },
@@ -194,6 +208,7 @@ impl PipeResource {
         format: pipe_format,
         read_write: bool,
         app_img_info: &AppImgInfo,
+        offset_pixels: u32,
     ) -> PipeImageView {
         debug_assert!(self.is_buffer());
 
@@ -210,7 +225,7 @@ impl PipeResource {
             shader_access: shader_access,
             u: pipe_image_view__bindgen_ty_1 {
                 tex2d_from_buf: pipe_tex2d_from_buf {
-                    offset: 0,
+                    offset: offset_pixels,
                     row_stride: app_img_info.row_stride as u16,
                     width: app_img_info.width as u16,
                     height: app_img_info.height as u16,
@@ -234,6 +249,7 @@ impl PipeResource {
         &self,
         format: pipe_format,
         size: u32,
+        offset_bytes: u32,
     ) -> pipe_sampler_view {
         debug_assert!(self.is_buffer());
 
@@ -245,7 +261,7 @@ impl PipeResource {
         // write the entire union field because u_sampler_view_default_template might have left it
         // in an undefined state.
         res.u.buf = pipe_sampler_view__bindgen_ty_1__bindgen_ty_2 {
-            offset: 0,
+            offset: offset_bytes,
             size: size,
         };
 
@@ -256,6 +272,7 @@ impl PipeResource {
         &self,
         format: pipe_format,
         app_img_info: &AppImgInfo,
+        offset_pixels: u32,
     ) -> pipe_sampler_view {
         debug_assert!(self.is_buffer());
 
@@ -267,7 +284,7 @@ impl PipeResource {
         // write the entire union field because u_sampler_view_default_template might have left it
         // in an undefined state.
         res.u.tex2d_from_buf = pipe_tex2d_from_buf {
-            offset: 0,
+            offset: offset_pixels,
             row_stride: app_img_info.row_stride as u16,
             width: app_img_info.width as u16,
             height: app_img_info.height as u16,
@@ -281,15 +298,6 @@ impl PipeResource {
 impl Drop for PipeResource {
     fn drop(&mut self) {
         unsafe {
-            let pipe = self.pipe.as_ref();
-            let screen = pipe.screen.as_ref().unwrap();
-
-            if pipe.flags & PIPE_RESOURCE_FLAG_FRONTEND_VM != 0 {
-                if let Some(resource_assign_vma) = screen.resource_assign_vma {
-                    resource_assign_vma(pipe.screen, self.pipe(), 0);
-                }
-            }
-
             pipe_resource_reference(&mut self.pipe.as_ptr(), ptr::null_mut());
         }
     }

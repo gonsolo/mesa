@@ -682,34 +682,34 @@ static struct {
       REG(CP_SCRATCH[0x6].REG, reg_dump_scratch),
       REG(CP_SCRATCH[0x7].REG, reg_dump_scratch),
 
-      REG64(SP_VS_OBJ_START, reg_disasm_gpuaddr64),
-      REG64(SP_HS_OBJ_START, reg_disasm_gpuaddr64),
-      REG64(SP_DS_OBJ_START, reg_disasm_gpuaddr64),
-      REG64(SP_GS_OBJ_START, reg_disasm_gpuaddr64),
-      REG64(SP_FS_OBJ_START, reg_disasm_gpuaddr64),
-      REG64(SP_CS_OBJ_START, reg_disasm_gpuaddr64),
+      REG64(SP_VS_BASE, reg_disasm_gpuaddr64),
+      REG64(SP_HS_BASE, reg_disasm_gpuaddr64),
+      REG64(SP_DS_BASE, reg_disasm_gpuaddr64),
+      REG64(SP_GS_BASE, reg_disasm_gpuaddr64),
+      REG64(SP_PS_BASE, reg_disasm_gpuaddr64),
+      REG64(SP_CS_BASE, reg_disasm_gpuaddr64),
 
-      REG64(SP_VS_TEX_CONST, reg_dump_gpuaddr64),
-      REG64(SP_VS_TEX_SAMP, reg_dump_gpuaddr64),
-      REG64(SP_HS_TEX_CONST, reg_dump_gpuaddr64),
-      REG64(SP_HS_TEX_SAMP, reg_dump_gpuaddr64),
-      REG64(SP_DS_TEX_CONST, reg_dump_gpuaddr64),
-      REG64(SP_DS_TEX_SAMP, reg_dump_gpuaddr64),
-      REG64(SP_GS_TEX_CONST, reg_dump_gpuaddr64),
-      REG64(SP_GS_TEX_SAMP, reg_dump_gpuaddr64),
-      REG64(SP_FS_TEX_CONST, reg_dump_gpuaddr64),
-      REG64(SP_FS_TEX_SAMP, reg_dump_gpuaddr64),
-      REG64(SP_CS_TEX_CONST, reg_dump_gpuaddr64),
-      REG64(SP_CS_TEX_SAMP, reg_dump_gpuaddr64),
+      REG64(SP_VS_TEXMEMOBJ_BASE, reg_dump_gpuaddr64),
+      REG64(SP_VS_SAMPLER_BASE, reg_dump_gpuaddr64),
+      REG64(SP_HS_TEXMEMOBJ_BASE, reg_dump_gpuaddr64),
+      REG64(SP_HS_SAMPLER_BASE, reg_dump_gpuaddr64),
+      REG64(SP_DS_TEXMEMOBJ_BASE, reg_dump_gpuaddr64),
+      REG64(SP_DS_SAMPLER_BASE, reg_dump_gpuaddr64),
+      REG64(SP_GS_TEXMEMOBJ_BASE, reg_dump_gpuaddr64),
+      REG64(SP_GS_SAMPLER_BASE, reg_dump_gpuaddr64),
+      REG64(SP_PS_TEXMEMOBJ_BASE, reg_dump_gpuaddr64),
+      REG64(SP_PS_SAMPLER_BASE, reg_dump_gpuaddr64),
+      REG64(SP_CS_TEXMEMOBJ_BASE, reg_dump_gpuaddr64),
+      REG64(SP_CS_SAMPLER_BASE, reg_dump_gpuaddr64),
 
       {NULL},
 }, reg_a7xx[] = {
-      REG64(SP_VS_OBJ_START, reg_disasm_gpuaddr64),
-      REG64(SP_HS_OBJ_START, reg_disasm_gpuaddr64),
-      REG64(SP_DS_OBJ_START, reg_disasm_gpuaddr64),
-      REG64(SP_GS_OBJ_START, reg_disasm_gpuaddr64),
-      REG64(SP_FS_OBJ_START, reg_disasm_gpuaddr64),
-      REG64(SP_CS_OBJ_START, reg_disasm_gpuaddr64),
+      REG64(SP_VS_BASE, reg_disasm_gpuaddr64),
+      REG64(SP_HS_BASE, reg_disasm_gpuaddr64),
+      REG64(SP_DS_BASE, reg_disasm_gpuaddr64),
+      REG64(SP_GS_BASE, reg_disasm_gpuaddr64),
+      REG64(SP_PS_BASE, reg_disasm_gpuaddr64),
+      REG64(SP_CS_BASE, reg_disasm_gpuaddr64),
 
       {NULL},
 }, *type0_reg;
@@ -1508,7 +1508,7 @@ dump_bindless_descriptors(bool is_compute, int level)
       if (is_compute) {
          sprintf(reg_name, "SP_CS_BINDLESS_BASE[%u].DESCRIPTOR", i);
       } else {
-         sprintf(reg_name, "SP_BINDLESS_BASE[%u].DESCRIPTOR", i);
+         sprintf(reg_name, "SP_GFX_BINDLESS_BASE[%u].DESCRIPTOR", i);
       }
       const unsigned base_reg = regbase(reg_name);
       if (!base_reg)
@@ -1539,18 +1539,21 @@ dump_bindless_descriptors(bool is_compute, int level)
       if (!contents)
          continue;
 
+      uint32_t empty_contents[16] = {};
+
       unsigned length = hostlen(ext_src_addr);
       unsigned desc_count = length / (16 * sizeof(uint32_t));
       for (unsigned desc_idx = 0; desc_idx < desc_count; desc_idx++) {
-         printl(2, "%sUBO[%u]:\n", levels[level + 1], desc_idx);
-         dump_domain(contents, 2, level + 2, "A6XX_UBO");
+         if (memcmp(contents, empty_contents, sizeof(empty_contents))) {
+            printl(2, "%sUBO[%u]:\n", levels[level + 1], desc_idx);
+            dump_domain(contents, 2, level + 2, "A6XX_UBO");
 
-         printl(2, "%sSTORAGE/TEXEL/IMAGE[%u]:\n", levels[level + 1], desc_idx);
-         dump_tex_const(contents, 1, level);
+            printl(2, "%sSTORAGE/TEXEL/IMAGE[%u]:\n", levels[level + 1], desc_idx);
+            dump_tex_const(contents, 1, level);
 
-         printl(2, "%sSAMPLER[%u]:\n", levels[level + 1], desc_idx);
-         dump_tex_samp(contents, STATE_SRC_BINDLESS, 1, level);
-
+            printl(2, "%sSAMPLER[%u]:\n", levels[level + 1], desc_idx);
+            dump_tex_samp(contents, STATE_SRC_BINDLESS, 1, level);
+         }
          contents += 16;
       }
    }

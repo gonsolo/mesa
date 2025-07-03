@@ -60,6 +60,10 @@
 #include <spirv-tools/linker.hpp>
 #include <spirv-tools/optimizer.hpp>
 
+#if LLVM_VERSION_MAJOR >= 16
+#include <llvm/TargetParser/Triple.h>
+#endif
+
 #if LLVM_VERSION_MAJOR >= 20
 #include <llvm/Support/VirtualFileSystem.h>
 #endif
@@ -527,7 +531,7 @@ public:
             literalType = CLC_SPEC_CONSTANT_DOUBLE;
             break;
          case 16:
-            /* Can't be used for a spec constant */
+            literalType = CLC_SPEC_CONSTANT_HALF;
             break;
          default:
             unreachable("Unexpected float bit size");
@@ -800,11 +804,17 @@ clc_compile_to_llvm_module(LLVMContext &llvm_ctx,
       c->addDependencyCollector(dep);
    }
 
+#if LLVM_VERSION_MAJOR >= 21
+   auto diag_opts = c->getDiagnosticOpts();
+#else
+   auto diag_opts = &c->getDiagnosticOpts();
+#endif
+
    clang::DiagnosticsEngine diag {
       new clang::DiagnosticIDs,
-      new clang::DiagnosticOptions,
+      diag_opts,
       new clang::TextDiagnosticPrinter(diag_log_stream,
-                                       &c->getDiagnosticOpts())
+                                       diag_opts)
    };
 
 #if LLVM_VERSION_MAJOR >= 17
@@ -861,7 +871,7 @@ clc_compile_to_llvm_module(LLVMContext &llvm_ctx,
 #endif
                    new clang::TextDiagnosticPrinter(
                            diag_log_stream,
-                           &c->getDiagnosticOpts()));
+                           diag_opts));
 
    c->setTarget(clang::TargetInfo::CreateTargetInfo(
 #if LLVM_VERSION_MAJOR >= 21
@@ -955,6 +965,9 @@ clc_compile_to_llvm_module(LLVMContext &llvm_ctx,
    c->getPreprocessorOpts().addMacroDef("cl_khr_expect_assume=1");
 
    bool needs_opencl_c_h = false;
+   if (args->features.extended_bit_ops) {
+      c->getPreprocessorOpts().addMacroDef("cl_khr_extended_bit_ops=1");
+   }
    if (args->features.fp16) {
       c->getTargetOpts().OpenCLExtensionsAsWritten.push_back("+cl_khr_fp16");
    }
@@ -996,6 +1009,15 @@ clc_compile_to_llvm_module(LLVMContext &llvm_ctx,
    }
    if (args->features.images_gl_msaa) {
       c->getTargetOpts().OpenCLExtensionsAsWritten.push_back("+cl_khr_gl_msaa_sharing");
+   }
+   if (args->features.images_unorm_int_2_101010) {
+      c->getPreprocessorOpts().addMacroDef("__opencl_c_ext_image_unorm_int_2_101010=1");
+      if (LLVM_VERSION_MAJOR < 20 || (LLVM_VERSION_MAJOR == 20 && LLVM_VERSION_MINOR < 1)) {
+         /* This feature doesn't really need any compiler support, but it does define a CLK_
+          * macro for the type, which is only available with llvm-20.1 or newer.
+          */
+         c->getPreprocessorOpts().addMacroDef("CLK_UNORM_INT_2_101010_EXT=0x10E5");
+      }
    }
    if (args->features.intel_subgroups) {
       c->getTargetOpts().OpenCLExtensionsAsWritten.push_back("+cl_intel_subgroups");
@@ -1139,7 +1161,12 @@ llvm_mod_to_spirv(std::unique_ptr<::llvm::Module> mod,
       auto target = TargetRegistry::lookupTarget(triple, error_msg);
       if (target) {
          auto TM = target->createTargetMachine(
-            triple, "", "", {}, std::nullopt, std::nullopt,
+#if LLVM_VERSION_MAJOR >= 21
+            llvm::Triple(triple),
+#else
+            triple,
+#endif
+            "", "", {}, std::nullopt, std::nullopt,
 #if LLVM_VERSION_MAJOR >= 18
             ::llvm::CodeGenOptLevel::None
 #else
@@ -1373,6 +1400,7 @@ clc_spirv_specialize(const struct clc_binary *in_spirv,
       case CLC_SPEC_CONSTANT_INT8:
          words.push_back((uint32_t)(int32_t)consts->specializations[i].value.i8);
          break;
+      case CLC_SPEC_CONSTANT_HALF:
       case CLC_SPEC_CONSTANT_UINT16:
          words.push_back((uint32_t)consts->specializations[i].value.u16);
          break;

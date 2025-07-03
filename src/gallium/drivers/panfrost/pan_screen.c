@@ -70,8 +70,8 @@ static const struct debug_named_value panfrost_debug_options[] = {
    {"gl3",        PAN_DBG_GL3,        "Enable experimental GL 3.x implementation, up to 3.3"},
    {"noafbc",     PAN_DBG_NO_AFBC,    "Disable AFBC support"},
    {"nocrc",      PAN_DBG_NO_CRC,     "Disable transaction elimination"},
-   {"msaa16",     PAN_DBG_MSAA16,     "Enable MSAA 8x and 16x support"},
    {"linear",     PAN_DBG_LINEAR,     "Force linear textures"},
+   {"strict_import", PAN_DBG_STRICT_IMPORT, "Use the explicit WSI stride and fail if it's not properly aligned"},
    {"nocache",    PAN_DBG_NO_CACHE,   "Disable BO cache"},
    {"dump",       PAN_DBG_DUMP,       "Dump all graphics memory"},
 #ifdef PAN_DBG_OVERFLOW
@@ -151,8 +151,15 @@ get_max_msaa(struct panfrost_device *dev, enum pipe_format format)
                                         max_cbuf_atts, format_size);
    assert(format_size > 16 || max_msaa >= 4);
 
+   /* t760 (GPU ID 0x750 - not a typo) has a HW issue in versions before
+    * the r1p0 version, which prevents 16x MSAA from working properly.
+    */
+   if (panfrost_device_gpu_id(dev) == 0x750 &&
+       panfrost_device_gpu_rev(dev) < 0x1000)
+      max_msaa = MIN2(max_msaa, 8);
+
    if (dev->model->quirks.max_4x_msaa)
-      max_msaa = 4;
+      max_msaa = MIN2(max_msaa, 4);
 
    return max_msaa;
 }
@@ -176,34 +183,19 @@ panfrost_is_format_supported(struct pipe_screen *screen,
        MAX2(sample_count, 1) > max_msaa)
       return false;
 
-   /* MSAA 2x gets rounded up to 4x. MSAA 8x/16x only supported on v5+.
-    * TODO: debug MSAA 8x/16x */
-
-   switch (sample_count) {
-   case 0:
-   case 1:
-   case 4:
-      break;
-   case 2:
-      if (dev->arch >= 12)
-         break;
-      else
-         return false;
-   case 8:
-   case 16:
-      if (dev->debug & PAN_DBG_MSAA16)
-         break;
-      else
-         return false;
-   default:
+   if (sample_count == 2 && dev->arch < 12)
       return false;
-   }
 
    if (MAX2(sample_count, 1) != MAX2(storage_sample_count, 1))
       return false;
 
    /* Z16 causes dEQP failures on t720 */
    if (format == PIPE_FORMAT_Z16_UNORM && dev->arch <= 4)
+      return false;
+
+   if (dev->arch <= 4 && util_format_get_blocksize(format) >= 16 &&
+       !pan_screen(screen)->allow_128bit_rts_v4 &&
+       (bind & PIPE_BIND_RENDER_TARGET))
       return false;
 
    /* Check we support the format with the given bind */
@@ -258,6 +250,68 @@ panfrost_query_compression_rates(struct pipe_screen *screen,
    *count = pan_afrc_query_rates(format, max, rates);
 }
 
+struct panfrost_yuv_format_lowering {
+   unsigned nres;
+   enum pipe_format res_formats[3];
+};
+
+static struct panfrost_yuv_format_lowering
+panfrost_lower_yuv_format(struct panfrost_device *dev,
+                          enum pipe_format format)
+{
+   assert(util_format_is_yuv(format));
+
+   switch (format) {
+#define SINGLE_RES(__in, __out)                                                \
+   case PIPE_FORMAT_##__in:                                                    \
+      if (dev->formats[PIPE_FORMAT_##__out].bind & PAN_BIND_SAMPLER_VIEW) {    \
+         return (struct panfrost_yuv_format_lowering){                         \
+            .nres = 1,                                                         \
+            .res_formats[0] = PIPE_FORMAT_##__out,                             \
+         };                                                                    \
+      }                                                                        \
+      break;
+
+   SINGLE_RES(AYUV, RGBA8888_UNORM)
+   SINGLE_RES(XYUV, RGBX8888_UNORM)
+   SINGLE_RES(YUYV, R8G8_R8B8_UNORM)
+   SINGLE_RES(UYVY, G8R8_B8R8_UNORM)
+   SINGLE_RES(YVYU, R8B8_R8G8_UNORM)
+   SINGLE_RES(VYUY, B8R8_G8R8_UNORM)
+   SINGLE_RES(NV12, R8_G8B8_420_UNORM)
+   SINGLE_RES(NV21, R8_B8G8_420_UNORM)
+   SINGLE_RES(NV16, R8_G8B8_422_UNORM)
+   SINGLE_RES(NV15, R10_G10B10_420_UNORM)
+   SINGLE_RES(NV20, R10_G10B10_422_UNORM)
+   SINGLE_RES(IYUV, R8_G8_B8_420_UNORM)
+   SINGLE_RES(YV12, R8_B8_G8_420_UNORM)
+   SINGLE_RES(Y8U8V8_420_UNORM_PACKED, R8G8B8_420_UNORM_PACKED)
+   SINGLE_RES(Y10U10V10_420_UNORM_PACKED, R10G10B10_420_UNORM_PACKED)
+
+#undef SINGLE_RES
+
+   default:
+      break;
+   }
+
+   struct panfrost_yuv_format_lowering lowering = {0};
+   unsigned nplanes =  util_format_get_num_planes(format);
+   for (unsigned i = 0; i < nplanes; i++) {
+      lowering.res_formats[lowering.nres++] =
+         util_format_get_plane_format(format, i);
+
+      /* If there's no YUV-as-RGB lowering available, the original YUV format
+       * will be returned, and only LINEAR will be allowed. */
+      if (i == 0 && lowering.res_formats[i] == format)
+         return lowering;
+
+      /* If plane0 got lowered, so should planeX. */
+      assert(lowering.res_formats[i] != format);
+   }
+
+   return lowering;
+}
+
 /* We always support linear and tiled operations, both external and internal.
  * We support AFBC for a subset of formats, and colourspace transform for a
  * subset of those. */
@@ -268,49 +322,116 @@ panfrost_walk_dmabuf_modifiers(struct pipe_screen *screen,
                                uint64_t *modifiers, unsigned int *external_only,
                                int *out_count, uint64_t test_modifier, bool allow_afrc)
 {
-   /* Query AFBC status */
    struct panfrost_device *dev = pan_device(screen);
-   bool afbc =
-      dev->has_afbc && pan_format_supports_afbc(dev->arch, format);
-   bool ytr = pan_afbc_can_ytr(format);
-   bool tiled_afbc = pan_afbc_can_tile(dev->arch);
-   bool afrc = allow_afrc && dev->has_afrc && pan_format_supports_afrc(format);
-   PAN_SUPPORTED_MODIFIERS(supported_mods);
+   bool is_yuv = util_format_is_yuv(format);
+   struct panfrost_yuv_format_lowering yuv_lowering = {0};
 
+   if (is_yuv) {
+      yuv_lowering =
+         panfrost_lower_yuv_format(dev, format);
+
+      if (yuv_lowering.nres == 1)
+         format = yuv_lowering.res_formats[0];
+   }
+
+   /* Query AFBC status */
+   bool afbc = dev->has_afbc;
+   bool ytr = afbc && !is_yuv;
+   bool tiled_afbc = pan_afbc_can_tile(dev->arch);
+   bool afrc = allow_afrc && dev->has_afrc;
+
+   if (is_yuv && yuv_lowering.nres > 1) {
+      for (unsigned i = 0; i < yuv_lowering.nres; i++) {
+         enum pipe_format plane_format = yuv_lowering.res_formats[i];
+
+         afbc &= pan_afbc_supports_format(dev->arch, plane_format);
+      }
+   } else {
+      afbc &= pan_afbc_supports_format(dev->arch, format);
+      ytr &= pan_afbc_can_ytr(format);
+      afrc &= !is_yuv && pan_afrc_supports_format(format);
+   }
+
+   PANFROST_EMULATED_MODIFIERS(emulated_mods);
+   PAN_SUPPORTED_MODIFIERS(native_mods);
    unsigned count = 0;
 
-   for (unsigned i = 0; i < ARRAY_SIZE(supported_mods); ++i) {
-      if (drm_is_afbc(supported_mods[i])) {
+   for (unsigned i = 0; i < ARRAY_SIZE(native_mods); ++i) {
+      if (drm_is_afbc(native_mods[i])) {
          if (!afbc)
             continue;
 
-         if ((supported_mods[i] & AFBC_FORMAT_MOD_SPLIT) &&
-             !pan_afbc_can_split(dev->arch, format, supported_mods[i]))
+         if ((native_mods[i] & AFBC_FORMAT_MOD_SPLIT)) {
+            unsigned nplanes = util_format_get_num_planes(format);
+            bool can_split = true;
+
+            for (unsigned p = 0; p < nplanes; p++) {
+               if (is_yuv && yuv_lowering.nres > 1) {
+                  can_split &= pan_afbc_can_split(
+                     dev->arch, yuv_lowering.res_formats[p], native_mods[i], 0);
+               } else {
+                  can_split &=
+                     pan_afbc_can_split(dev->arch, format, native_mods[i], p);
+               }
+            }
+
+            if (!can_split)
+               continue;
+         }
+
+         if ((native_mods[i] & AFBC_FORMAT_MOD_YTR) && !ytr)
             continue;
 
-         if ((supported_mods[i] & AFBC_FORMAT_MOD_YTR) && !ytr)
-            continue;
-
-         if ((supported_mods[i] & AFBC_FORMAT_MOD_TILED) && !tiled_afbc)
+         if ((native_mods[i] & AFBC_FORMAT_MOD_TILED) && !tiled_afbc)
             continue;
       }
 
-      if (drm_is_afrc(supported_mods[i]) && !afrc)
+      if (drm_is_afrc(native_mods[i]) && !afrc)
          continue;
 
-      if (drm_is_mtk_tiled(supported_mods[i]) &&
-          !pan_format_supports_mtk_tiled(format))
+      if (drm_is_mtk_tiled(native_mods[i]) &&
+          !panfrost_format_supports_mtk_tiled(format))
+         continue;
+
+      /* If the format is still YUV after lowering, the SW emulation might
+       * involve plane aliasing which we can't do with U_TILED. */
+      if (util_format_is_yuv(format) &&
+          native_mods[i] == DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED)
+         continue;
+
+      /* Some formats only work with AFBC. */
+      if ((native_mods[i] == DRM_FORMAT_MOD_LINEAR ||
+           native_mods[i] == DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED) &&
+          !pan_u_tiled_or_linear_supports_format(format))
          continue;
 
       if (test_modifier != DRM_FORMAT_MOD_INVALID &&
-          test_modifier != supported_mods[i])
+          test_modifier != native_mods[i])
          continue;
 
       if (max > (int)count) {
-         modifiers[count] = supported_mods[i];
+         modifiers[count] = native_mods[i];
 
          if (external_only)
-            external_only[count] = drm_is_mtk_tiled(modifiers[count]);
+            external_only[count] = is_yuv;
+      }
+      count++;
+   }
+
+   for (unsigned i = 0; i < ARRAY_SIZE(emulated_mods); ++i) {
+      if (drm_is_mtk_tiled(emulated_mods[i]) &&
+          !panfrost_format_supports_mtk_tiled(format))
+         continue;
+
+      if (test_modifier != DRM_FORMAT_MOD_INVALID &&
+          test_modifier != emulated_mods[i])
+         continue;
+
+      if (max > (int)count) {
+         modifiers[count] = emulated_mods[i];
+
+         if (external_only)
+            external_only[count] = true;
       }
       count++;
    }
@@ -545,11 +666,11 @@ panfrost_init_screen_caps(struct panfrost_screen *screen)
    caps->anisotropic_filter =
       panfrost_device_gpu_rev(dev) >= dev->model->min_rev_anisotropic;
 
-   /* Compile side is done for Bifrost, Midgard TODO. Needs some kernel
-    * work to turn on, since CYCLE_COUNT_START needs to be issued. In
-    * kbase, userspace requests this via BASE_JD_REQ_PERMON. There is not
-    * yet way to request this with mainline TODO */
-   caps->shader_clock = dev->arch >= 6;
+   /* Compile side is TODO for Midgard. */
+   caps->shader_clock = dev->arch >= 6 &&
+      dev->kmod.props.gpu_can_query_timestamp;
+   caps->shader_realtime_clock = dev->arch >= 6 &&
+      dev->kmod.props.gpu_can_query_timestamp;
 
    caps->vs_instanceid = true;
    caps->texture_multisample = true;
@@ -902,6 +1023,9 @@ panfrost_create_screen(int fd, const struct pipe_screen_config *config,
       panfrost_destroy_screen(&(screen->base));
       return NULL;
    }
+
+   screen->allow_128bit_rts_v4 =
+      driQueryOptionb(config->options, "pan_allow_128bit_rts_v4");
 
    screen->csf_tiler_heap.chunk_size = driQueryOptioni(config->options,
                                                        "pan_csf_chunk_size");

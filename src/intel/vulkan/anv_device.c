@@ -36,9 +36,6 @@
 #include "util/os_file.h"
 #include "util/os_misc.h"
 #include "util/u_atomic.h"
-#if DETECT_OS_ANDROID
-#include "util/u_gralloc/u_gralloc.h"
-#endif
 #include "util/u_string.h"
 #include "vk_common_entrypoints.h"
 #include "vk_util.h"
@@ -312,6 +309,7 @@ VkResult anv_CreateDevice(
     const VkAllocationCallbacks*                pAllocator,
     VkDevice*                                   pDevice)
 {
+   anv_wait_for_attach();
    ANV_FROM_HANDLE(anv_physical_device, physical_device, physicalDevice);
    VkResult result;
    struct anv_device *device;
@@ -322,7 +320,6 @@ VkResult anv_CreateDevice(
    /* Check requested queues and fail if we are requested to create any
     * queues with flags we don't support.
     */
-   assert(pCreateInfo->queueCreateInfoCount > 0);
    for (uint32_t i = 0; i < pCreateInfo->queueCreateInfoCount; i++) {
       if (pCreateInfo->pQueueCreateInfos[i].flags & ~VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT)
          return vk_error(physical_device, VK_ERROR_INITIALIZATION_FAILED);
@@ -912,10 +909,6 @@ VkResult anv_CreateDevice(
          goto fail_internal_cache;
    }
 
-#if DETECT_OS_ANDROID
-   device->u_gralloc = u_gralloc_create(U_GRALLOC_TYPE_AUTO);
-#endif
-
    device->robust_buffer_access =
       device->vk.enabled_features.robustBufferAccess ||
       device->vk.enabled_features.nullDescriptor;
@@ -1156,10 +1149,6 @@ void anv_DestroyDevice(
 
    if (!device)
       return;
-
-#if DETECT_OS_ANDROID
-   u_gralloc_destroy(&device->u_gralloc);
-#endif
 
    anv_memory_trace_finish(device);
 
@@ -1559,15 +1548,31 @@ VkResult anv_AllocateMemory(
    if (wsi_info)
       alloc_flags |= ANV_BO_ALLOC_SCANOUT;
 
+   struct anv_image *image = dedicated_info ?
+                             anv_image_from_handle(dedicated_info->image) :
+                             NULL;
+
+   if (device->info->ver >= 20 && image &&
+       image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT &&
+       isl_drm_modifier_has_aux(image->vk.drm_format_mod)) {
+      /* ISL should skip compression modifiers when no_ccs is set. */
+      assert(!INTEL_DEBUG(DEBUG_NO_CCS));
+      /* Images created with the Xe2 modifiers should be allocated into
+       * compressed memory, but we won't get such info from the memory type,
+       * refer to anv_image_is_pat_compressible(). We have to check the
+       * modifiers and enable compression if we can here.
+       */
+      alloc_flags |= ANV_BO_ALLOC_COMPRESSED;
+   } else if (mem_type->compressed && !INTEL_DEBUG(DEBUG_NO_CCS)) {
+      alloc_flags |= ANV_BO_ALLOC_COMPRESSED;
+   }
+
    /* Anything imported or exported is EXTERNAL */
    if (mem->vk.export_handle_types || mem->vk.import_handle_type) {
       alloc_flags |= ANV_BO_ALLOC_EXTERNAL;
 
       /* wsi has its own way of synchronizing with the compositor */
-      if (!wsi_info && dedicated_info &&
-          dedicated_info->image != VK_NULL_HANDLE) {
-         ANV_FROM_HANDLE(anv_image, image, dedicated_info->image);
-
+      if (!wsi_info && image) {
          /* Apply implicit sync to be compatible with clients relying on
           * implicit fencing. This matches the behavior in iris i915_batch
           * submit. An example client is VA-API (iHD), so only dedicated
@@ -1584,14 +1589,6 @@ VkResult anv_AllocateMemory(
             alloc_flags |= ANV_BO_ALLOC_IMPLICIT_WRITE;
       }
    }
-
-   /* TODO: Disabling compression on external bos will cause problems once we
-    * have a modifier that supports compression (Xe2+).
-    */
-   if (!(alloc_flags & ANV_BO_ALLOC_EXTERNAL) &&
-       mem_type->compressed &&
-       !INTEL_DEBUG(DEBUG_NO_CCS))
-      alloc_flags |= ANV_BO_ALLOC_COMPRESSED;
 
    if (mem_type->dynamic_visible)
       alloc_flags |= ANV_BO_ALLOC_DYNAMIC_VISIBLE_POOL;
@@ -1613,6 +1610,26 @@ VkResult anv_AllocateMemory(
                VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
              fd_info->handleType ==
                VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
+      if (alloc_flags & ANV_BO_ALLOC_COMPRESSED) {
+         /* First, when importing a compressed buffer on Xe2+, we are sure
+          * about that the buffer is from a resource created with modifiers
+          * supporting compression, even the info of modifier is not available
+          * on the path of allocation. (Buffers created with modifiers not
+          * supporting compression must be uncompressed or resolved first
+          * for sharing.)
+          *
+          * We assume the source of the sharing (a GL driver or this driver)
+          * would create the shared buffer for scanout usage as well by
+          * following the above reasons. As a result, configure the imported
+          * buffer for scanout.
+          *
+          * Such assumption could fit on pre-Xe2 platforms as well but become
+          * more relevant on Xe2+ because the alloc flags will determine bo's
+          * heap and then PAT entry in the later vm_bind stage.
+          */
+         assert(device->info->ver >= 20);
+         alloc_flags |= ANV_BO_ALLOC_SCANOUT;
+      }
 
       result = anv_device_import_bo(device, fd_info->fd, alloc_flags,
                                     client_address, &mem->bo);
@@ -1691,21 +1708,17 @@ VkResult anv_AllocateMemory(
    if (result != VK_SUCCESS)
       goto fail;
 
-   if (dedicated_info && dedicated_info->image != VK_NULL_HANDLE) {
-      ANV_FROM_HANDLE(anv_image, image, dedicated_info->image);
-
+   if (image && image->vk.wsi_legacy_scanout) {
       /* Some legacy (non-modifiers) consumers need the tiling to be set on
        * the BO.  In this case, we have a dedicated allocation.
        */
-      if (image->vk.wsi_legacy_scanout) {
-         const struct isl_surf *surf = &image->planes[0].primary_surface.isl;
-         result = anv_device_set_bo_tiling(device, mem->bo,
-                                           surf->row_pitch_B,
-                                           surf->tiling);
-         if (result != VK_SUCCESS) {
-            anv_device_release_bo(device, mem->bo);
-            goto fail;
-         }
+      const struct isl_surf *surf = &image->planes[0].primary_surface.isl;
+      result = anv_device_set_bo_tiling(device, mem->bo,
+                                        surf->row_pitch_B,
+                                        surf->tiling);
+      if (result != VK_SUCCESS) {
+         anv_device_release_bo(device, mem->bo);
+         goto fail;
       }
    }
 

@@ -343,6 +343,7 @@ a6xx_base = A6XXProps(
         max_sets = 5,
         line_width_min = 1.0,
         line_width_max = 1.0,
+        mov_half_shared_quirk = True,
     )
 
 
@@ -424,6 +425,7 @@ a6xx_gen4 = A6XXProps(
         has_lpac = True,
         has_legacy_pipeline_shading_rate = True,
         has_getfiberid = True,
+        has_movs = True,
         has_dp2acc = True,
         has_dp4acc = True,
         enable_lrz_fast_clear = True,
@@ -825,6 +827,51 @@ add_gpus([
         ],
     ))
 
+add_gpus([
+        GPUId(702), # KGSL
+        GPUId(chip_id=0x00b207002000, name="FD702"), # QRB2210 RB1
+        GPUId(chip_id=0xffff07002000, name="FD702"), # Default no-speedbin fallback
+    ], A6xxGPUInfo(
+        CHIP.A6XX, # NOT a mistake!
+        [a6xx_base, a6xx_gen1_low, A6XXProps(
+            has_cp_reg_write = False,
+            has_gmem_fast_clear = True,
+            sysmem_per_ccu_depth_cache_size = 8 * 1024, # ??????
+            sysmem_per_ccu_color_cache_size = 8 * 1024, # ??????
+            gmem_ccu_color_cache_fraction = CCUColorCacheFraction.HALF.value,
+            supports_double_threadsize = True,
+            prim_alloc_threshold = 0x1,
+            storage_16bit = True,
+            is_a702 = True,
+            )
+        ],
+        num_ccu = 1,
+        tile_align_w = 32,
+        tile_align_h = 16,
+        num_vsc_pipes = 16,
+        cs_shared_mem_size = 16 * 1024,
+        wave_granularity = 1,
+        fibers_per_sp = 128 * 16,
+        threadsize_base = 16,
+        max_waves = 16,
+        # has_early_preamble = True,  # for VS/FS but not CS?
+        magic_regs = dict(
+            PC_POWER_CNTL = 0,
+            TPL1_DBG_ECO_CNTL = 0x8000,
+            GRAS_DBG_ECO_CNTL = 0,
+            SP_CHICKEN_BITS = 0x1400,
+            UCHE_CLIENT_PF = 0x84,
+            PC_MODE_CNTL = 0xf,
+            SP_DBG_ECO_CNTL = 0x0,
+            RB_DBG_ECO_CNTL = 0x100000,
+            RB_DBG_ECO_CNTL_blit = 0x100000,
+            HLSQ_DBG_ECO_CNTL = 0x02000000,
+            RB_UNKNOWN_8E01 = 0x1,
+            VPC_DBG_ECO_CNTL = 0x0,
+            UCHE_UNKNOWN_0E12 = 0x1,
+        ),
+    ))
+
 # Based on a6xx_base + a6xx_gen4
 a7xx_base = A6XXProps(
         has_gmem_fast_clear = True,
@@ -854,6 +901,7 @@ a7xx_base = A6XXProps(
         has_sample_locations = True,
         has_lpac = True,
         has_getfiberid = True,
+        has_movs = True,
         has_dp2acc = True,
         has_dp4acc = True,
         enable_lrz_fast_clear = True,
@@ -876,7 +924,7 @@ a7xx_base = A6XXProps(
     )
 
 a7xx_gen1 = A7XXProps(
-        supports_ibo_ubwc = True,
+        supports_uav_ubwc = True,
         fs_must_have_non_zero_constlen_quirk = True,
         enable_tp_ubwc_flag_hint = True,
         reading_shading_rate_requires_smask_quirk = True,
@@ -886,7 +934,7 @@ a7xx_gen2 = A7XXProps(
         stsc_duplication_quirk = True,
         has_event_write_sample_count = True,
         ubwc_unorm_snorm_int_compatible = True,
-        supports_ibo_ubwc = True,
+        supports_uav_ubwc = True,
         fs_must_have_non_zero_constlen_quirk = True,
         # Most devices with a740 have blob v6xx which doesn't have
         # this hint set. Match them for better compatibility by default.
@@ -905,7 +953,7 @@ a7xx_gen3 = A7XXProps(
         sysmem_vpc_attr_buf_size = 0x20000,
         gmem_vpc_attr_buf_size = 0xc000,
         ubwc_unorm_snorm_int_compatible = True,
-        supports_ibo_ubwc = True,
+        supports_uav_ubwc = True,
         has_generic_clear = True,
         r8g8_faulty_fast_clear_quirk = True,
         gs_vpc_adjacency_quirk = True,
@@ -937,22 +985,22 @@ a730_magic_regs = dict(
         VPC_DBG_ECO_CNTL = 0x02000000,
         UCHE_UNKNOWN_0E12 = 0x3200000,
 
-        RB_UNKNOWN_8E06 = 0x02080000,
+        RB_CCU_DBG_ECO_CNTL = 0x02080000,
     )
 
 a730_raw_magic_regs = [
         [A6XXRegs.REG_A6XX_UCHE_CACHE_WAYS, 0x00840004],
         [A6XXRegs.REG_A6XX_TPL1_DBG_ECO_CNTL1, 0x00040724],
 
-        [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE08, 0x00002400],
-        [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE09, 0x00000000],
-        [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE0A, 0x00000000],
+        [A6XXRegs.REG_A7XX_SP_CHICKEN_BITS_1, 0x00002400],
+        [A6XXRegs.REG_A7XX_SP_CHICKEN_BITS_2, 0x00000000],
+        [A6XXRegs.REG_A7XX_SP_CHICKEN_BITS_3, 0x00000000],
         [A6XXRegs.REG_A7XX_UCHE_UNKNOWN_0E10, 0x00000000],
         [A6XXRegs.REG_A7XX_UCHE_UNKNOWN_0E11, 0x00000040],
-        [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE6C, 0x00008000],
+        [A6XXRegs.REG_A7XX_SP_HLSQ_DBG_ECO_CNTL, 0x00008000],
         [A6XXRegs.REG_A6XX_PC_DBG_ECO_CNTL, 0x20080000],
         [A6XXRegs.REG_A7XX_PC_UNKNOWN_9E24, 0x21fc7f00],
-        [A6XXRegs.REG_A7XX_VFD_UNKNOWN_A600, 0x00000000],
+        [A6XXRegs.REG_A7XX_VFD_DBG_ECO_CNTL, 0x00000000],
         [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE06, 0x00000000],
         [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE6A, 0x00000000],
         [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE6B, 0x00000080],
@@ -996,22 +1044,22 @@ a740_magic_regs = dict(
         VPC_DBG_ECO_CNTL = 0x02000000,
         UCHE_UNKNOWN_0E12 = 0x00000000,
 
-        RB_UNKNOWN_8E06 = 0x02080000,
+        RB_CCU_DBG_ECO_CNTL = 0x02080000,
     )
 
 a740_raw_magic_regs = [
         [A6XXRegs.REG_A6XX_UCHE_CACHE_WAYS, 0x00040004],
         [A6XXRegs.REG_A6XX_TPL1_DBG_ECO_CNTL1, 0x00040724],
 
-        [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE08, 0x00000400],
-        [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE09, 0x00430800],
-        [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE0A, 0x00000000],
+        [A6XXRegs.REG_A7XX_SP_CHICKEN_BITS_1, 0x00000400],
+        [A6XXRegs.REG_A7XX_SP_CHICKEN_BITS_2, 0x00430800],
+        [A6XXRegs.REG_A7XX_SP_CHICKEN_BITS_3, 0x00000000],
         [A6XXRegs.REG_A7XX_UCHE_UNKNOWN_0E10, 0x00000000],
         [A6XXRegs.REG_A7XX_UCHE_UNKNOWN_0E11, 0x00000000],
-        [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE6C, 0x00000000],
+        [A6XXRegs.REG_A7XX_SP_HLSQ_DBG_ECO_CNTL, 0x00000000],
         [A6XXRegs.REG_A6XX_PC_DBG_ECO_CNTL, 0x00100000],
         [A6XXRegs.REG_A7XX_PC_UNKNOWN_9E24, 0x21585600],
-        [A6XXRegs.REG_A7XX_VFD_UNKNOWN_A600, 0x00008000],
+        [A6XXRegs.REG_A7XX_VFD_DBG_ECO_CNTL, 0x00008000],
         [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE06, 0x00000000],
         [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE6A, 0x00000000],
         [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE6B, 0x00000080],
@@ -1084,6 +1132,7 @@ add_gpus([
     ))
 
 add_gpus([
+        GPUId(chip_id=0xffff43030c00, name="Adreno X1-45"),
         GPUId(chip_id=0x43030B00, name="FD735")
     ], A6xxGPUInfo(
         CHIP.A7XX,
@@ -1108,21 +1157,21 @@ add_gpus([
             VPC_DBG_ECO_CNTL = 0x02000000,
             UCHE_UNKNOWN_0E12 = 0x00000000,
 
-            RB_UNKNOWN_8E06 = 0x02080000,
+            RB_CCU_DBG_ECO_CNTL = 0x02080000,
         ),
         raw_magic_regs = [
             [A6XXRegs.REG_A6XX_UCHE_CACHE_WAYS, 0x00000000],
             [A6XXRegs.REG_A6XX_TPL1_DBG_ECO_CNTL1, 0x00040724],
 
-            [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE08, 0x00000400],
-            [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE09, 0x00430800],
-            [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE0A, 0x00000000],
+            [A6XXRegs.REG_A7XX_SP_CHICKEN_BITS_1, 0x00000400],
+            [A6XXRegs.REG_A7XX_SP_CHICKEN_BITS_2, 0x00430800],
+            [A6XXRegs.REG_A7XX_SP_CHICKEN_BITS_3, 0x00000000],
             [A6XXRegs.REG_A7XX_UCHE_UNKNOWN_0E10, 0x00000000],
             [A6XXRegs.REG_A7XX_UCHE_UNKNOWN_0E11, 0x00000000],
-            [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE6C, 0x00000000],
+            [A6XXRegs.REG_A7XX_SP_HLSQ_DBG_ECO_CNTL, 0x00000000],
             [A6XXRegs.REG_A6XX_PC_DBG_ECO_CNTL, 0x00100000],
             [A6XXRegs.REG_A7XX_PC_UNKNOWN_9E24, 0x01585600],
-            [A6XXRegs.REG_A7XX_VFD_UNKNOWN_A600, 0x00008000],
+            [A6XXRegs.REG_A7XX_VFD_DBG_ECO_CNTL, 0x00008000],
             [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE06, 0x00000000],
             [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE6A, 0x00000000],
             [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE6B, 0x00000080],
@@ -1162,22 +1211,6 @@ add_gpus([
         GPUId(740), # Deprecated, used for dev kernels.
         GPUId(chip_id=0x43050a01, name="FD740"), # KGSL, no speedbin data
         GPUId(chip_id=0xffff43050a01, name="FD740"), # Default no-speedbin fallback
-    ], A6xxGPUInfo(
-        CHIP.A7XX,
-        [a7xx_base, a7xx_gen2],
-        num_ccu = 6,
-        tile_align_w = 96,
-        tile_align_h = 32,
-        num_vsc_pipes = 32,
-        cs_shared_mem_size = 32 * 1024,
-        wave_granularity = 2,
-        fibers_per_sp = 128 * 2 * 16,
-        highest_bank_bit = 16,
-        magic_regs = a740_magic_regs,
-        raw_magic_regs = a740_raw_magic_regs,
-    ))
-
-add_gpus([
         GPUId(chip_id=0xffff43050c01, name="Adreno X1-85"),
     ], A6xxGPUInfo(
         CHIP.A7XX,
@@ -1213,15 +1246,15 @@ add_gpus([
             [A6XXRegs.REG_A6XX_UCHE_CACHE_WAYS, 0x00040004],
             [A6XXRegs.REG_A6XX_TPL1_DBG_ECO_CNTL1, 0x00000700],
 
-            [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE08, 0x00000400],
-            [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE09, 0x00430820],
-            [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE0A, 0x00000000],
+            [A6XXRegs.REG_A7XX_SP_CHICKEN_BITS_1, 0x00000400],
+            [A6XXRegs.REG_A7XX_SP_CHICKEN_BITS_2, 0x00430820],
+            [A6XXRegs.REG_A7XX_SP_CHICKEN_BITS_3, 0x00000000],
             [A6XXRegs.REG_A7XX_UCHE_UNKNOWN_0E10, 0x00000000],
             [A6XXRegs.REG_A7XX_UCHE_UNKNOWN_0E11, 0x00000080],
-            [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE6C, 0x00000000],
+            [A6XXRegs.REG_A7XX_SP_HLSQ_DBG_ECO_CNTL, 0x00000000],
             [A6XXRegs.REG_A6XX_PC_DBG_ECO_CNTL, 0x00100000],
             [A6XXRegs.REG_A7XX_PC_UNKNOWN_9E24, 0x21585600],
-            [A6XXRegs.REG_A7XX_VFD_UNKNOWN_A600, 0x00008000],
+            [A6XXRegs.REG_A7XX_VFD_DBG_ECO_CNTL, 0x00008000],
             [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE06, 0x00000000],
             [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE6A, 0x00000000],
             [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE6B, 0x00000080],
@@ -1284,7 +1317,7 @@ add_gpus([
             VPC_DBG_ECO_CNTL = 0x02000000,
             UCHE_UNKNOWN_0E12 = 0x00000000,
 
-            RB_UNKNOWN_8E06 = 0x02080000,
+            RB_CCU_DBG_ECO_CNTL = 0x02080000,
         ),
         raw_magic_regs = a740_raw_magic_regs,
     ))
@@ -1315,19 +1348,19 @@ add_gpus([
             VPC_DBG_ECO_CNTL = 0x02000000,
             UCHE_UNKNOWN_0E12 = 0x40000000,
 
-            RB_UNKNOWN_8E06 = 0x02082000,
+            RB_CCU_DBG_ECO_CNTL = 0x02082000,
         ),
         raw_magic_regs = [
             [A6XXRegs.REG_A6XX_UCHE_CACHE_WAYS, 0x00000000],
             [A6XXRegs.REG_A7XX_UCHE_UNKNOWN_0E10, 0x00000000],
             [A6XXRegs.REG_A7XX_UCHE_UNKNOWN_0E11, 0x00000080],
-            [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE08, 0x00000000],
-            [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE09, 0x00431800],
-            [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE0A, 0x00800000],
-            [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE6C, 0x00000000],
+            [A6XXRegs.REG_A7XX_SP_CHICKEN_BITS_1, 0x00000000],
+            [A6XXRegs.REG_A7XX_SP_CHICKEN_BITS_2, 0x00431800],
+            [A6XXRegs.REG_A7XX_SP_CHICKEN_BITS_3, 0x00800000],
+            [A6XXRegs.REG_A7XX_SP_HLSQ_DBG_ECO_CNTL, 0x00000000],
             [A6XXRegs.REG_A6XX_PC_DBG_ECO_CNTL, 0x00100000],
             [A6XXRegs.REG_A7XX_PC_UNKNOWN_9E24, 0x01585600],
-            [A6XXRegs.REG_A7XX_VFD_UNKNOWN_A600, 0x00008000],
+            [A6XXRegs.REG_A7XX_VFD_DBG_ECO_CNTL, 0x00008000],
             [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE06, 0x00000000],
             [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE6A, 0x00000000],
             [A6XXRegs.REG_A7XX_SP_UNKNOWN_AE6B, 0x00000080],
@@ -1360,8 +1393,8 @@ add_gpus([
 
             [0x930a, 0],
             [0x960a, 1],
-            [A6XXRegs.REG_A7XX_SP_PS_ALIASED_COMPONENTS_CONTROL, 0],
-            [A6XXRegs.REG_A7XX_SP_PS_ALIASED_COMPONENTS, 0],
+            [A6XXRegs.REG_A7XX_SP_PS_OUTPUT_CONST_CNTL, 0],
+            [A6XXRegs.REG_A7XX_SP_PS_OUTPUT_CONST_MASK, 0],
         ],
     ))
 

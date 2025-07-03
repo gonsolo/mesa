@@ -694,7 +694,7 @@ DefInfo::get_subdword_definition_info(Program* program, const aco_ptr<Instructio
    if (instr->isVALU()) {
       assert(rc.bytes() <= 2);
 
-      if (can_use_SDWA(gfx_level, instr, false) || instr->opcode == aco_opcode::p_v_cvt_pk_u8_f32)
+      if (can_use_SDWA(gfx_level, instr, false))
          return;
 
       rc = instr_is_16bit(gfx_level, instr->opcode) ? v2b : v1;
@@ -770,9 +770,6 @@ add_subdword_definition(Program* program, aco_ptr<Instruction>& instr, PhysReg r
    if (instr->isVALU()) {
       amd_gfx_level gfx_level = program->gfx_level;
       assert(instr->definitions[0].bytes() <= 2);
-
-      if (instr->opcode == aco_opcode::p_v_cvt_pk_u8_f32)
-         return;
 
       if (reg.byte() == 0 && allow_16bit_write && instr_is_16bit(gfx_level, instr->opcode))
          return;
@@ -855,7 +852,7 @@ adjust_max_used_regs(ra_ctx& ctx, RegClass rc, unsigned reg)
 
 void
 update_renames(ra_ctx& ctx, RegisterFile& reg_file, std::vector<parallelcopy>& parallelcopies,
-               aco_ptr<Instruction>& instr, bool clear_operands = true)
+               aco_ptr<Instruction>& instr, bool fill_operands = false, bool clear_operands = true)
 {
    /* clear operands */
    if (clear_operands) {
@@ -928,7 +925,7 @@ update_renames(ra_ctx& ctx, RegisterFile& reg_file, std::vector<parallelcopy>& p
                   // FIXME: ensure that the operand can use this reg
                   if (op.isFixed())
                      op.setFixed(other.def.physReg());
-                  fill = !op.isKillBeforeDef();
+                  fill = !op.isKillBeforeDef() || fill_operands;
                }
             }
             if (fill)
@@ -982,8 +979,9 @@ update_renames(ra_ctx& ctx, RegisterFile& reg_file, std::vector<parallelcopy>& p
             /* Copy-kill or precolored operand parallelcopies are only added when setting up
              * operands.
              */
-            bool is_reg_file_before_instr = op.isPrecolored() || is_copy_kill;
-            fill = !op.isKillBeforeDef() || is_reg_file_before_instr;
+            assert(!op.isPrecolored() || fill_operands);
+            assert(!is_copy_kill || fill_operands);
+            fill = !op.isKillBeforeDef() || fill_operands;
          }
       }
 
@@ -1936,11 +1934,13 @@ get_reg(ra_ctx& ctx, const RegisterFile& reg_file, Temp temp,
        compact_linear_vgprs(ctx, reg_file, pc)) {
       parallelcopies.insert(parallelcopies.end(), pc.begin(), pc.end());
 
-      /* We don't need to fill the copy definitions in because we don't care about the linear VGPR
-       * space here. */
       RegisterFile tmp_file(reg_file);
       for (parallelcopy& copy : pc)
          tmp_file.clear(copy.op);
+
+      /* Block these registers in case we try compacting linear VGPRs in the recursive get_reg(). */
+      for (parallelcopy& copy : pc)
+         tmp_file.block(copy.def.physReg(), copy.def.regClass());
 
       return get_reg(ctx, tmp_file, temp, parallelcopies, instr, operand_index);
    }
@@ -2322,7 +2322,7 @@ handle_fixed_operands(ra_ctx& ctx, RegisterFile& register_file,
    }
 
    get_regs_for_copies(ctx, tmp_file, parallelcopy, blocking_vars, instr, PhysRegInterval());
-   update_renames(ctx, register_file, parallelcopy, instr);
+   update_renames(ctx, register_file, parallelcopy, instr, true);
 }
 
 void
@@ -2339,8 +2339,7 @@ get_reg_for_operand(ra_ctx& ctx, RegisterFile& register_file,
    pc_op.setFixed(src);
    Definition pc_def = Definition(dst, pc_op.regClass());
    parallelcopy.emplace_back(pc_op, pc_def);
-   update_renames(ctx, register_file, parallelcopy, instr);
-   register_file.fill(Definition(operand.getTemp(), dst));
+   update_renames(ctx, register_file, parallelcopy, instr, true);
    operand.setFixed(dst);
 }
 
@@ -2385,7 +2384,7 @@ handle_vector_operands(ra_ctx& ctx, RegisterFile& register_file,
    for (unsigned i = operand_index; i < operand_index + num_operands; i++)
       instr->operands[i].setFixed(ctx.assignments[instr->operands[i].tempId()].reg);
 
-   update_renames(ctx, register_file, parallelcopies, instr);
+   update_renames(ctx, register_file, parallelcopies, instr, true);
    ctx.vector_operands.emplace_back(
       vector_operand{vec->definitions[0], operand_index, num_operands});
    register_file.fill(vec->definitions[0]);
@@ -2424,7 +2423,7 @@ resolve_vector_operands(ra_ctx& ctx, RegisterFile& reg_file,
    ctx.vector_operands.clear();
 
    /* Update operand temporaries and fill non-killed operands. */
-   update_renames(ctx, reg_file, parallelcopies, instr, false);
+   update_renames(ctx, reg_file, parallelcopies, instr, true, false);
 }
 
 PhysReg
@@ -3283,14 +3282,14 @@ handle_operands_tied_to_definitions(ra_ctx& ctx, std::vector<parallelcopy>& para
          PhysReg reg = get_reg(ctx, reg_file, op.getTemp(), parallelcopies, instr, op_idx);
 
          /* update_renames() in case we moved this operand. */
-         update_renames(ctx, reg_file, parallelcopies, instr);
+         update_renames(ctx, reg_file, parallelcopies, instr, true);
 
          Operand pc_op(op.getTemp());
          pc_op.setFixed(ctx.assignments[op.tempId()].reg);
          Definition pc_def(reg, op.regClass());
          parallelcopies.emplace_back(pc_op, pc_def, op_idx);
 
-         update_renames(ctx, reg_file, parallelcopies, instr);
+         update_renames(ctx, reg_file, parallelcopies, instr, true);
       }
 
       /* Flag the operand's temporary as lateKill. This serves as placeholder

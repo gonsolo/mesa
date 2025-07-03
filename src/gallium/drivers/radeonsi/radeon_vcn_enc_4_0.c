@@ -76,6 +76,7 @@ static void radeon_enc_session_init(struct radeon_encoder *enc)
    RADEON_ENC_CS(enc->enc_pic.session_init.slice_output_enabled);
    RADEON_ENC_CS(enc->enc_pic.session_init.display_remote);
    RADEON_ENC_CS(enc->enc_pic.session_init.WA_flags);
+   RADEON_ENC_CS(0);
    RADEON_ENC_END();
 }
 
@@ -122,10 +123,6 @@ static void radeon_enc_spec_misc_av1(struct radeon_encoder *enc)
    num_tiles_rows = tile_layout.nb_main_tile + tile_layout.nb_border_tile;
 
    num_of_tiles = num_tiles_cols * num_tiles_rows;
-
-   /* in case of multiple tiles, it should be an obu frame */
-   if (num_of_tiles > 1)
-      enc->enc_pic.is_obu_frame = 1;
 
    RADEON_ENC_BEGIN(enc->cmd.spec_misc_av1);
    RADEON_ENC_CS(enc->enc_pic.av1_spec_misc.palette_mode_enable);

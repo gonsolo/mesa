@@ -268,13 +268,8 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
       break;
    }
    case nir_intrinsic_load_patch_vertices_in:
-      if (stage == MESA_SHADER_TESS_CTRL)
-         replacement = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 12, 5);
-      else if (stage == MESA_SHADER_TESS_EVAL) {
-         replacement = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 7, 5);
-      } else
-         unreachable("no nir_load_patch_vertices_in");
-      replacement = nir_iadd_imm(b, replacement, 1);
+      replacement =
+         nir_iadd_imm(b, ac_nir_unpack_arg(b, &args->ac, args->ac.tcs_offchip_layout, 7, 5), 1);
       break;
    case nir_intrinsic_load_sample_mask_in:
       replacement = ac_nir_load_arg(b, &args->ac, args->ac.sample_coverage);
@@ -286,7 +281,7 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
          if (sel->screen->info.gfx_level >= GFX9 && shader->is_monolithic) {
             replacement = nir_imm_int(b, si_shader_lshs_vertex_stride(shader));
          } else {
-            nir_def *num_ls_out = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 17, 6);
+            nir_def *num_ls_out = ac_nir_unpack_arg(b, &args->ac, args->ac.tcs_offchip_layout, 17, 6);
             nir_def *extra_dw = nir_bcsel(b, nir_ieq_imm(b, num_ls_out, 0), nir_imm_int(b, 0), nir_imm_int(b, 4));
             replacement = nir_iadd_nuw(b, nir_ishl_imm(b, num_ls_out, 4), extra_dw);
          }
@@ -304,29 +299,24 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
       }
       break;
    case nir_intrinsic_load_tcs_num_patches_amd: {
-      nir_def *tmp = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 0, 7);
-      replacement = nir_iadd_imm(b, tmp, 1);
+      replacement = ac_nir_unpack_arg(b, &args->ac, args->ac.tcs_offchip_layout, 0, 7);
       break;
    }
+   case nir_intrinsic_load_tcs_mem_attrib_stride:
+      replacement = nir_imul_imm(b, ac_nir_unpack_arg(b, &args->ac, args->ac.tcs_offchip_layout, 12, 5), 256);
+      break;
    case nir_intrinsic_load_hs_out_patch_data_offset_amd: {
-      nir_def *per_vtx_out_patch_size = NULL;
+      nir_def *num_tcs_mem_outputs;
 
-      if (stage == MESA_SHADER_TESS_CTRL) {
-         const unsigned num_hs_out = util_last_bit64(sel->info.tcs_outputs_written_for_tes);
-         const unsigned out_vtx_size = num_hs_out * 16;
-         const unsigned out_vtx_per_patch = b->shader->info.tess.tcs_vertices_out;
-         per_vtx_out_patch_size = nir_imm_int(b, out_vtx_size * out_vtx_per_patch);
-      } else {
-         nir_def *num_hs_out = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 23, 6);
-         nir_def *out_vtx_size = nir_ishl_imm(b, num_hs_out, 4);
-         nir_def *o = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 7, 5);
-         nir_def *out_vtx_per_patch = nir_iadd_imm_nuw(b, o, 1);
-         per_vtx_out_patch_size = nir_imul(b, out_vtx_per_patch, out_vtx_size);
-      }
+      if (stage == MESA_SHADER_TESS_CTRL)
+         num_tcs_mem_outputs = nir_imm_int(b, sel->info.tess_io_info.highest_remapped_vram_output);
+      else
+         num_tcs_mem_outputs = ac_nir_unpack_arg(b, &args->ac, args->ac.tcs_offchip_layout, 23, 6);
 
-      nir_def *p = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 0, 7);
-      nir_def *num_patches = nir_iadd_imm_nuw(b, p, 1);
-      replacement = nir_imul(b, per_vtx_out_patch_size, num_patches);
+      /* Get the stride of a single output. */
+      nir_def *attr_stride =
+         nir_imul_imm(b, ac_nir_unpack_arg(b, &args->ac, args->ac.tcs_offchip_layout, 12, 5), 256);
+      replacement = nir_imul(b, attr_stride, num_tcs_mem_outputs);
       break;
    }
    case nir_intrinsic_load_clip_half_line_width_amd: {
@@ -574,7 +564,7 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
       if (shader->is_monolithic) {
          replacement = nir_imm_bool(b, key->ge.opt.tes_reads_tess_factors);
       } else {
-         replacement = nir_ine_imm(b, ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 31, 1), 0);
+         replacement = nir_ine_imm(b, ac_nir_unpack_arg(b, &args->ac, args->ac.tcs_offchip_layout, 31, 1), 0);
       }
       break;
    case nir_intrinsic_load_tcs_primitive_mode_amd:
@@ -584,7 +574,7 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
          if (b->shader->info.tess._primitive_mode != TESS_PRIMITIVE_UNSPECIFIED)
             replacement = nir_imm_int(b, b->shader->info.tess._primitive_mode);
          else
-            replacement = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 29, 2);
+            replacement = ac_nir_unpack_arg(b, &args->ac, args->ac.tcs_offchip_layout, 29, 2);
       }
       break;
    case nir_intrinsic_load_ring_gsvs_amd: {

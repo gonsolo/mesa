@@ -190,18 +190,13 @@ realloc_bo(struct fd_resource *rsc, uint32_t size)
    struct pipe_resource *prsc = &rsc->b.b;
    struct fd_screen *screen = fd_screen(rsc->b.b.screen);
    uint32_t flags =
-      (prsc->target == PIPE_BUFFER) ? FD_BO_HINT_BUFFER : FD_BO_HINT_IMAGE |
+      ((prsc->target == PIPE_BUFFER) ? FD_BO_HINT_BUFFER : FD_BO_HINT_IMAGE) |
       COND(rsc->layout.tile_mode, FD_BO_NOMAP) |
-      COND((prsc->usage & PIPE_USAGE_STAGING) &&
+      COND((prsc->usage == PIPE_USAGE_STAGING) &&
            (prsc->flags & PIPE_RESOURCE_FLAG_MAP_COHERENT),
            FD_BO_CACHED_COHERENT) |
       COND(prsc->bind & PIPE_BIND_SHARED, FD_BO_SHARED) |
       COND(prsc->bind & PIPE_BIND_SCANOUT, FD_BO_SCANOUT);
-   /* TODO other flags? */
-
-   /* if we start using things other than write-combine,
-    * be sure to check for PIPE_RESOURCE_FLAG_MAP_COHERENT
-    */
 
    if (rsc->bo)
       fd_bo_del(rsc->bo);
@@ -1302,7 +1297,7 @@ get_best_layout(struct fd_screen *screen,
       return LINEAR;
    }
 
-   bool ubwc_ok = is_a6xx(screen);
+   bool ubwc_ok = is_a6xx(screen) && !screen->info->a6xx.is_a702;
    if (FD_DBG(NOUBWC))
       ubwc_ok = false;
 

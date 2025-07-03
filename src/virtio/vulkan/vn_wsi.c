@@ -78,14 +78,21 @@ vn_wsi_proc_addr(VkPhysicalDevice physicalDevice, const char *pName)
 VkResult
 vn_wsi_init(struct vn_physical_device *physical_dev)
 {
+   /* TODO Drop the workaround for NVIDIA_PROPRIETARY once hw prime buffer
+    * blit path works there.
+    */
+   const bool use_sw_device =
+      !physical_dev->base.vk.supported_extensions
+          .EXT_external_memory_dma_buf ||
+      physical_dev->renderer_driver_id == VK_DRIVER_ID_NVIDIA_PROPRIETARY;
+
    const VkAllocationCallbacks *alloc =
       &physical_dev->instance->base.vk.alloc;
    VkResult result = wsi_device_init(
       &physical_dev->wsi_device, vn_physical_device_to_handle(physical_dev),
       vn_wsi_proc_addr, alloc, -1, &physical_dev->instance->dri_options,
       &(struct wsi_device_options){
-         .sw_device = !physical_dev->base.vk.supported_extensions
-                          .EXT_external_memory_dma_buf,
+         .sw_device = use_sw_device,
          .extra_xwayland_image = true,
       });
    if (result != VK_SUCCESS)
@@ -125,6 +132,23 @@ vn_wsi_create_image(struct vn_device *dev,
       create_info = &local_create_info;
    }
 
+   /* Gamescope relies on legacy scanout support when explicit modifier isn't
+    * available and it chains the mesa wsi hint requesting such. Venus doesn't
+    * support legacy scanout with optimal tiling on its own, so venus disables
+    * legacy scanout in favor of prime buffer blit for optimal performance. As
+    * a workaround here, venus can once again force linear tiling when legacy
+    * scanout is requested outside of common wsi.
+    */
+   if (wsi_info->scanout) {
+      if (create_info != &local_create_info) {
+         local_create_info = *create_info;
+         local_create_info.tiling = VK_IMAGE_TILING_LINEAR;
+         create_info = &local_create_info;
+      } else {
+         local_create_info.tiling = VK_IMAGE_TILING_LINEAR;
+      }
+   }
+
    struct vn_image *img;
    VkResult result = vn_image_create(dev, create_info, alloc, &img);
    if (result != VK_SUCCESS)
@@ -132,149 +156,12 @@ vn_wsi_create_image(struct vn_device *dev,
 
    img->wsi.is_wsi = true;
    img->wsi.is_prime_blit_src = wsi_info->blit_src;
-   img->wsi.tiling_override = create_info->tiling;
-
-   if (create_info->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
-      VkDevice dev_handle = vn_device_to_handle(dev);
-      VkImage img_handle = vn_image_to_handle(img);
-
-      VkImageDrmFormatModifierPropertiesEXT props = {
-         .sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_PROPERTIES_EXT,
-      };
-      result = vn_GetImageDrmFormatModifierPropertiesEXT(dev_handle,
-                                                         img_handle, &props);
-      if (result != VK_SUCCESS) {
-         vn_DestroyImage(dev_handle, img_handle, alloc);
-         return result;
-      }
-
-      img->wsi.drm_format_modifier = props.drmFormatModifier;
-   }
-
-   *out_img = img;
-   return VK_SUCCESS;
-}
-
-VkResult
-vn_wsi_create_image_from_swapchain(
-   struct vn_device *dev,
-   const VkImageCreateInfo *create_info,
-   const VkImageSwapchainCreateInfoKHR *swapchain_info,
-   const VkAllocationCallbacks *alloc,
-   struct vn_image **out_img)
-{
-   const struct vn_image *swapchain_img = vn_image_from_handle(
-      wsi_common_get_image(swapchain_info->swapchain, 0));
-   assert(swapchain_img->wsi.is_wsi);
-
-   /* must match what the common WSI and vn_wsi_create_image do */
-   VkImageCreateInfo local_create_info = *create_info;
-
-   /* match external memory */
-   const VkExternalMemoryImageCreateInfo local_external_info = {
-      .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
-      .pNext = local_create_info.pNext,
-      .handleTypes =
-         dev->physical_device->external_memory.renderer_handle_type,
-   };
-   local_create_info.pNext = &local_external_info;
-
-   /* match image tiling */
-   local_create_info.tiling = swapchain_img->wsi.tiling_override;
-
-   VkImageDrmFormatModifierListCreateInfoEXT local_mod_info;
-   if (local_create_info.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
-      local_mod_info = (const VkImageDrmFormatModifierListCreateInfoEXT){
-         .sType =
-            VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT,
-         .pNext = local_create_info.pNext,
-         .drmFormatModifierCount = 1,
-         .pDrmFormatModifiers = &swapchain_img->wsi.drm_format_modifier,
-      };
-      local_create_info.pNext = &local_mod_info;
-   }
-
-   /* match image usage */
-   if (swapchain_img->wsi.is_prime_blit_src)
-      local_create_info.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-
-   create_info = &local_create_info;
-
-   struct vn_image *img;
-   VkResult result = vn_image_create(dev, create_info, alloc, &img);
-   if (result != VK_SUCCESS)
-      return result;
-
-   img->wsi.is_wsi = true;
-   img->wsi.tiling_override = swapchain_img->wsi.tiling_override;
-   img->wsi.drm_format_modifier = swapchain_img->wsi.drm_format_modifier;
 
    *out_img = img;
    return VK_SUCCESS;
 }
 
 /* swapchain commands */
-
-VkResult
-vn_CreateSwapchainKHR(VkDevice device,
-                      const VkSwapchainCreateInfoKHR *pCreateInfo,
-                      const VkAllocationCallbacks *pAllocator,
-                      VkSwapchainKHR *pSwapchain)
-{
-   struct vn_device *dev = vn_device_from_handle(device);
-
-   VkResult result =
-      wsi_CreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
-   if (VN_DEBUG(WSI) && result == VK_SUCCESS) {
-      vn_log(dev->instance,
-             "swapchain %p: created with surface %p, min count %d, size "
-             "%dx%d, mode %s, old %p",
-             VN_WSI_PTR(*pSwapchain), VN_WSI_PTR(pCreateInfo->surface),
-             pCreateInfo->minImageCount, pCreateInfo->imageExtent.width,
-             pCreateInfo->imageExtent.height,
-             vk_PresentModeKHR_to_str(pCreateInfo->presentMode),
-             VN_WSI_PTR(pCreateInfo->oldSwapchain));
-   }
-
-   vn_tls_set_async_pipeline_create();
-
-   return vn_result(dev->instance, result);
-}
-
-void
-vn_DestroySwapchainKHR(VkDevice device,
-                       VkSwapchainKHR swapchain,
-                       const VkAllocationCallbacks *pAllocator)
-{
-   struct vn_device *dev = vn_device_from_handle(device);
-
-   wsi_DestroySwapchainKHR(device, swapchain, pAllocator);
-   if (VN_DEBUG(WSI))
-      vn_log(dev->instance, "swapchain %p: destroyed", VN_WSI_PTR(swapchain));
-}
-
-VkResult
-vn_QueuePresentKHR(VkQueue _queue, const VkPresentInfoKHR *pPresentInfo)
-{
-   VN_TRACE_FUNC();
-   struct vk_queue *queue_vk = vk_queue_from_handle(_queue);
-   struct vn_device *dev = vn_device_from_vk(queue_vk->base.device);
-
-   VkResult result = wsi_common_queue_present(
-      &dev->physical_device->wsi_device, vn_device_to_handle(dev), _queue,
-      queue_vk->queue_family_index, pPresentInfo);
-   if (VN_DEBUG(WSI) && result != VK_SUCCESS) {
-      for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
-         const VkResult r =
-            pPresentInfo->pResults ? pPresentInfo->pResults[i] : result;
-         vn_log(dev->instance, "swapchain %p: presented image %d: %s",
-                VN_WSI_PTR(pPresentInfo->pSwapchains[i]),
-                pPresentInfo->pImageIndices[i], vk_Result_to_str(r));
-      }
-   }
-
-   return vn_result(dev->instance, result);
-}
 
 static int
 vn_wsi_export_sync_file(struct vn_device *dev, struct vn_renderer_bo *bo)

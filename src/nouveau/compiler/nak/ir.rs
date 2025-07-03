@@ -1930,12 +1930,61 @@ impl TexLodMode {
 impl fmt::Display for TexLodMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TexLodMode::Auto => write!(f, "la"),
-            TexLodMode::Zero => write!(f, "lz"),
-            TexLodMode::Bias => write!(f, "lb"),
-            TexLodMode::Lod => write!(f, "ll"),
-            TexLodMode::Clamp => write!(f, "lc"),
-            TexLodMode::BiasClamp => write!(f, "lb.lc"),
+            TexLodMode::Auto => write!(f, ""),
+            TexLodMode::Zero => write!(f, ".lz"),
+            TexLodMode::Bias => write!(f, ".lb"),
+            TexLodMode::Lod => write!(f, ".ll"),
+            TexLodMode::Clamp => write!(f, ".lc"),
+            TexLodMode::BiasClamp => write!(f, ".lb.lc"),
+        }
+    }
+}
+
+/// Derivative behavior for tex ops and FSwzAdd
+///
+/// The descriptions here may not be wholly accurate as they come from cobbling
+/// together a bunch of pieces.  This is my (Faith's) best understanding of how
+/// these things work.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum TexDerivMode {
+    /// Automatic
+    ///
+    /// For partial (not full) quads, the derivative will default to the value
+    /// of DEFAULT_PARTIAL in SET_SHADER_CONTROL.
+    ///
+    /// On Volta and earlier GPUs or on Blackwell B and later, derivatives in
+    /// all non-fragment shaders stages are assumed to be partial.
+    Auto,
+
+    /// Assume a non-divergent (full) derivative
+    ///
+    /// Partial derivative checks are skipped and the hardware does the
+    /// derivative anyway, possibly on rubbish data.
+    NonDivergent,
+
+    /// Force the derivative to be considered divergent (partial)
+    ///
+    /// This only exists as a separate thing on Blackwell A.  On Hopper and
+    /// earlier, there is a .fdv that's part of the LodMode, but only for
+    /// LodMode::Clamp.  On Blackwell B, it appears (according to the
+    /// disassembler) to be removed again in favor of DerivXY.
+    ForceDivergent,
+
+    /// Attempt an X/Y derivative, ignoring shader stage
+    ///
+    /// This is (I think) identical to Auto except that it ignores the shader
+    /// stage checks.  This is new on Blackwell B+.
+    DerivXY,
+}
+
+impl fmt::Display for TexDerivMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TexDerivMode::Auto => Ok(()),
+            TexDerivMode::NonDivergent => write!(f, ".ndv"),
+            TexDerivMode::ForceDivergent => write!(f, ".fdv"),
+            TexDerivMode::DerivXY => write!(f, ".dxy"),
         }
     }
 }
@@ -2831,6 +2880,7 @@ pub struct OpFSwzAdd {
 
     pub rnd_mode: FRndMode,
     pub ftz: bool,
+    pub deriv_mode: TexDerivMode,
 
     pub ops: [FSwzAddOp; 4],
 }
@@ -2844,6 +2894,7 @@ impl DisplayOp for OpFSwzAdd {
         if self.ftz {
             write!(f, ".ftz")?;
         }
+        write!(f, "{}", self.deriv_mode)?;
         write!(
             f,
             " {} {} [{}, {}, {}, {}]",
@@ -2904,6 +2955,7 @@ pub struct OpFSwz {
 
     pub rnd_mode: FRndMode,
     pub ftz: bool,
+    pub deriv_mode: TexDerivMode,
     pub shuffle: FSwzShuffle,
 
     pub ops: [FSwzAddOp; 4],
@@ -2915,6 +2967,7 @@ impl DisplayOp for OpFSwz {
         if self.rnd_mode != FRndMode::NearestEven {
             write!(f, "{}", self.rnd_mode)?;
         }
+        write!(f, "{}", self.deriv_mode)?;
         if self.ftz {
             write!(f, ".ftz")?;
         }
@@ -3109,7 +3162,7 @@ impl DisplayOp for OpDMnMx {
 impl_display_for_op!(OpDMnMx);
 
 #[repr(C)]
-#[derive(SrcsAsSlice, DstsAsSlice)]
+#[derive(Clone, SrcsAsSlice, DstsAsSlice)]
 pub struct OpDSetP {
     #[dst_type(Pred)]
     pub dst: Dst,
@@ -3122,6 +3175,35 @@ pub struct OpDSetP {
 
     #[src_type(Pred)]
     pub accum: Src,
+}
+
+impl Foldable for OpDSetP {
+    fn fold(&self, _sm: &dyn ShaderModel, f: &mut OpFoldData<'_>) {
+        let a = f.get_f64_src(self, &self.srcs[0]);
+        let b = f.get_f64_src(self, &self.srcs[1]);
+        let accum = f.get_pred_src(self, &self.accum);
+
+        let ordered = !a.is_nan() && !b.is_nan();
+        let cmp_res = match self.cmp_op {
+            FloatCmpOp::OrdEq => ordered && a == b,
+            FloatCmpOp::OrdNe => ordered && a != b,
+            FloatCmpOp::OrdLt => ordered && a < b,
+            FloatCmpOp::OrdLe => ordered && a <= b,
+            FloatCmpOp::OrdGt => ordered && a > b,
+            FloatCmpOp::OrdGe => ordered && a >= b,
+            FloatCmpOp::UnordEq => !ordered || a == b,
+            FloatCmpOp::UnordNe => !ordered || a != b,
+            FloatCmpOp::UnordLt => !ordered || a < b,
+            FloatCmpOp::UnordLe => !ordered || a <= b,
+            FloatCmpOp::UnordGt => !ordered || a > b,
+            FloatCmpOp::UnordGe => !ordered || a >= b,
+            FloatCmpOp::IsNum => ordered,
+            FloatCmpOp::IsNan => !ordered,
+        };
+        let res = self.set_op.eval(cmp_res, accum);
+
+        f.set_pred_dst(self, &self.dst, res);
+    }
 }
 
 impl DisplayOp for OpDSetP {
@@ -3766,7 +3848,7 @@ impl DisplayOp for OpIMad64 {
 impl_display_for_op!(OpIMad64);
 
 #[repr(C)]
-#[derive(SrcsAsSlice, DstsAsSlice)]
+#[derive(Clone, SrcsAsSlice, DstsAsSlice)]
 pub struct OpIMnMx {
     #[dst_type(GPR)]
     pub dst: Dst,
@@ -3778,6 +3860,25 @@ pub struct OpIMnMx {
 
     #[src_type(Pred)]
     pub min: Src,
+}
+
+impl Foldable for OpIMnMx {
+    fn fold(&self, _sm: &dyn ShaderModel, f: &mut OpFoldData<'_>) {
+        let (a, b) = (
+            f.get_u32_bnot_src(self, &self.srcs[0]),
+            f.get_u32_bnot_src(self, &self.srcs[1]),
+        );
+        let min = f.get_pred_src(self, &self.min);
+
+        let res = match (min, self.cmp_type) {
+            (true, IntCmpType::U32) => a.min(b),
+            (true, IntCmpType::I32) => (a as i32).min(b as i32) as u32,
+            (false, IntCmpType::U32) => a.max(b),
+            (false, IntCmpType::I32) => (a as i32).max(b as i32) as u32,
+        };
+
+        f.set_u32_dst(self, &self.dst, res);
+    }
 }
 
 impl DisplayOp for OpIMnMx {
@@ -5065,6 +5166,7 @@ pub struct OpTex {
 
     pub dim: TexDim,
     pub lod_mode: TexLodMode,
+    pub deriv_mode: TexDerivMode,
     pub z_cmpr: bool,
     pub offset_mode: TexOffsetMode,
     pub mem_eviction_priority: MemEvictionPriority,
@@ -5074,11 +5176,11 @@ pub struct OpTex {
 
 impl DisplayOp for OpTex {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "tex{}", self.dim)?;
-        if self.lod_mode != TexLodMode::Auto {
-            write!(f, ".{}", self.lod_mode)?;
-        }
-        write!(f, "{}", self.offset_mode)?;
+        write!(
+            f,
+            "tex{}{}{}{}",
+            self.dim, self.lod_mode, self.offset_mode, self.deriv_mode
+        )?;
         if self.z_cmpr {
             write!(f, ".dc")?;
         }
@@ -5114,11 +5216,7 @@ pub struct OpTld {
 
 impl DisplayOp for OpTld {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "tld{}", self.dim)?;
-        if self.lod_mode != TexLodMode::Auto {
-            write!(f, ".{}", self.lod_mode)?;
-        }
-        write!(f, "{}", self.offset_mode)?;
+        write!(f, "tld{}{}{}", self.dim, self.lod_mode, self.offset_mode)?;
         if self.is_ms {
             write!(f, ".ms")?;
         }
@@ -5179,13 +5277,14 @@ pub struct OpTmml {
     pub srcs: [Src; 2],
 
     pub dim: TexDim,
+    pub deriv_mode: TexDerivMode,
     pub nodep: bool,
     pub channel_mask: ChannelMask,
 }
 
 impl DisplayOp for OpTmml {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "tmml.lod{}", self.dim)?;
+        write!(f, "tmml.lod{}{}", self.dim, self.deriv_mode)?;
         if self.nodep {
             write!(f, ".nodep")?;
         }
@@ -5283,7 +5382,7 @@ pub struct OpSuLd {
     pub mem_order: MemOrder,
     pub mem_eviction_priority: MemEvictionPriority,
 
-    #[src_type(GPR)]
+    #[src_type(SSA)]
     pub handle: Src,
 
     #[src_type(SSA)]
@@ -5314,7 +5413,7 @@ pub struct OpSuSt {
     pub mem_order: MemOrder,
     pub mem_eviction_priority: MemEvictionPriority,
 
-    #[src_type(GPR)]
+    #[src_type(SSA)]
     pub handle: Src,
 
     #[src_type(SSA)]
@@ -5355,7 +5454,7 @@ pub struct OpSuAtom {
     pub mem_order: MemOrder,
     pub mem_eviction_priority: MemEvictionPriority,
 
-    #[src_type(GPR)]
+    #[src_type(SSA)]
     pub handle: Src,
 
     #[src_type(SSA)]
@@ -6953,6 +7052,46 @@ impl DisplayOp for OpVote {
 }
 impl_display_for_op!(OpVote);
 
+#[allow(dead_code)]
+#[derive(Copy, Clone)]
+pub enum MatchOp {
+    All,
+    Any,
+}
+
+impl fmt::Display for MatchOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MatchOp::All => write!(f, ".all"),
+            MatchOp::Any => write!(f, ".any"),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(SrcsAsSlice, DstsAsSlice)]
+pub struct OpMatch {
+    #[dst_type(Pred)]
+    pub pred: Dst,
+
+    #[dst_type(GPR)]
+    pub mask: Dst,
+
+    #[src_type(GPR)]
+    pub src: Src,
+
+    pub op: MatchOp,
+    pub u64: bool,
+}
+
+impl DisplayOp for OpMatch {
+    fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let u64_str = if self.u64 { ".u64" } else { "" };
+        write!(f, "match{}{} {}", self.op, u64_str, self.src)
+    }
+}
+impl_display_for_op!(OpMatch);
+
 #[repr(C)]
 #[derive(SrcsAsSlice, DstsAsSlice)]
 pub struct OpUndef {
@@ -7590,6 +7729,7 @@ pub enum Op {
     PixLd(OpPixLd),
     S2R(OpS2R),
     Vote(OpVote),
+    Match(OpMatch),
     Undef(OpUndef),
     SrcBar(OpSrcBar),
     PhiSrcs(OpPhiSrcs),
@@ -7767,7 +7907,8 @@ impl Op {
             | Op::ViLd(_)
             | Op::Kill(_)
             | Op::PixLd(_)
-            | Op::S2R(_) => false,
+            | Op::S2R(_)
+            | Op::Match(_) => false,
             Op::Nop(_) | Op::Vote(_) => true,
 
             // Virtual ops
@@ -8729,8 +8870,18 @@ pub trait ShaderModel {
     }
 
     #[allow(dead_code)]
-    fn is_blackwell(&self) -> bool {
+    fn is_blackwell_a(&self) -> bool {
         self.sm() >= 100 && self.sm() < 110
+    }
+
+    #[allow(dead_code)]
+    fn is_blackwell_b(&self) -> bool {
+        self.sm() >= 120 && self.sm() < 130
+    }
+
+    #[allow(dead_code)]
+    fn is_blackwell(&self) -> bool {
+        self.is_blackwell_a() || self.is_blackwell_b()
     }
 
     fn num_regs(&self, file: RegFile) -> u32;

@@ -129,7 +129,7 @@ struct nir_instr;
 
 #define SI_MAX_ATTRIBS    16
 #define SI_MAX_VS_OUTPUTS 40
-#define SI_USER_CLIP_PLANE_MASK  0x3F
+#define SI_USER_CLIP_PLANE_MASK  BITFIELD_MASK(8)
 
 #define INTERP_MODE_COLOR  INTERP_MODE_COUNT
 
@@ -752,14 +752,6 @@ struct si_shader_binary {
    unsigned num_symbols;
 };
 
-struct gfx9_gs_info {
-   unsigned es_verts_per_subgroup;
-   unsigned gs_prims_per_subgroup;
-   unsigned gs_inst_prims_in_subgroup;
-   unsigned max_prims_per_subgroup;
-   unsigned esgs_ring_size; /* in bytes */
-};
-
 struct si_shader {
    struct si_pm4_state pm4; /* base class */
    struct si_compiler_ctx_state compiler_ctx_state;
@@ -803,7 +795,7 @@ struct si_shader {
    char *shader_log;
    size_t shader_log_size;
 
-   struct gfx9_gs_info gs_info;
+   ac_legacy_gs_subgroup_info gs_info;
 
    /* Precomputed register values. */
    union {
@@ -826,12 +818,8 @@ struct si_shader {
       } gs;
 
       struct {
-         /* Computed by gfx10_ngg_calculate_subgroup_info. */
-         uint16_t ngg_emit_size; /* in dwords */
-         uint16_t hw_max_esverts;
-         uint16_t max_gsprims;
-         uint16_t max_out_verts;
-         bool max_vert_out_per_gs_instance;
+         /* Computed by ac_ngg_calculate_subgroup_info. */
+         ac_ngg_subgroup_info info;
          /* Register values. */
          unsigned ge_max_output_per_subgroup;
          unsigned ge_ngg_subgrp_cntl;
@@ -891,6 +879,7 @@ struct si_shader_part {
 /* si_shader.c */
 struct ac_rtld_binary;
 
+unsigned si_map_io_driver_location(unsigned semantic);
 bool si_compile_shader(struct si_screen *sscreen, struct ac_llvm_compiler *compiler,
                        struct si_shader *shader, struct util_debug_callback *debug);
 bool si_create_shader_variant(struct si_screen *sscreen, struct ac_llvm_compiler *compiler,
@@ -930,8 +919,6 @@ char *si_finalize_nir(struct pipe_screen *screen, struct nir_shader *nir);
 /* si_state_shaders.cpp */
 unsigned si_shader_num_alloc_param_exports(struct si_shader *shader);
 unsigned si_determine_wave_size(struct si_screen *sscreen, struct si_shader *shader);
-void gfx9_get_gs_info(struct si_shader_selector *es, struct si_shader_selector *gs,
-                      struct gfx9_gs_info *out);
 bool gfx10_is_ngg_passthrough(struct si_shader *shader);
 unsigned si_shader_lshs_vertex_stride(struct si_shader *ls);
 bool si_should_clear_lds(struct si_screen *sscreen, const struct nir_shader *shader);

@@ -307,12 +307,12 @@ crocus_lower_storage_image_derefs_instr(nir_builder *b,
    }
 }
 
-static void
+static bool
 crocus_lower_storage_image_derefs(nir_shader *nir)
 {
-   nir_shader_intrinsics_pass(nir, crocus_lower_storage_image_derefs_instr,
-                              nir_metadata_control_flow,
-                              NULL);
+   return nir_shader_intrinsics_pass(nir, crocus_lower_storage_image_derefs_instr,
+                                     nir_metadata_control_flow,
+                                     NULL);
 }
 
 // XXX: need unify_interfaces() at link time...
@@ -1172,7 +1172,7 @@ crocus_compile_vs(struct crocus_context *ice,
       /* Check if variables were found. */
       if (nir_lower_clip_vs(nir, (1 << key->nr_userclip_plane_consts) - 1,
                             true, false, NULL)) {
-         nir_lower_io_to_temporaries(nir, impl, true, false);
+         nir_lower_io_vars_to_temporaries(nir, impl, true, false);
          nir_lower_global_vars_to_local(nir);
          nir_lower_vars_to_ssa(nir);
          nir_shader_gather_info(nir, impl);
@@ -1532,7 +1532,7 @@ crocus_compile_tes(struct crocus_context *ice,
       nir_function_impl *impl = nir_shader_get_entrypoint(nir);
       nir_lower_clip_vs(nir, (1 << key->nr_userclip_plane_consts) - 1, true,
                         false, NULL);
-      nir_lower_io_to_temporaries(nir, impl, true, false);
+      nir_lower_io_vars_to_temporaries(nir, impl, true, false);
       nir_lower_global_vars_to_local(nir);
       nir_lower_vars_to_ssa(nir);
       nir_shader_gather_info(nir, impl);
@@ -1675,7 +1675,7 @@ crocus_compile_gs(struct crocus_context *ice,
       nir_function_impl *impl = nir_shader_get_entrypoint(nir);
       nir_lower_clip_gs(nir, (1 << key->nr_userclip_plane_consts) - 1, false,
                         NULL);
-      nir_lower_io_to_temporaries(nir, impl, true, false);
+      nir_lower_io_vars_to_temporaries(nir, impl, true, false);
       nir_lower_global_vars_to_local(nir);
       nir_lower_vars_to_ssa(nir);
       nir_shader_gather_info(nir, impl);
@@ -2513,7 +2513,7 @@ crocus_compile_cs(struct crocus_context *ice,
 
    nir_shader *nir = nir_shader_clone(mem_ctx, ish->nir);
 
-   NIR_PASS_V(nir, elk_nir_lower_cs_intrinsics, devinfo, cs_prog_data);
+   NIR_PASS(_, nir, elk_nir_lower_cs_intrinsics, devinfo, cs_prog_data);
 
    crocus_setup_uniforms(devinfo, mem_ctx, nir, prog_data, &system_values,
                          &num_system_values, &num_cbufs);
@@ -2674,7 +2674,7 @@ crocus_create_uncompiled_shader(struct pipe_context *ctx,
    struct elk_nir_compiler_opts opts = {};
    elk_preprocess_nir(screen->compiler, nir, &opts);
 
-   NIR_PASS_V(nir, elk_nir_lower_storage_image,
+   NIR_PASS(_, nir, elk_nir_lower_storage_image,
               &(struct elk_nir_lower_storage_image_opts) {
                  .devinfo = devinfo,
                  .lower_loads = true,
@@ -2682,7 +2682,7 @@ crocus_create_uncompiled_shader(struct pipe_context *ctx,
                  .lower_atomics = true,
                  .lower_get_size = true,
               });
-   NIR_PASS_V(nir, crocus_lower_storage_image_derefs);
+   NIR_PASS(_, nir, crocus_lower_storage_image_derefs);
 
    nir_sweep(nir);
 

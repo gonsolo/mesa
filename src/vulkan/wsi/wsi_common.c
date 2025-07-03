@@ -1120,23 +1120,6 @@ wsi_ReleaseSwapchainImagesEXT(VkDevice _device,
    return VK_SUCCESS;
 }
 
-VkResult
-wsi_common_get_images(VkSwapchainKHR _swapchain,
-                      uint32_t *pSwapchainImageCount,
-                      VkImage *pSwapchainImages)
-{
-   VK_FROM_HANDLE(wsi_swapchain, swapchain, _swapchain);
-   VK_OUTARRAY_MAKE_TYPED(VkImage, images, pSwapchainImages, pSwapchainImageCount);
-
-   for (uint32_t i = 0; i < swapchain->image_count; i++) {
-      vk_outarray_append_typed(VkImage, &images, image) {
-         *image = swapchain->get_wsi_image(swapchain, i)->image;
-      }
-   }
-
-   return vk_outarray_status(&images);
-}
-
 VkImage
 wsi_common_get_image(VkSwapchainKHR _swapchain, uint32_t index)
 {
@@ -1147,14 +1130,21 @@ wsi_common_get_image(VkSwapchainKHR _swapchain, uint32_t index)
 
 VKAPI_ATTR VkResult VKAPI_CALL
 wsi_GetSwapchainImagesKHR(VkDevice device,
-                          VkSwapchainKHR swapchain,
+                          VkSwapchainKHR _swapchain,
                           uint32_t *pSwapchainImageCount,
                           VkImage *pSwapchainImages)
 {
    MESA_TRACE_FUNC();
-   return wsi_common_get_images(swapchain,
-                                pSwapchainImageCount,
-                                pSwapchainImages);
+   VK_FROM_HANDLE(wsi_swapchain, swapchain, _swapchain);
+   VK_OUTARRAY_MAKE_TYPED(VkImage, images, pSwapchainImages, pSwapchainImageCount);
+
+   for (uint32_t i = 0; i < swapchain->image_count; i++) {
+      vk_outarray_append_typed(VkImage, &images, image) {
+         *image = swapchain->get_wsi_image(swapchain, i)->image;
+      }
+   }
+
+   return vk_outarray_status(&images);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -1383,6 +1373,8 @@ wsi_common_queue_present(const struct wsi_device *wsi,
       vk_find_struct_const(pPresentInfo->pNext, PRESENT_REGIONS_KHR);
    const VkPresentIdKHR *present_ids =
       vk_find_struct_const(pPresentInfo->pNext, PRESENT_ID_KHR);
+   const VkPresentId2KHR *present_ids2 =
+      vk_find_struct_const(pPresentInfo->pNext, PRESENT_ID_2_KHR);
    const VkSwapchainPresentFenceInfoEXT *present_fence_info =
       vk_find_struct_const(pPresentInfo->pNext, SWAPCHAIN_PRESENT_FENCE_INFO_EXT);
    const VkSwapchainPresentModeInfoEXT *present_mode_info =
@@ -1574,6 +1566,10 @@ wsi_common_queue_present(const struct wsi_device *wsi,
       uint64_t present_id = 0;
       if (present_ids && present_ids->pPresentIds)
          present_id = present_ids->pPresentIds[i];
+      if (present_ids2 && present_ids2->pPresentIds) {
+         assert(present_id == 0);
+         present_id = present_ids2->pPresentIds[i];
+      }
       VkFence present_fence = VK_NULL_HANDLE;
       if (present_fence_info && present_fence_info->pFences)
          present_fence = present_fence_info->pFences[i];
@@ -1770,6 +1766,12 @@ wsi_select_memory_type(const struct wsi_device *wsi,
       return wsi_select_memory_type(wsi, req_props, deny_props, type_bits);
    }
 
+   if (req_props & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) {
+      req_props &= ~VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+      // fallback to coherent if cached-coherent is requested but not found
+      return wsi_select_memory_type(wsi, req_props, deny_props, type_bits);
+   }
+
    unreachable("No memory type found");
 }
 
@@ -1785,8 +1787,12 @@ static uint32_t
 wsi_select_host_memory_type(const struct wsi_device *wsi,
                             uint32_t type_bits)
 {
-   return wsi_select_memory_type(wsi, VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                 0 /* deny_props */, type_bits);
+   VkMemoryPropertyFlags req_props = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+   if (wsi->sw)
+      req_props |= VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+
+   return wsi_select_memory_type(wsi, req_props, 0 /* deny_props */, type_bits);
 }
 
 VkResult
@@ -1852,6 +1858,7 @@ wsi_create_buffer_blit_context(const struct wsi_swapchain *chain,
    VkExportMemoryAllocateInfo memory_export_info;
    VkImportMemoryHostPointerInfoEXT host_ptr_info;
    if (sw_host_ptr != NULL) {
+      image->blit.to_foreign_queue = true;
       host_ptr_info = (VkImportMemoryHostPointerInfoEXT) {
          .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
          .pHostPointer = sw_host_ptr,
@@ -1859,6 +1866,7 @@ wsi_create_buffer_blit_context(const struct wsi_swapchain *chain,
       };
       __vk_append_struct(&buf_mem_info, &host_ptr_info);
    } else if (handle_types != 0) {
+      image->blit.to_foreign_queue = true;
       memory_export_info = (VkExportMemoryAllocateInfo) {
          .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
          .handleTypes = handle_types,
@@ -1923,7 +1931,8 @@ static void
 wsi_cmd_blit_image_to_buffer(VkCommandBuffer cmd_buffer,
                              const struct wsi_device *wsi,
                              const struct wsi_image_info *info,
-                             struct wsi_image *image)
+                             struct wsi_image *image,
+                             uint32_t qfi)
 {
    assert(info->image_type == WSI_IMAGE_TYPE_CPU ||
           info->image_type == WSI_IMAGE_TYPE_DRM);
@@ -1978,12 +1987,27 @@ wsi_cmd_blit_image_to_buffer(VkCommandBuffer cmd_buffer,
    img_mem_barrier.dstAccessMask = 0;
    img_mem_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
    img_mem_barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+   const VkBufferMemoryBarrier buf_mem_barrier = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+      .pNext = NULL,
+      .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+      .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+      .srcQueueFamilyIndex =
+         image->blit.to_foreign_queue ? qfi : VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = image->blit.to_foreign_queue
+                                ? VK_QUEUE_FAMILY_FOREIGN_EXT
+                                : VK_QUEUE_FAMILY_IGNORED,
+      .buffer = image->blit.buffer,
+      .offset = 0,
+      .size = VK_WHOLE_SIZE,
+   };
    wsi->CmdPipelineBarrier(cmd_buffer,
                            VK_PIPELINE_STAGE_TRANSFER_BIT,
-                           VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                           VK_PIPELINE_STAGE_HOST_BIT,
                            0,
                            0, NULL,
-                           0, NULL,
+                           1, &buf_mem_barrier,
                            1, &img_mem_barrier);
 }
 
@@ -2126,9 +2150,13 @@ wsi_finish_create_blit_context(const struct wsi_swapchain *chain,
       wsi->BeginCommandBuffer(cmd_buffer, &begin_info);
 
       switch (chain->blit.type) {
-      case WSI_SWAPCHAIN_BUFFER_BLIT:
-         wsi_cmd_blit_image_to_buffer(cmd_buffer, wsi, info, image);
+      case WSI_SWAPCHAIN_BUFFER_BLIT: {
+         VK_FROM_HANDLE(vk_queue, blit_queue, chain->blit.queue);
+         wsi_cmd_blit_image_to_buffer(
+            cmd_buffer, wsi, info, image,
+            blit_queue ? blit_queue->queue_family_index : i);
          break;
+      }
       case WSI_SWAPCHAIN_IMAGE_BLIT:
          wsi_cmd_blit_image_to_image(cmd_buffer, wsi, info, image);
          break;
@@ -2329,6 +2357,15 @@ wsi_WaitForPresentKHR(VkDevice device, VkSwapchainKHR _swapchain,
    VK_FROM_HANDLE(wsi_swapchain, swapchain, _swapchain);
    assert(swapchain->wait_for_present);
    return swapchain->wait_for_present(swapchain, presentId, timeout);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+wsi_WaitForPresent2KHR(VkDevice device, VkSwapchainKHR _swapchain,
+                       const VkPresentWait2InfoKHR *info)
+{
+   VK_FROM_HANDLE(wsi_swapchain, swapchain, _swapchain);
+   assert(swapchain->wait_for_present2);
+   return swapchain->wait_for_present2(swapchain, info->presentId, info->timeout);
 }
 
 VkImageUsageFlags

@@ -66,6 +66,7 @@ enum radeon_bo_flag
   RADEON_FLAG_WINSYS_SLAB_BACKING = (1 << 11), /* only used by the winsys */
   RADEON_FLAG_GFX12_ALLOW_DCC = (1 << 12), /* allow DCC, VRAM only */
   RADEON_FLAG_CLEAR_VRAM = (1 << 13),
+  RADEON_FLAG_NO_VMA = (1 << 14), /* frontend assigns addresses */
 };
 
 static inline void
@@ -509,6 +510,33 @@ struct radeon_winsys {
     */
    enum radeon_bo_flag (*buffer_get_flags)(struct pb_buffer_lean *buf);
 
+   /**
+    * Query the valid virtual memory range of the device for use with alloc_vm.
+    */
+   void (*va_range)(struct radeon_winsys *rws, uint64_t *start, uint64_t *end);
+
+   /**
+    * Reserves a virtual memory range for use through buffer_assign_vma. Start and size must be
+    * within the limits of va_range otherwise this function will return NULL.
+    */
+   struct pipe_vm_allocation *(*alloc_vm)(struct radeon_winsys *rws, uint64_t start, uint64_t size);
+
+   /**
+    * Frees a virtual memory range reservation.
+    */
+   void (*free_vm)(struct radeon_winsys *rws, struct pipe_vm_allocation *alloc);
+
+   /**
+    * Assigns the given address to buf.
+    *
+    * \param buf        The buffer the address gets assigned to. This buffer must have been created
+    *                   with the RADEON_FLAG_NO_VMA flag.
+    * \param address    Address to be assigned. Needs to be within a range previously reserved
+    *                   through alloc_vm or 0.
+    */
+   bool (*buffer_assign_vma)(struct radeon_winsys *rws, struct pb_buffer_lean *buf,
+                             uint64_t address);
+
    /**************************************************************************
     * Command submission.
     *
@@ -742,6 +770,13 @@ struct radeon_winsys {
    int (*surface_init)(struct radeon_winsys *ws, const struct radeon_info *info,
                        const struct pipe_resource *tex, uint64_t flags,
                        unsigned bpe, enum radeon_surf_mode mode, struct radeon_surf *surf);
+
+   uint64_t (*surface_offset_from_coord)(struct radeon_winsys *rws,
+                                         const struct radeon_info *info,
+                                         const struct radeon_surf *surf,
+                                         const struct pipe_resource *tex,
+                                         unsigned level, unsigned x, unsigned y,
+                                         unsigned layer);
 
    uint64_t (*query_value)(struct radeon_winsys *ws, enum radeon_value_id value);
 

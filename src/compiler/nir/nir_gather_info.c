@@ -356,8 +356,6 @@ nir_intrinsic_writes_external_memory(const nir_intrinsic_instr *instr)
    case nir_intrinsic_bindless_image_store_raw_intel:
    case nir_intrinsic_global_atomic:
    case nir_intrinsic_global_atomic_swap:
-   case nir_intrinsic_global_atomic_ir3:
-   case nir_intrinsic_global_atomic_swap_ir3:
    case nir_intrinsic_image_atomic:
    case nir_intrinsic_image_atomic_swap:
    case nir_intrinsic_image_deref_atomic:
@@ -622,6 +620,8 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
          shader->info.patch_outputs_written |= slot_mask;
          if (!nir_src_is_const(*nir_get_io_offset_src(instr)))
             shader->info.patch_outputs_written_indirectly |= slot_mask;
+         if (!nir_intrinsic_io_semantics(instr).no_varying)
+            shader->info.tess.tcs_patch_outputs_read_by_tes |= slot_mask;
       } else {
          shader->info.outputs_written |= slot_mask;
          shader->info.outputs_written_16bit |= slot_mask_16bit;
@@ -631,12 +631,18 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
             shader->info.outputs_written_indirectly |= slot_mask;
             shader->info.outputs_written_indirectly_16bit |= slot_mask_16bit;
          }
-      }
 
-      if (shader->info.stage == MESA_SHADER_TESS_CTRL &&
-          instr->intrinsic == nir_intrinsic_store_per_vertex_output &&
-          !src_is_invocation_id(nir_get_io_arrayed_index_src(instr)))
-         shader->info.tess.tcs_cross_invocation_outputs_written |= slot_mask;
+         if (shader->info.stage == MESA_SHADER_TESS_CTRL) {
+            if (instr->intrinsic == nir_intrinsic_store_per_vertex_output &&
+                !src_is_invocation_id(nir_get_io_arrayed_index_src(instr)))
+               shader->info.tess.tcs_cross_invocation_outputs_written |= slot_mask;
+
+            if (!nir_intrinsic_io_semantics(instr).no_varying) {
+               shader->info.tess.tcs_outputs_read_by_tes |= slot_mask;
+               shader->info.tess.tcs_outputs_read_by_tes_16bit |= slot_mask_16bit;
+            }
+         }
+      }
 
       if (shader->info.stage == MESA_SHADER_MESH &&
           (instr->intrinsic == nir_intrinsic_store_per_vertex_output ||
@@ -674,6 +680,8 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
    case nir_intrinsic_load_invocation_id:
    case nir_intrinsic_load_frag_coord:
    case nir_intrinsic_load_pixel_coord:
+   case nir_intrinsic_load_frag_coord_z:
+   case nir_intrinsic_load_frag_coord_w:
    case nir_intrinsic_load_frag_shading_rate:
    case nir_intrinsic_load_fully_covered:
    case nir_intrinsic_load_point_coord:
@@ -1032,6 +1040,9 @@ nir_shader_gather_info(nir_shader *shader, nir_function_impl *entrypoint)
       shader->info.tess.tcs_cross_invocation_inputs_read = 0;
       shader->info.tess.tcs_cross_invocation_outputs_read = 0;
       shader->info.tess.tcs_cross_invocation_outputs_written = 0;
+      shader->info.tess.tcs_outputs_read_by_tes = 0;
+      shader->info.tess.tcs_patch_outputs_read_by_tes = 0;
+      shader->info.tess.tcs_outputs_read_by_tes_16bit = 0;
    }
    if (shader->info.stage == MESA_SHADER_MESH) {
       shader->info.mesh.ms_cross_invocation_output_access = 0;

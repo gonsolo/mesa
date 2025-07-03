@@ -235,8 +235,6 @@ anv_shader_bin_create(struct anv_device *device,
    VK_MULTIALLOC_DECL(&ma, struct anv_pipeline_embedded_sampler_binding,
                       embedded_sampler_to_binding,
                       bind_map->embedded_sampler_count);
-   VK_MULTIALLOC_DECL(&ma, struct brw_kernel_arg_desc, kernel_args,
-                      bind_map->kernel_arg_count);
    VK_MULTIALLOC_DECL(&ma, struct anv_embedded_sampler *, embedded_samplers,
                       bind_map->embedded_sampler_count);
 
@@ -274,7 +272,12 @@ anv_shader_bin_create(struct anv_device *device,
       prog_data_in->const_data_offset;
 
    int rv_count = 0;
-   struct brw_shader_reloc_value reloc_values[10];
+   struct brw_shader_reloc_value reloc_values[11];
+   assert((device->physical->va.instruction_state_pool.addr & 0xffffffff) == 0);
+   reloc_values[rv_count++] = (struct brw_shader_reloc_value) {
+      .id = BRW_SHADER_RELOC_INSTRUCTION_BASE_ADDR_HIGH,
+      .value = device->physical->va.instruction_state_pool.addr >> 32,
+   };
    assert((device->physical->va.dynamic_visible_pool.addr & 0xffffffff) == 0);
    reloc_values[rv_count++] = (struct brw_shader_reloc_value) {
       .id = BRW_SHADER_RELOC_DESCRIPTORS_BUFFER_ADDR_HIGH,
@@ -386,10 +389,6 @@ anv_shader_bin_create(struct anv_device *device,
                 bind_map->input_attachments,
                 ARRAY_SIZE(bind_map->input_attachments));
 
-   typed_memcpy(kernel_args, bind_map->kernel_args,
-                bind_map->kernel_arg_count);
-   shader->bind_map.kernel_args = kernel_args;
-
    return shader;
 }
 
@@ -444,11 +443,6 @@ anv_shader_bin_serialize(struct vk_pipeline_cache_object *object,
    blob_write_uint32(blob, shader->bind_map.surface_count);
    blob_write_uint32(blob, shader->bind_map.sampler_count);
    blob_write_uint32(blob, shader->bind_map.embedded_sampler_count);
-   if (shader->stage == MESA_SHADER_KERNEL) {
-      uint32_t packed = (uint32_t)shader->bind_map.kernel_args_size << 16 |
-                        (uint32_t)shader->bind_map.kernel_arg_count;
-      blob_write_uint32(blob, packed);
-   }
    blob_write_bytes(blob, shader->bind_map.surface_to_descriptor,
                     shader->bind_map.surface_count *
                     sizeof(*shader->bind_map.surface_to_descriptor));
@@ -460,9 +454,6 @@ anv_shader_bin_serialize(struct vk_pipeline_cache_object *object,
                     sizeof(*shader->bind_map.embedded_sampler_to_binding));
    blob_write_bytes(blob, shader->bind_map.input_attachments,
                     sizeof(shader->bind_map.input_attachments));
-   blob_write_bytes(blob, shader->bind_map.kernel_args,
-                    shader->bind_map.kernel_arg_count *
-                    sizeof(*shader->bind_map.kernel_args));
    blob_write_bytes(blob, shader->bind_map.push_ranges,
                     sizeof(shader->bind_map.push_ranges));
 
@@ -516,11 +507,6 @@ anv_shader_bin_deserialize(struct vk_pipeline_cache *cache,
    bind_map.surface_count = blob_read_uint32(blob);
    bind_map.sampler_count = blob_read_uint32(blob);
    bind_map.embedded_sampler_count = blob_read_uint32(blob);
-   if (stage == MESA_SHADER_KERNEL) {
-      uint32_t packed = blob_read_uint32(blob);
-      bind_map.kernel_args_size = (uint16_t)(packed >> 16);
-      bind_map.kernel_arg_count = (uint16_t)packed;
-   }
    bind_map.surface_to_descriptor = (void *)
       blob_read_bytes(blob, bind_map.surface_count *
                             sizeof(*bind_map.surface_to_descriptor));
@@ -532,9 +518,6 @@ anv_shader_bin_deserialize(struct vk_pipeline_cache *cache,
                             sizeof(*bind_map.embedded_sampler_to_binding));
    blob_copy_bytes(blob, bind_map.input_attachments,
                    sizeof(bind_map.input_attachments));
-   bind_map.kernel_args = (void *)
-      blob_read_bytes(blob, bind_map.kernel_arg_count *
-                            sizeof(*bind_map.kernel_args));
    blob_copy_bytes(blob, bind_map.push_ranges, sizeof(bind_map.push_ranges));
 
    if (blob->overrun) {

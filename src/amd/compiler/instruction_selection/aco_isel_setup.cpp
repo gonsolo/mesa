@@ -136,9 +136,7 @@ sanitize_cf_list(nir_function_impl* impl, struct exec_list* cf_list)
             /* We don't use block divergence information, so just this is enough. */
             cond->divergent = false;
 
-            nir_push_if(&b, cond);
-            nir_jump(&b, nir_jump_break);
-            nir_pop_if(&b, NULL);
+            nir_break_if(&b, cond);
 
             progress = true;
          }
@@ -377,6 +375,9 @@ init_context(isel_context* ctx, nir_shader* shader)
    /* we'll need these for isel */
    nir_metadata_require(impl, nir_metadata_block_index);
 
+   /* Our definition of divergence is slightly different, but we still want nir to print it. */
+   impl->valid_metadata |= nir_metadata_divergence;
+
    if (ctx->options->dump_preoptir) {
       fprintf(stderr, "NIR shader before instruction selection:\n");
       nir_print_shader(shader, stderr);
@@ -412,6 +413,13 @@ init_context(isel_context* ctx, nir_shader* shader)
                       regclasses[alu_instr->src[0].src.ssa->index].type() == RegType::vgpr)
                      type = RegType::vgpr;
                   break;
+               case nir_op_f2e4m3fn:
+               case nir_op_f2e4m3fn_sat:
+               case nir_op_f2e4m3fn_satfn:
+               case nir_op_f2e5m2:
+               case nir_op_f2e5m2_sat:
+               case nir_op_e4m3fn2f:
+               case nir_op_e5m22f:
                case nir_op_fmulz:
                case nir_op_ffmaz:
                case nir_op_f2f64:
@@ -532,7 +540,6 @@ init_context(isel_context* ctx, nir_shader* shader)
                case nir_intrinsic_ballot_relaxed:
                case nir_intrinsic_bindless_image_samples:
                case nir_intrinsic_load_scalar_arg_amd:
-               case nir_intrinsic_load_lds_ngg_scratch_base_amd:
                case nir_intrinsic_load_lds_ngg_gs_out_vertex_base_amd:
                case nir_intrinsic_load_smem_amd:
                case nir_intrinsic_unit_test_uniform_amd: type = RegType::sgpr; break;

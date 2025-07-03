@@ -106,7 +106,7 @@ prepare_tex_descs(struct panvk_image_view *view)
 #if PAN_ARCH == 7
    /* v7 requires AFBC reswizzle. */
    else if (!pan_format_is_yuv(view->pview.format) &&
-            pan_format_supports_afbc(PAN_ARCH, view->pview.format))
+            pan_afbc_supports_format(PAN_ARCH, view->pview.format))
       GENX(pan_texture_afbc_reswizzle)(&pview);
 #endif
 
@@ -127,7 +127,7 @@ prepare_tex_descs(struct panvk_image_view *view)
                       ? pan_alignment(MULTIPLANAR_SURFACE)
                       : pan_alignment(SURFACE_WITH_STRIDE),
 #else
-      .alignment = pan_alignment(PLANE) * (plane_count > 1 ? 2 : 1),
+      .alignment = pan_alignment(NULL_PLANE) * (plane_count > 1 ? 2 : 1),
 #endif
 
       .size = tex_payload_size * (can_preload_other_aspect ? 2 : plane_count),
@@ -222,7 +222,7 @@ prepare_tex_descs(struct panvk_image_view *view)
    return VK_SUCCESS;
 }
 
-#if PAN_ARCH <= 7
+#if PAN_ARCH < 9
 static void
 prepare_attr_buf_descs(struct panvk_image_view *view)
 {
@@ -241,13 +241,17 @@ prepare_attr_buf_descs(struct panvk_image_view *view)
          vk_format_get_blocksize(view->vk.view_format) == 1)))
       plane_idx = 1;
 
-   const struct pan_image_props *plane_props = &image->planes[plane_idx].props;
+   const struct pan_image_props *plane_props =
+      &image->planes[plane_idx].image.props;
    const struct pan_image_layout *plane_layout =
-      &image->planes[plane_idx].layout;
+      &image->planes[plane_idx].plane.layout;
+   const struct pan_image_slice_layout *slayout =
+      &plane_layout->slices[view->pview.first_level];
    bool is_3d = plane_props->dim == MALI_TEXTURE_DIMENSION_3D;
-   unsigned offset = pan_image_surface_offset(
-      plane_layout, view->pview.first_level,
-      is_3d ? 0 : view->pview.first_layer, is_3d ? view->pview.first_layer : 0);
+   unsigned offset =
+      slayout->offset_B + (view->pview.first_layer *
+                           (is_3d ? slayout->tiled_or_linear.surface_stride_B
+                                  : plane_layout->array_stride_B));
 
    pan_pack(&view->descs.img_attrib_buf[0], ATTRIBUTE_BUFFER, cfg) {
       /* The format is the only thing we lack to emit attribute descriptors
@@ -266,15 +270,14 @@ prepare_attr_buf_descs(struct panvk_image_view *view)
       cfg.type = image->vk.drm_format_mod == DRM_FORMAT_MOD_LINEAR
                     ? MALI_ATTRIBUTE_TYPE_3D_LINEAR
                     : MALI_ATTRIBUTE_TYPE_3D_INTERLEAVED;
-      cfg.pointer = image->planes[plane_idx].data.base + offset;
+      cfg.pointer = image->planes[plane_idx].plane.base + offset;
       cfg.stride = fmt_blksize | (hw_fmt << 10);
-      cfg.size = pan_image_mip_level_size(plane_props, plane_layout,
+      cfg.size = pan_image_mip_level_size(&image->planes[plane_idx].image, 0,
                                           view->pview.first_level);
    }
 
    struct mali_attribute_buffer_packed *buf = &view->descs.img_attrib_buf[1];
    pan_cast_and_pack(buf, ATTRIBUTE_BUFFER_CONTINUATION_3D, cfg) {
-      unsigned level = view->pview.first_level;
       VkExtent3D extent = view->vk.extent;
 
       cfg.s_dimension = extent.width;
@@ -283,12 +286,11 @@ prepare_attr_buf_descs(struct panvk_image_view *view)
          view->pview.dim == MALI_TEXTURE_DIMENSION_3D
             ? extent.depth
             : (view->pview.last_layer - view->pview.first_layer + 1);
-      cfg.row_stride =
-         image->planes[plane_idx].layout.slices[level].row_stride_B;
+      cfg.row_stride = slayout->tiled_or_linear.row_stride_B;
       if (cfg.r_dimension > 1) {
-         cfg.slice_stride =
-            pan_image_surface_stride(&image->planes[plane_idx].props,
-                                     &image->planes[plane_idx].layout, level);
+         cfg.slice_stride = view->pview.dim == MALI_TEXTURE_DIMENSION_3D
+                               ? slayout->tiled_or_linear.surface_stride_B
+                               : plane_layout->array_stride_B;
       }
    }
 }
@@ -314,6 +316,7 @@ panvk_per_arch(CreateImageView)(VkDevice _device,
 
    view->pview = (struct pan_image_view){
       .format = vk_format_to_pipe_format(view->vk.view_format),
+      .astc.hdr = util_format_is_astc_hdr(view->vk.view_format),
       .dim = panvk_view_type_to_mali_tex_dim(view->vk.view_type),
       .nr_samples = image->vk.samples,
       .first_level = view->vk.base_mip_level,
@@ -337,14 +340,20 @@ panvk_per_arch(CreateImageView)(VkDevice _device,
       uint8_t view_plane = (view->vk.aspects == VK_IMAGE_ASPECT_PLANE_1_BIT ||
                             view->vk.aspects == VK_IMAGE_ASPECT_PLANE_2_BIT) ?
                            0 : image_plane;
-      view->pview.planes[view_plane] = &image->planes[image_plane];
+      view->pview.planes[view_plane] = (struct pan_image_plane_ref) {
+         .image = &image->planes[image_plane].image,
+         .plane_idx = 0,
+      };
    }
 
    /* Depth/stencil are viewed as color for copies. */
    if (view->vk.aspects == VK_IMAGE_ASPECT_COLOR_BIT &&
        image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT &&
        vk_format_get_blocksize(view->vk.view_format) == 1) {
-      view->pview.planes[0] = &image->planes[1];
+      view->pview.planes[0] = (struct pan_image_plane_ref) {
+         .image = &image->planes[1].image,
+         .plane_idx = 0,
+      };
    }
 
    /* We need to patch the view format when the image contains both
@@ -372,7 +381,7 @@ panvk_per_arch(CreateImageView)(VkDevice _device,
          goto err_destroy_iview;
    }
 
-#if PAN_ARCH <= 7
+#if PAN_ARCH < 9
    if (view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT)
       prepare_attr_buf_descs(view);
 #endif

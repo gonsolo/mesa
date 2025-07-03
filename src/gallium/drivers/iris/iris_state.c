@@ -117,6 +117,7 @@
 #include "intel/common/intel_genX_state_elk.h"
 #endif
 
+#include "intel/common/intel_common.h"
 #include "intel/common/intel_guardband.h"
 #include "intel/common/intel_pixel_hash.h"
 #include "intel/common/intel_tiled_render.h"
@@ -1535,25 +1536,35 @@ iris_init_compute_context(struct iris_batch *batch)
                                    PIPE_CONTROL_INSTRUCTION_INVALIDATE |
                                    PIPE_CONTROL_FLUSH_HDC);
 
+   uint8_t pixel_async_compute_thread_limit, z_pass_async_compute_thread_limit,
+           np_z_async_throttle_settings;
+   intel_compute_engine_async_threads_limit(devinfo, 0, false,
+                                            &pixel_async_compute_thread_limit,
+                                            &z_pass_async_compute_thread_limit,
+                                            &np_z_async_throttle_settings);
+   batch->ice->state.pixel_async_compute_thread_limit = pixel_async_compute_thread_limit;
+   batch->ice->state.z_pass_async_compute_thread_limit = z_pass_async_compute_thread_limit;
+   batch->ice->state.np_z_async_throttle_settings = np_z_async_throttle_settings;
+
    iris_emit_cmd(batch, GENX(STATE_COMPUTE_MODE), cm) {
 #if GFX_VER >= 30
       cm.EnableVariableRegisterSizeAllocationMask = 1;
       cm.EnableVariableRegisterSizeAllocation = true;
 #endif
 #if GFX_VER >= 20
-      cm.AsyncComputeThreadLimit = ACTL_Max8;
-      cm.ZPassAsyncComputeThreadLimit = ZPACTL_Max60;
-      cm.ZAsyncThrottlesettings = ZATS_DefertoAsyncComputeThreadLimit;
+      cm.AsyncComputeThreadLimit = pixel_async_compute_thread_limit;
+      cm.ZPassAsyncComputeThreadLimit = z_pass_async_compute_thread_limit;
+      cm.ZAsyncThrottlesettings = np_z_async_throttle_settings;
       cm.AsyncComputeThreadLimitMask = 0x7;
       cm.ZPassAsyncComputeThreadLimitMask = 0x7;
       cm.ZAsyncThrottlesettingsMask = 0x3;
 #else
-      cm.PixelAsyncComputeThreadLimit = PACTL_Max24;
-      cm.ZPassAsyncComputeThreadLimit = ZPACTL_Max60;
+      cm.PixelAsyncComputeThreadLimit = pixel_async_compute_thread_limit;
+      cm.ZPassAsyncComputeThreadLimit = z_pass_async_compute_thread_limit;
       cm.PixelAsyncComputeThreadLimitMask = 0x7;
       cm.ZPassAsyncComputeThreadLimitMask = 0x7;
       if (intel_device_info_is_mtl_or_arl(devinfo)) {
-         cm.ZAsyncThrottlesettings = ZATS_DefertoPixelAsyncComputeThreadLimit;
+         cm.ZAsyncThrottlesettings = np_z_async_throttle_settings;
          cm.ZAsyncThrottlesettingsMask = 0x3;
       }
 #endif
@@ -4681,12 +4692,13 @@ iris_compute_first_urb_slot_required(struct iris_compiled_shader *fs_shader,
                                      const struct intel_vue_map *prev_stage_vue_map)
 {
 #if GFX_VER >= 9
-   uint32_t read_offset, read_length, num_varyings, primid_offset;
+   uint32_t read_offset, read_length, num_varyings, primid_offset, flat_inputs;
    brw_compute_sbe_per_vertex_urb_read(prev_stage_vue_map,
                                        false /* mesh*/,
+                                       false /* per_primitive_remapping */,
                                        brw_wm_prog_data(fs_shader->brw_prog_data),
                                        &read_offset, &read_length, &num_varyings,
-                                       &primid_offset);
+                                       &primid_offset, &flat_inputs);
    return 2 * read_offset;
 #else
    const struct iris_fs_data *fs_data = iris_fs_data(fs_shader);
@@ -9111,6 +9123,7 @@ iris_upload_compute_walker(struct iris_context *ice,
    const struct iris_cs_data *cs_data = iris_cs_data(shader);
    const struct intel_cs_dispatch_info dispatch =
       iris_get_cs_dispatch_info(devinfo, shader, grid->block);
+   uint32_t total_shared = shader->total_shared + grid->variable_shared_mem;
 
    trace_intel_begin_compute(&batch->trace);
 
@@ -9124,7 +9137,48 @@ iris_upload_compute_walker(struct iris_context *ice,
       }
    }
 
-   uint32_t total_shared = shader->total_shared + grid->variable_shared_mem;
+/* Not need with VRT enabled */
+#if GFX_VERx10 < 300
+   uint8_t pixel_async_compute_thread_limit, z_pass_async_compute_thread_limit,
+           np_z_async_throttle_settings;
+   bool slm_or_barrier_enabled = total_shared != 0 || cs_data->uses_barrier;
+
+   intel_compute_engine_async_threads_limit(devinfo, dispatch.threads,
+                                            slm_or_barrier_enabled,
+                                            &pixel_async_compute_thread_limit,
+                                            &z_pass_async_compute_thread_limit,
+                                            &np_z_async_throttle_settings);
+
+   if (ice->state.pixel_async_compute_thread_limit != pixel_async_compute_thread_limit ||
+       ice->state.z_pass_async_compute_thread_limit != z_pass_async_compute_thread_limit ||
+       ice->state.np_z_async_throttle_settings != np_z_async_throttle_settings) {
+
+      batch->ice->state.pixel_async_compute_thread_limit = pixel_async_compute_thread_limit;
+      batch->ice->state.z_pass_async_compute_thread_limit = z_pass_async_compute_thread_limit;
+      batch->ice->state.np_z_async_throttle_settings = np_z_async_throttle_settings;
+
+      iris_emit_cmd(batch, GENX(STATE_COMPUTE_MODE), cm) {
+#if GFX_VER >= 20
+         cm.AsyncComputeThreadLimit = pixel_async_compute_thread_limit;
+         cm.ZPassAsyncComputeThreadLimit = z_pass_async_compute_thread_limit;
+         cm.ZAsyncThrottlesettings = np_z_async_throttle_settings;
+         cm.AsyncComputeThreadLimitMask = 0x7;
+         cm.ZPassAsyncComputeThreadLimitMask = 0x7;
+         cm.ZAsyncThrottlesettingsMask = 0x3;
+#else
+         cm.PixelAsyncComputeThreadLimit = pixel_async_compute_thread_limit;
+         cm.ZPassAsyncComputeThreadLimit = z_pass_async_compute_thread_limit;
+         cm.PixelAsyncComputeThreadLimitMask = 0x7;
+         cm.ZPassAsyncComputeThreadLimitMask = 0x7;
+         if (intel_device_info_is_mtl_or_arl(devinfo)) {
+            cm.ZAsyncThrottlesettings = np_z_async_throttle_settings;
+            cm.ZAsyncThrottlesettingsMask = 0x3;
+         }
+#endif
+      }
+   }
+#endif /* GFX_VERx10 < 300 */
+
    struct GENX(INTERFACE_DESCRIPTOR_DATA) idd = {};
    idd.KernelStartPointer =
       KSP(shader) + iris_cs_data_prog_offset(cs_data, dispatch.simd_size);
@@ -9338,7 +9392,8 @@ iris_upload_gpgpu_walker(struct iris_context *ice,
 
 static void
 iris_use_global_bindings(struct iris_context *ice,
-                         struct iris_batch *batch)
+                         struct iris_batch *batch,
+                         const struct pipe_grid_info *grid)
 {
    for (unsigned i = 0; i < IRIS_MAX_GLOBAL_BINDINGS; i++) {
       struct pipe_resource *res = ice->state.global_bindings[i];
@@ -9347,6 +9402,13 @@ iris_use_global_bindings(struct iris_context *ice,
 
       iris_use_pinned_bo(batch, iris_resource_bo(res),
                         true, IRIS_DOMAIN_NONE);
+   }
+
+   for (unsigned i = 0; i < grid->num_globals; i++) {
+      struct iris_resource *res = (void *) grid->globals[i];
+      iris_use_pinned_bo(batch, res->bo, true, IRIS_DOMAIN_NONE);
+      util_range_add(&res->base.b, &res->valid_buffer_range,
+                     0, res->base.b.width0);
    }
 }
 
@@ -9391,7 +9453,7 @@ iris_upload_compute_state(struct iris_context *ice,
       iris_use_pinned_bo(batch, border_color_pool->bo, false,
                          IRIS_DOMAIN_NONE);
 
-   iris_use_global_bindings(ice, batch);
+   iris_use_global_bindings(ice, batch, grid);
 
 #if GFX_VER >= 12
    genX(invalidate_aux_map_state)(batch);

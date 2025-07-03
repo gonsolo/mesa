@@ -64,7 +64,7 @@ get_nir_options_for_stage(struct radv_physical_device *pdev, gl_shader_stage sta
    options->max_unroll_iterations = 32;
    options->max_unroll_iterations_aggressive = 128;
    options->lower_doubles_options = nir_lower_drcp | nir_lower_dsqrt | nir_lower_drsq | nir_lower_ddiv;
-   options->io_options |= nir_io_mediump_is_32bit;
+   options->io_options |= nir_io_mediump_is_32bit | nir_io_radv_intrinsic_component_workaround;
    options->varying_expression_max_cost = ac_nir_varying_expression_max_cost;
 }
 
@@ -82,6 +82,19 @@ vectorize_vec2_16bit(const nir_instr *instr, const void *_)
       return 0;
 
    const nir_alu_instr *alu = nir_instr_as_alu(instr);
+   switch (alu->op) {
+   case nir_op_f2e4m3fn:
+   case nir_op_f2e4m3fn_sat:
+   case nir_op_f2e4m3fn_satfn:
+   case nir_op_f2e5m2:
+   case nir_op_f2e5m2_sat:
+   case nir_op_e4m3fn2f:
+   case nir_op_e5m22f:
+      return 2;
+   default:
+      break;
+   }
+
    const unsigned bit_size = alu->def.bit_size;
    if (bit_size == 16)
       return 2;
@@ -213,6 +226,8 @@ radv_optimize_nir(struct nir_shader *shader, bool optimize_conservatively)
       NIR_PASS(progress, shader, nir_opt_move_discards_to_top);
 
    NIR_PASS(progress, shader, nir_opt_move, nir_move_load_ubo);
+
+   nir_shader_gather_info(shader, nir_shader_get_entrypoint(shader));
 }
 
 void
@@ -450,12 +465,11 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
       NIR_PASS(_, nir, nir_split_per_member_structs);
 
       if (nir->info.stage == MESA_SHADER_FRAGMENT)
-         NIR_PASS(_, nir, nir_lower_io_to_vector, nir_var_shader_out);
+         NIR_PASS(_, nir, nir_opt_vectorize_io_vars, nir_var_shader_out);
       if (nir->info.stage == MESA_SHADER_FRAGMENT)
          NIR_PASS(_, nir, nir_lower_input_attachments,
                   &(nir_input_attachment_options){
-                     .use_fragcoord_sysval = true,
-                     .use_layer_id_sysval = true,
+                     .use_ia_coord_intrin = true,
                   });
 
       nir_remove_dead_variables_options dead_vars_opts = {
@@ -473,7 +487,7 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
 
       NIR_PASS(_, nir, nir_propagate_invariant, pdev->cache_key.invariant_geom);
 
-      NIR_PASS(_, nir, nir_lower_clip_cull_distance_arrays);
+      NIR_PASS(_, nir, nir_lower_clip_cull_distance_array_vars);
 
       if (nir->info.stage == MESA_SHADER_VERTEX || nir->info.stage == MESA_SHADER_TESS_EVAL ||
           nir->info.stage == MESA_SHADER_GEOMETRY)
@@ -551,9 +565,9 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
 
    if (nir->info.stage == MESA_SHADER_VERTEX || nir->info.stage == MESA_SHADER_GEOMETRY ||
        nir->info.stage == MESA_SHADER_FRAGMENT) {
-      NIR_PASS(_, nir, nir_lower_io_to_temporaries, nir_shader_get_entrypoint(nir), true, true);
+      NIR_PASS(_, nir, nir_lower_io_vars_to_temporaries, nir_shader_get_entrypoint(nir), true, true);
    } else if (nir->info.stage == MESA_SHADER_TESS_EVAL) {
-      NIR_PASS(_, nir, nir_lower_io_to_temporaries, nir_shader_get_entrypoint(nir), true, false);
+      NIR_PASS(_, nir, nir_lower_io_vars_to_temporaries, nir_shader_get_entrypoint(nir), true, false);
    }
 
    NIR_PASS(_, nir, nir_split_var_copies);
@@ -574,7 +588,8 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
                .lower_relative_shuffle = 1,
                .lower_rotate_to_shuffle = use_llvm,
                .lower_shuffle_to_32bit = 1,
-               .lower_vote_eq = 1,
+               .lower_vote_feq = 1,
+               .lower_vote_ieq = 1,
                .lower_vote_bool_eq = 1,
                .lower_quad_broadcast_dynamic = 1,
                .lower_quad_broadcast_dynamic_to_const = gfx7minus,
@@ -772,14 +787,11 @@ radv_lower_ngg(struct radv_device *device, struct radv_shader_stage *ngg_stage,
       unreachable("NGG needs to be VS, TES or GS.");
    }
 
-   if (nir->info.stage != MESA_SHADER_MESH)
-      nir->info.shared_size = info->ngg_info.lds_size;
-
    ac_nir_lower_ngg_options options = {0};
    options.hw_info = &pdev->info;
    options.max_workgroup_size = info->workgroup_size;
    options.wave_size = info->wave_size;
-   options.clip_cull_dist_mask = info->outinfo.clip_dist_mask | info->outinfo.cull_dist_mask;
+   options.export_clipdist_mask = info->outinfo.clip_dist_mask | info->outinfo.cull_dist_mask;
    options.vs_output_param_offset = info->outinfo.vs_output_param_offset;
    options.has_param_exports = info->outinfo.param_exports || info->outinfo.prim_param_exports;
    options.can_cull = nir->info.stage != MESA_SHADER_GEOMETRY && info->has_ngg_culling;
@@ -803,24 +815,21 @@ radv_lower_ngg(struct radv_device *device, struct radv_shader_stage *ngg_stage,
       options.export_primitive_id_per_prim = info->outinfo.export_prim_id_per_primitive;
       options.instance_rate_inputs = gfx_state->vi.instance_rate_inputs << VERT_ATTRIB_GENERIC0;
 
-      NIR_PASS(_, nir, ac_nir_lower_ngg_nogs, &options);
-
-      /* Increase ESGS ring size so the LLVM binary contains the correct LDS size. */
-      ngg_stage->info.ngg_info.esgs_ring_size = nir->info.shared_size;
+      NIR_PASS(_, nir, ac_nir_lower_ngg_nogs, &options, &ngg_stage->info.ngg_lds_vertex_size,
+               &ngg_stage->info.ngg_lds_scratch_size);
    } else if (nir->info.stage == MESA_SHADER_GEOMETRY) {
       assert(info->is_ngg);
 
-      options.gs_out_vtx_bytes = info->gs.gsvs_vertex_size;
-
-      NIR_PASS(_, nir, ac_nir_lower_ngg_gs, &options);
+      NIR_PASS(_, nir, ac_nir_lower_ngg_gs, &options, &ngg_stage->info.ngg_lds_vertex_size,
+               &ngg_stage->info.ngg_lds_scratch_size);
    } else if (nir->info.stage == MESA_SHADER_MESH) {
       /* ACO aligns the workgroup size to the wave size. */
       unsigned hw_workgroup_size = ALIGN(info->workgroup_size, info->wave_size);
 
       bool scratch_ring = false;
-      NIR_PASS(_, nir, ac_nir_lower_ngg_mesh, &pdev->info, options.clip_cull_dist_mask,
-                 options.vs_output_param_offset, options.has_param_exports, &scratch_ring, info->wave_size,
-                 hw_workgroup_size, gfx_state->has_multiview_view_index, info->ms.has_query, pdev->mesh_fast_launch_2);
+      NIR_PASS(_, nir, ac_nir_lower_ngg_mesh, &pdev->info, options.export_clipdist_mask, options.vs_output_param_offset,
+               options.has_param_exports, &scratch_ring, info->wave_size, hw_workgroup_size,
+               gfx_state->has_multiview_view_index, info->ms.has_query, pdev->mesh_fast_launch_2);
       ngg_stage->info.ms.needs_ms_scratch_ring = scratch_ring;
    } else {
       unreachable("invalid SW stage passed to radv_lower_ngg");
@@ -1399,11 +1408,6 @@ radv_open_rtld_binary(struct radv_device *device, const struct radv_shader_binar
       struct ac_rtld_symbol *sym = &lds_symbols[num_lds_symbols++];
       sym->name = "ngg_emit";
       sym->size = binary->info.ngg_info.ngg_emit_size * 4;
-      sym->align = 4;
-
-      sym = &lds_symbols[num_lds_symbols++];
-      sym->name = "ngg_scratch";
-      sym->size = 8;
       sym->align = 4;
    }
 
@@ -2985,14 +2989,15 @@ radv_dump_nir_shaders(const struct radv_instance *instance, struct nir_shader *c
 
 static void
 radv_aco_build_shader_binary(void **bin, const struct ac_shader_config *config, const char *llvm_ir_str,
-                             unsigned llvm_ir_size, const char *disasm_str, unsigned disasm_size, uint32_t *statistics,
-                             uint32_t stats_size, uint32_t exec_size, const uint32_t *code, uint32_t code_dw,
+                             unsigned llvm_ir_size, const char *disasm_str, unsigned disasm_size,
+                             struct amd_stats *statistics, uint32_t exec_size, const uint32_t *code, uint32_t code_dw,
                              const struct aco_symbol *symbols, unsigned num_symbols,
                              const struct ac_shader_debug_info *debug_info, unsigned debug_info_count)
 {
    struct radv_shader_binary **binary = (struct radv_shader_binary **)bin;
 
    uint32_t debug_info_size = debug_info_count * sizeof(struct ac_shader_debug_info);
+   uint32_t stats_size = statistics ? sizeof(struct amd_stats) : 0;
 
    size_t size = llvm_ir_size;
 
@@ -3020,7 +3025,7 @@ radv_aco_build_shader_binary(void **bin, const struct ac_shader_config *config, 
    struct radv_shader_binary_layout layout = radv_shader_binary_get_layout(legacy_binary);
 
    if (stats_size)
-      memcpy(layout.stats, statistics, stats_size);
+      amd_stats_serialize(layout.stats, statistics);
 
    memcpy(layout.code, code, code_dw * sizeof(uint32_t));
 
@@ -3602,18 +3607,14 @@ radv_get_user_sgpr(const struct radv_shader *shader, int idx)
 }
 
 void
-radv_get_tess_wg_info(const struct radv_physical_device *pdev, const struct shader_info *tcs_info,
-                      unsigned tcs_num_input_vertices, unsigned tcs_num_lds_inputs, unsigned tcs_num_vram_outputs,
-                      unsigned tcs_num_vram_patch_outputs, bool all_invocations_define_tess_levels,
+radv_get_tess_wg_info(const struct radv_physical_device *pdev, const ac_nir_tess_io_info *io_info,
+                      unsigned tcs_vertices_out, unsigned tcs_num_input_vertices, unsigned tcs_num_lds_inputs,
                       unsigned *num_patches_per_wg, unsigned *hw_lds_size)
 {
    const uint32_t lds_input_vertex_size = get_tcs_input_vertex_stride(tcs_num_lds_inputs);
 
-   ac_nir_compute_tess_wg_info(&pdev->info, tcs_info->outputs_read, tcs_info->outputs_written,
-                               tcs_info->patch_outputs_read, tcs_info->patch_outputs_written,
-                               tcs_info->tess.tcs_vertices_out, pdev->ge_wave_size, false,
-                               all_invocations_define_tess_levels, tcs_num_input_vertices, lds_input_vertex_size,
-                               tcs_num_vram_outputs, tcs_num_vram_patch_outputs, num_patches_per_wg, hw_lds_size);
+   ac_nir_compute_tess_wg_info(&pdev->info, io_info, tcs_vertices_out, pdev->ge_wave_size, false,
+                               tcs_num_input_vertices, lds_input_vertex_size, 0, num_patches_per_wg, hw_lds_size);
 }
 
 VkResult

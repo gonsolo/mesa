@@ -51,6 +51,12 @@
 
 #include "vk_util.h"
 
+static void *
+query_slot(struct anv_query_pool *pool, uint32_t query)
+{
+   return pool->bo->map + query * pool->stride;
+}
+
 static struct anv_address
 anv_query_address(struct anv_query_pool *pool, uint32_t query)
 {
@@ -321,6 +327,13 @@ VkResult genX(CreateQueryPool)(
       }
    }
 
+   if (pCreateInfo->flags & VK_QUERY_POOL_CREATE_RESET_BIT_KHR) {
+      for (uint32_t q = 0; q < pool->vk.query_count; q++) {
+         uint64_t *slot = query_slot(pool, q);
+         *slot = 0;
+      }
+   }
+
    ANV_RMV(query_pool_create, device, pool, false);
 
    *pQueryPool = anv_query_pool_to_handle(pool);
@@ -475,12 +488,6 @@ cpu_write_query_result(void *dst_slot, VkQueryResultFlags flags,
       uint32_t *dst32 = dst_slot;
       dst32[value_index] = result;
    }
-}
-
-static void *
-query_slot(struct anv_query_pool *pool, uint32_t query)
-{
-   return pool->bo->map + query * pool->stride;
 }
 
 static bool
@@ -2059,10 +2066,17 @@ genX(CmdWriteAccelerationStructuresPropertiesKHR)(
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
    ANV_FROM_HANDLE(anv_query_pool, pool, queryPool);
 
-   anv_add_pending_pipe_bits(cmd_buffer,
-                             ANV_PIPE_END_OF_PIPE_SYNC_BIT |
-                             ANV_PIPE_DATA_CACHE_FLUSH_BIT,
-                             "read BVH data using CS");
+   /* L1/L2 caches flushes should have been dealt with by pipeline barriers.
+    * Unfortunately some platforms require L3 flush because CS (reading the
+    * dispatch parameters) is not L3 coherent.
+    */
+   if (!ANV_DEVINFO_HAS_COHERENT_L3_CS(cmd_buffer->device->info)) {
+      anv_add_pending_pipe_bits(cmd_buffer,
+                                ANV_PIPE_END_OF_PIPE_SYNC_BIT |
+                                ANV_PIPE_DATA_CACHE_FLUSH_BIT,
+                                "read BVH data using CS");
+      genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
+   }
 
    if (append_query_clear_flush(
           cmd_buffer, pool,

@@ -9,6 +9,7 @@
 #include "ac_nir.h"
 #include "nir.h"
 #include "nir_builder.h"
+#include "nir_tcs_info.h"
 #include "radv_device.h"
 #include "radv_nir.h"
 #include "radv_physical_device.h"
@@ -21,11 +22,11 @@ type_size_vec4(const struct glsl_type *type, bool bindless)
 }
 
 void
-radv_nir_lower_io_to_scalar_early(nir_shader *nir, nir_variable_mode mask)
+radv_nir_lower_io_vars_to_scalar(nir_shader *nir, nir_variable_mode mask)
 {
    bool progress = false;
 
-   NIR_PASS(progress, nir, nir_lower_io_to_scalar_early, mask);
+   NIR_PASS(progress, nir, nir_lower_io_vars_to_scalar, mask);
    if (progress) {
       /* Optimize the new vector code and then remove dead vars */
       NIR_PASS(_, nir, nir_copy_prop);
@@ -145,7 +146,7 @@ radv_nir_lower_io(struct radv_device *device, nir_shader *nir)
             nir_lower_direct_array_deref_of_vec_store | nir_lower_indirect_array_deref_of_vec_store);
 
    if (nir->info.stage == MESA_SHADER_TESS_CTRL) {
-      NIR_PASS(_, nir, nir_vectorize_tess_levels);
+      NIR_PASS(_, nir, nir_lower_tess_level_array_vars_to_vec);
    }
 
    if (nir->info.stage == MESA_SHADER_VERTEX) {
@@ -238,8 +239,15 @@ radv_nir_lower_io_to_mem(struct radv_device *device, struct radv_shader_stage *s
    } else if (nir->info.stage == MESA_SHADER_TESS_CTRL) {
       NIR_PASS(_, nir, ac_nir_lower_hs_inputs_to_mem, map_input, pdev->info.gfx_level, info->vs.tcs_in_out_eq,
                  info->vs.tcs_inputs_via_temp, info->vs.tcs_inputs_via_lds);
-      NIR_PASS(_, nir, ac_nir_lower_hs_outputs_to_mem, &info->tcs.info, map_output, pdev->info.gfx_level,
-                 info->tcs.tes_inputs_read, info->tcs.tes_patch_inputs_read, info->wave_size);
+
+      nir_tcs_info tcs_info;
+      nir_gather_tcs_info(nir, &tcs_info, nir->info.tess._primitive_mode, nir->info.tess.spacing);
+      ac_nir_tess_io_info tess_io_info;
+      ac_nir_get_tess_io_info(nir, &tcs_info, info->tcs.tes_inputs_read, info->tcs.tes_patch_inputs_read, map_output,
+                              true, &tess_io_info);
+
+      NIR_PASS(_, nir, ac_nir_lower_hs_outputs_to_mem, &tcs_info, &tess_io_info, map_output, pdev->info.gfx_level,
+               info->wave_size);
 
       return true;
    } else if (nir->info.stage == MESA_SHADER_TESS_EVAL) {

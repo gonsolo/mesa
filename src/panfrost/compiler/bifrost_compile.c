@@ -1278,7 +1278,7 @@ bi_emit_store_vary(bi_builder *b, nir_intrinsic_instr *instr)
 
    /* Only look at the total components needed. In effect, we fill in all
     * the intermediate "holes" in the write mask, since we can't mask off
-    * stores. Since nir_lower_io_to_temporaries ensures each varying is
+    * stores. Since nir_lower_io_vars_to_temporaries ensures each varying is
     * written at most once, anything that's masked out is undefined, so it
     * doesn't matter what we write there. So we may as well do the
     * simplest thing possible. */
@@ -2093,19 +2093,13 @@ bi_emit_intrinsic(bi_builder *b, nir_intrinsic_instr *instr)
    case nir_intrinsic_barrier:
       switch (nir_intrinsic_execution_scope(instr)) {
       case SCOPE_NONE:
-         /*
-          * No execution barrier, and we don't have to do anything for memory
-          * barriers (see SCOPE_WORKGROUP case.)
-          */
-         break;
-
       case SCOPE_SUBGROUP:
          /*
-          * To implement a subgroup barrier, we only need to prevent the
-          * scheduler from reordering memory operations around the barrier.
-          * Avail and vis are trivially established.
+          * To implement none and subgroup barriers, we only need to prevent
+          * the scheduler from reordering operations with side-effects around
+          * the barrier. Avail and vis are trivially established.
           */
-         bi_memory_barrier(b);
+         bi_nop(b)->scheduling_barrier = true;
          break;
 
       case SCOPE_WORKGROUP:
@@ -2231,6 +2225,10 @@ bi_emit_intrinsic(bi_builder *b, nir_intrinsic_instr *instr)
       bi_load_sample_id_to(b, dst);
       break;
 
+   case nir_intrinsic_load_primitive_id:
+      bi_mov_i32_to(b, dst, bi_preload(b, 57));
+      break;
+
    case nir_intrinsic_load_front_face: {
       /* (r58 & 1) == 0 means primitive is front facing */
       bi_index primitive_facing = bi_preload(b, 58);
@@ -2318,9 +2316,9 @@ bi_emit_intrinsic(bi_builder *b, nir_intrinsic_instr *instr)
       break;
 
    case nir_intrinsic_shader_clock:
-      assert(nir_intrinsic_memory_scope(instr) == SCOPE_SUBGROUP);
       bi_ld_gclk_u64_to(b, dst, BI_SOURCE_CYCLE_COUNTER);
       bi_split_def(b, &instr->def);
+      b->shader->info.has_ld_gclk_instr = true;
       break;
 
    case nir_intrinsic_ddx:
@@ -2980,11 +2978,14 @@ bi_emit_alu(bi_builder *b, nir_alu_instr *instr)
       bi_index idx = bi_src_index(&instr->src[0].src);
       unsigned factor = src_sz / 8;
       unsigned chan[4] = {0};
+      bi_index idxs[4];
 
-      for (unsigned i = 0; i < comps; ++i)
+      for (unsigned i = 0; i < comps; ++i) {
+         idxs[i] = idx;
          chan[i] = instr->src[0].swizzle[i] * factor;
+      }
 
-      bi_make_vec_to(b, dst, &idx, chan, comps, 8);
+      bi_make_vec_to(b, dst, idxs, chan, comps, 8);
       return;
    }
 
@@ -4414,7 +4415,7 @@ bi_emit_tex_valhall(bi_builder *b, nir_tex_instr *instr)
 
       src0 = bi_imm_u32(packed_handle);
 
-      /* TODO: narrow offsetms */
+      /* TODO: narrow offsetms. (only when offsetms is dynamically uniform) */
       src1 = bi_zero();
    } else {
       src0 = sampler;
@@ -5082,7 +5083,7 @@ glsl_type_size(const struct glsl_type *type, bool bindless)
 }
 
 /* Split stores to memory. We don't split stores to vertex outputs, since
- * nir_lower_io_to_temporaries will ensure there's only a single write.
+ * nir_lower_io_vars_to_temporaries will ensure there's only a single write.
  */
 
 static bool
@@ -5754,21 +5755,6 @@ bifrost_nir_lower_load_output(nir_shader *nir)
       nir_metadata_control_flow, NULL);
 }
 
-static bool
-bi_lower_halt_to_return(nir_builder *b, nir_instr *instr, UNUSED void *_data)
-{
-   if (instr->type != nir_instr_type_jump)
-      return false;
-
-   nir_jump_instr *jump = nir_instr_as_jump(instr);
-   if (jump->type != nir_jump_halt)
-      return false;
-
-   assert(b->impl == nir_shader_get_entrypoint(b->shader));
-   jump->type = nir_jump_return;
-   return true;
-}
-
 /* Bifrost LDEXP.v2f16 takes i16 exponent, while nir_op_ldexp takes i32. Lower
  * to nir_op_ldexp16_pan. */
 static bool
@@ -5830,8 +5816,7 @@ bifrost_preprocess_nir(nir_shader *nir, unsigned gpu_id)
       NIR_PASS(_, nir, nir_lower_terminate_to_demote);
 
    /* Ensure that halt are translated to returns and get ride of them */
-   NIR_PASS(_, nir, nir_shader_instructions_pass, bi_lower_halt_to_return,
-            nir_metadata_all, NULL);
+   NIR_PASS(_, nir, nir_lower_halt_to_return);
    NIR_PASS(_, nir, nir_lower_returns);
 
    /* Lower gl_Position pre-optimisation, but after lowering vars to ssa
@@ -5944,7 +5929,8 @@ bifrost_preprocess_nir(nir_shader *nir, unsigned gpu_id)
          .ballot_bit_size = 32,
          .ballot_components = 1,
          .lower_to_scalar = true,
-         .lower_vote_eq = true,
+         .lower_vote_feq = true,
+         .lower_vote_ieq = true,
          .lower_vote_bool_eq = true,
          .lower_first_invocation_to_ballot = true,
          .lower_read_first_invocation = true,
@@ -6326,6 +6312,7 @@ bi_compile_variant(nir_shader *nir,
 
    info->ubo_mask |= ctx->ubo_mask;
    info->tls_size = MAX2(info->tls_size, ctx->info.tls_size);
+   info->has_shader_clk_instr = ctx->info.has_ld_gclk_instr;
 
    if (idvs == BI_IDVS_VARYING) {
       info->vs.secondary_enable = (binary->size > offset);

@@ -20,7 +20,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  */
-#if VIDEO_CODEC_H265ENC
+#if MFT_CODEC_H265ENC
 #include "hmft_entrypoints.h"
 #include "mfbufferhelp.h"
 #include "mfpipeinterop.h"
@@ -299,11 +299,18 @@ CDX12EncHMFT::PrepareForEncodeHelper( LPDX12EncodeContext pDX12EncodeContext, bo
       pPicInfo->dpb[i].pic_order_cnt = cur_frame_desc->dpb_snapshot[i].pic_order_cnt;
       pPicInfo->dpb[i].is_ltr = cur_frame_desc->dpb_snapshot[i].is_ltr;
       pPicInfo->dpb[i].buffer = cur_frame_desc->dpb_snapshot[i].buffer;
+      pPicInfo->dpb[i].downscaled_buffer = cur_frame_desc->dpb_snapshot[i].downscaled_buffer;
+      if( pPicInfo->dpb[i].pic_order_cnt == cur_frame_desc->gop_info->picture_order_count )
+      {
+         pPicInfo->dpb_curr_pic = static_cast<uint8_t>( i );
+      }
    }
 
    pDX12EncodeContext->longTermReferenceFrameInfo = cur_frame_desc->gop_info->long_term_reference_frame_info;
 
    pPicInfo->num_ref_idx_l0_active_minus1 = 0;
+   memset( &pPicInfo->ref_list0, PIPE_H2645_LIST_REF_INVALID_ENTRY, sizeof( pPicInfo->ref_list0 ) );
+   memset( &pPicInfo->ref_list1, PIPE_H2645_LIST_REF_INVALID_ENTRY, sizeof( pPicInfo->ref_list1 ) );
 
    if( ( pPicInfo->picture_type == PIPE_H2645_ENC_PICTURE_TYPE_P ) || ( pPicInfo->picture_type == PIPE_H2645_ENC_PICTURE_TYPE_B ) )
    {
@@ -376,6 +383,11 @@ CDX12EncHMFT::PrepareForEncodeHelper( LPDX12EncodeContext pDX12EncodeContext, bo
       }
    }
 
+   pPicInfo->gpu_stats_qp_map = pDX12EncodeContext->pPipeResourceQPMapStats;
+   pPicInfo->gpu_stats_satd_map = pDX12EncodeContext->pPipeResourceSATDMapStats;
+   pPicInfo->gpu_stats_rc_bitallocation_map = pDX12EncodeContext->pPipeResourceRCBitAllocMapStats;
+   pPicInfo->gpu_stats_psnr = pDX12EncodeContext->pPipeResourcePSNRStats;
+
    // Quality vs speed
    // PIPE: The quality level range is [1..m_uiMaxHWSupportedQualityVsSpeedLevel]
    // A lower value means higher quality (slower encoding speed), and a value of 1 represents the highest quality
@@ -384,6 +396,12 @@ CDX12EncHMFT::PrepareForEncodeHelper( LPDX12EncodeContext pDX12EncodeContext, bo
       1u,
       static_cast<uint32_t>( std::ceil( ( static_cast<float>( 100 - m_uiQualityVsSpeed ) / 100.0f ) *
                                         static_cast<double>( m_EncoderCapabilities.m_uiMaxHWSupportedQualityVsSpeedLevel ) ) ) );
+
+   if( m_pPipeVideoCodec->two_pass.enable && ( m_pPipeVideoCodec->two_pass.pow2_downscale_factor > 0 ) )
+   {
+      pPicInfo->twopass_frame_config.downscaled_source = pDX12EncodeContext->pDownscaledTwoPassPipeVideoBuffer;
+      pPicInfo->twopass_frame_config.skip_1st_pass = false;
+   }
 
    // Setup Level, not sure why this is represented twice on the codec?
    pPicInfo->seq.general_level_idc = static_cast<uint8_t>( m_pPipeVideoCodec->level );
@@ -416,18 +434,24 @@ CDX12EncHMFT::PrepareForEncodeHelper( LPDX12EncodeContext pDX12EncodeContext, bo
          {
             pPicInfo->slice_mode = PIPE_VIDEO_SLICE_MODE_BLOCKS;
             uint32_t blocks_per_slice = m_uiSliceControlSize;
-            pPicInfo->num_slice_descriptors = ( height_in_blocks * width_in_blocks ) / blocks_per_slice;
+            pPicInfo->num_slice_descriptors = static_cast<uint32_t>(
+               std::ceil( ( height_in_blocks * width_in_blocks ) / static_cast<double>( blocks_per_slice ) ) );
             uint32_t slice_starting_mb = 0;
             CHECKBOOL_GOTO( pPicInfo->num_slice_descriptors <= m_EncoderCapabilities.m_uiMaxHWSupportedMaxSlices,
                             MF_E_UNEXPECTED,
                             done );
-            for( uint32_t i = 0; i < pPicInfo->num_slice_descriptors; i++ )
+            CHECKBOOL_GOTO( pPicInfo->num_slice_descriptors >= 1, MF_E_UNEXPECTED, done );
+
+            uint32_t total_blocks = height_in_blocks * width_in_blocks;
+            uint32_t i = 0;
+            for( i = 0; i < pPicInfo->num_slice_descriptors; i++ )
             {
                pPicInfo->slices_descriptors[i].slice_segment_address = slice_starting_mb;
                pPicInfo->slices_descriptors[i].num_ctu_in_slice = blocks_per_slice;
-               pPicInfo->slices_descriptors[i].slice_type = PIPE_H265_SLICE_TYPE_P;   // %%%TODO%%%
                slice_starting_mb += blocks_per_slice;
             }
+            pPicInfo->slices_descriptors[i].slice_segment_address = slice_starting_mb;
+            pPicInfo->slices_descriptors[i].num_ctu_in_slice = total_blocks - slice_starting_mb;
          }
          else if( SLICE_CONTROL_MODE_BITS == m_uiSliceControlMode )
          {
@@ -657,7 +681,6 @@ CDX12EncHMFT::GetCodecPrivateData( LPBYTE pSPSPPSData, DWORD dwSPSPPSDataLen, LP
 
    h265_pic_desc.base.profile = m_outputPipeProfile;
 
-   // TODO: might not be needed for 265, check later, for now dup logic
    h265_pic_desc.pic_order_cnt_type = ( p_picture_period > 2 ) ? 0u : 2u;
    h265_pic_desc.pic_order_cnt = 0;                                // cur_frame_desc->gop_info->picture_order_count;
    h265_pic_desc.picture_type = PIPE_H2645_ENC_PICTURE_TYPE_IDR;   // cur_frame_desc->gop_info->frame_type;
@@ -823,30 +846,10 @@ CDX12EncHMFT::CheckMediaTypeLevel(
 {
    HRESULT hr = S_OK;
    UINT32 uiLevel = (UINT32) -1;
-   int maxLumaPs = 0;
-   const int minCbSizeY = 1 << ( encoderCapabilities.m_HWSupportH265BlockSizes.bits.log2_min_luma_coding_block_size_minus3 + 3 );
-   const int alignedWidth = static_cast<UINT>( std::ceil( width / static_cast<double>( minCbSizeY ) ) * minCbSizeY );
-   const int alignedHeight = static_cast<UINT>( std::ceil( height / static_cast<double>( minCbSizeY ) ) * minCbSizeY );
 
    uiLevel = MFGetAttributeUINT32( pmt, MF_MT_VIDEO_LEVEL, uiLevel );
    enum eAVEncH265VLevel AVEncLevel;
    CHECKHR_GOTO( ConvertLevelToAVEncH265VLevel( uiLevel, AVEncLevel ), done );
-
-   maxLumaPs = LevelToLumaPS( AVEncLevel );
-
-   // TODO: add more checks according to A.1
-   if( ( alignedHeight * alignedWidth > maxLumaPs ) || ( (double) alignedWidth > sqrt( (double) maxLumaPs * 8 ) ) ||
-       ( (double) alignedHeight > sqrt( (double) maxLumaPs * 8 ) ) )
-   {
-      debug_printf( "[dx12 hmft 0x%p] CheckMediaTypeLevel failed:  alignedWidth, alignedHeight combination exceeded max luma "
-                    "sample constraints "
-                    "(maxLumaPS). (alignedWidth = %d, alignedHeight = %d, maxLumaPS = %d)\n",
-                    this,
-                    alignedHeight,
-                    alignedWidth,
-                    maxLumaPs );
-      CHECKHR_GOTO( E_INVALIDARG, done );
-   }
 
    if( pLevel )
    {
@@ -908,6 +911,7 @@ CDX12EncHMFT::CreateGOPTracker( uint32_t textureWidth, uint32_t textureHeight )
    uint32_t MaxHWL1Ref = m_EncoderCapabilities.m_uiMaxHWSupportedL1References;
    MaxHWL0Ref = std::min( 1u, MaxHWL0Ref );   // we only support 1
    MaxHWL1Ref = 0;
+   std::unique_ptr<dpb_buffer_manager> upTwoPassDPBManager;
 
    SAFE_DELETE( m_pGOPTracker );
    // B Frame not supported by HW
@@ -935,6 +939,18 @@ CDX12EncHMFT::CreateGOPTracker( uint32_t textureWidth, uint32_t textureHeight )
    assert( MaxHWL0Ref <= m_uiMaxNumRefFrame );
    assert( MaxHWL1Ref <= m_uiMaxNumRefFrame );
 
+   if( m_pPipeVideoCodec->two_pass.enable && ( m_pPipeVideoCodec->two_pass.pow2_downscale_factor > 0 ) )
+   {
+      upTwoPassDPBManager = std::make_unique<dpb_buffer_manager>(
+         m_pPipeVideoCodec,
+         static_cast<unsigned>( std::ceil( textureWidth / ( 1 << m_pPipeVideoCodec->two_pass.pow2_downscale_factor ) ) ),
+         static_cast<unsigned>( std::ceil( textureHeight / ( 1 << m_pPipeVideoCodec->two_pass.pow2_downscale_factor ) ) ),
+         ConvertProfileToFormat( m_pPipeVideoCodec->profile ),
+         m_pPipeVideoCodec->max_references + 1 /*curr pic*/ +
+            ( m_bLowLatency ? 0 :
+                              MFT_INPUT_QUEUE_DEPTH ) /*MFT process input queue depth for delayed in flight recon pic release*/ );
+   }
+
    m_pGOPTracker = new reference_frames_tracker_hevc( m_pPipeVideoCodec,
                                                       textureWidth,
                                                       textureHeight,
@@ -946,7 +962,8 @@ CDX12EncHMFT::CreateGOPTracker( uint32_t textureWidth, uint32_t textureHeight )
                                                       MaxHWL0Ref,
                                                       MaxHWL1Ref,
                                                       m_pPipeVideoCodec->max_references,
-                                                      m_uiMaxLongTermReferences );
+                                                      m_uiMaxLongTermReferences,
+                                                      std::move( upTwoPassDPBManager ) );
    CHECKNULL_GOTO( m_pGOPTracker, MF_E_INVALIDMEDIATYPE, done );
 
 done:

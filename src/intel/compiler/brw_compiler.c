@@ -27,6 +27,7 @@
 #include "brw_private.h"
 #include "dev/intel_debug.h"
 #include "compiler/nir/nir.h"
+#include "isl/isl.h"
 #include "util/u_debug.h"
 
 const struct nir_shader_compiler_options brw_scalar_nir_options = {
@@ -45,6 +46,8 @@ const struct nir_shader_compiler_options brw_scalar_nir_options = {
    .has_uclz = true,
    .lower_base_vertex = true,
    .lower_bitfield_extract = true,
+   .lower_bitfield_extract8 = true,
+   .lower_bitfield_extract16 = true,
    .lower_bitfield_insert = true,
    .lower_device_index_to_zero = true,
    .lower_fdiv = true,
@@ -52,6 +55,7 @@ const struct nir_shader_compiler_options brw_scalar_nir_options = {
    .lower_flrp16 = true,
    .lower_flrp64 = true,
    .lower_fmod = true,
+   .lower_fquantize2f16 = true,
    .lower_hadd64 = true,
    .lower_insert_byte = true,
    .lower_insert_word = true,
@@ -114,7 +118,9 @@ brw_compiler_create(void *mem_ctx, const struct intel_device_info *devinfo)
       nir_lower_find_lsb64 |
       nir_lower_ufind_msb64 |
       nir_lower_bit_count64 |
-      nir_lower_iadd3_64;
+      nir_lower_iadd3_64 |
+      nir_lower_bitfield_extract64 |
+      nir_lower_bitfield_reverse64;
    nir_lower_doubles_options fp64_options =
       nir_lower_drcp |
       nir_lower_dsqrt |
@@ -193,6 +199,29 @@ brw_compiler_create(void *mem_ctx, const struct intel_device_info *devinfo)
 
       compiler->nir_options[i] = nir_options;
    }
+
+   /* Build a list of storage format compatible in component bit size &
+    * isl_base_type. We can apply the same lowering to those.
+    */
+   compiler->num_lowered_storage_formats = 0;
+   for (enum isl_format fmt = 0; fmt < ISL_FORMAT_RAW; fmt++) {
+      if (!isl_is_storage_image_format(devinfo, fmt))
+         continue;
+
+      if (isl_lower_storage_image_format(devinfo, fmt) == fmt)
+         continue;
+
+      compiler->lowered_storage_formats =
+         reralloc(compiler, compiler->lowered_storage_formats,
+                  uint32_t, compiler->num_lowered_storage_formats + 1);
+      compiler->lowered_storage_formats[
+         compiler->num_lowered_storage_formats++] = fmt;
+   }
+   assert((devinfo->verx10 >= 125 &&
+           compiler->num_lowered_storage_formats == 0) ||
+          (devinfo->verx10 >= 110 && devinfo->verx10 <= 120 &&
+           compiler->num_lowered_storage_formats == 3) ||
+          devinfo->verx10 == 90);
 
    return compiler;
 }

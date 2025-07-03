@@ -23,88 +23,15 @@
  *
  */
 
+#include "pan_layout.h"
 #include "util/log.h"
 #include "util/macros.h"
 #include "util/u_math.h"
 #include "pan_afbc.h"
 #include "pan_afrc.h"
-#include "pan_layout.h"
+#include "pan_image.h"
+#include "pan_mod.h"
 #include "pan_props.h"
-
-/*
- * Given a format, determine the tile size used for u-interleaving. For formats
- * that are already block compressed, this is 4x4. For all other formats, this
- * is 16x16, hence the modifier name.
- */
-static inline struct pan_image_block_size
-pan_u_interleaved_tile_size_el(enum pipe_format format)
-{
-   if (util_format_is_compressed(format))
-      return (struct pan_image_block_size){4, 4};
-   else
-      return (struct pan_image_block_size){16, 16};
-}
-
-/*
- * Determine the block size used for interleaving. For u-interleaving, this is
- * the tile size. For AFBC, this is the superblock size. For AFRC, this is the
- * paging tile size. For linear textures, this is trivially 1x1.
- */
-struct pan_image_block_size
-pan_image_block_size_el(uint64_t modifier, enum pipe_format format)
-{
-   if (modifier == DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED)
-      return pan_u_interleaved_tile_size_el(format);
-   else if (drm_is_afbc(modifier))
-      return pan_afbc_superblock_size(modifier);
-   else if (drm_is_afrc(modifier))
-      return pan_afrc_tile_size(format, modifier);
-   else
-      return (struct pan_image_block_size){1, 1};
-}
-
-/* For non-AFBC and non-wide AFBC, the render block size matches
- * the block size, but for wide AFBC, the GPU wants the block height
- * to be 16 pixels high.
- */
-struct pan_image_block_size
-pan_image_renderblock_size_el(uint64_t modifier, enum pipe_format format)
-{
-   if (!drm_is_afbc(modifier))
-      return pan_image_block_size_el(modifier, format);
-
-   return pan_afbc_renderblock_size(modifier);
-}
-
-static inline unsigned
-format_minimum_alignment(unsigned arch, enum pipe_format format, uint64_t mod)
-{
-   if (drm_is_afbc(mod))
-      return 16;
-
-   if (drm_is_afrc(mod))
-      return pan_afrc_buffer_alignment_from_modifier(mod);
-
-   if (arch < 7)
-      return 64;
-
-   switch (format) {
-   /* For v7+, NV12/NV21/I420 have a looser alignment requirement of 16 bytes */
-   case PIPE_FORMAT_R8_G8B8_420_UNORM:
-   case PIPE_FORMAT_G8_B8R8_420_UNORM:
-   case PIPE_FORMAT_R8_G8_B8_420_UNORM:
-   case PIPE_FORMAT_R8_B8_G8_420_UNORM:
-   case PIPE_FORMAT_R8_G8B8_422_UNORM:
-   case PIPE_FORMAT_R8_B8G8_422_UNORM:
-      return 16;
-   /* the 10 bit formats have even looser alignment */
-   case PIPE_FORMAT_R10_G10B10_420_UNORM:
-   case PIPE_FORMAT_R10_G10B10_422_UNORM:
-      return 1;
-   default:
-      return 64;
-   }
-}
 
 /*
  * Computes sizes for checksumming, which is 8 bytes per 16x16 tile.
@@ -120,7 +47,7 @@ format_minimum_alignment(unsigned arch, enum pipe_format format, uint64_t mod)
 
 static void
 init_slice_crc_info(unsigned arch, struct pan_image_slice_layout *slice,
-                    unsigned width_px, unsigned height_px, unsigned offset_B)
+                    unsigned width_px, unsigned height_px, uint64_t offset_B)
 {
    unsigned checksum_region_size_px = pan_meta_tile_size(arch);
    unsigned checksum_x_tile_per_region =
@@ -138,269 +65,110 @@ init_slice_crc_info(unsigned arch, struct pan_image_slice_layout *slice,
    slice->crc.size_B = slice->crc.stride_B * tile_count_y;
 }
 
-unsigned
-pan_image_surface_stride(const struct pan_image_props *props,
-                         const struct pan_image_layout *layout, unsigned level)
+static struct pan_image_extent
+get_mip_level_extent(const struct pan_image_props *props, unsigned plane_idx,
+                     unsigned mip_level)
 {
-   if (props->dim != MALI_TEXTURE_DIMENSION_3D)
-      return layout->array_stride_B;
-   else if (drm_is_afbc(props->modifier))
-      return layout->slices[level].afbc.surface_stride_B;
-   else
-      return layout->slices[level].surface_stride_B;
-}
-
-struct pan_image_wsi_layout
-pan_image_layout_get_wsi_layout(const struct pan_image_props *props,
-                                const struct pan_image_layout *layout,
-                                unsigned level)
-{
-   unsigned row_stride_B = layout->slices[level].row_stride_B;
-   struct pan_image_block_size block_size_el =
-      pan_image_renderblock_size_el(props->modifier, props->format);
-
-   if (drm_is_afbc(props->modifier)) {
-      unsigned width_px = u_minify(props->extent_px.width, level);
-      unsigned alignment_B =
-         block_size_el.width * pan_afbc_tile_size(props->modifier);
-
-      width_px = ALIGN_POT(width_px, alignment_B);
-      return (struct pan_image_wsi_layout){
-         .offset_B = layout->slices[level].offset_B,
-         .row_pitch_B = width_px * util_format_get_blocksize(props->format),
-      };
-   } else if (drm_is_afrc(props->modifier)) {
-      struct pan_image_block_size tile_size_px =
-         pan_afrc_tile_size(props->format, props->modifier);
-
-      return (struct pan_image_wsi_layout){
-         .offset_B = layout->slices[level].offset_B,
-         .row_pitch_B = row_stride_B / tile_size_px.height,
-      };
-   } else {
-      return (struct pan_image_wsi_layout){
-         .offset_B = layout->slices[level].offset_B,
-         .row_pitch_B = row_stride_B / block_size_el.height,
-      };
-   }
-}
-
-static unsigned
-wsi_row_pitch_to_row_stride(unsigned wsi_row_pitch_B, enum pipe_format format,
-                            uint64_t modifier)
-{
-   if (drm_is_afbc(modifier)) {
-      unsigned width_px = wsi_row_pitch_B / util_format_get_blocksize(format);
-
-      return pan_afbc_row_stride(modifier, width_px);
-   } else if (drm_is_afrc(modifier)) {
-      struct pan_image_block_size tile_size_px =
-         pan_afrc_tile_size(format, modifier);
-
-      return wsi_row_pitch_B * tile_size_px.height;
-   } else {
-      struct pan_image_block_size block_size_el =
-         pan_image_renderblock_size_el(modifier, format);
-
-      return wsi_row_pitch_B * block_size_el.height;
-   }
-}
-
-/* Computes the offset of an image surface at a particular level/face. Add to
- * the base address of a texture to get the address to that level/face */
-
-unsigned
-pan_image_surface_offset(const struct pan_image_layout *layout, unsigned level,
-                         unsigned array_idx, unsigned surface_idx)
-{
-   return layout->slices[level].offset_B +
-          (array_idx * layout->array_stride_B) +
-          (surface_idx * layout->slices[level].surface_stride_B);
+   return (struct pan_image_extent){
+      .width = u_minify(util_format_get_plane_width(props->format, plane_idx,
+                                                    props->extent_px.width),
+                        mip_level),
+      .height = u_minify(util_format_get_plane_height(props->format, plane_idx,
+                                                      props->extent_px.height),
+                         mip_level),
+      .depth = u_minify(props->extent_px.depth, mip_level),
+   };
 }
 
 bool
-pan_image_layout_init(unsigned arch, const struct pan_image_props *props,
-                      const struct pan_image_wsi_layout *wsi_layout,
-                      struct pan_image_layout *layout)
+pan_image_layout_init(
+   unsigned arch, struct pan_image *image, unsigned plane_idx,
+   const struct pan_image_layout_constraints *explicit_layout_constraints)
 {
+   assert(image->mod_handler);
+   assert(plane_idx < ARRAY_SIZE(image->planes) &&
+          plane_idx < util_format_get_num_planes(image->props.format));
+   assert(image->planes[plane_idx]);
+
+   const struct pan_mod_handler *mod_handler = image->mod_handler;
+   const struct pan_image_props *props = &image->props;
+   struct pan_image_layout *layout = &image->planes[plane_idx]->layout;
+
+   /* Use explicit layout only when wsi_row_pitch_B is non-zero */
+   struct pan_image_layout_constraints layout_constraints = {0};
+   if (explicit_layout_constraints)
+      layout_constraints = *explicit_layout_constraints;
+
+   const bool use_explicit_layout = layout_constraints.wsi_row_pitch_B != 0;
+
    /* Explicit stride only work with non-mipmap, non-array, single-sample
     * 2D image without CRC.
     */
-   if (wsi_layout &&
+   if (use_explicit_layout &&
        (props->extent_px.depth > 1 || props->nr_samples > 1 ||
         props->array_size > 1 || props->dim != MALI_TEXTURE_DIMENSION_2D ||
         props->nr_slices > 1 || props->crc))
       return false;
 
-   bool afbc = drm_is_afbc(props->modifier);
-   bool afrc = drm_is_afrc(props->modifier);
-   int align_req_B =
-      format_minimum_alignment(arch, props->format, props->modifier);
-   uint64_t offset_B = 0, wsi_row_stride_B = 0;
-
-   /* Mandate alignment */
-   if (wsi_layout) {
-      bool rejected = false;
-
-      int align_mask = align_req_B - 1;
-
-      offset_B = wsi_layout->offset_B;
-      wsi_row_stride_B = wsi_row_pitch_to_row_stride(
-         wsi_layout->row_pitch_B, props->format, props->modifier);
-
-      if (arch >= 7) {
-         rejected =
-            ((offset_B & align_mask) || (wsi_row_stride_B & align_mask));
-      } else {
-         rejected = (offset_B & align_mask);
-      }
-
-      if (rejected) {
-         mesa_loge(
-            "panfrost: rejecting image due to unsupported offset or stride "
-            "alignment.\n");
-         return false;
-      }
-   }
-
-   unsigned fmt_blocksize_B = util_format_get_blocksize(props->format);
+   if (plane_idx >= util_format_get_num_planes(props->format))
+      return false;
 
    /* MSAA is implemented as a 3D texture with z corresponding to the
     * sample #, horrifyingly enough */
 
    assert(props->extent_px.depth == 1 || props->nr_samples == 1);
 
-   bool linear = props->modifier == DRM_FORMAT_MOD_LINEAR;
-   bool is_3d = props->dim == MALI_TEXTURE_DIMENSION_3D;
+   /* Make sure the extent/sample_count is not zero. */
+   assert(props->extent_px.width && props->extent_px.height &&
+          props->extent_px.depth && props->nr_samples);
 
-   struct pan_image_block_size renderblk_size_el =
-      pan_image_renderblock_size_el(props->modifier, props->format);
-   struct pan_image_block_size block_size_el =
-      pan_image_block_size_el(props->modifier, props->format);
-
-   unsigned width_px = props->extent_px.width;
-   unsigned height_px = props->extent_px.height;
-   unsigned depth_px = props->extent_px.depth;
-
-   unsigned align_w_el = renderblk_size_el.width;
-   unsigned align_h_el = renderblk_size_el.height;
-
-   /* For tiled AFBC, align to tiles of superblocks (this can be large) */
-   if (afbc) {
-      align_w_el *= pan_afbc_tile_size(props->modifier);
-      align_h_el *= pan_afbc_tile_size(props->modifier);
-   }
+   struct pan_image_extent mip_extent_px = {
+      .width = util_format_get_plane_width(props->format, plane_idx,
+                                           props->extent_px.width),
+      .height = util_format_get_plane_height(props->format, plane_idx,
+                                             props->extent_px.height),
+      .depth = props->extent_px.depth,
+   };
 
    for (unsigned l = 0; l < props->nr_slices; ++l) {
-      struct pan_image_slice_layout *slice = &layout->slices[l];
+      struct pan_image_slice_layout *slayout = &layout->slices[l];
 
-      unsigned effective_width_el = ALIGN_POT(
-         util_format_get_nblocksx(props->format, width_px), align_w_el);
-      unsigned effective_height_el = ALIGN_POT(
-         util_format_get_nblocksy(props->format, height_px), align_h_el);
-      unsigned row_stride_B;
+      if (!mod_handler->init_slice_layout(props, plane_idx, mip_extent_px,
+                                          &layout_constraints, slayout))
+         return false;
 
-      /* Align levels to cache-line as a performance improvement for
-       * linear/tiled and as a requirement for AFBC */
-
-      offset_B = ALIGN_POT(offset_B, pan_image_slice_align(props->modifier));
-
-      slice->offset_B = offset_B;
-
-      if (afrc) {
-         row_stride_B = pan_afrc_row_stride(props->format, props->modifier,
-                                            effective_width_el);
-      } else {
-         row_stride_B =
-            fmt_blocksize_B * effective_width_el * block_size_el.height;
-      }
-
-      /* On v7+ row_stride and offset alignment requirement are equal */
-      if (arch >= 7) {
-         row_stride_B = ALIGN_POT(row_stride_B, align_req_B);
-      }
-
-      if (wsi_layout && !afbc && !afrc) {
-         /* Make sure the explicit stride is valid */
-         if (wsi_row_stride_B < row_stride_B) {
-            mesa_loge("panfrost: rejecting image due to invalid row stride.\n");
-            return false;
-         }
-
-         row_stride_B = wsi_row_stride_B;
-      } else if (linear) {
-         /* Keep lines alignment on 64 byte for performance */
-         row_stride_B = ALIGN_POT(row_stride_B, 64);
-      }
-
-      uint64_t slice_one_size_B =
-         (uint64_t)row_stride_B * (effective_height_el / block_size_el.height);
-
-      /* Compute AFBC sizes if necessary */
-      if (afbc) {
-         slice->row_stride_B =
-            pan_afbc_row_stride(props->modifier, effective_width_el);
-         slice->afbc.stride_sb = effective_width_el / block_size_el.width;
-         slice->afbc.nr_sblocks = slice->afbc.stride_sb *
-                                  (effective_height_el / block_size_el.height);
-         slice->afbc.header_size_B =
-            ALIGN_POT(slice->afbc.nr_sblocks * AFBC_HEADER_BYTES_PER_TILE,
-                      pan_afbc_body_align(arch, props->modifier));
-
-         if (wsi_layout && wsi_row_stride_B < slice->row_stride_B) {
-            mesa_loge("panfrost: rejecting image due to invalid row stride.\n");
-            return false;
-         }
-
-         /* AFBC body size */
-         slice->afbc.body_size_B = slice_one_size_B;
-
-         /* 3D AFBC resources have all headers placed at the
-          * beginning instead of having them split per depth
-          * level
-          */
-         if (is_3d) {
-            slice->afbc.surface_stride_B = slice->afbc.header_size_B;
-            slice->afbc.header_size_B *= depth_px;
-            slice->afbc.body_size_B *= depth_px;
-            offset_B += slice->afbc.header_size_B;
-         } else {
-            slice_one_size_B += slice->afbc.header_size_B;
-            slice->afbc.surface_stride_B = slice_one_size_B;
-         }
-      } else {
-         slice->row_stride_B = row_stride_B;
-      }
-
-      uint64_t slice_full_size_B =
-         slice_one_size_B * depth_px * props->nr_samples;
-
-      slice->surface_stride_B = slice_one_size_B;
-
-      /* Compute AFBC sizes if necessary */
-
-      offset_B += slice_full_size_B;
-      slice->size_B = slice_full_size_B;
+      layout_constraints.offset_B += slayout->size_B;
 
       /* Add a checksum region if necessary */
       if (props->crc) {
-         init_slice_crc_info(arch, slice, width_px, height_px, offset_B);
-         offset_B += slice->crc.size_B;
-         slice->size_B += slice->crc.size_B;
+         init_slice_crc_info(arch, slayout, mip_extent_px.width,
+                             mip_extent_px.height, layout_constraints.offset_B);
+         layout_constraints.offset_B += slayout->crc.size_B;
+         slayout->size_B += slayout->crc.size_B;
       }
 
-      width_px = u_minify(width_px, 1);
-      height_px = u_minify(height_px, 1);
-      depth_px = u_minify(depth_px, 1);
+      mip_extent_px.width = u_minify(mip_extent_px.width, 1);
+      mip_extent_px.height = u_minify(mip_extent_px.height, 1);
+      mip_extent_px.depth = u_minify(mip_extent_px.depth, 1);
    }
 
    /* Arrays and cubemaps have the entire miptree duplicated */
-   layout->array_stride_B = ALIGN_POT(offset_B, 64);
-   if (wsi_layout)
-      layout->data_size_B = offset_B;
-   else
+   layout->array_stride_B =
+      ALIGN_POT(layout_constraints.offset_B - layout->slices[0].offset_B, 64);
+   if (use_explicit_layout) {
+      layout->data_size_B =
+         layout_constraints.offset_B - explicit_layout_constraints->offset_B;
+   } else {
+      /* Native images start from offset 0, and the planar plane offset has
+       * been at least 4K page aligned below. So the base level slice offset
+       * should always be the same with the plane offset.
+       */
+      assert(!explicit_layout_constraints ||
+             explicit_layout_constraints->offset_B ==
+                layout->slices[0].offset_B);
       layout->data_size_B = ALIGN_POT(
          (uint64_t)layout->array_stride_B * (uint64_t)props->array_size, 4096);
+   }
 
    return true;
 }

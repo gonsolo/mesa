@@ -11,6 +11,7 @@ use nvidia_headers::classes::clc3c0::mthd as clc3c0;
 use nvidia_headers::classes::clc3c0::VOLTA_COMPUTE_A;
 use nvidia_headers::classes::clc6c0::mthd as clc6c0;
 use nvidia_headers::classes::clc6c0::AMPERE_COMPUTE_A;
+use nvidia_headers::classes::clcbc0::HOPPER_COMPUTE_A;
 
 use std::io;
 use std::ops::Deref;
@@ -46,7 +47,7 @@ struct DrmDevices {
 impl DrmDevices {
     fn get() -> io::Result<Self> {
         unsafe {
-            let mut devices: [drmDevicePtr; 16] = std::mem::zeroed();
+            let mut devices: [drmDevicePtr; 16] = [std::ptr::null_mut(); 16];
             let num_devices = drmGetDevices(
                 devices.as_mut_ptr(),
                 devices.len().try_into().unwrap(),
@@ -465,7 +466,7 @@ impl<'a> Runner {
         );
 
         // Populate and upload the QMD
-        let mut qmd_cbufs: [nak_qmd_cbuf; 8] = unsafe { std::mem::zeroed() };
+        let mut qmd_cbufs: [nak_qmd_cbuf; 8] = Default::default();
         qmd_cbufs[0] = nak_qmd_cbuf {
             index: 0,
             size: std::mem::size_of::<CB0>()
@@ -513,14 +514,19 @@ impl<'a> Runner {
             });
         }
 
-        let smem_base_addr = 0xfe000000_u32;
+        let mut smem_base_addr = 0xfe000000_u64;
+        if self.dev_info().cls_compute >= HOPPER_COMPUTE_A {
+            // This needs to be 4GB aligned on Hopper+
+            smem_base_addr <<= 8;
+        }
+
         let lmem_base_addr = 0xff000000_u32;
         if self.dev_info().cls_compute >= VOLTA_COMPUTE_A {
             p.push_method(clc3c0::SetShaderSharedMemoryWindowA {
-                base_address_upper: 0,
+                base_address_upper: (smem_base_addr >> 32) as u32,
             });
             p.push_method(clc3c0::SetShaderSharedMemoryWindowB {
-                base_address: smem_base_addr,
+                base_address: smem_base_addr as u32,
             });
 
             p.push_method(clc3c0::SetShaderLocalMemoryWindowA {
@@ -531,7 +537,7 @@ impl<'a> Runner {
             });
         } else {
             p.push_method(cla0c0::SetShaderSharedMemoryWindow {
-                base_address: smem_base_addr,
+                base_address: smem_base_addr as u32,
             });
             p.push_method(cla0c0::SetShaderLocalMemoryWindow {
                 base_address: lmem_base_addr,

@@ -683,6 +683,7 @@ vtn_handle_convert(struct vtn_builder *b, SpvOp opcode,
     *
     * For now we are limiting exposure of bfloat16 in NIR, so apply the
     * extra conversions directly here.
+    * The same applies to E4M3 and E5M2.
     */
    if (glsl_type_is_bfloat_16(glsl_src_type)) {
       nir_def *src_as_float = nir_bf2f(&b->nb, src);
@@ -699,6 +700,42 @@ vtn_handle_convert(struct vtn_builder *b, SpvOp opcode,
          src_as_float = vtn_handle_convert(b, opcode, dest_val, glsl_float_type(),
                                            glsl_src_type, src);
       return nir_f2bf(&b->nb, src_as_float);
+   } else if (glsl_type_is_e4m3fn(glsl_src_type)) {
+      nir_def *src_as_float = nir_e4m3fn2f(&b->nb, src);
+      if (glsl_type_is_float(glsl_dest_type))
+         return src_as_float;
+      return vtn_handle_convert(b, opcode, dest_val, glsl_dest_type,
+                                glsl_float_type(), src_as_float);
+
+   } else if (glsl_type_is_e4m3fn(glsl_dest_type)) {
+      nir_def *src_as_float;
+      if (glsl_type_is_float(glsl_src_type))
+         src_as_float = src;
+      else
+         src_as_float = vtn_handle_convert(b, opcode, dest_val, glsl_float_type(),
+                                           glsl_src_type, src);
+      if (vtn_has_decoration(b, dest_val, SpvDecorationSaturatedToLargestFloat8NormalConversionEXT))
+         return nir_f2e4m3fn_sat(&b->nb, src_as_float);
+      else
+         return nir_f2e4m3fn(&b->nb, src_as_float);
+   } else if (glsl_type_is_e5m2(glsl_src_type)) {
+      nir_def *src_as_float = nir_e5m22f(&b->nb, src);
+      if (glsl_type_is_float(glsl_dest_type))
+         return src_as_float;
+      return vtn_handle_convert(b, opcode, dest_val, glsl_dest_type,
+                                glsl_float_type(), src_as_float);
+
+   } else if (glsl_type_is_e5m2(glsl_dest_type)) {
+      nir_def *src_as_float;
+      if (glsl_type_is_float(glsl_src_type))
+         src_as_float = src;
+      else
+         src_as_float = vtn_handle_convert(b, opcode, dest_val, glsl_float_type(),
+                                           glsl_src_type, src);
+      if (vtn_has_decoration(b, dest_val, SpvDecorationSaturatedToLargestFloat8NormalConversionEXT))
+         return nir_f2e5m2_sat(&b->nb, src_as_float);
+      else
+         return nir_f2e5m2(&b->nb, src_as_float);
    }
 
    /* Use bit_size from NIR source instead of from the original src type,
@@ -893,8 +930,16 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
    }
 
    case SpvOpIsInf: {
+      const bool save_exact = b->nb.exact;
+      const unsigned save_fast_math = b->nb.fp_fast_math;
+
+      b->nb.exact = true;
+      b->nb.fp_fast_math = 0;
       nir_def *inf = nir_imm_floatN_t(&b->nb, INFINITY, src[0]->bit_size);
-      dest->def = nir_ieq(&b->nb, nir_fabs(&b->nb, src[0]), inf);
+      dest->def = nir_feq(&b->nb, nir_fabs(&b->nb, src[0]), inf);
+
+      b->nb.exact = save_exact;
+      b->nb.fp_fast_math = save_fast_math;
       break;
    }
 

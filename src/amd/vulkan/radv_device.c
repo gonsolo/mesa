@@ -63,7 +63,6 @@ typedef void *drmDevicePtr;
 #include "winsys/null/radv_null_winsys_public.h"
 #include "git_sha1.h"
 #include "sid.h"
-#include "vk_common_entrypoints.h"
 #include "vk_format.h"
 #include "vk_sync.h"
 #include "vk_sync_dummy.h"
@@ -219,7 +218,7 @@ radv_device_init_vs_prologs(struct radv_device *device)
    for (unsigned num_attributes = 1; num_attributes <= 16; num_attributes++) {
       for (unsigned count = 1; count <= num_attributes; count++) {
          for (unsigned start = 0; start <= (num_attributes - count); start++) {
-            key.instance_rate_inputs = u_bit_consecutive(start, count);
+            key.instance_rate_inputs = BITFIELD_RANGE(start, count);
             key.num_attributes = num_attributes;
 
             struct radv_shader_part *prolog = radv_create_vs_prolog(device, &key);
@@ -331,14 +330,15 @@ radv_device_init_vrs_state(struct radv_device *device)
    if (result != VK_SUCCESS)
       goto fail_create;
 
-   VkBufferMemoryRequirementsInfo2 info = {
-      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2,
-      .buffer = buffer,
+   VkDeviceBufferMemoryRequirements buffer_mem_req_info = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_BUFFER_MEMORY_REQUIREMENTS,
+      .pCreateInfo = &buffer_create_info,
    };
    VkMemoryRequirements2 mem_req = {
       .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
    };
-   vk_common_GetBufferMemoryRequirements2(radv_device_to_handle(device), &info, &mem_req);
+
+   radv_GetDeviceBufferMemoryRequirements(radv_device_to_handle(device), &buffer_mem_req_info, &mem_req);
 
    VkMemoryAllocateInfo alloc_info = {
       .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
@@ -1184,7 +1184,7 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    device->rt_handles = _mesa_hash_table_create(NULL, _mesa_hash_u32, _mesa_key_u32_equal);
 
    device->ws = pdev->ws;
-   vk_device_set_drm_fd(&device->vk, device->ws->get_fd(device->ws));
+   device->vk.sync = device->ws->get_sync_provider(device->ws);
 
    /* With update after bind we can't attach bo's to the command buffer
     * from the descriptor set anymore, so we have to use a global BO list.
@@ -1273,7 +1273,7 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
 
    device->dispatch_initiator = S_00B800_COMPUTE_SHADER_EN(1);
 
-   if (pdev->info.gfx_level >= GFX7) {
+   if (pdev->info.gfx_level >= GFX7 && (pdev->info.family < CHIP_GFX940 || pdev->info.has_graphics)) {
       /* If the KMD allows it (there is a KMD hw register for it),
        * allow launching waves out-of-order.
        */
@@ -1356,7 +1356,7 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
       }
    }
 
-   if (!(instance->debug_flags & RADV_DEBUG_NO_IBS))
+   if (pdev->info.has_graphics && !(instance->debug_flags & RADV_DEBUG_NO_IBS))
       radv_create_gfx_preamble(device);
 
    if (!device->vk.disable_internal_cache) {

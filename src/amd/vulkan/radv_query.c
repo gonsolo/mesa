@@ -25,7 +25,6 @@
 #include "radv_sdma.h"
 #include "sid.h"
 #include "vk_acceleration_structure.h"
-#include "vk_common_entrypoints.h"
 #include "vk_shader_module.h"
 
 #define TIMESTAMP_NOT_READY UINT64_MAX
@@ -252,11 +251,7 @@ build_occlusion_query_shader(struct radv_device *device)
             nir_def *load = nir_build_load_global(&b, 1, 32, nir_iadd(&b, src_va, nir_u2u64(&b, load_offset)),
                                                   .align_mul = 4, .access = ACCESS_COHERENT);
 
-            nir_push_if(&b, nir_ige_imm(&b, load, 0x80000000));
-            {
-               nir_jump(&b, nir_jump_break);
-            }
-            nir_pop_if(&b, NULL);
+            nir_break_if(&b, nir_ige_imm(&b, load, 0x80000000));
          }
          nir_pop_loop(&b, NULL);
       }
@@ -1835,8 +1830,16 @@ radv_query_shader(struct radv_cmd_buffer *cmd_buffer, VkQueryType query_type, st
       dst_stride, pipeline_stats_mask, avail_offset, uses_emulated_queries,
    };
 
-   vk_common_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                              sizeof(push_constants), &push_constants);
+   const VkPushConstantsInfoKHR pc_info = {
+      .sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO_KHR,
+      .layout = layout,
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .offset = 0,
+      .size = sizeof(push_constants),
+      .pValues = &push_constants,
+   };
+
+   radv_CmdPushConstants2(radv_cmd_buffer_to_handle(cmd_buffer), &pc_info);
 
    cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_INV_L2 | RADV_CMD_FLAG_INV_VCACHE;
 
@@ -1853,6 +1856,39 @@ radv_query_shader(struct radv_cmd_buffer *cmd_buffer, VkQueryType query_type, st
       RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_L2 | RADV_CMD_FLAG_INV_VCACHE;
 
    radv_meta_restore(&saved_state, cmd_buffer);
+}
+
+static uint32_t
+query_clear_value(VkQueryType type)
+{
+   switch (type) {
+   case VK_QUERY_TYPE_TIMESTAMP:
+   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR:
+   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_SIZE_KHR:
+   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_BOTTOM_LEVEL_POINTERS_KHR:
+   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SIZE_KHR:
+      return (uint32_t)TIMESTAMP_NOT_READY;
+   default:
+      return 0;
+   }
+}
+
+static void
+radv_reset_query_pool(struct radv_device *device, struct radv_query_pool *pool, uint32_t first_query,
+                      uint32_t query_count)
+{
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   uint32_t value = query_clear_value(pool->vk.query_type);
+   uint32_t *data = (uint32_t *)(pool->ptr + first_query * pool->stride);
+   uint32_t *data_end = (uint32_t *)(pool->ptr + (first_query + query_count) * pool->stride);
+
+   for (uint32_t *p = data; p != data_end; ++p)
+      *p = value;
+
+   if (pool->vk.query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS ||
+       (pool->vk.query_type == VK_QUERY_TYPE_MESH_PRIMITIVES_GENERATED_EXT && pdev->info.gfx_level >= GFX11)) {
+      memset(pool->ptr + pool->availability_offset + first_query * 4, 0, query_count * 4);
+   }
 }
 
 static void
@@ -1983,6 +2019,9 @@ radv_create_query_pool(struct radv_device *device, const VkQueryPoolCreateInfo *
       radv_destroy_query_pool(device, pAllocator, pool);
       return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    }
+
+   if (pCreateInfo->flags & VK_QUERY_POOL_CREATE_RESET_BIT_KHR)
+      radv_reset_query_pool(device, pool, 0, pool->vk.query_count);
 
    *pQueryPool = radv_query_pool_to_handle(pool);
    radv_rmv_log_query_pool_create(device, *pQueryPool);
@@ -2364,7 +2403,7 @@ radv_GetQueryPoolResults(VkDevice _device, VkQueryPool queryPool, uint32_t first
             uint64_t *dest64 = (uint64_t *)dest;
             if (available || (flags & VK_QUERY_RESULT_PARTIAL_BIT)) {
                dest64[0] = src32[5];
-               dest64[1] = src32[6];
+               dest64[1] = src32[6] - src32[8];
             }
             dest += 16;
             if (flags & VK_QUERY_RESULT_WITH_STATUS_BIT_KHR) {
@@ -2375,7 +2414,7 @@ radv_GetQueryPoolResults(VkDevice _device, VkQueryPool queryPool, uint32_t first
             uint32_t *dest32 = (uint32_t *)dest;
             if (available || (flags & VK_QUERY_RESULT_PARTIAL_BIT)) {
                dest32[0] = src32[5];
-               dest32[1] = src32[6];
+               dest32[1] = src32[6] - src32[8];
             }
             dest += 8;
             if (flags & VK_QUERY_RESULT_WITH_STATUS_BIT_KHR) {
@@ -2486,21 +2525,6 @@ radv_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer, VkQueryPool queryPoo
    radv_resume_conditional_rendering(cmd_buffer);
 }
 
-static uint32_t
-query_clear_value(VkQueryType type)
-{
-   switch (type) {
-   case VK_QUERY_TYPE_TIMESTAMP:
-   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR:
-   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_SIZE_KHR:
-   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_BOTTOM_LEVEL_POINTERS_KHR:
-   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SIZE_KHR:
-      return (uint32_t)TIMESTAMP_NOT_READY;
-   default:
-      return 0;
-   }
-}
-
 VKAPI_ATTR void VKAPI_CALL
 radv_CmdResetQueryPool(VkCommandBuffer commandBuffer, VkQueryPool queryPool, uint32_t firstQuery, uint32_t queryCount)
 {
@@ -2543,19 +2567,8 @@ radv_ResetQueryPool(VkDevice _device, VkQueryPool queryPool, uint32_t firstQuery
 {
    VK_FROM_HANDLE(radv_device, device, _device);
    VK_FROM_HANDLE(radv_query_pool, pool, queryPool);
-   const struct radv_physical_device *pdev = radv_device_physical(device);
 
-   uint32_t value = query_clear_value(pool->vk.query_type);
-   uint32_t *data = (uint32_t *)(pool->ptr + firstQuery * pool->stride);
-   uint32_t *data_end = (uint32_t *)(pool->ptr + (firstQuery + queryCount) * pool->stride);
-
-   for (uint32_t *p = data; p != data_end; ++p)
-      *p = value;
-
-   if (pool->vk.query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS ||
-       (pool->vk.query_type == VK_QUERY_TYPE_MESH_PRIMITIVES_GENERATED_EXT && pdev->info.gfx_level >= GFX11)) {
-      memset(pool->ptr + pool->availability_offset + firstQuery * 4, 0, queryCount * 4);
-   }
+   radv_reset_query_pool(device, pool, firstQuery, queryCount);
 }
 
 static void

@@ -486,6 +486,12 @@ KHR-GLES2.texture_3d.filtering.sizes.63x63x63_nearest,Fail
 KHR-GLES2.texture_3d.filtering.sizes.63x63x63_nearest_mipmap_linear,Fail
 KHR-GLES2.texture_3d.filtering.sizes.63x63x63_nearest_mipmap_nearest,Fail
 
+# New failures with ES CTS 3.2.12.0
+dEQP-GLES2.functional.polygon_offset.fixed16_render_with_units,Fail
+dEQP-GLES2.functional.uniform_api.info_query.nested_structs_arrays.mat4_mat2_both,Fail
+dEQP-GLES2.functional.uniform_api.value.assigned.by_pointer.get_uniform.nested_structs_arrays.mat4_mat2_both,Fail
+dEQP-GLES2.functional.uniform_api.value.assigned.by_pointer.render.nested_structs_arrays.mat4_mat2_both,Fail
+
 
 # Piglit gpu tests
 
@@ -757,13 +763,6 @@ spec@ext_framebuffer_multisample@accuracy all_samples stencil_draw depthstencil,
 spec@ext_framebuffer_multisample@accuracy all_samples stencil_draw small depthstencil,Fail
 spec@ext_framebuffer_multisample@accuracy all_samples stencil_resolve depthstencil,Fail
 spec@ext_framebuffer_multisample@accuracy all_samples stencil_resolve small depthstencil,Fail
-spec@ext_framebuffer_multisample@alpha-to-coverage-no-draw-buffer-zero 2,Fail
-spec@ext_framebuffer_multisample@alpha-to-coverage-no-draw-buffer-zero 4,Fail
-spec@ext_framebuffer_multisample@alpha-to-coverage-no-draw-buffer-zero 6,Fail
-spec@ext_framebuffer_multisample@interpolation 0 centroid-deriv,Fail
-spec@ext_framebuffer_multisample@interpolation 0 centroid-deriv-disabled,Fail
-spec@ext_framebuffer_multisample@interpolation 0 non-centroid-deriv,Fail
-spec@ext_framebuffer_multisample@interpolation 0 non-centroid-deriv-disabled,Fail
 
 spec@ext_framebuffer_object@fbo-alphatest-formats,Fail
 spec@ext_framebuffer_object@fbo-alphatest-formats@GL_INTENSITY12,Fail

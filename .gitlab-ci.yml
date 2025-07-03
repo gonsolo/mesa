@@ -55,6 +55,11 @@ workflow:
     - if: &is-merge-request $CI_PIPELINE_SOURCE == "merge_request_event"
     # Push to a branch on a fork
     - if: &is-push-to-fork $CI_PROJECT_NAMESPACE != "mesa" && $CI_PIPELINE_SOURCE == "push"
+    # a pipeline running within the upstream project
+    - if: &is-upstream-pipeline $CI_PROJECT_PATH == $FDO_UPSTREAM_REPO
+    # an MR pipeline running within the upstream project, usually true for
+    # those with the Developer role or above
+    - if: &is-upstream-mr-pipeline $CI_PROJECT_PATH == $FDO_UPSTREAM_REPO && $CI_PIPELINE_SOURCE == "merge_request_event"
     # Nightly pipeline
     - if: &is-scheduled-pipeline $CI_PIPELINE_SOURCE == "schedule"
       variables:
@@ -102,6 +107,8 @@ variables:
   S3_TRACIE_RESULTS_BUCKET: mesa-tracie-results
   S3_TRACIE_PUBLIC_BUCKET: mesa-tracie-public
   S3_TRACIE_PRIVATE_BUCKET: mesa-tracie-private
+  # Base path used for various artifacts
+  S3_BASE_PATH: "${S3_HOST}/${S3_KERNEL_BUCKET}"
   # per-pipeline artifact storage on MinIO
   PIPELINE_ARTIFACTS_BASE: ${S3_HOST}/${S3_ARTIFACTS_BUCKET}/${CI_PROJECT_PATH}/${CI_PIPELINE_ID}
   # per-job artifact storage on MinIO
@@ -206,7 +213,9 @@ include:
     ref: *ci-tron-template-commit
     file: '/.gitlab-ci/dut.yml'
   - local: '.gitlab-ci/image-tags.yml'
-  - local: '.gitlab-ci/lava/lava-gitlab-ci.yml'
+  - local: '.gitlab-ci/bare-metal/gitlab-ci.yml'
+  - local: '.gitlab-ci/ci-tron/gitlab-ci.yml'
+  - local: '.gitlab-ci/lava/gitlab-ci.yml'
   - local: '.gitlab-ci/container/gitlab-ci.yml'
   - local: '.gitlab-ci/build/gitlab-ci.yml'
   - local: '.gitlab-ci/test/gitlab-ci.yml'
@@ -230,7 +239,57 @@ include:
 
 # Note: make sure the branches in this list are the same as in
 # `.build-only-delayed-rules` below.
-.container+build-rules:
+.container-rules:
+  rules:
+    - !reference [.common-rules, rules]
+    # Run when re-enabling a disabled farm, but not when disabling it
+    - !reference [.disable-farm-mr-rules, rules]
+    # Never run immediately after merging, as we just ran everything
+    - !reference [.never-post-merge-rules, rules]
+    # Only rebuild containers in merge pipelines if any tags have been
+    # changed, else we'll just use the already-built containers
+    - if: *is-merge-attempt
+      changes: &image_tags_path
+        - .gitlab-ci/image-tags.yml
+      when: on_success
+    # Skip everything for pre-merge and merge pipelines which don't change
+    # anything in the build; we only do this for marge-bot and not user
+    # pipelines in a MR, because we might still need to run it to copy the
+    # container into the user's namespace.
+    - if: *is-merge-attempt
+      when: never
+    # Any MR pipeline which changes image-tags.yml needs to be able to
+    # rebuild the containers
+    - if: *is-merge-request
+      changes: *image_tags_path
+      when: manual
+    # ... if the MR pipeline runs as mesa/mesa and does not need a container
+    # rebuild, we can skip it
+    - if: *is-upstream-mr-pipeline
+      when: never
+    # ... however for MRs running inside the user namespace, we may need to
+    # run these jobs to copy the container images from upstream
+    - if: *is-merge-request
+      when: manual
+    # Build everything after someone bypassed the CI
+    - if: *is-push-to-upstream-default-branch
+      when: on_success
+    # Build everything when pushing to staging branches
+    - if: *is-push-to-upstream-staging-branch
+      when: on_success
+    # Scheduled pipelines reuse already-built containers
+    - if: *is-scheduled-pipeline
+      when: never
+    # Any other pipeline in the upstream should reuse already-built containers
+    - if: *is-upstream-pipeline
+      when: never
+    # Allow building everything in fork pipelines, but build nothing unless
+    # manually triggered
+    - when: manual
+
+# Note: make sure the branches in this list are the same as in
+# `.build-only-delayed-rules` below.
+.build-rules:
   rules:
     - !reference [.common-rules, rules]
     # Run when re-enabling a disabled farm, but not when disabling it
@@ -328,45 +387,13 @@ include:
     # manually triggered
     - when: manual
 
-
-.ci-deqp-artifacts:
-  artifacts:
-    name: "${CI_PROJECT_NAME}_${CI_JOB_NAME}"
-    when: always
-    untracked: false
-    paths:
-      # Watch out!  Artifacts are relative to the build dir.
-      # https://gitlab.com/gitlab-org/gitlab-ce/commit/8788fb925706cad594adf6917a6c5f6587dd1521
-      - artifacts
-      - _build/meson-logs/*.txt
-      - _build/meson-logs/strace
-      - _build/.ninja_log
-
-# Git archive
-
-make-git-archive:
-  extends:
-    - .fdo.ci-fairy
-  stage: git-archive
-  rules:
-    - !reference [.scheduled_pipeline-rules, rules]
-  script:
-    # Compactify the .git directory
-    - git gc --aggressive
-    # Download & cache the perfetto subproject as well.
-    - rm -rf subprojects/perfetto ; mkdir -p subprojects/perfetto && curl --fail https://android.googlesource.com/platform/external/perfetto/+archive/$(grep 'revision =' subprojects/perfetto.wrap | cut -d ' ' -f3).tar.gz | tar zxf - -C subprojects/perfetto
-    # compress the current folder
-    - tar -cvzf ../$CI_PROJECT_NAME.tar.gz .
-
-    - ci-fairy s3cp --token-file "${S3_JWT_FILE}" ../$CI_PROJECT_NAME.tar.gz https://$S3_HOST/git-cache/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/$CI_PROJECT_NAME.tar.gz
-
 # Sanity checks of MR settings and commit logs
 sanity:
   extends:
     - .fdo.ci-fairy
   stage: sanity
   tags:
-    - $FDO_RUNNER_JOB_PRIORITY_TAG_X86_64
+    - placeholder-job
   rules:
     - if: *is-merge-request
       when: on_success
@@ -408,31 +435,3 @@ sanity:
     reports:
       junit: check-*.xml
 
-
-mr-label-maker-test:
-  extends:
-    - .fdo.ci-fairy
-  stage: sanity
-  tags:
-    - $FDO_RUNNER_JOB_PRIORITY_TAG_X86_64
-  rules:
-    - !reference [.mr-label-maker-rules, rules]
-  variables:
-    GIT_STRATEGY: fetch
-  timeout: 10m
-  script:
-    - set -eu
-    - python3 -m venv .venv
-    - source .venv/bin/activate
-    - pip install git+https://gitlab.freedesktop.org/freedesktop/mr-label-maker
-    - mr-label-maker --dry-run --mr $CI_MERGE_REQUEST_IID
-
-# Jobs that need to pass before spending hardware resources on further testing
-.required-for-hardware-jobs:
-  needs:
-    - job: rustfmt
-      optional: true
-      artifacts: false
-    - job: yaml-toml-shell-py-test
-      optional: true
-      artifacts: false

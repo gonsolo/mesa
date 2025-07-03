@@ -141,6 +141,17 @@ is_kgsl(struct tu_instance *instance)
    return strcmp(instance->knl->name, "kgsl") == 0;
 }
 
+static bool tu_has_multiview(const struct tu_physical_device *device)
+{
+   return device->info->a6xx.has_hw_multiview || TU_DEBUG(NOCONFORM);
+}
+
+/* We are generally VK 1.1 except A702, which has no multiview */
+static bool tu_is_vk_1_1(const struct tu_physical_device *device)
+{
+   return tu_has_multiview(device);
+}
+
 static void
 get_device_extensions(const struct tu_physical_device *device,
                       struct vk_device_extension_table *ext)
@@ -163,7 +174,8 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_calibrated_timestamps = device->info->a7xx.has_persistent_counter,
       .KHR_compute_shader_derivatives = device->info->chip >= 7,
       .KHR_copy_commands2 = true,
-      .KHR_create_renderpass2 = true,
+      // TODO workaround for https://github.com/KhronosGroup/VK-GL-CTS/issues/525
+      .KHR_create_renderpass2 = true, // tu_has_multiview(device),
       .KHR_dedicated_allocation = true,
       .KHR_deferred_host_operations = true,
       .KHR_depth_stencil_resolve = true,
@@ -182,25 +194,25 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_format_feature_flags2 = true,
       .KHR_fragment_shading_rate = device->info->a6xx.has_attachment_shading_rate,
       .KHR_get_memory_requirements2 = true,
-      .KHR_global_priority = true,
+      .KHR_global_priority = tu_is_vk_1_1(device),
       .KHR_image_format_list = true,
       .KHR_imageless_framebuffer = true,
 #ifdef TU_USE_WSI_PLATFORM
       .KHR_incremental_present = true,
 #endif
       .KHR_index_type_uint8 = true,
-      .KHR_line_rasterization = true,
+      .KHR_line_rasterization = !device->info->a6xx.is_a702,
       .KHR_load_store_op_none = true,
       .KHR_maintenance1 = true,
       .KHR_maintenance2 = true,
       .KHR_maintenance3 = true,
-      .KHR_maintenance4 = true,
-      .KHR_maintenance5 = true,
-      .KHR_maintenance6 = true,
-      .KHR_maintenance7 = true,
-      .KHR_maintenance8 = true,
+      .KHR_maintenance4 = tu_is_vk_1_1(device),
+      .KHR_maintenance5 = tu_is_vk_1_1(device),
+      .KHR_maintenance6 = tu_is_vk_1_1(device),
+      .KHR_maintenance7 = tu_is_vk_1_1(device),
+      .KHR_maintenance8 = tu_is_vk_1_1(device),
       .KHR_map_memory2 = true,
-      .KHR_multiview = TU_DEBUG(NOCONFORM) ? true : device->info->a6xx.has_hw_multiview,
+      .KHR_multiview = tu_has_multiview(device),
       .KHR_performance_query = TU_DEBUG(PERFC) || TU_DEBUG(PERFCRAW),
       .KHR_pipeline_executable_properties = true,
       .KHR_pipeline_library = true,
@@ -212,8 +224,10 @@ get_device_extensions(const struct tu_physical_device *device,
        * we can also expose the extension that way. */
       .KHR_present_id = (driQueryOptionb(&device->instance->dri_options, "vk_khr_present_wait") ||
                          wsi_common_vk_instance_supports_present_wait(&device->instance->vk)),
+      .KHR_present_id2 = true,
       .KHR_present_wait = (driQueryOptionb(&device->instance->dri_options, "vk_khr_present_wait") ||
                            wsi_common_vk_instance_supports_present_wait(&device->instance->vk)),
+      .KHR_present_wait2 = true,
 #endif
       .KHR_push_descriptor = true,
       .KHR_ray_query = has_raytracing,
@@ -228,15 +242,15 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_shader_expect_assume = true,
       .KHR_shader_float16_int8 = true,
       .KHR_shader_float_controls = true,
-      .KHR_shader_float_controls2 = true,
+      .KHR_shader_float_controls2 = tu_is_vk_1_1(device),
       .KHR_shader_integer_dot_product = true,
       .KHR_shader_non_semantic_info = true,
       .KHR_shader_relaxed_extended_instruction = true,
-      .KHR_shader_subgroup_extended_types = true,
+      .KHR_shader_subgroup_extended_types = tu_is_vk_1_1(device),
       .KHR_shader_subgroup_rotate = true,
-      .KHR_shader_subgroup_uniform_control_flow = true,
+      .KHR_shader_subgroup_uniform_control_flow = tu_is_vk_1_1(device),
       .KHR_shader_terminate_invocation = true,
-      .KHR_spirv_1_4 = true,
+      .KHR_spirv_1_4 = tu_is_vk_1_1(device),
       .KHR_storage_buffer_storage_class = true,
 #ifdef TU_USE_WSI_PLATFORM
       .KHR_swapchain = true,
@@ -244,6 +258,7 @@ get_device_extensions(const struct tu_physical_device *device,
 #endif
       .KHR_synchronization2 = true,
       .KHR_timeline_semaphore = true,
+      .KHR_unified_image_layouts = true,
       .KHR_uniform_buffer_standard_layout = true,
       .KHR_variable_pointers = true,
       .KHR_vertex_attribute_divisor = true,
@@ -276,8 +291,8 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_filter_cubic = device->info->a6xx.has_tex_filter_cubic,
       .EXT_fragment_density_map = true,
       .EXT_fragment_density_map_offset = true,
-      .EXT_global_priority = true,
-      .EXT_global_priority_query = true,
+      .EXT_global_priority = tu_is_vk_1_1(device),
+      .EXT_global_priority_query = tu_is_vk_1_1(device),
       .EXT_graphics_pipeline_library = true,
       .EXT_hdr_metadata = true,
       .EXT_host_image_copy = true,
@@ -317,8 +332,8 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_shader_module_identifier = true,
       .EXT_shader_replicated_composites = true,
       .EXT_shader_stencil_export = true,
-      .EXT_shader_viewport_index_layer = TU_DEBUG(NOCONFORM) ? true : device->info->a6xx.has_hw_multiview,
-      .EXT_subgroup_size_control = true,
+      .EXT_shader_viewport_index_layer = tu_has_multiview(device),
+      .EXT_subgroup_size_control = tu_is_vk_1_1(device),
 #ifdef TU_USE_WSI_PLATFORM
       .EXT_swapchain_maintenance1 = true,
 #endif
@@ -359,30 +374,31 @@ tu_get_features(struct tu_physical_device *pdevice,
    features->fullDrawIndexUint32 = true;
    features->imageCubeArray = true;
    features->independentBlend = true;
-   features->geometryShader = true;
-   features->tessellationShader = true;
+   features->geometryShader = !pdevice->info->a6xx.is_a702;
+   features->tessellationShader = !pdevice->info->a6xx.is_a702;
    features->sampleRateShading = true;
    features->dualSrcBlend = true;
    features->logicOp = true;
    features->multiDrawIndirect = true;
    features->drawIndirectFirstInstance = true;
    features->depthClamp = true;
-   features->depthBiasClamp = true;
+   features->depthBiasClamp = !pdevice->info->a6xx.is_a702;
    features->fillModeNonSolid = true;
    features->depthBounds = true;
    features->wideLines = pdevice->info->a6xx.line_width_max > 1.0;
    features->largePoints = true;
    features->alphaToOne = true;
-   features->multiViewport = true;
+   features->multiViewport = tu_has_multiview(pdevice);
    features->samplerAnisotropy = true;
    features->textureCompressionETC2 = true;
    features->textureCompressionASTC_LDR = true;
-   features->textureCompressionBC = true;
+   /* no BC6H & BC7 support on A702 */
+   features->textureCompressionBC = !pdevice->info->a6xx.is_a702;
    features->occlusionQueryPrecise = true;
    features->pipelineStatisticsQuery = true;
    features->vertexPipelineStoresAndAtomics = true;
    features->fragmentStoresAndAtomics = true;
-   features->shaderTessellationAndGeometryPointSize = true;
+   features->shaderTessellationAndGeometryPointSize = !pdevice->info->a6xx.is_a702;
    features->shaderImageGatherExtended = true;
    features->shaderStorageImageExtendedFormats = true;
    features->shaderStorageImageMultisample = false;
@@ -509,7 +525,7 @@ tu_get_features(struct tu_physical_device *pdevice,
    features->indexTypeUint8 = true;
 
    /* VK_KHR_line_rasterization */
-   features->rectangularLines = true;
+   features->rectangularLines = !pdevice->info->a6xx.is_a702;
    features->bresenhamLines = true;
    features->smoothLines = false;
    features->stippledRectangularLines = false;
@@ -617,7 +633,7 @@ tu_get_features(struct tu_physical_device *pdevice,
 
    /* VK_EXT_extended_dynamic_state3 */
    features->extendedDynamicState3PolygonMode = true;
-   features->extendedDynamicState3TessellationDomainOrigin = true;
+   features->extendedDynamicState3TessellationDomainOrigin = !pdevice->info->a6xx.is_a702;
    features->extendedDynamicState3DepthClampEnable = true;
    features->extendedDynamicState3DepthClipEnable = true;
    features->extendedDynamicState3LogicOpEnable = true;
@@ -626,7 +642,7 @@ tu_get_features(struct tu_physical_device *pdevice,
    features->extendedDynamicState3AlphaToCoverageEnable = true;
    features->extendedDynamicState3AlphaToOneEnable = true;
    features->extendedDynamicState3DepthClipNegativeOneToOne = true;
-   features->extendedDynamicState3RasterizationStream = true;
+   features->extendedDynamicState3RasterizationStream = !pdevice->info->a6xx.is_a702;
    features->extendedDynamicState3ConservativeRasterizationMode =
       pdevice->vk.supported_extensions.EXT_conservative_rasterization;
    features->extendedDynamicState3ExtraPrimitiveOverestimationSize =
@@ -744,7 +760,7 @@ tu_get_features(struct tu_physical_device *pdevice,
 
    /* VK_EXT_transform_feedback */
    features->transformFeedback = true;
-   features->geometryStreams = true;
+   features->geometryStreams = !pdevice->info->a6xx.is_a702;
 
    /* VK_EXT_vertex_input_dynamic_state */
    features->vertexInputDynamicState = true;
@@ -758,6 +774,10 @@ tu_get_features(struct tu_physical_device *pdevice,
 
    /* VK_EXT_fragment_density_map_offset */
    features->fragmentDensityMapOffset = true;
+
+   /* VK_KHR_unified_layouts */
+   features->unifiedImageLayouts = true;
+   features->unifiedImageLayoutsVideo = false;
 }
 
 static void
@@ -791,7 +811,7 @@ tu_get_physical_device_properties_1_1(struct tu_physical_device *pdevice,
 
    p->pointClippingBehavior = VK_POINT_CLIPPING_BEHAVIOR_ALL_CLIP_PLANES;
    p->maxMultiviewViewCount =
-      (pdevice->info->a6xx.has_hw_multiview || TU_DEBUG(NOCONFORM)) ? MAX_VIEWPORTS : 1;
+      tu_has_multiview(pdevice) ? MAX_VIEWPORTS : 1;
    p->maxMultiviewInstanceIndex = INT_MAX;
    p->protectedNoFault = false;
    /* Our largest descriptors are 2 texture descriptors, or a texture and
@@ -975,7 +995,7 @@ tu_get_properties(struct tu_physical_device *pdevice,
    props->maxImageDimension2D = (1 << 14);
    props->maxImageDimension3D = (1 << 11);
    props->maxImageDimensionCube = (1 << 14);
-   props->maxImageArrayLayers = (1 << 11);
+   props->maxImageArrayLayers = (1 << (pdevice->info->a6xx.is_a702 ? 8 : 11));
    props->maxTexelBufferElements = MAX_TEXEL_ELEMENTS;
    props->maxUniformBufferRange = MAX_UNIFORM_BUFFER_RANGE;
    props->maxStorageBufferRange = MAX_STORAGE_BUFFER_RANGE;
@@ -1004,21 +1024,25 @@ tu_get_properties(struct tu_physical_device *pdevice,
    props->maxVertexInputBindings = pdevice->info->a6xx.vs_max_inputs_count;
    props->maxVertexInputAttributeOffset = 4095;
    props->maxVertexInputBindingStride = 2048;
-   props->maxVertexOutputComponents = 128;
-   props->maxTessellationGenerationLevel = 64;
-   props->maxTessellationPatchSize = 32;
-   props->maxTessellationControlPerVertexInputComponents = 128;
-   props->maxTessellationControlPerVertexOutputComponents = 128;
-   props->maxTessellationControlPerPatchOutputComponents = 120;
-   props->maxTessellationControlTotalOutputComponents = 4096;
-   props->maxTessellationEvaluationInputComponents = 128;
-   props->maxTessellationEvaluationOutputComponents = 128;
-   props->maxGeometryShaderInvocations = 32;
-   props->maxGeometryInputComponents = 64;
-   props->maxGeometryOutputComponents = 128;
-   props->maxGeometryOutputVertices = 256;
-   props->maxGeometryTotalOutputComponents = 1024;
-   props->maxFragmentInputComponents = 124;
+   props->maxVertexOutputComponents = pdevice->info->a6xx.is_a702 ? 64 : 128;
+   if (!pdevice->info->a6xx.is_a702) {
+      props->maxTessellationGenerationLevel = 64;
+      props->maxTessellationPatchSize = 32;
+      props->maxTessellationControlPerVertexInputComponents = 128;
+      props->maxTessellationControlPerVertexOutputComponents = 128;
+      props->maxTessellationControlPerPatchOutputComponents = 120;
+      props->maxTessellationControlTotalOutputComponents = 4096;
+      props->maxTessellationEvaluationInputComponents = 128;
+      props->maxTessellationEvaluationOutputComponents = 128;
+      props->maxGeometryShaderInvocations = 32;
+      props->maxGeometryInputComponents = 64;
+      props->maxGeometryOutputComponents = 128;
+      props->maxGeometryOutputVertices = 256;
+      props->maxGeometryTotalOutputComponents = 1024;
+   }
+   // probably should be props->maxVertexOutputComponents - 4 but that is
+   // below the limit on a702
+   props->maxFragmentInputComponents = pdevice->info->a6xx.is_a702 ? 112 : 124;
    props->maxFragmentOutputAttachments = 8;
    props->maxFragmentDualSrcAttachments = 1;
    props->maxFragmentCombinedOutputResources = MAX_RTS + max_descriptor_set_size * 2;
@@ -1029,9 +1053,15 @@ tu_get_properties(struct tu_physical_device *pdevice,
    props->maxComputeWorkGroupInvocations = pdevice->info->a6xx.supports_double_threadsize ?
       pdevice->info->threadsize_base * 2 * pdevice->info->max_waves :
       pdevice->info->threadsize_base * pdevice->info->max_waves;
-   props->maxComputeWorkGroupSize[0] =
-      props->maxComputeWorkGroupSize[1] =
-      props->maxComputeWorkGroupSize[2] = 1024;
+   if (pdevice->info->a6xx.is_a702) {
+      props->maxComputeWorkGroupSize[0] =
+         props->maxComputeWorkGroupSize[1] = 512;
+      props->maxComputeWorkGroupSize[2] = 64;
+   } else {
+      props->maxComputeWorkGroupSize[0] =
+         props->maxComputeWorkGroupSize[1] =
+         props->maxComputeWorkGroupSize[2] = 1024;
+   }
    props->subPixelPrecisionBits = 8;
    props->subTexelPrecisionBits = 8;
    props->mipmapPrecisionBits = 8;
@@ -1040,7 +1070,7 @@ tu_get_properties(struct tu_physical_device *pdevice,
    props->maxSamplerLodBias = 4095.0 / 256.0; /* [-16, 15.99609375] */
    props->maxSamplerAnisotropy = 16;
    props->maxViewports =
-         (pdevice->info->a6xx.has_hw_multiview || TU_DEBUG(NOCONFORM)) ? MAX_VIEWPORTS : 1;
+         tu_has_multiview(pdevice) ? MAX_VIEWPORTS : 1;
    props->maxViewportDimensions[0] =
       props->maxViewportDimensions[1] = MAX_VIEWPORT_SIZE;
    props->viewportBoundsRange[0] = INT16_MIN;
@@ -1059,7 +1089,7 @@ tu_get_properties(struct tu_physical_device *pdevice,
    props->subPixelInterpolationOffsetBits = 4;
    props->maxFramebufferWidth = (1 << 14);
    props->maxFramebufferHeight = (1 << 14);
-   props->maxFramebufferLayers = (1 << 10);
+   props->maxFramebufferLayers = (1 << (pdevice->info->a6xx.is_a702 ? 8 : 10));
    props->framebufferColorSampleCounts = sample_counts;
    props->framebufferDepthSampleCounts = sample_counts;
    props->framebufferStencilSampleCounts = sample_counts;
@@ -1084,14 +1114,14 @@ tu_get_properties(struct tu_physical_device *pdevice,
    props->pointSizeGranularity = 	0.0625;
    props->lineWidthGranularity =
       pdevice->info->a6xx.line_width_max == 1.0 ? 0.0 : 0.5;
-   props->strictLines = true;
+   props->strictLines = !pdevice->info->a6xx.is_a702;
    props->standardSampleLocations = true;
    props->optimalBufferCopyOffsetAlignment = 128;
    props->optimalBufferCopyRowPitchAlignment = 128;
    props->nonCoherentAtomSize = 64;
 
    props->apiVersion =
-      (pdevice->info->a6xx.has_hw_multiview || TU_DEBUG(NOCONFORM)) ?
+      tu_has_multiview(pdevice) ?
          ((pdevice->info->chip >= 7) ? TU_API_VERSION :
             VK_MAKE_VERSION(1, 3, VK_HEADER_VERSION))
          : VK_MAKE_VERSION(1, 0, VK_HEADER_VERSION);
@@ -1154,7 +1184,12 @@ tu_get_properties(struct tu_physical_device *pdevice,
    props->maxPushDescriptors = MAX_PUSH_DESCRIPTORS;
 
    /* VK_EXT_transform_feedback */
-   props->maxTransformFeedbackStreams = IR3_MAX_SO_STREAMS;
+   if (pdevice->info->a6xx.is_a702) {
+       /* a702 only 32 streamout ram entries.. 1 stream, 64 components */
+      props->maxTransformFeedbackStreams = 1;
+   } else {
+      props->maxTransformFeedbackStreams = IR3_MAX_SO_STREAMS;
+   }
    props->maxTransformFeedbackBuffers = IR3_MAX_SO_BUFFERS;
    props->maxTransformFeedbackBufferSize = UINT32_MAX;
    props->maxTransformFeedbackStreamDataSize = 512;
@@ -1752,6 +1787,10 @@ tu_DestroyInstance(VkInstance _instance,
    vk_free(&instance->vk.alloc, instance);
 }
 
+/* Note if we introduce more queues in a family that we may need to reduce the max
+ * scope in our nir_opt_acquire_release_barriers() call.  See
+ * https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/33504#note_2807879
+ */
 static const VkQueueFamilyProperties tu_queue_family_properties = {
    .queueFlags =
       VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
@@ -1956,11 +1995,27 @@ tu_trace_create_buffer(struct u_trace_context *utctx, uint64_t size_B)
    struct tu_device *device =
       container_of(utctx, struct tu_device, trace_context);
 
-   struct tu_bo *bo;
-   tu_bo_init_new(device, NULL, &bo, size_B, TU_BO_ALLOC_INTERNAL_RESOURCE, "trace");
-   tu_bo_map(device, bo, NULL);
+   mtx_lock(&device->trace_mutex);
 
-   return bo;
+   if (!device->trace_suballoc) {
+      device->trace_suballoc = (struct tu_suballocator *) vk_zalloc(
+         &device->vk.alloc, sizeof(struct tu_suballocator), 8,
+         VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+
+      tu_bo_suballocator_init(device->trace_suballoc, device, 512 * 1024,
+                              TU_BO_ALLOC_INTERNAL_RESOURCE, "utrace");
+   }
+
+   struct tu_suballoc_bo *suballoc_bo = (struct tu_suballoc_bo *) vk_zalloc(
+      &device->vk.alloc, sizeof(struct tu_suballoc_bo), 8,
+      VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+
+   VkResult result =
+      tu_suballoc_bo_alloc(suballoc_bo, device->trace_suballoc, size_B, 1);
+
+   mtx_unlock(&device->trace_mutex);
+
+   return result == VK_SUCCESS ? suballoc_bo : NULL;
 }
 
 static void
@@ -1968,9 +2023,21 @@ tu_trace_destroy_buffer(struct u_trace_context *utctx, void *timestamps)
 {
    struct tu_device *device =
       container_of(utctx, struct tu_device, trace_context);
-   struct tu_bo *bo = (struct tu_bo *) timestamps;
+   struct tu_suballoc_bo *bo = (struct tu_suballoc_bo *) timestamps;
 
-   tu_bo_finish(device, bo);
+   static_assert(U_TRACE_NO_TIMESTAMP == 0);
+   /* Newly allocated timestamp buffers are expected to be filled with
+    * U_TRACE_NO_TIMESTAMP. Since we reuse buffers, we must clear them
+    * before use. We do this here rather than in create_buffer since
+    * tu_trace_create_buffer is called on a hot path.
+    */
+   memset(tu_suballoc_bo_map(bo), U_TRACE_NO_TIMESTAMP, bo->size);
+
+   mtx_lock(&device->trace_mutex);
+   tu_suballoc_bo_free(device->trace_suballoc, bo);
+   mtx_unlock(&device->trace_mutex);
+
+   vk_free(&device->vk.alloc, bo);
 }
 
 template <chip CHIP>
@@ -1978,7 +2045,7 @@ static void
 tu_trace_record_ts(struct u_trace *ut, void *cs, void *timestamps,
                    uint64_t offset_B, uint32_t)
 {
-   struct tu_bo *bo = (struct tu_bo *) timestamps;
+   struct tu_suballoc_bo *bo = (struct tu_suballoc_bo *) timestamps;
    struct tu_cs *ts_cs = (struct tu_cs *) cs;
 
    if (CHIP == A6XX) {
@@ -2005,7 +2072,7 @@ tu_trace_read_ts(struct u_trace_context *utctx,
 {
    struct tu_device *device =
       container_of(utctx, struct tu_device, trace_context);
-   struct tu_bo *bo = (struct tu_bo *) timestamps;
+   struct tu_suballoc_bo *bo = (struct tu_suballoc_bo *) timestamps;
    struct tu_u_trace_submission_data *submission_data =
       (struct tu_u_trace_submission_data *) flush_data;
 
@@ -2015,11 +2082,7 @@ tu_trace_read_ts(struct u_trace_context *utctx,
                           1000000000);
    }
 
-   if (tu_bo_map(device, bo, NULL) != VK_SUCCESS) {
-      return U_TRACE_NO_TIMESTAMP;
-   }
-
-   uint64_t *ts = (uint64_t *) ((char *)bo->map + offset_B);
+   uint64_t *ts = (uint64_t *) ((char *) tu_suballoc_bo_map(bo) + offset_B);
 
    /* Don't translate the no-timestamp marker: */
    if (*ts == U_TRACE_NO_TIMESTAMP)
@@ -2046,8 +2109,8 @@ tu_copy_buffer(struct u_trace_context *utctx, void *cmdstream,
                uint64_t size_B)
 {
    struct tu_cs *cs = (struct tu_cs *) cmdstream;
-   struct tu_bo *bo_from = (struct tu_bo *) ts_from;
-   struct tu_bo *bo_to = (struct tu_bo *) ts_to;
+   struct tu_suballoc_bo *bo_from = (struct tu_suballoc_bo *) ts_from;
+   struct tu_suballoc_bo *bo_to = (struct tu_suballoc_bo *) ts_to;
 
    tu_cs_emit_pkt7(cs, CP_MEMCPY, 5);
    tu_cs_emit(cs, size_B / sizeof(uint32_t));
@@ -2075,78 +2138,60 @@ tu_trace_get_data(struct u_trace_context *utctx,
                   uint64_t offset_B,
                   uint32_t size_B)
 {
-   struct tu_bo *bo = (struct tu_bo *) buffer;
-   return (char *) bo->map + offset_B;
+   struct tu_suballoc_bo *bo = (struct tu_suballoc_bo *) buffer;
+   return (char *) tu_suballoc_bo_map(bo) + offset_B;
 }
 
-/* Special helpers instead of u_trace_begin_iterator()/u_trace_end_iterator()
- * that ignore tracepoints at the beginning/end that are part of a
- * suspend/resume chain.
- */
-static struct u_trace_iterator
-tu_cmd_begin_iterator(struct tu_cmd_buffer *cmdbuf)
-{
-   switch (cmdbuf->state.suspend_resume) {
-   case SR_IN_PRE_CHAIN:
-      return cmdbuf->trace_renderpass_end;
-   case SR_AFTER_PRE_CHAIN:
-   case SR_IN_CHAIN_AFTER_PRE_CHAIN:
-      return cmdbuf->pre_chain.trace_renderpass_end;
-   default:
-      return u_trace_begin_iterator(&cmdbuf->trace);
-   }
-}
-
-static struct u_trace_iterator
-tu_cmd_end_iterator(struct tu_cmd_buffer *cmdbuf)
-{
-   switch (cmdbuf->state.suspend_resume) {
-   case SR_IN_PRE_CHAIN:
-      return cmdbuf->trace_renderpass_end;
-   case SR_IN_CHAIN:
-   case SR_IN_CHAIN_AFTER_PRE_CHAIN:
-      return cmdbuf->trace_renderpass_start;
-   default:
-      return u_trace_end_iterator(&cmdbuf->trace);
-   }
-}
 VkResult
-tu_create_copy_timestamp_cs(struct tu_cmd_buffer *cmdbuf, struct tu_cs** cs,
-                            struct u_trace **trace_copy)
+tu_create_copy_timestamp_cs(struct tu_u_trace_submission_data *submission_data,
+                            struct tu_cmd_buffer **cmd_buffers,
+                            uint32_t cmd_buffer_count,
+                            uint32_t trace_chunks_to_copy)
 {
-   *cs = (struct tu_cs *) vk_zalloc(&cmdbuf->device->vk.alloc,
-                                    sizeof(struct tu_cs), 8,
-                                    VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+   submission_data->last_buffer_with_tracepoints = -1;
 
-   if (*cs == NULL) {
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   tu_device *device = cmd_buffers[0]->device;
+   uint32_t cs_size = trace_chunks_to_copy * 6 * 2 + 3;
+
+   if (!list_is_empty(&device->copy_timestamp_cs_pool)) {
+      submission_data->timestamp_copy_data =
+         list_first_entry(&device->copy_timestamp_cs_pool,
+                          struct tu_copy_timestamp_data, node);
+      list_del(&submission_data->timestamp_copy_data->node);
+   } else {
+      submission_data->timestamp_copy_data =
+         (struct tu_copy_timestamp_data *) vk_zalloc(
+            &device->vk.alloc, sizeof(struct tu_copy_timestamp_data), 8,
+            VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+
+      tu_cs_init(&submission_data->timestamp_copy_data->cs, device,
+                 TU_CS_MODE_GROW, cs_size, "trace copy timestamp cs");
+      u_trace_init(&submission_data->timestamp_copy_data->trace,
+                   &device->trace_context);
    }
 
-   tu_cs_init(*cs, cmdbuf->device, TU_CS_MODE_GROW,
-              list_length(&cmdbuf->trace.trace_chunks) * 6 * 2 + 3, "trace copy timestamp cs");
+   tu_cs *cs = &submission_data->timestamp_copy_data->cs;
 
-   tu_cs_begin(*cs);
+   tu_cs_begin(cs);
 
-   tu_cs_emit_wfi(*cs);
-   tu_cs_emit_pkt7(*cs, CP_WAIT_FOR_ME, 0);
+   tu_cs_emit_wfi(cs);
+   tu_cs_emit_pkt7(cs, CP_WAIT_FOR_ME, 0);
 
-   *trace_copy = (struct u_trace *) vk_zalloc(
-      &cmdbuf->device->vk.alloc, sizeof(struct u_trace), 8,
-      VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+   for (uint32_t i = 0; i < cmd_buffer_count; i++) {
+      struct tu_cmd_buffer *cmdbuf = cmd_buffers[i];
 
-   if (*trace_copy == NULL) {
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
+      if (!u_trace_has_points(&cmdbuf->trace) ||
+          (cmdbuf->usage_flags & VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT))
+         continue;
+
+      u_trace_clone_append(
+         u_trace_begin_iterator(&cmdbuf->trace),
+         u_trace_end_iterator(&cmdbuf->trace),
+         &submission_data->timestamp_copy_data->trace, cs, tu_copy_buffer);
    }
 
-   u_trace_init(*trace_copy, cmdbuf->trace.utctx);
-   u_trace_clone_append(tu_cmd_begin_iterator(cmdbuf),
-                        tu_cmd_end_iterator(cmdbuf),
-                        *trace_copy, *cs,
-                        tu_copy_buffer);
-
-   tu_cs_emit_wfi(*cs);
-
-   tu_cs_end(*cs);
+   tu_cs_emit_wfi(cs);
+   tu_cs_end(cs);
 
    return VK_SUCCESS;
 }
@@ -2158,6 +2203,7 @@ tu_u_trace_submission_data_create(
    uint32_t cmd_buffer_count,
    struct tu_u_trace_submission_data **submission_data)
 {
+   MESA_TRACE_FUNC();
    *submission_data = (struct tu_u_trace_submission_data *)
       vk_zalloc(&device->vk.alloc,
                 sizeof(struct tu_u_trace_submission_data), 8,
@@ -2168,13 +2214,14 @@ tu_u_trace_submission_data_create(
    }
 
    struct tu_u_trace_submission_data *data = *submission_data;
+   uint32_t trace_chunks_to_copy = 0;
 
-   data->cmd_trace_data = (struct tu_u_trace_cmd_data *) vk_zalloc(
+   data->trace_per_cmd_buffer = (struct u_trace **) vk_zalloc(
       &device->vk.alloc,
-      cmd_buffer_count * sizeof(struct tu_u_trace_cmd_data), 8,
+      cmd_buffer_count * sizeof(struct u_trace *), 8,
       VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
 
-   if (!data->cmd_trace_data) {
+   if (!data->trace_per_cmd_buffer) {
       goto fail;
    }
 
@@ -2195,19 +2242,16 @@ tu_u_trace_submission_data_create(
           * single-use. Therefor we have to copy trace points and create
           * a new timestamp buffer on every submit of reusable command buffer.
           */
-         if (tu_create_copy_timestamp_cs(cmdbuf,
-               &data->cmd_trace_data[i].timestamp_copy_cs,
-               &data->cmd_trace_data[i].trace) != VK_SUCCESS) {
-            goto fail;
-         }
-
-         assert(data->cmd_trace_data[i].timestamp_copy_cs->entry_count == 1);
+         trace_chunks_to_copy += list_length(&cmdbuf->trace.trace_chunks);
       } else {
-         data->cmd_trace_data[i].trace = &cmdbuf->trace;
+         data->trace_per_cmd_buffer[i] = &cmdbuf->trace;
       }
    }
 
-   assert(data->last_buffer_with_tracepoints != -1);
+   if (trace_chunks_to_copy > 0) {
+      tu_create_copy_timestamp_cs(data, cmd_buffers, cmd_buffer_count,
+                                  trace_chunks_to_copy);
+   }
 
    return VK_SUCCESS;
 
@@ -2219,19 +2263,30 @@ fail:
 }
 
 void
+tu_free_copy_timestamp_data(struct tu_device *device,
+                            struct tu_copy_timestamp_data *data)
+{
+   if (list_is_linked(&data->node))
+      list_del(&data->node);
+   tu_cs_finish(&data->cs);
+   u_trace_fini(&data->trace);
+   vk_free(&device->vk.alloc, data);
+}
+
+void
 tu_u_trace_submission_data_finish(
    struct tu_device *device,
    struct tu_u_trace_submission_data *submission_data)
 {
-   for (uint32_t i = 0; i < submission_data->cmd_buffer_count; ++i) {
-      /* Only if we had to create a copy of trace we should free it */
-      struct tu_u_trace_cmd_data *cmd_data = &submission_data->cmd_trace_data[i];
-      if (cmd_data->timestamp_copy_cs) {
-         tu_cs_finish(cmd_data->timestamp_copy_cs);
-         vk_free(&device->vk.alloc, cmd_data->timestamp_copy_cs);
-
-         u_trace_fini(cmd_data->trace);
-         vk_free(&device->vk.alloc, cmd_data->trace);
+   if (submission_data->timestamp_copy_data) {
+      if (u_trace_enabled(&device->trace_context)) {
+         tu_cs_reset(&submission_data->timestamp_copy_data->cs);
+         u_trace_fini(&submission_data->timestamp_copy_data->trace);
+         list_addtail(&submission_data->timestamp_copy_data->node,
+                      &device->copy_timestamp_cs_pool);
+      } else {
+         tu_free_copy_timestamp_data(device,
+                                     submission_data->timestamp_copy_data);
       }
    }
 
@@ -2242,7 +2297,7 @@ tu_u_trace_submission_data_finish(
       mtx_unlock(&device->kgsl_profiling_mutex);
    }
 
-   vk_free(&device->vk.alloc, submission_data->cmd_trace_data);
+   vk_free(&device->vk.alloc, submission_data->trace_per_cmd_buffer);
    vk_free(&device->vk.alloc, submission_data);
 }
 
@@ -2365,58 +2420,58 @@ tu_init_cmdbuf_start_a725_quirk(struct tu_device *device)
    struct tu_cs sub_cs;
    tu_cs_begin_sub_stream(&device->sub_cs, 47, &sub_cs);
 
-   tu_cs_emit_regs(&sub_cs, HLSQ_INVALIDATE_CMD(A7XX,
+   tu_cs_emit_regs(&sub_cs, SP_UPDATE_CNTL(A7XX,
             .vs_state = true, .hs_state = true, .ds_state = true,
-            .gs_state = true, .fs_state = true, .gfx_ibo = true,
+            .gs_state = true, .fs_state = true, .gfx_uav = true,
             .cs_bindless = 0xff, .gfx_bindless = 0xff));
-   tu_cs_emit_regs(&sub_cs, HLSQ_CS_CNTL(A7XX,
+   tu_cs_emit_regs(&sub_cs, SP_CS_CONST_CONFIG(A7XX,
             .constlen = 4,
             .enabled = true));
    tu_cs_emit_regs(&sub_cs, A6XX_SP_CS_CONFIG(.enabled = true));
-   tu_cs_emit_regs(&sub_cs, A6XX_SP_CS_CTRL_REG0(
+   tu_cs_emit_regs(&sub_cs, A6XX_SP_CS_CNTL_0(
             .threadmode = MULTI,
             .threadsize = THREAD128,
             .mergedregs = true));
-   tu_cs_emit_regs(&sub_cs, A6XX_SP_CS_CTRL_REG1(.shared_size = 1));
-   tu_cs_emit_regs(&sub_cs, HLSQ_CS_KERNEL_GROUP_X(A7XX, 1),
-                     HLSQ_CS_KERNEL_GROUP_Y(A7XX, 1),
-                     HLSQ_CS_KERNEL_GROUP_Z(A7XX, 1));
-   tu_cs_emit_regs(&sub_cs, A6XX_SP_CS_INSTRLEN(.sp_cs_instrlen = 1));
-   tu_cs_emit_regs(&sub_cs, A6XX_SP_CS_TEX_COUNT(0));
-   tu_cs_emit_regs(&sub_cs, A6XX_SP_CS_IBO_COUNT(0));
-   tu_cs_emit_regs(&sub_cs, HLSQ_CS_CNTL_1(A7XX,
+   tu_cs_emit_regs(&sub_cs, A6XX_SP_CS_CNTL_1(.shared_size = 1));
+   tu_cs_emit_regs(&sub_cs, SP_CS_KERNEL_GROUP_X(A7XX, 1),
+                     SP_CS_KERNEL_GROUP_Y(A7XX, 1),
+                     SP_CS_KERNEL_GROUP_Z(A7XX, 1));
+   tu_cs_emit_regs(&sub_cs, A6XX_SP_CS_INSTR_SIZE(.sp_cs_instr_size = 1));
+   tu_cs_emit_regs(&sub_cs, A6XX_SP_CS_TSIZE(0));
+   tu_cs_emit_regs(&sub_cs, A6XX_SP_CS_USIZE(0));
+   tu_cs_emit_regs(&sub_cs, SP_CS_WGE_CNTL(A7XX,
             .linearlocalidregid = regid(63, 0),
             .threadsize = THREAD128,
             .workgrouprastorderzfirsten = true,
             .wgtilewidth = 4,
             .wgtileheight = 17));
-   tu_cs_emit_regs(&sub_cs, A6XX_SP_CS_CNTL_0(
+   tu_cs_emit_regs(&sub_cs, A6XX_SP_CS_WIE_CNTL_0(
             .wgidconstid = regid(51, 3),
             .wgsizeconstid = regid(48, 0),
             .wgoffsetconstid = regid(63, 0),
             .localidregid = regid(63, 0)));
-   tu_cs_emit_regs(&sub_cs, SP_CS_CNTL_1(A7XX,
+   tu_cs_emit_regs(&sub_cs, SP_CS_WIE_CNTL_1(A7XX,
             .linearlocalidregid = regid(63, 0),
             .threadsize = THREAD128,
             .workitemrastorder = WORKITEMRASTORDER_TILED));
    tu_cs_emit_regs(&sub_cs, A7XX_SP_CS_UNKNOWN_A9BE(0));
 
    tu_cs_emit_regs(&sub_cs,
-                  HLSQ_CS_NDRANGE_0(A7XX, .kerneldim = 3,
+                  SP_CS_NDRANGE_0(A7XX, .kerneldim = 3,
                                           .localsizex = 255,
                                           .localsizey = 1,
                                           .localsizez = 1),
-                  HLSQ_CS_NDRANGE_1(A7XX, .globalsize_x = 3072),
-                  HLSQ_CS_NDRANGE_2(A7XX, .globaloff_x = 0),
-                  HLSQ_CS_NDRANGE_3(A7XX, .globalsize_y = 1),
-                  HLSQ_CS_NDRANGE_4(A7XX, .globaloff_y = 0),
-                  HLSQ_CS_NDRANGE_5(A7XX, .globalsize_z = 1),
-                  HLSQ_CS_NDRANGE_6(A7XX, .globaloff_z = 0));
-   tu_cs_emit_regs(&sub_cs, A7XX_HLSQ_CS_LAST_LOCAL_SIZE(
+                  SP_CS_NDRANGE_1(A7XX, .globalsize_x = 3072),
+                  SP_CS_NDRANGE_2(A7XX, .globaloff_x = 0),
+                  SP_CS_NDRANGE_3(A7XX, .globalsize_y = 1),
+                  SP_CS_NDRANGE_4(A7XX, .globaloff_y = 0),
+                  SP_CS_NDRANGE_5(A7XX, .globalsize_z = 1),
+                  SP_CS_NDRANGE_6(A7XX, .globaloff_z = 0));
+   tu_cs_emit_regs(&sub_cs, A7XX_SP_CS_NDRANGE_7(
             .localsizex = 255,
             .localsizey = 0,
             .localsizez = 0));
-   tu_cs_emit_pkt4(&sub_cs, REG_A6XX_SP_CS_OBJ_FIRST_EXEC_OFFSET, 3);
+   tu_cs_emit_pkt4(&sub_cs, REG_A6XX_SP_CS_PROGRAM_COUNTER_OFFSET, 3);
    tu_cs_emit(&sub_cs, 0);
    tu_cs_emit_qw(&sub_cs, shader_iova);
 
@@ -2529,6 +2584,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    mtx_init(&device->autotune_mutex, mtx_plain);
    mtx_init(&device->kgsl_profiling_mutex, mtx_plain);
    mtx_init(&device->event_mutex, mtx_plain);
+   mtx_init(&device->trace_mutex, mtx_plain);
    u_rwlock_init(&device->dma_bo_lock);
    pthread_mutex_init(&device->submit_mutex, NULL);
 
@@ -2802,6 +2858,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    tu_gpu_tracepoint_config_variable();
 
    device->submit_count = 0;
+   list_inithead(&device->copy_timestamp_cs_pool);
    u_trace_context_init(&device->trace_context, device,
                      sizeof(uint64_t),
                      12,
@@ -2960,6 +3017,17 @@ tu_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 
    if (device->null_accel_struct_bo)
       tu_bo_finish(device, device->null_accel_struct_bo);
+
+   list_for_each_entry_safe(struct tu_copy_timestamp_data, data,
+                            &device->copy_timestamp_cs_pool, node)
+   {
+      tu_free_copy_timestamp_data(device, data);
+   }
+
+   if (device->trace_suballoc) {
+      tu_bo_suballocator_finish(device->trace_suballoc);
+      vk_free(&device->vk.alloc, device->trace_suballoc);
+   }
 
    for (unsigned i = 0; i < TU_MAX_QUEUE_FAMILIES; i++) {
       for (unsigned q = 0; q < device->queue_count[i]; q++)

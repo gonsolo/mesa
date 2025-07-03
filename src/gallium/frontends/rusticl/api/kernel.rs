@@ -118,6 +118,7 @@ unsafe impl CLInfoObj<cl_kernel_work_group_info, cl_device_id> for cl_kernel {
                 v.write::<usize>(kernel.preferred_simd_size(dev))
             }
             CL_KERNEL_PRIVATE_MEM_SIZE => v.write::<cl_ulong>(kernel.priv_mem_size(dev)),
+            CL_KERNEL_SPILL_MEM_SIZE_INTEL => v.write::<cl_ulong>(kernel.priv_mem_size(dev)),
             CL_KERNEL_WORK_GROUP_SIZE => v.write::<usize>(kernel.max_threads_per_block(dev)),
             // CL_INVALID_VALUE if param_name is not one of the supported values
             _ => Err(CL_INVALID_VALUE),
@@ -693,7 +694,7 @@ fn enqueue_ndrange_kernel(
     let device_bits = q.device.address_bits();
     let device_max = u64::MAX >> (u64::BITS - device_bits);
 
-    let mut threads = 0;
+    let mut threads = 1;
     for i in 0..work_dim as usize {
         let lws = local_work_size[i];
         let gws = global_work_size[i];

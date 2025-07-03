@@ -81,12 +81,6 @@
  *
  */
 
-#if USE_LIBGLVND
-#define EGLAPI
-#undef PUBLIC
-#define PUBLIC
-#endif
-
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2718,6 +2712,22 @@ eglQueryDeviceAttribEXT(EGLDeviceEXT device, EGLint attribute, EGLAttrib *value)
 
    ret = _eglQueryDeviceAttribEXT(dev, attribute, value);
    RETURN_EGL_EVAL(NULL, ret);
+}
+
+static EGLBoolean EGLAPIENTRY
+eglQueryDeviceBinaryEXT(EGLDeviceEXT device,
+                        EGLint name,
+                        EGLint max_size,
+                        void *value,
+                        EGLint *size)
+{
+   _EGLDevice *dev = _eglLookupDevice(device);
+
+   _EGL_FUNC_START(NULL, EGL_NONE, NULL);
+   if (!dev)
+      RETURN_EGL_ERROR(NULL, EGL_BAD_DEVICE_EXT, EGL_FALSE);
+
+   RETURN_EGL_EVAL(NULL, _eglQueryDeviceBinaryEXT(dev, name, max_size, value, size));
 }
 
 static const char *EGLAPIENTRY

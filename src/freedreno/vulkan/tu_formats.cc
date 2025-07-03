@@ -56,12 +56,6 @@ tu6_format_color(enum pipe_format format, enum a6xx_tile_mode tile_mode,
    return fmt;
 }
 
-static bool
-tu6_format_texture_supported(enum pipe_format format)
-{
-   return fd6_texture_format(format, TILE6_LINEAR, false) != FMT6_NONE;
-}
-
 struct tu_native_format
 tu6_format_texture(enum pipe_format format, enum a6xx_tile_mode tile_mode,
                    bool is_mutable)
@@ -106,6 +100,32 @@ tu6_mutable_format_list_ubwc_compatible(const struct fd_dev_info *info,
    return true;
 }
 
+static bool
+tu_format_linear_filtering_supported(struct tu_physical_device *physical_device,
+                                     VkFormat vk_format)
+{
+   if (physical_device->info->a6xx.is_a702) {
+      switch (vk_format) {
+      case VK_FORMAT_D16_UNORM:
+      case VK_FORMAT_D24_UNORM_S8_UINT:
+      case VK_FORMAT_X8_D24_UNORM_PACK32:
+      case VK_FORMAT_D32_SFLOAT:
+      case VK_FORMAT_D32_SFLOAT_S8_UINT:
+      case VK_FORMAT_R16_UNORM:
+      case VK_FORMAT_R16_SNORM:
+      case VK_FORMAT_R16G16_UNORM:
+      case VK_FORMAT_R16G16_SNORM:
+      case VK_FORMAT_R16G16B16A16_UNORM:
+      case VK_FORMAT_R16G16B16A16_SNORM:
+      case VK_FORMAT_R32_SFLOAT:
+      case VK_FORMAT_R32G32_SFLOAT:
+      case VK_FORMAT_R32G32B32A32_SFLOAT:
+         return false;
+      }
+   }
+   return !vk_format_is_int(vk_format);
+}
+
 static void
 tu_physical_device_get_format_properties(
    struct tu_physical_device *physical_device,
@@ -119,7 +139,8 @@ tu_physical_device_get_format_properties(
 
    bool supported_vtx = tu6_format_vtx_supported(format);
    bool supported_color = tu6_format_color_supported(format);
-   bool supported_tex = tu6_format_texture_supported(format);
+   bool supported_tex = fd6_texture_format_supported(physical_device->info, format,
+                                                     TILE6_LINEAR, false);
    bool is_npot = !util_is_power_of_two_or_zero(desc->block.bits);
 
    if (format == PIPE_FORMAT_NONE ||
@@ -169,7 +190,7 @@ tu_physical_device_get_format_properties(
          optimal |= VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
       }
 
-      if (!vk_format_is_int(vk_format)) {
+      if (tu_format_linear_filtering_supported(physical_device, vk_format)) {
          optimal |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
 
          if (physical_device->vk.supported_extensions.EXT_filter_cubic)

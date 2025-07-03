@@ -25,8 +25,8 @@ ARCH=$(uname -m)
 export VK_DRIVER_FILES="$PWD"/install/share/vulkan/icd.d/"$VK_DRIVER"_icd."$ARCH".json
 export OCL_ICD_VENDORS="$PWD"/install/etc/OpenCL/vendors/
 
-if [ -n "$ANGLE_TAG" ]; then
-  # Are we using the right angle version?
+if [ -n "${ANGLE_TAG:-}" ]; then
+  # Are we using the right ANGLE version?
   ci_tag_test_time_check "ANGLE_TAG"
   export LD_LIBRARY_PATH=/angle:$LD_LIBRARY_PATH
 fi
@@ -35,10 +35,10 @@ if [ -n "$PIGLIT_TAG" ]; then
   # Are we using the right Piglit version?
   ci_tag_test_time_check "PIGLIT_TAG"
 elif [ -d "/piglit" ]; then
-  # The job does not inherit from .test-piglit, so we move it out of the way.
+  # The job does not inherit from .test-piglit, so we remove it.
   # This makes sure that we can both do the right version checks when needed,
   # and also optimise our dependencies so we don't pull unneeded stuff.
-  mv /piglit /piglit.unused
+  rm -r /piglit
 fi
 
 # Ensure Mesa Shader Cache resides on tmpfs.
@@ -79,7 +79,7 @@ if [ -e "$INSTALL/$GPU_VERSION-slow-skips.txt" ] && [[ $CI_JOB_NAME != *full* ]]
     DEQP_SKIPS="$DEQP_SKIPS $INSTALL/$GPU_VERSION-slow-skips.txt"
 fi
 
-if [ -n "$ANGLE_TAG" ]; then
+if [ -n "${ANGLE_TAG:-}" ]; then
     DEQP_SKIPS="$DEQP_SKIPS $INSTALL/angle-skips.txt"
 fi
 

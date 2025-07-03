@@ -8,6 +8,7 @@ use crate::impl_cl_type_trait;
 
 use mesa_rust::compiler::nir::NirShader;
 use mesa_rust::pipe::context::PipeContext;
+use mesa_rust::pipe::context::PipeContextPrio;
 use mesa_rust_gen::*;
 use mesa_rust_util::properties::*;
 use rusticl_opencl_gen::*;
@@ -150,9 +151,17 @@ struct SendableQueueContext {
 }
 
 impl SendableQueueContext {
-    fn new(device: &'static Device) -> CLResult<Self> {
+    fn new(device: &'static Device, prio: cl_queue_priority_khr) -> CLResult<Self> {
+        let prio = if prio & CL_QUEUE_PRIORITY_HIGH_KHR != 0 {
+            PipeContextPrio::High
+        } else if prio & CL_QUEUE_PRIORITY_MED_KHR != 0 {
+            PipeContextPrio::Med
+        } else {
+            PipeContextPrio::Low
+        };
+
         Ok(Self {
-            ctx: ManuallyDrop::new(device.create_context().ok_or(CL_OUT_OF_HOST_MEMORY)?),
+            ctx: ManuallyDrop::new(device.create_context(prio).ok_or(CL_OUT_OF_HOST_MEMORY)?),
             dev: device,
         })
     }
@@ -194,7 +203,71 @@ pub struct Queue {
     pub props: cl_command_queue_properties,
     pub props_v2: Properties<cl_queue_properties>,
     state: Mutex<QueueState>,
-    thrd: JoinHandle<()>,
+    _thrd: JoinHandle<()>,
+}
+
+/// Wrapper around Event to set it to an error state on drop. This is useful for dealing with panics
+/// inside the worker thread, so all not yet processed events will bet put into an error state, so
+/// Event::wait won't infinitely spin on the status to change.
+#[repr(transparent)]
+struct QueueEvent(Arc<Event>);
+
+impl QueueEvent {
+    fn call(self, ctx: &QueueContext) -> (cl_int, Arc<Event>) {
+        let res = self.0.call(ctx);
+        (res, self.into_inner())
+    }
+
+    fn deps(&self) -> &[Arc<Event>] {
+        &self.0.deps
+    }
+
+    fn into_inner(self) -> Arc<Event> {
+        // SAFETY: QueueEvent is transparent wrapper so it's safe to transmute the value. We want to
+        //         prevent drop from running on it. Alternatively we could use ManuallyDrop, but
+        //         that also requires an unsafe call (ManuallyDrop::take).
+        unsafe { mem::transmute(self) }
+    }
+
+    fn has_same_queue_as(&self, ev: &Event) -> bool {
+        match (&self.0.queue, &ev.queue) {
+            (Some(a), Some(b)) => Weak::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
+    fn set_user_status(self, status: cl_int) {
+        self.into_inner().set_user_status(status);
+    }
+}
+
+impl Drop for QueueEvent {
+    fn drop(&mut self) {
+        // Make sure the status isn't an error or success.
+        debug_assert!(self.0.status() > CL_RUNNING as cl_int);
+        self.0.set_user_status(CL_OUT_OF_HOST_MEMORY)
+    }
+}
+
+/// Wrapper around received events, so they automatically go into an error state whenever the queue
+/// thread panics. We should use panic::catch_unwind, but that requires things to be UnwindSafe and
+/// that's not easily doable.
+#[repr(transparent)]
+struct QueueEvents(Vec<QueueEvent>);
+
+impl QueueEvents {
+    fn new(events: Vec<Arc<Event>>) -> Self {
+        Self(events.into_iter().map(QueueEvent).collect())
+    }
+}
+
+impl IntoIterator for QueueEvents {
+    type Item = QueueEvent;
+    type IntoIter = <Vec<QueueEvent> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
 }
 
 impl_cl_type_trait!(cl_command_queue, Queue, CL_INVALID_COMMAND_QUEUE);
@@ -222,9 +295,21 @@ impl Queue {
         props: cl_command_queue_properties,
         props_v2: Properties<cl_queue_properties>,
     ) -> CLResult<Arc<Queue>> {
+        // If CL_QUEUE_PRIORITY_KHR is not specified, the default priority CL_QUEUE_PRIORITY_MED_KHR
+        // is used.
+        let mut prio = *props_v2
+            .get(&CL_QUEUE_PRIORITY_KHR.into())
+            .unwrap_or(&CL_QUEUE_PRIORITY_MED_KHR.into())
+            as cl_queue_priority_khr;
+
+        // Fallback to the default priority if it's not supported by the device.
+        if device.context_priority_supported() & prio == 0 {
+            prio = CL_QUEUE_PRIORITY_MED_KHR;
+        }
+
         // we assume that memory allocation is the only possible failure. Any other failure reason
         // should be detected earlier (e.g.: checking for CAPs).
-        let ctx = SendableQueueContext::new(device)?;
+        let ctx = SendableQueueContext::new(device, prio)?;
         let (tx_q, rx_t) = mpsc::channel::<Vec<Arc<Event>>>();
         Ok(Arc::new(Self {
             base: CLObjectBase::new(RusticlTypes::Queue),
@@ -237,7 +322,7 @@ impl Queue {
                 last: Weak::new(),
                 chan_in: tx_q,
             }),
-            thrd: thread::Builder::new()
+            _thrd: thread::Builder::new()
                 .name("rusticl queue thread".into())
                 .spawn(move || {
                     // Track the error of all executed events. This is only needed for in-order
@@ -255,27 +340,27 @@ impl Queue {
                     //       GPU contexts
                     let mut last_err = CL_SUCCESS as cl_int;
                     let ctx = ctx.ctx();
+                    let mut flushed = Vec::new();
                     loop {
-                        let r = rx_t.recv();
-                        if r.is_err() {
+                        debug_assert!(flushed.is_empty());
+
+                        let Ok(new_events) = rx_t.recv() else {
                             break;
-                        }
+                        };
 
-                        let new_events = r.unwrap();
-                        let mut flushed = Vec::new();
-
+                        let new_events = QueueEvents::new(new_events);
                         for e in new_events {
                             // If we hit any deps from another queue, flush so we don't risk a dead
                             // lock.
-                            if e.deps.iter().any(|ev| ev.queue != e.queue) {
+                            if e.deps().iter().any(|ev| !e.has_same_queue_as(ev)) {
                                 let dep_err = flush_events(&mut flushed, &ctx);
                                 last_err = cmp::min(last_err, dep_err);
                             }
 
                             // check if any dependency has an error
-                            for dep in &e.deps {
+                            for dep in e.deps() {
                                 // We have to wait on user events or events from other queues.
-                                let dep_err = if dep.is_user() || dep.queue != e.queue {
+                                let dep_err = if dep.is_user() || !e.has_same_queue_as(dep) {
                                     dep.wait()
                                 } else {
                                     dep.status()
@@ -293,7 +378,8 @@ impl Queue {
                             // if there is an execution error don't bother signaling it as the  context
                             // might be in a broken state. How queues behave after any event hit an
                             // error is entirely implementation defined.
-                            last_err = e.call(&ctx);
+                            let (err, e) = e.call(&ctx);
+                            last_err = err;
                             if last_err < 0 {
                                 continue;
                             }
@@ -373,10 +459,6 @@ impl Queue {
         Ok(())
     }
 
-    pub fn is_dead(&self) -> bool {
-        self.thrd.is_finished()
-    }
-
     pub fn is_profiling_enabled(&self) -> bool {
         (self.props & (CL_QUEUE_PROFILING_ENABLE as u64)) != 0
     }
@@ -384,11 +466,8 @@ impl Queue {
 
 impl Drop for Queue {
     fn drop(&mut self) {
-        // when deleting the application side object, we have to flush
-        // From the OpenCL spec:
-        // clReleaseCommandQueue performs an implicit flush to issue any previously queued OpenCL
-        // commands in command_queue.
-        // TODO: maybe we have to do it on every release?
-        let _ = self.flush(true);
+        // When reaching this point the queue should have been flushed already, but do it here once
+        // again just to be sure.
+        let _ = self.flush(false);
     }
 }

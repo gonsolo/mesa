@@ -47,8 +47,6 @@
 #include <mutex>
 #include <strmif.h>   // For ICodecAPI
 #include <wrl.h>
-#include "wil/com.h"
-#include "wil/resource.h"
 #include <wrl/client.h>
 #include <wrl/implements.h>
 #include "macros.h"
@@ -65,6 +63,10 @@
 using namespace concurrency;
 using namespace Microsoft::WRL;
 using Microsoft::WRL::ComPtr;
+
+#define ENCODE_WITH_TWO_PASS                          0
+#define ENCODE_WITH_TWO_PASS_LOWEST_RES               1
+#define ENCODE_WITH_TWO_PASS_EXTERNAL_DPB_RECON_SCALE 1
 
 #define NUM_INPUT_TYPES 3
 
@@ -218,8 +220,6 @@ typedef struct tVUInfo
 
    BOOL bEnableVST;
    VideoSignalType stVidSigType;
-
-   // TODO: This seems incomplete, more VUI params to fill and then plumb to DX12 backend VUI header writer
 } VUInfo;
 
 // Slice control modes supported by the encoder.
@@ -249,16 +249,122 @@ typedef enum IntraRefreshMode
    HMFT_INTRA_REFRESH_MODE_MAX
 } IntraRefreshMode;
 
-// MFSampleExtension_VideoEncodeQPMap {2C68A331-B712-49CA-860A-3A1D58237D88}
-// Type: PTR
-// Used by to return the QP map of the current frame
-DEFINE_GUID( MFSampleExtension_VideoEncodeQPMap, 0x2c68a331, 0xb712, 0x49ca, 0x86, 0xa, 0x3a, 0x1d, 0x58, 0x23, 0x7d, 0x88 );
+#ifndef CODECAPI_AVEncVideoEnableFramePsnrYuv
+// AVEncVideoEnableFramePsnrYuv (BOOL)
+// Indicates whether to enable or disable reporting frame PSNR of YUV planes for video encoding.
+// VARIANT_FALSE: disable; VARIANT_TRUE: enable
+DEFINE_CODECAPI_GUID( AVEncVideoEnableFramePsnrYuv,
+                      "2BBCDD1D-BC47-430E-B2E8-64801B47F5F0",
+                      0x2bbcdd1d,
+                      0xbc47,
+                      0x430e,
+                      0xb2,
+                      0xe8,
+                      0x64,
+                      0x80,
+                      0x1b,
+                      0x47,
+                      0xf5,
+                      0xf0 )
+#define CODECAPI_AVEncVideoEnableFramePsnrYuv DEFINE_CODECAPI_GUIDNAMED( AVEncVideoEnableFramePsnrYuv )
+#endif
 
-#if VIDEO_CODEC_H264ENC
+#ifndef CODECAPI_AVEncVideoEnableSpatialAdaptiveQuantization
+// AVEncVideoEnableSpatialAdaptiveQuantization (BOOL)
+// Indicates whether to enable or disable spatial adaptive quantization for video encoding.
+// VARIANT_FALSE: disable; VARIANT_TRUE: enable
+DEFINE_CODECAPI_GUID( AVEncVideoEnableSpatialAdaptiveQuantization,
+                      "659CB943-15CA-448D-B99A-875619DB4DE4",
+                      0x659cb943,
+                      0x15ca,
+                      0x448d,
+                      0xb9,
+                      0x9a,
+                      0x87,
+                      0x56,
+                      0x19,
+                      0xdb,
+                      0x4d,
+                      0xe4 )
+#define CODECAPI_AVEncVideoEnableSpatialAdaptiveQuantization                                                                       \
+   DEFINE_CODECAPI_GUIDNAMED( AVEncVideoEnableSpatialAdaptiveQuantization )
+#endif
+
+#ifndef CODECAPI_AVEncVideoOutputQPMapBlockSize
+// AVEncVideoOutputQPMapBlockSize (VT_UI4)
+// The block size used in reporting the output QP map for each block in an encoded video frame.
+// ulVal should be zero or power of 2, such as 16 or 32, etc.
+// Zero value is used to disable the QP map reporting.
+DEFINE_CODECAPI_GUID( AVEncVideoOutputQPMapBlockSize,
+                      "97038743-4AE3-44C3-A0F2-5BD58A4634EF",
+                      0x97038743,
+                      0x4ae3,
+                      0x44c3,
+                      0xa0,
+                      0xf2,
+                      0x5b,
+                      0xd5,
+                      0x8a,
+                      0x46,
+                      0x34,
+                      0xef )
+#define CODECAPI_AVEncVideoOutputQPMapBlockSize DEFINE_CODECAPI_GUIDNAMED( AVEncVideoOutputQPMapBlockSize )
+#endif
+
+#ifndef CODECAPI_AVEncVideoOutputBitsUsedMapBlockSize
+// AVEncVideoOutputBitsUsedMapBlockSize (VT_UI4)
+// The block size used in reporting the output bits used map for each block in an encoded video frame.
+// ulVal should be zero or power of 2, such as 16 or 32, etc.
+// Zero value is used to disable the bits used map reporting.
+DEFINE_CODECAPI_GUID( AVEncVideoOutputBitsUsedMapBlockSize,
+                      "6C2CD11A-CA3B-44BD-9A9E-93B03634C36E",
+                      0x6c2cd11a,
+                      0xca3b,
+                      0x44bd,
+                      0x9a,
+                      0x9e,
+                      0x93,
+                      0xb0,
+                      0x36,
+                      0x34,
+                      0xc3,
+                      0x6e )
+#define CODECAPI_AVEncVideoOutputBitsUsedMapBlockSize DEFINE_CODECAPI_GUIDNAMED( AVEncVideoOutputBitsUsedMapBlockSize )
+#endif
+
+#ifndef MFSampleExtension_FramePsnrYuv
+typedef struct _MFSampleExtensionPsnrYuv
+{
+   FLOAT psnrY;   // PSNR for Y plane
+   FLOAT psnrU;   // PSNR for U plane
+   FLOAT psnrV;   // PSNR for V plane
+} MFSampleExtensionPsnrYuv;
+
+// MFSampleExtension_FramePsnrYuv {1C633A3D-566F-4752-833B-2907DF5415E1}
+// Type: IMFMediaBuffer
+// A MFSampleExtensionPsnrYuv structure that specifies the PSNR data of YUV planes of an encoded video frame.
+DEFINE_GUID( MFSampleExtension_FramePsnrYuv, 0x1c633a3d, 0x566f, 0x4752, 0x83, 0x3b, 0x29, 0x07, 0xdf, 0x54, 0x15, 0xe1 );
+#endif
+
+#ifndef MFSampleExtension_VideoEncodeQPMap
+// MFSampleExtension_VideoEncodeQPMap {2C68A331-B712-49CA-860A-3A1D58237D88}
+// Type: IMFMediaBuffer
+// The QP map of an encoded video frame.
+DEFINE_GUID( MFSampleExtension_VideoEncodeQPMap, 0x2c68a331, 0xb712, 0x49ca, 0x86, 0x0a, 0x3a, 0x1d, 0x58, 0x23, 0x7d, 0x88 );
+#endif
+
+#ifndef MFSampleExtension_VideoEncodeBitsUsedMap
+// MFSampleExtension_VideoEncodeBitsUsedMap {6894263D-E6E2-4BCC-849D-8570365F5114}
+// Type: IMFMediaBuffer
+// The bits used map of an encoded video frame.
+DEFINE_GUID( MFSampleExtension_VideoEncodeBitsUsedMap, 0x6894263d, 0xe6e2, 0x4bcc, 0x84, 0x9d, 0x85, 0x70, 0x36, 0x5f, 0x51, 0x14 );
+#endif
+
+#if MFT_CODEC_H264ENC
 #define HMFT_GUID "8994db7c-288a-4c62-a136-a3c3c2a208a8"
-#elif VIDEO_CODEC_H265ENC
+#elif MFT_CODEC_H265ENC
 #define HMFT_GUID "e7ffb8eb-fa0b-4fb0-acdf-1202f663cde5"
-#elif VIDEO_CODEC_AV1ENC
+#elif MFT_CODEC_AV1ENC
 #define HMFT_GUID "1a6f3150-b121-4ce9-9497-50fedb3dcb70"
 #endif
 
@@ -294,7 +400,7 @@ class __declspec( uuid( HMFT_GUID ) ) CDX12EncHMFT : CMFD3DManager,
    concurrent_queue<LPDX12EncodeContext> m_EncodingQueue;   // (MFT_INPUT_QUEUE_DEPTH)
 
    concurrent_queue<IMFSample *> m_OutputQueue;
-   wil::critical_section m_OutputQueueLock;
+   std::mutex m_OutputQueueLock;
 
    HRESULT SetEncodingParameters( IMFAttributes *pMFAttributes );
    HRESULT GetCodecPrivateData( LPBYTE pSPSPPSData, DWORD dwSPSPPSDataLen, LPDWORD lpdwSPSPPSDataLen );
@@ -309,13 +415,13 @@ class __declspec( uuid( HMFT_GUID ) ) CDX12EncHMFT : CMFD3DManager,
    HRESULT InternalCheckOutputType( IMFMediaType *pType );
    HRESULT CheckMediaType( IMFMediaType *pmt, bool bInputType );
 
-#if VIDEO_CODEC_H264ENC
+#if MFT_CODEC_H264ENC
    HRESULT CheckMediaTypeLevel(
       IMFMediaType *pmt, int width, int height, const encoder_capabilities &encoderCapabilities, eAVEncH264VLevel *pLevel ) const;
-#elif VIDEO_CODEC_H265ENC
+#elif MFT_CODEC_H265ENC
    HRESULT CheckMediaTypeLevel(
       IMFMediaType *pmt, int width, int height, const encoder_capabilities &encoderCapabilities, eAVEncH265VLevel *pLevel ) const;
-#elif VIDEO_CODEC_AV1ENC
+#elif MFT_CODEC_AV1ENC
    HRESULT CheckMediaTypeLevel(
       IMFMediaType *pmt, int width, int height, const encoder_capabilities &encoderCapabilities, eAVEncAV1VLevel *pLevel ) const;
 #endif
@@ -350,7 +456,6 @@ class __declspec( uuid( HMFT_GUID ) ) CDX12EncHMFT : CMFD3DManager,
    MFRatio m_PixelAspectRatio = { 1, 1 };   // default to 1:1
    MFNominalRange m_eNominalRange = MFNominalRange_16_235;
 
-   // TODO%%% Convert this to a map based on CODECAPI_guidname...
    BOOL m_bForceKeyFrame = FALSE;
    UINT32 m_uiRateControlMode = eAVEncCommonRateControlMode_CBR;
    BOOL m_bRateControlModeSet = FALSE;
@@ -392,25 +497,25 @@ class __declspec( uuid( HMFT_GUID ) ) CDX12EncHMFT : CMFD3DManager,
    UINT32 m_uiSliceControlSize = 0;
    BOOL m_bSliceControlSizeSet = FALSE;
    BOOL m_bMaxNumRefFrameSet = FALSE;
-#if VIDEO_CODEC_H264ENC
+#if MFT_CODEC_H264ENC
    UINT32 m_uiMaxNumRefFrame = PIPE_H264_MAX_REFERENCES;
-#elif VIDEO_CODEC_H265ENC
+#elif MFT_CODEC_H265ENC
    UINT32 m_uiMaxNumRefFrame = PIPE_H265_MAX_REFERENCES;
-#elif VIDEO_CODEC_AV1ENC
+#elif MFT_CODEC_AV1ENC
    UINT32 m_uiMaxNumRefFrame = PIPE_AV1_MAX_REFERENCES;
 #endif
 
-#if VIDEO_CODEC_H264ENC
+#if MFT_CODEC_H264ENC
    eAVEncH264VProfile m_uiProfile = eAVEncH264VProfile_Main;
    eAVEncH264VLevel m_uiLevel = eAVEncH264VLevel5;
    const D3D12_VIDEO_ENCODER_CODEC m_Codec = D3D12_VIDEO_ENCODER_CODEC_H264;
    enum pipe_video_profile m_outputPipeProfile = PIPE_VIDEO_PROFILE_MPEG4_AVC_MAIN;
-#elif VIDEO_CODEC_H265ENC
+#elif MFT_CODEC_H265ENC
    eAVEncH265VProfile m_uiProfile = eAVEncH265VProfile_Main_420_8;
    eAVEncH265VLevel m_uiLevel = eAVEncH265VLevel5;
    const D3D12_VIDEO_ENCODER_CODEC m_Codec = D3D12_VIDEO_ENCODER_CODEC_HEVC;
    enum pipe_video_profile m_outputPipeProfile = PIPE_VIDEO_PROFILE_HEVC_MAIN;
-#elif VIDEO_CODEC_AV1ENC
+#elif MFT_CODEC_AV1ENC
    eAVEncAV1VProfile m_uiProfile = eAVEncAV1VProfile_Main_420_8;
    eAVEncAV1VLevel m_uiLevel = eAVEncAV1VLevel5;
    const D3D12_VIDEO_ENCODER_CODEC m_Codec = D3D12_VIDEO_ENCODER_CODEC_AV1;
@@ -432,7 +537,13 @@ class __declspec( uuid( HMFT_GUID ) ) CDX12EncHMFT : CMFD3DManager,
    BOOL m_bLowLatency = FALSE;
    BOOL m_bCabacEnable = TRUE;
 
+   BOOL m_bVideoEnableFramePsnrYuv = FALSE;
+   BOOL m_bVideoEnableSpatialAdaptiveQuantization = FALSE;
+   UINT32 m_uiVideoOutputQPMapBlockSize = 0;
+   UINT32 m_uiVideoOutputBitsUsedMapBlockSize = 0;
+
    struct pipe_video_codec *m_pPipeVideoCodec = nullptr;
+   struct pipe_video_codec *m_pPipeVideoBlitter = nullptr;
    reference_frames_tracker *m_pGOPTracker = nullptr;
    enum pipe_format m_inputPipeFormat = PIPE_FORMAT_NV12;
 
@@ -459,9 +570,9 @@ class __declspec( uuid( HMFT_GUID ) ) CDX12EncHMFT : CMFD3DManager,
    DWORD m_dwHaveOutputCount = 0;
    DWORD m_dwProcessOutputCount = 0;
 
-   class wil::critical_section m_lock;
-   class wil::critical_section m_lockShutdown;
-   class wil::critical_section m_encoderLock;
+   class std::mutex m_lock;
+   class std::mutex m_lockShutdown;
+   class std::mutex m_encoderLock;
    bool m_bExitThread = false;
    bool m_bUnlocked = false;
    HRESULT IsUnlocked( void );

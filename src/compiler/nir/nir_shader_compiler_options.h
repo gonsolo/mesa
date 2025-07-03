@@ -180,6 +180,13 @@ typedef enum {
     */
    nir_io_compaction_groups_tes_inputs_into_pos_and_var_groups = BITFIELD_BIT(9),
 
+   /**
+    * RADV expects that high 16 bits of outputs set component >= 4. That's not
+    * legal in NIR, but RADV unfortunately relies on it because it's not
+    * validated.
+    */
+   nir_io_radv_intrinsic_component_workaround = BITFIELD_BIT(10),
+
    /* Options affecting the GLSL compiler or Gallium are below. */
 
    /**
@@ -200,7 +207,7 @@ typedef enum {
     * Whether clip and cull distance arrays should be separate. If this is not
     * set, cull distances will be moved into VARYING_SLOT_CLIP_DISTn after clip
     * distances, and shader_info::clip_distance_array_size will be the index
-    * of the first cull distance. nir_lower_clip_cull_distance_arrays does
+    * of the first cull distance. nir_lower_clip_cull_distance_array_vars does
     * that.
     */
    nir_io_separate_clip_cull_distance_arrays = BITFIELD_BIT(18),
@@ -235,7 +242,9 @@ typedef struct nir_shader_compiler_options {
    bool lower_fsqrt;
    bool lower_sincos;
    bool lower_fmod;
-   /** Lowers ibitfield_extract/ubitfield_extract. */
+   /** Lowers ibitfield_extract/ubitfield_extract for 8, 16 & 32 bits. */
+   bool lower_bitfield_extract8;
+   bool lower_bitfield_extract16;
    bool lower_bitfield_extract;
    /** Lowers bitfield_insert. */
    bool lower_bitfield_insert;
@@ -628,6 +637,12 @@ typedef struct nir_shader_compiler_options {
 
    /** Backend support msad_u4x8. */
    bool has_msad;
+
+   /** Backend supports f2e4m3fn_satfn */
+   bool has_f2e4m3fn_satfn;
+
+   /** Backend supports load_global_bounded intrinsics. */
+   bool has_load_global_bounded;
 
    /**
     * Is this the Intel vec4 backend?

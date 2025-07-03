@@ -295,7 +295,7 @@ ms_store_arrayed_output(nir_builder *b,
    bool hi_16b = io_sem.high_16bits;
    bool lo_16b = !hi_16b && store_val->bit_size == 16;
 
-   unsigned mapped_location = util_bitcount64(out->mask & u_bit_consecutive64(0, io_sem.location));
+   unsigned mapped_location = util_bitcount64(out->mask & BITFIELD64_MASK(io_sem.location));
    unsigned num_outputs = util_bitcount64(out->mask);
    unsigned const_off = out->addr + component_offset * 4 + (hi_16b ? 2 : 0);
 
@@ -414,7 +414,7 @@ ms_load_arrayed_output(nir_builder *b,
    unsigned const_off = out->addr + component_offset * 4;
 
    /* Use compacted location instead of the original semantic location. */
-   unsigned mapped_location = util_bitcount64(out->mask & u_bit_consecutive64(0, location));
+   unsigned mapped_location = util_bitcount64(out->mask & BITFIELD64_MASK(location));
 
    nir_def *base_addr = ms_arrayed_output_base_addr(b, arr_index, mapped_location, num_outputs);
    nir_def *base_addr_off = nir_imul_imm(b, base_offset, 16);
@@ -887,8 +887,8 @@ emit_ms_vertex(nir_builder *b, nir_def *index, nir_def *row, bool exports, bool 
    ms_emit_arrayed_outputs(b, index, per_vertex_outputs, s);
 
    if (exports) {
-      ac_nir_export_position(b, s->hw_info->gfx_level, s->clipdist_enable_mask,
-                             !s->has_param_exports, false, true,
+      ac_nir_export_position(b, s->hw_info->gfx_level, s->clipdist_enable_mask, false, false, false,
+                             !s->has_param_exports, false,
                              s->per_vertex_outputs | VARYING_BIT_POS, &s->out, row);
    }
 
@@ -963,11 +963,7 @@ emit_ms_outputs(nir_builder *b, nir_def *invocation_index, nir_def *row_start,
          nir_phi_instr_add_src(index, preheader, invocation_index);
          nir_phi_instr_add_src(row, preheader, row_start);
 
-         nir_if *if_break = nir_push_if(b, nir_uge(b, &index->def, count));
-         {
-            nir_jump(b, nir_jump_break);
-         }
-         nir_pop_if(b, if_break);
+         nir_break_if(b, nir_uge(b, &index->def, count));
 
          cb(b, &index->def, &row->def, exports, parameters, mask, s);
 
@@ -1204,11 +1200,7 @@ handle_smaller_ms_api_workgroup(nir_builder *b,
                                      .memory_modes = nir_var_shader_out | nir_var_mem_shared);
 
                nir_def *loaded = nir_load_shared(b, 1, 32, zero, .base = api_waves_in_flight_addr);
-               nir_if *if_break = nir_push_if(b, nir_ieq_imm(b, loaded, 0));
-               {
-                  nir_jump(b, nir_jump_break);
-               }
-               nir_pop_if(b, if_break);
+               nir_break_if(b, nir_ieq_imm(b, loaded, 0));
             }
             nir_pop_loop(b, loop);
          }

@@ -9,6 +9,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "util/macros.h"
 #include "util/mesa-blake3.h"
 
 #include "vk_descriptor_update_template.h"
@@ -156,7 +157,13 @@ panvk_per_arch(CreateDescriptorSetLayout)(
          binding_layout->flags = binding_flags_info->pBindingFlags[i];
       }
 
-      binding_layout->desc_count = binding->descriptorCount;
+      if (binding_layout->type & VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK) {
+         binding_layout->desc_count =
+            panvk_get_iub_desc_count(binding->descriptorCount);
+      } else {
+         binding_layout->desc_count = binding->descriptorCount;
+      }
+
       if (is_texture(binding_layout->type))
          binding_layout->textures_per_desc = 1;
 
@@ -235,12 +242,24 @@ panvk_per_arch(GetDescriptorSetLayoutSupport)(
    VkDevice _device, const VkDescriptorSetLayoutCreateInfo *pCreateInfo,
    VkDescriptorSetLayoutSupport *pSupport)
 {
+   const VkDescriptorSetLayoutBindingFlagsCreateInfo *binding_flags =
+      vk_find_struct_const(pCreateInfo->pNext,
+                           DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO);
+   VkDescriptorSetVariableDescriptorCountLayoutSupport *var_desc_count =
+      vk_find_struct(pSupport->pNext,
+                     DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_LAYOUT_SUPPORT);
+
    pSupport->supported = false;
 
-   unsigned desc_count = 0, dyn_buf_count = 0;
+   unsigned desc_count = 0, dyn_buf_count = 0, non_variable_count = 0,
+            variable_stride = 0;
+   VkDescriptorType variable_type = {0};
    for (unsigned i = 0; i < pCreateInfo->bindingCount; i++) {
       const VkDescriptorSetLayoutBinding *binding = &pCreateInfo->pBindings[i];
       VkDescriptorType type = binding->descriptorType;
+      VkDescriptorBindingFlags flags =
+         binding_flags && binding_flags->bindingCount > 0 ?
+         binding_flags->pBindingFlags[i] : 0;
 
       if (vk_descriptor_type_is_dynamic(type)) {
          dyn_buf_count += binding->descriptorCount;
@@ -271,7 +290,51 @@ panvk_per_arch(GetDescriptorSetLayoutSupport)(
          .samplers_per_desc = samplers_per_desc,
       };
 
-      desc_count += panvk_get_desc_stride(&layout) * binding->descriptorCount;
+      unsigned stride = panvk_get_desc_stride(&layout);
+      unsigned binding_desc_count = binding->descriptorCount;
+      bool has_variable_count =
+         flags & VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
+
+      if (has_variable_count) {
+         /* From the Vulkan 1.4.318 spec for
+          * VkDescriptorSetLayoutBindingFlagsCreateInfo:
+          *
+          *    "If an element of pBindingFlags includes
+          *    VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT, then it
+          *    must be the element with the highest binding number"
+          *
+          * Which implies only a single binding can have a variable count.
+          */
+         assert(!variable_stride);
+
+         if (binding_desc_count == 0) {
+            /* From the Vulkan 1.4.318 spec for
+             * VkDescriptorSetVariableDescriptorCountLayoutSupport:
+             *
+             *    "For the purposes of this command, a variable-sized
+             *    descriptor binding with a descriptorCount of zero is treated
+             *    as having a descriptorCount of four if descriptorType is
+             *    VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK, or one otherwise,
+             *    and thus the binding is not ignored and the maximum
+             *    descriptor count will be returned."
+             */
+            binding_desc_count =
+               type == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK ? 4 : 1;
+         }
+
+         variable_type = type;
+         variable_stride = stride;
+         assert(variable_stride);
+      }
+
+      unsigned count = type == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK
+                          ? panvk_get_iub_desc_count(binding_desc_count)
+                          : stride * binding_desc_count;
+
+      desc_count += count;
+
+      if (!has_variable_count)
+         non_variable_count += count;
    }
 
    if (desc_count > PANVK_MAX_DESCS_PER_SET ||
@@ -279,4 +342,24 @@ panvk_per_arch(GetDescriptorSetLayoutSupport)(
       return;
 
    pSupport->supported = true;
+
+   if (!var_desc_count)
+      return;
+
+   var_desc_count->maxVariableDescriptorCount = 0;
+
+   if (!variable_stride)
+      return;
+
+   if (variable_type == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK) {
+      /* Maximum byte size for inline uniform block */
+      unsigned available_size =
+         panvk_get_iub_size(PANVK_MAX_DESCS_PER_SET - non_variable_count);
+      var_desc_count->maxVariableDescriptorCount =
+         MIN2(available_size, MAX_INLINE_UNIFORM_BLOCK_SIZE);
+   } else {
+      /* Maximum descriptor count for any other descriptor type */
+      var_desc_count->maxVariableDescriptorCount =
+         (PANVK_MAX_DESCS_PER_SET - non_variable_count) / variable_stride;
+   }
 }

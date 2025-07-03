@@ -28,19 +28,9 @@ foreach ver : ['4', '5', '6', '7', '9', '10', '12', '13']
     [
       'pan_blend.c',
       'pan_desc.c',
+      'pan_mod.c',
       'pan_texture.c',
     ],
-    include_directories : [inc_include, inc_src, inc_panfrost],
-    c_args : ['-DPAN_ARCH=' + ver],
-    gnu_symbol_visibility : 'hidden',
-    dependencies : [deps_for_libpanfrost, idep_nir],
-  )
-endforeach
-
-foreach ver : ['7']
-  libpanfrost_per_arch += static_library(
-    'pan-arch-indirect-v' + ver,
-    'pan_indirect_dispatch.c',
     include_directories : [inc_include, inc_src, inc_panfrost],
     c_args : ['-DPAN_ARCH=' + ver],
     gnu_symbol_visibility : 'hidden',
@@ -51,7 +41,6 @@ endforeach
 libpanfrost_lib_files = files(
   'pan_encoder.h',
 
-  'pan_attributes.c',
   'pan_blend.c',
   'pan_clear.c',
   'pan_earlyzs.c',
@@ -82,6 +71,19 @@ libpanfrost_dep = declare_dependency(
 )
 
 if with_tests
+  test(
+    'panfrost_attribute',
+    executable(
+      'panfrost_attribute_test',
+      files('tests/test-attribute.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      gnu_symbol_visibility : 'hidden',
+      include_directories : [inc_include, inc_src],
+      dependencies: [libpanfrost_dep],
+    ),
+    suite : ['panfrost'],
+  )
+
   test(
     'panfrost_blend',
     executable(

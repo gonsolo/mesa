@@ -9,12 +9,15 @@
 $ADB shell mkdir -p /data/deqp
 $ADB push /deqp-gles/modules/egl/deqp-egl-android /data/deqp
 $ADB push /deqp-gles/mustpass/egl-main.txt.zst /data/deqp
+$ADB push /deqp-gles/modules/gles2/deqp-gles2 /data/deqp
+$ADB push /deqp-gles/mustpass/gles2-main.txt.zst /data/deqp
 $ADB push /deqp-vk/external/vulkancts/modules/vulkan/* /data/deqp
 $ADB push /deqp-vk/mustpass/vk-main.txt.zst /data/deqp
 $ADB push /deqp-tools/* /data/deqp
 $ADB push /deqp-runner/deqp-runner /data/deqp
 
 $ADB push "$INSTALL/all-skips.txt" /data/deqp
+$ADB push "$INSTALL/android-skips.txt" /data/deqp
 $ADB push "$INSTALL/angle-skips.txt" /data/deqp
 if [ -e "$INSTALL/$GPU_VERSION-flakes.txt" ]; then
   $ADB push "$INSTALL/$GPU_VERSION-flakes.txt" /data/deqp
@@ -40,12 +43,22 @@ if [ -e "$INSTALL/$GPU_VERSION-skips.txt" ]; then
     DEQP_SKIPS="$DEQP_SKIPS /data/deqp/$GPU_VERSION-skips.txt"
 fi
 
-if [ -n "$ANGLE_TAG" ]; then
+if [ -n "${ANGLE_TAG:-}" ]; then
     DEQP_SKIPS="$DEQP_SKIPS /data/deqp/angle-skips.txt"
 fi
 
 AOSP_RESULTS=/data/deqp/results
 uncollapsed_section_switch cuttlefish_test "cuttlefish: testing"
+
+# Print the detailed version with the list of backports and local patches
+{ set +x; } 2>/dev/null
+for api in vk-main vk gl gles; do
+  deqp_version_log=/deqp-$api/deqp-$api-version
+  if [ -r "$deqp_version_log" ]; then
+    cat "$deqp_version_log"
+  fi
+done
+set -x
 
 set +e
 $ADB shell "mkdir ${AOSP_RESULTS}; cd ${AOSP_RESULTS}/..; \

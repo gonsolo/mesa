@@ -22,6 +22,7 @@
  */
 
 #pragma once
+#include <d3d12.h>
 #include <mfidl.h>
 
 // Given a media type report plane information
@@ -44,3 +45,12 @@ MFTypeToImageSize( IMFMediaType *pType, UINT32 *pcbSize );
 // Copy a sample from src to dst for the given media type (copies buffer contents)
 HRESULT
 MFCopySample( IMFSample *dest, IMFSample *src, IMFMediaType *pmt );
+
+// Converts a Gallium pipe_resource into a D3D12 resource and wraps it as an IMFMediaBuffer,
+// then attaches it as a sample extension on an IMFSample using the specified GUID.
+HRESULT
+MFAttachPipeResourceAsSampleExtension( struct pipe_context *pPipeContext,
+                                       struct pipe_resource *pPipeRes,
+                                       ID3D12CommandQueue *pSyncObjectQueue,
+                                       REFGUID guidExtension,
+                                       IMFSample *pSample );

@@ -1573,7 +1573,9 @@ void anv_CmdClearColorImage(
                                           clear_rect.rect.extent.height,
                                           false /* depth clear */, 0 /* depth value */,
                                           true /* stencil_clear */, clear_color.u32[0] /* stencil_value */);
-         } else if (anv_can_fast_clear_color(cmd_buffer, image, level, &clear_rect,
+         } else if (anv_can_fast_clear_color(cmd_buffer, image,
+                                             pRanges[r].aspectMask,
+                                             level, &clear_rect,
                                              imageLayout, src_format.isl_format,
                                              clear_color)) {
             assert(level == 0);
@@ -1666,6 +1668,7 @@ void anv_CmdClearDepthStencilImage(
 
       bool clear_depth = pRanges[r].aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT;
       bool clear_stencil = pRanges[r].aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT;
+      assert(clear_depth || clear_stencil);
 
       unsigned base_layer = pRanges[r].baseArrayLayer;
       uint32_t layer_count =
@@ -1680,6 +1683,22 @@ void anv_CmdClearDepthStencilImage(
 
          if (image->vk.image_type == VK_IMAGE_TYPE_3D)
             layer_count = u_minify(image->vk.extent.depth, level);
+
+         const VkRect2D area = {
+            .offset.x = 0,
+            .offset.y = 0,
+            .extent.width = level_width,
+            .extent.height = level_height,
+         };
+
+         if (anv_can_hiz_clear_image(cmd_buffer, image, imageLayout,
+                                     pRanges[r].aspectMask,
+                                     pDepthStencil->depth, area, level)) {
+            anv_image_hiz_clear(cmd_buffer, image, pRanges[r].aspectMask,
+                                level, base_layer, layer_count, area,
+                                pDepthStencil);
+            continue;
+         }
 
          blorp_clear_depth_stencil(&batch, &depth, &stencil,
                                    level, base_layer, layer_count,
@@ -1776,6 +1795,7 @@ can_fast_clear_color_att(struct anv_cmd_buffer *cmd_buffer,
       return false;
 
    return anv_can_fast_clear_color(cmd_buffer, att->iview->image,
+                                   att->iview->vk.aspects,
                                    att->iview->vk.base_mip_level,
                                    pRects, att->layout,
                                    att->iview->planes[0].isl.format,
@@ -2041,12 +2061,12 @@ can_hiz_clear_att(struct anv_cmd_buffer *cmd_buffer,
    if (pRects[0].layerCount > 1 || pRects[0].baseArrayLayer > 0)
       return false;
 
-   return anv_can_hiz_clear_ds_view(cmd_buffer->device, ds_att->iview,
-                                    ds_att->layout,
-                                    attachment->aspectMask,
-                                    attachment->clearValue.depthStencil.depth,
-                                    pRects->rect,
-                                    cmd_buffer->queue_family->queueFlags);
+   return anv_can_hiz_clear_image(cmd_buffer, ds_att->iview->image,
+                                  ds_att->layout,
+                                  attachment->aspectMask,
+                                  attachment->clearValue.depthStencil.depth,
+                                  pRects->rect,
+                                  ds_att->iview->vk.base_mip_level);
 }
 
 static void
@@ -2401,10 +2421,11 @@ anv_image_clear_color(struct anv_cmd_buffer *cmd_buffer,
                       uint32_t level, uint32_t base_layer, uint32_t layer_count,
                       VkRect2D area, union isl_color_value clear_color)
 {
-   assert(image->vk.aspects == VK_IMAGE_ASPECT_COLOR_BIT);
+   assert((aspect & ~VK_IMAGE_ASPECT_ANY_COLOR_BIT_ANV) == 0);
+   assert(util_bitcount(aspect) == 1);
 
    /* We don't support planar images with multisampling yet */
-   assert(image->n_planes == 1);
+   assert(image->vk.samples == 1 || image->n_planes == 1);
 
    struct blorp_batch batch;
    anv_blorp_batch_init(cmd_buffer, &batch, 0);

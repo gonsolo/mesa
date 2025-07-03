@@ -299,7 +299,7 @@ nak_preprocess_nir(nir_shader *nir, const struct nak_compiler *nak)
 
    nir_validate_ssa_dominance(nir, "before nak_preprocess_nir");
 
-   OPT(nir, nir_lower_io_to_temporaries,
+   OPT(nir, nir_lower_io_vars_to_temporaries,
        nir_shader_get_entrypoint(nir),
        true /* outputs */, false /* inputs */);
 
@@ -309,7 +309,7 @@ nak_preprocess_nir(nir_shader *nir, const struct nak_compiler *nak)
       .lower_txd_clamp = true,
       .lower_txd_shadow = true,
       .lower_txp = ~0,
-      /* TODO: More lowering */
+      .lower_invalid_implicit_lod = true,
    };
    OPT(nir, nir_lower_tex, &tex_options);
    OPT(nir, nir_normalize_cubemap_coords);
@@ -948,7 +948,8 @@ nak_postprocess_nir(nir_shader *nir,
       .ballot_bit_size = 32,
       .ballot_components = 1,
       .lower_to_scalar = true,
-      .lower_vote_eq = true,
+      .lower_vote_feq = true,
+      .lower_vote_ieq = nak->sm < 70,
       .lower_first_invocation_to_ballot = true,
       .lower_read_first_invocation = true,
       .lower_elect = true,
@@ -956,6 +957,7 @@ nak_postprocess_nir(nir_shader *nir,
       .lower_inverse_ballot = true,
       .lower_rotate_to_shuffle = true
    };
+   OPT(nir, nir_opt_uniform_subgroup, &subgroups_options);
    OPT(nir, nir_lower_subgroups, &subgroups_options);
    if (nak->sm >= 50) {
       // On Maxwell+ we need to lower shared 64-bit atomics into
@@ -1106,7 +1108,7 @@ nak_postprocess_nir(nir_shader *nir,
 
    if (nak->sm >= 73) {
       OPT(nir, nak_nir_mark_lcssa_invariants);
-      if (OPT(nir, nak_nir_lower_non_uniform_ldcx)) {
+      if (OPT(nir, nak_nir_lower_non_uniform_ldcx, nak)) {
          OPT(nir, nir_copy_prop);
          OPT(nir, nir_opt_dce);
       }
@@ -1147,13 +1149,17 @@ nak_postprocess_nir(nir_shader *nir,
 }
 
 static bool
-scalar_is_imm_int(nir_scalar x, unsigned bits)
+scalar_is_imm_int(nir_scalar x, unsigned bits, bool is_signed)
 {
    if (!nir_scalar_is_const(x))
       return false;
 
-   int64_t imm = nir_scalar_as_int(x);
-   return u_intN_min(bits) <= imm && imm <= u_intN_max(bits);
+   if (is_signed) {
+      int64_t imm = nir_scalar_as_int(x);
+      return u_intN_min(bits) <= imm && imm <= u_intN_max(bits);
+   } else {
+      return nir_scalar_as_uint(x) < u_uintN_max(bits);
+   }
 }
 
 struct nak_io_addr_offset
@@ -1163,7 +1169,9 @@ nak_get_io_addr_offset(nir_def *addr, uint8_t imm_bits)
       .def = addr,
       .comp = 0,
    };
-   if (scalar_is_imm_int(addr_s, imm_bits)) {
+
+   /* If the entire address is constant, it's an unsigned immediate */
+   if (scalar_is_imm_int(addr_s, imm_bits, false)) {
       /* Base is a dumb name for this.  It should be offset */
       return (struct nak_io_addr_offset) {
          .offset = nir_scalar_as_int(addr_s),
@@ -1181,7 +1189,9 @@ nak_get_io_addr_offset(nir_def *addr, uint8_t imm_bits)
    for (unsigned i = 0; i < 2; i++) {
       nir_scalar off_s = nir_scalar_chase_alu_src(addr_s, i);
       off_s = nir_scalar_chase_movs(off_s);
-      if (scalar_is_imm_int(off_s, imm_bits)) {
+
+      /* If it's imm+indirect then the immediate is signed */
+      if (scalar_is_imm_int(off_s, imm_bits, true)) {
          return (struct nak_io_addr_offset) {
             .base = nir_scalar_chase_alu_src(addr_s, 1 - i),
             .offset = nir_scalar_as_int(off_s),

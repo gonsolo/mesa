@@ -33,6 +33,9 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "EGL/egl.h"
+#include "EGL/eglext.h"
+
 #include "wayland-drm-server-protocol.h"
 #include "wayland-drm.h"
 #include <wayland-server.h>
@@ -82,6 +85,36 @@ create_buffer(struct wl_client *client, struct wl_resource *resource,
    buffer->offset[2] = offset2;
    buffer->stride[2] = stride2;
 
+   switch (format) {
+   case WL_DRM_FORMAT_ARGB2101010:
+   case WL_DRM_FORMAT_ABGR2101010:
+   case WL_DRM_FORMAT_ARGB8888:
+      buffer->egl_components = EGL_TEXTURE_RGBA;
+      break;
+   case WL_DRM_FORMAT_XRGB2101010:
+   case WL_DRM_FORMAT_XBGR2101010:
+   case WL_DRM_FORMAT_XRGB8888:
+   case WL_DRM_FORMAT_BGR888:
+   case WL_DRM_FORMAT_RGB888:
+   case WL_DRM_FORMAT_RGB565:
+      buffer->egl_components = EGL_TEXTURE_RGB;
+      break;
+   case WL_DRM_FORMAT_YUV410:
+   case WL_DRM_FORMAT_YUV411:
+   case WL_DRM_FORMAT_YUV420:
+   case WL_DRM_FORMAT_YUV422:
+   case WL_DRM_FORMAT_YUV444:
+      buffer->egl_components = EGL_TEXTURE_Y_U_V_WL;
+      break;
+   case WL_DRM_FORMAT_NV12:
+   case WL_DRM_FORMAT_NV16:
+      buffer->egl_components = EGL_TEXTURE_Y_UV_WL;
+      break;
+   case WL_DRM_FORMAT_YUYV:
+      buffer->egl_components = EGL_TEXTURE_Y_XUXV_WL;
+      break;
+   }
+
    drm->callbacks.reference_buffer(drm->user_data, name, fd, buffer);
    if (buffer->driver_buffer == NULL) {
       wl_resource_post_error(resource, WL_DRM_ERROR_INVALID_NAME,
@@ -114,6 +147,8 @@ drm_create_buffer(struct wl_client *client, struct wl_resource *resource,
    case WL_DRM_FORMAT_XRGB2101010:
    case WL_DRM_FORMAT_ARGB8888:
    case WL_DRM_FORMAT_XRGB8888:
+   case WL_DRM_FORMAT_BGR888:
+   case WL_DRM_FORMAT_RGB888:
    case WL_DRM_FORMAT_YUYV:
    case WL_DRM_FORMAT_RGB565:
       break;
@@ -230,6 +265,8 @@ bind_drm(struct wl_client *client, void *data, uint32_t version, uint32_t id)
 
    wl_resource_post_event(resource, WL_DRM_FORMAT, WL_DRM_FORMAT_ARGB8888);
    wl_resource_post_event(resource, WL_DRM_FORMAT, WL_DRM_FORMAT_XRGB8888);
+   wl_resource_post_event(resource, WL_DRM_FORMAT, WL_DRM_FORMAT_BGR888);
+   wl_resource_post_event(resource, WL_DRM_FORMAT, WL_DRM_FORMAT_RGB888);
    wl_resource_post_event(resource, WL_DRM_FORMAT, WL_DRM_FORMAT_RGB565);
    wl_resource_post_event(resource, WL_DRM_FORMAT, WL_DRM_FORMAT_YUV410);
    wl_resource_post_event(resource, WL_DRM_FORMAT, WL_DRM_FORMAT_YUV411);

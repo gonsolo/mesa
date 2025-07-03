@@ -128,7 +128,6 @@ driGetAPIMask(struct dri_screen *screen);
 PUBLIC struct dri_drawable *
 dri_create_drawable(struct dri_screen *psp, const struct dri_config *config,
                     bool isPixmap, void *loaderPrivate);
-extern const __DRIimageDriverExtension driImageDriverExtension;
 PUBLIC void driDestroyScreen(struct dri_screen *psp);
 PUBLIC int
 driGetConfigAttrib(const struct dri_config *config, unsigned int attrib, unsigned int *value);
@@ -346,5 +345,9 @@ dri_get_pipe_screen(struct dri_screen *driScreen);
 
 PUBLIC char*
 driGetDriInfoXML(const char* driverName);
+
+PUBLIC bool
+dri_get_drm_device_info(const char *device_name, uint8_t *device_uuid, uint8_t *driver_uuid,
+                        char **vendor_name, char **renderer_name, char **driver_name);
 
 #endif /* _DRI_UTIL_H_ */

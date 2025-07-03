@@ -470,7 +470,8 @@ radv_amdgpu_winsys_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned 
        * e.g. Horizon Zero Dawn allocates more memory than we have
        * VRAM.
        */
-      request.preferred_heap |= AMDGPU_GEM_DOMAIN_GTT;
+      if (!(ws->perftest & RADV_PERFTEST_NO_GTT_SPILL))
+          request.preferred_heap |= AMDGPU_GEM_DOMAIN_GTT;
    }
 
    if (initial_domain & RADEON_DOMAIN_GTT)
@@ -492,13 +493,9 @@ radv_amdgpu_winsys_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned 
       request.flags |= AMDGPU_GEM_CREATE_EXPLICIT_SYNC;
    if ((initial_domain & RADEON_DOMAIN_VRAM_GTT) && (flags & RADEON_FLAG_NO_INTERPROCESS_SHARING) &&
        ((ws->perftest & RADV_PERFTEST_LOCAL_BOS) || (flags & RADEON_FLAG_PREFER_LOCAL_BO))) {
-      /* virtio needs to be able to create a dmabuf if CPU access is required but a
-       * dmabuf cannot be created if VM_ALWAYS_VALID is used.
-       */
-      if (!ws->info.is_virtio || (request.flags & AMDGPU_GEM_CREATE_NO_CPU_ACCESS)) {
-         bo->base.is_local = true;
-         request.flags |= AMDGPU_GEM_CREATE_VM_ALWAYS_VALID;
-      }
+      assert(ws->info.has_vm_always_valid);
+      bo->base.is_local = true;
+      request.flags |= AMDGPU_GEM_CREATE_VM_ALWAYS_VALID;
    }
    /* Set AMDGPU_GEM_CREATE_VIRTIO_SHARED if the driver didn't disable buffer sharing. */
    if (ws->info.is_virtio && (initial_domain & RADEON_DOMAIN_VRAM_GTT) &&

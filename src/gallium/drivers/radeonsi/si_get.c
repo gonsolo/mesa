@@ -16,6 +16,7 @@
 #include "util/u_video.h"
 #include "vl/vl_video_buffer.h"
 #include <sys/utsname.h>
+#include "drm-uapi/drm.h"
 
 /* The capabilities reported by the kernel has priority
    over the existing logic in si_get_video_param */
@@ -127,7 +128,7 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
          /* VPE 1st generation does not support orientation
           * Have to determine the version and features of VPE in future.
           */
-         return PIPE_VIDEO_VPP_ORIENTATION_DEFAULT;
+         return PIPE_VIDEO_VPP_FLIP_HORIZONTAL;
       case PIPE_VIDEO_CAP_VPP_BLEND_MODES:
          /* VPE 1st generation does not support blending.
           * Have to determine the version and features of VPE in future.
@@ -1095,6 +1096,7 @@ void si_init_screen_caps(struct si_screen *sscreen)
    caps->fs_face_is_integer_sysval = true;
    caps->invalidate_buffer = true;
    caps->surface_reinterpret_blocks = true;
+   caps->compressed_surface_reinterpret_blocks_layered = true;
    caps->query_buffer_object = true;
    caps->query_memory_info = true;
    caps->shader_pack_half_float = true;
@@ -1146,6 +1148,11 @@ void si_init_screen_caps(struct si_screen *sscreen)
    caps->has_const_bw = true;
    caps->cl_gl_sharing = true;
    caps->call_finalize_nir_in_linker = true;
+
+   /* Fixup dmabuf caps for the virtio + vpipe case (when fd=-1, u_init_pipe_screen_caps
+    * fails to set this capability). */
+   if (sscreen->info.is_virtio)
+         caps->dmabuf |= DRM_PRIME_CAP_EXPORT | DRM_PRIME_CAP_IMPORT;
 
    caps->fbfetch = 1;
 
@@ -1344,4 +1351,7 @@ void si_init_screen_caps(struct si_screen *sscreen)
     *    KHR-GL46.texture_lod_bias.texture_lod_bias_all
     */
    caps->max_texture_lod_bias = 16;
+
+   if (sscreen->ws->va_range)
+      sscreen->ws->va_range(sscreen->ws, &caps->min_vma, &caps->max_vma);
 }

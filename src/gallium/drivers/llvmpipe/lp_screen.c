@@ -135,10 +135,6 @@ llvmpipe_init_shader_caps(struct pipe_screen *screen)
          break;
       case PIPE_SHADER_TESS_CTRL:
       case PIPE_SHADER_TESS_EVAL:
-         /* Tessellation shader needs llvm coroutines support */
-         if (!GALLIVM_COROUTINES)
-            continue;
-         FALLTHROUGH;
       case PIPE_SHADER_VERTEX:
       case PIPE_SHADER_GEOMETRY:
          draw_init_shader_caps(caps);
@@ -273,7 +269,7 @@ llvmpipe_init_screen_caps(struct pipe_screen *screen)
    caps->vertex_color_clamped = true;
    caps->glsl_feature_level_compatibility =
    caps->glsl_feature_level = 450;
-   caps->compute = GALLIVM_COROUTINES;
+   caps->compute = true;
    caps->user_vertex_buffers = true;
    caps->tgsi_texcoord = true;
    caps->draw_indirect = true;
@@ -425,6 +421,8 @@ static const struct nir_shader_compiler_options gallivm_nir_options = {
    .lower_flrp64 = true,
    .lower_fsat = true,
    .lower_bitfield_insert = true,
+   .lower_bitfield_extract8 = true,
+   .lower_bitfield_extract16 = true,
    .lower_bitfield_extract = true,
    .lower_fdph = true,
    .lower_ffma16 = true,
@@ -457,7 +455,7 @@ static const struct nir_shader_compiler_options gallivm_nir_options = {
    .lower_usub_borrow = true,
    .lower_mul_2x32_64 = true,
    .lower_ifind_msb = true,
-   .lower_int64_options = nir_lower_imul_2x32_64,
+   .lower_int64_options = nir_lower_imul_2x32_64 | nir_lower_bitfield_extract64,
    .lower_doubles_options = nir_lower_dround_even,
    .max_unroll_iterations = 32,
    .lower_to_scalar = true,

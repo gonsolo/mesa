@@ -183,6 +183,68 @@ CDX12EncHMFT::PrepareForEncode( IMFSample *pSample, LPDX12EncodeContext *ppDX12E
       debug_printf( "[dx12 hmft 0x%p] DX12 input sample\n", this );
    }
 
+#if ENCODE_WITH_TWO_PASS
+   if( m_pPipeVideoCodec->two_pass.enable && ( m_pPipeVideoCodec->two_pass.pow2_downscale_factor > 0 ) )
+   {
+      // TODO: In case the app sends the downscaled input remove this
+
+      //
+      // Use VPBlit to downscale the input texture to generate the 1st pass
+      // downscaled input texture
+      //
+
+      struct pipe_video_buffer templ = {};
+      templ.buffer_format = pDX12EncodeContext->pPipeVideoBuffer->buffer_format;
+      templ.width = static_cast<uint32_t>(
+         std::ceil( pDX12EncodeContext->pPipeVideoBuffer->width / ( 1 << m_pPipeVideoCodec->two_pass.pow2_downscale_factor ) ) );
+      templ.height = static_cast<uint32_t>(
+         std::ceil( pDX12EncodeContext->pPipeVideoBuffer->height / ( 1 << m_pPipeVideoCodec->two_pass.pow2_downscale_factor ) ) );
+      pDX12EncodeContext->pDownscaledTwoPassPipeVideoBuffer = m_pPipeContext->create_video_buffer( m_pPipeContext, &templ );
+
+      struct pipe_vpp_desc vpblit_params = {};
+      struct pipe_fence_handle *dst_surface_fence = nullptr;
+
+      vpblit_params.src_surface_fence = m_pPipeFenceHandle;   // input surface fence (driver input)
+      vpblit_params.base.fence = &dst_surface_fence;          // Output surface fence (driver output)
+
+      vpblit_params.base.input_format = pDX12EncodeContext->pPipeVideoBuffer->buffer_format;
+      vpblit_params.base.output_format = pDX12EncodeContext->pDownscaledTwoPassPipeVideoBuffer->buffer_format;
+      vpblit_params.src_region.x0 = 0u;
+      vpblit_params.src_region.y0 = 0u;
+      vpblit_params.src_region.x1 = pDX12EncodeContext->pPipeVideoBuffer->width;
+      vpblit_params.src_region.y1 = pDX12EncodeContext->pPipeVideoBuffer->height;
+
+      vpblit_params.dst_region.x0 = 0u;
+      vpblit_params.dst_region.y0 = 0u;
+      vpblit_params.dst_region.x1 = pDX12EncodeContext->pDownscaledTwoPassPipeVideoBuffer->width;
+      vpblit_params.dst_region.y1 = pDX12EncodeContext->pDownscaledTwoPassPipeVideoBuffer->height;
+
+      m_pPipeVideoBlitter->begin_frame( m_pPipeVideoBlitter,
+                                        pDX12EncodeContext->pDownscaledTwoPassPipeVideoBuffer,
+                                        &vpblit_params.base );
+
+      CHECKBOOL_GOTO(
+         ( m_pPipeVideoBlitter->process_frame( m_pPipeVideoBlitter, pDX12EncodeContext->pPipeVideoBuffer, &vpblit_params ) == 0 ),
+         MF_E_UNEXPECTED,
+         done );
+      CHECKBOOL_GOTO( ( m_pPipeVideoBlitter->end_frame( m_pPipeVideoBlitter,
+                                                        pDX12EncodeContext->pDownscaledTwoPassPipeVideoBuffer,
+                                                        &vpblit_params.base ) == 0 ),
+                      MF_E_UNEXPECTED,
+                      done );
+      m_pPipeVideoBlitter->flush( m_pPipeVideoBlitter );
+
+      assert( *vpblit_params.base.fence );   // Driver must have returned the completion fence
+      // Wait for downscaling completion before encode can proceed
+
+      ASSERTED bool finished = m_pPipeVideoCodec->context->screen->fence_finish( m_pPipeVideoCodec->context->screen,
+                                                                                 NULL, /*passing non NULL resets GRFX context*/
+                                                                                 *vpblit_params.base.fence,
+                                                                                 OS_TIMEOUT_INFINITE );
+      assert( finished );
+   }
+#endif   // ENCODE_WITH_TWO_PASS
+
    // validate texture dimensions with surface alignment here for now, will add handling for non-aligned textures later
    if( textureWidth % surfaceWidthAlignment != 0 || textureHeight % surfaceHeightAlignment != 0 )
    {
@@ -255,16 +317,12 @@ CDX12EncHMFT::PrepareForEncode( IMFSample *pSample, LPDX12EncodeContext *ppDX12E
       }
    }
 
-   //
-   // TODO: Just to test the backend, needs proper plumbing to CodecAPI
-   //
-#if 0   // TODO: Enable me
    {
       //
       // Create resources for output GPU frame stats
       //
       struct pipe_resource templ = {};
-      memset(&templ, 0, sizeof(templ));
+      memset( &templ, 0, sizeof( templ ) );
       templ.target = PIPE_TEXTURE_2D;
       // PIPE_USAGE_STAGING allocates resource in L0 (System Memory) heap
       // and avoid a bunch of roundtrips for uploading/reading back the bitstream headers
@@ -275,46 +333,63 @@ CDX12EncHMFT::PrepareForEncode( IMFSample *pSample, LPDX12EncodeContext *ppDX12E
       templ.depth0 = 1;
       templ.array_size = 1;
 
-      // TODO: Only allocate these if CodecAPi requested these stats, since there's a perf impact to request them in DX12 driver
-
-      if (m_EncoderCapabilities.m_HWSupportStatsQPMapOutput.bits.supported)
+      if( m_EncoderCapabilities.m_HWSupportStatsQPMapOutput.bits.supported && m_uiVideoOutputQPMapBlockSize > 0 )
       {
-         uint32_t block_size = (1 << m_EncoderCapabilities.m_HWSupportStatsQPMapOutput.bits.log2_values_block_size);
+         uint32_t block_size = ( 1 << m_EncoderCapabilities.m_HWSupportStatsQPMapOutput.bits.log2_values_block_size );
          templ.format = (enum pipe_format) m_EncoderCapabilities.m_HWSupportStatsQPMapOutput.bits.pipe_pixel_format;
-         templ.width0 = static_cast<uint32_t>(std::ceil(alignedWidth / static_cast<float>(block_size)));
-         templ.height0 = static_cast<uint32_t>(std::ceil(alignedHeight / static_cast<float>(block_size)));
+         templ.width0 = static_cast<uint32_t>( std::ceil( m_uiOutputWidth / static_cast<float>( block_size ) ) );
+         templ.height0 = static_cast<uint16_t>( std::ceil( m_uiOutputHeight / static_cast<float>( block_size ) ) );
          CHECKNULL_GOTO(
-            pDX12EncodeContext->pPipeResourceQPMapStats = m_pVlScreen->pscreen->resource_create(m_pVlScreen->pscreen, &templ),
+            pDX12EncodeContext->pPipeResourceQPMapStats = m_pVlScreen->pscreen->resource_create( m_pVlScreen->pscreen, &templ ),
             E_OUTOFMEMORY,
-            done);
+            done );
       }
 
-      if (m_EncoderCapabilities.m_HWSupportStatsSATDMapOutput.bits.supported)
+      if( m_EncoderCapabilities.m_HWSupportStatsSATDMapOutput.bits.supported )
       {
-         uint32_t block_size = (1 << m_EncoderCapabilities.m_HWSupportStatsSATDMapOutput.bits.log2_values_block_size);
+         uint32_t block_size = ( 1 << m_EncoderCapabilities.m_HWSupportStatsSATDMapOutput.bits.log2_values_block_size );
          templ.format = (enum pipe_format) m_EncoderCapabilities.m_HWSupportStatsSATDMapOutput.bits.pipe_pixel_format;
-         templ.width0 = static_cast<uint32_t>(std::ceil(alignedWidth / static_cast<float>(block_size)));
-         templ.height0 = static_cast<uint32_t>(std::ceil(alignedHeight / static_cast<float>(block_size)));
+         templ.width0 = static_cast<uint32_t>( std::ceil( m_uiOutputWidth / static_cast<float>( block_size ) ) );
+         templ.height0 = static_cast<uint16_t>( std::ceil( m_uiOutputHeight / static_cast<float>( block_size ) ) );
          CHECKNULL_GOTO(
-            pDX12EncodeContext->pPipeResourceSATDMapStats = m_pVlScreen->pscreen->resource_create(m_pVlScreen->pscreen, &templ),
+            pDX12EncodeContext->pPipeResourceSATDMapStats = m_pVlScreen->pscreen->resource_create( m_pVlScreen->pscreen, &templ ),
             E_OUTOFMEMORY,
-            done);
+            done );
       }
 
-      if (m_EncoderCapabilities.m_HWSupportStatsRCBitAllocationMapOutput.bits.supported)
+      if( m_EncoderCapabilities.m_HWSupportStatsRCBitAllocationMapOutput.bits.supported && m_uiVideoOutputBitsUsedMapBlockSize > 0 )
       {
-         uint32_t block_size = (1 << m_EncoderCapabilities.m_HWSupportStatsRCBitAllocationMapOutput.bits.log2_values_block_size);
+         uint32_t block_size = ( 1 << m_EncoderCapabilities.m_HWSupportStatsRCBitAllocationMapOutput.bits.log2_values_block_size );
          templ.format = (enum pipe_format) m_EncoderCapabilities.m_HWSupportStatsRCBitAllocationMapOutput.bits.pipe_pixel_format;
-         templ.width0 = static_cast<uint32_t>(std::ceil(alignedWidth / static_cast<float>(block_size)));
-         templ.height0 = static_cast<uint32_t>(std::ceil(alignedHeight / static_cast<float>(block_size)));
-         CHECKNULL_GOTO(
-            pDX12EncodeContext->pPipeResourceRCBitAllocMapStats = m_pVlScreen->pscreen->resource_create(m_pVlScreen->pscreen, &templ),
-            E_OUTOFMEMORY,
-            done);
+         templ.width0 = static_cast<uint32_t>( std::ceil( m_uiOutputWidth / static_cast<float>( block_size ) ) );
+         templ.height0 = static_cast<uint16_t>( std::ceil( m_uiOutputHeight / static_cast<float>( block_size ) ) );
+         CHECKNULL_GOTO( pDX12EncodeContext->pPipeResourceRCBitAllocMapStats =
+                            m_pVlScreen->pscreen->resource_create( m_pVlScreen->pscreen, &templ ),
+                         E_OUTOFMEMORY,
+                         done );
+      }
+
+      if( m_EncoderCapabilities.m_PSNRStatsSupport.bits.supports_y_channel && m_bVideoEnableFramePsnrYuv )
+      {
+         struct pipe_resource buffer_templ = {};
+         buffer_templ.width0 = 3 * sizeof( float );   // Up to 3 float components Y, U, V
+         buffer_templ.target = PIPE_BUFFER;
+         // PIPE_USAGE_STAGING allocates resource in L0 (System Memory) heap
+         // and avoid a bunch of roundtrips for uploading/reading back the bitstream headers
+         // The GPU writes once the slice data (if dGPU over the PCIe bus) and all the other
+         // uploads (e.g bitstream headers from CPU) and readbacks to output MFSamples
+         // happen without moving data between L0/L1 pools
+         buffer_templ.usage = PIPE_USAGE_STAGING;
+         buffer_templ.format = PIPE_FORMAT_R8_UINT;
+         buffer_templ.height0 = 1;
+         buffer_templ.depth0 = 1;
+         buffer_templ.array_size = 1;
+         CHECKNULL_GOTO( pDX12EncodeContext->pPipeResourcePSNRStats =
+                            m_pVlScreen->pscreen->resource_create( m_pVlScreen->pscreen, &buffer_templ ),
+                         E_OUTOFMEMORY,
+                         done );
       }
    }
-
-#endif
 
    memset( &pDX12EncodeContext->encoderPicInfo, 0, sizeof( pDX12EncodeContext->encoderPicInfo ) );
    pDX12EncodeContext->encoderPicInfo.base.profile = m_outputPipeProfile;
@@ -359,16 +434,16 @@ CDX12EncHMFT::PrepareForEncode( IMFSample *pSample, LPDX12EncodeContext *ppDX12E
       // Otherwise fallback to full frame encoding fence notification using a single output buffer
       uint32_t num_output_buffers = 1u;
 
-#if VIDEO_CODEC_H264ENC
+#if MFT_CODEC_H264ENC
       num_output_buffers = std::max( 1u, pDX12EncodeContext->encoderPicInfo.h264enc.num_slice_descriptors );
-#elif VIDEO_CODEC_H265ENC
+#elif MFT_CODEC_H265ENC
       num_output_buffers = std::max( 1u, pDX12EncodeContext->encoderPicInfo.h265enc.num_slice_descriptors );
-#elif VIDEO_CODEC_AV1ENC
+#elif MFT_CODEC_AV1ENC
       num_output_buffers =
          std::max( 1u, pDX12EncodeContext->encoderPicInfo.av1enc.tile_rows * pDX12EncodeContext->encoderPicInfo.av1enc.tile_cols );
 #endif
 
-#if (USE_D3D12_PREVIEW_HEADERS && (D3D12_PREVIEW_SDK_VERSION >= 716))
+#if ( USE_D3D12_PREVIEW_HEADERS && ( D3D12_PREVIEW_SDK_VERSION >= 717 ) )
       pDX12EncodeContext->sliceNotificationMode = D3D12_VIDEO_ENCODER_COMPRESSED_BITSTREAM_NOTIFICATION_MODE_FULL_FRAME;
       if( m_EncoderCapabilities.m_HWSupportSlicedFences.bits.supported && ( num_output_buffers > 1 ) )
       {
@@ -385,7 +460,7 @@ CDX12EncHMFT::PrepareForEncode( IMFSample *pSample, LPDX12EncodeContext *ppDX12E
          }
       }
       else
-#endif // (USE_D3D12_PREVIEW_HEADERS && (D3D12_PREVIEW_SDK_VERSION >= 716))
+#endif   // (USE_D3D12_PREVIEW_HEADERS && (D3D12_PREVIEW_SDK_VERSION >= 717))
       {
          // Buffer byte size for full frame bitstream (when num_output_buffers == 1)
          templ.width0 = ( 1024 /*1K*/ * 1024 /*1MB*/ ) * 8 /*8 MB*/;

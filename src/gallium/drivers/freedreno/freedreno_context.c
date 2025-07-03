@@ -307,10 +307,26 @@ fd_context_add_private_bo(struct fd_context *ctx, struct fd_bo *bo)
 }
 
 /**
- * Return a reference to the current batch, caller must unref.
+ * Return a reference to the current batch, caller must unref.  For
+ * PIPE_CONTEXT_COMPUTE_ONLY contexts, this returns a nondraw batch,
+ * in order to avoid queries ending up in separate batches.
  */
 struct fd_batch *
 fd_context_batch(struct fd_context *ctx)
+{
+   if (ctx->flags & PIPE_CONTEXT_COMPUTE_ONLY) {
+      return fd_context_batch_nondraw(ctx);
+   } else {
+      return fd_context_batch_draw(ctx);
+   }
+}
+
+/**
+ * Return a reference to the current batch, caller must unref.  This
+ * returns specificall a draw batch.
+ */
+struct fd_batch *
+fd_context_batch_draw(struct fd_context *ctx)
 {
    struct fd_batch *batch = NULL;
 
@@ -363,6 +379,10 @@ fd_context_destroy(struct pipe_context *pctx)
    unsigned i;
 
    DBG("");
+
+   for (unsigned i = 0; i < ARRAY_SIZE(ctx->f16_blit_fs); i++)
+      if (ctx->f16_blit_fs[i])
+         pctx->delete_fs_state(pctx, ctx->f16_blit_fs[i]);
 
    fd_screen_lock(ctx->screen);
    list_del(&ctx->node);

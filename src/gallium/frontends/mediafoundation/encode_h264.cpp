@@ -20,7 +20,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  */
-#if VIDEO_CODEC_H264ENC
+#if MFT_CODEC_H264ENC
 #include "hmft_entrypoints.h"
 #include "mfbufferhelp.h"
 #include "mfpipeinterop.h"
@@ -304,6 +304,13 @@ CDX12EncHMFT::PrepareForEncodeHelper( LPDX12EncodeContext pDX12EncodeContext, bo
    pPicInfo->dpb_size = static_cast<uint8_t>( cur_frame_desc->dpb_snapshot.size() );
    assert( pPicInfo->dpb_size <= PIPE_H264_MAX_DPB_SIZE );
    memcpy( &pPicInfo->dpb[0], cur_frame_desc->dpb_snapshot.data(), sizeof( cur_frame_desc->dpb_snapshot[0] ) * pPicInfo->dpb_size );
+   for( unsigned i = 0; i < pPicInfo->dpb_size; i++ )
+   {
+      if( pPicInfo->dpb[i].pic_order_cnt == cur_frame_desc->gop_info->picture_order_count )
+      {
+         pPicInfo->dpb_curr_pic = static_cast<uint8_t>( i );
+      }
+   }
 
    if( ( pPicInfo->picture_type == PIPE_H2645_ENC_PICTURE_TYPE_P ) || ( pPicInfo->picture_type == PIPE_H2645_ENC_PICTURE_TYPE_B ) )
    {
@@ -396,98 +403,10 @@ CDX12EncHMFT::PrepareForEncodeHelper( LPDX12EncodeContext pDX12EncodeContext, bo
       }
    }
 
-   //
-   // TODO: Just to test the backend, needs proper plumbing to CodecAPI
-   //
-#if 0   // TODO: Enable me
-   if (//(m_EncoderCapabilities.m_HWSupportMoveRects.bits.max_motion_hints > 0)
-      // (m_EncoderCapabilities.m_HWSupportMoveRects.bits.supports_precision_full_pixel) &&
-      (pPicInfo->dpb_size > 1) /*at least 1 ref frame*/)
-   {
-      pPicInfo->move_info.input_mode = PIPE_ENC_MOVE_INFO_INPUT_MODE_MAP;
-
-      if (pPicInfo->move_info.input_mode == PIPE_ENC_MOVE_INFO_INPUT_MODE_MAP)
-      {
-         pPicInfo->move_info.num_hints = 1u;
-         pPicInfo->move_info.map_mv_precision = PIPE_ENC_MOVE_MAP_MOTION_UNIT_PRECISION_FULL_PIXEL;
-
-         struct pipe_resource templ = {};
-         memset(&templ, 0, sizeof(templ));
-         templ.target = PIPE_TEXTURE_2D;
-         templ.usage = PIPE_USAGE_DEFAULT;
-         templ.depth0 = 1;
-         templ.array_size = 1;
-         templ.format = PIPE_FORMAT_R16G16_SINT;
-         templ.width0 = pDX12EncodeContext->pPipeVideoBuffer->width;
-         templ.height0 = static_cast<uint16_t>(pDX12EncodeContext->pPipeVideoBuffer->height);
-
-         CHECKNULL_GOTO(
-            pPicInfo->move_info.gpu_motion_vectors_map[0] = m_pVlScreen->pscreen->resource_create(m_pVlScreen->pscreen, &templ),
-            E_OUTOFMEMORY,
-            done);
-
-         templ.format = PIPE_FORMAT_R8_UINT;
-         CHECKNULL_GOTO(
-            pPicInfo->move_info.gpu_motion_metadata_map[0] = m_pVlScreen->pscreen->resource_create(m_pVlScreen->pscreen, &templ),
-            E_OUTOFMEMORY,
-            done);
-      }
-      else if (pPicInfo->move_info.input_mode == PIPE_ENC_MOVE_INFO_INPUT_MODE_RECTS)
-      {
-         pPicInfo->move_info.num_rects = 2;
-         pPicInfo->move_info.rects[0].source_point = {
-            //       uint32_t x;
-            0u,
-            //       uint32_t y;
-            0u,
-         };
-         pPicInfo->move_info.rects[0].dest_rect = {
-            //       uint32_t top;
-            20u,
-            //       uint32_t left;
-            20u,
-            //       uint32_t right;
-            36u,
-            //       uint32_t bottom;
-            36u,
-         };
-
-         pPicInfo->move_info.rects[1].source_point = {
-            //       uint32_t x;
-            40u,
-            //       uint32_t y;
-            40u,
-         };
-         pPicInfo->move_info.rects[1].dest_rect = {
-            //       uint32_t top;
-            50u,
-            //       uint32_t left;
-            50u,
-            //       uint32_t right;
-            66u,
-            //       uint32_t bottom;
-            66u,
-         };
-
-         // It's always the latest one in reference_frames_tracker_h264 for now, but better
-         // to set a new uint in from reference_frames_tracker_h264 or iterate on the dpb snap array
-         // and find the index that matches with current pic poc == dpb.poc
-         pPicInfo->move_info.dpb_reference_index = pPicInfo->dpb_size - 1;
-         pPicInfo->move_info.precision = PIPE_ENC_MOVE_INFO_PRECISION_UNIT_FULL_PIXEL;
-         pPicInfo->move_info.overlapping_rects = false;
-      }
-   }
-#endif
-
-
-   //
-   // TODO: Just to test the backend, needs proper plumbing to CodecAPI
-   //
-#if 0   // TODO: Enable me
    pPicInfo->gpu_stats_qp_map = pDX12EncodeContext->pPipeResourceQPMapStats;
    pPicInfo->gpu_stats_satd_map = pDX12EncodeContext->pPipeResourceSATDMapStats;
    pPicInfo->gpu_stats_rc_bitallocation_map = pDX12EncodeContext->pPipeResourceRCBitAllocMapStats;
-#endif
+   pPicInfo->gpu_stats_psnr = pDX12EncodeContext->pPipeResourcePSNRStats;
 
    // Quality vs speed
    // PIPE: The quality level range is [1..m_uiMaxHWSupportedQualityVsSpeedLevel]
@@ -497,6 +416,12 @@ CDX12EncHMFT::PrepareForEncodeHelper( LPDX12EncodeContext pDX12EncodeContext, bo
       1u,
       static_cast<uint32_t>( std::ceil( ( static_cast<float>( 100 - m_uiQualityVsSpeed ) / 100.0f ) *
                                         static_cast<double>( m_EncoderCapabilities.m_uiMaxHWSupportedQualityVsSpeedLevel ) ) ) );
+
+   if( m_pPipeVideoCodec->two_pass.enable && ( m_pPipeVideoCodec->two_pass.pow2_downscale_factor > 0 ) )
+   {
+      pPicInfo->twopass_frame_config.downscaled_source = pDX12EncodeContext->pDownscaledTwoPassPipeVideoBuffer;
+      pPicInfo->twopass_frame_config.skip_1st_pass = false;
+   }
 
    // Slices data
    height_in_blocks = ( ( pDX12EncodeContext->pPipeVideoBuffer->height + 15 ) >> 4 );
@@ -511,18 +436,24 @@ CDX12EncHMFT::PrepareForEncodeHelper( LPDX12EncodeContext pDX12EncodeContext, bo
          {
             pPicInfo->slice_mode = PIPE_VIDEO_SLICE_MODE_BLOCKS;
             uint32_t blocks_per_slice = m_uiSliceControlSize;
-            pPicInfo->num_slice_descriptors = ( height_in_blocks * width_in_blocks ) / blocks_per_slice;
+            pPicInfo->num_slice_descriptors = static_cast<uint32_t>(
+               std::ceil( ( height_in_blocks * width_in_blocks ) / static_cast<double>( blocks_per_slice ) ) );
             uint32_t slice_starting_mb = 0;
             CHECKBOOL_GOTO( pPicInfo->num_slice_descriptors <= m_EncoderCapabilities.m_uiMaxHWSupportedMaxSlices,
                             MF_E_UNEXPECTED,
                             done );
-            for( uint32_t i = 0; i < pPicInfo->num_slice_descriptors; i++ )
+            CHECKBOOL_GOTO( pPicInfo->num_slice_descriptors >= 1, MF_E_UNEXPECTED, done );
+
+            uint32_t total_blocks = height_in_blocks * width_in_blocks;
+            uint32_t i = 0;
+            for( i = 0; i < pPicInfo->num_slice_descriptors - 1; i++ )
             {
                pPicInfo->slices_descriptors[i].macroblock_address = slice_starting_mb;
                pPicInfo->slices_descriptors[i].num_macroblocks = blocks_per_slice;
-               pPicInfo->slices_descriptors[i].slice_type = PIPE_H264_SLICE_TYPE_P;   // %%%TODO%%%
                slice_starting_mb += blocks_per_slice;
             }
+            pPicInfo->slices_descriptors[i].macroblock_address = slice_starting_mb;
+            pPicInfo->slices_descriptors[i].num_macroblocks = total_blocks - slice_starting_mb;
          }
          else if( SLICE_CONTROL_MODE_BITS == m_uiSliceControlMode )
          {
@@ -539,13 +470,18 @@ CDX12EncHMFT::PrepareForEncodeHelper( LPDX12EncodeContext pDX12EncodeContext, bo
             CHECKBOOL_GOTO( pPicInfo->num_slice_descriptors <= m_EncoderCapabilities.m_uiMaxHWSupportedMaxSlices,
                             MF_E_UNEXPECTED,
                             done );
-            for( uint32_t i = 0; i < pPicInfo->num_slice_descriptors; i++ )
+            CHECKBOOL_GOTO( pPicInfo->num_slice_descriptors >= 1, MF_E_UNEXPECTED, done );
+
+            uint32_t total_blocks = height_in_blocks * width_in_blocks;
+            uint32_t i = 0;
+            for( i = 0; i < pPicInfo->num_slice_descriptors - 1; i++ )
             {
                pPicInfo->slices_descriptors[i].macroblock_address = slice_starting_mb;
                pPicInfo->slices_descriptors[i].num_macroblocks = blocks_per_slice;
-               pPicInfo->slices_descriptors[i].slice_type = PIPE_H264_SLICE_TYPE_P;   // %%%TODO%%%
                slice_starting_mb += blocks_per_slice;
             }
+            pPicInfo->slices_descriptors[i].macroblock_address = slice_starting_mb;
+            pPicInfo->slices_descriptors[i].num_macroblocks = total_blocks - slice_starting_mb;
          }
       }
    }
@@ -1136,6 +1072,7 @@ CDX12EncHMFT::CreateGOPTracker( uint32_t textureWidth, uint32_t textureHeight )
    uint32_t MaxHWL1Ref = m_EncoderCapabilities.m_uiMaxHWSupportedL1References;
    MaxHWL0Ref = std::min( 1u, MaxHWL0Ref );   // we only support 1
    MaxHWL1Ref = 0;
+   std::unique_ptr<dpb_buffer_manager> upTwoPassDPBManager;
 
    SAFE_DELETE( m_pGOPTracker );
    // B Frame not supported by HW
@@ -1163,6 +1100,18 @@ CDX12EncHMFT::CreateGOPTracker( uint32_t textureWidth, uint32_t textureHeight )
    assert( MaxHWL0Ref <= m_uiMaxNumRefFrame );
    assert( MaxHWL1Ref <= m_uiMaxNumRefFrame );
 
+   if( m_pPipeVideoCodec->two_pass.enable && ( m_pPipeVideoCodec->two_pass.pow2_downscale_factor > 0 ) )
+   {
+      upTwoPassDPBManager = std::make_unique<dpb_buffer_manager>(
+         m_pPipeVideoCodec,
+         static_cast<unsigned>( std::ceil( textureWidth / ( 1 << m_pPipeVideoCodec->two_pass.pow2_downscale_factor ) ) ),
+         static_cast<unsigned>( std::ceil( textureHeight / ( 1 << m_pPipeVideoCodec->two_pass.pow2_downscale_factor ) ) ),
+         ConvertProfileToFormat( m_pPipeVideoCodec->profile ),
+         m_pPipeVideoCodec->max_references + 1 /*curr pic*/ +
+            ( m_bLowLatency ? 0 :
+                              MFT_INPUT_QUEUE_DEPTH ) /*MFT process input queue depth for delayed in flight recon pic release*/ );
+   }
+
    m_pGOPTracker = new reference_frames_tracker_h264( m_pPipeVideoCodec,
                                                       textureWidth,
                                                       textureHeight,
@@ -1175,7 +1124,8 @@ CDX12EncHMFT::CreateGOPTracker( uint32_t textureWidth, uint32_t textureHeight )
                                                       MaxHWL1Ref,
                                                       m_pPipeVideoCodec->max_references,
                                                       m_uiMaxLongTermReferences,
-                                                      m_gpuFeatureFlags.m_bH264SendUnwrappedPOC );
+                                                      m_gpuFeatureFlags.m_bH264SendUnwrappedPOC,
+                                                      std::move( upTwoPassDPBManager ) );
 
    CHECKNULL_GOTO( m_pGOPTracker, MF_E_INVALIDMEDIATYPE, done );
 

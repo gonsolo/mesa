@@ -97,7 +97,6 @@ spec@ext_framebuffer_object@fbo-blending-formats@GL_LUMINANCE8_ALPHA8,Fail
 spec@ext_framebuffer_object@fbo-blending-formats@GL_LUMINANCE8,Fail
 spec@ext_framebuffer_object@fbo-blending-formats@GL_LUMINANCE_ALPHA,Fail
 spec@ext_framebuffer_object@fbo-blending-formats@GL_LUMINANCE,Fail
-spec@ext_framebuffer_object@fbo-blending-snorm,Fail
 spec@ext_framebuffer_object@getteximage-formats init-by-clear-and-render,Fail
 spec@ext_framebuffer_object@getteximage-formats init-by-rendering,Fail
 spec@ext_transform_feedback2@draw-auto,Fail
@@ -276,32 +275,132 @@ spec@!opengl 3.1@primitive-restart-xfb generated,Fail
 spec@!opengl 3.1@primitive-restart-xfb written,Fail
 spec@!opengl es 3.0@gles-3.0-transform-feedback-uniform-buffer-object,Fail
 
+afbcp-spec@arb_direct_state_access@gettextureimage-formats,Fail
+afbcp-spec@arb_direct_state_access@gettextureimage-formats init-by-rendering,Fail
+afbcp-spec@arb_shader_texture_lod@execution@arb_shader_texture_lod-texgradcube,Fail
+afbcp-spec@arb_shader_texture_lod@execution@arb_shader_texture_lod-texgrad,Fail
+afbcp-spec@arb_shader_texture_lod@execution@tex-miplevel-selection *gradarb 2drect,Fail
+afbcp-spec@arb_shader_texture_lod@execution@tex-miplevel-selection *gradarb 2drectshadow,Fail
+afbcp-spec@arb_shader_texture_lod@execution@tex-miplevel-selection *projgradarb 2drect,Fail
+afbcp-spec@arb_shader_texture_lod@execution@tex-miplevel-selection *projgradarb 2drect_projvec4,Fail
+afbcp-spec@arb_shader_texture_lod@execution@tex-miplevel-selection *projgradarb 2drectshadow,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb),Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA16,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA16F_ARB,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA16I_EXT,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA16UI_EXT,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA32F_ARB,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA32I_EXT,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA32UI_EXT,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA8I_EXT,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA8UI_EXT,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_INTENSITY16F_ARB,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_INTENSITY32F_ARB,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_INTENSITY8,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_INTENSITY8I_EXT,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_LUMINANCE16_ALPHA16,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_LUMINANCE32F_ARB,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_LUMINANCE8,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_LUMINANCE8I_EXT,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_LUMINANCE_ALPHA16F_ARB,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_LUMINANCE_ALPHA16I_EXT,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_LUMINANCE_ALPHA16UI_EXT,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_LUMINANCE_ALPHA32F_ARB,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_LUMINANCE_ALPHA32I_EXT,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_LUMINANCE_ALPHA32UI_EXT,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_LUMINANCE_ALPHA8I_EXT,Fail
+afbcp-spec@arb_texture_buffer_object@formats (fs- arb)@GL_LUMINANCE_ALPHA8UI_EXT,Fail
+afbcp-spec@arb_texture_buffer_object@formats (vs- arb),Fail
+afbcp-spec@arb_texture_buffer_object@formats (vs- arb)@GL_INTENSITY16F_ARB,Fail
+afbcp-spec@arb_texture_buffer_object@formats (vs- arb)@GL_INTENSITY32F_ARB,Fail
+afbcp-spec@arb_texture_buffer_object@formats (vs- arb)@GL_INTENSITY8I_EXT,Fail
+afbcp-spec@arb_texture_buffer_object@texture-buffer-size-clamp,Crash
+afbcp-spec@arb_texture_float@arb_texture_float-texture-float-formats,Fail
+afbcp-spec@arb_texture_float@fbo-alphatest-formats,Crash
+afbcp-spec@arb_texture_float@fbo-blending-formats,Crash
+afbcp-spec@arb_texture_float@fbo-clear-formats,Fail
+afbcp-spec@arb_texture_float@fbo-clear-formats@GL_INTENSITY16F_ARB,Fail
+afbcp-spec@arb_texture_float@fbo-generatemipmap-formats,Fail
+afbcp-spec@arb_texture_float@fbo-generatemipmap-formats@GL_INTENSITY16F_ARB,Fail
+afbcp-spec@arb_texture_float@fbo-generatemipmap-formats@GL_INTENSITY16F_ARB NPOT,Fail
+afbcp-spec@arb_texture_float@multisample-formats 2 gl_arb_texture_float,Fail
+afbcp-spec@arb_texture_float@multisample-formats 4 gl_arb_texture_float,Fail
+afbcp-spec@arb_texture_float@multisample-formats 6 gl_arb_texture_float,Fail
+afbcp-spec@arb_texture_float@multisample-formats 8 gl_arb_texture_float,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_R16I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_R16_SNORM,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_R32I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_R8I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_R8_SNORM,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG16F,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG16I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG16_SNORM,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG32F,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG32I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG8I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG8_SNORM,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB10_A2,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB10_A2UI,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB10,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB16I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB16_SNORM,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB32I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB4,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB8,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB8I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB9_E5,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA16,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA16F,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA16I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA32F,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA32I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA4,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA8,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA8I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_SRGB8_ALPHA8,Fail
+afbcp-spec@arb_texture_rectangle@tex-miplevel-selection gl2:texture() 2drect,Fail
+afbcp-spec@arb_texture_rectangle@tex-miplevel-selection gl2:texture() 2drectshadow,Fail
+afbcp-spec@arb_texture_rectangle@tex-miplevel-selection gl2:textureproj 2drect,Crash
+afbcp-spec@arb_texture_rectangle@tex-miplevel-selection gl2:textureproj 2drect_projvec4,Crash
+afbcp-spec@arb_texture_rectangle@tex-miplevel-selection gl2:textureproj 2drectshadow,Crash
+afbcp-spec@arb_texture_rg@fbo-blending-formats,Fail
+afbcp-spec@arb_texture_rg@fbo-blending-formats@GL_R8,Fail
+afbcp-spec@arb_texture_rg@fbo-blending-formats@GL_RG8,Fail
+afbcp-spec@arb_texture_rg@fbo-blending-formats@GL_RG,Fail
+afbcp-spec@glsl-1.30@execution@tex-miplevel-selection texture() 2drect,Fail
+afbcp-spec@glsl-1.30@execution@tex-miplevel-selection texture() 2drectshadow,Fail
+afbcp-spec@khr_texture_compression_astc@miptree-gles srgb-fp,Fail
+afbcp-spec@khr_texture_compression_astc@miptree-gles srgb-fp@sRGB decode full precision,Fail
+afbcp-spec@khr_texture_compression_astc@miptree-gl srgb-fp,Fail
+afbcp-spec@khr_texture_compression_astc@miptree-gl srgb-fp@sRGB decode full precision,Fail
+afbcp-spec@khr_texture_compression_astc@sliced-3d-miptree-gles srgb-fp,Fail
+afbcp-spec@khr_texture_compression_astc@sliced-3d-miptree-gles srgb-fp@sRGB decode full precision,Fail
+afbcp-spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb-fp,Fail
+afbcp-spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb-fp@sRGB decode full precision,Fail
+
 # uprev Piglit in Mesa
+afbcp-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-refcount-multithread,Crash
+spec@!opengl 1.1@dlist-fdo31590,Crash
+spec@arb_texture_float@multisample-formats 6 gl_arb_texture_float,Crash
+spec@arb_texture_float@multisample-formats 8 gl_arb_texture_float,Crash
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-refcount-multithread,Crash
+
+# Piglit tests require too much precision in alpha-to-coverage higher sample-counts
+spec@ext_framebuffer_multisample@alpha-to-coverage-dual-src-blend 6,Fail
+spec@ext_framebuffer_multisample@alpha-to-coverage-dual-src-blend 8,Fail
+spec@ext_framebuffer_multisample@alpha-to-coverage-no-draw-buffer-zero 6,Fail
+spec@ext_framebuffer_multisample@alpha-to-coverage-no-draw-buffer-zero 8,Fail
+spec@ext_framebuffer_multisample@draw-buffers-alpha-to-coverage 6,Fail
+spec@ext_framebuffer_multisample@draw-buffers-alpha-to-coverage 8,Fail
+spec@ext_framebuffer_multisample@sample-alpha-to-coverage 6 color,Fail
+spec@ext_framebuffer_multisample@sample-alpha-to-coverage 8 color,Fail
+
+# CTS bug: https://gitlab.khronos.org/Tracker/vk-gl-cts/-/issues/5695
+KHR-GLES31.core.texture_storage_multisample.APIDependencies.renderbuffer_storage_multisample_invalid_samples_argument_for_integer_internalformats,Fail
 
 # physical device and device needs more robustness in allocation handling
 dEQP-VK.api.object_management.max_concurrent.device,Fail
 dEQP-VK.api.object_management.max_concurrent.device_group,Fail
-
-# CmdDispatchIndirect not supported yet
-dEQP-VK.compute.pipeline.indirect_dispatch.gen_in_compute.empty_command,Crash
-dEQP-VK.compute.pipeline.indirect_dispatch.gen_in_compute.large_offset,Crash
-dEQP-VK.compute.pipeline.indirect_dispatch.gen_in_compute.large_offset_multiple_invocations,Crash
-dEQP-VK.compute.pipeline.indirect_dispatch.gen_in_compute.multi_dispatch,Crash
-dEQP-VK.compute.pipeline.indirect_dispatch.gen_in_compute.multi_dispatch_reuse_command,Crash
-dEQP-VK.compute.pipeline.indirect_dispatch.gen_in_compute.multiple_groups,Crash
-dEQP-VK.compute.pipeline.indirect_dispatch.gen_in_compute.multiple_groups_multiple_invocations,Crash
-dEQP-VK.compute.pipeline.indirect_dispatch.gen_in_compute.single_invocation,Crash
-dEQP-VK.compute.pipeline.indirect_dispatch.gen_in_compute.small_offset,Crash
-dEQP-VK.compute.pipeline.indirect_dispatch.upload_buffer.empty_command,Crash
-dEQP-VK.compute.pipeline.indirect_dispatch.upload_buffer.large_offset,Crash
-dEQP-VK.compute.pipeline.indirect_dispatch.upload_buffer.large_offset_multiple_invocations,Crash
-dEQP-VK.compute.pipeline.indirect_dispatch.upload_buffer.multi_dispatch,Crash
-dEQP-VK.compute.pipeline.indirect_dispatch.upload_buffer.multi_dispatch_reuse_command,Crash
-dEQP-VK.compute.pipeline.indirect_dispatch.upload_buffer.multiple_groups,Crash
-dEQP-VK.compute.pipeline.indirect_dispatch.upload_buffer.multiple_groups_multiple_invocations,Crash
-dEQP-VK.compute.pipeline.indirect_dispatch.upload_buffer.single_invocation,Crash
-dEQP-VK.compute.pipeline.indirect_dispatch.upload_buffer.small_offset,Crash
 
 # CTS bug, see https://gitlab.khronos.org/Tracker/vk-gl-cts/-/issues/5296
 dEQP-VK.api.device_init.create_device_unsupported_features.protected_memory_features,Fail
@@ -447,6 +546,22 @@ dEQP-VK.draw.dynamic_rendering.primary_cmd_buff.indexed_draw.draw_instanced_inde
 dEQP-VK.draw.dynamic_rendering.primary_cmd_buff.indexed_draw.draw_instanced_indexed_triangle_strip_offset_negative_large_with_bind_offset_with_alloc_offset,Fail
 dEQP-VK.draw.dynamic_rendering.primary_cmd_buff.indexed_draw.draw_instanced_indexed_triangle_strip_with_alloc_offset,Fail
 dEQP-VK.draw.dynamic_rendering.primary_cmd_buff.indexed_draw.draw_instanced_indexed_triangle_strip_with_bind_offset_with_alloc_offset,Fail
+
+# CTS bug, see https://gitlab.khronos.org/Tracker/vk-gl-cts/-/issues/5700
+dEQP-VK.image.load_store.without_any_format.buffer.b8g8r8_srgb,Fail
+dEQP-VK.image.load_store.without_any_format.buffer.b8g8r8_srgb_linear,Fail
+dEQP-VK.image.load_store.without_any_format.buffer.b8g8r8_srgb_minalign,Fail
+dEQP-VK.image.load_store.without_any_format.buffer.b8g8r8_srgb_minalign_linear,Fail
+dEQP-VK.image.load_store.without_any_format.buffer.r8g8b8_srgb,Fail
+dEQP-VK.image.load_store.without_any_format.buffer.r8g8b8_srgb_linear,Fail
+dEQP-VK.image.load_store.without_any_format.buffer.r8g8b8_srgb_minalign,Fail
+dEQP-VK.image.load_store.without_any_format.buffer.r8g8b8_srgb_minalign_linear,Fail
+
+# CTS bug, see https://github.com/KhronosGroup/VK-GL-CTS/issues/523
+dEQP-VK.image.load_store.without_any_format.buffer.b8g8r8_srgb_minalign_uniform,Fail
+dEQP-VK.image.load_store.without_any_format.buffer.b8g8r8_srgb_minalign_uniform_linear,Fail
+dEQP-VK.image.load_store.without_any_format.buffer.r8g8b8_srgb_minalign_uniform,Fail
+dEQP-VK.image.load_store.without_any_format.buffer.r8g8b8_srgb_minalign_uniform_linear,Fail
 
 dEQP-VK.rasterization.rasterization_order_attachment_access.depth.samples_1.multi_draw_barriers,Crash
 dEQP-VK.rasterization.rasterization_order_attachment_access.depth.samples_4.multi_draw_barriers,Crash

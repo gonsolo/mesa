@@ -11,11 +11,32 @@
 #include "radv_meta.h"
 
 #include "util/format_rgb9e5.h"
-#include "vk_common_entrypoints.h"
 #include "vk_format.h"
 #include "vk_shader_module.h"
 
 #include "ac_formats.h"
+
+static bool
+radv_is_clear_rect_full(const struct radv_image_view *iview, const VkClearRect *clear_rect, uint32_t view_mask)
+{
+   const struct radv_image *image = iview->image;
+
+   if (clear_rect->rect.offset.x || clear_rect->rect.offset.y ||
+       clear_rect->rect.extent.width != image->vk.extent.width ||
+       clear_rect->rect.extent.height != image->vk.extent.height)
+      return false;
+
+   if (view_mask && (image->vk.array_layers >= 32 || (1u << image->vk.array_layers) - 1u != view_mask))
+      return false;
+
+   if (!view_mask && clear_rect->baseArrayLayer != 0)
+      return false;
+
+   if (!view_mask && clear_rect->layerCount != image->vk.array_layers)
+      return false;
+
+   return true;
+}
 
 static VkResult
 get_color_pipeline_layout(struct radv_device *device, VkPipelineLayout *layout_out)
@@ -218,8 +239,16 @@ emit_color_clear(struct radv_cmd_buffer *cmd_buffer, const VkClearAttachment *cl
       return;
    }
 
-   vk_common_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16,
-                              &clear_value);
+   const VkPushConstantsInfoKHR pc_info = {
+      .sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO_KHR,
+      .layout = layout,
+      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      .offset = 0,
+      .size = 16,
+      .pValues = &clear_value,
+   };
+
+   radv_CmdPushConstants2(radv_cmd_buffer_to_handle(cmd_buffer), &pc_info);
 
    radv_CmdBindPipeline(cmd_buffer_h, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
@@ -468,9 +497,16 @@ emit_depthstencil_clear(struct radv_cmd_buffer *cmd_buffer, VkClearDepthStencilV
    if (!(aspects & VK_IMAGE_ASPECT_DEPTH_BIT))
       clear_value.depth = 1.0f;
 
-   vk_common_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), layout,
-                              unrestricted ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT, 0, 4,
-                              &clear_value.depth);
+   const VkPushConstantsInfoKHR pc_info = {
+      .sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO_KHR,
+      .layout = layout,
+      .stageFlags = unrestricted ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT,
+      .offset = 0,
+      .size = 4,
+      .pValues = &clear_value.depth,
+   };
+
+   radv_CmdPushConstants2(radv_cmd_buffer_to_handle(cmd_buffer), &pc_info);
 
    uint32_t prev_reference = cmd_buffer->state.dynamic.vk.ds.stencil.front.reference;
    if (aspects & VK_IMAGE_ASPECT_STENCIL_BIT) {
@@ -580,10 +616,18 @@ clear_htile_mask(struct radv_cmd_buffer *cmd_buffer, const struct radv_image *im
       ~htile_mask,
    };
 
-   vk_common_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                              sizeof(constants), constants);
+   const VkPushConstantsInfoKHR pc_info = {
+      .sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO_KHR,
+      .layout = layout,
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .offset = 0,
+      .size = sizeof(constants),
+      .pValues = constants,
+   };
 
-   vk_common_CmdDispatch(radv_cmd_buffer_to_handle(cmd_buffer), block_count, 1, 1);
+   radv_CmdPushConstants2(radv_cmd_buffer_to_handle(cmd_buffer), &pc_info);
+
+   radv_CmdDispatchBase(radv_cmd_buffer_to_handle(cmd_buffer), 0, 0, 0, block_count, 1, 1);
 
    radv_meta_restore(&saved_state, cmd_buffer);
 
@@ -697,16 +741,7 @@ radv_can_fast_clear_depth(struct radv_cmd_buffer *cmd_buffer, const struct radv_
                                         radv_image_queue_family_mask(iview->image, cmd_buffer->qf, cmd_buffer->qf)))
       return false;
 
-   if (clear_rect->rect.offset.x || clear_rect->rect.offset.y ||
-       clear_rect->rect.extent.width != iview->image->vk.extent.width ||
-       clear_rect->rect.extent.height != iview->image->vk.extent.height)
-      return false;
-
-   if (view_mask && (iview->image->vk.array_layers >= 32 || (1u << iview->image->vk.array_layers) - 1u != view_mask))
-      return false;
-   if (!view_mask && clear_rect->baseArrayLayer != 0)
-      return false;
-   if (!view_mask && clear_rect->layerCount != iview->image->vk.array_layers)
+   if (!radv_is_clear_rect_full(iview, clear_rect, view_mask))
       return false;
 
    if (device->vk.enabled_extensions.EXT_depth_range_unrestricted && (aspects & VK_IMAGE_ASPECT_DEPTH_BIT) &&
@@ -1051,8 +1086,16 @@ radv_clear_dcc_comp_to_single(struct radv_cmd_buffer *cmd_buffer, struct radv_im
          color_values[3],
       };
 
-      vk_common_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 24,
-                                 constants);
+      const VkPushConstantsInfoKHR pc_info = {
+         .sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO_KHR,
+         .layout = layout,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+         .offset = 0,
+         .size = sizeof(constants),
+         .pValues = constants,
+      };
+
+      radv_CmdPushConstants2(radv_cmd_buffer_to_handle(cmd_buffer), &pc_info);
 
       radv_unaligned_dispatch(cmd_buffer, dcc_width, dcc_height, layer_count);
 
@@ -1183,14 +1226,14 @@ gfx8_get_fast_clear_parameters(struct radv_device *device, const struct radv_ima
 
       if (desc->channel[i].pure_integer && desc->channel[i].type == UTIL_FORMAT_TYPE_SIGNED) {
          /* Use the maximum value for clamping the clear color. */
-         int max = u_bit_consecutive(0, desc->channel[i].size - 1);
+         int max = BITFIELD_MASK(desc->channel[i].size - 1);
 
          values[i] = clear_value->int32[i] != 0;
          if (clear_value->int32[i] != 0 && MIN2(clear_value->int32[i], max) != max)
             return;
       } else if (desc->channel[i].pure_integer && desc->channel[i].type == UTIL_FORMAT_TYPE_UNSIGNED) {
          /* Use the maximum value for clamping the clear color. */
-         unsigned max = u_bit_consecutive(0, desc->channel[i].size);
+         unsigned max = BITFIELD_MASK(desc->channel[i].size);
 
          values[i] = clear_value->uint32[i] != 0U;
          if (clear_value->uint32[i] != 0U && MIN2(clear_value->uint32[i], max) != max)
@@ -1354,16 +1397,7 @@ radv_can_fast_clear_color(struct radv_cmd_buffer *cmd_buffer, const struct radv_
                                    radv_image_queue_family_mask(iview->image, cmd_buffer->qf, cmd_buffer->qf)))
       return false;
 
-   if (clear_rect->rect.offset.x || clear_rect->rect.offset.y ||
-       clear_rect->rect.extent.width != iview->image->vk.extent.width ||
-       clear_rect->rect.extent.height != iview->image->vk.extent.height)
-      return false;
-
-   if (view_mask && (iview->image->vk.array_layers >= 32 || (1u << iview->image->vk.array_layers) - 1u != view_mask))
-      return false;
-   if (!view_mask && clear_rect->baseArrayLayer != 0)
-      return false;
-   if (!view_mask && clear_rect->layerCount != iview->image->vk.array_layers)
+   if (!radv_is_clear_rect_full(iview, clear_rect, view_mask))
       return false;
 
    /* DCC */

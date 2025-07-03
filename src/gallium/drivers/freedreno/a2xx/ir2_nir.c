@@ -50,7 +50,7 @@ ir2_get_compiler_options(void)
       NIR_PASS(this_progress, nir, pass, ##__VA_ARGS__);                       \
       this_progress;                                                           \
    })
-#define OPT_V(nir, pass, ...) NIR_PASS_V(nir, pass, ##__VA_ARGS__)
+#define OPT_V(nir, pass, ...) NIR_PASS(_, nir, pass, ##__VA_ARGS__)
 
 static void
 ir2_optimize_loop(nir_shader *s)
@@ -671,7 +671,7 @@ emit_intrinsic(struct ir2_context *ctx, nir_intrinsic_instr *intr)
          ir2_src(ctx->f->inputs_count, IR2_SWIZZLE_ZW, IR2_SRC_INPUT);
       break;
    default:
-      compile_error(ctx, "unimplemented intr %d\n", intr->intrinsic);
+      compile_error(ctx, "unimplemented intr %s\n", nir_intrinsic_infos[intr->intrinsic].name);
       break;
    }
 }

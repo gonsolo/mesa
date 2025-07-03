@@ -27,6 +27,7 @@
 #include "util/ralloc.h"
 #include "util/u_debug.h"
 #include "util/u_screen.h"
+#include "util/xmlconfig.h"
 #include "renderonly/renderonly.h"
 
 #include "drm-uapi/drm_fourcc.h"
@@ -245,9 +246,14 @@ lima_screen_is_format_supported(struct pipe_screen *pscreen,
       if (!lima_format_pixel_supported(format))
          return false;
 
-      /* multisample unsupported with half float target */
-      if (sample_count > 1 && util_format_is_float(format))
-         return false;
+      if (util_format_is_float(format)) {
+         if (!lima_screen(pscreen)->allow_fp16_rts)
+            return false;
+
+         /* multisample unsupported with half float target */
+         if (sample_count > 1)
+            return false;
+      }
    }
 
    if (usage & PIPE_BIND_DEPTH_STENCIL) {
@@ -584,6 +590,12 @@ lima_screen_create(int fd, const struct pipe_screen_config *config,
    /* Set lower limit on PP PLB cache size */
    lima_plb_pp_stream_cache_size = MAX2(128 * 1024 * lima_ctx_num_plb,
                                         lima_plb_pp_stream_cache_size);
+
+   driParseConfigFiles(config->options, config->options_info, 0,
+                       "lima", NULL, NULL, NULL, 0, NULL, 0);
+
+   screen->allow_fp16_rts = driQueryOptionb(config->options,
+                                            "lima_allow_fp16_rts");
 
    if (!lima_screen_query_info(screen))
       goto err_out0;

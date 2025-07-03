@@ -187,7 +187,7 @@ static bool gfx8_get_dcc_clear_parameters(struct si_screen *sscreen, enum pipe_f
 
       if (desc->channel[i].pure_integer && desc->channel[i].type == UTIL_FORMAT_TYPE_SIGNED) {
          /* Use the maximum value for clamping the clear color. */
-         int max = u_bit_consecutive(0, desc->channel[i].size - 1);
+         int max = BITFIELD_MASK(desc->channel[i].size - 1);
 
          values[i] = color->i[i] != 0;
          if (color->i[i] != 0 && MIN2(color->i[i], max) != max)
@@ -195,7 +195,7 @@ static bool gfx8_get_dcc_clear_parameters(struct si_screen *sscreen, enum pipe_f
       } else if (desc->channel[i].pure_integer &&
                  desc->channel[i].type == UTIL_FORMAT_TYPE_UNSIGNED) {
          /* Use the maximum value for clamping the clear color. */
-         unsigned max = u_bit_consecutive(0, desc->channel[i].size);
+         unsigned max = BITFIELD_MASK(desc->channel[i].size);
 
          values[i] = color->ui[i] != 0U;
          if (color->ui[i] != 0U && MIN2(color->ui[i], max) != max)
@@ -903,8 +903,15 @@ static void si_fast_clear(struct si_context *sctx, unsigned *buffers,
       bool update_db_stencil_clear = false;
       bool fb_too_small = num_pixels * zs_num_layers <= 512 * 512;
 
-      /* Transition from TC-incompatible to TC-compatible HTILE if requested. */
-      if (zstex->enable_tc_compatible_htile_next_clear) {
+      /* Transition from TC-incompatible to TC-compatible HTILE if requested.
+       * (the transition applies to the whole buffer, so make sure we're clearing
+       * everything).
+       */
+      bool whole_clear =
+         ((*buffers & PIPE_CLEAR_DEPTHSTENCIL) == PIPE_CLEAR_DEPTHSTENCIL) ||
+         (*buffers & PIPE_CLEAR_DEPTH && (!zstex->surface.has_stencil ||
+                                          zstex->htile_stencil_disabled));
+      if (zstex->enable_tc_compatible_htile_next_clear && whole_clear) {
          assert(zstex->buffer.b.b.last_level == 0);
          assert(!zstex->tc_compatible_htile);
 

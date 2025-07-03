@@ -573,18 +573,18 @@ Shader::scan_uniforms(nir_variable *uniform)
 
       r600_shader_atomic atom = {0};
 
-      atom.buffer_id = uniform->data.binding;
+      atom.resource_id = uniform->data.binding;
       atom.hw_idx = m_atomic_base + m_next_hwatomic_loc;
 
       atom.start = uniform->data.offset >> 2;
-      atom.end = atom.start + natomics - 1;
+      atom.count = natomics;
 
       if (m_atomic_base_map.find(uniform->data.binding) == m_atomic_base_map.end())
          m_atomic_base_map[uniform->data.binding] = m_next_hwatomic_loc;
 
       m_next_hwatomic_loc += natomics;
 
-      m_atomic_file_count += atom.end - atom.start + 1;
+      m_atomic_file_count += atom.count;
 
       sfn_log << SfnLog::io << "HW_ATOMIC file count: " << m_atomic_file_count << "\n";
 
@@ -909,6 +909,17 @@ Shader::process_intrinsic(nir_intrinsic_instr *intr)
       return emit_get_lds_info_uint(intr,
                                     offsetof(struct r600_lds_constant_buffer,
                                              vertexid_base));
+   case nir_intrinsic_load_base_vertex:
+      return emit_get_lds_info_uint(intr,
+                                    offsetof(struct r600_lds_constant_buffer,
+                                             vertex_base));
+   case nir_intrinsic_load_base_instance:
+      return emit_get_lds_info_uint(intr,
+                                    offsetof(struct r600_lds_constant_buffer,
+                                             instance_base));
+   case nir_intrinsic_load_draw_id:
+      return emit_get_lds_info_uint(intr,
+                                    offsetof(struct r600_lds_constant_buffer, draw_id));
    case nir_intrinsic_barrier:
       return emit_barrier(intr);
    case nir_intrinsic_shared_atomic:
