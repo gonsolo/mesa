@@ -40,7 +40,7 @@ optimize_nir(nir_shader *nir, const struct bak_compiler *bak)
       OPT(nir, nir_opt_dead_write_vars);
       OPT(nir, nir_opt_combine_stores, nir_var_all);
 
-      OPT(nir, nir_lower_phis_to_scalar, false);
+      //OPT(nir, nir_lower_phis_to_scalar, false);
       OPT(nir, nir_lower_frexp);
       OPT(nir, nir_copy_prop);
       OPT(nir, nir_opt_dce);
