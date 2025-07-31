@@ -164,9 +164,11 @@ zink_debug_mem_print_stats(struct zink_screen *screen)
    simple_mtx_unlock(&screen->debug_mem_lock);
 }
 
-static void
-image_hic_transition(struct zink_screen *screen, struct zink_resource *res, VkImageLayout layout)
+void
+zink_resource_image_hic_transition(struct zink_screen *screen, struct zink_resource *res, VkImageLayout layout)
 {
+   if (!(res->obj->vkusage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT))
+      return;
    VkHostImageLayoutTransitionInfoEXT t = {
       VK_STRUCTURE_TYPE_HOST_IMAGE_LAYOUT_TRANSITION_INFO_EXT,
       NULL,
@@ -1379,6 +1381,11 @@ create_image(struct zink_screen *screen, struct zink_resource_object *obj,
       emici.pNext = ici.pNext;
       emici.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
       ici.pNext = &emici;
+   } else {
+      /* If the frontend passed modifiers it should have also passed
+       * PIPE_BIND_SHARED
+       */
+      assert(ici.tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT);
    }
 
    if (linear)
@@ -1709,9 +1716,8 @@ resource_create(struct pipe_screen *pscreen,
       res->base.buffer_id_unique = util_idalloc_mt_alloc(&screen->buffer_ids);
    } else {
       /* immediately switch to GENERAL layout if possible to avoid extra sync */
-      if (res->obj->image && res->queue != VK_QUEUE_FAMILY_FOREIGN_EXT && (res->obj->vkusage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT) &&
-          screen->driver_workarounds.general_layout)
-         image_hic_transition(screen, res, VK_IMAGE_LAYOUT_GENERAL);
+      if (res->obj->image && res->queue != VK_QUEUE_FAMILY_FOREIGN_EXT && screen->driver_workarounds.general_layout)
+         zink_resource_image_hic_transition(screen, res, VK_IMAGE_LAYOUT_GENERAL);
    }
    if (res->obj->exportable)
       res->base.b.bind |= ZINK_BIND_DMABUF;
@@ -1771,14 +1777,19 @@ add_resource_bind(struct zink_context *ctx, struct zink_resource *res, unsigned 
    res->layout = VK_IMAGE_LAYOUT_UNDEFINED;
    res->obj = new_obj;
    res->queue = VK_QUEUE_FAMILY_IGNORED;
-   for (unsigned i = 0; i <= res->base.b.last_level; i++) {
-      struct pipe_box box;
-      u_box_3d(0, 0, 0,
-               u_minify(res->base.b.width0, i),
-               u_minify(res->base.b.height0, i), res->base.b.array_size, &box);
-      box.depth = util_num_layers(&res->base.b, i);
-      ctx->base.resource_copy_region(&ctx->base, &res->base.b, i, 0, 0, 0, &staging.base.b, i, &box);
+   bool valid_contents = (res->obj->is_buffer && (res->valid_buffer_range.end || res->base.valid_buffer_range.end)) ||
+                         (!res->obj->is_buffer && res->valid);
+   if (valid_contents) {
+      for (unsigned i = 0; i <= res->base.b.last_level; i++) {
+         struct pipe_box box;
+         u_box_3d(0, 0, 0,
+                  u_minify(res->base.b.width0, i),
+                  u_minify(res->base.b.height0, i), res->base.b.array_size, &box);
+         box.depth = util_num_layers(&res->base.b, i);
+         ctx->base.resource_copy_region(&ctx->base, &res->base.b, i, 0, 0, 0, &staging.base.b, i, &box);
+      }
    }
+   res->rebind_count++;
    if (old_obj->exportable) {
       simple_mtx_lock(&ctx->bs->exportable_lock);
       _mesa_set_remove_key(&ctx->bs->dmabuf_exports, &staging);
@@ -2185,7 +2196,8 @@ invalidate_buffer(struct zink_context *ctx, struct zink_resource *res)
    res->queue = VK_QUEUE_FAMILY_IGNORED;
    if (needs_bda)
       zink_resource_get_address(screen, res);
-   zink_resource_rebind(ctx, res);
+   if (!zink_resource_rebind(ctx, res))
+      ctx->buffer_rebind_counter = p_atomic_inc_return(&screen->buffer_rebind_counter);
    return true;
 }
 
@@ -2703,7 +2715,7 @@ zink_image_subdata(struct pipe_context *pctx,
 
       /* only pre-transition uninit images to avoid thrashing */
       if (change_layout)
-         image_hic_transition(screen, res, VK_IMAGE_LAYOUT_GENERAL);
+         zink_resource_image_hic_transition(screen, res, VK_IMAGE_LAYOUT_GENERAL);
       VkMemoryToImageCopyEXT region = {
          VK_STRUCTURE_TYPE_MEMORY_TO_IMAGE_COPY_EXT,
          NULL,
@@ -2729,7 +2741,7 @@ zink_image_subdata(struct pipe_context *pctx,
           box->width == pres->width0 && box->height == pres->height0 &&
           ((is_arrayed && box->depth == pres->array_size) || (!is_arrayed && box->depth == pres->depth0))) {
          /* assume full copy single-mip images use shader read access */
-         image_hic_transition(screen, res, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+         zink_resource_image_hic_transition(screen, res, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
          /* assume multi-mip where further subdata calls may happen */
       }
       /* make sure image is marked as having data */

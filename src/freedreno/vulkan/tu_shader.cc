@@ -319,7 +319,7 @@ lower_ssbo_ubo_intrinsic(struct tu_device *dev,
       return true;
    }
 
-   nir_def *base_idx = nir_channel(b, scalar_idx.def, scalar_idx.comp);
+   nir_def *base_idx = nir_mov_scalar(b, scalar_idx);
    for (unsigned i = 0; i < dev->physical_device->info->a6xx.max_sets; i++) {
       /* if (base_idx == i) { ... */
       nir_if *nif = nir_push_if(b, nir_ieq_imm(b, base_idx, i));
@@ -1012,6 +1012,7 @@ tu_lower_io(nir_shader *shader, struct tu_device *dev,
 struct lower_fdm_options {
    unsigned num_views;
    bool adjust_fragcoord;
+   bool use_layer;
 };
 
 static bool
@@ -1039,14 +1040,16 @@ lower_fdm_instr(struct nir_builder *b, nir_instr *instr, void *data)
 
    nir_def *view;
    if (options->num_views > 1) {
+      gl_varying_slot slot = options->use_layer ?
+         VARYING_SLOT_LAYER : VARYING_SLOT_VIEW_INDEX;
       nir_variable *view_var =
          nir_find_variable_with_location(b->shader, nir_var_shader_in,
-                                         VARYING_SLOT_VIEW_INDEX);
+                                         slot);
 
       if (view_var == NULL) {
          view_var = nir_variable_create(b->shader, nir_var_shader_in,
                                         glsl_int_type(), NULL);
-         view_var->data.location = VARYING_SLOT_VIEW_INDEX;
+         view_var->data.location = slot;
          view_var->data.interpolation = INTERP_MODE_FLAT;
          view_var->data.driver_location = b->shader->num_inputs++;
       }
@@ -1137,6 +1140,81 @@ tu_nir_lower_ssbo_descriptor(nir_shader *shader,
    return nir_shader_intrinsics_pass(shader, lower_ssbo_descriptor_instr,
                                      nir_metadata_control_flow,
                                      (void *)dev);
+}
+
+struct lower_fdm_state {
+   nir_variable *layer_var;
+   nir_variable *viewport_var;
+};
+
+static bool
+lower_layered_fdm_instr(nir_builder *b, nir_intrinsic_instr *intrin,
+                        void *cb)
+{
+   struct lower_fdm_state *state = (struct lower_fdm_state *)cb;
+   if (intrin->intrinsic != nir_intrinsic_store_deref)
+      return false;
+
+   nir_deref_instr *deref = nir_src_as_deref(intrin->src[0]);
+   if (!nir_deref_mode_is(deref, nir_var_shader_out))
+       return false;
+
+   nir_variable *var = nir_deref_instr_get_variable(deref);
+   if (var != state->layer_var)
+      return false;
+
+   /* Ok, we've finally got a store to gl_Layer. Mirror a store to
+    * gl_ViewportIndex.
+    */
+   if (!state->viewport_var) {
+      state->viewport_var =
+         nir_create_variable_with_location(b->shader,
+                                           nir_var_shader_out,
+                                           VARYING_SLOT_VIEWPORT,
+                                           glsl_int_type());
+      state->viewport_var->data.interpolation = INTERP_MODE_FLAT;
+   }
+
+   b->cursor = nir_after_instr(&intrin->instr);
+   nir_store_var(b, state->viewport_var, intrin->src[1].ssa, 0x1);
+   return true;
+}
+
+static bool
+tu_nir_lower_layered_fdm(nir_shader *shader,
+                         bool *per_layer_viewport)
+{
+   nir_function_impl *entrypoint = nir_shader_get_entrypoint(shader);
+
+   /* If viewport is alreay written, there's nothing to do and we will fall
+    * back.
+    */
+   if (shader->info.outputs_written & VARYING_BIT_VIEWPORT) {
+      *per_layer_viewport = false;
+      return nir_no_progress(entrypoint);
+   }
+
+   *per_layer_viewport = true;
+
+   struct lower_fdm_state state = {};
+
+   state.layer_var =
+      nir_find_variable_with_location(shader, nir_var_shader_out,
+                                      VARYING_SLOT_LAYER);
+
+   /* If layer is never written, it will get the default value of 0 and we can
+    * also leave the viewport with the default value of 0.
+    */
+   if (!state.layer_var)
+      return nir_no_progress(entrypoint);
+
+   state.viewport_var =
+      nir_find_variable_with_location(shader, nir_var_shader_out,
+                                      VARYING_SLOT_VIEWPORT);
+
+
+   return nir_shader_intrinsics_pass(shader, lower_layered_fdm_instr,
+                                     nir_metadata_control_flow, &state);
 }
 
 static void
@@ -1442,32 +1520,6 @@ tu6_emit_xs(struct tu_cs *cs,
       tu_cs_emit_qw(cs,
                     iova |
                     (uint64_t)A6XX_UBO_1_SIZE(size_vec4s) << 32);
-
-      /* Upload the constant data to the const file if needed. */
-      const struct ir3_ubo_analysis_state *ubo_state = &const_state->ubo_state;
-
-      if (!cs->device->physical_device->info->a7xx.load_shader_consts_via_preamble) {
-         for (int i = 0; i < ubo_state->num_enabled; i++) {
-            if (ubo_state->range[i].ubo.block != offset ||
-                ubo_state->range[i].ubo.bindless) {
-               continue;
-            }
-
-            uint32_t start = ubo_state->range[i].start;
-            uint32_t end = ubo_state->range[i].end;
-            uint32_t size = MIN2(end - start,
-                                 (16 * xs->constlen) - ubo_state->range[i].offset);
-
-            tu_cs_emit_pkt7(cs, tu6_stage2opcode(stage), 3);
-            tu_cs_emit(cs,
-                     CP_LOAD_STATE6_0_DST_OFF(ubo_state->range[i].offset / 16) |
-                     CP_LOAD_STATE6_0_STATE_TYPE(ST6_CONSTANTS) |
-                     CP_LOAD_STATE6_0_STATE_SRC(SS6_INDIRECT) |
-                     CP_LOAD_STATE6_0_STATE_BLOCK(tu6_stage2shadersb(stage)) |
-                     CP_LOAD_STATE6_0_NUM_UNIT(size / 16));
-            tu_cs_emit_qw(cs, iova + start);
-         }
-      }
    }
 
    /* emit statically-known FS driver param */
@@ -1679,7 +1731,7 @@ tu6_emit_fs_inputs(struct tu_cs *cs, const struct ir3_shader_variant *fs)
    uint32_t ij_regid[IJ_COUNT];
    uint32_t smask_in_regid, shading_rate_regid;
 
-   bool sample_shading = fs->per_samp | fs->key.sample_shading;
+   bool sample_shading = fs->sample_shading;
    bool enable_varyings = fs->total_in > 0;
 
    samp_id_regid   = ir3_find_sysval_regid(fs, SYSTEM_VALUE_SAMPLE_ID);
@@ -2265,9 +2317,13 @@ tu_upload_shader(struct tu_device *dev,
    const struct ir3_shader_variant *v = shader->variant;
    const struct ir3_shader_variant *binning = v ? v->binning : NULL;
    const struct ir3_shader_variant *safe_const = shader->safe_const_variant;
+   const struct ir3_shader_variant *safe_const_binning =
+      safe_const && v->type == MESA_SHADER_VERTEX ? safe_const->binning : NULL;
 
-   if (v->type == MESA_SHADER_VERTEX && v->stream_output.num_outputs != 0)
+   if (v->type == MESA_SHADER_VERTEX && v->stream_output.num_outputs != 0) {
       binning = v;
+      safe_const_binning = safe_const;
+   }
 
    uint32_t size = 0;
    if (v->type == MESA_SHADER_VERTEX)
@@ -2276,16 +2332,11 @@ tu_upload_shader(struct tu_device *dev,
    const unsigned xs_size = 128;
    const unsigned vpc_size = 32 + (v->stream_output.num_outputs != 0 ? 256 : 0);
 
-   size += xs_size + tu_xs_get_additional_cs_size_dwords(v);
-   size += v->info.size / 4;
-   if (binning) {
-      size += xs_size + tu_xs_get_additional_cs_size_dwords(binning);
-      size += binning->info.size / 4;
-   }
-
-   if (safe_const) {
-      size += xs_size + tu_xs_get_additional_cs_size_dwords(safe_const);
-      size += safe_const->info.size / 4;
+   for (auto& variant : {v, binning, safe_const, safe_const_binning}) {
+      if (variant) {
+         size += xs_size + tu_xs_get_additional_cs_size_dwords(variant);
+         size += variant->info.size / 4;
+      }
    }
 
    /* We emit an empty VPC including streamout state in the binning draw state */
@@ -2338,6 +2389,7 @@ tu_upload_shader(struct tu_device *dev,
    uint64_t iova = tu_upload_variant(&shader->cs, v);
    uint64_t binning_iova = tu_upload_variant(&shader->cs, binning);
    uint64_t safe_const_iova = tu_upload_variant(&shader->cs, safe_const);
+   uint64_t safe_const_binning_iova = tu_upload_variant(&shader->cs, safe_const_binning);
 
    struct tu_cs sub_cs;
    tu_cs_begin_sub_stream(&shader->cs, xs_size +
@@ -2365,6 +2417,17 @@ tu_upload_shader(struct tu_device *dev,
       /* emit an empty VPC */
       TU_CALLX(dev, tu6_emit_vpc)(&sub_cs, binning, NULL, NULL, NULL, NULL);
       shader->binning_state = tu_cs_end_draw_state(&shader->cs, &sub_cs);
+   }
+
+   if (safe_const_binning) {
+      tu_cs_begin_sub_stream(&shader->cs, xs_size + vpc_size +
+         tu_xs_get_additional_cs_size_dwords(safe_const_binning), &sub_cs);
+      TU_CALLX(dev, tu6_emit_variant)(
+         &sub_cs, v->type, safe_const_binning, &pvtmem_config, shader->view_mask,
+         safe_const_binning_iova);
+      /* emit an empty VPC */
+      TU_CALLX(dev, tu6_emit_vpc)(&sub_cs, safe_const_binning, NULL, NULL, NULL, NULL);
+      shader->safe_const_binning_state = tu_cs_end_draw_state(&shader->cs, &sub_cs);
    }
 
    /* We don't support binning variants for GS, so the same draw state is used
@@ -2451,6 +2514,7 @@ tu_shader_serialize(struct vk_pipeline_cache_object *object,
                     sizeof(shader->dynamic_descriptor_sizes));
    blob_write_uint32(blob, shader->view_mask);
    blob_write_uint8(blob, shader->active_desc_sets);
+   blob_write_uint8(blob, shader->per_layer_viewport);
 
    ir3_store_variant(blob, shader->variant);
 
@@ -2496,6 +2560,7 @@ tu_shader_deserialize(struct vk_pipeline_cache *cache,
                    sizeof(shader->dynamic_descriptor_sizes));
    shader->view_mask = blob_read_uint32(blob);
    shader->active_desc_sets = blob_read_uint8(blob);
+   shader->per_layer_viewport = blob_read_uint8(blob);
 
    shader->variant = ir3_retrieve_variant(blob, dev->compiler, NULL);
 
@@ -2568,10 +2633,25 @@ tu_shader_create(struct tu_device *dev,
     * lower input attachment coordinates except if unscaled.
     */
    const struct lower_fdm_options fdm_options = {
-      .num_views = MAX2(util_last_bit(key->multiview_mask), 1),
+      .num_views = MAX2(key->multiview_mask ?
+                        util_last_bit(key->multiview_mask) :
+                        key->max_fdm_layers, 1),
       .adjust_fragcoord = key->fragment_density_map,
+      .use_layer = !key->multiview_mask,
    };
    NIR_PASS(_, nir, tu_nir_lower_fdm, &fdm_options);
+
+   if (nir->info.stage != MESA_SHADER_FRAGMENT &&
+       nir->info.stage != MESA_SHADER_COMPUTE &&
+       !key->multiview_mask &&
+       key->fdm_per_layer) {
+      NIR_PASS(_, nir, tu_nir_lower_layered_fdm, &shader->per_layer_viewport);
+   }
+
+   if (nir->info.stage == MESA_SHADER_FRAGMENT &&
+       key->fdm_per_layer) {
+      shader->fs.max_fdm_layers = key->max_fdm_layers;
+   }
 
    /* Note that nir_opt_barrier_modes here breaks tests such as
     * dEQP-VK.memory_model.message_passing.ext.u32.coherent.fence_atomic.atomicwrite.device.payload_local.image.guard_local.buffer.vert
@@ -2591,6 +2671,7 @@ tu_shader_create(struct tu_device *dev,
    }
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT && key->force_sample_interp) {
+      nir->info.fs.uses_sample_shading = true;
       nir_foreach_shader_in_variable(var, nir) {
          if (!var->data.centroid)
             var->data.sample = true;
@@ -2749,7 +2830,7 @@ tu_shader_create(struct tu_device *dev,
    }
    case MESA_SHADER_FRAGMENT: {
       const struct ir3_shader_variant *fs = shader->variant;
-      shader->fs.per_samp = fs->per_samp || ir3_key->sample_shading;
+      shader->fs.sample_shading = fs->sample_shading;
       shader->fs.has_fdm = key->fragment_density_map;
       if (fs->has_kill)
          shader->fs.lrz.status |= TU_LRZ_FORCE_DISABLE_WRITE;
@@ -2940,8 +3021,6 @@ tu_compile_shaders(struct tu_device *device,
    if (nir[MESA_SHADER_GEOMETRY])
       ir3_key.has_gs = true;
 
-   ir3_key.sample_shading = keys[MESA_SHADER_FRAGMENT].force_sample_interp;
-
    if (nir_initial_disasm) {
       for (gl_shader_stage stage = MESA_SHADER_VERTEX;
            stage < MESA_SHADER_STAGES;
@@ -3002,7 +3081,7 @@ tu_compile_shaders(struct tu_device *device,
       if (stage > MESA_SHADER_TESS_CTRL) {
          if (stage == MESA_SHADER_FRAGMENT) {
             ir3_key.tcs_store_primid = ir3_key.tcs_store_primid ||
-               (nir[stage]->info.inputs_read & (1ull << VARYING_SLOT_PRIMITIVE_ID));
+               (nir[stage]->info.inputs_read & VARYING_BIT_PRIMITIVE_ID);
          } else {
             ir3_key.tcs_store_primid = ir3_key.tcs_store_primid ||
                BITSET_TEST(nir[stage]->info.system_values_read, SYSTEM_VALUE_PRIMITIVE_ID);

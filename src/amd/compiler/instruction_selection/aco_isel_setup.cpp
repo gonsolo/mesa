@@ -5,6 +5,7 @@
  */
 
 #include "aco_instruction_selection.h"
+#include "aco_interface.h"
 
 #include "nir_builder.h"
 #include "nir_control_flow.h"
@@ -168,9 +169,7 @@ apply_nuw_to_ssa(isel_context* ctx, nir_def* ssa)
    nir_scalar src1 = nir_scalar_chase_alu_src(scalar, 1);
 
    if (nir_scalar_is_const(src0)) {
-      nir_scalar tmp = src0;
-      src0 = src1;
-      src1 = tmp;
+      std::swap(src0, src1);
    }
 
    uint32_t src1_ub = nir_unsigned_upper_bound(ctx->shader, ctx->range_ht, src1, &ctx->ub_config);
@@ -249,7 +248,7 @@ void
 setup_nir(isel_context* ctx, nir_shader* nir)
 {
    nir_convert_to_lcssa(nir, true, false);
-   if (nir_lower_phis_to_scalar(nir, true)) {
+   if (nir_lower_phis_to_scalar(nir, ac_nir_lower_phis_to_scalar_cb, NULL)) {
       nir_copy_prop(nir);
       nir_opt_dce(nir);
    }
@@ -398,9 +397,9 @@ init_context(isel_context* ctx, nir_shader* shader)
                nir_alu_instr* alu_instr = nir_instr_as_alu(instr);
                RegType type = RegType::sgpr;
 
-               /* packed 16bit instructions have to be VGPR */
+               /* Packed 16-bit instructions have to be VGPR. */
                if (alu_instr->def.num_components == 2 &&
-                   nir_op_infos[alu_instr->op].output_size == 0)
+                   aco_nir_op_supports_packed_math_16bit(alu_instr))
                   type = RegType::vgpr;
 
                switch (alu_instr->op) {
@@ -446,6 +445,7 @@ init_context(isel_context* ctx, nir_shader* shader)
                case nir_op_udot_2x16_uadd_sat:
                case nir_op_sdot_2x16_iadd_sat:
                case nir_op_bfdot2_bfadd:
+               case nir_op_byte_perm_amd:
                case nir_op_alignbyte_amd: type = RegType::vgpr; break;
                case nir_op_fmul:
                case nir_op_ffma:
@@ -540,7 +540,6 @@ init_context(isel_context* ctx, nir_shader* shader)
                case nir_intrinsic_ballot_relaxed:
                case nir_intrinsic_bindless_image_samples:
                case nir_intrinsic_load_scalar_arg_amd:
-               case nir_intrinsic_load_lds_ngg_gs_out_vertex_base_amd:
                case nir_intrinsic_load_smem_amd:
                case nir_intrinsic_unit_test_uniform_amd: type = RegType::sgpr; break;
                case nir_intrinsic_load_input:

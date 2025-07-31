@@ -46,7 +46,13 @@ struct vk_shader;
 
 /** Root descriptor table. */
 struct hk_root_descriptor_table {
+   /* Address of this descriptor itself. Must be first for reflection. */
    uint64_t root_desc_addr;
+
+   /* Descriptor set base addresses. Must follow root_desc_addr to match our
+    * push layout.
+    */
+   uint64_t sets[HK_MAX_SETS];
 
    union {
       struct {
@@ -56,6 +62,7 @@ struct hk_root_descriptor_table {
          /* Vertex input state */
          uint64_t attrib_base[AGX_MAX_VBUFS];
          uint32_t attrib_clamps[AGX_MAX_VBUFS];
+         uint32_t attrib_strides[AGX_MAX_VBUFS];
 
          /* Pointer to the VS->TCS, VS->GS, or TES->GS buffer. */
          uint64_t vertex_output_buffer;
@@ -109,9 +116,6 @@ struct hk_root_descriptor_table {
 
    /* Client push constants */
    uint8_t push[HK_MAX_PUSH_SIZE];
-
-   /* Descriptor set base addresses */
-   uint64_t sets[HK_MAX_SETS];
 
    /* Dynamic buffer bindings */
    struct hk_buffer_address dynamic_buffers[HK_MAX_DYNAMIC_BUFFERS];
@@ -357,6 +361,12 @@ struct hk_cs {
    /* Whether there is more than just the root chunk */
    bool stream_linked;
 
+   /* Whether the sampler heap is required. Although we always must maintain the
+    * heap for correctness, it's often not necessary since we can push lots of
+    * samplers (especially for GL/DX11-era engines).
+    */
+   bool uses_sampler_heap;
+
    /* Scratch requirements */
    struct {
       union {
@@ -425,6 +435,7 @@ hk_cs_merge_cdm(struct hk_cs *a, const struct hk_cs *b)
    a->current = b->current;
    a->stream_linked = true;
 
+   a->uses_sampler_heap |= b->uses_sampler_heap;
    a->scratch.cs.main |= b->scratch.cs.main;
    a->scratch.cs.preamble |= b->scratch.cs.preamble;
 
@@ -855,3 +866,8 @@ void hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
 
 void hk_queue_write(struct hk_cmd_buffer *cmd, uint64_t address, uint32_t value,
                     bool after_gfx);
+
+void agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
+                         uint64_t attribs_read, struct agx_velem_key *keys);
+
+struct agx_robustness hk_prolog_robustness(struct hk_device *dev);

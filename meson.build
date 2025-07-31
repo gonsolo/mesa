@@ -95,6 +95,7 @@ with_vulkan_overlay_layer = get_option('vulkan-layers').contains('overlay')
 with_vulkan_device_select_layer = get_option('vulkan-layers').contains('device-select')
 with_vulkan_screenshot_layer = get_option('vulkan-layers').contains('screenshot')
 with_vulkan_vram_report_limit_layer = get_option('vulkan-layers').contains('vram-report-limit')
+with_vulkan_anti_lag_layer = get_option('vulkan-layers').contains('anti-lag')
 with_tools = get_option('tools')
 if with_tools.contains('all')
   with_tools = [
@@ -180,7 +181,7 @@ elif gallium_drivers.contains('all')
    gallium_drivers = [
      'r300', 'r600', 'radeonsi', 'crocus', 'v3d', 'vc4', 'freedreno', 'etnaviv', 'i915',
      'nouveau', 'svga', 'tegra', 'virgl', 'lima', 'panfrost', 'llvmpipe', 'softpipe', 'iris',
-     'zink', 'd3d12', 'asahi'
+     'zink', 'd3d12', 'asahi', 'rocket'
    ]
 endif
 
@@ -207,6 +208,7 @@ with_gallium_lima = gallium_drivers.contains('lima')
 with_gallium_zink = gallium_drivers.contains('zink')
 with_gallium_d3d12 = gallium_drivers.contains('d3d12')
 with_gallium_asahi = gallium_drivers.contains('asahi')
+with_gallium_rocket = gallium_drivers.contains('rocket')
 foreach gallium_driver : gallium_drivers
   pre_args += '-DHAVE_@0@'.format(gallium_driver.to_upper())
 endforeach
@@ -303,8 +305,6 @@ if freedreno_kmds.length() != 0 and freedreno_kmds != [ 'msm' ] and with_freedre
 endif
 
 with_vdrm = [
-  with_gallium_virgl,
-  with_virtio_vk,
   with_amdgpu_virtio,
   freedreno_kmds.contains('virtio'),
   with_gallium_asahi,
@@ -584,8 +584,6 @@ endif
 
 with_dri2 = (with_dri or with_any_vk) and (with_dri_platform == 'drm' or with_dri_platform == 'apple')
 
-with_x11_dri2 = with_dri2 and get_option('legacy-x11').contains('dri2')
-
 if with_dri
   if with_glx == 'disabled' and not with_egl and not with_gbm
     error('building dri drivers require at least one windowing system')
@@ -792,6 +790,9 @@ if with_gallium_rusticl or with_nouveau_vk or with_tools.contains('etnaviv') or 
     '--raw-line', '#![allow(non_snake_case)]',
     '--raw-line', '#![allow(non_upper_case_globals)]',
   ]
+  if rustc.version().version_compare('>= 1.88')
+    bindgen_output_args += ['--raw-line', '#![allow(unnecessary_transmutes)]']
+  endif
 endif
 
 if get_option('precomp-compiler') != 'system'
@@ -1980,6 +1981,7 @@ endif
 
 # TODO: symbol mangling
 
+with_wayland_bind_display = with_platform_wayland and get_option('legacy-wayland').contains('bind-wayland-display')
 if with_platform_wayland
   dep_wl_scanner = dependency('wayland-scanner', native: true)
   prog_wl_scanner = find_program(dep_wl_scanner.get_variable(pkgconfig : 'wayland_scanner'))
@@ -2021,14 +2023,11 @@ endif
 
 dep_x11 = null_dep
 dep_xext = null_dep
-dep_xfixes = null_dep
 dep_x11_xcb = null_dep
 dep_xcb = null_dep
 dep_xcb_keysyms = null_dep
 dep_xcb_glx = null_dep
-dep_xcb_dri2 = null_dep
 dep_xcb_dri3 = null_dep
-dep_dri2proto = null_dep
 dep_glproto = null_dep
 dep_xxf86vm = null_dep
 dep_xcb_present = null_dep
@@ -2039,13 +2038,11 @@ dep_xcb_xrandr = null_dep
 dep_xcb_shm = null_dep
 dep_xlib_xrandr = null_dep
 
-dep_dri2proto_version = '>= 2.8'
 dep_glproto_version = '>= 1.4.14'
-dep_xcb_dri2_version = '>= 1.8'
 dep_xcb_dri3_version = '>= 1.13'
 dep_xcb_glx_version = '>= 1.8.1'
 dep_xcb_present_version = '>= 1.13'
-dep_xfixes_version = '>= 2.0'
+dep_xlib_version = '>= 1.8'
 dep_xlib_xrandr_version = '>= 1.3'
 dep_xshmfence_version = '>= 1.1'
 
@@ -2055,17 +2052,16 @@ if with_platform_x11
   dep_xcb = dependency('xcb')
   dep_xcb_xrandr = dependency('xcb-randr')
   if with_glx == 'xlib'
-    dep_x11 = dependency('x11')
+    dep_x11 = dependency('x11', version : dep_xlib_version)
     dep_xext = dependency('xext')
   elif with_glx == 'dri'
-    dep_x11 = dependency('x11')
+    dep_x11 = dependency('x11', version : dep_xlib_version)
     dep_xext = dependency('xext')
-    dep_xfixes = dependency('xfixes', version : dep_xfixes_version)
     dep_xcb_glx = dependency('xcb-glx', version : dep_xcb_glx_version)
     dep_xcb_shm = dependency('xcb-shm')
   elif with_gallium_rusticl
     # needed for GL sharing extension
-    dep_x11 = dependency('x11')
+    dep_x11 = dependency('x11', version : dep_xlib_version)
   endif
   if (with_any_vk or with_glx == 'dri' or with_egl or
        (with_gallium_vdpau or with_gallium_va))
@@ -2076,14 +2072,11 @@ if with_platform_x11
       pre_args += '-DXCB_KEYSYMS_AVAILABLE'
     endif
     dep_x11_xcb = dependency('x11-xcb')
-    dep_xcb_dri2 = dependency('xcb-dri2', version : dep_xcb_dri2_version, required : with_x11_dri2)
     if with_dri_platform == 'drm' and not dep_libdrm.found()
       error('libdrm required for gallium video statetrackers when using x11')
     endif
   endif
   if with_dri_platform == 'drm'
-    dep_xcb_dri2 = dependency('xcb-dri2', version : dep_xcb_dri2_version, required : with_x11_dri2)
-
     dep_xcb_dri3 = dependency('xcb-dri3', version : dep_xcb_dri3_version)
     dep_xcb_present = dependency('xcb-present', version : dep_xcb_present_version)
     if (dep_xcb_dri3.version().version_compare('>= 1.17') and
@@ -2100,7 +2093,6 @@ if with_platform_x11
   endif
   if with_glx == 'dri'
     if with_dri_platform == 'drm'
-      dep_dri2proto = dependency('dri2proto', version : dep_dri2proto_version)
       if with_glx_direct
         dep_xxf86vm = dependency('xxf86vm')
       endif
@@ -2131,9 +2123,6 @@ if with_dri
 endif
 if with_dri2
   pre_args += '-DHAVE_DRI2'
-endif
-if with_x11_dri2
-  pre_args += '-DHAVE_X11_DRI2'
 endif
 if with_dri3_explicit_sync
   pre_args += '-DHAVE_DRI3_EXPLICIT_SYNC'

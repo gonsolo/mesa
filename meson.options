@@ -82,7 +82,7 @@ option(
     'all', 'auto',
     'asahi', 'crocus', 'd3d12', 'etnaviv', 'freedreno', 'i915', 'iris',
     'lima', 'llvmpipe', 'nouveau', 'panfrost', 'r300', 'r600', 'radeonsi',
-    'softpipe', 'svga', 'tegra', 'v3d', 'vc4', 'virgl', 'zink',
+    'rocket', 'softpipe', 'svga', 'tegra', 'v3d', 'vc4', 'virgl', 'zink',
   ],
   description : 'List of gallium drivers to build. If this is set to auto ' +
                 'all drivers applicable to the target OS/architecture ' +
@@ -299,7 +299,7 @@ option(
   type : 'array',
   value : [],
   choices : [
-    'device-select', 'intel-nullhw', 'overlay', 'screenshot',
+    'device-select', 'intel-nullhw', 'overlay', 'screenshot', 'anti-lag',
     'vram-report-limit',
   ],
   description : 'List of vulkan layers to build'
@@ -778,12 +778,22 @@ option(
 )
 
 option(
+  'legacy-wayland',
+  type : 'array',
+  value : [],
+  description : 'Build legacy Wayland support features.',
+  choices : [
+    'bind-wayland-display',
+  ],
+)
+
+option(
   'legacy-x11',
   type : 'array',
   value : [],
   description : 'Build legacy X11 support features.',
+  deprecated : true,
   choices : [
-    'dri2'
   ],
 )
 

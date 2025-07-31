@@ -78,21 +78,12 @@ typedef struct
 
 typedef struct
 {
-   nir_def *outputs[VARYING_SLOT_MAX][4];
-   nir_def *outputs_16bit_lo[16][4];
-   nir_def *outputs_16bit_hi[16][4];
+   /* Low and high 16 bits are packed into 32 bits. */
+   nir_def *outputs[NUM_TOTAL_VARYING_SLOTS][4];
+   uint32_t const_values[NUM_TOTAL_VARYING_SLOTS][4];
 
-   /* Low and high 16 bits are packed. */
-   uint32_t const_values[VARYING_SLOT_MAX][4];
-   uint32_t const_values_16bit[16][4];
-
-   nir_alu_type types[VARYING_SLOT_MAX][4];
-   nir_alu_type types_16bit_lo[16][4];
-   nir_alu_type types_16bit_hi[16][4];
-
-   ac_nir_prerast_per_output_info infos[VARYING_SLOT_MAX];
-   ac_nir_prerast_per_output_info infos_16bit_lo[16];
-   ac_nir_prerast_per_output_info infos_16bit_hi[16];
+   nir_alu_type types[NUM_TOTAL_VARYING_SLOTS][4];
+   ac_nir_prerast_per_output_info infos[NUM_TOTAL_VARYING_SLOTS];
 
    /* The size of all components, packed. */
    uint16_t total_packed_gs_out_size;
@@ -137,7 +128,6 @@ ac_nir_export_position(nir_builder *b,
                        uint32_t export_clipdist_mask,
                        bool dont_export_cull_distances,
                        bool write_pos_to_clipvertex,
-                       bool pack_clip_cull_distances,
                        bool no_param_export,
                        bool force_vrs,
                        uint64_t outputs_written,
@@ -242,7 +232,7 @@ bool
 ac_nir_is_const_output(ac_nir_prerast_out *pr_out, gl_varying_slot slot, unsigned component);
 
 nir_def *
-ac_nir_get_const_output(nir_builder *b, unsigned bit_size, ac_nir_prerast_out *pr_out, gl_varying_slot slot,
+ac_nir_get_const_output(nir_builder *b, ac_nir_prerast_out *pr_out, gl_varying_slot slot,
                         unsigned component);
 
 void
@@ -250,7 +240,7 @@ ac_nir_store_shared_xfb(nir_builder *b, nir_def *value, nir_def *vtxptr, ac_nir_
                         gl_varying_slot slot, unsigned component);
 
 nir_def *
-ac_nir_load_shared_xfb(nir_builder *b, unsigned bit_size, nir_def *vtxptr, ac_nir_prerast_out *pr_out,
+ac_nir_load_shared_xfb(nir_builder *b, nir_def *vtxptr, ac_nir_prerast_out *pr_out,
                        gl_varying_slot slot, unsigned component);
 
 void
@@ -258,7 +248,7 @@ ac_nir_store_shared_gs_out(nir_builder *b, nir_def *value, nir_def *vtxptr, ac_n
                            gl_varying_slot slot, unsigned component);
 
 nir_def *
-ac_nir_load_shared_gs_out(nir_builder *b, unsigned bit_size, nir_def *vtxptr, ac_nir_prerast_out *pr_out,
+ac_nir_load_shared_gs_out(nir_builder *b, nir_def *vtxptr, ac_nir_prerast_out *pr_out,
                           gl_varying_slot slot, unsigned component);
 
 void

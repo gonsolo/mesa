@@ -485,10 +485,10 @@ optimizations.extend([
    (('ffma@64', a, b, c), ('fadd', ('fmul', a, b), c), 'options->lower_ffma64'),
    (('ffmaz', a, b, c), ('fadd', ('fmulz', a, b), c), 'options->lower_ffma32'),
    # Always lower inexact ffma, because it will be fused back by late optimizations (nir_opt_algebraic_late).
-   (('~ffma@16', a, b, c), ('fadd', ('fmul', a, b), c), 'options->fuse_ffma16'),
-   (('~ffma@32', a, b, c), ('fadd', ('fmul', a, b), c), 'options->fuse_ffma32'),
-   (('~ffma@64', a, b, c), ('fadd', ('fmul', a, b), c), 'options->fuse_ffma64'),
-   (('~ffmaz', a, b, c), ('fadd', ('fmulz', a, b), c), 'options->fuse_ffma32'),
+   (('ffma@16(contract)', a, b, c), ('fadd', ('fmul', a, b), c), 'options->fuse_ffma16'),
+   (('ffma@32(contract)', a, b, c), ('fadd', ('fmul', a, b), c), 'options->fuse_ffma32'),
+   (('ffma@64(contract)', a, b, c), ('fadd', ('fmul', a, b), c), 'options->fuse_ffma64'),
+   (('ffmaz(contract)', a, b, c), ('fadd', ('fmulz', a, b), c), 'options->fuse_ffma32'),
 
    (('~fmul', ('fadd', ('bcsel', a, ('fmul', b, c), 0), '#d'), '#e'),
     ('bcsel', a, ('fmul', ('fadd', ('fmul', b, c), d), e), ('fmul', d, e))),
@@ -1145,6 +1145,18 @@ for s in [16, 32, 64]:
        # support fp16 don't support int16.
        (('bcsel@{}'.format(s), ('feq', a, 0.0), 1.0, ('i2f{}'.format(s), ('iadd', ('b2i{}'.format(s), ('flt', 0.0, 'a@{}'.format(s))), ('ineg', ('b2i{}'.format(s), ('flt', 'a@{}'.format(s), 0.0)))))),
         ('i2f{}'.format(s), ('iadd', ('b2i32', ('!fge', a, 0.0)), ('ineg', ('b2i32', ('!flt', a, 0.0)))))),
+
+       # Signed pow() used in Control. It's not enough to match just the
+       # copysign piece because we would require extra instructions to handle
+       # the various floating point special cases. Specializing to the pow
+       # sequence lets us collapse all the sign fixup code.
+       (('fmul', ('fexp2', ('fmul', ('flog2', ('fabs', a)), b)),
+         ('i2f', ('iadd',           ('b2i', ('flt', 0.0, a)),
+                          ('ineg', ('b2i', ('flt', a, 0.0)))))),
+
+        ('bcsel', ('!flt', a, 0.0),
+         ('fneg', ('fexp2', ('fmul', ('flog2', ('fabs', a)), b))),
+                  ('fexp2', ('fmul', ('flog2', ('fabs', a)), b)))),
 
        (('bcsel', a, ('b2f(is_used_once)', 'b@{}'.format(s)), ('b2f', 'c@{}'.format(s))), ('b2f', ('bcsel', a, b, c))),
 
@@ -2079,6 +2091,10 @@ optimizations.extend([
    (('ior', ('u2u16', ('unpack_32_4x8.z', a)), ('ishl', ('u2u16', ('unpack_32_4x8.w', a)), 8)),
     ('unpack_32_2x16_split_y', a), '!options->lower_unpack_32_2x16_split'),
 
+   # Prefer 16bit unpack/extract because it's easier to vectorize
+   (('i2i16', ('unpack_32_4x8(xz_components_unused).y', a)), ('extract_i8', ('unpack_32_2x16.x', a), 1), '!options->lower_extract_byte'),
+   (('i2i16', ('unpack_32_4x8(xz_components_unused).w', a)), ('extract_i8', ('unpack_32_2x16.y', a), 1), '!options->lower_extract_byte'),
+
    (('extract_u16', ('extract_i16', a, b), 0), ('extract_u16', a, b)),
    (('extract_u16', ('extract_u16', a, b), 0), ('extract_u16', a, b)),
 
@@ -2461,10 +2477,13 @@ optimizations.extend([
    (('bitfield_select', ('inot', a), b, c), ('bitfield_select', a, c, b)),
    (('bitfield_select', ('ineg', ('b2i', 'a@1')), b, c), ('bcsel', a, b, c)),
 
-   (('ior@32', ('iand', a, b), ('iand', ('inot', a), c)), ('bitfield_select', a, b, c), 'options->has_bitfield_select'),
-   (('iadd@32', ('iand', a, b), ('iand', ('inot', a), c)), ('bitfield_select', a, b, c), 'options->has_bitfield_select'),
-   (('ixor@32', ('iand', a, b), ('iand', ('inot', a), c)), ('bitfield_select', a, b, c), 'options->has_bitfield_select'),
-   (('ixor@32', ('iand', a, ('ixor', b, c)), c), ('bitfield_select', a, b, c), 'options->has_bitfield_select'),
+   (('ior', ('iand', a, b), ('iand', ('inot', a), c)), ('bitfield_select', a, b, c), 'options->has_bitfield_select'),
+   (('iadd', ('iand', a, b), ('iand', ('inot', a), c)), ('bitfield_select', a, b, c), 'options->has_bitfield_select'),
+   (('ixor', ('iand', a, b), ('iand', ('inot', a), c)), ('bitfield_select', a, b, c), 'options->has_bitfield_select'),
+   (('ixor', ('iand', a, ('ixor', b, c)), c), ('bitfield_select', a, b, c), 'options->has_bitfield_select'),
+
+   # The patterns above could create 1bit bitfield_select, but that's really just bcsel.
+   (('bitfield_select@1', a, b, c), ('bcsel', a, b, c)),
 
    # Note that these opcodes are defined to only use the five least significant bits of 'offset' and 'bits'
    (('ubfe', 'value', 'offset', ('iand', 31, 'bits')), ('ubfe', 'value', 'offset', 'bits')),
@@ -2704,6 +2723,17 @@ optimizations.extend([
 
    (('imul_high@16', a, b), ('i2i16', ('ishr', ('imul24_relaxed', ('i2i32', a), ('i2i32', b)), 16)), 'options->lower_mul_high16'),
    (('umul_high@16', a, b), ('u2u16', ('ushr', ('umul24_relaxed', ('u2u32', a), ('u2u32', b)), 16)), 'options->lower_mul_high16'),
+
+   # Optimize vec2 unsigned comparison predicates to usub_sat with clamp.
+   (('b2i16', ('vec2', ('ult', 'a@16', b), ('ult', 'c@16', d))),
+    ('umin', 1, ('usub_sat', ('vec2', b, d), ('vec2', a, c))),
+    'options->vectorize_vec2_16bit && !options->lower_usub_sat'),
+   (('b2i16', ('vec2', ('uge', 'a@16', '#b(is_not_zero)'), ('uge', 'c@16', '#d(is_not_zero)'))),
+    ('umin', 1, ('usub_sat', ('vec2', a, c), ('iadd', ('vec2', b, d), -1))),
+    'options->vectorize_vec2_16bit && !options->lower_usub_sat'),
+   (('b2i16', ('vec2', ('uge', '#a(is_not_uint_max)', 'b@16'), ('uge', '#c(is_not_uint_max)', 'd@16'))),
+    ('umin', 1, ('usub_sat', ('iadd', ('vec2', a, c), 1), ('vec2', b, d))),
+    'options->vectorize_vec2_16bit && !options->lower_usub_sat'),
 ])
 
 for bit_size in [8, 16, 32, 64]:
@@ -3068,7 +3098,7 @@ def ldexp(f, exp, bits):
    # of our exponent is doubled.
    pow2_1 = fexp2i(('ishr', exp, 1), bits)
    pow2_2 = fexp2i(('isub', exp, ('ishr', exp, 1)), bits)
-   return ('fmul', ('fmul', f, pow2_1), pow2_2)
+   return ('!fmul', ('!fmul', f, pow2_1), pow2_2)
 
 optimizations += [
    (('ldexp@16', 'x', 'exp'), ldexp('x', 'exp', 16), 'options->lower_ldexp'),
@@ -3552,7 +3582,7 @@ for sz, mulz in itertools.product([16, 32, 64], [False, True]):
     fmul = ('fmulz' if mulz else 'fmul') + '(is_only_used_by_fadd)'
     ffma = 'ffmaz' if mulz else 'ffma'
 
-    fadd = '~fadd@{}'.format(sz)
+    fadd = 'fadd@{}(contract)'.format(sz)
     option = 'options->fuse_ffma{}'.format(sz)
 
     late_optimizations.extend([

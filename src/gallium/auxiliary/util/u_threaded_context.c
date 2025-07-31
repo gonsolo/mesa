@@ -377,12 +377,12 @@ tc_resource_batch_usage_test_busy(const struct threaded_context *tc, const struc
 
    int diff;
    if (tbuf->last_batch_usage < tc->last_completed)
-      /* account for wrapping */
-      diff = (tbuf->last_batch_usage + (INT8_MAX - 1)) - tc->last_completed;
+      /* account for wrapping: un-wrap the resource's usage */
+      diff = (tbuf->last_batch_usage + INT8_MAX) - tc->last_completed;
    else
       diff = tbuf->last_batch_usage - tc->last_completed;
 
-   /* if diff is positive, then batch usage has completed: resource is not busy */
+   /* if diff is positive, then batch usage has not completed: resource is busy */
    return diff > 0;
 }
 
@@ -3183,13 +3183,16 @@ tc_texture_subdata(struct pipe_context *_pipe,
 {
    struct threaded_context *tc = threaded_context(_pipe);
    uint64_t size;
+   uint32_t last_row_stride;
 
    assert(box->height >= 1);
    assert(box->depth >= 1);
 
+   last_row_stride = box->width * util_format_get_blocksize(resource->format);
+
    size = (box->depth - 1) * layer_stride +
           (box->height - 1) * (uint64_t)stride +
-          box->width * util_format_get_blocksize(resource->format);
+          last_row_stride;
    if (!size)
       return;
 
@@ -3384,21 +3387,24 @@ tc_create_fence_fd(struct pipe_context *_pipe,
 struct tc_fence_call {
    struct tc_call_base base;
    struct pipe_fence_handle *fence;
+   uint64_t value;
 };
 
 static uint16_t ALWAYS_INLINE
 tc_call_fence_server_sync(struct pipe_context *pipe, void *call)
 {
-   struct pipe_fence_handle *fence = to_call(call, tc_fence_call)->fence;
+   struct tc_fence_call *p = (void*)to_call(call, tc_fence_call);
+   struct pipe_fence_handle *fence = p->fence;
 
-   pipe->fence_server_sync(pipe, fence);
+   pipe->fence_server_sync(pipe, fence, p->value);
    pipe->screen->fence_reference(pipe->screen, &fence, NULL);
    return call_size(tc_fence_call);
 }
 
 static void
 tc_fence_server_sync(struct pipe_context *_pipe,
-                     struct pipe_fence_handle *fence)
+                     struct pipe_fence_handle *fence,
+                     uint64_t value)
 {
    struct threaded_context *tc = threaded_context(_pipe);
    struct pipe_screen *screen = tc->pipe->screen;
@@ -3407,17 +3413,19 @@ tc_fence_server_sync(struct pipe_context *_pipe,
 
    call->fence = NULL;
    screen->fence_reference(screen, &call->fence, fence);
+   call->value = value;
 }
 
 static void
 tc_fence_server_signal(struct pipe_context *_pipe,
-                           struct pipe_fence_handle *fence)
+                           struct pipe_fence_handle *fence,
+                           uint64_t value)
 {
    struct threaded_context *tc = threaded_context(_pipe);
    struct pipe_context *pipe = tc->pipe;
    tc_sync(tc);
    tc_set_driver_thread(tc);
-   pipe->fence_server_signal(pipe, fence);
+   pipe->fence_server_signal(pipe, fence, value);
    tc_clear_driver_thread(tc);
 }
 

@@ -20,6 +20,7 @@
 #include "instr-a3xx.h"
 #include "ir3.h"
 #include "ir3_context.h"
+#include "ir3_ra.h"
 
 static struct ir3_instruction_rpt
 rpt_instr(struct ir3_instruction *instr, unsigned nrpt)
@@ -2627,6 +2628,17 @@ apply_mov_half_shared_quirk(struct ir3_context *ctx,
 }
 
 static void
+make_dst_dummy(struct ir3_instruction *instr)
+{
+   assert(instr->dsts_count == 1);
+
+   struct ir3_register *dst = instr->dsts[0];
+   dst->flags &= ~IR3_REG_SSA;
+   dst->flags |= IR3_REG_DUMMY;
+   dst->num = INVALID_REG;
+}
+
+static void
 emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
 {
    const nir_intrinsic_info *info = &nir_intrinsic_infos[intr->intrinsic];
@@ -2956,7 +2968,6 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
       dst[0] = ctx->instance_id;
       break;
    case nir_intrinsic_load_sample_id:
-   case nir_intrinsic_load_sample_id_no_per_sample:
       if (!ctx->samp_id) {
          ctx->samp_id = create_sysval_input(ctx, SYSTEM_VALUE_SAMPLE_ID, 0x1);
          ctx->samp_id->dsts[0]->flags |= IR3_REG_HALF;
@@ -3362,7 +3373,7 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
       struct ir3_instruction *sam =
          emit_sam(ctx, OPC_SAM, info, TYPE_F32, 0b1111, NULL, NULL);
 
-      sam->dsts_count = 0;
+      make_dst_dummy(sam);
       array_insert(ctx->block, ctx->block->keeps, sam);
       break;
    }
@@ -3378,7 +3389,7 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
       if (resinfo->flags & IR3_INSTR_B)
          ctx->so->bindless_tex = true;
 
-      resinfo->dsts_count = 0;
+      make_dst_dummy(resinfo);
       array_insert(ctx->block, ctx->block->keeps, resinfo);
       break;
    }
@@ -3393,7 +3404,7 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
       if (ldc->flags & IR3_INSTR_B)
          ctx->so->bindless_ubo = true;
 
-      ldc->dsts_count = 0;
+      make_dst_dummy(ldc);
       array_insert(ctx->block, ctx->block->keeps, ldc);
       break;
    }
@@ -5515,6 +5526,44 @@ collect_tex_prefetches(struct ir3_context *ctx, struct ir3 *ir)
    }
 }
 
+static bool
+is_noop_subreg_move(struct ir3_instruction *instr)
+{
+   enum ir3_subreg_move subreg_move = ir3_is_subreg_move(instr);
+
+   if (subreg_move == IR3_SUBREG_MOVE_NONE) {
+      return false;
+   }
+
+   struct ir3_register *src = instr->srcs[0];
+   struct ir3_register *dst = instr->dsts[0];
+   unsigned offset = subreg_move == IR3_SUBREG_MOVE_LOWER ? 0 : 1;
+
+   return ra_num_to_physreg(dst->num, dst->flags) ==
+          ra_num_to_physreg(src->num, src->flags) + offset;
+}
+
+static bool
+ir3_remove_noop_subreg_moves(struct ir3 *ir)
+{
+   if (!ir->compiler->mergedregs) {
+      return false;
+   }
+
+   bool progress = false;
+
+   foreach_block (block, &ir->block_list) {
+      foreach_instr_safe (instr, &block->instr_list) {
+         if (is_noop_subreg_move(instr)) {
+            ir3_instr_remove(instr);
+            progress = true;
+         }
+      }
+   }
+
+   return progress;
+}
+
 int
 ir3_compile_shader_nir(struct ir3_compiler *compiler,
                        struct ir3_shader *shader,
@@ -5846,6 +5895,7 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
       goto out;
    }
 
+   IR3_PASS(ir, ir3_remove_noop_subreg_moves);
    IR3_PASS(ir, ir3_merge_rpt, so);
    IR3_PASS(ir, ir3_postsched, so);
 
@@ -5950,7 +6000,7 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
       so->fs.depth_layout = ctx->s->info.fs.depth_layout;
    }
 
-   ctx->so->per_samp = ctx->s->info.fs.uses_sample_shading;
+   ctx->so->sample_shading = ctx->s->info.fs.uses_sample_shading;
 
    if (ctx->has_relative_load_const_ir3) {
       /* NOTE: if relative addressing is used, we set

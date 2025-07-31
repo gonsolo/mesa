@@ -214,6 +214,7 @@ struct drm_amdgpu_info_hw_ip {
    uint32_t ib_size_alignment;
    uint32_t available_rings;
    uint32_t ip_discovery_version;
+   uint32_t userq_num_slots;
 };
 
 struct drm_amdgpu_info_uq_fw_areas_gfx {
@@ -557,6 +558,8 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
          info->ip[ip_type].num_queues = 1;
       } else if (ip_info.available_rings) {
          info->ip[ip_type].num_queues = util_bitcount(ip_info.available_rings);
+      } else if (ip_info.userq_num_slots) {
+         info->ip[ip_type].num_queue_slots = ip_info.userq_num_slots;
       } else {
          continue;
       }
@@ -1703,8 +1706,9 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
    }
 
    /* WARNING: Register shadowing decreases performance by up to 50% on GFX11 with current FW. */
-   info->register_shadowing_required = device_info.ids_flags & AMDGPU_IDS_FLAGS_PREEMPTION &&
-                                       info->gfx_level < GFX11;
+   info->has_kernelq_reg_shadowing = device_info.ids_flags & AMDGPU_IDS_FLAGS_PREEMPTION &&
+                                     info->gfx_level < GFX11 &&
+                                     !(info->userq_ip_mask & (1 << AMD_IP_GFX));
 
    if (info->gfx_level >= GFX12) {
       info->has_set_context_pairs = true;
@@ -1712,7 +1716,7 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       info->has_set_uconfig_pairs = true;
    } else if (info->gfx_level >= GFX11 && info->has_dedicated_vram) {
       info->has_set_context_pairs_packed = true;
-      info->has_set_sh_pairs_packed = info->register_shadowing_required;
+      info->has_set_sh_pairs_packed = info->has_kernelq_reg_shadowing;
    }
 
    /* This is the size of all TCS outputs in memory per workgroup.
@@ -1800,6 +1804,8 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       info->rt_ip_version = RT_1_1;
 
    set_custom_cu_en_mask(info);
+
+   info->mesh_fast_launch_2 = info->gfx_level >= GFX11;
 
    const char *ib_filename = debug_get_option("AMD_PARSE_IB", NULL);
    if (ib_filename) {
@@ -1910,11 +1916,11 @@ void ac_print_gpu_info(const struct radeon_info *info, FILE *f)
    fprintf(f, "    clock_crystal_freq = %i KHz\n", info->clock_crystal_freq);
 
    for (unsigned i = 0; i < AMD_NUM_IP_TYPES; i++) {
-      if (info->ip[i].num_queues) {
-         fprintf(f, "    IP %-7s %2u.%u \tqueues:%u \talign:%u \tpad_dw:0x%x\n",
+      if (info->ip[i].num_queues || info->ip[i].num_queue_slots) {
+         fprintf(f, "    IP %-7s %2u.%u \tqueues:%u \tqueue_slots:%u \talign:%u \tpad_dw:0x%x\n",
                  ac_get_ip_type_string(info, i),
                  info->ip[i].ver_major, info->ip[i].ver_minor, info->ip[i].num_queues,
-                 info->ip[i].ib_alignment, info->ip[i].ib_pad_dw_mask);
+                 info->ip[i].num_queue_slots,info->ip[i].ib_alignment, info->ip[i].ib_pad_dw_mask);
       }
    }
 
@@ -1964,6 +1970,7 @@ void ac_print_gpu_info(const struct radeon_info *info, FILE *f)
    fprintf(f, "    has_set_sh_pairs_packed = %i\n", info->has_set_sh_pairs_packed);
    fprintf(f, "    has_set_uconfig_pairs = %i\n", info->has_set_uconfig_pairs);
    fprintf(f, "    conformant_trunc_coord = %i\n", info->conformant_trunc_coord);
+   fprintf(f, "    mesh_fast_launch_2 = %i\n", info->mesh_fast_launch_2);
 
    if (info->gfx_level < GFX12) {
       fprintf(f, "Display features:\n");
@@ -2067,7 +2074,7 @@ void ac_print_gpu_info(const struct radeon_info *info, FILE *f)
    fprintf(f, "    has_stable_pstate = %u\n", info->has_stable_pstate);
    fprintf(f, "    has_gang_submit = %u\n", info->has_gang_submit);
    fprintf(f, "    has_gpuvm_fault_query = %u\n", info->has_gpuvm_fault_query);
-   fprintf(f, "    register_shadowing_required = %u\n", info->register_shadowing_required);
+   fprintf(f, "    has_kernelq_reg_shadowing = %u\n", info->has_kernelq_reg_shadowing);
    fprintf(f, "    has_fw_based_shadowing = %u\n", info->has_fw_based_shadowing);
    if (info->has_fw_based_shadowing) {
       fprintf(f, "        * shadow size: %u (alignment: %u)\n",

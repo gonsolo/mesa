@@ -209,7 +209,7 @@ emit_ngg_nogs_prim_export(nir_builder *b, lower_ngg_nogs_state *s, nir_def *arg)
             nir_def *vtx_idx = nir_load_var(b, s->gs_vtx_indices_vars[i]);
             nir_def *addr = pervertex_lds_addr(b, s, vtx_idx, s->pervertex_lds_bytes);
             /* Edge flags share LDS with XFB. */
-            nir_def *edge = ac_nir_load_shared_xfb(b, 32, addr, &s->out, VARYING_SLOT_EDGE, 0);
+            nir_def *edge = ac_nir_load_shared_xfb(b, addr, &s->out, VARYING_SLOT_EDGE, 0);
 
             if (s->options->hw_info->gfx_level >= GFX12)
                mask = nir_ior(b, mask, nir_ishl_imm(b, edge, 8 + i * 9));
@@ -409,7 +409,7 @@ replace_scalar_component_uses(nir_builder *b, nir_scalar old, nir_scalar rep)
    for (unsigned dst_comp = 0; dst_comp < old.def->num_components; ++dst_comp) {
       nir_scalar old_dst = nir_get_scalar(old.def, dst_comp);
       nir_scalar new_dst = dst_comp == old.comp ? rep : old_dst;
-      dst[dst_comp] = nir_channel(b, new_dst.def, new_dst.comp);
+      dst[dst_comp] = nir_mov_scalar(b, new_dst);
    }
 
    nir_def *replacement = nir_vec(b, dst, old.def->num_components);
@@ -884,7 +884,7 @@ clipdist_culling_es_part(nir_builder *b, lower_ngg_nogs_state *s,
    if (s->options->cull_clipdist_mask && !s->has_clipdist) {
       /* use gl_ClipVertex if defined */
       nir_variable *clip_vertex_var =
-         b->shader->info.outputs_written & BITFIELD64_BIT(VARYING_SLOT_CLIP_VERTEX) ?
+         b->shader->info.outputs_written & VARYING_BIT_CLIP_VERTEX ?
          s->clip_vertex_var : s->position_value_var;
       nir_def *clip_vertex = nir_load_var(b, clip_vertex_var);
 
@@ -1311,32 +1311,23 @@ ngg_nogs_store_xfb_outputs_to_lds(nir_builder *b, lower_ngg_nogs_state *s)
 
    uint64_t xfb_outputs = 0;
    unsigned xfb_outputs_16bit = 0;
-   uint8_t xfb_mask[VARYING_SLOT_MAX] = {0};
-   uint8_t xfb_mask_16bit_lo[16] = {0};
-   uint8_t xfb_mask_16bit_hi[16] = {0};
+   uint8_t xfb_mask[NUM_TOTAL_VARYING_SLOTS] = {0};
 
    /* Get XFB output mask for each slot. */
    for (int i = 0; i < info->output_count; i++) {
       nir_xfb_output_info *out = info->outputs + i;
+      xfb_mask[out->location] |= out->component_mask;
 
-      if (out->location < VARYING_SLOT_VAR0_16BIT) {
+      if (out->location < VARYING_SLOT_VAR0_16BIT)
          xfb_outputs |= BITFIELD64_BIT(out->location);
-         xfb_mask[out->location] |= out->component_mask;
-      } else {
-         unsigned index = out->location - VARYING_SLOT_VAR0_16BIT;
-         xfb_outputs_16bit |= BITFIELD_BIT(index);
-
-         if (out->high_16bits)
-            xfb_mask_16bit_hi[index] |= out->component_mask;
-         else
-            xfb_mask_16bit_lo[index] |= out->component_mask;
-      }
+      else
+         xfb_outputs_16bit |= BITFIELD_BIT(out->location - VARYING_SLOT_VAR0_16BIT);
    }
 
    nir_def *tid = nir_load_local_invocation_index(b);
    nir_def *addr = pervertex_lds_addr(b, s, tid, s->pervertex_lds_bytes);
 
-   u_foreach_bit64(slot, xfb_outputs) {
+   u_foreach_bit64_two_masks(slot, xfb_outputs, VARYING_SLOT_VAR0_16BIT, xfb_outputs_16bit) {
       u_foreach_bit(c, xfb_mask[slot]) {
          if (!s->out.outputs[slot][c])
             continue;
@@ -1348,25 +1339,6 @@ ngg_nogs_store_xfb_outputs_to_lds(nir_builder *b, lower_ngg_nogs_state *s)
           *   OpenGL puts 16bit outputs in VARYING_SLOT_VAR0_16BIT.
           */
          ac_nir_store_shared_xfb(b, s->out.outputs[slot][c], addr, &s->out, slot, c);
-      }
-   }
-
-   u_foreach_bit64(slot, xfb_outputs_16bit) {
-      unsigned mask_lo = xfb_mask_16bit_lo[slot];
-      unsigned mask_hi = xfb_mask_16bit_hi[slot];
-      nir_def **outputs_lo = s->out.outputs_16bit_lo[slot];
-      nir_def **outputs_hi = s->out.outputs_16bit_hi[slot];
-      nir_def *undef = nir_undef(b, 1, 16);
-
-      u_foreach_bit(c, mask_lo | mask_hi) {
-         if (!outputs_lo[c] && !outputs_hi[c])
-            continue;
-
-         nir_def *lo = mask_lo & BITFIELD_BIT(c) ? outputs_lo[c] : undef;
-         nir_def *hi = mask_hi & BITFIELD_BIT(c) ? outputs_hi[c] : undef;
-         nir_def *store_val = nir_pack_32_2x16_split(b, lo, hi);
-
-         ac_nir_store_shared_xfb(b, store_val, addr, &s->out, VARYING_SLOT_VAR0_16BIT + slot, c);
       }
    }
 }
@@ -1742,9 +1714,8 @@ ac_nir_lower_ngg_nogs(nir_shader *shader, const ac_nir_lower_ngg_options *option
 
    ac_nir_export_position(b, options->hw_info->gfx_level,
                           options->export_clipdist_mask,
-                          options->dont_export_cull_distances,
+                          options->can_cull,
                           options->write_pos_to_clipvertex,
-                          options->pack_clip_cull_distances,
                           !options->has_param_exports,
                           options->force_vrs,
                           export_outputs, &state.out, NULL);
@@ -1797,7 +1768,7 @@ ac_nir_lower_ngg_nogs(nir_shader *shader, const ac_nir_lower_ngg_options *option
    nir_lower_vars_to_ssa(shader);
    nir_remove_dead_variables(shader, nir_var_function_temp, NULL);
    nir_lower_alu_to_scalar(shader, NULL, NULL);
-   nir_lower_phis_to_scalar(shader, true);
+   nir_lower_phis_to_scalar(shader, ac_nir_lower_phis_to_scalar_cb, NULL);
 
    if (options->can_cull) {
       /* It's beneficial to redo these opts after splitting the shader. */

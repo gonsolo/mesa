@@ -50,6 +50,7 @@ struct ir3_info {
    int8_t max_reg; /* highest GPR # used by shader */
    int8_t max_half_reg;
    int16_t max_const;
+   unsigned constlen;
    /* This is the maximum # of waves that can executed at once in one core,
     * assuming that they are all executing this shader.
     */
@@ -185,6 +186,11 @@ typedef enum ir3_register_flags {
     * IR3_REG_FIRST_ALIAS set.
     */
    IR3_REG_FIRST_ALIAS = BIT(22),
+
+   /* Set for registers that should be ignored by all passes. For example, the
+    * dummy src and dst of prefetch sam/ldc/resinfo.
+    */
+   IR3_REG_DUMMY = BIT(23),
 } ir3_register_flags;
 
 struct ir3_register {
@@ -802,6 +808,7 @@ struct ir3_instruction *
 ir3_block_get_last_non_terminator(struct ir3_block *block);
 
 struct ir3_instruction *ir3_block_get_last_phi(struct ir3_block *block);
+struct ir3_instruction *ir3_block_get_first_instr(struct ir3_block *block);
 
 static inline struct ir3_block *
 ir3_after_preamble(struct ir3 *ir)
@@ -1143,6 +1150,14 @@ is_subgroup_cond_mov_macro(struct ir3_instruction *instr)
    }
 }
 
+enum ir3_subreg_move {
+   IR3_SUBREG_MOVE_NONE,
+   IR3_SUBREG_MOVE_LOWER,
+   IR3_SUBREG_MOVE_UPPER,
+};
+
+enum ir3_subreg_move ir3_is_subreg_move(struct ir3_instruction *instr);
+
 static inline bool
 is_alu(struct ir3_instruction *instr)
 {
@@ -1207,6 +1222,12 @@ is_shared(struct ir3_instruction *instr)
 }
 
 static inline bool
+has_dummy_dst(struct ir3_instruction *instr)
+{
+   return !!(instr->dsts[0]->flags & IR3_REG_DUMMY);
+}
+
+static inline bool
 is_store(struct ir3_instruction *instr)
 {
    /* these instructions, the "destination" register is
@@ -1245,7 +1266,7 @@ is_load(struct ir3_instruction *instr)
       /* probably some others too.. */
       return true;
    case OPC_LDC:
-      return instr->dsts_count > 0;
+      return !has_dummy_dst(instr);
    default:
       return false;
    }
@@ -1293,7 +1314,7 @@ uses_helpers(struct ir3_instruction *instr)
 
    /* sam requires helper invocations except for dummy prefetch instructions */
    case OPC_SAM:
-      return instr->dsts_count != 0;
+      return !has_dummy_dst(instr);
 
    /* Subgroup operations don't require helper invocations to be present, but
     * will use helper invocations if they are present.
@@ -3129,7 +3150,7 @@ ir3_SAM(struct ir3_builder *build, opc_t opc, type_t type, unsigned wrmask,
        * case. It needs to be shared so that we don't accidentally disable early
        * preamble, and this is what the blob does.
        */
-      ir3_src_create(sam, regid(48, 0), IR3_REG_SHARED);
+      ir3_src_create(sam, regid(48, 0), IR3_REG_SHARED | IR3_REG_DUMMY);
    }
    if (src1) {
       __ssa_src(sam, src1, 0);

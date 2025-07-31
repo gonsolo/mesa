@@ -39,13 +39,14 @@ ac_nir_create_gs_copy_shader(const nir_shader *gs_nir, ac_nir_lower_legacy_gs_op
 
       unsigned offset = 0;
 
-      u_foreach_bit64 (i, gs_nir->info.outputs_written) {
+      u_foreach_bit64_two_masks(i, gs_nir->info.outputs_written,
+                                VARYING_SLOT_VAR0_16BIT, gs_nir->info.outputs_written_16bit) {
          u_foreach_bit (j, out->infos[i].components_mask) {
             if (((out->infos[i].stream >> (j * 2)) & 0x3) != stream)
                continue;
 
             if (ac_nir_is_const_output(out, i, j)) {
-               out->outputs[i][j] = ac_nir_get_const_output(&b, 32, out, i, j);
+               out->outputs[i][j] = ac_nir_get_const_output(&b, out, i, j);
                continue;
             }
 
@@ -53,39 +54,9 @@ ac_nir_create_gs_copy_shader(const nir_shader *gs_nir, ac_nir_lower_legacy_gs_op
             out->outputs[i][j] =
                nir_load_buffer_amd(&b, 1, 32, gsvs_ring, vtx_offset, zero, zero,
                                    .base = base,
-                                   .access = ACCESS_COHERENT | ACCESS_NON_TEMPORAL);
+                                   .access = ACCESS_COHERENT | ACCESS_NON_TEMPORAL |
+                                             ACCESS_CAN_REORDER | ACCESS_CAN_SPECULATE);
             offset += 4;
-         }
-      }
-
-      u_foreach_bit (i, gs_nir->info.outputs_written_16bit) {
-         unsigned mask = out->infos_16bit_lo[i].components_mask |
-                         out->infos_16bit_hi[i].components_mask;
-
-         u_foreach_bit (j, mask) {
-            bool has_lo_16bit = ((out->infos_16bit_lo[i].stream >> (j * 2)) & 0x3) == stream;
-            bool has_hi_16bit = ((out->infos_16bit_hi[i].stream >> (j * 2)) & 0x3) == stream;
-
-            if (!has_lo_16bit && !has_hi_16bit)
-               continue;
-
-            nir_def *load_val;
-
-            if (ac_nir_is_const_output(out, VARYING_SLOT_VAR0_16BIT + i, j)) {
-               load_val = ac_nir_get_const_output(&b, 32, out, i, j);
-            } else {
-               unsigned base = offset * gs_nir->info.gs.vertices_out * 16;
-               load_val = nir_load_buffer_amd(&b, 1, 32, gsvs_ring, vtx_offset, zero, zero,
-                                              .base = base,
-                                              .access = ACCESS_COHERENT | ACCESS_NON_TEMPORAL);
-               offset += 4;
-            }
-
-            if (has_lo_16bit)
-               out->outputs_16bit_lo[i][j] = nir_unpack_32_2x16_split_x(&b, load_val);
-
-            if (has_hi_16bit)
-               out->outputs_16bit_hi[i][j] = nir_unpack_32_2x16_split_y(&b, load_val);
          }
       }
 
@@ -97,9 +68,8 @@ ac_nir_create_gs_copy_shader(const nir_shader *gs_nir, ac_nir_lower_legacy_gs_op
 
       if (stream == 0) {
          ac_nir_export_position(&b, options->gfx_level, options->export_clipdist_mask, false,
-                                options->write_pos_to_clipvertex, options->pack_clip_cull_distances,
-                                !options->has_param_exports, options->force_vrs,
-                                b.shader->info.outputs_written | VARYING_BIT_POS,
+                                options->write_pos_to_clipvertex,  !options->has_param_exports,
+                                options->force_vrs, b.shader->info.outputs_written | VARYING_BIT_POS,
                                 out, NULL);
 
          if (options->has_param_exports) {

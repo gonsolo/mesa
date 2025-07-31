@@ -115,7 +115,7 @@
 } while (0)
 
 struct v3dv_instance;
-
+struct v3dv_image;
 struct v3d_simulator_file;
 
 /* Minimum required by the Vulkan 1.1 spec */
@@ -205,8 +205,6 @@ v3dv_device_lookup_bo(struct v3dv_physical_device *device, uint32_t handle)
 
 VkResult v3dv_wsi_init(struct v3dv_physical_device *physical_device);
 void v3dv_wsi_finish(struct v3dv_physical_device *physical_device);
-struct v3dv_image *v3dv_wsi_get_image_from_swapchain(VkSwapchainKHR swapchain,
-                                                     uint32_t index);
 
 void v3dv_meta_clear_init(struct v3dv_device *device);
 void v3dv_meta_clear_finish(struct v3dv_device *device);
@@ -599,11 +597,6 @@ struct v3dv_device {
    void *device_address_mem_ctx;
    struct util_dynarray device_address_bo_list; /* Array of struct v3dv_bo * */
 };
-
-/* TFU has readhead of 64 bytes. So to avoid the unit reading unmaped memory
- * it is needed to overallocate buffers that could be read by the TFU
- */
-#define V3D_TFU_READAHEAD_SIZE 64
 
 struct v3dv_device_memory {
    struct vk_device_memory vk;
@@ -2600,18 +2593,6 @@ v3dv_flag_oom(struct v3dv_cmd_buffer *cmd_buffer, struct v3dv_job *job)
    if (__job && __job->cmd_buffer && __job->cmd_buffer->state.oom)  \
       return;                                                       \
 } while(0)                                                          \
-
-static inline uint32_t
-u64_hash(const void *key)
-{
-   return _mesa_hash_data(key, sizeof(uint64_t));
-}
-
-static inline bool
-u64_compare(const void *key1, const void *key2)
-{
-   return memcmp(key1, key2, sizeof(uint64_t)) == 0;
-}
 
 /* v3d_macros from common requires v3dX and V3DX definitions. Below we need to
  * define v3dX for each version supported, because when we compile code that

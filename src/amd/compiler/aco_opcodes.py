@@ -428,6 +428,11 @@ insn("p_bpermute_shared_vgpr")
 # operands: linear VGPR, index * 4, input data, same half (bool)
 insn("p_bpermute_permlane")
 
+# simulates v_permlane64_b32 behavior using shared vgprs (for GFX10/10.3)
+# definitions result VGPR
+# operands: input data
+insn("p_permlane64_shared_vgpr")
+
 # creates a lane mask where only the first active lane is selected
 insn("p_elect")
 
@@ -1649,6 +1654,9 @@ DS = {
    ("ds_pk_add_rtn_f16",       op(gfx12=0xaa)),
    ("ds_pk_add_bf16",          op(gfx12=0x9b)),
    ("ds_pk_add_rtn_bf16",      op(gfx12=0xab)),
+   ("ds_bvh_stack_push4_pop1_rtn_b32", op(gfx11=0xad, gfx12=0xe0)), #ds_bvh_stack_rtn in GFX11
+   ("ds_bvh_stack_push8_pop1_rtn_b32", op(gfx12=0xe1)),
+   ("ds_bvh_stack_push8_pop2_rtn_b64", op(gfx12=0xe2)),
 }
 for (name, num) in DS:
     insn(name, num, Format.DS, InstrClass.DS)

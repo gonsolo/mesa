@@ -148,7 +148,7 @@ print_def(nir_def *def, print_state *state)
            def->bit_size, sizes[def->num_components],
            padding, "", state->def_prefix, def->index);
 
-   if (state->shader->has_debug_info) {
+   if (def->parent_instr->has_debug_info) {
       nir_instr_debug_info *debug_info = nir_instr_get_debug_info(def->parent_instr);
       if (debug_info->variable_name)
          fprintf(fp, ".%s", debug_info->variable_name);
@@ -409,7 +409,7 @@ print_src(const nir_src *src, print_state *state, nir_alu_type src_type)
    fprintf(fp, "%s%u", state->def_prefix, src->ssa->index);
    nir_instr *instr = src->ssa->parent_instr;
 
-   if (state->shader && state->shader->has_debug_info) {
+   if (instr->has_debug_info) {
       nir_instr_debug_info *debug_info = nir_instr_get_debug_info(instr);
       if (debug_info->variable_name)
          fprintf(fp, ".%s", debug_info->variable_name);
@@ -1115,6 +1115,13 @@ print_deref_instr(nir_deref_instr *instr, print_state *state)
       fprintf(fp, "%s%s", get_variable_mode_str(1 << m, true),
               modes ? "|" : "");
    }
+
+   nir_variable *var = nir_deref_instr_get_variable(instr);
+   if (var) {
+      static const char *precision_str[] = {"", " highp", " mediump", " lowp"};
+      fprintf(fp, "%s", precision_str[var->data.precision]);
+   }
+
    fprintf(fp, " %s)", get_type_name(instr->type, state));
 
    if (instr->deref_type == nir_deref_type_cast) {
@@ -1225,6 +1232,12 @@ print_intrinsic_instr(nir_intrinsic_instr *instr, print_state *state)
 
    for (unsigned i = 0; i < info->num_indices; i++) {
       unsigned idx = info->indices[i];
+
+      /* Skip "general" to denoise since it is the unremarkable default case */
+      if (idx == NIR_INTRINSIC_PREAMBLE_CLASS &&
+          nir_intrinsic_preamble_class(instr) == nir_preamble_class_general)
+         continue;
+
       if (i == 0)
          fprintf(fp, " (");
       else
@@ -1693,6 +1706,19 @@ print_intrinsic_instr(nir_intrinsic_instr *instr, print_state *state)
                  glsl_interp_mode_name(nir_intrinsic_interp_mode(instr)));
          break;
 
+      case NIR_INTRINSIC_PREAMBLE_CLASS: {
+         /* "General" handled above */
+         nir_preamble_class cls = nir_intrinsic_preamble_class(instr);
+         if (cls == nir_preamble_class_image)
+            fprintf(fp, "class=image");
+         else if (cls == nir_preamble_class_sampler)
+            fprintf(fp, "class=sampler");
+         else
+            unreachable("invalid class");
+
+         break;
+      }
+
       default: {
          unsigned off = info->index_map[idx] - 1;
          fprintf(fp, "%s=%d", nir_intrinsic_index_names[idx], instr->const_index[off]);
@@ -1838,6 +1864,9 @@ print_tex_instr(nir_tex_instr *instr, print_state *state)
       break;
    case nir_texop_tex_type_nv:
       fprintf(fp, "tex_type_nv ");
+      break;
+   case nir_texop_sample_pos_nv:
+      fprintf(fp, "sample_pos_nv ");
       break;
    default:
       unreachable("Invalid texture operation");
@@ -2098,7 +2127,7 @@ print_instr(const nir_instr *instr, print_state *state, unsigned tabs)
       debug_info->nir_line = (uint32_t)ftell(fp);
    }
 
-   if (state->shader->has_debug_info && !state->gather_debug_info) {
+   if (instr->has_debug_info && !state->gather_debug_info) {
       nir_instr_debug_info *debug_info = nir_instr_get_debug_info((nir_instr *)instr);
 
       bool changed = state->last_debug_info.spirv_offset != debug_info->spirv_offset;

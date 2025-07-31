@@ -826,7 +826,7 @@ v3d_vs_set_prog_data(struct v3d_compile *c,
                 prog_data->vpm_input_size++;
 
         prog_data->writes_psiz =
-            c->s->info.outputs_written & (1 << VARYING_SLOT_PSIZ);
+            c->s->info.outputs_written & VARYING_BIT_PSIZ;
 
         /* Input/output segment size are in sectors (8 rows of 32 bits per
          * channel).
@@ -905,7 +905,7 @@ v3d_gs_set_prog_data(struct v3d_compile *c,
         prog_data->num_invocations = c->s->info.gs.invocations;
 
         prog_data->writes_psiz =
-            c->s->info.outputs_written & (1 << VARYING_SLOT_PSIZ);
+            c->s->info.outputs_written & VARYING_BIT_PSIZ;
 }
 
 static void
@@ -1138,7 +1138,7 @@ v3d_nir_lower_fs_late(struct v3d_compile *c)
          *
          * The SPIR-V compiler will declare VARING_SLOT_CLIP_DIST0 as compact
          * array variable, so we have GL's clip lowering follow suit
-         * (PIPE_CAP_NIR_COMPACT_ARRAYS).
+         * (compact_arrays option at nir_shader_compiler_options)
          */
         if (c->fs_key->ucp_enables)
                 NIR_PASS(_, c->s, nir_lower_clip_fs, c->fs_key->ucp_enables, true, false);
@@ -1811,7 +1811,7 @@ v3d_attempt_compile(struct v3d_compile *c)
                 .instr_delay_cb = v3d_instr_delay_cb,
                 .instr_delay_cb_data = c,
         };
-        NIR_PASS_V(c->s, nir_schedule, &schedule_options);
+        NIR_PASS(_, c->s, nir_schedule, &schedule_options);
 
         if (!c->disable_constant_ubo_load_sorting)
                 NIR_PASS(_, c->s, v3d_nir_sort_constant_ubo_loads, c);

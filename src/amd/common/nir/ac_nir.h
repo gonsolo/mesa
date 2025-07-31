@@ -165,26 +165,25 @@ typedef struct {
 
    unsigned max_workgroup_size;
    unsigned wave_size;
-   /* The mask of clip and cull distances that the shader should export. */
+   /* The mask of clip and cull distances that the shader should export.
+    *
+    * Clip/cull distance components that are missing in export_clipdist_mask are removed, improving
+    * throughput by up to 50% (3 pos exports -> 2 pos exports). The caller shouldn't set no-op
+    * components (>= 0) in export_clipdist_mask to remove those completely. No-op components
+    * should be determined by nir_opt_clip_cull_const before this.
+    *
+    * If can_cull is true, the shader culls cull distances and they are not exported to increase
+    * throughput by reducing the number of pos exports. cull_clipdist_mask must be set to include
+    * all cull distances that are < 0. The best case scenario is 100% increase in throughput from
+    * not exporting any cull distances (2 pos exports -> 1 pos export).
+    */
    uint8_t export_clipdist_mask;
    /* The mask of clip and cull distances that the shader should cull against.
     * If no clip and cull distance outputs are present, it will load clip planes and cull
     * either against CLIP_VERTEX or POS.
     */
    uint8_t cull_clipdist_mask;
-   /* This skips exporting cull distances to increase throughput by reducing the number of pos exports.
-    * If this is set, cull_clipdist_mask must be set to cull against cull distances in the shader because
-    * the hw won't do it without the exports. The best case scenario is 100% increase in throughput
-    * (2 pos exports -> 1 pos export).
-    */
-   bool dont_export_cull_distances;
    bool write_pos_to_clipvertex;
-   /* Remove clip/cull distance components that are missing in export_clipdist_mask, improving
-    * throughput by up to 50% (3 pos exports -> 2 pos exports). The caller shouldn't set no-op
-    * components (>= 0) in export_clipdist_mask to remove those completely. No-op components
-    * should be determined by nir_opt_clip_cull_const before this.
-    */
-   bool pack_clip_cull_distances;
    const uint8_t *vs_output_param_offset; /* GFX11+ */
    bool has_param_exports;
    bool can_cull;
@@ -231,8 +230,7 @@ ac_nir_lower_ngg_mesh(nir_shader *shader,
                       unsigned wave_size,
                       unsigned workgroup_size,
                       bool multiview,
-                      bool has_query,
-                      bool fast_launch_2);
+                      bool has_query);
 
 bool
 ac_nir_lower_task_outputs_to_mem(nir_shader *shader,
@@ -256,7 +254,6 @@ ac_nir_lower_legacy_vs(nir_shader *nir,
                        enum amd_gfx_level gfx_level,
                        uint32_t export_clipdist_mask,
                        bool write_pos_to_clipvertex,
-                       bool pack_clip_cull_distances,
                        const uint8_t *param_offsets,
                        bool has_param_exports,
                        bool export_primitive_id,
@@ -270,23 +267,26 @@ typedef struct {
    enum amd_gfx_level gfx_level;
    uint32_t export_clipdist_mask;
    bool write_pos_to_clipvertex;
-   bool pack_clip_cull_distances;
    const uint8_t *param_offsets;
    bool has_param_exports;
    bool disable_streamout;
    bool force_vrs;
 } ac_nir_lower_legacy_gs_options;
 
+typedef struct {
+   uint8_t num_components_per_stream[4];
+} ac_nir_legacy_gs_info;
+
 bool
 ac_nir_lower_legacy_gs(nir_shader *nir, ac_nir_lower_legacy_gs_options *options,
-                       nir_shader **gs_copy_shader);
+                       nir_shader **gs_copy_shader, ac_nir_legacy_gs_info *out_info);
 
 /* This is a pre-link pass. It should only eliminate code and do lowering that mostly doesn't
  * generate AMD-specific intrinsics.
  */
 typedef struct {
    /* System values. */
-   bool force_center_interp_no_msaa; /* true if MSAA is disabled, false may mean that the state is unknown */
+   bool msaa_disabled; /* true if MSAA is disabled, false may mean that the state is unknown */
    bool uses_vrs_coarse_shading;
    bool load_sample_positions_always_loads_current_ones;
    bool dynamic_rasterization_samples;
@@ -295,8 +295,7 @@ typedef struct {
    bool frag_coord_is_center; /* GL requirement for sample shading */
 
    /* frag_coord/pixel_coord:
-    *    allow_pixel_coord && (frag_coord_is_center || ps_iter_samples == 1 ||
-    *                          force_center_interp_no_msaa ||
+    *    allow_pixel_coord && (frag_coord_is_center || ps_iter_samples == 1 || msaa_disabled ||
     *                          the fractional part of frag_coord.xy isn't used):
     *       * frag_coord.xy is replaced by u2f(pixel_coord) + 0.5.
     *    else:
@@ -304,7 +303,7 @@ typedef struct {
     *       * ps_iter_samples == 0 means the state is unknown.
     *
     * barycentrics:
-    *    force_center_interp_no_msaa:
+    *    msaa_disabled:
     *       * All barycentrics including at_sample but excluding at_offset are changed to
     *         barycentric_pixel
     *    ps_iter_samples >= 2:
@@ -312,7 +311,7 @@ typedef struct {
     *       * barycentric_at_sample(sample_id) is replaced by barycentric_sample.
     *
     * sample_mask_in:
-    *    force_center_interp_no_msaa && !uses_vrs_coarse_shading:
+    *    msaa_disabled && !uses_vrs_coarse_shading:
     *       * sample_mask_in is replaced by b2i32(!helper_invocation)
     *    ps_iter_samples == 2, 4:
     *       * sample_mask_in is changed to (sample_mask_in & (ps_iter_mask << sample_id))
@@ -434,6 +433,9 @@ ac_nir_scalarize_overfetching_loads_callback(const nir_instr *instr, const void 
 
 enum gl_access_qualifier
 ac_nir_get_mem_access_flags(const nir_intrinsic_instr *instr);
+
+uint8_t
+ac_nir_lower_phis_to_scalar_cb(const nir_instr *instr, const void *_);
 
 #ifdef __cplusplus
 }

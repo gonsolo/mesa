@@ -238,6 +238,11 @@ enum
  * in the shader via vs_state_bits in legacy GS, the GS copy shader, and any NGG shader.
  */
 /* bit gap */
+/* The LDS size of ES outputs in bytes for NGG GS, in multiples of 256 (bits [8:15]).
+ * This is used to determine the LDS address of GS outputs, which is after ES outputs.
+ */
+#define GS_STATE_GS_OUT_LDS_OFFSET_256B__SHIFT  6
+#define GS_STATE_GS_OUT_LDS_OFFSET_256B__MASK   0xff
 /* The number of ES outputs is derived from the last output index of SI_UNIQUE_SLOT_* + 1, which
  * can be 55 at most. The ESGS vertex stride in dwords is: NUM_ES_OUTPUTS * 4 + 1
  * Only used by GFX9+ to compute LDS addresses of GS inputs.
@@ -635,6 +640,11 @@ struct si_shader_key_ge {
 
       /* Gfx12: When no streamout buffers are bound, streamout must be disabled. */
       unsigned remove_streamout : 1;
+
+      /* Emulate 8 clip planes using the CLIP_VERTEX output. Only 6 clip planes are supported
+       * without this.
+       */
+      unsigned write_pos_to_clipvertex : 1;
    } mono;
 
    /* Optimization flags for asynchronous compilation only. */
@@ -909,12 +919,13 @@ void si_nir_scan_shader(struct si_screen *sscreen, struct nir_shader *nir,
                         struct si_shader_info *info, bool colors_lowered);
 
 /* si_shader_nir.c */
-void si_lower_mediump_io(struct nir_shader *nir);
+void si_lower_mediump_io_default(nir_shader *nir);
+void si_lower_mediump_io_option(struct nir_shader *nir);
 
 bool si_alu_to_scalar_packed_math_filter(const struct nir_instr *instr, const void *data);
 void si_nir_opts(struct si_screen *sscreen, struct nir_shader *nir, bool has_array_temps);
 void si_nir_late_opts(struct nir_shader *nir);
-char *si_finalize_nir(struct pipe_screen *screen, struct nir_shader *nir);
+void si_finalize_nir(struct pipe_screen *screen, struct nir_shader *nir);
 
 /* si_state_shaders.cpp */
 unsigned si_shader_num_alloc_param_exports(struct si_shader *shader);

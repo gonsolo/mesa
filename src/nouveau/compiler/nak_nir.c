@@ -20,6 +20,33 @@
 
 #define OPT_V(nir, pass, ...) NIR_PASS(_, nir, pass, ##__VA_ARGS__)
 
+nir_def *
+nak_nir_load_sysval(nir_builder *b, enum nak_sv idx,
+                    enum gl_access_qualifier access)
+{
+   bool divergent;
+
+   switch (idx) {
+   case NAK_SV_CTAID_X:
+   case NAK_SV_CTAID_Y:
+   case NAK_SV_CTAID_Z:
+   case NAK_SV_VIRTCFG:
+   case NAK_SV_PRIM_TYPE:
+   case NAK_SV_CLOCK_LO:
+   case NAK_SV_CLOCK_HI:
+   case NAK_SV_VARIABLE_RATE:
+      divergent = false;
+      break;
+   default:
+      divergent = true;
+      break;
+   }
+
+   return nir_load_sysval_nv(b, 32, .base = idx,
+                             .access = access,
+                             .divergent = divergent);
+}
+
 bool
 nak_nir_workgroup_has_one_subgroup(const nir_shader *nir)
 {
@@ -88,6 +115,19 @@ vectorize_filter_cb(const nir_instr *instr, const void *_data)
    }
 }
 
+static uint8_t
+phi_vectorize_cb(const nir_instr *instr, const void *data)
+{
+   nir_phi_instr *phi = nir_instr_as_phi(instr);
+   unsigned bit_size = phi->def.bit_size;
+
+   if (bit_size == 16)
+      return 2;
+   if (bit_size == 8)
+      return 4;
+   return 1;
+}
+
 static void
 optimize_nir(nir_shader *nir, const struct nak_compiler *nak, bool allow_copies)
 {
@@ -130,7 +170,7 @@ optimize_nir(nir_shader *nir, const struct nak_compiler *nak, bool allow_copies)
 
       OPT(nir, nir_lower_alu_width, vectorize_filter_cb, NULL);
       OPT(nir, nir_opt_vectorize, vectorize_filter_cb, NULL);
-      OPT(nir, nir_lower_phis_to_scalar, false);
+      OPT(nir, nir_lower_phis_to_scalar, phi_vectorize_cb, NULL);
       OPT(nir, nir_lower_frexp);
       OPT(nir, nir_copy_prop);
       OPT(nir, nir_opt_dce);
@@ -280,13 +320,6 @@ lower_bit_size_cb(const nir_instr *instr, void *data)
       }
    }
 
-   case nir_instr_type_phi: {
-      nir_phi_instr *phi = nir_instr_as_phi(instr);
-      if (phi->def.bit_size < 32 && phi->def.bit_size != 1)
-         return 32;
-      return 0;
-   }
-
    default:
       return 0;
    }
@@ -320,6 +353,8 @@ nak_preprocess_nir(nir_shader *nir, const struct nak_compiler *nak)
    OPT(nir, nir_lower_image, &image_options);
 
    OPT(nir, nir_lower_global_vars_to_local);
+
+   OPT(nir, nak_nir_lower_cmat, nak);
 
    OPT(nir, nir_split_var_copies);
    OPT(nir, nir_split_struct_vars, nir_var_function_temp);
@@ -452,15 +487,13 @@ nak_nir_lower_system_value_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
    }
 
    case nir_intrinsic_load_patch_vertices_in: {
-      val = nir_load_sysval_nv(b, 32, .base = NAK_SV_PRIM_TYPE,
-                               .access = ACCESS_CAN_REORDER);
+      val = nak_nir_load_sysval(b, NAK_SV_PRIM_TYPE, ACCESS_CAN_REORDER);
       val = nir_extract_u8(b, val, nir_imm_int(b, 1));
       break;
    }
 
    case nir_intrinsic_load_frag_shading_rate: {
-      val = nir_load_sysval_nv(b, 32, .base = NAK_SV_VARIABLE_RATE,
-                               .access = ACCESS_CAN_REORDER);
+      val = nak_nir_load_sysval(b, NAK_SV_VARIABLE_RATE, ACCESS_CAN_REORDER);
 
       /* X is in bits 8..16 and Y is in bits 16..24.  However, we actually
        * want the log2 of X and Y and, since we only support 1, 2, and 4, a
@@ -486,8 +519,7 @@ nak_nir_lower_system_value_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
       const gl_system_value sysval =
          nir_system_value_from_intrinsic(intrin->intrinsic);
       const uint32_t idx = nak_sysval_sysval_idx(sysval);
-      val = nir_load_sysval_nv(b, 32, .base = idx,
-                               .access = ACCESS_CAN_REORDER);
+      val = nak_nir_load_sysval(b, idx, ACCESS_CAN_REORDER);
 
       /* Pad with 0 because all invocations above 31 are off */
       if (intrin->def.bit_size == 64) {
@@ -509,21 +541,19 @@ nak_nir_lower_system_value_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
       nir_def *comps[3];
       assert(intrin->def.num_components <= 3);
       for (unsigned c = 0; c < intrin->def.num_components; c++) {
-         comps[c] = nir_load_sysval_nv(b, 32, .base = idx + c,
-                                       .access = ACCESS_CAN_REORDER);
+         comps[c] = nak_nir_load_sysval(b, idx + c, ACCESS_CAN_REORDER);
       }
       val = nir_vec(b, comps, intrin->def.num_components);
       break;
    }
 
    case nir_intrinsic_load_local_invocation_id: {
-      nir_def *x = nir_load_sysval_nv(b, 32, .base = NAK_SV_TID_X,
-                                      .access = ACCESS_CAN_REORDER);
-      nir_def *y = nir_load_sysval_nv(b, 32, .base = NAK_SV_TID_Y,
-                                      .access = ACCESS_CAN_REORDER);
-      nir_def *z = nir_load_sysval_nv(b, 32, .base = NAK_SV_TID_Z,
-                                      .access = ACCESS_CAN_REORDER);
-
+      nir_def *x = nak_nir_load_sysval(b, NAK_SV_TID_X,
+                                       ACCESS_CAN_REORDER);
+      nir_def *y = nak_nir_load_sysval(b, NAK_SV_TID_Y,
+                                       ACCESS_CAN_REORDER);
+      nir_def *z = nak_nir_load_sysval(b, NAK_SV_TID_Z,
+                                       ACCESS_CAN_REORDER);
       if (b->shader->info.derivative_group == DERIVATIVE_GROUP_QUADS) {
          nir_def *x_lo = nir_iand_imm(b, x, 0x1);
          nir_def *y_lo = nir_ushr_imm(b, nir_iand_imm(b, x, 0x2), 1);
@@ -552,12 +582,16 @@ nak_nir_lower_system_value_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
          val = nir_imm_int(b, 0);
       } else {
          assert(!b->shader->info.workgroup_size_variable);
-         nir_def *tid_x = nir_load_sysval_nv(b, 32, .base = NAK_SV_TID_X,
-                                             .access = ACCESS_CAN_REORDER);
-         nir_def *tid_y = nir_load_sysval_nv(b, 32, .base = NAK_SV_TID_Y,
-                                             .access = ACCESS_CAN_REORDER);
-         nir_def *tid_z = nir_load_sysval_nv(b, 32, .base = NAK_SV_TID_Z,
-                                             .access = ACCESS_CAN_REORDER);
+
+         nir_def *tid_x = b->shader->info.workgroup_size[0] > 1
+            ? nak_nir_load_sysval(b, NAK_SV_TID_X, ACCESS_CAN_REORDER)
+            : nir_imm_int(b, 0);
+         nir_def *tid_y = b->shader->info.workgroup_size[1] > 1
+            ? nak_nir_load_sysval(b, NAK_SV_TID_Y, ACCESS_CAN_REORDER)
+            : nir_imm_int(b, 0);
+         nir_def *tid_z = b->shader->info.workgroup_size[2] > 1
+            ? nak_nir_load_sysval(b, NAK_SV_TID_Z, ACCESS_CAN_REORDER)
+            : nir_imm_int(b, 0);
 
          const uint16_t *wg_size = b->shader->info.workgroup_size;
          nir_def *tid =
@@ -571,7 +605,7 @@ nak_nir_lower_system_value_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
 
    case nir_intrinsic_is_helper_invocation: {
       /* Unlike load_helper_invocation, this one isn't re-orderable */
-      val = nir_load_sysval_nv(b, 32, .base = NAK_SV_THREAD_KILL);
+      val = nak_nir_load_sysval(b, NAK_SV_THREAD_KILL, 0);
       break;
    }
 
@@ -599,7 +633,7 @@ nak_nir_lower_system_value_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
       nir_variable *clock =
          nir_local_variable_create(b->impl, glsl_uvec2_type(), NULL);
 
-      nir_def *clock_hi = nir_load_sysval_nv(b, 32, .base = NAK_SV_CLOCK_HI);
+      nir_def *clock_hi = nak_nir_load_sysval(b, NAK_SV_CLOCK_HI, 0);
       nir_ssa_bar_nv(b, clock_hi);
 
       nir_store_var(b, clock, nir_vec2(b, nir_imm_int(b, 0), clock_hi), 0x3);
@@ -608,10 +642,10 @@ nak_nir_lower_system_value_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
       {
          nir_def *last_clock = nir_load_var(b, clock);
 
-         nir_def *clock_lo = nir_load_sysval_nv(b, 32, .base = NAK_SV_CLOCK_LO);
+         nir_def *clock_lo = nak_nir_load_sysval(b, NAK_SV_CLOCK_LO, 0);
          nir_ssa_bar_nv(b, clock_lo);
 
-         clock_hi = nir_load_sysval_nv(b, 32, .base = NAK_SV_CLOCK + 1);
+         clock_hi = nak_nir_load_sysval(b, NAK_SV_CLOCK + 1, 0);
          nir_ssa_bar_nv(b, clock_hi);
 
          nir_store_var(b, clock, nir_vec2(b, clock_lo, clock_hi), 0x3);
@@ -631,17 +665,17 @@ nak_nir_lower_system_value_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
       break;
 
    case nir_intrinsic_load_sm_count_nv:
-      val = nir_load_sysval_nv(b, 32, .base = NAK_SV_VIRTCFG);
+      val = nak_nir_load_sysval(b, NAK_SV_VIRTCFG, 0);
       val = nir_ubitfield_extract_imm(b, val, 20, 9);
       break;
 
    case nir_intrinsic_load_warp_id_nv:
-      val = nir_load_sysval_nv(b, 32, .base = NAK_SV_VIRTID);
+      val = nak_nir_load_sysval(b, NAK_SV_VIRTID, 0);
       val = nir_ubitfield_extract_imm(b, val, 8, 7);
       break;
 
    case nir_intrinsic_load_sm_id_nv:
-      val = nir_load_sysval_nv(b, 32, .base = NAK_SV_VIRTID);
+      val = nak_nir_load_sysval(b, NAK_SV_VIRTID, 0);
       val = nir_ubitfield_extract_imm(b, val, 20, 9);
       break;
 

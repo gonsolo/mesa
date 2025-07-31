@@ -78,7 +78,7 @@ static const struct debug_named_value panfrost_debug_options[] = {
    {"overflow",   PAN_DBG_OVERFLOW,   "Check for buffer overflows in pool uploads"},
 #endif
    {"yuv",        PAN_DBG_YUV,        "Tint YUV textures with blue for 1-plane and green for 2-plane"},
-   {"forcepack",  PAN_DBG_FORCE_PACK, "Force packing of AFBC textures on upload"},
+   {"forcepack",  PAN_DBG_FORCE_PACK, "Pack AFBC textures progressively in the background"},
    {"cs",         PAN_DBG_CS,         "Enable extra checks in command stream"},
    DEBUG_NAMED_VALUE_END
 };
@@ -154,7 +154,7 @@ get_max_msaa(struct panfrost_device *dev, enum pipe_format format)
    /* t760 (GPU ID 0x750 - not a typo) has a HW issue in versions before
     * the r1p0 version, which prevents 16x MSAA from working properly.
     */
-   if (panfrost_device_gpu_id(dev) == 0x750 &&
+   if (panfrost_device_gpu_prod_id(dev) == 0x750 &&
        panfrost_device_gpu_rev(dev) < 0x1000)
       max_msaa = MIN2(max_msaa, 8);
 
@@ -191,11 +191,6 @@ panfrost_is_format_supported(struct pipe_screen *screen,
 
    /* Z16 causes dEQP failures on t720 */
    if (format == PIPE_FORMAT_Z16_UNORM && dev->arch <= 4)
-      return false;
-
-   if (dev->arch <= 4 && util_format_get_blocksize(format) >= 16 &&
-       !pan_screen(screen)->allow_128bit_rts_v4 &&
-       (bind & PIPE_BIND_RENDER_TARGET))
       return false;
 
    /* Check we support the format with the given bind */
@@ -639,7 +634,7 @@ panfrost_init_screen_caps(struct panfrost_screen *screen)
    caps->depth_clip_disable = true;
    caps->mixed_framebuffer_sizes = true;
    caps->frontend_noop = true;
-   caps->sample_shading = true;
+   caps->sample_shading = dev->arch >= 6;
    caps->fragment_shader_derivatives = true;
    caps->framebuffer_no_attachment = true;
    caps->quads_follow_provoking_vertex_convention = true;
@@ -675,6 +670,9 @@ panfrost_init_screen_caps(struct panfrost_screen *screen)
    caps->vs_instanceid = true;
    caps->texture_multisample = true;
    caps->surface_sample_count = true;
+
+   caps->device_reset_status_query = dev->arch >= 10;
+   caps->robust_buffer_access_behavior = dev->arch >= 6;
 
    caps->sampler_view_target = true;
    caps->clip_halfz = true;
@@ -890,14 +888,6 @@ panfrost_destroy_screen(struct pipe_screen *pscreen)
    ralloc_free(pscreen);
 }
 
-static const void *
-panfrost_screen_get_compiler_options(struct pipe_screen *pscreen,
-                                     enum pipe_shader_ir ir,
-                                     enum pipe_shader_type shader)
-{
-   return pan_shader_get_compiler_options(pan_screen(pscreen)->dev.arch);
-}
-
 static struct disk_cache *
 panfrost_get_disk_shader_cache(struct pipe_screen *pscreen)
 {
@@ -971,6 +961,8 @@ panfrost_create_screen(int fd, const struct pipe_screen_config *config,
    /* Debug must be set first for pandecode to work correctly */
    dev->debug =
       debug_get_flags_option("PAN_MESA_DEBUG", panfrost_debug_options, 0);
+   dev->fault_injection_rate =
+      debug_get_num_option("PAN_FAULT_INJECTION_RATE", 0);
    screen->max_afbc_packing_ratio = debug_get_num_option(
       "PAN_MAX_AFBC_PACKING_RATIO", DEFAULT_MAX_AFBC_PACKING_RATIO);
 
@@ -984,10 +976,13 @@ panfrost_create_screen(int fd, const struct pipe_screen_config *config,
    if (dev->debug & PAN_DBG_NO_AFBC)
       dev->has_afbc = false;
 
+   dev->relaxed_afbc_yuv_imports =
+      driQueryOptionb(config->options, "pan_relax_afbc_yuv_imports");
+
    /* Bail early on unsupported hardware */
    if (dev->model == NULL) {
       debug_printf("panfrost: Unsupported model %X",
-                   panfrost_device_gpu_id(dev));
+                   panfrost_device_gpu_prod_id(dev));
       panfrost_destroy_screen(&(screen->base));
       return NULL;
    }
@@ -995,10 +990,16 @@ panfrost_create_screen(int fd, const struct pipe_screen_config *config,
    snprintf(screen->renderer_string, sizeof(screen->renderer_string),
             "%s (Panfrost)", dev->model->name);
 
+   screen->afbc_tiled = driQueryOptionb(config->options, "pan_afbc_tiled");
+
    screen->force_afbc_packing = dev->debug & PAN_DBG_FORCE_PACK;
    if (!screen->force_afbc_packing)
       screen->force_afbc_packing = driQueryOptionb(config->options,
                                                    "pan_force_afbc_packing");
+   screen->afbcp_reads_threshold = driQueryOptioni(config->options,
+                                                   "pan_afbcp_reads_threshold");
+   screen->afbcp_gpu_payload_sizes = driQueryOptionb(config->options,
+                                                     "pan_afbcp_gpu_payload_sizes");
 
    const char *option = debug_get_option("PAN_AFRC_RATE", NULL);
    if (!option) {
@@ -1024,9 +1025,6 @@ panfrost_create_screen(int fd, const struct pipe_screen_config *config,
       return NULL;
    }
 
-   screen->allow_128bit_rts_v4 =
-      driQueryOptionb(config->options, "pan_allow_128bit_rts_v4");
-
    screen->csf_tiler_heap.chunk_size = driQueryOptioni(config->options,
                                                        "pan_csf_chunk_size");
    screen->csf_tiler_heap.initial_chunks = driQueryOptioni(config->options,
@@ -1049,7 +1047,6 @@ panfrost_create_screen(int fd, const struct pipe_screen_config *config,
    screen->base.is_dmabuf_modifier_supported =
       panfrost_is_dmabuf_modifier_supported;
    screen->base.context_create = panfrost_create_context;
-   screen->base.get_compiler_options = panfrost_screen_get_compiler_options;
    screen->base.get_disk_shader_cache = panfrost_get_disk_shader_cache;
    screen->base.fence_reference = panfrost_fence_reference;
    screen->base.fence_finish = panfrost_fence_finish;
@@ -1074,6 +1071,9 @@ panfrost_create_screen(int fd, const struct pipe_screen_config *config,
       panfrost_destroy_screen(&(screen->base));
       return NULL;
    }
+
+   for (unsigned i = 0; i <= MESA_SHADER_COMPUTE; i++)
+      screen->base.nir_options[i] = pan_shader_get_compiler_options(pan_screen(&screen->base)->dev.arch);
 
    switch (dev->arch) {
    case 4:

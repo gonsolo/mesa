@@ -16,7 +16,8 @@
  */
 
 static void
-def_size(nir_def *def, unsigned *size, unsigned *align)
+def_size(nir_def *def, unsigned *size, unsigned *align,
+         nir_preamble_class *class)
 {
    unsigned bit_size = def->bit_size == 1 ? 32 : def->bit_size;
    /* Due to the implicit const file promotion we want to expand 16-bit values
@@ -25,6 +26,7 @@ def_size(nir_def *def, unsigned *size, unsigned *align)
     */
    *size = DIV_ROUND_UP(bit_size, 32) * def->num_components;
    *align = 1;
+   *class = nir_preamble_class_general;
 }
 
 static bool
@@ -267,8 +269,18 @@ avoid_instr(const nir_instr *instr, const void *data)
 }
 
 static bool
-set_speculate(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *_)
+set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
 {
+   if (instr->type == nir_instr_type_tex) {
+      nir_instr_as_tex(instr)->can_speculate = true;
+      return true;
+   }
+
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+
+   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+
    switch (intr->intrinsic) {
    /* These instructions go through bounds-checked hardware descriptors so
     * should be safe to speculate.
@@ -311,15 +323,15 @@ ir3_nir_opt_preamble(nir_shader *nir, struct ir3_shader_variant *v)
    if (max_size == 0)
       return false;
 
-   bool progress = nir_shader_intrinsics_pass(nir, set_speculate,
-                                              nir_metadata_control_flow, NULL);
+   bool progress = nir_shader_instructions_pass(nir, set_speculate,
+                                                nir_metadata_control_flow, NULL);
 
    nir_opt_preamble_options options = {
       .drawid_uniform = true,
       .subgroup_size_uniform = true,
       .load_workgroup_size_allowed = true,
       .def_size = def_size,
-      .preamble_storage_size = max_size,
+      .preamble_storage_size[nir_preamble_class_general] = max_size,
       .instr_cost_cb = instr_cost,
       .avoid_instr_cb = avoid_instr,
       .rewrite_cost_cb = rewrite_cost,

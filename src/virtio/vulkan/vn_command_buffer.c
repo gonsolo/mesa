@@ -218,8 +218,6 @@ vn_cmd_fix_image_memory_barrier_common(const struct vn_image *img,
        *new_layout != VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
       return result;
 
-   assert(img->wsi.is_wsi);
-
    /* prime blit src or no layout transition */
    if (img->wsi.is_prime_blit_src || *old_layout == *new_layout) {
       if (*old_layout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
@@ -1481,19 +1479,6 @@ vn_CmdCopyImageToBuffer(VkCommandBuffer commandBuffer,
                         uint32_t regionCount,
                         const VkBufferImageCopy *pRegions)
 {
-   struct vn_image *img = vn_image_from_handle(srcImage);
-   struct vn_buffer *buf = vn_buffer_from_handle(dstBuffer);
-
-   /* The prime blit dst buffer is internal to common wsi layer. Only the
-    * corresponding wsi image can blit to it.
-    */
-   if (buf->wsi.mem) {
-      assert(img->wsi.is_wsi);
-      assert(img->wsi.is_prime_blit_src);
-      assert(!img->wsi.blit_mem);
-      img->wsi.blit_mem = buf->wsi.mem;
-   }
-
    VN_CMD_ENQUEUE(vkCmdCopyImageToBuffer, commandBuffer, srcImage,
                   srcImageLayout, dstBuffer, regionCount, pRegions);
 }

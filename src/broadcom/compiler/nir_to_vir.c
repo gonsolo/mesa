@@ -2142,7 +2142,7 @@ v3d_optimize_nir(struct v3d_compile *c, struct nir_shader *s)
                          NULL);
 
                 NIR_PASS(progress, s, nir_lower_alu_to_scalar, NULL, NULL);
-                NIR_PASS(progress, s, nir_lower_phis_to_scalar, false);
+                NIR_PASS(progress, s, nir_lower_phis_to_scalar, NULL, NULL);
                 NIR_PASS(progress, s, nir_copy_prop);
                 NIR_PASS(progress, s, nir_opt_remove_phis);
                 NIR_PASS(progress, s, nir_opt_dce);
@@ -2769,14 +2769,8 @@ ntq_emit_load_input(struct v3d_compile *c, nir_intrinsic_instr *instr)
 {
         /* XXX: Use ldvpmv (uniform offset) or ldvpmd (non-uniform offset).
          *
-         * Right now the driver sets support_indirect_inputs even
-         * if we don't support non-uniform offsets because we also set the
-         * lower_all_io_to_temps option in the NIR compiler. This ensures that
-         * any indirect indexing on in/out variables is turned into indirect
-         * indexing on temporary variables instead, that we handle by lowering
-         * to scratch. If we implement non-uniform offset here we might be able
-         * to avoid the temp and scratch lowering, which involves copying from
-         * the input to the temp variable, possibly making code more optimal.
+         * Indirect indexing is lowered by the GLSL compiler based on
+         * support_indirect_inputs.
          */
         unsigned offset =
                 nir_intrinsic_base(instr) + nir_src_as_uint(instr->src[0]);

@@ -40,11 +40,10 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
 {
    VkFormatFeatureFlags2 features = 0;
 
-   /* These optional formats need custom borders for opaque black, so hide for
+   /* This optional format needs hacks for opaque black, so hide for
     * performance. We might specially enable this for Proton / behind a driconf.
     */
-   if (vk_format == VK_FORMAT_A8_UNORM_KHR ||
-       vk_format == VK_FORMAT_B4G4R4A4_UNORM_PACK16)
+   if (vk_format == VK_FORMAT_A8_UNORM_KHR)
       return 0;
 
    enum pipe_format p_format = hk_format_to_pipe_format(vk_format);
@@ -1360,28 +1359,17 @@ hk_BindImageMemory2(VkDevice device, uint32_t bindInfoCount,
       /* Ignore this struct on Android, we cannot access swapchain structures
        * there. */
 #ifdef HK_USE_WSI_PLATFORM
-      const VkBindImageMemorySwapchainInfoKHR *swapchain_info =
-         vk_find_struct_const(pBindInfos[i].pNext,
-                              BIND_IMAGE_MEMORY_SWAPCHAIN_INFO_KHR);
-
-      if (swapchain_info && swapchain_info->swapchain != VK_NULL_HANDLE) {
-         VkImage _wsi_image = wsi_common_get_image(swapchain_info->swapchain,
-                                                   swapchain_info->imageIndex);
-         VK_FROM_HANDLE(hk_image, wsi_img, _wsi_image);
-
-         assert(image->plane_count == 1);
-         assert(wsi_img->plane_count == 1);
-
-         struct hk_image_plane *plane = &image->planes[0];
-         struct hk_image_plane *swapchain_plane = &wsi_img->planes[0];
-
-         /* Copy memory binding information from swapchain image to the current
-          * image's plane. */
-         plane->addr = swapchain_plane->addr;
-         continue;
+      if (!mem) {
+         const VkBindImageMemorySwapchainInfoKHR *swapchain_info =
+            vk_find_struct_const(pBindInfos[i].pNext,
+                                 BIND_IMAGE_MEMORY_SWAPCHAIN_INFO_KHR);
+         assert(swapchain_info && swapchain_info->swapchain != VK_NULL_HANDLE);
+         mem = hk_device_memory_from_handle(wsi_common_get_memory(
+            swapchain_info->swapchain, swapchain_info->imageIndex));
       }
 #endif
 
+      assert(mem);
       uint64_t offset_B = pBindInfos[i].memoryOffset;
       if (image->disjoint) {
          const VkBindImagePlaneMemoryInfo *plane_info = vk_find_struct_const(

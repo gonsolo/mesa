@@ -68,7 +68,8 @@ struct hk_shader_info {
       struct {
          uint32_t attribs_read;
          BITSET_DECLARE(attrib_components_read, AGX_MAX_ATTRIBS * 4);
-         uint8_t _pad[8];
+         bool use_prolog;
+         uint8_t _pad[7];
       } vs;
 
       struct {
@@ -107,7 +108,7 @@ struct hk_shader_info {
    gl_shader_stage stage : 8;
    uint8_t clip_distance_array_size;
    uint8_t cull_distance_array_size;
-   uint8_t image_heap_uniform;
+   uint8_t set_count;
 
    /* XXX: is there a less goofy way to do this? I really don't want dynamic
     * allocation here.

@@ -1310,8 +1310,6 @@ zink_screen_init_compiler(struct zink_screen *screen)
       .has_isub = true,
       .lower_mul_2x32_64 = true,
       .support_16bit_alu = true, /* not quite what it sounds like */
-      .support_indirect_inputs = (uint8_t)BITFIELD_MASK(MESA_SHADER_COMPUTE),
-      .support_indirect_outputs = (uint8_t)BITFIELD_MASK(MESA_SHADER_COMPUTE),
       .max_unroll_iterations = 0,
    };
 
@@ -1359,17 +1357,10 @@ zink_screen_init_compiler(struct zink_screen *screen)
          nir_lower_bitfield_reverse64 | nir_lower_bitfield_extract64;
    }
 
-   screen->nir_options.support_indirect_inputs = (uint8_t)BITFIELD_MASK(PIPE_SHADER_TYPES);
+   screen->nir_options.support_indirect_inputs = BITFIELD_BIT(MESA_SHADER_TESS_CTRL) |
+                                                 BITFIELD_BIT(MESA_SHADER_TESS_EVAL) |
+                                                 BITFIELD_BIT(MESA_SHADER_FRAGMENT);
    screen->nir_options.support_indirect_outputs = (uint8_t)BITFIELD_MASK(PIPE_SHADER_TYPES);
-}
-
-const void *
-zink_get_compiler_options(struct pipe_screen *pscreen,
-                          enum pipe_shader_ir ir,
-                          gl_shader_stage shader)
-{
-   assert(ir == PIPE_SHADER_IR_NIR);
-   return &zink_screen(pscreen)->nir_options;
 }
 
 struct nir_shader *
@@ -1568,7 +1559,7 @@ optimize_nir(struct nir_shader *s, struct zink_shader *zs, bool can_shrink)
       }
       NIR_PASS(progress, s, nir_opt_dce);
       NIR_PASS(progress, s, nir_opt_dead_cf);
-      NIR_PASS(progress, s, nir_lower_phis_to_scalar, false);
+      NIR_PASS(progress, s, nir_lower_phis_to_scalar, NULL, NULL);
       NIR_PASS(progress, s, nir_opt_cse);
 
       nir_opt_peephole_select_options peephole_select_options = {
@@ -3284,7 +3275,7 @@ lower_64bit_vars(nir_shader *shader, bool doubles_only)
    ralloc_free(derefs);
    if (progress) {
       nir_lower_alu_to_scalar(shader, filter_64_bit_instr, NULL);
-      nir_lower_phis_to_scalar(shader, false);
+      nir_lower_phis_to_scalar(shader, NULL, NULL);
       optimize_nir(shader, NULL, true);
    }
    return progress;
@@ -3353,7 +3344,7 @@ zink_shader_spirv_compile(struct zink_screen *screen, struct zink_shader *zs, st
       sci.setLayoutCount = pg->num_dsl;
       sci.pSetLayouts = pg->dsl;
    } else {
-      sci.setLayoutCount = zs->info.stage + 1;
+      sci.setLayoutCount = zs->info.stage == MESA_SHADER_COMPUTE ? 1 : ZINK_GFX_SHADER_COUNT;
       dsl[zs->info.stage] = zs->precompile.dsl;;
       sci.pSetLayouts = dsl;
    }
@@ -5424,16 +5415,17 @@ loop_io_var_mask(nir_shader *nir, nir_variable_mode mode, bool indirect, bool pa
 {
    ASSERTED bool is_vertex_input = nir->info.stage == MESA_SHADER_VERTEX && mode == nir_var_shader_in;
    u_foreach_bit64(slot, mask) {
+      unsigned location = slot;
       if (patch)
-         slot += VARYING_SLOT_PATCH0;
+         location += VARYING_SLOT_PATCH0;
 
       /* this should've been handled explicitly */
-      assert(is_vertex_input || !is_clipcull_dist(slot));
+      assert(is_vertex_input || !is_clipcull_dist(location));
 
       unsigned remaining = 0;
       do {
          /* scan the slot for usage */
-         struct rework_io_state ris = scan_io_var_slot(nir, mode, slot, indirect);
+         struct rework_io_state ris = scan_io_var_slot(nir, mode, location, indirect);
          /* one of these must be true or things have gone very wrong */
          assert(indirect || ris.component_mask || find_rework_var(nir, &ris) || remaining);
          /* release builds only */
@@ -6384,7 +6376,7 @@ zink_shader_init(struct zink_screen *screen, struct zink_shader *zs)
    memcpy(&zs->info, &nir->info, sizeof(nir->info));
 }
 
-char *
+void
 zink_shader_finalize(struct pipe_screen *pscreen, struct nir_shader *nir)
 {
    struct zink_screen *screen = zink_screen(pscreen);
@@ -6409,8 +6401,6 @@ zink_shader_finalize(struct pipe_screen *pscreen, struct nir_shader *nir)
       nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
    if (screen->driconf.inline_uniforms)
       nir_find_inlinable_uniforms(nir);
-
-   return NULL;
 }
 
 void
@@ -6450,11 +6440,14 @@ gfx_shader_prune(struct zink_screen *screen, struct zink_shader *shader)
    assert(stage < ZINK_GFX_SHADER_COUNT);
    util_queue_fence_wait(&prog->base.cache_fence);
    unsigned stages_present = prog->stages_present;
+   unsigned stages_remaining = prog->stages_remaining;
    if (prog->shaders[MESA_SHADER_TESS_CTRL] &&
-         prog->shaders[MESA_SHADER_TESS_CTRL]->non_fs.is_generated)
+         prog->shaders[MESA_SHADER_TESS_CTRL]->non_fs.is_generated) {
       stages_present &= ~BITFIELD_BIT(MESA_SHADER_TESS_CTRL);
+      stages_remaining &= ~BITFIELD_BIT(MESA_SHADER_TESS_CTRL);
+   }
    unsigned idx = zink_program_cache_stages(stages_present);
-   if (!prog->base.removed && prog->stages_present == prog->stages_remaining &&
+   if (!prog->base.removed && stages_present == stages_remaining &&
          (stage == MESA_SHADER_FRAGMENT || !shader->non_fs.is_generated)) {
       struct hash_table *ht = &prog->base.ctx->program_cache[idx];
       simple_mtx_lock(&prog->base.ctx->program_lock[idx]);

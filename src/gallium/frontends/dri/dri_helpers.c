@@ -236,7 +236,7 @@ dri_server_wait_sync(struct dri_context *_ctx, void *_fence, unsigned flags)
    _mesa_glthread_finish(st->ctx);
 
    if (ctx->fence_server_sync)
-      ctx->fence_server_sync(ctx, fence->pipe_fence);
+      ctx->fence_server_sync(ctx, fence->pipe_fence, 0);
 }
 
 struct dri_image *
@@ -311,14 +311,10 @@ void
 dri2_destroy_image(struct dri_image *img)
 {
    const __DRIimageLoaderExtension *imgLoader = img->screen->image.loader;
-   const __DRIdri2LoaderExtension *dri2Loader = img->screen->dri2.loader;
 
    if (imgLoader && imgLoader->base.version >= 4 &&
          imgLoader->destroyLoaderImageState) {
       imgLoader->destroyLoaderImageState(img->loader_private);
-   } else if (dri2Loader && dri2Loader->base.version >= 5 &&
-         dri2Loader->destroyLoaderImageState) {
-      dri2Loader->destroyLoaderImageState(img->loader_private);
    }
 
    pipe_resource_reference(&img->texture, NULL);
@@ -461,6 +457,22 @@ static const struct dri2_format_mapping dri2_format_table[] = {
         PIPE_FORMAT_RG88_UNORM, 1, },
       { DRM_FORMAT_GR1616,        __DRI_IMAGE_FORMAT_GR1616,
         PIPE_FORMAT_RG1616_UNORM, 1, },
+      { DRM_FORMAT_R16F,          PIPE_FORMAT_R16_FLOAT,
+         PIPE_FORMAT_R16_FLOAT, 1 },
+      { DRM_FORMAT_R32F,          PIPE_FORMAT_R32_FLOAT,
+         PIPE_FORMAT_R32_FLOAT, 1 },
+      { DRM_FORMAT_GR1616F,       PIPE_FORMAT_R16G16_FLOAT,
+         PIPE_FORMAT_R16G16_FLOAT, 1 },
+      { DRM_FORMAT_GR3232F,       PIPE_FORMAT_R32G32_FLOAT,
+         PIPE_FORMAT_R32G32_FLOAT, 1 },
+      { DRM_FORMAT_BGR161616,     PIPE_FORMAT_R16G16B16_UNORM,
+         PIPE_FORMAT_R16G16B16_UNORM, 1 },
+      { DRM_FORMAT_BGR161616F,    PIPE_FORMAT_R16G16B16_FLOAT,
+         PIPE_FORMAT_R16G16B16_FLOAT, 1 },
+      { DRM_FORMAT_BGR323232F,    PIPE_FORMAT_R32G32B32_FLOAT,
+         PIPE_FORMAT_R32G32B32_FLOAT, 1 },
+      { DRM_FORMAT_ABGR32323232F, PIPE_FORMAT_R32G32B32A32_FLOAT,
+         PIPE_FORMAT_R32G32B32A32_FLOAT, 1 },
 
       /*
        * YUV formats:
@@ -779,6 +791,9 @@ dri_query_dma_buf_formats(struct dri_screen *screen, int max, int *formats,
           pscreen->is_format_supported(pscreen, map->pipe_format,
                                        screen->target, 0, 0,
                                        PIPE_BIND_SAMPLER_VIEW) ||
+          pscreen->is_format_supported(pscreen, map->pipe_format,
+                                       screen->target, 0, 0,
+                                       PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_SAMPLER_VIEW_SUBOPTIMAL) ||
           dri2_yuv_dma_buf_supported(screen, map)) {
          if (j < max)
             formats[j] = map->dri_fourcc;
@@ -838,7 +853,7 @@ dri_image_fence_sync(struct dri_context *ctx, struct dri_image *img)
    img->in_fence_fd = -1;
 
    pipe->create_fence_fd(pipe, &fence, fd, PIPE_FD_TYPE_NATIVE_SYNC);
-   pipe->fence_server_sync(pipe, fence);
+   pipe->fence_server_sync(pipe, fence, 0);
    pipe->screen->fence_reference(pipe->screen, &fence, NULL);
 
    close(fd);

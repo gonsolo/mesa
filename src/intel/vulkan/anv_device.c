@@ -51,21 +51,22 @@
 #include "genxml/gen70_pack.h"
 #include "genxml/genX_bits.h"
 
+const struct gfx8_border_color anv_default_border_colors[] = {
+   [VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK] =  { .float32 = { 0.0, 0.0, 0.0, 0.0 } },
+   [VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK] =       { .float32 = { 0.0, 0.0, 0.0, 1.0 } },
+   [VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE] =       { .float32 = { 1.0, 1.0, 1.0, 1.0 } },
+   [VK_BORDER_COLOR_INT_TRANSPARENT_BLACK] =    { .uint32 = { 0, 0, 0, 0 } },
+   [VK_BORDER_COLOR_INT_OPAQUE_BLACK] =         { .uint32 = { 0, 0, 0, 1 } },
+   [VK_BORDER_COLOR_INT_OPAQUE_WHITE] =         { .uint32 = { 1, 1, 1, 1 } },
+};
+
 static void
 anv_device_init_border_colors(struct anv_device *device)
 {
-   static const struct gfx8_border_color border_colors[] = {
-      [VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK] =  { .float32 = { 0.0, 0.0, 0.0, 0.0 } },
-      [VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK] =       { .float32 = { 0.0, 0.0, 0.0, 1.0 } },
-      [VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE] =       { .float32 = { 1.0, 1.0, 1.0, 1.0 } },
-      [VK_BORDER_COLOR_INT_TRANSPARENT_BLACK] =    { .uint32 = { 0, 0, 0, 0 } },
-      [VK_BORDER_COLOR_INT_OPAQUE_BLACK] =         { .uint32 = { 0, 0, 0, 1 } },
-      [VK_BORDER_COLOR_INT_OPAQUE_WHITE] =         { .uint32 = { 1, 1, 1, 1 } },
-   };
-
    device->border_colors =
       anv_state_pool_emit_data(&device->dynamic_state_pool,
-                               sizeof(border_colors), 64, border_colors);
+                               sizeof(anv_default_border_colors),
+                               64, anv_default_border_colors);
 }
 
 static VkResult
@@ -916,6 +917,7 @@ VkResult anv_CreateDevice(
    device->breakpoint = anv_state_pool_alloc(&device->dynamic_state_pool, 4,
                                              4);
    p_atomic_set(&device->draw_call_count, 0);
+   p_atomic_set(&device->dispatch_call_count, 0);
 
    /* Create a separate command pool for companion RCS command buffer. */
    if (device->info->verx10 >= 125) {
@@ -1551,6 +1553,7 @@ VkResult anv_AllocateMemory(
    struct anv_image *image = dedicated_info ?
                              anv_image_from_handle(dedicated_info->image) :
                              NULL;
+   mem->dedicated_image = image;
 
    if (device->info->ver >= 20 && image &&
        image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT &&
@@ -1808,8 +1811,10 @@ VkResult anv_GetMemoryHostPointerPropertiesEXT(
 
    switch (handleType) {
    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT:
-      /* Host memory can be imported as any memory type. */
+
       pMemoryHostPointerProperties->memoryTypeBits =
+         device->info->ver >= 20 ?
+         device->physical->memory.default_buffer_mem_types :
          (1ull << device->physical->memory.type_count) - 1;
 
       return VK_SUCCESS;
@@ -2186,9 +2191,6 @@ const struct intel_device_info_pat_entry *
 anv_device_get_pat_entry(struct anv_device *device,
                          enum anv_bo_alloc_flags alloc_flags)
 {
-   if (alloc_flags & ANV_BO_ALLOC_IMPORTED)
-      return &device->info->pat.cached_coherent;
-
    if (alloc_flags & ANV_BO_ALLOC_COMPRESSED) {
       /* Compressed PAT entries are available on Xe2+. */
       assert(device->info->ver >= 20);
@@ -2196,6 +2198,9 @@ anv_device_get_pat_entry(struct anv_device *device,
              &device->info->pat.compressed_scanout :
              &device->info->pat.compressed;
    }
+
+   if (alloc_flags & ANV_BO_ALLOC_IMPORTED)
+      return &device->info->pat.cached_coherent;
 
    if (alloc_flags & (ANV_BO_ALLOC_EXTERNAL | ANV_BO_ALLOC_SCANOUT))
       return &device->info->pat.scanout;

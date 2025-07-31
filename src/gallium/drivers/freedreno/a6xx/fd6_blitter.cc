@@ -333,14 +333,21 @@ emit_blit_setup(struct fd_ringbuffer *ring, enum pipe_format pfmt,
    if (fmt == FMT6_10_10_10_2_UNORM_DEST)
       fmt = FMT6_16_16_16_16_FLOAT;
 
+   enum a6xx_sp_a2d_output_ifmt_type output_ifmt_type;
+   if (util_format_is_pure_uint(pfmt))
+      output_ifmt_type = OUTPUT_IFMT_2D_UINT;
+   else if (util_format_is_pure_sint(pfmt))
+      output_ifmt_type = OUTPUT_IFMT_2D_SINT;
+   else
+      output_ifmt_type = OUTPUT_IFMT_2D_FLOAT;
+
    /* This register is probably badly named... it seems that it's
     * controlling the internal/accumulator format or something like
     * that. It's certainly not tied to only the src format.
     */
    OUT_REG(ring, SP_A2D_OUTPUT_INFO(
          CHIP,
-         .sint = util_format_is_pure_sint(pfmt),
-         .uint = util_format_is_pure_uint(pfmt),
+         .ifmt_type = output_ifmt_type,
          .color_format = fmt,
          .srgb = is_srgb,
          .mask = 0xf,
@@ -1519,6 +1526,9 @@ FD_GENX(fd6_blitter_init);
 unsigned
 fd6_tile_mode_for_format(enum pipe_format pfmt)
 {
+   if (!util_is_power_of_two_nonzero(util_format_get_blocksize(pfmt)))
+      return TILE6_LINEAR;
+
    /* basically just has to be a format we can blit, so uploads/downloads
     * via linear staging buffer works:
     */
@@ -1527,6 +1537,7 @@ fd6_tile_mode_for_format(enum pipe_format pfmt)
 
    return TILE6_LINEAR;
 }
+
 unsigned
 fd6_tile_mode(const struct pipe_resource *tmpl)
 {

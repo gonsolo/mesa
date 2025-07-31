@@ -3350,6 +3350,108 @@ impl DisplayOp for OpHMul2 {
 }
 impl_display_for_op!(OpHMul2);
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[allow(dead_code)]
+pub enum ImmaSize {
+    M8N8K16,
+    M8N8K32,
+    M16N8K16,
+    M16N8K32,
+    M16N8K64,
+}
+
+impl fmt::Display for ImmaSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ImmaSize::M8N8K16 => write!(f, ".m8n8k16"),
+            ImmaSize::M8N8K32 => write!(f, ".m8n8k32"),
+            ImmaSize::M16N8K16 => write!(f, ".m16n8k16"),
+            ImmaSize::M16N8K32 => write!(f, ".m16n8k32"),
+            ImmaSize::M16N8K64 => write!(f, ".m16n8k64"),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(SrcsAsSlice, DstsAsSlice)]
+pub struct OpImma {
+    #[dst_type(Vec)]
+    pub dst: Dst,
+
+    pub mat_size: ImmaSize,
+    pub src_types: [IntType; 2],
+    pub saturate: bool,
+
+    #[src_type(SSA)]
+    pub srcs: [Src; 3],
+}
+
+impl DisplayOp for OpImma {
+    fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let sat = if self.saturate { ".sat" } else { "" };
+        write!(
+            f,
+            "imma{}{}{}{sat} {} {} {}",
+            self.mat_size,
+            self.src_types[0],
+            self.src_types[1],
+            self.srcs[0],
+            self.srcs[1],
+            self.srcs[2],
+        )
+    }
+}
+
+impl_display_for_op!(OpImma);
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[allow(dead_code)]
+pub enum HmmaSize {
+    M16N8K16,
+    M16N8K8,
+    M16N8K4,
+}
+
+impl fmt::Display for HmmaSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HmmaSize::M16N8K16 => write!(f, ".m16n8k16"),
+            HmmaSize::M16N8K8 => write!(f, ".m16n8k8"),
+            HmmaSize::M16N8K4 => write!(f, ".m16n8k4"),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(SrcsAsSlice, DstsAsSlice)]
+pub struct OpHmma {
+    #[dst_type(Vec)]
+    pub dst: Dst,
+
+    pub mat_size: HmmaSize,
+    pub src_type: FloatType,
+    pub dst_type: FloatType,
+
+    #[src_type(SSA)]
+    pub srcs: [Src; 3],
+}
+
+impl DisplayOp for OpHmma {
+    fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "hmma{}{} {} {} {}",
+            self.mat_size,
+            self.dst_type,
+            self.srcs[0],
+            self.srcs[1],
+            self.srcs[2],
+        )
+    }
+}
+
+impl_display_for_op!(OpHmma);
+
 #[repr(C)]
 #[derive(SrcsAsSlice, DstsAsSlice)]
 pub struct OpHFma2 {
@@ -6843,7 +6945,15 @@ impl_display_for_op!(OpBar);
 #[repr(C)]
 #[derive(SrcsAsSlice, DstsAsSlice)]
 pub struct OpTexDepBar {
-    pub textures_left: i8,
+    pub textures_left: u8,
+}
+
+impl OpTexDepBar {
+    /// Maximum value of textures_left
+    ///
+    /// The maximum encodable value is 63.  However, nvcc starts emitting
+    /// TEXDEPBAR 0x3e as soon as it hits 62 texture instructions.
+    pub const MAX_TEXTURES_LEFT: u8 = 62;
 }
 
 impl DisplayOp for OpTexDepBar {
@@ -7639,6 +7749,8 @@ pub enum Op {
     HMul2(OpHMul2),
     HSet2(OpHSet2),
     HSetP2(OpHSetP2),
+    Imma(OpImma),
+    Hmma(OpHmma),
     HMnMx2(OpHMnMx2),
     BMsk(OpBMsk),
     BRev(OpBRev),
@@ -7804,6 +7916,9 @@ impl Op {
             | Op::DMnMx(_)
             | Op::DMul(_)
             | Op::DSetP(_) => false,
+
+            // Matrix Multiply Add
+            Op::Imma(_) | Op::Hmma(_) => false,
 
             // Integer ALU
             Op::BRev(_) | Op::Flo(_) | Op::PopC(_) => false,
@@ -8075,7 +8190,6 @@ impl fmt::Display for Pred {
 }
 
 pub const MIN_INSTR_DELAY: u8 = 1;
-pub const MAX_INSTR_DELAY: u8 = 15;
 
 pub struct InstrDeps {
     pub delay: u8,
@@ -8931,6 +9045,9 @@ pub trait ShaderModel {
 
     /// Worst-case access-after-write latency
     fn worst_latency(&self, write: &Op, dst_idx: usize) -> u32;
+
+    /// Maximum encodable instruction delay
+    fn max_instr_delay(&self) -> u8;
 
     fn legalize_op(&self, b: &mut LegalizeBuilder, op: &mut Op);
     fn encode_shader(&self, s: &Shader<'_>) -> Vec<u32>;

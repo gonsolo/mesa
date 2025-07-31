@@ -1007,7 +1007,7 @@ brw_nir_optimize(nir_shader *nir,
 
       LOOP_OPT(nir_copy_prop);
 
-      LOOP_OPT(nir_lower_phis_to_scalar, false);
+      LOOP_OPT(nir_lower_phis_to_scalar, NULL, NULL);
 
       LOOP_OPT(nir_copy_prop);
       LOOP_OPT(nir_opt_dce);
@@ -1526,8 +1526,8 @@ brw_nir_link_shaders(const struct brw_compiler *compiler,
          ms_outputs |= BITFIELD64_BIT(var->data.location);
 
       uint64_t zero_inputs = ~ms_outputs & fs_inputs;
-      zero_inputs &= BITFIELD64_BIT(VARYING_SLOT_LAYER) |
-                     BITFIELD64_BIT(VARYING_SLOT_VIEWPORT);
+      zero_inputs &= VARYING_BIT_LAYER |
+                     VARYING_BIT_VIEWPORT;
 
       if (zero_inputs)
          NIR_PASS(_, consumer, brw_nir_zero_inputs, &zero_inputs);
@@ -1574,7 +1574,7 @@ brw_nir_link_shaders(const struct brw_compiler *compiler,
 
    if (producer->info.stage == MESA_SHADER_TESS_CTRL &&
        producer->options->vectorize_tess_levels)
-   NIR_PASS_V(producer, nir_lower_tess_level_array_vars_to_vec);
+   NIR_PASS(_, producer, nir_lower_tess_level_array_vars_to_vec);
 
    NIR_PASS(_, producer, nir_opt_combine_stores, nir_var_shader_out);
    NIR_PASS(_, consumer, nir_opt_vectorize_io_vars, nir_var_shader_in);
@@ -1592,7 +1592,7 @@ brw_nir_link_shaders(const struct brw_compiler *compiler,
        * between whole workgroup, possibly using multiple HW threads). For
        * those write-mask in output is handled by I/O lowering.
        */
-      NIR_PASS_V(producer, nir_lower_io_vars_to_temporaries,
+      NIR_PASS(_, producer, nir_lower_io_vars_to_temporaries,
                  nir_shader_get_entrypoint(producer), true, false);
       NIR_PASS(_, producer, nir_lower_global_vars_to_local);
       NIR_PASS(_, producer, nir_split_var_copies);
@@ -2067,6 +2067,12 @@ brw_postprocess_nir(nir_shader *nir, const struct brw_compiler *compiler,
 
    if (OPT(nir_lower_int64))
       brw_nir_optimize(nir, devinfo);
+
+   /* This pass specifically looks for sequences of fmul and fadd that
+    * intel_nir_opt_peephole_ffma will try to eliminate. Call this
+    * reassociation pass first.
+    */
+   OPT(nir_opt_reassociate_matrix_mul);
 
    /* Try and fuse multiply-adds, if successful, run shrink_vectors to
     * avoid peephole_ffma to generate things like this :

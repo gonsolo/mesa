@@ -410,15 +410,15 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
       if (key.op[rt] == AGX_BG_LOAD) {
          uses_txf = true;
 
-         uint32_t index = key.tib.layered
-                             ? iview->planes[0].layered_background_desc_index
-                             : iview->planes[0].background_desc_index;
+         const struct agx_texture_packed *desc =
+            key.tib.layered ? &iview->planes[0].layered_background
+                            : &iview->planes[0].background;
 
          agx_usc_pack(&b, TEXTURE, cfg) {
             /* Shifted to match eMRT indexing, could be optimized */
             cfg.start = rt * 2;
             cfg.count = 1;
-            cfg.buffer = dev->images.bo->va->addr + index * AGX_TEXTURE_LENGTH;
+            cfg.buffer = hk_pool_upload(cmd, desc, sizeof(*desc), 8);
          }
 
          nr_tex = (rt * 2) + 1;
@@ -430,14 +430,14 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
          agx_usc_uniform(&b, 4 + (8 * rt), 8, colour);
          uniforms = MAX2(uniforms, 4 + (8 * rt) + 8);
       } else if (key.op[rt] == AGX_EOT_STORE) {
-         uint32_t index = key.tib.layered
-                             ? iview->planes[0].layered_eot_pbe_desc_index
-                             : iview->planes[0].eot_pbe_desc_index;
+         const struct agx_pbe_packed *desc = key.tib.layered
+                                                ? &iview->planes[0].layered_eot
+                                                : &iview->planes[0].eot;
 
          agx_usc_pack(&b, TEXTURE, cfg) {
             cfg.start = rt;
             cfg.count = 1;
-            cfg.buffer = dev->images.bo->va->addr + index * AGX_TEXTURE_LENGTH;
+            cfg.buffer = hk_pool_upload(cmd, desc, sizeof(*desc), 8);
          }
 
          nr_tex = rt + 1;
@@ -2614,6 +2614,30 @@ uses_blend_constant(const struct vk_color_blend_state *cb)
    return false;
 }
 
+void
+agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
+                    uint64_t attribs_read, struct agx_velem_key *keys)
+{
+   u_foreach_bit(a, vi->attributes_valid) {
+      struct vk_vertex_attribute_state attr = vi->attributes[a];
+
+      assert(vi->bindings_valid & BITFIELD_BIT(attr.binding));
+      struct vk_vertex_binding_state binding = vi->bindings[attr.binding];
+
+      /* nir_assign_io_var_locations compacts vertex inputs, eliminating
+       * unused inputs. We need to do the same here to match the locations.
+       */
+      unsigned slot = util_bitcount64(attribs_read & BITFIELD_MASK(a));
+
+      keys[slot] = (struct agx_velem_key){
+         .format = hk_format_to_pipe_format(attr.format),
+         .stride = binding.stride,
+         .divisor = binding.divisor,
+         .instanced = binding.input_rate == VK_VERTEX_INPUT_RATE_INSTANCE,
+      };
+   }
+}
+
 static void
 hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                        uint32_t draw_id, struct agx_draw draw)
@@ -2717,6 +2741,7 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                : AGX_ROBUSTNESS_DISABLED,
 
          .prolog.robustness.soft_fault = agx_has_soft_fault(&dev->dev),
+         .prolog.static_vi = !sw_vs->info.vs.use_prolog,
       };
 
       enum mesa_prim prim = vk_conv_topology(dyn->ia.primitive_topology);
@@ -2739,31 +2764,24 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       BITSET_COPY(key.prolog.component_mask,
                   sw_vs->info.vs.attrib_components_read);
 
-      u_foreach_bit(a, dyn->vi->attributes_valid) {
-         struct vk_vertex_attribute_state attr = dyn->vi->attributes[a];
+      if (sw_vs->info.vs.use_prolog) {
+         agx_fill_velem_keys(dyn->vi, sw_vs->info.vs.attribs_read,
+                             key.prolog.attribs);
 
-         assert(dyn->vi->bindings_valid & BITFIELD_BIT(attr.binding));
-         struct vk_vertex_binding_state binding =
-            dyn->vi->bindings[attr.binding];
+         u_foreach_bit(a, dyn->vi->attributes_valid) {
+            unsigned slot =
+               util_bitcount64(sw_vs->info.vs.attribs_read & BITFIELD_MASK(a));
 
-         /* nir_assign_io_var_locations compacts vertex inputs, eliminating
-          * unused inputs. We need to do the same here to match the locations.
-          */
-         unsigned slot =
-            util_bitcount64(sw_vs->info.vs.attribs_read & BITFIELD_MASK(a));
-
-         key.prolog.attribs[slot] = (struct agx_velem_key){
-            .format = hk_format_to_pipe_format(attr.format),
-            .stride = dyn->vi_binding_strides[attr.binding],
-            .divisor = binding.divisor,
-            .instanced = binding.input_rate == VK_VERTEX_INPUT_RATE_INSTANCE,
-         };
+            key.prolog.attribs[slot].stride =
+               dyn->vi_binding_strides[dyn->vi->attributes[a].binding];
+         }
       }
 
       hk_update_fast_linked(cmd, sw_vs, &key);
    }
 
-   if (IS_DIRTY(VI) || IS_DIRTY(VI_BINDINGS_VALID) || vgt_dirty ||
+   if (IS_DIRTY(VI) || IS_DIRTY(VI_BINDINGS_VALID) ||
+       IS_DIRTY(VI_BINDING_STRIDES) || vgt_dirty ||
        (gfx->dirty & HK_DIRTY_VB)) {
 
       unsigned slot = 0;
@@ -2771,14 +2789,21 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          if (dyn->vi->attributes_valid & BITFIELD_BIT(a)) {
             struct vk_vertex_attribute_state attr = dyn->vi->attributes[a];
             struct hk_addr_range vb = gfx->vb[attr.binding];
+            enum pipe_format fmt = hk_format_to_pipe_format(attr.format);
+            enum pipe_format interchange_format = agx_vbo_internal_format(fmt);
+            unsigned interchange_align =
+               util_format_get_blocksize(interchange_format);
 
             desc->root.draw.attrib_clamps[slot] = agx_calculate_vbo_clamp(
-               vb.addr, hk_format_to_pipe_format(attr.format), vb.range,
-               dyn->vi_binding_strides[attr.binding], attr.offset,
-               &desc->root.draw.attrib_base[slot]);
+               vb.addr, fmt, vb.range, dyn->vi_binding_strides[attr.binding],
+               attr.offset, &desc->root.draw.attrib_base[slot]);
+
+            desc->root.draw.attrib_strides[slot] =
+               dyn->vi_binding_strides[attr.binding] / interchange_align;
          } else {
             desc->root.draw.attrib_base[slot] = AGX_ZERO_PAGE_ADDRESS;
             desc->root.draw.attrib_clamps[slot] = 0;
+            desc->root.draw.attrib_strides[slot] = 0;
          }
 
          ++slot;

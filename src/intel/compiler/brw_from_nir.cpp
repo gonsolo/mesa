@@ -3813,11 +3813,11 @@ emit_is_helper_invocation(nir_to_brw_state &ntb, brw_reg result)
 
       brw_inst *mov = b.MOV(offset(result, b, i), brw_imm_ud(~0));
 
-      /* The at() ensures that any code emitted to get the predicate happens
+      /* The before() ensures that any code emitted to get the predicate happens
        * before the mov right above.  This is not an issue elsewhere because
        * lowering code already set up the builder this way.
        */
-      brw_emit_predicate_on_sample_mask(b.at(NULL, mov), mov);
+      brw_emit_predicate_on_sample_mask(b.before(mov), mov);
       mov->predicate_inverse = true;
    }
 }
@@ -4630,7 +4630,6 @@ static void
 set_memory_address(nir_to_brw_state &ntb,
                    const brw_builder &bld,
                    nir_intrinsic_instr *instr,
-                   bool is_store,
                    brw_reg *srcs)
 {
    const intel_device_info *devinfo = ntb.devinfo;
@@ -4886,10 +4885,14 @@ brw_from_nir_emit_cs_intrinsic(nir_to_brw_state &ntb,
       const unsigned elems = src_components * src_packing_factor;
 
       brw_builder bldn = bld.exec_all();
-      const brw_reg src = retype(get_nir_src(ntb, instr->src[0], 0), src_type);
+      brw_reg src = retype(get_nir_src(ntb, instr->src[0], 0), src_type);
       const brw_reg dst = retype(dest, dst_type);
 
       assert(dst_cmat_desc.use == src_cmat_desc.use);
+
+      const bool needs_intermediate =
+         (src.type == BRW_TYPE_BF && dst.type != BRW_TYPE_F) ||
+         (dst.type == BRW_TYPE_BF && src.type != BRW_TYPE_F);
 
       switch (src_cmat_desc.use) {
       case GLSL_CMAT_USE_B:
@@ -4899,6 +4902,16 @@ brw_from_nir_emit_cs_intrinsic(nir_to_brw_state &ntb,
       case GLSL_CMAT_USE_A:
       case GLSL_CMAT_USE_ACCUMULATOR: {
          const unsigned width = bldn.dispatch_width();
+
+         if (needs_intermediate) {
+            brw_reg tmp = bldn.vgrf(BRW_TYPE_F, elems);
+            for (unsigned c = 0; c < elems; c++) {
+               bldn.MOV(suboffset(tmp, c * width),
+                        suboffset(src, c * width));
+            }
+            src = tmp;
+         }
+
          for (unsigned c = 0; c < elems; c++) {
             bldn.MOV(suboffset(dst, c * width),
                      suboffset(src, c * width));
@@ -7165,7 +7178,7 @@ brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
                     LSC_ADDR_SURFTYPE_BSS : LSC_ADDR_SURFTYPE_BTI);
       srcs[MEMORY_LOGICAL_BINDING] =
          get_nir_buffer_intrinsic_index(ntb, bld, instr, &no_mask_handle);
-      set_memory_address(ntb, bld, instr, is_store, srcs);
+      set_memory_address(ntb, bld, instr, srcs);
       data_src = is_atomic ? 2 : 0;
       break;
    case nir_intrinsic_load_shared:
@@ -7177,7 +7190,7 @@ brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
    case nir_intrinsic_load_shared_uniform_block_intel: {
       srcs[MEMORY_LOGICAL_MODE] = brw_imm_ud(MEMORY_MODE_SHARED_LOCAL);
       srcs[MEMORY_LOGICAL_BINDING_TYPE] = brw_imm_ud(LSC_ADDR_SURFTYPE_FLAT);
-      set_memory_address(ntb, bld, instr, is_store, srcs);
+      set_memory_address(ntb, bld, instr, srcs);
       data_src = is_atomic ? 1 : 0;
       no_mask_handle = true;
       break;
@@ -7236,7 +7249,7 @@ brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
    case nir_intrinsic_store_global_block_intel:
       srcs[MEMORY_LOGICAL_MODE] = brw_imm_ud(MEMORY_MODE_UNTYPED);
       srcs[MEMORY_LOGICAL_BINDING_TYPE] = brw_imm_ud(LSC_ADDR_SURFTYPE_FLAT);
-      set_memory_address(ntb, bld, instr, is_store, srcs);
+      set_memory_address(ntb, bld, instr, srcs);
       data_src = is_atomic ? 1 : 0;
       no_mask_handle = srcs[MEMORY_LOGICAL_ADDRESS].is_scalar;
       break;

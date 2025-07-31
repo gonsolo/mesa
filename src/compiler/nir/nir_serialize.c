@@ -527,10 +527,9 @@ union packed_instr {
       unsigned exact : 1;
       unsigned no_signed_wrap : 1;
       unsigned no_unsigned_wrap : 1;
-      unsigned padding : 1;
       /* Swizzles for 2 srcs */
       unsigned two_swizzles : 4;
-      unsigned op : 9;
+      unsigned op : 10;
       unsigned packed_src_ssa_16bit : 1;
       /* Scalarized ALUs always have the same header. */
       unsigned num_followup_alu_sharing_header : 2;
@@ -709,8 +708,8 @@ write_alu(write_ctx *ctx, const nir_alu_instr *alu)
 {
    unsigned num_srcs = nir_op_infos[alu->op].num_inputs;
 
-   /* 9 bits for nir_op */
-   STATIC_ASSERT(nir_num_opcodes <= 512);
+   /* 10 bits for nir_op */
+   STATIC_ASSERT(nir_num_opcodes <= 1024);
    union packed_instr header;
    header.u32 = 0;
 
@@ -1367,7 +1366,8 @@ union packed_tex_data {
       unsigned offset_non_uniform : 1;
       unsigned array_is_lowered_cube : 1;
       unsigned is_gather_implicit_lod : 1;
-      unsigned unused : 4; /* Mark unused for valgrind. */
+      unsigned can_speculate : 1;
+      unsigned unused : 3; /* Mark unused for valgrind. */
    } u;
 };
 
@@ -1407,6 +1407,7 @@ write_tex(write_ctx *ctx, const nir_tex_instr *tex)
       .u.offset_non_uniform = tex->offset_non_uniform,
       .u.array_is_lowered_cube = tex->array_is_lowered_cube,
       .u.is_gather_implicit_lod = tex->is_gather_implicit_lod,
+      .u.can_speculate = tex->can_speculate,
    };
    blob_write_uint32(ctx->blob, packed.u32);
 
@@ -1447,6 +1448,7 @@ read_tex(read_ctx *ctx, union packed_instr header)
    tex->offset_non_uniform = packed.u.offset_non_uniform;
    tex->array_is_lowered_cube = packed.u.array_is_lowered_cube;
    tex->is_gather_implicit_lod = packed.u.is_gather_implicit_lod;
+   tex->can_speculate = packed.u.can_speculate;
 
    for (unsigned i = 0; i < tex->num_srcs; i++) {
       union packed_src src = read_src(ctx, &tex->src[i].src);

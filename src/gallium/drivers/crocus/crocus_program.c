@@ -1093,7 +1093,7 @@ crocus_vs_outputs_written(struct crocus_context *ice,
    if (devinfo->ver < 6) {
 
       if (key->copy_edgeflag)
-         outputs_written |= BITFIELD64_BIT(VARYING_SLOT_EDGE);
+         outputs_written |= VARYING_BIT_EDGE;
 
       /* Put dummy slots into the VUE for the SF to put the replaced
        * point sprite coords in.  We shouldn't need these dummy slots,
@@ -1107,10 +1107,10 @@ crocus_vs_outputs_written(struct crocus_context *ice,
       }
 
       /* if back colors are written, allocate slots for front colors too */
-      if (outputs_written & BITFIELD64_BIT(VARYING_SLOT_BFC0))
-         outputs_written |= BITFIELD64_BIT(VARYING_SLOT_COL0);
-      if (outputs_written & BITFIELD64_BIT(VARYING_SLOT_BFC1))
-         outputs_written |= BITFIELD64_BIT(VARYING_SLOT_COL1);
+      if (outputs_written & VARYING_BIT_BFC0)
+         outputs_written |= VARYING_BIT_COL0;
+      if (outputs_written & VARYING_BIT_BFC1)
+         outputs_written |= VARYING_BIT_COL1;
    }
 
    /* In order for legacy clipping to work, we need to populate the clip
@@ -1118,8 +1118,8 @@ crocus_vs_outputs_written(struct crocus_context *ice,
     * shader doesn't write to gl_ClipDistance.
     */
    if (key->nr_userclip_plane_consts > 0) {
-      outputs_written |= BITFIELD64_BIT(VARYING_SLOT_CLIP_DIST0);
-      outputs_written |= BITFIELD64_BIT(VARYING_SLOT_CLIP_DIST1);
+      outputs_written |= VARYING_BIT_CLIP_DIST0;
+      outputs_written |= VARYING_BIT_CLIP_DIST1;
    }
 
    return outputs_written;
@@ -1231,7 +1231,7 @@ crocus_compile_vs(struct crocus_context *ice,
    if (program == NULL) {
       dbg_printf("Failed to compile vertex shader: %s\n", params.base.error_str);
       ralloc_free(mem_ctx);
-      return false;
+      return NULL;
    }
 
    if (ish->compiled_once) {
@@ -1428,7 +1428,7 @@ crocus_compile_tcs(struct crocus_context *ice,
    if (program == NULL) {
       dbg_printf("Failed to compile control shader: %s\n", params.base.error_str);
       ralloc_free(mem_ctx);
-      return false;
+      return NULL;
    }
 
    if (ish) {
@@ -1573,7 +1573,7 @@ crocus_compile_tes(struct crocus_context *ice,
    if (program == NULL) {
       dbg_printf("Failed to compile evaluation shader: %s\n", params.base.error_str);
       ralloc_free(mem_ctx);
-      return false;
+      return NULL;
    }
 
    if (ish->compiled_once) {
@@ -1719,7 +1719,7 @@ crocus_compile_gs(struct crocus_context *ice,
    if (program == NULL) {
       dbg_printf("Failed to compile geometry shader: %s\n", params.base.error_str);
       ralloc_free(mem_ctx);
-      return false;
+      return NULL;
    }
 
    if (ish->compiled_once) {
@@ -1859,7 +1859,7 @@ crocus_compile_fs(struct crocus_context *ice,
    if (program == NULL) {
       dbg_printf("Failed to compile fragment shader: %s\n", params.base.error_str);
       ralloc_free(mem_ctx);
-      return false;
+      return NULL;
    }
 
    if (ish->compiled_once) {
@@ -2040,7 +2040,7 @@ crocus_compile_clip(struct crocus_context *ice, struct elk_clip_prog_key *key)
    if (program == NULL) {
       dbg_printf("failed to compile clip shader\n");
       ralloc_free(mem_ctx);
-      return false;
+      return NULL;
    }
    struct crocus_binding_table bt;
    memset(&bt, 0, sizeof(bt));
@@ -2194,7 +2194,7 @@ crocus_compile_sf(struct crocus_context *ice, struct elk_sf_prog_key *key)
    if (program == NULL) {
       dbg_printf("failed to compile sf shader\n");
       ralloc_free(mem_ctx);
-      return false;
+      return NULL;
    }
 
    struct crocus_binding_table bt;
@@ -2220,7 +2220,7 @@ crocus_update_compiled_sf(struct crocus_context *ice)
    switch (ice->state.reduced_prim_mode) {
    case MESA_PRIM_TRIANGLES:
    default:
-      if (key.attrs & BITFIELD64_BIT(VARYING_SLOT_EDGE))
+      if (key.attrs & VARYING_BIT_EDGE)
          key.primitive = ELK_SF_PRIM_UNFILLED_TRIS;
       else
          key.primitive = ELK_SF_PRIM_TRIANGLES;
@@ -2287,7 +2287,7 @@ crocus_compile_ff_gs(struct crocus_context *ice, struct elk_ff_gs_prog_key *key)
    if (program == NULL) {
       dbg_printf("failed to compile sf shader\n");
       ralloc_free(mem_ctx);
-      return false;
+      return NULL;
    }
 
    struct crocus_binding_table bt;
@@ -2537,7 +2537,7 @@ crocus_compile_cs(struct crocus_context *ice,
    if (program == NULL) {
       dbg_printf("Failed to compile compute shader: %s\n", params.base.error_str);
       ralloc_free(mem_ctx);
-      return false;
+      return NULL;
    }
 
    if (ish->compiled_once) {

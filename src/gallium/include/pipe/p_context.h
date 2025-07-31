@@ -828,13 +828,15 @@ struct pipe_context {
     * Insert commands to have GPU wait for fence to be signaled.
     */
    void (*fence_server_sync)(struct pipe_context *pipe,
-                             struct pipe_fence_handle *fence);
+                             struct pipe_fence_handle *fence,
+                             uint64_t timeline_value);
 
    /**
     * Insert commands to have the GPU signal a fence.
     */
    void (*fence_server_signal)(struct pipe_context *pipe,
-                               struct pipe_fence_handle *fence);
+                               struct pipe_fence_handle *fence,
+                               uint64_t timeline_value);
 
    /**
     * Create a view on a texture to be used by a shader stage.
@@ -1037,7 +1039,6 @@ struct pipe_context {
                        const struct pipe_grid_info *info);
 
    void (*draw_mesh_tasks)(struct pipe_context *context,
-                           unsigned drawid_offset,
                            const struct pipe_grid_info *info);
    /*@}*/
 
@@ -1252,6 +1253,15 @@ struct pipe_context {
                                                      const struct pipe_video_buffer *templat,
                                                      struct winsys_handle *handle,
                                                      unsigned usage );
+
+   /**
+    * Checks whether an operation can be accelerated by this context.
+    *
+    * \param ctx         pipe context
+    * \param operation   pipe_ml_operation to be checked
+    * \return            whether the context can accelerate this operation
+    */
+    bool (*ml_operation_supported)(struct pipe_context *context, const struct pipe_ml_operation *operation);
 
    /**
     * Compiles a ML subgraph, to be executed later. The returned pipe_ml_subgraph

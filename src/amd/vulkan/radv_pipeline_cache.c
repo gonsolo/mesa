@@ -11,14 +11,14 @@
 #include "util/mesa-sha1.h"
 #include "util/u_atomic.h"
 #include "util/u_debug.h"
-#include "nir_serialize.h"
 #include "nir.h"
+#include "nir_serialize.h"
 #include "radv_debug.h"
 #include "radv_descriptor_set.h"
 #include "radv_pipeline.h"
+#include "radv_pipeline_binary.h"
 #include "radv_pipeline_compute.h"
 #include "radv_pipeline_graphics.h"
-#include "radv_pipeline_binary.h"
 #include "radv_pipeline_rt.h"
 #include "radv_shader.h"
 #include "vk_pipeline.h"
@@ -335,7 +335,7 @@ radv_pipeline_cache_object_search(struct radv_device *device, struct vk_pipeline
    *found_in_application_cache = false;
 
    if (radv_is_cache_disabled(device, cache))
-      return false;
+      return NULL;
 
    bool *found = found_in_application_cache;
    if (!cache) {
@@ -349,7 +349,7 @@ radv_pipeline_cache_object_search(struct radv_device *device, struct vk_pipeline
    radv_report_pso_cache_stats(device, pipeline, !!object);
 
    if (!object)
-      return false;
+      return NULL;
 
    return container_of(object, struct radv_pipeline_cache_object, base);
 }
@@ -448,8 +448,7 @@ struct radv_ray_tracing_pipeline_cache_data {
 
 bool
 radv_ray_tracing_pipeline_cache_search(struct radv_device *device, struct vk_pipeline_cache *cache,
-                                       struct radv_ray_tracing_pipeline *pipeline,
-                                       bool *found_in_application_cache)
+                                       struct radv_ray_tracing_pipeline *pipeline, bool *found_in_application_cache)
 {
    struct radv_pipeline_cache_object *pipeline_obj;
 

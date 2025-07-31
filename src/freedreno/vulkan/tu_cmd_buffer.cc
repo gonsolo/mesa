@@ -1224,6 +1224,13 @@ tu_bin_offset(VkOffset2D fdm_offset, const struct tu_tiling_config *tiling)
    };
 }
 
+static uint32_t
+tu_fdm_num_layers(const struct tu_cmd_buffer *cmd)
+{
+   return cmd->state.pass->num_views ? cmd->state.pass->num_views : 
+      (cmd->state.fdm_per_layer ? cmd->state.framebuffer->layers : 1);
+}
+
 template <chip CHIP>
 static void
 tu6_emit_tile_select(struct tu_cmd_buffer *cmd,
@@ -1301,8 +1308,7 @@ tu6_emit_tile_select(struct tu_cmd_buffer *cmd,
    tu_cs_emit(cs, 0x0);
 
    if (fdm) {
-      unsigned views =
-         cmd->state.pass->num_views ? cmd->state.pass->num_views : 1;
+      unsigned views = tu_fdm_num_layers(cmd);
       VkRect2D bin = {
          { x1, y1 },
          { (x2 - x1) * tile->extent.width, (y2 - y1) * tile->extent.height }
@@ -1477,9 +1483,6 @@ tu6_emit_gmem_stores(struct tu_cmd_buffer *cmd,
                                   (!cmd->state.rp.draw_cs_writes_to_cond_pred ||
                                   cs != &cmd->draw_cs);
 
-   if (pass->has_fdm)
-      tu_cs_set_writeable(cs, true);
-
    bool scissor_emitted = false;
 
    /* Resolve should happen before store in case BLIT_EVENT_STORE_AND_CLEAR is
@@ -1521,6 +1524,9 @@ tu6_emit_tile_store_cs(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    uint32_t subpass_idx = pass->subpass_count - 1;
    const struct tu_subpass *subpass = &pass->subpasses[subpass_idx];
 
+   if (pass->has_fdm)
+      tu_cs_set_writeable(cs, true);
+
    /* We believe setting the marker affects what state HW blocks save/restore
     * during preemption.  So we only emit it before the stores at the end of the
     * last subpass, not other resolves.
@@ -1534,6 +1540,10 @@ tu6_emit_tile_store_cs(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    tu6_emit_gmem_stores<CHIP>(cmd, cs, &resolve_group, subpass);
 
    tu_emit_resolve_group<CHIP>(cmd, cs, &resolve_group);
+
+   if (pass->has_fdm)
+      tu_cs_set_writeable(cs, false);
+
 }
 
 void
@@ -1987,7 +1997,7 @@ tu6_emit_binning_pass(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
     */
    if ((!(cmd->usage_flags & VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT) ||
         fdm_offsets) && cmd->fdm_bin_patchpoints.size != 0) {
-      unsigned num_views = MAX2(cmd->state.pass->num_views, 1);
+      unsigned num_views = tu_fdm_num_layers(cmd);
       VkExtent2D unscaled_frag_areas[num_views];
       VkRect2D bins[num_views];
       for (unsigned i = 0; i < num_views; i++) {
@@ -2671,8 +2681,7 @@ tu_calc_frag_area(struct tu_cmd_buffer *cmd,
    const uint32_t x2 = MIN2(x1 + tiling->tile0.width, MAX_VIEWPORT_SIZE);
    const uint32_t y2 = MIN2(y1 + tiling->tile0.height, MAX_VIEWPORT_SIZE);
 
-   unsigned views =
-      cmd->state.pass->num_views ? cmd->state.pass->num_views : 1;
+   unsigned views = tu_fdm_num_layers(cmd);
    const struct tu_framebuffer *fb = cmd->state.framebuffer;
    struct tu_frag_area raw_areas[views];
    if (fdm) {
@@ -2890,8 +2899,7 @@ tu_render_pipe_fdm(struct tu_cmd_buffer *cmd, uint32_t pipe,
 {
    uint32_t width = tx2 - tx1;
    uint32_t height = ty2 - ty1;
-   unsigned views =
-      cmd->state.pass->num_views ? cmd->state.pass->num_views : 1;
+   unsigned views = tu_fdm_num_layers(cmd);
    bool has_abs_mask =
       cmd->device->physical_device->info->a7xx.has_abs_bin_mask;
 
@@ -4487,8 +4495,20 @@ tu_CmdBindPipeline(VkCommandBuffer commandBuffer,
          pipeline->shaders[MESA_SHADER_FRAGMENT]->fs.has_fdm;
    }
 
-   if (pipeline->program.per_view_viewport != cmd->state.per_view_viewport) {
+   if (pipeline->program.per_layer_viewport != cmd->state.per_layer_viewport ||
+       pipeline->shaders[MESA_SHADER_FRAGMENT]->fs.max_fdm_layers !=
+       cmd->state.max_fdm_layers) {
+      cmd->state.per_layer_viewport = pipeline->program.per_layer_viewport;
+      cmd->state.max_fdm_layers =
+         pipeline->shaders[MESA_SHADER_FRAGMENT]->fs.max_fdm_layers;
+      cmd->state.dirty |= TU_CMD_DIRTY_FDM;
+   }
+
+   if (pipeline->program.per_view_viewport != cmd->state.per_view_viewport ||
+       pipeline->program.fake_single_viewport != cmd->state.fake_single_viewport) {
       cmd->state.per_view_viewport = pipeline->program.per_view_viewport;
+      cmd->state.fake_single_viewport =
+         pipeline->program.fake_single_viewport;
       cmd->state.dirty |= TU_CMD_DIRTY_PER_VIEW_VIEWPORT;
    }
 
@@ -5547,6 +5567,7 @@ tu_CmdBeginRenderPass2(VkCommandBuffer commandBuffer,
    cmd->state.subpass = pass->subpasses;
    cmd->state.framebuffer = fb;
    cmd->state.render_area = pRenderPassBegin->renderArea;
+   cmd->state.fdm_per_layer = pass->has_layered_fdm;
 
    if (pass->attachment_count > 0) {
       VK_MULTIALLOC(ma);
@@ -5615,6 +5636,8 @@ tu_CmdBeginRendering(VkCommandBuffer commandBuffer,
    cmd->state.subpass = &cmd->dynamic_subpass;
    cmd->state.framebuffer = &cmd->dynamic_framebuffer;
    cmd->state.render_area = pRenderingInfo->renderArea;
+   cmd->state.fdm_per_layer =
+      pRenderingInfo->flags & VK_RENDERING_PER_LAYER_FRAGMENT_DENSITY_BIT_VALVE;
    cmd->state.blit_cache_cleaned = false;
 
    cmd->state.attachments = cmd->dynamic_attachments;
@@ -6338,7 +6361,7 @@ tu6_build_depth_plane_z_mode(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
       zmode = A6XX_EARLY_Z_LATE_Z;
 
    if (zmode == A6XX_EARLY_Z_LATE_Z &&
-       (cmd->state.stencil_written_on_depth_fail || fs->fs.per_samp ||
+       (cmd->state.stencil_written_on_depth_fail || fs->fs.sample_shading ||
         !vk_format_has_depth(depth_format) || !ds_test_enable)) {
       zmode = A6XX_LATE_Z;
    }
@@ -6410,11 +6433,14 @@ fdm_apply_fs_params(struct tu_cmd_buffer *cmd,
    unsigned num_consts = state->num_consts;
 
    for (unsigned i = 0; i < num_consts; i++) {
-      assert(i < views);
-      VkExtent2D area = frag_areas[i];
-      VkRect2D bin = bins[i];
+      /* FDM per layer may be enabled in the shader but not in the renderpass,
+       * in which case views will be 1 and we have to replicate the one view
+       * to all of the layers.
+       */
+      VkExtent2D area = frag_areas[MIN2(i, views - 1)];
+      VkRect2D bin = bins[MIN2(i, views - 1)];
       VkOffset2D offset = tu_fdm_per_bin_offset(area, bin, common_bin_offset);
-      
+
       tu_cs_emit(cs, area.width);
       tu_cs_emit(cs, area.height);
       tu_cs_emit(cs, fui(offset.x));
@@ -6428,7 +6454,7 @@ tu_emit_fdm_params(struct tu_cmd_buffer *cmd,
                    unsigned num_units)
 {
    STATIC_ASSERT(IR3_DP_FS(frag_invocation_count) == IR3_DP_FS_DYNAMIC);
-   tu_cs_emit(cs, fs->fs.per_samp ?
+   tu_cs_emit(cs, fs->fs.sample_shading ?
               cmd->vk.dynamic_graphics_state.ms.rasterization_samples : 1);
    tu_cs_emit(cs, 0);
    tu_cs_emit(cs, 0);
@@ -6590,6 +6616,14 @@ tu6_draw_common(struct tu_cmd_buffer *cmd,
 {
    const struct tu_program_state *program = &cmd->state.program;
    struct tu_render_pass_state *rp = &cmd->state.rp;
+
+   trace_start_draw(
+      &cmd->trace, &cmd->draw_cs, cmd, draw_count,
+      cmd->state.program.stage_sha1[MESA_SHADER_VERTEX],
+      cmd->state.program.stage_sha1[MESA_SHADER_TESS_CTRL],
+      cmd->state.program.stage_sha1[MESA_SHADER_TESS_EVAL],
+      cmd->state.program.stage_sha1[MESA_SHADER_GEOMETRY],
+      cmd->state.program.stage_sha1[MESA_SHADER_FRAGMENT]);
 
    /* Emit state first, because it's needed for bandwidth calculations */
    uint32_t dynamic_draw_state_dirty = 0;
@@ -7031,6 +7065,8 @@ tu_CmdDraw(VkCommandBuffer commandBuffer,
    tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_AUTO_INDEX));
    tu_cs_emit(cs, instanceCount);
    tu_cs_emit(cs, vertexCount);
+
+   trace_end_draw(&cmd->trace, cs);
 }
 TU_GENX(tu_CmdDraw);
 
@@ -7077,6 +7113,9 @@ tu_CmdDrawMultiEXT(VkCommandBuffer commandBuffer,
       tu_cs_emit(cs, instanceCount);
       tu_cs_emit(cs, draw->vertexCount);
    }
+
+   if (i != 0)
+      trace_end_draw(&cmd->trace, cs);
 }
 TU_GENX(tu_CmdDrawMultiEXT);
 
@@ -7103,6 +7142,8 @@ tu_CmdDrawIndexed(VkCommandBuffer commandBuffer,
    tu_cs_emit(cs, firstIndex);
    tu_cs_emit_qw(cs, cmd->state.index_va);
    tu_cs_emit(cs, cmd->state.max_index_count);
+
+   trace_end_draw(&cmd->trace, cs);
 }
 TU_GENX(tu_CmdDrawIndexed);
 
@@ -7154,6 +7195,9 @@ tu_CmdDrawMultiIndexedEXT(VkCommandBuffer commandBuffer,
       tu_cs_emit_qw(cs, cmd->state.index_va);
       tu_cs_emit(cs, cmd->state.max_index_count);
    }
+
+   if (i != 0)
+      trace_end_draw(&cmd->trace, cs);
 }
 TU_GENX(tu_CmdDrawMultiIndexedEXT);
 
@@ -7197,6 +7241,8 @@ tu_CmdDrawIndirect(VkCommandBuffer commandBuffer,
    tu_cs_emit(cs, drawCount);
    tu_cs_emit_qw(cs, vk_buffer_address(&buf->vk, offset));
    tu_cs_emit(cs, stride);
+
+   trace_end_draw(&cmd->trace, cs);
 }
 TU_GENX(tu_CmdDrawIndirect);
 
@@ -7228,6 +7274,8 @@ tu_CmdDrawIndexedIndirect(VkCommandBuffer commandBuffer,
    tu_cs_emit(cs, cmd->state.max_index_count);
    tu_cs_emit_qw(cs, vk_buffer_address(&buf->vk, offset));
    tu_cs_emit(cs, stride);
+
+   trace_end_draw(&cmd->trace, cs);
 }
 TU_GENX(tu_CmdDrawIndexedIndirect);
 
@@ -7265,6 +7313,8 @@ tu_CmdDrawIndirectCount(VkCommandBuffer commandBuffer,
    tu_cs_emit_qw(cs, vk_buffer_address(&buf->vk, offset));
    tu_cs_emit_qw(cs, vk_buffer_address(&count_buf->vk, countBufferOffset));
    tu_cs_emit(cs, stride);
+
+   trace_end_draw(&cmd->trace, cs);
 }
 TU_GENX(tu_CmdDrawIndirectCount);
 
@@ -7299,6 +7349,8 @@ tu_CmdDrawIndexedIndirectCount(VkCommandBuffer commandBuffer,
    tu_cs_emit_qw(cs, vk_buffer_address(&buf->vk, offset));
    tu_cs_emit_qw(cs, vk_buffer_address(&count_buf->vk, countBufferOffset));
    tu_cs_emit(cs, stride);
+
+   trace_end_draw(&cmd->trace, cs);
 }
 TU_GENX(tu_CmdDrawIndexedIndirectCount);
 
@@ -7341,6 +7393,8 @@ tu_CmdDrawIndirectByteCountEXT(VkCommandBuffer commandBuffer,
    tu_cs_emit_qw(cs, vk_buffer_address(&buf->vk, counterBufferOffset));
    tu_cs_emit(cs, counterOffset);
    tu_cs_emit(cs, vertexStride);
+
+   trace_end_draw(&cmd->trace, cs);
 }
 TU_GENX(tu_CmdDrawIndirectByteCountEXT);
 
@@ -7801,7 +7855,8 @@ tu_dispatch(struct tu_cmd_buffer *cmd,
    }
 
    if (info->indirect) {
-      trace_start_compute_indirect(&cmd->trace, cs, cmd, info->unaligned);
+      trace_start_compute_indirect(&cmd->trace, cs, cmd, info->unaligned,
+                                   (char *)shader->variant->sha1_str);
 
       if (info->unaligned) {
          tu_cs_emit_pkt7(cs, CP_RUN_OPENCL, 1);
@@ -7826,7 +7881,7 @@ tu_dispatch(struct tu_cmd_buffer *cmd,
       trace_start_compute(&cmd->trace, cs, cmd, info->indirect != 0,
                           info->unaligned, local_size[0], local_size[1],
                           local_size[2], info->blocks[0], info->blocks[1],
-                          info->blocks[2]);
+                          info->blocks[2], (char *)shader->variant->sha1_str);
 
       if (info->unaligned) {
          tu_cs_emit_pkt7(cs, CP_EXEC_CS, 4);
@@ -7948,8 +8003,7 @@ tu_CmdEndRenderPass2(VkCommandBuffer commandBuffer,
 
    VkOffset2D test_offsets[MAX_VIEWS];
    if (TU_DEBUG(FDM) && TU_DEBUG(FDM_OFFSET)) {
-      for (unsigned i = 0;
-           i < MAX2(cmd_buffer->state.pass->num_views, 1); i++) {
+      for (unsigned i = 0; i < tu_fdm_num_layers(cmd_buffer); i++) {
          test_offsets[i] = { 64, 64 };
       }
       fdm_offsets = test_offsets;
@@ -7994,8 +8048,7 @@ tu_CmdEndRendering2EXT(VkCommandBuffer commandBuffer,
 
    VkOffset2D test_offsets[MAX_VIEWS];
    if (TU_DEBUG(FDM) && TU_DEBUG(FDM_OFFSET)) {
-      for (unsigned i = 0;
-           i < MAX2(cmd_buffer->state.pass->num_views, 1); i++) {
+      for (unsigned i = 0; i < tu_fdm_num_layers(cmd_buffer); i++) {
          test_offsets[i] = { 64, 64 };
       }
       fdm_offsets = test_offsets;
@@ -8011,7 +8064,7 @@ tu_CmdEndRendering2EXT(VkCommandBuffer commandBuffer,
          if (fdm_offsets) {
             memcpy(cmd_buffer->pre_chain.fdm_offsets,
                    fdm_offsets, sizeof(VkOffset2D) *
-                   MAX2(cmd_buffer->state.pass->num_views, 1));
+                   tu_fdm_num_layers(cmd_buffer));
          }
 
          /* Even we don't call tu_cmd_render here, renderpass is finished

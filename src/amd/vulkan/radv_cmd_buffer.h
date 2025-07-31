@@ -429,12 +429,12 @@ struct radv_cmd_state {
    bool rb_noncoherent_dirty;
 
    /* Conditional rendering info. */
-   uint8_t predication_op; /* 32-bit or 64-bit predicate value */
-   int predication_type;   /* -1: disabled, 0: normal, 1: inverted */
+   uint8_t predication_op;           /* 32-bit or 64-bit predicate value */
+   int predication_type;             /* -1: disabled, 0: normal, 1: inverted */
    uint64_t user_predication_va;     /* User predication VA. */
    uint64_t emulated_predication_va; /* Emulated VA if no 32-bit predication support. */
-   uint64_t mec_inv_pred_va;  /* For inverted predication when using MEC. */
-   bool mec_inv_pred_emitted; /* To ensure we don't have to repeat inverting the VA. */
+   uint64_t mec_inv_pred_va;         /* For inverted predication when using MEC. */
+   bool mec_inv_pred_emitted;        /* To ensure we don't have to repeat inverting the VA. */
    bool saved_user_cond_render;
    bool is_user_cond_render_suspended;
 
@@ -764,6 +764,44 @@ struct radv_resolve_barrier {
 };
 
 void radv_emit_resolve_barrier(struct radv_cmd_buffer *cmd_buffer, const struct radv_resolve_barrier *barrier);
+
+struct radv_draw_info {
+   /**
+    * Number of vertices.
+    */
+   uint32_t count;
+
+   /**
+    * First instance id.
+    */
+   uint32_t first_instance;
+
+   /**
+    * Number of instances.
+    */
+   uint32_t instance_count;
+
+   /**
+    * Whether it's an indexed draw.
+    */
+   bool indexed;
+
+   /**
+    * Indirect draw parameters.
+    */
+   uint64_t indirect_va;
+   uint32_t stride;
+
+   /**
+    * Draw count parameters VA.
+    */
+   uint64_t count_va;
+
+   /**
+    * Stream output parameters VA.
+    */
+   uint64_t strmout_va;
+};
 
 struct radv_dispatch_info {
    /**
