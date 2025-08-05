@@ -432,6 +432,7 @@ if with_tests
         'tests/serialize_tests.cpp',
         'tests/range_analysis_tests.cpp',
         'tests/vars_tests.cpp',
+        'tests/test_constant_corruption.cpp',
       ),
       cpp_args : [cpp_msvc_compat_args, msvc_bigobj],
       override_options: [msvc_designated_initializer],
