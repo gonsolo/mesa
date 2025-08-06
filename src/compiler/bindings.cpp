@@ -139,6 +139,12 @@ void register_functions(py::module &m) {
 
     m.def("nir_opt_algebraic", &nir_opt_algebraic,
         py::arg("shader"));
+
+    m.def("nir_opt_constant_folding", &nir_opt_constant_folding,
+        py::arg("shader"));
+
+    m.def("nir_opt_dce", &nir_opt_dce,
+        py::arg("shader"));
 }
 
 PYBIND11_MODULE(mesabindings, m) {
