@@ -123,6 +123,9 @@ void register_classes(py::module &m) {
        .def("is_array", &glsl_type_is_array)
        .def("is_struct", &glsl_type_is_struct);
 
+    py::class_<nir_variable, std::unique_ptr<nir_variable, py::nodelete>>(m, "nir_variable")
+        .def_readwrite("data", &nir_variable::data)
+        .def_readwrite("type", &nir_variable::type);
 }
 
 void register_enums(py::module &m) {
@@ -136,6 +139,10 @@ void register_enums(py::module &m) {
         .value("nir_metadata_dominance", nir_metadata_dominance)
         .export_values()
         .finalize();
+
+    py::enum_<nir_variable_mode>(m, "nir_variable_mode")
+       .value("nir_var_mem_ssbo", nir_var_mem_ssbo)
+       .export_values();
 }
 
 void register_functions(py::module &m) {
@@ -190,11 +197,18 @@ void register_functions(py::module &m) {
     m.def("glsl_float_type", &glsl_float_type,
         py::return_value_policy::reference);
 
-      m.def("glsl_array_type", &glsl_array_type,
-          py::arg("element"),
-          py::arg("array_size"),
-          py::arg("explicit_stride"),
-          py::return_value_policy::reference);
+    m.def("glsl_array_type", &glsl_array_type,
+      py::arg("element"),
+      py::arg("array_size"),
+      py::arg("explicit_stride"),
+      py::return_value_policy::reference);
+
+    m.def("nir_variable_create", &nir_variable_create,
+      py::arg("shader"),
+      py::arg("mode"),
+      py::arg("type"),
+      py::arg("name"),
+      py::return_value_policy::reference);
 }
 
 PYBIND11_MODULE(mesa3d, m) {
