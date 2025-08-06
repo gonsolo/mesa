@@ -189,6 +189,12 @@ void register_functions(py::module &m) {
           py::return_value_policy::reference);
     m.def("glsl_float_type", &glsl_float_type,
         py::return_value_policy::reference);
+
+      m.def("glsl_array_type", &glsl_array_type,
+          py::arg("element"),
+          py::arg("array_size"),
+          py::arg("explicit_stride"),
+          py::return_value_policy::reference);
 }
 
 PYBIND11_MODULE(mesa3d, m) {
