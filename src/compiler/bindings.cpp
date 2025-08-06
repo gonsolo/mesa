@@ -20,9 +20,9 @@ void test_gonsolo() {
 
       (void)sum;
 
-      printf("--- Original Shader ---\n");
-      nir_print_shader(builder.shader, stdout);
-      printf("\n\n");
+      //printf("--- Original Shader ---\n");
+      //nir_print_shader(builder.shader, stdout);
+      //printf("\n\n");
 
       nir_metadata_require(builder.impl, nir_metadata_block_index | nir_metadata_dominance);
 
@@ -30,8 +30,8 @@ void test_gonsolo() {
       nir_opt_constant_folding(builder.shader);
       nir_opt_dce(builder.shader);
 
-      printf("--- Optimized Shader ---\n");
-      nir_print_shader(builder.shader, stdout);
+      //printf("--- Optimized Shader ---\n");
+      //nir_print_shader(builder.shader, stdout);
 
       ralloc_free(builder.shader);
 }
@@ -42,13 +42,16 @@ PYBIND11_MODULE(mesabindings, m) {
     m.doc() = "pybind11 bindings for selected Mesa3D functions";
 
     m.def("glsl_type_singleton_init_or_ref", &glsl_type_singleton_init_or_ref,
-          "Initializes or references the GLSL type singleton.");
+      "Initializes or references the GLSL type singleton.");
 
     m.def("test_gonsolo", &test_gonsolo);
 
     py::native_enum<gl_shader_stage>(m, "gl_shader_stage", "enum.IntEnum")
-          .value("COMPUTE", MESA_SHADER_COMPUTE)
-          .export_values()
-          .finalize();
+      .value("COMPUTE", MESA_SHADER_COMPUTE)
+      .export_values()
+      .finalize();
+
+    py::class_<nir_shader_compiler_options>(m, "nir_shader_compiler_options")
+      .def(py::init<>());
 }
 

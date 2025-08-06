@@ -26,7 +26,9 @@ DRIVERS = nouveau,borg-experimental
 #VERBOSE = --verbose
 SKIP_DRM = 1
 
-all: compile
+#all: compile
+all: ct run_python_test
+
 t: test
 test: test_nouveau
 tn: test_nouveau
