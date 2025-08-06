@@ -1,7 +1,6 @@
+#include <pybind11/native_enum.h>
 #include <pybind11/pybind11.h>
 
-// Include the header where glsl_type_singleton_init_or_ref is declared
-// Adjust this path based on your Mesa3D source tree
 #include "glsl_types.h"
 #include "nir/nir.h"
 #include "nir/nir_builder.h"
@@ -19,17 +18,14 @@ void test_gonsolo() {
       nir_def* val2 = nir_imm_int(&builder, 5);
       nir_def* sum = nir_iadd(&builder, val1, val2);
 
-      // Um die Warnung "Variable wird nicht verwendet" zu beheben
       (void)sum;
 
       printf("--- Original Shader ---\n");
       nir_print_shader(builder.shader, stdout);
       printf("\n\n");
 
-      // Korrekter Aufruf: builder.impl statt builder.shader
       nir_metadata_require(builder.impl, nir_metadata_block_index | nir_metadata_dominance);
 
-        // Rufen Sie jeden Pass einzeln auf
       nir_opt_algebraic(builder.shader);
       nir_opt_constant_folding(builder.shader);
       nir_opt_dce(builder.shader);
@@ -39,15 +35,20 @@ void test_gonsolo() {
 
       ralloc_free(builder.shader);
 }
+
 namespace py = pybind11;
 
 PYBIND11_MODULE(mesabindings, m) {
-    m.doc() = "pybind11 bindings for selected Mesa3D functions"; // Optional module docstring
+    m.doc() = "pybind11 bindings for selected Mesa3D functions";
 
     m.def("glsl_type_singleton_init_or_ref", &glsl_type_singleton_init_or_ref,
           "Initializes or references the GLSL type singleton.");
 
     m.def("test_gonsolo", &test_gonsolo);
 
+    py::native_enum<gl_shader_stage>(m, "gl_shader_stage", "enum.IntEnum")
+          .value("COMPUTE", MESA_SHADER_COMPUTE)
+          .export_values()
+          .finalize();
 }
 
