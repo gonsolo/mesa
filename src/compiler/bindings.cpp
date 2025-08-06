@@ -167,7 +167,7 @@ void register_functions(py::module &m) {
         py::arg("fp"));
 }
 
-PYBIND11_MODULE(mesabindings, m) {
+PYBIND11_MODULE(mesa3d, m) {
     m.doc() = "pybind11 bindings for selected Mesa3D functions";
 
     register_classes(m);
