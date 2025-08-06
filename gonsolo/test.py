@@ -14,6 +14,17 @@ def test_python_functions():
         assert val2.num_components == 1, "val2 num_components is not 1"
         assert val2.bit_size == 32, "val2 bit_size is not 32"
         val3 = mesabindings.nir_iadd(builder, val1, val2);
+        assert val3.num_components == 1, "val3 num_components is not 1"
+        assert val3.bit_size == 32, "val3 bit_size is not 32"
+
+        mesabindings.nir_metadata_require(builder.impl, mesabindings.nir_metadata_block_index | mesabindings.nir_metadata_dominance);
+
+        #nir_opt_algebraic(builder.shader);
+        #nir_opt_constant_folding(builder.shader);
+        #nir_opt_dce(builder.shader);
+
+        #ralloc_free(builder.shader);
+
         print("Functions called successfully!")
     except Exception as e:
         print(f"An error occurred: {e}")
