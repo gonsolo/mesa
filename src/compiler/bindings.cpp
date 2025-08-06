@@ -270,6 +270,12 @@ void register_functions(py::module &m) {
         py::arg("builder"),
         py::arg("deref"),
         py::return_value_policy::reference);
+
+    m.def("nir_store_deref", &nir_store_deref,
+        py::arg("builder"),
+        py::arg("deref"),
+        py::arg("value"),
+        py::arg("writemask"));
 }
 
 PYBIND11_MODULE(mesa3d, m) {
