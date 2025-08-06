@@ -1,4 +1,5 @@
 import mesabindings
+import sys
 
 def test_python_functions():
     print("Calling functions from Python...")
@@ -17,13 +18,16 @@ def test_python_functions():
         assert val3.num_components == 1, "val3 num_components is not 1"
         assert val3.bit_size == 32, "val3 bit_size is not 32"
 
+        print("Original shader:")
+        mesabindings.nir_print_shader(builder.shader, sys.stdout.fileno())
+
         mesabindings.nir_metadata_require(builder.impl, mesabindings.nir_metadata_block_index | mesabindings.nir_metadata_dominance);
 
         mesabindings.nir_opt_algebraic(builder.shader);
         mesabindings.nir_opt_constant_folding(builder.shader);
         mesabindings.nir_opt_dce(builder.shader);
 
-        #ralloc_free(builder.shader);
+        mesabindings.ralloc_free(builder.shader);
 
         print("Functions called successfully!")
     except Exception as e:

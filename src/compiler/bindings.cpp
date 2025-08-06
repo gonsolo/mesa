@@ -1,3 +1,6 @@
+#include <cstdio>
+#include <unistd.h>
+
 #include "pybind11/detail/common.h"
 #include <pybind11/native_enum.h>
 #include <pybind11/pybind11.h>
@@ -66,6 +69,16 @@ void
 wrap_nir_metadata_require(nir_function_impl *impl, int required)
 {
   nir_metadata_require(impl, static_cast<nir_metadata>(required));
+}
+
+void
+wrap_nir_print_shader(nir_shader *shader, int fd)
+{
+    FILE *fp = fdopen(dup(fd), "w");
+    if (fp) {
+        nir_print_shader(shader, fp);
+        fclose(fp);
+    }
 }
 
 namespace py = pybind11;
@@ -145,6 +158,13 @@ void register_functions(py::module &m) {
 
     m.def("nir_opt_dce", &nir_opt_dce,
         py::arg("shader"));
+
+    m.def("ralloc_free", &ralloc_free,
+        py::arg("shader"));
+
+    m.def("nir_print_shader", &wrap_nir_print_shader,
+        py::arg("shader"),
+        py::arg("fp"));
 }
 
 PYBIND11_MODULE(mesabindings, m) {
