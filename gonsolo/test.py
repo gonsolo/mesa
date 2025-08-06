@@ -27,6 +27,9 @@ def test_python_functions():
         mesabindings.nir_opt_constant_folding(builder.shader);
         mesabindings.nir_opt_dce(builder.shader);
 
+        print("Optimized shader:");
+        mesabindings.nir_print_shader(builder.shader, sys.stdout.fileno());
+
         mesabindings.ralloc_free(builder.shader);
 
         print("Functions called successfully!")
