@@ -88,6 +88,9 @@ void register_classes(py::module &m) {
     py::class_<nir_def>(m, "nir_def")
         .def_readonly("bit_size", &nir_def::bit_size)
         .def_readonly("num_components", &nir_def::num_components);
+
+    py::class_<nir_shader>(m, "nir_shader")
+        .def(py::init<>());
 }
 
 void register_enums(py::module &m) {
@@ -133,6 +136,9 @@ void register_functions(py::module &m) {
         py::arg("impl"),
         py::arg("required"),
         py::return_value_policy::reference);
+
+    m.def("nir_opt_algebraic", &nir_opt_algebraic,
+        py::arg("shader"));
 }
 
 PYBIND11_MODULE(mesabindings, m) {

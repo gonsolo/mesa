@@ -19,7 +19,7 @@ def test_python_functions():
 
         mesabindings.nir_metadata_require(builder.impl, mesabindings.nir_metadata_block_index | mesabindings.nir_metadata_dominance);
 
-        #nir_opt_algebraic(builder.shader);
+        mesabindings.nir_opt_algebraic(builder.shader);
         #nir_opt_constant_folding(builder.shader);
         #nir_opt_dce(builder.shader);
 
