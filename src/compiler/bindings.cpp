@@ -75,6 +75,15 @@ wrap_nir_iadd(nir_builder *build, nir_def *src0, nir_def *src1)
   return result;
 }
 
+nir_def *
+wrap_nir_imul(nir_builder *build, nir_def *src0, nir_def *src1)
+{
+  assert(build);
+  nir_def *result = nir_imul(build, src0, src1);
+  assert(result);
+  return result;
+}
+
 void
 wrap_nir_metadata_require(nir_function_impl *impl, int required)
 {
@@ -205,6 +214,14 @@ void register_functions(py::module &m) {
         py::return_value_policy::reference,
         py::keep_alive<1, 0>());
 
+    m.def("nir_imul", &wrap_nir_imul,
+        "Wrapper for nir_iadd",
+        py::arg("builder"),
+        py::arg("src0"),
+        py::arg("src1"),
+        py::return_value_policy::reference,
+        py::keep_alive<1, 0>());
+
     m.def("nir_metadata_require", &wrap_nir_metadata_require,
         py::arg("impl"),
         py::arg("required"),
@@ -293,6 +310,21 @@ void register_functions(py::module &m) {
         py::arg("deref"),
         py::arg("value"),
         py::arg("writemask"));
+
+    m.def("nir_load_local_invocation_id", &_nir_build_load_local_invocation_id,
+        py::arg("builder"),
+        py::return_value_policy::reference);
+
+    m.def("nir_channel", &nir_channel,
+        py::arg("builder"),
+        py::arg("def"),
+        py::arg("c"),
+        py::return_value_policy::reference);
+
+    m.def("nir_load_global_invocation_id", &_nir_build_load_global_invocation_id,
+        py::arg("builder"),
+        py::arg("bit_size"),
+        py::return_value_policy::reference);
 }
 
 PYBIND11_MODULE(mesa3d, m) {
