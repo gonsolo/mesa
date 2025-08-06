@@ -104,6 +104,25 @@ void register_classes(py::module &m) {
 
     py::class_<nir_shader>(m, "nir_shader")
         .def(py::init<>());
+
+    py::class_<glsl_type>(m, "glsl_type")
+       .def_property_readonly("name",
+           [](const glsl_type &self) {
+               return glsl_get_type_name(&self);
+           })
+       .def_property_readonly("array",
+           [](const glsl_type &self) {
+               return self.fields.array;
+           },
+           py::return_value_policy::reference_internal)
+       .def_property_readonly("structure",
+           [](const glsl_type &self) {
+               return self.fields.structure;
+           },
+           py::return_value_policy::reference_internal)
+       .def("is_array", &glsl_type_is_array)
+       .def("is_struct", &glsl_type_is_struct);
+
 }
 
 void register_enums(py::module &m) {
@@ -165,6 +184,11 @@ void register_functions(py::module &m) {
     m.def("nir_print_shader", &wrap_nir_print_shader,
         py::arg("shader"),
         py::arg("fp"));
+
+    m.def("glsl_int_type", &glsl_int_type,
+          py::return_value_policy::reference);
+    m.def("glsl_float_type", &glsl_float_type,
+        py::return_value_policy::reference);
 }
 
 PYBIND11_MODULE(mesa3d, m) {
