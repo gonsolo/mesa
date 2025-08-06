@@ -325,6 +325,25 @@ void register_functions(py::module &m) {
         py::arg("builder"),
         py::arg("bit_size"),
         py::return_value_policy::reference);
+
+    m.def("nir_ine_imm", &nir_ine_imm,
+        py::arg("builder"),
+        py::arg("src1"),
+        py::arg("src2"),
+        py::return_value_policy::reference);
+
+    m.def("nir_bcsel", &nir_bcsel,
+        py::arg("builder"),
+        py::arg("src0"),
+        py::arg("src1"),
+        py::arg("src2"),
+        py::return_value_policy::reference);
+
+    m.def("nir_ilt", &nir_ilt,
+        py::arg("builder"),
+        py::arg("src0"),
+        py::arg("src1"),
+        py::return_value_policy::reference);
 }
 
 PYBIND11_MODULE(mesa3d, m) {
