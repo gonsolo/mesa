@@ -1,3 +1,4 @@
+#include "pybind11/detail/common.h"
 #include <pybind11/native_enum.h>
 #include <pybind11/pybind11.h>
 
@@ -52,6 +53,14 @@ wrap_nir_imm_int(nir_builder *build, int x)
   assert(result);
   return result;
 }
+nir_def *
+wrap_nir_iadd(nir_builder *build, nir_def *src0, nir_def *src1)
+{
+  assert(build);
+  nir_def *result = nir_iadd(build, src0, src1);
+  assert(result);
+  return result;
+}
 
 namespace py = pybind11;
 
@@ -95,6 +104,12 @@ PYBIND11_MODULE(mesabindings, m) {
       py::return_value_policy::reference,
       py::keep_alive<1, 0>());
 
-
+    m.def("nir_iadd", &wrap_nir_iadd,
+        "Wrapper for nir_iadd",
+        py::arg("builder"),
+        py::arg("src0"),
+        py::arg("src1"),
+        py::return_value_policy::reference,
+        py::keep_alive<1, 0>());
 }
 
