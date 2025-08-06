@@ -83,6 +83,14 @@ wrap_nir_print_shader(nir_shader *shader, int fd)
 
 namespace py = pybind11;
 
+py::object wrap_nir_load_ssbo(py::object builder, int num_components, int bit_size, py::object src0, py::object src1) {
+    nir_builder* b = py::cast<nir_builder*>(builder);
+    nir_def* s0 = py::cast<nir_def*>(src0);
+    nir_def* s1 = py::cast<nir_def*>(src1);
+
+    return py::cast(nir_load_ssbo(b, num_components, bit_size, s0, s1));
+}
+
 void register_classes(py::module &m) {
     py::class_<nir_function_impl>(m, "nir_function_impl")
         .def_readonly("body", &nir_function_impl::body);
@@ -123,9 +131,18 @@ void register_classes(py::module &m) {
        .def("is_array", &glsl_type_is_array)
        .def("is_struct", &glsl_type_is_struct);
 
+    py::class_<nir_variable::nir_variable_data>(m, "nir_variable_data")
+        .def_readwrite("binding", &nir_variable::nir_variable_data::binding)
+        .def_property("explicit_binding",
+            [](const nir_variable::nir_variable_data& self) { return self.explicit_binding; },
+            [](nir_variable::nir_variable_data& self, bool value) { self.explicit_binding = value; });
+
     py::class_<nir_variable, std::unique_ptr<nir_variable, py::nodelete>>(m, "nir_variable")
         .def_readwrite("data", &nir_variable::data)
         .def_readwrite("type", &nir_variable::type);
+
+    py::class_<nir_deref_instr>(m, "nir_deref_instr")
+        .def(py::init<>());
 }
 
 void register_enums(py::module &m) {
@@ -198,17 +215,61 @@ void register_functions(py::module &m) {
         py::return_value_policy::reference);
 
     m.def("glsl_array_type", &glsl_array_type,
-      py::arg("element"),
-      py::arg("array_size"),
-      py::arg("explicit_stride"),
-      py::return_value_policy::reference);
+        py::arg("element"),
+        py::arg("array_size"),
+        py::arg("explicit_stride"),
+        py::return_value_policy::reference);
 
     m.def("nir_variable_create", &nir_variable_create,
-      py::arg("shader"),
-      py::arg("mode"),
-      py::arg("type"),
-      py::arg("name"),
-      py::return_value_policy::reference);
+        py::arg("shader"),
+        py::arg("mode"),
+        py::arg("type"),
+        py::arg("name"),
+        py::return_value_policy::reference);
+
+    m.def("glsl_get_explicit_size", &glsl_get_explicit_size,
+        py::arg("type"),
+        py::arg("align_to_stride"));
+
+    m.def("nir_imul_imm", &nir_imul_imm,
+        py::arg("builder"),
+        py::arg("x"),
+        py::arg("y"),
+        py::return_value_policy::reference);
+
+    m.def("glsl_get_vector_elements", &glsl_get_vector_elements,
+        py::arg("type"));
+
+    m.def("glsl_get_bit_size", &glsl_get_bit_size,
+        py::arg("type"));
+
+    m.def("nir_load_ssbo", &wrap_nir_load_ssbo, "A C++ wrapper for the nir_load_ssbo macro.",
+        py::arg("builder"),
+        py::arg("num_components"),
+        py::arg("bit_size"),
+        py::arg("src0"),
+        py::arg("src1"));
+
+    m.def("nir_load_var", &nir_load_var,
+        py::arg("builder"),
+        py::arg("var"),
+        py::return_value_policy::reference);
+
+    m.def("nir_build_deref_var", &nir_build_deref_var,
+        py::arg("builder"),
+        py::arg("var"),
+        py::return_value_policy::reference);
+
+    m.def("nir_build_deref_array", &nir_build_deref_array,
+        py::arg("builder"),
+        py::arg("parent"),
+        py::arg("index"),
+        py::return_value_policy::reference);
+
+    m.def("nir_load_deref", &nir_load_deref,
+        py::arg("builder"),
+        py::arg("deref"),
+        py::return_value_policy::reference);
 }
 
 PYBIND11_MODULE(mesa3d, m) {
