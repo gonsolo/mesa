@@ -56,6 +56,16 @@ wrap_nir_imm_int(nir_builder *build, int x)
   assert(result);
   return result;
 }
+
+nir_def *
+wrap_nir_imm_float(nir_builder *build, float x)
+{
+  assert(build);
+  nir_def *result = nir_imm_float(build, x);
+  assert(result);
+  return result;
+}
+
 nir_def *
 wrap_nir_iadd(nir_builder *build, nir_def *src0, nir_def *src1)
 {
@@ -175,6 +185,13 @@ void register_functions(py::module &m) {
 
     m.def("nir_imm_int", &wrap_nir_imm_int,
         "Wrapper for nir_imm_int",
+        py::arg("builder"),
+        py::arg("x"),
+        py::return_value_policy::reference,
+        py::keep_alive<1, 0>());
+
+    m.def("nir_imm_float", &wrap_nir_imm_float,
+        "Wrapper for nir_imm_float",
         py::arg("builder"),
         py::arg("x"),
         py::return_value_policy::reference,
