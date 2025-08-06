@@ -7,6 +7,9 @@ def test_python_functions():
         stage = mesabindings.gl_shader_stage.COMPUTE
         options = mesabindings.nir_shader_compiler_options()
         builder = mesabindings.nir_builder_init_simple_shader(stage, options, "simple")
+        val1 = mesabindings.nir_imm_int(builder, 3);
+        print(f"val1 num_components: {val1.num_components}")
+        print(f"val1 bit_size: {val1.bit_size}")
         print("Functions called successfully!")
     except Exception as e:
         print(f"An error occurred: {e}")

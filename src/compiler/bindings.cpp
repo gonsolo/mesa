@@ -36,13 +36,21 @@ void test_gonsolo() {
       ralloc_free(builder.shader);
 }
 
-
 static nir_builder
 nir_builder_init_simple_shader_wrapper(gl_shader_stage stage,
                                       const nir_shader_compiler_options *options,
                                       const char *name)
 {
     return nir_builder_init_simple_shader(stage, options, "%s", name);
+}
+
+nir_def *
+wrap_nir_imm_int(nir_builder *build, int x)
+{
+  assert(build);
+  nir_def *result = nir_imm_int(build, x);
+  assert(result);
+  return result;
 }
 
 namespace py = pybind11;
@@ -75,5 +83,18 @@ PYBIND11_MODULE(mesabindings, m) {
       py::arg("stage"),
       py::arg("options"),
       py::arg("name"));
+
+    py::class_<nir_def> (m, "nir_def")
+      .def_readonly("bit_size", &nir_def::bit_size)
+      .def_readonly("num_components", &nir_def::num_components);
+
+    m.def("nir_imm_int", &wrap_nir_imm_int,
+      "Wrapper for nir_imm_int",
+      py::arg("builder"),
+      py::arg("x"),
+      py::return_value_policy::reference,
+      py::keep_alive<1, 0>());
+
+
 }
 
