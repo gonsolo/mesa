@@ -6,6 +6,7 @@ def test_python_functions():
         mesabindings.glsl_type_singleton_init_or_ref()
         stage = mesabindings.gl_shader_stage.COMPUTE
         options = mesabindings.nir_shader_compiler_options()
+        builder = mesabindings.nir_builder_init_simple_shader(stage, options, "simple")
         print("Functions called successfully!")
     except Exception as e:
         print(f"An error occurred: {e}")

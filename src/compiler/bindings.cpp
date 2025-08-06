@@ -36,12 +36,21 @@ void test_gonsolo() {
       ralloc_free(builder.shader);
 }
 
+
+static nir_builder
+nir_builder_init_simple_shader_wrapper(gl_shader_stage stage,
+                                      const nir_shader_compiler_options *options,
+                                      const char *name)
+{
+    return nir_builder_init_simple_shader(stage, options, "%s", name);
+}
+
 namespace py = pybind11;
 
 PYBIND11_MODULE(mesabindings, m) {
     m.doc() = "pybind11 bindings for selected Mesa3D functions";
 
-    m.def("glsl_type_singleton_init_or_ref", &glsl_type_singleton_init_or_ref,
+    auto placeholder = m.def("glsl_type_singleton_init_or_ref", &glsl_type_singleton_init_or_ref,
       "Initializes or references the GLSL type singleton.");
 
     m.def("test_gonsolo", &test_gonsolo);
@@ -53,5 +62,18 @@ PYBIND11_MODULE(mesabindings, m) {
 
     py::class_<nir_shader_compiler_options>(m, "nir_shader_compiler_options")
       .def(py::init<>());
+
+    py::class_<nir_builder>(m, "nir_builder")
+      .def_readwrite("cursor", &nir_builder::cursor)
+      .def_readwrite("impl", &nir_builder::impl)
+      .def_property_readonly("shader", [](nir_builder *builder) {
+          return builder->shader;
+      },
+      py::return_value_policy::reference);
+
+    m.def("nir_builder_init_simple_shader", &nir_builder_init_simple_shader_wrapper,
+      py::arg("stage"),
+      py::arg("options"),
+      py::arg("name"));
 }
 
