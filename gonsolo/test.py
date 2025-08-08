@@ -44,5 +44,7 @@ def test_gonsolo_function():
         print(f"An error occurred: {e}")
 
 if __name__ == "__main__":
-    test_python_functions()
+    mesa3d.is_device_info_initialized()
+
+    #test_python_functions()
     #test_gonsolo_function()

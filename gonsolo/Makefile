@@ -52,15 +52,11 @@ compile:
 	cd $(BUILD_DIR); mold -run $(MESON) compile $(VERBOSE); cd -
 link_compile_commands:
 	cd ..; ln -s $(BUILD_DIR_NAME)/compile_commands.json .; cd -
-#setup:
-#	cd ..; $(MESON) setup $(BUILD_DIR_NAME) -Dbackend=ninja -Dgallium-drivers= \
-#		-Dvulkan-drivers=$(DRIVERS) -Dprefix=~/bin/mesa \
-#		-Dbuild-tests=true -Dbuildtype=debug -Db_sanitize=address; cd -
 setup:
-	cd ..; $(MESON) setup --wipe $(BUILD_DIR_NAME) -Dbackend=ninja -Dgallium-drivers= -Dvulkan-drivers=[] \
-            -Dprefix=~/bin/mesa -Dbuild-tests=true -Dbuildtype=debug -Db_sanitize=address \
-            -Degl=disabled -Dgbm=disabled -Dopengl=false -Dglx=disabled -Dplatforms= \
-	    -Dvalgrind=disabled
+	cd ..; $(MESON) setup --wipe $(BUILD_DIR_NAME) -Dbackend=ninja -Dgallium-drivers= \
+		-Dvulkan-drivers=$(DRIVERS) -Dprefix=~/bin/mesa \
+		-Dbuild-tests=true -Dbuildtype=debug -Db_sanitize=address #\
+		#-Dplatforms=wayland; cd -
 clean:
 	cd ..; rm -rf $(BUILD_DIR_NAME); cd -
 
@@ -71,7 +67,7 @@ tidy_compile_commands:
 run_nir_tests:
 	meson test -C ../build nir_tests
 run_python_test:
-	LD_PRELOAD=/usr/lib/libasan.so.8 ASAN_OPTIONS=detect_leaks=0 PYTHONPATH=../build/src/compiler python test.py
+	LD_PRELOAD=/usr/lib/libasan.so.8 ASAN_OPTIONS=detect_leaks=0 PYTHONPATH=../build/src python test.py
 
 .PHONY: all clean compile compile_and_tidy ct install link_compile_commands \
 	run_nir_tests setup t test
