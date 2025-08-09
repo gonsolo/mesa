@@ -189,7 +189,7 @@ pybind11_dep = dependency('pybind11', version: '>=3.0', required: true)
 
 python.extension_module('mesa3d',
   'bindings.cpp',
-  dependencies: [pybind11_dep, idep_compiler, idep_mesautil, idep_nir, idep_nvidia_headers, idep_nouveau_ws],
+  dependencies: [pybind11_dep, idep_compiler, idep_mesautil, idep_nir, idep_nvidia_headers, idep_nouveau_ws, idep_nak],
   include_directories: [inc_compiler, inc_glsl, inc_nir, inc_util],
   install: true,
   cpp_args: [cpp_msvc_compat_args, '-std=c++17'],
