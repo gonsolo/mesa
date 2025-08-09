@@ -246,8 +246,12 @@ void register_enums(py::module &m) {
         .value("nir_var_uniform", nir_var_uniform)
         .value("nir_var_shader_in", nir_var_shader_in)
         .value("nir_var_shader_out", nir_var_shader_out)
-        // ... all other enum values
+        // ... 
         .value("nir_var_mem_ssbo", nir_var_mem_ssbo)
+        .export_values();
+
+    py::enum_<nir_address_format>(m, "nir_address_format")
+        .value("nir_address_format_32bit_global", nir_address_format_32bit_global)
         .export_values();
 }
 
@@ -432,6 +436,24 @@ void register_functions(py::module &m) {
       py::arg("robust2_modes"),
       py::arg("fs_key"),
       py::return_value_policy::reference);
+
+    m.def("nir_lower_vars_to_ssa", &nir_lower_vars_to_ssa,
+      py::arg("shader"));
+
+    m.def("nak_optimize_nir", &nak_optimize_nir,
+      py::arg("nir"),
+      py::arg("nak"));
+
+    m.def("nak_postprocess_nir", &nak_postprocess_nir,
+      py::arg("nir"),
+      py::arg("nak"),
+      py::arg("robust2_modes"),
+      py::arg("fs_key"));
+
+    m.def("nir_lower_explicit_io", &nir_lower_explicit_io,
+      py::arg("shader"),
+      py::arg("modes"),
+      py::arg("addr_format"));
 }
 
 PYBIND11_MODULE(mesa3d, m) {
