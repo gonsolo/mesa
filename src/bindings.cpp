@@ -155,6 +155,12 @@ void wrap_is_device_info_initialized()
     drmClose(drm_fd);
 }
 
+void nir_lower_explicit_io_ssbo_simple(nir_shader *shader)
+{
+    nir_lower_explicit_io(shader,
+                          nir_var_mem_ssbo,
+                          nir_address_format_64bit_global);
+}
 
 py::object wrap_nir_load_ssbo(py::object builder, int num_components, int bit_size, py::object src0, py::object src1) {
     nir_builder* b = py::cast<nir_builder*>(builder);
@@ -444,6 +450,10 @@ void register_functions(py::module &m) {
       py::arg("nir"),
       py::arg("nak"));
 
+    m.def("nak_preprocess_nir", &nak_preprocess_nir,
+      py::arg("nir"),
+      py::arg("nak"));
+
     m.def("nak_postprocess_nir", &nak_postprocess_nir,
       py::arg("nir"),
       py::arg("nak"),
@@ -454,6 +464,16 @@ void register_functions(py::module &m) {
       py::arg("shader"),
       py::arg("modes"),
       py::arg("addr_format"));
+
+     m.def("nir_lower_explicit_io_ssbo_simple", &nir_lower_explicit_io_ssbo_simple,
+          pybind11::arg("shader"));
+
+     m.def("nir_build_deref_ptr_as_array", &nir_build_deref_ptr_as_array,
+          "Builds a nir_deref_instr that indexes a pointer as an array.",
+          py::arg("builder"),
+          py::arg("parent"),
+          py::arg("index"),
+          py::return_value_policy::reference);
 }
 
 PYBIND11_MODULE(mesa3d, m) {
