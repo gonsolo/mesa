@@ -163,6 +163,212 @@ py::object wrap_nir_load_ssbo(py::object builder, int num_components, int bit_si
     return py::cast(nir_load_ssbo(b, num_components, bit_size, s0, s1));
 }
 
+struct lower_ycbcr_state {
+     uint32_t set_layout_count;
+     struct vk_descriptor_set_layout * const *set_layouts;
+};
+
+static bool
+lower_load_intrinsic(nir_builder *b, nir_intrinsic_instr *load,
+                     UNUSED void *_data)
+{
+   switch (load->intrinsic) {
+   case nir_intrinsic_load_ubo: {
+      b->cursor = nir_before_instr(&load->instr);
+
+      nir_def *index = load->src[0].ssa;
+      nir_def *offset = load->src[1].ssa;
+      const enum gl_access_qualifier access = nir_intrinsic_access(load);
+      const uint32_t align_mul = nir_intrinsic_align_mul(load);
+      const uint32_t align_offset = nir_intrinsic_align_offset(load);
+
+      nir_def *val;
+      if (load->src[0].ssa->num_components == 1) {
+         val = nir_ldc_nv(b, load->num_components, load->def.bit_size,
+                           index, offset, .access = access,
+                           .align_mul = align_mul,
+                           .align_offset = align_offset);
+      } else if (load->src[0].ssa->num_components == 2) {
+         nir_def *handle = nir_pack_64_2x32(b, load->src[0].ssa);
+         val = nir_ldcx_nv(b, load->num_components, load->def.bit_size,
+                           handle, offset, .access = access,
+                           .align_mul = align_mul,
+                           .align_offset = align_offset);
+      } else {
+         unreachable("Invalid UBO index");
+      }
+      nir_def_rewrite_uses(&load->def, val);
+      return true;
+   }
+
+   case nir_intrinsic_load_global_constant_offset:
+   case nir_intrinsic_load_global_constant_bounded: {
+      b->cursor = nir_before_instr(&load->instr);
+
+      nir_def *base_addr = load->src[0].ssa;
+      nir_def *offset = load->src[1].ssa;
+
+      nir_def *zero = NULL;
+      if (load->intrinsic == nir_intrinsic_load_global_constant_bounded) {
+         nir_def *bound = load->src[2].ssa;
+
+         unsigned bit_size = load->def.bit_size;
+         assert(bit_size >= 8 && bit_size % 8 == 0);
+         unsigned byte_size = bit_size / 8;
+
+         zero = nir_imm_zero(b, load->num_components, bit_size);
+
+         unsigned load_size = byte_size * load->num_components;
+
+         nir_def *sat_offset =
+            nir_umin(b, offset, nir_imm_int(b, UINT32_MAX - (load_size - 1)));
+         nir_def *in_bounds =
+            nir_ilt(b, nir_iadd_imm(b, sat_offset, load_size - 1), bound);
+
+         nir_push_if(b, in_bounds);
+      }
+
+      nir_def *val =
+         nir_build_load_global_constant(b, load->def.num_components,
+                                        load->def.bit_size,
+                                        nir_iadd(b, base_addr, nir_u2u64(b, offset)),
+                                        .align_mul = nir_intrinsic_align_mul(load),
+                                        .align_offset = nir_intrinsic_align_offset(load));
+
+      if (load->intrinsic == nir_intrinsic_load_global_constant_bounded) {
+         nir_pop_if(b, NULL);
+         val = nir_if_phi(b, val, zero);
+      }
+
+      nir_def_rewrite_uses(&load->def, val);
+      return true;
+   }
+
+   default:
+      return false;
+   }
+}
+
+static void
+shared_var_info(const struct glsl_type *type, unsigned *size, unsigned *align)
+{
+   assert(glsl_type_is_vector_or_scalar(type));
+
+   uint32_t comp_size = glsl_type_is_boolean(type) ? 4 : glsl_get_bit_size(type) / 8;
+   unsigned length = glsl_get_vector_elements(type);
+   *size = comp_size * length, *align = comp_size;
+}
+
+static void tinygrad_lower_nir(nir_shader *nir)
+{
+   //if (nir->info.stage == MESA_SHADER_TESS_EVAL) {
+   //   NIR_PASS(_, nir, nir_lower_patch_vertices,
+   //            nir->info.tess.tcs_vertices_out, NULL);
+   //}
+
+   //const struct lower_ycbcr_state ycbcr_state = {
+   //   .set_layout_count = set_layout_count,
+   //   .set_layouts = set_layouts,
+   //};
+   //NIR_PASS(_, nir, nir_vk_lower_ycbcr_tex,
+   //         lookup_ycbcr_conversion, &ycbcr_state);
+
+   nir_lower_compute_system_values_options csv_options = {
+      .has_base_workgroup_id = true,
+   };
+   NIR_PASS(_, nir, nir_lower_compute_system_values, &csv_options);
+
+   /* Lower push constants before lower_descriptors */
+   NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_push_const,
+            nir_address_format_32bit_offset);
+
+   //struct nvk_cbuf_map *cbuf_map = NULL;
+   //if (!(pdev->debug_flags & NVK_DEBUG_NO_CBUF)) {
+   //   cbuf_map = cbuf_map_out;
+
+   //   /* Large constant support assumes cbufs */
+   //   NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
+   //} else {
+   //   *cbuf_map_out = (struct nvk_cbuf_map) {
+   //      .cbuf_count = 1,
+   //      .cbufs = {
+   //         { .type = NVK_CBUF_TYPE_ROOT_DESC },
+   //      }
+   //   };
+   //}
+
+   nir_opt_access_options opt_access_options = {
+      .is_vulkan = true,
+   };
+   NIR_PASS(_, nir, nir_opt_access, &opt_access_options);
+
+   /* On Kepler, we have to lower images to addresses */
+   //if (pdev->info.cls_eng3d < MAXWELL_A)
+   //   NIR_PASS(_, nir, nak_nir_lower_image_addrs, pdev->nak);
+
+   //NIR_PASS(_, nir, nvk_nir_lower_descriptors, pdev, shader_flags, rs,
+   //         set_layout_count, set_layouts, cbuf_map);
+
+   //if (nvk_use_bindless_cbuf(&pdev->info)) {
+   //   /* On Turing+ where we have bindless cbufs, we use ACCESS_NON_UNIFORM to
+   //    * determine whether or not it's safe to assume a uniform handle so we
+   //    * want to optimize it away whenever possible.
+   //    */
+   //   if (nir_has_non_uniform_access(nir, nir_lower_non_uniform_ubo_access))
+   //      NIR_PASS(_, nir, nir_opt_non_uniform_access);
+   //}
+
+   //if (pdev->info.cls_eng3d < TURING_A) {
+   //   /* NOTE: This does nothing for images on Kepler since those are lowered
+   //    * to suldga/sustga before we get here.  That's fine, though, because
+   //    * our nil_su_info fetches and calculations work fine with non-uniform
+   //    * descriptors.
+   //    */
+   //   struct nir_lower_non_uniform_access_options opts = {
+   //      .types = nir_lower_non_uniform_texture_access |
+   //               nir_lower_non_uniform_image_access,
+   //      .callback = NULL,
+   //   };
+   //   /* In practice, most shaders do not have non-uniform-qualified accesses
+   //    * thus a cheaper and likely to fail check is run first.
+   //    */
+   //   if (nir_has_non_uniform_access(nir, opts.types)) {
+   //      NIR_PASS(_, nir, nir_opt_non_uniform_access);
+   //      NIR_PASS(_, nir, nir_lower_non_uniform_access, &opts);
+   //   }
+   //}
+
+   NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
+            nir_address_format_64bit_global);
+   NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ssbo,
+            nir_address_format_64bit_global);
+   NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
+            nir_address_format_64bit_global);
+   NIR_PASS(_, nir, nir_shader_intrinsics_pass,
+            lower_load_intrinsic, nir_metadata_none, NULL);
+
+   NIR_PASS(_, nir, nir_lower_vars_to_explicit_types,
+            nir_var_mem_shared, shared_var_info);
+   NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_shared,
+            nir_address_format_32bit_offset);
+
+   if (nir->info.zero_initialize_shared_memory && nir->info.shared_size > 0) {
+      /* QMD::SHARED_MEMORY_SIZE requires an alignment of 256B so it's safe to
+       * align everything up to 16B so we can write whole vec4s.
+       */
+      nir->info.shared_size = align(nir->info.shared_size, 16);
+      NIR_PASS(_, nir, nir_zero_initialize_shared_memory,
+               nir->info.shared_size, 16);
+
+      /* We need to call lower_compute_system_values again because
+       * nir_zero_initialize_shared_memory generates load_invocation_id which
+       * has to be lowered to load_invocation_index.
+       */
+      NIR_PASS(_, nir, nir_lower_compute_system_values, NULL);
+   }
+}
+
+
 void register_classes(py::module &m) {
     py::class_<nir_function_impl>(m, "nir_function_impl")
         .def_readonly("body", &nir_function_impl::body);
@@ -464,6 +670,9 @@ void register_functions(py::module &m) {
           py::arg("parent"),
           py::arg("index"),
           py::return_value_policy::reference);
+
+    m.def("tinygrad_lower_nir", &tinygrad_lower_nir,
+      py::arg("nir"));
 }
 
 PYBIND11_MODULE(mesa3d, m) {
