@@ -47,8 +47,7 @@ link_compile_commands:
 setup:
 	cd ..; $(MESON) setup --wipe $(BUILD_DIR_NAME) -Dbackend=ninja -Dgallium-drivers= \
 		-Dvulkan-drivers=$(DRIVERS) -Dprefix=~/bin/mesa \
-		-Dbuild-tests=true -Dbuildtype=debug -Db_sanitize=address #\
-		#-Dplatforms=wayland; cd -
+		-Dbuild-tests=true -Dbuildtype=debug -Db_sanitize=address; cd -
 clean:
 	cd ..; rm -rf $(BUILD_DIR_NAME); cd -
 
