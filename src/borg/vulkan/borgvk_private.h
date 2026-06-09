@@ -11,6 +11,8 @@
 
 #include "vk_instance.h"
 #include "vk_physical_device.h"
+#include "vk_device.h"
+#include "vk_queue.h"
 
 #include "borgvk_entrypoints.h"
 
@@ -32,10 +34,20 @@ struct borgvk_physical_device {
    VkPhysicalDeviceMemoryProperties memory;
 };
 
+struct borgvk_device {
+   struct vk_device vk;
+
+   /* Single graphics/compute/transfer queue. cube.c and vulkaninfo both use one
+    * queue from family 0; multi-queue support can come later. */
+   struct vk_queue queue;
+};
+
 VK_DEFINE_HANDLE_CASTS(borgvk_instance, vk.base, VkInstance,
                        VK_OBJECT_TYPE_INSTANCE)
 VK_DEFINE_HANDLE_CASTS(borgvk_physical_device, vk.base, VkPhysicalDevice,
                        VK_OBJECT_TYPE_PHYSICAL_DEVICE)
+VK_DEFINE_HANDLE_CASTS(borgvk_device, vk.base, VkDevice,
+                       VK_OBJECT_TYPE_DEVICE)
 
 #ifdef __cplusplus
 }

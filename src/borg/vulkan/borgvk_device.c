@@ -288,6 +288,62 @@ borgvk_DestroyInstance(VkInstance _instance,
    vk_free(&instance->vk.alloc, instance);
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL
+borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
+                    const VkDeviceCreateInfo *pCreateInfo,
+                    const VkAllocationCallbacks *pAllocator,
+                    VkDevice *pDevice)
+{
+   VK_FROM_HANDLE(borgvk_physical_device, physical_device, physicalDevice);
+   struct borgvk_device *device;
+   VkResult result;
+
+   assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO);
+
+   device = vk_zalloc2(&physical_device->vk.instance->alloc, pAllocator,
+                       sizeof(*device), 8,
+                       VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+   if (!device)
+      return vk_error(physical_device, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   struct vk_device_dispatch_table dispatch_table;
+   vk_device_dispatch_table_from_entrypoints(&dispatch_table,
+                                             &borgvk_device_entrypoints, true);
+
+   result = vk_device_init(&device->vk, &physical_device->vk,
+                           &dispatch_table, pCreateInfo, pAllocator);
+   if (result != VK_SUCCESS) {
+      vk_free2(&physical_device->vk.instance->alloc, pAllocator, device);
+      return vk_error(physical_device, result);
+   }
+
+   /* One queue from family 0. */
+   assert(pCreateInfo->queueCreateInfoCount >= 1);
+   result = vk_queue_init(&device->queue, &device->vk,
+                          &pCreateInfo->pQueueCreateInfos[0], 0);
+   if (result != VK_SUCCESS) {
+      vk_device_finish(&device->vk);
+      vk_free2(&physical_device->vk.instance->alloc, pAllocator, device);
+      return vk_error(physical_device, result);
+   }
+
+   *pDevice = borgvk_device_to_handle(device);
+   return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
+{
+   VK_FROM_HANDLE(borgvk_device, device, _device);
+
+   if (!device)
+      return;
+
+   vk_queue_finish(&device->queue);
+   vk_device_finish(&device->vk);
+   vk_free2(&device->vk.alloc, pAllocator, device);
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 borgvk_GetInstanceProcAddr(VkInstance _instance, const char *pName)
 {
