@@ -80,6 +80,9 @@ endif
 if with_any_broadcom
   subdir('broadcom')
 endif
+if with_borg_vk
+  subdir('borg')
+endif
 if with_gallium_etnaviv
   subdir('etnaviv')
 endif
