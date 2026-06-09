@@ -14,7 +14,10 @@ borgvk_entrypoints = custom_target(
 )
 
 libborgvk_files = files(
+  'borgvk_cmd_buffer.c',
   'borgvk_device.c',
+  'borgvk_memory.c',
+  'borgvk_sync.c',
   'borgvk_private.h',
 )
 

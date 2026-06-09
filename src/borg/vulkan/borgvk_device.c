@@ -12,6 +12,8 @@
 #include "vk_alloc.h"
 #include "vk_log.h"
 #include "vk_util.h"
+#include "vk_cmd_enqueue_entrypoints.h"
+#include "vk_common_entrypoints.h"
 
 #include "util/log.h"
 
@@ -218,6 +220,10 @@ create_physical_device(struct borgvk_instance *instance)
       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
    device->memory.memoryTypes[0].heapIndex = 0;
 
+   device->sync_types[0] = &borgvk_sync_type;
+   device->sync_types[1] = NULL;
+   device->vk.supported_sync_types = device->sync_types;
+
    list_addtail(&device->vk.link, &instance->vk.physical_devices.list);
 
    return VK_SUCCESS;
@@ -306,9 +312,19 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (!device)
       return vk_error(physical_device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
+   /* Main device dispatch: our entrypoints, then fill every vkCmd* we don't
+    * implement with the runtime's record-into-queue emulation. */
    struct vk_device_dispatch_table dispatch_table;
    vk_device_dispatch_table_from_entrypoints(&dispatch_table,
                                              &borgvk_device_entrypoints, true);
+   vk_device_dispatch_table_from_entrypoints(&dispatch_table,
+                                             &vk_cmd_enqueue_device_entrypoints, false);
+
+   /* Dispatch used to replay a recorded queue (secondary cmd buffers). */
+   vk_device_dispatch_table_from_entrypoints(&device->cmd_dispatch,
+                                             &borgvk_device_entrypoints, true);
+   vk_device_dispatch_table_from_entrypoints(&device->cmd_dispatch,
+                                             &vk_common_device_entrypoints, false);
 
    result = vk_device_init(&device->vk, &physical_device->vk,
                            &dispatch_table, pCreateInfo, pAllocator);
@@ -316,6 +332,9 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
       vk_free2(&physical_device->vk.instance->alloc, pAllocator, device);
       return vk_error(physical_device, result);
    }
+
+   device->vk.command_dispatch_table = &device->cmd_dispatch;
+   device->vk.command_buffer_ops = &borgvk_cmd_buffer_ops;
 
    /* One queue from family 0. */
    assert(pCreateInfo->queueCreateInfoCount >= 1);
