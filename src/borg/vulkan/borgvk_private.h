@@ -16,6 +16,7 @@
 #include "vk_device_memory.h"
 #include "vk_buffer.h"
 #include "vk_image.h"
+#include "vk_descriptor_set_layout.h"
 
 #include "borgvk_entrypoints.h"
 
@@ -92,6 +93,41 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_buffer, vk.base, VkBuffer,
                                VK_OBJECT_TYPE_BUFFER)
 VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_image, vk.base, VkImage,
                                VK_OBJECT_TYPE_IMAGE)
+
+#define BORGVK_MAX_BINDINGS 8
+
+struct borgvk_descriptor_set_layout {
+   struct vk_descriptor_set_layout vk;
+   uint32_t binding_count;
+};
+
+struct borgvk_descriptor_pool {
+   struct vk_object_base base;
+};
+
+/* A descriptor set just remembers which buffer is bound at each binding, so the
+ * submit path can find the cube's uniform buffer (binding 0) and read the MVP. */
+struct borgvk_descriptor_set {
+   struct vk_object_base base;
+   struct borgvk_buffer *buffers[BORGVK_MAX_BINDINGS];
+   VkDeviceSize offsets[BORGVK_MAX_BINDINGS];
+};
+
+/* No shader compilation yet (the cube's shaders are pre-baked in firmware), so
+ * a pipeline is an opaque placeholder. */
+struct borgvk_pipeline {
+   struct vk_object_base base;
+};
+
+VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_descriptor_set_layout, vk.base,
+                               VkDescriptorSetLayout,
+                               VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT)
+VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_descriptor_pool, base, VkDescriptorPool,
+                               VK_OBJECT_TYPE_DESCRIPTOR_POOL)
+VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_descriptor_set, base, VkDescriptorSet,
+                               VK_OBJECT_TYPE_DESCRIPTOR_SET)
+VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_pipeline, base, VkPipeline,
+                               VK_OBJECT_TYPE_PIPELINE)
 
 #ifdef __cplusplus
 }
