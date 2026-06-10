@@ -6,22 +6,38 @@
 // FNEG/FSTEP/FRCP/FTEX) and emits the .borg blob the firmware loads. Modeled on
 // Mesa's NAK (src/nouveau/compiler/nak).
 //
-// Status: the build/link pipeline is proven (borgc_selftest) and NIR now flows
-// in (borgc_compile_nir inspects the shader). The actual NIR→Borg lowering and
-// .borg emission land next.
+// Status: SPIR-V→NIR→borgc is live. This pass classifies every NIR instruction
+// against the Borg ISA — a coverage report that drives instruction selection.
+// The arithmetic core (fmul/ffma → FMUL/FMADD) selects directly; the open work
+// is lowering the UBO/I-O intrinsics to the firmware's uniform model and real
+// register allocation + .borg emission.
+
+#![allow(non_upper_case_globals)]
 
 use compiler::bindings::*;
 
-/// Self-test: returns a known constant so the C side can confirm the Rust crate
-/// is linked into libvulkan_borg and callable across the FFI boundary.
+/// Self-test: confirms the Rust crate is linked and callable across the FFI.
 #[no_mangle]
 pub extern "C" fn borgc_selftest() -> u32 {
     0xB0_06
 }
 
-/// First NIR entry point: receive the app's shader as Mesa NIR and inspect it
-/// (stage + instruction count) to prove the SPIR-V→NIR→borgc path. Returns the
-/// instruction count. The real lowering to Borg ISA replaces this body next.
+/// Does this NIR ALU op map directly onto a Borg ISA opcode?
+fn borg_isel(op: nir_op) -> Option<&'static str> {
+    match op {
+        nir_op_fadd => Some("FADD"),
+        nir_op_fmul => Some("FMUL"),
+        nir_op_ffma | nir_op_ffma_weak => Some("FMADD"),
+        nir_op_fneg => Some("FNEG"),
+        // Moves / vector (de)construction become register copies, no ISA op.
+        nir_op_mov | nir_op_vec2 | nir_op_vec3 | nir_op_vec4 => Some("mov"),
+        _ => None,
+    }
+}
+
+/// Receive the app's shader as NIR and report Borg-ISA instruction-selection
+/// coverage: how many instructions map directly today vs. still need lowering or
+/// new selection rules (printed by op name). Returns the instruction count.
 ///
 /// # Safety
 /// `nir` must be a valid `nir_shader` pointer from the Mesa runtime (or null).
@@ -30,19 +46,54 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
     if nir.is_null() {
         return 0;
     }
-    let shader = &*nir;
-    let stage = shader.info.stage();
+    let stage = (*nir).info.stage();
 
-    let mut instrs: u32 = 0;
+    let mut total = 0u32;
+    let mut alu_ok = 0u32;
+    let mut alu_todo = 0u32;
+    let mut tex = 0u32;
+    let mut consts = 0u32;
+    let mut intrinsics = 0u32;
+    let mut other = 0u32;
+    let mut todo: Vec<&'static str> = Vec::new();
+    let mut note = |op: &'static str| {
+        if !todo.contains(&op) {
+            todo.push(op);
+        }
+    };
+
     let entry = nir_shader_get_entrypoint(nir);
     if !entry.is_null() {
         for block in (*entry).iter_blocks() {
-            for _instr in block.iter_instr_list() {
-                instrs += 1;
+            for instr in block.iter_instr_list() {
+                total += 1;
+                if let Some(alu) = instr.as_alu() {
+                    if borg_isel(alu.op).is_some() {
+                        alu_ok += 1;
+                    } else {
+                        alu_todo += 1;
+                        note(alu.info().name());
+                    }
+                } else if instr.as_tex().is_some() {
+                    tex += 1; // → FTEX
+                } else if let Some(i) = instr.as_intrinsic() {
+                    intrinsics += 1;
+                    note(i.info().name());
+                } else if instr.as_load_const().is_some() {
+                    consts += 1;
+                } else {
+                    other += 1;
+                }
             }
         }
     }
 
-    eprintln!("borgc: NIR shader stage={stage} instrs={instrs}");
-    instrs
+    eprintln!(
+        "borgc: stage={stage} instrs={total} | alu_ok={alu_ok} alu_todo={alu_todo} \
+         tex={tex} const={consts} intrinsic={intrinsics} other={other}"
+    );
+    if !todo.is_empty() {
+        eprintln!("borgc:   needs lowering/selection: {}", todo.join(", "));
+    }
+    total
 }
