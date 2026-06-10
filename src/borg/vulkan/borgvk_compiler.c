@@ -62,6 +62,20 @@ borgvk_compile_stage(struct borgvk_device *device,
       return;
    }
 
+   /* Lower/optimize toward the Borg ISA: scalarize, then fold and lower ALU ops
+    * (fsub→fadd, fdiv→fmul·frcp via lower_fdiv, fdot→fmul+ffma, constant folding)
+    * so the backend sees the small supported op set. UBO/descriptor I/O lowering
+    * to the firmware's uniform model comes next. */
+   NIR_PASS(_, nir, nir_lower_alu_to_scalar, NULL, NULL);
+   bool progress;
+   do {
+      progress = false;
+      NIR_PASS(progress, nir, nir_opt_dce);
+      NIR_PASS(progress, nir, nir_opt_cse);
+      NIR_PASS(progress, nir, nir_opt_constant_folding);
+      NIR_PASS(progress, nir, nir_opt_algebraic);
+   } while (progress);
+
    if (getenv("BORGC_DUMP_NIR"))
       nir_print_shader(nir, stderr);
 
