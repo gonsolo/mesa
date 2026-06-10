@@ -133,25 +133,80 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
         eprintln!("borgc:   needs lowering/selection: {}", todo.join(", "));
     }
 
-    // Instruction selection: emit Borg ops for the selectable ALU instructions,
-    // in virtual-register (NIR SSA index) form. Register allocation + .borg blob
-    // emission are the next step; this proves selection produces real Borg code.
+    use std::collections::HashMap;
+
+    // Vector-construction / move resolution. mov and vecN don't become Borg ops;
+    // instead they define, per result component, which (scalar def, component) it
+    // really reads. cube.c's matrix multiply threads its accumulator through vec4
+    // builds and swizzle reads (e.g. `%67 = fadd(%66, %65.x)` where %65 = vec4(...)),
+    // so an operand must be resolved through these to its true scalar producer —
+    // otherwise the data flow is severed and accumulators read garbage.
+    let mut vec_map: HashMap<u32, Vec<(u32, u8)>> = HashMap::new();
+    if !entry.is_null() {
+        for block in (*entry).iter_blocks() {
+            for instr in block.iter_instr_list() {
+                if let Some(alu) = instr.as_alu() {
+                    let comps: Option<Vec<(u32, u8)>> = match alu.op {
+                        nir_op_vec2 | nir_op_vec3 | nir_op_vec4 => Some(
+                            alu.srcs_as_slice()
+                                .iter()
+                                .map(|s| (s.src.as_def().index, s.swizzle[0]))
+                                .collect(),
+                        ),
+                        // mov / bit-size no-ops: per result component k read src0.swizzle[k].
+                        nir_op_mov
+                        | nir_op_i2i16
+                        | nir_op_i2i32
+                        | nir_op_u2u16
+                        | nir_op_u2u32 => {
+                            let s = &alu.srcs_as_slice()[0];
+                            let n = alu.def.num_components as usize;
+                            Some((0..n).map(|k| (s.src.as_def().index, s.swizzle[k])).collect())
+                        }
+                        _ => None,
+                    };
+                    if let Some(c) = comps {
+                        vec_map.insert(alu.def.index, c);
+                    }
+                }
+            }
+        }
+    }
+    // Resolve (def, component) through vec/mov chains to the underlying scalar.
+    let resolve = |d0: u32, c0: u8| -> (u32, u8) {
+        let (mut d, mut c) = (d0, c0);
+        for _ in 0..64 {
+            match vec_map.get(&d) {
+                Some(v) if (c as usize) < v.len() => {
+                    let (nd, nc) = v[c as usize];
+                    d = nd;
+                    c = nc;
+                }
+                _ => break,
+            }
+        }
+        (d, c)
+    };
+
+    // Instruction selection: emit Borg ops for the selectable ALU instructions
+    // (skipping mov/vecN, which are resolved away). Each source operand is resolved
+    // through the vec/mov map to its true scalar producer + component.
     let mut prog: Vec<BorgInstr> = Vec::new();
     if !entry.is_null() {
         for block in (*entry).iter_blocks() {
             for instr in block.iter_instr_list() {
                 if let Some(alu) = instr.as_alu() {
                     if let Some(mnem) = borg_isel(alu.op) {
-                        let srcs = alu
-                            .srcs_as_slice()
-                            .iter()
-                            .map(|s| s.src.as_def().index)
-                            .collect();
-                        let swz = alu
-                            .srcs_as_slice()
-                            .iter()
-                            .map(|s| s.swizzle[0])
-                            .collect();
+                        if mnem == "mov" {
+                            continue; // resolved via vec_map, not emitted
+                        }
+                        let mut srcs = Vec::new();
+                        let mut swz = Vec::new();
+                        for s in alu.srcs_as_slice() {
+                            let (d, c) = resolve(s.src.as_def().index, s.swizzle[0]);
+                            srcs.push(d);
+                            swz.push(c);
+                        }
                         prog.push(BorgInstr { mnem, dst: alu.def.index, srcs, swz });
                     }
                 }
@@ -175,7 +230,6 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
     //   store_output io_semantics.location (low 7 bits of IO_SEMANTICS):
     //     VARYING_SLOT_POS(0) → gl_Position → output regs r0..r3 (sequencer-snooped)
     //     VAR0/VAR1           → texcoord/frag_pos varyings (firmware-handled)
-    use std::collections::HashMap;
     const VARYING_SLOT_POS: u32 = 0;
     let mut mvp_loads = 0u32;
     let mut pos_loads = 0u32;
@@ -216,12 +270,17 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
                         nir_intrinsic_store_output => {
                             let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
                             let src = intr.srcs_as_slice()[0].as_def().index;
-                            out_roots.push(src);
                             if loc == VARYING_SLOT_POS {
+                                // gl_Position is a vec4 stored whole (wrmask=xyzw);
+                                // resolve each component to its scalar producer and
+                                // pin it to r0..r3 (also the DCE roots). Varyings
+                                // (texcoord/frag_pos) are firmware-handled — not rooted.
                                 gl_position = Some(src);
-                                let c = intr.component() as usize;
-                                if c < 4 {
-                                    pos_out[c] = Some(src);
+                                let n = vec_map.get(&src).map_or(1, |v| v.len()).min(4);
+                                for c in 0..n {
+                                    let (d, _) = resolve(src, c as u8);
+                                    pos_out[c] = Some(d);
+                                    out_roots.push(d);
                                 }
                             } else {
                                 varying_outs += 1;
