@@ -209,11 +209,15 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
     let mut prod: HashMap<u32, (nir_op, Vec<(u32, u8)>)> = HashMap::new();
     // FTEX results occupy 3 consecutive regs (R=rd, G=rd+1, B=rd+2).
     let mut ftex_dsts: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    // Vector constants (e.g. cube.frag's lightDir) → reserved GPRs r23.. (written
-    // once via MMIO by the firmware; persist across the autonomous render — the rast
-    // kernel uses only r0..r11 and the frag reserves these). Uniforms are too tight:
+    // Vector constants (e.g. cube.frag's lightDir) → reserved GPRs r17.. (written
+    // once via MMIO by the firmware; persist across the WHOLE autonomous render).
+    // They must dodge every prior stage's working registers: the vertex shaders
+    // (hand + borgc) use r0-9 and r24-26 for the MVP·pos chain, and setup/rast use
+    // r0-11.  r17-19 is free in all of them, so lightDir survives vertex→frag.
+    // (r23-25 collided with the vertex shaders' r24/r25 — caught only by running
+    // the full pipeline, not the fragment in isolation.)  Uniforms are too tight:
     // rast(u0-11) + frag varyings(u12-30) already fill 31 of 32. Records (reg, fp16).
-    let mut const_reg_next: u8 = 23;
+    let mut const_reg_next: u8 = 17;
     let mut const_uniforms: Vec<(u8, u16)> = Vec::new();
     // gl_varying_slot: VAR0=texcoord, VAR1=frag_pos (Mesa enum: VAR0 = 32).
     const VARYING_SLOT_VAR0: u32 = 32;
@@ -653,8 +657,8 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
         if let Some(zr) = frag_z {
             forced.insert(zr, 29); // interpolated depth → r29
         }
-        // r0-2 attrs, r20-22 FTEX, r23-25 lightDir consts, r26-29 outputs.
-        extra_reserved.extend_from_slice(&[0, 1, 2, 21, 22, 23, 24, 25, 26, 27, 28, 29]);
+        // r0-2 attrs, r17-19 lightDir consts, r20-22 FTEX, r26-29 outputs.
+        extra_reserved.extend_from_slice(&[0, 1, 2, 17, 18, 19, 21, 22, 26, 27, 28, 29]);
     }
 
     let alloc = regalloc(&prog, &forced, &extra_reserved);
