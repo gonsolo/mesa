@@ -50,6 +50,28 @@ pub extern "C" fn borgc_selftest() -> u32 {
     0xB0_06
 }
 
+/// Resolve a (def, component) through the vec/mov construction map to the true
+/// underlying scalar producer + component. Free function (not a closure) so the
+/// selection walk can resolve and mutate `vec_map` in the same loop.
+fn resolve_vm(
+    vec_map: &std::collections::HashMap<u32, Vec<(u32, u8)>>,
+    d0: u32,
+    c0: u8,
+) -> (u32, u8) {
+    let (mut d, mut c) = (d0, c0);
+    for _ in 0..64 {
+        match vec_map.get(&d) {
+            Some(v) if (c as usize) < v.len() => {
+                let (nd, nc) = v[c as usize];
+                d = nd;
+                c = nc;
+            }
+            _ => break,
+        }
+    }
+    (d, c)
+}
+
 /// Does this NIR ALU op map directly onto a Borg ISA opcode?
 fn borg_isel(op: nir_op) -> Option<&'static str> {
     match op {
@@ -145,74 +167,88 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
     // builds and swizzle reads (e.g. `%67 = fadd(%66, %65.x)` where %65 = vec4(...)),
     // so an operand must be resolved through these to its true scalar producer —
     // otherwise the data flow is severed and accumulators read garbage.
+    // Single in-order selection walk. NIR is in SSA + topological order, so when we
+    // reach an instruction all its sources are already in vec_map/prog. Each
+    // value-producing op either (a) registers a vec_map entry (mov/vecN and the
+    // vector-wide intrinsics, which resolve away component-wise) or (b) emits scalar
+    // Borg ops. Operands are resolved through vec_map to their true scalar producer.
+    // Synthetic results from expansions (ddx/ddy/fmax/tex/interp) use fresh vregs
+    // above any NIR ssa index.
     let mut vec_map: HashMap<u32, Vec<(u32, u8)>> = HashMap::new();
+    let mut prog: Vec<BorgInstr> = Vec::new();
+    let mut next_vreg: u32 = 1_000_000;
     if !entry.is_null() {
         for block in (*entry).iter_blocks() {
             for instr in block.iter_instr_list() {
                 if let Some(alu) = instr.as_alu() {
-                    let comps: Option<Vec<(u32, u8)>> = match alu.op {
-                        nir_op_vec2 | nir_op_vec3 | nir_op_vec4 => Some(
-                            alu.srcs_as_slice()
+                    match alu.op {
+                        nir_op_vec2 | nir_op_vec3 | nir_op_vec4 => {
+                            let c: Vec<(u32, u8)> = alu
+                                .srcs_as_slice()
                                 .iter()
                                 .map(|s| (s.src.as_def().index, s.swizzle[0]))
-                                .collect(),
-                        ),
-                        // mov / bit-size no-ops: per result component k read src0.swizzle[k].
-                        nir_op_mov
-                        | nir_op_i2i16
-                        | nir_op_i2i32
-                        | nir_op_u2u16
+                                .collect();
+                            vec_map.insert(alu.def.index, c);
+                        }
+                        nir_op_mov | nir_op_i2i16 | nir_op_i2i32 | nir_op_u2u16
                         | nir_op_u2u32 => {
                             let s = &alu.srcs_as_slice()[0];
                             let n = alu.def.num_components as usize;
-                            Some((0..n).map(|k| (s.src.as_def().index, s.swizzle[k])).collect())
+                            let c: Vec<(u32, u8)> =
+                                (0..n).map(|k| (s.src.as_def().index, s.swizzle[k])).collect();
+                            vec_map.insert(alu.def.index, c);
                         }
+                        // fmax(0, x) → x · FSTEP(x)  (FSTEP(x)=1 if x>0 else 0).
+                        nir_op_fmax => {
+                            let s = alu.srcs_as_slice();
+                            let a_zero = s[0].comp_as_uint(0) == Some(0);
+                            let xs = if a_zero { &s[1] } else { &s[0] };
+                            let x = resolve_vm(&vec_map, xs.src.as_def().index, xs.swizzle[0]);
+                            let vstep = next_vreg;
+                            next_vreg += 1;
+                            prog.push(BorgInstr { mnem: "FSTEP", dst: vstep, srcs: vec![x.0], swz: vec![x.1] });
+                            prog.push(BorgInstr { mnem: "FMUL", dst: alu.def.index, srcs: vec![x.0, vstep], swz: vec![x.1, 0] });
+                        }
+                        _ => {
+                            if let Some(mnem) = borg_isel(alu.op) {
+                                if mnem != "mov" {
+                                    let mut srcs = Vec::new();
+                                    let mut swz = Vec::new();
+                                    for s in alu.srcs_as_slice() {
+                                        let (d, c) =
+                                            resolve_vm(&vec_map, s.src.as_def().index, s.swizzle[0]);
+                                        srcs.push(d);
+                                        swz.push(c);
+                                    }
+                                    prog.push(BorgInstr { mnem, dst: alu.def.index, srcs, swz });
+                                }
+                            }
+                            // else: unhandled alu (fpow/fge feed the sRGB idiom) — skip.
+                        }
+                    }
+                } else if let Some(intr) = instr.as_intrinsic() {
+                    // Vector-wide quad derivatives → per-component scalar DDX/DDY,
+                    // registered in vec_map so reads of the result resolve correctly.
+                    let deriv = match intr.intrinsic {
+                        nir_intrinsic_ddx | nir_intrinsic_ddx_coarse | nir_intrinsic_ddx_fine => Some("DDX"),
+                        nir_intrinsic_ddy | nir_intrinsic_ddy_coarse | nir_intrinsic_ddy_fine => Some("DDY"),
                         _ => None,
                     };
-                    if let Some(c) = comps {
-                        vec_map.insert(alu.def.index, c);
+                    if let Some(mnem) = deriv {
+                        let src = intr.srcs_as_slice()[0].as_def().index;
+                        let n = intr.def.num_components as usize;
+                        let comps: Vec<(u32, u8)> = (0..n)
+                            .map(|c| {
+                                let (sd, sc) = resolve_vm(&vec_map, src, c as u8);
+                                let v = next_vreg;
+                                next_vreg += 1;
+                                prog.push(BorgInstr { mnem, dst: v, srcs: vec![sd], swz: vec![sc] });
+                                (v, 0u8)
+                            })
+                            .collect();
+                        vec_map.insert(intr.def.index, comps);
                     }
-                }
-            }
-        }
-    }
-    // Resolve (def, component) through vec/mov chains to the underlying scalar.
-    let resolve = |d0: u32, c0: u8| -> (u32, u8) {
-        let (mut d, mut c) = (d0, c0);
-        for _ in 0..64 {
-            match vec_map.get(&d) {
-                Some(v) if (c as usize) < v.len() => {
-                    let (nd, nc) = v[c as usize];
-                    d = nd;
-                    c = nc;
-                }
-                _ => break,
-            }
-        }
-        (d, c)
-    };
-
-    // Instruction selection: emit Borg ops for the selectable ALU instructions
-    // (skipping mov/vecN, which are resolved away). Each source operand is resolved
-    // through the vec/mov map to its true scalar producer + component.
-    let mut prog: Vec<BorgInstr> = Vec::new();
-    if !entry.is_null() {
-        for block in (*entry).iter_blocks() {
-            for instr in block.iter_instr_list() {
-                if let Some(alu) = instr.as_alu() {
-                    if let Some(mnem) = borg_isel(alu.op) {
-                        if mnem == "mov" {
-                            continue; // resolved via vec_map, not emitted
-                        }
-                        let mut srcs = Vec::new();
-                        let mut swz = Vec::new();
-                        for s in alu.srcs_as_slice() {
-                            let (d, c) = resolve(s.src.as_def().index, s.swizzle[0]);
-                            srcs.push(d);
-                            swz.push(c);
-                        }
-                        prog.push(BorgInstr { mnem, dst: alu.def.index, srcs, swz });
-                    }
+                    // load_input/load_ubo/store_output handled in the I/O pass below.
                 }
             }
         }
@@ -282,7 +318,7 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
                                 gl_position = Some(src);
                                 let n = vec_map.get(&src).map_or(1, |v| v.len()).min(4);
                                 for c in 0..n {
-                                    let (d, _) = resolve(src, c as u8);
+                                    let (d, _) = resolve_vm(&vec_map, src, c as u8);
                                     pos_out[c] = Some(d);
                                     out_roots.push(d);
                                 }
