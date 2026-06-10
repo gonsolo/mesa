@@ -174,6 +174,33 @@ borgvk_serial_send_geom(const float *verts, int nverts,
    borgvk_serial_write_paced(fd, pkt, sizeof(pkt));
 }
 
+#define BORGVK_MARKER_TEX  0xAF
+/* 0xAF: marker, y, BORGVK_TEX_DIM texels RGB-FP16 (dim*6 B), checksum. */
+#define BORGVK_TEX_PKT_LEN (1 + 1 + BORGVK_TEX_DIM * 6 + 1)
+
+void
+borgvk_serial_send_tex_row(int y, const float *rgb)
+{
+   int fd = borgvk_serial_open();
+   if (fd < 0)
+      return;
+
+   uint8_t pkt[BORGVK_TEX_PKT_LEN];
+   pkt[0] = BORGVK_MARKER_TEX;
+   pkt[1] = (uint8_t)y;
+   for (int i = 0; i < BORGVK_TEX_DIM * 3; i++) {
+      uint16_t h = f32_to_f16(rgb[i]);
+      pkt[2 + i*2]     = (uint8_t)(h & 0xff);
+      pkt[2 + i*2 + 1] = (uint8_t)(h >> 8);
+   }
+   uint8_t csum = 0;
+   for (int i = 1; i < BORGVK_TEX_PKT_LEN - 1; i++)
+      csum ^= pkt[i];
+   pkt[BORGVK_TEX_PKT_LEN - 1] = csum;
+
+   borgvk_serial_write_paced(fd, pkt, sizeof(pkt));
+}
+
 void
 borgvk_serial_send_mvp(const float mvp[16])
 {
