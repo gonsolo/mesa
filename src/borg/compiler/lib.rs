@@ -416,6 +416,7 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
         }
         for (s, &c) in i.srcs.iter().zip(i.swz.iter()) {
             if ubo.get(s) == Some(&Ubo::Pos)
+                && c != 3 // pos.w is the constant 1.0 (folded below), never pre-loaded
                 && !pos_gpr.contains_key(&(*s, c))
                 && next_pre <= 29
             {
@@ -432,11 +433,47 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
     let n_preload = words.len();
 
     let mut pending = 0u32;
+    // Resolve one source operand to (physical register, reads-from-uniform).
+    let resolve_op = |s: u32, c: u8| -> (u8, bool) {
+        match ubo.get(&s) {
+            Some(&Ubo::Mvp(rb)) => ((8 + (rb / 16) * 4 + c as i32) as u8, true),
+            Some(&Ubo::Pos) => (*pos_gpr.get(&(s, c)).unwrap_or(&0), false),
+            _ => (*alloc.get(&s).unwrap_or(&0), false),
+        }
+    };
     for i in &prog {
         if i.mnem == "mov" {
             continue;
         }
         let rd = *alloc.get(&i.dst).unwrap_or(&0);
+
+        // pos.w fold: under the 3-component-position ABI pos.w is the constant 1.0,
+        // so a multiply by it is the identity. col3·pos.w (+acc) collapses to a load
+        // of col3 (added to the accumulator) — exactly the hand-written shader's
+        // direct col3 bias, and avoids reading pos.w from u3 (which holds color.r).
+        let posw = i
+            .srcs
+            .iter()
+            .zip(i.swz.iter())
+            .take(2) // only the multiply operands (rs1/rs2) can be pos.w
+            .position(|(s, &c)| ubo.get(s) == Some(&Ubo::Pos) && c == 3);
+        if let Some(k) = posw {
+            if i.mnem == "FMUL" || i.mnem == "FMADD" {
+                let other = 1 - k; // the surviving multiply operand
+                let (oreg, ouni) = resolve_op(i.srcs[other], i.swz[other]);
+                // FMUL → FADD(rd, other, 0); FMADD → FADD(rd, other, acc).
+                let (addend, f3) = if i.mnem == "FMADD" {
+                    (resolve_op(i.srcs[2], i.swz[2]).0, if ouni { 1 } else { 0 })
+                } else {
+                    (30, if ouni { 1 } else { 0 }) // r30 = 0 → load `other`
+                };
+                if let Some(w) = encode("FADD", rd, oreg, addend, 0, f3) {
+                    words.push(w);
+                }
+                continue;
+            }
+        }
+
         let mut r = [0u8; 3];
         let mut f3 = 0u32;
         for (k, (s, &c)) in i.srcs.iter().zip(i.swz.iter()).take(3).enumerate() {
