@@ -11,6 +11,7 @@
 #include "vk_pipeline.h"
 
 #include "nir.h"
+#include "glsl_types.h"
 #include "spirv/nir_spirv.h"
 #include "util/ralloc.h"
 #include "util/log.h"
@@ -46,6 +47,13 @@ static const struct nir_shader_compiler_options borgvk_nir_options = {
    .lower_fdiv = true,
 };
 
+/* Location (vec4-slot) sizing for nir_lower_io of varyings. */
+static int
+borgvk_type_size(const struct glsl_type *type, bool bindless)
+{
+   return glsl_count_attribute_slots(type, false);
+}
+
 /* Turn one pipeline shader stage's SPIR-V into NIR and hand it to borgc. */
 void
 borgvk_compile_stage(struct borgvk_device *device,
@@ -70,6 +78,12 @@ borgvk_compile_stage(struct borgvk_device *device,
    NIR_PASS(_, nir, nir_lower_system_values);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
             borgvk_spirv_options.ubo_addr_format);
+   /* Lower varying I/O to load_input/store_output(location): the outputs
+    * (gl_Position/texcoord/frag_pos) become store_output, which the backend maps
+    * to the sequencer's snooped output registers; fragment inputs become
+    * load_input. vec4-slot sizing. */
+   NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
+            borgvk_type_size, 0);
 
    /* Lower/optimize toward the Borg ISA: scalarize, then fold and lower ALU ops
     * (fsub→fadd, fdiv→fmul·frcp via lower_fdiv, fdot→fmul+ffma, constant folding)
