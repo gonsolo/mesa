@@ -57,6 +57,10 @@ fn borg_isel(op: nir_op) -> Option<&'static str> {
         nir_op_fmul => Some("FMUL"),
         nir_op_ffma | nir_op_ffma_weak => Some("FMADD"),
         nir_op_fneg => Some("FNEG"),
+        // Fragment transcendentals — now real Borg HW ops. (ddx/ddy are NIR
+        // intrinsics, handled in the intrinsic selection path, not here.)
+        nir_op_frcp => Some("FRCP"),
+        nir_op_frsq => Some("FRSQ"),
         // Integer ops (the Borg core now has these — enables standard addressing).
         nir_op_iadd => Some("IADD"),
         nir_op_ishl => Some("ISHL"),
@@ -596,6 +600,11 @@ fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32) -> Option<
         "IMUL" => bin(0x2800_0000),
         "I2F" => un(0x2C00_0000),
         "F2I" => un(0x3000_0000),
+        "FRSQ" => un(0x3400_0000),
+        "FSRGB" => un(0x3800_0000),
+        "DDX" => un(0x3C00_0000),
+        "DDY" => un(0x4000_0000),
+        "FSTEP" => un(0x1000_0000),
         _ => return None, // mov is handled separately (register copy)
     })
 }
