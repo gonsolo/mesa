@@ -369,8 +369,6 @@ borgvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
    instance->vk.physical_devices.enumerate = enumerate_devices;
    instance->vk.physical_devices.destroy = destroy_physical_device;
 
-   borgvk_compiler_selftest();  /* TEMP: confirm the Rust borgc crate is linked */
-
    *pInstance = borgvk_instance_to_handle(instance);
    return VK_SUCCESS;
 }
