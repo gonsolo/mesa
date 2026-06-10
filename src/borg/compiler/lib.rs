@@ -19,11 +19,29 @@ use compiler::nir::AsDef;
 use std::env;
 
 /// One selected Borg instruction in virtual-register form (pre-register-alloc).
-/// `dst`/`srcs` are NIR SSA indices used directly as virtual registers.
+/// `dst`/`srcs` are NIR SSA indices used directly as virtual registers; `swz` is
+/// the scalar component each source reads from its (possibly vec4) def — needed to
+/// pin a uniform/attribute load to the right column/component.
 struct BorgInstr {
     mnem: &'static str,
     dst: u32,
     srcs: Vec<u32>,
+    swz: Vec<u8>,
+}
+
+/// How a load_ubo def maps onto the firmware's uniform register convention
+/// (cube.c `vktexcube_vs_uniform` layout — see the I/O map below). Carried per
+/// def index so the encoder can pin each operand that reads it.
+#[derive(Clone, Copy, PartialEq)]
+enum Ubo {
+    /// MVP column at this byte range_base (column = range_base/16). Component `c`
+    /// → uniform u(8 + column*4 + c). Read directly as a funct3 uniform operand.
+    Mvp(i32),
+    /// position[gl_VertexIndex] vec4. Component `c` → uniform u(c) (firmware
+    /// pre-fetches the current vertex into u0..u2). Pre-loaded into a GPR.
+    Pos,
+    /// attribute (texcoord) varying — firmware-handled; left pending for now.
+    Attr,
 }
 
 /// Self-test: confirms the Rust crate is linked and callable across the FFI.
@@ -129,7 +147,12 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
                             .iter()
                             .map(|s| s.src.as_def().index)
                             .collect();
-                        prog.push(BorgInstr { mnem, dst: alu.def.index, srcs });
+                        let swz = alu
+                            .srcs_as_slice()
+                            .iter()
+                            .map(|s| s.swizzle[0])
+                            .collect();
+                        prog.push(BorgInstr { mnem, dst: alu.def.index, srcs, swz });
                     }
                 }
             }
@@ -152,22 +175,38 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
     //   store_output io_semantics.location (low 7 bits of IO_SEMANTICS):
     //     VARYING_SLOT_POS(0) → gl_Position → output regs r0..r3 (sequencer-snooped)
     //     VAR0/VAR1           → texcoord/frag_pos varyings (firmware-handled)
+    use std::collections::HashMap;
     const VARYING_SLOT_POS: u32 = 0;
     let mut mvp_loads = 0u32;
     let mut pos_loads = 0u32;
     let mut attr_loads = 0u32;
     let mut gl_position: Option<u32> = None;
     let mut varying_outs = 0u32;
+    // Per-def classification onto the firmware uniform convention.
+    let mut ubo: HashMap<u32, Ubo> = HashMap::new();
     if !entry.is_null() {
         for block in (*entry).iter_blocks() {
             for instr in block.iter_instr_list() {
                 if let Some(intr) = instr.as_intrinsic() {
                     match intr.intrinsic {
-                        nir_intrinsic_load_ubo => match intr.range_base() {
-                            0..=63 => mvp_loads += 1,
-                            64..=639 => pos_loads += 1,
-                            _ => attr_loads += 1,
-                        },
+                        nir_intrinsic_load_ubo => {
+                            let rb = intr.range_base();
+                            let kind = match rb {
+                                0..=63 => {
+                                    mvp_loads += 1;
+                                    Ubo::Mvp(rb)
+                                }
+                                64..=639 => {
+                                    pos_loads += 1;
+                                    Ubo::Pos
+                                }
+                                _ => {
+                                    attr_loads += 1;
+                                    Ubo::Attr
+                                }
+                            };
+                            ubo.insert(intr.def.index, kind);
+                        }
                         nir_intrinsic_store_output => {
                             let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
                             if loc == VARYING_SLOT_POS {
@@ -190,12 +229,38 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
 
     let alloc = regalloc(&prog);
 
-    // Encode the selected+allocated instructions into Borg machine words. Operands
-    // that aren't allocated to a GPR are shader inputs (UBO/attribute/uniform) and
-    // are left as a placeholder register until the I/O→uniform mapping pins them;
-    // `mov` ops are register copies handled by coalescing (skipped). This is the
-    // real machine code for the arithmetic — the .borg blob wraps it next.
+    // Encode the selected+allocated instructions into Borg machine words, pinning
+    // shader inputs to the firmware's uniform convention. The Borg core has ONE
+    // uniform read port: funct3 is a selector (1=rs1, 2=rs2, 3=rs3 reads the
+    // uniform indexed by that register field), so each op reads at most one
+    // uniform. cube.c's transform is position×MVP, so positions are pre-loaded
+    // into high GPRs (firmware idiom `FADD g, u<comp>, r30, f3=1` → g = u[comp])
+    // and the MVP column is read in place as the single uniform operand. `mov`
+    // ops are register copies handled by coalescing (skipped).
     let mut words: Vec<u32> = Vec::new();
+    let mut pos_gpr: std::collections::HashMap<(u32, u8), u8> = HashMap::new();
+    let mut next_pre: u8 = 24; // r24..r29: above regalloc's low-GPR fill
+    for i in &prog {
+        if i.mnem == "mov" {
+            continue;
+        }
+        for (s, &c) in i.srcs.iter().zip(i.swz.iter()) {
+            if ubo.get(s) == Some(&Ubo::Pos)
+                && !pos_gpr.contains_key(&(*s, c))
+                && next_pre <= 29
+            {
+                let g = next_pre;
+                next_pre += 1;
+                pos_gpr.insert((*s, c), g);
+                // g = u[c] (position component c → uniform u0..u2), funct3=1.
+                if let Some(w) = encode("FADD", g, c, 30, 0, 1) {
+                    words.push(w);
+                }
+            }
+        }
+    }
+    let n_preload = words.len();
+
     let mut pending = 0u32;
     for i in &prog {
         if i.mnem == "mov" {
@@ -203,22 +268,39 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
         }
         let rd = *alloc.get(&i.dst).unwrap_or(&0);
         let mut r = [0u8; 3];
-        for (k, s) in i.srcs.iter().take(3).enumerate() {
-            match alloc.get(s) {
-                Some(&phys) => r[k] = phys,
-                None => {
-                    pending += 1;
-                    r[k] = 0;
+        let mut f3 = 0u32;
+        for (k, (s, &c)) in i.srcs.iter().zip(i.swz.iter()).take(3).enumerate() {
+            match ubo.get(s) {
+                // MVP column → uniform u(8 + column*4 + component), read in place.
+                Some(&Ubo::Mvp(rb)) => {
+                    if f3 == 0 {
+                        r[k] = (8 + (rb / 16) * 4 + c as i32) as u8;
+                        f3 = k as u32 + 1; // funct3 selects this operand slot
+                    } else {
+                        pending += 1; // 2nd uniform in one op needs a preload
+                    }
                 }
+                // position component → its pre-loaded GPR.
+                Some(&Ubo::Pos) => r[k] = *pos_gpr.get(&(*s, c)).unwrap_or(&0),
+                // attribute varying — firmware-handled, not yet pinned.
+                Some(&Ubo::Attr) => pending += 1,
+                // ALU intermediate → allocated GPR (or pending if a stray input).
+                None => match alloc.get(s) {
+                    Some(&phys) => r[k] = phys,
+                    None => pending += 1,
+                },
             }
         }
-        if let Some(w) = encode(i.mnem, rd, r[0], r[1]) {
+        if let Some(w) = encode(i.mnem, rd, r[0], r[1], r[2], f3) {
             words.push(w);
         }
     }
     eprintln!(
-        "borgc: encoded {} Borg word(s) ({} input operand(s) pending I/O map)",
+        "borgc: encoded {} word(s) = {} uniform pre-load(s) + {} op(s) \
+         ({} operand(s) still pending)",
         words.len(),
+        n_preload,
+        words.len() - n_preload,
         pending
     );
     if env::var("BORGC_DUMP_ISA").is_ok() {
@@ -229,12 +311,16 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
 }
 
 /// Encode one Borg instruction to its 32-bit word (opcode bases match
-/// software/borg/borg_isa.h and hardware Instructions.scala).
-fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8) -> Option<u32> {
-    let (rd, rs1, rs2) = (rd as u32, rs1 as u32, rs2 as u32);
-    let bin = |base: u32| base | (rs2 << 20) | (rs1 << 15) | (rd << 7);
-    let un = |base: u32| base | (rs1 << 15) | (rd << 7);
+/// software/borg/borg_isa.h and hardware Instructions.scala). `funct3` selects a
+/// uniform operand (0=none, 1=rs1, 2=rs2, 3=rs3); `rs3` is used only by FMADD.
+fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32) -> Option<u32> {
+    let (rd, rs1, rs2, rs3) = (rd as u32, rs1 as u32, rs2 as u32, rs3 as u32);
+    let f3 = (funct3 & 0x7) << 12;
+    let bin = |base: u32| base | f3 | (rs2 << 20) | (rs1 << 15) | (rd << 7);
+    let un = |base: u32| base | f3 | (rs1 << 15) | (rd << 7);
+    let r4 = |base: u32| base | f3 | (rs3 << 27) | (rs2 << 20) | (rs1 << 15) | (rd << 7);
     Some(match mnem {
+        "FMADD" => r4(0x0000_0004),
         "FADD" => bin(0x0000_0000),
         "FMUL" => bin(0x0800_0000),
         "FNEG" => un(0x0C00_0000),
@@ -246,7 +332,7 @@ fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8) -> Option<u32> {
         "IMUL" => bin(0x2800_0000),
         "I2F" => un(0x2C00_0000),
         "F2I" => un(0x3000_0000),
-        _ => return None, // FMADD (R4) and mov handled separately
+        _ => return None, // mov is handled separately (register copy)
     })
 }
 
