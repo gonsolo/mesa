@@ -96,4 +96,12 @@ borgvk_serial_send_mvp(const float mvp[16])
       }
       off += (size_t)n;
    }
+
+   /* The firmware aligns to packets via the inter-packet IDLE GAP. A blocking
+    * app (cube.c) submits frames back-to-back, so without pacing the packets
+    * stream gaplessly and the firmware locks onto the first one and never
+    * re-syncs (cube freezes). Drain the TX, then idle briefly to guarantee a
+    * gap; this also caps the frame rate sensibly (the FPGA renders far slower). */
+   tcdrain(fd);
+   usleep(3000);
 }
