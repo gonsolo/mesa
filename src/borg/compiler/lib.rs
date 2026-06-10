@@ -186,6 +186,10 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
     let mut ubo: HashMap<u32, Ubo> = HashMap::new();
     // Output roots for DCE: every value a store_output consumes is live.
     let mut out_roots: Vec<u32> = Vec::new();
+    // gl_Position component c (x/y/z/w) → the SSA value that produces it. These
+    // clip coords are pinned to r0..r3 so the perspective-divide epilogue and the
+    // sequencer's clipReg snoop find them where the firmware convention expects.
+    let mut pos_out: [Option<u32>; 4] = [None; 4];
     if !entry.is_null() {
         for block in (*entry).iter_blocks() {
             for instr in block.iter_instr_list() {
@@ -215,6 +219,10 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
                             out_roots.push(src);
                             if loc == VARYING_SLOT_POS {
                                 gl_position = Some(src);
+                                let c = intr.component() as usize;
+                                if c < 4 {
+                                    pos_out[c] = Some(src);
+                                }
                             } else {
                                 varying_outs += 1;
                             }
@@ -259,7 +267,18 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
         );
     }
 
-    let alloc = regalloc(&prog);
+    // Pre-color gl_Position components to output registers r0..r3.
+    let mut forced: HashMap<u32, u8> = HashMap::new();
+    let is_vertex = stage == 0; // MESA_SHADER_VERTEX
+    if is_vertex {
+        for (c, v) in pos_out.iter().enumerate() {
+            if let Some(def) = v {
+                forced.insert(*def, c as u8);
+            }
+        }
+    }
+
+    let alloc = regalloc(&prog, &forced);
 
     // Encode the selected+allocated instructions into Borg machine words, pinning
     // shader inputs to the firmware's uniform convention. The Borg core has ONE
@@ -327,16 +346,31 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
             words.push(w);
         }
     }
+    let n_body = words.len();
+
+    // Fixed-function epilogue (vertex only): perspective divide + viewport. The
+    // body left clip coords in r0..r3 (uniforms u8..u23 are viewport-baked by the
+    // firmware's cache_ts_mvp, so screen = clip'/w covers the full viewport map).
+    // r4 = 1/clip_w; screen_x/y and ndc_z = clip'/w → r0/r1/r2, snooped by the
+    // sequencer. Matches seq_vert_shader's tail; HALT terminates.
+    if is_vertex && gl_position.is_some() {
+        words.push(encode("FRCP", 4, 3, 0, 0, 0).unwrap()); // r4 = 1/clip_w
+        words.push(encode("FMUL", 0, 0, 4, 0, 0).unwrap()); // screen_x
+        words.push(encode("FMUL", 1, 1, 4, 0, 0).unwrap()); // screen_y
+        words.push(encode("FMUL", 2, 2, 4, 0, 0).unwrap()); // ndc_z
+        words.push(0x0000_0000); // HALT
+    }
     eprintln!(
-        "borgc: encoded {} word(s) = {} uniform pre-load(s) + {} op(s) \
+        "borgc: encoded {} word(s) = {} uniform pre-load(s) + {} op(s) + {} epilogue \
          ({} operand(s) still pending)",
         words.len(),
         n_preload,
-        words.len() - n_preload,
+        n_body - n_preload,
+        words.len() - n_body,
         pending
     );
     if env::var("BORGC_DUMP_ISA").is_ok() {
-        let hex: Vec<String> = words.iter().take(8).map(|w| format!("{w:#010x}")).collect();
+        let hex: Vec<String> = words.iter().map(|w| format!("{w:#010x}")).collect();
         eprintln!("borgc:   first words: {}", hex.join(" "));
     }
     total
@@ -375,7 +409,7 @@ fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32) -> Option<
 /// allocation, the peak register pressure, and any spills. Values that only
 /// appear as sources (shader inputs) are not allocated here — they map to
 /// uniforms/attributes when the I/O lowering lands.
-fn regalloc(prog: &[BorgInstr]) -> std::collections::HashMap<u32, u8> {
+fn regalloc(prog: &[BorgInstr], forced: &std::collections::HashMap<u32, u8>) -> std::collections::HashMap<u32, u8> {
     use std::collections::HashMap;
 
     const NUM_GPRS: u8 = 30; // r0..r29; r30/r31 reserved for coordinates
@@ -395,7 +429,10 @@ fn regalloc(prog: &[BorgInstr]) -> std::collections::HashMap<u32, u8> {
     let mut defs: Vec<u32> = def_at.keys().copied().collect();
     defs.sort_by_key(|v| def_at[v]);
 
-    let mut free: Vec<u8> = (0..NUM_GPRS).rev().collect();
+    // Reserve the pre-colored output regs (gl_Position r0..r3) and r4 (the
+    // perspective-divide scratch) from the general pool — the epilogue owns them.
+    let reserved: std::collections::HashSet<u8> = forced.values().copied().chain([4]).collect();
+    let mut free: Vec<u8> = (0..NUM_GPRS).rev().filter(|r| !reserved.contains(r)).collect();
     let mut active: Vec<(usize, u8)> = Vec::new(); // (live_end, phys_reg)
     let mut alloc: HashMap<u32, u8> = HashMap::new();
     let mut spills = 0usize;
@@ -405,12 +442,22 @@ fn regalloc(prog: &[BorgInstr]) -> std::collections::HashMap<u32, u8> {
         let start = def_at[&v];
         let end = *last_use.get(&v).unwrap_or(&start);
 
-        // Expire intervals that ended before this value starts.
+        // Pre-colored value (gl_Position component): pin to its output register.
+        if let Some(&r) = forced.get(&v) {
+            alloc.insert(v, r);
+            active.push((end, r));
+            peak = peak.max(active.len());
+            continue;
+        }
+
+        // Expire intervals that ended before this value starts. Reserved output
+        // registers are never returned to the pool — the epilogue still reads them
+        // after the body, beyond the body-local last-use we computed here.
         let mut keep = Vec::with_capacity(active.len());
         for &(e, r) in &active {
-            if e < start {
+            if e < start && !reserved.contains(&r) {
                 free.push(r);
-            } else {
+            } else if e >= start {
                 keep.push((e, r));
             }
         }
