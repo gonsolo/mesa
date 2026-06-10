@@ -62,10 +62,18 @@ borgvk_compile_stage(struct borgvk_device *device,
       return;
    }
 
+   /* SSA + system values (gl_VertexIndex → load_vertex_id). We deliberately do
+    * NOT run nir_lower_explicit_io on the UBO: the Borg ISA is FP-only (no
+    * integer ops), so byte-offset address arithmetic is impossible. Instead the
+    * backend maps the UBO struct members to FIXED uniform registers (MVP) and
+    * the gl_VertexIndex-indexed arrays (position/attr) to per-vertex attribute
+    * inputs — matching the firmware's DMA model (as the Python compiler does). */
+   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+   NIR_PASS(_, nir, nir_lower_system_values);
+
    /* Lower/optimize toward the Borg ISA: scalarize, then fold and lower ALU ops
     * (fsub→fadd, fdiv→fmul·frcp via lower_fdiv, fdot→fmul+ffma, constant folding)
-    * so the backend sees the small supported op set. UBO/descriptor I/O lowering
-    * to the firmware's uniform model comes next. */
+    * so the backend sees the small supported op set. */
    NIR_PASS(_, nir, nir_lower_alu_to_scalar, NULL, NULL);
    bool progress;
    do {
