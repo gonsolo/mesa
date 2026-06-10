@@ -143,32 +143,39 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
         }
     }
 
-    // I/O map: identify which value feeds each shader output and which value each
-    // input/UBO-load produces, so the backend can pin them to the firmware's
-    // registers (outputs→snooped regs, UBO/inputs→uniforms). Reported here; the
-    // register assignment + encoding is the next step.
-    let mut outputs: Vec<(i32, u32)> = Vec::new(); // (location, value vreg)
-    let mut inputs: Vec<(u32, i32)> = Vec::new();  // (def vreg, location)
-    let mut ubo_loads = 0u32;
-    let mut vtx_id = 0u32;
+    // I/O map: pin the shader interface to the firmware register convention.
+    //   load_ubo range_base (cube.c vktexcube_vs_uniform layout):
+    //     0/16/32/48 → MVP columns    → uniforms u8..u23 (col-major; u = 8 + rb/4)
+    //     64..639    → position[idx]  → uniforms u0..u2 (firmware pre-fetches the
+    //                                    current vertex; the index math is dead)
+    //     640..      → attr[idx]      → texcoord varying (firmware-handled)
+    //   store_output io_semantics.location (low 7 bits of IO_SEMANTICS):
+    //     VARYING_SLOT_POS(0) → gl_Position → output regs r0..r3 (sequencer-snooped)
+    //     VAR0/VAR1           → texcoord/frag_pos varyings (firmware-handled)
+    const VARYING_SLOT_POS: u32 = 0;
+    let mut mvp_loads = 0u32;
+    let mut pos_loads = 0u32;
+    let mut attr_loads = 0u32;
+    let mut gl_position: Option<u32> = None;
+    let mut varying_outs = 0u32;
     if !entry.is_null() {
         for block in (*entry).iter_blocks() {
             for instr in block.iter_instr_list() {
                 if let Some(intr) = instr.as_intrinsic() {
                     match intr.intrinsic {
+                        nir_intrinsic_load_ubo => match intr.range_base() {
+                            0..=63 => mvp_loads += 1,
+                            64..=639 => pos_loads += 1,
+                            _ => attr_loads += 1,
+                        },
                         nir_intrinsic_store_output => {
-                            let v = intr.srcs_as_slice()[0].as_def().index;
-                            outputs.push((intr.base(), v));
-                        }
-                        nir_intrinsic_load_input
-                        | nir_intrinsic_load_interpolated_input => {
-                            if let Some(d) = instr.def() {
-                                inputs.push((d.index, intr.base()));
+                            let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
+                            if loc == VARYING_SLOT_POS {
+                                gl_position = Some(intr.srcs_as_slice()[0].as_def().index);
+                            } else {
+                                varying_outs += 1;
                             }
                         }
-                        nir_intrinsic_load_ubo => ubo_loads += 1,
-                        nir_intrinsic_load_vertex_id
-                        | nir_intrinsic_load_vertex_id_zero_base => vtx_id += 1,
                         _ => {}
                     }
                 }
@@ -176,20 +183,10 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
         }
     }
     eprintln!(
-        "borgc: I/O — {} output(s), {} input(s), {} ubo-load(s), {} vertex-id",
-        outputs.len(),
-        inputs.len(),
-        ubo_loads,
-        vtx_id
+        "borgc: I/O map — MVP {mvp_loads}→u8..u23, position {pos_loads}→u0..u2, \
+         attr {attr_loads}→varying; gl_Position=v{}→r0..r3 ({varying_outs} varying out)",
+        gl_position.map_or("?".to_string(), |v| v.to_string())
     );
-    if env::var("BORGC_DUMP_ISA").is_ok() {
-        for (loc, v) in &outputs {
-            eprintln!("borgc:   store_output loc={loc} <- v{v}");
-        }
-        for (v, loc) in &inputs {
-            eprintln!("borgc:   v{v} <- load_input loc={loc}");
-        }
-    }
 
     let alloc = regalloc(&prog);
 
