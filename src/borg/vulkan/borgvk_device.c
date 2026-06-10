@@ -28,8 +28,9 @@ borgvk_EnumerateInstanceVersion(uint32_t *pApiVersion)
    return VK_SUCCESS;
 }
 
-/* Instance extensions advertised by borgvk. No WSI yet (Phase 1 is enumeration
- * only); surfaces/swapchain land in Phase 3. */
+/* Instance extensions advertised by borgvk. The WSI surface extensions let an
+ * app create a swapchain so its render loop runs; the actual pixels go to the
+ * FPGA over serial, the host window is just a formality (software WSI path). */
 static const struct vk_instance_extension_table instance_extensions = {
    .KHR_device_group_creation           = true,
    .KHR_external_fence_capabilities     = true,
@@ -38,6 +39,26 @@ static const struct vk_instance_extension_table instance_extensions = {
    .KHR_get_physical_device_properties2 = true,
    .EXT_debug_report                    = true,
    .EXT_debug_utils                     = true,
+#ifdef BORGVK_USE_WSI_PLATFORM
+   .KHR_surface                         = true,
+   .KHR_get_surface_capabilities2       = true,
+#endif
+#ifdef VK_USE_PLATFORM_XCB_KHR
+   .KHR_xcb_surface                     = true,
+#endif
+#ifdef VK_USE_PLATFORM_XLIB_KHR
+   .KHR_xlib_surface                    = true,
+#endif
+#ifdef VK_USE_PLATFORM_WAYLAND_KHR
+   .KHR_wayland_surface                 = true,
+#endif
+};
+
+/* Device extensions advertised by borgvk: the swapchain so apps can present. */
+static const struct vk_device_extension_table device_extensions = {
+#ifdef BORGVK_USE_WSI_PLATFORM
+   .KHR_swapchain                       = true,
+#endif
 };
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -110,13 +131,62 @@ borgvk_GetPhysicalDeviceFormatProperties2(
    VkFormat format,
    VkFormatProperties2 *pFormatProperties)
 {
-   /* Phase 1: report no format features. Real format support comes with the
-    * pipeline/image work in later phases. */
-   pFormatProperties->formatProperties = (VkFormatProperties){ 0 };
+   /* borgvk doesn't render on the host — it forwards an MVP to the FPGA — so we
+    * don't actually consume these formats. Report a generous, uniform feature
+    * set so WSI can pick a swapchain format and apps (cube.c) pass their format
+    * capability checks (color/depth attachment, sampling, blit, transfer). */
+   const VkFormatFeatureFlags img =
+      VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+      VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT |
+      VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+      VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT |
+      VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT |
+      VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+      VK_FORMAT_FEATURE_BLIT_DST_BIT |
+      VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+      VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
+      VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+   const VkFormatFeatureFlags buf =
+      VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT |
+      VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT |
+      VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT;
+
+   pFormatProperties->formatProperties = (VkFormatProperties){
+      .linearTilingFeatures  = img,
+      .optimalTilingFeatures = img,
+      .bufferFeatures        = buf,
+   };
 
    vk_foreach_struct(ext, pFormatProperties->pNext) {
       vk_debug_ignored_stype(ext->sType);
    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+borgvk_GetPhysicalDeviceImageFormatProperties2(
+   VkPhysicalDevice physicalDevice,
+   const VkPhysicalDeviceImageFormatInfo2 *pImageFormatInfo,
+   VkImageFormatProperties2 *pImageFormatProperties)
+{
+   /* Permissive: every (format, type, tiling, usage) the app or WSI asks for is
+    * "supported" with generous limits. We never allocate device-real images. */
+   const uint32_t max2d = 16384;
+   pImageFormatProperties->imageFormatProperties = (VkImageFormatProperties){
+      .maxExtent = {
+         .width  = pImageFormatInfo->type == VK_IMAGE_TYPE_1D ? max2d : max2d,
+         .height = pImageFormatInfo->type == VK_IMAGE_TYPE_1D ? 1 : max2d,
+         .depth  = pImageFormatInfo->type == VK_IMAGE_TYPE_3D ? 2048 : 1,
+      },
+      .maxMipLevels   = 15,
+      .maxArrayLayers = 2048,
+      .sampleCounts   = VK_SAMPLE_COUNT_1_BIT,
+      .maxResourceSize = (VkDeviceSize)1 << 31,
+   };
+
+   vk_foreach_struct(ext, pImageFormatProperties->pNext) {
+      vk_debug_ignored_stype(ext->sType);
+   }
+   return VK_SUCCESS;
 }
 
 static void
@@ -196,14 +266,18 @@ create_physical_device(struct borgvk_instance *instance)
    struct vk_physical_device_dispatch_table dispatch_table;
    vk_physical_device_dispatch_table_from_entrypoints(
       &dispatch_table, &borgvk_physical_device_entrypoints, true);
+#ifdef BORGVK_USE_WSI_PLATFORM
+   vk_physical_device_dispatch_table_from_entrypoints(
+      &dispatch_table, &wsi_physical_device_entrypoints, false);
+#endif
 
    struct vk_features features = { 0 };
    struct vk_properties properties;
    borgvk_get_properties(&properties);
 
    VkResult result =
-      vk_physical_device_init(&device->vk, &instance->vk, NULL, &features,
-                              &properties, &dispatch_table);
+      vk_physical_device_init(&device->vk, &instance->vk, &device_extensions,
+                              &features, &properties, &dispatch_table);
    if (result != VK_SUCCESS) {
       vk_free(&instance->vk.alloc, device);
       return result;
@@ -224,6 +298,17 @@ create_physical_device(struct borgvk_instance *instance)
    device->sync_types[1] = NULL;
    device->vk.supported_sync_types = device->sync_types;
 
+   /* WSI init must follow supported_sync_types: wsi_device_init queries external
+    * semaphore/fence properties, which walk that list. */
+#ifdef BORGVK_USE_WSI_PLATFORM
+   result = borgvk_wsi_init(device);
+   if (result != VK_SUCCESS) {
+      vk_physical_device_finish(&device->vk);
+      vk_free(&instance->vk.alloc, device);
+      return result;
+   }
+#endif
+
    list_addtail(&device->vk.link, &instance->vk.physical_devices.list);
 
    return VK_SUCCESS;
@@ -241,6 +326,9 @@ enumerate_devices(struct vk_instance *vk_instance)
 static void
 destroy_physical_device(struct vk_physical_device *pdev)
 {
+#ifdef BORGVK_USE_WSI_PLATFORM
+   borgvk_wsi_finish(container_of(pdev, struct borgvk_physical_device, vk));
+#endif
    vk_physical_device_finish(pdev);
    vk_free(&pdev->instance->alloc, pdev);
 }
@@ -266,6 +354,10 @@ borgvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
    struct vk_instance_dispatch_table dispatch_table;
    vk_instance_dispatch_table_from_entrypoints(
       &dispatch_table, &borgvk_instance_entrypoints, true);
+#ifdef BORGVK_USE_WSI_PLATFORM
+   vk_instance_dispatch_table_from_entrypoints(
+      &dispatch_table, &wsi_instance_entrypoints, false);
+#endif
 
    result = vk_instance_init(&instance->vk, &instance_extensions,
                              &dispatch_table, pCreateInfo, pAllocator);
@@ -317,6 +409,10 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
    struct vk_device_dispatch_table dispatch_table;
    vk_device_dispatch_table_from_entrypoints(&dispatch_table,
                                              &borgvk_device_entrypoints, true);
+#ifdef BORGVK_USE_WSI_PLATFORM
+   vk_device_dispatch_table_from_entrypoints(&dispatch_table,
+                                             &wsi_device_entrypoints, false);
+#endif
    vk_device_dispatch_table_from_entrypoints(&dispatch_table,
                                              &vk_cmd_enqueue_device_entrypoints, false);
 

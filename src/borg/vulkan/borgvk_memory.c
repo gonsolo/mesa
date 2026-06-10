@@ -230,6 +230,33 @@ borgvk_GetImageMemoryRequirements2(VkDevice _device,
    }
 }
 
+/* Linear subresource layout. cube.c queries this to upload its staging texture
+ * row by row; report a tightly-packed linear layout matching how an app maps and
+ * writes the malloc-backed image memory (mip 0 / layer 0 at offset 0). */
+VKAPI_ATTR void VKAPI_CALL
+borgvk_GetImageSubresourceLayout2KHR(VkDevice _device, VkImage _image,
+                                     const VkImageSubresource2KHR *pSubresource,
+                                     VkSubresourceLayout2KHR *pLayout)
+{
+   VK_FROM_HANDLE(borgvk_image, image, _image);
+
+   uint32_t bs = vk_format_get_blocksize(image->vk.format);
+   uint64_t row = (uint64_t)image->vk.extent.width * MAX2(bs, 1);
+   uint64_t slice = row * image->vk.extent.height;
+
+   pLayout->subresourceLayout = (VkSubresourceLayout){
+      .offset     = 0,
+      .size       = slice * image->vk.extent.depth,
+      .rowPitch   = row,
+      .arrayPitch = slice,
+      .depthPitch = slice,
+   };
+
+   vk_foreach_struct(ext, pLayout->pNext) {
+      vk_debug_ignored_stype(ext->sType);
+   }
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 borgvk_BindImageMemory2(VkDevice _device, uint32_t bindInfoCount,
                         const VkBindImageMemoryInfo *pBindInfos)
