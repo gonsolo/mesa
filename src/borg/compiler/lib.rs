@@ -492,7 +492,49 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
         let hex: Vec<String> = words.iter().map(|w| format!("{w:#010x}")).collect();
         eprintln!("borgc:   first words: {}", hex.join(" "));
     }
+
+    // Serialize the .borg blob (software/borg/borg_spirb.c format). For the
+    // autonomous TBR sequencer only instrs[] matter — they're uploaded straight to
+    // SEQ_VERT_SHADER_ADDR with the conventions baked in; the output_regs list is
+    // descriptive (the snooped screen regs r0..r2). The blob is the artifact the
+    // firmware loads to replace the hand-written seq_vert_shader.
+    let outputs: &[u8] = if is_vertex && gl_position.is_some() {
+        &[0, 1, 2]
+    } else {
+        &[]
+    };
+    let blob = emit_blob(&words, outputs);
+    eprintln!("borgc: .borg blob = {} bytes ({} instr, {} output regs)", blob.len(), words.len(), outputs.len());
+    if let Ok(prefix) = env::var("BORGC_EMIT_BLOB") {
+        let path = format!("{prefix}.{}.borg", if is_vertex { "vert" } else { "frag" });
+        match std::fs::write(&path, &blob) {
+            Ok(()) => eprintln!("borgc: wrote {path}"),
+            Err(e) => eprintln!("borgc: failed to write {path}: {e}"),
+        }
+    }
     total
+}
+
+/// Serialize a Borg shader to the .borg blob format parsed by spirb_parse()
+/// (software/borg/borg_spirb.c): a 6-byte header (num_instrs, num_uniforms,
+/// num_attributes, num_outputs, num_consts, reserved), then num_instrs LE u32
+/// instruction words, then the uint8 uniform/attribute/output/const register
+/// lists, then num_consts LE u16 constant values. We emit only instructions and
+/// the output-register list (the sequencer path consumes instrs[] directly;
+/// uniforms are read inline via funct3, not through a host interface list).
+fn emit_blob(words: &[u32], outputs: &[u8]) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.push(words.len() as u8); // num_instrs
+    b.push(0); // num_uniforms (inline funct3 reads, no host interface)
+    b.push(0); // num_attributes
+    b.push(outputs.len() as u8); // num_outputs
+    b.push(0); // num_consts
+    b.push(0); // reserved
+    for &w in words {
+        b.extend_from_slice(&w.to_le_bytes());
+    }
+    b.extend_from_slice(outputs); // output_regs
+    b
 }
 
 /// Encode one Borg instruction to its 32-bit word (opcode bases match
