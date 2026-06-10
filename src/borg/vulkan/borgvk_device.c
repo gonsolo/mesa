@@ -346,6 +346,10 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
       return vk_error(physical_device, result);
    }
 
+   /* On every vkQueueSubmit, read the MVP from the bound uniform buffer and
+    * ship it to the FPGA over serial. This is the driver's whole render path. */
+   device->queue.driver_submit = borgvk_queue_submit;
+
    *pDevice = borgvk_device_to_handle(device);
    return VK_SUCCESS;
 }

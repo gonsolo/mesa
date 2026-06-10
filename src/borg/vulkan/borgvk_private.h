@@ -58,6 +58,18 @@ struct borgvk_device {
 
 extern const struct vk_command_buffer_ops borgvk_cmd_buffer_ops;
 
+/* ---- Serial transport (borgvk_serial.c) ------------------------------- *
+ * The "GPU" is the ULX3S FPGA reached over the FT231X serial bridge
+ * (/dev/ttyUSB0 @115200, overridable via $BORGVK_SERIAL). The submit path
+ * ships the per-frame 4×4 MVP as a framed packet the firmware decodes. */
+void borgvk_serial_send_mvp(const float mvp[16]);
+
+/* Queue submit hook (borgvk_queue.c): reads the MVP from the submitted command
+ * buffer's bound descriptor set and ships it over serial. Wired into
+ * device->queue.driver_submit by CreateDevice. */
+VkResult borgvk_queue_submit(struct vk_queue *queue,
+                             struct vk_queue_submit *submit);
+
 VK_DEFINE_HANDLE_CASTS(borgvk_instance, vk.base, VkInstance,
                        VK_OBJECT_TYPE_INSTANCE)
 VK_DEFINE_HANDLE_CASTS(borgvk_physical_device, vk.base, VkPhysicalDevice,
