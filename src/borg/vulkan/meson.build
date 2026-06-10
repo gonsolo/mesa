@@ -15,6 +15,7 @@ borgvk_entrypoints = custom_target(
 
 libborgvk_files = files(
   'borgvk_cmd_buffer.c',
+  'borgvk_compiler.c',
   'borgvk_descriptor_set.c',
   'borgvk_device.c',
   'borgvk_memory.c',
@@ -29,6 +30,7 @@ libborgvk_files = files(
 
 borgvk_deps = [
   dep_dl,
+  idep_borgc,
   idep_nir,
   idep_vulkan_util,
   idep_vulkan_runtime,
