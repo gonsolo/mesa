@@ -147,6 +147,18 @@ borgvk_UpdateDescriptorSets(VkDevice _device,
          set->buffers[w->dstBinding] = buffer;
          set->offsets[w->dstBinding] = w->pBufferInfo[0].offset;
       }
+
+      /* Record image bindings (the cube's texture is a combined image sampler
+       * at binding 1); the submit path reads its mapped RGBA8 to upload it. */
+      if (w->pImageInfo &&
+          (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+           w->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) &&
+          w->pImageInfo[0].imageView != VK_NULL_HANDLE) {
+         VK_FROM_HANDLE(vk_image_view, view, w->pImageInfo[0].imageView);
+         if (view)
+            set->images[w->dstBinding] =
+               container_of(view->image, struct borgvk_image, vk);
+      }
    }
 
    /* Copies are unused by the cube; ignore. */

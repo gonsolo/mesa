@@ -96,6 +96,14 @@ void borgvk_serial_send_mvp(const float mvp[16]);
 void borgvk_serial_send_geom(const float *verts, int nverts,
                              const uint8_t *idx, const float *uv, int ntris);
 
+/* The Borg texture dimension (must match firmware TEX_WIDTH). The app's texture
+ * is downsampled to this on the host (lossless at the 128x128 render size). */
+#define BORGVK_TEX_DIM 64
+
+/* Ship one texture row (Phase B): `rgb` is BORGVK_TEX_DIM texels of 3 floats
+ * (R,G,B in [0,1]); converted to RGB-FP16 and framed as a 0xAF packet. */
+void borgvk_serial_send_tex_row(int y, const float *rgb);
+
 /* Queue submit hook (borgvk_queue.c): reads the MVP from the submitted command
  * buffer's bound descriptor set and ships it over serial. Wired into
  * device->queue.driver_submit by CreateDevice. */
@@ -149,12 +157,14 @@ struct borgvk_descriptor_pool {
    struct vk_object_base base;
 };
 
-/* A descriptor set just remembers which buffer is bound at each binding, so the
- * submit path can find the cube's uniform buffer (binding 0) and read the MVP. */
+/* A descriptor set remembers which buffer/image is bound at each binding, so the
+ * submit path can find the cube's uniform buffer (binding 0 → MVP + geometry)
+ * and its texture image (binding 1 → combined image sampler). */
 struct borgvk_descriptor_set {
    struct vk_object_base base;
    struct borgvk_buffer *buffers[BORGVK_MAX_BINDINGS];
    VkDeviceSize offsets[BORGVK_MAX_BINDINGS];
+   struct borgvk_image *images[BORGVK_MAX_BINDINGS];
 };
 
 /* No shader compilation yet (the cube's shaders are pre-baked in firmware), so

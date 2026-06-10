@@ -5,17 +5,19 @@
  * Queue submit for borgvk — the single interception point of the driver. cube.c
  * records a frame into a command buffer (captured into cmd_buffer->cmd_queue by
  * the runtime's vk_cmd_enqueue emulation) and submits it. We never replay those
- * commands; instead we locate the bound descriptor set's binding-0 uniform
- * buffer, which for cube.c is `struct vktexcube_vs_uniform`:
+ * commands; instead we locate the bound descriptor set and forward the app's
+ * real data to the FPGA over serial:
  *
- *     float mvp[4][4];          // bytes   0..63   (updated every frame)
- *     float position[12*3][4];  // bytes  64..639  (static mesh, written once)
- *     float attr[12*3][4];      // bytes 640..1215 (static UVs)
+ *   binding 0 (uniform buffer) = `struct vktexcube_vs_uniform`:
+ *       float mvp[4][4];          // bytes   0..63   (updated every frame → 0xAD)
+ *       float position[12*3][4];  // bytes  64..639  (static mesh → 0xAE)
+ *       float attr[12*3][4];      // bytes 640..1215 (static UVs)
+ *   binding 1 (combined image sampler) = the texture (RGBA8 → 0xAF rows)
  *
- * Each frame we ship the MVP over serial (0xAD). Once, at startup, we also ship
- * the real mesh (0xAE): we dedup the 36 expanded positions to the unique corners
- * and forward them with the indexed triangle list + UVs. The GPU then renders
- * the app's actual geometry with hardware vertex transform + perspective divide.
+ * The firmware drains one packet per frame, so we time-multiplex: ship the mesh
+ * on the first frames, then per-frame MVPs interleaved with texture rows (the
+ * texture progressively, reliably fills in while the cube animates). The GPU
+ * renders with hardware vertex transform + perspective divide.
  */
 #include "borgvk_private.h"
 
@@ -31,10 +33,11 @@
 #define UBO_ATTR_FLOAT0  (UBO_MVP_FLOATS + UBO_NUM_VERTS * 4)  /* attr[36][4] */
 #define UBO_MIN_FLOATS   (UBO_ATTR_FLOAT0 + UBO_NUM_VERTS * 4) /* 304 = 1216 B */
 
-/* Locate the bound descriptor-set's binding-0 uniform buffer; return its mapped
- * base (where mvp + geometry live) or NULL, and the readable float count. */
-static const float *
-find_ubo(struct vk_queue_submit *submit, uint32_t *floats_out)
+#define GEOM_FRAMES      24   /* frames spent shipping the mesh at startup */
+
+/* Locate the bound descriptor set (binding 0 = UBO, binding 1 = texture). */
+static struct borgvk_descriptor_set *
+find_set(struct vk_queue_submit *submit)
 {
    for (uint32_t i = 0; i < submit->command_buffer_count; i++) {
       struct vk_command_buffer *cb = submit->command_buffers[i];
@@ -45,24 +48,15 @@ find_ubo(struct vk_queue_submit *submit, uint32_t *floats_out)
          if (b->descriptor_set_count == 0 || b->descriptor_sets == NULL)
             continue;
          VK_FROM_HANDLE(borgvk_descriptor_set, set, b->descriptor_sets[0]);
-         if (!set)
-            continue;
-         struct borgvk_buffer *buf = set->buffers[0];
-         if (!buf || !buf->mem || !buf->mem->map)
-            continue;
-
-         VkDeviceSize off = buf->offset + set->offsets[0];
-         if (off >= buf->vk.size)
-            continue;
-         *floats_out = (uint32_t)((buf->vk.size - off) / sizeof(float));
-         return (const float *)((const char *)buf->mem->map + off);
+         if (set)
+            return set;
       }
    }
    return NULL;
 }
 
 /* Dedup the 36 expanded positions to unique corners; build the indexed triangle
- * list and per-tri-vertex UVs, then ship the mesh. */
+ * list + per-tri-vertex UVs, then ship the mesh. */
 static void
 send_geometry(const float *ubo)
 {
@@ -85,7 +79,7 @@ send_geometry(const float *ubo)
       }
       if (u < 0) {
          if (nverts >= BORGVK_GEOM_MAX_VERTS)
-            return;  /* mesh too complex for the fixed packet — skip (cube fits) */
+            return;  /* mesh too complex for the fixed packet (cube fits) */
          u = nverts++;
          verts[u*3+0] = x; verts[u*3+1] = y; verts[u*3+2] = z;
       }
@@ -97,24 +91,75 @@ send_geometry(const float *ubo)
    borgvk_serial_send_geom(verts, nverts, idx, uv, UBO_NUM_VERTS / 3);
 }
 
+/* Box-downsample the linear RGBA8 texture to one BORGVK_TEX_DIM-wide row of
+ * normalized RGB floats and ship it. */
+static void
+send_texture_row(struct borgvk_image *tex, int dy)
+{
+   const uint8_t *base = (const uint8_t *)tex->mem->map + tex->offset;
+   uint32_t sw = tex->vk.extent.width, sh = tex->vk.extent.height;
+   if (sw == 0 || sh == 0)
+      return;
+   uint32_t pitch = sw * 4;                 /* RGBA8, linear tiling */
+   int sxs = (int)(sw / BORGVK_TEX_DIM); if (sxs < 1) sxs = 1;
+   int sys = (int)(sh / BORGVK_TEX_DIM); if (sys < 1) sys = 1;
+
+   float row[BORGVK_TEX_DIM * 3];
+   for (int dx = 0; dx < BORGVK_TEX_DIM; dx++) {
+      uint32_t r = 0, g = 0, b = 0, n = 0;
+      for (int oy = 0; oy < sys; oy++) {
+         uint32_t sy = (uint32_t)dy * sys + oy;
+         if (sy >= sh) break;
+         for (int ox = 0; ox < sxs; ox++) {
+            uint32_t sx = (uint32_t)dx * sxs + ox;
+            if (sx >= sw) break;
+            const uint8_t *p = base + sy * pitch + sx * 4;
+            r += p[0]; g += p[1]; b += p[2]; n++;
+         }
+      }
+      if (n == 0) n = 1;
+      row[dx*3+0] = (float)r / n / 255.0f;
+      row[dx*3+1] = (float)g / n / 255.0f;
+      row[dx*3+2] = (float)b / n / 255.0f;
+   }
+   borgvk_serial_send_tex_row(dy, row);
+}
+
 VkResult
 borgvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
 {
-   uint32_t nfloats = 0;
-   const float *ubo = find_ubo(submit, &nfloats);
-   if (!ubo)
+   struct borgvk_descriptor_set *set = find_set(submit);
+   if (!set)
       return VK_SUCCESS;
 
-   /* Ship the static mesh on the first frames (and rarely after, to self-heal a
-    * dropped upload), otherwise the per-frame MVP. The firmware drains one
-    * packet per frame, so geometry and MVP take turns; the cube is briefly
-    * static while the mesh uploads, then animates. */
+   struct borgvk_buffer *ubuf = set->buffers[0];
+   if (!ubuf || !ubuf->mem || !ubuf->mem->map)
+      return VK_SUCCESS;
+   VkDeviceSize off = ubuf->offset + set->offsets[0];
+   if (off >= ubuf->vk.size)
+      return VK_SUCCESS;
+   const float *ubo = (const float *)((const char *)ubuf->mem->map + off);
+   uint32_t nfloats = (uint32_t)((ubuf->vk.size - off) / sizeof(float));
+
+   struct borgvk_image *tex = set->images[1];
+   bool can_geom = nfloats >= UBO_MIN_FLOATS;
+   bool can_tex  = tex && tex->mem && tex->mem->map &&
+                   tex->vk.extent.width && tex->vk.extent.height;
+
    static unsigned submit_no = 0;
-   bool can_geom = (nfloats >= UBO_MIN_FLOATS);
-   if (can_geom && (submit_no < 24 || (submit_no % 256) == 0))
+   static int tex_row = 0;
+
+   /* Startup: ship the mesh. Then animate (MVP), slipping a texture row in every
+    * 4th frame — the rows cycle so the whole texture reliably lands over time
+    * even though the firmware only catches ~1 packet per frame. */
+   if (can_geom && submit_no < GEOM_FRAMES) {
       send_geometry(ubo);
-   else
+   } else if (can_tex && (submit_no % 4) == 3) {
+      send_texture_row(tex, tex_row);
+      tex_row = (tex_row + 1) % BORGVK_TEX_DIM;
+   } else {
       borgvk_serial_send_mvp(ubo);   /* mvp = the first 16 floats */
+   }
    submit_no++;
 
    return VK_SUCCESS;
