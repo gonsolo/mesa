@@ -42,6 +42,12 @@ enum Ubo {
     Pos,
     /// attribute (texcoord) varying — firmware-handled; left pending for now.
     Attr,
+    /// A fragment uniform read directly at this physical index via funct3
+    /// (inv_area, per-vertex varyings staged by the sequencer at u12..u30).
+    Uniform(u8),
+    /// A value that lives in a fixed physical register, not allocated (the
+    /// fragment edge-function attributes e0/e1/e2 in r0/r1/r2).
+    Fixed(u8),
 }
 
 /// Self-test: confirms the Rust crate is linked and callable across the FFI.
@@ -177,6 +183,13 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
     let mut vec_map: HashMap<u32, Vec<(u32, u8)>> = HashMap::new();
     let mut prog: Vec<BorgInstr> = Vec::new();
     let mut next_vreg: u32 = 1_000_000;
+    // Operand classification (populated here for fragment uniforms/attrs, and in the
+    // I/O pass below for the vertex's load_ubo).
+    let mut ubo: HashMap<u32, Ubo> = HashMap::new();
+    // Barycentric weights w_i = e_i·inv_area, emitted once on the first load_input.
+    let mut weights: Option<[u32; 3]> = None;
+    // gl_varying_slot: VAR0=texcoord, VAR1=frag_pos (Mesa enum: VAR0 = 32).
+    const VARYING_SLOT_VAR0: u32 = 32;
     if !entry.is_null() {
         for block in (*entry).iter_blocks() {
             for instr in block.iter_instr_list() {
@@ -247,8 +260,55 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
                             })
                             .collect();
                         vec_map.insert(intr.def.index, comps);
+                    } else if intr.intrinsic == nir_intrinsic_load_input {
+                        // Interpolated varying. Borg has no fixed-function interpolation:
+                        // the shader computes it barycentrically. Emit the weights once
+                        // (w_i = e_i·inv_area; e0/1/2 = attrs r0/1/2, inv_area = u12), then
+                        // per component: w0·v0 + w1·v1 + w2·v2 over the per-vertex uniforms.
+                        if weights.is_none() {
+                            let mut w = [0u32; 3];
+                            for (i, wi) in w.iter_mut().enumerate() {
+                                let e = next_vreg; next_vreg += 1;
+                                ubo.insert(e, Ubo::Fixed(i as u8));        // e_i in r0/r1/r2
+                                let inv = next_vreg; next_vreg += 1;
+                                ubo.insert(inv, Ubo::Uniform(12));         // inv_area = u12
+                                let v = next_vreg; next_vreg += 1;
+                                prog.push(BorgInstr { mnem: "FMUL", dst: v, srcs: vec![e, inv], swz: vec![0, 0] });
+                                *wi = v;
+                            }
+                            weights = Some(w);
+                        }
+                        let w = weights.unwrap();
+                        let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
+                        // Per-vertex uniform base per varying (sequencer convention,
+                        // each group stored (v2,v1,v0)): VAR0 texcoord → u13.., VAR1
+                        // frag_pos → u19.., depth → u28...
+                        let var = loc.wrapping_sub(VARYING_SLOT_VAR0); // 0 = texcoord, 1 = frag_pos
+                        let n = intr.def.num_components as usize;
+                        let comps: Vec<(u32, u8)> = (0..n)
+                            .map(|c| {
+                                let base = ((if var == 0 { 13 } else { 19 }) + (c as u32) * 3) as u8;
+                                // uniforms for (v0, v1, v2) = (base+2, base+1, base+0)
+                                let uv: Vec<u32> = [2u8, 1, 0]
+                                    .iter()
+                                    .map(|&o| {
+                                        let v = next_vreg; next_vreg += 1;
+                                        ubo.insert(v, Ubo::Uniform(base + o));
+                                        v
+                                    })
+                                    .collect();
+                                let t0 = next_vreg; next_vreg += 1;
+                                prog.push(BorgInstr { mnem: "FMUL", dst: t0, srcs: vec![w[0], uv[0]], swz: vec![0, 0] });
+                                let t1 = next_vreg; next_vreg += 1;
+                                prog.push(BorgInstr { mnem: "FMADD", dst: t1, srcs: vec![w[1], uv[1], t0], swz: vec![0, 0, 0] });
+                                let res = next_vreg; next_vreg += 1;
+                                prog.push(BorgInstr { mnem: "FMADD", dst: res, srcs: vec![w[2], uv[2], t1], swz: vec![0, 0, 0] });
+                                (res, 0u8)
+                            })
+                            .collect();
+                        vec_map.insert(intr.def.index, comps);
                     }
-                    // load_input/load_ubo/store_output handled in the I/O pass below.
+                    // load_ubo/store_output handled in the I/O pass below.
                 }
             }
         }
@@ -276,8 +336,7 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
     let mut attr_loads = 0u32;
     let mut gl_position: Option<u32> = None;
     let mut varying_outs = 0u32;
-    // Per-def classification onto the firmware uniform convention.
-    let mut ubo: HashMap<u32, Ubo> = HashMap::new();
+    // (`ubo` is declared above the selection walk so the fragment path can populate it.)
     // Output roots for DCE: every value a store_output consumes is live.
     let mut out_roots: Vec<u32> = Vec::new();
     // gl_Position component c (x/y/z/w) → the SSA value that produces it. These
@@ -478,6 +537,8 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
         match ubo.get(&s) {
             Some(&Ubo::Mvp(rb)) => ((8 + (rb / 16) * 4 + c as i32) as u8, true),
             Some(&Ubo::Pos) => (*pos_gpr.get(&(s, c)).unwrap_or(&0), false),
+            Some(&Ubo::Uniform(idx)) => (idx, true),
+            Some(&Ubo::Fixed(reg)) => (reg, false),
             _ => (*alloc.get(&s).unwrap_or(&0), false),
         }
     };
@@ -529,6 +590,17 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
                 }
                 // position component → its pre-loaded GPR.
                 Some(&Ubo::Pos) => r[k] = *pos_gpr.get(&(*s, c)).unwrap_or(&0),
+                // fragment uniform (inv_area / per-vertex varying) → funct3 read.
+                Some(&Ubo::Uniform(idx)) => {
+                    if f3 == 0 {
+                        r[k] = idx;
+                        f3 = k as u32 + 1;
+                    } else {
+                        pending += 1; // 2nd uniform in one op needs a preload
+                    }
+                }
+                // edge-function attribute in a fixed register (r0/r1/r2).
+                Some(&Ubo::Fixed(reg)) => r[k] = reg,
                 // attribute varying — firmware-handled, not yet pinned.
                 Some(&Ubo::Attr) => pending += 1,
                 // ALU intermediate → allocated GPR (or pending if a stray input).
