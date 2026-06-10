@@ -85,6 +85,17 @@ extern const struct vk_command_buffer_ops borgvk_cmd_buffer_ops;
  * ships the per-frame 4×4 MVP as a framed packet the firmware decodes. */
 void borgvk_serial_send_mvp(const float mvp[16]);
 
+/* Max mesh the firmware's fixed-length 0xAE geometry packet carries (must match
+ * the firmware RX_GEOM_*). cube.c is 8 unique verts / 12 triangles. */
+#define BORGVK_GEOM_MAX_VERTS 16
+#define BORGVK_GEOM_MAX_TRIS  16
+
+/* Ship the app's real mesh once (Phase B): nverts unique model-space positions
+ * (xyz floats), ntris triangles each indexing 3 of them (idx, 3 per tri), with
+ * per-triangle-vertex UVs (uv, 2 floats per tri-vertex). */
+void borgvk_serial_send_geom(const float *verts, int nverts,
+                             const uint8_t *idx, const float *uv, int ntris);
+
 /* Queue submit hook (borgvk_queue.c): reads the MVP from the submitted command
  * buffer's bound descriptor set and ships it over serial. Wired into
  * device->queue.driver_submit by CreateDevice. */
