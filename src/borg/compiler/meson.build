@@ -10,6 +10,9 @@ libborgc = static_library(
   gnu_symbol_visibility : 'hidden',
   rust_abi : 'c',
   rust_args : rust_global_args,
+  dependencies : [
+    idep_compiler_rs,   # Mesa's NIR Rust bindings (compiler::bindings / ::nir)
+  ],
 )
 
 idep_borgc = declare_dependency(
