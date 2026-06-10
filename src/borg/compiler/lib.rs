@@ -511,6 +511,32 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
         gl_position.map_or("?".to_string(), |v| v.to_string())
     );
 
+    // Fragment depth output (target boilerplate): cube.frag writes no depth, but
+    // the tile-buffer depth test needs r29 = interpolated z. z is staged per-vertex
+    // at u28-30 ((v2,v1,v0) → v0=u30); emit w0·u30 + w1·u29 + w2·u28 → r29.
+    let mut frag_z: Option<u32> = None;
+    if stage == 4 {
+        if let Some(w) = weights {
+            let uz: Vec<u32> = [30u8, 29, 28]
+                .iter()
+                .map(|&idx| {
+                    let v = next_vreg;
+                    next_vreg += 1;
+                    ubo.insert(v, Ubo::Uniform(idx));
+                    v
+                })
+                .collect();
+            let t0 = next_vreg; next_vreg += 1;
+            prog.push(BorgInstr { mnem: "FMUL", dst: t0, srcs: vec![w[0], uz[0]], swz: vec![0, 0] });
+            let t1 = next_vreg; next_vreg += 1;
+            prog.push(BorgInstr { mnem: "FMADD", dst: t1, srcs: vec![w[1], uz[1], t0], swz: vec![0, 0, 0] });
+            let zr = next_vreg; next_vreg += 1;
+            prog.push(BorgInstr { mnem: "FMADD", dst: zr, srcs: vec![w[2], uz[2], t1], swz: vec![0, 0, 0] });
+            out_roots.push(zr);
+            frag_z = Some(zr);
+        }
+    }
+
     // Dead-code elimination. Because every load_ubo is pinned to a fixed uniform,
     // the UBO byte-offset arithmetic (iadd/ishl from gl_VertexIndex, descriptor
     // index math) feeds only the dropped offsets and is dead. Mark-and-sweep from
@@ -620,6 +646,9 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
         }
         for &t in &ftex_dsts {
             forced.insert(t, 20);
+        }
+        if let Some(zr) = frag_z {
+            forced.insert(zr, 29); // interpolated depth → r29
         }
         extra_reserved.extend_from_slice(&[0, 1, 2, 21, 22, 26, 27, 28, 29]);
     }
@@ -792,8 +821,12 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
     let outputs: Vec<u8> = if is_vertex && gl_position.is_some() {
         vec![0, 1, 2]
     } else if !is_vertex {
-        // Fragment colour outputs r26/27/28 (+ r29 = z, once z-interp lands).
-        (0..3).filter(|&c| frag_out[c].is_some()).map(|c| 26 + c as u8).collect()
+        // Fragment colour outputs r26/27/28 + r29 = interpolated depth.
+        let mut o: Vec<u8> = (0..3).filter(|&c| frag_out[c].is_some()).map(|c| 26 + c as u8).collect();
+        if frag_z.is_some() {
+            o.push(29);
+        }
+        o
     } else {
         vec![]
     };
