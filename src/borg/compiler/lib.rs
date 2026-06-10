@@ -184,6 +184,8 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
     let mut varying_outs = 0u32;
     // Per-def classification onto the firmware uniform convention.
     let mut ubo: HashMap<u32, Ubo> = HashMap::new();
+    // Output roots for DCE: every value a store_output consumes is live.
+    let mut out_roots: Vec<u32> = Vec::new();
     if !entry.is_null() {
         for block in (*entry).iter_blocks() {
             for instr in block.iter_instr_list() {
@@ -209,8 +211,10 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
                         }
                         nir_intrinsic_store_output => {
                             let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
+                            let src = intr.srcs_as_slice()[0].as_def().index;
+                            out_roots.push(src);
                             if loc == VARYING_SLOT_POS {
-                                gl_position = Some(intr.srcs_as_slice()[0].as_def().index);
+                                gl_position = Some(src);
                             } else {
                                 varying_outs += 1;
                             }
@@ -226,6 +230,34 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
          attr {attr_loads}→varying; gl_Position=v{}→r0..r3 ({varying_outs} varying out)",
         gl_position.map_or("?".to_string(), |v| v.to_string())
     );
+
+    // Dead-code elimination. Because every load_ubo is pinned to a fixed uniform,
+    // the UBO byte-offset arithmetic (iadd/ishl from gl_VertexIndex, descriptor
+    // index math) feeds only the dropped offsets and is dead. Mark-and-sweep from
+    // the store_output roots back through the def→use chain to fixpoint.
+    let pre_dce = prog.len();
+    let mut live: std::collections::HashSet<u32> = out_roots.iter().copied().collect();
+    loop {
+        let mut grew = false;
+        for i in &prog {
+            if live.contains(&i.dst) {
+                for &s in &i.srcs {
+                    grew |= live.insert(s);
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    prog.retain(|i| live.contains(&i.dst));
+    if pre_dce != prog.len() {
+        eprintln!(
+            "borgc: DCE — dropped {} dead instr(s) (UBO address math), {} live",
+            pre_dce - prog.len(),
+            prog.len()
+        );
+    }
 
     let alloc = regalloc(&prog);
 
