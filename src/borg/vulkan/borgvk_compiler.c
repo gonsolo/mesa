@@ -62,6 +62,9 @@ borgvk_compile_stage(struct borgvk_device *device,
       return;
    }
 
+   if (getenv("BORGC_DUMP_NIR"))
+      nir_print_shader(nir, stderr);
+
    borgc_compile_nir(nir);   /* Rust: inspects/lowers the shader */
    ralloc_free(nir);
 }
