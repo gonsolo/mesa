@@ -19,6 +19,8 @@ libborgvk_files = files(
   'borgvk_device.c',
   'borgvk_memory.c',
   'borgvk_pipeline.c',
+  'borgvk_queue.c',
+  'borgvk_serial.c',
   'borgvk_sync.c',
   'borgvk_private.h',
 )
