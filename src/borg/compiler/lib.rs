@@ -133,5 +133,74 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
             eprintln!("borgc:   {} v{}, {}", i.mnem, i.dst, s.join(", "));
         }
     }
+
+    regalloc(&prog);
     total
+}
+
+/// Linear-scan register allocation (Poletto & Sarkar) for the values our
+/// instruction selection defines (the ALU results). Each is live from its def
+/// to its last use; we assign physical GPRs r0..r29 (r30/r31 are the special
+/// coordinate registers), reusing a register once its value dies. Reports the
+/// allocation, the peak register pressure, and any spills. Values that only
+/// appear as sources (shader inputs) are not allocated here — they map to
+/// uniforms/attributes when the I/O lowering lands.
+fn regalloc(prog: &[BorgInstr]) {
+    use std::collections::HashMap;
+
+    const NUM_GPRS: u8 = 30; // r0..r29; r30/r31 reserved for coordinates
+
+    // Def position (first) and last-use position for every value.
+    let mut def_at: HashMap<u32, usize> = HashMap::new();
+    let mut last_use: HashMap<u32, usize> = HashMap::new();
+    for (i, instr) in prog.iter().enumerate() {
+        def_at.entry(instr.dst).or_insert(i);
+        last_use.insert(instr.dst, i);
+        for &s in &instr.srcs {
+            last_use.insert(s, i);
+        }
+    }
+
+    // Allocate only values we define (ALU results), in def order.
+    let mut defs: Vec<u32> = def_at.keys().copied().collect();
+    defs.sort_by_key(|v| def_at[v]);
+
+    let mut free: Vec<u8> = (0..NUM_GPRS).rev().collect();
+    let mut active: Vec<(usize, u8)> = Vec::new(); // (live_end, phys_reg)
+    let mut alloc: HashMap<u32, u8> = HashMap::new();
+    let mut spills = 0usize;
+    let mut peak = 0usize;
+
+    for v in defs {
+        let start = def_at[&v];
+        let end = *last_use.get(&v).unwrap_or(&start);
+
+        // Expire intervals that ended before this value starts.
+        let mut keep = Vec::with_capacity(active.len());
+        for &(e, r) in &active {
+            if e < start {
+                free.push(r);
+            } else {
+                keep.push((e, r));
+            }
+        }
+        active = keep;
+
+        match free.pop() {
+            Some(r) => {
+                alloc.insert(v, r);
+                active.push((end, r));
+            }
+            None => spills += 1,
+        }
+        peak = peak.max(active.len());
+    }
+
+    eprintln!(
+        "borgc: regalloc — {} values → r0..r{}, peak pressure {}, spills {}",
+        alloc.len(),
+        NUM_GPRS - 1,
+        peak,
+        spills
+    );
 }
