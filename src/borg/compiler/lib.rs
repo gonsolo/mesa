@@ -209,9 +209,11 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
     let mut prod: HashMap<u32, (nir_op, Vec<(u32, u8)>)> = HashMap::new();
     // FTEX results occupy 3 consecutive regs (R=rd, G=rd+1, B=rd+2).
     let mut ftex_dsts: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    // Vector constants (e.g. cube.frag's lightDir) → dedicated fragment uniforms
-    // u4.. (staged once by the firmware); records (uniform index, fp16 bits).
-    let mut const_u_next: u8 = 4;
+    // Vector constants (e.g. cube.frag's lightDir) → reserved GPRs r23.. (written
+    // once via MMIO by the firmware; persist across the autonomous render — the rast
+    // kernel uses only r0..r11 and the frag reserves these). Uniforms are too tight:
+    // rast(u0-11) + frag varyings(u12-30) already fill 31 of 32. Records (reg, fp16).
+    let mut const_reg_next: u8 = 23;
     let mut const_uniforms: Vec<(u8, u16)> = Vec::new();
     // gl_varying_slot: VAR0=texcoord, VAR1=frag_pos (Mesa enum: VAR0 = 32).
     const VARYING_SLOT_VAR0: u32 = 32;
@@ -397,16 +399,17 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
                     if n == 1 {
                         consts.insert(lc.def.index, unsafe { lc.values()[0].u32_ });
                     } else {
-                        // Vector constant (lightDir) → pin components to uniforms u4+.
+                        // Vector constant (lightDir) → pin components to reserved
+                        // GPRs r23+ (firmware writes them once via MMIO).
                         let comps: Vec<(u32, u8)> = (0..n)
                             .map(|c| {
-                                let idx = const_u_next;
-                                const_u_next += 1;
+                                let reg = const_reg_next;
+                                const_reg_next += 1;
                                 let bits = unsafe { lc.values()[c].u32_ };
-                                const_uniforms.push((idx, f32_to_fp16(bits)));
+                                const_uniforms.push((reg, f32_to_fp16(bits)));
                                 let v = next_vreg;
                                 next_vreg += 1;
-                                ubo.insert(v, Ubo::Uniform(idx));
+                                ubo.insert(v, Ubo::Fixed(reg));
                                 (v, 0u8)
                             })
                             .collect();
@@ -650,7 +653,8 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
         if let Some(zr) = frag_z {
             forced.insert(zr, 29); // interpolated depth → r29
         }
-        extra_reserved.extend_from_slice(&[0, 1, 2, 21, 22, 26, 27, 28, 29]);
+        // r0-2 attrs, r20-22 FTEX, r23-25 lightDir consts, r26-29 outputs.
+        extra_reserved.extend_from_slice(&[0, 1, 2, 21, 22, 23, 24, 25, 26, 27, 28, 29]);
     }
 
     let alloc = regalloc(&prog, &forced, &extra_reserved);
@@ -805,8 +809,8 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
         pending
     );
     if !const_uniforms.is_empty() {
-        let cs: Vec<String> = const_uniforms.iter().map(|(i, v)| format!("u{i}={v:#06x}")).collect();
-        eprintln!("borgc: const uniforms (firmware-staged): {}", cs.join(" "));
+        let cs: Vec<String> = const_uniforms.iter().map(|(r, v)| format!("r{r}={v:#06x}")).collect();
+        eprintln!("borgc: const regs (firmware-staged via MMIO): {}", cs.join(" "));
     }
     if env::var("BORGC_DUMP_ISA").is_ok() {
         let hex: Vec<String> = words.iter().map(|w| format!("{w:#010x}")).collect();
