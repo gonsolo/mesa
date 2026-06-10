@@ -56,6 +56,21 @@ pub extern "C" fn borgc_selftest() -> u32 {
     0xB0_06
 }
 
+/// Convert f32 bits to fp16 bits (round toward zero; adequate for the small
+/// normal constants we pin, e.g. lightDir).
+fn f32_to_fp16(bits: u32) -> u16 {
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xFF) as i32 - 127 + 15;
+    let mant = bits & 0x7F_FFFF;
+    if exp <= 0 {
+        sign
+    } else if exp >= 31 {
+        sign | 0x7C00
+    } else {
+        sign | ((exp as u16) << 10) | ((mant >> 13) as u16)
+    }
+}
+
 /// Resolve a (def, component) through the vec/mov construction map to the true
 /// underlying scalar producer + component. Free function (not a closure) so the
 /// selection walk can resolve and mutate `vec_map` in the same loop.
@@ -188,6 +203,16 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
     let mut ubo: HashMap<u32, Ubo> = HashMap::new();
     // Barycentric weights w_i = e_i·inv_area, emitted once on the first load_input.
     let mut weights: Option<[u32; 3]> = None;
+    // Scalar load_const f32 bits (for the sRGB idiom match) and a producer map
+    // (alu def → its op + resolved scalar srcs) for recognising the bcsel tree.
+    let mut consts: HashMap<u32, u32> = HashMap::new();
+    let mut prod: HashMap<u32, (nir_op, Vec<(u32, u8)>)> = HashMap::new();
+    // FTEX results occupy 3 consecutive regs (R=rd, G=rd+1, B=rd+2).
+    let mut ftex_dsts: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    // Vector constants (e.g. cube.frag's lightDir) → dedicated fragment uniforms
+    // u4.. (staged once by the firmware); records (uniform index, fp16 bits).
+    let mut const_u_next: u8 = 4;
+    let mut const_uniforms: Vec<(u8, u16)> = Vec::new();
     // gl_varying_slot: VAR0=texcoord, VAR1=frag_pos (Mesa enum: VAR0 = 32).
     const VARYING_SLOT_VAR0: u32 = 32;
     if !entry.is_null() {
@@ -222,6 +247,40 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
                             prog.push(BorgInstr { mnem: "FSTEP", dst: vstep, srcs: vec![x.0], swz: vec![x.1] });
                             prog.push(BorgInstr { mnem: "FMUL", dst: alu.def.index, srcs: vec![x.0, vstep], swz: vec![x.1, 0] });
                         }
+                        // linearToSrgb idiom → FSRGB: bcsel(fge(knee,x), x·12.92,
+                        // 1.055·pow(x,1/2.4)-0.055). Recognised by the linear branch
+                        // fmul(x, 12.92); x is the value to sRGB-encode.
+                        nir_op_bcsel => {
+                            let s = alu.srcs_as_slice();
+                            let then_def = s[1].src.as_def().index;
+                            let mut x: Option<(u32, u8)> = None;
+                            if let Some((op, tsrcs)) = prod.get(&then_def) {
+                                if *op == nir_op_fmul && tsrcs.len() == 2 {
+                                    let is12 = |d: u32| {
+                                        consts.get(&d).map_or(false, |&b| {
+                                            (f32::from_bits(b) - 12.92).abs() < 0.1
+                                        })
+                                    };
+                                    x = if is12(tsrcs[0].0) {
+                                        Some(tsrcs[1])
+                                    } else if is12(tsrcs[1].0) {
+                                        Some(tsrcs[0])
+                                    } else {
+                                        None
+                                    };
+                                }
+                            }
+                            if let Some(x) = x {
+                                let v = next_vreg;
+                                next_vreg += 1;
+                                prog.push(BorgInstr { mnem: "FSRGB", dst: v, srcs: vec![x.0], swz: vec![x.1] });
+                                vec_map.insert(alu.def.index, vec![(v, 0)]);
+                            } else {
+                                // non-sRGB bcsel: pass through the then-value.
+                                let s0 = resolve_vm(&vec_map, s[1].src.as_def().index, s[1].swizzle[0]);
+                                vec_map.insert(alu.def.index, vec![s0]);
+                            }
+                        }
                         _ => {
                             if let Some(mnem) = borg_isel(alu.op) {
                                 if mnem != "mov" {
@@ -233,6 +292,9 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
                                         srcs.push(d);
                                         swz.push(c);
                                     }
+                                    let pairs: Vec<(u32, u8)> =
+                                        srcs.iter().cloned().zip(swz.iter().cloned()).collect();
+                                    prod.insert(alu.def.index, (alu.op, pairs));
                                     prog.push(BorgInstr { mnem, dst: alu.def.index, srcs, swz });
                                 }
                             }
@@ -309,6 +371,47 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
                         vec_map.insert(intr.def.index, comps);
                     }
                     // load_ubo/store_output handled in the I/O pass below.
+                } else if let Some(tex) = instr.as_tex() {
+                    // Texture sample → FTEX rd, U, V (rd=R, rd+1=G, rd+2=B implicit).
+                    // The result vec4's .x/.y/.z resolve to rd/rd+1/rd+2.
+                    let coord = tex
+                        .srcs_as_slice()
+                        .iter()
+                        .find(|s| s.src_type == nir_tex_src_coord)
+                        .map(|s| s.src.as_def().index);
+                    if let Some(cd) = coord {
+                        let (ud, uc) = resolve_vm(&vec_map, cd, 0);
+                        let (vd, vc) = resolve_vm(&vec_map, cd, 1);
+                        let ftex_v = next_vreg;
+                        next_vreg += 1;
+                        prog.push(BorgInstr { mnem: "FTEX", dst: ftex_v, srcs: vec![ud, vd], swz: vec![uc, vc] });
+                        ftex_dsts.insert(ftex_v);
+                        // .w (alpha) is unused by the RGB tile buffer → map to .z.
+                        vec_map.insert(
+                            tex.def.index,
+                            vec![(ftex_v, 0), (ftex_v, 1), (ftex_v, 2), (ftex_v, 2)],
+                        );
+                    }
+                } else if let Some(lc) = instr.as_load_const() {
+                    let n = lc.def.num_components as usize;
+                    if n == 1 {
+                        consts.insert(lc.def.index, unsafe { lc.values()[0].u32_ });
+                    } else {
+                        // Vector constant (lightDir) → pin components to uniforms u4+.
+                        let comps: Vec<(u32, u8)> = (0..n)
+                            .map(|c| {
+                                let idx = const_u_next;
+                                const_u_next += 1;
+                                let bits = unsafe { lc.values()[c].u32_ };
+                                const_uniforms.push((idx, f32_to_fp16(bits)));
+                                let v = next_vreg;
+                                next_vreg += 1;
+                                ubo.insert(v, Ubo::Uniform(idx));
+                                (v, 0u8)
+                            })
+                            .collect();
+                        vec_map.insert(lc.def.index, comps);
+                    }
                 }
             }
         }
@@ -343,6 +446,9 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
     // clip coords are pinned to r0..r3 so the perspective-divide epilogue and the
     // sequencer's clipReg snoop find them where the firmware convention expects.
     let mut pos_out: [Option<u32>; 4] = [None; 4];
+    // Fragment colour uFragColor.rgb → output regs r26/r27/r28 (the tile-buffer
+    // convention; alpha is dropped).
+    let mut frag_out: [Option<u32>; 3] = [None; 3];
     if !entry.is_null() {
         for block in (*entry).iter_blocks() {
             for instr in block.iter_instr_list() {
@@ -369,7 +475,7 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
                         nir_intrinsic_store_output => {
                             let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
                             let src = intr.srcs_as_slice()[0].as_def().index;
-                            if loc == VARYING_SLOT_POS {
+                            if stage == 0 && loc == VARYING_SLOT_POS {
                                 // gl_Position is a vec4 stored whole (wrmask=xyzw);
                                 // resolve each component to its scalar producer and
                                 // pin it to r0..r3 (also the DCE roots). Varyings
@@ -379,6 +485,14 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
                                 for c in 0..n {
                                     let (d, _) = resolve_vm(&vec_map, src, c as u8);
                                     pos_out[c] = Some(d);
+                                    out_roots.push(d);
+                                }
+                            } else if stage == 4 {
+                                // Fragment colour uFragColor (vec4) → r26/27/28 rgb.
+                                let n = vec_map.get(&src).map_or(1, |v| v.len()).min(3);
+                                for c in 0..n {
+                                    let (d, _) = resolve_vm(&vec_map, src, c as u8);
+                                    frag_out[c] = Some(d);
                                     out_roots.push(d);
                                 }
                             } else {
@@ -485,18 +599,32 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
         );
     }
 
-    // Pre-color gl_Position components to output registers r0..r3.
+    // Pre-color outputs and reserve fixed registers.
     let mut forced: HashMap<u32, u8> = HashMap::new();
+    let mut extra_reserved: Vec<u8> = Vec::new();
     let is_vertex = stage == 0; // MESA_SHADER_VERTEX
     if is_vertex {
+        // gl_Position components → r0..r3 (the epilogue reserves r4).
         for (c, v) in pos_out.iter().enumerate() {
             if let Some(def) = v {
                 forced.insert(*def, c as u8);
             }
         }
+    } else {
+        // Fragment: colour → r26/27/28; edge-function attrs occupy r0/r1/r2; the
+        // FTEX result occupies a fixed 3-reg block r20/21/22.
+        for (c, v) in frag_out.iter().enumerate() {
+            if let Some(def) = v {
+                forced.insert(*def, 26 + c as u8);
+            }
+        }
+        for &t in &ftex_dsts {
+            forced.insert(t, 20);
+        }
+        extra_reserved.extend_from_slice(&[0, 1, 2, 21, 22, 26, 27, 28, 29]);
     }
 
-    let alloc = regalloc(&prog, &forced);
+    let alloc = regalloc(&prog, &forced, &extra_reserved);
 
     // Encode the selected+allocated instructions into Borg machine words, pinning
     // shader inputs to the firmware's uniform convention. The Borg core has ONE
@@ -534,6 +662,10 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
     let mut pending = 0u32;
     // Resolve one source operand to (physical register, reads-from-uniform).
     let resolve_op = |s: u32, c: u8| -> (u8, bool) {
+        // FTEX result component c → rd+c (R/G/B in consecutive regs).
+        if ftex_dsts.contains(&s) {
+            return (alloc.get(&s).map_or(0, |&r| r + c), false);
+        }
         match ubo.get(&s) {
             Some(&Ubo::Mvp(rb)) => ((8 + (rb / 16) * 4 + c as i32) as u8, true),
             Some(&Ubo::Pos) => (*pos_gpr.get(&(s, c)).unwrap_or(&0), false),
@@ -578,6 +710,10 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
         let mut r = [0u8; 3];
         let mut f3 = 0u32;
         for (k, (s, &c)) in i.srcs.iter().zip(i.swz.iter()).take(3).enumerate() {
+            if ftex_dsts.contains(s) {
+                r[k] = alloc.get(s).map_or(0, |&rr| rr + c); // FTEX result rd+c
+                continue;
+            }
             match ubo.get(s) {
                 // MVP column → uniform u(8 + column*4 + component), read in place.
                 Some(&Ubo::Mvp(rb)) => {
@@ -627,6 +763,8 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
         words.push(encode("FMUL", 1, 1, 4, 0, 0).unwrap()); // screen_y
         words.push(encode("FMUL", 2, 2, 4, 0, 0).unwrap()); // ndc_z
         words.push(0x0000_0000); // HALT
+    } else if !is_vertex {
+        words.push(0x0000_0000); // fragment: HALT terminates (no epilogue)
     }
     eprintln!(
         "borgc: encoded {} word(s) = {} uniform pre-load(s) + {} op(s) + {} epilogue \
@@ -637,6 +775,10 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
         words.len() - n_body,
         pending
     );
+    if !const_uniforms.is_empty() {
+        let cs: Vec<String> = const_uniforms.iter().map(|(i, v)| format!("u{i}={v:#06x}")).collect();
+        eprintln!("borgc: const uniforms (firmware-staged): {}", cs.join(" "));
+    }
     if env::var("BORGC_DUMP_ISA").is_ok() {
         let hex: Vec<String> = words.iter().map(|w| format!("{w:#010x}")).collect();
         eprintln!("borgc:   first words: {}", hex.join(" "));
@@ -647,12 +789,15 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
     // SEQ_VERT_SHADER_ADDR with the conventions baked in; the output_regs list is
     // descriptive (the snooped screen regs r0..r2). The blob is the artifact the
     // firmware loads to replace the hand-written seq_vert_shader.
-    let outputs: &[u8] = if is_vertex && gl_position.is_some() {
-        &[0, 1, 2]
+    let outputs: Vec<u8> = if is_vertex && gl_position.is_some() {
+        vec![0, 1, 2]
+    } else if !is_vertex {
+        // Fragment colour outputs r26/27/28 (+ r29 = z, once z-interp lands).
+        (0..3).filter(|&c| frag_out[c].is_some()).map(|c| 26 + c as u8).collect()
     } else {
-        &[]
+        vec![]
     };
-    let blob = emit_blob(&words, outputs);
+    let blob = emit_blob(&words, &outputs);
     eprintln!("borgc: .borg blob = {} bytes ({} instr, {} output regs)", blob.len(), words.len(), outputs.len());
     if let Ok(prefix) = env::var("BORGC_EMIT_BLOB") {
         let path = format!("{prefix}.{}.borg", if is_vertex { "vert" } else { "frag" });
@@ -724,7 +869,11 @@ fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32) -> Option<
 /// allocation, the peak register pressure, and any spills. Values that only
 /// appear as sources (shader inputs) are not allocated here — they map to
 /// uniforms/attributes when the I/O lowering lands.
-fn regalloc(prog: &[BorgInstr], forced: &std::collections::HashMap<u32, u8>) -> std::collections::HashMap<u32, u8> {
+fn regalloc(
+    prog: &[BorgInstr],
+    forced: &std::collections::HashMap<u32, u8>,
+    extra_reserved: &[u8],
+) -> std::collections::HashMap<u32, u8> {
     use std::collections::HashMap;
 
     const NUM_GPRS: u8 = 30; // r0..r29; r30/r31 reserved for coordinates
@@ -746,7 +895,12 @@ fn regalloc(prog: &[BorgInstr], forced: &std::collections::HashMap<u32, u8>) -> 
 
     // Reserve the pre-colored output regs (gl_Position r0..r3) and r4 (the
     // perspective-divide scratch) from the general pool — the epilogue owns them.
-    let reserved: std::collections::HashSet<u8> = forced.values().copied().chain([4]).collect();
+    let reserved: std::collections::HashSet<u8> = forced
+        .values()
+        .copied()
+        .chain([4])
+        .chain(extra_reserved.iter().copied())
+        .collect();
     let mut free: Vec<u8> = (0..NUM_GPRS).rev().filter(|r| !reserved.contains(r)).collect();
     let mut active: Vec<(usize, u8)> = Vec::new(); // (live_end, phys_reg)
     let mut alloc: HashMap<u32, u8> = HashMap::new();

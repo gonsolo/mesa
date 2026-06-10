@@ -96,6 +96,13 @@ borgvk_compile_stage(struct borgvk_device *device,
       NIR_PASS(progress, nir, nir_opt_cse);
       NIR_PASS(progress, nir, nir_opt_constant_folding);
       NIR_PASS(progress, nir, nir_opt_algebraic);
+      /* Borg has no branches: flatten if/else (e.g. cube.frag's linearToSrgb
+       * piecewise) into bcsel selects. expensive_alu_ok so the pow branch doesn't
+       * block flattening — the whole select then collapses to one FSRGB op. */
+      static const nir_opt_peephole_select_options peephole_opts = {
+         .limit = 64, .indirect_load_ok = true, .expensive_alu_ok = true,
+      };
+      NIR_PASS(progress, nir, nir_opt_peephole_select, &peephole_opts);
    } while (progress);
 
    if (getenv("BORGC_DUMP_NIR"))
