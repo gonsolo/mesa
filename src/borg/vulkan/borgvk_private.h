@@ -110,6 +110,9 @@ void borgvk_serial_send_tex_row(int y, const float *rgb);
 VkResult borgvk_queue_submit(struct vk_queue *queue,
                              struct vk_queue_submit *submit);
 
+/* Compiler shim (borgvk_compiler.c → Rust borgc crate). */
+void borgvk_compiler_selftest(void);
+
 VK_DEFINE_HANDLE_CASTS(borgvk_instance, vk.base, VkInstance,
                        VK_OBJECT_TYPE_INSTANCE)
 VK_DEFINE_HANDLE_CASTS(borgvk_physical_device, vk.base, VkPhysicalDevice,

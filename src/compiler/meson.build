@@ -73,6 +73,6 @@ if with_gallium
 endif
 subdir('isaspec')
 
-if with_nouveau_vk or with_tools.contains('etnaviv') or with_panfrost_rust
+if with_nouveau_vk or with_tools.contains('etnaviv') or with_panfrost_rust or with_borg_vk
   subdir('rust')
 endif
