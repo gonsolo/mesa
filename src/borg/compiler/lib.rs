@@ -834,7 +834,7 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
     } else {
         vec![]
     };
-    let blob = emit_blob(&words, &outputs);
+    let blob = emit_blob(&words, &outputs, &const_uniforms);
     eprintln!("borgc: .borg blob = {} bytes ({} instr, {} output regs)", blob.len(), words.len(), outputs.len());
     if let Ok(prefix) = env::var("BORGC_EMIT_BLOB") {
         let path = format!("{prefix}.{}.borg", if is_vertex { "vert" } else { "frag" });
@@ -850,21 +850,30 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
 /// (software/borg/borg_spirb.c): a 6-byte header (num_instrs, num_uniforms,
 /// num_attributes, num_outputs, num_consts, reserved), then num_instrs LE u32
 /// instruction words, then the uint8 uniform/attribute/output/const register
-/// lists, then num_consts LE u16 constant values. We emit only instructions and
-/// the output-register list (the sequencer path consumes instrs[] directly;
-/// uniforms are read inline via funct3, not through a host interface list).
-fn emit_blob(words: &[u32], outputs: &[u8]) -> Vec<u8> {
+/// lists, then num_consts LE u16 constant values. We emit instructions, the
+/// output-register list, and the const-register list. The consts (e.g.
+/// cube.frag's lightDir in r23-25) are written once to the GPRs by the firmware
+/// (spirb_parse → BORG_GPU->gpr[const_regs[i]] = const_vals[i]) and persist
+/// across the autonomous render. Uniforms are read inline via funct3, so there
+/// is no host uniform/attribute interface list.
+fn emit_blob(words: &[u32], outputs: &[u8], consts: &[(u8, u16)]) -> Vec<u8> {
     let mut b = Vec::new();
     b.push(words.len() as u8); // num_instrs
     b.push(0); // num_uniforms (inline funct3 reads, no host interface)
     b.push(0); // num_attributes
     b.push(outputs.len() as u8); // num_outputs
-    b.push(0); // num_consts
+    b.push(consts.len() as u8); // num_consts
     b.push(0); // reserved
     for &w in words {
         b.extend_from_slice(&w.to_le_bytes());
     }
     b.extend_from_slice(outputs); // output_regs
+    for &(reg, _) in consts {
+        b.push(reg); // const_regs[]
+    }
+    for &(_, val) in consts {
+        b.extend_from_slice(&val.to_le_bytes()); // const_vals[] (LE u16)
+    }
     b
 }
 
