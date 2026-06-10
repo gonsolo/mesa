@@ -18,10 +18,22 @@
 #include "vk_image.h"
 #include "vk_descriptor_set_layout.h"
 
+#include "wsi_common.h"
+
 #include "borgvk_entrypoints.h"
 
 #ifdef __cplusplus
 extern "C" {
+#endif
+
+/* WSI (window-system integration) is available when at least one surface
+ * platform is compiled in. borgvk uses the software (CPU) WSI path: the host
+ * window is irrelevant — the real output is the FPGA's HDMI — so WSI only needs
+ * to function so an app's render loop runs and submits each frame. */
+#if defined(VK_USE_PLATFORM_XCB_KHR) || \
+    defined(VK_USE_PLATFORM_XLIB_KHR) || \
+    defined(VK_USE_PLATFORM_WAYLAND_KHR)
+#define BORGVK_USE_WSI_PLATFORM
 #endif
 
 struct borgvk_instance {
@@ -40,7 +52,16 @@ struct borgvk_physical_device {
    /* Submit is synchronous (ship MVP over serial, return), so a single
     * immediate-success sync type (borgvk_sync_type) backs fences/semaphores. */
    const struct vk_sync_type *sync_types[2];
+
+#ifdef BORGVK_USE_WSI_PLATFORM
+   struct wsi_device wsi_device;
+#endif
 };
+
+#ifdef BORGVK_USE_WSI_PLATFORM
+VkResult borgvk_wsi_init(struct borgvk_physical_device *physical_device);
+void borgvk_wsi_finish(struct borgvk_physical_device *physical_device);
+#endif
 
 extern const struct vk_sync_type borgvk_sync_type;
 
