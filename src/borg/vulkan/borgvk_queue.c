@@ -33,7 +33,8 @@
 #define UBO_ATTR_FLOAT0  (UBO_MVP_FLOATS + UBO_NUM_VERTS * 4)  /* attr[36][4] */
 #define UBO_MIN_FLOATS   (UBO_ATTR_FLOAT0 + UBO_NUM_VERTS * 4) /* 304 = 1216 B */
 
-#define GEOM_FRAMES      24   /* frames spent shipping the mesh at startup */
+#define GEOM_FRAMES      24                      /* startup frames shipping the mesh */
+#define TEX_FRAMES       (BORGVK_TEX_DIM * 2)    /* then a bounded texture-upload window */
 
 /* Locate the bound descriptor set (binding 0 = UBO, binding 1 = texture). */
 static struct borgvk_descriptor_set *
@@ -149,12 +150,13 @@ borgvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
    static unsigned submit_no = 0;
    static int tex_row = 0;
 
-   /* Startup: ship the mesh. Then animate (MVP), slipping a texture row in every
-    * 4th frame — the rows cycle so the whole texture reliably lands over time
-    * even though the firmware only catches ~1 packet per frame. */
+   /* Startup is a one-time sequence: ship the mesh, then a bounded window of
+    * texture rows (cycling so the whole texture lands). After that, send the MVP
+    * every frame so the animation is smooth — the texture is static, so there is
+    * no reason to keep interleaving it (doing so stutters the spin). */
    if (can_geom && submit_no < GEOM_FRAMES) {
       send_geometry(ubo);
-   } else if (can_tex && (submit_no % 4) == 3) {
+   } else if (can_tex && submit_no < GEOM_FRAMES + TEX_FRAMES) {
       send_texture_row(tex, tex_row);
       tex_row = (tex_row + 1) % BORGVK_TEX_DIM;
    } else {
