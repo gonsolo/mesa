@@ -143,6 +143,54 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
         }
     }
 
+    // I/O map: identify which value feeds each shader output and which value each
+    // input/UBO-load produces, so the backend can pin them to the firmware's
+    // registers (outputs→snooped regs, UBO/inputs→uniforms). Reported here; the
+    // register assignment + encoding is the next step.
+    let mut outputs: Vec<(i32, u32)> = Vec::new(); // (location, value vreg)
+    let mut inputs: Vec<(u32, i32)> = Vec::new();  // (def vreg, location)
+    let mut ubo_loads = 0u32;
+    let mut vtx_id = 0u32;
+    if !entry.is_null() {
+        for block in (*entry).iter_blocks() {
+            for instr in block.iter_instr_list() {
+                if let Some(intr) = instr.as_intrinsic() {
+                    match intr.intrinsic {
+                        nir_intrinsic_store_output => {
+                            let v = intr.srcs_as_slice()[0].as_def().index;
+                            outputs.push((intr.base(), v));
+                        }
+                        nir_intrinsic_load_input
+                        | nir_intrinsic_load_interpolated_input => {
+                            if let Some(d) = instr.def() {
+                                inputs.push((d.index, intr.base()));
+                            }
+                        }
+                        nir_intrinsic_load_ubo => ubo_loads += 1,
+                        nir_intrinsic_load_vertex_id
+                        | nir_intrinsic_load_vertex_id_zero_base => vtx_id += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "borgc: I/O — {} output(s), {} input(s), {} ubo-load(s), {} vertex-id",
+        outputs.len(),
+        inputs.len(),
+        ubo_loads,
+        vtx_id
+    );
+    if env::var("BORGC_DUMP_ISA").is_ok() {
+        for (loc, v) in &outputs {
+            eprintln!("borgc:   store_output loc={loc} <- v{v}");
+        }
+        for (v, loc) in &inputs {
+            eprintln!("borgc:   v{v} <- load_input loc={loc}");
+        }
+    }
+
     regalloc(&prog);
     total
 }
