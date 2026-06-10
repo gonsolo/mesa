@@ -191,8 +191,66 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
         }
     }
 
-    regalloc(&prog);
+    let alloc = regalloc(&prog);
+
+    // Encode the selected+allocated instructions into Borg machine words. Operands
+    // that aren't allocated to a GPR are shader inputs (UBO/attribute/uniform) and
+    // are left as a placeholder register until the I/O→uniform mapping pins them;
+    // `mov` ops are register copies handled by coalescing (skipped). This is the
+    // real machine code for the arithmetic — the .borg blob wraps it next.
+    let mut words: Vec<u32> = Vec::new();
+    let mut pending = 0u32;
+    for i in &prog {
+        if i.mnem == "mov" {
+            continue;
+        }
+        let rd = *alloc.get(&i.dst).unwrap_or(&0);
+        let mut r = [0u8; 3];
+        for (k, s) in i.srcs.iter().take(3).enumerate() {
+            match alloc.get(s) {
+                Some(&phys) => r[k] = phys,
+                None => {
+                    pending += 1;
+                    r[k] = 0;
+                }
+            }
+        }
+        if let Some(w) = encode(i.mnem, rd, r[0], r[1]) {
+            words.push(w);
+        }
+    }
+    eprintln!(
+        "borgc: encoded {} Borg word(s) ({} input operand(s) pending I/O map)",
+        words.len(),
+        pending
+    );
+    if env::var("BORGC_DUMP_ISA").is_ok() {
+        let hex: Vec<String> = words.iter().take(8).map(|w| format!("{w:#010x}")).collect();
+        eprintln!("borgc:   first words: {}", hex.join(" "));
+    }
     total
+}
+
+/// Encode one Borg instruction to its 32-bit word (opcode bases match
+/// software/borg/borg_isa.h and hardware Instructions.scala).
+fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8) -> Option<u32> {
+    let (rd, rs1, rs2) = (rd as u32, rs1 as u32, rs2 as u32);
+    let bin = |base: u32| base | (rs2 << 20) | (rs1 << 15) | (rd << 7);
+    let un = |base: u32| base | (rs1 << 15) | (rd << 7);
+    Some(match mnem {
+        "FADD" => bin(0x0000_0000),
+        "FMUL" => bin(0x0800_0000),
+        "FNEG" => un(0x0C00_0000),
+        "FRCP" => un(0x1400_0000),
+        "FTEX" => bin(0x1800_0000),
+        "IADD" => bin(0x1C00_0000),
+        "ISHL" => bin(0x2000_0000),
+        "ISHR" => bin(0x2400_0000),
+        "IMUL" => bin(0x2800_0000),
+        "I2F" => un(0x2C00_0000),
+        "F2I" => un(0x3000_0000),
+        _ => return None, // FMADD (R4) and mov handled separately
+    })
 }
 
 /// Linear-scan register allocation (Poletto & Sarkar) for the values our
@@ -202,7 +260,7 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
 /// allocation, the peak register pressure, and any spills. Values that only
 /// appear as sources (shader inputs) are not allocated here — they map to
 /// uniforms/attributes when the I/O lowering lands.
-fn regalloc(prog: &[BorgInstr]) {
+fn regalloc(prog: &[BorgInstr]) -> std::collections::HashMap<u32, u8> {
     use std::collections::HashMap;
 
     const NUM_GPRS: u8 = 30; // r0..r29; r30/r31 reserved for coordinates
@@ -260,4 +318,5 @@ fn regalloc(prog: &[BorgInstr]) {
         peak,
         spills
     );
+    alloc
 }
