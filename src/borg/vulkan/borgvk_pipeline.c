@@ -40,6 +40,10 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
    uint32_t i;
 
    for (i = 0; i < count; i++) {
+      /* Compile each shader stage's SPIR-V → NIR → Borg ISA (borgc). */
+      for (uint32_t s = 0; s < pCreateInfos[i].stageCount; s++)
+         borgvk_compile_stage(device, &pCreateInfos[i].pStages[s]);
+
       result = borgvk_create_pipeline(device, pAllocator, &pPipelines[i]);
       if (result != VK_SUCCESS) {
          pPipelines[i] = VK_NULL_HANDLE;
