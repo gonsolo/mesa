@@ -39,8 +39,17 @@ fn borg_isel(op: nir_op) -> Option<&'static str> {
         nir_op_fmul => Some("FMUL"),
         nir_op_ffma | nir_op_ffma_weak => Some("FMADD"),
         nir_op_fneg => Some("FNEG"),
+        // Integer ops (the Borg core now has these — enables standard addressing).
+        nir_op_iadd => Some("IADD"),
+        nir_op_ishl => Some("ISHL"),
+        nir_op_ishr | nir_op_ushr => Some("ISHR"),
+        nir_op_imul => Some("IMUL"),
+        nir_op_i2f16 | nir_op_i2f32 | nir_op_u2f16 | nir_op_u2f32 => Some("I2F"),
+        nir_op_f2i16 | nir_op_f2i32 | nir_op_f2u16 | nir_op_f2u32 => Some("F2I"),
         // Moves / vector (de)construction become register copies, no ISA op.
         nir_op_mov | nir_op_vec2 | nir_op_vec3 | nir_op_vec4 => Some("mov"),
+        // Integer↔int bit-size conversions are no-ops at 16-bit (copy).
+        nir_op_i2i16 | nir_op_i2i32 | nir_op_u2u16 | nir_op_u2u32 => Some("mov"),
         _ => None,
     }
 }

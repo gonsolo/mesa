@@ -62,14 +62,14 @@ borgvk_compile_stage(struct borgvk_device *device,
       return;
    }
 
-   /* SSA + system values (gl_VertexIndex → load_vertex_id). We deliberately do
-    * NOT run nir_lower_explicit_io on the UBO: the Borg ISA is FP-only (no
-    * integer ops), so byte-offset address arithmetic is impossible. Instead the
-    * backend maps the UBO struct members to FIXED uniform registers (MVP) and
-    * the gl_VertexIndex-indexed arrays (position/attr) to per-vertex attribute
-    * inputs — matching the firmware's DMA model (as the Python compiler does). */
+   /* SSA + system values (gl_VertexIndex → load_vertex_id), then lower the UBO
+    * deref I/O to load_ubo with byte offsets. The Borg core now has integer ops
+    * (iadd/ishl), so the offset address arithmetic is selectable — this is the
+    * standard Mesa addressing path, unblocked by the new integer ALU. */
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
    NIR_PASS(_, nir, nir_lower_system_values);
+   NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
+            borgvk_spirv_options.ubo_addr_format);
 
    /* Lower/optimize toward the Borg ISA: scalarize, then fold and lower ALU ops
     * (fsub→fadd, fdiv→fmul·frcp via lower_fdiv, fdot→fmul+ffma, constant folding)
