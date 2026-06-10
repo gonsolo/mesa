@@ -15,6 +15,16 @@
 #![allow(non_upper_case_globals)]
 
 use compiler::bindings::*;
+use compiler::nir::AsDef;
+use std::env;
+
+/// One selected Borg instruction in virtual-register form (pre-register-alloc).
+/// `dst`/`srcs` are NIR SSA indices used directly as virtual registers.
+struct BorgInstr {
+    mnem: &'static str,
+    dst: u32,
+    srcs: Vec<u32>,
+}
 
 /// Self-test: confirms the Rust crate is linked and callable across the FFI.
 #[no_mangle]
@@ -94,6 +104,34 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
     );
     if !todo.is_empty() {
         eprintln!("borgc:   needs lowering/selection: {}", todo.join(", "));
+    }
+
+    // Instruction selection: emit Borg ops for the selectable ALU instructions,
+    // in virtual-register (NIR SSA index) form. Register allocation + .borg blob
+    // emission are the next step; this proves selection produces real Borg code.
+    let mut prog: Vec<BorgInstr> = Vec::new();
+    if !entry.is_null() {
+        for block in (*entry).iter_blocks() {
+            for instr in block.iter_instr_list() {
+                if let Some(alu) = instr.as_alu() {
+                    if let Some(mnem) = borg_isel(alu.op) {
+                        let srcs = alu
+                            .srcs_as_slice()
+                            .iter()
+                            .map(|s| s.src.as_def().index)
+                            .collect();
+                        prog.push(BorgInstr { mnem, dst: alu.def.index, srcs });
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("borgc: selected {} Borg instruction(s) (virtual regs)", prog.len());
+    if env::var("BORGC_DUMP_ISA").is_ok() {
+        for i in &prog {
+            let s: Vec<String> = i.srcs.iter().map(|v| format!("v{v}")).collect();
+            eprintln!("borgc:   {} v{}, {}", i.mnem, i.dst, s.join(", "));
+        }
     }
     total
 }
