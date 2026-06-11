@@ -318,13 +318,38 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
                     if let Some(mnem) = deriv {
                         let src = intr.srcs_as_slice()[0].as_def().index;
                         let n = intr.def.num_components as usize;
-                        let comps: Vec<(u32, u8)> = (0..n)
+                        let raw: Vec<u32> = (0..n)
                             .map(|c| {
                                 let (sd, sc) = resolve_vm(&vec_map, src, c as u8);
                                 let v = next_vreg;
                                 next_vreg += 1;
                                 prog.push(BorgInstr { mnem, dst: v, srcs: vec![sd], swz: vec![sc] });
-                                (v, 0u8)
+                                v
+                            })
+                            .collect();
+                        // FP16-underflow rescale: at fb 128×128 frag_pos derivatives
+                        // are ~0.03/px, so |cross(ddx,ddy)|² lands BELOW the FP16
+                        // minimum normal (6.1e-5) and Fp16Rsq returns +Inf (the
+                        // "white cube" bug).  Scale the DDX components by 32 — cross
+                        // is bilinear and normalize() is scale-invariant, so the
+                        // result is exact; DDY is left untouched.  The constant
+                        // lives in u31, the firmware-owned uniform slot (the Borg
+                        // DMA/sequencer never write it; the firmware stages 32.0 on
+                        // both pages before each render).
+                        let comps: Vec<(u32, u8)> = raw
+                            .into_iter()
+                            .map(|v| {
+                                if mnem == "DDX" {
+                                    let s = next_vreg;
+                                    next_vreg += 1;
+                                    ubo.insert(s, Ubo::Uniform(31));
+                                    let vs = next_vreg;
+                                    next_vreg += 1;
+                                    prog.push(BorgInstr { mnem: "FMUL", dst: vs, srcs: vec![v, s], swz: vec![0, 0] });
+                                    (vs, 0u8)
+                                } else {
+                                    (v, 0u8)
+                                }
                             })
                             .collect();
                         vec_map.insert(intr.def.index, comps);
