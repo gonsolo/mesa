@@ -34,7 +34,12 @@
 #define UBO_MIN_FLOATS   (UBO_ATTR_FLOAT0 + UBO_NUM_VERTS * 4) /* 304 = 1216 B */
 
 #define GEOM_FRAMES      24                      /* startup frames shipping the mesh */
-#define TEX_FRAMES       (BORGVK_TEX_DIM * 2)    /* then a bounded texture-upload window */
+/* Texture-upload window, in host submits (each cycles one more of the 64 rows).
+ * The firmware drops bytes during its ~300 ms render, so a row sent only during
+ * render gaps is lost that cycle; with the firmware's greedy texture drain, 2
+ * cycles reached 54/64 distinct rows (measured).  6 cycles over-provisions so the
+ * stragglers — different ones each cycle as render/send timing drifts — all land. */
+#define TEX_FRAMES       (BORGVK_TEX_DIM * 6)    /* then switch to per-frame MVP */
 
 /* Locate the bound descriptor set (binding 0 = UBO, binding 1 = texture). */
 static struct borgvk_descriptor_set *
@@ -149,6 +154,16 @@ borgvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
 
    static unsigned submit_no = 0;
    static int tex_row = 0;
+
+   if (getenv("BORGVK_DEBUG") && submit_no == 0) {
+      fprintf(stderr,
+              "[borgvk] submit#0: nfloats=%u (need %u) can_geom=%d | "
+              "tex=%p map=%p %ux%u can_tex=%d\n",
+              nfloats, (unsigned)UBO_MIN_FLOATS, can_geom,
+              (void *)tex, tex && tex->mem ? tex->mem->map : NULL,
+              tex ? tex->vk.extent.width : 0,
+              tex ? tex->vk.extent.height : 0, can_tex);
+   }
 
    /* Startup is a one-time sequence: ship the mesh, then a bounded window of
     * texture rows (cycling so the whole texture lands). After that, send the MVP
