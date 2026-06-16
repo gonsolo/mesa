@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #define BORGVK_SERIAL_DEFAULT "/dev/ttyUSB0"
@@ -221,4 +222,43 @@ borgvk_serial_send_mvp(const float mvp[16])
     * so a blocking app's back-to-back submits would otherwise stream gaplessly
     * and freeze the cube (it locks onto the first packet and never re-syncs). */
    borgvk_serial_write_paced(fd, pkt, sizeof(pkt));
+
+   /* Steady frame pacing (BORGVK_FRAME_MS): hold each host frame to a fixed
+    * wall-clock period.  cube.c spins by a CONSTANT angle per frame, so emitting
+    * MVPs at a steady rate at/below the FPGA's sustained render rate makes the
+    * displayed motion advance by exactly one angle step per shown frame —
+    * removing the judder from subsampling ~60 host fps down to ~15 with a
+    * variable stride.  Because re-rendering the same MVP yields an identical
+    * image, the FPGA's per-frame time variance no longer affects the motion.
+    * Drift-free: the deadline advances by a fixed period, not from "now".
+    * Unset = no throttle (legacy free-run behaviour). */
+   const char *ms_env = getenv("BORGVK_FRAME_MS");
+   if (ms_env && ms_env[0]) {
+      long period_ns = atol(ms_env) * 1000000L;
+      if (period_ns > 0) {
+         static struct timespec next;
+         static int armed;
+         struct timespec now;
+         clock_gettime(CLOCK_MONOTONIC, &now);
+         if (armed) {
+            long wait_ns = (next.tv_sec - now.tv_sec) * 1000000000L +
+                           (next.tv_nsec - now.tv_nsec);
+            if (wait_ns > 0) {
+               struct timespec ts = { wait_ns / 1000000000L,
+                                      wait_ns % 1000000000L };
+               nanosleep(&ts, NULL);
+            } else {
+               next = now;   /* fell behind (slow frame): resync, don't bank debt */
+            }
+         } else {
+            next = now;
+            armed = 1;
+         }
+         next.tv_nsec += period_ns;
+         while (next.tv_nsec >= 1000000000L) {
+            next.tv_nsec -= 1000000000L;
+            next.tv_sec++;
+         }
+      }
+   }
 }
