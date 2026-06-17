@@ -243,6 +243,9 @@ borgvk_get_properties(struct vk_properties *p)
       .lineWidthRange = { 1.0f, 1.0f },
       .pointSizeGranularity = 0.0f,
       .lineWidthGranularity = 0.0f,
+      .optimalBufferCopyOffsetAlignment = 1,
+      .optimalBufferCopyRowPitchAlignment = 1,
+      .nonCoherentAtomSize = 1,
 
       /* Vulkan 1.2 driver identification */
       .driverID = VK_DRIVER_ID_MESA_DOZEN,  /* placeholder until a Borg ID exists */
