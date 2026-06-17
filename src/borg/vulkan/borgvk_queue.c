@@ -14,17 +14,21 @@
  *       float attr[12*3][4];      // bytes 640..1215 (static UVs)
  *   binding 1 (combined image sampler) = the texture (RGBA8 → 0xAF rows)
  *
- * The firmware drains one packet per frame, so we time-multiplex: ship the mesh
- * on the first frames, then per-frame MVPs interleaved with texture rows (the
- * texture progressively, reliably fills in while the cube animates). The GPU
- * renders with hardware vertex transform + perspective divide.
+ * Startup: geometry + texture are burst-uploaded once on the first submit, then
+ * every subsequent submit ships only the MVP.  A sentinel file in /tmp records
+ * that the FPGA already holds the mesh+texture so subsequent runs in the same
+ * power cycle skip the upload entirely (~0 s startup instead of ~2 s).
+ * Set BORGVK_FORCE_UPLOAD=1 to ignore the sentinel and re-upload unconditionally.
  */
 #include "borgvk_private.h"
 
 #include "vk_command_buffer.h"
 #include "vk_cmd_queue.h"
 
+#include <fcntl.h>
+#include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 /* cube.c uniform-buffer layout (floats). */
 #define UBO_MVP_FLOATS   16
@@ -32,14 +36,6 @@
 #define UBO_POS_FLOAT0   UBO_MVP_FLOATS      /* position[36][4] */
 #define UBO_ATTR_FLOAT0  (UBO_MVP_FLOATS + UBO_NUM_VERTS * 4)  /* attr[36][4] */
 #define UBO_MIN_FLOATS   (UBO_ATTR_FLOAT0 + UBO_NUM_VERTS * 4) /* 304 = 1216 B */
-
-#define GEOM_FRAMES      24                      /* startup frames shipping the mesh */
-/* Texture-upload window, in host submits (each cycles one more of the 64 rows).
- * The firmware drops bytes during its ~300 ms render, so a row sent only during
- * render gaps is lost that cycle; with the firmware's greedy texture drain, 2
- * cycles reached 54/64 distinct rows (measured).  6 cycles over-provisions so the
- * stragglers — different ones each cycle as render/send timing drifts — all land. */
-#define TEX_FRAMES       (BORGVK_TEX_DIM * 6)    /* then switch to per-frame MVP */
 
 /* Locate the bound descriptor set (binding 0 = UBO, binding 1 = texture). */
 static struct borgvk_descriptor_set *
@@ -131,6 +127,39 @@ send_texture_row(struct borgvk_image *tex, int dy)
    borgvk_serial_send_tex_row(dy, row);
 }
 
+/* Sentinel path: /tmp/borgvk_<devbasename>_setup — presence means the FPGA
+ * already holds the current session's geometry+texture in PSRAM. */
+static void
+sentinel_path(char *buf, size_t n)
+{
+   const char *dev = getenv("BORGVK_SERIAL");
+   if (!dev || !dev[0])
+      dev = "/dev/ttyUSB0";
+   const char *base = strrchr(dev, '/');
+   base = base ? base + 1 : dev;
+   snprintf(buf, n, "/tmp/borgvk_%s_setup", base);
+}
+
+static bool
+setup_already_done(void)
+{
+   if (getenv("BORGVK_FORCE_UPLOAD"))
+      return false;
+   char path[256];
+   sentinel_path(path, sizeof(path));
+   return access(path, F_OK) == 0;
+}
+
+static void
+mark_setup_done(void)
+{
+   char path[256];
+   sentinel_path(path, sizeof(path));
+   int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+   if (fd >= 0)
+      close(fd);
+}
+
 VkResult
 borgvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
 {
@@ -152,32 +181,32 @@ borgvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
    bool can_tex  = tex && tex->mem && tex->mem->map &&
                    tex->vk.extent.width && tex->vk.extent.height;
 
-   static unsigned submit_no = 0;
-   static int tex_row = 0;
+   static bool g_setup_done = false;
 
-   if (getenv("BORGVK_DEBUG") && submit_no == 0) {
-      fprintf(stderr,
-              "[borgvk] submit#0: nfloats=%u (need %u) can_geom=%d | "
-              "tex=%p map=%p %ux%u can_tex=%d\n",
-              nfloats, (unsigned)UBO_MIN_FLOATS, can_geom,
-              (void *)tex, tex && tex->mem ? tex->mem->map : NULL,
-              tex ? tex->vk.extent.width : 0,
-              tex ? tex->vk.extent.height : 0, can_tex);
+   if (!g_setup_done) {
+      if (setup_already_done()) {
+         /* Texture/geometry already in FPGA PSRAM from a prior run this
+          * power cycle — skip straight to MVP. */
+         mesa_logi("borgvk: skipping upload (sentinel present); "
+                   "set BORGVK_FORCE_UPLOAD=1 to re-upload");
+         g_setup_done = true;
+      } else if (can_geom && can_tex) {
+         /* Burst: send geometry once, then all texture rows back-to-back.
+          * borgvk_serial_write_paced already inserts tcdrain+3ms between
+          * packets so the firmware can sync on inter-packet idle gaps. */
+         mesa_logi("borgvk: uploading geometry + texture burst...");
+         send_geometry(ubo);
+         for (int row = 0; row < BORGVK_TEX_DIM; row++)
+            send_texture_row(tex, row);
+         mark_setup_done();
+         mesa_logi("borgvk: upload complete");
+         g_setup_done = true;
+      }
+      /* else: UBO/tex not mapped yet — wait for a submit where they are. */
    }
 
-   /* Startup is a one-time sequence: ship the mesh, then a bounded window of
-    * texture rows (cycling so the whole texture lands). After that, send the MVP
-    * every frame so the animation is smooth — the texture is static, so there is
-    * no reason to keep interleaving it (doing so stutters the spin). */
-   if (can_geom && submit_no < GEOM_FRAMES) {
-      send_geometry(ubo);
-   } else if (can_tex && submit_no < GEOM_FRAMES + TEX_FRAMES) {
-      send_texture_row(tex, tex_row);
-      tex_row = (tex_row + 1) % BORGVK_TEX_DIM;
-   } else {
-      borgvk_serial_send_mvp(ubo);   /* mvp = the first 16 floats */
-   }
-   submit_no++;
+   if (g_setup_done)
+      borgvk_serial_send_mvp(ubo);
 
    return VK_SUCCESS;
 }
