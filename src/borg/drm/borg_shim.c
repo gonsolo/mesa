@@ -34,6 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 /* ---- Sentinel (skip upload if FPGA already has the data) -------------- */
@@ -133,6 +134,16 @@ send_texture(const uint8_t *pixels, uint32_t sw, uint32_t sh)
 
 /* ---- drm-shim ioctl handlers ------------------------------------------ */
 
+/* drm_shim_bo_init() allocates virtual address space in shim_device.mem_fd
+ * but does NOT set bo->map.  We mmap the memfd ourselves so SETUP/SUBMIT can
+ * read the BO contents directly.  driver_bo_free unmaps on GEM_CLOSE. */
+static void
+borg_bo_free(struct shim_bo *bo)
+{
+   if (bo->map && bo->map != MAP_FAILED)
+      munmap(bo->map, bo->size);
+}
+
 static int
 borg_ioctl_gem_create(int fd, unsigned long req, void *arg)
 {
@@ -145,6 +156,15 @@ borg_ioctl_gem_create(int fd, unsigned long req, void *arg)
 
    int ret = drm_shim_bo_init(bo, size);
    if (ret) { free(bo); return ret; }
+
+   /* Map the backing store so SETUP/SUBMIT can read CPU-written data. */
+   bo->map = mmap(NULL, size, PROT_READ | PROT_WRITE,
+                  MAP_SHARED, shim_device.mem_fd, (off_t)bo->mem_addr);
+   if (bo->map == MAP_FAILED) {
+      bo->map = NULL;
+      drm_shim_bo_put(bo);
+      return -ENOMEM;
+   }
 
    c->handle = drm_shim_bo_get_handle(shim_fd, bo);
    drm_shim_bo_put(bo);
@@ -225,6 +245,7 @@ drm_shim_driver_init(void)
    shim_device.driver_name        = "borg";
    shim_device.driver_ioctls      = driver_ioctls;
    shim_device.driver_ioctl_count = ARRAY_SIZE(driver_ioctls);
+   shim_device.driver_bo_free     = borg_bo_free;
    shim_device.version_major      = 1;
    shim_device.version_minor      = 0;
    shim_device.version_patchlevel = 0;
