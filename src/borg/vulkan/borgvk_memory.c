@@ -16,7 +16,12 @@
 
 #include "util/u_math.h"
 
+#include "drm-uapi/borg_drm.h"
+
 #include <stdlib.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <xf86drm.h>
 
 /* ---- Device memory ---------------------------------------------------- */
 
@@ -34,10 +39,38 @@ borgvk_AllocateMemory(VkDevice _device,
    if (!mem)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   mem->map = malloc(MAX2(pAllocateInfo->allocationSize, 1));
-   if (!mem->map) {
-      vk_device_memory_destroy(&device->vk, pAllocator, &mem->vk);
-      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+   size_t alloc_size = MAX2(pAllocateInfo->allocationSize, 1);
+   mem->size = alloc_size;
+   mem->gem_handle = 0;
+
+   if (device->drm_fd >= 0) {
+      struct drm_borg_gem_create create = { .size = (__u64)alloc_size };
+      if (drmIoctl(device->drm_fd, DRM_IOCTL_BORG_GEM_CREATE, &create) < 0) {
+         vk_device_memory_destroy(&device->vk, pAllocator, &mem->vk);
+         return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      }
+      struct drm_borg_gem_mmap mmap_arg = { .handle = create.handle };
+      if (drmIoctl(device->drm_fd, DRM_IOCTL_BORG_GEM_MMAP, &mmap_arg) < 0) {
+         struct drm_gem_close cl = { .handle = create.handle };
+         drmIoctl(device->drm_fd, DRM_IOCTL_GEM_CLOSE, &cl);
+         vk_device_memory_destroy(&device->vk, pAllocator, &mem->vk);
+         return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      }
+      mem->map = mmap(NULL, alloc_size, PROT_READ | PROT_WRITE,
+                      MAP_SHARED, device->drm_fd, (off_t)mmap_arg.offset);
+      if (mem->map == MAP_FAILED) {
+         struct drm_gem_close cl = { .handle = create.handle };
+         drmIoctl(device->drm_fd, DRM_IOCTL_GEM_CLOSE, &cl);
+         vk_device_memory_destroy(&device->vk, pAllocator, &mem->vk);
+         return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+      }
+      mem->gem_handle = create.handle;
+   } else {
+      mem->map = malloc(alloc_size);
+      if (!mem->map) {
+         vk_device_memory_destroy(&device->vk, pAllocator, &mem->vk);
+         return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+      }
    }
 
    *pMem = borgvk_device_memory_to_handle(mem);
@@ -54,7 +87,13 @@ borgvk_FreeMemory(VkDevice _device, VkDeviceMemory _mem,
    if (!mem)
       return;
 
-   free(mem->map);
+   if (mem->gem_handle != 0) {
+      munmap(mem->map, mem->size);
+      struct drm_gem_close cl = { .handle = mem->gem_handle };
+      drmIoctl(device->drm_fd, DRM_IOCTL_GEM_CLOSE, &cl);
+   } else {
+      free(mem->map);
+   }
    vk_device_memory_destroy(&device->vk, pAllocator, &mem->vk);
 }
 

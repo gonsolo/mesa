@@ -25,10 +25,13 @@
 #include "vk_command_buffer.h"
 #include "vk_cmd_queue.h"
 
+#include "drm-uapi/borg_drm.h"
+
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <xf86drm.h>
 
 /* cube.c uniform-buffer layout (floats). */
 #define UBO_MVP_FLOATS   16
@@ -163,6 +166,9 @@ mark_setup_done(void)
 VkResult
 borgvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
 {
+   struct borgvk_device *device =
+      container_of(vk_queue->base.device, struct borgvk_device, vk);
+
    struct borgvk_descriptor_set *set = find_set(submit);
    if (!set)
       return VK_SUCCESS;
@@ -183,30 +189,53 @@ borgvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
 
    static bool g_setup_done = false;
 
-   if (!g_setup_done) {
-      if (setup_already_done()) {
-         /* Texture/geometry already in FPGA PSRAM from a prior run this
-          * power cycle — skip straight to MVP. */
-         mesa_logi("borgvk: skipping upload (sentinel present); "
-                   "set BORGVK_FORCE_UPLOAD=1 to re-upload");
-         g_setup_done = true;
-      } else if (can_geom && can_tex) {
-         /* Burst: send geometry once, then all texture rows back-to-back.
-          * borgvk_serial_write_paced already inserts tcdrain+3ms between
-          * packets so the firmware can sync on inter-packet idle gaps. */
-         mesa_logi("borgvk: uploading geometry + texture burst...");
-         send_geometry(ubo);
-         for (int row = 0; row < BORGVK_TEX_DIM; row++)
-            send_texture_row(tex, row);
-         mark_setup_done();
-         mesa_logi("borgvk: upload complete");
-         g_setup_done = true;
-      }
-      /* else: UBO/tex not mapped yet — wait for a submit where they are. */
-   }
+   if (device->drm_fd >= 0) {
+      /* DRM path: delegate geometry/texture upload and per-frame MVP to the
+       * shim (or kernel driver) via ioctls.  The shim manages the sentinel
+       * and serial transport; we just pass the GEM handles. */
+      bool has_gem = ubuf->mem->gem_handle != 0 &&
+                     tex && tex->mem && tex->mem->gem_handle != 0;
 
-   if (g_setup_done)
-      borgvk_serial_send_mvp(ubo);
+      if (!g_setup_done && has_gem) {
+         struct drm_borg_setup s = {
+            .ubo_handle = ubuf->mem->gem_handle,
+            .tex_handle = tex->mem->gem_handle,
+            .tex_offset = (__u64)tex->offset,
+            .tex_width  = tex->vk.extent.width,
+            .tex_height = tex->vk.extent.height,
+         };
+         if (drmIoctl(device->drm_fd, DRM_IOCTL_BORG_SETUP, &s) == 0)
+            g_setup_done = true;
+         else
+            mesa_logw("borgvk: DRM_IOCTL_BORG_SETUP failed");
+      }
+
+      if (g_setup_done) {
+         struct drm_borg_submit sub = { .ubo_handle = ubuf->mem->gem_handle };
+         drmIoctl(device->drm_fd, DRM_IOCTL_BORG_SUBMIT, &sub);
+      }
+   } else {
+      /* Serial fallback: no DRM device (shim not loaded).  Run the legacy
+       * direct-serial path exactly as before. */
+      if (!g_setup_done) {
+         if (setup_already_done()) {
+            mesa_logi("borgvk: skipping upload (sentinel present); "
+                      "set BORGVK_FORCE_UPLOAD=1 to re-upload");
+            g_setup_done = true;
+         } else if (can_geom && can_tex) {
+            mesa_logi("borgvk: uploading geometry + texture burst...");
+            send_geometry(ubo);
+            for (int row = 0; row < BORGVK_TEX_DIM; row++)
+               send_texture_row(tex, row);
+            mark_setup_done();
+            mesa_logi("borgvk: upload complete");
+            g_setup_done = true;
+         }
+      }
+
+      if (g_setup_done)
+         borgvk_serial_send_mvp(ubo);
+   }
 
    return VK_SUCCESS;
 }
