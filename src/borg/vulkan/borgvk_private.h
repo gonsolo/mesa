@@ -53,6 +53,11 @@ struct borgvk_physical_device {
     * immediate-success sync type (borgvk_sync_type) backs fences/semaphores. */
    const struct vk_sync_type *sync_types[2];
 
+   /* DRM device fd opened during enumeration.  -1 when no borg DRM device is
+    * found (drm-shim not loaded or no kernel driver).  In that case the driver
+    * falls back to direct malloc + serial (legacy path). */
+   int drm_fd;
+
 #ifdef BORGVK_USE_WSI_PLATFORM
    struct wsi_device wsi_device;
 #endif
@@ -75,6 +80,9 @@ struct borgvk_device {
    /* Single graphics/compute/transfer queue. cube.c and vulkaninfo both use one
     * queue from family 0; multi-queue support can come later. */
    struct vk_queue queue;
+
+   /* Non-owning copy of physical_device->drm_fd.  -1 → malloc+serial fallback. */
+   int drm_fd;
 };
 
 extern const struct vk_command_buffer_ops borgvk_cmd_buffer_ops;
@@ -122,13 +130,13 @@ VK_DEFINE_HANDLE_CASTS(borgvk_physical_device, vk.base, VkPhysicalDevice,
 VK_DEFINE_HANDLE_CASTS(borgvk_device, vk.base, VkDevice,
                        VK_OBJECT_TYPE_DEVICE)
 
-/* All "device" memory is plain host RAM. We malloc the backing bytes and hand
- * the pointer straight back from vkMapMemory; at submit time (Phase 3) the
- * driver reads the bound uniform buffer's bytes here and ships the MVP over
- * serial. */
+/* Device memory: backed by a GEM BO (drm_fd >= 0) or plain malloc.
+ * In both cases `map` is a CPU-writable pointer to the allocation. */
 struct borgvk_device_memory {
    struct vk_device_memory vk;
-   void *map;   /* malloc'd backing store, mem->vk.size bytes */
+   void    *map;         /* mmap(drm_fd, gem_offset) or malloc'd              */
+   size_t   size;        /* allocation size for munmap                         */
+   uint32_t gem_handle;  /* 0 = malloc path (no DRM)                          */
 };
 
 struct borgvk_buffer {

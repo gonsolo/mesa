@@ -2,10 +2,10 @@
  * Copyright © 2026 Borg GPU project
  * SPDX-License-Identifier: MIT
  *
- * Instance + physical-device bring-up for borgvk. Phase 1 goal: a single fake
- * "Borg (ULX3S)" physical device that `vulkaninfo` can enumerate. There is no
- * DRM device — the real GPU is the FPGA reached over serial — so device
- * enumeration unconditionally creates one physical device.
+ * Instance + physical-device bring-up for borgvk.  When libborg_drm_shim.so is
+ * preloaded, enumerate_devices finds the "borg" DRM device and opens it; all
+ * GEM and submit ioctls go through that fd.  Without the shim (drm_fd == -1),
+ * the driver falls back to malloc + direct serial (legacy path).
  */
 #include "borgvk_private.h"
 
@@ -16,8 +16,12 @@
 #include "vk_common_entrypoints.h"
 
 #include "util/log.h"
+#include "drm-uapi/borg_drm.h"
 
+#include <fcntl.h>
 #include <stdio.h>
+#include <string.h>
+#include <xf86drm.h>
 
 #define BORGVK_API_VERSION VK_API_VERSION_1_3
 
@@ -258,13 +262,15 @@ borgvk_get_properties(struct vk_properties *p)
 }
 
 static VkResult
-create_physical_device(struct borgvk_instance *instance)
+create_physical_device(struct borgvk_instance *instance, int drm_fd)
 {
    struct borgvk_physical_device *device =
       vk_zalloc(&instance->vk.alloc, sizeof(*device), 8,
                 VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
    if (!device)
       return vk_error(instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   device->drm_fd = drm_fd;
 
    struct vk_physical_device_dispatch_table dispatch_table;
    vk_physical_device_dispatch_table_from_entrypoints(
@@ -317,21 +323,54 @@ create_physical_device(struct borgvk_instance *instance)
    return VK_SUCCESS;
 }
 
+/* Try to open a /dev/dri/renderD* node whose DRM driver name is "borg".
+ * Returns an open fd, or -1 if no such device is found. */
+static int
+find_borg_drm_device(void)
+{
+   for (int i = 128; i < 192; i++) {
+      char path[64];
+      snprintf(path, sizeof(path), "/dev/dri/renderD%d", i);
+      int fd = open(path, O_RDWR | O_CLOEXEC);
+      if (fd < 0)
+         continue;
+      drmVersionPtr ver = drmGetVersion(fd);
+      if (ver) {
+         int match = ver->name && strcmp(ver->name, "borg") == 0;
+         drmFreeVersion(ver);
+         if (match)
+            return fd;
+      }
+      close(fd);
+   }
+   return -1;
+}
+
 static VkResult
 enumerate_devices(struct vk_instance *vk_instance)
 {
    struct borgvk_instance *instance =
       container_of(vk_instance, struct borgvk_instance, vk);
 
-   return create_physical_device(instance);
+   int drm_fd = find_borg_drm_device();
+   if (drm_fd >= 0)
+      mesa_logi("borgvk: found borg DRM device (fd %d)", drm_fd);
+   else
+      mesa_logi("borgvk: no borg DRM device; using malloc+serial fallback");
+
+   return create_physical_device(instance, drm_fd);
 }
 
 static void
 destroy_physical_device(struct vk_physical_device *pdev)
 {
+   struct borgvk_physical_device *pdevice =
+      container_of(pdev, struct borgvk_physical_device, vk);
 #ifdef BORGVK_USE_WSI_PLATFORM
-   borgvk_wsi_finish(container_of(pdev, struct borgvk_physical_device, vk));
+   borgvk_wsi_finish(pdevice);
 #endif
+   if (pdevice->drm_fd >= 0)
+      close(pdevice->drm_fd);
    vk_physical_device_finish(pdev);
    vk_free(&pdev->instance->alloc, pdev);
 }
@@ -444,6 +483,9 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
       vk_free2(&physical_device->vk.instance->alloc, pAllocator, device);
       return vk_error(physical_device, result);
    }
+
+   /* Non-owning copy — lifetime is managed by the physical device. */
+   device->drm_fd = physical_device->drm_fd;
 
    /* On every vkQueueSubmit, read the MVP from the bound uniform buffer and
     * ship it to the FPGA over serial. This is the driver's whole render path. */

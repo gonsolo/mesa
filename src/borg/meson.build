@@ -3,3 +3,6 @@
 
 subdir('compiler')
 subdir('vulkan')
+if with_tools.contains('drm-shim')
+  subdir('drm')
+endif

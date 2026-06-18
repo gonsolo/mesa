@@ -30,6 +30,7 @@ libborgvk_files = files(
 
 borgvk_deps = [
   dep_dl,
+  dep_libdrm,
   idep_borgc,
   idep_nir,
   idep_vulkan_util,
