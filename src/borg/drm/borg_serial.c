@@ -21,7 +21,11 @@
 #define BORG_MARKER_MVP     0xAD
 #define BORG_MARKER_GEOM    0xAE
 #define BORG_MARKER_TEX     0xAF
+#define BORG_MARKER_SHADER  0xB0
 #define BORG_TEX_PKT_LEN    (1 + 1 + BORG_TEX_DIM * 6 + 1)
+/* Shader upload: marker, stage, len(2B LE), blob padded to BORG_SHADER_MAX,
+ * checksum. Fixed length (matches borgvk_serial.c BORGVK_SHADER_PKT_LEN). */
+#define BORG_SHADER_PKT_LEN (1 + 1 + 2 + BORG_SHADER_MAX + 1)
 
 static int g_serial_fd = -1;  /* -1 = not tried, -2 = failed */
 
@@ -163,6 +167,33 @@ borg_serial_send_tex_row(int y, const float *rgb)
    for (int i = 1; i < BORG_TEX_PKT_LEN - 1; i++) csum ^= pkt[i];
    pkt[BORG_TEX_PKT_LEN - 1] = csum;
    borg_serial_write_paced(fd, pkt, sizeof(pkt));
+}
+
+void
+borg_serial_send_shader(uint8_t stage, const uint8_t *blob, uint32_t len)
+{
+   int fd = borg_serial_open();
+   if (fd < 0) return;
+   if (!blob || len == 0 || len > BORG_SHADER_MAX) {
+      fprintf(stderr, "borg-shim: refusing to send shader (stage %u, len %u)\n",
+              stage, len);
+      return;
+   }
+
+   uint8_t pkt[BORG_SHADER_PKT_LEN];
+   memset(pkt, 0, sizeof(pkt));
+   pkt[0] = BORG_MARKER_SHADER;
+   pkt[1] = stage;
+   pkt[2] = (uint8_t)(len & 0xff);
+   pkt[3] = (uint8_t)(len >> 8);
+   memcpy(&pkt[4], blob, len);
+
+   uint8_t csum = 0;
+   for (int i = 1; i < BORG_SHADER_PKT_LEN - 1; i++) csum ^= pkt[i];
+   pkt[BORG_SHADER_PKT_LEN - 1] = csum;
+   borg_serial_write_paced(fd, pkt, sizeof(pkt));
+   fprintf(stderr, "borg-shim: uploaded %s shader (%u bytes)\n",
+           stage == 0 ? "vertex" : "fragment", len);
 }
 
 void

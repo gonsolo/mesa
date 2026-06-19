@@ -18,9 +18,13 @@
 
 #include <stdint.h>
 
-/* Implemented in Rust: src/borg/compiler/lib.rs. */
+/* Implemented in Rust: src/borg/compiler/lib.rs. borgc_compile_nir compiles the
+ * shader to a .borg blob: it writes up to buf_cap bytes into out_buf and sets
+ * *out_len to the true blob size (so *out_len > buf_cap signals an undersized
+ * buffer); the return value is the instruction count. */
 uint32_t borgc_selftest(void);
-uint32_t borgc_compile_nir(struct nir_shader *nir);
+uint32_t borgc_compile_nir(struct nir_shader *nir, uint8_t *out_buf,
+                           uint32_t buf_cap, uint32_t *out_len);
 
 void
 borgvk_compiler_selftest(void)
@@ -108,6 +112,32 @@ borgvk_compile_stage(struct borgvk_device *device,
    if (getenv("BORGC_DUMP_NIR"))
       nir_print_shader(nir, stderr);
 
-   borgc_compile_nir(nir);   /* Rust: inspects/lowers the shader */
+   /* Map the Vulkan stage to a firmware shader slot. Only the vertex and
+    * fragment stages are app-derived; anything else (e.g. compute) has no Borg
+    * slot, so compile for diagnostics but don't capture a blob. */
+   int slot = -1;
+   switch (stage_info->stage) {
+   case VK_SHADER_STAGE_VERTEX_BIT:   slot = BORGVK_STAGE_VERT; break;
+   case VK_SHADER_STAGE_FRAGMENT_BIT: slot = BORGVK_STAGE_FRAG; break;
+   default: break;
+   }
+
+   if (slot >= 0) {
+      struct borgvk_shader_blob *b = &device->shader_blob[slot];
+      uint32_t len = 0;
+      borgc_compile_nir(nir, b->data, BORGVK_SHADER_BLOB_MAX, &len);
+      if (len > 0 && len <= BORGVK_SHADER_BLOB_MAX) {
+         b->len = len;
+         mesa_logi("borgvk: captured %s shader blob (%u bytes) for upload",
+                   slot == BORGVK_STAGE_VERT ? "vertex" : "fragment", len);
+      } else {
+         b->len = 0;
+         mesa_logw("borgvk: %s shader blob not captured (size %u, max %u)",
+                   slot == BORGVK_STAGE_VERT ? "vertex" : "fragment",
+                   len, BORGVK_SHADER_BLOB_MAX);
+      }
+   } else {
+      borgc_compile_nir(nir, NULL, 0, NULL);   /* diagnostics only */
+   }
    ralloc_free(nir);
 }

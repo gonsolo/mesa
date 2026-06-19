@@ -163,6 +163,28 @@ mark_setup_done(void)
       close(fd);
 }
 
+/* Ship the borgc-compiled shader blobs (captured at pipeline creation) to the
+ * firmware once, as part of setup. DRM path → inline ioctl (the shim/kernel owns
+ * the serial port); serial fallback → direct send. The firmware stages each blob
+ * into PSRAM in place of its baked borgc_vert/frag_shader[] array. */
+static void
+upload_shaders(struct borgvk_device *device)
+{
+   for (int st = 0; st < BORGVK_SHADER_STAGE_COUNT; st++) {
+      struct borgvk_shader_blob *b = &device->shader_blob[st];
+      if (b->len == 0)
+         continue;   /* stage not compiled (app didn't bind it) */
+      if (device->drm_fd >= 0) {
+         struct drm_borg_shader s = { .stage = (uint32_t)st, .len = b->len };
+         memcpy(s.data, b->data, b->len);
+         if (drmIoctl(device->drm_fd, DRM_IOCTL_BORG_SHADER, &s) != 0)
+            mesa_logw("borgvk: DRM_IOCTL_BORG_SHADER failed (stage %d)", st);
+      } else {
+         borgvk_serial_send_shader((uint8_t)st, b->data, b->len);
+      }
+   }
+}
+
 VkResult
 borgvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
 {
@@ -197,6 +219,7 @@ borgvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
                      tex && tex->mem && tex->mem->gem_handle != 0;
 
       if (!g_setup_done && has_gem) {
+         upload_shaders(device);   /* borgc-compiled shaders, before geom/tex */
          struct drm_borg_setup s = {
             .ubo_handle = ubuf->mem->gem_handle,
             .tex_handle = tex->mem->gem_handle,
@@ -223,7 +246,8 @@ borgvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
                       "set BORGVK_FORCE_UPLOAD=1 to re-upload");
             g_setup_done = true;
          } else if (can_geom && can_tex) {
-            mesa_logi("borgvk: uploading geometry + texture burst...");
+            mesa_logi("borgvk: uploading shaders + geometry + texture burst...");
+            upload_shaders(device);   /* borgc-compiled shaders, before geom/tex */
             send_geometry(ubo);
             for (int row = 0; row < BORGVK_TEX_DIM; row++)
                send_texture_row(tex, row);

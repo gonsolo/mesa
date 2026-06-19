@@ -43,6 +43,12 @@
 #define DRM_BORG_GEM_MMAP     0x01
 #define DRM_BORG_SETUP        0x02   /* one-time mesh+texture upload        */
 #define DRM_BORG_SUBMIT       0x03   /* per-frame MVP send                  */
+#define DRM_BORG_SHADER       0x04   /* upload a borgc-compiled shader blob */
+
+/* Max .borg blob the shader-upload path carries (must match the Vulkan side's
+ * BORGVK_SHADER_BLOB_MAX and the firmware RX shader packet). cube.frag = 255 B
+ * today; 512 leaves headroom. */
+#define BORG_SHADER_MAX       512u
 
 /* Allocate a GEM buffer object backed by anonymous memory. */
 struct drm_borg_gem_create {
@@ -76,6 +82,15 @@ struct drm_borg_submit {
    uint32_t pad;
 };
 
+/* Upload a borgc-compiled shader blob to the firmware. `stage` selects the slot
+ * (0 = vertex, 1 = fragment); `len` bytes of `data` are the .borg blob. The blob
+ * is carried inline so the shim/kernel needs no BO for it. */
+struct drm_borg_shader {
+   uint32_t stage;
+   uint32_t len;
+   uint8_t  data[BORG_SHADER_MAX];
+};
+
 #define DRM_IOCTL_BORG_GEM_CREATE \
    DRM_IOWR(DRM_COMMAND_BASE + DRM_BORG_GEM_CREATE, struct drm_borg_gem_create)
 #define DRM_IOCTL_BORG_GEM_MMAP \
@@ -84,5 +99,7 @@ struct drm_borg_submit {
    DRM_IOW (DRM_COMMAND_BASE + DRM_BORG_SETUP,       struct drm_borg_setup)
 #define DRM_IOCTL_BORG_SUBMIT \
    DRM_IOW (DRM_COMMAND_BASE + DRM_BORG_SUBMIT,      struct drm_borg_submit)
+#define DRM_IOCTL_BORG_SHADER \
+   DRM_IOW (DRM_COMMAND_BASE + DRM_BORG_SHADER,      struct drm_borg_shader)
 
 #endif /* BORG_DRM_H */

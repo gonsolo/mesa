@@ -119,14 +119,26 @@ fn borg_isel(op: nir_op) -> Option<&'static str> {
     }
 }
 
-/// Receive the app's shader as NIR and report Borg-ISA instruction-selection
-/// coverage: how many instructions map directly today vs. still need lowering or
-/// new selection rules (printed by op name). Returns the instruction count.
+/// Compile the app's shader (NIR) to a Borg-ISA `.borg` blob and return it to the
+/// caller. The blob (firmware `spirb_parse` format) is written into `out_buf` (up
+/// to `buf_cap` bytes); `*out_len` is set to the blob's true size so the caller can
+/// detect an undersized buffer (`*out_len > buf_cap` ⇒ nothing copied). Any of
+/// `out_buf`/`out_len` may be null to skip blob return (diagnostics-only, as before).
+/// Returns the instruction count (0 on null/empty shader).
 ///
 /// # Safety
 /// `nir` must be a valid `nir_shader` pointer from the Mesa runtime (or null).
+/// `out_buf` must point to at least `buf_cap` writable bytes (or be null).
 #[no_mangle]
-pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
+pub unsafe extern "C" fn borgc_compile_nir(
+    nir: *mut nir_shader,
+    out_buf: *mut u8,
+    buf_cap: u32,
+    out_len: *mut u32,
+) -> u32 {
+    if !out_len.is_null() {
+        *out_len = 0;
+    }
     if nir.is_null() {
         return 0;
     }
@@ -871,6 +883,15 @@ pub unsafe extern "C" fn borgc_compile_nir(nir: *mut nir_shader) -> u32 {
             Ok(()) => eprintln!("borgc: wrote {path}"),
             Err(e) => eprintln!("borgc: failed to write {path}: {e}"),
         }
+    }
+    // Return the blob to the C caller (borgvk_pipeline.c stores it per stage and
+    // ships it to the firmware over serial). out_len always reports the true size;
+    // copy only if it fits so the caller can grow its buffer on mismatch.
+    if !out_len.is_null() {
+        *out_len = blob.len() as u32;
+    }
+    if !out_buf.is_null() && (blob.len() as u32) <= buf_cap {
+        std::ptr::copy_nonoverlapping(blob.as_ptr(), out_buf, blob.len());
     }
     total
 }
