@@ -193,6 +193,20 @@ borgvk_GetPhysicalDeviceImageFormatProperties2(
    return VK_SUCCESS;
 }
 
+VKAPI_ATTR void VKAPI_CALL
+borgvk_GetPhysicalDeviceSparseImageFormatProperties2(
+   VkPhysicalDevice physicalDevice,
+   const VkPhysicalDeviceSparseImageFormatInfo2 *pFormatInfo,
+   uint32_t *pPropertyCount,
+   VkSparseImageFormatProperties2 *pProperties)
+{
+   /* Borg has no sparse-residency support, so no format supports sparse images.
+    * Report zero properties.  Without this entrypoint the Mesa runtime's common
+    * v1 shim (vk_common_GetPhysicalDeviceSparseImageFormatProperties) calls a
+    * NULL dispatch slot and segfaults. */
+   *pPropertyCount = 0;
+}
+
 static void
 borgvk_get_properties(struct vk_properties *p)
 {
