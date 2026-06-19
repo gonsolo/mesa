@@ -70,6 +70,22 @@ void borgvk_wsi_finish(struct borgvk_physical_device *physical_device);
 
 extern const struct vk_sync_type borgvk_sync_type;
 
+/* Compiled Borg-ISA shader blobs (borgc output). Captured per stage at pipeline
+ * creation and shipped to the firmware over serial (0xB0) at submit-setup, where
+ * they replace the firmware's baked borgc_vert/frag_shader[] arrays. Only the
+ * vertex and fragment stages come from the app; the rasterize stage stays baked
+ * (it is a fixed-function Borg shader, not derived from the app). */
+#define BORGVK_SHADER_BLOB_MAX 512   /* frag = 255 B today; headroom */
+enum borgvk_shader_stage {
+   BORGVK_STAGE_VERT = 0,
+   BORGVK_STAGE_FRAG = 1,
+   BORGVK_SHADER_STAGE_COUNT,
+};
+struct borgvk_shader_blob {
+   uint8_t  data[BORGVK_SHADER_BLOB_MAX];
+   uint32_t len;   /* 0 = not compiled (or didn't fit) */
+};
+
 struct borgvk_device {
    struct vk_device vk;
 
@@ -83,6 +99,10 @@ struct borgvk_device {
 
    /* Non-owning copy of physical_device->drm_fd.  -1 → malloc+serial fallback. */
    int drm_fd;
+
+   /* borgc-compiled shader blobs captured at pipeline creation, uploaded to the
+    * firmware over serial (0xB0) on the first submit. */
+   struct borgvk_shader_blob shader_blob[BORGVK_SHADER_STAGE_COUNT];
 };
 
 extern const struct vk_command_buffer_ops borgvk_cmd_buffer_ops;
@@ -111,6 +131,12 @@ void borgvk_serial_send_geom(const float *verts, int nverts,
 /* Ship one texture row (Phase B): `rgb` is BORGVK_TEX_DIM texels of 3 floats
  * (R,G,B in [0,1]); converted to RGB-FP16 and framed as a 0xAF packet. */
 void borgvk_serial_send_tex_row(int y, const float *rgb);
+
+/* Ship a borgc-compiled Borg-ISA shader blob to the firmware (0xB0 packet):
+ * `stage` selects the firmware shader slot (0 = vertex, 1 = fragment), `blob` is
+ * the .borg bytes (spirb_parse format). The firmware stages it to PSRAM in place
+ * of its baked borgc_vert/frag_shader[] array before the next render. */
+void borgvk_serial_send_shader(uint8_t stage, const uint8_t *blob, uint32_t len);
 
 /* Queue submit hook (borgvk_queue.c): reads the MVP from the submitted command
  * buffer's bound descriptor set and ships it over serial. Wired into

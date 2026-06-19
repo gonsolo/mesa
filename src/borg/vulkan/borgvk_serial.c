@@ -202,6 +202,42 @@ borgvk_serial_send_tex_row(int y, const float *rgb)
    borgvk_serial_write_paced(fd, pkt, sizeof(pkt));
 }
 
+#define BORGVK_MARKER_SHADER  0xB0
+/* 0xB0 shader upload: marker, stage(1B), len(2B LE), blob padded to
+ * BORGVK_SHADER_BLOB_MAX, checksum. Fixed length so the firmware drain reads a
+ * constant byte count (like 0xAE/0xAF); `len` says how many blob bytes are valid.
+ * 517 B total < the firmware's 0xAF drain buffer, so no RX buffer growth needed. */
+#define BORGVK_SHADER_PKT_LEN (1 + 1 + 2 + BORGVK_SHADER_BLOB_MAX + 1)
+
+void
+borgvk_serial_send_shader(uint8_t stage, const uint8_t *blob, uint32_t len)
+{
+   int fd = borgvk_serial_open();
+   if (fd < 0)
+      return;
+   if (!blob || len == 0 || len > BORGVK_SHADER_BLOB_MAX) {
+      mesa_logw("borgvk: refusing to send shader (stage %u, len %u)", stage, len);
+      return;
+   }
+
+   uint8_t pkt[BORGVK_SHADER_PKT_LEN];
+   memset(pkt, 0, sizeof(pkt));
+   pkt[0] = BORGVK_MARKER_SHADER;
+   pkt[1] = stage;
+   pkt[2] = (uint8_t)(len & 0xff);
+   pkt[3] = (uint8_t)(len >> 8);
+   memcpy(&pkt[4], blob, len);   /* remainder stays zero-padded */
+
+   uint8_t csum = 0;
+   for (int i = 1; i < BORGVK_SHADER_PKT_LEN - 1; i++)
+      csum ^= pkt[i];
+   pkt[BORGVK_SHADER_PKT_LEN - 1] = csum;
+
+   borgvk_serial_write_paced(fd, pkt, sizeof(pkt));
+   mesa_logi("borgvk: uploaded %s shader (%u bytes) to firmware",
+             stage == 0 ? "vertex" : "fragment", len);
+}
+
 void
 borgvk_serial_send_mvp(const float mvp[16])
 {

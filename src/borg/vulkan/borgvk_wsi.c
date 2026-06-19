@@ -82,16 +82,6 @@ make_headless_surface(VkInstance _instance,
    return VK_SUCCESS;
 }
 
-#ifdef VK_USE_PLATFORM_WAYLAND_KHR
-VKAPI_ATTR VkResult VKAPI_CALL
-borgvk_CreateWaylandSurfaceKHR(VkInstance instance,
-                                const VkWaylandSurfaceCreateInfoKHR *pCreateInfo,
-                                const VkAllocationCallbacks *pAllocator,
-                                VkSurfaceKHR *pSurface)
-{
-   return make_headless_surface(instance, pAllocator, pSurface);
-}
-#endif
 
 #ifdef VK_USE_PLATFORM_XLIB_KHR
 VKAPI_ATTR VkResult VKAPI_CALL

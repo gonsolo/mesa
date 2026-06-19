@@ -227,11 +227,25 @@ borg_ioctl_submit(int fd, unsigned long req, void *arg)
    return 0;
 }
 
+/* Upload a borgc-compiled shader blob (carried inline in the ioctl) to the
+ * firmware over serial. When a real kernel driver exists, it would stage the
+ * blob into GPU memory instead. */
+static int
+borg_ioctl_shader(int fd, unsigned long req, void *arg)
+{
+   struct drm_borg_shader *s = arg;
+   if (s->len == 0 || s->len > BORG_SHADER_MAX)
+      return -EINVAL;
+   borg_serial_send_shader((uint8_t)s->stage, s->data, s->len);
+   return 0;
+}
+
 static int (*driver_ioctls[])(int, unsigned long, void *) = {
    [DRM_BORG_GEM_CREATE] = borg_ioctl_gem_create,
    [DRM_BORG_GEM_MMAP]   = borg_ioctl_gem_mmap,
    [DRM_BORG_SETUP]      = borg_ioctl_setup,
    [DRM_BORG_SUBMIT]     = borg_ioctl_submit,
+   [DRM_BORG_SHADER]     = borg_ioctl_shader,
 };
 
 /* ---- drm_shim_driver_init — called once on library load --------------- */
