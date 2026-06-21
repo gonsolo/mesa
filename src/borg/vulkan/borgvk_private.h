@@ -172,10 +172,10 @@ struct borgvk_descriptor_set {
    struct borgvk_image *images[BORGVK_MAX_BINDINGS];
 };
 
-/* No shader compilation yet (the cube's shaders are pre-baked in firmware), so
- * a pipeline is an opaque placeholder. */
 struct borgvk_pipeline {
    struct vk_object_base base;
+   VkCullModeFlags cull_mode;      /* from VkPipelineRasterizationStateCreateInfo */
+   VkFrontFace     front_face;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_descriptor_set_layout, vk.base,

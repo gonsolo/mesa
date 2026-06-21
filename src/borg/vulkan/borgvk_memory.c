@@ -303,6 +303,44 @@ borgvk_DestroyImageView(VkDevice _device, VkImageView _view,
    vk_image_view_destroy(&device->vk, pAllocator, view);
 }
 
+/* Image copy for readback: both images are linear host-RAM; just memcpy the
+ * region. The CTS path (Image::copyToLinearImage) copies mip 0, layer 0 of the
+ * colour attachment into a linear staging image of the same size/format. */
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
+                    VkImage srcImage, VkImageLayout srcImageLayout,
+                    VkImage dstImage, VkImageLayout dstImageLayout,
+                    uint32_t regionCount, const VkImageCopy *pRegions)
+{
+   VK_FROM_HANDLE(borgvk_image, src, srcImage);
+   VK_FROM_HANDLE(borgvk_image, dst, dstImage);
+
+   if (!src || !dst || !src->mem || !dst->mem ||
+       !src->mem->map || !dst->mem->map)
+      return;
+
+   uint32_t bs = vk_format_get_blocksize(src->vk.format);
+
+   for (uint32_t r = 0; r < regionCount; r++) {
+      const VkImageCopy *reg = &pRegions[r];
+      uint32_t w = reg->extent.width;
+      uint32_t h = reg->extent.height;
+
+      const uint8_t *s = (const uint8_t *)src->mem->map + src->offset
+                       + (VkDeviceSize)reg->srcOffset.y * src->vk.extent.width * bs
+                       + (VkDeviceSize)reg->srcOffset.x * bs;
+      uint8_t *d = (uint8_t *)dst->mem->map + dst->offset
+                 + (VkDeviceSize)reg->dstOffset.y * dst->vk.extent.width * bs
+                 + (VkDeviceSize)reg->dstOffset.x * bs;
+
+      for (uint32_t row = 0; row < h; row++) {
+         memcpy(d + (size_t)row * w * bs,
+                s + (size_t)row * src->vk.extent.width * bs,
+                (size_t)w * bs);
+      }
+   }
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 borgvk_CreateSampler(VkDevice _device, const VkSamplerCreateInfo *pCreateInfo,
                      const VkAllocationCallbacks *pAllocator,

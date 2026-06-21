@@ -43,6 +43,7 @@ libvulkan_borg = shared_library(
   [libborgvk_files, borgvk_entrypoints],
   include_directories : [
     inc_include, inc_src, inc_util,
+    include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h
   ],
   dependencies : borgvk_deps,
   link_args : [vulkan_icd_link_args, ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections],
