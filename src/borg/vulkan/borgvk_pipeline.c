@@ -49,6 +49,13 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
          pPipelines[i] = VK_NULL_HANDLE;
          break;
       }
+
+      /* Capture rasterization state so the sim submit path can apply it. */
+      VK_FROM_HANDLE(borgvk_pipeline, pl, pPipelines[i]);
+      const VkPipelineRasterizationStateCreateInfo *rs =
+         pCreateInfos[i].pRasterizationState;
+      pl->cull_mode  = rs ? rs->cullMode  : VK_CULL_MODE_NONE;
+      pl->front_face = rs ? rs->frontFace : VK_FRONT_FACE_COUNTER_CLOCKWISE;
    }
    for (; i < count; i++)
       pPipelines[i] = VK_NULL_HANDLE;

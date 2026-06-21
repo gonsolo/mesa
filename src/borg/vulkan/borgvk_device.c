@@ -243,6 +243,10 @@ borgvk_get_properties(struct vk_properties *p)
       .lineWidthRange = { 1.0f, 1.0f },
       .pointSizeGranularity = 0.0f,
       .lineWidthGranularity = 0.0f,
+      .subPixelPrecisionBits = 8,      /* Vulkan spec minimum is 4; 8 matches Mesa/LLVM */
+      .subTexelPrecisionBits = 8,
+      .mipmapPrecisionBits   = 8,
+      .subPixelInterpolationOffsetBits = 8,
 
       /* Vulkan 1.2 driver identification */
       .driverID = VK_DRIVER_ID_MESA_DOZEN,  /* placeholder until a Borg ID exists */
