@@ -138,6 +138,19 @@ void borgvk_serial_send_tex_row(int y, const float *rgb);
  * of its baked borgc_vert/frag_shader[] array before the next render. */
 void borgvk_serial_send_shader(uint8_t stage, const uint8_t *blob, uint32_t len);
 
+/* ---- Transport capture (serial ↔ sim unification) --------------------- *
+ * By default every send_* packet above is written to the serial port (paced).
+ * Wrapping a sequence between capture_begin/capture_end redirects the identical
+ * framed bytes into a growable in-memory buffer instead — exactly the byte
+ * stream borgvk would have put on the wire.  The BORGVK_SIM path captures one
+ * frame's packets this way and feeds them to `arcilator_sim --cts-uart`, so the
+ * simulator exercises the same protocol (incl. 0xB0 borgc shaders) as the FPGA,
+ * with no serial port involved.  Not re-entrant: one capture at a time. */
+void borgvk_transport_capture_begin(void);
+/* End capture: returns the malloc'd captured bytes (caller frees) and sets
+ * *out_len; restores serial mode.  Returns NULL with *out_len=0 if empty. */
+uint8_t *borgvk_transport_capture_end(size_t *out_len);
+
 /* Queue submit hook (borgvk_queue.c): reads the MVP from the submitted command
  * buffer's bound descriptor set and ships it over serial. Wired into
  * device->queue.driver_submit by CreateDevice. */

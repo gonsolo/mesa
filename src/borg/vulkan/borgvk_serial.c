@@ -22,6 +22,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <termios.h>
@@ -130,6 +131,63 @@ borgvk_serial_write_paced(int fd, const uint8_t *pkt, size_t len)
    usleep(3000);
 }
 
+/* ---- Transport sink: serial port (default) or capture buffer ---------- */
+static bool     borgvk_capture_active = false;
+static uint8_t *borgvk_capture_buf    = NULL;
+static size_t   borgvk_capture_len    = 0;
+static size_t   borgvk_capture_cap    = 0;
+
+/* Single emit chokepoint for every framed packet.  In capture mode the bytes
+ * are appended to the growable buffer (no serial port, no pacing — the sim
+ * injects them all at once); otherwise they are paced out to the serial fd. */
+static void
+borgvk_transport_emit(const uint8_t *pkt, size_t len)
+{
+   if (borgvk_capture_active) {
+      if (borgvk_capture_len + len > borgvk_capture_cap) {
+         size_t ncap = borgvk_capture_cap ? borgvk_capture_cap : 4096;
+         while (ncap < borgvk_capture_len + len)
+            ncap *= 2;
+         uint8_t *nbuf = realloc(borgvk_capture_buf, ncap);
+         if (!nbuf) {
+            mesa_logw("borgvk: transport capture realloc(%zu) failed", ncap);
+            return;
+         }
+         borgvk_capture_buf = nbuf;
+         borgvk_capture_cap = ncap;
+      }
+      memcpy(borgvk_capture_buf + borgvk_capture_len, pkt, len);
+      borgvk_capture_len += len;
+      return;
+   }
+
+   int fd = borgvk_serial_open();
+   if (fd < 0)
+      return;
+   borgvk_serial_write_paced(fd, pkt, len);
+}
+
+void
+borgvk_transport_capture_begin(void)
+{
+   borgvk_capture_len = 0;     /* reuse any existing allocation */
+   borgvk_capture_active = true;
+}
+
+uint8_t *
+borgvk_transport_capture_end(size_t *out_len)
+{
+   borgvk_capture_active = false;
+   uint8_t *buf = borgvk_capture_buf;
+   size_t   len = borgvk_capture_len;
+   borgvk_capture_buf = NULL;  /* transfer ownership to caller */
+   borgvk_capture_cap = 0;
+   borgvk_capture_len = 0;
+   if (out_len)
+      *out_len = len;
+   return buf;
+}
+
 /* Ship the app's real mesh: nverts unique model-space positions, ntris triangles
  * each indexing 3 of them, with per-triangle-vertex UVs.  Fixed-offset padded
  * regions keep the packet a constant length (see firmware RX_GEOM_*). */
@@ -137,9 +195,6 @@ void
 borgvk_serial_send_geom(const float *verts, int nverts,
                         const uint8_t *idx, const float *uv, int ntris)
 {
-   int fd = borgvk_serial_open();
-   if (fd < 0)
-      return;
    if (nverts < 1 || nverts > BORGVK_GEOM_MAX_VERTS ||
        ntris  < 1 || ntris  > BORGVK_GEOM_MAX_TRIS)
       return;
@@ -172,7 +227,7 @@ borgvk_serial_send_geom(const float *verts, int nverts,
       csum ^= pkt[i];
    pkt[BORGVK_GEOM_PKT_LEN - 1] = csum;
 
-   borgvk_serial_write_paced(fd, pkt, sizeof(pkt));
+   borgvk_transport_emit(pkt, sizeof(pkt));
 }
 
 #define BORGVK_MARKER_TEX  0xAF
@@ -182,10 +237,6 @@ borgvk_serial_send_geom(const float *verts, int nverts,
 void
 borgvk_serial_send_tex_row(int y, const float *rgb)
 {
-   int fd = borgvk_serial_open();
-   if (fd < 0)
-      return;
-
    uint8_t pkt[BORGVK_TEX_PKT_LEN];
    pkt[0] = BORGVK_MARKER_TEX;
    pkt[1] = (uint8_t)y;
@@ -199,7 +250,7 @@ borgvk_serial_send_tex_row(int y, const float *rgb)
       csum ^= pkt[i];
    pkt[BORGVK_TEX_PKT_LEN - 1] = csum;
 
-   borgvk_serial_write_paced(fd, pkt, sizeof(pkt));
+   borgvk_transport_emit(pkt, sizeof(pkt));
 }
 
 #define BORGVK_MARKER_SHADER  0xB0
@@ -212,9 +263,6 @@ borgvk_serial_send_tex_row(int y, const float *rgb)
 void
 borgvk_serial_send_shader(uint8_t stage, const uint8_t *blob, uint32_t len)
 {
-   int fd = borgvk_serial_open();
-   if (fd < 0)
-      return;
    if (!blob || len == 0 || len > BORGVK_SHADER_BLOB_MAX) {
       mesa_logw("borgvk: refusing to send shader (stage %u, len %u)", stage, len);
       return;
@@ -233,18 +281,15 @@ borgvk_serial_send_shader(uint8_t stage, const uint8_t *blob, uint32_t len)
       csum ^= pkt[i];
    pkt[BORGVK_SHADER_PKT_LEN - 1] = csum;
 
-   borgvk_serial_write_paced(fd, pkt, sizeof(pkt));
-   mesa_logi("borgvk: uploaded %s shader (%u bytes) to firmware",
+   borgvk_transport_emit(pkt, sizeof(pkt));
+   mesa_logi("borgvk: %s %s shader (%u bytes)",
+             borgvk_capture_active ? "captured" : "uploaded",
              stage == 0 ? "vertex" : "fragment", len);
 }
 
 void
 borgvk_serial_send_mvp(const float mvp[16])
 {
-   int fd = borgvk_serial_open();
-   if (fd < 0)
-      return;
-
    uint8_t pkt[66];
    pkt[0] = BORGVK_MARKER_MVP;
    memcpy(&pkt[1], mvp, 16 * sizeof(float));
@@ -257,7 +302,11 @@ borgvk_serial_send_mvp(const float mvp[16])
    /* Paced write: the firmware aligns to packets via the inter-packet IDLE GAP,
     * so a blocking app's back-to-back submits would otherwise stream gaplessly
     * and freeze the cube (it locks onto the first packet and never re-syncs). */
-   borgvk_serial_write_paced(fd, pkt, sizeof(pkt));
+   borgvk_transport_emit(pkt, sizeof(pkt));
+
+   /* Live-display frame pacing is meaningless when capturing for the sim. */
+   if (borgvk_capture_active)
+      return;
 
    /* Steady frame pacing (BORGVK_FRAME_MS): hold each host frame to a fixed
     * wall-clock period.  cube.c spins by a CONSTANT angle per frame, so emitting
