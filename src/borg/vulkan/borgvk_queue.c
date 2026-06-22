@@ -365,6 +365,27 @@ find_set(struct vk_queue_submit *submit)
    return NULL;
 }
 
+/* Locate the first render-pass colour attachment image (for sim readback). */
+static struct borgvk_image *
+find_color_attachment(struct vk_queue_submit *submit)
+{
+   for (uint32_t ci = 0; ci < submit->command_buffer_count; ci++) {
+      struct vk_command_buffer *cb = submit->command_buffers[ci];
+      list_for_each_entry(struct vk_cmd_queue_entry, e, &cb->cmd_queue.cmds, cmd_link) {
+         if (e->type != VK_CMD_BEGIN_RENDER_PASS)
+            continue;
+         const VkRenderPassBeginInfo *rp = e->u.begin_render_pass.render_pass_begin;
+         VK_FROM_HANDLE(vk_framebuffer, fb, rp->framebuffer);
+         if (fb && fb->attachment_count > 0) {
+            VK_FROM_HANDLE(vk_image_view, view, fb->attachments[0]);
+            if (view && view->image)
+               return container_of(view->image, struct borgvk_image, vk);
+         }
+      }
+   }
+   return NULL;
+}
+
 /* Dedup the 36 expanded positions to unique corners; build the indexed triangle
  * list + per-tri-vertex UVs, then ship the mesh. */
 static void
@@ -490,19 +511,194 @@ upload_shaders(struct borgvk_device *device)
    }
 }
 
+/* True when this submit is cube.c's UBO-driven frame (vs a CTS VBO draw). */
+static bool
+submit_is_cube(struct vk_queue_submit *submit)
+{
+   struct borgvk_descriptor_set *set = find_set(submit);
+   if (!set)
+      return false;
+   struct borgvk_buffer *ubuf = set->buffers[0];
+   if (!ubuf || !ubuf->mem || !ubuf->mem->map)
+      return false;
+   VkDeviceSize off = ubuf->offset + set->offsets[0];
+   if (off >= ubuf->vk.size)
+      return false;
+   uint32_t nfloats = (uint32_t)((ubuf->vk.size - off) / sizeof(float));
+   return nfloats >= UBO_MIN_FLOATS;
+}
+
+/* Sim path for cube.c: capture the EXACT serial byte stream borgvk would put on
+ * the wire (0xB0 borgc shaders + 0xAE geom + 0xAF texture + 0xAD MVP), feed it to
+ * `arcilator_sim --cts-uart`, and write the rendered pixels into the colour
+ * attachment.  Unlike the live serial path there is no once-only sentinel: every
+ * frame ships the full stream because the sim boots fresh per invocation.  This
+ * exercises the same borgc shaders + protocol as the FPGA, with no serial port. */
+static VkResult
+borgvk_submit_sim_cube(struct borgvk_device *device,
+                       struct vk_queue_submit *submit)
+{
+   const char *sim_bin = getenv("BORGVK_SIM");
+   const char *sim_fw  = getenv("BORGVK_SIM_FW");
+   if (!sim_bin || !sim_fw)
+      return VK_SUCCESS;
+
+   struct borgvk_descriptor_set *set = find_set(submit);
+   if (!set)
+      return VK_SUCCESS;
+   struct borgvk_buffer *ubuf = set->buffers[0];
+   if (!ubuf || !ubuf->mem || !ubuf->mem->map)
+      return VK_SUCCESS;
+   VkDeviceSize off = ubuf->offset + set->offsets[0];
+   if (off >= ubuf->vk.size)
+      return VK_SUCCESS;
+   const float *ubo = (const float *)((const char *)ubuf->mem->map + off);
+   uint32_t nfloats = (uint32_t)((ubuf->vk.size - off) / sizeof(float));
+   if (nfloats < UBO_MIN_FLOATS)
+      return VK_SUCCESS;
+   struct borgvk_image *tex = set->images[1];
+
+   struct borgvk_image *color_img = find_color_attachment(submit);
+   if (!color_img || !color_img->mem || !color_img->mem->map)
+      return VK_SUCCESS;
+   uint32_t width  = color_img->vk.extent.width;
+   uint32_t height = color_img->vk.extent.height;
+   if (width == 0 || height == 0)
+      return VK_SUCCESS;
+
+   /* The firmware renders at its fixed native size (128² fallback for the cube),
+    * which need not match the swapchain extent.  Render the sim at that size and
+    * nearest-upscale into the attachment.  Override with BORGVK_SIM_DIM. */
+   uint32_t sdim = 128;
+   const char *dim_env = getenv("BORGVK_SIM_DIM");
+   if (dim_env && dim_env[0]) {
+      int d = atoi(dim_env);
+      if (d > 0)
+         sdim = (uint32_t)d;
+   }
+
+   /* Capture one frame's full wire stream (shaders + geom + texture + MVP). */
+   borgvk_transport_capture_begin();
+   upload_shaders(device);
+   send_geometry(ubo);
+   if (tex && tex->mem && tex->mem->map &&
+       tex->vk.extent.width && tex->vk.extent.height)
+      for (int row = 0; row < BORGVK_TEX_DIM; row++)
+         send_texture_row(tex, row);
+   borgvk_serial_send_mvp(ubo);
+   size_t nbytes = 0;
+   uint8_t *bytes = borgvk_transport_capture_end(&nbytes);
+   if (!bytes || nbytes == 0) {
+      free(bytes);
+      return VK_SUCCESS;
+   }
+
+   /* Debug bisect: dump the captured wire stream and skip the sim fork.  Lets us
+    * verify borgvk produces the correct protocol bytes independent of arcilator.
+    *   BORGVK_SIM_DUMP=/path  → write one frame's stream there, then return. */
+   const char *dump = getenv("BORGVK_SIM_DUMP");
+   if (dump && dump[0]) {
+      int dfd = open(dump, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      if (dfd >= 0) {
+         for (size_t w = 0; w < nbytes; ) {
+            ssize_t n = write(dfd, bytes + w, nbytes - w);
+            if (n <= 0) break;
+            w += (size_t)n;
+         }
+         close(dfd);
+      }
+      mesa_logi("borgvk: dumped %zu-byte sim stream to %s (%ux%u)",
+                nbytes, dump, width, height);
+      free(bytes);
+      return VK_SUCCESS;
+   }
+
+   /* Hand the byte stream to arcilator_sim --cts-uart via a temp file. */
+   char uart_path[] = "/tmp/borgvk_uart_XXXXXX";
+   int ufd = mkstemp(uart_path);
+   if (ufd < 0) {
+      free(bytes);
+      return VK_SUCCESS;
+   }
+   for (size_t w = 0; w < nbytes; ) {
+      ssize_t n = write(ufd, bytes + w, nbytes - w);
+      if (n <= 0)
+         break;
+      w += (size_t)n;
+   }
+   close(ufd);
+   free(bytes);
+
+   char w_str[16], h_str[16];
+   snprintf(w_str, sizeof(w_str), "%u", sdim);
+   snprintf(h_str, sizeof(h_str), "%u", sdim);
+
+   int pfd[2];
+   if (pipe(pfd) < 0) {
+      unlink(uart_path);
+      return VK_SUCCESS;
+   }
+   pid_t pid = fork();
+   if (pid == 0) {
+      close(pfd[0]);
+      dup2(pfd[1], STDOUT_FILENO);
+      close(pfd[1]);
+      execlp(sim_bin, sim_bin, "--cts-uart", uart_path, sim_fw,
+             w_str, h_str, (char *)NULL);
+      _exit(127);
+   }
+   close(pfd[1]);
+
+   size_t expected = (size_t)sdim * sdim * 3;
+   uint8_t *rgb = malloc(expected);
+   size_t got = 0;
+   if (rgb) {
+      while (got < expected) {
+         ssize_t n = read(pfd[0], rgb + got, expected - got);
+         if (n <= 0)
+            break;
+         got += (size_t)n;
+      }
+   }
+   close(pfd[0]);
+   int wstatus = 0;
+   waitpid(pid, &wstatus, 0);
+   unlink(uart_path);
+
+   /* RGB888 sdim×sdim (sim stdout) → R8G8B8A8_UNORM attachment (width×height),
+    * nearest-neighbour upscale, opaque alpha. */
+   if (rgb && got == expected) {
+      uint8_t *dst = (uint8_t *)color_img->mem->map + color_img->offset;
+      for (uint32_t y = 0; y < height; y++) {
+         uint32_t sy = (uint32_t)((uint64_t)y * sdim / height);
+         for (uint32_t x = 0; x < width; x++) {
+            uint32_t sx = (uint32_t)((uint64_t)x * sdim / width);
+            const uint8_t *s = rgb + ((size_t)sy * sdim + sx) * 3;
+            uint8_t *d = dst + ((size_t)y * width + x) * 4;
+            d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
+         }
+      }
+   }
+   free(rgb);
+   return VK_SUCCESS;
+}
+
 VkResult
 borgvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
 {
    struct borgvk_device *device =
       container_of(vk_queue->base.device, struct borgvk_device, vk);
 
-   /* Sim draw path: if BORGVK_SIM is set, render via arcilator_sim and write
-    * pixels into the color attachment.  Handles both the draw submit and the
-    * readback (CmdCopyImage) submit, so the normal serial path is skipped.
-    * TODO(Phase 2): route the real protocol (incl. 0xB0 borgc shaders) into the
-    * sim instead of the geometry-only --cts-draw path. */
+   /* Sim path: if BORGVK_SIM is set, render via arcilator_sim and write pixels
+    * into the colour attachment instead of shipping to the FPGA.
+    *   - cube.c (UBO-driven): borgvk_submit_sim_cube captures the full serial
+    *     stream incl. 0xB0 borgc shaders and replays it via --cts-uart, so the
+    *     sim runs the exact protocol + real shaders as the FPGA.
+    *   - CTS draws (VBO-driven): borgvk_submit_sim_draw, the mailbox --cts-draw
+    *     path (carries per-vertex colour; still baked-shader for now). */
    if (getenv("BORGVK_SIM"))
-      return borgvk_submit_sim_draw(submit);
+      return submit_is_cube(submit) ? borgvk_submit_sim_cube(device, submit)
+                                    : borgvk_submit_sim_draw(submit);
 
    struct borgvk_descriptor_set *set = find_set(submit);
    if (!set)
