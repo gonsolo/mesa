@@ -10,6 +10,7 @@
 #include "borgvk_private.h"
 
 #include "vk_alloc.h"
+#include "vk_format.h"
 #include "vk_log.h"
 #include "vk_util.h"
 #include "vk_cmd_enqueue_entrypoints.h"
@@ -129,40 +130,178 @@ borgvk_GetPhysicalDeviceMemoryProperties2(
    }
 }
 
+static bool
+is_depth_stencil_format(VkFormat format)
+{
+   switch (format) {
+   case VK_FORMAT_D16_UNORM:
+   case VK_FORMAT_X8_D24_UNORM_PACK32:
+   case VK_FORMAT_D32_SFLOAT:
+   case VK_FORMAT_S8_UINT:
+   case VK_FORMAT_D16_UNORM_S8_UINT:
+   case VK_FORMAT_D24_UNORM_S8_UINT:
+   case VK_FORMAT_D32_SFLOAT_S8_UINT:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool
+is_ycbcr_format(VkFormat format)
+{
+   /* Multi-planar and 4:2:x packed formats require samplerYcbcrConversion
+    * (VK_KHR_sampler_ycbcr_conversion) which borgvk does not advertise.
+    * Report zero features for all of them. */
+   switch (format) {
+   case VK_FORMAT_G8B8G8R8_422_UNORM:
+   case VK_FORMAT_B8G8R8G8_422_UNORM:
+   case VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM:
+   case VK_FORMAT_G8_B8R8_2PLANE_420_UNORM:
+   case VK_FORMAT_G8_B8_R8_3PLANE_422_UNORM:
+   case VK_FORMAT_G8_B8R8_2PLANE_422_UNORM:
+   case VK_FORMAT_G8_B8_R8_3PLANE_444_UNORM:
+   case VK_FORMAT_G8_B8R8_2PLANE_444_UNORM:
+   case VK_FORMAT_R10X6_UNORM_PACK16:
+   case VK_FORMAT_R10X6G10X6_UNORM_2PACK16:
+   case VK_FORMAT_R10X6G10X6B10X6A10X6_UNORM_4PACK16:
+   case VK_FORMAT_G10X6B10X6G10X6R10X6_422_UNORM_4PACK16:
+   case VK_FORMAT_B10X6G10X6R10X6G10X6_422_UNORM_4PACK16:
+   case VK_FORMAT_G10X6_B10X6_R10X6_3PLANE_420_UNORM_3PACK16:
+   case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16:
+   case VK_FORMAT_G10X6_B10X6_R10X6_3PLANE_422_UNORM_3PACK16:
+   case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_422_UNORM_3PACK16:
+   case VK_FORMAT_G10X6_B10X6_R10X6_3PLANE_444_UNORM_3PACK16:
+   case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_444_UNORM_3PACK16:
+   case VK_FORMAT_R12X4_UNORM_PACK16:
+   case VK_FORMAT_R12X4G12X4_UNORM_2PACK16:
+   case VK_FORMAT_R12X4G12X4B12X4A12X4_UNORM_4PACK16:
+   case VK_FORMAT_G12X4B12X4G12X4R12X4_422_UNORM_4PACK16:
+   case VK_FORMAT_B12X4G12X4R12X4G12X4_422_UNORM_4PACK16:
+   case VK_FORMAT_G12X4_B12X4_R12X4_3PLANE_420_UNORM_3PACK16:
+   case VK_FORMAT_G12X4_B12X4R12X4_2PLANE_420_UNORM_3PACK16:
+   case VK_FORMAT_G12X4_B12X4_R12X4_3PLANE_422_UNORM_3PACK16:
+   case VK_FORMAT_G12X4_B12X4R12X4_2PLANE_422_UNORM_3PACK16:
+   case VK_FORMAT_G12X4_B12X4_R12X4_3PLANE_444_UNORM_3PACK16:
+   case VK_FORMAT_G12X4_B12X4R12X4_2PLANE_444_UNORM_3PACK16:
+   case VK_FORMAT_G16B16G16R16_422_UNORM:
+   case VK_FORMAT_B16G16R16G16_422_UNORM:
+   case VK_FORMAT_G16_B16_R16_3PLANE_420_UNORM:
+   case VK_FORMAT_G16_B16R16_2PLANE_420_UNORM:
+   case VK_FORMAT_G16_B16_R16_3PLANE_422_UNORM:
+   case VK_FORMAT_G16_B16R16_2PLANE_422_UNORM:
+   case VK_FORMAT_G16_B16_R16_3PLANE_444_UNORM:
+   case VK_FORMAT_G16_B16R16_2PLANE_444_UNORM:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool
+is_compressed_format(VkFormat format)
+{
+   /* BC and ASTC — zero features (not advertised in device features). */
+   return (format >= VK_FORMAT_BC1_RGB_UNORM_BLOCK &&
+           format <= VK_FORMAT_BC7_SRGB_BLOCK) ||
+          (format >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK &&
+           format <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK);
+}
+
+static bool
+is_etc2_format(VkFormat format)
+{
+   /* ETC2 and EAC — supported via textureCompressionETC2 = true. */
+   return (format >= VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK &&
+           format <= VK_FORMAT_EAC_R11G11_SNORM_BLOCK);
+}
+
+/* Compute optimal-tiling format features for a given VkFormat. */
+static VkFormatFeatureFlags
+borgvk_optimal_features(VkFormat format)
+{
+   if (format == VK_FORMAT_UNDEFINED || is_ycbcr_format(format) ||
+       is_compressed_format(format))
+      return 0;
+
+   /* ETC2/EAC: mandatory compressed texture formats. */
+   if (is_etc2_format(format)) {
+      return VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+             VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+             VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+             VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+             VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+   }
+
+   const VkFormatFeatureFlags common =
+      VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+      VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+      VK_FORMAT_FEATURE_BLIT_DST_BIT |
+      VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+      VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+
+   if (is_depth_stencil_format(format)) {
+      /* Depth/stencil formats: sampled + depth/stencil attachment only.
+       * No color attachment (CTS unsupported_image_usage.optimal checks this). */
+      return common | VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+   }
+
+   /* Color formats: full feature set, no depth/stencil.
+    * Storage image atomics mandated by spec for R32_UINT and R32_SINT. */
+   VkFormatFeatureFlags f =
+      common |
+      VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT |
+      VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+      VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT |
+      VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+   if (format == VK_FORMAT_R32_UINT || format == VK_FORMAT_R32_SINT)
+      f |= VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT;
+   return f;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 borgvk_GetPhysicalDeviceFormatProperties2(
    VkPhysicalDevice physicalDevice,
    VkFormat format,
    VkFormatProperties2 *pFormatProperties)
 {
-   /* borgvk doesn't render on the host — it forwards an MVP to the FPGA — so we
-    * don't actually consume these formats. Report a generous, uniform feature
-    * set so WSI can pick a swapchain format and apps (cube.c) pass their format
-    * capability checks (color/depth attachment, sampling, blit, transfer). */
-   const VkFormatFeatureFlags img =
-      VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
-      VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT |
-      VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
-      VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT |
-      VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT |
-      VK_FORMAT_FEATURE_BLIT_SRC_BIT |
-      VK_FORMAT_FEATURE_BLIT_DST_BIT |
-      VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
-      VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
-      VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-   const VkFormatFeatureFlags buf =
-      VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT |
-      VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT |
-      VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT;
+   const VkFormatFeatureFlags opt = borgvk_optimal_features(format);
+   /* Linear tiling: only transfer (staging/readback only; no rendering). */
+   const VkFormatFeatureFlags lin =
+      (opt != 0) ? (VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+                    VK_FORMAT_FEATURE_TRANSFER_DST_BIT) : 0;
+   /* Buffer features: for non-compressed non-depth color formats only.
+    * ETC2/EAC are sampled-only (no buffer/vertex support). */
+   VkFormatFeatureFlags buf = 0;
+   if (opt != 0 && !is_depth_stencil_format(format) && !is_etc2_format(format)) {
+      buf = VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT |
+            VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT |
+            VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT;
+      if (format == VK_FORMAT_R32_UINT || format == VK_FORMAT_R32_SINT)
+         buf |= VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_ATOMIC_BIT;
+   }
 
    pFormatProperties->formatProperties = (VkFormatProperties){
-      .linearTilingFeatures  = img,
-      .optimalTilingFeatures = img,
+      .linearTilingFeatures  = lin,
+      .optimalTilingFeatures = opt,
       .bufferFeatures        = buf,
    };
 
    vk_foreach_struct(ext, pFormatProperties->pNext) {
-      vk_debug_ignored_stype(ext->sType);
+      switch (ext->sType) {
+      case VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3: {
+         /* VkFormatProperties3 mirrors VkFormatProperties with 64-bit flags.
+          * CTS checks these are consistent with the core struct. */
+         VkFormatProperties3 *fp3 = (VkFormatProperties3 *)ext;
+         fp3->linearTilingFeatures  = lin;
+         fp3->optimalTilingFeatures = opt;
+         fp3->bufferFeatures        = buf;
+         break;
+      }
+      default:
+         vk_debug_ignored_stype(ext->sType);
+         break;
+      }
    }
 }
 
@@ -172,18 +311,84 @@ borgvk_GetPhysicalDeviceImageFormatProperties2(
    const VkPhysicalDeviceImageFormatInfo2 *pImageFormatInfo,
    VkImageFormatProperties2 *pImageFormatProperties)
 {
-   /* Permissive: every (format, type, tiling, usage) the app or WSI asks for is
-    * "supported" with generous limits. We never allocate device-real images. */
+   /* Derive supported usages from the format's reported features. */
+   VkFormatProperties2 fp2 = {VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2};
+   borgvk_GetPhysicalDeviceFormatProperties2(physicalDevice,
+                                             pImageFormatInfo->format, &fp2);
+   const VkFormatFeatureFlags feats =
+      (pImageFormatInfo->tiling == VK_IMAGE_TILING_LINEAR)
+      ? fp2.formatProperties.linearTilingFeatures
+      : fp2.formatProperties.optimalTilingFeatures;
+
+   /* Map requested usage flags to required format feature bits. */
+   const VkImageUsageFlags usage = pImageFormatInfo->usage;
+   VkFormatFeatureFlags required = 0;
+   if (usage & VK_IMAGE_USAGE_SAMPLED_BIT)
+      required |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+   if (usage & VK_IMAGE_USAGE_STORAGE_BIT)
+      required |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+   if (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
+      required |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+   if (usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
+      required |= VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+   if (usage & VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT)
+      required |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+   if (usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
+      required |= VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+   if (usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+      required |= VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+
+   /* Always zero the output so callers see clean data even on NOT_SUPPORTED.
+    * The v1 bridge (vk_common_GetPhysicalDeviceImageFormatProperties) zero-inits
+    * its VkImageFormatProperties2 on the stack; v1 and v2 must agree exactly,
+    * including on error paths. */
+   pImageFormatProperties->imageFormatProperties =
+      (VkImageFormatProperties){ 0 };
+
+   if ((feats & required) != required)
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
+   /* INPUT_ATTACHMENT requires color or depth-stencil attachment capability.
+    * Compressed formats (ETC2/EAC) are sampled-only — reject them here. */
+   if ((usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) &&
+       !(feats & (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                  VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)))
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
+   /* Mirror the CTS sampleCounts check (vktApiFeatureInfo.cpp ~line 5035):
+    * 4x is valid iff: 2D optimal + !CUBE_COMPATIBLE + format has COLOR or
+    * DEPTH_STENCIL attachment feature + format is not integer/scaled.
+    * Everything else (CUBE_COMPATIBLE, no attachment feature, linear, 1D/3D,
+    * integer/scaled) must return exactly VK_SAMPLE_COUNT_1_BIT. */
+   const bool cube_compatible =
+      (pImageFormatInfo->flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) != 0;
+   const bool has_attach_feature =
+      (feats & (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) != 0;
+   /* Integer/scaled check only applies to COLOR formats.  Depth/stencil formats
+    * (e.g. S8_UINT) use sampledImageStencilSampleCounts which includes 4x. */
+   const bool is_color_int_or_scaled =
+      !is_depth_stencil_format(pImageFormatInfo->format) &&
+      (vk_format_is_int(pImageFormatInfo->format) ||
+       vk_format_is_scaled(pImageFormatInfo->format));
+   const VkSampleCountFlags samples =
+      (pImageFormatInfo->type == VK_IMAGE_TYPE_2D &&
+       pImageFormatInfo->tiling == VK_IMAGE_TILING_OPTIMAL &&
+       !cube_compatible && has_attach_feature && !is_color_int_or_scaled)
+      ? (VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT)
+      : VK_SAMPLE_COUNT_1_BIT;
+
    const uint32_t max2d = 16384;
    pImageFormatProperties->imageFormatProperties = (VkImageFormatProperties){
       .maxExtent = {
-         .width  = pImageFormatInfo->type == VK_IMAGE_TYPE_1D ? max2d : max2d,
+         .width  = max2d,
          .height = pImageFormatInfo->type == VK_IMAGE_TYPE_1D ? 1 : max2d,
          .depth  = pImageFormatInfo->type == VK_IMAGE_TYPE_3D ? 2048 : 1,
       },
       .maxMipLevels   = 15,
-      .maxArrayLayers = 2048,
-      .sampleCounts   = VK_SAMPLE_COUNT_1_BIT,
+      /* Spec §12.5: 3D images must have maxArrayLayers = 1. */
+      .maxArrayLayers = pImageFormatInfo->type == VK_IMAGE_TYPE_3D ? 1 : 2048,
+      .sampleCounts   = samples,
       .maxResourceSize = (VkDeviceSize)1 << 31,
    };
 
@@ -240,6 +445,7 @@ borgvk_get_properties(struct vk_properties *p)
       .maxVertexOutputComponents = 64,
       .maxFragmentInputComponents = 64,
       .maxFragmentOutputAttachments = 4,
+      .maxFragmentCombinedOutputResources = 4,
       .maxColorAttachments = 4,
       .maxFramebufferWidth = 16384,
       .maxFramebufferHeight = 16384,
@@ -247,13 +453,67 @@ borgvk_get_properties(struct vk_properties *p)
       .maxViewports = 1,
       .maxViewportDimensions = { 16384, 16384 },
       .viewportBoundsRange = { -32768.0f, 32767.0f },
-      .framebufferColorSampleCounts = VK_SAMPLE_COUNT_1_BIT,
-      .framebufferDepthSampleCounts = VK_SAMPLE_COUNT_1_BIT,
-      .sampledImageColorSampleCounts = VK_SAMPLE_COUNT_1_BIT,
+
+      /* Per-stage and per-set descriptor limits (Vulkan spec table minimums). */
+      .maxPerStageDescriptorSamplers          = 16,
+      .maxPerStageDescriptorUniformBuffers    = 12,
+      .maxPerStageDescriptorStorageBuffers    = 4,
+      .maxPerStageDescriptorSampledImages     = 16,
+      .maxPerStageDescriptorStorageImages     = 4,
+      .maxPerStageDescriptorInputAttachments  = 4,
+      .maxDescriptorSetSamplers               = 96,
+      .maxDescriptorSetUniformBuffers         = 72,
+      .maxDescriptorSetUniformBuffersDynamic  = 8,
+      .maxDescriptorSetStorageBuffers         = 24,
+      .maxDescriptorSetStorageBuffersDynamic  = 4,
+      .maxDescriptorSetSampledImages          = 96,
+      .maxDescriptorSetStorageImages          = 24,
+      .maxDescriptorSetInputAttachments       = 4,
+
+      /* Compute limits (spec minimums). */
+      .maxComputeSharedMemorySize    = 16384,
+      .maxComputeWorkGroupCount      = {65535, 65535, 65535},
+      .maxComputeWorkGroupInvocations = 128,
+      .maxComputeWorkGroupSize       = {128, 128, 64},
+
+      /* Texel gather / LOD / offset. */
+      .maxSamplerLodBias   = 2.0f,
+      .minTexelOffset      = -8,
+      .maxTexelOffset      = 7,
+
+      /* Alignment requirements (must be >= 1 per spec). */
+      .minMemoryMapAlignment           = 64,
+      .minTexelBufferOffsetAlignment   = 64,
+      .minUniformBufferOffsetAlignment = 256,
+      .minStorageBufferOffsetAlignment = 256,
+      .nonCoherentAtomSize             = 64,
+
+      /* VK_EXT_texel_buffer_alignment (Vulkan 1.3): must be a power of two. */
+      .storageTexelBufferOffsetAlignmentBytes  = 256,
+      .uniformTexelBufferOffsetAlignmentBytes  = 256,
+      .storageTexelBufferOffsetSingleTexelAlignment  = VK_TRUE,
+      .uniformTexelBufferOffsetSingleTexelAlignment  = VK_TRUE,
+
+      /* Spec requires at least 1x and 4x sample support (bitmask >= 5). */
+      .framebufferColorSampleCounts =
+         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
+      .framebufferDepthSampleCounts =
+         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
+      .framebufferStencilSampleCounts =
+         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
+      .framebufferNoAttachmentsSampleCounts =
+         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
+      .sampledImageColorSampleCounts =
+         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
       .sampledImageIntegerSampleCounts = VK_SAMPLE_COUNT_1_BIT,
-      .sampledImageDepthSampleCounts = VK_SAMPLE_COUNT_1_BIT,
-      .sampledImageStencilSampleCounts = VK_SAMPLE_COUNT_1_BIT,
+      .sampledImageDepthSampleCounts =
+         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
+      .sampledImageStencilSampleCounts =
+         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
       .storageImageSampleCounts = VK_SAMPLE_COUNT_1_BIT,
+      .maxSampleMaskWords       = 1,
+      .discreteQueuePriorities  = 2,
+
       .maxSamplerAnisotropy = 1.0f,
       .maxDrawIndexedIndexValue = UINT32_MAX,
       .maxDrawIndirectCount = UINT32_MAX,
@@ -264,8 +524,25 @@ borgvk_get_properties(struct vk_properties *p)
       .optimalBufferCopyOffsetAlignment = 1,
       .optimalBufferCopyRowPitchAlignment = 1,
       .nonCoherentAtomSize = 1,
+      .subPixelPrecisionBits = 8,
+      .subTexelPrecisionBits = 8,
+      .mipmapPrecisionBits   = 8,
+      .subPixelInterpolationOffsetBits = 8,
 
-      /* Vulkan 1.2 driver identification */
+      /* Vulkan 1.1 properties. */
+      .maxMultiviewViewCount    = 6,
+      .maxMultiviewInstanceIndex = (1u << 27) - 1,
+      .maxPerSetDescriptors     = 1024,
+      .maxMemoryAllocationSize  = (VkDeviceSize)1 << 30,  /* 1 GB */
+
+      /* Vulkan 1.2 properties. */
+      .framebufferIntegerColorSampleCounts = VK_SAMPLE_COUNT_1_BIT,
+      .maxTimelineSemaphoreValueDifference = (uint64_t)INT64_MAX,
+
+      /* Vulkan 1.3 properties. */
+      .maxInlineUniformTotalSize = 256,
+
+      /* Vulkan 1.2 driver identification. */
       .driverID = VK_DRIVER_ID_MESA_DOZEN,  /* placeholder until a Borg ID exists */
       .conformanceVersion = { 1, 3, 0, 0 },
    };
@@ -294,7 +571,10 @@ create_physical_device(struct borgvk_instance *instance, int drm_fd)
       &dispatch_table, &wsi_physical_device_entrypoints, false);
 #endif
 
-   struct vk_features features = { 0 };
+   struct vk_features features = {
+      /* Vulkan 1.3 spec §43 mandates at least one compressed texture family. */
+      .textureCompressionETC2 = true,
+   };
    struct vk_properties properties;
    borgvk_get_properties(&properties);
 
@@ -507,6 +787,20 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    *pDevice = borgvk_device_to_handle(device);
    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_GetPhysicalDeviceSparseImageFormatProperties2(
+   VkPhysicalDevice physicalDevice,
+   const VkPhysicalDeviceSparseImageFormatInfo2 *pFormatInfo,
+   uint32_t *pPropertyCount,
+   VkSparseImageFormatProperties2 *pProperties)
+{
+   /* Borg has no sparse-residency support, so no format supports sparse images.
+    * Report zero properties.  Without this entrypoint the Mesa runtime's common
+    * v1 shim (vk_common_GetPhysicalDeviceSparseImageFormatProperties) calls a
+    * NULL dispatch slot and segfaults. */
+   *pPropertyCount = 0;
 }
 
 VKAPI_ATTR void VKAPI_CALL
