@@ -790,20 +790,6 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
 }
 
 VKAPI_ATTR void VKAPI_CALL
-borgvk_GetPhysicalDeviceSparseImageFormatProperties2(
-   VkPhysicalDevice physicalDevice,
-   const VkPhysicalDeviceSparseImageFormatInfo2 *pFormatInfo,
-   uint32_t *pPropertyCount,
-   VkSparseImageFormatProperties2 *pProperties)
-{
-   /* Borg has no sparse-residency support, so no format supports sparse images.
-    * Report zero properties.  Without this entrypoint the Mesa runtime's common
-    * v1 shim (vk_common_GetPhysicalDeviceSparseImageFormatProperties) calls a
-    * NULL dispatch slot and segfaults. */
-   *pPropertyCount = 0;
-}
-
-VKAPI_ATTR void VKAPI_CALL
 borgvk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 {
    VK_FROM_HANDLE(borgvk_device, device, _device);
