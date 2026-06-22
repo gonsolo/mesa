@@ -1,0 +1,15 @@
+[binaries]
+c = '/nix/store/v0dbf36mkxl9lzxp4rldsqn6ryl0svk9-riscv64-unknown-linux-gnu-gcc-wrapper-15.2.0/bin/riscv64-unknown-linux-gnu-gcc'
+cpp = '/nix/store/v0dbf36mkxl9lzxp4rldsqn6ryl0svk9-riscv64-unknown-linux-gnu-gcc-wrapper-15.2.0/bin/riscv64-unknown-linux-gnu-g++'
+ar = '/nix/store/kps1rby9w1dcj2spqnizxipgxrn9g0rc-riscv64-unknown-linux-gnu-binutils-wrapper-2.46/bin/riscv64-unknown-linux-gnu-ar'
+strip = '/nix/store/kps1rby9w1dcj2spqnizxipgxrn9g0rc-riscv64-unknown-linux-gnu-binutils-wrapper-2.46/bin/riscv64-unknown-linux-gnu-strip'
+pkg-config = '/nix/store/v7mjkia7ki79s5i24ldbzq1khalhgzk0-pkg-config-wrapper-0.29.2/bin/pkg-config'
+
+[built-in options]
+pkg_config_path = '/nix/store/32lj3h9m2mbnyixxcfpv2ys9rm5k91x2-libdrm-riscv64-unknown-linux-gnu-2.4.131-dev/lib/pkgconfig:/nix/store/fsy17sbzyas3rz96i4pwc8jd8vn7x3yc-expat-riscv64-unknown-linux-gnu-2.7.5-dev/lib/pkgconfig:/nix/store/02xpc4g9hr0xiknjb2g6w80m0g5l5is5-zlib-riscv64-unknown-linux-gnu-1.3.2-dev/lib/pkgconfig:/nix/store/f07yy638g1sas0ds9mqrra93jpi27ax7-zstd-riscv64-unknown-linux-gnu-1.5.7-dev/lib/pkgconfig'
+
+[host_machine]
+system = 'linux'
+cpu_family = 'riscv64'
+cpu = 'riscv64'
+endian = 'little'
