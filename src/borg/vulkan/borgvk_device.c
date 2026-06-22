@@ -266,10 +266,22 @@ borgvk_GetPhysicalDeviceFormatProperties2(
    VkFormatProperties2 *pFormatProperties)
 {
    const VkFormatFeatureFlags opt = borgvk_optimal_features(format);
-   /* Linear tiling: only transfer (staging/readback only; no rendering). */
-   const VkFormatFeatureFlags lin =
+   /* Linear tiling: transfer + sampling.  borgvk samples textures by reading the
+    * host-visible image memory directly over serial, so a LINEAR host-visible
+    * image is sampleable.  Advertising SAMPLED here lets cube.c upload its texture
+    * straight into a linear host-visible image (the path the shim reads) instead
+    * of falling back to a staging buffer + OPTIMAL image + vkCmdCopyBufferToImage,
+    * which borgvk does not execute (that fallback left the texture all-black).
+    * Only for color formats that the optimal path already samples. */
+   VkFormatFeatureFlags lin =
       (opt != 0) ? (VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
                     VK_FORMAT_FEATURE_TRANSFER_DST_BIT) : 0;
+   if ((opt & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) &&
+       !is_depth_stencil_format(format)) {
+      lin |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+      if (opt & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)
+         lin |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+   }
    /* Buffer features: for non-compressed non-depth color formats only.
     * ETC2/EAC are sampled-only (no buffer/vertex support). */
    VkFormatFeatureFlags buf = 0;
