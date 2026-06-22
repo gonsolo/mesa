@@ -116,7 +116,7 @@ void borgvk_serial_send_mvp(const float mvp[16]);
 /* Max mesh the firmware's fixed-length 0xAE geometry packet carries (must match
  * the firmware RX_GEOM_*). cube.c is 8 unique verts / 12 triangles. */
 #define BORGVK_GEOM_MAX_VERTS 16
-#define BORGVK_GEOM_MAX_TRIS  16
+#define BORGVK_GEOM_MAX_TRIS  12
 
 /* Ship the app's real mesh once (Phase B): nverts unique model-space positions
  * (xyz floats), ntris triangles each indexing 3 of them (idx, 3 per tri), with
