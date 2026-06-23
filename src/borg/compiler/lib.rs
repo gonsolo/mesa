@@ -40,7 +40,12 @@ enum Ubo {
     /// position[gl_VertexIndex] vec4. Component `c` → uniform u(c) (firmware
     /// pre-fetches the current vertex into u0..u2). Pre-loaded into a GPR.
     Pos,
-    /// attribute (texcoord) varying — firmware-handled; left pending for now.
+    /// Vertex attribute (texcoord). Component `c` → uniform u(6+c): the
+    /// sequencer DMA pre-loads the per-vertex descriptor words [x,y,z,r,g,b,u,v]
+    /// into uniform[0..7] before running the vertex shader, so u6=U and u7=V.
+    /// In practice, vertex shader `store_output(VAR0)` is DCE'd (the sequencer
+    /// snoops UV from the DMA stream directly, bypassing the vertex shader), so
+    /// Attr values are eliminated before encoding and this path is latent.
     Attr,
     /// A fragment uniform read directly at this physical index via funct3
     /// (inv_area, per-vertex varyings staged by the sequencer at u12..u30).
@@ -551,7 +556,7 @@ pub unsafe extern "C" fn borgc_compile_nir(
     }
     eprintln!(
         "borgc: I/O map — MVP {mvp_loads}→u8..u23, position {pos_loads}→u0..u2, \
-         attr {attr_loads}→varying; gl_Position=v{}→r0..r3 ({varying_outs} varying out)",
+         attr {attr_loads}→u6/u7 (DMA, DCE'd); gl_Position=v{}→r0..r3 ({varying_outs} varying out)",
         gl_position.map_or("?".to_string(), |v| v.to_string())
     );
 
@@ -745,6 +750,7 @@ pub unsafe extern "C" fn borgc_compile_nir(
             Some(&Ubo::Pos) => (*pos_gpr.get(&(s, c)).unwrap_or(&0), false),
             Some(&Ubo::Uniform(idx)) => (idx, true),
             Some(&Ubo::Fixed(reg)) => (reg, false),
+            Some(&Ubo::Attr) => (6 + c, true),  // u6=U, u7=V (DMA vertex descriptor)
             _ => (*alloc.get(&s).unwrap_or(&0), false),
         }
     };
@@ -811,8 +817,15 @@ pub unsafe extern "C" fn borgc_compile_nir(
                 }
                 // edge-function attribute in a fixed register (r0/r1/r2).
                 Some(&Ubo::Fixed(reg)) => r[k] = reg,
-                // attribute varying — firmware-handled, not yet pinned.
-                Some(&Ubo::Attr) => pending += 1,
+                // attribute: u6=U, u7=V (sequencer DMA fills uniform[6,7]).
+                Some(&Ubo::Attr) => {
+                    if f3 == 0 {
+                        r[k] = 6 + c;
+                        f3 = k as u32 + 1;
+                    } else {
+                        pending += 1; // 2nd uniform in one op needs a preload
+                    }
+                }
                 // ALU intermediate → allocated GPR (or pending if a stray input).
                 None => match alloc.get(s) {
                     Some(&phys) => r[k] = phys,
