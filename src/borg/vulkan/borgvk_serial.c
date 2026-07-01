@@ -5,8 +5,8 @@
  * Serial transport for borgvk. The real GPU is the ULX3S FPGA, reached over the
  * board's FT231X USB-serial bridge (/dev/ttyUSB0 @115200). Each frame the submit
  * path hands us the 4×4 model-view-projection matrix; we frame it and write it to
- * the port. The firmware (software/borg/borg_vkcube.c) decodes the packet and
- * renders the cube through the autonomous TBR sequencer.
+ * the port. The firmware (software/borg/borg_kernel.c) decodes the packet and
+ * renders the frame through the autonomous TBR sequencer.
  *
  * Packet format ("0xAD" full-MVP):
  *   byte 0      : 0xAD marker
@@ -15,6 +15,12 @@
  * Total 66 bytes. Unlike the legacy 0xAC rotation matrix, MVP entries are not
  * bounded to [-1,1] (projection scales them), so the firmware validates with the
  * checksum instead of a magnitude range.
+ *
+ * Sim transport: when $BORGVK_SIM_SOCKET is set, packets go to a Unix domain
+ * socket instead of the serial port — the interactive verilator/arcilator
+ * viewer (simulation/verilator/viewer.py) listens there and injects the same
+ * bytes into the simulated hardware UART RXD line.  Same wire protocol, same
+ * borg_kernel.c firmware image; only the transport differs.
  */
 #include "borgvk_private.h"
 
@@ -25,6 +31,8 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -79,6 +87,42 @@ borgvk_serial_open(void)
    return fd;
 }
 
+/* -1 = not yet attempted, -2 = connect failed (don't retry every frame). */
+static int borgvk_sim_socket_fd = -1;
+
+/* Connect to the interactive sim viewer's Unix domain socket (see
+ * simulation/verilator/viewer.py).  Lazily opened on first submit, kept open
+ * for the process lifetime — same lifecycle as borgvk_serial_open(). */
+static int
+borgvk_sim_socket_open(const char *path)
+{
+   if (borgvk_sim_socket_fd >= 0)
+      return borgvk_sim_socket_fd;
+   if (borgvk_sim_socket_fd == -2)
+      return -1;
+
+   int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+   if (fd < 0) {
+      mesa_logw("borgvk: socket() failed (%s)", strerror(errno));
+      borgvk_sim_socket_fd = -2;
+      return -1;
+   }
+
+   struct sockaddr_un addr = { .sun_family = AF_UNIX };
+   snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
+   if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+      mesa_logw("borgvk: cannot connect to sim socket %s (%s); "
+                "is the viewer running?", path, strerror(errno));
+      close(fd);
+      borgvk_sim_socket_fd = -2;
+      return -1;
+   }
+
+   borgvk_sim_socket_fd = fd;
+   mesa_logi("borgvk: streaming to sim socket %s", path);
+   return fd;
+}
+
 /* IEEE-754 float32 → float16 (round-to-nearest-even). Inputs here are positions
  * in [-1,1] and UVs in [0,1], all comfortably in the FP16 normal range. */
 static uint16_t
@@ -112,8 +156,13 @@ f32_to_f16(float f)
    return h;
 }
 
+/* Write the full packet, then idle so the receiver sees an inter-packet gap
+ * to sync on (the firmware's gap-sync waits for the line to go idle before
+ * trusting the next marker byte — see borg_kernel.c).  `is_socket` selects
+ * tcdrain() (serial, flushes the kernel TTY write buffer) vs a plain sleep
+ * (socket writes are already synchronous once write() returns). */
 static void
-borgvk_serial_write_paced(int fd, const uint8_t *pkt, size_t len)
+borgvk_transport_write_paced(int fd, const uint8_t *pkt, size_t len, bool is_socket)
 {
    size_t off = 0;
    while (off < len) {
@@ -121,17 +170,21 @@ borgvk_serial_write_paced(int fd, const uint8_t *pkt, size_t len)
       if (n < 0) {
          if (errno == EINTR)
             continue;
-         mesa_logw("borgvk: serial write failed (%s)", strerror(errno));
+         mesa_logw("borgvk: %s write failed (%s)",
+                   is_socket ? "sim socket" : "serial", strerror(errno));
          return;
       }
       off += (size_t)n;
    }
-   /* Drain + idle so the firmware sees an inter-packet gap to sync on. */
-   tcdrain(fd);
+   if (!is_socket)
+      tcdrain(fd);
    usleep(3000);
 }
 
-/* ---- Transport sink: serial port (default) or capture buffer ---------- */
+/* ---- Transport sink: serial port / sim socket (default) or capture buffer ---
+ * Selection: capture (during a frame wrapped in capture_begin/end) takes
+ * priority; otherwise $BORGVK_SIM_SOCKET routes to the interactive sim
+ * viewer; otherwise the real serial port. */
 static bool     borgvk_capture_active = false;
 static uint8_t *borgvk_capture_buf    = NULL;
 static size_t   borgvk_capture_len    = 0;
@@ -139,7 +192,8 @@ static size_t   borgvk_capture_cap    = 0;
 
 /* Single emit chokepoint for every framed packet.  In capture mode the bytes
  * are appended to the growable buffer (no serial port, no pacing — the sim
- * injects them all at once); otherwise they are paced out to the serial fd. */
+ * injects them all at once); otherwise they are paced out to the socket or
+ * serial fd. */
 static void
 borgvk_transport_emit(const uint8_t *pkt, size_t len)
 {
@@ -161,10 +215,19 @@ borgvk_transport_emit(const uint8_t *pkt, size_t len)
       return;
    }
 
+   const char *sim_socket = getenv("BORGVK_SIM_SOCKET");
+   if (sim_socket && sim_socket[0]) {
+      int fd = borgvk_sim_socket_open(sim_socket);
+      if (fd < 0)
+         return;
+      borgvk_transport_write_paced(fd, pkt, len, true);
+      return;
+   }
+
    int fd = borgvk_serial_open();
    if (fd < 0)
       return;
-   borgvk_serial_write_paced(fd, pkt, len);
+   borgvk_transport_write_paced(fd, pkt, len, false);
 }
 
 void
