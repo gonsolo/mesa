@@ -23,7 +23,7 @@ use compiler::bindings::*;
 use compiler::nir::AsDef;
 use encode::{emit_blob, encode, f32_to_fp16};
 use isel::{borg_isel, resolve_vm};
-use opt::{dce, fuse_fmadd};
+use opt::{classify_uniform, dce, fuse_fmadd};
 use regalloc::regalloc;
 use std::env;
 
@@ -166,6 +166,11 @@ pub unsafe extern "C" fn borgc_compile_nir(
     let mut ubo: HashMap<u32, Ubo> = HashMap::new();
     // Barycentric weights w_i = e_i·inv_area, emitted once on the first load_input.
     let mut weights: Option<[u32; 3]> = None;
+    // e0/e1/e2 (edge-function attrs r0/r1/r2) are Ubo::Fixed too, but unlike the
+    // *other* Ubo::Fixed use (true shader constants pinned to r17+, e.g. lightDir),
+    // they vary per pixel — exclude them from the uniformity classification's
+    // "is this a per-triangle-constant root" test below.
+    let mut per_pixel_fixed: std::collections::HashSet<u32> = std::collections::HashSet::new();
     // Scalar load_const f32 bits (for the sRGB idiom match) and a producer map
     // (alu def → its op + resolved scalar srcs) for recognising the bcsel tree.
     let mut consts: HashMap<u32, u32> = HashMap::new();
@@ -326,6 +331,7 @@ pub unsafe extern "C" fn borgc_compile_nir(
                             for (i, wi) in w.iter_mut().enumerate() {
                                 let e = next_vreg; next_vreg += 1;
                                 ubo.insert(e, Ubo::Fixed(i as u8));        // e_i in r0/r1/r2
+                                per_pixel_fixed.insert(e); // NOT uniform: varies per pixel
                                 let inv = next_vreg; next_vreg += 1;
                                 ubo.insert(inv, Ubo::Uniform(12));         // inv_area = u12
                                 let v = next_vreg; next_vreg += 1;
@@ -534,6 +540,39 @@ pub unsafe extern "C" fn borgc_compile_nir(
 
     dce(&mut prog, &out_roots);
     fuse_fmadd(&mut prog, &out_roots);
+
+    // Uniformity classification (fragment shaders only — vertex/setup shaders
+    // have no per-pixel divergence to hoist away from). Roots: any read of a
+    // per-vertex-staged uniform (Ubo::Uniform — constant across the triangle,
+    // e.g. inv_area, UV/frag_pos/z of v0..v2) or a true shader constant
+    // (Ubo::Fixed, excluding the per-pixel edge-attr use of the same variant).
+    // See opt::classify_uniform for the propagation rule and why DDX/DDY are
+    // unconditional roots on this architecture.
+    if stage == 4 {
+        let uniform_roots: std::collections::HashSet<u32> = ubo
+            .iter()
+            .filter_map(|(&v, u)| match u {
+                Ubo::Uniform(_) => Some(v),
+                Ubo::Fixed(_) if !per_pixel_fixed.contains(&v) => Some(v),
+                _ => None,
+            })
+            .collect();
+        let uniform = classify_uniform(&prog, &uniform_roots);
+        if env::var("BORGC_DUMP_ISA").is_ok() {
+            let n_uniform = prog.iter().filter(|i| uniform.contains(&i.dst)).count();
+            eprintln!(
+                "borgc: uniformity — {} of {} instr(s) are primitive-uniform (hoistable)",
+                n_uniform,
+                prog.len()
+            );
+            for i in &prog {
+                if uniform.contains(&i.dst) {
+                    let s: Vec<String> = i.srcs.iter().map(|v| format!("v{v}")).collect();
+                    eprintln!("borgc:   [uniform] {} v{}, {}", i.mnem, i.dst, s.join(", "));
+                }
+            }
+        }
+    }
 
     // Pre-color outputs and reserve fixed registers.
     let mut forced: HashMap<u32, u8> = HashMap::new();

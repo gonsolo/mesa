@@ -5,7 +5,7 @@
 // after instruction selection and before register allocation.
 
 use crate::BorgInstr;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Dead-code elimination. Because every load_ubo is pinned to a fixed uniform,
 /// the UBO byte-offset arithmetic (iadd/ishl from gl_VertexIndex, descriptor
@@ -97,4 +97,37 @@ pub(crate) fn fuse_fmadd(prog: &mut Vec<BorgInstr>, out_roots: &[u32]) {
             prog.len()
         );
     }
+}
+
+/// Which values are "primitive-uniform" — constant for the whole triangle,
+/// safe to compute once in the setup stage instead of once per fragment.
+///
+/// Borg-specific axiom: DDX/DDY results are ALWAYS uniform. Borg has no
+/// fixed-function interpolator — every fragment varying is computed in the
+/// fragment shader itself as a barycentric-weighted sum of per-vertex uniform
+/// data, i.e. every varying is (by construction) an affine function of screen
+/// position within one triangle. The derivative of an affine function over
+/// that triangle is a constant, regardless of which varying is being
+/// differentiated — so this holds for any Borg fragment shader that uses
+/// dFdx/dFdy, not just one in particular.
+///
+/// From that axiom, uniformity propagates the ordinary way: a value is
+/// uniform iff every one of its operands is uniform — either a `root` (a
+/// per-vertex-staged uniform read or a true shader constant, classified by
+/// the caller from its knowledge of the `Ubo` map) or another already-uniform
+/// result. `prog` must be in forward topological order (true for the
+/// selection walk's own output — DCE only removes entries and FMADD fusion
+/// only merges adjacent producer/consumer pairs in place, so the order
+/// invariant survives both), so one linear pass suffices — no fixed point
+/// needed, unlike the backward DCE walk above.
+pub(crate) fn classify_uniform(prog: &[BorgInstr], roots: &HashSet<u32>) -> HashSet<u32> {
+    let mut uniform: HashSet<u32> = roots.clone();
+    for i in prog {
+        if i.mnem == "DDX" || i.mnem == "DDY" {
+            uniform.insert(i.dst);
+        } else if !i.srcs.is_empty() && i.srcs.iter().all(|s| uniform.contains(s)) {
+            uniform.insert(i.dst);
+        }
+    }
+    uniform
 }
