@@ -14,8 +14,10 @@
  *       re-upload across restarts within the same FPGA power cycle.
  *
  *   BORG_SUBMIT:
- *       Read the 16-float MVP from byte 0 of the UBO BO and ship it as a 0xAD
- *       serial packet.
+ *       Read the 16-float MVP from byte 0 of the UBO BO, right-multiply by an
+ *       externally-supplied rotation matrix if scripts/mouse_rotation.py is
+ *       running (see read_mouse_rotation() below), and ship the result as a
+ *       0xAD serial packet.
  *
  * Usage:
  *   LD_PRELOAD=libborg_drm_shim.so VK_DRIVER_FILES=.../borg_devenv_icd.json vkcube
@@ -29,12 +31,15 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ---- Sentinel (skip upload if FPGA already has the data) -------------- */
@@ -213,6 +218,66 @@ borg_ioctl_setup(int fd, unsigned long req, void *arg)
    return 0;
 }
 
+/* ---- Mouse/touchpad rotation overlay ----------------------------------
+ * scripts/mouse_rotation.py runs independently of cube.c (which free-spins on
+ * its own internal timer with no input hooks) and has no wire protocol of its
+ * own to the firmware — the old firmware supported a direct 0xAC packet, but
+ * that relied on a local hardcoded-geometry TS bake that no longer exists now
+ * that geometry and the full MVP both always come from the host.  Instead the
+ * script writes its column-major 3x3 rotation matrix to a plain file; we read
+ * it here and fold it into the model-space side of the MVP cube.c already
+ * computed: mvp_new = mvp_baked * R.  Matrix associativity makes this exact
+ * regardless of how mvp_baked was itself composed (it's equivalent to
+ * rotating the model-space vertices by R before cube's own transform), so it
+ * layers on top of (rather than replacing) cube's continuous auto-spin. */
+#define MOUSE_ROTATION_PATH "/tmp/borg_mouse_rotation.bin"
+
+static int
+read_mouse_rotation(float rot3x3[9])
+{
+   struct stat st;
+   if (stat(MOUSE_ROTATION_PATH, &st) != 0)
+      return 0;
+   /* Ignore a rotation left behind by a script that is no longer running,
+    * rather than freezing the cube at whatever it last wrote. */
+   time_t now = time(NULL);
+   if (now - st.st_mtime > 1)
+      return 0;
+
+   int fd = open(MOUSE_ROTATION_PATH, O_RDONLY);
+   if (fd < 0)
+      return 0;
+   float buf[9];
+   ssize_t n = read(fd, buf, sizeof(buf));
+   close(fd);
+   if (n != (ssize_t)sizeof(buf))
+      return 0;
+
+   for (int i = 0; i < 9; i++) {
+      if (!isfinite(buf[i]) || fabsf(buf[i]) > 1.5f)
+         return 0;  /* corruption/torn-write guard: a rotation matrix entry is in [-1,1] */
+   }
+   memcpy(rot3x3, buf, sizeof(buf));
+   return 1;
+}
+
+static void
+apply_extra_rotation(float mvp[16], const float rot3x3[9])
+{
+   /* mvp is column-major (mvp[col*4+row]); rot3x3 likewise (rot3x3[col*3+row]). */
+   float result[16];
+   for (int j = 0; j < 3; j++)
+      for (int row = 0; row < 4; row++) {
+         float sum = 0.0f;
+         for (int k = 0; k < 3; k++)
+            sum += mvp[k * 4 + row] * rot3x3[j * 3 + k];
+         result[j * 4 + row] = sum;
+      }
+   for (int row = 0; row < 4; row++)
+      result[3 * 4 + row] = mvp[3 * 4 + row];
+   memcpy(mvp, result, sizeof(result));
+}
+
 static int
 borg_ioctl_submit(int fd, unsigned long req, void *arg)
 {
@@ -222,7 +287,13 @@ borg_ioctl_submit(int fd, unsigned long req, void *arg)
    struct shim_bo *bo = drm_shim_bo_lookup(shim_fd, (int)s->ubo_handle);
    if (!bo) return -ENOENT;
 
-   borg_serial_send_mvp((const float *)bo->map);
+   float mvp[16];
+   memcpy(mvp, bo->map, sizeof(mvp));
+   float rot3x3[9];
+   if (read_mouse_rotation(rot3x3))
+      apply_extra_rotation(mvp, rot3x3);
+
+   borg_serial_send_mvp(mvp);
    drm_shim_bo_put(bo);
    return 0;
 }
