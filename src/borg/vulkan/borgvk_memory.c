@@ -1280,19 +1280,16 @@ borgvk_CmdBlitImage(VkCommandBuffer commandBuffer,
    uint32_t src_bs = vk_format_get_blocksize(src->vk.format);
    uint32_t dst_bs = vk_format_get_blocksize(dst->vk.format);
 
-   /* Unlike CmdCopyImage (a raw byte-region copy), a blit can legally use a
-    * block-compressed SOURCE format (e.g. ETC2/EAC, which
-    * borgvk_optimal_features grants VK_FORMAT_FEATURE_BLIT_SRC_BIT) --
-    * a genuine Vulkan feature for e.g. compressed-to-uncompressed blits.
-    * The whole per-texel addressing below assumes 1 texel == 1 stored
-    * element (bw=bh=1), which is wrong for a compressed format: reading it
-    * as if every 4x4-block-sized element were a single texel walked off the
-    * end of the source allocation. Confirmed via coredumpctl/gdb: SIGSEGV
-    * running dEQP-VK...blit_image...eac_r11_snorm_block.a1r5g5b5_unorm_pack16.
-    * Correctly blitting FROM a compressed format means decoding its blocks
-    * (real ETC2/EAC decompression), which is out of scope here -- no-op
-    * rather than risk an out-of-bounds read, same "defended gap" pattern as
-    * the 3D-block-compressed ASTC formats. */
+   /* No format here ever advertises BLIT_SRC_BIT while block-compressed
+    * (borgvk_optimal_features grants ETC2/EAC only SAMPLED/TRANSFER, and
+    * BC1-7/ASTC get zero features at all, in both cases because Mesa's
+    * generic util_format_fetch_rgba_func has no decoder for any of them) --
+    * so this should be unreachable. Kept as a defended no-op rather than an
+    * out-of-bounds read/write: the per-texel addressing below assumes 1
+    * texel == 1 stored element, which previously SIGSEGV'd walking off the
+    * end of the source allocation for a compressed format before that
+    * feature-bit fix (confirmed via coredumpctl/gdb running
+    * dEQP-VK...blit_image...eac_r11_snorm_block.a1r5g5b5_unorm_pack16). */
    if (vk_format_get_blockwidth(src->vk.format) > 1 ||
        vk_format_get_blockheight(src->vk.format) > 1 ||
        vk_format_get_blockwidth(dst->vk.format) > 1 ||
