@@ -773,14 +773,16 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
     * offsets/extents are always block-aligned per the spec, so the divisions
     * below are exact. For uncompressed formats bw = bh = 1 and this is
     * unchanged from the original per-texel math. */
+   enum pipe_format src_pfmt = vk_format_to_pipe_format(src->vk.format);
+   enum pipe_format dst_pfmt = vk_format_to_pipe_format(dst->vk.format);
    uint32_t src_bs = vk_format_get_blocksize(src->vk.format);
    uint32_t src_bw = vk_format_get_blockwidth(src->vk.format);
    uint32_t src_bh = vk_format_get_blockheight(src->vk.format);
-   uint32_t src_bd = util_format_get_blockdepth(vk_format_to_pipe_format(src->vk.format));
+   uint32_t src_bd = util_format_get_blockdepth(src_pfmt);
    uint32_t dst_bs = vk_format_get_blocksize(dst->vk.format);
    uint32_t dst_bw = vk_format_get_blockwidth(dst->vk.format);
    uint32_t dst_bh = vk_format_get_blockheight(dst->vk.format);
-   uint32_t dst_bd = util_format_get_blockdepth(vk_format_to_pipe_format(dst->vk.format));
+   uint32_t dst_bd = util_format_get_blockdepth(dst_pfmt);
    /* See the matching comment in CmdClearColorImage: 3D-block-compressed
     * formats remain a defended gap, not a supported combination. */
    if (src_bd > 1 || dst_bd > 1)
@@ -868,21 +870,65 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
 
          if (src_elem_bs == src_bs && dst_elem_bs == dst_bs) {
             /* Common case (whole-texel copy, e.g. plain colour formats):
-             * one memcpy per row. */
+             * one memcpy per row. Row advance MUST use the destination
+             * image's own real row stride (dst_stride_blocks, its full mip
+             * level width), not the copy region's width (w_blocks) -- those
+             * only coincide for a full-image-width copy, which is why every
+             * earlier single-region "whole image" test passed while a
+             * partial-width region (e.g. any multi-region test placing
+             * several sub-rectangles) silently corrupted adjacent rows: a
+             * region narrower than the image walked into the next row's
+             * bytes early, drifting further with every row. Found via a
+             * pixel-level diff against CTS's reference image, running
+             * dEQP-VK.api.copy_and_blit.core.image_to_image.all_formats.
+             * color.2d_to_2d (100% of that group was failing this way). */
             for (uint32_t row = 0; row < h_blocks; row++) {
-               memcpy(d + (size_t)row * w_blocks * dst_bs,
+               memcpy(d + (size_t)row * dst_stride_blocks * dst_bs,
                       s + (size_t)row * src_stride_blocks * src_bs,
                       (size_t)w_blocks * elem_bs);
             }
          } else {
-            /* Aspect-selective copy on a combined format: each destination
-             * texel is smaller than its source texel's storage, so texels
-             * must be copied individually rather than row-at-once. */
+            /* Aspect-selective copy on a combined format (e.g. STENCIL_BIT
+             * only, image-to-image, between two combined depth-stencil
+             * images): both sides are real images with their own full
+             * combined-format texel storage, not a tightly-packed buffer, so
+             * the row/column stride here must use dst_bs/src_bs (the real
+             * per-texel spacing), not dst_elem_bs/elem_bs. And a naive
+             * "copy the first N bytes of each texel" is wrong whenever the
+             * aspect isn't literally stored first (true for stencil in
+             * several Mesa depth-stencil pipe formats) -- use the same real
+             * per-aspect pack/unpack as the depth/stencil copy-to/from-buffer
+             * paths, including the PIPE_FORMAT_Z16_UNORM_S8_UINT special
+             * case (see borgvk_is_z16_s8's comment: every one of its six
+             * pack/unpack functions is an UNREACHABLE() stub in Mesa itself). */
+            VkImageAspectFlags aspect = reg->srcSubresource.aspectMask;
+            bool stencil = (aspect & VK_IMAGE_ASPECT_STENCIL_BIT) != 0;
+
             for (uint32_t row = 0; row < h_blocks; row++) {
                for (uint32_t col = 0; col < w_blocks; col++) {
-                  memcpy(d + (size_t)row * w_blocks * dst_elem_bs + (size_t)col * dst_elem_bs,
-                         s + (size_t)row * src_stride_blocks * src_bs + (size_t)col * src_bs,
-                         elem_bs);
+                  const uint8_t *stexel = s + (size_t)row * src_stride_blocks * src_bs
+                                            + (size_t)col * src_bs;
+                  uint8_t *dtexel = d + (size_t)row * dst_stride_blocks * dst_bs
+                                       + (size_t)col * dst_bs;
+
+                  if (stencil) {
+                     uint8_t val = borgvk_is_z16_s8(src_pfmt) ? stexel[2] : 0;
+                     if (!borgvk_is_z16_s8(src_pfmt))
+                        util_format_unpack_s_8uint(src_pfmt, &val, stexel, 1);
+                     if (borgvk_is_z16_s8(dst_pfmt))
+                        dtexel[2] = val;
+                     else
+                        util_format_pack_s_8uint(dst_pfmt, dtexel, &val, 1);
+                  } else {
+                     float z = borgvk_is_z16_s8(src_pfmt) ?
+                        borgvk_z16_s8_unpack_z(stexel) : 0.0f;
+                     if (!borgvk_is_z16_s8(src_pfmt))
+                        util_format_unpack_z_float(src_pfmt, &z, stexel, 1);
+                     if (borgvk_is_z16_s8(dst_pfmt))
+                        borgvk_z16_s8_pack_z(dtexel, z);
+                     else
+                        util_format_pack_z_float(dst_pfmt, dtexel, &z, 1);
+                  }
                }
             }
          }
