@@ -18,6 +18,7 @@
 
 #include "drm-uapi/borg_drm.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -846,6 +847,248 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
                   memcpy(d + (size_t)row * w_blocks * dst_elem_bs + (size_t)col * dst_elem_bs,
                          s + (size_t)row * src_stride_blocks * src_bs + (size_t)col * src_bs,
                          elem_bs);
+               }
+            }
+         }
+      }
+   }
+}
+
+/* Like CmdClearColorImage, this was entirely missing -- discarded into the
+ * generic vk_cmd_queue and never executed, so a blit's destination read back
+ * whatever the image's fresh host allocation already contained. This was the
+ * single largest concentration of failures anywhere in the api/info surface
+ * (~44k of ~79k total). Unlike CmdCopyImage, a blit can rescale (src/dst
+ * region sizes differ) and convert between compatible formats, so texels
+ * are addressed and copied individually rather than row-at-once, going
+ * through util_format_{un,}pack_rgba (same normalized intermediate as
+ * CmdClearColorImage) for the format conversion.
+ *
+ * Nearest is exact. Linear does real bilinear (2D) / trilinear (3D)
+ * filtering by blending the up-to-8 texels around the sampled position --
+ * always through float, matching Vulkan's own requirement that only
+ * non-integer formats support VK_FILTER_LINEAR (borgvk's own
+ * borgvk_optimal_features only grants SAMPLED_IMAGE_FILTER_LINEAR to
+ * non-integer color formats, so this assumption holds for any image this
+ * driver would let an app filter in the first place).
+ *
+ * Blit source/destination formats are never block-compressed (invalid usage
+ * per spec: VUID-vkCmdBlitImage-srcImage-06421 and friends), so block
+ * width/height/depth are always 1 here and addressing reduces to plain texel
+ * indexing -- no need for the block-aware machinery CmdCopyImage needs. */
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdBlitImage(VkCommandBuffer commandBuffer,
+                    VkImage srcImage, VkImageLayout srcImageLayout,
+                    VkImage dstImage, VkImageLayout dstImageLayout,
+                    uint32_t regionCount, const VkImageBlit *pRegions,
+                    VkFilter filter)
+{
+   VK_FROM_HANDLE(borgvk_image, src, srcImage);
+   VK_FROM_HANDLE(borgvk_image, dst, dstImage);
+
+   if (!src || !dst || !src->mem || !dst->mem || !src->mem->map || !dst->mem->map)
+      return;
+
+   enum pipe_format src_pfmt = vk_format_to_pipe_format(src->vk.format);
+   enum pipe_format dst_pfmt = vk_format_to_pipe_format(dst->vk.format);
+   uint32_t src_bs = vk_format_get_blocksize(src->vk.format);
+   uint32_t dst_bs = vk_format_get_blocksize(dst->vk.format);
+
+   /* Unlike CmdCopyImage (a raw byte-region copy), a blit can legally use a
+    * block-compressed SOURCE format (e.g. ETC2/EAC, which
+    * borgvk_optimal_features grants VK_FORMAT_FEATURE_BLIT_SRC_BIT) --
+    * a genuine Vulkan feature for e.g. compressed-to-uncompressed blits.
+    * The whole per-texel addressing below assumes 1 texel == 1 stored
+    * element (bw=bh=1), which is wrong for a compressed format: reading it
+    * as if every 4x4-block-sized element were a single texel walked off the
+    * end of the source allocation. Confirmed via coredumpctl/gdb: SIGSEGV
+    * running dEQP-VK...blit_image...eac_r11_snorm_block.a1r5g5b5_unorm_pack16.
+    * Correctly blitting FROM a compressed format means decoding its blocks
+    * (real ETC2/EAC decompression), which is out of scope here -- no-op
+    * rather than risk an out-of-bounds read, same "defended gap" pattern as
+    * the 3D-block-compressed ASTC formats. */
+   if (vk_format_get_blockwidth(src->vk.format) > 1 ||
+       vk_format_get_blockheight(src->vk.format) > 1 ||
+       vk_format_get_blockwidth(dst->vk.format) > 1 ||
+       vk_format_get_blockheight(dst->vk.format) > 1)
+      return;
+
+   /* Per spec, blit source/dest formats must be from the same numeric-format
+    * class (both pure-uint, both pure-sint, or neither), so one class check
+    * per region -- taken from src -- applies to both sides. */
+   bool is_uint = util_format_is_pure_uint(src_pfmt);
+   bool is_sint = util_format_is_pure_sint(src_pfmt);
+
+   bool src_3d = src->vk.image_type == VK_IMAGE_TYPE_3D;
+   bool dst_3d = dst->vk.image_type == VK_IMAGE_TYPE_3D;
+
+   for (uint32_t r = 0; r < regionCount; r++) {
+      const VkImageBlit *reg = &pRegions[r];
+      /* A depth or stencil aspect has no "RGBA" concept at all -- Mesa's
+       * format table doesn't populate pack_rgba/unpack_rgba for pure
+       * depth/stencil pipe formats, so calling them crashed through a null
+       * function pointer. Confirmed via coredumpctl/gdb: SIGSEGV running
+       * dEQP-VK...blit_image...depth_stencil.1d.d16_unorm_d16_unorm. Use the
+       * same z_float/s_8uint helpers CmdClearDepthStencilImage and the
+       * depth/stencil copy paths already rely on instead. Stencil is never a
+       * valid VK_FILTER_LINEAR target per spec (integer data, no filtering
+       * feature ever granted for it), so it always samples nearest
+       * regardless of `filter`. */
+      bool is_depth_aspect = (reg->srcSubresource.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT) != 0;
+      bool is_stencil_aspect = (reg->srcSubresource.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT) != 0;
+
+      int32_t dst_x0 = MIN2(reg->dstOffsets[0].x, reg->dstOffsets[1].x);
+      int32_t dst_x1 = MAX2(reg->dstOffsets[0].x, reg->dstOffsets[1].x);
+      int32_t dst_y0 = MIN2(reg->dstOffsets[0].y, reg->dstOffsets[1].y);
+      int32_t dst_y1 = MAX2(reg->dstOffsets[0].y, reg->dstOffsets[1].y);
+      int32_t dst_z0 = MIN2(reg->dstOffsets[0].z, reg->dstOffsets[1].z);
+      int32_t dst_z1 = MAX2(reg->dstOffsets[0].z, reg->dstOffsets[1].z);
+
+      /* Signed extents of each box, corner 0 to corner 1 -- negative when the
+       * region is flipped on that axis. The parametric formulas below give
+       * the correct (possibly mirrored) source position regardless of sign. */
+      float dst_ex = (float)(reg->dstOffsets[1].x - reg->dstOffsets[0].x);
+      float dst_ey = (float)(reg->dstOffsets[1].y - reg->dstOffsets[0].y);
+      float dst_ez = (float)(reg->dstOffsets[1].z - reg->dstOffsets[0].z);
+      float src_ex = (float)(reg->srcOffsets[1].x - reg->srcOffsets[0].x);
+      float src_ey = (float)(reg->srcOffsets[1].y - reg->srcOffsets[0].y);
+      float src_ez = (float)(reg->srcOffsets[1].z - reg->srcOffsets[0].z);
+
+      uint32_t layerCount = (src_3d || dst_3d) ? 1 :
+         vk_image_subresource_layer_count(&src->vk, &reg->srcSubresource);
+
+      for (uint32_t l = 0; l < layerCount; l++) {
+         uint32_t src_level_w = MAX2(src->vk.extent.width >> reg->srcSubresource.mipLevel, 1);
+         uint32_t src_level_h = MAX2(src->vk.extent.height >> reg->srcSubresource.mipLevel, 1);
+         uint32_t src_level_d = src_3d ?
+            MAX2(src->vk.extent.depth >> reg->srcSubresource.mipLevel, 1) : 1;
+         uint32_t dst_level_h = MAX2(dst->vk.extent.height >> reg->dstSubresource.mipLevel, 1);
+
+         uint32_t src_stride_texels, dst_stride_texels;
+         uint64_t src_layer_off = borgvk_image_level_offset(
+            src, reg->srcSubresource.mipLevel,
+            src_3d ? 0 : reg->srcSubresource.baseArrayLayer + l,
+            src_bs, 1, 1, 1, &src_stride_texels);
+         uint64_t dst_layer_off = borgvk_image_level_offset(
+            dst, reg->dstSubresource.mipLevel,
+            dst_3d ? 0 : reg->dstSubresource.baseArrayLayer + l,
+            dst_bs, 1, 1, 1, &dst_stride_texels);
+
+         const uint8_t *src_base = (const uint8_t *)src->mem->map + src->offset + src_layer_off;
+         uint8_t *dst_base = (uint8_t *)dst->mem->map + dst->offset + dst_layer_off;
+
+         for (int32_t dz = dst_z0; dz < dst_z1; dz++) {
+            float wz = dst_ez != 0 ? ((float)dz + 0.5f - reg->dstOffsets[0].z) / dst_ez : 0.5f;
+            float sz = reg->srcOffsets[0].z + wz * src_ez;
+
+            for (int32_t dy = dst_y0; dy < dst_y1; dy++) {
+               float wy = dst_ey != 0 ? ((float)dy + 0.5f - reg->dstOffsets[0].y) / dst_ey : 0.5f;
+               float sy = reg->srcOffsets[0].y + wy * src_ey;
+
+               uint8_t *drow = dst_base +
+                  ((uint64_t)dz * dst_level_h + dy) * dst_stride_texels * dst_bs;
+
+               for (int32_t dx = dst_x0; dx < dst_x1; dx++) {
+                  float wx = dst_ex != 0 ? ((float)dx + 0.5f - reg->dstOffsets[0].x) / dst_ex : 0.5f;
+                  float sx = reg->srcOffsets[0].x + wx * src_ex;
+                  uint8_t *dtexel = drow + (uint64_t)dx * dst_bs;
+
+                  if (filter == VK_FILTER_NEAREST || is_stencil_aspect) {
+                     int32_t six = CLAMP((int32_t)floorf(sx), 0, (int32_t)src_level_w - 1);
+                     int32_t siy = CLAMP((int32_t)floorf(sy), 0, (int32_t)src_level_h - 1);
+                     int32_t siz = CLAMP((int32_t)floorf(sz), 0, (int32_t)src_level_d - 1);
+                     const uint8_t *stexel = src_base +
+                        (((uint64_t)siz * src_level_h + siy) * src_stride_texels + six) * src_bs;
+
+                     if (is_stencil_aspect) {
+                        /* PIPE_FORMAT_Z16_UNORM_S8_UINT has no
+                         * pack_s_8uint/unpack_s_8uint either -- see
+                         * borgvk_is_z16_s8's comment. Byte 2 of its 3-byte
+                         * texel is the stencil value directly. */
+                        uint8_t s = borgvk_is_z16_s8(src_pfmt) ? stexel[2] : 0;
+                        if (!borgvk_is_z16_s8(src_pfmt))
+                           util_format_unpack_s_8uint(src_pfmt, &s, stexel, 1);
+                        if (borgvk_is_z16_s8(dst_pfmt))
+                           dtexel[2] = s;
+                        else
+                           util_format_pack_s_8uint(dst_pfmt, dtexel, &s, 1);
+                     } else if (is_depth_aspect) {
+                        float z = borgvk_is_z16_s8(src_pfmt) ? borgvk_z16_s8_unpack_z(stexel) : 0.0f;
+                        if (!borgvk_is_z16_s8(src_pfmt))
+                           util_format_unpack_z_float(src_pfmt, &z, stexel, 1);
+                        if (borgvk_is_z16_s8(dst_pfmt))
+                           borgvk_z16_s8_pack_z(dtexel, z);
+                        else
+                           util_format_pack_z_float(dst_pfmt, dtexel, &z, 1);
+                     } else if (is_uint) {
+                        uint32_t v[4];
+                        util_format_unpack_rgba(src_pfmt, v, stexel, 1);
+                        util_format_pack_rgba(dst_pfmt, dtexel, v, 1);
+                     } else if (is_sint) {
+                        int32_t v[4];
+                        util_format_unpack_rgba(src_pfmt, v, stexel, 1);
+                        util_format_pack_rgba(dst_pfmt, dtexel, v, 1);
+                     } else {
+                        float v[4];
+                        util_format_unpack_rgba(src_pfmt, v, stexel, 1);
+                        util_format_pack_rgba(dst_pfmt, dtexel, v, 1);
+                     }
+                     continue;
+                  }
+
+                  /* VK_FILTER_LINEAR: bilinear (2D) / trilinear (3D),
+                   * texel-center sampling with edge clamping. Blend weight
+                   * per axis degenerates to a single sample (weight 1) when
+                   * that axis only has one texel, so 2D images (src_level_d
+                   * == 1) naturally reduce to plain bilinear. */
+                  float fx = sx - 0.5f, fy = sy - 0.5f, fz = sz - 0.5f;
+                  int32_t x0 = (int32_t)floorf(fx), y0 = (int32_t)floorf(fy), z0 = (int32_t)floorf(fz);
+                  float tx = fx - (float)x0, ty = fy - (float)y0, tz = fz - (float)z0;
+                  int32_t x1 = x0 + 1, y1 = y0 + 1, z1 = z0 + 1;
+                  x0 = CLAMP(x0, 0, (int32_t)src_level_w - 1);
+                  x1 = CLAMP(x1, 0, (int32_t)src_level_w - 1);
+                  y0 = CLAMP(y0, 0, (int32_t)src_level_h - 1);
+                  y1 = CLAMP(y1, 0, (int32_t)src_level_h - 1);
+                  z0 = CLAMP(z0, 0, (int32_t)src_level_d - 1);
+                  z1 = CLAMP(z1, 0, (int32_t)src_level_d - 1);
+
+                  float acc[4] = {0, 0, 0, 0};
+                  int32_t xs[2] = {x0, x1}, ys[2] = {y0, y1}, zs[2] = {z0, z1};
+                  float xw[2] = {1 - tx, tx}, yw[2] = {1 - ty, ty}, zw[2] = {1 - tz, tz};
+                  for (int iz = 0; iz < 2; iz++) {
+                     for (int iy = 0; iy < 2; iy++) {
+                        for (int ix = 0; ix < 2; ix++) {
+                           float weight = xw[ix] * yw[iy] * zw[iz];
+                           if (weight == 0.0f)
+                              continue;
+                           const uint8_t *stexel = src_base +
+                              (((uint64_t)zs[iz] * src_level_h + ys[iy]) * src_stride_texels
+                               + xs[ix]) * src_bs;
+                           if (is_depth_aspect) {
+                              float z = borgvk_is_z16_s8(src_pfmt) ?
+                                 borgvk_z16_s8_unpack_z(stexel) : 0.0f;
+                              if (!borgvk_is_z16_s8(src_pfmt))
+                                 util_format_unpack_z_float(src_pfmt, &z, stexel, 1);
+                              acc[0] += z * weight;
+                           } else {
+                              float v[4];
+                              util_format_unpack_rgba(src_pfmt, v, stexel, 1);
+                              acc[0] += v[0] * weight;
+                              acc[1] += v[1] * weight;
+                              acc[2] += v[2] * weight;
+                              acc[3] += v[3] * weight;
+                           }
+                        }
+                     }
+                  }
+                  if (is_depth_aspect) {
+                     if (borgvk_is_z16_s8(dst_pfmt))
+                        borgvk_z16_s8_pack_z(dtexel, acc[0]);
+                     else
+                        util_format_pack_z_float(dst_pfmt, dtexel, acc, 1);
+                  } else {
+                     util_format_pack_rgba(dst_pfmt, dtexel, acc, 1);
+                  }
                }
             }
          }
