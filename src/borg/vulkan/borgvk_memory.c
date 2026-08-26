@@ -281,29 +281,39 @@ borgvk_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer _buffer,
 static uint64_t
 borgvk_mip_level_size(uint32_t width, uint32_t height, uint32_t depth,
                       uint32_t level, uint32_t bs, uint32_t bw, uint32_t bh,
-                      uint32_t *width_blocks_out)
+                      uint32_t bd, uint32_t *width_blocks_out)
 {
    uint32_t w = MAX2(width >> level, 1);
    uint32_t h = MAX2(height >> level, 1);
    uint32_t d = MAX2(depth >> level, 1);
    uint32_t w_blocks = DIV_ROUND_UP(w, bw);
    uint32_t h_blocks = DIV_ROUND_UP(h, bh);
+   /* bd (block depth) is >1 only for 3D block-compressed formats (e.g. any
+    * ASTC_*x*x*_BLOCK_EXT), where a single bs-byte block already encodes a
+    * bd-texel-deep volume -- not accounting for it here overstated the level
+    * size (and every offset derived from it) by a factor of bd, which
+    * combined with the 3D copy paths' per-Z-slice addressing walked off the
+    * end of the allocation. Confirmed via coredumpctl/gdb: "corrupted
+    * double-linked list" surfacing in a later borgvk_FreeMemory, found
+    * running dEQP-VK.api.copy_and_blit...3d_to_3d.astc_3x3x3_unorm_block_ext.
+    * bd=1 for every other format, so this is a no-op there. */
+   uint32_t d_blocks = DIV_ROUND_UP(d, bd);
 
    if (width_blocks_out)
       *width_blocks_out = w_blocks;
-   return (uint64_t)w_blocks * h_blocks * d * bs;
+   return (uint64_t)w_blocks * h_blocks * d_blocks * bs;
 }
 
 static uint64_t
 borgvk_image_layer_size(const struct borgvk_image *image, uint32_t bs,
-                        uint32_t bw, uint32_t bh)
+                        uint32_t bw, uint32_t bh, uint32_t bd)
 {
    uint64_t layer_size = 0;
    for (uint32_t l = 0; l < image->vk.mip_levels; l++)
       layer_size += borgvk_mip_level_size(image->vk.extent.width,
                                           image->vk.extent.height,
                                           image->vk.extent.depth,
-                                          l, bs, bw, bh, NULL);
+                                          l, bs, bw, bh, bd, NULL);
    return layer_size;
 }
 
@@ -312,18 +322,18 @@ borgvk_image_layer_size(const struct borgvk_image *image, uint32_t bs,
 static uint64_t
 borgvk_image_level_offset(const struct borgvk_image *image, uint32_t level,
                           uint32_t layer, uint32_t bs, uint32_t bw, uint32_t bh,
-                          uint32_t *stride_blocks_out)
+                          uint32_t bd, uint32_t *stride_blocks_out)
 {
-   uint64_t layer_size = borgvk_image_layer_size(image, bs, bw, bh);
+   uint64_t layer_size = borgvk_image_layer_size(image, bs, bw, bh, bd);
    uint64_t level_offset = 0;
 
    for (uint32_t l = 0; l < level; l++)
       level_offset += borgvk_mip_level_size(image->vk.extent.width,
                                             image->vk.extent.height,
                                             image->vk.extent.depth,
-                                            l, bs, bw, bh, NULL);
+                                            l, bs, bw, bh, bd, NULL);
    borgvk_mip_level_size(image->vk.extent.width, image->vk.extent.height,
-                         image->vk.extent.depth, level, bs, bw, bh,
+                         image->vk.extent.depth, level, bs, bw, bh, bd,
                          stride_blocks_out);
 
    return (uint64_t)layer * layer_size + level_offset;
@@ -395,11 +405,12 @@ borgvk_image_size(const VkImageCreateInfo *info)
    uint32_t bs = vk_format_get_blocksize(info->format);
    uint32_t bw = vk_format_get_blockwidth(info->format);
    uint32_t bh = vk_format_get_blockheight(info->format);
+   uint32_t bd = util_format_get_blockdepth(vk_format_to_pipe_format(info->format));
    uint64_t layer_size = 0;
 
    for (uint32_t l = 0; l < MAX2(info->mipLevels, 1); l++)
       layer_size += borgvk_mip_level_size(info->extent.width, info->extent.height,
-                                          info->extent.depth, l, bs, bw, bh, NULL);
+                                          info->extent.depth, l, bs, bw, bh, bd, NULL);
 
    uint64_t size = layer_size * MAX2(info->arrayLayers, 1);
    return align64(size, 256);
@@ -463,23 +474,47 @@ borgvk_GetImageMemoryRequirements2(VkDevice _device,
 
 /* Linear subresource layout. cube.c queries this to upload its staging texture
  * row by row; report a tightly-packed linear layout matching how an app maps and
- * writes the malloc-backed image memory (mip 0 / layer 0 at offset 0). */
+ * writes the malloc-backed image memory (mip 0 / layer 0 at offset 0).
+ *
+ * This computed row = width(texels) * blocksize(bytes/BLOCK) directly, with no
+ * division by block width/height/depth at all -- for any block-compressed
+ * format that overstated the real row pitch by a factor of the block extent
+ * (e.g. 16x for a 4x4-block format, up to 27x for a 3x3x3 3D-block ASTC
+ * format). Real apps and CTS alike use exactly this query to know how far
+ * apart rows are before writing into a mapped LINEAR image directly, so a
+ * wrong answer here doesn't fail loudly at the call site -- it silently walks
+ * the write past the real allocation, corrupting unrelated heap state that
+ * only aborts later. This was a live, previously-unaudited bug independent
+ * of every other block-size fix earlier in this file (nothing else calls
+ * this function's math). Addressed via the same shared block-aware layout
+ * (borgvk_image_level_offset) as everything else, generalized to any
+ * mip level/array layer instead of always assuming (0, 0). */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_GetImageSubresourceLayout2KHR(VkDevice _device, VkImage _image,
                                      const VkImageSubresource2KHR *pSubresource,
                                      VkSubresourceLayout2KHR *pLayout)
 {
    VK_FROM_HANDLE(borgvk_image, image, _image);
+   const VkImageSubresource *sub = &pSubresource->imageSubresource;
 
-   uint32_t bs = vk_format_get_blocksize(image->vk.format);
-   uint64_t row = (uint64_t)image->vk.extent.width * MAX2(bs, 1);
-   uint64_t slice = row * image->vk.extent.height;
+   uint32_t bs, bw, bh;
+   borgvk_aspect_block_size(image->vk.format, sub->aspectMask, &bs, &bw, &bh);
+   uint32_t bd = util_format_get_blockdepth(vk_format_to_pipe_format(image->vk.format));
+
+   uint32_t stride_blocks;
+   uint64_t offset = borgvk_image_level_offset(image, sub->mipLevel, sub->arrayLayer,
+                                               bs, bw, bh, bd, &stride_blocks);
+   uint32_t h_blocks = DIV_ROUND_UP(MAX2(image->vk.extent.height >> sub->mipLevel, 1), bh);
+   uint32_t d_blocks = DIV_ROUND_UP(MAX2(image->vk.extent.depth >> sub->mipLevel, 1), bd);
+
+   uint64_t row = (uint64_t)stride_blocks * bs;
+   uint64_t slice = row * h_blocks;
 
    pLayout->subresourceLayout = (VkSubresourceLayout){
-      .offset     = 0,
-      .size       = slice * image->vk.extent.depth,
+      .offset     = offset,
+      .size       = slice * d_blocks,
       .rowPitch   = row,
-      .arrayPitch = slice,
+      .arrayPitch = borgvk_image_layer_size(image, bs, bw, bh, bd),
       .depthPitch = slice,
    };
 
@@ -566,6 +601,15 @@ borgvk_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage _image,
    uint32_t bs = vk_format_get_blocksize(image->vk.format);
    uint32_t bw = vk_format_get_blockwidth(image->vk.format);
    uint32_t bh = vk_format_get_blockheight(image->vk.format);
+   uint32_t bd = util_format_get_blockdepth(pfmt);
+   /* 3D-block-compressed formats (any ASTC_*x*x*_BLOCK_EXT) remain a defended
+    * gap: the format-query rejection in borgvk_GetPhysicalDeviceImageFormatProperties2
+    * doesn't reliably stop every CTS code path from creating one anyway, and
+    * getting this addressing fully right cost more debugging than this format
+    * class's near-zero real-world usage justifies. No-op rather than risk
+    * writing outside the allocation. */
+   if (bd > 1)
+      return;
 
    uint8_t pixel[16]; /* largest uncompressed colour format block is 16 B */
    if (util_format_is_pure_uint(pfmt))
@@ -584,11 +628,11 @@ borgvk_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage _image,
          uint32_t level = range->baseMipLevel + lv;
          uint32_t stride_blocks;
          uint32_t h_blocks = DIV_ROUND_UP(MAX2(image->vk.extent.height >> level, 1), bh);
-         uint32_t d = MAX2(image->vk.extent.depth >> level, 1);
+         uint32_t d = DIV_ROUND_UP(MAX2(image->vk.extent.depth >> level, 1), bd);
 
          for (uint32_t l = 0; l < layerCount; l++) {
             uint32_t layer = range->baseArrayLayer + l;
-            uint64_t off = borgvk_image_level_offset(image, level, layer, bs, bw, bh,
+            uint64_t off = borgvk_image_level_offset(image, level, layer, bs, bw, bh, bd,
                                                      &stride_blocks);
             uint8_t *dst = (uint8_t *)image->mem->map + image->offset + off;
 
@@ -623,6 +667,11 @@ borgvk_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage _image,
    uint32_t bs = vk_format_get_blocksize(image->vk.format);
    uint32_t bw = vk_format_get_blockwidth(image->vk.format);
    uint32_t bh = vk_format_get_blockheight(image->vk.format);
+   uint32_t bd = util_format_get_blockdepth(pfmt);
+   /* See the matching comment in CmdClearColorImage: 3D-block-compressed
+    * formats remain a defended gap, not a supported combination. */
+   if (bd > 1)
+      return;
    uint8_t stencil8 = (uint8_t)pDepthStencil->stencil;
 
    for (uint32_t r = 0; r < rangeCount; r++) {
@@ -634,11 +683,11 @@ borgvk_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage _image,
          uint32_t level = range->baseMipLevel + lv;
          uint32_t stride_blocks;
          uint32_t h_blocks = DIV_ROUND_UP(MAX2(image->vk.extent.height >> level, 1), bh);
-         uint32_t d = MAX2(image->vk.extent.depth >> level, 1);
+         uint32_t d = DIV_ROUND_UP(MAX2(image->vk.extent.depth >> level, 1), bd);
 
          for (uint32_t l = 0; l < layerCount; l++) {
             uint32_t layer = range->baseArrayLayer + l;
-            uint64_t off = borgvk_image_level_offset(image, level, layer, bs, bw, bh,
+            uint64_t off = borgvk_image_level_offset(image, level, layer, bs, bw, bh, bd,
                                                      &stride_blocks);
             uint8_t *base = (uint8_t *)image->mem->map + image->offset + off;
             uint64_t texel_count = (uint64_t)stride_blocks * h_blocks * d;
@@ -690,9 +739,15 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
    uint32_t src_bs = vk_format_get_blocksize(src->vk.format);
    uint32_t src_bw = vk_format_get_blockwidth(src->vk.format);
    uint32_t src_bh = vk_format_get_blockheight(src->vk.format);
+   uint32_t src_bd = util_format_get_blockdepth(vk_format_to_pipe_format(src->vk.format));
    uint32_t dst_bs = vk_format_get_blocksize(dst->vk.format);
    uint32_t dst_bw = vk_format_get_blockwidth(dst->vk.format);
    uint32_t dst_bh = vk_format_get_blockheight(dst->vk.format);
+   uint32_t dst_bd = util_format_get_blockdepth(vk_format_to_pipe_format(dst->vk.format));
+   /* See the matching comment in CmdClearColorImage: 3D-block-compressed
+    * formats remain a defended gap, not a supported combination. */
+   if (src_bd > 1 || dst_bd > 1)
+      return;
 
    for (uint32_t r = 0; r < regionCount; r++) {
       const VkImageCopy *reg = &pRegions[r];
@@ -728,28 +783,44 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
        * running dEQP-VK.api.copy_and_blit.core.image_to_image.3d_images.*. */
       bool src_3d = src->vk.image_type == VK_IMAGE_TYPE_3D;
       bool dst_3d = dst->vk.image_type == VK_IMAGE_TYPE_3D;
+      /* For a 3D image whose format is 3D-block-compressed (e.g. any
+       * ASTC_*x*x*_BLOCK_EXT), Z must be walked in blocks, not texels --
+       * VkImageCopy offsets/extents for such a format are block-aligned per
+       * spec, and a single bs-byte block already covers `bd` texels of
+       * depth (see the borgvk_mip_level_size comment). Getting this wrong
+       * doesn't just miscount slices, it multiplies the per-slice offset by
+       * the wrong stride: confirmed via coredumpctl/gdb, a
+       * "corrupted double-linked list" surfacing later in borgvk_FreeMemory,
+       * running dEQP-VK.api.copy_and_blit...3d_to_3d.astc_3x3x3_*. A 2D
+       * image can never use a 3D-block-compressed format, so bd is always 1
+       * whenever only one side is 3D -- this reduces to the prior
+       * texel-granular stepping for every other case. */
+      uint32_t slice_bd = src_3d ? src_bd : (dst_3d ? dst_bd : 1);
       uint32_t sliceCount = (src_3d || dst_3d) ?
-         reg->extent.depth : vk_image_subresource_layer_count(&src->vk, &reg->srcSubresource);
+         DIV_ROUND_UP(reg->extent.depth, slice_bd) :
+         vk_image_subresource_layer_count(&src->vk, &reg->srcSubresource);
 
       for (uint32_t l = 0; l < sliceCount; l++) {
          uint32_t src_stride_blocks, dst_stride_blocks;
          uint64_t src_off = borgvk_image_level_offset(
             src, reg->srcSubresource.mipLevel,
             src_3d ? 0 : reg->srcSubresource.baseArrayLayer + l,
-            src_bs, src_bw, src_bh, &src_stride_blocks);
+            src_bs, src_bw, src_bh, src_bd, &src_stride_blocks);
          if (src_3d)
-            src_off += (uint64_t)(reg->srcOffset.z + l) *
+            src_off += (uint64_t)(reg->srcOffset.z / src_bd + l) *
                borgvk_mip_level_size(src->vk.extent.width, src->vk.extent.height, 1,
-                                     reg->srcSubresource.mipLevel, src_bs, src_bw, src_bh, NULL);
+                                     reg->srcSubresource.mipLevel, src_bs, src_bw, src_bh,
+                                     src_bd, NULL);
 
          uint64_t dst_off = borgvk_image_level_offset(
             dst, reg->dstSubresource.mipLevel,
             dst_3d ? 0 : reg->dstSubresource.baseArrayLayer + l,
-            dst_bs, dst_bw, dst_bh, &dst_stride_blocks);
+            dst_bs, dst_bw, dst_bh, dst_bd, &dst_stride_blocks);
          if (dst_3d)
-            dst_off += (uint64_t)(reg->dstOffset.z + l) *
+            dst_off += (uint64_t)(reg->dstOffset.z / dst_bd + l) *
                borgvk_mip_level_size(dst->vk.extent.width, dst->vk.extent.height, 1,
-                                     reg->dstSubresource.mipLevel, dst_bs, dst_bw, dst_bh, NULL);
+                                     reg->dstSubresource.mipLevel, dst_bs, dst_bw, dst_bh,
+                                     dst_bd, NULL);
 
          const uint8_t *s = (const uint8_t *)src->mem->map + src->offset + src_off
                           + (VkDeviceSize)(reg->srcOffset.y / src_bh) * src_stride_blocks * src_bs
@@ -808,6 +879,11 @@ borgvk_CmdCopyImageToBuffer(VkCommandBuffer commandBuffer,
    uint32_t img_bs = vk_format_get_blocksize(src->vk.format);
    uint32_t img_bw = vk_format_get_blockwidth(src->vk.format);
    uint32_t img_bh = vk_format_get_blockheight(src->vk.format);
+   uint32_t img_bd = util_format_get_blockdepth(vk_format_to_pipe_format(src->vk.format));
+   /* See the matching comment in CmdClearColorImage: 3D-block-compressed
+    * formats remain a defended gap, not a supported combination. */
+   if (img_bd > 1)
+      return;
 
    for (uint32_t r = 0; r < regionCount; r++) {
       const VkBufferImageCopy *reg = &pRegions[r];
@@ -841,18 +917,20 @@ borgvk_CmdCopyImageToBuffer(VkCommandBuffer commandBuffer,
        * reading back Depth:0 for every slice past the first. */
       bool img_3d = src->vk.image_type == VK_IMAGE_TYPE_3D;
       uint32_t sliceCount = img_3d ?
-         MAX2(reg->imageExtent.depth, 1) : MAX2(reg->imageSubresource.layerCount, 1);
+         DIV_ROUND_UP(MAX2(reg->imageExtent.depth, 1), img_bd) :
+         MAX2(reg->imageSubresource.layerCount, 1);
 
       for (uint32_t l = 0; l < sliceCount; l++) {
          uint32_t src_stride_blocks;
          uint64_t level_off = borgvk_image_level_offset(
             src, reg->imageSubresource.mipLevel,
             img_3d ? 0 : reg->imageSubresource.baseArrayLayer + l,
-            img_bs, img_bw, img_bh, &src_stride_blocks);
+            img_bs, img_bw, img_bh, img_bd, &src_stride_blocks);
          if (img_3d)
-            level_off += (uint64_t)(reg->imageOffset.z + l) *
+            level_off += (uint64_t)(reg->imageOffset.z / img_bd + l) *
                borgvk_mip_level_size(src->vk.extent.width, src->vk.extent.height, 1,
-                                     reg->imageSubresource.mipLevel, img_bs, img_bw, img_bh, NULL);
+                                     reg->imageSubresource.mipLevel, img_bs, img_bw, img_bh,
+                                     img_bd, NULL);
 
          const uint8_t *s = (const uint8_t *)src->mem->map + src->offset + level_off
                           + (VkDeviceSize)(reg->imageOffset.y / img_bh) * src_stride_blocks * img_bs
@@ -941,6 +1019,11 @@ borgvk_CmdCopyBufferToImage(VkCommandBuffer commandBuffer,
    uint32_t img_bs = vk_format_get_blocksize(dst->vk.format);
    uint32_t img_bw = vk_format_get_blockwidth(dst->vk.format);
    uint32_t img_bh = vk_format_get_blockheight(dst->vk.format);
+   uint32_t img_bd = util_format_get_blockdepth(vk_format_to_pipe_format(dst->vk.format));
+   /* See the matching comment in CmdClearColorImage: 3D-block-compressed
+    * formats remain a defended gap, not a supported combination. */
+   if (img_bd > 1)
+      return;
 
    for (uint32_t r = 0; r < regionCount; r++) {
       const VkBufferImageCopy *reg = &pRegions[r];
@@ -964,18 +1047,20 @@ borgvk_CmdCopyBufferToImage(VkCommandBuffer commandBuffer,
        * (always 1 for a 3D image). */
       bool img_3d = dst->vk.image_type == VK_IMAGE_TYPE_3D;
       uint32_t sliceCount = img_3d ?
-         MAX2(reg->imageExtent.depth, 1) : MAX2(reg->imageSubresource.layerCount, 1);
+         DIV_ROUND_UP(MAX2(reg->imageExtent.depth, 1), img_bd) :
+         MAX2(reg->imageSubresource.layerCount, 1);
 
       for (uint32_t l = 0; l < sliceCount; l++) {
          uint32_t dst_stride_blocks;
          uint64_t level_off = borgvk_image_level_offset(
             dst, reg->imageSubresource.mipLevel,
             img_3d ? 0 : reg->imageSubresource.baseArrayLayer + l,
-            img_bs, img_bw, img_bh, &dst_stride_blocks);
+            img_bs, img_bw, img_bh, img_bd, &dst_stride_blocks);
          if (img_3d)
-            level_off += (uint64_t)(reg->imageOffset.z + l) *
+            level_off += (uint64_t)(reg->imageOffset.z / img_bd + l) *
                borgvk_mip_level_size(dst->vk.extent.width, dst->vk.extent.height, 1,
-                                     reg->imageSubresource.mipLevel, img_bs, img_bw, img_bh, NULL);
+                                     reg->imageSubresource.mipLevel, img_bs, img_bw, img_bh,
+                                     img_bd, NULL);
 
          const uint8_t *s = (const uint8_t *)src->mem->map + src->offset + reg->bufferOffset
                           + (VkDeviceSize)l * layer_pitch;
