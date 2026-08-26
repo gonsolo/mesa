@@ -340,12 +340,20 @@ borgvk_image_level_offset(const struct borgvk_image *image, uint32_t level,
  * running dEQP-VK.api.command_buffers.record_many_draws_primary_1, which
  * exercises a depth-stencil attachment readback). For VK_IMAGE_ASPECT_COLOR_BIT
  * this returns the image's own format unchanged, so callers that always pass
- * COLOR_BIT see no behavior change. */
+ * COLOR_BIT see no behavior change. A region can also legally name BOTH
+ * VK_IMAGE_ASPECT_DEPTH_BIT and _STENCIL_BIT together (image-to-image copies
+ * between two images of the same combined format): that means "copy the
+ * whole combined texel" and must NOT be forwarded to
+ * vk_format_get_aspect_format(), which asserts on a single-bit aspect mask
+ * (confirmed via a clean assertion failure, not a crash, running
+ * dEQP-VK.api.copy_and_blit...depth_stencil_aspects tests) -- so it's handled
+ * as the identity case here, same as passing the format through unchanged. */
 static void
 borgvk_aspect_block_size(VkFormat combined_format, VkImageAspectFlags aspect,
                          uint32_t *bs_out, uint32_t *bw_out, uint32_t *bh_out)
 {
-   VkFormat fmt = vk_format_get_aspect_format(combined_format, aspect);
+   VkFormat fmt = util_bitcount(aspect) == 1 ?
+      vk_format_get_aspect_format(combined_format, aspect) : combined_format;
    *bs_out = vk_format_get_blocksize(fmt);
    *bw_out = vk_format_get_blockwidth(fmt);
    *bh_out = vk_format_get_blockheight(fmt);
