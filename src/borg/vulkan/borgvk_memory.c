@@ -203,8 +203,16 @@ borgvk_GetDeviceBufferMemoryRequirements(
    const VkDeviceBufferMemoryRequirements *pInfo,
    VkMemoryRequirements2 *pMemoryRequirements)
 {
+   /* align64(size, 256) overflows (wraps toward 0) for a size within 255 of
+    * UINT64_MAX. borgvk_CreateBuffer never rejects an oversized VkBuffer (it
+    * defers all real allocation to vkAllocateMemory/vkBindBufferMemory), so
+    * reporting a wrapped, too-small size here made VK-GL-CTS's
+    * api.buffer.basic.size_max_uint64 fail: it requires
+    * memoryRequirements.size >= the buffer's own requested size whenever
+    * creation succeeds. Saturate instead of wrapping. */
+   uint64_t size = pInfo->pCreateInfo->size;
    pMemoryRequirements->memoryRequirements.size =
-      align64(pInfo->pCreateInfo->size, 256);
+      size > UINT64_MAX - 255 ? UINT64_MAX : align64(size, 256);
    pMemoryRequirements->memoryRequirements.alignment = 256;
    pMemoryRequirements->memoryRequirements.memoryTypeBits = 0x1;
 
