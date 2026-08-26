@@ -243,19 +243,105 @@ borgvk_BindBufferMemory2(VkDevice _device, uint32_t bindInfoCount,
    return VK_SUCCESS;
 }
 
+/* Was entirely missing (discarded into the generic vk_cmd_queue). Needed by
+ * ImageClearingTestInstance::preClearImage, which cmdFillBuffer(0)s a staging
+ * buffer before uploading it into an image via CmdCopyBufferToImage -- a
+ * no-op fill meant that upload copied whatever garbage the staging buffer's
+ * host allocation already contained instead of zero. */
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer _buffer,
+                     VkDeviceSize dstOffset, VkDeviceSize size, uint32_t data)
+{
+   VK_FROM_HANDLE(borgvk_buffer, buffer, _buffer);
+
+   if (!buffer || !buffer->mem || !buffer->mem->map)
+      return;
+
+   VkDeviceSize fill_size = size == VK_WHOLE_SIZE ? buffer->vk.size - dstOffset : size;
+   uint8_t *dst = (uint8_t *)buffer->mem->map + buffer->offset + dstOffset;
+
+   for (VkDeviceSize i = 0; i < fill_size / 4; i++)
+      ((uint32_t *)dst)[i] = data;
+}
+
 /* ---- Images ----------------------------------------------------------- */
+
+/* One consistent linear layout, shared by every place that reads or writes
+ * image bytes (borgvk_image_size, CmdClearColorImage, CmdCopyImage,
+ * CmdCopyImageToBuffer): layer-major, mip-minor -- layer 0's full mip chain
+ * (level 0, level 1, ...) is contiguous, then layer 1's, etc. This is
+ * internal to borgvk only (VK_IMAGE_TILING_LINEAR's real layout is
+ * implementation-defined, and nothing outside this driver ever reads this
+ * memory), but every reader/writer MUST agree, or an offset computed one way
+ * and validated against a total computed another way silently walks off the
+ * end of the allocation -- the same class of bug as the earlier CmdCopyImage
+ * block-size overflow. Returns the level's size in bytes and, via
+ * *width_blocks_out, its row stride (in format blocks) for callers doing
+ * row-by-row copies. */
+static uint64_t
+borgvk_mip_level_size(uint32_t width, uint32_t height, uint32_t depth,
+                      uint32_t level, uint32_t bs, uint32_t bw, uint32_t bh,
+                      uint32_t *width_blocks_out)
+{
+   uint32_t w = MAX2(width >> level, 1);
+   uint32_t h = MAX2(height >> level, 1);
+   uint32_t d = MAX2(depth >> level, 1);
+   uint32_t w_blocks = DIV_ROUND_UP(w, bw);
+   uint32_t h_blocks = DIV_ROUND_UP(h, bh);
+
+   if (width_blocks_out)
+      *width_blocks_out = w_blocks;
+   return (uint64_t)w_blocks * h_blocks * d * bs;
+}
+
+static uint64_t
+borgvk_image_layer_size(const struct borgvk_image *image, uint32_t bs,
+                        uint32_t bw, uint32_t bh)
+{
+   uint64_t layer_size = 0;
+   for (uint32_t l = 0; l < image->vk.mip_levels; l++)
+      layer_size += borgvk_mip_level_size(image->vk.extent.width,
+                                          image->vk.extent.height,
+                                          image->vk.extent.depth,
+                                          l, bs, bw, bh, NULL);
+   return layer_size;
+}
+
+/* Byte offset of (level, layer)'s data within the image's backing memory,
+ * plus that level's row stride (in format blocks). */
+static uint64_t
+borgvk_image_level_offset(const struct borgvk_image *image, uint32_t level,
+                          uint32_t layer, uint32_t bs, uint32_t bw, uint32_t bh,
+                          uint32_t *stride_blocks_out)
+{
+   uint64_t layer_size = borgvk_image_layer_size(image, bs, bw, bh);
+   uint64_t level_offset = 0;
+
+   for (uint32_t l = 0; l < level; l++)
+      level_offset += borgvk_mip_level_size(image->vk.extent.width,
+                                            image->vk.extent.height,
+                                            image->vk.extent.depth,
+                                            l, bs, bw, bh, NULL);
+   borgvk_mip_level_size(image->vk.extent.width, image->vk.extent.height,
+                         image->vk.extent.depth, level, bs, bw, bh,
+                         stride_blocks_out);
+
+   return (uint64_t)layer * layer_size + level_offset;
+}
 
 static VkDeviceSize
 borgvk_image_size(const VkImageCreateInfo *info)
 {
-   /* Rough linear size: enough to back the image in host RAM. We never sample
-    * or render to it on the host. */
    uint32_t bs = vk_format_get_blocksize(info->format);
-   uint64_t size = (uint64_t)info->extent.width * info->extent.height *
-                   info->extent.depth * MAX2(info->arrayLayers, 1) * MAX2(bs, 1);
-   /* crude mip allowance */
-   if (info->mipLevels > 1)
-      size += size / 2;
+   uint32_t bw = vk_format_get_blockwidth(info->format);
+   uint32_t bh = vk_format_get_blockheight(info->format);
+   uint64_t layer_size = 0;
+
+   for (uint32_t l = 0; l < MAX2(info->mipLevels, 1); l++)
+      layer_size += borgvk_mip_level_size(info->extent.width, info->extent.height,
+                                          info->extent.depth, l, bs, bw, bh, NULL);
+
+   uint64_t size = layer_size * MAX2(info->arrayLayers, 1);
    return align64(size, 256);
 }
 
@@ -388,9 +474,74 @@ borgvk_DestroyImageView(VkDevice _device, VkImageView _view,
    vk_image_view_destroy(&device->vk, pAllocator, view);
 }
 
+/* Every other vkCmd* is recorded into the generic vk_cmd_queue and discarded
+ * on reset (see the file comment in borgvk_cmd_buffer.c) -- fine for
+ * rendering, since the cube's real state is read from bound
+ * buffers/descriptors at submit time, not replayed commands. But
+ * CmdClearColorImage's whole observable effect IS the write it makes to image
+ * memory, and CTS's image_clearing tests read that memory back afterward. Left
+ * unimplemented, the clear byte pattern was whatever the host malloc arena
+ * happened to already contain -- which is why the *_clamp_input tests were
+ * flipping Pass/Fail between otherwise-identical runs (confirmed by diffing
+ * two full CTS runs where the only driver change was unrelated: whatever
+ * garbage ended up in a given allocation depends on the process's prior
+ * allocation history). Fixed the same way as CmdCopyImage: execute for real
+ * at record time instead of queuing, addressed via the shared
+ * borgvk_image_level_offset layout so every mip level/array layer in range is
+ * covered, not just level 0. util_format_pack_rgba() clamps to the
+ * destination format's representable range, which is exactly the
+ * "_clamp_input" semantics CTS is checking. */
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage _image,
+                          VkImageLayout imageLayout,
+                          const VkClearColorValue *pColor,
+                          uint32_t rangeCount, const VkImageSubresourceRange *pRanges)
+{
+   VK_FROM_HANDLE(borgvk_image, image, _image);
+
+   if (!image || !image->mem || !image->mem->map)
+      return;
+
+   enum pipe_format pfmt = vk_format_to_pipe_format(image->vk.format);
+   uint32_t bs = vk_format_get_blocksize(image->vk.format);
+   uint32_t bw = vk_format_get_blockwidth(image->vk.format);
+   uint32_t bh = vk_format_get_blockheight(image->vk.format);
+
+   uint8_t pixel[16]; /* largest uncompressed colour format block is 16 B */
+   if (util_format_is_pure_uint(pfmt))
+      util_format_pack_rgba(pfmt, pixel, pColor->uint32, 1);
+   else if (util_format_is_pure_sint(pfmt))
+      util_format_pack_rgba(pfmt, pixel, pColor->int32, 1);
+   else
+      util_format_pack_rgba(pfmt, pixel, pColor->float32, 1);
+
+   for (uint32_t r = 0; r < rangeCount; r++) {
+      const VkImageSubresourceRange *range = &pRanges[r];
+      uint32_t levelCount = vk_image_subresource_level_count(&image->vk, range);
+      uint32_t layerCount = vk_image_subresource_layer_count(&image->vk, range);
+
+      for (uint32_t lv = 0; lv < levelCount; lv++) {
+         uint32_t level = range->baseMipLevel + lv;
+         uint32_t stride_blocks;
+         uint32_t h_blocks = DIV_ROUND_UP(MAX2(image->vk.extent.height >> level, 1), bh);
+         uint32_t d = MAX2(image->vk.extent.depth >> level, 1);
+
+         for (uint32_t l = 0; l < layerCount; l++) {
+            uint32_t layer = range->baseArrayLayer + l;
+            uint64_t off = borgvk_image_level_offset(image, level, layer, bs, bw, bh,
+                                                     &stride_blocks);
+            uint8_t *dst = (uint8_t *)image->mem->map + image->offset + off;
+
+            for (uint64_t t = 0; t < (uint64_t)stride_blocks * h_blocks * d; t++)
+               memcpy(dst + t * bs, pixel, bs);
+         }
+      }
+   }
+}
+
 /* Image copy for readback: both images are linear host-RAM; just memcpy the
- * region. The CTS path (Image::copyToLinearImage) copies mip 0, layer 0 of the
- * colour attachment into a linear staging image of the same size/format. */
+ * region, addressed via the shared borgvk_image_level_offset layout so every
+ * mip level/array layer a region names is handled, not just level 0/layer 0. */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
                     VkImage srcImage, VkImageLayout srcImageLayout,
@@ -404,8 +555,6 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
        !src->mem->map || !dst->mem->map)
       return;
 
-   uint32_t bs = vk_format_get_blocksize(src->vk.format);
-
    /* Strides and extents must be counted in compressed blocks, not texels:
     * vk_format_get_blocksize() returns bytes per BLOCK (e.g. 16 B covering a
     * 4x4 texel block for ETC2/EAC), not bytes per texel. Multiplying texel
@@ -415,27 +564,159 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
     * offsets/extents are always block-aligned per the spec, so the divisions
     * below are exact. For uncompressed formats bw = bh = 1 and this is
     * unchanged from the original per-texel math. */
-   uint32_t bw = vk_format_get_blockwidth(src->vk.format);
-   uint32_t bh = vk_format_get_blockheight(src->vk.format);
-   uint32_t src_stride_blocks = src->vk.extent.width / bw;
-   uint32_t dst_stride_blocks = dst->vk.extent.width / bw;
+   uint32_t src_bs = vk_format_get_blocksize(src->vk.format);
+   uint32_t src_bw = vk_format_get_blockwidth(src->vk.format);
+   uint32_t src_bh = vk_format_get_blockheight(src->vk.format);
+   uint32_t dst_bs = vk_format_get_blocksize(dst->vk.format);
+   uint32_t dst_bw = vk_format_get_blockwidth(dst->vk.format);
+   uint32_t dst_bh = vk_format_get_blockheight(dst->vk.format);
 
    for (uint32_t r = 0; r < regionCount; r++) {
       const VkImageCopy *reg = &pRegions[r];
-      uint32_t w_blocks = DIV_ROUND_UP(reg->extent.width, bw);
-      uint32_t h_blocks = DIV_ROUND_UP(reg->extent.height, bh);
+      uint32_t w_blocks = DIV_ROUND_UP(reg->extent.width, src_bw);
+      uint32_t h_blocks = DIV_ROUND_UP(reg->extent.height, src_bh);
+      uint32_t layerCount = vk_image_subresource_layer_count(&src->vk, &reg->srcSubresource);
 
-      const uint8_t *s = (const uint8_t *)src->mem->map + src->offset
-                       + (VkDeviceSize)(reg->srcOffset.y / bh) * src_stride_blocks * bs
-                       + (VkDeviceSize)(reg->srcOffset.x / bw) * bs;
-      uint8_t *d = (uint8_t *)dst->mem->map + dst->offset
-                 + (VkDeviceSize)(reg->dstOffset.y / bh) * dst_stride_blocks * bs
-                 + (VkDeviceSize)(reg->dstOffset.x / bw) * bs;
+      for (uint32_t l = 0; l < layerCount; l++) {
+         uint32_t src_stride_blocks, dst_stride_blocks;
+         uint64_t src_off = borgvk_image_level_offset(
+            src, reg->srcSubresource.mipLevel, reg->srcSubresource.baseArrayLayer + l,
+            src_bs, src_bw, src_bh, &src_stride_blocks);
+         uint64_t dst_off = borgvk_image_level_offset(
+            dst, reg->dstSubresource.mipLevel, reg->dstSubresource.baseArrayLayer + l,
+            dst_bs, dst_bw, dst_bh, &dst_stride_blocks);
 
-      for (uint32_t row = 0; row < h_blocks; row++) {
-         memcpy(d + (size_t)row * w_blocks * bs,
-                s + (size_t)row * src_stride_blocks * bs,
-                (size_t)w_blocks * bs);
+         const uint8_t *s = (const uint8_t *)src->mem->map + src->offset + src_off
+                          + (VkDeviceSize)(reg->srcOffset.y / src_bh) * src_stride_blocks * src_bs
+                          + (VkDeviceSize)(reg->srcOffset.x / src_bw) * src_bs;
+         uint8_t *d = (uint8_t *)dst->mem->map + dst->offset + dst_off
+                    + (VkDeviceSize)(reg->dstOffset.y / dst_bh) * dst_stride_blocks * dst_bs
+                    + (VkDeviceSize)(reg->dstOffset.x / dst_bw) * dst_bs;
+
+         for (uint32_t row = 0; row < h_blocks; row++) {
+            memcpy(d + (size_t)row * w_blocks * dst_bs,
+                   s + (size_t)row * src_stride_blocks * src_bs,
+                   (size_t)w_blocks * src_bs);
+         }
+      }
+   }
+}
+
+/* Like CmdClearColorImage, this was entirely missing -- discarded into the
+ * generic vk_cmd_queue like every other unimplemented vkCmd*. That's the
+ * actual reason CmdClearColorImage's fix alone didn't make image_clearing
+ * tests pass: CTS's own readback path (ImageClearingTestInstance::readImage)
+ * doesn't read the image directly, it always goes through
+ * vkCmdCopyImageToBuffer into a host-visible staging buffer first. With this
+ * missing, that staging buffer was never actually written, so verification
+ * saw whatever the buffer's fresh host allocation already contained,
+ * regardless of what CmdClearColorImage or anything else wrote to the image.
+ * Addressed via the shared borgvk_image_level_offset layout so every mip
+ * level CTS reads back (not just level 0) sees real data. */
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdCopyImageToBuffer(VkCommandBuffer commandBuffer,
+                            VkImage _srcImage, VkImageLayout srcImageLayout,
+                            VkBuffer _dstBuffer,
+                            uint32_t regionCount, const VkBufferImageCopy *pRegions)
+{
+   VK_FROM_HANDLE(borgvk_image, src, _srcImage);
+   VK_FROM_HANDLE(borgvk_buffer, dst, _dstBuffer);
+
+   if (!src || !dst || !src->mem || !dst->mem || !src->mem->map || !dst->mem->map)
+      return;
+
+   uint32_t bs = vk_format_get_blocksize(src->vk.format);
+   uint32_t bw = vk_format_get_blockwidth(src->vk.format);
+   uint32_t bh = vk_format_get_blockheight(src->vk.format);
+
+   for (uint32_t r = 0; r < regionCount; r++) {
+      const VkBufferImageCopy *reg = &pRegions[r];
+      uint32_t w_blocks = DIV_ROUND_UP(reg->imageExtent.width, bw);
+      uint32_t h_blocks = DIV_ROUND_UP(reg->imageExtent.height, bh);
+      /* 0 means tightly packed (VkBufferImageCopy spec). */
+      uint32_t row_len_blocks = reg->bufferRowLength ?
+         DIV_ROUND_UP(reg->bufferRowLength, bw) : w_blocks;
+      uint32_t img_h_blocks = reg->bufferImageHeight ?
+         DIV_ROUND_UP(reg->bufferImageHeight, bh) : h_blocks;
+      uint64_t layer_pitch = (uint64_t)row_len_blocks * img_h_blocks * bs;
+      uint32_t layerCount = MAX2(reg->imageSubresource.layerCount, 1);
+
+      for (uint32_t l = 0; l < layerCount; l++) {
+         uint32_t src_stride_blocks;
+         uint64_t level_off = borgvk_image_level_offset(
+            src, reg->imageSubresource.mipLevel,
+            reg->imageSubresource.baseArrayLayer + l, bs, bw, bh, &src_stride_blocks);
+
+         const uint8_t *s = (const uint8_t *)src->mem->map + src->offset + level_off
+                          + (VkDeviceSize)(reg->imageOffset.y / bh) * src_stride_blocks * bs
+                          + (VkDeviceSize)(reg->imageOffset.x / bw) * bs;
+         uint8_t *d = (uint8_t *)dst->mem->map + dst->offset + reg->bufferOffset
+                    + (VkDeviceSize)l * layer_pitch;
+
+         for (uint32_t row = 0; row < h_blocks; row++) {
+            memcpy(d + (size_t)row * row_len_blocks * bs,
+                   s + (size_t)row * src_stride_blocks * bs,
+                   (size_t)w_blocks * bs);
+         }
+      }
+   }
+}
+
+/* Upload counterpart of CmdCopyImageToBuffer, same reasoning: was entirely
+ * missing (discarded into the generic vk_cmd_queue), which broke every test
+ * that pre-fills an image from a host buffer before checking a partial
+ * operation against it. Concretely: ImageClearingTestInstance::preClearImage
+ * cmdFillBuffer(0)s a staging buffer then vkCmdCopyBufferToImage()s it across
+ * every mip level and array layer *before* the real (possibly partial-range)
+ * clear -- so pixels/layers the real clear doesn't touch are supposed to read
+ * back as zero. Without this, they read back whatever the image's fresh host
+ * allocation already contained, which is why clear_color_image's
+ * multiple_layers/remaining_array_layers* groups kept failing even after
+ * CmdClearColorImage and CmdCopyImageToBuffer were both fixed. */
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdCopyBufferToImage(VkCommandBuffer commandBuffer,
+                            VkBuffer _srcBuffer, VkImage _dstImage,
+                            VkImageLayout dstImageLayout,
+                            uint32_t regionCount, const VkBufferImageCopy *pRegions)
+{
+   VK_FROM_HANDLE(borgvk_buffer, src, _srcBuffer);
+   VK_FROM_HANDLE(borgvk_image, dst, _dstImage);
+
+   if (!src || !dst || !src->mem || !dst->mem || !src->mem->map || !dst->mem->map)
+      return;
+
+   uint32_t bs = vk_format_get_blocksize(dst->vk.format);
+   uint32_t bw = vk_format_get_blockwidth(dst->vk.format);
+   uint32_t bh = vk_format_get_blockheight(dst->vk.format);
+
+   for (uint32_t r = 0; r < regionCount; r++) {
+      const VkBufferImageCopy *reg = &pRegions[r];
+      uint32_t w_blocks = DIV_ROUND_UP(reg->imageExtent.width, bw);
+      uint32_t h_blocks = DIV_ROUND_UP(reg->imageExtent.height, bh);
+      uint32_t row_len_blocks = reg->bufferRowLength ?
+         DIV_ROUND_UP(reg->bufferRowLength, bw) : w_blocks;
+      uint32_t img_h_blocks = reg->bufferImageHeight ?
+         DIV_ROUND_UP(reg->bufferImageHeight, bh) : h_blocks;
+      uint64_t layer_pitch = (uint64_t)row_len_blocks * img_h_blocks * bs;
+      uint32_t layerCount = MAX2(reg->imageSubresource.layerCount, 1);
+
+      for (uint32_t l = 0; l < layerCount; l++) {
+         uint32_t dst_stride_blocks;
+         uint64_t level_off = borgvk_image_level_offset(
+            dst, reg->imageSubresource.mipLevel,
+            reg->imageSubresource.baseArrayLayer + l, bs, bw, bh, &dst_stride_blocks);
+
+         const uint8_t *s = (const uint8_t *)src->mem->map + src->offset + reg->bufferOffset
+                          + (VkDeviceSize)l * layer_pitch;
+         uint8_t *d = (uint8_t *)dst->mem->map + dst->offset + level_off
+                    + (VkDeviceSize)(reg->imageOffset.y / bh) * dst_stride_blocks * bs
+                    + (VkDeviceSize)(reg->imageOffset.x / bw) * bs;
+
+         for (uint32_t row = 0; row < h_blocks; row++) {
+            memcpy(d + (size_t)row * dst_stride_blocks * bs,
+                   s + (size_t)row * row_len_blocks * bs,
+                   (size_t)w_blocks * bs);
+         }
       }
    }
 }
