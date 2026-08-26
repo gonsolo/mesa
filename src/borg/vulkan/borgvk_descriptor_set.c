@@ -37,6 +37,21 @@ borgvk_CreateDescriptorSetLayout(VkDevice _device,
 
 /* DestroyDescriptorSetLayout is the common (refcounted) entrypoint. */
 
+VKAPI_ATTR void VKAPI_CALL
+borgvk_GetDescriptorSetLayoutSupport(VkDevice _device,
+                                     const VkDescriptorSetLayoutCreateInfo *pCreateInfo,
+                                     VkDescriptorSetLayoutSupport *pSupport)
+{
+   /* Mandatory core Vulkan 1.1 entry point, entirely missing -- same failure
+    * mode as the other gaps this pass has been finding: a null
+    * dispatch-table slot, SEGV the moment CTS's maintenance3_check.* calls
+    * through it. borgvk has no descriptor-indexing/mutable-descriptor-type
+    * support to account for (not advertised anywhere in this driver), so the
+    * only real constraint is the fixed per-set binding array used by
+    * borgvk_descriptor_set (BORGVK_MAX_BINDINGS, see borgvk_UpdateDescriptorSets). */
+   pSupport->supported = pCreateInfo->bindingCount <= BORGVK_MAX_BINDINGS;
+}
+
 /* ---- Descriptor pool -------------------------------------------------- */
 
 VKAPI_ATTR VkResult VKAPI_CALL
