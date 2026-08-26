@@ -424,6 +424,28 @@ borgvk_GetPhysicalDeviceSparseImageFormatProperties2(
    *pPropertyCount = 0;
 }
 
+VKAPI_ATTR void VKAPI_CALL
+borgvk_GetPhysicalDeviceExternalBufferProperties(
+   VkPhysicalDevice physicalDevice,
+   const VkPhysicalDeviceExternalBufferInfo *pExternalBufferInfo,
+   VkExternalBufferProperties *pExternalBufferProperties)
+{
+   /* Unlike External{Fence,Semaphore}Properties, Mesa's vk runtime has no
+    * vk_common_ fallback for this one -- every driver must implement it
+    * itself, and borgvk didn't, so this was a NULL dispatch-table call
+    * (confirmed via coredumpctl/gdb: SEGV in
+    * vk::InstanceDriver::getPhysicalDeviceExternalBufferProperties).
+    * Borg has no import/export path for any external memory handle type
+    * (malloc+serial only), so every handle type reports unsupported --
+    * same "no support" answer lvp_GetPhysicalDeviceExternalBufferProperties
+    * gives for any handle type it doesn't implement. */
+   pExternalBufferProperties->externalMemoryProperties = (VkExternalMemoryProperties){
+      .externalMemoryFeatures = 0,
+      .exportFromImportedHandleTypes = 0,
+      .compatibleHandleTypes = 0,
+   };
+}
+
 static void
 borgvk_get_properties(struct vk_properties *p)
 {
