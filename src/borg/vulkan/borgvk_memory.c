@@ -1379,26 +1379,42 @@ borgvk_CmdBlitImage(VkCommandBuffer commandBuffer,
                   float sx = reg->srcOffsets[0].x + wx * src_ex;
                   uint8_t *dtexel = drow + (uint64_t)dx * dst_bs;
 
-                  if (filter == VK_FILTER_NEAREST || is_stencil_aspect) {
-                     int32_t six = CLAMP((int32_t)floorf(sx), 0, (int32_t)src_level_w - 1);
-                     int32_t siy = CLAMP((int32_t)floorf(sy), 0, (int32_t)src_level_h - 1);
-                     int32_t siz = CLAMP((int32_t)floorf(sz), 0, (int32_t)src_level_d - 1);
+                  /* A combined DEPTH+STENCIL region has both aspect bits set
+                   * at once (CTS's defaultDSSourceLayer does exactly this),
+                   * so stencil and depth/color must be handled as
+                   * independent writes to the same texel rather than a
+                   * mutually-exclusive dispatch -- an earlier else-if chain
+                   * here meant a combined-aspect blit only ever wrote
+                   * stencil (nearest-filter case) or silently dropped depth
+                   * entirely (linear-filter case, since is_stencil_aspect
+                   * alone routed the whole texel through the nearest/stencil
+                   * path). Stencil is never filtered (no LINEAR feature ever
+                   * granted for it), so it always samples nearest regardless
+                   * of `filter`. */
+                  int32_t six = CLAMP((int32_t)floorf(sx), 0, (int32_t)src_level_w - 1);
+                  int32_t siy = CLAMP((int32_t)floorf(sy), 0, (int32_t)src_level_h - 1);
+                  int32_t siz = CLAMP((int32_t)floorf(sz), 0, (int32_t)src_level_d - 1);
+
+                  if (is_stencil_aspect) {
                      const uint8_t *stexel = src_base +
                         (((uint64_t)siz * src_level_h + siy) * src_stride_texels + six) * src_bs;
+                     /* PIPE_FORMAT_Z16_UNORM_S8_UINT has no
+                      * pack_s_8uint/unpack_s_8uint either -- see
+                      * borgvk_is_z16_s8's comment. Byte 2 of its 3-byte
+                      * texel is the stencil value directly. */
+                     uint8_t s = borgvk_is_z16_s8(src_pfmt) ? stexel[2] : 0;
+                     if (!borgvk_is_z16_s8(src_pfmt))
+                        util_format_unpack_s_8uint(src_pfmt, &s, stexel, 1);
+                     if (borgvk_is_z16_s8(dst_pfmt))
+                        dtexel[2] = s;
+                     else
+                        util_format_pack_s_8uint(dst_pfmt, dtexel, &s, 1);
+                  }
 
-                     if (is_stencil_aspect) {
-                        /* PIPE_FORMAT_Z16_UNORM_S8_UINT has no
-                         * pack_s_8uint/unpack_s_8uint either -- see
-                         * borgvk_is_z16_s8's comment. Byte 2 of its 3-byte
-                         * texel is the stencil value directly. */
-                        uint8_t s = borgvk_is_z16_s8(src_pfmt) ? stexel[2] : 0;
-                        if (!borgvk_is_z16_s8(src_pfmt))
-                           util_format_unpack_s_8uint(src_pfmt, &s, stexel, 1);
-                        if (borgvk_is_z16_s8(dst_pfmt))
-                           dtexel[2] = s;
-                        else
-                           util_format_pack_s_8uint(dst_pfmt, dtexel, &s, 1);
-                     } else if (is_depth_aspect) {
+                  if (is_depth_aspect) {
+                     if (filter == VK_FILTER_NEAREST) {
+                        const uint8_t *stexel = src_base +
+                           (((uint64_t)siz * src_level_h + siy) * src_stride_texels + six) * src_bs;
                         float z = borgvk_is_z16_s8(src_pfmt) ? borgvk_z16_s8_unpack_z(stexel) : 0.0f;
                         if (!borgvk_is_z16_s8(src_pfmt))
                            util_format_unpack_z_float(src_pfmt, &z, stexel, 1);
@@ -1406,74 +1422,103 @@ borgvk_CmdBlitImage(VkCommandBuffer commandBuffer,
                            borgvk_z16_s8_pack_z(dtexel, z);
                         else
                            util_format_pack_z_float(dst_pfmt, dtexel, &z, 1);
-                     } else if (is_uint) {
-                        uint32_t v[4];
-                        util_format_unpack_rgba(src_pfmt, v, stexel, 1);
-                        util_format_pack_rgba(dst_pfmt, dtexel, v, 1);
-                     } else if (is_sint) {
-                        int32_t v[4];
-                        util_format_unpack_rgba(src_pfmt, v, stexel, 1);
-                        util_format_pack_rgba(dst_pfmt, dtexel, v, 1);
                      } else {
-                        float v[4];
-                        borgvk_unpack_rgba_float(src->vk.format, src_pfmt, stexel, v);
-                        borgvk_pack_rgba_float(dst->vk.format, dst_pfmt, dtexel, v);
-                     }
-                     continue;
-                  }
+                        /* Bilinear (2D) / trilinear (3D), texel-center
+                         * sampling with edge clamping -- degenerates to a
+                         * single sample per axis with only one texel. */
+                        float fx = sx - 0.5f, fy = sy - 0.5f, fz = sz - 0.5f;
+                        int32_t x0 = (int32_t)floorf(fx), y0 = (int32_t)floorf(fy), z0 = (int32_t)floorf(fz);
+                        float tx = fx - (float)x0, ty = fy - (float)y0, tz = fz - (float)z0;
+                        int32_t x1 = x0 + 1, y1 = y0 + 1, z1 = z0 + 1;
+                        x0 = CLAMP(x0, 0, (int32_t)src_level_w - 1);
+                        x1 = CLAMP(x1, 0, (int32_t)src_level_w - 1);
+                        y0 = CLAMP(y0, 0, (int32_t)src_level_h - 1);
+                        y1 = CLAMP(y1, 0, (int32_t)src_level_h - 1);
+                        z0 = CLAMP(z0, 0, (int32_t)src_level_d - 1);
+                        z1 = CLAMP(z1, 0, (int32_t)src_level_d - 1);
 
-                  /* VK_FILTER_LINEAR: bilinear (2D) / trilinear (3D),
-                   * texel-center sampling with edge clamping. Blend weight
-                   * per axis degenerates to a single sample (weight 1) when
-                   * that axis only has one texel, so 2D images (src_level_d
-                   * == 1) naturally reduce to plain bilinear. */
-                  float fx = sx - 0.5f, fy = sy - 0.5f, fz = sz - 0.5f;
-                  int32_t x0 = (int32_t)floorf(fx), y0 = (int32_t)floorf(fy), z0 = (int32_t)floorf(fz);
-                  float tx = fx - (float)x0, ty = fy - (float)y0, tz = fz - (float)z0;
-                  int32_t x1 = x0 + 1, y1 = y0 + 1, z1 = z0 + 1;
-                  x0 = CLAMP(x0, 0, (int32_t)src_level_w - 1);
-                  x1 = CLAMP(x1, 0, (int32_t)src_level_w - 1);
-                  y0 = CLAMP(y0, 0, (int32_t)src_level_h - 1);
-                  y1 = CLAMP(y1, 0, (int32_t)src_level_h - 1);
-                  z0 = CLAMP(z0, 0, (int32_t)src_level_d - 1);
-                  z1 = CLAMP(z1, 0, (int32_t)src_level_d - 1);
-
-                  float acc[4] = {0, 0, 0, 0};
-                  int32_t xs[2] = {x0, x1}, ys[2] = {y0, y1}, zs[2] = {z0, z1};
-                  float xw[2] = {1 - tx, tx}, yw[2] = {1 - ty, ty}, zw[2] = {1 - tz, tz};
-                  for (int iz = 0; iz < 2; iz++) {
-                     for (int iy = 0; iy < 2; iy++) {
-                        for (int ix = 0; ix < 2; ix++) {
-                           float weight = xw[ix] * yw[iy] * zw[iz];
-                           if (weight == 0.0f)
-                              continue;
-                           const uint8_t *stexel = src_base +
-                              (((uint64_t)zs[iz] * src_level_h + ys[iy]) * src_stride_texels
-                               + xs[ix]) * src_bs;
-                           if (is_depth_aspect) {
-                              float z = borgvk_is_z16_s8(src_pfmt) ?
-                                 borgvk_z16_s8_unpack_z(stexel) : 0.0f;
-                              if (!borgvk_is_z16_s8(src_pfmt))
-                                 util_format_unpack_z_float(src_pfmt, &z, stexel, 1);
-                              acc[0] += z * weight;
-                           } else {
-                              float v[4];
-                              borgvk_unpack_rgba_float(src->vk.format, src_pfmt, stexel, v);
-                              acc[0] += v[0] * weight;
-                              acc[1] += v[1] * weight;
-                              acc[2] += v[2] * weight;
-                              acc[3] += v[3] * weight;
+                        float acc = 0;
+                        int32_t xs[2] = {x0, x1}, ys[2] = {y0, y1}, zs[2] = {z0, z1};
+                        float xw[2] = {1 - tx, tx}, yw[2] = {1 - ty, ty}, zw[2] = {1 - tz, tz};
+                        for (int iz = 0; iz < 2; iz++) {
+                           for (int iy = 0; iy < 2; iy++) {
+                              for (int ix = 0; ix < 2; ix++) {
+                                 float weight = xw[ix] * yw[iy] * zw[iz];
+                                 if (weight == 0.0f)
+                                    continue;
+                                 const uint8_t *stexel = src_base +
+                                    (((uint64_t)zs[iz] * src_level_h + ys[iy]) * src_stride_texels
+                                     + xs[ix]) * src_bs;
+                                 float z = borgvk_is_z16_s8(src_pfmt) ?
+                                    borgvk_z16_s8_unpack_z(stexel) : 0.0f;
+                                 if (!borgvk_is_z16_s8(src_pfmt))
+                                    util_format_unpack_z_float(src_pfmt, &z, stexel, 1);
+                                 acc += z * weight;
+                              }
                            }
                         }
+                        if (borgvk_is_z16_s8(dst_pfmt))
+                           borgvk_z16_s8_pack_z(dtexel, acc);
+                        else
+                           util_format_pack_z_float(dst_pfmt, dtexel, &acc, 1);
                      }
                   }
-                  if (is_depth_aspect) {
-                     if (borgvk_is_z16_s8(dst_pfmt))
-                        borgvk_z16_s8_pack_z(dtexel, acc[0]);
-                     else
-                        util_format_pack_z_float(dst_pfmt, dtexel, acc, 1);
-                  } else {
-                     borgvk_pack_rgba_float(dst->vk.format, dst_pfmt, dtexel, acc);
+
+                  if (!is_depth_aspect && !is_stencil_aspect) {
+                     if (filter == VK_FILTER_NEAREST) {
+                        const uint8_t *stexel = src_base +
+                           (((uint64_t)siz * src_level_h + siy) * src_stride_texels + six) * src_bs;
+                        if (is_uint) {
+                           uint32_t v[4];
+                           util_format_unpack_rgba(src_pfmt, v, stexel, 1);
+                           util_format_pack_rgba(dst_pfmt, dtexel, v, 1);
+                        } else if (is_sint) {
+                           int32_t v[4];
+                           util_format_unpack_rgba(src_pfmt, v, stexel, 1);
+                           util_format_pack_rgba(dst_pfmt, dtexel, v, 1);
+                        } else {
+                           float v[4];
+                           borgvk_unpack_rgba_float(src->vk.format, src_pfmt, stexel, v);
+                           borgvk_pack_rgba_float(dst->vk.format, dst_pfmt, dtexel, v);
+                        }
+                     } else {
+                        /* Bilinear (2D) / trilinear (3D), texel-center
+                         * sampling with edge clamping -- degenerates to a
+                         * single sample per axis with only one texel. */
+                        float fx = sx - 0.5f, fy = sy - 0.5f, fz = sz - 0.5f;
+                        int32_t x0 = (int32_t)floorf(fx), y0 = (int32_t)floorf(fy), z0 = (int32_t)floorf(fz);
+                        float tx = fx - (float)x0, ty = fy - (float)y0, tz = fz - (float)z0;
+                        int32_t x1 = x0 + 1, y1 = y0 + 1, z1 = z0 + 1;
+                        x0 = CLAMP(x0, 0, (int32_t)src_level_w - 1);
+                        x1 = CLAMP(x1, 0, (int32_t)src_level_w - 1);
+                        y0 = CLAMP(y0, 0, (int32_t)src_level_h - 1);
+                        y1 = CLAMP(y1, 0, (int32_t)src_level_h - 1);
+                        z0 = CLAMP(z0, 0, (int32_t)src_level_d - 1);
+                        z1 = CLAMP(z1, 0, (int32_t)src_level_d - 1);
+
+                        float acc[4] = {0, 0, 0, 0};
+                        int32_t xs[2] = {x0, x1}, ys[2] = {y0, y1}, zs[2] = {z0, z1};
+                        float xw[2] = {1 - tx, tx}, yw[2] = {1 - ty, ty}, zw[2] = {1 - tz, tz};
+                        for (int iz = 0; iz < 2; iz++) {
+                           for (int iy = 0; iy < 2; iy++) {
+                              for (int ix = 0; ix < 2; ix++) {
+                                 float weight = xw[ix] * yw[iy] * zw[iz];
+                                 if (weight == 0.0f)
+                                    continue;
+                                 const uint8_t *stexel = src_base +
+                                    (((uint64_t)zs[iz] * src_level_h + ys[iy]) * src_stride_texels
+                                     + xs[ix]) * src_bs;
+                                 float v[4];
+                                 borgvk_unpack_rgba_float(src->vk.format, src_pfmt, stexel, v);
+                                 acc[0] += v[0] * weight;
+                                 acc[1] += v[1] * weight;
+                                 acc[2] += v[2] * weight;
+                                 acc[3] += v[3] * weight;
+                              }
+                           }
+                        }
+                        borgvk_pack_rgba_float(dst->vk.format, dst_pfmt, dtexel, acc);
+                     }
                   }
                }
             }
