@@ -15,6 +15,7 @@
 #include "vk_queue.h"
 #include "vk_device_memory.h"
 #include "vk_buffer.h"
+#include "vk_buffer_view.h"
 #include "vk_image.h"
 #include "vk_descriptor_set_layout.h"
 
@@ -191,10 +192,23 @@ struct borgvk_image {
    VkDeviceSize offset;
 };
 
+/* Texel buffer view: format + range over a VkBuffer, used by
+ * VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER / STORAGE_TEXEL_BUFFER. No
+ * driver-specific state needed yet -- vk_buffer_view already tracks
+ * buffer/format/offset/range; the shader-visible side is future work
+ * (texel buffers aren't wired into the texture unit path yet). This
+ * object existing and being destroyable correctly is what CTS's basic
+ * lifetime/API tests need. */
+struct borgvk_buffer_view {
+   struct vk_buffer_view vk;
+};
+
 VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_device_memory, vk.base, VkDeviceMemory,
                                VK_OBJECT_TYPE_DEVICE_MEMORY)
 VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_buffer, vk.base, VkBuffer,
                                VK_OBJECT_TYPE_BUFFER)
+VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_buffer_view, vk.base, VkBufferView,
+                               VK_OBJECT_TYPE_BUFFER_VIEW)
 VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_image, vk.base, VkImage,
                                VK_OBJECT_TYPE_IMAGE)
 

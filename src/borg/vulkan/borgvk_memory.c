@@ -158,6 +158,44 @@ borgvk_DestroyBuffer(VkDevice _device, VkBuffer _buffer,
    vk_buffer_destroy(&device->vk, pAllocator, &buffer->vk);
 }
 
+/* ---- Buffer views -------------------------------------------------------
+ * Was entirely missing: vkCreateBufferView/vkDestroyBufferView are
+ * mandatory core Vulkan 1.0 entry points (not extension-gated like sparse
+ * binding), so their dispatch-table slot was null and calling through it
+ * crashed with a SEGV at instruction address 0 -- confirmed via
+ * coredumpctl/gdb backtrace through vk::createBufferView() ->
+ * BufferViewTestInstance -- rather than any real driver logic being wrong.
+ */
+
+VKAPI_ATTR VkResult VKAPI_CALL
+borgvk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
+                        const VkAllocationCallbacks *pAllocator, VkBufferView *pView)
+{
+   VK_FROM_HANDLE(borgvk_device, device, _device);
+   struct borgvk_buffer_view *view;
+
+   view = vk_buffer_view_create(&device->vk, pCreateInfo, pAllocator,
+                                sizeof(*view));
+   if (!view)
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   *pView = borgvk_buffer_view_to_handle(view);
+   return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_DestroyBufferView(VkDevice _device, VkBufferView _bufferView,
+                         const VkAllocationCallbacks *pAllocator)
+{
+   VK_FROM_HANDLE(borgvk_device, device, _device);
+   VK_FROM_HANDLE(borgvk_buffer_view, view, _bufferView);
+
+   if (!view)
+      return;
+
+   vk_buffer_view_destroy(&device->vk, pAllocator, &view->vk);
+}
+
 /* The common GetBufferMemoryRequirements2 delegates here (maintenance4). */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_GetDeviceBufferMemoryRequirements(
