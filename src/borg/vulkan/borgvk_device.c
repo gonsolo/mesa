@@ -247,10 +247,23 @@ borgvk_optimal_features(VkFormat format)
        is_compressed_format(format))
       return 0;
 
-   /* ETC2/EAC: mandatory compressed texture formats. */
+   /* ETC2/EAC: mandatory compressed texture formats. Sampling doesn't need
+    * decoding here, borgvk samples by reading host-visible image memory
+    * directly over serial, decoding happens shader-side. BLIT_SRC_BIT was
+    * dropped: unlike a real GPU's dedicated decompression hardware, a blit
+    * from a compressed source requires CPU-side block decoding, and Mesa's
+    * generic util_format_fetch_rgba_func has no decoder registered for any
+    * ETC2 or EAC variant (confirmed every PIPE_FORMAT_ETC2_ entry in the
+    * generated fetch_rgba table is NULL -- only legacy ETC1, DXT/BC, and
+    * BPTC (BC6-7) have one). Advertising BLIT_SRC_BIT here made CTS
+    * legitimately attempt compressed-source blits we can't actually decode,
+    * producing "Result image is incorrect" instead of the honest
+    * NotSupported a driver without decode hardware should report; this
+    * makes ETC2/EAC consistent with how BC1-7/ASTC are already handled
+    * (zero features at all, via is_compressed_format's blanket bail above,
+    * for the same underlying reason). */
    if (is_etc2_format(format)) {
       return VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
-             VK_FORMAT_FEATURE_BLIT_SRC_BIT |
              VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
              VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
              VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
