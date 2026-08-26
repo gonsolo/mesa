@@ -457,6 +457,75 @@ borgvk_pack_rgba_float(VkFormat vk_fmt, enum pipe_format pfmt,
    }
 }
 
+/* Which VkClearColorValue union member a format's clear color uses. Matches
+ * CTS's own classification (VK-GL-CTS's getTextureChannelClass): UINT and
+ * USCALED both read .uint32, SINT and SSCALED both read .int32, everything
+ * else (UNORM/SNORM/UFLOAT/SFLOAT/SRGB) reads .float32. Gallium's
+ * util_format_is_pure_uint/sint alone isn't enough here -- it deliberately
+ * excludes SCALED formats (pure_integer is false for "U10"/"S10"-style
+ * unnormalized-but-not-pure-integer channels). */
+static inline bool
+borgvk_clear_color_is_uint(enum pipe_format pfmt)
+{
+   if (util_format_is_pure_uint(pfmt))
+      return true;
+   if (!util_format_is_scaled(pfmt))
+      return false;
+   int ch = util_format_get_first_non_void_channel(pfmt);
+   return ch >= 0 && util_format_description(pfmt)->channel[ch].type == UTIL_FORMAT_TYPE_UNSIGNED;
+}
+
+static inline bool
+borgvk_clear_color_is_sint(enum pipe_format pfmt)
+{
+   if (util_format_is_pure_sint(pfmt))
+      return true;
+   if (!util_format_is_scaled(pfmt))
+      return false;
+   int ch = util_format_get_first_non_void_channel(pfmt);
+   return ch >= 0 && util_format_description(pfmt)->channel[ch].type == UTIL_FORMAT_TYPE_SIGNED;
+}
+
+/* Packs a VkClearColorValue into `pixel` for the given format, picking the
+ * right union member per borgvk_clear_color_is_uint/is_sint above. For a
+ * TRUE pure-integer format (UINT/SINT) this hands the union member's raw
+ * array straight to util_format_pack_rgba, matching its own internal
+ * is_pure_uint/is_pure_sint dispatch exactly. For a SCALED format, though,
+ * util_format_pack_rgba's dispatch (which only checks pure_integer, not
+ * is_scaled) would take its non-pure "else" branch and reinterpret our
+ * uint32_t/int32_t array's raw BITS as a float* -- type-punning e.g. the
+ * integer 51 into the float bit-pattern of a tiny denormal near zero,
+ * packing to all-zero bytes. Confirmed via a debug print on
+ * dEQP-VK...clear_color_image...a2b10g10r10_sscaled_pack32: is_sint=1,
+ * int32={51,255,153,0} (exactly the expected value -- classification was
+ * already correct), yet packed pixel={0,0,0,0}. Converting the integer
+ * components to float first fixes it: that's exactly the representation a
+ * SCALED format's pack_rgba_float expects (the raw integer value presented
+ * as float, no normalization), which is what CTS's own reference does too
+ * (VK-GL-CTS's makeClearColorValue routes SSCALED/USCALED through
+ * .int32/.uint32 while the shader-facing numeric value is still the plain
+ * integer, just typed as float in the pipeline -- SCALED's whole point). */
+static inline void
+borgvk_pack_clear_color(VkFormat vk_fmt, enum pipe_format pfmt, uint8_t *pixel,
+                        const VkClearColorValue *color)
+{
+   if (util_format_is_pure_uint(pfmt)) {
+      util_format_pack_rgba(pfmt, pixel, color->uint32, 1);
+   } else if (util_format_is_pure_sint(pfmt)) {
+      util_format_pack_rgba(pfmt, pixel, color->int32, 1);
+   } else if (borgvk_clear_color_is_uint(pfmt)) {
+      float v[4] = {(float)color->uint32[0], (float)color->uint32[1],
+                    (float)color->uint32[2], (float)color->uint32[3]};
+      util_format_pack_rgba(pfmt, pixel, v, 1);
+   } else if (borgvk_clear_color_is_sint(pfmt)) {
+      float v[4] = {(float)color->int32[0], (float)color->int32[1],
+                    (float)color->int32[2], (float)color->int32[3]};
+      util_format_pack_rgba(pfmt, pixel, v, 1);
+   } else {
+      borgvk_pack_rgba_float(vk_fmt, pfmt, pixel, color->float32);
+   }
+}
+
 /* For a combined depth-stencil image, a copy naming only one aspect
  * (VkBufferImageCopy::imageSubresource.aspectMask) writes/reads a buffer
  * packed with just that aspect's own element size (e.g. 1 tightly-packed
@@ -700,12 +769,7 @@ borgvk_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage _image,
       return;
 
    uint8_t pixel[16]; /* largest uncompressed colour format block is 16 B */
-   if (util_format_is_pure_uint(pfmt))
-      util_format_pack_rgba(pfmt, pixel, pColor->uint32, 1);
-   else if (util_format_is_pure_sint(pfmt))
-      util_format_pack_rgba(pfmt, pixel, pColor->int32, 1);
-   else
-      borgvk_pack_rgba_float(image->vk.format, pfmt, pixel, pColor->float32);
+   borgvk_pack_clear_color(image->vk.format, pfmt, pixel, pColor);
 
    for (uint32_t r = 0; r < rangeCount; r++) {
       const VkImageSubresourceRange *range = &pRanges[r];
@@ -836,12 +900,7 @@ borgvk_clear_attachment_rect(struct vk_image_view *view, VkImageAspectFlags aspe
    uint8_t pixel[16];
    uint8_t stencil8 = (uint8_t)clearValue->depthStencil.stencil;
    if (aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) {
-      if (util_format_is_pure_uint(pfmt))
-         util_format_pack_rgba(pfmt, pixel, clearValue->color.uint32, 1);
-      else if (util_format_is_pure_sint(pfmt))
-         util_format_pack_rgba(pfmt, pixel, clearValue->color.int32, 1);
-      else
-         borgvk_pack_rgba_float(image->vk.format, pfmt, pixel, clearValue->color.float32);
+      borgvk_pack_clear_color(image->vk.format, pfmt, pixel, &clearValue->color);
    }
 
    for (uint32_t l = 0; l < layerCount; l++) {
