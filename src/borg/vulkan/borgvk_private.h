@@ -17,6 +17,7 @@
 #include "vk_buffer.h"
 #include "vk_buffer_view.h"
 #include "vk_image.h"
+#include "vk_command_buffer.h"
 #include "vk_descriptor_set_layout.h"
 
 #include "wsi_common.h"
@@ -104,6 +105,29 @@ struct borgvk_device {
    /* borgc-compiled shader blobs captured at pipeline creation, uploaded to the
     * firmware over serial (0xB0) on the first submit. */
    struct borgvk_shader_blob shader_blob[BORGVK_SHADER_STAGE_COUNT];
+};
+
+/* A render pass/framebuffer or dynamic-rendering scope currently open on this
+ * command buffer, captured in borgvk_CmdBeginRendering(). Mesa's own
+ * vk_common_CmdBeginRenderPass2 (borgvk never overrides RenderPass or
+ * Framebuffer creation, nor the legacy Begin/EndRenderPass entrypoints --
+ * Mesa's runtime emulates all of that generically) always resolves down to a
+ * VkRenderingInfo and calls this driver's CmdBeginRendering, whether the app
+ * used the legacy API or called it directly, so this is the one place that
+ * needs to remember "what image backs each attachment right now" --
+ * CmdClearAttachments has no other way to resolve its attachment indices
+ * back to real images. */
+#define BORGVK_MAX_COLOR_ATTACHMENTS 8
+
+struct borgvk_command_buffer {
+   struct vk_command_buffer vk;
+
+   bool in_rendering;
+   VkRect2D render_area;
+   uint32_t color_attachment_count;
+   struct vk_image_view *color_views[BORGVK_MAX_COLOR_ATTACHMENTS];
+   struct vk_image_view *depth_view;
+   struct vk_image_view *stencil_view;
 };
 
 extern const struct vk_command_buffer_ops borgvk_cmd_buffer_ops;

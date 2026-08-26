@@ -10,6 +10,7 @@
 #include "borgvk_private.h"
 
 #include "vk_alloc.h"
+#include "vk_common_entrypoints.h"
 #include "vk_format.h"
 #include "vk_log.h"
 #include "vk_sampler.h"
@@ -796,6 +797,259 @@ borgvk_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage _image,
          }
       }
    }
+}
+
+/* Clears a rectangular sub-region of one image view's base mip level, across
+ * `layerCount` array layers starting at the view's base layer + baseLayer.
+ * Shared by borgvk_CmdBeginRendering (VK_ATTACHMENT_LOAD_OP_CLEAR) and
+ * borgvk_CmdClearAttachments -- both are "clear this rectangle of this
+ * attachment" in the end, just triggered differently. Unlike
+ * CmdClearColorImage/CmdClearDepthStencilImage (which always clear a whole
+ * subresource), this is bounded to an arbitrary rect within the level. */
+static void
+borgvk_clear_attachment_rect(struct vk_image_view *view, VkImageAspectFlags aspectMask,
+                             const VkClearValue *clearValue, VkRect2D rect,
+                             uint32_t baseLayer, uint32_t layerCount)
+{
+   if (!view)
+      return;
+
+   struct borgvk_image *image = container_of(view->image, struct borgvk_image, vk);
+   if (!image->mem || !image->mem->map)
+      return;
+
+   enum pipe_format pfmt = vk_format_to_pipe_format(image->vk.format);
+   uint32_t bs = vk_format_get_blocksize(image->vk.format);
+   uint32_t bw = vk_format_get_blockwidth(image->vk.format);
+   uint32_t bh = vk_format_get_blockheight(image->vk.format);
+   uint32_t bd = util_format_get_blockdepth(pfmt);
+   /* See the matching comment in CmdClearColorImage: 3D-block-compressed
+    * formats remain a defended gap, not a supported combination -- and
+    * attachments are never 3D images with real depth slices in practice. */
+   if (bd > 1)
+      return;
+
+   uint32_t level = view->base_mip_level;
+   uint32_t x0 = (uint32_t)rect.offset.x, y0 = (uint32_t)rect.offset.y;
+   uint32_t w = rect.extent.width, h = rect.extent.height;
+
+   uint8_t pixel[16];
+   uint8_t stencil8 = (uint8_t)clearValue->depthStencil.stencil;
+   if (aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) {
+      if (util_format_is_pure_uint(pfmt))
+         util_format_pack_rgba(pfmt, pixel, clearValue->color.uint32, 1);
+      else if (util_format_is_pure_sint(pfmt))
+         util_format_pack_rgba(pfmt, pixel, clearValue->color.int32, 1);
+      else
+         borgvk_pack_rgba_float(image->vk.format, pfmt, pixel, clearValue->color.float32);
+   }
+
+   for (uint32_t l = 0; l < layerCount; l++) {
+      uint32_t layer = view->base_array_layer + baseLayer + l;
+      uint32_t stride_texels;
+      uint64_t off = borgvk_image_level_offset(image, level, layer, bs, bw, bh, bd,
+                                               &stride_texels);
+      uint8_t *level_base = (uint8_t *)image->mem->map + image->offset + off;
+
+      for (uint32_t y = y0; y < y0 + h; y++) {
+         uint8_t *row = level_base + (uint64_t)y * stride_texels * bs;
+         for (uint32_t x = x0; x < x0 + w; x++) {
+            uint8_t *texel = row + (uint64_t)x * bs;
+
+            if (aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) {
+               memcpy(texel, pixel, bs);
+               continue;
+            }
+            if (borgvk_is_z16_s8(pfmt)) {
+               if (aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)
+                  borgvk_z16_s8_pack_z(texel, clearValue->depthStencil.depth);
+               if (aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT)
+                  texel[2] = stencil8;
+               continue;
+            }
+            if (aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)
+               util_format_pack_z_float(pfmt, texel, &clearValue->depthStencil.depth, 1);
+            if (aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT)
+               util_format_pack_s_8uint(pfmt, texel, &stencil8, 1);
+         }
+      }
+   }
+}
+
+/* borgvk never overrides RenderPass/Framebuffer creation, nor the legacy
+ * CmdBeginRenderPass(2)/CmdEndRenderPass(2) entrypoints -- Mesa's own
+ * vk_common_* runtime code (src/vulkan/runtime/vk_render_pass.c) emulates
+ * all of that generically for any driver, always resolving down to a
+ * VkRenderingInfo and calling the driver's CmdBeginRendering, whether the
+ * app used the legacy API or dynamic rendering directly. This was the only
+ * entrypoint actually missing: without it, every attachment's
+ * VK_ATTACHMENT_LOAD_OP_CLEAR silently did nothing (same discard-into-
+ * vk_cmd_queue story as every other unimplemented vkCmd* in this file), and
+ * CmdClearAttachments had no way to resolve its attachment indices back to
+ * real images -- so this also captures the current attachment set on the
+ * command buffer for CmdClearAttachments to use. */
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRenderingInfo)
+{
+   VK_FROM_HANDLE(vk_command_buffer, vk_cmd, commandBuffer);
+   struct borgvk_command_buffer *cmd =
+      container_of(vk_cmd, struct borgvk_command_buffer, vk);
+
+   cmd->in_rendering = true;
+   cmd->render_area = pRenderingInfo->renderArea;
+   cmd->color_attachment_count =
+      MIN2(pRenderingInfo->colorAttachmentCount, BORGVK_MAX_COLOR_ATTACHMENTS);
+   cmd->depth_view = NULL;
+   cmd->stencil_view = NULL;
+
+   uint32_t layerCount = MAX2(pRenderingInfo->layerCount, 1);
+
+   for (uint32_t i = 0; i < cmd->color_attachment_count; i++) {
+      const VkRenderingAttachmentInfo *att = &pRenderingInfo->pColorAttachments[i];
+      VK_FROM_HANDLE(vk_image_view, view, att->imageView);
+      cmd->color_views[i] = view;
+      if (view && att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+         borgvk_clear_attachment_rect(view, VK_IMAGE_ASPECT_COLOR_BIT, &att->clearValue,
+                                      cmd->render_area, 0, layerCount);
+   }
+
+   if (pRenderingInfo->pDepthAttachment &&
+       pRenderingInfo->pDepthAttachment->imageView != VK_NULL_HANDLE) {
+      const VkRenderingAttachmentInfo *att = pRenderingInfo->pDepthAttachment;
+      VK_FROM_HANDLE(vk_image_view, view, att->imageView);
+      cmd->depth_view = view;
+      if (att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+         borgvk_clear_attachment_rect(view, VK_IMAGE_ASPECT_DEPTH_BIT, &att->clearValue,
+                                      cmd->render_area, 0, layerCount);
+   }
+
+   if (pRenderingInfo->pStencilAttachment &&
+       pRenderingInfo->pStencilAttachment->imageView != VK_NULL_HANDLE) {
+      const VkRenderingAttachmentInfo *att = pRenderingInfo->pStencilAttachment;
+      VK_FROM_HANDLE(vk_image_view, view, att->imageView);
+      cmd->stencil_view = view;
+      if (att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+         borgvk_clear_attachment_rect(view, VK_IMAGE_ASPECT_STENCIL_BIT, &att->clearValue,
+                                      cmd->render_area, 0, layerCount);
+   }
+}
+
+/* vk_common_CmdEndRendering (called for both the legacy-RenderPass-emulation
+ * path and a direct vkCmdEndRendering call) always forwards to this
+ * CmdEndRendering2EXT entrypoint. Nothing to do here -- there's no deferred
+ * store/resolve work in this driver -- beyond clearing the attachment state
+ * CmdBeginRendering captured. */
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdEndRendering2EXT(VkCommandBuffer commandBuffer,
+                           const VkRenderingEndInfoEXT *pRenderingEndInfo)
+{
+   VK_FROM_HANDLE(vk_command_buffer, vk_cmd, commandBuffer);
+   struct borgvk_command_buffer *cmd =
+      container_of(vk_cmd, struct borgvk_command_buffer, vk);
+
+   cmd->in_rendering = false;
+   cmd->color_attachment_count = 0;
+   cmd->depth_view = NULL;
+   cmd->stencil_view = NULL;
+}
+
+/* Was entirely missing -- discarded into the generic vk_cmd_queue like every
+ * other unimplemented vkCmd*. Resolves each VkClearAttachment against the
+ * attachment set borgvk_CmdBeginRendering captured on this command buffer,
+ * then does a real rect clear (borgvk_clear_attachment_rect) per VkClearRect. */
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdClearAttachments(VkCommandBuffer commandBuffer, uint32_t attachmentCount,
+                           const VkClearAttachment *pAttachments,
+                           uint32_t rectCount, const VkClearRect *pRects)
+{
+   VK_FROM_HANDLE(vk_command_buffer, vk_cmd, commandBuffer);
+   struct borgvk_command_buffer *cmd =
+      container_of(vk_cmd, struct borgvk_command_buffer, vk);
+
+   if (!cmd->in_rendering)
+      return;
+
+   for (uint32_t a = 0; a < attachmentCount; a++) {
+      const VkClearAttachment *att = &pAttachments[a];
+      struct vk_image_view *view = NULL;
+      VkImageAspectFlags aspect = att->aspectMask & VK_IMAGE_ASPECT_COLOR_BIT;
+
+      if (aspect) {
+         if (att->colorAttachment >= cmd->color_attachment_count)
+            continue;
+         view = cmd->color_views[att->colorAttachment];
+         for (uint32_t r = 0; r < rectCount; r++)
+            borgvk_clear_attachment_rect(view, aspect, &att->clearValue, pRects[r].rect,
+                                         pRects[r].baseArrayLayer, pRects[r].layerCount);
+         continue;
+      }
+
+      for (uint32_t r = 0; r < rectCount; r++) {
+         if (att->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)
+            borgvk_clear_attachment_rect(cmd->depth_view, VK_IMAGE_ASPECT_DEPTH_BIT,
+                                         &att->clearValue, pRects[r].rect,
+                                         pRects[r].baseArrayLayer, pRects[r].layerCount);
+         if (att->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT)
+            borgvk_clear_attachment_rect(cmd->stencil_view, VK_IMAGE_ASPECT_STENCIL_BIT,
+                                         &att->clearValue, pRects[r].rect,
+                                         pRects[r].baseArrayLayer, pRects[r].layerCount);
+      }
+   }
+}
+
+/* Legacy render-pass entrypoints (CmdBeginRenderPass[2], CmdNextSubpass[2],
+ * CmdEndRenderPass[2]) are NOT auto-serviced by vk_common_* the way they are
+ * in drivers without their own generic-record-and-discard fallback: borgvk's
+ * main dispatch table fills any vkCmd* without a borgvk_ symbol from
+ * vk_cmd_enqueue_device_entrypoints (record into the command buffer's
+ * vk_cmd_queue, discarded on reset -- see the file comment in
+ * borgvk_cmd_buffer.c), and that fallback applies to these entrypoints too
+ * since we never gave them real borgvk_ symbols. That silently ate every
+ * legacy-render-pass CmdBeginRenderPass call, so vk_common_CmdBeginRenderPass2's
+ * translation to our CmdBeginRendering (see the comment above it) was never
+ * reached. Fix: explicit thin wrappers that call the vk_common_* emulation
+ * directly instead of relying on it being picked up as a fallback. */
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdBeginRenderPass(VkCommandBuffer commandBuffer,
+                          const VkRenderPassBeginInfo *pRenderPassBegin,
+                          VkSubpassContents contents)
+{
+   vk_common_CmdBeginRenderPass(commandBuffer, pRenderPassBegin, contents);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdBeginRenderPass2(VkCommandBuffer commandBuffer,
+                           const VkRenderPassBeginInfo *pRenderPassBegin,
+                           const VkSubpassBeginInfo *pSubpassBeginInfo)
+{
+   vk_common_CmdBeginRenderPass2(commandBuffer, pRenderPassBegin, pSubpassBeginInfo);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdNextSubpass(VkCommandBuffer commandBuffer, VkSubpassContents contents)
+{
+   vk_common_CmdNextSubpass(commandBuffer, contents);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdNextSubpass2(VkCommandBuffer commandBuffer,
+                       const VkSubpassBeginInfo *pSubpassBeginInfo,
+                       const VkSubpassEndInfo *pSubpassEndInfo)
+{
+   vk_common_CmdNextSubpass2(commandBuffer, pSubpassBeginInfo, pSubpassEndInfo);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdEndRenderPass(VkCommandBuffer commandBuffer)
+{
+   vk_common_CmdEndRenderPass(commandBuffer);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdEndRenderPass2(VkCommandBuffer commandBuffer,
+                         const VkSubpassEndInfo *pSubpassEndInfo)
+{
+   vk_common_CmdEndRenderPass2(commandBuffer, pSubpassEndInfo);
 }
 
 /* Image copy for readback: both images are linear host-RAM; just memcpy the

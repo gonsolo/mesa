@@ -15,9 +15,10 @@
 #include "vk_command_buffer.h"
 #include "vk_command_pool.h"
 
-struct borgvk_command_buffer {
-   struct vk_command_buffer vk;
-};
+/* struct borgvk_command_buffer is defined in borgvk_private.h -- it also
+ * tracks render-pass/dynamic-rendering state (see the struct's comment),
+ * needed by borgvk_CmdBeginRendering/CmdClearAttachments in
+ * borgvk_memory.c. */
 
 static void
 borgvk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
@@ -56,6 +57,14 @@ static void
 borgvk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
                         VkCommandBufferResetFlags flags)
 {
+   struct borgvk_command_buffer *cmd =
+      container_of(vk_cmd_buffer, struct borgvk_command_buffer, vk);
+
+   cmd->in_rendering = false;
+   cmd->color_attachment_count = 0;
+   cmd->depth_view = NULL;
+   cmd->stencil_view = NULL;
+
    vk_command_buffer_reset(vk_cmd_buffer);
 }
 
