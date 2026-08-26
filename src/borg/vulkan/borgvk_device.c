@@ -275,8 +275,15 @@ borgvk_optimal_features(VkFormat format)
       common |
       VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT |
       VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
-      VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT |
-      VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+      VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
+   /* Integer formats can't be linearly filtered -- interpolating between
+    * integer texel values is meaningless, and no real hardware advertises
+    * this bit for them. Without this exclusion CTS legitimately runs
+    * VK_FILTER_LINEAR blits/samples against e.g. R32_UINT (since we claimed
+    * to support it) and gets "incorrect" results compared to its NEAREST-only
+    * reference for integer formats. */
+   if (!vk_format_is_int(format))
+      f |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
    if (format == VK_FORMAT_R32_UINT || format == VK_FORMAT_R32_SINT)
       f |= VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT;
    return f;
