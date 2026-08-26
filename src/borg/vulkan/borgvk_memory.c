@@ -509,6 +509,28 @@ static inline void
 borgvk_pack_clear_color(VkFormat vk_fmt, enum pipe_format pfmt, uint8_t *pixel,
                         const VkClearColorValue *color)
 {
+   /* R64_UINT/R64_SINT/R64G64_UINT/R64G64_SINT (64-bit-per-channel integer
+    * formats): util_format_pack_rgba's generic dispatch always casts src to
+    * a 32-bit-per-component pointer, matching every other integer format's
+    * clear-value convention, regardless of the format's actual channel
+    * width, so it cannot correctly pack one of these; confirmed via a debug
+    * print on dEQP-VK...clear_color_image...r64_uint: the real 64-bit clear
+    * value's low 32 bits packed correctly but the high 32 bits were
+    * silently discarded, reading back as 2147483647 (0x7FFFFFFF, exactly
+    * color->uint32[0] alone) instead of the actual huge reference value.
+    * These formats are a raw native 64-bit integer per channel with no
+    * bit-packing math at all, and CTS builds their VkClearColorValue via a
+    * straight memcpy of each 64-bit value into a consecutive uint32 pair
+    * (vktApiImageClearingTests.cpp, makeClearColorValue64), which is
+    * therefore already byte-identical to this format's storage layout; skip
+    * the pack machinery entirely and copy the union's raw bytes instead. */
+   int first_ch = util_format_get_first_non_void_channel(pfmt);
+   if (first_ch >= 0 && util_format_is_pure_integer(pfmt) &&
+       util_format_description(pfmt)->channel[first_ch].size == 64) {
+      memcpy(pixel, color->uint32, vk_format_get_blocksize(vk_fmt));
+      return;
+   }
+
    if (util_format_is_pure_uint(pfmt)) {
       util_format_pack_rgba(pfmt, pixel, color->uint32, 1);
    } else if (util_format_is_pure_sint(pfmt)) {
