@@ -406,6 +406,56 @@ borgvk_z16_s8_unpack_z(const uint8_t *texel)
    return z16 / 65535.0f;
 }
 
+/* VK_FORMAT_R4G4_UNORM_PACK8 has no entry anywhere in
+ * vk_format_to_pipe_format()'s mapping table -- unlike Z16_UNORM_S8_UINT
+ * (which has a valid pipe_format with stub pack/unpack functions),
+ * this format has no pipe_format counterpart at all, so
+ * vk_format_to_pipe_format() silently returns PIPE_FORMAT_NONE for it.
+ * Every util_format_*() call downstream (pack_rgba, unpack_rgba, ...) then
+ * operates on a dummy "no format" description and produces all-zero output
+ * with no crash and no error -- confirmed via
+ * dEQP-VK.api.image_clearing...r4g4_unorm_pack8 reading back (0,0,0,1)
+ * instead of the requested clear colour, and the same format appearing as
+ * a blit destination in dEQP-VK.api.copy_and_blit...blit_image failures.
+ * vk_format_get_blocksize() still happens to return the numerically
+ * correct answer (1 byte) purely by coincidence: its own !desc fallback
+ * defaults to 1, which is simply correct here. Hand-rolled: bits [7:4] = R,
+ * bits [3:0] = G (Vulkan's PACK8 component order is MSB-first), each a
+ * plain 4-bit UNORM channel -- this format is never pure-integer, so only
+ * the float unpack/pack path needs the special case. */
+static inline bool
+borgvk_is_r4g4_unorm(VkFormat fmt)
+{
+   return fmt == VK_FORMAT_R4G4_UNORM_PACK8;
+}
+
+static inline void
+borgvk_unpack_rgba_float(VkFormat vk_fmt, enum pipe_format pfmt,
+                         const uint8_t *texel, float out[4])
+{
+   if (borgvk_is_r4g4_unorm(vk_fmt)) {
+      out[0] = ((texel[0] >> 4) & 0xF) / 15.0f;
+      out[1] = (texel[0] & 0xF) / 15.0f;
+      out[2] = 0.0f;
+      out[3] = 1.0f;
+   } else {
+      util_format_unpack_rgba(pfmt, out, texel, 1);
+   }
+}
+
+static inline void
+borgvk_pack_rgba_float(VkFormat vk_fmt, enum pipe_format pfmt,
+                       uint8_t *texel, const float in[4])
+{
+   if (borgvk_is_r4g4_unorm(vk_fmt)) {
+      uint8_t r4 = (uint8_t)(CLAMP(in[0], 0.0f, 1.0f) * 15.0f + 0.5f);
+      uint8_t g4 = (uint8_t)(CLAMP(in[1], 0.0f, 1.0f) * 15.0f + 0.5f);
+      texel[0] = (uint8_t)((r4 << 4) | g4);
+   } else {
+      util_format_pack_rgba(pfmt, texel, in, 1);
+   }
+}
+
 /* For a combined depth-stencil image, a copy naming only one aspect
  * (VkBufferImageCopy::imageSubresource.aspectMask) writes/reads a buffer
  * packed with just that aspect's own element size (e.g. 1 tightly-packed
@@ -654,7 +704,7 @@ borgvk_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage _image,
    else if (util_format_is_pure_sint(pfmt))
       util_format_pack_rgba(pfmt, pixel, pColor->int32, 1);
    else
-      util_format_pack_rgba(pfmt, pixel, pColor->float32, 1);
+      borgvk_pack_rgba_float(image->vk.format, pfmt, pixel, pColor->float32);
 
    for (uint32_t r = 0; r < rangeCount; r++) {
       const VkImageSubresourceRange *range = &pRanges[r];
@@ -1112,8 +1162,8 @@ borgvk_CmdBlitImage(VkCommandBuffer commandBuffer,
                         util_format_pack_rgba(dst_pfmt, dtexel, v, 1);
                      } else {
                         float v[4];
-                        util_format_unpack_rgba(src_pfmt, v, stexel, 1);
-                        util_format_pack_rgba(dst_pfmt, dtexel, v, 1);
+                        borgvk_unpack_rgba_float(src->vk.format, src_pfmt, stexel, v);
+                        borgvk_pack_rgba_float(dst->vk.format, dst_pfmt, dtexel, v);
                      }
                      continue;
                   }
@@ -1154,7 +1204,7 @@ borgvk_CmdBlitImage(VkCommandBuffer commandBuffer,
                               acc[0] += z * weight;
                            } else {
                               float v[4];
-                              util_format_unpack_rgba(src_pfmt, v, stexel, 1);
+                              borgvk_unpack_rgba_float(src->vk.format, src_pfmt, stexel, v);
                               acc[0] += v[0] * weight;
                               acc[1] += v[1] * weight;
                               acc[2] += v[2] * weight;
@@ -1169,7 +1219,7 @@ borgvk_CmdBlitImage(VkCommandBuffer commandBuffer,
                      else
                         util_format_pack_z_float(dst_pfmt, dtexel, acc, 1);
                   } else {
-                     util_format_pack_rgba(dst_pfmt, dtexel, acc, 1);
+                     borgvk_pack_rgba_float(dst->vk.format, dst_pfmt, dtexel, acc);
                   }
                }
             }
