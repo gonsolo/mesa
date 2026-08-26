@@ -201,11 +201,34 @@ is_ycbcr_format(VkFormat format)
 static bool
 is_compressed_format(VkFormat format)
 {
-   /* BC and ASTC — zero features (not advertised in device features). */
+   /* BC and ASTC — zero features (not advertised in device features).
+    * The 3D ASTC formats (VK_EXT_texture_compression_astc_3d,
+    * VK_FORMAT_ASTC_3x3x3_UNORM_BLOCK_EXT .. VK_FORMAT_ASTC_6x6x6_SFLOAT_BLOCK_EXT,
+    * enum range 1000288000-1000288029) live in the extension's own enum
+    * range, well outside VK_FORMAT_ASTC_12x12_SRGB_BLOCK -- this range check
+    * alone let them fall through to borgvk_optimal_features' generic "any
+    * other format" branch and get full feature support as if fully
+    * supported. That's what let CTS create and actually copy/read back a
+    * real 3D-block-compressed image, hitting a genuine heap corruption in
+    * that path (borgvk's addressing has never been correctly worked out for
+    * block-compressed depth).
+    *
+    * A block-depth-based generic check (util_format_get_blockdepth) was
+    * tried first instead of hardcoding this range, but doesn't work:
+    * vk_format_to_pipe_format() has NO mapping at all for these EXT enum
+    * values (confirmed by direct probe: vkGetPhysicalDeviceFormatProperties
+    * still returned nonzero optimalTilingFeatures after that fix), so it
+    * silently returns PIPE_FORMAT_NONE, and util_format_get_blockdepth's
+    * !desc fallback returns 1 -- indistinguishable from an ordinary 2D
+    * format. Hardcoding the range is the only thing that actually reaches
+    * this format at all, confirmed by re-running the same direct probe
+    * after this change (optimalTilingFeatures == 0). */
    return (format >= VK_FORMAT_BC1_RGB_UNORM_BLOCK &&
            format <= VK_FORMAT_BC7_SRGB_BLOCK) ||
           (format >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK &&
-           format <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK);
+           format <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK) ||
+          (format >= 1000288000 && format <= 1000288029) ||
+          util_format_get_blockdepth(vk_format_to_pipe_format(format)) > 1;
 }
 
 static bool
@@ -358,6 +381,22 @@ borgvk_GetPhysicalDeviceImageFormatProperties2(
       (VkImageFormatProperties){ 0 };
 
    if ((feats & required) != required)
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
+   /* 3D images using a 3D-block-compressed format (any ASTC_*x*x*_BLOCK_EXT,
+    * e.g. ASTC_3x3x3) require real block-depth-aware addressing throughout
+    * the copy/clear paths. That math was added (borgvk_mip_level_size's `bd`
+    * parameter) but a heap corruption still surfaced running
+    * dEQP-VK.api.copy_and_blit...3d_to_3d.astc_3x3x3_* even after fixing the
+    * addressing CmdCopyImage itself does -- meaning some other path (the
+    * initial data upload via CmdCopyBufferToImage, or CTS's own readback)
+    * still isn't right for this narrow combination. Rather than ship a
+    * partially-debugged data-corruption risk for a combination real content
+    * essentially never uses (3D block compression has minimal real-world
+    * adoption), decline it honestly here so CTS reports NotSupported instead
+    * of crashing or corrupting memory. */
+   if (pImageFormatInfo->type == VK_IMAGE_TYPE_3D &&
+       util_format_get_blockdepth(vk_format_to_pipe_format(pImageFormatInfo->format)) > 1)
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
    /* INPUT_ATTACHMENT requires color or depth-stencil attachment capability.
