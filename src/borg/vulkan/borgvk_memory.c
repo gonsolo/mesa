@@ -265,6 +265,42 @@ borgvk_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer _buffer,
       ((uint32_t *)dst)[i] = data;
 }
 
+/* Plain buffer-to-buffer copy: also entirely missing, same no-op-via-
+ * vk_cmd_queue-discard story as every other unimplemented vkCmd* in this
+ * file. No format/block-size concerns at all here -- just raw bytes. */
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdCopyBuffer(VkCommandBuffer commandBuffer, VkBuffer _srcBuffer,
+                     VkBuffer _dstBuffer, uint32_t regionCount,
+                     const VkBufferCopy *pRegions)
+{
+   VK_FROM_HANDLE(borgvk_buffer, src, _srcBuffer);
+   VK_FROM_HANDLE(borgvk_buffer, dst, _dstBuffer);
+
+   if (!src || !dst || !src->mem || !dst->mem || !src->mem->map || !dst->mem->map)
+      return;
+
+   for (uint32_t i = 0; i < regionCount; i++) {
+      const VkBufferCopy *r = &pRegions[i];
+      memcpy((uint8_t *)dst->mem->map + dst->offset + r->dstOffset,
+             (const uint8_t *)src->mem->map + src->offset + r->srcOffset,
+             (size_t)r->size);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdCopyBuffer2(VkCommandBuffer commandBuffer, const VkCopyBufferInfo2 *pCopyBufferInfo)
+{
+   VkBufferCopy regions[MAX2(pCopyBufferInfo->regionCount, 1)];
+   for (uint32_t i = 0; i < pCopyBufferInfo->regionCount; i++) {
+      const VkBufferCopy2 *r = &pCopyBufferInfo->pRegions[i];
+      regions[i] = (VkBufferCopy){
+         .srcOffset = r->srcOffset, .dstOffset = r->dstOffset, .size = r->size,
+      };
+   }
+   borgvk_CmdCopyBuffer(commandBuffer, pCopyBufferInfo->srcBuffer, pCopyBufferInfo->dstBuffer,
+                        pCopyBufferInfo->regionCount, regions);
+}
+
 /* ---- Images ----------------------------------------------------------- */
 
 /* One consistent linear layout, shared by every place that reads or writes
@@ -1360,6 +1396,98 @@ borgvk_CmdCopyBufferToImage(VkCommandBuffer commandBuffer,
          }
       }
    }
+}
+
+/* VK_KHR_copy_commands2 / core-1.3 struct-based variants of the four
+ * commands above. Their region types (VkImageCopy2, VkBufferImageCopy2,
+ * VkImageBlit2) are the exact same fields as the legacy structs with an
+ * sType/pNext header prepended -- not implementing these at all meant
+ * vkCmdCopyImage2/vkCmdBlitImage2/etc. fell through to the generic
+ * discard-on-reset vk_cmd_queue path like any other unimplemented vkCmd*,
+ * so the copy silently did nothing. This was invisible relative to the
+ * legacy-struct entrypoints being fixed earlier in this file: CTS's
+ * copy_commands2.* test group mirrors the exact same combinatorial test
+ * matrix as core and dedicated_allocation, just calling the *2 entrypoints
+ * instead, so it needed this separately. Confirmed by the pattern of the
+ * failures themselves: the destination image read back its untouched
+ * original fill pattern everywhere, as if the copy were never issued at
+ * all -- found running
+ * dEQP-VK.api.copy_and_blit.copy_commands2.image_to_image.all_formats.*.
+ * Each wrapper strips the header and forwards to the already-verified
+ * legacy-struct implementation via a small on-stack VLA (region counts here
+ * are always small, test-parameter-bounded). */
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdCopyImage2(VkCommandBuffer commandBuffer, const VkCopyImageInfo2 *pCopyImageInfo)
+{
+   VkImageCopy regions[MAX2(pCopyImageInfo->regionCount, 1)];
+   for (uint32_t i = 0; i < pCopyImageInfo->regionCount; i++) {
+      const VkImageCopy2 *r = &pCopyImageInfo->pRegions[i];
+      regions[i] = (VkImageCopy){
+         .srcSubresource = r->srcSubresource, .srcOffset = r->srcOffset,
+         .dstSubresource = r->dstSubresource, .dstOffset = r->dstOffset,
+         .extent = r->extent,
+      };
+   }
+   borgvk_CmdCopyImage(commandBuffer, pCopyImageInfo->srcImage, pCopyImageInfo->srcImageLayout,
+                       pCopyImageInfo->dstImage, pCopyImageInfo->dstImageLayout,
+                       pCopyImageInfo->regionCount, regions);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdBlitImage2(VkCommandBuffer commandBuffer, const VkBlitImageInfo2 *pBlitImageInfo)
+{
+   VkImageBlit regions[MAX2(pBlitImageInfo->regionCount, 1)];
+   for (uint32_t i = 0; i < pBlitImageInfo->regionCount; i++) {
+      const VkImageBlit2 *r = &pBlitImageInfo->pRegions[i];
+      regions[i] = (VkImageBlit){
+         .srcSubresource = r->srcSubresource,
+         .srcOffsets = {r->srcOffsets[0], r->srcOffsets[1]},
+         .dstSubresource = r->dstSubresource,
+         .dstOffsets = {r->dstOffsets[0], r->dstOffsets[1]},
+      };
+   }
+   borgvk_CmdBlitImage(commandBuffer, pBlitImageInfo->srcImage, pBlitImageInfo->srcImageLayout,
+                       pBlitImageInfo->dstImage, pBlitImageInfo->dstImageLayout,
+                       pBlitImageInfo->regionCount, regions, pBlitImageInfo->filter);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
+                             const VkCopyImageToBufferInfo2 *pCopyImageToBufferInfo)
+{
+   VkBufferImageCopy regions[MAX2(pCopyImageToBufferInfo->regionCount, 1)];
+   for (uint32_t i = 0; i < pCopyImageToBufferInfo->regionCount; i++) {
+      const VkBufferImageCopy2 *r = &pCopyImageToBufferInfo->pRegions[i];
+      regions[i] = (VkBufferImageCopy){
+         .bufferOffset = r->bufferOffset, .bufferRowLength = r->bufferRowLength,
+         .bufferImageHeight = r->bufferImageHeight, .imageSubresource = r->imageSubresource,
+         .imageOffset = r->imageOffset, .imageExtent = r->imageExtent,
+      };
+   }
+   borgvk_CmdCopyImageToBuffer(commandBuffer, pCopyImageToBufferInfo->srcImage,
+                               pCopyImageToBufferInfo->srcImageLayout,
+                               pCopyImageToBufferInfo->dstBuffer,
+                               pCopyImageToBufferInfo->regionCount, regions);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
+                             const VkCopyBufferToImageInfo2 *pCopyBufferToImageInfo)
+{
+   VkBufferImageCopy regions[MAX2(pCopyBufferToImageInfo->regionCount, 1)];
+   for (uint32_t i = 0; i < pCopyBufferToImageInfo->regionCount; i++) {
+      const VkBufferImageCopy2 *r = &pCopyBufferToImageInfo->pRegions[i];
+      regions[i] = (VkBufferImageCopy){
+         .bufferOffset = r->bufferOffset, .bufferRowLength = r->bufferRowLength,
+         .bufferImageHeight = r->bufferImageHeight, .imageSubresource = r->imageSubresource,
+         .imageOffset = r->imageOffset, .imageExtent = r->imageExtent,
+      };
+   }
+   borgvk_CmdCopyBufferToImage(commandBuffer, pCopyBufferToImageInfo->srcBuffer,
+                               pCopyBufferToImageInfo->dstImage,
+                               pCopyBufferToImageInfo->dstImageLayout,
+                               pCopyBufferToImageInfo->regionCount, regions);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
