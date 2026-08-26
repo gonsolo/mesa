@@ -124,10 +124,18 @@ struct borgvk_command_buffer {
 
    bool in_rendering;
    VkRect2D render_area;
+   uint32_t layer_count;
    uint32_t color_attachment_count;
    struct vk_image_view *color_views[BORGVK_MAX_COLOR_ATTACHMENTS];
    struct vk_image_view *depth_view;
    struct vk_image_view *stencil_view;
+   /* Multisample resolve targets captured from VkRenderingAttachmentInfo::
+    * resolveImageView, NULL when that attachment isn't multisampled or
+    * requested no resolve. Performed at CmdEndRendering2EXT -- see its
+    * comment for why the legacy render-pass path (which is how CTS's
+    * clear_color_attachment MSAA tests actually exercise this, via
+    * VkSubpassDescription::pResolveAttachments) needs this at all. */
+   struct vk_image_view *color_resolve_views[BORGVK_MAX_COLOR_ATTACHMENTS];
 };
 
 extern const struct vk_command_buffer_ops borgvk_cmd_buffer_ops;

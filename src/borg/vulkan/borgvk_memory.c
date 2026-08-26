@@ -342,17 +342,36 @@ borgvk_mip_level_size(uint32_t width, uint32_t height, uint32_t depth,
    return (uint64_t)w_blocks * h_blocks * d_blocks * bs;
 }
 
+/* Byte size of ONE sample plane of ONE array layer (the full mip chain, for
+ * a single MSAA sample index). Multisampled images always have exactly 1
+ * mip level (Vulkan requires mipLevels=1 whenever samples>1), so for those
+ * this is just that single level's size. */
+static uint64_t
+borgvk_image_sample_plane_size(const struct borgvk_image *image, uint32_t bs,
+                               uint32_t bw, uint32_t bh, uint32_t bd)
+{
+   uint64_t plane_size = 0;
+   for (uint32_t l = 0; l < image->vk.mip_levels; l++)
+      plane_size += borgvk_mip_level_size(image->vk.extent.width,
+                                          image->vk.extent.height,
+                                          image->vk.extent.depth,
+                                          l, bs, bw, bh, bd, NULL);
+   return plane_size;
+}
+
+/* Byte size of ONE array layer, including all its MSAA sample planes (a
+ * layer of a samples>1 image packs `image->vk.samples` consecutive sample
+ * planes back to back -- see borgvk_image_size and the CmdResolveImage/
+ * clear-to-all-samples code, which add a sample's plane offset on top of
+ * what borgvk_image_level_offset (below) returns for this layer/level).
+ * For samples==1 (every non-MSAA image) this is a no-op multiply by 1, so
+ * every existing copy/blit/clear caller of this function is unaffected. */
 static uint64_t
 borgvk_image_layer_size(const struct borgvk_image *image, uint32_t bs,
                         uint32_t bw, uint32_t bh, uint32_t bd)
 {
-   uint64_t layer_size = 0;
-   for (uint32_t l = 0; l < image->vk.mip_levels; l++)
-      layer_size += borgvk_mip_level_size(image->vk.extent.width,
-                                          image->vk.extent.height,
-                                          image->vk.extent.depth,
-                                          l, bs, bw, bh, bd, NULL);
-   return layer_size;
+   return borgvk_image_sample_plane_size(image, bs, bw, bh, bd) *
+          MAX2(image->vk.samples, 1);
 }
 
 /* Byte offset of (level, layer)'s data within the image's backing memory,
@@ -591,7 +610,11 @@ borgvk_image_size(const VkImageCreateInfo *info)
       layer_size += borgvk_mip_level_size(info->extent.width, info->extent.height,
                                           info->extent.depth, l, bs, bw, bh, bd, NULL);
 
-   uint64_t size = layer_size * MAX2(info->arrayLayers, 1);
+   /* Multisampled images pack `samples` consecutive sample planes per array
+    * layer (matches borgvk_image_layer_size's convention) -- Vulkan requires
+    * mipLevels==1 whenever samples>1, so layer_size above is already a
+    * single sample plane's size for those. No-op for samples==1. */
+   uint64_t size = layer_size * MAX2(info->arrayLayers, 1) * MAX2(info->samples, 1);
    return align64(size, 256);
 }
 
@@ -808,10 +831,19 @@ borgvk_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage _image,
             uint32_t layer = range->baseArrayLayer + l;
             uint64_t off = borgvk_image_level_offset(image, level, layer, bs, bw, bh, bd,
                                                      &stride_blocks);
-            uint8_t *dst = (uint8_t *)image->mem->map + image->offset + off;
+            /* Multisampled images clear identically to every sample plane --
+             * a clear has no per-sample coverage, it's a uniform fill. See
+             * borgvk_image_layer_size's comment for the sample-plane packing
+             * this offset math relies on. No-op loop (1 iteration, +0 offset)
+             * for samples==1. */
+            uint64_t plane_size = borgvk_image_sample_plane_size(image, bs, bw, bh, bd);
+            for (uint32_t s = 0; s < MAX2(image->vk.samples, 1); s++) {
+               uint8_t *dst = (uint8_t *)image->mem->map + image->offset + off +
+                  (uint64_t)s * plane_size;
 
-            for (uint64_t t = 0; t < (uint64_t)stride_blocks * h_blocks * d; t++)
-               memcpy(dst + t * bs, pixel, bs);
+               for (uint64_t t = 0; t < (uint64_t)stride_blocks * h_blocks * d; t++)
+                  memcpy(dst + t * bs, pixel, bs);
+            }
          }
       }
    }
@@ -863,22 +895,29 @@ borgvk_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage _image,
             uint32_t layer = range->baseArrayLayer + l;
             uint64_t off = borgvk_image_level_offset(image, level, layer, bs, bw, bh, bd,
                                                      &stride_blocks);
-            uint8_t *base = (uint8_t *)image->mem->map + image->offset + off;
             uint64_t texel_count = (uint64_t)stride_blocks * h_blocks * d;
 
-            for (uint64_t t = 0; t < texel_count; t++) {
-               uint8_t *texel = base + t * bs;
-               if (borgvk_is_z16_s8(pfmt)) {
+            /* See the matching comment in CmdClearColorImage: a clear fills
+             * every sample plane identically. No-op loop for samples==1. */
+            uint64_t plane_size = borgvk_image_sample_plane_size(image, bs, bw, bh, bd);
+            for (uint32_t s = 0; s < MAX2(image->vk.samples, 1); s++) {
+               uint8_t *base = (uint8_t *)image->mem->map + image->offset + off +
+                  (uint64_t)s * plane_size;
+
+               for (uint64_t t = 0; t < texel_count; t++) {
+                  uint8_t *texel = base + t * bs;
+                  if (borgvk_is_z16_s8(pfmt)) {
+                     if (range->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)
+                        borgvk_z16_s8_pack_z(texel, pDepthStencil->depth);
+                     if (range->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT)
+                        texel[2] = stencil8;
+                     continue;
+                  }
                   if (range->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)
-                     borgvk_z16_s8_pack_z(texel, pDepthStencil->depth);
+                     util_format_pack_z_float(pfmt, texel, &pDepthStencil->depth, 1);
                   if (range->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT)
-                     texel[2] = stencil8;
-                  continue;
+                     util_format_pack_s_8uint(pfmt, texel, &stencil8, 1);
                }
-               if (range->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)
-                  util_format_pack_z_float(pfmt, texel, &pDepthStencil->depth, 1);
-               if (range->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT)
-                  util_format_pack_s_8uint(pfmt, texel, &stencil8, 1);
             }
          }
       }
@@ -930,32 +969,44 @@ borgvk_clear_attachment_rect(struct vk_image_view *view, VkImageAspectFlags aspe
       uint32_t stride_texels;
       uint64_t off = borgvk_image_level_offset(image, level, layer, bs, bw, bh, bd,
                                                &stride_texels);
-      uint8_t *level_base = (uint8_t *)image->mem->map + image->offset + off;
 
-      for (uint32_t y = y0; y < y0 + h; y++) {
-         uint8_t *row = level_base + (uint64_t)y * stride_texels * bs;
-         for (uint32_t x = x0; x < x0 + w; x++) {
-            uint8_t *texel = row + (uint64_t)x * bs;
+      /* See the matching comment in CmdClearColorImage: a clear fills every
+       * sample plane identically. No-op loop for samples==1. */
+      uint64_t plane_size = borgvk_image_sample_plane_size(image, bs, bw, bh, bd);
+      for (uint32_t s = 0; s < MAX2(image->vk.samples, 1); s++) {
+         uint8_t *level_base = (uint8_t *)image->mem->map + image->offset + off +
+            (uint64_t)s * plane_size;
 
-            if (aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) {
-               memcpy(texel, pixel, bs);
-               continue;
-            }
-            if (borgvk_is_z16_s8(pfmt)) {
+         for (uint32_t y = y0; y < y0 + h; y++) {
+            uint8_t *row = level_base + (uint64_t)y * stride_texels * bs;
+            for (uint32_t x = x0; x < x0 + w; x++) {
+               uint8_t *texel = row + (uint64_t)x * bs;
+
+               if (aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) {
+                  memcpy(texel, pixel, bs);
+                  continue;
+               }
+               if (borgvk_is_z16_s8(pfmt)) {
+                  if (aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)
+                     borgvk_z16_s8_pack_z(texel, clearValue->depthStencil.depth);
+                  if (aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT)
+                     texel[2] = stencil8;
+                  continue;
+               }
                if (aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)
-                  borgvk_z16_s8_pack_z(texel, clearValue->depthStencil.depth);
+                  util_format_pack_z_float(pfmt, texel, &clearValue->depthStencil.depth, 1);
                if (aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT)
-                  texel[2] = stencil8;
-               continue;
+                  util_format_pack_s_8uint(pfmt, texel, &stencil8, 1);
             }
-            if (aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)
-               util_format_pack_z_float(pfmt, texel, &clearValue->depthStencil.depth, 1);
-            if (aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT)
-               util_format_pack_s_8uint(pfmt, texel, &stencil8, 1);
          }
       }
    }
 }
+
+/* Defined below (near CmdResolveImage); forward-declared here so
+ * CmdEndRendering2EXT can call it for implicit render-pass resolve. */
+static void borgvk_resolve_region(struct borgvk_image *src, struct borgvk_image *dst,
+                                  const VkImageResolve *reg);
 
 /* borgvk never overrides RenderPass/Framebuffer creation, nor the legacy
  * CmdBeginRenderPass(2)/CmdEndRenderPass(2) entrypoints -- Mesa's own
@@ -978,17 +1029,24 @@ borgvk_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *p
 
    cmd->in_rendering = true;
    cmd->render_area = pRenderingInfo->renderArea;
+   cmd->layer_count = MAX2(pRenderingInfo->layerCount, 1);
    cmd->color_attachment_count =
       MIN2(pRenderingInfo->colorAttachmentCount, BORGVK_MAX_COLOR_ATTACHMENTS);
    cmd->depth_view = NULL;
    cmd->stencil_view = NULL;
 
-   uint32_t layerCount = MAX2(pRenderingInfo->layerCount, 1);
+   uint32_t layerCount = cmd->layer_count;
 
    for (uint32_t i = 0; i < cmd->color_attachment_count; i++) {
       const VkRenderingAttachmentInfo *att = &pRenderingInfo->pColorAttachments[i];
       VK_FROM_HANDLE(vk_image_view, view, att->imageView);
+      VK_FROM_HANDLE(vk_image_view, resolve_view, att->resolveImageView);
       cmd->color_views[i] = view;
+      /* resolveMode is always NONE or AVERAGE for a color attachment per
+       * spec, and resolveImageView is only set when a resolve was actually
+       * requested, so a non-NULL view is a sufficient "should resolve"
+       * signal without also checking resolveMode. */
+      cmd->color_resolve_views[i] = resolve_view;
       if (view && att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
          borgvk_clear_attachment_rect(view, VK_IMAGE_ASPECT_COLOR_BIT, &att->clearValue,
                                       cmd->render_area, 0, layerCount);
@@ -1015,11 +1073,34 @@ borgvk_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *p
    }
 }
 
-/* vk_common_CmdEndRendering (called for both the legacy-RenderPass-emulation
- * path and a direct vkCmdEndRendering call) always forwards to this
- * CmdEndRendering2EXT entrypoint. Nothing to do here -- there's no deferred
- * store/resolve work in this driver -- beyond clearing the attachment state
- * CmdBeginRendering captured. */
+/* A direct vkCmdEndRendering call resolves to vk_common_CmdEndRendering,
+ * which forwards to CmdEndRendering2EXT below -- but the LEGACY render-pass
+ * path (vkCmdEndRenderPass/2, which is how CTS's clear_color_attachment MSAA
+ * tests actually end their render pass) does NOT go through
+ * vk_common_CmdEndRendering at all: vk_common_CmdEndRenderPass2 calls
+ * `disp->CmdEndRendering` on the main dispatch table directly
+ * (src/vulkan/runtime/vk_render_pass.c). Since borgvk never gave that a real
+ * borgvk_ symbol, it fell into the same generic record-and-discard fallback
+ * that bit CmdBeginRenderPass earlier (see that function's comment) -- a
+ * debug print confirmed CmdBeginRendering fires (so the resolve views below
+ * get captured fine) but CmdEndRendering2EXT never did. Same fix: an
+ * explicit thin wrapper instead of relying on it being reached indirectly. */
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdEndRendering(VkCommandBuffer commandBuffer)
+{
+   vk_common_CmdEndRendering(commandBuffer);
+}
+
+/* This is where a multisample resolve actually has to happen: CTS's
+ * clear_color_attachment MSAA tests' resolve is driven entirely by
+ * VkSubpassDescription::pResolveAttachments -- there is no explicit
+ * vkCmdResolveImage call anywhere in that path (confirmed by reading
+ * ClearAttachmentTestInstance::iterate() in CTS). Mesa's
+ * vk_common_CmdEndRenderPass2 emulation turns that subpass resolve
+ * attachment into VkRenderingAttachmentInfo::resolveImageView/resolveMode
+ * when it calls our CmdBeginRendering, which is why the resolve targets are
+ * captured there and performed here at end-of-rendering, matching real
+ * Vulkan's resolve-at-subpass-end timing. */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdEndRendering2EXT(VkCommandBuffer commandBuffer,
                            const VkRenderingEndInfoEXT *pRenderingEndInfo)
@@ -1027,6 +1108,36 @@ borgvk_CmdEndRendering2EXT(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(vk_command_buffer, vk_cmd, commandBuffer);
    struct borgvk_command_buffer *cmd =
       container_of(vk_cmd, struct borgvk_command_buffer, vk);
+
+   for (uint32_t i = 0; i < cmd->color_attachment_count; i++) {
+      struct vk_image_view *view = cmd->color_views[i];
+      struct vk_image_view *resolve_view = cmd->color_resolve_views[i];
+      if (!view || !resolve_view)
+         continue;
+
+      struct borgvk_image *src = container_of(view->image, struct borgvk_image, vk);
+      struct borgvk_image *dst = container_of(resolve_view->image, struct borgvk_image, vk);
+      const VkImageResolve region = {
+         .srcSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .mipLevel = view->base_mip_level,
+            .baseArrayLayer = view->base_array_layer,
+            .layerCount = cmd->layer_count,
+         },
+         .srcOffset = { cmd->render_area.offset.x, cmd->render_area.offset.y, 0 },
+         .dstSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .mipLevel = resolve_view->base_mip_level,
+            .baseArrayLayer = resolve_view->base_array_layer,
+            .layerCount = cmd->layer_count,
+         },
+         .dstOffset = { cmd->render_area.offset.x, cmd->render_area.offset.y, 0 },
+         .extent = {
+            cmd->render_area.extent.width, cmd->render_area.extent.height, 1
+         },
+      };
+      borgvk_resolve_region(src, dst, &region);
+   }
 
    cmd->in_rendering = false;
    cmd->color_attachment_count = 0;
@@ -1961,6 +2072,104 @@ borgvk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
                                pCopyBufferToImageInfo->dstImage,
                                pCopyBufferToImageInfo->dstImageLayout,
                                pCopyBufferToImageInfo->regionCount, regions);
+}
+
+/* Resolves one region of a multisampled COLOR image down to a single-sample
+ * destination by averaging each pixel's src->vk.samples sample planes (see
+ * borgvk_image_layer_size's comment for how those planes are packed in
+ * memory). Multisampled images are always 2D, non-block-compressed, single
+ * mip level (Vulkan requires this whenever samples>1), so this needs none of
+ * CmdBlitImage's 1D/3D/block-compressed handling. Shared by CmdResolveImage
+ * (explicit resolve) and CmdEndRendering2EXT's implicit render-pass-resolve
+ * handling below -- see that function's comment for why both are needed. */
+static void
+borgvk_resolve_region(struct borgvk_image *src, struct borgvk_image *dst,
+                      const VkImageResolve *reg)
+{
+   if (!src->mem || !dst->mem || !src->mem->map || !dst->mem->map)
+      return;
+
+   enum pipe_format src_pfmt = vk_format_to_pipe_format(src->vk.format);
+   enum pipe_format dst_pfmt = vk_format_to_pipe_format(dst->vk.format);
+   uint32_t src_bs = vk_format_get_blocksize(src->vk.format);
+   uint32_t dst_bs = vk_format_get_blocksize(dst->vk.format);
+   uint32_t samples = MAX2(src->vk.samples, 1);
+
+   uint32_t layerCount = vk_image_subresource_layer_count(&src->vk, &reg->srcSubresource);
+
+   for (uint32_t l = 0; l < layerCount; l++) {
+      uint32_t src_stride, dst_stride;
+      uint64_t src_off = borgvk_image_level_offset(
+         src, reg->srcSubresource.mipLevel,
+         reg->srcSubresource.baseArrayLayer + l,
+         src_bs, 1, 1, 1, &src_stride);
+      uint64_t dst_off = borgvk_image_level_offset(
+         dst, reg->dstSubresource.mipLevel,
+         reg->dstSubresource.baseArrayLayer + l,
+         dst_bs, 1, 1, 1, &dst_stride);
+      uint64_t plane_size = borgvk_image_sample_plane_size(src, src_bs, 1, 1, 1);
+
+      const uint8_t *src_base = (const uint8_t *)src->mem->map + src->offset + src_off;
+      uint8_t *dst_base = (uint8_t *)dst->mem->map + dst->offset + dst_off;
+
+      for (uint32_t y = 0; y < reg->extent.height; y++) {
+         uint32_t sy = reg->srcOffset.y + y, dy = reg->dstOffset.y + y;
+         for (uint32_t x = 0; x < reg->extent.width; x++) {
+            uint32_t sx = reg->srcOffset.x + x, dx = reg->dstOffset.x + x;
+            uint8_t *dtexel = dst_base + ((uint64_t)dy * dst_stride + dx) * dst_bs;
+
+            float acc[4] = {0, 0, 0, 0};
+            for (uint32_t s = 0; s < samples; s++) {
+               const uint8_t *stexel = src_base + (uint64_t)s * plane_size +
+                  ((uint64_t)sy * src_stride + sx) * src_bs;
+               float v[4];
+               borgvk_unpack_rgba_float(src->vk.format, src_pfmt, stexel, v);
+               acc[0] += v[0]; acc[1] += v[1]; acc[2] += v[2]; acc[3] += v[3];
+            }
+            acc[0] /= samples; acc[1] /= samples; acc[2] /= samples; acc[3] /= samples;
+            borgvk_pack_rgba_float(dst->vk.format, dst_pfmt, dtexel, acc);
+         }
+      }
+   }
+}
+
+/* Depth/stencil resolve is a separate mechanism
+ * (VK_KHR_depth_stencil_resolve, via a render pass, not this entrypoint) --
+ * core vkCmdResolveImage is colour-only per spec. */
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdResolveImage(VkCommandBuffer commandBuffer,
+                       VkImage srcImage, VkImageLayout srcImageLayout,
+                       VkImage dstImage, VkImageLayout dstImageLayout,
+                       uint32_t regionCount, const VkImageResolve *pRegions)
+{
+   VK_FROM_HANDLE(borgvk_image, src, srcImage);
+   VK_FROM_HANDLE(borgvk_image, dst, dstImage);
+
+   if (!src || !dst)
+      return;
+
+   for (uint32_t r = 0; r < regionCount; r++)
+      borgvk_resolve_region(src, dst, &pRegions[r]);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdResolveImage2(VkCommandBuffer commandBuffer,
+                        const VkResolveImageInfo2 *pResolveImageInfo)
+{
+   VkImageResolve regions[MAX2(pResolveImageInfo->regionCount, 1)];
+   for (uint32_t i = 0; i < pResolveImageInfo->regionCount; i++) {
+      const VkImageResolve2 *r = &pResolveImageInfo->pRegions[i];
+      regions[i] = (VkImageResolve){
+         .srcSubresource = r->srcSubresource, .srcOffset = r->srcOffset,
+         .dstSubresource = r->dstSubresource, .dstOffset = r->dstOffset,
+         .extent = r->extent,
+      };
+   }
+   borgvk_CmdResolveImage(commandBuffer, pResolveImageInfo->srcImage,
+                          pResolveImageInfo->srcImageLayout,
+                          pResolveImageInfo->dstImage,
+                          pResolveImageInfo->dstImageLayout,
+                          pResolveImageInfo->regionCount, regions);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
