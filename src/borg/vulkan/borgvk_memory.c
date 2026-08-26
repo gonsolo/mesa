@@ -329,6 +329,28 @@ borgvk_image_level_offset(const struct borgvk_image *image, uint32_t level,
    return (uint64_t)layer * layer_size + level_offset;
 }
 
+/* For a combined depth-stencil image, a copy naming only one aspect
+ * (VkBufferImageCopy::imageSubresource.aspectMask) writes/reads a buffer
+ * packed with just that aspect's own element size (e.g. 1 tightly-packed
+ * byte per texel for VK_IMAGE_ASPECT_STENCIL_BIT on D24_UNORM_S8_UINT), not
+ * the combined format's element size (4 bytes there). Blindly using
+ * vk_format_get_blocksize(image->vk.format) for that side overflowed the
+ * buffer by up to 8x -- a real "double free or corruption" heap-overflow
+ * abort confirmed via coredumpctl/gdb in a later borgvk_FreeMemory (found
+ * running dEQP-VK.api.command_buffers.record_many_draws_primary_1, which
+ * exercises a depth-stencil attachment readback). For VK_IMAGE_ASPECT_COLOR_BIT
+ * this returns the image's own format unchanged, so callers that always pass
+ * COLOR_BIT see no behavior change. */
+static void
+borgvk_aspect_block_size(VkFormat combined_format, VkImageAspectFlags aspect,
+                         uint32_t *bs_out, uint32_t *bw_out, uint32_t *bh_out)
+{
+   VkFormat fmt = vk_format_get_aspect_format(combined_format, aspect);
+   *bs_out = vk_format_get_blocksize(fmt);
+   *bw_out = vk_format_get_blockwidth(fmt);
+   *bh_out = vk_format_get_blockheight(fmt);
+}
+
 static VkDeviceSize
 borgvk_image_size(const VkImageCreateInfo *info)
 {
@@ -573,8 +595,23 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
 
    for (uint32_t r = 0; r < regionCount; r++) {
       const VkImageCopy *reg = &pRegions[r];
-      uint32_t w_blocks = DIV_ROUND_UP(reg->extent.width, src_bw);
-      uint32_t h_blocks = DIV_ROUND_UP(reg->extent.height, src_bh);
+
+      /* Element size actually moved per texel: for a combined depth-stencil
+       * image with an aspect-selective region this differs from the
+       * image's own (combined) block size -- see borgvk_aspect_block_size.
+       * Addressing within each image still uses its own combined format
+       * (that's the real backing layout); src_elem_bs/dst_elem_bs is only
+       * how many bytes of each texel are actually copied. */
+      uint32_t src_elem_bs, src_elem_bw, src_elem_bh;
+      uint32_t dst_elem_bs, dst_elem_bw, dst_elem_bh;
+      borgvk_aspect_block_size(src->vk.format, reg->srcSubresource.aspectMask,
+                               &src_elem_bs, &src_elem_bw, &src_elem_bh);
+      borgvk_aspect_block_size(dst->vk.format, reg->dstSubresource.aspectMask,
+                               &dst_elem_bs, &dst_elem_bw, &dst_elem_bh);
+      uint32_t elem_bs = MIN2(src_elem_bs, dst_elem_bs);
+
+      uint32_t w_blocks = DIV_ROUND_UP(reg->extent.width, src_elem_bw);
+      uint32_t h_blocks = DIV_ROUND_UP(reg->extent.height, src_elem_bh);
       uint32_t layerCount = vk_image_subresource_layer_count(&src->vk, &reg->srcSubresource);
 
       for (uint32_t l = 0; l < layerCount; l++) {
@@ -593,10 +630,25 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
                     + (VkDeviceSize)(reg->dstOffset.y / dst_bh) * dst_stride_blocks * dst_bs
                     + (VkDeviceSize)(reg->dstOffset.x / dst_bw) * dst_bs;
 
-         for (uint32_t row = 0; row < h_blocks; row++) {
-            memcpy(d + (size_t)row * w_blocks * dst_bs,
-                   s + (size_t)row * src_stride_blocks * src_bs,
-                   (size_t)w_blocks * src_bs);
+         if (src_elem_bs == src_bs && dst_elem_bs == dst_bs) {
+            /* Common case (whole-texel copy, e.g. plain colour formats):
+             * one memcpy per row. */
+            for (uint32_t row = 0; row < h_blocks; row++) {
+               memcpy(d + (size_t)row * w_blocks * dst_bs,
+                      s + (size_t)row * src_stride_blocks * src_bs,
+                      (size_t)w_blocks * elem_bs);
+            }
+         } else {
+            /* Aspect-selective copy on a combined format: each destination
+             * texel is smaller than its source texel's storage, so texels
+             * must be copied individually rather than row-at-once. */
+            for (uint32_t row = 0; row < h_blocks; row++) {
+               for (uint32_t col = 0; col < w_blocks; col++) {
+                  memcpy(d + (size_t)row * w_blocks * dst_elem_bs + (size_t)col * dst_elem_bs,
+                         s + (size_t)row * src_stride_blocks * src_bs + (size_t)col * src_bs,
+                         elem_bs);
+               }
+            }
          }
       }
    }
@@ -625,12 +677,24 @@ borgvk_CmdCopyImageToBuffer(VkCommandBuffer commandBuffer,
    if (!src || !dst || !src->mem || !dst->mem || !src->mem->map || !dst->mem->map)
       return;
 
-   uint32_t bs = vk_format_get_blocksize(src->vk.format);
-   uint32_t bw = vk_format_get_blockwidth(src->vk.format);
-   uint32_t bh = vk_format_get_blockheight(src->vk.format);
+   uint32_t img_bs = vk_format_get_blocksize(src->vk.format);
+   uint32_t img_bw = vk_format_get_blockwidth(src->vk.format);
+   uint32_t img_bh = vk_format_get_blockheight(src->vk.format);
 
    for (uint32_t r = 0; r < regionCount; r++) {
       const VkBufferImageCopy *reg = &pRegions[r];
+
+      /* The buffer side is packed with the SELECTED ASPECT's element size,
+       * which for an aspect-selective region on a combined depth-stencil
+       * image (e.g. VK_IMAGE_ASPECT_STENCIL_BIT on D24_UNORM_S8_UINT) is
+       * smaller than the image's own combined element size -- see
+       * borgvk_aspect_block_size. Using the combined size for the buffer
+       * side overflowed it by up to 8x, a real heap-overflow "double free
+       * or corruption" abort confirmed via coredumpctl/gdb. */
+      uint32_t bs, bw, bh;
+      borgvk_aspect_block_size(src->vk.format, reg->imageSubresource.aspectMask,
+                               &bs, &bw, &bh);
+
       uint32_t w_blocks = DIV_ROUND_UP(reg->imageExtent.width, bw);
       uint32_t h_blocks = DIV_ROUND_UP(reg->imageExtent.height, bh);
       /* 0 means tightly packed (VkBufferImageCopy spec). */
@@ -645,18 +709,29 @@ borgvk_CmdCopyImageToBuffer(VkCommandBuffer commandBuffer,
          uint32_t src_stride_blocks;
          uint64_t level_off = borgvk_image_level_offset(
             src, reg->imageSubresource.mipLevel,
-            reg->imageSubresource.baseArrayLayer + l, bs, bw, bh, &src_stride_blocks);
+            reg->imageSubresource.baseArrayLayer + l, img_bs, img_bw, img_bh,
+            &src_stride_blocks);
 
          const uint8_t *s = (const uint8_t *)src->mem->map + src->offset + level_off
-                          + (VkDeviceSize)(reg->imageOffset.y / bh) * src_stride_blocks * bs
-                          + (VkDeviceSize)(reg->imageOffset.x / bw) * bs;
+                          + (VkDeviceSize)(reg->imageOffset.y / img_bh) * src_stride_blocks * img_bs
+                          + (VkDeviceSize)(reg->imageOffset.x / img_bw) * img_bs;
          uint8_t *d = (uint8_t *)dst->mem->map + dst->offset + reg->bufferOffset
                     + (VkDeviceSize)l * layer_pitch;
 
-         for (uint32_t row = 0; row < h_blocks; row++) {
-            memcpy(d + (size_t)row * row_len_blocks * bs,
-                   s + (size_t)row * src_stride_blocks * bs,
-                   (size_t)w_blocks * bs);
+         if (bs == img_bs) {
+            for (uint32_t row = 0; row < h_blocks; row++) {
+               memcpy(d + (size_t)row * row_len_blocks * bs,
+                      s + (size_t)row * src_stride_blocks * img_bs,
+                      (size_t)w_blocks * bs);
+            }
+         } else {
+            for (uint32_t row = 0; row < h_blocks; row++) {
+               for (uint32_t col = 0; col < w_blocks; col++) {
+                  memcpy(d + (size_t)row * row_len_blocks * bs + (size_t)col * bs,
+                         s + (size_t)row * src_stride_blocks * img_bs + (size_t)col * img_bs,
+                         bs);
+               }
+            }
          }
       }
    }
@@ -685,12 +760,20 @@ borgvk_CmdCopyBufferToImage(VkCommandBuffer commandBuffer,
    if (!src || !dst || !src->mem || !dst->mem || !src->mem->map || !dst->mem->map)
       return;
 
-   uint32_t bs = vk_format_get_blocksize(dst->vk.format);
-   uint32_t bw = vk_format_get_blockwidth(dst->vk.format);
-   uint32_t bh = vk_format_get_blockheight(dst->vk.format);
+   uint32_t img_bs = vk_format_get_blocksize(dst->vk.format);
+   uint32_t img_bw = vk_format_get_blockwidth(dst->vk.format);
+   uint32_t img_bh = vk_format_get_blockheight(dst->vk.format);
 
    for (uint32_t r = 0; r < regionCount; r++) {
       const VkBufferImageCopy *reg = &pRegions[r];
+
+      /* See the matching comment in CmdCopyImageToBuffer: the buffer side is
+       * packed with the selected aspect's element size, not the image's
+       * combined element size. */
+      uint32_t bs, bw, bh;
+      borgvk_aspect_block_size(dst->vk.format, reg->imageSubresource.aspectMask,
+                               &bs, &bw, &bh);
+
       uint32_t w_blocks = DIV_ROUND_UP(reg->imageExtent.width, bw);
       uint32_t h_blocks = DIV_ROUND_UP(reg->imageExtent.height, bh);
       uint32_t row_len_blocks = reg->bufferRowLength ?
@@ -704,18 +787,29 @@ borgvk_CmdCopyBufferToImage(VkCommandBuffer commandBuffer,
          uint32_t dst_stride_blocks;
          uint64_t level_off = borgvk_image_level_offset(
             dst, reg->imageSubresource.mipLevel,
-            reg->imageSubresource.baseArrayLayer + l, bs, bw, bh, &dst_stride_blocks);
+            reg->imageSubresource.baseArrayLayer + l, img_bs, img_bw, img_bh,
+            &dst_stride_blocks);
 
          const uint8_t *s = (const uint8_t *)src->mem->map + src->offset + reg->bufferOffset
                           + (VkDeviceSize)l * layer_pitch;
          uint8_t *d = (uint8_t *)dst->mem->map + dst->offset + level_off
-                    + (VkDeviceSize)(reg->imageOffset.y / bh) * dst_stride_blocks * bs
-                    + (VkDeviceSize)(reg->imageOffset.x / bw) * bs;
+                    + (VkDeviceSize)(reg->imageOffset.y / img_bh) * dst_stride_blocks * img_bs
+                    + (VkDeviceSize)(reg->imageOffset.x / img_bw) * img_bs;
 
-         for (uint32_t row = 0; row < h_blocks; row++) {
-            memcpy(d + (size_t)row * dst_stride_blocks * bs,
-                   s + (size_t)row * row_len_blocks * bs,
-                   (size_t)w_blocks * bs);
+         if (bs == img_bs) {
+            for (uint32_t row = 0; row < h_blocks; row++) {
+               memcpy(d + (size_t)row * dst_stride_blocks * img_bs,
+                      s + (size_t)row * row_len_blocks * bs,
+                      (size_t)w_blocks * bs);
+            }
+         } else {
+            for (uint32_t row = 0; row < h_blocks; row++) {
+               for (uint32_t col = 0; col < w_blocks; col++) {
+                  memcpy(d + (size_t)row * dst_stride_blocks * img_bs + (size_t)col * img_bs,
+                         s + (size_t)row * row_len_blocks * bs + (size_t)col * bs,
+                         bs);
+               }
+            }
          }
       }
    }
