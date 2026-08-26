@@ -612,16 +612,43 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
 
       uint32_t w_blocks = DIV_ROUND_UP(reg->extent.width, src_elem_bw);
       uint32_t h_blocks = DIV_ROUND_UP(reg->extent.height, src_elem_bh);
-      uint32_t layerCount = vk_image_subresource_layer_count(&src->vk, &reg->srcSubresource);
 
-      for (uint32_t l = 0; l < layerCount; l++) {
+      /* A copy between a 2D (array) image and a 3D image is a spec-defined
+       * special case (VUID-vkCmdCopyImage-srcImage-07743 and friends): the
+       * 2D side's array layers correspond to Z slices within the 3D image's
+       * SINGLE array layer, not to separate array layers of their own (a 3D
+       * image always has arrayLayers=1). Treating each slice as a real array
+       * layer on the 3D side -- which borgvk_image_level_offset's "layer"
+       * parameter always multiplies by the image's full per-layer size --
+       * walked off the end of the 3D image's allocation for slice > 0. Real
+       * bug, not a corner case: confirmed via coredumpctl/gdb, a heap
+       * corruption surfacing later as a SEGV inside CTS's own posix_memalign
+       * while logging the (unrelated, already-corrupted) test result, found
+       * running dEQP-VK.api.copy_and_blit.core.image_to_image.3d_images.*. */
+      bool src_3d = src->vk.image_type == VK_IMAGE_TYPE_3D;
+      bool dst_3d = dst->vk.image_type == VK_IMAGE_TYPE_3D;
+      uint32_t sliceCount = (src_3d || dst_3d) ?
+         reg->extent.depth : vk_image_subresource_layer_count(&src->vk, &reg->srcSubresource);
+
+      for (uint32_t l = 0; l < sliceCount; l++) {
          uint32_t src_stride_blocks, dst_stride_blocks;
          uint64_t src_off = borgvk_image_level_offset(
-            src, reg->srcSubresource.mipLevel, reg->srcSubresource.baseArrayLayer + l,
+            src, reg->srcSubresource.mipLevel,
+            src_3d ? 0 : reg->srcSubresource.baseArrayLayer + l,
             src_bs, src_bw, src_bh, &src_stride_blocks);
+         if (src_3d)
+            src_off += (uint64_t)(reg->srcOffset.z + l) *
+               borgvk_mip_level_size(src->vk.extent.width, src->vk.extent.height, 1,
+                                     reg->srcSubresource.mipLevel, src_bs, src_bw, src_bh, NULL);
+
          uint64_t dst_off = borgvk_image_level_offset(
-            dst, reg->dstSubresource.mipLevel, reg->dstSubresource.baseArrayLayer + l,
+            dst, reg->dstSubresource.mipLevel,
+            dst_3d ? 0 : reg->dstSubresource.baseArrayLayer + l,
             dst_bs, dst_bw, dst_bh, &dst_stride_blocks);
+         if (dst_3d)
+            dst_off += (uint64_t)(reg->dstOffset.z + l) *
+               borgvk_mip_level_size(dst->vk.extent.width, dst->vk.extent.height, 1,
+                                     reg->dstSubresource.mipLevel, dst_bs, dst_bw, dst_bh, NULL);
 
          const uint8_t *s = (const uint8_t *)src->mem->map + src->offset + src_off
                           + (VkDeviceSize)(reg->srcOffset.y / src_bh) * src_stride_blocks * src_bs
