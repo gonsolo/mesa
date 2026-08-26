@@ -398,22 +398,36 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
 
    uint32_t bs = vk_format_get_blocksize(src->vk.format);
 
+   /* Strides and extents must be counted in compressed blocks, not texels:
+    * vk_format_get_blocksize() returns bytes per BLOCK (e.g. 16 B covering a
+    * 4x4 texel block for ETC2/EAC), not bytes per texel. Multiplying texel
+    * width/height directly by bs overflowed the destination allocation for
+    * any block-compressed format -- surfaced as a heap "double free or
+    * corruption" abort in a later borgvk_FreeMemory, not here. VkImageCopy
+    * offsets/extents are always block-aligned per the spec, so the divisions
+    * below are exact. For uncompressed formats bw = bh = 1 and this is
+    * unchanged from the original per-texel math. */
+   uint32_t bw = vk_format_get_blockwidth(src->vk.format);
+   uint32_t bh = vk_format_get_blockheight(src->vk.format);
+   uint32_t src_stride_blocks = src->vk.extent.width / bw;
+   uint32_t dst_stride_blocks = dst->vk.extent.width / bw;
+
    for (uint32_t r = 0; r < regionCount; r++) {
       const VkImageCopy *reg = &pRegions[r];
-      uint32_t w = reg->extent.width;
-      uint32_t h = reg->extent.height;
+      uint32_t w_blocks = DIV_ROUND_UP(reg->extent.width, bw);
+      uint32_t h_blocks = DIV_ROUND_UP(reg->extent.height, bh);
 
       const uint8_t *s = (const uint8_t *)src->mem->map + src->offset
-                       + (VkDeviceSize)reg->srcOffset.y * src->vk.extent.width * bs
-                       + (VkDeviceSize)reg->srcOffset.x * bs;
+                       + (VkDeviceSize)(reg->srcOffset.y / bh) * src_stride_blocks * bs
+                       + (VkDeviceSize)(reg->srcOffset.x / bw) * bs;
       uint8_t *d = (uint8_t *)dst->mem->map + dst->offset
-                 + (VkDeviceSize)reg->dstOffset.y * dst->vk.extent.width * bs
-                 + (VkDeviceSize)reg->dstOffset.x * bs;
+                 + (VkDeviceSize)(reg->dstOffset.y / bh) * dst_stride_blocks * bs
+                 + (VkDeviceSize)(reg->dstOffset.x / bw) * bs;
 
-      for (uint32_t row = 0; row < h; row++) {
-         memcpy(d + (size_t)row * w * bs,
-                s + (size_t)row * src->vk.extent.width * bs,
-                (size_t)w * bs);
+      for (uint32_t row = 0; row < h_blocks; row++) {
+         memcpy(d + (size_t)row * w_blocks * bs,
+                s + (size_t)row * src_stride_blocks * bs,
+                (size_t)w_blocks * bs);
       }
    }
 }
