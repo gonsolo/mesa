@@ -329,6 +329,36 @@ borgvk_image_level_offset(const struct borgvk_image *image, uint32_t level,
    return (uint64_t)layer * layer_size + level_offset;
 }
 
+/* PIPE_FORMAT_Z16_UNORM_S8_UINT (VK_FORMAT_D16_UNORM_S8_UINT) has NO
+ * util_format_{pack,unpack}_{z_float,s_8uint} implementation anywhere in
+ * Mesa -- every one of those six functions is a bare UNREACHABLE() stub
+ * (src/util/format/u_format_zs.c), confirmed by hitting the assertion
+ * running dEQP-VK.api.image_clearing...d16_unorm_s8_uint. This is an
+ * upstream Mesa gap, not something to route around silently: hand-roll the
+ * packing here instead, using the format's own documented layout
+ * (u_format.yaml: channels [UN16, UP8], no padding -- 2-byte little-endian
+ * UNORM16 depth followed directly by a 1-byte stencil, 3 bytes/texel). */
+static inline bool
+borgvk_is_z16_s8(enum pipe_format fmt)
+{
+   return fmt == PIPE_FORMAT_Z16_UNORM_S8_UINT;
+}
+
+static inline void
+borgvk_z16_s8_pack_z(uint8_t *texel, float z)
+{
+   uint16_t z16 = (uint16_t)(CLAMP(z, 0.0f, 1.0f) * 65535.0f + 0.5f);
+   texel[0] = z16 & 0xFF;
+   texel[1] = (z16 >> 8) & 0xFF;
+}
+
+static inline float
+borgvk_z16_s8_unpack_z(const uint8_t *texel)
+{
+   uint16_t z16 = (uint16_t)texel[0] | ((uint16_t)texel[1] << 8);
+   return z16 / 65535.0f;
+}
+
 /* For a combined depth-stencil image, a copy naming only one aspect
  * (VkBufferImageCopy::imageSubresource.aspectMask) writes/reads a buffer
  * packed with just that aspect's own element size (e.g. 1 tightly-packed
@@ -569,6 +599,69 @@ borgvk_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage _image,
    }
 }
 
+/* Same reasoning and layout as CmdClearColorImage, but depth/stencil clears
+ * can legally touch only ONE aspect of a combined format (e.g. depth-only on
+ * D24_UNORM_S8_UINT), which must leave the other aspect's bits in each texel
+ * untouched -- unlike a colour clear, this can't be a blind per-texel
+ * memcpy/overwrite. Rather than hand-deriving each combined format's bit
+ * layout, this uses gallium's own util_format_pack_z_float/pack_s_8uint,
+ * which read-modify-write exactly the requested aspect's bits and leave the
+ * rest alone (the same packing tables CTS's own reference implementation is
+ * built on, so this matches what CTS expects by construction). */
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage _image,
+                                 VkImageLayout imageLayout,
+                                 const VkClearDepthStencilValue *pDepthStencil,
+                                 uint32_t rangeCount, const VkImageSubresourceRange *pRanges)
+{
+   VK_FROM_HANDLE(borgvk_image, image, _image);
+
+   if (!image || !image->mem || !image->mem->map)
+      return;
+
+   enum pipe_format pfmt = vk_format_to_pipe_format(image->vk.format);
+   uint32_t bs = vk_format_get_blocksize(image->vk.format);
+   uint32_t bw = vk_format_get_blockwidth(image->vk.format);
+   uint32_t bh = vk_format_get_blockheight(image->vk.format);
+   uint8_t stencil8 = (uint8_t)pDepthStencil->stencil;
+
+   for (uint32_t r = 0; r < rangeCount; r++) {
+      const VkImageSubresourceRange *range = &pRanges[r];
+      uint32_t levelCount = vk_image_subresource_level_count(&image->vk, range);
+      uint32_t layerCount = vk_image_subresource_layer_count(&image->vk, range);
+
+      for (uint32_t lv = 0; lv < levelCount; lv++) {
+         uint32_t level = range->baseMipLevel + lv;
+         uint32_t stride_blocks;
+         uint32_t h_blocks = DIV_ROUND_UP(MAX2(image->vk.extent.height >> level, 1), bh);
+         uint32_t d = MAX2(image->vk.extent.depth >> level, 1);
+
+         for (uint32_t l = 0; l < layerCount; l++) {
+            uint32_t layer = range->baseArrayLayer + l;
+            uint64_t off = borgvk_image_level_offset(image, level, layer, bs, bw, bh,
+                                                     &stride_blocks);
+            uint8_t *base = (uint8_t *)image->mem->map + image->offset + off;
+            uint64_t texel_count = (uint64_t)stride_blocks * h_blocks * d;
+
+            for (uint64_t t = 0; t < texel_count; t++) {
+               uint8_t *texel = base + t * bs;
+               if (borgvk_is_z16_s8(pfmt)) {
+                  if (range->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)
+                     borgvk_z16_s8_pack_z(texel, pDepthStencil->depth);
+                  if (range->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT)
+                     texel[2] = stencil8;
+                  continue;
+               }
+               if (range->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)
+                  util_format_pack_z_float(pfmt, texel, &pDepthStencil->depth, 1);
+               if (range->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT)
+                  util_format_pack_s_8uint(pfmt, texel, &stencil8, 1);
+            }
+         }
+      }
+   }
+}
+
 /* Image copy for readback: both images are linear host-RAM; just memcpy the
  * region, addressed via the shared borgvk_image_level_offset layout so every
  * mip level/array layer a region names is handled, not just level 0/layer 0. */
@@ -738,14 +831,28 @@ borgvk_CmdCopyImageToBuffer(VkCommandBuffer commandBuffer,
       uint32_t img_h_blocks = reg->bufferImageHeight ?
          DIV_ROUND_UP(reg->bufferImageHeight, bh) : h_blocks;
       uint64_t layer_pitch = (uint64_t)row_len_blocks * img_h_blocks * bs;
-      uint32_t layerCount = MAX2(reg->imageSubresource.layerCount, 1);
+      /* A 3D image has exactly one array layer (imageSubresource.layerCount
+       * is always 1); its depth slices are what iterate here instead, via
+       * imageExtent.depth. Without this, only the first Z slice (z=0) was
+       * ever copied -- imageOffset.z was silently ignored -- so a 3D
+       * image's remaining slices in the destination buffer stayed whatever
+       * that buffer's fresh host allocation already contained. Found via
+       * dEQP-VK.api.image_clearing...clear_depth_stencil_image.3d.*
+       * reading back Depth:0 for every slice past the first. */
+      bool img_3d = src->vk.image_type == VK_IMAGE_TYPE_3D;
+      uint32_t sliceCount = img_3d ?
+         MAX2(reg->imageExtent.depth, 1) : MAX2(reg->imageSubresource.layerCount, 1);
 
-      for (uint32_t l = 0; l < layerCount; l++) {
+      for (uint32_t l = 0; l < sliceCount; l++) {
          uint32_t src_stride_blocks;
          uint64_t level_off = borgvk_image_level_offset(
             src, reg->imageSubresource.mipLevel,
-            reg->imageSubresource.baseArrayLayer + l, img_bs, img_bw, img_bh,
-            &src_stride_blocks);
+            img_3d ? 0 : reg->imageSubresource.baseArrayLayer + l,
+            img_bs, img_bw, img_bh, &src_stride_blocks);
+         if (img_3d)
+            level_off += (uint64_t)(reg->imageOffset.z + l) *
+               borgvk_mip_level_size(src->vk.extent.width, src->vk.extent.height, 1,
+                                     reg->imageSubresource.mipLevel, img_bs, img_bw, img_bh, NULL);
 
          const uint8_t *s = (const uint8_t *)src->mem->map + src->offset + level_off
                           + (VkDeviceSize)(reg->imageOffset.y / img_bh) * src_stride_blocks * img_bs
@@ -759,12 +866,48 @@ borgvk_CmdCopyImageToBuffer(VkCommandBuffer commandBuffer,
                       s + (size_t)row * src_stride_blocks * img_bs,
                       (size_t)w_blocks * bs);
             }
-         } else {
+         } else if (reg->imageSubresource.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT) {
+            /* A raw byte-copy of the first `bs` bytes of each combined texel
+             * would be wrong here -- stencil isn't necessarily stored in the
+             * texel's first byte(s) (Mesa's combined depth-stencil pipe
+             * formats put depth first, stencil last). Use gallium's own
+             * stencil pack/unpack so this matches CTS's own reference
+             * layout regardless of the combined format's actual bit
+             * packing. */
+            enum pipe_format img_pfmt = vk_format_to_pipe_format(src->vk.format);
+            bool z16_s8 = borgvk_is_z16_s8(img_pfmt);
             for (uint32_t row = 0; row < h_blocks; row++) {
                for (uint32_t col = 0; col < w_blocks; col++) {
-                  memcpy(d + (size_t)row * row_len_blocks * bs + (size_t)col * bs,
-                         s + (size_t)row * src_stride_blocks * img_bs + (size_t)col * img_bs,
-                         bs);
+                  const uint8_t *src_texel =
+                     s + (size_t)row * src_stride_blocks * img_bs + (size_t)col * img_bs;
+                  uint8_t stencil;
+                  if (z16_s8)
+                     stencil = src_texel[2];
+                  else
+                     util_format_unpack_s_8uint(img_pfmt, &stencil, src_texel, 1);
+                  d[(size_t)row * row_len_blocks * bs + (size_t)col * bs] = stencil;
+               }
+            }
+         } else {
+            /* Depth-only extraction where the aspect-only format isn't the
+             * same size as the combined format (e.g. D32_SFLOAT_S8_UINT's
+             * depth-only view is 4 B vs its own 8 B combined texel).
+             * util_format_unpack_z_float/pack_z_float convert through a
+             * normalized float intermediate, so this is correct regardless
+             * of either format's exact bit layout. */
+            enum pipe_format img_pfmt = vk_format_to_pipe_format(src->vk.format);
+            enum pipe_format dst_pfmt = vk_format_to_pipe_format(
+               vk_format_get_aspect_format(src->vk.format, VK_IMAGE_ASPECT_DEPTH_BIT));
+            bool z16_s8 = borgvk_is_z16_s8(img_pfmt);
+            for (uint32_t row = 0; row < h_blocks; row++) {
+               for (uint32_t col = 0; col < w_blocks; col++) {
+                  const uint8_t *src_texel =
+                     s + (size_t)row * src_stride_blocks * img_bs + (size_t)col * img_bs;
+                  float z = z16_s8 ? borgvk_z16_s8_unpack_z(src_texel) : 0.0f;
+                  if (!z16_s8)
+                     util_format_unpack_z_float(img_pfmt, &z, src_texel, 1);
+                  util_format_pack_z_float(dst_pfmt,
+                     d + (size_t)row * row_len_blocks * bs + (size_t)col * bs, &z, 1);
                }
             }
          }
@@ -816,14 +959,23 @@ borgvk_CmdCopyBufferToImage(VkCommandBuffer commandBuffer,
       uint32_t img_h_blocks = reg->bufferImageHeight ?
          DIV_ROUND_UP(reg->bufferImageHeight, bh) : h_blocks;
       uint64_t layer_pitch = (uint64_t)row_len_blocks * img_h_blocks * bs;
-      uint32_t layerCount = MAX2(reg->imageSubresource.layerCount, 1);
+      /* See the matching comment in CmdCopyImageToBuffer: a 3D image's depth
+       * slices iterate via imageExtent.depth, not imageSubresource.layerCount
+       * (always 1 for a 3D image). */
+      bool img_3d = dst->vk.image_type == VK_IMAGE_TYPE_3D;
+      uint32_t sliceCount = img_3d ?
+         MAX2(reg->imageExtent.depth, 1) : MAX2(reg->imageSubresource.layerCount, 1);
 
-      for (uint32_t l = 0; l < layerCount; l++) {
+      for (uint32_t l = 0; l < sliceCount; l++) {
          uint32_t dst_stride_blocks;
          uint64_t level_off = borgvk_image_level_offset(
             dst, reg->imageSubresource.mipLevel,
-            reg->imageSubresource.baseArrayLayer + l, img_bs, img_bw, img_bh,
-            &dst_stride_blocks);
+            img_3d ? 0 : reg->imageSubresource.baseArrayLayer + l,
+            img_bs, img_bw, img_bh, &dst_stride_blocks);
+         if (img_3d)
+            level_off += (uint64_t)(reg->imageOffset.z + l) *
+               borgvk_mip_level_size(dst->vk.extent.width, dst->vk.extent.height, 1,
+                                     reg->imageSubresource.mipLevel, img_bs, img_bw, img_bh, NULL);
 
          const uint8_t *s = (const uint8_t *)src->mem->map + src->offset + reg->bufferOffset
                           + (VkDeviceSize)l * layer_pitch;
@@ -837,12 +989,44 @@ borgvk_CmdCopyBufferToImage(VkCommandBuffer commandBuffer,
                       s + (size_t)row * row_len_blocks * bs,
                       (size_t)w_blocks * bs);
             }
-         } else {
+         } else if (reg->imageSubresource.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT) {
+            /* See the matching comment in CmdCopyImageToBuffer: a raw byte
+             * write into the first `bs` bytes of the combined texel would
+             * land in the wrong bit position (and clobber depth bits) --
+             * use gallium's stencil pack, which writes only the stencil
+             * bits and preserves the rest. */
+            enum pipe_format img_pfmt = vk_format_to_pipe_format(dst->vk.format);
+            bool z16_s8 = borgvk_is_z16_s8(img_pfmt);
             for (uint32_t row = 0; row < h_blocks; row++) {
                for (uint32_t col = 0; col < w_blocks; col++) {
-                  memcpy(d + (size_t)row * dst_stride_blocks * img_bs + (size_t)col * img_bs,
-                         s + (size_t)row * row_len_blocks * bs + (size_t)col * bs,
-                         bs);
+                  uint8_t stencil = s[(size_t)row * row_len_blocks * bs + (size_t)col * bs];
+                  uint8_t *dst_texel =
+                     d + (size_t)row * dst_stride_blocks * img_bs + (size_t)col * img_bs;
+                  if (z16_s8)
+                     dst_texel[2] = stencil;
+                  else
+                     util_format_pack_s_8uint(img_pfmt, dst_texel, &stencil, 1);
+               }
+            }
+         } else {
+            /* Depth-only upload where the aspect-only format isn't the same
+             * size as the combined format -- see the matching comment in
+             * CmdCopyImageToBuffer. */
+            enum pipe_format img_pfmt = vk_format_to_pipe_format(dst->vk.format);
+            enum pipe_format src_pfmt = vk_format_to_pipe_format(
+               vk_format_get_aspect_format(dst->vk.format, VK_IMAGE_ASPECT_DEPTH_BIT));
+            bool z16_s8 = borgvk_is_z16_s8(img_pfmt);
+            for (uint32_t row = 0; row < h_blocks; row++) {
+               for (uint32_t col = 0; col < w_blocks; col++) {
+                  float z;
+                  util_format_unpack_z_float(src_pfmt, &z,
+                     s + (size_t)row * row_len_blocks * bs + (size_t)col * bs, 1);
+                  uint8_t *dst_texel =
+                     d + (size_t)row * dst_stride_blocks * img_bs + (size_t)col * img_bs;
+                  if (z16_s8)
+                     borgvk_z16_s8_pack_z(dst_texel, z);
+                  else
+                     util_format_pack_z_float(img_pfmt, dst_texel, &z, 1);
                }
             }
          }
