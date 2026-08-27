@@ -266,6 +266,29 @@ borgvk_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer _buffer,
       ((uint32_t *)dst)[i] = data;
 }
 
+/* vkCmdUpdateBuffer: inline data embedded in the command buffer, copied into
+ * the destination at submit time.  Was entirely missing -- same discard-into-
+ * vk_cmd_queue story as CmdFillBuffer above, so every
+ * dEQP-VK.api.fill_and_update_buffer.*.update_buffer_* case read back whatever
+ * the destination already held.  (The fill_buffer_* cases in the same group
+ * passed, which is exactly why this looked implemented from the group name.)
+ *
+ * Spec constraints that make this a plain memcpy: dataSize is at most 65536,
+ * and both dstOffset and dataSize must be 4-byte multiples, so there is no
+ * partial-word or oversized case to handle. */
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdUpdateBuffer(VkCommandBuffer commandBuffer, VkBuffer _dstBuffer,
+                       VkDeviceSize dstOffset, VkDeviceSize dataSize,
+                       const void *pData)
+{
+   VK_FROM_HANDLE(borgvk_buffer, buffer, _dstBuffer);
+
+   if (!buffer || !buffer->mem || !buffer->mem->map || !pData)
+      return;
+
+   memcpy((uint8_t *)buffer->mem->map + buffer->offset + dstOffset, pData, dataSize);
+}
+
 /* Plain buffer-to-buffer copy: also entirely missing, same no-op-via-
  * vk_cmd_queue-discard story as every other unimplemented vkCmd* in this
  * file. No format/block-size concerns at all here -- just raw bytes. */
@@ -586,6 +609,25 @@ borgvk_pack_clear_color(VkFormat vk_fmt, enum pipe_format pfmt, uint8_t *pixel,
  * (confirmed via a clean assertion failure, not a crash, running
  * dEQP-VK.api.copy_and_blit...depth_stencil_aspects tests) -- so it's handled
  * as the identity case here, same as passing the format through unchanged. */
+/* True when `aspect` names only ONE aspect of a combined depth+stencil format.
+ *
+ * This is exactly the case where a raw whole-texel memcpy is wrong even though
+ * the two element sizes happen to match. For VK_FORMAT_D24_UNORM_S8_UINT the
+ * depth aspect's transfer format is X8_D24_UNORM_PACK32 -- also 4 bytes -- so
+ * a `bs == img_bs` fast path would memcpy the full 32-bit texel and blow away
+ * the stencil byte that shares it. The aspect-selective pack/unpack path
+ * read-modify-writes only the named aspect's bits and must be used instead.
+ * Confirmed by dEQP-VK.api.copy_and_blit.*.buffer_to_depthstencil.
+ * buffer_offset_d24_unorm_s8_uint_{SD,S_D} reporting "Stencil comparison
+ * failed" while depth compared clean. */
+static bool
+borgvk_is_partial_ds_aspect(VkFormat fmt, VkImageAspectFlags aspect)
+{
+   if (!vk_format_has_depth(fmt) || !vk_format_has_stencil(fmt))
+      return false;
+   return aspect != (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
+}
+
 static void
 borgvk_aspect_block_size(VkFormat combined_format, VkImageAspectFlags aspect,
                          uint32_t *bs_out, uint32_t *bw_out, uint32_t *bh_out)
@@ -1761,6 +1803,8 @@ borgvk_CmdCopyImageToBuffer(VkCommandBuffer commandBuffer,
       uint32_t bs, bw, bh;
       borgvk_aspect_block_size(src->vk.format, reg->imageSubresource.aspectMask,
                                &bs, &bw, &bh);
+      bool partial_aspect = borgvk_is_partial_ds_aspect(
+         src->vk.format, reg->imageSubresource.aspectMask);
 
       uint32_t w_blocks = DIV_ROUND_UP(reg->imageExtent.width, bw);
       uint32_t h_blocks = DIV_ROUND_UP(reg->imageExtent.height, bh);
@@ -1801,7 +1845,7 @@ borgvk_CmdCopyImageToBuffer(VkCommandBuffer commandBuffer,
          uint8_t *d = (uint8_t *)dst->mem->map + dst->offset + reg->bufferOffset
                     + (VkDeviceSize)l * layer_pitch;
 
-         if (bs == img_bs) {
+         if (bs == img_bs && !partial_aspect) {
             for (uint32_t row = 0; row < h_blocks; row++) {
                memcpy(d + (size_t)row * row_len_blocks * bs,
                       s + (size_t)row * src_stride_blocks * img_bs,
@@ -1897,6 +1941,8 @@ borgvk_CmdCopyBufferToImage(VkCommandBuffer commandBuffer,
       uint32_t bs, bw, bh;
       borgvk_aspect_block_size(dst->vk.format, reg->imageSubresource.aspectMask,
                                &bs, &bw, &bh);
+      bool partial_aspect = borgvk_is_partial_ds_aspect(
+         dst->vk.format, reg->imageSubresource.aspectMask);
 
       uint32_t w_blocks = DIV_ROUND_UP(reg->imageExtent.width, bw);
       uint32_t h_blocks = DIV_ROUND_UP(reg->imageExtent.height, bh);
@@ -1931,7 +1977,7 @@ borgvk_CmdCopyBufferToImage(VkCommandBuffer commandBuffer,
                     + (VkDeviceSize)(reg->imageOffset.y / img_bh) * dst_stride_blocks * img_bs
                     + (VkDeviceSize)(reg->imageOffset.x / img_bw) * img_bs;
 
-         if (bs == img_bs) {
+         if (bs == img_bs && !partial_aspect) {
             for (uint32_t row = 0; row < h_blocks; row++) {
                memcpy(d + (size_t)row * dst_stride_blocks * img_bs,
                       s + (size_t)row * row_len_blocks * bs,
