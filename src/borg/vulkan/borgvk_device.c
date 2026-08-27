@@ -351,6 +351,21 @@ borgvk_GetPhysicalDeviceFormatProperties2(
          fp3->linearTilingFeatures  = lin;
          fp3->optimalTilingFeatures = opt;
          fp3->bufferFeatures        = buf;
+
+         /* VkFormatFeatureFlagBits2 has bits with NO 32-bit counterpart, so a
+          * straight copy of the core flags under-reports them.
+          * SAMPLED_IMAGE_DEPTH_COMPARISON (bit 33) is one: the spec's mandatory
+          * format table requires it for every depth format that supports
+          * SAMPLED_IMAGE, and dEQP-VK.api.format_feature_flags2.* compares
+          * against exactly that table (vktApiFormatPropertiesExtendedKHRtests
+          * checkFlags → "missing flags 0x0000000200000000" for all six depth
+          * formats).  Only optimal tiling: borgvk deliberately withholds
+          * SAMPLED_IMAGE from depth formats in the linear path above, so there
+          * is nothing to qualify there. */
+         if (vk_format_has_depth(format) &&
+             (opt & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))
+            fp3->optimalTilingFeatures |=
+               VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT;
          break;
       }
       default:
@@ -844,6 +859,24 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
 #endif
    vk_device_dispatch_table_from_entrypoints(&dispatch_table,
                                              &vk_cmd_enqueue_device_entrypoints, false);
+   /* Finally, fill anything STILL null from the runtime's generic
+    * implementations.  vk_cmd_enqueue_device_entrypoints above only covers
+    * vkCmd* functions, so before this every non-Cmd core entrypoint that
+    * borgvk didn't implement itself resolved to NULL and
+    * vkGetDeviceProcAddr returned nullptr for it -- caught by
+    * dEQP-VK.api.version_check.entry_points listing eight of them
+    * (GetDeviceMemoryCommitment, GetImageSparseMemoryRequirements2,
+    * UpdateDescriptorSetWithTemplate, ResetQueryPool,
+    * Get{Buffer,DeviceMemory}OpaqueCaptureAddress,
+    * GetDeviceImage{,Sparse}MemoryRequirements), all of which Mesa already
+    * implements generically.
+    *
+    * Ordering matters and is deliberate: this comes AFTER the cmd-enqueue
+    * table, so every vkCmd* keeps its existing record-into-queue behaviour
+    * and only genuinely-empty slots change.  overwrite=false throughout means
+    * borgvk's own entrypoints always win. */
+   vk_device_dispatch_table_from_entrypoints(&dispatch_table,
+                                             &vk_common_device_entrypoints, false);
 
    /* Dispatch used to replay a recorded queue (secondary cmd buffers). */
    vk_device_dispatch_table_from_entrypoints(&device->cmd_dispatch,
