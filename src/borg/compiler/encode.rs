@@ -23,13 +23,21 @@ pub(crate) fn f32_to_fp16(bits: u32) -> u16 {
 /// (software/borg/borg_spirb.c): a 6-byte header (num_instrs, num_uniforms,
 /// num_attributes, num_outputs, num_consts, reserved), then num_instrs LE u32
 /// instruction words, then the uint8 uniform/attribute/output/const register
-/// lists, then num_consts LE u16 constant values. We emit instructions, the
+/// lists, then num_consts LE u32 constant values. We emit instructions, the
 /// output-register list, and the const-register list. The consts (e.g.
 /// cube.frag's lightDir in r23-25) are written once to the GPRs by the firmware
 /// (spirb_parse → BORG_GPU->gpr[const_regs[i]] = const_vals[i]) and persist
 /// across the autonomous render. Uniforms are read inline via funct3, so there
 /// is no host uniform/attribute interface list.
-pub(crate) fn emit_blob(words: &[u32], outputs: &[u8], consts: &[(u8, u16)]) -> Vec<u8> {
+///
+/// const_vals is u32 (widened from u16 -- see borg_spirb.h/docs/spirb.md on
+/// the Borg side, same commit) so the wire format can eventually carry a real
+/// FP32 constant. Every value passed in today is still `f32_to_fp16(bits) as
+/// u32` -- this compiler has no FP32 codegen path yet (see the
+/// feat/fp32-datapath branch's own plan doc for that larger, separate
+/// undertaking) -- so this widening is wire-format-only for now: it removes
+/// the format-level blocker without claiming FP32 shader support exists.
+pub(crate) fn emit_blob(words: &[u32], outputs: &[u8], consts: &[(u8, u32)]) -> Vec<u8> {
     let mut b = Vec::new();
     b.push(words.len() as u8); // num_instrs
     b.push(0); // num_uniforms (inline funct3 reads, no host interface)
@@ -45,7 +53,7 @@ pub(crate) fn emit_blob(words: &[u32], outputs: &[u8], consts: &[(u8, u16)]) -> 
         b.push(reg); // const_regs[]
     }
     for &(_, val) in consts {
-        b.extend_from_slice(&val.to_le_bytes()); // const_vals[] (LE u16)
+        b.extend_from_slice(&val.to_le_bytes()); // const_vals[] (LE u32)
     }
     b
 }

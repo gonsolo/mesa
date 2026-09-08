@@ -186,7 +186,10 @@ pub unsafe extern "C" fn borgc_compile_nir(
     // the full pipeline, not the fragment in isolation.)  Uniforms are too tight:
     // rast(u0-11) + frag varyings(u12-30) already fill 31 of 32. Records (reg, fp16).
     let mut const_reg_next: u8 = 17;
-    let mut const_uniforms: Vec<(u8, u16)> = Vec::new();
+    // u32 (widened from u16): wire-format-only, see emit_blob's doc comment
+    // in encode.rs -- every value pushed today is still an fp16 bit pattern
+    // zero-extended via `as u32`, not a real FP32 constant.
+    let mut const_uniforms: Vec<(u8, u32)> = Vec::new();
     // gl_varying_slot: VAR0=texcoord, VAR1=frag_pos (Mesa enum: VAR0 = 32).
     const VARYING_SLOT_VAR0: u32 = 32;
     if !entry.is_null() {
@@ -404,7 +407,7 @@ pub unsafe extern "C" fn borgc_compile_nir(
                                 let reg = const_reg_next;
                                 const_reg_next += 1;
                                 let bits = unsafe { lc.values()[c].u32_ };
-                                const_uniforms.push((reg, f32_to_fp16(bits)));
+                                const_uniforms.push((reg, f32_to_fp16(bits) as u32));
                                 let v = next_vreg;
                                 next_vreg += 1;
                                 ubo.insert(v, Ubo::Fixed(reg));
