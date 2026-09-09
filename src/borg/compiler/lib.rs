@@ -450,9 +450,19 @@ pub unsafe extern "C" fn borgc_compile_nir(
     // clip coords are pinned to r0..r3 so the perspective-divide epilogue and the
     // sequencer's clipReg snoop find them where the firmware convention expects.
     let mut pos_out: [Option<u32>; 4] = [None; 4];
-    // Fragment colour uFragColor.rgb → output regs r26/r27/r28 (the tile-buffer
-    // convention; alpha is dropped).
-    let mut frag_out: [Option<u32>; 3] = [None; 3];
+    // Fragment colour uFragColor → output regs: RGB to r26/r27/r28, A to r24.
+    // The hardware ABI block is r24=A, r25=Kill, r26..r28=RGB, r29=Z.
+    //
+    // Alpha is opt-in and off by default. It is only meaningful to a
+    // BorgConfig.hasBlend build -- without a blend stage the dispatcher
+    // ignores r24 entirely -- and emitting it unconditionally would change
+    // the codegen of every existing fragment shader: the alpha component
+    // becomes a live output root, so the instructions computing it stop
+    // being dead code and the shader grows. Off by default keeps today's
+    // shaders byte-identical; the driver sets this when it binds a pipeline
+    // with blendEnable.
+    let frag_alpha = env::var("BORGC_FRAG_ALPHA").is_ok();
+    let mut frag_out: [Option<u32>; 4] = [None; 4];
     if !entry.is_null() {
         for block in (*entry).iter_blocks() {
             for instr in block.iter_instr_list() {
@@ -492,8 +502,10 @@ pub unsafe extern "C" fn borgc_compile_nir(
                                     out_roots.push(d);
                                 }
                             } else if stage == 4 {
-                                // Fragment colour uFragColor (vec4) → r26/27/28 rgb.
-                                let n = vec_map.get(&src).map_or(1, |v| v.len()).min(3);
+                                // Fragment colour uFragColor (vec4) → r26/27/28 rgb,
+                                // plus r24 alpha when the blend path is in use.
+                                let ncomp = if frag_alpha { 4 } else { 3 };
+                                let n = vec_map.get(&src).map_or(1, |v| v.len()).min(ncomp);
                                 for c in 0..n {
                                     let (d, _) = resolve_vm(&vec_map, src, c as u8);
                                     frag_out[c] = Some(d);
@@ -593,7 +605,9 @@ pub unsafe extern "C" fn borgc_compile_nir(
         // FTEX result occupies a fixed 3-reg block r20/21/22.
         for (c, v) in frag_out.iter().enumerate() {
             if let Some(def) = v {
-                forced.insert(*def, 26 + c as u8);
+                // Alpha is r24, not r29 -- r29 is the interpolated depth
+                // output, so the naive 26+c would collide with it.
+                forced.insert(*def, if c == 3 { 24 } else { 26 + c as u8 });
             }
         }
         for &t in &ftex_dsts {
@@ -604,6 +618,12 @@ pub unsafe extern "C" fn borgc_compile_nir(
         }
         // r0-2 attrs, r17-19 lightDir consts, r20-22 FTEX, r26-29 outputs.
         extra_reserved.extend_from_slice(&[0, 1, 2, 17, 18, 19, 21, 22, 26, 27, 28, 29]);
+        // r24 (alpha) only when it is actually an output. Reserving it
+        // unconditionally would shrink the allocator's pool for every
+        // existing shader to no purpose.
+        if frag_out[3].is_some() {
+            extra_reserved.push(24);
+        }
     }
 
     let alloc = regalloc(&prog, &forced, &extra_reserved);
@@ -784,6 +804,9 @@ pub unsafe extern "C" fn borgc_compile_nir(
     } else if !is_vertex {
         // Fragment colour outputs r26/27/28 + r29 = interpolated depth.
         let mut o: Vec<u8> = (0..3).filter(|&c| frag_out[c].is_some()).map(|c| 26 + c as u8).collect();
+        if frag_out[3].is_some() {
+            o.push(24);
+        }
         if frag_z.is_some() {
             o.push(29);
         }
