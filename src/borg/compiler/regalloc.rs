@@ -25,8 +25,13 @@ pub(crate) fn regalloc(
     let mut def_at: HashMap<u32, usize> = HashMap::new();
     let mut last_use: HashMap<u32, usize> = HashMap::new();
     for (i, instr) in prog.iter().enumerate() {
-        def_at.entry(instr.dst).or_insert(i);
-        last_use.insert(instr.dst, i);
+        // Instructions with no destination (the execution-mask ops, STORE)
+        // must not register one: treating the sentinel as a def would keep a
+        // physical register alive for a value nothing produces.
+        if instr.dst != crate::NO_DST {
+            def_at.entry(instr.dst).or_insert(i);
+            last_use.insert(instr.dst, i);
+        }
         for &s in &instr.srcs {
             last_use.insert(s, i);
         }

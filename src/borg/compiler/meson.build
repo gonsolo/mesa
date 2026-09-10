@@ -18,3 +18,15 @@ libborgc = static_library(
 idep_borgc = declare_dependency(
   link_with : libborgc,
 )
+
+# Unit tests for the instruction encoders. These matter more than most: the
+# encodings are a hand-maintained mirror of the hardware's Instructions.scala,
+# and a divergence is SILENT -- the shader would execute a different opcode
+# rather than fail to load. Same sanitizer caveat as src/compiler/rust.
+if with_tests and get_option('b_sanitize') == 'none'
+  rust.test(
+    'borgc_test',
+    libborgc,
+    suite : ['borg', 'rs'],
+  )
+endif
