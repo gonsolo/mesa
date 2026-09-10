@@ -259,6 +259,10 @@ pub unsafe extern "C" fn borgc_compile_nir(
     // the full pipeline, not the fragment in isolation.)  Uniforms are too tight:
     // rast(u0-11) + frag varyings(u12-30) already fill 31 of 32. Records (reg, fp16).
     let mut const_reg_next: u8 = 17;
+    // FP16 1.0, pinned to a const GPR on first use. Only the inverting
+    // comparisons (fge/feq) need it, and allocating it unconditionally would
+    // burn one of the scarce const registers for every shader that does not.
+    let mut one_vreg: Option<u32> = None;
     // u32 (widened from u16): wire-format-only, see emit_blob's doc comment
     // in encode.rs -- every value pushed today is still an fp16 bit pattern
     // zero-extended via `as u32`, not a real FP32 constant.
@@ -314,6 +318,99 @@ pub unsafe extern "C" fn borgc_compile_nir(
                             let c: Vec<(u32, u8)> =
                                 (0..n).map(|k| (s.src.as_def().index, s.swizzle[k])).collect();
                             vec_map.insert(alu.def.index, c);
+                        }
+                        // Float comparisons, built from FSTEP.
+                        //
+                        // FSTEP(a) is 1.0 for a strictly positive and 0.0
+                        // otherwise (BorgLane.computeFstep), so `a < b` is
+                        // FSTEP(b - a) and the rest follow by swapping or
+                        // inverting. Subtraction is FADD(a, FNEG(b)) -- the
+                        // ISA has no subtract.
+                        //
+                        // These exist for the execution mask: without them a
+                        // condition like `if (x < y)` is a NIR op borgc
+                        // cannot select, so EXPUSH would read a register no
+                        // instruction ever wrote. The result is FP16 1.0 or
+                        // 0.0, and the mask tests raw bits against zero, so
+                        // both encodings land correctly without a bool
+                        // conversion.
+                        nir_op_flt | nir_op_fge | nir_op_fneu | nir_op_feq => {
+                            let sl = alu.srcs_as_slice();
+                            let a = resolve_vm(&vec_map, sl[0].src.as_def().index, sl[0].swizzle[0]);
+                            let b = resolve_vm(&vec_map, sl[1].src.as_def().index, sl[1].swizzle[0]);
+
+                            // diff(hi, lo) = hi - lo, as a fresh vreg.
+                            let mut diff = |hi: (u32, u8), lo: (u32, u8), nv: &mut u32, prog: &mut Vec<BorgInstr>| {
+                                let neg = *nv; *nv += 1;
+                                let d = *nv; *nv += 1;
+                                prog.push(BorgInstr { mnem: "FNEG", dst: neg, srcs: vec![lo.0], swz: vec![lo.1] });
+                                prog.push(BorgInstr { mnem: "FADD", dst: d, srcs: vec![hi.0, neg], swz: vec![hi.1, 0] });
+                                d
+                            };
+
+                            match alu.op {
+                                // a < b  ->  FSTEP(b - a)
+                                nir_op_flt => {
+                                    let d = diff(b, a, &mut next_vreg, &mut prog);
+                                    prog.push(BorgInstr { mnem: "FSTEP", dst: alu.def.index, srcs: vec![d], swz: vec![0] });
+                                }
+                                // a >= b  ->  1 - FSTEP(b - a), as
+                                // FADD(1.0, FNEG(step)). The 1.0 comes from a
+                                // pinned constant register, same mechanism as
+                                // the existing const_uniforms.
+                                nir_op_fge => {
+                                    let d = diff(b, a, &mut next_vreg, &mut prog);
+                                    let st = next_vreg; next_vreg += 1;
+                                    let nst = next_vreg; next_vreg += 1;
+                                    prog.push(BorgInstr { mnem: "FSTEP", dst: st, srcs: vec![d], swz: vec![0] });
+                                    prog.push(BorgInstr { mnem: "FNEG", dst: nst, srcs: vec![st], swz: vec![0] });
+                                    let one = *one_vreg.get_or_insert_with(|| {
+                                        let reg = const_reg_next;
+                                        const_reg_next += 1;
+                                        const_uniforms.push((reg, 0x3C00u32)); // FP16 1.0
+                                        let v = next_vreg;
+                                        next_vreg += 1;
+                                        ubo.insert(v, Ubo::Fixed(reg));
+                                        v
+                                    });
+                                    prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![one, nst], swz: vec![0, 0] });
+                                }
+                                // a != b  ->  FSTEP(a-b) + FSTEP(b-a). At most
+                                // one term is 1.0, so the sum is a clean 0/1
+                                // and needs no clamp.
+                                nir_op_fneu => {
+                                    let dab = diff(a, b, &mut next_vreg, &mut prog);
+                                    let dba = diff(b, a, &mut next_vreg, &mut prog);
+                                    let s1 = next_vreg; next_vreg += 1;
+                                    let s2 = next_vreg; next_vreg += 1;
+                                    prog.push(BorgInstr { mnem: "FSTEP", dst: s1, srcs: vec![dab], swz: vec![0] });
+                                    prog.push(BorgInstr { mnem: "FSTEP", dst: s2, srcs: vec![dba], swz: vec![0] });
+                                    prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![s1, s2], swz: vec![0, 0] });
+                                }
+                                // a == b  ->  1 - (a != b)
+                                _ => {
+                                    let dab = diff(a, b, &mut next_vreg, &mut prog);
+                                    let dba = diff(b, a, &mut next_vreg, &mut prog);
+                                    let s1 = next_vreg; next_vreg += 1;
+                                    let s2 = next_vreg; next_vreg += 1;
+                                    let ne = next_vreg; next_vreg += 1;
+                                    let nne = next_vreg; next_vreg += 1;
+                                    prog.push(BorgInstr { mnem: "FSTEP", dst: s1, srcs: vec![dab], swz: vec![0] });
+                                    prog.push(BorgInstr { mnem: "FSTEP", dst: s2, srcs: vec![dba], swz: vec![0] });
+                                    prog.push(BorgInstr { mnem: "FADD", dst: ne, srcs: vec![s1, s2], swz: vec![0, 0] });
+                                    prog.push(BorgInstr { mnem: "FNEG", dst: nne, srcs: vec![ne], swz: vec![0] });
+                                    let one = *one_vreg.get_or_insert_with(|| {
+                                        let reg = const_reg_next;
+                                        const_reg_next += 1;
+                                        const_uniforms.push((reg, 0x3C00u32)); // FP16 1.0
+                                        let v = next_vreg;
+                                        next_vreg += 1;
+                                        ubo.insert(v, Ubo::Fixed(reg));
+                                        v
+                                    });
+                                    prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![one, nne], swz: vec![0, 0] });
+                                }
+                            }
                         }
                         // fmax(0, x) → x · FSTEP(x)  (FSTEP(x)=1 if x>0 else 0).
                         nir_op_fmax => {
