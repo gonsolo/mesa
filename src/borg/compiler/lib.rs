@@ -266,6 +266,12 @@ pub unsafe extern "C" fn borgc_compile_nir(
     // comparisons (fge/feq) need it, and allocating it unconditionally would
     // burn one of the scarce const registers for every shader that does not.
     let mut one_vreg: Option<u32> = None;
+    // Word-index constants for push-constant LOADs, pinned to const GPRs on
+    // first use and shared across every load_push_constant reaching the same
+    // word (a vec4 field reads 4 consecutive words; a scalar read elsewhere
+    // in the shader at the same offset reuses the same pin rather than
+    // burning a second scarce const register on an identical value).
+    let mut push_const_reg: HashMap<u32, u32> = HashMap::new();
     // u32 (widened from u16): wire-format-only, see emit_blob's doc comment
     // in encode.rs -- every value pushed today is still an fp16 bit pattern
     // zero-extended via `as u32`, not a real FP32 constant.
@@ -625,6 +631,68 @@ pub unsafe extern "C" fn borgc_compile_nir(
                             })
                             .collect();
                         vec_map.insert(intr.def.index, comps);
+                    } else if intr.intrinsic == nir_intrinsic_load_push_constant {
+                        // layout(push_constant) reads. Reached here only after
+                        // borg_nir_passes.c's nir_lower_explicit_io turns the
+                        // pointer-deref access into this intrinsic -- WITHOUT
+                        // that pass this never arrives; it arrives as
+                        // load_deref instead, which is unselectable and DCEs
+                        // the whole shader to nothing (found empirically, not
+                        // assumed, the first time this was tried).
+                        //
+                        // `base` is the field's static byte offset; `src(0)`
+                        // is a dynamic offset for array-indexed push constants,
+                        // which this does not support yet -- only a
+                        // compile-time-constant src(0) is handled, mirroring
+                        // how divergent LOOPS are refused rather than silently
+                        // mis-lowered. A non-constant offset is warned about
+                        // and the intrinsic is left unselected (DCE removes
+                        // whatever depended on it, same failure shape as an
+                        // unhandled op, not a wrong answer).
+                        //
+                        // LOAD addresses whole 32-bit DRAM words
+                        // (LS_BASE + rs1<<2), so each 4-byte-aligned field
+                        // maps onto exactly one word -- push-constant data is
+                        // naturally word-granular already, no repacking
+                        // needed on the hardware side.
+                        let dyn_off = intr.get_src(0).comp_as_uint(0);
+                        if let Some(dyn_off) = dyn_off {
+                            let base = intr.base() + dyn_off as i32;
+                            let n = intr.def.num_components as usize;
+                            let comps: Vec<(u32, u8)> = (0..n)
+                                .map(|c| {
+                                    let byte_off = base + 4 * (c as i32);
+                                    assert_eq!(byte_off % 4, 0,
+                                        "push constant field at byte {byte_off} is not word-aligned");
+                                    let word_idx = (byte_off / 4) as u32;
+                                    let idx_reg = *push_const_reg.entry(word_idx).or_insert_with(|| {
+                                        let reg = const_reg_next;
+                                        const_reg_next += 1;
+                                        // RAW integer, not f32_to_fp16 -- this
+                                        // becomes rs1 for LOAD, a word INDEX,
+                                        // not a shader-visible float value.
+                                        const_uniforms.push((reg, word_idx));
+                                        let v = next_vreg;
+                                        next_vreg += 1;
+                                        ubo.insert(v, Ubo::Fixed(reg));
+                                        v
+                                    });
+                                    let dst = next_vreg;
+                                    next_vreg += 1;
+                                    prog.push(BorgInstr {
+                                        mnem: "LOAD", dst, srcs: vec![idx_reg], swz: vec![0],
+                                    });
+                                    (dst, 0u8)
+                                })
+                                .collect();
+                            vec_map.insert(intr.def.index, comps);
+                        } else {
+                            eprintln!(
+                                "borgc: WARNING push constant at base={} read with a \
+                                 non-constant dynamic offset -- not supported, dropped",
+                                intr.base()
+                            );
+                        }
                     }
                     // load_ubo/store_output handled in the I/O pass below.
                 } else if let Some(tex) = instr.as_tex() {
