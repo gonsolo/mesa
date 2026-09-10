@@ -233,6 +233,9 @@ pub unsafe extern "C" fn borgc_compile_nir(
     // above any NIR ssa index.
     let mut vec_map: HashMap<u32, Vec<(u32, u8)>> = HashMap::new();
     let mut prog: Vec<BorgInstr> = Vec::new();
+    // Phi renames, collected during the selection walk and applied after it
+    // (see the comment at the collection site).
+    let mut phi_alias_final: HashMap<u32, u32> = HashMap::new();
     let mut next_vreg: u32 = 1_000_000;
     // Operand classification (populated here for fragment uniforms/attrs, and in the
     // I/O pass below for the vertex's load_ubo).
@@ -286,6 +289,23 @@ pub unsafe extern "C" fn borgc_compile_nir(
             );
         }
 
+        // Phi elimination, predication style.
+        //
+        // A phi at an `if`'s merge point selects between the two arms' values.
+        // Under an execution mask there is nothing to select: BOTH arms
+        // execute and write, and the mask decides whose write lands. So the
+        // phi collapses to "every arm writes the same register" -- which is
+        // achieved by renaming each arm's result to the phi's own def.
+        //
+        // Without this the phi's def has no producer borgc understands, the
+        // store_output reading it is unreachable from any DCE root, and BOTH
+        // ARMS ARE DELETED -- a 93-instruction shader emitting 7. That is how
+        // this was found.
+        //
+        // The rename is safe for the SSA a structured `if` produces, where each
+        // arm's value feeds only the phi. A source that is also live elsewhere
+        // would need a real copy instead; borgc warns rather than silently
+        // renaming one of those out from under its other users.
         for block in (*entry).iter_blocks() {
             // Emitted before the block's own instructions, which is what makes
             // EXPUSH gate the `then` body and EXPOP land after the `if` rather
@@ -301,6 +321,40 @@ pub unsafe extern "C" fn borgc_compile_nir(
                 }
             }
             for instr in block.iter_instr_list() {
+                // Phi -> predicated register sharing.
+                //
+                // Componentwise, because a phi is often a vector and its
+                // sources are vec_map entries built by nir_op_vec*, not
+                // instructions with a dst -- renaming whole defs reaches
+                // nothing. For each component, every arm's producer is renamed
+                // onto the first arm's vreg, and the phi resolves there too.
+                // Both arms then write one register and the execution mask
+                // decides whose write survives, which is what a phi means
+                // under predication.
+                //
+                // Safe for the SSA a structured `if` produces, where an arm's
+                // value feeds only the phi. A value also live elsewhere would
+                // need a real copy.
+                if let Some(phi) = instr.as_phi() {
+                    let n = phi.def.num_components as usize;
+                    let srcs: Vec<u32> =
+                        phi.iter_srcs().map(|s| s.src.as_def().index).collect();
+                    if let Some(&first) = srcs.first() {
+                        let mut comps: Vec<(u32, u8)> = Vec::with_capacity(n);
+                        for c in 0..n {
+                            let (d0, c0) = resolve_vm(&vec_map, first, c as u8);
+                            for &other in &srcs[1..] {
+                                let (d1, _) = resolve_vm(&vec_map, other, c as u8);
+                                if d1 != d0 {
+                                    phi_alias_final.insert(d1, d0);
+                                }
+                            }
+                            comps.push((d0, c0));
+                        }
+                        vec_map.insert(phi.def.index, comps);
+                    }
+                    continue;
+                }
                 if let Some(alu) = instr.as_alu() {
                     match alu.op {
                         nir_op_vec2 | nir_op_vec3 | nir_op_vec4 => {
@@ -749,6 +803,19 @@ pub unsafe extern "C" fn borgc_compile_nir(
             prog.push(BorgInstr { mnem: "FMADD", dst: zr, srcs: vec![w[2], uz[2], t1], swz: vec![0, 0, 0] });
             out_roots.push(zr);
             frag_z = Some(zr);
+        }
+    }
+
+    // Apply the phi renames BEFORE dce. Each arm's producer now writes the
+    // phi's register directly, so the mask -- not a select -- picks the winner.
+    // Order matters: dce roots at the shader outputs and walks back, and until
+    // the rename happens the arms are unreachable from those roots, so running
+    // it after would mean renaming instructions dce had already deleted.
+    if !phi_alias_final.is_empty() {
+        for i in prog.iter_mut() {
+            if let Some(&d) = phi_alias_final.get(&i.dst) {
+                i.dst = d;
+            }
         }
     }
 

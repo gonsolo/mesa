@@ -14,10 +14,26 @@ use std::collections::{HashMap, HashSet};
 pub(crate) fn dce(prog: &mut Vec<BorgInstr>, out_roots: &[u32]) {
     let pre_dce = prog.len();
     let mut live: std::collections::HashSet<u32> = out_roots.iter().copied().collect();
+
+    // An instruction with no destination is a SIDE EFFECT, not dead code. The
+    // execution-mask ops and STORE write no register, so nothing can ever make
+    // their dst reachable from an output root -- a liveness-only rule deletes
+    // every one of them. That silently removed EXPUSH/EXELSE/EXPOP from a
+    // shader whose `if` had otherwise lowered correctly, leaving both arms
+    // running unconditionally: the exact miscompile the mask exists to fix.
+    // Their sources are live too, or the condition feeding EXPUSH would be
+    // dropped in turn.
+    let side_effecting = |i: &BorgInstr| i.dst == crate::NO_DST;
+    for i in prog.iter().filter(|i| side_effecting(i)) {
+        for &s in &i.srcs {
+            live.insert(s);
+        }
+    }
+
     loop {
         let mut grew = false;
         for i in prog.iter() {
-            if live.contains(&i.dst) {
+            if live.contains(&i.dst) || side_effecting(i) {
                 for &s in &i.srcs {
                     grew |= live.insert(s);
                 }
@@ -27,7 +43,7 @@ pub(crate) fn dce(prog: &mut Vec<BorgInstr>, out_roots: &[u32]) {
             break;
         }
     }
-    prog.retain(|i| live.contains(&i.dst));
+    prog.retain(|i| side_effecting(i) || live.contains(&i.dst));
     if pre_dce != prog.len() {
         eprintln!(
             "borgc: DCE — dropped {} dead instr(s) (UBO address math), {} live",

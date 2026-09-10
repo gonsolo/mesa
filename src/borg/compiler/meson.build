@@ -15,8 +15,36 @@ libborgc = static_library(
   ],
 )
 
+# The SPIR-V options and NIR pass list borgc expects, shared by the driver and
+# the offline CLI so the two cannot drift (see borg_nir_passes.h).
+libborg_nir_passes = static_library(
+  'borg_nir_passes',
+  files('borg_nir_passes.c'),
+  include_directories : [inc_include, inc_src, inc_compiler],
+  dependencies : [idep_nir, idep_mesautil],
+  gnu_symbol_visibility : 'hidden',
+)
+
+idep_borg_nir_passes = declare_dependency(
+  link_with : libborg_nir_passes,
+  include_directories : include_directories('.'),
+)
+
 idep_borgc = declare_dependency(
   link_with : libborgc,
+  dependencies : [idep_borg_nir_passes],
+)
+
+# Offline compiler. Lets borgc be exercised (and shaders baked into the
+# firmware) without standing up a Vulkan device -- see borgc_cli.c's header for
+# the two verification gaps that closes.
+borgc_cli = executable(
+  'borgc-cli',
+  files('borgc_cli.c'),
+  include_directories : [inc_include, inc_src, inc_compiler],
+  dependencies : [idep_borgc, idep_vtn, idep_nir, idep_mesautil],
+  link_with : [libborgc],
+  install : false,
 )
 
 # Unit tests for the instruction encoders. These matter more than most: the
