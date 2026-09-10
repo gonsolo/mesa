@@ -85,6 +85,87 @@ pub(crate) fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
         "DDX" => un(0x3C00_0000),
         "DDY" => un(0x4000_0000),
         "FSTEP" => un(0x1000_0000),
+        // --- Extended ISA (hardware Instructions.scala, same funct7 << 25) ---
+        // LOAD/STORE address LS_BASE + (rs1 << 2): the operand is a word
+        // INDEX, not a byte address, because at FP16 a register holds 16 bits
+        // and the address space is 25. STORE has no destination.
+        "LOAD" => un(0x4400_0000),
+        "STORE" => bin(0x4800_0000) & !(0x1F << 7), // rd field is unused
+        // Execution mask. None of these has a destination; EXPUSH reads its
+        // condition from rs1.
+        "EXPUSH" => un(0x5400_0000) & !(0x1F << 7),
+        "EXELSE" => 0x5800_0000,
+        "EXPOP" => 0x5C00_0000,
         _ => return None, // mov is handled separately (register copy)
     })
+}
+
+/// Encode a conditional branch. Separate from [`encode`] because the target is
+/// packed into the otherwise-unused rs2 and rd fields as `(target >> 5)` and
+/// `(target & 31)` -- it is not a register operand, and passing it through the
+/// register-shaped signature above would invite treating it as one.
+pub(crate) fn encode_branch(mnem: &str, rs1: u8, target: u16) -> Option<u32> {
+    let base = match mnem {
+        "BRZ" => 0x4C00_0000u32,
+        "BRNZ" => 0x5000_0000u32,
+        _ => return None,
+    };
+    if target >= 1024 {
+        return None; // 10 bits; far past any IMEM Borg builds
+    }
+    let t = target as u32;
+    Some(base | (((t >> 5) & 0x1F) << 20) | ((rs1 as u32) << 15) | ((t & 0x1F) << 7))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The encodings are a mirror of the hardware's Instructions.scala. A
+    /// divergence here is silent: the shader would execute a different opcode
+    /// rather than fail to load, so the funct7 bases are pinned explicitly.
+    #[test]
+    fn extended_isa_bases_match_hardware() {
+        // funct7 << 25, from hardware/borg/src/Instructions.scala.
+        assert_eq!(encode("LOAD", 3, 5, 0, 0, 0).unwrap() & 0xFE00_0000, 0x22 << 25);
+        assert_eq!(encode("STORE", 0, 5, 7, 0, 0).unwrap() & 0xFE00_0000, 0x24 << 25);
+        assert_eq!(encode_branch("BRZ", 5, 0).unwrap() & 0xFE00_0000, 0x26 << 25);
+        assert_eq!(encode_branch("BRNZ", 5, 0).unwrap() & 0xFE00_0000, 0x28 << 25);
+        assert_eq!(encode("EXPUSH", 0, 5, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2A << 25);
+        assert_eq!(encode("EXELSE", 0, 0, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2C << 25);
+        assert_eq!(encode("EXPOP", 0, 0, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2E << 25);
+    }
+
+    #[test]
+    fn load_places_operands_where_the_hardware_reads_them() {
+        let w = encode("LOAD", 7, 5, 0, 0, 0).unwrap();
+        assert_eq!((w >> 15) & 0x1F, 5, "rs1 = address index");
+        assert_eq!((w >> 7) & 0x1F, 7, "rd = destination");
+    }
+
+    #[test]
+    fn store_and_mask_ops_leave_no_destination() {
+        // rd carries no meaning for these; a stray value there would name a
+        // register the hardware does not write but a reader would believe.
+        assert_eq!((encode("STORE", 31, 5, 7, 0, 0).unwrap() >> 7) & 0x1F, 0);
+        assert_eq!((encode("EXPUSH", 31, 5, 0, 0, 0).unwrap() >> 7) & 0x1F, 0);
+        // STORE's data operand is rs2.
+        assert_eq!((encode("STORE", 0, 5, 7, 0, 0).unwrap() >> 20) & 0x1F, 7);
+    }
+
+    #[test]
+    fn branch_target_splits_across_rs2_and_rd() {
+        // Target 33 = 0b1_00001 -> high bits 1 in rs2, low bits 1 in rd.
+        let w = encode_branch("BRZ", 2, 33).unwrap();
+        assert_eq!((w >> 20) & 0x1F, 1, "target high 5 bits");
+        assert_eq!((w >> 7) & 0x1F, 1, "target low 5 bits");
+        assert_eq!((w >> 15) & 0x1F, 2, "rs1 = condition");
+        // Round-trip every representable target.
+        for t in 0..1024u16 {
+            let w = encode_branch("BRNZ", 0, t).unwrap();
+            let back = (((w >> 20) & 0x1F) << 5) | ((w >> 7) & 0x1F);
+            assert_eq!(back, t as u32, "target {t} did not round-trip");
+        }
+        assert!(encode_branch("BRZ", 0, 1024).is_none(), "out of range must not encode");
+    }
 }

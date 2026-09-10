@@ -31,11 +31,84 @@ use std::env;
 /// `dst`/`srcs` are NIR SSA indices used directly as virtual registers; `swz` is
 /// the scalar component each source reads from its (possibly vec4) def — needed to
 /// pin a uniform/attribute load to the right column/component.
+/// `BorgInstr::dst` for an instruction that writes no register.
+///
+/// The execution-mask ops and STORE have no destination -- their rd field
+/// either is unused or carries something else entirely. Without a sentinel
+/// they would look like definitions of vreg 0 to the register allocator,
+/// which would then keep a register alive for a value nothing produces.
+pub(crate) const NO_DST: u32 = u32::MAX;
+
+/// A control-flow instruction to splice in before a given NIR block.
+///
+/// NIR's `if` maps onto the mask ops with no branching at all, and every
+/// marker happens to land *before* some block: EXPUSH before the first `then`
+/// block, EXELSE before the first `else` block, EXPOP before the block
+/// following the `if`. That symmetry is why this is a single "before" map
+/// rather than a pair of before/after lists.
+struct CfMark {
+    mnem: &'static str,
+    /// Condition def index, for EXPUSH only.
+    cond: Option<u32>,
+}
+
 pub(crate) struct BorgInstr {
     pub(crate) mnem: &'static str,
     pub(crate) dst: u32,
     pub(crate) srcs: Vec<u32>,
     pub(crate) swz: Vec<u8>,
+}
+
+/// Walk the NIR control-flow tree and record where mask instructions belong.
+///
+/// The instruction-selection walk below iterates blocks FLAT, in layout order,
+/// which is exactly the order this tree linearizes to -- so the two can be
+/// matched up by block pointer without restructuring selection at all. That
+/// matters: selection is the part with all the operand and swizzle handling,
+/// and threading control flow through it would have meant rewriting it.
+///
+/// Note what the flat walk does WITHOUT this: it emits the `then` and `else`
+/// bodies one after the other with nothing to distinguish them, so both
+/// execute unconditionally. Any shader whose control flow survived NIR's
+/// flattening passes was already being miscompiled; this is what fixes it.
+///
+/// Loops are deliberately not handled -- see the caller, which refuses them
+/// rather than emitting a body that runs exactly once.
+unsafe fn collect_cf_marks(
+    nodes: compiler::nir::ExecListIter<'_, nir_cf_node>,
+    marks: &mut std::collections::HashMap<usize, Vec<CfMark>>,
+    unsupported: &mut Vec<&'static str>,
+) {
+    for node in nodes {
+        if node.as_block().is_some() {
+            continue;
+        }
+        if let Some(nif) = node.as_if() {
+            let cond = nif.condition.as_def().index;
+            let key = |b: &nir_block| b as *const nir_block as usize;
+            marks.entry(key(nif.first_then_block())).or_default().push(CfMark {
+                mnem: "EXPUSH",
+                cond: Some(cond),
+            });
+            marks.entry(key(nif.first_else_block())).or_default().push(CfMark {
+                mnem: "EXELSE",
+                cond: None,
+            });
+            marks.entry(key(nif.following_block())).or_default().push(CfMark {
+                mnem: "EXPOP",
+                cond: None,
+            });
+            collect_cf_marks(nif.iter_then_list(), marks, unsupported);
+            collect_cf_marks(nif.iter_else_list(), marks, unsupported);
+        } else if let Some(nloop) = node.as_loop() {
+            // A divergent loop needs the mask PLUS a way to ask "is any lane
+            // still active" to decide the backward branch, and that
+            // instruction does not exist yet. Emitting the body unmasked
+            // would run every iteration for every lane.
+            unsupported.push("loop");
+            collect_cf_marks(nloop.iter_body(), marks, unsupported);
+        }
+    }
 }
 
 /// How a load_ubo def maps onto the firmware's uniform register convention
@@ -193,7 +266,36 @@ pub unsafe extern "C" fn borgc_compile_nir(
     // gl_varying_slot: VAR0=texcoord, VAR1=frag_pos (Mesa enum: VAR0 = 32).
     const VARYING_SLOT_VAR0: u32 = 32;
     if !entry.is_null() {
+        // Control-flow markers, collected from the CF tree so this flat block
+        // walk can splice them in at the right seams. Must be here rather than
+        // in the I/O pass below: the marks are instructions and have to
+        // interleave with selection's output, not land after all of it.
+        let mut cf_marks: std::collections::HashMap<usize, Vec<CfMark>> =
+            std::collections::HashMap::new();
+        let mut cf_unsupported: Vec<&'static str> = Vec::new();
+        collect_cf_marks((*entry).iter_body(), &mut cf_marks, &mut cf_unsupported);
+        if !cf_unsupported.is_empty() {
+            eprintln!(
+                "borgc: WARNING unsupported control flow ({}) -- the body will be \
+                 emitted UNMASKED and run for every lane. See BorgCore.wireExecMask.",
+                cf_unsupported.join(", ")
+            );
+        }
+
         for block in (*entry).iter_blocks() {
+            // Emitted before the block's own instructions, which is what makes
+            // EXPUSH gate the `then` body and EXPOP land after the `if` rather
+            // than inside it.
+            if let Some(ms) = cf_marks.get(&(block as *const nir_block as usize)) {
+                for m in ms {
+                    prog.push(BorgInstr {
+                        mnem: m.mnem,
+                        dst: NO_DST,
+                        srcs: m.cond.map(|c| vec![c]).unwrap_or_default(),
+                        swz: m.cond.map(|_| vec![0u8]).unwrap_or_default(),
+                    });
+                }
+            }
             for instr in block.iter_instr_list() {
                 if let Some(alu) = instr.as_alu() {
                     match alu.op {
@@ -679,6 +781,20 @@ pub unsafe extern "C" fn borgc_compile_nir(
     };
     for i in &prog {
         if i.mnem == "mov" {
+            continue;
+        }
+        // Execution-mask ops: no destination, and EXPUSH's single source is a
+        // condition rather than an arithmetic operand, so they bypass the
+        // operand folding below entirely.
+        if matches!(i.mnem, "EXPUSH" | "EXELSE" | "EXPOP") {
+            let rs1 = if i.srcs.is_empty() {
+                0
+            } else {
+                resolve_op(i.srcs[0], i.swz[0]).0
+            };
+            if let Some(w) = encode(i.mnem, 0, rs1, 0, 0, 0) {
+                words.push(w);
+            }
             continue;
         }
         let rd = *alloc.get(&i.dst).unwrap_or(&0);
