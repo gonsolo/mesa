@@ -53,6 +53,27 @@ libvulkan_borg = shared_library(
   install : true,
 )
 
+# Unit test for the wire packet builders. Compiles borgvk_serial.c directly
+# rather than linking libvulkan_borg, because the library is built with hidden
+# symbol visibility (only the ICD entrypoints are exported) -- and because the
+# serial layer has no dependency on the device/instance types, so it stands up
+# on its own.
+borgvk_serial_test = executable(
+  'borgvk_serial_test',
+  ['borgvk_serial_test.c', 'borgvk_serial.c'],
+  include_directories : [
+    inc_include, inc_src, inc_util,
+    include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h
+  ],
+  dependencies : borgvk_deps,
+)
+
+test(
+  'borgvk push-constant packet',
+  borgvk_serial_test,
+  suite : ['borg'],
+)
+
 if with_symbols_check
   test(
     'borgvk symbols check',
