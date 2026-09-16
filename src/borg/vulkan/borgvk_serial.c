@@ -350,6 +350,63 @@ borgvk_serial_send_shader(uint8_t stage, const uint8_t *blob, uint32_t len)
              stage == 0 ? "vertex" : "fragment", len);
 }
 
+#define BORGVK_MARKER_PUSH    0xB2
+/* 0xB2 push constants: marker, off_words(1B), n_words(1B), data padded to
+ * BORGVK_PUSH_MAX_WORDS words, checksum.  0xB1 is the firmware's serial-reload
+ * trigger, hence 0xB2.  Fixed length for the same reason as 0xAE/0xAF/0xB0:
+ * the firmware drain reads a constant byte count per marker, and `n_words`
+ * says how much of the payload is valid.
+ *
+ * 32 words = 128 B = Vulkan 1.0's minimum maxPushConstantsSize, which is what
+ * this driver advertises.  Raising that limit means growing this AND the
+ * firmware's BORG_PUSH_CONST_MAX_WORDS together -- the firmware clamps, so a
+ * mismatch truncates silently rather than corrupting, but it would still be a
+ * wrong answer. */
+#define BORGVK_PUSH_MAX_WORDS 32
+#define BORGVK_PUSH_PKT_LEN   (1 + 1 + 1 + BORGVK_PUSH_MAX_WORDS * 4 + 1)
+
+void
+borgvk_serial_send_push_constants(uint32_t offset, uint32_t size,
+                                  const void *values)
+{
+   /* Vulkan requires both to be multiples of 4 (VUID-vkCmdPushConstants-offset
+    * -00368 / -size-00369); check rather than assume, because the whole
+    * word-index mapping below is built on it. */
+   if (!values || size == 0 || (offset & 3) || (size & 3)) {
+      mesa_logw("borgvk: bad push-constant range (offset %u, size %u)",
+                offset, size);
+      return;
+   }
+
+   uint32_t off_words = offset / 4;
+   uint32_t n_words   = size / 4;
+   if (off_words >= BORGVK_PUSH_MAX_WORDS ||
+       n_words > BORGVK_PUSH_MAX_WORDS - off_words) {
+      mesa_logw("borgvk: push-constant range %u..%u B exceeds the %u B limit",
+                offset, offset + size, BORGVK_PUSH_MAX_WORDS * 4);
+      return;
+   }
+
+   uint8_t pkt[BORGVK_PUSH_PKT_LEN];
+   memset(pkt, 0, sizeof(pkt));
+   pkt[0] = BORGVK_MARKER_PUSH;
+   pkt[1] = (uint8_t)off_words;
+   pkt[2] = (uint8_t)n_words;
+   /* memcpy, not a u32 store loop: `values` is void* from the application and
+    * carries no alignment guarantee, and the wire format is little-endian
+    * bytes either way. */
+   memcpy(&pkt[3], values, size);
+
+   uint8_t csum = 0;
+   for (int i = 1; i < BORGVK_PUSH_PKT_LEN - 1; i++)
+      csum ^= pkt[i];
+   pkt[BORGVK_PUSH_PKT_LEN - 1] = csum;
+
+   borgvk_transport_emit(pkt, sizeof(pkt));
+   mesa_logi("borgvk: %s %u B of push constants at offset %u",
+             borgvk_capture_active ? "captured" : "sent", size, offset);
+}
+
 void
 borgvk_serial_send_mvp(const float mvp[16])
 {

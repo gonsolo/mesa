@@ -171,6 +171,15 @@ void borgvk_serial_send_tex_row(int y, const float *rgb);
  * of its baked borgc_vert/frag_shader[] array before the next render. */
 void borgvk_serial_send_shader(uint8_t stage, const uint8_t *blob, uint32_t len);
 
+/* Ship a push-constant range to the firmware (0xB2 packet).  `offset` and
+ * `size` are BYTES, as Vulkan gives them, and both are required by the spec to
+ * be multiples of 4; the packet carries words because that is what the shader
+ * side addresses (LS_BASE + rs1<<2, with borgc pinning rs1 to the field's word
+ * index).  The firmware stages the bytes and points LS_BASE at them, so a
+ * borgc-compiled LOAD lands on the right word. */
+void borgvk_serial_send_push_constants(uint32_t offset, uint32_t size,
+                                       const void *values);
+
 /* ---- Transport capture (serial ↔ sim unification) --------------------- *
  * By default every send_* packet above is written to the serial port (paced).
  * Wrapping a sequence between capture_begin/capture_end redirects the identical
