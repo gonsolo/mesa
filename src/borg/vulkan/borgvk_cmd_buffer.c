@@ -91,3 +91,42 @@ borgvk_EndCommandBuffer(VkCommandBuffer commandBuffer)
 
    return vk_command_buffer_end(cmd);
 }
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdPushConstants(VkCommandBuffer commandBuffer,
+                        VkPipelineLayout layout,
+                        VkShaderStageFlags stageFlags,
+                        uint32_t offset, uint32_t size, const void *pValues)
+{
+   /* Step 50 item 13.  The shader half of this already worked: borgc lowers
+    * load_push_constant to `LOAD rd, rs1` with rs1 pinned to the field's word
+    * index, and the hardware forms LS_BASE + (rs1 << 2).  What was missing was
+    * anything putting real data where those loads look -- this, plus the
+    * firmware's 0xB2 handler and borg_set_push_constants().
+    *
+    * `layout` and `stageFlags` are deliberately unused: Borg has one shader
+    * core with one LS_BASE, so there is no per-stage or per-layout push-constant
+    * window to select between.  A range pushed for the vertex stage is visible
+    * to the fragment stage too.  That is more permissive than Vulkan requires,
+    * not less, so it cannot make a conformant application read the wrong value
+    * -- it would only fail to catch an application reading a stage it never
+    * pushed to, which is already undefined behaviour.
+    *
+    * Emitted at record time rather than queued to submit: the firmware applies
+    * a 0xB2 packet when it arrives, and recording necessarily precedes the
+    * submit that ships the draw's MVP, so ordering holds for the
+    * record-then-submit pattern borgvk targets.  KNOWN LIMITATION: a command
+    * buffer recorded once and submitted repeatedly pushes only on the
+    * recording, so a later submit reuses whatever LS_BASE last pointed at.
+    * That matches how borgvk_serial_send_shader() already behaves and is
+    * invisible to the current re-record-every-frame callers; fixing it means
+    * capturing the range into struct borgvk_command_buffer and replaying it
+    * from the submit path, which is the natural follow-on once anything
+    * actually reuses command buffers. */
+   VK_FROM_HANDLE(vk_command_buffer, cmd, commandBuffer);
+   (void)cmd;
+   (void)layout;
+   (void)stageFlags;
+
+   borgvk_serial_send_push_constants(offset, size, pValues);
+}
