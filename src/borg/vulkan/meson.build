@@ -74,6 +74,19 @@ test(
   suite : ['borg'],
 )
 
+# Generates a replayable wire burst for the simulator's push-constant
+# end-to-end test. Built from the same serial sources as the unit test above,
+# so the burst is produced by the real senders rather than a reimplementation.
+borgvk_burst_gen = executable(
+  'borgvk_burst_gen',
+  ['borgvk_burst_gen.c', 'borgvk_serial.c'],
+  include_directories : [
+    inc_include, inc_src, inc_util,
+    include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h
+  ],
+  dependencies : borgvk_deps,
+)
+
 if with_symbols_check
   test(
     'borgvk symbols check',
