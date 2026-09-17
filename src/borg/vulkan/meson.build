@@ -69,7 +69,7 @@ borgvk_serial_test = executable(
 )
 
 test(
-  'borgvk push-constant packet',
+  'borgvk wire packets',
   borgvk_serial_test,
   suite : ['borg'],
 )

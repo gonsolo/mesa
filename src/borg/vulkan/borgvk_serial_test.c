@@ -2,7 +2,7 @@
  * Copyright © 2026 Andreas Wendleder
  * SPDX-License-Identifier: MIT
  *
- * Unit test for the push-constant wire packet (0xB2).
+ * Unit tests for wire packets: push constants (0xB2) and geometry (0xAE).
  *
  * This exists because the simulator-side test
  * (simulation/verilator/main.cpp --push-const-test) BUILDS its own packets
@@ -156,9 +156,67 @@ test_rejected_ranges(void)
    free(pkt);
 }
 
+/* 0xAE geometry: positions and UVs are shader datapath values, so they must
+ * go out as float32 bits (the FP16 packing they used to have reads as
+ * denormals on the FP32 datapath). Layout mirrors borg_kernel.c RX_GEOM_*. */
+#define GEOM_MAX_VERTS 16
+#define GEOM_MAX_TRIS  12
+#define GEOM_PKT_LEN   (1 + 2 + GEOM_MAX_VERTS * 12 + GEOM_MAX_TRIS * 3 + \
+                        GEOM_MAX_TRIS * 24 + 1)
+
+static bool
+f32_at(const uint8_t *p, uint32_t bits)
+{
+   return p[0] == (uint8_t)(bits & 0xff) && p[1] == (uint8_t)((bits >> 8) & 0xff) &&
+          p[2] == (uint8_t)((bits >> 16) & 0xff) && p[3] == (uint8_t)(bits >> 24);
+}
+
+static void
+test_geometry_packet(void)
+{
+   const float verts[2 * 3] = { -1.0f, 0.5f, 0.1f,   1.0f, -0.25f, 3.0f };
+   const uint8_t idx[1 * 3] = { 0, 1, 1 };
+   const float uv[1 * 3 * 2] = { 0.0f, 1.0f,   0.75f, 0.5f,   0.1f, 0.9f };
+
+   borgvk_transport_capture_begin();
+   borgvk_serial_send_geom(verts, 2, idx, uv, 1);
+   size_t len = 0;
+   uint8_t *pkt = borgvk_transport_capture_end(&len);
+
+   check(pkt != NULL && len == GEOM_PKT_LEN, "geometry packet is the fixed 520-byte length");
+   if (!pkt || len != GEOM_PKT_LEN) {
+      free(pkt);
+      return;
+   }
+   check(pkt[0] == 0xAE && pkt[1] == 2 && pkt[2] == 1, "marker, nverts, ntris");
+
+   const int vbase = 3;
+   const int ibase = vbase + GEOM_MAX_VERTS * 12;
+   const int ubase = ibase + GEOM_MAX_TRIS * 3;
+   check(f32_at(&pkt[vbase + 0], 0xBF800000u), "position -1.0f as float32 LE");
+   check(f32_at(&pkt[vbase + 4], 0x3F000000u), "position 0.5f as float32 LE");
+   check(f32_at(&pkt[vbase + 8], 0x3DCCCCCDu), "position 0.1f keeps all 32 bits");
+   check(f32_at(&pkt[vbase + 20], 0x40400000u), "second vertex z 3.0f");
+   check(pkt[ibase] == 0 && pkt[ibase + 1] == 1 && pkt[ibase + 2] == 1, "indices");
+   check(f32_at(&pkt[ubase + 8], 0x3F400000u), "UV 0.75f as float32 LE");
+   check(f32_at(&pkt[ubase + 12], 0x3F000000u), "UV 0.5f as float32 LE");
+
+   bool padded = true;
+   for (int i = vbase + 2 * 12; i < ibase; i++) padded &= pkt[i] == 0;
+   for (int i = ubase + 6 * 4; i < GEOM_PKT_LEN - 1; i++) padded &= pkt[i] == 0;
+   check(padded, "unused vertex and UV slots are zero");
+
+   uint8_t csum = 0;
+   for (int i = 1; i < GEOM_PKT_LEN - 1; i++)
+      csum ^= pkt[i];
+   check(csum == pkt[GEOM_PKT_LEN - 1], "geometry checksum is XOR over bytes 1..len-2");
+   free(pkt);
+}
+
 int
 main(void)
 {
+   test_geometry_packet();
    test_well_formed_range();
    test_full_range();
    test_rejected_ranges();
@@ -167,6 +225,6 @@ main(void)
       fprintf(stderr, "%d check(s) failed\n", failures);
       return 1;
    }
-   printf("borgvk push-constant packet: all checks passed\n");
+   printf("borgvk wire packets: all checks passed\n");
    return 0;
 }
