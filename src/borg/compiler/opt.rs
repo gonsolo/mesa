@@ -56,7 +56,7 @@ pub(crate) fn dce(prog: &mut Vec<BorgInstr>, out_roots: &[u32]) {
 /// Peephole: re-fuse FMUL+FADD into FMADD. nir_lower_alu_to_scalar split the
 /// source ffma into a multiply and an add; fuse FADD(d, m, c) where m=FMUL(a,b)
 /// is used only here back into FMADD(d, a*b + c). Halves the matrix-multiply op
-/// count — both faster and necessary to fit SPIRB_MAX_INSTRS (32).
+/// count — both faster and necessary to fit SPIRB_MAX_INSTRS (72).
 pub(crate) fn fuse_fmadd(prog: &mut Vec<BorgInstr>, out_roots: &[u32]) {
     let pre_fuse = prog.len();
     {

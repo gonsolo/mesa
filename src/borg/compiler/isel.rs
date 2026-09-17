@@ -48,7 +48,8 @@ pub(crate) fn borg_isel(op: nir_op) -> Option<&'static str> {
         nir_op_f2i16 | nir_op_f2i32 | nir_op_f2u16 | nir_op_f2u32 => Some("F2I"),
         // Moves / vector (de)construction become register copies, no ISA op.
         nir_op_mov | nir_op_vec2 | nir_op_vec3 | nir_op_vec4 => Some("mov"),
-        // Integer↔int bit-size conversions are no-ops at 16-bit (copy).
+        // Integer↔int bit-size conversions are register copies: a GPR holds
+        // the full datapath word either way.
         nir_op_i2i16 | nir_op_i2i32 | nir_op_u2u16 | nir_op_u2u32 => Some("mov"),
         _ => None,
     }
