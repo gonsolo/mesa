@@ -64,7 +64,19 @@ borg_serial_open(void)
    return fd;
 }
 
-/* IEEE-754 float32 → float16, round-to-nearest-even. */
+/* A float32 as its IEEE bits, little-endian: positions and UVs are shader
+ * datapath values, and the datapath is FP32 -- no conversion. */
+static void
+put_f32_le(uint8_t *dst, float f)
+{
+   union { float f; uint32_t u; } in = { f };
+   dst[0] = (uint8_t)(in.u & 0xff);
+   dst[1] = (uint8_t)((in.u >> 8) & 0xff);
+   dst[2] = (uint8_t)((in.u >> 16) & 0xff);
+   dst[3] = (uint8_t)((in.u >> 24) & 0xff);
+}
+
+/* IEEE-754 float32 → float16, round-to-nearest-even (texels only). */
 static uint16_t
 f32_to_f16(float f)
 {
@@ -127,21 +139,15 @@ borg_serial_send_geom(const float *verts, int nverts,
    pkt[2] = (uint8_t)ntris;
 
    const int vbase = 3;
-   const int ibase = vbase + BORG_GEOM_MAX_VERTS * 6;
+   const int ibase = vbase + BORG_GEOM_MAX_VERTS * 12;
    const int ubase = ibase + BORG_GEOM_MAX_TRIS  * 3;
 
-   for (int i = 0; i < nverts * 3; i++) {
-      uint16_t h = f32_to_f16(verts[i]);
-      pkt[vbase + i*2]     = (uint8_t)(h & 0xff);
-      pkt[vbase + i*2 + 1] = (uint8_t)(h >> 8);
-   }
+   for (int i = 0; i < nverts * 3; i++)
+      put_f32_le(&pkt[vbase + i * 4], verts[i]);
    for (int i = 0; i < ntris * 3; i++)
       pkt[ibase + i] = idx[i];
-   for (int i = 0; i < ntris * 6; i++) {
-      uint16_t h = f32_to_f16(uv[i]);
-      pkt[ubase + i*2]     = (uint8_t)(h & 0xff);
-      pkt[ubase + i*2 + 1] = (uint8_t)(h >> 8);
-   }
+   for (int i = 0; i < ntris * 6; i++)
+      put_f32_le(&pkt[ubase + i * 4], uv[i]);
 
    uint8_t csum = 0;
    for (int i = 1; i < BORG_GEOM_PKT_LEN - 1; i++) csum ^= pkt[i];

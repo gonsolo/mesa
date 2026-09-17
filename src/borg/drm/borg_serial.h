@@ -8,8 +8,8 @@
 
 /* Geometry packet length (must match borgvk_serial.c BORGVK_GEOM_PKT_LEN). */
 #define BORG_GEOM_PKT_LEN \
-   (1 + 2 + BORG_GEOM_MAX_VERTS * 6 + BORG_GEOM_MAX_TRIS * 3 + \
-    BORG_GEOM_MAX_TRIS * 12 + 1)
+   (1 + 2 + BORG_GEOM_MAX_VERTS * 12 + BORG_GEOM_MAX_TRIS * 3 + \
+    BORG_GEOM_MAX_TRIS * 24 + 1)
 
 void borg_serial_send_geom(const float *verts, int nverts,
                            const uint8_t *idx, const float *uv, int ntris);
