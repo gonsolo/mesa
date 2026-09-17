@@ -558,25 +558,6 @@ borgvk_submit_sim_cube(struct borgvk_device *device,
       return VK_SUCCESS;
    struct borgvk_image *tex = set->images[1];
 
-   struct borgvk_image *color_img = find_color_attachment(submit);
-   if (!color_img || !color_img->mem || !color_img->mem->map)
-      return VK_SUCCESS;
-   uint32_t width  = color_img->vk.extent.width;
-   uint32_t height = color_img->vk.extent.height;
-   if (width == 0 || height == 0)
-      return VK_SUCCESS;
-
-   /* The firmware renders at its fixed native size (128² fallback for the cube),
-    * which need not match the swapchain extent.  Render the sim at that size and
-    * nearest-upscale into the attachment.  Override with BORGVK_SIM_DIM. */
-   uint32_t sdim = 128;
-   const char *dim_env = getenv("BORGVK_SIM_DIM");
-   if (dim_env && dim_env[0]) {
-      int d = atoi(dim_env);
-      if (d > 0)
-         sdim = (uint32_t)d;
-   }
-
    /* Capture one frame's full wire stream (shaders + geom + texture + MVP). */
    borgvk_transport_capture_begin();
    upload_shaders(device);
@@ -593,8 +574,9 @@ borgvk_submit_sim_cube(struct borgvk_device *device,
       return VK_SUCCESS;
    }
 
-   /* Debug bisect: dump the captured wire stream and skip the sim fork.  Lets us
-    * verify borgvk produces the correct protocol bytes independent of arcilator.
+   /* Dump the captured wire stream and skip the sim fork -- how the simulation
+    * goldens' borgvk_capture.bin is produced. Needs no mappable colour
+    * attachment, so it works against a real WSI swapchain.
     *   BORGVK_SIM_DUMP=/path  → write one frame's stream there, then return. */
    const char *dump = getenv("BORGVK_SIM_DUMP");
    if (dump && dump[0]) {
@@ -607,10 +589,28 @@ borgvk_submit_sim_cube(struct borgvk_device *device,
          }
          close(dfd);
       }
-      mesa_logi("borgvk: dumped %zu-byte sim stream to %s (%ux%u)",
-                nbytes, dump, width, height);
+      mesa_logi("borgvk: dumped %zu-byte sim stream to %s", nbytes, dump);
       free(bytes);
       return VK_SUCCESS;
+   }
+
+   struct borgvk_image *color_img = find_color_attachment(submit);
+   if (!color_img || !color_img->mem || !color_img->mem->map)
+      { free(bytes); return VK_SUCCESS; }
+   uint32_t width  = color_img->vk.extent.width;
+   uint32_t height = color_img->vk.extent.height;
+   if (width == 0 || height == 0)
+      { free(bytes); return VK_SUCCESS; }
+
+   /* The firmware renders at its fixed native size (128² fallback for the cube),
+    * which need not match the swapchain extent.  Render the sim at that size and
+    * nearest-upscale into the attachment.  Override with BORGVK_SIM_DIM. */
+   uint32_t sdim = 128;
+   const char *dim_env = getenv("BORGVK_SIM_DIM");
+   if (dim_env && dim_env[0]) {
+      int d = atoi(dim_env);
+      if (d > 0)
+         sdim = (uint32_t)d;
    }
 
    /* Hand the byte stream to arcilator_sim --cts-uart via a temp file. */
