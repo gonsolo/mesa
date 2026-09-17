@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: MIT
 //
 // borgc — the Borg GPU shader compiler (Rust), called from the borgvk Vulkan
-// driver. It lowers Mesa NIR to Borg ISA (the 7-op FP16 ISA: FADD/FMUL/FMADD/
-// FNEG/FSTEP/FRCP/FTEX) and emits the .borg blob the firmware loads. Modeled on
+// driver. It lowers Mesa NIR to Borg ISA (FADD/FMUL/FMADD/FNEG/FSTEP/FRCP/FTEX
+// and friends, on the FP32 shader datapath) and emits the .borg blob the
+// firmware loads. Modeled on
 // Mesa's NAK (src/nouveau/compiler/nak).
 //
 // Status: SPIR-V→NIR→borgc is live. This pass classifies every NIR instruction
@@ -21,7 +22,7 @@ mod regalloc;
 
 use compiler::bindings::*;
 use compiler::nir::AsDef;
-use encode::{emit_blob, encode, f32_to_fp16};
+use encode::{emit_blob, encode};
 use isel::{borg_isel, resolve_vm};
 use opt::{classify_uniform, dce, fuse_fmadd};
 use regalloc::regalloc;
@@ -253,18 +254,30 @@ pub unsafe extern "C" fn borgc_compile_nir(
     let mut prod: HashMap<u32, (nir_op, Vec<(u32, u8)>)> = HashMap::new();
     // FTEX results occupy 3 consecutive regs (R=rd, G=rd+1, B=rd+2).
     let mut ftex_dsts: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    // Vector constants (e.g. cube.frag's lightDir) → reserved GPRs r17.. (written
-    // once via MMIO by the firmware; persist across the WHOLE autonomous render).
-    // They must dodge every prior stage's working registers: the vertex shaders
-    // (hand + borgc) use r0-9 and r24-26 for the MVP·pos chain, and setup/rast use
-    // r0-11.  r17-19 is free in all of them, so lightDir survives vertex→frag.
-    // (r23-25 collided with the vertex shaders' r24/r25 — caught only by running
-    // the full pipeline, not the fragment in isolation.)  Uniforms are too tight:
-    // rast(u0-11) + frag varyings(u12-30) already fill 31 of 32. Records (reg, fp16).
-    let mut const_reg_next: u8 = 17;
-    // FP16 1.0, pinned to a const GPR on first use. Only the inverting
-    // comparisons (fge/feq) need it, and allocating it unconditionally would
-    // burn one of the scarce const registers for every shader that does not.
+    // Shader constants (cube.frag's lightDir, push-constant word indices) live in
+    // GPRs the firmware writes ONCE before the autonomous render, so they must
+    // survive every stage that runs before the fragment on every triangle and
+    // pixel: the vertex shaders (hand + borgc: r0-9, r24-26), the setup shader
+    // (r0-16), the rasterizer ROM (r0-4), and the fragment's own fixed blocks
+    // (r0-2 edges, r20-22 FTEX, r24 alpha, r25 kill, r26-29 outputs, r30/31
+    // pixel centre). That leaves exactly CONST_REGS. Handing out r20 -- the next
+    // register after r19 -- used to put fge's 1.0 where FTEX writes its texel.
+    // Uniforms are no alternative: rast(u0-11) + frag varyings(u12-30) fill 31
+    // of 32. Records (reg, value), value a datapath float or a raw integer.
+    const CONST_REGS: [u8; 4] = [17, 18, 19, 23];
+    let mut const_reg_count: usize = 0;
+    let alloc_const_reg = |count: &mut usize| -> u8 {
+        assert!(*count < CONST_REGS.len(),
+            "borgc: shader needs more than {} constant registers ({:?})",
+            CONST_REGS.len(), CONST_REGS);
+        let reg = CONST_REGS[*count];
+        *count += 1;
+        reg
+    };
+    // 1.0 for the inverting comparisons (fge/feq), created on first use. In a
+    // fragment shader it is FSTEP(r30): r30 reads the pixel centre (>= 0.5)
+    // during the fragment pass, so the result is exactly 1.0 and costs no
+    // constant register. Vertex shaders see r30 = 0 and fall back to a const.
     let mut one_vreg: Option<u32> = None;
     // Word-index constants for push-constant LOADs, pinned to const GPRs on
     // first use and shared across every load_push_constant reaching the same
@@ -272,9 +285,6 @@ pub unsafe extern "C" fn borgc_compile_nir(
     // in the shader at the same offset reuses the same pin rather than
     // burning a second scarce const register on an identical value).
     let mut push_const_reg: HashMap<u32, u32> = HashMap::new();
-    // u32 (widened from u16): wire-format-only, see emit_blob's doc comment
-    // in encode.rs -- every value pushed today is still an fp16 bit pattern
-    // zero-extended via `as u32`, not a real FP32 constant.
     let mut const_uniforms: Vec<(u8, u32)> = Vec::new();
     // gl_varying_slot: VAR0=texcoord, VAR1=frag_pos (Mesa enum: VAR0 = 32).
     const VARYING_SLOT_VAR0: u32 = 32;
@@ -390,8 +400,8 @@ pub unsafe extern "C" fn borgc_compile_nir(
                         // These exist for the execution mask: without them a
                         // condition like `if (x < y)` is a NIR op borgc
                         // cannot select, so EXPUSH would read a register no
-                        // instruction ever wrote. The result is FP16 1.0 or
-                        // 0.0, and the mask tests raw bits against zero, so
+                        // instruction ever wrote. The result is 1.0 or 0.0,
+                        // and the mask tests raw bits against zero, so
                         // both encodings land correctly without a bool
                         // conversion.
                         nir_op_flt | nir_op_fge | nir_op_fneu | nir_op_feq => {
@@ -424,15 +434,26 @@ pub unsafe extern "C" fn borgc_compile_nir(
                                     let nst = next_vreg; next_vreg += 1;
                                     prog.push(BorgInstr { mnem: "FSTEP", dst: st, srcs: vec![d], swz: vec![0] });
                                     prog.push(BorgInstr { mnem: "FNEG", dst: nst, srcs: vec![st], swz: vec![0] });
-                                    let one = *one_vreg.get_or_insert_with(|| {
-                                        let reg = const_reg_next;
-                                        const_reg_next += 1;
-                                        const_uniforms.push((reg, 0x3C00u32)); // FP16 1.0
-                                        let v = next_vreg;
-                                        next_vreg += 1;
-                                        ubo.insert(v, Ubo::Fixed(reg));
-                                        v
-                                    });
+                                    let one = match one_vreg {
+                                        Some(v) => v,
+                                        None => {
+                                            let v = next_vreg;
+                                            next_vreg += 1;
+                                            if stage == 4 {
+                                                let c = next_vreg;
+                                                next_vreg += 1;
+                                                ubo.insert(c, Ubo::Fixed(30));
+                                                per_pixel_fixed.insert(c);
+                                                prog.push(BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
+                                            } else {
+                                                let reg = alloc_const_reg(&mut const_reg_count);
+                                                const_uniforms.push((reg, 1.0f32.to_bits()));
+                                                ubo.insert(v, Ubo::Fixed(reg));
+                                            }
+                                            one_vreg = Some(v);
+                                            v
+                                        }
+                                    };
                                     prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![one, nst], swz: vec![0, 0] });
                                 }
                                 // a != b  ->  FSTEP(a-b) + FSTEP(b-a). At most
@@ -459,15 +480,26 @@ pub unsafe extern "C" fn borgc_compile_nir(
                                     prog.push(BorgInstr { mnem: "FSTEP", dst: s2, srcs: vec![dba], swz: vec![0] });
                                     prog.push(BorgInstr { mnem: "FADD", dst: ne, srcs: vec![s1, s2], swz: vec![0, 0] });
                                     prog.push(BorgInstr { mnem: "FNEG", dst: nne, srcs: vec![ne], swz: vec![0] });
-                                    let one = *one_vreg.get_or_insert_with(|| {
-                                        let reg = const_reg_next;
-                                        const_reg_next += 1;
-                                        const_uniforms.push((reg, 0x3C00u32)); // FP16 1.0
-                                        let v = next_vreg;
-                                        next_vreg += 1;
-                                        ubo.insert(v, Ubo::Fixed(reg));
-                                        v
-                                    });
+                                    let one = match one_vreg {
+                                        Some(v) => v,
+                                        None => {
+                                            let v = next_vreg;
+                                            next_vreg += 1;
+                                            if stage == 4 {
+                                                let c = next_vreg;
+                                                next_vreg += 1;
+                                                ubo.insert(c, Ubo::Fixed(30));
+                                                per_pixel_fixed.insert(c);
+                                                prog.push(BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
+                                            } else {
+                                                let reg = alloc_const_reg(&mut const_reg_count);
+                                                const_uniforms.push((reg, 1.0f32.to_bits()));
+                                                ubo.insert(v, Ubo::Fixed(reg));
+                                            }
+                                            one_vreg = Some(v);
+                                            v
+                                        }
+                                    };
                                     prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![one, nne], swz: vec![0, 0] });
                                 }
                             }
@@ -557,31 +589,10 @@ pub unsafe extern "C" fn borgc_compile_nir(
                                 v
                             })
                             .collect();
-                        // FP16-underflow rescale: at fb 128×128 frag_pos derivatives
-                        // are ~0.03/px, so |cross(ddx,ddy)|² lands BELOW the FP16
-                        // minimum normal (6.1e-5) and Fp16Rsq returns +Inf (the
-                        // "white cube" bug).  Scale the DDX components by 32 — cross
-                        // is bilinear and normalize() is scale-invariant, so the
-                        // result is exact; DDY is left untouched.  The constant
-                        // lives in u31, the firmware-owned uniform slot (the Borg
-                        // DMA/sequencer never write it; the firmware stages 32.0 on
-                        // both pages before each render).
-                        let comps: Vec<(u32, u8)> = raw
-                            .into_iter()
-                            .map(|v| {
-                                if mnem == "DDX" {
-                                    let s = next_vreg;
-                                    next_vreg += 1;
-                                    ubo.insert(s, Ubo::Uniform(31));
-                                    let vs = next_vreg;
-                                    next_vreg += 1;
-                                    prog.push(BorgInstr { mnem: "FMUL", dst: vs, srcs: vec![v, s], swz: vec![0, 0] });
-                                    (vs, 0u8)
-                                } else {
-                                    (v, 0u8)
-                                }
-                            })
-                            .collect();
+                        // (The FP16 datapath needed DDX scaled by 32 here, because
+                        // |cross(ddx, ddy)|^2 underflowed below FP16's minimum
+                        // normal at 128x128. FP32 has no such floor.)
+                        let comps: Vec<(u32, u8)> = raw.into_iter().map(|v| (v, 0u8)).collect();
                         vec_map.insert(intr.def.index, comps);
                     } else if intr.intrinsic == nir_intrinsic_load_input {
                         // Interpolated varying. Borg has no fixed-function interpolation:
@@ -666,9 +677,8 @@ pub unsafe extern "C" fn borgc_compile_nir(
                                         "push constant field at byte {byte_off} is not word-aligned");
                                     let word_idx = (byte_off / 4) as u32;
                                     let idx_reg = *push_const_reg.entry(word_idx).or_insert_with(|| {
-                                        let reg = const_reg_next;
-                                        const_reg_next += 1;
-                                        // RAW integer, not f32_to_fp16 -- this
+                                        let reg = alloc_const_reg(&mut const_reg_count);
+                                        // RAW integer, not a float -- this
                                         // becomes rs1 for LOAD, a word INDEX,
                                         // not a shader-visible float value.
                                         const_uniforms.push((reg, word_idx));
@@ -721,14 +731,13 @@ pub unsafe extern "C" fn borgc_compile_nir(
                     if n == 1 {
                         consts.insert(lc.def.index, unsafe { lc.values()[0].u32_ });
                     } else {
-                        // Vector constant (lightDir) → pin components to reserved
-                        // GPRs r23+ (firmware writes them once via MMIO).
+                        // Vector constant (lightDir) → pin components to constant
+                        // GPRs (firmware writes them once via MMIO).
                         let comps: Vec<(u32, u8)> = (0..n)
                             .map(|c| {
-                                let reg = const_reg_next;
-                                const_reg_next += 1;
+                                let reg = alloc_const_reg(&mut const_reg_count);
                                 let bits = unsafe { lc.values()[c].u32_ };
-                                const_uniforms.push((reg, f32_to_fp16(bits) as u32));
+                                const_uniforms.push((reg, bits));
                                 let v = next_vreg;
                                 next_vreg += 1;
                                 ubo.insert(v, Ubo::Fixed(reg));
@@ -950,8 +959,8 @@ pub unsafe extern "C" fn borgc_compile_nir(
         if let Some(zr) = frag_z {
             forced.insert(zr, 29); // interpolated depth → r29
         }
-        // r0-2 attrs, r17-19 lightDir consts, r20-22 FTEX, r26-29 outputs.
-        extra_reserved.extend_from_slice(&[0, 1, 2, 17, 18, 19, 21, 22, 26, 27, 28, 29]);
+        // r0-2 attrs, r17-19 + r23 constants, r20-22 FTEX, r26-29 outputs.
+        extra_reserved.extend_from_slice(&[0, 1, 2, 17, 18, 19, 21, 22, 23, 26, 27, 28, 29]);
         // r24 (alpha) only when it is actually an output. Reserving it
         // unconditionally would shrink the allocator's pool for every
         // existing shader to no purpose.

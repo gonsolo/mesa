@@ -4,39 +4,19 @@
 // Instruction encoding and blob serialization: turns a fully register-allocated
 // Vec<BorgInstr> word list into the .borg blob bytes the firmware loads.
 
-/// Convert f32 bits to fp16 bits (round toward zero; adequate for the small
-/// normal constants we pin, e.g. lightDir).
-pub(crate) fn f32_to_fp16(bits: u32) -> u16 {
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exp = ((bits >> 23) & 0xFF) as i32 - 127 + 15;
-    let mant = bits & 0x7F_FFFF;
-    if exp <= 0 {
-        sign
-    } else if exp >= 31 {
-        sign | 0x7C00
-    } else {
-        sign | ((exp as u16) << 10) | ((mant >> 13) as u16)
-    }
-}
-
 /// Serialize a Borg shader to the .borg blob format parsed by spirb_parse()
 /// (software/borg/borg_spirb.c): a 6-byte header (num_instrs, num_uniforms,
 /// num_attributes, num_outputs, num_consts, reserved), then num_instrs LE u32
 /// instruction words, then the uint8 uniform/attribute/output/const register
 /// lists, then num_consts LE u32 constant values. We emit instructions, the
 /// output-register list, and the const-register list. The consts (e.g.
-/// cube.frag's lightDir in r23-25) are written once to the GPRs by the firmware
+/// cube.frag's lightDir in r17-19) are written once to the GPRs by the firmware
 /// (spirb_parse → BORG_GPU->gpr[const_regs[i]] = const_vals[i]) and persist
 /// across the autonomous render. Uniforms are read inline via funct3, so there
 /// is no host uniform/attribute interface list.
 ///
-/// const_vals is u32 (widened from u16 -- see borg_spirb.h/docs/spirb.md on
-/// the Borg side, same commit) so the wire format can eventually carry a real
-/// FP32 constant. Every value passed in today is still `f32_to_fp16(bits) as
-/// u32` -- this compiler has no FP32 codegen path yet (see the
-/// feat/fp32-datapath branch's own plan doc for that larger, separate
-/// undertaking) -- so this widening is wire-format-only for now: it removes
-/// the format-level blocker without claiming FP32 shader support exists.
+/// const_vals are LE u32: one datapath float (IEEE binary32 bits) or a raw
+/// integer such as a push-constant word index, written to the GPR unchanged.
 pub(crate) fn emit_blob(words: &[u32], outputs: &[u8], consts: &[(u8, u32)]) -> Vec<u8> {
     let mut b = Vec::new();
     b.push(words.len() as u8); // num_instrs
@@ -87,8 +67,8 @@ pub(crate) fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
         "FSTEP" => un(0x1000_0000),
         // --- Extended ISA (hardware Instructions.scala, same funct7 << 25) ---
         // LOAD/STORE address LS_BASE + (rs1 << 2): the operand is a word
-        // INDEX, not a byte address, because at FP16 a register holds 16 bits
-        // and the address space is 25. STORE has no destination.
+        // INDEX, not a byte address (words are the natural unit, and the
+        // scheme predates FP32, when a register held only 16 bits). STORE has no destination.
         "LOAD" => un(0x4400_0000),
         "STORE" => bin(0x4800_0000) & !(0x1F << 7), // rd field is unused
         // Execution mask. None of these has a destination; EXPUSH reads its
@@ -124,6 +104,17 @@ mod tests {
     /// The encodings are a mirror of the hardware's Instructions.scala. A
     /// divergence here is silent: the shader would execute a different opcode
     /// rather than fail to load, so the funct7 bases are pinned explicitly.
+    #[test]
+    fn blob_constants_are_raw_little_endian_words() {
+        // A constant reaches its GPR unchanged, so the blob must carry the
+        // FP32 bits themselves: 1.0f = 0x3F800000, not an FP16 0x3C00.
+        let b = emit_blob(&[0], &[], &[(17, 1.0f32.to_bits()), (23, 9)]);
+        assert_eq!(&b[..6], &[1, 0, 0, 0, 2, 0], "header: 1 instr, 2 consts");
+        assert_eq!(&b[10..12], &[17, 23], "const registers");
+        assert_eq!(&b[12..16], &[0x00, 0x00, 0x80, 0x3F], "1.0f as LE binary32");
+        assert_eq!(&b[16..20], &[9, 0, 0, 0], "raw integer (a word index)");
+    }
+
     #[test]
     fn extended_isa_bases_match_hardware() {
         // funct7 << 25, from hardware/borg/src/Instructions.scala.
