@@ -422,10 +422,21 @@ send_geometry(const float *ubo)
    borgvk_serial_send_geom(verts, nverts, idx, uv, UBO_NUM_VERTS / 3);
 }
 
-/* Box-downsample the linear RGBA8 texture to one BORGVK_TEX_DIM-wide row of
- * normalized RGB floats and ship it. */
+/* Box-downsample the linear RGBA8 texture to one BORGVK_TEX_DIM-wide RGBA8
+ * row and ship it with the sampler's packed descriptor. With no sampler
+ * recorded (an immutable one, which borgvk does not track yet) it sends the
+ * firmware's own default: nearest, CLAMP_TO_EDGE, LOD clamped to 0. */
+static const uint32_t default_sampler[4] = { (2u << 3) | (2u << 6) | (2u << 9), 0, 0, 0 };
+
+static const uint32_t *
+sampler_desc(const struct borgvk_sampler *sampler)
+{
+   return sampler ? sampler->desc : default_sampler;
+}
+
 static void
-send_texture_row(struct borgvk_image *tex, int dy)
+send_texture_row(struct borgvk_image *tex, const struct borgvk_sampler *sampler,
+                 int dy)
 {
    const uint8_t *base = (const uint8_t *)tex->mem->map + tex->offset;
    uint32_t sw = tex->vk.extent.width, sh = tex->vk.extent.height;
@@ -435,9 +446,9 @@ send_texture_row(struct borgvk_image *tex, int dy)
    int sxs = (int)(sw / BORGVK_TEX_DIM); if (sxs < 1) sxs = 1;
    int sys = (int)(sh / BORGVK_TEX_DIM); if (sys < 1) sys = 1;
 
-   float row[BORGVK_TEX_DIM * 3];
+   uint8_t row[BORGVK_TEX_DIM * 4];
    for (int dx = 0; dx < BORGVK_TEX_DIM; dx++) {
-      uint32_t r = 0, g = 0, b = 0, n = 0;
+      uint32_t sum[4] = { 0, 0, 0, 0 }, n = 0;
       for (int oy = 0; oy < sys; oy++) {
          uint32_t sy = (uint32_t)dy * sys + oy;
          if (sy >= sh) break;
@@ -445,15 +456,16 @@ send_texture_row(struct borgvk_image *tex, int dy)
             uint32_t sx = (uint32_t)dx * sxs + ox;
             if (sx >= sw) break;
             const uint8_t *p = base + sy * pitch + sx * 4;
-            r += p[0]; g += p[1]; b += p[2]; n++;
+            for (int c = 0; c < 4; c++)
+               sum[c] += p[c];
+            n++;
          }
       }
       if (n == 0) n = 1;
-      row[dx*3+0] = (float)r / n / 255.0f;
-      row[dx*3+1] = (float)g / n / 255.0f;
-      row[dx*3+2] = (float)b / n / 255.0f;
+      for (int c = 0; c < 4; c++)
+         row[dx * 4 + c] = (uint8_t)((sum[c] + n / 2) / n);
    }
-   borgvk_serial_send_tex_row(dy, row);
+   borgvk_serial_send_tex_row(dy, row, sampler_desc(sampler));
 }
 
 /* Sentinel path: /tmp/borgvk_<devbasename>_setup — presence means the FPGA
@@ -565,7 +577,7 @@ borgvk_submit_sim_cube(struct borgvk_device *device,
    if (tex && tex->mem && tex->mem->map &&
        tex->vk.extent.width && tex->vk.extent.height)
       for (int row = 0; row < BORGVK_TEX_DIM; row++)
-         send_texture_row(tex, row);
+         send_texture_row(tex, set->samplers[1], row);
    borgvk_serial_send_mvp(ubo);
    size_t nbytes = 0;
    uint8_t *bytes = borgvk_transport_capture_end(&nbytes);
@@ -736,6 +748,7 @@ borgvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
             .tex_width  = tex->vk.extent.width,
             .tex_height = tex->vk.extent.height,
          };
+         memcpy(s.sampler, sampler_desc(set->samplers[1]), sizeof(s.sampler));
          if (drmIoctl(device->drm_fd, DRM_IOCTL_BORG_SETUP, &s) == 0)
             g_setup_done = true;
          else
@@ -759,7 +772,7 @@ borgvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
             upload_shaders(device);   /* borgc-compiled shaders, before geom/tex */
             send_geometry(ubo);
             for (int row = 0; row < BORGVK_TEX_DIM; row++)
-               send_texture_row(tex, row);
+               send_texture_row(tex, set->samplers[1], row);
             mark_setup_done();
             mesa_logi("borgvk: upload complete");
             g_setup_done = true;

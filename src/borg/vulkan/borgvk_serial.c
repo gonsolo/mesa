@@ -137,39 +137,6 @@ put_f32_le(uint8_t *dst, float f)
    dst[3] = (uint8_t)((in.u >> 24) & 0xff);
 }
 
-/* IEEE-754 float32 → float16 (round-to-nearest-even), for texels only: the
- * texture unit is FP16-native. Inputs are colour channels in [0,1]. */
-static uint16_t
-f32_to_f16(float f)
-{
-   union { float f; uint32_t u; } in = { f };
-   uint32_t x = in.u;
-   uint16_t sign = (uint16_t)((x >> 16) & 0x8000u);
-   int32_t exp = (int32_t)((x >> 23) & 0xff) - 127 + 15;
-   uint32_t mant = x & 0x7fffffu;
-
-   if (((x >> 23) & 0xff) == 0xff)          /* inf / nan */
-      return (uint16_t)(sign | 0x7c00u | (mant ? 0x200u : 0u));
-   if (exp >= 0x1f)                         /* overflow → inf */
-      return (uint16_t)(sign | 0x7c00u);
-   if (exp <= 0) {                          /* subnormal / underflow → flush to 0 */
-      if (exp < -10)
-         return sign;
-      mant |= 0x800000u;
-      uint32_t shift = (uint32_t)(14 - exp);
-      uint16_t h = (uint16_t)(mant >> shift);
-      if ((mant >> (shift - 1)) & 1u)       /* round */
-         h++;
-      return (uint16_t)(sign | h);
-   }
-   uint16_t h = (uint16_t)(sign | (uint16_t)(exp << 10) | (uint16_t)(mant >> 13));
-   if (mant & 0x1000u) {                    /* round-to-nearest-even */
-      if ((mant & 0x0fffu) || (h & 1u))
-         h++;
-   }
-   return h;
-}
-
 /* Write the full packet, then idle so the receiver sees an inter-packet gap
  * to sync on (the firmware's gap-sync waits for the line to go idle before
  * trusting the next marker byte — see borg_kernel.c).  `is_socket` selects
@@ -302,20 +269,21 @@ borgvk_serial_send_geom(const float *verts, int nverts,
 }
 
 #define BORGVK_MARKER_TEX  0xAF
-/* 0xAF: marker, y, BORGVK_TEX_DIM texels RGB-FP16 (dim*6 B), checksum. */
-#define BORGVK_TEX_PKT_LEN (1 + 1 + BORGVK_TEX_DIM * 6 + 1)
+/* 0xAF: marker, y, sampler descriptor (4 words LE), BORGVK_TEX_DIM RGBA8
+ * texels, checksum. Every row carries the sampler, so any row that arrives
+ * intact delivers it. */
+#define BORGVK_TEX_PKT_LEN (1 + 1 + 16 + BORGVK_TEX_DIM * 4 + 1)
 
 void
-borgvk_serial_send_tex_row(int y, const float *rgb)
+borgvk_serial_send_tex_row(int y, const uint8_t *rgba, const uint32_t sampler[4])
 {
    uint8_t pkt[BORGVK_TEX_PKT_LEN];
    pkt[0] = BORGVK_MARKER_TEX;
    pkt[1] = (uint8_t)y;
-   for (int i = 0; i < BORGVK_TEX_DIM * 3; i++) {
-      uint16_t h = f32_to_f16(rgb[i]);
-      pkt[2 + i*2]     = (uint8_t)(h & 0xff);
-      pkt[2 + i*2 + 1] = (uint8_t)(h >> 8);
-   }
+   for (int w = 0; w < 4; w++)
+      for (int b = 0; b < 4; b++)
+         pkt[2 + w * 4 + b] = (uint8_t)(sampler[w] >> (8 * b));
+   memcpy(&pkt[2 + 16], rgba, BORGVK_TEX_DIM * 4);
    uint8_t csum = 0;
    for (int i = 1; i < BORGVK_TEX_PKT_LEN - 1; i++)
       csum ^= pkt[i];

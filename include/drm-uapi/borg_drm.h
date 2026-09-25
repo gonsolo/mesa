@@ -74,6 +74,8 @@ struct drm_borg_setup {
    uint64_t tex_offset;    /* byte offset of pixel data within tex BO */
    uint32_t tex_width;
    uint32_t tex_height;
+   uint32_t sampler[4];    /* the texture unit's sampler descriptor, packed by
+                            * borgvk from the app's VkSampler */
 };
 
 /* Send the per-frame MVP (16 floats at UBO byte offset 0) to the FPGA. */

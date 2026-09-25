@@ -40,7 +40,8 @@ pub(crate) fn emit_blob(words: &[u32], outputs: &[u8], consts: &[(u8, u32)]) -> 
 
 /// Encode one Borg instruction to its 32-bit word (opcode bases match
 /// software/borg/borg_isa.h and hardware Instructions.scala). `funct3` selects a
-/// uniform operand (0=none, 1=rs1, 2=rs2, 3=rs3); `rs3` is used only by FMADD.
+/// uniform operand (0=none, 1=rs1, 2=rs2, 3=rs3); `rs3` is used by the R4-type
+/// ops, FMADD and TEX.
 pub(crate) fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32) -> Option<u32> {
     let (rd, rs1, rs2, rs3) = (rd as u32, rs1 as u32, rs2 as u32, rs3 as u32);
     let f3 = (funct3 & 0x7) << 12;
@@ -49,11 +50,13 @@ pub(crate) fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
     let r4 = |base: u32| base | f3 | (rs3 << 27) | (rs2 << 20) | (rs1 << 15) | (rd << 7);
     Some(match mnem {
         "FMADD" => r4(0x0000_0004),
+        // TEX rd, u, v, ctl: R4-type funct2 = 2 (docs/B2_texture_unit.md).
+        // funct2 = 1 was FTEX, retired with the legacy texture unit.
+        "TEX" => r4(0x0400_0004),
         "FADD" => bin(0x0000_0000),
         "FMUL" => bin(0x0800_0000),
         "FNEG" => un(0x0C00_0000),
         "FRCP" => un(0x1400_0000),
-        "FTEX" => bin(0x1800_0000),
         "IADD" => bin(0x1C00_0000),
         "ISHL" => bin(0x2000_0000),
         "ISHR" => bin(0x2400_0000),
@@ -125,6 +128,18 @@ mod tests {
         assert_eq!(encode("EXPUSH", 0, 5, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2A << 25);
         assert_eq!(encode("EXELSE", 0, 0, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2C << 25);
         assert_eq!(encode("EXPOP", 0, 0, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2E << 25);
+    }
+
+    #[test]
+    fn tex_is_r4_type_funct2_2_with_the_control_word_in_rs3() {
+        // Instructions.encodeR4Type(rs3, FUNCT2_TEX = 2, rs2, rs1, rd): the
+        // opcode's FMA bit, funct2 at 26:25, rs3 at 31:27.
+        let w = encode("TEX", 20, 15, 7, 9, 0).unwrap();
+        assert_eq!(w & 0x7F, 0x04, "R4-type opcode");
+        assert_eq!((w >> 25) & 0x3, 2, "funct2 = TEX");
+        assert_eq!((w >> 27, (w >> 20) & 0x1F, (w >> 15) & 0x1F, (w >> 7) & 0x1F),
+                   (9, 7, 15, 20), "rs3 ctl, rs2 v, rs1 u, rd");
+        assert!(encode("FTEX", 20, 15, 7, 0, 0).is_none(), "FTEX is retired");
     }
 
     #[test]

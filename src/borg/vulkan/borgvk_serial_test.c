@@ -213,9 +213,42 @@ test_geometry_packet(void)
    free(pkt);
 }
 
+/* 0xAF: the firmware (borg_kernel.c) reads y at [1], the sampler descriptor
+ * as four little-endian words at [2..17], the RGBA8 texels from [18]. */
+static void
+test_texture_row_packet(void)
+{
+   const int len_expected = 1 + 1 + 16 + BORGVK_TEX_DIM * 4 + 1;
+   uint8_t rgba[BORGVK_TEX_DIM * 4];
+   for (int i = 0; i < BORGVK_TEX_DIM * 4; i++)
+      rgba[i] = (uint8_t)(i * 7);
+   const uint32_t sampler[4] = { 0x000A0493u, 0x3F800000u, 0u, 0x447A0000u };
+
+   borgvk_transport_capture_begin();
+   borgvk_serial_send_tex_row(5, rgba, sampler);
+   size_t len = 0;
+   uint8_t *pkt = borgvk_transport_capture_end(&len);
+
+   check(pkt != NULL && len == (size_t)len_expected, "texture row packet is 275 bytes");
+   if (!pkt || len != (size_t)len_expected) {
+      free(pkt);
+      return;
+   }
+   check(pkt[0] == 0xAF && pkt[1] == 5, "marker and row");
+   for (int w = 0; w < 4; w++)
+      check(f32_at(&pkt[2 + w * 4], sampler[w]), "sampler descriptor word, LE");
+   check(memcmp(&pkt[18], rgba, sizeof(rgba)) == 0, "RGBA8 texels follow the sampler");
+   uint8_t csum = 0;
+   for (int i = 1; i < len_expected - 1; i++)
+      csum ^= pkt[i];
+   check(csum == pkt[len_expected - 1], "texture checksum is XOR over bytes 1..len-2");
+   free(pkt);
+}
+
 int
 main(void)
 {
+   test_texture_row_packet();
    test_geometry_packet();
    test_well_formed_range();
    test_full_range();

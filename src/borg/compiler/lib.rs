@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 //
 // borgc — the Borg GPU shader compiler (Rust), called from the borgvk Vulkan
-// driver. It lowers Mesa NIR to Borg ISA (FADD/FMUL/FMADD/FNEG/FSTEP/FRCP/FTEX
+// driver. It lowers Mesa NIR to Borg ISA (FADD/FMUL/FMADD/FNEG/FSTEP/FRCP/TEX
 // and friends, on the FP32 shader datapath) and emits the .borg blob the
 // firmware loads. Modeled on
 // Mesa's NAK (src/nouveau/compiler/nak).
@@ -196,7 +196,7 @@ pub unsafe extern "C" fn borgc_compile_nir(
                         note(alu.info().name());
                     }
                 } else if instr.as_tex().is_some() {
-                    tex += 1; // → FTEX
+                    tex += 1; // → TEX
                 } else if let Some(i) = instr.as_intrinsic() {
                     intrinsics += 1;
                     note(i.info().name());
@@ -252,25 +252,36 @@ pub unsafe extern "C" fn borgc_compile_nir(
     // (alu def → its op + resolved scalar srcs) for recognising the bcsel tree.
     let mut consts: HashMap<u32, u32> = HashMap::new();
     let mut prod: HashMap<u32, (nir_op, Vec<(u32, u8)>)> = HashMap::new();
-    // FTEX results occupy 3 consecutive regs (R=rd, G=rd+1, B=rd+2).
-    let mut ftex_dsts: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    // TEX results occupy 4 consecutive regs (rd..rd+3 = R, G, B, A).
+    let mut tex_dsts: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    // TEX's control word (docs/B2_texture_unit.md), created on first use. Word 0
+    // is texture 0, sampler 0, a plain sample with the LOD taken from the quad,
+    // no offsets -- all a shader with one sampler2D needs. It is built in the
+    // shader rather than pinned: FSTEP of -r30 is exactly +0 (r30 >= 0 in every
+    // stage), so it costs two instructions and no constant register.
+    let mut zero_ctl: Option<u32> = None;
+    // Distinct texture derefs seen, to say so when a shader samples more than
+    // one: every sample uses descriptor 0 until borgc maps bindings to indices.
+    let mut tex_derefs: std::collections::HashSet<u32> = std::collections::HashSet::new();
     // Shader constants (cube.frag's lightDir, push-constant word indices) live in
     // GPRs the firmware writes ONCE before the autonomous render, so they must
     // survive every stage that runs before the fragment on every triangle and
     // pixel: the vertex shaders (hand + borgc: r0-9, r24-26), the setup shader
     // (r0-16), the rasterizer ROM (r0-4), and the fragment's own fixed blocks
-    // (r0-2 edges, r20-22 FTEX, r24 alpha, r25 kill, r26-29 outputs, r30/31
-    // pixel centre). That leaves exactly CONST_REGS. Handing out r20 -- the next
-    // register after r19 -- used to put fge's 1.0 where FTEX writes its texel.
-    // Uniforms are no alternative: rast(u0-11) + frag varyings(u12-30) fill 31
-    // of 32. Records (reg, value), value a datapath float or a raw integer.
-    const CONST_REGS: [u8; 4] = [17, 18, 19, 23];
+    // (r0-2 edges, r20-23 TEX, r24 alpha, r25 kill, r26-29 outputs, r30/31
+    // pixel centre). That leaves r17-19, plus r23 in a shader that never
+    // samples: TEX writes rd..rd+3, so with rd = 20 it overwrites r23. Handing
+    // out r20 -- the next register after r19 -- once put fge's 1.0 where the
+    // texel lands. Uniforms are no alternative: rast(u0-11) + frag
+    // varyings(u12-30) fill 31 of 32. Records (reg, value), value a datapath
+    // float or a raw integer.
+    let const_regs: &[u8] = if tex > 0 { &[17, 18, 19] } else { &[17, 18, 19, 23] };
     let mut const_reg_count: usize = 0;
     let alloc_const_reg = |count: &mut usize| -> u8 {
-        assert!(*count < CONST_REGS.len(),
+        assert!(*count < const_regs.len(),
             "borgc: shader needs more than {} constant registers ({:?})",
-            CONST_REGS.len(), CONST_REGS);
-        let reg = CONST_REGS[*count];
+            const_regs.len(), const_regs);
+        let reg = const_regs[*count];
         *count += 1;
         reg
     };
@@ -706,24 +717,51 @@ pub unsafe extern "C" fn borgc_compile_nir(
                     }
                     // load_ubo/store_output handled in the I/O pass below.
                 } else if let Some(tex) = instr.as_tex() {
-                    // Texture sample → FTEX rd, U, V (rd=R, rd+1=G, rd+2=B implicit).
-                    // The result vec4's .x/.y/.z resolve to rd/rd+1/rd+2.
-                    let coord = tex
-                        .srcs_as_slice()
+                    // Texture sample → TEX rd, u, v, ctl: R, G, B, A to rd..rd+3.
+                    // Only a plain implicit-LOD sample of a 2D texture so far;
+                    // anything else is reported rather than sampled wrongly.
+                    let srcs = tex.srcs_as_slice();
+                    if tex.op != nir_texop_tex {
+                        eprintln!("borgc: WARNING texture op {} not supported yet, dropped", tex.op);
+                        continue;
+                    }
+                    if let Some(t) = srcs.iter().find(|s| s.src_type == nir_tex_src_texture_deref) {
+                        tex_derefs.insert(t.src.as_def().index);
+                        if tex_derefs.len() == 2 {
+                            eprintln!("borgc: WARNING more than one texture: all sample descriptor 0");
+                        }
+                    }
+                    let coord = srcs
                         .iter()
                         .find(|s| s.src_type == nir_tex_src_coord)
                         .map(|s| s.src.as_def().index);
                     if let Some(cd) = coord {
                         let (ud, uc) = resolve_vm(&vec_map, cd, 0);
                         let (vd, vc) = resolve_vm(&vec_map, cd, 1);
-                        let ftex_v = next_vreg;
+                        let ctl = match zero_ctl {
+                            Some(v) => v,
+                            None => {
+                                let c = next_vreg;
+                                let neg = next_vreg + 1;
+                                let z = next_vreg + 2;
+                                next_vreg += 3;
+                                ubo.insert(c, Ubo::Fixed(30));
+                                per_pixel_fixed.insert(c);
+                                prog.push(BorgInstr { mnem: "FNEG", dst: neg, srcs: vec![c], swz: vec![0] });
+                                prog.push(BorgInstr { mnem: "FSTEP", dst: z, srcs: vec![neg], swz: vec![0] });
+                                zero_ctl = Some(z);
+                                z
+                            }
+                        };
+                        let tex_v = next_vreg;
                         next_vreg += 1;
-                        prog.push(BorgInstr { mnem: "FTEX", dst: ftex_v, srcs: vec![ud, vd], swz: vec![uc, vc] });
-                        ftex_dsts.insert(ftex_v);
-                        // .w (alpha) is unused by the RGB tile buffer → map to .z.
+                        prog.push(BorgInstr {
+                            mnem: "TEX", dst: tex_v, srcs: vec![ud, vd, ctl], swz: vec![uc, vc, 0],
+                        });
+                        tex_dsts.insert(tex_v);
                         vec_map.insert(
                             tex.def.index,
-                            vec![(ftex_v, 0), (ftex_v, 1), (ftex_v, 2), (ftex_v, 2)],
+                            vec![(tex_v, 0), (tex_v, 1), (tex_v, 2), (tex_v, 3)],
                         );
                     }
                 } else if let Some(lc) = instr.as_load_const() {
@@ -945,7 +983,7 @@ pub unsafe extern "C" fn borgc_compile_nir(
         }
     } else {
         // Fragment: colour → r26/27/28; edge-function attrs occupy r0/r1/r2; the
-        // FTEX result occupies a fixed 3-reg block r20/21/22.
+        // TEX result occupies a fixed 4-reg block r20..r23.
         for (c, v) in frag_out.iter().enumerate() {
             if let Some(def) = v {
                 // Alpha is r24, not r29 -- r29 is the interpolated depth
@@ -953,13 +991,13 @@ pub unsafe extern "C" fn borgc_compile_nir(
                 forced.insert(*def, if c == 3 { 24 } else { 26 + c as u8 });
             }
         }
-        for &t in &ftex_dsts {
+        for &t in &tex_dsts {
             forced.insert(t, 20);
         }
         if let Some(zr) = frag_z {
             forced.insert(zr, 29); // interpolated depth → r29
         }
-        // r0-2 attrs, r17-19 + r23 constants, r20-22 FTEX, r26-29 outputs.
+        // r0-2 attrs, r17-19 (+ r23) constants, r20-23 TEX, r26-29 outputs.
         extra_reserved.extend_from_slice(&[0, 1, 2, 17, 18, 19, 21, 22, 23, 26, 27, 28, 29]);
         // r24 (alpha) only when it is actually an output. Reserving it
         // unconditionally would shrink the allocator's pool for every
@@ -1007,8 +1045,8 @@ pub unsafe extern "C" fn borgc_compile_nir(
     let mut pending = 0u32;
     // Resolve one source operand to (physical register, reads-from-uniform).
     let resolve_op = |s: u32, c: u8| -> (u8, bool) {
-        // FTEX result component c → rd+c (R/G/B in consecutive regs).
-        if ftex_dsts.contains(&s) {
+        // TEX result component c → rd+c (R/G/B/A in consecutive regs).
+        if tex_dsts.contains(&s) {
             return (alloc.get(&s).map_or(0, |&r| r + c), false);
         }
         match ubo.get(&s) {
@@ -1070,8 +1108,8 @@ pub unsafe extern "C" fn borgc_compile_nir(
         let mut r = [0u8; 3];
         let mut f3 = 0u32;
         for (k, (s, &c)) in i.srcs.iter().zip(i.swz.iter()).take(3).enumerate() {
-            if ftex_dsts.contains(s) {
-                r[k] = alloc.get(s).map_or(0, |&rr| rr + c); // FTEX result rd+c
+            if tex_dsts.contains(s) {
+                r[k] = alloc.get(s).map_or(0, |&rr| rr + c); // TEX result rd+c
                 continue;
             }
             match ubo.get(s) {

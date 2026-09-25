@@ -22,7 +22,9 @@
 #define BORG_MARKER_GEOM    0xAE
 #define BORG_MARKER_TEX     0xAF
 #define BORG_MARKER_SHADER  0xB0
-#define BORG_TEX_PKT_LEN    (1 + 1 + BORG_TEX_DIM * 6 + 1)
+/* 0xAF: marker, y, sampler descriptor (4 words LE), BORG_TEX_DIM RGBA8 texels,
+ * checksum (matches borgvk_serial.c BORGVK_TEX_PKT_LEN and the firmware). */
+#define BORG_TEX_PKT_LEN    (1 + 1 + 16 + BORG_TEX_DIM * 4 + 1)
 /* Shader upload: marker, stage, len(2B LE), blob padded to BORG_SHADER_MAX,
  * checksum. Fixed length (matches borgvk_serial.c BORGVK_SHADER_PKT_LEN). */
 #define BORG_SHADER_PKT_LEN (1 + 1 + 2 + BORG_SHADER_MAX + 1)
@@ -76,35 +78,6 @@ put_f32_le(uint8_t *dst, float f)
    dst[3] = (uint8_t)((in.u >> 24) & 0xff);
 }
 
-/* IEEE-754 float32 → float16, round-to-nearest-even (texels only). */
-static uint16_t
-f32_to_f16(float f)
-{
-   union { float f; uint32_t u; } in = { f };
-   uint32_t x = in.u;
-   uint16_t sign = (uint16_t)((x >> 16) & 0x8000u);
-   int32_t exp   = (int32_t)((x >> 23) & 0xff) - 127 + 15;
-   uint32_t mant = x & 0x7fffffu;
-
-   if (((x >> 23) & 0xff) == 0xff)
-      return (uint16_t)(sign | 0x7c00u | (mant ? 0x200u : 0u));
-   if (exp >= 0x1f)
-      return (uint16_t)(sign | 0x7c00u);
-   if (exp <= 0) {
-      if (exp < -10) return sign;
-      mant |= 0x800000u;
-      uint32_t shift = (uint32_t)(14 - exp);
-      uint16_t h = (uint16_t)(mant >> shift);
-      if ((mant >> (shift - 1)) & 1u) h++;
-      return (uint16_t)(sign | h);
-   }
-   uint16_t h = (uint16_t)(sign | (uint16_t)(exp << 10) | (uint16_t)(mant >> 13));
-   if (mant & 0x1000u) {
-      if ((mant & 0x0fffu) || (h & 1u)) h++;
-   }
-   return h;
-}
-
 static void
 borg_serial_write_paced(int fd, const uint8_t *pkt, size_t len)
 {
@@ -156,7 +129,7 @@ borg_serial_send_geom(const float *verts, int nverts,
 }
 
 void
-borg_serial_send_tex_row(int y, const float *rgb)
+borg_serial_send_tex_row(int y, const uint8_t *rgba, const uint32_t sampler[4])
 {
    int fd = borg_serial_open();
    if (fd < 0) return;
@@ -164,11 +137,10 @@ borg_serial_send_tex_row(int y, const float *rgb)
    uint8_t pkt[BORG_TEX_PKT_LEN];
    pkt[0] = BORG_MARKER_TEX;
    pkt[1] = (uint8_t)y;
-   for (int i = 0; i < BORG_TEX_DIM * 3; i++) {
-      uint16_t h = f32_to_f16(rgb[i]);
-      pkt[2 + i*2]     = (uint8_t)(h & 0xff);
-      pkt[2 + i*2 + 1] = (uint8_t)(h >> 8);
-   }
+   for (int w = 0; w < 4; w++)
+      for (int b = 0; b < 4; b++)
+         pkt[2 + w * 4 + b] = (uint8_t)(sampler[w] >> (8 * b));
+   memcpy(&pkt[2 + 16], rgba, BORG_TEX_DIM * 4);
    uint8_t csum = 0;
    for (int i = 1; i < BORG_TEX_PKT_LEN - 1; i++) csum ^= pkt[i];
    pkt[BORG_TEX_PKT_LEN - 1] = csum;
