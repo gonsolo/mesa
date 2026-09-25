@@ -22,7 +22,7 @@ mod regalloc;
 
 use compiler::bindings::*;
 use compiler::nir::AsDef;
-use encode::{emit_blob, encode};
+use encode::{emit_blob, encode, encode_fattr, encode_sout};
 use isel::{borg_isel, resolve_vm};
 use opt::{classify_uniform, dce, fuse_fmadd};
 use regalloc::regalloc;
@@ -75,6 +75,92 @@ pub(crate) struct BorgInstr {
 ///
 /// Loops are deliberately not handled -- see the caller, which refuses them
 /// rather than emitting a body that runs exactly once.
+/// Draw front end only (docs/B1_geometry_front_end.md): decompose a
+/// dynamically-indexed load_ubo's byte offset into `(word-aligned base,
+/// per-vertex word stride)`, recognizing `const + (gl_VertexIndex << shift)`
+/// -- what NIR's own optimizer canonicalizes a UBO array indexed by
+/// gl_VertexIndex to (verified against real cube.vert output, BORGC_DUMP_NIR)
+/// -- through `resolve_vm` (so any mov/vecN wrapping already selected earlier
+/// in the walk is transparent) and `prod`/`consts` (populated by that same
+/// generic ALU selection, not a second walk of raw NIR).
+///
+/// A `load_vulkan_descriptor` result is treated as contributing 0 wherever it
+/// appears in the offset, by construction rather than by proving it from the
+/// IR: Borg has one binding per resource, no descriptor arrays, no
+/// VK_DESCRIPTOR_TYPE_*_DYNAMIC (borgvk_descriptor_set.c never reads
+/// pDynamicOffsets), so it never actually varies. (An earlier version of this
+/// made that true at the NIR level, constant-folding the descriptor to a real
+/// zero before this function ever ran -- which spuriously turned OTHER
+/// multi-component load_consts the folding touched into "shader constants"
+/// this compiler pins to GPRs, exhausting the const-register budget on a
+/// shader that uses none. Recognizing the descriptor here instead has no such
+/// side effect.)
+///
+/// Anything else is reported, not guessed at: the caller drops the shader
+/// rather than emit an address for an offset shape this does not recognize.
+fn decompose_vertex_offset(
+    vec_map: &std::collections::HashMap<u32, Vec<(u32, u8)>>,
+    prod: &std::collections::HashMap<u32, (nir_op, Vec<(u32, u8)>)>,
+    consts: &std::collections::HashMap<u32, u32>,
+    descriptor_defs: &std::collections::HashSet<u32>,
+    vertex_id_def: u32,
+    offset_def: u32,
+) -> Option<(i32, i32)> {
+    // Sum of `d`'s additive terms as (constant, dynamic stride if one leaf was
+    // gl_VertexIndex, optionally shifted). nir_lower_explicit_io's
+    // vec2_index_32bit_offset format adds the descriptor's own dynamic-offset
+    // component into EVERY load_ubo address, not just a dynamically-indexed
+    // one -- range_base=0's own offset in cube.vert (MVP column 0) is exactly
+    // `descriptor.z` alone, no visible "+0" left for nir_opt_algebraic to have
+    // simplified away -- so this has to walk the WHOLE additive tree, not
+    // assume a single flat `const + dynamic` split.
+    fn walk(
+        vec_map: &std::collections::HashMap<u32, Vec<(u32, u8)>>,
+        prod: &std::collections::HashMap<u32, (nir_op, Vec<(u32, u8)>)>,
+        consts: &std::collections::HashMap<u32, u32>,
+        descriptor_defs: &std::collections::HashSet<u32>,
+        vertex_id_def: u32,
+        d: u32,
+    ) -> Option<(i32, Option<i32>)> {
+        if d == vertex_id_def {
+            return Some((0, Some(1)));
+        }
+        if descriptor_defs.contains(&d) {
+            return Some((0, None));
+        }
+        if let Some(&v) = consts.get(&d) {
+            return Some((v as i32, None));
+        }
+        let (op, srcs) = prod.get(&d)?;
+        match *op {
+            nir_op_iadd if srcs.len() == 2 => {
+                let (c0, s0) = walk(vec_map, prod, consts, descriptor_defs, vertex_id_def, srcs[0].0)?;
+                let (c1, s1) = walk(vec_map, prod, consts, descriptor_defs, vertex_id_def, srcs[1].0)?;
+                let stride = match (s0, s1) {
+                    (Some(s), None) | (None, Some(s)) => Some(s),
+                    (None, None) => None,
+                    (Some(_), Some(_)) => return None, // two dynamic terms: not this shape
+                };
+                Some((c0 + c1, stride))
+            }
+            nir_op_ishl if srcs.len() == 2 && srcs[0].0 == vertex_id_def => {
+                Some((0, Some(1i32 << *consts.get(&srcs[1].0)?)))
+            }
+            _ => None,
+        }
+    }
+    let (d, _) = resolve_vm(vec_map, offset_def, 0);
+    let (base, stride) = walk(vec_map, prod, consts, descriptor_defs, vertex_id_def, d)?;
+    if base % 4 != 0 {
+        return None;
+    }
+    let stride = stride.unwrap_or(0);
+    if stride % 4 != 0 {
+        return None;
+    }
+    Some((base / 4, stride / 4))
+}
+
 unsafe fn collect_cf_marks(
     nodes: compiler::nir::ExecListIter<'_, nir_cf_node>,
     marks: &mut std::collections::HashMap<usize, Vec<CfMark>>,
@@ -168,6 +254,12 @@ pub unsafe extern "C" fn borgc_compile_nir(
         return 0;
     }
     let stage = (*nir).info.stage();
+
+    if env::var("BORGC_DUMP_NIR").is_ok() {
+        if let Ok(s) = (*nir).to_string() {
+            eprintln!("{s}");
+        }
+    }
 
     let mut total = 0u32;
     let mut alu_ok = 0u32;
@@ -275,7 +367,22 @@ pub unsafe extern "C" fn borgc_compile_nir(
     // texel lands. Uniforms are no alternative: rast(u0-11) + frag
     // varyings(u12-30) fill 31 of 32. Records (reg, value), value a datapath
     // float or a raw integer.
-    let const_regs: &[u8] = if tex > 0 { &[17, 18, 19] } else { &[17, 18, 19, 23] };
+    // Vertex shaders have none of the fragment-only reservations below (edge
+    // attrs r0-2, TEX r20-23, alpha r24, kill r25) -- only r0-4 (gl_Position
+    // output + the perspective-divide epilogue's scratch, both via `forced`/
+    // regalloc's own reserved set, not this list) and r30/31 (VertexIndex,
+    // never in the general pool). r5-16 is a generous, exclusively
+    // vertex-stage pool, wide enough for a draw-mode vertex shader's LOAD
+    // address constants (MVP base, the shared +1 increment, each
+    // vertex-pulled array's base and stride) -- more of them than a legacy
+    // vertex shader has ever needed, since none pinned any before.
+    let const_regs: &[u8] = if stage == 0 {
+        &[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    } else if tex > 0 {
+        &[17, 18, 19]
+    } else {
+        &[17, 18, 19, 23]
+    };
     let mut const_reg_count: usize = 0;
     let alloc_const_reg = |count: &mut usize| -> u8 {
         assert!(*count < const_regs.len(),
@@ -284,6 +391,22 @@ pub unsafe extern "C" fn borgc_compile_nir(
         let reg = const_regs[*count];
         *count += 1;
         reg
+    };
+    // Pin a compile-time-constant integer to a GPR, reusing the same
+    // register for every later reference to the same value (draw-mode LOAD
+    // word indices and the literal 1 an address sequence increments by).
+    let pin_const_int = |v: i32,
+                          const_int_reg: &mut HashMap<i32, u8>,
+                          const_reg_count: &mut usize,
+                          const_uniforms: &mut Vec<(u8, u32)>|
+     -> u8 {
+        if let Some(&r) = const_int_reg.get(&v) {
+            return r;
+        }
+        let r = alloc_const_reg(const_reg_count);
+        const_uniforms.push((r, v as u32));
+        const_int_reg.insert(v, r);
+        r
     };
     // 1.0 for the inverting comparisons (fge/feq), created on first use. In a
     // fragment shader it is FSTEP(r30): r30 reads the pixel centre (>= 0.5)
@@ -299,6 +422,57 @@ pub unsafe extern "C" fn borgc_compile_nir(
     let mut const_uniforms: Vec<(u8, u32)> = Vec::new();
     // gl_varying_slot: VAR0=texcoord, VAR1=frag_pos (Mesa enum: VAR0 = 32).
     const VARYING_SLOT_VAR0: u32 = 32;
+    const VARYING_SLOT_POS: u32 = 0;
+
+    // --- Draw front end (docs/B1_geometry_front_end.md), gated behind an env
+    // var so the legacy path -- and every shader compiled against it, incl.
+    // the checked-in shader_blobs.h -- is untouched until borgvk moves over
+    // (docs/B1's own "Coexistence" section). Everything below this point that
+    // is draw_mode-specific is a parallel, independent I/O path: it shares
+    // the generic ALU/tex/ddx selection above and nothing of the legacy
+    // MVP/Pos/Attr/load_input scheme, which stays exactly as it was.
+    let draw_mode = env::var("BORGC_DRAW_MODE").is_ok();
+    // Moved up from the legacy I/O pass below so the draw-mode store_output
+    // handling (in the main walk, ahead of that pass) can read it too; same
+    // value, same meaning, in both modes.
+    let frag_alpha = env::var("BORGC_FRAG_ALPHA").is_ok();
+    // gl_VertexIndex's SSA def, once seen -- the index every vertex-pulling
+    // load_ubo (position[], attr[]) is computed from. Always seen before any
+    // load_ubo that depends on it: NIR/SPIR-V evaluates gl_VertexIndex where
+    // the source first reads it, and a dynamic array index has to read it
+    // before it can compute an offset from it.
+    let mut vertex_id_def: Option<u32> = None;
+    // A compile-time-constant integer, pinned to a GPR on first use and
+    // reused for every later reference to the SAME value -- word indices for
+    // draw-mode LOADs (MVP columns, vertex-pulling base/stride) and the
+    // literal 1 a multi-word LOAD sequence increments its address by.
+    // Deliberately separate from push_const_reg: that cache is word indices
+    // into the push-constant staging buffer, a different LS_BASE-relative
+    // address space than the vertex/uniform buffer draw-mode LOADs read.
+    let mut const_int_reg: HashMap<i32, u8> = HashMap::new();
+    // Vertex stage: resolved scalar producer per output location, built
+    // in program order as store_output is seen, so a load_output reading
+    // an earlier store in the SAME shader (`frag_pos = gl_Position.xyz`)
+    // resolves -- SOUT has no matching load, so that is the only way such a
+    // read can ever be answered. Also doubles as the SOUT-index source: a
+    // location's SOUT indices are 4*(location - VARYING_SLOT_VAR0) upward
+    // (VARYING_SLOT_POS's own components are never SOUT, so it does not
+    // compete with this), a fixed mapping the fragment compile computes
+    // identically without any shared state between the two compiles.
+    let mut draw_output_stores: HashMap<u32, Vec<(u32, u8)>> = HashMap::new();
+    let mut draw_pos_out: [Option<(u32, u8)>; 4] = [None; 4];
+    let mut draw_frag_out: [Option<(u32, u8)>; 4] = [None; 4];
+    let mut draw_out_roots: Vec<u32> = Vec::new();
+    // load_vulkan_descriptor results seen, for decompose_vertex_offset.
+    let mut descriptor_defs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    // Running (next expected word address, its address vreg) for consecutive
+    // constant-address loads (the MVP columns: 4 separate load_ubo calls, 16
+    // words back to back). Chaining them through ONE running IADD-by-1
+    // sequence, continued across calls when a later one picks up exactly
+    // where the previous left off, is what keeps this under the ~4-word
+    // constant-register budget -- pinning each of the 16 word indices on its
+    // own does not fit (see git history).
+    let mut const_addr_chain: Option<(i32, u32)> = None;
     if !entry.is_null() {
         // Control-flow markers, collected from the CF tree so this flat block
         // walk can splice them in at the right seams. Must be here rather than
@@ -605,6 +779,39 @@ pub unsafe extern "C" fn borgc_compile_nir(
                         // normal at 128x128. FP32 has no such floor.)
                         let comps: Vec<(u32, u8)> = raw.into_iter().map(|v| (v, 0u8)).collect();
                         vec_map.insert(intr.def.index, comps);
+                    } else if intr.intrinsic == nir_intrinsic_load_input && draw_mode {
+                        // Draw front end: FATTR + the perspective-correct barycentrics
+                        // already in r5-r7 at fragment start (docs/B1_geometry_front_end.md),
+                        // one component at a time -- FATTR loads a component's three
+                        // per-vertex values into rd..rd+2, which the next FATTR overwrites,
+                        // so each component's FMUL/FMADD chain must consume its own before
+                        // requesting the next.
+                        let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
+                        let base_index = 4 * loc.wrapping_sub(VARYING_SLOT_VAR0);
+                        let bary = [5u8, 6, 7].map(|r| {
+                            let v = next_vreg; next_vreg += 1;
+                            ubo.insert(v, Ubo::Fixed(r));
+                            per_pixel_fixed.insert(v);
+                            v
+                        });
+                        let n = intr.def.num_components as usize;
+                        let comps: Vec<(u32, u8)> = (0..n)
+                            .map(|c| {
+                                let fattr_rd = next_vreg; next_vreg += 3; // rd, rd+1, rd+2
+                                prog.push(BorgInstr {
+                                    mnem: "FATTR", dst: fattr_rd, srcs: vec![],
+                                    swz: vec![(base_index + c as u32) as u8],
+                                });
+                                let t0 = next_vreg; next_vreg += 1;
+                                prog.push(BorgInstr { mnem: "FMUL", dst: t0, srcs: vec![bary[0], fattr_rd], swz: vec![0, 0] });
+                                let t1 = next_vreg; next_vreg += 1;
+                                prog.push(BorgInstr { mnem: "FMADD", dst: t1, srcs: vec![bary[1], fattr_rd + 1, t0], swz: vec![0, 0, 0] });
+                                let res = next_vreg; next_vreg += 1;
+                                prog.push(BorgInstr { mnem: "FMADD", dst: res, srcs: vec![bary[2], fattr_rd + 2, t1], swz: vec![0, 0, 0] });
+                                (res, 0u8)
+                            })
+                            .collect();
+                        vec_map.insert(intr.def.index, comps);
                     } else if intr.intrinsic == nir_intrinsic_load_input {
                         // Interpolated varying. Borg has no fixed-function interpolation:
                         // the shader computes it barycentrically. Emit the weights once
@@ -715,7 +922,157 @@ pub unsafe extern "C" fn borgc_compile_nir(
                             );
                         }
                     }
-                    // load_ubo/store_output handled in the I/O pass below.
+                    // load_ubo/store_output handled in the I/O pass below
+                    // (legacy) or inline here (draw mode).
+                    else if intr.intrinsic == nir_intrinsic_load_vulkan_descriptor {
+                        descriptor_defs.insert(intr.def.index);
+                    } else if draw_mode && intr.intrinsic == nir_intrinsic_load_vertex_id {
+                        // r30 = VertexIndex at vertex-shader start
+                        // (docs/B1_geometry_front_end.md); referenced directly,
+                        // like the fragment stage's e0-e2/barycentrics, never
+                        // through vec_map/regalloc (see resolve_op's Ubo::Fixed
+                        // arm -- checked before the alloc fallback for every
+                        // source, whether or not that source has a producing
+                        // BorgInstr of its own, which load_vertex_id does not).
+                        ubo.insert(intr.def.index, Ubo::Fixed(30));
+                        vertex_id_def = Some(intr.def.index);
+                    } else if draw_mode && intr.intrinsic == nir_intrinsic_load_ubo {
+                        let offset_def = intr.get_src(1).as_def().index;
+                        let n = intr.def.num_components as usize;
+                        // vertex_id_def is always Some by now if the shader reads
+                        // gl_VertexIndex anywhere, which every load_ubo here does
+                        // transitively via the descriptor's own address term
+                        // (see decompose_vertex_offset's doc) even when THIS
+                        // particular load's own offset has no vid-scaled term
+                        // (the MVP columns); u32::MAX is a sentinel no real NIR
+                        // index can equal, for the degenerate shader that never
+                        // reads gl_VertexIndex at all.
+                        let (base_words, stride_words) = match decompose_vertex_offset(
+                            &vec_map, &prod, &consts, &descriptor_defs,
+                            vertex_id_def.unwrap_or(u32::MAX), offset_def,
+                        ) {
+                            Some(bs) => bs,
+                            None => {
+                                eprintln!(
+                                    "borgc: WARNING load_ubo offset (def {offset_def}) is \
+                                     not a recognized draw-mode address shape -- dropped"
+                                );
+                                (-1, 0)
+                            }
+                        };
+                        if base_words >= 0 {
+                            // A physical register pinned by pin_const_int is not
+                            // itself a valid `prog` source: `srcs` holds SSA/vreg
+                            // indices, resolved to a physical register via `ubo`
+                            // at encode time, and a small integer like a GPR
+                            // number can easily collide with a real NIR SSA
+                            // index. Every reference below therefore mints its
+                            // OWN fresh vreg (next_vreg, far above any real NIR
+                            // index) wrapping the pinned register, exactly like
+                            // e0-e2/lightDir elsewhere in this file -- never the
+                            // register number directly.
+                            let mut fixed = |reg: u8, next_vreg: &mut u32, ubo: &mut HashMap<u32, Ubo>| -> u32 {
+                                let v = *next_vreg; *next_vreg += 1;
+                                ubo.insert(v, Ubo::Fixed(reg));
+                                v
+                            };
+                            // The running address register this load's words come
+                            // from. A constant address (stride_words == 0, the MVP
+                            // columns) continues an earlier load_ubo's chain when it
+                            // left off exactly here (const_addr_chain), instead of
+                            // pinning every one of the (here) 16 word indices to its
+                            // own constant register -- which does not fit the ~4-word
+                            // budget (see const_addr_chain's doc).
+                            let addr = match (stride_words, const_addr_chain) {
+                                (0, Some((next, a))) if next == base_words => a,
+                                (0, _) => {
+                                    let base_reg = pin_const_int(base_words, &mut const_int_reg, &mut const_reg_count, &mut const_uniforms);
+                                    fixed(base_reg, &mut next_vreg, &mut ubo)
+                                }
+                                _ => {
+                                    let vid = vertex_id_def.unwrap();
+                                    let stride_reg =
+                                        pin_const_int(stride_words, &mut const_int_reg, &mut const_reg_count, &mut const_uniforms);
+                                    let base_reg =
+                                        pin_const_int(base_words, &mut const_int_reg, &mut const_reg_count, &mut const_uniforms);
+                                    let stride_v = fixed(stride_reg, &mut next_vreg, &mut ubo);
+                                    let tmp = next_vreg; next_vreg += 1;
+                                    prog.push(BorgInstr { mnem: "IMUL", dst: tmp, srcs: vec![vid, stride_v], swz: vec![0, 0] });
+                                    let base_v = fixed(base_reg, &mut next_vreg, &mut ubo);
+                                    let a = next_vreg; next_vreg += 1;
+                                    prog.push(BorgInstr { mnem: "IADD", dst: a, srcs: vec![tmp, base_v], swz: vec![0, 0] });
+                                    a
+                                }
+                            };
+                            let one_reg = pin_const_int(1, &mut const_int_reg, &mut const_reg_count, &mut const_uniforms);
+                            let mut cur = addr;
+                            let comps: Vec<(u32, u8)> = (0..n)
+                                .map(|c| {
+                                    let dst = next_vreg; next_vreg += 1;
+                                    prog.push(BorgInstr { mnem: "LOAD", dst, srcs: vec![cur], swz: vec![0] });
+                                    if c + 1 < n {
+                                        let one_v = fixed(one_reg, &mut next_vreg, &mut ubo);
+                                        let next_a = next_vreg; next_vreg += 1;
+                                        prog.push(BorgInstr {
+                                            mnem: "IADD", dst: next_a, srcs: vec![cur, one_v], swz: vec![0, 0],
+                                        });
+                                        cur = next_a;
+                                    }
+                                    (dst, 0u8)
+                                })
+                                .collect();
+                            // Leave the chain one past the last word THIS load
+                            // read, for a later constant-address load_ubo to pick
+                            // up (a stray unconsumed IADD if none does, which dce
+                            // then drops like any other dead instruction).
+                            if stride_words == 0 {
+                                let one_v = fixed(one_reg, &mut next_vreg, &mut ubo);
+                                let past = next_vreg; next_vreg += 1;
+                                prog.push(BorgInstr { mnem: "IADD", dst: past, srcs: vec![cur, one_v], swz: vec![0, 0] });
+                                const_addr_chain = Some((base_words + n as i32, past));
+                            }
+                            vec_map.insert(intr.def.index, comps);
+                        }
+                    } else if draw_mode && intr.intrinsic == nir_intrinsic_store_output {
+                        let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
+                        let src = intr.get_src(0).as_def().index;
+                        let ncomp = intr.get_src(0).num_components() as usize;
+                        let comps: Vec<(u32, u8)> = (0..ncomp).map(|c| resolve_vm(&vec_map, src, c as u8)).collect();
+                        if stage == 0 && loc == VARYING_SLOT_POS {
+                            for (c, &v) in comps.iter().enumerate().take(4) {
+                                draw_pos_out[c] = Some(v);
+                                draw_out_roots.push(v.0);
+                            }
+                        } else if stage == 4 {
+                            let ncomp2 = if frag_alpha { 4 } else { 3 };
+                            for (c, &v) in comps.iter().enumerate().take(ncomp2) {
+                                draw_frag_out[c] = Some(v);
+                                draw_out_roots.push(v.0);
+                            }
+                        } else {
+                            let base_index = 4 * loc.wrapping_sub(VARYING_SLOT_VAR0);
+                            for (c, &(vd, vc)) in comps.iter().enumerate() {
+                                let index = base_index + c as u32;
+                                assert!(index < 256, "borgc: SOUT index {index} does not fit a byte");
+                                prog.push(BorgInstr {
+                                    mnem: "SOUT", dst: NO_DST, srcs: vec![vd], swz: vec![index as u8],
+                                });
+                                draw_out_roots.push(vd);
+                                let _ = vc; // see decompose_vertex_offset's doc: draw-mode producers are scalar (c=0) by construction
+                            }
+                        }
+                        draw_output_stores.insert(loc, comps);
+                    } else if draw_mode && intr.intrinsic == nir_intrinsic_load_output {
+                        let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
+                        match draw_output_stores.get(&loc) {
+                            Some(v) => { vec_map.insert(intr.def.index, v.clone()); }
+                            None => eprintln!(
+                                "borgc: WARNING load_output of location {loc}, never stored earlier \
+                                 in program order -- dropped (draw mode resolves it from the store, \
+                                 not a real load; see decompose_vertex_offset's neighbor)"
+                            ),
+                        }
+                    }
                 } else if let Some(tex) = instr.as_tex() {
                     // Texture sample → TEX rd, u, v, ctl: R, G, B, A to rd..rd+3.
                     // Only a plain implicit-LOD sample of a 2D texture so far;
@@ -805,7 +1162,6 @@ pub unsafe extern "C" fn borgc_compile_nir(
     //   store_output io_semantics.location (low 7 bits of IO_SEMANTICS):
     //     VARYING_SLOT_POS(0) → gl_Position → output regs r0..r3 (sequencer-snooped)
     //     VAR0/VAR1           → texcoord/frag_pos varyings (firmware-handled)
-    const VARYING_SLOT_POS: u32 = 0;
     let mut mvp_loads = 0u32;
     let mut pos_loads = 0u32;
     let mut attr_loads = 0u32;
@@ -829,9 +1185,17 @@ pub unsafe extern "C" fn borgc_compile_nir(
     // being dead code and the shader grows. Off by default keeps today's
     // shaders byte-identical; the driver sets this when it binds a pipeline
     // with blendEnable.
-    let frag_alpha = env::var("BORGC_FRAG_ALPHA").is_ok();
     let mut frag_out: [Option<u32>; 4] = [None; 4];
-    if !entry.is_null() {
+    // Legacy-only: draw mode built pos_out/frag_out/out_roots inline in the
+    // main walk above (draw_pos_out/draw_frag_out/draw_out_roots), in program
+    // order, so a load_output reading back an earlier store_output resolves
+    // -- SOUT has no matching load, so that is the only way such a read can
+    // ever be answered, which rules out a second, later pass like this one.
+    // gl_position deliberately stays None in draw mode: it is what gates the
+    // perspective-divide epilogue below, and draw mode wants the RAW clip
+    // coordinates in r0-r3 (BorgSetupRom does its own homogeneous divide) --
+    // running that epilogue would corrupt them.
+    if !draw_mode && !entry.is_null() {
         for block in (*entry).iter_blocks() {
             for instr in block.iter_instr_list() {
                 if let Some(intr) = instr.as_intrinsic() {
@@ -889,15 +1253,36 @@ pub unsafe extern "C" fn borgc_compile_nir(
             }
         }
     }
-    eprintln!(
-        "borgc: I/O map — MVP {mvp_loads}→u8..u23, position {pos_loads}→u0..u2, \
-         attr {attr_loads}→u6/u7 (DMA, DCE'd); gl_Position=v{}→r0..r3 ({varying_outs} varying out)",
-        gl_position.map_or("?".to_string(), |v| v.to_string())
-    );
+    if draw_mode {
+        for (c, v) in draw_pos_out.iter().enumerate() {
+            pos_out[c] = v.map(|(d, _)| d);
+        }
+        for (c, v) in draw_frag_out.iter().enumerate() {
+            frag_out[c] = v.map(|(d, _)| d);
+        }
+        out_roots.extend(draw_out_roots.iter().copied());
+        eprintln!(
+            "borgc: draw-mode I/O map — {} vertex-pulling/MVP load(s), {} SOUT(s), \
+             gl_Position={}",
+            descriptor_defs.len(), // proxy: one load_ubo per descriptor use
+            draw_output_stores.len(),
+            draw_pos_out[0].is_some(),
+        );
+    } else {
+        eprintln!(
+            "borgc: I/O map — MVP {mvp_loads}→u8..u23, position {pos_loads}→u0..u2, \
+             attr {attr_loads}→u6/u7 (DMA, DCE'd); gl_Position=v{}→r0..r3 ({varying_outs} varying out)",
+            gl_position.map_or("?".to_string(), |v| v.to_string())
+        );
+    }
 
     // Fragment depth output (target boilerplate): cube.frag writes no depth, but
     // the tile-buffer depth test needs r29 = interpolated z. z is staged per-vertex
     // at u28-30 ((v2,v1,v0) → v0=u30); emit w0·u30 + w1·u29 + w2·u28 → r29.
+    // Draw mode: r29 is FragCoord.z already, from the raster ROM
+    // (docs/B1_geometry_front_end.md) -- weights stays None (only the legacy
+    // load_input path populates it), so this never fires there, correctly:
+    // the fragment shader not writing r29 IS draw mode's depth output.
     let mut frag_z: Option<u32> = None;
     if stage == 4 {
         if let Some(w) = weights {
@@ -975,12 +1360,31 @@ pub unsafe extern "C" fn borgc_compile_nir(
     let mut extra_reserved: Vec<u8> = Vec::new();
     let is_vertex = stage == 0; // MESA_SHADER_VERTEX
     if is_vertex {
-        // gl_Position components → r0..r3 (the epilogue reserves r4).
+        // gl_Position components → r0..r3.
         for (c, v) in pos_out.iter().enumerate() {
             if let Some(def) = v {
                 forced.insert(*def, c as u8);
             }
         }
+        // r4: the perspective-divide epilogue's scratch, reserved only when
+        // that epilogue actually runs (gl_position.is_some(), gated the same
+        // way the epilogue itself is emitted below) -- draw mode has none,
+        // wanting r0..r3 left as the RAW clip coordinates BorgSetupRom does
+        // its own homogeneous divide from, so reserving r4 there would only
+        // shrink its register pool for nothing.
+        if gl_position.is_some() {
+            extra_reserved.push(4);
+        }
+        // Only the const_regs prefix actually pinned (const_reg_count) --
+        // reserving the whole 12-register pool regardless of use starved the
+        // general ALU pool for a shader that only pins a few (a 4x4 matmul
+        // alone needs more than 30-17 live registers at once, spilling to
+        // r0/0.0 with no real spill support -- see regalloc's own doc).
+        // Without reserving even that prefix, regalloc's general pool could
+        // hand one of them to an ordinary ALU temporary, clobbering a pinned
+        // LOAD-address constant -- latent since no vertex shader pinned any
+        // before draw mode's LOADs.
+        extra_reserved.extend_from_slice(&const_regs[..const_reg_count]);
     } else {
         // Fragment: colour → r26/27/28; edge-function attrs occupy r0/r1/r2; the
         // TEX result occupies a fixed 4-reg block r20..r23.
@@ -997,8 +1401,13 @@ pub unsafe extern "C" fn borgc_compile_nir(
         if let Some(zr) = frag_z {
             forced.insert(zr, 29); // interpolated depth → r29
         }
-        // r0-2 attrs, r17-19 (+ r23) constants, r20-23 TEX, r26-29 outputs.
-        extra_reserved.extend_from_slice(&[0, 1, 2, 17, 18, 19, 21, 22, 23, 26, 27, 28, 29]);
+        // r0-2 attrs, r4 (unused by a fragment shader, but reserved here too
+        // -- matching every existing fragment compile's register assignment
+        // exactly, rather than only freeing r4 where it is actually unused,
+        // which reassigns everything after the first spot that would have
+        // taken it and changes the checked-in shader_blobs.h), r17-19 (+ r23)
+        // constants, r20-23 TEX, r26-29 outputs.
+        extra_reserved.extend_from_slice(&[0, 1, 2, 4, 17, 18, 19, 21, 22, 23, 26, 27, 28, 29]);
         // r24 (alpha) only when it is actually an output. Reserving it
         // unconditionally would shrink the allocator's pool for every
         // existing shader to no purpose.
@@ -1072,6 +1481,29 @@ pub unsafe extern "C" fn borgc_compile_nir(
                 resolve_op(i.srcs[0], i.swz[0]).0
             };
             if let Some(w) = encode(i.mnem, 0, rs1, 0, 0, 0) {
+                words.push(w);
+            }
+            continue;
+        }
+        // SOUT/FATTR (docs/B1_geometry_front_end.md): the 10-bit index is not
+        // a register operand, so it does not fit encode()'s rd/rs1/rs2/rs3
+        // shape -- swz[0] carries it instead (see the draw-mode load_input
+        // and store_output codegen). u8 covers every index this compiler can
+        // produce today (record_shift=8, five varying components); a future
+        // shader with more needs swz widened, not a silent wraparound, hence
+        // the assert rather than an `as u16` truncation.
+        if i.mnem == "SOUT" {
+            let index = i.swz[0] as u16;
+            let rs2 = resolve_op(i.srcs[0], 0).0;
+            if let Some(w) = encode_sout(rs2, index, 0) {
+                words.push(w);
+            }
+            continue;
+        }
+        if i.mnem == "FATTR" {
+            let index = i.swz[0] as u16;
+            let rd = *alloc.get(&i.dst).unwrap_or(&0);
+            if let Some(w) = encode_fattr(rd, index) {
                 words.push(w);
             }
             continue;

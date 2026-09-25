@@ -83,6 +83,34 @@ pub(crate) fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
     })
 }
 
+/// Encode SOUT (docs/B1_geometry_front_end.md): store `rs2` as the current
+/// invocation's corner's output component `index`. Separate from [`encode`]
+/// for the same reason as [`encode_branch`] -- `index` is packed into the
+/// otherwise-unused rs1/rd fields as `(index >> 5)`/`(index & 31)`, not a
+/// register operand.
+pub(crate) fn encode_sout(rs2: u8, index: u16, funct3: u32) -> Option<u32> {
+    if index >= 1024 {
+        return None; // 10 bits
+    }
+    let t = index as u32;
+    Some(0x8400_0000u32
+        | ((funct3 & 0x7) << 12)
+        | ((rs2 as u32) << 20)
+        | (((t >> 5) & 0x1F) << 15)
+        | ((t & 0x1F) << 7))
+}
+
+/// Encode FATTR (docs/B1_geometry_front_end.md): load component `index`'s
+/// three per-vertex values into `rd..rd+2`. `index` is packed into rs2/rs1
+/// the same way [`encode_sout`]'s is.
+pub(crate) fn encode_fattr(rd: u8, index: u16) -> Option<u32> {
+    if index >= 1024 {
+        return None; // 10 bits
+    }
+    let t = index as u32;
+    Some(0x8800_0000u32 | (((t >> 5) & 0x1F) << 20) | ((t & 0x1F) << 15) | ((rd as u32) << 7))
+}
+
 /// Encode a conditional branch. Separate from [`encode`] because the target is
 /// packed into the otherwise-unused rs2 and rd fields as `(target >> 5)` and
 /// `(target & 31)` -- it is not a register operand, and passing it through the
@@ -128,6 +156,29 @@ mod tests {
         assert_eq!(encode("EXPUSH", 0, 5, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2A << 25);
         assert_eq!(encode("EXELSE", 0, 0, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2C << 25);
         assert_eq!(encode("EXPOP", 0, 0, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2E << 25);
+        assert_eq!(encode_sout(0, 0, 0).unwrap() & 0xFE00_0000, 0x42 << 25);
+        assert_eq!(encode_fattr(0, 0).unwrap() & 0xFE00_0000, 0x44 << 25);
+    }
+
+    #[test]
+    fn sout_and_fattr_split_the_index_over_two_5_bit_fields() {
+        // index = 515 = 0b10000_00011: high 5 bits 0b10000 = 16 in
+        // rs1(SOUT)/rs2(FATTR), low 5 bits 0b00011 = 3 in rd(SOUT)/rs1(FATTR)
+        // -- the same split as a BRZ/BRNZ branch target (see
+        // branch_target_splits_across_rs2_and_rd).
+        let s = encode_sout(9, 515, 2).unwrap();
+        assert_eq!((s >> 20) & 0x1F, 9, "rs2 = the stored value");
+        assert_eq!((s >> 15) & 0x1F, 16, "index high 5 bits");
+        assert_eq!((s >> 7) & 0x1F, 3, "index low 5 bits");
+        assert_eq!((s >> 12) & 0x7, 2, "funct3");
+
+        let f = encode_fattr(20, 515).unwrap();
+        assert_eq!((f >> 20) & 0x1F, 16, "index high 5 bits");
+        assert_eq!((f >> 15) & 0x1F, 3, "index low 5 bits");
+        assert_eq!((f >> 7) & 0x1F, 20, "rd");
+
+        assert!(encode_sout(0, 1024, 0).is_none(), "index out of range must not encode");
+        assert!(encode_fattr(0, 1024).is_none(), "index out of range must not encode");
     }
 
     #[test]
