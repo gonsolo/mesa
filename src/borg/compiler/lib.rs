@@ -346,6 +346,10 @@ pub unsafe extern "C" fn borgc_compile_nir(
     let mut prod: HashMap<u32, (nir_op, Vec<(u32, u8)>)> = HashMap::new();
     // TEX results occupy 4 consecutive regs (rd..rd+3 = R, G, B, A).
     let mut tex_dsts: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    // FATTR results occupy 3 consecutive regs (rd..rd+2 = per-vertex v0/v1/v2),
+    // same hardware shape as TEX's 4-wide result -- see tex_dsts's resolve-time
+    // (alloc[def] + component) handling below, mirrored for this set.
+    let mut fattr_dsts: std::collections::HashSet<u32> = std::collections::HashSet::new();
     // TEX's control word (docs/B2_texture_unit.md), created on first use. Word 0
     // is texture 0, sampler 0, a plain sample with the LOD taken from the quad,
     // no offsets -- all a shader with one sampler2D needs. It is built in the
@@ -376,6 +380,13 @@ pub unsafe extern "C" fn borgc_compile_nir(
     // address constants (MVP base, the shared +1 increment, each
     // vertex-pulled array's base and stride) -- more of them than a legacy
     // vertex shader has ever needed, since none pinned any before.
+    let draw_mode = env::var("BORGC_DRAW_MODE").is_ok();
+    // r0-4 can never hold a shader-pinned constant, draw mode or not: the
+    // draw front end's baked raster ROM (BorgRasterRom, its own "REGISTER
+    // CLOBBER ABI" comment) destroys r0..r4 on EVERY pixel as part of its
+    // edge/depth/barycentric setup, before the fragment shader's own body
+    // even starts -- confirmed on real hardware (a value pinned there read
+    // back as whatever the ROM last wrote, not what the firmware staged).
     let const_regs: &[u8] = if stage == 0 {
         &[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     } else if tex > 0 {
@@ -431,7 +442,8 @@ pub unsafe extern "C" fn borgc_compile_nir(
     // is draw_mode-specific is a parallel, independent I/O path: it shares
     // the generic ALU/tex/ddx selection above and nothing of the legacy
     // MVP/Pos/Attr/load_input scheme, which stays exactly as it was.
-    let draw_mode = env::var("BORGC_DRAW_MODE").is_ok();
+    // (draw_mode itself is declared further up, before const_regs, which
+    // also branches on it.)
     // Moved up from the legacy I/O pass below so the draw-mode store_output
     // handling (in the main walk, ahead of that pass) can read it too; same
     // value, same meaning, in both modes.
@@ -786,6 +798,19 @@ pub unsafe extern "C" fn borgc_compile_nir(
                         // per-vertex values into rd..rd+2, which the next FATTR overwrites,
                         // so each component's FMUL/FMADD chain must consume its own before
                         // requesting the next.
+                        //
+                        // FATTR's rd..rd+2 is a single hardware-implied 3-register write,
+                        // exactly like TEX's rd..rd+3 (tex_dsts above) -- it must be
+                        // referenced the SAME way: one tracked def (fattr_rd) plus a
+                        // component offset resolved at encode time (fattr_dsts, mirroring
+                        // tex_dsts), never as bare `fattr_rd + 1`/`+ 2` integers. Those
+                        // never appear as any instruction's dst, so regalloc never assigns
+                        // them a register -- they silently resolved to r0 (whatever
+                        // instruction happened to be encoding "unresolved operand"),
+                        // discarding two of every three vertices' contribution to the
+                        // interpolation. Caught by a hardware test: dot(c, c) computed
+                        // wildly too large because the barycentric sum silently used
+                        // vertex 0's value for all three terms.
                         let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
                         let base_index = 4 * loc.wrapping_sub(VARYING_SLOT_VAR0);
                         let bary = [5u8, 6, 7].map(|r| {
@@ -797,7 +822,8 @@ pub unsafe extern "C" fn borgc_compile_nir(
                         let n = intr.def.num_components as usize;
                         let comps: Vec<(u32, u8)> = (0..n)
                             .map(|c| {
-                                let fattr_rd = next_vreg; next_vreg += 3; // rd, rd+1, rd+2
+                                let fattr_rd = next_vreg; next_vreg += 1;
+                                fattr_dsts.insert(fattr_rd);
                                 prog.push(BorgInstr {
                                     mnem: "FATTR", dst: fattr_rd, srcs: vec![],
                                     swz: vec![(base_index + c as u32) as u8],
@@ -805,9 +831,9 @@ pub unsafe extern "C" fn borgc_compile_nir(
                                 let t0 = next_vreg; next_vreg += 1;
                                 prog.push(BorgInstr { mnem: "FMUL", dst: t0, srcs: vec![bary[0], fattr_rd], swz: vec![0, 0] });
                                 let t1 = next_vreg; next_vreg += 1;
-                                prog.push(BorgInstr { mnem: "FMADD", dst: t1, srcs: vec![bary[1], fattr_rd + 1, t0], swz: vec![0, 0, 0] });
+                                prog.push(BorgInstr { mnem: "FMADD", dst: t1, srcs: vec![bary[1], fattr_rd, t0], swz: vec![0, 1, 0] });
                                 let res = next_vreg; next_vreg += 1;
-                                prog.push(BorgInstr { mnem: "FMADD", dst: res, srcs: vec![bary[2], fattr_rd + 2, t1], swz: vec![0, 0, 0] });
+                                prog.push(BorgInstr { mnem: "FMADD", dst: res, srcs: vec![bary[2], fattr_rd, t1], swz: vec![0, 2, 0] });
                                 (res, 0u8)
                             })
                             .collect();
@@ -1398,16 +1424,57 @@ pub unsafe extern "C" fn borgc_compile_nir(
         for &t in &tex_dsts {
             forced.insert(t, 20);
         }
+        // FATTR's rd..rd+2 block, pinned to r10 -- matching the hand-written
+        // fragment shaders' own FATTR(rd=10, ...) convention exactly (see
+        // BorgDrawTests.scala's fs), so every load_input call reuses the
+        // same 3-register slot rather than leaving it to the general pool
+        // (which has no idea the hardware write spans 3 registers).
+        for &f in &fattr_dsts {
+            forced.insert(f, 10);
+        }
         if let Some(zr) = frag_z {
             forced.insert(zr, 29); // interpolated depth → r29
         }
-        // r0-2 attrs, r4 (unused by a fragment shader, but reserved here too
-        // -- matching every existing fragment compile's register assignment
-        // exactly, rather than only freeing r4 where it is actually unused,
-        // which reassigns everything after the first spot that would have
-        // taken it and changes the checked-in shader_blobs.h), r17-19 (+ r23)
-        // constants, r20-23 TEX, r26-29 outputs.
-        extra_reserved.extend_from_slice(&[0, 1, 2, 4, 17, 18, 19, 21, 22, 23, 26, 27, 28, 29]);
+        // r4 (unused by a fragment shader, but reserved here too -- matching
+        // every existing fragment compile's register assignment exactly,
+        // rather than only freeing r4 where it is actually unused, which
+        // reassigns everything after the first spot that would have taken
+        // it and changes the checked-in shader_blobs.h), r20-23 TEX (the
+        // full RGBA result block, needed whenever there is a TEX call in
+        // either mode), r26-29 outputs.
+        extra_reserved.extend_from_slice(&[4, 21, 22, 23, 26, 27, 28, 29]);
+        if draw_mode {
+            // r5-7: the draw front end's perspective-correct barycentrics,
+            // read directly out of fixed registers by every load_input call
+            // (docs/B1_geometry_front_end.md) -- must survive the whole
+            // shader, since load_input calls are interspersed with other
+            // computation rather than read once up front. r10-12 (FATTR's
+            // pinned result block, forced above) are already excluded from
+            // the free pool via `forced`; listed again here for clarity,
+            // not because it changes anything.
+            extra_reserved.extend_from_slice(&[5, 6, 7, 10, 11, 12]);
+        } else {
+            // r0-2: edge-function attrs, read only by legacy's own
+            // interpolation-weight computation below -- draw-mode never
+            // touches them, using r5-7 directly instead, so reserving them
+            // there too would shrink its pool for no reason.
+            extra_reserved.extend_from_slice(&[0, 1, 2]);
+        }
+        // const_regs[..const_reg_count]: r17-19(+23), the actually-pinned
+        // prefix of this shader's constant registers (see const_regs
+        // above) -- needed in both modes. KNOWN GAP, not fixed here: a
+        // register-pressured draw-mode VERTEX shader's own general ALU
+        // pool can also reach r17-19 (nothing there knows they are spoken
+        // for by the paired fragment shader) and clobber them before the
+        // fragment shader ever runs -- confirmed on real hardware
+        // (cube.vert's address-chain LOADs did exactly this, silently
+        // zeroing cube.frag's lightDir). r0-4 cannot be the fix either:
+        // the draw front end's raster ROM destroys them on every pixel
+        // (see const_regs's own comment). Needs either lowering cube.vert's
+        // register pressure or a firmware-side re-poke of the fragment's
+        // consts after vertex processing, neither of which is a
+        // register-allocation change.
+        extra_reserved.extend_from_slice(&const_regs[..const_reg_count]);
         // r24 (alpha) only when it is actually an output. Reserving it
         // unconditionally would shrink the allocator's pool for every
         // existing shader to no purpose.
@@ -1456,6 +1523,10 @@ pub unsafe extern "C" fn borgc_compile_nir(
     let resolve_op = |s: u32, c: u8| -> (u8, bool) {
         // TEX result component c → rd+c (R/G/B/A in consecutive regs).
         if tex_dsts.contains(&s) {
+            return (alloc.get(&s).map_or(0, |&r| r + c), false);
+        }
+        // FATTR result component c → rd+c (per-vertex v0/v1/v2 in consecutive regs).
+        if fattr_dsts.contains(&s) {
             return (alloc.get(&s).map_or(0, |&r| r + c), false);
         }
         match ubo.get(&s) {
@@ -1542,6 +1613,10 @@ pub unsafe extern "C" fn borgc_compile_nir(
         for (k, (s, &c)) in i.srcs.iter().zip(i.swz.iter()).take(3).enumerate() {
             if tex_dsts.contains(s) {
                 r[k] = alloc.get(s).map_or(0, |&rr| rr + c); // TEX result rd+c
+                continue;
+            }
+            if fattr_dsts.contains(s) {
+                r[k] = alloc.get(s).map_or(0, |&rr| rr + c); // FATTR result rd+c
                 continue;
             }
             match ubo.get(s) {
