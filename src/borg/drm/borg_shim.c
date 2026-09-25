@@ -107,7 +107,8 @@ send_geometry(const float *ubo)
 /* ---- Texture downsample + send ---------------------------------------- */
 
 static void
-send_texture(const uint8_t *pixels, uint32_t sw, uint32_t sh)
+send_texture(const uint8_t *pixels, uint32_t sw, uint32_t sh,
+             const uint32_t sampler[4])
 {
    if (!sw || !sh) return;
    uint32_t pitch = sw * 4;
@@ -115,9 +116,9 @@ send_texture(const uint8_t *pixels, uint32_t sw, uint32_t sh)
    int sys = (int)(sh / BORG_TEX_DIM); if (sys < 1) sys = 1;
 
    for (int dy = 0; dy < BORG_TEX_DIM; dy++) {
-      float row[BORG_TEX_DIM * 3];
+      uint8_t row[BORG_TEX_DIM * 4];
       for (int dx = 0; dx < BORG_TEX_DIM; dx++) {
-         uint32_t r=0, g=0, b=0, n=0;
+         uint32_t sum[4] = { 0, 0, 0, 0 }, n = 0;
          for (int oy = 0; oy < sys; oy++) {
             uint32_t sy = (uint32_t)dy * sys + oy;
             if (sy >= sh) break;
@@ -125,15 +126,16 @@ send_texture(const uint8_t *pixels, uint32_t sw, uint32_t sh)
                uint32_t sx = (uint32_t)dx * sxs + ox;
                if (sx >= sw) break;
                const uint8_t *p = pixels + sy * pitch + sx * 4;
-               r += p[0]; g += p[1]; b += p[2]; n++;
+               for (int c = 0; c < 4; c++)
+                  sum[c] += p[c];
+               n++;
             }
          }
          if (!n) n = 1;
-         row[dx*3+0] = (float)r / n / 255.0f;
-         row[dx*3+1] = (float)g / n / 255.0f;
-         row[dx*3+2] = (float)b / n / 255.0f;
+         for (int c = 0; c < 4; c++)
+            row[dx * 4 + c] = (uint8_t)((sum[c] + n / 2) / n);
       }
-      borg_serial_send_tex_row(dy, row);
+      borg_serial_send_tex_row(dy, row, sampler);
    }
 }
 
@@ -209,7 +211,7 @@ borg_ioctl_setup(int fd, unsigned long req, void *arg)
    fprintf(stderr, "borg-shim: uploading geometry + texture...\n");
    send_geometry((const float *)ubo_bo->map);
    send_texture((const uint8_t *)tex_bo->map + s->tex_offset,
-                s->tex_width, s->tex_height);
+                s->tex_width, s->tex_height, s->sampler);
    mark_setup_done();
    fprintf(stderr, "borg-shim: upload complete\n");
 

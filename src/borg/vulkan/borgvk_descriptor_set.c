@@ -3,9 +3,10 @@
  * SPDX-License-Identifier: MIT
  *
  * Descriptor set layouts, pools and sets for borgvk. We don't drive shaders
- * with descriptors on the host; a set simply records which buffer is bound at
- * each binding so the submit path can locate the cube's uniform buffer
- * (binding 0) and read the per-frame MVP from its mapped memory.
+ * with descriptors on the host; a set simply records which buffer, image and
+ * sampler is bound at each binding so the submit path can locate the cube's
+ * uniform buffer (binding 0, the per-frame MVP) and its texture and sampler
+ * (binding 1).
  */
 #include "borgvk_private.h"
 
@@ -161,6 +162,16 @@ borgvk_UpdateDescriptorSets(VkDevice _device,
          VK_FROM_HANDLE(borgvk_buffer, buffer, w->pBufferInfo[0].buffer);
          set->buffers[w->dstBinding] = buffer;
          set->offsets[w->dstBinding] = w->pBufferInfo[0].offset;
+      }
+
+      /* Record the sampler (combined image sampler or a plain sampler); the
+       * submit path ships its packed descriptor with the texture. */
+      if (w->pImageInfo &&
+          (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+           w->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER) &&
+          w->pImageInfo[0].sampler != VK_NULL_HANDLE) {
+         VK_FROM_HANDLE(borgvk_sampler, sampler, w->pImageInfo[0].sampler);
+         set->samplers[w->dstBinding] = sampler;
       }
 
       /* Record image bindings (the cube's texture is a combined image sampler

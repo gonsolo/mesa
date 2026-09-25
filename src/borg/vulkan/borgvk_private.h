@@ -17,6 +17,7 @@
 #include "vk_buffer.h"
 #include "vk_buffer_view.h"
 #include "vk_image.h"
+#include "vk_sampler.h"
 #include "vk_command_buffer.h"
 #include "vk_descriptor_set_layout.h"
 
@@ -161,9 +162,10 @@ void borgvk_serial_send_geom(const float *verts, int nverts,
  * is downsampled to this on the host (lossless at the 128x128 render size). */
 #define BORGVK_TEX_DIM 64
 
-/* Ship one texture row (Phase B): `rgb` is BORGVK_TEX_DIM texels of 3 floats
- * (R,G,B in [0,1]); converted to RGB-FP16 and framed as a 0xAF packet. */
-void borgvk_serial_send_tex_row(int y, const float *rgb);
+/* Ship one texture row (Phase B): `rgba` is BORGVK_TEX_DIM RGBA8 texels, framed
+ * as a 0xAF packet together with the four-word sampler descriptor `sampler`
+ * (struct borgvk_sampler::desc), which the firmware installs as sampler 0. */
+void borgvk_serial_send_tex_row(int y, const uint8_t *rgba, const uint32_t sampler[4]);
 
 /* Ship a borgc-compiled Borg-ISA shader blob to the firmware (0xB0 packet):
  * `stage` selects the firmware shader slot (0 = vertex, 1 = fragment), `blob` is
@@ -244,6 +246,14 @@ struct borgvk_buffer_view {
    struct vk_buffer_view vk;
 };
 
+/* A sampler, packed at creation into the texture unit's four-word sampler
+ * descriptor (docs/B2_texture_unit.md in the Borg repository). The firmware
+ * stores the words in its sampler table as they are. */
+struct borgvk_sampler {
+   struct vk_sampler vk;
+   uint32_t desc[4];
+};
+
 VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_device_memory, vk.base, VkDeviceMemory,
                                VK_OBJECT_TYPE_DEVICE_MEMORY)
 VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_buffer, vk.base, VkBuffer,
@@ -252,6 +262,8 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_buffer_view, vk.base, VkBufferView,
                                VK_OBJECT_TYPE_BUFFER_VIEW)
 VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_image, vk.base, VkImage,
                                VK_OBJECT_TYPE_IMAGE)
+VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_sampler, vk.base, VkSampler,
+                               VK_OBJECT_TYPE_SAMPLER)
 
 #define BORGVK_MAX_BINDINGS 8
 
@@ -264,14 +276,16 @@ struct borgvk_descriptor_pool {
    struct vk_object_base base;
 };
 
-/* A descriptor set remembers which buffer/image is bound at each binding, so the
- * submit path can find the cube's uniform buffer (binding 0 → MVP + geometry)
- * and its texture image (binding 1 → combined image sampler). */
+/* A descriptor set remembers which buffer/image/sampler is bound at each
+ * binding, so the submit path can find the cube's uniform buffer (binding 0 →
+ * MVP + geometry) and its texture and sampler (binding 1 → combined image
+ * sampler). */
 struct borgvk_descriptor_set {
    struct vk_object_base base;
    struct borgvk_buffer *buffers[BORGVK_MAX_BINDINGS];
    VkDeviceSize offsets[BORGVK_MAX_BINDINGS];
    struct borgvk_image *images[BORGVK_MAX_BINDINGS];
+   struct borgvk_sampler *samplers[BORGVK_MAX_BINDINGS];
 };
 
 struct borgvk_pipeline {
