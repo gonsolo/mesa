@@ -419,6 +419,51 @@ pub unsafe extern "C" fn borgc_compile_nir(
         const_int_reg.insert(v, r);
         r
     };
+    // A draw-mode VERTEX shader cannot keep constants in GPRs at all: the
+    // draw walker runs the setup ROM (BorgSetupRom: r0-r6 plus temporaries)
+    // in the same register file between one triangle's vertex shader and the
+    // next, so a GPR the firmware staged once per draw survives only the
+    // first triangle. docs/B1_geometry_front_end.md gives the vertex shader
+    // u25-u31 instead -- its DRAW_VS_CONST window, loaded once per draw into
+    // uniforms the setup ROM never touches (it owns u0-u24). Each constant
+    // is a funct3 uniform operand there, which every instruction accepts
+    // once (LOAD's address included), so it costs no extra instructions.
+    const DRAW_VS_CONST_U0: u8 = 25;
+    const DRAW_VS_CONST_WORDS: usize = 7;
+    let mut draw_vs_consts: Vec<(u8, u32)> = Vec::new(); // (u-index, bits)
+    let vs_const_window = draw_mode && stage == 0;
+    // A fresh vreg standing for the compile-time integer `v`: a window
+    // uniform in a draw-mode vertex shader, a pinned GPR otherwise. Same
+    // value, same slot, for every reference (const_int_reg caches either).
+    let const_int_operand = |v: i32,
+                             const_int_reg: &mut HashMap<i32, u8>,
+                             const_reg_count: &mut usize,
+                             const_uniforms: &mut Vec<(u8, u32)>,
+                             draw_vs_consts: &mut Vec<(u8, u32)>,
+                             next_vreg: &mut u32,
+                             ubo: &mut HashMap<u32, Ubo>|
+     -> u32 {
+        let kind = if vs_const_window {
+            let idx = match const_int_reg.get(&v) {
+                Some(&u) => u,
+                None => {
+                    assert!(draw_vs_consts.len() < DRAW_VS_CONST_WORDS,
+                        "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
+                    let u = DRAW_VS_CONST_U0 + draw_vs_consts.len() as u8;
+                    draw_vs_consts.push((u, v as u32));
+                    const_int_reg.insert(v, u);
+                    u
+                }
+            };
+            Ubo::Uniform(idx)
+        } else {
+            Ubo::Fixed(pin_const_int(v, const_int_reg, const_reg_count, const_uniforms))
+        };
+        let r = *next_vreg;
+        *next_vreg += 1;
+        ubo.insert(r, kind);
+        r
+    };
     // 1.0 for the inverting comparisons (fge/feq), created on first use. In a
     // fragment shader it is FSTEP(r30): r30 reads the pixel centre (>= 0.5)
     // during the fragment pass, so the result is exactly 1.0 and costs no
@@ -1012,21 +1057,17 @@ pub unsafe extern "C" fn borgc_compile_nir(
                             }
                         };
                         if base_words >= 0 {
-                            // A physical register pinned by pin_const_int is not
-                            // itself a valid `prog` source: `srcs` holds SSA/vreg
-                            // indices, resolved to a physical register via `ubo`
-                            // at encode time, and a small integer like a GPR
-                            // number can easily collide with a real NIR SSA
-                            // index. Every reference below therefore mints its
-                            // OWN fresh vreg (next_vreg, far above any real NIR
-                            // index) wrapping the pinned register, exactly like
-                            // e0-e2/lightDir elsewhere in this file -- never the
-                            // register number directly.
-                            let mut fixed = |reg: u8, next_vreg: &mut u32, ubo: &mut HashMap<u32, Ubo>| -> u32 {
-                                let v = *next_vreg; *next_vreg += 1;
-                                ubo.insert(v, Ubo::Fixed(reg));
-                                v
-                            };
+                            // Every constant operand is a fresh vreg from
+                            // const_int_operand (a window uniform or a pinned
+                            // GPR), never the register number itself: `srcs`
+                            // holds SSA/vreg indices, and a small GPR number
+                            // could collide with a real NIR SSA index.
+                            macro_rules! cint {
+                                ($v:expr) => {
+                                    const_int_operand($v, &mut const_int_reg, &mut const_reg_count,
+                                        &mut const_uniforms, &mut draw_vs_consts, &mut next_vreg, &mut ubo)
+                                };
+                            }
                             // The running address register this load's words come
                             // from. A constant address (stride_words == 0, the MVP
                             // columns) continues an earlier load_ubo's chain when it
@@ -1036,33 +1077,38 @@ pub unsafe extern "C" fn borgc_compile_nir(
                             // budget (see const_addr_chain's doc).
                             let addr = match (stride_words, const_addr_chain) {
                                 (0, Some((next, a))) if next == base_words => a,
-                                (0, _) => {
-                                    let base_reg = pin_const_int(base_words, &mut const_int_reg, &mut const_reg_count, &mut const_uniforms);
-                                    fixed(base_reg, &mut next_vreg, &mut ubo)
-                                }
+                                // A pinned GPR can seed the chain directly. A
+                                // window uniform cannot: the chain's IADD would
+                                // then read two uniforms (it and the +1), and an
+                                // instruction has only one uniform operand. It
+                                // goes through the strided path below instead,
+                                // with stride 0 (VertexIndex * 0 + base).
+                                (0, _) if !vs_const_window => cint!(base_words),
                                 _ => {
-                                    let vid = vertex_id_def.unwrap();
-                                    let stride_reg =
-                                        pin_const_int(stride_words, &mut const_int_reg, &mut const_reg_count, &mut const_uniforms);
-                                    let base_reg =
-                                        pin_const_int(base_words, &mut const_int_reg, &mut const_reg_count, &mut const_uniforms);
-                                    let stride_v = fixed(stride_reg, &mut next_vreg, &mut ubo);
+                                    let vid = match vertex_id_def {
+                                        Some(v) => v,
+                                        None => {
+                                            let v = next_vreg; next_vreg += 1;
+                                            ubo.insert(v, Ubo::Fixed(30));
+                                            v
+                                        }
+                                    };
+                                    let stride_v = cint!(stride_words);
                                     let tmp = next_vreg; next_vreg += 1;
                                     prog.push(BorgInstr { mnem: "IMUL", dst: tmp, srcs: vec![vid, stride_v], swz: vec![0, 0] });
-                                    let base_v = fixed(base_reg, &mut next_vreg, &mut ubo);
+                                    let base_v = cint!(base_words);
                                     let a = next_vreg; next_vreg += 1;
                                     prog.push(BorgInstr { mnem: "IADD", dst: a, srcs: vec![tmp, base_v], swz: vec![0, 0] });
                                     a
                                 }
                             };
-                            let one_reg = pin_const_int(1, &mut const_int_reg, &mut const_reg_count, &mut const_uniforms);
                             let mut cur = addr;
                             let comps: Vec<(u32, u8)> = (0..n)
                                 .map(|c| {
                                     let dst = next_vreg; next_vreg += 1;
                                     prog.push(BorgInstr { mnem: "LOAD", dst, srcs: vec![cur], swz: vec![0] });
                                     if c + 1 < n {
-                                        let one_v = fixed(one_reg, &mut next_vreg, &mut ubo);
+                                        let one_v = cint!(1);
                                         let next_a = next_vreg; next_vreg += 1;
                                         prog.push(BorgInstr {
                                             mnem: "IADD", dst: next_a, srcs: vec![cur, one_v], swz: vec![0, 0],
@@ -1077,7 +1123,7 @@ pub unsafe extern "C" fn borgc_compile_nir(
                             // up (a stray unconsumed IADD if none does, which dce
                             // then drops like any other dead instruction).
                             if stride_words == 0 {
-                                let one_v = fixed(one_reg, &mut next_vreg, &mut ubo);
+                                let one_v = cint!(1);
                                 let past = next_vreg; next_vreg += 1;
                                 prog.push(BorgInstr { mnem: "IADD", dst: past, srcs: vec![cur, one_v], swz: vec![0, 0] });
                                 const_addr_chain = Some((base_words + n as i32, past));
@@ -1759,6 +1805,13 @@ pub unsafe extern "C" fn borgc_compile_nir(
         let cs: Vec<String> = draw_uniform_consts.iter().map(|(u, v)| format!("u{u}={v:#010x}")).collect();
         eprintln!(
             "borgc: draw-mode uniform consts (write to draw_fs_const_offset + 4*(u-20) before the draw): {}",
+            cs.join(" ")
+        );
+    }
+    if !draw_vs_consts.is_empty() {
+        let cs: Vec<String> = draw_vs_consts.iter().map(|(u, v)| format!("u{u}={v:#010x}")).collect();
+        eprintln!(
+            "borgc: draw-mode vertex window consts (write to draw_vs_const_offset + 4*(u-25) before the draw): {}",
             cs.join(" ")
         );
     }
