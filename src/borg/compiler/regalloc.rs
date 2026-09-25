@@ -41,14 +41,14 @@ pub(crate) fn regalloc(
     let mut defs: Vec<u32> = def_at.keys().copied().collect();
     defs.sort_by_key(|v| def_at[v]);
 
-    // Reserve the pre-colored output regs (gl_Position r0..r3) and r4 (the
-    // perspective-divide scratch) from the general pool — the epilogue owns them.
-    let reserved: std::collections::HashSet<u8> = forced
-        .values()
-        .copied()
-        .chain([4])
-        .chain(extra_reserved.iter().copied())
-        .collect();
+    // Reserve the pre-colored output regs (gl_Position r0..r3) from the
+    // general pool. r4 (the perspective-divide epilogue's scratch) is the
+    // caller's to add to extra_reserved when that epilogue will actually
+    // run (a legacy vertex shader, always; a draw-mode one, never -- see
+    // lib.rs) -- it used to be unconditional here, back when every vertex
+    // shader ran that epilogue.
+    let reserved: std::collections::HashSet<u8> =
+        forced.values().copied().chain(extra_reserved.iter().copied()).collect();
     let mut free: Vec<u8> = (0..NUM_GPRS).rev().filter(|r| !reserved.contains(r)).collect();
     let mut active: Vec<(usize, u8)> = Vec::new(); // (live_end, phys_reg)
     let mut alloc: HashMap<u32, u8> = HashMap::new();
