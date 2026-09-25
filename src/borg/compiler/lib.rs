@@ -1840,8 +1840,26 @@ pub unsafe extern "C" fn borgc_compile_nir(
     } else {
         vec![]
     };
-    let blob = emit_blob(&words, &outputs, &const_uniforms);
-    eprintln!("borgc: .borg blob = {} bytes ({} instr, {} output regs)", blob.len(), words.len(), outputs.len());
+    // Draw mode: the constant window the firmware must fill (u25+ for a
+    // vertex shader, u20+ for a fragment shader) and, for a vertex shader,
+    // how many varying components it SOUTs (the record size).
+    let window: Vec<(u8, u32)> = if is_vertex {
+        draw_vs_consts.clone()
+    } else {
+        draw_uniform_consts.iter().map(|&(u, v)| (u as u8, v)).collect()
+    };
+    let num_varyings: u8 = prog
+        .iter()
+        .filter(|i| i.mnem == "SOUT")
+        .map(|i| i.swz[0] + 1)
+        .max()
+        .unwrap_or(0);
+    let blob = emit_blob(&words, &outputs, &const_uniforms,
+                         if draw_mode { Some((num_varyings, &window[..])) } else { None });
+    eprintln!(
+        "borgc: .borg blob = {} bytes ({} instr, {} output regs, {} window consts, {} varyings)",
+        blob.len(), words.len(), outputs.len(), window.len(), num_varyings
+    );
     if let Ok(prefix) = env::var("BORGC_EMIT_BLOB") {
         let path = format!("{prefix}.{}.borg", if is_vertex { "vert" } else { "frag" });
         match std::fs::write(&path, &blob) {

@@ -5,26 +5,34 @@
 // Vec<BorgInstr> word list into the .borg blob bytes the firmware loads.
 
 /// Serialize a Borg shader to the .borg blob format parsed by spirb_parse()
-/// (software/borg/borg_spirb.c): a 6-byte header (num_instrs, num_uniforms,
-/// num_attributes, num_outputs, num_consts, reserved), then num_instrs LE u32
-/// instruction words, then the uint8 uniform/attribute/output/const register
-/// lists, then num_consts LE u32 constant values. We emit instructions, the
-/// output-register list, and the const-register list. The consts (e.g.
-/// cube.frag's lightDir in r17-19) are written once to the GPRs by the firmware
-/// (spirb_parse → BORG_GPU->gpr[const_regs[i]] = const_vals[i]) and persist
-/// across the autonomous render. Uniforms are read inline via funct3, so there
-/// is no host uniform/attribute interface list.
+/// (software/borg/borg_spirb.c, docs/spirb.md): a 6-byte header
+/// (num_instrs, num_uniforms, num_attributes, num_outputs, num_consts,
+/// extensions), then num_instrs LE u32 instruction words, then the uint8
+/// uniform/attribute/output/const register lists, then num_consts LE u32
+/// constant values. We emit instructions, the output-register list, and the
+/// const-register list. The consts (e.g. a legacy cube.frag's lightDir in
+/// r17-19) are written once to the GPRs by the firmware (spirb_parse →
+/// BORG_GPU->gpr[const_regs[i]] = const_vals[i]) and persist across the
+/// autonomous render. Uniforms are read inline via funct3, so there is no
+/// host uniform/attribute interface list.
 ///
 /// const_vals are LE u32: one datapath float (IEEE binary32 bits) or a raw
 /// integer such as a push-constant word index, written to the GPR unchanged.
-pub(crate) fn emit_blob(words: &[u32], outputs: &[u8], consts: &[(u8, u32)]) -> Vec<u8> {
+///
+/// `draw` is Some for a draw-mode compile (docs/B1_geometry_front_end.md):
+/// extensions bit 0 is set and the draw extension follows const_vals --
+/// num_varyings (the SOUT component count, which sizes the triangle
+/// records), num_window, the constant window's u-indices, then their LE
+/// u32 values. A legacy compile passes None and its bytes are unchanged.
+pub(crate) fn emit_blob(words: &[u32], outputs: &[u8], consts: &[(u8, u32)],
+                        draw: Option<(u8, &[(u8, u32)])>) -> Vec<u8> {
     let mut b = Vec::new();
     b.push(words.len() as u8); // num_instrs
     b.push(0); // num_uniforms (inline funct3 reads, no host interface)
     b.push(0); // num_attributes
     b.push(outputs.len() as u8); // num_outputs
     b.push(consts.len() as u8); // num_consts
-    b.push(0); // reserved
+    b.push(if draw.is_some() { 1 } else { 0 }); // extensions: bit 0 = draw
     for &w in words {
         b.extend_from_slice(&w.to_le_bytes());
     }
@@ -34,6 +42,16 @@ pub(crate) fn emit_blob(words: &[u32], outputs: &[u8], consts: &[(u8, u32)]) -> 
     }
     for &(_, val) in consts {
         b.extend_from_slice(&val.to_le_bytes()); // const_vals[] (LE u32)
+    }
+    if let Some((num_varyings, window)) = draw {
+        b.push(num_varyings);
+        b.push(window.len() as u8); // num_window
+        for &(u, _) in window {
+            b.push(u); // window_regs[]
+        }
+        for &(_, val) in window {
+            b.extend_from_slice(&val.to_le_bytes()); // window_vals[] (LE u32)
+        }
     }
     b
 }
@@ -139,11 +157,25 @@ mod tests {
     fn blob_constants_are_raw_little_endian_words() {
         // A constant reaches its GPR unchanged, so the blob must carry the
         // FP32 bits themselves: 1.0f = 0x3F800000, not an FP16 0x3C00.
-        let b = emit_blob(&[0], &[], &[(17, 1.0f32.to_bits()), (23, 9)]);
+        let b = emit_blob(&[0], &[], &[(17, 1.0f32.to_bits()), (23, 9)], None);
         assert_eq!(&b[..6], &[1, 0, 0, 0, 2, 0], "header: 1 instr, 2 consts");
         assert_eq!(&b[10..12], &[17, 23], "const registers");
         assert_eq!(&b[12..16], &[0x00, 0x00, 0x80, 0x3F], "1.0f as LE binary32");
         assert_eq!(&b[16..20], &[9, 0, 0, 0], "raw integer (a word index)");
+        assert_eq!(b.len(), 20, "a legacy blob ends at const_vals");
+    }
+
+    #[test]
+    fn blob_carries_the_draw_extension() {
+        // A draw-mode vertex shader: 7 varying components and two window
+        // constants (u25 = 4, u26 = 160), after const_vals.
+        let b = emit_blob(&[0], &[], &[], Some((7, &[(25, 4), (26, 160)])));
+        assert_eq!(&b[..6], &[1, 0, 0, 0, 0, 1], "header: extensions bit 0");
+        assert_eq!(&b[10..12], &[7, 2], "7 varyings, 2 window words");
+        assert_eq!(&b[12..14], &[25, 26], "window u-indices");
+        assert_eq!(&b[14..18], &[4, 0, 0, 0], "u25 = 4");
+        assert_eq!(&b[18..22], &[160, 0, 0, 0], "u26 = 160");
+        assert_eq!(b.len(), 22);
     }
 
     #[test]
