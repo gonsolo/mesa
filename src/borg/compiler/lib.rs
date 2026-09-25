@@ -24,7 +24,7 @@ use compiler::bindings::*;
 use compiler::nir::AsDef;
 use encode::{emit_blob, encode, encode_fattr, encode_sout};
 use isel::{borg_isel, resolve_vm};
-use opt::{classify_uniform, dce, fuse_fmadd};
+use opt::{classify_uniform, dce, fuse_fmadd, schedule_for_pressure};
 use regalloc::regalloc;
 use std::env;
 
@@ -431,6 +431,15 @@ pub unsafe extern "C" fn borgc_compile_nir(
     // burning a second scarce const register on an identical value).
     let mut push_const_reg: HashMap<u32, u32> = HashMap::new();
     let mut const_uniforms: Vec<(u8, u32)> = Vec::new();
+    // Draw-mode fragment's own vector constants (lightDir etc): NOT GPR
+    // pins (see the load_const arm below for why), but words in the
+    // existing uniform memory window (draw_fs_const_offset / u20+, the
+    // same mechanism legacy fragment shaders already read inv_area and
+    // per-vertex varyings from). Reported here, not folded into
+    // const_uniforms, since that Vec specifically means "GPR, poked once
+    // via MMIO" -- a different delivery channel from "word in memory."
+    let mut draw_uniform_count: u32 = 0;
+    let mut draw_uniform_consts: Vec<(u32, u32)> = Vec::new(); // (u-index, bits)
     // gl_varying_slot: VAR0=texcoord, VAR1=frag_pos (Mesa enum: VAR0 = 32).
     const VARYING_SLOT_VAR0: u32 = 32;
     const VARYING_SLOT_POS: u32 = 0;
@@ -921,6 +930,22 @@ pub unsafe extern "C" fn borgc_compile_nir(
                                         "push constant field at byte {byte_off} is not word-aligned");
                                     let word_idx = (byte_off / 4) as u32;
                                     let idx_reg = *push_const_reg.entry(word_idx).or_insert_with(|| {
+                                        // KNOWN GAP, not fixed here: unlike the
+                                        // load_const vector-constant case above,
+                                        // this pins a GPR regardless of
+                                        // draw_mode (the const_regs reservation
+                                        // comment has the vertex-collision
+                                        // story) -- this value becomes LOAD's
+                                        // own address operand, which must be an
+                                        // actual register, not something the
+                                        // uniform-memory-window trick can
+                                        // resolve (that trick works for a value
+                                        // OPERAND, not for the register that
+                                        // reads memory in the first place).
+                                        // Not exercised by cube.vert/cube.frag
+                                        // (no push constants), so left as-is
+                                        // rather than risk a change nothing
+                                        // currently tests.
                                         let reg = alloc_const_reg(&mut const_reg_count);
                                         // RAW integer, not a float -- this
                                         // becomes rs1 for LOAD, a word INDEX,
@@ -1151,9 +1176,40 @@ pub unsafe extern "C" fn borgc_compile_nir(
                     let n = lc.def.num_components as usize;
                     if n == 1 {
                         consts.insert(lc.def.index, unsafe { lc.values()[0].u32_ });
+                    } else if draw_mode {
+                        // Vector constant (lightDir): a word in the existing
+                        // uniform memory window (u20+, draw_fs_const_offset)
+                        // rather than a pinned GPR. NOT a legacy-style GPR
+                        // pin: legacy's r17-19(+23) sit inside a register-
+                        // pressured draw-mode VERTEX shader's own reachable
+                        // general-pool range (the const_regs reservation
+                        // comment has the full story -- a hardware-caught
+                        // bug, cube.vert's address-chain LOADs silently
+                        // zeroing cube.frag's lightDir), and r0-4 cannot be
+                        // the fix either (BorgRasterRom's "REGISTER CLOBBER
+                        // ABI" destroys them every pixel). A uniform-memory
+                        // read shares nothing with the GPR file vertex also
+                        // uses, so it cannot collide with vertex at all --
+                        // and unlike a real register spill, it costs no
+                        // extra instructions: the funct3 tag that marks an
+                        // operand as "read from memory" is already free on
+                        // every instruction, not a separate LOAD.
+                        let comps: Vec<(u32, u8)> = (0..n)
+                            .map(|c| {
+                                let idx = 20 + draw_uniform_count;
+                                draw_uniform_count += 1;
+                                let bits = unsafe { lc.values()[c].u32_ };
+                                draw_uniform_consts.push((idx, bits));
+                                let v = next_vreg;
+                                next_vreg += 1;
+                                ubo.insert(v, Ubo::Uniform(idx as u8));
+                                (v, 0u8)
+                            })
+                            .collect();
+                        vec_map.insert(lc.def.index, comps);
                     } else {
-                        // Vector constant (lightDir) → pin components to constant
-                        // GPRs (firmware writes them once via MMIO).
+                        // Legacy: pin components to constant GPRs (firmware
+                        // writes them once via MMIO).
                         let comps: Vec<(u32, u8)> = (0..n)
                             .map(|c| {
                                 let reg = alloc_const_reg(&mut const_reg_count);
@@ -1347,6 +1403,14 @@ pub unsafe extern "C" fn borgc_compile_nir(
 
     dce(&mut prog, &out_roots);
     fuse_fmadd(&mut prog, &out_roots);
+    // draw_mode only: legacy's register assignment is checked into
+    // shader_blobs.h and must stay byte-identical (docs/B1's own
+    // "Coexistence" section) -- reordering its instructions, even to a
+    // provably equivalent schedule, changes the checked-in blob for no
+    // reason legacy needs.
+    if draw_mode {
+        schedule_for_pressure(&mut prog, &out_roots);
+    }
 
     // Uniformity classification (fragment shaders only — vertex/setup shaders
     // have no per-pixel divergence to hoist away from). Roots: any read of a
@@ -1690,6 +1754,13 @@ pub unsafe extern "C" fn borgc_compile_nir(
     if !const_uniforms.is_empty() {
         let cs: Vec<String> = const_uniforms.iter().map(|(r, v)| format!("r{r}={v:#06x}")).collect();
         eprintln!("borgc: const regs (firmware-staged via MMIO): {}", cs.join(" "));
+    }
+    if !draw_uniform_consts.is_empty() {
+        let cs: Vec<String> = draw_uniform_consts.iter().map(|(u, v)| format!("u{u}={v:#010x}")).collect();
+        eprintln!(
+            "borgc: draw-mode uniform consts (write to draw_fs_const_offset + 4*(u-20) before the draw): {}",
+            cs.join(" ")
+        );
     }
     if env::var("BORGC_DUMP_ISA").is_ok() {
         let hex: Vec<String> = words.iter().map(|w| format!("{w:#010x}")).collect();
