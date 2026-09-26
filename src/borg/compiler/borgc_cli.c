@@ -42,7 +42,7 @@ usage(const char *argv0)
       "  -o  write the raw .borg blob here\n"
       "  -H  write a C header declaring <name>[] and <name>_len\n"
       "\n"
-      "Environment: BORGC_DUMP_NIR, BORGC_DUMP_ISA, BORGC_FRAG_ALPHA\n",
+      "Environment: BORGC_DUMP_NIR, BORGC_DUMP_ISA, BORGC_FRAG_ALPHA, BORGC_LEGACY\n",
       argv0);
 }
 

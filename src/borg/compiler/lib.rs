@@ -380,7 +380,10 @@ pub unsafe extern "C" fn borgc_compile_nir(
     // address constants (MVP base, the shared +1 increment, each
     // vertex-pulled array's base and stride) -- more of them than a legacy
     // vertex shader has ever needed, since none pinned any before.
-    let draw_mode = env::var("BORGC_DRAW_MODE").is_ok();
+    // Draw mode (DRAW_CFG mode 1, docs/B1_geometry_front_end.md) is the only
+    // geometry path the hardware keeps. BORGC_LEGACY=1 still emits the old
+    // per-triangle-descriptor ABI until that code is deleted here too.
+    let draw_mode = env::var("BORGC_LEGACY").is_err();
     // r0-4 can never hold a shader-pinned constant, draw mode or not: the
     // draw front end's baked raster ROM (BorgRasterRom, its own "REGISTER
     // CLOBBER ABI" comment) destroys r0..r4 on EVERY pixel as part of its

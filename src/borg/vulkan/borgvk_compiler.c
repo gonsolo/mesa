@@ -33,35 +33,10 @@ borgvk_compiler_selftest(void)
 }
 
 /* Turn one pipeline shader stage's SPIR-V into NIR and hand it to borgc. */
-/* docs/B1_geometry_front_end.md's draw front end (DRAW_CFG mode 1): borgc's
- * own draw-mode codegen is env-gated (BORGC_DRAW_MODE, see lib.rs), which
- * the offline `borgc-cli` sets directly. borgvk relays its own opt-in
- * (BORGVK_DRAW_MODE, set by whoever launches it -- e.g. the firmware side's
- * matching BORG_DRAW_MODE_CUBE build flag) into that same process-wide env
- * var, once, before any shader compiles: propagating it here rather than
- * widening borgc_compile_nir's signature keeps the offline CLI and the
- * driver's one FFI entry point in lockstep, matching how BORGC_DUMP_ISA/
- * BORGC_DUMP_NIR/BORGC_FRAG_ALPHA already work for both callers. Off by
- * default -- this is still the one hand-verified cube.vert/cube.frag pair,
- * not a generic draw-mode compile path (see docs/B1_geometry_front_end.md's
- * Coexistence section and this session's firmware wiring). */
-static void
-borgvk_maybe_enable_draw_mode(void)
-{
-   static bool checked = false;
-   if (checked)
-      return;
-   checked = true;
-   if (getenv("BORGVK_DRAW_MODE"))
-      setenv("BORGC_DRAW_MODE", "1", 1);
-}
-
 void
 borgvk_compile_stage(struct borgvk_device *device,
                      const VkPipelineShaderStageCreateInfo *stage_info)
 {
-   borgvk_maybe_enable_draw_mode();
-
    struct nir_shader *nir = NULL;
    VkResult result =
       vk_pipeline_shader_stage_to_nir(&device->vk, 0, stage_info,
