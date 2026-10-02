@@ -1788,8 +1788,12 @@ pub unsafe extern "C" fn borgc_compile_nir(
         words.push(encode("FMUL", 1, 1, 4, 0, 0).unwrap()); // screen_y
         words.push(encode("FMUL", 2, 2, 4, 0, 0).unwrap()); // ndc_z
         words.push(0x0000_0000); // HALT
-    } else if !is_vertex {
-        words.push(0x0000_0000); // fragment: HALT terminates (no epilogue)
+    } else {
+        // Fragment, or a draw-mode vertex shader (its varyings leave through
+        // SOUT, no fixed-function epilogue): HALT terminates. Without it the
+        // core keeps fetching past the program, which only appears to work in
+        // simulation because memory after the blob reads as zero (= HALT).
+        words.push(0x0000_0000);
     }
     eprintln!(
         "borgc: encoded {} word(s) = {} uniform pre-load(s) + {} op(s) + {} epilogue \
