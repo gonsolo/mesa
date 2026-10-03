@@ -24,7 +24,9 @@
 #include <string.h>
 #include <xf86drm.h>
 
-#define BORGVK_API_VERSION VK_API_VERSION_1_3
+/* The Vulkan version borgvk claims. It implements the Vulkan 1.0 feature set (the target of
+ * the conformance work), and says so: reporting a higher version would promise 1.1+ behaviour. */
+#define BORGVK_API_VERSION VK_API_VERSION_1_0
 
 VKAPI_ATTR VkResult VKAPI_CALL
 borgvk_EnumerateInstanceVersion(uint32_t *pApiVersion)
@@ -239,12 +241,23 @@ is_etc2_format(VkFormat format)
            format <= VK_FORMAT_EAC_R11G11_SNORM_BLOCK);
 }
 
+/* Sample counts the device supports per use; VkPhysicalDeviceLimits and the per-format
+ * sampleCounts both derive from these, so the two cannot disagree. */
+#define BORGVK_SC_MSAA      (VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT)
+#define BORGVK_SC_INTEGER   VK_SAMPLE_COUNT_1_BIT
+#define BORGVK_SC_STORAGE   VK_SAMPLE_COUNT_1_BIT
+
 /* Compute optimal-tiling format features for a given VkFormat. */
 static VkFormatFeatureFlags
 borgvk_optimal_features(VkFormat format)
 {
    if (format == VK_FORMAT_UNDEFINED || is_ycbcr_format(format) ||
        is_compressed_format(format))
+      return 0;
+
+   /* 64-bit-per-channel formats (R64*): the texture unit and the tile buffer top out at
+    * 32 bits per channel, and Vulkan 1.0 does not require them. */
+   if (format >= VK_FORMAT_R64_UINT && format <= VK_FORMAT_R64G64B64A64_SFLOAT)
       return 0;
 
    /* ETC2/EAC: mandatory compressed texture formats. Sampling doesn't need
@@ -289,13 +302,13 @@ borgvk_optimal_features(VkFormat format)
       VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT |
       VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
       VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
-   /* Integer formats can't be linearly filtered -- interpolating between
+   /* Integer and scaled formats (the sampler has no scaled-integer formats) can't be linearly filtered -- interpolating between
     * integer texel values is meaningless, and no real hardware advertises
     * this bit for them. Without this exclusion CTS legitimately runs
     * VK_FILTER_LINEAR blits/samples against e.g. R32_UINT (since we claimed
     * to support it) and gets "incorrect" results compared to its NEAREST-only
     * reference for integer formats. */
-   if (!vk_format_is_int(format))
+   if (!vk_format_is_int(format) && !vk_format_is_scaled(format))
       f |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
    if (format == VK_FORMAT_R32_UINT || format == VK_FORMAT_R32_SINT)
       f |= VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT;
@@ -441,28 +454,35 @@ borgvk_GetPhysicalDeviceImageFormatProperties2(
                   VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
-   /* Mirror the CTS sampleCounts check (vktApiFeatureInfo.cpp ~line 5035):
-    * 4x is valid iff: 2D optimal + !CUBE_COMPATIBLE + format has COLOR or
-    * DEPTH_STENCIL attachment feature + format is not integer/scaled.
-    * Everything else (CUBE_COMPATIBLE, no attachment feature, linear, 1D/3D,
-    * integer/scaled) must return exactly VK_SAMPLE_COUNT_1_BIT. */
+   /* Sample counts follow the device limits for the way the image will be used (the
+    * CTS requires exactly that intersection): storage, sampled (depth / stencil / integer
+    * / other colour) and attachment usage each narrow the set. Only 2D optimal images
+    * that are not cube-compatible and have an attachment feature can be multisampled. */
    const bool cube_compatible =
       (pImageFormatInfo->flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) != 0;
    const bool has_attach_feature =
       (feats & (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
                 VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) != 0;
-   /* Integer/scaled check only applies to COLOR formats.  Depth/stencil formats
-    * (e.g. S8_UINT) use sampledImageStencilSampleCounts which includes 4x. */
-   const bool is_color_int_or_scaled =
-      !is_depth_stencil_format(pImageFormatInfo->format) &&
-      (vk_format_is_int(pImageFormatInfo->format) ||
-       vk_format_is_scaled(pImageFormatInfo->format));
-   const VkSampleCountFlags samples =
-      (pImageFormatInfo->type == VK_IMAGE_TYPE_2D &&
+   VkSampleCountFlags samples = VK_SAMPLE_COUNT_1_BIT;
+   if (pImageFormatInfo->type == VK_IMAGE_TYPE_2D &&
        pImageFormatInfo->tiling == VK_IMAGE_TILING_OPTIMAL &&
-       !cube_compatible && has_attach_feature && !is_color_int_or_scaled)
-      ? (VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT)
-      : VK_SAMPLE_COUNT_1_BIT;
+       !cube_compatible && has_attach_feature) {
+      const VkFormat fmt = pImageFormatInfo->format;
+      const bool is_ds = is_depth_stencil_format(fmt);
+      VkSampleCountFlags sc = ~(VkSampleCountFlags)0;
+      if (usage & VK_IMAGE_USAGE_STORAGE_BIT)
+         sc &= BORGVK_SC_STORAGE;
+      if (usage & VK_IMAGE_USAGE_SAMPLED_BIT)
+         sc &= is_ds ? BORGVK_SC_MSAA
+                     : (vk_format_is_int(fmt) ? BORGVK_SC_INTEGER : BORGVK_SC_MSAA);
+      if (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
+         sc &= BORGVK_SC_MSAA;
+      if (usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
+         sc &= BORGVK_SC_MSAA;
+      /* No usage bit narrows it: only single-sampled is required. */
+      samples = (sc == ~(VkSampleCountFlags)0) ? VK_SAMPLE_COUNT_1_BIT
+                                               : (sc | VK_SAMPLE_COUNT_1_BIT);
+   }
 
    const uint32_t max2d = 16384;
    pImageFormatProperties->imageFormatProperties = (VkImageFormatProperties){
@@ -603,22 +623,15 @@ borgvk_get_properties(struct vk_properties *p)
       .uniformTexelBufferOffsetSingleTexelAlignment  = VK_TRUE,
 
       /* Spec requires at least 1x and 4x sample support (bitmask >= 5). */
-      .framebufferColorSampleCounts =
-         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
-      .framebufferDepthSampleCounts =
-         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
-      .framebufferStencilSampleCounts =
-         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
-      .framebufferNoAttachmentsSampleCounts =
-         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
-      .sampledImageColorSampleCounts =
-         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
-      .sampledImageIntegerSampleCounts = VK_SAMPLE_COUNT_1_BIT,
-      .sampledImageDepthSampleCounts =
-         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
-      .sampledImageStencilSampleCounts =
-         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
-      .storageImageSampleCounts = VK_SAMPLE_COUNT_1_BIT,
+      .framebufferColorSampleCounts = BORGVK_SC_MSAA,
+      .framebufferDepthSampleCounts = BORGVK_SC_MSAA,
+      .framebufferStencilSampleCounts = BORGVK_SC_MSAA,
+      .framebufferNoAttachmentsSampleCounts = BORGVK_SC_MSAA,
+      .sampledImageColorSampleCounts = BORGVK_SC_MSAA,
+      .sampledImageIntegerSampleCounts = BORGVK_SC_INTEGER,
+      .sampledImageDepthSampleCounts = BORGVK_SC_MSAA,
+      .sampledImageStencilSampleCounts = BORGVK_SC_MSAA,
+      .storageImageSampleCounts = BORGVK_SC_STORAGE,
       .maxSampleMaskWords       = 1,
       .discreteQueuePriorities  = 2,
 
@@ -786,6 +799,14 @@ borgvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
    VkResult result;
 
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO);
+
+   /* A Vulkan 1.0 implementation rejects a requested apiVersion it does not support. */
+   if (pCreateInfo->pApplicationInfo && pCreateInfo->pApplicationInfo->apiVersion != 0) {
+      const uint32_t req = pCreateInfo->pApplicationInfo->apiVersion;
+      if (VK_API_VERSION_MAJOR(req) != VK_API_VERSION_MAJOR(BORGVK_API_VERSION) ||
+          VK_API_VERSION_MINOR(req) > VK_API_VERSION_MINOR(BORGVK_API_VERSION))
+         return vk_error(NULL, VK_ERROR_INCOMPATIBLE_DRIVER);
+   }
 
    if (pAllocator == NULL)
       pAllocator = vk_default_allocator();
