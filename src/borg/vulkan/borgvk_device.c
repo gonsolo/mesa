@@ -851,6 +851,12 @@ borgvk_DestroyInstance(VkInstance _instance,
    vk_free(&instance->vk.alloc, instance);
 }
 
+/* Body for vkCmd* entries borgvk does not implement; see the cmd_dispatch fill-in. */
+static void
+borgvk_noop_cmd(void)
+{
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
                     const VkDeviceCreateInfo *pCreateInfo,
@@ -880,6 +886,30 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
 #endif
    vk_device_dispatch_table_from_entrypoints(&dispatch_table,
                                              &vk_cmd_enqueue_device_entrypoints, false);
+   /* Every vkCmd* the application calls only RECORDS (the runtime's vk_cmd_enqueue_*). The real
+    * borgvk_Cmd* implementations are in cmd_dispatch below and run when the command buffer is
+    * submitted (borgvk_queue_submit -> vk_cmd_queue_execute), in submission order, so a copy
+    * waits for its semaphores and a command buffer can be submitted again. The commands borgvk
+    * implements itself are listed here: borgvk_device_entrypoints put them in this table first
+    * and the line above only fills what was empty. */
+#define BORGVK_RECORD_CMD(name) dispatch_table.name = vk_cmd_enqueue_##name
+   BORGVK_RECORD_CMD(CmdPushConstants);
+   /* The legacy vkCmd{Begin,Next,End}RenderPass* stay borgvk's translators (they call
+    * vk_common_*, which turns them into vkCmdBeginRendering / vkCmdEndRendering through this
+    * table); the dynamic-rendering commands they produce are what gets recorded and replayed. */
+   BORGVK_RECORD_CMD(CmdBeginRendering);   BORGVK_RECORD_CMD(CmdEndRendering);
+   BORGVK_RECORD_CMD(CmdClearAttachments);
+   BORGVK_RECORD_CMD(CmdClearColorImage);  BORGVK_RECORD_CMD(CmdClearDepthStencilImage);
+   BORGVK_RECORD_CMD(CmdBlitImage);        BORGVK_RECORD_CMD(CmdBlitImage2);
+   BORGVK_RECORD_CMD(CmdCopyBuffer);       BORGVK_RECORD_CMD(CmdCopyBuffer2);
+   BORGVK_RECORD_CMD(CmdCopyBufferToImage); BORGVK_RECORD_CMD(CmdCopyBufferToImage2);
+   BORGVK_RECORD_CMD(CmdCopyImage);        BORGVK_RECORD_CMD(CmdCopyImage2);
+   BORGVK_RECORD_CMD(CmdCopyImageToBuffer); BORGVK_RECORD_CMD(CmdCopyImageToBuffer2);
+   BORGVK_RECORD_CMD(CmdResolveImage);     BORGVK_RECORD_CMD(CmdResolveImage2);
+   BORGVK_RECORD_CMD(CmdFillBuffer);       BORGVK_RECORD_CMD(CmdUpdateBuffer);
+   BORGVK_RECORD_CMD(CmdSetEvent);         BORGVK_RECORD_CMD(CmdResetEvent);
+   BORGVK_RECORD_CMD(CmdSetEvent2);        BORGVK_RECORD_CMD(CmdResetEvent2);
+#undef BORGVK_RECORD_CMD
    /* Finally, fill anything STILL null from the runtime's generic
     * implementations.  vk_cmd_enqueue_device_entrypoints above only covers
     * vkCmd* functions, so before this every non-Cmd core entrypoint that
@@ -902,8 +932,22 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
    /* Dispatch used to replay a recorded queue (secondary cmd buffers). */
    vk_device_dispatch_table_from_entrypoints(&device->cmd_dispatch,
                                              &borgvk_device_entrypoints, true);
-   vk_device_dispatch_table_from_entrypoints(&device->cmd_dispatch,
-                                             &vk_common_device_entrypoints, false);
+   /* Not vk_common_device_entrypoints wholesale: its vkCmd* wrappers (vk_common_CmdSetEvent,
+    * vk_common_CmdPipelineBarrier, ...) call through the MAIN table, which now records, so a
+    * replay would append to the very queue it is walking. ExecuteCommands is the one wanted:
+    * it replays the secondaries through command_dispatch_table, i.e. this table. */
+   if (!device->cmd_dispatch.CmdExecuteCommands)
+      device->cmd_dispatch.CmdExecuteCommands = vk_common_CmdExecuteCommands;
+   /* vk_cmd_queue_execute calls every recorded command through this table without a NULL check:
+    * give the commands borgvk does not act on (state setting, draws on the way to the generic
+    * path, ...) an empty body. A command's arguments sit in registers and the callee ignores
+    * them, so one function serves every signature. */
+   {
+      void **slots = (void **)&device->cmd_dispatch;
+      for (size_t i = 0; i < sizeof(device->cmd_dispatch) / sizeof(void *); i++)
+         if (!slots[i])
+            slots[i] = (void *)borgvk_noop_cmd;
+   }
 
    result = vk_device_init(&device->vk, &physical_device->vk,
                            &dispatch_table, pCreateInfo, pAllocator);
@@ -911,6 +955,10 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
       vk_free2(&physical_device->vk.instance->alloc, pAllocator, device);
       return vk_error(physical_device, result);
    }
+
+   /* Queue work runs on a thread when it has to (a submit waiting on work that has not been
+    * submitted yet), as in lavapipe and v3dv; the sync type has real state and a move(). */
+   vk_device_enable_threaded_submit(&device->vk);
 
    device->vk.command_dispatch_table = &device->cmd_dispatch;
    device->vk.command_buffer_ops = &borgvk_cmd_buffer_ops;

@@ -352,4 +352,8 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_pipeline, base, VkPipeline,
 }
 #endif
 
+
+/* borgvk_sync.c: set or reset a VkEvent from the host (queue replay of vkCmdSetEvent / vkCmdResetEvent). */
+void borgvk_event_set_status(VkEvent event, bool set);
+
 #endif /* BORGVK_PRIVATE_H */
