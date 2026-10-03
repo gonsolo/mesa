@@ -119,6 +119,13 @@ borg_lower_nir_for_borgc(struct nir_shader *nir)
       NIR_PASS(progress, nir, nir_opt_peephole_select, &peephole_opts);
    } while (progress);
 
+   /* Compute: booleans as 32-bit integers and phis as registers (the backend
+    * has no select; both arms of an `if` store into the phi's register). */
+   if (nir->info.stage == MESA_SHADER_COMPUTE) {
+      NIR_PASS(_, nir, nir_lower_bool_to_int32);
+      NIR_PASS(_, nir, nir_convert_from_ssa, true, false);
+   }
+
    if (getenv("BORGC_DUMP_NIR"))
       nir_print_shader(nir, stderr);
 }

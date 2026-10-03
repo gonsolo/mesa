@@ -62,11 +62,9 @@ struct Em {
     regs: Vec<(u8, u32)>,
     cmap: HashMap<u32, u8>,
     vals: HashMap<(u32, u8), V>,
-    /// Phi inputs: both arms of an `if` write the phi's register (value -> register).
-    alias: HashMap<(u32, u8), u32>,
+    /// NIR registers (decl_reg): one virtual register per component.
+    nregs: HashMap<u32, Vec<u32>>,
     err: Option<String>,
-    /// The (def, component) being produced, so a result can land in its phi's register.
-    key: (u32, u8),
 }
 
 impl Em {
@@ -116,16 +114,9 @@ impl Em {
     fn raw(&mut self, word: u32) {
         self.prog.push(CI { mnem: "RAW", dst: NO_DST, srcs: [word, 0], f3: 0 });
     }
-    fn dst(&mut self, key: (u32, u8)) -> u32 {
-        match self.alias.get(&key) {
-            Some(&r) => r,
-            None => self.fresh(),
-        }
-    }
     fn bin(&mut self, mnem: &'static str, a: V, b: V) -> V {
-        let key = self.key;
         let (ra, rb) = (self.reg(a), self.reg(b));
-        let rd = self.dst(key);
+        let rd = self.fresh();
         self.op(mnem, rd, ra, rb, 0);
         V::R(rd)
     }
@@ -178,27 +169,13 @@ impl Em {
 }
 
 pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
-    let mut em = Em { words: vec![], prog: vec![], next: FIRST_VREG, next_const: 29, regs: vec![], cmap: HashMap::new(), vals: HashMap::new(), alias: HashMap::new(), err: None, key: (u32::MAX, 0) };
+    let mut em = Em { words: vec![], prog: vec![], next: FIRST_VREG, next_const: 29, regs: vec![], cmap: HashMap::new(), vals: HashMap::new(), nregs: HashMap::new(), err: None };
     let entry = nir_shader_get_entrypoint(nir);
     let mut marks: HashMap<usize, Vec<CfMark>> = HashMap::new();
     let mut unsupported: Vec<&'static str> = Vec::new();
     collect_cf_marks((*entry).iter_body(), &mut marks, &mut unsupported);
     if !unsupported.is_empty() {
         return Err(format!("unsupported control flow: {}", unsupported.join(", ")));
-    }
-    // Phis: every input is produced straight into one register per component.
-    for block in (*entry).iter_blocks() {
-        for instr in block.iter_instr_list() {
-            if let Some(phi) = instr.as_phi() {
-                for k in 0..phi.def.num_components {
-                    let r = em.fresh();
-                    for s in phi.iter_srcs() {
-                        em.alias.insert((s.src.as_def().index, k), r);
-                    }
-                    em.alias.insert((phi.def.index, k), r);
-                }
-            }
-        }
     }
     for block in (*entry).iter_blocks() {
         for m in marks.get(&(block as *const nir_block as usize)).map(|v| v.as_slice()).unwrap_or(&[]) {
@@ -213,13 +190,6 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
             }
         }
         for instr in block.iter_instr_list() {
-            if let Some(phi) = instr.as_phi() {
-                for k in 0..phi.def.num_components {
-                    let r = em.alias[&(phi.def.index, k)];
-                    em.vals.insert((phi.def.index, k), V::R(r));
-                }
-                continue;
-            }
             if let Some(lc) = instr.as_load_const() {
                 for c in 0..lc.def.num_components as usize {
                     em.vals.insert((lc.def.index, c as u8), V::C(lc.values()[c].u32_));
@@ -229,7 +199,6 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                 let nsrc = alu.info().num_inputs as usize;
                 let op = alu.op;
                 for k in 0..n {
-                    em.key = (alu.def.index, k as u8);
                     let s: Vec<V> = (0..nsrc)
                         .map(|i| {
                             let a = alu.get_src(i);
@@ -255,7 +224,15 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                             (V::C(x), V::C(y)) => V::C(x >> (y & 31)),
                             _ => em.bin("ISRL", s[0], s[1]),
                         },
-                        nir_op_ieq => em.bin("ISEQ", s[0], s[1]),
+                        // Booleans are 32-bit: true is all ones. The compares yield 0/1, so negate.
+                        nir_op_ieq32 => { let t = em.bin("ISEQ", s[0], s[1]); em.bin("ISUB", V::C(0), t) }
+                        nir_op_ine32 => { let t = em.bin("ISEQ", s[0], s[1]); em.bin("IADD", t, V::C(u32::MAX)) }
+                        nir_op_ilt32 => { let t = em.bin("ISLT", s[0], s[1]); em.bin("ISUB", V::C(0), t) }
+                        nir_op_ige32 => { let t = em.bin("ISLT", s[0], s[1]); em.bin("IADD", t, V::C(u32::MAX)) }
+                        nir_op_ult32 => { let t = em.bin("ISLTU", s[0], s[1]); em.bin("ISUB", V::C(0), t) }
+                        nir_op_uge32 => { let t = em.bin("ISLTU", s[0], s[1]); em.bin("IADD", t, V::C(u32::MAX)) }
+                        nir_op_b2i32 => em.bin("ISUB", V::C(0), s[0]),
+                        nir_op_inot => em.bin("IXOR", s[0], V::C(u32::MAX)),
                         nir_op_iand => em.bin("IAND", s[0], s[1]),
                         nir_op_ior => em.bin("IOR", s[0], s[1]),
                         _ => {
@@ -268,6 +245,32 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
             } else if let Some(i) = instr.as_intrinsic() {
                 let d = i.def.index;
                 match i.intrinsic {
+                    nir_intrinsic_decl_reg => {
+                        let n = i.get_const_index(NIR_INTRINSIC_NUM_COMPONENTS);
+                        let v: Vec<u32> = (0..n).map(|_| em.fresh()).collect();
+                        em.nregs.insert(d, v);
+                    }
+                    nir_intrinsic_load_reg => {
+                        let h = i.get_src(0).as_def().index;
+                        for c in 0..i.def.num_components as usize {
+                            let r = em.nregs.get(&h).map(|v| v[c]).unwrap_or(PHYS + 1);
+                            em.vals.insert((d, c as u8), V::R(r));
+                        }
+                    }
+                    nir_intrinsic_store_reg => {
+                        let h = i.get_src(1).as_def().index;
+                        let zero = em.creg(0);
+                        for c in 0..i.get_src(0).num_components() as usize {
+                            if i.write_mask() & (1 << c) == 0 {
+                                continue;
+                            }
+                            let v = em.src(i.get_src(0), c as u8);
+                            let rs = em.reg(v);
+                            let r = em.nregs.get(&h).map(|v| v[c]).unwrap_or(PHYS + 1);
+                            // A copy: IADD r, value, 0.
+                            em.op("IADD", r, rs, zero, 0);
+                        }
+                    }
                     nir_intrinsic_load_base_workgroup_id => {
                         for c in 0..3 {
                             em.vals.insert((d, c), V::C(0));
@@ -302,7 +305,7 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                         for c in 0..i.def.num_components as u32 {
                             let a = em.word_addr(i.get_src(0), i.get_src(1), c);
                             let ra = em.reg(a);
-                            let rd = em.dst((d, c as u8));
+                            let rd = em.fresh();
                             em.op("LOAD", rd, ra, 0, 0);
                             em.vals.insert((d, c as u8), V::R(rd));
                         }
@@ -344,18 +347,6 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                         em.vals.insert((d, 0), V::R(old));
                     }
                     _ => em.fail(format!("unsupported intrinsic {}", i.info().name())),
-                }
-            }
-            // A phi input that did not land in the phi's register (a constant, a copy) is moved there.
-            let defs: Vec<(u32, u8)> = em.alias.keys().copied().filter(|k| em.vals.contains_key(k)).collect();
-            for key in defs {
-                let r = em.alias[&key];
-                let v = em.vals[&key];
-                if !matches!(v, V::R(x) if x == r) {
-                    let zero = em.creg(0);
-                    let rs = em.reg(v);
-                    em.op("IADD", r, rs, zero, 0);
-                    em.vals.insert(key, V::R(r));
                 }
             }
         }
