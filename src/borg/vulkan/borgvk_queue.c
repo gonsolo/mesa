@@ -660,8 +660,13 @@ sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
       close(pfd[0]);
       dup2(pfd[1], STDOUT_FILENO);
       close(pfd[1]);
-      if (direct && direct[0])
+      if (direct && direct[0]) {
+         /* Colour attachment format: RGBA8 targets are flushed as 4 B/pixel so the
+          * result keeps 8 bits per channel; the rest as R5G6B5. */
+         if (color_img->vk.format == VK_FORMAT_R8G8B8A8_UNORM)
+            execlp(direct, direct, uart_path, w_str, h_str, "/dev/stdout", "rgba8", (char *)NULL);
          execlp(direct, direct, uart_path, w_str, h_str, (char *)NULL);
+      }
       execlp(sim_bin, sim_bin, "--cts-uart", uart_path, sim_fw,
              w_str, h_str, (char *)NULL);
       _exit(127);

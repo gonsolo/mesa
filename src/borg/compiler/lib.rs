@@ -1469,7 +1469,9 @@ pub unsafe extern "C" fn borgc_compile_nir(
     }
 
     dce(&mut prog, &out_roots);
-    fuse_fmadd(&mut prog, &out_roots);
+    fuse_fmadd(&mut prog, &out_roots, &|v| {
+        matches!(ubo.get(&v), Some(Ubo::Mvp(_)) | Some(Ubo::Uniform(_)) | Some(Ubo::Attr))
+    });
     // draw_mode only: legacy's register assignment is checked into
     // shader_blobs.h and must stay byte-identical (docs/B1's own
     // "Coexistence" section) -- reordering its instructions, even to a

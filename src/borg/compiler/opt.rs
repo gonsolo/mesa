@@ -219,7 +219,11 @@ fn schedule_run(run: Vec<BorgInstr>, out_roots: &HashSet<u32>) -> Vec<BorgInstr>
 /// source ffma into a multiply and an add; fuse FADD(d, m, c) where m=FMUL(a,b)
 /// is used only here back into FMADD(d, a*b + c). Halves the matrix-multiply op
 /// count — both faster and necessary to fit SPIRB_MAX_INSTRS (72).
-pub(crate) fn fuse_fmadd(prog: &mut Vec<BorgInstr>, out_roots: &[u32]) {
+pub(crate) fn fuse_fmadd(
+    prog: &mut Vec<BorgInstr>,
+    out_roots: &[u32],
+    uniform_like: &dyn Fn(u32) -> bool,
+) {
     let pre_fuse = prog.len();
     {
         let mut def_idx: HashMap<u32, usize> = HashMap::new();
@@ -253,6 +257,13 @@ pub(crate) fn fuse_fmadd(prog: &mut Vec<BorgInstr>, out_roots: &[u32]) {
                     let (sa, sb) = (prog[mi].swz[0], prog[mi].swz[1]);
                     let c = prog[i].srcs[1 - k];
                     let sc = prog[i].swz[1 - k];
+                    // An instruction reads at most one uniform operand (funct3
+                    // selects the slot); a second one would be left as r0 in the
+                    // encoding. x * u20 + u24 therefore stays a FMUL and a FADD.
+                    let n_uniform = [a, b, c].iter().filter(|&&s| uniform_like(s)).count();
+                    if n_uniform > 1 {
+                        continue;
+                    }
                     prog[i].mnem = "FMADD";
                     prog[i].srcs = vec![a, b, c];
                     prog[i].swz = vec![sa, sb, sc];
