@@ -224,20 +224,22 @@ is_compressed_format(VkFormat format)
     * format. Hardcoding the range is the only thing that actually reaches
     * this format at all, confirmed by re-running the same direct probe
     * after this change (optimalTilingFeatures == 0). */
-   return (format >= VK_FORMAT_BC1_RGB_UNORM_BLOCK &&
-           format <= VK_FORMAT_BC7_SRGB_BLOCK) ||
+   return (format >= VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK &&
+           format <= VK_FORMAT_EAC_R11G11_SNORM_BLOCK) ||
           (format >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK &&
            format <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK) ||
           (format >= 1000288000 && format <= 1000288029) ||
           util_format_get_blockdepth(vk_format_to_pipe_format(format)) > 1;
 }
 
+/* BC1-BC7: the one compression family Vulkan 1.0 asks for.  The texels stay compressed
+ * in image memory; the driver decodes them (Mesa's util/format decoders) when it blits
+ * from them or hands them to the texture unit. */
 static bool
-is_etc2_format(VkFormat format)
+is_bc_format(VkFormat format)
 {
-   /* ETC2 and EAC — supported via textureCompressionETC2 = true. */
-   return (format >= VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK &&
-           format <= VK_FORMAT_EAC_R11G11_SNORM_BLOCK);
+   return format >= VK_FORMAT_BC1_RGB_UNORM_BLOCK &&
+          format <= VK_FORMAT_BC7_SRGB_BLOCK;
 }
 
 /* Sample counts the device supports per use; VkPhysicalDeviceLimits and the per-format
@@ -254,28 +256,23 @@ borgvk_optimal_features(VkFormat format)
        is_compressed_format(format))
       return 0;
 
+   /* Scaled-integer formats (*_USCALED, *_SSCALED) are vertex-buffer formats in Vulkan 1.0;
+    * the spec requires no image feature for them.  The texture unit cannot sample them and
+    * the blit/attachment paths do not convert to them, so advertise none. */
+   if (vk_format_is_scaled(format))
+      return 0;
+
    /* 64-bit-per-channel formats (R64*): the texture unit and the tile buffer top out at
     * 32 bits per channel, and Vulkan 1.0 does not require them. */
    if (format >= VK_FORMAT_R64_UINT && format <= VK_FORMAT_R64G64B64A64_SFLOAT)
       return 0;
 
-   /* ETC2/EAC: mandatory compressed texture formats. Sampling doesn't need
-    * decoding here, borgvk samples by reading host-visible image memory
-    * directly over serial, decoding happens shader-side. BLIT_SRC_BIT was
-    * dropped: unlike a real GPU's dedicated decompression hardware, a blit
-    * from a compressed source requires CPU-side block decoding, and Mesa's
-    * generic util_format_fetch_rgba_func has no decoder registered for any
-    * ETC2 or EAC variant (confirmed every PIPE_FORMAT_ETC2_ entry in the
-    * generated fetch_rgba table is NULL -- only legacy ETC1, DXT/BC, and
-    * BPTC (BC6-7) have one). Advertising BLIT_SRC_BIT here made CTS
-    * legitimately attempt compressed-source blits we can't actually decode,
-    * producing "Result image is incorrect" instead of the honest
-    * NotSupported a driver without decode hardware should report; this
-    * makes ETC2/EAC consistent with how BC1-7/ASTC are already handled
-    * (zero features at all, via is_compressed_format's blanket bail above,
-    * for the same underlying reason). */
-   if (is_etc2_format(format)) {
+   /* BC1-7: sampled, blit source, transfer (the Vulkan 1.0 requirement for a
+    * compression family, vkGetPhysicalDeviceFormatProperties tables).  No blit
+    * destination, colour attachment or storage: the block formats cannot be rendered to. */
+   if (is_bc_format(format)) {
       return VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+             VK_FORMAT_FEATURE_BLIT_SRC_BIT |
              VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
              VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
              VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
@@ -329,18 +326,19 @@ borgvk_GetPhysicalDeviceFormatProperties2(
     * which borgvk does not execute (that fallback left the texture all-black).
     * Only for color formats that the optimal path already samples. */
    VkFormatFeatureFlags lin =
-      (opt != 0) ? (VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+      (opt != 0 && !is_bc_format(format)) ? (VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
                     VK_FORMAT_FEATURE_TRANSFER_DST_BIT) : 0;
    if ((opt & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) &&
-       !is_depth_stencil_format(format)) {
+       !is_depth_stencil_format(format) && !is_bc_format(format)) {
       lin |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
       if (opt & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)
          lin |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
    }
    /* Buffer features: for non-compressed non-depth color formats only.
-    * ETC2/EAC are sampled-only (no buffer/vertex support). */
+    * BC formats are sampled-only (no buffer/vertex support). */
    VkFormatFeatureFlags buf = 0;
-   if (opt != 0 && !is_depth_stencil_format(format) && !is_etc2_format(format)) {
+   if ((opt != 0 || vk_format_is_scaled(format)) &&
+       !is_depth_stencil_format(format) && !is_bc_format(format)) {
       buf = VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT |
             VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT |
             VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT;
@@ -696,7 +694,7 @@ create_physical_device(struct borgvk_instance *instance, int drm_fd)
        * fetch_vertex_attr (bounded vertex fetch). */
       .robustBufferAccess = true,
       /* Vulkan 1.3 spec §43 mandates at least one compressed texture family. */
-      .textureCompressionETC2 = true,
+      .textureCompressionBC = true,
    };
    struct vk_properties properties;
    borgvk_get_properties(&properties);

@@ -75,9 +75,17 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
                .offset = va->offset, .format = va->format };
          }
       }
-      borgvk_blend_pack(pCreateInfos[i].pColorBlendState,
-                        &device->blend_cfg, &device->blend_const);
-      borgvk_state_pack(&pCreateInfos[i], device->state_reg);
+      /* With rasterizer discard the spec ignores the viewport, multisample, depth/stencil
+       * and colour-blend pointers (they may be invalid), so never read them. */
+      VkGraphicsPipelineCreateInfo ci = pCreateInfos[i];
+      if (rs && rs->rasterizerDiscardEnable) {
+         ci.pViewportState = NULL;
+         ci.pMultisampleState = NULL;
+         ci.pDepthStencilState = NULL;
+         ci.pColorBlendState = NULL;
+      }
+      borgvk_blend_pack(ci.pColorBlendState, &device->blend_cfg, &device->blend_const);
+      borgvk_state_pack(&ci, device->state_reg);
       device->state_valid = true;
    }
    for (; i < count; i++)

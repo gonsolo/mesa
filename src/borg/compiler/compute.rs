@@ -407,7 +407,12 @@ pub unsafe extern "C" fn borgc_compile_compute(
     regs: *mut u32, reg_cap: u32, nregs: *mut u32,
     local: *mut u32,
 ) -> u32 {
-    match compile(nir) {
+    // An assert in the backend must refuse the shader, not abort the process.
+    let compiled = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile(nir))) {
+        Ok(r) => r,
+        Err(_) => return 1,
+    };
+    match compiled {
         Ok(o) if o.words.len() as u32 <= word_cap && o.regs.len() as u32 <= reg_cap => {
             for (i, w) in o.words.iter().enumerate() {
                 *words.add(i) = *w;

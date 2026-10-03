@@ -744,7 +744,13 @@ sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
 
    /* RGB888 sdim×sdim (sim stdout) → R8G8B8A8_UNORM attachment (width×height),
     * nearest-neighbour upscale, opaque alpha. */
-   if (rgb && got == expected && raw32) {
+   /* The write below assumes a 4-byte texel; an attachment of another size (or unmapped
+    * memory) must not be written past its backing. */
+   bool fits = color_img->mem && color_img->mem->map &&
+               (uint64_t)width * height * 4 * MAX2(color_img->vk.samples, 1) <= color_img->size;
+   if (rgb && got == expected && !fits) {
+      /* leave the image untouched */
+   } else if (rgb && got == expected && raw32) {
       memcpy((uint8_t *)color_img->mem->map + color_img->offset, rgb, expected);
    } else if (rgb && got == expected) {
       /* The sim returns the resolved pixel. A multisampled image packs one plane per

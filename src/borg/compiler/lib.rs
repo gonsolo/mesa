@@ -248,6 +248,26 @@ pub unsafe extern "C" fn borgc_compile_nir(
     buf_cap: u32,
     out_len: *mut u32,
 ) -> u32 {
+    // A shader borgc cannot handle trips an assert; unwinding out of an extern "C"
+    // function aborts the whole process, so turn it into "no blob" (the same outcome
+    // as any other unsupported shader).
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        compile_nir_inner(nir, out_buf, buf_cap, out_len)
+    }))
+    .unwrap_or_else(|_| {
+        if !out_len.is_null() {
+            *out_len = 0;
+        }
+        0
+    })
+}
+
+unsafe fn compile_nir_inner(
+    nir: *mut nir_shader,
+    out_buf: *mut u8,
+    buf_cap: u32,
+    out_len: *mut u32,
+) -> u32 {
     if !out_len.is_null() {
         *out_len = 0;
     }

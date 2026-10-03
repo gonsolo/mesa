@@ -1507,6 +1507,53 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
  * per spec: VUID-vkCmdBlitImage-srcImage-06421 and friends), so block
  * width/height/depth are always 1 here and addressing reduces to plain texel
  * indexing -- no need for the block-aware machinery CmdCopyImage needs. */
+/* Decode a block-compressed (BC1-7) image into R32G32B32A32_SFLOAT, level by level,
+ * layer by layer, so the generic blit path can read it as an ordinary image.  The
+ * compressed texels in image memory are left alone (they must read back unchanged).
+ * Returns the decoded buffer (caller frees) and describes it in *out/*mem. */
+static void *
+borgvk_decode_compressed_image(const struct borgvk_image *src,
+                               struct borgvk_image *out,
+                               struct borgvk_device_memory *mem)
+{
+   enum pipe_format pfmt = vk_format_to_pipe_format(src->vk.format);
+   uint32_t bs = vk_format_get_blocksize(src->vk.format);
+   uint32_t bw = vk_format_get_blockwidth(src->vk.format);
+   uint32_t bh = vk_format_get_blockheight(src->vk.format);
+   uint32_t layers = MAX2(src->vk.array_layers, 1);
+
+   *out = *src;
+   out->vk.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+   uint64_t total = borgvk_image_layer_size(out, 16, 1, 1, 1) * layers;
+   uint8_t *buf = calloc(1, total);
+   if (!buf)
+      return NULL;
+
+   for (uint32_t layer = 0; layer < layers; layer++) {
+      for (uint32_t l = 0; l < src->vk.mip_levels; l++) {
+         uint32_t w = MAX2(src->vk.extent.width >> l, 1);
+         uint32_t h = MAX2(src->vk.extent.height >> l, 1);
+         uint32_t d = MAX2(src->vk.extent.depth >> l, 1);
+         uint32_t wb, ob;
+         uint64_t soff = borgvk_image_level_offset(src, l, layer, bs, bw, bh, 1, &wb);
+         uint64_t doff = borgvk_image_level_offset(out, l, layer, 16, 1, 1, 1, &ob);
+         uint64_t sslice = (uint64_t)wb * DIV_ROUND_UP(h, bh) * bs;
+         uint64_t dslice = (uint64_t)w * h * 16;
+         for (uint32_t z = 0; z < d; z++)
+            util_format_unpack_rgba_rect(pfmt, buf + doff + z * dslice, w * 16,
+                                         (const uint8_t *)src->mem->map + src->offset + soff + z * sslice,
+                                         wb * bs, w, h);
+      }
+   }
+
+   memset(mem, 0, sizeof(*mem));
+   mem->map = buf;
+   mem->size = total;
+   out->mem = mem;
+   out->offset = 0;
+   return buf;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdBlitImage(VkCommandBuffer commandBuffer,
                     VkImage srcImage, VkImageLayout srcImageLayout,
@@ -1525,21 +1572,23 @@ borgvk_CmdBlitImage(VkCommandBuffer commandBuffer,
    uint32_t src_bs = vk_format_get_blocksize(src->vk.format);
    uint32_t dst_bs = vk_format_get_blocksize(dst->vk.format);
 
-   /* No format here ever advertises BLIT_SRC_BIT while block-compressed
-    * (borgvk_optimal_features grants ETC2/EAC only SAMPLED/TRANSFER, and
-    * BC1-7/ASTC get zero features at all, in both cases because Mesa's
-    * generic util_format_fetch_rgba_func has no decoder for any of them) --
-    * so this should be unreachable. Kept as a defended no-op rather than an
-    * out-of-bounds read/write: the per-texel addressing below assumes 1
-    * texel == 1 stored element, which previously SIGSEGV'd walking off the
-    * end of the source allocation for a compressed format before that
-    * feature-bit fix (confirmed via coredumpctl/gdb running
-    * dEQP-VK...blit_image...eac_r11_snorm_block.a1r5g5b5_unorm_pack16). */
-   if (vk_format_get_blockwidth(src->vk.format) > 1 ||
-       vk_format_get_blockheight(src->vk.format) > 1 ||
-       vk_format_get_blockwidth(dst->vk.format) > 1 ||
+   /* A block-compressed destination cannot be blitted to (BLIT_DST is not advertised). A
+    * BC source is decoded to float first; ETC2/ASTC are not advertised at all. */
+   if (vk_format_get_blockwidth(dst->vk.format) > 1 ||
        vk_format_get_blockheight(dst->vk.format) > 1)
       return;
+   struct borgvk_image src_decoded_img;
+   struct borgvk_device_memory src_decoded_mem;
+   void *src_decoded = NULL;
+   if (vk_format_get_blockwidth(src->vk.format) > 1 ||
+       vk_format_get_blockheight(src->vk.format) > 1) {
+      src_decoded = borgvk_decode_compressed_image(src, &src_decoded_img, &src_decoded_mem);
+      if (!src_decoded)
+         return;
+      src = &src_decoded_img;
+      src_pfmt = vk_format_to_pipe_format(src->vk.format);
+      src_bs = vk_format_get_blocksize(src->vk.format);
+   }
 
    /* Per spec, blit source/dest formats must be from the same numeric-format
     * class (both pure-uint, both pure-sint, or neither), so one class check
@@ -1767,6 +1816,7 @@ borgvk_CmdBlitImage(VkCommandBuffer commandBuffer,
          }
       }
    }
+   free(src_decoded);
 }
 
 /* Like CmdClearColorImage, this was entirely missing -- discarded into the
