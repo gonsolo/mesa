@@ -27,12 +27,15 @@ use compiler::nir::AsDef;
 use std::collections::HashMap;
 
 pub(crate) const SLOT_BASE_WORDS: u32 = 0x40000;
-pub(crate) const SLOT_WORDS: u32 = 0x10000;
+pub(crate) const SLOT_WORDS: u32 = 0x80000;
 const LANES: u32 = 4; // BorgConfig.Simt: fragLanes
-const MAX_WORDS: usize = 72;
+const MAX_WORDS: usize = 512;
 /// Operand ids at or above this are physical registers (r30, preset constants); below, virtual.
 const PHYS: u32 = 0x4000_0000;
 const FIRST_VREG: u32 = 1000;
+/// First of three registers (x, y, z) holding the dispatch's workgroup origin: 0 normally, the
+/// slice start when the driver splits a grid over several simulator runs.
+pub(crate) const WG_BASE_REG: u32 = 12;
 
 /// One selected instruction. `srcs` are virtual or physical ids; `f3` is the funct3 operand slot.
 struct CI {
@@ -54,6 +57,8 @@ pub(crate) struct Out {
     pub words: Vec<u32>,
     pub regs: Vec<(u8, u32)>,
     pub local: [u32; 3],
+    /// bit 0: uses atomics, so the grid must not be split across runs.
+    pub flags: u32,
 }
 
 struct Em {
@@ -67,6 +72,8 @@ struct Em {
     /// NIR registers (decl_reg): one virtual register per component.
     nregs: HashMap<u32, Vec<u32>>,
     err: Option<String>,
+    base_used: bool,
+    atomics: bool,
 }
 
 impl Em {
@@ -86,9 +93,9 @@ impl Em {
         if let Some(&r) = self.cmap.get(&c) {
             return PHYS + r as u32;
         }
-        if self.next_const < 12 {
+        if self.next_const < 15 {
             self.fail("too many distinct constants".into());
-            return PHYS + 12;
+            return PHYS + 15;
         }
         let r = self.next_const;
         self.next_const -= 1;
@@ -154,6 +161,23 @@ impl Em {
     fn src(&mut self, s: &nir_src, c: u8) -> V {
         self.get(s.as_def().index, c)
     }
+    /// Address of word `c` of a multi-word access whose first word is `a0`.  A constant address
+    /// would take one preset register per word (there are only 18), so word c > 0 is the first
+    /// word's register plus the shared constant c, as long as that stays inside the window.
+    fn word_n(&mut self, a0: V, c: u32) -> V {
+        if c == 0 {
+            return a0;
+        }
+        if let V::C(x) = a0 {
+            let off = x.wrapping_sub(SLOT_BASE_WORDS) & (SLOT_WORDS - 1);
+            if off + c >= SLOT_WORDS {
+                return V::C(x.wrapping_add(c)); // would leave the window: keep the exact constant
+            }
+            let r0 = self.reg(a0);
+            return self.bin("IADD", V::R(r0), V::C(c));
+        }
+        a0
+    }
     /// Word index of the byte offset `off` in the buffer named by `idx`'s first component.
     fn word_addr(&mut self, idx: &nir_src, off: &nir_src, extra_words: u32) -> V {
         let base = match self.src(idx, 0) {
@@ -178,7 +202,7 @@ impl Em {
 }
 
 pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
-    let mut em = Em { words: vec![], prog: vec![], next: FIRST_VREG, next_const: 29, regs: vec![], cmap: HashMap::new(), vals: HashMap::new(), nregs: HashMap::new(), err: None };
+    let mut em = Em { words: vec![], prog: vec![], next: FIRST_VREG, next_const: 29, regs: vec![], cmap: HashMap::new(), vals: HashMap::new(), nregs: HashMap::new(), err: None, base_used: false, atomics: false };
     let entry = nir_shader_get_entrypoint(nir);
     let mut marks: HashMap<usize, Vec<CfMark>> = HashMap::new();
     let mut unsupported: Vec<&'static str> = Vec::new();
@@ -202,6 +226,11 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
             if let Some(lc) = instr.as_load_const() {
                 for c in 0..lc.def.num_components as usize {
                     em.vals.insert((lc.def.index, c as u8), V::C(lc.values()[c].u32_));
+                }
+            } else if let Some(u) = instr.as_undef() {
+                // An undefined value (an unused component of a widened coordinate): any value.
+                for c in 0..u.def.num_components as usize {
+                    em.vals.insert((u.def.index, c as u8), V::C(0));
                 }
             } else if let Some(alu) = instr.as_alu() {
                 let n = alu.def.num_components as usize;
@@ -286,12 +315,35 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                         }
                     }
                     nir_intrinsic_load_workgroup_id => {
-                        let zero = em.creg(0);
+                        em.base_used = true;
                         for c in 0..3u8 {
                             let rd = em.fresh();
-                            // IADD rd, u(29+c), r_zero with funct3 = 1: rs1 is the uniform operand.
-                            em.op("IADD", rd, PHYS + 29 + c as u32, zero, 1);
+                            // IADD rd, u(29+c), r(12+c) with funct3 = 1: rs1 is the uniform operand;
+                            // r12-r14 hold the grid origin (0 unless the driver split the dispatch).
+                            em.op("IADD", rd, PHYS + 29 + c as u32, PHYS + WG_BASE_REG + c as u32, 1);
                             em.vals.insert((d, c), V::R(rd));
+                        }
+                    }
+                    nir_intrinsic_load_base_global_invocation_id => {
+                        for c in 0..3 {
+                            em.vals.insert((d, c), V::C(0));
+                        }
+                    }
+                    nir_intrinsic_load_global_invocation_id => {
+                        // workgroup_id * local_size + local_id (r31 = x | y << 10 | z << 20).
+                        em.base_used = true;
+                        let ws = (*nir).info.workgroup_size;
+                        for c in 0..3u8 {
+                            let wg = em.fresh();
+                            em.op("IADD", wg, PHYS + 29 + c as u32, PHYS + WG_BASE_REG + c as u32, 1);
+                            let size = ws[c as usize] as u32;
+                            let mut v = if size == 1 { V::R(wg) } else { em.mul(V::R(wg), V::C(size)) };
+                            if size > 1 {
+                                let sh = em.bin("ISRL", V::R(PHYS + 31), V::C(10 * c as u32));
+                                let lid = em.bin("IAND", sh, V::C(1023));
+                                v = em.add(v, lid);
+                            }
+                            em.vals.insert((d, c), v);
                         }
                     }
                     nir_intrinsic_load_local_invocation_index => {
@@ -311,8 +363,13 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                         }
                     }
                     nir_intrinsic_load_ubo | nir_intrinsic_load_ssbo => {
+                        let a0 = em.word_addr(i.get_src(0), i.get_src(1), 0);
                         for c in 0..i.def.num_components as u32 {
-                            let a = em.word_addr(i.get_src(0), i.get_src(1), c);
+                            let a = match a0 {
+                                V::C(_) => em.word_n(a0, c),
+                                _ if c == 0 => a0,
+                                _ => em.word_addr(i.get_src(0), i.get_src(1), c),
+                            };
                             let ra = em.reg(a);
                             let rd = em.fresh();
                             em.op("LOAD", rd, ra, 0, 0);
@@ -321,11 +378,16 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                     }
                     nir_intrinsic_store_ssbo => {
                         let mask = i.write_mask();
+                        let a0 = em.word_addr(i.get_src(1), i.get_src(2), 0);
                         for c in 0..i.get_src(0).num_components() as u32 {
                             if mask & (1 << c) == 0 {
                                 continue;
                             }
-                            let a = em.word_addr(i.get_src(1), i.get_src(2), c);
+                            let a = match a0 {
+                                V::C(_) => em.word_n(a0, c),
+                                _ if c == 0 => a0,
+                                _ => em.word_addr(i.get_src(1), i.get_src(2), c),
+                            };
                             let ra = em.reg(a);
                             let v = em.src(i.get_src(0), c as u8);
                             let rv = em.reg(v);
@@ -333,6 +395,7 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                         }
                     }
                     nir_intrinsic_ssbo_atomic => {
+                        em.atomics = true;
                         if i.atomic_op() != nir_atomic_op_iadd {
                             em.fail("only atomicAdd is supported".into());
                             continue;
@@ -374,7 +437,12 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
             swz: vec![],
         })
         .collect();
-    let reserved: Vec<u8> = em.cmap.values().copied().chain([30u8, 31]).collect();
+    if em.base_used {
+        for c in 0..3u32 {
+            em.regs.push(((WG_BASE_REG + c) as u8, 0));
+        }
+    }
+    let reserved: Vec<u8> = em.cmap.values().copied().chain([30u8, 31, 12, 13, 14]).collect();
     let alloc = regalloc(&bp, &HashMap::new(), &reserved);
     let phys = |x: u32| -> u8 { if x >= PHYS { (x - PHYS) as u8 } else { *alloc.get(&x).unwrap_or(&0) } };
     for i in &em.prog {
@@ -389,10 +457,10 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
         }
     }
     if em.words.len() > MAX_WORDS {
-        return Err(format!("{} instructions exceed the {MAX_WORDS}-word instruction window", em.words.len()));
+        return Err(format!("{} instructions exceed the {MAX_WORDS}-word program limit", em.words.len()));
     }
     let ws = (*nir).info.workgroup_size;
-    Ok(Out { words: em.words, regs: em.regs, local: [ws[0] as u32, ws[1] as u32, ws[2] as u32] })
+    Ok(Out { words: em.words, regs: em.regs, local: [ws[0] as u32, ws[1] as u32, ws[2] as u32], flags: em.atomics as u32 })
 }
 
 /// Compile a compute shader.  `words` receives the program, `regs` (register, value) pairs the
@@ -405,7 +473,7 @@ pub unsafe extern "C" fn borgc_compile_compute(
     nir: *mut nir_shader,
     words: *mut u32, word_cap: u32, nwords: *mut u32,
     regs: *mut u32, reg_cap: u32, nregs: *mut u32,
-    local: *mut u32,
+    local: *mut u32, flags: *mut u32,
 ) -> u32 {
     // An assert in the backend must refuse the shader, not abort the process.
     let compiled = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile(nir))) {
@@ -426,9 +494,16 @@ pub unsafe extern "C" fn borgc_compile_compute(
             for k in 0..3 {
                 *local.add(k) = o.local[k];
             }
+            *flags = o.flags;
             0
         }
-        Ok(_) => 2,
-        Err(_) => 1,
+        Ok(o) => {
+            eprintln!("borgc[compute]: {} words / {} preset registers exceed the driver's {word_cap} / {reg_cap}", o.words.len(), o.regs.len());
+            2
+        }
+        Err(e) => {
+            eprintln!("borgc[compute]: refused: {e}");
+            1
+        }
     }
 }

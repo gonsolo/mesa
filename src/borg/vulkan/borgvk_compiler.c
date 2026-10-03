@@ -98,9 +98,9 @@ borgvk_compile_compute_stage(struct borgvk_device *device,
       return;
    }
    borg_lower_nir_for_borgc(nir);
-   uint32_t rc = borgc_compile_compute(nir, pipeline->cs_words, 80, &pipeline->cs_nwords,
+   uint32_t rc = borgc_compile_compute(nir, pipeline->cs_words, 512, &pipeline->cs_nwords,
                                        pipeline->cs_regs, 32, &pipeline->cs_nregs,
-                                       pipeline->cs_local);
+                                       pipeline->cs_local, &pipeline->cs_flags);
    pipeline->cs_ok = rc == 0;
    mesa_logi("borgvk: compute shader %s (%u words, %u presets)", rc == 0 ? "compiled" : "REFUSED",
              pipeline->cs_nwords, pipeline->cs_nregs);

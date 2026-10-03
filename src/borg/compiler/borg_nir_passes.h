@@ -48,7 +48,7 @@ uint32_t borgc_selftest(void);
 uint32_t borgc_compile_compute(struct nir_shader *nir,
                                uint32_t *words, uint32_t word_cap, uint32_t *nwords,
                                uint32_t *regs, uint32_t reg_cap, uint32_t *nregs,
-                               uint32_t *local);
+                               uint32_t *local, uint32_t *flags);
 
 #ifdef __cplusplus
 }

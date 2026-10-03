@@ -151,7 +151,8 @@ main(int argc, char **argv)
    uint32_t len = 0;
    if (stage == MESA_SHADER_COMPUTE) {
       uint32_t w[128], r[64], nw = 0, nr = 0, local[3];
-      uint32_t rc = borgc_compile_compute(nir, w, 128, &nw, r, 32, &nr, local);
+      uint32_t cflags = 0;
+      uint32_t rc = borgc_compile_compute(nir, w, 128, &nw, r, 32, &nr, local, &cflags);
       printf("compute rc=%u local=%u,%u,%u words=%u\n", rc, local[0], local[1], local[2], nw);
       for (uint32_t i = 0; rc == 0 && i < nw; i++) printf("  %08x\n", w[i]);
       for (uint32_t i = 0; rc == 0 && i < nr; i++) printf("  r%u = %u\n", r[2*i], r[2*i+1]);

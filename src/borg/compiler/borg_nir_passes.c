@@ -7,6 +7,8 @@
 #include "borg_nir_passes.h"
 
 #include "glsl_types.h"
+#include "nir_builder.h"
+#include "vulkan/vulkan_core.h"
 #include "util/ralloc.h"
 
 #include <stdlib.h>
@@ -30,6 +32,90 @@ static int
 borg_type_size(const struct glsl_type *type, bool bindless)
 {
    return glsl_count_attribute_slots(type, false);
+}
+
+/* Compute: texel buffers.  A texelFetch on a textureBuffer / imageLoad on an imageBuffer
+ * becomes four word loads from the binding's window, 16 bytes per texel.  The buffer view's
+ * format is only known at dispatch, so the driver decodes the view into that canonical
+ * four-word layout (RGBA as the shader's declared type: float, uint or int bits) before the
+ * dispatch; the shader never sees the format. */
+static bool
+borg_texel_buffer_filter(const nir_instr *instr, const void *data)
+{
+   if (instr->type == nir_instr_type_tex) {
+      const nir_tex_instr *tex = nir_instr_as_tex(instr);
+      return tex->op == nir_texop_txf && tex->sampler_dim == GLSL_SAMPLER_DIM_BUF;
+   }
+   if (instr->type == nir_instr_type_intrinsic) {
+      const nir_intrinsic_instr *i = nir_instr_as_intrinsic(instr);
+      return (i->intrinsic == nir_intrinsic_image_deref_load &&
+              nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_BUF) ||
+             (i->intrinsic == nir_intrinsic_image_deref_store &&
+              nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_2D &&
+              !nir_intrinsic_image_array(i));
+   }
+   return false;
+}
+
+static nir_def *
+borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
+{
+   nir_deref_instr *deref;
+   nir_def *coord;
+   if (instr->type == nir_instr_type_intrinsic &&
+       nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_deref_store) {
+      /* A 2D image store (single 32-bit texel formats): the binding's window holds the image's
+       * width in word 0, then the texels row by row; the host copies the image in and back. */
+      nir_intrinsic_instr *st = nir_instr_as_intrinsic(instr);
+      nir_variable *ivar = nir_deref_instr_get_variable(nir_src_as_deref(st->src[0]));
+      if (!ivar)
+         return NULL;
+      const nir_address_format afmt = borg_spirv_options.ssbo_addr_format;
+      nir_def *ridx = nir_vulkan_resource_index(b, nir_address_format_num_components(afmt),
+                                                nir_address_format_bit_size(afmt), nir_imm_int(b, 0),
+                                                .desc_set = ivar->data.descriptor_set,
+                                                .binding = ivar->data.binding,
+                                                .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+      nir_def *rdesc = nir_load_vulkan_descriptor(b, nir_address_format_num_components(afmt),
+                                                  nir_address_format_bit_size(afmt), ridx,
+                                                  .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+      nir_def *buf = nir_channel(b, rdesc, 0);
+      nir_def *width = nir_load_ssbo(b, 1, 32, buf, nir_imm_int(b, 0), .align_mul = 4);
+      nir_def *x = nir_channel(b, st->src[1].ssa, 0);
+      nir_def *y = nir_channel(b, st->src[1].ssa, 1);
+      nir_def *word = nir_iadd(b, nir_iadd(b, nir_imul(b, y, width), x), nir_imm_int(b, 1));
+      nir_store_ssbo(b, nir_channel(b, st->src[3].ssa, 0), buf, nir_ishl_imm(b, word, 2),
+                     .write_mask = 1, .align_mul = 4);
+      return NIR_LOWER_INSTR_PROGRESS_REPLACE;
+   }
+   if (instr->type == nir_instr_type_tex) {
+      nir_tex_instr *tex = nir_instr_as_tex(instr);
+      int di = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+      int ci = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+      if (di < 0 || ci < 0)
+         return NULL;
+      deref = nir_src_as_deref(tex->src[di].src);
+      coord = nir_channel(b, tex->src[ci].src.ssa, 0);
+   } else {
+      nir_intrinsic_instr *i = nir_instr_as_intrinsic(instr);
+      deref = nir_src_as_deref(i->src[0]);
+      coord = nir_channel(b, i->src[1].ssa, 0);
+   }
+   nir_variable *var = deref ? nir_deref_instr_get_variable(deref) : NULL;
+   if (!var)
+      return NULL;
+
+   const nir_address_format fmt = borg_spirv_options.ssbo_addr_format;
+   nir_def *idx = nir_vulkan_resource_index(b, nir_address_format_num_components(fmt),
+                                            nir_address_format_bit_size(fmt), nir_imm_int(b, 0),
+                                            .desc_set = var->data.descriptor_set,
+                                            .binding = var->data.binding,
+                                            .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+   nir_def *desc = nir_load_vulkan_descriptor(b, nir_address_format_num_components(fmt),
+                                              nir_address_format_bit_size(fmt), idx,
+                                              .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+   nir_def *off = nir_imul_imm(b, coord, 16);
+   return nir_load_ssbo(b, 4, 32, nir_channel(b, desc, 0), off, .align_mul = 16);
 }
 
 void
@@ -73,6 +159,9 @@ borg_lower_nir_for_borgc(struct nir_shader *nir)
    /* Storage buffers (compute): load/store/atomic_ssbo intrinsics. */
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ssbo,
             borg_spirv_options.ssbo_addr_format);
+   if (nir->info.stage == MESA_SHADER_COMPUTE)
+      NIR_PASS(_, nir, nir_shader_lower_instructions, borg_texel_buffer_filter,
+               borg_texel_buffer_lower, NULL);
    /* Push constants. Confirmed empirically (not assumed): with
     * push_const_addr_format left at its default, a `layout(push_constant)`
     * access arrives here as a plain load_deref, same as any other pointer,

@@ -359,9 +359,10 @@ struct borgvk_pipeline {
     * value pairs) and LocalSize. cs_ok is false when borgc refused the shader. */
    bool     cs_ok;
    uint32_t cs_nwords, cs_nregs;
-   uint32_t cs_words[80];
+   uint32_t cs_words[512];
    uint32_t cs_regs[64];
    uint32_t cs_local[3];
+   uint32_t cs_flags;   /* bit 0: the shader uses atomics (its grid cannot be split) */
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_descriptor_set_layout, vk.base,

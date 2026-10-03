@@ -27,6 +27,8 @@
 #include "vk_sync.h"
 #include "vk_framebuffer.h"
 #include "vk_image.h"
+#include "vk_format.h"
+#include "util/format/u_format.h"
 
 #include "drm-uapi/borg_drm.h"
 
@@ -1116,8 +1118,9 @@ borgvk_CmdBindPipeline(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipeli
  * addresses are baked into the program by borgc's compute backend, see compute.rs). The job
  * goes to `direct_sim --compute`. Runs when the recorded commands replay at submit, so it
  * lands in command order. */
-#define BORGVK_CS_SLOT_BYTES (0x10000u * 4)
+#define BORGVK_CS_SLOT_BYTES (0x80000u * 4)
 #define BORGVK_CS_BASE_BYTES (0x40000u * 4)
+#define BORGVK_MAX_CS_PARTS 64
 
 static void
 put_u32(uint8_t **p, uint32_t v)
@@ -1137,10 +1140,59 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
       return;
    struct borgvk_descriptor_set *set = cmd->desc_set;
 
-   struct { uint8_t *host; uint32_t size, addr; } bufs[BORGVK_MAX_BINDINGS];
+   /* wb: copy the window back to the app's buffer afterwards.  A texel buffer is decoded into a
+    * private array (the canonical 4-word texel the compiler reads, see borg_nir_passes.c) and
+    * never written back. */
+   struct { uint8_t *host; uint8_t *decoded; bool wb; uint32_t skip, size, addr; } bufs[BORGVK_MAX_BINDINGS];
    uint32_t nbufs = 0, total = 0;
    for (uint32_t b = 0; set && b < BORGVK_MAX_BINDINGS; b++) {
+      const struct vk_buffer_view *bv = set->buffer_views[b];
+      if (bv && !set->buffers[b]) {
+         struct borgvk_buffer *tb = container_of(bv->buffer, struct borgvk_buffer, vk);
+         enum pipe_format pf = vk_format_to_pipe_format(bv->format);
+         uint32_t bs = util_format_get_blocksize(pf);
+         if (!tb->mem || !tb->mem->map || pf == PIPE_FORMAT_NONE || bs == 0)
+            continue;
+         uint32_t n = (uint32_t)MIN2(bv->range / bs, BORGVK_CS_SLOT_BYTES / 16);
+         uint8_t *dec = calloc(MAX2(n, 1), 16);
+         if (!dec)
+            continue;
+         const uint8_t *src = (const uint8_t *)tb->mem->map + tb->offset + bv->offset;
+         for (uint32_t t = 0; t < n; t++)
+            util_format_unpack_rgba(pf, dec + (size_t)t * 16, src + (size_t)t * bs, 1);
+         bufs[nbufs].host = NULL;
+         bufs[nbufs].decoded = dec;
+         bufs[nbufs].wb = false;
+         bufs[nbufs].skip = 0;
+         bufs[nbufs].size = n * 16;
+         bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + b * BORGVK_CS_SLOT_BYTES;
+         total += 8 + n * 16;
+         nbufs++;
+         continue;
+      }
       struct borgvk_buffer *buf = set->buffers[b];
+      struct borgvk_image *simg = set->images[b];
+      if (!buf && !bv && simg && simg->mem && simg->mem->map && simg->vk.image_type == VK_IMAGE_TYPE_2D &&
+          vk_format_get_blocksize(simg->vk.format) == 4 && simg->vk.samples == 1) {
+         /* A storage image: word 0 = width, then level 0 / layer 0 texel by texel (4-byte
+          * formats; the compiler addresses it as y * width + x + 1). */
+         uint32_t w = simg->vk.extent.width, h = simg->vk.extent.height;
+         uint32_t n = MIN2(w * h, BORGVK_CS_SLOT_BYTES / 4 - 1);
+         uint8_t *dec = calloc(1 + n, 4);
+         if (!dec)
+            continue;
+         memcpy(dec, &w, 4);
+         memcpy(dec + 4, (uint8_t *)simg->mem->map + simg->offset, (size_t)n * 4);
+         bufs[nbufs].host = (uint8_t *)simg->mem->map + simg->offset;
+         bufs[nbufs].decoded = dec;
+         bufs[nbufs].wb = true;
+         bufs[nbufs].skip = 4;
+         bufs[nbufs].size = (1 + n) * 4;
+         bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + b * BORGVK_CS_SLOT_BYTES;
+         total += 8 + (1 + n) * 4;
+         nbufs++;
+         continue;
+      }
       if (!buf || !buf->mem || !buf->mem->map)
          continue;
       VkDeviceSize avail = buf->vk.size > set->offsets[b] ? buf->vk.size - set->offsets[b] : 0;
@@ -1148,61 +1200,122 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
       if (size > BORGVK_CS_SLOT_BYTES)
          size = BORGVK_CS_SLOT_BYTES;
       bufs[nbufs].host = (uint8_t *)buf->mem->map + buf->offset + set->offsets[b];
+      bufs[nbufs].decoded = NULL;
+      bufs[nbufs].wb = true;
+      bufs[nbufs].skip = 0;
       bufs[nbufs].size = (uint32_t)size;
       bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + b * BORGVK_CS_SLOT_BYTES;
       total += 8 + ((uint32_t)size + 3) / 4 * 4;
       nbufs++;
    }
 
-   size_t cap = 9 * 4 + pl->cs_nwords * 4 + pl->cs_nregs * 8 + total;
+   /* Job header: nprog gx gy gz lx ly lz nregs nbufs bx by bz (b* = the grid origin, which the
+    * compiled program adds to the workgroup id). */
+   const uint32_t HDR = 12;
+   size_t cap = HDR * 4 + pl->cs_nwords * 4 + pl->cs_nregs * 8 + total;
    uint8_t *job = malloc(cap), *w = job;
    put_u32(&w, pl->cs_nwords); put_u32(&w, gx); put_u32(&w, gy); put_u32(&w, gz);
    put_u32(&w, pl->cs_local[0]); put_u32(&w, pl->cs_local[1]); put_u32(&w, pl->cs_local[2]);
    put_u32(&w, pl->cs_nregs); put_u32(&w, nbufs);
+   put_u32(&w, 0); put_u32(&w, 0); put_u32(&w, 0);
    for (uint32_t i = 0; i < pl->cs_nwords; i++) put_u32(&w, pl->cs_words[i]);
    for (uint32_t i = 0; i < pl->cs_nregs; i++) { put_u32(&w, pl->cs_regs[2 * i]); put_u32(&w, pl->cs_regs[2 * i + 1]); }
    for (uint32_t i = 0; i < nbufs; i++) {
       put_u32(&w, bufs[i].addr); put_u32(&w, bufs[i].size);
-      memcpy(w, bufs[i].host, bufs[i].size);
+      memcpy(w, bufs[i].decoded ? bufs[i].decoded : bufs[i].host, bufs[i].size);
       memset(w + bufs[i].size, 0, ((bufs[i].size + 3) & ~3u) - bufs[i].size);
       w += (bufs[i].size + 3) & ~3u;
    }
+   const size_t job_len = (size_t)(w - job);
 
-   char jpath[] = "/tmp/borgvk_cs_job_XXXXXX", opath[] = "/tmp/borgvk_cs_out_XXXXXX";
-   int jfd = mkstemp(jpath), ofd = mkstemp(opath);
-   if (jfd >= 0 && ofd >= 0) {
-      for (size_t o = 0; o < (size_t)(w - job); ) {
-         ssize_t n = write(jfd, job + o, (size_t)(w - job) - o);
+   /* A big grid is cut along one axis into slices that run as separate simulator processes
+    * (the simulator is cycle-accurate: a 512x512 grid of one-invocation workgroups takes
+    * minutes in one process). Each slice starts from the same buffers and the changed bytes
+    * are merged afterwards, so it is only done for shaders without atomics, whose result does
+    * not depend on how the workgroups are ordered. */
+   uint32_t axis = gy > 1 && gy >= gx ? 1 : gx > 1 ? 0 : 2;
+   uint32_t extent = axis == 0 ? gx : axis == 1 ? gy : gz;
+   uint32_t nparts = 1;
+   if (!(pl->cs_flags & 1) && (uint64_t)gx * gy * gz >= 4096 && extent > 1) {
+      long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+      nparts = (uint32_t)MIN2((long)extent, MAX2(ncpu, 1));
+      if (getenv("BORGVK_CS_PARTS"))
+         nparts = (uint32_t)MAX2(1, MIN2((long)extent, atol(getenv("BORGVK_CS_PARTS"))));
+   }
+
+   char jpath[BORGVK_MAX_CS_PARTS][32], opath[BORGVK_MAX_CS_PARTS][32];
+   pid_t pids[BORGVK_MAX_CS_PARTS];
+   nparts = MIN2(nparts, BORGVK_MAX_CS_PARTS);
+   bool ran = true;
+   for (uint32_t k = 0; k < nparts; k++) {
+      snprintf(jpath[k], sizeof jpath[k], "/tmp/borgvk_cs_job_XXXXXX");
+      snprintf(opath[k], sizeof opath[k], "/tmp/borgvk_cs_out_XXXXXX");
+      pids[k] = -1;
+      int jfd = mkstemp(jpath[k]), ofd = mkstemp(opath[k]);
+      if (jfd < 0 || ofd < 0) { ran = false; continue; }
+      uint32_t lo = extent * k / nparts, hi = extent * (k + 1) / nparts;
+      uint32_t hdr[HDR];
+      memcpy(hdr, job, sizeof hdr);
+      hdr[1 + axis] = hi - lo;        /* gx gy gz */
+      hdr[9 + axis] = lo;             /* bx by bz */
+      if (write(jfd, hdr, sizeof hdr) != (ssize_t)sizeof hdr) ran = false;
+      for (size_t o = sizeof hdr; o < job_len; ) {
+         ssize_t n = write(jfd, job + o, job_len - o);
          if (n <= 0) break;
          o += (size_t)n;
       }
       close(jfd);
       close(ofd);
-      pid_t pid = fork();
-      if (pid == 0) {
+      pids[k] = fork();
+      if (pids[k] == 0) {
          setenv("BORG_SIM_CFG", "simt", 1);
-         execlp(direct, direct, "--compute", jpath, opath, (char *)NULL);
+         execlp(direct, direct, "--compute", jpath[k], opath[k], (char *)NULL);
          _exit(127);
       }
-      int st = 0;
-      waitpid(pid, &st, 0);
-      FILE *f = fopen(opath, "rb");
-      if (f && WIFEXITED(st) && WEXITSTATUS(st) == 0) {
-         for (uint32_t i = 0; i < nbufs; i++) {
-            uint8_t *tmp = malloc(((bufs[i].size + 3) & ~3u) + 1);
-            if (tmp && fread(tmp, 1, bufs[i].size, f) == bufs[i].size)
-               memcpy(bufs[i].host, tmp, bufs[i].size);
-            free(tmp);
-            fseek(f, ((bufs[i].size + 3) & ~3u) - bufs[i].size, SEEK_CUR);
-         }
-         cmd->dispatched = true;
-      } else {
-         mesa_logw("borgvk: compute sim failed (status %d)", st);
-      }
-      if (f) fclose(f);
    }
-   unlink(jpath);
-   unlink(opath);
+   /* Merged result per buffer: the original bytes with every changed byte of every slice. */
+   uint8_t *merged[BORGVK_MAX_BINDINGS] = { 0 };
+   for (uint32_t i = 0; i < nbufs; i++) {
+      merged[i] = malloc(((bufs[i].size + 3) & ~3u) + 1);
+      memcpy(merged[i], bufs[i].decoded ? bufs[i].decoded : bufs[i].host, bufs[i].size);
+   }
+   for (uint32_t k = 0; k < nparts; k++) {
+      int st = 0;
+      if (pids[k] > 0)
+         waitpid(pids[k], &st, 0);
+      FILE *f = pids[k] > 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0 ? fopen(opath[k], "rb") : NULL;
+      if (!f) {
+         mesa_logw("borgvk: compute sim failed (status %d)", st);
+         ran = false;
+         continue;
+      }
+      for (uint32_t i = 0; i < nbufs; i++) {
+         uint8_t *tmp = malloc(((bufs[i].size + 3) & ~3u) + 1);
+         const uint8_t *orig = bufs[i].decoded ? bufs[i].decoded : bufs[i].host;
+         if (tmp && fread(tmp, 1, bufs[i].size, f) == bufs[i].size)
+            for (uint32_t b = 0; b < bufs[i].size; b++)
+               if (tmp[b] != orig[b])
+                  merged[i][b] = tmp[b];
+         free(tmp);
+         fseek(f, ((bufs[i].size + 3) & ~3u) - bufs[i].size, SEEK_CUR);
+      }
+      fclose(f);
+   }
+   if (ran) {
+      for (uint32_t i = 0; i < nbufs; i++)
+         if (bufs[i].wb)
+            memcpy(bufs[i].host, merged[i] + bufs[i].skip, bufs[i].size - bufs[i].skip);
+      cmd->dispatched = true;
+   }
+   for (uint32_t k = 0; k < nparts; k++) {
+      if (!getenv("BORGVK_KEEP_JOB"))
+         unlink(jpath[k]);
+      unlink(opath[k]);
+   }
+   for (uint32_t i = 0; i < nbufs; i++) {
+      free(merged[i]);
+      free(bufs[i].decoded);
+   }
    free(job);
 }
 
