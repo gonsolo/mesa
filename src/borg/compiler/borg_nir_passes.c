@@ -70,6 +70,9 @@ borg_lower_nir_for_borgc(struct nir_shader *nir)
    NIR_PASS(_, nir, nir_lower_system_values);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
             borg_spirv_options.ubo_addr_format);
+   /* Storage buffers (compute): load/store/atomic_ssbo intrinsics. */
+   NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ssbo,
+            borg_spirv_options.ssbo_addr_format);
    /* Push constants. Confirmed empirically (not assumed): with
     * push_const_addr_format left at its default, a `layout(push_constant)`
     * access arrives here as a plain load_deref, same as any other pointer,

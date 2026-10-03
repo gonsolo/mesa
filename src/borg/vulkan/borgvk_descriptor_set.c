@@ -162,6 +162,7 @@ borgvk_UpdateDescriptorSets(VkDevice _device,
          VK_FROM_HANDLE(borgvk_buffer, buffer, w->pBufferInfo[0].buffer);
          set->buffers[w->dstBinding] = buffer;
          set->offsets[w->dstBinding] = w->pBufferInfo[0].offset;
+         set->ranges[w->dstBinding] = w->pBufferInfo[0].range;
       }
 
       /* Record the sampler (combined image sampler or a plain sampler); the

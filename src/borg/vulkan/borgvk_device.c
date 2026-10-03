@@ -910,6 +910,7 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
    BORGVK_RECORD_CMD(CmdSetEvent2);        BORGVK_RECORD_CMD(CmdResetEvent2);
    BORGVK_RECORD_CMD(CmdBindPipeline);     BORGVK_RECORD_CMD(CmdBindVertexBuffers);
    BORGVK_RECORD_CMD(CmdBindDescriptorSets); BORGVK_RECORD_CMD(CmdDraw);
+   BORGVK_RECORD_CMD(CmdDispatch);
 #undef BORGVK_RECORD_CMD
    /* Finally, fill anything STILL null from the runtime's generic
     * implementations.  vk_cmd_enqueue_device_entrypoints above only covers

@@ -103,6 +103,8 @@ borgvk_CreateComputePipelines(VkDevice _device, VkPipelineCache cache,
          pPipelines[i] = VK_NULL_HANDLE;
          break;
       }
+      VK_FROM_HANDLE(borgvk_pipeline, pl, pPipelines[i]);
+      borgvk_compile_compute_stage(device, &pCreateInfos[i].stage, pl);
    }
    for (; i < count; i++)
       pPipelines[i] = VK_NULL_HANDLE;

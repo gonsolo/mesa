@@ -1002,10 +1002,106 @@ borgvk_CmdBindPipeline(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipeli
 {
    VK_FROM_HANDLE(vk_command_buffer, vk_cmd, commandBuffer);
    struct borgvk_command_buffer *cmd = container_of(vk_cmd, struct borgvk_command_buffer, vk);
-   if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS) {
-      VK_FROM_HANDLE(borgvk_pipeline, pl, _pipeline);
+   VK_FROM_HANDLE(borgvk_pipeline, pl, _pipeline);
+   if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS)
       cmd->gfx_pipeline = pl;
+   else if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE)
+      cmd->cs_pipeline = pl;
+}
+
+/* Compute (simulator only): the compute shader's buffers live in fixed windows of GPU memory,
+ * one per binding, which the host fills before the dispatch and reads back afterwards (the
+ * addresses are baked into the program by borgc's compute backend, see compute.rs). The job
+ * goes to `direct_sim --compute`. Runs when the recorded commands replay at submit, so it
+ * lands in command order. */
+#define BORGVK_CS_SLOT_BYTES (0x10000u * 4)
+#define BORGVK_CS_BASE_BYTES (0x40000u * 4)
+
+static void
+put_u32(uint8_t **p, uint32_t v)
+{
+   memcpy(*p, &v, 4);
+   *p += 4;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint32_t gz)
+{
+   VK_FROM_HANDLE(vk_command_buffer, vk_cmd, commandBuffer);
+   struct borgvk_command_buffer *cmd = container_of(vk_cmd, struct borgvk_command_buffer, vk);
+   const struct borgvk_pipeline *pl = cmd->cs_pipeline;
+   const char *direct = getenv("BORGVK_SIM_DIRECT");
+   if (!pl || !pl->cs_ok || !gx || !gy || !gz || !direct || !direct[0])
+      return;
+   struct borgvk_descriptor_set *set = cmd->desc_set;
+
+   struct { uint8_t *host; uint32_t size, addr; } bufs[BORGVK_MAX_BINDINGS];
+   uint32_t nbufs = 0, total = 0;
+   for (uint32_t b = 0; set && b < BORGVK_MAX_BINDINGS; b++) {
+      struct borgvk_buffer *buf = set->buffers[b];
+      if (!buf || !buf->mem || !buf->mem->map)
+         continue;
+      VkDeviceSize avail = buf->vk.size > set->offsets[b] ? buf->vk.size - set->offsets[b] : 0;
+      VkDeviceSize size = set->ranges[b] == VK_WHOLE_SIZE || set->ranges[b] > avail ? avail : set->ranges[b];
+      if (size > BORGVK_CS_SLOT_BYTES)
+         size = BORGVK_CS_SLOT_BYTES;
+      bufs[nbufs].host = (uint8_t *)buf->mem->map + buf->offset + set->offsets[b];
+      bufs[nbufs].size = (uint32_t)size;
+      bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + b * BORGVK_CS_SLOT_BYTES;
+      total += 8 + ((uint32_t)size + 3) / 4 * 4;
+      nbufs++;
    }
+
+   size_t cap = 9 * 4 + pl->cs_nwords * 4 + pl->cs_nregs * 8 + total;
+   uint8_t *job = malloc(cap), *w = job;
+   put_u32(&w, pl->cs_nwords); put_u32(&w, gx); put_u32(&w, gy); put_u32(&w, gz);
+   put_u32(&w, pl->cs_local[0]); put_u32(&w, pl->cs_local[1]); put_u32(&w, pl->cs_local[2]);
+   put_u32(&w, pl->cs_nregs); put_u32(&w, nbufs);
+   for (uint32_t i = 0; i < pl->cs_nwords; i++) put_u32(&w, pl->cs_words[i]);
+   for (uint32_t i = 0; i < pl->cs_nregs; i++) { put_u32(&w, pl->cs_regs[2 * i]); put_u32(&w, pl->cs_regs[2 * i + 1]); }
+   for (uint32_t i = 0; i < nbufs; i++) {
+      put_u32(&w, bufs[i].addr); put_u32(&w, bufs[i].size);
+      memcpy(w, bufs[i].host, bufs[i].size);
+      memset(w + bufs[i].size, 0, ((bufs[i].size + 3) & ~3u) - bufs[i].size);
+      w += (bufs[i].size + 3) & ~3u;
+   }
+
+   char jpath[] = "/tmp/borgvk_cs_job_XXXXXX", opath[] = "/tmp/borgvk_cs_out_XXXXXX";
+   int jfd = mkstemp(jpath), ofd = mkstemp(opath);
+   if (jfd >= 0 && ofd >= 0) {
+      for (size_t o = 0; o < (size_t)(w - job); ) {
+         ssize_t n = write(jfd, job + o, (size_t)(w - job) - o);
+         if (n <= 0) break;
+         o += (size_t)n;
+      }
+      close(jfd);
+      close(ofd);
+      pid_t pid = fork();
+      if (pid == 0) {
+         setenv("BORG_SIM_CFG", "simt", 1);
+         execlp(direct, direct, "--compute", jpath, opath, (char *)NULL);
+         _exit(127);
+      }
+      int st = 0;
+      waitpid(pid, &st, 0);
+      FILE *f = fopen(opath, "rb");
+      if (f && WIFEXITED(st) && WEXITSTATUS(st) == 0) {
+         for (uint32_t i = 0; i < nbufs; i++) {
+            uint8_t *tmp = malloc(((bufs[i].size + 3) & ~3u) + 1);
+            if (tmp && fread(tmp, 1, bufs[i].size, f) == bufs[i].size)
+               memcpy(bufs[i].host, tmp, bufs[i].size);
+            free(tmp);
+            fseek(f, ((bufs[i].size + 3) & ~3u) - bufs[i].size, SEEK_CUR);
+         }
+         cmd->dispatched = true;
+      } else {
+         mesa_logw("borgvk: compute sim failed (status %d)", st);
+      }
+      if (f) fclose(f);
+   }
+   unlink(jpath);
+   unlink(opath);
+   free(job);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1108,7 +1204,8 @@ borgvk_queue_submit_work(struct vk_queue *vk_queue, struct vk_queue_submit *subm
          return borgvk_submit_sim_cube(device, submit);
       /* Generic draws already ran, at their place in the replay above. */
       for (uint32_t ci = 0; ci < submit->command_buffer_count; ci++)
-         if (container_of(submit->command_buffers[ci], struct borgvk_command_buffer, vk)->generic_drawn)
+         if (container_of(submit->command_buffers[ci], struct borgvk_command_buffer, vk)->generic_drawn ||
+             container_of(submit->command_buffers[ci], struct borgvk_command_buffer, vk)->dispatched)
             return VK_SUCCESS;
       return borgvk_submit_sim_draw(submit);
    }

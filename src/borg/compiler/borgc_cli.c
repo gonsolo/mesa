@@ -120,6 +120,7 @@ main(int argc, char **argv)
    mesa_shader_stage stage;
    if (!strcmp(stage_name, "vert"))      stage = MESA_SHADER_VERTEX;
    else if (!strcmp(stage_name, "frag")) stage = MESA_SHADER_FRAGMENT;
+   else if (!strcmp(stage_name, "comp")) stage = MESA_SHADER_COMPUTE;
    else {
       fprintf(stderr, "borgc-cli: unknown stage '%s' (vert|frag)\n", stage_name);
       return 2;
@@ -148,6 +149,14 @@ main(int argc, char **argv)
     * silent truncation. */
    uint8_t blob[8192];
    uint32_t len = 0;
+   if (stage == MESA_SHADER_COMPUTE) {
+      uint32_t w[128], r[64], nw = 0, nr = 0, local[3];
+      uint32_t rc = borgc_compile_compute(nir, w, 128, &nw, r, 32, &nr, local);
+      printf("compute rc=%u local=%u,%u,%u words=%u\n", rc, local[0], local[1], local[2], nw);
+      for (uint32_t i = 0; rc == 0 && i < nw; i++) printf("  %08x\n", w[i]);
+      for (uint32_t i = 0; rc == 0 && i < nr; i++) printf("  r%u = %u\n", r[2*i], r[2*i+1]);
+      return rc;
+   }
    uint32_t n_instrs = borgc_compile_nir(nir, blob, sizeof blob, &len);
    int rc = 0;
 

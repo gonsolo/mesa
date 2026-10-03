@@ -155,6 +155,8 @@ struct borgvk_command_buffer {
    const uint8_t *vb[BORGVK_MAX_VERTEX_BINDINGS];
    struct borgvk_descriptor_set *desc_set;
    bool generic_drawn;
+   const struct borgvk_pipeline *cs_pipeline;   /* bound compute pipeline */
+   bool dispatched;                             /* ran a compute dispatch at replay */
 };
 
 extern const struct vk_command_buffer_ops borgvk_cmd_buffer_ops;
@@ -241,6 +243,9 @@ VkResult borgvk_queue_submit(struct vk_queue *queue,
 
 /* Compiler shim (borgvk_compiler.c → Rust borgc crate). */
 void borgvk_compiler_selftest(void);
+void borgvk_compile_compute_stage(struct borgvk_device *device,
+                                  const VkPipelineShaderStageCreateInfo *stage_info,
+                                  struct borgvk_pipeline *pipeline);
 void borgvk_compile_stage(struct borgvk_device *device,
                           const VkPipelineShaderStageCreateInfo *stage_info);
 
@@ -322,6 +327,7 @@ struct borgvk_descriptor_set {
    struct vk_object_base base;
    struct borgvk_buffer *buffers[BORGVK_MAX_BINDINGS];
    VkDeviceSize offsets[BORGVK_MAX_BINDINGS];
+   VkDeviceSize ranges[BORGVK_MAX_BINDINGS];
    struct borgvk_image *images[BORGVK_MAX_BINDINGS];
    /* The view behind images[]: view type, format, mip/layer range, swizzle. */
    struct vk_image_view *views[BORGVK_MAX_BINDINGS];
@@ -347,6 +353,13 @@ struct borgvk_pipeline {
    uint32_t                  binding_stride[BORGVK_MAX_VERTEX_BINDINGS];
    uint32_t                  attr_count;
    struct borgvk_vertex_attr attrs[BORGVK_MAX_VERTEX_ATTRS];
+   /* Compute: the borgc program, the registers the driver presets (register,
+    * value pairs) and LocalSize. cs_ok is false when borgc refused the shader. */
+   bool     cs_ok;
+   uint32_t cs_nwords, cs_nregs;
+   uint32_t cs_words[80];
+   uint32_t cs_regs[64];
+   uint32_t cs_local[3];
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_descriptor_set_layout, vk.base,

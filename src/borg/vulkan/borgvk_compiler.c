@@ -81,3 +81,28 @@ borgvk_compile_stage(struct borgvk_device *device,
    }
    ralloc_free(nir);
 }
+
+/* Compute pipeline: SPIR-V -> NIR -> borgc's compute backend. */
+void
+borgvk_compile_compute_stage(struct borgvk_device *device,
+                             const VkPipelineShaderStageCreateInfo *stage_info,
+                             struct borgvk_pipeline *pipeline)
+{
+   struct nir_shader *nir = NULL;
+   VkResult result =
+      vk_pipeline_shader_stage_to_nir(&device->vk, 0, stage_info,
+                                      &borg_spirv_options, &borg_nir_options,
+                                      NULL, &nir);
+   if (result != VK_SUCCESS || nir == NULL) {
+      mesa_logw("borgvk: SPIR-V->NIR failed for compute stage (%d)", result);
+      return;
+   }
+   borg_lower_nir_for_borgc(nir);
+   uint32_t rc = borgc_compile_compute(nir, pipeline->cs_words, 80, &pipeline->cs_nwords,
+                                       pipeline->cs_regs, 32, &pipeline->cs_nregs,
+                                       pipeline->cs_local);
+   pipeline->cs_ok = rc == 0;
+   mesa_logi("borgvk: compute shader %s (%u words, %u presets)", rc == 0 ? "compiled" : "REFUSED",
+             pipeline->cs_nwords, pipeline->cs_nregs);
+   ralloc_free(nir);
+}

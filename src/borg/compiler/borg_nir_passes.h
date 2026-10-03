@@ -44,6 +44,12 @@ uint32_t borgc_compile_nir(struct nir_shader *nir, uint8_t *out_buf,
                            uint32_t buf_cap, uint32_t *out_len);
 uint32_t borgc_selftest(void);
 
+/* Compute: program words, (register, value) presets and LocalSize. 0 on success. */
+uint32_t borgc_compile_compute(struct nir_shader *nir,
+                               uint32_t *words, uint32_t word_cap, uint32_t *nwords,
+                               uint32_t *regs, uint32_t reg_cap, uint32_t *nregs,
+                               uint32_t *local);
+
 #ifdef __cplusplus
 }
 #endif

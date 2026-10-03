@@ -15,6 +15,7 @@
 
 #![allow(non_upper_case_globals)]
 
+mod compute;
 mod encode;
 mod isel;
 mod opt;
@@ -47,10 +48,10 @@ pub(crate) const NO_DST: u32 = u32::MAX;
 /// block, EXELSE before the first `else` block, EXPOP before the block
 /// following the `if`. That symmetry is why this is a single "before" map
 /// rather than a pair of before/after lists.
-struct CfMark {
-    mnem: &'static str,
+pub(crate) struct CfMark {
+    pub(crate) mnem: &'static str,
     /// Condition def index, for EXPUSH only.
-    cond: Option<u32>,
+    pub(crate) cond: Option<u32>,
 }
 
 pub(crate) struct BorgInstr {
@@ -161,7 +162,7 @@ fn decompose_vertex_offset(
     Some((base / 4, stride / 4))
 }
 
-unsafe fn collect_cf_marks(
+pub(crate) unsafe fn collect_cf_marks(
     nodes: compiler::nir::ExecListIter<'_, nir_cf_node>,
     marks: &mut std::collections::HashMap<usize, Vec<CfMark>>,
     unsupported: &mut Vec<&'static str>,
