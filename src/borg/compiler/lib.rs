@@ -1169,7 +1169,14 @@ pub unsafe extern "C" fn borgc_compile_nir(
                             }
                         } else {
                             let base_index = 4 * loc.wrapping_sub(VARYING_SLOT_VAR0);
-                            for (c, &(vd, vc)) in comps.iter().enumerate() {
+                            for (c, &(vd0, vc)) in comps.iter().enumerate() {
+                                let mut vd = vd0;
+                                // SOUT stores a register; a constant living in the uniform window needs a copy.
+                                if matches!(ubo.get(&vd), Some(Ubo::Uniform(_))) {
+                                    let out = next_vreg; next_vreg += 1;
+                                    prog.push(BorgInstr { mnem: "FMOV", dst: out, srcs: vec![vd], swz: vec![0] });
+                                    vd = out;
+                                }
                                 let index = base_index + c as u32;
                                 assert!(index < 256, "borgc: SOUT index {index} does not fit a byte");
                                 prog.push(BorgInstr {
@@ -1263,10 +1270,20 @@ pub unsafe extern "C" fn borgc_compile_nir(
                         // every instruction, not a separate LOAD.
                         let comps: Vec<(u32, u8)> = (0..n)
                             .map(|c| {
-                                let idx = 20 + draw_uniform_count;
-                                draw_uniform_count += 1;
                                 let bits = unsafe { lc.values()[c].u32_ };
-                                draw_uniform_consts.push((idx, bits));
+                                let idx = if vs_const_window {
+                                    // A vertex shader reads its own window, not the fragment one.
+                                    assert!(draw_vs_consts.len() < DRAW_VS_CONST_WORDS,
+                                        "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
+                                    let u = DRAW_VS_CONST_U0 as u32 + draw_vs_consts.len() as u32;
+                                    draw_vs_consts.push((u as u8, bits));
+                                    u
+                                } else {
+                                    let u = 20 + draw_uniform_count;
+                                    draw_uniform_count += 1;
+                                    draw_uniform_consts.push((u, bits));
+                                    u
+                                };
                                 let v = next_vreg;
                                 next_vreg += 1;
                                 ubo.insert(v, Ubo::Uniform(idx as u8));

@@ -925,6 +925,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    float verts[BORGVK_GEOM_MAX_VERTS * 3];
    uint8_t idx[BORGVK_GEOM_MAX_TRIS * 3];
    float uv[BORGVK_GEOM_MAX_TRIS * 3 * 2];
+   float attr4[BORGVK_GEOM_MAX_TRIS * 3 * 4];
    int nverts = 0;
    for (uint32_t i = 0; i < vert_count; i++) {
       float pos[4], tc[4] = { 0, 0, 0, 1 };
@@ -947,6 +948,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       idx[i] = (uint8_t)u;
       uv[i*2+0] = tc[0];
       uv[i*2+1] = tc[1];
+      memcpy(&attr4[i*4], tc, sizeof(tc));
    }
 
    static const float identity[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
@@ -967,6 +969,8 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       borgvk_serial_send_target(fmt, clear);
    }
    borgvk_serial_send_geom(verts, nverts, idx, uv, (int)(vert_count / 3));
+   if (a_uv && (a_uv->format == VK_FORMAT_R32G32B32_SFLOAT || a_uv->format == VK_FORMAT_R32G32B32A32_SFLOAT))
+      borgvk_serial_send_attr4(attr4, (int)vert_count);
    for (int b = 0; set && b < BORGVK_MAX_BINDINGS; b++)
       if (set->views[b] && send_generic_texture(set->views[b], set->images[b], set->samplers[b]))
          break;
@@ -978,6 +982,8 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       free(bytes);
       return true;
    }
+   for (uint32_t k = 0; k < pipeline->attr_count; k++)
+      mesa_logi("borgvk: attr loc %u fmt %d off %u bind %u", pipeline->attrs[k].location, pipeline->attrs[k].format, pipeline->attrs[k].offset, pipeline->attrs[k].binding);
    mesa_logi("borgvk: generic sim draw: %u verts -> %d unique, %zu byte stream, target %ux%u",
              vert_count, nverts, nbytes, color_img->vk.extent.width,
              color_img->vk.extent.height);

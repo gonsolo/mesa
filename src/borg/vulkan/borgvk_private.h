@@ -174,6 +174,7 @@ void borgvk_blend_pack(const VkPipelineColorBlendStateCreateInfo *cb,
 /* 0xB4: STENCIL_CFG, STENCIL_FRONT, STENCIL_BACK, DEPTH_CFG, CULL_CFG. */
 void borgvk_serial_send_state(const uint32_t reg[5]);
 void borgvk_serial_send_target(uint8_t flush_format, const float clear[4]);
+void borgvk_serial_send_attr4(const float *attr, int n);
 /* 0xB5: one chunk (<= 256 B at byte offset `off`) of a texture's texels plus
  * the texture descriptor words 1..3 and the four sampler words
  * (docs/B2_texture_unit.md); descriptor and sampler ride with every chunk. */

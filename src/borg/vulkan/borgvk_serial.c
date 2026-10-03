@@ -529,6 +529,23 @@ borgvk_serial_send_target(uint8_t flush_format, const float clear[4])
    borgvk_transport_emit(pkt, sizeof(pkt));
 }
 
+/* Host-simulator only: vec4 attribute at location 1 for each of n corners. */
+void
+borgvk_serial_send_attr4(const float *attr, int n)
+{
+   uint8_t pkt[1 + 1 + 36 * 16 + 1];
+   memset(pkt, 0, sizeof(pkt));
+   pkt[0] = 0xB7;
+   pkt[1] = (uint8_t)n;
+   for (int i = 0; i < n * 4; i++)
+      put_f32_le(&pkt[2 + 4 * i], attr[i]);
+   uint8_t csum = 0;
+   for (int i = 1; i < (int)sizeof(pkt) - 1; i++)
+      csum ^= pkt[i];
+   pkt[sizeof(pkt) - 1] = csum;
+   borgvk_transport_emit(pkt, sizeof(pkt));
+}
+
 static uint32_t
 stencil_face_pack(const VkStencilOpState *f)
 {
