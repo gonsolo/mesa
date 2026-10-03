@@ -342,6 +342,7 @@ pub unsafe extern "C" fn borgc_compile_nir(
     let mut per_pixel_fixed: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut frag_coord_w = false;
     let mut fetch_ctl_uniform: Option<u32> = None;
+    let mut frag_window_by_bits: HashMap<u32, u32> = HashMap::new();
     // Scalar load_const f32 bits (for the sRGB idiom match) and a producer map
     // (alu def → its op + resolved scalar srcs) for recognising the bcsel tree.
     let mut consts: HashMap<u32, u32> = HashMap::new();
@@ -612,8 +613,12 @@ pub unsafe extern "C" fn borgc_compile_nir(
                     // its own (the ISA has no immediates): give it a word in the constant
                     // window, shared by value, the way vector constants get theirs.
                     // Integer constants stay address-walk patterns (see `walk`).
-                    if draw_mode && matches!(alu.op, nir_op_fadd | nir_op_fmul | nir_op_ffma
+                    // Fragment integer arithmetic reads its constants the same way (the vertex
+                    // stage's integer constants are address math, handled by `walk`).
+                    if draw_mode && (matches!(alu.op, nir_op_fadd | nir_op_fmul | nir_op_ffma
                         | nir_op_flt | nir_op_fge | nir_op_feq | nir_op_fneu | nir_op_bcsel)
+                        || (stage == 4 && matches!(alu.op, nir_op_iadd | nir_op_imul | nir_op_ishl
+                            | nir_op_ishr | nir_op_ushr)))
                     {
                         let first = if alu.op == nir_op_bcsel { 1 } else { 0 };
                         for sr in &alu.srcs_as_slice()[first..] {
@@ -628,11 +633,14 @@ pub unsafe extern "C" fn borgc_compile_nir(
                                 let u = DRAW_VS_CONST_U0 as u32 + draw_vs_consts.len() as u32;
                                 draw_vs_consts.push((u as u8, bits));
                                 u
+                            } else if let Some(&u) = frag_window_by_bits.get(&bits) {
+                                u   // the same value already has a word
                             } else {
                                 assert!(draw_uniform_count < 12, "borgc: fragment shader needs more than 12 window constants");
                                 let u = 20 + draw_uniform_count;
                                 draw_uniform_count += 1;
                                 draw_uniform_consts.push((u, bits));
+                                frag_window_by_bits.insert(bits, u);
                                 u
                             };
                             let v = next_vreg;
