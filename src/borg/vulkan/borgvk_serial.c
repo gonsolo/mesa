@@ -493,3 +493,62 @@ borgvk_serial_send_mvp(const float mvp[16])
       }
    }
 }
+
+#define BORGVK_MARKER_STATE   0xB4
+/* 0xB4 raster state: marker, 5 register values (LE u32), csum. */
+void
+borgvk_serial_send_state(const uint32_t reg[5])
+{
+   uint8_t pkt[22];
+   pkt[0] = BORGVK_MARKER_STATE;
+   for (int r = 0; r < 5; r++)
+      for (int i = 0; i < 4; i++)
+         pkt[1 + 4 * r + i] = (uint8_t)(reg[r] >> (8 * i));
+   uint8_t csum = 0;
+   for (int i = 1; i < 21; i++)
+      csum ^= pkt[i];
+   pkt[21] = csum;
+   borgvk_transport_emit(pkt, sizeof(pkt));
+}
+
+static uint32_t
+stencil_face_pack(const VkStencilOpState *f)
+{
+   return ((uint32_t)f->compareMask & 0xFF) |
+          ((uint32_t)f->writeMask & 0xFF) << 8 |
+          ((uint32_t)f->reference & 0xFF) << 16;
+}
+
+void
+borgvk_state_pack(const VkGraphicsPipelineCreateInfo *ci, uint32_t reg[5])
+{
+   /* Reset state: no stencil, depth LESS + write, cull back faces. */
+   reg[0] = 0;
+   reg[1] = reg[2] = 0;
+   reg[3] = 1u | (1u << 3);
+   reg[4] = 2u;
+
+   const VkPipelineDepthStencilStateCreateInfo *ds = ci->pDepthStencilState;
+   if (ds) {
+      /* Vulkan compare and stencil-op enums pass through unchanged. */
+      uint32_t cmp = ds->depthTestEnable ? ((uint32_t)ds->depthCompareOp & 7) : 7u;
+      reg[3] = cmp | ((ds->depthTestEnable && ds->depthWriteEnable) ? 1u << 3 : 0u);
+      if (ds->stencilTestEnable) {
+         const VkStencilOpState *f = &ds->front, *b = &ds->back;
+         reg[0] = 1u |
+                  ((uint32_t)f->compareOp & 7) << 1 | ((uint32_t)f->failOp & 7) << 4 |
+                  ((uint32_t)f->passOp & 7) << 7 | ((uint32_t)f->depthFailOp & 7) << 10 |
+                  ((uint32_t)b->compareOp & 7) << 13 | ((uint32_t)b->failOp & 7) << 16 |
+                  ((uint32_t)b->passOp & 7) << 19 | ((uint32_t)b->depthFailOp & 7) << 22;
+         reg[1] = stencil_face_pack(f);
+         reg[2] = stencil_face_pack(b);
+      }
+   }
+   const VkPipelineRasterizationStateCreateInfo *rs = ci->pRasterizationState;
+   if (rs) {
+      /* VkCullModeFlags bit 0 = front, bit 1 = back, as in CULL_CFG. cube.c's
+       * CCW winding is the hardware's unmodified facing; CW inverts it. */
+      reg[4] = ((uint32_t)rs->cullMode & 3) |
+               (rs->frontFace == VK_FRONT_FACE_CLOCKWISE ? 1u << 2 : 0u);
+   }
+}

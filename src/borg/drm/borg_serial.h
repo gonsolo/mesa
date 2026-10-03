@@ -18,4 +18,7 @@ void borg_serial_send_tex_row(int y, const uint8_t *rgba, const uint32_t sampler
 void borg_serial_send_mvp(const float mvp[16]);
 /* 0xB3: BLEND_CFG and BLEND_CONST register values. */
 void borg_serial_send_blend(uint32_t blend_cfg, uint32_t blend_const);
+
+/* 0xB4: STENCIL_CFG, STENCIL_FRONT, STENCIL_BACK, DEPTH_CFG, CULL_CFG. */
+void borg_serial_send_state(const uint32_t reg[5]);
 void borg_serial_send_shader(uint8_t stage, const uint8_t *blob, uint32_t len);

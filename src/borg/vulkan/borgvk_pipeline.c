@@ -77,6 +77,8 @@ borgvk_CreateComputePipelines(VkDevice _device, VkPipelineCache cache,
    uint32_t i;
 
    for (i = 0; i < count; i++) {
+      borgvk_state_pack(&pCreateInfos[i], device->state_reg);
+      device->state_valid = true;
       result = borgvk_create_pipeline(device, pAllocator, &pPipelines[i]);
       if (result != VK_SUCCESS) {
          pPipelines[i] = VK_NULL_HANDLE;

@@ -45,6 +45,7 @@
 #define DRM_BORG_SUBMIT       0x03   /* per-frame MVP send                  */
 #define DRM_BORG_SHADER       0x04   /* upload a borgc-compiled shader blob */
 #define DRM_BORG_BLEND        0x05   /* colour-blend state (BLEND_CFG/CONST) */
+#define DRM_BORG_STATE        0x06   /* stencil/depth/cull state registers */
 
 /* Max .borg blob the shader-upload path carries (must match the Vulkan side's
  * BORGVK_SHADER_BLOB_MAX and the firmware RX shader packet). cube.frag = 255 B
@@ -114,5 +115,15 @@ struct drm_borg_blend {
 
 #define DRM_IOCTL_BORG_BLEND \
    DRM_IOW (DRM_COMMAND_BASE + DRM_BORG_BLEND,       struct drm_borg_blend)
+
+/* Fixed-function raster state in register layout (hardware/rdl/borg.rdl):
+ * STENCIL_CFG, STENCIL_FRONT, STENCIL_BACK, DEPTH_CFG, CULL_CFG. */
+#define DRM_BORG_STATE_REGS 5
+struct drm_borg_state {
+   uint32_t reg[DRM_BORG_STATE_REGS];
+};
+
+#define DRM_IOCTL_BORG_STATE \
+   DRM_IOW (DRM_COMMAND_BASE + DRM_BORG_STATE,       struct drm_borg_state)
 
 #endif /* BORG_DRM_H */

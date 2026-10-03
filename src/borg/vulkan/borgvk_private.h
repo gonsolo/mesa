@@ -110,6 +110,10 @@ struct borgvk_device {
     * in BLEND_CFG / BLEND_CONST register layout (see borgvk_blend_pack()). */
    uint32_t blend_cfg;
    uint32_t blend_const;
+   /* Stencil / depth / cull state of the last graphics pipeline created, in
+    * register layout (see borgvk_state_pack()); state_valid once set. */
+   uint32_t state_reg[5];
+   bool     state_valid;
 };
 
 /* A render pass/framebuffer or dynamic-rendering scope currently open on this
@@ -157,6 +161,10 @@ void borgvk_serial_send_blend(uint32_t blend_cfg, uint32_t blend_const);
  * (hardware/rdl/borg.rdl); the Vulkan enum values pass through unchanged. */
 void borgvk_blend_pack(const VkPipelineColorBlendStateCreateInfo *cb,
                        uint32_t *cfg, uint32_t *konst);
+/* 0xB4: STENCIL_CFG, STENCIL_FRONT, STENCIL_BACK, DEPTH_CFG, CULL_CFG. */
+void borgvk_serial_send_state(const uint32_t reg[5]);
+/* Pack a pipeline's stencil, depth and cull state into register layout. */
+void borgvk_state_pack(const VkGraphicsPipelineCreateInfo *ci, uint32_t reg[5]);
 
 /* Max mesh the firmware's fixed-length 0xAE geometry packet carries (must match
  * the firmware RX_GEOM_*). cube.c is 8 unique verts / 12 triangles. */

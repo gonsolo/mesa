@@ -515,6 +515,16 @@ send_blend_state(const struct borgvk_device *device)
       if (drmIoctl(device->drm_fd, DRM_IOCTL_BORG_BLEND, &b) != 0)
          mesa_logw("borgvk: DRM_IOCTL_BORG_BLEND failed");
    } else {
+   if (device->state_valid) {
+      if (device->drm_fd >= 0) {
+         struct drm_borg_state s;
+         memcpy(s.reg, device->state_reg, sizeof(s.reg));
+         if (drmIoctl(device->drm_fd, DRM_IOCTL_BORG_STATE, &s) != 0)
+            mesa_logw("borgvk: DRM_IOCTL_BORG_STATE failed");
+      } else {
+         borgvk_serial_send_state(device->state_reg);
+      }
+   }
       borgvk_serial_send_blend(device->blend_cfg, device->blend_const);
    }
 }

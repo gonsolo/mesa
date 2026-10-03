@@ -239,3 +239,21 @@ borg_serial_send_mvp(const float mvp[16])
       }
    }
 }
+
+void
+borg_serial_send_state(const uint32_t reg[5])
+{
+   int fd = borg_serial_open();
+   if (fd < 0) return;
+
+   /* marker, 5 register values (LE u32), csum */
+   uint8_t pkt[22];
+   pkt[0] = 0xB4;
+   for (int r = 0; r < 5; r++)
+      for (int i = 0; i < 4; i++)
+         pkt[1 + 4 * r + i] = (uint8_t)(reg[r] >> (8 * i));
+   uint8_t csum = 0;
+   for (int i = 1; i < 21; i++) csum ^= pkt[i];
+   pkt[21] = csum;
+   borg_serial_write_paced(fd, pkt, sizeof(pkt));
+}
