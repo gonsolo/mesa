@@ -615,7 +615,8 @@ pub unsafe extern "C" fn borgc_compile_nir(
                                 .collect();
                             vec_map.insert(alu.def.index, c);
                         }
-                        nir_op_mov | nir_op_i2i16 | nir_op_i2i32 | nir_op_u2u16
+                        // A graphics condition already is 1.0 or 0.0 (comparisons below), so b2f is a copy.
+                        nir_op_mov | nir_op_b2f16 | nir_op_b2f32 | nir_op_i2i16 | nir_op_i2i32 | nir_op_u2u16
                         | nir_op_u2u32 => {
                             let s = &alu.srcs_as_slice()[0];
                             let n = alu.def.num_components as usize;
@@ -778,9 +779,26 @@ pub unsafe extern "C" fn borgc_compile_nir(
                                 prog.push(BorgInstr { mnem: "FSRGB", dst: v, srcs: vec![x.0], swz: vec![x.1] });
                                 vec_map.insert(alu.def.index, vec![(v, 0)]);
                             } else {
-                                // non-sRGB bcsel: pass through the then-value.
-                                let s0 = resolve_vm(&vec_map, s[1].src.as_def().index, s[1].swizzle[0]);
-                                vec_map.insert(alu.def.index, vec![s0]);
+                                // General select: the ISA has none, but the condition
+                                // is a 0.0/1.0 float (see the comparisons above), so
+                                // else + cond * (then - else) is exact for both arms.
+                                // NIR leaves vector selects unscalarised: one per component.
+                                let n = alu.def.num_components as usize;
+                                let mut comps = Vec::new();
+                                for k in 0..n {
+                                    let c = resolve_vm(&vec_map, s[0].src.as_def().index, s[0].swizzle[k]);
+                                    let t = resolve_vm(&vec_map, s[1].src.as_def().index, s[1].swizzle[k]);
+                                    let e = resolve_vm(&vec_map, s[2].src.as_def().index, s[2].swizzle[k]);
+                                    let ne = next_vreg;
+                                    let d = next_vreg + 1;
+                                    let r = next_vreg + 2;
+                                    next_vreg += 3;
+                                    prog.push(BorgInstr { mnem: "FNEG", dst: ne, srcs: vec![e.0], swz: vec![e.1] });
+                                    prog.push(BorgInstr { mnem: "FADD", dst: d, srcs: vec![t.0, ne], swz: vec![t.1, 0] });
+                                    prog.push(BorgInstr { mnem: "FMADD", dst: r, srcs: vec![c.0, d, e.0], swz: vec![c.1, 0, e.1] });
+                                    comps.push((r, 0u8));
+                                }
+                                vec_map.insert(alu.def.index, comps);
                             }
                         }
                         _ => {
