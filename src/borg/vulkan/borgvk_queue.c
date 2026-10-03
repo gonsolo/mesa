@@ -561,13 +561,10 @@ upload_shaders(struct borgvk_device *device)
    }
 }
 
-/* True when this submit is cube.c's UBO-driven frame (vs a CTS VBO draw). */
+/* True when this descriptor set is cube.c's UBO-driven frame (vs a CTS VBO draw). */
 static bool
-submit_is_cube(struct vk_queue_submit *submit)
+set_is_cube(struct borgvk_descriptor_set *set)
 {
-   struct borgvk_descriptor_set *set = find_set(submit);
-   if (!set)
-      return false;
    struct borgvk_buffer *ubuf = set->buffers[0];
    if (!ubuf || !ubuf->mem || !ubuf->mem->map)
       return false;
@@ -576,6 +573,13 @@ submit_is_cube(struct vk_queue_submit *submit)
       return false;
    uint32_t nfloats = (uint32_t)((ubuf->vk.size - off) / sizeof(float));
    return nfloats >= UBO_MIN_FLOATS;
+}
+
+static bool
+submit_is_cube(struct vk_queue_submit *submit)
+{
+   struct borgvk_descriptor_set *set = find_set(submit);
+   return set && set_is_cube(set);
 }
 
 /* Feed a captured wire stream to `arcilator_sim --cts-uart` and write the
@@ -662,10 +666,6 @@ sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
       dup2(pfd[1], STDOUT_FILENO);
       close(pfd[1]);
       if (direct && direct[0]) {
-         /* Colour attachment format: RGBA8 targets are flushed as 4 B/pixel so the
-          * result keeps 8 bits per channel; the rest as R5G6B5. */
-         if (color_img->vk.format == VK_FORMAT_R8G8B8A8_UNORM)
-            execlp(direct, direct, uart_path, w_str, h_str, "/dev/stdout", "rgba8", (char *)NULL);
          execlp(direct, direct, uart_path, w_str, h_str, (char *)NULL);
       }
       execlp(sim_bin, sim_bin, "--cts-uart", uart_path, sim_fw,
@@ -892,57 +892,14 @@ generic_reject(int why)
 }
 
 static bool
-borgvk_submit_sim_generic(struct borgvk_device *device,
-                          struct vk_queue_submit *submit)
+borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buffer *cmd,
+                        uint32_t vert_count, uint32_t first_vert)
 {
-   struct borgvk_pipeline *pipeline = NULL;
-   const uint8_t *vb[BORGVK_MAX_VERTEX_BINDINGS] = { NULL };
-   uint32_t vert_count = 0, first_vert = 0;
-
-   /* Only textured draws: untextured vertex-colour draws stay on the mailbox
-    * path until their shaders go through borgc as well. */
-   struct borgvk_descriptor_set *set = find_set(submit);
-   if (!set)
-      return generic_reject(1);
-   bool has_view = false;
-   for (int b = 0; b < BORGVK_MAX_BINDINGS; b++)
-      has_view |= set->views[b] != NULL;
-   if (!has_view)
-      return generic_reject(2);
-
-   for (uint32_t ci = 0; ci < submit->command_buffer_count; ci++) {
-      struct vk_command_buffer *cb = submit->command_buffers[ci];
-      list_for_each_entry(struct vk_cmd_queue_entry, e, &cb->cmd_queue.cmds, cmd_link) {
-         switch (e->type) {
-         case VK_CMD_BIND_PIPELINE: {
-            const struct vk_cmd_bind_pipeline *bp = &e->u.bind_pipeline;
-            if (bp->pipeline_bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
-               VK_FROM_HANDLE(borgvk_pipeline, pl, bp->pipeline);
-               pipeline = pl;
-            }
-            break;
-         }
-         case VK_CMD_BIND_VERTEX_BUFFERS: {
-            const struct vk_cmd_bind_vertex_buffers *bv = &e->u.bind_vertex_buffers;
-            for (uint32_t i = 0; i < bv->binding_count; i++) {
-               uint32_t b = bv->first_binding + i;
-               VK_FROM_HANDLE(borgvk_buffer, buf, bv->buffers[i]);
-               if (b < BORGVK_MAX_VERTEX_BINDINGS && buf && buf->mem && buf->mem->map)
-                  vb[b] = (const uint8_t *)buf->mem->map + buf->offset + bv->offsets[i];
-            }
-            break;
-         }
-         case VK_CMD_DRAW:
-            if (vert_count == 0) {
-               vert_count = e->u.draw.vertex_count;
-               first_vert = e->u.draw.first_vertex;
-            }
-            break;
-         default:
-            break;
-         }
-      }
-   }
+   /* State as the replay left it: the bound pipeline, vertex buffers and (optionally, for a
+    * texture) descriptor set. */
+   struct borgvk_pipeline *pipeline = cmd->gfx_pipeline;
+   const uint8_t *const *vb = cmd->vb;
+   struct borgvk_descriptor_set *set = cmd->desc_set;
 
    if (!pipeline || vert_count == 0 || vert_count % 3 != 0 ||
        pipeline->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ||
@@ -957,7 +914,9 @@ borgvk_submit_sim_generic(struct borgvk_device *device,
    if (!a_pos)
       return generic_reject(4);
 
-   struct borgvk_image *color_img = find_color_attachment(submit);
+   struct borgvk_image *color_img =
+      cmd->color_views[0] && cmd->color_views[0]->image
+         ? container_of(cmd->color_views[0]->image, struct borgvk_image, vk) : NULL;
    if (!color_img || !color_img->mem || !color_img->mem->map)
       return generic_reject(5);
 
@@ -998,8 +957,17 @@ borgvk_submit_sim_generic(struct borgvk_device *device,
    borgvk_transport_capture_begin();
    upload_shaders(device);
    send_blend_state(device);
+   {
+      /* Render target: the attachment's format and the clear colour its render pass asked for. */
+      uint8_t fmt = color_img->vk.format == VK_FORMAT_R8G8B8A8_UNORM ? 1 :
+                    color_img->vk.format == VK_FORMAT_B8G8R8A8_UNORM ? 2 : 0;
+      float clear[4] = { 0, 0, 0, 0 };
+      if (cmd->has_clear)
+         memcpy(clear, cmd->clear_color, sizeof(clear));
+      borgvk_serial_send_target(fmt, clear);
+   }
    borgvk_serial_send_geom(verts, nverts, idx, uv, (int)(vert_count / 3));
-   for (int b = 0; b < BORGVK_MAX_BINDINGS; b++)
+   for (int b = 0; set && b < BORGVK_MAX_BINDINGS; b++)
       if (set->views[b] && send_generic_texture(set->views[b], set->images[b], set->samplers[b]))
          break;
    borgvk_serial_send_mvp(identity);
@@ -1015,6 +983,69 @@ borgvk_submit_sim_generic(struct borgvk_device *device,
              color_img->vk.extent.height);
    sim_run_stream(bytes, nbytes, color_img, 0);   /* firmware renders 128^2; resample to the target */
    return true;
+}
+
+/* ---- Draw state and the draw itself, run in submission order -------------------------------- *
+ * The application-facing table only records these (see borgvk_CreateDevice); cmd_dispatch runs
+ * them when the command buffer is submitted. Tracking the state here, instead of scanning the
+ * queue afterwards, is what lets a draw happen at its place in the command stream: a
+ * vkCmdCopyImageToBuffer recorded after it sees the rendered image. */
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdBindPipeline(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,
+                       VkPipeline _pipeline)
+{
+   VK_FROM_HANDLE(vk_command_buffer, vk_cmd, commandBuffer);
+   struct borgvk_command_buffer *cmd = container_of(vk_cmd, struct borgvk_command_buffer, vk);
+   if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS) {
+      VK_FROM_HANDLE(borgvk_pipeline, pl, _pipeline);
+      cmd->gfx_pipeline = pl;
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdBindVertexBuffers(VkCommandBuffer commandBuffer, uint32_t firstBinding,
+                            uint32_t bindingCount, const VkBuffer *pBuffers,
+                            const VkDeviceSize *pOffsets)
+{
+   VK_FROM_HANDLE(vk_command_buffer, vk_cmd, commandBuffer);
+   struct borgvk_command_buffer *cmd = container_of(vk_cmd, struct borgvk_command_buffer, vk);
+   for (uint32_t i = 0; i < bindingCount; i++) {
+      uint32_t b = firstBinding + i;
+      VK_FROM_HANDLE(borgvk_buffer, buf, pBuffers[i]);
+      if (b < BORGVK_MAX_VERTEX_BINDINGS)
+         cmd->vb[b] = buf && buf->mem && buf->mem->map
+            ? (const uint8_t *)buf->mem->map + buf->offset + pOffsets[i] : NULL;
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdBindDescriptorSets(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,
+                             VkPipelineLayout layout, uint32_t firstSet, uint32_t descriptorSetCount,
+                             const VkDescriptorSet *pDescriptorSets, uint32_t dynamicOffsetCount,
+                             const uint32_t *pDynamicOffsets)
+{
+   VK_FROM_HANDLE(vk_command_buffer, vk_cmd, commandBuffer);
+   struct borgvk_command_buffer *cmd = container_of(vk_cmd, struct borgvk_command_buffer, vk);
+   if (descriptorSetCount > 0 && pDescriptorSets) {
+      VK_FROM_HANDLE(borgvk_descriptor_set, set, pDescriptorSets[0]);
+      if (set)
+         cmd->desc_set = set;
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t instanceCount,
+               uint32_t firstVertex, uint32_t firstInstance)
+{
+   VK_FROM_HANDLE(vk_command_buffer, vk_cmd, commandBuffer);
+   struct borgvk_command_buffer *cmd = container_of(vk_cmd, struct borgvk_command_buffer, vk);
+   struct borgvk_device *device = container_of(vk_cmd->base.device, struct borgvk_device, vk);
+
+   /* Only the simulator renders; cube.c (UBO-driven) has its own path at submit. */
+   if (!getenv("BORGVK_SIM") || (cmd->desc_set && set_is_cube(cmd->desc_set)))
+      return;
+   if (borgvk_sim_generic_draw(device, cmd, vertexCount, firstVertex))
+      cmd->generic_drawn = true;
 }
 
 static VkResult borgvk_queue_submit_work(struct vk_queue *vk_queue, struct vk_queue_submit *submit);
@@ -1069,8 +1100,10 @@ borgvk_queue_submit_work(struct vk_queue *vk_queue, struct vk_queue_submit *subm
    if (getenv("BORGVK_SIM")) {
       if (submit_is_cube(submit))
          return borgvk_submit_sim_cube(device, submit);
-      if (borgvk_submit_sim_generic(device, submit))
-         return VK_SUCCESS;
+      /* Generic draws already ran, at their place in the replay above. */
+      for (uint32_t ci = 0; ci < submit->command_buffer_count; ci++)
+         if (container_of(submit->command_buffers[ci], struct borgvk_command_buffer, vk)->generic_drawn)
+            return VK_SUCCESS;
       return borgvk_submit_sim_draw(submit);
    }
 

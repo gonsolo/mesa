@@ -1403,6 +1403,22 @@ pub unsafe extern "C" fn borgc_compile_nir(
         }
     }
     if draw_mode {
+        // A fragment output that no instruction produces -- a constant colour, say, which lives in
+        // the uniform window -- has no register to hand to the output stage: copy it with FMOV
+        // (rs1 may be a uniform).
+        if stage == 4 {
+            for c in 0..4 {
+                let Some((v, comp)) = draw_frag_out[c] else { continue };
+                if prog.iter().any(|i| i.dst == v) {
+                    continue;
+                }
+                let out = next_vreg;
+                next_vreg += 1;
+                prog.push(BorgInstr { mnem: "FMOV", dst: out, srcs: vec![v], swz: vec![comp] });
+                draw_frag_out[c] = Some((out, 0));
+                out_roots.push(out);
+            }
+        }
         for (c, v) in draw_pos_out.iter().enumerate() {
             pos_out[c] = v.map(|(d, _)| d);
         }

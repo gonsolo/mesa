@@ -128,6 +128,8 @@ struct borgvk_device {
  * back to real images. */
 #define BORGVK_MAX_COLOR_ATTACHMENTS 8
 
+#define BORGVK_MAX_VERTEX_BINDINGS 4
+
 struct borgvk_command_buffer {
    struct vk_command_buffer vk;
 
@@ -145,6 +147,14 @@ struct borgvk_command_buffer {
     * clear_color_attachment MSAA tests actually exercise this, via
     * VkSubpassDescription::pResolveAttachments) needs this at all. */
    struct vk_image_view *color_resolve_views[BORGVK_MAX_COLOR_ATTACHMENTS];
+   /* The first colour attachment's load-op clear colour, for the simulator's render target. */
+   bool has_clear;
+   float clear_color[4];
+   /* Draw state tracked as the recorded commands replay at submit (borgvk_queue.c). */
+   struct borgvk_pipeline *gfx_pipeline;
+   const uint8_t *vb[BORGVK_MAX_VERTEX_BINDINGS];
+   struct borgvk_descriptor_set *desc_set;
+   bool generic_drawn;
 };
 
 extern const struct vk_command_buffer_ops borgvk_cmd_buffer_ops;
@@ -163,6 +173,7 @@ void borgvk_blend_pack(const VkPipelineColorBlendStateCreateInfo *cb,
                        uint32_t *cfg, uint32_t *konst);
 /* 0xB4: STENCIL_CFG, STENCIL_FRONT, STENCIL_BACK, DEPTH_CFG, CULL_CFG. */
 void borgvk_serial_send_state(const uint32_t reg[5]);
+void borgvk_serial_send_target(uint8_t flush_format, const float clear[4]);
 /* 0xB5: one chunk (<= 256 B at byte offset `off`) of a texture's texels plus
  * the texture descriptor words 1..3 and the four sampler words
  * (docs/B2_texture_unit.md); descriptor and sampler ride with every chunk. */
@@ -316,7 +327,6 @@ struct borgvk_descriptor_set {
    struct borgvk_sampler *samplers[BORGVK_MAX_BINDINGS];
 };
 
-#define BORGVK_MAX_VERTEX_BINDINGS 4
 #define BORGVK_MAX_VERTEX_ATTRS    8
 
 struct borgvk_vertex_attr {

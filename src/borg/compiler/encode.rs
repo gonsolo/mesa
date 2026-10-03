@@ -74,6 +74,7 @@ pub(crate) fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
         "FADD" => bin(0x0000_0000),
         "FMUL" => bin(0x0800_0000),
         "FNEG" => un(0x0C00_0000),
+        "FMOV" => un(0xA400_0000),
         "FRCP" => un(0x1400_0000),
         "IADD" => bin(0x1C00_0000),
         "ISHL" => bin(0x2000_0000),

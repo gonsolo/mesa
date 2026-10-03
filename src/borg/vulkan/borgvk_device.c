@@ -39,7 +39,6 @@ borgvk_EnumerateInstanceVersion(uint32_t *pApiVersion)
  * app create a swapchain so its render loop runs; the actual pixels go to the
  * FPGA over serial, the host window is just a formality (software WSI path). */
 static const struct vk_instance_extension_table instance_extensions = {
-   .KHR_device_group_creation           = true,
    .KHR_external_fence_capabilities     = true,
    .KHR_external_memory_capabilities    = true,
    .KHR_external_semaphore_capabilities = true,
@@ -909,6 +908,8 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
    BORGVK_RECORD_CMD(CmdFillBuffer);       BORGVK_RECORD_CMD(CmdUpdateBuffer);
    BORGVK_RECORD_CMD(CmdSetEvent);         BORGVK_RECORD_CMD(CmdResetEvent);
    BORGVK_RECORD_CMD(CmdSetEvent2);        BORGVK_RECORD_CMD(CmdResetEvent2);
+   BORGVK_RECORD_CMD(CmdBindPipeline);     BORGVK_RECORD_CMD(CmdBindVertexBuffers);
+   BORGVK_RECORD_CMD(CmdBindDescriptorSets); BORGVK_RECORD_CMD(CmdDraw);
 #undef BORGVK_RECORD_CMD
    /* Finally, fill anything STILL null from the runtime's generic
     * implementations.  vk_cmd_enqueue_device_entrypoints above only covers

@@ -61,6 +61,11 @@ borgvk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
       container_of(vk_cmd_buffer, struct borgvk_command_buffer, vk);
 
    cmd->in_rendering = false;
+   cmd->has_clear = false;
+   cmd->gfx_pipeline = NULL;
+   memset(cmd->vb, 0, sizeof(cmd->vb));
+   cmd->desc_set = NULL;
+   cmd->generic_drawn = false;
    cmd->color_attachment_count = 0;
    cmd->depth_view = NULL;
    cmd->stencil_view = NULL;

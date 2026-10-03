@@ -511,6 +511,24 @@ borgvk_serial_send_state(const uint32_t reg[5])
    borgvk_transport_emit(pkt, sizeof(pkt));
 }
 
+#define BORGVK_MARKER_TARGET  0xB6
+/* 0xB6 render target: marker, flush format (0 R5G6B5, 1 R8G8B8A8, 2 B8G8R8A8), the clear colour
+ * (4 x float32 LE), csum. Only the simulator's host driver acts on it. */
+void
+borgvk_serial_send_target(uint8_t flush_format, const float clear[4])
+{
+   uint8_t pkt[19];
+   pkt[0] = BORGVK_MARKER_TARGET;
+   pkt[1] = flush_format;
+   for (int i = 0; i < 4; i++)
+      put_f32_le(&pkt[2 + 4 * i], clear[i]);
+   uint8_t csum = 0;
+   for (int i = 1; i < 18; i++)
+      csum ^= pkt[i];
+   pkt[18] = csum;
+   borgvk_transport_emit(pkt, sizeof(pkt));
+}
+
 static uint32_t
 stencil_face_pack(const VkStencilOpState *f)
 {

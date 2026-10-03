@@ -1089,9 +1089,15 @@ borgvk_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *p
        * requested, so a non-NULL view is a sufficient "should resolve"
        * signal without also checking resolveMode. */
       cmd->color_resolve_views[i] = resolve_view;
-      if (view && att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+      if (view && att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
          borgvk_clear_attachment_rect(view, VK_IMAGE_ASPECT_COLOR_BIT, &att->clearValue,
                                       cmd->render_area, 0, layerCount);
+         if (i == 0) {
+            cmd->has_clear = true;
+            for (int c = 0; c < 4; c++)
+               cmd->clear_color[c] = att->clearValue.color.float32[c];
+         }
+      }
    }
 
    if (pRenderingInfo->pDepthAttachment &&
