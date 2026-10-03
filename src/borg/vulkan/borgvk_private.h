@@ -153,6 +153,7 @@ struct borgvk_command_buffer {
    /* Draw state tracked as the recorded commands replay at submit (borgvk_queue.c). */
    struct borgvk_pipeline *gfx_pipeline;
    const uint8_t *vb[BORGVK_MAX_VERTEX_BINDINGS];
+   VkDeviceSize vb_avail[BORGVK_MAX_VERTEX_BINDINGS];   /* bytes from vb[] to the buffer's end */
    struct borgvk_descriptor_set *desc_set;
    bool generic_drawn;
    const struct borgvk_pipeline *cs_pipeline;   /* bound compute pipeline */

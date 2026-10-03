@@ -14,6 +14,8 @@
 //   * A buffer binding (set, binding) lives in a fixed window of GPU memory the driver fills
 //     and reads back: word index SLOT_BASE_WORDS + (set * 8 + binding) * SLOT_WORDS.  LS_BASE
 //     stays 0, so LOAD/STORE take full word indices.
+//   * robustBufferAccess: every buffer word index is masked to the binding's window (word_addr);
+//     the host zero-fills the window past the buffer and copies back only the buffer's bytes.
 //   * atomics are per-lane critical sections (EXPUSH(LocalInvocationIndex == i)).
 
 use crate::encode::encode;
@@ -163,8 +165,15 @@ impl Em {
         };
         let o = self.src(off, 0);
         let w = self.shr(o, 2);
-        let a = self.add(V::C(base + extra_words), w);
-        a
+        // robustBufferAccess: the access stays inside the binding's window. The host zero-fills
+        // the window past the buffer and copies back only the buffer's bytes, so an out-of-range
+        // load reads zero and an out-of-range store is discarded; neither reaches another buffer.
+        let w = self.add(w, V::C(extra_words));
+        let w = match w {
+            V::C(x) => V::C(x & (SLOT_WORDS - 1)),
+            _ => self.bin("IAND", w, V::C(SLOT_WORDS - 1)),
+        };
+        self.add(V::C(base), w)
     }
 }
 

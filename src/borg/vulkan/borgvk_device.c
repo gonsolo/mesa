@@ -692,6 +692,9 @@ create_physical_device(struct borgvk_instance *instance, int drm_fd)
 #endif
 
    struct vk_features features = {
+      /* Buffer accesses stay inside the bound range: see compute.rs (window mask) and
+       * fetch_vertex_attr (bounded vertex fetch). */
+      .robustBufferAccess = true,
       /* Vulkan 1.3 spec §43 mandates at least one compressed texture family. */
       .textureCompressionETC2 = true,
    };

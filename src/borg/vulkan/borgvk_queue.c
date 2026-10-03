@@ -943,6 +943,7 @@ static bool
 fetch_vertex_attr(const struct borgvk_pipeline *pl,
                   const struct borgvk_vertex_attr *a,
                   const uint8_t *const vb[BORGVK_MAX_VERTEX_BINDINGS],
+                  const VkDeviceSize vb_avail[BORGVK_MAX_VERTEX_BINDINGS],
                   uint32_t vertex, float out[4])
 {
    uint32_t n;
@@ -955,11 +956,15 @@ fetch_vertex_attr(const struct borgvk_pipeline *pl,
    }
    if (a->binding >= BORGVK_MAX_VERTEX_BINDINGS || !vb[a->binding])
       return false;
-   const uint8_t *p = vb[a->binding] +
-      (size_t)vertex * pl->binding_stride[a->binding] + a->offset;
+   const uint64_t at = (uint64_t)vertex * pl->binding_stride[a->binding] + a->offset;
    out[0] = out[1] = out[2] = 0.0f;
    out[3] = 1.0f;
-   memcpy(out, p, n * sizeof(float));
+   /* robustBufferAccess: a fetch past the end of the bound range reads zero. */
+   if (at + n * sizeof(float) > vb_avail[a->binding]) {
+      out[3] = 0.0f;
+      return true;
+   }
+   memcpy(out, vb[a->binding] + at, n * sizeof(float));
    return true;
 }
 
@@ -1016,9 +1021,9 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    int nverts = 0;
    for (uint32_t i = 0; i < vert_count; i++) {
       float pos[4], tc[4] = { 0, 0, 0, 1 };
-      if (!fetch_vertex_attr(pipeline, a_pos, vb, first_vert + i, pos))
+      if (!fetch_vertex_attr(pipeline, a_pos, vb, cmd->vb_avail, first_vert + i, pos))
          return generic_reject(6);
-      if (a_uv && !fetch_vertex_attr(pipeline, a_uv, vb, first_vert + i, tc))
+      if (a_uv && !fetch_vertex_attr(pipeline, a_uv, vb, cmd->vb_avail, first_vert + i, tc))
          return generic_reject(7);
       int u = -1;
       for (int j = 0; j < nverts; j++)
@@ -1205,9 +1210,11 @@ borgvk_CmdBindVertexBuffers(VkCommandBuffer commandBuffer, uint32_t firstBinding
    for (uint32_t i = 0; i < bindingCount; i++) {
       uint32_t b = firstBinding + i;
       VK_FROM_HANDLE(borgvk_buffer, buf, pBuffers[i]);
-      if (b < BORGVK_MAX_VERTEX_BINDINGS)
+      if (b < BORGVK_MAX_VERTEX_BINDINGS) {
          cmd->vb[b] = buf && buf->mem && buf->mem->map
             ? (const uint8_t *)buf->mem->map + buf->offset + pOffsets[i] : NULL;
+         cmd->vb_avail[b] = buf && buf->vk.size > pOffsets[i] ? buf->vk.size - pOffsets[i] : 0;
+      }
    }
 }
 
