@@ -1426,11 +1426,16 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
              * pixel-level diff against CTS's reference image, running
              * dEQP-VK.api.copy_and_blit.core.image_to_image.all_formats.
              * color.2d_to_2d (100% of that group was failing this way). */
-            for (uint32_t row = 0; row < h_blocks; row++) {
-               memcpy(d + (size_t)row * dst_stride_blocks * dst_bs,
-                      s + (size_t)row * src_stride_blocks * src_bs,
-                      (size_t)w_blocks * elem_bs);
-            }
+            /* A multisampled image packs one plane per sample; both sides have the
+             * same sample count (VUID-vkCmdCopyImage-srcImage-00136). */
+            uint64_t src_plane = borgvk_image_sample_plane_size(src, src_bs, src_bw, src_bh, src_bd);
+            uint64_t dst_plane = borgvk_image_sample_plane_size(dst, dst_bs, dst_bw, dst_bh, dst_bd);
+            for (uint32_t smp = 0; smp < MAX2(src->vk.samples, 1); smp++)
+               for (uint32_t row = 0; row < h_blocks; row++) {
+                  memcpy(d + smp * dst_plane + (size_t)row * dst_stride_blocks * dst_bs,
+                         s + smp * src_plane + (size_t)row * src_stride_blocks * src_bs,
+                         (size_t)w_blocks * elem_bs);
+               }
          } else {
             /* Aspect-selective copy on a combined format (e.g. STENCIL_BIT
              * only, image-to-image, between two combined depth-stencil

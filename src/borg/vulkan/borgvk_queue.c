@@ -696,14 +696,20 @@ sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
    /* RGB888 sdim×sdim (sim stdout) → R8G8B8A8_UNORM attachment (width×height),
     * nearest-neighbour upscale, opaque alpha. */
    if (rgb && got == expected) {
-      uint8_t *dst = (uint8_t *)color_img->mem->map + color_img->offset;
-      for (uint32_t y = 0; y < height; y++) {
-         uint32_t sy = (uint32_t)((uint64_t)(2 * y + 1) * sdim / (2 * (uint64_t)height));
-         for (uint32_t x = 0; x < width; x++) {
-            uint32_t sx = (uint32_t)((uint64_t)(2 * x + 1) * sdim / (2 * (uint64_t)width));
-            const uint8_t *s = rgb + ((size_t)sy * sdim + sx) * 3;
-            uint8_t *d = dst + ((size_t)y * width + x) * 4;
-            d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
+      /* The sim returns the resolved pixel. A multisampled image packs one plane per
+       * sample (see borgvk_image_layer_size): put the resolved value in every plane,
+       * so a later vkCmdResolveImage averages it back to itself. */
+      uint64_t plane_size = (uint64_t)width * height * 4;
+      for (uint32_t smp = 0; smp < MAX2(color_img->vk.samples, 1); smp++) {
+         uint8_t *dst = (uint8_t *)color_img->mem->map + color_img->offset + smp * plane_size;
+         for (uint32_t y = 0; y < height; y++) {
+            uint32_t sy = (uint32_t)((uint64_t)(2 * y + 1) * sdim / (2 * (uint64_t)height));
+            for (uint32_t x = 0; x < width; x++) {
+               uint32_t sx = (uint32_t)((uint64_t)(2 * x + 1) * sdim / (2 * (uint64_t)width));
+               const uint8_t *s = rgb + ((size_t)sy * sdim + sx) * 3;
+               uint8_t *d = dst + ((size_t)y * width + x) * 4;
+               d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
+            }
          }
       }
    }
