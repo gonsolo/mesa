@@ -113,18 +113,19 @@ borg_lower_nir_for_borgc(struct nir_shader *nir)
        *
        * expensive_alu_ok so cube.frag's linearToSrgb pow branch does not block
        * flattening -- the whole select then collapses to one FSRGB op. */
-      static const nir_opt_peephole_select_options peephole_opts = {
-         .limit = 64, .indirect_load_ok = true, .expensive_alu_ok = true,
+      /* BORGC_NO_FLATTEN keeps every `if` as control flow, to exercise the mask path. */
+      const nir_opt_peephole_select_options peephole_opts = {
+         .limit = getenv("BORGC_NO_FLATTEN") ? 1 : 64, .indirect_load_ok = true, .expensive_alu_ok = true,
       };
       NIR_PASS(progress, nir, nir_opt_peephole_select, &peephole_opts);
    } while (progress);
 
-   /* Compute: booleans as 32-bit integers and phis as registers (the backend
-    * has no select; both arms of an `if` store into the phi's register). */
-   if (nir->info.stage == MESA_SHADER_COMPUTE) {
+   /* Compute: booleans as 32-bit integers. The backend has no select; both arms
+    * of an `if` store into the phi's register. */
+   if (nir->info.stage == MESA_SHADER_COMPUTE)
       NIR_PASS(_, nir, nir_lower_bool_to_int32);
-      NIR_PASS(_, nir, nir_convert_from_ssa, true, false);
-   }
+   /* Phis become registers for every stage. */
+   NIR_PASS(_, nir, nir_convert_from_ssa, true, false);
 
    if (getenv("BORGC_DUMP_NIR"))
       nir_print_shader(nir, stderr);
