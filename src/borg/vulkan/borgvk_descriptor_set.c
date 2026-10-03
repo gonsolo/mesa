@@ -165,6 +165,14 @@ borgvk_UpdateDescriptorSets(VkDevice _device,
          set->ranges[w->dstBinding] = w->pBufferInfo[0].range;
       }
 
+      /* Texel buffers: the view carries the buffer, format, offset and range. */
+      if (w->pTexelBufferView &&
+          (w->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
+           w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)) {
+         VK_FROM_HANDLE(vk_buffer_view, bview, w->pTexelBufferView[0]);
+         set->buffer_views[w->dstBinding] = bview;
+      }
+
       /* Record the sampler (combined image sampler or a plain sampler); the
        * submit path ships its packed descriptor with the texture. */
       if (w->pImageInfo &&

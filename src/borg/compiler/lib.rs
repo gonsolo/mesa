@@ -341,6 +341,7 @@ pub unsafe extern "C" fn borgc_compile_nir(
     // "is this a per-triangle-constant root" test below.
     let mut per_pixel_fixed: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut frag_coord_w = false;
+    let mut fetch_ctl_uniform: Option<u32> = None;
     // Scalar load_const f32 bits (for the sRGB idiom match) and a producer map
     // (alu def → its op + resolved scalar srcs) for recognising the bcsel tree.
     let mut consts: HashMap<u32, u32> = HashMap::new();
@@ -1251,7 +1252,7 @@ pub unsafe extern "C" fn borgc_compile_nir(
                     // Only a plain implicit-LOD sample of a 2D texture so far;
                     // anything else is reported rather than sampled wrongly.
                     let srcs = tex.srcs_as_slice();
-                    if tex.op != nir_texop_tex {
+                    if tex.op != nir_texop_tex && tex.op != nir_texop_txf {
                         eprintln!("borgc: WARNING texture op {} not supported yet, dropped", tex.op);
                         continue;
                     }
@@ -1267,8 +1268,34 @@ pub unsafe extern "C" fn borgc_compile_nir(
                         .map(|s| s.src.as_def().index);
                     if let Some(cd) = coord {
                         let (ud, uc) = resolve_vm(&vec_map, cd, 0);
-                        let (vd, vc) = resolve_vm(&vec_map, cd, 1);
-                        let ctl = match zero_ctl {
+                        let is_fetch = tex.op == nir_texop_txf;
+                        // A fetch of a 1D texture or texel buffer takes the integer texel in u;
+                        // v is unused, so u is passed twice.
+                        let (vd, vc) = if is_fetch && tex.coord_components == 1 {
+                            (ud, uc)
+                        } else {
+                            resolve_vm(&vec_map, cd, 1)
+                        };
+                        let ctl = if is_fetch {
+                            // Control word: operation 1 (fetch) in bits 17:16, texture 0, sampler 0,
+                            // read from the constant window (docs/B2_texture_unit.md).
+                            let u = match fetch_ctl_uniform {
+                                Some(u) => u,
+                                None => {
+                                    assert!(draw_uniform_count < 12, "borgc: fragment shader needs more than 12 window constants");
+                                    let u = 20 + draw_uniform_count;
+                                    draw_uniform_count += 1;
+                                    draw_uniform_consts.push((u, 1u32 << 16));
+                                    fetch_ctl_uniform = Some(u);
+                                    u
+                                }
+                            };
+                            let c = next_vreg;
+                            next_vreg += 1;
+                            ubo.insert(c, Ubo::Uniform(u as u8));
+                            c
+                        } else {
+                            match zero_ctl {
                             Some(v) => v,
                             None => {
                                 let c = next_vreg;
@@ -1281,6 +1308,7 @@ pub unsafe extern "C" fn borgc_compile_nir(
                                 prog.push(BorgInstr { mnem: "FSTEP", dst: z, srcs: vec![neg], swz: vec![0] });
                                 zero_ctl = Some(z);
                                 z
+                            }
                             }
                         };
                         let tex_v = next_vreg;
@@ -1474,7 +1502,8 @@ pub unsafe extern "C" fn borgc_compile_nir(
         if stage == 4 {
             for c in 0..4 {
                 let Some((v, comp)) = draw_frag_out[c] else { continue };
-                if prog.iter().any(|i| i.dst == v) {
+                // A TEX result block (r20-r23) or FATTR block is not the output register: copy that too.
+                if prog.iter().any(|i| i.dst == v) && !tex_dsts.contains(&v) && !fattr_dsts.contains(&v) {
                     continue;
                 }
                 let out = next_vreg;

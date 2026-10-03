@@ -332,6 +332,7 @@ struct borgvk_descriptor_set {
    /* The view behind images[]: view type, format, mip/layer range, swizzle. */
    struct vk_image_view *views[BORGVK_MAX_BINDINGS];
    struct borgvk_sampler *samplers[BORGVK_MAX_BINDINGS];
+   struct vk_buffer_view *buffer_views[BORGVK_MAX_BINDINGS];   /* texel buffers */
 };
 
 #define BORGVK_MAX_VERTEX_ATTRS    8

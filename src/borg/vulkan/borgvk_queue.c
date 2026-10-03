@@ -603,6 +603,10 @@ sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
     * which need not match the swapchain extent.  Render the sim at that size and
     * nearest-upscale into the attachment.  Override with BORGVK_SIM_DIM. */
    uint32_t sdim = sim_dim ? sim_dim : 128;
+   /* A RAW32 attachment (R32_UINT) comes back as its raw words and is never resampled. */
+   const bool raw32 = color_img->vk.format == VK_FORMAT_R32_UINT && width == height;
+   if (raw32)
+      sdim = width;
    /* BORGVK_SIM_DIRECT=<direct_sim>: Borg alone driven by a host-side driver
     * (simulation/direct) -- no firmware, so the target size is free (power of
     * two, 4..256, square) and a draw takes well under a second. */
@@ -655,47 +659,94 @@ sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
    snprintf(w_str, sizeof(w_str), "%u", sdim);
    snprintf(h_str, sizeof(h_str), "%u", sdim);
 
-   int pfd[2];
-   if (pipe(pfd) < 0) {
-      unlink(uart_path);
-      return VK_SUCCESS;
+   /* A target over 128 pixels is rendered as 128-pixel windows (the hardware draws a large
+    * framebuffer as several windows, docs/B1_geometry_front_end.md); the windows are
+    * independent, so with the direct simulator they are dealt out to one process per core
+    * and the pieces merged. Window w (row-major) belongs to process w % nparts. */
+   const uint32_t WIN = 128;
+   uint32_t nwx = sdim > WIN ? sdim / WIN : 1;
+   uint32_t nparts = 1;
+   if (direct && direct[0] && nwx > 1) {
+      long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+      nparts = (uint32_t)(ncpu > 1 ? ncpu : 1);
+      if (nparts > nwx * nwx)
+         nparts = nwx * nwx;
    }
-   pid_t pid = fork();
-   if (pid == 0) {
-      close(pfd[0]);
-      dup2(pfd[1], STDOUT_FILENO);
-      close(pfd[1]);
-      if (direct && direct[0]) {
-         execlp(direct, direct, uart_path, w_str, h_str, (char *)NULL);
-      }
-      execlp(sim_bin, sim_bin, "--cts-uart", uart_path, sim_fw,
-             w_str, h_str, (char *)NULL);
-      _exit(127);
-   }
-   close(pfd[1]);
 
-   size_t expected = (size_t)sdim * sdim * 3;
+   const size_t bpp = raw32 ? 4 : 3;
+   size_t expected = (size_t)sdim * sdim * bpp;
    uint8_t *rgb = malloc(expected);
    size_t got = 0;
-   if (rgb) {
-      while (got < expected) {
-         ssize_t n = read(pfd[0], rgb + got, expected - got);
+   int pfds[64][2];
+   pid_t pids[64];
+   if (nparts > 64)
+      nparts = 64;
+   for (uint32_t k = 0; k < nparts; k++) {
+      pids[k] = -1;
+      if (pipe(pfds[k]) < 0)
+         continue;
+      pid_t pid = fork();
+      if (pid == 0) {
+         close(pfds[k][0]);
+         dup2(pfds[k][1], STDOUT_FILENO);
+         close(pfds[k][1]);
+         if (direct && direct[0]) {
+            if (nwx > 1) {
+               char part[32];
+               snprintf(part, sizeof(part), "%u/%u", k, nparts);
+               setenv("BORG_PART", part, 1);
+               setenv("BORG_WINDOW_TILES", "32", 1);
+            }
+            execlp(direct, direct, uart_path, w_str, h_str, (char *)NULL);
+         }
+         execlp(sim_bin, sim_bin, "--cts-uart", uart_path, sim_fw,
+                w_str, h_str, (char *)NULL);
+         _exit(127);
+      }
+      close(pfds[k][1]);
+      pids[k] = pid;
+   }
+   uint8_t *piece = nparts > 1 ? malloc(expected) : NULL;
+   uint32_t pieces_ok = 0;
+   for (uint32_t k = 0; k < nparts && rgb; k++) {
+      if (pids[k] < 0)
+         continue;
+      uint8_t *dst = nparts > 1 ? piece : rgb;
+      size_t n_got = 0;
+      while (n_got < expected) {
+         ssize_t n = read(pfds[k][0], dst + n_got, expected - n_got);
          if (n <= 0)
             break;
-         got += (size_t)n;
+         n_got += (size_t)n;
+      }
+      close(pfds[k][0]);
+      int wstatus = 0;
+      waitpid(pids[k], &wstatus, 0);
+      if (nparts > 1) {
+         if (n_got == expected) {
+            for (uint32_t y = 0; y < sdim; y++)
+               for (uint32_t x = 0; x < sdim; x++)
+                  if (((y / WIN) * nwx + x / WIN) % nparts == k)
+                     memcpy(rgb + ((size_t)y * sdim + x) * bpp,
+                            piece + ((size_t)y * sdim + x) * bpp, bpp);
+            pieces_ok++;
+         }
+      } else {
+         got = n_got;
       }
    }
-   close(pfd[0]);
-   int wstatus = 0;
-   waitpid(pid, &wstatus, 0);
+   if (nparts > 1)
+      got = pieces_ok == nparts ? expected : 0;
+   free(piece);
    unlink(uart_path);
    if (getenv("BORGVK_DEBUG"))
-      mesa_logi("borgvk: sim returned %zu of %zu bytes, exit status %d",
-                got, expected, wstatus);
+      mesa_logi("borgvk: sim returned %zu of %zu bytes", got, expected);
 
    /* RGB888 sdim×sdim (sim stdout) → R8G8B8A8_UNORM attachment (width×height),
     * nearest-neighbour upscale, opaque alpha. */
-   if (rgb && got == expected) {
+   if (rgb && got == expected && raw32) {
+      memcpy((uint8_t *)color_img->mem->map + color_img->offset, rgb, expected);
+   } else if (rgb && got == expected) {
       /* The sim returns the resolved pixel. A multisampled image packs one plane per
        * sample (see borgvk_image_layer_size): put the resolved value in every plane,
        * so a later vkCmdResolveImage averages it back to itself. */
@@ -856,6 +907,36 @@ send_generic_texture(const struct vk_image_view *view,
    return true;
 }
 
+/* A texel buffer as a 1D texture of the same texels (linear layout, one level), so a
+ * texelFetch reads it through the texture unit. Only 32-bit single-channel formats so far. */
+static bool
+send_buffer_texture(const struct vk_buffer_view *bv)
+{
+   uint32_t fmt_code;
+   switch (bv->format) {
+   case VK_FORMAT_R32_UINT:   fmt_code = 33; break;   /* BORG_TEX_FORMAT_R32_UINT */
+   case VK_FORMAT_R32_SFLOAT: fmt_code = 35; break;
+   default: return false;
+   }
+   struct borgvk_buffer *buf = container_of(bv->buffer, struct borgvk_buffer, vk);
+   if (!buf->mem || !buf->mem->map)
+      return false;
+   uint32_t w = (uint32_t)(bv->range / 4);
+   if (w == 0 || w > 65536)
+      return false;
+   uint32_t total = w * 4;
+   const uint8_t *src = (const uint8_t *)buf->mem->map + buf->offset + bv->offset;
+   uint32_t desc[3];
+   desc[0] = (w - 1) | (0u << 28) | (1u << 30);       /* 1D, linear */
+   desc[1] = fmt_code << 14;                          /* identity swizzle */
+   desc[2] = total;
+   for (uint32_t off = 0; off < total; off += BORGVK_TEXG_CHUNK) {
+      uint32_t n = total - off < BORGVK_TEXG_CHUNK ? total - off : BORGVK_TEXG_CHUNK;
+      borgvk_serial_send_texture_chunk(off, src + off, n, desc, sampler_desc(NULL));
+   }
+   return true;
+}
+
 /* Read one float attribute of one vertex (R32..R32G32B32A32_SFLOAT only).
  * Missing components follow the Vulkan defaults: 0, 0, 0, 1. */
 static bool
@@ -968,7 +1049,8 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    {
       /* Render target: the attachment's format and the clear colour its render pass asked for. */
       uint8_t fmt = color_img->vk.format == VK_FORMAT_R8G8B8A8_UNORM ? 1 :
-                    color_img->vk.format == VK_FORMAT_B8G8R8A8_UNORM ? 2 : 0;
+                    color_img->vk.format == VK_FORMAT_B8G8R8A8_UNORM ? 2 :
+                    color_img->vk.format == VK_FORMAT_R32_UINT ? 3 : 0;   /* 3 = RAW32 */
       float clear[4] = { 0, 0, 0, 0 };
       if (cmd->has_clear)
          memcpy(clear, cmd->clear_color, sizeof(clear));
@@ -977,9 +1059,12 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    borgvk_serial_send_geom(verts, nverts, idx, uv, (int)(vert_count / 3));
    if (a_uv && (a_uv->format == VK_FORMAT_R32G32B32_SFLOAT || a_uv->format == VK_FORMAT_R32G32B32A32_SFLOAT))
       borgvk_serial_send_attr4(attr4, (int)vert_count);
-   for (int b = 0; set && b < BORGVK_MAX_BINDINGS; b++)
+   for (int b = 0; set && b < BORGVK_MAX_BINDINGS; b++) {
       if (set->views[b] && send_generic_texture(set->views[b], set->images[b], set->samplers[b]))
          break;
+      if (set->buffer_views[b] && send_buffer_texture(set->buffer_views[b]))
+         break;
+   }
    borgvk_serial_send_mvp(identity);
    size_t nbytes = 0;
    uint8_t *bytes = borgvk_transport_capture_end(&nbytes);
