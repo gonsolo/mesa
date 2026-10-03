@@ -106,6 +106,10 @@ struct borgvk_device {
    /* borgc-compiled shader blobs captured at pipeline creation, uploaded to the
     * firmware over serial (0xB0) on the first submit. */
    struct borgvk_shader_blob shader_blob[BORGVK_SHADER_STAGE_COUNT];
+   /* Colour-blend state of the last graphics pipeline created, already packed
+    * in BLEND_CFG / BLEND_CONST register layout (see borgvk_blend_pack()). */
+   uint32_t blend_cfg;
+   uint32_t blend_const;
 };
 
 /* A render pass/framebuffer or dynamic-rendering scope currently open on this
@@ -146,6 +150,13 @@ extern const struct vk_command_buffer_ops borgvk_cmd_buffer_ops;
  * (/dev/ttyUSB0 @115200, overridable via $BORGVK_SERIAL). The submit path
  * ships the per-frame 4×4 MVP as a framed packet the firmware decodes. */
 void borgvk_serial_send_mvp(const float mvp[16]);
+/* 0xB3: BLEND_CFG and BLEND_CONST register values, applied by the firmware
+ * before the next draw. */
+void borgvk_serial_send_blend(uint32_t blend_cfg, uint32_t blend_const);
+/* Pack a pipeline's colour-blend state into the BLEND_CFG / BLEND_CONST layout
+ * (hardware/rdl/borg.rdl); the Vulkan enum values pass through unchanged. */
+void borgvk_blend_pack(const VkPipelineColorBlendStateCreateInfo *cb,
+                       uint32_t *cfg, uint32_t *konst);
 
 /* Max mesh the firmware's fixed-length 0xAE geometry packet carries (must match
  * the firmware RX_GEOM_*). cube.c is 8 unique verts / 12 triangles. */

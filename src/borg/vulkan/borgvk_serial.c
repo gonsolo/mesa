@@ -383,6 +383,56 @@ borgvk_serial_send_push_constants(uint32_t offset, uint32_t size,
              borgvk_capture_active ? "captured" : "sent", size, offset);
 }
 
+#define BORGVK_MARKER_BLEND   0xB3
+/* 0xB3 blend state: marker, BLEND_CFG (LE u32), BLEND_CONST (LE u32), csum. */
+void
+borgvk_serial_send_blend(uint32_t blend_cfg, uint32_t blend_const)
+{
+   uint8_t pkt[10];
+   pkt[0] = BORGVK_MARKER_BLEND;
+   for (int i = 0; i < 4; i++) {
+      pkt[1 + i] = (uint8_t)(blend_cfg   >> (8 * i));
+      pkt[5 + i] = (uint8_t)(blend_const >> (8 * i));
+   }
+   uint8_t csum = 0;
+   for (int i = 1; i < 9; i++)
+      csum ^= pkt[i];
+   pkt[9] = csum;
+   borgvk_transport_emit(pkt, sizeof(pkt));
+}
+
+static uint32_t
+unorm8(float f)
+{
+   if (!(f > 0.0f)) return 0;
+   if (f >= 1.0f) return 255;
+   return (uint32_t)(f * 255.0f + 0.5f);
+}
+
+void
+borgvk_blend_pack(const VkPipelineColorBlendStateCreateInfo *cb,
+                  uint32_t *cfg, uint32_t *konst)
+{
+   /* Reset state: blending off, all channels written. */
+   *cfg = 0xFu << 27;
+   *konst = 0;
+   if (!cb || cb->attachmentCount < 1 || !cb->pAttachments)
+      return;
+   const VkPipelineColorBlendAttachmentState *a = &cb->pAttachments[0];
+   *cfg = (a->blendEnable ? 1u : 0u) |
+          ((uint32_t)a->srcColorBlendFactor & 0x1F) << 1 |
+          ((uint32_t)a->dstColorBlendFactor & 0x1F) << 6 |
+          ((uint32_t)a->colorBlendOp & 7) << 11 |
+          ((uint32_t)a->srcAlphaBlendFactor & 0x1F) << 14 |
+          ((uint32_t)a->dstAlphaBlendFactor & 0x1F) << 19 |
+          ((uint32_t)a->alphaBlendOp & 7) << 24 |
+          ((uint32_t)a->colorWriteMask & 0xF) << 27;
+   *konst = unorm8(cb->blendConstants[0]) |
+            unorm8(cb->blendConstants[1]) << 8 |
+            unorm8(cb->blendConstants[2]) << 16 |
+            unorm8(cb->blendConstants[3]) << 24;
+}
+
 void
 borgvk_serial_send_mvp(const float mvp[16])
 {

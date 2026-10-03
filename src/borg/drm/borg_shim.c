@@ -313,12 +313,21 @@ borg_ioctl_shader(int fd, unsigned long req, void *arg)
    return 0;
 }
 
+static int
+borg_ioctl_blend(int fd, unsigned long req, void *arg)
+{
+   struct drm_borg_blend *b = arg;
+   borg_serial_send_blend(b->cfg, b->constant);
+   return 0;
+}
+
 static int (*driver_ioctls[])(int, unsigned long, void *) = {
    [DRM_BORG_GEM_CREATE] = borg_ioctl_gem_create,
    [DRM_BORG_GEM_MMAP]   = borg_ioctl_gem_mmap,
    [DRM_BORG_SETUP]      = borg_ioctl_setup,
    [DRM_BORG_SUBMIT]     = borg_ioctl_submit,
    [DRM_BORG_SHADER]     = borg_ioctl_shader,
+   [DRM_BORG_BLEND]      = borg_ioctl_blend,
 };
 
 /* ---- drm_shim_driver_init — called once on library load --------------- */

@@ -501,6 +501,24 @@ mark_setup_done(void)
       close(fd);
 }
 
+/* Ship the pipeline's colour-blend state (BLEND_CFG/BLEND_CONST). blend_cfg is
+ * never 0 once a graphics pipeline has set it (the write mask resets to 0xF),
+ * so 0 means "no pipeline yet": leave the hardware at its reset state. */
+static void
+send_blend_state(const struct borgvk_device *device)
+{
+   if (!device->blend_cfg)
+      return;
+   if (device->drm_fd >= 0) {
+      struct drm_borg_blend b = { .cfg = device->blend_cfg,
+                                  .constant = device->blend_const };
+      if (drmIoctl(device->drm_fd, DRM_IOCTL_BORG_BLEND, &b) != 0)
+         mesa_logw("borgvk: DRM_IOCTL_BORG_BLEND failed");
+   } else {
+      borgvk_serial_send_blend(device->blend_cfg, device->blend_const);
+   }
+}
+
 /* Ship the borgc-compiled shader blobs (captured at pipeline creation) to the
  * firmware once, as part of setup. DRM path → inline ioctl (the shim/kernel owns
  * the serial port); serial fallback → direct send. The firmware stages each blob
@@ -574,6 +592,7 @@ borgvk_submit_sim_cube(struct borgvk_device *device,
    borgvk_transport_capture_begin();
    upload_shaders(device);
    send_geometry(ubo);
+   send_blend_state(device);
    if (tex && tex->mem && tex->mem->map &&
        tex->vk.extent.width && tex->vk.extent.height)
       for (int row = 0; row < BORGVK_TEX_DIM; row++)
@@ -756,6 +775,7 @@ borgvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
       }
 
       if (g_setup_done) {
+         send_blend_state(device);
          struct drm_borg_submit sub = { .ubo_handle = ubuf->mem->gem_handle };
          drmIoctl(device->drm_fd, DRM_IOCTL_BORG_SUBMIT, &sub);
       }
@@ -779,8 +799,10 @@ borgvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
          }
       }
 
-      if (g_setup_done)
+      if (g_setup_done) {
+         send_blend_state(device);
          borgvk_serial_send_mvp(ubo);
+      }
    }
 
    return VK_SUCCESS;

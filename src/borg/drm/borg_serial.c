@@ -175,6 +175,25 @@ borg_serial_send_shader(uint8_t stage, const uint8_t *blob, uint32_t len)
 }
 
 void
+borg_serial_send_blend(uint32_t blend_cfg, uint32_t blend_const)
+{
+   int fd = borg_serial_open();
+   if (fd < 0) return;
+
+   /* marker, BLEND_CFG (LE u32), BLEND_CONST (LE u32), csum */
+   uint8_t pkt[10];
+   pkt[0] = 0xB3;
+   for (int i = 0; i < 4; i++) {
+      pkt[1 + i] = (uint8_t)(blend_cfg   >> (8 * i));
+      pkt[5 + i] = (uint8_t)(blend_const >> (8 * i));
+   }
+   uint8_t csum = 0;
+   for (int i = 1; i < 9; i++) csum ^= pkt[i];
+   pkt[9] = csum;
+   borg_serial_write_paced(fd, pkt, sizeof(pkt));
+}
+
+void
 borg_serial_send_mvp(const float mvp[16])
 {
    int fd = borg_serial_open();

@@ -44,6 +44,7 @@
 #define DRM_BORG_SETUP        0x02   /* one-time mesh+texture upload        */
 #define DRM_BORG_SUBMIT       0x03   /* per-frame MVP send                  */
 #define DRM_BORG_SHADER       0x04   /* upload a borgc-compiled shader blob */
+#define DRM_BORG_BLEND        0x05   /* colour-blend state (BLEND_CFG/CONST) */
 
 /* Max .borg blob the shader-upload path carries (must match the Vulkan side's
  * BORGVK_SHADER_BLOB_MAX and the firmware RX shader packet). cube.frag = 255 B
@@ -93,6 +94,13 @@ struct drm_borg_shader {
    uint8_t  data[BORG_SHADER_MAX];
 };
 
+/* Colour-blend state, already packed in the BLEND_CFG / BLEND_CONST register
+ * layout (hardware/rdl/borg.rdl); the firmware stores both words as is. */
+struct drm_borg_blend {
+   uint32_t cfg;
+   uint32_t constant;
+};
+
 #define DRM_IOCTL_BORG_GEM_CREATE \
    DRM_IOWR(DRM_COMMAND_BASE + DRM_BORG_GEM_CREATE, struct drm_borg_gem_create)
 #define DRM_IOCTL_BORG_GEM_MMAP \
@@ -103,5 +111,8 @@ struct drm_borg_shader {
    DRM_IOW (DRM_COMMAND_BASE + DRM_BORG_SUBMIT,      struct drm_borg_submit)
 #define DRM_IOCTL_BORG_SHADER \
    DRM_IOW (DRM_COMMAND_BASE + DRM_BORG_SHADER,      struct drm_borg_shader)
+
+#define DRM_IOCTL_BORG_BLEND \
+   DRM_IOW (DRM_COMMAND_BASE + DRM_BORG_BLEND,       struct drm_borg_blend)
 
 #endif /* BORG_DRM_H */

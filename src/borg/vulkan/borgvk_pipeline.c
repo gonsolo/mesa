@@ -56,6 +56,8 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
          pCreateInfos[i].pRasterizationState;
       pl->cull_mode  = rs ? rs->cullMode  : VK_CULL_MODE_NONE;
       pl->front_face = rs ? rs->frontFace : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+      borgvk_blend_pack(pCreateInfos[i].pColorBlendState,
+                        &device->blend_cfg, &device->blend_const);
    }
    for (; i < count; i++)
       pPipelines[i] = VK_NULL_HANDLE;
