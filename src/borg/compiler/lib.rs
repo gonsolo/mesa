@@ -340,6 +340,7 @@ pub unsafe extern "C" fn borgc_compile_nir(
     // they vary per pixel — exclude them from the uniformity classification's
     // "is this a per-triangle-constant root" test below.
     let mut per_pixel_fixed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut frag_coord_w = false;
     // Scalar load_const f32 bits (for the sRGB idiom match) and a producer map
     // (alu def → its op + resolved scalar srcs) for recognising the bcsel tree.
     let mut consts: HashMap<u32, u32> = HashMap::new();
@@ -606,6 +607,39 @@ pub unsafe extern "C" fn borgc_compile_nir(
                     }
                 }
                 if let Some(alu) = instr.as_alu() {
+                    // A scalar float constant read by float arithmetic has no register of
+                    // its own (the ISA has no immediates): give it a word in the constant
+                    // window, shared by value, the way vector constants get theirs.
+                    // Integer constants stay address-walk patterns (see `walk`).
+                    if draw_mode && matches!(alu.op, nir_op_fadd | nir_op_fmul | nir_op_ffma
+                        | nir_op_flt | nir_op_fge | nir_op_feq | nir_op_fneu | nir_op_bcsel)
+                    {
+                        let first = if alu.op == nir_op_bcsel { 1 } else { 0 };
+                        for sr in &alu.srcs_as_slice()[first..] {
+                            let d = sr.src.as_def().index;
+                            let bits = match consts.get(&d) {
+                                Some(&b) if !vec_map.contains_key(&d) => b,
+                                _ => continue,
+                            };
+                            let u = if vs_const_window {
+                                assert!(draw_vs_consts.len() < DRAW_VS_CONST_WORDS,
+                                    "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
+                                let u = DRAW_VS_CONST_U0 as u32 + draw_vs_consts.len() as u32;
+                                draw_vs_consts.push((u as u8, bits));
+                                u
+                            } else {
+                                assert!(draw_uniform_count < 12, "borgc: fragment shader needs more than 12 window constants");
+                                let u = 20 + draw_uniform_count;
+                                draw_uniform_count += 1;
+                                draw_uniform_consts.push((u, bits));
+                                u
+                            };
+                            let v = next_vreg;
+                            next_vreg += 1;
+                            ubo.insert(v, Ubo::Uniform(u as u8));
+                            vec_map.insert(d, vec![(v, 0u8)]);
+                        }
+                    }
                     match alu.op {
                         nir_op_vec2 | nir_op_vec3 | nir_op_vec4 => {
                             let c: Vec<(u32, u8)> = alu
@@ -1023,6 +1057,22 @@ pub unsafe extern "C" fn borgc_compile_nir(
                     // (legacy) or inline here (draw mode).
                     else if intr.intrinsic == nir_intrinsic_load_vulkan_descriptor {
                         descriptor_defs.insert(intr.def.index);
+                    } else if draw_mode && stage == 4 && intr.intrinsic == nir_intrinsic_load_frag_coord {
+                        // docs/B1_geometry_front_end.md, fragment ABI: FragCoord.xy = r30/r31
+                        // (the pixel centre), .z = r29, .w = r8 (= 1/w). Read in place like the
+                        // barycentrics; r8 has to survive the shader, so it is reserved.
+                        let comps: Vec<(u32, u8)> = [30u8, 31, 29, 8]
+                            .iter()
+                            .map(|&r| {
+                                let v = next_vreg;
+                                next_vreg += 1;
+                                ubo.insert(v, Ubo::Fixed(r));
+                                per_pixel_fixed.insert(v);
+                                (v, 0u8)
+                            })
+                            .collect();
+                        frag_coord_w = true;
+                        vec_map.insert(intr.def.index, comps);
                     } else if draw_mode && intr.intrinsic == nir_intrinsic_load_vertex_id {
                         // r30 = VertexIndex at vertex-shader start
                         // (docs/B1_geometry_front_end.md); referenced directly,
@@ -1604,6 +1654,9 @@ pub unsafe extern "C" fn borgc_compile_nir(
             // the free pool via `forced`; listed again here for clarity,
             // not because it changes anything.
             extra_reserved.extend_from_slice(&[5, 6, 7, 10, 11, 12]);
+            if frag_coord_w {
+                extra_reserved.push(8);
+            }
         } else {
             // r0-2: edge-function attrs, read only by legacy's own
             // interpolation-weight computation below -- draw-mode never
