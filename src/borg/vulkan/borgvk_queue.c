@@ -281,6 +281,7 @@ borgvk_submit_sim_draw(struct vk_queue_submit *submit)
       return VK_SUCCESS;
    }
 
+   setenv("CTS_MAX_CYCLES", "60000000", 0);
    pid_t pid = fork();
    if (pid == 0) {
       close(pfd[0]);
@@ -382,6 +383,14 @@ find_color_attachment(struct vk_queue_submit *submit)
                return container_of(view->image, struct borgvk_image, vk);
          }
       }
+      /* Mesa emulates the legacy render-pass entrypoints on top of
+       * CmdBeginRendering, which does not enqueue; the command buffer
+       * remembers the colour view it last rendered to instead. */
+      struct borgvk_command_buffer *bcb =
+         container_of(cb, struct borgvk_command_buffer, vk);
+      if (bcb->color_views[0] &&
+          bcb->color_views[0]->image)
+         return container_of(bcb->color_views[0]->image, struct borgvk_image, vk);
    }
    return NULL;
 }
@@ -507,14 +516,6 @@ mark_setup_done(void)
 static void
 send_blend_state(const struct borgvk_device *device)
 {
-   if (!device->blend_cfg)
-      return;
-   if (device->drm_fd >= 0) {
-      struct drm_borg_blend b = { .cfg = device->blend_cfg,
-                                  .constant = device->blend_const };
-      if (drmIoctl(device->drm_fd, DRM_IOCTL_BORG_BLEND, &b) != 0)
-         mesa_logw("borgvk: DRM_IOCTL_BORG_BLEND failed");
-   } else {
    if (device->state_valid) {
       if (device->drm_fd >= 0) {
          struct drm_borg_state s;
@@ -525,6 +526,14 @@ send_blend_state(const struct borgvk_device *device)
          borgvk_serial_send_state(device->state_reg);
       }
    }
+   if (!device->blend_cfg)
+      return;
+   if (device->drm_fd >= 0) {
+      struct drm_borg_blend b = { .cfg = device->blend_cfg,
+                                  .constant = device->blend_const };
+      if (drmIoctl(device->drm_fd, DRM_IOCTL_BORG_BLEND, &b) != 0)
+         mesa_logw("borgvk: DRM_IOCTL_BORG_BLEND failed");
+   } else {
       borgvk_serial_send_blend(device->blend_cfg, device->blend_const);
    }
 }
@@ -567,6 +576,135 @@ submit_is_cube(struct vk_queue_submit *submit)
    uint32_t nfloats = (uint32_t)((ubuf->vk.size - off) / sizeof(float));
    return nfloats >= UBO_MIN_FLOATS;
 }
+
+/* Feed a captured wire stream to `arcilator_sim --cts-uart` and write the
+ * rendered RGB888 pixels into the colour attachment (nearest-neighbour scaled,
+ * opaque alpha). `sim_dim` = 0 uses the vkcube default (128, BORGVK_SIM_DIM);
+ * otherwise the simulator renders sim_dim x sim_dim. Takes ownership of `bytes`. */
+static VkResult
+sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
+               uint32_t sim_dim)
+{
+   const char *sim_bin = getenv("BORGVK_SIM");
+   const char *sim_fw  = getenv("BORGVK_SIM_FW");
+   if (!color_img || !color_img->mem || !color_img->mem->map)
+      { free(bytes); return VK_SUCCESS; }
+   uint32_t width  = color_img->vk.extent.width;
+   uint32_t height = color_img->vk.extent.height;
+   if (width == 0 || height == 0)
+      { free(bytes); return VK_SUCCESS; }
+
+   /* The firmware renders at its fixed native size (128² fallback for the cube),
+    * which need not match the swapchain extent.  Render the sim at that size and
+    * nearest-upscale into the attachment.  Override with BORGVK_SIM_DIM. */
+   uint32_t sdim = sim_dim ? sim_dim : 128;
+   /* BORGVK_SIM_DIRECT=<direct_sim>: Borg alone driven by a host-side driver
+    * (simulation/direct) -- no firmware, so the target size is free (power of
+    * two, 4..256, square) and a draw takes well under a second. */
+   const char *direct = getenv("BORGVK_SIM_DIRECT");
+   if (direct && direct[0]) {
+      uint32_t d = color_img->vk.extent.width;
+      if (d >= 4 && d <= 256 && (d & (d - 1)) == 0 &&
+          color_img->vk.extent.height == d)
+         sdim = d;
+   }
+   const char *dim_env = getenv("BORGVK_SIM_DIM");
+   if (!sim_dim && dim_env && dim_env[0]) {
+      int d = atoi(dim_env);
+      if (d > 0)
+         sdim = (uint32_t)d;
+   }
+
+   /* BORGVK_SIM_KEEP=<path>: also keep the stream, for replaying it by hand
+    * with scripts/cts_uart_render.py. */
+   const char *keep = getenv("BORGVK_SIM_KEEP");
+   if (keep && keep[0]) {
+      int kfd = open(keep, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      if (kfd >= 0) {
+         for (size_t w = 0; w < nbytes; ) {
+            ssize_t n = write(kfd, bytes + w, nbytes - w);
+            if (n <= 0) break;
+            w += (size_t)n;
+         }
+         close(kfd);
+      }
+   }
+
+   /* Hand the byte stream to arcilator_sim --cts-uart via a temp file. */
+   char uart_path[] = "/tmp/borgvk_uart_XXXXXX";
+   int ufd = mkstemp(uart_path);
+   if (ufd < 0) {
+      free(bytes);
+      return VK_SUCCESS;
+   }
+   for (size_t w = 0; w < nbytes; ) {
+      ssize_t n = write(ufd, bytes + w, nbytes - w);
+      if (n <= 0)
+         break;
+      w += (size_t)n;
+   }
+   close(ufd);
+   free(bytes);
+
+   char w_str[16], h_str[16];
+   snprintf(w_str, sizeof(w_str), "%u", sdim);
+   snprintf(h_str, sizeof(h_str), "%u", sdim);
+
+   int pfd[2];
+   if (pipe(pfd) < 0) {
+      unlink(uart_path);
+      return VK_SUCCESS;
+   }
+   pid_t pid = fork();
+   if (pid == 0) {
+      close(pfd[0]);
+      dup2(pfd[1], STDOUT_FILENO);
+      close(pfd[1]);
+      if (direct && direct[0])
+         execlp(direct, direct, uart_path, w_str, h_str, (char *)NULL);
+      execlp(sim_bin, sim_bin, "--cts-uart", uart_path, sim_fw,
+             w_str, h_str, (char *)NULL);
+      _exit(127);
+   }
+   close(pfd[1]);
+
+   size_t expected = (size_t)sdim * sdim * 3;
+   uint8_t *rgb = malloc(expected);
+   size_t got = 0;
+   if (rgb) {
+      while (got < expected) {
+         ssize_t n = read(pfd[0], rgb + got, expected - got);
+         if (n <= 0)
+            break;
+         got += (size_t)n;
+      }
+   }
+   close(pfd[0]);
+   int wstatus = 0;
+   waitpid(pid, &wstatus, 0);
+   unlink(uart_path);
+   if (getenv("BORGVK_DEBUG"))
+      mesa_logi("borgvk: sim returned %zu of %zu bytes, exit status %d",
+                got, expected, wstatus);
+
+   /* RGB888 sdim×sdim (sim stdout) → R8G8B8A8_UNORM attachment (width×height),
+    * nearest-neighbour upscale, opaque alpha. */
+   if (rgb && got == expected) {
+      uint8_t *dst = (uint8_t *)color_img->mem->map + color_img->offset;
+      for (uint32_t y = 0; y < height; y++) {
+         uint32_t sy = (uint32_t)((uint64_t)(2 * y + 1) * sdim / (2 * (uint64_t)height));
+         for (uint32_t x = 0; x < width; x++) {
+            uint32_t sx = (uint32_t)((uint64_t)(2 * x + 1) * sdim / (2 * (uint64_t)width));
+            const uint8_t *s = rgb + ((size_t)sy * sdim + sx) * 3;
+            uint8_t *d = dst + ((size_t)y * width + x) * 4;
+            d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
+         }
+      }
+   }
+   free(rgb);
+   return VK_SUCCESS;
+}
+
 
 /* Sim path for cube.c: capture the EXACT serial byte stream borgvk would put on
  * the wire (0xB0 borgc shaders + 0xAE geom + 0xAF texture + 0xAD MVP), feed it to
@@ -636,92 +774,241 @@ borgvk_submit_sim_cube(struct borgvk_device *device,
    }
 
    struct borgvk_image *color_img = find_color_attachment(submit);
-   if (!color_img || !color_img->mem || !color_img->mem->map)
-      { free(bytes); return VK_SUCCESS; }
-   uint32_t width  = color_img->vk.extent.width;
-   uint32_t height = color_img->vk.extent.height;
-   if (width == 0 || height == 0)
-      { free(bytes); return VK_SUCCESS; }
+   return sim_run_stream(bytes, nbytes, color_img, 0);
+}
 
-   /* The firmware renders at its fixed native size (128² fallback for the cube),
-    * which need not match the swapchain extent.  Render the sim at that size and
-    * nearest-upscale into the attachment.  Override with BORGVK_SIM_DIM. */
-   uint32_t sdim = 128;
-   const char *dim_env = getenv("BORGVK_SIM_DIM");
-   if (dim_env && dim_env[0]) {
-      int d = atoi(dim_env);
-      if (d > 0)
-         sdim = (uint32_t)d;
+/* Convert a sampled image to texels the texture unit reads (RGBA8, linear,
+ * one level) and ship it as 0xB5 chunks. Returns false for formats not handled
+ * yet, in which case nothing is sent. */
+static bool
+send_generic_texture(const struct vk_image_view *view,
+                     const struct borgvk_image *img,
+                     const struct borgvk_sampler *sampler)
+{
+   if (!img || !img->mem || !img->mem->map)
+      return false;
+   uint32_t w = img->vk.extent.width, h = img->vk.extent.height;
+   if (w == 0 || h == 0 || w > 4096 || h > 4096)
+      return false;
+   uint32_t type;
+   switch (view->view_type) {
+   case VK_IMAGE_VIEW_TYPE_1D: type = 0; h = 1; break;
+   case VK_IMAGE_VIEW_TYPE_2D: type = 1; break;
+   default: return false;
    }
 
-   /* Hand the byte stream to arcilator_sim --cts-uart via a temp file. */
-   char uart_path[] = "/tmp/borgvk_uart_XXXXXX";
-   int ufd = mkstemp(uart_path);
-   if (ufd < 0) {
-      free(bytes);
-      return VK_SUCCESS;
+   /* source texel layout -> RGBA8 + TexFormat code (borg_isa.h) */
+   uint32_t bpp, fmt_code;
+   bool swap_rb, alpha_fill;
+   uint8_t alpha_val;
+   switch (view->format) {
+   case VK_FORMAT_R8G8B8A8_UNORM: bpp = 4; fmt_code = 11; swap_rb = false; alpha_fill = false; alpha_val = 0; break;
+   case VK_FORMAT_R8G8B8A8_SNORM: bpp = 4; fmt_code = 12; swap_rb = false; alpha_fill = false; alpha_val = 0; break;
+   case VK_FORMAT_B8G8R8A8_UNORM: bpp = 4; fmt_code = 11; swap_rb = true;  alpha_fill = false; alpha_val = 0; break;
+   case VK_FORMAT_B8G8R8A8_SNORM: bpp = 4; fmt_code = 12; swap_rb = true;  alpha_fill = false; alpha_val = 0; break;
+   case VK_FORMAT_R8G8B8_UNORM:   bpp = 3; fmt_code = 11; swap_rb = false; alpha_fill = true;  alpha_val = 255; break;
+   case VK_FORMAT_R8G8B8_SNORM:   bpp = 3; fmt_code = 12; swap_rb = false; alpha_fill = true;  alpha_val = 127; break;
+   case VK_FORMAT_B8G8R8_UNORM:   bpp = 3; fmt_code = 11; swap_rb = true;  alpha_fill = true;  alpha_val = 255; break;
+   case VK_FORMAT_B8G8R8_SNORM:   bpp = 3; fmt_code = 12; swap_rb = true;  alpha_fill = true;  alpha_val = 127; break;
+   default: return false;
    }
-   for (size_t w = 0; w < nbytes; ) {
-      ssize_t n = write(ufd, bytes + w, nbytes - w);
-      if (n <= 0)
-         break;
-      w += (size_t)n;
+   uint32_t total = w * h * 4;
+   uint8_t *rgba = malloc(total);
+   if (!rgba)
+      return false;
+   const uint8_t *src = (const uint8_t *)img->mem->map + img->offset;
+   for (uint32_t i = 0; i < w * h; i++) {
+      const uint8_t *p = src + (size_t)i * bpp;
+      uint8_t *d = rgba + (size_t)i * 4;
+      d[0] = swap_rb ? p[2] : p[0];
+      d[1] = p[1];
+      d[2] = swap_rb ? p[0] : p[2];
+      d[3] = alpha_fill ? alpha_val : p[3];
    }
-   close(ufd);
-   free(bytes);
 
-   char w_str[16], h_str[16];
-   snprintf(w_str, sizeof(w_str), "%u", sdim);
-   snprintf(h_str, sizeof(h_str), "%u", sdim);
-
-   int pfd[2];
-   if (pipe(pfd) < 0) {
-      unlink(uart_path);
-      return VK_SUCCESS;
+   /* descriptor words 1..3: linear layout, one level, view swizzle (the
+    * VkComponentSwizzle values are the hardware's own encoding). */
+   uint32_t desc[3];
+   desc[0] = (w - 1) | ((h - 1) << 16) | (type << 28) | (1u << 30);
+   desc[1] = (fmt_code << 14) |
+             ((uint32_t)(view->swizzle.r & 7) << 20) |
+             ((uint32_t)(view->swizzle.g & 7) << 23) |
+             ((uint32_t)(view->swizzle.b & 7) << 26) |
+             ((uint32_t)(view->swizzle.a & 7) << 29);
+   desc[2] = w * 4;
+   for (uint32_t off = 0; off < total; off += BORGVK_TEXG_CHUNK) {
+      uint32_t n = total - off < BORGVK_TEXG_CHUNK ? total - off : BORGVK_TEXG_CHUNK;
+      borgvk_serial_send_texture_chunk(off, rgba + off, n, desc, sampler_desc(sampler));
    }
-   pid_t pid = fork();
-   if (pid == 0) {
-      close(pfd[0]);
-      dup2(pfd[1], STDOUT_FILENO);
-      close(pfd[1]);
-      execlp(sim_bin, sim_bin, "--cts-uart", uart_path, sim_fw,
-             w_str, h_str, (char *)NULL);
-      _exit(127);
-   }
-   close(pfd[1]);
+   free(rgba);
+   return true;
+}
 
-   size_t expected = (size_t)sdim * sdim * 3;
-   uint8_t *rgb = malloc(expected);
-   size_t got = 0;
-   if (rgb) {
-      while (got < expected) {
-         ssize_t n = read(pfd[0], rgb + got, expected - got);
-         if (n <= 0)
+/* Read one float attribute of one vertex (R32..R32G32B32A32_SFLOAT only).
+ * Missing components follow the Vulkan defaults: 0, 0, 0, 1. */
+static bool
+fetch_vertex_attr(const struct borgvk_pipeline *pl,
+                  const struct borgvk_vertex_attr *a,
+                  const uint8_t *const vb[BORGVK_MAX_VERTEX_BINDINGS],
+                  uint32_t vertex, float out[4])
+{
+   uint32_t n;
+   switch (a->format) {
+   case VK_FORMAT_R32_SFLOAT:          n = 1; break;
+   case VK_FORMAT_R32G32_SFLOAT:       n = 2; break;
+   case VK_FORMAT_R32G32B32_SFLOAT:    n = 3; break;
+   case VK_FORMAT_R32G32B32A32_SFLOAT: n = 4; break;
+   default: return false;
+   }
+   if (a->binding >= BORGVK_MAX_VERTEX_BINDINGS || !vb[a->binding])
+      return false;
+   const uint8_t *p = vb[a->binding] +
+      (size_t)vertex * pl->binding_stride[a->binding] + a->offset;
+   out[0] = out[1] = out[2] = 0.0f;
+   out[3] = 1.0f;
+   memcpy(out, p, n * sizeof(float));
+   return true;
+}
+
+/* Sim path for a generic draw (CTS): one graphics pipeline, vertex buffers
+ * described by its vertex-input state, location 0 = position (clip space,
+ * w taken as 1), location 1 = texture coordinate, a TRIANGLE_LIST draw and,
+ * optionally, a sampled image at some descriptor binding. The draw goes through
+ * the same wire protocol as vkcube (shaders, geometry, identity MVP, state),
+ * so it runs on the real firmware and hardware model.
+ * Returns true when it handled the submit. */
+static bool
+generic_reject(int why)
+{
+   if (getenv("BORGVK_DEBUG"))
+      mesa_logi("borgvk: generic sim draw rejected (reason %d)", why);
+   return false;
+}
+
+static bool
+borgvk_submit_sim_generic(struct borgvk_device *device,
+                          struct vk_queue_submit *submit)
+{
+   struct borgvk_pipeline *pipeline = NULL;
+   const uint8_t *vb[BORGVK_MAX_VERTEX_BINDINGS] = { NULL };
+   uint32_t vert_count = 0, first_vert = 0;
+
+   /* Only textured draws: untextured vertex-colour draws stay on the mailbox
+    * path until their shaders go through borgc as well. */
+   struct borgvk_descriptor_set *set = find_set(submit);
+   if (!set)
+      return generic_reject(1);
+   bool has_view = false;
+   for (int b = 0; b < BORGVK_MAX_BINDINGS; b++)
+      has_view |= set->views[b] != NULL;
+   if (!has_view)
+      return generic_reject(2);
+
+   for (uint32_t ci = 0; ci < submit->command_buffer_count; ci++) {
+      struct vk_command_buffer *cb = submit->command_buffers[ci];
+      list_for_each_entry(struct vk_cmd_queue_entry, e, &cb->cmd_queue.cmds, cmd_link) {
+         switch (e->type) {
+         case VK_CMD_BIND_PIPELINE: {
+            const struct vk_cmd_bind_pipeline *bp = &e->u.bind_pipeline;
+            if (bp->pipeline_bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
+               VK_FROM_HANDLE(borgvk_pipeline, pl, bp->pipeline);
+               pipeline = pl;
+            }
             break;
-         got += (size_t)n;
-      }
-   }
-   close(pfd[0]);
-   int wstatus = 0;
-   waitpid(pid, &wstatus, 0);
-   unlink(uart_path);
-
-   /* RGB888 sdim×sdim (sim stdout) → R8G8B8A8_UNORM attachment (width×height),
-    * nearest-neighbour upscale, opaque alpha. */
-   if (rgb && got == expected) {
-      uint8_t *dst = (uint8_t *)color_img->mem->map + color_img->offset;
-      for (uint32_t y = 0; y < height; y++) {
-         uint32_t sy = (uint32_t)((uint64_t)y * sdim / height);
-         for (uint32_t x = 0; x < width; x++) {
-            uint32_t sx = (uint32_t)((uint64_t)x * sdim / width);
-            const uint8_t *s = rgb + ((size_t)sy * sdim + sx) * 3;
-            uint8_t *d = dst + ((size_t)y * width + x) * 4;
-            d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
+         }
+         case VK_CMD_BIND_VERTEX_BUFFERS: {
+            const struct vk_cmd_bind_vertex_buffers *bv = &e->u.bind_vertex_buffers;
+            for (uint32_t i = 0; i < bv->binding_count; i++) {
+               uint32_t b = bv->first_binding + i;
+               VK_FROM_HANDLE(borgvk_buffer, buf, bv->buffers[i]);
+               if (b < BORGVK_MAX_VERTEX_BINDINGS && buf && buf->mem && buf->mem->map)
+                  vb[b] = (const uint8_t *)buf->mem->map + buf->offset + bv->offsets[i];
+            }
+            break;
+         }
+         case VK_CMD_DRAW:
+            if (vert_count == 0) {
+               vert_count = e->u.draw.vertex_count;
+               first_vert = e->u.draw.first_vertex;
+            }
+            break;
+         default:
+            break;
          }
       }
    }
-   free(rgb);
-   return VK_SUCCESS;
+
+   if (!pipeline || vert_count == 0 || vert_count % 3 != 0 ||
+       pipeline->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ||
+       vert_count / 3 > BORGVK_GEOM_MAX_TRIS)
+      return generic_reject(3);
+
+   const struct borgvk_vertex_attr *a_pos = NULL, *a_uv = NULL;
+   for (uint32_t i = 0; i < pipeline->attr_count; i++) {
+      if (pipeline->attrs[i].location == 0) a_pos = &pipeline->attrs[i];
+      if (pipeline->attrs[i].location == 1) a_uv  = &pipeline->attrs[i];
+   }
+   if (!a_pos)
+      return generic_reject(4);
+
+   struct borgvk_image *color_img = find_color_attachment(submit);
+   if (!color_img || !color_img->mem || !color_img->mem->map)
+      return generic_reject(5);
+
+   /* Dedup positions into the packet's shared vertex table, keep UVs per
+    * triangle corner (the packet carries them that way). */
+   float verts[BORGVK_GEOM_MAX_VERTS * 3];
+   uint8_t idx[BORGVK_GEOM_MAX_TRIS * 3];
+   float uv[BORGVK_GEOM_MAX_TRIS * 3 * 2];
+   int nverts = 0;
+   for (uint32_t i = 0; i < vert_count; i++) {
+      float pos[4], tc[4] = { 0, 0, 0, 1 };
+      if (!fetch_vertex_attr(pipeline, a_pos, vb, first_vert + i, pos))
+         return generic_reject(6);
+      if (a_uv && !fetch_vertex_attr(pipeline, a_uv, vb, first_vert + i, tc))
+         return generic_reject(7);
+      int u = -1;
+      for (int j = 0; j < nverts; j++)
+         if (verts[j*3+0] == pos[0] && verts[j*3+1] == pos[1] && verts[j*3+2] == pos[2]) {
+            u = j;
+            break;
+         }
+      if (u < 0) {
+         if (nverts >= BORGVK_GEOM_MAX_VERTS)
+            return generic_reject(8);
+         u = nverts++;
+         memcpy(&verts[u*3], pos, 3 * sizeof(float));
+      }
+      idx[i] = (uint8_t)u;
+      uv[i*2+0] = tc[0];
+      uv[i*2+1] = tc[1];
+   }
+
+   static const float identity[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+
+   /* The DRM shim's ioctls bypass the capture buffer; force the serial path. */
+   int saved_fd = device->drm_fd;
+   device->drm_fd = -1;
+   borgvk_transport_capture_begin();
+   upload_shaders(device);
+   send_blend_state(device);
+   borgvk_serial_send_geom(verts, nverts, idx, uv, (int)(vert_count / 3));
+   for (int b = 0; b < BORGVK_MAX_BINDINGS; b++)
+      if (set->views[b] && send_generic_texture(set->views[b], set->images[b], set->samplers[b]))
+         break;
+   borgvk_serial_send_mvp(identity);
+   size_t nbytes = 0;
+   uint8_t *bytes = borgvk_transport_capture_end(&nbytes);
+   device->drm_fd = saved_fd;
+   if (!bytes || nbytes == 0) {
+      free(bytes);
+      return true;
+   }
+   mesa_logi("borgvk: generic sim draw: %u verts -> %d unique, %zu byte stream, target %ux%u",
+             vert_count, nverts, nbytes, color_img->vk.extent.width,
+             color_img->vk.extent.height);
+   sim_run_stream(bytes, nbytes, color_img, 0);   /* firmware renders 128^2; resample to the target */
+   return true;
 }
 
 VkResult
@@ -737,9 +1024,13 @@ borgvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
     *     sim runs the exact protocol + real shaders as the FPGA.
     *   - CTS draws (VBO-driven): borgvk_submit_sim_draw, the mailbox --cts-draw
     *     path (carries per-vertex colour; still baked-shader for now). */
-   if (getenv("BORGVK_SIM"))
-      return submit_is_cube(submit) ? borgvk_submit_sim_cube(device, submit)
-                                    : borgvk_submit_sim_draw(submit);
+   if (getenv("BORGVK_SIM")) {
+      if (submit_is_cube(submit))
+         return borgvk_submit_sim_cube(device, submit);
+      if (borgvk_submit_sim_generic(device, submit))
+         return VK_SUCCESS;
+      return borgvk_submit_sim_draw(submit);
+   }
 
    struct borgvk_descriptor_set *set = find_set(submit);
    if (!set)

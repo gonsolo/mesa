@@ -56,8 +56,29 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
          pCreateInfos[i].pRasterizationState;
       pl->cull_mode  = rs ? rs->cullMode  : VK_CULL_MODE_NONE;
       pl->front_face = rs ? rs->frontFace : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+      const VkPipelineInputAssemblyStateCreateInfo *ia =
+         pCreateInfos[i].pInputAssemblyState;
+      pl->topology = ia ? ia->topology : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+      const VkPipelineVertexInputStateCreateInfo *vi =
+         pCreateInfos[i].pVertexInputState;
+      if (vi) {
+         for (uint32_t b = 0; b < vi->vertexBindingDescriptionCount; b++) {
+            const VkVertexInputBindingDescription *vb = &vi->pVertexBindingDescriptions[b];
+            if (vb->binding < BORGVK_MAX_VERTEX_BINDINGS)
+               pl->binding_stride[vb->binding] = vb->stride;
+         }
+         for (uint32_t a = 0; a < vi->vertexAttributeDescriptionCount &&
+                              pl->attr_count < BORGVK_MAX_VERTEX_ATTRS; a++) {
+            const VkVertexInputAttributeDescription *va = &vi->pVertexAttributeDescriptions[a];
+            pl->attrs[pl->attr_count++] = (struct borgvk_vertex_attr){
+               .location = va->location, .binding = va->binding,
+               .offset = va->offset, .format = va->format };
+         }
+      }
       borgvk_blend_pack(pCreateInfos[i].pColorBlendState,
                         &device->blend_cfg, &device->blend_const);
+      borgvk_state_pack(&pCreateInfos[i], device->state_reg);
+      device->state_valid = true;
    }
    for (; i < count; i++)
       pPipelines[i] = VK_NULL_HANDLE;
@@ -77,8 +98,6 @@ borgvk_CreateComputePipelines(VkDevice _device, VkPipelineCache cache,
    uint32_t i;
 
    for (i = 0; i < count; i++) {
-      borgvk_state_pack(&pCreateInfos[i], device->state_reg);
-      device->state_valid = true;
       result = borgvk_create_pipeline(device, pAllocator, &pPipelines[i]);
       if (result != VK_SUCCESS) {
          pPipelines[i] = VK_NULL_HANDLE;

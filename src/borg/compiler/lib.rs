@@ -848,7 +848,7 @@ pub unsafe extern "C" fn borgc_compile_nir(
                         // normal at 128x128. FP32 has no such floor.)
                         let comps: Vec<(u32, u8)> = raw.into_iter().map(|v| (v, 0u8)).collect();
                         vec_map.insert(intr.def.index, comps);
-                    } else if intr.intrinsic == nir_intrinsic_load_input && draw_mode {
+                    } else if intr.intrinsic == nir_intrinsic_load_input && draw_mode && !vs_const_window {
                         // Draw front end: FATTR + the perspective-correct barycentrics
                         // already in r5-r7 at fragment start (docs/B1_geometry_front_end.md),
                         // one component at a time -- FATTR loads a component's three
@@ -895,7 +895,7 @@ pub unsafe extern "C" fn borgc_compile_nir(
                             })
                             .collect();
                         vec_map.insert(intr.def.index, comps);
-                    } else if intr.intrinsic == nir_intrinsic_load_input {
+                    } else if intr.intrinsic == nir_intrinsic_load_input && !vs_const_window {
                         // Interpolated varying. Borg has no fixed-function interpolation:
                         // the shader computes it barycentrically. Emit the weights once
                         // (w_i = e_i·inv_area; e0/1/2 = attrs r0/1/2, inv_area = u12), then
@@ -1035,8 +1035,17 @@ pub unsafe extern "C" fn borgc_compile_nir(
                         // BorgInstr of its own, which load_vertex_id does not).
                         ubo.insert(intr.def.index, Ubo::Fixed(30));
                         vertex_id_def = Some(intr.def.index);
-                    } else if draw_mode && intr.intrinsic == nir_intrinsic_load_ubo {
-                        let offset_def = intr.get_src(1).as_def().index;
+                    } else if draw_mode && (intr.intrinsic == nir_intrinsic_load_ubo
+                                            || (vs_const_window && intr.intrinsic == nir_intrinsic_load_input)) {
+                        // A draw-mode vertex shader's `in` attributes are read from
+                        // the same per-vertex UBO region the firmware fills for
+                        // cube.vert: input location L is `vec4 attr[]` at word
+                        // 16 + 144*L (36 vertices * 4 words), stride 4 words,
+                        // indexed by VertexIndex -- the shape load_ubo already
+                        // lowers below (cube.vert's position is L=0 at word 16,
+                        // its texcoord L=1 at word 160).
+                        let is_input = intr.intrinsic == nir_intrinsic_load_input;
+                        let offset_def = if is_input { 0 } else { intr.get_src(1).as_def().index };
                         let n = intr.def.num_components as usize;
                         // vertex_id_def is always Some by now if the shader reads
                         // gl_VertexIndex anywhere, which every load_ubo here does
@@ -1046,10 +1055,19 @@ pub unsafe extern "C" fn borgc_compile_nir(
                         // (the MVP columns); u32::MAX is a sentinel no real NIR
                         // index can equal, for the degenerate shader that never
                         // reads gl_VertexIndex at all.
-                        let (base_words, stride_words) = match decompose_vertex_offset(
-                            &vec_map, &prod, &consts, &descriptor_defs,
-                            vertex_id_def.unwrap_or(u32::MAX), offset_def,
-                        ) {
+                        const VERT_ATTRIB_GENERIC0: u32 = 15;
+                        let input_slot = if is_input {
+                            let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
+                            Some(loc.wrapping_sub(VERT_ATTRIB_GENERIC0))
+                        } else {
+                            None
+                        };
+                        let (base_words, stride_words) = match input_slot
+                            .map(|l| Some((16 + 144 * l as i32, 4i32)))
+                            .unwrap_or_else(|| decompose_vertex_offset(
+                                &vec_map, &prod, &consts, &descriptor_defs,
+                                vertex_id_def.unwrap_or(u32::MAX), offset_def,
+                            )) {
                             Some(bs) => bs,
                             None => {
                                 eprintln!(

@@ -163,6 +163,13 @@ void borgvk_blend_pack(const VkPipelineColorBlendStateCreateInfo *cb,
                        uint32_t *cfg, uint32_t *konst);
 /* 0xB4: STENCIL_CFG, STENCIL_FRONT, STENCIL_BACK, DEPTH_CFG, CULL_CFG. */
 void borgvk_serial_send_state(const uint32_t reg[5]);
+/* 0xB5: one chunk (<= 256 B at byte offset `off`) of a texture's texels plus
+ * the texture descriptor words 1..3 and the four sampler words
+ * (docs/B2_texture_unit.md); descriptor and sampler ride with every chunk. */
+#define BORGVK_TEXG_CHUNK 256
+void borgvk_serial_send_texture_chunk(uint32_t off, const uint8_t *data, uint32_t n,
+                                      const uint32_t desc_w123[3],
+                                      const uint32_t sampler[4]);
 /* Pack a pipeline's stencil, depth and cull state into register layout. */
 void borgvk_state_pack(const VkGraphicsPipelineCreateInfo *ci, uint32_t reg[5]);
 
@@ -304,13 +311,31 @@ struct borgvk_descriptor_set {
    struct borgvk_buffer *buffers[BORGVK_MAX_BINDINGS];
    VkDeviceSize offsets[BORGVK_MAX_BINDINGS];
    struct borgvk_image *images[BORGVK_MAX_BINDINGS];
+   /* The view behind images[]: view type, format, mip/layer range, swizzle. */
+   struct vk_image_view *views[BORGVK_MAX_BINDINGS];
    struct borgvk_sampler *samplers[BORGVK_MAX_BINDINGS];
+};
+
+#define BORGVK_MAX_VERTEX_BINDINGS 4
+#define BORGVK_MAX_VERTEX_ATTRS    8
+
+struct borgvk_vertex_attr {
+   uint32_t location;
+   uint32_t binding;
+   uint32_t offset;
+   VkFormat format;
 };
 
 struct borgvk_pipeline {
    struct vk_object_base base;
    VkCullModeFlags cull_mode;      /* from VkPipelineRasterizationStateCreateInfo */
    VkFrontFace     front_face;
+   /* VkPipelineVertexInputStateCreateInfo, so a generic draw can find
+    * position and texture coordinates in the bound vertex buffers. */
+   VkPrimitiveTopology       topology;
+   uint32_t                  binding_stride[BORGVK_MAX_VERTEX_BINDINGS];
+   uint32_t                  attr_count;
+   struct borgvk_vertex_attr attrs[BORGVK_MAX_VERTEX_ATTRS];
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_descriptor_set_layout, vk.base,

@@ -181,9 +181,11 @@ borgvk_UpdateDescriptorSets(VkDevice _device,
            w->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) &&
           w->pImageInfo[0].imageView != VK_NULL_HANDLE) {
          VK_FROM_HANDLE(vk_image_view, view, w->pImageInfo[0].imageView);
-         if (view)
+         if (view) {
             set->images[w->dstBinding] =
                container_of(view->image, struct borgvk_image, vk);
+            set->views[w->dstBinding] = view;
+         }
       }
    }
 

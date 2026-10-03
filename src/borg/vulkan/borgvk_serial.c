@@ -552,3 +552,33 @@ borgvk_state_pack(const VkGraphicsPipelineCreateInfo *ci, uint32_t reg[5])
                (rs->frontFace == VK_FRONT_FACE_CLOCKWISE ? 1u << 2 : 0u);
    }
 }
+
+#define BORGVK_MARKER_TEXG 0xB5
+/* 0xB5: marker, off (LE u32), n (LE u16), desc words 1..3, sampler words,
+ * BORGVK_TEXG_CHUNK data bytes (zero padded), csum. */
+void
+borgvk_serial_send_texture_chunk(uint32_t off, const uint8_t *data, uint32_t n,
+                                 const uint32_t desc_w123[3],
+                                 const uint32_t sampler[4])
+{
+   uint8_t pkt[1 + 4 + 2 + 12 + 16 + BORGVK_TEXG_CHUNK + 1] = { 0 };
+   if (n > BORGVK_TEXG_CHUNK)
+      n = BORGVK_TEXG_CHUNK;
+   pkt[0] = BORGVK_MARKER_TEXG;
+   for (int i = 0; i < 4; i++)
+      pkt[1 + i] = (uint8_t)(off >> (8 * i));
+   pkt[5] = (uint8_t)n;
+   pkt[6] = (uint8_t)(n >> 8);
+   for (int w = 0; w < 3; w++)
+      for (int i = 0; i < 4; i++)
+         pkt[7 + 4 * w + i] = (uint8_t)(desc_w123[w] >> (8 * i));
+   for (int w = 0; w < 4; w++)
+      for (int i = 0; i < 4; i++)
+         pkt[19 + 4 * w + i] = (uint8_t)(sampler[w] >> (8 * i));
+   memcpy(&pkt[35], data, n);
+   uint8_t csum = 0;
+   for (size_t i = 1; i < sizeof(pkt) - 1; i++)
+      csum ^= pkt[i];
+   pkt[sizeof(pkt) - 1] = csum;
+   borgvk_transport_emit(pkt, sizeof(pkt));
+}
