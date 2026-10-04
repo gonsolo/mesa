@@ -458,7 +458,8 @@ unsafe fn compile_nir_inner(
     // is a funct3 uniform operand there, which every instruction accepts
     // once (LOAD's address included), so it costs no extra instructions.
     const DRAW_VS_CONST_U0: u8 = 25;
-    const DRAW_VS_CONST_WORDS: usize = 7;
+    // u31 is never written by the DMA (Borg.scala keeps it firmware-owned), so the window ends at u30.
+    const DRAW_VS_CONST_WORDS: usize = 6;
     let mut draw_vs_consts: Vec<(u8, u32)> = Vec::new(); // (u-index, bits)
     let vs_const_window = draw_mode && stage == 0;
     // A fresh vreg standing for the compile-time integer `v`: a window
@@ -660,7 +661,7 @@ unsafe fn compile_nir_inner(
                             } else if let Some(&u) = frag_window_by_bits.get(&bits) {
                                 u   // the same value already has a word
                             } else {
-                                assert!(draw_uniform_count < 12, "borgc: fragment shader needs more than 12 window constants");
+                                assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
                                 let u = 20 + draw_uniform_count;
                                 draw_uniform_count += 1;
                                 draw_uniform_consts.push((u, bits));
@@ -1316,7 +1317,7 @@ unsafe fn compile_nir_inner(
                             } else if let Some(&u) = frag_window_by_bits.get(&bits) {
                                 u
                             } else {
-                                assert!(draw_uniform_count < 12, "borgc: fragment shader needs more than 12 window constants");
+                                assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
                                 let u = 20 + draw_uniform_count;
                                 draw_uniform_count += 1;
                                 draw_uniform_consts.push((u, bits));
@@ -1416,7 +1417,7 @@ unsafe fn compile_nir_inner(
                             let u = match fetch_ctl_uniform {
                                 Some(u) => u,
                                 None => {
-                                    assert!(draw_uniform_count < 12, "borgc: fragment shader needs more than 12 window constants");
+                                    assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
                                     let u = 20 + draw_uniform_count;
                                     draw_uniform_count += 1;
                                     draw_uniform_consts.push((u, 1u32 << 16));
@@ -1668,7 +1669,7 @@ unsafe fn compile_nir_inner(
         if let (Some(px), Some(py), Some(pw)) = (draw_pos_out[0], draw_pos_out[1], draw_pos_out[3]) {
             let w = reg(pw, &ubo, &mut prog, &mut next_vreg);
             let size = draw_psize.map(|ps| {
-                // Clamp to the advertised maximum, 64: x - c*(x - 64), c = step(x - 64). The window has no word to spare for the minimum.
+                // Clamp to the advertised range [1, 64]: x - c*(x - 64), c = step(x - 64).
                 let x = reg(ps, &ubo, &mut prog, &mut next_vreg).0;
                 let mut win = |bits: u32, draw_vs_consts: &mut Vec<(u8, u32)>, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| {
                     let u = DRAW_VS_CONST_U0 + draw_vs_consts.len() as u8;
@@ -1691,6 +1692,14 @@ unsafe fn compile_nir_inner(
                 let ct = op("FMUL", vec![c, t], &mut prog, &mut next_vreg);
                 let nct = op("FNEG", vec![ct], &mut prog, &mut next_vreg);
                 let x = op("FADD", vec![x, nct], &mut prog, &mut next_vreg);
+                // lower: x += step(1 - x) * (1 - x); 1.0 = step(dx * dx), as the window has no word left
+                let dd = op("FMUL", vec![d[0], d[0]], &mut prog, &mut next_vreg);
+                let one = op("FSTEP", vec![dd], &mut prog, &mut next_vreg);
+                let nx = op("FNEG", vec![x], &mut prog, &mut next_vreg);
+                let t2 = op("FADD", vec![nx, one], &mut prog, &mut next_vreg);
+                let c2 = op("FSTEP", vec![t2], &mut prog, &mut next_vreg);
+                let m2 = op("FMUL", vec![c2, t2], &mut prog, &mut next_vreg);
+                let x = op("FADD", vec![x, m2], &mut prog, &mut next_vreg);
                 (x, 0u8)
             });
             for (k, pc) in [px, py].into_iter().enumerate() {
@@ -1713,7 +1722,7 @@ unsafe fn compile_nir_inner(
         // Byte-packed integer colour (R8G8B8A8_UINT/SINT, RAW32): r26 = c0 | c1<<8 | c2<<16 | c3<<24.
         let (mut p, mut pc) = draw_frag_out[3].unwrap();
         let eight = *frag_window_by_bits.entry(8).or_insert_with(|| {
-            assert!(draw_uniform_count < 12, "borgc: fragment shader needs more than 12 window constants");
+            assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
             let u = 20 + draw_uniform_count;
             draw_uniform_count += 1;
             draw_uniform_consts.push((u, 8));
