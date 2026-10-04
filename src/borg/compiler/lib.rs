@@ -914,7 +914,7 @@ unsafe fn compile_nir_inner(
                         // normal at 128x128. FP32 has no such floor.)
                         let comps: Vec<(u32, u8)> = raw.into_iter().map(|v| (v, 0u8)).collect();
                         vec_map.insert(intr.def.index, comps);
-                    } else if intr.intrinsic == nir_intrinsic_load_input && draw_mode && !vs_const_window {
+                    } else if (intr.intrinsic == nir_intrinsic_load_input || intr.intrinsic == nir_intrinsic_load_point_coord) && draw_mode && !vs_const_window {
                         // Draw front end: FATTR + the perspective-correct barycentrics
                         // already in r5-r7 at fragment start (docs/B1_geometry_front_end.md),
                         // one component at a time -- FATTR loads a component's three
@@ -934,8 +934,11 @@ unsafe fn compile_nir_inner(
                         // interpolation. Caught by a hardware test: dot(c, c) computed
                         // wildly too large because the barycentric sum silently used
                         // vertex 0's value for all three terms.
-                        let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
-                        let base_index = 4 * loc.wrapping_sub(VARYING_SLOT_VAR0);
+                        let is_pc = intr.intrinsic == nir_intrinsic_load_point_coord;
+                        let loc = if is_pc { 25 } else { intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F };
+                        // gl_PointCoord (VARYING_SLOT_PNTC): the vertex stage's extra varyings, whose first index
+                        // the driver passes in the option word's top byte.
+                        let base_index = if loc == 25 { vfetch >> 24 } else { 4 * loc.wrapping_sub(VARYING_SLOT_VAR0) };
                         let bary = [5u8, 6, 7].map(|r| {
                             let v = next_vreg; next_vreg += 1;
                             ubo.insert(v, Ubo::Fixed(r));
@@ -944,7 +947,7 @@ unsafe fn compile_nir_inner(
                         });
                         let n = intr.def.num_components as usize;
                         // Integer varyings are flat (Vulkan): the provoking vertex's bits, not a blend.
-                        let dtype = intr.get_const_index(NIR_INTRINSIC_DEST_TYPE);
+                        let dtype = if is_pc { 0x80 } else { intr.get_const_index(NIR_INTRINSIC_DEST_TYPE) };
                         let flat = dtype != 0 && dtype & 0x80 == 0;
                         let comps: Vec<(u32, u8)> = (0..n)
                             .map(|c| {
@@ -1632,8 +1635,8 @@ unsafe fn compile_nir_inner(
     }
     if draw_mode && stage == 0 && vfetch & 0x4000_0000 != 0 {
         // Point expansion: this vertex is a corner of the point's quad; the corner's clip-space
-        // offset (slot 15, x y), times gl_PointSize, times w, moves it from the point's centre.
-        let ctl_bits = (1u32 << 16) | (128 + 15);
+        // offset (slot 16: x y, then the point coordinate u v), times gl_PointSize, times w, moves it from the point's centre.
+        let ctl_bits = (1u32 << 16) | (128 + 16);
         assert!(draw_vs_consts.len() < DRAW_VS_CONST_WORDS,
             "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
         let u = DRAW_VS_CONST_U0 + draw_vs_consts.len() as u8;
@@ -1653,11 +1656,20 @@ unsafe fn compile_nir_inner(
         let tex_v = next_vreg; next_vreg += 1;
         prog.push(BorgInstr { mnem: "TEX", dst: tex_v, srcs: vec![tx, ty, ctl], swz: vec![0, 0, 0] });
         tex_dsts.insert(tex_v);
-        let mut d = [0u32; 2];
-        for k in 0..2 {
+        let mut d = [0u32; 4];
+        for k in 0..4 {
             let m = next_vreg; next_vreg += 1;
             prog.push(BorgInstr { mnem: "IOR", dst: m, srcs: vec![tex_v, tex_v], swz: vec![k as u8, k as u8] });
             d[k] = m;
+        }
+        // gl_PointCoord rides as two more varyings, after the shader's own.
+        if vfetch & 0x2000_0000 != 0 {
+            let base = prog.iter().filter(|i| i.mnem == "SOUT").map(|i| i.swz[0] as u32 + 1).max().unwrap_or(0);
+            assert!(base + 2 <= 255, "borgc: no varying slot left for the point coordinate");
+            for k in 0..2u32 {
+                prog.push(BorgInstr { mnem: "SOUT", dst: NO_DST, srcs: vec![d[2 + k as usize]], swz: vec![(base + k) as u8] });
+                draw_out_roots.push(d[2 + k as usize]);
+            }
         }
         let reg = |v: (u32, u8), ubo: &HashMap<u32, Ubo>, prog: &mut Vec<BorgInstr>, next_vreg: &mut u32| -> (u32, u8) {
             if matches!(ubo.get(&v.0), Some(Ubo::Uniform(_))) {
@@ -1717,6 +1729,42 @@ unsafe fn compile_nir_inner(
                 draw_out_roots.push(o);
             }
         }
+    }
+    if draw_mode && stage == 4 && vfetch & 2 != 0 && draw_frag_out[0].is_some() {
+        // R8_UNORM (RAW8): r26 = round(r * 255) & 0xFF.
+        let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
+            let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
+                assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
+                let u = 20 + draw_uniform_count;
+                draw_uniform_count += 1;
+                draw_uniform_consts.push((u, bits));
+                u
+            });
+            let v = *next_vreg; *next_vreg += 1;
+            ubo.insert(v, Ubo::Uniform(u as u8));
+            v
+        };
+        let c255 = win(255.0f32.to_bits(), &mut ubo, &mut next_vreg);
+        let c05 = win(0.5f32.to_bits(), &mut ubo, &mut next_vreg);
+        let cff = win(0xFF, &mut ubo, &mut next_vreg);
+        let (x, xc) = draw_frag_out[0].unwrap();
+        let x = if matches!(ubo.get(&x), Some(Ubo::Uniform(_))) {
+            let o = next_vreg; next_vreg += 1;
+            prog.push(BorgInstr { mnem: "FMOV", dst: o, srcs: vec![x], swz: vec![xc] });
+            o
+        } else { x };
+        let xc = if x == draw_frag_out[0].unwrap().0 { xc } else { 0 };
+        let mut op = |mnem: &'static str, srcs: Vec<u32>, swz: Vec<u8>, prog: &mut Vec<BorgInstr>, next_vreg: &mut u32| {
+            let d = *next_vreg; *next_vreg += 1;
+            prog.push(BorgInstr { mnem, dst: d, srcs, swz });
+            d
+        };
+        let m = op("FMUL", vec![x, c255], vec![xc, 0], &mut prog, &mut next_vreg);
+        let h = op("FADD", vec![m, c05], vec![0, 0], &mut prog, &mut next_vreg);
+        let i = op("F2I", vec![h], vec![0], &mut prog, &mut next_vreg);
+        let w = op("IAND", vec![i, cff], vec![0, 0], &mut prog, &mut next_vreg);
+        draw_frag_out = [Some((w, 0)), None, None, None];
+        out_roots.push(w);
     }
     if draw_mode && stage == 4 && vfetch & 1 != 0 && draw_frag_out[3].is_some() {
         // Byte-packed integer colour (R8G8B8A8_UINT/SINT, RAW32): r26 = c0 | c1<<8 | c2<<16 | c3<<24.

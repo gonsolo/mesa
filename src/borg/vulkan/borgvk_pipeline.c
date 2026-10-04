@@ -68,10 +68,30 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
          device->shader_blob[st].len = 0;
       const VkPipelineRenderingCreateInfo *ri = vk_get_pipeline_rendering_create_info(&pCreateInfos[i]);
       const uint32_t frag_opt =
-         ri && ri->colorAttachmentCount && borgvk_sim_bytes_packed(ri->pColorAttachmentFormats[0]) ? 1 : 0;
+         ri && ri->colorAttachmentCount && borgvk_sim_bytes_packed(ri->pColorAttachmentFormats[0]) ? 1 :
+         ri && ri->colorAttachmentCount && ri->pColorAttachmentFormats[0] == VK_FORMAT_R8_UNORM ? 2 : 0;
       for (uint32_t s = 0; s < pCreateInfos[i].stageCount; s++)
          borgvk_compile_stage(device, pCreateInfos[i].pStages[s].stage == VK_SHADER_STAGE_FRAGMENT_BIT ? frag_opt : vfetch,
                               &pCreateInfos[i].pStages[s]);
+      if (points) {
+         /* gl_PointCoord: the fragment stage reads two varyings placed after the vertex stage's own. */
+         const VkPipelineShaderStageCreateInfo *vs = NULL, *fs = NULL;
+         for (uint32_t s = 0; s < pCreateInfos[i].stageCount; s++) {
+            if (pCreateInfos[i].pStages[s].stage == VK_SHADER_STAGE_VERTEX_BIT)
+               vs = &pCreateInfos[i].pStages[s];
+            if (pCreateInfos[i].pStages[s].stage == VK_SHADER_STAGE_FRAGMENT_BIT)
+               fs = &pCreateInfos[i].pStages[s];
+         }
+         if (vs && fs) {
+            const uint32_t base = borgvk_blob_num_varyings(&device->shader_blob[BORGVK_STAGE_VERT]);
+            borgvk_compile_stage(device, frag_opt | (base << 24), fs);
+            if (device->frag_reads_pntc && base + 2 <= 255) {
+               borgvk_compile_stage(device, vfetch | 0x20000000u, vs);
+            } else {
+               borgvk_compile_stage(device, frag_opt, fs);
+            }
+         }
+      }
 
       result = borgvk_create_pipeline(device, pAllocator, &pPipelines[i]);
       if (result != VK_SUCCESS) {

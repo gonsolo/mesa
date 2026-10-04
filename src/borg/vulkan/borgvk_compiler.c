@@ -32,7 +32,34 @@ borgvk_compiler_selftest(void)
    mesa_logi("borgvk: borgc (Rust compiler) selftest = 0x%x", borgc_selftest());
 }
 
+static bool
+reads_point_coord(nir_shader *nir)
+{
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic == nir_intrinsic_load_point_coord)
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
 /* Turn one pipeline shader stage's SPIR-V into NIR and hand it to borgc. */
+/* The draw extension's varying count of a compiled blob (software/borg/borg_spirb.c layout). */
+uint32_t
+borgvk_blob_num_varyings(const struct borgvk_shader_blob *b)
+{
+   if (b->len < 6 || !(b->data[5] & 1))
+      return 0;
+   const uint32_t at = 6 + 4 * b->data[0] + b->data[3] + b->data[4] + 4 * b->data[4];
+   return at < b->len ? b->data[at] : 0;
+}
+
 void
 borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
                      const VkPipelineShaderStageCreateInfo *stage_info)
@@ -51,6 +78,7 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
    /* Shared with the offline borgc CLI -- see borg_nir_passes.h for why this
     * must not be a second copy. */
    borg_lower_nir_for_borgc(nir);
+   device->frag_reads_pntc = stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT && reads_point_coord(nir);
 
    /* Map the Vulkan stage to a firmware shader slot. Only the vertex and
     * fragment stages are app-derived; anything else (e.g. compute) has no Borg

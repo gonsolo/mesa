@@ -106,6 +106,7 @@ struct borgvk_device {
    /* borgc-compiled shader blobs captured at pipeline creation, uploaded to the
     * firmware over serial (0xB0) on the first submit. */
    struct borgvk_shader_blob shader_blob[BORGVK_SHADER_STAGE_COUNT];
+   bool frag_reads_pntc;   /* the last fragment stage compiled reads gl_PointCoord */
    /* Colour-blend state of the last graphics pipeline created, already packed
     * in BLEND_CFG / BLEND_CONST register layout (see borgvk_blend_pack()). */
    uint32_t blend_cfg;
@@ -184,7 +185,7 @@ void borgvk_flush_draws(struct borgvk_command_buffer *cmd);
 
 /* The persistent simulator (borgvk_sim.c). */
 struct borgvk_image;
-bool borgvk_sim_serves(const struct borgvk_image *color);
+bool borgvk_sim_serves(const struct borgvk_image *color, bool has_depth_stencil);
 uint8_t borgvk_sim_flush_format(VkFormat f);
 bool borgvk_sim_bytes_packed(VkFormat f);
 bool borgvk_sim_depth_is_d32(VkFormat f);
@@ -286,6 +287,7 @@ void borgvk_compiler_selftest(void);
 void borgvk_compile_compute_stage(struct borgvk_device *device,
                                   const VkPipelineShaderStageCreateInfo *stage_info,
                                   struct borgvk_pipeline *pipeline);
+uint32_t borgvk_blob_num_varyings(const struct borgvk_shader_blob *b);
 void borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
                           const VkPipelineShaderStageCreateInfo *stage_info);
 

@@ -1040,6 +1040,7 @@ generic_reject(int why)
 
 /* The simulator's heap (software/borg/borg_layout.h BORG_HEAP_*): a bump allocator per stream. */
 #define BORGVK_HEAP_BYTES 0x2000000u
+#define BORGVK_POINT_SLOT 16   /* the point corner attribute's vertex slot (BORG_MAX_VATTRS - 1) */
 
 struct draw_heap {
    uint32_t top;
@@ -1148,9 +1149,6 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    /* A point is a quad of two triangles: six vertices, whose clip offsets come from slot 15. */
    const bool points = pipeline->topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
    const uint32_t X = points ? 6 : 1;
-   for (uint32_t a = 0; points && a < pipeline->attr_count; a++)
-      if (pipeline->attrs[a].location >= 15)
-         return generic_reject(11);
 
    struct borgvk_image *color_img =
       cmd->color_views[0] && cmd->color_views[0]->image
@@ -1205,7 +1203,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
          need += (uint64_t)(r1 - r0 + 1) * X * pipeline->binding_stride[b] + 32;
       }
       if (points)
-         need += (uint64_t)(vmax - vmin + 1) * X * 8 + 32;
+         need += (uint64_t)(vmax - vmin + 1) * X * 16 + 32;
       if (cmd->batch_draws && cmd->heap_top + need > BORGVK_HEAP_BYTES)
          borgvk_flush_draws(cmd);
    }
@@ -1228,7 +1226,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
                            memcmp(state, cmd->state_sent, state_len) == 0;
    borgvk_transport_capture_begin();
    if (first_of_batch)
-      cmd->batch_serve = borgvk_sim_serves(color_img);
+      cmd->batch_serve = borgvk_sim_serves(color_img, cmd->depth_view || cmd->stencil_view);
    const bool serve = cmd->batch_serve;
    /* Persistent simulator: the attachments hold what the application's images hold, so every
     * draw loads them (colour, depth, stencil) and keeps the tiles it does not reach. */
@@ -1301,25 +1299,29 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    if (ok && points) {
       static const float corner[6][2] = { { -.5f, -.5f }, { .5f, -.5f }, { -.5f, .5f },
                                           { .5f, -.5f }, { .5f, .5f }, { -.5f, .5f } };
+      /* (dx, dy) in clip units, then the point coordinate (u, v) of the corner. */
       uint32_t code, swz, rbytes;
       const int64_t e0 = vmin * X, e1 = vmax * X + X - 1;
-      if (e1 + 1 > 4096 * 4096 || !vertex_format_to_fetch(VK_FORMAT_R32G32_SFLOAT, &code, &swz, &rbytes)) {
+      if (e1 + 1 > 4096 * 4096 || !vertex_format_to_fetch(VK_FORMAT_R32G32B32A32_SFLOAT, &code, &swz, &rbytes)) {
          ok = generic_reject(9);
       } else {
-         float *c = malloc((size_t)(e1 - e0 + 1) * 8);
+         float *c = malloc((size_t)(e1 - e0 + 1) * 16);
          if (!c) {
             ok = generic_reject(10);
          } else {
             for (int64_t e = e0; e <= e1; e++) {
-               c[2 * (e - e0)] = corner[e % X][0] * 2.0f / color_img->vk.extent.width;
-               c[2 * (e - e0) + 1] = corner[e % X][1] * 2.0f / color_img->vk.extent.height;
+               float *o = c + 4 * (e - e0);
+               o[0] = corner[e % X][0] * 2.0f / color_img->vk.extent.width;
+               o[1] = corner[e % X][1] * 2.0f / color_img->vk.extent.height;
+               o[2] = corner[e % X][0] + 0.5f;
+               o[3] = corner[e % X][1] + 0.5f;
             }
-            const uint32_t off = heap_upload(&heap, (const uint8_t *)c, (uint32_t)(e1 - e0 + 1) * 8);
+            const uint32_t off = heap_upload(&heap, (const uint8_t *)c, (uint32_t)(e1 - e0 + 1) * 16);
             free(c);
             if (off == UINT32_MAX)
                ok = generic_reject(10);
             else
-               borgvk_serial_send_vattr(15, code, off - (uint32_t)e0 * rbytes, (uint32_t)e1 + 1, rbytes, swz);
+               borgvk_serial_send_vattr(BORGVK_POINT_SLOT, code, off - (uint32_t)e0 * rbytes, (uint32_t)e1 + 1, rbytes, swz);
          }
       }
    }
