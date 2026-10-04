@@ -187,7 +187,7 @@ borgvk_sim_flush_format(VkFormat f)
 }
 
 /* Whether the persistent simulator can render to this colour attachment: the direct
- * simulator, and a square power-of-two target up to 256. */
+ * simulator, and a power-of-two-wide target of up to 512 x 256 pixels. */
 bool
 borgvk_sim_serves(const struct borgvk_image *color)
 {
@@ -195,7 +195,8 @@ borgvk_sim_serves(const struct borgvk_image *color)
    if (!direct || !direct[0] || !color)
       return false;
    uint32_t w = color->vk.extent.width, h = color->vk.extent.height;
-   return w >= 4 && w <= 512 && (w & (w - 1)) == 0 && h >= 4 && h <= 512 && (h & 3) == 0;
+   /* The depth plane (BORG_ZB_SPI) holds 512 x 256 D32 pixels. */
+   return w >= 4 && (w & (w - 1)) == 0 && h >= 4 && (h & 3) == 0 && (uint64_t)w * h <= 512 * 256;
 }
 
 static struct borgvk_image *
