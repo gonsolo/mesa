@@ -600,11 +600,11 @@ borgvk_get_properties(struct vk_properties *p)
 
       /* Vulkan 1.0 limits — modest, sane values so vulkaninfo and apps see a
        * coherent device. Tightened/grown as real features come online. */
-      .maxImageDimension1D = 16384,
-      .maxImageDimension2D = 16384,
-      .maxImageDimension3D = 2048,
-      .maxImageDimensionCube = 16384,
-      .maxImageArrayLayers = 2048,
+      .maxImageDimension1D = 4096,
+      .maxImageDimension2D = 4096,
+      .maxImageDimension3D = 256,
+      .maxImageDimensionCube = 4096,
+      .maxImageArrayLayers = 256,
       .maxTexelBufferElements = 65536,
       .maxUniformBufferRange = 65536,
       .maxStorageBufferRange = UINT32_MAX,
@@ -623,12 +623,12 @@ borgvk_get_properties(struct vk_properties *p)
       .maxFragmentOutputAttachments = 4,
       .maxFragmentCombinedOutputResources = 4,
       .maxColorAttachments = 4,
-      .maxFramebufferWidth = 16384,
-      .maxFramebufferHeight = 16384,
+      .maxFramebufferWidth = 4096,
+      .maxFramebufferHeight = 4096,
       .maxFramebufferLayers = 256,
       .maxViewports = 1,
-      .maxViewportDimensions = { 16384, 16384 },
-      .viewportBoundsRange = { -32768.0f, 32767.0f },
+      .maxViewportDimensions = { 4096, 4096 },
+      .viewportBoundsRange = { -8192.0f, 8191.0f },
 
       /* Per-stage and per-set descriptor limits (Vulkan spec table minimums). */
       .maxPerStageDescriptorSamplers          = 16,
