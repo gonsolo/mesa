@@ -671,6 +671,10 @@ sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
    if (direct && direct[0] && nwx > 1) {
       long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
       nparts = (uint32_t)(ncpu > 1 ? ncpu : 1);
+      /* BORGVK_SIM_PARTS=n: at most n processes (1 under a parallel test runner). */
+      const char *parts = getenv("BORGVK_SIM_PARTS");
+      if (parts && atoi(parts) > 0)
+         nparts = MIN2(nparts, (uint32_t)atoi(parts));
       if (nparts > nwx * nwx)
          nparts = nwx * nwx;
    }
