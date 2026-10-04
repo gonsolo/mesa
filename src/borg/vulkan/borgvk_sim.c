@@ -303,7 +303,7 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
 
    /* A large pass is split into horizontal strips of tile rows, one simulator each. */
    const char *pe = getenv("BORGVK_SERVE_PARTS");
-   int np = pe ? atoi(pe) : 1;
+   int np = pe ? atoi(pe) : (int)MIN2(12, MAX2(1, sysconf(_SC_NPROCESSORS_ONLN)));
    np = n >= SIM_PARALLEL_BYTES ? CLAMP(np, 1, SIM_MAX_PARTS) : 1;
    const uint32_t ftiles = h >> 2;
    const uint32_t rows_per = (ftiles + np - 1) / np;
