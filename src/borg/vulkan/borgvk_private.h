@@ -106,6 +106,7 @@ struct borgvk_device {
    /* borgc-compiled shader blobs captured at pipeline creation, uploaded to the
     * firmware over serial (0xB0) on the first submit. */
    struct borgvk_shader_blob shader_blob[BORGVK_SHADER_STAGE_COUNT];
+   VkPipelineLayout compile_layout;   /* the layout of the pipeline being created, for array bindings */
    bool frag_reads_pntc;   /* the last fragment stage compiled reads gl_PointCoord */
    /* Colour-blend state of the last graphics pipeline created, already packed
     * in BLEND_CFG / BLEND_CONST register layout (see borgvk_blend_pack()). */
@@ -355,10 +356,18 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_sampler, vk.base, VkSampler,
                                VK_OBJECT_TYPE_SAMPLER)
 
 
+/* Where each binding's array elements sit in a set's flat slot arrays: slot = binding plus the
+ * extra elements of the lower bindings, so a layout without arrays maps each binding to itself. */
+struct borgvk_desc_map {
+   uint8_t n, num[BORGVK_MAX_BINDINGS], slot[BORGVK_MAX_BINDINGS], count[BORGVK_MAX_BINDINGS];
+   bool arrays;
+};
+
 struct borgvk_descriptor_set_layout {
    struct vk_descriptor_set_layout vk;
    uint32_t binding_count;
-   uint64_t dyn_mask;           /* bindings that are *_BUFFER_DYNAMIC */
+   uint64_t dyn_mask;           /* slots of *_BUFFER_DYNAMIC descriptors */
+   struct borgvk_desc_map map;
 };
 
 struct borgvk_descriptor_pool {
@@ -379,7 +388,8 @@ struct borgvk_descriptor_set {
    struct vk_image_view *views[BORGVK_MAX_BINDINGS];
    struct borgvk_sampler *samplers[BORGVK_MAX_BINDINGS];
    struct vk_buffer_view *buffer_views[BORGVK_MAX_BINDINGS];   /* texel buffers */
-   uint64_t dyn_mask;           /* from the layout: dynamic-offset bindings */
+   uint64_t dyn_mask;           /* from the layout: dynamic-offset slots */
+   struct borgvk_desc_map map;
 };
 
 #define BORGVK_MAX_VERTEX_ATTRS    8

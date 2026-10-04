@@ -31,12 +31,30 @@ borgvk_CreateDescriptorSetLayout(VkDevice _device,
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    layout->binding_count = pCreateInfo->bindingCount;
+   uint8_t count_of[BORGVK_MAX_BINDINGS] = { 0 };
+   bool dyn_of[BORGVK_MAX_BINDINGS] = { 0 };
    for (uint32_t i = 0; i < pCreateInfo->bindingCount; i++) {
       const VkDescriptorSetLayoutBinding *b = &pCreateInfo->pBindings[i];
-      if (b->binding < BORGVK_MAX_BINDINGS &&
-          (b->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
-           b->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC))
-         layout->dyn_mask |= 1ull << b->binding;
+      if (b->binding >= BORGVK_MAX_BINDINGS)
+         continue;
+      count_of[b->binding] = MIN2(MAX2(b->descriptorCount, 1u), BORGVK_MAX_BINDINGS);
+      dyn_of[b->binding] = b->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
+                           b->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+   }
+   uint32_t extra = 0;
+   for (uint32_t b = 0; b < BORGVK_MAX_BINDINGS; b++) {
+      if (!count_of[b])
+         continue;
+      uint32_t slot = b + extra;
+      if (slot >= BORGVK_MAX_BINDINGS)
+         break;
+      uint32_t cnt = MIN2(count_of[b], BORGVK_MAX_BINDINGS - slot);
+      struct borgvk_desc_map *m = &layout->map;
+      m->num[m->n] = b; m->slot[m->n] = slot; m->count[m->n] = cnt; m->n++;
+      m->arrays |= cnt > 1;
+      for (uint32_t k = 0; dyn_of[b] && k < cnt; k++)
+         layout->dyn_mask |= 1ull << (slot + k);
+      extra += cnt - 1;
    }
 
    *pSetLayout = borgvk_descriptor_set_layout_to_handle(layout);
@@ -121,8 +139,10 @@ borgvk_AllocateDescriptorSets(VkDevice _device,
       }
       if (pAllocateInfo->pSetLayouts) {
          VK_FROM_HANDLE(borgvk_descriptor_set_layout, l, pAllocateInfo->pSetLayouts[i]);
-         if (l)
+         if (l) {
             set->dyn_mask = l->dyn_mask;
+            set->map = l->map;
+         }
       }
       pDescriptorSets[i] = borgvk_descriptor_set_to_handle(set);
    }
@@ -151,6 +171,41 @@ borgvk_FreeDescriptorSets(VkDevice _device, VkDescriptorPool pool,
    return VK_SUCCESS;
 }
 
+/* The flat slot of element `elem` of `binding`, counting on into the next bindings when the
+ * element is past the end of its own (a write may span several). False past the last binding. */
+static bool
+desc_slot(const struct borgvk_desc_map *m, uint32_t binding, uint32_t elem, uint32_t *slot)
+{
+   if (!m->n) {
+      *slot = binding + elem;
+      return *slot < BORGVK_MAX_BINDINGS;
+   }
+   uint32_t j = 0;
+   while (j < m->n && m->num[j] != binding)
+      j++;
+   if (j == m->n)
+      return false;
+   while (elem >= m->count[j]) {
+      elem -= m->count[j];
+      if (++j == m->n)
+         return false;
+   }
+   *slot = m->slot[j] + elem;
+   return true;
+}
+
+static void
+copy_slot(struct borgvk_descriptor_set *dst, uint32_t d, const struct borgvk_descriptor_set *src, uint32_t s)
+{
+   dst->buffers[d] = src->buffers[s];
+   dst->offsets[d] = src->offsets[s];
+   dst->ranges[d] = src->ranges[s];
+   dst->images[d] = src->images[s];
+   dst->views[d] = src->views[s];
+   dst->samplers[d] = src->samplers[s];
+   dst->buffer_views[d] = src->buffer_views[s];
+}
+
 VKAPI_ATTR void VKAPI_CALL
 borgvk_UpdateDescriptorSets(VkDevice _device,
                             uint32_t descriptorWriteCount,
@@ -162,54 +217,66 @@ borgvk_UpdateDescriptorSets(VkDevice _device,
       const VkWriteDescriptorSet *w = &pDescriptorWrites[i];
       VK_FROM_HANDLE(borgvk_descriptor_set, set, w->dstSet);
 
-      if (w->dstBinding >= BORGVK_MAX_BINDINGS)
-         continue;
+      for (uint32_t k = 0; k < w->descriptorCount; k++) {
+         uint32_t slot;
+         if (!desc_slot(&set->map, w->dstBinding, w->dstArrayElement + k, &slot))
+            break;
 
-      /* Record buffer bindings (the cube's MVP UBO lives at binding 0). */
-      if (w->pBufferInfo &&
-          (w->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
-           w->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
-           w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
-           w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)) {
-         VK_FROM_HANDLE(borgvk_buffer, buffer, w->pBufferInfo[0].buffer);
-         set->buffers[w->dstBinding] = buffer;
-         set->offsets[w->dstBinding] = w->pBufferInfo[0].offset;
-         set->ranges[w->dstBinding] = w->pBufferInfo[0].range;
-      }
+         if (w->pBufferInfo &&
+             (w->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+              w->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
+              w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
+              w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)) {
+            VK_FROM_HANDLE(borgvk_buffer, buffer, w->pBufferInfo[k].buffer);
+            set->buffers[slot] = buffer;
+            set->offsets[slot] = w->pBufferInfo[k].offset;
+            set->ranges[slot] = w->pBufferInfo[k].range;
+         }
 
-      /* Texel buffers: the view carries the buffer, format, offset and range. */
-      if (w->pTexelBufferView &&
-          (w->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
-           w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)) {
-         VK_FROM_HANDLE(vk_buffer_view, bview, w->pTexelBufferView[0]);
-         set->buffer_views[w->dstBinding] = bview;
-      }
+         /* Texel buffers: the view carries the buffer, format, offset and range. */
+         if (w->pTexelBufferView &&
+             (w->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
+              w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)) {
+            VK_FROM_HANDLE(vk_buffer_view, bview, w->pTexelBufferView[k]);
+            set->buffer_views[slot] = bview;
+         }
 
-      /* Record the sampler (combined image sampler or a plain sampler); the
-       * submit path ships its packed descriptor with the texture. */
-      if (w->pImageInfo &&
-          (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
-           w->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER) &&
-          w->pImageInfo[0].sampler != VK_NULL_HANDLE) {
-         VK_FROM_HANDLE(borgvk_sampler, sampler, w->pImageInfo[0].sampler);
-         set->samplers[w->dstBinding] = sampler;
-      }
+         /* The sampler (combined image sampler or a plain sampler); the submit path ships its
+          * packed descriptor with the texture. */
+         if (w->pImageInfo &&
+             (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+              w->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER) &&
+             w->pImageInfo[k].sampler != VK_NULL_HANDLE) {
+            VK_FROM_HANDLE(borgvk_sampler, sampler, w->pImageInfo[k].sampler);
+            set->samplers[slot] = sampler;
+         }
 
-      /* Record image bindings (the cube's texture is a combined image sampler
-       * at binding 1); the submit path reads its mapped RGBA8 to upload it. */
-      if (w->pImageInfo &&
-          (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
-           w->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
-           w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) &&
-          w->pImageInfo[0].imageView != VK_NULL_HANDLE) {
-         VK_FROM_HANDLE(vk_image_view, view, w->pImageInfo[0].imageView);
-         if (view) {
-            set->images[w->dstBinding] =
-               container_of(view->image, struct borgvk_image, vk);
-            set->views[w->dstBinding] = view;
+         /* Image bindings (the cube's texture is a combined image sampler at binding 1); the
+          * submit path reads its mapped RGBA8 to upload it. */
+         if (w->pImageInfo &&
+             (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+              w->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+              w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) &&
+             w->pImageInfo[k].imageView != VK_NULL_HANDLE) {
+            VK_FROM_HANDLE(vk_image_view, view, w->pImageInfo[k].imageView);
+            if (view) {
+               set->images[slot] = container_of(view->image, struct borgvk_image, vk);
+               set->views[slot] = view;
+            }
          }
       }
    }
 
-   /* Copies are unused by the cube; ignore. */
+   for (uint32_t i = 0; i < descriptorCopyCount; i++) {
+      const VkCopyDescriptorSet *c = &pDescriptorCopies[i];
+      VK_FROM_HANDLE(borgvk_descriptor_set, src, c->srcSet);
+      VK_FROM_HANDLE(borgvk_descriptor_set, dst, c->dstSet);
+      for (uint32_t k = 0; k < c->descriptorCount; k++) {
+         uint32_t s, d;
+         if (!desc_slot(&src->map, c->srcBinding, c->srcArrayElement + k, &s) ||
+             !desc_slot(&dst->map, c->dstBinding, c->dstArrayElement + k, &d))
+            break;
+         copy_slot(dst, d, src, s);
+      }
+   }
 }

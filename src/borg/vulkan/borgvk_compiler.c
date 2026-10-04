@@ -10,6 +10,7 @@
 #include "borg_nir_passes.h"
 
 #include "vk_pipeline.h"
+#include "vk_pipeline_layout.h"
 
 #include "nir.h"
 #include "glsl_types.h"
@@ -60,6 +61,46 @@ borgvk_blob_num_varyings(const struct borgvk_shader_blob *b)
    return at < b->len ? b->data[at] : 0;
 }
 
+/* A buffer binding that is an array: borgc names buffers by (set, binding), so point each constant
+ * array index at its flat slot (the slot the descriptor update wrote). */
+static void
+remap_array_bindings(struct borgvk_device *device, nir_shader *nir)
+{
+   VK_FROM_HANDLE(vk_pipeline_layout, pl, device->compile_layout);
+   if (!pl)
+      return;
+   bool any = false;
+   for (uint32_t s = 0; s < pl->set_count; s++) {
+      struct vk_descriptor_set_layout *l = pl->set_layouts[s];
+      any |= l && container_of(l, struct borgvk_descriptor_set_layout, vk)->map.arrays;
+   }
+   if (!any)
+      return;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_vulkan_resource_index ||
+                !nir_src_is_const(intr->src[0]))
+               continue;
+            uint32_t set = nir_intrinsic_desc_set(intr), binding = nir_intrinsic_binding(intr);
+            if (set >= pl->set_count || !pl->set_layouts[set])
+               continue;
+            const struct borgvk_desc_map *m =
+               &container_of(pl->set_layouts[set], struct borgvk_descriptor_set_layout, vk)->map;
+            for (uint32_t j = 0; j < m->n; j++) {
+               if (m->num[j] == binding) {
+                  nir_intrinsic_set_binding(intr, m->slot[j] + MIN2(nir_src_as_uint(intr->src[0]), m->count[j] - 1u));
+                  break;
+               }
+            }
+         }
+      }
+   }
+}
+
 void
 borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
                      const VkPipelineShaderStageCreateInfo *stage_info)
@@ -75,6 +116,7 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
       return;
    }
 
+   remap_array_bindings(device, nir);
    /* Shared with the offline borgc CLI -- see borg_nir_passes.h for why this
     * must not be a second copy. */
    borg_lower_nir_for_borgc(nir);
@@ -126,6 +168,7 @@ borgvk_compile_compute_stage(struct borgvk_device *device,
       mesa_logw("borgvk: SPIR-V->NIR failed for compute stage (%d)", result);
       return;
    }
+   remap_array_bindings(device, nir);
    borg_lower_nir_for_borgc(nir);
    uint32_t rc = borgc_compile_compute(nir, pipeline->cs_words, 512, &pipeline->cs_nwords,
                                        pipeline->cs_regs, 32, &pipeline->cs_nregs,

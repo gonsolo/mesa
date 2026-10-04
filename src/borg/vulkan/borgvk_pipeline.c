@@ -41,6 +41,7 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
    uint32_t i;
 
    for (i = 0; i < count; i++) {
+      device->compile_layout = pCreateInfos[i].layout;
       const VkPipelineVertexInputStateCreateInfo *vi = pCreateInfos[i].pVertexInputState;
       uint32_t vfetch = 0;
       if (vi && vi->vertexAttributeDescriptionCount > 0) {
@@ -184,6 +185,7 @@ borgvk_CreateComputePipelines(VkDevice _device, VkPipelineCache cache,
          break;
       }
       VK_FROM_HANDLE(borgvk_pipeline, pl, pPipelines[i]);
+      device->compile_layout = pCreateInfos[i].layout;
       borgvk_compile_compute_stage(device, &pCreateInfos[i].stage, pl);
    }
    for (; i < count; i++)
