@@ -194,8 +194,8 @@ borgvk_sim_serves(const struct borgvk_image *color)
    const char *direct = getenv("BORGVK_SIM_DIRECT");
    if (!direct || !direct[0] || !color)
       return false;
-   uint32_t d = color->vk.extent.width;
-   return d >= 4 && d <= 256 && (d & (d - 1)) == 0 && color->vk.extent.height == d;
+   uint32_t w = color->vk.extent.width, h = color->vk.extent.height;
+   return w >= 4 && w <= 512 && (w & (w - 1)) == 0 && h >= 4 && h <= 512 && (h & 3) == 0;
 }
 
 static struct borgvk_image *
