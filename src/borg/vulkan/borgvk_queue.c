@@ -1039,7 +1039,7 @@ generic_reject(int why)
 }
 
 /* The simulator's heap (software/borg/borg_layout.h BORG_HEAP_*): a bump allocator per stream. */
-#define BORGVK_HEAP_BYTES 0x0F00000u
+#define BORGVK_HEAP_BYTES 0x0B00000u
 
 struct draw_heap {
    uint32_t top;
