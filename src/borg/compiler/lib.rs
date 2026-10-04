@@ -941,6 +941,9 @@ unsafe fn compile_nir_inner(
                             v
                         });
                         let n = intr.def.num_components as usize;
+                        // Integer varyings are flat (Vulkan): the provoking vertex's bits, not a blend.
+                        let dtype = intr.get_const_index(NIR_INTRINSIC_DEST_TYPE);
+                        let flat = dtype != 0 && dtype & 0x80 == 0;
                         let comps: Vec<(u32, u8)> = (0..n)
                             .map(|c| {
                                 let fattr_rd = next_vreg; next_vreg += 1;
@@ -949,6 +952,11 @@ unsafe fn compile_nir_inner(
                                     mnem: "FATTR", dst: fattr_rd, srcs: vec![],
                                     swz: vec![(base_index + c as u32) as u8],
                                 });
+                                if flat {
+                                    let res = next_vreg; next_vreg += 1;
+                                    prog.push(BorgInstr { mnem: "IOR", dst: res, srcs: vec![fattr_rd, fattr_rd], swz: vec![0, 0] });
+                                    return (res, 0u8);
+                                }
                                 let t0 = next_vreg; next_vreg += 1;
                                 prog.push(BorgInstr { mnem: "FMUL", dst: t0, srcs: vec![bary[0], fattr_rd], swz: vec![0, 0] });
                                 let t1 = next_vreg; next_vreg += 1;
