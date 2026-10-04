@@ -582,9 +582,9 @@ borgvk_serial_send_vattr(uint32_t slot, uint32_t fmt, uint32_t base, uint32_t co
 void
 borgvk_serial_send_draw(uint32_t topology, uint32_t index_type, uint32_t restart,
                         uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex,
-                        uint32_t first_instance, int32_t vertex_offset, uint32_t index_base)
+                        uint32_t first_instance, int32_t vertex_offset, uint32_t index_base, uint32_t ubo_base)
 {
-   uint8_t pkt[1 + 3 + 6 * 4 + 1];
+   uint8_t pkt[1 + 3 + 7 * 4 + 1];
    pkt[0] = 0xBA;
    pkt[1] = (uint8_t)topology; pkt[2] = (uint8_t)index_type; pkt[3] = (uint8_t)restart;
    put_u32_le(&pkt[4], vertex_count);
@@ -593,6 +593,7 @@ borgvk_serial_send_draw(uint32_t topology, uint32_t index_type, uint32_t restart
    put_u32_le(&pkt[16], first_instance);
    put_u32_le(&pkt[20], (uint32_t)vertex_offset);
    put_u32_le(&pkt[24], index_base);
+   put_u32_le(&pkt[28], ubo_base);
    emit_checked(pkt, sizeof(pkt));
 }
 

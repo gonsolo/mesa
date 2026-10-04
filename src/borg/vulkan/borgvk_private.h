@@ -215,7 +215,8 @@ void borgvk_serial_send_vattr(uint32_t slot, uint32_t fmt, uint32_t base, uint32
                               uint32_t stride, uint32_t swz);
 void borgvk_serial_send_draw(uint32_t topology, uint32_t index_type, uint32_t restart,
                              uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex,
-                             uint32_t first_instance, int32_t vertex_offset, uint32_t index_base);
+                             uint32_t first_instance, int32_t vertex_offset, uint32_t index_base,
+                             uint32_t ubo_base);
 /* 0xB5: one chunk (<= 256 B at byte offset `off`) of a texture's texels plus
  * the texture descriptor words 1..3 and the four sampler words
  * (docs/B2_texture_unit.md); descriptor and sampler ride with every chunk. */

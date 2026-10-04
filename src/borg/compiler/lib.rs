@@ -1248,6 +1248,8 @@ unsafe fn compile_nir_inner(
                                 // goes through the strided path below instead,
                                 // with stride 0 (VertexIndex * 0 + base).
                                 (0, _) if !vs_const_window => cint!(base_words),
+                                // A single constant word: the address is a window word, no chain.
+                                (0, _) if n == 1 => cint!(base_words),
                                 _ => {
                                     let vid = match vertex_id_def {
                                         Some(v) => v,
@@ -1286,7 +1288,7 @@ unsafe fn compile_nir_inner(
                             // read, for a later constant-address load_ubo to pick
                             // up (a stray unconsumed IADD if none does, which dce
                             // then drops like any other dead instruction).
-                            if stride_words == 0 {
+                            if stride_words == 0 && n > 1 {
                                 let one_v = cint!(1);
                                 let past = next_vreg; next_vreg += 1;
                                 prog.push(BorgInstr { mnem: "IADD", dst: past, srcs: vec![cur, one_v], swz: vec![0, 0] });
@@ -1344,7 +1346,7 @@ unsafe fn compile_nir_inner(
                                 draw_frag_out[c] = Some(v);
                                 draw_out_roots.push(v.0);
                             }
-                        } else if stage == 0 && loc == 1 {
+                        } else if stage == 0 && loc == 12 {
                             draw_psize = comps.first().copied();   // VARYING_SLOT_PSIZ
                         } else if loc < VARYING_SLOT_VAR0 {
                             // gl_PointSize and the other built-in outputs: triangles ignore them.
@@ -1656,7 +1658,7 @@ unsafe fn compile_nir_inner(
             prog.push(BorgInstr { mnem: "IOR", dst: m, srcs: vec![tex_v, tex_v], swz: vec![k as u8, k as u8] });
             d[k] = m;
         }
-        let reg = |v: (u32, u8), prog: &mut Vec<BorgInstr>, next_vreg: &mut u32| -> (u32, u8) {
+        let reg = |v: (u32, u8), ubo: &HashMap<u32, Ubo>, prog: &mut Vec<BorgInstr>, next_vreg: &mut u32| -> (u32, u8) {
             if matches!(ubo.get(&v.0), Some(Ubo::Uniform(_))) {
                 let o = *next_vreg; *next_vreg += 1;
                 prog.push(BorgInstr { mnem: "FMOV", dst: o, srcs: vec![v.0], swz: vec![0] });
@@ -1664,10 +1666,35 @@ unsafe fn compile_nir_inner(
             } else { v }
         };
         if let (Some(px), Some(py), Some(pw)) = (draw_pos_out[0], draw_pos_out[1], draw_pos_out[3]) {
-            let w = reg(pw, &mut prog, &mut next_vreg);
-            let size = draw_psize.map(|ps| reg(ps, &mut prog, &mut next_vreg));
+            let w = reg(pw, &ubo, &mut prog, &mut next_vreg);
+            let size = draw_psize.map(|ps| {
+                // Clamp to the advertised maximum, 64: x - c*(x - 64), c = step(x - 64). The window has no word to spare for the minimum.
+                let x = reg(ps, &ubo, &mut prog, &mut next_vreg).0;
+                let mut win = |bits: u32, draw_vs_consts: &mut Vec<(u8, u32)>, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| {
+                    let u = DRAW_VS_CONST_U0 + draw_vs_consts.len() as u8;
+                    assert!(draw_vs_consts.len() < DRAW_VS_CONST_WORDS, "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
+                    draw_vs_consts.push((u, bits));
+                    let v = *next_vreg; *next_vreg += 1;
+                    ubo.insert(v, Ubo::Uniform(u));
+                    v
+                };
+                let mut op = |mnem: &'static str, srcs: Vec<u32>, prog: &mut Vec<BorgInstr>, next_vreg: &mut u32| {
+                    let d = *next_vreg; *next_vreg += 1;
+                    let swz = vec![0; srcs.len()];
+                    prog.push(BorgInstr { mnem, dst: d, srcs, swz });
+                    d
+                };
+                // upper: x -= step(x - 64) * (x - 64)
+                let neg_hi = win((-64.0f32).to_bits(), &mut draw_vs_consts, &mut ubo, &mut next_vreg);
+                let t = op("FADD", vec![x, neg_hi], &mut prog, &mut next_vreg);
+                let c = op("FSTEP", vec![t], &mut prog, &mut next_vreg);
+                let ct = op("FMUL", vec![c, t], &mut prog, &mut next_vreg);
+                let nct = op("FNEG", vec![ct], &mut prog, &mut next_vreg);
+                let x = op("FADD", vec![x, nct], &mut prog, &mut next_vreg);
+                (x, 0u8)
+            });
             for (k, pc) in [px, py].into_iter().enumerate() {
-                let base = reg(pc, &mut prog, &mut next_vreg);
+                let base = reg(pc, &ubo, &mut prog, &mut next_vreg);
                 let mut off = d[k];
                 if let Some(sz) = size {
                     let o = next_vreg; next_vreg += 1;

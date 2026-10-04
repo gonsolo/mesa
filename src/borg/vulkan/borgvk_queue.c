@@ -1347,6 +1347,24 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       if (ok && idx_off == UINT32_MAX)
          ok = generic_reject(10);
    }
+   /* The first bound uniform buffer is the shader's LOAD window (ls_base). */
+   uint32_t ubo_base = 0;
+   for (int b = 0; ok && set && b < BORGVK_MAX_BINDINGS; b++) {
+      struct borgvk_buffer *ub = set->buffers[b];
+      if (!ub || !ub->mem || !ub->mem->map)
+         continue;
+      VkDeviceSize off = set->offsets[b] + ((set->dyn_mask >> b) & 1 ? cmd->dyn_off[b] : 0);
+      VkDeviceSize len = set->ranges[b] == VK_WHOLE_SIZE || set->ranges[b] == 0 ? ub->vk.size - off : set->ranges[b];
+      if (off >= ub->vk.size)
+         break;
+      len = MIN2(len, MIN2(ub->vk.size - off, 65536));
+      uint32_t at = heap_upload(&heap, (const uint8_t *)ub->mem->map + ub->offset + off, (uint32_t)len);
+      if (at == UINT32_MAX)
+         ok = generic_reject(10);
+      else
+         ubo_base = at + 1;
+      break;
+   }
    if (ok) {
       for (int b = 0; set && b < BORGVK_MAX_BINDINGS; b++) {
          if (set->views[b] && send_generic_texture(set->views[b], set->images[b], set->samplers[b]))
@@ -1356,7 +1374,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       }
       borgvk_serial_send_draw(topo, dp->indexed ? index_code : 0,
                               (pipeline->restart ? 1u : 0u) | (load << 1), dp->count * X, dp->instances,
-                              dp->indexed ? 0 : dp->first * X, dp->first_instance, voff_out, idx_off);
+                              dp->indexed ? 0 : dp->first * X, dp->first_instance, voff_out, idx_off, ubo_base);
    }
    size_t nbytes = 0;
    uint8_t *bytes = borgvk_transport_capture_end(&nbytes);
