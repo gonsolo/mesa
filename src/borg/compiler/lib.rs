@@ -1627,11 +1627,21 @@ unsafe fn compile_nir_inner(
     if draw_mode && stage == 4 && vfetch & 1 != 0 && draw_frag_out[3].is_some() {
         // Byte-packed integer colour (R8G8B8A8_UINT/SINT, RAW32): r26 = c0 | c1<<8 | c2<<16 | c3<<24.
         let (mut p, mut pc) = draw_frag_out[3].unwrap();
+        let eight = *frag_window_by_bits.entry(8).or_insert_with(|| {
+            assert!(draw_uniform_count < 12, "borgc: fragment shader needs more than 12 window constants");
+            let u = 20 + draw_uniform_count;
+            draw_uniform_count += 1;
+            draw_uniform_consts.push((u, 8));
+            u
+        });
+        let sh = next_vreg;
+        next_vreg += 1;
+        ubo.insert(sh, Ubo::Uniform(eight as u8));
         for c in (0..3).rev() {
-            for _ in 0..8 {
+            {
                 let d = next_vreg;
                 next_vreg += 1;
-                prog.push(BorgInstr { mnem: "IADD", dst: d, srcs: vec![p, p], swz: vec![pc, pc] });
+                prog.push(BorgInstr { mnem: "ISHL", dst: d, srcs: vec![p, sh], swz: vec![pc, 0] });
                 p = d;
                 pc = 0;
             }

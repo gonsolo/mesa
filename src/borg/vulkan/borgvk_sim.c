@@ -28,15 +28,21 @@
 #include "vk_log.h"
 
 #define SIM_MEM_BYTES (1u << 25)   /* simulation/direct/direct_sim.h DirectSim::MEM_BYTES */
+#define SIM_MAX_PARTS 24
+#define SIM_PARALLEL_BYTES 65536   /* a pass this large is split over several simulators */
 
-static struct {
-   simple_mtx_t lock;
+struct sim_srv {
    pid_t pid;
    int to, from, memfd;
    uint8_t *mem;
    uint32_t w, h;
    uint32_t fb, zb, sb, heap;   /* byte addresses, from the server */
-} sim = { .lock = SIMPLE_MTX_INITIALIZER, .to = -1, .from = -1 };
+};
+
+static struct {
+   simple_mtx_t lock;
+   struct sim_srv s[SIM_MAX_PARTS];
+} sim = { .lock = SIMPLE_MTX_INITIALIZER };
 
 static bool
 write_all(int fd, const uint8_t *p, size_t n)
@@ -71,36 +77,39 @@ read_all(int fd, uint8_t *p, size_t n)
 static void
 sim_stop(void)
 {
-   if (sim.to >= 0)
-      close(sim.to);
-   if (sim.from >= 0)
-      close(sim.from);
-   if (sim.pid > 0)
-      waitpid(sim.pid, NULL, 0);
-   sim.to = sim.from = -1;
-   sim.pid = 0;
-   sim.w = sim.h = 0;
+   for (int i = 0; i < SIM_MAX_PARTS; i++) {
+      struct sim_srv *S = &sim.s[i];
+      if (S->to > 0)
+         close(S->to);
+      if (S->from > 0)
+         close(S->from);
+      if (S->pid > 0)
+         waitpid(S->pid, NULL, 0);
+      S->to = S->from = 0;
+      S->pid = 0;
+      S->w = S->h = 0;
+   }
 }
 
 static bool
-sim_start(const char *bin)
+sim_start(struct sim_srv *S, const char *bin)
 {
-   if (sim.pid > 0)
+   if (S->pid > 0)
       return true;
-   if (!sim.mem) {
+   if (!S->mem) {
       int mfd = memfd_create("borg-dram", 0);
       if (mfd < 0 || ftruncate(mfd, SIM_MEM_BYTES) < 0)
          return false;
-      sim.mem = mmap(NULL, SIM_MEM_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, mfd, 0);
-      if (sim.mem == MAP_FAILED) {
-         sim.mem = NULL;
+      S->mem = mmap(NULL, SIM_MEM_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, mfd, 0);
+      if (S->mem == MAP_FAILED) {
+         S->mem = NULL;
          close(mfd);
          return false;
       }
-      sim.memfd = mfd;   /* stays open, and inheritable, for every server this process starts */
+      S->memfd = mfd;   /* stays open, and inheritable, for the server started on it */
    }
    char memfd_arg[16];
-   snprintf(memfd_arg, sizeof(memfd_arg), "%d", sim.memfd);
+   snprintf(memfd_arg, sizeof(memfd_arg), "%d", S->memfd);
    int in[2], out[2];
    if (pipe(in) < 0)
       return false;
@@ -121,26 +130,26 @@ sim_start(const char *bin)
    }
    close(in[0]);
    close(out[1]);
-   sim.pid = pid;
-   sim.to = in[1];
-   sim.from = out[0];
-   sim.w = sim.h = 0;
+   S->pid = pid;
+   S->to = in[1];
+   S->from = out[0];
+   S->w = S->h = 0;
    return true;
 }
 
 static bool
-sim_set_size(uint32_t w, uint32_t h)
+sim_set_size(struct sim_srv *S, uint32_t w, uint32_t h)
 {
-   if (sim.w == w && sim.h == h)
+   if (S->w == w && S->h == h)
       return true;
    uint8_t cmd[5] = { 0xBC, w & 0xff, w >> 8, h & 0xff, h >> 8 };
    uint8_t r[16];
-   if (!write_all(sim.to, cmd, sizeof(cmd)) || !read_all(sim.from, r, sizeof(r)))
+   if (!write_all(S->to, cmd, sizeof(cmd)) || !read_all(S->from, r, sizeof(r)))
       return false;
    uint32_t a[4];
    memcpy(a, r, sizeof(a));
-   sim.fb = a[0]; sim.zb = a[1]; sim.sb = a[2]; sim.heap = a[3];
-   sim.w = w; sim.h = h;
+   S->fb = a[0]; S->zb = a[1]; S->sb = a[2]; S->heap = a[3];
+   S->w = w; S->h = h;
    return true;
 }
 
@@ -292,18 +301,32 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
       return VK_SUCCESS;
    uint8_t *cb = before, *zb = before + npx * 4, *sb = before + npx * 8;
 
+   /* A large pass is split into horizontal strips of tile rows, one simulator each. */
+   const char *pe = getenv("BORGVK_SERVE_PARTS");
+   int np = pe ? atoi(pe) : 1;
+   np = n >= SIM_PARALLEL_BYTES ? CLAMP(np, 1, SIM_MAX_PARTS) : 1;
+   const uint32_t ftiles = h >> 2;
+   const uint32_t rows_per = (ftiles + np - 1) / np;
+   np = (int)((ftiles + rows_per - 1) / rows_per);
+
    simple_mtx_lock(&sim.lock);
-   if (!sim_start(getenv("BORGVK_SIM_DIRECT")) || !sim_set_size(w, h)) {
-      mesa_logw("borgvk: cannot start the simulator");
-      sim_stop();
-      goto out;
+   for (int part = 0; part < np; part++) {
+      uint8_t sp[3] = { 0xBE, (uint8_t)part, (uint8_t)np };
+      if (!sim_start(&sim.s[part], getenv("BORGVK_SIM_DIRECT")) || !sim_set_size(&sim.s[part], w, h) ||
+          !write_all(sim.s[part].to, sp, sizeof(sp))) {
+         mesa_logw("borgvk: cannot start the simulator");
+         sim_stop();
+         goto out;
+      }
    }
 
    /* In: the application's images into the GPU's attachments. */
-   for (uint32_t y = 0; y < h; y++) {
+   for (int part = 0; part < np; part++) {
+   struct sim_srv *S = &sim.s[part];
+   for (uint32_t y = part * rows_per * 4; y < MIN2(h, (part + 1) * rows_per * 4); y++) {
       for (uint32_t x = 0; x < w; x++) {
          const size_t i = (size_t)y * w + x;
-         uint8_t *g = sim.mem + tiled(sim.fb, w, x, y, 16 * cpx, cpx);
+         uint8_t *g = S->mem + tiled(S->fb, w, x, y, 16 * cpx, cpx);
          if (fmt) {
             memcpy(g, chost + i * cbs, 4);
          } else {
@@ -314,7 +337,7 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
          }
          memcpy(cb + i * 4, g, cpx);
          if (zimg) {
-            uint8_t *gz = sim.mem + tiled(sim.zb, w, x, y, 16 * zpx, zpx);
+            uint8_t *gz = S->mem + tiled(S->zb, w, x, y, 16 * zpx, zpx);
             float z = unpack_z(zpf, zhost + i * zbs);
             if (d32) {
                memcpy(gz, &z, 4);
@@ -325,11 +348,12 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
             memcpy(zb + i * 4, gz, zpx);
          }
          if (simg) {
-            uint8_t *gs = sim.mem + tiled(sim.sb, w, x, y, 16, 1);
+            uint8_t *gs = S->mem + tiled(S->sb, w, x, y, 16, 1);
             *gs = unpack_s(spf, shost + i * sbs);
             sb[i] = *gs;
          }
       }
+   }
    }
 
    const char *keep = getenv("BORGVK_SIM_KEEP");   /* the stream, for replaying it by hand */
@@ -341,19 +365,30 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
       }
    }
    uint8_t sync = 0xBD, ack;
-   if (!write_all(sim.to, stream, n) || !write_all(sim.to, &sync, 1) || !read_all(sim.from, &ack, 1)) {
-      mesa_logw("borgvk: the simulator stopped answering");
-      sim_stop();
-      goto out;
+   for (int part = 0; part < np; part++) {
+      if (!write_all(sim.s[part].to, stream, n) || !write_all(sim.s[part].to, &sync, 1)) {
+         mesa_logw("borgvk: the simulator stopped answering");
+         sim_stop();
+         goto out;
+      }
+   }
+   for (int part = 0; part < np; part++) {
+      if (!read_all(sim.s[part].from, &ack, 1)) {
+         mesa_logw("borgvk: the simulator stopped answering");
+         sim_stop();
+         goto out;
+      }
    }
 
    /* Out: the pixels the pass changed, into every sample plane of the image. */
    const uint32_t cplanes = MAX2(color->vk.samples, 1);
    uint32_t changed = 0;
-   for (uint32_t y = 0; y < h; y++) {
+   for (int part = 0; part < np; part++) {
+   struct sim_srv *S = &sim.s[part];
+   for (uint32_t y = part * rows_per * 4; y < MIN2(h, (part + 1) * rows_per * 4); y++) {
       for (uint32_t x = 0; x < w; x++) {
          const size_t i = (size_t)y * w + x;
-         const uint8_t *g = sim.mem + tiled(sim.fb, w, x, y, 16 * cpx, cpx);
+         const uint8_t *g = S->mem + tiled(S->fb, w, x, y, 16 * cpx, cpx);
          if (memcmp(g, cb + i * 4, cpx) != 0) {
             changed++;
             for (uint32_t p = 0; p < cplanes; p++) {
@@ -369,7 +404,7 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
             }
          }
          if (zimg) {
-            const uint8_t *gz = sim.mem + tiled(sim.zb, w, x, y, 16 * zpx, zpx);
+            const uint8_t *gz = S->mem + tiled(S->zb, w, x, y, 16 * zpx, zpx);
             if (memcmp(gz, zb + i * 4, zpx) != 0) {
                float z;
                if (d32) {
@@ -384,12 +419,13 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
             }
          }
          if (simg) {
-            const uint8_t gs = sim.mem[tiled(sim.sb, w, x, y, 16, 1)];
+            const uint8_t gs = S->mem[tiled(S->sb, w, x, y, 16, 1)];
             if (gs != sb[i])
                for (uint32_t p = 0; p < MAX2(simg->vk.samples, 1); p++)
                   pack_s(spf, shost + (p * npx + i) * sbs, gs);
          }
       }
+   }
    }
    if (getenv("BORGVK_DEBUG"))
       mesa_logi("borgvk: pass of %zu bytes changed %u of %zu pixels (format %u)", n, changed, npx, fmt);
