@@ -558,6 +558,7 @@ unsafe fn compile_nir_inner(
     let mut draw_output_stores: HashMap<u32, Vec<(u32, u8)>> = HashMap::new();
     let mut draw_pos_out: [Option<(u32, u8)>; 4] = [None; 4];
     let mut draw_psize: Option<(u32, u8)> = None;
+    let mut mrt_out: [Option<(u32, u8)>; 4] = [None; 4];   // fragment outputs of locations 0..3 (multiple attachments)
     let mut draw_frag_out: [Option<(u32, u8)>; 4] = [None; 4];
     let mut draw_out_roots: Vec<u32> = Vec::new();
     // load_vulkan_descriptor results seen, for decompose_vertex_offset.
@@ -1344,6 +1345,10 @@ unsafe fn compile_nir_inner(
                                 draw_pos_out[c] = Some(v);
                                 draw_out_roots.push(v.0);
                             }
+                        } else if stage == 4 && vfetch & 0x100 != 0 && (4..8).contains(&loc) {
+                            // Several colour attachments: FRAG_RESULT_DATA0.. , one value per attachment.
+                            // A constant (a window word) is copied into a register where it is packed.
+                            mrt_out[(loc - 4) as usize] = Some(comps[0]);
                         } else if stage == 4 {
                             let ncomp2 = if frag_alpha || vfetch & 1 != 0 { 4 } else { 3 };
                             for (c, &v) in comps.iter().enumerate().take(ncomp2) {
@@ -1492,10 +1497,14 @@ unsafe fn compile_nir_inner(
                                     let u = DRAW_VS_CONST_U0 as u32 + draw_vs_consts.len() as u32;
                                     draw_vs_consts.push((u as u8, bits));
                                     u
+                                } else if let Some(&u) = frag_window_by_bits.get(&bits) {
+                                    u   // the same value already has a word
                                 } else {
+                                    assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
                                     let u = 20 + draw_uniform_count;
                                     draw_uniform_count += 1;
                                     draw_uniform_consts.push((u, bits));
+                                    frag_window_by_bits.insert(bits, u);
                                     u
                                 };
                                 let v = next_vreg;
@@ -1729,6 +1738,88 @@ unsafe fn compile_nir_inner(
                 draw_out_roots.push(o);
             }
         }
+    }
+    if draw_mode && stage == 4 && vfetch & 0x100 != 0 {
+        // Up to four R8 attachments, each rendered in its own pass (ATTIDX): the byte this pass stores is
+        // chosen from the per-attachment values; one the shader never wrote keeps its own (TLD).
+        let n = ((vfetch >> 9) & 7) as usize + 1;
+        let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
+            let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
+                assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
+                let u = 20 + draw_uniform_count;
+                draw_uniform_count += 1;
+                draw_uniform_consts.push((u, bits));
+                u
+            });
+            let v = *next_vreg; *next_vreg += 1;
+            ubo.insert(v, Ubo::Uniform(u as u8));
+            v
+        };
+        let mut op = |mnem: &'static str, srcs: Vec<u32>, prog: &mut Vec<BorgInstr>, next_vreg: &mut u32| {
+            let d = *next_vreg; *next_vreg += 1;
+            let swz = vec![0; srcs.len()];
+            prog.push(BorgInstr { mnem, dst: d, srcs, swz });
+            d
+        };
+        let class = |k: usize| (vfetch >> (12 + 3 * k)) & 7;
+        let cff = win(0xFF, &mut ubo, &mut next_vreg);
+        // x + 0 in integer arithmetic copies a window word bit for bit (FMOV would flush a denormal).
+        let idx = op("ATTIDX", vec![], &mut prog, &mut next_vreg);
+        let zero = op("ISUB", vec![idx, idx], &mut prog, &mut next_vreg);
+        let mut vals: Vec<u32> = Vec::new();
+        for k in 0..n {
+            let w = match mrt_out[k] {
+                None => op("TLD", vec![], &mut prog, &mut next_vreg),
+                Some((x, xc)) => {
+                    let x = if matches!(ubo.get(&x), Some(Ubo::Uniform(_))) {
+                        op("IADD", vec![x, zero], &mut prog, &mut next_vreg)
+                    } else if xc != 0 {
+                        let o = next_vreg; next_vreg += 1;
+                        prog.push(BorgInstr { mnem: "FMOV", dst: o, srcs: vec![x], swz: vec![xc] });
+                        o
+                    } else { x };
+                    match class(k) {
+                        1 => {
+                            let c255 = win(255.0f32.to_bits(), &mut ubo, &mut next_vreg);
+                            let c05 = win(0.5f32.to_bits(), &mut ubo, &mut next_vreg);
+                            let m = op("FMUL", vec![x, c255], &mut prog, &mut next_vreg);
+                            let h = op("FADD", vec![m, c05], &mut prog, &mut next_vreg);
+                            let i = op("F2I", vec![h], &mut prog, &mut next_vreg);
+                            op("IAND", vec![i, cff], &mut prog, &mut next_vreg)
+                        }
+                        2 => {
+                            let c127 = win(127.0f32.to_bits(), &mut ubo, &mut next_vreg);
+                            let c05 = win(0.5f32.to_bits(), &mut ubo, &mut next_vreg);
+                            let t = op("FMUL", vec![x, c127], &mut prog, &mut next_vreg);
+                            let s = op("FSTEP", vec![t], &mut prog, &mut next_vreg);
+                            let nh = op("FNEG", vec![c05], &mut prog, &mut next_vreg);
+                            let hh = op("FADD", vec![s, nh], &mut prog, &mut next_vreg);
+                            let u = op("FADD", vec![t, hh], &mut prog, &mut next_vreg);
+                            let i = op("F2I", vec![u], &mut prog, &mut next_vreg);
+                            op("IAND", vec![i, cff], &mut prog, &mut next_vreg)
+                        }
+                        _ => op("IAND", vec![x, cff], &mut prog, &mut next_vreg),
+                    }
+                }
+            };
+            vals.push(w);
+        }
+        let mut acc = vals[0];
+        if n > 1 {
+            let one_u = win(1, &mut ubo, &mut next_vreg);
+            let one = op("IADD", vec![one_u, zero], &mut prog, &mut next_vreg);
+            let mut kreg = one;
+            for k in 1..n {
+                if k == 2 { kreg = op("IADD", vec![one, one], &mut prog, &mut next_vreg); }
+                if k == 3 { kreg = op("IADD", vec![kreg, one], &mut prog, &mut next_vreg); }
+                let sel = op("ISEQ", vec![idx, kreg], &mut prog, &mut next_vreg);
+                let diff = op("ISUB", vec![vals[k], acc], &mut prog, &mut next_vreg);
+                let prod = op("IMUL", vec![sel, diff], &mut prog, &mut next_vreg);
+                acc = op("IADD", vec![acc, prod], &mut prog, &mut next_vreg);
+            }
+        }
+        draw_frag_out = [Some((acc, 0)), None, None, None];
+        out_roots.push(acc);
     }
     if draw_mode && stage == 4 && vfetch & 2 != 0 && draw_frag_out[0].is_some() {
         // R8_UNORM (RAW8): r26 = round(r * 255) & 0xFF.

@@ -95,6 +95,10 @@ pub(crate) fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
         "DDX" => un(0x3C00_0000),
         "DDY" => un(0x4000_0000),
         "FSTEP" => un(0x1000_0000),
+        // Colour attachments (docs/B3_colour_formats.md): the attachment this pass renders, and
+        // this lane's current destination word.
+        "ATTIDX" => un(0x9000_0000),
+        "TLD" => un(0x9C00_0000),
         // --- Extended ISA (hardware Instructions.scala, same funct7 << 25) ---
         // LOAD/STORE address LS_BASE + (rs1 << 2): the operand is a word
         // INDEX, not a byte address (words are the natural unit, and the

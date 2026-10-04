@@ -169,6 +169,8 @@ struct borgvk_command_buffer {
    uint8_t *state_sent;
    size_t state_sent_len;
    struct borgvk_image *batch_img;
+   struct borgvk_image *batch_extra[3];   /* colour attachments 1-3 of the batch */
+   uint32_t batch_nextra;
    /* The batch runs on the persistent simulator, with these depth and stencil attachments. */
    bool batch_serve;
    struct vk_image_view *batch_depth, *batch_stencil;
@@ -190,6 +192,7 @@ uint8_t borgvk_sim_flush_format(VkFormat f);
 bool borgvk_sim_bytes_packed(VkFormat f);
 bool borgvk_sim_depth_is_d32(VkFormat f);
 VkResult borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
+                             struct borgvk_image *const *extra, uint32_t nextra,
                              const struct vk_image_view *depth_view,
                              const struct vk_image_view *stencil_view);
 
@@ -209,6 +212,7 @@ void borgvk_blend_pack(const VkPipelineColorBlendStateCreateInfo *cb,
 void borgvk_serial_send_state(const uint32_t reg[5]);
 void borgvk_serial_send_target(uint8_t flush_format, const float clear[4]);
 void borgvk_serial_send_pass(uint8_t flush_format, uint8_t flags);
+void borgvk_serial_send_att(uint8_t count, const uint8_t fmt[3]);
 void borgvk_serial_send_attr4(const float *attr, int n);
 /* 0xB8 / 0xB9 / 0xBA (simulator): heap write, vertex-attribute fetch descriptor, draw. */
 void borgvk_serial_send_mem(uint32_t off, const uint8_t *data, uint32_t n);
@@ -399,6 +403,8 @@ struct borgvk_pipeline {
    struct borgvk_vertex_attr attrs[BORGVK_MAX_VERTEX_ATTRS];
    bool                      binding_instance[BORGVK_MAX_VERTEX_BINDINGS];   /* per-instance rate */
    bool                      restart;      /* primitiveRestartEnable */
+   uint32_t                  color_count;  /* colour attachments of the pipeline's render pass */
+   bool                      mrt;          /* several attachments, all R8, which the fragment stage packs */
    /* borgc option word for this pipeline's vertex shader (see borgc_compile_nir): vertex inputs
     * are typed fetches whenever the pipeline declares any attribute. */
    uint32_t                  vfetch;

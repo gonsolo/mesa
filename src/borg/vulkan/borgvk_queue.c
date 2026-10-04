@@ -1059,17 +1059,20 @@ borgvk_flush_draws(struct borgvk_command_buffer *cmd)
    uint8_t *bytes = cmd->stream;
    size_t n = cmd->stream_len;
    struct borgvk_image *img = cmd->batch_img;
+   struct borgvk_image *extra[3] = { cmd->batch_extra[0], cmd->batch_extra[1], cmd->batch_extra[2] };
+   const uint32_t nextra = cmd->batch_nextra;
    const bool serve = cmd->batch_serve;
    cmd->stream = NULL;
    cmd->stream_len = cmd->stream_cap = 0;
    cmd->heap_top = 0;
    cmd->batch_draws = 0;
    cmd->batch_img = NULL;
+   cmd->batch_nextra = 0;
    free(cmd->state_sent);
    cmd->state_sent = NULL;
    cmd->state_sent_len = 0;
    if (serve) {
-      borgvk_sim_run_pass(bytes, n, img, cmd->batch_depth, cmd->batch_stencil);
+      borgvk_sim_run_pass(bytes, n, img, extra, nextra, cmd->batch_depth, cmd->batch_stencil);
       free(bytes);
       return;
    }
@@ -1155,7 +1158,25 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
          ? container_of(cmd->color_views[0]->image, struct borgvk_image, vk) : NULL;
    if (!color_img || !color_img->mem || !color_img->mem->map)
       return generic_reject(5);
-   if (cmd->batch_draws && (cmd->batch_img != color_img || cmd->batch_depth != cmd->depth_view ||
+   /* Colour attachments 1-3, when the pipeline's render pass has several (all R8, one pass each). */
+   struct borgvk_image *extra[3] = { NULL, NULL, NULL };
+   const uint32_t nextra = pipeline->mrt ? pipeline->color_count - 1 : 0;
+   if (pipeline->color_count >= 2 && !pipeline->mrt)
+      return generic_reject(12);
+   for (uint32_t k = 0; k < nextra; k++) {
+      struct vk_image_view *v = cmd->color_views[k + 1];
+      extra[k] = v && v->image ? container_of(v->image, struct borgvk_image, vk) : NULL;
+      if (!extra[k] || !extra[k]->mem || !extra[k]->mem->map ||
+          extra[k]->vk.extent.width != color_img->vk.extent.width ||
+          extra[k]->vk.extent.height != color_img->vk.extent.height)
+         return generic_reject(13);
+   }
+   if (nextra && !borgvk_sim_serves(color_img, cmd->depth_view || cmd->stencil_view))
+      return generic_reject(14);
+   bool same_extra = cmd->batch_nextra == nextra;
+   for (uint32_t k = 0; k < nextra; k++)
+      same_extra &= cmd->batch_extra[k] == extra[k];
+   if (cmd->batch_draws && (!same_extra || cmd->batch_img != color_img || cmd->batch_depth != cmd->depth_view ||
                             cmd->batch_stencil != cmd->stencil_view))
       borgvk_flush_draws(cmd);
 
@@ -1235,9 +1256,13 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       const bool has_z = cmd->depth_view != NULL, has_s = cmd->stencil_view != NULL;
       load = 1u | (has_z ? 2u : 0u) | (has_s ? 4u : 0u) | 8u;
       if (first_of_batch)
-         borgvk_serial_send_pass(borgvk_sim_flush_format(color_img->vk.format),
+         borgvk_serial_send_pass(nextra ? 5 : borgvk_sim_flush_format(color_img->vk.format),
                                  (has_z ? 1u : 0u) | (has_s ? 2u : 0u) |
                                  (has_z && borgvk_sim_depth_is_d32(cmd->depth_view->image->format) ? 4u : 0u));
+      if (first_of_batch) {
+         const uint8_t raw8[3] = { 5, 5, 5 };
+         borgvk_serial_send_att(nextra + 1, raw8);
+      }
    } else if (first_of_batch) {
       /* Render target: the attachment's format and the clear colour its render pass asked for. */
       uint8_t fmt = color_img->vk.format == VK_FORMAT_R8G8B8A8_UNORM ? 1 :
@@ -1401,6 +1426,9 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    cmd->heap_top = heap.top;
    cmd->batch_draws++;
    cmd->batch_img = color_img;
+   cmd->batch_nextra = nextra;
+   for (uint32_t k = 0; k < 3; k++)
+      cmd->batch_extra[k] = extra[k];
    cmd->batch_depth = cmd->depth_view;
    cmd->batch_stencil = cmd->stencil_view;
    return true;

@@ -597,6 +597,14 @@ borgvk_serial_send_draw(uint32_t topology, uint32_t index_type, uint32_t restart
    emit_checked(pkt, sizeof(pkt));
 }
 
+/* Host-simulator only: how many colour attachments the pass has, and the flush formats of 1-3. */
+void
+borgvk_serial_send_att(uint8_t count, const uint8_t fmt[3])
+{
+   uint8_t pkt[6] = { 0xBF, count, fmt[0], fmt[1], fmt[2], 0 };
+   emit_checked(pkt, sizeof(pkt));
+}
+
 /* Host-simulator only: the pass's attachments. flags bit 0 depth, 1 stencil, 2 D32_SFLOAT depth. */
 void
 borgvk_serial_send_pass(uint8_t flush_format, uint8_t flags)

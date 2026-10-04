@@ -67,7 +67,19 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
       for (int st = 0; st < BORGVK_SHADER_STAGE_COUNT; st++)
          device->shader_blob[st].len = 0;
       const VkPipelineRenderingCreateInfo *ri = vk_get_pipeline_rendering_create_info(&pCreateInfos[i]);
+      /* Several colour attachments: every one an R8 format, whose class the fragment stage packs
+       * (1 UNORM, 2 SNORM, 3 UINT or SINT). */
+      uint32_t color_count = ri ? ri->colorAttachmentCount : 0, mrt_opt = 0;
+      bool mrt = color_count >= 2 && color_count <= 4;
+      for (uint32_t k = 0; mrt && k < color_count; k++) {
+         const VkFormat f = ri->pColorAttachmentFormats[k];
+         const uint32_t cls = f == VK_FORMAT_R8_UNORM ? 1 : f == VK_FORMAT_R8_SNORM ? 2 :
+                              f == VK_FORMAT_R8_UINT || f == VK_FORMAT_R8_SINT ? 3 : 0;
+         mrt = cls != 0;
+         mrt_opt |= cls << (12 + 3 * k);
+      }
       const uint32_t frag_opt =
+         mrt ? 0x100u | ((color_count - 1) << 9) | mrt_opt :
          ri && ri->colorAttachmentCount && borgvk_sim_bytes_packed(ri->pColorAttachmentFormats[0]) ? 1 :
          ri && ri->colorAttachmentCount && ri->pColorAttachmentFormats[0] == VK_FORMAT_R8_UNORM ? 2 : 0;
       for (uint32_t s = 0; s < pCreateInfos[i].stageCount; s++)
@@ -103,6 +115,8 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
       VK_FROM_HANDLE(borgvk_pipeline, pl, pPipelines[i]);
       memcpy(pl->blob, device->shader_blob, sizeof(pl->blob));
       pl->vfetch = vfetch;
+      pl->color_count = color_count;
+      pl->mrt = mrt;
       const VkPipelineRasterizationStateCreateInfo *rs =
          pCreateInfos[i].pRasterizationState;
       pl->cull_mode  = rs ? rs->cullMode  : VK_CULL_MODE_NONE;
