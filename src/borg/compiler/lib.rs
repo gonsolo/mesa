@@ -1295,6 +1295,8 @@ unsafe fn compile_nir_inner(
                                 draw_frag_out[c] = Some(v);
                                 draw_out_roots.push(v.0);
                             }
+                        } else if loc < VARYING_SLOT_VAR0 {
+                            // gl_PointSize and the other built-in outputs: triangles ignore them.
                         } else {
                             let base_index = 4 * loc.wrapping_sub(VARYING_SLOT_VAR0);
                             for (c, &(vd0, vc)) in comps.iter().enumerate() {
