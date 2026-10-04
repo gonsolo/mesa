@@ -462,6 +462,41 @@ unsafe fn compile_nir_inner(
     const DRAW_VS_CONST_WORDS: usize = 6;
     let mut draw_vs_consts: Vec<(u8, u32)> = Vec::new(); // (u-index, bits)
     let vs_const_window = draw_mode && stage == 0;
+    let mut vs_vreg_by_bits: HashMap<u32, u32> = HashMap::new();
+    // A vertex-shader constant: a window word, shared by value; once the window is full a small
+    // integer is derived from others (a sum) or zero (a difference) with an ALU op.
+    macro_rules! vs_const_vreg {
+        ($bits:expr) => {{
+            let bits: u32 = $bits;
+            if let Some(&v) = vs_vreg_by_bits.get(&bits) {
+                v
+            } else {
+                let v = next_vreg;
+                next_vreg += 1;
+                if draw_vs_consts.len() < DRAW_VS_CONST_WORDS {
+                    let u = DRAW_VS_CONST_U0 as u32 + draw_vs_consts.len() as u32;
+                    draw_vs_consts.push((u as u8, bits));
+                    ubo.insert(v, Ubo::Uniform(u as u8));
+                } else {
+                    let small: Vec<(u32, u32)> =
+                        vs_vreg_by_bits.iter().filter(|(&b, _)| b >= 1 && b <= 64).map(|(&b, &r)| (b, r)).collect();
+                    let pair = if bits == 0 {
+                        small.first().map(|&(_, r)| ("ISUB", r, r))
+                    } else {
+                        small.iter().find_map(|&(a, ra)| {
+                            small.iter().find(|&&(b, _)| a + b == bits).map(|&(_, rb)| ("IADD", ra, rb))
+                        })
+                    };
+                    let (mnem, a, b) = pair.unwrap_or_else(|| {
+                        panic!("borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS)
+                    });
+                    prog.push(BorgInstr { mnem, dst: v, srcs: vec![a, b], swz: vec![0, 0] });
+                }
+                vs_vreg_by_bits.insert(bits, v);
+                v
+            }
+        }};
+    }
     // A fresh vreg standing for the compile-time integer `v`: a window
     // uniform in a draw-mode vertex shader, a pinned GPR otherwise. Same
     // value, same slot, for every reference (const_int_reg caches either).
@@ -654,13 +689,12 @@ unsafe fn compile_nir_inner(
                                 Some(&b) if !vec_map.contains_key(&d) => b,
                                 _ => continue,
                             };
-                            let u = if vs_const_window {
-                                assert!(draw_vs_consts.len() < DRAW_VS_CONST_WORDS,
-                                    "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
-                                let u = DRAW_VS_CONST_U0 as u32 + draw_vs_consts.len() as u32;
-                                draw_vs_consts.push((u as u8, bits));
-                                u
-                            } else if let Some(&u) = frag_window_by_bits.get(&bits) {
+                            if vs_const_window {
+                                let v = vs_const_vreg!(bits);
+                                vec_map.insert(d, vec![(v, 0u8)]);
+                                continue;
+                            }
+                            let u = if let Some(&u) = frag_window_by_bits.get(&bits) {
                                 u   // the same value already has a word
                             } else {
                                 assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
@@ -1340,13 +1374,12 @@ unsafe fn compile_nir_inner(
                                 Some(&b) if !vec_map.contains_key(&d) => b,
                                 _ => continue,
                             };
-                            let u = if vs_const_window {
-                                assert!(draw_vs_consts.len() < DRAW_VS_CONST_WORDS,
-                                    "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
-                                let u = DRAW_VS_CONST_U0 as u32 + draw_vs_consts.len() as u32;
-                                draw_vs_consts.push((u as u8, bits));
-                                u
-                            } else if let Some(&u) = frag_window_by_bits.get(&bits) {
+                            if vs_const_window {
+                                let v = vs_const_vreg!(bits);
+                                vec_map.insert(d, vec![(v, 0u8)]);
+                                continue;
+                            }
+                            let u = if let Some(&u) = frag_window_by_bits.get(&bits) {
                                 u
                             } else {
                                 assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
@@ -1518,14 +1551,10 @@ unsafe fn compile_nir_inner(
                         let comps: Vec<(u32, u8)> = (0..n)
                             .map(|c| {
                                 let bits = unsafe { lc.values()[c].u32_ };
-                                let idx = if vs_const_window {
-                                    // A vertex shader reads its own window, not the fragment one.
-                                    assert!(draw_vs_consts.len() < DRAW_VS_CONST_WORDS,
-                                        "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
-                                    let u = DRAW_VS_CONST_U0 as u32 + draw_vs_consts.len() as u32;
-                                    draw_vs_consts.push((u as u8, bits));
-                                    u
-                                } else if let Some(&u) = frag_window_by_bits.get(&bits) {
+                                if vs_const_window {
+                                    return (vs_const_vreg!(bits), 0u8);
+                                }
+                                let idx = if let Some(&u) = frag_window_by_bits.get(&bits) {
                                     u   // the same value already has a word
                                 } else {
                                     assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
