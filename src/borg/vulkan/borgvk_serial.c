@@ -529,6 +529,81 @@ borgvk_serial_send_target(uint8_t flush_format, const float clear[4])
    borgvk_transport_emit(pkt, sizeof(pkt));
 }
 
+static void
+put_u32_le(uint8_t *d, uint32_t v)
+{
+   d[0] = v & 0xff; d[1] = (v >> 8) & 0xff; d[2] = (v >> 16) & 0xff; d[3] = (v >> 24) & 0xff;
+}
+
+static void
+emit_checked(uint8_t *pkt, size_t len)
+{
+   uint8_t csum = 0;
+   for (size_t i = 1; i < len - 1; i++)
+      csum ^= pkt[i];
+   pkt[len - 1] = csum;
+   borgvk_transport_emit(pkt, len);
+}
+
+/* Host-simulator only. 0xB8: write n (<= 256, a multiple of 4 is enough; the rest is padded)
+ * bytes at heap offset `off` (BORG_HEAP_SPI + off in the device's memory). */
+void
+borgvk_serial_send_mem(uint32_t off, const uint8_t *data, uint32_t n)
+{
+   uint8_t pkt[1 + 4 + 2 + 256 + 1];
+   memset(pkt, 0, sizeof(pkt));
+   pkt[0] = 0xB8;
+   put_u32_le(&pkt[1], off);
+   pkt[5] = n & 0xff; pkt[6] = n >> 8;
+   memcpy(&pkt[7], data, n);
+   emit_checked(pkt, sizeof(pkt));
+}
+
+/* Host-simulator only. 0xB9: vertex attribute `slot` is a typed fetch (texture format code
+ * `fmt`, component swizzle bits `swz` as in the texture descriptor) of `count` rows `stride`
+ * bytes apart from heap offset `base` (two's complement, may precede the uploaded data). */
+void
+borgvk_serial_send_vattr(uint32_t slot, uint32_t fmt, uint32_t base, uint32_t count,
+                         uint32_t stride, uint32_t swz)
+{
+   uint8_t pkt[1 + 1 + 1 + 4 + 4 + 4 + 4 + 1];
+   pkt[0] = 0xB9;
+   pkt[1] = (uint8_t)slot;
+   pkt[2] = (uint8_t)fmt;
+   put_u32_le(&pkt[3], base);
+   put_u32_le(&pkt[7], count);
+   put_u32_le(&pkt[11], stride);
+   put_u32_le(&pkt[15], swz);
+   emit_checked(pkt, sizeof(pkt));
+}
+
+/* Host-simulator only. 0xBA: run a draw. topology 0 list / 1 strip / 2 fan, index_type 0 none /
+ * 1 16-bit / 2 32-bit, index_base = heap offset of the first index. */
+void
+borgvk_serial_send_draw(uint32_t topology, uint32_t index_type, uint32_t restart,
+                        uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex,
+                        uint32_t first_instance, int32_t vertex_offset, uint32_t index_base)
+{
+   uint8_t pkt[1 + 3 + 6 * 4 + 1];
+   pkt[0] = 0xBA;
+   pkt[1] = (uint8_t)topology; pkt[2] = (uint8_t)index_type; pkt[3] = (uint8_t)restart;
+   put_u32_le(&pkt[4], vertex_count);
+   put_u32_le(&pkt[8], instance_count);
+   put_u32_le(&pkt[12], first_vertex);
+   put_u32_le(&pkt[16], first_instance);
+   put_u32_le(&pkt[20], (uint32_t)vertex_offset);
+   put_u32_le(&pkt[24], index_base);
+   emit_checked(pkt, sizeof(pkt));
+}
+
+/* Host-simulator only: the pass's attachments. flags bit 0 depth, 1 stencil, 2 D32_SFLOAT depth. */
+void
+borgvk_serial_send_pass(uint8_t flush_format, uint8_t flags)
+{
+   uint8_t pkt[4] = { 0xBB, flush_format, flags, 0 };
+   emit_checked(pkt, sizeof(pkt));
+}
+
 /* Host-simulator only: vec4 attribute at location 1 for each of n corners. */
 void
 borgvk_serial_send_attr4(const float *attr, int n)

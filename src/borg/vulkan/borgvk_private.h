@@ -160,11 +160,33 @@ struct borgvk_command_buffer {
    bool generic_drawn;
    const struct borgvk_pipeline *cs_pipeline;   /* bound compute pipeline */
    bool dispatched;                             /* ran a compute dispatch at replay */
+   /* Draws of the open render pass, as one wire stream the simulator runs at its end. */
+   uint8_t *stream;
+   size_t stream_len, stream_cap;
+   uint32_t heap_top, batch_draws;
+   struct borgvk_image *batch_img;
+   /* The batch runs on the persistent simulator, with these depth and stencil attachments. */
+   bool batch_serve;
+   struct vk_image_view *batch_depth, *batch_stencil;
+   const uint8_t *index_ptr;                    /* bound index buffer, at its offset */
+   VkDeviceSize index_avail;
+   uint32_t index_size;                         /* 2, 4, or 0 for an unsupported type */
    uint32_t pc[32];                             /* push-constant bytes, for compute */
    VkDeviceSize dyn_off[BORGVK_MAX_BINDINGS];   /* dynamic offsets of desc_set, by binding */
 };
 
 extern const struct vk_command_buffer_ops borgvk_cmd_buffer_ops;
+struct borgvk_command_buffer;
+void borgvk_flush_draws(struct borgvk_command_buffer *cmd);
+
+/* The persistent simulator (borgvk_sim.c). */
+struct borgvk_image;
+bool borgvk_sim_serves(const struct borgvk_image *color);
+uint8_t borgvk_sim_flush_format(VkFormat f);
+bool borgvk_sim_depth_is_d32(VkFormat f);
+VkResult borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
+                             const struct vk_image_view *depth_view,
+                             const struct vk_image_view *stencil_view);
 
 /* ---- Serial transport (borgvk_serial.c) ------------------------------- *
  * The "GPU" is the ULX3S FPGA reached over the FT231X serial bridge
@@ -181,7 +203,15 @@ void borgvk_blend_pack(const VkPipelineColorBlendStateCreateInfo *cb,
 /* 0xB4: STENCIL_CFG, STENCIL_FRONT, STENCIL_BACK, DEPTH_CFG, CULL_CFG. */
 void borgvk_serial_send_state(const uint32_t reg[5]);
 void borgvk_serial_send_target(uint8_t flush_format, const float clear[4]);
+void borgvk_serial_send_pass(uint8_t flush_format, uint8_t flags);
 void borgvk_serial_send_attr4(const float *attr, int n);
+/* 0xB8 / 0xB9 / 0xBA (simulator): heap write, vertex-attribute fetch descriptor, draw. */
+void borgvk_serial_send_mem(uint32_t off, const uint8_t *data, uint32_t n);
+void borgvk_serial_send_vattr(uint32_t slot, uint32_t fmt, uint32_t base, uint32_t count,
+                              uint32_t stride, uint32_t swz);
+void borgvk_serial_send_draw(uint32_t topology, uint32_t index_type, uint32_t restart,
+                             uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex,
+                             uint32_t first_instance, int32_t vertex_offset, uint32_t index_base);
 /* 0xB5: one chunk (<= 256 B at byte offset `off`) of a texture's texels plus
  * the texture descriptor words 1..3 and the four sampler words
  * (docs/B2_texture_unit.md); descriptor and sampler ride with every chunk. */
@@ -251,7 +281,7 @@ void borgvk_compiler_selftest(void);
 void borgvk_compile_compute_stage(struct borgvk_device *device,
                                   const VkPipelineShaderStageCreateInfo *stage_info,
                                   struct borgvk_pipeline *pipeline);
-void borgvk_compile_stage(struct borgvk_device *device,
+void borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
                           const VkPipelineShaderStageCreateInfo *stage_info);
 
 VK_DEFINE_HANDLE_CASTS(borgvk_instance, vk.base, VkInstance,
@@ -360,6 +390,15 @@ struct borgvk_pipeline {
    uint32_t                  binding_stride[BORGVK_MAX_VERTEX_BINDINGS];
    uint32_t                  attr_count;
    struct borgvk_vertex_attr attrs[BORGVK_MAX_VERTEX_ATTRS];
+   bool                      binding_instance[BORGVK_MAX_VERTEX_BINDINGS];   /* per-instance rate */
+   bool                      restart;      /* primitiveRestartEnable */
+   /* borgc option word for this pipeline's vertex shader (see borgc_compile_nir): vertex inputs
+    * are typed fetches whenever the pipeline declares any attribute. */
+   uint32_t                  vfetch;
+   /* The pipeline's own shader blobs and fixed-function state, as compiled/packed at creation. */
+   struct borgvk_shader_blob blob[BORGVK_SHADER_STAGE_COUNT];
+   uint32_t                  blend_cfg, blend_const, state_reg[5];
+   bool                      state_valid;
    /* Compute: the borgc program, the registers the driver presets (register,
     * value pairs) and LocalSize. cs_ok is false when borgc refused the shader. */
    bool     cs_ok;

@@ -40,8 +40,10 @@ void borg_lower_nir_for_borgc(struct nir_shader *nir);
 /* Implemented in Rust (src/borg/compiler/lib.rs). Writes up to buf_cap bytes
  * into out_buf and sets *out_len to the true blob size, so *out_len > buf_cap
  * signals an undersized buffer; returns the instruction count. */
+/* vfetch: bit 31 = fetch vertex inputs with TEX (slot 128 + location); bits 0..15 = the
+ * locations whose binding is instance-rate. 0 keeps the cube's uniform-buffer pulling. */
 uint32_t borgc_compile_nir(struct nir_shader *nir, uint8_t *out_buf,
-                           uint32_t buf_cap, uint32_t *out_len);
+                           uint32_t buf_cap, uint32_t *out_len, uint32_t vfetch);
 uint32_t borgc_selftest(void);
 
 /* Compute: program words, (register, value) presets and LocalSize. 0 on success. */

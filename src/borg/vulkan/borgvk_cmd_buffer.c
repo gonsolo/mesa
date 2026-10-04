@@ -10,6 +10,7 @@
  * drive the common command-buffer lifecycle.
  */
 #include "borgvk_private.h"
+#include <stdlib.h>
 #include <string.h>
 
 #include "vk_alloc.h"
@@ -28,6 +29,7 @@ borgvk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
       container_of(vk_cmd_buffer, struct borgvk_command_buffer, vk);
 
    vk_command_buffer_finish(&cmd->vk);
+   free(cmd->stream);
    vk_free(&cmd->vk.pool->alloc, cmd);
 }
 
@@ -61,6 +63,12 @@ borgvk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    struct borgvk_command_buffer *cmd =
       container_of(vk_cmd_buffer, struct borgvk_command_buffer, vk);
 
+   free(cmd->stream);
+   cmd->stream = NULL;
+   cmd->stream_len = cmd->stream_cap = 0;
+   cmd->heap_top = cmd->batch_draws = 0;
+   cmd->batch_img = NULL;
+   cmd->index_ptr = NULL;
    cmd->in_rendering = false;
    cmd->has_clear = false;
    cmd->gfx_pipeline = NULL;

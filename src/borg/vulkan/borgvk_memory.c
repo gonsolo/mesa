@@ -1166,6 +1166,8 @@ borgvk_CmdEndRendering2EXT(VkCommandBuffer commandBuffer,
    struct borgvk_command_buffer *cmd =
       container_of(vk_cmd, struct borgvk_command_buffer, vk);
 
+   borgvk_flush_draws(cmd);   /* the pass's draws land in the attachment before it is resolved */
+
    for (uint32_t i = 0; i < cmd->color_attachment_count; i++) {
       struct vk_image_view *view = cmd->color_views[i];
       struct vk_image_view *resolve_view = cmd->color_resolve_views[i];
@@ -1215,6 +1217,7 @@ borgvk_CmdClearAttachments(VkCommandBuffer commandBuffer, uint32_t attachmentCou
    struct borgvk_command_buffer *cmd =
       container_of(vk_cmd, struct borgvk_command_buffer, vk);
 
+   borgvk_flush_draws(cmd);   /* the draws so far come first */
    if (!cmd->in_rendering)
       return;
 

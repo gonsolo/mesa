@@ -34,7 +34,7 @@ borgvk_compiler_selftest(void)
 
 /* Turn one pipeline shader stage's SPIR-V into NIR and hand it to borgc. */
 void
-borgvk_compile_stage(struct borgvk_device *device,
+borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
                      const VkPipelineShaderStageCreateInfo *stage_info)
 {
    struct nir_shader *nir = NULL;
@@ -65,7 +65,8 @@ borgvk_compile_stage(struct borgvk_device *device,
    if (slot >= 0) {
       struct borgvk_shader_blob *b = &device->shader_blob[slot];
       uint32_t len = 0;
-      borgc_compile_nir(nir, b->data, BORGVK_SHADER_BLOB_MAX, &len);
+      borgc_compile_nir(nir, b->data, BORGVK_SHADER_BLOB_MAX, &len,
+                        slot == BORGVK_STAGE_VERT ? vfetch : 0);
       if (len > 0 && len <= BORGVK_SHADER_BLOB_MAX) {
          b->len = len;
          mesa_logi("borgvk: captured %s shader blob (%u bytes) for upload",
@@ -77,7 +78,7 @@ borgvk_compile_stage(struct borgvk_device *device,
                    len, BORGVK_SHADER_BLOB_MAX);
       }
    } else {
-      borgc_compile_nir(nir, NULL, 0, NULL);   /* diagnostics only */
+      borgc_compile_nir(nir, NULL, 0, NULL, 0);   /* diagnostics only */
    }
    ralloc_free(nir);
 }

@@ -985,6 +985,7 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
    BORGVK_RECORD_CMD(CmdSetEvent2);        BORGVK_RECORD_CMD(CmdResetEvent2);
    BORGVK_RECORD_CMD(CmdBindPipeline);     BORGVK_RECORD_CMD(CmdBindVertexBuffers);
    BORGVK_RECORD_CMD(CmdBindDescriptorSets); BORGVK_RECORD_CMD(CmdDraw);
+   BORGVK_RECORD_CMD(CmdDrawIndexed);      BORGVK_RECORD_CMD(CmdBindIndexBuffer);
    BORGVK_RECORD_CMD(CmdDispatch);
 #undef BORGVK_RECORD_CMD
    /* Finally, fill anything STILL null from the runtime's generic

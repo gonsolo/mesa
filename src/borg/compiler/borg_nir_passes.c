@@ -152,6 +152,10 @@ borg_lower_nir_for_borgc(struct nir_shader *nir)
    /* SSA + system values (gl_VertexIndex → load_vertex_id), then lower the UBO
     * deref I/O to load_ubo with byte offsets. The Borg core has integer ops
     * (iadd/ishl), so the offset address arithmetic is selectable. */
+   /* A constant array indexed by gl_VertexIndex (the usual vertex-less fullscreen
+    * triangle/quad) becomes a bcsel chain. */
+   NIR_PASS(_, nir, nir_lower_global_vars_to_local);
+   NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees, nir_var_function_temp | nir_var_shader_temp, UINT32_MAX);
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
    NIR_PASS(_, nir, nir_lower_system_values);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,

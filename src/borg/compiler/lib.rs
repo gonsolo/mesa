@@ -247,12 +247,13 @@ pub unsafe extern "C" fn borgc_compile_nir(
     out_buf: *mut u8,
     buf_cap: u32,
     out_len: *mut u32,
+    vfetch: u32,
 ) -> u32 {
     // A shader borgc cannot handle trips an assert; unwinding out of an extern "C"
     // function aborts the whole process, so turn it into "no blob" (the same outcome
     // as any other unsupported shader).
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        compile_nir_inner(nir, out_buf, buf_cap, out_len)
+        compile_nir_inner(nir, out_buf, buf_cap, out_len, vfetch)
     }))
     .unwrap_or_else(|_| {
         if !out_len.is_null() {
@@ -267,6 +268,7 @@ unsafe fn compile_nir_inner(
     out_buf: *mut u8,
     buf_cap: u32,
     out_len: *mut u32,
+    vfetch: u32,
 ) -> u32 {
     if !out_len.is_null() {
         *out_len = 0;
@@ -362,6 +364,7 @@ unsafe fn compile_nir_inner(
     let mut per_pixel_fixed: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut frag_coord_w = false;
     let mut fetch_ctl_uniform: Option<u32> = None;
+    let mut vfetch_ctl: HashMap<u32, u8> = HashMap::new();   // attribute location -> window uniform of its TEX control word
     let mut frag_window_by_bits: HashMap<u32, u32> = HashMap::new();
     // Scalar load_const f32 bits (for the sRGB idiom match) and a producer map
     // (alu def → its op + resolved scalar srcs) for recognising the bcsel tree.
@@ -1112,6 +1115,54 @@ unsafe fn compile_nir_inner(
                         // BorgInstr of its own, which load_vertex_id does not).
                         ubo.insert(intr.def.index, Ubo::Fixed(30));
                         vertex_id_def = Some(intr.def.index);
+                    } else if draw_mode && stage == 0 && vfetch & 0x8000_0000 != 0
+                              && intr.intrinsic == nir_intrinsic_load_input {
+                        // Vertex input as a typed fetch (docs/B1_geometry_front_end.md, "Vertex
+                        // input"): attribute L is texture slot 128 + L, a width-1 linear image
+                        // whose row pitch is the vertex stride and whose format converts the
+                        // attribute. `TEX` fetches row VertexIndex (or InstanceIndex for an
+                        // instance-rate binding); missing components read (0, 0, 0, 1).
+                        const VERT_ATTRIB_GENERIC0: u32 = 15;
+                        let loc = (intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F)
+                            .wrapping_sub(VERT_ATTRIB_GENERIC0);
+                        let n = intr.def.num_components as usize;
+                        let ctl_bits = (1u32 << 16) | (128 + loc);
+                        let u = match vfetch_ctl.get(&loc) {
+                            Some(&u) => u,
+                            None => {
+                                assert!(draw_vs_consts.len() < DRAW_VS_CONST_WORDS,
+                                    "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
+                                let u = DRAW_VS_CONST_U0 + draw_vs_consts.len() as u8;
+                                draw_vs_consts.push((u, ctl_bits));
+                                vfetch_ctl.insert(loc, u);
+                                u
+                            }
+                        };
+                        let ctl = next_vreg; next_vreg += 1;
+                        ubo.insert(ctl, Ubo::Uniform(u));
+                        // The index register: r30 (VertexIndex) or r31 (InstanceIndex).
+                        let idx_reg = if vfetch >> loc & 1 != 0 { 31 } else { 30 };
+                        let idx = next_vreg; next_vreg += 1;
+                        ubo.insert(idx, Ubo::Fixed(idx_reg));
+                        // Texel x = 0: any register minus itself.
+                        let zero = next_vreg; next_vreg += 1;
+                        prog.push(BorgInstr { mnem: "ISUB", dst: zero, srcs: vec![idx, idx], swz: vec![0, 0] });
+                        let tex_v = next_vreg; next_vreg += 1;
+                        prog.push(BorgInstr { mnem: "TEX", dst: tex_v, srcs: vec![zero, idx, ctl], swz: vec![0, 0, 0] });
+                        tex_dsts.insert(tex_v);
+                        // The fetch fills a fixed four-register block (see the vertex `forced`
+                        // below); every component a shader uses is copied out of it at once, so
+                        // the next fetch can reuse the block and the rest of the compiler sees
+                        // ordinary scalars. IOR x, x copies the bits, integer formats included.
+                        let comp0 = intr.get_const_index(NIR_INTRINSIC_COMPONENT) as u8;
+                        let mut comps = Vec::with_capacity(n);
+                        for c in 0..n {
+                            let m = next_vreg; next_vreg += 1;
+                            prog.push(BorgInstr { mnem: "IOR", dst: m, srcs: vec![tex_v, tex_v],
+                                                  swz: vec![comp0 + c as u8, comp0 + c as u8] });
+                            comps.push((m, 0u8));
+                        }
+                        vec_map.insert(intr.def.index, comps);
                     } else if draw_mode && (intr.intrinsic == nir_intrinsic_load_ubo
                                             || (vs_const_window && intr.intrinsic == nir_intrinsic_load_input)) {
                         // A draw-mode vertex shader's `in` attributes are read from
@@ -1658,6 +1709,13 @@ unsafe fn compile_nir_inner(
         // shrink its register pool for nothing.
         if gl_position.is_some() {
             extra_reserved.push(4);
+        }
+        // A typed vertex fetch (TEX) writes rd..rd+3: one block, r20..r23, for all of them.
+        for &t in &tex_dsts {
+            forced.insert(t, 20);
+        }
+        if !tex_dsts.is_empty() {
+            extra_reserved.extend_from_slice(&[21, 22, 23]);
         }
         // Only the const_regs prefix actually pinned (const_reg_count) --
         // reserving the whole 12-register pool regardless of use starved the

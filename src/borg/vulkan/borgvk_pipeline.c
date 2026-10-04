@@ -40,9 +40,28 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
    uint32_t i;
 
    for (i = 0; i < count; i++) {
-      /* Compile each shader stage's SPIR-V → NIR → Borg ISA (borgc). */
+      const VkPipelineVertexInputStateCreateInfo *vi = pCreateInfos[i].pVertexInputState;
+      uint32_t vfetch = 0;
+      if (vi && vi->vertexAttributeDescriptionCount > 0) {
+         vfetch = 0x80000000u;
+         for (uint32_t b = 0; b < vi->vertexBindingDescriptionCount; b++) {
+            const VkVertexInputBindingDescription *vb = &vi->pVertexBindingDescriptions[b];
+            if (vb->inputRate != VK_VERTEX_INPUT_RATE_INSTANCE)
+               continue;
+            for (uint32_t a = 0; a < vi->vertexAttributeDescriptionCount; a++) {
+               const VkVertexInputAttributeDescription *va = &vi->pVertexAttributeDescriptions[a];
+               if (va->binding == vb->binding && va->location < 16)
+                  vfetch |= 1u << va->location;
+            }
+         }
+      }
+
+      /* Compile each shader stage's SPIR-V → NIR → Borg ISA (borgc). The blobs land in the
+       * device (the cube's path uploads those) and are kept in the pipeline for generic draws. */
+      for (int st = 0; st < BORGVK_SHADER_STAGE_COUNT; st++)
+         device->shader_blob[st].len = 0;
       for (uint32_t s = 0; s < pCreateInfos[i].stageCount; s++)
-         borgvk_compile_stage(device, &pCreateInfos[i].pStages[s]);
+         borgvk_compile_stage(device, vfetch, &pCreateInfos[i].pStages[s]);
 
       result = borgvk_create_pipeline(device, pAllocator, &pPipelines[i]);
       if (result != VK_SUCCESS) {
@@ -52,6 +71,8 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
 
       /* Capture rasterization state so the sim submit path can apply it. */
       VK_FROM_HANDLE(borgvk_pipeline, pl, pPipelines[i]);
+      memcpy(pl->blob, device->shader_blob, sizeof(pl->blob));
+      pl->vfetch = vfetch;
       const VkPipelineRasterizationStateCreateInfo *rs =
          pCreateInfos[i].pRasterizationState;
       pl->cull_mode  = rs ? rs->cullMode  : VK_CULL_MODE_NONE;
@@ -59,13 +80,14 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
       const VkPipelineInputAssemblyStateCreateInfo *ia =
          pCreateInfos[i].pInputAssemblyState;
       pl->topology = ia ? ia->topology : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-      const VkPipelineVertexInputStateCreateInfo *vi =
-         pCreateInfos[i].pVertexInputState;
+      pl->restart  = ia && ia->primitiveRestartEnable;
       if (vi) {
          for (uint32_t b = 0; b < vi->vertexBindingDescriptionCount; b++) {
             const VkVertexInputBindingDescription *vb = &vi->pVertexBindingDescriptions[b];
-            if (vb->binding < BORGVK_MAX_VERTEX_BINDINGS)
+            if (vb->binding < BORGVK_MAX_VERTEX_BINDINGS) {
                pl->binding_stride[vb->binding] = vb->stride;
+               pl->binding_instance[vb->binding] = vb->inputRate == VK_VERTEX_INPUT_RATE_INSTANCE;
+            }
          }
          for (uint32_t a = 0; a < vi->vertexAttributeDescriptionCount &&
                               pl->attr_count < BORGVK_MAX_VERTEX_ATTRS; a++) {
@@ -87,6 +109,10 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
       borgvk_blend_pack(ci.pColorBlendState, &device->blend_cfg, &device->blend_const);
       borgvk_state_pack(&ci, device->state_reg);
       device->state_valid = true;
+      pl->blend_cfg = device->blend_cfg;
+      pl->blend_const = device->blend_const;
+      memcpy(pl->state_reg, device->state_reg, sizeof(pl->state_reg));
+      pl->state_valid = true;
    }
    for (; i < count; i++)
       pPipelines[i] = VK_NULL_HANDLE;

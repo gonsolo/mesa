@@ -158,7 +158,7 @@ main(int argc, char **argv)
       for (uint32_t i = 0; rc == 0 && i < nr; i++) printf("  r%u = %u\n", r[2*i], r[2*i+1]);
       return rc;
    }
-   uint32_t n_instrs = borgc_compile_nir(nir, blob, sizeof blob, &len);
+   uint32_t n_instrs = borgc_compile_nir(nir, blob, sizeof blob, &len, getenv("BORGC_VFETCH") ? 0x80000000u : 0);
    int rc = 0;
 
    if (len == 0) {

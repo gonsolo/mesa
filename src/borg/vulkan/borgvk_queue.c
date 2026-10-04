@@ -961,44 +961,71 @@ send_buffer_texture(const struct vk_buffer_view *bv)
    return true;
 }
 
-/* Read one float attribute of one vertex (R32..R32G32B32A32_SFLOAT only).
- * Missing components follow the Vulkan defaults: 0, 0, 0, 1. */
+/* VkFormat of a vertex attribute -> the texture unit's format code (software/borg/borg_isa.h
+ * BORG_TEX_FORMAT_*), the component swizzle bits of its descriptor, and how many bytes the
+ * typed fetch reads. Three-component formats are fetched as four with alpha forced to one (the
+ * Vulkan default), which reads the next vertex's first bytes: the upload keeps slack for it. */
 static bool
-fetch_vertex_attr(const struct borgvk_pipeline *pl,
-                  const struct borgvk_vertex_attr *a,
-                  const uint8_t *const vb[BORGVK_MAX_VERTEX_BINDINGS],
-                  const VkDeviceSize vb_avail[BORGVK_MAX_VERTEX_BINDINGS],
-                  uint32_t vertex, float out[4])
+vertex_format_to_fetch(VkFormat f, uint32_t *code, uint32_t *swz, uint32_t *read_bytes)
 {
-   uint32_t n;
-   switch (a->format) {
-   case VK_FORMAT_R32_SFLOAT:          n = 1; break;
-   case VK_FORMAT_R32G32_SFLOAT:       n = 2; break;
-   case VK_FORMAT_R32G32B32_SFLOAT:    n = 3; break;
-   case VK_FORMAT_R32G32B32A32_SFLOAT: n = 4; break;
+   const uint32_t A_ONE = 2u << 29;
+   *swz = 0;
+   switch (f) {
+   case VK_FORMAT_R8_UNORM: *code = 1; *read_bytes = 1; return true;
+   case VK_FORMAT_R8_SNORM: *code = 2; *read_bytes = 1; return true;
+   case VK_FORMAT_R8_UINT:  *code = 3; *read_bytes = 1; return true;
+   case VK_FORMAT_R8_SINT:  *code = 4; *read_bytes = 1; return true;
+   case VK_FORMAT_R8G8_UNORM: *code = 6; *read_bytes = 2; return true;
+   case VK_FORMAT_R8G8_SNORM: *code = 7; *read_bytes = 2; return true;
+   case VK_FORMAT_R8G8_UINT:  *code = 8; *read_bytes = 2; return true;
+   case VK_FORMAT_R8G8_SINT:  *code = 9; *read_bytes = 2; return true;
+   case VK_FORMAT_R8G8B8_UNORM: *code = 11; *swz = A_ONE; *read_bytes = 4; return true;
+   case VK_FORMAT_R8G8B8_SNORM: *code = 12; *swz = A_ONE; *read_bytes = 4; return true;
+   case VK_FORMAT_R8G8B8_UINT:  *code = 13; *swz = A_ONE; *read_bytes = 4; return true;
+   case VK_FORMAT_R8G8B8_SINT:  *code = 14; *swz = A_ONE; *read_bytes = 4; return true;
+   case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_A8B8G8R8_UNORM_PACK32: *code = 11; *read_bytes = 4; return true;
+   case VK_FORMAT_R8G8B8A8_SNORM: case VK_FORMAT_A8B8G8R8_SNORM_PACK32: *code = 12; *read_bytes = 4; return true;
+   case VK_FORMAT_R8G8B8A8_UINT:  case VK_FORMAT_A8B8G8R8_UINT_PACK32:  *code = 13; *read_bytes = 4; return true;
+   case VK_FORMAT_R8G8B8A8_SINT:  case VK_FORMAT_A8B8G8R8_SINT_PACK32:  *code = 14; *read_bytes = 4; return true;
+   case VK_FORMAT_B8G8R8A8_UNORM: *code = 16; *read_bytes = 4; return true;
+   case VK_FORMAT_R16_UNORM: *code = 18; *read_bytes = 2; return true;
+   case VK_FORMAT_R16_SNORM: *code = 19; *read_bytes = 2; return true;
+   case VK_FORMAT_R16_UINT:  *code = 20; *read_bytes = 2; return true;
+   case VK_FORMAT_R16_SINT:  *code = 21; *read_bytes = 2; return true;
+   case VK_FORMAT_R16_SFLOAT: *code = 22; *read_bytes = 2; return true;
+   case VK_FORMAT_R16G16_UNORM: *code = 23; *read_bytes = 4; return true;
+   case VK_FORMAT_R16G16_SNORM: *code = 24; *read_bytes = 4; return true;
+   case VK_FORMAT_R16G16_UINT:  *code = 25; *read_bytes = 4; return true;
+   case VK_FORMAT_R16G16_SINT:  *code = 26; *read_bytes = 4; return true;
+   case VK_FORMAT_R16G16_SFLOAT: *code = 27; *read_bytes = 4; return true;
+   case VK_FORMAT_R16G16B16_UNORM: *code = 28; *swz = A_ONE; *read_bytes = 8; return true;
+   case VK_FORMAT_R16G16B16_SNORM: *code = 29; *swz = A_ONE; *read_bytes = 8; return true;
+   case VK_FORMAT_R16G16B16_UINT:  *code = 30; *swz = A_ONE; *read_bytes = 8; return true;
+   case VK_FORMAT_R16G16B16_SINT:  *code = 31; *swz = A_ONE; *read_bytes = 8; return true;
+   case VK_FORMAT_R16G16B16_SFLOAT: *code = 32; *swz = A_ONE; *read_bytes = 8; return true;
+   case VK_FORMAT_R16G16B16A16_UNORM: *code = 28; *read_bytes = 8; return true;
+   case VK_FORMAT_R16G16B16A16_SNORM: *code = 29; *read_bytes = 8; return true;
+   case VK_FORMAT_R16G16B16A16_UINT:  *code = 30; *read_bytes = 8; return true;
+   case VK_FORMAT_R16G16B16A16_SINT:  *code = 31; *read_bytes = 8; return true;
+   case VK_FORMAT_R16G16B16A16_SFLOAT: *code = 32; *read_bytes = 8; return true;
+   case VK_FORMAT_R32_UINT:   *code = 33; *read_bytes = 4; return true;
+   case VK_FORMAT_R32_SINT:   *code = 34; *read_bytes = 4; return true;
+   case VK_FORMAT_R32_SFLOAT: *code = 35; *read_bytes = 4; return true;
+   case VK_FORMAT_R32G32_UINT:   *code = 36; *read_bytes = 8; return true;
+   case VK_FORMAT_R32G32_SINT:   *code = 37; *read_bytes = 8; return true;
+   case VK_FORMAT_R32G32_SFLOAT: *code = 38; *read_bytes = 8; return true;
+   case VK_FORMAT_R32G32B32_UINT:   *code = 39; *swz = A_ONE; *read_bytes = 16; return true;
+   case VK_FORMAT_R32G32B32_SINT:   *code = 40; *swz = A_ONE; *read_bytes = 16; return true;
+   case VK_FORMAT_R32G32B32_SFLOAT: *code = 41; *swz = A_ONE; *read_bytes = 16; return true;
+   case VK_FORMAT_R32G32B32A32_UINT:   *code = 39; *read_bytes = 16; return true;
+   case VK_FORMAT_R32G32B32A32_SINT:   *code = 40; *read_bytes = 16; return true;
+   case VK_FORMAT_R32G32B32A32_SFLOAT: *code = 41; *read_bytes = 16; return true;
+   case VK_FORMAT_A2B10G10R10_UNORM_PACK32: *code = 42; *read_bytes = 4; return true;
+   case VK_FORMAT_A2B10G10R10_UINT_PACK32:  *code = 43; *read_bytes = 4; return true;
    default: return false;
    }
-   if (a->binding >= BORGVK_MAX_VERTEX_BINDINGS || !vb[a->binding])
-      return false;
-   const uint64_t at = (uint64_t)vertex * pl->binding_stride[a->binding] + a->offset;
-   out[0] = out[1] = out[2] = 0.0f;
-   out[3] = 1.0f;
-   /* robustBufferAccess: a fetch past the end of the bound range reads zero. */
-   if (at + n * sizeof(float) > vb_avail[a->binding]) {
-      out[3] = 0.0f;
-      return true;
-   }
-   memcpy(out, vb[a->binding] + at, n * sizeof(float));
-   return true;
 }
 
-/* Sim path for a generic draw (CTS): one graphics pipeline, vertex buffers
- * described by its vertex-input state, location 0 = position (clip space,
- * w taken as 1), location 1 = texture coordinate, a TRIANGLE_LIST draw and,
- * optionally, a sampled image at some descriptor binding. The draw goes through
- * the same wire protocol as vkcube (shaders, geometry, identity MVP, state),
- * so it runs on the real firmware and hardware model.
- * Returns true when it handled the submit. */
 static bool
 generic_reject(int why)
 {
@@ -1007,27 +1034,108 @@ generic_reject(int why)
    return false;
 }
 
+/* The simulator's heap (software/borg/borg_layout.h BORG_HEAP_*): a bump allocator per stream. */
+#define BORGVK_HEAP_BYTES 0x0F00000u
+
+struct draw_heap {
+   uint32_t top;
+};
+
+/* Run the accumulated draws of the open render pass (one simulator process for all of them) and
+ * read the render target back. A no-op when nothing is pending. */
+static VkResult sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
+                               uint32_t sim_dim);
+
+void
+borgvk_flush_draws(struct borgvk_command_buffer *cmd)
+{
+   if (cmd->stream_len == 0)
+      return;
+   uint8_t *bytes = cmd->stream;
+   size_t n = cmd->stream_len;
+   struct borgvk_image *img = cmd->batch_img;
+   const bool serve = cmd->batch_serve;
+   cmd->stream = NULL;
+   cmd->stream_len = cmd->stream_cap = 0;
+   cmd->heap_top = 0;
+   cmd->batch_draws = 0;
+   cmd->batch_img = NULL;
+   if (serve) {
+      borgvk_sim_run_pass(bytes, n, img, cmd->batch_depth, cmd->batch_stencil);
+      free(bytes);
+      return;
+   }
+   sim_run_stream(bytes, n, img, 0);   /* takes ownership of bytes */
+}
+
+static bool
+stream_append(struct borgvk_command_buffer *cmd, const uint8_t *data, size_t n)
+{
+   if (cmd->stream_len + n > cmd->stream_cap) {
+      size_t cap = MAX2(cmd->stream_cap * 2, cmd->stream_len + n + 65536);
+      uint8_t *p = realloc(cmd->stream, cap);
+      if (!p)
+         return false;
+      cmd->stream = p;
+      cmd->stream_cap = cap;
+   }
+   memcpy(cmd->stream + cmd->stream_len, data, n);
+   cmd->stream_len += n;
+   return true;
+}
+
+/* Upload n bytes (the tail up to a multiple of 4 is zero) and return their heap offset, or
+ * UINT32_MAX when the heap is full. */
+static uint32_t
+heap_upload(struct draw_heap *h, const uint8_t *data, uint32_t n)
+{
+   uint32_t padded = (n + 3) & ~3u;
+   if (h->top + padded + 16 > BORGVK_HEAP_BYTES)
+      return UINT32_MAX;
+   uint32_t off = h->top;
+   for (uint32_t i = 0; i < padded; i += 256) {
+      uint8_t tmp[256] = { 0 };
+      uint32_t c = MIN2(256u, n > i ? n - i : 0);
+      if (c)
+         memcpy(tmp, data + i, c);
+      borgvk_serial_send_mem(off + i, tmp, MIN2(256u, padded - i));
+   }
+   h->top += padded + 16;   /* slack for the typed fetch's over-read */
+   return off;
+}
+
+struct draw_params {
+   bool          indexed;
+   uint32_t      index_size;      /* 2 or 4 */
+   uint32_t      count;           /* vertices or indices */
+   uint32_t      instances;
+   uint32_t      first;           /* first vertex or first index */
+   int32_t       vertex_offset;
+   uint32_t      first_instance;
+};
+
+/* Sim path for a draw (CTS and applications): the pipeline's vertex shader fetches its inputs
+ * through the texture unit (borgc, load_input -> TEX fetch from slot 128 + location), so the
+ * driver uploads the bound vertex (and index) buffers into the GPU heap, describes each
+ * attribute with a texture descriptor, and sends the draw parameters. No vertex data is read
+ * on the host except to find the index range. Returns true when it handled the draw. */
 static bool
 borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buffer *cmd,
-                        uint32_t vert_count, uint32_t first_vert)
+                        const struct draw_params *dp)
 {
-   /* State as the replay left it: the bound pipeline, vertex buffers and (optionally, for a
-    * texture) descriptor set. */
    struct borgvk_pipeline *pipeline = cmd->gfx_pipeline;
-   const uint8_t *const *vb = cmd->vb;
    struct borgvk_descriptor_set *set = cmd->desc_set;
 
-   if (!pipeline || vert_count == 0 || vert_count % 3 != 0 ||
-       pipeline->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ||
-       vert_count / 3 > BORGVK_GEOM_MAX_TRIS)
+   if (!pipeline || dp->count == 0 || dp->instances == 0)
       return generic_reject(3);
-
-   const struct borgvk_vertex_attr *a_pos = NULL, *a_uv = NULL;
-   for (uint32_t i = 0; i < pipeline->attr_count; i++) {
-      if (pipeline->attrs[i].location == 0) a_pos = &pipeline->attrs[i];
-      if (pipeline->attrs[i].location == 1) a_uv  = &pipeline->attrs[i];
+   uint32_t topo;
+   switch (pipeline->topology) {
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:  topo = 0; break;
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP: topo = 1; break;
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN:   topo = 2; break;
+   default: return generic_reject(3);
    }
-   if (!a_pos)
+   if (pipeline->blob[BORGVK_STAGE_VERT].len == 0 || pipeline->blob[BORGVK_STAGE_FRAG].len == 0)
       return generic_reject(4);
 
    struct borgvk_image *color_img =
@@ -1035,47 +1143,83 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
          ? container_of(cmd->color_views[0]->image, struct borgvk_image, vk) : NULL;
    if (!color_img || !color_img->mem || !color_img->mem->map)
       return generic_reject(5);
+   if (cmd->batch_draws && (cmd->batch_img != color_img || cmd->batch_depth != cmd->depth_view ||
+                            cmd->batch_stencil != cmd->stencil_view))
+      borgvk_flush_draws(cmd);
 
-   /* Dedup positions into the packet's shared vertex table, keep UVs per
-    * triangle corner (the packet carries them that way). */
-   float verts[BORGVK_GEOM_MAX_VERTS * 3];
-   uint8_t idx[BORGVK_GEOM_MAX_TRIS * 3];
-   float uv[BORGVK_GEOM_MAX_TRIS * 3 * 2];
-   float attr4[BORGVK_GEOM_MAX_TRIS * 3 * 4];
-   int nverts = 0;
-   for (uint32_t i = 0; i < vert_count; i++) {
-      float pos[4], tc[4] = { 0, 0, 0, 1 };
-      if (!fetch_vertex_attr(pipeline, a_pos, vb, cmd->vb_avail, first_vert + i, pos))
+   /* The index range each binding needs. */
+   const uint8_t *idx_host = NULL;
+   if (dp->indexed) {
+      if (!cmd->index_ptr)
          return generic_reject(6);
-      if (a_uv && !fetch_vertex_attr(pipeline, a_uv, vb, cmd->vb_avail, first_vert + i, tc))
-         return generic_reject(7);
-      int u = -1;
-      for (int j = 0; j < nverts; j++)
-         if (verts[j*3+0] == pos[0] && verts[j*3+1] == pos[1] && verts[j*3+2] == pos[2]) {
-            u = j;
-            break;
-         }
-      if (u < 0) {
-         if (nverts >= BORGVK_GEOM_MAX_VERTS)
-            return generic_reject(8);
-         u = nverts++;
-         memcpy(&verts[u*3], pos, 3 * sizeof(float));
-      }
-      idx[i] = (uint8_t)u;
-      uv[i*2+0] = tc[0];
-      uv[i*2+1] = tc[1];
-      memcpy(&attr4[i*4], tc, sizeof(tc));
+      idx_host = cmd->index_ptr + (size_t)dp->first * dp->index_size;
+      if ((size_t)(dp->first + dp->count) * dp->index_size > cmd->index_avail)
+         return generic_reject(6);
    }
+   int64_t vmin = INT64_MAX, vmax = -1;
+   if (dp->indexed) {
+      const uint32_t restart_val = dp->index_size == 2 ? 0xFFFFu : 0xFFFFFFFFu;
+      for (uint32_t i = 0; i < dp->count; i++) {
+         uint32_t v = dp->index_size == 2 ? ((const uint16_t *)idx_host)[i] : ((const uint32_t *)idx_host)[i];
+         if (pipeline->restart && v == restart_val)
+            continue;
+         int64_t r = (int64_t)v + dp->vertex_offset;
+         if (r < 0)
+            return generic_reject(7);
+         vmin = MIN2(vmin, r);
+         vmax = MAX2(vmax, r);
+      }
+   } else {
+      vmin = dp->first;
+      vmax = (int64_t)dp->first + dp->count - 1;
+   }
+   if (vmax < 0)
+      return generic_reject(7);
+   int64_t imin = dp->first_instance, imax = (int64_t)dp->first_instance + dp->instances - 1;
 
-   static const float identity[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+   /* The heap this draw needs: flush the pass so far when it would not fit next to it. */
+   {
+      uint64_t need = dp->indexed ? (uint64_t)dp->count * dp->index_size + 32 : 0;
+      for (uint32_t b = 0; b < BORGVK_MAX_VERTEX_BINDINGS; b++) {
+         bool used = false;
+         for (uint32_t a = 0; a < pipeline->attr_count; a++)
+            used |= pipeline->attrs[a].binding == b;
+         if (!used)
+            continue;
+         int64_t r0 = pipeline->binding_instance[b] ? imin : vmin;
+         int64_t r1 = pipeline->binding_instance[b] ? imax : vmax;
+         need += (uint64_t)(r1 - r0 + 1) * pipeline->binding_stride[b] + 32;
+      }
+      if (cmd->batch_draws && cmd->heap_top + need > BORGVK_HEAP_BYTES)
+         borgvk_flush_draws(cmd);
+   }
+   const bool first_of_batch = cmd->batch_draws == 0;
 
    /* The DRM shim's ioctls bypass the capture buffer; force the serial path. */
    int saved_fd = device->drm_fd;
    device->drm_fd = -1;
    borgvk_transport_capture_begin();
+   memcpy(device->shader_blob, pipeline->blob, sizeof(device->shader_blob));
+   device->blend_cfg = pipeline->blend_cfg;
+   device->blend_const = pipeline->blend_const;
+   memcpy(device->state_reg, pipeline->state_reg, sizeof(device->state_reg));
+   device->state_valid = pipeline->state_valid;
    upload_shaders(device);
    send_blend_state(device);
-   {
+   if (first_of_batch)
+      cmd->batch_serve = borgvk_sim_serves(color_img);
+   const bool serve = cmd->batch_serve;
+   /* Persistent simulator: the attachments hold what the application's images hold, so every
+    * draw loads them (colour, depth, stencil) and keeps the tiles it does not reach. */
+   uint32_t load = first_of_batch ? 0u : 1u;
+   if (serve) {
+      const bool has_z = cmd->depth_view != NULL, has_s = cmd->stencil_view != NULL;
+      load = 1u | (has_z ? 2u : 0u) | (has_s ? 4u : 0u) | 8u;
+      if (first_of_batch)
+         borgvk_serial_send_pass(borgvk_sim_flush_format(color_img->vk.format),
+                                 (has_z ? 1u : 0u) | (has_s ? 2u : 0u) |
+                                 (has_z && borgvk_sim_depth_is_d32(cmd->depth_view->image->format) ? 4u : 0u));
+   } else if (first_of_batch) {
       /* Render target: the attachment's format and the clear colour its render pass asked for. */
       uint8_t fmt = color_img->vk.format == VK_FORMAT_R8G8B8A8_UNORM ? 1 :
                     color_img->vk.format == VK_FORMAT_B8G8R8A8_UNORM ? 2 :
@@ -1085,29 +1229,90 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
          memcpy(clear, cmd->clear_color, sizeof(clear));
       borgvk_serial_send_target(fmt, clear);
    }
-   borgvk_serial_send_geom(verts, nverts, idx, uv, (int)(vert_count / 3));
-   if (a_uv && (a_uv->format == VK_FORMAT_R32G32B32_SFLOAT || a_uv->format == VK_FORMAT_R32G32B32A32_SFLOAT))
-      borgvk_serial_send_attr4(attr4, (int)vert_count);
-   for (int b = 0; set && b < BORGVK_MAX_BINDINGS; b++) {
-      if (set->views[b] && send_generic_texture(set->views[b], set->images[b], set->samplers[b]))
+
+   struct draw_heap heap = { cmd->heap_top };
+   bool ok = true;
+   uint32_t bind_off[BORGVK_MAX_VERTEX_BINDINGS];
+   int64_t bind_row0[BORGVK_MAX_VERTEX_BINDINGS];
+   bool bind_done[BORGVK_MAX_VERTEX_BINDINGS] = { false };
+   for (uint32_t a = 0; ok && a < pipeline->attr_count; a++) {
+      const struct borgvk_vertex_attr *at = &pipeline->attrs[a];
+      uint32_t code, swz, rbytes;
+      uint32_t b = at->binding;
+      if (at->location >= 16 || b >= BORGVK_MAX_VERTEX_BINDINGS ||
+          !vertex_format_to_fetch(at->format, &code, &swz, &rbytes) ||
+          !cmd->vb[b] || pipeline->binding_stride[b] == 0) {
+         ok = generic_reject(8);
          break;
-      if (set->buffer_views[b] && send_buffer_texture(set->buffer_views[b]))
+      }
+      const uint32_t stride = pipeline->binding_stride[b];
+      const bool inst = pipeline->binding_instance[b];
+      const int64_t row0 = inst ? imin : vmin, row1 = inst ? imax : vmax;
+      if (row1 + 1 > 4096) {
+         ok = generic_reject(9);
          break;
+      }
+      if (!bind_done[b]) {
+         /* Upload the rows this binding is read at, [row0, row1], within the bound range. */
+         const uint64_t avail = cmd->vb_avail[b];
+         const uint64_t from = (uint64_t)row0 * stride;
+         const uint64_t to = MIN2(avail, ((uint64_t)row1 + 1) * stride);
+         uint32_t off = 0;
+         if (to > from) {
+            off = heap_upload(&heap, cmd->vb[b] + from, (uint32_t)(to - from));
+         } else {
+            uint8_t z[16] = { 0 };
+            off = heap_upload(&heap, z, 16);
+         }
+         if (off == UINT32_MAX) {
+            ok = generic_reject(10);
+            break;
+         }
+         bind_off[b] = off;
+         bind_row0[b] = row0;
+         bind_done[b] = true;
+      }
+      /* Rows available at this attribute: the fetch beyond them reads (0, 0, 0, 1). */
+      const uint64_t avail = cmd->vb_avail[b];
+      uint64_t rows = avail >= (uint64_t)at->offset + rbytes ? (avail - at->offset - rbytes) / stride + 1 : 0;
+      uint32_t count = (uint32_t)MAX2(1, MIN2((uint64_t)row1 + 1, rows));
+      /* base - row0 * stride + attribute offset, as a 32-bit two's-complement heap offset. */
+      uint32_t base = bind_off[b] - (uint32_t)((uint64_t)row0 * stride) + at->offset;
+      borgvk_serial_send_vattr(at->location, code, base, count, stride, swz);
    }
-   borgvk_serial_send_mvp(identity);
+   uint32_t idx_off = 0;
+   if (ok && dp->indexed) {
+      idx_off = heap_upload(&heap, idx_host, dp->count * dp->index_size);
+      if (idx_off == UINT32_MAX)
+         ok = generic_reject(10);
+   }
+   if (ok) {
+      for (int b = 0; set && b < BORGVK_MAX_BINDINGS; b++) {
+         if (set->views[b] && send_generic_texture(set->views[b], set->images[b], set->samplers[b]))
+            break;
+         if (set->buffer_views[b] && send_buffer_texture(set->buffer_views[b]))
+            break;
+      }
+      borgvk_serial_send_draw(topo, dp->indexed ? (dp->index_size == 2 ? 1 : 2) : 0,
+                              (pipeline->restart ? 1u : 0u) | (load << 1), dp->count, dp->instances,
+                              dp->indexed ? 0 : dp->first, dp->first_instance, dp->vertex_offset, idx_off);
+   }
    size_t nbytes = 0;
    uint8_t *bytes = borgvk_transport_capture_end(&nbytes);
    device->drm_fd = saved_fd;
-   if (!bytes || nbytes == 0) {
+   if (!ok || !bytes || nbytes == 0) {
       free(bytes);
-      return true;
+      return ok;
    }
-   for (uint32_t k = 0; k < pipeline->attr_count; k++)
-      mesa_logi("borgvk: attr loc %u fmt %d off %u bind %u", pipeline->attrs[k].location, pipeline->attrs[k].format, pipeline->attrs[k].offset, pipeline->attrs[k].binding);
-   mesa_logi("borgvk: generic sim draw: %u verts -> %d unique, %zu byte stream, target %ux%u",
-             vert_count, nverts, nbytes, color_img->vk.extent.width,
-             color_img->vk.extent.height);
-   sim_run_stream(bytes, nbytes, color_img, 0);   /* firmware renders 128^2; resample to the target */
+   bool appended = stream_append(cmd, bytes, nbytes);
+   free(bytes);
+   if (!appended)
+      return false;
+   cmd->heap_top = heap.top;
+   cmd->batch_draws++;
+   cmd->batch_img = color_img;
+   cmd->batch_depth = cmd->depth_view;
+   cmd->batch_stencil = cmd->stencil_view;
    return true;
 }
 
@@ -1307,7 +1512,7 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
       }
    }
    /* Merged result per buffer: the original bytes with every changed byte of every slice. */
-   uint8_t *merged[BORGVK_MAX_BINDINGS] = { 0 };
+   uint8_t *merged[BORGVK_MAX_BINDINGS + 1] = { 0 };
    for (uint32_t i = 0; i < nbufs; i++) {
       merged[i] = malloc(((bufs[i].size + 3) & ~3u) + 1);
       memcpy(merged[i], bufs[i].decoded ? bufs[i].decoded : bufs[i].host, bufs[i].size);
@@ -1392,8 +1597,23 @@ borgvk_CmdBindDescriptorSets(VkCommandBuffer commandBuffer, VkPipelineBindPoint 
 }
 
 VKAPI_ATTR void VKAPI_CALL
-borgvk_CmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t instanceCount,
-               uint32_t firstVertex, uint32_t firstInstance)
+borgvk_CmdBindIndexBuffer(VkCommandBuffer commandBuffer, VkBuffer _buffer, VkDeviceSize offset,
+                          VkIndexType indexType)
+{
+   VK_FROM_HANDLE(vk_command_buffer, vk_cmd, commandBuffer);
+   struct borgvk_command_buffer *cmd = container_of(vk_cmd, struct borgvk_command_buffer, vk);
+   VK_FROM_HANDLE(borgvk_buffer, buf, _buffer);
+   cmd->index_ptr = NULL;
+   cmd->index_avail = 0;
+   cmd->index_size = indexType == VK_INDEX_TYPE_UINT16 ? 2 : indexType == VK_INDEX_TYPE_UINT32 ? 4 : 0;
+   if (buf && buf->mem && buf->mem->map && buf->vk.size > offset) {
+      cmd->index_ptr = (const uint8_t *)buf->mem->map + buf->offset + offset;
+      cmd->index_avail = buf->vk.size - offset;
+   }
+}
+
+static void
+sim_draw(VkCommandBuffer commandBuffer, const struct draw_params *dp)
 {
    VK_FROM_HANDLE(vk_command_buffer, vk_cmd, commandBuffer);
    struct borgvk_command_buffer *cmd = container_of(vk_cmd, struct borgvk_command_buffer, vk);
@@ -1402,8 +1622,31 @@ borgvk_CmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t ins
    /* Only the simulator renders; cube.c (UBO-driven) has its own path at submit. */
    if (!getenv("BORGVK_SIM") || (cmd->desc_set && set_is_cube(cmd->desc_set)))
       return;
-   if (borgvk_sim_generic_draw(device, cmd, vertexCount, firstVertex))
+   struct draw_params p = *dp;
+   p.index_size = cmd->index_size;
+   if (p.indexed && p.index_size == 0)
+      return;
+   if (borgvk_sim_generic_draw(device, cmd, &p))
       cmd->generic_drawn = true;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t instanceCount,
+               uint32_t firstVertex, uint32_t firstInstance)
+{
+   struct draw_params dp = { .count = vertexCount, .instances = instanceCount, .first = firstVertex,
+                             .first_instance = firstInstance };
+   sim_draw(commandBuffer, &dp);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount, uint32_t instanceCount,
+                      uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance)
+{
+   struct draw_params dp = { .indexed = true, .count = indexCount, .instances = instanceCount,
+                             .first = firstIndex, .vertex_offset = vertexOffset,
+                             .first_instance = firstInstance };
+   sim_draw(commandBuffer, &dp);
 }
 
 static VkResult borgvk_queue_submit_work(struct vk_queue *vk_queue, struct vk_queue_submit *submit);
@@ -1443,6 +1686,7 @@ borgvk_queue_submit_work(struct vk_queue *vk_queue, struct vk_queue_submit *subm
    for (uint32_t ci = 0; ci < submit->command_buffer_count; ci++) {
       struct vk_command_buffer *cb = submit->command_buffers[ci];
       vk_cmd_queue_execute(&cb->cmd_queue, vk_command_buffer_to_handle(cb), &replay_dev->cmd_dispatch);
+      borgvk_flush_draws(container_of(cb, struct borgvk_command_buffer, vk));   /* draws outside a pass end */
    }
 
    struct borgvk_device *device =
