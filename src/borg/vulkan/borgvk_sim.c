@@ -332,7 +332,7 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
 
    simple_mtx_lock(&sim.lock);
    for (int part = 0; part < np; part++) {
-      uint8_t sp[3] = { 0xBE, (uint8_t)part, (uint8_t)np };
+      uint8_t sp[5] = { 0xBE, (uint8_t)part, (uint8_t)np, (uint8_t)rows_per, (uint8_t)(rows_per >> 8) };
       if (!sim_start(&sim.s[part], getenv("BORGVK_SIM_DIRECT")) || !sim_set_size(&sim.s[part], w, h) ||
           !write_all(sim.s[part].to, sp, sizeof(sp))) {
          mesa_logw("borgvk: cannot start the simulator");
