@@ -642,7 +642,8 @@ unsafe fn compile_nir_inner(
                     // Fragment integer arithmetic reads its constants the same way (the vertex
                     // stage's integer constants are address math, handled by `walk`).
                     if draw_mode && (matches!(alu.op, nir_op_fadd | nir_op_fmul | nir_op_ffma
-                        | nir_op_flt | nir_op_fge | nir_op_feq | nir_op_fneu | nir_op_bcsel)
+                        | nir_op_flt | nir_op_fge | nir_op_feq | nir_op_fneu | nir_op_bcsel
+                        | nir_op_ieq | nir_op_ine | nir_op_ilt | nir_op_ige | nir_op_ult | nir_op_uge)
                         || (stage == 4 && matches!(alu.op, nir_op_iadd | nir_op_imul | nir_op_ishl
                             | nir_op_ishr | nir_op_ushr)))
                     {
@@ -822,6 +823,33 @@ unsafe fn compile_nir_inner(
                         // linearToSrgb idiom → FSRGB: bcsel(fge(knee,x), x·12.92,
                         // 1.055·pow(x,1/2.4)-0.055). Recognised by the linear branch
                         // fmul(x, 12.92); x is the value to sRGB-encode.
+                        // Integer comparisons give the 1.0 / 0.0 condition bcsel expects.
+                        nir_op_ieq | nir_op_ine | nir_op_ilt | nir_op_ige | nir_op_ult | nir_op_uge if draw_mode => {
+                            let sl = alu.srcs_as_slice();
+                            let a = resolve_vm(&vec_map, sl[0].src.as_def().index, sl[0].swizzle[0]);
+                            let b = resolve_vm(&vec_map, sl[1].src.as_def().index, sl[1].swizzle[0]);
+                            let mut ins = |mnem: &'static str, x: (u32, u8), y: (u32, u8), nv: &mut u32, prog: &mut Vec<BorgInstr>| {
+                                let d = *nv; *nv += 1;
+                                prog.push(BorgInstr { mnem, dst: d, srcs: vec![x.0, y.0], swz: vec![x.1, y.1] });
+                                (d, 0u8)
+                            };
+                            let lt = if matches!(alu.op, nir_op_ult | nir_op_uge) { "ISLTU" } else { "ISLT" };
+                            let bits = match alu.op {
+                                nir_op_ieq => ins("ISEQ", a, b, &mut next_vreg, &mut prog),
+                                nir_op_ilt | nir_op_ult => ins(lt, a, b, &mut next_vreg, &mut prog),
+                                nir_op_ine => {
+                                    let l = ins("ISLT", a, b, &mut next_vreg, &mut prog);
+                                    let g = ins("ISLT", b, a, &mut next_vreg, &mut prog);
+                                    ins("IADD", l, g, &mut next_vreg, &mut prog)
+                                }
+                                _ => {
+                                    let g = ins(lt, b, a, &mut next_vreg, &mut prog);
+                                    let e = ins("ISEQ", a, b, &mut next_vreg, &mut prog);
+                                    ins("IADD", g, e, &mut next_vreg, &mut prog)
+                                }
+                            };
+                            prog.push(BorgInstr { mnem: "I2F", dst: alu.def.index, srcs: vec![bits.0], swz: vec![bits.1] });
+                        }
                         nir_op_bcsel => {
                             let s = alu.srcs_as_slice();
                             let then_def = s[1].src.as_def().index;
