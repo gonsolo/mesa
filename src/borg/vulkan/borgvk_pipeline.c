@@ -57,6 +57,11 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
          }
       }
 
+      const bool points = pCreateInfos[i].pInputAssemblyState &&
+                          pCreateInfos[i].pInputAssemblyState->topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+      if (points)
+         vfetch |= 0xC0000000u;   /* fetching, and each point is a quad of two triangles */
+
       /* Compile each shader stage's SPIR-V → NIR → Borg ISA (borgc). The blobs land in the
        * device (the cube's path uploads those) and are kept in the pipeline for generic draws. */
       for (int st = 0; st < BORGVK_SHADER_STAGE_COUNT; st++)
@@ -113,6 +118,8 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
       }
       borgvk_blend_pack(ci.pColorBlendState, &device->blend_cfg, &device->blend_const);
       borgvk_state_pack(&ci, device->state_reg);
+      if (points)
+         device->state_reg[4] &= ~3u;   /* points are not culled */
       device->state_valid = true;
       pl->blend_cfg = device->blend_cfg;
       pl->blend_const = device->blend_const;

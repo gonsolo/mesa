@@ -1337,6 +1337,54 @@ unsafe fn compile_nir_inner(
                                 draw_pos_out[c] = Some(v);
                                 draw_out_roots.push(v.0);
                             }
+                            if vfetch & 0x4000_0000 != 0 {
+                                // Point expansion: this vertex is a corner of the point's quad; the
+                                // corner's clip-space offset (slot 15, x y) is scaled by w.
+                                let ctl_bits = (1u32 << 16) | (128 + 15);
+                                assert!(draw_vs_consts.len() < DRAW_VS_CONST_WORDS,
+                                    "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
+                                let u = DRAW_VS_CONST_U0 + draw_vs_consts.len() as u8;
+                                draw_vs_consts.push((u, ctl_bits));
+                                let ctl = next_vreg; next_vreg += 1;
+                                ubo.insert(ctl, Ubo::Uniform(u));
+                                let idx = next_vreg; next_vreg += 1;
+                                ubo.insert(idx, Ubo::Fixed(30));
+                                let twelve = const_int_operand(12, &mut const_int_reg, &mut const_reg_count,
+                                    &mut const_uniforms, &mut draw_vs_consts, &mut next_vreg, &mut ubo);
+                                let ty = next_vreg; next_vreg += 1;
+                                prog.push(BorgInstr { mnem: "ISRL", dst: ty, srcs: vec![idx, twelve], swz: vec![0, 0] });
+                                let hi = next_vreg; next_vreg += 1;
+                                prog.push(BorgInstr { mnem: "ISHL", dst: hi, srcs: vec![ty, twelve], swz: vec![0, 0] });
+                                let tx = next_vreg; next_vreg += 1;
+                                prog.push(BorgInstr { mnem: "ISUB", dst: tx, srcs: vec![idx, hi], swz: vec![0, 0] });
+                                let tex_v = next_vreg; next_vreg += 1;
+                                prog.push(BorgInstr { mnem: "TEX", dst: tex_v, srcs: vec![tx, ty, ctl], swz: vec![0, 0, 0] });
+                                tex_dsts.insert(tex_v);
+                                let mut d = [0u32; 2];
+                                for k in 0..2 {
+                                    let m = next_vreg; next_vreg += 1;
+                                    prog.push(BorgInstr { mnem: "IOR", dst: m, srcs: vec![tex_v, tex_v], swz: vec![k as u8, k as u8] });
+                                    d[k] = m;
+                                }
+                                let mut reg = |v: (u32, u8), prog: &mut Vec<BorgInstr>, next_vreg: &mut u32| -> (u32, u8) {
+                                    if matches!(ubo.get(&v.0), Some(Ubo::Uniform(_))) {
+                                        let o = *next_vreg; *next_vreg += 1;
+                                        prog.push(BorgInstr { mnem: "FMOV", dst: o, srcs: vec![v.0], swz: vec![0] });
+                                        (o, 0)
+                                    } else { v }
+                                };
+                                if let (Some(px), Some(py), Some(pw)) = (draw_pos_out[0], draw_pos_out[1], draw_pos_out[3]) {
+                                    let w = reg(pw, &mut prog, &mut next_vreg);
+                                    for (k, pc) in [px, py].into_iter().enumerate() {
+                                        let base = reg(pc, &mut prog, &mut next_vreg);
+                                        let o = next_vreg; next_vreg += 1;
+                                        prog.push(BorgInstr { mnem: "FMADD", dst: o, srcs: vec![d[k], w.0, base.0],
+                                                              swz: vec![0, w.1, base.1] });
+                                        draw_pos_out[k] = Some((o, 0));
+                                        draw_out_roots.push(o);
+                                    }
+                                }
+                            }
                         } else if stage == 4 {
                             let ncomp2 = if frag_alpha || vfetch & 1 != 0 { 4 } else { 3 };
                             for (c, &v) in comps.iter().enumerate().take(ncomp2) {
