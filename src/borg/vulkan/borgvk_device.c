@@ -686,9 +686,9 @@ borgvk_get_properties(struct vk_properties *p)
       .maxSamplerAnisotropy = 1.0f,
       .maxDrawIndexedIndexValue = UINT32_MAX,
       .maxDrawIndirectCount = UINT32_MAX,
-      .pointSizeRange = { 1.0f, 1.0f },
+      .pointSizeRange = { 1.0f, 64.0f },
       .lineWidthRange = { 1.0f, 1.0f },
-      .pointSizeGranularity = 0.0f,
+      .pointSizeGranularity = 0.125f,
       .lineWidthGranularity = 0.0f,
       .optimalBufferCopyOffsetAlignment = 1,
       .optimalBufferCopyRowPitchAlignment = 1,
@@ -746,6 +746,7 @@ create_physical_device(struct borgvk_instance *instance, int drm_fd)
       .robustBufferAccess = true,
       /* Vulkan 1.3 spec §43 mandates at least one compressed texture family. */
       .textureCompressionBC = true,
+      .largePoints = true,
    };
    struct vk_properties properties;
    borgvk_get_properties(&properties);

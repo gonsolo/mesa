@@ -1259,7 +1259,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       uint32_t b = at->binding;
       if (at->location >= 16 || b >= BORGVK_MAX_VERTEX_BINDINGS ||
           !vertex_format_to_fetch(at->format, &code, &swz, &rbytes) ||
-          !cmd->vb[b] || pipeline->binding_stride[b] == 0) {
+          !cmd->vb[b]) {
          ok = generic_reject(8);
          break;
       }
