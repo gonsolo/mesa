@@ -99,6 +99,15 @@ borgvk_FreeMemory(VkDevice _device, VkDeviceMemory _mem,
    vk_device_memory_destroy(&device->vk, pAllocator, &mem->vk);
 }
 
+/* No memory type is lazily allocated, so everything allocated is committed. */
+VKAPI_ATTR void VKAPI_CALL
+borgvk_GetDeviceMemoryCommitment(VkDevice _device, VkDeviceMemory _memory,
+                                 VkDeviceSize *pCommittedMemoryInBytes)
+{
+   VK_FROM_HANDLE(borgvk_device_memory, mem, _memory);
+   *pCommittedMemoryInBytes = mem ? mem->vk.size : 0;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 borgvk_MapMemory2(VkDevice _device, const VkMemoryMapInfo *pMemoryMapInfo,
                   void **ppData)

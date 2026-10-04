@@ -920,6 +920,29 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO);
 
+   /* The runtime's feature check ignores Vulkan 1.1 feature structs on a device that reports
+    * 1.0, so enabling a 1.1 feature we do not have would succeed. Refuse them here. */
+   vk_foreach_struct_const(f, pCreateInfo->pNext) {
+      switch (f->sType) {
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES:
+         if (((const VkPhysicalDeviceProtectedMemoryFeatures *)f)->protectedMemory)
+            return vk_error(physical_device, VK_ERROR_FEATURE_NOT_PRESENT);
+         break;
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES:
+         if (((const VkPhysicalDeviceShaderDrawParametersFeatures *)f)->shaderDrawParameters)
+            return vk_error(physical_device, VK_ERROR_FEATURE_NOT_PRESENT);
+         break;
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES: {
+         const VkPhysicalDeviceVulkan11Features *v11 = (const void *)f;
+         if (v11->protectedMemory || v11->shaderDrawParameters)
+            return vk_error(physical_device, VK_ERROR_FEATURE_NOT_PRESENT);
+         break;
+      }
+      default:
+         break;
+      }
+   }
+
    device = vk_zalloc2(&physical_device->vk.instance->alloc, pAllocator,
                        sizeof(*device), 8,
                        VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
