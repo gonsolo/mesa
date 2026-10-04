@@ -1297,9 +1297,43 @@ unsafe fn compile_nir_inner(
                         let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
                         let src = intr.get_src(0).as_def().index;
                         let ncomp = intr.get_src(0).num_components() as usize;
+                        // A scalar constant stored directly has no register yet: give it a window word.
+                        for c in 0..ncomp {
+                            let d = resolve_vm(&vec_map, src, c as u8).0;
+                            let bits = match consts.get(&d) {
+                                Some(&b) if !vec_map.contains_key(&d) => b,
+                                _ => continue,
+                            };
+                            let u = if vs_const_window {
+                                assert!(draw_vs_consts.len() < DRAW_VS_CONST_WORDS,
+                                    "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
+                                let u = DRAW_VS_CONST_U0 as u32 + draw_vs_consts.len() as u32;
+                                draw_vs_consts.push((u as u8, bits));
+                                u
+                            } else if let Some(&u) = frag_window_by_bits.get(&bits) {
+                                u
+                            } else {
+                                assert!(draw_uniform_count < 12, "borgc: fragment shader needs more than 12 window constants");
+                                let u = 20 + draw_uniform_count;
+                                draw_uniform_count += 1;
+                                draw_uniform_consts.push((u, bits));
+                                frag_window_by_bits.insert(bits, u);
+                                u
+                            };
+                            let v = next_vreg;
+                            next_vreg += 1;
+                            ubo.insert(v, Ubo::Uniform(u as u8));
+                            vec_map.insert(d, vec![(v, 0u8)]);
+                        }
                         let comps: Vec<(u32, u8)> = (0..ncomp).map(|c| resolve_vm(&vec_map, src, c as u8)).collect();
                         if stage == 0 && loc == VARYING_SLOT_POS {
-                            for (c, &v) in comps.iter().enumerate().take(4) {
+                            for (c, &v0) in comps.iter().enumerate().take(4) {
+                                let mut v = v0;
+                                if matches!(ubo.get(&v.0), Some(Ubo::Uniform(_))) {
+                                    let out = next_vreg; next_vreg += 1;
+                                    prog.push(BorgInstr { mnem: "FMOV", dst: out, srcs: vec![v.0], swz: vec![0] });
+                                    v = (out, 0);
+                                }
                                 draw_pos_out[c] = Some(v);
                                 draw_out_roots.push(v.0);
                             }

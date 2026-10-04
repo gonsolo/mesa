@@ -66,7 +66,7 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
       struct borgvk_shader_blob *b = &device->shader_blob[slot];
       uint32_t len = 0;
       borgc_compile_nir(nir, b->data, BORGVK_SHADER_BLOB_MAX, &len,
-                        slot == BORGVK_STAGE_VERT ? vfetch : 0);
+                        vfetch);
       if (len > 0 && len <= BORGVK_SHADER_BLOB_MAX) {
          b->len = len;
          mesa_logi("borgvk: captured %s shader blob (%u bytes) for upload",
