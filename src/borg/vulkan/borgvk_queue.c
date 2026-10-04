@@ -1064,6 +1064,9 @@ borgvk_flush_draws(struct borgvk_command_buffer *cmd)
    cmd->heap_top = 0;
    cmd->batch_draws = 0;
    cmd->batch_img = NULL;
+   free(cmd->state_sent);
+   cmd->state_sent = NULL;
+   cmd->state_sent_len = 0;
    if (serve) {
       borgvk_sim_run_pass(bytes, n, img, cmd->batch_depth, cmd->batch_stencil);
       free(bytes);
@@ -1210,6 +1213,11 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    device->state_valid = pipeline->state_valid;
    upload_shaders(device);
    send_blend_state(device);
+   size_t state_len = 0;
+   uint8_t *state = borgvk_transport_capture_end(&state_len);
+   const bool state_same = state && cmd->state_sent && state_len == cmd->state_sent_len &&
+                           memcmp(state, cmd->state_sent, state_len) == 0;
+   borgvk_transport_capture_begin();
    if (first_of_batch)
       cmd->batch_serve = borgvk_sim_serves(color_img);
    const bool serve = cmd->batch_serve;
@@ -1236,9 +1244,6 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
 
    struct draw_heap heap = { cmd->heap_top };
    bool ok = true;
-   uint32_t bind_off[BORGVK_MAX_VERTEX_BINDINGS];
-   int64_t bind_row0[BORGVK_MAX_VERTEX_BINDINGS];
-   bool bind_done[BORGVK_MAX_VERTEX_BINDINGS] = { false };
    for (uint32_t a = 0; ok && a < pipeline->attr_count; a++) {
       const struct borgvk_vertex_attr *at = &pipeline->attrs[a];
       uint32_t code, swz, rbytes;
@@ -1252,37 +1257,35 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       const uint32_t stride = pipeline->binding_stride[b];
       const bool inst = pipeline->binding_instance[b];
       const int64_t row0 = inst ? imin : vmin, row1 = inst ? imax : vmax;
-      if (row1 + 1 > 4096) {
+      if (row1 + 1 > 4096 * 4096) {
          ok = generic_reject(9);
          break;
       }
-      if (!bind_done[b]) {
-         /* Upload the rows this binding is read at, [row0, row1], within the bound range. */
-         const uint64_t avail = cmd->vb_avail[b];
-         const uint64_t from = (uint64_t)row0 * stride;
-         const uint64_t to = MIN2(avail, ((uint64_t)row1 + 1) * stride);
-         uint32_t off = 0;
-         if (to > from) {
-            off = heap_upload(&heap, cmd->vb[b] + from, (uint32_t)(to - from));
-         } else {
-            uint8_t z[16] = { 0 };
-            off = heap_upload(&heap, z, 16);
-         }
-         if (off == UINT32_MAX) {
-            ok = generic_reject(10);
-            break;
-         }
-         bind_off[b] = off;
-         bind_row0[b] = row0;
-         bind_done[b] = true;
+      /* The attribute, gathered into a tight array of `rbytes` elements: element r of the buffer
+       * is element r of the array, so the base is shifted back by row0 elements (a 32-bit
+       * two's-complement heap offset). The unit reads it as a 4096-wide linear image. */
+      const uint32_t nrows = (uint32_t)(row1 - row0 + 1);
+      const uint32_t asz = vk_format_get_blocksize(at->format);
+      uint8_t *tight = calloc(nrows, rbytes);
+      if (!tight) {
+         ok = generic_reject(10);
+         break;
       }
-      /* Rows available at this attribute: the fetch beyond them reads (0, 0, 0, 1). */
       const uint64_t avail = cmd->vb_avail[b];
-      uint64_t rows = avail >= (uint64_t)at->offset + rbytes ? (avail - at->offset - rbytes) / stride + 1 : 0;
-      uint32_t count = (uint32_t)MAX2(1, MIN2((uint64_t)row1 + 1, rows));
-      /* base - row0 * stride + attribute offset, as a 32-bit two's-complement heap offset. */
-      uint32_t base = bind_off[b] - (uint32_t)((uint64_t)row0 * stride) + at->offset;
-      borgvk_serial_send_vattr(at->location, code, base, count, stride, swz);
+      for (uint32_t r = 0; r < nrows; r++) {
+         const uint64_t src = (uint64_t)(row0 + r) * stride + at->offset;
+         if (src + asz <= avail)
+            memcpy(tight + (size_t)r * rbytes, cmd->vb[b] + src, MIN2(asz, rbytes));
+      }
+      const uint32_t off = heap_upload(&heap, tight, nrows * rbytes);
+      free(tight);
+      if (off == UINT32_MAX) {
+         ok = generic_reject(10);
+         break;
+      }
+      const uint32_t base = off - (uint32_t)row0 * rbytes;
+      const uint32_t count = (uint32_t)row1 + 1;
+      borgvk_serial_send_vattr(at->location, code, base, count, rbytes, swz);
    }
    uint32_t idx_off = 0;
    if (ok && dp->indexed) {
@@ -1306,10 +1309,19 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    device->drm_fd = saved_fd;
    if (!ok || !bytes || nbytes == 0) {
       free(bytes);
+      free(state);
       return ok;
    }
-   bool appended = stream_append(cmd, bytes, nbytes);
+   bool appended = (state_same || !state || stream_append(cmd, state, state_len)) &&
+                   stream_append(cmd, bytes, nbytes);
    free(bytes);
+   if (!state_same && state && appended) {
+      free(cmd->state_sent);
+      cmd->state_sent = state;
+      cmd->state_sent_len = state_len;
+   } else {
+      free(state);
+   }
    if (!appended)
       return false;
    cmd->heap_top = heap.top;

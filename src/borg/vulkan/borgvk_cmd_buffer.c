@@ -30,6 +30,7 @@ borgvk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
 
    vk_command_buffer_finish(&cmd->vk);
    free(cmd->stream);
+   free(cmd->state_sent);
    vk_free(&cmd->vk.pool->alloc, cmd);
 }
 
@@ -65,6 +66,9 @@ borgvk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
 
    free(cmd->stream);
    cmd->stream = NULL;
+   free(cmd->state_sent);
+   cmd->state_sent = NULL;
+   cmd->state_sent_len = 0;
    cmd->stream_len = cmd->stream_cap = 0;
    cmd->heap_top = cmd->batch_draws = 0;
    cmd->batch_img = NULL;

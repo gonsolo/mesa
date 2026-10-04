@@ -164,6 +164,9 @@ struct borgvk_command_buffer {
    uint8_t *stream;
    size_t stream_len, stream_cap;
    uint32_t heap_top, batch_draws;
+   /* Shader and blend packets last sent in this batch; a draw repeats them only when they change. */
+   uint8_t *state_sent;
+   size_t state_sent_len;
    struct borgvk_image *batch_img;
    /* The batch runs on the persistent simulator, with these depth and stencil attachments. */
    bool batch_serve;

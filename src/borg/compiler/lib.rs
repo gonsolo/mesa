@@ -1118,9 +1118,9 @@ unsafe fn compile_nir_inner(
                     } else if draw_mode && stage == 0 && vfetch & 0x8000_0000 != 0
                               && intr.intrinsic == nir_intrinsic_load_input {
                         // Vertex input as a typed fetch (docs/B1_geometry_front_end.md, "Vertex
-                        // input"): attribute L is texture slot 128 + L, a width-1 linear image
-                        // whose row pitch is the vertex stride and whose format converts the
-                        // attribute. `TEX` fetches row VertexIndex (or InstanceIndex for an
+                        // input"): attribute L is texture slot 128 + L, a 4096-wide linear image
+                        // of tight elements whose format converts the
+                        // attribute. `TEX` fetches element VertexIndex (or InstanceIndex for an
                         // instance-rate binding); missing components read (0, 0, 0, 1).
                         const VERT_ATTRIB_GENERIC0: u32 = 15;
                         let loc = (intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F)
@@ -1144,11 +1144,17 @@ unsafe fn compile_nir_inner(
                         let idx_reg = if vfetch >> loc & 1 != 0 { 31 } else { 30 };
                         let idx = next_vreg; next_vreg += 1;
                         ubo.insert(idx, Ubo::Fixed(idx_reg));
-                        // Texel x = 0: any register minus itself.
-                        let zero = next_vreg; next_vreg += 1;
-                        prog.push(BorgInstr { mnem: "ISUB", dst: zero, srcs: vec![idx, idx], swz: vec![0, 0] });
+                        // The element index i is texel (i & 4095, i >> 12) of a 4096-wide image.
+                        let twelve = const_int_operand(12, &mut const_int_reg, &mut const_reg_count,
+                            &mut const_uniforms, &mut draw_vs_consts, &mut next_vreg, &mut ubo);
+                        let ty = next_vreg; next_vreg += 1;
+                        prog.push(BorgInstr { mnem: "ISRL", dst: ty, srcs: vec![idx, twelve], swz: vec![0, 0] });
+                        let hi = next_vreg; next_vreg += 1;
+                        prog.push(BorgInstr { mnem: "ISHL", dst: hi, srcs: vec![ty, twelve], swz: vec![0, 0] });
+                        let tx = next_vreg; next_vreg += 1;
+                        prog.push(BorgInstr { mnem: "ISUB", dst: tx, srcs: vec![idx, hi], swz: vec![0, 0] });
                         let tex_v = next_vreg; next_vreg += 1;
-                        prog.push(BorgInstr { mnem: "TEX", dst: tex_v, srcs: vec![zero, idx, ctl], swz: vec![0, 0, 0] });
+                        prog.push(BorgInstr { mnem: "TEX", dst: tex_v, srcs: vec![tx, ty, ctl], swz: vec![0, 0, 0] });
                         tex_dsts.insert(tex_v);
                         // The fetch fills a fixed four-register block (see the vertex `forced`
                         // below); every component a shader uses is copied out of it at once, so
