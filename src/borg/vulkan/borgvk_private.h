@@ -191,6 +191,7 @@ struct borgvk_image;
 bool borgvk_sim_serves(const struct borgvk_image *color, bool has_depth_stencil);
 uint8_t borgvk_sim_flush_format(VkFormat f);
 bool borgvk_sim_bytes_packed(VkFormat f);
+bool borgvk_sim_half2(VkFormat f);
 bool borgvk_sim_depth_is_d32(VkFormat f);
 VkResult borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
                              struct borgvk_image *const *extra, uint32_t nextra,

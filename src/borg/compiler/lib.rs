@@ -463,6 +463,7 @@ unsafe fn compile_nir_inner(
     let mut draw_vs_consts: Vec<(u8, u32)> = Vec::new(); // (u-index, bits)
     let vs_const_window = draw_mode && stage == 0;
     let mut vs_vreg_by_bits: HashMap<u32, u32> = HashMap::new();
+    let mut vs_zero: Option<u32> = None;
     // A vertex-shader constant: a window word, shared by value; once the window is full a small
     // integer is derived from others (a sum) or zero (a difference) with an ALU op.
     macro_rules! vs_const_vreg {
@@ -471,6 +472,7 @@ unsafe fn compile_nir_inner(
             if let Some(&v) = vs_vreg_by_bits.get(&bits) {
                 v
             } else {
+                let mut return_zero = false;
                 let v = next_vreg;
                 next_vreg += 1;
                 if draw_vs_consts.len() < DRAW_VS_CONST_WORDS {
@@ -478,22 +480,41 @@ unsafe fn compile_nir_inner(
                     draw_vs_consts.push((u as u8, bits));
                     ubo.insert(v, Ubo::Uniform(u as u8));
                 } else {
+                    // An instruction reads one window word at most: go through a register.
+                    if vs_zero.is_none() {
+                        let f = next_vreg;
+                        next_vreg += 1;
+                        ubo.insert(f, Ubo::Fixed(30));
+                        let z = next_vreg;
+                        next_vreg += 1;
+                        prog.push(BorgInstr { mnem: "ISUB", dst: z, srcs: vec![f, f], swz: vec![0, 0] });
+                        vs_zero = Some(z);
+                    }
+                    let z = vs_zero.unwrap();
                     let small: Vec<(u32, u32)> =
                         vs_vreg_by_bits.iter().filter(|(&b, _)| b >= 1 && b <= 64).map(|(&b, &r)| (b, r)).collect();
-                    let pair = if bits == 0 {
-                        small.first().map(|&(_, r)| ("ISUB", r, r))
+                    if bits == 0 {
+                        vs_vreg_by_bits.insert(0, z);
+                        return_zero = true;
                     } else {
-                        small.iter().find_map(|&(a, ra)| {
-                            small.iter().find(|&&(b, _)| a + b == bits).map(|&(_, rb)| ("IADD", ra, rb))
-                        })
-                    };
-                    let (mnem, a, b) = pair.unwrap_or_else(|| {
-                        panic!("borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS)
-                    });
-                    prog.push(BorgInstr { mnem, dst: v, srcs: vec![a, b], swz: vec![0, 0] });
+                        let pair = small.iter().find_map(|&(a, ra)| {
+                            small.iter().find(|&&(b, _)| a + b == bits).map(|&(_, rb)| (ra, rb))
+                        });
+                        let (ra, rb) = pair.unwrap_or_else(|| {
+                            panic!("borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS)
+                        });
+                        let t = next_vreg;
+                        next_vreg += 1;
+                        prog.push(BorgInstr { mnem: "IADD", dst: t, srcs: vec![z, ra], swz: vec![0, 0] });
+                        prog.push(BorgInstr { mnem: "IADD", dst: v, srcs: vec![t, rb], swz: vec![0, 0] });
+                    }
                 }
-                vs_vreg_by_bits.insert(bits, v);
-                v
+                if return_zero {
+                    vs_zero.unwrap()
+                } else {
+                    vs_vreg_by_bits.insert(bits, v);
+                    v
+                }
             }
         }};
     }
@@ -1913,6 +1934,99 @@ unsafe fn compile_nir_inner(
         let w = op("IAND", vec![i, cff], vec![0, 0], &mut prog, &mut next_vreg);
         draw_frag_out = [Some((w, 0)), None, None, None];
         out_roots.push(w);
+    }
+    if draw_mode && stage == 4 && vfetch & 8 != 0 && draw_frag_out[0].is_some() {
+        // R16G16_SFLOAT (RAW32): r26 = half(r) | half(g) << 16 with integer ops (round to nearest even,
+        // NaN to 0x7E00); a branch-free select between the denormal, normal and overflow results.
+        let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
+            let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
+                assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
+                let u = 20 + draw_uniform_count;
+                draw_uniform_count += 1;
+                draw_uniform_consts.push((u, bits));
+                u
+            });
+            let v = *next_vreg; *next_vreg += 1;
+            ubo.insert(v, Ubo::Uniform(u as u8));
+            v
+        };
+        let ins = |mnem: &'static str, s: &[(u32, u8)], prog: &mut Vec<BorgInstr>, nv: &mut u32| -> u32 {
+            let d = *nv; *nv += 1;
+            prog.push(BorgInstr { mnem, dst: d, srcs: s.iter().map(|x| x.0).collect(), swz: s.iter().map(|x| x.1).collect() });
+            d
+        };
+        macro_rules! i {
+            ($m:expr, $a:expr, $b:expr) => { ins($m, &[($a, 0u8), ($b, 0u8)], &mut prog, &mut next_vreg) };
+            ($m:expr, $a:expr) => { ins($m, &[($a, 0u8)], &mut prog, &mut next_vreg) };
+        }
+        macro_rules! k {
+            ($b:expr) => { win($b, &mut ubo, &mut next_vreg) };
+        }
+        let (x0, x0c) = draw_frag_out[0].unwrap();
+        let first = if matches!(ubo.get(&x0), Some(Ubo::Uniform(_))) {
+            (ins("FMOV", &[(x0, x0c)], &mut prog, &mut next_vreg), 0u8)
+        } else { (x0, x0c) };
+        let zero = ins("ISUB", &[first, first], &mut prog, &mut next_vreg);
+        let r1 = i!("ISEQ", zero, zero);
+        let r2 = i!("IADD", r1, r1);
+        let r4 = i!("IADD", r2, r2);
+        let r8 = i!("IADD", r4, r4);
+        let r12 = i!("IADD", r8, r4);
+        let r13 = i!("IADD", r12, r1);
+        let k1000 = i!("ISHL", r1, r12);
+        let kfff = i!("ISUB", k1000, r1);
+        let mut p = 0u32;
+        for (n, src) in [Some((x0, x0c)), draw_frag_out[1]].into_iter().enumerate() {
+            let Some((x, xc)) = src else { continue };
+            let xr = ins("IADD", &[(x, xc), (zero, 0)], &mut prog, &mut next_vreg);
+            // The sign first, so the input register is free early; 0x8000 and 0x200 are built here.
+            let r14 = i!("IADD", r13, r1);
+            let r15 = i!("IADD", r14, r1);
+            let r16 = i!("IADD", r15, r1);
+            let k8000 = i!("ISHL", r1, r15);
+            let s16 = i!("ISRL", xr, r16);
+            let sg = i!("IAND", s16, k8000);
+            let r6 = i!("ISRL", r13, r1);
+            let k200 = i!("ISRL", k8000, r6);
+            let c = k!(0x7FFF_FFFF);
+            let a = i!("IAND", xr, c);
+            let c = k!(0x3800_0000);
+            let t = i!("ISUB", a, c);
+            let sh = i!("ISRL", a, r13);
+            let lsb = i!("IAND", sh, r1);
+            let u = i!("IADD", t, kfff);
+            let u2 = i!("IADD", u, lsb);
+            let r = i!("ISRL", u2, r13);
+            let c = k!(16777216.0f32.to_bits());
+            let f = i!("FMUL", a, c);
+            let d = i!("F2I", f);
+            let c = k!(0x3880_0000);
+            let sd = i!("ISLTU", a, c);
+            let dd = i!("ISUB", d, r);
+            let md = i!("IMUL", sd, dd);
+            let v1 = i!("IADD", r, md);
+            let c = k!(0x477F_F000);
+            let ib = i!("ISLTU", a, c);
+            let c = k!(0x7C00);
+            let dv = i!("ISUB", v1, c);
+            let mb = i!("IMUL", ib, dv);
+            let c = k!(0x7C00);
+            let v2 = i!("IADD", mb, c);
+            let c = k!(0x7F80_0001);
+            let inn = i!("ISLTU", a, c);
+            let nan = i!("IXOR", inn, r1);
+            let nb = i!("IMUL", nan, k200);
+            let v3 = i!("IOR", v2, nb);
+            let h = i!("IOR", v3, sg);
+            if n == 0 {
+                p = h;
+            } else {
+                let hi = i!("ISHL", h, r16);
+                p = i!("IOR", p, hi);
+            }
+        }
+        draw_frag_out = [Some((p, 0)), None, None, None];
+        out_roots.push(p);
     }
     if draw_mode && stage == 4 && vfetch & 1 != 0 && draw_frag_out[3].is_some() {
         // Byte-packed integer colour (R8G8B8A8_UINT/SINT, RAW32): r26 = c0 | c1<<8 | c2<<16 | c3<<24.

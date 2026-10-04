@@ -82,7 +82,8 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
       const uint32_t frag_opt =
          mrt ? 0x100u | ((color_count - 1) << 9) | mrt_opt :
          ri && ri->colorAttachmentCount && borgvk_sim_bytes_packed(ri->pColorAttachmentFormats[0]) ? 1 :
-         ri && ri->colorAttachmentCount && ri->pColorAttachmentFormats[0] == VK_FORMAT_R8_UNORM ? 2 : 0;
+         ri && ri->colorAttachmentCount && ri->pColorAttachmentFormats[0] == VK_FORMAT_R8_UNORM ? 2 :
+         ri && ri->colorAttachmentCount && borgvk_sim_half2(ri->pColorAttachmentFormats[0]) ? 8 : 0;
       for (uint32_t s = 0; s < pCreateInfos[i].stageCount; s++)
          borgvk_compile_stage(device, pCreateInfos[i].pStages[s].stage == VK_SHADER_STAGE_FRAGMENT_BIT ? frag_opt : vfetch,
                               &pCreateInfos[i].pStages[s]);

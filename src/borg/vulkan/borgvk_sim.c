@@ -181,12 +181,18 @@ borgvk_sim_bytes_packed(VkFormat f)
    return f == VK_FORMAT_R8G8B8A8_UINT || f == VK_FORMAT_R8G8B8A8_SINT;
 }
 
+bool
+borgvk_sim_half2(VkFormat f)
+{
+   return f == VK_FORMAT_R16G16_SFLOAT;
+}
+
 uint8_t
 borgvk_sim_flush_format(VkFormat f)
 {
    return f == VK_FORMAT_R8_UNORM ? 5 :
           f == VK_FORMAT_R8G8B8A8_UNORM ? 1 : f == VK_FORMAT_B8G8R8A8_UNORM ? 2 :
-          f == VK_FORMAT_R32_UINT || borgvk_sim_bytes_packed(f) ? 3 : 0;
+          f == VK_FORMAT_R32_UINT || borgvk_sim_bytes_packed(f) || borgvk_sim_half2(f) ? 3 : 0;
 }
 
 /* Whether the persistent simulator can render to this colour attachment: the direct
@@ -200,7 +206,7 @@ borgvk_sim_serves(const struct borgvk_image *color, bool has_depth_stencil)
    uint32_t w = color->vk.extent.width, h = color->vk.extent.height;
    /* The depth plane (BORG_ZB_SPI) holds 1024 x 1024 D32 pixels; colour alone goes up to 4096 x 4096. */
    const uint32_t max_dim = has_depth_stencil ? 1024 : 4096;
-   return w >= 4 && (w & (w - 1)) == 0 && w <= max_dim && h >= 4 && (h & 3) == 0 && h <= max_dim;
+   return w >= 4 && (w & (w - 1)) == 0 && w <= max_dim && h >= 1 && (h < 4 || (h & 3) == 0) && h <= max_dim;
 }
 
 static struct borgvk_image *
@@ -296,6 +302,7 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
                     const struct vk_image_view *stencil_view)
 {
    const uint32_t w = color->vk.extent.width, h = color->vk.extent.height;
+   const uint32_t hp = MAX2(h, 4u);   /* the GPU renders whole tiles: a short target is padded */
    struct borgvk_image *zimg = view_image(depth_view), *simg = view_image(stencil_view);
    if (!image_backed(color, w, h))
       return VK_SUCCESS;
@@ -333,14 +340,14 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
    const char *pe = getenv("BORGVK_SERVE_PARTS");
    int np = pe ? atoi(pe) : (int)MIN2(12, MAX2(1, sysconf(_SC_NPROCESSORS_ONLN)));
    np = n >= SIM_PARALLEL_BYTES ? CLAMP(np, 1, SIM_MAX_PARTS) : 1;
-   const uint32_t ftiles = h >> 2;
+   const uint32_t ftiles = hp >> 2;
    const uint32_t rows_per = (ftiles + np - 1) / np;
    np = (int)((ftiles + rows_per - 1) / rows_per);
 
    simple_mtx_lock(&sim.lock);
    for (int part = 0; part < np; part++) {
       uint8_t sp[5] = { 0xBE, (uint8_t)part, (uint8_t)np, (uint8_t)rows_per, (uint8_t)(rows_per >> 8) };
-      if (!sim_start(&sim.s[part], getenv("BORGVK_SIM_DIRECT")) || !sim_set_size(&sim.s[part], w, h) ||
+      if (!sim_start(&sim.s[part], getenv("BORGVK_SIM_DIRECT")) || !sim_set_size(&sim.s[part], w, hp) ||
           !write_all(sim.s[part].to, sp, sizeof(sp))) {
          mesa_logw("borgvk: cannot start the simulator");
          sim_stop();
