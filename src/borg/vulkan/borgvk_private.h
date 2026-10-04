@@ -183,6 +183,7 @@ void borgvk_flush_draws(struct borgvk_command_buffer *cmd);
 struct borgvk_image;
 bool borgvk_sim_serves(const struct borgvk_image *color);
 uint8_t borgvk_sim_flush_format(VkFormat f);
+bool borgvk_sim_bytes_packed(VkFormat f);
 bool borgvk_sim_depth_is_d32(VkFormat f);
 VkResult borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
                              const struct vk_image_view *depth_view,

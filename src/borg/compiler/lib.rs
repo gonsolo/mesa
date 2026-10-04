@@ -1290,7 +1290,7 @@ unsafe fn compile_nir_inner(
                                 draw_out_roots.push(v.0);
                             }
                         } else if stage == 4 {
-                            let ncomp2 = if frag_alpha { 4 } else { 3 };
+                            let ncomp2 = if frag_alpha || vfetch & 1 != 0 { 4 } else { 3 };
                             for (c, &v) in comps.iter().enumerate().take(ncomp2) {
                                 draw_frag_out[c] = Some(v);
                                 draw_out_roots.push(v.0);
@@ -1575,6 +1575,28 @@ unsafe fn compile_nir_inner(
                 }
             }
         }
+    }
+    if draw_mode && stage == 4 && vfetch & 1 != 0 && draw_frag_out[3].is_some() {
+        // Byte-packed integer colour (R8G8B8A8_UINT/SINT, RAW32): r26 = c0 | c1<<8 | c2<<16 | c3<<24.
+        let (mut p, mut pc) = draw_frag_out[3].unwrap();
+        for c in (0..3).rev() {
+            for _ in 0..8 {
+                let d = next_vreg;
+                next_vreg += 1;
+                prog.push(BorgInstr { mnem: "IADD", dst: d, srcs: vec![p, p], swz: vec![pc, pc] });
+                p = d;
+                pc = 0;
+            }
+            if let Some((v, comp)) = draw_frag_out[c] {
+                let d = next_vreg;
+                next_vreg += 1;
+                prog.push(BorgInstr { mnem: "IOR", dst: d, srcs: vec![p, v], swz: vec![pc, comp] });
+                p = d;
+                pc = 0;
+            }
+        }
+        draw_frag_out = [Some((p, pc)), None, None, None];
+        out_roots.push(p);
     }
     if draw_mode {
         // A fragment output that no instruction produces -- a constant colour, say, which lives in

@@ -9,6 +9,7 @@
  * time by shipping the MVP to the FPGA.
  */
 #include "borgvk_private.h"
+#include "vk_render_pass.h"
 
 #include "vk_alloc.h"
 #include "vk_log.h"
@@ -60,8 +61,12 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
        * device (the cube's path uploads those) and are kept in the pipeline for generic draws. */
       for (int st = 0; st < BORGVK_SHADER_STAGE_COUNT; st++)
          device->shader_blob[st].len = 0;
+      const VkPipelineRenderingCreateInfo *ri = vk_get_pipeline_rendering_create_info(&pCreateInfos[i]);
+      const uint32_t frag_opt =
+         ri && ri->colorAttachmentCount && borgvk_sim_bytes_packed(ri->pColorAttachmentFormats[0]) ? 1 : 0;
       for (uint32_t s = 0; s < pCreateInfos[i].stageCount; s++)
-         borgvk_compile_stage(device, vfetch, &pCreateInfos[i].pStages[s]);
+         borgvk_compile_stage(device, pCreateInfos[i].pStages[s].stage == VK_SHADER_STAGE_FRAGMENT_BIT ? frag_opt : vfetch,
+                              &pCreateInfos[i].pStages[s]);
 
       result = borgvk_create_pipeline(device, pAllocator, &pPipelines[i]);
       if (result != VK_SUCCESS) {

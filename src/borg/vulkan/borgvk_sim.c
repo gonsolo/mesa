@@ -146,11 +146,17 @@ sim_set_size(uint32_t w, uint32_t h)
 
 /* Colour flush format of an attachment (software/borg FlushFormat as borg_core takes it):
  * 1 R8G8B8A8, 2 B8G8R8A8, 3 RAW32; 0 = R5G6B5 for everything else. */
+bool
+borgvk_sim_bytes_packed(VkFormat f)
+{
+   return f == VK_FORMAT_R8G8B8A8_UINT || f == VK_FORMAT_R8G8B8A8_SINT;
+}
+
 uint8_t
 borgvk_sim_flush_format(VkFormat f)
 {
    return f == VK_FORMAT_R8G8B8A8_UNORM ? 1 : f == VK_FORMAT_B8G8R8A8_UNORM ? 2 :
-          f == VK_FORMAT_R32_UINT ? 3 : 0;
+          f == VK_FORMAT_R32_UINT || borgvk_sim_bytes_packed(f) ? 3 : 0;
 }
 
 /* Whether the persistent simulator can render to this colour attachment: the direct
