@@ -1665,6 +1665,41 @@ borgvk_CmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount, uint32
    sim_draw(commandBuffer, &dp);
 }
 
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdDrawIndirect(VkCommandBuffer commandBuffer, VkBuffer _buffer, VkDeviceSize offset,
+                       uint32_t drawCount, uint32_t stride)
+{
+   VK_FROM_HANDLE(borgvk_buffer, buf, _buffer);
+   if (!buf || !buf->mem || !buf->mem->map)
+      return;
+   for (uint32_t i = 0; i < drawCount; i++) {
+      VkDrawIndirectCommand c;
+      memcpy(&c, (const uint8_t *)buf->mem->map + buf->offset + offset + (VkDeviceSize)i * (stride ? stride : sizeof(c)),
+             sizeof(c));
+      struct draw_params dp = { .count = c.vertexCount, .instances = c.instanceCount, .first = c.firstVertex,
+                                .first_instance = c.firstInstance };
+      sim_draw(commandBuffer, &dp);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdDrawIndexedIndirect(VkCommandBuffer commandBuffer, VkBuffer _buffer, VkDeviceSize offset,
+                              uint32_t drawCount, uint32_t stride)
+{
+   VK_FROM_HANDLE(borgvk_buffer, buf, _buffer);
+   if (!buf || !buf->mem || !buf->mem->map)
+      return;
+   for (uint32_t i = 0; i < drawCount; i++) {
+      VkDrawIndexedIndirectCommand c;
+      memcpy(&c, (const uint8_t *)buf->mem->map + buf->offset + offset + (VkDeviceSize)i * (stride ? stride : sizeof(c)),
+             sizeof(c));
+      struct draw_params dp = { .indexed = true, .count = c.indexCount, .instances = c.instanceCount,
+                                .first = c.firstIndex, .vertex_offset = c.vertexOffset,
+                                .first_instance = c.firstInstance };
+      sim_draw(commandBuffer, &dp);
+   }
+}
+
 static VkResult borgvk_queue_submit_work(struct vk_queue *vk_queue, struct vk_queue_submit *submit);
 
 /* driver_submit: honour the submit's semaphore/fence waits and signals (the runtime leaves both
