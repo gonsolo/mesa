@@ -28,7 +28,7 @@
 #include "vk_format.h"
 #include "vk_log.h"
 
-#define SIM_MEM_BYTES (1u << 25)   /* simulation/direct/direct_sim.h DirectSim::MEM_BYTES */
+#define SIM_MEM_BYTES 0x8000000u   /* simulation/direct/direct_sim.h DirectSim::MEM_BYTES */
 #define SIM_MAX_PARTS 24
 #define SIM_PARALLEL_BYTES 65536   /* a pass this large is split over several simulators */
 
@@ -182,12 +182,12 @@ borgvk_sim_bytes_packed(VkFormat f)
 uint8_t
 borgvk_sim_flush_format(VkFormat f)
 {
-   return f == VK_FORMAT_R8G8B8A8_UNORM ? 1 : f == VK_FORMAT_B8G8R8A8_UNORM ? 2 :
+   return f == VK_FORMAT_R8G8B8A8_UNORM || f == VK_FORMAT_R8_UNORM ? 1 : f == VK_FORMAT_B8G8R8A8_UNORM ? 2 :
           f == VK_FORMAT_R32_UINT || borgvk_sim_bytes_packed(f) ? 3 : 0;
 }
 
 /* Whether the persistent simulator can render to this colour attachment: the direct
- * simulator, and a power-of-two-wide target of up to 512 x 256 pixels. */
+ * simulator, and a power-of-two-wide target of up to 1024 x 1024 pixels. */
 bool
 borgvk_sim_serves(const struct borgvk_image *color)
 {
@@ -195,8 +195,8 @@ borgvk_sim_serves(const struct borgvk_image *color)
    if (!direct || !direct[0] || !color)
       return false;
    uint32_t w = color->vk.extent.width, h = color->vk.extent.height;
-   /* The depth plane (BORG_ZB_SPI) holds 512 x 256 D32 pixels. */
-   return w >= 4 && (w & (w - 1)) == 0 && h >= 4 && (h & 3) == 0 && (uint64_t)w * h <= 512 * 256;
+   /* The depth plane (BORG_ZB_SPI) holds 1024 x 1024 D32 pixels. */
+   return w >= 4 && (w & (w - 1)) == 0 && w <= 1024 && h >= 4 && (h & 3) == 0 && h <= 1024;
 }
 
 static struct borgvk_image *
@@ -346,7 +346,9 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
       for (uint32_t x = 0; x < w; x++) {
          const size_t i = (size_t)y * w + x;
          uint8_t *g = S->mem + tiled(S->fb, w, x, y, 16 * cpx, cpx);
-         if (fmt) {
+         if (fmt && cbs == 1) {   /* R8_UNORM rides in the red byte of RGBA8 */
+            g[0] = chost[i]; g[1] = g[2] = 0; g[3] = 255;
+         } else if (fmt) {
             memcpy(g, chost + i * cbs, 4);
          } else {
             float c[4];
@@ -421,7 +423,9 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
             changed++;
             for (uint32_t p = 0; p < cplanes; p++) {
                uint8_t *d = chost + (p * npx + i) * cbs;
-               if (fmt) {
+               if (fmt && cbs == 1) {
+                  d[0] = g[0];
+               } else if (fmt) {
                   memcpy(d, g, 4);
                } else {
                   uint16_t v;
