@@ -31,6 +31,13 @@ borgvk_CreateDescriptorSetLayout(VkDevice _device,
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    layout->binding_count = pCreateInfo->bindingCount;
+   for (uint32_t i = 0; i < pCreateInfo->bindingCount; i++) {
+      const VkDescriptorSetLayoutBinding *b = &pCreateInfo->pBindings[i];
+      if (b->binding < BORGVK_MAX_BINDINGS &&
+          (b->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
+           b->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC))
+         layout->dyn_mask |= 1ull << b->binding;
+   }
 
    *pSetLayout = borgvk_descriptor_set_layout_to_handle(layout);
    return VK_SUCCESS;
@@ -111,6 +118,11 @@ borgvk_AllocateDescriptorSets(VkDevice _device,
       if (!set) {
          result = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
          break;
+      }
+      if (pAllocateInfo->pSetLayouts) {
+         VK_FROM_HANDLE(borgvk_descriptor_set_layout, l, pAllocateInfo->pSetLayouts[i]);
+         if (l)
+            set->dyn_mask = l->dyn_mask;
       }
       pDescriptorSets[i] = borgvk_descriptor_set_to_handle(set);
    }

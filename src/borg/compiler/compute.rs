@@ -362,6 +362,25 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                             em.vals.insert((d, c), v);
                         }
                     }
+                    nir_intrinsic_load_push_constant => {
+                        // Push constants are one more window (slot 8, set 1 binding 0) that the
+                        // host fills at dispatch.
+                        let o = em.src(i.get_src(0), 0);
+                        let w = em.shr(o, 2);
+                        let base_w = (i.base() as u32) / 4;
+                        for c in 0..i.def.num_components as u32 {
+                            let w2 = em.add(w, V::C(base_w + c));
+                            let w2 = match w2 {
+                                V::C(x) => V::C(x & (SLOT_WORDS - 1)),
+                                _ => em.bin("IAND", w2, V::C(SLOT_WORDS - 1)),
+                            };
+                            let a = em.add(V::C(SLOT_BASE_WORDS + 8 * SLOT_WORDS), w2);
+                            let ra = em.reg(a);
+                            let rd = em.fresh();
+                            em.op("LOAD", rd, ra, 0, 0);
+                            em.vals.insert((d, c as u8), V::R(rd));
+                        }
+                    }
                     nir_intrinsic_load_ubo | nir_intrinsic_load_ssbo => {
                         let a0 = em.word_addr(i.get_src(0), i.get_src(1), 0);
                         for c in 0..i.def.num_components as u32 {

@@ -2234,6 +2234,12 @@ borgvk_resolve_region(struct borgvk_image *src, struct borgvk_image *dst,
             uint32_t sx = reg->srcOffset.x + x, dx = reg->dstOffset.x + x;
             uint8_t *dtexel = dst_base + ((uint64_t)dy * dst_stride + dx) * dst_bs;
 
+            /* Integer formats do not average: the resolve takes sample 0 bit-exact
+             * (the float path would round 32-bit values). */
+            if (util_format_is_pure_integer(src_pfmt) && src_bs == dst_bs) {
+               memcpy(dtexel, src_base + ((uint64_t)sy * src_stride + sx) * src_bs, src_bs);
+               continue;
+            }
             float acc[4] = {0, 0, 0, 0};
             for (uint32_t s = 0; s < samples; s++) {
                const uint8_t *stexel = src_base + (uint64_t)s * plane_size +

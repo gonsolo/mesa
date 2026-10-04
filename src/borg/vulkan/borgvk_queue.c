@@ -870,9 +870,23 @@ send_generic_texture(const struct vk_image_view *view,
 
    /* source texel layout -> RGBA8 + TexFormat code (borg_isa.h) */
    uint32_t bpp, fmt_code;
-   bool swap_rb, alpha_fill;
-   uint8_t alpha_val;
+   bool swap_rb = false, alpha_fill = false, raw = false;
+   uint8_t alpha_val = 0;
    switch (view->format) {
+#define RAWFMT(vk, code, bytes) case VK_FORMAT_##vk: bpp = bytes; fmt_code = code; raw = true; break;
+   RAWFMT(R16_UNORM, 18, 2) RAWFMT(R16_SNORM, 19, 2) RAWFMT(R16_UINT, 20, 2) RAWFMT(R16_SINT, 21, 2)
+   RAWFMT(R16_SFLOAT, 22, 2) RAWFMT(R16G16_UNORM, 23, 4) RAWFMT(R16G16_SNORM, 24, 4)
+   RAWFMT(R16G16_UINT, 25, 4) RAWFMT(R16G16_SINT, 26, 4) RAWFMT(R16G16_SFLOAT, 27, 4)
+   RAWFMT(R16G16B16A16_UNORM, 28, 8) RAWFMT(R16G16B16A16_SNORM, 29, 8) RAWFMT(R16G16B16A16_UINT, 30, 8)
+   RAWFMT(R16G16B16A16_SINT, 31, 8) RAWFMT(R16G16B16A16_SFLOAT, 32, 8)
+   RAWFMT(R32_UINT, 33, 4) RAWFMT(R32_SINT, 34, 4) RAWFMT(R32_SFLOAT, 35, 4)
+   RAWFMT(R32G32_UINT, 36, 8) RAWFMT(R32G32_SINT, 37, 8) RAWFMT(R32G32_SFLOAT, 38, 8)
+   RAWFMT(R32G32B32A32_UINT, 39, 16) RAWFMT(R32G32B32A32_SINT, 40, 16) RAWFMT(R32G32B32A32_SFLOAT, 41, 16)
+   RAWFMT(A2B10G10R10_UNORM_PACK32, 42, 4) RAWFMT(A2B10G10R10_UINT_PACK32, 43, 4)
+   RAWFMT(R5G6B5_UNORM_PACK16, 44, 2) RAWFMT(A1R5G5B5_UNORM_PACK16, 45, 2)
+   RAWFMT(B4G4R4A4_UNORM_PACK16, 46, 2) RAWFMT(B10G11R11_UFLOAT_PACK32, 47, 4)
+   RAWFMT(E5B9G9R9_UFLOAT_PACK32, 48, 4)
+#undef RAWFMT
    case VK_FORMAT_R8G8B8A8_UNORM: bpp = 4; fmt_code = 11; swap_rb = false; alpha_fill = false; alpha_val = 0; break;
    case VK_FORMAT_R8G8B8A8_SNORM: bpp = 4; fmt_code = 12; swap_rb = false; alpha_fill = false; alpha_val = 0; break;
    case VK_FORMAT_B8G8R8A8_UNORM: bpp = 4; fmt_code = 11; swap_rb = true;  alpha_fill = false; alpha_val = 0; break;
@@ -883,12 +897,14 @@ send_generic_texture(const struct vk_image_view *view,
    case VK_FORMAT_B8G8R8_SNORM:   bpp = 3; fmt_code = 12; swap_rb = true;  alpha_fill = true;  alpha_val = 127; break;
    default: return false;
    }
-   uint32_t total = w * h * 4;
+   uint32_t total = raw ? w * h * bpp : w * h * 4;
    uint8_t *rgba = malloc(total);
    if (!rgba)
       return false;
    const uint8_t *src = (const uint8_t *)img->mem->map + img->offset;
-   for (uint32_t i = 0; i < w * h; i++) {
+   if (raw)
+      memcpy(rgba, src, total);
+   for (uint32_t i = 0; !raw && i < w * h; i++) {
       const uint8_t *p = src + (size_t)i * bpp;
       uint8_t *d = rgba + (size_t)i * 4;
       d[0] = swap_rb ? p[2] : p[0];
@@ -906,7 +922,7 @@ send_generic_texture(const struct vk_image_view *view,
              ((uint32_t)(view->swizzle.g & 7) << 23) |
              ((uint32_t)(view->swizzle.b & 7) << 26) |
              ((uint32_t)(view->swizzle.a & 7) << 29);
-   desc[2] = w * 4;
+   desc[2] = w * (raw ? bpp : 4);
    for (uint32_t off = 0; off < total; off += BORGVK_TEXG_CHUNK) {
       uint32_t n = total - off < BORGVK_TEXG_CHUNK ? total - off : BORGVK_TEXG_CHUNK;
       borgvk_serial_send_texture_chunk(off, rgba + off, n, desc, sampler_desc(sampler));
@@ -1143,7 +1159,7 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
    /* wb: copy the window back to the app's buffer afterwards.  A texel buffer is decoded into a
     * private array (the canonical 4-word texel the compiler reads, see borg_nir_passes.c) and
     * never written back. */
-   struct { uint8_t *host; uint8_t *decoded; bool wb; uint32_t skip, size, addr; } bufs[BORGVK_MAX_BINDINGS];
+   struct { uint8_t *host; uint8_t *decoded; bool wb; uint32_t skip, size, addr; } bufs[BORGVK_MAX_BINDINGS + 1];
    uint32_t nbufs = 0, total = 0;
    for (uint32_t b = 0; set && b < BORGVK_MAX_BINDINGS; b++) {
       const struct vk_buffer_view *bv = set->buffer_views[b];
@@ -1195,11 +1211,12 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
       }
       if (!buf || !buf->mem || !buf->mem->map)
          continue;
-      VkDeviceSize avail = buf->vk.size > set->offsets[b] ? buf->vk.size - set->offsets[b] : 0;
+      VkDeviceSize boff = set->offsets[b] + cmd->dyn_off[b];
+      VkDeviceSize avail = buf->vk.size > boff ? buf->vk.size - boff : 0;
       VkDeviceSize size = set->ranges[b] == VK_WHOLE_SIZE || set->ranges[b] > avail ? avail : set->ranges[b];
       if (size > BORGVK_CS_SLOT_BYTES)
          size = BORGVK_CS_SLOT_BYTES;
-      bufs[nbufs].host = (uint8_t *)buf->mem->map + buf->offset + set->offsets[b];
+      bufs[nbufs].host = (uint8_t *)buf->mem->map + buf->offset + boff;
       bufs[nbufs].decoded = NULL;
       bufs[nbufs].wb = true;
       bufs[nbufs].skip = 0;
@@ -1207,6 +1224,22 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
       bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + b * BORGVK_CS_SLOT_BYTES;
       total += 8 + ((uint32_t)size + 3) / 4 * 4;
       nbufs++;
+   }
+
+   /* Push constants: one more window, slot 8. */
+   {
+      uint8_t *dec = calloc(1, sizeof(cmd->pc));
+      if (dec) {
+         memcpy(dec, cmd->pc, sizeof(cmd->pc));
+         bufs[nbufs].host = NULL;
+         bufs[nbufs].decoded = dec;
+         bufs[nbufs].wb = false;
+         bufs[nbufs].skip = 0;
+         bufs[nbufs].size = sizeof(cmd->pc);
+         bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + BORGVK_MAX_BINDINGS * BORGVK_CS_SLOT_BYTES;
+         total += 8 + sizeof(cmd->pc);
+         nbufs++;
+      }
    }
 
    /* Job header: nprog gx gy gz lx ly lz nregs nbufs bx by bz (b* = the grid origin, which the
@@ -1347,8 +1380,14 @@ borgvk_CmdBindDescriptorSets(VkCommandBuffer commandBuffer, VkPipelineBindPoint 
    struct borgvk_command_buffer *cmd = container_of(vk_cmd, struct borgvk_command_buffer, vk);
    if (descriptorSetCount > 0 && pDescriptorSets) {
       VK_FROM_HANDLE(borgvk_descriptor_set, set, pDescriptorSets[0]);
-      if (set)
+      if (set) {
          cmd->desc_set = set;
+         memset(cmd->dyn_off, 0, sizeof(cmd->dyn_off));
+         uint32_t k = 0;
+         for (uint32_t b = 0; b < BORGVK_MAX_BINDINGS && k < dynamicOffsetCount; b++)
+            if (set->dyn_mask & (1ull << b))
+               cmd->dyn_off[b] = pDynamicOffsets[k++];
+      }
    }
 }
 

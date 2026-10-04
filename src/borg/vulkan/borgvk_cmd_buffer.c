@@ -10,6 +10,7 @@
  * drive the common command-buffer lifecycle.
  */
 #include "borgvk_private.h"
+#include <string.h>
 
 #include "vk_alloc.h"
 #include "vk_command_buffer.h"
@@ -132,7 +133,11 @@ borgvk_CmdPushConstants(VkCommandBuffer commandBuffer,
     * from the submit path, which is the natural follow-on once anything
     * actually reuses command buffers. */
    VK_FROM_HANDLE(vk_command_buffer, cmd, commandBuffer);
-   (void)cmd;
+   {
+      struct borgvk_command_buffer *bcmd = container_of(cmd, struct borgvk_command_buffer, vk);
+      if (offset + size <= sizeof(bcmd->pc))
+         memcpy((uint8_t *)bcmd->pc + offset, pValues, size);
+   }
    (void)layout;
    (void)stageFlags;
 

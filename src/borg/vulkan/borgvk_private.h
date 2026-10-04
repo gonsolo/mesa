@@ -130,6 +130,8 @@ struct borgvk_device {
 
 #define BORGVK_MAX_VERTEX_BINDINGS 4
 
+#define BORGVK_MAX_BINDINGS 8
+
 struct borgvk_command_buffer {
    struct vk_command_buffer vk;
 
@@ -158,6 +160,8 @@ struct borgvk_command_buffer {
    bool generic_drawn;
    const struct borgvk_pipeline *cs_pipeline;   /* bound compute pipeline */
    bool dispatched;                             /* ran a compute dispatch at replay */
+   uint32_t pc[32];                             /* push-constant bytes, for compute */
+   VkDeviceSize dyn_off[BORGVK_MAX_BINDINGS];   /* dynamic offsets of desc_set, by binding */
 };
 
 extern const struct vk_command_buffer_ops borgvk_cmd_buffer_ops;
@@ -309,11 +313,11 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_image, vk.base, VkImage,
 VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_sampler, vk.base, VkSampler,
                                VK_OBJECT_TYPE_SAMPLER)
 
-#define BORGVK_MAX_BINDINGS 8
 
 struct borgvk_descriptor_set_layout {
    struct vk_descriptor_set_layout vk;
    uint32_t binding_count;
+   uint64_t dyn_mask;           /* bindings that are *_BUFFER_DYNAMIC */
 };
 
 struct borgvk_descriptor_pool {
@@ -334,6 +338,7 @@ struct borgvk_descriptor_set {
    struct vk_image_view *views[BORGVK_MAX_BINDINGS];
    struct borgvk_sampler *samplers[BORGVK_MAX_BINDINGS];
    struct vk_buffer_view *buffer_views[BORGVK_MAX_BINDINGS];   /* texel buffers */
+   uint64_t dyn_mask;           /* from the layout: dynamic-offset bindings */
 };
 
 #define BORGVK_MAX_VERTEX_ATTRS    8
