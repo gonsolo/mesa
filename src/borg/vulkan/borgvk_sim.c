@@ -14,6 +14,7 @@
 #include "borgvk_private.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,6 +90,23 @@ sim_stop(void)
       S->pid = 0;
       S->w = S->h = 0;
    }
+}
+
+struct feed {
+   int fd;
+   const uint8_t *data;
+   size_t n;
+   const uint8_t *sync;
+   bool ok;
+};
+
+/* Each server consumes its stream at simulation speed, so they are fed side by side. */
+static void *
+feed_server(void *arg)
+{
+   struct feed *f = arg;
+   f->ok = write_all(f->fd, f->data, f->n) && write_all(f->fd, f->sync, 1);
+   return NULL;
 }
 
 static bool
@@ -365,12 +383,21 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
       }
    }
    uint8_t sync = 0xBD, ack;
+   struct feed feeds[SIM_MAX_PARTS];
+   pthread_t th[SIM_MAX_PARTS];
    for (int part = 0; part < np; part++) {
-      if (!write_all(sim.s[part].to, stream, n) || !write_all(sim.s[part].to, &sync, 1)) {
-         mesa_logw("borgvk: the simulator stopped answering");
-         sim_stop();
-         goto out;
-      }
+      feeds[part] = (struct feed){ sim.s[part].to, stream, n, &sync, false };
+      pthread_create(&th[part], NULL, feed_server, &feeds[part]);
+   }
+   bool fed = true;
+   for (int part = 0; part < np; part++) {
+      pthread_join(th[part], NULL);
+      fed &= feeds[part].ok;
+   }
+   if (!fed) {
+      mesa_logw("borgvk: the simulator stopped answering");
+      sim_stop();
+      goto out;
    }
    for (int part = 0; part < np; part++) {
       if (!read_all(sim.s[part].from, &ack, 1)) {
