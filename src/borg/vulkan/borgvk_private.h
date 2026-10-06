@@ -295,6 +295,10 @@ void borgvk_compiler_selftest(void);
 void borgvk_compile_compute_stage(struct borgvk_device *device,
                                   const VkPipelineShaderStageCreateInfo *stage_info,
                                   struct borgvk_pipeline *pipeline);
+bool borgvk_shader_cache_get(const VkPipelineShaderStageCreateInfo *si, uint32_t vfetch,
+                             struct borgvk_shader_blob *blob, bool *reads_pntc);
+void borgvk_shader_cache_record(const VkPipelineShaderStageCreateInfo *si, uint32_t vfetch,
+                                const struct borgvk_shader_blob *blob, bool reads_pntc);
 uint32_t borgvk_blob_num_varyings(const struct borgvk_shader_blob *b);
 void borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
                           const VkPipelineShaderStageCreateInfo *stage_info);

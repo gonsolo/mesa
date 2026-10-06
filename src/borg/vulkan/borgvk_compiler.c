@@ -105,6 +105,17 @@ void
 borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
                      const VkPipelineShaderStageCreateInfo *stage_info)
 {
+   const int cslot = stage_info->stage == VK_SHADER_STAGE_VERTEX_BIT ? BORGVK_STAGE_VERT :
+                     stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT ? BORGVK_STAGE_FRAG : -1;
+   if (cslot >= 0) {
+      bool pntc;
+      if (borgvk_shader_cache_get(stage_info, vfetch, &device->shader_blob[cslot], &pntc)) {
+         if (cslot == BORGVK_STAGE_FRAG)
+            device->frag_reads_pntc = pntc;
+         mesa_logi("borgvk: shader blob from the cache (%u bytes)", device->shader_blob[cslot].len);
+         return;
+      }
+   }
    struct nir_shader *nir = NULL;
    VkResult result =
       vk_pipeline_shader_stage_to_nir(&device->vk, 0, stage_info,
@@ -139,6 +150,7 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
                         vfetch);
       if (len > 0 && len <= BORGVK_SHADER_BLOB_MAX) {
          b->len = len;
+         borgvk_shader_cache_record(stage_info, vfetch, b, device->frag_reads_pntc);
          mesa_logi("borgvk: captured %s shader blob (%u bytes) for upload",
                    slot == BORGVK_STAGE_VERT ? "vertex" : "fragment", len);
       } else {
