@@ -18,6 +18,7 @@ libborgvk_files = files(
   'borgvk_compiler.c',
   'borgvk_descriptor_set.c',
   'borgvk_device.c',
+  'borgvk_hw.c',
   'borgvk_memory.c',
   'borgvk_pipeline.c',
   'borgvk_query.c',
@@ -29,7 +30,24 @@ libborgvk_files = files(
   'borgvk_private.h',
 )
 
+# The Borg's own driver code (software/borg), host build, with its hooks over the DRM render node.
+borg_sw = '../../../../software/borg/'
+borg_sw_inc = include_directories(
+  '../../../../software/borg',
+  '../../../../software/linux/overlay/include/uapi',
+  '../../../../out/hardware/borg/rdl',
+  '../../../include/drm-uapi',
+)
+libborg_host = static_library(
+  'borg_host',
+  files(borg_sw + 'borg_core.c', borg_sw + 'borg_hw.c', borg_sw + 'borg_spirb.c'),
+  c_args : ['-DBORG_HOST', '-Wno-unused-parameter'],
+  include_directories : borg_sw_inc,
+)
+idep_borg_host = declare_dependency(link_with : libborg_host, include_directories : borg_sw_inc)
+
 borgvk_deps = [
+  idep_borg_host,
   dep_dl,
   dep_libdrm,
   idep_borgc,

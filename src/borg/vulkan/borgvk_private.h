@@ -188,6 +188,8 @@ void borgvk_flush_draws(struct borgvk_command_buffer *cmd);
 
 /* The persistent simulator (borgvk_sim.c). */
 struct borgvk_image;
+bool borgvk_hw_enabled(void);
+size_t borgvk_hw_render(const uint8_t *stream, size_t n, uint32_t dim, uint8_t *out);
 bool borgvk_sim_serves(const struct borgvk_image *color, bool has_depth_stencil);
 uint8_t borgvk_sim_flush_format(VkFormat f);
 bool borgvk_sim_bytes_packed(VkFormat f);
