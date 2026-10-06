@@ -911,10 +911,14 @@ unsafe fn compile_nir_inner(
                             let mut x: Option<(u32, u8)> = None;
                             if let Some((op, tsrcs)) = prod.get(&then_def) {
                                 if *op == nir_op_fmul && tsrcs.len() == 2 {
+                                    // 12.92 is a NIR constant, or a window word once an arithmetic reader gave it one.
                                     let is12 = |d: u32| {
-                                        consts.get(&d).map_or(false, |&b| {
-                                            (f32::from_bits(b) - 12.92).abs() < 0.1
-                                        })
+                                        let bits = consts.get(&d).copied().or_else(|| match ubo.get(&d) {
+                                            Some(Ubo::Uniform(u)) => draw_uniform_consts.iter()
+                                                .find(|(w, _)| *w == *u as u32).map(|&(_, b)| b),
+                                            _ => None,
+                                        });
+                                        bits.map_or(false, |b| (f32::from_bits(b) - 12.92).abs() < 0.1)
                                     };
                                     x = if is12(tsrcs[0].0) {
                                         Some(tsrcs[1])
