@@ -298,6 +298,7 @@ unsafe fn compile_nir_inner(
         }
     };
 
+    let mut skipped: Vec<&'static str> = Vec::new();
     let entry = nir_shader_get_entrypoint(nir);
     if !entry.is_null() {
         for block in (*entry).iter_blocks() {
@@ -974,7 +975,9 @@ unsafe fn compile_nir_inner(
                                     prog.push(BorgInstr { mnem, dst: alu.def.index, srcs, swz });
                                 }
                             }
-                            // else: unhandled alu (fpow/fge feed the sRGB idiom) — skip.
+                            else if !skipped.contains(&alu.info().name()) {
+                                skipped.push(alu.info().name());
+                            }
                         }
                     }
                 } else if let Some(intr) = instr.as_intrinsic() {
@@ -1723,6 +1726,13 @@ unsafe fn compile_nir_inner(
                 }
             }
         }
+    }
+    // fpow/fge only vanish into the sRGB idiom (FSRGB); any other skipped op is a missing lowering.
+    let srgb = prog.iter().any(|i| i.mnem == "FSRGB");
+    skipped.retain(|&op| !(matches!(op, "fpow" | "fge") && srgb));
+    if !skipped.is_empty() {
+        eprintln!("borgc: ERROR unhandled NIR ops, refusing to emit a wrong shader: {}", skipped.join(", "));
+        return 0;
     }
     if draw_mode && stage == 0 && vfetch & 0x4000_0000 != 0 {
         // Point expansion: this vertex is a corner of the point's quad; the corner's clip-space
