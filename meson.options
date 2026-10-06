@@ -901,3 +901,17 @@ option(
   choices : ['full', 'cache'],
   description : 'borgvk shader compiler: full (borgc, needs Rust) or cache (only shaders from $BORGVK_SHADER_CACHE)',
 )
+
+option(
+  'util-without-cpp',
+  type : 'boolean',
+  value : false,
+  description : 'Leave out the C++ parts of src/util (qsort fallback, ASTC); for targets without a C++ standard library',
+)
+
+option(
+  'borg-without-libdrm',
+  type : 'boolean',
+  value : false,
+  description : 'Build without libdrm (borgvk on the board talks to its render node with plain ioctls)',
+)

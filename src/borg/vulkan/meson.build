@@ -163,3 +163,16 @@ _dev_icd = custom_target(
 )
 
 devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
+
+# A static borgvk (no ICD loader, no dlopen) for the board; see software/vkcube.
+borgvk_static = executable(
+  'borgvk_static',
+  ['borgvk_static_main.c', libborgvk_files, borgvk_entrypoints],
+  include_directories : [
+    inc_include, inc_src, inc_util,
+    include_directories('../../../../'),
+  ],
+  dependencies : borgvk_deps,
+  link_args : ['-static', '-Wl,--gc-sections'],
+  build_by_default : false,
+)

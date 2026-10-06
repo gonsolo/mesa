@@ -89,7 +89,6 @@ files_mesa_util = files(
   'perf/u_trace_priv.h',
   'u_process.c',
   'u_process.h',
-  'u_qsort.cpp',
   'u_qsort.h',
   'rwlock.c',
   'rwlock.h',
@@ -123,11 +122,8 @@ files_mesa_util = files(
   'strndup.h',
   'strtod.c',
   'strtod.h',
-  'texcompress_astc_luts.cpp',
   'texcompress_astc_luts.h',
-  'texcompress_astc_luts_wrap.cpp',
   'texcompress_astc_luts_wrap.h',
-  'texcompress_astc.cpp',
   'texcompress_astc.h',
   'timespec.h',
   'u_atomic.c',
@@ -283,6 +279,11 @@ shader_stats_h = custom_target(
   command : [prog_python, '@INPUT@'],
   capture : true,
 )
+if get_option('util-without-cpp')
+  files_mesa_util += files('u_cpp_stubs.c')   # a build with no C++ standard library (borgvk on the board)
+else
+  files_mesa_util += files('u_qsort.cpp', 'texcompress_astc_luts.cpp', 'texcompress_astc_luts_wrap.cpp', 'texcompress_astc.cpp')
+endif
 files_mesa_util += shader_stats_h
 
 # subdir format provide files_mesa_format
