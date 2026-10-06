@@ -915,3 +915,10 @@ option(
   value : false,
   description : 'Build without libdrm (borgvk on the board talks to its render node with plain ioctls)',
 )
+
+option(
+  'borg-app-objects',
+  type : 'array',
+  value : [],
+  description : 'Object files of the application linked into the static borgvk (replaces its link probe)',
+)
