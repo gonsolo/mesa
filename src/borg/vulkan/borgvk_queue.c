@@ -584,6 +584,54 @@ submit_is_cube(struct vk_queue_submit *submit)
    return set && set_is_cube(set);
 }
 
+/* RGB888 sdim×sdim (or the raw words of a RAW32 target) → the colour attachment. Takes ownership of `rgb`. */
+static VkResult
+sim_store_rgb(struct borgvk_image *color_img, uint8_t *rgb, bool ok, bool raw32, uint32_t sdim)
+{
+   const uint32_t width = color_img->vk.extent.width, height = color_img->vk.extent.height;
+   const size_t expected = (size_t)sdim * sdim * (raw32 ? 4 : 3);
+   const size_t got = ok ? expected : 0;
+   const char *ppm = getenv("BORGVK_DUMP_PPM");   /* the rendered frame as it came from the Borg */
+   if (ppm && ppm[0] && ok && !raw32) {
+      FILE *f = fopen(ppm, "wb");
+      if (f) {
+         fprintf(f, "P6\n%u %u\n255\n", sdim, sdim);
+         fwrite(rgb, 1, expected, f);
+         fclose(f);
+      }
+   }
+   /* RGB888 sdim×sdim → R8G8B8A8_UNORM attachment (width×height),
+    * nearest-neighbour upscale, opaque alpha. */
+   /* The write below assumes a 4-byte texel; an attachment of another size (or unmapped
+    * memory) must not be written past its backing. */
+   bool fits = color_img->mem && color_img->mem->map &&
+               (uint64_t)width * height * 4 * MAX2(color_img->vk.samples, 1) <= color_img->size;
+   if (rgb && got == expected && !fits) {
+      /* leave the image untouched */
+   } else if (rgb && got == expected && raw32) {
+      memcpy((uint8_t *)color_img->mem->map + color_img->offset, rgb, expected);
+   } else if (rgb && got == expected) {
+      /* The sim returns the resolved pixel. A multisampled image packs one plane per
+       * sample (see borgvk_image_layer_size): put the resolved value in every plane,
+       * so a later vkCmdResolveImage averages it back to itself. */
+      uint64_t plane_size = (uint64_t)width * height * 4;
+      for (uint32_t smp = 0; smp < MAX2(color_img->vk.samples, 1); smp++) {
+         uint8_t *dst = (uint8_t *)color_img->mem->map + color_img->offset + smp * plane_size;
+         for (uint32_t y = 0; y < height; y++) {
+            uint32_t sy = (uint32_t)((uint64_t)(2 * y + 1) * sdim / (2 * (uint64_t)height));
+            for (uint32_t x = 0; x < width; x++) {
+               uint32_t sx = (uint32_t)((uint64_t)(2 * x + 1) * sdim / (2 * (uint64_t)width));
+               const uint8_t *s = rgb + ((size_t)sy * sdim + sx) * 3;
+               uint8_t *d = dst + ((size_t)y * width + x) * 4;
+               d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
+            }
+         }
+      }
+   }
+   free(rgb);
+   return VK_SUCCESS;
+}
+
 /* Feed a captured wire stream to `arcilator_sim --cts-uart` and write the
  * rendered RGB888 pixels into the colour attachment (nearest-neighbour scaled,
  * opaque alpha). `sim_dim` = 0 uses the vkcube default (128, BORGVK_SIM_DIM);
@@ -639,6 +687,14 @@ sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
          }
          close(kfd);
       }
+   }
+
+   if (borgvk_hw_enabled()) {
+      const size_t bpp_hw = raw32 ? 4 : 3, expected_hw = (size_t)sdim * sdim * bpp_hw;
+      uint8_t *rgb_hw = malloc(expected_hw);
+      size_t got_hw = rgb_hw ? borgvk_hw_render(bytes, nbytes, sdim, rgb_hw) : 0;
+      free(bytes);
+      return sim_store_rgb(color_img, rgb_hw, got_hw == expected_hw, raw32, sdim);
    }
 
    /* Hand the byte stream to arcilator_sim --cts-uart via a temp file. */
@@ -748,36 +804,7 @@ sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
    if (getenv("BORGVK_DEBUG"))
       mesa_logi("borgvk: sim returned %zu of %zu bytes", got, expected);
 
-   /* RGB888 sdim×sdim (sim stdout) → R8G8B8A8_UNORM attachment (width×height),
-    * nearest-neighbour upscale, opaque alpha. */
-   /* The write below assumes a 4-byte texel; an attachment of another size (or unmapped
-    * memory) must not be written past its backing. */
-   bool fits = color_img->mem && color_img->mem->map &&
-               (uint64_t)width * height * 4 * MAX2(color_img->vk.samples, 1) <= color_img->size;
-   if (rgb && got == expected && !fits) {
-      /* leave the image untouched */
-   } else if (rgb && got == expected && raw32) {
-      memcpy((uint8_t *)color_img->mem->map + color_img->offset, rgb, expected);
-   } else if (rgb && got == expected) {
-      /* The sim returns the resolved pixel. A multisampled image packs one plane per
-       * sample (see borgvk_image_layer_size): put the resolved value in every plane,
-       * so a later vkCmdResolveImage averages it back to itself. */
-      uint64_t plane_size = (uint64_t)width * height * 4;
-      for (uint32_t smp = 0; smp < MAX2(color_img->vk.samples, 1); smp++) {
-         uint8_t *dst = (uint8_t *)color_img->mem->map + color_img->offset + smp * plane_size;
-         for (uint32_t y = 0; y < height; y++) {
-            uint32_t sy = (uint32_t)((uint64_t)(2 * y + 1) * sdim / (2 * (uint64_t)height));
-            for (uint32_t x = 0; x < width; x++) {
-               uint32_t sx = (uint32_t)((uint64_t)(2 * x + 1) * sdim / (2 * (uint64_t)width));
-               const uint8_t *s = rgb + ((size_t)sy * sdim + sx) * 3;
-               uint8_t *d = dst + ((size_t)y * width + x) * 4;
-               d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
-            }
-         }
-      }
-   }
-   free(rgb);
-   return VK_SUCCESS;
+   return sim_store_rgb(color_img, rgb, rgb && got == expected, raw32, sdim);
 }
 
 
@@ -793,7 +820,7 @@ borgvk_submit_sim_cube(struct borgvk_device *device,
 {
    const char *sim_bin = getenv("BORGVK_SIM");
    const char *sim_fw  = getenv("BORGVK_SIM_FW");
-   if (!sim_bin || !sim_fw)
+   if (!borgvk_hw_enabled() && (!sim_bin || !sim_fw))
       return VK_SUCCESS;
 
    struct borgvk_descriptor_set *set = find_set(submit);
@@ -1738,7 +1765,7 @@ sim_draw(VkCommandBuffer commandBuffer, const struct draw_params *dp)
    struct borgvk_device *device = container_of(vk_cmd->base.device, struct borgvk_device, vk);
 
    /* Only the simulator renders; cube.c (UBO-driven) has its own path at submit. */
-   if (!getenv("BORGVK_SIM") || (cmd->desc_set && set_is_cube(cmd->desc_set)))
+   if (!(getenv("BORGVK_SIM") || borgvk_hw_enabled()) || (cmd->desc_set && set_is_cube(cmd->desc_set)))
       return;
    struct draw_params p = *dp;
    p.index_size = cmd->index_size;
@@ -1852,7 +1879,7 @@ borgvk_queue_submit_work(struct vk_queue *vk_queue, struct vk_queue_submit *subm
     *     sim runs the exact protocol + real shaders as the FPGA.
     *   - CTS draws (VBO-driven): borgvk_submit_sim_draw, the mailbox --cts-draw
     *     path (carries per-vertex colour; still baked-shader for now). */
-   if (getenv("BORGVK_SIM")) {
+   if (getenv("BORGVK_SIM") || borgvk_hw_enabled()) {
       if (submit_is_cube(submit))
          return borgvk_submit_sim_cube(device, submit);
       /* Generic draws already ran, at their place in the replay above. */
