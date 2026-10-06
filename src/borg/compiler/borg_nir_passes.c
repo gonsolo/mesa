@@ -118,6 +118,33 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
    return nir_load_ssbo(b, 4, 32, nir_channel(b, desc, 0), off, .align_mul = 16);
 }
 
+#ifdef BORG_SMALL_NIR
+/* nir_opt_algebraic's tables are 8.6 MB; the on-board build lowers only what the ISA lacks. */
+static bool
+borg_basic_alu_filter(const nir_instr *instr, const void *data)
+{
+   if (instr->type != nir_instr_type_alu)
+      return false;
+   const nir_op op = nir_instr_as_alu(instr)->op;
+   return op == nir_op_fsub || op == nir_op_fdiv || op == nir_op_fsqrt;
+}
+
+static nir_def *
+borg_basic_alu_lower(nir_builder *b, nir_instr *instr, void *data)
+{
+   nir_alu_instr *alu = nir_instr_as_alu(instr);
+   nir_def *x = nir_ssa_for_alu_src(b, alu, 0);
+   switch (alu->op) {
+   case nir_op_fsub:
+      return nir_fadd(b, x, nir_fneg(b, nir_ssa_for_alu_src(b, alu, 1)));
+   case nir_op_fdiv:
+      return nir_fmul(b, x, nir_frcp(b, nir_ssa_for_alu_src(b, alu, 1)));
+   default:
+      return nir_frcp(b, nir_frsq(b, x));
+   }
+}
+#endif
+
 void
 borg_lower_nir_for_borgc(struct nir_shader *nir)
 {
@@ -190,7 +217,12 @@ borg_lower_nir_for_borgc(struct nir_shader *nir)
       NIR_PASS(progress, nir, nir_opt_dce);
       NIR_PASS(progress, nir, nir_opt_cse);
       NIR_PASS(progress, nir, nir_opt_constant_folding);
+#ifdef BORG_SMALL_NIR
+      NIR_PASS(progress, nir, nir_shader_lower_instructions, borg_basic_alu_filter,
+               borg_basic_alu_lower, NULL);
+#else
       NIR_PASS(progress, nir, nir_opt_algebraic);
+#endif
       /* Flatten if/else into bcsel selects where that is cheaper than
        * predication.
        *

@@ -20,6 +20,7 @@ libborgc = static_library(
 libborg_nir_passes = static_library(
   'borg_nir_passes',
   files('borg_nir_passes.c'),
+  c_args : get_option('borg-small-nir') ? ['-DBORG_SMALL_NIR'] : [],
   include_directories : [inc_include, inc_src, inc_compiler],
   dependencies : [idep_nir, idep_mesautil],
   gnu_symbol_visibility : 'hidden',

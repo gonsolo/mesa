@@ -903,6 +903,13 @@ option(
 )
 
 option(
+  'borg-small-nir',
+  type : 'boolean',
+  value : false,
+  description : 'borgc lowers fsub/fdiv/fsqrt itself instead of running nir_opt_algebraic (8.6 MB of tables); for the on-board build',
+)
+
+option(
   'util-without-cpp',
   type : 'boolean',
   value : false,
