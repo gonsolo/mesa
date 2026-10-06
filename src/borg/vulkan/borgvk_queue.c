@@ -40,7 +40,7 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <xf86drm.h>
+#include "borgvk_drm_compat.h"
 
 /* Firmware layout constants (mailbox offsets, max verts/tris, magic). */
 #include "software/borg/borg_layout.h"

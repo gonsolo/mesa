@@ -23,7 +23,7 @@
 #include <stdlib.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <xf86drm.h>
+#include "borgvk_drm_compat.h"
 
 /* ---- Device memory ---------------------------------------------------- */
 

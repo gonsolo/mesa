@@ -22,7 +22,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
-#include <xf86drm.h>
+#include "borgvk_drm_compat.h"
 
 /* The Vulkan version borgvk claims. It implements the Vulkan 1.0 feature set (the target of
  * the conformance work), and says so: reporting a higher version would promise 1.1+ behaviour. */
