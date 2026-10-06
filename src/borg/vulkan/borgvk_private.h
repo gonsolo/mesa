@@ -33,11 +33,7 @@ extern "C" {
  * platform is compiled in. borgvk uses the software (CPU) WSI path: the host
  * window is irrelevant — the real output is the FPGA's HDMI — so WSI only needs
  * to function so an app's render loop runs and submits each frame. */
-#if defined(VK_USE_PLATFORM_XCB_KHR) || \
-    defined(VK_USE_PLATFORM_XLIB_KHR) || \
-    defined(VK_USE_PLATFORM_WAYLAND_KHR)
-#define BORGVK_USE_WSI_PLATFORM
-#endif
+#define BORGVK_USE_WSI_PLATFORM   /* Mesa's headless WSI backend needs no platform */
 
 struct borgvk_instance {
    struct vk_instance vk;

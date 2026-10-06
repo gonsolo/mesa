@@ -48,6 +48,7 @@ static const struct vk_instance_extension_table instance_extensions = {
 #ifdef BORGVK_USE_WSI_PLATFORM
    .KHR_surface                         = true,
    .KHR_get_surface_capabilities2       = true,
+   .EXT_headless_surface                = true,
 #endif
 #ifdef VK_USE_PLATFORM_XCB_KHR
    .KHR_xcb_surface                     = true,
