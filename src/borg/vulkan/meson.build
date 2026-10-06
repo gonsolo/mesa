@@ -15,7 +15,6 @@ borgvk_entrypoints = custom_target(
 
 libborgvk_files = files(
   'borgvk_cmd_buffer.c',
-  'borgvk_compiler.c',
   'borgvk_descriptor_set.c',
   'borgvk_device.c',
   'borgvk_hw.c',
@@ -47,12 +46,19 @@ libborg_host = static_library(
 )
 idep_borg_host = declare_dependency(link_with : libborg_host, include_directories : borg_sw_inc)
 
+if with_borgc
+  libborgvk_files += files('borgvk_compiler.c')
+  borgvk_compiler_deps = [idep_borgc, idep_nir]
+else
+  libborgvk_files += files('borgvk_compiler_cache.c')
+  borgvk_compiler_deps = []
+endif
+
 borgvk_deps = [
+  borgvk_compiler_deps,
   idep_borg_host,
   dep_dl,
   dep_libdrm,
-  idep_borgc,
-  idep_nir,
   idep_vulkan_util,
   idep_vulkan_runtime,
   idep_vulkan_wsi,

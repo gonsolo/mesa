@@ -1,7 +1,9 @@
 # Copyright © 2026 Andreas Wendleder
 # SPDX-License-Identifier: MIT
 
-subdir('compiler')
+if with_borgc
+  subdir('compiler')
+endif
 subdir('vulkan')
 if with_tools.contains('drm-shim')
   subdir('drm')

@@ -893,3 +893,11 @@ option(
   value : false,
   description : 'Build panfrost Rust components.'
 )
+
+option(
+  'borg-compiler',
+  type : 'combo',
+  value : 'full',
+  choices : ['full', 'cache'],
+  description : 'borgvk shader compiler: full (borgc, needs Rust) or cache (only shaders from $BORGVK_SHADER_CACHE)',
+)

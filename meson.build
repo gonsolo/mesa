@@ -302,6 +302,7 @@ with_panfrost_vk = _vulkan_drivers.contains('panfrost')
 with_swrast_vk = _vulkan_drivers.contains('swrast')
 with_virtio_vk = _vulkan_drivers.contains('virtio')
 with_borg_vk = _vulkan_drivers.contains('borg')
+with_borgc = with_borg_vk and get_option('borg-compiler') == 'full'
 with_broadcom_vk = _vulkan_drivers.contains('broadcom')
 with_imagination_vk = _vulkan_drivers.contains('imagination')
 with_imagination_srv = get_option('imagination-srv')
@@ -836,7 +837,7 @@ if with_gallium_rusticl
 endif
 
 with_virtgpu_kumquat = get_option('virtgpu_kumquat') and with_gfxstream_vk
-if with_gallium_rusticl or with_nouveau_vk or with_tools.contains('etnaviv') or with_virtgpu_kumquat or with_panfrost_rust or with_borg_vk
+if with_gallium_rusticl or with_nouveau_vk or with_tools.contains('etnaviv') or with_virtgpu_kumquat or with_panfrost_rust or with_borgc
   # rust.bindgen() does not pass `--rust-target` to bindgen until 1.7.0.
   if meson.version().version_compare('< 1.7.0')
     error('Mesa Rust support requires Meson 1.7.0 or newer')
