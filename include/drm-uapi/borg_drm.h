@@ -39,13 +39,15 @@
 #define BORG_TEX_DIM   64
 
 /* ---- Driver-specific ioctl offsets ------------------------------------ */
-#define DRM_BORG_GEM_CREATE   0x00
-#define DRM_BORG_GEM_MMAP     0x01
-#define DRM_BORG_SETUP        0x02   /* one-time mesh+texture upload        */
-#define DRM_BORG_SUBMIT       0x03   /* per-frame MVP send                  */
-#define DRM_BORG_SHADER       0x04   /* upload a borgc-compiled shader blob */
-#define DRM_BORG_BLEND        0x05   /* colour-blend state (BLEND_CFG/CONST) */
-#define DRM_BORG_STATE        0x06   /* stencil/depth/cull state registers */
+/* 0x00-0x04 belong to the kernel driver (register and memory access, software/linux/overlay/include/uapi/drm/borg_drm.h);
+ * GEM_CREATE and GEM_MMAP are the kernel's too. SETUP and above exist only in the drm-shim. */
+#define DRM_BORG_GEM_CREATE   0x05
+#define DRM_BORG_GEM_MMAP     0x06
+#define DRM_BORG_SETUP        0x07   /* one-time mesh+texture upload        */
+#define DRM_BORG_SUBMIT       0x08   /* per-frame MVP send                  */
+#define DRM_BORG_SHADER       0x09   /* upload a borgc-compiled shader blob */
+#define DRM_BORG_BLEND        0x0a   /* colour-blend state (BLEND_CFG/CONST) */
+#define DRM_BORG_STATE        0x0b   /* stencil/depth/cull state registers */
 
 /* Max .borg blob the shader-upload path carries (must match the Vulkan side's
  * BORGVK_SHADER_BLOB_MAX and the firmware RX shader packet). cube.frag = 255 B
