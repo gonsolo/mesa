@@ -959,6 +959,37 @@ unsafe fn compile_nir_inner(
                                 vec_map.insert(alu.def.index, comps);
                             }
                         }
+                        // I2F is signed: convert the two 16-bit halves and join them
+                        // with one FMADD, which rounds once.
+                        nir_op_u2f16 | nir_op_u2f32 => {
+                            let s = &alu.srcs_as_slice()[0];
+                            let (x, xc) = resolve_vm(&vec_map, s.src.as_def().index, s.swizzle[0]);
+                            let mut kreg = |bits: u32| -> u32 {
+                                if !draw_mode || vs_const_window {
+                                    return const_int_operand(bits as i32, &mut const_int_reg, &mut const_reg_count,
+                                        &mut const_uniforms, &mut draw_vs_consts, &mut next_vreg, &mut ubo);
+                                }
+                                let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
+                                    assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
+                                    draw_uniform_count += 1;
+                                    draw_uniform_consts.push((19 + draw_uniform_count, bits));
+                                    19 + draw_uniform_count
+                                });
+                                next_vreg += 1;
+                                ubo.insert(next_vreg - 1, Ubo::Uniform(u as u8));
+                                next_vreg - 1
+                            };
+                            let c16 = kreg(16);
+                            let k = kreg(65536.0f32.to_bits());
+                            let v = next_vreg;
+                            next_vreg += 5;
+                            prog.push(BorgInstr { mnem: "ISRL", dst: v, srcs: vec![x, c16], swz: vec![xc, 0] });
+                            prog.push(BorgInstr { mnem: "ISHL", dst: v + 1, srcs: vec![v, c16], swz: vec![0, 0] });
+                            prog.push(BorgInstr { mnem: "ISUB", dst: v + 2, srcs: vec![x, v + 1], swz: vec![xc, 0] });
+                            prog.push(BorgInstr { mnem: "I2F", dst: v + 3, srcs: vec![v], swz: vec![0] });
+                            prog.push(BorgInstr { mnem: "I2F", dst: v + 4, srcs: vec![v + 2], swz: vec![0] });
+                            prog.push(BorgInstr { mnem: "FMADD", dst: alu.def.index, srcs: vec![v + 3, k, v + 4], swz: vec![0, 0, 0] });
+                        }
                         _ => {
                             if let Some(mnem) = borg_isel(alu.op) {
                                 if mnem != "mov" {
