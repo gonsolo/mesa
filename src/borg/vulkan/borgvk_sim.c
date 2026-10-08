@@ -169,6 +169,9 @@ sim_set_size(struct sim_srv *S, uint32_t w, uint32_t h)
    memcpy(a, r, sizeof(a));
    S->fb = a[0]; S->zb = a[1]; S->sb = a[2]; S->heap = a[3];
    S->att[1] = a[4]; S->att[2] = a[5]; S->att[3] = a[6];
+   /* the bin and setup regions move with the size and must not hold the old target */
+   if (S->heap > S->fb)
+      memset(S->mem + S->fb, 0, S->heap - S->fb);
    S->w = w; S->h = h;
    return true;
 }
