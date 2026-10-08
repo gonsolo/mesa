@@ -868,15 +868,55 @@ unsafe fn compile_nir_inner(
                             }
                         }
                         // fmax(0, x) → x · FSTEP(x)  (FSTEP(x)=1 if x>0 else 0).
-                        nir_op_fmax => {
+                        nir_op_fmax | nir_op_fmin => {
                             let s = alu.srcs_as_slice();
                             let a_zero = s[0].comp_as_uint(0) == Some(0);
-                            let xs = if a_zero { &s[1] } else { &s[0] };
-                            let x = resolve_vm(&vec_map, xs.src.as_def().index, xs.swizzle[0]);
-                            let vstep = next_vreg;
-                            next_vreg += 1;
-                            prog.push(BorgInstr { mnem: "FSTEP", dst: vstep, srcs: vec![x.0], swz: vec![x.1] });
-                            prog.push(BorgInstr { mnem: "FMUL", dst: alu.def.index, srcs: vec![x.0, vstep], swz: vec![x.1, 0] });
+                            let b_zero = s[1].comp_as_uint(0) == Some(0);
+                            if alu.op == nir_op_fmax && (a_zero || b_zero) {
+                                let xs = if a_zero { &s[1] } else { &s[0] };
+                                let x = resolve_vm(&vec_map, xs.src.as_def().index, xs.swizzle[0]);
+                                let vstep = next_vreg;
+                                next_vreg += 1;
+                                prog.push(BorgInstr { mnem: "FSTEP", dst: vstep, srcs: vec![x.0], swz: vec![x.1] });
+                                prog.push(BorgInstr { mnem: "FMUL", dst: alu.def.index, srcs: vec![x.0, vstep], swz: vec![x.1, 0] });
+                            } else {
+                                // max(a, b) = b + (a >= b) * (a - b); min(a, b) = a + (a >= b) * (b - a)
+                                let a = resolve_vm(&vec_map, s[0].src.as_def().index, s[0].swizzle[0]);
+                                let b = resolve_vm(&vec_map, s[1].src.as_def().index, s[1].swizzle[0]);
+                                let one = match one_vreg {
+                                    Some(v) => v,
+                                    None => {
+                                        let v = next_vreg;
+                                        next_vreg += 1;
+                                        if stage == 4 {
+                                            let c = next_vreg;
+                                            next_vreg += 1;
+                                            ubo.insert(c, Ubo::Fixed(30));
+                                            per_pixel_fixed.insert(c);
+                                            prog.push(BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
+                                        } else {
+                                            let reg = alloc_const_reg(&mut const_reg_count);
+                                            const_uniforms.push((reg, 1.0f32.to_bits()));
+                                            ubo.insert(v, Ubo::Fixed(reg));
+                                        }
+                                        one_vreg = Some(v);
+                                        v
+                                    }
+                                };
+                                let v = next_vreg;
+                                next_vreg += 8;
+                                prog.push(BorgInstr { mnem: "FNEG", dst: v, srcs: vec![a.0], swz: vec![a.1] });          // -a
+                                prog.push(BorgInstr { mnem: "FADD", dst: v + 1, srcs: vec![b.0, v], swz: vec![b.1, 0] }); // b - a
+                                prog.push(BorgInstr { mnem: "FSTEP", dst: v + 2, srcs: vec![v + 1], swz: vec![0] });      // a < b
+                                prog.push(BorgInstr { mnem: "FNEG", dst: v + 3, srcs: vec![v + 2], swz: vec![0] });
+                                prog.push(BorgInstr { mnem: "FADD", dst: v + 4, srcs: vec![one, v + 3], swz: vec![0, 0] }); // a >= b
+                                if alu.op == nir_op_fmax {
+                                    prog.push(BorgInstr { mnem: "FNEG", dst: v + 5, srcs: vec![v + 1], swz: vec![0] });    // a - b
+                                    prog.push(BorgInstr { mnem: "FMADD", dst: alu.def.index, srcs: vec![v + 4, v + 5, b.0], swz: vec![0, 0, b.1] });
+                                } else {
+                                    prog.push(BorgInstr { mnem: "FMADD", dst: alu.def.index, srcs: vec![v + 4, v + 1, a.0], swz: vec![0, 0, a.1] });
+                                }
+                            }
                         }
                         // linearToSrgb idiom → FSRGB: bcsel(fge(knee,x), x·12.92,
                         // 1.055·pow(x,1/2.4)-0.055). Recognised by the linear branch
@@ -960,8 +1000,70 @@ unsafe fn compile_nir_inner(
                                 vec_map.insert(alu.def.index, comps);
                             }
                         }
-                        // I2F is signed: convert the two 16-bit halves and join them
-                        // with one FMADD, which rounds once.
+                        // max/min of integers: a + (a < b) * (b - a) for max, b + (a < b) * (a - b) for min.
+                        nir_op_umax | nir_op_umin | nir_op_imax | nir_op_imin => {
+                            let sl = alu.srcs_as_slice();
+                            let a = resolve_vm(&vec_map, sl[0].src.as_def().index, sl[0].swizzle[0]);
+                            let b = resolve_vm(&vec_map, sl[1].src.as_def().index, sl[1].swizzle[0]);
+                            let lt = if matches!(alu.op, nir_op_umax | nir_op_umin) { "ISLTU" } else { "ISLT" };
+                            let is_max = matches!(alu.op, nir_op_umax | nir_op_imax);
+                            let (p, q) = if is_max { (a, b) } else { (b, a) };
+                            let v = next_vreg;
+                            next_vreg += 3;
+                            prog.push(BorgInstr { mnem: lt, dst: v, srcs: vec![a.0, b.0], swz: vec![a.1, b.1] });
+                            prog.push(BorgInstr { mnem: "ISUB", dst: v + 1, srcs: vec![q.0, p.0], swz: vec![q.1, p.1] });
+                            prog.push(BorgInstr { mnem: "IMUL", dst: v + 2, srcs: vec![v, v + 1], swz: vec![0, 0] });
+                            prog.push(BorgInstr { mnem: "IADD", dst: alu.def.index, srcs: vec![p.0, v + 2], swz: vec![p.1, 0] });
+                        }
+                        // |x|: clear the sign bit.
+                        nir_op_fabs => {
+                            let sl = &alu.srcs_as_slice()[0];
+                            let (x, xc) = resolve_vm(&vec_map, sl.src.as_def().index, sl.swizzle[0]);
+                            let mut kreg = |bits: u32| -> u32 {
+                                if !draw_mode || vs_const_window {
+                                    return const_int_operand(bits as i32, &mut const_int_reg, &mut const_reg_count,
+                                        &mut const_uniforms, &mut draw_vs_consts, &mut next_vreg, &mut ubo);
+                                }
+                                let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
+                                    assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
+                                    draw_uniform_count += 1;
+                                    draw_uniform_consts.push((19 + draw_uniform_count, bits));
+                                    19 + draw_uniform_count
+                                });
+                                next_vreg += 1;
+                                ubo.insert(next_vreg - 1, Ubo::Uniform(u as u8));
+                                next_vreg - 1
+                            };
+                            let m = kreg(0x7fff_ffff);
+                            prog.push(BorgInstr { mnem: "IAND", dst: alu.def.index, srcs: vec![x, m], swz: vec![xc, 0] });
+                        }
+                        // A condition is 1.0 or 0.0: its inverse is 1.0 - c.
+                        nir_op_inot if alu.def.bit_size == 1 => {
+                            let sl = &alu.srcs_as_slice()[0];
+                            let (x, xc) = resolve_vm(&vec_map, sl.src.as_def().index, sl.swizzle[0]);
+                            let mut kreg = |bits: u32| -> u32 {
+                                if !draw_mode || vs_const_window {
+                                    return const_int_operand(bits as i32, &mut const_int_reg, &mut const_reg_count,
+                                        &mut const_uniforms, &mut draw_vs_consts, &mut next_vreg, &mut ubo);
+                                }
+                                let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
+                                    assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
+                                    draw_uniform_count += 1;
+                                    draw_uniform_consts.push((19 + draw_uniform_count, bits));
+                                    19 + draw_uniform_count
+                                });
+                                next_vreg += 1;
+                                ubo.insert(next_vreg - 1, Ubo::Uniform(u as u8));
+                                next_vreg - 1
+                            };
+                            let one = kreg(1.0f32.to_bits());
+                            let n = next_vreg;
+                            next_vreg += 1;
+                            prog.push(BorgInstr { mnem: "FNEG", dst: n, srcs: vec![x], swz: vec![xc] });
+                            prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![n, one], swz: vec![0, 0] });
+                        }
+                        // I2F is signed: convert x >> 1 and x & 1 and join them with one FMADD,
+                        // which rounds once.
                         nir_op_u2f16 | nir_op_u2f32 => {
                             let s = &alu.srcs_as_slice()[0];
                             let (x, xc) = resolve_vm(&vec_map, s.src.as_def().index, s.swizzle[0]);
@@ -980,13 +1082,12 @@ unsafe fn compile_nir_inner(
                                 ubo.insert(next_vreg - 1, Ubo::Uniform(u as u8));
                                 next_vreg - 1
                             };
-                            let c16 = kreg(16);
-                            let k = kreg(65536.0f32.to_bits());
+                            let c1 = kreg(1);
+                            let k = kreg(2.0f32.to_bits());
                             let v = next_vreg;
                             next_vreg += 5;
-                            prog.push(BorgInstr { mnem: "ISRL", dst: v, srcs: vec![x, c16], swz: vec![xc, 0] });
-                            prog.push(BorgInstr { mnem: "ISHL", dst: v + 1, srcs: vec![v, c16], swz: vec![0, 0] });
-                            prog.push(BorgInstr { mnem: "ISUB", dst: v + 2, srcs: vec![x, v + 1], swz: vec![xc, 0] });
+                            prog.push(BorgInstr { mnem: "ISRL", dst: v, srcs: vec![x, c1], swz: vec![xc, 0] });
+                            prog.push(BorgInstr { mnem: "IAND", dst: v + 2, srcs: vec![x, c1], swz: vec![xc, 0] });
                             prog.push(BorgInstr { mnem: "I2F", dst: v + 3, srcs: vec![v], swz: vec![0] });
                             prog.push(BorgInstr { mnem: "I2F", dst: v + 4, srcs: vec![v + 2], swz: vec![0] });
                             prog.push(BorgInstr { mnem: "FMADD", dst: alu.def.index, srcs: vec![v + 3, k, v + 4], swz: vec![0, 0, 0] });
@@ -2327,7 +2428,7 @@ unsafe fn compile_nir_inner(
         // it and changes the checked-in shader_blobs.h), r20-23 TEX (the
         // full RGBA result block, needed whenever there is a TEX call in
         // either mode), r26-29 outputs.
-        extra_reserved.extend_from_slice(&[4, 21, 22, 23, 26, 27, 28, 29]);
+        extra_reserved.extend_from_slice(&[4, 21, 22, 23, 25, 26, 27, 28, 29]);   // r25 is the kill flag
         if draw_mode {
             // r5-7: the draw front end's perspective-correct barycentrics,
             // read directly out of fixed registers by every load_input call
@@ -2371,7 +2472,13 @@ unsafe fn compile_nir_inner(
         }
     }
 
-    let alloc = regalloc(&prog, &forced, &extra_reserved);
+    let soft: Vec<u8> = if stage == 4 && draw_mode { vec![20, 21, 22, 23, 24, 26, 27, 28] } else { Vec::new() };
+    let mut block_len: HashMap<u32, u8> = HashMap::new();
+    for &t in &tex_dsts {
+        block_len.insert(t, 4);
+    }
+    extra_reserved.retain(|r| !soft.contains(r));
+    let alloc = regalloc(&prog, &forced, &extra_reserved, &soft, &block_len);
 
     // Encode the selected+allocated instructions into Borg machine words, pinning
     // shader inputs to the firmware's uniform convention. The Borg core has ONE

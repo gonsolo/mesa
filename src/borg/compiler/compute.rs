@@ -462,7 +462,7 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
         }
     }
     let reserved: Vec<u8> = em.cmap.values().copied().chain([30u8, 31, 12, 13, 14]).collect();
-    let alloc = regalloc(&bp, &HashMap::new(), &reserved);
+    let alloc = regalloc(&bp, &HashMap::new(), &reserved, &[], &HashMap::new());
     let phys = |x: u32| -> u8 { if x >= PHYS { (x - PHYS) as u8 } else { *alloc.get(&x).unwrap_or(&0) } };
     for i in &em.prog {
         if i.mnem == "RAW" {

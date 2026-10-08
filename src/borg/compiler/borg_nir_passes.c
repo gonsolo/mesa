@@ -118,6 +118,47 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
    return nir_load_ssbo(b, 4, 32, nir_channel(b, desc, 0), off, .align_mul = 16);
 }
 
+/* Cube sampling: the hardware takes the face (TEXA's layer) and the face coordinates s, t in
+ * [0, 1]; the direction's major-axis projection is done here (Vulkan 16.5.4). The cube
+ * becomes a 2D array sample whose layer is the face. */
+static bool
+borg_lower_cube(nir_builder *b, nir_instr *instr, void *data)
+{
+   if (instr->type != nir_instr_type_tex)
+      return false;
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+   if (tex->sampler_dim != GLSL_SAMPLER_DIM_CUBE || tex->is_array)
+      return false;
+   const int ci = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   if (ci < 0)
+      return false;
+   b->cursor = nir_before_instr(instr);
+   nir_def *c = tex->src[ci].src.ssa;
+   nir_def *x = nir_channel(b, c, 0), *y = nir_channel(b, c, 1), *z = nir_channel(b, c, 2);
+   /* Non-negative floats order like their bits: the comparisons are integer ones, two
+    * instructions each. A sign test is the sign bit. */
+   nir_def *ax = nir_fabs(b, x), *ay = nir_fabs(b, y), *az = nir_fabs(b, z);
+   nir_def *xneg = nir_ilt_imm(b, x, 0), *yneg = nir_ilt_imm(b, y, 0), *zneg = nir_ilt_imm(b, z, 0);
+   nir_def *nx = nir_fneg(b, x), *ny = nir_fneg(b, y), *nz = nir_fneg(b, z);
+   /* per major axis: |ma|, sc, tc, face */
+   nir_def *X[4] = { ax, nir_bcsel(b, xneg, z, nz), ny, nir_b2f32(b, xneg) };
+   nir_def *Y[4] = { ay, x, nir_bcsel(b, yneg, nz, z), nir_fadd_imm(b, nir_b2f32(b, yneg), 2.0) };
+   nir_def *Z[4] = { az, nir_bcsel(b, zneg, nx, x), ny, nir_fadd_imm(b, nir_b2f32(b, zneg), 4.0) };
+   nir_def *x_over_y = nir_ult(b, ay, ax);                          /* X beats Y; ties go to Y */
+   nir_def *not_z = nir_ior(b, nir_ult(b, az, ax), nir_ult(b, az, ay));   /* Z wins ties */
+   nir_def *r[4];
+   for (int i = 0; i < 4; i++)
+      r[i] = nir_bcsel(b, not_z, nir_bcsel(b, x_over_y, X[i], Y[i]), Z[i]);
+   nir_def *half_inv = nir_fmul_imm(b, nir_frcp(b, r[0]), 0.5f);
+   nir_def *half = nir_imm_float(b, 0.5f);
+   nir_def *st = nir_vec3(b, nir_ffma(b, r[1], half_inv, half), nir_ffma(b, r[2], half_inv, half), r[3]);
+   nir_src_rewrite(&tex->src[ci].src, st);
+   tex->coord_components = 3;
+   tex->is_array = true;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   return true;
+}
+
 #ifdef BORG_SMALL_NIR
 /* nir_opt_algebraic's tables are 8.6 MB; the on-board build lowers only what the ISA lacks. */
 static bool
@@ -210,6 +251,8 @@ borg_lower_nir_for_borgc(struct nir_shader *nir)
    /* Lower/optimize toward the Borg ISA: scalarize, then fold and lower ALU ops
     * (fsub→fadd, fdiv→fmul·frcp via lower_fdiv, fdot→fmul+ffma, constant
     * folding) so the backend sees the small supported op set. */
+   if (nir->info.stage == MESA_SHADER_FRAGMENT)
+      NIR_PASS(_, nir, nir_shader_instructions_pass, borg_lower_cube, nir_metadata_control_flow, NULL);
    NIR_PASS(_, nir, nir_lower_alu_to_scalar, NULL, NULL);
    bool progress;
    do {

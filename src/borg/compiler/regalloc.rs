@@ -16,6 +16,8 @@ pub(crate) fn regalloc(
     prog: &[BorgInstr],
     forced: &std::collections::HashMap<u32, u8>,
     extra_reserved: &[u8],
+    soft: &[u8],
+    block_len: &std::collections::HashMap<u32, u8>,
 ) -> std::collections::HashMap<u32, u8> {
     use std::collections::HashMap;
 
@@ -47,8 +49,26 @@ pub(crate) fn regalloc(
     // run (a legacy vertex shader, always; a draw-mode one, never -- see
     // lib.rs) -- it used to be unconditional here, back when every vertex
     // shader ran that epilogue.
-    let reserved: std::collections::HashSet<u8> =
-        forced.values().copied().chain(extra_reserved.iter().copied()).collect();
+    // `soft` registers (the TEX result block, the colour outputs) are free for temporaries
+    // outside the interval of the pre-coloured value that owns them: a TEX block from the TEX to
+    // its last use, an output from its definition to the end of the shader.
+    let mut busy: HashMap<u8, Vec<(usize, usize)>> = HashMap::new();
+    for (&v, &r) in forced {
+        if !soft.contains(&r) {
+            continue;
+        }
+        let Some(&st) = def_at.get(&v) else { continue };
+        let en = if block_len.get(&v).copied().unwrap_or(1) > 1 { last_use.get(&v).copied().unwrap_or(st) } else { prog.len() };
+        for k in 0..block_len.get(&v).copied().unwrap_or(1) {
+            busy.entry(r + k).or_default().push((st, en));
+        }
+    }
+    let reserved: std::collections::HashSet<u8> = forced
+        .values()
+        .copied()
+        .filter(|r| !soft.contains(r))
+        .chain(extra_reserved.iter().copied())
+        .collect();
     let mut free: Vec<u8> = (0..NUM_GPRS).rev().filter(|r| !reserved.contains(r)).collect();
     let mut active: Vec<(usize, u8)> = Vec::new(); // (live_end, phys_reg)
     let mut alloc: HashMap<u32, u8> = HashMap::new();
@@ -62,8 +82,10 @@ pub(crate) fn regalloc(
         // Pre-colored value (gl_Position component): pin to its output register.
         if let Some(&r) = forced.get(&v) {
             alloc.insert(v, r);
-            active.push((end, r));
-            peak = peak.max(active.len());
+            if !soft.contains(&r) {
+                active.push((end, r));
+                peak = peak.max(active.len());
+            }
             continue;
         }
 
@@ -80,8 +102,10 @@ pub(crate) fn regalloc(
         }
         active = keep;
 
-        match free.pop() {
-            Some(r) => {
+        let fits = |r: u8| busy.get(&r).map_or(true, |l| l.iter().all(|&(a, b)| end < a || start > b));
+        match free.iter().rposition(|&r| fits(r)) {
+            Some(i) => {
+                let r = free.remove(i);
                 alloc.insert(v, r);
                 active.push((end, r));
             }
