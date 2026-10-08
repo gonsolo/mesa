@@ -375,6 +375,9 @@ struct borgvk_descriptor_set_layout {
 
 struct borgvk_descriptor_pool {
    struct vk_object_base base;
+   struct list_head sets;       /* every live set allocated from this pool */
+   uint32_t max_sets;
+   uint32_t num_sets;
 };
 
 /* A descriptor set remembers which buffer/image/sampler is bound at each
@@ -383,6 +386,8 @@ struct borgvk_descriptor_pool {
  * sampler). */
 struct borgvk_descriptor_set {
    struct vk_object_base base;
+   struct list_head link;       /* in the pool's list */
+   struct borgvk_descriptor_pool *pool;
    struct borgvk_buffer *buffers[BORGVK_MAX_BINDINGS];
    VkDeviceSize offsets[BORGVK_MAX_BINDINGS];
    VkDeviceSize ranges[BORGVK_MAX_BINDINGS];

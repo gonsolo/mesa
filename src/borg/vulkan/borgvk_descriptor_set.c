@@ -93,9 +93,21 @@ borgvk_CreateDescriptorPool(VkDevice _device,
                            VK_OBJECT_TYPE_DESCRIPTOR_POOL);
    if (!pool)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+   list_inithead(&pool->sets);
+   pool->max_sets = pCreateInfo->maxSets;
 
    *pDescriptorPool = borgvk_descriptor_pool_to_handle(pool);
    return VK_SUCCESS;
+}
+
+static void
+free_pool_sets(struct borgvk_device *device, struct borgvk_descriptor_pool *pool)
+{
+   list_for_each_entry_safe(struct borgvk_descriptor_set, set, &pool->sets, link) {
+      list_del(&set->link);
+      vk_object_free(&device->vk, NULL, set);
+   }
+   pool->num_sets = 0;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -108,6 +120,7 @@ borgvk_DestroyDescriptorPool(VkDevice _device, VkDescriptorPool _pool,
    if (!pool)
       return;
 
+   free_pool_sets(device, pool);
    vk_object_free(&device->vk, pAllocator, pool);
 }
 
@@ -115,6 +128,10 @@ VKAPI_ATTR VkResult VKAPI_CALL
 borgvk_ResetDescriptorPool(VkDevice _device, VkDescriptorPool _pool,
                            VkDescriptorPoolResetFlags flags)
 {
+   VK_FROM_HANDLE(borgvk_device, device, _device);
+   VK_FROM_HANDLE(borgvk_descriptor_pool, pool, _pool);
+
+   free_pool_sets(device, pool);
    return VK_SUCCESS;
 }
 
@@ -126,8 +143,12 @@ borgvk_AllocateDescriptorSets(VkDevice _device,
                               VkDescriptorSet *pDescriptorSets)
 {
    VK_FROM_HANDLE(borgvk_device, device, _device);
+   VK_FROM_HANDLE(borgvk_descriptor_pool, pool, pAllocateInfo->descriptorPool);
    VkResult result = VK_SUCCESS;
    uint32_t i;
+
+   if (pool->num_sets + pAllocateInfo->descriptorSetCount > pool->max_sets)
+      return vk_error(device, VK_ERROR_OUT_OF_POOL_MEMORY);
 
    for (i = 0; i < pAllocateInfo->descriptorSetCount; i++) {
       struct borgvk_descriptor_set *set =
@@ -144,12 +165,17 @@ borgvk_AllocateDescriptorSets(VkDevice _device,
             set->map = l->map;
          }
       }
+      set->pool = pool;
+      list_addtail(&set->link, &pool->sets);
+      pool->num_sets++;
       pDescriptorSets[i] = borgvk_descriptor_set_to_handle(set);
    }
 
    if (result != VK_SUCCESS) {
       for (uint32_t j = 0; j < i; j++) {
          VK_FROM_HANDLE(borgvk_descriptor_set, set, pDescriptorSets[j]);
+         list_del(&set->link);
+         pool->num_sets--;
          vk_object_free(&device->vk, NULL, set);
          pDescriptorSets[j] = VK_NULL_HANDLE;
       }
@@ -165,8 +191,11 @@ borgvk_FreeDescriptorSets(VkDevice _device, VkDescriptorPool pool,
 
    for (uint32_t i = 0; i < count; i++) {
       VK_FROM_HANDLE(borgvk_descriptor_set, set, pDescriptorSets[i]);
-      if (set)
+      if (set) {
+         list_del(&set->link);
+         set->pool->num_sets--;
          vk_object_free(&device->vk, NULL, set);
+      }
    }
    return VK_SUCCESS;
 }
