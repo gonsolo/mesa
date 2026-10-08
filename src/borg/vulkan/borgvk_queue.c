@@ -879,8 +879,48 @@ borgvk_submit_sim_cube(struct borgvk_device *device,
    return sim_run_stream(bytes, nbytes, color_img, 0);
 }
 
-/* Convert a sampled image to texels the texture unit reads (RGBA8, linear,
- * one level) and ship it as 0xB5 chunks. Returns false for formats not handled
+/* A format's source texel to the hardware's: copied, widened from three channels or R/B
+ * swapped (cs bytes per channel), repacked 16-bit, or a depth part cut from depth/stencil. */
+struct tex_conv {
+   uint32_t bpp, obpp, cs, sch, alpha, pack16, zstride;
+   bool swap_rb;
+};
+
+static void
+tex_convert(const struct tex_conv *c, uint8_t *dst, const uint8_t *src, uint32_t n)
+{
+   const uint32_t bpp = c->bpp, obpp = c->obpp, cs = c->cs;
+   if (!c->sch && !c->pack16 && !c->zstride)
+      memcpy(dst, src, (size_t)n * obpp);
+   for (uint32_t i = 0; c->zstride && i < n; i++)
+      memcpy(dst + (size_t)i * obpp, src + (size_t)i * c->zstride, obpp);
+   for (uint32_t i = 0; c->sch && i < n; i++) {
+      const uint8_t *p = src + (size_t)i * bpp;
+      uint8_t *d = dst + (size_t)i * obpp;
+      memcpy(d, p + (c->swap_rb ? 2 * cs : 0), cs);
+      memcpy(d + cs, p + cs, cs);
+      memcpy(d + 2 * cs, p + (c->swap_rb ? 0 : 2 * cs), cs);
+      memcpy(d + 3 * cs, c->sch == 4 ? p + 3 * cs : (const uint8_t *)&c->alpha, cs);
+   }
+   for (uint32_t i = 0; c->pack16 && i < n; i++) {
+      uint32_t v = 0;
+      memcpy(&v, src + (size_t)i * bpp, bpp);
+      switch (c->pack16) {
+      case 1: v = (v >> 11) | (v & 0x07e0) | ((v & 0x1f) << 11); break;
+      case 2: v = ((v & 1) << 15) | (v >> 1); break;
+      case 3: v = ((v & 1) << 15) | ((v & 0x3e) << 9) | ((v >> 1) & 0x03e0) | (v >> 11); break;
+      case 4: v = ((v & 0x00f0) << 8) | (v & 0x0f0f) | ((v >> 8) & 0x00f0); break;
+      case 5: v = ((v >> 4) * 17) | ((v & 0xf) * 17) << 8; break;
+      case 7: v = ((v & 0xf) << 12) | ((v & 0xf0) << 4) | ((v >> 4) & 0xf0) | (v >> 12); break;
+      case 8: v = ((v & 0xf00) << 4) | ((v & 0xf0) << 4) | ((v & 0xf) << 4) | (v >> 12); break;
+      default: v = (v & 0xc00ffc00) | ((v >> 20) & 0x3ff) | ((v & 0x3ff) << 20); break;
+      }
+      memcpy(dst + (size_t)i * obpp, &v, obpp);
+   }
+}
+
+/* Convert a sampled image to texels the texture unit reads (linear for one level,
+ * tiled for several) and ship it as 0xB5 chunks. Returns false for formats not handled
  * yet, in which case nothing is sent. */
 static bool
 send_generic_texture(const struct vk_image_view *view,
@@ -959,56 +999,90 @@ send_generic_texture(const struct vk_image_view *view,
 #undef P16FMT
    default: return false;
    }
-   uint32_t obpp = sch ? cs * 4 : pack16 == 5 ? 2 : bpp;
-   /* the firmware writes whole words: pad the tail */
-   uint32_t total = align(w * h * obpp, 4);
-   uint8_t *rgba = calloc(1, total);
-   if (!rgba)
+   const struct tex_conv tc = { bpp, sch ? cs * 4 : pack16 == 5 ? 2 : bpp, cs, sch, alpha, pack16, zstride, swap_rb };
+   const uint32_t obpp = tc.obpp, sbpp = zstride ? zstride : bpp;
+   const uint32_t base = view->base_mip_level;
+   const uint32_t levels = base < img->vk.mip_levels ? MIN2(view->level_count, img->vk.mip_levels - base) : 0;
+   if (levels == 0 || levels > 13)
       return false;
-   const uint8_t *src = (const uint8_t *)img->mem->map + img->offset;
-   if (!sch && !pack16 && !zstride)
-      memcpy(rgba, src, w * h * obpp);
-   for (uint32_t i = 0; zstride && i < w * h; i++)
-      memcpy(rgba + (size_t)i * obpp, src + (size_t)i * zstride, obpp);
-   for (uint32_t i = 0; sch && i < w * h; i++) {
-      const uint8_t *p = src + (size_t)i * bpp;
-      uint8_t *d = rgba + (size_t)i * obpp;
-      memcpy(d, p + (swap_rb ? 2 * cs : 0), cs);
-      memcpy(d + cs, p + cs, cs);
-      memcpy(d + 2 * cs, p + (swap_rb ? 0 : 2 * cs), cs);
-      memcpy(d + 3 * cs, sch == 4 ? p + 3 * cs : (const uint8_t *)&alpha, cs);
-   }
-   for (uint32_t i = 0; pack16 && i < w * h; i++) {
-      uint32_t v = 0;
-      memcpy(&v, src + (size_t)i * bpp, bpp);
-      switch (pack16) {
-      case 1: v = (v >> 11) | (v & 0x07e0) | ((v & 0x1f) << 11); break;
-      case 2: v = ((v & 1) << 15) | (v >> 1); break;
-      case 3: v = ((v & 1) << 15) | ((v & 0x3e) << 9) | ((v >> 1) & 0x03e0) | (v >> 11); break;
-      case 4: v = ((v & 0x00f0) << 8) | (v & 0x0f0f) | ((v >> 8) & 0x00f0); break;
-      case 5: v = ((v >> 4) * 17) | ((v & 0xf) * 17) << 8; break;
-      case 7: v = ((v & 0xf) << 12) | ((v & 0xf0) << 4) | ((v >> 4) & 0xf0) | (v >> 12); break;
-      case 8: v = ((v & 0xf00) << 4) | ((v & 0xf0) << 4) | ((v & 0xf) << 4) | (v >> 12); break;
-      default: v = (v & 0xc00ffc00) | ((v >> 20) & 0x3ff) | ((v & 0x3ff) << 20); break;
-      }
-      memcpy(rgba + (size_t)i * obpp, &v, obpp);
-   }
 
-   /* descriptor words 1..3: linear layout, one level, view swizzle (the
-    * VkComponentSwizzle values are the hardware's own encoding). */
+   /* the source image keeps its levels one after the other, rows packed */
+   uint32_t lw[13], lh[13];
+   uint64_t soff[13], sum = 0;
+   for (uint32_t l = 0; l < base + levels; l++) {
+      uint32_t cw = MAX2(img->vk.extent.width >> l, 1), ch = type ? MAX2(img->vk.extent.height >> l, 1) : 1;
+      if (l >= base) {
+         lw[l - base] = cw;
+         lh[l - base] = ch;
+         soff[l - base] = sum;
+      }
+      sum += (uint64_t)cw * ch * sbpp;
+   }
+   w = lw[0];
+   h = lh[0];
+   const uint8_t *src = (const uint8_t *)img->mem->map + img->offset;
+
+   /* One level is linear. Several are tiled (4x4 texels, a 16-byte texel in two halves),
+    * level after level, their offsets from the base sent ahead in a 0xC0 packet. */
+   uint32_t offs[12] = { 0 }, total = 0;
+   uint8_t *out = NULL;
+   if (levels == 1) {
+      total = align(w * h * obpp, 4);
+      out = calloc(1, total);
+      if (out)
+         tex_convert(&tc, out, src + soff[0], w * h);
+   } else {
+      uint32_t lsz[13];
+      for (uint32_t l = 0; l < levels; l++) {
+         lsz[l] = ((lw[l] + 3) / 4) * ((lh[l] + 3) / 4) * 16 * obpp;
+         if (l)
+            offs[l - 1] = total;
+         total += lsz[l];
+      }
+      out = total <= 0x70000 ? calloc(1, total) : NULL;
+      uint8_t *lin = out ? malloc((size_t)w * h * obpp) : NULL;
+      if (!lin) {
+         free(out);
+         return false;
+      }
+      for (uint32_t l = 0; l < levels; l++) {
+         const uint32_t tw = (lw[l] + 3) / 4;
+         uint8_t *lev = out + (l ? offs[l - 1] : 0);
+         tex_convert(&tc, lin, src + soff[l], lw[l] * lh[l]);
+         for (uint32_t y = 0; y < lh[l]; y++)
+            for (uint32_t x = 0; x < lw[l]; x++) {
+               const uint8_t *t = lin + ((size_t)y * lw[l] + x) * obpp;
+               const uint32_t tile = (y >> 2) * tw + (x >> 2), ti = (y & 3) * 4 + (x & 3);
+               if (obpp == 16) {
+                  memcpy(lev + tile * 256 + ti * 8, t, 8);
+                  memcpy(lev + tile * 256 + 128 + ti * 8, t + 8, 8);
+               } else {
+                  memcpy(lev + ((size_t)tile * 16 + ti) * obpp, t, obpp);
+               }
+            }
+      }
+      free(lin);
+   }
+   if (!out)
+      return false;
+
+   /* descriptor words 1..3: layout, levels, view swizzle (the VkComponentSwizzle
+    * values are the hardware's own encoding). */
    uint32_t desc[3];
-   desc[0] = (w - 1) | ((h - 1) << 16) | (type << 28) | (1u << 30);
-   desc[1] = (fmt_code << 14) |
+   desc[0] = (w - 1) | ((h - 1) << 16) | (type << 28) | (levels == 1 ? 1u << 30 : 0);
+   desc[1] = (fmt_code << 14) | ((levels - 1) << 10) |
              ((uint32_t)(view->swizzle.r & 7) << 20) |
              ((uint32_t)(view->swizzle.g & 7) << 23) |
              ((uint32_t)(view->swizzle.b & 7) << 26) |
              ((uint32_t)(view->swizzle.a & 7) << 29);
-   desc[2] = w * obpp;
+   desc[2] = levels == 1 ? w * obpp : total;
+   if (levels > 1)
+      borgvk_serial_send_texture_levels(offs);
    for (uint32_t off = 0; off < total; off += BORGVK_TEXG_CHUNK) {
       uint32_t n = total - off < BORGVK_TEXG_CHUNK ? total - off : BORGVK_TEXG_CHUNK;
-      borgvk_serial_send_texture_chunk(off, rgba + off, n, desc, sampler_desc(sampler));
+      borgvk_serial_send_texture_chunk(off, out + off, n, desc, sampler_desc(sampler));
    }
-   free(rgba);
+   free(out);
    return true;
 }
 

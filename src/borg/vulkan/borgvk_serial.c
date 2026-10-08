@@ -701,3 +701,21 @@ borgvk_serial_send_texture_chunk(uint32_t off, const uint8_t *data, uint32_t n,
    pkt[sizeof(pkt) - 1] = csum;
    borgvk_transport_emit(pkt, sizeof(pkt));
 }
+
+#define BORGVK_MARKER_TEXL 0xC0
+/* 0xC0: marker, the byte offsets of levels 1..12 (LE u32 each), checksum. Precedes the 0xB5
+ * chunks of a texture with several levels. */
+void
+borgvk_serial_send_texture_levels(const uint32_t offs[12])
+{
+   uint8_t pkt[1 + 48 + 1] = { 0 };
+   pkt[0] = BORGVK_MARKER_TEXL;
+   for (int w = 0; w < 12; w++)
+      for (int i = 0; i < 4; i++)
+         pkt[1 + 4 * w + i] = (uint8_t)(offs[w] >> (8 * i));
+   uint8_t csum = 0;
+   for (size_t i = 1; i < sizeof(pkt) - 1; i++)
+      csum ^= pkt[i];
+   pkt[sizeof(pkt) - 1] = csum;
+   borgvk_transport_emit(pkt, sizeof(pkt));
+}

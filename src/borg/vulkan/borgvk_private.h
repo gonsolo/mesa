@@ -229,6 +229,7 @@ void borgvk_serial_send_draw(uint32_t topology, uint32_t index_type, uint32_t re
 void borgvk_serial_send_texture_chunk(uint32_t off, const uint8_t *data, uint32_t n,
                                       const uint32_t desc_w123[3],
                                       const uint32_t sampler[4]);
+void borgvk_serial_send_texture_levels(const uint32_t offs[12]);
 /* Pack a pipeline's stencil, depth and cull state into register layout. */
 void borgvk_state_pack(const VkGraphicsPipelineCreateInfo *ci, uint32_t reg[5]);
 
