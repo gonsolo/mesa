@@ -882,7 +882,7 @@ borgvk_submit_sim_cube(struct borgvk_device *device,
 /* A format's source texel to the hardware's: copied, widened from three channels or R/B
  * swapped (cs bytes per channel), repacked 16-bit, or a depth part cut from depth/stencil. */
 struct tex_conv {
-   uint32_t bpp, obpp, cs, sch, alpha, pack16, zstride;
+   uint32_t bpp, obpp, cs, sch, alpha, pack16, zstride, soff;
    bool swap_rb;
 };
 
@@ -893,7 +893,7 @@ tex_convert(const struct tex_conv *c, uint8_t *dst, const uint8_t *src, uint32_t
    if (!c->sch && !c->pack16 && !c->zstride)
       memcpy(dst, src, (size_t)n * obpp);
    for (uint32_t i = 0; c->zstride && i < n; i++)
-      memcpy(dst + (size_t)i * obpp, src + (size_t)i * c->zstride, obpp);
+      memcpy(dst + (size_t)i * obpp, src + (size_t)i * c->zstride + c->soff, obpp);
    for (uint32_t i = 0; c->sch && i < n; i++) {
       const uint8_t *p = src + (size_t)i * bpp;
       uint8_t *d = dst + (size_t)i * obpp;
@@ -933,8 +933,7 @@ send_generic_texture(const struct vk_image_view *view,
    if (w == 0 || h == 0 || w > 4096 || h > 4096)
       return false;
    uint32_t type;
-   if (view->aspects & VK_IMAGE_ASPECT_STENCIL_BIT)
-      return false;
+   const bool stencil = view->aspects & VK_IMAGE_ASPECT_STENCIL_BIT;
    uint32_t layers = 1, depth = 1;
    switch (view->view_type) {
    case VK_IMAGE_VIEW_TYPE_1D_ARRAY: layers = view->layer_count; type = 0; h = 1; break;
@@ -951,7 +950,7 @@ send_generic_texture(const struct vk_image_view *view,
    /* source texel layout -> a TexFormat code (borg_isa.h) and its texels:
     * copied (RAWFMT), widened from three channels or R/B swapped (CHFMT, cs bytes
     * per channel), or 16-bit repacked (pack16). */
-   uint32_t bpp, fmt_code, cs = 0, sch = 0, alpha = 0, pack16 = 0, zstride = 0;
+   uint32_t bpp, fmt_code, cs = 0, sch = 0, alpha = 0, pack16 = 0, zstride = 0, sten_off = 0;
    bool swap_rb = false;
    switch (view->format) {
 #define RAWFMT(vk, code, bytes) case VK_FORMAT_##vk: bpp = bytes; fmt_code = code; break;
@@ -1006,7 +1005,16 @@ send_generic_texture(const struct vk_image_view *view,
 #undef P16FMT
    default: return false;
    }
-   const struct tex_conv tc = { bpp, sch ? cs * 4 : pack16 == 5 ? 2 : bpp, cs, sch, alpha, pack16, zstride, swap_rb };
+   if (stencil) {
+      switch (view->format) {
+      case VK_FORMAT_D16_UNORM_S8_UINT:  zstride = 3; sten_off = 2; break;
+      case VK_FORMAT_D24_UNORM_S8_UINT:  zstride = 4; sten_off = 3; break;
+      case VK_FORMAT_D32_SFLOAT_S8_UINT: zstride = 8; sten_off = 4; break;
+      default: return false;
+      }
+      bpp = 1; fmt_code = 3;
+   }
+   const struct tex_conv tc = { bpp, sch ? cs * 4 : pack16 == 5 ? 2 : bpp, cs, sch, alpha, pack16, zstride, sten_off, swap_rb };
    const uint32_t obpp = tc.obpp, sbpp = zstride ? zstride : bpp;
    const uint32_t base = view->base_mip_level;
    const uint32_t levels = base < img->vk.mip_levels ? MIN2(view->level_count, img->vk.mip_levels - base) : 0;
@@ -1085,13 +1093,20 @@ send_generic_texture(const struct vk_image_view *view,
 
    /* descriptor words 1..3: layout, levels, depth or layers, view swizzle (the
     * VkComponentSwizzle values are the hardware's own encoding). */
+   uint32_t sw[4] = { view->swizzle.r, view->swizzle.g, view->swizzle.b, view->swizzle.a };
+   const bool no_alpha = sch && !util_format_has_alpha(vk_format_to_pipe_format(view->format));
+   for (uint32_t i = 0; no_alpha && i < 4; i++) {
+      const uint32_t src = sw[i] == VK_COMPONENT_SWIZZLE_IDENTITY ? VK_COMPONENT_SWIZZLE_R + i : sw[i];
+      if (src == VK_COMPONENT_SWIZZLE_A)
+         sw[i] = VK_COMPONENT_SWIZZLE_ONE;
+   }
    uint32_t desc[3];
    desc[0] = (w - 1) | ((h - 1) << 16) | (type << 28) | (tiled ? 0 : 1u << 30);
    desc[1] = ((type == 2 ? depth : layers) - 1) | (fmt_code << 14) | ((levels - 1) << 10) |
-             ((uint32_t)(view->swizzle.r & 7) << 20) |
-             ((uint32_t)(view->swizzle.g & 7) << 23) |
-             ((uint32_t)(view->swizzle.b & 7) << 26) |
-             ((uint32_t)(view->swizzle.a & 7) << 29);
+             ((uint32_t)(sw[0] & 7) << 20) |
+             ((uint32_t)(sw[1] & 7) << 23) |
+             ((uint32_t)(sw[2] & 7) << 26) |
+             ((uint32_t)(sw[3] & 7) << 29);
    desc[2] = tiled ? ltotal : w * obpp;
    if (levels > 1)
       borgvk_serial_send_texture_levels(offs);
