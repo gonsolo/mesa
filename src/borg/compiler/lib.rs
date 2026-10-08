@@ -588,7 +588,7 @@ unsafe fn compile_nir_inner(
     // Moved up from the legacy I/O pass below so the draw-mode store_output
     // handling (in the main walk, ahead of that pass) can read it too; same
     // value, same meaning, in both modes.
-    let frag_alpha = env::var("BORGC_FRAG_ALPHA").is_ok();
+    let frag_alpha = env::var("BORGC_FRAG_ALPHA").is_ok() || (stage == 4 && vfetch & 4 != 0);
     // gl_VertexIndex's SSA def, once seen -- the index every vertex-pulling
     // load_ubo (position[], attr[]) is computed from. Always seen before any
     // load_ubo that depends on it: NIR/SPIR-V evaluates gl_VertexIndex where
