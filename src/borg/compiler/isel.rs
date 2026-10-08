@@ -42,7 +42,12 @@ pub(crate) fn borg_isel(op: nir_op) -> Option<&'static str> {
         // Integer ops (the Borg core now has these — enables standard addressing).
         nir_op_iadd => Some("IADD"),
         nir_op_ishl => Some("ISHL"),
-        nir_op_ishr | nir_op_ushr => Some("ISHR"),
+        nir_op_ishr => Some("ISHR"),
+        nir_op_ushr => Some("ISRL"),
+        nir_op_isub => Some("ISUB"),
+        nir_op_iand => Some("IAND"),
+        nir_op_ior => Some("IOR"),
+        nir_op_ixor => Some("IXOR"),
         nir_op_imul => Some("IMUL"),
         nir_op_i2f16 | nir_op_i2f32 | nir_op_u2f16 | nir_op_u2f32 => Some("I2F"),
         nir_op_f2i16 | nir_op_f2i32 | nir_op_f2u16 | nir_op_f2u32 => Some("F2I"),
