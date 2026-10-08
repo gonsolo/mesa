@@ -206,7 +206,7 @@ borgvk_sim_serves(const struct borgvk_image *color, bool has_depth_stencil)
    uint32_t w = color->vk.extent.width, h = color->vk.extent.height;
    /* The depth plane (BORG_ZB_SPI) holds 1024 x 1024 D32 pixels; colour alone goes up to 4096 x 4096. */
    const uint32_t max_dim = has_depth_stencil ? 1024 : 4096;
-   return w >= 4 && (w & (w - 1)) == 0 && w <= max_dim && h >= 1 && (h < 4 || (h & 3) == 0) && h <= max_dim;
+   return w >= 4 && (w & 3) == 0 && w <= max_dim && h >= 1 && (h < 4 || (h & 3) == 0) && h <= max_dim;
 }
 
 static struct borgvk_image *
