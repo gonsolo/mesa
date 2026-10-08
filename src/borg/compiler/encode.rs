@@ -71,6 +71,8 @@ pub(crate) fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
         // TEX rd, u, v, ctl: R4-type funct2 = 2 (docs/B2_texture_unit.md).
         // funct2 = 1 was FTEX, retired with the legacy texture unit.
         "TEX" => r4(0x0400_0004),
+        // TEXA w, lod, dref: this lane's extra arguments for the TEX after it (funct2 = 3).
+        "TEXA" => r4(0x0600_0004),
         "FADD" => bin(0x0000_0000),
         "FMUL" => bin(0x0800_0000),
         "FNEG" => un(0x0C00_0000),

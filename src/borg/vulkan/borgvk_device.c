@@ -654,7 +654,7 @@ borgvk_get_properties(struct vk_properties *p)
       .maxComputeWorkGroupSize       = {128, 128, 64},
 
       /* Texel gather / LOD / offset. */
-      .maxSamplerLodBias   = 2.0f,
+      .maxSamplerLodBias   = 15.0f,   /* BorgSampler.MaxLodBias */
       .minTexelOffset      = -8,
       .maxTexelOffset      = 7,
 

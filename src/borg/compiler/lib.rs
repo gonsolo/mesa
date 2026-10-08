@@ -365,6 +365,7 @@ unsafe fn compile_nir_inner(
     let mut per_pixel_fixed: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut frag_coord_w = false;
     let mut fetch_ctl_uniform: Option<u32> = None;
+    let mut lod_ctl_uniform: Option<u32> = None;
     let mut vfetch_ctl: HashMap<u32, u8> = HashMap::new();   // attribute location -> window uniform of its TEX control word
     let mut frag_window_by_bits: HashMap<u32, u32> = HashMap::new();
     // Scalar load_const f32 bits (for the sRGB idiom match) and a producer map
@@ -1516,7 +1517,8 @@ unsafe fn compile_nir_inner(
                     // Only a plain implicit-LOD sample of a 2D texture so far;
                     // anything else is reported rather than sampled wrongly.
                     let srcs = tex.srcs_as_slice();
-                    if tex.op != nir_texop_tex && tex.op != nir_texop_txf {
+                    let is_txl = tex.op == nir_texop_txl && stage == 4 && draw_mode;
+                    if tex.op != nir_texop_tex && tex.op != nir_texop_txf && !is_txl {
                         eprintln!("borgc: WARNING texture op {} not supported yet, dropped", tex.op);
                         continue;
                     }
@@ -1540,17 +1542,52 @@ unsafe fn compile_nir_inner(
                         } else {
                             resolve_vm(&vec_map, cd, 1)
                         };
-                        let ctl = if is_fetch {
+                        let is_cube = tex.sampler_dim == GLSL_SAMPLER_DIM_CUBE;
+                        // A third coordinate (3D, 2D array) goes to TEXA as w; a cube's is the compiler's face math.
+                        let has_w = !is_fetch && tex.coord_components >= 3 && !is_cube && stage == 4 && draw_mode;
+                        if is_txl || has_w {
+                            // Explicit LOD: TEXA hands this lane's LOD to the TEX after it (w and the
+                            // depth reference are unused for a 2D sample, so r30 stands in for both).
+                            let ld = srcs.iter().find(|s| s.src_type == nir_tex_src_lod).map(|s| s.src.as_def().index).unwrap_or(cd);
+                            if let Some(&bits) = consts.get(&ld).filter(|_| is_txl) {
+                                if !vec_map.contains_key(&ld) {
+                                    let u = if let Some(&u) = frag_window_by_bits.get(&bits) {
+                                        u
+                                    } else {
+                                        assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
+                                        let u = 20 + draw_uniform_count;
+                                        draw_uniform_count += 1;
+                                        draw_uniform_consts.push((u, bits));
+                                        frag_window_by_bits.insert(bits, u);
+                                        u
+                                    };
+                                    let v = next_vreg;
+                                    next_vreg += 1;
+                                    ubo.insert(v, Ubo::Uniform(u as u8));
+                                    vec_map.insert(ld, vec![(v, 0u8)]);
+                                }
+                            }
+                            let wz = next_vreg;
+                            next_vreg += 1;
+                            ubo.insert(wz, Ubo::Fixed(30));
+                            per_pixel_fixed.insert(wz);
+                            let (lv, lc) = if is_txl { resolve_vm(&vec_map, ld, 0) } else { (wz, 0u8) };
+                            let (wv, wc) = if has_w { resolve_vm(&vec_map, cd, 2) } else { (wz, 0u8) };
+                            prog.push(BorgInstr { mnem: "TEXA", dst: NO_DST, srcs: vec![wv, lv, wz], swz: vec![wc, lc, 0] });
+                        }
+                        let ctl = if is_fetch || is_txl {
                             // Control word: operation 1 (fetch) in bits 17:16, texture 0, sampler 0,
                             // read from the constant window (docs/B2_texture_unit.md).
-                            let u = match fetch_ctl_uniform {
+                            let ctl_bits = if is_txl { 2u32 << 21 } else { 1u32 << 16 };
+                            let slot = if is_txl { &mut lod_ctl_uniform } else { &mut fetch_ctl_uniform };
+                            let u = match *slot {
                                 Some(u) => u,
                                 None => {
                                     assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
                                     let u = 20 + draw_uniform_count;
                                     draw_uniform_count += 1;
-                                    draw_uniform_consts.push((u, 1u32 << 16));
-                                    fetch_ctl_uniform = Some(u);
+                                    draw_uniform_consts.push((u, ctl_bits));
+                                    *slot = Some(u);
                                     u
                                 }
                             };

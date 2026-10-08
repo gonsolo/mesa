@@ -935,11 +935,18 @@ send_generic_texture(const struct vk_image_view *view,
    uint32_t type;
    if (view->aspects & VK_IMAGE_ASPECT_STENCIL_BIT)
       return false;
+   uint32_t layers = 1, depth = 1;
    switch (view->view_type) {
+   case VK_IMAGE_VIEW_TYPE_1D_ARRAY: layers = view->layer_count; type = 0; h = 1; break;
    case VK_IMAGE_VIEW_TYPE_1D: type = 0; h = 1; break;
+   case VK_IMAGE_VIEW_TYPE_2D_ARRAY: layers = view->layer_count; type = 1; break;
    case VK_IMAGE_VIEW_TYPE_2D: type = 1; break;
+   case VK_IMAGE_VIEW_TYPE_CUBE: type = 3; layers = 6; break;
+   case VK_IMAGE_VIEW_TYPE_3D: type = 2; depth = img->vk.extent.depth; break;
    default: return false;
    }
+   if (layers == 0 || layers > 1024 || depth > 1024)
+      return false;
 
    /* source texel layout -> a TexFormat code (borg_isa.h) and its texels:
     * copied (RAWFMT), widened from three channels or R/B swapped (CHFMT, cs bytes
@@ -1006,76 +1013,86 @@ send_generic_texture(const struct vk_image_view *view,
    if (levels == 0 || levels > 13)
       return false;
 
-   /* the source image keeps its levels one after the other, rows packed */
-   uint32_t lw[13], lh[13];
+   /* the source image keeps a layer's levels one after the other, rows packed, a 3D level
+    * slice after slice; layers follow each other */
+   uint32_t lw[13], lh[13], ld[13];
    uint64_t soff[13], sum = 0;
-   for (uint32_t l = 0; l < base + levels; l++) {
+   for (uint32_t l = 0; l < img->vk.mip_levels; l++) {
       uint32_t cw = MAX2(img->vk.extent.width >> l, 1), ch = type ? MAX2(img->vk.extent.height >> l, 1) : 1;
-      if (l >= base) {
+      uint32_t cd = type == 2 ? MAX2(img->vk.extent.depth >> l, 1) : 1;
+      if (l >= base && l < base + levels) {
          lw[l - base] = cw;
          lh[l - base] = ch;
+         ld[l - base] = cd;
          soff[l - base] = sum;
       }
-      sum += (uint64_t)cw * ch * sbpp;
+      sum += (uint64_t)cw * ch * cd * sbpp;
    }
    w = lw[0];
    h = lh[0];
    const uint8_t *src = (const uint8_t *)img->mem->map + img->offset;
 
-   /* One level is linear. Several are tiled (4x4 texels, a 16-byte texel in two halves),
-    * level after level, their offsets from the base sent ahead in a 0xC0 packet. */
-   uint32_t offs[12] = { 0 }, total = 0;
+   /* One level of one layer is linear. Anything more is tiled (4x4 texels, a 16-byte texel in
+    * two halves): a layer's levels one after the other, the layers after each other, the level
+    * offsets within a layer sent ahead in a 0xC0 packet. */
+   const bool tiled = levels > 1 || layers > 1 || depth > 1 || type == 3;
+   uint32_t offs[12] = { 0 }, ltotal = 0, total = 0;
    uint8_t *out = NULL;
-   if (levels == 1) {
+   if (!tiled) {
       total = align(w * h * obpp, 4);
       out = calloc(1, total);
       if (out)
-         tex_convert(&tc, out, src + soff[0], w * h);
+         tex_convert(&tc, out, src + (uint64_t)view->base_array_layer * sum + soff[0], w * h);
    } else {
       uint32_t lsz[13];
       for (uint32_t l = 0; l < levels; l++) {
-         lsz[l] = ((lw[l] + 3) / 4) * ((lh[l] + 3) / 4) * 16 * obpp;
+         lsz[l] = ((lw[l] + 3) / 4) * ((lh[l] + 3) / 4) * 16 * obpp * ld[l];
          if (l)
-            offs[l - 1] = total;
-         total += lsz[l];
+            offs[l - 1] = ltotal;
+         ltotal += lsz[l];
       }
+      total = ltotal * layers;
       out = total <= 0x70000 ? calloc(1, total) : NULL;
-      uint8_t *lin = out ? malloc((size_t)w * h * obpp) : NULL;
+      uint8_t *lin = out ? malloc((size_t)w * h * depth * obpp) : NULL;
       if (!lin) {
          free(out);
          return false;
       }
-      for (uint32_t l = 0; l < levels; l++) {
-         const uint32_t tw = (lw[l] + 3) / 4;
-         uint8_t *lev = out + (l ? offs[l - 1] : 0);
-         tex_convert(&tc, lin, src + soff[l], lw[l] * lh[l]);
-         for (uint32_t y = 0; y < lh[l]; y++)
-            for (uint32_t x = 0; x < lw[l]; x++) {
-               const uint8_t *t = lin + ((size_t)y * lw[l] + x) * obpp;
-               const uint32_t tile = (y >> 2) * tw + (x >> 2), ti = (y & 3) * 4 + (x & 3);
-               if (obpp == 16) {
-                  memcpy(lev + tile * 256 + ti * 8, t, 8);
-                  memcpy(lev + tile * 256 + 128 + ti * 8, t + 8, 8);
-               } else {
-                  memcpy(lev + ((size_t)tile * 16 + ti) * obpp, t, obpp);
-               }
-            }
-      }
+      for (uint32_t layer = 0; layer < layers; layer++)
+         for (uint32_t l = 0; l < levels; l++) {
+            const uint32_t tw = (lw[l] + 3) / 4, th = (lh[l] + 3) / 4;
+            uint8_t *lev = out + (size_t)layer * ltotal + (l ? offs[l - 1] : 0);
+            tex_convert(&tc, lin, src + (uint64_t)(view->base_array_layer + layer) * sum + soff[l],
+                        lw[l] * lh[l] * ld[l]);
+            for (uint32_t z = 0; z < ld[l]; z++)
+               for (uint32_t y = 0; y < lh[l]; y++)
+                  for (uint32_t x = 0; x < lw[l]; x++) {
+                     const uint8_t *t = lin + (((size_t)z * lh[l] + y) * lw[l] + x) * obpp;
+                     uint8_t *sl = lev + (size_t)z * tw * th * 16 * obpp;
+                     const uint32_t tile = (y >> 2) * tw + (x >> 2), ti = (y & 3) * 4 + (x & 3);
+                     if (obpp == 16) {
+                        memcpy(sl + tile * 256 + ti * 8, t, 8);
+                        memcpy(sl + tile * 256 + 128 + ti * 8, t + 8, 8);
+                     } else {
+                        memcpy(sl + ((size_t)tile * 16 + ti) * obpp, t, obpp);
+                     }
+                  }
+         }
       free(lin);
    }
    if (!out)
       return false;
 
-   /* descriptor words 1..3: layout, levels, view swizzle (the VkComponentSwizzle
-    * values are the hardware's own encoding). */
+   /* descriptor words 1..3: layout, levels, depth or layers, view swizzle (the
+    * VkComponentSwizzle values are the hardware's own encoding). */
    uint32_t desc[3];
-   desc[0] = (w - 1) | ((h - 1) << 16) | (type << 28) | (levels == 1 ? 1u << 30 : 0);
-   desc[1] = (fmt_code << 14) | ((levels - 1) << 10) |
+   desc[0] = (w - 1) | ((h - 1) << 16) | (type << 28) | (tiled ? 0 : 1u << 30);
+   desc[1] = ((type == 2 ? depth : layers) - 1) | (fmt_code << 14) | ((levels - 1) << 10) |
              ((uint32_t)(view->swizzle.r & 7) << 20) |
              ((uint32_t)(view->swizzle.g & 7) << 23) |
              ((uint32_t)(view->swizzle.b & 7) << 26) |
              ((uint32_t)(view->swizzle.a & 7) << 29);
-   desc[2] = levels == 1 ? w * obpp : total;
+   desc[2] = tiled ? ltotal : w * obpp;
    if (levels > 1)
       borgvk_serial_send_texture_levels(offs);
    for (uint32_t off = 0; off < total; off += BORGVK_TEXG_CHUNK) {
