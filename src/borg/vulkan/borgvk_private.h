@@ -126,7 +126,7 @@ struct borgvk_device {
  * back to real images. */
 #define BORGVK_MAX_COLOR_ATTACHMENTS 8
 
-#define BORGVK_MAX_VERTEX_BINDINGS 4
+#define BORGVK_MAX_VERTEX_BINDINGS 16
 
 #define BORGVK_MAX_BINDINGS 8
 
@@ -400,7 +400,7 @@ struct borgvk_descriptor_set {
    struct borgvk_desc_map map;
 };
 
-#define BORGVK_MAX_VERTEX_ATTRS    8
+#define BORGVK_MAX_VERTEX_ATTRS    16
 
 struct borgvk_vertex_attr {
    uint32_t location;
