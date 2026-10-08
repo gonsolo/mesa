@@ -893,55 +893,105 @@ send_generic_texture(const struct vk_image_view *view,
    if (w == 0 || h == 0 || w > 4096 || h > 4096)
       return false;
    uint32_t type;
+   if (view->aspects & VK_IMAGE_ASPECT_STENCIL_BIT)
+      return false;
    switch (view->view_type) {
    case VK_IMAGE_VIEW_TYPE_1D: type = 0; h = 1; break;
    case VK_IMAGE_VIEW_TYPE_2D: type = 1; break;
    default: return false;
    }
 
-   /* source texel layout -> RGBA8 + TexFormat code (borg_isa.h) */
-   uint32_t bpp, fmt_code;
-   bool swap_rb = false, alpha_fill = false, raw = false;
-   uint8_t alpha_val = 0;
+   /* source texel layout -> a TexFormat code (borg_isa.h) and its texels:
+    * copied (RAWFMT), widened from three channels or R/B swapped (CHFMT, cs bytes
+    * per channel), or 16-bit repacked (pack16). */
+   uint32_t bpp, fmt_code, cs = 0, sch = 0, alpha = 0, pack16 = 0, zstride = 0;
+   bool swap_rb = false;
    switch (view->format) {
-#define RAWFMT(vk, code, bytes) case VK_FORMAT_##vk: bpp = bytes; fmt_code = code; raw = true; break;
+#define RAWFMT(vk, code, bytes) case VK_FORMAT_##vk: bpp = bytes; fmt_code = code; break;
+#define CHFMT(vk, code, csz, n, swap, a) case VK_FORMAT_##vk: \
+      fmt_code = code; cs = csz; sch = n; bpp = csz * n; swap_rb = swap; alpha = a; break;
+#define P16FMT(vk, code, kind) case VK_FORMAT_##vk: bpp = 2; fmt_code = code; pack16 = kind; break;
+   RAWFMT(R8_UNORM, 1, 1) RAWFMT(R8_SNORM, 2, 1) RAWFMT(R8_UINT, 3, 1) RAWFMT(R8_SINT, 4, 1) RAWFMT(R8_SRGB, 5, 1)
+   RAWFMT(R8G8_UNORM, 6, 2) RAWFMT(R8G8_SNORM, 7, 2) RAWFMT(R8G8_UINT, 8, 2) RAWFMT(R8G8_SINT, 9, 2)
+   RAWFMT(R8G8_SRGB, 10, 2)
+   RAWFMT(R8G8B8A8_UNORM, 11, 4) RAWFMT(R8G8B8A8_SNORM, 12, 4) RAWFMT(R8G8B8A8_UINT, 13, 4)
+   RAWFMT(R8G8B8A8_SINT, 14, 4) RAWFMT(R8G8B8A8_SRGB, 15, 4)
+   RAWFMT(A8B8G8R8_UNORM_PACK32, 11, 4) RAWFMT(A8B8G8R8_SNORM_PACK32, 12, 4) RAWFMT(A8B8G8R8_UINT_PACK32, 13, 4)
+   RAWFMT(A8B8G8R8_SINT_PACK32, 14, 4) RAWFMT(A8B8G8R8_SRGB_PACK32, 15, 4)
+   RAWFMT(B8G8R8A8_UNORM, 16, 4) RAWFMT(B8G8R8A8_SRGB, 17, 4)
+   CHFMT(B8G8R8A8_SNORM, 12, 1, 4, true, 0) CHFMT(B8G8R8A8_UINT, 13, 1, 4, true, 0)
+   CHFMT(B8G8R8A8_SINT, 14, 1, 4, true, 0)
+   CHFMT(R8G8B8_UNORM, 11, 1, 3, false, 255) CHFMT(R8G8B8_SNORM, 12, 1, 3, false, 127)
+   CHFMT(R8G8B8_UINT, 13, 1, 3, false, 1) CHFMT(R8G8B8_SINT, 14, 1, 3, false, 1)
+   CHFMT(R8G8B8_SRGB, 15, 1, 3, false, 255)
+   CHFMT(B8G8R8_UNORM, 11, 1, 3, true, 255) CHFMT(B8G8R8_SNORM, 12, 1, 3, true, 127)
+   CHFMT(B8G8R8_UINT, 13, 1, 3, true, 1) CHFMT(B8G8R8_SINT, 14, 1, 3, true, 1)
+   CHFMT(B8G8R8_SRGB, 15, 1, 3, true, 255)
    RAWFMT(R16_UNORM, 18, 2) RAWFMT(R16_SNORM, 19, 2) RAWFMT(R16_UINT, 20, 2) RAWFMT(R16_SINT, 21, 2)
    RAWFMT(R16_SFLOAT, 22, 2) RAWFMT(R16G16_UNORM, 23, 4) RAWFMT(R16G16_SNORM, 24, 4)
    RAWFMT(R16G16_UINT, 25, 4) RAWFMT(R16G16_SINT, 26, 4) RAWFMT(R16G16_SFLOAT, 27, 4)
+   CHFMT(R16G16B16_UNORM, 28, 2, 3, false, 0xffff) CHFMT(R16G16B16_SNORM, 29, 2, 3, false, 0x7fff)
+   CHFMT(R16G16B16_UINT, 30, 2, 3, false, 1) CHFMT(R16G16B16_SINT, 31, 2, 3, false, 1)
+   CHFMT(R16G16B16_SFLOAT, 32, 2, 3, false, 0x3c00)
    RAWFMT(R16G16B16A16_UNORM, 28, 8) RAWFMT(R16G16B16A16_SNORM, 29, 8) RAWFMT(R16G16B16A16_UINT, 30, 8)
    RAWFMT(R16G16B16A16_SINT, 31, 8) RAWFMT(R16G16B16A16_SFLOAT, 32, 8)
    RAWFMT(R32_UINT, 33, 4) RAWFMT(R32_SINT, 34, 4) RAWFMT(R32_SFLOAT, 35, 4)
    RAWFMT(R32G32_UINT, 36, 8) RAWFMT(R32G32_SINT, 37, 8) RAWFMT(R32G32_SFLOAT, 38, 8)
+   CHFMT(R32G32B32_UINT, 39, 4, 3, false, 1) CHFMT(R32G32B32_SINT, 40, 4, 3, false, 1)
+   CHFMT(R32G32B32_SFLOAT, 41, 4, 3, false, 0x3f800000)
    RAWFMT(R32G32B32A32_UINT, 39, 16) RAWFMT(R32G32B32A32_SINT, 40, 16) RAWFMT(R32G32B32A32_SFLOAT, 41, 16)
    RAWFMT(A2B10G10R10_UNORM_PACK32, 42, 4) RAWFMT(A2B10G10R10_UINT_PACK32, 43, 4)
    RAWFMT(R5G6B5_UNORM_PACK16, 44, 2) RAWFMT(A1R5G5B5_UNORM_PACK16, 45, 2)
    RAWFMT(B4G4R4A4_UNORM_PACK16, 46, 2) RAWFMT(B10G11R11_UFLOAT_PACK32, 47, 4)
    RAWFMT(E5B9G9R9_UFLOAT_PACK32, 48, 4)
+   P16FMT(B5G6R5_UNORM_PACK16, 44, 1) P16FMT(R5G5B5A1_UNORM_PACK16, 45, 2)
+   P16FMT(B5G5R5A1_UNORM_PACK16, 45, 3) P16FMT(R4G4B4A4_UNORM_PACK16, 46, 4)
+   P16FMT(A4R4G4B4_UNORM_PACK16, 46, 7) P16FMT(A4B4G4R4_UNORM_PACK16, 46, 8)
+   RAWFMT(D16_UNORM, 49, 2) RAWFMT(X8_D24_UNORM_PACK32, 50, 4) RAWFMT(D24_UNORM_S8_UINT, 50, 4)
+   RAWFMT(D32_SFLOAT, 51, 4)
+   case VK_FORMAT_D16_UNORM_S8_UINT:  bpp = 2; fmt_code = 49; zstride = 3; break;
+   case VK_FORMAT_D32_SFLOAT_S8_UINT: bpp = 4; fmt_code = 51; zstride = 8; break;
+   case VK_FORMAT_R4G4_UNORM_PACK8: bpp = 1; fmt_code = 6; pack16 = 5; break;
+   case VK_FORMAT_A2R10G10B10_UNORM_PACK32: bpp = 4; fmt_code = 42; pack16 = 6; break;
+   case VK_FORMAT_A2R10G10B10_UINT_PACK32:  bpp = 4; fmt_code = 43; pack16 = 6; break;
 #undef RAWFMT
-   case VK_FORMAT_R8G8B8A8_UNORM: bpp = 4; fmt_code = 11; swap_rb = false; alpha_fill = false; alpha_val = 0; break;
-   case VK_FORMAT_R8G8B8A8_SNORM: bpp = 4; fmt_code = 12; swap_rb = false; alpha_fill = false; alpha_val = 0; break;
-   case VK_FORMAT_B8G8R8A8_UNORM: bpp = 4; fmt_code = 11; swap_rb = true;  alpha_fill = false; alpha_val = 0; break;
-   case VK_FORMAT_B8G8R8A8_SNORM: bpp = 4; fmt_code = 12; swap_rb = true;  alpha_fill = false; alpha_val = 0; break;
-   case VK_FORMAT_R8G8B8_UNORM:   bpp = 3; fmt_code = 11; swap_rb = false; alpha_fill = true;  alpha_val = 255; break;
-   case VK_FORMAT_R8G8B8_SNORM:   bpp = 3; fmt_code = 12; swap_rb = false; alpha_fill = true;  alpha_val = 127; break;
-   case VK_FORMAT_B8G8R8_UNORM:   bpp = 3; fmt_code = 11; swap_rb = true;  alpha_fill = true;  alpha_val = 255; break;
-   case VK_FORMAT_B8G8R8_SNORM:   bpp = 3; fmt_code = 12; swap_rb = true;  alpha_fill = true;  alpha_val = 127; break;
+#undef CHFMT
+#undef P16FMT
    default: return false;
    }
-   uint32_t total = raw ? w * h * bpp : w * h * 4;
-   uint8_t *rgba = malloc(total);
+   uint32_t obpp = sch ? cs * 4 : pack16 == 5 ? 2 : bpp;
+   /* the firmware writes whole words: pad the tail */
+   uint32_t total = align(w * h * obpp, 4);
+   uint8_t *rgba = calloc(1, total);
    if (!rgba)
       return false;
    const uint8_t *src = (const uint8_t *)img->mem->map + img->offset;
-   if (raw)
-      memcpy(rgba, src, total);
-   for (uint32_t i = 0; !raw && i < w * h; i++) {
+   if (!sch && !pack16 && !zstride)
+      memcpy(rgba, src, w * h * obpp);
+   for (uint32_t i = 0; zstride && i < w * h; i++)
+      memcpy(rgba + (size_t)i * obpp, src + (size_t)i * zstride, obpp);
+   for (uint32_t i = 0; sch && i < w * h; i++) {
       const uint8_t *p = src + (size_t)i * bpp;
-      uint8_t *d = rgba + (size_t)i * 4;
-      d[0] = swap_rb ? p[2] : p[0];
-      d[1] = p[1];
-      d[2] = swap_rb ? p[0] : p[2];
-      d[3] = alpha_fill ? alpha_val : p[3];
+      uint8_t *d = rgba + (size_t)i * obpp;
+      memcpy(d, p + (swap_rb ? 2 * cs : 0), cs);
+      memcpy(d + cs, p + cs, cs);
+      memcpy(d + 2 * cs, p + (swap_rb ? 0 : 2 * cs), cs);
+      memcpy(d + 3 * cs, sch == 4 ? p + 3 * cs : (const uint8_t *)&alpha, cs);
+   }
+   for (uint32_t i = 0; pack16 && i < w * h; i++) {
+      uint32_t v = 0;
+      memcpy(&v, src + (size_t)i * bpp, bpp);
+      switch (pack16) {
+      case 1: v = (v >> 11) | (v & 0x07e0) | ((v & 0x1f) << 11); break;
+      case 2: v = ((v & 1) << 15) | (v >> 1); break;
+      case 3: v = ((v & 1) << 15) | ((v & 0x3e) << 9) | ((v >> 1) & 0x03e0) | (v >> 11); break;
+      case 4: v = ((v & 0x00f0) << 8) | (v & 0x0f0f) | ((v >> 8) & 0x00f0); break;
+      case 5: v = ((v >> 4) * 17) | ((v & 0xf) * 17) << 8; break;
+      case 7: v = ((v & 0xf) << 12) | ((v & 0xf0) << 4) | ((v >> 4) & 0xf0) | (v >> 12); break;
+      case 8: v = ((v & 0xf00) << 4) | ((v & 0xf0) << 4) | ((v & 0xf) << 4) | (v >> 12); break;
+      default: v = (v & 0xc00ffc00) | ((v >> 20) & 0x3ff) | ((v & 0x3ff) << 20); break;
+      }
+      memcpy(rgba + (size_t)i * obpp, &v, obpp);
    }
 
    /* descriptor words 1..3: linear layout, one level, view swizzle (the
@@ -953,7 +1003,7 @@ send_generic_texture(const struct vk_image_view *view,
              ((uint32_t)(view->swizzle.g & 7) << 23) |
              ((uint32_t)(view->swizzle.b & 7) << 26) |
              ((uint32_t)(view->swizzle.a & 7) << 29);
-   desc[2] = w * (raw ? bpp : 4);
+   desc[2] = w * obpp;
    for (uint32_t off = 0; off < total; off += BORGVK_TEXG_CHUNK) {
       uint32_t n = total - off < BORGVK_TEXG_CHUNK ? total - off : BORGVK_TEXG_CHUNK;
       borgvk_serial_send_texture_chunk(off, rgba + off, n, desc, sampler_desc(sampler));
