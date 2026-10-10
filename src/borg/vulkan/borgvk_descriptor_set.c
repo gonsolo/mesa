@@ -289,6 +289,7 @@ borgvk_UpdateDescriptorSets(VkDevice _device,
          if (w->pImageInfo &&
              (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
               w->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+              w->descriptorType == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT ||
               w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) &&
              w->pImageInfo[k].imageView != VK_NULL_HANDLE) {
             VK_FROM_HANDLE(vk_image_view, view, w->pImageInfo[k].imageView);

@@ -57,7 +57,7 @@ borg_texel_buffer_filter(const nir_instr *instr, const void *data)
       const nir_intrinsic_instr *i = nir_instr_as_intrinsic(instr);
       return ((i->intrinsic == nir_intrinsic_image_deref_load || i->intrinsic == nir_intrinsic_image_deref_store) &&
               nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_BUF) ||
-             (i->intrinsic == nir_intrinsic_image_deref_store &&
+             ((i->intrinsic == nir_intrinsic_image_deref_store || i->intrinsic == nir_intrinsic_image_deref_load) &&
               nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_2D &&
               !nir_intrinsic_image_array(i));
    }
@@ -70,7 +70,8 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
    nir_deref_instr *deref;
    nir_def *coord;
    if (instr->type == nir_instr_type_intrinsic &&
-       nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_deref_store &&
+       (nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_deref_store ||
+        nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_deref_load) &&
        nir_intrinsic_image_dim(nir_instr_as_intrinsic(instr)) != GLSL_SAMPLER_DIM_BUF) {
       /* A 2D image store (single 32-bit texel formats): the binding's window holds the image's
        * width in word 0, then the texels row by row; the host copies the image in and back. */
@@ -92,8 +93,13 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
       nir_def *x = nir_channel(b, st->src[1].ssa, 0);
       nir_def *y = nir_channel(b, st->src[1].ssa, 1);
       nir_def *word = nir_iadd(b, nir_iadd(b, nir_imul(b, y, width), x), nir_imm_int(b, 1));
-      nir_store_ssbo(b, nir_channel(b, st->src[3].ssa, 0), buf, nir_ishl_imm(b, word, 2),
-                     .write_mask = 1, .align_mul = 4);
+      const bool rgba8 = nir_intrinsic_format(st) == PIPE_FORMAT_R8G8B8A8_UNORM;
+      if (st->intrinsic == nir_intrinsic_image_deref_load) {
+         nir_def *v = nir_load_ssbo(b, 1, 32, buf, nir_ishl_imm(b, word, 2), .align_mul = 4);
+         return rgba8 ? nir_unpack_unorm_4x8(b, v) : nir_vec4(b, v, nir_imm_int(b, 0), nir_imm_int(b, 0), nir_imm_int(b, 0));
+      }
+      nir_def *val = rgba8 ? nir_pack_unorm_4x8(b, st->src[3].ssa) : nir_channel(b, st->src[3].ssa, 0);
+      nir_store_ssbo(b, val, buf, nir_ishl_imm(b, word, 2), .write_mask = 1, .align_mul = 4);
       return NIR_LOWER_INSTR_PROGRESS_REPLACE;
    }
    if (instr->type == nir_instr_type_tex) {
@@ -248,7 +254,8 @@ static bool
 borg_view_index_filter(const nir_instr *instr, const void *data)
 {
    return instr->type == nir_instr_type_intrinsic &&
-          nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_view_index;
+          (nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_view_index ||
+           nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_layer_id);
 }
 
 static nir_def *
@@ -325,6 +332,8 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    NIR_PASS(_, nir, nir_lower_variable_initializers, nir_var_function_temp);
    NIR_PASS(_, nir, nir_lower_returns);
    NIR_PASS(_, nir, nir_inline_functions);
+   if (nir->info.stage == MESA_SHADER_FRAGMENT)
+      NIR_PASS(_, nir, nir_lower_input_attachments, &(nir_input_attachment_options){ 0 });
    NIR_PASS(_, nir, nir_opt_copy_prop);
    NIR_PASS(_, nir, nir_opt_constant_folding);
    NIR_PASS(_, nir, nir_opt_deref);
