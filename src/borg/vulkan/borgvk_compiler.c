@@ -16,6 +16,7 @@
 #include "nir.h"
 #include "glsl_types.h"
 #include "spirv/nir_spirv.h"
+#include "util/hash_table.h"
 #include "util/ralloc.h"
 #include "util/log.h"
 
@@ -102,6 +103,95 @@ remap_array_bindings(struct borgvk_device *device, nir_shader *nir)
    }
 }
 
+/* A line is drawn as a quad (borgvk_queue.c gathers six rows per line). This shader runs once
+ * per corner: a copy of it computes the other endpoint's position from the attributes at
+ * location + BORGVK_LINE_OTHER, and the corner moves half a pixel along the line's minor axis.
+ * The line attribute (location BORGVK_LINE_SLOT) holds that step in clip units for x and y,
+ * then the target's width and height. */
+static void
+borgvk_lower_lines(nir_shader *nir, uint32_t instance_mask)
+{
+   nir_variable *pos = nir_find_variable_with_location(nir, nir_var_shader_out, VARYING_SLOT_POS);
+   if (!pos)
+      return;
+   /* One function, so the copy holds every use of the inputs and of gl_Position. */
+   NIR_PASS(_, nir, nir_lower_variable_initializers, nir_var_function_temp);
+   NIR_PASS(_, nir, nir_lower_returns);
+   NIR_PASS(_, nir, nir_inline_functions);
+   nir_remove_non_entrypoints(nir);
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   const struct glsl_type *vec4 = glsl_vec4_type();
+   nir_variable *own = nir_variable_create(nir, nir_var_shader_temp, vec4, "line_own");
+   nir_variable *other = nir_variable_create(nir, nir_var_shader_temp, vec4, "line_other");
+   nir_variable *line = nir_variable_create(nir, nir_var_shader_in, vec4, "line_step");
+   line->data.location = VERT_ATTRIB_GENERIC0 + BORGVK_LINE_SLOT;
+
+   nir_function *fn = nir_function_create(nir, "line_other_end");
+   nir_function_impl *copy = nir_function_impl_clone(nir, impl);
+   nir_function_set_impl(fn, copy);
+
+   struct hash_table *remap = _mesa_pointer_hash_table_create(NULL);
+   nir_foreach_block(block, copy) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_deref)
+            continue;
+         nir_deref_instr *d = nir_instr_as_deref(instr);
+         if (d->deref_type != nir_deref_type_var)
+            continue;
+         nir_variable *v = d->var;
+         if (v == pos) {
+            d->var = other;
+            continue;
+         }
+         const bool in = v->data.mode == nir_var_shader_in, out = v->data.mode == nir_var_shader_out;
+         const int loc = v->data.location - VERT_ATTRIB_GENERIC0;
+         if (!out && !(in && loc >= 0 && loc < 16 && !(instance_mask >> loc & 1)))
+            continue;
+         struct hash_entry *e = _mesa_hash_table_search(remap, v);
+         if (!e) {
+            nir_variable *n = nir_variable_create(nir, in ? nir_var_shader_in : nir_var_shader_temp, v->type, "line_end");
+            if (in) {
+               n->data = v->data;
+               n->data.location = v->data.location + BORGVK_LINE_OTHER;
+            }
+            e = _mesa_hash_table_insert(remap, v, n);
+         }
+         d->var = e->data;
+      }
+   }
+   _mesa_hash_table_destroy(remap, NULL);
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_deref)
+            continue;
+         nir_deref_instr *d = nir_instr_as_deref(instr);
+         if (d->deref_type == nir_deref_type_var && d->var == pos)
+            d->var = own;
+      }
+   }
+
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   nir_call(&b, fn);
+   b.cursor = nir_after_impl(impl);
+   nir_def *a = nir_load_var(&b, own), *o = nir_load_var(&b, other), *l = nir_load_var(&b, line);
+   nir_def *aw = nir_channel(&b, a, 3);
+   nir_def *na = nir_fdiv(&b, nir_trim_vector(&b, a, 2), aw);
+   nir_def *nb = nir_fdiv(&b, nir_trim_vector(&b, o, 2), nir_channel(&b, o, 3));
+   nir_def *d = nir_fmul(&b, nir_fsub(&b, nb, na), nir_channels(&b, l, 0xc));
+   nir_def *xmajor = nir_fge(&b, nir_fabs(&b, nir_channel(&b, d, 0)), nir_fabs(&b, nir_channel(&b, d, 1)));
+   nir_def *zero = nir_imm_float(&b, 0.0f);
+   nir_def *sx = nir_bcsel(&b, xmajor, zero, nir_channel(&b, l, 0));
+   nir_def *sy = nir_bcsel(&b, xmajor, nir_channel(&b, l, 1), zero);
+   nir_def *out = nir_vec4(&b, nir_fadd(&b, nir_channel(&b, a, 0), nir_fmul(&b, sx, aw)),
+                               nir_fadd(&b, nir_channel(&b, a, 1), nir_fmul(&b, sy, aw)),
+                               nir_channel(&b, a, 2), aw);
+   nir_store_var(&b, pos, out, 0xf);
+   nir_progress(true, impl, nir_metadata_none);
+   nir_fixup_deref_modes(nir);
+   NIR_PASS(_, nir, nir_inline_functions);
+   nir_remove_non_entrypoints(nir);
+}
+
 /* A pipeline without a fragment stage (depth only): a shader that writes nothing. */
 void
 borgvk_compile_empty_frag(struct borgvk_device *device, uint32_t opt)
@@ -143,6 +233,8 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
    }
 
    remap_array_bindings(device, nir);
+   if (stage_info->stage == VK_SHADER_STAGE_VERTEX_BIT && (vfetch & 0xD0000000u) == 0x90000000u)
+      borgvk_lower_lines(nir, vfetch & 0xFFFFu);
    /* Shared with the offline borgc CLI -- see borg_nir_passes.h for why this
     * must not be a second copy. */
    borg_lower_nir_for_borgc(nir);

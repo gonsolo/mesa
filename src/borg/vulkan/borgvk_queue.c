@@ -1341,6 +1341,8 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP: topo = 1; break;
    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN:   topo = 2; break;
    case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:     topo = 0; break;
+   case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
+   case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:     topo = 0; break;
    default: return generic_reject(3);
    }
    if (pipeline->blob[BORGVK_STAGE_VERT].len == 0 || pipeline->blob[BORGVK_STAGE_FRAG].len == 0)
@@ -1348,6 +1350,9 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    /* A point is a quad of two triangles: six vertices, whose clip offsets come from slot 15. */
    const bool points = pipeline->topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
    const uint32_t X = points ? 6 : 1;
+   /* A line is a quad too, but its six rows are gathered per line (see `pairs`). */
+   const bool lines = pipeline->topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST ||
+                      pipeline->topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
 
    struct borgvk_image *color_img =
       cmd->color_views[0] && cmd->color_views[0]->image
@@ -1410,6 +1415,41 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    }
    if (vmax < 0)
       return generic_reject(7);
+   /* Lines: the two vertex rows of each line. */
+   uint32_t (*pairs)[2] = NULL, nlines = 0;
+   if (lines) {
+      const bool strip = pipeline->topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+      const uint32_t restart_val = dp->index_size == 2 ? 0xFFFFu : 0xFFFFFFFFu;
+      pairs = malloc(sizeof(*pairs) * MAX2(dp->count, 1));
+      if (!pairs)
+         return generic_reject(10);
+      int64_t prev = -1;
+      for (uint32_t i = 0; i < dp->count; i++) {
+         int64_t r = (int64_t)dp->first + i;
+         if (dp->indexed) {
+            uint32_t v = dp->index_size == 2 ? ((const uint16_t *)idx_host)[i] : ((const uint32_t *)idx_host)[i];
+            if (pipeline->restart && v == restart_val) {
+               prev = -1;
+               continue;
+            }
+            r = (int64_t)v + dp->vertex_offset;
+         }
+         if (prev < 0) {
+            prev = r;
+            continue;
+         }
+         pairs[nlines][0] = (uint32_t)prev;
+         pairs[nlines][1] = (uint32_t)r;
+         nlines++;
+         prev = strip ? r : -1;
+      }
+      if (nlines == 0 || (uint64_t)nlines * 6 > 4096 * 4096) {
+         free(pairs);
+         return generic_reject(7);
+      }
+   }
+   static const uint8_t line_end[6] = { 0, 0, 1, 0, 1, 1 };
+   static const float line_side[6] = { -1, 1, -1, 1, 1, -1 };
    int64_t imin = dp->first_instance, imax = (int64_t)dp->first_instance + dp->instances - 1;
 
    /* The heap this draw needs: flush the pass so far when it would not fit next to it. */
@@ -1427,6 +1467,8 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       }
       if (points)
          need += (uint64_t)(vmax - vmin + 1) * X * 16 + 32;
+      if (lines)
+         need = (uint64_t)nlines * 6 * (16 + 2 * 16 * pipeline->attr_count) + 64;
       if (cmd->batch_draws && cmd->heap_top + need > BORGVK_HEAP_BYTES)
          borgvk_flush_draws(cmd);
    }
@@ -1490,6 +1532,29 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       }
       const uint32_t stride = pipeline->binding_stride[b];
       const bool inst = pipeline->binding_instance[b];
+      if (lines && !inst) {
+         /* Row 6 * line + corner: the corner's own endpoint, and in a second slot the other one. */
+         const uint32_t asz = vk_format_get_blocksize(at->format);
+         for (uint32_t other = 0; ok && other < 2; other++) {
+            uint8_t *tight = calloc((size_t)nlines * 6, rbytes);
+            if (!tight) {
+               ok = generic_reject(10);
+               break;
+            }
+            for (uint32_t r = 0; r < nlines * 6; r++) {
+               const uint64_t src = (uint64_t)pairs[r / 6][line_end[r % 6] ^ other] * stride + at->offset;
+               if (src + asz <= cmd->vb_avail[b])
+                  memcpy(tight + (size_t)r * rbytes, cmd->vb[b] + src, MIN2(asz, rbytes));
+            }
+            const uint32_t off = heap_upload(&heap, tight, nlines * 6 * rbytes);
+            free(tight);
+            if (off == UINT32_MAX)
+               ok = generic_reject(10);
+            else
+               borgvk_serial_send_vattr(at->location + (other ? BORGVK_LINE_OTHER : 0), code, off, nlines * 6, rbytes, swz);
+         }
+         continue;
+      }
       const int64_t row0 = inst ? imin : vmin, row1 = inst ? imax : vmax;
       const bool expand = points && !inst;
       const int64_t e0 = expand ? row0 * X : row0, e1 = expand ? row1 * X + X - 1 : row1;
@@ -1552,8 +1617,31 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
          }
       }
    }
+   if (ok && lines) {
+      /* The half-pixel step in clip units for x and y, then the target's size. */
+      uint32_t code, swz, rbytes;
+      float *c = malloc((size_t)nlines * 6 * 16);
+      if (!c || !vertex_format_to_fetch(VK_FORMAT_R32G32B32A32_SFLOAT, &code, &swz, &rbytes)) {
+         ok = generic_reject(10);
+      } else {
+         const float w = size_img->vk.extent.width, h = size_img->vk.extent.height;
+         for (uint32_t r = 0; r < nlines * 6; r++) {
+            c[4 * r + 0] = line_side[r % 6] / w;
+            c[4 * r + 1] = line_side[r % 6] / h;
+            c[4 * r + 2] = w;
+            c[4 * r + 3] = h;
+         }
+         const uint32_t off = heap_upload(&heap, (const uint8_t *)c, nlines * 6 * 16);
+         if (off == UINT32_MAX)
+            ok = generic_reject(10);
+         else
+            borgvk_serial_send_vattr(BORGVK_LINE_SLOT, code, off, nlines * 6, rbytes, swz);
+      }
+      free(c);
+   }
+   free(pairs);
    uint32_t idx_off = 0, index_code = dp->index_size == 2 ? 1 : 2, voff_out = dp->vertex_offset;
-   if (ok && dp->indexed) {
+   if (ok && dp->indexed && !lines) {
       if (points) {
          uint32_t *ex = malloc((size_t)dp->count * X * 4);
          if (!ex) {
@@ -1601,6 +1689,9 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
          if (set->buffer_views[b] && send_buffer_texture(set->buffer_views[b]))
             break;
       }
+      if (lines)
+         borgvk_serial_send_draw(0, 0, load << 1, nlines * 6, dp->instances, 0, dp->first_instance, 0, 0, ubo_base);
+      else
       borgvk_serial_send_draw(topo, dp->indexed ? index_code : 0,
                               (pipeline->restart ? 1u : 0u) | (load << 1), dp->count * X, dp->instances,
                               dp->indexed ? 0 : dp->first * X, dp->first_instance, voff_out, idx_off, ubo_base);

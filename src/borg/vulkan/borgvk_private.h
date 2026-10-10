@@ -303,6 +303,9 @@ bool borgvk_shader_cache_get(const VkPipelineShaderStageCreateInfo *si, uint32_t
 void borgvk_shader_cache_record(const VkPipelineShaderStageCreateInfo *si, uint32_t vfetch,
                                 const struct borgvk_shader_blob *blob, bool reads_pntc);
 uint32_t borgvk_blob_num_varyings(const struct borgvk_shader_blob *b);
+/* Lines: vertex slot of the line attribute, and the offset to the other endpoint's attributes. */
+#define BORGVK_LINE_SLOT  16
+#define BORGVK_LINE_OTHER 24
 void borgvk_compile_empty_frag(struct borgvk_device *device, uint32_t opt);
 void borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
                           const VkPipelineShaderStageCreateInfo *stage_info);
