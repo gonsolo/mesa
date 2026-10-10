@@ -164,6 +164,8 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
       VK_FROM_HANDLE(borgvk_pipeline, pl, pPipelines[i]);
       memcpy(pl->blob, device->shader_blob, sizeof(pl->blob));
       pl->vfetch = vfetch;
+      pl->tex_binding = device->frag_tex_binding;
+      pl->ubo_slot = device->stage_ubo[0] >= 0 ? device->stage_ubo[0] : device->stage_ubo[1];
       pl->color_count = color_count;
       pl->mrt = mrt;
       const VkPipelineRasterizationStateCreateInfo *rs =

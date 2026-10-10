@@ -35,6 +35,60 @@ borgvk_compiler_selftest(void)
    mesa_logi("borgvk: borgc (Rust compiler) selftest = 0x%x", borgc_selftest());
 }
 
+static int
+ubo_slot_used(nir_shader *nir)
+{
+   int slot = -1;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic ||
+                nir_instr_as_intrinsic(instr)->intrinsic != nir_intrinsic_load_ubo)
+               continue;
+            nir_def *d = nir_instr_as_intrinsic(instr)->src[0].ssa;
+            for (int n = 0; n < 8 && d; n++) {
+               nir_instr *di = nir_def_instr(d);
+               if (di->type == nir_instr_type_alu) {
+                  d = nir_instr_as_alu(di)->src[0].src.ssa;
+               } else if (di->type == nir_instr_type_intrinsic) {
+                  nir_intrinsic_instr *r = nir_instr_as_intrinsic(di);
+                  if (r->intrinsic == nir_intrinsic_vulkan_resource_index) {
+                     if (slot < 0)
+                        slot = nir_intrinsic_binding(r);
+                     break;
+                  }
+                  d = r->intrinsic == nir_intrinsic_load_vulkan_descriptor ? r->src[0].ssa : NULL;
+               } else {
+                  break;
+               }
+            }
+         }
+      }
+   }
+   return slot;
+}
+
+/* The binding of the texture the shader samples (-1 for none); a draw sends one texture. */
+static int
+sampled_binding(nir_shader *nir)
+{
+   int binding = -1;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_tex)
+               continue;
+            nir_tex_instr *tex = nir_instr_as_tex(instr);
+            int di = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+            nir_variable *var = di >= 0 ? nir_deref_instr_get_variable(nir_src_as_deref(tex->src[di].src)) : NULL;
+            if (var && binding < 0)
+               binding = var->data.binding;
+         }
+      }
+   }
+   return binding;
+}
+
 static bool
 reads_point_coord(nir_shader *nir)
 {
@@ -204,6 +258,8 @@ borgvk_compile_empty_frag(struct borgvk_device *device, uint32_t opt)
    b->len = len <= BORGVK_SHADER_BLOB_MAX ? len : 0;
    b->npool = 0;
    device->frag_reads_pntc = false;
+   device->frag_tex_binding = -1;
+   device->stage_ubo[1] = -1;
    ralloc_free(nb.shader);
 }
 
@@ -217,8 +273,11 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
    if (cslot >= 0 && !blend) {   /* the cache does not know the blend state */
       bool pntc;
       if (borgvk_shader_cache_get(stage_info, vfetch, &device->shader_blob[cslot], &pntc)) {
-         if (cslot == BORGVK_STAGE_FRAG)
+         if (cslot == BORGVK_STAGE_FRAG) {
             device->frag_reads_pntc = pntc;
+            device->frag_tex_binding = -1;
+         }
+         device->stage_ubo[cslot == BORGVK_STAGE_FRAG] = -1;
          device->shader_blob[cslot].npool = 0;
          mesa_logi("borgvk: shader blob from the cache (%u bytes)", device->shader_blob[cslot].len);
          return;
@@ -242,6 +301,10 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
     * must not be a second copy. */
    borg_lower_nir_for_borgc_blend(nir, blend);
    device->frag_reads_pntc = stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT && reads_point_coord(nir);
+   if (stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT)
+      device->frag_tex_binding = sampled_binding(nir);
+   if (stage_info->stage == VK_SHADER_STAGE_VERTEX_BIT || stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT)
+      device->stage_ubo[stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT] = ubo_slot_used(nir);
 
    /* Map the Vulkan stage to a firmware shader slot. Only the vertex and
     * fragment stages are app-derived; anything else (e.g. compute) has no Borg

@@ -1725,6 +1725,8 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
                if (!ub || !ub->mem || !ub->mem->map)
                   continue;
                const bool st = smask >> b & 1;
+               if (!st && pipeline->ubo_slot >= 0 && b != pipeline->ubo_slot)
+                  continue;
                VkDeviceSize off = set->offsets[b] + ((set->dyn_mask >> b) & 1 ? cmd->dyn_off[b] : 0);
                if (off >= ub->vk.size)
                   continue;
@@ -1748,7 +1750,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    }
    for (int b = 0; ok && !smask && set && b < BORGVK_MAX_BINDINGS; b++) {
       struct borgvk_buffer *ub = set->buffers[b];
-      if (!ub || !ub->mem || !ub->mem->map)
+      if (!ub || !ub->mem || !ub->mem->map || (pipeline->ubo_slot >= 0 && b != pipeline->ubo_slot))
          continue;
       VkDeviceSize off = set->offsets[b] + ((set->dyn_mask >> b) & 1 ? cmd->dyn_off[b] : 0);
       VkDeviceSize len = set->ranges[b] == VK_WHOLE_SIZE || set->ranges[b] == 0 ? ub->vk.size - off : set->ranges[b];
@@ -1763,7 +1765,18 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       break;
    }
    if (ok) {
+      int want = -1;   /* the slot of the binding the fragment shader samples */
+      if (set && pipeline->tex_binding >= 0) {
+         want = set->map.n ? -2 : pipeline->tex_binding;
+         for (uint32_t j = 0; j < set->map.n; j++)
+            if (set->map.num[j] == pipeline->tex_binding)
+               want = set->map.slot[j];
+         if (want < 0 || want >= BORGVK_MAX_BINDINGS)
+            want = -1;
+      }
       for (int b = 0; set && b < BORGVK_MAX_BINDINGS; b++) {
+         if (want >= 0 && b != want)
+            continue;
          if (set->views[b] && send_generic_texture(set->views[b], set->images[b], set->samplers[b]))
             break;
          if (set->buffer_views[b] && send_buffer_texture(set->buffer_views[b]))
