@@ -263,6 +263,12 @@ borgvk_optimal_features(VkFormat format)
    if (vk_format_is_scaled(format))
       return 0;
 
+   /* 10-bit signed packed formats: the texture unit has none (only UNORM and UINT), and
+    * Vulkan 1.0 does not require them. */
+   if (format == VK_FORMAT_A2R10G10B10_SNORM_PACK32 || format == VK_FORMAT_A2B10G10R10_SNORM_PACK32 ||
+       format == VK_FORMAT_A2R10G10B10_SINT_PACK32 || format == VK_FORMAT_A2B10G10R10_SINT_PACK32)
+      return 0;
+
    /* 64-bit-per-channel formats (R64*): the texture unit and the tile buffer top out at
     * 32 bits per channel, and Vulkan 1.0 does not require them. */
    if (format >= VK_FORMAT_R64_UINT && format <= VK_FORMAT_R64G64B64A64_SFLOAT)
