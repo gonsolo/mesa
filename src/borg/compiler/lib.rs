@@ -707,7 +707,7 @@ unsafe fn compile_nir_inner(
                     // Fragment integer arithmetic reads its constants the same way (the vertex
                     // stage's integer constants are address math, handled by `walk`).
                     if draw_mode && (matches!(alu.op, nir_op_fadd | nir_op_fmul | nir_op_ffma
-                        | nir_op_flt | nir_op_fge | nir_op_feq | nir_op_fneu | nir_op_bcsel
+                        | nir_op_flt | nir_op_fge | nir_op_feq | nir_op_fneu | nir_op_bcsel | nir_op_fmin | nir_op_fmax
                         | nir_op_ieq | nir_op_ine | nir_op_ilt | nir_op_ige | nir_op_ult | nir_op_uge)
                         || (stage == 4 && matches!(alu.op, nir_op_iadd | nir_op_imul | nir_op_ishl
                             | nir_op_ishr | nir_op_ushr | nir_op_isub | nir_op_iand | nir_op_ior
