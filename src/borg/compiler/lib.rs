@@ -704,6 +704,9 @@ unsafe fn compile_nir_inner(
                         | nir_op_ieq | nir_op_ine | nir_op_ilt | nir_op_ige | nir_op_ult | nir_op_uge)
                         || (stage == 4 && matches!(alu.op, nir_op_iadd | nir_op_imul | nir_op_ishl
                             | nir_op_ishr | nir_op_ushr | nir_op_isub | nir_op_iand | nir_op_ior
+                            | nir_op_ixor))
+                        // Vertex bit operations are never address math (gl_VertexIndex & 2, say).
+                        || (stage == 0 && matches!(alu.op, nir_op_ishr | nir_op_ushr | nir_op_iand | nir_op_ior
                             | nir_op_ixor)))
                     {
                         let first = if alu.op == nir_op_bcsel { 1 } else { 0 };
@@ -1638,7 +1641,8 @@ unsafe fn compile_nir_inner(
                     let srcs = tex.srcs_as_slice();
                     let is_txl = tex.op == nir_texop_txl && stage == 4 && draw_mode;
                     let is_txb = tex.op == nir_texop_txb && stage == 4 && draw_mode;
-                    if tex.op != nir_texop_tex && tex.op != nir_texop_txf && !is_txl && !is_txb {
+                    let is_tg4 = tex.op == nir_texop_tg4 && stage == 4 && draw_mode;
+                    if tex.op != nir_texop_tex && tex.op != nir_texop_txf && !is_txl && !is_txb && !is_tg4 {
                         eprintln!("borgc: WARNING texture op {} not supported yet, dropped", tex.op);
                         continue;
                     }
@@ -1696,7 +1700,21 @@ unsafe fn compile_nir_inner(
                             let (wv, wc) = if has_w { resolve_vm(&vec_map, cd, 2) } else { (wz, 0u8) };
                             prog.push(BorgInstr { mnem: "TEXA", dst: NO_DST, srcs: vec![wv, lv, wz], swz: vec![wc, lc, 0] });
                         }
-                        let ctl = if has_bias {
+                        let ctl = if is_tg4 {
+                            // Operation 2 (gather) of the component in bits 19:18.
+                            let bits = 2u32 << 16 | (tex.component() & 3) << 18;
+                            let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
+                                assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
+                                let u = 20 + draw_uniform_count;
+                                draw_uniform_count += 1;
+                                draw_uniform_consts.push((u, bits));
+                                u
+                            });
+                            let c = next_vreg;
+                            next_vreg += 1;
+                            ubo.insert(c, Ubo::Uniform(u as u8));
+                            c
+                        } else if has_bias {
                             // LOD mode 1: implicit LOD plus TEXA's bias.
                             let u = *frag_window_by_bits.entry(1u32 << 21).or_insert_with(|| {
                                 assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
@@ -2612,6 +2630,37 @@ unsafe fn compile_nir_inner(
         }
     }
 
+    // An instruction reads one window word at most: a second one is copied into a register first
+    // (x + 0 in integer arithmetic, bit for bit; r30 - r30 is the zero).
+    if draw_mode {
+        let is_win = |v: &u32, ubo: &HashMap<u32, Ubo>| matches!(ubo.get(v), Some(Ubo::Uniform(_)));
+        if prog.iter().any(|i| i.srcs.iter().filter(|v| is_win(v, &ubo)).count() > 1) {
+            let f = next_vreg;
+            let z = next_vreg + 1;
+            next_vreg += 2;
+            ubo.insert(f, Ubo::Fixed(30));
+            let mut out = vec![BorgInstr { mnem: "ISUB", dst: z, srcs: vec![f, f], swz: vec![0, 0] }];
+            for mut ins in std::mem::take(&mut prog) {
+                let mut seen = false;
+                for k in 0..ins.srcs.len() {
+                    if !is_win(&ins.srcs[k], &ubo) {
+                        continue;
+                    }
+                    if !seen {
+                        seen = true;
+                        continue;
+                    }
+                    let t = next_vreg;
+                    next_vreg += 1;
+                    out.push(BorgInstr { mnem: "IADD", dst: t, srcs: vec![ins.srcs[k], z], swz: vec![ins.swz[k], 0] });
+                    ins.srcs[k] = t;
+                    ins.swz[k] = 0;
+                }
+                out.push(ins);
+            }
+            prog = out;
+        }
+    }
     let soft: Vec<u8> = if stage == 4 && draw_mode { vec![20, 21, 22, 23, 24, 26, 27, 28] } else { Vec::new() };
     let mut block_len: HashMap<u32, u8> = HashMap::new();
     for &t in &tex_dsts {

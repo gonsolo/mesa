@@ -260,6 +260,10 @@ borg_lower_nir_for_borgc(struct nir_shader *nir)
       NIR_PASS(progress, nir, nir_opt_dce);
       NIR_PASS(progress, nir, nir_opt_cse);
       NIR_PASS(progress, nir, nir_opt_constant_folding);
+      /* An `if` on a constant (a specialization constant, say) loses its dead arm. */
+      NIR_PASS(progress, nir, nir_opt_dead_cf);
+      NIR_PASS(progress, nir, nir_opt_remove_phis);
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
 #ifdef BORG_SMALL_NIR
       NIR_PASS(progress, nir, nir_shader_lower_instructions, borg_basic_alu_filter,
                borg_basic_alu_lower, NULL);
