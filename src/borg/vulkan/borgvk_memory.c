@@ -1085,6 +1085,9 @@ borgvk_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *p
       MIN2(pRenderingInfo->colorAttachmentCount, BORGVK_MAX_COLOR_ATTACHMENTS);
    cmd->depth_view = NULL;
    cmd->stencil_view = NULL;
+   /* A subpass without colour must not draw into the previous one's attachment. */
+   memset(cmd->color_views, 0, sizeof(cmd->color_views));
+   memset(cmd->color_resolve_views, 0, sizeof(cmd->color_resolve_views));
 
    uint32_t layerCount = cmd->layer_count;
 
