@@ -479,8 +479,9 @@ unsafe fn compile_nir_inner(
                 let mut return_zero = false;
                 let v = next_vreg;
                 next_vreg += 1;
+                // Integer sums are exact for any bit pattern: a control word plus a slot offset too.
                 let derivable = bits == 0 || vs_vreg_by_bits.keys().any(|&a| {
-                    a >= 1 && a < bits && bits <= 64 && vs_vreg_by_bits.get(&(bits - a)).is_some()
+                    a >= 1 && a < bits && vs_vreg_by_bits.get(&(bits - a)).is_some()
                 });
                 if draw_vs_consts.len() < DRAW_VS_CONST_WORDS && !($derive && derivable) {
                     let u = DRAW_VS_CONST_U0 as u32 + draw_vs_consts.len() as u32;
@@ -499,7 +500,7 @@ unsafe fn compile_nir_inner(
                     }
                     let z = vs_zero.unwrap();
                     let small: Vec<(u32, u32)> =
-                        vs_vreg_by_bits.iter().filter(|(&b, _)| b >= 1 && b <= 64).map(|(&b, &r)| (b, r)).collect();
+                        vs_vreg_by_bits.iter().filter(|(&b, _)| b >= 1 && b < bits).map(|(&b, &r)| (b, r)).collect();
                     if bits == 0 {
                         vs_vreg_by_bits.insert(0, z);
                         return_zero = true;
@@ -816,11 +817,11 @@ unsafe fn compile_nir_inner(
                                                 ubo.insert(c, Ubo::Fixed(30));
                                                 per_pixel_fixed.insert(c);
                                                 prog.push(BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
-                                            } else {
                                                 v
                                             } else if vs_const_window {
                                                 // A pinned register is not staged for a draw's vertex shader.
                                                 vs_const_vreg!(1.0f32.to_bits())
+                                            } else {
                                                 let reg = alloc_const_reg(&mut const_reg_count);
                                                 const_uniforms.push((reg, 1.0f32.to_bits()));
                                                 ubo.insert(v, Ubo::Fixed(reg));
@@ -867,11 +868,11 @@ unsafe fn compile_nir_inner(
                                                 ubo.insert(c, Ubo::Fixed(30));
                                                 per_pixel_fixed.insert(c);
                                                 prog.push(BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
-                                            } else {
                                                 v
                                             } else if vs_const_window {
                                                 // A pinned register is not staged for a draw's vertex shader.
                                                 vs_const_vreg!(1.0f32.to_bits())
+                                            } else {
                                                 let reg = alloc_const_reg(&mut const_reg_count);
                                                 const_uniforms.push((reg, 1.0f32.to_bits()));
                                                 ubo.insert(v, Ubo::Fixed(reg));
@@ -1401,26 +1402,21 @@ unsafe fn compile_nir_inner(
                             .wrapping_sub(VERT_ATTRIB_GENERIC0);
                         let n = intr.def.num_components as usize;
                         let ctl_bits = (1u32 << 16) | (128 + loc);
-                        let u = match vfetch_ctl.get(&loc) {
-                            Some(&u) => u,
-                            None => {
-                                assert!(draw_vs_consts.len() < DRAW_VS_CONST_WORDS,
-                                    "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
-                                let u = DRAW_VS_CONST_U0 + draw_vs_consts.len() as u8;
-                                draw_vs_consts.push((u, ctl_bits));
-                                vfetch_ctl.insert(loc, u);
-                                u
-                            }
+                        let twelve = vs_const_vreg!(12);
+                        // A line's other endpoint (location + 24): the control word is built from
+                        // the endpoint's own, so the pair costs one window word.
+                        let ctl = if loc >= 24 {
+                            let _ = vs_const_vreg!(ctl_bits - 24);
+                            let _ = vs_const_vreg!(24, true);
+                            vs_const_vreg!(ctl_bits, true)
+                        } else {
+                            vs_const_vreg!(ctl_bits)
                         };
-                        let ctl = next_vreg; next_vreg += 1;
-                        ubo.insert(ctl, Ubo::Uniform(u));
                         // The index register: r30 (VertexIndex) or r31 (InstanceIndex).
-                        let idx_reg = if vfetch >> loc & 1 != 0 { 31 } else { 30 };
+                        let idx_reg = if loc < 16 && vfetch >> loc & 1 != 0 { 31 } else { 30 };
                         let idx = next_vreg; next_vreg += 1;
                         ubo.insert(idx, Ubo::Fixed(idx_reg));
                         // The element index i is texel (i & 4095, i >> 12) of a 4096-wide image.
-                        let twelve = const_int_operand(12, &mut const_int_reg, &mut const_reg_count,
-                            &mut const_uniforms, &mut draw_vs_consts, &mut next_vreg, &mut ubo);
                         let ty = next_vreg; next_vreg += 1;
                         prog.push(BorgInstr { mnem: "ISRL", dst: ty, srcs: vec![idx, twelve], swz: vec![0, 0] });
                         let hi = next_vreg; next_vreg += 1;
