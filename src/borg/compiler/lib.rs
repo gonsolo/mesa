@@ -3058,3 +3058,23 @@ unsafe fn compile_nir_inner(
     total
 }
 
+    // A value without a register would be read and written as r0.
+    if let Some(i) = prog.iter().find(|i| i.dst != NO_DST && !alloc.contains_key(&i.dst)) {
+        let mut res: Vec<u8> = extra_reserved.clone();
+        res.sort();
+        res.dedup();
+        eprintln!("borgc: ERROR out of registers ({} has none; reserved {:?}), refusing to emit a wrong shader", i.mnem, res);
+        return 0;
+    }
+    if env::var("BORGC_DUMP_ALLOC").is_ok() {
+        for i in &prog {
+            let r = |v: &u32| match (alloc.get(v), ubo.get(v)) {
+                (Some(r), _) => format!("r{r}"),
+                (None, Some(Ubo::Uniform(u))) => format!("u{u}"),
+                (None, Some(Ubo::Fixed(f))) => format!("R{f}"),
+                _ => format!("?{v}"),
+            };
+            let s: Vec<String> = i.srcs.iter().zip(i.swz.iter()).map(|(v, c)| format!("{}.{}", r(v), c)).collect();
+            eprintln!("borgc:A {} {} <- {}", i.mnem, r(&i.dst), s.join(", "));
+        }
+    }
