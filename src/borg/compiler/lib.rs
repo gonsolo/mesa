@@ -469,7 +469,9 @@ unsafe fn compile_nir_inner(
     // A vertex-shader constant: a window word, shared by value; once the window is full a small
     // integer is derived from others (a sum) or zero (a difference) with an ALU op.
     macro_rules! vs_const_vreg {
-        ($bits:expr) => {{
+        ($bits:expr) => { vs_const_vreg!($bits, false) };
+        // `derive`: build a small integer from others even while the window has room.
+        ($bits:expr, $derive:expr) => {{
             let bits: u32 = $bits;
             if let Some(&v) = vs_vreg_by_bits.get(&bits) {
                 v
@@ -477,7 +479,10 @@ unsafe fn compile_nir_inner(
                 let mut return_zero = false;
                 let v = next_vreg;
                 next_vreg += 1;
-                if draw_vs_consts.len() < DRAW_VS_CONST_WORDS {
+                let derivable = bits == 0 || vs_vreg_by_bits.keys().any(|&a| {
+                    a >= 1 && a < bits && bits <= 64 && vs_vreg_by_bits.get(&(bits - a)).is_some()
+                });
+                if draw_vs_consts.len() < DRAW_VS_CONST_WORDS && !($derive && derivable) {
                     let u = DRAW_VS_CONST_U0 as u32 + draw_vs_consts.len() as u32;
                     draw_vs_consts.push((u as u8, bits));
                     ubo.insert(v, Ubo::Uniform(u as u8));
@@ -1285,7 +1290,7 @@ unsafe fn compile_nir_inner(
                                     let idx_reg = *push_const_reg.entry(word_idx).or_insert_with(|| {
                                         // Vertex: a window word per run; a pinned GPR is clobbered by the fragment pass.
                                         if vs_const_window {
-                                            return vs_const_vreg!(word_idx);
+                                            return vs_const_vreg!(word_idx, true);
                                         }
                                         // Fragment: a window word too (no GPR is staged in draw mode).
                                         if draw_mode && stage == 4 {

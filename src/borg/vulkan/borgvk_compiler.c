@@ -7,6 +7,7 @@
  * NIR (via the Mesa runtime) and hands each stage to Rust.
  */
 #include "borgvk_private.h"
+#include "nir_builder.h"
 #include "borg_nir_passes.h"
 
 #include "vk_pipeline.h"
@@ -99,6 +100,20 @@ remap_array_bindings(struct borgvk_device *device, nir_shader *nir)
          }
       }
    }
+}
+
+/* A pipeline without a fragment stage (depth only): a shader that writes nothing. */
+void
+borgvk_compile_empty_frag(struct borgvk_device *device, uint32_t opt)
+{
+   struct borgvk_shader_blob *b = &device->shader_blob[BORGVK_STAGE_FRAG];
+   nir_builder nb = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, &borg_nir_options, "borgvk_empty_fs");
+   borg_lower_nir_for_borgc(nb.shader);
+   uint32_t len = 0;
+   borgc_compile_nir(nb.shader, b->data, BORGVK_SHADER_BLOB_MAX, &len, opt);
+   b->len = len <= BORGVK_SHADER_BLOB_MAX ? len : 0;
+   device->frag_reads_pntc = false;
+   ralloc_free(nb.shader);
 }
 
 void

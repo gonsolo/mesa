@@ -91,6 +91,11 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
       for (uint32_t s = 0; s < pCreateInfos[i].stageCount; s++)
          borgvk_compile_stage(device, pCreateInfos[i].pStages[s].stage == VK_SHADER_STAGE_FRAGMENT_BIT ? frag_opt : vfetch,
                               &pCreateInfos[i].pStages[s]);
+      bool has_fs = false;
+      for (uint32_t s = 0; s < pCreateInfos[i].stageCount; s++)
+         has_fs |= pCreateInfos[i].pStages[s].stage == VK_SHADER_STAGE_FRAGMENT_BIT;
+      if (!has_fs)
+         borgvk_compile_empty_frag(device, frag_opt);
       if (points) {
          /* gl_PointCoord: the fragment stage reads two varyings placed after the vertex stage's own. */
          const VkPipelineShaderStageCreateInfo *vs = NULL, *fs = NULL;
