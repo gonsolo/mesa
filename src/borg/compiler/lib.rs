@@ -2153,13 +2153,13 @@ unsafe fn compile_nir_inner(
         out_roots.push(w);
     }
     if draw_mode && stage == 4 && vfetch & 0x10 != 0 && vfetch & 0x100 == 0 && draw_frag_out[0].is_some() {
-        // Packed colour (RAW8/16/32): n channels of 8 or 16 bits, kind 0 UNORM, 1 SNORM, 2 SRGB, 3 integer;
-        // `swap` reads the components as B, G, R. r26 = ch0 | ch1 << bits | ...
-        let kind = (vfetch >> 16) & 3;
-        let wide = (vfetch >> 18) & 1 != 0;
-        let n = ((vfetch >> 19) & 3) as usize + 1;
-        let swap = (vfetch >> 21) & 1 != 0;
-        let bits: u32 = if wide { 16 } else { 8 };
+        // Packed colour (RAW8 .. RAW128): n channels of 8, 16 or 32 bits, kind 0 UNORM, 1 SNORM, 2 SRGB, 3 the
+        // bits as they are; `swap` reads the components as B, G, R. Channel k fills bits k*size of the texel:
+        // word w of the texel is r26 (w = 0), r27 (w = 1); a RAW128 texel renders in two slices of two words.
+        let kind = (vfetch >> 16) & 7;
+        let bits: u32 = match (vfetch >> 19) & 3 { 0 => 8, 1 => 16, _ => 32 };
+        let n = ((vfetch >> 21) & 3) as usize + 1;
+        let swap = (vfetch >> 23) & 1 != 0;
         let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
             let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
                 assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
@@ -2172,8 +2172,8 @@ unsafe fn compile_nir_inner(
             ubo.insert(v, Ubo::Uniform(u as u8));
             v
         };
-        let mask = win(if wide { 0xFFFF } else { 0xFF }, &mut ubo, &mut next_vreg);
-        let mut acc: Option<u32> = None;
+        let mask = if bits < 32 { Some(win((1u32 << bits) - 1, &mut ubo, &mut next_vreg)) } else { None };
+        let mut words: [Option<u32>; 4] = [None; 4];
         for k in 0..n {
             let comp = if swap && k < 3 { 2 - k } else { k };
             let Some((x, xc)) = draw_frag_out[comp] else { continue };
@@ -2190,14 +2190,14 @@ unsafe fn compile_nir_inner(
             } else { (x, xc) };
             let q = match kind {
                 0 | 2 => {
-                    let cmax = win((if wide { 65535.0f32 } else { 255.0f32 }).to_bits(), &mut ubo, &mut next_vreg);
+                    let cmax = win(((1u32 << bits) as f32 - 1.0).to_bits(), &mut ubo, &mut next_vreg);
                     let c05 = win(0.5f32.to_bits(), &mut ubo, &mut next_vreg);
                     let m = op("FMUL", vec![x, cmax], vec![xc, 0], &mut prog, &mut next_vreg);
                     let h = op("FADD", vec![m, c05], vec![0, 0], &mut prog, &mut next_vreg);
                     op("F2I", vec![h], vec![0], &mut prog, &mut next_vreg)
                 }
                 1 => {
-                    let cmax = win((if wide { 32767.0f32 } else { 127.0f32 }).to_bits(), &mut ubo, &mut next_vreg);
+                    let cmax = win((((1u32 << (bits - 1)) - 1) as f32).to_bits(), &mut ubo, &mut next_vreg);
                     let c05 = win(0.5f32.to_bits(), &mut ubo, &mut next_vreg);
                     let t = op("FMUL", vec![x, cmax], vec![xc, 0], &mut prog, &mut next_vreg);
                     let st = op("FSTEP", vec![t], vec![0], &mut prog, &mut next_vreg);
@@ -2205,23 +2205,55 @@ unsafe fn compile_nir_inner(
                     let hh = op("FADD", vec![st, nh], vec![0, 0], &mut prog, &mut next_vreg);
                     let u = op("FADD", vec![t, hh], vec![0, 0], &mut prog, &mut next_vreg);
                     let i = op("F2I", vec![u], vec![0], &mut prog, &mut next_vreg);
-                    op("IAND", vec![i, mask], vec![0, 0], &mut prog, &mut next_vreg)
+                    op("IAND", vec![i, mask.unwrap()], vec![0, 0], &mut prog, &mut next_vreg)
                 }
-                _ => op("IAND", vec![x, mask], vec![xc, 0], &mut prog, &mut next_vreg),
+                _ => match mask {
+                    Some(m) => op("IAND", vec![x, m], vec![xc, 0], &mut prog, &mut next_vreg),
+                    None => op("IOR", vec![x, x], vec![xc, xc], &mut prog, &mut next_vreg),
+                },
             };
-            let q = if k == 0 { q } else {
-                let sh = win(k as u32 * bits, &mut ubo, &mut next_vreg);
-                op("ISHL", vec![q, sh], vec![0, 0], &mut prog, &mut next_vreg)
+            let bitpos = k as u32 * bits;
+            let (wi, sh) = ((bitpos / 32) as usize, bitpos % 32);
+            let q = if sh == 0 { q } else {
+                let shv = win(sh, &mut ubo, &mut next_vreg);
+                op("ISHL", vec![q, shv], vec![0, 0], &mut prog, &mut next_vreg)
             };
-            acc = Some(match acc {
+            words[wi] = Some(match words[wi] {
                 None => q,
                 Some(a) => op("IOR", vec![a, q], vec![0, 0], &mut prog, &mut next_vreg),
             });
         }
-        if let Some(w) = acc {
-            draw_frag_out = [Some((w, 0)), None, None, None];
-            out_roots.push(w);
+        let nwords = (n as u32 * bits + 31) / 32;
+        let mut out: [Option<(u32, u8)>; 4] = [None; 4];
+        if nwords <= 2 {
+            for w in 0..nwords as usize {
+                out[w] = words[w].map(|v| (v, 0u8));
+            }
+        } else {
+            // RAW128: the slice this pass renders (ATTIDX / 4) picks words 0-1 or 2-3.
+            let mut op = |mnem: &'static str, srcs: Vec<u32>, prog: &mut Vec<BorgInstr>, next_vreg: &mut u32| {
+                let d = *next_vreg; *next_vreg += 1;
+                let swz = vec![0; srcs.len()];
+                prog.push(BorgInstr { mnem, dst: d, srcs, swz });
+                d
+            };
+            let idx = op("ATTIDX", vec![], &mut prog, &mut next_vreg);
+            let zero = op("ISUB", vec![idx, idx], &mut prog, &mut next_vreg);
+            let four_w = win(4, &mut ubo, &mut next_vreg);
+            let four = op("IADD", vec![four_w, zero], &mut prog, &mut next_vreg);
+            let sel = op("ISEQ", vec![idx, four], &mut prog, &mut next_vreg);
+            for w in 0..2 {
+                let lo = words[w].unwrap_or(zero);
+                let hi = words[w + 2].unwrap_or(zero);
+                let d = op("ISUB", vec![hi, lo], &mut prog, &mut next_vreg);
+                let m = op("IMUL", vec![sel, d], &mut prog, &mut next_vreg);
+                out[w] = Some((op("IADD", vec![lo, m], &mut prog, &mut next_vreg), 0u8));
+            }
         }
+        for o in out.iter().flatten() {
+            out_roots.push(o.0);
+        }
+        draw_frag_out = out;
     }
     if draw_mode && stage == 4 && vfetch & 8 != 0 && draw_frag_out[0].is_some() {
         // R16G16_SFLOAT (RAW32; with bit 0x20 R16_SFLOAT, RAW16): r26 = half(r) | half(g) << 16 with integer ops (round to nearest even,
@@ -2255,6 +2287,7 @@ unsafe fn compile_nir_inner(
             (ins("FMOV", &[(x0, x0c)], &mut prog, &mut next_vreg), 0u8)
         } else { (x0, x0c) };
         let zero = ins("ISUB", &[first, first], &mut prog, &mut next_vreg);
+        let nch = if vfetch & 0x20 != 0 { 1 } else if vfetch & 0x40 != 0 { 3 } else if vfetch & 0x80 != 0 { 4 } else { 2 };
         let r1 = i!("ISEQ", zero, zero);
         let r2 = i!("IADD", r1, r1);
         let r4 = i!("IADD", r2, r2);
@@ -2263,19 +2296,20 @@ unsafe fn compile_nir_inner(
         let r13 = i!("IADD", r12, r1);
         let k1000 = i!("ISHL", r1, r12);
         let kfff = i!("ISUB", k1000, r1);
-        let mut p = 0u32;
-        for (n, src) in [Some((x0, x0c)), if vfetch & 0x20 != 0 { None } else { draw_frag_out[1] }].into_iter().enumerate() {
+        let r14 = i!("IADD", r13, r1);
+        let r15 = i!("IADD", r14, r1);
+        let r16 = i!("IADD", r15, r1);
+        let k8000 = i!("ISHL", r1, r15);
+        let r6 = i!("ISRL", r13, r1);
+        let k200 = i!("ISRL", k8000, r6);
+        let mut pw: [Option<u32>; 2] = [None; 2];
+        for n in 0..nch {
+            let src = if n == 0 { Some((x0, x0c)) } else { draw_frag_out[n] };
             let Some((x, xc)) = src else { continue };
             let xr = ins("IADD", &[(x, xc), (zero, 0)], &mut prog, &mut next_vreg);
             // The sign first, so the input register is free early; 0x8000 and 0x200 are built here.
-            let r14 = i!("IADD", r13, r1);
-            let r15 = i!("IADD", r14, r1);
-            let r16 = i!("IADD", r15, r1);
-            let k8000 = i!("ISHL", r1, r15);
             let s16 = i!("ISRL", xr, r16);
             let sg = i!("IAND", s16, k8000);
-            let r6 = i!("ISRL", r13, r1);
-            let k200 = i!("ISRL", k8000, r6);
             let c = k!(0x7FFF_FFFF);
             let a = i!("IAND", xr, c);
             let c = k!(0x3800_0000);
@@ -2300,21 +2334,18 @@ unsafe fn compile_nir_inner(
             let mb = i!("IMUL", ib, dv);
             let c = k!(0x7C00);
             let v2 = i!("IADD", mb, c);
-            let c = k!(0x7F80_0001);
-            let inn = i!("ISLTU", a, c);
-            let nan = i!("IXOR", inn, r1);
+            let c = k!(0x7F80_0000);
+            let nan = i!("ISLTU", c, a);
             let nb = i!("IMUL", nan, k200);
             let v3 = i!("IOR", v2, nb);
             let h = i!("IOR", v3, sg);
-            if n == 0 {
-                p = h;
-            } else {
-                let hi = i!("ISHL", h, r16);
-                p = i!("IOR", p, hi);
-            }
+            let h = if n & 1 == 0 { h } else { i!("ISHL", h, r16) };
+            pw[n / 2] = Some(match pw[n / 2] { None => h, Some(a) => i!("IOR", a, h) });
         }
-        draw_frag_out = [Some((p, 0)), None, None, None];
-        out_roots.push(p);
+        draw_frag_out = [pw[0].map(|p| (p, 0)), pw[1].map(|p| (p, 0)), None, None];
+        for p in pw.iter().flatten() {
+            out_roots.push(*p);
+        }
     }
     if draw_mode && stage == 4 && vfetch & 1 != 0 && draw_frag_out[3].is_some() {
         // Byte-packed integer colour (R8G8B8A8_UINT/SINT, RAW32): r26 = c0 | c1<<8 | c2<<16 | c3<<24.

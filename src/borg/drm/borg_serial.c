@@ -27,7 +27,7 @@
 #define BORG_TEX_PKT_LEN    (1 + 1 + 16 + BORG_TEX_DIM * 4 + 1)
 /* Shader upload: marker, stage, len(2B LE), blob padded to BORG_SHADER_MAX,
  * checksum. Fixed length (matches borgvk_serial.c BORGVK_SHADER_PKT_LEN). */
-#define BORG_SHADER_PKT_LEN (1 + 1 + 2 + BORG_SHADER_MAX + 1)
+#define BORG_SHADER_SMALL   512   /* firmware BC_SHADER_MAX; a larger blob goes in a 0xC1 packet */
 
 static int g_serial_fd = -1;  /* -1 = not tried, -2 = failed */
 
@@ -158,18 +158,19 @@ borg_serial_send_shader(uint8_t stage, const uint8_t *blob, uint32_t len)
       return;
    }
 
-   uint8_t pkt[BORG_SHADER_PKT_LEN];
-   memset(pkt, 0, sizeof(pkt));
-   pkt[0] = BORG_MARKER_SHADER;
+   const size_t pkt_len = 1 + 1 + 2 + (len > BORG_SHADER_SMALL ? BORG_SHADER_MAX : BORG_SHADER_SMALL) + 1;
+   uint8_t pkt[1 + 1 + 2 + BORG_SHADER_MAX + 1];
+   memset(pkt, 0, pkt_len);
+   pkt[0] = len > BORG_SHADER_SMALL ? 0xC1 : BORG_MARKER_SHADER;
    pkt[1] = stage;
    pkt[2] = (uint8_t)(len & 0xff);
    pkt[3] = (uint8_t)(len >> 8);
    memcpy(&pkt[4], blob, len);
 
    uint8_t csum = 0;
-   for (int i = 1; i < BORG_SHADER_PKT_LEN - 1; i++) csum ^= pkt[i];
-   pkt[BORG_SHADER_PKT_LEN - 1] = csum;
-   borg_serial_write_paced(fd, pkt, sizeof(pkt));
+   for (size_t i = 1; i < pkt_len - 1; i++) csum ^= pkt[i];
+   pkt[pkt_len - 1] = csum;
+   borg_serial_write_paced(fd, pkt, pkt_len);
    fprintf(stderr, "borg-shim: uploaded %s shader (%u bytes)\n",
            stage == 0 ? "vertex" : "fragment", len);
 }

@@ -74,7 +74,7 @@ extern const struct vk_sync_type borgvk_sync_type;
  * they replace the firmware's baked borgc_vert/frag_shader[] arrays. Only the
  * vertex and fragment stages come from the app; the rasterize stage stays baked
  * (it is a fixed-function Borg shader, not derived from the app). */
-#define BORGVK_SHADER_BLOB_MAX 512   /* frag = 255 B today; headroom */
+#define BORGVK_SHADER_BLOB_MAX 1024
 enum borgvk_shader_stage {
    BORGVK_STAGE_VERT = 0,
    BORGVK_STAGE_FRAG = 1,

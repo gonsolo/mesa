@@ -53,7 +53,7 @@
 /* Max .borg blob the shader-upload path carries (must match the Vulkan side's
  * BORGVK_SHADER_BLOB_MAX and the firmware RX shader packet). cube.frag = 255 B
  * today; 512 leaves headroom. */
-#define BORG_SHADER_MAX       512u
+#define BORG_SHADER_MAX       1024u
 
 /* Allocate a GEM buffer object backed by anonymous memory. */
 struct drm_borg_gem_create {
