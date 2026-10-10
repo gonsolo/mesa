@@ -1850,15 +1850,16 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
    const char *direct = getenv("BORGVK_SIM_DIRECT");
    if (!pl || !pl->cs_ok || !gx || !gy || !gz || !direct || !direct[0])
       return;
-   struct borgvk_descriptor_set *set = cmd->cs_desc_set;
-
    /* wb: copy the window back to the app's buffer afterwards.  A texel buffer is decoded into a
     * private array (the canonical 4-word texel the compiler reads, see borg_nir_passes.c); the
     * texels a shader changed are encoded back. */
    struct { uint8_t *host; uint8_t *decoded; bool wb; uint32_t skip, size, addr;
-            uint8_t *texels; enum pipe_format pf; } bufs[BORGVK_MAX_BINDINGS + 1];
+            uint8_t *texels; enum pipe_format pf; } bufs[2 * BORGVK_MAX_BINDINGS + 1];
    memset(bufs, 0, sizeof(bufs));
    uint32_t nbufs = 0, total = 0;
+   for (uint32_t si = 0; si < 2; si++) {
+   struct borgvk_descriptor_set *set = si ? cmd->cs_desc_set1 : cmd->cs_desc_set;
+   const VkDeviceSize *dyn_off = si ? cmd->cs_dyn_off1 : cmd->cs_dyn_off;
    for (uint32_t b = 0; set && b < BORGVK_MAX_BINDINGS; b++) {
       const struct vk_buffer_view *bv = set->buffer_views[b];
       if (bv && !set->buffers[b]) {
@@ -1881,13 +1882,39 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
          bufs[nbufs].pf = pf;
          bufs[nbufs].skip = 0;
          bufs[nbufs].size = n * 16;
-         bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + b * BORGVK_CS_SLOT_BYTES;
+         bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + (si * BORGVK_MAX_BINDINGS + b) * BORGVK_CS_SLOT_BYTES;
          total += 8 + n * 16;
          nbufs++;
          continue;
       }
       struct borgvk_buffer *buf = set->buffers[b];
       struct borgvk_image *simg = set->images[b];
+      if (!buf && !bv && simg && (set->sampled_mask >> b & 1) && simg->mem && simg->mem->map &&
+          simg->vk.image_type == VK_IMAGE_TYPE_2D && simg->vk.samples == 1) {
+         /* A sampled image: word 0 = width, then level 0 / layer 0 decoded to 16-byte texels. */
+         enum pipe_format pf = vk_format_to_pipe_format(simg->vk.format);
+         uint32_t w = simg->vk.extent.width, h = simg->vk.extent.height;
+         uint32_t bs = util_format_get_blocksize(pf);
+         if (pf == PIPE_FORMAT_NONE || bs == 0 || util_format_is_compressed(pf))
+            continue;
+         uint32_t n = MIN2(w * h, BORGVK_CS_SLOT_BYTES / 16 - 1);
+         uint8_t *dec = calloc(1 + n, 16);
+         if (!dec)
+            continue;
+         memcpy(dec, &w, 4);
+         const uint8_t *src = (const uint8_t *)simg->mem->map + simg->offset;
+         for (uint32_t t = 0; t < n; t++)
+            util_format_unpack_rgba(pf, dec + 16 + (size_t)t * 16, src + (size_t)t * bs, 1);
+         bufs[nbufs].host = NULL;
+         bufs[nbufs].decoded = dec;
+         bufs[nbufs].wb = false;
+         bufs[nbufs].skip = 0;
+         bufs[nbufs].size = (1 + n) * 16;
+         bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + (si * BORGVK_MAX_BINDINGS + b) * BORGVK_CS_SLOT_BYTES;
+         total += 8 + (1 + n) * 16;
+         nbufs++;
+         continue;
+      }
       if (!buf && !bv && simg && simg->mem && simg->mem->map && simg->vk.image_type == VK_IMAGE_TYPE_2D &&
           vk_format_get_blocksize(simg->vk.format) == 4 && simg->vk.samples == 1) {
          /* A storage image: word 0 = width, then level 0 / layer 0 texel by texel (4-byte
@@ -1904,14 +1931,14 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
          bufs[nbufs].wb = true;
          bufs[nbufs].skip = 4;
          bufs[nbufs].size = (1 + n) * 4;
-         bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + b * BORGVK_CS_SLOT_BYTES;
+         bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + (si * BORGVK_MAX_BINDINGS + b) * BORGVK_CS_SLOT_BYTES;
          total += 8 + (1 + n) * 4;
          nbufs++;
          continue;
       }
       if (!buf || !buf->mem || !buf->mem->map)
          continue;
-      VkDeviceSize boff = set->offsets[b] + cmd->cs_dyn_off[b];
+      VkDeviceSize boff = set->offsets[b] + dyn_off[b];
       VkDeviceSize avail = buf->vk.size > boff ? buf->vk.size - boff : 0;
       VkDeviceSize size = set->ranges[b] == VK_WHOLE_SIZE || set->ranges[b] > avail ? avail : set->ranges[b];
       if (size > BORGVK_CS_SLOT_BYTES)
@@ -1921,12 +1948,13 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
       bufs[nbufs].wb = true;
       bufs[nbufs].skip = 0;
       bufs[nbufs].size = (uint32_t)size;
-      bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + b * BORGVK_CS_SLOT_BYTES;
+      bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + (si * BORGVK_MAX_BINDINGS + b) * BORGVK_CS_SLOT_BYTES;
       total += 8 + ((uint32_t)size + 3) / 4 * 4;
       nbufs++;
    }
+   }
 
-   /* Push constants: one more window, slot 8. */
+   /* Push constants: one more window, slot 32. */
    {
       uint8_t *dec = calloc(1, sizeof(cmd->pc));
       if (dec) {
@@ -1936,7 +1964,7 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
          bufs[nbufs].wb = false;
          bufs[nbufs].skip = 0;
          bufs[nbufs].size = sizeof(cmd->pc);
-         bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + BORGVK_MAX_BINDINGS * BORGVK_CS_SLOT_BYTES;
+         bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + 32 * BORGVK_CS_SLOT_BYTES;
          total += 8 + sizeof(cmd->pc);
          nbufs++;
       }
@@ -2087,21 +2115,24 @@ borgvk_CmdBindDescriptorSets(VkCommandBuffer commandBuffer, VkPipelineBindPoint 
 {
    VK_FROM_HANDLE(vk_command_buffer, vk_cmd, commandBuffer);
    struct borgvk_command_buffer *cmd = container_of(vk_cmd, struct borgvk_command_buffer, vk);
-   if (descriptorSetCount > 0 && pDescriptorSets) {
-      VK_FROM_HANDLE(borgvk_descriptor_set, set, pDescriptorSets[0]);
-      if (set) {
-         const bool cs = pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE;
-         VkDeviceSize *dyn = cs ? cmd->cs_dyn_off : cmd->dyn_off;
-         if (cs)
-            cmd->cs_desc_set = set;
-         else
-            cmd->desc_set = set;
-         memset(dyn, 0, sizeof(cmd->dyn_off));
-         uint32_t k = 0;
-         for (uint32_t b = 0; b < BORGVK_MAX_BINDINGS && k < dynamicOffsetCount; b++)
-            if (set->dyn_mask & (1ull << b))
-               dyn[b] = pDynamicOffsets[k++];
-      }
+   const bool cs = pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE;
+   uint32_t k = 0;
+   for (uint32_t i = 0; i < descriptorSetCount && pDescriptorSets; i++) {
+      VK_FROM_HANDLE(borgvk_descriptor_set, set, pDescriptorSets[i]);
+      const uint32_t si = cs ? firstSet + i : 0;
+      if (!set || si > 1u || (!cs && i > 0))
+         continue;
+      VkDeviceSize *dyn = cs ? (si ? cmd->cs_dyn_off1 : cmd->cs_dyn_off) : cmd->dyn_off;
+      if (cs && si)
+         cmd->cs_desc_set1 = set;
+      else if (cs)
+         cmd->cs_desc_set = set;
+      else
+         cmd->desc_set = set;
+      memset(dyn, 0, sizeof(cmd->dyn_off));
+      for (uint32_t b = 0; b < BORGVK_MAX_BINDINGS && k < dynamicOffsetCount; b++)
+         if (set->dyn_mask & (1ull << b))
+            dyn[b] = pDynamicOffsets[k++];
    }
 }
 

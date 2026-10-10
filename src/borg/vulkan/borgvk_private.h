@@ -138,7 +138,7 @@ struct borgvk_device {
 
 #define BORGVK_MAX_VERTEX_BINDINGS 16
 
-#define BORGVK_MAX_BINDINGS 8
+#define BORGVK_MAX_BINDINGS 16
 #define BORGVK_MAX_WRITEBACKS 16
 /* A draw's buffer region: the uniform buffer, then storage buffer b at slot 1 + b (lib.rs SSBO_SLOT_WORDS). */
 #define BORGVK_SSBO_SLOT_BYTES 65536u
@@ -197,8 +197,10 @@ struct borgvk_command_buffer {
    uint32_t pc[32];                             /* push-constant bytes, for compute */
    VkDeviceSize dyn_off[BORGVK_MAX_BINDINGS];   /* dynamic offsets of desc_set, by binding */
    /* The compute bind point has its own set. */
-   struct borgvk_descriptor_set *cs_desc_set;
+   struct borgvk_descriptor_set *cs_desc_set;   /* set 0 */
+   struct borgvk_descriptor_set *cs_desc_set1;
    VkDeviceSize cs_dyn_off[BORGVK_MAX_BINDINGS];
+   VkDeviceSize cs_dyn_off1[BORGVK_MAX_BINDINGS];
 };
 
 extern const struct vk_command_buffer_ops borgvk_cmd_buffer_ops;
@@ -431,6 +433,7 @@ struct borgvk_descriptor_set {
    struct vk_buffer_view *buffer_views[BORGVK_MAX_BINDINGS];   /* texel buffers */
    uint64_t dyn_mask;           /* from the layout: dynamic-offset slots */
    uint32_t storage_mask;       /* slots whose buffer is a storage buffer */
+   uint32_t sampled_mask;       /* slots whose image is sampled (not storage) */
    struct borgvk_desc_map map;
 };
 

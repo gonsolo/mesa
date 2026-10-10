@@ -12,7 +12,7 @@
 //   * Constants have no immediate form: each distinct constant gets a register the driver
 //     presets over MMIO (returned as (register, value) pairs).
 //   * A buffer binding (set, binding) lives in a fixed window of GPU memory the driver fills
-//     and reads back: word index SLOT_BASE_WORDS + (set * 8 + binding) * SLOT_WORDS.  LS_BASE
+//     and reads back: word index SLOT_BASE_WORDS + (set * 16 + binding) * SLOT_WORDS.  LS_BASE
 //     stays 0, so LOAD/STORE take full word indices.
 //   * robustBufferAccess: every buffer word index is masked to the binding's window (word_addr);
 //     the host zero-fills the window past the buffer and copies back only the buffer's bytes.
@@ -181,7 +181,7 @@ impl Em {
     /// Word index of the byte offset `off` in the buffer named by `idx`'s first component.
     fn word_addr(&mut self, idx: &nir_src, off: &nir_src, extra_words: u32) -> V {
         let base = match self.src(idx, 0) {
-            V::D(set, binding) => SLOT_BASE_WORDS + (set * 8 + binding) * SLOT_WORDS,
+            V::D(set, binding) => SLOT_BASE_WORDS + (set * 16 + binding) * SLOT_WORDS,
             _ => {
                 self.fail("buffer index is not a known binding".into());
                 0
@@ -363,7 +363,7 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                         }
                     }
                     nir_intrinsic_load_push_constant => {
-                        // Push constants are one more window (slot 8, set 1 binding 0) that the
+                        // Push constants are one more window (slot 32) that the
                         // host fills at dispatch.
                         let o = em.src(i.get_src(0), 0);
                         let w = em.shr(o, 2);
@@ -374,7 +374,7 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                                 V::C(x) => V::C(x & (SLOT_WORDS - 1)),
                                 _ => em.bin("IAND", w2, V::C(SLOT_WORDS - 1)),
                             };
-                            let a = em.add(V::C(SLOT_BASE_WORDS + 8 * SLOT_WORDS), w2);
+                            let a = em.add(V::C(SLOT_BASE_WORDS + 32 * SLOT_WORDS), w2);
                             let ra = em.reg(a);
                             let rd = em.fresh();
                             em.op("LOAD", rd, ra, 0, 0);
@@ -423,7 +423,7 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                         }
                     }
                     nir_intrinsic_load_shared | nir_intrinsic_store_shared => {
-                        // Workgroup-shared variables are one more window (slot 9); workgroups run
+                        // Workgroup-shared variables are one more window (slot 33); workgroups run
                         // one after the other, so they can all use the same one.
                         let store = i.intrinsic == nir_intrinsic_store_shared;
                         let o = em.src(i.get_src(if store { 1 } else { 0 }), 0);
@@ -439,7 +439,7 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                                 V::C(x) => V::C(x & (SLOT_WORDS - 1)),
                                 _ => em.bin("IAND", w2, V::C(SLOT_WORDS - 1)),
                             };
-                            let a = em.add(V::C(SLOT_BASE_WORDS + 9 * SLOT_WORDS), w2);
+                            let a = em.add(V::C(SLOT_BASE_WORDS + 33 * SLOT_WORDS), w2);
                             let ra = em.reg(a);
                             if store {
                                 let v = em.src(i.get_src(0), c as u8);

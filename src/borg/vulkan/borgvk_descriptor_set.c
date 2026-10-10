@@ -231,6 +231,7 @@ copy_slot(struct borgvk_descriptor_set *dst, uint32_t d, const struct borgvk_des
    dst->ranges[d] = src->ranges[s];
    dst->images[d] = src->images[s];
    dst->views[d] = src->views[s];
+   dst->sampled_mask = (dst->sampled_mask & ~(1u << d)) | (src->sampled_mask & (1u << s) ? 1u << d : 0);
    dst->samplers[d] = src->samplers[s];
    dst->buffer_views[d] = src->buffer_views[s];
 }
@@ -294,6 +295,8 @@ borgvk_UpdateDescriptorSets(VkDevice _device,
             if (view) {
                set->images[slot] = container_of(view->image, struct borgvk_image, vk);
                set->views[slot] = view;
+               const bool sampled = w->descriptorType != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+               set->sampled_mask = (set->sampled_mask & ~(1u << slot)) | (sampled ? 1u << slot : 0);
             }
          }
       }
