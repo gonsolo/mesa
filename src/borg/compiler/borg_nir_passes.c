@@ -186,6 +186,20 @@ borg_basic_alu_lower(nir_builder *b, nir_instr *instr, void *data)
 }
 #endif
 
+/* No multiview: gl_ViewIndex is 0. */
+static bool
+borg_view_index_filter(const nir_instr *instr, const void *data)
+{
+   return instr->type == nir_instr_type_intrinsic &&
+          nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_view_index;
+}
+
+static nir_def *
+borg_view_index_lower(nir_builder *b, nir_instr *instr, void *data)
+{
+   return nir_imm_int(b, 0);
+}
+
 void
 borg_lower_nir_for_borgc(struct nir_shader *nir)
 {
@@ -226,6 +240,7 @@ borg_lower_nir_for_borgc(struct nir_shader *nir)
    NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees, nir_var_function_temp | nir_var_shader_temp, UINT32_MAX);
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
    NIR_PASS(_, nir, nir_lower_system_values);
+   NIR_PASS(_, nir, nir_shader_lower_instructions, borg_view_index_filter, borg_view_index_lower, NULL);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
             borg_spirv_options.ubo_addr_format);
    /* Storage buffers (compute): load/store/atomic_ssbo intrinsics. */
