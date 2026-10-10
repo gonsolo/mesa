@@ -86,8 +86,9 @@ pub(crate) fn schedule_for_pressure(prog: &mut Vec<BorgInstr>, out_roots: &[u32]
     {
         let mut cur: Vec<BorgInstr> = Vec::new();
         for instr in prog.drain(..) {
-            // A TEX fills a fixed register block: nothing may move across it.
-            if instr.dst == crate::NO_DST || instr.mnem == "TEX" {
+            // A TEX fills a fixed register block: nothing may move across it. Every FATTR fills
+            // the same three registers, so the same holds for it.
+            if instr.dst == crate::NO_DST || instr.mnem == "TEX" || instr.mnem == "FATTR" {
                 runs.push((std::mem::take(&mut cur), Some(instr)));
             } else {
                 cur.push(instr);
