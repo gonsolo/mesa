@@ -1352,7 +1352,13 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    struct borgvk_image *color_img =
       cmd->color_views[0] && cmd->color_views[0]->image
          ? container_of(cmd->color_views[0]->image, struct borgvk_image, vk) : NULL;
-   if (!color_img || !color_img->mem || !color_img->mem->map)
+   /* Depth only: no colour attachment, the depth or stencil image gives the size. */
+   const struct vk_image_view *ds_view = cmd->depth_view ? cmd->depth_view : cmd->stencil_view;
+   struct borgvk_image *size_img =
+      color_img ? color_img : ds_view && ds_view->image ? container_of(ds_view->image, struct borgvk_image, vk) : NULL;
+   if (!size_img || !size_img->mem || !size_img->mem->map)
+      return generic_reject(5);
+   if (!color_img && !borgvk_sim_serves(size_img, true))
       return generic_reject(5);
    /* Colour attachments 1-3, when the pipeline's render pass has several (all R8, one pass each). */
    struct borgvk_image *extra[3] = { NULL, NULL, NULL };
@@ -1443,7 +1449,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
                            memcmp(state, cmd->state_sent, state_len) == 0;
    borgvk_transport_capture_begin();
    if (first_of_batch)
-      cmd->batch_serve = borgvk_sim_serves(color_img, cmd->depth_view || cmd->stencil_view);
+      cmd->batch_serve = borgvk_sim_serves(size_img, cmd->depth_view || cmd->stencil_view);
    const bool serve = cmd->batch_serve;
    /* Persistent simulator: the attachments hold what the application's images hold, so every
     * draw loads them (colour, depth, stencil) and keeps the tiles it does not reach. */
@@ -1452,8 +1458,8 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       const bool has_z = cmd->depth_view != NULL, has_s = cmd->stencil_view != NULL;
       load = 1u | (has_z ? 2u : 0u) | (has_s ? 4u : 0u) | 8u;
       if (first_of_batch)
-         borgvk_serial_send_pass(nextra ? 5 : borgvk_sim_flush_format(color_img->vk.format),
-                                 (has_z ? 1u : 0u) | (has_s ? 2u : 0u) |
+         borgvk_serial_send_pass(nextra ? 5 : color_img ? borgvk_sim_flush_format(color_img->vk.format) : 0,
+                                 (has_z ? 1u : 0u) | (has_s ? 2u : 0u) | (color_img ? 0u : 8u) |
                                  (has_z && borgvk_sim_depth_is_d32(cmd->depth_view->image->format) ? 4u : 0u));
       if (first_of_batch) {
          const uint8_t raw8[3] = { 5, 5, 5 };
@@ -1532,8 +1538,8 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
          } else {
             for (int64_t e = e0; e <= e1; e++) {
                float *o = c + 4 * (e - e0);
-               o[0] = corner[e % X][0] * 2.0f / color_img->vk.extent.width;
-               o[1] = corner[e % X][1] * 2.0f / color_img->vk.extent.height;
+               o[0] = corner[e % X][0] * 2.0f / size_img->vk.extent.width;
+               o[1] = corner[e % X][1] * 2.0f / size_img->vk.extent.height;
                o[2] = corner[e % X][0] + 0.5f;
                o[3] = corner[e % X][1] + 0.5f;
             }

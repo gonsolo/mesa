@@ -387,11 +387,15 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
                     const struct vk_image_view *depth_view,
                     const struct vk_image_view *stencil_view)
 {
-   const uint32_t w = color->vk.extent.width, h = color->vk.extent.height;
+   struct borgvk_image *zimg = view_image(depth_view), *simg = view_image(stencil_view);
+   /* Depth only: no colour attachment, nothing of it goes in or comes back. */
+   const struct borgvk_image *size = color ? color : zimg ? zimg : simg;
+   if (!size)
+      return VK_SUCCESS;
+   const uint32_t w = size->vk.extent.width, h = size->vk.extent.height;
    const uint32_t hp = MAX2(h, 4u);   /* the GPU renders whole tiles: a short or narrow target is padded */
    const uint32_t wp = MAX2(w, 4u);
-   struct borgvk_image *zimg = view_image(depth_view), *simg = view_image(stencil_view);
-   if (!image_backed(color, w, h))
+   if (color && !image_backed(color, w, h))
       return VK_SUCCESS;
    if (zimg && !image_backed(zimg, w, h))
       zimg = NULL;
@@ -402,9 +406,9 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
       if (!image_backed(extra[a], w, h))
          return VK_SUCCESS;
    /* Several colour attachments are all one byte per pixel (RAW8). */
-   const uint8_t fmt = nextra ? 5 : borgvk_sim_flush_format(color->vk.format);
-   const enum pipe_format cpf = vk_format_to_pipe_format(color->vk.format);
-   const uint32_t cbs = vk_format_get_blocksize(color->vk.format);
+   const uint8_t fmt = nextra ? 5 : color ? borgvk_sim_flush_format(color->vk.format) : 0;
+   const enum pipe_format cpf = color ? vk_format_to_pipe_format(color->vk.format) : PIPE_FORMAT_NONE;
+   const uint32_t cbs = color ? vk_format_get_blocksize(color->vk.format) : 0;
    const uint32_t cpx = fmt == 5 ? 1 : fmt == 4 ? 2 : fmt == 6 ? 8 : fmt == 7 ? 16 : fmt ? 4 : 2;  /* GPU bytes per colour pixel */
    const bool d32 = zimg && borgvk_sim_depth_is_d32(zimg->vk.format);
    const uint32_t zpx = d32 ? 4 : 2;
@@ -412,7 +416,7 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
    const enum pipe_format spf = simg ? vk_format_to_pipe_format(simg->vk.format) : PIPE_FORMAT_NONE;
    const uint32_t zbs = zimg ? vk_format_get_blocksize(zimg->vk.format) : 0;
    const uint32_t sbs = simg ? vk_format_get_blocksize(simg->vk.format) : 0;
-   uint8_t *chost = (uint8_t *)color->mem->map + color->offset;
+   uint8_t *chost = color ? (uint8_t *)color->mem->map + color->offset : NULL;
    uint8_t *zhost = zimg ? (uint8_t *)zimg->mem->map + zimg->offset : NULL;
    uint8_t *shost = simg ? (uint8_t *)simg->mem->map + simg->offset : NULL;
    const size_t npx = (size_t)w * h;
@@ -449,7 +453,8 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
       for (uint32_t x = 0; x < w; x++) {
          const size_t i = (size_t)y * w + x;
          uint8_t *g = S->mem + tiled(S->fb, wp, x, y, 16 * cpx, cpx == 16 ? 8 : cpx);
-         if (fmt) {
+         if (!color) {
+         } else if (fmt) {
             uint8_t px[16] = { 0 };
             memcpy(px, chost + i * cbs, MIN2(cbs, cpx));
             px_put(g, cpx, px);
@@ -519,7 +524,7 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
    }
 
    /* Out: the pixels the pass changed, into every sample plane of the image. */
-   const uint32_t cplanes = MAX2(color->vk.samples, 1);
+   const uint32_t cplanes = color ? MAX2(color->vk.samples, 1) : 0;
    uint32_t changed = 0;
    for (int part = 0; part < np; part++) {
    struct sim_srv *S = &sim.s[part];
@@ -529,7 +534,7 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
          const uint8_t *g = S->mem + tiled(S->fb, wp, x, y, 16 * cpx, cpx == 16 ? 8 : cpx);
          uint8_t cur[16];
          px_get(g, cpx, cur);
-         if (memcmp(cur, cb + i * 16, cpx) != 0) {
+         if (color && memcmp(cur, cb + i * 16, cpx) != 0) {
             changed++;
             for (uint32_t p = 0; p < cplanes; p++) {
                uint8_t *d = chost + (p * npx + i) * cbs;
