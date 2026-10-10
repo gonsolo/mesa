@@ -542,6 +542,8 @@ send_blend_state(const struct borgvk_device *device)
                                            device->push_words + device->push_lo);
       }
    }
+   if (device->vp.valid && device->drm_fd < 0)
+      borgvk_serial_send_viewport(&device->vp);
    if (!device->blend_cfg)
       return;
    if (device->drm_fd >= 0) {
@@ -1496,6 +1498,26 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    device->blend_const = pipeline->blend_const;
    memcpy(device->state_reg, pipeline->state_reg, sizeof(device->state_reg));
    device->state_valid = pipeline->state_valid;
+   device->vp = pipeline->vp;
+   {
+      const struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
+      if (pipeline->vp_dyn && BITSET_TEST(dyn->set, MESA_VK_DYNAMIC_VP_VIEWPORTS)) {
+         for (int k = 0; k < 6; k++) {
+            const VkViewport *v = &dyn->vp.viewports[0];
+            const float vv[6] = { v->x, v->y, v->width, v->height, v->minDepth, v->maxDepth };
+            device->vp.v[k] = vv[k];
+         }
+         device->vp.valid = true;
+      }
+      if (pipeline->sc_dyn && BITSET_TEST(dyn->set, MESA_VK_DYNAMIC_VP_SCISSORS)) {
+         const VkRect2D *r = &dyn->vp.scissors[0];
+         device->vp.sc[0] = MAX2(r->offset.x, 0);
+         device->vp.sc[1] = MAX2(r->offset.y, 0);
+         device->vp.sc[2] = MAX2(r->offset.x + (int32_t)r->extent.width, 0);
+         device->vp.sc[3] = MAX2(r->offset.y + (int32_t)r->extent.height, 0);
+         device->vp.valid = true;
+      }
+   }
    upload_shaders(device);
    send_blend_state(device);
    size_t state_len = 0;

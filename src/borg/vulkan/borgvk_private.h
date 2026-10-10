@@ -91,6 +91,13 @@ struct borgvk_shader_blob {
    uint32_t npool;
 };
 
+/* A viewport and scissor as the firmware takes them (packet 0xC2). */
+struct borgvk_vp {
+   bool     valid;
+   float    v[6];           /* x, y, width, height, minDepth, maxDepth */
+   uint32_t sc[4];          /* scissor x0, y0, x1, y1 */
+};
+
 struct borgvk_device {
    struct vk_device vk;
 
@@ -120,6 +127,7 @@ struct borgvk_device {
    /* Stencil / depth / cull state of the last graphics pipeline created, in
     * register layout (see borgvk_state_pack()); state_valid once set. */
    uint32_t state_reg[5];
+   struct borgvk_vp vp;      /* the viewport and scissor of the draw being queued */
    bool     state_valid;
    /* Push constants set by vkCmdPushConstants, replayed at submit (DRM path). */
    uint32_t push_words[32];
@@ -242,6 +250,7 @@ void borgvk_blend_pack(const VkPipelineColorBlendStateCreateInfo *cb,
                        uint32_t *cfg, uint32_t *konst);
 /* 0xB4: STENCIL_CFG, STENCIL_FRONT, STENCIL_BACK, DEPTH_CFG, CULL_CFG. */
 void borgvk_serial_send_state(const uint32_t reg[5]);
+void borgvk_serial_send_viewport(const struct borgvk_vp *vp);
 void borgvk_serial_send_target(uint8_t flush_format, const float clear[4]);
 void borgvk_serial_send_pass(uint8_t flush_format, uint8_t flags);
 void borgvk_serial_send_att(uint8_t count, const uint8_t fmt[3]);
@@ -473,6 +482,8 @@ struct borgvk_pipeline {
    /* The pipeline's own shader blobs and fixed-function state, as compiled/packed at creation. */
    struct borgvk_shader_blob blob[BORGVK_SHADER_STAGE_COUNT];
    uint32_t                  blend_cfg, blend_const, state_reg[5];
+   struct borgvk_vp          vp;                 /* static viewport/scissor, if the pipeline has them */
+   bool                      vp_dyn, sc_dyn;     /* taken from the command buffer */
    bool                      srgb_table;   /* the fragment shader decodes the destination */
    bool                      state_valid;
    /* Compute: the borgc program, the registers the driver presets (register,

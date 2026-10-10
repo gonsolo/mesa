@@ -514,6 +514,26 @@ borgvk_serial_send_state(const uint32_t reg[5])
    borgvk_transport_emit(pkt, sizeof(pkt));
 }
 
+#define BORGVK_MARKER_VP      0xC2
+/* 0xC2 viewport and scissor: marker, x y w h minDepth maxDepth (float32 LE), scissor x0 y0 x1 y1
+ * (u32 LE), csum. Only the simulator's host driver acts on it. */
+void
+borgvk_serial_send_viewport(const struct borgvk_vp *vp)
+{
+   uint8_t pkt[42];
+   pkt[0] = BORGVK_MARKER_VP;
+   for (int k = 0; k < 6; k++)
+      memcpy(&pkt[1 + 4 * k], &vp->v[k], 4);
+   for (int k = 0; k < 4; k++)
+      for (int i = 0; i < 4; i++)
+         pkt[25 + 4 * k + i] = (uint8_t)(vp->sc[k] >> (8 * i));
+   uint8_t csum = 0;
+   for (int i = 1; i < 41; i++)
+      csum ^= pkt[i];
+   pkt[41] = csum;
+   borgvk_transport_emit(pkt, sizeof(pkt));
+}
+
 #define BORGVK_MARKER_TARGET  0xB6
 /* 0xB6 render target: marker, flush format (0 R5G6B5, 1 R8G8B8A8, 2 B8G8R8A8), the clear colour
  * (4 x float32 LE), csum. Only the simulator's host driver acts on it. */

@@ -216,6 +216,30 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
       pl->blend_const = device->blend_const;
       memcpy(pl->state_reg, device->state_reg, sizeof(pl->state_reg));
       pl->state_valid = true;
+      pl->vp_dyn = pl->sc_dyn = false;
+      for (uint32_t d = 0; ci.pDynamicState && d < ci.pDynamicState->dynamicStateCount; d++) {
+         const VkDynamicState ds = ci.pDynamicState->pDynamicStates[d];
+         pl->vp_dyn |= ds == VK_DYNAMIC_STATE_VIEWPORT || ds == VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT;
+         pl->sc_dyn |= ds == VK_DYNAMIC_STATE_SCISSOR || ds == VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT;
+      }
+      memset(&pl->vp, 0, sizeof(pl->vp));
+      if (ci.pViewportState && !rs->rasterizerDiscardEnable) {
+         const VkPipelineViewportStateCreateInfo *vs = ci.pViewportState;
+         if (vs->pViewports && vs->viewportCount && !pl->vp_dyn) {
+            const VkViewport *v = &vs->pViewports[0];
+            const float vv[6] = { v->x, v->y, v->width, v->height, v->minDepth, v->maxDepth };
+            memcpy(pl->vp.v, vv, sizeof(vv));
+            pl->vp.valid = true;
+         }
+         if (vs->pScissors && vs->scissorCount && !pl->sc_dyn) {
+            const VkRect2D *r = &vs->pScissors[0];
+            pl->vp.sc[0] = MAX2(r->offset.x, 0);
+            pl->vp.sc[1] = MAX2(r->offset.y, 0);
+            pl->vp.sc[2] = MAX2(r->offset.x + (int32_t)r->extent.width, 0);
+            pl->vp.sc[3] = MAX2(r->offset.y + (int32_t)r->extent.height, 0);
+            pl->vp.valid = true;
+         }
+      }
    }
    for (; i < count; i++)
       pPipelines[i] = VK_NULL_HANDLE;
