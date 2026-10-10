@@ -182,6 +182,50 @@ borgvk_sim_bytes_packed(VkFormat f)
 }
 
 bool
+borgvk_sim_raw32(VkFormat f)
+{
+   return f == VK_FORMAT_R32_UINT || f == VK_FORMAT_R32_SINT || f == VK_FORMAT_R32_SFLOAT;
+}
+
+/* Plain 8- or 16-bit UNORM/SNORM/SRGB/integer formats of 1 to 4 channels that the fragment stage packs into
+ * one RAW word (compiler option bits, see borgc "Packed colour"); 0 for any other format. */
+uint32_t
+borgvk_sim_packed_opt(VkFormat f)
+{
+   if (f == VK_FORMAT_R8_UNORM || f == VK_FORMAT_R8G8B8A8_UNORM || f == VK_FORMAT_B8G8R8A8_UNORM ||
+       borgvk_sim_bytes_packed(f) || borgvk_sim_half2(f) || borgvk_sim_raw32(f))
+      return 0;
+   const struct util_format_description *d = vk_format_description(f);
+   if (!d || d->layout != UTIL_FORMAT_LAYOUT_PLAIN || d->nr_channels < 1 || d->nr_channels > 4)
+      return 0;
+   const unsigned n = d->nr_channels, bits = d->channel[0].size;
+   if (bits != 8 && bits != 16)
+      return 0;
+   for (unsigned i = 0; i < n; i++)
+      if (d->channel[i].size != bits || d->channel[i].type == UTIL_FORMAT_TYPE_FLOAT)
+         return 0;
+   if (n * bits / 8 > 4)
+      return 0;
+   uint32_t kind;
+   if (d->colorspace == UTIL_FORMAT_COLORSPACE_SRGB)
+      kind = 2;
+   else if (d->channel[0].pure_integer)
+      kind = 3;
+   else if (d->channel[0].normalized)
+      kind = d->channel[0].type == UTIL_FORMAT_TYPE_SIGNED ? 1 : 0;
+   else
+      return 0;
+   const bool swap = n >= 3 && d->swizzle[0] == PIPE_SWIZZLE_Z;
+   return 0x10u | kind << 16 | (bits == 16) << 18 | (n - 1) << 19 | swap << 21 | (n == 4 ? 4u : 0u);
+}
+
+bool
+borgvk_sim_half1(VkFormat f)
+{
+   return f == VK_FORMAT_R16_SFLOAT;
+}
+
+bool
 borgvk_sim_half2(VkFormat f)
 {
    return f == VK_FORMAT_R16G16_SFLOAT;
@@ -190,9 +234,14 @@ borgvk_sim_half2(VkFormat f)
 uint8_t
 borgvk_sim_flush_format(VkFormat f)
 {
-   return f == VK_FORMAT_R8_UNORM ? 5 :
+   const uint32_t po = borgvk_sim_packed_opt(f);
+   if (po) {
+      const unsigned bytes = (((po >> 19) & 3) + 1) * ((po >> 18) & 1 ? 2 : 1);
+      return bytes == 1 ? 5 : bytes == 2 ? 4 : 3;
+   }
+   return f == VK_FORMAT_R8_UNORM ? 5 : borgvk_sim_half1(f) ? 4 :
           f == VK_FORMAT_R8G8B8A8_UNORM ? 1 : f == VK_FORMAT_B8G8R8A8_UNORM ? 2 :
-          f == VK_FORMAT_R32_UINT || borgvk_sim_bytes_packed(f) || borgvk_sim_half2(f) ? 3 : 0;
+          borgvk_sim_raw32(f) || borgvk_sim_bytes_packed(f) || borgvk_sim_half2(f) ? 3 : 0;
 }
 
 /* Whether the persistent simulator can render to this colour attachment: the direct
@@ -206,7 +255,7 @@ borgvk_sim_serves(const struct borgvk_image *color, bool has_depth_stencil)
    uint32_t w = color->vk.extent.width, h = color->vk.extent.height;
    /* The depth plane (BORG_ZB_SPI) holds 1024 x 1024 D32 pixels; colour alone goes up to 4096 x 4096. */
    const uint32_t max_dim = has_depth_stencil ? 1024 : 4096;
-   return w >= 4 && (w & 3) == 0 && w <= max_dim && h >= 1 && (h < 4 || (h & 3) == 0) && h <= max_dim;
+   return w >= 1 && (w < 4 || (w & 3) == 0) && w <= max_dim && h >= 1 && (h < 4 || (h & 3) == 0) && h <= max_dim;
 }
 
 static struct borgvk_image *
@@ -302,7 +351,8 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
                     const struct vk_image_view *stencil_view)
 {
    const uint32_t w = color->vk.extent.width, h = color->vk.extent.height;
-   const uint32_t hp = MAX2(h, 4u);   /* the GPU renders whole tiles: a short target is padded */
+   const uint32_t hp = MAX2(h, 4u);   /* the GPU renders whole tiles: a short or narrow target is padded */
+   const uint32_t wp = MAX2(w, 4u);
    struct borgvk_image *zimg = view_image(depth_view), *simg = view_image(stencil_view);
    if (!image_backed(color, w, h))
       return VK_SUCCESS;
@@ -318,7 +368,7 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
    const uint8_t fmt = nextra ? 5 : borgvk_sim_flush_format(color->vk.format);
    const enum pipe_format cpf = vk_format_to_pipe_format(color->vk.format);
    const uint32_t cbs = vk_format_get_blocksize(color->vk.format);
-   const uint32_t cpx = fmt == 5 ? 1 : fmt ? 4 : 2;  /* GPU bytes per colour pixel */
+   const uint32_t cpx = fmt == 5 ? 1 : fmt == 4 ? 2 : fmt ? 4 : 2;  /* GPU bytes per colour pixel */
    const bool d32 = zimg && borgvk_sim_depth_is_d32(zimg->vk.format);
    const uint32_t zpx = d32 ? 4 : 2;
    const enum pipe_format zpf = zimg ? vk_format_to_pipe_format(zimg->vk.format) : PIPE_FORMAT_NONE;
@@ -347,7 +397,7 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
    simple_mtx_lock(&sim.lock);
    for (int part = 0; part < np; part++) {
       uint8_t sp[5] = { 0xBE, (uint8_t)part, (uint8_t)np, (uint8_t)rows_per, (uint8_t)(rows_per >> 8) };
-      if (!sim_start(&sim.s[part], getenv("BORGVK_SIM_DIRECT")) || !sim_set_size(&sim.s[part], w, hp) ||
+      if (!sim_start(&sim.s[part], getenv("BORGVK_SIM_DIRECT")) || !sim_set_size(&sim.s[part], wp, hp) ||
           !write_all(sim.s[part].to, sp, sizeof(sp))) {
          mesa_logw("borgvk: cannot start the simulator");
          sim_stop();
@@ -361,11 +411,13 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
    for (uint32_t y = part * rows_per * 4; y < MIN2(h, (part + 1) * rows_per * 4); y++) {
       for (uint32_t x = 0; x < w; x++) {
          const size_t i = (size_t)y * w + x;
-         uint8_t *g = S->mem + tiled(S->fb, w, x, y, 16 * cpx, cpx);
+         uint8_t *g = S->mem + tiled(S->fb, wp, x, y, 16 * cpx, cpx);
          if (fmt == 5) {
             g[0] = chost[i];
+         } else if (fmt == 4) {
+            memcpy(g, chost + i * cbs, MIN2(cbs, 2u));
          } else if (fmt) {
-            memcpy(g, chost + i * cbs, 4);
+            memcpy(g, chost + i * cbs, MIN2(cbs, 4u));
          } else {
             float c[4];
             util_format_unpack_rgba(cpf, c, chost + i * cbs, 1);
@@ -374,12 +426,12 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
          }
          memcpy(cb + i * 4, g, cpx);
          for (uint32_t a = 0; a < nextra; a++) {
-            uint8_t *ge = S->mem + tiled(S->att[a + 1], w, x, y, 16, 1);
+            uint8_t *ge = S->mem + tiled(S->att[a + 1], wp, x, y, 16, 1);
             *ge = ((uint8_t *)extra[a]->mem->map + extra[a]->offset)[i];
             eb[a * npx + i] = *ge;
          }
          if (zimg) {
-            uint8_t *gz = S->mem + tiled(S->zb, w, x, y, 16 * zpx, zpx);
+            uint8_t *gz = S->mem + tiled(S->zb, wp, x, y, 16 * zpx, zpx);
             float z = unpack_z(zpf, zhost + i * zbs);
             if (d32) {
                memcpy(gz, &z, 4);
@@ -390,7 +442,7 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
             memcpy(zb + i * 4, gz, zpx);
          }
          if (simg) {
-            uint8_t *gs = S->mem + tiled(S->sb, w, x, y, 16, 1);
+            uint8_t *gs = S->mem + tiled(S->sb, wp, x, y, 16, 1);
             *gs = unpack_s(spf, shost + i * sbs);
             sb[i] = *gs;
          }
@@ -439,15 +491,17 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
    for (uint32_t y = part * rows_per * 4; y < MIN2(h, (part + 1) * rows_per * 4); y++) {
       for (uint32_t x = 0; x < w; x++) {
          const size_t i = (size_t)y * w + x;
-         const uint8_t *g = S->mem + tiled(S->fb, w, x, y, 16 * cpx, cpx);
+         const uint8_t *g = S->mem + tiled(S->fb, wp, x, y, 16 * cpx, cpx);
          if (memcmp(g, cb + i * 4, cpx) != 0) {
             changed++;
             for (uint32_t p = 0; p < cplanes; p++) {
                uint8_t *d = chost + (p * npx + i) * cbs;
                if (fmt == 5) {
                   d[0] = g[0];
+               } else if (fmt == 4) {
+                  memcpy(d, g, MIN2(cbs, 2u));
                } else if (fmt) {
-                  memcpy(d, g, 4);
+                  memcpy(d, g, MIN2(cbs, 4u));
                } else {
                   uint16_t v;
                   memcpy(&v, g, 2);
@@ -457,14 +511,14 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
             }
          }
          for (uint32_t a = 0; a < nextra; a++) {
-            const uint8_t ge = S->mem[tiled(S->att[a + 1], w, x, y, 16, 1)];
+            const uint8_t ge = S->mem[tiled(S->att[a + 1], wp, x, y, 16, 1)];
             if (ge != eb[a * npx + i]) {
                changed++;
                ((uint8_t *)extra[a]->mem->map + extra[a]->offset)[i] = ge;
             }
          }
          if (zimg) {
-            const uint8_t *gz = S->mem + tiled(S->zb, w, x, y, 16 * zpx, zpx);
+            const uint8_t *gz = S->mem + tiled(S->zb, wp, x, y, 16 * zpx, zpx);
             if (memcmp(gz, zb + i * 4, zpx) != 0) {
                float z;
                if (d32) {
@@ -479,7 +533,7 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
             }
          }
          if (simg) {
-            const uint8_t gs = S->mem[tiled(S->sb, w, x, y, 16, 1)];
+            const uint8_t gs = S->mem[tiled(S->sb, wp, x, y, 16, 1)];
             if (gs != sb[i])
                for (uint32_t p = 0; p < MAX2(simg->vk.samples, 1); p++)
                   pack_s(spf, shost + (p * npx + i) * sbs, gs);

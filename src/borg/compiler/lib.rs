@@ -1280,6 +1280,24 @@ unsafe fn compile_nir_inner(
                                         "push constant field at byte {byte_off} is not word-aligned");
                                     let word_idx = (byte_off / 4) as u32;
                                     let idx_reg = *push_const_reg.entry(word_idx).or_insert_with(|| {
+                                        // Vertex: a window word per run; a pinned GPR is clobbered by the fragment pass.
+                                        if vs_const_window {
+                                            return vs_const_vreg!(word_idx);
+                                        }
+                                        // Fragment: a window word too (no GPR is staged in draw mode).
+                                        if draw_mode && stage == 4 {
+                                            let u = *frag_window_by_bits.entry(word_idx).or_insert_with(|| {
+                                                assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
+                                                let u = 20 + draw_uniform_count;
+                                                draw_uniform_count += 1;
+                                                draw_uniform_consts.push((u, word_idx));
+                                                u
+                                            });
+                                            let v = next_vreg;
+                                            next_vreg += 1;
+                                            ubo.insert(v, Ubo::Uniform(u as u8));
+                                            return v;
+                                        }
                                         // KNOWN GAP, not fixed here: unlike the
                                         // load_const vector-constant case above,
                                         // this pins a GPR regardless of
@@ -1619,7 +1637,8 @@ unsafe fn compile_nir_inner(
                     // anything else is reported rather than sampled wrongly.
                     let srcs = tex.srcs_as_slice();
                     let is_txl = tex.op == nir_texop_txl && stage == 4 && draw_mode;
-                    if tex.op != nir_texop_tex && tex.op != nir_texop_txf && !is_txl {
+                    let is_txb = tex.op == nir_texop_txb && stage == 4 && draw_mode;
+                    if tex.op != nir_texop_tex && tex.op != nir_texop_txf && !is_txl && !is_txb {
                         eprintln!("borgc: WARNING texture op {} not supported yet, dropped", tex.op);
                         continue;
                     }
@@ -1646,11 +1665,12 @@ unsafe fn compile_nir_inner(
                         let is_cube = tex.sampler_dim == GLSL_SAMPLER_DIM_CUBE;
                         // A third coordinate (3D, 2D array) goes to TEXA as w; a cube's is the compiler's face math.
                         let has_w = !is_fetch && tex.coord_components >= 3 && !is_cube && stage == 4 && draw_mode;
-                        if is_txl || has_w {
+                        let has_bias = (is_txb || tex.op == nir_texop_tex) && !is_fetch && srcs.iter().any(|s| s.src_type == nir_tex_src_bias);
+                        if is_txl || has_w || has_bias {
                             // Explicit LOD: TEXA hands this lane's LOD to the TEX after it (w and the
                             // depth reference are unused for a 2D sample, so r30 stands in for both).
-                            let ld = srcs.iter().find(|s| s.src_type == nir_tex_src_lod).map(|s| s.src.as_def().index).unwrap_or(cd);
-                            if let Some(&bits) = consts.get(&ld).filter(|_| is_txl) {
+                            let ld = srcs.iter().find(|s| s.src_type == nir_tex_src_lod || s.src_type == nir_tex_src_bias).map(|s| s.src.as_def().index).unwrap_or(cd);
+                            if let Some(&bits) = consts.get(&ld).filter(|_| is_txl || has_bias) {
                                 if !vec_map.contains_key(&ld) {
                                     let u = if let Some(&u) = frag_window_by_bits.get(&bits) {
                                         u
@@ -1672,11 +1692,24 @@ unsafe fn compile_nir_inner(
                             next_vreg += 1;
                             ubo.insert(wz, Ubo::Fixed(30));
                             per_pixel_fixed.insert(wz);
-                            let (lv, lc) = if is_txl { resolve_vm(&vec_map, ld, 0) } else { (wz, 0u8) };
+                            let (lv, lc) = if is_txl || has_bias { resolve_vm(&vec_map, ld, 0) } else { (wz, 0u8) };
                             let (wv, wc) = if has_w { resolve_vm(&vec_map, cd, 2) } else { (wz, 0u8) };
                             prog.push(BorgInstr { mnem: "TEXA", dst: NO_DST, srcs: vec![wv, lv, wz], swz: vec![wc, lc, 0] });
                         }
-                        let ctl = if is_fetch || is_txl {
+                        let ctl = if has_bias {
+                            // LOD mode 1: implicit LOD plus TEXA's bias.
+                            let u = *frag_window_by_bits.entry(1u32 << 21).or_insert_with(|| {
+                                assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
+                                let u = 20 + draw_uniform_count;
+                                draw_uniform_count += 1;
+                                draw_uniform_consts.push((u, 1u32 << 21));
+                                u
+                            });
+                            let c = next_vreg;
+                            next_vreg += 1;
+                            ubo.insert(c, Ubo::Uniform(u as u8));
+                            c
+                        } else if is_fetch || is_txl {
                             // Control word: operation 1 (fetch) in bits 17:16, texture 0, sampler 0,
                             // read from the constant window (docs/B2_texture_unit.md).
                             let ctl_bits = if is_txl { 2u32 << 21 } else { 1u32 << 16 };
@@ -2119,8 +2152,79 @@ unsafe fn compile_nir_inner(
         draw_frag_out = [Some((w, 0)), None, None, None];
         out_roots.push(w);
     }
+    if draw_mode && stage == 4 && vfetch & 0x10 != 0 && vfetch & 0x100 == 0 && draw_frag_out[0].is_some() {
+        // Packed colour (RAW8/16/32): n channels of 8 or 16 bits, kind 0 UNORM, 1 SNORM, 2 SRGB, 3 integer;
+        // `swap` reads the components as B, G, R. r26 = ch0 | ch1 << bits | ...
+        let kind = (vfetch >> 16) & 3;
+        let wide = (vfetch >> 18) & 1 != 0;
+        let n = ((vfetch >> 19) & 3) as usize + 1;
+        let swap = (vfetch >> 21) & 1 != 0;
+        let bits: u32 = if wide { 16 } else { 8 };
+        let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
+            let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
+                assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
+                let u = 20 + draw_uniform_count;
+                draw_uniform_count += 1;
+                draw_uniform_consts.push((u, bits));
+                u
+            });
+            let v = *next_vreg; *next_vreg += 1;
+            ubo.insert(v, Ubo::Uniform(u as u8));
+            v
+        };
+        let mask = win(if wide { 0xFFFF } else { 0xFF }, &mut ubo, &mut next_vreg);
+        let mut acc: Option<u32> = None;
+        for k in 0..n {
+            let comp = if swap && k < 3 { 2 - k } else { k };
+            let Some((x, xc)) = draw_frag_out[comp] else { continue };
+            let mut op = |mnem: &'static str, srcs: Vec<u32>, swz: Vec<u8>, prog: &mut Vec<BorgInstr>, next_vreg: &mut u32| {
+                let d = *next_vreg; *next_vreg += 1;
+                prog.push(BorgInstr { mnem, dst: d, srcs, swz });
+                d
+            };
+            let (x, xc) = if matches!(ubo.get(&x), Some(Ubo::Uniform(_))) {
+                (op("FMOV", vec![x], vec![xc], &mut prog, &mut next_vreg), 0)
+            } else { (x, xc) };
+            let (x, xc) = if kind == 2 && comp != 3 {
+                (op("FSRGB", vec![x], vec![xc], &mut prog, &mut next_vreg), 0)
+            } else { (x, xc) };
+            let q = match kind {
+                0 | 2 => {
+                    let cmax = win((if wide { 65535.0f32 } else { 255.0f32 }).to_bits(), &mut ubo, &mut next_vreg);
+                    let c05 = win(0.5f32.to_bits(), &mut ubo, &mut next_vreg);
+                    let m = op("FMUL", vec![x, cmax], vec![xc, 0], &mut prog, &mut next_vreg);
+                    let h = op("FADD", vec![m, c05], vec![0, 0], &mut prog, &mut next_vreg);
+                    op("F2I", vec![h], vec![0], &mut prog, &mut next_vreg)
+                }
+                1 => {
+                    let cmax = win((if wide { 32767.0f32 } else { 127.0f32 }).to_bits(), &mut ubo, &mut next_vreg);
+                    let c05 = win(0.5f32.to_bits(), &mut ubo, &mut next_vreg);
+                    let t = op("FMUL", vec![x, cmax], vec![xc, 0], &mut prog, &mut next_vreg);
+                    let st = op("FSTEP", vec![t], vec![0], &mut prog, &mut next_vreg);
+                    let nh = op("FNEG", vec![c05], vec![0], &mut prog, &mut next_vreg);
+                    let hh = op("FADD", vec![st, nh], vec![0, 0], &mut prog, &mut next_vreg);
+                    let u = op("FADD", vec![t, hh], vec![0, 0], &mut prog, &mut next_vreg);
+                    let i = op("F2I", vec![u], vec![0], &mut prog, &mut next_vreg);
+                    op("IAND", vec![i, mask], vec![0, 0], &mut prog, &mut next_vreg)
+                }
+                _ => op("IAND", vec![x, mask], vec![xc, 0], &mut prog, &mut next_vreg),
+            };
+            let q = if k == 0 { q } else {
+                let sh = win(k as u32 * bits, &mut ubo, &mut next_vreg);
+                op("ISHL", vec![q, sh], vec![0, 0], &mut prog, &mut next_vreg)
+            };
+            acc = Some(match acc {
+                None => q,
+                Some(a) => op("IOR", vec![a, q], vec![0, 0], &mut prog, &mut next_vreg),
+            });
+        }
+        if let Some(w) = acc {
+            draw_frag_out = [Some((w, 0)), None, None, None];
+            out_roots.push(w);
+        }
+    }
     if draw_mode && stage == 4 && vfetch & 8 != 0 && draw_frag_out[0].is_some() {
-        // R16G16_SFLOAT (RAW32): r26 = half(r) | half(g) << 16 with integer ops (round to nearest even,
+        // R16G16_SFLOAT (RAW32; with bit 0x20 R16_SFLOAT, RAW16): r26 = half(r) | half(g) << 16 with integer ops (round to nearest even,
         // NaN to 0x7E00); a branch-free select between the denormal, normal and overflow results.
         let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
             let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
@@ -2160,7 +2264,7 @@ unsafe fn compile_nir_inner(
         let k1000 = i!("ISHL", r1, r12);
         let kfff = i!("ISUB", k1000, r1);
         let mut p = 0u32;
-        for (n, src) in [Some((x0, x0c)), draw_frag_out[1]].into_iter().enumerate() {
+        for (n, src) in [Some((x0, x0c)), if vfetch & 0x20 != 0 { None } else { draw_frag_out[1] }].into_iter().enumerate() {
             let Some((x, xc)) = src else { continue };
             let xr = ins("IADD", &[(x, xc), (zero, 0)], &mut prog, &mut next_vreg);
             // The sign first, so the input register is free early; 0x8000 and 0x200 are built here.
@@ -2257,7 +2361,12 @@ unsafe fn compile_nir_inner(
                 }
                 let out = next_vreg;
                 next_vreg += 1;
-                prog.push(BorgInstr { mnem: "FMOV", dst: out, srcs: vec![v], swz: vec![comp] });
+                // A register is copied bit for bit (IOR): FMOV turns an integer that looks like a NaN into 0x7FC00000.
+                if tex_dsts.contains(&v) || fattr_dsts.contains(&v) {
+                    prog.push(BorgInstr { mnem: "IOR", dst: out, srcs: vec![v, v], swz: vec![comp, comp] });
+                } else {
+                    prog.push(BorgInstr { mnem: "FMOV", dst: out, srcs: vec![v], swz: vec![comp] });
+                }
                 draw_frag_out[c] = Some((out, 0));
                 out_roots.push(out);
             }

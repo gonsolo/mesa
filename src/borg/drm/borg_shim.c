@@ -329,6 +329,16 @@ borg_ioctl_state(int fd, unsigned long req, void *arg)
    return 0;
 }
 
+static int
+borg_ioctl_push(int fd, unsigned long req, void *arg)
+{
+   struct drm_borg_push *p = arg;
+   if (p->off_words >= DRM_BORG_PUSH_WORDS || p->n_words > DRM_BORG_PUSH_WORDS - p->off_words)
+      return -1;
+   borg_serial_send_push(p->off_words, p->n_words, p->words);
+   return 0;
+}
+
 static int (*driver_ioctls[])(int, unsigned long, void *) = {
    [DRM_BORG_GEM_CREATE] = borg_ioctl_gem_create,
    [DRM_BORG_GEM_MMAP]   = borg_ioctl_gem_mmap,
@@ -337,6 +347,7 @@ static int (*driver_ioctls[])(int, unsigned long, void *) = {
    [DRM_BORG_SHADER]     = borg_ioctl_shader,
    [DRM_BORG_BLEND]      = borg_ioctl_blend,
    [DRM_BORG_STATE]      = borg_ioctl_state,
+   [DRM_BORG_PUSH]       = borg_ioctl_push,
 };
 
 /* ---- drm_shim_driver_init — called once on library load --------------- */

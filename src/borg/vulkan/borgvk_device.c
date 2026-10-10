@@ -533,14 +533,14 @@ borgvk_GetPhysicalDeviceImageFormatProperties2(
                                                : (sc | VK_SAMPLE_COUNT_1_BIT);
    }
 
-   const uint32_t max2d = 16384;
+   const uint32_t max2d = 4096;   /* BorgSampler: up to 4096 */
    pImageFormatProperties->imageFormatProperties = (VkImageFormatProperties){
       .maxExtent = {
          .width  = max2d,
          .height = pImageFormatInfo->type == VK_IMAGE_TYPE_1D ? 1 : max2d,
          .depth  = pImageFormatInfo->type == VK_IMAGE_TYPE_3D ? 2048 : 1,
       },
-      .maxMipLevels   = 15,
+      .maxMipLevels   = 13,
       /* Spec §12.5: 3D images must have maxArrayLayers = 1. */
       .maxArrayLayers = pImageFormatInfo->type == VK_IMAGE_TYPE_3D ? 1 : 2048,
       .sampleCounts   = samples,

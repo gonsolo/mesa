@@ -48,6 +48,7 @@
 #define DRM_BORG_SHADER       0x09   /* upload a borgc-compiled shader blob */
 #define DRM_BORG_BLEND        0x0a   /* colour-blend state (BLEND_CFG/CONST) */
 #define DRM_BORG_STATE        0x0b   /* stencil/depth/cull state registers */
+#define DRM_BORG_PUSH         0x0c   /* push-constant words */
 
 /* Max .borg blob the shader-upload path carries (must match the Vulkan side's
  * BORGVK_SHADER_BLOB_MAX and the firmware RX shader packet). cube.frag = 255 B
@@ -127,5 +128,16 @@ struct drm_borg_state {
 
 #define DRM_IOCTL_BORG_STATE \
    DRM_IOW (DRM_COMMAND_BASE + DRM_BORG_STATE,       struct drm_borg_state)
+
+/* Push-constant words [off_words, off_words + n_words) of the 32-word window. */
+#define DRM_BORG_PUSH_WORDS 32
+struct drm_borg_push {
+   uint32_t off_words;
+   uint32_t n_words;
+   uint32_t words[DRM_BORG_PUSH_WORDS];
+};
+
+#define DRM_IOCTL_BORG_PUSH \
+   DRM_IOW (DRM_COMMAND_BASE + DRM_BORG_PUSH,        struct drm_borg_push)
 
 #endif /* BORG_DRM_H */

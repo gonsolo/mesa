@@ -112,6 +112,9 @@ struct borgvk_device {
     * register layout (see borgvk_state_pack()); state_valid once set. */
    uint32_t state_reg[5];
    bool     state_valid;
+   /* Push constants set by vkCmdPushConstants, replayed at submit (DRM path). */
+   uint32_t push_words[32];
+   uint32_t push_lo, push_hi;   /* word range written so far; empty when lo >= hi */
 };
 
 /* A render pass/framebuffer or dynamic-rendering scope currently open on this
@@ -190,6 +193,9 @@ bool borgvk_sim_serves(const struct borgvk_image *color, bool has_depth_stencil)
 uint8_t borgvk_sim_flush_format(VkFormat f);
 bool borgvk_sim_bytes_packed(VkFormat f);
 bool borgvk_sim_half2(VkFormat f);
+bool borgvk_sim_half1(VkFormat f);
+bool borgvk_sim_raw32(VkFormat f);
+uint32_t borgvk_sim_packed_opt(VkFormat f);
 bool borgvk_sim_depth_is_d32(VkFormat f);
 VkResult borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
                              struct borgvk_image *const *extra, uint32_t nextra,

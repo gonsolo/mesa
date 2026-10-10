@@ -241,6 +241,23 @@ borg_serial_send_mvp(const float mvp[16])
 }
 
 void
+borg_serial_send_push(uint32_t off_words, uint32_t n_words, const uint32_t *words)
+{
+   int fd = borg_serial_open();
+   if (fd < 0) return;
+
+   /* marker, offset, count, 32 words (LE u32), csum */
+   uint8_t pkt[3 + 4 * 32 + 1] = { 0xB2, (uint8_t)off_words, (uint8_t)n_words };
+   for (uint32_t w = 0; w < n_words && off_words + w < 32; w++)
+      for (int i = 0; i < 4; i++)
+         pkt[3 + 4 * w + i] = (uint8_t)(words[w] >> (8 * i));
+   uint8_t csum = 0;
+   for (size_t i = 1; i < sizeof(pkt) - 1; i++) csum ^= pkt[i];
+   pkt[sizeof(pkt) - 1] = csum;
+   borg_serial_write_paced(fd, pkt, sizeof(pkt));
+}
+
+void
 borg_serial_send_state(const uint32_t reg[5])
 {
    int fd = borg_serial_open();

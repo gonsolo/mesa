@@ -153,5 +153,16 @@ borgvk_CmdPushConstants(VkCommandBuffer commandBuffer,
    (void)layout;
    (void)stageFlags;
 
-   borgvk_serial_send_push_constants(offset, size, pValues);
+   struct borgvk_device *device = container_of(cmd->base.device, struct borgvk_device, vk);
+   if (!size || offset + size > sizeof(device->push_words))
+      return;
+   memcpy((uint8_t *)device->push_words + offset, pValues, size);
+   uint32_t lo = offset / 4, hi = (offset + size + 3) / 4;
+   if (device->push_lo >= device->push_hi) {
+      device->push_lo = lo;
+      device->push_hi = hi;
+   } else {
+      if (lo < device->push_lo) device->push_lo = lo;
+      if (hi > device->push_hi) device->push_hi = hi;
+   }
 }

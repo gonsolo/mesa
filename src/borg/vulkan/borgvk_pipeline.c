@@ -84,6 +84,8 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
          mrt ? 0x100u | ((color_count - 1) << 9) | mrt_opt :
          ri && ri->colorAttachmentCount && borgvk_sim_bytes_packed(ri->pColorAttachmentFormats[0]) ? 1 :
          ri && ri->colorAttachmentCount && ri->pColorAttachmentFormats[0] == VK_FORMAT_R8_UNORM ? 2 :
+         ri && ri->colorAttachmentCount && borgvk_sim_packed_opt(ri->pColorAttachmentFormats[0]) ? borgvk_sim_packed_opt(ri->pColorAttachmentFormats[0]) :
+         ri && ri->colorAttachmentCount && borgvk_sim_half1(ri->pColorAttachmentFormats[0]) ? 0x28 :
          ri && ri->colorAttachmentCount && borgvk_sim_half2(ri->pColorAttachmentFormats[0]) ? 8 :
          ri && ri->colorAttachmentCount && vk_format_has_alpha(ri->pColorAttachmentFormats[0]) ? 4 : 0;   /* 4: alpha is an output */
       for (uint32_t s = 0; s < pCreateInfos[i].stageCount; s++)

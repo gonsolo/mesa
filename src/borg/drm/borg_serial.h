@@ -21,4 +21,6 @@ void borg_serial_send_blend(uint32_t blend_cfg, uint32_t blend_const);
 
 /* 0xB4: STENCIL_CFG, STENCIL_FRONT, STENCIL_BACK, DEPTH_CFG, CULL_CFG. */
 void borg_serial_send_state(const uint32_t reg[5]);
+/* 0xB2: push-constant words. */
+void borg_serial_send_push(uint32_t off_words, uint32_t n_words, const uint32_t *words);
 void borg_serial_send_shader(uint8_t stage, const uint8_t *blob, uint32_t len);

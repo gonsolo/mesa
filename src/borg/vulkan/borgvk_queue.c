@@ -529,6 +529,18 @@ send_blend_state(const struct borgvk_device *device)
          borgvk_serial_send_state(device->state_reg);
       }
    }
+   if (device->push_lo < device->push_hi) {
+      const uint32_t n = device->push_hi - device->push_lo;
+      if (device->drm_fd >= 0) {
+         struct drm_borg_push p = { .off_words = device->push_lo, .n_words = n };
+         memcpy(p.words, device->push_words + device->push_lo, n * 4);
+         if (drmIoctl(device->drm_fd, DRM_IOCTL_BORG_PUSH, &p) != 0)
+            mesa_logw("borgvk: DRM_IOCTL_BORG_PUSH failed");
+      } else {
+         borgvk_serial_send_push_constants(device->push_lo * 4, n * 4,
+                                           device->push_words + device->push_lo);
+      }
+   }
    if (!device->blend_cfg)
       return;
    if (device->drm_fd >= 0) {
@@ -654,7 +666,7 @@ sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
     * nearest-upscale into the attachment.  Override with BORGVK_SIM_DIM. */
    uint32_t sdim = sim_dim ? sim_dim : 128;
    /* A RAW32 attachment (R32_UINT) comes back as its raw words and is never resampled. */
-   const bool raw32 = color_img->vk.format == VK_FORMAT_R32_UINT && width == height;
+   const bool raw32 = borgvk_sim_raw32(color_img->vk.format) && width == height;
    if (raw32)
       sdim = width;
    /* BORGVK_SIM_DIRECT=<direct_sim>: Borg alone driven by a host-side driver
@@ -1450,7 +1462,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       /* Render target: the attachment's format and the clear colour its render pass asked for. */
       uint8_t fmt = color_img->vk.format == VK_FORMAT_R8G8B8A8_UNORM ? 1 :
                     color_img->vk.format == VK_FORMAT_B8G8R8A8_UNORM ? 2 :
-                    color_img->vk.format == VK_FORMAT_R32_UINT ? 3 : 0;   /* 3 = RAW32 */
+                    borgvk_sim_raw32(color_img->vk.format) ? 3 : 0;   /* 3 = RAW32 */
       float clear[4] = { 0, 0, 0, 0 };
       if (cmd->has_clear)
          memcpy(clear, cmd->clear_color, sizeof(clear));
