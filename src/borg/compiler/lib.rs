@@ -1982,8 +1982,7 @@ unsafe fn compile_nir_inner(
         ubo.insert(ctl, Ubo::Uniform(u));
         let idx = next_vreg; next_vreg += 1;
         ubo.insert(idx, Ubo::Fixed(30));
-        let twelve = const_int_operand(12, &mut const_int_reg, &mut const_reg_count,
-            &mut const_uniforms, &mut draw_vs_consts, &mut next_vreg, &mut ubo);
+        let twelve = vs_const_vreg!(12);   // shared with the attribute fetches
         let ty = next_vreg; next_vreg += 1;
         prog.push(BorgInstr { mnem: "ISRL", dst: ty, srcs: vec![idx, twelve], swz: vec![0, 0] });
         let hi = next_vreg; next_vreg += 1;
