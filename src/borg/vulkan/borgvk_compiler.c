@@ -35,10 +35,11 @@ borgvk_compiler_selftest(void)
    mesa_logi("borgvk: borgc (Rust compiler) selftest = 0x%x", borgc_selftest());
 }
 
-static int
-ubo_slot_used(nir_shader *nir)
+/* The uniform-buffer bindings the shader loads from, as a bit mask. */
+static uint32_t
+ubo_mask_used(nir_shader *nir)
 {
-   int slot = -1;
+   uint32_t mask = 0;
    nir_foreach_function_impl(impl, nir) {
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
@@ -53,8 +54,7 @@ ubo_slot_used(nir_shader *nir)
                } else if (di->type == nir_instr_type_intrinsic) {
                   nir_intrinsic_instr *r = nir_instr_as_intrinsic(di);
                   if (r->intrinsic == nir_intrinsic_vulkan_resource_index) {
-                     if (slot < 0)
-                        slot = nir_intrinsic_binding(r);
+                     mask |= 1u << nir_intrinsic_binding(r);
                      break;
                   }
                   d = r->intrinsic == nir_intrinsic_load_vulkan_descriptor ? r->src[0].ssa : NULL;
@@ -65,7 +65,7 @@ ubo_slot_used(nir_shader *nir)
          }
       }
    }
-   return slot;
+   return mask;
 }
 
 /* The binding of the texture the shader samples (-1 for none); a draw sends one texture. */
@@ -259,7 +259,7 @@ borgvk_compile_empty_frag(struct borgvk_device *device, uint32_t opt)
    b->npool = 0;
    device->frag_reads_pntc = false;
    device->frag_tex_binding = -1;
-   device->stage_ubo[1] = -1;
+   device->stage_ubo[1] = 0;
    ralloc_free(nb.shader);
 }
 
@@ -277,7 +277,7 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
             device->frag_reads_pntc = pntc;
             device->frag_tex_binding = -1;
          }
-         device->stage_ubo[cslot == BORGVK_STAGE_FRAG] = -1;
+         device->stage_ubo[cslot == BORGVK_STAGE_FRAG] = 0;
          device->shader_blob[cslot].npool = 0;
          mesa_logi("borgvk: shader blob from the cache (%u bytes)", device->shader_blob[cslot].len);
          return;
@@ -304,7 +304,7 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
    if (stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT)
       device->frag_tex_binding = sampled_binding(nir);
    if (stage_info->stage == VK_SHADER_STAGE_VERTEX_BIT || stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT)
-      device->stage_ubo[stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT] = ubo_slot_used(nir);
+      device->stage_ubo[stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT] = ubo_mask_used(nir);
 
    /* Map the Vulkan stage to a firmware shader slot. Only the vertex and
     * fragment stages are app-derived; anything else (e.g. compute) has no Borg

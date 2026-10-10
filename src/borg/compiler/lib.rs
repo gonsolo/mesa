@@ -1430,13 +1430,18 @@ unsafe fn compile_nir_inner(
                         const SSBO_SLOT_WORDS: u32 = 16384;
                         let store = intr.intrinsic == nir_intrinsic_store_ssbo;
                         let (bsrc, osrc) = if store { (1, 2) } else { (0, 1) };
-                        let binding = res_binding.get(&intr.get_src(bsrc).as_def().index).copied().unwrap_or(0);
+                        let mut bd = resolve_vm(&vec_map, intr.get_src(bsrc).as_def().index, 0).0;
+                        for _ in 0..8 {
+                            if res_binding.contains_key(&bd) { break; }
+                            match prod.get(&bd) { Some((_, srcs)) if !srcs.is_empty() => bd = resolve_vm(&vec_map, srcs[0].0, 0).0, _ => break }
+                        }
+                        let binding = res_binding.get(&bd).copied().unwrap_or(0);
                         let slot = SSBO_SLOT_WORDS * (1 + binding);
                         macro_rules! kc {
                             ($b:expr) => {{
                                 let bits: u32 = $b;
                                 if vs_const_window {
-                                    vs_const_vreg!(bits)
+                                    vs_const_vreg!(bits, true)
                                 } else {
                                     let u = if let Some(&u) = frag_window_by_bits.get(&bits) {
                                         u
@@ -1455,13 +1460,19 @@ unsafe fn compile_nir_inner(
                                 }
                             }};
                         }
+                        if vs_const_window {
+                            let _ = vs_const_vreg!(1u32);   // each word's address is the slot's base plus 1
+                        }
                         // A register holding 0, to copy window words through (an instruction reads one).
                         let f = next_vreg; next_vreg += 1;
                         ubo.insert(f, Ubo::Fixed(30));
                         let zero = next_vreg; next_vreg += 1;
                         prog.push(BorgInstr { mnem: "ISUB", dst: zero, srcs: vec![f, f], swz: vec![0, 0] });
+                        // The descriptor's own offset component (a dynamic buffer's) is the window base: 0.
+                        let off_is_descriptor = descriptor_defs.contains(&resolve_vm(&vec_map, intr.get_src(osrc).as_def().index, 0).0);
                         let word = match intr.get_src(osrc).comp_as_uint(0) {
                             Some(_) => None,
+                            None if off_is_descriptor => None,
                             None => {
                                 let o = resolve_vm(&vec_map, intr.get_src(osrc).as_def().index, 0);
                                 let two = kc!(2);
@@ -1619,6 +1630,19 @@ unsafe fn compile_nir_inner(
                                 (-1, 0)
                             }
                         };
+                        // A uniform buffer other than binding 0 is a window of the draw's buffer
+                        // region, SSBO_SLOT_WORDS * 17 * binding words above LS_BASE (multiples of one base).
+                        let base_words = if base_words >= 0 && !is_input {
+                            let mut d = resolve_vm(&vec_map, intr.get_src(0).as_def().index, 0).0;
+                            for _ in 0..8 {
+                                if res_binding.contains_key(&d) { break; }
+                                match prod.get(&d) { Some((_, srcs)) if !srcs.is_empty() => d = resolve_vm(&vec_map, srcs[0].0, 0).0, _ => break }
+                            }
+                            let b = res_binding.get(&d).copied().unwrap_or(0);
+                            if b == 0 { base_words } else { base_words + 16384 * 17 * (b as i32) }
+                        } else {
+                            base_words
+                        };
                         if base_words >= 0 {
                             // Every constant operand is a fresh vreg from
                             // const_int_operand (a window uniform or a pinned
@@ -1626,10 +1650,15 @@ unsafe fn compile_nir_inner(
                             // holds SSA/vreg indices, and a small GPR number
                             // could collide with a real NIR SSA index.
                             macro_rules! cint {
-                                ($v:expr) => {
-                                    const_int_operand($v, &mut const_int_reg, &mut const_reg_count,
-                                        &mut const_uniforms, &mut draw_vs_consts, &mut next_vreg, &mut ubo)
-                                };
+                                ($v:expr) => {{
+                                    let v: i32 = $v;
+                                    if vs_const_window {
+                                        vs_const_vreg!(v as u32)
+                                    } else {
+                                        const_int_operand(v, &mut const_int_reg, &mut const_reg_count,
+                                            &mut const_uniforms, &mut draw_vs_consts, &mut next_vreg, &mut ubo)
+                                    }
+                                }};
                             }
                             // The running address register this load's words come
                             // from. A constant address (stride_words == 0, the MVP
@@ -1646,6 +1675,24 @@ unsafe fn compile_nir_inner(
                                 // instruction has only one uniform operand. It
                                 // goes through the strided path below instead,
                                 // with stride 0 (VertexIndex * 0 + base).
+                                // A base past 16 bits does not fit a staged register: a window constant.
+                                (0, _) if !vs_const_window && base_words >= 65536 => {
+                                    let bits = base_words as u32;
+                                    let u = if let Some(&u) = frag_window_by_bits.get(&bits) {
+                                        u
+                                    } else {
+                                        assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
+                                        let u = 20 + draw_uniform_count;
+                                        draw_uniform_count += 1;
+                                        draw_uniform_consts.push((u, bits));
+                                        frag_window_by_bits.insert(bits, u);
+                                        u
+                                    };
+                                    let v = next_vreg;
+                                    next_vreg += 1;
+                                    ubo.insert(v, Ubo::Uniform(u as u8));
+                                    v
+                                }
                                 (0, _) if !vs_const_window => cint!(base_words),
                                 // A single constant word: the address is a window word, no chain.
                                 (0, _) if n == 1 => cint!(base_words),

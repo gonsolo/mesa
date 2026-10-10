@@ -586,8 +586,10 @@ set_is_cube(struct borgvk_descriptor_set *set)
    VkDeviceSize off = ubuf->offset + set->offsets[0];
    if (off >= ubuf->vk.size)
       return false;
-   uint32_t nfloats = (uint32_t)((ubuf->vk.size - off) / sizeof(float));
-   return nfloats >= UBO_MIN_FLOATS;
+   VkDeviceSize avail = ubuf->vk.size - off;
+   if (set->ranges[0] != VK_WHOLE_SIZE && set->ranges[0] < avail)
+      avail = set->ranges[0];
+   return avail / sizeof(float) >= UBO_MIN_FLOATS;
 }
 
 static bool
@@ -1707,12 +1709,13 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    for (int b = 0; set && b < BORGVK_MAX_BINDINGS; b++)
       if ((set->storage_mask >> b & 1) && set->buffers[b] && set->buffers[b]->mem && set->buffers[b]->mem->map)
          smask |= 1u << b;
-   if (ok && smask) {
+   const uint32_t umask = pipeline->ubo_mask & ~1u;   /* uniform buffers past binding 0 live in the region too */
+   if (ok && (smask || umask)) {
       /* With storage buffers the window is a region: the uniform buffer in slot 0, storage
        * buffer b in slot 1 + b. A draw with the same set as the one before shares its region,
        * so it sees that draw's stores. */
-      const uint32_t slots = 1 + util_last_bit(smask);
-      const bool reuse = cmd->region_set == set && cmd->batch_draws;
+      const uint32_t slots = MAX2(1 + util_last_bit(smask), umask ? 17 * (util_last_bit(umask) - 1) + 1 : 0);
+      const bool reuse = cmd->region_set == set && cmd->batch_draws && !umask && !set->dyn_mask;
       uint32_t base = cmd->region_base;
       if (!reuse) {
          base = (heap.top + 3) & ~3u;
@@ -1725,7 +1728,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
                if (!ub || !ub->mem || !ub->mem->map)
                   continue;
                const bool st = smask >> b & 1;
-               if (!st && pipeline->ubo_slot >= 0 && b != pipeline->ubo_slot)
+               if (!st && pipeline->ubo_mask && !(pipeline->ubo_mask >> b & 1))
                   continue;
                VkDeviceSize off = set->offsets[b] + ((set->dyn_mask >> b) & 1 ? cmd->dyn_off[b] : 0);
                if (off >= ub->vk.size)
@@ -1733,7 +1736,8 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
                VkDeviceSize len = set->ranges[b] == VK_WHOLE_SIZE || set->ranges[b] == 0 ? ub->vk.size - off : set->ranges[b];
                len = MIN2(len, MIN2(ub->vk.size - off, BORGVK_SSBO_SLOT_BYTES));
                uint8_t *host = (uint8_t *)ub->mem->map + ub->offset + off;
-               const uint32_t at = base + (st ? (1 + b) * BORGVK_SSBO_SLOT_BYTES : 0);
+               const uint32_t at = base + (st ? (1 + b) * BORGVK_SSBO_SLOT_BYTES :
+                                           b && pipeline->ubo_mask ? 17 * b * BORGVK_SSBO_SLOT_BYTES : 0);
                for (uint32_t i = 0; i < len; i += 256) {
                   uint8_t tmp[256] = { 0 };
                   memcpy(tmp, host + i, MIN2(256u, (uint32_t)len - i));
@@ -1748,9 +1752,9 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       }
       ubo_base = base + 1;
    }
-   for (int b = 0; ok && !smask && set && b < BORGVK_MAX_BINDINGS; b++) {
+   for (int b = 0; ok && !smask && !umask && set && b < BORGVK_MAX_BINDINGS; b++) {
       struct borgvk_buffer *ub = set->buffers[b];
-      if (!ub || !ub->mem || !ub->mem->map || (pipeline->ubo_slot >= 0 && b != pipeline->ubo_slot))
+      if (!ub || !ub->mem || !ub->mem->map || (pipeline->ubo_mask && !(pipeline->ubo_mask >> b & 1)))
          continue;
       VkDeviceSize off = set->offsets[b] + ((set->dyn_mask >> b) & 1 ? cmd->dyn_off[b] : 0);
       VkDeviceSize len = set->ranges[b] == VK_WHOLE_SIZE || set->ranges[b] == 0 ? ub->vk.size - off : set->ranges[b];

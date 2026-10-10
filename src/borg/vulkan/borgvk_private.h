@@ -110,7 +110,7 @@ struct borgvk_device {
    const struct borg_blend *blend_lower;   /* the fragment stage being compiled blends in the shader */
    struct borgvk_shader_blob shader_blob[BORGVK_SHADER_STAGE_COUNT];
    VkPipelineLayout compile_layout;   /* the layout of the pipeline being created, for array bindings */
-   int stage_ubo[2];       /* slot of the uniform buffer each stage (vertex, fragment) reads, -1 none */
+   uint32_t stage_ubo[2];  /* mask of the uniform buffer bindings each stage (vertex, fragment) reads */
    int frag_tex_binding;   /* binding of the last fragment stage's texture, -1 if unknown */
    bool frag_reads_pntc;   /* the last fragment stage compiled reads gl_PointCoord */
    /* Colour-blend state of the last graphics pipeline created, already packed
@@ -464,7 +464,7 @@ struct borgvk_pipeline {
    bool                      mrt;          /* several attachments, all R8, which the fragment stage packs */
    /* borgc option word for this pipeline's vertex shader (see borgc_compile_nir): vertex inputs
     * are typed fetches whenever the pipeline declares any attribute. */
-   int                       ubo_slot;      /* the uniform buffer the draw loads from, -1 any */
+   uint32_t                  ubo_mask;      /* the uniform buffer bindings the draw loads from */
    int                       tex_binding;   /* binding of the texture the fragment shader samples */
    uint32_t                  vfetch;
    /* The pipeline's own shader blobs and fixed-function state, as compiled/packed at creation. */

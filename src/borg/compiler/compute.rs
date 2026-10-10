@@ -273,6 +273,18 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                         nir_op_inot => em.bin("IXOR", s[0], V::C(u32::MAX)),
                         nir_op_iand => em.bin("IAND", s[0], s[1]),
                         nir_op_ior => em.bin("IOR", s[0], s[1]),
+                        nir_op_fadd => em.bin("FADD", s[0], s[1]),
+                        nir_op_fmul => em.bin("FMUL", s[0], s[1]),
+                        nir_op_fneg => {
+                            let (ra, rd) = (em.reg(s[0]), em.fresh());
+                            em.op("FNEG", rd, ra, 0, 0);
+                            V::R(rd)
+                        }
+                        nir_op_fsub => {
+                            let (rb, nb) = (em.reg(s[1]), em.fresh());
+                            em.op("FNEG", nb, rb, 0, 0);
+                            em.bin("FADD", s[0], V::R(nb))
+                        }
                         _ => {
                             em.fail(format!("unsupported ALU op {}", alu.info().name()));
                             V::C(0)
