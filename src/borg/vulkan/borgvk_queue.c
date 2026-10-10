@@ -1773,9 +1773,11 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
    struct borgvk_descriptor_set *set = cmd->desc_set;
 
    /* wb: copy the window back to the app's buffer afterwards.  A texel buffer is decoded into a
-    * private array (the canonical 4-word texel the compiler reads, see borg_nir_passes.c) and
-    * never written back. */
-   struct { uint8_t *host; uint8_t *decoded; bool wb; uint32_t skip, size, addr; } bufs[BORGVK_MAX_BINDINGS + 1];
+    * private array (the canonical 4-word texel the compiler reads, see borg_nir_passes.c); the
+    * texels a shader changed are encoded back. */
+   struct { uint8_t *host; uint8_t *decoded; bool wb; uint32_t skip, size, addr;
+            uint8_t *texels; enum pipe_format pf; } bufs[BORGVK_MAX_BINDINGS + 1];
+   memset(bufs, 0, sizeof(bufs));
    uint32_t nbufs = 0, total = 0;
    for (uint32_t b = 0; set && b < BORGVK_MAX_BINDINGS; b++) {
       const struct vk_buffer_view *bv = set->buffer_views[b];
@@ -1795,6 +1797,8 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
          bufs[nbufs].host = NULL;
          bufs[nbufs].decoded = dec;
          bufs[nbufs].wb = false;
+         bufs[nbufs].texels = (uint8_t *)tb->mem->map + tb->offset + bv->offset;
+         bufs[nbufs].pf = pf;
          bufs[nbufs].skip = 0;
          bufs[nbufs].size = n * 16;
          bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + b * BORGVK_CS_SLOT_BYTES;
@@ -1954,6 +1958,15 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
       for (uint32_t i = 0; i < nbufs; i++)
          if (bufs[i].wb)
             memcpy(bufs[i].host, merged[i] + bufs[i].skip, bufs[i].size - bufs[i].skip);
+      /* A texel buffer: the texels a shader stored, encoded back into the view's format. */
+      for (uint32_t i = 0; i < nbufs; i++) {
+         if (!bufs[i].texels)
+            continue;
+         const uint32_t bs = util_format_get_blocksize(bufs[i].pf);
+         for (uint32_t t = 0; t < bufs[i].size / 16; t++)
+            if (memcmp(merged[i] + t * 16, bufs[i].decoded + t * 16, 16) != 0)
+               util_format_pack_rgba(bufs[i].pf, bufs[i].texels + (size_t)t * bs, merged[i] + t * 16, 1);
+      }
       cmd->dispatched = true;
    }
    for (uint32_t k = 0; k < nparts; k++) {

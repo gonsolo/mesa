@@ -49,7 +49,7 @@ borg_texel_buffer_filter(const nir_instr *instr, const void *data)
    }
    if (instr->type == nir_instr_type_intrinsic) {
       const nir_intrinsic_instr *i = nir_instr_as_intrinsic(instr);
-      return (i->intrinsic == nir_intrinsic_image_deref_load &&
+      return ((i->intrinsic == nir_intrinsic_image_deref_load || i->intrinsic == nir_intrinsic_image_deref_store) &&
               nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_BUF) ||
              (i->intrinsic == nir_intrinsic_image_deref_store &&
               nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_2D &&
@@ -64,7 +64,8 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
    nir_deref_instr *deref;
    nir_def *coord;
    if (instr->type == nir_instr_type_intrinsic &&
-       nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_deref_store) {
+       nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_deref_store &&
+       nir_intrinsic_image_dim(nir_instr_as_intrinsic(instr)) != GLSL_SAMPLER_DIM_BUF) {
       /* A 2D image store (single 32-bit texel formats): the binding's window holds the image's
        * width in word 0, then the texels row by row; the host copies the image in and back. */
       nir_intrinsic_instr *st = nir_instr_as_intrinsic(instr);
@@ -116,6 +117,13 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
                                               nir_address_format_bit_size(fmt), idx,
                                               .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
    nir_def *off = nir_imul_imm(b, coord, 16);
+   if (instr->type == nir_instr_type_intrinsic &&
+       nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_deref_store) {
+      /* The driver encodes the changed texels back into the view's format after the dispatch. */
+      nir_store_ssbo(b, nir_instr_as_intrinsic(instr)->src[3].ssa, nir_channel(b, desc, 0), off,
+                     .write_mask = 0xf, .align_mul = 16);
+      return NIR_LOWER_INSTR_PROGRESS_REPLACE;
+   }
    return nir_load_ssbo(b, 4, 32, nir_channel(b, desc, 0), off, .align_mul = 16);
 }
 
