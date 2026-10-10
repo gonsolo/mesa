@@ -1006,7 +1006,7 @@ send_generic_texture(const struct vk_image_view *view,
    P16FMT(B5G5R5A1_UNORM_PACK16, 45, 3) P16FMT(R4G4B4A4_UNORM_PACK16, 46, 4)
    P16FMT(A4R4G4B4_UNORM_PACK16, 46, 7) P16FMT(A4B4G4R4_UNORM_PACK16, 46, 8)
    RAWFMT(D16_UNORM, 49, 2) RAWFMT(X8_D24_UNORM_PACK32, 50, 4) RAWFMT(D24_UNORM_S8_UINT, 50, 4)
-   RAWFMT(D32_SFLOAT, 51, 4)
+   RAWFMT(D32_SFLOAT, 51, 4) RAWFMT(S8_UINT, 3, 1)
    case VK_FORMAT_D16_UNORM_S8_UINT:  bpp = 2; fmt_code = 49; zstride = 3; break;
    case VK_FORMAT_D32_SFLOAT_S8_UINT: bpp = 4; fmt_code = 51; zstride = 8; break;
    case VK_FORMAT_R4G4_UNORM_PACK8: bpp = 1; fmt_code = 6; pack16 = 5; break;
@@ -1019,6 +1019,7 @@ send_generic_texture(const struct vk_image_view *view,
    }
    if (stencil) {
       switch (view->format) {
+      case VK_FORMAT_S8_UINT: break;   /* the bytes as they are */
       case VK_FORMAT_D16_UNORM_S8_UINT:  zstride = 3; sten_off = 2; break;
       case VK_FORMAT_D24_UNORM_S8_UINT:  zstride = 4; sten_off = 3; break;
       case VK_FORMAT_D32_SFLOAT_S8_UINT: zstride = 8; sten_off = 4; break;
