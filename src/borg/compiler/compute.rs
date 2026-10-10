@@ -413,6 +413,45 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                             em.op_nd("STORE", ra, rv);
                         }
                     }
+                    nir_intrinsic_barrier => {
+                        // A memory barrier is nothing here: a store is visible at once. A control
+                        // barrier is nothing with one invocation per workgroup.
+                        let ws = (*nir).info.workgroup_size;
+                        let control = i.get_const_index(NIR_INTRINSIC_EXECUTION_SCOPE) != 0;
+                        if control && ws[0] as u32 * ws[1] as u32 * ws[2] as u32 != 1 {
+                            em.fail("barrier() with more than one invocation per workgroup".into());
+                        }
+                    }
+                    nir_intrinsic_load_shared | nir_intrinsic_store_shared => {
+                        // Workgroup-shared variables are one more window (slot 9); workgroups run
+                        // one after the other, so they can all use the same one.
+                        let store = i.intrinsic == nir_intrinsic_store_shared;
+                        let o = em.src(i.get_src(if store { 1 } else { 0 }), 0);
+                        let w = em.shr(o, 2);
+                        let base_w = (i.base() as u32) / 4;
+                        let n = if store { i.get_src(0).num_components() as u32 } else { i.def.num_components as u32 };
+                        for c in 0..n {
+                            if store && i.write_mask() & (1 << c) == 0 {
+                                continue;
+                            }
+                            let w2 = em.add(w, V::C(base_w + c));
+                            let w2 = match w2 {
+                                V::C(x) => V::C(x & (SLOT_WORDS - 1)),
+                                _ => em.bin("IAND", w2, V::C(SLOT_WORDS - 1)),
+                            };
+                            let a = em.add(V::C(SLOT_BASE_WORDS + 9 * SLOT_WORDS), w2);
+                            let ra = em.reg(a);
+                            if store {
+                                let v = em.src(i.get_src(0), c as u8);
+                                let rv = em.reg(v);
+                                em.op_nd("STORE", ra, rv);
+                            } else {
+                                let rd = em.fresh();
+                                em.op("LOAD", rd, ra, 0, 0);
+                                em.vals.insert((d, c as u8), V::R(rd));
+                            }
+                        }
+                    }
                     nir_intrinsic_ssbo_atomic => {
                         em.atomics = true;
                         if i.atomic_op() != nir_atomic_op_iadd {

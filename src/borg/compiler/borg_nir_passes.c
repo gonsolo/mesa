@@ -212,6 +212,13 @@ borg_view_index_lower(nir_builder *b, nir_instr *instr, void *data)
 void
 borg_lower_nir_for_borgc(struct nir_shader *nir)
 {
+   /* One invocation per workgroup: `shared` variables are private ones. */
+   if (nir->info.stage == MESA_SHADER_COMPUTE && !nir->info.workgroup_size_variable &&
+       nir->info.workgroup_size[0] * nir->info.workgroup_size[1] * nir->info.workgroup_size[2] == 1) {
+      nir_foreach_variable_with_modes(var, nir, nir_var_mem_shared)
+         var->data.mode = nir_var_shader_temp;
+      nir_fixup_deref_modes(nir);
+   }
    /* The Vulkan-runtime preamble.
     *
     * The driver gets this from vk_spirv_to_nir before its own passes run; the
@@ -268,6 +275,11 @@ borg_lower_nir_for_borgc(struct nir_shader *nir)
     * select from directly. */
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_push_const,
             nir_address_format_32bit_offset);
+   if (nir->info.stage == MESA_SHADER_COMPUTE) {
+      /* `shared` variables: one more memory window (compute.rs, slot 9). */
+      NIR_PASS(_, nir, nir_lower_vars_to_explicit_types, nir_var_mem_shared, glsl_get_natural_size_align_bytes);
+      NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_shared, nir_address_format_32bit_offset);
+   }
    /* Varying I/O → load_input/store_output(location). vec4-slot sizing. */
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
             borg_type_size, 0);
@@ -288,6 +300,7 @@ borg_lower_nir_for_borgc(struct nir_shader *nir)
       NIR_PASS(progress, nir, nir_opt_dead_cf);
       NIR_PASS(progress, nir, nir_opt_remove_phis);
       NIR_PASS(progress, nir, nir_opt_copy_prop);
+      NIR_PASS(progress, nir, nir_opt_loop_unroll);
 #ifdef BORG_SMALL_NIR
       NIR_PASS(progress, nir, nir_shader_lower_instructions, borg_basic_alu_filter,
                borg_basic_alu_lower, NULL);
@@ -308,7 +321,6 @@ borg_lower_nir_for_borgc(struct nir_shader *nir)
        * side effect of adding the capability.
        *
        * expensive_alu_ok so cube.frag's linearToSrgb pow branch does not block
-      NIR_PASS(progress, nir, nir_opt_loop_unroll);
        * flattening -- the whole select then collapses to one FSRGB op. */
       /* BORGC_NO_FLATTEN keeps every `if` as control flow, to exercise the mask path. */
       const nir_opt_peephole_select_options peephole_opts = {
