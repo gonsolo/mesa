@@ -25,6 +25,7 @@ const struct spirv_to_nir_options borg_spirv_options = {
 
 const struct nir_shader_compiler_options borg_nir_options = {
    .lower_fdiv = true,
+   .max_unroll_iterations = 32,   /* the ISA has no backward branch: constant loops are unrolled */
 };
 
 /* Location (vec4-slot) sizing for nir_lower_io of varyings. */
@@ -299,6 +300,7 @@ borg_lower_nir_for_borgc(struct nir_shader *nir)
        * side effect of adding the capability.
        *
        * expensive_alu_ok so cube.frag's linearToSrgb pow branch does not block
+      NIR_PASS(progress, nir, nir_opt_loop_unroll);
        * flattening -- the whole select then collapses to one FSRGB op. */
       /* BORGC_NO_FLATTEN keeps every `if` as control flow, to exercise the mask path. */
       const nir_opt_peephole_select_options peephole_opts = {
