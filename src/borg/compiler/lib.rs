@@ -810,17 +810,22 @@ unsafe fn compile_nir_inner(
                                         None => {
                                             let v = next_vreg;
                                             next_vreg += 1;
-                                            if stage == 4 {
+                                            let v = if stage == 4 {
                                                 let c = next_vreg;
                                                 next_vreg += 1;
                                                 ubo.insert(c, Ubo::Fixed(30));
                                                 per_pixel_fixed.insert(c);
                                                 prog.push(BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
                                             } else {
+                                                v
+                                            } else if vs_const_window {
+                                                // A pinned register is not staged for a draw's vertex shader.
+                                                vs_const_vreg!(1.0f32.to_bits())
                                                 let reg = alloc_const_reg(&mut const_reg_count);
                                                 const_uniforms.push((reg, 1.0f32.to_bits()));
                                                 ubo.insert(v, Ubo::Fixed(reg));
-                                            }
+                                                v
+                                            };
                                             one_vreg = Some(v);
                                             v
                                         }
@@ -856,17 +861,22 @@ unsafe fn compile_nir_inner(
                                         None => {
                                             let v = next_vreg;
                                             next_vreg += 1;
-                                            if stage == 4 {
+                                            let v = if stage == 4 {
                                                 let c = next_vreg;
                                                 next_vreg += 1;
                                                 ubo.insert(c, Ubo::Fixed(30));
                                                 per_pixel_fixed.insert(c);
                                                 prog.push(BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
                                             } else {
+                                                v
+                                            } else if vs_const_window {
+                                                // A pinned register is not staged for a draw's vertex shader.
+                                                vs_const_vreg!(1.0f32.to_bits())
                                                 let reg = alloc_const_reg(&mut const_reg_count);
                                                 const_uniforms.push((reg, 1.0f32.to_bits()));
                                                 ubo.insert(v, Ubo::Fixed(reg));
-                                            }
+                                                v
+                                            };
                                             one_vreg = Some(v);
                                             v
                                         }
