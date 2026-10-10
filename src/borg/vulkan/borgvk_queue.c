@@ -1258,6 +1258,11 @@ borgvk_flush_draws(struct borgvk_command_buffer *cmd)
    struct borgvk_image *extra[3] = { cmd->batch_extra[0], cmd->batch_extra[1], cmd->batch_extra[2] };
    const uint32_t nextra = cmd->batch_nextra;
    const bool serve = cmd->batch_serve;
+   struct borgvk_writeback wb[BORGVK_MAX_WRITEBACKS];
+   const uint32_t nwb = cmd->nwb;
+   memcpy(wb, cmd->wb, sizeof(wb));
+   cmd->nwb = 0;
+   cmd->region_set = NULL;
    cmd->stream = NULL;
    cmd->stream_len = cmd->stream_cap = 0;
    cmd->heap_top = 0;
@@ -1268,7 +1273,7 @@ borgvk_flush_draws(struct borgvk_command_buffer *cmd)
    cmd->state_sent = NULL;
    cmd->state_sent_len = 0;
    if (serve) {
-      borgvk_sim_run_pass(bytes, n, img, extra, nextra, cmd->batch_depth, cmd->batch_stencil);
+      borgvk_sim_run_pass(bytes, n, img, extra, nextra, cmd->batch_depth, cmd->batch_stencil, wb, nwb);
       free(bytes);
       return;
    }
@@ -1666,7 +1671,50 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    }
    /* The first bound uniform buffer is the shader's LOAD window (ls_base). */
    uint32_t ubo_base = 0;
-   for (int b = 0; ok && set && b < BORGVK_MAX_BINDINGS; b++) {
+   uint32_t smask = 0;
+   for (int b = 0; set && b < BORGVK_MAX_BINDINGS; b++)
+      if ((set->storage_mask >> b & 1) && set->buffers[b] && set->buffers[b]->mem && set->buffers[b]->mem->map)
+         smask |= 1u << b;
+   if (ok && smask) {
+      /* With storage buffers the window is a region: the uniform buffer in slot 0, storage
+       * buffer b in slot 1 + b. A draw with the same set as the one before shares its region,
+       * so it sees that draw's stores. */
+      const uint32_t slots = 1 + util_last_bit(smask);
+      const bool reuse = cmd->region_set == set && cmd->batch_draws;
+      uint32_t base = cmd->region_base;
+      if (!reuse) {
+         base = (heap.top + 3) & ~3u;
+         if (base + slots * BORGVK_SSBO_SLOT_BYTES + 16 > BORGVK_HEAP_BYTES) {
+            ok = generic_reject(10);
+         } else {
+            heap.top = base + slots * BORGVK_SSBO_SLOT_BYTES + 16;
+            for (int b = 0; b < BORGVK_MAX_BINDINGS; b++) {
+               struct borgvk_buffer *ub = set->buffers[b];
+               if (!ub || !ub->mem || !ub->mem->map)
+                  continue;
+               const bool st = smask >> b & 1;
+               VkDeviceSize off = set->offsets[b] + ((set->dyn_mask >> b) & 1 ? cmd->dyn_off[b] : 0);
+               if (off >= ub->vk.size)
+                  continue;
+               VkDeviceSize len = set->ranges[b] == VK_WHOLE_SIZE || set->ranges[b] == 0 ? ub->vk.size - off : set->ranges[b];
+               len = MIN2(len, MIN2(ub->vk.size - off, BORGVK_SSBO_SLOT_BYTES));
+               uint8_t *host = (uint8_t *)ub->mem->map + ub->offset + off;
+               const uint32_t at = base + (st ? (1 + b) * BORGVK_SSBO_SLOT_BYTES : 0);
+               for (uint32_t i = 0; i < len; i += 256) {
+                  uint8_t tmp[256] = { 0 };
+                  memcpy(tmp, host + i, MIN2(256u, (uint32_t)len - i));
+                  borgvk_serial_send_mem(at + i, tmp, (MIN2(256u, (uint32_t)len - i) + 3) & ~3u);
+               }
+               if (st && cmd->nwb < BORGVK_MAX_WRITEBACKS)
+                  cmd->wb[cmd->nwb++] = (struct borgvk_writeback){ at, (uint32_t)len, host };
+            }
+            cmd->region_set = set;
+            cmd->region_base = base;
+         }
+      }
+      ubo_base = base + 1;
+   }
+   for (int b = 0; ok && !smask && set && b < BORGVK_MAX_BINDINGS; b++) {
       struct borgvk_buffer *ub = set->buffers[b];
       if (!ub || !ub->mem || !ub->mem->map)
          continue;

@@ -368,6 +368,7 @@ unsafe fn compile_nir_inner(
     let mut lod_ctl_uniform: Option<u32> = None;
     let mut vfetch_ctl: HashMap<u32, u8> = HashMap::new();   // attribute location -> window uniform of its TEX control word
     let mut frag_window_by_bits: HashMap<u32, u32> = HashMap::new();
+    let mut res_binding: HashMap<u32, u32> = HashMap::new();   // resource index / descriptor def -> binding
     // Scalar load_const f32 bits (for the sRGB idiom match) and a producer map
     // (alu def → its op + resolved scalar srcs) for recognising the bcsel tree.
     let mut consts: HashMap<u32, u32> = HashMap::new();
@@ -1366,8 +1367,94 @@ unsafe fn compile_nir_inner(
                     }
                     // load_ubo/store_output handled in the I/O pass below
                     // (legacy) or inline here (draw mode).
-                    else if intr.intrinsic == nir_intrinsic_load_vulkan_descriptor {
+                    else if intr.intrinsic == nir_intrinsic_vulkan_resource_index {
+                        res_binding.insert(intr.def.index, intr.get_const_index(NIR_INTRINSIC_BINDING));
+                    } else if intr.intrinsic == nir_intrinsic_load_vulkan_descriptor {
                         descriptor_defs.insert(intr.def.index);
+                        if let Some(&b) = res_binding.get(&intr.get_src(0).as_def().index) {
+                            res_binding.insert(intr.def.index, b);
+                        }
+                    } else if draw_mode && (intr.intrinsic == nir_intrinsic_load_ssbo
+                                            || intr.intrinsic == nir_intrinsic_store_ssbo) {
+                        // A storage buffer is a window of the draw's buffer region: binding b
+                        // starts SSBO_SLOT_WORDS * (1 + b) words above LS_BASE (the uniform
+                        // buffer keeps the first slot). The driver uploads it there and copies
+                        // back what the pass stored.
+                        const SSBO_SLOT_WORDS: u32 = 16384;
+                        let store = intr.intrinsic == nir_intrinsic_store_ssbo;
+                        let (bsrc, osrc) = if store { (1, 2) } else { (0, 1) };
+                        let binding = res_binding.get(&intr.get_src(bsrc).as_def().index).copied().unwrap_or(0);
+                        let slot = SSBO_SLOT_WORDS * (1 + binding);
+                        macro_rules! kc {
+                            ($b:expr) => {{
+                                let bits: u32 = $b;
+                                if vs_const_window {
+                                    vs_const_vreg!(bits)
+                                } else {
+                                    let u = if let Some(&u) = frag_window_by_bits.get(&bits) {
+                                        u
+                                    } else {
+                                        assert!(draw_uniform_count < 11, "borgc: fragment shader needs more than 11 window constants");
+                                        let u = 20 + draw_uniform_count;
+                                        draw_uniform_count += 1;
+                                        draw_uniform_consts.push((u, bits));
+                                        frag_window_by_bits.insert(bits, u);
+                                        u
+                                    };
+                                    let v = next_vreg;
+                                    next_vreg += 1;
+                                    ubo.insert(v, Ubo::Uniform(u as u8));
+                                    v
+                                }
+                            }};
+                        }
+                        // A register holding 0, to copy window words through (an instruction reads one).
+                        let f = next_vreg; next_vreg += 1;
+                        ubo.insert(f, Ubo::Fixed(30));
+                        let zero = next_vreg; next_vreg += 1;
+                        prog.push(BorgInstr { mnem: "ISUB", dst: zero, srcs: vec![f, f], swz: vec![0, 0] });
+                        let word = match intr.get_src(osrc).comp_as_uint(0) {
+                            Some(_) => None,
+                            None => {
+                                let o = resolve_vm(&vec_map, intr.get_src(osrc).as_def().index, 0);
+                                let two = kc!(2);
+                                let w = next_vreg; next_vreg += 1;
+                                prog.push(BorgInstr { mnem: "ISRL", dst: w, srcs: vec![o.0, two], swz: vec![o.1, 0] });
+                                Some(w)
+                            }
+                        };
+                        let const_word = intr.get_src(osrc).comp_as_uint(0).map(|o| o as u32 / 4);
+                        let n = if store { intr.get_src(0).num_components() as usize } else { intr.def.num_components as usize };
+                        let mut comps = Vec::with_capacity(n);
+                        for c in 0..n {
+                            if store && intr.write_mask() & (1 << c) == 0 {
+                                continue;
+                            }
+                            let k = kc!(slot + const_word.unwrap_or(0) + c as u32);
+                            let addr = next_vreg; next_vreg += 1;
+                            prog.push(BorgInstr { mnem: "IADD", dst: addr, srcs: vec![word.unwrap_or(zero), k], swz: vec![0, 0] });
+                            if store {
+                                let src = intr.get_src(0).as_def().index;
+                                let d = resolve_vm(&vec_map, src, c as u8);
+                                let val = match consts.get(&d.0) {
+                                    Some(&bits) if !vec_map.contains_key(&d.0) => {
+                                        let kv = kc!(bits);
+                                        let t = next_vreg; next_vreg += 1;
+                                        prog.push(BorgInstr { mnem: "IADD", dst: t, srcs: vec![zero, kv], swz: vec![0, 0] });
+                                        (t, 0u8)
+                                    }
+                                    _ => d,
+                                };
+                                prog.push(BorgInstr { mnem: "STORE", dst: NO_DST, srcs: vec![addr, val.0], swz: vec![0, val.1] });
+                            } else {
+                                let dst = next_vreg; next_vreg += 1;
+                                prog.push(BorgInstr { mnem: "LOAD", dst, srcs: vec![addr], swz: vec![0] });
+                                comps.push((dst, 0u8));
+                            }
+                        }
+                        if !store {
+                            vec_map.insert(intr.def.index, comps);
+                        }
                     } else if draw_mode && stage == 4 && intr.intrinsic == nir_intrinsic_load_frag_coord {
                         // docs/B1_geometry_front_end.md, fragment ABI: FragCoord.xy = r30/r31
                         // (the pixel centre), .z = r29, .w = r8 (= 1/w). Read in place like the

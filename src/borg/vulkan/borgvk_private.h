@@ -132,6 +132,9 @@ struct borgvk_device {
 #define BORGVK_MAX_VERTEX_BINDINGS 16
 
 #define BORGVK_MAX_BINDINGS 8
+#define BORGVK_MAX_WRITEBACKS 16
+/* A draw's buffer region: the uniform buffer, then storage buffer b at slot 1 + b (lib.rs SSBO_SLOT_WORDS). */
+#define BORGVK_SSBO_SLOT_BYTES 65536u
 
 struct borgvk_command_buffer {
    struct vk_command_buffer vk;
@@ -174,11 +177,19 @@ struct borgvk_command_buffer {
    /* The batch runs on the persistent simulator, with these depth and stencil attachments. */
    bool batch_serve;
    struct vk_image_view *batch_depth, *batch_stencil;
+   /* Storage buffers of the pass's draws: heap bytes to copy back into the application's buffer. */
+   struct borgvk_writeback { uint32_t off, size; uint8_t *host; } wb[BORGVK_MAX_WRITEBACKS];
+   uint32_t nwb;
+   struct borgvk_descriptor_set *region_set;   /* the set whose buffer region is at region_base */
+   uint32_t region_base;
    const uint8_t *index_ptr;                    /* bound index buffer, at its offset */
    VkDeviceSize index_avail;
    uint32_t index_size;                         /* 2, 4, or 0 for an unsupported type */
    uint32_t pc[32];                             /* push-constant bytes, for compute */
    VkDeviceSize dyn_off[BORGVK_MAX_BINDINGS];   /* dynamic offsets of desc_set, by binding */
+   /* The compute bind point has its own set. */
+   struct borgvk_descriptor_set *cs_desc_set;
+   VkDeviceSize cs_dyn_off[BORGVK_MAX_BINDINGS];
 };
 
 extern const struct vk_command_buffer_ops borgvk_cmd_buffer_ops;
@@ -187,9 +198,6 @@ void borgvk_flush_draws(struct borgvk_command_buffer *cmd);
 
 /* The persistent simulator (borgvk_sim.c). */
 struct borgvk_image;
-   /* The compute bind point has its own set. */
-   struct borgvk_descriptor_set *cs_desc_set;
-   VkDeviceSize cs_dyn_off[BORGVK_MAX_BINDINGS];
 bool borgvk_hw_enabled(void);
 size_t borgvk_hw_render(const uint8_t *stream, size_t n, uint32_t dim, uint8_t *out);
 bool borgvk_sim_serves(const struct borgvk_image *color, bool has_depth_stencil);
@@ -200,10 +208,12 @@ bool borgvk_sim_half1(VkFormat f);
 bool borgvk_sim_raw32(VkFormat f);
 uint32_t borgvk_sim_packed_opt(VkFormat f);
 bool borgvk_sim_depth_is_d32(VkFormat f);
+struct borgvk_writeback;
 VkResult borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
                              struct borgvk_image *const *extra, uint32_t nextra,
                              const struct vk_image_view *depth_view,
-                             const struct vk_image_view *stencil_view);
+                             const struct vk_image_view *stencil_view,
+                             const struct borgvk_writeback *wb, uint32_t nwb);
 
 /* ---- Serial transport (borgvk_serial.c) ------------------------------- *
  * The "GPU" is the ULX3S FPGA reached over the FT231X serial bridge
@@ -411,6 +421,7 @@ struct borgvk_descriptor_set {
    struct borgvk_sampler *samplers[BORGVK_MAX_BINDINGS];
    struct vk_buffer_view *buffer_views[BORGVK_MAX_BINDINGS];   /* texel buffers */
    uint64_t dyn_mask;           /* from the layout: dynamic-offset slots */
+   uint32_t storage_mask;       /* slots whose buffer is a storage buffer */
    struct borgvk_desc_map map;
 };
 

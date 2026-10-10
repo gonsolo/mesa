@@ -260,6 +260,9 @@ borgvk_UpdateDescriptorSets(VkDevice _device,
             set->buffers[slot] = buffer;
             set->offsets[slot] = w->pBufferInfo[k].offset;
             set->ranges[slot] = w->pBufferInfo[k].range;
+            const bool storage = w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
+                                 w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+            set->storage_mask = (set->storage_mask & ~(1u << slot)) | (storage ? 1u << slot : 0);
          }
 
          /* Texel buffers: the view carries the buffer, format, offset and range. */

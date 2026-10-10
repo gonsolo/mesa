@@ -385,7 +385,8 @@ VkResult
 borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
                     struct borgvk_image *const *extra, uint32_t nextra,
                     const struct vk_image_view *depth_view,
-                    const struct vk_image_view *stencil_view)
+                    const struct vk_image_view *stencil_view,
+                    const struct borgvk_writeback *wb, uint32_t nwb)
 {
    struct borgvk_image *zimg = view_image(depth_view), *simg = view_image(stencil_view);
    /* Depth only: no colour attachment, nothing of it goes in or comes back. */
@@ -579,6 +580,15 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
       }
    }
    }
+   /* Storage buffers: the bytes a draw's shaders stored, back into the application's buffer.
+    * Every strip started from the same bytes, so a byte that differs was stored. */
+   for (uint32_t i = 0; i < nwb; i++)
+      for (int part = np - 1; part >= 0; part--) {
+         const uint8_t *g = sim.s[part].mem + sim.s[part].heap + wb[i].off;
+         for (uint32_t k = 0; k < wb[i].size; k++)
+            if (g[k] != wb[i].host[k])
+               wb[i].host[k] = g[k];
+      }
    if (getenv("BORGVK_DEBUG"))
       mesa_logi("borgvk: pass of %zu bytes changed %u of %zu pixels (format %u)", n, changed, npx, fmt);
 
