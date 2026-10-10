@@ -199,10 +199,10 @@ struct borgvk_command_buffer {
    uint32_t pc[32];                             /* push-constant bytes, for compute */
    VkDeviceSize dyn_off[BORGVK_MAX_BINDINGS];   /* dynamic offsets of desc_set, by binding */
    /* The compute bind point has its own set. */
-   struct borgvk_descriptor_set *cs_desc_set;   /* set 0 */
-   struct borgvk_descriptor_set *cs_desc_set1;
-   VkDeviceSize cs_dyn_off[BORGVK_MAX_BINDINGS];
-   VkDeviceSize cs_dyn_off1[BORGVK_MAX_BINDINGS];
+   struct borgvk_descriptor_set *cs_sets[4];
+   VkDeviceSize cs_dyn_offs[4][BORGVK_MAX_BINDINGS];
+   struct borgvk_descriptor_set *desc_sets[4];   /* [0] is desc_set; dyn_offs[0] is unused (dyn_off) */
+   VkDeviceSize dyn_offs[4][BORGVK_MAX_BINDINGS];
 };
 
 extern const struct vk_command_buffer_ops borgvk_cmd_buffer_ops;
@@ -321,6 +321,7 @@ VkResult borgvk_queue_submit(struct vk_queue *queue,
 
 /* Compiler shim (borgvk_compiler.c → Rust borgc crate). */
 void borgvk_compiler_selftest(void);
+void borgvk_layout_set_base(struct borgvk_device *device, uint8_t base[4]);
 void borgvk_compile_compute_stage(struct borgvk_device *device,
                                   const VkPipelineShaderStageCreateInfo *stage_info,
                                   struct borgvk_pipeline *pipeline);
@@ -400,6 +401,7 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_sampler, vk.base, VkSampler,
  * extra elements of the lower bindings, so a layout without arrays maps each binding to itself. */
 struct borgvk_desc_map {
    uint8_t n, num[BORGVK_MAX_BINDINGS], slot[BORGVK_MAX_BINDINGS], count[BORGVK_MAX_BINDINGS];
+   uint8_t total;   /* slots the set takes: the next set's flat numbering starts here */
    bool arrays;
 };
 
@@ -465,6 +467,7 @@ struct borgvk_pipeline {
    /* borgc option word for this pipeline's vertex shader (see borgc_compile_nir): vertex inputs
     * are typed fetches whenever the pipeline declares any attribute. */
    uint32_t                  ubo_mask;      /* the uniform buffer bindings the draw loads from */
+   uint8_t                   set_base[4];   /* flat number of each set's first slot, from the layout */
    int                       tex_binding;   /* binding of the texture the fragment shader samples */
    uint32_t                  vfetch;
    /* The pipeline's own shader blobs and fixed-function state, as compiled/packed at creation. */

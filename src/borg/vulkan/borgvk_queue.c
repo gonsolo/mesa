@@ -1703,19 +1703,28 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       if (ok && idx_off == UINT32_MAX)
          ok = generic_reject(10);
    }
-   /* The first bound uniform buffer is the shader's LOAD window (ls_base). */
+   /* The first bound uniform buffer is the shader's LOAD window (ls_base). Buffers of all bound
+    * sets are numbered flat (set_base + slot), as the compiler numbers them. */
    uint32_t ubo_base = 0;
    uint32_t smask = 0;
-   for (int b = 0; set && b < BORGVK_MAX_BINDINGS; b++)
-      if ((set->storage_mask >> b & 1) && set->buffers[b] && set->buffers[b]->mem && set->buffers[b]->mem->map)
-         smask |= 1u << b;
+   struct borgvk_descriptor_set *sets[4] = { set, cmd->desc_sets[1], cmd->desc_sets[2], cmd->desc_sets[3] };
+   bool any_dyn = false;
+   for (int si = 0; si < 4; si++) {
+      if (!sets[si])
+         continue;
+      any_dyn |= sets[si]->dyn_mask != 0;
+      for (int b = 0; b < BORGVK_MAX_BINDINGS && pipeline->set_base[si] + b < 32; b++)
+         if ((sets[si]->storage_mask >> b & 1) && sets[si]->buffers[b] && sets[si]->buffers[b]->mem &&
+             sets[si]->buffers[b]->mem->map)
+            smask |= 1u << (pipeline->set_base[si] + b);
+   }
    const uint32_t umask = pipeline->ubo_mask & ~1u;   /* uniform buffers past binding 0 live in the region too */
    if (ok && (smask || umask)) {
-      /* With storage buffers the window is a region: the uniform buffer in slot 0, storage
-       * buffer b in slot 1 + b. A draw with the same set as the one before shares its region,
-       * so it sees that draw's stores. */
-      const uint32_t slots = MAX2(1 + util_last_bit(smask), umask ? 17 * (util_last_bit(umask) - 1) + 1 : 0);
-      const bool reuse = cmd->region_set == set && cmd->batch_draws && !umask && !set->dyn_mask;
+      /* With storage buffers the window is a region: the uniform buffer in slot 0, buffer number
+       * f in slot 1 + f. A draw with the same set as the one before shares its region, so it
+       * sees that draw's stores. */
+      const uint32_t slots = 1 + util_last_bit(smask | umask);
+      const bool reuse = cmd->region_set == set && cmd->batch_draws && !umask && !any_dyn && !sets[1];
       uint32_t base = cmd->region_base;
       if (!reuse) {
          base = (heap.top + 3) & ~3u;
@@ -1723,28 +1732,32 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
             ok = generic_reject(10);
          } else {
             heap.top = base + slots * BORGVK_SSBO_SLOT_BYTES + 16;
-            for (int b = 0; b < BORGVK_MAX_BINDINGS; b++) {
-               struct borgvk_buffer *ub = set->buffers[b];
-               if (!ub || !ub->mem || !ub->mem->map)
-                  continue;
-               const bool st = smask >> b & 1;
-               if (!st && pipeline->ubo_mask && !(pipeline->ubo_mask >> b & 1))
-                  continue;
-               VkDeviceSize off = set->offsets[b] + ((set->dyn_mask >> b) & 1 ? cmd->dyn_off[b] : 0);
-               if (off >= ub->vk.size)
-                  continue;
-               VkDeviceSize len = set->ranges[b] == VK_WHOLE_SIZE || set->ranges[b] == 0 ? ub->vk.size - off : set->ranges[b];
-               len = MIN2(len, MIN2(ub->vk.size - off, BORGVK_SSBO_SLOT_BYTES));
-               uint8_t *host = (uint8_t *)ub->mem->map + ub->offset + off;
-               const uint32_t at = base + (st ? (1 + b) * BORGVK_SSBO_SLOT_BYTES :
-                                           b && pipeline->ubo_mask ? 17 * b * BORGVK_SSBO_SLOT_BYTES : 0);
-               for (uint32_t i = 0; i < len; i += 256) {
-                  uint8_t tmp[256] = { 0 };
-                  memcpy(tmp, host + i, MIN2(256u, (uint32_t)len - i));
-                  borgvk_serial_send_mem(at + i, tmp, (MIN2(256u, (uint32_t)len - i) + 3) & ~3u);
+            for (int si = 0; si < 4; si++) {
+               for (int b = 0; sets[si] && b < BORGVK_MAX_BINDINGS; b++) {
+                  const struct borgvk_descriptor_set *ds = sets[si];
+                  const int fb = pipeline->set_base[si] + b;
+                  struct borgvk_buffer *ub = ds->buffers[b];
+                  if (fb >= 32 || !ub || !ub->mem || !ub->mem->map)
+                     continue;
+                  const bool st = smask >> fb & 1;
+                  if (!st && pipeline->ubo_mask && !(pipeline->ubo_mask >> fb & 1))
+                     continue;
+                  const VkDeviceSize *dyn = si ? cmd->dyn_offs[si] : cmd->dyn_off;
+                  VkDeviceSize off = ds->offsets[b] + ((ds->dyn_mask >> b) & 1 ? dyn[b] : 0);
+                  if (off >= ub->vk.size)
+                     continue;
+                  VkDeviceSize len = ds->ranges[b] == VK_WHOLE_SIZE || ds->ranges[b] == 0 ? ub->vk.size - off : ds->ranges[b];
+                  len = MIN2(len, MIN2(ub->vk.size - off, BORGVK_SSBO_SLOT_BYTES));
+                  uint8_t *host = (uint8_t *)ub->mem->map + ub->offset + off;
+                  const uint32_t at = base + (st || (fb && pipeline->ubo_mask) ? (1 + fb) * BORGVK_SSBO_SLOT_BYTES : 0);
+                  for (uint32_t i = 0; i < len; i += 256) {
+                     uint8_t tmp[256] = { 0 };
+                     memcpy(tmp, host + i, MIN2(256u, (uint32_t)len - i));
+                     borgvk_serial_send_mem(at + i, tmp, (MIN2(256u, (uint32_t)len - i) + 3) & ~3u);
+                  }
+                  if (st && cmd->nwb < BORGVK_MAX_WRITEBACKS)
+                     cmd->wb[cmd->nwb++] = (struct borgvk_writeback){ at, (uint32_t)len, host };
                }
-               if (st && cmd->nwb < BORGVK_MAX_WRITEBACKS)
-                  cmd->wb[cmd->nwb++] = (struct borgvk_writeback){ at, (uint32_t)len, host };
             }
             cmd->region_set = set;
             cmd->region_base = base;
@@ -1871,13 +1884,13 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
     * private array (the canonical 4-word texel the compiler reads, see borg_nir_passes.c); the
     * texels a shader changed are encoded back. */
    struct { uint8_t *host; uint8_t *decoded; bool wb; uint32_t skip, size, addr;
-            uint8_t *texels; enum pipe_format pf; } bufs[2 * BORGVK_MAX_BINDINGS + 1];
+            uint8_t *texels; enum pipe_format pf; } bufs[34];
    memset(bufs, 0, sizeof(bufs));
    uint32_t nbufs = 0, total = 0;
-   for (uint32_t si = 0; si < 2; si++) {
-   struct borgvk_descriptor_set *set = si ? cmd->cs_desc_set1 : cmd->cs_desc_set;
-   const VkDeviceSize *dyn_off = si ? cmd->cs_dyn_off1 : cmd->cs_dyn_off;
-   for (uint32_t b = 0; set && b < BORGVK_MAX_BINDINGS; b++) {
+   for (uint32_t si = 0; si < 4; si++) {
+   struct borgvk_descriptor_set *set = cmd->cs_sets[si];
+   const VkDeviceSize *dyn_off = cmd->cs_dyn_offs[si];
+   for (uint32_t b = 0; set && b < BORGVK_MAX_BINDINGS && pl->set_base[si] + b < 32; b++) {
       const struct vk_buffer_view *bv = set->buffer_views[b];
       if (bv && !set->buffers[b]) {
          struct borgvk_buffer *tb = container_of(bv->buffer, struct borgvk_buffer, vk);
@@ -1899,7 +1912,7 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
          bufs[nbufs].pf = pf;
          bufs[nbufs].skip = 0;
          bufs[nbufs].size = n * 16;
-         bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + (si * BORGVK_MAX_BINDINGS + b) * BORGVK_CS_SLOT_BYTES;
+         bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + (pl->set_base[si] + b) * BORGVK_CS_SLOT_BYTES;
          total += 8 + n * 16;
          nbufs++;
          continue;
@@ -1927,7 +1940,7 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
          bufs[nbufs].wb = false;
          bufs[nbufs].skip = 0;
          bufs[nbufs].size = (1 + n) * 16;
-         bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + (si * BORGVK_MAX_BINDINGS + b) * BORGVK_CS_SLOT_BYTES;
+         bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + (pl->set_base[si] + b) * BORGVK_CS_SLOT_BYTES;
          total += 8 + (1 + n) * 16;
          nbufs++;
          continue;
@@ -1948,7 +1961,7 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
          bufs[nbufs].wb = true;
          bufs[nbufs].skip = 4;
          bufs[nbufs].size = (1 + n) * 4;
-         bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + (si * BORGVK_MAX_BINDINGS + b) * BORGVK_CS_SLOT_BYTES;
+         bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + (pl->set_base[si] + b) * BORGVK_CS_SLOT_BYTES;
          total += 8 + (1 + n) * 4;
          nbufs++;
          continue;
@@ -1965,7 +1978,7 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
       bufs[nbufs].wb = true;
       bufs[nbufs].skip = 0;
       bufs[nbufs].size = (uint32_t)size;
-      bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + (si * BORGVK_MAX_BINDINGS + b) * BORGVK_CS_SLOT_BYTES;
+      bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + (pl->set_base[si] + b) * BORGVK_CS_SLOT_BYTES;
       total += 8 + ((uint32_t)size + 3) / 4 * 4;
       nbufs++;
    }
@@ -2136,14 +2149,14 @@ borgvk_CmdBindDescriptorSets(VkCommandBuffer commandBuffer, VkPipelineBindPoint 
    uint32_t k = 0;
    for (uint32_t i = 0; i < descriptorSetCount && pDescriptorSets; i++) {
       VK_FROM_HANDLE(borgvk_descriptor_set, set, pDescriptorSets[i]);
-      const uint32_t si = cs ? firstSet + i : 0;
-      if (!set || si > 1u || (!cs && i > 0))
+      const uint32_t si = firstSet + i;
+      if (!set || si > 3)
          continue;
-      VkDeviceSize *dyn = cs ? (si ? cmd->cs_dyn_off1 : cmd->cs_dyn_off) : cmd->dyn_off;
-      if (cs && si)
-         cmd->cs_desc_set1 = set;
-      else if (cs)
-         cmd->cs_desc_set = set;
+      VkDeviceSize *dyn = cs ? cmd->cs_dyn_offs[si] : si ? cmd->dyn_offs[si] : cmd->dyn_off;
+      if (cs)
+         cmd->cs_sets[si] = set;
+      else if (si)
+         cmd->desc_sets[si] = set;
       else
          cmd->desc_set = set;
       memset(dyn, 0, sizeof(cmd->dyn_off));

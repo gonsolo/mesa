@@ -117,41 +117,53 @@ borgvk_blob_num_varyings(const struct borgvk_shader_blob *b)
    return at < b->len ? b->data[at] : 0;
 }
 
-/* A buffer binding that is an array: borgc names buffers by (set, binding), so point each constant
- * array index at its flat slot (the slot the descriptor update wrote). */
+/* The sets of a layout are numbered flat: set s starts where the sets before it end, so the
+ * buffer windows borgc names by binding alone cannot collide. */
+void
+borgvk_layout_set_base(struct borgvk_device *device, uint8_t base[4])
+{
+   VK_FROM_HANDLE(vk_pipeline_layout, pl, device->compile_layout);
+   uint32_t at = 0;
+   memset(base, 0, 4);
+   for (uint32_t s = 0; pl && s < pl->set_count && s < 4; s++) {
+      base[s] = MIN2(at, 255u);
+      if (pl->set_layouts[s])
+         at += container_of(pl->set_layouts[s], struct borgvk_descriptor_set_layout, vk)->map.total;
+   }
+}
+
+/* borgc names buffers by (set, binding): point each constant array index at its flat slot (the
+ * slot the descriptor update wrote) and fold the set number in. */
 static void
 remap_array_bindings(struct borgvk_device *device, nir_shader *nir)
 {
    VK_FROM_HANDLE(vk_pipeline_layout, pl, device->compile_layout);
    if (!pl)
       return;
-   bool any = false;
-   for (uint32_t s = 0; s < pl->set_count; s++) {
-      struct vk_descriptor_set_layout *l = pl->set_layouts[s];
-      any |= l && container_of(l, struct borgvk_descriptor_set_layout, vk)->map.arrays;
-   }
-   if (!any)
-      return;
+   uint8_t base[4];
+   borgvk_layout_set_base(device, base);
    nir_foreach_function_impl(impl, nir) {
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
             if (instr->type != nir_instr_type_intrinsic)
                continue;
             nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-            if (intr->intrinsic != nir_intrinsic_vulkan_resource_index ||
-                !nir_src_is_const(intr->src[0]))
+            if (intr->intrinsic != nir_intrinsic_vulkan_resource_index)
                continue;
             uint32_t set = nir_intrinsic_desc_set(intr), binding = nir_intrinsic_binding(intr);
-            if (set >= pl->set_count || !pl->set_layouts[set])
+            if (set >= pl->set_count || set >= 4 || !pl->set_layouts[set])
                continue;
             const struct borgvk_desc_map *m =
                &container_of(pl->set_layouts[set], struct borgvk_descriptor_set_layout, vk)->map;
+            uint32_t slot = binding, elem = nir_src_is_const(intr->src[0]) ? nir_src_as_uint(intr->src[0]) : 0;
             for (uint32_t j = 0; j < m->n; j++) {
                if (m->num[j] == binding) {
-                  nir_intrinsic_set_binding(intr, m->slot[j] + MIN2(nir_src_as_uint(intr->src[0]), m->count[j] - 1u));
+                  slot = m->slot[j] + MIN2(elem, m->count[j] - 1u);
                   break;
                }
             }
+            nir_intrinsic_set_binding(intr, base[set] + slot);
+            nir_intrinsic_set_desc_set(intr, 0);
          }
       }
    }
@@ -361,6 +373,7 @@ borgvk_compile_compute_stage(struct borgvk_device *device,
                                        pipeline->cs_regs, 32, &pipeline->cs_nregs,
                                        pipeline->cs_local, &pipeline->cs_flags);
    pipeline->cs_ok = rc == 0;
+   borgvk_layout_set_base(device, pipeline->set_base);
    mesa_logi("borgvk: compute shader %s (%u words, %u presets)", rc == 0 ? "compiled" : "REFUSED",
              pipeline->cs_nwords, pipeline->cs_nregs);
    ralloc_free(nir);

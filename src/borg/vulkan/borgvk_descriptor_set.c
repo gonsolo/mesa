@@ -55,6 +55,7 @@ borgvk_CreateDescriptorSetLayout(VkDevice _device,
       for (uint32_t k = 0; dyn_of[b] && k < cnt; k++)
          layout->dyn_mask |= 1ull << (slot + k);
       extra += cnt - 1;
+      m->total = MAX2(m->total, slot + cnt);
    }
 
    *pSetLayout = borgvk_descriptor_set_layout_to_handle(layout);

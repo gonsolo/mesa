@@ -531,7 +531,7 @@ unsafe fn compile_nir_inner(
                 let derivable = bits == 0 || vs_vreg_by_bits.keys().any(|&a| {
                     a >= 1 && a < bits && vs_vreg_by_bits.get(&(bits - a)).is_some()
                 });
-                if draw_vs_consts.len() < DRAW_VS_CONST_WORDS && !($derive && derivable) {
+                if draw_vs_consts.len() < DRAW_VS_CONST_WORDS && !($derive && derivable) && bits != 0 {
                     let u = DRAW_VS_CONST_U0 as u32 + draw_vs_consts.len() as u32;
                     draw_vs_consts.push((u as u8, bits));
                     ubo.insert(v, Ubo::Uniform(u as u8));
@@ -1631,7 +1631,7 @@ unsafe fn compile_nir_inner(
                             }
                         };
                         // A uniform buffer other than binding 0 is a window of the draw's buffer
-                        // region, SSBO_SLOT_WORDS * 17 * binding words above LS_BASE (multiples of one base).
+                        // region, SSBO_SLOT_WORDS * (1 + binding) words above LS_BASE.
                         let base_words = if base_words >= 0 && !is_input {
                             let mut d = resolve_vm(&vec_map, intr.get_src(0).as_def().index, 0).0;
                             for _ in 0..8 {
@@ -1639,7 +1639,7 @@ unsafe fn compile_nir_inner(
                                 match prod.get(&d) { Some((_, srcs)) if !srcs.is_empty() => d = resolve_vm(&vec_map, srcs[0].0, 0).0, _ => break }
                             }
                             let b = res_binding.get(&d).copied().unwrap_or(0);
-                            if b == 0 { base_words } else { base_words + 16384 * 17 * (b as i32) }
+                            if b == 0 { base_words } else { base_words + 16384 * (1 + b as i32) }
                         } else {
                             base_words
                         };
@@ -1649,6 +1649,10 @@ unsafe fn compile_nir_inner(
                             // GPR), never the register number itself: `srcs`
                             // holds SSA/vreg indices, and a small GPR number
                             // could collide with a real NIR SSA index.
+                            // The slot size seeds the window so each further buffer's base is a sum.
+                            if vs_const_window && base_words >= 16384 {
+                                let _ = vs_const_vreg!(16384u32);
+                            }
                             macro_rules! cint {
                                 ($v:expr) => {{
                                     let v: i32 = $v;
