@@ -303,8 +303,29 @@ borgvk_optimal_features(VkFormat format)
    VkFormatFeatureFlags f =
       common |
       VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT |
-      VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
-      VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
+      VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+   /* Blending: the formats Vulkan 1.0 requires it for, no others (the fixed-function blend does
+    * the UNORM8 ones; docs/B3_colour_formats.md has the plan for the rest). */
+   switch (format) {
+   case VK_FORMAT_R5G6B5_UNORM_PACK16:
+   case VK_FORMAT_A1R5G5B5_UNORM_PACK16:
+   case VK_FORMAT_R8_UNORM:
+   case VK_FORMAT_R8G8_UNORM:
+   case VK_FORMAT_R8G8B8A8_UNORM:
+   case VK_FORMAT_R8G8B8A8_SRGB:
+   case VK_FORMAT_B8G8R8A8_UNORM:
+   case VK_FORMAT_B8G8R8A8_SRGB:
+   case VK_FORMAT_A8B8G8R8_UNORM_PACK32:
+   case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+   case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+   case VK_FORMAT_R16_SFLOAT:
+   case VK_FORMAT_R16G16_SFLOAT:
+   case VK_FORMAT_R16G16B16A16_SFLOAT:
+      f |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
+      break;
+   default:
+      break;
+   }
    /* Integer and scaled formats (the sampler has no scaled-integer formats) can't be linearly filtered -- interpolating between
     * integer texel values is meaningless, and no real hardware advertises
     * this bit for them. Without this exclusion CTS legitimately runs
