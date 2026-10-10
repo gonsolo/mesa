@@ -25,6 +25,8 @@ const struct spirv_to_nir_options borg_spirv_options = {
 
 const struct nir_shader_compiler_options borg_nir_options = {
    .lower_fdiv = true,
+   .lower_fceil = true,
+   .lower_ffract = true,
    .max_unroll_iterations = 32,   /* the ISA has no backward branch: constant loops are unrolled */
 };
 
@@ -195,6 +197,27 @@ borg_basic_alu_lower(nir_builder *b, nir_instr *instr, void *data)
 }
 #endif
 
+/* F2I truncates: trunc(x) = float(int(x)), floor(x) = trunc(x) - (x < trunc(x)). */
+static bool
+borg_trunc_filter(const nir_instr *instr, const void *data)
+{
+   if (instr->type != nir_instr_type_alu)
+      return false;
+   const nir_op op = nir_instr_as_alu(instr)->op;
+   return op == nir_op_ftrunc || op == nir_op_ffloor;
+}
+
+static nir_def *
+borg_trunc_lower(nir_builder *b, nir_instr *instr, void *data)
+{
+   nir_alu_instr *alu = nir_instr_as_alu(instr);
+   nir_def *x = nir_ssa_for_alu_src(b, alu, 0);
+   nir_def *t = nir_i2f32(b, nir_f2i32(b, x));
+   if (alu->op == nir_op_ftrunc)
+      return t;
+   return nir_fsub(b, t, nir_b2f32(b, nir_flt(b, x, t)));
+}
+
 /* No multiview: gl_ViewIndex is 0. */
 static bool
 borg_view_index_filter(const nir_instr *instr, const void *data)
@@ -301,6 +324,7 @@ borg_lower_nir_for_borgc(struct nir_shader *nir)
       NIR_PASS(progress, nir, nir_opt_remove_phis);
       NIR_PASS(progress, nir, nir_opt_copy_prop);
       NIR_PASS(progress, nir, nir_opt_loop_unroll);
+      NIR_PASS(progress, nir, nir_shader_lower_instructions, borg_trunc_filter, borg_trunc_lower, NULL);
 #ifdef BORG_SMALL_NIR
       NIR_PASS(progress, nir, nir_shader_lower_instructions, borg_basic_alu_filter,
                borg_basic_alu_lower, NULL);
