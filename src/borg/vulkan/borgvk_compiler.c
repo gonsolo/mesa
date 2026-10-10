@@ -202,6 +202,7 @@ borgvk_compile_empty_frag(struct borgvk_device *device, uint32_t opt)
    uint32_t len = 0;
    borgc_compile_nir(nb.shader, b->data, BORGVK_SHADER_BLOB_MAX, &len, opt);
    b->len = len <= BORGVK_SHADER_BLOB_MAX ? len : 0;
+   b->npool = 0;
    device->frag_reads_pntc = false;
    ralloc_free(nb.shader);
 }
@@ -218,6 +219,7 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
          if (cslot == BORGVK_STAGE_FRAG)
             device->frag_reads_pntc = pntc;
          mesa_logi("borgvk: shader blob from the cache (%u bytes)", device->shader_blob[cslot].len);
+         device->shader_blob[cslot].npool = 0;
          return;
       }
    }
@@ -257,7 +259,9 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
                         vfetch);
       if (len > 0 && len <= BORGVK_SHADER_BLOB_MAX) {
          b->len = len;
-         borgvk_shader_cache_record(stage_info, vfetch, b, device->frag_reads_pntc);
+         b->npool = slot == BORGVK_STAGE_FRAG ? borgc_last_frag_pool(b->pool, BORGVK_POOL_MAX) : 0;
+         if (!blend && !b->npool)   /* the cache holds neither */
+            borgvk_shader_cache_record(stage_info, vfetch, b, device->frag_reads_pntc);
          mesa_logi("borgvk: captured %s shader blob (%u bytes) for upload",
                    slot == BORGVK_STAGE_VERT ? "vertex" : "fragment", len);
       } else {

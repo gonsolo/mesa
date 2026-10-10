@@ -54,6 +54,8 @@ uint32_t borgc_compile_compute(struct nir_shader *nir,
 
 #ifdef __cplusplus
 }
+/* The constant pool of the fragment shader compiled last: words fetched from vertex slot 40. */
+uint32_t borgc_last_frag_pool(uint32_t *out, uint32_t cap);
 #endif
 
 #endif /* BORG_NIR_PASSES_H */

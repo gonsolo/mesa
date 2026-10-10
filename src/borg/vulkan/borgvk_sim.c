@@ -207,6 +207,22 @@ packed_info(VkFormat f, uint32_t *opt, unsigned *bytes)
    if (f == VK_FORMAT_R8_UNORM || f == VK_FORMAT_R8G8B8A8_UNORM || f == VK_FORMAT_B8G8R8A8_UNORM ||
        borgvk_sim_bytes_packed(f) || borgvk_sim_half1(f) || borgvk_sim_half2(f) || borgvk_sim_raw32(f))
       return false;
+   /* UNORM formats with uneven channels, by number (borgc packed_layout). */
+   static const struct { VkFormat f; uint8_t id, bytes, alpha; } uneven[] = {
+      { VK_FORMAT_A1R5G5B5_UNORM_PACK16, 0, 2, 1 },  { VK_FORMAT_R5G5B5A1_UNORM_PACK16, 1, 2, 1 },
+      { VK_FORMAT_B5G5R5A1_UNORM_PACK16, 2, 2, 1 },  { VK_FORMAT_R4G4B4A4_UNORM_PACK16, 3, 2, 1 },
+      { VK_FORMAT_B4G4R4A4_UNORM_PACK16, 4, 2, 1 },  { VK_FORMAT_A4R4G4B4_UNORM_PACK16, 5, 2, 1 },
+      { VK_FORMAT_A4B4G4R4_UNORM_PACK16, 6, 2, 1 },  { VK_FORMAT_A2B10G10R10_UNORM_PACK32, 7, 4, 1 },
+      { VK_FORMAT_A2R10G10B10_UNORM_PACK32, 8, 4, 1 }, { VK_FORMAT_B5G6R5_UNORM_PACK16, 9, 2, 0 },
+      { VK_FORMAT_R4G4_UNORM_PACK8, 10, 1, 0 },       { VK_FORMAT_R5G6B5_UNORM_PACK16, 11, 2, 0 },
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(uneven); i++) {
+      if (uneven[i].f == f) {
+         *opt = 0x10u | 3u << 19 | (uneven[i].id & 7u) << 16 | (uneven[i].id >> 3) << 21 | (uneven[i].alpha ? 4u : 0u);
+         *bytes = uneven[i].bytes;
+         return true;
+      }
+   }
    const struct util_format_description *d = vk_format_description(f);
    if (!d || d->layout != UTIL_FORMAT_LAYOUT_PLAIN || d->nr_channels < 1 || d->nr_channels > 4)
       return false;

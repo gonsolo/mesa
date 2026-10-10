@@ -20,6 +20,7 @@
  * power cycle skip the upload entirely (~0 s startup instead of ~2 s).
  * Set BORGVK_FORCE_UPLOAD=1 to ignore the sentinel and re-upload unconditionally.
  */
+#include "util/format_srgb.h"
 #include "borgvk_private.h"
 
 #include "vk_command_buffer.h"
@@ -1263,6 +1264,8 @@ borgvk_flush_draws(struct borgvk_command_buffer *cmd)
    memcpy(wb, cmd->wb, sizeof(wb));
    cmd->nwb = 0;
    cmd->region_set = NULL;
+   cmd->batch_pool = NULL;
+   cmd->batch_srgb = false;
    cmd->stream = NULL;
    cmd->stream_len = cmd->stream_cap = 0;
    cmd->heap_top = 0;
@@ -1476,6 +1479,9 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
          need = (uint64_t)nlines * 6 * (16 + 2 * 16 * pipeline->attr_count) + 64;
       if (cmd->batch_draws && cmd->heap_top + need > BORGVK_HEAP_BYTES)
          borgvk_flush_draws(cmd);
+      /* The constant pool's slot is one per pass. */
+      if (cmd->batch_draws && pipeline->blob[BORGVK_STAGE_FRAG].npool && cmd->batch_pool && cmd->batch_pool != pipeline)
+         borgvk_flush_draws(cmd);
    }
    const bool first_of_batch = cmd->batch_draws == 0;
 
@@ -1620,6 +1626,32 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
             else
                borgvk_serial_send_vattr(BORGVK_POINT_SLOT, code, off - (uint32_t)e0 * rbytes, (uint32_t)e1 + 1, rbytes, swz);
          }
+      }
+   }
+   if (ok && pipeline->blob[BORGVK_STAGE_FRAG].npool && cmd->batch_pool != pipeline) {
+      const struct borgvk_shader_blob *fb = &pipeline->blob[BORGVK_STAGE_FRAG];
+      uint32_t code, swz, rbytes, words[BORGVK_POOL_MAX + 4] = { 0 };
+      memcpy(words, fb->pool, fb->npool * 4);
+      const uint32_t rows = (fb->npool + 3) / 4;
+      const uint32_t off = heap_upload(&heap, (const uint8_t *)words, rows * 16);
+      if (off == UINT32_MAX || !vertex_format_to_fetch(VK_FORMAT_R32G32B32A32_UINT, &code, &swz, &rbytes)) {
+         ok = generic_reject(10);
+      } else {
+         borgvk_serial_send_vattr(BORGVK_POOL_SLOT, code, off, rows, rbytes, swz);
+         cmd->batch_pool = pipeline;
+      }
+   }
+   if (ok && pipeline->srgb_table && !cmd->batch_srgb) {
+      float t[256];
+      uint32_t code, swz, rbytes;
+      for (int i = 0; i < 256; i++)
+         t[i] = util_format_srgb_8unorm_to_linear_float(i);
+      const uint32_t off = heap_upload(&heap, (const uint8_t *)t, sizeof(t));
+      if (off == UINT32_MAX || !vertex_format_to_fetch(VK_FORMAT_R32_SFLOAT, &code, &swz, &rbytes)) {
+         ok = generic_reject(10);
+      } else {
+         borgvk_serial_send_vattr(BORGVK_SRGB_SLOT, code, off, 256, rbytes, swz);
+         cmd->batch_srgb = true;
       }
    }
    if (ok && lines) {

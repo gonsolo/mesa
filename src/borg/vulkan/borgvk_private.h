@@ -80,9 +80,15 @@ enum borgvk_shader_stage {
    BORGVK_STAGE_FRAG = 1,
    BORGVK_SHADER_STAGE_COUNT,
 };
+#define BORGVK_POOL_MAX  64
+#define BORGVK_POOL_SLOT 40
+#define BORGVK_SRGB_SLOT 41   /* 256 floats: sRGB to linear, for blending in the shader */
 struct borgvk_shader_blob {
    uint8_t  data[BORGVK_SHADER_BLOB_MAX];
    uint32_t len;   /* 0 = not compiled (or didn't fit) */
+   /* Fragment constants that did not fit the window, fetched from vertex slot BORGVK_POOL_SLOT. */
+   uint32_t pool[BORGVK_POOL_MAX];
+   uint32_t npool;
 };
 
 struct borgvk_device {
@@ -101,6 +107,7 @@ struct borgvk_device {
 
    /* borgc-compiled shader blobs captured at pipeline creation, uploaded to the
     * firmware over serial (0xB0) on the first submit. */
+   const struct borg_blend *blend_lower;   /* the fragment stage being compiled blends in the shader */
    struct borgvk_shader_blob shader_blob[BORGVK_SHADER_STAGE_COUNT];
    VkPipelineLayout compile_layout;   /* the layout of the pipeline being created, for array bindings */
    bool frag_reads_pntc;   /* the last fragment stage compiled reads gl_PointCoord */
@@ -180,6 +187,8 @@ struct borgvk_command_buffer {
    /* Storage buffers of the pass's draws: heap bytes to copy back into the application's buffer. */
    struct borgvk_writeback { uint32_t off, size; uint8_t *host; } wb[BORGVK_MAX_WRITEBACKS];
    uint32_t nwb;
+   bool batch_srgb;          /* the pass's sRGB decode table (vertex slot 41) is uploaded */
+   const void *batch_pool;   /* the pipeline whose constant pool the pass's slot holds */
    struct borgvk_descriptor_set *region_set;   /* the set whose buffer region is at region_base */
    uint32_t region_base;
    const uint8_t *index_ptr;                    /* bound index buffer, at its offset */
@@ -454,6 +463,7 @@ struct borgvk_pipeline {
    /* The pipeline's own shader blobs and fixed-function state, as compiled/packed at creation. */
    struct borgvk_shader_blob blob[BORGVK_SHADER_STAGE_COUNT];
    uint32_t                  blend_cfg, blend_const, state_reg[5];
+   bool                      srgb_table;   /* the fragment shader decodes the destination */
    bool                      state_valid;
    /* Compute: the borgc program, the registers the driver presets (register,
     * value pairs) and LocalSize. cs_ok is false when borgc refused the shader. */
