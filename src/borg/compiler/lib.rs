@@ -1772,6 +1772,142 @@ unsafe fn compile_nir_inner(
                             }
                         }
                         draw_output_stores.insert(loc, comps);
+                    } else if draw_mode && stage == 4 && intr.intrinsic == nir_intrinsic_load_output
+                              && intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) >> 14 & 1 != 0 {
+                        // The destination pixel as floats (nir_lower_blend's fb fetch): `TLD` returns the
+                        // attachment's word, unpacked here by the same description the pack block uses.
+                        let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
+                            let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
+                                assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
+                                let u = 20 + draw_uniform_count;
+                                draw_uniform_count += 1;
+                                draw_uniform_consts.push((u, bits));
+                                u
+                            });
+                            let v = *next_vreg; *next_vreg += 1;
+                            ubo.insert(v, Ubo::Uniform(u as u8));
+                            v
+                        };
+                        let mut op = |mnem: &'static str, srcs: Vec<u32>, prog: &mut Vec<BorgInstr>, next_vreg: &mut u32| {
+                            let d = *next_vreg; *next_vreg += 1;
+                            let swz = vec![0; srcs.len()];
+                            prog.push(BorgInstr { mnem, dst: d, srcs, swz });
+                            d
+                        };
+                        // (kind, bits per channel, channels, swap): the generic packed description, or R8_UNORM.
+                        let desc = if vfetch & 0x10 != 0 && vfetch & 0x100 == 0 {
+                            Some(packed_layout(vfetch))
+                        } else if vfetch & 2 != 0 {
+                            Some((0, vec![(0usize, 0u32, 8u32)]))
+                        } else {
+                            None
+                        };
+                        match desc {
+                            Some((kind, layout)) if layout.iter().all(|&(_, sh, b)| sh + b <= 32) => {
+                                let w = op("TLD", vec![], &mut prog, &mut next_vreg);
+                                let zero = op("ISUB", vec![w, w], &mut prog, &mut next_vreg);
+                                let mut rgba: [Option<u32>; 4] = [None; 4];
+                                for &(comp, sh, bits) in layout.iter() {
+                                    let mut f = w;
+                                    if sh != 0 {
+                                        let s = win(sh, &mut ubo, &mut next_vreg);
+                                        f = op("ISRL", vec![f, s], &mut prog, &mut next_vreg);
+                                    }
+                                    if bits < 32 && (kind != 1) && sh + bits < 32 {
+                                        let m = win((1u32 << bits) - 1, &mut ubo, &mut next_vreg);
+                                        f = op("IAND", vec![f, m], &mut prog, &mut next_vreg);
+                                    }
+                                    let v = match kind {
+                                        2 if comp != 3 => {
+                                            // sRGB to linear: a fetch from the driver's 256-entry table (slot 41).
+                                            let ctl = win((1 << 16) | (128 + 41), &mut ubo, &mut next_vreg);
+                                            let t = op("TEX", vec![f, zero, ctl], &mut prog, &mut next_vreg);
+                                            tex_dsts.insert(t);
+                                            op("IOR", vec![t, t], &mut prog, &mut next_vreg)
+                                        }
+                                        0 | 2 => {
+                                            let i = op("I2F", vec![f], &mut prog, &mut next_vreg);
+                                            let inv = win((1.0f32 / ((1u64 << bits) - 1) as f32).to_bits(), &mut ubo, &mut next_vreg);
+                                            op("FMUL", vec![i, inv], &mut prog, &mut next_vreg)
+                                        }
+                                        1 => {
+                                            // Sign-extend the field from the word itself.
+                                            let up = win(32 - bits - sh, &mut ubo, &mut next_vreg);
+                                            let a = if 32 - bits - sh != 0 { op("ISHL", vec![w, up], &mut prog, &mut next_vreg) } else { w };
+                                            let dn = win(32 - bits, &mut ubo, &mut next_vreg);
+                                            let s = op("ISHR", vec![a, dn], &mut prog, &mut next_vreg);
+                                            let i = op("I2F", vec![s], &mut prog, &mut next_vreg);
+                                            let inv = win((1.0f32 / ((1u64 << (bits - 1)) - 1) as f32).to_bits(), &mut ubo, &mut next_vreg);
+                                            op("FMUL", vec![i, inv], &mut prog, &mut next_vreg)
+                                        }
+                                        _ => f,
+                                    };
+                                    rgba[comp] = Some(v);
+                                }
+                                let one = win(1.0f32.to_bits(), &mut ubo, &mut next_vreg);
+                                let comp0 = intr.get_const_index(NIR_INTRINSIC_COMPONENT) as usize;
+                                let nc = intr.def.num_components as usize;
+                                let comps: Vec<(u32, u8)> = (0..nc).map(|c| {
+                                    let c = c + comp0;
+                                    (rgba[c].unwrap_or(if c == 3 { one } else { zero }), 0u8)
+                                }).collect();
+                                vec_map.insert(intr.def.index, comps);
+                            }
+                            _ if vfetch & 8 != 0 => {
+                                // Half floats: R, G in word 0, B, A in word 1. A channel's bits become the
+                                // float's: exponent rebased by 112, an infinity or NaN by another 112, and a
+                                // denormal is its mantissa times 2^-24.
+                                let nch = if vfetch & 0x20 != 0 { 1 } else if vfetch & 0x40 != 0 { 3 } else if vfetch & 0x80 != 0 { 4 } else { 2 };
+                                let w0 = op("TLD", vec![], &mut prog, &mut next_vreg);
+                                let w1 = if nch > 2 { op("TLD1", vec![], &mut prog, &mut next_vreg) } else { w0 };
+                                let zero = op("ISUB", vec![w0, w0], &mut prog, &mut next_vreg);
+                                let mut rgba: [Option<u32>; 4] = [None; 4];
+                                for k in 0..nch {
+                                    let mut h = if k < 2 { w0 } else { w1 };
+                                    if k % 2 == 1 {
+                                        let c16 = win(16, &mut ubo, &mut next_vreg);
+                                        h = op("ISRL", vec![h, c16], &mut prog, &mut next_vreg);
+                                    }
+                                    let c7fff = win(0x7FFF, &mut ubo, &mut next_vreg);
+                                    let mag = op("IAND", vec![h, c7fff], &mut prog, &mut next_vreg);
+                                    let c13 = win(13, &mut ubo, &mut next_vreg);
+                                    let n = op("ISHL", vec![mag, c13], &mut prog, &mut next_vreg);
+                                    let bias = win(112 << 23, &mut ubo, &mut next_vreg);
+                                    let n = op("IADD", vec![n, bias], &mut prog, &mut next_vreg);
+                                    let c10 = win(10, &mut ubo, &mut next_vreg);
+                                    let e = op("ISRL", vec![mag, c10], &mut prog, &mut next_vreg);
+                                    let c31 = win(31, &mut ubo, &mut next_vreg);
+                                    let isinf = op("ISEQ", vec![e, c31], &mut prog, &mut next_vreg);
+                                    let bias2 = win(112 << 23, &mut ubo, &mut next_vreg);
+                                    let add = op("IMUL", vec![isinf, bias2], &mut prog, &mut next_vreg);
+                                    let n = op("IADD", vec![n, add], &mut prog, &mut next_vreg);
+                                    let c3ff = win(0x3FF, &mut ubo, &mut next_vreg);
+                                    let m = op("IAND", vec![mag, c3ff], &mut prog, &mut next_vreg);
+                                    let mf = op("I2F", vec![m], &mut prog, &mut next_vreg);
+                                    let sc = win((2.0f32).powi(-24).to_bits(), &mut ubo, &mut next_vreg);
+                                    let df = op("FMUL", vec![mf, sc], &mut prog, &mut next_vreg);
+                                    let isden = op("ISEQ", vec![e, zero], &mut prog, &mut next_vreg);
+                                    let mask = op("ISUB", vec![zero, isden], &mut prog, &mut next_vreg);
+                                    let x = op("IXOR", vec![n, df], &mut prog, &mut next_vreg);
+                                    let x = op("IAND", vec![x, mask], &mut prog, &mut next_vreg);
+                                    let r = op("IXOR", vec![n, x], &mut prog, &mut next_vreg);
+                                    let c15 = win(15, &mut ubo, &mut next_vreg);
+                                    let sg = op("ISRL", vec![h, c15], &mut prog, &mut next_vreg);
+                                    let c31b = win(31, &mut ubo, &mut next_vreg);
+                                    let sg = op("ISHL", vec![sg, c31b], &mut prog, &mut next_vreg);
+                                    rgba[k] = Some(op("IOR", vec![r, sg], &mut prog, &mut next_vreg));
+                                }
+                                let one = win(1.0f32.to_bits(), &mut ubo, &mut next_vreg);
+                                let comp0 = intr.get_const_index(NIR_INTRINSIC_COMPONENT) as usize;
+                                let nc = intr.def.num_components as usize;
+                                let comps: Vec<(u32, u8)> = (0..nc).map(|c| {
+                                    let c = c + comp0;
+                                    (rgba[c].unwrap_or(if c == 3 { one } else { zero }), 0u8)
+                                }).collect();
+                                vec_map.insert(intr.def.index, comps);
+                            }
+                            _ => eprintln!("borgc: ERROR blending on this attachment format is not implemented"),
+                        }
                     } else if draw_mode && intr.intrinsic == nir_intrinsic_load_output {
                         let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
                         match draw_output_stores.get(&loc) {
@@ -2339,6 +2475,7 @@ unsafe fn compile_nir_inner(
         let mut words: [Option<u32>; 4] = [None; 4];
         for &(comp, bitpos, bits) in layout.iter() {
             let Some((x, xc)) = draw_frag_out[comp] else { continue };
+            let mask = if bits < 32 && (kind == 1 || kind == 3) { Some(win((1u32 << bits) - 1, &mut ubo, &mut next_vreg)) } else { None };
             let mut op = |mnem: &'static str, srcs: Vec<u32>, swz: Vec<u8>, prog: &mut Vec<BorgInstr>, next_vreg: &mut u32| {
                 let d = *next_vreg; *next_vreg += 1;
                 prog.push(BorgInstr { mnem, dst: d, srcs, swz });
@@ -2464,7 +2601,6 @@ unsafe fn compile_nir_inner(
             let c = k!(0x7FFF_FFFF);
             let a = i!("IAND", xr, c);
             let c = k!(0x3800_0000);
-            let mask = if bits < 32 && (kind == 1 || kind == 3) { Some(win((1u32 << bits) - 1, &mut ubo, &mut next_vreg)) } else { None };
             let t = i!("ISUB", a, c);
             let c = k!(13);
             let sh = i!("ISRL", a, c);
@@ -2611,6 +2747,140 @@ unsafe fn compile_nir_inner(
         }
     }
 
+    // Fragment constants beyond the window come from a pool: a typed fetch of four words at a
+    // time from vertex-attribute slot FRAG_POOL_SLOT, which the driver points at the pool's words
+    // (borgc_last_frag_pool). The window keeps its first nine and holds the fetch's control word
+    // and the 1 the index steps by.
+    #[allow(static_mut_refs)]
+    unsafe { LAST_FRAG_POOL.clear(); }
+    if draw_mode && stage == 4 && draw_uniform_count > 11 {
+        let first_pool = 20 + 9;
+        // The window keeps the nine constants read most often: a window word costs no register.
+        {
+            let mut uses: HashMap<u32, usize> = HashMap::new();
+            for i in prog.iter() {
+                for s in i.srcs.iter() {
+                    if let Some(&Ubo::Uniform(u)) = ubo.get(s) {
+                        if u >= 20 {
+                            *uses.entry(u as u32).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            let mut by_use: Vec<(u32, u32)> = draw_uniform_consts.clone();
+            by_use.sort_by_key(|&(u, _)| (std::cmp::Reverse(uses.get(&u).copied().unwrap_or(0)), u));
+            let renum: HashMap<u32, u32> = by_use.iter().enumerate().map(|(k, &(u, _))| (u, 20 + k as u32)).collect();
+            for (_, m) in ubo.iter_mut() {
+                if let Ubo::Uniform(u) = m {
+                    if let Some(&n) = renum.get(&(*u as u32)) {
+                        *u = n as u8;
+                    }
+                }
+            }
+            draw_uniform_consts = by_use.iter().map(|&(u, bits)| (renum[&u], bits)).collect();
+        }
+        let mut pool: Vec<u32> = vec![0; (20 + draw_uniform_count - first_pool) as usize];
+        for &(u, bits) in draw_uniform_consts.iter() {
+            if u >= first_pool {
+                pool[(u - first_pool) as usize] = bits;
+            }
+        }
+        draw_uniform_consts.retain(|&(u, _)| u < first_pool);
+        draw_uniform_consts.push((first_pool, (1 << 16) | (128 + FRAG_POOL_SLOT)));
+        draw_uniform_consts.push((first_pool + 1, 1));
+        let mut fresh = |ubo: &mut HashMap<u32, Ubo>, u: Option<Ubo>| {
+            let v = next_vreg;
+            next_vreg += 1;
+            if let Some(u) = u {
+                ubo.insert(v, u);
+            }
+            v
+        };
+        let ctl = fresh(&mut ubo, Some(Ubo::Uniform(first_pool as u8)));
+        let one = fresh(&mut ubo, Some(Ubo::Uniform(first_pool as u8 + 1)));
+        let f = fresh(&mut ubo, Some(Ubo::Fixed(30)));
+        per_pixel_fixed.insert(f);
+        let zero = fresh(&mut ubo, None);
+        // A group of four is fetched just before its first use, so a constant holds a register
+        // only while it is needed: the pool is ordered by first use.
+        let is_pool = |v: &u32, ubo: &HashMap<u32, Ubo>| match ubo.get(v) {
+            Some(&Ubo::Uniform(u)) if u as u32 >= first_pool && *v != ctl && *v != one => Some(u as u32 - first_pool),
+            _ => None,
+        };
+        let mut first_use: Vec<Option<usize>> = vec![None; pool.len()];
+        for (at, i) in prog.iter().enumerate() {
+            for s in i.srcs.iter() {
+                if let Some(k) = is_pool(s, &ubo) {
+                    first_use[k as usize].get_or_insert(at);
+                }
+            }
+        }
+        let mut order: Vec<usize> = (0..pool.len()).filter(|&k| first_use[k].is_some()).collect();
+        order.sort_by_key(|&k| first_use[k]);
+        let mut slot_of: Vec<usize> = vec![0; pool.len()];
+        for (slot, &k) in order.iter().enumerate() {
+            slot_of[k] = slot;
+        }
+        let pool: Vec<u32> = order.iter().map(|&k| pool[k]).collect();
+        // A group is fetched before its first use, and again when it has not been used for a
+        // while (a register held across the whole shader is one the shader cannot spare), and
+        // never between a TEX and a read of its block.
+        const GAP: usize = 16;
+        let ngroups = (pool.len() + 3) / 4;
+        let mut last: Vec<Option<usize>> = vec![None; ngroups];
+        let mut events: Vec<(usize, usize)> = Vec::new();   // (before instruction, group)
+        for (at, i) in prog.iter().enumerate() {
+            for s in i.srcs.iter() {
+                let Some(k) = is_pool(s, &ubo) else { continue };
+                let g = slot_of[k as usize] / 4;
+                if last[g].map_or(true, |l| at - l > GAP) {
+                    let mut p = at;
+                    loop {
+                        let Some(t) = (0..p).rev().find(|&t| prog[t].mnem == "TEX") else { break };
+                        let d = prog[t].dst;
+                        if prog[p..].iter().any(|i| i.srcs.contains(&d)) { p = t; } else { break; }
+                    }
+                    events.push((p, g));
+                }
+                last[g] = Some(at);
+            }
+        }
+        events.sort();
+        let mut cur: Vec<[u32; 4]> = vec![[0; 4]; ngroups];
+        let mut out: Vec<BorgInstr> = vec![BorgInstr { mnem: "ISUB", dst: zero, srcs: vec![f, f], swz: vec![0, 0] }];
+        let mut e = 0;
+        for (at, mut i) in std::mem::take(&mut prog).into_iter().enumerate() {
+            while e < events.len() && events[e].0 == at {
+                let g = events[e].1;
+                let mut idx = zero;
+                for _ in 0..g {
+                    let n = fresh(&mut ubo, None);
+                    out.push(BorgInstr { mnem: "IADD", dst: n, srcs: vec![idx, one], swz: vec![0, 0] });
+                    idx = n;
+                }
+                let t = fresh(&mut ubo, None);
+                out.push(BorgInstr { mnem: "TEX", dst: t, srcs: vec![idx, zero, ctl], swz: vec![0, 0, 0] });
+                tex_dsts.insert(t);
+                for c in 0..4u8 {
+                    let r = fresh(&mut ubo, None);
+                    out.push(BorgInstr { mnem: "IOR", dst: r, srcs: vec![t, t], swz: vec![c, c] });
+                    cur[g][c as usize] = r;
+                }
+                e += 1;
+            }
+            for s in i.srcs.iter_mut() {
+                if let Some(k) = is_pool(s, &ubo) {
+                    let slot = slot_of[k as usize];
+                    *s = cur[slot / 4][slot % 4];
+                }
+            }
+            out.push(i);
+        }
+        prog = out;
+        eprintln!("borgc: constant pool of {} word(s)", pool.len());
+        #[allow(static_mut_refs)]
+        unsafe { LAST_FRAG_POOL = pool; }
+    }
     dce(&mut prog, &out_roots);
     fuse_fmadd(&mut prog, &out_roots, &|v| {
         matches!(ubo.get(&v), Some(Ubo::Mvp(_)) | Some(Ubo::Uniform(_)) | Some(Ubo::Attr))
@@ -2747,140 +3017,6 @@ unsafe fn compile_nir_inner(
             extra_reserved.extend_from_slice(&[0, 1, 2]);
         }
         // const_regs[..const_reg_count]: r17-19(+23), the actually-pinned
-    // Fragment constants beyond the window come from a pool: a typed fetch of four words at a
-    // time from vertex-attribute slot FRAG_POOL_SLOT, which the driver points at the pool's words
-    // (borgc_last_frag_pool). The window keeps its first nine and holds the fetch's control word
-    // and the 1 the index steps by.
-    #[allow(static_mut_refs)]
-    unsafe { LAST_FRAG_POOL.clear(); }
-    if draw_mode && stage == 4 && draw_uniform_count > 11 {
-        let first_pool = 20 + 9;
-        // The window keeps the nine constants read most often: a window word costs no register.
-        {
-            let mut uses: HashMap<u32, usize> = HashMap::new();
-            for i in prog.iter() {
-                for s in i.srcs.iter() {
-                    if let Some(&Ubo::Uniform(u)) = ubo.get(s) {
-                        if u >= 20 {
-                            *uses.entry(u as u32).or_insert(0) += 1;
-                        }
-                    }
-                }
-            }
-            let mut by_use: Vec<(u32, u32)> = draw_uniform_consts.clone();
-            by_use.sort_by_key(|&(u, _)| (std::cmp::Reverse(uses.get(&u).copied().unwrap_or(0)), u));
-            let renum: HashMap<u32, u32> = by_use.iter().enumerate().map(|(k, &(u, _))| (u, 20 + k as u32)).collect();
-            for (_, m) in ubo.iter_mut() {
-                if let Ubo::Uniform(u) = m {
-                    if let Some(&n) = renum.get(&(*u as u32)) {
-                        *u = n as u8;
-                    }
-                }
-            }
-            draw_uniform_consts = by_use.iter().map(|&(u, bits)| (renum[&u], bits)).collect();
-        }
-        let mut pool: Vec<u32> = vec![0; (20 + draw_uniform_count - first_pool) as usize];
-        for &(u, bits) in draw_uniform_consts.iter() {
-            if u >= first_pool {
-                pool[(u - first_pool) as usize] = bits;
-            }
-        }
-        draw_uniform_consts.retain(|&(u, _)| u < first_pool);
-        draw_uniform_consts.push((first_pool, (1 << 16) | (128 + FRAG_POOL_SLOT)));
-        draw_uniform_consts.push((first_pool + 1, 1));
-        let mut fresh = |ubo: &mut HashMap<u32, Ubo>, u: Option<Ubo>| {
-            let v = next_vreg;
-            next_vreg += 1;
-            if let Some(u) = u {
-                ubo.insert(v, u);
-            }
-            v
-        };
-        let ctl = fresh(&mut ubo, Some(Ubo::Uniform(first_pool as u8)));
-        let one = fresh(&mut ubo, Some(Ubo::Uniform(first_pool as u8 + 1)));
-        let f = fresh(&mut ubo, Some(Ubo::Fixed(30)));
-        per_pixel_fixed.insert(f);
-        let zero = fresh(&mut ubo, None);
-        // A group of four is fetched just before its first use, so a constant holds a register
-        // only while it is needed: the pool is ordered by first use.
-        let is_pool = |v: &u32, ubo: &HashMap<u32, Ubo>| match ubo.get(v) {
-            Some(&Ubo::Uniform(u)) if u as u32 >= first_pool && *v != ctl && *v != one => Some(u as u32 - first_pool),
-            _ => None,
-        };
-        let mut first_use: Vec<Option<usize>> = vec![None; pool.len()];
-        for (at, i) in prog.iter().enumerate() {
-            for s in i.srcs.iter() {
-                if let Some(k) = is_pool(s, &ubo) {
-                    first_use[k as usize].get_or_insert(at);
-                }
-            }
-        }
-        let mut order: Vec<usize> = (0..pool.len()).filter(|&k| first_use[k].is_some()).collect();
-        order.sort_by_key(|&k| first_use[k]);
-        let mut slot_of: Vec<usize> = vec![0; pool.len()];
-        for (slot, &k) in order.iter().enumerate() {
-            slot_of[k] = slot;
-        }
-        let pool: Vec<u32> = order.iter().map(|&k| pool[k]).collect();
-        // A group is fetched before its first use, and again when it has not been used for a
-        // while (a register held across the whole shader is one the shader cannot spare), and
-        // never between a TEX and a read of its block.
-        const GAP: usize = 16;
-        let ngroups = (pool.len() + 3) / 4;
-        let mut last: Vec<Option<usize>> = vec![None; ngroups];
-        let mut events: Vec<(usize, usize)> = Vec::new();   // (before instruction, group)
-        for (at, i) in prog.iter().enumerate() {
-            for s in i.srcs.iter() {
-                let Some(k) = is_pool(s, &ubo) else { continue };
-                let g = slot_of[k as usize] / 4;
-                if last[g].map_or(true, |l| at - l > GAP) {
-                    let mut p = at;
-                    loop {
-                        let Some(t) = (0..p).rev().find(|&t| prog[t].mnem == "TEX") else { break };
-                        let d = prog[t].dst;
-                        if prog[p..].iter().any(|i| i.srcs.contains(&d)) { p = t; } else { break; }
-                    }
-                    events.push((p, g));
-                }
-                last[g] = Some(at);
-            }
-        }
-        events.sort();
-        let mut cur: Vec<[u32; 4]> = vec![[0; 4]; ngroups];
-        let mut out: Vec<BorgInstr> = vec![BorgInstr { mnem: "ISUB", dst: zero, srcs: vec![f, f], swz: vec![0, 0] }];
-        let mut e = 0;
-        for (at, mut i) in std::mem::take(&mut prog).into_iter().enumerate() {
-            while e < events.len() && events[e].0 == at {
-                let g = events[e].1;
-                let mut idx = zero;
-                for _ in 0..g {
-                    let n = fresh(&mut ubo, None);
-                    out.push(BorgInstr { mnem: "IADD", dst: n, srcs: vec![idx, one], swz: vec![0, 0] });
-                    idx = n;
-                }
-                let t = fresh(&mut ubo, None);
-                out.push(BorgInstr { mnem: "TEX", dst: t, srcs: vec![idx, zero, ctl], swz: vec![0, 0, 0] });
-                tex_dsts.insert(t);
-                for c in 0..4u8 {
-                    let r = fresh(&mut ubo, None);
-                    out.push(BorgInstr { mnem: "IOR", dst: r, srcs: vec![t, t], swz: vec![c, c] });
-                    cur[g][c as usize] = r;
-                }
-                e += 1;
-            }
-            for s in i.srcs.iter_mut() {
-                if let Some(k) = is_pool(s, &ubo) {
-                    let slot = slot_of[k as usize];
-                    *s = cur[slot / 4][slot % 4];
-                }
-            }
-            out.push(i);
-        }
-        prog = out;
-        eprintln!("borgc: constant pool of {} word(s)", pool.len());
-        #[allow(static_mut_refs)]
-        unsafe { LAST_FRAG_POOL = pool; }
-    }
         // prefix of this shader's constant registers (see const_regs
         // above) -- needed in both modes. KNOWN GAP, not fixed here: a
         // register-pressured draw-mode VERTEX shader's own general ALU
@@ -2941,6 +3077,26 @@ unsafe fn compile_nir_inner(
     }
     extra_reserved.retain(|r| !soft.contains(r));
     let alloc = regalloc(&prog, &forced, &extra_reserved, &soft, &block_len);
+    // A value without a register would be read and written as r0.
+    if let Some(i) = prog.iter().find(|i| i.dst != NO_DST && !alloc.contains_key(&i.dst)) {
+        let mut res: Vec<u8> = extra_reserved.clone();
+        res.sort();
+        res.dedup();
+        eprintln!("borgc: ERROR out of registers ({} has none; reserved {:?}), refusing to emit a wrong shader", i.mnem, res);
+        return 0;
+    }
+    if env::var("BORGC_DUMP_ALLOC").is_ok() {
+        for i in &prog {
+            let r = |v: &u32| match (alloc.get(v), ubo.get(v)) {
+                (Some(r), _) => format!("r{r}"),
+                (None, Some(Ubo::Uniform(u))) => format!("u{u}"),
+                (None, Some(Ubo::Fixed(f))) => format!("R{f}"),
+                _ => format!("?{v}"),
+            };
+            let s: Vec<String> = i.srcs.iter().zip(i.swz.iter()).map(|(v, c)| format!("{}.{}", r(v), c)).collect();
+            eprintln!("borgc:A {} {} <- {}", i.mnem, r(&i.dst), s.join(", "));
+        }
+    }
 
     // Encode the selected+allocated instructions into Borg machine words, pinning
     // shader inputs to the firmware's uniform convention. The Borg core has ONE
@@ -3077,26 +3233,6 @@ unsafe fn compile_nir_inner(
                 continue;
             }
             match ubo.get(s) {
-    // A value without a register would be read and written as r0.
-    if let Some(i) = prog.iter().find(|i| i.dst != NO_DST && !alloc.contains_key(&i.dst)) {
-        let mut res: Vec<u8> = extra_reserved.clone();
-        res.sort();
-        res.dedup();
-        eprintln!("borgc: ERROR out of registers ({} has none; reserved {:?}), refusing to emit a wrong shader", i.mnem, res);
-        return 0;
-    }
-    if env::var("BORGC_DUMP_ALLOC").is_ok() {
-        for i in &prog {
-            let r = |v: &u32| match (alloc.get(v), ubo.get(v)) {
-                (Some(r), _) => format!("r{r}"),
-                (None, Some(Ubo::Uniform(u))) => format!("u{u}"),
-                (None, Some(Ubo::Fixed(f))) => format!("R{f}"),
-                _ => format!("?{v}"),
-            };
-            let s: Vec<String> = i.srcs.iter().zip(i.swz.iter()).map(|(v, c)| format!("{}.{}", r(v), c)).collect();
-            eprintln!("borgc:A {} {} <- {}", i.mnem, r(&i.dst), s.join(", "));
-        }
-    }
                 // MVP column → uniform u(8 + column*4 + component), read in place.
                 Some(&Ubo::Mvp(rb)) => {
                     if f3 == 0 {

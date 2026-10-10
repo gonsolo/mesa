@@ -213,13 +213,14 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
 {
    const int cslot = stage_info->stage == VK_SHADER_STAGE_VERTEX_BIT ? BORGVK_STAGE_VERT :
                      stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT ? BORGVK_STAGE_FRAG : -1;
-   if (cslot >= 0) {
+   const struct borg_blend *blend = stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT ? device->blend_lower : NULL;
+   if (cslot >= 0 && !blend) {   /* the cache does not know the blend state */
       bool pntc;
       if (borgvk_shader_cache_get(stage_info, vfetch, &device->shader_blob[cslot], &pntc)) {
          if (cslot == BORGVK_STAGE_FRAG)
             device->frag_reads_pntc = pntc;
-         mesa_logi("borgvk: shader blob from the cache (%u bytes)", device->shader_blob[cslot].len);
          device->shader_blob[cslot].npool = 0;
+         mesa_logi("borgvk: shader blob from the cache (%u bytes)", device->shader_blob[cslot].len);
          return;
       }
    }
@@ -239,7 +240,7 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
       borgvk_lower_lines(nir, vfetch & 0xFFFFu);
    /* Shared with the offline borgc CLI -- see borg_nir_passes.h for why this
     * must not be a second copy. */
-   borg_lower_nir_for_borgc(nir);
+   borg_lower_nir_for_borgc_blend(nir, blend);
    device->frag_reads_pntc = stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT && reads_point_coord(nir);
 
    /* Map the Vulkan stage to a firmware shader slot. Only the vertex and

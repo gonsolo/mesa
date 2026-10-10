@@ -5,6 +5,7 @@
  * See borg_nir_passes.h for why this is shared rather than duplicated.
  */
 #include "borg_nir_passes.h"
+#include "util/format/u_format.h"
 
 #include "glsl_types.h"
 #include "nir_builder.h"
@@ -26,6 +27,8 @@ const struct spirv_to_nir_options borg_spirv_options = {
 const struct nir_shader_compiler_options borg_nir_options = {
    .lower_fdiv = true,
    .lower_fceil = true,
+   .lower_fsat = true,
+   .lower_flrp32 = true,
    .lower_ffract = true,
    .max_unroll_iterations = 32,   /* the ISA has no backward branch: constant loops are unrolled */
 };
@@ -232,8 +235,48 @@ borg_view_index_lower(nir_builder *b, nir_instr *instr, void *data)
    return nir_imm_int(b, 0);
 }
 
+static bool
+borg_blend_const_filter(const nir_instr *instr, const void *data)
+{
+   return instr->type == nir_instr_type_intrinsic &&
+          nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_blend_const_color_rgba;
+}
+
+static nir_def *
+borg_blend_const_lower(nir_builder *b, nir_instr *instr, void *data)
+{
+   const float *k = data;
+   return nir_imm_vec4(b, k[0], k[1], k[2], k[3]);
+}
+
+/* The blended colour is clamped to what the format holds (the pack block only rounds). */
+static bool
+borg_clamp_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   const enum pipe_format *format = data;
+   if (intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+   const unsigned loc = nir_intrinsic_io_semantics(intr).location;
+   if (loc != FRAG_RESULT_DATA0 && loc != FRAG_RESULT_COLOR)
+      return false;
+   const bool unorm = util_format_is_unorm(*format) || util_format_is_srgb(*format);
+   if (!unorm && !util_format_is_snorm(*format))
+      return false;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *v = intr->src[0].ssa;
+   v = unorm ? nir_fsat(b, v) : nir_fmin(b, nir_fmax(b, v, nir_imm_float(b, -1.0f)), nir_imm_float(b, 1.0f));
+   nir_src_rewrite(&intr->src[0], v);
+   return true;
+}
+
 void
 borg_lower_nir_for_borgc(struct nir_shader *nir)
+{
+   borg_lower_nir_for_borgc_blend(nir, NULL);
+}
+
+void
+borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *blend)
 {
    /* One invocation per workgroup: `shared` variables are private ones. */
    if (nir->info.stage == MESA_SHADER_COMPUTE && !nir->info.workgroup_size_variable &&
@@ -306,6 +349,13 @@ borg_lower_nir_for_borgc(struct nir_shader *nir)
    /* Varying I/O → load_input/store_output(location). vec4-slot sizing. */
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
             borg_type_size, 0);
+   if (blend && nir->info.stage == MESA_SHADER_FRAGMENT) {
+      NIR_PASS(_, nir, nir_lower_blend, &blend->opts);
+      NIR_PASS(_, nir, nir_shader_lower_instructions, borg_blend_const_filter, borg_blend_const_lower,
+               (void *)blend->konst);
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, borg_clamp_color, nir_metadata_control_flow,
+               (void *)&blend->opts.rt[0].format);
+   }
 
    /* Lower/optimize toward the Borg ISA: scalarize, then fold and lower ALU ops
     * (fsub→fadd, fdiv→fmul·frcp via lower_fdiv, fdot→fmul+ffma, constant

@@ -101,6 +101,7 @@ pub(crate) fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
         // this lane's current destination word.
         "ATTIDX" => un(0x9000_0000),
         "TLD" => un(0x9C00_0000),
+        "TLD1" => un(0x9C00_0000) | (1 << 12),   // word 1 of a RAW64 texel
         // --- Extended ISA (hardware Instructions.scala, same funct7 << 25) ---
         // LOAD/STORE address LS_BASE + (rs1 << 2): the operand is a word
         // INDEX, not a byte address (words are the natural unit, and the

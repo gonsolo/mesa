@@ -8,6 +8,8 @@
  * pipeline creation and binding succeed. The actual draw is realized at submit
  * time by shipping the MVP to the FPGA.
  */
+#include "vk_blend.h"
+#include "borg_nir_passes.h"
 #include "borgvk_private.h"
 #include "vk_render_pass.h"
 
@@ -93,6 +95,36 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
          ri && ri->colorAttachmentCount && borgvk_sim_half1(ri->pColorAttachmentFormats[0]) ? 0x28 :
          ri && ri->colorAttachmentCount && borgvk_sim_half2(ri->pColorAttachmentFormats[0]) ? 8 :
          ri && ri->colorAttachmentCount && vk_format_has_alpha(ri->pColorAttachmentFormats[0]) ? 4 : 0;   /* 4: alpha is an output */
+      /* A RAW attachment has no fixed-function blend or write mask: the shader does both. */
+      struct borg_blend blend = { 0 };
+      device->blend_lower = NULL;
+      {
+         const VkPipelineRasterizationStateCreateInfo *rz = pCreateInfos[i].pRasterizationState;
+         const VkPipelineColorBlendStateCreateInfo *cb = rz && rz->rasterizerDiscardEnable ? NULL : pCreateInfos[i].pColorBlendState;
+         const VkFormat f0 = ri && ri->colorAttachmentCount ? ri->pColorAttachmentFormats[0] : VK_FORMAT_UNDEFINED;
+         const bool fixed = f0 == VK_FORMAT_R8G8B8A8_UNORM || f0 == VK_FORMAT_B8G8R8A8_UNORM;
+         if (cb && cb->attachmentCount >= 1 && cb->pAttachments && !mrt && f0 != VK_FORMAT_UNDEFINED && !fixed) {
+            const VkPipelineColorBlendAttachmentState *a = &cb->pAttachments[0];
+            const bool enable = a->blendEnable && !vk_format_is_int(f0);
+            if (enable || (a->colorWriteMask & 0xF) != 0xF) {
+               nir_lower_blend_rt *rt = &blend.opts.rt[0];
+               rt->format = vk_format_to_pipe_format(f0);
+               rt->colormask = a->colorWriteMask & 0xF;
+               rt->rgb.func = enable ? vk_blend_op_to_pipe(a->colorBlendOp) : PIPE_BLEND_ADD;
+               rt->rgb.src_factor = enable ? vk_blend_factor_to_pipe(a->srcColorBlendFactor) : PIPE_BLENDFACTOR_ONE;
+               rt->rgb.dst_factor = enable ? vk_blend_factor_to_pipe(a->dstColorBlendFactor) : PIPE_BLENDFACTOR_ZERO;
+               rt->alpha.func = enable ? vk_blend_op_to_pipe(a->alphaBlendOp) : PIPE_BLEND_ADD;
+               rt->alpha.src_factor = enable ? vk_blend_factor_to_pipe(a->srcAlphaBlendFactor) : PIPE_BLENDFACTOR_ONE;
+               rt->alpha.dst_factor = enable ? vk_blend_factor_to_pipe(a->dstAlphaBlendFactor) : PIPE_BLENDFACTOR_ZERO;
+               for (unsigned k = 1; k < 8; k++)
+                  blend.opts.rt[k] = (nir_lower_blend_rt){ .format = PIPE_FORMAT_NONE, .colormask = 0xF,
+                     .rgb = { PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO },
+                     .alpha = { PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO } };
+               memcpy(blend.konst, cb->blendConstants, sizeof(blend.konst));
+               device->blend_lower = &blend;
+            }
+         }
+      }
       for (uint32_t s = 0; s < pCreateInfos[i].stageCount; s++)
          borgvk_compile_stage(device, pCreateInfos[i].pStages[s].stage == VK_SHADER_STAGE_FRAGMENT_BIT ? frag_opt : vfetch,
                               &pCreateInfos[i].pStages[s]);
@@ -121,6 +153,7 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
          }
       }
 
+      device->blend_lower = NULL;
       result = borgvk_create_pipeline(device, pAllocator, &pPipelines[i]);
       if (result != VK_SUCCESS) {
          pPipelines[i] = VK_NULL_HANDLE;
@@ -175,6 +208,7 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
       if (lines)
          device->state_reg[4] &= ~3u;
       device->state_valid = true;
+      pl->srgb_table = blend.opts.rt[0].format != PIPE_FORMAT_NONE && util_format_is_srgb(blend.opts.rt[0].format);
       pl->blend_cfg = device->blend_cfg;
       pl->blend_const = device->blend_const;
       memcpy(pl->state_reg, device->state_reg, sizeof(pl->state_reg));

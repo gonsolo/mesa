@@ -17,6 +17,7 @@
 #define BORG_NIR_PASSES_H
 
 #include "nir.h"
+#include "nir_lower_blend.h"
 #include "spirv/nir_spirv.h"
 
 #ifdef __cplusplus
@@ -37,6 +38,14 @@ extern const struct nir_shader_compiler_options borg_nir_options;
  * SPIR-V → NIR. */
 void borg_lower_nir_for_borgc(struct nir_shader *nir);
 
+/* Blending in the fragment shader (docs/B3_colour_formats.md): the attachment's blend state for
+ * nir_lower_blend, and the blend constants. */
+struct borg_blend {
+   nir_lower_blend_options opts;
+   float konst[4];
+};
+void borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *blend);
+
 /* Implemented in Rust (src/borg/compiler/lib.rs). Writes up to buf_cap bytes
  * into out_buf and sets *out_len to the true blob size, so *out_len > buf_cap
  * signals an undersized buffer; returns the instruction count. */
@@ -45,6 +54,8 @@ void borg_lower_nir_for_borgc(struct nir_shader *nir);
 uint32_t borgc_compile_nir(struct nir_shader *nir, uint8_t *out_buf,
                            uint32_t buf_cap, uint32_t *out_len, uint32_t vfetch);
 uint32_t borgc_selftest(void);
+/* The constant pool of the fragment shader compiled last: words fetched from vertex slot 40. */
+uint32_t borgc_last_frag_pool(uint32_t *out, uint32_t cap);
 
 /* Compute: program words, (register, value) presets and LocalSize. 0 on success. */
 uint32_t borgc_compile_compute(struct nir_shader *nir,
@@ -54,8 +65,6 @@ uint32_t borgc_compile_compute(struct nir_shader *nir,
 
 #ifdef __cplusplus
 }
-/* The constant pool of the fragment shader compiled last: words fetched from vertex slot 40. */
-uint32_t borgc_last_frag_pool(uint32_t *out, uint32_t cap);
 #endif
 
 #endif /* BORG_NIR_PASSES_H */
