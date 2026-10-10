@@ -1770,7 +1770,7 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
    const char *direct = getenv("BORGVK_SIM_DIRECT");
    if (!pl || !pl->cs_ok || !gx || !gy || !gz || !direct || !direct[0])
       return;
-   struct borgvk_descriptor_set *set = cmd->desc_set;
+   struct borgvk_descriptor_set *set = cmd->cs_desc_set;
 
    /* wb: copy the window back to the app's buffer afterwards.  A texel buffer is decoded into a
     * private array (the canonical 4-word texel the compiler reads, see borg_nir_passes.c); the
@@ -1831,7 +1831,7 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
       }
       if (!buf || !buf->mem || !buf->mem->map)
          continue;
-      VkDeviceSize boff = set->offsets[b] + cmd->dyn_off[b];
+      VkDeviceSize boff = set->offsets[b] + cmd->cs_dyn_off[b];
       VkDeviceSize avail = buf->vk.size > boff ? buf->vk.size - boff : 0;
       VkDeviceSize size = set->ranges[b] == VK_WHOLE_SIZE || set->ranges[b] > avail ? avail : set->ranges[b];
       if (size > BORGVK_CS_SLOT_BYTES)
@@ -2010,12 +2010,17 @@ borgvk_CmdBindDescriptorSets(VkCommandBuffer commandBuffer, VkPipelineBindPoint 
    if (descriptorSetCount > 0 && pDescriptorSets) {
       VK_FROM_HANDLE(borgvk_descriptor_set, set, pDescriptorSets[0]);
       if (set) {
-         cmd->desc_set = set;
-         memset(cmd->dyn_off, 0, sizeof(cmd->dyn_off));
+         const bool cs = pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE;
+         VkDeviceSize *dyn = cs ? cmd->cs_dyn_off : cmd->dyn_off;
+         if (cs)
+            cmd->cs_desc_set = set;
+         else
+            cmd->desc_set = set;
+         memset(dyn, 0, sizeof(cmd->dyn_off));
          uint32_t k = 0;
          for (uint32_t b = 0; b < BORGVK_MAX_BINDINGS && k < dynamicOffsetCount; b++)
             if (set->dyn_mask & (1ull << b))
-               cmd->dyn_off[b] = pDynamicOffsets[k++];
+               dyn[b] = pDynamicOffsets[k++];
       }
    }
 }
