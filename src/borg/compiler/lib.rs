@@ -19,10 +19,10 @@ use compiler::bindings::*;
 use compiler::nir::AsDef;
 use config::Flags;
 use encode::{emit_blob, encode, encode_fattr, encode_sout};
-use isel::{borg_isel, resolve_vm};
+use isel::resolve_vm;
 use opt::{classify_uniform, dce, fuse_fmadd, schedule_for_pressure};
 use regalloc::regalloc;
-use state::{Cx, DRAW_VS_CONST_U0, DRAW_VS_CONST_WORDS};
+use state::Cx;
 use survey::{survey, Survey};
 use std::env;
 
@@ -258,7 +258,6 @@ unsafe fn compile_nir_inner(
         &[17, 18, 19, 23]
     };
     let mut cx = Cx::new(regs, draw_mode, is_vertex, is_fragment, flags);
-    const VARYING_SLOT_VAR0: u32 = 32;
     const VARYING_SLOT_POS: u32 = 0;
 
     let frag_alpha = env::var("BORGC_FRAG_ALPHA").is_ok() || (is_fragment && flags.alpha_output());
