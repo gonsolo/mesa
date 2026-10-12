@@ -16,6 +16,7 @@
 #![allow(non_upper_case_globals)]
 
 mod compute;
+mod config;
 mod corpus;
 mod encode;
 mod isel;
@@ -24,6 +25,7 @@ mod regalloc;
 
 use compiler::bindings::*;
 use compiler::nir::AsDef;
+use config::Flags;
 use encode::{emit_blob, encode, encode_fattr, encode_sout};
 use isel::{borg_isel, resolve_vm};
 use opt::{classify_uniform, dce, fuse_fmadd, schedule_for_pressure};
@@ -43,7 +45,8 @@ use std::env;
 /// A packed colour attachment (fragment option bit 0x10): the kind (0 UNORM, 1 SNORM, 2 SRGB, 3 the
 /// bits as they are) and, per channel, (component 0..3 = R G B A, first bit, bits) within the texel.
 /// Size code 3 selects a format with uneven channels by number (borgvk_sim.c, packed_info).
-fn packed_layout(vfetch: u32) -> (u32, Vec<(usize, u32, u32)>) {
+fn packed_layout(flags: Flags) -> (u32, Vec<(usize, u32, u32)>) {
+    let vfetch = flags.0;
     let kind = (vfetch >> 16) & 7;
     if (vfetch >> 19) & 3 == 3 {
         let id = kind | ((vfetch >> 21) & 7) << 3;
@@ -306,7 +309,7 @@ pub unsafe extern "C" fn borgc_compile_nir(
         None
     };
     let ret = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        compile_nir_inner(nir, out_buf, buf_cap, out_len, vfetch)
+        compile_nir_inner(nir, out_buf, buf_cap, out_len, Flags(vfetch))
     }))
     .unwrap_or_else(|_| {
         if !out_len.is_null() {
@@ -331,7 +334,7 @@ unsafe fn compile_nir_inner(
     out_buf: *mut u8,
     buf_cap: u32,
     out_len: *mut u32,
-    vfetch: u32,
+    flags: Flags,
 ) -> u32 {
     if !out_len.is_null() {
         *out_len = 0;
@@ -660,7 +663,7 @@ unsafe fn compile_nir_inner(
     // Moved up from the legacy I/O pass below so the draw-mode store_output
     // handling (in the main walk, ahead of that pass) can read it too; same
     // value, same meaning, in both modes.
-    let frag_alpha = env::var("BORGC_FRAG_ALPHA").is_ok() || (stage == 4 && vfetch & 4 != 0);
+    let frag_alpha = env::var("BORGC_FRAG_ALPHA").is_ok() || (stage == 4 && flags.alpha_output());
     // gl_VertexIndex's SSA def, once seen -- the index every vertex-pulling
     // load_ubo (position[], attr[]) is computed from. Always seen before any
     // load_ubo that depends on it: NIR/SPIR-V evaluates gl_VertexIndex where
@@ -1251,7 +1254,7 @@ unsafe fn compile_nir_inner(
                         let loc = if is_pc { 25 } else { intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F };
                         // gl_PointCoord (VARYING_SLOT_PNTC): the vertex stage's extra varyings, whose first index
                         // the driver passes in the option word's top byte.
-                        let base_index = if loc == 25 { vfetch >> 24 } else { 4 * loc.wrapping_sub(VARYING_SLOT_VAR0) };
+                        let base_index = if loc == 25 { flags.pntc_base() } else { 4 * loc.wrapping_sub(VARYING_SLOT_VAR0) };
                         let bary = [5u8, 6, 7].map(|r| {
                             let v = next_vreg; next_vreg += 1;
                             ubo.insert(v, Ubo::Fixed(r));
@@ -1556,7 +1559,7 @@ unsafe fn compile_nir_inner(
                         // BorgInstr of its own, which load_vertex_id does not).
                         ubo.insert(intr.def.index, Ubo::Fixed(30));
                         vertex_id_def = Some(intr.def.index);
-                    } else if draw_mode && stage == 0 && vfetch & 0x8000_0000 != 0
+                    } else if draw_mode && stage == 0 && flags.fetching()
                               && intr.intrinsic == nir_intrinsic_load_input {
                         // Vertex input as a typed fetch (docs/B1_geometry_front_end.md, "Vertex
                         // input"): attribute L is texture slot 128 + L, a 4096-wide linear image
@@ -1579,7 +1582,7 @@ unsafe fn compile_nir_inner(
                             vs_const_vreg!(ctl_bits)
                         };
                         // The index register: r30 (VertexIndex) or r31 (InstanceIndex).
-                        let idx_reg = if loc < 16 && vfetch >> loc & 1 != 0 { 31 } else { 30 };
+                        let idx_reg = if loc < 16 && flags.instanced(loc) { 31 } else { 30 };
                         let idx = next_vreg; next_vreg += 1;
                         ubo.insert(idx, Ubo::Fixed(idx_reg));
                         // The element index i is texel (i & 4095, i >> 12) of a 4096-wide image.
@@ -1806,12 +1809,12 @@ unsafe fn compile_nir_inner(
                                 draw_pos_out[c] = Some(v);
                                 draw_out_roots.push(v.0);
                             }
-                        } else if stage == 4 && vfetch & 0x100 != 0 && (4..8).contains(&loc) {
+                        } else if stage == 4 && flags.multi_target() && (4..8).contains(&loc) {
                             // Several colour attachments: FRAG_RESULT_DATA0.. , one value per attachment.
                             // A constant (a window word) is copied into a register where it is packed.
                             mrt_out[(loc - 4) as usize] = Some(comps[0]);
                         } else if stage == 4 {
-                            let ncomp2 = if frag_alpha || vfetch & 1 != 0 { 4 } else { 3 };
+                            let ncomp2 = if frag_alpha || flags.bytes_packed() { 4 } else { 3 };
                             for (c, &v) in comps.iter().enumerate().take(ncomp2) {
                                 draw_frag_out[c] = Some(v);
                                 draw_out_roots.push(v.0);
@@ -1863,9 +1866,9 @@ unsafe fn compile_nir_inner(
                             d
                         };
                         // (kind, bits per channel, channels, swap): the generic packed description, or R8_UNORM.
-                        let desc = if vfetch & 0x10 != 0 && vfetch & 0x100 == 0 {
-                            Some(packed_layout(vfetch))
-                        } else if vfetch & 2 != 0 {
+                        let desc = if flags.packed() && !flags.multi_target() {
+                            Some(packed_layout(flags))
+                        } else if flags.r8_unorm() {
                             Some((0, vec![(0usize, 0u32, 8u32)]))
                         } else {
                             None
@@ -1921,11 +1924,11 @@ unsafe fn compile_nir_inner(
                                 }).collect();
                                 vec_map.insert(intr.def.index, comps);
                             }
-                            _ if vfetch & 8 != 0 => {
+                            _ if flags.half() => {
                                 // Half floats: R, G in word 0, B, A in word 1. A channel's bits become the
                                 // float's: exponent rebased by 112, an infinity or NaN by another 112, and a
                                 // denormal is its mantissa times 2^-24.
-                                let nch = if vfetch & 0x20 != 0 { 1 } else if vfetch & 0x40 != 0 { 3 } else if vfetch & 0x80 != 0 { 4 } else { 2 };
+                                let nch = flags.half_channels();
                                 let w0 = op("TLD", vec![], &mut prog, &mut next_vreg);
                                 let w1 = if nch > 2 { op("TLD1", vec![], &mut prog, &mut next_vreg) } else { w0 };
                                 let zero = op("ISUB", vec![w0, w0], &mut prog, &mut next_vreg);
@@ -2308,7 +2311,7 @@ unsafe fn compile_nir_inner(
         eprintln!("borgc: ERROR unhandled NIR ops, refusing to emit a wrong shader: {}", skipped.join(", "));
         return 0;
     }
-    if draw_mode && stage == 0 && vfetch & 0x4000_0000 != 0 {
+    if draw_mode && stage == 0 && flags.point_quads() {
         // Point expansion: this vertex is a corner of the point's quad; the corner's clip-space
         // offset (slot 16: x y, then the point coordinate u v), times gl_PointSize, times w, moves it from the point's centre.
         let ctl_bits = (1u32 << 16) | (128 + 16);
@@ -2337,7 +2340,7 @@ unsafe fn compile_nir_inner(
             d[k] = m;
         }
         // gl_PointCoord rides as two more varyings, after the shader's own.
-        if vfetch & 0x2000_0000 != 0 {
+        if flags.pntc_varyings() {
             let base = prog.iter().filter(|i| i.mnem == "SOUT").map(|i| i.swz[0] as u32 + 1).max().unwrap_or(0);
             assert!(base + 2 <= 255, "borgc: no varying slot left for the point coordinate");
             for k in 0..2u32 {
@@ -2404,10 +2407,10 @@ unsafe fn compile_nir_inner(
             }
         }
     }
-    if draw_mode && stage == 4 && vfetch & 0x100 != 0 {
+    if draw_mode && stage == 4 && flags.multi_target() {
         // Up to four R8 attachments, each rendered in its own pass (ATTIDX): the byte this pass stores is
         // chosen from the per-attachment values; one the shader never wrote keeps its own (TLD).
-        let n = ((vfetch >> 9) & 7) as usize + 1;
+        let n = flags.target_count();
         let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
             let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
                 assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
@@ -2426,7 +2429,7 @@ unsafe fn compile_nir_inner(
             prog.push(BorgInstr { mnem, dst: d, srcs, swz });
             d
         };
-        let class = |k: usize| (vfetch >> (12 + 3 * k)) & 7;
+        let class = |k: usize| flags.target_class(k);
         let cff = win(0xFF, &mut ubo, &mut next_vreg);
         // x + 0 in integer arithmetic copies a window word bit for bit (FMOV would flush a denormal).
         let idx = op("ATTIDX", vec![], &mut prog, &mut next_vreg);
@@ -2486,7 +2489,7 @@ unsafe fn compile_nir_inner(
         draw_frag_out = [Some((acc, 0)), None, None, None];
         out_roots.push(acc);
     }
-    if draw_mode && stage == 4 && vfetch & 2 != 0 && draw_frag_out[0].is_some() {
+    if draw_mode && stage == 4 && flags.r8_unorm() && draw_frag_out[0].is_some() {
         // R8_UNORM (RAW8): r26 = round(r * 255) & 0xFF.
         let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
             let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
@@ -2522,11 +2525,11 @@ unsafe fn compile_nir_inner(
         draw_frag_out = [Some((w, 0)), None, None, None];
         out_roots.push(w);
     }
-    if draw_mode && stage == 4 && vfetch & 0x10 != 0 && vfetch & 0x100 == 0 && draw_frag_out[0].is_some() {
+    if draw_mode && stage == 4 && flags.packed() && !flags.multi_target() && draw_frag_out[0].is_some() {
         // Packed colour (RAW8 .. RAW128): n channels of 8, 16 or 32 bits, kind 0 UNORM, 1 SNORM, 2 SRGB, 3 the
         // bits as they are; `swap` reads the components as B, G, R. Channel k fills bits k*size of the texel:
         // word w of the texel is r26 (w = 0), r27 (w = 1); a RAW128 texel renders in two slices of two words.
-        let (kind, layout) = packed_layout(vfetch);
+        let (kind, layout) = packed_layout(flags);
         let total_bits = layout.iter().map(|&(_, sh, b)| sh + b).max().unwrap_or(0);
         let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
             let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
@@ -2621,7 +2624,7 @@ unsafe fn compile_nir_inner(
         }
         draw_frag_out = out;
     }
-    if draw_mode && stage == 4 && vfetch & 8 != 0 && draw_frag_out[0].is_some() {
+    if draw_mode && stage == 4 && flags.half() && draw_frag_out[0].is_some() {
         // R16G16_SFLOAT (RAW32; with bit 0x20 R16_SFLOAT, RAW16): r26 = half(r) | half(g) << 16 with integer ops (round to nearest even,
         // NaN to 0x7E00); a branch-free select between the denormal, normal and overflow results.
         let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
@@ -2653,7 +2656,7 @@ unsafe fn compile_nir_inner(
             (ins("FMOV", &[(x0, x0c)], &mut prog, &mut next_vreg), 0u8)
         } else { (x0, x0c) };
         let zero = ins("ISUB", &[first, first], &mut prog, &mut next_vreg);
-        let nch = if vfetch & 0x20 != 0 { 1 } else if vfetch & 0x40 != 0 { 3 } else if vfetch & 0x80 != 0 { 4 } else { 2 };
+        let nch = flags.half_channels();
         // The small integers are constants like the rest: a register each for the whole block
         // was more than a blending shader has (the pool pass keeps the busiest in the window).
         let mut pw: [Option<u32>; 2] = [None; 2];
@@ -2708,7 +2711,7 @@ unsafe fn compile_nir_inner(
             out_roots.push(*p);
         }
     }
-    if draw_mode && stage == 4 && vfetch & 1 != 0 && draw_frag_out[3].is_some() {
+    if draw_mode && stage == 4 && flags.bytes_packed() && draw_frag_out[3].is_some() {
         // Byte-packed integer colour (R8G8B8A8_UINT/SINT, RAW32): r26 = c0 | c1<<8 | c2<<16 | c3<<24.
         let (mut p, mut pc) = draw_frag_out[3].unwrap();
         let eight = *frag_window_by_bits.entry(8).or_insert_with(|| {
