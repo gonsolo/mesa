@@ -1,17 +1,5 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
-//
-// borgc — the Borg GPU shader compiler (Rust), called from the borgvk Vulkan
-// driver. It lowers Mesa NIR to Borg ISA (FADD/FMUL/FMADD/FNEG/FSTEP/FRCP/TEX
-// and friends, on the FP32 shader datapath) and emits the .borg blob the
-// firmware loads. Modeled on
-// Mesa's NAK (src/nouveau/compiler/nak).
-//
-// Status: SPIR-V→NIR→borgc is live. This pass classifies every NIR instruction
-// against the Borg ISA — a coverage report that drives instruction selection.
-// The arithmetic core (fmul/ffma → FMUL/FMADD) selects directly; the open work
-// is lowering the UBO/I-O intrinsics to the firmware's uniform model and real
-// register allocation + .borg emission.
 
 #![allow(non_upper_case_globals)]
 
@@ -37,19 +25,6 @@ use state::{Cx, DRAW_VS_CONST_U0, DRAW_VS_CONST_WORDS};
 use survey::{survey, Survey};
 use std::env;
 
-/// One selected Borg instruction in virtual-register form (pre-register-alloc).
-/// `dst`/`srcs` are NIR SSA indices used directly as virtual registers; `swz` is
-/// the scalar component each source reads from its (possibly vec4) def — needed to
-/// pin a uniform/attribute load to the right column/component.
-/// `BorgInstr::dst` for an instruction that writes no register.
-///
-/// The execution-mask ops and STORE have no destination -- their rd field
-/// either is unused or carries something else entirely. Without a sentinel
-/// they would look like definitions of vreg 0 to the register allocator,
-/// which would then keep a register alive for a value nothing produces.
-/// A packed colour attachment (fragment option bit 0x10): the kind (0 UNORM, 1 SNORM, 2 SRGB, 3 the
-/// bits as they are) and, per channel, (component 0..3 = R G B A, first bit, bits) within the texel.
-/// Size code 3 selects a format with uneven channels by number (borgvk_sim.c, packed_info).
 fn packed_layout(flags: Flags) -> (u32, Vec<(usize, u32, u32)>) {
     let vfetch = flags.0;
     let kind = (vfetch >> 16) & 7;
@@ -79,11 +54,9 @@ fn packed_layout(flags: Flags) -> (u32, Vec<(usize, u32, u32)>) {
 
 /// Window words a fragment shader may ask for before the pool pass sorts them out.
 const FRAG_CONST_MAX: u32 = 11 + 64;
-/// The vertex-attribute slot the fragment constant pool is fetched from (texture slot 128 + this).
 const FRAG_POOL_SLOT: u32 = 40;
 static mut LAST_FRAG_POOL: Vec<u32> = Vec::new();
 
-/// The constant pool of the fragment shader compiled last (empty when it fits the window).
 #[no_mangle]
 pub unsafe extern "C" fn borgc_last_frag_pool(out: *mut u32, cap: u32) -> u32 {
     #[allow(static_mut_refs)]
@@ -97,13 +70,6 @@ pub unsafe extern "C" fn borgc_last_frag_pool(out: *mut u32, cap: u32) -> u32 {
 
 pub(crate) const NO_DST: u32 = u32::MAX;
 
-/// A control-flow instruction to splice in before a given NIR block.
-///
-/// NIR's `if` maps onto the mask ops with no branching at all, and every
-/// marker happens to land *before* some block: EXPUSH before the first `then`
-/// block, EXELSE before the first `else` block, EXPOP before the block
-/// following the `if`. That symmetry is why this is a single "before" map
-/// rather than a pair of before/after lists.
 pub(crate) struct CfMark {
     pub(crate) mnem: &'static str,
     /// Condition def index, for EXPUSH only.
@@ -117,44 +83,6 @@ pub(crate) struct BorgInstr {
     pub(crate) swz: Vec<u8>,
 }
 
-/// Walk the NIR control-flow tree and record where mask instructions belong.
-///
-/// The instruction-selection walk below iterates blocks FLAT, in layout order,
-/// which is exactly the order this tree linearizes to -- so the two can be
-/// matched up by block pointer without restructuring selection at all. That
-/// matters: selection is the part with all the operand and swizzle handling,
-/// and threading control flow through it would have meant rewriting it.
-///
-/// Note what the flat walk does WITHOUT this: it emits the `then` and `else`
-/// bodies one after the other with nothing to distinguish them, so both
-/// execute unconditionally. Any shader whose control flow survived NIR's
-/// flattening passes was already being miscompiled; this is what fixes it.
-///
-/// Loops are deliberately not handled -- see the caller, which refuses them
-/// rather than emitting a body that runs exactly once.
-/// Draw front end only (docs/B1_geometry_front_end.md): decompose a
-/// dynamically-indexed load_ubo's byte offset into `(word-aligned base,
-/// per-vertex word stride)`, recognizing `const + (gl_VertexIndex << shift)`
-/// -- what NIR's own optimizer canonicalizes a UBO array indexed by
-/// gl_VertexIndex to (verified against real cube.vert output, BORGC_DUMP_NIR)
-/// -- through `resolve_vm` (so any mov/vecN wrapping already selected earlier
-/// in the walk is transparent) and `prod`/`consts` (populated by that same
-/// generic ALU selection, not a second walk of raw NIR).
-///
-/// A `load_vulkan_descriptor` result is treated as contributing 0 wherever it
-/// appears in the offset, by construction rather than by proving it from the
-/// IR: Borg has one binding per resource, no descriptor arrays, no
-/// VK_DESCRIPTOR_TYPE_*_DYNAMIC (borgvk_descriptor_set.c never reads
-/// pDynamicOffsets), so it never actually varies. (An earlier version of this
-/// made that true at the NIR level, constant-folding the descriptor to a real
-/// zero before this function ever ran -- which spuriously turned OTHER
-/// multi-component load_consts the folding touched into "shader constants"
-/// this compiler pins to GPRs, exhausting the const-register budget on a
-/// shader that uses none. Recognizing the descriptor here instead has no such
-/// side effect.)
-///
-/// Anything else is reported, not guessed at: the caller drops the shader
-/// rather than emit an address for an offset shape this does not recognize.
 fn decompose_vertex_offset(
     vec_map: &std::collections::HashMap<u32, Vec<(u32, u8)>>,
     prod: &std::collections::HashMap<u32, (nir_op, Vec<(u32, u8)>)>,
@@ -163,14 +91,6 @@ fn decompose_vertex_offset(
     vertex_id_def: u32,
     offset_def: u32,
 ) -> Option<(i32, i32)> {
-    // Sum of `d`'s additive terms as (constant, dynamic stride if one leaf was
-    // gl_VertexIndex, optionally shifted). nir_lower_explicit_io's
-    // vec2_index_32bit_offset format adds the descriptor's own dynamic-offset
-    // component into EVERY load_ubo address, not just a dynamically-indexed
-    // one -- range_base=0's own offset in cube.vert (MVP column 0) is exactly
-    // `descriptor.z` alone, no visible "+0" left for nir_opt_algebraic to have
-    // simplified away -- so this has to walk the WHOLE additive tree, not
-    // assume a single flat `const + dynamic` split.
     fn walk(
         vec_map: &std::collections::HashMap<u32, Vec<(u32, u8)>>,
         prod: &std::collections::HashMap<u32, (nir_op, Vec<(u32, u8)>)>,
@@ -245,39 +165,18 @@ pub(crate) unsafe fn collect_cf_marks(
             collect_cf_marks(nif.iter_then_list(), marks, unsupported);
             collect_cf_marks(nif.iter_else_list(), marks, unsupported);
         } else if let Some(nloop) = node.as_loop() {
-            // A divergent loop needs the mask PLUS a way to ask "is any lane
-            // still active" to decide the backward branch, and that
-            // instruction does not exist yet. Emitting the body unmasked
-            // would run every iteration for every lane.
             unsupported.push("loop");
             collect_cf_marks(nloop.iter_body(), marks, unsupported);
         }
     }
 }
 
-/// How a load_ubo def maps onto the firmware's uniform register convention
-/// (cube.c `vktexcube_vs_uniform` layout — see the I/O map below). Carried per
-/// def index so the encoder can pin each operand that reads it.
 #[derive(Clone, Copy, PartialEq)]
 enum Ubo {
-    /// MVP column at this byte range_base (column = range_base/16). Component `c`
-    /// → uniform u(8 + column*4 + c). Read directly as a funct3 uniform operand.
     Mvp(i32),
-    /// position[gl_VertexIndex] vec4. Component `c` → uniform u(c) (firmware
-    /// pre-fetches the current vertex into u0..u2). Pre-loaded into a GPR.
     Pos,
-    /// Vertex attribute (texcoord). Component `c` → uniform u(6+c): the
-    /// sequencer DMA pre-loads the per-vertex descriptor words [x,y,z,r,g,b,u,v]
-    /// into uniform[0..7] before running the vertex shader, so u6=U and u7=V.
-    /// In practice, vertex shader `store_output(VAR0)` is DCE'd (the sequencer
-    /// snoops UV from the DMA stream directly, bypassing the vertex shader), so
-    /// Attr values are eliminated before encoding and this path is latent.
     Attr,
-    /// A fragment uniform read directly at this physical index via funct3
-    /// (inv_area, per-vertex varyings staged by the sequencer at u12..u30).
     Uniform(u8),
-    /// A value that lives in a fixed physical register, not allocated (the
-    /// fragment edge-function attributes e0/e1/e2 in r0/r1/r2).
     Fixed(u8),
 }
 
@@ -287,16 +186,6 @@ pub extern "C" fn borgc_selftest() -> u32 {
     0xB0_06
 }
 
-/// Compile the app's shader (NIR) to a Borg-ISA `.borg` blob and return it to the
-/// caller. The blob (firmware `spirb_parse` format) is written into `out_buf` (up
-/// to `buf_cap` bytes); `*out_len` is set to the blob's true size so the caller can
-/// detect an undersized buffer (`*out_len > buf_cap` ⇒ nothing copied). Any of
-/// `out_buf`/`out_len` may be null to skip blob return (diagnostics-only, as before).
-/// Returns the instruction count (0 on null/empty shader).
-///
-/// # Safety
-/// `nir` must be a valid `nir_shader` pointer from the Mesa runtime (or null).
-/// `out_buf` must point to at least `buf_cap` writable bytes (or be null).
 #[no_mangle]
 pub unsafe extern "C" fn borgc_compile_nir(
     nir: *mut nir_shader,
@@ -305,9 +194,6 @@ pub unsafe extern "C" fn borgc_compile_nir(
     out_len: *mut u32,
     vfetch: u32,
 ) -> u32 {
-    // A shader borgc cannot handle trips an assert; unwinding out of an extern "C"
-    // function aborts the whole process, so turn it into "no blob" (the same outcome
-    // as any other unsupported shader).
     let key = if !nir.is_null() && env::var("BORGC_CORPUS_DIR").is_ok() {
         (*nir).to_string().ok().map(|s| corpus::key(&s, vfetch))
     } else {
@@ -362,72 +248,7 @@ unsafe fn compile_nir_inner(
 
     use std::collections::HashMap;
 
-    // Vector-construction / move resolution. mov and vecN don't become Borg ops;
-    // instead they define, per result component, which (scalar def, component) it
-    // really reads. cube.c's matrix multiply threads its accumulator through vec4
-    // builds and swizzle reads (e.g. `%67 = fadd(%66, %65.x)` where %65 = vec4(...)),
-    // so an operand must be resolved through these to its true scalar producer —
-    // otherwise the data flow is severed and accumulators read garbage.
-    // Single in-order selection walk. NIR is in SSA + topological order, so when we
-    // reach an instruction all its sources are already in sel.vec_map/sel.prog. Each
-    // value-producing op either (a) registers a sel.vec_map entry (mov/vecN and the
-    // vector-wide intrinsics, which resolve away component-wise) or (b) emits scalar
-    // Borg ops. Operands are resolved through sel.vec_map to their true scalar producer.
-    // Synthetic results from expansions (ddx/ddy/fmax/tex/interp) use fresh vregs
-    // above any NIR ssa index.
-    // Phi renames, collected during the selection walk and applied after it
-    // (see the comment at the collection site).
-    // Operand classification (populated here for fragment uniforms/attrs, and in the
-    // I/O pass below for the vertex's load_ubo).
-    // Barycentric cx.weights w_i = e_i·inv_area, emitted once on the first load_input.
-    // e0/e1/e2 (edge-function attrs r0/r1/r2) are Ubo::Fixed too, but unlike the
-    // *other* Ubo::Fixed use (true shader constants pinned to r17+, e.g. lightDir),
-    // they vary per pixel — exclude them from the uniformity classification's
-    // "is this a per-triangle-constant root" test below.
-    // Scalar load_const f32 bits (for the sRGB idiom match) and a producer map
-    // (alu def → its op + resolved scalar srcs) for recognising the bcsel tree.
-    // TEX results occupy 4 consecutive regs (rd..rd+3 = R, G, B, A).
-    // FATTR results occupy 3 consecutive regs (rd..rd+2 = per-vertex v0/v1/v2),
-    // same hardware shape as TEX's 4-wide result -- see cx.tex_dsts's resolve-time
-    // (alloc[def] + component) handling below, mirrored for this set.
-    // TEX's control word (docs/B2_texture_unit.md), created on first use. Word 0
-    // is texture 0, sampler 0, a plain sample with the LOD taken from the quad,
-    // no offsets -- all a shader with one sampler2D needs. It is built in the
-    // shader rather than pinned: FSTEP of -r30 is exactly +0 (r30 >= 0 in every
-    // stage), so it costs two instructions and no constant register.
-    // Distinct texture derefs seen, to say so when a shader samples more than
-    // one: every sample uses descriptor 0 until borgc maps bindings to indices.
-    // Shader constants (cube.frag's lightDir, push-constant word indices) live in
-    // GPRs the firmware writes ONCE before the autonomous render, so they must
-    // survive every stage that runs before the fragment on every triangle and
-    // pixel: the vertex shaders (hand + borgc: r0-9, r24-26), the setup shader
-    // (r0-16), the rasterizer ROM (r0-4), and the fragment's own fixed blocks
-    // (r0-2 edges, r20-23 TEX, r24 alpha, r25 kill, r26-29 outputs, r30/31
-    // pixel centre). That leaves r17-19, plus r23 in a shader that never
-    // samples: TEX writes rd..rd+3, so with rd = 20 it overwrites r23. Handing
-    // out r20 -- the next register after r19 -- once put fge's 1.0 where the
-    // texel lands. Uniforms are no alternative: rast(u0-11) + frag
-    // varyings(u12-30) fill 31 of 32. Records (reg, value), value a datapath
-    // float or a raw integer.
-    // Vertex shaders have none of the fragment-only reservations below (edge
-    // attrs r0-2, TEX r20-23, alpha r24, kill r25) -- only r0-4 (gl_Position
-    // output + the perspective-divide epilogue's scratch, both via `forced`/
-    // regalloc's own reserved set, not this list) and r30/31 (VertexIndex,
-    // never in the general pool). r5-16 is a generous, exclusively
-    // vertex-stage pool, wide enough for a draw-mode vertex shader's LOAD
-    // address constants (MVP base, the shared +1 increment, each
-    // vertex-pulled array's base and stride) -- more of them than a legacy
-    // vertex shader has ever needed, since none pinned any before.
-    // Draw mode (DRAW_CFG mode 1, docs/B1_geometry_front_end.md) is the only
-    // geometry path the hardware keeps. BORGC_LEGACY=1 still emits the old
-    // per-triangle-descriptor ABI until that code is deleted here too.
     let draw_mode = env::var("BORGC_LEGACY").is_err();
-    // r0-4 can never hold a shader-pinned constant, draw mode or not: the
-    // draw front end's baked raster ROM (BorgRasterRom, its own "REGISTER
-    // CLOBBER ABI" comment) destroys r0..r4 on EVERY pixel as part of its
-    // edge/depth/barycentric setup, before the fragment shader's own body
-    // even starts -- confirmed on real hardware (a value pinned there read
-    // back as whatever the ROM last wrote, not what the firmware staged).
     let regs: &'static [u8] = if is_vertex {
         &[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     } else if tex > 0 {
@@ -436,92 +257,12 @@ unsafe fn compile_nir_inner(
         &[17, 18, 19, 23]
     };
     let mut cx = Cx::new(regs, draw_mode, is_vertex, is_fragment, flags);
-    // Pin a compile-time-constant integer to a GPR, reusing the same
-    // register for every later reference to the same value (draw-mode LOAD
-    // word indices and the literal 1 an address sequence increments by).
-    // A draw-mode VERTEX shader cannot keep constants in GPRs at all: the
-    // draw walker runs the setup ROM (BorgSetupRom: r0-r6 plus temporaries)
-    // in the same register file between one triangle's vertex shader and the
-    // next, so a GPR the firmware staged once per draw survives only the
-    // first triangle. docs/B1_geometry_front_end.md gives the vertex shader
-    // u25-u31 instead -- its DRAW_VS_CONST window, loaded once per draw into
-    // uniforms the setup ROM never touches (it owns u0-u24). Each constant
-    // is a funct3 uniform operand there, which every instruction accepts
-    // once (LOAD's address included), so it costs no extra instructions.
-    // u31 is never written by the DMA (Borg.scala keeps it firmware-owned), so the window ends at u30.
-    // A vertex-shader constant: a window word, shared by value; once the window is full a small
-    // integer is derived from others (a sum) or zero (a difference) with an ALU op.
-    // A fresh vreg standing for the compile-time integer `v`: a window
-    // uniform in a draw-mode vertex shader, a pinned GPR otherwise. Same
-    // value, same slot, for every reference (cx.cp.int_reg caches either).
-    // 1.0 for the inverting comparisons (fge/feq), created on first use. In a
-    // fragment shader it is FSTEP(r30): r30 reads the pixel centre (>= 0.5)
-    // during the fragment pass, so the result is exactly 1.0 and costs no
-    // constant register. Vertex shaders see r30 = 0 and fall back to a const.
-    // Word-index constants for push-constant LOADs, pinned to const GPRs on
-    // first use and shared across every load_push_constant reaching the same
-    // word (a vec4 field reads 4 consecutive words; a scalar read elsewhere
-    // in the shader at the same offset reuses the same pin rather than
-    // burning a second scarce const register on an identical value).
-    // Draw-mode fragment's own vector constants (lightDir etc): NOT GPR
-    // pins (see the load_const arm below for why), but words in the
-    // existing uniform memory window (draw_fs_const_offset / u20+, the
-    // same mechanism legacy fragment shaders already read inv_area and
-    // per-vertex varyings from). Reported here, not folded into
-    // cx.cp.uniforms, since that Vec specifically means "GPR, poked once
-    // via MMIO" -- a different delivery channel from "word in memory."
-    // gl_varying_slot: VAR0=texcoord, VAR1=frag_pos (Mesa enum: VAR0 = 32).
     const VARYING_SLOT_VAR0: u32 = 32;
     const VARYING_SLOT_POS: u32 = 0;
 
-    // --- Draw front end (docs/B1_geometry_front_end.md), gated behind an env
-    // var so the legacy path -- and every shader compiled against it, incl.
-    // the checked-in shader_blobs.h -- is untouched until borgvk moves over
-    // (docs/B1's own "Coexistence" section). Everything below this point that
-    // is draw_mode-specific is a parallel, independent I/O path: it shares
-    // the generic ALU/tex/ddx selection above and nothing of the legacy
-    // MVP/Pos/Attr/load_input scheme, which stays exactly as it was.
-    // (draw_mode itself is declared further up, before cx.cp.regs, which
-    // also branches on it.)
-    // Moved up from the legacy I/O pass below so the draw-mode store_output
-    // handling (in the main walk, ahead of that pass) can read it too; same
-    // value, same meaning, in both modes.
     let frag_alpha = env::var("BORGC_FRAG_ALPHA").is_ok() || (is_fragment && flags.alpha_output());
     cx.frag_alpha = frag_alpha;
-    // gl_VertexIndex's SSA def, once seen -- the index every vertex-pulling
-    // load_ubo (position[], attr[]) is computed from. Always seen before any
-    // load_ubo that depends on it: NIR/SPIR-V evaluates gl_VertexIndex where
-    // the source first reads it, and a dynamic array index has to read it
-    // before it can compute an offset from it.
-    // A compile-time-constant integer, pinned to a GPR on first use and
-    // reused for every later reference to the SAME value -- word indices for
-    // draw-mode LOADs (MVP columns, vertex-pulling base/stride) and the
-    // literal 1 a multi-word LOAD sequence increments its address by.
-    // Deliberately separate from cx.push_const_reg: that cache is word indices
-    // into the push-constant staging buffer, a different LS_BASE-relative
-    // address space than the vertex/uniform buffer draw-mode LOADs read.
-    // Vertex stage: resolved scalar producer per output location, built
-    // in program order as store_output is seen, so a load_output reading
-    // an earlier store in the SAME shader (`frag_pos = gl_Position.xyz`)
-    // resolves -- SOUT has no matching load, so that is the only way such a
-    // read can ever be answered. Also doubles as the SOUT-index source: a
-    // location's SOUT indices are 4*(location - VARYING_SLOT_VAR0) upward
-    // (VARYING_SLOT_POS's own components are never SOUT, so it does not
-    // compete with this), a fixed mapping the fragment compile computes
-    // identically without any shared state between the two compiles.
-    // load_vulkan_descriptor results seen, for decompose_vertex_offset.
-    // Running (next expected word address, its address vreg) for consecutive
-    // constant-address loads (the MVP columns: 4 separate load_ubo calls, 16
-    // words back to back). Chaining them through ONE running IADD-by-1
-    // sequence, continued across calls when a later one picks up exactly
-    // where the previous left off, is what keeps this under the ~4-word
-    // constant-register budget -- pinning each of the 16 word indices on its
-    // own does not fit (see git history).
     if !entry.is_null() {
-        // Control-flow markers, collected from the CF tree so this flat block
-        // walk can splice them in at the right seams. Must be here rather than
-        // in the I/O pass below: the marks are instructions and have to
-        // interleave with selection's output, not land after all of it.
         let mut cf_marks: std::collections::HashMap<usize, Vec<CfMark>> =
             std::collections::HashMap::new();
         let mut cf_unsupported: Vec<&'static str> = Vec::new();
@@ -534,15 +275,8 @@ unsafe fn compile_nir_inner(
             );
         }
 
-        // Phis arrive as registers: borg_nir_passes.c runs nir_convert_from_ssa, so an `if`'s
-        // merge is a decl_reg, a store_reg at the end of each arm and a load_reg after. Under an
-        // execution mask both arms run and the mask decides whose write lands, so every
-        // store_reg is a masked copy (FMOV) into the register's virtual registers.
         let mut reg_vregs: HashMap<u32, Vec<u32>> = HashMap::new();
         for block in (*entry).iter_blocks() {
-            // Emitted before the block's own instructions, which is what makes
-            // EXPUSH gate the `then` body and EXPOP land after the `if` rather
-            // than inside it.
             if let Some(ms) = cf_marks.get(&(block as *const nir_block as usize)) {
                 for m in ms {
                     cx.sel.prog.push(BorgInstr {
@@ -600,48 +334,14 @@ unsafe fn compile_nir_inner(
         }
     }
 
-    // I/O map: pin the shader interface to the firmware register convention.
-    //   load_ubo range_base (cube.c vktexcube_vs_uniform layout):
-    //     0/16/32/48 → MVP columns    → uniforms u8..u23 (col-major; u = 8 + rb/4)
-    //     64..639    → position[idx]  → uniforms u0..u2 (firmware pre-fetches the
-    //                                    current vertex; the index math is dead)
-    //     640..      → attr[idx]      → texcoord varying (firmware-handled)
-    //   store_output io_semantics.location (low 7 bits of IO_SEMANTICS):
-    //     VARYING_SLOT_POS(0) → gl_Position → output regs r0..r3 (sequencer-snooped)
-    //     VAR0/VAR1           → texcoord/frag_pos varyings (firmware-handled)
     let mut mvp_loads = 0u32;
     let mut pos_loads = 0u32;
     let mut attr_loads = 0u32;
     let mut gl_position: Option<u32> = None;
     let mut varying_outs = 0u32;
-    // (`cx.sel.ubo` is declared above the selection walk so the fragment path can populate it.)
-    // Output roots for DCE: every value a store_output consumes is live.
     let mut out_roots: Vec<u32> = Vec::new();
-    // gl_Position component c (x/y/z/w) → the SSA value that produces it. These
-    // clip coords are pinned to r0..r3 so the perspective-divide epilogue and the
-    // sequencer's clipReg snoop find them where the firmware convention expects.
     let mut pos_out: [Option<u32>; 4] = [None; 4];
-    // Fragment colour uFragColor → output regs: RGB to r26/r27/r28, A to r24.
-    // The hardware ABI block is r24=A, r25=Kill, r26..r28=RGB, r29=Z.
-    //
-    // Alpha is opt-in and off by default. It is only meaningful to a
-    // BorgConfig.hasBlend build -- without a blend stage the dispatcher
-    // ignores r24 entirely -- and emitting it unconditionally would change
-    // the codegen of every existing fragment shader: the alpha component
-    // becomes a live output root, so the instructions computing it stop
-    // being dead code and the shader grows. Off by default keeps today's
-    // shaders byte-identical; the driver sets this when it binds a pipeline
-    // with blendEnable.
     let mut frag_out: [Option<u32>; 4] = [None; 4];
-    // Legacy-only: draw mode built pos_out/frag_out/out_roots inline in the
-    // main walk above (cx.outs.pos/cx.outs.frag/cx.outs.roots), in program
-    // order, so a load_output reading back an earlier store_output resolves
-    // -- SOUT has no matching load, so that is the only way such a read can
-    // ever be answered, which rules out a second, later pass like this one.
-    // gl_position deliberately stays None in draw mode: it is what gates the
-    // perspective-divide epilogue below, and draw mode wants the RAW clip
-    // coordinates in r0-r3 (BorgSetupRom does its own homogeneous divide) --
-    // running that epilogue would corrupt them.
     if !draw_mode && !entry.is_null() {
         for block in (*entry).iter_blocks() {
             for instr in block.iter_instr_list() {
@@ -669,10 +369,6 @@ unsafe fn compile_nir_inner(
                             let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
                             let src = intr.srcs_as_slice()[0].as_def().index;
                             if is_vertex && loc == VARYING_SLOT_POS {
-                                // gl_Position is a vec4 stored whole (wrmask=xyzw);
-                                // resolve each component to its scalar producer and
-                                // pin it to r0..r3 (also the DCE roots). Varyings
-                                // (texcoord/frag_pos) are firmware-handled — not rooted.
                                 gl_position = Some(src);
                                 let n = cx.sel.vec_map.get(&src).map_or(1, |v| v.len()).min(4);
                                 for c in 0..n {
@@ -681,8 +377,6 @@ unsafe fn compile_nir_inner(
                                     out_roots.push(d);
                                 }
                             } else if is_fragment {
-                                // Fragment colour uFragColor (vec4) → r26/27/28 rgb,
-                                // plus r24 alpha when the blend path is in use.
                                 let ncomp = if frag_alpha { 4 } else { 3 };
                                 let n = cx.sel.vec_map.get(&src).map_or(1, |v| v.len()).min(ncomp);
                                 for c in 0..n {
@@ -700,7 +394,6 @@ unsafe fn compile_nir_inner(
             }
         }
     }
-    // fpow/fge only vanish into the sRGB idiom (FSRGB); any other cx.skipped op is a missing lowering.
     let srgb = cx.sel.prog.iter().any(|i| i.mnem == "FSRGB");
     cx.skipped.retain(|&op| !(matches!(op, "fpow" | "fge") && srgb));
     if !cx.skipped.is_empty() {
@@ -708,8 +401,6 @@ unsafe fn compile_nir_inner(
         return 0;
     }
     if draw_mode && is_vertex && flags.point_quads() {
-        // Point expansion: this vertex is a corner of the point's quad; the corner's clip-space
-        // offset (slot 16: x y, then the point coordinate u v), times gl_PointSize, times w, moves it from the point's centre.
         let ctl_bits = (1u32 << 16) | (128 + 16);
         assert!(cx.cp.vs_consts.len() < DRAW_VS_CONST_WORDS,
             "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
@@ -783,12 +474,9 @@ unsafe fn compile_nir_inner(
         }
     }
     if draw_mode && is_fragment && flags.multi_target() {
-        // Up to four R8 attachments, each rendered in its own pass (ATTIDX): the byte this pass stores is
-        // chosen from the per-attachment values; one the shader never wrote keeps its own (TLD).
         let n = flags.target_count();
         let class = |k: usize| flags.target_class(k);
         let cff = cx.fw.win(&mut cx.sel, 0xFF);
-        // x + 0 in integer arithmetic copies a window word bit for bit (FMOV would flush a denormal).
         let idx = cx.sel.op0("ATTIDX", vec![]);
         let zero = cx.sel.op0("ISUB", vec![idx, idx]);
         let mut vals: Vec<u32> = Vec::new();
@@ -866,9 +554,6 @@ unsafe fn compile_nir_inner(
         out_roots.push(w);
     }
     if draw_mode && is_fragment && flags.packed() && !flags.multi_target() && cx.outs.frag[0].is_some() {
-        // Packed colour (RAW8 .. RAW128): n channels of 8, 16 or 32 bits, kind 0 UNORM, 1 SNORM, 2 SRGB, 3 the
-        // bits as they are; `swap` reads the components as B, G, R. Channel k fills bits k*size of the texel:
-        // word w of the texel is r26 (w = 0), r27 (w = 1); a RAW128 texel renders in two slices of two words.
         let (kind, layout) = packed_layout(flags);
         let total_bits = layout.iter().map(|&(_, sh, b)| sh + b).max().unwrap_or(0);
         let mut words: [Option<u32>; 4] = [None; 4];
@@ -942,8 +627,6 @@ unsafe fn compile_nir_inner(
         cx.outs.frag = out;
     }
     if draw_mode && is_fragment && flags.half() && cx.outs.frag[0].is_some() {
-        // R16G16_SFLOAT (RAW32; with bit 0x20 R16_SFLOAT, RAW16): r26 = half(r) | half(g) << 16 with integer ops (round to nearest even,
-        // NaN to 0x7E00); a branch-free select between the denormal, normal and overflow results.
         macro_rules! i {
             ($m:expr, $a:expr, $b:expr) => { cx.sel.opc($m, &[($a, 0u8), ($b, 0u8)]) };
             ($m:expr, $a:expr) => { cx.sel.opc($m, &[($a, 0u8)]) };
@@ -957,8 +640,6 @@ unsafe fn compile_nir_inner(
         } else { (x0, x0c) };
         let zero = cx.sel.opc("ISUB", &[first, first]);
         let nch = flags.half_channels();
-        // The small integers are constants like the rest: a register each for the whole block
-        // was more than a blending shader has (the pool pass keeps the busiest in the window).
         let mut pw: [Option<u32>; 2] = [None; 2];
         for n in 0..nch {
             let src = if n == 0 { Some((x0, x0c)) } else { cx.outs.frag[n] };
@@ -1012,7 +693,6 @@ unsafe fn compile_nir_inner(
         }
     }
     if draw_mode && is_fragment && flags.bytes_packed() && cx.outs.frag[3].is_some() {
-        // Byte-packed integer colour (R8G8B8A8_UINT/SINT, RAW32): r26 = c0 | c1<<8 | c2<<16 | c3<<24.
         let (mut p, mut pc) = cx.outs.frag[3].unwrap();
         let eight = cx.fw.slot(8);
         let sh = cx.sel.next_vreg;
@@ -1038,9 +718,6 @@ unsafe fn compile_nir_inner(
         out_roots.push(p);
     }
     if draw_mode {
-        // A fragment output that no instruction produces -- a constant colour, say, which lives in
-        // the uniform window -- has no register to hand to the output stage: copy it with FMOV
-        // (rs1 may be a uniform).
         if is_fragment {
             for c in 0..4 {
                 let Some((v, comp)) = cx.outs.frag[c] else { continue };
@@ -1050,7 +727,6 @@ unsafe fn compile_nir_inner(
                 }
                 let out = cx.sel.next_vreg;
                 cx.sel.next_vreg += 1;
-                // A register is copied bit for bit (IOR): FMOV turns an integer that looks like a NaN into 0x7FC00000.
                 if cx.tex_dsts.contains(&v) || cx.fattr_dsts.contains(&v) {
                     cx.sel.prog.push(BorgInstr { mnem: "IOR", dst: out, srcs: vec![v, v], swz: vec![comp, comp] });
                 } else {
@@ -1082,13 +758,6 @@ unsafe fn compile_nir_inner(
         );
     }
 
-    // Fragment depth output (target boilerplate): cube.frag writes no depth, but
-    // the tile-buffer depth test needs r29 = interpolated z. z is staged per-vertex
-    // at u28-30 ((v2,v1,v0) → v0=u30); emit w0·u30 + w1·u29 + w2·u28 → r29.
-    // Draw mode: r29 is FragCoord.z already, from the raster ROM
-    // (docs/B1_geometry_front_end.md) -- cx.weights stays None (only the legacy
-    // load_input path populates it), so this never fires there, correctly:
-    // the fragment shader not writing r29 IS draw mode's depth output.
     let mut frag_z: Option<u32> = None;
     if is_fragment {
         if let Some(w) = cx.weights {
@@ -1112,10 +781,6 @@ unsafe fn compile_nir_inner(
         }
     }
 
-    // Fragment constants beyond the window come from a pool: a typed fetch of four words at a
-    // time from vertex-attribute slot FRAG_POOL_SLOT, which the driver points at the pool's words
-    // (borgc_last_frag_pool). The window keeps its first nine and holds the fetch's control word
-    // and the 1 the index steps by.
     #[allow(static_mut_refs)]
     unsafe { LAST_FRAG_POOL.clear(); }
     if draw_mode && is_fragment && cx.fw.count > 11 {
@@ -1166,8 +831,6 @@ unsafe fn compile_nir_inner(
         let f = fresh(&mut cx.sel.ubo, Some(Ubo::Fixed(30)));
         cx.per_pixel_fixed.insert(f);
         let zero = fresh(&mut cx.sel.ubo, None);
-        // A group of four is fetched just before its first use, so a constant holds a register
-        // only while it is needed: the pool is ordered by first use.
         let is_pool = |v: &u32, ubo: &HashMap<u32, Ubo>| match ubo.get(v) {
             Some(&Ubo::Uniform(u)) if u as u32 >= first_pool && *v != ctl && *v != one => Some(u as u32 - first_pool),
             _ => None,
@@ -1187,9 +850,6 @@ unsafe fn compile_nir_inner(
             slot_of[k] = slot;
         }
         let pool: Vec<u32> = order.iter().map(|&k| pool[k]).collect();
-        // A group is fetched before its first use, and again when it has not been used for a
-        // while (a register held across the whole shader is one the shader cannot spare), and
-        // never between a TEX and a read of its block.
         const GAP: usize = 16;
         let ngroups = (pool.len() + 3) / 4;
         let mut last: Vec<Option<usize>> = vec![None; ngroups];
@@ -1250,22 +910,10 @@ unsafe fn compile_nir_inner(
     fuse_fmadd(&mut cx.sel.prog, &out_roots, &|v| {
         matches!(cx.sel.ubo.get(&v), Some(Ubo::Mvp(_)) | Some(Ubo::Uniform(_)) | Some(Ubo::Attr))
     });
-    // draw_mode only: legacy's register assignment is checked into
-    // shader_blobs.h and must stay byte-identical (docs/B1's own
-    // "Coexistence" section) -- reordering its instructions, even to a
-    // provably equivalent schedule, changes the checked-in blob for no
-    // reason legacy needs.
     if draw_mode {
         schedule_for_pressure(&mut cx.sel.prog, &out_roots);
     }
 
-    // Uniformity classification (fragment shaders only — vertex/setup shaders
-    // have no per-pixel divergence to hoist away from). Roots: any read of a
-    // per-vertex-staged uniform (Ubo::Uniform — constant across the triangle,
-    // e.g. inv_area, UV/frag_pos/z of v0..v2) or a true shader constant
-    // (Ubo::Fixed, excluding the per-pixel edge-attr use of the same variant).
-    // See opt::classify_uniform for the propagation rule and why DDX/DDY are
-    // unconditional roots on this architecture.
     if is_fragment {
         let uniform_roots: std::collections::HashSet<u32> = cx.sel.ubo
             .iter()
@@ -1302,12 +950,6 @@ unsafe fn compile_nir_inner(
                 forced.insert(*def, c as u8);
             }
         }
-        // r4: the perspective-divide epilogue's scratch, reserved only when
-        // that epilogue actually runs (gl_position.is_some(), gated the same
-        // way the epilogue itself is emitted below) -- draw mode has none,
-        // wanting r0..r3 left as the RAW clip coordinates BorgSetupRom does
-        // its own homogeneous divide from, so reserving r4 there would only
-        // shrink its register pool for nothing.
         if gl_position.is_some() {
             extra_reserved.push(4);
         }
@@ -1318,93 +960,37 @@ unsafe fn compile_nir_inner(
         if !cx.tex_dsts.is_empty() {
             extra_reserved.extend_from_slice(&[21, 22, 23]);
         }
-        // Only the cx.cp.regs prefix actually pinned (cx.cp.count) --
-        // reserving the whole 12-register pool regardless of use starved the
-        // general ALU pool for a shader that only pins a few (a 4x4 matmul
-        // alone needs more than 30-17 live registers at once, spilling to
-        // r0/0.0 with no real spill support -- see regalloc's own doc).
-        // Without reserving even that prefix, regalloc's general pool could
-        // hand one of them to an ordinary ALU temporary, clobbering a pinned
-        // LOAD-address constant -- latent since no vertex shader pinned any
-        // before draw mode's LOADs.
         extra_reserved.extend_from_slice(&cx.cp.regs[..cx.cp.count]);
     } else {
-        // Fragment: colour → r26/27/28; edge-function attrs occupy r0/r1/r2; the
-        // TEX result occupies a fixed 4-reg block r20..r23.
         for (c, v) in frag_out.iter().enumerate() {
             if let Some(def) = v {
-                // Alpha is r24, not r29 -- r29 is the interpolated depth
-                // output, so the naive 26+c would collide with it.
                 forced.insert(*def, if c == 3 { 24 } else { 26 + c as u8 });
             }
         }
         for &t in &cx.tex_dsts {
             forced.insert(t, 20);
         }
-        // FATTR's rd..rd+2 block, pinned to r10 -- matching the hand-written
-        // fragment shaders' own FATTR(rd=10, ...) convention exactly (see
-        // BorgDrawTests.scala's fs), so every load_input call reuses the
-        // same 3-register slot rather than leaving it to the general pool
-        // (which has no idea the hardware write spans 3 registers).
         for &f in &cx.fattr_dsts {
             forced.insert(f, 10);
         }
         if let Some(zr) = frag_z {
             forced.insert(zr, 29); // interpolated depth → r29
         }
-        // r4 (unused by a fragment shader, but reserved here too -- matching
-        // every existing fragment compile's register assignment exactly,
-        // rather than only freeing r4 where it is actually unused, which
-        // reassigns everything after the first spot that would have taken
-        // it and changes the checked-in shader_blobs.h), r20-23 TEX (the
-        // full RGBA result block, needed whenever there is a TEX call in
-        // either mode), r26-29 outputs.
         extra_reserved.extend_from_slice(&[4, 21, 22, 23, 25, 26, 27, 28, 29]);   // r25 is the kill flag
         if draw_mode {
-            // r5-7: the draw front end's perspective-correct barycentrics,
-            // read directly out of fixed registers by every load_input call
-            // (docs/B1_geometry_front_end.md) -- must survive the whole
-            // shader, since load_input calls are interspersed with other
-            // computation rather than read once up front. r10-12 (FATTR's
-            // pinned result block, forced above) are already excluded from
-            // the free pool via `forced`; listed again here for clarity,
-            // not because it changes anything.
             extra_reserved.extend_from_slice(&[5, 6, 7, 10, 11, 12]);
             if cx.frag_coord_w {
                 extra_reserved.push(8);
             }
         } else {
-            // r0-2: edge-function attrs, read only by legacy's own
-            // interpolation-weight computation below -- draw-mode never
-            // touches them, using r5-7 directly instead, so reserving them
-            // there too would shrink its pool for no reason.
             extra_reserved.extend_from_slice(&[0, 1, 2]);
         }
-        // cx.cp.regs[..cx.cp.count]: r17-19(+23), the actually-pinned
-        // prefix of this shader's constant registers (see cx.cp.regs
-        // above) -- needed in both modes. KNOWN GAP, not fixed here: a
-        // register-pressured draw-mode VERTEX shader's own general ALU
-        // pool can also reach r17-19 (nothing there knows they are spoken
-        // for by the paired fragment shader) and clobber them before the
-        // fragment shader ever runs -- confirmed on real hardware
-        // (cube.vert's address-chain LOADs did exactly this, silently
-        // zeroing cube.frag's lightDir). r0-4 cannot be the fix either:
-        // the draw front end's raster ROM destroys them on every pixel
-        // (see cx.cp.regs's own comment). Needs either lowering cube.vert's
-        // register pressure or a firmware-side re-poke of the fragment's
-        // consts after vertex processing, neither of which is a
-        // register-allocation change.
         extra_reserved.extend_from_slice(&cx.cp.regs[..cx.cp.count]);
-        // r24 (alpha) only when it is actually an output. Reserving it
-        // unconditionally would shrink the allocator's pool for every
-        // existing shader to no purpose.
         if frag_out[3].is_some() {
             extra_reserved.push(24);
         }
     }
 
-    // An instruction reads one window word at most: a second one is copied into a register first
-    // (x + 0 in integer arithmetic, bit for bit; r30 - r30 is the zero).
     if draw_mode {
         let is_win = |v: &u32, ubo: &HashMap<u32, Ubo>| matches!(ubo.get(v), Some(Ubo::Uniform(_)));
         if cx.sel.prog.iter().any(|i| i.srcs.iter().filter(|v| is_win(v, &cx.sel.ubo)).count() > 1) {
@@ -1462,14 +1048,6 @@ unsafe fn compile_nir_inner(
         }
     }
 
-    // Encode the selected+allocated instructions into Borg machine words, pinning
-    // shader inputs to the firmware's uniform convention. The Borg core has ONE
-    // uniform read port: funct3 is a selector (1=rs1, 2=rs2, 3=rs3 reads the
-    // uniform indexed by that register field), so each op reads at most one
-    // uniform. cube.c's transform is position×MVP, so positions are pre-loaded
-    // into high GPRs (firmware idiom `FADD g, u<comp>, r30, f3=1` → g = u[comp])
-    // and the MVP column is read in place as the single uniform operand. `mov`
-    // ops are register copies handled by coalescing (cx.skipped).
     let mut words: Vec<u32> = Vec::new();
     let mut pos_gpr: std::collections::HashMap<(u32, u8), u8> = HashMap::new();
     let mut next_pre: u8 = 24; // r24..r29: above regalloc's low-GPR fill
@@ -1519,9 +1097,6 @@ unsafe fn compile_nir_inner(
         if i.mnem == "mov" {
             continue;
         }
-        // Execution-mask ops: no destination, and EXPUSH's single source is a
-        // condition rather than an arithmetic operand, so they bypass the
-        // operand folding below entirely.
         if matches!(i.mnem, "EXPUSH" | "EXELSE" | "EXPOP") {
             let rs1 = if i.srcs.is_empty() {
                 0
@@ -1533,13 +1108,6 @@ unsafe fn compile_nir_inner(
             }
             continue;
         }
-        // SOUT/FATTR (docs/B1_geometry_front_end.md): the 10-bit index is not
-        // a register operand, so it does not fit encode()'s rd/rs1/rs2/rs3
-        // shape -- swz[0] carries it instead (see the draw-mode load_input
-        // and store_output codegen). u8 covers every index this compiler can
-        // produce today (record_shift=8, five varying components); a future
-        // shader with more needs swz widened, not a silent wraparound, hence
-        // the assert rather than an `as u16` truncation.
         if i.mnem == "SOUT" {
             let index = i.swz[0] as u16;
             let rs2 = resolve_op(i.srcs[0], 0).0;
@@ -1558,10 +1126,6 @@ unsafe fn compile_nir_inner(
         }
         let rd = *alloc.get(&i.dst).unwrap_or(&0);
 
-        // pos.w fold: under the 3-component-position ABI pos.w is the constant 1.0,
-        // so a multiply by it is the identity. col3·pos.w (+acc) collapses to a load
-        // of col3 (added to the accumulator) — exactly the hand-written shader's
-        // direct col3 bias, and avoids reading pos.w from u3 (which holds color.r).
         let posw = i
             .srcs
             .iter()
@@ -1641,11 +1205,6 @@ unsafe fn compile_nir_inner(
     }
     let n_body = words.len();
 
-    // Fixed-function epilogue (vertex only): perspective divide + viewport. The
-    // body left clip coords in r0..r3 (uniforms u8..u23 are viewport-baked by the
-    // firmware's cache_ts_mvp, so screen = clip'/w covers the full viewport map).
-    // r4 = 1/clip_w; screen_x/y and ndc_z = clip'/w → r0/r1/r2, snooped by the
-    // sequencer. Matches seq_vert_shader's tail; HALT terminates.
     if is_vertex && gl_position.is_some() {
         words.push(encode("FRCP", 4, 3, 0, 0, 0).unwrap()); // r4 = 1/clip_w
         words.push(encode("FMUL", 0, 0, 4, 0, 0).unwrap()); // screen_x
@@ -1653,10 +1212,6 @@ unsafe fn compile_nir_inner(
         words.push(encode("FMUL", 2, 2, 4, 0, 0).unwrap()); // ndc_z
         words.push(0x0000_0000); // HALT
     } else {
-        // Fragment, or a draw-mode vertex shader (its varyings leave through
-        // SOUT, no fixed-function epilogue): HALT terminates. Without it the
-        // core keeps fetching past the program, which only appears to work in
-        // simulation because memory after the blob reads as zero (= HALT).
         words.push(0x0000_0000);
     }
     eprintln!(
@@ -1691,11 +1246,6 @@ unsafe fn compile_nir_inner(
         eprintln!("borgc:   first words: {}", hex.join(" "));
     }
 
-    // Serialize the .borg blob (software/borg/borg_spirb.c format). For the
-    // autonomous TBR sequencer only instrs[] matter — they're uploaded straight to
-    // SEQ_VERT_SHADER_ADDR with the conventions baked in; the output_regs list is
-    // descriptive (the snooped screen regs r0..r2). The blob is the artifact the
-    // firmware loads to replace the hand-written seq_vert_shader.
     let outputs: Vec<u8> = if is_vertex && gl_position.is_some() {
         vec![0, 1, 2]
     } else if !is_vertex {
@@ -1711,9 +1261,6 @@ unsafe fn compile_nir_inner(
     } else {
         vec![]
     };
-    // Draw mode: the constant window the firmware must fill (u25+ for a
-    // vertex shader, u20+ for a fragment shader) and, for a vertex shader,
-    // how many varying components it SOUTs (the record size).
     let window: Vec<(u8, u32)> = if is_vertex {
         cx.cp.vs_consts.clone()
     } else {
@@ -1738,9 +1285,6 @@ unsafe fn compile_nir_inner(
             Err(e) => eprintln!("borgc: failed to write {path}: {e}"),
         }
     }
-    // Return the blob to the C caller (borgvk_pipeline.c stores it per stage and
-    // ships it to the firmware over serial). out_len always reports the true size;
-    // copy only if it fits so the caller can grow its buffer on mismatch.
     if !out_len.is_null() {
         *out_len = blob.len() as u32;
     }

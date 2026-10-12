@@ -1,22 +1,5 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
-//
-// Compute shaders (docs/B0_compiler_contract.md, "Compute shaders").
-//
-// A separate, deliberately small backend: compute shares nothing with the draw front end's
-// register conventions, so it does its own selection, then hands the program to borgc's
-// linear-scan `regalloc` (values are virtual registers until the end).
-//
-// Conventions implemented here:
-//   * r30 = LocalInvocationIndex, WorkgroupID in the uniforms u29/u30/u31.
-//   * Constants have no immediate form: each distinct constant gets a register the driver
-//     presets over MMIO (returned as (register, value) pairs).
-//   * A buffer binding (set, binding) lives in a fixed window of GPU memory the driver fills
-//     and reads back: word index SLOT_BASE_WORDS + (set * 16 + binding) * SLOT_WORDS.  LS_BASE
-//     stays 0, so LOAD/STORE take full word indices.
-//   * robustBufferAccess: every buffer word index is masked to the binding's window (word_addr);
-//     the host zero-fills the window past the buffer and copies back only the buffer's bytes.
-//   * atomics are per-lane critical sections (EXPUSH(LocalInvocationIndex == i)).
 
 use crate::encode::encode;
 use crate::regalloc::regalloc;
@@ -30,14 +13,10 @@ pub(crate) const SLOT_BASE_WORDS: u32 = 0x40000;
 pub(crate) const SLOT_WORDS: u32 = 0x80000;
 const LANES: u32 = 4; // BorgConfig.Simt: fragLanes
 const MAX_WORDS: usize = 512;
-/// Operand ids at or above this are physical registers (r30, preset constants); below, virtual.
 const PHYS: u32 = 0x4000_0000;
 const FIRST_VREG: u32 = 1000;
-/// First of three registers (x, y, z) holding the dispatch's workgroup origin: 0 normally, the
-/// slice start when the driver splits a grid over several simulator runs.
 pub(crate) const WG_BASE_REG: u32 = 12;
 
-/// One selected instruction. `srcs` are virtual or physical ids; `f3` is the funct3 operand slot.
 struct CI {
     mnem: &'static str,
     dst: u32, // NO_DST, or a virtual id
@@ -63,7 +42,7 @@ pub(crate) struct Out {
 
 struct Em {
     words: Vec<u32>, // raw words that need no register (EXELSE, EXPOP)
-    prog: Vec<CI>,   // everything else; EXELSE/EXPOP are CI with mnem "RAW" and srcs[0] the word
+    prog: Vec<CI>,
     next: u32,
     next_const: u8,
     regs: Vec<(u8, u32)>,
@@ -88,7 +67,6 @@ impl Em {
         self.next += 1;
         r
     }
-    /// A register the driver presets to `c` before the dispatch (physical, taken from r29 down).
     fn creg(&mut self, c: u32) -> u32 {
         if let Some(&r) = self.cmap.get(&c) {
             return PHYS + r as u32;
@@ -161,9 +139,6 @@ impl Em {
     fn src(&mut self, s: &nir_src, c: u8) -> V {
         self.get(s.as_def().index, c)
     }
-    /// Address of word `c` of a multi-word access whose first word is `a0`.  A constant address
-    /// would take one preset register per word (there are only 18), so word c > 0 is the first
-    /// word's register plus the shared constant c, as long as that stays inside the window.
     fn word_n(&mut self, a0: V, c: u32) -> V {
         if c == 0 {
             return a0;
@@ -189,9 +164,6 @@ impl Em {
         };
         let o = self.src(off, 0);
         let w = self.shr(o, 2);
-        // robustBufferAccess: the access stays inside the binding's window. The host zero-fills
-        // the window past the buffer and copies back only the buffer's bytes, so an out-of-range
-        // load reads zero and an out-of-range store is discarded; neither reaches another buffer.
         let w = self.add(w, V::C(extra_words));
         let w = match w {
             V::C(x) => V::C(x & (SLOT_WORDS - 1)),
@@ -330,8 +302,6 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                         em.base_used = true;
                         for c in 0..3u8 {
                             let rd = em.fresh();
-                            // IADD rd, u(29+c), r(12+c) with funct3 = 1: rs1 is the uniform operand;
-                            // r12-r14 hold the grid origin (0 unless the driver split the dispatch).
                             em.op("IADD", rd, PHYS + 29 + c as u32, PHYS + WG_BASE_REG + c as u32, 1);
                             em.vals.insert((d, c), V::R(rd));
                         }
@@ -375,8 +345,6 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                         }
                     }
                     nir_intrinsic_load_push_constant => {
-                        // Push constants are one more window (slot 32) that the
-                        // host fills at dispatch.
                         let o = em.src(i.get_src(0), 0);
                         let w = em.shr(o, 2);
                         let base_w = (i.base() as u32) / 4;
@@ -426,8 +394,6 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                         }
                     }
                     nir_intrinsic_barrier => {
-                        // A memory barrier is nothing here: a store is visible at once. A control
-                        // barrier is nothing with one invocation per workgroup.
                         let ws = (*nir).info.workgroup_size;
                         let control = i.get_const_index(NIR_INTRINSIC_EXECUTION_SCOPE) != 0;
                         if control && ws[0] as u32 * ws[1] as u32 * ws[2] as u32 != 1 {
@@ -435,8 +401,6 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                         }
                     }
                     nir_intrinsic_load_shared | nir_intrinsic_store_shared => {
-                        // Workgroup-shared variables are one more window (slot 33); workgroups run
-                        // one after the other, so they can all use the same one.
                         let store = i.intrinsic == nir_intrinsic_store_shared;
                         let o = em.src(i.get_src(if store { 1 } else { 0 }), 0);
                         let w = em.shr(o, 2);
@@ -533,11 +497,6 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
     Ok(Out { words: em.words, regs: em.regs, local: [ws[0] as u32, ws[1] as u32, ws[2] as u32], flags: em.atomics as u32 })
 }
 
-/// Compile a compute shader.  `words` receives the program, `regs` (register, value) pairs the
-/// driver must preset, `local` the LocalSize.  Returns 0 on success.
-///
-/// # Safety
-/// `nir` is a valid compute `nir_shader`; the buffers have the stated capacities.
 #[no_mangle]
 pub unsafe extern "C" fn borgc_compile_compute(
     nir: *mut nir_shader,

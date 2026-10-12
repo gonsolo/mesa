@@ -10,23 +10,6 @@ impl Cx {
         if n == 1 {
             self.consts.insert(lc.def.index, unsafe { lc.values()[0].u32_ });
         } else if self.draw_mode {
-            // Vector constant (lightDir): a word in the existing
-            // uniform memory window (u20+, draw_fs_const_offset)
-            // rather than a pinned GPR. NOT a legacy-style GPR
-            // pin: legacy's r17-19(+23) sit inside a register-
-            // pressured draw-mode VERTEX shader's own reachable
-            // general-pool range (the self.cp.regs reservation
-            // comment has the full story -- a hardware-caught
-            // bug, cube.vert's address-chain LOADs silently
-            // zeroing cube.frag's lightDir), and r0-4 cannot be
-            // the fix either (BorgRasterRom's "REGISTER CLOBBER
-            // ABI" destroys them every pixel). A uniform-memory
-            // read shares nothing with the GPR file vertex also
-            // uses, so it cannot collide with vertex at all --
-            // and unlike a real register spill, it costs no
-            // extra instructions: the funct3 tag that marks an
-            // operand as "read from memory" is already free on
-            // every instruction, not a separate LOAD.
             let comps: Vec<(u32, u8)> = (0..n)
                 .map(|c| {
                     let bits = unsafe { lc.values()[c].u32_ };
@@ -42,8 +25,6 @@ impl Cx {
                 .collect();
             self.sel.vec_map.insert(lc.def.index, comps);
         } else {
-            // Legacy: pin components to constant GPRs (firmware
-            // writes them once via MMIO).
             let comps: Vec<(u32, u8)> = (0..n)
                 .map(|c| {
                     let reg = self.cp.alloc_reg();
@@ -60,9 +41,6 @@ impl Cx {
     }
 
     pub unsafe fn tex(&mut self, tex: &nir_tex_instr) {
-        // Texture sample → TEX rd, u, v, ctl: R, G, B, A to rd..rd+3.
-        // Only a plain implicit-LOD sample of a 2D texture so far;
-        // anything else is reported rather than sampled wrongly.
         let srcs = tex.srcs_as_slice();
         let is_txl = tex.op == nir_texop_txl && self.is_fragment && self.draw_mode;
         let is_txb = tex.op == nir_texop_txb && self.is_fragment && self.draw_mode;
@@ -84,20 +62,15 @@ impl Cx {
         if let Some(cd) = coord {
             let (ud, uc) = resolve_vm(&self.sel.vec_map, cd, 0);
             let is_fetch = tex.op == nir_texop_txf;
-            // A fetch of a 1D texture or texel buffer takes the integer texel in u;
-            // v is unused, so u is passed twice.
             let (vd, vc) = if is_fetch && tex.coord_components == 1 {
                 (ud, uc)
             } else {
                 resolve_vm(&self.sel.vec_map, cd, 1)
             };
             let is_cube = tex.sampler_dim == GLSL_SAMPLER_DIM_CUBE;
-            // A third coordinate (3D, 2D array) goes to TEXA as w; a cube's is the compiler's face math.
             let has_w = !is_fetch && tex.coord_components >= 3 && !is_cube && self.is_fragment && self.draw_mode;
             let has_bias = (is_txb || tex.op == nir_texop_tex) && !is_fetch && srcs.iter().any(|s| s.src_type == nir_tex_src_bias);
             if is_txl || has_w || has_bias {
-                // Explicit LOD: TEXA hands this lane's LOD to the TEX after it (w and the
-                // depth reference are unused for a 2D sample, so r30 stands in for both).
                 let ld = srcs.iter().find(|s| s.src_type == nir_tex_src_lod || s.src_type == nir_tex_src_bias).map(|s| s.src.as_def().index).unwrap_or(cd);
                 if let Some(&bits) = self.consts.get(&ld).filter(|_| is_txl || has_bias) {
                     if !self.sel.vec_map.contains_key(&ld) {
@@ -132,8 +105,6 @@ impl Cx {
                 self.sel.ubo.insert(c, Ubo::Uniform(u as u8));
                 c
             } else if is_fetch || is_txl {
-                // Control word: operation 1 (fetch) in bits 17:16, texture 0, sampler 0,
-                // read from the constant window (docs/B2_texture_unit.md).
                 let ctl_bits = if is_txl { 2u32 << 21 } else { 1u32 << 16 };
                 let slot = if is_txl { &mut self.lod_ctl_uniform } else { &mut self.fetch_ctl_uniform };
                 let u = match *slot {
@@ -182,12 +153,6 @@ impl Cx {
     }
 
     pub unsafe fn alu(&mut self, alu: &nir_alu_instr) {
-        // A scalar float constant read by float arithmetic has no register of
-        // its own (the ISA has no immediates): give it a word in the constant
-        // window, shared by value, the way vector constants get theirs.
-        // Integer constants stay address-walk patterns (see `walk`).
-        // Fragment integer arithmetic reads its constants the same way (the vertex
-        // stage's integer constants are address math, handled by `walk`).
         if self.draw_mode && (matches!(alu.op, nir_op_fadd | nir_op_fmul | nir_op_ffma
             | nir_op_flt | nir_op_fge | nir_op_feq | nir_op_fneu | nir_op_bcsel | nir_op_fmin | nir_op_fmax
             | nir_op_ieq | nir_op_ine | nir_op_ilt | nir_op_ige | nir_op_ult | nir_op_uge)
@@ -235,21 +200,6 @@ impl Cx {
                     (0..n).map(|k| (s.src.as_def().index, s.swizzle[k])).collect();
                 self.sel.vec_map.insert(alu.def.index, c);
             }
-            // Float comparisons, built from FSTEP.
-            //
-            // FSTEP(a) is 1.0 for a strictly positive and 0.0
-            // otherwise (BorgLane.computeFstep), so `a < b` is
-            // FSTEP(b - a) and the rest follow by swapping or
-            // inverting. Subtraction is FADD(a, FNEG(b)) -- the
-            // ISA has no subtract.
-            //
-            // These exist for the execution mask: without them a
-            // condition like `if (x < y)` is a NIR op borgc
-            // cannot select, so EXPUSH would read a register no
-            // instruction ever wrote. The result is 1.0 or 0.0,
-            // and the mask tests raw bits against zero, so
-            // both encodings land correctly without a bool
-            // conversion.
             nir_op_flt | nir_op_fge | nir_op_fneu | nir_op_feq => {
                 let sl = alu.srcs_as_slice();
                 let a = resolve_vm(&self.sel.vec_map, sl[0].src.as_def().index, sl[0].swizzle[0]);
@@ -263,10 +213,6 @@ impl Cx {
                         let d = self.sel.fsub(b, a);
                         self.sel.prog.push(BorgInstr { mnem: "FSTEP", dst: alu.def.index, srcs: vec![d], swz: vec![0] });
                     }
-                    // a >= b  ->  1 - FSTEP(b - a), as
-                    // FADD(1.0, FNEG(step)). The 1.0 comes from a
-                    // pinned constant register, same mechanism as
-                    // the existing self.cp.uniforms.
                     nir_op_fge => {
                         let d = self.sel.fsub(b, a);
                         let st = self.sel.next_vreg; self.sel.next_vreg += 1;
@@ -300,9 +246,6 @@ impl Cx {
                         };
                         self.sel.prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![one, nst], swz: vec![0, 0] });
                     }
-                    // a != b  ->  FSTEP(a-b) + FSTEP(b-a). At most
-                    // one term is 1.0, so the sum is a clean 0/1
-                    // and needs no clamp.
                     nir_op_fneu => {
                         let dab = self.sel.fsub(a, b);
                         let dba = self.sel.fsub(b, a);
@@ -408,10 +351,6 @@ impl Cx {
                     }
                 }
             }
-            // linearToSrgb idiom → FSRGB: bcsel(fge(knee,x), x·12.92,
-            // 1.055·pow(x,1/2.4)-0.055). Recognised by the linear branch
-            // fmul(x, 12.92); x is the value to sRGB-encode.
-            // Integer comparisons give the 1.0 / 0.0 condition bcsel expects.
             nir_op_ieq | nir_op_ine | nir_op_ilt | nir_op_ige | nir_op_ult | nir_op_uge if self.draw_mode => {
                 let sl = alu.srcs_as_slice();
                 let a = resolve_vm(&self.sel.vec_map, sl[0].src.as_def().index, sl[0].swizzle[0]);
@@ -463,10 +402,6 @@ impl Cx {
                     self.sel.prog.push(BorgInstr { mnem: "FSRGB", dst: v, srcs: vec![x.0], swz: vec![x.1] });
                     self.sel.vec_map.insert(alu.def.index, vec![(v, 0)]);
                 } else {
-                    // General select: the ISA has none, but the condition
-                    // is a 0.0/1.0 float (see the comparisons above), so
-                    // else + cond * (then - else) is exact for both arms.
-                    // NIR leaves vector selects unscalarised: one per component.
                     let n = alu.def.num_components as usize;
                     let mut comps = Vec::new();
                     for k in 0..n {
@@ -535,8 +470,6 @@ impl Cx {
                 self.sel.prog.push(BorgInstr { mnem: "FNEG", dst: n, srcs: vec![x], swz: vec![xc] });
                 self.sel.prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![n, one], swz: vec![0, 0] });
             }
-            // I2F is signed: convert x >> 1 and x & 1 and join them with one FMADD,
-            // which rounds once.
             nir_op_u2f16 | nir_op_u2f32 => {
                 let s = &alu.srcs_as_slice()[0];
                 let (x, xc) = resolve_vm(&self.sel.vec_map, s.src.as_def().index, s.swizzle[0]);
@@ -584,8 +517,6 @@ impl Cx {
     }
 
     pub unsafe fn intrinsic(&mut self, intr: &nir_intrinsic_instr) {
-        // Vector-wide quad derivatives → per-component scalar DDX/DDY,
-        // registered in self.sel.vec_map so reads of the result resolve correctly.
         let deriv = match intr.intrinsic {
             nir_intrinsic_ddx | nir_intrinsic_ddx_coarse | nir_intrinsic_ddx_fine => Some("DDX"),
             nir_intrinsic_ddy | nir_intrinsic_ddy_coarse | nir_intrinsic_ddy_fine => Some("DDY"),
@@ -603,35 +534,11 @@ impl Cx {
                     v
                 })
                 .collect();
-            // (The FP16 datapath needed DDX scaled by 32 here, because
-            // |cross(ddx, ddy)|^2 underflowed below FP16's minimum
-            // normal at 128x128. FP32 has no such floor.)
             let comps: Vec<(u32, u8)> = raw.into_iter().map(|v| (v, 0u8)).collect();
             self.sel.vec_map.insert(intr.def.index, comps);
         } else if (intr.intrinsic == nir_intrinsic_load_input || intr.intrinsic == nir_intrinsic_load_point_coord) && self.draw_mode && !self.cp.vs_window {
-            // Draw front end: FATTR + the perspective-correct barycentrics
-            // already in r5-r7 at fragment start (docs/B1_geometry_front_end.md),
-            // one component at a time -- FATTR loads a component's three
-            // per-vertex values into rd..rd+2, which the next FATTR overwrites,
-            // so each component's FMUL/FMADD chain must consume its own before
-            // requesting the next.
-            //
-            // FATTR's rd..rd+2 is a single hardware-implied 3-register write,
-            // exactly like TEX's rd..rd+3 (self.tex_dsts above) -- it must be
-            // referenced the SAME way: one tracked def (fattr_rd) plus a
-            // component offset resolved at encode time (self.fattr_dsts, mirroring
-            // self.tex_dsts), never as bare `fattr_rd + 1`/`+ 2` integers. Those
-            // never appear as any instruction's dst, so regalloc never assigns
-            // them a register -- they silently resolved to r0 (whatever
-            // instruction happened to be encoding "unresolved operand"),
-            // discarding two of every three vertices' contribution to the
-            // interpolation. Caught by a hardware test: dot(c, c) computed
-            // wildly too large because the barycentric sum silently used
-            // vertex 0's value for all three terms.
             let is_pc = intr.intrinsic == nir_intrinsic_load_point_coord;
             let loc = if is_pc { 25 } else { intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F };
-            // gl_PointCoord (VARYING_SLOT_PNTC): the vertex stage's extra varyings, whose first index
-            // the driver passes in the option word's top byte.
             let base_index = if loc == 25 { self.flags.pntc_base() } else { 4 * loc.wrapping_sub(VARYING_SLOT_VAR0) };
             let bary = [5u8, 6, 7].map(|r| {
                 let v = self.sel.next_vreg; self.sel.next_vreg += 1;
@@ -667,10 +574,6 @@ impl Cx {
                 .collect();
             self.sel.vec_map.insert(intr.def.index, comps);
         } else if intr.intrinsic == nir_intrinsic_load_input && !self.cp.vs_window {
-            // Interpolated varying. Borg has no fixed-function interpolation:
-            // the shader computes it barycentrically. Emit the self.weights once
-            // (w_i = e_i·inv_area; e0/1/2 = attrs r0/1/2, inv_area = u12), then
-            // per component: w0·v0 + w1·v1 + w2·v2 over the per-vertex uniforms.
             if self.weights.is_none() {
                 let mut w = [0u32; 3];
                 for (i, wi) in w.iter_mut().enumerate() {
@@ -687,9 +590,6 @@ impl Cx {
             }
             let w = self.weights.unwrap();
             let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
-            // Per-vertex uniform base per varying (sequencer convention,
-            // each group stored (v2,v1,v0)): VAR0 texcoord → u13.., VAR1
-            // frag_pos → u19.., depth → u28...
             let var = loc.wrapping_sub(VARYING_SLOT_VAR0); // 0 = texcoord, 1 = frag_pos
             let n = intr.def.num_components as usize;
             let comps: Vec<(u32, u8)> = (0..n)
@@ -715,29 +615,6 @@ impl Cx {
                 .collect();
             self.sel.vec_map.insert(intr.def.index, comps);
         } else if intr.intrinsic == nir_intrinsic_load_push_constant {
-            // layout(push_constant) reads. Reached here only after
-            // borg_nir_passes.c's nir_lower_explicit_io turns the
-            // pointer-deref access into this intrinsic -- WITHOUT
-            // that pass this never arrives; it arrives as
-            // load_deref instead, which is unselectable and DCEs
-            // the whole shader to nothing (found empirically, not
-            // assumed, the first time this was tried).
-            //
-            // `base` is the field's static byte offset; `src(0)`
-            // is a dynamic offset for array-indexed push constants,
-            // which this does not support yet -- only a
-            // compile-time-constant src(0) is handled, mirroring
-            // how divergent LOOPS are refused rather than silently
-            // mis-lowered. A non-constant offset is warned about
-            // and the intrinsic is left unselected (DCE removes
-            // whatever depended on it, same failure shape as an
-            // unhandled op, not a wrong answer).
-            //
-            // LOAD addresses whole 32-bit DRAM words
-            // (LS_BASE + rs1<<2), so each 4-byte-aligned field
-            // maps onto exactly one word -- push-constant data is
-            // naturally word-granular already, no repacking
-            // needed on the hardware side.
             let dyn_off = intr.get_src(0).comp_as_uint(0);
             if let Some(dyn_off) = dyn_off {
                 let base = intr.base() + dyn_off as i32;
@@ -761,26 +638,7 @@ impl Cx {
                                 self.sel.ubo.insert(v, Ubo::Uniform(u as u8));
                                 return v;
                             }
-                            // KNOWN GAP, not fixed here: unlike the
-                            // load_const vector-constant case above,
-                            // this pins a GPR regardless of
-                            // self.draw_mode (the self.cp.regs reservation
-                            // comment has the vertex-collision
-                            // story) -- this value becomes LOAD's
-                            // own address operand, which must be an
-                            // actual register, not something the
-                            // uniform-memory-window trick can
-                            // resolve (that trick works for a value
-                            // OPERAND, not for the register that
-                            // reads memory in the first place).
-                            // Not exercised by cube.vert/cube.frag
-                            // (no push constants), so left as-is
-                            // rather than risk a change nothing
-                            // currently tests.
                             let reg = self.cp.alloc_reg();
-                            // RAW integer, not a float -- this
-                            // becomes rs1 for LOAD, a word INDEX,
-                            // not a shader-visible float value.
                             self.cp.uniforms.push((reg, word_idx));
                             let v = self.sel.next_vreg;
                             self.sel.next_vreg += 1;
@@ -804,8 +662,6 @@ impl Cx {
                 );
             }
         }
-        // load_ubo/store_output handled in the I/O pass below
-        // (legacy) or inline here (draw mode).
         else if intr.intrinsic == nir_intrinsic_vulkan_resource_index {
             self.res_binding.insert(intr.def.index, intr.get_const_index(NIR_INTRINSIC_BINDING));
         } else if intr.intrinsic == nir_intrinsic_load_vulkan_descriptor {
@@ -815,10 +671,6 @@ impl Cx {
             }
         } else if self.draw_mode && (intr.intrinsic == nir_intrinsic_load_ssbo
                                 || intr.intrinsic == nir_intrinsic_store_ssbo) {
-            // A storage buffer is a window of the draw's buffer region: binding b
-            // starts SSBO_SLOT_WORDS * (1 + b) words above LS_BASE (the uniform
-            // buffer keeps the first slot). The driver uploads it there and copies
-            // back what the pass stored.
             const SSBO_SLOT_WORDS: u32 = 16384;
             let store = intr.intrinsic == nir_intrinsic_store_ssbo;
             let (bsrc, osrc) = if store { (1, 2) } else { (0, 1) };
@@ -897,9 +749,6 @@ impl Cx {
                 self.sel.vec_map.insert(intr.def.index, comps);
             }
         } else if self.draw_mode && self.is_fragment && intr.intrinsic == nir_intrinsic_load_frag_coord {
-            // docs/B1_geometry_front_end.md, fragment ABI: FragCoord.xy = r30/r31
-            // (the pixel centre), .z = r29, .w = r8 (= 1/w). Read in place like the
-            // barycentrics; r8 has to survive the shader, so it is reserved.
             let comps: Vec<(u32, u8)> = [30u8, 31, 29, 8]
                 .iter()
                 .map(|&r| {
@@ -913,30 +762,16 @@ impl Cx {
             self.frag_coord_w = true;
             self.sel.vec_map.insert(intr.def.index, comps);
         } else if self.draw_mode && intr.intrinsic == nir_intrinsic_load_vertex_id {
-            // r30 = VertexIndex at vertex-shader start
-            // (docs/B1_geometry_front_end.md); referenced directly,
-            // like the fragment stage's e0-e2/barycentrics, never
-            // through self.sel.vec_map/regalloc (see resolve_op's Ubo::Fixed
-            // arm -- checked before the alloc fallback for every
-            // source, whether or not that source has a producing
-            // BorgInstr of its own, which load_vertex_id does not).
             self.sel.ubo.insert(intr.def.index, Ubo::Fixed(30));
             self.vertex_id_def = Some(intr.def.index);
         } else if self.draw_mode && self.is_vertex && self.flags.fetching()
                   && intr.intrinsic == nir_intrinsic_load_input {
-            // Vertex input as a typed fetch (docs/B1_geometry_front_end.md, "Vertex
-            // input"): attribute L is texture slot 128 + L, a 4096-wide linear image
-            // of tight elements whose format converts the
-            // attribute. `TEX` fetches element VertexIndex (or InstanceIndex for an
-            // instance-rate binding); missing components read (0, 0, 0, 1).
             const VERT_ATTRIB_GENERIC0: u32 = 15;
             let loc = (intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F)
                 .wrapping_sub(VERT_ATTRIB_GENERIC0);
             let n = intr.def.num_components as usize;
             let ctl_bits = (1u32 << 16) | (128 + loc);
             let twelve = self.cp.vs_const(&mut self.sel, 12, false);
-            // A line's other endpoint (location + 24): the control word is built from
-            // the endpoint's own, so the pair costs one window word.
             let ctl = if loc >= 24 {
                 let _ = self.cp.vs_const(&mut self.sel, ctl_bits - 24, false);
                 let _ = self.cp.vs_const(&mut self.sel, 24, true);
@@ -958,10 +793,6 @@ impl Cx {
             let tex_v = self.sel.next_vreg; self.sel.next_vreg += 1;
             self.sel.prog.push(BorgInstr { mnem: "TEX", dst: tex_v, srcs: vec![tx, ty, ctl], swz: vec![0, 0, 0] });
             self.tex_dsts.insert(tex_v);
-            // The fetch fills a fixed four-register block (see the vertex `forced`
-            // below); every component a shader uses is copied out of it at once, so
-            // the next fetch can reuse the block and the rest of the compiler sees
-            // ordinary scalars. IOR x, x copies the bits, integer formats included.
             let comp0 = intr.get_const_index(NIR_INTRINSIC_COMPONENT) as u8;
             let mut comps = Vec::with_capacity(n);
             for c in 0..n {
@@ -973,24 +804,9 @@ impl Cx {
             self.sel.vec_map.insert(intr.def.index, comps);
         } else if self.draw_mode && (intr.intrinsic == nir_intrinsic_load_ubo
                                 || (self.cp.vs_window && intr.intrinsic == nir_intrinsic_load_input)) {
-            // A draw-mode vertex shader's `in` attributes are read from
-            // the same per-vertex UBO region the firmware fills for
-            // cube.vert: input location L is `vec4 attr[]` at word
-            // 16 + 144*L (36 vertices * 4 words), stride 4 words,
-            // indexed by VertexIndex -- the shape load_ubo already
-            // lowers below (cube.vert's position is L=0 at word 16,
-            // its texcoord L=1 at word 160).
             let is_input = intr.intrinsic == nir_intrinsic_load_input;
             let offset_def = if is_input { 0 } else { intr.get_src(1).as_def().index };
             let n = intr.def.num_components as usize;
-            // self.vertex_id_def is always Some by now if the shader reads
-            // gl_VertexIndex anywhere, which every load_ubo here does
-            // transitively via the descriptor's own address term
-            // (see decompose_vertex_offset's doc) even when THIS
-            // particular load's own offset has no vid-scaled term
-            // (the MVP columns); u32::MAX is a sentinel no real NIR
-            // index can equal, for the degenerate shader that never
-            // reads gl_VertexIndex at all.
             const VERT_ATTRIB_GENERIC0: u32 = 15;
             let input_slot = if is_input {
                 let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
@@ -1013,8 +829,6 @@ impl Cx {
                     (-1, 0)
                 }
             };
-            // A uniform buffer other than binding 0 is a window of the draw's buffer
-            // region, SSBO_SLOT_WORDS * (1 + binding) words above LS_BASE.
             let base_words = if base_words >= 0 && !is_input {
                 let mut d = resolve_vm(&self.sel.vec_map, intr.get_src(0).as_def().index, 0).0;
                 for _ in 0..8 {
@@ -1027,12 +841,6 @@ impl Cx {
                 base_words
             };
             if base_words >= 0 {
-                // Every constant operand is a fresh vreg from
-                // const_int_operand (a window uniform or a pinned
-                // GPR), never the register number itself: `srcs`
-                // holds SSA/vreg indices, and a small GPR number
-                // could collide with a real NIR SSA index.
-                // The slot size seeds the window so each further buffer's base is a sum.
                 if self.cp.vs_window && base_words >= 16384 {
                     let _ = self.cp.vs_const(&mut self.sel, 16384u32, false);
                 }
@@ -1046,22 +854,8 @@ impl Cx {
                         }
                     }};
                 }
-                // The running address register this load's words come
-                // from. A constant address (stride_words == 0, the MVP
-                // columns) continues an earlier load_ubo's chain when it
-                // left off exactly here (self.const_addr_chain), instead of
-                // pinning every one of the (here) 16 word indices to its
-                // own constant register -- which does not fit the ~4-word
-                // budget (see self.const_addr_chain's doc).
                 let addr = match (stride_words, self.const_addr_chain) {
                     (0, Some((next, a))) if next == base_words => a,
-                    // A pinned GPR can seed the chain directly. A
-                    // window uniform cannot: the chain's IADD would
-                    // then read two uniforms (it and the +1), and an
-                    // instruction has only one uniform operand. It
-                    // goes through the strided path below instead,
-                    // with stride 0 (VertexIndex * 0 + base).
-                    // A base past 16 bits does not fit a staged register: a window constant.
                     (0, _) if !self.cp.vs_window && base_words >= 65536 => {
                         let bits = base_words as u32;
                         let u = self.fw.slot(bits);
@@ -1107,10 +901,6 @@ impl Cx {
                         (dst, 0u8)
                     })
                     .collect();
-                // Leave the chain one past the last word THIS load
-                // read, for a later constant-address load_ubo to pick
-                // up (a stray unconsumed IADD if none does, which dce
-                // then drops like any other dead instruction).
                 if stride_words == 0 && n > 1 {
                     let one_v = cint!(1);
                     let past = self.sel.next_vreg; self.sel.next_vreg += 1;
@@ -1154,8 +944,6 @@ impl Cx {
                     self.outs.roots.push(v.0);
                 }
             } else if self.is_fragment && self.flags.multi_target() && (4..8).contains(&loc) {
-                // Several colour attachments: FRAG_RESULT_DATA0.. , one value per attachment.
-                // A constant (a window word) is copied into a register where it is packed.
                 self.outs.mrt[(loc - 4) as usize] = Some(comps[0]);
             } else if self.is_fragment {
                 let ncomp2 = if self.frag_alpha || self.flags.bytes_packed() { 4 } else { 3 };
@@ -1183,15 +971,12 @@ impl Cx {
                         mnem: "SOUT", dst: NO_DST, srcs: vec![vd], swz: vec![index as u8],
                     });
                     self.outs.roots.push(vd);
-                    let _ = vc; // see decompose_vertex_offset's doc: draw-mode producers are scalar (c=0) by construction
+                    let _ = vc;
                 }
             }
             self.outs.stores.insert(loc, comps);
         } else if self.draw_mode && self.is_fragment && intr.intrinsic == nir_intrinsic_load_output
                   && intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) >> 14 & 1 != 0 {
-            // The destination pixel as floats (nir_lower_blend's fb fetch): `TLD` returns the
-            // attachment's word, unpacked here by the same description the pack block uses.
-            // (kind, bits per channel, channels, swap): the generic packed description, or R8_UNORM.
             let desc = if self.flags.packed() && !self.flags.multi_target() {
                 Some(packed_layout(self.flags))
             } else if self.flags.r8_unorm() {
@@ -1251,9 +1036,6 @@ impl Cx {
                     self.sel.vec_map.insert(intr.def.index, comps);
                 }
                 _ if self.flags.half() => {
-                    // Half floats: R, G in word 0, B, A in word 1. A channel's bits become the
-                    // float's: exponent rebased by 112, an infinity or NaN by another 112, and a
-                    // denormal is its mantissa times 2^-24.
                     let nch = self.flags.half_channels();
                     let w0 = self.sel.op0("TLD", vec![]);
                     let w1 = if nch > 2 { self.sel.op0("TLD1", vec![]) } else { w0 };

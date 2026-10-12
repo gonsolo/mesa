@@ -1,14 +1,8 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
-//
-// Small NIR-facing instruction-selection helpers used by the main selection
-// walk in lib.rs::borgc_compile_nir.
 
 use compiler::bindings::*;
 
-/// Resolve a (def, component) through the vec/mov construction map to the true
-/// underlying scalar producer + component. Free function (not a closure) so the
-/// selection walk can resolve and mutate `vec_map` in the same loop.
 pub(crate) fn resolve_vm(
     vec_map: &std::collections::HashMap<u32, Vec<(u32, u8)>>,
     d0: u32,
@@ -35,8 +29,6 @@ pub(crate) fn borg_isel(op: nir_op) -> Option<&'static str> {
         nir_op_fmul => Some("FMUL"),
         nir_op_ffma | nir_op_ffma_weak => Some("FMADD"),
         nir_op_fneg => Some("FNEG"),
-        // Fragment transcendentals — now real Borg HW ops. (ddx/ddy are NIR
-        // intrinsics, handled in the intrinsic selection path, not here.)
         nir_op_frcp => Some("FRCP"),
         nir_op_frsq => Some("FRSQ"),
         // Integer ops (the Borg core now has these — enables standard addressing).
@@ -53,8 +45,6 @@ pub(crate) fn borg_isel(op: nir_op) -> Option<&'static str> {
         nir_op_f2i16 | nir_op_f2i32 | nir_op_f2u16 | nir_op_f2u32 => Some("F2I"),
         // Moves / vector (de)construction become register copies, no ISA op.
         nir_op_mov | nir_op_vec2 | nir_op_vec3 | nir_op_vec4 => Some("mov"),
-        // Integer↔int bit-size conversions are register copies: a GPR holds
-        // the full datapath word either way.
         nir_op_i2i16 | nir_op_i2i32 | nir_op_u2u16 | nir_op_u2u32 => Some("mov"),
         _ => None,
     }

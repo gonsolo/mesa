@@ -1,17 +1,8 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
-//
-// Linear-scan register allocation over the selected virtual-register program.
 
 use crate::BorgInstr;
 
-/// Linear-scan register allocation (Poletto & Sarkar) for the values our
-/// instruction selection defines (the ALU results). Each is live from its def
-/// to its last use; we assign physical GPRs r0..r29 (r30/r31 are the special
-/// coordinate registers), reusing a register once its value dies. Reports the
-/// allocation, the peak register pressure, and any spills. Values that only
-/// appear as sources (shader inputs) are not allocated here — they map to
-/// uniforms/attributes when the I/O lowering lands.
 pub(crate) fn regalloc(
     prog: &[BorgInstr],
     forced: &std::collections::HashMap<u32, u8>,
@@ -27,9 +18,6 @@ pub(crate) fn regalloc(
     let mut def_at: HashMap<u32, usize> = HashMap::new();
     let mut last_use: HashMap<u32, usize> = HashMap::new();
     for (i, instr) in prog.iter().enumerate() {
-        // Instructions with no destination (the execution-mask ops, STORE)
-        // must not register one: treating the sentinel as a def would keep a
-        // physical register alive for a value nothing produces.
         if instr.dst != crate::NO_DST {
             def_at.entry(instr.dst).or_insert(i);
             last_use.insert(instr.dst, i);
@@ -43,15 +31,6 @@ pub(crate) fn regalloc(
     let mut defs: Vec<u32> = def_at.keys().copied().collect();
     defs.sort_by_key(|v| def_at[v]);
 
-    // Reserve the pre-colored output regs (gl_Position r0..r3) from the
-    // general pool. r4 (the perspective-divide epilogue's scratch) is the
-    // caller's to add to extra_reserved when that epilogue will actually
-    // run (a legacy vertex shader, always; a draw-mode one, never -- see
-    // lib.rs) -- it used to be unconditional here, back when every vertex
-    // shader ran that epilogue.
-    // `soft` registers (the TEX result block, the colour outputs) are free for temporaries
-    // outside the interval of the pre-coloured value that owns them: a TEX block from the TEX to
-    // its last use, an output from its definition to the end of the shader.
     let mut busy: HashMap<u8, Vec<(usize, usize)>> = HashMap::new();
     for (&v, &r) in forced {
         if !soft.contains(&r) {
@@ -89,9 +68,6 @@ pub(crate) fn regalloc(
             continue;
         }
 
-        // Expire intervals that ended before this value starts. Reserved output
-        // registers are never returned to the pool — the epilogue still reads them
-        // after the body, beyond the body-local last-use we computed here.
         let mut keep = Vec::with_capacity(active.len());
         for &(e, r) in &active {
             if e < start && !reserved.contains(&r) {
