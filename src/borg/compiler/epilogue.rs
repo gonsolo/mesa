@@ -155,4 +155,77 @@ impl Cx {
         self.outs.frag = [Some((w, 0)), None, None, None];
         self.out_roots.push(w);
     }
+    pub unsafe fn epilogue_packed(&mut self) {
+        let (kind, layout) = packed_layout(self.flags);
+        let total_bits = layout.iter().map(|&(_, sh, b)| sh + b).max().unwrap_or(0);
+        let mut words: [Option<u32>; 4] = [None; 4];
+        for &(comp, bitpos, bits) in layout.iter() {
+            let Some((x, xc)) = self.outs.frag[comp] else { continue };
+            let mask = if bits < 32 && (kind == 1 || kind == 3) { Some(self.fw.win(&mut self.sel, (1u32 << bits) - 1)) } else { None };
+            let (x, xc) = if matches!(self.sel.ubo.get(&x), Some(Ubo::Uniform(_))) {
+                (self.sel.op("FMOV", vec![x], vec![xc]), 0)
+            } else { (x, xc) };
+            let (x, xc) = if kind == 2 && comp != 3 {
+                (self.sel.op("FSRGB", vec![x], vec![xc]), 0)
+            } else { (x, xc) };
+            let q = match kind {
+                0 | 2 => {
+                    let cmax = self.fw.win(&mut self.sel, ((1u32 << bits) as f32 - 1.0).to_bits());
+                    let c05 = self.fw.win(&mut self.sel, 0.5f32.to_bits());
+                    let m = self.sel.op("FMUL", vec![x, cmax], vec![xc, 0]);
+                    let h = self.sel.op("FADD", vec![m, c05], vec![0, 0]);
+                    self.sel.op("F2I", vec![h], vec![0])
+                }
+                1 => {
+                    let cmax = self.fw.win(&mut self.sel, (((1u32 << (bits - 1)) - 1) as f32).to_bits());
+                    let c05 = self.fw.win(&mut self.sel, 0.5f32.to_bits());
+                    let t = self.sel.op("FMUL", vec![x, cmax], vec![xc, 0]);
+                    let st = self.sel.op("FSTEP", vec![t], vec![0]);
+                    let nh = self.sel.op("FNEG", vec![c05], vec![0]);
+                    let hh = self.sel.op("FADD", vec![st, nh], vec![0, 0]);
+                    let u = self.sel.op("FADD", vec![t, hh], vec![0, 0]);
+                    let i = self.sel.op("F2I", vec![u], vec![0]);
+                    self.sel.op("IAND", vec![i, mask.unwrap()], vec![0, 0])
+                }
+                _ => match mask {
+                    Some(m) => self.sel.op("IAND", vec![x, m], vec![xc, 0]),
+                    None => self.sel.op("IOR", vec![x, x], vec![xc, xc]),
+                },
+            };
+            let (wi, sh) = ((bitpos / 32) as usize, bitpos % 32);
+            let q = if sh == 0 { q } else {
+                let shv = self.fw.win(&mut self.sel, sh);
+                self.sel.op("ISHL", vec![q, shv], vec![0, 0])
+            };
+            words[wi] = Some(match words[wi] {
+                None => q,
+                Some(a) => self.sel.op("IOR", vec![a, q], vec![0, 0]),
+            });
+        }
+        let nwords = (total_bits + 31) / 32;
+        let mut out: [Option<(u32, u8)>; 4] = [None; 4];
+        if nwords <= 2 {
+            for w in 0..nwords as usize {
+                out[w] = words[w].map(|v| (v, 0u8));
+            }
+        } else {
+            // RAW128: the slice this pass renders (ATTIDX / 4) picks words 0-1 or 2-3.
+            let idx = self.sel.op0("ATTIDX", vec![]);
+            let zero = self.sel.op0("ISUB", vec![idx, idx]);
+            let four_w = self.fw.win(&mut self.sel, 4);
+            let four = self.sel.op0("IADD", vec![four_w, zero]);
+            let hit = self.sel.op0("ISEQ", vec![idx, four]);
+            for w in 0..2 {
+                let lo = words[w].unwrap_or(zero);
+                let hi = words[w + 2].unwrap_or(zero);
+                let d = self.sel.op0("ISUB", vec![hi, lo]);
+                let m = self.sel.op0("IMUL", vec![hit, d]);
+                out[w] = Some((self.sel.op0("IADD", vec![lo, m]), 0u8));
+            }
+        }
+        for o in out.iter().flatten() {
+            self.out_roots.push(o.0);
+        }
+        self.outs.frag = out;
+    }
 }
