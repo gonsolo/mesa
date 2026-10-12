@@ -227,8 +227,8 @@ borgvk_GetDeviceBufferMemoryRequirements(
    pMemoryRequirements->memoryRequirements.alignment = 256;
    pMemoryRequirements->memoryRequirements.memoryTypeBits = 0x1;
 
-   vk_foreach_struct(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(ext_stype, ext, pMemoryRequirements->pNext) {
+      switch (ext_stype) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *dedicated = (void *)ext;
          dedicated->prefersDedicatedAllocation = false;
@@ -711,8 +711,8 @@ borgvk_GetImageMemoryRequirements2(VkDevice _device,
    pMemoryRequirements->memoryRequirements.alignment = 256;
    pMemoryRequirements->memoryRequirements.memoryTypeBits = 0x1;
 
-   vk_foreach_struct(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(ext_stype, ext, pMemoryRequirements->pNext) {
+      switch (ext_stype) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *dedicated = (void *)ext;
          dedicated->prefersDedicatedAllocation = false;
@@ -771,8 +771,8 @@ borgvk_GetImageSubresourceLayout2KHR(VkDevice _device, VkImage _image,
       .depthPitch = slice,
    };
 
-   vk_foreach_struct(ext, pLayout->pNext) {
-      vk_debug_ignored_stype(ext->sType);
+   vk_foreach_struct(ext_stype, ext, pLayout->pNext) {
+      vk_debug_ignored_stype(ext_stype);
    }
 }
 

@@ -112,8 +112,8 @@ borgvk_GetPhysicalDeviceQueueFamilyProperties2(
 
    vk_outarray_append_typed(VkQueueFamilyProperties2, &out, p) {
       p->queueFamilyProperties = borgvk_queue_family_properties;
-      vk_foreach_struct(s, p->pNext) {
-         vk_debug_ignored_stype(s->sType);
+      vk_foreach_struct(s_stype, s, p->pNext) {
+         vk_debug_ignored_stype(s_stype);
       }
    }
 }
@@ -127,8 +127,8 @@ borgvk_GetPhysicalDeviceMemoryProperties2(
 
    pMemoryProperties->memoryProperties = device->memory;
 
-   vk_foreach_struct(ext, pMemoryProperties->pNext) {
-      vk_debug_ignored_stype(ext->sType);
+   vk_foreach_struct(ext_stype, ext, pMemoryProperties->pNext) {
+      vk_debug_ignored_stype(ext_stype);
    }
 }
 
@@ -431,8 +431,8 @@ borgvk_GetPhysicalDeviceFormatProperties2(
       .bufferFeatures        = buf,
    };
 
-   vk_foreach_struct(ext, pFormatProperties->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(ext_stype, ext, pFormatProperties->pNext) {
+      switch (ext_stype) {
       case VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3: {
          /* VkFormatProperties3 mirrors VkFormatProperties with 64-bit flags.
           * CTS checks these are consistent with the core struct. */
@@ -458,7 +458,7 @@ borgvk_GetPhysicalDeviceFormatProperties2(
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(ext_stype);
          break;
       }
    }
@@ -574,8 +574,8 @@ borgvk_GetPhysicalDeviceImageFormatProperties2(
       .maxResourceSize = (VkDeviceSize)1 << 31,
    };
 
-   vk_foreach_struct(ext, pImageFormatProperties->pNext) {
-      vk_debug_ignored_stype(ext->sType);
+   vk_foreach_struct(ext_stype, ext, pImageFormatProperties->pNext) {
+      vk_debug_ignored_stype(ext_stype);
    }
    return VK_SUCCESS;
 }
@@ -951,8 +951,8 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    /* The runtime's feature check ignores Vulkan 1.1 feature structs on a device that reports
     * 1.0, so enabling a 1.1 feature we do not have would succeed. Refuse them here. */
-   vk_foreach_struct_const(f, pCreateInfo->pNext) {
-      switch (f->sType) {
+   vk_foreach_struct_const(f_stype, f, pCreateInfo->pNext) {
+      switch (f_stype) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES:
          if (((const VkPhysicalDeviceProtectedMemoryFeatures *)f)->protectedMemory)
             return vk_error(physical_device, VK_ERROR_FEATURE_NOT_PRESENT);

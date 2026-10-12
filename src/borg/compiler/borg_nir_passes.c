@@ -34,7 +34,7 @@ const struct nir_shader_compiler_options borg_nir_options = {
 };
 
 /* Location (vec4-slot) sizing for nir_lower_io of varyings. */
-static int
+static unsigned
 borg_type_size(const struct glsl_type *type, bool bindless)
 {
    return glsl_count_attribute_slots(type, false);
