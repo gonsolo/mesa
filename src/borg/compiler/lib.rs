@@ -22,6 +22,7 @@ mod encode;
 mod isel;
 mod opt;
 mod regalloc;
+mod state;
 mod survey;
 
 use compiler::bindings::*;
@@ -31,6 +32,7 @@ use encode::{emit_blob, encode, encode_fattr, encode_sout};
 use isel::{borg_isel, resolve_vm};
 use opt::{classify_uniform, dce, fuse_fmadd, schedule_for_pressure};
 use regalloc::regalloc;
+use state::DrawOutputs;
 use survey::{survey, Survey};
 use std::env;
 
@@ -646,12 +648,7 @@ unsafe fn compile_nir_inner(
     // (VARYING_SLOT_POS's own components are never SOUT, so it does not
     // compete with this), a fixed mapping the fragment compile computes
     // identically without any shared state between the two compiles.
-    let mut draw_output_stores: HashMap<u32, Vec<(u32, u8)>> = HashMap::new();
-    let mut draw_pos_out: [Option<(u32, u8)>; 4] = [None; 4];
-    let mut draw_psize: Option<(u32, u8)> = None;
-    let mut mrt_out: [Option<(u32, u8)>; 4] = [None; 4];   // fragment outputs of locations 0..3 (multiple attachments)
-    let mut draw_frag_out: [Option<(u32, u8)>; 4] = [None; 4];
-    let mut draw_out_roots: Vec<u32> = Vec::new();
+    let mut outs = DrawOutputs::default();
     // load_vulkan_descriptor results seen, for decompose_vertex_offset.
     let mut descriptor_defs: std::collections::HashSet<u32> = std::collections::HashSet::new();
     // Running (next expected word address, its address vreg) for consecutive
@@ -1765,21 +1762,21 @@ unsafe fn compile_nir_inner(
                                     prog.push(BorgInstr { mnem: "FMOV", dst: out, srcs: vec![v.0], swz: vec![0] });
                                     v = (out, 0);
                                 }
-                                draw_pos_out[c] = Some(v);
-                                draw_out_roots.push(v.0);
+                                outs.pos[c] = Some(v);
+                                outs.roots.push(v.0);
                             }
                         } else if is_fragment && flags.multi_target() && (4..8).contains(&loc) {
                             // Several colour attachments: FRAG_RESULT_DATA0.. , one value per attachment.
                             // A constant (a window word) is copied into a register where it is packed.
-                            mrt_out[(loc - 4) as usize] = Some(comps[0]);
+                            outs.mrt[(loc - 4) as usize] = Some(comps[0]);
                         } else if is_fragment {
                             let ncomp2 = if frag_alpha || flags.bytes_packed() { 4 } else { 3 };
                             for (c, &v) in comps.iter().enumerate().take(ncomp2) {
-                                draw_frag_out[c] = Some(v);
-                                draw_out_roots.push(v.0);
+                                outs.frag[c] = Some(v);
+                                outs.roots.push(v.0);
                             }
                         } else if is_vertex && loc == 12 {
-                            draw_psize = comps.first().copied();   // VARYING_SLOT_PSIZ
+                            outs.psize = comps.first().copied();   // VARYING_SLOT_PSIZ
                         } else if loc < VARYING_SLOT_VAR0 {
                             // gl_PointSize and the other built-in outputs: triangles ignore them.
                         } else {
@@ -1797,11 +1794,11 @@ unsafe fn compile_nir_inner(
                                 prog.push(BorgInstr {
                                     mnem: "SOUT", dst: NO_DST, srcs: vec![vd], swz: vec![index as u8],
                                 });
-                                draw_out_roots.push(vd);
+                                outs.roots.push(vd);
                                 let _ = vc; // see decompose_vertex_offset's doc: draw-mode producers are scalar (c=0) by construction
                             }
                         }
-                        draw_output_stores.insert(loc, comps);
+                        outs.stores.insert(loc, comps);
                     } else if draw_mode && is_fragment && intr.intrinsic == nir_intrinsic_load_output
                               && intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) >> 14 & 1 != 0 {
                         // The destination pixel as floats (nir_lower_blend's fb fetch): `TLD` returns the
@@ -1940,7 +1937,7 @@ unsafe fn compile_nir_inner(
                         }
                     } else if draw_mode && intr.intrinsic == nir_intrinsic_load_output {
                         let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
-                        match draw_output_stores.get(&loc) {
+                        match outs.stores.get(&loc) {
                             Some(v) => { vec_map.insert(intr.def.index, v.clone()); }
                             None => eprintln!(
                                 "borgc: WARNING load_output of location {loc}, never stored earlier \
@@ -2197,7 +2194,7 @@ unsafe fn compile_nir_inner(
     // with blendEnable.
     let mut frag_out: [Option<u32>; 4] = [None; 4];
     // Legacy-only: draw mode built pos_out/frag_out/out_roots inline in the
-    // main walk above (draw_pos_out/draw_frag_out/draw_out_roots), in program
+    // main walk above (outs.pos/outs.frag/outs.roots), in program
     // order, so a load_output reading back an earlier store_output resolves
     // -- SOUT has no matching load, so that is the only way such a read can
     // ever be answered, which rules out a second, later pass like this one.
@@ -2304,7 +2301,7 @@ unsafe fn compile_nir_inner(
             assert!(base + 2 <= 255, "borgc: no varying slot left for the point coordinate");
             for k in 0..2u32 {
                 prog.push(BorgInstr { mnem: "SOUT", dst: NO_DST, srcs: vec![d[2 + k as usize]], swz: vec![(base + k) as u8] });
-                draw_out_roots.push(d[2 + k as usize]);
+                outs.roots.push(d[2 + k as usize]);
             }
         }
         let reg = |v: (u32, u8), ubo: &HashMap<u32, Ubo>, prog: &mut Vec<BorgInstr>, next_vreg: &mut u32| -> (u32, u8) {
@@ -2314,9 +2311,9 @@ unsafe fn compile_nir_inner(
                 (o, 0)
             } else { v }
         };
-        if let (Some(px), Some(py), Some(pw)) = (draw_pos_out[0], draw_pos_out[1], draw_pos_out[3]) {
+        if let (Some(px), Some(py), Some(pw)) = (outs.pos[0], outs.pos[1], outs.pos[3]) {
             let w = reg(pw, &ubo, &mut prog, &mut next_vreg);
-            let size = draw_psize.map(|ps| {
+            let size = outs.psize.map(|ps| {
                 // Clamp to the advertised range [1, 64]: x - c*(x - 64), c = step(x - 64).
                 let x = reg(ps, &ubo, &mut prog, &mut next_vreg).0;
                 let mut win = |bits: u32, draw_vs_consts: &mut Vec<(u8, u32)>, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| {
@@ -2361,8 +2358,8 @@ unsafe fn compile_nir_inner(
                 let o = next_vreg; next_vreg += 1;
                 prog.push(BorgInstr { mnem: "FMADD", dst: o, srcs: vec![off, w.0, base.0],
                                       swz: vec![0, w.1, base.1] });
-                draw_pos_out[k] = Some((o, 0));
-                draw_out_roots.push(o);
+                outs.pos[k] = Some((o, 0));
+                outs.roots.push(o);
             }
         }
     }
@@ -2395,7 +2392,7 @@ unsafe fn compile_nir_inner(
         let zero = op("ISUB", vec![idx, idx], &mut prog, &mut next_vreg);
         let mut vals: Vec<u32> = Vec::new();
         for k in 0..n {
-            let w = match mrt_out[k] {
+            let w = match outs.mrt[k] {
                 None => op("TLD", vec![], &mut prog, &mut next_vreg),
                 Some((x, xc)) => {
                     let x = if matches!(ubo.get(&x), Some(Ubo::Uniform(_))) {
@@ -2445,10 +2442,10 @@ unsafe fn compile_nir_inner(
                 acc = op("IADD", vec![acc, prod], &mut prog, &mut next_vreg);
             }
         }
-        draw_frag_out = [Some((acc, 0)), None, None, None];
+        outs.frag = [Some((acc, 0)), None, None, None];
         out_roots.push(acc);
     }
-    if draw_mode && is_fragment && flags.r8_unorm() && draw_frag_out[0].is_some() {
+    if draw_mode && is_fragment && flags.r8_unorm() && outs.frag[0].is_some() {
         // R8_UNORM (RAW8): r26 = round(r * 255) & 0xFF.
         let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
             let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
@@ -2465,13 +2462,13 @@ unsafe fn compile_nir_inner(
         let c255 = win(255.0f32.to_bits(), &mut ubo, &mut next_vreg);
         let c05 = win(0.5f32.to_bits(), &mut ubo, &mut next_vreg);
         let cff = win(0xFF, &mut ubo, &mut next_vreg);
-        let (x, xc) = draw_frag_out[0].unwrap();
+        let (x, xc) = outs.frag[0].unwrap();
         let x = if matches!(ubo.get(&x), Some(Ubo::Uniform(_))) {
             let o = next_vreg; next_vreg += 1;
             prog.push(BorgInstr { mnem: "FMOV", dst: o, srcs: vec![x], swz: vec![xc] });
             o
         } else { x };
-        let xc = if x == draw_frag_out[0].unwrap().0 { xc } else { 0 };
+        let xc = if x == outs.frag[0].unwrap().0 { xc } else { 0 };
         let mut op = |mnem: &'static str, srcs: Vec<u32>, swz: Vec<u8>, prog: &mut Vec<BorgInstr>, next_vreg: &mut u32| {
             let d = *next_vreg; *next_vreg += 1;
             prog.push(BorgInstr { mnem, dst: d, srcs, swz });
@@ -2481,10 +2478,10 @@ unsafe fn compile_nir_inner(
         let h = op("FADD", vec![m, c05], vec![0, 0], &mut prog, &mut next_vreg);
         let i = op("F2I", vec![h], vec![0], &mut prog, &mut next_vreg);
         let w = op("IAND", vec![i, cff], vec![0, 0], &mut prog, &mut next_vreg);
-        draw_frag_out = [Some((w, 0)), None, None, None];
+        outs.frag = [Some((w, 0)), None, None, None];
         out_roots.push(w);
     }
-    if draw_mode && is_fragment && flags.packed() && !flags.multi_target() && draw_frag_out[0].is_some() {
+    if draw_mode && is_fragment && flags.packed() && !flags.multi_target() && outs.frag[0].is_some() {
         // Packed colour (RAW8 .. RAW128): n channels of 8, 16 or 32 bits, kind 0 UNORM, 1 SNORM, 2 SRGB, 3 the
         // bits as they are; `swap` reads the components as B, G, R. Channel k fills bits k*size of the texel:
         // word w of the texel is r26 (w = 0), r27 (w = 1); a RAW128 texel renders in two slices of two words.
@@ -2504,7 +2501,7 @@ unsafe fn compile_nir_inner(
         };
         let mut words: [Option<u32>; 4] = [None; 4];
         for &(comp, bitpos, bits) in layout.iter() {
-            let Some((x, xc)) = draw_frag_out[comp] else { continue };
+            let Some((x, xc)) = outs.frag[comp] else { continue };
             let mask = if bits < 32 && (kind == 1 || kind == 3) { Some(win((1u32 << bits) - 1, &mut ubo, &mut next_vreg)) } else { None };
             let mut op = |mnem: &'static str, srcs: Vec<u32>, swz: Vec<u8>, prog: &mut Vec<BorgInstr>, next_vreg: &mut u32| {
                 let d = *next_vreg; *next_vreg += 1;
@@ -2581,9 +2578,9 @@ unsafe fn compile_nir_inner(
         for o in out.iter().flatten() {
             out_roots.push(o.0);
         }
-        draw_frag_out = out;
+        outs.frag = out;
     }
-    if draw_mode && is_fragment && flags.half() && draw_frag_out[0].is_some() {
+    if draw_mode && is_fragment && flags.half() && outs.frag[0].is_some() {
         // R16G16_SFLOAT (RAW32; with bit 0x20 R16_SFLOAT, RAW16): r26 = half(r) | half(g) << 16 with integer ops (round to nearest even,
         // NaN to 0x7E00); a branch-free select between the denormal, normal and overflow results.
         let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
@@ -2610,7 +2607,7 @@ unsafe fn compile_nir_inner(
         macro_rules! k {
             ($b:expr) => { win($b, &mut ubo, &mut next_vreg) };
         }
-        let (x0, x0c) = draw_frag_out[0].unwrap();
+        let (x0, x0c) = outs.frag[0].unwrap();
         let first = if matches!(ubo.get(&x0), Some(Ubo::Uniform(_))) {
             (ins("FMOV", &[(x0, x0c)], &mut prog, &mut next_vreg), 0u8)
         } else { (x0, x0c) };
@@ -2620,7 +2617,7 @@ unsafe fn compile_nir_inner(
         // was more than a blending shader has (the pool pass keeps the busiest in the window).
         let mut pw: [Option<u32>; 2] = [None; 2];
         for n in 0..nch {
-            let src = if n == 0 { Some((x0, x0c)) } else { draw_frag_out[n] };
+            let src = if n == 0 { Some((x0, x0c)) } else { outs.frag[n] };
             let Some((x, xc)) = src else { continue };
             let xr = ins("IADD", &[(x, xc), (zero, 0)], &mut prog, &mut next_vreg);
             // The sign first, so the input register is free early; 0x8000 and 0x200 are built here.
@@ -2665,14 +2662,14 @@ unsafe fn compile_nir_inner(
             let h = if n & 1 == 0 { h } else { let c = k!(16); i!("ISHL", h, c) };
             pw[n / 2] = Some(match pw[n / 2] { None => h, Some(a) => i!("IOR", a, h) });
         }
-        draw_frag_out = [pw[0].map(|p| (p, 0)), pw[1].map(|p| (p, 0)), None, None];
+        outs.frag = [pw[0].map(|p| (p, 0)), pw[1].map(|p| (p, 0)), None, None];
         for p in pw.iter().flatten() {
             out_roots.push(*p);
         }
     }
-    if draw_mode && is_fragment && flags.bytes_packed() && draw_frag_out[3].is_some() {
+    if draw_mode && is_fragment && flags.bytes_packed() && outs.frag[3].is_some() {
         // Byte-packed integer colour (R8G8B8A8_UINT/SINT, RAW32): r26 = c0 | c1<<8 | c2<<16 | c3<<24.
-        let (mut p, mut pc) = draw_frag_out[3].unwrap();
+        let (mut p, mut pc) = outs.frag[3].unwrap();
         let eight = *frag_window_by_bits.entry(8).or_insert_with(|| {
             assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
             let u = 20 + draw_uniform_count;
@@ -2691,7 +2688,7 @@ unsafe fn compile_nir_inner(
                 p = d;
                 pc = 0;
             }
-            if let Some((v, comp)) = draw_frag_out[c] {
+            if let Some((v, comp)) = outs.frag[c] {
                 let d = next_vreg;
                 next_vreg += 1;
                 prog.push(BorgInstr { mnem: "IOR", dst: d, srcs: vec![p, v], swz: vec![pc, comp] });
@@ -2699,7 +2696,7 @@ unsafe fn compile_nir_inner(
                 pc = 0;
             }
         }
-        draw_frag_out = [Some((p, pc)), None, None, None];
+        outs.frag = [Some((p, pc)), None, None, None];
         out_roots.push(p);
     }
     if draw_mode {
@@ -2708,7 +2705,7 @@ unsafe fn compile_nir_inner(
         // (rs1 may be a uniform).
         if is_fragment {
             for c in 0..4 {
-                let Some((v, comp)) = draw_frag_out[c] else { continue };
+                let Some((v, comp)) = outs.frag[c] else { continue };
                 // A TEX result block (r20-r23) or FATTR block is not the output register: copy that too.
                 if prog.iter().any(|i| i.dst == v) && !tex_dsts.contains(&v) && !fattr_dsts.contains(&v) {
                     continue;
@@ -2721,23 +2718,23 @@ unsafe fn compile_nir_inner(
                 } else {
                     prog.push(BorgInstr { mnem: "FMOV", dst: out, srcs: vec![v], swz: vec![comp] });
                 }
-                draw_frag_out[c] = Some((out, 0));
+                outs.frag[c] = Some((out, 0));
                 out_roots.push(out);
             }
         }
-        for (c, v) in draw_pos_out.iter().enumerate() {
+        for (c, v) in outs.pos.iter().enumerate() {
             pos_out[c] = v.map(|(d, _)| d);
         }
-        for (c, v) in draw_frag_out.iter().enumerate() {
+        for (c, v) in outs.frag.iter().enumerate() {
             frag_out[c] = v.map(|(d, _)| d);
         }
-        out_roots.extend(draw_out_roots.iter().copied());
+        out_roots.extend(outs.roots.iter().copied());
         eprintln!(
             "borgc: draw-mode I/O map — {} vertex-pulling/MVP load(s), {} SOUT(s), \
              gl_Position={}",
             descriptor_defs.len(), // proxy: one load_ubo per descriptor use
-            draw_output_stores.len(),
-            draw_pos_out[0].is_some(),
+            outs.stores.len(),
+            outs.pos[0].is_some(),
         );
     } else {
         eprintln!(
