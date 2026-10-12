@@ -404,65 +404,7 @@ unsafe fn compile_nir_inner(
         cx.epilogue_point_quads();
     }
     if draw_mode && is_fragment && flags.multi_target() {
-        let n = flags.target_count();
-        let class = |k: usize| flags.target_class(k);
-        let cff = cx.fw.win(&mut cx.sel, 0xFF);
-        let idx = cx.sel.op0("ATTIDX", vec![]);
-        let zero = cx.sel.op0("ISUB", vec![idx, idx]);
-        let mut vals: Vec<u32> = Vec::new();
-        for k in 0..n {
-            let w = match cx.outs.mrt[k] {
-                None => cx.sel.op0("TLD", vec![]),
-                Some((x, xc)) => {
-                    let x = if matches!(cx.sel.ubo.get(&x), Some(Ubo::Uniform(_))) {
-                        cx.sel.op0("IADD", vec![x, zero])
-                    } else if xc != 0 {
-                        let o = cx.sel.next_vreg; cx.sel.next_vreg += 1;
-                        cx.sel.prog.push(BorgInstr { mnem: "FMOV", dst: o, srcs: vec![x], swz: vec![xc] });
-                        o
-                    } else { x };
-                    match class(k) {
-                        1 => {
-                            let c255 = cx.fw.win(&mut cx.sel, 255.0f32.to_bits());
-                            let c05 = cx.fw.win(&mut cx.sel, 0.5f32.to_bits());
-                            let m = cx.sel.op0("FMUL", vec![x, c255]);
-                            let h = cx.sel.op0("FADD", vec![m, c05]);
-                            let i = cx.sel.op0("F2I", vec![h]);
-                            cx.sel.op0("IAND", vec![i, cff])
-                        }
-                        2 => {
-                            let c127 = cx.fw.win(&mut cx.sel, 127.0f32.to_bits());
-                            let c05 = cx.fw.win(&mut cx.sel, 0.5f32.to_bits());
-                            let t = cx.sel.op0("FMUL", vec![x, c127]);
-                            let s = cx.sel.op0("FSTEP", vec![t]);
-                            let nh = cx.sel.op0("FNEG", vec![c05]);
-                            let hh = cx.sel.op0("FADD", vec![s, nh]);
-                            let u = cx.sel.op0("FADD", vec![t, hh]);
-                            let i = cx.sel.op0("F2I", vec![u]);
-                            cx.sel.op0("IAND", vec![i, cff])
-                        }
-                        _ => cx.sel.op0("IAND", vec![x, cff]),
-                    }
-                }
-            };
-            vals.push(w);
-        }
-        let mut acc = vals[0];
-        if n > 1 {
-            let one_u = cx.fw.win(&mut cx.sel, 1);
-            let one = cx.sel.op0("IADD", vec![one_u, zero]);
-            let mut kreg = one;
-            for k in 1..n {
-                if k == 2 { kreg = cx.sel.op0("IADD", vec![one, one]); }
-                if k == 3 { kreg = cx.sel.op0("IADD", vec![kreg, one]); }
-                let hit = cx.sel.op0("ISEQ", vec![idx, kreg]);
-                let diff = cx.sel.op0("ISUB", vec![vals[k], acc]);
-                let term = cx.sel.op0("IMUL", vec![hit, diff]);
-                acc = cx.sel.op0("IADD", vec![acc, term]);
-            }
-        }
-        cx.outs.frag = [Some((acc, 0)), None, None, None];
-        cx.out_roots.push(acc);
+        cx.epilogue_multi_target();
     }
     if draw_mode && is_fragment && flags.r8_unorm() && cx.outs.frag[0].is_some() {
         // R8_UNORM (RAW8): r26 = round(r * 255) & 0xFF.

@@ -75,4 +75,65 @@ impl Cx {
             }
         }
     }
+    pub unsafe fn epilogue_multi_target(&mut self) {
+        let n = self.flags.target_count();
+        let class = |k: usize| self.flags.target_class(k);
+        let cff = self.fw.win(&mut self.sel, 0xFF);
+        let idx = self.sel.op0("ATTIDX", vec![]);
+        let zero = self.sel.op0("ISUB", vec![idx, idx]);
+        let mut vals: Vec<u32> = Vec::new();
+        for k in 0..n {
+            let w = match self.outs.mrt[k] {
+                None => self.sel.op0("TLD", vec![]),
+                Some((x, xc)) => {
+                    let x = if matches!(self.sel.ubo.get(&x), Some(Ubo::Uniform(_))) {
+                        self.sel.op0("IADD", vec![x, zero])
+                    } else if xc != 0 {
+                        let o = self.sel.next_vreg; self.sel.next_vreg += 1;
+                        self.sel.prog.push(BorgInstr { mnem: "FMOV", dst: o, srcs: vec![x], swz: vec![xc] });
+                        o
+                    } else { x };
+                    match class(k) {
+                        1 => {
+                            let c255 = self.fw.win(&mut self.sel, 255.0f32.to_bits());
+                            let c05 = self.fw.win(&mut self.sel, 0.5f32.to_bits());
+                            let m = self.sel.op0("FMUL", vec![x, c255]);
+                            let h = self.sel.op0("FADD", vec![m, c05]);
+                            let i = self.sel.op0("F2I", vec![h]);
+                            self.sel.op0("IAND", vec![i, cff])
+                        }
+                        2 => {
+                            let c127 = self.fw.win(&mut self.sel, 127.0f32.to_bits());
+                            let c05 = self.fw.win(&mut self.sel, 0.5f32.to_bits());
+                            let t = self.sel.op0("FMUL", vec![x, c127]);
+                            let s = self.sel.op0("FSTEP", vec![t]);
+                            let nh = self.sel.op0("FNEG", vec![c05]);
+                            let hh = self.sel.op0("FADD", vec![s, nh]);
+                            let u = self.sel.op0("FADD", vec![t, hh]);
+                            let i = self.sel.op0("F2I", vec![u]);
+                            self.sel.op0("IAND", vec![i, cff])
+                        }
+                        _ => self.sel.op0("IAND", vec![x, cff]),
+                    }
+                }
+            };
+            vals.push(w);
+        }
+        let mut acc = vals[0];
+        if n > 1 {
+            let one_u = self.fw.win(&mut self.sel, 1);
+            let one = self.sel.op0("IADD", vec![one_u, zero]);
+            let mut kreg = one;
+            for k in 1..n {
+                if k == 2 { kreg = self.sel.op0("IADD", vec![one, one]); }
+                if k == 3 { kreg = self.sel.op0("IADD", vec![kreg, one]); }
+                let hit = self.sel.op0("ISEQ", vec![idx, kreg]);
+                let diff = self.sel.op0("ISUB", vec![vals[k], acc]);
+                let term = self.sel.op0("IMUL", vec![hit, diff]);
+                acc = self.sel.op0("IADD", vec![acc, term]);
+            }
+        }
+        self.outs.frag = [Some((acc, 0)), None, None, None];
+        self.out_roots.push(acc);
+    }
 }
