@@ -339,7 +339,6 @@ unsafe fn compile_nir_inner(
     let mut attr_loads = 0u32;
     let mut gl_position: Option<u32> = None;
     let mut varying_outs = 0u32;
-    let mut out_roots: Vec<u32> = Vec::new();
     let mut pos_out: [Option<u32>; 4] = [None; 4];
     let mut frag_out: [Option<u32>; 4] = [None; 4];
     if !draw_mode && !entry.is_null() {
@@ -374,7 +373,7 @@ unsafe fn compile_nir_inner(
                                 for c in 0..n {
                                     let (d, _) = resolve_vm(&cx.sel.vec_map, src, c as u8);
                                     pos_out[c] = Some(d);
-                                    out_roots.push(d);
+                                    cx.out_roots.push(d);
                                 }
                             } else if is_fragment {
                                 let ncomp = if frag_alpha { 4 } else { 3 };
@@ -382,7 +381,7 @@ unsafe fn compile_nir_inner(
                                 for c in 0..n {
                                     let (d, _) = resolve_vm(&cx.sel.vec_map, src, c as u8);
                                     frag_out[c] = Some(d);
-                                    out_roots.push(d);
+                                    cx.out_roots.push(d);
                                 }
                             } else {
                                 varying_outs += 1;
@@ -532,7 +531,7 @@ unsafe fn compile_nir_inner(
             }
         }
         cx.outs.frag = [Some((acc, 0)), None, None, None];
-        out_roots.push(acc);
+        cx.out_roots.push(acc);
     }
     if draw_mode && is_fragment && flags.r8_unorm() && cx.outs.frag[0].is_some() {
         // R8_UNORM (RAW8): r26 = round(r * 255) & 0xFF.
@@ -551,7 +550,7 @@ unsafe fn compile_nir_inner(
         let i = cx.sel.op("F2I", vec![h], vec![0]);
         let w = cx.sel.op("IAND", vec![i, cff], vec![0, 0]);
         cx.outs.frag = [Some((w, 0)), None, None, None];
-        out_roots.push(w);
+        cx.out_roots.push(w);
     }
     if draw_mode && is_fragment && flags.packed() && !flags.multi_target() && cx.outs.frag[0].is_some() {
         let (kind, layout) = packed_layout(flags);
@@ -622,7 +621,7 @@ unsafe fn compile_nir_inner(
             }
         }
         for o in out.iter().flatten() {
-            out_roots.push(o.0);
+            cx.out_roots.push(o.0);
         }
         cx.outs.frag = out;
     }
@@ -689,7 +688,7 @@ unsafe fn compile_nir_inner(
         }
         cx.outs.frag = [pw[0].map(|p| (p, 0)), pw[1].map(|p| (p, 0)), None, None];
         for p in pw.iter().flatten() {
-            out_roots.push(*p);
+            cx.out_roots.push(*p);
         }
     }
     if draw_mode && is_fragment && flags.bytes_packed() && cx.outs.frag[3].is_some() {
@@ -715,7 +714,7 @@ unsafe fn compile_nir_inner(
             }
         }
         cx.outs.frag = [Some((p, pc)), None, None, None];
-        out_roots.push(p);
+        cx.out_roots.push(p);
     }
     if draw_mode {
         if is_fragment {
@@ -733,7 +732,7 @@ unsafe fn compile_nir_inner(
                     cx.sel.prog.push(BorgInstr { mnem: "FMOV", dst: out, srcs: vec![v], swz: vec![comp] });
                 }
                 cx.outs.frag[c] = Some((out, 0));
-                out_roots.push(out);
+                cx.out_roots.push(out);
             }
         }
         for (c, v) in cx.outs.pos.iter().enumerate() {
@@ -742,7 +741,7 @@ unsafe fn compile_nir_inner(
         for (c, v) in cx.outs.frag.iter().enumerate() {
             frag_out[c] = v.map(|(d, _)| d);
         }
-        out_roots.extend(cx.outs.roots.iter().copied());
+        cx.out_roots.extend(cx.outs.roots.iter().copied());
         eprintln!(
             "borgc: draw-mode I/O map — {} vertex-pulling/MVP load(s), {} SOUT(s), \
              gl_Position={}",
@@ -776,7 +775,7 @@ unsafe fn compile_nir_inner(
             cx.sel.prog.push(BorgInstr { mnem: "FMADD", dst: t1, srcs: vec![w[1], uz[1], t0], swz: vec![0, 0, 0] });
             let zr = cx.sel.next_vreg; cx.sel.next_vreg += 1;
             cx.sel.prog.push(BorgInstr { mnem: "FMADD", dst: zr, srcs: vec![w[2], uz[2], t1], swz: vec![0, 0, 0] });
-            out_roots.push(zr);
+            cx.out_roots.push(zr);
             frag_z = Some(zr);
         }
     }
@@ -906,12 +905,12 @@ unsafe fn compile_nir_inner(
         #[allow(static_mut_refs)]
         unsafe { LAST_FRAG_POOL = pool; }
     }
-    dce(&mut cx.sel.prog, &out_roots);
-    fuse_fmadd(&mut cx.sel.prog, &out_roots, &|v| {
+    dce(&mut cx.sel.prog, &cx.out_roots);
+    fuse_fmadd(&mut cx.sel.prog, &cx.out_roots, &|v| {
         matches!(cx.sel.ubo.get(&v), Some(Ubo::Mvp(_)) | Some(Ubo::Uniform(_)) | Some(Ubo::Attr))
     });
     if draw_mode {
-        schedule_for_pressure(&mut cx.sel.prog, &out_roots);
+        schedule_for_pressure(&mut cx.sel.prog, &cx.out_roots);
     }
 
     if is_fragment {
