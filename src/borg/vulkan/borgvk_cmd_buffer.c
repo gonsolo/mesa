@@ -46,8 +46,14 @@ borgvk_create_cmd_buffer(struct vk_command_pool *pool,
    if (!cmd)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-   VkResult result =
-      vk_command_buffer_init(pool, &cmd->vk, &borgvk_cmd_buffer_ops, level);
+   VkResult result = vk_command_buffer_init_with_params(
+      &cmd->vk,
+      &(struct vk_command_buffer_init_params) {
+         .pool = pool,
+         .ops = &borgvk_cmd_buffer_ops,
+         .level = level,
+         .needs_cmd_queue = true,
+      });
    if (result != VK_SUCCESS) {
       vk_free(&pool->alloc, cmd);
       return result;
