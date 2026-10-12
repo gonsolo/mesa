@@ -28,3 +28,24 @@ impl Selector {
         Selector { vec_map: HashMap::new(), prog: Vec::new(), next_vreg: 1_000_000, ubo: HashMap::new() }
     }
 }
+
+impl Selector {
+    pub fn fresh(&mut self) -> u32 {
+        let v = self.next_vreg;
+        self.next_vreg += 1;
+        v
+    }
+
+    /// Emit one instruction into a fresh vreg.
+    pub fn op(&mut self, mnem: &'static str, srcs: Vec<u32>, swz: Vec<u8>) -> u32 {
+        let dst = self.fresh();
+        self.prog.push(crate::BorgInstr { mnem, dst, srcs, swz });
+        dst
+    }
+
+    /// `op` reading component 0 of every source.
+    pub fn op0(&mut self, mnem: &'static str, srcs: Vec<u32>) -> u32 {
+        let swz = vec![0; srcs.len()];
+        self.op(mnem, srcs, swz)
+    }
+}
