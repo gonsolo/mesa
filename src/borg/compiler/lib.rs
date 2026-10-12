@@ -58,17 +58,24 @@ fn packed_layout(flags: Flags) -> (u32, Vec<(usize, u32, u32)>) {
 /// Window words a fragment shader may ask for before the pool pass sorts them out.
 const FRAG_CONST_MAX: u32 = 11 + 64;
 const FRAG_POOL_SLOT: u32 = 40;
-static mut LAST_FRAG_POOL: Vec<u32> = Vec::new();
+thread_local! {
+    static LAST_FRAG_POOL: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn set_frag_pool(pool: Vec<u32>) {
+    LAST_FRAG_POOL.with(|p| *p.borrow_mut() = pool);
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn borgc_last_frag_pool(out: *mut u32, cap: u32) -> u32 {
-    #[allow(static_mut_refs)]
-    let p = &LAST_FRAG_POOL;
-    let n = p.len().min(cap as usize);
-    for (i, &w) in p.iter().take(n).enumerate() {
-        *out.add(i) = w;
-    }
-    n as u32
+    LAST_FRAG_POOL.with(|p| {
+        let p = p.borrow();
+        let n = p.len().min(cap as usize);
+        for (i, &w) in p.iter().take(n).enumerate() {
+            *out.add(i) = w;
+        }
+        n as u32
+    })
 }
 
 pub(crate) const NO_DST: u32 = u32::MAX;
@@ -416,7 +423,7 @@ unsafe fn compile_nir_inner(
     }
 
     #[allow(static_mut_refs)]
-    unsafe { LAST_FRAG_POOL.clear(); }
+    set_frag_pool(Vec::new());
     if is_fragment && cx.fw.count > 11 {
         cx.pool_window_consts();
     }
@@ -472,3 +479,17 @@ unsafe fn compile_nir_inner(
     total
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frag_pool_round_trips_and_clears() {
+        set_frag_pool(vec![1, 2, 3]);
+        let mut out = [0u32; 2];
+        let n = unsafe { borgc_last_frag_pool(out.as_mut_ptr(), 2) };
+        assert_eq!((n, out), (2, [1, 2]));
+        set_frag_pool(Vec::new());
+        assert_eq!(unsafe { borgc_last_frag_pool(out.as_mut_ptr(), 2) }, 0);
+    }
+}

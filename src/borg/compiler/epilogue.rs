@@ -1,6 +1,6 @@
 use crate::state::{Cx, DRAW_VS_CONST_U0, DRAW_VS_CONST_WORDS};
 use std::collections::HashMap;
-use crate::{FRAG_POOL_SLOT, LAST_FRAG_POOL, packed_layout, BorgInstr, Ubo, NO_DST};
+use crate::{FRAG_POOL_SLOT, packed_layout, BorgInstr, Ubo, NO_DST};
 
 impl Cx {
     pub unsafe fn epilogue_point_quads(&mut self) {
@@ -441,7 +441,7 @@ impl Cx {
         self.sel.prog = out;
         eprintln!("borgc: constant pool of {} word(s)", pool.len());
         #[allow(static_mut_refs)]
-        unsafe { LAST_FRAG_POOL = pool; }
+        crate::set_frag_pool(pool);
     }
     pub fn split_window_reads(&mut self) {
         let is_win = |v: &u32, ubo: &HashMap<u32, Ubo>| matches!(ubo.get(v), Some(Ubo::Uniform(_)));
