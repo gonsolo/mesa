@@ -416,29 +416,7 @@ unsafe fn compile_nir_inner(
         cx.epilogue_half();
     }
     if draw_mode && is_fragment && flags.bytes_packed() && cx.outs.frag[3].is_some() {
-        let (mut p, mut pc) = cx.outs.frag[3].unwrap();
-        let eight = cx.fw.slot(8);
-        let sh = cx.sel.next_vreg;
-        cx.sel.next_vreg += 1;
-        cx.sel.ubo.insert(sh, Ubo::Uniform(eight as u8));
-        for c in (0..3).rev() {
-            {
-                let d = cx.sel.next_vreg;
-                cx.sel.next_vreg += 1;
-                cx.sel.prog.push(BorgInstr { mnem: "ISHL", dst: d, srcs: vec![p, sh], swz: vec![pc, 0] });
-                p = d;
-                pc = 0;
-            }
-            if let Some((v, comp)) = cx.outs.frag[c] {
-                let d = cx.sel.next_vreg;
-                cx.sel.next_vreg += 1;
-                cx.sel.prog.push(BorgInstr { mnem: "IOR", dst: d, srcs: vec![p, v], swz: vec![pc, comp] });
-                p = d;
-                pc = 0;
-            }
-        }
-        cx.outs.frag = [Some((p, pc)), None, None, None];
-        cx.out_roots.push(p);
+        cx.epilogue_bytes_packed();
     }
     if draw_mode {
         if is_fragment {

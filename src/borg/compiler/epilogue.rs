@@ -294,4 +294,29 @@ impl Cx {
             self.out_roots.push(*p);
         }
     }
+    pub unsafe fn epilogue_bytes_packed(&mut self) {
+        let (mut p, mut pc) = self.outs.frag[3].unwrap();
+        let eight = self.fw.slot(8);
+        let sh = self.sel.next_vreg;
+        self.sel.next_vreg += 1;
+        self.sel.ubo.insert(sh, Ubo::Uniform(eight as u8));
+        for c in (0..3).rev() {
+            {
+                let d = self.sel.next_vreg;
+                self.sel.next_vreg += 1;
+                self.sel.prog.push(BorgInstr { mnem: "ISHL", dst: d, srcs: vec![p, sh], swz: vec![pc, 0] });
+                p = d;
+                pc = 0;
+            }
+            if let Some((v, comp)) = self.outs.frag[c] {
+                let d = self.sel.next_vreg;
+                self.sel.next_vreg += 1;
+                self.sel.prog.push(BorgInstr { mnem: "IOR", dst: d, srcs: vec![p, v], swz: vec![pc, comp] });
+                p = d;
+                pc = 0;
+            }
+        }
+        self.outs.frag = [Some((p, pc)), None, None, None];
+        self.out_roots.push(p);
+    }
 }
