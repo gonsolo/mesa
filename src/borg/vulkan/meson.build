@@ -51,7 +51,7 @@ if with_borgc
   borgvk_compiler_deps = [idep_borgc, idep_nir]
 else
   libborgvk_files += files('borgvk_compiler_cache.c')
-  borgvk_compiler_deps = []
+  borgvk_compiler_deps = [declare_dependency(include_directories : [inc_compiler, include_directories('../compiler')])]
 endif
 
 borgvk_deps = [
