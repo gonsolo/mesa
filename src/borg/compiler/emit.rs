@@ -1,4 +1,5 @@
-use crate::encode::{encode, encode_fattr, encode_sout};
+use crate::encode::{emit_blob, encode, encode_fattr, encode_sout};
+use std::env;
 use crate::state::Cx;
 use crate::Ubo;
 use std::collections::HashMap;
@@ -148,4 +149,86 @@ pub fn encode_program(cx: &Cx, alloc: &HashMap<u32, u8>) -> Encoded {
     }
     let n_body = words.len();
     Encoded { words, n_preload, n_body, pending }
+}
+
+pub fn build_blob(
+    cx: &Cx,
+    words: &[u32],
+    n_preload: usize,
+    n_body: usize,
+    pending: u32,
+    frag_out: &[Option<u32>; 4],
+    frag_z: Option<u32>,
+) -> Vec<u8> {
+    let is_vertex = cx.is_vertex;
+    eprintln!(
+        "borgc: encoded {} word(s) = {} uniform pre-load(s) + {} op(s) + {} epilogue \
+         ({} operand(s) still pending)",
+        words.len(),
+        n_preload,
+        n_body - n_preload,
+        words.len() - n_body,
+        pending
+    );
+    if !cx.cp.uniforms.is_empty() {
+        let cs: Vec<String> = cx.cp.uniforms.iter().map(|(r, v)| format!("r{r}={v:#06x}")).collect();
+        eprintln!("borgc: const regs (firmware-staged via MMIO): {}", cs.join(" "));
+    }
+    if !cx.fw.consts.is_empty() {
+        let cs: Vec<String> = cx.fw.consts.iter().map(|(u, v)| format!("u{u}={v:#010x}")).collect();
+        eprintln!(
+            "borgc: draw-mode uniform consts (write to draw_fs_const_offset + 4*(u-20) before the draw): {}",
+            cs.join(" ")
+        );
+    }
+    if !cx.cp.vs_consts.is_empty() {
+        let cs: Vec<String> = cx.cp.vs_consts.iter().map(|(u, v)| format!("u{u}={v:#010x}")).collect();
+        eprintln!(
+            "borgc: draw-mode vertex window consts (write to draw_vs_const_offset + 4*(u-25) before the draw): {}",
+            cs.join(" ")
+        );
+    }
+    if env::var("BORGC_DUMP_ISA").is_ok() {
+        let hex: Vec<String> = words.iter().map(|w| format!("{w:#010x}")).collect();
+        eprintln!("borgc:   first words: {}", hex.join(" "));
+    }
+
+    let outputs: Vec<u8> = if !is_vertex {
+        // Fragment colour outputs r26/27/28 + r29 = interpolated depth.
+        let mut o: Vec<u8> = (0..3).filter(|&c| frag_out[c].is_some()).map(|c| 26 + c as u8).collect();
+        if frag_out[3].is_some() {
+            o.push(24);
+        }
+        if frag_z.is_some() {
+            o.push(29);
+        }
+        o
+    } else {
+        vec![]
+    };
+    let window: Vec<(u8, u32)> = if is_vertex {
+        cx.cp.vs_consts.clone()
+    } else {
+        cx.fw.consts.iter().map(|&(u, v)| (u as u8, v)).collect()
+    };
+    let num_varyings: u8 = cx.sel.prog
+        .iter()
+        .filter(|i| i.mnem == "SOUT")
+        .map(|i| i.swz[0] + 1)
+        .max()
+        .unwrap_or(0);
+    let blob = emit_blob(words, &outputs, &cx.cp.uniforms,
+                         Some((num_varyings, &window[..])));
+    eprintln!(
+        "borgc: .borg blob = {} bytes ({} instr, {} output regs, {} window consts, {} varyings)",
+        blob.len(), words.len(), outputs.len(), window.len(), num_varyings
+    );
+    if let Ok(prefix) = env::var("BORGC_EMIT_BLOB") {
+        let path = format!("{prefix}.{}.borg", if is_vertex { "vert" } else { "frag" });
+        match std::fs::write(&path, &blob) {
+            Ok(()) => eprintln!("borgc: wrote {path}"),
+            Err(e) => eprintln!("borgc: failed to write {path}: {e}"),
+        }
+    }
+    blob
 }
