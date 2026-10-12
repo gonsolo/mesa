@@ -136,4 +136,23 @@ impl Cx {
         self.outs.frag = [Some((acc, 0)), None, None, None];
         self.out_roots.push(acc);
     }
+    pub unsafe fn epilogue_r8_unorm(&mut self) {
+        // R8_UNORM (RAW8): r26 = round(r * 255) & 0xFF.
+        let c255 = self.fw.win(&mut self.sel, 255.0f32.to_bits());
+        let c05 = self.fw.win(&mut self.sel, 0.5f32.to_bits());
+        let cff = self.fw.win(&mut self.sel, 0xFF);
+        let (x, xc) = self.outs.frag[0].unwrap();
+        let x = if matches!(self.sel.ubo.get(&x), Some(Ubo::Uniform(_))) {
+            let o = self.sel.next_vreg; self.sel.next_vreg += 1;
+            self.sel.prog.push(BorgInstr { mnem: "FMOV", dst: o, srcs: vec![x], swz: vec![xc] });
+            o
+        } else { x };
+        let xc = if x == self.outs.frag[0].unwrap().0 { xc } else { 0 };
+        let m = self.sel.op("FMUL", vec![x, c255], vec![xc, 0]);
+        let h = self.sel.op("FADD", vec![m, c05], vec![0, 0]);
+        let i = self.sel.op("F2I", vec![h], vec![0]);
+        let w = self.sel.op("IAND", vec![i, cff], vec![0, 0]);
+        self.outs.frag = [Some((w, 0)), None, None, None];
+        self.out_roots.push(w);
+    }
 }

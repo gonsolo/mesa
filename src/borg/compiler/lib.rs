@@ -407,23 +407,7 @@ unsafe fn compile_nir_inner(
         cx.epilogue_multi_target();
     }
     if draw_mode && is_fragment && flags.r8_unorm() && cx.outs.frag[0].is_some() {
-        // R8_UNORM (RAW8): r26 = round(r * 255) & 0xFF.
-        let c255 = cx.fw.win(&mut cx.sel, 255.0f32.to_bits());
-        let c05 = cx.fw.win(&mut cx.sel, 0.5f32.to_bits());
-        let cff = cx.fw.win(&mut cx.sel, 0xFF);
-        let (x, xc) = cx.outs.frag[0].unwrap();
-        let x = if matches!(cx.sel.ubo.get(&x), Some(Ubo::Uniform(_))) {
-            let o = cx.sel.next_vreg; cx.sel.next_vreg += 1;
-            cx.sel.prog.push(BorgInstr { mnem: "FMOV", dst: o, srcs: vec![x], swz: vec![xc] });
-            o
-        } else { x };
-        let xc = if x == cx.outs.frag[0].unwrap().0 { xc } else { 0 };
-        let m = cx.sel.op("FMUL", vec![x, c255], vec![xc, 0]);
-        let h = cx.sel.op("FADD", vec![m, c05], vec![0, 0]);
-        let i = cx.sel.op("F2I", vec![h], vec![0]);
-        let w = cx.sel.op("IAND", vec![i, cff], vec![0, 0]);
-        cx.outs.frag = [Some((w, 0)), None, None, None];
-        cx.out_roots.push(w);
+        cx.epilogue_r8_unorm();
     }
     if draw_mode && is_fragment && flags.packed() && !flags.multi_target() && cx.outs.frag[0].is_some() {
         let (kind, layout) = packed_layout(flags);
