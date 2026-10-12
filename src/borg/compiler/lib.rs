@@ -12,6 +12,7 @@ mod encode;
 mod epilogue;
 mod isel;
 mod opt;
+mod pipeline;
 mod regalloc;
 mod select;
 mod state;
@@ -20,12 +21,8 @@ mod survey;
 use compiler::bindings::*;
 use compiler::nir::AsDef;
 use config::Flags;
-use fixed::{allocate, fixed_regs};
-use emit::{build_blob, encode_program, Encoded};
 use isel::resolve_vm;
-use opt::{dce, fuse_fmadd, schedule_for_pressure};
 use state::Cx;
-use survey::{survey, Survey};
 use std::env;
 
 fn packed_layout(flags: Flags) -> (u32, Vec<(usize, u32, u32)>) {
@@ -241,102 +238,14 @@ unsafe fn compile_nir_inner(
     if nir.is_null() {
         return 0;
     }
-    let stage = (*nir).info.stage();
-    let is_vertex = stage == MESA_SHADER_VERTEX;
-    let is_fragment = stage == MESA_SHADER_FRAGMENT;
-
-    if env::var("BORGC_DUMP_NIR").is_ok() {
-        if let Ok(s) = (*nir).to_string() {
-            eprintln!("{s}");
-        }
-    }
-
-    let entry = nir_shader_get_entrypoint(nir);
-    let Survey { total, tex } = survey(entry, stage);
-
-    let regs: &'static [u8] = if is_vertex {
-        &[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-    } else if tex > 0 {
-        &[17, 18, 19]
-    } else {
-        &[17, 18, 19, 23]
-    };
-    let mut cx = Cx::new(regs, is_vertex, is_fragment, flags);
-
-    let frag_alpha = env::var("BORGC_FRAG_ALPHA").is_ok() || (is_fragment && flags.alpha_output());
-    cx.frag_alpha = frag_alpha;
+    let (mut cx, entry, total) = Cx::start(nir, flags);
     cx.select_entry(entry);
-    eprintln!("borgc: selected {} Borg instruction(s) (virtual regs)", cx.sel.prog.len());
-    if env::var("BORGC_DUMP_ISA").is_ok() {
-        for i in &cx.sel.prog {
-            let s: Vec<String> = i.srcs.iter().map(|v| format!("v{v}")).collect();
-            eprintln!("borgc:   {} v{}, {}", i.mnem, i.dst, s.join(", "));
-        }
-    }
-
-    let srgb = cx.sel.prog.iter().any(|i| i.mnem == "FSRGB");
-    cx.skipped.retain(|&op| !(matches!(op, "fpow" | "fge") && srgb));
-    if !cx.skipped.is_empty() {
-        eprintln!("borgc: ERROR unhandled NIR ops, refusing to emit a wrong shader: {}", cx.skipped.join(", "));
+    if !cx.check_selected() {
         return 0;
     }
-    if is_vertex && flags.point_quads() {
-        cx.epilogue_point_quads();
-    }
-    if is_fragment && flags.multi_target() {
-        cx.epilogue_multi_target();
-    }
-    if is_fragment && flags.r8_unorm() && cx.outs.frag[0].is_some() {
-        cx.epilogue_r8_unorm();
-    }
-    if is_fragment && flags.packed() && !flags.multi_target() && cx.outs.frag[0].is_some() {
-        cx.epilogue_packed();
-    }
-    if is_fragment && flags.half() && cx.outs.frag[0].is_some() {
-        cx.epilogue_half();
-    }
-    if is_fragment && flags.bytes_packed() && cx.outs.frag[3].is_some() {
-        cx.epilogue_bytes_packed();
-    }
-    if is_fragment {
-        cx.copy_frag_outputs();
-    }
-    let pos_out = cx.outs.pos.map(|v| v.map(|(d, _)| d));
-    let frag_out = cx.outs.frag.map(|v| v.map(|(d, _)| d));
-    cx.out_roots.extend(cx.outs.roots.iter().copied());
-    eprintln!(
-        "borgc: draw-mode I/O map — {} vertex-pulling/MVP load(s), {} SOUT(s), \
-         gl_Position={}",
-        cx.descriptor_defs.len(), // proxy: one load_ubo per descriptor use
-        cx.outs.stores.len(),
-        cx.outs.pos[0].is_some(),
-    );
-
-    let frag_z = if is_fragment { cx.interpolate_depth() } else { None };
-
-    set_frag_pool(Vec::new());
-    if is_fragment && cx.fw.count > 11 {
-        cx.pool_window_consts();
-    }
-    dce(&mut cx.sel.prog, &cx.out_roots);
-    fuse_fmadd(&mut cx.sel.prog, &cx.out_roots, &|v| {
-        matches!(cx.sel.ubo.get(&v), Some(Ubo::Uniform(_)))
-    });
-    schedule_for_pressure(&mut cx.sel.prog, &cx.out_roots);
-
-    if is_fragment {
-        cx.log_uniformity();
-    }
-
-    // Pre-color outputs and reserve fixed registers.
-    let (forced, mut extra_reserved) = fixed_regs(&cx, &pos_out, &frag_out, frag_z);
-    cx.split_window_reads();
-
-    let Some(alloc) = allocate(&cx, &forced, &mut extra_reserved) else { return 0 };
-
-    let Encoded { mut words, n_preload, n_body, pending } = encode_program(&cx, &alloc);
-    words.push(0x0000_0000);
-    let blob = build_blob(&cx, &words, n_preload, n_body, pending, &frag_out, frag_z);
+    cx.lower_outputs();
+    cx.optimise();
+    let Some(blob) = cx.assemble() else { return 0 };
     if !out_len.is_null() {
         *out_len = blob.len() as u32;
     }
