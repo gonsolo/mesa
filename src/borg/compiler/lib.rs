@@ -32,7 +32,7 @@ use encode::{emit_blob, encode, encode_fattr, encode_sout};
 use isel::{borg_isel, resolve_vm};
 use opt::{classify_uniform, dce, fuse_fmadd, schedule_for_pressure};
 use regalloc::regalloc;
-use state::{DrawOutputs, FragWindow, Selector};
+use state::{ConstPool, DrawOutputs, FragWindow, Selector, DRAW_VS_CONST_U0, DRAW_VS_CONST_WORDS};
 use survey::{survey, Survey};
 use std::env;
 
@@ -443,38 +443,17 @@ unsafe fn compile_nir_inner(
     // edge/depth/barycentric setup, before the fragment shader's own body
     // even starts -- confirmed on real hardware (a value pinned there read
     // back as whatever the ROM last wrote, not what the firmware staged).
-    let const_regs: &[u8] = if is_vertex {
+    let regs: &'static [u8] = if is_vertex {
         &[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     } else if tex > 0 {
         &[17, 18, 19]
     } else {
         &[17, 18, 19, 23]
     };
-    let mut const_reg_count: usize = 0;
-    let alloc_const_reg = |count: &mut usize| -> u8 {
-        assert!(*count < const_regs.len(),
-            "borgc: shader needs more than {} constant registers ({:?})",
-            const_regs.len(), const_regs);
-        let reg = const_regs[*count];
-        *count += 1;
-        reg
-    };
+    let mut cp = ConstPool::new(regs, draw_mode && is_vertex);
     // Pin a compile-time-constant integer to a GPR, reusing the same
     // register for every later reference to the same value (draw-mode LOAD
     // word indices and the literal 1 an address sequence increments by).
-    let pin_const_int = |v: i32,
-                          const_int_reg: &mut HashMap<i32, u8>,
-                          const_reg_count: &mut usize,
-                          const_uniforms: &mut Vec<(u8, u32)>|
-     -> u8 {
-        if let Some(&r) = const_int_reg.get(&v) {
-            return r;
-        }
-        let r = alloc_const_reg(const_reg_count);
-        const_uniforms.push((r, v as u32));
-        const_int_reg.insert(v, r);
-        r
-    };
     // A draw-mode VERTEX shader cannot keep constants in GPRs at all: the
     // draw walker runs the setup ROM (BorgSetupRom: r0-r6 plus temporaries)
     // in the same register file between one triangle's vertex shader and the
@@ -484,106 +463,12 @@ unsafe fn compile_nir_inner(
     // uniforms the setup ROM never touches (it owns u0-u24). Each constant
     // is a funct3 uniform operand there, which every instruction accepts
     // once (LOAD's address included), so it costs no extra instructions.
-    const DRAW_VS_CONST_U0: u8 = 25;
     // u31 is never written by the DMA (Borg.scala keeps it firmware-owned), so the window ends at u30.
-    const DRAW_VS_CONST_WORDS: usize = 6;
-    let mut draw_vs_consts: Vec<(u8, u32)> = Vec::new(); // (u-index, bits)
-    let vs_const_window = draw_mode && is_vertex;
-    let mut vs_vreg_by_bits: HashMap<u32, u32> = HashMap::new();
-    let mut vs_zero: Option<u32> = None;
     // A vertex-shader constant: a window word, shared by value; once the window is full a small
     // integer is derived from others (a sum) or zero (a difference) with an ALU op.
-    macro_rules! vs_const_vreg {
-        ($bits:expr) => { vs_const_vreg!($bits, false) };
-        // `derive`: build a small integer from others even while the window has room.
-        ($bits:expr, $derive:expr) => {{
-            let bits: u32 = $bits;
-            if let Some(&v) = vs_vreg_by_bits.get(&bits) {
-                v
-            } else {
-                let mut return_zero = false;
-                let v = sel.next_vreg;
-                sel.next_vreg += 1;
-                // Integer sums are exact for any bit pattern: a control word plus a slot offset too.
-                let derivable = bits == 0 || vs_vreg_by_bits.keys().any(|&a| {
-                    a >= 1 && a < bits && vs_vreg_by_bits.get(&(bits - a)).is_some()
-                });
-                if draw_vs_consts.len() < DRAW_VS_CONST_WORDS && !($derive && derivable) && bits != 0 {
-                    let u = DRAW_VS_CONST_U0 as u32 + draw_vs_consts.len() as u32;
-                    draw_vs_consts.push((u as u8, bits));
-                    sel.ubo.insert(v, Ubo::Uniform(u as u8));
-                } else {
-                    // An instruction reads one window word at most: go through a register.
-                    if vs_zero.is_none() {
-                        let f = sel.next_vreg;
-                        sel.next_vreg += 1;
-                        sel.ubo.insert(f, Ubo::Fixed(30));
-                        let z = sel.next_vreg;
-                        sel.next_vreg += 1;
-                        sel.prog.push(BorgInstr { mnem: "ISUB", dst: z, srcs: vec![f, f], swz: vec![0, 0] });
-                        vs_zero = Some(z);
-                    }
-                    let z = vs_zero.unwrap();
-                    let mut small: Vec<(u32, u32)> =
-                        vs_vreg_by_bits.iter().filter(|(&b, _)| b >= 1 && b < bits).map(|(&b, &r)| (b, r)).collect();
-                    small.sort();
-                    if bits == 0 {
-                        vs_vreg_by_bits.insert(0, z);
-                        return_zero = true;
-                    } else {
-                        let pair = small.iter().find_map(|&(a, ra)| {
-                            small.iter().find(|&&(b, _)| a + b == bits).map(|&(_, rb)| (ra, rb))
-                        });
-                        let (ra, rb) = pair.unwrap_or_else(|| {
-                            panic!("borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS)
-                        });
-                        let t = sel.next_vreg;
-                        sel.next_vreg += 1;
-                        sel.prog.push(BorgInstr { mnem: "IADD", dst: t, srcs: vec![z, ra], swz: vec![0, 0] });
-                        sel.prog.push(BorgInstr { mnem: "IADD", dst: v, srcs: vec![t, rb], swz: vec![0, 0] });
-                    }
-                }
-                if return_zero {
-                    vs_zero.unwrap()
-                } else {
-                    vs_vreg_by_bits.insert(bits, v);
-                    v
-                }
-            }
-        }};
-    }
     // A fresh vreg standing for the compile-time integer `v`: a window
     // uniform in a draw-mode vertex shader, a pinned GPR otherwise. Same
-    // value, same slot, for every reference (const_int_reg caches either).
-    let const_int_operand = |v: i32,
-                             const_int_reg: &mut HashMap<i32, u8>,
-                             const_reg_count: &mut usize,
-                             const_uniforms: &mut Vec<(u8, u32)>,
-                             draw_vs_consts: &mut Vec<(u8, u32)>,
-                             next_vreg: &mut u32,
-                             ubo: &mut HashMap<u32, Ubo>|
-     -> u32 {
-        let kind = if vs_const_window {
-            let idx = match const_int_reg.get(&v) {
-                Some(&u) => u,
-                None => {
-                    assert!(draw_vs_consts.len() < DRAW_VS_CONST_WORDS,
-                        "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
-                    let u = DRAW_VS_CONST_U0 + draw_vs_consts.len() as u8;
-                    draw_vs_consts.push((u, v as u32));
-                    const_int_reg.insert(v, u);
-                    u
-                }
-            };
-            Ubo::Uniform(idx)
-        } else {
-            Ubo::Fixed(pin_const_int(v, const_int_reg, const_reg_count, const_uniforms))
-        };
-        let r = *next_vreg;
-        *next_vreg += 1;
-        ubo.insert(r, kind);
-        r
-    };
+    // value, same slot, for every reference (cp.int_reg caches either).
     // 1.0 for the inverting comparisons (fge/feq), created on first use. In a
     // fragment shader it is FSTEP(r30): r30 reads the pixel centre (>= 0.5)
     // during the fragment pass, so the result is exactly 1.0 and costs no
@@ -595,13 +480,12 @@ unsafe fn compile_nir_inner(
     // in the shader at the same offset reuses the same pin rather than
     // burning a second scarce const register on an identical value).
     let mut push_const_reg: HashMap<u32, u32> = HashMap::new();
-    let mut const_uniforms: Vec<(u8, u32)> = Vec::new();
     // Draw-mode fragment's own vector constants (lightDir etc): NOT GPR
     // pins (see the load_const arm below for why), but words in the
     // existing uniform memory window (draw_fs_const_offset / u20+, the
     // same mechanism legacy fragment shaders already read inv_area and
     // per-vertex varyings from). Reported here, not folded into
-    // const_uniforms, since that Vec specifically means "GPR, poked once
+    // cp.uniforms, since that Vec specifically means "GPR, poked once
     // via MMIO" -- a different delivery channel from "word in memory."
     // gl_varying_slot: VAR0=texcoord, VAR1=frag_pos (Mesa enum: VAR0 = 32).
     const VARYING_SLOT_VAR0: u32 = 32;
@@ -614,7 +498,7 @@ unsafe fn compile_nir_inner(
     // is draw_mode-specific is a parallel, independent I/O path: it shares
     // the generic ALU/tex/ddx selection above and nothing of the legacy
     // MVP/Pos/Attr/load_input scheme, which stays exactly as it was.
-    // (draw_mode itself is declared further up, before const_regs, which
+    // (draw_mode itself is declared further up, before cp.regs, which
     // also branches on it.)
     // Moved up from the legacy I/O pass below so the draw-mode store_output
     // handling (in the main walk, ahead of that pass) can read it too; same
@@ -633,7 +517,6 @@ unsafe fn compile_nir_inner(
     // Deliberately separate from push_const_reg: that cache is word indices
     // into the push-constant staging buffer, a different LS_BASE-relative
     // address space than the vertex/uniform buffer draw-mode LOADs read.
-    let mut const_int_reg: HashMap<i32, u8> = HashMap::new();
     // Vertex stage: resolved scalar producer per output location, built
     // in program order as store_output is seen, so a load_output reading
     // an earlier store in the SAME shader (`frag_pos = gl_Position.xyz`)
@@ -741,8 +624,8 @@ unsafe fn compile_nir_inner(
                                 Some(&b) if !sel.vec_map.contains_key(&d) => b,
                                 _ => continue,
                             };
-                            if vs_const_window {
-                                let v = vs_const_vreg!(bits);
+                            if cp.vs_window {
+                                let v = cp.vs_const(&mut sel, bits, false);
                                 sel.vec_map.insert(d, vec![(v, 0u8)]);
                                 continue;
                             }
@@ -802,7 +685,7 @@ unsafe fn compile_nir_inner(
                                 // a >= b  ->  1 - FSTEP(b - a), as
                                 // FADD(1.0, FNEG(step)). The 1.0 comes from a
                                 // pinned constant register, same mechanism as
-                                // the existing const_uniforms.
+                                // the existing cp.uniforms.
                                 nir_op_fge => {
                                     let d = sel.fsub(b, a);
                                     let st = sel.next_vreg; sel.next_vreg += 1;
@@ -821,12 +704,12 @@ unsafe fn compile_nir_inner(
                                                 per_pixel_fixed.insert(c);
                                                 sel.prog.push(BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
                                                 v
-                                            } else if vs_const_window {
+                                            } else if cp.vs_window {
                                                 // A pinned register is not staged for a draw's vertex shader.
-                                                vs_const_vreg!(1.0f32.to_bits())
+                                                cp.vs_const(&mut sel, 1.0f32.to_bits(), false)
                                             } else {
-                                                let reg = alloc_const_reg(&mut const_reg_count);
-                                                const_uniforms.push((reg, 1.0f32.to_bits()));
+                                                let reg = cp.alloc_reg();
+                                                cp.uniforms.push((reg, 1.0f32.to_bits()));
                                                 sel.ubo.insert(v, Ubo::Fixed(reg));
                                                 v
                                             };
@@ -872,12 +755,12 @@ unsafe fn compile_nir_inner(
                                                 per_pixel_fixed.insert(c);
                                                 sel.prog.push(BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
                                                 v
-                                            } else if vs_const_window {
+                                            } else if cp.vs_window {
                                                 // A pinned register is not staged for a draw's vertex shader.
-                                                vs_const_vreg!(1.0f32.to_bits())
+                                                cp.vs_const(&mut sel, 1.0f32.to_bits(), false)
                                             } else {
-                                                let reg = alloc_const_reg(&mut const_reg_count);
-                                                const_uniforms.push((reg, 1.0f32.to_bits()));
+                                                let reg = cp.alloc_reg();
+                                                cp.uniforms.push((reg, 1.0f32.to_bits()));
                                                 sel.ubo.insert(v, Ubo::Fixed(reg));
                                                 v
                                             };
@@ -917,11 +800,11 @@ unsafe fn compile_nir_inner(
                                             per_pixel_fixed.insert(c);
                                             sel.prog.push(BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
                                             v
-                                        } else if vs_const_window {
-                                            vs_const_vreg!(1.0f32.to_bits())
+                                        } else if cp.vs_window {
+                                            cp.vs_const(&mut sel, 1.0f32.to_bits(), false)
                                         } else {
-                                            let reg = alloc_const_reg(&mut const_reg_count);
-                                            const_uniforms.push((reg, 1.0f32.to_bits()));
+                                            let reg = cp.alloc_reg();
+                                            cp.uniforms.push((reg, 1.0f32.to_bits()));
                                             sel.ubo.insert(v, Ubo::Fixed(reg));
                                             v
                                         };
@@ -1041,9 +924,8 @@ unsafe fn compile_nir_inner(
                             let sl = &alu.srcs_as_slice()[0];
                             let (x, xc) = resolve_vm(&sel.vec_map, sl.src.as_def().index, sl.swizzle[0]);
                             let mut kreg = |bits: u32| -> u32 {
-                                if !draw_mode || vs_const_window {
-                                    return const_int_operand(bits as i32, &mut const_int_reg, &mut const_reg_count,
-                                        &mut const_uniforms, &mut draw_vs_consts, &mut sel.next_vreg, &mut sel.ubo);
+                                if !draw_mode || cp.vs_window {
+                                    return cp.int_operand(&mut sel, bits as i32);
                                 }
                                 let u = fw.slot(bits);
                                 sel.next_vreg += 1;
@@ -1058,9 +940,8 @@ unsafe fn compile_nir_inner(
                             let sl = &alu.srcs_as_slice()[0];
                             let (x, xc) = resolve_vm(&sel.vec_map, sl.src.as_def().index, sl.swizzle[0]);
                             let mut kreg = |bits: u32| -> u32 {
-                                if !draw_mode || vs_const_window {
-                                    return const_int_operand(bits as i32, &mut const_int_reg, &mut const_reg_count,
-                                        &mut const_uniforms, &mut draw_vs_consts, &mut sel.next_vreg, &mut sel.ubo);
+                                if !draw_mode || cp.vs_window {
+                                    return cp.int_operand(&mut sel, bits as i32);
                                 }
                                 let u = fw.slot(bits);
                                 sel.next_vreg += 1;
@@ -1079,9 +960,8 @@ unsafe fn compile_nir_inner(
                             let s = &alu.srcs_as_slice()[0];
                             let (x, xc) = resolve_vm(&sel.vec_map, s.src.as_def().index, s.swizzle[0]);
                             let mut kreg = |bits: u32| -> u32 {
-                                if !draw_mode || vs_const_window {
-                                    return const_int_operand(bits as i32, &mut const_int_reg, &mut const_reg_count,
-                                        &mut const_uniforms, &mut draw_vs_consts, &mut sel.next_vreg, &mut sel.ubo);
+                                if !draw_mode || cp.vs_window {
+                                    return cp.int_operand(&mut sel, bits as i32);
                                 }
                                 let u = fw.slot(bits);
                                 sel.next_vreg += 1;
@@ -1145,7 +1025,7 @@ unsafe fn compile_nir_inner(
                         // normal at 128x128. FP32 has no such floor.)
                         let comps: Vec<(u32, u8)> = raw.into_iter().map(|v| (v, 0u8)).collect();
                         sel.vec_map.insert(intr.def.index, comps);
-                    } else if (intr.intrinsic == nir_intrinsic_load_input || intr.intrinsic == nir_intrinsic_load_point_coord) && draw_mode && !vs_const_window {
+                    } else if (intr.intrinsic == nir_intrinsic_load_input || intr.intrinsic == nir_intrinsic_load_point_coord) && draw_mode && !cp.vs_window {
                         // Draw front end: FATTR + the perspective-correct barycentrics
                         // already in r5-r7 at fragment start (docs/B1_geometry_front_end.md),
                         // one component at a time -- FATTR loads a component's three
@@ -1203,7 +1083,7 @@ unsafe fn compile_nir_inner(
                             })
                             .collect();
                         sel.vec_map.insert(intr.def.index, comps);
-                    } else if intr.intrinsic == nir_intrinsic_load_input && !vs_const_window {
+                    } else if intr.intrinsic == nir_intrinsic_load_input && !cp.vs_window {
                         // Interpolated varying. Borg has no fixed-function interpolation:
                         // the shader computes it barycentrically. Emit the weights once
                         // (w_i = e_i·inv_area; e0/1/2 = attrs r0/1/2, inv_area = u12), then
@@ -1287,8 +1167,8 @@ unsafe fn compile_nir_inner(
                                     let word_idx = (byte_off / 4) as u32;
                                     let idx_reg = *push_const_reg.entry(word_idx).or_insert_with(|| {
                                         // Vertex: a window word per run; a pinned GPR is clobbered by the fragment pass.
-                                        if vs_const_window {
-                                            return vs_const_vreg!(word_idx, true);
+                                        if cp.vs_window {
+                                            return cp.vs_const(&mut sel, word_idx, true);
                                         }
                                         // Fragment: a window word too (no GPR is staged in draw mode).
                                         if draw_mode && is_fragment {
@@ -1301,7 +1181,7 @@ unsafe fn compile_nir_inner(
                                         // KNOWN GAP, not fixed here: unlike the
                                         // load_const vector-constant case above,
                                         // this pins a GPR regardless of
-                                        // draw_mode (the const_regs reservation
+                                        // draw_mode (the cp.regs reservation
                                         // comment has the vertex-collision
                                         // story) -- this value becomes LOAD's
                                         // own address operand, which must be an
@@ -1314,11 +1194,11 @@ unsafe fn compile_nir_inner(
                                         // (no push constants), so left as-is
                                         // rather than risk a change nothing
                                         // currently tests.
-                                        let reg = alloc_const_reg(&mut const_reg_count);
+                                        let reg = cp.alloc_reg();
                                         // RAW integer, not a float -- this
                                         // becomes rs1 for LOAD, a word INDEX,
                                         // not a shader-visible float value.
-                                        const_uniforms.push((reg, word_idx));
+                                        cp.uniforms.push((reg, word_idx));
                                         let v = sel.next_vreg;
                                         sel.next_vreg += 1;
                                         sel.ubo.insert(v, Ubo::Fixed(reg));
@@ -1369,8 +1249,8 @@ unsafe fn compile_nir_inner(
                         macro_rules! kc {
                             ($b:expr) => {{
                                 let bits: u32 = $b;
-                                if vs_const_window {
-                                    vs_const_vreg!(bits, true)
+                                if cp.vs_window {
+                                    cp.vs_const(&mut sel, bits, true)
                                 } else {
                                     let u = fw.slot(bits);
                                     let v = sel.next_vreg;
@@ -1380,8 +1260,8 @@ unsafe fn compile_nir_inner(
                                 }
                             }};
                         }
-                        if vs_const_window {
-                            let _ = vs_const_vreg!(1u32);   // each word's address is the slot's base plus 1
+                        if cp.vs_window {
+                            let _ = cp.vs_const(&mut sel, 1u32, false);   // each word's address is the slot's base plus 1
                         }
                         // A register holding 0, to copy window words through (an instruction reads one).
                         let f = sel.next_vreg; sel.next_vreg += 1;
@@ -1471,15 +1351,15 @@ unsafe fn compile_nir_inner(
                             .wrapping_sub(VERT_ATTRIB_GENERIC0);
                         let n = intr.def.num_components as usize;
                         let ctl_bits = (1u32 << 16) | (128 + loc);
-                        let twelve = vs_const_vreg!(12);
+                        let twelve = cp.vs_const(&mut sel, 12, false);
                         // A line's other endpoint (location + 24): the control word is built from
                         // the endpoint's own, so the pair costs one window word.
                         let ctl = if loc >= 24 {
-                            let _ = vs_const_vreg!(ctl_bits - 24);
-                            let _ = vs_const_vreg!(24, true);
-                            vs_const_vreg!(ctl_bits, true)
+                            let _ = cp.vs_const(&mut sel, ctl_bits - 24, false);
+                            let _ = cp.vs_const(&mut sel, 24, true);
+                            cp.vs_const(&mut sel, ctl_bits, true)
                         } else {
-                            vs_const_vreg!(ctl_bits)
+                            cp.vs_const(&mut sel, ctl_bits, false)
                         };
                         // The index register: r30 (VertexIndex) or r31 (InstanceIndex).
                         let idx_reg = if loc < 16 && flags.instanced(loc) { 31 } else { 30 };
@@ -1509,7 +1389,7 @@ unsafe fn compile_nir_inner(
                         }
                         sel.vec_map.insert(intr.def.index, comps);
                     } else if draw_mode && (intr.intrinsic == nir_intrinsic_load_ubo
-                                            || (vs_const_window && intr.intrinsic == nir_intrinsic_load_input)) {
+                                            || (cp.vs_window && intr.intrinsic == nir_intrinsic_load_input)) {
                         // A draw-mode vertex shader's `in` attributes are read from
                         // the same per-vertex UBO region the firmware fills for
                         // cube.vert: input location L is `vec4 attr[]` at word
@@ -1570,17 +1450,16 @@ unsafe fn compile_nir_inner(
                             // holds SSA/vreg indices, and a small GPR number
                             // could collide with a real NIR SSA index.
                             // The slot size seeds the window so each further buffer's base is a sum.
-                            if vs_const_window && base_words >= 16384 {
-                                let _ = vs_const_vreg!(16384u32);
+                            if cp.vs_window && base_words >= 16384 {
+                                let _ = cp.vs_const(&mut sel, 16384u32, false);
                             }
                             macro_rules! cint {
                                 ($v:expr) => {{
                                     let v: i32 = $v;
-                                    if vs_const_window {
-                                        vs_const_vreg!(v as u32)
+                                    if cp.vs_window {
+                                        cp.vs_const(&mut sel, v as u32, false)
                                     } else {
-                                        const_int_operand(v, &mut const_int_reg, &mut const_reg_count,
-                                            &mut const_uniforms, &mut draw_vs_consts, &mut sel.next_vreg, &mut sel.ubo)
+                                        cp.int_operand(&mut sel, v)
                                     }
                                 }};
                             }
@@ -1600,7 +1479,7 @@ unsafe fn compile_nir_inner(
                                 // goes through the strided path below instead,
                                 // with stride 0 (VertexIndex * 0 + base).
                                 // A base past 16 bits does not fit a staged register: a window constant.
-                                (0, _) if !vs_const_window && base_words >= 65536 => {
+                                (0, _) if !cp.vs_window && base_words >= 65536 => {
                                     let bits = base_words as u32;
                                     let u = fw.slot(bits);
                                     let v = sel.next_vreg;
@@ -1608,7 +1487,7 @@ unsafe fn compile_nir_inner(
                                     sel.ubo.insert(v, Ubo::Uniform(u as u8));
                                     v
                                 }
-                                (0, _) if !vs_const_window => cint!(base_words),
+                                (0, _) if !cp.vs_window => cint!(base_words),
                                 // A single constant word: the address is a window word, no chain.
                                 (0, _) if n == 1 => cint!(base_words),
                                 _ => {
@@ -1668,8 +1547,8 @@ unsafe fn compile_nir_inner(
                                 Some(&b) if !sel.vec_map.contains_key(&d) => b,
                                 _ => continue,
                             };
-                            if vs_const_window {
-                                let v = vs_const_vreg!(bits);
+                            if cp.vs_window {
+                                let v = cp.vs_const(&mut sel, bits, false);
                                 sel.vec_map.insert(d, vec![(v, 0u8)]);
                                 continue;
                             }
@@ -1984,7 +1863,7 @@ unsafe fn compile_nir_inner(
                         // rather than a pinned GPR. NOT a legacy-style GPR
                         // pin: legacy's r17-19(+23) sit inside a register-
                         // pressured draw-mode VERTEX shader's own reachable
-                        // general-pool range (the const_regs reservation
+                        // general-pool range (the cp.regs reservation
                         // comment has the full story -- a hardware-caught
                         // bug, cube.vert's address-chain LOADs silently
                         // zeroing cube.frag's lightDir), and r0-4 cannot be
@@ -1999,8 +1878,8 @@ unsafe fn compile_nir_inner(
                         let comps: Vec<(u32, u8)> = (0..n)
                             .map(|c| {
                                 let bits = unsafe { lc.values()[c].u32_ };
-                                if vs_const_window {
-                                    return (vs_const_vreg!(bits), 0u8);
+                                if cp.vs_window {
+                                    return (cp.vs_const(&mut sel, bits, false), 0u8);
                                 }
                                 let idx = fw.slot(bits);
                                 let v = sel.next_vreg;
@@ -2015,9 +1894,9 @@ unsafe fn compile_nir_inner(
                         // writes them once via MMIO).
                         let comps: Vec<(u32, u8)> = (0..n)
                             .map(|c| {
-                                let reg = alloc_const_reg(&mut const_reg_count);
+                                let reg = cp.alloc_reg();
                                 let bits = unsafe { lc.values()[c].u32_ };
-                                const_uniforms.push((reg, bits));
+                                cp.uniforms.push((reg, bits));
                                 let v = sel.next_vreg;
                                 sel.next_vreg += 1;
                                 sel.ubo.insert(v, Ubo::Fixed(reg));
@@ -2149,15 +2028,15 @@ unsafe fn compile_nir_inner(
         // Point expansion: this vertex is a corner of the point's quad; the corner's clip-space
         // offset (slot 16: x y, then the point coordinate u v), times gl_PointSize, times w, moves it from the point's centre.
         let ctl_bits = (1u32 << 16) | (128 + 16);
-        assert!(draw_vs_consts.len() < DRAW_VS_CONST_WORDS,
+        assert!(cp.vs_consts.len() < DRAW_VS_CONST_WORDS,
             "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
-        let u = DRAW_VS_CONST_U0 + draw_vs_consts.len() as u8;
-        draw_vs_consts.push((u, ctl_bits));
+        let u = DRAW_VS_CONST_U0 + cp.vs_consts.len() as u8;
+        cp.vs_consts.push((u, ctl_bits));
         let ctl = sel.next_vreg; sel.next_vreg += 1;
         sel.ubo.insert(ctl, Ubo::Uniform(u));
         let idx = sel.next_vreg; sel.next_vreg += 1;
         sel.ubo.insert(idx, Ubo::Fixed(30));
-        let twelve = vs_const_vreg!(12);   // shared with the attribute fetches
+        let twelve = cp.vs_const(&mut sel, 12, false);   // shared with the attribute fetches
         let ty = sel.next_vreg; sel.next_vreg += 1;
         sel.prog.push(BorgInstr { mnem: "ISRL", dst: ty, srcs: vec![idx, twelve], swz: vec![0, 0] });
         let hi = sel.next_vreg; sel.next_vreg += 1;
@@ -2187,16 +2066,8 @@ unsafe fn compile_nir_inner(
             let size = outs.psize.map(|ps| {
                 // Clamp to the advertised range [1, 64]: x - c*(x - 64), c = step(x - 64).
                 let x = sel.reg(ps).0;
-                let mut win = |bits: u32, draw_vs_consts: &mut Vec<(u8, u32)>, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| {
-                    let u = DRAW_VS_CONST_U0 + draw_vs_consts.len() as u8;
-                    assert!(draw_vs_consts.len() < DRAW_VS_CONST_WORDS, "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
-                    draw_vs_consts.push((u, bits));
-                    let v = *next_vreg; *next_vreg += 1;
-                    ubo.insert(v, Ubo::Uniform(u));
-                    v
-                };
                 // upper: x -= step(x - 64) * (x - 64)
-                let neg_hi = win((-64.0f32).to_bits(), &mut draw_vs_consts, &mut sel.ubo, &mut sel.next_vreg);
+                let neg_hi = cp.vs_win(&mut sel, (-64.0f32).to_bits());
                 let t = sel.op0("FADD", vec![x, neg_hi]);
                 let c = sel.op0("FSTEP", vec![t]);
                 let ct = sel.op0("FMUL", vec![c, t]);
@@ -2764,7 +2635,7 @@ unsafe fn compile_nir_inner(
         if !tex_dsts.is_empty() {
             extra_reserved.extend_from_slice(&[21, 22, 23]);
         }
-        // Only the const_regs prefix actually pinned (const_reg_count) --
+        // Only the cp.regs prefix actually pinned (cp.count) --
         // reserving the whole 12-register pool regardless of use starved the
         // general ALU pool for a shader that only pins a few (a 4x4 matmul
         // alone needs more than 30-17 live registers at once, spilling to
@@ -2773,7 +2644,7 @@ unsafe fn compile_nir_inner(
         // hand one of them to an ordinary ALU temporary, clobbering a pinned
         // LOAD-address constant -- latent since no vertex shader pinned any
         // before draw mode's LOADs.
-        extra_reserved.extend_from_slice(&const_regs[..const_reg_count]);
+        extra_reserved.extend_from_slice(&cp.regs[..cp.count]);
     } else {
         // Fragment: colour → r26/27/28; edge-function attrs occupy r0/r1/r2; the
         // TEX result occupies a fixed 4-reg block r20..r23.
@@ -2826,8 +2697,8 @@ unsafe fn compile_nir_inner(
             // there too would shrink its pool for no reason.
             extra_reserved.extend_from_slice(&[0, 1, 2]);
         }
-        // const_regs[..const_reg_count]: r17-19(+23), the actually-pinned
-        // prefix of this shader's constant registers (see const_regs
+        // cp.regs[..cp.count]: r17-19(+23), the actually-pinned
+        // prefix of this shader's constant registers (see cp.regs
         // above) -- needed in both modes. KNOWN GAP, not fixed here: a
         // register-pressured draw-mode VERTEX shader's own general ALU
         // pool can also reach r17-19 (nothing there knows they are spoken
@@ -2836,11 +2707,11 @@ unsafe fn compile_nir_inner(
         // (cube.vert's address-chain LOADs did exactly this, silently
         // zeroing cube.frag's lightDir). r0-4 cannot be the fix either:
         // the draw front end's raster ROM destroys them on every pixel
-        // (see const_regs's own comment). Needs either lowering cube.vert's
+        // (see cp.regs's own comment). Needs either lowering cube.vert's
         // register pressure or a firmware-side re-poke of the fragment's
         // consts after vertex processing, neither of which is a
         // register-allocation change.
-        extra_reserved.extend_from_slice(&const_regs[..const_reg_count]);
+        extra_reserved.extend_from_slice(&cp.regs[..cp.count]);
         // r24 (alpha) only when it is actually an output. Reserving it
         // unconditionally would shrink the allocator's pool for every
         // existing shader to no purpose.
@@ -3114,8 +2985,8 @@ unsafe fn compile_nir_inner(
         words.len() - n_body,
         pending
     );
-    if !const_uniforms.is_empty() {
-        let cs: Vec<String> = const_uniforms.iter().map(|(r, v)| format!("r{r}={v:#06x}")).collect();
+    if !cp.uniforms.is_empty() {
+        let cs: Vec<String> = cp.uniforms.iter().map(|(r, v)| format!("r{r}={v:#06x}")).collect();
         eprintln!("borgc: const regs (firmware-staged via MMIO): {}", cs.join(" "));
     }
     if !fw.consts.is_empty() {
@@ -3125,8 +2996,8 @@ unsafe fn compile_nir_inner(
             cs.join(" ")
         );
     }
-    if !draw_vs_consts.is_empty() {
-        let cs: Vec<String> = draw_vs_consts.iter().map(|(u, v)| format!("u{u}={v:#010x}")).collect();
+    if !cp.vs_consts.is_empty() {
+        let cs: Vec<String> = cp.vs_consts.iter().map(|(u, v)| format!("u{u}={v:#010x}")).collect();
         eprintln!(
             "borgc: draw-mode vertex window consts (write to draw_vs_const_offset + 4*(u-25) before the draw): {}",
             cs.join(" ")
@@ -3161,7 +3032,7 @@ unsafe fn compile_nir_inner(
     // vertex shader, u20+ for a fragment shader) and, for a vertex shader,
     // how many varying components it SOUTs (the record size).
     let window: Vec<(u8, u32)> = if is_vertex {
-        draw_vs_consts.clone()
+        cp.vs_consts.clone()
     } else {
         fw.consts.iter().map(|&(u, v)| (u as u8, v)).collect()
     };
@@ -3171,7 +3042,7 @@ unsafe fn compile_nir_inner(
         .map(|i| i.swz[0] + 1)
         .max()
         .unwrap_or(0);
-    let blob = emit_blob(&words, &outputs, &const_uniforms,
+    let blob = emit_blob(&words, &outputs, &cp.uniforms,
                          if draw_mode { Some((num_varyings, &window[..])) } else { None });
     eprintln!(
         "borgc: .borg blob = {} bytes ({} instr, {} output regs, {} window consts, {} varyings)",

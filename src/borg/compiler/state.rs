@@ -91,3 +91,129 @@ impl Selector {
         }
     }
 }
+
+pub const DRAW_VS_CONST_U0: u8 = 25;
+pub const DRAW_VS_CONST_WORDS: usize = 6;
+
+pub struct ConstPool {
+    pub regs: &'static [u8],
+    pub count: usize,
+    pub int_reg: HashMap<i32, u8>,
+    pub uniforms: Vec<(u8, u32)>,
+    pub vs_consts: Vec<(u8, u32)>,
+    pub vs_by_bits: HashMap<u32, u32>,
+    pub vs_zero: Option<u32>,
+    pub vs_window: bool,
+}
+
+impl ConstPool {
+    pub fn new(regs: &'static [u8], vs_window: bool) -> Self {
+        ConstPool {
+            regs,
+            count: 0,
+            int_reg: HashMap::new(),
+            uniforms: Vec::new(),
+            vs_consts: Vec::new(),
+            vs_by_bits: HashMap::new(),
+            vs_zero: None,
+            vs_window,
+        }
+    }
+
+    pub fn alloc_reg(&mut self) -> u8 {
+        assert!(self.count < self.regs.len(),
+            "borgc: shader needs more than {} constant registers ({:?})", self.regs.len(), self.regs);
+        let reg = self.regs[self.count];
+        self.count += 1;
+        reg
+    }
+
+    pub fn pin_int(&mut self, v: i32) -> u8 {
+        if let Some(&r) = self.int_reg.get(&v) {
+            return r;
+        }
+        let r = self.alloc_reg();
+        self.uniforms.push((r, v as u32));
+        self.int_reg.insert(v, r);
+        r
+    }
+
+    pub fn int_operand(&mut self, sel: &mut Selector, v: i32) -> u32 {
+        let kind = if self.vs_window {
+            let idx = match self.int_reg.get(&v) {
+                Some(&u) => u,
+                None => {
+                    assert!(self.vs_consts.len() < DRAW_VS_CONST_WORDS,
+                        "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
+                    let u = DRAW_VS_CONST_U0 + self.vs_consts.len() as u8;
+                    self.vs_consts.push((u, v as u32));
+                    self.int_reg.insert(v, u);
+                    u
+                }
+            };
+            crate::Ubo::Uniform(idx)
+        } else {
+            crate::Ubo::Fixed(self.pin_int(v))
+        };
+        let r = sel.fresh();
+        sel.ubo.insert(r, kind);
+        r
+    }
+
+    pub fn vs_win(&mut self, sel: &mut Selector, bits: u32) -> u32 {
+        let u = DRAW_VS_CONST_U0 + self.vs_consts.len() as u8;
+        assert!(self.vs_consts.len() < DRAW_VS_CONST_WORDS,
+            "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
+        self.vs_consts.push((u, bits));
+        let v = sel.fresh();
+        sel.ubo.insert(v, crate::Ubo::Uniform(u));
+        v
+    }
+
+    pub fn vs_const(&mut self, sel: &mut Selector, bits: u32, derive: bool) -> u32 {
+        if let Some(&v) = self.vs_by_bits.get(&bits) {
+            return v;
+        }
+        let mut return_zero = false;
+        let v = sel.fresh();
+        let derivable = bits == 0
+            || self.vs_by_bits.keys().any(|&a| a >= 1 && a < bits && self.vs_by_bits.get(&(bits - a)).is_some());
+        if self.vs_consts.len() < DRAW_VS_CONST_WORDS && !(derive && derivable) && bits != 0 {
+            let u = DRAW_VS_CONST_U0 as u32 + self.vs_consts.len() as u32;
+            self.vs_consts.push((u as u8, bits));
+            sel.ubo.insert(v, crate::Ubo::Uniform(u as u8));
+        } else {
+            if self.vs_zero.is_none() {
+                let f = sel.fresh();
+                sel.ubo.insert(f, crate::Ubo::Fixed(30));
+                let z = sel.fresh();
+                sel.prog.push(crate::BorgInstr { mnem: "ISUB", dst: z, srcs: vec![f, f], swz: vec![0, 0] });
+                self.vs_zero = Some(z);
+            }
+            let z = self.vs_zero.unwrap();
+            let mut small: Vec<(u32, u32)> =
+                self.vs_by_bits.iter().filter(|(&b, _)| b >= 1 && b < bits).map(|(&b, &r)| (b, r)).collect();
+            small.sort();
+            if bits == 0 {
+                self.vs_by_bits.insert(0, z);
+                return_zero = true;
+            } else {
+                let pair = small.iter().find_map(|&(a, ra)| {
+                    small.iter().find(|&&(b, _)| a + b == bits).map(|&(_, rb)| (ra, rb))
+                });
+                let (ra, rb) = pair.unwrap_or_else(|| {
+                    panic!("borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS)
+                });
+                let t = sel.fresh();
+                sel.prog.push(crate::BorgInstr { mnem: "IADD", dst: t, srcs: vec![z, ra], swz: vec![0, 0] });
+                sel.prog.push(crate::BorgInstr { mnem: "IADD", dst: v, srcs: vec![t, rb], swz: vec![0, 0] });
+            }
+        }
+        if return_zero {
+            self.vs_zero.unwrap()
+        } else {
+            self.vs_by_bits.insert(bits, v);
+            v
+        }
+    }
+}
