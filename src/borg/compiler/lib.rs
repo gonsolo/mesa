@@ -563,8 +563,9 @@ unsafe fn compile_nir_inner(
                         vs_zero = Some(z);
                     }
                     let z = vs_zero.unwrap();
-                    let small: Vec<(u32, u32)> =
+                    let mut small: Vec<(u32, u32)> =
                         vs_vreg_by_bits.iter().filter(|(&b, _)| b >= 1 && b < bits).map(|(&b, &r)| (b, r)).collect();
+                    small.sort();
                     if bits == 0 {
                         vs_vreg_by_bits.insert(0, z);
                         return_zero = true;
