@@ -174,9 +174,7 @@ pub(crate) unsafe fn collect_cf_marks(
 
 #[derive(Clone, Copy, PartialEq)]
 enum Ubo {
-    Mvp(i32),
     Pos,
-    Attr,
     Uniform(u8),
     Fixed(u8),
 }
@@ -249,7 +247,6 @@ unsafe fn compile_nir_inner(
 
     use std::collections::HashMap;
 
-    let draw_mode = env::var("BORGC_LEGACY").is_err();
     let regs: &'static [u8] = if is_vertex {
         &[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     } else if tex > 0 {
@@ -257,8 +254,7 @@ unsafe fn compile_nir_inner(
     } else {
         &[17, 18, 19, 23]
     };
-    let mut cx = Cx::new(regs, draw_mode, is_vertex, is_fragment, flags);
-    const VARYING_SLOT_POS: u32 = 0;
+    let mut cx = Cx::new(regs, is_vertex, is_fragment, flags);
 
     let frag_alpha = env::var("BORGC_FRAG_ALPHA").is_ok() || (is_fragment && flags.alpha_output());
     cx.frag_alpha = frag_alpha;
@@ -334,129 +330,65 @@ unsafe fn compile_nir_inner(
         }
     }
 
-    let mut mvp_loads = 0u32;
-    let mut pos_loads = 0u32;
-    let mut attr_loads = 0u32;
-    let mut gl_position: Option<u32> = None;
-    let mut varying_outs = 0u32;
     let mut pos_out: [Option<u32>; 4] = [None; 4];
     let mut frag_out: [Option<u32>; 4] = [None; 4];
-    if !draw_mode && !entry.is_null() {
-        for block in (*entry).iter_blocks() {
-            for instr in block.iter_instr_list() {
-                if let Some(intr) = instr.as_intrinsic() {
-                    match intr.intrinsic {
-                        nir_intrinsic_load_ubo => {
-                            let rb = intr.range_base();
-                            let kind = match rb {
-                                0..=63 => {
-                                    mvp_loads += 1;
-                                    Ubo::Mvp(rb)
-                                }
-                                64..=639 => {
-                                    pos_loads += 1;
-                                    Ubo::Pos
-                                }
-                                _ => {
-                                    attr_loads += 1;
-                                    Ubo::Attr
-                                }
-                            };
-                            cx.sel.ubo.insert(intr.def.index, kind);
-                        }
-                        nir_intrinsic_store_output => {
-                            let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
-                            let src = intr.srcs_as_slice()[0].as_def().index;
-                            if is_vertex && loc == VARYING_SLOT_POS {
-                                gl_position = Some(src);
-                                let n = cx.sel.vec_map.get(&src).map_or(1, |v| v.len()).min(4);
-                                for c in 0..n {
-                                    let (d, _) = resolve_vm(&cx.sel.vec_map, src, c as u8);
-                                    pos_out[c] = Some(d);
-                                    cx.out_roots.push(d);
-                                }
-                            } else if is_fragment {
-                                let ncomp = if frag_alpha { 4 } else { 3 };
-                                let n = cx.sel.vec_map.get(&src).map_or(1, |v| v.len()).min(ncomp);
-                                for c in 0..n {
-                                    let (d, _) = resolve_vm(&cx.sel.vec_map, src, c as u8);
-                                    frag_out[c] = Some(d);
-                                    cx.out_roots.push(d);
-                                }
-                            } else {
-                                varying_outs += 1;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
     let srgb = cx.sel.prog.iter().any(|i| i.mnem == "FSRGB");
     cx.skipped.retain(|&op| !(matches!(op, "fpow" | "fge") && srgb));
     if !cx.skipped.is_empty() {
         eprintln!("borgc: ERROR unhandled NIR ops, refusing to emit a wrong shader: {}", cx.skipped.join(", "));
         return 0;
     }
-    if draw_mode && is_vertex && flags.point_quads() {
+    if is_vertex && flags.point_quads() {
         cx.epilogue_point_quads();
     }
-    if draw_mode && is_fragment && flags.multi_target() {
+    if is_fragment && flags.multi_target() {
         cx.epilogue_multi_target();
     }
-    if draw_mode && is_fragment && flags.r8_unorm() && cx.outs.frag[0].is_some() {
+    if is_fragment && flags.r8_unorm() && cx.outs.frag[0].is_some() {
         cx.epilogue_r8_unorm();
     }
-    if draw_mode && is_fragment && flags.packed() && !flags.multi_target() && cx.outs.frag[0].is_some() {
+    if is_fragment && flags.packed() && !flags.multi_target() && cx.outs.frag[0].is_some() {
         cx.epilogue_packed();
     }
-    if draw_mode && is_fragment && flags.half() && cx.outs.frag[0].is_some() {
+    if is_fragment && flags.half() && cx.outs.frag[0].is_some() {
         cx.epilogue_half();
     }
-    if draw_mode && is_fragment && flags.bytes_packed() && cx.outs.frag[3].is_some() {
+    if is_fragment && flags.bytes_packed() && cx.outs.frag[3].is_some() {
         cx.epilogue_bytes_packed();
     }
-    if draw_mode {
-        if is_fragment {
-            for c in 0..4 {
-                let Some((v, comp)) = cx.outs.frag[c] else { continue };
-                // A TEX result block (r20-r23) or FATTR block is not the output register: copy that too.
-                if cx.sel.prog.iter().any(|i| i.dst == v) && !cx.tex_dsts.contains(&v) && !cx.fattr_dsts.contains(&v) {
-                    continue;
-                }
-                let out = cx.sel.next_vreg;
-                cx.sel.next_vreg += 1;
-                if cx.tex_dsts.contains(&v) || cx.fattr_dsts.contains(&v) {
-                    cx.sel.prog.push(BorgInstr { mnem: "IOR", dst: out, srcs: vec![v, v], swz: vec![comp, comp] });
-                } else {
-                    cx.sel.prog.push(BorgInstr { mnem: "FMOV", dst: out, srcs: vec![v], swz: vec![comp] });
-                }
-                cx.outs.frag[c] = Some((out, 0));
-                cx.out_roots.push(out);
+    if is_fragment {
+        for c in 0..4 {
+            let Some((v, comp)) = cx.outs.frag[c] else { continue };
+            // A TEX result block (r20-r23) or FATTR block is not the output register: copy that too.
+            if cx.sel.prog.iter().any(|i| i.dst == v) && !cx.tex_dsts.contains(&v) && !cx.fattr_dsts.contains(&v) {
+                continue;
             }
+            let out = cx.sel.next_vreg;
+            cx.sel.next_vreg += 1;
+            if cx.tex_dsts.contains(&v) || cx.fattr_dsts.contains(&v) {
+                cx.sel.prog.push(BorgInstr { mnem: "IOR", dst: out, srcs: vec![v, v], swz: vec![comp, comp] });
+            } else {
+                cx.sel.prog.push(BorgInstr { mnem: "FMOV", dst: out, srcs: vec![v], swz: vec![comp] });
+            }
+            cx.outs.frag[c] = Some((out, 0));
+            cx.out_roots.push(out);
         }
-        for (c, v) in cx.outs.pos.iter().enumerate() {
-            pos_out[c] = v.map(|(d, _)| d);
-        }
-        for (c, v) in cx.outs.frag.iter().enumerate() {
-            frag_out[c] = v.map(|(d, _)| d);
-        }
-        cx.out_roots.extend(cx.outs.roots.iter().copied());
-        eprintln!(
-            "borgc: draw-mode I/O map — {} vertex-pulling/MVP load(s), {} SOUT(s), \
-             gl_Position={}",
-            cx.descriptor_defs.len(), // proxy: one load_ubo per descriptor use
-            cx.outs.stores.len(),
-            cx.outs.pos[0].is_some(),
-        );
-    } else {
-        eprintln!(
-            "borgc: I/O map — MVP {mvp_loads}→u8..u23, position {pos_loads}→u0..u2, \
-             attr {attr_loads}→u6/u7 (DMA, DCE'd); gl_Position=v{}→r0..r3 ({varying_outs} varying out)",
-            gl_position.map_or("?".to_string(), |v| v.to_string())
-        );
     }
+    for (c, v) in cx.outs.pos.iter().enumerate() {
+        pos_out[c] = v.map(|(d, _)| d);
+    }
+    for (c, v) in cx.outs.frag.iter().enumerate() {
+        frag_out[c] = v.map(|(d, _)| d);
+    }
+    cx.out_roots.extend(cx.outs.roots.iter().copied());
+    eprintln!(
+        "borgc: draw-mode I/O map — {} vertex-pulling/MVP load(s), {} SOUT(s), \
+         gl_Position={}",
+        cx.descriptor_defs.len(), // proxy: one load_ubo per descriptor use
+        cx.outs.stores.len(),
+        cx.outs.pos[0].is_some(),
+    );
+
 
     let mut frag_z: Option<u32> = None;
     if is_fragment {
@@ -483,7 +415,7 @@ unsafe fn compile_nir_inner(
 
     #[allow(static_mut_refs)]
     unsafe { LAST_FRAG_POOL.clear(); }
-    if draw_mode && is_fragment && cx.fw.count > 11 {
+    if is_fragment && cx.fw.count > 11 {
         let first_pool = 20 + 9;
         // The window keeps the nine constants read most often: a window word costs no register.
         {
@@ -608,11 +540,10 @@ unsafe fn compile_nir_inner(
     }
     dce(&mut cx.sel.prog, &cx.out_roots);
     fuse_fmadd(&mut cx.sel.prog, &cx.out_roots, &|v| {
-        matches!(cx.sel.ubo.get(&v), Some(Ubo::Mvp(_)) | Some(Ubo::Uniform(_)) | Some(Ubo::Attr))
+        matches!(cx.sel.ubo.get(&v), Some(Ubo::Uniform(_)))
     });
-    if draw_mode {
-        schedule_for_pressure(&mut cx.sel.prog, &cx.out_roots);
-    }
+    schedule_for_pressure(&mut cx.sel.prog, &cx.out_roots);
+
 
     if is_fragment {
         let uniform_roots: std::collections::HashSet<u32> = cx.sel.ubo
@@ -650,9 +581,6 @@ unsafe fn compile_nir_inner(
                 forced.insert(*def, c as u8);
             }
         }
-        if gl_position.is_some() {
-            extra_reserved.push(4);
-        }
         // A typed vertex fetch (TEX) writes rd..rd+3: one block, r20..r23, for all of them.
         for &t in &cx.tex_dsts {
             forced.insert(t, 20);
@@ -677,50 +605,46 @@ unsafe fn compile_nir_inner(
             forced.insert(zr, 29); // interpolated depth → r29
         }
         extra_reserved.extend_from_slice(&[4, 21, 22, 23, 25, 26, 27, 28, 29]);   // r25 is the kill flag
-        if draw_mode {
-            extra_reserved.extend_from_slice(&[5, 6, 7, 10, 11, 12]);
-            if cx.frag_coord_w {
-                extra_reserved.push(8);
-            }
-        } else {
-            extra_reserved.extend_from_slice(&[0, 1, 2]);
+        extra_reserved.extend_from_slice(&[5, 6, 7, 10, 11, 12]);
+        if cx.frag_coord_w {
+            extra_reserved.push(8);
         }
+
         extra_reserved.extend_from_slice(&cx.cp.regs[..cx.cp.count]);
         if frag_out[3].is_some() {
             extra_reserved.push(24);
         }
     }
 
-    if draw_mode {
-        let is_win = |v: &u32, ubo: &HashMap<u32, Ubo>| matches!(ubo.get(v), Some(Ubo::Uniform(_)));
-        if cx.sel.prog.iter().any(|i| i.srcs.iter().filter(|v| is_win(v, &cx.sel.ubo)).count() > 1) {
-            let f = cx.sel.next_vreg;
-            let z = cx.sel.next_vreg + 1;
-            cx.sel.next_vreg += 2;
-            cx.sel.ubo.insert(f, Ubo::Fixed(30));
-            let mut out = vec![BorgInstr { mnem: "ISUB", dst: z, srcs: vec![f, f], swz: vec![0, 0] }];
-            for mut ins in std::mem::take(&mut cx.sel.prog) {
-                let mut seen = false;
-                for k in 0..ins.srcs.len() {
-                    if !is_win(&ins.srcs[k], &cx.sel.ubo) {
-                        continue;
-                    }
-                    if !seen {
-                        seen = true;
-                        continue;
-                    }
-                    let t = cx.sel.next_vreg;
-                    cx.sel.next_vreg += 1;
-                    out.push(BorgInstr { mnem: "IADD", dst: t, srcs: vec![ins.srcs[k], z], swz: vec![ins.swz[k], 0] });
-                    ins.srcs[k] = t;
-                    ins.swz[k] = 0;
+    let is_win = |v: &u32, ubo: &HashMap<u32, Ubo>| matches!(ubo.get(v), Some(Ubo::Uniform(_)));
+    if cx.sel.prog.iter().any(|i| i.srcs.iter().filter(|v| is_win(v, &cx.sel.ubo)).count() > 1) {
+        let f = cx.sel.next_vreg;
+        let z = cx.sel.next_vreg + 1;
+        cx.sel.next_vreg += 2;
+        cx.sel.ubo.insert(f, Ubo::Fixed(30));
+        let mut out = vec![BorgInstr { mnem: "ISUB", dst: z, srcs: vec![f, f], swz: vec![0, 0] }];
+        for mut ins in std::mem::take(&mut cx.sel.prog) {
+            let mut seen = false;
+            for k in 0..ins.srcs.len() {
+                if !is_win(&ins.srcs[k], &cx.sel.ubo) {
+                    continue;
                 }
-                out.push(ins);
+                if !seen {
+                    seen = true;
+                    continue;
+                }
+                let t = cx.sel.next_vreg;
+                cx.sel.next_vreg += 1;
+                out.push(BorgInstr { mnem: "IADD", dst: t, srcs: vec![ins.srcs[k], z], swz: vec![ins.swz[k], 0] });
+                ins.srcs[k] = t;
+                ins.swz[k] = 0;
             }
-            cx.sel.prog = out;
+            out.push(ins);
         }
+        cx.sel.prog = out;
     }
-    let soft: Vec<u8> = if is_fragment && draw_mode { vec![20, 21, 22, 23, 24, 26, 27, 28] } else { Vec::new() };
+
+    let soft: Vec<u8> = if is_fragment { vec![20, 21, 22, 23, 24, 26, 27, 28] } else { Vec::new() };
     let mut block_len: HashMap<u32, u8> = HashMap::new();
     for &t in &cx.tex_dsts {
         block_len.insert(t, 4);
@@ -785,11 +709,9 @@ unsafe fn compile_nir_inner(
             return (alloc.get(&s).map_or(0, |&r| r + c), false);
         }
         match cx.sel.ubo.get(&s) {
-            Some(&Ubo::Mvp(rb)) => ((8 + (rb / 16) * 4 + c as i32) as u8, true),
             Some(&Ubo::Pos) => (*pos_gpr.get(&(s, c)).unwrap_or(&0), false),
             Some(&Ubo::Uniform(idx)) => (idx, true),
             Some(&Ubo::Fixed(reg)) => (reg, false),
-            Some(&Ubo::Attr) => (6 + c, true),  // u6=U, u7=V (DMA vertex descriptor)
             _ => (*alloc.get(&s).unwrap_or(&0), false),
         }
     };
@@ -861,15 +783,6 @@ unsafe fn compile_nir_inner(
                 continue;
             }
             match cx.sel.ubo.get(s) {
-                // MVP column → uniform u(8 + column*4 + component), read in place.
-                Some(&Ubo::Mvp(rb)) => {
-                    if f3 == 0 {
-                        r[k] = (8 + (rb / 16) * 4 + c as i32) as u8;
-                        f3 = k as u32 + 1; // funct3 selects this operand slot
-                    } else {
-                        pending += 1; // 2nd uniform in one op needs a preload
-                    }
-                }
                 // position component → its pre-loaded GPR.
                 Some(&Ubo::Pos) => r[k] = *pos_gpr.get(&(*s, c)).unwrap_or(&0),
                 // fragment uniform (inv_area / per-vertex varying) → funct3 read.
@@ -883,15 +796,6 @@ unsafe fn compile_nir_inner(
                 }
                 // edge-function attribute in a fixed register (r0/r1/r2).
                 Some(&Ubo::Fixed(reg)) => r[k] = reg,
-                // attribute: u6=U, u7=V (sequencer DMA fills uniform[6,7]).
-                Some(&Ubo::Attr) => {
-                    if f3 == 0 {
-                        r[k] = 6 + c;
-                        f3 = k as u32 + 1;
-                    } else {
-                        pending += 1; // 2nd uniform in one op needs a preload
-                    }
-                }
                 // ALU intermediate → allocated GPR (or pending if a stray input).
                 None => match alloc.get(s) {
                     Some(&phys) => r[k] = phys,
@@ -904,16 +808,7 @@ unsafe fn compile_nir_inner(
         }
     }
     let n_body = words.len();
-
-    if is_vertex && gl_position.is_some() {
-        words.push(encode("FRCP", 4, 3, 0, 0, 0).unwrap()); // r4 = 1/clip_w
-        words.push(encode("FMUL", 0, 0, 4, 0, 0).unwrap()); // screen_x
-        words.push(encode("FMUL", 1, 1, 4, 0, 0).unwrap()); // screen_y
-        words.push(encode("FMUL", 2, 2, 4, 0, 0).unwrap()); // ndc_z
-        words.push(0x0000_0000); // HALT
-    } else {
-        words.push(0x0000_0000);
-    }
+    words.push(0x0000_0000);
     eprintln!(
         "borgc: encoded {} word(s) = {} uniform pre-load(s) + {} op(s) + {} epilogue \
          ({} operand(s) still pending)",
@@ -946,9 +841,7 @@ unsafe fn compile_nir_inner(
         eprintln!("borgc:   first words: {}", hex.join(" "));
     }
 
-    let outputs: Vec<u8> = if is_vertex && gl_position.is_some() {
-        vec![0, 1, 2]
-    } else if !is_vertex {
+    let outputs: Vec<u8> = if !is_vertex {
         // Fragment colour outputs r26/27/28 + r29 = interpolated depth.
         let mut o: Vec<u8> = (0..3).filter(|&c| frag_out[c].is_some()).map(|c| 26 + c as u8).collect();
         if frag_out[3].is_some() {
@@ -973,7 +866,7 @@ unsafe fn compile_nir_inner(
         .max()
         .unwrap_or(0);
     let blob = emit_blob(&words, &outputs, &cx.cp.uniforms,
-                         if draw_mode { Some((num_varyings, &window[..])) } else { None });
+                         Some((num_varyings, &window[..])));
     eprintln!(
         "borgc: .borg blob = {} bytes ({} instr, {} output regs, {} window cx.consts, {} varyings)",
         blob.len(), words.len(), outputs.len(), window.len(), num_varyings

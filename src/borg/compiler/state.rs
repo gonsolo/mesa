@@ -226,7 +226,6 @@ pub struct Cx {
     pub fw: FragWindow,
     pub outs: DrawOutputs,
     pub consts: HashMap<u32, u32>,
-    pub draw_mode: bool,
     pub out_roots: Vec<u32>,
     pub is_vertex: bool,
     pub is_fragment: bool,
@@ -238,7 +237,6 @@ pub struct Cx {
     pub frag_coord_w: bool,
     pub fetch_ctl_uniform: Option<u32>,
     pub lod_ctl_uniform: Option<u32>,
-    pub vfetch_ctl: HashMap<u32, u8>,
     pub res_binding: HashMap<u32, u32>,
     pub prod: HashMap<u32, (nir_op, Vec<(u32, u8)>)>,
     pub tex_dsts: std::collections::HashSet<u32>,
@@ -253,14 +251,13 @@ pub struct Cx {
 }
 
 impl Cx {
-    pub fn new(regs: &'static [u8], draw_mode: bool, is_vertex: bool, is_fragment: bool, flags: Flags) -> Self {
+    pub fn new(regs: &'static [u8], is_vertex: bool, is_fragment: bool, flags: Flags) -> Self {
         Cx {
             sel: Selector::new(),
-            cp: ConstPool::new(regs, draw_mode && is_vertex),
+            cp: ConstPool::new(regs, is_vertex),
             fw: FragWindow::default(),
             outs: DrawOutputs::default(),
             consts: HashMap::new(),
-            draw_mode,
             out_roots: Vec::new(),
             is_vertex,
             is_fragment,
@@ -272,7 +269,6 @@ impl Cx {
             frag_coord_w: Default::default(),
             fetch_ctl_uniform: Default::default(),
             lod_ctl_uniform: Default::default(),
-            vfetch_ctl: Default::default(),
             res_binding: Default::default(),
             prod: Default::default(),
             tex_dsts: Default::default(),

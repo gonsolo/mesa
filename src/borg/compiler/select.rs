@@ -9,7 +9,7 @@ impl Cx {
         let n = lc.def.num_components as usize;
         if n == 1 {
             self.consts.insert(lc.def.index, unsafe { lc.values()[0].u32_ });
-        } else if self.draw_mode {
+        } else {
             let comps: Vec<(u32, u8)> = (0..n)
                 .map(|c| {
                     let bits = unsafe { lc.values()[c].u32_ };
@@ -24,27 +24,14 @@ impl Cx {
                 })
                 .collect();
             self.sel.vec_map.insert(lc.def.index, comps);
-        } else {
-            let comps: Vec<(u32, u8)> = (0..n)
-                .map(|c| {
-                    let reg = self.cp.alloc_reg();
-                    let bits = unsafe { lc.values()[c].u32_ };
-                    self.cp.uniforms.push((reg, bits));
-                    let v = self.sel.next_vreg;
-                    self.sel.next_vreg += 1;
-                    self.sel.ubo.insert(v, Ubo::Fixed(reg));
-                    (v, 0u8)
-                })
-                .collect();
-            self.sel.vec_map.insert(lc.def.index, comps);
         }
     }
 
     pub unsafe fn tex(&mut self, tex: &nir_tex_instr) {
         let srcs = tex.srcs_as_slice();
-        let is_txl = tex.op == nir_texop_txl && self.is_fragment && self.draw_mode;
-        let is_txb = tex.op == nir_texop_txb && self.is_fragment && self.draw_mode;
-        let is_tg4 = tex.op == nir_texop_tg4 && self.is_fragment && self.draw_mode;
+        let is_txl = tex.op == nir_texop_txl && self.is_fragment;
+        let is_txb = tex.op == nir_texop_txb && self.is_fragment;
+        let is_tg4 = tex.op == nir_texop_tg4 && self.is_fragment;
         if tex.op != nir_texop_tex && tex.op != nir_texop_txf && !is_txl && !is_txb && !is_tg4 {
             eprintln!("borgc: WARNING texture op {} not supported yet, dropped", tex.op);
             return;
@@ -68,7 +55,7 @@ impl Cx {
                 resolve_vm(&self.sel.vec_map, cd, 1)
             };
             let is_cube = tex.sampler_dim == GLSL_SAMPLER_DIM_CUBE;
-            let has_w = !is_fetch && tex.coord_components >= 3 && !is_cube && self.is_fragment && self.draw_mode;
+            let has_w = !is_fetch && tex.coord_components >= 3 && !is_cube && self.is_fragment;
             let has_bias = (is_txb || tex.op == nir_texop_tex) && !is_fetch && srcs.iter().any(|s| s.src_type == nir_tex_src_bias);
             if is_txl || has_w || has_bias {
                 let ld = srcs.iter().find(|s| s.src_type == nir_tex_src_lod || s.src_type == nir_tex_src_bias).map(|s| s.src.as_def().index).unwrap_or(cd);
@@ -153,7 +140,7 @@ impl Cx {
     }
 
     pub unsafe fn alu(&mut self, alu: &nir_alu_instr) {
-        if self.draw_mode && (matches!(alu.op, nir_op_fadd | nir_op_fmul | nir_op_ffma
+        if (matches!(alu.op, nir_op_fadd | nir_op_fmul | nir_op_ffma
             | nir_op_flt | nir_op_fge | nir_op_feq | nir_op_fneu | nir_op_bcsel | nir_op_fmin | nir_op_fmax
             | nir_op_ieq | nir_op_ine | nir_op_ilt | nir_op_ige | nir_op_ult | nir_op_uge)
             || (self.is_fragment && matches!(alu.op, nir_op_iadd | nir_op_imul | nir_op_ishl
@@ -351,7 +338,7 @@ impl Cx {
                     }
                 }
             }
-            nir_op_ieq | nir_op_ine | nir_op_ilt | nir_op_ige | nir_op_ult | nir_op_uge if self.draw_mode => {
+            nir_op_ieq | nir_op_ine | nir_op_ilt | nir_op_ige | nir_op_ult | nir_op_uge => {
                 let sl = alu.srcs_as_slice();
                 let a = resolve_vm(&self.sel.vec_map, sl[0].src.as_def().index, sl[0].swizzle[0]);
                 let b = resolve_vm(&self.sel.vec_map, sl[1].src.as_def().index, sl[1].swizzle[0]);
@@ -440,7 +427,7 @@ impl Cx {
                 let sl = &alu.srcs_as_slice()[0];
                 let (x, xc) = resolve_vm(&self.sel.vec_map, sl.src.as_def().index, sl.swizzle[0]);
                 let mut kreg = |bits: u32| -> u32 {
-                    if !self.draw_mode || self.cp.vs_window {
+                    if self.cp.vs_window {
                         return self.cp.int_operand(&mut self.sel, bits as i32);
                     }
                     let u = self.fw.slot(bits);
@@ -456,7 +443,7 @@ impl Cx {
                 let sl = &alu.srcs_as_slice()[0];
                 let (x, xc) = resolve_vm(&self.sel.vec_map, sl.src.as_def().index, sl.swizzle[0]);
                 let mut kreg = |bits: u32| -> u32 {
-                    if !self.draw_mode || self.cp.vs_window {
+                    if self.cp.vs_window {
                         return self.cp.int_operand(&mut self.sel, bits as i32);
                     }
                     let u = self.fw.slot(bits);
@@ -474,7 +461,7 @@ impl Cx {
                 let s = &alu.srcs_as_slice()[0];
                 let (x, xc) = resolve_vm(&self.sel.vec_map, s.src.as_def().index, s.swizzle[0]);
                 let mut kreg = |bits: u32| -> u32 {
-                    if !self.draw_mode || self.cp.vs_window {
+                    if self.cp.vs_window {
                         return self.cp.int_operand(&mut self.sel, bits as i32);
                     }
                     let u = self.fw.slot(bits);
@@ -536,7 +523,7 @@ impl Cx {
                 .collect();
             let comps: Vec<(u32, u8)> = raw.into_iter().map(|v| (v, 0u8)).collect();
             self.sel.vec_map.insert(intr.def.index, comps);
-        } else if (intr.intrinsic == nir_intrinsic_load_input || intr.intrinsic == nir_intrinsic_load_point_coord) && self.draw_mode && !self.cp.vs_window {
+        } else if (intr.intrinsic == nir_intrinsic_load_input || intr.intrinsic == nir_intrinsic_load_point_coord) && !self.cp.vs_window {
             let is_pc = intr.intrinsic == nir_intrinsic_load_point_coord;
             let loc = if is_pc { 25 } else { intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F };
             let base_index = if loc == 25 { self.flags.pntc_base() } else { 4 * loc.wrapping_sub(VARYING_SLOT_VAR0) };
@@ -631,7 +618,7 @@ impl Cx {
                                 return self.cp.vs_const(&mut self.sel, word_idx, true);
                             }
                             // Fragment: a window word too (no GPR is staged in draw mode).
-                            if self.draw_mode && self.is_fragment {
+                            if self.is_fragment {
                                 let u = self.fw.slot(word_idx);
                                 let v = self.sel.next_vreg;
                                 self.sel.next_vreg += 1;
@@ -669,8 +656,8 @@ impl Cx {
             if let Some(&b) = self.res_binding.get(&intr.get_src(0).as_def().index) {
                 self.res_binding.insert(intr.def.index, b);
             }
-        } else if self.draw_mode && (intr.intrinsic == nir_intrinsic_load_ssbo
-                                || intr.intrinsic == nir_intrinsic_store_ssbo) {
+        } else if intr.intrinsic == nir_intrinsic_load_ssbo
+                                || intr.intrinsic == nir_intrinsic_store_ssbo {
             const SSBO_SLOT_WORDS: u32 = 16384;
             let store = intr.intrinsic == nir_intrinsic_store_ssbo;
             let (bsrc, osrc) = if store { (1, 2) } else { (0, 1) };
@@ -748,7 +735,7 @@ impl Cx {
             if !store {
                 self.sel.vec_map.insert(intr.def.index, comps);
             }
-        } else if self.draw_mode && self.is_fragment && intr.intrinsic == nir_intrinsic_load_frag_coord {
+        } else if self.is_fragment && intr.intrinsic == nir_intrinsic_load_frag_coord {
             let comps: Vec<(u32, u8)> = [30u8, 31, 29, 8]
                 .iter()
                 .map(|&r| {
@@ -761,10 +748,10 @@ impl Cx {
                 .collect();
             self.frag_coord_w = true;
             self.sel.vec_map.insert(intr.def.index, comps);
-        } else if self.draw_mode && intr.intrinsic == nir_intrinsic_load_vertex_id {
+        } else if intr.intrinsic == nir_intrinsic_load_vertex_id {
             self.sel.ubo.insert(intr.def.index, Ubo::Fixed(30));
             self.vertex_id_def = Some(intr.def.index);
-        } else if self.draw_mode && self.is_vertex && self.flags.fetching()
+        } else if self.is_vertex && self.flags.fetching()
                   && intr.intrinsic == nir_intrinsic_load_input {
             const VERT_ATTRIB_GENERIC0: u32 = 15;
             let loc = (intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F)
@@ -802,8 +789,8 @@ impl Cx {
                 comps.push((m, 0u8));
             }
             self.sel.vec_map.insert(intr.def.index, comps);
-        } else if self.draw_mode && (intr.intrinsic == nir_intrinsic_load_ubo
-                                || (self.cp.vs_window && intr.intrinsic == nir_intrinsic_load_input)) {
+        } else if intr.intrinsic == nir_intrinsic_load_ubo
+                                || (self.cp.vs_window && intr.intrinsic == nir_intrinsic_load_input) {
             let is_input = intr.intrinsic == nir_intrinsic_load_input;
             let offset_def = if is_input { 0 } else { intr.get_src(1).as_def().index };
             let n = intr.def.num_components as usize;
@@ -909,7 +896,7 @@ impl Cx {
                 }
                 self.sel.vec_map.insert(intr.def.index, comps);
             }
-        } else if self.draw_mode && intr.intrinsic == nir_intrinsic_store_output {
+        } else if intr.intrinsic == nir_intrinsic_store_output {
             let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
             let src = intr.get_src(0).as_def().index;
             let ncomp = intr.get_src(0).num_components() as usize;
@@ -975,7 +962,7 @@ impl Cx {
                 }
             }
             self.outs.stores.insert(loc, comps);
-        } else if self.draw_mode && self.is_fragment && intr.intrinsic == nir_intrinsic_load_output
+        } else if self.is_fragment && intr.intrinsic == nir_intrinsic_load_output
                   && intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) >> 14 & 1 != 0 {
             let desc = if self.flags.packed() && !self.flags.multi_target() {
                 Some(packed_layout(self.flags))
@@ -1087,7 +1074,7 @@ impl Cx {
                 }
                 _ => eprintln!("borgc: ERROR blending on this attachment format is not implemented"),
             }
-        } else if self.draw_mode && intr.intrinsic == nir_intrinsic_load_output {
+        } else if intr.intrinsic == nir_intrinsic_load_output {
             let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
             match self.outs.stores.get(&loc) {
                 Some(v) => { self.sel.vec_map.insert(intr.def.index, v.clone()); }
