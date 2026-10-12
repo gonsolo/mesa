@@ -23,7 +23,7 @@ use config::Flags;
 use fixed::{allocate, fixed_regs};
 use emit::{build_blob, encode_program, Encoded};
 use isel::resolve_vm;
-use opt::{classify_uniform, dce, fuse_fmadd, schedule_for_pressure};
+use opt::{dce, fuse_fmadd, schedule_for_pressure};
 use state::Cx;
 use survey::{survey, Survey};
 use std::env;
@@ -254,8 +254,6 @@ unsafe fn compile_nir_inner(
     let entry = nir_shader_get_entrypoint(nir);
     let Survey { total, tex } = survey(entry, stage);
 
-    use std::collections::HashMap;
-
     let regs: &'static [u8] = if is_vertex {
         &[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     } else if tex > 0 {
@@ -267,70 +265,7 @@ unsafe fn compile_nir_inner(
 
     let frag_alpha = env::var("BORGC_FRAG_ALPHA").is_ok() || (is_fragment && flags.alpha_output());
     cx.frag_alpha = frag_alpha;
-    if !entry.is_null() {
-        let mut cf_marks: std::collections::HashMap<usize, Vec<CfMark>> =
-            std::collections::HashMap::new();
-        let mut cf_unsupported: Vec<&'static str> = Vec::new();
-        collect_cf_marks((*entry).iter_body(), &mut cf_marks, &mut cf_unsupported);
-        if !cf_unsupported.is_empty() {
-            eprintln!(
-                "borgc: WARNING unsupported control flow ({}) -- the body will be \
-                 emitted UNMASKED and run for every lane. See BorgCore.wireExecMask.",
-                cf_unsupported.join(", ")
-            );
-        }
-
-        let mut reg_vregs: HashMap<u32, Vec<u32>> = HashMap::new();
-        for block in (*entry).iter_blocks() {
-            if let Some(ms) = cf_marks.get(&(block as *const nir_block as usize)) {
-                for m in ms {
-                    cx.sel.prog.push(BorgInstr {
-                        mnem: m.mnem,
-                        dst: NO_DST,
-                        srcs: m.cond.map(|c| vec![c]).unwrap_or_default(),
-                        swz: m.cond.map(|_| vec![0u8]).unwrap_or_default(),
-                    });
-                }
-            }
-            for instr in block.iter_instr_list() {
-                if let Some(intr) = instr.as_intrinsic() {
-                    if intr.intrinsic == nir_intrinsic_decl_reg {
-                        let n = intr.get_const_index(NIR_INTRINSIC_NUM_COMPONENTS);
-                        let v: Vec<u32> = (0..n).map(|_| { let r = cx.sel.next_vreg; cx.sel.next_vreg += 1; r }).collect();
-                        reg_vregs.insert(intr.def.index, v);
-                        continue;
-                    }
-                    if intr.intrinsic == nir_intrinsic_load_reg {
-                        let h = intr.get_src(0).as_def().index;
-                        let comps: Vec<(u32, u8)> = reg_vregs[&h].iter().map(|&r| (r, 0u8)).collect();
-                        cx.sel.vec_map.insert(intr.def.index, comps);
-                        continue;
-                    }
-                    if intr.intrinsic == nir_intrinsic_store_reg {
-                        let h = intr.get_src(1).as_def().index;
-                        let src = intr.get_src(0).as_def().index;
-                        for c in 0..intr.get_src(0).num_components() as usize {
-                            if intr.write_mask() & (1 << c) == 0 {
-                                continue;
-                            }
-                            let (v, comp) = resolve_vm(&cx.sel.vec_map, src, c as u8);
-                            cx.sel.prog.push(BorgInstr { mnem: "FMOV", dst: reg_vregs[&h][c], srcs: vec![v], swz: vec![comp] });
-                        }
-                        continue;
-                    }
-                }
-                if let Some(alu) = instr.as_alu() {
-                    cx.alu(alu);
-                } else if let Some(intr) = instr.as_intrinsic() {
-                    cx.intrinsic(intr);
-                } else if let Some(tex) = instr.as_tex() {
-                    cx.tex(tex);
-                } else if let Some(lc) = instr.as_load_const() {
-                    cx.load_const(lc);
-                }
-            }
-        }
-    }
+    cx.select_entry(entry);
     eprintln!("borgc: selected {} Borg instruction(s) (virtual regs)", cx.sel.prog.len());
     if env::var("BORGC_DUMP_ISA").is_ok() {
         for i in &cx.sel.prog {
@@ -339,8 +274,6 @@ unsafe fn compile_nir_inner(
         }
     }
 
-    let mut pos_out: [Option<u32>; 4] = [None; 4];
-    let mut frag_out: [Option<u32>; 4] = [None; 4];
     let srgb = cx.sel.prog.iter().any(|i| i.mnem == "FSRGB");
     cx.skipped.retain(|&op| !(matches!(op, "fpow" | "fge") && srgb));
     if !cx.skipped.is_empty() {
@@ -366,29 +299,10 @@ unsafe fn compile_nir_inner(
         cx.epilogue_bytes_packed();
     }
     if is_fragment {
-        for c in 0..4 {
-            let Some((v, comp)) = cx.outs.frag[c] else { continue };
-            // A TEX result block (r20-r23) or FATTR block is not the output register: copy that too.
-            if cx.sel.prog.iter().any(|i| i.dst == v) && !cx.tex_dsts.contains(&v) && !cx.fattr_dsts.contains(&v) {
-                continue;
-            }
-            let out = cx.sel.next_vreg;
-            cx.sel.next_vreg += 1;
-            if cx.tex_dsts.contains(&v) || cx.fattr_dsts.contains(&v) {
-                cx.sel.prog.push(BorgInstr { mnem: "IOR", dst: out, srcs: vec![v, v], swz: vec![comp, comp] });
-            } else {
-                cx.sel.prog.push(BorgInstr { mnem: "FMOV", dst: out, srcs: vec![v], swz: vec![comp] });
-            }
-            cx.outs.frag[c] = Some((out, 0));
-            cx.out_roots.push(out);
-        }
+        cx.copy_frag_outputs();
     }
-    for (c, v) in cx.outs.pos.iter().enumerate() {
-        pos_out[c] = v.map(|(d, _)| d);
-    }
-    for (c, v) in cx.outs.frag.iter().enumerate() {
-        frag_out[c] = v.map(|(d, _)| d);
-    }
+    let pos_out = cx.outs.pos.map(|v| v.map(|(d, _)| d));
+    let frag_out = cx.outs.frag.map(|v| v.map(|(d, _)| d));
     cx.out_roots.extend(cx.outs.roots.iter().copied());
     eprintln!(
         "borgc: draw-mode I/O map — {} vertex-pulling/MVP load(s), {} SOUT(s), \
@@ -398,31 +312,8 @@ unsafe fn compile_nir_inner(
         cx.outs.pos[0].is_some(),
     );
 
+    let frag_z = if is_fragment { cx.interpolate_depth() } else { None };
 
-    let mut frag_z: Option<u32> = None;
-    if is_fragment {
-        if let Some(w) = cx.weights {
-            let uz: Vec<u32> = [30u8, 29, 28]
-                .iter()
-                .map(|&idx| {
-                    let v = cx.sel.next_vreg;
-                    cx.sel.next_vreg += 1;
-                    cx.sel.ubo.insert(v, Ubo::Uniform(idx));
-                    v
-                })
-                .collect();
-            let t0 = cx.sel.next_vreg; cx.sel.next_vreg += 1;
-            cx.sel.prog.push(BorgInstr { mnem: "FMUL", dst: t0, srcs: vec![w[0], uz[0]], swz: vec![0, 0] });
-            let t1 = cx.sel.next_vreg; cx.sel.next_vreg += 1;
-            cx.sel.prog.push(BorgInstr { mnem: "FMADD", dst: t1, srcs: vec![w[1], uz[1], t0], swz: vec![0, 0, 0] });
-            let zr = cx.sel.next_vreg; cx.sel.next_vreg += 1;
-            cx.sel.prog.push(BorgInstr { mnem: "FMADD", dst: zr, srcs: vec![w[2], uz[2], t1], swz: vec![0, 0, 0] });
-            cx.out_roots.push(zr);
-            frag_z = Some(zr);
-        }
-    }
-
-    #[allow(static_mut_refs)]
     set_frag_pool(Vec::new());
     if is_fragment && cx.fw.count > 11 {
         cx.pool_window_consts();
@@ -433,37 +324,13 @@ unsafe fn compile_nir_inner(
     });
     schedule_for_pressure(&mut cx.sel.prog, &cx.out_roots);
 
-
     if is_fragment {
-        let uniform_roots: std::collections::HashSet<u32> = cx.sel.ubo
-            .iter()
-            .filter_map(|(&v, u)| match u {
-                Ubo::Uniform(_) => Some(v),
-                Ubo::Fixed(_) if !cx.per_pixel_fixed.contains(&v) => Some(v),
-                _ => None,
-            })
-            .collect();
-        let uniform = classify_uniform(&cx.sel.prog, &uniform_roots);
-        if env::var("BORGC_DUMP_ISA").is_ok() {
-            let n_uniform = cx.sel.prog.iter().filter(|i| uniform.contains(&i.dst)).count();
-            eprintln!(
-                "borgc: uniformity — {} of {} instr(s) are primitive-uniform (hoistable)",
-                n_uniform,
-                cx.sel.prog.len()
-            );
-            for i in &cx.sel.prog {
-                if uniform.contains(&i.dst) {
-                    let s: Vec<String> = i.srcs.iter().map(|v| format!("v{v}")).collect();
-                    eprintln!("borgc:   [uniform] {} v{}, {}", i.mnem, i.dst, s.join(", "));
-                }
-            }
-        }
+        cx.log_uniformity();
     }
 
     // Pre-color outputs and reserve fixed registers.
     let (forced, mut extra_reserved) = fixed_regs(&cx, &pos_out, &frag_out, frag_z);
     cx.split_window_reads();
-
 
     let Some(alloc) = allocate(&cx, &forced, &mut extra_reserved) else { return 0 };
 

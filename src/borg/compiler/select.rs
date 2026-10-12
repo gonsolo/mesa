@@ -1,6 +1,9 @@
 use crate::state::Cx;
 use crate::isel::borg_isel;
-use crate::{decompose_vertex_offset, packed_layout, resolve_vm, BorgInstr, Ubo, FRAG_CONST_MAX, NO_DST};
+use crate::opt::classify_uniform;
+use std::env;
+use std::collections::HashMap;
+use crate::{collect_cf_marks, decompose_vertex_offset, packed_layout, CfMark, resolve_vm, BorgInstr, Ubo, FRAG_CONST_MAX, NO_DST};
 use compiler::bindings::*;
 use compiler::nir::AsDef;
 
@@ -1086,4 +1089,139 @@ impl Cx {
             }
         }
     }
+    pub unsafe fn select_entry(&mut self, entry: *mut nir_function_impl) {
+        let mut cf_marks: std::collections::HashMap<usize, Vec<CfMark>> =
+            std::collections::HashMap::new();
+        let mut cf_unsupported: Vec<&'static str> = Vec::new();
+        collect_cf_marks((*entry).iter_body(), &mut cf_marks, &mut cf_unsupported);
+        if !cf_unsupported.is_empty() {
+            eprintln!(
+                "borgc: WARNING unsupported control flow ({}) -- the body will be \
+                 emitted UNMASKED and run for every lane. See BorgCore.wireExecMask.",
+                cf_unsupported.join(", ")
+            );
+        }
+
+        let mut reg_vregs: HashMap<u32, Vec<u32>> = HashMap::new();
+        for block in (*entry).iter_blocks() {
+            if let Some(ms) = cf_marks.get(&(block as *const nir_block as usize)) {
+                for m in ms {
+                    self.sel.prog.push(BorgInstr {
+                        mnem: m.mnem,
+                        dst: NO_DST,
+                        srcs: m.cond.map(|c| vec![c]).unwrap_or_default(),
+                        swz: m.cond.map(|_| vec![0u8]).unwrap_or_default(),
+                    });
+                }
+            }
+            for instr in block.iter_instr_list() {
+                if let Some(intr) = instr.as_intrinsic() {
+                    if intr.intrinsic == nir_intrinsic_decl_reg {
+                        let n = intr.get_const_index(NIR_INTRINSIC_NUM_COMPONENTS);
+                        let v: Vec<u32> = (0..n).map(|_| { let r = self.sel.next_vreg; self.sel.next_vreg += 1; r }).collect();
+                        reg_vregs.insert(intr.def.index, v);
+                        continue;
+                    }
+                    if intr.intrinsic == nir_intrinsic_load_reg {
+                        let h = intr.get_src(0).as_def().index;
+                        let comps: Vec<(u32, u8)> = reg_vregs[&h].iter().map(|&r| (r, 0u8)).collect();
+                        self.sel.vec_map.insert(intr.def.index, comps);
+                        continue;
+                    }
+                    if intr.intrinsic == nir_intrinsic_store_reg {
+                        let h = intr.get_src(1).as_def().index;
+                        let src = intr.get_src(0).as_def().index;
+                        for c in 0..intr.get_src(0).num_components() as usize {
+                            if intr.write_mask() & (1 << c) == 0 {
+                                continue;
+                            }
+                            let (v, comp) = resolve_vm(&self.sel.vec_map, src, c as u8);
+                            self.sel.prog.push(BorgInstr { mnem: "FMOV", dst: reg_vregs[&h][c], srcs: vec![v], swz: vec![comp] });
+                        }
+                        continue;
+                    }
+                }
+                if let Some(alu) = instr.as_alu() {
+                    self.alu(alu);
+                } else if let Some(intr) = instr.as_intrinsic() {
+                    self.intrinsic(intr);
+                } else if let Some(tex) = instr.as_tex() {
+                    self.tex(tex);
+                } else if let Some(lc) = instr.as_load_const() {
+                    self.load_const(lc);
+                }
+            }
+        }
+    
+    }
+    pub unsafe fn copy_frag_outputs(&mut self) {
+    for c in 0..4 {
+        let Some((v, comp)) = self.outs.frag[c] else { continue };
+        // A TEX result block (r20-r23) or FATTR block is not the output register: copy that too.
+        if self.sel.prog.iter().any(|i| i.dst == v) && !self.tex_dsts.contains(&v) && !self.fattr_dsts.contains(&v) {
+            continue;
+        }
+        let out = self.sel.next_vreg;
+        self.sel.next_vreg += 1;
+        if self.tex_dsts.contains(&v) || self.fattr_dsts.contains(&v) {
+            self.sel.prog.push(BorgInstr { mnem: "IOR", dst: out, srcs: vec![v, v], swz: vec![comp, comp] });
+        } else {
+            self.sel.prog.push(BorgInstr { mnem: "FMOV", dst: out, srcs: vec![v], swz: vec![comp] });
+        }
+        self.outs.frag[c] = Some((out, 0));
+        self.out_roots.push(out);
+    }
+    
+    }
+    pub unsafe fn interpolate_depth(&mut self) -> Option<u32> {
+    let mut frag_z: Option<u32> = None;
+    if let Some(w) = self.weights {
+        let uz: Vec<u32> = [30u8, 29, 28]
+            .iter()
+            .map(|&idx| {
+                let v = self.sel.next_vreg;
+                self.sel.next_vreg += 1;
+                self.sel.ubo.insert(v, Ubo::Uniform(idx));
+                v
+            })
+            .collect();
+        let t0 = self.sel.next_vreg; self.sel.next_vreg += 1;
+        self.sel.prog.push(BorgInstr { mnem: "FMUL", dst: t0, srcs: vec![w[0], uz[0]], swz: vec![0, 0] });
+        let t1 = self.sel.next_vreg; self.sel.next_vreg += 1;
+        self.sel.prog.push(BorgInstr { mnem: "FMADD", dst: t1, srcs: vec![w[1], uz[1], t0], swz: vec![0, 0, 0] });
+        let zr = self.sel.next_vreg; self.sel.next_vreg += 1;
+        self.sel.prog.push(BorgInstr { mnem: "FMADD", dst: zr, srcs: vec![w[2], uz[2], t1], swz: vec![0, 0, 0] });
+        self.out_roots.push(zr);
+        frag_z = Some(zr);
+    }
+    
+    frag_z
+    }
+    pub fn log_uniformity(&self) {
+    let uniform_roots: std::collections::HashSet<u32> = self.sel.ubo
+        .iter()
+        .filter_map(|(&v, u)| match u {
+            Ubo::Uniform(_) => Some(v),
+            Ubo::Fixed(_) if !self.per_pixel_fixed.contains(&v) => Some(v),
+            _ => None,
+        })
+        .collect();
+    let uniform = classify_uniform(&self.sel.prog, &uniform_roots);
+    if env::var("BORGC_DUMP_ISA").is_ok() {
+        let n_uniform = self.sel.prog.iter().filter(|i| uniform.contains(&i.dst)).count();
+        eprintln!(
+            "borgc: uniformity — {} of {} instr(s) are primitive-uniform (hoistable)",
+            n_uniform,
+            self.sel.prog.len()
+        );
+        for i in &self.sel.prog {
+            if uniform.contains(&i.dst) {
+                let s: Vec<String> = i.srcs.iter().map(|v| format!("v{v}")).collect();
+                eprintln!("borgc:   [uniform] {} v{}, {}", i.mnem, i.dst, s.join(", "));
+            }
+        }
+    }
+    
+    }
 }
+
