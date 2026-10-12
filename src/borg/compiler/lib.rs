@@ -16,6 +16,7 @@
 #![allow(non_upper_case_globals)]
 
 mod compute;
+mod corpus;
 mod encode;
 mod isel;
 mod opt;
@@ -299,7 +300,12 @@ pub unsafe extern "C" fn borgc_compile_nir(
     // A shader borgc cannot handle trips an assert; unwinding out of an extern "C"
     // function aborts the whole process, so turn it into "no blob" (the same outcome
     // as any other unsupported shader).
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let key = if !nir.is_null() && env::var("BORGC_CORPUS_DIR").is_ok() {
+        (*nir).to_string().ok().map(|s| corpus::key(&s, vfetch))
+    } else {
+        None
+    };
+    let ret = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         compile_nir_inner(nir, out_buf, buf_cap, out_len, vfetch)
     }))
     .unwrap_or_else(|_| {
@@ -307,7 +313,17 @@ pub unsafe extern "C" fn borgc_compile_nir(
             *out_len = 0;
         }
         0
-    })
+    });
+    if let Some(key) = key {
+        let len = if out_len.is_null() { 0 } else { *out_len };
+        let blob = if !out_buf.is_null() && len <= buf_cap {
+            std::slice::from_raw_parts(out_buf, len as usize)
+        } else {
+            &[]
+        };
+        corpus::record(key, ret, blob);
+    }
+    ret
 }
 
 unsafe fn compile_nir_inner(
