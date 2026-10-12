@@ -1974,6 +1974,12 @@ borgvk_CmdCopyImageToBuffer(VkCommandBuffer commandBuffer,
          }
       }
    }
+   if (borgvk_corpus_on()) {
+      uint64_t key = borgvk_corpus_hash(BORGVK_CORPUS_SEED, &src->vk.format, sizeof(src->vk.format));
+      key = borgvk_corpus_hash(key, pRegions, regionCount * sizeof(*pRegions));
+      borgvk_corpus_log('R', key, borgvk_corpus_hash(BORGVK_CORPUS_SEED,
+                        (const uint8_t *)dst->mem->map + dst->offset, dst->vk.size));
+   }
 }
 
 /* Upload counterpart of CmdCopyImageToBuffer, same reasoning: was entirely

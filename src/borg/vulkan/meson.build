@@ -24,6 +24,7 @@ libborgvk_files = files(
   'borgvk_queue.c',
   'borgvk_serial.c',
   'borgvk_shader_cache.c',
+  'borgvk_corpus.c',
   'borgvk_sim.c',
   'borgvk_sync.c',
   'borgvk_wsi.c',

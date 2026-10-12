@@ -893,7 +893,12 @@ borgvk_submit_sim_cube(struct borgvk_device *device,
    }
 
    struct borgvk_image *color_img = find_color_attachment(submit);
-   return sim_run_stream(bytes, nbytes, color_img, 0);
+   const bool rec = borgvk_corpus_on();
+   const uint64_t key = rec ? borgvk_corpus_hash(BORGVK_CORPUS_SEED, bytes, nbytes) : 0;
+   const VkResult res = sim_run_stream(bytes, nbytes, color_img, 0);
+   if (rec)
+      borgvk_corpus_log('C', key, borgvk_corpus_image(BORGVK_CORPUS_SEED, color_img));
+   return res;
 }
 
 /* A format's source texel to the hardware's: copied, widened from three channels or R/B
@@ -1252,6 +1257,23 @@ struct draw_heap {
 static VkResult sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
                                uint32_t sim_dim);
 
+static uint64_t
+corpus_state(uint64_t h, const struct borgvk_image *img, struct borgvk_image *const *extra, uint32_t nextra,
+             const struct vk_image_view *depth, const struct vk_image_view *stencil,
+             const struct borgvk_writeback *wb, uint32_t nwb)
+{
+   h = borgvk_corpus_image(h, img);
+   for (uint32_t i = 0; i < nextra; i++)
+      h = borgvk_corpus_image(h, extra[i]);
+   if (depth && depth->image)
+      h = borgvk_corpus_image(h, container_of(depth->image, struct borgvk_image, vk));
+   if (stencil && stencil->image)
+      h = borgvk_corpus_image(h, container_of(stencil->image, struct borgvk_image, vk));
+   for (uint32_t i = 0; i < nwb; i++)
+      h = borgvk_corpus_hash(h, wb[i].host, wb[i].size);
+   return h;
+}
+
 void
 borgvk_flush_draws(struct borgvk_command_buffer *cmd)
 {
@@ -1279,12 +1301,21 @@ borgvk_flush_draws(struct borgvk_command_buffer *cmd)
    free(cmd->state_sent);
    cmd->state_sent = NULL;
    cmd->state_sent_len = 0;
+   const bool rec = borgvk_corpus_on();
+   uint64_t key = BORGVK_CORPUS_SEED;
+   if (rec) {
+      key = borgvk_corpus_hash(key, bytes, n);
+      key = corpus_state(key, img, extra, nextra, cmd->batch_depth, cmd->batch_stencil, wb, nwb);
+   }
    if (serve) {
       borgvk_sim_run_pass(bytes, n, img, extra, nextra, cmd->batch_depth, cmd->batch_stencil, wb, nwb);
       free(bytes);
-      return;
+   } else {
+      sim_run_stream(bytes, n, img, 0);   /* takes ownership of bytes */
    }
-   sim_run_stream(bytes, n, img, 0);   /* takes ownership of bytes */
+   if (rec)
+      borgvk_corpus_log('F', key, corpus_state(BORGVK_CORPUS_SEED, img, extra, nextra,
+                                               cmd->batch_depth, cmd->batch_stencil, wb, nwb));
 }
 
 static bool
@@ -2113,6 +2144,12 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
          fseek(f, ((bufs[i].size + 3) & ~3u) - bufs[i].size, SEEK_CUR);
       }
       fclose(f);
+   }
+   if (borgvk_corpus_on()) {
+      uint64_t out = borgvk_corpus_hash(BORGVK_CORPUS_SEED, &ran, sizeof(ran));
+      for (uint32_t i = 0; i < nbufs; i++)
+         out = borgvk_corpus_hash(out, merged[i], bufs[i].size);
+      borgvk_corpus_log('D', borgvk_corpus_hash(BORGVK_CORPUS_SEED, job, job_len), out);
    }
    if (ran) {
       for (uint32_t i = 0; i < nbufs; i++)

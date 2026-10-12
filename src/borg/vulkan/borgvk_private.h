@@ -229,6 +229,11 @@ bool borgvk_sim_half1(VkFormat f);
 bool borgvk_sim_raw32(VkFormat f);
 uint32_t borgvk_sim_packed_opt(VkFormat f);
 bool borgvk_sim_depth_is_d32(VkFormat f);
+#define BORGVK_CORPUS_SEED 0xcbf29ce484222325ull
+bool borgvk_corpus_on(void);
+uint64_t borgvk_corpus_hash(uint64_t h, const void *p, size_t n);
+uint64_t borgvk_corpus_image(uint64_t h, const struct borgvk_image *img);
+void borgvk_corpus_log(char kind, uint64_t key, uint64_t content);
 struct borgvk_writeback;
 VkResult borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
                              struct borgvk_image *const *extra, uint32_t nextra,
