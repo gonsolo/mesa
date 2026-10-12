@@ -14,3 +14,15 @@ pub fn record(key: u64, ret: u32, blob: &[u8]) {
     out.extend_from_slice(blob);
     let _ = std::fs::write(format!("{dir}/{key:016x}.out"), out);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::key;
+
+    #[test]
+    fn key_depends_on_text_and_flags() {
+        assert_eq!(key("a", 1), key("a", 1));
+        assert_ne!(key("a", 1), key("a", 2));
+        assert_ne!(key("a", 1), key("b", 1));
+    }
+}

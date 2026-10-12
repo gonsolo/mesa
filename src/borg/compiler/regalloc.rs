@@ -99,3 +99,36 @@ pub(crate) fn regalloc(
     );
     alloc
 }
+
+#[cfg(test)]
+mod tests {
+    use super::regalloc;
+    use crate::BorgInstr;
+    use std::collections::HashMap;
+
+    fn chain(n: u32) -> Vec<BorgInstr> {
+        (1..=n)
+            .map(|d| BorgInstr { mnem: "FADD", dst: d, srcs: vec![d - 1, d.saturating_sub(2)], swz: vec![0, 0] })
+            .collect()
+    }
+
+    #[test]
+    fn every_value_gets_a_register_and_overlaps_differ() {
+        let prog = chain(60);
+        let a = regalloc(&prog, &HashMap::new(), &[], &[], &HashMap::new());
+        assert_eq!(a.len(), 60);
+        for d in 1..=58u32 {
+            assert_ne!(a[&d], a[&(d + 1)]);
+            assert_ne!(a[&d], a[&(d + 2)]);
+        }
+    }
+
+    #[test]
+    fn forced_registers_are_honoured_and_reserved_ones_avoided() {
+        let prog = chain(20);
+        let forced = HashMap::from([(5u32, 9u8)]);
+        let a = regalloc(&prog, &forced, &[0, 1, 2, 3], &[], &HashMap::new());
+        assert_eq!(a[&5], 9);
+        assert!(a.iter().all(|(&v, &r)| v == 5 || ![0, 1, 2, 3].contains(&r)));
+    }
+}

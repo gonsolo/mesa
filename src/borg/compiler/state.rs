@@ -283,3 +283,105 @@ impl Cx {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cx(vertex: bool) -> Cx {
+        Cx::new(&[17, 18, 19], vertex, !vertex, Flags(0))
+    }
+
+    #[test]
+    fn selector_hands_out_vregs_from_a_million() {
+        let mut s = Selector::new();
+        assert_eq!((s.fresh(), s.fresh()), (1_000_000, 1_000_001));
+    }
+
+    #[test]
+    fn op0_reads_component_zero_of_every_source() {
+        let mut s = Selector::new();
+        let d = s.op0("FADD", vec![3, 4]);
+        assert_eq!((s.prog[0].dst, s.prog[0].swz.clone()), (d, vec![0, 0]));
+    }
+
+    #[test]
+    fn fsub_negates_then_adds() {
+        let mut s = Selector::new();
+        let d = s.fsub((7, 2), (8, 1));
+        let mnems: Vec<_> = s.prog.iter().map(|i| i.mnem).collect();
+        assert_eq!(mnems, ["FNEG", "FADD"]);
+        assert_eq!((s.prog[1].dst, s.prog[1].srcs[0], s.prog[1].swz[0]), (d, 7, 2));
+    }
+
+    #[test]
+    fn reg_copies_only_uniform_operands() {
+        let mut s = Selector::new();
+        s.ubo.insert(5, crate::Ubo::Uniform(20));
+        assert_eq!(s.reg((6, 1)), (6, 1));
+        let (v, c) = s.reg((5, 0));
+        assert!(v != 5 && c == 0 && s.prog[0].mnem == "FMOV");
+    }
+
+    #[test]
+    fn const_regs_run_out() {
+        let mut c = cx(false);
+        assert_eq!((c.cp.alloc_reg(), c.cp.alloc_reg(), c.cp.alloc_reg()), (17, 18, 19));
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.cp.alloc_reg())).is_err());
+    }
+
+    #[test]
+    fn pinned_integers_share_a_register() {
+        let mut c = cx(false);
+        let (a, b) = (c.cp.pin_int(7), c.cp.pin_int(9));
+        assert_eq!((c.cp.pin_int(7), a == b), (a, false));
+        assert_eq!(c.cp.uniforms, [(17, 7), (18, 9)]);
+    }
+
+    #[test]
+    fn vertex_window_words_start_at_u25_and_dedupe() {
+        let mut c = cx(true);
+        let a = c.cp.vs_const(&mut c.sel, 0x3f80_0000, false);
+        assert_eq!(c.cp.vs_const(&mut c.sel, 0x3f80_0000, false), a);
+        c.cp.vs_const(&mut c.sel, 0x4000_0000, false);
+        assert_eq!(c.cp.vs_consts, [(25, 0x3f80_0000), (26, 0x4000_0000)]);
+        assert!(matches!(c.sel.ubo[&a], crate::Ubo::Uniform(25)));
+    }
+
+    #[test]
+    fn full_vertex_window_derives_constants_from_sums() {
+        let mut c = cx(true);
+        for b in 1..=DRAW_VS_CONST_WORDS as u32 {
+            c.cp.vs_const(&mut c.sel, b, false);
+        }
+        let before = c.cp.vs_consts.len();
+        c.cp.vs_const(&mut c.sel, 3 + 4, false);
+        assert_eq!(c.cp.vs_consts.len(), before);
+        assert!(c.sel.prog.iter().any(|i| i.mnem == "IADD"));
+    }
+
+    #[test]
+    fn fragment_window_numbers_from_u20_and_dedupes() {
+        let mut w = FragWindow::default();
+        assert_eq!((w.slot(5), w.slot(6), w.slot(5)), (20, 21, 20));
+        assert_eq!(w.consts, [(20, 5), (21, 6)]);
+    }
+
+    #[test]
+    fn fragment_window_overflow_panics() {
+        let mut w = FragWindow::default();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for b in 0..=crate::FRAG_CONST_MAX {
+                w.slot(b);
+            }
+        }));
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn win_makes_a_uniform_vreg() {
+        let (mut w, mut s) = (FragWindow::default(), Selector::new());
+        let v = w.win(&mut s, 42);
+        assert!(matches!(s.ubo[&v], crate::Ubo::Uniform(20)));
+    }
+}
