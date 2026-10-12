@@ -497,33 +497,8 @@ unsafe fn compile_nir_inner(
         }
     }
 
-    let is_win = |v: &u32, ubo: &HashMap<u32, Ubo>| matches!(ubo.get(v), Some(Ubo::Uniform(_)));
-    if cx.sel.prog.iter().any(|i| i.srcs.iter().filter(|v| is_win(v, &cx.sel.ubo)).count() > 1) {
-        let f = cx.sel.next_vreg;
-        let z = cx.sel.next_vreg + 1;
-        cx.sel.next_vreg += 2;
-        cx.sel.ubo.insert(f, Ubo::Fixed(30));
-        let mut out = vec![BorgInstr { mnem: "ISUB", dst: z, srcs: vec![f, f], swz: vec![0, 0] }];
-        for mut ins in std::mem::take(&mut cx.sel.prog) {
-            let mut seen = false;
-            for k in 0..ins.srcs.len() {
-                if !is_win(&ins.srcs[k], &cx.sel.ubo) {
-                    continue;
-                }
-                if !seen {
-                    seen = true;
-                    continue;
-                }
-                let t = cx.sel.next_vreg;
-                cx.sel.next_vreg += 1;
-                out.push(BorgInstr { mnem: "IADD", dst: t, srcs: vec![ins.srcs[k], z], swz: vec![ins.swz[k], 0] });
-                ins.srcs[k] = t;
-                ins.swz[k] = 0;
-            }
-            out.push(ins);
-        }
-        cx.sel.prog = out;
-    }
+    cx.split_window_reads();
+
 
     let soft: Vec<u8> = if is_fragment { vec![20, 21, 22, 23, 24, 26, 27, 28] } else { Vec::new() };
     let mut block_len: HashMap<u32, u8> = HashMap::new();
