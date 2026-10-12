@@ -1,5 +1,6 @@
 use crate::state::{Cx, DRAW_VS_CONST_U0, DRAW_VS_CONST_WORDS};
-use crate::{packed_layout, BorgInstr, Ubo, NO_DST};
+use std::collections::HashMap;
+use crate::{FRAG_POOL_SLOT, LAST_FRAG_POOL, packed_layout, BorgInstr, Ubo, NO_DST};
 
 impl Cx {
     pub unsafe fn epilogue_point_quads(&mut self) {
@@ -318,5 +319,128 @@ impl Cx {
         }
         self.outs.frag = [Some((p, pc)), None, None, None];
         self.out_roots.push(p);
+    }
+    pub unsafe fn pool_window_consts(&mut self) {
+        let first_pool = 20 + 9;
+        // The window keeps the nine constants read most often: a window word costs no register.
+        {
+            let mut uses: HashMap<u32, usize> = HashMap::new();
+            for i in self.sel.prog.iter() {
+                for s in i.srcs.iter() {
+                    if let Some(&Ubo::Uniform(u)) = self.sel.ubo.get(s) {
+                        if u >= 20 {
+                            *uses.entry(u as u32).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            let mut by_use: Vec<(u32, u32)> = self.fw.consts.clone();
+            by_use.sort_by_key(|&(u, _)| (std::cmp::Reverse(uses.get(&u).copied().unwrap_or(0)), u));
+            let renum: HashMap<u32, u32> = by_use.iter().enumerate().map(|(k, &(u, _))| (u, 20 + k as u32)).collect();
+            for (_, m) in self.sel.ubo.iter_mut() {
+                if let Ubo::Uniform(u) = m {
+                    if let Some(&n) = renum.get(&(*u as u32)) {
+                        *u = n as u8;
+                    }
+                }
+            }
+            self.fw.consts = by_use.iter().map(|&(u, bits)| (renum[&u], bits)).collect();
+        }
+        let mut pool: Vec<u32> = vec![0; (20 + self.fw.count - first_pool) as usize];
+        for &(u, bits) in self.fw.consts.iter() {
+            if u >= first_pool {
+                pool[(u - first_pool) as usize] = bits;
+            }
+        }
+        self.fw.consts.retain(|&(u, _)| u < first_pool);
+        self.fw.consts.push((first_pool, (1 << 16) | (128 + FRAG_POOL_SLOT)));
+        self.fw.consts.push((first_pool + 1, 1));
+        let mut fresh = |ubo: &mut HashMap<u32, Ubo>, u: Option<Ubo>| {
+            let v = self.sel.next_vreg;
+            self.sel.next_vreg += 1;
+            if let Some(u) = u {
+                ubo.insert(v, u);
+            }
+            v
+        };
+        let ctl = fresh(&mut self.sel.ubo, Some(Ubo::Uniform(first_pool as u8)));
+        let one = fresh(&mut self.sel.ubo, Some(Ubo::Uniform(first_pool as u8 + 1)));
+        let f = fresh(&mut self.sel.ubo, Some(Ubo::Fixed(30)));
+        self.per_pixel_fixed.insert(f);
+        let zero = fresh(&mut self.sel.ubo, None);
+        let is_pool = |v: &u32, ubo: &HashMap<u32, Ubo>| match ubo.get(v) {
+            Some(&Ubo::Uniform(u)) if u as u32 >= first_pool && *v != ctl && *v != one => Some(u as u32 - first_pool),
+            _ => None,
+        };
+        let mut first_use: Vec<Option<usize>> = vec![None; pool.len()];
+        for (at, i) in self.sel.prog.iter().enumerate() {
+            for s in i.srcs.iter() {
+                if let Some(k) = is_pool(s, &self.sel.ubo) {
+                    first_use[k as usize].get_or_insert(at);
+                }
+            }
+        }
+        let mut order: Vec<usize> = (0..pool.len()).filter(|&k| first_use[k].is_some()).collect();
+        order.sort_by_key(|&k| first_use[k]);
+        let mut slot_of: Vec<usize> = vec![0; pool.len()];
+        for (slot, &k) in order.iter().enumerate() {
+            slot_of[k] = slot;
+        }
+        let pool: Vec<u32> = order.iter().map(|&k| pool[k]).collect();
+        const GAP: usize = 16;
+        let ngroups = (pool.len() + 3) / 4;
+        let mut last: Vec<Option<usize>> = vec![None; ngroups];
+        let mut events: Vec<(usize, usize)> = Vec::new();   // (before instruction, group)
+        for (at, i) in self.sel.prog.iter().enumerate() {
+            for s in i.srcs.iter() {
+                let Some(k) = is_pool(s, &self.sel.ubo) else { continue };
+                let g = slot_of[k as usize] / 4;
+                if last[g].map_or(true, |l| at - l > GAP) {
+                    let mut p = at;
+                    loop {
+                        let Some(t) = (0..p).rev().find(|&t| self.sel.prog[t].mnem == "TEX") else { break };
+                        let d = self.sel.prog[t].dst;
+                        if self.sel.prog[p..].iter().any(|i| i.srcs.contains(&d)) { p = t; } else { break; }
+                    }
+                    events.push((p, g));
+                }
+                last[g] = Some(at);
+            }
+        }
+        events.sort();
+        let mut cur: Vec<[u32; 4]> = vec![[0; 4]; ngroups];
+        let mut out: Vec<BorgInstr> = vec![BorgInstr { mnem: "ISUB", dst: zero, srcs: vec![f, f], swz: vec![0, 0] }];
+        let mut e = 0;
+        for (at, mut i) in std::mem::take(&mut self.sel.prog).into_iter().enumerate() {
+            while e < events.len() && events[e].0 == at {
+                let g = events[e].1;
+                let mut idx = zero;
+                for _ in 0..g {
+                    let n = fresh(&mut self.sel.ubo, None);
+                    out.push(BorgInstr { mnem: "IADD", dst: n, srcs: vec![idx, one], swz: vec![0, 0] });
+                    idx = n;
+                }
+                let t = fresh(&mut self.sel.ubo, None);
+                out.push(BorgInstr { mnem: "TEX", dst: t, srcs: vec![idx, zero, ctl], swz: vec![0, 0, 0] });
+                self.tex_dsts.insert(t);
+                for c in 0..4u8 {
+                    let r = fresh(&mut self.sel.ubo, None);
+                    out.push(BorgInstr { mnem: "IOR", dst: r, srcs: vec![t, t], swz: vec![c, c] });
+                    cur[g][c as usize] = r;
+                }
+                e += 1;
+            }
+            for s in i.srcs.iter_mut() {
+                if let Some(k) = is_pool(s, &self.sel.ubo) {
+                    let slot = slot_of[k as usize];
+                    *s = cur[slot / 4][slot % 4];
+                }
+            }
+            out.push(i);
+        }
+        self.sel.prog = out;
+        eprintln!("borgc: constant pool of {} word(s)", pool.len());
+        #[allow(static_mut_refs)]
+        unsafe { LAST_FRAG_POOL = pool; }
     }
 }
