@@ -22,6 +22,7 @@ mod encode;
 mod isel;
 mod opt;
 mod regalloc;
+mod survey;
 
 use compiler::bindings::*;
 use compiler::nir::AsDef;
@@ -30,6 +31,7 @@ use encode::{emit_blob, encode, encode_fattr, encode_sout};
 use isel::{borg_isel, resolve_vm};
 use opt::{classify_uniform, dce, fuse_fmadd, schedule_for_pressure};
 use regalloc::regalloc;
+use survey::{survey, Survey};
 use std::env;
 
 /// One selected Borg instruction in virtual-register form (pre-register-alloc).
@@ -352,54 +354,9 @@ unsafe fn compile_nir_inner(
         }
     }
 
-    let mut total = 0u32;
-    let mut alu_ok = 0u32;
-    let mut alu_todo = 0u32;
-    let mut tex = 0u32;
-    let mut consts = 0u32;
-    let mut intrinsics = 0u32;
-    let mut other = 0u32;
-    let mut todo: Vec<&'static str> = Vec::new();
-    let mut note = |op: &'static str| {
-        if !todo.contains(&op) {
-            todo.push(op);
-        }
-    };
-
-    let mut skipped: Vec<&'static str> = Vec::new();
     let entry = nir_shader_get_entrypoint(nir);
-    if !entry.is_null() {
-        for block in (*entry).iter_blocks() {
-            for instr in block.iter_instr_list() {
-                total += 1;
-                if let Some(alu) = instr.as_alu() {
-                    if borg_isel(alu.op).is_some() {
-                        alu_ok += 1;
-                    } else {
-                        alu_todo += 1;
-                        note(alu.info().name());
-                    }
-                } else if instr.as_tex().is_some() {
-                    tex += 1; // → TEX
-                } else if let Some(i) = instr.as_intrinsic() {
-                    intrinsics += 1;
-                    note(i.info().name());
-                } else if instr.as_load_const().is_some() {
-                    consts += 1;
-                } else {
-                    other += 1;
-                }
-            }
-        }
-    }
-
-    eprintln!(
-        "borgc: stage={stage} instrs={total} | alu_ok={alu_ok} alu_todo={alu_todo} \
-         tex={tex} const={consts} intrinsic={intrinsics} other={other}"
-    );
-    if !todo.is_empty() {
-        eprintln!("borgc:   needs lowering/selection: {}", todo.join(", "));
-    }
+    let Survey { total, tex } = survey(entry, stage);
+    let mut skipped: Vec<&'static str> = Vec::new();
 
     use std::collections::HashMap;
 
