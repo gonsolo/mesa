@@ -100,6 +100,7 @@ pub(crate) fn encode_fattr(rd: u8, index: u16) -> Option<u32> {
     Some(0x8800_0000u32 | (((t >> 5) & 0x1F) << 20) | ((t & 0x1F) << 15) | ((rd as u32) << 7))
 }
 
+#[cfg(test)]
 pub(crate) fn encode_branch(mnem: &str, rs1: u8, target: u16) -> Option<u32> {
     let base = match mnem {
         "BRZ" => 0x4C00_0000u32,
