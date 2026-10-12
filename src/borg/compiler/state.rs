@@ -66,3 +66,28 @@ impl FragWindow {
         v
     }
 }
+
+impl Selector {
+    pub fn opc(&mut self, mnem: &'static str, s: &[(u32, u8)]) -> u32 {
+        let srcs = s.iter().map(|x| x.0).collect();
+        let swz = s.iter().map(|x| x.1).collect();
+        self.op(mnem, srcs, swz)
+    }
+
+    pub fn pair(&mut self, mnem: &'static str, x: (u32, u8), y: (u32, u8)) -> (u32, u8) {
+        (self.opc(mnem, &[x, y]), 0)
+    }
+
+    pub fn fsub(&mut self, hi: (u32, u8), lo: (u32, u8)) -> u32 {
+        let neg = self.opc("FNEG", &[lo]);
+        self.opc("FADD", &[hi, (neg, 0)])
+    }
+
+    pub fn reg(&mut self, v: (u32, u8)) -> (u32, u8) {
+        if matches!(self.ubo.get(&v.0), Some(crate::Ubo::Uniform(_))) {
+            (self.opc("FMOV", &[(v.0, 0)]), 0)
+        } else {
+            v
+        }
+    }
+}

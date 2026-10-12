@@ -792,18 +792,11 @@ unsafe fn compile_nir_inner(
                             let b = resolve_vm(&sel.vec_map, sl[1].src.as_def().index, sl[1].swizzle[0]);
 
                             // diff(hi, lo) = hi - lo, as a fresh vreg.
-                            let mut diff = |hi: (u32, u8), lo: (u32, u8), nv: &mut u32, prog: &mut Vec<BorgInstr>| {
-                                let neg = *nv; *nv += 1;
-                                let d = *nv; *nv += 1;
-                                prog.push(BorgInstr { mnem: "FNEG", dst: neg, srcs: vec![lo.0], swz: vec![lo.1] });
-                                prog.push(BorgInstr { mnem: "FADD", dst: d, srcs: vec![hi.0, neg], swz: vec![hi.1, 0] });
-                                d
-                            };
 
                             match alu.op {
                                 // a < b  ->  FSTEP(b - a)
                                 nir_op_flt => {
-                                    let d = diff(b, a, &mut sel.next_vreg, &mut sel.prog);
+                                    let d = sel.fsub(b, a);
                                     sel.prog.push(BorgInstr { mnem: "FSTEP", dst: alu.def.index, srcs: vec![d], swz: vec![0] });
                                 }
                                 // a >= b  ->  1 - FSTEP(b - a), as
@@ -811,7 +804,7 @@ unsafe fn compile_nir_inner(
                                 // pinned constant register, same mechanism as
                                 // the existing const_uniforms.
                                 nir_op_fge => {
-                                    let d = diff(b, a, &mut sel.next_vreg, &mut sel.prog);
+                                    let d = sel.fsub(b, a);
                                     let st = sel.next_vreg; sel.next_vreg += 1;
                                     let nst = sel.next_vreg; sel.next_vreg += 1;
                                     sel.prog.push(BorgInstr { mnem: "FSTEP", dst: st, srcs: vec![d], swz: vec![0] });
@@ -847,8 +840,8 @@ unsafe fn compile_nir_inner(
                                 // one term is 1.0, so the sum is a clean 0/1
                                 // and needs no clamp.
                                 nir_op_fneu => {
-                                    let dab = diff(a, b, &mut sel.next_vreg, &mut sel.prog);
-                                    let dba = diff(b, a, &mut sel.next_vreg, &mut sel.prog);
+                                    let dab = sel.fsub(a, b);
+                                    let dba = sel.fsub(b, a);
                                     let s1 = sel.next_vreg; sel.next_vreg += 1;
                                     let s2 = sel.next_vreg; sel.next_vreg += 1;
                                     sel.prog.push(BorgInstr { mnem: "FSTEP", dst: s1, srcs: vec![dab], swz: vec![0] });
@@ -857,8 +850,8 @@ unsafe fn compile_nir_inner(
                                 }
                                 // a == b  ->  1 - (a != b)
                                 _ => {
-                                    let dab = diff(a, b, &mut sel.next_vreg, &mut sel.prog);
-                                    let dba = diff(b, a, &mut sel.next_vreg, &mut sel.prog);
+                                    let dab = sel.fsub(a, b);
+                                    let dba = sel.fsub(b, a);
                                     let s1 = sel.next_vreg; sel.next_vreg += 1;
                                     let s2 = sel.next_vreg; sel.next_vreg += 1;
                                     let ne = sel.next_vreg; sel.next_vreg += 1;
@@ -959,24 +952,19 @@ unsafe fn compile_nir_inner(
                             let sl = alu.srcs_as_slice();
                             let a = resolve_vm(&sel.vec_map, sl[0].src.as_def().index, sl[0].swizzle[0]);
                             let b = resolve_vm(&sel.vec_map, sl[1].src.as_def().index, sl[1].swizzle[0]);
-                            let mut ins = |mnem: &'static str, x: (u32, u8), y: (u32, u8), nv: &mut u32, prog: &mut Vec<BorgInstr>| {
-                                let d = *nv; *nv += 1;
-                                prog.push(BorgInstr { mnem, dst: d, srcs: vec![x.0, y.0], swz: vec![x.1, y.1] });
-                                (d, 0u8)
-                            };
                             let lt = if matches!(alu.op, nir_op_ult | nir_op_uge) { "ISLTU" } else { "ISLT" };
                             let bits = match alu.op {
-                                nir_op_ieq => ins("ISEQ", a, b, &mut sel.next_vreg, &mut sel.prog),
-                                nir_op_ilt | nir_op_ult => ins(lt, a, b, &mut sel.next_vreg, &mut sel.prog),
+                                nir_op_ieq => sel.pair("ISEQ", a, b),
+                                nir_op_ilt | nir_op_ult => sel.pair(lt, a, b),
                                 nir_op_ine => {
-                                    let l = ins("ISLT", a, b, &mut sel.next_vreg, &mut sel.prog);
-                                    let g = ins("ISLT", b, a, &mut sel.next_vreg, &mut sel.prog);
-                                    ins("IADD", l, g, &mut sel.next_vreg, &mut sel.prog)
+                                    let l = sel.pair("ISLT", a, b);
+                                    let g = sel.pair("ISLT", b, a);
+                                    sel.pair("IADD", l, g)
                                 }
                                 _ => {
-                                    let g = ins(lt, b, a, &mut sel.next_vreg, &mut sel.prog);
-                                    let e = ins("ISEQ", a, b, &mut sel.next_vreg, &mut sel.prog);
-                                    ins("IADD", g, e, &mut sel.next_vreg, &mut sel.prog)
+                                    let g = sel.pair(lt, b, a);
+                                    let e = sel.pair("ISEQ", a, b);
+                                    sel.pair("IADD", g, e)
                                 }
                             };
                             sel.prog.push(BorgInstr { mnem: "I2F", dst: alu.def.index, srcs: vec![bits.0], swz: vec![bits.1] });
@@ -2194,18 +2182,11 @@ unsafe fn compile_nir_inner(
                 outs.roots.push(d[2 + k as usize]);
             }
         }
-        let reg = |v: (u32, u8), ubo: &HashMap<u32, Ubo>, prog: &mut Vec<BorgInstr>, next_vreg: &mut u32| -> (u32, u8) {
-            if matches!(ubo.get(&v.0), Some(Ubo::Uniform(_))) {
-                let o = *next_vreg; *next_vreg += 1;
-                prog.push(BorgInstr { mnem: "FMOV", dst: o, srcs: vec![v.0], swz: vec![0] });
-                (o, 0)
-            } else { v }
-        };
         if let (Some(px), Some(py), Some(pw)) = (outs.pos[0], outs.pos[1], outs.pos[3]) {
-            let w = reg(pw, &sel.ubo, &mut sel.prog, &mut sel.next_vreg);
+            let w = sel.reg(pw);
             let size = outs.psize.map(|ps| {
                 // Clamp to the advertised range [1, 64]: x - c*(x - 64), c = step(x - 64).
-                let x = reg(ps, &sel.ubo, &mut sel.prog, &mut sel.next_vreg).0;
+                let x = sel.reg(ps).0;
                 let mut win = |bits: u32, draw_vs_consts: &mut Vec<(u8, u32)>, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| {
                     let u = DRAW_VS_CONST_U0 + draw_vs_consts.len() as u8;
                     assert!(draw_vs_consts.len() < DRAW_VS_CONST_WORDS, "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
@@ -2232,7 +2213,7 @@ unsafe fn compile_nir_inner(
                 (x, 0u8)
             });
             for (k, pc) in [px, py].into_iter().enumerate() {
-                let base = reg(pc, &sel.ubo, &mut sel.prog, &mut sel.next_vreg);
+                let base = sel.reg(pc);
                 let mut off = d[k];
                 if let Some(sz) = size {
                     let o = sel.next_vreg; sel.next_vreg += 1;
@@ -2409,23 +2390,18 @@ unsafe fn compile_nir_inner(
     if draw_mode && is_fragment && flags.half() && outs.frag[0].is_some() {
         // R16G16_SFLOAT (RAW32; with bit 0x20 R16_SFLOAT, RAW16): r26 = half(r) | half(g) << 16 with integer ops (round to nearest even,
         // NaN to 0x7E00); a branch-free select between the denormal, normal and overflow results.
-        let ins = |mnem: &'static str, s: &[(u32, u8)], prog: &mut Vec<BorgInstr>, nv: &mut u32| -> u32 {
-            let d = *nv; *nv += 1;
-            prog.push(BorgInstr { mnem, dst: d, srcs: s.iter().map(|x| x.0).collect(), swz: s.iter().map(|x| x.1).collect() });
-            d
-        };
         macro_rules! i {
-            ($m:expr, $a:expr, $b:expr) => { ins($m, &[($a, 0u8), ($b, 0u8)], &mut sel.prog, &mut sel.next_vreg) };
-            ($m:expr, $a:expr) => { ins($m, &[($a, 0u8)], &mut sel.prog, &mut sel.next_vreg) };
+            ($m:expr, $a:expr, $b:expr) => { sel.opc($m, &[($a, 0u8), ($b, 0u8)]) };
+            ($m:expr, $a:expr) => { sel.opc($m, &[($a, 0u8)]) };
         }
         macro_rules! k {
             ($b:expr) => { fw.win(&mut sel, $b) };
         }
         let (x0, x0c) = outs.frag[0].unwrap();
         let first = if matches!(sel.ubo.get(&x0), Some(Ubo::Uniform(_))) {
-            (ins("FMOV", &[(x0, x0c)], &mut sel.prog, &mut sel.next_vreg), 0u8)
+            (sel.opc("FMOV", &[(x0, x0c)]), 0u8)
         } else { (x0, x0c) };
-        let zero = ins("ISUB", &[first, first], &mut sel.prog, &mut sel.next_vreg);
+        let zero = sel.opc("ISUB", &[first, first]);
         let nch = flags.half_channels();
         // The small integers are constants like the rest: a register each for the whole block
         // was more than a blending shader has (the pool pass keeps the busiest in the window).
@@ -2433,7 +2409,7 @@ unsafe fn compile_nir_inner(
         for n in 0..nch {
             let src = if n == 0 { Some((x0, x0c)) } else { outs.frag[n] };
             let Some((x, xc)) = src else { continue };
-            let xr = ins("IADD", &[(x, xc), (zero, 0)], &mut sel.prog, &mut sel.next_vreg);
+            let xr = sel.opc("IADD", &[(x, xc), (zero, 0)]);
             // The sign first, so the input register is free early; 0x8000 and 0x200 are built here.
             let c = k!(16);
             let s16 = i!("ISRL", xr, c);
