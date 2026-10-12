@@ -51,7 +51,7 @@ static nir_def *build_attr_ring_desc(nir_builder *b, struct si_shader *shader,
    nir_def *attr_address =
       b->shader->info.stage == MESA_SHADER_VERTEX && b->shader->info.vs.blit_sgprs_amd ?
       ac_nir_load_arg_at_offset(b, &args->ac, args->vs_blit_inputs,
-                                b->shader->info.vs.blit_sgprs_amd - 1) :
+                                b->shader->info.vs.blit_sgprs_amd - 1, false) :
       ac_nir_load_arg(b, &args->ac, args->gs_attr_address);
 
    unsigned per_vertex_params = MAX2(1, si_shader_num_alloc_param_exports(shader));
@@ -60,6 +60,7 @@ static nir_def *build_attr_ring_desc(nir_builder *b, struct si_shader *shader,
    uint32_t desc[4];
 
    ac_build_attr_ring_descriptor(sel->screen->info.gfx_level,
+                                 sel->screen->info.compiler_info.has_desc_resource_level,
                                  (uint64_t)sel->screen->info.address32_hi << 32,
                                  0xffffffff, stride, desc);
 
@@ -80,8 +81,9 @@ static nir_def *build_tess_ring_desc(nir_builder *b, struct si_screen *screen,
    uint32_t desc[4];
 
    ac_build_raw_buffer_descriptor(screen->info.gfx_level,
-                             (uint64_t)screen->info.address32_hi << 32,
-                             0xffffffff, desc);
+                                  screen->info.compiler_info.has_desc_resource_level,
+                                  (uint64_t)screen->info.address32_hi << 32,
+                                  0xffffffff, desc);
 
    nir_def *comp[4] = {
       addr,
@@ -162,6 +164,7 @@ static bool build_gsvs_ring_desc(nir_builder *b, struct lower_abi_state *s)
             .index_stride = 1,
             .add_tid = true,
             .gfx10_oob_select = V_008F0C_OOB_SELECT_DISABLED,
+            .has_desc_resource_level = sel->screen->info.compiler_info.has_desc_resource_level,
          };
          uint32_t tmp_desc[4];
 
@@ -198,6 +201,7 @@ static nir_def *build_task_ring_desc(nir_builder *b, struct lower_abi_state *s,
       .format = PIPE_FORMAT_R32_FLOAT,
       .swizzle = { PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y, PIPE_SWIZZLE_Z, PIPE_SWIZZLE_W },
       .gfx10_oob_select = V_008F0C_OOB_SELECT_DISABLED,
+      .has_desc_resource_level = screen->info.compiler_info.has_desc_resource_level,
    };
 
    unsigned desc[4];
@@ -227,6 +231,7 @@ static nir_def *build_mesh_scratch_ring_desc(nir_builder *b, struct lower_abi_st
       .format = PIPE_FORMAT_R32_FLOAT,
       .swizzle = { PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y, PIPE_SWIZZLE_Z, PIPE_SWIZZLE_W },
       .gfx10_oob_select = V_008F0C_OOB_SELECT_DISABLED,
+      .has_desc_resource_level = screen->info.compiler_info.has_desc_resource_level,
    };
 
    unsigned desc[4];
@@ -411,20 +416,16 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
    case nir_intrinsic_load_num_vertices_per_primitive_amd:
       replacement = get_num_vertices_per_prim(b, s);
       break;
-   case nir_intrinsic_load_cull_ccw_amd:
-      /* radeonsi embed cw/ccw info into front/back face enabled */
-      replacement = nir_imm_false(b);
-      break;
    case nir_intrinsic_load_cull_any_enabled_amd:
       /* If culling is enabled at compile time, it's always enabled at runtime. */
       assert(si_shader_culling_enabled(shader));
       replacement = nir_imm_true(b);
       break;
-   case nir_intrinsic_load_cull_back_face_enabled_amd:
-      replacement = nir_i2b(b, GET_FIELD_NIR(GS_STATE_CULL_FACE_BACK));
+   case nir_intrinsic_load_cull_face_positive_determinant_enabled_amd:
+      replacement = nir_i2b(b, GET_FIELD_NIR(GS_STATE_CULL_FACE_POSITIVE_DETERMINANT));
       break;
-   case nir_intrinsic_load_cull_front_face_enabled_amd:
-      replacement = nir_i2b(b, GET_FIELD_NIR(GS_STATE_CULL_FACE_FRONT));
+   case nir_intrinsic_load_cull_face_negative_determinant_enabled_amd:
+      replacement = nir_i2b(b, GET_FIELD_NIR(GS_STATE_CULL_FACE_NEGATIVE_DETERMINANT));
       break;
    case nir_intrinsic_load_cull_small_triangle_precision_amd:
       replacement = get_small_prim_precision(b, s, false);
@@ -577,7 +578,7 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
       nir_def *color[4];
       for (int i = 0; i < 4; i++) {
          if (colors_read & BITFIELD_BIT(start + i))
-            color[i] = ac_nir_load_arg_at_offset(b, &args->ac, args->color_start, offset++);
+            color[i] = ac_nir_load_arg_at_offset(b, &args->ac, args->color_start, offset++, false);
          else
             color[i] = nir_undef(b, 1, 32);
       }
@@ -588,9 +589,16 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
    case nir_intrinsic_load_point_coord_maybe_flipped: {
       /* Load point coordinates (x, y) which are written by the hw after the interpolated inputs */
       nir_def *baryc = intrin->src[0].ssa;
-      replacement = nir_load_interpolated_input(b, 2, 32, baryc, nir_imm_int(b, 0),
-                                                .component = 2,
-                                                .io_semantics.location = VARYING_SLOT_PARAM_GEN_AMD);
+      unsigned base = ac_nir_get_io_driver_location(b->shader, VARYING_SLOT_PARAM_GEN_AMD, true);
+      nir_def *comp[2];
+
+      for (unsigned i = 0; i < 2; i++) {
+         comp[i] = nir_load_interpolated_input_amd(b, 32, baryc,
+                                                   ac_nir_load_arg(b, &args->ac, args->ac.prim_mask),
+                                                   .ps_input_info_amd.slot = base,
+                                                   .ps_input_info_amd.component = 2 + i);
+      }
+      replacement = nir_vec(b, comp, 2);
       break;
    }
    case nir_intrinsic_load_poly_line_smooth_enabled:

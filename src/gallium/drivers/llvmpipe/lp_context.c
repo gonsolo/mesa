@@ -58,6 +58,8 @@ llvmpipe_destroy(struct pipe_context *pipe)
    struct llvmpipe_screen *lp_screen = llvmpipe_screen(pipe->screen);
    uint i;
 
+   llvmpipe_finish(pipe, __func__);
+
    mtx_lock(&lp_screen->ctx_mutex);
    list_del(&llvmpipe->list);
    mtx_unlock(&lp_screen->ctx_mutex);
@@ -107,7 +109,9 @@ llvmpipe_destroy(struct pipe_context *pipe)
 
    lp_delete_setup_variants(llvmpipe);
 
-   llvmpipe_sampler_matrix_destroy(llvmpipe);
+   lp_destroy_cs_variants(llvmpipe);
+
+   llvmpipe_destroy_fs_funcs(llvmpipe);
 
    lp_context_destroy(&llvmpipe->context);
 
@@ -274,12 +278,6 @@ llvmpipe_create_context(struct pipe_screen *screen, void *priv,
    }
 #endif
 
-   list_inithead(&llvmpipe->fs_variants_list.list);
-
-   list_inithead(&llvmpipe->setup_variants_list.list);
-
-   list_inithead(&llvmpipe->cs_variants_list.list);
-
    llvmpipe->pipe.screen = screen;
    llvmpipe->pipe.priv = priv;
 
@@ -313,23 +311,13 @@ llvmpipe_create_context(struct pipe_screen *screen, void *priv,
    llvmpipe_init_context_resource_funcs(&llvmpipe->pipe);
    llvmpipe_init_surface_functions(llvmpipe);
 
-   llvmpipe_init_sampler_matrix(llvmpipe);
-
 #ifdef HAVE_LIBDRM
    llvmpipe_init_fence_funcs(&llvmpipe->pipe);
 #endif
 
-#ifdef USE_GLOBAL_LLVM_CONTEXT
-   llvmpipe->context.ref = LLVMGetGlobalContext();
+   /* Alias the screen's shared LLVMContext; aliases share the mutex. */
+   llvmpipe->context = lp_screen->llvm_context;
    llvmpipe->context.owned = false;
-#if LLVM_VERSION_MAJOR == 15
-   if (llvmpipe->context.ref) {
-      LLVMContextSetOpaquePointers(llvmpipe->context.ref, false);
-   }
-#endif
-#else
-   lp_context_create(&llvmpipe->context);
-#endif
 
    if (!llvmpipe->context.ref)
       goto fail;
@@ -385,7 +373,6 @@ llvmpipe_create_context(struct pipe_screen *screen, void *priv,
    /* plug in AA line/point stages */
    draw_install_aaline_stage(llvmpipe->draw, &llvmpipe->pipe);
    draw_install_aapoint_stage(llvmpipe->draw, &llvmpipe->pipe, nir_type_bool1);
-   draw_install_pstipple_stage(llvmpipe->draw, &llvmpipe->pipe);
 
    /* convert points and lines into triangles:
     * (otherwise, draw points and lines natively)
@@ -405,6 +392,9 @@ llvmpipe_create_context(struct pipe_screen *screen, void *priv,
     * See https://bugs.freedesktop.org/show_bug.cgi?id=101709
     */
    llvmpipe->dirty |= LP_NEW_SCISSOR;
+
+   p_atomic_set(&llvmpipe->sampler_matrix_update_count.value,
+                p_atomic_read(&lp_screen->sampler_matrix.update_count.value));
 
    mtx_lock(&lp_screen->ctx_mutex);
    list_addtail(&llvmpipe->list, &lp_screen->ctx_list);

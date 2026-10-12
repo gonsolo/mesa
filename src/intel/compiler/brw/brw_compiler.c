@@ -13,13 +13,13 @@
 #include "util/u_debug.h"
 
 const struct nir_shader_compiler_options brw_scalar_nir_options = {
-   .avoid_ternary_with_two_constants = true,
    .compact_arrays = true,
    .discard_is_demote = true,
    .divergence_analysis_options =
       (nir_divergence_single_patch_per_tcs_subgroup |
        nir_divergence_single_patch_per_tes_subgroup |
-       nir_divergence_shader_record_ptr_uniform),
+       nir_divergence_shader_record_ptr_uniform |
+       nir_divergence_tcs_invocation_id_uniform),
    .force_indirect_unrolling = nir_var_function_temp,
    .has_bfe = true,
    .has_bfi = true,
@@ -54,10 +54,12 @@ const struct nir_shader_compiler_options brw_scalar_nir_options = {
    .lower_pack_unorm_2x16 = true,
    .lower_pack_unorm_4x8 = true,
    .lower_pack_64_4x16 = true,
+   .lower_pack_64_2x32 = true,
    .lower_scmp = true,
    .lower_to_scalar = true,
    .lower_uadd_carry = true,
    .lower_ufind_msb = true,
+   .lower_ifind_msb = true,
    .lower_uniforms_to_ubo = true,
    .lower_unpack_half_2x16 = true,
    .lower_unpack_snorm_2x16 = true,
@@ -77,6 +79,7 @@ const struct nir_shader_compiler_options brw_scalar_nir_options = {
    .per_view_unique_driver_locations = true,
    .compact_view_index = true,
    .io_options = nir_io_use_frag_result_dual_src_blend,
+   .has_find_msb_rev = true,
 };
 
 struct brw_compiler *
@@ -89,7 +92,9 @@ brw_compiler_create(void *mem_ctx, const struct intel_device_info *devinfo)
 
    brw_init_isa_info(&compiler->isa, devinfo);
 
-   brw_alloc_reg_sets(compiler);
+   brw_alloc_reg_sets(compiler, 0);
+   if (intel_threads_per_eu_min != -1 || intel_threads_per_eu_set != -1)
+      brw_alloc_reg_sets(compiler, 1);
 
    compiler->precise_trig = debug_get_bool_option("INTEL_PRECISE_TRIG", false);
 
@@ -165,6 +170,12 @@ brw_compiler_create(void *mem_ctx, const struct intel_device_info *devinfo)
    struct nir_shader_compiler_options *nir_options = &compiler->nir_options[0];
    *nir_options = brw_scalar_nir_options;
 
+   /* Weigh gcm loop hoist pressure against the same number the backend uses
+    * to decide a shader is under too much pressure.
+    */
+   nir_options->max_gcm_loop_pressure = compiler->register_pressure_threshold;
+   nir_options->gcm_divergent_pressure_scale = devinfo->ver >= 30 ? 2 : 1;
+
    /* Gfx11 loses LRP. */
    nir_options->lower_flrp32 = devinfo->ver >= 11;
 
@@ -183,8 +194,13 @@ brw_compiler_create(void *mem_ctx, const struct intel_device_info *devinfo)
 
    nir_options->has_bitfield_select = devinfo->verx10 >= 125;
 
+   /* jay (>=xe2) shouldn't have this; brw (<=xe1) should */
+   nir_options->avoid_ternary_with_two_constants = devinfo->ver < 20;
+
    nir_options->lower_int64_options = int64_options;
    nir_options->lower_doubles_options = fp64_options;
+   if (!(fp64_options & nir_lower_fp64_full_software))
+      nir_options->float_mul_add64 |= nir_float_muladd_support_has_ffma;
    nir_options->max_samples = devinfo->ver >= 30 ? 8 : 16;
 
    if (intel_use_tcs_multi_patch(devinfo)) {
@@ -197,8 +213,9 @@ brw_compiler_create(void *mem_ctx, const struct intel_device_info *devinfo)
       nir_options->divergence_analysis_options |=
          nir_divergence_single_prim_per_subgroup;
 
+   nir_options->has_tanh = devinfo->ver >= 35;
+
    for (int i = 0; i < MESA_ALL_SHADER_STAGES; i++) {
-      bool jay = intel_use_jay(compiler->devinfo, i);
       struct nir_shader_compiler_options *stage_options =
          &compiler->nir_options[i];
       *stage_options = compiler->nir_options[0];
@@ -206,9 +223,6 @@ brw_compiler_create(void *mem_ctx, const struct intel_device_info *devinfo)
       stage_options->unify_interfaces = i < MESA_SHADER_FRAGMENT;
 
       stage_options->force_indirect_unrolling |= brw_nir_no_indirect_mask(i);
-      stage_options->has_find_msb_rev = jay;
-      stage_options->lower_ifind_msb = jay;
-      stage_options->avoid_ternary_with_two_constants = !jay;
    }
 
    /* Build a list of storage format compatible in component bit size &
@@ -251,6 +265,8 @@ brw_get_compiler_config_value(const struct brw_compiler *compiler)
 
    insert_u64_bit(&config, compiler->precise_trig);
    bits++;
+   insert_u64_bit(&config, compiler->limit_trig_input_range);
+   bits++;
    insert_u64_bit(&config, compiler->lower_dpas);
    bits++;
    insert_u64_bit(&config, compiler->optimistic_simd_heuristic);
@@ -261,11 +277,12 @@ brw_get_compiler_config_value(const struct brw_compiler *compiler)
       DEBUG_SPILL_FS,
       DEBUG_SPILL_VEC4,
       DEBUG_NO_COMPACTION,
-      DEBUG_DO32,
       DEBUG_SOFT64,
       DEBUG_NO_SEND_GATHER,
       DEBUG_NO_VRT,
       DEBUG_NO_FILL_OPT,
+      DEBUG_NO_JAY,
+      DEBUG_SHADER_HASH,
    };
    for (uint32_t i = 0; i < ARRAY_SIZE(debug_bits); i++) {
       insert_u64_bit(&config, INTEL_DEBUG(debug_bits[i]));
@@ -279,7 +296,10 @@ brw_get_compiler_config_value(const struct brw_compiler *compiler)
       insert_u64_bit(&config, (intel_simd & (1ULL << bit)) != 0);
 
    for (unsigned i = 0; i < MESA_VULKAN_SHADER_STAGES; i++) {
-      insert_u64_bit(&config, intel_use_jay(compiler->devinfo, i) != 0);
+      insert_u64_bit(&config, (intel_simd_overridden & (1 << i)) != 0);
+      bits++;
+      insert_u64_bit(&config,
+                     intel_use_jay_for_stage(compiler->devinfo, i) != 0);
       bits++;
    }
 
@@ -377,14 +397,4 @@ brw_write_shader_relocs(const struct brw_isa_info *isa,
          }
       }
    }
-}
-
-unsigned
-ptl_register_blocks(unsigned grf_used)
-{
-   if (INTEL_DEBUG(DEBUG_NO_VRT))
-      return (BRW_MAX_GRF / 32) - 1;
-
-   const unsigned n = DIV_ROUND_UP(grf_used, 32) - 1;
-   return (n < 6 ? n : 7);
 }

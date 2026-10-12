@@ -308,6 +308,29 @@ directory.  You can hack on mesa and iterate testing the build with:
 
    sudo docker run --rm -v `pwd`:/mesa $IMAGE meson compile -C /mesa/_build
 
+.. _filtering-ci-jobs:
+
+Filtering the CI hardware jobs
+------------------------------
+
+By default, every CI hardware job affected by the changes you are
+pushing will be created in the CI pipeline(s) associated to your push.
+
+It is however possible to further filter the list of jobs by setting
+the ``hw_jobs`` `CI input <https://docs.gitlab.com/ci/inputs/>`_ at
+push time (using ``git push -o ci.input='hw_jobs=["tag1", ...]'``), or
+by creating a new MR pipeline by clicking ``Run pipeline with modified
+values``.
+
+To make this possible, every hardware job has been tagged with labels
+that, if none of them is set in ``hw_jobs``, the job will simply not be
+added to the CI pipeline. The list of labels associated to each job is
+usually composed of: ``all``, ``${mesa_driver_name}``, and
+``${kernel_driver_name}.ko``.
+
+You may view the list of available tags at the top of the
+``.gitlab-ci.yml`` file.
+
 Running specific CI jobs
 ------------------------
 
@@ -344,6 +367,64 @@ scope permissions.
     `create-a-personal-access-token <https://docs.gitlab.com/user/profile/personal_access_tokens/#create-a-personal-access-token>`_
     and select the ``api`` scope. The token will only be shown once after creation,
     so make sure you store it securely.
+
+Reproducing CI jobs locally
+---------------------------
+
+If you need to debug a CI job failure, you can often reproduce it locally
+without needing the target hardware by using ``drm-shim``.
+
+.. toctree::
+   :maxdepth: 1
+
+   drm-shim
+
+Embedding the Mesa CI pipeline in related projects
+--------------------------------------------------
+
+Mesa CI depends on projects such as the Linux kernel to operate, so to make
+development of such projects easier it is possible to embed the Mesa CI
+pipeline in the CI pipeline of these projects.
+
+.. warning::
+   The container building jobs are not executing when running as a downstream
+   pipeline. So, please make sure to run the pipeline once first, or limit
+   yourself to a commit that has been ``HEAD`` of main or a release branch.
+
+Configuration
+^^^^^^^^^^^^^
+
+Here are the list of options you can set from your pipeline:
+
+  * CI inputs:
+
+    * ``hw_jobs``: Control the list of hardware jobs created. See
+      :ref:`filtering-ci-jobs`.
+
+  * Variables
+
+    * ``KERNEL_IMAGE_BASE``: An HTTP/S3 URL that contains kernel build
+      artifacts, stored in the expected format (See
+      :ref:`output-kernel-build-jobs`)
+    * More variables coming soon
+
+Example
+^^^^^^^
+
+.. code-block:: yaml
+
+   mesa-main:
+     stage: test
+     inherit:
+       variables: false
+     variables:
+       KERNEL_IMAGE_BASE: https://s3.freedesktop.org/mesa-rootfs/gfx-ci/linux/$CI_COMMIT_SHORT_SHA
+     trigger:
+       strategy: mirror
+       project: mesa/mesa
+       branch: main
+       inputs:
+          hw_jobs: ["amdgpu.ko", "anv"]
 
 Marge queue
 -----------

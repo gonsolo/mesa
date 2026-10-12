@@ -10,8 +10,9 @@
 #include "kk_image_layout.h"
 #include "kk_private.h"
 
-#include <Metal/MTLDevice.h>
+#include <Metal/MTL4Counters.h>
 #include <Metal/MTLCaptureManager.h>
+#include <Metal/MTLDevice.h>
 
 /* Device creation */
 mtl_device *
@@ -89,6 +90,21 @@ mtl_device_get_architecture_name(mtl_device *dev, char buffer[256])
    }
 }
 
+uint32_t
+mtl_device_get_gpu_apple_family(mtl_device *dev)
+{
+   @autoreleasepool {
+      id<MTLDevice> device = (id<MTLDevice>)dev;
+      uint32_t gpu_family = 0u;
+      MTLGPUFamily family = MTLGPUFamilyApple1;
+      while([device supportsFamily:family]) {
+         family += 1u;
+         gpu_family += 1u;
+      }
+      return gpu_family;
+   }
+}
+
 uint64_t
 mtl_device_get_registry_id(mtl_device *dev)
 {
@@ -154,6 +170,15 @@ mtl_device_current_allocated_size(mtl_device *dev)
    }
 }
 
+uint32_t
+mtl_device_max_argument_buffer_sampler_count(mtl_device *dev)
+{
+   @autoreleasepool {
+      id<MTLDevice> device = (id<MTLDevice>)dev;
+      return device.maxArgumentBufferSamplerCount;
+   }
+}
+
 /* Timestamp query */
 uint64_t
 mtl_device_get_gpu_timestamp(mtl_device *dev)
@@ -165,6 +190,40 @@ mtl_device_get_gpu_timestamp(mtl_device *dev)
       [device sampleTimestamps:&cpu_ts gpuTimestamp:&gpu_ts];
 
       return (uint64_t)gpu_ts;
+   }
+}
+
+uint64_t
+mtl_device_timestamp_frequency(mtl_device *dev)
+{
+   @autoreleasepool {
+      id<MTLDevice> device = (id<MTLDevice>)dev;
+      return [device queryTimestampFrequency];
+   }
+}
+
+mtl_counter_heap *
+mtl_new_timestamp_counter_heap(mtl_device *dev, uint32_t count)
+{
+   @autoreleasepool {
+      id<MTLDevice> device = (id<MTLDevice>)dev;
+      MTL4CounterHeapDescriptor *desc =
+         [[MTL4CounterHeapDescriptor alloc] init];
+      desc.type = MTL4CounterHeapTypeTimestamp;
+      desc.count = count;
+
+      NSError *error = nil;
+      id<MTL4CounterHeap> heap = [device newCounterHeapWithDescriptor:desc
+                                                                error:&error];
+      [desc release];
+
+      if (heap == nil) {
+         fprintf(stderr, "Failed to create timestamp counter heap: %s\n",
+                 error ? error.localizedDescription.UTF8String : "unknown");
+         return NULL;
+      }
+
+      return (mtl_counter_heap *)heap;
    }
 }
 
@@ -279,5 +338,23 @@ mtl_new_buffer_with_bytes_no_copy(mtl_device *device, void* ptr,
    @autoreleasepool {
       id<MTLDevice> dev = (id<MTLDevice>)device;
       return [dev newBufferWithBytesNoCopy:ptr length:size_B options:KK_MTL_RESOURCE_OPTIONS deallocator:nil];
+   }
+}
+
+mtl_command_allocator *
+mtl_new_command_allocator(mtl_device *device)
+{
+   @autoreleasepool {
+      id<MTLDevice> dev = (id<MTLDevice>)device;
+      return [dev newCommandAllocator];
+   }
+}
+
+mtl_command_buffer *
+mtl_new_command_buffer(mtl_device *device)
+{
+   @autoreleasepool {
+      id<MTLDevice> dev = (id<MTLDevice>)device;
+      return [dev newCommandBuffer];
    }
 }

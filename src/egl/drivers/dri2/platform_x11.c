@@ -565,7 +565,7 @@ dri2_query_surface(_EGLDisplay *disp, _EGLSurface *surf, EGLint attribute,
    struct dri2_egl_surface *dri2_surf = dri2_egl_surface(surf);
    int x, y, w, h;
 
-   struct dri_drawable *drawable = dri2_dpy->vtbl->get_dri_drawable(surf);
+   struct dri_drawable *drawable = dri2_surface_get_dri_drawable(surf);
 
    switch (attribute) {
    case EGL_WIDTH:
@@ -685,31 +685,13 @@ dri2_x11_add_configs_for_visuals(struct dri2_egl_display *dri2_dpy,
 }
 
 static EGLBoolean
-dri2_x11_swap_buffers(_EGLDisplay *disp, _EGLSurface *draw)
-{
-   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
-   struct dri2_egl_surface *dri2_surf = dri2_egl_surface(draw);
-
-   if (dri2_dpy->swrast) {
-      /* aka the swrast path, which does the swap in the gallium driver. */
-      driSwapBuffers(dri2_surf->dri_drawable);
-      return EGL_TRUE;
-   }
-
-   return EGL_TRUE;
-}
-
-static EGLBoolean
-dri2_x11_kopper_swap_buffers_with_damage(_EGLDisplay *disp, _EGLSurface *draw,
-                                         const EGLint *rects, EGLint numRects)
+dri2_x11_kopper_swap_buffers(_EGLDisplay *disp, _EGLSurface *draw,
+                             const EGLint *rects, EGLint numRects)
 {
    struct dri2_egl_surface *dri2_surf = dri2_egl_surface(draw);
 
    /* swrast path unsupported for now */
-   if (numRects)
-      kopperSwapBuffersWithDamage(dri2_surf->dri_drawable, __DRI2_FLUSH_CONTEXT | __DRI2_FLUSH_INVALIDATE_ANCILLARY, numRects, rects);
-   else
-      kopperSwapBuffers(dri2_surf->dri_drawable, __DRI2_FLUSH_CONTEXT | __DRI2_FLUSH_INVALIDATE_ANCILLARY);
+   kopperSwapBuffers(dri2_surf->dri_drawable, __DRI2_FLUSH_CONTEXT | __DRI2_FLUSH_INVALIDATE_ANCILLARY, numRects, rects);
 
    /* If the X11 window has been resized, vkQueuePresentKHR() or
     * vkAcquireNextImageKHR() may return VK_ERROR_SURFACE_LOST or
@@ -723,20 +705,11 @@ dri2_x11_kopper_swap_buffers_with_damage(_EGLDisplay *disp, _EGLSurface *draw,
 }
 
 static EGLBoolean
-dri2_x11_kopper_swap_buffers(_EGLDisplay *disp, _EGLSurface *draw)
-{
-   return dri2_x11_kopper_swap_buffers_with_damage(disp, draw, NULL, 0);
-}
-
-static EGLBoolean
-dri2_x11_swap_buffers_with_damage(_EGLDisplay *disp, _EGLSurface *draw,
-                                  const EGLint *rects, EGLint numRects)
+dri2_x11_swap_buffers(_EGLDisplay *disp, _EGLSurface *draw,
+                      const EGLint *rects, EGLint numRects)
 {
    struct dri2_egl_surface *dri2_surf = dri2_egl_surface(draw);
-   if (numRects)
-      driSwapBuffersWithDamage(dri2_surf->dri_drawable, numRects, rects);
-   else
-      driSwapBuffers(dri2_surf->dri_drawable);
+   driSwapBuffers(dri2_surf->dri_drawable, numRects, rects);
    return EGL_TRUE;
 }
 
@@ -761,7 +734,7 @@ dri2_x11_copy_buffers(_EGLDisplay *disp, _EGLSurface *surf,
        * okay-ish on swrast because those aren't invalidating the back buffer on
        * swap.
        */
-      driSwapBuffers(dri2_surf->dri_drawable);
+      driSwapBuffers(dri2_surf->dri_drawable, 0, NULL);
    }
 
    gc = xcb_generate_id(dri2_dpy->conn);
@@ -792,17 +765,6 @@ dri2_fourcc_for_depth(struct dri2_egl_display *dri2_dpy, uint32_t depth)
    default:
       return DRM_FORMAT_INVALID;
    }
-}
-
-static int
-box_intersection_area(int16_t a_x, int16_t a_y, int16_t a_width,
-                      int16_t a_height, int16_t b_x, int16_t b_y,
-                      int16_t b_width, int16_t b_height)
-{
-   int w = MIN2(a_x + a_width, b_x + b_width) - MAX2(a_x, b_x);
-   int h = MIN2(a_y + a_height, b_y + b_height) - MAX2(a_y, b_y);
-
-   return (w < 0 || h < 0) ? 0 : w * h;
 }
 
 EGLBoolean
@@ -937,13 +899,11 @@ static const struct dri2_egl_display_vtbl dri2_x11_swrast_display_vtbl = {
    .destroy_surface = dri2_x11_destroy_surface,
    .create_image = dri2_create_image_khr,
    .swap_buffers = dri2_x11_swap_buffers,
-   .swap_buffers_with_damage = dri2_x11_swap_buffers_with_damage,
    .copy_buffers = dri2_x11_copy_buffers,
    .query_buffer_age = dri2_swrast_query_buffer_age,
    /* XXX: should really implement this since X11 has pixmaps */
    .query_surface = dri2_query_surface,
    .get_msc_rate = dri2_x11_get_msc_rate,
-   .get_dri_drawable = dri2_surface_get_dri_drawable,
 };
 
 static const struct dri2_egl_display_vtbl dri2_x11_kopper_display_vtbl = {
@@ -955,18 +915,14 @@ static const struct dri2_egl_display_vtbl dri2_x11_kopper_display_vtbl = {
    .create_image = dri2_create_image_khr,
    .swap_interval = dri2_kopper_swap_interval,
    .swap_buffers = dri2_x11_kopper_swap_buffers,
-   .swap_buffers_with_damage = dri2_x11_kopper_swap_buffers_with_damage,
    .copy_buffers = dri2_x11_copy_buffers,
    .query_buffer_age = dri2_kopper_query_buffer_age,
    /* XXX: should really implement this since X11 has pixmaps */
    .query_surface = dri2_query_surface,
    .get_msc_rate = dri2_x11_get_msc_rate,
-   .get_dri_drawable = dri2_surface_get_dri_drawable,
 };
 
 static const __DRIswrastLoaderExtension swrast_loader_extension = {
-   .base = {__DRI_SWRAST_LOADER, 1},
-
    .getDrawableInfo = swrastGetDrawableInfo,
    .putImage = swrastPutImage,
    .putImage2 = swrastPutImage2,
@@ -974,8 +930,6 @@ static const __DRIswrastLoaderExtension swrast_loader_extension = {
 };
 
 static const __DRIswrastLoaderExtension swrast_loader_shm_extension = {
-   .base = {__DRI_SWRAST_LOADER, 4},
-
    .getDrawableInfo = swrastGetDrawableInfo,
    .putImage = swrastPutImage,
    .putImage2 = swrastPutImage2,
@@ -1016,28 +970,23 @@ kopperGetDrawableInfo(struct dri_drawable *draw, int *w, int *h,
 }
 
 static const __DRIkopperLoaderExtension kopper_loader_extension = {
-   .base = {__DRI_KOPPER_LOADER, 1},
-
    .SetSurfaceCreateInfo = kopperSetSurfaceCreateInfo,
    .GetDrawableInfo = kopperGetDrawableInfo,
 };
 
-static const __DRIextension *kopper_loader_extensions[] = {
-   &kopper_loader_extension.base,
-   &image_lookup_extension.base,
-   NULL,
+static const struct dri_loader_funcs kopper_loader_funcs = {
+   .image_lookup = &image_lookup_extension,
+   .kopper = &kopper_loader_extension,
 };
 
-static const __DRIextension *swrast_loader_extensions[] = {
-   &swrast_loader_extension.base,
-   &image_lookup_extension.base,
-   NULL,
+static const struct dri_loader_funcs swrast_loader_funcs = {
+   .image_lookup = &image_lookup_extension,
+   .swrast = &swrast_loader_extension,
 };
 
-static const __DRIextension *swrast_loader_shm_extensions[] = {
-   &swrast_loader_shm_extension.base,
-   &image_lookup_extension.base,
-   NULL,
+static const struct dri_loader_funcs swrast_loader_shm_funcs = {
+   .image_lookup = &image_lookup_extension,
+   .swrast = &swrast_loader_shm_extension,
 };
 
 static int
@@ -1171,7 +1120,7 @@ dri2_initialize_x11_kopper(_EGLDisplay *disp, bool force_zink)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
 
-   dri2_dpy->loader_extensions = kopper_loader_extensions;
+   dri2_dpy->loader_funcs = &kopper_loader_funcs;
 
    if (!platform_x11_finalize(disp, force_zink))
       return EGL_FALSE;
@@ -1189,10 +1138,10 @@ dri2_initialize_x11_swrast(_EGLDisplay *disp)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
 
-   if (x11_xcb_display_supports_xshm(dri2_dpy->conn)) {
-      dri2_dpy->loader_extensions = swrast_loader_shm_extensions;
+   if (x11_xcb_display_supports_xshm(dri2_dpy->conn, NULL)) {
+      dri2_dpy->loader_funcs = &swrast_loader_shm_funcs;
    } else {
-      dri2_dpy->loader_extensions = swrast_loader_extensions;
+      dri2_dpy->loader_funcs = &swrast_loader_funcs;
    }
 
    if (!platform_x11_finalize(disp, false))
@@ -1207,10 +1156,9 @@ dri2_initialize_x11_swrast(_EGLDisplay *disp)
 }
 
 #ifdef HAVE_LIBDRM
-static const __DRIextension *dri3_image_loader_extensions[] = {
-   &dri3_image_loader_extension.base,
-   &image_lookup_extension.base,
-   NULL,
+static const struct dri_loader_funcs dri3_image_loader_funcs = {
+   .image_lookup = &image_lookup_extension,
+   .image = &dri3_image_loader_extension,
 };
 
 static EGLBoolean
@@ -1218,7 +1166,7 @@ dri2_initialize_x11_dri3(_EGLDisplay *disp)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
 
-   dri2_dpy->loader_extensions = dri3_image_loader_extensions;
+   dri2_dpy->loader_funcs = &dri3_image_loader_funcs;
 
    if (!platform_x11_finalize(disp, false))
       return EGL_FALSE;

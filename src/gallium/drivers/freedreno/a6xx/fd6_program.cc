@@ -1277,15 +1277,26 @@ emit_fs_outputs(fd_crb &crb, const struct program_builder *b)
       .stencilref_regid = stencilref_regid,
    ));
 
-   for (uint32_t i = 0; i < output_reg_count; i++) {
-      crb.add(A6XX_SP_PS_OUTPUT_REG(i,
-         .regid          = fragdata_regid[i] & ~HALF_REG_ID,
-         .half_precision = fragdata_regid[i] & HALF_REG_ID,
-      ));
+   if (fs->fs.yuv_color) {
+      uint32_t regid = fragdata_regid[0] & ~HALF_REG_ID;
+      bool half = !!(fragdata_regid[0] & HALF_REG_ID);
 
-      if (VALIDREG(fragdata_regid[i]) ||
-          (fragdata_aliased_components & (0xf << (i * 4)))) {
-         b->state->mrt_components |= 0xf << (i * 4);
+      crb.add(A6XX_SP_PS_OUTPUT_REG(0, .regid = regid, .half_precision = half));
+      crb.add(A6XX_SP_PS_OUTPUT_REG(1, .regid = regid, .half_precision = half));
+
+      b->state->mrt_components |= 0xf;
+      b->state->mrt_components |= 0xf << 4;
+   } else {
+      for (uint32_t i = 0; i < output_reg_count; i++) {
+         crb.add(A6XX_SP_PS_OUTPUT_REG(i,
+            .regid          = fragdata_regid[i] & ~HALF_REG_ID,
+            .half_precision = fragdata_regid[i] & HALF_REG_ID,
+         ));
+
+         if (VALIDREG(fragdata_regid[i]) ||
+             (fragdata_aliased_components & (0xf << (i * 4)))) {
+            b->state->mrt_components |= 0xf << (i * 4);
+         }
       }
    }
 
@@ -1674,10 +1685,14 @@ fd6_program_create(void *data, const struct ir3_shader_variant *bs,
       /* On a6xx all shader stages use driver params pushed in cmdstream: */
       num_dp += num_ubo_dp;
       num_ubo_dp = 0;
+   } else {
+      /* On later gens, VS dp's are split into push const + ubo: */
+      num_ubo_dp += num_dp;
    }
 
    state->num_driver_params = num_dp;
    state->num_ubo_driver_params = num_ubo_dp;
+   state->needs_driver_params = (num_dp + num_ubo_dp) > 0;
 
    /* dual source blending has an extra fs output in the 2nd slot */
    if (fs->fs.color_is_dual_source) {

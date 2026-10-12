@@ -1,8 +1,10 @@
 /*
+ * Copyright (C) 2026 NXP
  * Copyright (C) 2008 VMware, Inc.
  * Copyright (C) 2014 Broadcom
  * Copyright (C) 2018-2019 Alyssa Rosenzweig
  * Copyright (C) 2019-2020 Collabora, Ltd.
+ * Copyright (C) 2026 Google LLC
  * SPDX-License-Identifier: MIT
  */
 
@@ -19,8 +21,9 @@ extern "C" {
 
 #include "util/format/u_format.h"
 
-#define MAX_MIP_LEVELS   17
-#define MAX_IMAGE_PLANES 3
+#define MAX_MIP_LEVELS        17
+#define MAX_IMAGE_PLANES      3
+#define PAN_CRC_HEADER_SIZE_B 64
 
 struct pan_mod_handler;
 
@@ -80,9 +83,10 @@ struct pan_image_slice_layout {
       struct pan_tiled_or_linear_image_slice_layout tiled_or_linear;
    };
 
-   /* If checksumming is enabled following the slice, what
-    * is its offset/stride? */
+   /* GPU-visible CRC header (64-bytes) followed by the hardware CRC table.
+    * size_B covers only the table, not the header. */
    struct {
+      uint64_t header_offset_B;
       uint64_t offset_B;
       uint32_t stride_B;
       uint32_t size_B;
@@ -133,6 +137,10 @@ struct pan_image_layout_constraints {
 
    /* Row pitch in bytes. Non-zero if layout is explicit. */
    uint32_t wsi_row_pitch_B;
+
+   /* Array stride in bytes for explicit multi-layer imports. When non-zero
+    * and array_size > 1, used as array_stride_B directly. */
+   uint64_t wsi_array_pitch_B;
 
    /* When true, AFBC/AFRC imports are stricter than they were when those
     * modifiers where introduced. */
@@ -205,14 +213,18 @@ pan_linear_or_tiled_row_align_req(unsigned arch, enum pipe_format format,
    }
 
    switch (format) {
-   /* For v7+, NV12/NV21/I420 have a looser alignment requirement of 16 bytes */
+   /* For v7+, below have a looser alignment requirement of 16 bytes */
    case PIPE_FORMAT_R8G8B8_420_UNORM_PACKED:
    case PIPE_FORMAT_R8_G8B8_420_UNORM:
    case PIPE_FORMAT_G8_B8R8_420_UNORM:
    case PIPE_FORMAT_R8_G8_B8_420_UNORM:
    case PIPE_FORMAT_R8_B8_G8_420_UNORM:
+   case PIPE_FORMAT_G8_B8_R8_420_UNORM:
+   case PIPE_FORMAT_Y8_U8_V8_422_UNORM:
    case PIPE_FORMAT_R8_G8B8_422_UNORM:
    case PIPE_FORMAT_R8_B8G8_422_UNORM:
+   case PIPE_FORMAT_Y8_U8V8_422_UNORM:
+   case PIPE_FORMAT_X6G10_X6B10X6R10_420_UNORM:
       return 16;
    /* the 10 bit formats have even looser alignment */
    case PIPE_FORMAT_R10G10B10_420_UNORM_PACKED:

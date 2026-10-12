@@ -16,6 +16,19 @@ pvr_entrypoints = custom_target(
   depend_files : vk_entrypoints_gen_depend_files,
 )
 
+pvr_drirc = custom_target(
+  'pvr_drirc',
+  input  : [files('pvr_drirc_gen.py'), drirc_gen, '00-pvr-defaults.conf'],
+  output : ['pvr_drirc.c', 'pvr_drirc.h'],
+  command : [
+    prog_python, '@INPUT0@',
+    '--import-path', join_paths(dir_source_root, 'src/util'),
+    '--drirc-src', '@OUTPUT0@',
+    '--drirc-hdr', '@OUTPUT1@',
+    '--validate', '@INPUT2@',
+  ],
+)
+
 pvr_files = files(
   'winsys/powervr/pvr_drm.c',
   'winsys/powervr/pvr_drm_bo.c',
@@ -43,6 +56,7 @@ pvr_files = files(
   'pvr_spm.c',
   'pvr_usc.c',
   'pvr_wsi.c',
+  'pvr_utrace.c',
 )
 
 pvr_includes = [
@@ -56,6 +70,8 @@ pvr_deps = [
   dep_valgrind,
   idep_mesautil,
   idep_pco_uscgen_programs,
+  idep_pdsc_precomp_programs,
+  idep_pvr_driver_ds,
   idep_vulkan_runtime,
   idep_vulkan_util,
   idep_vulkan_wsi,
@@ -68,6 +84,7 @@ pvr_flags = [
 
 common_per_arch_files = [
   pvr_entrypoints[0],
+  pvr_drirc[1],
   sha1_h,
 ]
 
@@ -146,6 +163,8 @@ foreach arch : ['rogue']
       dep_valgrind,
       idep_nir_headers,
       idep_pco_uscgen_programs_headers,
+      idep_pdsc_precomp_programs_headers,
+      idep_pvr_driver_ds_headers,
       idep_vulkan_runtime_headers,
       idep_vulkan_util_headers,
       idep_vulkan_wsi_headers,
@@ -158,7 +177,7 @@ endforeach
 
 libvulkan_powervr_mesa = shared_library(
   'vulkan_powervr_mesa',
-  [pvr_files, pvr_entrypoints, u_format_pack_h],
+  [pvr_files, pvr_entrypoints, pvr_drirc, u_format_pack_h],
   include_directories : [
     pvr_includes,
     inc_imagination,
@@ -170,6 +189,8 @@ libvulkan_powervr_mesa = shared_library(
     libpowervr_common,
     libpowervr_compiler,
     libpowervr_pds,
+    libpowervr_pdsc,
+    libpowervr_pdsc_precomp,
     libpowervr_uscgen,
     libvulkan_wsi,
   ],
@@ -184,6 +205,7 @@ libvulkan_powervr_mesa = shared_library(
     ld_args_bsymbolic,
     ld_args_gc_sections
   ],
+  link_depends : vulkan_icd_link_depends,
   gnu_symbol_visibility : 'hidden',
   install : true,
 )

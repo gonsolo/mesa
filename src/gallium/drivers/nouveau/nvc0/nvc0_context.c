@@ -21,6 +21,7 @@
  */
 
 #include "pipe/p_defines.h"
+#include "util/u_draw.h"
 #include "util/u_framebuffer.h"
 #include "util/u_upload_mgr.h"
 
@@ -83,7 +84,8 @@ nvc0_flush(struct pipe_context *pipe,
    struct nvc0_context *nvc0 = nvc0_context(pipe);
 
    if (fence)
-      nouveau_fence_ref(nvc0->base.fence, (struct nouveau_fence **)fence);
+      nouveau_fence_ref(nvc0->base.fence, (struct nouveau_fence **)fence,
+                        nvc0->base.screen);
 
    PUSH_KICK(nvc0->base.pushbuf); /* fencing handled in kick_notify */
 
@@ -273,15 +275,17 @@ nvc0_destroy(struct pipe_context *pipe)
    nouveau_context_destroy(&nvc0->base);
 }
 
-void
+bool
 nvc0_default_kick_notify(struct nouveau_context *context)
 {
    struct nvc0_context *nvc0 = nvc0_context(&context->pipe);
 
-   _nouveau_fence_next(context);
+   if (!_nouveau_fence_next(context))
+      return false;
    _nouveau_fence_update(context->screen, true);
 
    nvc0->state.flushed = true;
+   return true;
 }
 
 static int
@@ -444,6 +448,7 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    pipe->destroy = nvc0_destroy;
 
    pipe->draw_vbo = nvc0_draw_vbo;
+   pipe->draw_vbo_buffers = util_draw_vbo_buffers;
    pipe->clear = nvc0_clear;
    pipe->launch_grid = (nvc0->screen->base.class_3d >= NVE4_3D_CLASS) ?
       nve4_launch_grid : nvc0_launch_grid;
@@ -478,6 +483,10 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    nvc0_program_init_tcp_empty(nvc0);
    if (!nvc0->tcp_empty)
       goto out_err;
+
+   if (!nouveau_fence_new(&nvc0->base, &nvc0->base.fence))
+      goto out_err;
+
    /* set the empty tctl prog on next draw in case one is never set */
    nvc0->dirty_3d |= NVC0_NEW_3D_TCTLPROG;
 
@@ -547,8 +556,6 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
       nvc0->dirty_3d |= NVC0_NEW_3D_SAMPLERS;
       nvc0->dirty_cp |= NVC0_NEW_CP_SAMPLERS;
    }
-
-   nouveau_fence_new(&nvc0->base, &nvc0->base.fence);
 
    return pipe;
 

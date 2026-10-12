@@ -53,7 +53,6 @@
 
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
-#include "pipe/p_shader_tokens.h"
 #include "util/u_inlines.h"
 #include "program/prog_instruction.h"
 #include "cso_cache/cso_context.h"
@@ -681,6 +680,7 @@ st_Bitmap(struct gl_context *ctx, GLint x, GLint y,
                        ctx->FragmentProgram._Current,
                        ctx->Scissor.EnableFlags & 0x1,
                        ctx->Color._ClampFragmentColor);
+      st->pipe->sampler_view_release(st->pipe, view);
    }
 }
 

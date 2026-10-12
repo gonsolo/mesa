@@ -91,10 +91,23 @@ typedef struct {
    struct hash_table *errors;
 } validate_state;
 
+static bool interactive;
+
+#if !DETECT_OS_WINDOWS
+static void
+init_interactive(void)
+{
+   interactive = isatty(STDERR_FILENO);
+}
+#endif
+
 static void
 log_error(validate_state *state, const char *cond, const char *file, int line)
 {
    const void *obj;
+
+   const char *color_red   = interactive ? "\x1b[0;1;31m" : "";
+   const char *color_reset = interactive ? "\x1b[0m"      : "";
 
    if (state->instr)
       obj = state->instr;
@@ -103,8 +116,8 @@ log_error(validate_state *state, const char *cond, const char *file, int line)
    else
       obj = cond;
 
-   char *msg = ralloc_asprintf(state->errors, "error: %s (%s:%d)",
-                               cond, file, line);
+   char *msg = ralloc_asprintf(state->errors, "%serror: %s (%s:%d)%s",
+                               color_red, cond, file, line, color_reset);
 
    _mesa_hash_table_insert(state->errors, obj, msg);
 }
@@ -271,6 +284,16 @@ validate_alu_instr(nir_alu_instr *instr, validate_state *state)
       case nir_op_ufind_msb:
       case nir_op_ufind_msb_rev:
          validate_assert(state, src_bit_size == 32 || src_bit_size == 64);
+         break;
+
+      /* In nir_opcodes.py, these are defined to take general int sources.
+       * However, for downcasts they are redundant with u2uN opcodes and
+       * in order make things consistent, we only want to use the latter.
+       */
+      case nir_op_i2i8:
+      case nir_op_i2i16:
+      case nir_op_i2i32:
+         validate_assert(state, src_bit_size <= instr->def.bit_size);
          break;
 
       default:
@@ -638,7 +661,7 @@ validate_intrinsic_instr(nir_intrinsic_instr *instr, validate_state *state)
    case nir_intrinsic_load_per_view_output:
    case nir_intrinsic_load_per_primitive_output:
    case nir_intrinsic_load_push_constant:
-   case nir_intrinsic_load_attribute_pan:
+   case nir_intrinsic_load_attr_pan:
       /* All memory load operations must load at least a byte */
       validate_assert(state, instr->def.bit_size >= 8);
       break;
@@ -701,6 +724,8 @@ validate_intrinsic_instr(nir_intrinsic_instr *instr, validate_state *state)
 
          switch (format) {
          case PIPE_FORMAT_R32_FLOAT:
+         case PIPE_FORMAT_R16G16_FLOAT:
+         case PIPE_FORMAT_R16G16B16A16_FLOAT:
             allowed = is_float || op == nir_atomic_op_xchg;
             break;
          case PIPE_FORMAT_R16_FLOAT:
@@ -718,8 +743,13 @@ validate_intrinsic_instr(nir_intrinsic_instr *instr, validate_state *state)
          }
 
          validate_assert(state, allowed);
+         const struct util_format_description *fmt_desc =
+            util_format_description(format);
          validate_assert(state, instr->def.bit_size ==
-                                   util_format_get_blocksizebits(format));
+                                fmt_desc->channel[0].size);
+         validate_assert(state,
+                         instr->num_components >= 1 &&
+                         instr->num_components <= 4);
       }
       break;
    }
@@ -802,6 +832,21 @@ validate_intrinsic_instr(nir_intrinsic_instr *instr, validate_state *state)
          validate_assert(state, instr->src[2].ssa->bit_size == 1);
       }
 
+      break;
+   }
+
+   case nir_intrinsic_barrier: {
+      unsigned semantics = nir_intrinsic_memory_semantics(instr);
+      bool is_arrive = semantics & NIR_MEMORY_CONTROL_ARRIVE;
+      bool is_wait = semantics & NIR_MEMORY_CONTROL_WAIT;
+      if (nir_intrinsic_execution_scope(instr) != SCOPE_NONE) {
+         if (is_wait)
+            validate_assert(state, is_arrive || !(semantics & NIR_MEMORY_RELEASE));
+         if (is_arrive)
+            validate_assert(state, is_wait || !(semantics & NIR_MEMORY_ACQUIRE));
+      } else {
+         validate_assert(state, !is_arrive && !is_wait);
+      }
       break;
    }
 
@@ -1271,6 +1316,7 @@ validate_jump_instr(nir_jump_instr *instr, validate_state *state)
    switch (instr->type) {
    case nir_jump_return:
    case nir_jump_halt:
+   case nir_jump_abort:
       validate_assert(state, block->successors[0] == state->impl->end_block);
       validate_assert(state, block->successors[1] == NULL);
       validate_assert(state, instr->target == NULL);
@@ -1539,6 +1585,7 @@ validate_block(nir_block *block, validate_state *state)
 {
    validate_assert(state, block->cf_node.parent == state->parent_node);
 
+   validate_assert(state, block->impl == state->impl);
    state->block = block;
 
    exec_list_validate(&block->instr_list);
@@ -2352,6 +2399,12 @@ validate_options(const nir_shader_compiler_options *options, validate_state *sta
 static void
 init_validate_state(validate_state *state)
 {
+   static struct util_once_flag once = UTIL_ONCE_FLAG_INIT;
+
+#if !DETECT_OS_WINDOWS
+   util_call_once(&once, init_interactive);
+#endif
+
    state->mem_ctx = ralloc_context(NULL);
    state->ssa_defs_found = NULL;
    state->blocks = _mesa_pointer_set_create(state->mem_ctx);

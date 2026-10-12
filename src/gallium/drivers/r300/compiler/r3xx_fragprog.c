@@ -12,43 +12,9 @@
 #include "r500_fragprog.h"
 #include "radeon_compiler_util.h"
 #include "radeon_dataflow.h"
-#include "radeon_list.h"
 #include "radeon_program_alu.h"
-#include "radeon_program_tex.h"
 #include "radeon_remove_constants.h"
 #include "radeon_variable.h"
-
-static void
-rc_rewrite_depth_out(struct radeon_compiler *cc, void *user)
-{
-   struct r300_fragment_program_compiler *c = (struct r300_fragment_program_compiler *)cc;
-   struct rc_instruction *rci;
-
-   for (rci = c->Base.Program.Instructions.Next; rci != &c->Base.Program.Instructions;
-        rci = rci->Next) {
-      struct rc_sub_instruction *inst = &rci->U.I;
-      unsigned i;
-      const struct rc_opcode_info *info = rc_get_opcode_info(inst->Opcode);
-
-      if (inst->DstReg.File != RC_FILE_OUTPUT || inst->DstReg.Index != c->OutputDepth)
-         continue;
-
-      if (inst->DstReg.WriteMask & RC_MASK_Z) {
-         inst->DstReg.WriteMask = RC_MASK_W;
-      } else {
-         inst->DstReg.WriteMask = 0;
-         continue;
-      }
-
-      if (!info->IsComponentwise) {
-         continue;
-      }
-
-      for (i = 0; i < info->NumSrcRegs; i++) {
-         inst->SrcReg[i] = lmul_swizzle(RC_SWIZZLE_ZZZZ, inst->SrcReg[i]);
-      }
-   }
-}
 
 /**
  * This function will try to convert rgb instructions into alpha instructions
@@ -69,13 +35,12 @@ rc_rewrite_depth_out(struct radeon_compiler *cc, void *user)
 static void
 rc_convert_rgb_alpha(struct radeon_compiler *c, void *user)
 {
-   struct rc_list *variables;
-   struct rc_list *var_ptr;
+   struct util_dynarray *variables;
 
    variables = rc_get_variables(c);
 
-   for (var_ptr = variables; var_ptr; var_ptr = var_ptr->Next) {
-      struct rc_variable *var = var_ptr->Item;
+   util_dynarray_foreach(variables, struct rc_variable *, variable_ptr) {
+      struct rc_variable *var = *variable_ptr;
 
       if (var->Inst->U.I.DstReg.File != RC_FILE_TEMPORARY) {
          continue;
@@ -105,13 +70,13 @@ rc_convert_rgb_alpha(struct radeon_compiler *c, void *user)
          unsigned have_tex = false;
          struct rc_variable *fsat = NULL;
          for (unsigned int src = 0; src < 2; src++) {
-            struct rc_list *writer_list;
+            struct util_dynarray *writer_list;
             writer_list = rc_variable_list_get_writers(variables, RC_INSTRUCTION_NORMAL,
                                                        &var->Inst->U.I.SrcReg[src]);
-            if (!writer_list || !writer_list->Item)
+            if (!writer_list)
                continue;
 
-            struct rc_variable *src_variable = (struct rc_variable *)writer_list->Item;
+            struct rc_variable *src_variable = rc_variable_list_first(writer_list);
             struct rc_instruction *inst = src_variable->Inst;
             const struct rc_opcode_info *info = rc_get_opcode_info(inst->U.I.Opcode);
 
@@ -142,22 +107,11 @@ r3xx_compile_fragment_program(struct r300_fragment_program_compiler *c)
 {
    int is_r500 = c->Base.is_r500;
    int opt = !c->Base.disable_optimizations;
-   int alpha2one = c->state.alpha_to_one;
    bool dbg = c->Base.Debug & RC_DBG_LOG;
 
    /* Lists of instruction transformations. */
-   struct radeon_program_transformation force_alpha_to_one[] = {{&rc_force_output_alpha_to_one, c},
-                                                                {NULL, NULL}};
-
-   struct radeon_program_transformation rewrite_tex[] = {{&radeonTransformTEX, c}, {NULL, NULL}};
-
-   struct radeon_program_transformation native_rewrite_r500[] = {{&radeonTransformALU, NULL},
-                                                                 {&radeonTransformDeriv, NULL},
-                                                                 {NULL, NULL}};
-
-   struct radeon_program_transformation native_rewrite_r300[] = {{&radeonTransformALU, NULL},
-                                                                 {&radeonStubDeriv, NULL},
-                                                                 {NULL, NULL}};
+   struct radeon_program_transformation native_rewrite[] = {{&radeonTransformALU, NULL},
+                                                           {NULL, NULL}};
 
    struct radeon_program_transformation opt_presubtract[] = {{&rc_opt_presubtract, NULL},
                                                              {NULL, NULL}};
@@ -166,15 +120,11 @@ r3xx_compile_fragment_program(struct r300_fragment_program_compiler *c)
    /* clang-format off */
    struct radeon_compiler_pass fs_list[] = {
       /* NAME                     DUMP PREDICATE        FUNCTION                        PARAM */
-      {"rewrite depth out",       1,   1,               rc_rewrite_depth_out,           NULL},
-      {"force alpha to one",      1,   alpha2one,       rc_local_transform,             force_alpha_to_one},
-      {"transform TEX",           1,   1,               rc_local_transform,             rewrite_tex},
       {"transform IF",            1,   is_r500,         r500_transform_IF,              NULL},
-      {"native rewrite",          1,   is_r500,         rc_local_transform,             native_rewrite_r500},
-      {"native rewrite",          1,   !is_r500,        rc_local_transform,             native_rewrite_r300},
+      {"native rewrite",          1,   1,               rc_local_transform,             native_rewrite},
       {"deadcode",                1,   opt,             rc_dataflow_deadcode,           NULL},
-      {"convert rgb<->alpha",     1,   opt,             rc_convert_rgb_alpha,           NULL},
       {"dataflow optimize",       1,   opt,             rc_optimize,                    NULL},
+      {"convert rgb<->alpha",     1,   opt,             rc_convert_rgb_alpha,           NULL},
       {"inline literals",         1,   is_r500 && opt,  rc_inline_literals,             NULL},
       {"dead constants",          1,   1,               rc_remove_unused_constants,     &c->code->constants_remap_table},
       {"dataflow swizzles",       1,   1,               rc_dataflow_swizzles,           NULL},

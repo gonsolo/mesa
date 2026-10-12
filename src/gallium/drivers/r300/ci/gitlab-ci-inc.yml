@@ -1,6 +1,12 @@
+.enforce-hw-jobs-r300-rules:
+  rules:
+    - if: '$INPUT_HW_JOBS !~ /"(all|r300|radeon.ko)"/i'
+      when: never
+
 .r300-rules:
   stage: amd
   rules:
+    - !reference [.enforce-hw-jobs-r300-rules, rules]
     - !reference [.test, rules]
     - !reference [.ondracka-farm-rules, rules]
     - !reference [.gl-rules, rules]
@@ -9,6 +15,7 @@
         - src/gallium/drivers/r300/compiler/**/*
         - src/gallium/drivers/r300/ci/gitlab-ci.yml
         - src/gallium/drivers/r300/ci/gitlab-ci-inc.yml
+        - src/gallium/drivers/r300/ci/r300-piglit.conf
         - src/gallium/drivers/r300/ci/deqp-$DEQP_SUITE.toml
         - src/gallium/drivers/r300/ci/$GPU_VERSION-fails.txt
         - src/gallium/drivers/r300/ci/$GPU_VERSION-flakes.txt
@@ -21,10 +28,10 @@
   stage: amd-nightly
   extends: .no-auto-retry
   rules:
+    - !reference [.enforce-hw-jobs-r300-rules, rules]
     - !reference [.test, rules]
     - !reference [.ondracka-farm-manual-rules, rules]
     - !reference [.gl-manual-rules, rules]
     - changes:
         *r300_file_list
       when: manual
-

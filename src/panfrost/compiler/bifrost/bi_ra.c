@@ -376,6 +376,23 @@ bi_mark_interference(bi_block *block, struct lcra_state *l, uint8_t *live,
          }
       }
 
+      /* MMUL must not write its result into a multiply operand, but the
+       * accumulator (src2) may be reused.
+       */
+      if (ins->op == BI_OPCODE_MMUL_F32 ||
+          ins->op == BI_OPCODE_MMUL_V2F16 ||
+          ins->op == BI_OPCODE_MMUL_V4S8 ||
+          ins->op == BI_OPCODE_MMUL_V4U8) {
+         const unsigned dnode = ins->dest[0].value;
+         const unsigned dmask = bi_writemask(ins, 0);
+
+         for (unsigned s = 0; s < 2; ++s) {
+            if (bi_is_ssa(ins->src[s]))
+               lcra_add_node_interference(l, dnode, dmask, ins->src[s].value,
+                                          dmask);
+         }
+      }
+
       /* Valhall needs >= 64-bit reads to be pair-aligned */
       if (aligned_sr) {
          bi_foreach_ssa_src(ins, s) {
@@ -628,6 +645,15 @@ bi_choose_spill_node(bi_context *ctx, struct lcra_state *l)
    unsigned best_benefit = 0;
    signed best_node = -1;
 
+   /* consider spilling the node that we're trying to allocate,
+    * rather the ones interfering with it, if that would be
+    * better
+    */
+   if (!BITSET_TEST(no_spill, l->spill_node)) {
+      best_node = l->spill_node;
+      best_benefit = lcra_count_constraints(l, best_node);
+   }
+
    if (nodearray_is_sparse(&l->linear[l->spill_node])) {
       nodearray_sparse_foreach(&l->linear[l->spill_node], elem) {
          unsigned i = nodearray_sparse_key(elem);
@@ -702,26 +728,31 @@ bi_tls_ptr(bool hi)
 bi_instr *
 bi_load_tl(bi_builder *b, unsigned bits, bi_index dst, unsigned offset)
 {
+   bi_instr *I;
    if (b->shader->arch >= 9) {
       assert(offset < 0x8000);  /* valhall has 16 bit signed offset */
-      return bi_load_to(b, bits, dst, bi_tls_ptr(false), bi_tls_ptr(true),
-                        BI_SEG_TL, offset);
+      I = bi_load_to(b, bits, dst, bi_tls_ptr(false), bi_tls_ptr(true),
+                     BI_SEG_TL, offset);
    } else {
-      return bi_load_to(b, bits, dst, bi_imm_u32(offset), bi_zero(), BI_SEG_TL,
-                        0);
+      I = bi_load_to(b, bits, dst, bi_imm_u32(offset), bi_zero(), BI_SEG_TL, 0);
    }
+   I->mem_access = VA_MEMORY_ACCESS_FORCE;
+
+   return I;
 }
 
 void
 bi_store_tl(bi_builder *b, unsigned bits, bi_index src, unsigned offset)
 {
+   bi_instr *I;
    if (b->shader->arch >= 9) {
       assert(offset < 0x8000);  /* valhall has 16 bit signed offset */
-      bi_store(b, bits, src, bi_tls_ptr(false), bi_tls_ptr(true), BI_SEG_TL,
-               offset);
+      I = bi_store(b, bits, src, bi_tls_ptr(false), bi_tls_ptr(true), BI_SEG_TL,
+                   offset);
    } else {
-      bi_store(b, bits, src, bi_imm_u32(offset), bi_zero(), BI_SEG_TL, 0);
+      I = bi_store(b, bits, src, bi_imm_u32(offset), bi_zero(), BI_SEG_TL, 0);
    }
+   I->mem_access = VA_MEMORY_ACCESS_FORCE;
 }
 
 static void
@@ -733,7 +764,7 @@ bi_compute_reg_alignment(bi_context *ctx)
    bi_foreach_instr_global(ctx, I) {
       bi_foreach_ssa_dest(I, d) {
          idx = I->dest[d].value;
-         count = bi_count_write_registers(I, d);
+         count = bi_count_write_registers(I, d) + I->dest[d].offset;
          if (count == 3) count = 4;
          assert(idx < ctx->ssa_alloc);
          ctx->reg_alignment[idx] = MAX2(count*4, ctx->reg_alignment[idx]);
@@ -755,18 +786,16 @@ bi_spill_register(bi_context *ctx, bi_index index, uint32_t offset,
                   bi_index spill_point)
 {
    bi_builder b = {.shader = ctx};
-   unsigned alignment = 4;
-   unsigned channels = 0;
+   if (!ctx->reg_alignment)
+      bi_compute_reg_alignment(ctx);
+   assert(index.value < ctx->ssa_alloc);
+   unsigned channels = ctx->reg_alignment[index.value] / 4;
+   assert(channels > 0);
+   unsigned alignment = (ctx->arch >= 9) ? ctx->reg_alignment[index.value] : 4;
 
    /* first figure out the alignment we will need, based on the
     * maximum count we see
     */
-   if (ctx->arch >= 9) {
-      if (!ctx->reg_alignment)
-         bi_compute_reg_alignment(ctx);
-      assert(index.value < ctx->ssa_alloc);
-      alignment = ctx->reg_alignment[index.value];
-   }
    offset = ALIGN_POT(offset, alignment);
 
    /* Spill after every store, fill before every load */
@@ -782,20 +811,17 @@ bi_spill_register(bi_context *ctx, bi_index index, uint32_t offset,
             if (!bi_is_equiv(I->dest[d], index))
                continue;
 
+            I->no_spill = true;
             unsigned count = bi_count_write_registers(I, d);
             unsigned extra = I->dest[d].offset;
+            bi_index src = index;
+            src.offset = extra;
 
-            channels = MAX2(channels, extra + count);
-            I->no_spill = true;
+            b.cursor = bi_after_instr(I);
+            bi_store_tl(&b, count * 32, src, offset + (extra * 4));
 
-            if (channels == extra + count) {
-               b.cursor = bi_after_instr(I);
-               bi_store_tl(&b, channels * 32, index, offset);
-
-               ctx->spills++;
-               /* Don't disable filling if spill_point is before index. */
-               fill = found_spill_point;
-            }
+            /* Don't disable filling if spill_point is before index. */
+            fill = found_spill_point;
          }
 
          if (bi_has_arg(I, index) && fill) {
@@ -807,7 +833,6 @@ bi_spill_register(bi_context *ctx, bi_index index, uint32_t offset,
 
             bi_instr *ld = bi_load_tl(&b, bits, tmp, offset);
             ld->no_spill = true;
-            ctx->fills++;
          }
       }
    }
@@ -980,6 +1005,20 @@ squeeze_index(bi_context *ctx)
    ralloc_free(map);
 }
 
+static void
+bi_mov_words_to(bi_builder *b, bi_index dst, bi_index src, unsigned words)
+{
+   assert(words >= 1 && words <= 4);
+
+   for (unsigned i = 0; i < words; ++i) {
+      bi_index word_dst = dst, word_src = src;
+      word_dst.offset += i;
+      word_src.offset += i;
+
+      bi_mov_i32_to(b, word_dst, word_src);
+   }
+}
+
 /*
  * Brainless out-of-SSA pass. The eventual goal is to go out-of-SSA after RA and
  * coalesce implicitly with biased colouring in a tree scan allocator. For now,
@@ -997,6 +1036,9 @@ bi_out_of_ssa(bi_context *ctx)
       bi_foreach_instr_in_block_safe(block, I) {
          if (I->op != BI_OPCODE_PHI)
             break;
+
+         unsigned words = I->table ? I->table : 1;
+         assert(words >= 1 && words <= 4);
 
          /* Assign a register for the phi */
          bi_index reg = bi_temp(ctx);
@@ -1016,12 +1058,17 @@ bi_out_of_ssa(bi_context *ctx)
 
             if (I->src[i].memory)
                /* spilled register, need to un-spill */
-               bi_load_tl(&b, 32, reg, I->src[i].value);
-            else if (ctx->arch >= 9 && I->src[i].type == BI_INDEX_CONSTANT)
+               bi_load_tl(&b, words * 32, reg, I->src[i].value);
+            else if (ctx->arch >= 9 && I->src[i].type == BI_INDEX_CONSTANT) {
                /* MOV of immediate needs lowering on Valhall */
-               bi_iadd_imm_i32_to(&b, reg, zero, I->src[i].value);
-            else
-               bi_mov_i32_to(&b, reg, I->src[i]);
+               for (unsigned w = 0; w < words; ++w) {
+                  bi_index word_reg = reg;
+                  word_reg.offset += w;
+                  bi_iadd_imm_i32_to(&b, word_reg, zero,
+                                     w == 0 ? I->src[i].value : 0);
+               }
+            } else
+               bi_mov_words_to(&b, reg, I->src[i], words);
          }
 
          /* Replace the phi with a move */
@@ -1029,13 +1076,13 @@ bi_out_of_ssa(bi_context *ctx)
          bi_builder b = bi_init_builder(ctx, bi_before_instr(I));
          if (I->dest[0].memory) {
             /* dest was spilled to memory */
-            bi_store_tl(&b, 32, reg, I->dest[0].value);
+            bi_store_tl(&b, words * 32, reg, I->dest[0].value);
             allow_propagate = false;
          } else if (ctx->arch >= 9 && reg.type == BI_INDEX_CONSTANT)
             /* MOV of immediate needs lowering on Valhall */
             bi_iadd_imm_i32_to(&b, I->dest[0], zero, reg.value);
          else
-            bi_mov_i32_to(&b, I->dest[0], reg);
+            bi_mov_words_to(&b, I->dest[0], reg, words);
          bi_remove_instruction(I);
 
          /* Propagate that move within the block. The destination
@@ -1133,18 +1180,9 @@ bi_out_of_ssa(bi_context *ctx)
 }
 
 static bool
-op_is_load_store(enum bi_opcode op)
+op_is_load(enum bi_opcode op)
 {
    switch (op) {
-   case BI_OPCODE_STORE_I8:
-   case BI_OPCODE_STORE_I16:
-   case BI_OPCODE_STORE_I24:
-   case BI_OPCODE_STORE_I32:
-   case BI_OPCODE_STORE_I48:
-   case BI_OPCODE_STORE_I64:
-   case BI_OPCODE_STORE_I96:
-   case BI_OPCODE_STORE_I128:
-      return true;
    case BI_OPCODE_LOAD_I8:
    case BI_OPCODE_LOAD_I16:
    case BI_OPCODE_LOAD_I24:
@@ -1159,7 +1197,25 @@ op_is_load_store(enum bi_opcode op)
    }
 }
 
-static uint64_t
+static bool
+op_is_store(enum bi_opcode op)
+{
+   switch (op) {
+   case BI_OPCODE_STORE_I8:
+   case BI_OPCODE_STORE_I16:
+   case BI_OPCODE_STORE_I24:
+   case BI_OPCODE_STORE_I32:
+   case BI_OPCODE_STORE_I48:
+   case BI_OPCODE_STORE_I64:
+   case BI_OPCODE_STORE_I96:
+   case BI_OPCODE_STORE_I128:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static void
 compute_spill_cost(bi_context *ctx)
 {
    void *mctx = ralloc_context(NULL);
@@ -1179,22 +1235,31 @@ compute_spill_cost(bi_context *ctx)
       bi_find_loop_blocks(ctx, block, loop_block);
 
       for (uint32_t b = 0; b < ctx->num_blocks; ++b) {
-         if (BITSET_SET(loop_block, b))
+         if (BITSET_TEST(loop_block, b))
             block_depth[b] += 1;
       }
    }
 
+   unsigned spills = 0, fills = 0;
    uint64_t cost = 0;
    bi_foreach_block(ctx, block) {
+      uint64_t per_spill_cost = 10 * (block_depth[block->index] + 1);
       bi_foreach_instr_in_block(block, I) {
-         if (op_is_load_store(I->op) && I->seg == BI_SEG_TL)
-            cost += 10 * (block_depth[block->index] + 1);
+         if (op_is_load(I->op) && I->seg == BI_SEG_TL) {
+            fills++;
+            cost += per_spill_cost;
+         } else if (op_is_store(I->op) && I->seg == BI_SEG_TL) {
+            spills++;
+            cost += per_spill_cost;
+         }
       }
    }
 
-   ralloc_free(mctx);
+   ctx->spills = spills;
+   ctx->fills = fills;
+   ctx->spill_cost = cost;
 
-   return cost;
+   ralloc_free(mctx);
 }
 
 void
@@ -1294,7 +1359,7 @@ bi_register_allocate(bi_context *ctx)
       }
    }
 
-   ctx->spill_cost = compute_spill_cost(ctx);
+   compute_spill_cost(ctx);
 
    assert(success);
    assert(l != NULL);

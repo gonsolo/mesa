@@ -5025,6 +5025,20 @@ get_spacing(enum gl_tess_spacing spacing)
    }
 }
 
+/* Prefer ShaderLayer/ShaderViewportIndexLayerEXT for Layer. Fall back to Geometry only when necessary. */
+static void
+emit_shader_layer_cap(struct spirv_builder *builder, const struct ntv_info *sinfo)
+{
+   if (sinfo->spirv_version >= SPIRV_VERSION(1, 5) && sinfo->have_shader_output_layer) {
+      spirv_builder_emit_cap(builder, SpvCapabilityShaderLayer);
+   } else if (sinfo->have_shader_viewport_index_layer) {
+      spirv_builder_emit_extension(builder, "SPV_EXT_shader_viewport_index_layer");
+      spirv_builder_emit_cap(builder, SpvCapabilityShaderViewportIndexLayerEXT);
+   } else {
+      spirv_builder_emit_cap(builder, SpvCapabilityGeometry);
+   }
+}
+
 struct spirv_shader *
 nir_to_spirv(struct nir_shader *s, const struct ntv_info *sinfo)
 {
@@ -5088,19 +5102,20 @@ nir_to_spirv(struct nir_shader *s, const struct ntv_info *sinfo)
    if (s->info.stage < MESA_SHADER_GEOMETRY) {
       if (s->info.outputs_written & VARYING_BIT_LAYER ||
           s->info.inputs_read & VARYING_BIT_LAYER) {
-         if (sinfo->spirv_version >= SPIRV_VERSION(1, 5))
-            spirv_builder_emit_cap(&ctx.builder, SpvCapabilityShaderLayer);
-         else {
-            spirv_builder_emit_extension(&ctx.builder, "SPV_EXT_shader_viewport_index_layer");
-            spirv_builder_emit_cap(&ctx.builder, SpvCapabilityShaderViewportIndexLayerEXT);
-         }
+         emit_shader_layer_cap(&ctx.builder, sinfo);
       }
    } else if (s->info.stage == MESA_SHADER_FRAGMENT) {
       /* incredibly, this is legal and intended.
        * https://github.com/KhronosGroup/SPIRV-Registry/issues/95
+       *
+       * gl_Layer can be enabled via ShaderLayer/ShaderViewportIndexLayerEXT, so
+       * avoid pulling in the Geometry capability (and thus the geometryShader
+       * feature) unless it is actually needed. gl_PrimitiveID has no such
+       * alternative and always requires Geometry (or Tessellation).
        */
-      if (s->info.inputs_read & (VARYING_BIT_LAYER |
-                                 VARYING_BIT_PRIMITIVE_ID))
+      if (s->info.inputs_read & VARYING_BIT_LAYER)
+         emit_shader_layer_cap(&ctx.builder, sinfo);
+      if (s->info.inputs_read & VARYING_BIT_PRIMITIVE_ID)
          spirv_builder_emit_cap(&ctx.builder, SpvCapabilityGeometry);
    }
 
@@ -5675,17 +5690,21 @@ lower_vri_to_var_instr(nir_builder *b, nir_instr *instr, void *data)
    int binding = nir_intrinsic_binding(vri);
    nir_variable *var = NULL;
    nir_foreach_variable_with_modes(i, b->shader, deref->modes) {
-      if (i->data.descriptor_set == desc_set && i->data.binding == binding) {
+      if (i->data.descriptor_set == desc_set && i->data.binding == binding &&
+          glsl_without_array(i->type) == deref->type) {
          var = i;
          break;
       }
    }
+
    if (!var)
       return false;
 
    b->cursor = nir_after_instr(instr);
    nir_deref_instr *var_deref = nir_build_deref_var(b, var);
    fixup_deref_components(deref);
+   if (glsl_type_is_array(var->type))
+      var_deref = nir_build_deref_array(b, var_deref, vri->src[0].ssa);
    nir_def_rewrite_uses_after_instr(&deref->def, &var_deref->def, instr);
 
    return true;

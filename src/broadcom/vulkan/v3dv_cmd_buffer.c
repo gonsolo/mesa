@@ -26,6 +26,7 @@
 #include "v3dv_cmd_buffer.h"
 #include "v3dv_image.h"
 #include "v3dv_entrypoints.h"
+#include "v3dv_pass.h"
 #include "v3dv_version_dispatch.h"
 #include "vk_format.h"
 #include "util/perf/cpu_trace.h"
@@ -96,6 +97,13 @@ cmd_buffer_init(struct v3dv_cmd_buffer *cmd_buffer,
    cmd_buffer->state.subpass_idx = -1;
    cmd_buffer->state.meta.subpass_idx = -1;
 
+   /* A job type -1 is how we tell perfetto that this is not a real job
+    * and we are instead tracking the entire command buffer.
+    */
+   cmd_buffer->trace_marker_job.type = -1;
+   cmd_buffer->trace_marker_job.cmd_buffer = cmd_buffer;
+   cmd_buffer->trace_queue_mask = 0;
+
    cmd_buffer->status = V3DV_CMD_BUFFER_STATUS_INITIALIZED;
 }
 
@@ -127,6 +135,7 @@ cmd_buffer_create(struct vk_command_pool *pool, VkCommandBufferLevel level,
    }
 
    cmd_buffer_init(cmd_buffer, device);
+   u_trace_init(&cmd_buffer->trace, &device->utrace.utrace_ctx);
 
    *cmd_buffer_out = &cmd_buffer->vk;
 
@@ -149,8 +158,8 @@ job_destroy_gpu_cl_resources(struct v3dv_job *job)
     */
    _mesa_set_destroy(job->bos, NULL);
 
-   v3dv_bo_free(job->device, job->tile_alloc);
-   v3dv_bo_free(job->device, job->tile_state);
+   v3dv_bo_free(job->device, job->tile_alloc, 0);
+   v3dv_bo_free(job->device, job->tile_state, 0);
 }
 
 static void
@@ -197,7 +206,7 @@ job_destroy_gpu_csd_resources(struct v3dv_job *job)
    _mesa_set_destroy(job->bos, NULL);
 
    if (job->csd.shared_memory)
-      v3dv_bo_free(job->device, job->csd.shared_memory);
+      v3dv_bo_free(job->device, job->csd.shared_memory, 0);
 }
 
 void
@@ -258,7 +267,7 @@ v3dv_cmd_buffer_destroy_bo_cb(VkDevice _device,
 {
    V3DV_FROM_HANDLE(v3dv_device, device, _device);
    struct v3dv_bo *bo = (struct v3dv_bo *)((uintptr_t) pobj);
-   v3dv_bo_free(device, bo);
+   v3dv_bo_free(device, bo, 0);
 }
 
 static void
@@ -293,7 +302,8 @@ cmd_buffer_free_resources(struct v3dv_cmd_buffer *cmd_buffer)
       vk_free(&cmd_buffer->device->vk.alloc, cmd_buffer->state.query.end.states);
 
    if (cmd_buffer->push_constants_resource.bo)
-      v3dv_bo_free(cmd_buffer->device, cmd_buffer->push_constants_resource.bo);
+      v3dv_bo_free(cmd_buffer->device,
+                   cmd_buffer->push_constants_resource.bo, 0);
 
    list_for_each_entry_safe(struct v3dv_cmd_buffer_private_obj, pobj,
                             &cmd_buffer->private_objs, list_link) {
@@ -314,6 +324,7 @@ cmd_buffer_destroy(struct vk_command_buffer *vk_cmd_buffer)
    struct v3dv_cmd_buffer *cmd_buffer =
       container_of(vk_cmd_buffer, struct v3dv_cmd_buffer, vk);
 
+   u_trace_fini(&cmd_buffer->trace);
    cmd_buffer_free_resources(cmd_buffer);
    vk_command_buffer_finish(&cmd_buffer->vk);
    vk_free(&cmd_buffer->vk.pool->alloc, cmd_buffer);
@@ -338,7 +349,7 @@ cmd_buffer_can_merge_subpass(struct v3dv_cmd_buffer *cmd_buffer,
    if (cmd_buffer->state.job->always_flush)
       return false;
 
-   if (!physical_device->options.merge_jobs)
+   if (!physical_device->merge_jobs)
       return false;
 
    /* Each render pass starts a new job */
@@ -406,6 +417,21 @@ job_compute_frame_tiling(struct v3dv_job *job,
 {
    assert(job);
    struct v3dv_frame_tiling *tiling = &job->frame_tiling;
+
+   /* With V3D_WEBGPU_OVERRIDE=1 the advertised framebuffer width/height
+    * is 8192 (to satisfy Dawn/Chromium) but the actual HW rendering
+    * limit is lower (7680 on RPi5, 4096 on RPi4). Warn when a render
+    * job exceeds the real limit — meta fill/copy paths are already
+    * clamped by framebuffer_size_for_pixel_count, but image blits and
+    * render passes may legitimately use the advertised limit.
+    */
+   const uint32_t max_fb_dim =
+      job->device->devinfo.max_framebuffer_size;
+   if (width > max_fb_dim || height > max_fb_dim) {
+      mesa_loge("V3D_WEBGPU_OVERRIDE:"
+                " job_compute_frame_tiling: %ux%u exceeds real HW limit %ux%u",
+                width, height, max_fb_dim, max_fb_dim);
+   }
 
    tiling->width = width;
    tiling->height = height;
@@ -475,7 +501,9 @@ v3dv_job_allocate_tile_state(struct v3dv_job *job)
                         &tile_state_size);
 
    job->tile_alloc = v3dv_bo_alloc(job->device, tile_alloc_size,
-                                   "tile_alloc", true);
+                                   "tile_alloc", true,
+                                   VK_OBJECT_TYPE_COMMAND_BUFFER,
+                                   job_get_cmd_buffer_vk_handle(job));
    if (!job->tile_alloc) {
       v3dv_flag_oom(NULL, job);
       return false;
@@ -483,7 +511,9 @@ v3dv_job_allocate_tile_state(struct v3dv_job *job)
 
    v3dv_job_add_bo_unchecked(job, job->tile_alloc);
 
-   job->tile_state = v3dv_bo_alloc(job->device, tile_state_size, "TSDA", true);
+   job->tile_state = v3dv_bo_alloc(job->device, tile_state_size, "TSDA", true,
+                                   VK_OBJECT_TYPE_COMMAND_BUFFER,
+                                   job_get_cmd_buffer_vk_handle(job));
    if (!job->tile_state) {
       v3dv_flag_oom(NULL, job);
       return false;
@@ -794,6 +824,7 @@ v3dv_job_init(struct v3dv_job *job,
    /* Make sure we haven't made this new job current before calling here */
    assert(!cmd_buffer || cmd_buffer->state.job != job);
 
+   job->id = p_atomic_inc_return(&device->job_id_counter);
    job->type = type;
 
    job->device = device;
@@ -902,10 +933,13 @@ cmd_buffer_reset(struct vk_command_buffer *vk_cmd_buffer,
       /* FIXME: For now we always free all resources as if
        * VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT was set.
        */
-      if (cmd_buffer->status != V3DV_CMD_BUFFER_STATUS_NEW)
+      if (cmd_buffer->status != V3DV_CMD_BUFFER_STATUS_NEW) {
+         u_trace_fini(&cmd_buffer->trace);
          cmd_buffer_free_resources(cmd_buffer);
+      }
 
       cmd_buffer_init(cmd_buffer, device);
+      u_trace_init(&cmd_buffer->trace, &device->utrace.utrace_ctx);
    }
 
    assert(cmd_buffer->status == V3DV_CMD_BUFFER_STATUS_INITIALIZED);
@@ -1082,12 +1116,13 @@ cmd_buffer_begin_render_pass_secondary(
     *     rendering is contained within the render area."
     */
    const struct v3dv_framebuffer *framebuffer = cmd_buffer->state.framebuffer;
+   const uint32_t max_fb_size = cmd_buffer->device->devinfo.max_framebuffer_size;
    cmd_buffer->state.render_area.offset.x = 0;
    cmd_buffer->state.render_area.offset.y = 0;
    cmd_buffer->state.render_area.extent.width =
-      framebuffer ? framebuffer->width : V3D_MAX_IMAGE_DIMENSION;
+      framebuffer ? framebuffer->width : max_fb_size;
    cmd_buffer->state.render_area.extent.height =
-      framebuffer ? framebuffer->height : V3D_MAX_IMAGE_DIMENSION;
+      framebuffer ? framebuffer->height : max_fb_size;
 
    /* We only really execute double-buffer mode in primary jobs, so allow this
     * mode in render pass secondaries to keep track of the double-buffer mode
@@ -2307,7 +2342,7 @@ emit_scissor(struct v3dv_cmd_buffer *cmd_buffer)
 
    struct v3dv_dynamic_state *dynamic = &cmd_buffer->state.dynamic;
 
-   /* FIXME: right now we only support one viewport. viewporst[0] would work
+   /* FIXME: right now we only support one viewport. viewports[0] would work
     * now, but would need to change if we allow multiple viewports.
     */
    float *vptranslate = dynamic->viewport.translate[0];
@@ -2529,7 +2564,7 @@ v3dv_cmd_buffer_meta_state_push(struct v3dv_cmd_buffer *cmd_buffer,
     * we are no longer in a subpass because Vulkan disallows image resolves
     * via vkCmdResolveImage during subpasses, but we still need to preserve
     * attachment state because we may have more subpasses to go through
-    * after processing resolves in the current subass.
+    * after processing resolves in the current subpass.
     */
    const uint32_t attachment_state_item_size =
       sizeof(struct v3dv_cmd_buffer_attachment_state);
@@ -2578,6 +2613,8 @@ v3dv_cmd_buffer_meta_state_push(struct v3dv_cmd_buffer *cmd_buffer,
       if (gfx_descriptor_state->valid != 0) {
          memcpy(&state->meta.gfx.descriptor_state, gfx_descriptor_state,
                 sizeof(state->gfx.descriptor_state));
+      } else {
+         state->meta.gfx.descriptor_state.valid = 0;
       }
       state->meta.has_descriptor_state = true;
    } else {
@@ -3377,6 +3414,84 @@ handle_barrier(VkPipelineStageFlags2 srcStageMask, VkAccessFlags2 srcAccessMask,
    }
 }
 
+static bool
+is_tlb_color_input_barrier_scope(const VkPipelineStageFlags2 srcStageMask,
+                                 const VkAccessFlags2 srcAccessMask,
+                                 const VkPipelineStageFlags2 dstStageMask,
+                                 const VkAccessFlags2 dstAccessMask)
+{
+   return !(srcStageMask & ~VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT) &&
+          !(srcAccessMask & ~VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT) &&
+          !(dstStageMask & ~VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT) &&
+          !(dstAccessMask & ~VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT);
+}
+
+/* In Vulkan, vkCmdPipelineBarrier inside a render pass is only allowed
+ * for subpass self-dependencies.
+ */
+static bool
+is_tlb_color_input_barrier(struct v3dv_cmd_buffer *cmd_buffer,
+                           const VkDependencyInfo *info)
+{
+   const struct v3dv_cmd_buffer_state *state = &cmd_buffer->state;
+   if (!state->pass || !state->job)
+      return false;
+
+   /* Buffer memory barriers are not allowed inside a render pass instance. */
+   assert(info->bufferMemoryBarrierCount == 0);
+
+   const struct v3dv_subpass *subpass =
+      &state->pass->subpasses[state->subpass_idx];
+   if (!subpass->has_tlb_color_input_self_dependency)
+      return false;
+
+   /* If this is not strictly a subpass self-dependency chances are
+    * that we'll have to flush the job anyway.
+    *
+    * FIXME: there are some non-image barriers that are no-ops for us
+    * (i.e. host-stage barriers). So it could make sense to improve the
+    * check to not bail if all these other barriers are no-op.
+    */
+   if (info->memoryBarrierCount > 0)
+      return false;
+
+   if (info->imageMemoryBarrierCount == 0)
+      return false;
+
+   const VkDependencyFlags allowed_dependency_flags = VK_DEPENDENCY_BY_REGION_BIT |
+                                                      VK_DEPENDENCY_VIEW_LOCAL_BIT |
+                                                      VK_DEPENDENCY_FEEDBACK_LOOP_BIT_EXT;
+   if (info->dependencyFlags & ~allowed_dependency_flags)
+      return false;
+
+   for (uint32_t i = 0; i < info->imageMemoryBarrierCount; i++) {
+      const VkImageMemoryBarrier2 *barrier = &info->pImageMemoryBarriers[i];
+      if (barrier->pNext != NULL)
+         return false;
+
+      if (barrier->srcQueueFamilyIndex != barrier->dstQueueFamilyIndex)
+         return false;
+
+      if (barrier->subresourceRange.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT)
+         return false;
+
+      if (!is_tlb_color_input_barrier_scope(barrier->srcStageMask,
+                                            barrier->srcAccessMask,
+                                            barrier->dstStageMask,
+                                            barrier->dstAccessMask)) {
+         return false;
+      }
+   }
+   /* If a barrier's scope is limited to color-write to input-reads,
+    * it must target an attachment used as both an input and a color
+    * attachment. The self-dependency is framebuffer-local, and the
+    * input read has already been lowered in the compiler to emit a
+    * TLB load from the corresponding RT, so there is no need to
+    * flush current job.
+    */
+   return true;
+}
+
 void
 v3dv_cmd_buffer_emit_pipeline_barrier(struct v3dv_cmd_buffer *cmd_buffer,
                                       const VkDependencyInfo *info)
@@ -3389,6 +3504,13 @@ v3dv_cmd_buffer_emit_pipeline_barrier(struct v3dv_cmd_buffer *cmd_buffer,
 
    uint32_t memoryBarrierCount = info->memoryBarrierCount;
    const VkMemoryBarrier2 *pMemoryBarriers = info->pMemoryBarriers;
+
+   /* We can ignore barriers for color TLB subpass self-dependencies.
+    * In these cases we compiled the shader to emit a TLB read and we
+    * don't need to flush the current job for that.
+    */
+   if (is_tlb_color_input_barrier(cmd_buffer, info))
+      return;
 
    struct v3dv_barrier_state state = { 0 };
    for (uint32_t i = 0; i < imageBarrierCount; i++) {
@@ -3930,7 +4052,7 @@ v3dv_CmdPushConstants(VkCommandBuffer commandBuffer,
 {
    V3DV_FROM_HANDLE(v3dv_cmd_buffer, cmd_buffer, commandBuffer);
 
-   assert(cmd_buffer->state.push_constants_data);
+   assert(cmd_buffer->state.push_constants_data != NULL);
    if (!memcmp((uint8_t *) cmd_buffer->state.push_constants_data + offset,
                pValues, size)) {
       return;
@@ -4315,7 +4437,9 @@ cmd_buffer_create_csd_job(struct v3dv_cmd_buffer *cmd_buffer,
       job->csd.shared_memory =
          v3dv_bo_alloc(cmd_buffer->device,
                        cs_variant->prog_data.cs->shared_size * num_wgs,
-                       "shared_vars", true);
+                       "shared_vars", true,
+                       VK_OBJECT_TYPE_COMMAND_BUFFER,
+                       vk_object_to_u64_handle(&cmd_buffer->vk.base));
       if (!job->csd.shared_memory) {
          v3dv_flag_oom(cmd_buffer, NULL);
          return job;

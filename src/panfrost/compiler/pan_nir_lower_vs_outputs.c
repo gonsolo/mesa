@@ -20,12 +20,12 @@ struct lower_vs_outputs_ctx {
    nir_variable *variables[PAN_MAX_VARYINGS];
    uint8_t per_view_written[PAN_MAX_VARYINGS];
    unsigned used_buckets;
-   bool uses_multiview;
+   bool uses_per_view_outputs;
 };
 
 static bool
-valhal_writes_extended_fifo(uint64_t outputs_written,
-                            bool no_psiz, bool multiview)
+valhal_writes_extended_fifo(uint64_t outputs_written, bool no_psiz,
+                            bool per_view_outputs)
 {
    uint64_t ex_fifo_written = outputs_written & VALHAL_EX_FIFO_VARYING_BITS;
    if (ex_fifo_written == 0)
@@ -35,7 +35,7 @@ valhal_writes_extended_fifo(uint64_t outputs_written,
     * output writes. We don't currently patch these offsets in the no_psiz
     * variant, so we need the extended format, regardless of point size.
     */
-   if (multiview)
+   if (per_view_outputs)
       return true;
 
    /* If we're not rendering in points mode, the no_psiz variant has point
@@ -102,7 +102,7 @@ build_attr_desc_write(struct nir_builder *b, nir_def *data, uint32_t base,
                       const struct lower_vs_outputs_ctx *ctx)
 {
    nir_def *index = nir_imm_int(b, base);
-   nir_def *vertex_id = nir_load_raw_vertex_id_pan(b);
+   nir_def *vertex_id = nir_load_raw_vertex_id(b);
    nir_def *instance_id = nir_load_instance_id(b);
 
    nir_def *addr_cvt = nir_lea_attr_pan(b, index, vertex_id, instance_id,
@@ -170,8 +170,6 @@ get_or_create_var(nir_builder *b, struct lower_vs_outputs_ctx *ctx,
    bool is_per_view = intr->intrinsic == nir_intrinsic_store_per_view_output;
    ASSERTED nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
    unsigned slot_idx = nir_intrinsic_base(intr);
-   nir_alu_type src_type = nir_intrinsic_src_type(intr);
-   enum glsl_base_type base_type = nir_get_glsl_base_type_for_nir_type(src_type);
 
    /* Indirect array varyings are not yet supported (num_slots > 1) */
    assert(sem.num_slots == 1);
@@ -179,13 +177,15 @@ get_or_create_var(nir_builder *b, struct lower_vs_outputs_ctx *ctx,
 
    nir_variable *var = ctx->variables[slot_idx];
    if (var != NULL) {
-      /* All stores should agree per-location */
       assert(glsl_type_is_array(var->type) == is_per_view);
-      assert(glsl_get_base_type(glsl_without_array(var->type)) == base_type);
       return var;
    }
 
-   /* We need the slot section for the number of components */
+   /* Use the layout's authoritative type for the variable. The VS doesn't
+    * know if a varying is flat or smooth, and nir_opt_varyings can put
+    * stores of different types at the same slot, so we cannot trust the
+    * individual store's src_type.
+    */
    pan_varying_layout_require_format(ctx->varying_layout);
    const struct pan_varying_slot *slot =
       pan_varying_layout_slot_at(ctx->varying_layout, slot_idx);
@@ -193,9 +193,13 @@ get_or_create_var(nir_builder *b, struct lower_vs_outputs_ctx *ctx,
    assert(slot && slot->section != PAN_VARYING_SECTION_SPECIAL &&
           slot->location == sem.location);
 
+   enum glsl_base_type base_type =
+      nir_get_glsl_base_type_for_nir_type(slot->alu_type);
    const glsl_type *var_type = glsl_vector_type(base_type, slot->ncomps);
-   if (is_per_view)
-      var_type = glsl_array_type(var_type, PAN_MAX_MULTIVIEW_VIEW_COUNT, false);
+   if (is_per_view) {
+      var_type = glsl_array_type(
+         var_type, pan_max_multiview_view_count(ctx->arch), false);
+   }
 
    var = nir_local_variable_create(b->impl, var_type, "vs_out_tmp");
    ctx->variables[slot_idx] = var;
@@ -220,9 +224,12 @@ gather_vs_outputs(struct nir_builder *b,
    bool is_per_view = intr->intrinsic == nir_intrinsic_store_per_view_output;
    unsigned view_index = is_per_view ? nir_src_as_uint(intr->src[1]) : 0;
 
+   /* nir_intrinsic_store_per_view_output is never emitted on v14+. */
+   assert(ctx->arch < 14 || !is_per_view);
+
    ctx->per_view_written[slot_idx] |= BITFIELD_BIT(view_index);
    ctx->used_buckets |= BITFIELD_BIT(va_shader_output_from_loc(sem.location));
-   ctx->uses_multiview |= is_per_view;
+   ctx->uses_per_view_outputs |= is_per_view;
 
    b->cursor = nir_instr_remove(&intr->instr);
    nir_variable *var = get_or_create_var(b, ctx, intr);
@@ -273,10 +280,12 @@ pan_nir_lower_vs_outputs(nir_shader *shader, uint64_t gpu_id,
       .variables = {NULL, },
       .per_view_written = {0, },
       .used_buckets = 0,
-      .uses_multiview = false,
+      .uses_per_view_outputs = false,
    };
-   /* We use uint8 as a viewcount bitmask */
-   assert(PAN_MAX_MULTIVIEW_VIEW_COUNT <= 8 * sizeof(ctx.per_view_written[0]));
+   /* We use uint8 as a viewcount bitmask. per_view_written is always 0
+    * on v14+. */
+   assert(ctx.arch >= 14 || pan_max_multiview_view_count(ctx.arch) <=
+                               8 * sizeof(ctx.per_view_written[0]));
    bool progress = nir_shader_intrinsics_pass(shader, gather_vs_outputs,
                                               nir_metadata_control_flow,
                                               (void *)&ctx);
@@ -288,12 +297,12 @@ pan_nir_lower_vs_outputs(nir_shader *shader, uint64_t gpu_id,
       assert(needs_extended_fifo);
       const uint64_t outputs = shader->info.outputs_written;
       ctx.has_extended_fifo =
-         valhal_writes_extended_fifo(outputs, false, ctx.uses_multiview);
+         valhal_writes_extended_fifo(outputs, false, ctx.uses_per_view_outputs);
       /* Export if we need ex_fifo even without psiz.  The backend needs to
        * know this because we can patch psiz out.
        */
       *needs_extended_fifo =
-         valhal_writes_extended_fifo(outputs, true, ctx.uses_multiview);
+         valhal_writes_extended_fifo(outputs, true, ctx.uses_per_view_outputs);
    }
 
    nir_builder builder = nir_builder_at(nir_after_impl(impl));

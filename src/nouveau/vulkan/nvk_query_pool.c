@@ -16,6 +16,7 @@
 #include "vk_common_entrypoints.h"
 #include "vk_meta.h"
 #include "vk_pipeline.h"
+#include "vk_synchronization.h"
 
 #include "cl/nvk_query.h"
 #include "compiler/nir/nir.h"
@@ -26,6 +27,8 @@
 
 #include "nv_push_cl906f.h"
 #include "nv_push_cl9097.h"
+#include "nv_push_cl90b5.h"
+#include "nv_push_cl90c0.h"
 #include "nv_push_cla0c0.h"
 #include "nv_push_clc597.h"
 #include "nv_push_clc7c0.h"
@@ -355,7 +358,7 @@ nvk_CmdResetQueryPool(VkCommandBuffer commandBuffer,
          UNREACHABLE("Unsupported query type");
 
       uint64_t addr = nvk_query_available_addr(pool, firstQuery);
-      nvk_cmd_fill_memory(cmd, addr, clear_size, 0);
+      nvk_cmd_fill_memory_ce(cmd, addr, clear_size, 0);
    } else {
       for (uint32_t i = 0; i < queryCount; i++) {
          uint64_t addr = nvk_query_available_addr(pool, firstQuery + i);
@@ -404,18 +407,73 @@ nvk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
 
    assert(pool->layout == NVK_QUERY_POOL_LAYOUT_TIMESTAMP_PACKED);
 
-   struct nv_push *p = nvk_cmd_buffer_push(cmd, 5);
    uint64_t report_addr = nvk_query_report_addr(pool, query);
-   P_MTHD(p, NV9097, SET_REPORT_SEMAPHORE_A);
-   P_NV9097_SET_REPORT_SEMAPHORE_A(p, report_addr >> 32);
-   P_NV9097_SET_REPORT_SEMAPHORE_B(p, report_addr);
-   P_NV9097_SET_REPORT_SEMAPHORE_C(p, 1);
-   P_NV9097_SET_REPORT_SEMAPHORE_D(p, {
-      .operation = OPERATION_RELEASE,
-      .release = RELEASE_AFTER_ALL_PRECEEDING_WRITES_COMPLETE,
-      .pipeline_location = vk_stage_flags_to_nv9097_pipeline_location(stage),
-      .structure_size = STRUCTURE_SIZE_FOUR_WORDS,
-   });
+   uint8_t subc = nvk_cmd_buffer_last_subchannel(cmd);
+   if (subc == SUBC_NV9097) {
+      struct nv_push *p = nvk_cmd_buffer_push(cmd, 7);
+      P_IMMD(p, NV9097, FLUSH_PENDING_WRITES, 0);
+      P_MTHD(p, NV9097, SET_REPORT_SEMAPHORE_A);
+      P_NV9097_SET_REPORT_SEMAPHORE_A(p, report_addr >> 32);
+      P_NV9097_SET_REPORT_SEMAPHORE_B(p, report_addr);
+      P_NV9097_SET_REPORT_SEMAPHORE_C(p, 1);
+      P_NV9097_SET_REPORT_SEMAPHORE_D(p, {
+         .operation = OPERATION_RELEASE,
+         .release = RELEASE_AFTER_ALL_PRECEEDING_WRITES_COMPLETE,
+         .pipeline_location = vk_stage_flags_to_nv9097_pipeline_location(stage),
+         .structure_size = STRUCTURE_SIZE_FOUR_WORDS,
+      });
+   } else if (subc == SUBC_NV90C0) {
+      struct nv_push *p = nvk_cmd_buffer_push(cmd, 7);
+
+      /* Compute SET_REPORT_SEMAPHORE_D doesn't provide a pipeline location
+       * meaning that we need to handle first synchronization scope here.
+       *
+       * Considering that if we are on the compute subchannel, we only really
+       * need to wait on anything that runs on compute.
+       */
+      if (vk_expand_src_stage_flags2(stage) &
+          (VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+           VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_RESOLVE_BIT |
+           VK_PIPELINE_STAGE_2_BLIT_BIT))
+         P_IMMD(p, NV90C0, WAIT_FOR_IDLE, 0);
+
+      P_MTHD(p, NV90C0, SET_REPORT_SEMAPHORE_A);
+      P_NV90C0_SET_REPORT_SEMAPHORE_A(p, report_addr >> 32);
+      P_NV90C0_SET_REPORT_SEMAPHORE_B(p, report_addr);
+      P_NV90C0_SET_REPORT_SEMAPHORE_C(p, 1);
+      P_NV90C0_SET_REPORT_SEMAPHORE_D(p, {
+         .operation = OPERATION_RELEASE,
+         .structure_size = STRUCTURE_SIZE_FOUR_WORDS,
+      });
+   } else {
+      assert(subc == SUBC_NV90B5);
+
+      /* It is unclear if DATA_TRANSFER_TYPE_NONE will wait for previous
+       * operation here. Let's emit a DMA WFI and release the semaphore if we
+       * need to wait on DMA.
+       */
+      bool wfi = vk_expand_src_stage_flags2(stage) & VK_PIPELINE_STAGE_2_COPY_BIT;
+
+      struct nv_push *p = nvk_cmd_buffer_push(cmd, 6 + 3 * wfi);
+      P_MTHD(p, NV90B5, SET_SEMAPHORE_A);
+      P_NV90B5_SET_SEMAPHORE_A(p, report_addr >> 32);
+      P_NV90B5_SET_SEMAPHORE_B(p, report_addr);
+      P_NV90B5_SET_SEMAPHORE_PAYLOAD(p, 1);
+
+      if (wfi) {
+         P_MTHD(p, NV90B5, LINE_LENGTH_IN);
+         P_NV90B5_LINE_LENGTH_IN(p, 0);
+         P_NV90B5_LINE_COUNT(p, 0);
+      }
+
+      P_IMMD(p, NV90B5, LAUNCH_DMA, {
+         .data_transfer_type = wfi ? DATA_TRANSFER_TYPE_NON_PIPELINED
+                                   : DATA_TRANSFER_TYPE_NONE,
+         .semaphore_type = SEMAPHORE_TYPE_RELEASE_FOUR_WORD_SEMAPHORE,
+         .flush_enable = FLUSH_ENABLE_TRUE,
+         /* Note: FLUSH_TYPE=SYS implicitly for NVC3B5+ */
+      });
+   }
 
    /* From the Vulkan spec:
     *
@@ -611,6 +669,10 @@ nvk_cmd_set_statistics_counters(struct nvk_cmd_buffer *cmd,
          P_1INC(p, NV9097, CALL_MME_MACRO(NVK_MME_SET_STATISTICS_COUNTERS));
          P_INLINE_DATA(p, enable);
          P_INLINE_DATA(p, pool->statistics_counter_mask);
+      } else if (pool->vk.query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS &&
+                 pool->vk.pipeline_statistics &
+                    VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT) {
+         cmd->state.cs.active_compute_invocations_query = enable;
       }
       break;
    }
@@ -933,14 +995,6 @@ struct nvk_copy_query_push {
    uint32_t flags;
 };
 
-static nir_def *
-load_struct_var(nir_builder *b, nir_variable *var, uint32_t field)
-{
-   nir_deref_instr *deref =
-      nir_build_deref_struct(b, nir_build_deref_var(b, var), field);
-   return nir_load_deref(b, deref);
-}
-
 static nir_shader *
 build_copy_queries_shader(void)
 {
@@ -967,14 +1021,14 @@ build_copy_queries_shader(void)
                           false /* row_major */, "push");
    nir_variable *push = nir_variable_create(b->shader, nir_var_mem_push_const,
                                             push_iface_type, "push");
-
+   nir_deref_instr *push_deref = nir_build_deref_var(b, push);
    b->shader->info.workgroup_size[0] = 32;
 
-   nvk_copy_queries(b, load_struct_var(b, push, 0), load_struct_var(b, push, 1),
-                    load_struct_var(b, push, 2), load_struct_var(b, push, 3),
-                    load_struct_var(b, push, 4), load_struct_var(b, push, 5),
-                    load_struct_var(b, push, 6), load_struct_var(b, push, 7),
-                    load_struct_var(b, push, 8), load_struct_var(b, push, 9));
+   nvk_copy_queries(b, nir_load_struct_field(b, push_deref, 0), nir_load_struct_field(b, push_deref, 1),
+                    nir_load_struct_field(b, push_deref, 2), nir_load_struct_field(b, push_deref, 3),
+                    nir_load_struct_field(b, push_deref, 4), nir_load_struct_field(b, push_deref, 5),
+                    nir_load_struct_field(b, push_deref, 6), nir_load_struct_field(b, push_deref, 7),
+                    nir_load_struct_field(b, push_deref, 8), nir_load_struct_field(b, push_deref, 9));
 
    return build.shader;
 }
@@ -1056,18 +1110,16 @@ nvk_meta_copy_query_pool_results(struct nvk_cmd_buffer *cmd,
 }
 
 VKAPI_ATTR void VKAPI_CALL
-nvk_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer,
-                            VkQueryPool queryPool,
-                            uint32_t firstQuery,
-                            uint32_t queryCount,
-                            VkBuffer dstBuffer,
-                            VkDeviceSize dstOffset,
-                            VkDeviceSize stride,
-                            VkQueryResultFlags flags)
+nvk_CmdCopyQueryPoolResultsToMemoryKHR(VkCommandBuffer commandBuffer,
+                                       VkQueryPool queryPool,
+                                       uint32_t firstQuery,
+                                       uint32_t queryCount,
+                                       const VkStridedDeviceAddressRangeKHR* pDstRange,
+                                       VkAddressCommandFlagsKHR dstFlags,
+                                       VkQueryResultFlags flags)
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(nvk_query_pool, pool, queryPool);
-   VK_FROM_HANDLE(nvk_buffer, dst_buffer, dstBuffer);
 
    if (unlikely(!queryCount))
       return;
@@ -1089,9 +1141,9 @@ nvk_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer,
       }
    }
 
-   uint64_t dst_addr = vk_buffer_address(&dst_buffer->vk, dstOffset);
    nvk_meta_copy_query_pool_results(cmd, pool, firstQuery, queryCount,
-                                    dst_addr, stride, flags);
+                                    pDstRange->address, pDstRange->stride,
+                                    flags);
 }
 
 void

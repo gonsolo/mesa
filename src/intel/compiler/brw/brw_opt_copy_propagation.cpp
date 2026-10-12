@@ -564,6 +564,17 @@ is_logic_op(enum opcode opcode)
 }
 
 static bool
+src_has_dst_aligned_region_restriction(const intel_device_info *devinfo,
+                                       const brw_inst *inst,
+                                       brw_reg_type dst_type,
+                                       unsigned arg)
+{
+   return
+      has_dst_aligned_region_restriction(devinfo, inst, dst_type) ||
+      (devinfo->ver >= 35 && arg == 1);
+}
+
+static bool
 can_take_stride(brw_inst *inst, brw_reg_type dst_type,
                 unsigned arg, unsigned stride,
                 const struct brw_compiler *compiler)
@@ -577,7 +588,7 @@ can_take_stride(brw_inst *inst, brw_reg_type dst_type,
     * of the corresponding channel of the destination, and the provided stride
     * would break this restriction.
     */
-   if (has_dst_aligned_region_restriction(devinfo, inst, dst_type) &&
+   if (src_has_dst_aligned_region_restriction(devinfo, inst, dst_type, arg) &&
        !(brw_type_size_bytes(inst->src[arg].type) * stride ==
            brw_type_size_bytes(dst_type) * inst->dst.stride ||
          stride == 0))
@@ -849,7 +860,7 @@ try_copy_propagate(brw_shader &s, brw_inst *inst,
     * Most of this is already checked in can_take_stride(), we're only left
     * with checking 3.
     */
-   if (has_dst_aligned_region_restriction(devinfo, inst, dst_type) &&
+   if (src_has_dst_aligned_region_restriction(devinfo, inst, dst_type, arg) &&
        entry_stride != 0 &&
        (reg_offset(inst->dst) % (REG_SIZE * reg_unit(devinfo))) != (reg_offset(entry->src) % (REG_SIZE * reg_unit(devinfo))))
       return false;
@@ -873,7 +884,7 @@ try_copy_propagate(brw_shader &s, brw_inst *inst,
     * propagate them in such cases.
     */
    if (entry->src.file == ATTR && max_polygons > 1 &&
-       (has_dst_aligned_region_restriction(devinfo, inst, dst_type) ||
+       (src_has_dst_aligned_region_restriction(devinfo, inst, dst_type, arg) ||
 	instruction_requires_packed_data(inst) ||
 	(inst->is_3src(s.compiler) && arg == 2) ||
 	entry->dst.type != inst->src[arg].type))
@@ -1727,7 +1738,7 @@ try_copy_propagate_def(brw_shader &s,
     * Most of this is already checked in can_take_stride(), we're only left
     * with checking 3.
     */
-   if (has_dst_aligned_region_restriction(devinfo, inst, dst_type) &&
+   if (src_has_dst_aligned_region_restriction(devinfo, inst, dst_type, arg) &&
        entry_stride != 0 &&
        (reg_offset(inst->dst) % (REG_SIZE * reg_unit(devinfo))) != (reg_offset(val) % (REG_SIZE * reg_unit(devinfo))))
       return false;
@@ -1743,7 +1754,7 @@ try_copy_propagate_def(brw_shader &s,
     * propagate them in such cases.
     */
    if (max_polygons > 1 && val.file == ATTR &&
-       (has_dst_aligned_region_restriction(devinfo, inst, dst_type) ||
+       (src_has_dst_aligned_region_restriction(devinfo, inst, dst_type, arg) ||
         instruction_requires_packed_data(inst) ||
         (inst->is_3src(s.compiler) && arg == 2) ||
         def->dst.type != inst->src[arg].type))
@@ -1777,26 +1788,6 @@ try_copy_propagate_def(brw_shader &s,
       inst->src[arg].swizzle = val.swizzle;
    } else {
       inst->src[arg].stride *= val.stride;
-   }
-
-   /* Handle NoMask cases where the def replicates a small scalar to a number
-    * of channels, but the use is a lower SIMD width but larger type, so each
-    * invocation reads multiple channels worth of data, e.g.
-    *
-    *    mov(16) vgrf1:UW, u0<0>:UW NoMask
-    *    mov(8)  vgrf2:UD, vgrf1:UD NoMask group0
-    *
-    * In this case, we should just use the scalar's type.
-    */
-   if (val.stride == 0 &&
-       inst->opcode == BRW_OPCODE_MOV &&
-       inst->force_writemask_all && def->force_writemask_all &&
-       inst->exec_size < def->exec_size &&
-       (inst->exec_size * brw_type_size_bytes(inst->src[arg].type) ==
-        def->exec_size * brw_type_size_bytes(val.type))) {
-      inst->src[arg].type = val.type;
-      inst->dst.type = val.type;
-      inst->exec_size = def->exec_size;
    }
 
    if (has_source_modifiers && !is_logic_op(inst->opcode)) {

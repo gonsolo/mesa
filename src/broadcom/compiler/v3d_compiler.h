@@ -205,57 +205,6 @@ enum quniform_contents {
         QUNIFORM_VIEWPORT_Z_OFFSET,
         QUNIFORM_VIEWPORT_Z_SCALE,
 
-        /**
-         * A reference to a V3D 3.x texture config parameter 0 uniform.
-         *
-         * This is a uniform implicitly loaded with a QPU_W_TMU* write, which
-         * defines texture type, miplevels, and such.  It will be found as a
-         * parameter to the first QOP_TEX_[STRB] instruction in a sequence.
-         */
-        QUNIFORM_TEXTURE_CONFIG_P0_0,
-        QUNIFORM_TEXTURE_CONFIG_P0_1,
-        QUNIFORM_TEXTURE_CONFIG_P0_2,
-        QUNIFORM_TEXTURE_CONFIG_P0_3,
-        QUNIFORM_TEXTURE_CONFIG_P0_4,
-        QUNIFORM_TEXTURE_CONFIG_P0_5,
-        QUNIFORM_TEXTURE_CONFIG_P0_6,
-        QUNIFORM_TEXTURE_CONFIG_P0_7,
-        QUNIFORM_TEXTURE_CONFIG_P0_8,
-        QUNIFORM_TEXTURE_CONFIG_P0_9,
-        QUNIFORM_TEXTURE_CONFIG_P0_10,
-        QUNIFORM_TEXTURE_CONFIG_P0_11,
-        QUNIFORM_TEXTURE_CONFIG_P0_12,
-        QUNIFORM_TEXTURE_CONFIG_P0_13,
-        QUNIFORM_TEXTURE_CONFIG_P0_14,
-        QUNIFORM_TEXTURE_CONFIG_P0_15,
-        QUNIFORM_TEXTURE_CONFIG_P0_16,
-        QUNIFORM_TEXTURE_CONFIG_P0_17,
-        QUNIFORM_TEXTURE_CONFIG_P0_18,
-        QUNIFORM_TEXTURE_CONFIG_P0_19,
-        QUNIFORM_TEXTURE_CONFIG_P0_20,
-        QUNIFORM_TEXTURE_CONFIG_P0_21,
-        QUNIFORM_TEXTURE_CONFIG_P0_22,
-        QUNIFORM_TEXTURE_CONFIG_P0_23,
-        QUNIFORM_TEXTURE_CONFIG_P0_24,
-        QUNIFORM_TEXTURE_CONFIG_P0_25,
-        QUNIFORM_TEXTURE_CONFIG_P0_26,
-        QUNIFORM_TEXTURE_CONFIG_P0_27,
-        QUNIFORM_TEXTURE_CONFIG_P0_28,
-        QUNIFORM_TEXTURE_CONFIG_P0_29,
-        QUNIFORM_TEXTURE_CONFIG_P0_30,
-        QUNIFORM_TEXTURE_CONFIG_P0_31,
-        QUNIFORM_TEXTURE_CONFIG_P0_32,
-
-        /**
-         * A reference to a V3D 3.x texture config parameter 1 uniform.
-         *
-         * This is a uniform implicitly loaded with a QPU_W_TMU* write, which
-         * has the pointer to the indirect texture state.  Our data[] field
-         * will have a packed p1 value, but the address field will be just
-         * which texture unit's texture should be referenced.
-         */
-        QUNIFORM_TEXTURE_CONFIG_P1,
-
         /* A V3D 4.x texture config parameter.  The high 8 bits will be
          * which texture or sampler is being sampled, and the driver must
          * replace the address field with the appropriate address.
@@ -392,7 +341,7 @@ static inline struct v3d_varying_slot
 v3d_slot_from_slot_and_component(uint8_t slot, uint8_t component)
 {
         assert(slot < 255 / 4);
-        return (struct v3d_varying_slot){ (slot << 2) + component };
+        return (struct v3d_varying_slot){ (uint8_t)((slot << 2) + component) };
 }
 
 static inline uint8_t v3d_slot_get_slot(struct v3d_varying_slot slot)
@@ -845,6 +794,21 @@ struct v3d_compile {
         uint32_t spill_size;
         /* Shader-db stats */
         uint32_t spills, fills, loops;
+        /* Pre-spill register pressure (max simultaneously-live temps), computed
+         * in probe_only mode and used by v3d_compile() to route and rank the
+         * 2-thread compile strategies.
+         */
+        uint32_t max_pressure;
+
+        /* Pressure probe: when set, v3d_nir_to_vir builds the VIR and computes
+         * max_pressure, then returns WITHOUT register allocation.
+         */
+        bool probe_only;
+        /* Pre-RA thrsw state, stashed by v3d_nir_to_vir() for
+         * v3d_nir_to_vir_finish().
+         */
+        struct qinst *restore_last_thrsw;
+        bool restore_scoreboard_lock;
 
         /* Whether we are in the process of spilling registers for
          * register allocation
@@ -1187,6 +1151,8 @@ enum v3d_qpu_output_pack vir_get_pack(struct qinst *inst);
 
 struct qreg vir_get_temp(struct v3d_compile *c);
 void vir_calculate_live_intervals(struct v3d_compile *c);
+void vir_update_live_intervals_after_spill(struct v3d_compile *c,
+                                           uint32_t num_temps_before_spills);
 int vir_get_nsrc(struct qinst *inst);
 bool vir_has_side_effects(struct v3d_compile *c, struct qinst *inst);
 bool vir_get_add_op(struct qinst *inst, enum v3d_qpu_add_op *op);
@@ -1236,10 +1202,12 @@ bool v3d_nir_lower_null_descriptors(nir_shader *s);
 bool v3d_nir_lower_global_2x32(nir_shader *s);
 bool v3d_nir_lower_load_store_bitsize(nir_shader *s);
 bool v3d_nir_lower_algebraic(struct nir_shader *shader, const struct v3d_compile *c);
-bool v3d_nir_lower_load_output(nir_shader *s, struct v3d_compile *c);
+bool v3d_nir_lower_tlb_loads(nir_shader *s, struct v3d_compile *c);
 bool v3d_nir_lower_blend(nir_shader *s, struct v3d_compile *c);
 
-nir_def *v3d_nir_get_tlb_color(nir_builder *b, struct v3d_compile *c, int rt, int sample);
+nir_def *v3d_nir_get_tlb_color(nir_builder *b, struct v3d_compile *c, int rt,
+                               int sample, unsigned component,
+                               unsigned num_components);
 
 void v3d_vir_emit_tex(struct v3d_compile *c, nir_tex_instr *instr);
 void v3d_vir_emit_image_load_store(struct v3d_compile *c,
@@ -1249,6 +1217,8 @@ void v3d_vir_to_qpu(struct v3d_compile *c, struct qpu_reg *temp_registers);
 uint32_t v3d_qpu_schedule_instructions(struct v3d_compile *c);
 void qpu_validate(struct v3d_compile *c);
 struct qpu_reg *v3d_register_allocate(struct v3d_compile *c);
+uint32_t vir_get_max_temps(struct v3d_compile *c);
+void v3d_nir_to_vir_finish(struct v3d_compile *c);
 bool vir_init_reg_sets(struct v3d_compiler *compiler);
 
 int v3d_shaderdb_dump(struct v3d_compile *c, char **shaderdb_str);
@@ -1257,14 +1227,6 @@ bool v3d_gl_format_is_return_32(enum pipe_format format);
 
 uint32_t
 v3d_get_op_for_atomic_add(nir_intrinsic_instr *instr, unsigned src);
-
-static inline bool
-quniform_contents_is_texture_p0(enum quniform_contents contents)
-{
-        return (contents >= QUNIFORM_TEXTURE_CONFIG_P0_0 &&
-                contents < (QUNIFORM_TEXTURE_CONFIG_P0_0 +
-                            V3D_MAX_TEXTURE_SAMPLERS));
-}
 
 static inline bool
 vir_in_nonuniform_control_flow(struct v3d_compile *c)

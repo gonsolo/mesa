@@ -149,6 +149,7 @@ def define_tracepoints(args):
                  tp_args=[Arg(type='enum blorp_op', var='op', c_format='%s', to_prim_type='blorp_op_to_name({})'),
                           Arg(type='uint32_t', var='width', c_format='%u'),
                           Arg(type='uint32_t', var='height', c_format='%u'),
+                          Arg(type='uint32_t', var='array_len', c_format='%u'),
                           Arg(type='uint32_t', var='samples', c_format='%u'),
                           Arg(type='enum blorp_shader_pipeline', var='shader_pipe', c_format='%s', to_prim_type='blorp_shader_pipeline_to_name({})'),
                           Arg(type='enum isl_format', var='dst_fmt', c_format='%s', to_prim_type='isl_format_get_short_name({})'),
@@ -258,16 +259,19 @@ def define_tracepoints(args):
                  tp_args=[Arg(type='uint32_t', var='n_tlas', c_format='%u'),
                           Arg(type='uint32_t', var='n_blas', c_format='%u'),])
     begin_end_tp('as_build_leaves', repeat_last=True)
-    begin_end_tp('as_morton_generate', repeat_last=True)
     begin_end_tp('as_morton_sort', repeat_last=True)
-    begin_end_tp('as_lbvh_build_internal', repeat_last=True)
+    begin_end_tp('as_lbvh_main', repeat_last=True)
+    begin_end_tp('as_lbvh_generate_ir', repeat_last=True)
     begin_end_tp('as_ploc_build_internal', repeat_last=True)
     begin_end_tp('as_encode', repeat_last=True,
-                  tp_args=[Arg(type='uint32_t', var='pass', c_format='%u'),
-                           Arg(type='uint32_t', var='key', c_format='%x'),
-                           Arg(type='uint32_t', var='n_leaves', c_format='%u'),
-                           Arg(type='uint32_t', var='n_ir_leaves', c_format='%u')])
+                  tp_args=[Arg(type='uint32_t', var='build_flags', c_format='%x')])
+    begin_end_tp('as_init_header', repeat_last=True,
+                  tp_args=[Arg(type='uint32_t', var='build_flags', c_format='%x')])
+    begin_end_tp('as_update', repeat_last=True,
+                  tp_args=[Arg(type='uint32_t', var='build_flags', c_format='%x')])
     begin_end_tp('as_copy', repeat_last=True)
+    begin_end_tp('as_pair_triangles', repeat_last=True)
+    begin_end_tp('as_id_prefix_sum', repeat_last=True)
 
     begin_end_tp('rays',
                  tp_args=[Arg(type='uint32_t', var='group_x', c_format='%u'),

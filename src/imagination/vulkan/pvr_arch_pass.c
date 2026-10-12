@@ -34,7 +34,6 @@
 #include "pvr_formats.h"
 #include "pvr_hw_pass.h"
 #include "pvr_macros.h"
-#include "pvr_pds.h"
 #include "pvr_physical_device.h"
 #include "pvr_pipeline.h"
 #include "pvr_types.h"
@@ -846,7 +845,6 @@ PVR_PER_ARCH(CreateRenderPass2)(VkDevice _device,
 
       attachment->vk_format = desc->format;
       attachment->sample_count = desc->samples;
-      attachment->initial_layout = desc->initialLayout;
       attachment->index = i;
 
       /* On cores without gs_rta_support, PBE resolves might depend on writes

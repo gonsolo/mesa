@@ -41,8 +41,31 @@ lower_memmov(struct lower_spill_ctx* ctx, bi_instr *I, uint32_t tls_base)
    bi_remove_instruction(I);
 }
 
+/* For vector phis, bi_out_of_ssa expects the width in bi_instr::table. */
 static void
-lower_mem_phi(struct lower_spill_ctx* ctx, bi_instr *I, uint32_t tls_base)
+lower_phi_size(struct lower_spill_ctx *ctx, bi_instr *I)
+{
+   assert(I->op == BI_OPCODE_PHI);
+   assert(I->nr_dests == 1);
+
+#ifndef NDEBUG
+   /* Sanity check. */
+
+   unsigned words = 1;
+   words = MAX2(words, ctx->sizes[I->dest[0].value]);
+
+   bi_foreach_ssa_src(I, s)
+      words = MAX2(words, ctx->sizes[I->src[s].value]);
+
+   assert(words == ctx->sizes[I->dest[0].value]);
+#endif
+
+   I->table = ctx->sizes[I->dest[0].value];
+   assert(I->table <= 4);
+}
+
+static void
+lower_mem_phi(struct lower_spill_ctx *ctx, bi_instr *I, uint32_t tls_base)
 {
    assert(I->op == BI_OPCODE_PHI);
    assert(I->nr_dests == 1);
@@ -53,11 +76,6 @@ lower_mem_phi(struct lower_spill_ctx* ctx, bi_instr *I, uint32_t tls_base)
 
    if (I->dest[0].memory) {
       const bi_index dst = I->dest[0];
-      /* bi_repair_ssa could make PHIs for MEMMOV sources which could be
-       * wider. But, those should all get eliminated as trivial because they
-       * are only defined once so they would all look like mX = PHI mX, mX.
-       */
-      assert(ctx->sizes[dst.value] == 1);
       I->dest[0].value = tls_base + ctx->tls_loc[dst.value];
    }
 
@@ -67,7 +85,6 @@ lower_mem_phi(struct lower_spill_ctx* ctx, bi_instr *I, uint32_t tls_base)
          continue;
 
       assert(ctx->tls_loc[src.value] != UINT32_MAX && "Undefined source");
-      assert(ctx->sizes[src.value] == 1);
       I->src[s].value = tls_base + ctx->tls_loc[src.value];
    }
 }
@@ -83,8 +100,12 @@ assign_tls_locations(struct lower_spill_ctx *ctx) {
          assert(I->op == BI_OPCODE_MEMMOV || I->op == BI_OPCODE_PHI);
          assert(ctx->tls_loc[dst.value] == UINT32_MAX && "Broken SSA");
 
+         unsigned size = ctx->sizes[dst.value];
+         unsigned alignment = (size <= 1) ? 4 : (size == 2) ? 8 : 16;
+
+         ctx->spill_count = ALIGN_POT(ctx->spill_count, alignment);
          ctx->tls_loc[dst.value] = ctx->spill_count;
-         ctx->spill_count += 4 * ctx->sizes[dst.value];
+         ctx->spill_count += 4 * size;
       }
    }
 }
@@ -107,6 +128,12 @@ bi_lower_spill(bi_context* ctx, uint32_t tls_base) {
    };
 
    assign_tls_locations(&lctx);
+
+   /* Before adding SSA values, lower phi sizes. */
+   bi_foreach_instr_global_safe(ctx, I) {
+      if (I->op == BI_OPCODE_PHI)
+         lower_phi_size(&lctx, I);
+   }
 
    bi_foreach_instr_global_safe(ctx, I) {
       switch (I->op) {

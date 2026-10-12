@@ -71,25 +71,6 @@ struct pvr_descriptor_pool {
    struct util_vma_heap heap; /** Pool (sub)allocation heap. */
 };
 
-struct pvr_descriptor {
-   VkDescriptorType type;
-
-   union {
-      struct {
-         struct pvr_buffer_view *bview;
-         pvr_dev_addr_t buffer_dev_addr;
-         VkDeviceSize buffer_desc_range;
-         VkDeviceSize buffer_whole_range;
-      };
-
-      struct {
-         VkImageLayout layout;
-         const struct pvr_image_view *iview;
-         const struct pvr_sampler *sampler;
-      };
-   };
-};
-
 struct pvr_descriptor_set {
    struct vk_object_base base;
    struct list_head link; /** Link in pvr_descriptor_pool::desc_sets. */
@@ -102,6 +83,14 @@ struct pvr_descriptor_set {
    void *mapping; /** Descriptor set CPU mapping. */
 
    struct pvr_buffer_descriptor dynamic_buffers[];
+};
+
+struct pvr_push_descriptor_set {
+   struct pvr_descriptor_set_layout *layout;
+   uint8_t data[PVR_MAX_PUSH_DESCRIPTORS * PVR_MAX_DESCRIPTOR_SIZE];      /* CPU-side descriptor blob */
+
+   /* descriptor set record instantiated at flush time */
+   struct pvr_descriptor_set instantiate_set;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(pvr_descriptor_set_layout,
@@ -130,6 +119,19 @@ vk_to_pvr_descriptor_set_layout(struct vk_descriptor_set_layout *layout)
 void PVR_PER_ARCH(descriptor_set_write_immutable_samplers)(
    struct pvr_descriptor_set_layout *layout,
    struct pvr_descriptor_set *set);
+
+void PVR_PER_ARCH(push_descriptor_set_update)(
+   struct pvr_push_descriptor_set *push_set,
+   struct pvr_descriptor_set_layout *layout,
+   uint32_t descriptorWriteCount,
+   const VkWriteDescriptorSet *pDescriptorWrites,
+   const struct pvr_device_info *dev_info);
+
+void PVR_PER_ARCH(push_descriptor_set_update_template)(
+   struct pvr_push_descriptor_set *push_set,
+   struct pvr_descriptor_set_layout *layout,
+   const VkPushDescriptorSetWithTemplateInfoKHR *info,
+   const struct pvr_device_info *dev_info);
 
 #endif
 

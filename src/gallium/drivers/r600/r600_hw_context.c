@@ -299,13 +299,12 @@ void r600_context_gfx_flush(void *context, unsigned flags,
 			const char *fname = os_get_option("R600_TRACE");
 			if (!fname)
 				exit(-1);
-			FILE *fl = fopen(fname, "w+");
+			FILE *fl = fopen(fname, "a+");
 			if (fl) {
 				eg_dump_debug_state(&ctx->b.b, fl, 0);
 				fclose(fl);
 			} else
 				perror(fname);
-			exit(-1);
 		}
 	}
 	r600_begin_new_cs(ctx);
@@ -348,8 +347,11 @@ void r600_begin_new_cs(struct r600_context *ctx)
 	r600_mark_atom_dirty(ctx, &ctx->db_state.atom);
 	r600_mark_atom_dirty(ctx, &ctx->cb_state.atom);
 	if (ctx->b.gfx_level >= EVERGREEN) {
-		r600_mark_atom_dirty(ctx, &ctx->fragment_images.atom);
-		r600_mark_atom_dirty(ctx, &ctx->fragment_buffers.atom);
+		for (unsigned k = 0; k < ARRAY_SIZE(ctx->fragment_images); k++)
+			r600_mark_atom_dirty(ctx, &ctx->fragment_images[k].atom);
+		for (unsigned k = 0; k < ARRAY_SIZE(ctx->fragment_buffers); k++)
+			if (r600_check_buffer_shader_supported(k))
+				r600_mark_atom_dirty(ctx, &ctx->fragment_buffers[k].atom);
 		r600_mark_atom_dirty(ctx, &ctx->compute_images.atom);
 		r600_mark_atom_dirty(ctx, &ctx->compute_buffers.atom);
 	}

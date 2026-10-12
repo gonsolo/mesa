@@ -54,6 +54,7 @@ static void blorp_measure_end(struct blorp_batch *_batch,
                          params->op,
                          params->x1 - params->x0,
                          params->y1 - params->y0,
+                         params->num_layers,
                          params->num_samples,
                          params->shader_pipeline,
                          params->depth.enabled ? params->depth.view.format :
@@ -79,7 +80,7 @@ blorp_emit_reloc(struct blorp_batch *batch,
       .bo = address.buffer,
       .offset = address.offset,
    };
-   anv_reloc_list_add_bo(cmd_buffer->batch.relocs, anv_addr.bo);
+   anv_cmd_buffer_add_reloc_bo(cmd_buffer, anv_addr.bo);
    return anv_address_physical(anv_address_add(anv_addr, delta));
 }
 
@@ -101,8 +102,8 @@ blorp_get_surface_base_address(struct blorp_batch *batch)
 {
    struct anv_cmd_buffer *cmd_buffer = batch->driver_batch;
    return (struct blorp_address) {
-      .buffer = cmd_buffer->device->internal_surface_state_pool.block_pool.bo,
-      .offset = -cmd_buffer->device->internal_surface_state_pool.start_offset,
+      .buffer = anv_device_get_internal_surface_state_pool(cmd_buffer->device)->block_pool.bo,
+      .offset = -anv_device_get_internal_surface_state_pool(cmd_buffer->device)->start_offset,
    };
 }
 #endif
@@ -130,19 +131,15 @@ blorp_alloc_dynamic_state(struct blorp_batch *batch,
    return state.map;
 }
 
-UNUSED static void *
-blorp_alloc_general_state(struct blorp_batch *batch,
-                          uint32_t size,
-                          uint32_t alignment,
-                          uint32_t *offset)
+static struct blorp_address
+blorp_dynamic_state_address(struct blorp_batch *batch,
+                            uint32_t offset)
 {
    struct anv_cmd_buffer *cmd_buffer = batch->driver_batch;
-
-   struct anv_state state =
-      anv_cmd_buffer_alloc_general_state(cmd_buffer, size, alignment);
-
-   *offset = state.offset;
-   return state.map;
+   return (struct blorp_address) {
+      .buffer = anv_device_get_dynamic_state_pool(cmd_buffer->device)->block_pool.bo,
+      .offset = offset,
+   };
 }
 
 static bool
@@ -353,8 +350,24 @@ blorp_exec_on_render(struct blorp_batch *batch,
 #endif
 
    if (params->depth.enabled &&
-       !(batch->flags & BLORP_BATCH_NO_EMIT_DEPTH_STENCIL))
-      genX(cmd_buffer_emit_gfx12_depth_wa)(cmd_buffer, &params->depth.surf);
+       !(batch->flags & BLORP_BATCH_NO_EMIT_DEPTH_STENCIL)) {
+      if (INTEL_NEEDS_WA_1808121037 && params->num_samples == 1 &&
+          params->depth.surf.format == ISL_FORMAT_R16_UNORM) {
+         /* Disable HiZ planes on D16 1x MSAA to avoid sporadic corruption. */
+         genX(cmd_buffer_disable_hiz_planes)(cmd_buffer);
+      }
+   }
+
+   if (params->depth.enabled &&
+       (batch->flags & BLORP_BATCH_NO_EMIT_DEPTH_STENCIL)) {
+      /* BLORP expects that the depth buffer aux usage matches the
+       * attachment's. Undo any temporary modification.
+       */
+      enum isl_aux_usage depth_aux_usage =
+         cmd_buffer->state.gfx.depth_att.aux_usage;
+      if (cmd_buffer->state.gfx.hiz_usage != depth_aux_usage)
+         genX(cmd_buffer_emit_depth_stencil)(cmd_buffer, depth_aux_usage);
+   }
 
    genX(flush_pipeline_select_3d)(cmd_buffer);
 

@@ -128,15 +128,28 @@ driGetOptionsXml(const driOptionDescription *configOptions, unsigned numOptions)
 void driParseOptionInfo(driOptionCache *info,
                         const driOptionDescription *configOptions,
                         unsigned numOptions);
+
+typedef void (*driShaderOptionCallback)(const void *hash_data,
+                                        uint32_t hash_size,
+                                        const driOptionInfo *option,
+                                        const driOptionValue *value,
+                                        void *shaderOptionCallbackData);
+
 typedef struct {
    int screenNum;
    const char *driverName;
    const char *kernelDriverName;
    const char *deviceName;
+   uint32_t deviceVersion;
    const char *applicationName;
    uint32_t applicationVersion;
    const char *engineName;
    uint32_t engineVersion;
+
+   bool logNonDefaultOptions;
+
+   driShaderOptionCallback shaderOptionCallback;
+   void *shaderOptionCallbackData;
 } driConfigFileParseParams;
 
 /** \brief Initialize option cache from info and parse configuration files

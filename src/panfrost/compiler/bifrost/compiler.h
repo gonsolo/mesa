@@ -607,6 +607,11 @@ typedef struct {
    /* Valhall-only property to relax waits on read-only resources */
    bool wait_resource;
 
+   /* Valhall-only: at pack time, replace the immediate with the byte offset
+    * from the next instruction to the inline constant pool.
+    */
+   bool patch_imm_const_offset;
+
    /* Slot associated with a message-passing instruction */
    uint8_t slot;
 
@@ -617,6 +622,13 @@ typedef struct {
    /* Tags the gl_PointSize memory write, this is used if we want to
     * create a variant without psiz writes */
    bool is_psiz_write;
+
+   /* Tags the two instructions va_lower_blend() appends after BLEND to call
+    * a blend shader. Under fixed-function blending, they are always skipped,
+    * so they are a fixed ABI cost rather than shader work and are excluded
+    * from statistics.
+    */
+   bool is_blend_prologue;
 
    /* On Bifrost: A value of bi_table to override the table, inducing a
     * DTSEL_IMM pair if nonzero.
@@ -970,6 +982,9 @@ typedef struct bi_block {
    bool unconditional_jumps;
    bool loop_header;
 
+   /* whether this is a loop exit point that needs branch reconvergence */
+   bool needs_reconvergence_on_exit;
+
    /* Per 32-bit word live masks for the block indexed by node */
    uint8_t *live_in;
    uint8_t *live_out;
@@ -1088,13 +1103,11 @@ bi_block_add_successor(bi_block *block, bi_block *successor)
 
 /* Subset of pan_shader_info needed per-variant, in order to support IDVS */
 struct bi_shader_info {
-   struct pan_ubo_push *push;
+   struct pan_fau_layout *fau;
    struct bifrost_shader_info *bifrost;
    struct pan_stats stats;
    unsigned tls_size;
    unsigned work_reg_count;
-   unsigned push_offset;
-   unsigned init_fau_consts_count;
    bool has_ld_gclk_instr;
 };
 
@@ -1142,7 +1155,8 @@ enum bi_preload {
    BI_PRELOAD_RASTERIZER_COVERAGE,
    BI_PRELOAD_SAMPLE_ID,
    BI_PRELOAD_CENTROID_ID,
-   BI_PRELOAD_FRAME_ARG,
+   BI_PRELOAD_FRAME_ARG_LO,
+   BI_PRELOAD_FRAME_ARG_HI,
    /* Blend */
    BI_PRELOAD_BLEND_SRC0_C0,
    BI_PRELOAD_BLEND_SRC0_C1,
@@ -1220,9 +1234,10 @@ bi_preload_reg(enum bi_preload val, unsigned arch)
    case BI_PRELOAD_CENTROID_ID:
       /* Bits [31;24] */
       return 61;
-   case BI_PRELOAD_FRAME_ARG:
-      /* Double reg */
+   case BI_PRELOAD_FRAME_ARG_LO:
       return 62;
+   case BI_PRELOAD_FRAME_ARG_HI:
+      return 63;
    /* Blend */
    case BI_PRELOAD_BLEND_SRC0_C0:
       return 0;
@@ -1286,14 +1301,16 @@ typedef struct {
     */
    bi_index preloaded[BI_MAX_REGS];
 
-   uint32_t fau_consts_count;
-
    /* For creating temporaries */
    unsigned ssa_alloc;
    unsigned reg_alloc;
 
    /* Mask of UBOs that need to be uploaded */
    uint32_t ubo_mask;
+   struct {
+      unsigned start;
+      unsigned end;
+   } ubo_reloc;
 
    /* During instruction selection, map from vector bi_index to its scalar
     * components, populated by a split.
@@ -1319,6 +1336,10 @@ typedef struct {
 
    /* Computed after RA */
    uint64_t spill_cost;
+
+   /* Placement of the inline constant pool emitted at pack time, if any */
+   unsigned constant_pool_size_B;
+   unsigned constant_pool_offset_B;
 } bi_context;
 
 static inline enum bi_round

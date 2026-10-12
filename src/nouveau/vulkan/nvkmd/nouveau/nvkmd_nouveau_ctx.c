@@ -62,6 +62,7 @@ nvkmd_nouveau_create_exec_ctx(struct nvkmd_dev *_dev,
    STATIC_ASSERT(NVKMD_ENGINE_3D       == (int)NOUVEAU_WS_ENGINE_3D);
    STATIC_ASSERT(NVKMD_ENGINE_M2MF     == (int)NOUVEAU_WS_ENGINE_M2MF);
    STATIC_ASSERT(NVKMD_ENGINE_COMPUTE  == (int)NOUVEAU_WS_ENGINE_COMPUTE);
+   STATIC_ASSERT(NVKMD_ENGINE_VDEC     == (int)NOUVEAU_WS_ENGINE_VDEC);
 
    err = nouveau_ws_context_create(dev->ws_dev, (int)engines, &ctx->ws_ctx);
    if (err != 0) {
@@ -379,6 +380,7 @@ nvkmd_nouveau_bind_ctx_bind(struct nvkmd_ctx *_ctx,
 {
    struct nvkmd_nouveau_bind_ctx *ctx = nvkmd_nouveau_bind_ctx(_ctx);
 
+   struct nvkmd_va *prev_va = NULL;
    for (uint32_t i = 0; i < bind_count; i++) {
       STATIC_ASSERT(NVKMD_BIND_OP_BIND   == DRM_NOUVEAU_VM_BIND_OP_MAP);
       STATIC_ASSERT(NVKMD_BIND_OP_UNBIND == DRM_NOUVEAU_VM_BIND_OP_UNMAP);
@@ -399,8 +401,10 @@ nvkmd_nouveau_bind_ctx_bind(struct nvkmd_ctx *_ctx,
          struct drm_nouveau_vm_bind_op *prev_op =
             &ctx->req_ops[ctx->req.op_count - 1];
 
-         /* Try to coalesce bind ops together if we can */
-         if (op.op == prev_op->op &&
+         /* Try to coalesce bind ops together if we can (We can only merge
+          * operations if they are part of the same VA mapping) */
+         if (binds[i].va == prev_va &&
+             op.op == prev_op->op &&
              op.flags == prev_op->flags &&
              op.handle == prev_op->handle &&
              op.addr == prev_op->addr + prev_op->range &&
@@ -417,6 +421,7 @@ nvkmd_nouveau_bind_ctx_bind(struct nvkmd_ctx *_ctx,
       }
 
       ctx->req_ops[ctx->req.op_count++] = op;
+      prev_va = binds[i].va;
    }
 
    return VK_SUCCESS;

@@ -39,6 +39,7 @@
 
 #include "common/intel_gem.h"
 #include "util/u_debug.h"
+#include "util/u_string.h"
 #include "util/log.h"
 #include "util/macros.h"
 
@@ -1265,7 +1266,8 @@ static const struct intel_device_info intel_device_info_nvl_u_h = {
 #define XE3P_FEATURES                                           \
    XE3_FEATURES,                                                \
    .ver = 35,                                                   \
-   .verx10 = 350
+   .verx10 = 350,                                               \
+   .has_integer_dword_mul = true
 
 #define XE3P_CONFIG(platform_suffix)                            \
    XE3P_FEATURES, XE2_PAT_ENTRIES,                              \
@@ -1427,16 +1429,27 @@ fill_masks(struct intel_device_info *devinfo)
 void
 intel_device_info_update_cs_workgroup_threads(struct intel_device_info *devinfo)
 {
-   /* GPGPU_WALKER::ThreadWidthCounterMaximum is U6-1 so the most threads we
-    * can program is 64 without going up to a rectangular group. This only
-    * impacts Haswell and TGL which have higher thread counts.
-    *
-    * INTERFACE_DESCRIPTOR_DATA::NumberofThreadsinGPGPUThreadGroup on Xe-HP+
-    * is 10 bits so we have no such restrictions.
-    */
-   devinfo->max_cs_workgroup_threads =
-      devinfo->verx10 >= 125 ? devinfo->max_cs_threads :
-                               MIN2(devinfo->max_cs_threads, 64);
+   if (devinfo->verx10 >= 300) {
+      /* BSpec 56590 (r65834)
+       * PTL+ introduces compute workgroup limits that depend on SIMD
+       * width and GRF usage. Conservatively limit the workgroup thread
+       * count to 32 so brw_simd_should_compile() rejects SIMD16 variants
+       * that would require more than 32 hardware threads and selects
+       * SIMD32 instead.
+       */
+      devinfo->max_cs_workgroup_threads = MIN2(devinfo->max_cs_threads, 32);
+   } else if (devinfo->verx10 >= 125) {
+      /* INTERFACE_DESCRIPTOR_DATA::NumberofThreadsinGPGPUThreadGroup on Xe-HP+
+       * is 10 bits so we have no such restrictions.
+       */
+      devinfo->max_cs_workgroup_threads = devinfo->max_cs_threads;
+   } else {
+      /* GPGPU_WALKER::ThreadWidthCounterMaximum is U6-1 so the most threads we
+       * can program is 64 without going up to a rectangular group. This only
+       * impacts Haswell and TGL which have higher thread counts.
+       */
+      devinfo->max_cs_workgroup_threads = MIN2(devinfo->max_cs_threads, 64);
+   }
 }
 
 static bool
@@ -1484,18 +1497,16 @@ scan_for_force_probe(int pci_id, bool *force_on, bool *force_off)
    *force_off = false;
 
    const char *env = os_get_option("INTEL_FORCE_PROBE");
-   if (env == NULL)
+   if (env == NULL || env[0] == '\0')
       return;
 
-   size_t len = strlen(env);
-   if (len == 0)
-      return;
-
-   char *dup = strndup(env, len);
+   char *dup = strdup(env);
    if (dup == NULL)
       return;
 
-   for (char *entry = strtok(dup, ","); entry; entry = strtok(NULL, ","))
+   char *saveptr;
+   for (char *entry = strtok_r(dup, ",", &saveptr); entry;
+        entry = strtok_r(NULL, ",", &saveptr))
       parse_force_probe_entry(pci_id, entry, force_on, force_off);
 
    free(dup);

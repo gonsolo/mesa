@@ -45,6 +45,7 @@
 #include "util/u_math.h"
 #include "util/u_memory.h"
 #include "util/u_screen.h"
+#include "util/u_transfer_helper.h"
 #include "util/u_string.h"
 
 #include "frontend/drm_driver.h"
@@ -82,6 +83,7 @@ static const struct debug_named_value etna_debug_options[] = {
    {"npu_parallel",   ETNA_DBG_NPU_PARALLEL, "Enable parallelism inside NPU batches (unsafe)"},
    {"npu_no_batching",ETNA_DBG_NPU_NO_BATCHING, "Disable batching NPU jobs"},
    {"no_texdesc"     ,ETNA_DBG_NO_TEXDESC, "Disable texture descriptor"},
+   {"no_unified_samplers", ETNA_DBG_NO_UNIFIED_SAMPLERS, "Disable unified sampler allocation"},
    DEBUG_NAMED_VALUE_END
 };
 
@@ -92,6 +94,8 @@ static void
 etna_screen_destroy(struct pipe_screen *pscreen)
 {
    struct etna_screen *screen = etna_screen(pscreen);
+
+   u_transfer_helper_destroy(screen->base.transfer_helper);
 
    if (screen->dummy_bo)
       etna_bo_del(screen->dummy_bo);
@@ -206,6 +210,32 @@ etna_init_shader_caps(struct etna_screen *screen)
    etna_init_single_shader_caps(screen, MESA_SHADER_FRAGMENT);
 }
 
+static bool
+gpu_supports_texture_desc(struct etna_screen *screen)
+{
+   return VIV_FEATURE(screen, ETNA_FEATURE_HALTI5) &&
+          !DBG_ENABLED(ETNA_DBG_NO_TEXDESC);
+}
+
+static bool
+gpu_supports_msaa(struct etna_screen *screen, unsigned sample_count)
+{
+   if (DBG_ENABLED(ETNA_DBG_NO_MSAA))
+      return false;
+
+   if (!VIV_FEATURE(screen, ETNA_FEATURE_MSAA))
+      return false;
+
+   if (!translate_samples_to_xyscale(sample_count, NULL, NULL))
+      return false;
+
+   /* On SMALL_MSAA hardware 2x MSAA does not work. */
+   if (sample_count == 2 && VIV_FEATURE(screen, ETNA_FEATURE_SMALL_MSAA))
+      return false;
+
+   return true;
+}
+
 static void
 etna_init_screen_caps(struct etna_screen *screen)
 {
@@ -233,14 +263,19 @@ etna_init_screen_caps(struct etna_screen *screen)
    caps->fs_position_is_sysval = true;
    caps->fs_face_is_integer_sysval = true; /* note: not integer */
    caps->fs_point_is_sysval = false;
+   caps->native_fp32_depth = false;
    caps->generate_mipmap =
    caps->clear_scissored = screen->specs.use_blt;
    caps->clear_masked = screen->specs.use_blt &&
                         VIV_FEATURE(screen, ETNA_FEATURE_BLT_64BPP_MASKED_CLEAR_FIX);
+   caps->blend_equation_advanced =
+      VIV_FEATURE(screen, ETNA_FEATURE_PE_ADVANCE_BLEND_PART0) ?
+      ETNA_ADVANCED_BLEND_MODES : 0;
 
    /* Memory */
    caps->constant_buffer_offset_alignment = 256;
    caps->min_map_buffer_alignment = 4096;
+   caps->invalidate_buffer = true;
 
    caps->npot_textures = true; /* VIV_FEATURE(priv->dev, chipMinorFeatures1, NON_POWER_OF_TWO); */
 
@@ -255,16 +290,20 @@ etna_init_screen_caps(struct etna_screen *screen)
 
    caps->draw_indirect = VIV_FEATURE(screen, ETNA_FEATURE_HALTI5);
 
+   caps->glsl_feature_level =
+   caps->glsl_feature_level_compatibility = screen->info->halti >= 2 ? 130 : 120;
+
    /* Unsupported features. */
    caps->texture_buffer_offset_alignment = false;
    caps->texrect = false;
 
    /* Stream output. */
-   caps->max_stream_output_buffers = VIV_FEATURE(screen, ETNA_FEATURE_HWTFB) || DBG_ENABLED(ETNA_DBG_DEQP) ? 4 : 0;
+   caps->max_stream_output_buffers = VIV_FEATURE(screen, ETNA_FEATURE_HWTFB) ||
+                                     screen->info->halti >= 2 ? 4 : 0;
    caps->max_stream_output_separate_components = 64;
    caps->max_stream_output_interleaved_components = 64;
 
-   caps->max_vertex_attrib_stride = 128;
+   caps->max_vertex_attrib_stride = screen->info->halti >= 2 ? 2048 : 128;
    caps->max_vertex_element_src_offset = 255;
    caps->max_vertex_buffers = screen->info->gpu.stream_count;
    caps->vs_instanceid =
@@ -288,7 +327,8 @@ etna_init_screen_caps(struct etna_screen *screen)
       (VIV_FEATURE(screen, ETNA_FEATURE_HALTI5) && DBG_ENABLED(ETNA_DBG_DEQP)) ? 4 : 0;
    caps->seamless_cube_map_per_texture =
    caps->seamless_cube_map = VIV_FEATURE(screen, ETNA_FEATURE_SEAMLESS_CUBE_MAP);
-   caps->texture_multisample = DBG_ENABLED(ETNA_DBG_DEQP);
+   caps->texture_multisample = gpu_supports_msaa(screen, ETNA_MAX_SAMPLES) &&
+                               gpu_supports_texture_desc(screen);
 
    /* Render targets. */
    caps->max_render_targets = VIV_FEATURE(screen, ETNA_FEATURE_HALTI2) ?
@@ -367,6 +407,8 @@ etna_init_screen_caps(struct etna_screen *screen)
 
    caps->max_texture_anisotropy = 16.0f;
    caps->max_texture_lod_bias = util_last_bit(screen->specs.max_texture_size);
+
+   caps->device_type = PIPE_DEVICE_TYPE_INTEGRATED_GPU;
 }
 
 static bool
@@ -392,12 +434,6 @@ gpu_supports_texture_format(struct etna_screen *screen, uint32_t fmt,
 {
    bool supported = true;
 
-   /* Requires split sampler support, which the driver doesn't support, yet. */
-   if (!DBG_ENABLED(ETNA_DBG_DEQP) &&
-       !util_format_is_compressed(format) &&
-       util_format_get_blocksizebits(format) > 64)
-      return false;
-
    if (fmt == TEXTURE_FORMAT_ETC1)
       supported = VIV_FEATURE(screen, ETNA_FEATURE_ETC1_TEXTURE_COMPRESSION);
 
@@ -421,12 +457,20 @@ gpu_supports_texture_format(struct etna_screen *screen, uint32_t fmt,
        (util_format_is_pure_integer(format) || util_format_is_float(format)))
       supported = VIV_FEATURE(screen, ETNA_FEATURE_HALTI2);
 
+   /* 128-bit formats sample as paired planes: G32R32F via the half-float pipe,
+    * G32R32I only on halti5+.
+    */
+   if (format_is_128bit(format))
+      supported = util_format_is_pure_integer(format)
+         ? VIV_FEATURE(screen, ETNA_FEATURE_HALTI5)
+         : VIV_FEATURE(screen, ETNA_FEATURE_HALF_FLOAT);
+
    if (format == PIPE_FORMAT_S8_UINT)
       supported = VIV_FEATURE(screen, ETNA_FEATURE_S8);
 
-   if (format == PIPE_FORMAT_S8X24_UINT)
-      supported = VIV_FEATURE(screen, ETNA_FEATURE_HALTI5) &&
-                  !DBG_ENABLED(ETNA_DBG_NO_TEXDESC);
+   if (format == PIPE_FORMAT_S8X24_UINT ||
+       format == PIPE_FORMAT_X32_S8X24_UINT)
+      supported = gpu_supports_texture_desc(screen);
 
    if (etna_format_needs_yuv_tiler(format))
       supported = VIV_FEATURE(screen, ETNA_FEATURE_YUV420_TILER);
@@ -441,45 +485,49 @@ gpu_supports_texture_format(struct etna_screen *screen, uint32_t fmt,
 }
 
 static bool
-gpu_supports_msaa(struct etna_screen *screen, unsigned sample_count)
+gpu_supports_multisampled_blitter_resolve(const struct etna_screen *screen,
+                                          enum pipe_format format, unsigned sample_count)
 {
-   if (DBG_ENABLED(ETNA_DBG_NO_MSAA))
+   if (sample_count != ETNA_MAX_SAMPLES ||
+       !screen->base.caps.texture_multisample)
       return false;
 
-   if (!VIV_FEATURE(screen, ETNA_FEATURE_MSAA))
-      return false;
-
-   if (!translate_samples_to_xyscale(sample_count, NULL, NULL))
-      return false;
-
-   /* On SMALL_MSAA hardware 2x MSAA does not work. */
-   if (sample_count == 2 && VIV_FEATURE(screen, ETNA_FEATURE_SMALL_MSAA))
-      return false;
-
-   return true;
+   switch (format) {
+   case PIPE_FORMAT_R16_FLOAT:
+   case PIPE_FORMAT_R16G16_FLOAT:
+   case PIPE_FORMAT_R11G11B10_FLOAT:
+      /* handled by u_blitter */
+      return true;
+   default:
+      return !screen->specs.use_blt &&
+             util_format_get_blocksize(format) <= 4 &&
+             (util_format_is_unorm(format) ||
+              util_format_is_pure_integer(format));
+   }
 }
 
 static bool
 gpu_supports_render_format(struct etna_screen *screen, enum pipe_format format,
                            unsigned sample_count)
 {
-   const uint32_t fmt = translate_pe_format(format);
+   const uint32_t fmt = translate_pe_format(format, screen);
 
    if (fmt == ETNA_NO_MATCH)
       return false;
 
-   /* Requires split target support, which the driver doesn't support, yet. */
-   if (!DBG_ENABLED(ETNA_DBG_DEQP) &&
-       util_format_get_blocksizebits(format) > 64)
-      return false;
-
    if (sample_count > 1) {
-      /* BLT/RS supports the format. */
       if (screen->specs.use_blt) {
-         if (translate_blt_format(format) == ETNA_NO_MATCH)
+         if (translate_blt_format(format) == ETNA_NO_MATCH &&
+             !gpu_supports_multisampled_blitter_resolve(screen, format, sample_count))
             return false;
       } else {
-         if (translate_rs_format(format) == ETNA_NO_MATCH)
+         if (util_format_is_pure_integer(format) &&
+             !VIV_FEATURE(screen, ETNA_FEATURE_HALTI5))
+            return false;
+
+         /* RS format or u_blitter fallback support */
+         if (translate_rs_format(format, screen->info->halti >= 5) == ETNA_NO_MATCH &&
+             !gpu_supports_multisampled_blitter_resolve(screen, format, sample_count))
             return false;
       }
    }
@@ -493,6 +541,10 @@ gpu_supports_render_format(struct etna_screen *screen, enum pipe_format format,
 
    if (util_format_is_srgb(format))
       return VIV_FEATURE(screen, ETNA_FEATURE_HALTI3);
+
+   /* 128-bit formats render as paired G32R32F targets via the half-float pipe. */
+   if (format_is_128bit(format))
+      return VIV_FEATURE(screen, ETNA_FEATURE_HALF_FLOAT);
 
    if (util_format_is_pure_integer(format) || util_format_is_float(format))
       return VIV_FEATURE(screen, ETNA_FEATURE_HALTI2);
@@ -584,7 +636,15 @@ etna_screen_is_format_supported(struct pipe_screen *pscreen,
       if (!gpu_supports_texture_format(screen, fmt, format))
          fmt = ETNA_NO_MATCH;
 
-      if (sample_count < 2 && fmt != ETNA_NO_MATCH)
+      /* lower_txf_ms_dynamic(..) always fetches four samples, so 4x is the
+       * only multisample layout that can be sampled.
+       */
+      if (sample_count > 1 &&
+          (sample_count != ETNA_MAX_SAMPLES ||
+           !gpu_supports_texture_desc(screen)))
+         fmt = ETNA_NO_MATCH;
+
+      if (fmt != ETNA_NO_MATCH)
          allowed |= PIPE_BIND_SAMPLER_VIEW;
    }
 
@@ -826,6 +886,16 @@ etna_determine_sampler_limits(struct etna_screen *screen)
 
    if (screen->info->model == 0x400)
       screen->specs.vertex_sampler_count = 0;
+
+   /* The unified allocation is only implemented in the descriptor emit path,
+    * so it requires descriptor mode (HALTI5, texdesc enabled). Some pre-HALTI5
+    * parts advertise UNIFIED_SAMPLERS but use the legacy texture-state path.
+    */
+   screen->specs.unified_samplers =
+      VIV_FEATURE(screen, ETNA_FEATURE_UNIFIED_SAMPLERS) &&
+      screen->info->halti >= 5 &&
+      !DBG_ENABLED(ETNA_DBG_NO_TEXDESC) &&
+      !DBG_ENABLED(ETNA_DBG_NO_UNIFIED_SAMPLERS);
 }
 
 static void
@@ -945,6 +1015,9 @@ etna_get_specs(struct etna_screen *screen)
 
    screen->specs.max_vs_outputs = screen->info->halti >= 5 ? 32 : 16;
 
+   if (screen->info->halti >= 5)
+      screen->specs.vs_usc_budget = etna_core_vs_usc_budget(screen->info);
+
    screen->specs.max_varyings = MIN3(ETNA_NUM_VARYINGS,
                                      info->gpu.max_varyings,
                                      /* one output slot used for position */
@@ -961,8 +1034,10 @@ etna_get_specs(struct etna_screen *screen)
    screen->specs.pe_multitiled = screen->specs.pixel_pipes > 1 &&
                                  !screen->specs.single_buffer;
 
-   screen->specs.tex_astc = VIV_FEATURE(screen, ETNA_FEATURE_TEXTURE_ASTC) &&
-                            !VIV_FEATURE(screen, ETNA_FEATURE_NO_ASTC);
+   if (VIV_FEATURE(screen, ETNA_FEATURE_TEXTURE_ASTC) &&
+       !VIV_FEATURE(screen, ETNA_FEATURE_NO_ASTC))
+      perf_debug_ctx(NULL, "Hardware ASTC disabled, ASTC is decoded on the CPU");
+   screen->specs.tex_astc = false;
 
    screen->specs.use_blt = VIV_FEATURE(screen, ETNA_FEATURE_BLT_ENGINE);
 
@@ -1002,10 +1077,7 @@ etna_screen_bo_from_handle(struct pipe_screen *pscreen,
 static struct disk_cache *
 etna_get_disk_shader_cache(struct pipe_screen *pscreen)
 {
-   struct etna_screen *screen = etna_screen(pscreen);
-   struct etna_compiler *compiler = screen->compiler;
-
-   return compiler->disk_cache;
+   return etna_screen(pscreen)->disk_cache;
 }
 
 static int
@@ -1114,6 +1186,8 @@ etna_screen_create(struct etna_device *dev, struct etna_gpu *gpu,
 
    etna_init_shader_caps(screen);
    etna_init_screen_caps(screen);
+
+   screen->compiler->max_render_targets = screen->base.caps.max_render_targets;
 
    screen->supported_pm_queries = UTIL_DYNARRAY_INIT;
    slab_create_parent(&screen->transfer_pool, sizeof(struct etna_transfer), 16);

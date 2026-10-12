@@ -23,6 +23,8 @@ struct pandecode_context {
    int dump_frame_count;
    simple_mtx_t lock;
 
+   pandecode_shader_disassemble_cb dissassemble;
+
    /* On CSF context, set to true if the root CS ring buffer
     * is managed in userspace. The blob does that, and mesa might use
     * usermode queues too at some point.
@@ -116,6 +118,13 @@ void pandecode_interpret_cs_v10(struct pandecode_context *ctx, uint64_t queue,
 void pandecode_cs_binary_v10(struct pandecode_context *ctx, uint64_t bin,
                              uint32_t bin_size);
 void pandecode_cs_trace_v10(struct pandecode_context *ctx, uint64_t trace,
+                            uint32_t trace_size, uint64_t gpu_id);
+
+void pandecode_interpret_cs_v11(struct pandecode_context *ctx, uint64_t queue,
+                                uint32_t size, uint64_t gpu_id, uint32_t *regs);
+void pandecode_cs_binary_v11(struct pandecode_context *ctx, uint64_t bin,
+                             uint32_t bin_size);
+void pandecode_cs_trace_v11(struct pandecode_context *ctx, uint64_t trace,
                             uint32_t trace_size, uint64_t gpu_id);
 
 void pandecode_interpret_cs_v12(struct pandecode_context *ctx, uint64_t queue,

@@ -20,6 +20,7 @@ brw_inst_kind_size(brw_inst_kind kind)
    STATIC_ASSERT(sizeof(brw_send_inst) >= sizeof(brw_load_payload_inst));
    STATIC_ASSERT(sizeof(brw_send_inst) >= sizeof(brw_urb_inst));
    STATIC_ASSERT(sizeof(brw_send_inst) >= sizeof(brw_fb_write_inst));
+   STATIC_ASSERT(sizeof(brw_send_inst) >= sizeof(brw_scratch_inst));
 
    /* To allow transforming from other non-BASE kinds to a SEND, make
     * it so that enough space is always allocated.
@@ -38,6 +39,7 @@ brw_inst_kind_align(brw_inst_kind kind)
    STATIC_ASSERT(alignof(brw_send_inst) >= alignof(brw_load_payload_inst));
    STATIC_ASSERT(alignof(brw_send_inst) >= alignof(brw_urb_inst));
    STATIC_ASSERT(alignof(brw_send_inst) >= alignof(brw_fb_write_inst));
+   STATIC_ASSERT(alignof(brw_send_inst) >= alignof(brw_scratch_inst));
 
    /* See brw_inst_kind_size(). */
 
@@ -174,6 +176,9 @@ brw_transform_inst(brw_shader &s, brw_inst *inst, enum opcode new_opcode,
          new_src[i] = inst->src[i];
       inst->src = new_src;
    }
+   /* Initialize newer srcs */
+   for (unsigned i = inst->sources; i < new_num_sources; i++)
+      inst->src[i] = brw_reg();
 
    if (new_kind != kind)
       memset(((char *)inst) + sizeof(brw_inst), 0, new_inst_size - sizeof(brw_inst));
@@ -193,6 +198,8 @@ brw_inst_kind_for_opcode(enum opcode opcode)
    case BRW_OPCODE_SENDS:
    case BRW_OPCODE_SENDC:
    case BRW_OPCODE_SENDSC:
+   case BRW_OPCODE_SENDG:
+   case BRW_OPCODE_SENDGC:
    case SHADER_OPCODE_SEND:
    case SHADER_OPCODE_SEND_GATHER:
    case SHADER_OPCODE_BARRIER:
@@ -258,6 +265,9 @@ bool
 brw_inst::is_control_source(unsigned arg) const
 {
    switch (opcode) {
+   case FS_OPCODE_FB_WRITE_LOGICAL:
+      return arg == FB_WRITE_LOGICAL_SRC_BINDING;
+
    case FS_OPCODE_UNIFORM_PULL_CONSTANT_LOAD:
       return arg == 0;
 
@@ -505,7 +515,8 @@ brw_inst::components_read(unsigned i) const
 
    case FS_OPCODE_FB_WRITE_LOGICAL:
       /* First/second FB write color. */
-      if (i < 2)
+      if (i == FB_WRITE_LOGICAL_SRC_COLOR0 ||
+          i == FB_WRITE_LOGICAL_SRC_COLOR1)
          return as_fb_write()->components;
       else
          return 1;
@@ -715,22 +726,33 @@ brw_inst::flags_read(const intel_device_info *devinfo) const
 }
 
 unsigned
-brw_inst::flags_written(const intel_device_info *devinfo) const
+brw_flags_written(enum opcode opcode, enum brw_conditional_mod conditional_mod,
+                  unsigned flag_subreg, unsigned group, unsigned exec_size)
 {
    if (conditional_mod && (opcode != BRW_OPCODE_SEL &&
                            opcode != BRW_OPCODE_CSEL &&
                            opcode != BRW_OPCODE_IF &&
                            opcode != BRW_OPCODE_WHILE)) {
-      return brw_flag_mask(this, 1);
+      return brw_flag_mask(flag_subreg, group, exec_size, 1);
    } else if (opcode == FS_OPCODE_LOAD_LIVE_CHANNELS ||
               opcode == SHADER_OPCODE_BALLOT ||
               opcode == SHADER_OPCODE_VOTE_ANY ||
               opcode == SHADER_OPCODE_VOTE_ALL ||
               opcode == SHADER_OPCODE_VOTE_EQUAL) {
-      return brw_flag_mask(this, 32);
+      return brw_flag_mask(flag_subreg, group, exec_size, 32);
    } else {
-      return brw_flag_mask(dst, size_written);
+      return 0;
    }
+}
+
+unsigned
+brw_inst::flags_written(const intel_device_info *devinfo) const
+{
+   unsigned f = brw_flags_written(opcode, conditional_mod,
+                                  flag_subreg, group, exec_size);
+
+   return f == 0 ? brw_flag_mask(dst, size_written) : f;
+
 }
 
 bool
@@ -788,6 +810,7 @@ brw_inst::is_commutative() const
    case SHADER_OPCODE_MULH:
       return true;
 
+   case BRW_OPCODE_MAC:
    case BRW_OPCODE_MUL:
       /* Integer multiplication of dword and word sources is not actually
        * commutative. The DW source must be first.
@@ -823,6 +846,7 @@ brw_inst::is_math() const
            opcode == SHADER_OPCODE_LOG2 ||
            opcode == SHADER_OPCODE_SIN ||
            opcode == SHADER_OPCODE_COS ||
+           opcode == SHADER_OPCODE_TANH ||
            opcode == SHADER_OPCODE_INT_QUOTIENT ||
            opcode == SHADER_OPCODE_INT_REMAINDER ||
            opcode == SHADER_OPCODE_POW);
@@ -928,6 +952,7 @@ brw_inst::can_do_saturate() const
    case BRW_OPCODE_SHL:
    case BRW_OPCODE_SHR:
    case SHADER_OPCODE_COS:
+   case SHADER_OPCODE_TANH:
    case SHADER_OPCODE_EXP2:
    case SHADER_OPCODE_LOG2:
    case SHADER_OPCODE_POW:

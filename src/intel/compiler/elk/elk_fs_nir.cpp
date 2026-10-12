@@ -1165,7 +1165,11 @@ fs_nir_emit_alu(nir_to_elk_state &ntb, nir_alu_instr *instr,
       break;
 
    case nir_op_fadd:
-      if (nir_has_any_rounding_mode_enabled(execution_mode)) {
+   case nir_op_fadd_rtne:
+      if (instr->op == nir_op_fadd_rtne) {
+         bld.exec_all().emit(ELK_SHADER_OPCODE_RND_MODE, bld.null_reg_ud(),
+                             elk_imm_d(ELK_RND_MODE_RTNE));
+      } else if (nir_has_any_rounding_mode_enabled(execution_mode)) {
          elk_rnd_mode rnd =
             elk_rnd_mode_from_execution_mode(execution_mode);
          bld.exec_all().emit(ELK_SHADER_OPCODE_RND_MODE, bld.null_reg_ud(),
@@ -3392,16 +3396,6 @@ emit_samplepos_setup(nir_to_elk_state &ntb)
       abld.MUL(offset(pos, abld, i), tmp_f, elk_imm_f(1 / 16.0f));
    }
 
-   if (fs_prog_data->persample_dispatch == ELK_SOMETIMES) {
-      check_dynamic_fs_config(abld, fs_prog_data,
-                              INTEL_FS_CONFIG_PERSAMPLE_DISPATCH);
-      for (unsigned i = 0; i < 2; i++) {
-         set_predicate(ELK_PREDICATE_NORMAL,
-                       bld.SEL(offset(pos, abld, i), offset(pos, abld, i),
-                               elk_imm_f(0.5f)));
-      }
-   }
-
    return pos;
 }
 
@@ -3561,13 +3555,6 @@ emit_samplemaskin_setup(nir_to_elk_state &ntb)
    abld.SHL(enabled_mask, one, ntb.system_values[SYSTEM_VALUE_SAMPLE_ID]);
    elk_fs_reg mask = bld.vgrf(ELK_REGISTER_TYPE_D);
    abld.AND(mask, enabled_mask, coverage_mask);
-
-   if (fs_prog_data->persample_dispatch == ELK_ALWAYS)
-      return mask;
-
-   check_dynamic_fs_config(abld, fs_prog_data,
-                           INTEL_FS_CONFIG_PERSAMPLE_DISPATCH);
-   set_predicate(ELK_PREDICATE_NORMAL, abld.SEL(mask, mask, coverage_mask));
 
    return mask;
 }

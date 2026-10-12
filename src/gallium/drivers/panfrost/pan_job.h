@@ -15,11 +15,37 @@
 #include "pan_jm.h"
 #include "pan_mempool.h"
 #include "pan_resource.h"
+#include "util/perf/u_trace.h"
 
-/* A panfrost_batch corresponds to a bound FBO we're rendering to,
- * collecting over multiple draws. */
+/* BO is being read/written by the GPU */
+#define PAN_BO_ACCESS_READ  BITFIELD_BIT(0)
+#define PAN_BO_ACCESS_WRITE BITFIELD_BIT(1)
+#define PAN_BO_ACCESS_RW    (PAN_BO_ACCESS_READ | PAN_BO_ACCESS_WRITE)
+
+/* Set when the BO access needs to be recorded to the
+ * panfrost_context::bo_access array at submission time.
+ */
+#define PAN_BO_ACCESS_PER_CTX_TRACKING BITFIELD_BIT(2)
+
+typedef uint8_t pan_bo_access;
+
+/* Type of batches. */
+enum panfrost_batch_type {
+   /* A render batch is for tiling and vertex shading. It's tightly linked to
+    * a framebuffer state. Fragment jobs are implicitly queued at submit. It
+    * accepts state storage jobs too. */
+   PANFROST_BATCH_RENDER = 0,
+
+   /* A compute batch is for compute kernel jobs. It accepts state storage
+    * jobs too. */
+   PANFROST_BATCH_COMPUTE,
+
+   PANFROST_BATCH_TYPE_COUNT,
+};
 
 struct panfrost_batch {
+   enum panfrost_batch_type type;
+
    struct panfrost_context *ctx;
    struct pipe_framebuffer_state key;
 
@@ -126,6 +152,11 @@ struct panfrost_batch {
       uint64_t psiz;
    } varyings;
 
+   /* FS SRT entry holding a single constant buffer for fullscreen-draw
+    * texcoord varyings on PAN_TABLE_ATTRIBUTE_BUFFER.
+    */
+   uint64_t fullscreen_texcoord_buf;
+
    /* Index array */
    uint64_t indices;
 
@@ -153,9 +184,9 @@ struct panfrost_batch {
    /** This one is always on the batch */
    enum u_tristate line_smoothing;
 
-   /* Number of effective draws in the batch. Draws with rasterization disabled
-    * don't count as effective draws. It's basically the number of IDVS or
-    * <vertex,tiler> jobs present in the batch.
+   /* Number of effective draws in the batch. Draws with rasterization
+    * disabled don't count as effective draws. It's basically the number of
+    * tiling jobs present in the batch.
     */
    uint32_t draw_count;
 
@@ -173,30 +204,30 @@ struct panfrost_batch {
       struct panfrost_jm_batch jm;
       struct panfrost_csf_batch csf;
    };
+
+   /* u_trace support for GPU tracing / perfetto */
+   struct u_trace trace;
 };
 
 /* Functions for managing the above */
 
-struct panfrost_batch *panfrost_get_batch_for_fbo(struct panfrost_context *ctx);
+struct panfrost_batch *panfrost_get_render_batch(struct panfrost_context *ctx);
 
-struct panfrost_batch *
-panfrost_get_fresh_batch_for_fbo(struct panfrost_context *ctx,
-                                 const char *reason);
+struct panfrost_batch *panfrost_get_fresh_render_batch(struct panfrost_context *ctx,
+                                                       const char *reason);
 
-void panfrost_batch_add_bo(struct panfrost_batch *batch, struct panfrost_bo *bo,
-                           mesa_shader_stage stage);
+struct panfrost_batch *panfrost_get_compute_batch(struct panfrost_context *ctx);
+
+void panfrost_batch_add_bo(struct panfrost_batch *batch, struct panfrost_bo *bo);
 
 void panfrost_batch_write_bo(struct panfrost_batch *batch,
-                             struct panfrost_bo *bo,
-                             mesa_shader_stage stage);
+                             struct panfrost_bo *bo);
 
 void panfrost_batch_read_rsrc(struct panfrost_batch *batch,
-                              struct panfrost_resource *rsrc,
-                              mesa_shader_stage stage);
+                              struct panfrost_resource *rsrc);
 
 void panfrost_batch_write_rsrc(struct panfrost_batch *batch,
-                               struct panfrost_resource *rsrc,
-                               mesa_shader_stage stage);
+                               struct panfrost_resource *rsrc);
 
 bool panfrost_any_batch_reads_rsrc(struct panfrost_context *ctx,
                                    struct panfrost_resource *rsrc);
@@ -208,6 +239,8 @@ struct panfrost_bo *panfrost_batch_create_bo(struct panfrost_batch *batch,
                                              size_t size, uint32_t create_flags,
                                              mesa_shader_stage stage,
                                              const char *label);
+
+void panfrost_flush_batch(struct panfrost_batch *batch, const char *reason);
 
 void panfrost_flush_all_batches(struct panfrost_context *ctx,
                                 const char *reason);

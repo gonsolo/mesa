@@ -23,6 +23,7 @@
 #include "vk_util.h"
 #include "vk_log.h"
 
+#include "hwdef/pvr_hw_utils.h"
 #include "hwdef/rogue_hw_utils.h"
 
 #include "pco/pco.h"
@@ -120,7 +121,7 @@ void pvr_physical_device_free_pipeline_cache(
 }
 
 static void pvr_physical_device_get_supported_extensions(
-   struct vk_device_extension_table *extensions, struct vk_instance *instance)
+   struct vk_device_extension_table *extensions, struct pvr_instance* instance)
 {
    *extensions = (struct vk_device_extension_table){
       .KHR_bind_memory2 = true,
@@ -137,10 +138,11 @@ static void pvr_physical_device_get_supported_extensions(
       .KHR_external_fence_fd = true,
       .KHR_external_memory = true,
       .KHR_external_memory_fd = true,
-      .KHR_external_semaphore = PVR_USE_WSI_PLATFORM,
-      .KHR_external_semaphore_fd = PVR_USE_WSI_PLATFORM,
-      .KHR_format_feature_flags2 = false,
+      .KHR_external_semaphore = true,
+      .KHR_external_semaphore_fd = true,
+      .KHR_format_feature_flags2 = true,
       .KHR_get_memory_requirements2 = true,
+      .KHR_global_priority = true,
       .KHR_incremental_present = PVR_USE_WSI_PLATFORM,
       .KHR_image_format_list = true,
       .KHR_imageless_framebuffer = true,
@@ -151,29 +153,40 @@ static void pvr_physical_device_get_supported_extensions(
       .KHR_maintenance3 = true,
       .KHR_maintenance4 = true,
       .KHR_maintenance5 = true,
+      .KHR_maintenance7 = true,
       .KHR_map_memory2 = true,
       .KHR_multiview = true,
       .KHR_pipeline_executable_properties = true,
+      .KHR_present_id = PVR_USE_WSI_PLATFORM,
       .KHR_present_id2 = PVR_USE_WSI_PLATFORM,
+      .KHR_present_wait = PVR_USE_WSI_PLATFORM,
       .KHR_present_wait2 = PVR_USE_WSI_PLATFORM,
+      .KHR_push_descriptor = true,
       .KHR_relaxed_block_layout = true,
       .KHR_robustness2 = true,
       .KHR_sampler_mirror_clamp_to_edge = true,
       .KHR_sampler_ycbcr_conversion = true,
       .KHR_separate_depth_stencil_layouts = true,
       .KHR_shader_draw_parameters = true,
-      .KHR_shader_expect_assume = false,
+      .KHR_shader_expect_assume = true,
       .KHR_shader_float_controls = true,
+      .KHR_shader_float_controls2 = true,
+      .KHR_shader_fma = true,
       .KHR_shader_integer_dot_product = true,
       .KHR_shader_non_semantic_info = true,
       .KHR_shader_relaxed_extended_instruction = true,
       .KHR_shader_subgroup_extended_types = true,
+      .KHR_shader_subgroup_rotate = true,
+      .KHR_shader_subgroup_uniform_control_flow = true,
       .KHR_shader_terminate_invocation = true,
       .KHR_spirv_1_4 = true,
       .KHR_storage_buffer_storage_class = true,
       .KHR_swapchain = PVR_USE_WSI_PLATFORM,
+      .KHR_swapchain_maintenance1 = PVR_USE_WSI_PLATFORM,
       .KHR_swapchain_mutable_format = PVR_USE_WSI_PLATFORM,
+      .KHR_synchronization2 = true,
       .KHR_timeline_semaphore = true,
+      .KHR_unified_image_layouts = true,
       .KHR_uniform_buffer_standard_layout = true,
       .KHR_vertex_attribute_divisor = true,
       .KHR_workgroup_memory_explicit_layout = true,
@@ -183,6 +196,10 @@ static void pvr_physical_device_get_supported_extensions(
       .EXT_debug_marker = true,
       .EXT_depth_clamp_zero_one = true,
       .EXT_depth_clip_enable = true,
+      .EXT_device_memory_report = true,
+      .EXT_display_control = PVR_USE_WSI_PLATFORM_DISPLAY,
+      .EXT_global_priority = true,
+      .EXT_global_priority_query = true,
       .EXT_image_drm_format_modifier = true,
       .EXT_extended_dynamic_state = true,
       .EXT_extended_dynamic_state2 = true,
@@ -190,11 +207,14 @@ static void pvr_physical_device_get_supported_extensions(
       .EXT_external_memory_dma_buf = true,
       .EXT_host_query_reset = true,
       .EXT_image_2d_view_of_3d = true,
+      .EXT_image_sliced_view_of_3d = true,
       .EXT_index_type_uint8 = true,
+      .EXT_inline_uniform_block = true,
       .EXT_line_rasterization = true,
       .EXT_map_memory_placed = true,
       .EXT_non_seamless_cube_map = true,
       .EXT_physical_device_drm = true,
+      .EXT_primitive_topology_list_restart = true,
       .EXT_private_data = true,
       .EXT_provoking_vertex = true,
       .EXT_queue_family_foreign = true,
@@ -203,13 +223,17 @@ static void pvr_physical_device_get_supported_extensions(
       .EXT_separate_stencil_usage = true,
       .EXT_shader_demote_to_helper_invocation = true,
       .EXT_shader_replicated_composites = true,
-      .EXT_texel_buffer_alignment = false,
+      .EXT_shader_subgroup_ballot = true,
+      .EXT_shader_subgroup_vote = true,
+      .EXT_subgroup_size_control = true,
+      .EXT_texel_buffer_alignment = true,
       .EXT_tooling_info = true,
       .EXT_vertex_attribute_divisor = true,
       .EXT_zero_initialize_device_memory = true,
 #ifdef PVR_USE_WSI_PLATFORM
-      .GOOGLE_display_timing = wsi_instance_supports_google_display_timing(instance),
+      .GOOGLE_display_timing = wsi_instance_supports_google_display_timing(&instance->vk, &instance->drirc.options),
 #endif
+      .IMG_filter_linear_2d = true,
    };
 }
 
@@ -242,20 +266,20 @@ static void pvr_physical_device_get_supported_features(
       .textureCompressionETC2 = true,
       .textureCompressionASTC_LDR = false,
       .textureCompressionBC = false,
-      .occlusionQueryPrecise = false,
+      .occlusionQueryPrecise = true,
       .pipelineStatisticsQuery = false,
       .vertexPipelineStoresAndAtomics = false,
-      .fragmentStoresAndAtomics = false,
+      .fragmentStoresAndAtomics = true,
       .shaderTessellationAndGeometryPointSize = false,
       .shaderImageGatherExtended = true,
       .shaderStorageImageExtendedFormats = true,
       .shaderStorageImageMultisample = false,
       .shaderStorageImageReadWithoutFormat = true,
       .shaderStorageImageWriteWithoutFormat = true,
-      .shaderUniformBufferArrayDynamicIndexing = false,
-      .shaderSampledImageArrayDynamicIndexing = false,
-      .shaderStorageBufferArrayDynamicIndexing = false,
-      .shaderStorageImageArrayDynamicIndexing = false,
+      .shaderUniformBufferArrayDynamicIndexing = true,
+      .shaderSampledImageArrayDynamicIndexing = true,
+      .shaderStorageBufferArrayDynamicIndexing = true,
+      .shaderStorageImageArrayDynamicIndexing = true,
       .shaderClipDistance = true,
       .shaderCullDistance = true,
       .shaderFloat64 = false,
@@ -295,9 +319,9 @@ static void pvr_physical_device_get_supported_features(
       .shaderFloat16 = false,
       .shaderInt8 = false,
       .descriptorIndexing = false,
-      .shaderInputAttachmentArrayDynamicIndexing = false,
-      .shaderUniformTexelBufferArrayDynamicIndexing = false,
-      .shaderStorageTexelBufferArrayDynamicIndexing = false,
+      .shaderInputAttachmentArrayDynamicIndexing = true,
+      .shaderUniformTexelBufferArrayDynamicIndexing = true,
+      .shaderStorageTexelBufferArrayDynamicIndexing = true,
       .shaderUniformBufferArrayNonUniformIndexing = false,
       .shaderSampledImageArrayNonUniformIndexing = false,
       .shaderStorageBufferArrayNonUniformIndexing = false,
@@ -343,8 +367,16 @@ static void pvr_physical_device_get_supported_features(
       /* Vulkan 1.4 / VK_KHR_maintenance5 */
       .maintenance5 = true,
 
+      /* VK_KHR_maintenance7 */
+      .maintenance7 = true,
+
       /* Vulkan 1.1 / VK_KHR_shader_draw_parameters */
       .shaderDrawParameters = true,
+
+      /* VK_KHR_shader_fma */
+      .shaderFmaFloat16 = false,
+      .shaderFmaFloat32 = true,
+      .shaderFmaFloat64 = false,
 
       /* Vulkan 1.3 / VK_KHR_shader_integer_dot_product */
       .shaderIntegerDotProduct = true,
@@ -355,11 +387,21 @@ static void pvr_physical_device_get_supported_features(
       /* Vulkan 1.2 / VK_KHR_separate_depth_stencil_layouts */
       .separateDepthStencilLayouts = true,
 
+      /* Vulkan 1.4 / VK_KHR_shader_float_controls2 */
+      .shaderFloatControls2 = true,
+
       /* VK_KHR_shader_relaxed_extended_instruction */
       .shaderRelaxedExtendedInstruction = true,
 
       /* Vulkan 1.2 / VK_KHR_shader_subgroup_extended_types */
       .shaderSubgroupExtendedTypes = true,
+
+      /* Vulkan 1.4 / VK_KHR_shader_subgroup_rotate */
+      .shaderSubgroupRotate = true,
+      .shaderSubgroupRotateClustered = true,
+
+      /* VK_KHR_shader_subgroup_uniform_control_flow */
+      .shaderSubgroupUniformControlFlow = true,
 
       /* Vulkan 1.1 / VK_KHR_robustness2 */
       .robustBufferAccess2 = false,
@@ -413,12 +455,22 @@ static void pvr_physical_device_get_supported_features(
       .extendedDynamicState3RepresentativeFragmentTestEnable = false,
       .extendedDynamicState3ShadingRateImageEnable = false,
 
+      /* Vulkan 1.4 / VK_KHR_global_priority / VK_EXT_global_priority_query */
+      .globalPriorityQuery = true,
+
       /* Vulkan 1.2 / VK_EXT_host_query_reset */
       .hostQueryReset = true,
+
+      /* Vulkan 1.3 / VK_EXT_inline_uniform_block */
+      .inlineUniformBlock = true,
+      .descriptorBindingInlineUniformBlockUpdateAfterBind = true,
 
       /* VK_EXT_image_2d_view_of_3d */
       .image2DViewOf3D = true,
       .sampler2DViewOf3D = true,
+
+      /* VK_EXT_image_sliced_view_of_3d */
+      .imageSlicedViewOf3D = true,
 
       /* VK_EXT_map_memory_placed */
       .memoryMapPlaced = true,
@@ -435,6 +487,9 @@ static void pvr_physical_device_get_supported_features(
       .provokingVertexLast = true,
       .transformFeedbackPreservesProvokingVertex = false,
 
+      /* Vulkan 1.4 / VK_KHR_push_descriptor */
+      .pushDescriptor = true,
+
       /* Vulkan 1.2 / VK_EXT_scalar_block_layout */
       .scalarBlockLayout = true,
 
@@ -447,7 +502,7 @@ static void pvr_physical_device_get_supported_features(
       .bufferDeviceAddressMultiDevice = false,
 
       /* VK_KHR_shader_expect_assume */
-      .shaderExpectAssume = false,
+      .shaderExpectAssume = true,
 
       /* VK_EXT_shader_demote_to_helper_invocation */
       .shaderDemoteToHelperInvocation = true,
@@ -458,11 +513,24 @@ static void pvr_physical_device_get_supported_features(
       /* VK_KHR_shader_terminate_invocation */
       .shaderTerminateInvocation = true,
 
+      /* Vulkan 1.3 / VK_EXT_subgroup_size_control */
+      .subgroupSizeControl = true,
+      .computeFullSubgroups = true,
+
+      /* VK_KHR_present_id */
+      .presentId = PVR_USE_WSI_PLATFORM,
+
+      /* VK_KHR_present_wait */
+      .presentWait = PVR_USE_WSI_PLATFORM,
+
       /* VK_KHR_present_id2 */
       .presentId2 = PVR_USE_WSI_PLATFORM,
 
       /* VK_KHR_present_wait2 */
       .presentWait2 = PVR_USE_WSI_PLATFORM,
+
+      /* Vulkan 1.3 / VK_KHR_synchronization2 */
+      .synchronization2 = true,
 
       /* Vulkan 1.4 / VK_EXT_vertex_attribute_divisor /
          VK_KHR_vertex_attribute_divisor */
@@ -482,11 +550,17 @@ static void pvr_physical_device_get_supported_features(
       .borderColorSwizzle = true,
       .borderColorSwizzleFromImage = true,
 
+      /* VK_EXT_primitive_topology_list_restart */
+      .primitiveTopologyListRestart = true,
+
       /* VK_EXT_custom_border_color */
       .customBorderColors = true,
 
       /* VK_EXT_depth_clip_enable */
       .depthClipEnable = true,
+
+      /* VK_EXT_device_memory_report */
+      .deviceMemoryReport = true,
 
       /* VK_KHR_line_rasterization */
       .bresenhamLines = true,
@@ -499,6 +573,12 @@ static void pvr_physical_device_get_supported_features(
 
       /* VK_KHR_pipeline_executable_properties */
       .pipelineExecutableInfo = true,
+
+      /* VK_EXT_swapchain_maintenance1 / VK_KHR_swapchain_maintenance1 */
+      .swapchainMaintenance1 = PVR_USE_WSI_PLATFORM,
+
+      /* KHR_unifiedImageLayouts */
+      .unifiedImageLayouts = true
    };
 }
 
@@ -574,17 +654,17 @@ static bool pvr_physical_device_get_properties(
       /* Vulkan 1.0 */
       .apiVersion = get_api_version(),
       .driverVersion = vk_get_driver_version(),
-      .vendorID = pdevice->instance->force_vk_vendor ?
-                  pdevice->instance->force_vk_vendor : VK_VENDOR_ID_IMAGINATION,
+      .vendorID = pdevice->instance->drirc.debug.force_vk_vendor ?
+                  pdevice->instance->drirc.debug.force_vk_vendor : VK_VENDOR_ID_IMAGINATION,
       .deviceID = dev_info->ident.device_id,
       .deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
       /* deviceName and pipelineCacheUUID are filled below .*/
 
       .maxImageDimension1D = 4096U,
       .maxImageDimension2D = 4096U,
-      .maxImageDimension3D = 256U,
+      .maxImageDimension3D = pvr_get_texture_extent_max_z(dev_info),
       .maxImageDimensionCube = 4096U,
-      .maxImageArrayLayers = 256U,
+      .maxImageArrayLayers = rogue_get_render_size_max_z(dev_info),
       .maxTexelBufferElements = 64U * 1024U,
       .maxUniformBufferRange = 16U * 1024U,
       .maxStorageBufferRange = 128U * 1024U * 1024U,
@@ -595,12 +675,12 @@ static bool pvr_physical_device_get_properties(
       .sparseAddressSpaceSize = 0U, /* Requires sparseBinding */
       .maxBoundDescriptorSets = 4U,
       .maxPerStageDescriptorSamplers = 16,
-      .maxPerStageDescriptorUniformBuffers = 12,
+      .maxPerStageDescriptorUniformBuffers = 13,
       .maxPerStageDescriptorStorageBuffers = 16,
       .maxPerStageDescriptorSampledImages = 16,
       .maxPerStageDescriptorStorageImages = 4,
       .maxPerStageDescriptorInputAttachments = 4,
-      .maxPerStageResources = 56,
+      .maxPerStageResources = 57,
       .maxDescriptorSetSamplers = 3U * 16U,
       .maxDescriptorSetUniformBuffers = 3U * 12U,
       .maxDescriptorSetUniformBuffersDynamic = 8U,
@@ -730,9 +810,17 @@ static bool pvr_physical_device_get_properties(
       .nonCoherentAtomSize = 1U,
 
       /* Vulkan 1.1 */
-      .subgroupSize = 1,
+      .subgroupSize = ROGUE_MAX_INSTANCES_PER_TASK,
       .subgroupSupportedStages = VK_SHADER_STAGE_COMPUTE_BIT,
-      .subgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT,
+      .subgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT |
+                                     VK_SUBGROUP_FEATURE_VOTE_BIT |
+                                     VK_SUBGROUP_FEATURE_ARITHMETIC_BIT |
+                                     VK_SUBGROUP_FEATURE_BALLOT_BIT |
+                                     VK_SUBGROUP_FEATURE_SHUFFLE_BIT |
+                                     VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT |
+                                     VK_SUBGROUP_FEATURE_CLUSTERED_BIT |
+                                     VK_SUBGROUP_FEATURE_ROTATE_BIT |
+                                     VK_SUBGROUP_FEATURE_ROTATE_CLUSTERED_BIT,
       .subgroupQuadOperationsInAllStages = false,
       .protectedNoFault = false,
 
@@ -790,6 +878,13 @@ static bool pvr_physical_device_get_properties(
 
       /* VK_EXT_extended_dynamic_state3 */
       .dynamicPrimitiveTopologyUnrestricted = false,
+
+      /* Vulkan 1.3 / VK_EXT_inline_uniform_block */
+      .maxInlineUniformBlockSize = 256U,
+      .maxPerStageDescriptorInlineUniformBlocks = 4U,
+      .maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks = 4U,
+      .maxDescriptorSetInlineUniformBlocks = 4U,
+      .maxDescriptorSetUpdateAfterBindInlineUniformBlocks = 4U,
 
       /* VK_EXT_map_memory_placed */
       .minPlacedMemoryMapAlignment = pdevice->ws->page_size,
@@ -854,6 +949,12 @@ static bool pvr_physical_device_get_properties(
       .integerDotProductAccumulatingSaturating64BitSignedAccelerated = false,
       .integerDotProductAccumulatingSaturating64BitMixedSignednessAccelerated = false,
 
+      /* Vulkan 1.3 / VK_EXT_subgroup_size_control */
+      .minSubgroupSize = ROGUE_MAX_INSTANCES_PER_TASK,
+      .maxSubgroupSize = ROGUE_MAX_INSTANCES_PER_TASK,
+      .maxComputeWorkgroupSubgroups = 128U / ROGUE_MAX_INSTANCES_PER_TASK,
+      .requiredSubgroupSizeStages = VK_SHADER_STAGE_COMPUTE_BIT,
+
       /* Vulkan 1.2 / VK_KHR_timeline_semaphore */
       .maxTimelineSemaphoreValueDifference = UINT64_MAX,
 
@@ -898,11 +999,29 @@ static bool pvr_physical_device_get_properties(
       .independentResolveNone = true,
       .independentResolve = true,
 
+      /* VK_KHR_push_descriptor */
+      .maxPushDescriptors = PVR_MAX_PUSH_DESCRIPTORS,
+
       /* VK_KHR_line_rasterization */
       .lineSubPixelPrecisionBits = line_sub_pixel_precision_bits,
+
+      /* VK_KHR_maintenance7 */
+      .robustFragmentShadingRateAttachmentAccess = false,
+      .separateDepthStencilAttachmentAccess = false,
+      .maxDescriptorSetTotalUniformBuffersDynamic = PVR_MAX_DESCRIPTOR_SET_UNIFORM_DYNAMIC_BUFFERS,
+      .maxDescriptorSetTotalStorageBuffersDynamic = PVR_MAX_DESCRIPTOR_SET_STORAGE_DYNAMIC_BUFFERS,
+      .maxDescriptorSetTotalBuffersDynamic = PVR_MAX_DYNAMIC_BUFFERS,
+      .maxDescriptorSetUpdateAfterBindTotalUniformBuffersDynamic = PVR_MAX_DESCRIPTOR_SET_UNIFORM_DYNAMIC_BUFFERS,
+      .maxDescriptorSetUpdateAfterBindTotalStorageBuffersDynamic = PVR_MAX_DESCRIPTOR_SET_STORAGE_DYNAMIC_BUFFERS,
+      .maxDescriptorSetUpdateAfterBindTotalBuffersDynamic = PVR_MAX_DYNAMIC_BUFFERS,
    };
 
-   if (PVR_HAS_FEATURE(dev_info, gpu_multicore_support)) {
+   if (strlen(pdevice->instance->drirc.debug.force_vk_devicename) > 0) {
+      snprintf(properties->deviceName,
+               sizeof(properties->deviceName),
+               "%s",
+               pdevice->instance->drirc.debug.force_vk_devicename);
+   } else if (PVR_HAS_FEATURE(dev_info, gpu_multicore_support)) {
       snprintf(properties->deviceName,
                sizeof(properties->deviceName),
                "PowerVR %s %s MC%u",
@@ -1000,6 +1119,7 @@ static bool pvr_device_is_conformant(const struct pvr_device_info *info)
 {
    const uint64_t bvnc = pvr_get_packed_bvnc(info);
    switch (bvnc) {
+   case PVR_BVNC_PACK(36, 52, 104, 182):
    case PVR_BVNC_PACK(36, 53, 104, 796):
       return true;
 
@@ -1016,7 +1136,7 @@ static bool pvr_device_is_conformant(const struct pvr_device_info *info)
 static inline uint64_t pvr_compute_heap_size(struct pvr_instance *instance)
 {
    uint64_t available_ram =
-      os_get_gpu_heap_size(instance->heap_memory_percent, NULL);
+      os_get_gpu_heap_size(instance->drirc.misc.heap_memory_percent, NULL);
    return MAX2(available_ram, PVR_MAX_MEMORY_ALLOCATION_SIZE);
 }
 
@@ -1120,7 +1240,7 @@ VkResult pvr_physical_device_init(struct pvr_physical_device *pdevice,
       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
    pdevice->memory.memoryTypes[0].heapIndex = 0;
 
-   pvr_physical_device_get_supported_extensions(&supported_extensions, &instance->vk);
+   pvr_physical_device_get_supported_extensions(&supported_extensions, instance);
    pvr_physical_device_get_supported_features(&pdevice->dev_info,
                                               &supported_features);
    if (!pvr_physical_device_get_properties(pdevice, &supported_properties)) {
@@ -1225,8 +1345,25 @@ void pvr_GetPhysicalDeviceQueueFamilyProperties2(
    vk_outarray_append_typed (VkQueueFamilyProperties2, &out, p) {
       p->queueFamilyProperties = pvr_queue_family_properties;
 
-      vk_foreach_struct (ext, p->pNext) {
-         vk_debug_ignored_stype(ext->sType);
+      vk_foreach_struct (sType, ext, p->pNext) {
+         switch (sType) {
+         case VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES: {
+            VkQueueFamilyGlobalPriorityProperties
+               *pvr_queue_global_family_properties =
+                  (VkQueueFamilyGlobalPriorityProperties *)ext;
+            uint32_t priority_index = 0;
+
+            pvr_queue_global_family_properties->priorities[priority_index++] =
+               VK_QUEUE_GLOBAL_PRIORITY_LOW;
+            pvr_queue_global_family_properties->priorities[priority_index++] =
+               VK_QUEUE_GLOBAL_PRIORITY_MEDIUM;
+            pvr_queue_global_family_properties->priorityCount = priority_index;
+            break;
+         }
+         default:
+            vk_debug_ignored_stype(sType);
+            break;
+         }
       }
    }
 }
@@ -1239,8 +1376,8 @@ void pvr_GetPhysicalDeviceMemoryProperties2(
 
    pMemoryProperties->memoryProperties = pdevice->memory;
 
-   vk_foreach_struct (ext, pMemoryProperties->pNext) {
-      vk_debug_ignored_stype(ext->sType);
+   vk_foreach_struct (sType, ext, pMemoryProperties->pNext) {
+      vk_debug_ignored_stype(sType);
    }
 }
 

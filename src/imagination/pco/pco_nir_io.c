@@ -21,6 +21,17 @@
 #include <stdbool.h>
 #include <stdio.h>
 
+static inline bool is_inline_ubo(unsigned desc_set,
+                                 unsigned binding,
+                                 const pco_common_data *common)
+{
+   const pco_descriptor_set_data *desc_set_data = &common->desc_sets[desc_set];
+   assert(desc_set_data->bindings && binding < desc_set_data->binding_count);
+
+   const pco_binding_data *binding_data = &desc_set_data->bindings[binding];
+   return binding_data->is_inline_ubo;
+}
+
 /**
  * \brief Lowers an I/O instruction.
  *
@@ -30,7 +41,7 @@
  * \return True if progress was made.
  */
 static bool
-lower_io(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *cb_data)
+lower_io(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
 {
    b->cursor = nir_before_instr(&intr->instr);
 
@@ -42,14 +53,29 @@ lower_io(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *cb_data)
    case nir_intrinsic_store_shared:
       break;
 
+   case nir_intrinsic_load_ubo: {
+      const pco_common_data *common = cb_data;
+      unsigned desc_set;
+      unsigned binding;
+
+      nir_scalar scalar = nir_scalar_resolved(intr->src[0].ssa, 0);
+      uint32_t packed_desc = nir_scalar_as_uint(scalar);
+
+      pco_unpack_desc(packed_desc, &desc_set, &binding);
+
+      if (!is_inline_ubo(desc_set, binding, common))
+         return false;
+
+      break;
+   }
+
    default:
       return false;
    }
 
    nir_src *offset_src = nir_get_io_offset_src(intr);
 
-   ASSERTED unsigned base = nir_intrinsic_base(intr);
-   assert(!base);
+   assert(!nir_intrinsic_has_base(intr) || !nir_intrinsic_base(intr));
 
    /* Byte offset to DWORD offset. */
    nir_src_rewrite(offset_src, nir_ushr_imm(b, offset_src->ssa, 2));
@@ -63,14 +89,15 @@ lower_io(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *cb_data)
  * \param[in,out] shader NIR shader.
  * \return True if the pass made progress.
  */
-bool pco_nir_lower_io(nir_shader *shader)
+bool pco_nir_lower_io(nir_shader *shader, pco_data *data)
 {
+   pco_common_data *common = &data->common;
    bool progress = false;
 
    progress |= nir_shader_intrinsics_pass(shader,
                                           lower_io,
                                           nir_metadata_control_flow,
-                                          NULL);
+                                          common);
 
    return progress;
 }
@@ -156,10 +183,11 @@ static bool lower_shared_io_to_global(nir_builder *b,
       nir_def *data = intr->src[1].ssa;
       nir_def *repl =
          nir_global_atomic_2x32(b,
-                              intr->def.bit_size,
-                              addr,
-                              data,
-                              .atomic_op = nir_intrinsic_atomic_op(intr));
+                                intr->def.bit_size,
+                                addr,
+                                data,
+                                .atomic_op = nir_intrinsic_atomic_op(intr),
+                                .access = nir_intrinsic_access(intr));
 
       nir_def_replace(&intr->def, repl);
       nir_instr_free(&intr->instr);
@@ -171,11 +199,12 @@ static bool lower_shared_io_to_global(nir_builder *b,
       nir_def *data2 = intr->src[2].ssa;
       nir_def *repl =
          nir_global_atomic_swap_2x32(b,
-                              intr->def.bit_size,
-                              addr,
-                              data,
-                              data2,
-                              .atomic_op = nir_intrinsic_atomic_op(intr));
+                                     intr->def.bit_size,
+                                     addr,
+                                     data,
+                                     data2,
+                                     .atomic_op = nir_intrinsic_atomic_op(intr),
+                                     .access = nir_intrinsic_access(intr));
 
       nir_def_replace(&intr->def, repl);
       nir_instr_free(&intr->instr);
@@ -195,4 +224,94 @@ bool pco_nir_lower_shared_io_to_global(nir_shader *shader, unsigned usc_slots)
                                      lower_shared_io_to_global,
                                      nir_metadata_control_flow,
                                      &usc_slots);
+}
+
+/**
+ * \brief Propagages coherent/volatile access qualifiers on deref intrinsics to
+ *        the intrinsics respective nir_variable.
+ *
+ * \param[in] b NIR builder.
+ * \param[in] intr NIR intrinsic instruction.
+ * \param[in] cb_data User callback data.
+ * \return True if progress was made.
+ */
+static bool prop_intr_access_to_vars(nir_builder *b,
+                                     nir_intrinsic_instr *intr,
+                                     void *cb_data)
+{
+   switch (intr->intrinsic) {
+   case nir_intrinsic_load_deref:
+   case nir_intrinsic_store_deref:
+   case nir_intrinsic_deref_atomic:
+   case nir_intrinsic_deref_atomic_swap:
+      break;
+
+   default:
+      return false;
+   }
+
+   assert(nir_intrinsic_has_access(intr));
+
+   struct util_dynarray *intrs = cb_data;
+
+   nir_variable *var =
+      nir_get_binding_variable(b->shader, nir_chase_binding(intr->src[0]));
+   if (!var)
+      return false;
+
+   enum gl_access_qualifier intr_access = nir_intrinsic_access(intr);
+
+   util_dynarray_append(intrs, intr);
+
+   bool progress = false;
+
+   if (intr_access & ACCESS_COHERENT) {
+      var->data.access |= ACCESS_COHERENT;
+      progress = true;
+   }
+
+   if (intr_access & ACCESS_VOLATILE) {
+      var->data.access |= ACCESS_VOLATILE;
+      progress = true;
+   }
+
+   return progress;
+}
+
+/**
+ * \brief Access qualifier propagating pass.
+ *
+ * \param[in,out] shader NIR shader.
+ * \param[in,out] data Shader data.
+ * \return True if the pass made progress.
+ */
+bool pco_nir_prop_access(nir_shader *shader)
+{
+   struct util_dynarray intrs = UTIL_DYNARRAY_INIT;
+
+   bool progress = false;
+
+   progress |= nir_shader_intrinsics_pass(shader,
+                                          prop_intr_access_to_vars,
+                                          nir_metadata_none,
+                                          &intrs);
+
+   /* Propagate coherent access qualifier from nir_variable's to their
+    * respective deref intrinsics. Avoid propagating any other access
+    * qualifiers that could have other effects.
+    */
+   util_dynarray_foreach (&intrs, nir_intrinsic_instr *, pintr) {
+      nir_intrinsic_instr *intr = *pintr;
+
+      nir_variable *var =
+         nir_get_binding_variable(shader, nir_chase_binding(intr->src[0]));
+
+      nir_intrinsic_set_access(intr,
+                               nir_intrinsic_access(intr) | var->data.access);
+      progress = true;
+   }
+
+   util_dynarray_fini(&intrs);
+
+   return progress;
 }

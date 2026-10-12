@@ -286,16 +286,9 @@ v3dX(pipeline_pack_compile_state)(struct v3dv_pipeline *pipeline,
                                   const VkPipelineVertexInputStateCreateInfo *vi_info,
                                   const VkPipelineVertexInputDivisorStateCreateInfoEXT *vd_info);
 
-bool
-v3dX(pipeline_needs_default_attribute_values)(struct v3dv_pipeline *pipeline);
-
 struct v3dv_bo *
 v3dX(create_default_attribute_values)(struct v3dv_device *device,
                                       struct v3dv_pipeline *pipeline);
-
-/* Used at v3dv_queue */
-void
-v3dX(job_emit_noop)(struct v3dv_job *job);
 
 /* Used at v3dv_descriptor_set, and other descriptor set utils */
 uint32_t v3dX(descriptor_bo_size)(VkDescriptorType type);

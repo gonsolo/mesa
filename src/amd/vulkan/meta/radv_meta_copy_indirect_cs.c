@@ -144,12 +144,11 @@ radv_compute_copy_memory_indirect(struct radv_cmd_buffer *cmd_buffer,
    const uint32_t copy_count = pCopyMemoryIndirectInfo->copyCount;
    VkPipelineLayout layout;
    uint32_t alloc_offset;
-   uint32_t *alloc_ptr;
    VkPipeline pipeline;
    VkResult result;
 
    if (!radv_cmd_buffer_upload_alloc_aligned(cmd_buffer, copy_count * sizeof(VkDispatchIndirectCommand), 4,
-                                             &alloc_offset, (void *)&alloc_ptr)) {
+                                             &alloc_offset, NULL)) {
       vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return;
    }
@@ -163,7 +162,7 @@ radv_compute_copy_memory_indirect(struct radv_cmd_buffer *cmd_buffer,
    }
 
    /* Synchronize the preprocess dispatch. */
-   cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_VCACHE |
+   cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_VMEM | AC_BARRIER_PFP_SYNC_ME |
                                    radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                                          VK_ACCESS_2_SHADER_WRITE_BIT, 0, NULL, NULL);
 
@@ -382,12 +381,11 @@ radv_compute_copy_memory_to_image_indirect(struct radv_cmd_buffer *cmd_buffer,
    uint32_t texel_scale = 1;
    VkPipelineLayout layout;
    uint32_t alloc_offset;
-   uint32_t *alloc_ptr;
    VkPipeline pipeline;
    VkResult result;
 
    if (!radv_cmd_buffer_upload_alloc_aligned(cmd_buffer, copy_count * sizeof(VkDispatchIndirectCommand), 4,
-                                             &alloc_offset, (void *)&alloc_ptr)) {
+                                             &alloc_offset, NULL)) {
       vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return;
    }
@@ -402,7 +400,7 @@ radv_compute_copy_memory_to_image_indirect(struct radv_cmd_buffer *cmd_buffer,
    }
 
    /* Synchronize the preprocess dispatch. */
-   cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_VCACHE |
+   cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_VMEM | AC_BARRIER_PFP_SYNC_ME |
                                    radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                                          VK_ACCESS_2_SHADER_WRITE_BIT, 0, NULL, NULL);
 
@@ -441,7 +439,7 @@ radv_compute_copy_memory_to_image_indirect(struct radv_cmd_buffer *cmd_buffer,
          dst_image, pCopyMemoryToImageIndirectInfo->dstImageLayout, imageSubresource);
 
       if (!radv_is_buffer_format_supported(img_bsurf.format, NULL)) {
-         const uint32_t queue_mask = radv_image_queue_family_mask(dst_image, cmd_buffer->qf, cmd_buffer->qf);
+         const uint32_t queue_mask = radv_image_queue_family_mask(dst_image, cmd_buffer->qf);
          const VkFormat raw_format = vk_format_for_size(vk_format_get_blocksize(img_bsurf.format));
 
          if (!radv_dcc_formats_compatible(pdev->info.gfx_level, img_bsurf.format, raw_format, NULL) &&
@@ -474,9 +472,9 @@ radv_compute_copy_memory_to_image_indirect(struct radv_cmd_buffer *cmd_buffer,
       const uint32_t slice_count = vk_image_subresource_layer_count(&dst_image->vk, imageSubresource);
 
       for (uint32_t slice = 0; slice < slice_count; slice++) {
-         const VkImageViewUsageCreateInfo iview_usage_info = {
-            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
-            .usage = VK_IMAGE_USAGE_STORAGE_BIT,
+         const VkImageViewUsage2CreateInfoKHR iview_usage_info = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_2_CREATE_INFO_KHR,
+            .usage = VK_IMAGE_USAGE_2_STORAGE_BIT_KHR,
          };
 
          radv_image_view_init(&dst_iview, device,
@@ -485,7 +483,7 @@ radv_compute_copy_memory_to_image_indirect(struct radv_cmd_buffer *cmd_buffer,
                                  .pNext = &iview_usage_info,
                                  .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
                                  .image = radv_image_to_handle(dst_image),
-                                 .viewType = radv_meta_get_view_type(dst_image),
+                                 .viewType = radv_meta_get_view_type(dst_image, false),
                                  .format = img_bsurf.format,
                                  .subresourceRange =
                                     {

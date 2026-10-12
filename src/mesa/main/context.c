@@ -891,6 +891,15 @@ _mesa_set_dispatch(struct gl_context *ctx, struct _glapi_table *t)
    _mesa_glapi_set_dispatch(ctx->Dispatch.Trace ? ctx->Dispatch.Trace : t);
 }
 
+struct _glapi_table *
+_mesa_get_dispatch(struct gl_context *ctx)
+{
+   if (ctx->Dispatch.Trace && GET_DISPATCH() == ctx->Dispatch.Trace)
+      return ctx->Dispatch.RealPublished;
+
+   return GET_DISPATCH();
+}
+
 bool
 _mesa_initialize_dispatch_tables(struct gl_context *ctx)
 {
@@ -1188,117 +1197,6 @@ _mesa_clear_releasebufs(struct gl_context *ctx)
 }
 
 /**
- * Copy attribute groups from one context to another.
- *
- * \param src source context
- * \param dst destination context
- * \param mask bitwise OR of GL_*_BIT flags
- *
- * According to the bits specified in \p mask, copies the corresponding
- * attributes from \p src into \p dst.  For many of the attributes a simple \c
- * memcpy is not enough due to the existence of internal pointers in their data
- * structures.
- */
-void
-_mesa_copy_context( const struct gl_context *src, struct gl_context *dst,
-                    GLuint mask )
-{
-   if (mask & GL_ACCUM_BUFFER_BIT) {
-      /* OK to memcpy */
-      dst->Accum = src->Accum;
-   }
-   if (mask & GL_COLOR_BUFFER_BIT) {
-      /* OK to memcpy */
-      dst->Color = src->Color;
-   }
-   if (mask & GL_CURRENT_BIT) {
-      /* OK to memcpy */
-      dst->Current = src->Current;
-   }
-   if (mask & GL_DEPTH_BUFFER_BIT) {
-      /* OK to memcpy */
-      dst->Depth = src->Depth;
-   }
-   if (mask & GL_ENABLE_BIT) {
-      /* no op */
-   }
-   if (mask & GL_EVAL_BIT) {
-      /* OK to memcpy */
-      dst->Eval = src->Eval;
-   }
-   if (mask & GL_FOG_BIT) {
-      /* OK to memcpy */
-      dst->Fog = src->Fog;
-   }
-   if (mask & GL_HINT_BIT) {
-      /* OK to memcpy */
-      dst->Hint = src->Hint;
-   }
-   if (mask & GL_LIGHTING_BIT) {
-      /* OK to memcpy */
-      dst->Light = src->Light;
-   }
-   if (mask & GL_LINE_BIT) {
-      /* OK to memcpy */
-      dst->Line = src->Line;
-   }
-   if (mask & GL_LIST_BIT) {
-      /* OK to memcpy */
-      dst->List = src->List;
-   }
-   if (mask & GL_PIXEL_MODE_BIT) {
-      /* OK to memcpy */
-      dst->Pixel = src->Pixel;
-   }
-   if (mask & GL_POINT_BIT) {
-      /* OK to memcpy */
-      dst->Point = src->Point;
-   }
-   if (mask & GL_POLYGON_BIT) {
-      /* OK to memcpy */
-      dst->Polygon = src->Polygon;
-   }
-   if (mask & GL_POLYGON_STIPPLE_BIT) {
-      /* Use loop instead of memcpy due to problem with Portland Group's
-       * C compiler.  Reported by John Stone.
-       */
-      GLuint i;
-      for (i = 0; i < 32; i++) {
-         dst->PolygonStipple[i] = src->PolygonStipple[i];
-      }
-   }
-   if (mask & GL_SCISSOR_BIT) {
-      /* OK to memcpy */
-      dst->Scissor = src->Scissor;
-   }
-   if (mask & GL_STENCIL_BUFFER_BIT) {
-      /* OK to memcpy */
-      dst->Stencil = src->Stencil;
-   }
-   if (mask & GL_TEXTURE_BIT) {
-      /* Cannot memcpy because of pointers */
-      _mesa_copy_texture_state(src, dst);
-   }
-   if (mask & GL_TRANSFORM_BIT) {
-      /* OK to memcpy */
-      dst->Transform = src->Transform;
-   }
-   if (mask & GL_VIEWPORT_BIT) {
-      unsigned i;
-      for (i = 0; i < src->Const.MaxViewports; i++) {
-         /* OK to memcpy */
-         dst->ViewportArray[i] = src->ViewportArray[i];
-      }
-   }
-
-   /* XXX FIXME:  Call callbacks?
-    */
-   dst->NewState = _NEW_ALL;
-   ST_SET_ALL_STATES(dst->NewDriverState);
-}
-
-
-/**
  * Check if the given context can render into the given framebuffer
  * by checking visual attributes.
  *
@@ -1341,7 +1239,7 @@ check_compatible(const struct gl_context *ctx,
 static void
 check_init_viewport(struct gl_context *ctx, GLuint width, GLuint height)
 {
-   if (!ctx->ViewportInitialized && width > 0 && height > 0) {
+   if (!ctx->ViewportInitialized) {
       unsigned i;
 
       /* Note: set flag here, before calling _mesa_set_viewport(), to prevent
@@ -1558,8 +1456,17 @@ _mesa_share_state(struct gl_context *ctx, struct gl_context *ctxToShare)
       /* save ref to old state to prevent it from being deleted immediately */
       _mesa_reference_shared_state(ctx, &oldShared, ctx->Shared);
 
+      /* Keep SharedLink consistent with ctx->Shared */
+      simple_mtx_lock(&oldShared->Mutex);
+      list_del(&ctx->SharedLink);
+      simple_mtx_unlock(&oldShared->Mutex);
+
       /* update ctx's Shared pointer */
       _mesa_reference_shared_state(ctx, &ctx->Shared, ctxToShare->Shared);
+
+      simple_mtx_lock(&ctx->Shared->Mutex);
+      list_addtail(&ctx->SharedLink, &ctx->Shared->Contexts);
+      simple_mtx_unlock(&ctx->Shared->Mutex);
 
       update_default_objects(ctx);
 

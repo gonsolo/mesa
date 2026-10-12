@@ -32,6 +32,7 @@ pass(nir_builder *b, nir_instr *instr, void *data)
       case nir_intrinsic_ssbo_atomic:
       case nir_intrinsic_ssbo_atomic_swap:
       case nir_intrinsic_get_ssbo_size:
+      case nir_intrinsic_load_ssbo_address:
          lower_buffer(b, intr, 0);
          return true;
 
@@ -102,13 +103,13 @@ pass(nir_builder *b, nir_instr *instr, void *data)
          } else if (tex->src[i].src_type == nir_tex_src_sampler_heap_offset) {
             tex->src[i].src_type = nir_tex_src_sampler_handle;
             nir_def *base = nir_load_const_buf_base_addr_lvp(b, nir_imm_int(b, LVP_DESCRIPTOR_HEAP_SAMPLER + 1));
-            nir_src_rewrite(&tex->src[i].src, nir_iadd(b, base, nir_u2u64(b, nir_iadd_imm(b, tex->src[i].src.ssa, plane_offset))));
+            nir_src_rewrite(&tex->src[i].src, nir_iadd(b, base, nir_u2u64(b, tex->src[i].src.ssa)));
          }
       }
 
       if (tex->embedded_sampler) {
          nir_def *base = nir_load_const_buf_base_addr_lvp(b, nir_imm_int(b, LVP_DESCRIPTOR_HEAP_EMBEDDED + 1));
-         nir_def *sampler = nir_iadd_imm(b, base, tex->sampler_index * sizeof(struct lp_sampler_descriptor) + plane_offset);
+         nir_def *sampler = nir_iadd_imm(b, base, tex->sampler_index * sizeof(struct lp_sampler_descriptor));
          nir_tex_instr_add_src(tex, nir_tex_src_sampler_handle, sampler);
       }
 

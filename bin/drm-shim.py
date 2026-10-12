@@ -11,6 +11,7 @@ import subprocess
 ALIASES = {
     "amd": "gfx1201",
     "asahi": "m1",
+    "etnaviv": "gc2000-r5108",
     "freedreno": "a750",
     "intel": "lnl",
     "lima": "lima-mali450",
@@ -22,6 +23,9 @@ ALIASES = {
     "a5xx": "a530",
     "a6xx": "a660",
     "a7xx": "a750",
+
+    "gc2000": "gc2000-r5108",
+    "gc3000": "gc3000-r5450",
 
     "lima-mali450": "mali450",
     "panfrost-t860": "t860",
@@ -44,32 +48,56 @@ TARGETS = {
 
     "m1": ["asahi", None],
 
-    "a306": ["freedreno", "307"],
-    "a530": ["freedreno", "530"],
-    "a618": ["freedreno", "618"],
-    "a660": ["freedreno", "660"],
-    "a750": ["freedreno", "750"],
+    "gc2000-r5108": ["etnaviv", "2000:5108"],
+    "gc3000-r5450": ["etnaviv", "3000:5450"],
+    "gc7000-r6204": ["etnaviv", "7000:6204:70003:11"],
+    "gc7000-r6214": ["etnaviv", "7000:6214:70002:30"],
 
-    "skl": ["intel", "skl"],
-    "apl": ["intel", "apl"],
-    "glk": ["intel", "glk"],
-    "kbl": ["intel", "kbl"],
-    "jsl": ["intel", "jsl"],
-    "tgl": ["intel", "tgl"],
-    "adl": ["intel", "adl"],
-    "rpl": ["intel", "rpl"],
-    "lnl": ["intel", "lnl"],
-    "ptl": ["intel", "ptl"],
+    "a200": ["freedreno", "200"],
+    "a201": ["freedreno", "201"],
+    "a220": ["freedreno", "220"],
+    "a225": ["freedreno", "225"],
+    "a305": ["freedreno", "305"],
+    "a320": ["freedreno", "320"],
+    "a330": ["freedreno", "330"],
+    "a306": ["freedreno", "307"],
+    "a420": ["freedreno", "420"],
+    "a430": ["freedreno", "430"],
+    "a510": ["freedreno", "510"],
+    "a530": ["freedreno", "530"],
+    "a540": ["freedreno", "540"],
+    "a610": ["freedreno", "610"],
+    "a618": ["freedreno", "618"],
+    "a630": ["freedreno", "630"],
+    "a650": ["freedreno", "650"],
+    "a660": ["freedreno", "660"],
+    "a702": ["freedreno", "702"],
+    "a710": ["freedreno", "710"],
+    "a720": ["freedreno", "720"],
+    "a730": ["freedreno", "730"],
+    "a735": ["freedreno", "735"],
+    "a740": ["freedreno", "740"],
+    "a750": ["freedreno", "750"],
+    "a810": ["freedreno", "810"],
+    "a830": ["freedreno", "830"],
 
     "mali450": ["lima", None],
 
     "turing": ["nouveau", "160"],
 
+    "t720": ["panfrost", "720"],
     "t860": ["panfrost", "860"],
     "g52": ["panfrost", "7212"],
     "g57": ["panfrost", "9093"],
     "g72": ["panfrost", "6221"],
     "g610": ["panfrost", "a867"],
+    "g310v1": ["panfrost", "ac04:0"],
+    "g310v2": ["panfrost", "ac04:1"],
+    "g310v3": ["panfrost", "ac04:2"],
+    "g310v4": ["panfrost", "ac04:3"],
+    "g310v5": ["panfrost", "ac04:4"],
+    "g720": ["panfrost", "c800:4"],
+    "g725": ["panfrost", "d800:4"],
     "g925": ["panfrost", "d830:4"],
 
     "rpi4": ["v3d", "42"],
@@ -79,9 +107,21 @@ TARGETS = {
 
 }
 
+INTEL_TARGETS = [
+   "lpt", "brw", "g4x", "ilk", "snb", "ivb", "hsw", "byt", "bdw", "chv", "skl",
+   "bxt", "kbl", "aml", "glk", "cfl", "whl", "cml", "icl", "ehl", "jsl", "tgl",
+   "rkl", "dg1", "adl", "sg1", "rpl", "dg2", "mtl", "arl", "lnl", "bmg", "ptl",
+   "nvl-u", "nvl"
+]
+
+for target in INTEL_TARGETS:
+    assert(target not in TARGETS)
+    TARGETS[target] = ["intel", target]
+
 LD_PRELOAD = {
     "amd": "src/amd/drm-shim/libamdgpu_noop_drm_shim.so",
     "asahi": "src/asahi/drm-shim/libasahi_noop_drm_shim.so",
+    "etnaviv": "src/etnaviv/drm-shim/libetnaviv_noop_drm_shim.so",
     "freedreno": "src/freedreno/drm-shim/libfreedreno_noop_drm_shim.so",
     "intel": "src/intel/tools/libintel_noop_drm_shim.so",
     "nouveau": "src/nouveau/drm-shim/libnouveau_noop_drm_shim.so",
@@ -92,6 +132,7 @@ LD_PRELOAD = {
 
 SHIM_VAR = {
     "amd": "AMDGPU_GPU_ID",
+    "etnaviv": "ETNA_SHIM_GPU",
     "freedreno": "FD_GPU_ID",
     "intel": "INTEL_STUB_GPU_PLATFORM",
     "nouveau": "NOUVEAU_CHIPSET",
@@ -102,6 +143,7 @@ SHIM_VAR = {
 DISASM = {
     "amd": [("AMD_DEBUG", "vs,ps,gs,tcs,tes,cs,ts,ms,nir,aco,asm"), ("RADV_DEBUG", "shaders")],
     "asahi": [("AGX_MESA_DEBUG", "shaders")],
+    "etnaviv": [("ETNA_MESA_DEBUG", "dump_shaders")],
     "freedreno": [("IR3_SHADER_DEBUG", "disasm")],
     "intel": [("INTEL_DEBUG", "vs,tcs,tes,gs,fs,cs,mesh,task,rt")],
     "nouveau": [("NAK_DEBUG", "print")],
@@ -168,4 +210,4 @@ if __name__ == "__main__":
         for (key, val) in DISASM[driver]:
             env[key] = val
 
-    subprocess.call(command, env=env, shell=True)
+    sys.exit(subprocess.call(command, env=env, shell=True))

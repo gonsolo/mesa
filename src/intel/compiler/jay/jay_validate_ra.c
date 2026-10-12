@@ -11,7 +11,7 @@
 
 /* Validatation doesn't make sense in release builds */
 #ifndef NDEBUG
-#define NUM_VALIDATE_FILES (UACCUM + 1)
+#define NUM_VALIDATE_FILES (ACCUM + 1)
 
 struct regfile {
    /* For each register in each file, records the SSA index currently stored
@@ -26,11 +26,6 @@ struct regfile {
 static uint32_t *
 reg(struct regfile *rf, enum jay_file file, uint32_t reg)
 {
-   /* FLAG and UFLAG share their registers */
-   if (file == UFLAG) {
-      file = FLAG;
-   }
-
    assert(file < NUM_VALIDATE_FILES);
    assert(reg < rf->n[file]);
    return &rf->r[file][reg];
@@ -111,15 +106,6 @@ validate_block(jay_function *func, jay_block *block, struct regfile *blocks)
    struct regfile *rf = &blocks[block->index];
    bool all_ok = true;
 
-   /* Pathological shaders can end up with loop headers that have only a
-    * single predecessor and act like normal blocks. Validate them as such,
-    * since RA treats them as such implicitly. Affects:
-    *
-    * dEQP-VK.graphicsfuzz.spv-stable-mergesort-dead-code
-    */
-   bool loop_header =
-      block->loop_header && jay_num_predecessors(block, GPR) > 1;
-
    /* Initialize the register file based on predecessors. */
    /* Initialize with the exit state of any one predecessor */
    jay_foreach_ssa_file(f) {
@@ -131,7 +117,7 @@ validate_block(jay_function *func, jay_block *block, struct regfile *blocks)
    }
 
    /* TODO: Handle loop header validation better */
-   if (!loop_header) {
+   if (!block->loop_header) {
       /* Intersect with the other predecessor. If a register has different
        * values coming in from each block, it is considered undefined at the
        * start of the block.
@@ -186,7 +172,7 @@ validate_block(jay_function *func, jay_block *block, struct regfile *blocks)
       }
 
       if (!ok) {
-         jay_print_inst(stderr, I);
+         jay_print_inst(stderr, func, I);
          print_regfile(rf, stderr);
       }
 
@@ -209,9 +195,8 @@ jay_validate_ra(jay_function *func)
       assert(block->index < func->num_blocks);
 
       for (unsigned file = 0; file < NUM_VALIDATE_FILES; ++file) {
-         b->n[file] = file == ACCUM  ? 8 / jay_grf_per_gpr(func->shader) :
-                      file == UACCUM ? 4 * jay_ugpr_per_grf(func->shader) :
-                                       jay_num_regs(func->shader, file);
+         b->n[file] = file == ACCUM ? 8 / jay_grf_per_gpr(func->shader) :
+                                      func->shader->num_regs[file];
          b->r[file] = linear_zalloc_array(lin_ctx, uint32_t, b->n[file]);
       }
    }

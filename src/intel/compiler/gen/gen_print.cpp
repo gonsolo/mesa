@@ -8,6 +8,7 @@
 #include <cstdarg>
 #include <cstring>
 #include <inttypes.h>
+#include <optional>
 #include <vector>
 
 #include "util/half_float.h"
@@ -26,7 +27,7 @@ emit_swsb(const intel_device_info *devinfo, FILE *fp, gen_swsb swsb,
 
    if (swsb.regdist) {
       const char *pipe = "";
-      if (devinfo && devinfo->verx10 >= 125) {
+      if (!devinfo || devinfo->verx10 >= 125) {
          pipe = gen_pipe_to_string(swsb.pipe);
          if (!pipe)
             pipe = "?";
@@ -91,6 +92,7 @@ struct gen_printer {
     * the raw send opcode. Otherwise the translated form appears in a comment.
     */
    bool translated_send_as_opcode = false;
+   std::optional<gen_lsc_desc> lsc_desc;
 
    gen_printer(const gen_print_params *print_params)
       : params(print_params), devinfo(print_params->devinfo), fp(print_params->fp),
@@ -123,7 +125,8 @@ struct gen_printer {
       const char *const *annotations = params->annotations;
       const char *const *label_annotations = params->label_annotations;
 
-      labels = collect_labels(insts, num_insts);
+      if (!(flags & GEN_PRINT_NO_LABELS))
+         labels = collect_labels(insts, num_insts);
 
       unsigned next_label = 0;
       int next_error = 0;
@@ -165,6 +168,13 @@ struct gen_printer {
       idx = idx_;
       inst_format = gen_inst_format(inst->opcode);
       translated_send_as_opcode = false;
+
+      if (gen_inst_is_send(inst) && is_lsc_translated_sfid(inst->send.sfid) &&
+          !inst->send.desc_is_reg) {
+         lsc_desc = gen_lsc_desc_decode(devinfo, inst->send.desc_imm);
+      } else {
+         lsc_desc.reset();
+      }
 
       print_offset_prefix();
       print_hex_prefix();
@@ -367,7 +377,7 @@ private:
       switch (inst->opcode) {
       case GEN_OP_MATH: {
          text(".");
-         text(gen_math_function_to_string(inst->math.func));
+         text(gen_math_function_to_string(devinfo, inst->math.func));
          break;
       }
 
@@ -427,7 +437,7 @@ private:
       case GEN_FORMAT_BASIC_THREE_SRC:
       case GEN_FORMAT_DPAS_THREE_SRC: {
          const unsigned num_sources = gen_inst_num_sources(devinfo, inst);
-         const bool has_dst = gen_inst_has_dst(inst_format, inst->opcode);
+         const bool has_dst = gen_inst_has_dst(inst->opcode);
 
          if (inst->opcode == GEN_OP_WAIT) {
             field_sep(DST_COLUMN);
@@ -448,9 +458,13 @@ private:
       }
 
       case GEN_FORMAT_SEND: {
+         const bool has_dst = translated_send_has_dst();
+
          field_sep(DST_COLUMN);
-         print_send_reg(inst->dst, false,
-                        translated_send_as_opcode ? gen_inst_send_dst_len(inst) : -1);
+         if (has_dst) {
+            print_send_reg(inst->dst, false,
+                           translated_send_as_opcode ? gen_inst_send_dst_len(devinfo, inst) : -1);
+         }
 
          field_sep(SEND_SRC0_COLUMN);
          print_send_reg(inst->src[0], true,
@@ -486,13 +500,17 @@ private:
          }
 
          field_sep(SEND_EX_DESC_COLUMN);
-         print_send_ex_desc();
+         if (inst->opcode == GEN_OP_SENDG || inst->opcode == GEN_OP_SENDGC) {
+            hex_pad0_64(inst->send.combined_desc);
+         } else {
+            print_send_ex_desc();
 
-         field_sep(SEND_DESC_COLUMN);
-         if (inst->send.desc_is_reg)
-            text("a0.0");
-         else
-            hex_pad0(inst->send.desc_imm);
+            field_sep(SEND_DESC_COLUMN);
+            if (inst->send.desc_is_reg)
+               text("a0.0");
+            else
+               hex_pad0(inst->send.desc_imm);
+         }
          break;
       }
 
@@ -556,6 +574,14 @@ private:
    void
    print_send_reg(const gen_operand &op, bool allow_scalar_arf, int length = -1)
    {
+      const bool block2d_addr =
+         translated_send_as_opcode && lsc_desc &&
+         lsc_opcode_is_2d_block(lsc_desc->op) &&
+         &op == &inst->src[0];
+
+      if (block2d_addr)
+         text("[");
+
       if (op.file == GEN_GRF && !op.indirect) {
          text("r");
          uint(op.nr);
@@ -577,6 +603,18 @@ private:
       if (length >= 0) {
          text(":");
          uint(length);
+      }
+
+      if (block2d_addr) {
+         const gen_lsc_ex_desc ex_desc =
+            gen_lsc_ex_desc_decode(devinfo, lsc_desc->op, LSC_ADDR_SURFTYPE_FLAT,
+                                   lsc_ex_desc_surface_bits(),
+                                   inst->send.ex_desc_imm_extra);
+         if (ex_desc.block2d.x_off != 0 || ex_desc.block2d.y_off != 0) {
+            format(" + (%d, %d)",
+                   ex_desc.block2d.x_off, ex_desc.block2d.y_off);
+         }
+         text("]");
       }
    }
 
@@ -798,6 +836,8 @@ private:
          subnr = op.subnr / 2;
       } else if (arf == GEN_ARF_NOTIFICATION_COUNT) {
          subnr = op.subnr / MAX2(gen_type_size_bytes(op.type), 1u);
+      } else if (arf == GEN_ARF_STATE) {
+         subnr = op.subnr / 4;
       }
 
       if (show_default_zero || subnr) {
@@ -908,6 +948,9 @@ private:
    void
    print_send_lengths()
    {
+      if (inst->opcode == GEN_OP_SENDG || inst->opcode == GEN_OP_SENDGC)
+         return;
+
       const gen_message_desc msg =
          gen_message_desc_decode(devinfo, inst->send.desc_imm);
       const bool header = msg.header_present &&
@@ -969,6 +1012,12 @@ private:
    }
 
    void
+   hex_pad0_64(uint64_t n)
+   {
+      column += fprintf(fp, "0x%016" PRIx64, n);
+   }
+
+   void
    text(const char *s)
    {
       s = s ? s : "UNKNOWN";
@@ -1008,18 +1057,21 @@ private:
    }
 
    bool
+   translated_send_has_dst() const
+   {
+      if (!translated_send_as_opcode)
+         return true;
+
+      if (lsc_desc)
+         return !lsc_opcode_is_store(lsc_desc->op);
+
+      return true;
+   }
+
+   bool
    is_lsc_translated_sfid(gen_sfid sfid) const
    {
-      switch (sfid) {
-      case GEN_SFID_SLM:
-      case GEN_SFID_TGM:
-      case GEN_SFID_UGM:
-         return devinfo->has_lsc;
-      case GEN_SFID_URB:
-         return devinfo->has_lsc && devinfo->ver >= 20;
-      default:
-         return false;
-      }
+      return gen_is_lsc_translated_sfid(devinfo, sfid);
    }
 
    void
@@ -1032,11 +1084,12 @@ private:
    }
 
    bool
-   print_lsc_symbolic_surface_name(enum lsc_addr_surface_type addr_type)
+   print_lsc_symbolic_surface_name(enum lsc_opcode op,
+                                   enum lsc_addr_surface_type addr_type)
    {
       const uint32_t surface_bits = lsc_ex_desc_surface_bits();
       const gen_lsc_ex_desc ex_desc =
-         gen_lsc_ex_desc_decode(devinfo, addr_type, surface_bits,
+         gen_lsc_ex_desc_decode(devinfo, op, addr_type, surface_bits,
                                 inst->send.ex_desc_imm_extra);
 
       switch (inst->send.sfid) {
@@ -1132,6 +1185,172 @@ private:
    }
 
    bool
+   print_lsc_cache_ctrl(enum lsc_opcode op, unsigned cache_ctrl)
+   {
+      const char *cache = gen_lsc_cache_ctrl_to_string(devinfo, op, cache_ctrl);
+      if (!cache) {
+         text(".?");
+         return false;
+      }
+      if (cache[0]) {
+         text(".");
+         text(cache);
+      }
+      return true;
+   }
+
+   bool
+   print_translated_sendg()
+   {
+      const uint8_t op = gen_64bit_msg_desc_get_opcode(inst->send.combined_desc);
+      const char *sfid_name = gen_sfid_to_string(devinfo, inst->send.sfid);
+      if (!sfid_name) {
+         unknown();
+         return true;
+      }
+
+      switch (inst->send.sfid) {
+      case GEN_SFID_SLM:
+      case GEN_SFID_TGM:
+      case GEN_SFID_UGM:
+      case GEN_SFID_URB: {
+         enum lsc_opcode lsc_op = (enum lsc_opcode)op;
+         const char *op_name = gen_lsc_opcode_to_string(lsc_op);
+
+         if (lsc_op == LSC_OP_FENCE) {
+            enum lsc_fence_scope scope = lsc_fence_64bit_msg_desc_get_fence_scope(inst->send.combined_desc);
+            enum lsc_flush_type flush_type = lsc_fence_64bit_msg_desc_get_fence_flush_type(inst->send.combined_desc);
+            const char *scope_name = gen_lsc_fence_scope_to_string(scope);
+            const char *flush_name = gen_lsc_flush_type_to_string(flush_type);
+            if (!scope_name || !flush_name) {
+               unknown();
+               return true;
+            }
+
+            format("%s.%s.%s.%s", op_name, sfid_name, scope_name, flush_name);
+            break;
+         }
+
+         enum lsc_data_size data_size = gen_lsc_64bit_msg_desc_get_data_size(inst->send.combined_desc);
+         const char *data_name = gen_lsc_data_size_to_string(data_size);
+         if (!data_name) {
+            unknown();
+            return true;
+         }
+
+         format("%s.%s.%s", op_name, sfid_name, data_name);
+
+         uint8_t num_channels_or_cmaks = gen_lsc_64bit_msg_desc_get_num_channels_or_cmaks(inst->send.combined_desc,
+                                                                                          lsc_opcode_has_cmask(lsc_op));
+         if (lsc_opcode_has_cmask(lsc_op)) {
+            const char *cmask_name = gen_lsc_cmask_to_string((enum lsc_cmask)num_channels_or_cmaks);
+
+            if (!cmask_name) {
+               text(".?");
+               return true;
+            }
+            text(".");
+            text(cmask_name);
+         } else if (!lsc_opcode_is_atomic(lsc_op)) {
+            const unsigned num_values = lsc_vector_length((enum lsc_vect_size)num_channels_or_cmaks);
+            const bool transpose = gen_lsc_64bit_msg_desc_get_transpose(inst->send.combined_desc);
+            if (num_values == 0) {
+               text(".?");
+               return true;
+            }
+            if (num_values != 1 || transpose) {
+               format("x%u", num_channels_or_cmaks);
+               if (transpose)
+                  text("t");
+            }
+         }
+
+         const char *addr_type_size_name;
+         switch (inst->send.sfid) {
+         case GEN_SFID_URB: {
+            enum lsc_urb_addr_type_size addr_type_size =
+               (enum lsc_urb_addr_type_size)gen_lsc_64bit_msg_desc_get_addr_size_and_type(inst->send.combined_desc);
+            addr_type_size_name = gen_lsc_urb_addr_type_size_to_string(addr_type_size);
+            if (!addr_type_size_name) {
+               text(".?");
+               return true;
+            }
+            break;
+         }
+         case GEN_SFID_SLM:
+         case GEN_SFID_UGM: {
+            enum lsc_addr_type_size addr_type_size = gen_lsc_64bit_msg_desc_get_addr_size_and_type(inst->send.combined_desc);
+            addr_type_size_name = gen_lsc_addr_type_size_to_string(addr_type_size);
+            if (!addr_type_size_name) {
+               text(".?");
+               return true;
+            }
+            break;
+         }
+         case GEN_SFID_TGM: {
+            addr_type_size_name = "statefull";
+            break;
+         }
+         default:
+            unknown();
+            return false;
+         }
+         text(".");
+         text(addr_type_size_name);
+
+         unsigned cache_ctrl = gen_lsc_64bit_msg_desc_get_cache_ctrl(inst->send.combined_desc);
+         const char *cache_name = gen_lsc_cache_ctrl_to_string(devinfo, lsc_op, cache_ctrl);
+         if (!cache_name) {
+            text(".?");
+            return true;
+         }
+         if (cache_name[0]) {
+            text(".");
+            text(cache_name);
+         }
+
+         break;
+      }
+      case GEN_SFID_MESSAGE_GATEWAY: {
+         enum gen_gateway_64bit_opcode gateway_op = (enum gen_gateway_64bit_opcode)op;
+         const char *op_name = gen_gateway_64bit_opcode_to_string(gateway_op);
+
+         format("%s.%s", op_name, sfid_name);
+         break;
+      }
+      case GEN_SFID_RENDER_CACHE: {
+         const char *op_name = gen_rt_64bit_opcode_to_string(op);
+
+         format("%s.%s", op_name, sfid_name);
+         break;
+      }
+      case GEN_SFID_SAMPLER: {
+         const char *op_name = gen_sampler_msg_type_to_string(devinfo, op);
+
+         format("%s.%s", op_name, sfid_name);
+         break;
+      }
+      default:
+         unknown();
+         return false;
+      }
+
+      for (int i = 0; i < 2; i++) {
+         text(" ind");
+         uint(i);
+
+         if (inst->send.indirect_desc[i].nr == GEN_ARF_SCALAR) {
+            text(":S");
+            uint(inst->send.indirect_desc[i].subnr / sizeof(uint64_t));
+         } else {
+            text(":not_present");
+         }
+      }
+
+      return true;
+   }
+
+   bool
    print_lsc_translated_send()
    {
       if (!gen_inst_is_send(inst) || !is_lsc_translated_sfid(inst->send.sfid) ||
@@ -1144,7 +1363,8 @@ private:
          return true;
       }
 
-      const gen_lsc_desc desc = gen_lsc_desc_decode(devinfo, inst->send.desc_imm);
+      assert(lsc_desc);
+      const gen_lsc_desc &desc = *lsc_desc;
 
       const enum lsc_opcode op = desc.op;
       const char *op_name = gen_lsc_opcode_to_string(op);
@@ -1180,6 +1400,27 @@ private:
          return true;
       }
 
+      if (lsc_opcode_is_2d_block(op)) {
+         if (inst->send.sfid != GEN_SFID_UGM ||
+             desc.addr_type != LSC_ADDR_SURFTYPE_FLAT ||
+             inst->send.ex_desc_is_reg || inst->send.ex_desc_imm_extra) {
+            unknown();
+            return true;
+         }
+
+         format("%s.%s.%s", op_name, sfid_name, data_name);
+         if (desc.transpose)
+            text("t");
+         if (desc.vnni)
+            text("v");
+         text(".a64");
+
+         if (!print_lsc_cache_ctrl(op, desc.cache_ctrl))
+            return true;
+
+         return true;
+      }
+
       format("%s.%s.%s", op_name, sfid_name, data_name);
 
       if (lsc_opcode_has_cmask(op)) {
@@ -1212,17 +1453,10 @@ private:
       text(".");
       text(addr_name);
 
-      const char *cache = gen_lsc_cache_ctrl_to_string(devinfo, op, desc.cache_ctrl);
-      if (!cache) {
-         text(".?");
+      if (!print_lsc_cache_ctrl(op, desc.cache_ctrl))
          return true;
-      }
-      if (cache[0]) {
-         text(".");
-         text(cache);
-      }
 
-      if (!print_lsc_symbolic_surface_name(desc.addr_type)) {
+      if (!print_lsc_symbolic_surface_name(op, desc.addr_type)) {
          text(".?");
          return true;
       }
@@ -1796,6 +2030,9 @@ private:
    {
       if (!translated_send_may_apply())
          return false;
+
+      if (inst->opcode == GEN_OP_SENDG || inst->opcode == GEN_OP_SENDGC)
+         return print_translated_sendg();
 
       if (is_lsc_translated_sfid(inst->send.sfid))
          return print_lsc_translated_send();

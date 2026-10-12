@@ -20,6 +20,7 @@
 #define KK_MAX_MIP_LEVELS 16
 
 struct kk_device;
+struct kk_physical_device;
 struct VkImageCreateInfo;
 enum pipe_swizzle;
 
@@ -210,7 +211,8 @@ kk_get_level_size_B(const struct kk_image_layout *layout, unsigned level)
    return layout->level_offsets_B[level + 1] - layout->level_offsets_B[level];
 }
 
-bool kk_image_layout_can_optimize(VkImageUsageFlags usage, VkImageTiling tiling,
+bool kk_image_layout_can_optimize(const struct kk_physical_device *pdev,
+                                  VkImageUsageFlags usage, VkImageTiling tiling,
                                   VkImageCreateFlags flags,
                                   enum pipe_format format);
 
@@ -218,5 +220,9 @@ void kk_image_layout_init(const struct kk_device *dev,
                           const struct vk_image *image, enum pipe_format format,
                           const uint8_t width_scale, const uint8_t height_scale,
                           struct kk_image_layout *layout);
+
+void kk_image_layout_init_level_offsets(const struct kk_device *dev,
+                                        struct kk_image_layout *layout,
+                                        mtl_texture *texture);
 
 #endif /* KK_IMAGE_LAYOUT_H */

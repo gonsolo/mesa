@@ -28,6 +28,7 @@
 #include "drm-uapi/xe_drm.h"
 
 #include "common/xe/intel_device_query.h"
+#include "common/xe/intel_gem.h"
 
 bool anv_xe_device_destroy_vm(struct anv_device *device)
 {
@@ -73,6 +74,8 @@ drm_sched_priority_to_vk_priority(enum drm_sched_priority drm_sched_priority)
       return VK_QUEUE_GLOBAL_PRIORITY_MEDIUM;
    case DRM_SCHED_PRIORITY_HIGH:
       return VK_QUEUE_GLOBAL_PRIORITY_HIGH;
+   case DRM_SCHED_PRIORITY_KERNEL:
+      return VK_QUEUE_GLOBAL_PRIORITY_REALTIME;
    default:
       UNREACHABLE("Invalid drm_sched_priority");
       return VK_QUEUE_GLOBAL_PRIORITY_LOW;
@@ -104,19 +107,19 @@ anv_xe_physical_device_init_memory_types(struct anv_physical_device *device)
       if (device->info.ver >= 20) {
          device->memory.types[device->memory.type_count++] = (struct anv_memory_type) {
             .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-            .heapIndex = 0,
+            .heapIndex = 0,/* lmem */
             .compressed = true,
          };
       }
       device->memory.types[device->memory.type_count++] = (struct anv_memory_type) {
          .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-         .heapIndex = 0,
+         .heapIndex = 0,/* lmem */
       };
       device->memory.types[device->memory.type_count++] = (struct anv_memory_type) {
          .propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
                           VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
-         .heapIndex = 1,
+         .heapIndex = 1,/* smem */
       };
       device->memory.types[device->memory.type_count++] = (struct anv_memory_type) {
          .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
@@ -174,20 +177,23 @@ anv_xe_physical_device_init_memory_types(struct anv_physical_device *device)
 }
 
 static VkResult
-anv_xe_get_device_status(struct anv_device *device, uint32_t exec_queue_id)
+anv_xe_get_device_status(struct anv_device *device,
+                         struct anv_queue *queue,
+                         uint32_t exec_queue_id)
 {
-   VkResult result = VK_SUCCESS;
    struct drm_xe_exec_queue_get_property exec_queue_get_property = {
       .exec_queue_id = exec_queue_id,
       .property = DRM_XE_EXEC_QUEUE_GET_PROPERTY_BAN,
    };
    int ret = intel_ioctl(device->fd, DRM_IOCTL_XE_EXEC_QUEUE_GET_PROPERTY,
                          &exec_queue_get_property);
+   if (ret == -1)
+      return anv_queue_set_lost(queue, errno, "exec_queue_get_property failed: %m");
 
-   if (ret || exec_queue_get_property.value)
-      result = vk_device_set_lost(&device->vk, "One or more queues banned");
+   if (exec_queue_get_property.value)
+      return anv_queue_set_lost(queue, ECANCELED, "One or more queues banned");
 
-   return result;
+   return VK_SUCCESS;
 }
 
 VkResult
@@ -197,13 +203,16 @@ anv_xe_device_check_status(struct vk_device *vk_device)
    VkResult result = VK_SUCCESS;
 
    for (uint32_t i = 0; i < device->queue_count; i++) {
-      result = anv_xe_get_device_status(device, device->queues[i].exec_queue_id);
+      result = anv_xe_get_device_status(device,
+                                        &device->queues[i],
+                                        device->queues[i].exec_queue_id);
       if (result != VK_SUCCESS)
          goto done;
 
       if (device->queues[i].companion_rcs_id != 0) {
-         uint32_t exec_queue_id = device->queues[i].companion_rcs_id;
-         result = anv_xe_get_device_status(device, exec_queue_id);
+         result = anv_xe_get_device_status(device,
+                                           &device->queues[i],
+                                           device->queues[i].companion_rcs_id);
          if (result != VK_SUCCESS)
             goto done;
       }
@@ -220,4 +229,10 @@ anv_xe_device_check_status(struct vk_device *vk_device)
    }
 
    return result;
+}
+
+struct intel_pagefault_buffer *
+anv_xe_device_alloc_get_vm_faults(struct anv_device *device)
+{
+   return xe_gem_alloc_get_vm_faults(device->fd, device->vm_id);
 }

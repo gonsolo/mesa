@@ -49,6 +49,7 @@ enum radv_ud_index {
    AC_UD_CS_TASK_RING_OFFSETS,
    AC_UD_CS_TASK_DRAW_ID,
    AC_UD_CS_TASK_IB,
+   AC_UD_CS_STATE,
    AC_UD_CS_MAX_UD,
    AC_UD_GS_MAX_UD,
    AC_UD_TCS_OFFCHIP_LAYOUT = AC_UD_VS_MAX_UD,
@@ -84,8 +85,11 @@ struct radv_shader_args {
 
    /* Task */
    struct ac_arg task_state;
-   /* User data 2/3. same as ring_offsets but for task shaders. */
+   /* User data 2/3 (0/1 on GFX11+). same as ring_offsets but for task shaders. */
    struct ac_arg task_ring_offsets;
+
+   /* Compute shaders */
+   struct ac_arg cs_state;
 
    /* NGG */
    struct ac_arg ngg_state;
@@ -132,15 +136,14 @@ radv_shader_args_from_ac(struct ac_shader_args *args)
 }
 
 struct radv_graphics_state_key;
-struct radv_shader_info;
+struct radv_shader_stage;
 struct radv_ps_epilog_key;
 struct radv_shader_debug_info;
 struct radv_compiler_info;
 
 void radv_declare_shader_args(const struct radv_compiler_info *compiler_info,
-                              const struct radv_graphics_state_key *gfx_state, const struct radv_shader_info *info,
-                              mesa_shader_stage stage, mesa_shader_stage previous_stage, struct radv_shader_args *args,
-                              struct radv_shader_debug_info *debug);
+                              const struct radv_graphics_state_key *gfx_state, struct radv_shader_stage *stage,
+                              mesa_shader_stage previous_stage, struct radv_shader_debug_info *debug);
 
 void radv_declare_ps_epilog_args(const struct radv_compiler_info *compiler_info, const struct radv_ps_epilog_key *key,
                                  struct radv_shader_args *args);

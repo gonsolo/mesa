@@ -38,7 +38,6 @@ DEPS=(
     dpkg-dev
     fastboot
     file
-    flatbuffers-compiler
     flex
     g++
     git
@@ -51,8 +50,8 @@ DEPS=(
     libdrm-dev
     libelf-dev
     libexpat1-dev
-    libflatbuffers-dev
     "libllvm${LLVM_VERSION}"
+    "libllvmspirvlib-${LLVM_VERSION}-dev"
     libpng-dev
     libvulkan-dev
     libx11-dev
@@ -68,12 +67,12 @@ DEPS=(
     libxext-dev
     libxrandr-dev
     libxshmfence-dev
-    libxtensor-dev
     libxxf86vm-dev
     libwayland-bin
     libwayland-dev
     libwayland-egl-backend-dev
     "llvm-${LLVM_VERSION}-dev"
+    "llvm-spirv-${LLVM_VERSION}"
     ninja-build
     openssh-server
     pkgconf
@@ -111,8 +110,6 @@ arch=armhf
 . .gitlab-ci/container/container_pre_build.sh
 
 . .gitlab-ci/container/build-mold.sh
-
-. .gitlab-ci/container/build-llvm-spirv.sh
 
 . .gitlab-ci/container/build-libclc.sh
 

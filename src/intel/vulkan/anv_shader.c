@@ -9,6 +9,7 @@
 
 #include "compiler/gen/gen.h"
 #include "mda/debug_archiver.h"
+#include "util/memstream.h"
 #include "util/shader_stats.h"
 
 
@@ -37,7 +38,7 @@ anv_device_finish_shader_dump(struct anv_device *device)
    if (!ANV_DEBUG(SHADER_DUMP) && !INTEL_DEBUG(DEBUG_SHADERS_LINENO))
       return;
 
-   debug_archiver_finish_file(device->shader_dump.archive);
+   debug_archiver_close(device->shader_dump.archive);
 
    simple_mtx_destroy(&device->shader_dump.mutex);
 }
@@ -186,7 +187,7 @@ anv_shader_deserialize(struct vk_device *vk_device,
    blob_copy_bytes(blob, data.bind_map.surface_blake3, sizeof(data.bind_map.surface_blake3));
    blob_copy_bytes(blob, data.bind_map.sampler_blake3, sizeof(data.bind_map.sampler_blake3));
    blob_copy_bytes(blob, data.bind_map.push_blake3, sizeof(data.bind_map.push_blake3));
-   data.bind_map.layout_type = blob_read_uint16(blob);
+   data.bind_map.binding_mode = blob_read_uint16(blob);
    data.bind_map.binding_mask = blob_read_uint16(blob);
    data.bind_map.surface_count = blob_read_uint8(blob);
    data.bind_map.sampler_count = blob_read_uint8(blob);
@@ -271,7 +272,7 @@ anv_shader_serialize(struct vk_device *device,
                     sizeof(shader->bind_map.sampler_blake3));
    blob_write_bytes(blob, shader->bind_map.push_blake3,
                     sizeof(shader->bind_map.push_blake3));
-   blob_write_uint16(blob, shader->bind_map.layout_type);
+   blob_write_uint16(blob, shader->bind_map.binding_mode);
    blob_write_uint16(blob, shader->bind_map.binding_mask);
    blob_write_uint8(blob, shader->bind_map.surface_count);
    blob_write_uint8(blob, shader->bind_map.sampler_count);
@@ -394,7 +395,10 @@ get_shader_bind_map_text(const struct anv_device *device,
 {
    char *stream_data = NULL;
    size_t stream_size = 0;
-   FILE *stream = open_memstream(&stream_data, &stream_size);
+   struct u_memstream mem;
+   if (!u_memstream_open(&mem, &stream_data, &stream_size))
+      return NULL;
+   FILE *stream = u_memstream_get(&mem);
 
    const struct anv_pipeline_bind_map *bind_map = &shader->bind_map;
    uint32_t push_size = 0;
@@ -456,7 +460,7 @@ get_shader_bind_map_text(const struct anv_device *device,
       fprintf(stream, "\n");
    }
 
-   fclose(stream);
+   u_memstream_close(&mem);
 
    if (stream_size == 0) {
       free(stream_data);
@@ -473,7 +477,10 @@ get_shader_isa_text(struct anv_device *device,
 {
    char *stream_data = NULL;
    size_t stream_size = 0;
-   FILE *stream = open_memstream(&stream_data, &stream_size);
+   struct u_memstream mem;
+   if (!u_memstream_open(&mem, &stream_data, &stream_size))
+      return NULL;
+   FILE *stream = u_memstream_get(&mem);
 
    const struct intel_device_info *devinfo =
       device->physical->compiler->isa.devinfo;
@@ -503,7 +510,7 @@ get_shader_isa_text(struct anv_device *device,
                                program_size, 0, 0);
    }
 
-   fclose(stream);
+   u_memstream_close(&mem);
 
    return stream_data;
 }
@@ -590,22 +597,22 @@ anv_shader_set_relocs(struct anv_device *device,
       .id = BRW_SHADER_RELOC_INSTRUCTION_BASE_ADDR_HIGH,
       .value = device->physical->va.shader_heap.addr >> 32,
    };
-   assert((device->physical->va.dynamic_visible_pool.addr & 0xffffffff) == 0);
+   assert((anv_physical_device_get_dynamic_visible_pool_va(device->physical)->addr & 0xffffffff) == 0);
    reloc_values[rv_count++] = (struct intel_shader_reloc_value) {
       .id = BRW_SHADER_RELOC_DESCRIPTORS_BUFFER_ADDR_HIGH,
-      .value = device->physical->va.dynamic_visible_pool.addr >> 32,
+      .value = anv_physical_device_get_dynamic_visible_pool_va(device->physical)->addr >> 32,
    };
    reloc_values[rv_count++] = (struct intel_shader_reloc_value) {
       .id = BRW_SHADER_RELOC_PUSH_DESCRIPTORS_BUFFER_ADDR_HIGH,
-      .value = device->physical->va.internal_surface_state_pool.addr >> 32,
+      .value = anv_physical_device_get_internal_surface_state_pool_va(device->physical)->addr >> 32,
    };
-   assert((device->physical->va.indirect_descriptor_pool.addr & 0xffffffff) == 0);
-   assert((device->physical->va.internal_surface_state_pool.addr & 0xffffffff) == 0);
+   assert((anv_physical_device_get_indirect_descriptor_pool_va(device->physical)->addr & 0xffffffff) == 0);
+   assert((anv_physical_device_get_internal_surface_state_pool_va(device->physical)->addr & 0xffffffff) == 0);
    reloc_values[rv_count++] = (struct intel_shader_reloc_value) {
       .id = BRW_SHADER_RELOC_DESCRIPTORS_ADDR_HIGH,
       .value = device->physical->indirect_descriptors ?
-               (device->physical->va.indirect_descriptor_pool.addr >> 32) :
-               (device->physical->va.internal_surface_state_pool.addr >> 32),
+               (anv_physical_device_get_indirect_descriptor_pool_va(device->physical)->addr >> 32) :
+               (anv_physical_device_get_internal_surface_state_pool_va(device->physical)->addr >> 32),
    };
    assert((device->physical->va.shader_heap.addr & 0xffffffff) == 0);
    reloc_values[rv_count++] = (struct intel_shader_reloc_value) {
@@ -657,6 +664,33 @@ anv_shader_set_relocs(struct anv_device *device,
          .value = anv_surface_state_to_handle(
             device->physical, device->descriptor_view_state),
       };
+   }
+   if (device->physical->uses_efficient_64bit) {
+      reloc_values[rv_count++] = (struct intel_shader_reloc_value) {
+         .id = BRW_SHADER_RELOC_DESCRIPTORS_INTERNAL_HIGH,
+         .value = device->physical->va.internal_surface_state_pool.addr >> 32,
+      };
+      reloc_values[rv_count++] = (struct intel_shader_reloc_value) {
+         .id = BRW_SHADER_RELOC_DESCRIPTORS_APP_HIGH,
+         .value = device->physical->va.bindless_surface_state_pool.addr >> 32,
+      };
+
+      if (shader->prog_data->total_scratch > 0) {
+         reloc_values[rv_count++] = (struct intel_shader_reloc_value) {
+            .id = BRW_SHADER_RELOC_SCRATCH64_SURFACE_HIGH,
+            .value = device->physical->va.internal_surface_state_pool.addr >> 32,
+         };
+         /* TODO: deal with protected scratch surfaces in efficient 64bit mode
+          *
+          * We could upload the shader twice?
+          */
+         reloc_values[rv_count++] = (struct intel_shader_reloc_value) {
+            .id = BRW_SHADER_RELOC_SCRATCH64_SURFACE_LOW,
+            .value = anv_shader_get_scratch_surf(
+               NULL, device, shader->vk.stage,
+               shader->prog_data->total_scratch, false /* protected */),
+         };
+      }
    }
 
    if (anv_needs_printf_buffer()) {
@@ -903,6 +937,47 @@ anv_shader_create(struct anv_device *device,
                           device->physical->uses_relocs);
    if (result != VK_SUCCESS)
       goto error_state;
+
+
+   /* Apply workarounds associated with this shader hash */
+   struct anv_physical_device *pdevice = device->physical;
+   if (pdevice->shader_workarounds != NULL) {
+      struct anv_shader_workaround *workaround =
+         _mesa_hash_table_u64_search(pdevice->shader_workarounds,
+                                     shader->prog_data->source_hash);
+      if (workaround != NULL)
+         shader->workaround = *workaround;
+   }
+
+   switch (shader->vk.stage) {
+   case MESA_SHADER_FRAGMENT:
+      if (brw_fs_prog_data_const(shader->prog_data)->prefer_simd32 !=
+          shader->workaround.prefer_simd32_fs) {
+         anv_perf_warn(VK_LOG_OBJS(&device->vk.base),
+                       "Fragment shader 0x%016"PRIx64" for disk cache not "
+                       "matching SIMD preference, recompile needed",
+                       shader->prog_data->source_hash);
+         result = VK_ERROR_UNKNOWN;
+         goto error_state;
+      }
+      break;
+
+   case MESA_SHADER_COMPUTE:
+      if (device->info->ver >= 20 &&
+          brw_cs_prog_data_const(shader->prog_data)->force_simd32 !=
+          shader->workaround.force_xe2_simd32_cs) {
+         anv_perf_warn(VK_LOG_OBJS(&device->vk.base),
+                       "Compute shader 0x%016"PRIx64" for disk cache not "
+                       "matching SIMD preference, recompile needed",
+                       shader->prog_data->source_hash);
+         result = VK_ERROR_UNKNOWN;
+         goto error_state;
+      }
+      break;
+
+   default:
+      break;
+   }
 
    struct anv_batch batch = {};
    anv_batch_set_storage(&batch, ANV_NULL_ADDRESS,

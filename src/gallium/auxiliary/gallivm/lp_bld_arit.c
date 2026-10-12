@@ -135,11 +135,10 @@ lp_build_min_simple(struct lp_build_context *bld,
       }
    }
    else if (type.floating && util_get_cpu_caps()->has_altivec) {
-      if (nan_behavior == GALLIVM_NAN_RETURN_NAN_FIRST_NONNAN) {
-         debug_printf("%s: altivec doesn't support nan return nan behavior\n",
-                      __func__);
-      }
-      if (type.width == 32 && type.length == 4) {
+      /* vminfp returns NaN if either operand is NaN, and honors VSCR[NJ]. */
+      if (type.width == 32 && !util_get_cpu_caps()->has_vsx &&
+          (nan_behavior == GALLIVM_NAN_BEHAVIOR_UNDEFINED ||
+           nan_behavior == GALLIVM_NAN_RETURN_NAN_FIRST_NONNAN)) {
          intrinsic = "llvm.ppc.altivec.vminfp";
          intr_size = 128;
       }
@@ -289,11 +288,10 @@ lp_build_max_simple(struct lp_build_context *bld,
       }
    }
    else if (type.floating && util_get_cpu_caps()->has_altivec) {
-      if (nan_behavior == GALLIVM_NAN_RETURN_NAN_FIRST_NONNAN) {
-         debug_printf("%s: altivec doesn't support nan return nan behavior\n",
-                      __func__);
-      }
-      if (type.width == 32 || type.length == 4) {
+      /* vmaxfp returns NaN if either operand is NaN, and honors VSCR[NJ]. */
+      if (type.width == 32 && !util_get_cpu_caps()->has_vsx &&
+          (nan_behavior == GALLIVM_NAN_BEHAVIOR_UNDEFINED ||
+           nan_behavior == GALLIVM_NAN_RETURN_NAN_FIRST_NONNAN)) {
          intrinsic = "llvm.ppc.altivec.vmaxfp";
          intr_size = 128;
       }
@@ -1786,8 +1784,9 @@ lp_build_round_arch(struct lp_build_context *bld,
                     LLVMValueRef a,
                     enum lp_build_round_mode mode)
 {
+   /* VMX vrfi* honor VSCR[NJ]; VSX follows IEEE for denormals. */
    if (util_get_cpu_caps()->has_sse4_1 || util_get_cpu_caps()->has_neon ||
-       DETECT_ARCH_S390 == true) {
+       util_get_cpu_caps()->has_vsx || DETECT_ARCH_S390 == true) {
       LLVMBuilderRef builder = bld->gallivm->builder;
       const struct lp_type type = bld->type;
       const char *intrinsic_root;
@@ -1919,6 +1918,14 @@ lp_build_round(struct lp_build_context *bld,
       LLVMValueRef res, anosign, mask;
       LLVMTypeRef int_vec_type = bld->int_vec_type;
       LLVMTypeRef vec_type = bld->vec_type;
+
+      /* On altivec/VSX, llvm.nearbyint lowers to vrfin/xvrspic (1 instruction,
+       * round-to-nearest-even) for any vector width. */
+      if (util_get_cpu_caps()->has_altivec) {
+         char intrinsic[64];
+         lp_format_intrinsic(intrinsic, sizeof(intrinsic), "llvm.nearbyint", bld->vec_type);
+         return lp_build_intrinsic_unary(builder, intrinsic, bld->vec_type, a);
+      }
 
       inttype = type;
       inttype.floating = 0;

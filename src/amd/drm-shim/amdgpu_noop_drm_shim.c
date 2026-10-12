@@ -11,10 +11,9 @@
 #include "drm-uapi/amdgpu_drm.h"
 #include "util/log.h"
 #include "util/os_misc.h"
+#include "util/u_debug.h"
 
 static const struct amdgpu_device *amdgpu_dev;
-
-bool drm_shim_driver_prefers_first_render_node = true;
 
 static int
 amdgpu_ioctl_noop(int fd, unsigned long request, void *arg)
@@ -51,6 +50,8 @@ amdgpu_ioctl_gem_mmap(int fd, unsigned long request, void *_arg)
    struct shim_bo *bo = drm_shim_bo_lookup(shim_fd, arg->in.handle);
 
    arg->out.addr_ptr = drm_shim_bo_get_mmap_offset(shim_fd, bo);
+
+   drm_shim_bo_put(bo);
 
    return 0;
 }
@@ -225,37 +226,17 @@ drm_shim_amdgpu_select_device(const char *gpu_id)
 void
 drm_shim_driver_init(void)
 {
-   const char *gpu_id = os_get_option("AMDGPU_GPU_ID");
+   const char *gpu_id = debug_get_option("AMDGPU_GPU_ID", "renoir");
 
    drm_shim_amdgpu_select_device(gpu_id);
 
-   shim_device.bus_type = DRM_BUS_PCI;
-   shim_device.driver_name = "amdgpu";
    shim_device.driver_ioctls = amdgpu_ioctls;
    shim_device.driver_ioctl_count = ARRAY_SIZE(amdgpu_ioctls);
 
-   shim_device.version_major = 3;
-   shim_device.version_minor = 54;
+   shim_device.version_major = AC_AMDGPU_DRM_MAJOR;
+   shim_device.version_minor = AC_AMDGPU_DRM_MINOR;
    shim_device.version_patchlevel = 0;
 
    /* make drmGetDevices2 and drmProcessPciDevice happy */
-   static const char uevent_content[] =
-      "DRIVER=amdgpu\n"
-      "PCI_CLASS=30000\n"
-      "PCI_ID=1002:15E7\n"
-      "PCI_SUBSYS_ID=1028:1636\n"
-      "PCI_SLOT_NAME=0000:04:00.0\n"
-      "MODALIAS=pci:v00001002d000015E7sv00001002sd00001636bc03sc00i00\n";
-   drm_shim_override_file(uevent_content, "/sys/dev/char/%d:%d/device/uevent", DRM_MAJOR,
-                          render_node_minor);
-   drm_shim_override_file("0xe9\n", "/sys/dev/char/%d:%d/device/revision", DRM_MAJOR,
-                          render_node_minor);
-   drm_shim_override_file("0x1002", "/sys/dev/char/%d:%d/device/vendor", DRM_MAJOR,
-                          render_node_minor);
-   drm_shim_override_file("0x15e7", "/sys/dev/char/%d:%d/device/device", DRM_MAJOR,
-                          render_node_minor);
-   drm_shim_override_file("0x1002", "/sys/dev/char/%d:%d/device/subsystem_vendor", DRM_MAJOR,
-                          render_node_minor);
-   drm_shim_override_file("0x1636", "/sys/dev/char/%d:%d/device/subsystem_device", DRM_MAJOR,
-                          render_node_minor);
+   drm_shim_pci_device_setup(0x1002, 0x15E7, "0000:04:00.0", "amdgpu");
 }

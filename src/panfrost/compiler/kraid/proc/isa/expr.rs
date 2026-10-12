@@ -5,8 +5,8 @@ use crate::isa::xml::XmlElement;
 use crate::isa::*;
 use proc_macro2::Ident;
 use proc_macro2::TokenStream as TokenStream2;
-use std::rc::Rc;
 
+#[derive(Clone)]
 pub struct FieldIdent {
     pub name: String,
     pub ident: Ident,
@@ -18,26 +18,10 @@ impl ToTokens for FieldIdent {
     }
 }
 
-pub struct LiteralEnum {
-    pub enum_type: Rc<Enum>,
-    pub value_name: String,
-    pub value_ident: Ident,
-}
-
-impl ToTokens for LiteralEnum {
-    fn to_tokens(&self, ts: &mut TokenStream2) {
-        let e_ident = &self.enum_type.ident;
-        let v_ident = &self.value_ident;
-        ts.extend(quote! {
-            #e_ident::#v_ident
-        });
-    }
-}
-
 pub enum Expr {
     Ident(FieldIdent),
-    EnumLiteral(LiteralEnum),
-    UintLiteral(u32),
+    Enum(EnumLiteral),
+    Uint(u32),
     If(Vec<Expr>),
     BitwiseAnd([Box<Expr>; 2]),
     BitwiseOr([Box<Expr>; 2]),
@@ -65,16 +49,12 @@ impl Expr {
     ) -> Result<Expr> {
         if let Some(e) = type_.and_then(|t| enums.get_enum(t)) {
             if let Some(v) = e.get_value(value) {
-                return Ok(Expr::EnumLiteral(LiteralEnum {
-                    enum_type: e.clone(),
-                    value_name: v.name.clone(),
-                    value_ident: v.ident.clone(),
-                }));
+                return Ok(Expr::Enum(EnumLiteral::new(e, v)));
             }
         }
 
         if let Ok(v) = u32::from_str_radix(value, 10) {
-            Ok(Expr::UintLiteral(v))
+            Ok(Expr::Uint(v))
         } else {
             Err(err("Unknown expression literal"))
         }
@@ -147,10 +127,8 @@ impl Expr {
                         return Err(op_err.into());
                     }
                     for i in 1..operands.len() {
-                        if !matches!(
-                            operands[i],
-                            Expr::EnumLiteral(_) | Expr::UintLiteral(_),
-                        ) {
+                        if !matches!(operands[i], Expr::Enum(_) | Expr::Uint(_),)
+                        {
                             return Err(
                                 "inside expression operands should be literals"
                                     .into(),
@@ -201,10 +179,36 @@ impl Expr {
         }
     }
 
-    pub fn as_enum(&self) -> Option<&LiteralEnum> {
+    pub fn as_enum(&self) -> Option<&EnumLiteral> {
         match self {
-            Expr::EnumLiteral(lit) => Some(lit),
+            Expr::Enum(lit) => Some(lit),
             _ => None,
+        }
+    }
+
+    pub fn fields(&self) -> Vec<FieldIdent> {
+        match self {
+            Expr::Ident(ident) => vec![ident.clone()],
+            Expr::If(args) => args.iter().flat_map(Expr::fields).collect(),
+            Expr::BitwiseAnd([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::BitwiseOr([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::BitwiseXor([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::Equal([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::LessThan([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::LessEqual([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::NotEqual([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::LogicalAnd([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::Add([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::Sub([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::RShift([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::LShift([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::Inside(args) => args.iter().flat_map(Expr::fields).collect(),
+            Expr::CountOnes(x) => x.fields(),
+            Expr::Mask(x) => x.fields(),
+            Expr::Slice([v, h, l]) => {
+                [v.fields(), h.fields(), l.fields()].concat()
+            }
+            _ => vec![],
         }
     }
 }
@@ -231,12 +235,12 @@ impl ToTokens for Expr {
             Expr::Ident(ident) => {
                 quote! { u32::from(#ident) }
             }
-            Expr::EnumLiteral(lit) => {
+            Expr::Enum(lit) => {
                 quote! {
                     u32::from(#lit.try_encode(arch)?)
                 }
             }
-            Expr::UintLiteral(u) => quote! { #u },
+            Expr::Uint(u) => quote! { #u },
             Expr::If(args) => {
                 let mut iter = args.iter();
                 let c = iter.next().unwrap();

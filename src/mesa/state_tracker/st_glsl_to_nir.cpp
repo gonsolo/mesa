@@ -365,7 +365,7 @@ st_glsl_to_nir_post_opts(struct st_context *st, struct gl_program *prog,
 
    NIR_PASS(_, nir, nir_opt_intrinsics);
 
-   st_set_prog_affected_state_flags(prog);
+   st_set_prog_affected_state_flags(st, prog);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
    st_update_state_param_locations(st->ctx, prog, nir);
 
@@ -621,6 +621,15 @@ st_link_glsl_to_nir(struct gl_context *ctx,
          prog->info.inputs_read = prog->nir->info.inputs_read;
          prog->DualSlotInputs = prog->nir->info.dual_slot_inputs;
 
+         /* prog->info.inputs_read is the ABI between the gallium driver and the
+          * state tracker, and it is communicated via I/O bases. Recompute bases
+          * now that we've commited to the inputs_read mask to match. This needs
+          * to happen at the last possible moment, because dead code elimination
+          * enabled by complex optimizations can cause inputs_read to change
+          * very late in the compile. Doing it here is the robust choice.
+          */
+         nir_recompute_io_bases(prog->nir, nir_var_shader_in);
+
          /* Initialize st_vertex_program members. */
          st_prepare_vertex_program(prog);
       }
@@ -685,13 +694,13 @@ st_nir_lower_samplers(struct pipe_screen *screen, nir_shader *nir,
    }
 }
 
-static int
+static unsigned
 st_packed_uniforms_type_size(const struct glsl_type *type, bool bindless)
 {
    return glsl_count_dword_slots(type, bindless);
 }
 
-static int
+static unsigned
 st_unpacked_uniforms_type_size(const struct glsl_type *type, bool bindless)
 {
    return glsl_count_vec4_slots(type, false, bindless);

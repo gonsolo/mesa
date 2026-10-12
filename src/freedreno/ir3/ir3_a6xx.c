@@ -448,8 +448,7 @@ parse_src_shift(struct ir3_context *ctx, nir_src **offset_src,
       return 0;
    }
 
-   nir_scalar offset =
-      nir_scalar_chase_movs(nir_get_scalar((*offset_src)->ssa, 0));
+   nir_scalar offset = nir_scalar_resolved((*offset_src)->ssa, 0);
 
    if (!nir_scalar_is_alu(offset) || nir_scalar_alu_op(offset) != nir_op_ishl) {
       return 0;
@@ -498,14 +497,23 @@ struct ldg_stg_offset {
 static struct ldg_stg_offset
 ldg_stg_offset(struct ir3_context *ctx, nir_intrinsic_instr *intr)
 {
-   assert(intr->intrinsic == nir_intrinsic_load_global_ir3 ||
-          intr->intrinsic == nir_intrinsic_store_global_ir3);
+   assert(intr->intrinsic == nir_intrinsic_load_global_offset ||
+          intr->intrinsic == nir_intrinsic_store_global_offset ||
+          intr->intrinsic == nir_intrinsic_load_global ||
+          intr->intrinsic == nir_intrinsic_store_global);
+
+   if (intr->intrinsic == nir_intrinsic_load_global ||
+       intr->intrinsic == nir_intrinsic_store_global) {
+      return (struct ldg_stg_offset){
+         .imm = create_immed(&ctx->build, 0),
+      };
+   }
 
    if (ctx->compiler->gen >= 7) {
       assert(nir_intrinsic_offset_shift(intr) == 0);
    } else {
       ASSERTED unsigned bit_size =
-         intr->intrinsic == nir_intrinsic_load_global_ir3
+          intr->intrinsic == nir_intrinsic_load_global_offset
             ? intr->def.bit_size
             : intr->src[0].ssa->bit_size;
       assert(nir_intrinsic_offset_shift(intr) == ffs(bit_size / 8) - 1);
@@ -513,19 +521,19 @@ ldg_stg_offset(struct ir3_context *ctx, nir_intrinsic_instr *intr)
 
    struct ldg_stg_offset offset = {};
    nir_src *offset_src = nir_get_io_offset_src(intr);
-   int32_t base = nir_intrinsic_base(intr);
+   uint32_t base = nir_intrinsic_base(intr);
    unsigned offset_shift = nir_intrinsic_offset_shift(intr);
    struct ir3_builder *b = &ctx->build;
 
    if (nir_src_is_const(*offset_src)) {
-      int32_t full_imm_offset = base + nir_src_as_int(*offset_src);
-      int32_t full_imm_offset_bytes = full_imm_offset << offset_shift;
+      uint32_t full_imm_offset = base + nir_src_as_uint(*offset_src);
+      uint32_t full_imm_offset_bytes = full_imm_offset << offset_shift;
 
-      /* ldg/stg offset immediate is 13 bits. Note that ldg/stg use byte offsets
-       * even on a6xx.
+      /* ldg/stg offset immediate is 13 bits signed but we only get unsigned
+       * offsets out if NIR so we can only use 12 of those bits. Note that
+       * ldg/stg use byte offsets even on a6xx.
        */
-      if (full_imm_offset_bytes < (1 << 12) &&
-          full_imm_offset_bytes >= -(1 << 12)) {
+      if (full_imm_offset_bytes < (1 << 12)) {
          offset.imm = create_immed(b, full_imm_offset_bytes);
       } else {
          /* The immediate offset does not fit. Generate ldg/stg.a with the
@@ -558,9 +566,8 @@ ldg_stg_offset(struct ir3_context *ctx, nir_intrinsic_instr *intr)
 }
 
 static void
-emit_intrinsic_load_global_ir3(struct ir3_context *ctx,
-                               nir_intrinsic_instr *intr,
-                               struct ir3_instruction **dst)
+emit_intrinsic_load_global(struct ir3_context *ctx, nir_intrinsic_instr *intr,
+                           struct ir3_instruction **dst)
 {
    struct ir3_builder *b = &ctx->build;
    unsigned dest_components = nir_intrinsic_dest_components(intr);
@@ -589,8 +596,7 @@ emit_intrinsic_load_global_ir3(struct ir3_context *ctx,
 }
 
 static void
-emit_intrinsic_store_global_ir3(struct ir3_context *ctx,
-                                nir_intrinsic_instr *intr)
+emit_intrinsic_store_global(struct ir3_context *ctx, nir_intrinsic_instr *intr)
 {
    struct ir3_builder *b = &ctx->build;
    struct ir3_instruction *value, *addr;
@@ -700,7 +706,7 @@ const struct ir3_context_funcs ir3_a6xx_funcs = {
    .emit_intrinsic_store_image = emit_intrinsic_store_image,
    .emit_intrinsic_atomic_image = emit_intrinsic_atomic_image,
    .emit_intrinsic_image_size = emit_intrinsic_image_size,
-   .emit_intrinsic_load_global_ir3 = emit_intrinsic_load_global_ir3,
-   .emit_intrinsic_store_global_ir3 = emit_intrinsic_store_global_ir3,
+   .emit_intrinsic_load_global = emit_intrinsic_load_global,
+   .emit_intrinsic_store_global = emit_intrinsic_store_global,
    .emit_intrinsic_atomic_global = emit_intrinsic_atomic_global,
 };

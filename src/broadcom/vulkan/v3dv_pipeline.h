@@ -51,6 +51,7 @@ struct v3dv_pipeline_key {
    bool sample_alpha_to_one;
    bool software_blend;
    uint8_t cbufs;
+   uint8_t tlb_input_attachment_location[MAX_INPUT_ATTACHMENTS];
    struct {
       enum pipe_format format;
       uint8_t swizzle[4];
@@ -315,6 +316,14 @@ struct v3dv_pipeline_shared_data {
    struct v3dv_shader_variant *variants[BROADCOM_SHADER_STAGES];
 
    struct v3dv_bo *assembly_bo;
+
+   /* Owning VkPipelineCache, used for VK_EXT_device_memory_report
+    * attribution of assembly_bo. Pipeline cache is the correct owner (rather
+    * than whichever pipeline first populated this entry) since shared_data is
+    * refcounted and shared across any pipeline that hits this blake3_key.
+    */
+   VkObjectType owner_type;
+   uint64_t owner_handle;
 };
 
 struct v3dv_pipeline_executable_data {
@@ -330,9 +339,6 @@ struct v3dv_pipeline {
 
    VkShaderStageFlags active_stages;
    VkPipelineCreateFlagBits2KHR flags;
-
-   struct v3dv_render_pass *pass;
-   struct v3dv_subpass *subpass;
 
    struct v3dv_pipeline_stage *stages[BROADCOM_SHADER_STAGES];
 

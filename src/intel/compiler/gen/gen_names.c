@@ -55,88 +55,6 @@ from_string(const char *str, int size, bool *valid)            \
    return *valid ? (type)v : (type)0;                          \
 }
 
-static const char *const gen_opcode_names[] = {
-   [GEN_OP_ILLEGAL]  = "illegal",
-   [GEN_OP_ADD3]     = "add3",
-   [GEN_OP_ADD]      = "add",
-   [GEN_OP_ADDC]     = "addc",
-   [GEN_OP_AND]      = "and",
-   [GEN_OP_ASR]      = "asr",
-   [GEN_OP_AVG]      = "avg",
-   [GEN_OP_BFE]      = "bfe",
-   [GEN_OP_BFI1]     = "bfi1",
-   [GEN_OP_BFI2]     = "bfi2",
-   [GEN_OP_BFN]      = "bfn",
-   [GEN_OP_BFREV]    = "bfrev",
-   [GEN_OP_BRC]      = "brc",
-   [GEN_OP_BRD]      = "brd",
-   [GEN_OP_BREAK]    = "break",
-   [GEN_OP_CALL]     = "call",
-   [GEN_OP_CALLA]    = "calla",
-   [GEN_OP_CBIT]     = "cbit",
-   [GEN_OP_CMP]      = "cmp",
-   [GEN_OP_CMPN]     = "cmpn",
-   [GEN_OP_CONTINUE] = "continue",
-   [GEN_OP_CSEL]     = "csel",
-   [GEN_OP_DP2]      = "dp2",
-   [GEN_OP_DP3]      = "dp3",
-   [GEN_OP_DP4]      = "dp4",
-   [GEN_OP_DP4A]     = "dp4a",
-   [GEN_OP_DPAS]     = "dpas",
-   [GEN_OP_DPH]      = "dph",
-   [GEN_OP_ELSE]     = "else",
-   [GEN_OP_ENDIF]    = "endif",
-   [GEN_OP_FBH]      = "fbh",
-   [GEN_OP_FBL]      = "fbl",
-   [GEN_OP_FRC]      = "frc",
-   [GEN_OP_GOTO]     = "goto",
-   [GEN_OP_HALT]     = "halt",
-   [GEN_OP_IF]       = "if",
-   [GEN_OP_JMPI]     = "jmpi",
-   [GEN_OP_JOIN]     = "join",
-   [GEN_OP_LINE]     = "line",
-   [GEN_OP_LRP]      = "lrp",
-   [GEN_OP_LZD]      = "lzd",
-   [GEN_OP_MAC]      = "mac",
-   [GEN_OP_MACH]     = "mach",
-   [GEN_OP_MACL]     = "macl",
-   [GEN_OP_MAD]      = "mad",
-   [GEN_OP_MADM]     = "madm",
-   [GEN_OP_MATH]     = "math",
-   [GEN_OP_MOV]      = "mov",
-   [GEN_OP_MOVI]     = "movi",
-   [GEN_OP_MUL]      = "mul",
-   [GEN_OP_NOP]      = "nop",
-   [GEN_OP_NOT]      = "not",
-   [GEN_OP_OR]       = "or",
-   [GEN_OP_PLN]      = "pln",
-   [GEN_OP_RET]      = "ret",
-   [GEN_OP_RNDD]     = "rndd",
-   [GEN_OP_RNDE]     = "rnde",
-   [GEN_OP_RNDU]     = "rndu",
-   [GEN_OP_RNDZ]     = "rndz",
-   [GEN_OP_ROL]      = "rol",
-   [GEN_OP_ROR]      = "ror",
-   [GEN_OP_SEL]      = "sel",
-   [GEN_OP_SEND]     = "send",
-   [GEN_OP_SENDC]    = "sendc",
-   [GEN_OP_SENDS]    = "sends",
-   [GEN_OP_SENDSC]   = "sendsc",
-   [GEN_OP_SHL]      = "shl",
-   [GEN_OP_SHR]      = "shr",
-   [GEN_OP_SMOV]     = "smov",
-   [GEN_OP_SRND]     = "srnd",
-   [GEN_OP_SUBB]     = "subb",
-   [GEN_OP_SYNC]     = "sync",
-   [GEN_OP_WAIT]     = "wait",
-   [GEN_OP_WHILE]    = "while",
-   [GEN_OP_XOR]      = "xor",
-};
-
-DEFINE_TO_STRING(gen_opcode_to_string, gen_opcode, gen_opcode_names)
-DEFINE_FROM_STRING(gen_opcode_from_string, gen_opcode, gen_opcode_names)
-
-
 static const char *const gen_reg_type_names[] = {
    [GEN_TYPE_UB] = "ub",
    [GEN_TYPE_B]  = "b",
@@ -271,7 +189,6 @@ static const char *const gen_math_function_names[] = {
    [GEN_MATH_RSQ]               = "rsq",
    [GEN_MATH_SIN]               = "sin",
    [GEN_MATH_COS]               = "cos",
-   [GEN_MATH_FDIV]              = "fdiv",
    [GEN_MATH_POW]               = "pow",
    [GEN_MATH_INT_DIV_BOTH]      = "intdiv_qr",
    [GEN_MATH_INT_DIV_QUOTIENT]  = "intdiv_q",
@@ -280,9 +197,36 @@ static const char *const gen_math_function_names[] = {
    [GEN_MATH_RSQRTM]            = "rsqrtm",
 };
 
-DEFINE_TO_STRING(gen_math_function_to_string, gen_math, gen_math_function_names)
-DEFINE_FROM_STRING(gen_math_function_from_string, gen_math, gen_math_function_names)
+const char *
+gen_math_function_to_string(const struct intel_device_info *devinfo, gen_math value)
+{
+   if (value == GEN_MATH_FDIV) {
+      if (devinfo->verx10 >= 350)
+         return "tanh";
+      return "fdiv";
+   }
 
+   return gen_math_function_names[value];
+}
+
+gen_math
+gen_math_function_from_string(const struct intel_device_info *devinfo, const char *str, int size, bool *valid)
+{
+   assert(valid);
+
+   if (string_matches("fdiv", str, size)) {
+      *valid = true;
+      return GEN_MATH_FDIV;
+   }
+   if (string_matches("tanh", str, size)) {
+      *valid = devinfo->verx10 >= 350;
+      return GEN_MATH_TANH;
+   }
+
+   const int v = LOOKUP_BY_NAME(gen_math_function_names, str, size);
+   *valid = v >= 0;
+   return *valid ? (gen_math)v : (gen_math)0;
+}
 
 static const char *const gen_sync_function_names[] = {
    [GEN_SYNC_NOP] = "nop",
@@ -361,8 +305,10 @@ gen_sfid_from_string(const struct intel_device_info *devinfo,
 static const char *const gen_lsc_opcode_names[] = {
    [LSC_OP_LOAD]             = "load",
    [LSC_OP_LOAD_CMASK]       = "load_cmask",
+   [LSC_OP_LOAD_2D_BLOCK]    = "load_block2d",
    [LSC_OP_STORE]            = "store",
    [LSC_OP_STORE_CMASK]      = "store_cmask",
+   [LSC_OP_STORE_2D_BLOCK]   = "store_block2d",
    [LSC_OP_ATOMIC_INC]       = "atomic_inc",
    [LSC_OP_ATOMIC_DEC]       = "atomic_dec",
    [LSC_OP_ATOMIC_LOAD]      = "atomic_load",
@@ -553,63 +499,143 @@ gen_lsc_cache_ctrl_from_string(const struct intel_device_info *devinfo,
    return *valid ? (unsigned)ctrl : 0;
 }
 
+static const char * const lsc_addr_type_size[] = {
+   [LSC_ADDR_TYPE_SIZE_FLAT_A64_UA32_INDEX] = "flat_a64_+_ua32_index",
+   [LSC_ADDR_TYPE_SIZE_FLAT_A64_IA32_INDEX] = "flat_a64_+_ia32_index",
+   [LSC_ADDR_TYPE_SIZE_FLAT_A64_A64_INDEX] = "flat_a64_+_a64_index",
+   [LSC_ADDR_TYPE_SIZE_STATEFUL_A32_INDEX] = "stateful_a32",
+};
 
-static const char *const gen_sampler_msg_type_names[] = {
-   [GEN_SAMPLER_MESSAGE_SAMPLE]                     = "sample",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_BIAS]                = "sample_b",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_LOD]                 = "sample_l",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_COMPARE]             = "sample_c",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_DERIVS]              = "sample_d",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_BIAS_COMPARE]        = "sample_b_c",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_LOD_COMPARE]         = "sample_l_c",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_LD]                  = "ld",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_GATHER4]             = "gather4",
-   [GEN_SAMPLER_MESSAGE_LOD]                        = "lod",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_RESINFO]             = "resinfo",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_SAMPLEINFO]          = "sampleinfo",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_L]       = "gather4_l",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_B]       = "gather4_b",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_I]       = "gather4_i",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_GATHER4_C]           = "gather4_c",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO]          = "gather4_po",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_COMPARE_MLOD]    = "sample_c_mlod",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_DERIV_COMPARE]       = "sample_d_c",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_I_C]     = "gather4_i_c",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_L_C]     = "gather4_l_c",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_LZ]                  = "sample_lz",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_C_LZ]                = "sample_c_lz",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_LD_LZ]               = "ld_lz",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_LD2DMS_W]            = "ld2dms_w",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_LD_MCS]              = "ld_mcs",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_LD2DMS]              = "ld2dms",
-   [GEN_SAMPLER_MESSAGE_SAMPLE_LD2DSS]              = "ld2dss",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_PO]              = "sample_po",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_PO_BIAS]         = "sample_po_b",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_PO_LOD]          = "sample_po_l",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_PO_COMPARE]      = "sample_po_c",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_PO_DERIVS]       = "sample_po_d",
-   [GEN_XE3_SAMPLER_MESSAGE_SAMPLE_PO_BIAS_COMPARE] = "sample_po_b_c",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_PO_LOD_COMPARE]  = "sample_po_l_c",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_L]    = "gather4_po_l",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_B]    = "gather4_po_b",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_I]    = "gather4_po_i",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_C]    = "gather4_po_c",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_PO_D_C]          = "sample_po_d_c",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_I_C]  = "gather4_po_i_c",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_L_C]  = "gather4_po_l_c",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_PO_LZ]           = "sample_po_lz",
-   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_PO_C_LZ]         = "sample_po_c_lz",
+DEFINE_TO_STRING(gen_lsc_addr_type_size_to_string, enum lsc_addr_type_size, lsc_addr_type_size)
+DEFINE_FROM_STRING(gen_lsc_addr_type_size_from_string, enum lsc_addr_type_size, lsc_addr_type_size)
+
+static const char * const lsc_urb_addr_type_size[] = {
+   [LSC_URB_ADDR_TYPE_SIZE_A32_A32_INDEX] = "base_a32_+_a32_index",
+   [LSC_URB_ADDR_TYPE_SIZE_A64] = "a64",
+};
+
+DEFINE_TO_STRING(gen_lsc_urb_addr_type_size_to_string, enum lsc_urb_addr_type_size, lsc_urb_addr_type_size)
+DEFINE_FROM_STRING(gen_lsc_urb_addr_type_size_from_string, enum lsc_urb_addr_type_size, lsc_urb_addr_type_size)
+
+static const char * const gen_gateway_64bit_opcode_names[] = {
+   [GEN_MESSAGE_GATEWAY_64BIT_SFID_SIGNAL_EOT] = "eot",
+};
+
+DEFINE_TO_STRING(gen_gateway_64bit_opcode_to_string, enum gen_gateway_64bit_opcode, gen_gateway_64bit_opcode_names)
+DEFINE_FROM_STRING(gen_gateway_64bit_opcode_from_string, enum gen_gateway_64bit_opcode, gen_gateway_64bit_opcode_names)
+
+static const char * const gen_rt_64bit_opcode_names[] = {
+   [GFX35_RENDER_TARGET_WRITE] = "write",
+   [GFX35_RENDER_TARGET_READ] = "read",
+   [GFX35_RENDER_TARGET_DUAL_SOURCE_WRITE] = "dual_source_write",
+};
+
+DEFINE_TO_STRING(gen_rt_64bit_opcode_to_string, uint8_t, gen_rt_64bit_opcode_names)
+DEFINE_FROM_STRING(gen_rt_64bit_opcode_from_string, uint8_t, gen_rt_64bit_opcode_names)
+
+struct gen_sampler_msg_type_name {
+   const char *name;
+   unsigned min_ver;
+};
+
+static const struct gen_sampler_msg_type_name gen_sampler_msg_type_names[] = {
+   [GEN_SAMPLER_MESSAGE_SAMPLE]                     = { "sample" },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_BIAS]                = { "sample_b" },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_LOD]                 = { "sample_l" },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_COMPARE]             = { "sample_c" },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_DERIVS]              = { "sample_d" },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_BIAS_COMPARE]        = { "sample_b_c" },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_LOD_COMPARE]         = { "sample_l_c" },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_LD]                  = { "ld" },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_GATHER4]             = { "gather4" },
+   [GEN_SAMPLER_MESSAGE_LOD]                        = { "lod" },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_RESINFO]             = { "resinfo" },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_SAMPLEINFO]          = { "sampleinfo" },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_L]       = { "gather4_l", 20 },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_B]       = { "gather4_b", 20 },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_I]       = { "gather4_i", 20 },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_GATHER4_C]           = { "gather4_c" },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO]          = { "gather4_po" },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_MLOD]            = { "sample_mlod", 20 },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_COMPARE_MLOD]    = { "sample_c_mlod", 20 },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_DERIV_COMPARE]       = { "sample_d_c" },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_I_C]     = { "gather4_i_c", 20 },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_L_C]     = { "gather4_l_c", 20 },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_LZ]                  = { "sample_lz" },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_C_LZ]                = { "sample_c_lz" },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_LD_LZ]               = { "ld_lz" },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_LD2DMS_W]            = { "ld2dms_w" },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_LD_MCS]              = { "ld_mcs" },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_LD2DMS]              = { "ld2dms" },
+   [GEN_SAMPLER_MESSAGE_SAMPLE_LD2DSS]              = { "ld2dss" },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_PO]              = { "sample_po", 20 },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_PO_BIAS]         = { "sample_po_b", 20 },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_PO_LOD]          = { "sample_po_l", 20 },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_PO_COMPARE]      = { "sample_po_c", 20 },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_PO_DERIVS]       = { "sample_po_d", 20 },
+   [GEN_XE3_SAMPLER_MESSAGE_SAMPLE_PO_BIAS_COMPARE] = { "sample_po_b_c", 30 },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_PO_LOD_COMPARE]  = { "sample_po_l_c", 20 },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO]      = { "gather4_po", 20 },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_L]    = { "gather4_po_l", 20 },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_B]    = { "gather4_po_b", 20 },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_I]    = { "gather4_po_i", 20 },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_C]    = { "gather4_po_c", 20 },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_PO_D_C]          = { "sample_po_d_c", 20 },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_I_C]  = { "gather4_po_i_c", 20 },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_L_C]  = { "gather4_po_l_c", 20 },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_PO_LZ]           = { "sample_po_lz", 20 },
+   [GEN_XE2_SAMPLER_MESSAGE_SAMPLE_PO_C_LZ]         = { "sample_po_c_lz", 20 },
 };
 
 const char *
 gen_sampler_msg_type_to_string(const struct intel_device_info *devinfo,
                                unsigned msg_type)
 {
-   /* Value 18 aliases GATHER4_PO_C pre-Xe2 and MLOD on Xe2+. */
+   if (msg_type == GEN_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO)
+      return devinfo->ver >= 20 ? NULL : "gather4_po";
    if (msg_type == GEN_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_C)
       return devinfo->ver >= 20 ? "sample_mlod" : "gather4_po_c";
 
-   return LOOKUP_BY_VALUE(gen_sampler_msg_type_names, msg_type);
+   if (msg_type >= ARRAY_SIZE(gen_sampler_msg_type_names))
+      return NULL;
+
+   const struct gen_sampler_msg_type_name *name =
+      &gen_sampler_msg_type_names[msg_type];
+   return name->name && devinfo->ver >= name->min_ver ? name->name : NULL;
+}
+
+unsigned
+gen_sampler_msg_type_from_string(const struct intel_device_info *devinfo,
+                                 const char *str, int size, bool *valid)
+{
+   assert(valid);
+
+   if (string_matches("gather4_po", str, size)) {
+      *valid = true;
+      return devinfo->ver >= 20 ?
+         GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO :
+         GEN_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO;
+   }
+   if (string_matches("gather4_po_c", str, size)) {
+      *valid = true;
+      return devinfo->ver >= 20 ?
+         GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_C :
+         GEN_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_C;
+   }
+
+   for (unsigned msg_type = 0;
+        msg_type < ARRAY_SIZE(gen_sampler_msg_type_names); msg_type++) {
+      const struct gen_sampler_msg_type_name *name =
+         &gen_sampler_msg_type_names[msg_type];
+      if (name->name && devinfo->ver >= name->min_ver &&
+          string_matches(name->name, str, size)) {
+         *valid = true;
+         return msg_type;
+      }
+   }
+
+   *valid = false;
+   return 0;
 }
 
 /* TODO: This was initially based on the unambiguous cases from brw_sampler.c,

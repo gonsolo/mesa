@@ -44,7 +44,7 @@ traces:
     freedreno-a618:
       checksum: e0e18dcc50ab2e23cead650d64469178
     zink-a618:
-      checksum: b7e0cdb0db74ea9a31fb7a75ae0d76fc
+      checksum: b007c69ad3d9ede36bac6b2fe356722b
 
   valve/counterstrike-source-v2.trace:
     freedreno-a306:
@@ -77,7 +77,7 @@ traces:
     freedreno-a530:
       label: [unsupported]
     freedreno-a618:
-      checksum: b5fdea0f949c4c02c86b5785e0556dfe
+      checksum: 116fa212b89071fc064be1023f153bf1
     zink-a618:
       label: [skip, flakes]
       checksum: 96f7f231042f892c7d11c91defd7ecc1
@@ -141,7 +141,7 @@ traces:
     freedreno-a530:
       label: [skip, flakes]
     freedreno-a618:
-      checksum: 1b9a79f0088a3ddb5723f217d37cee74
+      checksum: c8608d54cc6298476a2b60686d152dbc
     zink-a618:
       checksum: e4e5415f7a81a6bd14b7ff8f67083cbf
 
@@ -297,7 +297,7 @@ traces:
     freedreno-a618:
       checksum: b0ac8fb4b2b2268cfb87944730125886
     zink-a618:
-      checksum: bd713b79eaa2a7ebbf4ebebab3577e40
+      checksum: 47c816354d1ea4dcb64827394abf089e
 
   humus/DynamicBranching3-v2.trace:
     freedreno-a306:

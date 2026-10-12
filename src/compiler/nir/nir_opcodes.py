@@ -128,8 +128,6 @@ tfloat = "float"
 tint = "int"
 tbool = "bool"
 tbool1 = "bool1"
-tbool8 = "bool8"
-tbool16 = "bool16"
 tbool32 = "bool32"
 tuint = "uint"
 tuint8 = "uint8"
@@ -161,7 +159,7 @@ def type_sizes(type_):
     if type_has_size(type_):
         return [type_size(type_)]
     elif type_ == 'bool':
-        return [1, 8, 16, 32]
+        return [1, 32]
     elif type_ == 'float':
         return [16, 32, 64]
     else:
@@ -364,14 +362,20 @@ for src_t in [tint, tuint, tfloat, tbool]:
               # an uint.", but we define the NIR opcodes the SPIRV way.
               if dst_t == tuint:
                    min = "0.0"
-                   max = "u_uintN_max({})".format(dst_bit_size)
+                   # 2^dst_bit_size is a power of 2 and exactly representable
+                   # in float, avoiding the rounding issue with u_uintN_max().
+                   max = "{}.0".format(2 ** dst_bit_size)
               else:
                    min = "u_intN_min({})".format(dst_bit_size)
-                   max = "u_intN_max({})".format(dst_bit_size)
+                   # 2^(dst_bit_size-1) is exactly representable in float,
+                   # unlike i_intN_max() which rounds up when converted.
+                   max = "{}.0".format(2 ** (dst_bit_size - 1))
               conv_expr = f"""
-                dst = src0;
-                if (src0 < {min} || src0 > {max}) {{
+                if (isnan(src0) || src0 < {min} || src0 >= {max}) {{
                    poison = true;
+                   dst = 0;
+                }} else {{
+                   dst = src0;
                 }}
               """
               unop_numeric_convert("{0}2{1}{2}".format(src_t[0], dst_t[0],
@@ -443,6 +447,7 @@ unop("fquantize2f16", tfloat32, "(fabsf(src0) < ldexpf(1.0, -14)) ? copysignf(0.
 
 unop("fsin", tfloat, "bit_size == 64 ? sin(src0) : sinf(src0)")
 unop("fcos", tfloat, "bit_size == 64 ? cos(src0) : cosf(src0)")
+unop("ftanh", tfloat, "bit_size == 64 ? tanh(src0) : tanhf(src0)")
 
 # dfrexp
 unop_convert("frexp_exp", tint32, tfloat, "frexp(src0, &dst);", valid_fp_math_ctrl = preserve_inf + preserve_nan + exact)
@@ -508,10 +513,10 @@ dst.x = (src0.x & 0xffff) | (src0.y << 16);
 """)
 
 unop_horiz("pack_uvec4_to_uint", 1, tuint32, 4, tuint32, """
-dst.x = (src0.x <<  0) |
-        (src0.y <<  8) |
-        (src0.z << 16) |
-        (src0.w << 24);
+dst.x = ((src0.x & 0xff) <<  0) |
+        ((src0.y & 0xff) <<  8) |
+        ((src0.z & 0xff) << 16) |
+        ((src0.w & 0xff) << 24);
 """)
 
 unop_horiz("pack_32_4x8", 1, tuint32, 4, tuint8,
@@ -649,26 +654,21 @@ def binop_compare(name, ty, alg_props, const_expr, description = "", ty2=None,
                   valid_fp_math_ctrl=None):
    binop_convert(name, tbool1, ty, alg_props, const_expr, description, ty2, False, valid_fp_math_ctrl)
 
-def binop_compare8(name, ty, alg_props, const_expr, description = "", ty2=None,
-                   valid_fp_math_ctrl=None):
-   binop_convert(name, tbool8, ty, alg_props, const_expr, description, ty2, False, valid_fp_math_ctrl)
-
-def binop_compare16(name, ty, alg_props, const_expr, description = "", ty2=None,
-                    valid_fp_math_ctrl=None):
-   binop_convert(name, tbool16, ty, alg_props, const_expr, description, ty2, False, valid_fp_math_ctrl)
-
 def binop_compare32(name, ty, alg_props, const_expr, description = "", ty2=None,
                     valid_fp_math_ctrl=None):
    binop_convert(name, tbool32, ty, alg_props, const_expr, description, ty2, False, valid_fp_math_ctrl)
+
+def binop_compare_pan(name, ty, alg_props, const_expr, description = "", ty2=None,
+                      valid_fp_math_ctrl=None):
+   binop_convert(name, tuint, ty, alg_props, const_expr, description, ty2, False, valid_fp_math_ctrl)
 
 def binop_compare_all_sizes(name, ty, alg_props, const_expr, description = "", ty2=None):
    valid_fp_math_ctrl = None
    if type_base_type(ty) == 'float':
       valid_fp_math_ctrl = preserve_inf + preserve_nan
    binop_compare(name, ty, alg_props, const_expr, description, ty2, valid_fp_math_ctrl)
-   binop_compare8(name + "8", ty, alg_props, const_expr, description, ty2, valid_fp_math_ctrl)
-   binop_compare16(name + "16", ty, alg_props, const_expr, description, ty2, valid_fp_math_ctrl)
    binop_compare32(name + "32", ty, alg_props, const_expr, description, ty2, valid_fp_math_ctrl)
+   binop_compare_pan(name + "_pan", ty, alg_props, const_expr + " ? -1 : 0", description, ty2, valid_fp_math_ctrl)
 
 def binop_horiz(name, out_size, out_type, src1_size, src1_type, src2_size,
                 src2_type, const_expr, description = ""):
@@ -710,10 +710,6 @@ def binop_reduce_all_sizes(name, output_size, src_type, prereduce_expr,
       valid_fp_math_ctrl = preserve_inf + preserve_nan
    binop_reduce(name, output_size, tbool1, src_type, prereduce_expr,
                 reduce_expr, final_expr, "", description, valid_fp_math_ctrl)
-   binop_reduce("b8" + name[1:], output_size, tbool8, src_type, prereduce_expr,
-                reduce_expr, final_expr, "", description, valid_fp_math_ctrl)
-   binop_reduce("b16" + name[1:], output_size, tbool16, src_type, prereduce_expr,
-                reduce_expr, final_expr, "", description, valid_fp_math_ctrl)
    binop_reduce("b32" + name[1:], output_size, tbool32, src_type, prereduce_expr,
                 reduce_expr, final_expr, "", description, valid_fp_math_ctrl)
 
@@ -726,6 +722,12 @@ if (nir_is_rounding_mode_rtz(execution_mode, bit_size)) {
 } else {
    dst = src0 + src1;
 }
+""")
+binop("fadd_rtne", tfloat, _2src_commutative + inexact_associative,"""
+dst = src0 + src1;
+""", description = """
+Used by lower_round_even in nir_lower_double_ops to correctly round regardless
+of the rounding mode set for the shader.
 """)
 binop("iadd", tint, _2src_commutative + associative, "(uint64_t)src0 + (uint64_t)src1")
 binop("iadd_sat", tint, _2src_commutative, """
@@ -946,10 +948,10 @@ binop_compare_all_sizes("ine", tint, _2src_commutative, "src0 != src1")
 binop_compare_all_sizes("ult", tuint, "", "src0 < src1")
 binop_compare_all_sizes("uge", tuint, "", "src0 >= src1")
 
-binop_compare_all_sizes("bitnz", tuint, "", "((uint64_t)src0 >> (src1 & (bit_size - 1)) & 0x1) == 0x1",
+binop_compare("bitnz", tuint, "", "((uint64_t)src0 >> (src1 & (bit_size - 1)) & 0x1) == 0x1",
    "only uses the least significant bits like SM5 shifts", tuint32)
 
-binop_compare_all_sizes("bitz", tuint, "", "((uint64_t)src0 >> (src1 & (bit_size - 1)) & 0x1) == 0x0",
+binop_compare("bitz", tuint, "", "((uint64_t)src0 >> (src1 & (bit_size - 1)) & 0x1) == 0x0",
    "only uses the least significant bits like SM5 shifts", tuint32)
 
 # integer-aware GLSL-style comparisons that compare floats and ints
@@ -1249,15 +1251,12 @@ triop("fcsel", tfloat32, selection, "(src0 != 0.0f) ? src1 : src2",
 opcode("bcsel", 0, tuint, [0, 0, 0],
        [tbool1, tuint, tuint], False, selection, "src0 ? src1 : src2",
        description = csel_description.format("a 1-bit", "0 vs 1"))
-opcode("b8csel", 0, tuint, [0, 0, 0],
-       [tbool8, tuint, tuint], False, selection, "src0 ? src1 : src2",
-       description = csel_description.format("an 8-bit", "0 vs ~0"))
-opcode("b16csel", 0, tuint, [0, 0, 0],
-       [tbool16, tuint, tuint], False, selection, "src0 ? src1 : src2",
-       description = csel_description.format("a 16-bit", "0 vs ~0"))
 opcode("b32csel", 0, tuint, [0, 0, 0],
        [tbool32, tuint, tuint], False, selection, "src0 ? src1 : src2",
        description = csel_description.format("a 32-bit", "0 vs ~0"))
+opcode("bcsel_pan", 0, tuint, [0, 0, 0],
+       [tuint, tuint, tuint], False, selection, "src0 ? src1 : src2",
+       description = csel_description.format("a same-sized", "0 vs ~0"))
 
 triop("icsel_eqz", tint, selection, "(src0 == 0) ? src1 : src2")
 
@@ -1392,6 +1391,17 @@ if (bits == 0) {
 }
 """)
 
+# Etnaviv-specific bitfield insert. The hardware bit_insert reads the bit offset
+# and bit count from the two channels of the third source, so they are packed
+# into one vec2.
+opcode("bitfield_insert_etna", 0, tuint, [0, 0, 2],
+       [tuint, tuint, tint32], False, "", """
+unsigned base = src0, insert = src1;
+int offset = src2.x, bits = src2.y;
+unsigned mask = ((1ull << bits) - 1) << offset;
+dst = (base & ~mask) | ((insert << offset) & mask);
+""")
+
 quadop_horiz("vec4", 4, 1, 1, 1, 1, """
 dst.x = src0.x;
 dst.y = src1.x;
@@ -1478,6 +1488,24 @@ triop_shift_ir3("shlm_ir3", "<<", "&")
 triop_shift_ir3("shrg_ir3", ">>", "|")
 triop_shift_ir3("shlg_ir3", "<<", "|")
 triop("andg_ir3", tuint, _2src_commutative, "(src0 & src1) | src2")
+
+def triop_shift_pan(name, type0, shift_expr):
+    shift_decl = "uint8_t shift_mask = (bit_size - 1); \
+                  uint8_t shift = src1 & shift_mask;"
+    opcode(name + '_and_pan', 0, type0, [0, 0, 0], [type0, tuint8, tuint],
+           False, "", f"{shift_decl}; dst = ({shift_expr}) & src2;")
+    opcode(name + '_or_pan', 0, type0, [0, 0, 0], [type0, tuint8, tuint],
+           False, "", f"{shift_decl}; dst = ({shift_expr}) | src2;")
+    opcode(name + '_xor_pan', 0, type0, [0, 0, 0], [type0, tuint8, tuint],
+           False, "", f"{shift_decl}; dst = ({shift_expr}) ^ src2;")
+
+triop_shift_pan("arshift", tint, "src0 >> shift")
+triop_shift_pan("lshift", tuint, "src0 << shift")
+triop_shift_pan("rshift", tuint, "src0 >> shift")
+triop_shift_pan("lrot", tuint, "(src0 << shift) |\
+                                (src0 >> ((-shift) & shift_mask))")
+triop_shift_pan("rrot", tuint, "(src0 >> shift) |\
+                                (src0 << ((-shift) & shift_mask))")
 
 # r600/gcn specific instruction that evaluates unnormalized cube texture coordinates
 # and face index
@@ -1600,11 +1628,11 @@ opcode("bounds_agx", 0, tint, [0, 0, 0],
        [tint, tint, tint], False,
        "", "src1 <= src2 ? src0 : 0")
 
-binop_convert("interleave", tuint32, tuint16, "", """
+binop_convert("interleave", tuint32, tuint, "", """
       dst = 0;
       for (unsigned bit = 0; bit < 16; bit++) {
-          dst |= (src0 & (1 << bit)) << bit;
-          dst |= (src1 & (1 << bit)) << (bit + 1);
+          dst |= ((uint32_t)src0 & (1 << bit)) << bit;
+          dst |= ((uint32_t)src1 & (1 << bit)) << (bit + 1);
       }""", description="""
       Interleave bits of 16-bit integers to calculate a 32-bit integer. This can
       be used as-is for Morton encoding.
@@ -1627,6 +1655,12 @@ float src0_f = get_float_source(src0_cv, execution_mode, 32);
 float src1_f = get_float_source(src1_cv, execution_mode, 32);
 dst = (src0_f > src1_f || isnan(src1_f)) ? src0 : src1;
 """, valid_fp_math_ctrl = preserve_inf + preserve_nan)
+
+# Intel multiply-adds
+triop("imad_32x16_intel", tint32, "", "(src0 * (int16_t) src1) + src2",
+      description = "Multiply 32-bits with low 16-bits, with sign extension, then add a 32-bit value")
+triop("umad_32x16_intel", tuint32, "", "(src0 * (uint16_t) src1) + src2",
+      description = "Multiply 32-bits with low 16-bits, with zero extension, then add a 32-bit value")
 
 # NVIDIA PRMT
 opcode("prmt_nv", 0, tuint32, [0, 0, 0], [tuint32, tuint32, tuint32],
@@ -2001,6 +2035,25 @@ triop("bffma", tuint16, _2src_commutative, """
     const float c = _mesa_bfloat16_bits_to_float(src2);
     dst = _mesa_float_to_bfloat16_bits_rte(fmaf(a, b, c));
 """, valid_fp_math_ctrl = preserve_sz_inf_nan + exact)
+
+opcode("bfmul_mixed_intel",
+       0, tuint16,
+       [0, 0], [tuint16, tfloat32],
+       False, "", """
+   const float a = _mesa_bfloat16_bits_to_float(src0);
+   const float b = src1;
+   dst = _mesa_float_to_bfloat16_bits_rte(a * b);
+""", "like bfmul but with f32 src1", valid_fp_math_ctrl = preserve_sz_inf_nan + exact)
+
+opcode("bffma_mixed_intel",
+       0, tuint16,
+       [0, 0, 0], [tfloat32, tuint16, tuint16],
+       False, "", """
+    const float a = src0;
+    const float b = _mesa_bfloat16_bits_to_float(src1);
+    const float c = _mesa_bfloat16_bits_to_float(src2);
+    dst = _mesa_float_to_bfloat16_bits_rte(fmaf(a, b, c));
+""", "like bffma but with f32 src0", valid_fp_math_ctrl = preserve_sz_inf_nan + exact)
 
 binop_reduce("bfdot", 1, tuint16, tuint16,
              "_mesa_bfloat16_bits_to_float({src0}) * _mesa_bfloat16_bits_to_float({src1})",

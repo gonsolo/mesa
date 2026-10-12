@@ -39,20 +39,48 @@ void
 intel_compute_engine_async_threads_limit(const struct intel_device_info *devinfo,
                                          uint32_t hw_threads_in_wg,
                                          bool slm_or_barrier_enabled,
+                                         bool uses_fence,
                                          uint8_t *ret_pixel_async_compute_thread_limit,
                                          uint8_t *ret_z_pass_async_compute_thread_limit,
                                          uint8_t *ret_np_z_async_throttle_settings)
 {
-   /* Spec recommended SW values.
+   /*
     * IMPORTANT: values set to this variables are HW values
+    *
+    * Bspec 45765: Pixel Async compute thread limit field states:
+    *
+    *    When SLM or barriers are enabled, the MAX_API_thread limit must be
+    *    less than or equal to the throttle limit to prevent deadlocks.
+    *
+    * These limit talks about when 3D pipe is active or Z-pass (fixed function
+    * units) running and impose maximum number of active Compute CS threads to
+    * run in DSS.
+    *
+    * For example with Max 8, we could have max 8 threads * 8 Xe cores which
+    * gives us 64threads active for compute. But if there is a cross thread
+    * dependency and if we don't launch enough threads, we will hit deadlock.
+    *
+    * we found such a case in Witcher3 workload.
+    *
+    *    Compute walker tries to dispatch 114x1x1 threads with 2 threads per
+    *    thread groups in SIMD 16 mode. 1 thread group does UGM fetch and
+    *    another does UGM fence. Memory update is supposed to happen from
+    *    differnt thread groups of the same walker.
+    *
+    *    Since we set the max of 8 threads per DSS for compute engine while
+    *    running things in async mode, we were not launching other thread
+    *    groups which leads to deadlock.
+    *
+    * Best way to deal with such kind of scenario is don't apply any limit
+    * and use the default setting.
     */
-   uint8_t pixel_async_compute_thread_limit = 2;
+   uint8_t pixel_async_compute_thread_limit = uses_fence ? 0 : 2;
    uint8_t z_pass_async_compute_thread_limit = 0;
    uint8_t np_z_async_throttle_settings = 0;
    bool has_vrt = devinfo->verx10 >= 300 && !INTEL_DEBUG(DEBUG_NO_VRT);
 
    /* When VRT is enabled async threads limits don't have effect */
-   if (!slm_or_barrier_enabled || has_vrt) {
+   if (!slm_or_barrier_enabled || has_vrt || uses_fence) {
       *ret_pixel_async_compute_thread_limit = pixel_async_compute_thread_limit;
       *ret_z_pass_async_compute_thread_limit = z_pass_async_compute_thread_limit;
       *ret_np_z_async_throttle_settings = np_z_async_throttle_settings;
@@ -228,10 +256,78 @@ intel_compute_threads_group_dispatch_size(uint32_t hw_threads_in_wg)
     */
    switch (hw_threads_in_wg) {
    case 0 ... 16:
-      return 0;
+      return 0;/* TG size 8 */
    case 17 ... 32:
-      return 1;
+      return 1;/* TG size 4 */
    default:
-      return 2;
+      return 2;/* TG size 2 */
    }
+}
+
+/* Compute Walker 2 has a new enconde values */
+int
+intel_compute_threads_group_dispatch_size_walker_2(uint32_t hw_threads_in_wg)
+{
+   /* Following value calculated based on overdispatch is disabled. In case if
+    * compute overdispatch disabled set to 1, then we need to use TG Size 1.
+    */
+   switch (hw_threads_in_wg) {
+   case 0 ... 16:
+      return 0;/* TG size 8 */
+   case 17 ... 32:
+      return 2;/* TG size 4 */
+   default:
+      return 4;/* TG size 2 */
+   }
+}
+
+static unsigned
+intel_register_blocks_bits(const struct intel_device_info *devinfo)
+{
+#define BIT_FOR_NUM_GRF(GRFS) (1u << (((GRFS) / 32) - 1))
+   if (INTEL_DEBUG(DEBUG_NO_VRT) || devinfo->ver < 30)
+      return BIT_FOR_NUM_GRF(128); /* No VRT, so only 128 grfs */
+
+   const unsigned xe3_bits =
+      BIT_FOR_NUM_GRF(32) |
+      BIT_FOR_NUM_GRF(64) |
+      BIT_FOR_NUM_GRF(96) |
+      BIT_FOR_NUM_GRF(128) |
+      BIT_FOR_NUM_GRF(160) |
+      BIT_FOR_NUM_GRF(192) |
+      /* 224 GRFs is not supported */
+      BIT_FOR_NUM_GRF(256);
+
+   return xe3_bits;
+#undef BIT_FOR_NUM_GRF
+}
+
+unsigned
+intel_register_blocks(const struct intel_device_info *devinfo,
+                      unsigned grf_used)
+{
+   if (INTEL_DEBUG(DEBUG_NO_VRT))
+      return (128 / 32) - 1; /* 3 => 128 regs */
+
+   const unsigned hw_blocks = intel_register_blocks_bits(devinfo);
+   const unsigned n_bit = 1u << (DIV_ROUND_UP(grf_used, 32) - 1);
+   const unsigned usable = hw_blocks & ~(n_bit - 1);
+   return (usable ? ffs(usable) : util_last_bit(hw_blocks)) - 1;
+}
+
+bool
+intel_register_blocks_supported(const struct intel_device_info *devinfo,
+                                int num_regs)
+{
+   if ((num_regs % 32) != 0)
+      return false;
+
+   const unsigned n = (num_regs / 32) - 1;
+   return intel_register_blocks_bits(devinfo) & (1u << n);
+}
+
+uint8_t
+intel_sampler_state_size(bool uses_efficient_64bit)
+{
+   return uses_efficient_64bit ? 32 : 16;
 }

@@ -536,6 +536,10 @@ static void
 i915_set_polygon_stipple(struct pipe_context *pipe,
                          const struct pipe_poly_stipple *stipple)
 {
+   struct i915_context *i915 = i915_context(pipe);
+
+   i915->poly_stipple = *stipple;
+   i915->dirty |= I915_NEW_STIPPLE;
 }
 
 static const struct nir_to_tgsi_options ntt_options = {
@@ -669,24 +673,13 @@ i915_create_vs_state(struct pipe_context *pipe,
    struct i915_context *i915 = i915_context(pipe);
    void *vertex_shader;
 
-   struct pipe_shader_state from_nir = {PIPE_SHADER_IR_TGSI};
    if (templ->type == PIPE_SHADER_IR_NIR) {
       nir_shader *s = templ->ir.nir;
 
       NIR_PASS(_, s, nir_lower_point_size, 1.0, 255.0);
-
-      /* The gallivm draw path doesn't support non-native-integers NIR shaders,
-       * st/mesa does native-integers for the screen as a whole rather than
-       * per-stage, and i915 FS can't do native integers.  So, convert to TGSI,
-       * where the draw path *does* support non-native-integers.
-       */
-      from_nir.tokens = nir_to_tgsi(s, pipe->screen);
-      templ = &from_nir;
    }
 
    vertex_shader = draw_create_vertex_shader(i915->draw, templ);
-
-   FREE((void *)from_nir.tokens);
 
    return vertex_shader;
 }

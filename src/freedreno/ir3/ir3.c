@@ -267,13 +267,7 @@ ir3_get_reg_independent_max_waves(struct ir3_shader_variant *v,
 
    /* If this is a compute shader, compute the limit based on shared size */
    if (ir3_shader_compute(v)) {
-      unsigned threads_per_wg =
-         v->local_size[0] * v->local_size[1] * v->local_size[2];
-      unsigned waves_per_wg =
-         DIV_ROUND_UP(threads_per_wg, compiler->info->threadsize_base *
-                                         (double_threadsize ? 2 : 1) *
-                                         compiler->info->wave_granularity) *
-         compiler->info->wave_granularity;
+      unsigned waves_per_wg = ir3_get_waves_per_wg(v, double_threadsize);
 
       /* Shared is allocated in chunks of 1k */
       unsigned shared_per_wg = ALIGN_POT(v->shared_size, 1024);
@@ -350,6 +344,32 @@ ir3_get_min_reg_count(const struct ir3_shader_variant *v, bool double_threadsize
    return (v->compiler->info->props.reg_size_vec4 /
       ((max_waves / v->compiler->info->wave_granularity) *
        (double_threadsize ? 2 : 1) + 1)) + 1;
+}
+
+unsigned
+ir3_get_waves_per_wg(struct ir3_shader_variant *v, bool double_threadsize)
+{
+   assert(ir3_shader_compute(v));
+
+   struct ir3_compiler *compiler = v->compiler;
+   unsigned threads_per_wg;
+
+   if (v->local_size_variable) {
+      if (v->type == MESA_SHADER_KERNEL) {
+         threads_per_wg =
+            compiler->info->threadsize_base * (double_threadsize ? 2 : 1);
+      } else {
+         /* We have to expect the worst case. */
+         threads_per_wg = compiler->max_variable_workgroup_size;
+      }
+   } else {
+      threads_per_wg = v->local_size[0] * v->local_size[1] * v->local_size[2];
+   }
+
+   return DIV_ROUND_UP(threads_per_wg, compiler->info->threadsize_base *
+                                          (double_threadsize ? 2 : 1) *
+                                          compiler->info->wave_granularity) *
+          compiler->info->wave_granularity;
 }
 
 void
@@ -598,7 +618,8 @@ ir3_collect_info(struct ir3_shader_variant *v)
       info->max_reg = MAX2(info->max_reg, min_reg_count - 1);
 
    /* TODO this is different for earlier gens, but earlier gens don't use this */
-   info->subgroup_size = v->info.double_threadsize ? 128 : 64;
+   info->subgroup_size = compiler->info->threadsize_base *
+                         (info->double_threadsize ? 2 : 1);
 
    unsigned reg_independent_max_waves =
       ir3_get_reg_independent_max_waves(v, info->double_threadsize);
@@ -1202,7 +1223,7 @@ ir3_create_collect(struct ir3_builder *build,
    /* There should be at least one non-undef source to determine the type of the
     * destination.
     */
-   assert(non_undef_src != -1);
+   assume(non_undef_src != -1);
    unsigned flags = dest_flags(arr[non_undef_src]);
 
    /* If any of the sources are themselves collects, flatten their sources into
@@ -1637,9 +1658,8 @@ static unsigned
 cp_flags(unsigned flags)
 {
    /* only considering these flags (at least for now): */
-   flags &= (IR3_REG_CONST | IR3_REG_IMMED | IR3_REG_FNEG | IR3_REG_FABS |
-             IR3_REG_SNEG | IR3_REG_SABS | IR3_REG_BNOT | IR3_REG_RELATIV |
-             IR3_REG_SHARED);
+   flags &= (IR3_REG_CONST | IR3_REG_IMMED | IR3_REG_SRC_MODS |
+             IR3_REG_RELATIV | IR3_REG_SHARED);
    return flags;
 }
 
@@ -1957,6 +1977,7 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
                return false;
             break;
          case OPC_RESINFO:
+         case OPC_RESBASE:
             if (n != 0)
                return false;
             break;
@@ -2073,8 +2094,7 @@ static bool
 is_unmodified_full_gpr(struct ir3_register *src)
 {
    return !(src->flags & (IR3_REG_HALF | IR3_REG_CONST | IR3_REG_IMMED |
-                          IR3_REG_RELATIV | IR3_REG_FNEG | IR3_REG_FABS |
-                          IR3_REG_SNEG | IR3_REG_SABS | IR3_REG_BNOT));
+                          IR3_REG_RELATIV | IR3_REG_SRC_MODS));
 }
 
 /* Does `instr` move half of its full GPR src to its half dst? If this is the

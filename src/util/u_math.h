@@ -273,6 +273,13 @@ util_is_half_nan(int16_t x)
 }
 
 
+static inline bool
+util_is_half_subnormal(int16_t x)
+{
+   return (x & 0x7c00) == 0 && (x & 0x03ff) != 0;
+}
+
+
 static inline int
 util_half_inf_sign(int16_t x)
 {
@@ -908,6 +915,23 @@ util_is_probably_float(uint32_t bits)
 
    return false;
 }
+
+#ifndef __OPENCL_VERSION__
+static inline float
+fractf(float x)
+{
+   x -= floorf(x);
+
+   /* fract should return a value in [0, 1). If we get >= 1, it means
+    * the subtraction rounded up, so clamp to the first representable number
+    * that's less than 1.
+    */
+   if (x >= 1.0f)
+      x = 1.0f - 0.5f*FLT_EPSILON;
+
+   return x;
+}
+#endif
 
 #ifdef __cplusplus
 }

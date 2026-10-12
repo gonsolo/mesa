@@ -171,19 +171,17 @@ lower_abi_instr(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
 
       nir_def *mask =
          nir_bcsel(b, small_workgroup, nir_imm_int(b, radv_nggc_none),
-                   nir_imm_int(b, radv_nggc_front_face | radv_nggc_back_face | radv_nggc_small_primitives));
+                   nir_imm_int(b, radv_nggc_cull_face_negative_determinant | radv_nggc_cull_face_positive_determinant |
+                                     radv_nggc_small_primitives));
       nir_def *settings = ac_nir_load_arg(b, &s->args->ac, s->args->nggc_settings);
       replacement = nir_ine_imm(b, nir_iand(b, settings, mask), 0);
       break;
    }
-   case nir_intrinsic_load_cull_front_face_enabled_amd:
-      replacement = nggc_bool_setting(b, radv_nggc_front_face, s);
+   case nir_intrinsic_load_cull_face_negative_determinant_enabled_amd:
+      replacement = nggc_bool_setting(b, radv_nggc_cull_face_negative_determinant, s);
       break;
-   case nir_intrinsic_load_cull_back_face_enabled_amd:
-      replacement = nggc_bool_setting(b, radv_nggc_back_face, s);
-      break;
-   case nir_intrinsic_load_cull_ccw_amd:
-      replacement = nggc_bool_setting(b, radv_nggc_face_is_ccw, s);
+   case nir_intrinsic_load_cull_face_positive_determinant_enabled_amd:
+      replacement = nggc_bool_setting(b, radv_nggc_cull_face_positive_determinant, s);
       break;
    case nir_intrinsic_load_cull_small_triangles_enabled_amd:
       replacement = nggc_bool_setting(b, radv_nggc_small_primitives, s);
@@ -314,7 +312,7 @@ lower_abi_instr(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
          unsigned provoking_vertex = 0;
          if (s->gfx_state->rs.provoking_vtx_last) {
             if (stage == MESA_SHADER_VERTEX) {
-               provoking_vertex = radv_get_num_vertices_per_prim(s->gfx_state) - 1;
+               provoking_vertex = radv_get_num_vertices_per_prim(s->gfx_level, s->gfx_state) - 1;
             } else if (stage == MESA_SHADER_GEOMETRY) {
                provoking_vertex = b->shader->info.gs.vertices_in - 1;
             } else {
@@ -386,7 +384,7 @@ lower_abi_instr(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
          if (s->info->vs.dynamic_num_verts_per_prim) {
             replacement = GET_SGPR_FIELD_NIR(s->args->ngg_state, NGG_STATE_NUM_VERTS_PER_PRIM);
          } else {
-            replacement = nir_imm_int(b, radv_get_num_vertices_per_prim(s->gfx_state));
+            replacement = nir_imm_int(b, radv_get_num_vertices_per_prim(s->gfx_level, s->gfx_state));
          }
       } else if (stage == MESA_SHADER_TESS_EVAL) {
          if (s->info->tes.point_mode) {
@@ -425,11 +423,9 @@ lower_abi_instr(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
       replacement = nir_ine_imm(b, sample_coverage, 0);
       break;
    }
-   case nir_intrinsic_load_poly_line_smooth_enabled: {
-      nir_def *line_rast_mode = GET_SGPR_FIELD_NIR(s->args->ps_state, PS_STATE_LINE_RAST_MODE);
-      replacement = nir_ieq_imm(b, line_rast_mode, VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH);
+   case nir_intrinsic_load_poly_line_smooth_enabled:
+      replacement = nir_ieq_imm(b, GET_SGPR_FIELD_NIR(s->args->ps_state, PS_STATE_SMOOTH_LINES), 1);
       break;
-   }
    case nir_intrinsic_load_initial_edgeflags_amd:
       replacement = nir_imm_int(b, 0);
       break;
@@ -437,18 +433,25 @@ lower_abi_instr(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
       replacement = ac_nir_load_arg(b, &s->args->ac, s->args->ac.load_provoking_vtx);
       break;
    case nir_intrinsic_load_rasterization_primitive_amd:
-      assert(s->gfx_state->unknown_rast_prim);
       /* Load the primitive topology from an user SGPR when it's unknown at compile time (GPL). */
       replacement = GET_SGPR_FIELD_NIR(s->args->ps_state, PS_STATE_RAST_PRIM);
       break;
    case nir_intrinsic_load_use_float_frag_coord_xy_amd:
       replacement = nir_ine_imm(b, GET_SGPR_FIELD_NIR(s->args->ps_state, PS_STATE_USE_FLOAT_FRAG_COORD_XY), 0);
       break;
+   case nir_intrinsic_load_use_quad_pos_amd:
+      replacement = nir_ine_imm(b, GET_SGPR_FIELD_NIR(s->args->ps_state, PS_STATE_USE_QUAD_POS), 0);
+      break;
    case nir_intrinsic_load_ps_iter_mask_amd:
       replacement = GET_SGPR_FIELD_NIR(s->args->ps_state, PS_STATE_PS_ITER_MASK);
       break;
    case nir_intrinsic_load_use_sample_mask_in_amd:
       replacement = nir_ine_imm(b, GET_SGPR_FIELD_NIR(s->args->ps_state, PS_STATE_USE_SAMPLE_MASK_IN), 0);
+      break;
+   case nir_intrinsic_load_front_face_select_amd:
+      /* Extract it manually because GET_SGPR_FIELD_NIR doesn't sign-extend. */
+      replacement =
+         nir_ishr_imm(b, ac_nir_load_arg(b, &s->args->ac, s->args->ps_state), PS_STATE_FRONT_FACE_SELECT__SHIFT);
       break;
    default:
       progress = false;

@@ -2902,6 +2902,7 @@ emit_alu(struct ntd_context *ctx, nir_alu_instr *alu)
 
    switch (alu->op) {
    case nir_op_iadd:
+   case nir_op_fadd_rtne:
    case nir_op_fadd: return emit_binop(ctx, alu, DXIL_BINOP_ADD, src[0], src[1]);
 
    case nir_op_isub:
@@ -5116,10 +5117,16 @@ emit_phi(struct ntd_context *ctx, nir_phi_instr *instr)
 {
    const struct dxil_type *type = NULL;
    nir_foreach_phi_src(src, instr) {
-      /* All sources have the same type, just use the first one */
-      type = dxil_value_get_type(ctx->defs[src->src.ssa->index].chans[0]);
-      break;
+      /* All sources have the same type, so use the first one that's already
+       * been emitted. Phi-source order is not stable, and back-edge sources
+       * (e.g. for a loop-header phi) won't have been emitted yet. */
+      const struct dxil_value *val = ctx->defs[src->src.ssa->index].chans[0];
+      if (val) {
+         type = dxil_value_get_type(val);
+         break;
+      }
    }
+   assert(type);
 
    struct phi_block *vphi = ralloc(ctx->phis, struct phi_block);
    vphi->num_components = instr->def.num_components;
@@ -5558,12 +5565,14 @@ emit_tex(struct ntd_context *ctx, nir_tex_instr *instr)
          break;
 
       case nir_tex_src_texture_offset:
-         params.tex = emit_createhandle_call_dynamic(ctx, DXIL_RESOURCE_CLASS_SRV,
-            0, instr->texture_index,
-            dxil_emit_binop(&ctx->mod, DXIL_BINOP_ADD,
-               get_src(ctx, &instr->src[i].src, 0, nir_type_uint),
-               dxil_module_get_int32_const(&ctx->mod, instr->texture_index), 0),
-            instr->texture_non_uniform);
+         if (!instr->input_attachment_index) {
+            params.tex = emit_createhandle_call_dynamic(ctx, DXIL_RESOURCE_CLASS_SRV,
+               0, instr->texture_index,
+               dxil_emit_binop(&ctx->mod, DXIL_BINOP_ADD,
+                  get_src(ctx, &instr->src[i].src, 0, nir_type_uint),
+                  dxil_module_get_int32_const(&ctx->mod, instr->texture_index), 0),
+               instr->texture_non_uniform);
+         }
          break;
 
       case nir_tex_src_sampler_offset:
@@ -6350,7 +6359,7 @@ optimize_nir(struct nir_shader *s, const struct nir_to_dxil_options *opts)
       NIR_PASS(progress, s, nir_opt_algebraic_late);
    } while (progress);
 
-   NIR_PASS(_, s, nir_lower_undef_to_zero);
+   NIR_PASS(_, s, nir_lower_undef_to_zero, NULL);
 }
 
 static
@@ -6534,7 +6543,7 @@ allocate_sysvalues(struct ntd_context *ctx)
    return true;
 }
 
-static int
+static unsigned
 type_size_vec4(const struct glsl_type *type, bool bindless)
 {
    return glsl_count_attribute_slots(type, false);

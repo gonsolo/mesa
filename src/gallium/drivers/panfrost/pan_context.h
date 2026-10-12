@@ -25,19 +25,38 @@
 #include "util/format/u_formats.h"
 #include "util/hash_table.h"
 #include "util/simple_mtx.h"
+#include "util/u_dynarray.h"
 #include "util/u_blitter.h"
 #include "util/u_printf.h"
+
+#include "util/perf/u_trace.h"
+#include "panfrost_perfetto.h"
 
 #include "compiler/shader_enums.h"
 #include "midgard/midgard_compile.h"
 
 #include "pan_csf.h"
 
+#define PAN_MAX_BATCHES        32
+#define PAN_MAX_RENDER_BATCHES (PAN_MAX_BATCHES - 1)
+
+/* Reserve last slot for compute. */
+#define PAN_COMPUTE_BATCH_SLOT PAN_MAX_RENDER_BATCHES
+
 #define SET_BIT(lval, bit, cond)                                               \
    if (cond)                                                                   \
       lval |= (bit);                                                           \
    else                                                                        \
       lval &= ~(bit);
+
+/* Passed as the 'cs' argument to u_trace tracepoints, analogous to
+ * panvk_utrace_cs_info. sb_wait_mask != 0 makes the GPU defer the timestamp
+ * write until those scoreboard slots signal (CSF only, JM ignores it).
+ */
+struct panfrost_trace_cs_info {
+   struct panfrost_batch *batch;
+   uint16_t sb_wait_mask;
+};
 
 /* Dirty tracking flags. 3D is for general 3D state. Shader flags are
  * per-stage. Renderer refers to Renderer State Descriptors. Vertex refers to
@@ -134,8 +153,8 @@ struct panfrost_context {
    /* Map from resources to panfrost_batches */
    struct hash_table *writers;
 
-   /* Bound job batch */
-   struct panfrost_batch *batch;
+   /* Current batches */
+   struct panfrost_batch *batch[PANFROST_BATCH_TYPE_COUNT];
 
    /* Within a launch_grid call.. */
    const struct pipe_grid_info *compute_grid;
@@ -192,6 +211,7 @@ struct panfrost_context {
    } texture_buffer[MESA_SHADER_STAGES];
 
    struct blitter_context *blitter;
+   bool has_blit_loop;
 
    struct pan_mod_convert_shaders mod_convert_shaders;
 
@@ -232,6 +252,23 @@ struct panfrost_context {
       struct u_printf_ctx ctx;
       struct panfrost_bo *bo;
    } printf;
+
+   /* u_trace support */
+   struct u_trace_context trace_context;
+#ifdef HAVE_PERFETTO
+   struct panfrost_perfetto_state perfetto;
+#endif
+   uint32_t submit_count; /* monotonic submit ID for perfetto */
+
+   /* Used to track in-flight BO accesses done by this context (job
+    * accessing those BOs have been submitted, but we don't know if
+    * they completed yet).
+    * The array is indexed by BO handles and is never shrunk.
+    * Each uint32_t entry encodes the pending access type (R/W) and the
+    * BO seqno at the time of this access. The seqno allows us to
+    * detect stale entries when a BO or its handle is recycled.
+    */
+   struct util_dynarray bo_access;
 };
 
 /* Corresponds to the CSO */
@@ -445,6 +482,27 @@ struct panfrost_shader_binary {
    struct util_dynarray binary;
 };
 
+struct panfrost_run_fullscreen_attrib {
+   float x, y, z, w;
+};
+
+/* The tiler always allocates packets that can hold 64 vertices in RUN_IDVS
+ * malloc mode. For RUN_FULLSCREEN, the vertex array is preallocated but must
+ * match the tiler allocation strategy. */
+#define PAN_RUN_FULLSCREEN_NUM_VERTICES 64
+
+#define PAN_RUN_FULLSCREEN_ATTRIB_STRIDE \
+   sizeof(struct panfrost_run_fullscreen_attrib)
+
+/* A RUN_FULLSCREEN packet is made of a position and a texcoord attrib. */
+#define PAN_RUN_FULLSCREEN_PACKET_STRIDE \
+   (2 * sizeof(struct panfrost_run_fullscreen_attrib))
+
+#define PAN_RUN_FULLSCREEN_ARRAY_SIZE \
+   (PAN_RUN_FULLSCREEN_NUM_VERTICES * PAN_RUN_FULLSCREEN_PACKET_STRIDE)
+
+#define PAN_RUN_FULLSCREEN_ARRAY_ALIGN 64
+
 void
 panfrost_disk_cache_store(struct disk_cache *cache,
                           const struct panfrost_uncompiled_shader *uncompiled,
@@ -480,6 +538,10 @@ struct pan_vertex_buffer {
 unsigned pan_assign_vertex_buffer(struct pan_vertex_buffer *buffers,
                                   unsigned *nr_bufs, unsigned vbi,
                                   unsigned divisor);
+
+struct pan_ptr panfrost_emit_fullscreen_vertex_array(struct panfrost_batch *batch,
+                                                     enum blitter_attrib_type type,
+                                                     const struct blitter_attrib *attrib);
 
 struct panfrost_zsa_state;
 struct panfrost_sampler_state;
@@ -537,20 +599,20 @@ void panfrost_shader_context_init(struct pipe_context *pctx);
 static inline void
 panfrost_dirty_state_all(struct panfrost_context *ctx)
 {
-   ctx->dirty = ~0;
+   ctx->dirty = (enum pan_dirty_3d)~0;
 
    for (unsigned i = 0; i < MESA_SHADER_STAGES; ++i)
-      ctx->dirty_shader[i] = ~0;
+      ctx->dirty_shader[i] = (enum pan_dirty_shader)~0;
 }
 
 static inline void
 panfrost_clean_state_3d(struct panfrost_context *ctx)
 {
-   ctx->dirty = 0;
+   ctx->dirty = (enum pan_dirty_3d)0;
 
    for (unsigned i = 0; i < MESA_SHADER_STAGES; ++i) {
       if (i != MESA_SHADER_COMPUTE)
-         ctx->dirty_shader[i] = 0;
+         ctx->dirty_shader[i] = (enum pan_dirty_shader)0;
    }
 }
 
@@ -565,9 +627,57 @@ void panfrost_set_batch_masks_blend(struct panfrost_batch *batch);
 void panfrost_set_batch_masks_zs(struct panfrost_batch *batch);
 
 void panfrost_track_image_access(struct panfrost_batch *batch,
-                                 mesa_shader_stage stage,
                                  struct pipe_image_view *image);
 
 void panfrost_context_reinit(struct panfrost_context *ctx);
+
+static inline void
+panfrost_context_report_bo_access(struct panfrost_context *ctx,
+                                  struct panfrost_bo *bo, uint32_t access)
+{
+   /* Skip if per-context tracking is not requested or if the BO is shared. */
+   if (!(access & PAN_BO_ACCESS_PER_CTX_TRACKING) || (bo->flags & PAN_BO_SHARED))
+      return;
+
+   ASSERTED void *new_bo_access;
+   uint32_t handle = panfrost_bo_handle(bo);
+
+   new_bo_access = util_dynarray_resize_zero(&ctx->bo_access, uint32_t, handle + 1);
+   if (!new_bo_access)
+      return;
+
+   uint32_t *access_ptr = util_dynarray_element(&ctx->bo_access, uint32_t, handle);
+   uint32_t seqno = *access_ptr >> 2;
+   uint32_t pending = *access_ptr & BITFIELD_MASK(2);
+
+   static_assert(PAN_BO_ACCESS_RW == BITFIELD_MASK(2),
+                 "PAN_BO_ACCESS_RW expected to cover the lower 2-bits");
+
+   access &= PAN_BO_ACCESS_RW;
+
+   /* We don't have an easy way to know when the BO leaves the context,
+    * nor do we have a way to get back to contexts that might have been
+    * using the BO when the resource is destroyed. This means we're left
+    * with potential stale data in the bo_access array, which we check
+    * validity of based on a per-BO seqno that gets incremented every
+    * time a BO is allocated (handle re-allocated, or BO taken from the
+    * BO cache, which forces a wait-on-everything). If that happens,
+    * the pending accesses are reset, and the seqno gets updated to match
+    * the BO seqno.
+    */
+   if (seqno != bo->seqno)
+      seqno = bo->seqno;
+   else
+      access |= pending;
+
+   /* We lose the 2 MSB of the seqno here, but 30 bits should be more
+    * than enough to prevent spurious wrap around messing up with the
+    * stale entry detection. Worst case scenario, we really have 2^30
+    * rotations on this handle, and we wrongly consider the entry valid
+    * and wait when we could have skipped the wait => that's not the end
+    * of the world.
+    */
+   *access_ptr = (seqno << 2) | access;
+}
 
 #endif

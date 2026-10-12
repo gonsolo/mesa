@@ -9,6 +9,7 @@
 #include "util/format/u_format_s3tc.h"
 #include "util/u_screen.h"
 #include "util/u_memory.h"
+#include "util/u_endian.h"
 #include "util/hex.h"
 #include "util/os_time.h"
 #include "util/xmlconfig.h"
@@ -21,6 +22,9 @@
 #include "r300_public.h"
 
 #include "draw/draw_context.h"
+
+#include <assert.h>
+#include <stdio.h>
 
 /* Return the identifier behind whom the brave coders responsible for this
  * amalgamation of code, sweat, and duct tape, routinely obscure their names.
@@ -103,11 +107,7 @@ static struct disk_cache* r300_get_disk_shader_cache(struct pipe_screen* pscreen
 	return r300screen->disk_shader_cache;
 }
 
-#define COMMON_NIR_OPTIONS                    \
-   .fdot_replicates = true,                   \
-   .float_mul_add32 =                         \
-      nir_float_muladd_support_has_fmad |     \
-      nir_float_muladd_support_fuse,          \
+#define COMMON_NIR_OPTIONS_BASE               \
    .lower_bitops = true,                      \
    .lower_extract_byte = true,                \
    .lower_extract_word = true,                \
@@ -126,10 +126,16 @@ static struct disk_cache* r300_get_disk_shader_cache(struct pipe_screen* pscreen
    .lower_uniforms_to_ubo = true,             \
    .no_integers = true
 
+#define COMMON_NIR_OPTIONS                    \
+   .float_mul_add32 =                         \
+      nir_float_muladd_support_has_fmad |     \
+      nir_float_muladd_support_fuse,          \
+   .fdot_replicates = true,                   \
+   COMMON_NIR_OPTIONS_BASE
+
 static const nir_shader_compiler_options r500_vs_compiler_options = {
    COMMON_NIR_OPTIONS,
    .has_fused_comp_and_csel = true,
-
    /* Have HW loops support and 1024 max instr count, but don't unroll *too*
     * hard.
     */
@@ -175,7 +181,8 @@ static const nir_shader_compiler_options r300_fs_compiler_options = {
 };
 
 static const nir_shader_compiler_options gallivm_compiler_options = {
-   COMMON_NIR_OPTIONS,
+   COMMON_NIR_OPTIONS_BASE,
+   .float_mul_add32 = nir_float_muladd_support_keep_weak_ffma,
    .has_fused_comp_and_csel = true,
    .max_unroll_iterations = 32,
 
@@ -210,8 +217,8 @@ util_format_is_rgba1010102_variant(const struct util_format_description *desc)
    return true;
 }
 
-static bool r300_is_blending_supported(struct r300_screen *rscreen,
-                                       enum pipe_format format)
+bool r300_is_blending_supported(struct r300_screen *rscreen,
+                                enum pipe_format format)
 {
     int c;
     const struct util_format_description *desc =
@@ -469,7 +476,7 @@ static void r300_init_screen_caps(struct r300_screen* r300screen)
    bool is_r500 = r300screen->caps.is_r500;
 
    /* Supported features (boolean caps). */
-   caps->npot_textures = true;
+   caps->npot_textures = false;
    caps->mixed_framebuffer_sizes = true;
    caps->mixed_color_depth_bits = true;
    caps->anisotropic_filter = true;
@@ -489,6 +496,9 @@ static void r300_init_screen_caps(struct r300_screen* r300screen)
    caps->query_memory_info = true;
 
    caps->texture_transfer_modes = PIPE_TEXTURE_TRANSFER_BLIT;
+
+   caps->max_texture_upload_memory_budget =
+      MIN2(16 * 1024, r300screen->info.gart_size_kb / 8) * 1024;
 
    caps->min_map_buffer_alignment = R300_BUFFER_ALIGNMENT;
 
@@ -519,6 +529,7 @@ static void r300_init_screen_caps(struct r300_screen* r300screen)
    caps->primitive_restart =
    caps->primitive_restart_fixed_index =
    caps->user_vertex_buffers =
+   caps->vs_instanceid =
    caps->vs_window_space_position = !r300screen->caps.has_tcl;
 
    /* HWTCL-only features / limitations. */
@@ -532,16 +543,19 @@ static void r300_init_screen_caps(struct r300_screen* r300screen)
 
    /* Render targets. */
    caps->max_render_targets = 4;
-   caps->endianness = PIPE_ENDIAN_LITTLE;
 
    caps->max_viewports = 1;
 
    caps->max_vertex_attrib_stride = 2048;
 
-   caps->max_varyings = 10;
+   /* R500 can use two color interpolators for generic varyings. */
+   caps->max_varyings = is_r500 ? 10 : 8;
 
    caps->prefer_imm_arrays_as_constbuf = false;
 
+   caps->device_type = r300screen->caps.has_hardware_tcl
+       ? PIPE_DEVICE_TYPE_DISCRETE_GPU
+       : PIPE_DEVICE_TYPE_INTEGRATED_GPU;
    caps->vendor_id = 0x1002;
    caps->device_id = r300screen->info.pci_id;
    caps->video_memory = r300screen->info.vram_size_kb >> 10;
@@ -643,7 +657,8 @@ static void r300_query_memory_info(struct pipe_screen *pscreen,
 }
 
 struct pipe_screen* r300_screen_create(struct radeon_winsys *rws,
-                                       const struct pipe_screen_config *config)
+                                       const struct pipe_screen_config *config,
+                                       UNUSED uint64_t debug_flags)
 {
     struct r300_screen *r300screen = CALLOC_STRUCT(r300_screen);
 
@@ -656,6 +671,11 @@ struct pipe_screen* r300_screen_create(struct radeon_winsys *rws,
 
     r300_init_debug(r300screen);
     r300_parse_chipset(r300screen->info.pci_id, &r300screen->caps);
+
+#if UTIL_ARCH_BIG_ENDIAN
+    /* All known big-endian r300 systems should have hardware TCL. */
+    assert(r300screen->caps.has_tcl);
+#endif
 
     driParseConfigFiles(config->options, config->options_info,
                         &(driConfigFileParseParams) { .driverName = "r300" });
@@ -670,8 +690,13 @@ struct pipe_screen* r300_screen_create(struct radeon_winsys *rws,
     if (SCREEN_DBG_ON(r300screen, DBG_NO_HIZ) ||
         r300screen->options.nohiz)
         r300screen->caps.hiz_ram = 0;
-    if (SCREEN_DBG_ON(r300screen, DBG_NO_TCL))
+    if (SCREEN_DBG_ON(r300screen, DBG_NO_TCL)) {
+#if UTIL_ARCH_BIG_ENDIAN
+        fprintf(stderr, "r300: RADEON_DEBUG=notcl is unsupported on big-endian, ignoring.\n");
+#else
         r300screen->caps.has_tcl = false;
+#endif
+    }
 
     if (SCREEN_DBG_ON(r300screen, DBG_IEEEMATH))
         r300screen->options.ieeemath = true;

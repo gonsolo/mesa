@@ -23,15 +23,12 @@ enum amd_gfx_level;
 
 nir_builder PRINTFLIKE(2, 3) radv_meta_nir_init_shader(mesa_shader_stage stage, const char *name, ...);
 
-nir_shader *radv_meta_nir_build_vs_generate_vertices(void);
+nir_shader *radv_meta_nir_build_vs_generate_vertices(bool layered);
 nir_shader *radv_meta_nir_build_fs_noop(void);
 
 nir_def *radv_meta_nir_get_global_ids(nir_builder *b, unsigned num_components);
 
 void radv_meta_nir_break_on_count(nir_builder *b, nir_variable *var, nir_def *count);
-
-nir_shader *radv_meta_nir_build_fill_memory_shader(uint32_t bytes_per_invocation);
-nir_shader *radv_meta_nir_build_copy_memory_shader(uint32_t bytes_per_invocation);
 
 nir_shader *radv_meta_nir_build_blit_vertex_shader(void);
 nir_shader *radv_meta_nir_build_blit_copy_fragment_shader(enum glsl_sampler_dim tex_dim);
@@ -40,8 +37,8 @@ nir_shader *radv_meta_nir_build_blit_copy_fragment_shader_stencil(enum glsl_samp
 
 nir_shader *radv_meta_nir_build_itob_compute_shader(bool is_3d);
 nir_shader *radv_meta_nir_build_btoi_compute_shader(bool is_3d);
-nir_shader *radv_meta_nir_build_itoi_compute_shader(bool src_3d, bool dst_3d, int samples);
-nir_shader *radv_meta_nir_build_cleari_compute_shader(bool is_3d, int samples);
+nir_shader *radv_meta_nir_build_itoi_compute_shader(bool src_3d, bool dst_3d, uint32_t samples);
+nir_shader *radv_meta_nir_build_cleari_compute_shader(bool is_3d, uint32_t samples);
 nir_shader *radv_meta_nir_build_cleari_96bit_compute_shader(void);
 
 typedef nir_def *(*radv_meta_nir_texel_fetch_build_func)(nir_builder *, uint32_t, nir_def *, bool, bool);
@@ -63,8 +60,7 @@ nir_shader *radv_meta_nir_build_blit2d_copy_fragment_shader_depth_stencil(radv_m
 
 void radv_meta_nir_build_clear_color_shaders(struct nir_shader **out_vs, struct nir_shader **out_fs,
                                              uint32_t frag_output);
-void radv_meta_nir_build_clear_depthstencil_shaders(struct nir_shader **out_vs, struct nir_shader **out_fs,
-                                                    bool unrestricted);
+nir_shader *radv_meta_nir_build_clear_depthstencil_vertex_shader(void);
 nir_shader *radv_meta_nir_build_clear_htile_mask_shader(void);
 nir_shader *radv_meta_nir_build_clear_dcc_comp_to_single_shader(bool is_msaa);
 
@@ -78,9 +74,9 @@ nir_shader *radv_meta_nir_build_expand_depth_stencil_compute_shader(uint8_t samp
 
 nir_shader *radv_meta_nir_build_dcc_decompress_compute_shader(void);
 
-nir_shader *radv_meta_nir_build_fmask_copy_compute_shader(int samples);
+nir_shader *radv_meta_nir_build_fmask_copy_compute_shader(uint32_t samples);
 
-nir_shader *radv_meta_nir_build_fmask_expand_compute_shader(int samples);
+nir_shader *radv_meta_nir_build_fmask_expand_compute_shader(uint32_t samples);
 
 enum radv_meta_resolve_compute_type {
    RADV_META_RESOLVE_COMPUTE_NORM,
@@ -90,12 +86,12 @@ enum radv_meta_resolve_compute_type {
    RADV_META_RESOLVE_COMPUTE_COUNT,
 };
 
-nir_shader *radv_meta_nir_build_resolve_cs(bool use_fmask, enum radv_meta_resolve_compute_type type, int samples,
+nir_shader *radv_meta_nir_build_resolve_cs(bool use_fmask, enum radv_meta_resolve_compute_type type, uint8_t samples,
                                            VkImageAspectFlags aspects, VkResolveModeFlagBits resolve_mode);
-nir_shader *radv_meta_nir_build_resolve_fs(bool use_fmask, int samples, bool is_integer, VkImageAspectFlags aspects,
+nir_shader *radv_meta_nir_build_resolve_fs(bool use_fmask, uint32_t samples, bool is_integer, VkImageAspectFlags aspects,
                                            VkResolveModeFlagBits resolve_mode);
 
-nir_shader *radv_meta_nir_build_clear_hiz_compute_shader(int samples);
+nir_shader *radv_meta_nir_build_clear_hiz_compute_shader(uint32_t samples);
 
 nir_shader *radv_meta_nir_build_copy_memory_indirect_preprocess_cs(void);
 nir_shader *radv_meta_nir_build_copy_memory_indirect_cs(void);

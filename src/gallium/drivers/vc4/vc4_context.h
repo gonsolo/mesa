@@ -76,6 +76,25 @@
 #define VC4_DIRTY_FS_INPUTS     (1 << 26)
 #define VC4_DIRTY_UBO_1_SIZE    (1 << 27)
 
+#define VC4_DIRTY_CLIP_WINDOW   (VC4_DIRTY_SCISSOR | \
+                                 VC4_DIRTY_VIEWPORT | \
+                                 VC4_DIRTY_RASTERIZER | \
+                                 VC4_DIRTY_FRAMEBUFFER)
+
+/* bitmask */
+enum vc4_blitter_op {
+        VC4_SAVE_TEXTURES          = (1u << 1),
+        VC4_SAVE_FRAMEBUFFER       = (1u << 2),
+        VC4_SAVE_FRAGMENT_STATE    = (1u << 3),
+        VC4_SAVE_FRAGMENT_CONSTANT = (1u << 4),
+
+        VC4_BLIT          = VC4_SAVE_FRAMEBUFFER | VC4_SAVE_TEXTURES |
+                            VC4_SAVE_FRAGMENT_STATE,
+        VC4_CLEAR         = VC4_SAVE_FRAGMENT_STATE | VC4_SAVE_FRAGMENT_CONSTANT,
+        VC4_CLEAR_SURFACE = VC4_CLEAR | VC4_SAVE_FRAMEBUFFER,
+        VC4_CLEAR_ZS_SURFACE = VC4_SAVE_FRAGMENT_STATE | VC4_SAVE_FRAMEBUFFER
+};
+
 struct vc4_sampler_view {
         struct pipe_sampler_view base;
         uint32_t texture_p0;
@@ -337,7 +356,7 @@ struct vc4_context {
         struct ra_class *reg_class_r4_or_a[2];
         struct ra_class *reg_class_a[2];
 
-        uint8_t prim_mode;
+        enum mesa_prim prim_mode;
 
         /** Maximum index buffer valid for the current shader_rec. */
         uint32_t max_index;
@@ -374,6 +393,8 @@ struct vc4_context {
         struct pipe_framebuffer_state framebuffer;
         struct pipe_poly_stipple stipple;
         struct pipe_viewport_state viewport;
+        struct pipe_scissor_state clip_window;
+        bool clip_window_empty;
         struct vc4_constbuf_stateobj constbuf[MESA_SHADER_STAGES];
         struct vc4_vertexbuf_stateobj vertexbuf;
 
@@ -495,9 +516,11 @@ void vc4_flush_jobs_writing_resource(struct vc4_context *vc4,
 void vc4_flush_jobs_reading_resource(struct vc4_context *vc4,
                                      struct pipe_resource *prsc);
 void vc4_emit_state(struct pipe_context *pctx);
+bool vc4_get_clip_window(struct vc4_context *vc4,
+                         struct pipe_scissor_state *clip);
 void vc4_generate_code(struct vc4_context *vc4, struct vc4_compile *c);
 struct qpu_reg *vc4_register_allocate(struct vc4_context *vc4, struct vc4_compile *c);
-bool vc4_update_compiled_shaders(struct vc4_context *vc4, uint8_t prim_mode);
+bool vc4_update_compiled_shaders(struct vc4_context *vc4, enum mesa_prim prim_mode);
 
 bool vc4_rt_format_supported(enum pipe_format f);
 bool vc4_rt_format_is_565(enum pipe_format f);
@@ -506,5 +529,5 @@ uint8_t vc4_get_tex_format(enum pipe_format f);
 const uint8_t *vc4_get_format_swizzle(enum pipe_format f);
 void vc4_init_query_functions(struct vc4_context *vc4);
 void vc4_blit(struct pipe_context *pctx, const struct pipe_blit_info *blit_info);
-void vc4_blitter_save(struct vc4_context *vc4);
+void vc4_blitter_save(struct vc4_context *vc4, enum vc4_blitter_op op);
 #endif /* VC4_CONTEXT_H */

@@ -44,6 +44,8 @@ typedef struct gen_encode_params {
    /* Use compacted encoded form for all instructions that support it. */
    bool compact_all;
 
+   bool use_efficient_64bit;
+
    bool skip_validation;
 
    const gen_inst *insts;
@@ -89,6 +91,8 @@ typedef struct gen_decode_params {
 
    gen_inst *insts;
    int       num_insts;
+
+   bool use_efficient_64bit;
 
    gen_error *errors;
    int        num_errors;
@@ -166,6 +170,11 @@ typedef enum gen_print_flags {
     * implies GEN_PRINT_HEX) into the effective flags.
     */
    GEN_PRINT_IGNORE_ENV = 1 << 4,
+
+   /* Don't synthesize labels for branch targets; print every jip/uip as an
+    * explicit numeric delta.
+    */
+   GEN_PRINT_NO_LABELS = 1 << 5,
 } gen_print_flags;
 
 typedef struct gen_print_params {
@@ -273,11 +282,13 @@ uint32_t gen_lsc_desc_encode(const struct intel_device_info *devinfo,
                              const gen_lsc_desc *desc);
 
 gen_lsc_ex_desc gen_lsc_ex_desc_decode(const struct intel_device_info *devinfo,
+                                       enum lsc_opcode op,
                                        enum lsc_addr_surface_type addr_type,
                                        uint32_t ex_desc,
                                        uint32_t ex_desc_imm_extra);
 
 uint32_t gen_lsc_ex_desc_encode(const struct intel_device_info *devinfo,
+                                enum lsc_opcode op,
                                 const gen_lsc_ex_desc *ex_desc,
                                 uint32_t *ex_desc_imm_extra_out);
 

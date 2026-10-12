@@ -1,57 +1,32 @@
-# Copyright © 2024 Google
+# Copyright © 2026 Collabora, Ltd.
 # SPDX-License-Identifier: MIT
 
-dep_log = dependency('log',
-  version: '>= 0.4.22',
-  fallback: ['log-0.4-rs', 'dep_log'],
-  required: true,
-)
+_util_rust_args = [
+  rust_global_args,
+  rust_2024_lint_args,
+  '-Aclippy::identity_op',
+  '-Aclippy::len_zero',
+  '-Aclippy::manual_range_contains',
+  # normally this is a good one, but we use it where the "better" code is worse
+  '-Aclippy::needless_range_loop',
+  '-Aclippy::redundant_field_names',
+  '-Aclippy::upper_case_acronyms',
+  '-Aclippy::vec_box',
+  '-Aclippy::write_with_newline',
+  # warns about public function might dereference a raw pointer, but nothing is
+  # actually public here
+  '-Aclippy::not_unsafe_ptr_arg_deref',
+  '-Anon_snake_case',
+]
 
-dep_cfg_if = dependency('cfg-if',
-  version: '>= 1.0.0',
-  fallback: ['cfg-if-1-rs', 'dep_cfg_if'],
-  required: true,
-)
-
-dep_thiserror = dependency('thiserror',
-  version: '>= 2.0.11',
-  fallback: ['thiserror-2-rs', 'dep_thiserror'],
-  required: true,
-)
-
-dep_remain = dependency('remain',
-  version: '>= 0.2.12',
-  fallback: ['remain-0.2-rs', 'dep_remain'],
-  required: true,
-)
-
-dep_zerocopy = dependency('zerocopy',
-  version: '>= 0.8.13',
-  fallback: ['zerocopy-0.8-rs', 'dep_zerocopy'],
-  required: true,
-)
-
-dep_mesa3d_util = [dep_cfg_if, dep_thiserror, dep_remain, dep_zerocopy,
-                   dep_log]
-
-supported_systems = ['linux', 'windows', 'darwin', 'macos']
-supported_host_machine = host_machine.system() in supported_systems
-
-if supported_host_machine
-  dep_rustix = dependency('rustix',
-    version: '>= 0.38.31',
-    fallback: ['rustix-1-rs', 'dep_rustix'],
-    required: true,
-  )
-
-  dep_mesa3d_util += [dep_rustix]
-endif
-
-libmesa_rust_util = static_library(
-  'mesa3d_util',
-  'lib.rs',
+_libmesa_util_rs = static_library(
+  'mesa_util',
+  files('lib.rs'),
   gnu_symbol_visibility : 'hidden',
   rust_abi : 'rust',
-  rust_args : rust_global_args,
-  dependencies: dep_mesa3d_util,
+  rust_args : _util_rust_args,
+)
+
+idep_mesa_util_rs = declare_dependency(
+  link_with : _libmesa_util_rs,
 )

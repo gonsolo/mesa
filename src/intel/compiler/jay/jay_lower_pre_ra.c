@@ -3,9 +3,11 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "compiler/brw/brw_eu_defines.h"
 #include "util/hash_table.h"
 #include "util/lut.h"
 #include "util/macros.h"
+#include "util/sparse_bitset.h"
 #include "util/u_math.h"
 #include "jay_builder.h"
 #include "jay_builder_opcodes.h"
@@ -44,7 +46,9 @@ lower_contiguous_sources(jay_builder *b, jay_inst *I)
             } else {
                /* Insert a copy to access a duplicated index */
                jay_def copy = jay_alloc_def(b, I->src[s].file, 1);
-               jay_MOV(b, copy, jay_extract(I->src[s], c));
+               jay_def x = jay_extract(I->src[s], c);
+               x.negate = x.abs = false; /* XXX: rework modifiers */
+               jay_MOV(b, copy, x);
                jay_insert_channel(b, &I->src[s], c, copy);
             }
          }
@@ -86,7 +90,6 @@ lower_imm_to_ugpr(jay_builder *b,
     * don't lose the wave, but we could still probably optimize this.
     */
    jay_def x = jay_alloc_def(b, UGPR, is_64bit ? 2 : 1);
-   b->cursor = jay_before_function(b->func);
    _mesa_hash_table_u64_insert(constants, key, jay_MOV(b, x, imm));
    return x;
 }
@@ -97,7 +100,7 @@ try_swap_src01(jay_inst *I)
    if (I->op == JAY_OPCODE_SEL) {
       /* sel(a, b, p) = sel(b, a, !p) */
       I->src[2].negate ^= true;
-   } else if (I->op == JAY_OPCODE_CMP) {
+   } else if (I->op == JAY_OPCODE_CMP || I->op == JAY_OPCODE_DEMOTE) {
       I->conditional_mod = gen_condition_swap_sources(I->conditional_mod);
    } else if (I->op == JAY_OPCODE_BFN) {
       jay_set_bfn_ctrl(I, util_lut3_swap_sources(jay_bfn_ctrl(I), 0, 1));
@@ -133,9 +136,9 @@ lower_immediates(jay_builder *b, jay_inst *I, struct hash_table_u64 *constants)
    }
 
    /* One source supports immediates but the other does not, so swap. */
-   bool allow_s0 = I->op == JAY_OPCODE_BFE || I->op == JAY_OPCODE_BFN;
-   unsigned other = allow_s0 ? 1 : 0;
-   if (jay_is_imm(I->src[other]) &&
+   unsigned nr_srcs = jay_num_isa_srcs(I);
+   unsigned other = nr_srcs == 2 ? 0 : 1;
+   if ((other < I->num_srcs && jay_is_imm(I->src[other])) &&
        !_mesa_hash_table_u64_search(constants, jay_as_uint(I->src[other]))) {
 
       try_swap_src01(I);
@@ -144,11 +147,39 @@ lower_immediates(jay_builder *b, jay_inst *I, struct hash_table_u64 *constants)
    /* Immediates allowed only in certain cases, lower the rest */
    jay_foreach_src(I, s) {
       if (jay_is_imm(I->src[s])) {
-         uint32_t imm = jay_as_uint(I->src[s]);
+         /* In general, one machine source cannot take an immediate */
+         bool allowed = s < 3 && s != other;
 
-         bool last = s == (jay_num_isa_srcs(I) - 1);
-         bool allowed = s < 2 && (last || I->op == JAY_OPCODE_SEND);
-         allowed |= (allow_s0 && s == 0 && imm <= UINT16_MAX);
+         /* Eligible three-source instructions can have exactly one immediate
+          * (src0 or src2) and it must be 16-bit.
+          */
+         if (nr_srcs == 3) {
+            unsigned ver = b->shader->devinfo->ver;
+            allowed &= I->op == JAY_OPCODE_BFN ||
+                       I->op == JAY_OPCODE_ADD3 ||
+                       I->op == JAY_OPCODE_MAD ||
+                       I->op == JAY_OPCODE_DP4A_SS ||
+                       I->op == JAY_OPCODE_DP4A_SU ||
+                       I->op == JAY_OPCODE_DP4A_UU ||
+                       (ver >= 12 && I->op == JAY_OPCODE_BFE);
+
+            /* Gen9 does not support 3-src immediates */
+            allowed &= ver >= 11 &&
+                       !jay_type_is_any_float(I->type) &&
+                       jay_as_uint(I->src[s]) <= UINT16_MAX;
+
+            /* MAD/DP4A can have at most one immediate source on Gfx11 */
+            allowed &= (ver >= 12 || s == 0 || !jay_is_imm(I->src[0])) ||
+                       !(I->op == JAY_OPCODE_MAD ||
+                         I->op == JAY_OPCODE_DP4A_SS ||
+                         I->op == JAY_OPCODE_DP4A_SU ||
+                         I->op == JAY_OPCODE_DP4A_UU);
+         }
+
+         /* SENDs have immediate messages descriptors but not payloads */
+         if (I->op == JAY_OPCODE_SEND) {
+            allowed = s < 2;
+         }
 
          if (!allowed) {
             I->src[s] = lower_imm_to_ugpr(b, I, s, constants);
@@ -157,32 +188,129 @@ lower_immediates(jay_builder *b, jay_inst *I, struct hash_table_u64 *constants)
    }
 }
 
+static void
+lower_bf16_restrictions(jay_inst *I, jay_function *f)
+{
+   /* BSpec 56640 disallows broadcast of bfloat16 scalar.
+    * Insert a MOV to eliminate bfloat scalar broadcast.
+    */
+   jay_foreach_src(I, s) {
+      bool is_bf16 = jay_src_type(I, s) == JAY_TYPE_BF16;
+      bool is_broadcast = I->src[s].file == UGPR;
+      if (is_bf16 && is_broadcast && I->dst.file != UGPR) {
+         jay_builder b = jay_init_builder(f, jay_before_inst(I));
+         jay_def tmp = jay_alloc_def(&b, GPR, 1);
+         jay_MOV(&b, tmp, I->src[s]);
+         jay_replace_src(&I->src[s], tmp);
+      }
+   }
+}
+
+/*
+ * If multiple phis in a block read the same source, RA will need to insert at
+ * least one copy regardless, but the messy resulting phi webs means RA will end
+ * up inserting many copies (or even swaps). Instead, we lower away repeated
+ * sources pre-RA by inserting that single copy preemptively, allowing RA's phi
+ * web heuristics to do their job.
+ *
+ * This is less heavyhanded than a full CSSA lowering.
+ */
+static void
+lower_repeated_phi_srcs(jay_function *f,
+                        jay_block *block,
+                        struct u_sparse_bitset *seen)
+{
+   jay_foreach_phi_src_in_block(block, phi) {
+      unsigned idx = jay_index(phi->src[0]);
+      if (u_sparse_bitset_test(seen, idx)) {
+         jay_builder b = jay_init_builder(f, jay_after_block_logical(block));
+         jay_def repl = jay_alloc_def(&b, phi->src[0].file, 1);
+         jay_inst *mov = jay_MOV(&b, repl, phi->src[0]);
+         if (jay_is_flag(phi->src[0])) {
+            mov->type = jay_flag_type(f);
+         }
+
+         jay_replace_src(&phi->src[0], repl);
+      } else {
+         u_sparse_bitset_set(seen, idx);
+      }
+   }
+
+   u_sparse_bitset_clear_all(seen);
+}
+
+static void
+lower_ex_desc_address_registers(jay_inst *I, jay_function *f)
+{
+   if (I->op != JAY_OPCODE_SEND)
+      return;
+   if (jay_is_null(I->src[1]) || jay_is_imm(I->src[1]))
+      return;
+   /* ex_desc should have been in a UGPR so we could have more easily performed
+    * optimizations with it. It doesn't need to be an address register yet since
+    * we're moving it to one here.
+    */
+   assert(I->src[1].file == UGPR);
+   jay_builder b = jay_init_builder(f, jay_before_inst(I));
+   jay_def tmp = jay_alloc_def(&b, J_ADDRESS, 1);
+   jay_MOV(&b, tmp, I->src[1]);
+   jay_replace_src(&I->src[1], tmp);
+}
+
 void
 jay_lower_pre_ra(jay_shader *s)
 {
    struct hash_table_u64 *constants = _mesa_hash_table_u64_create(NULL);
 
    jay_foreach_function(s, f) {
-      /* Pool constants per function. */
+      /* If we prioritize instruction count, pool constants per function. If we
+       * prioritize register pressure, pool per block. This is a heuristic fed
+       * by the pressure scheduler. When we have a more competent remat story,
+       * this heuristic can hopefully go away but it helps a lot right now.
+       */
       _mesa_hash_table_u64_clear(constants);
 
-      jay_foreach_inst_in_func(f, block, I) {
-         jay_builder b = { .shader = s, .func = f };
+      struct u_sparse_bitset phi_srcs;
+      u_sparse_bitset_init(&phi_srcs, f->ssa_alloc, NULL);
 
-         /* Shuffle(UGPR) can result from copyprop if there's a mismatch between
-          * isel and divergence analysis (e.g. because multipolygon is
-          * disabled). Legalize.
-          */
-         if (I->op == JAY_OPCODE_SHUFFLE && I->src[0].file == UGPR) {
-            assert(!I->predication);
-            I->op = JAY_OPCODE_MOV;
-            jay_shrink_sources(I, 1);
+      jay_foreach_block(f, block) {
+         if (f->prioritize_pressure) {
+            _mesa_hash_table_u64_clear(constants);
          }
 
-         /* lower_immediates must be last since it consumes I */
-         lower_contiguous_sources(&b, I);
-         lower_immediates(&b, I, constants);
+         jay_foreach_inst_in_block(block, I) {
+            lower_ex_desc_address_registers(I, f);
+
+            jay_builder b = { .shader = s, .func = f };
+
+            lower_bf16_restrictions(I, f);
+
+            /* We use predicated-default with flags to optimize OR/AND of
+             * booleans. RA forcibly ties the flags for this case, so insert
+             * copies to legalize that. These copies are usually coalesced.
+             */
+            if (I->predication > 1) {
+               b.cursor = jay_before_inst(I);
+               jay_def copy = jay_alloc_def(&b, FLAG, 1);
+               jay_MOV(&b, copy, I->src[I->num_srcs - 1])->type =
+                  jay_flag_type(f);
+               assert(jay_defs_equivalent(I->src[I->num_srcs - 1],
+                                          I->src[I->num_srcs - 2]));
+               jay_replace_src(&I->src[I->num_srcs - 1], copy);
+               jay_replace_src(&I->src[I->num_srcs - 2], copy);
+            }
+
+            /* lower_immediates must be last since it consumes I */
+            lower_contiguous_sources(&b, I);
+            b.cursor = f->prioritize_pressure ? jay_before_inst(I) :
+                                                jay_before_function(f);
+            lower_immediates(&b, I, constants);
+         }
+
+         lower_repeated_phi_srcs(f, block, &phi_srcs);
       }
+
+      u_sparse_bitset_free(&phi_srcs);
    }
 
    _mesa_hash_table_u64_destroy(constants);

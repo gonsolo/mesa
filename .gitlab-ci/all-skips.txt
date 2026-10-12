@@ -26,11 +26,6 @@ glx@glx_arb_sync_control@timing.*
 # This test is not built with waffle, while we do build tests with waffle
 spec@!opengl 1.1@windowoverlap
 
-# These test the loader more than the implementation and are broken because the
-# Vulkan loader in Debian is too old
-dEQP-VK.api.get_device_proc_addr.non_enabled
-dEQP-VK.api.version_check.unavailable_entry_points
-
 # These tests are flaking too much recently on almost all drivers, so better skip them until the cause is identified
 spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex
 spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex@'vs_input2[1][0]' on GL_PROGRAM_INPUT
@@ -50,3 +45,10 @@ spec@!opengl 1.1@read-front
 # Also, individually, it was disabled in most of the tests as it is
 # either too slow or results in an OOM
 spec@!opengl 1.1@streaming-texture-leak
+
+# OpenCL-CTS SPIR exits cleanly after reporting that cl_khr_spir is unsupported,
+# but deqp-runner cannot parse that message as a skip
+^SPIR$
+
+# Skip CPU tests (ie. CL_FILTER_LINEAR) that are only required to pass on CPU:
+^CL_DEVICE_TYPE_CPU,.*$

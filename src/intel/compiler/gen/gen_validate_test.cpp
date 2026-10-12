@@ -17,7 +17,7 @@
 #include "util/ralloc.h"
 
 static constexpr int MIN_GFX_VERX10 = 90;
-static constexpr int MAX_GFX_VERX10 = 300;
+static constexpr int MAX_GFX_VERX10 = 350;
 
 /* Many of the tests can be represented as an assembly instruction that can be
  * parsed and then validate.  These tests are handled in a single table.
@@ -123,12 +123,14 @@ static const struct {
 
    { "math.sqt (8) r0:hf r1<0>:hf null", VALID, { .le = 125 } },
    { "math.sqt (8) r0:hf r1<0>:hf null",
-     "Scalar broadcast on HF MATH inputs is not supported on this platform.", { .gt = 125 }
+     "Scalar broadcast on HF MATH inputs is not supported on this platform.", { .gt = 125, .lt = 350 }
    },
+   { "math.sqt (8) r0:hf r1<0>:hf null", VALID, { .ge = 350 } },
    { "math.invm (8) r0:hf r1:hf r2<0>:hf", VALID, { .le = 125 } },
    { "math.invm (8) r0:hf r1:hf r2<0>:hf",
-     "Scalar broadcast on HF MATH inputs is not supported on this platform.", { .gt = 125 }
+     "Scalar broadcast on HF MATH inputs is not supported on this platform.", { .gt = 125, .lt = 350 }
    },
+   { "math.invm (8) r0:hf r1:hf r2<0>:hf", VALID, { .ge = 350 } },
 
 
    /* Branch restrictions. */
@@ -152,8 +154,10 @@ static const struct {
 
    /* GFX register numbers. */
    { "mov (4) r127 r127",        VALID,                                                      { .lt = 200 } },
-   { "mov (4) r128 r1",          "Destination GRF register number 128 exceeds maximum 127.", { .lt = 200 } },
-   { "mov (4) r0 r128",          "Source 0 GRF register number 128 exceeds maximum 127.",    { .lt = 200 } },
+   { "mov (4) r128 r1",          "Destination GRF register number 128 exceeds maximum 127.", { .lt = 125 } },
+   { "mov (4) r0 r128",          "Source 0 GRF register number 128 exceeds maximum 127.",    { .lt = 125 } },
+   { "mov (4) r256 r1",          "Destination GRF register number 256 exceeds maximum 255.", { .ge = 125 } },
+   { "mov (4) r0 r256",          "Source 0 GRF register number 256 exceeds maximum 255.",    { .ge = 125 } },
    { "mov (4) r[a0.0 + 128] r1", VALID,                                                      { .lt = 200 } },
    { "mov (4) r0 r[a0.0 + 128]", VALID,                                                      { .lt = 200 } },
 
@@ -194,7 +198,7 @@ static const struct {
    { "mad (8) r0:d r1:d r2:d r3:d",
      "Gfx9 3-source instructions must use Align16 mode.", { .eq = 90 }
    },
-   { "mad (8) r0:d r1:d r2:d r3:d", VALID, { .gt = 90 } },
+   { "mad (8) r0:d r1:d r2:d r3:d", VALID, { .gt = 90, .lt = 120 } },
 
    { "mad (8) r0.:d r1:d r2:d r3:d {Align16}", VALID,                                   { .eq = 90 } },
    { "mad (8) r0.:d r1:d r2:d r3:d {Align16}", "Align16 mode doesn't exist on Gfx11+.", { .ge = 110 } },
@@ -280,7 +284,7 @@ static const struct {
    { "mad (8) a0:f r1:f r2:f r3:f",
      "Align1 3-source destination must be a GRF, accumulator, or null register.", { .ge = 110 }
    },
-   { "mad (8) r0<2>:f r1:f r2:f r3:f", VALID, { .ge = 110 } },
+   { "mad (8) r0<2>:f r1:f r2:f r3:f", VALID, { .ge = 110, .lt = 350 } },
    { "mad (8) r0<4>:f r1:f r2:f r3:f",
      "Align1 3-source destination horizontal stride must be 1 or 2.", { .ge = 110 }
    },
@@ -412,7 +416,7 @@ static const struct {
    { "add (32) r0:d r1:d r2<2>:d",
      "A source cannot span more than 2 adjacent GRF registers.", { .ge = 200 }
    },
-   { "add (16) r0:d r1:d r2.0<2>:d", VALID, { .ge = 200 } },
+   { "add (16) r0:d r1:d r2.0<2>:d", VALID, { .ge = 200, .lt = 350 } },
    { "add (16) r0:d r1:d r2:d", VALID, { .ge = 200 } },
 
 
@@ -420,17 +424,17 @@ static const struct {
      "A destination cannot span more than 2 adjacent GRF registers.", { .lt = 200 }
    },
    { "add (32) r0<4>:w r1:w r2:w",  SAME_ERROR, { .ge = 200 } },
-   { "add (8) r0.3<4>:w r1:w r2:w", VALID },
+   { "add (8) r0.3<4>:w r1:w r2:w", VALID, { .lt = 350 } },
 
 
    { "add (8) r0:w r1:w r2<16;4,2>:w",   VALID, { .lt = 200 } },
    { "add (8) r0.8:w r1:w r2<16;4,2>:w", VALID, { .lt = 200 } },
    { "add (16) r0:w r1:w r2<2>:w",       VALID, { .lt = 200 } },
    { "add (4) r0.5:w r1:w r2<16;2,1>:w", VALID, { .lt = 200 } },
-   { "add (8) r0:d r1:d r2<16;4,2>:d",   VALID, { .ge = 200 } },
-   { "add (8) r0.4:d r1:d r2<16;4,2>:d", VALID, { .ge = 200 } },
-   { "add (16) r0:d r1:d r2<2>:d",       VALID, { .ge = 200 } },
-   { "add (4) r0.2:d r1:d r2<16;2,1>:d", VALID, { .ge = 200 } },
+   { "add (8) r0:d r1:d r2<16;4,2>:d",   VALID, { .ge = 200, .lt = 350 } },
+   { "add (8) r0.4:d r1:d r2<16;4,2>:d", VALID, { .ge = 200, .lt = 350 } },
+   { "add (16) r0:d r1:d r2<2>:d",       VALID, { .ge = 200, .lt = 350 } },
+   { "add (4) r0.2:d r1:d r2<16;2,1>:d", VALID, { .ge = 200, .lt = 350 } },
 
 
    /* dst_elements_must_be_evenly_split_between_registers. */
@@ -467,10 +471,10 @@ static const struct {
 
    { "add (16) r0:d r0<0>:d r0<0>:d", VALID },
    { "add (16) r0:d r1:w r2:d",       VALID },
-   { "add (16) r0:d r1:d r2:w",       VALID },
-   { "add (16) r0:d r1:w r2:w",       VALID },
+   { "add (16) r0:d r1:d r2:w",       VALID, { .lt = 350 } },
+   { "add (16) r0:d r1:w r2:w",       VALID, { .lt = 350 } },
    { "add (16) r0<2>:w r1:w r2<0>:w", VALID },
-   { "add (16) r0<2>:w r1<0>:w r2:w", VALID },
+   { "add (16) r0<2>:w r1<0>:w r2:w", VALID, { .lt = 350 } },
 
 
    { "mov (8) r0:ub r1:ub",      VALID, },
@@ -928,7 +932,7 @@ static const struct {
    { "add (8) r0<2>:bf r1:f r2<0>:bf",
      "Broadcast of bfloat scalar is not supported.", { .has_bfloat16 = true }
    },
-   { "mul (8) r0:bf r1:bf r2:f", VALID, { .has_bfloat16 = true } },
+   { "mul (8) r0:bf r1:bf r2:f", VALID, { .lt = 350, .has_bfloat16 = true } },
    { "mul (8) r0:bf r1:f r2:bf",
      "Bfloat is not allowed in src1 of 2-source multiplier instructions.", { .has_bfloat16 = true }
    },
@@ -937,9 +941,10 @@ static const struct {
      "Bfloat is not allowed in src2 of 3-source multiplier instructions.", { .has_bfloat16 = true }
    },
    { "add (8) r0.8:bf r1:bf r2:f", VALID, { .lt = 200, .has_bfloat16 = true } },
-   { "add (8) r0.16:bf r1:bf r2:f", VALID, { .ge = 200, .has_bfloat16 = true } },
+   { "add (8) r0.16:bf r1:bf r2:f", VALID, { .ge = 200, .lt = 350, .has_bfloat16 = true } },
    { "add (8) r0.1:bf r1:bf r2:f",
-     "Packed bfloat destination must have register offset 0 or half a GRF.", { .has_bfloat16 = true }
+     "Packed bfloat destination must have register offset 0 or half a GRF.",
+     { .lt = 350, .has_bfloat16 = true }
    },
    { "add (8) r0.2<2>:bf r1:f r2:f",
      "Unpacked bfloat destination must have stride 2 and register offset 0 or 1 element.", { .has_bfloat16 = true }
@@ -948,7 +953,7 @@ static const struct {
      "Bfloat sources must be packed.", { .has_bfloat16 = true }
    },
    { "add (8) r0:bf r1.8:bf r2:f", VALID, { .lt = 200, .has_bfloat16 = true } },
-   { "add (8) r0:bf r1.16:bf r2:f", VALID, { .ge = 200, .has_bfloat16 = true } },
+   { "add (8) r0:bf r1.16:bf r2:f", VALID, { .ge = 200, .lt = 350, .has_bfloat16 = true } },
    { "add (8) r0:bf r1.2:bf r2:f",
      "Bfloat sources must have register offset 0 or half a GRF.", { .has_bfloat16 = true }
    },
@@ -980,14 +985,14 @@ static const struct {
      "Bfloat is not allowed in src1 of 2-source multiplier instructions.", { .has_bfloat16 = true }
    },
    { "mad (8) r0:f r1:bf r2:f r3:f", VALID, { .has_bfloat16 = true } },
-   { "mad (8) r0:f r1:f r2:bf r3:f", VALID, { .has_bfloat16 = true } },
+   { "mad (8) r0:f r1:f r2:bf r3:f", VALID, { .lt = 350, .has_bfloat16 = true } },
    { "mad (8) r0:f r1:f r2:f r3:bf",
      "Bfloat is not allowed in src2 of 3-source multiplier instructions.", { .has_bfloat16 = true }
    },
 
 
    { "add (8) r0<2>:bf r1:f r2.8:bf", VALID, { .lt = 200, .has_bfloat16 = true } },
-   { "add (8) r0<2>:bf r1:f r2.16:bf", VALID, { .ge = 200, .has_bfloat16 = true } },
+   { "add (8) r0<2>:bf r1:f r2.16:bf", VALID, { .ge = 200, .lt = 350, .has_bfloat16 = true } },
    { "add (8) r0<2>:bf r1:f r2.2:bf",
      "Bfloat sources must have register offset 0 or half a GRF.", { .has_bfloat16 = true }
    },
@@ -1495,15 +1500,16 @@ static const struct {
    },
    { "math.fdiv (8) r0:f r1:f r2<16;8,2>:hf", VALID, { .lt = 125 } },
    { "math.fdiv (8) r0:f r1:f r2<16;8,2>:hf",
-     "MATH POW and FDIV are not supported on Gfx12.5+.", { .ge = 125 }
+     "MATH POW and FDIV are not supported on Gfx12.5+.", { .ge = 125, .lt = 350 }
    },
    { "math.fdiv (8) r0:f r1:f r2",
      "Before Gfx12.5, 2-source MATH src1 type must be F or HF.", { .lt = 125 }
    },
    { "math.fdiv (8) r0:f r1:f r2",
-     "MATH POW and FDIV are not supported on Gfx12.5+.", { .ge = 125 }
+     "MATH POW and FDIV are not supported on Gfx12.5+.", { .ge = 125, .lt = 350 }
    },
 
+   { "math.tanh (8) r0:f r1:f null", VALID, { .ge = 350 } },
 
    { "math.sqt (8) r0:f r1:f null",         VALID },
    { "math.sqt (8) r0<2>:hf r1<2>:hf null", VALID },
@@ -1640,7 +1646,7 @@ static const struct {
    },
 
 
-   { "mul (8) r0 -r1 r2:uw",     VALID },
+   { "mul (8) r0 -r1 r2:uw",     VALID, { .lt = 350 } },
    { "mul (8) r0 r1 (abs)r2:uw", VALID, { .lt = 120 } },
    { "mul (8) r0 r1 (abs)r2:uw",
      "When multiplying a DWord and a lower-precision integer, source modifiers are not supported.", { .ge = 120 }
@@ -1942,6 +1948,22 @@ static const struct {
    { "send.ugm (8) null r1 null:0 a0.0 a0.0", VALID, { .ge = 200, .has_lsc = true } },
 
 
+   { "send.ugm (1) r10 r80 null:0 0x0 0x02400403",
+     "LSC 2D block messages require Xe2+.", { .lt = 200, .has_lsc = true }
+   },
+   { "send.ugm (1) r10 r80 null:0 0x0 0x02400403", VALID, { .ge = 200, .has_lsc = true } },
+   { "send.tgm (1) r10 r80 null:0 0x0 0x02400403", VALID, { .ge = 200, .has_lsc = true } },
+   { "send.slm (1) r10 r80 null:0 0x0 0x02400403",
+     "LSC 2D block messages must use UGM or TGM.", { .ge = 200, .has_lsc = true }
+   },
+   { "send.ugm (1) r10 r80 null:0 0x0 0x22400403",
+     "UGM 2D block messages require flat A64 addressing.", { .ge = 200, .has_lsc = true }
+   },
+   { "send.ugm (1) r10 r80 null:0 0x0 0x02400803",
+     "UGM 2D block messages require d8, d16, d32, or d64 data size.", { .ge = 200, .has_lsc = true }
+   },
+
+
    /* ARF scalar register restrictions. */
 
    { "mov (1) s0 r1<0>",
@@ -1961,7 +1983,7 @@ static const struct {
    { "mov (1) (eq)f0.0 s0:uw 0:uw",
      "Scalar-register MOV with an immediate source cannot use a condition modifier.", { .ge = 300 }
    },
-   { "mov (1) s0.28 r1<0>",
+   { "mov (1) s0.60:uq r1<0>:uq",
      "Scalar-register destinations must not cross the lower/upper 8-dword boundary.", { .ge = 300 }
    },
    { "mov (8) r0:uw s0<0>:uw", VALID, { .ge = 300 } },
@@ -2050,27 +2072,27 @@ static const struct {
    { "add (8) r0.4<2>:b r2.2<16;2,4>:w r4:w", SAME_ERROR, { .ge = 200 } },
 
    /* Source 1. One element per dword channel. */
-   { "add (8) r0:d r2:d r4:w",    VALID, { .ge = 200 } },
-   { "add (8) r0<2>:w r2:d r4:w", VALID, { .ge = 200 } },
+   { "add (8) r0:d r2:d r4:w",    VALID, { .ge = 200, .lt = 350 } },
+   { "add (8) r0<2>:w r2:d r4:w", VALID, { .ge = 200, .lt = 350 } },
 
    /* Source 1. Uniform stride W->W cases. */
    { "add (8) r0.1:w r2:w r4.2:w",    VALID, { .ge = 200 } },
    { "add (8) r0.1:w r2:w r4<2>:w",
      "Invalid register region for source 1. See special restrictions section.", { .ge = 200 }
    },
-   { "add (8) r0.1:w r2:w r4.2<2>:w", VALID, { .ge = 200 } },
+   { "add (8) r0.1:w r2:w r4.2<2>:w", VALID, { .ge = 200, .lt = 350 } },
    { "add (8) r0.1:w r2:w r4<4>:w",
      "Invalid register region for source 1. See special restrictions section.", { .ge = 200 }
    },
    { "add (8) r0.1:w r2:w r4.2<4>:w", SAME_ERROR, { .ge = 200 } },
 
    /* Source 1. Dword aligned W->W cases. */
-   { "add (8) r0.2:w r2:w r4<8;4,1>:w",   VALID, { .ge = 200 } },
-   { "add (8) r0.2:w r2:w r4.4<8;4,1>:w", VALID, { .ge = 200 } },
+   { "add (8) r0.2:w r2:w r4<8;4,1>:w",   VALID, { .ge = 200, .lt = 350 } },
+   { "add (8) r0.2:w r2:w r4.4<8;4,1>:w", VALID, { .ge = 200, .lt = 350 } },
    { "add (8) r0.2:w r2:w r4<2>:w",
      "Invalid register region for source 1. See special restrictions section.", { .ge = 200 }
    },
-   { "add (8) r0.2:w r2:w r4.4<2>:w",     VALID, { .ge = 200 } },
+   { "add (8) r0.2:w r2:w r4.4<2>:w",     VALID, { .ge = 200, .lt = 350 } },
    { "add (8) r0.2:w r2:w r4<16;2,4>:w",
      "Invalid register region for source 1. See special restrictions section.", { .ge = 200 }
    },
@@ -2087,14 +2109,44 @@ static const struct {
    { "add (8) r0.2<2>:b r2:b r4.1<4>:w", SAME_ERROR, { .ge = 200 } },
 
    /* Source 1. Dword aligned W->B cases. */
-   { "add (8) r0.4<2>:b r2:w r4<8;4,1>:w",    VALID, { .ge = 200 } },
-   { "add (8) r0.4<2>:b r2:w r4.2<8;4,1>:w",  VALID, { .ge = 200 } },
+   { "add (8) r0.4<2>:b r2:w r4<8;4,1>:w",    VALID, { .ge = 200, .lt = 350 } },
+   { "add (8) r0.4<2>:b r2:w r4.2<8;4,1>:w",  VALID, { .ge = 200, .lt = 350 } },
    { "add (8) r0.4<2>:b r2:w r4<2>:w",
      "Invalid register region for source 1. See special restrictions section.", { .ge = 200 }
    },
    { "add (8) r0.4<2>:b r2:w r4.2<2>:w",      SAME_ERROR, { .ge = 200 } },
    { "add (8) r0.4<2>:b r2:w r4<16;2,4>:w",   SAME_ERROR, { .ge = 200 } },
    { "add (8) r0.4<2>:b r2:w r4.2<16;2,4>:w", SAME_ERROR, { .ge = 200 } },
+
+   /* Xe3P register region encoding restrictions for Src1. */
+   { "add (8) r3<4>:ud r3<4>:ud r4<1>:ud",
+     "On Xe3P+, src1 and dst byte stride must match.", { .ge = 350 } },
+   { "mad (8) r0<2>:f r1:f r2:f r3:f",    SAME_ERROR, { .ge = 350 } },
+   { "add (16) r0:d r1:d r2.0<2>:d",      SAME_ERROR, { .ge = 350 } },
+   { "add (8) r0.3<4>:w r1:w r2:w",       SAME_ERROR, { .ge = 350 } },
+   { "add (8) r0:d r1:d r2<16;4,2>:d",    SAME_ERROR, { .ge = 350 } },
+   { "add (8) r0.4:d r1:d r2<16;4,2>:d",  SAME_ERROR, { .ge = 350 } },
+   { "add (16) r0:d r1:d r2<2>:d",        SAME_ERROR, { .ge = 350 } },
+   { "add (4) r0.2:d r1:d r2<16;2,1>:d",  SAME_ERROR, { .ge = 350 } },
+   { "add (16) r0:d r1:d r2:w",           SAME_ERROR, { .ge = 350 } },
+   { "add (16) r0:d r1:w r2:w",           SAME_ERROR, { .ge = 350 } },
+   { "add (16) r0<2>:w r1<0>:w r2:w",     SAME_ERROR, { .ge = 350 } },
+   { "mul (8) r0:bf r1:bf r2:f",          SAME_ERROR, { .ge = 350 } },
+   { "add (8) r0.16:bf r1:bf r2:f",       SAME_ERROR, { .ge = 350 } },
+   { "add (8) r0.1:bf r1:bf r2:f",        SAME_ERROR, { .ge = 350 } },
+   { "add (8) r0:bf r1.16:bf r2:f",       SAME_ERROR, { .ge = 350 } },
+   { "mad (8) r0:f r1:f r2:bf r3:f",      SAME_ERROR, { .ge = 350 } },
+   { "add (8) r0<2>:bf r1:f r2.16:bf",    SAME_ERROR, { .ge = 350 } },
+   { "mul (8) r0 -r1 r2:uw",              SAME_ERROR, { .ge = 350 } },
+   { "add (8) r0:d r2:d r4:w",            SAME_ERROR, { .ge = 350 } },
+   { "add (8) r0<2>:w r2:d r4:w",         SAME_ERROR, { .ge = 350 } },
+   { "add (8) r0.1:w r2:w r4.2<2>:w",     SAME_ERROR, { .ge = 350 } },
+   { "add (8) r0.2:w r2:w r4<8;4,1>:w",   SAME_ERROR, { .ge = 350 } },
+   { "add (8) r0.2:w r2:w r4.4<8;4,1>:w", SAME_ERROR, { .ge = 350 } },
+   { "add (8) r0.2:w r2:w r4.4<2>:w",     SAME_ERROR, { .ge = 350 } },
+   { "add (8) r0.4<2>:b r2:w r4<8;4,1>:w", SAME_ERROR, { .ge = 350 } },
+   { "add (8) r0.4<2>:b r2:w r4.2<8;4,1>:w", SAME_ERROR, { .ge = 350 } },
+
 };
 
 static struct intel_device_info

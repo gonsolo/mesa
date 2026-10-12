@@ -39,7 +39,7 @@
 #include "util/mesa-blake3.h"
 #include "util/u_dl.h"
 
-#include "util/driconf.h"
+#include "dzn_drirc.h"
 
 #include "glsl_types.h"
 
@@ -57,8 +57,6 @@
 #include <shlobj.h>
 #include "dzn_dxgi.h"
 #endif
-
-#include <directx/d3d12sdklayers.h>
 
 #define DZN_API_VERSION VK_MAKE_VERSION(1, 2, VK_HEADER_VERSION)
 
@@ -248,8 +246,8 @@ dzn_instance_destroy(struct dzn_instance *instance, const VkAllocationCallbacks 
    if (instance->d3d12_mod)
       util_dl_close(instance->d3d12_mod);
 
-   driDestroyOptionCache(&instance->dri_options);
-   driDestroyOptionInfo(&instance->available_dri_options);
+   driDestroyOptionCache(&instance->drirc.options);
+   driDestroyOptionInfo(&instance->drirc.available_options);
 
    vk_free2(vk_default_allocator(), alloc, instance);
 }
@@ -667,7 +665,7 @@ dzn_physical_device_get_features(const struct dzn_physical_device *pdev,
 
    bool support_descriptor_indexing = pdev->shader_model >= D3D_SHADER_MODEL_6_6 &&
       !(instance->debug_flags & DZN_DEBUG_NO_BINDLESS);
-   bool support_8bit = driQueryOptionb(&instance->dri_options, "dzn_enable_8bit_loads_stores") &&
+   bool support_8bit = instance->drirc.debug.enable_8bit_loads_stores &&
       pdev->options4.Native16BitShaderOpsSupported;
 
    *features = (struct vk_features) {
@@ -686,7 +684,7 @@ dzn_physical_device_get_features(const struct dzn_physical_device *pdev,
       .depthBiasClamp = true,
       .fillModeNonSolid = true,
       .depthBounds = pdev->options2.DepthBoundsTestSupported,
-      .wideLines = driQueryOptionb(&instance->dri_options, "dzn_claim_wide_lines"),
+      .wideLines = instance->drirc.debug.claim_wide_lines,
       .largePoints = false,
       .alphaToOne = false,
       .multiViewport = false,
@@ -817,6 +815,7 @@ static void
 dzn_physical_device_get_properties(const struct dzn_physical_device *pdev,
                                    struct vk_properties *properties)
 {
+   struct dzn_instance *instance = container_of(pdev->vk.instance, struct dzn_instance, vk);
    /* minimum from the D3D and Vulkan specs */
    const VkSampleCountFlags supported_sample_counts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
 
@@ -1076,9 +1075,16 @@ dzn_physical_device_get_properties(const struct dzn_physical_device *pdev,
       .underlyingAPI = VK_LAYERED_DRIVER_UNDERLYING_API_D3D12_MSFT,
    };
 
-   snprintf(properties->deviceName,
-            sizeof(properties->deviceName),
-            "Microsoft Direct3D12 (%s)", pdev->desc.description);
+   if (strlen(instance->drirc.debug.force_vk_devicename) > 0) {
+      snprintf(properties->deviceName,
+               sizeof(properties->deviceName),
+               "%s",
+               instance->drirc.debug.force_vk_devicename);
+   } else {
+      snprintf(properties->deviceName,
+               sizeof(properties->deviceName),
+               "Microsoft Direct3D12 (%s)", pdev->desc.description);
+   }
    memcpy(properties->pipelineCacheUUID,
           pdev->pipeline_cache_uuid, VK_UUID_SIZE);
    memcpy(properties->driverUUID, pdev->driver_uuid, VK_UUID_SIZE);
@@ -1165,7 +1171,7 @@ dzn_physical_device_create(struct vk_instance *instance,
       pdev->options3.ViewInstancingTier = D3D12_VIEW_INSTANCING_TIER_NOT_SUPPORTED;
 
    dzn_physical_device_get_extensions(pdev);
-   if (driQueryOptionb(&dzn_instance->dri_options, "dzn_enable_8bit_loads_stores") &&
+   if (dzn_instance->drirc.debug.enable_8bit_loads_stores &&
        pdev->options4.Native16BitShaderOpsSupported)
       pdev->vk.supported_extensions.KHR_8bit_storage = true;
    if (dzn_instance->debug_flags & DZN_DEBUG_NO_BINDLESS)
@@ -1282,8 +1288,8 @@ dzn_physical_device_get_format_properties(struct dzn_physical_device *pdev,
       dzn_physical_device_get_format_support(pdev, format, 0);
    VkFormatProperties *base_props = &properties->formatProperties;
 
-   vk_foreach_struct(ext, properties->pNext) {
-      vk_debug_ignored_stype(ext->sType);
+   vk_foreach_struct(sType, ext, properties->pNext) {
+      vk_debug_ignored_stype(sType);
    }
 
    if (dfmt_info.Format == DXGI_FORMAT_UNKNOWN) {
@@ -1401,8 +1407,8 @@ dzn_physical_device_get_image_format_properties(struct dzn_physical_device *pdev
    VkImageUsageFlags usage = info->usage;
 
    /* Extract input structs */
-   vk_foreach_struct_const(s, info->pNext) {
-      switch (s->sType) {
+   vk_foreach_struct_const(sType, s, info->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO:
          external_info = (const VkPhysicalDeviceExternalImageFormatInfo *)s;
          break;
@@ -1410,7 +1416,7 @@ dzn_physical_device_get_image_format_properties(struct dzn_physical_device *pdev
          usage |= ((const VkImageStencilUsageCreateInfo *)s)->stencilUsage;
          break;
       default:
-         vk_debug_ignored_stype(s->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -1418,14 +1424,14 @@ dzn_physical_device_get_image_format_properties(struct dzn_physical_device *pdev
    assert(info->tiling == VK_IMAGE_TILING_OPTIMAL || info->tiling == VK_IMAGE_TILING_LINEAR);
 
    /* Extract output structs */
-   vk_foreach_struct(s, properties->pNext) {
-      switch (s->sType) {
+   vk_foreach_struct(sType, s, properties->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES:
          external_props = (VkExternalImageFormatProperties *)s;
          external_props->externalMemoryProperties = (VkExternalMemoryProperties) { 0 };
          break;
       default:
-         vk_debug_ignored_stype(s->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -1763,28 +1769,17 @@ dzn_enumerate_physical_devices(struct vk_instance *instance)
    return result;
 }
 
-static const driOptionDescription dzn_dri_options[] = {
-   DRI_CONF_SECTION_DEBUG
-      DRI_CONF_DZN_CLAIM_WIDE_LINES(false)
-      DRI_CONF_DZN_ENABLE_8BIT_LOADS_STORES(false)
-      DRI_CONF_DZN_DISABLE(false)
-      DRI_CONF_VK_WSI_FORCE_SWAPCHAIN_TO_CURRENT_EXTENT(false)
-   DRI_CONF_SECTION_END
-};
-
 static void
 dzn_init_dri_config(struct dzn_instance *instance)
 {
-   driParseOptionInfo(&instance->available_dri_options, dzn_dri_options,
-                      ARRAY_SIZE(dzn_dri_options));
-   driParseConfigFiles(&instance->dri_options, &instance->available_dri_options,
-                       &(driConfigFileParseParams) {
-                          .driverName = "dzn",
-                          .applicationName = instance->vk.app_info.app_name,
-                          .applicationVersion = instance->vk.app_info.app_version,
-                          .engineName = instance->vk.app_info.engine_name,
-                          .engineVersion = instance->vk.app_info.engine_version,
-                       });
+   dzn_parse_dri_options(&instance->drirc,
+                         &(driConfigFileParseParams) {
+                            .driverName = "dzn",
+                            .applicationName = instance->vk.app_info.app_name,
+                            .applicationVersion = instance->vk.app_info.app_version,
+                            .engineName = instance->vk.app_info.engine_name,
+                            .engineVersion = instance->vk.app_info.engine_version,
+                         });
 }
 
 static VkResult
@@ -1874,7 +1869,7 @@ dzn_instance_create(const VkInstanceCreateInfo *pCreateInfo,
    instance->sync_binary_type = vk_sync_binary_get_type(&dzn_sync_type);
    dzn_init_dri_config(instance);
 
-   if (driQueryOptionb(&instance->dri_options, "dzn_disable")) {
+   if (instance->drirc.debug.disable) {
       dzn_instance_destroy(instance, pAllocator);
       return vk_errorf(NULL, VK_ERROR_INITIALIZATION_FAILED, "dzn_disable set, failing instance creation");
    }
@@ -1929,8 +1924,8 @@ dzn_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice,
       vk_outarray_append_typed(VkQueueFamilyProperties2, &out, p) {
          p->queueFamilyProperties = pdev->queue_families[i].props;
 
-         vk_foreach_struct(ext, pQueueFamilyProperties->pNext) {
-            vk_debug_ignored_stype(ext->sType);
+         vk_foreach_struct(sType, ext, pQueueFamilyProperties->pNext) {
+            vk_debug_ignored_stype(sType);
          }
       }
    }
@@ -1952,8 +1947,8 @@ dzn_GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice physicalDevice,
    dzn_GetPhysicalDeviceMemoryProperties(physicalDevice,
                                          &pMemoryProperties->memoryProperties);
 
-   vk_foreach_struct(ext, pMemoryProperties->pNext) {
-      if(ext->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT){
+   vk_foreach_struct(sType, ext, pMemoryProperties->pNext) {
+      if(sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT){
 
          VkPhysicalDeviceMemoryBudgetPropertiesEXT* vk_physical_memory_budget_properties = (VkPhysicalDeviceMemoryBudgetPropertiesEXT*)ext;
          VK_FROM_HANDLE(dzn_physical_device, pdev, physicalDevice);
@@ -1976,7 +1971,7 @@ dzn_GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice physicalDevice,
          }
       }
       else {
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
       }
    }
 }
@@ -2618,8 +2613,8 @@ dzn_device_memory_create(struct dzn_device *device,
    const wchar_t *import_name = NULL;
    const VkExportMemoryWin32HandleInfoKHR *win32_export = NULL;
 #endif
-   vk_foreach_struct_const(ext, pAllocateInfo->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct_const(sType, ext, pAllocateInfo->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO: {
          const VkExportMemoryAllocateInfo *exp =
             (const VkExportMemoryAllocateInfo *)ext;
@@ -2681,7 +2676,7 @@ dzn_device_memory_create(struct dzn_device *device,
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -3297,8 +3292,8 @@ dzn_GetBufferMemoryRequirements2(VkDevice dev,
    pMemoryRequirements->memoryRequirements.memoryTypeBits =
       dzn_physical_device_get_mem_type_mask_for_resource(pdev, &buffer->desc, buffer->shared);
 
-   vk_foreach_struct(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *requirements =
             (VkMemoryDedicatedRequirements *)ext;
@@ -3308,7 +3303,7 @@ dzn_GetBufferMemoryRequirements2(VkDevice dev,
       }
 
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }

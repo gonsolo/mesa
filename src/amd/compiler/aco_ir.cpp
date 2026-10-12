@@ -121,6 +121,8 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
    program->dev.fused_mad_mix = options->compiler_info->has_fma_mix;
    program->dev.has_mad32 = options->compiler_info->has_mad32;
 
+   program->dev.has_desc_resource_level = options->compiler_info->has_desc_resource_level;
+
    if (program->gfx_level >= GFX12) {
       program->dev.scratch_global_offset_min = -8388608;
       program->dev.scratch_global_offset_max = 8388607;
@@ -225,15 +227,12 @@ is_ordered_ps_done_sendmsg(const Instruction* instr)
 
 uint16_t
 is_atomic_or_control_instr(Program* program, const Instruction* instr, memory_sync_info sync,
-                           unsigned semantic)
+                           unsigned semantic, sync_scope ignore_scope)
 {
    bool is_acquire = semantic & semantic_acquire;
    bool is_release = semantic & semantic_release;
 
-   bool is_atomic = sync.semantics & semantic_atomic;
-   // TODO: NIR doesn't have any atomic load/store, so we assume any load/store is atomic
-   is_atomic |= !(sync.semantics & semantic_private) && sync.storage;
-   if (is_atomic) {
+   if (sync.semantics & semantic_atomic) {
       bool is_load = !instr->definitions.empty() || (sync.semantics & semantic_rmw);
       bool is_store = instr->definitions.empty() || (sync.semantics & semantic_rmw);
       return ((is_release && is_store) || (is_acquire && is_load)) ? sync.storage : 0;
@@ -257,7 +256,15 @@ is_atomic_or_control_instr(Program* program, const Instruction* instr, memory_sy
       if (instr->opcode == aco_opcode::s_sethalt)
          return cls & ~storage_shared;
    }
-   return (instr->isBarrier() && instr->barrier().exec_scope > scope_invocation) ? cls : 0;
+
+   if (instr->isBarrier() && instr->barrier().exec_scope > ignore_scope) {
+      bool is_signal = instr->opcode != aco_opcode::p_barrier_wait;
+      bool is_wait = instr->opcode != aco_opcode::p_barrier_signal;
+      if ((is_acquire && is_wait) || (is_release && is_signal))
+         return cls;
+   }
+
+   return 0;
 }
 
 memory_sync_info
@@ -845,6 +852,19 @@ get_gfx11_true16_mask(aco_opcode op)
    }
 }
 
+static bool
+is_copy_instr(aco_opcode op)
+{
+   switch (op) {
+   case aco_opcode::p_extract_vector:
+   case aco_opcode::p_create_vector:
+   case aco_opcode::p_start_linear_vgpr:
+   case aco_opcode::p_split_vector:
+   case aco_opcode::p_parallelcopy: return true;
+   default: return false;
+   }
+}
+
 unsigned
 get_subdword_operand_stride(Program* program, const Instruction* instr, unsigned idx, RegClass rc)
 {
@@ -858,6 +878,8 @@ get_subdword_operand_stride(Program* program, const Instruction* instr, unsigned
       if (instr->opcode == aco_opcode::p_as_uniform ||
           instr->opcode == aco_opcode::p_permlane64_shared_vgpr)
          return 4;
+      else if (is_copy_instr(instr->opcode))
+         return 1;
       else
          return rc.bytes() % 2 == 0 ? 2 : 1;
    }
@@ -919,6 +941,8 @@ get_subdword_definition_caps(Program* program, const Instruction* instr, unsigne
           instr->opcode == aco_opcode::p_permlane64_shared_vgpr) {
          caps.overwrite_bytes = rc.size() * 4;
          caps.placement_stride = 4;
+      } else if (is_copy_instr(instr->opcode)) {
+         caps.placement_stride = 1;
       }
       return caps;
    }
@@ -1948,6 +1972,7 @@ load_scratch_resource(Program* program, Builder& bld, unsigned resume_idx,
    ac_state.index_stride = program->wave_size == 64 ? 3u : 2u;
    ac_state.add_tid = true;
    ac_state.gfx10_oob_select = V_008F0C_OOB_SELECT_RAW;
+   ac_state.has_desc_resource_level = program->dev.has_desc_resource_level;
 
    ac_build_buffer_descriptor(program->gfx_level, &ac_state, desc);
 

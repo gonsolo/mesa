@@ -57,8 +57,7 @@ vk_primitive_topology_to_mtl_primitive_type(enum VkPrimitiveTopology topology)
    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
       return MTL_PRIMITIVE_TYPE_TRIANGLE_STRIP;
    default:
-      assert(0 && "Primitive topology not supported!");
-      return 0;
+      UNREACHABLE("Primitive topology not supported!");
    }
 }
 
@@ -74,13 +73,14 @@ vk_primitive_topology_to_mtl_primitive_topology_class(
       return MTL_PRIMITIVE_TOPOLOGY_CLASS_LINE;
    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN:
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wswitch"
    case VK_PRIMITIVE_TOPOLOGY_META_RECT_LIST_MESA:
 #pragma GCC diagnostic pop
       return MTL_PRIMITIVE_TOPOLOGY_CLASS_TRIANGLE;
    default:
-      return MTL_PRIMITIVE_TOPOLOGY_CLASS_UNSPECIFIED;
+      UNREACHABLE("Primitive topology not supported!");
    }
 }
 
@@ -93,6 +93,7 @@ vk_attachment_load_op_to_mtl_load_action(enum VkAttachmentLoadOp op)
    case VK_ATTACHMENT_LOAD_OP_CLEAR:
       return MTL_LOAD_ACTION_CLEAR;
    case VK_ATTACHMENT_LOAD_OP_DONT_CARE:
+   case VK_ATTACHMENT_LOAD_OP_NONE:
       return MTL_LOAD_ACTION_DONT_CARE;
    default:
       assert(false && "Unsupported VkAttachmentLoadOp");
@@ -107,9 +108,8 @@ vk_attachment_store_op_to_mtl_store_action(enum VkAttachmentStoreOp op)
    case VK_ATTACHMENT_STORE_OP_STORE:
       return MTL_STORE_ACTION_STORE;
    case VK_ATTACHMENT_STORE_OP_DONT_CARE:
-      return MTL_STORE_ACTION_DONT_CARE;
    case VK_ATTACHMENT_STORE_OP_NONE:
-      return MTL_STORE_ACTION_UNKNOWN;
+      return MTL_STORE_ACTION_DONT_CARE;
    default:
       assert(false && "Unsupported VkAttachmentStoreOp");
       return MTL_STORE_ACTION_UNKNOWN;
@@ -149,9 +149,6 @@ vk_border_color_to_mtl_sampler_border_color(enum VkBorderColor color)
    case VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE:
    case VK_BORDER_COLOR_INT_OPAQUE_WHITE:
       return MTL_SAMPLER_BORDER_COLOR_OPAQUE_WHITE;
-   case VK_BORDER_COLOR_FLOAT_CUSTOM_EXT:
-   case VK_BORDER_COLOR_INT_CUSTOM_EXT:
-      return MTL_SAMPLER_BORDER_COLOR_OPAQUE_WHITE;
    default:
       UNREACHABLE("Unsupported address mode");
    }
@@ -180,6 +177,22 @@ vk_sampler_mipmap_mode_to_mtl_sampler_mip_filter(enum VkSamplerMipmapMode mode)
       return MTL_SAMPLER_MIP_FILTER_LINEAR;
    default:
       UNREACHABLE("Unsupported address mode");
+   }
+}
+
+enum mtl_sampler_reduction_mode
+vk_sampler_reduction_mode_to_mtl_sampler_reduction_mode(
+   enum VkSamplerReductionMode mode)
+{
+   switch (mode) {
+   case VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE:
+      return MTL_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE;
+   case VK_SAMPLER_REDUCTION_MODE_MIN:
+      return MTL_SAMPLER_REDUCTION_MODE_MINIMUM;
+   case VK_SAMPLER_REDUCTION_MODE_MAX:
+      return MTL_SAMPLER_REDUCTION_MODE_MAXIMUM;
+   default:
+      UNREACHABLE("Unsupported sampler reduction mode");
    }
 }
 
@@ -238,6 +251,34 @@ vk_front_face_to_mtl_cull_mode(enum VkCullModeFlagBits mode)
    }
 }
 
+enum mtl_depth_resolve_filter
+vk_resolve_mode_to_mtl_depth_resolve_filter(
+   enum VkResolveModeFlagBits resolve_mode)
+{
+   switch (resolve_mode) {
+   case VK_RESOLVE_MODE_SAMPLE_ZERO_BIT:
+      return MTL_DEPTH_RESOLVE_FILTER_SAMPLE_0;
+   case VK_RESOLVE_MODE_MIN_BIT:
+      return MTL_DEPTH_RESOLVE_FILTER_MIN;
+   case VK_RESOLVE_MODE_MAX_BIT:
+      return MTL_DEPTH_RESOLVE_FILTER_MAX;
+   default:
+      UNREACHABLE("Unsupported VkResolveMode for depth");
+   }
+}
+
+enum mtl_stencil_resolve_filter
+vk_resolve_mode_to_mtl_stencil_resolve_filter(
+   enum VkResolveModeFlagBits resolve_mode)
+{
+   switch (resolve_mode) {
+   case VK_RESOLVE_MODE_SAMPLE_ZERO_BIT:
+      return MTL_STENCIL_RESOLVE_FILTER_SAMPLE_0;
+   default:
+      UNREACHABLE("Unsupported VkResolveMode for stencil");
+   }
+}
+
 enum mtl_index_type
 index_size_in_bytes_to_mtl_index_type(unsigned bytes)
 {
@@ -261,5 +302,26 @@ mtl_index_type_to_size_B(enum mtl_index_type type)
       return 4u;
    default:
       UNREACHABLE("Unhandled index type");
+   }
+}
+
+const char *
+mtl_command_queue_error_to_string(enum mtl_command_queue_error error)
+{
+   switch (error) {
+   case MTL_COMMAND_QUEUE_ERROR_NONE:
+      return "MTL_COMMAND_QUEUE_ERROR_NONE";
+   case MTL_COMMAND_QUEUE_ERROR_TIMEOUT:
+      return "MTL_COMMAND_QUEUE_ERROR_TIMEOUT";
+   case MTL_COMMAND_QUEUE_ERROR_NOT_PERMITTED:
+      return "MTL_COMMAND_QUEUE_ERROR_NOT_PERMITTED";
+   case MTL_COMMAND_QUEUE_ERROR_OUT_OF_MEMORY:
+      return "MTL_COMMAND_QUEUE_ERROR_OUT_OF_MEMORY";
+   case MTL_COMMAND_QUEUE_ERROR_ACCESS_REVOKED:
+      return "MTL_COMMAND_QUEUE_ERROR_ACCESS_REVOKED";
+   case MTL_COMMAND_QUEUE_ERROR_INTERNAL:
+      return "MTL_COMMAND_QUEUE_ERROR_INTERNAL";
+   default:
+      UNREACHABLE("Unsupported error value");
    }
 }

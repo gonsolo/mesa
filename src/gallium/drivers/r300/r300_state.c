@@ -447,6 +447,7 @@ static void* r300_create_blend_state(struct pipe_context* pipe,
     uint32_t alpha_blend_control_noalpha_noclamp = 0; /* R300_RB3D_ABLEND: 0x4e08 */
     uint32_t rop = 0;                 /* R300_RB3D_ROPCNTL: 0x4e18 */
     uint32_t dither = 0;              /* R300_RB3D_DITHER_CTL: 0x4e50 */
+    uint32_t masked_write_blend_control;
     int i;
 
     const unsigned eqRGB = state->rt[0].rgb_func;
@@ -462,6 +463,13 @@ static void* r300_create_blend_state(struct pipe_context* pipe,
     CB_LOCALS;
 
     blend->state = *state;
+    masked_write_blend_control =
+        R300_ALPHA_BLEND_ENABLE |
+        R300_READ_ENABLE |
+        (r300_translate_blend_factor(PIPE_BLENDFACTOR_ONE) <<
+         R300_SRC_BLEND_SHIFT) |
+        (r300_translate_blend_factor(PIPE_BLENDFACTOR_ZERO) <<
+         R300_DST_BLEND_SHIFT);
 
     /* force DST_ALPHA to ONE where we can */
     switch (srcRGBX) {
@@ -588,6 +596,15 @@ static void* r300_create_blend_state(struct pipe_context* pipe,
             OUT_CB(func[i](state->rt[0].colormask));
             OUT_CB_REG(R300_RB3D_DITHER_CTL, dither);
             END_CB;
+
+            BEGIN_CB(blend->cb_clamp_masked_write[i], 8);
+            OUT_CB_REG(R300_RB3D_ROPCNTL, 0);
+            OUT_CB_REG_SEQ(R300_RB3D_CBLEND, 3);
+            OUT_CB(masked_write_blend_control);
+            OUT_CB(0);
+            OUT_CB(func[i](state->rt[0].colormask));
+            OUT_CB_REG(R300_RB3D_DITHER_CTL, dither);
+            END_CB;
         }
     }
 
@@ -676,7 +693,6 @@ static void r300_set_blend_color(struct pipe_context* pipe,
         (struct r300_blend_color_state*)r300->blend_color_state.state;
     struct pipe_blend_color c;
     struct pipe_surface *cb;
-    float tmp;
     CB_LOCALS;
 
     state->state = *color; /* Save it, so that we can reuse it in set_fb_state */
@@ -705,13 +721,82 @@ static void r300_set_blend_color(struct pipe_context* pipe,
             c.color[2] = c.color[3];
             break;
 
+#if UTIL_ARCH_BIG_ENDIAN
+        /* R500 packs components into two registers, so BE swizzles differ. */
+        case PIPE_FORMAT_A8R8G8B8_UNORM: {
+            if (r300->screen->caps.is_r500)
+                break;
+
+            /* A8R8G8B8 constant-color blending consumes the register lanes
+             * in a different order from pipe RGBA. Program the inverse
+             * order so GL_CONSTANT_COLOR sees pipe RGBA.
+             */
+            float r = c.color[0];
+            float g = c.color[1];
+            float b = c.color[2];
+            float a = c.color[3];
+            c.color[0] = g;
+            c.color[1] = r;
+            c.color[2] = a;
+            c.color[3] = b;
+            break;
+        }
+
         case PIPE_FORMAT_R8G8B8A8_UNORM:
         case PIPE_FORMAT_R8G8B8X8_UNORM:
         case PIPE_FORMAT_R10G10B10A2_UNORM:
-            tmp = c.color[0];
+        case PIPE_FORMAT_B5G6R5_UNORM: {
+            /* These formats consume constant-color register lanes in A,R,G,B
+             * order. Program the inverse order so constant blend factors see
+             * pipe RGBA/RGB.
+             */
+            float r = c.color[0];
+            float g = c.color[1];
+            float b = c.color[2];
+            float a = c.color[3];
+            if (r300->screen->caps.is_r500) {
+                c.color[0] = b;
+                c.color[2] = r;
+                break;
+            }
+            c.color[0] = g;
+            c.color[1] = b;
+            c.color[2] = a;
+            c.color[3] = r;
+            break;
+        }
+
+        case PIPE_FORMAT_B4G4R4A4_UNORM:
+        case PIPE_FORMAT_B4G4R4X4_UNORM:
+        case PIPE_FORMAT_B5G5R5A1_UNORM:
+        case PIPE_FORMAT_B5G5R5X1_UNORM: {
+            if (r300->screen->caps.is_r500)
+                break;
+
+            /* 1555 colorbuffer blending consumes the constant color in
+             * colorbuffer-lane order. Match the B5G5R5* output swizzle so
+             * GL_CONSTANT_COLOR blending sees pipe RGBA.
+             */
+            float r = c.color[0];
+            float g = c.color[1];
+            float b = c.color[2];
+            float a = c.color[3];
+            c.color[0] = g;
+            c.color[1] = r;
+            c.color[2] = a;
+            c.color[3] = b;
+            break;
+        }
+#else
+        case PIPE_FORMAT_R8G8B8A8_UNORM:
+        case PIPE_FORMAT_R8G8B8X8_UNORM:
+        case PIPE_FORMAT_R10G10B10A2_UNORM: {
+            float tmp = c.color[0];
             c.color[0] = c.color[2];
             c.color[2] = tmp;
             break;
+        }
+#endif
 
         default:;
         }
@@ -1221,6 +1306,8 @@ static void* r300_create_fs_state(struct pipe_context* pipe,
         /* R300/R400 can not do any kind of control flow, so abort early here. */
         if (!r300->screen->caps.is_r500) {
             char *msg = r300_check_control_flow(shader->ir.nir);
+            if (!msg)
+                msg = r300_check_fs_inputs(shader->ir.nir);
             if (msg && shader->report_compile_error) {
                 fprintf(stderr, "r300 FP: Compiler error: %s\n", msg);
                 ((struct pipe_shader_state *)shader)->error_message = strdup(msg);
@@ -1243,13 +1330,17 @@ static void* r300_create_fs_state(struct pipe_context* pipe,
     memset(&precompile_state, 0, sizeof(precompile_state));
 
     if (fs->state.type == PIPE_SHADER_IR_NIR) {
-        /* Pick something for the shadow samplers so that we have somewhat reliable shader stats later. */
+        /* Record sampler metadata and pick something for the shadow samplers
+         * so that we have somewhat reliable shader stats later. */
         nir_foreach_function_impl(impl, fs->state.ir.nir) {
             nir_foreach_block_safe(block, impl) {
                 nir_foreach_instr_safe(instr, block) {
                     if (instr->type != nir_instr_type_tex)
                         continue;
                     nir_tex_instr *tex = nir_instr_as_tex(instr);
+
+                    if (tex->sampler_dim == GLSL_SAMPLER_DIM_2D)
+                        fs->samplers_2d |= 1u << tex->sampler_index;
 
                     if (tex->is_shadow) {
                         precompile_state.unit[tex->sampler_index].compare_mode_enabled = true;
@@ -1584,7 +1675,10 @@ static void r300_bind_rs_state(struct pipe_context* pipe, void* state)
     bool last_scissor_enabled = r300->scissor_enabled;
 
     if (r300->draw && rs) {
-        draw_set_rasterizer_state(r300->draw, &rs->rs_draw, state);
+        bool frontface_emul = r300->vs_state.state &&
+                              r300_vs(r300)->shader->key.frontface;
+        rs->rs_draw.light_twoside = rs->rs.light_twoside || frontface_emul;
+        draw_set_rasterizer_state(r300->draw, &rs->rs_draw, rs);
     }
 
     if (rs) {
@@ -1657,6 +1751,7 @@ static void*
     struct r300_context* r300 = r300_context(pipe);
     struct r300_sampler_state* sampler = CALLOC_STRUCT(r300_sampler_state);
     bool is_r500 = r300->screen->caps.is_r500;
+    int lod_bias_correction = 1;
     int lod_bias;
 
     sampler->state = *state;
@@ -1702,7 +1797,12 @@ static void*
     sampler->min_lod = (unsigned)MAX2(state->min_lod, 0);
     sampler->max_lod = (unsigned)MAX2(ceilf(state->max_lod), 0);
 
-    lod_bias = CLAMP((int)(state->lod_bias * 32 + 1), -(1 << 9), (1 << 9) - 1);
+    /* Fine-tune the existing empirical LOD bias correction for mip-nearest. */
+    if (state->min_mip_filter == PIPE_TEX_MIPFILTER_NEAREST)
+        lod_bias_correction += is_r500 ? 2 : 1;
+
+    lod_bias = CLAMP((int)(state->lod_bias * 32 + lod_bias_correction),
+                     -(1 << 9), (1 << 9) - 1);
 
     sampler->filter1 |= (lod_bias << R300_LOD_BIAS_SHIFT) & R300_LOD_BIAS_MASK;
 
@@ -1814,10 +1914,12 @@ static void r300_set_sampler_views(struct pipe_context* pipe,
         /* A new sampler view (= texture)... */
         dirty_tex = true;
 
-        /* Set the texrect factor in the fragment shader.
-             * Needed for RECT and NPOT fallback. */
+        /* Set texture size factors in the fragment shader.
+         * Needed for RECT, unnormalized coordinates, and NPOT fallback. */
         texture = r300_resource(views[i]->texture);
-        if (texture->tex.is_npot) {
+        if (texture->tex.is_npot || views[i]->target == PIPE_TEXTURE_RECT ||
+            (i < state->sampler_state_count && state->sampler_states[i] &&
+             state->sampler_states[i]->state.unnormalized_coords)) {
             r300_mark_atom_dirty(r300, &r300->fs_rc_constant_state);
         }
 
@@ -2066,8 +2168,8 @@ static void r300_vertex_psc(struct r300_vertex_element_state *velems)
         swizzle = r300_translate_vertex_data_swizzle(format);
 
         if (i & 1) {
-            vstream->vap_prog_stream_cntl[i >> 1] |= type << 16;
-            vstream->vap_prog_stream_cntl_ext[i >> 1] |= (uint32_t)swizzle << 16;
+            vstream->vap_prog_stream_cntl[i >> 1] |= (uint32_t)(type) << 16;
+            vstream->vap_prog_stream_cntl_ext[i >> 1] |= (uint32_t)(swizzle) << 16;
         } else {
             vstream->vap_prog_stream_cntl[i >> 1] |= type;
             vstream->vap_prog_stream_cntl_ext[i >> 1] |= swizzle;
@@ -2094,7 +2196,8 @@ static void* r300_create_vertex_elements_state(struct pipe_context* pipe,
 
     /* R300 Programmable Stream Control (PSC) doesn't support 0 vertex elements. */
     if (!count) {
-        dummy_attrib.src_format = PIPE_FORMAT_R8G8B8A8_UNORM;
+        /* Keep the dummy format 32-bit so the big-endian VAP path accepts it. */
+        dummy_attrib.src_format = PIPE_FORMAT_R32_FLOAT;
         attribs = &dummy_attrib;
         count = 1;
     } else if (count > 16) {
@@ -2152,6 +2255,8 @@ static void r300_delete_vertex_elements_state(struct pipe_context *pipe, void *s
     FREE(state);
 }
 
+static bool r300_can_emulate_frontface(nir_shader *nir);
+
 static void* r300_create_vs_state(struct pipe_context* pipe,
                                   const struct pipe_shader_state* shader)
 {
@@ -2167,10 +2272,8 @@ static void* r300_create_vs_state(struct pipe_context* pipe,
        vs->state.type = PIPE_SHADER_IR_NIR;
     }
 
-    /* Run the same NIR optimization/lowering for both HW and SW TCL. */
-    r300_optimize_nir(vs->state.ir.nir, r300->screen);
-
     if (r300->screen->caps.has_tcl) {
+        r300_optimize_nir(vs->state.ir.nir, r300->screen);
         /* R300/R400 can not do any kind of control flow, so abort early here. */
         if (!r300->screen->caps.is_r500) {
             char *msg = r300_check_control_flow(vs->state.ir.nir);
@@ -2183,6 +2286,8 @@ static void* r300_create_vs_state(struct pipe_context* pipe,
             }
         }
     }
+
+    vs->can_emulate_frontface = r300_can_emulate_frontface(vs->state.ir.nir);
 
     vs->first = vs->shader = CALLOC_STRUCT(r300_vertex_shader_code);
     if (r300->screen->caps.has_tcl) {
@@ -2207,6 +2312,25 @@ static void* r300_create_vs_state(struct pipe_context* pipe,
     return vs;
 }
 
+static bool r300_can_emulate_frontface(nir_shader *nir)
+{
+    /* FACE emulation uses the two-sided color path, so it cannot coexist
+     * with regular front/back color outputs. */
+    nir_foreach_shader_out_variable(var, nir) {
+        switch (var->data.location) {
+        case VARYING_SLOT_COL0:
+        case VARYING_SLOT_COL1:
+        case VARYING_SLOT_BFC0:
+        case VARYING_SLOT_BFC1:
+            return false;
+        default:
+            break;
+        }
+    }
+
+    return true;
+}
+
 void r300_mark_vs_code_dirty(struct r300_context *r300)
 {
     struct r300_vertex_shader *vs = r300_vs(r300);
@@ -2228,6 +2352,26 @@ void r300_mark_vs_code_dirty(struct r300_context *r300)
     r300_mark_atom_dirty(r300, &r300->pvs_flush);
 }
 
+void r300_bind_vertex_shader_variant(struct r300_context *r300)
+{
+    if (r300->screen->caps.has_tcl) {
+        r300_mark_vs_code_dirty(r300);
+    } else {
+        draw_bind_vertex_shader(r300->draw,
+                (struct draw_vertex_shader*)r300_vs(r300)->shader->draw_vs);
+
+        struct r300_rs_state *rs = r300->rs_state.state;
+        bool frontface_emul = r300_vs(r300)->shader->key.frontface;
+        bool light_twoside = rs &&
+            (rs->rs.light_twoside || frontface_emul);
+
+        if (rs && rs->rs_draw.light_twoside != light_twoside) {
+            rs->rs_draw.light_twoside = light_twoside;
+            draw_set_rasterizer_state(r300->draw, &rs->rs_draw, rs);
+        }
+    }
+}
+
 static void r300_bind_vs_state(struct pipe_context* pipe, void* shader)
 {
     struct r300_context* r300 = r300_context(pipe);
@@ -2245,32 +2389,28 @@ static void r300_bind_vs_state(struct pipe_context* pipe, void* shader)
     /* The majority of the RS block bits is dependent on the vertex shader. */
     r300_mark_atom_dirty(r300, &r300->rs_block_state); /* Will be updated before the emission. */
 
-    if (r300->screen->caps.has_tcl) {
-        r300_mark_vs_code_dirty(r300);
-    } else {
-        draw_bind_vertex_shader(r300->draw,
-                (struct draw_vertex_shader*)vs->draw_vs);
-    }
+    r300_bind_vertex_shader_variant(r300);
 }
 
 static void r300_delete_vs_state(struct pipe_context* pipe, void* shader)
 {
     struct r300_context* r300 = r300_context(pipe);
     struct r300_vertex_shader* vs = (struct r300_vertex_shader*)shader;
+    struct r300_vertex_shader_code *code;
 
-    if (r300->screen->caps.has_tcl) {
-        while (vs->shader) {
-            rc_constants_destroy(&vs->shader->code.constants);
-            FREE(vs->shader->code.constants_remap_table);
-            free(vs->shader->error);
-            vs->shader = vs->shader->next;
-            FREE(vs->first);
-            vs->first = vs->shader;
-	}
-    } else {
-        draw_delete_vertex_shader(r300->draw,
-                (struct draw_vertex_shader*)vs->draw_vs);
-        FREE(vs->first);
+    while ((code = vs->first)) {
+        vs->first = code->next;
+
+        if (r300->screen->caps.has_tcl) {
+            rc_constants_destroy(&code->code.constants);
+            FREE(code->code.constants_remap_table);
+        } else {
+            draw_delete_vertex_shader(r300->draw,
+                    (struct draw_vertex_shader*)code->draw_vs);
+        }
+
+        free(code->error);
+        FREE(code);
     }
 
     ralloc_free(vs->state.ir.nir);

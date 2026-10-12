@@ -39,6 +39,7 @@ static nir_def *load_ubo_desc_fast_path(nir_builder *b, nir_def *addr_lo,
             PIPE_SWIZZLE_W,
          },
       .gfx10_oob_select = V_008F0C_OOB_SELECT_RAW,
+      .has_desc_resource_level = sel->screen->info.compiler_info.has_desc_resource_level,
    };
    uint32_t desc[4];
 
@@ -299,15 +300,6 @@ static bool lower_resource_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin
 
       nir_def *desc = load_ssbo_desc(b, &intrin->src[1], s);
       nir_src_rewrite(&intrin->src[1], desc);
-      break;
-   }
-   case nir_intrinsic_load_ssbo_address: {
-      assert(nir_src_as_uint(intrin->src[1]) == 0);
-      nir_def *desc = load_ssbo_desc(b, &intrin->src[0], s);
-      nir_def *lo = nir_channel(b, desc, 0);
-      nir_def *hi = nir_i2i32(b, nir_u2u16(b, nir_channel(b, desc, 1)));
-      nir_def_rewrite_uses(&intrin->def, nir_pack_64_2x32_split(b, lo, hi));
-      nir_instr_remove(&intrin->instr);
       break;
    }
    case nir_intrinsic_ssbo_descriptor_amd: {

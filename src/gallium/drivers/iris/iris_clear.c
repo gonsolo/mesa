@@ -185,6 +185,18 @@ can_fast_clear_color(struct iris_context *ice,
       return false;
    }
 
+   /* Wa_22018390030 (Xe2+), Bspec 57340, and HSD 22021327133 (Xe3P+) say that
+    * we can't fast clear surfaces that are color, non-volumetric, Tile4, and
+    * have a VALIGN of 4.
+    */
+   if (devinfo->ver >= 20 &&
+       res->surf.dim != ISL_SURF_DIM_3D &&
+       res->surf.image_alignment_el.h == 4) {
+      assert(res->surf.tiling == ISL_TILING_4);
+      perf_debug(&ice->dbg, "Wa_2201839003: Don't fast-clear on VALIGN_4.");
+      return false;
+   }
+
    return true;
 }
 
@@ -573,7 +585,7 @@ can_fast_clear_depth(struct iris_context *ice,
       return false;
    }
 
-   if (res->aux.usage == ISL_AUX_USAGE_NONE)
+   if (!isl_aux_usage_has_fast_clears(res->aux.usage))
       return false;
 
    /* From the TGL PRM, Vol 9, "Compressed Depth Buffers" (under the

@@ -107,10 +107,14 @@ VkResult anv_CreateSampler(
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    uint32_t border_color_offset = 0;
-   VkResult result = border_color_load(device, sampler, pCreateInfo, &border_color_offset);
-   if (result != VK_SUCCESS)
-      return result;
-
+   /* No need for an additional allocation with 64bit mode, it goes intot
+    * SAMPLER_STATE_EXTENDED.
+    */
+   if (!device->physical->uses_efficient_64bit) {
+      VkResult result = border_color_load(device, sampler, pCreateInfo, &border_color_offset);
+      if (result != VK_SUCCESS)
+         return result;
+   }
    struct vk_sampler_state vk_state;
    vk_sampler_state_init(&vk_state, pCreateInfo);
    anv_genX(device->info, emit_sampler_state)(device, &vk_state,
@@ -123,11 +127,11 @@ VkResult anv_CreateSampler(
     * sampler messages on them.
     */
    sampler->bindless_state =
-      anv_state_pool_alloc(&device->dynamic_state_pool,
-                           sampler->state.n_planes * 32, 32);
+      anv_state_pool_alloc(anv_device_get_dynamic_state_pool(device),
+                           sampler->state.n_planes * ANV_SAMPLER_STATE_SIZE, 32);
    if (sampler->bindless_state.map) {
       memcpy(sampler->bindless_state.map, sampler->state.state,
-             sampler->state.n_planes * SAMPLER_STATE_length(device->info) * 4);
+             sampler->state.n_planes * ANV_SAMPLER_STATE_SIZE);
    }
 
    *pSampler = anv_sampler_to_handle(sampler);
@@ -147,7 +151,7 @@ void anv_DestroySampler(
       return;
 
    if (sampler->bindless_state.map) {
-      anv_state_pool_free(&device->dynamic_state_pool,
+      anv_state_pool_free(anv_device_get_dynamic_state_pool(device),
                           sampler->bindless_state);
    }
 
@@ -167,6 +171,14 @@ VkResult anv_RegisterCustomBorderColorEXT(
     uint32_t*                                   pIndex)
 {
    ANV_FROM_HANDLE(anv_device, device, _device);
+
+   /* In efficient 64bit mode the border color is located next to the sampler,
+    * no extra allocation required.
+    */
+   if (device->physical->uses_efficient_64bit) {
+      *pIndex = 0;
+      return VK_SUCCESS;
+   }
 
    struct anv_state color_state = requestIndex ?
          anv_state_reserved_array_pool_alloc_index(
@@ -210,6 +222,12 @@ void anv_UnregisterCustomBorderColorEXT(
     uint32_t                                    index)
 {
    ANV_FROM_HANDLE(anv_device, device, _device);
+
+   /* In efficient 64bit mode the border color is located next to the sampler,
+    * no extra allocation required.
+    */
+   if (device->physical->uses_efficient_64bit)
+      return;
 
    anv_state_reserved_array_pool_index_free(
       &device->custom_border_colors, index);

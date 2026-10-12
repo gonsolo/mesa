@@ -5,15 +5,11 @@
 #include "anv_private.h"
 #include "anv_api_version.h"
 
-#include "util/driconf.h"
-
 static const struct debug_control debug_control[] = {
-   { "bindless",                  ANV_DEBUG_BINDLESS},
    { "desc-dirty",                ANV_DEBUG_DESCRIPTOR_DIRTY},
    { "dgc-dump",                  ANV_DEBUG_DGC_DUMP},
    { "experimental",              ANV_DEBUG_EXPERIMENTAL},
    { "no-gpl",                    ANV_DEBUG_NO_GPL},
-   { "no-alloc-oversubscription", ANV_DEBUG_NO_ALLOC_OVER_SUBSCRIPTION},
    { "no-slab",                   ANV_DEBUG_NO_SLAB},
    { "no-sparse",                 ANV_DEBUG_NO_SPARSE},
    { "sparse-trtt",               ANV_DEBUG_SPARSE_TRTT},
@@ -22,6 +18,7 @@ static const struct debug_control debug_control[] = {
    { "shader-dump",               ANV_DEBUG_SHADER_DUMP},
    { "shader-hash",               ANV_DEBUG_SHADER_HASH},
    { "shader-print",              ANV_DEBUG_SHADER_PRINT},
+   { "skip-disk-cache",           ANV_DEBUG_SKIP_DISK_CACHE},
    { NULL,    0 }
 };
 
@@ -93,72 +90,6 @@ VkResult anv_EnumerateInstanceExtensionProperties(
       &instance_extensions, pPropertyCount, pProperties);
 }
 
-static void
-anv_init_dri_options(struct anv_instance *instance)
-{
-   anv_parse_dri_options(&instance->drirc,
-                         &(driConfigFileParseParams) {
-                            .driverName = "anv",
-                            .applicationName = instance->vk.app_info.app_name,
-                            .applicationVersion = instance->vk.app_info.app_version,
-                            .engineName = instance->vk.app_info.engine_name,
-                            .engineVersion = instance->vk.app_info.engine_version,
-                         });
-
-    if (instance->vk.app_info.engine_name &&
-        !strcmp(instance->vk.app_info.engine_name, "DXVK")) {
-       /* Since 2.3.1+, DXVK uses the application version to signal D3D9. */
-       const bool is_d3d9 = instance->vk.app_info.app_version & 0x1;
-
-       /* This driconf bit enables D3D10+ behaviour for texture coordinate
-        * rounding. As D3D9 wants the Vulkan behaviour instead, apply the
-        * workaround only to D3D10+.
-        */
-       instance->drirc.debug.force_filter_addr_rounding &= !is_d3d9;
-    }
-
-    switch (instance->drirc.perf.stack_ids) {
-    case 256:
-    case 512:
-    case 1024:
-    case 2048:
-       break;
-    default:
-       mesa_logw("Invalid value provided for drirc anv_stack_id=%u, reverting to 512.",
-                 instance->drirc.perf.stack_ids);
-       instance->drirc.perf.stack_ids = 512;
-       break;
-    }
-
-   switch(instance->drirc.perf.rt_dispatch_timeout) {
-   case 64:
-   case 128:
-   case 192:
-   case 256:
-   case 384:
-   case 512:
-   case 640:
-   case 768:
-   case 896:
-   case 1024:
-   case 1152:
-   case 1280:
-   case 1408:
-   case 1536:
-   case 1664:
-   case 1792:
-   case 1920:
-   case 2048:
-   case 4096:
-      break;
-   default:
-       mesa_logw("Invalid value provided for drirc anv_rt_dispatch_timeout=%u, reverting to 512.",
-                 instance->drirc.perf.rt_dispatch_timeout);
-       instance->drirc.perf.rt_dispatch_timeout = 512;
-       break;
-   }
-}
-
 VkResult anv_CreateInstance(
     const VkInstanceCreateInfo*                 pCreateInfo,
     const VkAllocationCallbacks*                pAllocator,
@@ -172,8 +103,8 @@ VkResult anv_CreateInstance(
    if (pAllocator == NULL)
       pAllocator = vk_default_allocator();
 
-   instance = vk_alloc(pAllocator, sizeof(*instance), 8,
-                       VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
+   instance = vk_zalloc(pAllocator, sizeof(*instance), 8,
+                        VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
    if (!instance)
       return vk_error(NULL, VK_ERROR_OUT_OF_HOST_MEMORY);
 
@@ -194,8 +125,6 @@ VkResult anv_CreateInstance(
    instance->vk.physical_devices.destroy = anv_physical_device_destroy;
 
    VG(VALGRIND_CREATE_MEMPOOL(instance, 0, false));
-
-   anv_init_dri_options(instance);
 
    static once_flag process_anv_debug_variable_flag = ONCE_FLAG_INIT;
    call_once(&process_anv_debug_variable_flag,
@@ -221,9 +150,6 @@ void anv_DestroyInstance(
       return;
 
    VG(VALGRIND_DESTROY_MEMPOOL(instance));
-
-   driDestroyOptionCache(&instance->drirc.options);
-   driDestroyOptionInfo(&instance->drirc.available_options);
 
    vk_instance_finish(&instance->vk);
    vk_free(&instance->vk.alloc, instance);

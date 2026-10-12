@@ -72,6 +72,7 @@ struct etna_sampler_view {
    uint32_t astc0;
    uint32_t linear_stride;  /* only LOD0 */
    struct etna_reloc lod_addr[VIVS_TE_SAMPLER_LOD_ADDR__LEN];
+   struct etna_reloc lod_addr_128bit[VIVS_TE_SAMPLER_LOD_ADDR__LEN]; /* BA-half plane */
    unsigned min_lod, max_lod; /* 5.5 fixp */
 
    struct etna_sampler_ts ts;
@@ -185,7 +186,7 @@ etna_create_sampler_view_state(struct pipe_context *pctx, struct pipe_resource *
 
    /* For RB_SWAP formats, pre-compute the alternative texture format for when
     * shared resources hold data in native byte order (RGBA). */
-   const bool rb_swap = translate_pe_format_rb_swap(so->format);
+   const bool rb_swap = translate_pe_format_rb_swap(so->format, screen);
    const uint32_t native_format = rb_swap ? remap_texture_format_rb_swap(format) : 0;
 
    const bool ext = !!(format & EXT_FORMAT);
@@ -282,6 +283,18 @@ etna_create_sampler_view_state(struct pipe_context *pctx, struct pipe_resource *
    sv->min_lod = sv->base.u.tex.first_level << 5;
    sv->max_lod = MIN2(sv->base.u.tex.last_level, res->base.last_level) << 5;
 
+   /* 128-bit formats are emulated as two stacked G32R32 planes. The companion
+    * sampler reads the second (BA) plane, starting halfway into each level.
+    */
+   if (format_is_128bit(so->format)) {
+      for (int lod = 0; lod <= res->base.last_level; ++lod) {
+         sv->lod_addr_128bit[lod].bo = res->bo;
+         sv->lod_addr_128bit[lod].offset = res->levels[lod].offset +
+            etna_resource_level_second_plane_offset(&res->levels[lod]);
+         sv->lod_addr_128bit[lod].flags = ETNA_RELOC_READ;
+      }
+   }
+
    /* Workaround for npot textures -- it appears that only CLAMP_TO_EDGE is
     * supported when the appropriate capability is not set. */
    if (!etna_core_has_feature(screen->info, ETNA_FEATURE_NON_POWER_OF_TWO) &&
@@ -360,6 +373,18 @@ etna_emit_ts_state(struct etna_context *ctx)
    etna_coalesce_end(stream, &coalesce);
 }
 
+static struct etna_reloc
+etna_sampler_view_lod_addr(struct etna_context *ctx, struct etna_sampler_view *sv,
+                           unsigned num, const struct etna_reloc *reloc)
+{
+   struct etna_reloc addr = *reloc;
+
+   if (addr.bo)
+      addr.bo = etna_sampler_view_resource(ctx, &sv->base, num)->bo;
+
+   return addr;
+}
+
 static void
 etna_emit_new_texture_state(struct etna_context *ctx)
 {
@@ -418,7 +443,7 @@ etna_emit_new_texture_state(struct etna_context *ctx)
             uint32_t log_size = sv->log_size;
 
             if (texture_use_int_filter(&sv->base, &ss->base, false))
-               log_size |= VIVS_TE_SAMPLER_LOG_SIZE_INT_FILTER;
+               log_size |= VIVS_NTE_SAMPLER_LOG_SIZE_INT_FILTER;
 
             /*10100*/ EMIT_STATE(NTE_SAMPLER_LOG_SIZE(x), log_size);
          }
@@ -434,8 +459,8 @@ etna_emit_new_texture_state(struct etna_context *ctx)
             /* min and max lod is determined both by the sampler and the view */
             /*10180*/ EMIT_STATE(NTE_SAMPLER_LOD_CONFIG(x),
                                  ss->config_lod |
-                                 VIVS_TE_SAMPLER_LOD_CONFIG_MAX(max_lod) |
-                                 VIVS_TE_SAMPLER_LOD_CONFIG_MIN(min_lod));
+                                 VIVS_NTE_SAMPLER_LOD_CONFIG_MAX(max_lod) |
+                                 VIVS_NTE_SAMPLER_LOD_CONFIG_MIN(min_lod));
          }
       }
    }
@@ -468,7 +493,7 @@ etna_emit_new_texture_state(struct etna_context *ctx)
 
             /*10380*/ EMIT_STATE(NTE_SAMPLER_CONFIG1(x), ss->config1 |
                                                          sv->config1 |
-                                                         COND(sv->ts.enable, VIVS_TE_SAMPLER_CONFIG1_USE_TS));
+                                                         COND(sv->ts.enable, VIVS_NTE_SAMPLER_CONFIG1_USE_TS));
          }
       }
    }
@@ -494,8 +519,54 @@ etna_emit_new_texture_state(struct etna_context *ctx)
          if ((1 << x) & active_samplers) {
             for (int y = 0; y < VIVS_NTE_SAMPLER_ADDR_LOD__LEN; ++y) {
                struct etna_sampler_view *sv = etna_sampler_view(ctx->sampler_view[x]);
-               /*10800*/ EMIT_STATE_RELOC(NTE_SAMPLER_ADDR_LOD(x, y), &sv->lod_addr[y]);
+               struct etna_reloc addr = etna_sampler_view_lod_addr(ctx, sv, x, &sv->lod_addr[y]);
+               /*10800*/ EMIT_STATE_RELOC(NTE_SAMPLER_ADDR_LOD(x, y), &addr);
             }
+         }
+      }
+   }
+
+   /* Mirror each 128-bit sampler onto its companion slot, pointing the
+    * companion at the BA-half plane. The split is reassembled in the shader by
+    * etna_nir_lower_128bit(..).
+    */
+   if (unlikely(dirty & (ETNA_DIRTY_SAMPLER_VIEWS | ETNA_DIRTY_SAMPLERS)) &&
+       (ctx->tex_is_128bit[MESA_SHADER_FRAGMENT] | ctx->tex_is_128bit[MESA_SHADER_VERTEX])) {
+      for (int x = 0; x < VIVS_NTE_SAMPLER__LEN; ++x) {
+         if (!((1 << x) & active_samplers))
+            continue;
+
+         struct etna_sampler_view *sv = etna_sampler_view(ctx->sampler_view[x]);
+         if (!format_is_128bit(sv->base.format))
+            continue;
+
+         const unsigned y = companion_slot(ctx, x);
+         if (y == ~0U)
+            continue;
+
+         struct etna_sampler_state *ss = etna_sampler_state(ctx->sampler[x]);
+         uint32_t config0 = (ss->config0 & sv->config0_mask) | etna_sampler_view_config0(sv);
+         uint32_t log_size = sv->log_size;
+         unsigned max_lod = MAX2(MIN2(ss->max_lod + sv->min_lod, sv->max_lod), ss->max_lod_min);
+         unsigned min_lod = MIN2(MAX2(ss->min_lod + sv->min_lod, sv->min_lod), max_lod);
+
+         if (texture_use_int_filter(&sv->base, &ss->base, false))
+            log_size |= VIVS_NTE_SAMPLER_LOG_SIZE_INT_FILTER;
+
+         EMIT_STATE(NTE_SAMPLER_CONFIG0(y), config0);
+         EMIT_STATE(NTE_SAMPLER_SIZE(y), sv->size);
+         EMIT_STATE(NTE_SAMPLER_LOG_SIZE(y), log_size);
+         EMIT_STATE(NTE_SAMPLER_LOD_CONFIG(y), ss->config_lod |
+                    VIVS_NTE_SAMPLER_LOD_CONFIG_MAX(max_lod) |
+                    VIVS_NTE_SAMPLER_LOD_CONFIG_MIN(min_lod));
+         EMIT_STATE(NTE_SAMPLER_LINEAR_STRIDE(0, y), sv->linear_stride);
+         EMIT_STATE(NTE_SAMPLER_3D_CONFIG(y), ss->config_3d | sv->config_3d);
+         EMIT_STATE(NTE_SAMPLER_CONFIG1(y), ss->config1 | sv->config1);
+         EMIT_STATE(NTE_SAMPLER_BASELOD(y), ss->baselod);
+
+         for (int lod = 0; lod < VIVS_NTE_SAMPLER_ADDR_LOD__LEN; ++lod) {
+            struct etna_reloc addr = etna_sampler_view_lod_addr(ctx, sv, x, &sv->lod_addr_128bit[lod]);
+            EMIT_STATE_RELOC(NTE_SAMPLER_ADDR_LOD(y, lod), &addr);
          }
       }
    }
@@ -510,7 +581,6 @@ static void
 etna_emit_texture_state(struct etna_context *ctx)
 {
    struct etna_cmd_stream *stream = ctx->stream;
-   struct etna_screen *screen = ctx->screen;
    uint32_t active_samplers = active_samplers_bits(ctx);
    uint32_t dirty = ctx->dirty;
    struct etna_coalesce coalesce;
@@ -608,7 +678,8 @@ etna_emit_texture_state(struct etna_context *ctx)
          for (int x = 0; x < VIVS_TE_SAMPLER__LEN; ++x) {
             if ((1 << x) & active_samplers) {
                struct etna_sampler_view *sv = etna_sampler_view(ctx->sampler_view[x]);
-               /*02400*/ EMIT_STATE_RELOC(TE_SAMPLER_LOD_ADDR(x, y), &sv->lod_addr[y]);
+               struct etna_reloc addr = etna_sampler_view_lod_addr(ctx, sv, x, &sv->lod_addr[y]);
+               /*02400*/ EMIT_STATE_RELOC(TE_SAMPLER_LOD_ADDR(x, y), &addr);
             }
          }
       }
@@ -619,14 +690,6 @@ etna_emit_texture_state(struct etna_context *ctx)
          if ((1 << x) & active_samplers) {
             struct etna_sampler_view *sv = etna_sampler_view(ctx->sampler_view[x]);
             /*02C00*/ EMIT_STATE(TE_SAMPLER_LINEAR_STRIDE(0, x), sv->linear_stride);
-         }
-      }
-   }
-   if (unlikely(screen->specs.tex_astc && (dirty & (ETNA_DIRTY_SAMPLER_VIEWS)))) {
-      for (int x = 0; x < VIVS_TE_SAMPLER__LEN; ++x) {
-         if ((1 << x) & active_samplers) {
-            struct etna_sampler_view *sv = etna_sampler_view(ctx->sampler_view[x]);
-            /*10500*/ EMIT_STATE(NTE_SAMPLER_ASTC0(x), sv->astc0);
          }
       }
    }

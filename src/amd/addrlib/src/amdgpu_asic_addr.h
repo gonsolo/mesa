@@ -103,7 +103,8 @@
 #define AMDGPU_NAVI32_RANGE     0x20, 0xFF //# 32 <= x < 255
 #define AMDGPU_NAVI33_RANGE     0x10, 0x20 //# 16 <= x < 32
 #define AMDGPU_STRIX1_RANGE     0x01, 0x40 //# 1 <= x < 64
-#define AMDGPU_STRIX_HALO_RANGE 0xC0, 0xFF //# 192 <= x < 255
+#define AMDGPU_STRIX_HALO_RANGE 0xC0, 0xD0 //# 192 <= x < 208
+#define AMDGPU_GFX1156_RANGE    0xD0, 0xFF //# 208 <= x < 255
 #define AMDGPU_KRACKAN1_RANGE   0x40, 0x50 //# 64 <= x < 80
 #define AMDGPU_GFX1153_RANGE    0x50, 0xC0 //# 80 <= x < 192
 #define AMDGPU_PHOENIX1_RANGE      0x01, 0x80 //# 1 <= x < 128
@@ -111,6 +112,7 @@
 #define AMDGPU_HAWK_POINT1_RANGE   0xC0, 0xF0 //# 192 <= x < 240
 #define AMDGPU_HAWK_POINT2_RANGE   0xF0, 0xFF //# 240 <= x < 255
 #define AMDGPU_GFX1170_RANGE        0x01, 0x40 //# 1 <= x < 64
+#define AMDGPU_GFX1171_RANGE        0x40, 0x80 //# 64 <= x < 128
 
 #define AMDGPU_REMBRANDT_RANGE  0x01, 0xFF //# 01 <= x < 255
 #define AMDGPU_RAPHAEL_RANGE    0x01, 0xFF //# 1 <= x < max
@@ -185,6 +187,7 @@
 #define ASICREV_IS_NAVI33_P(r)         ASICREV_IS(r, NAVI33)
 #define ASICREV_IS_STRIX1(r)           ASICREV_IS(r, STRIX1)
 #define ASICREV_IS_STRIX_HALO(r)       ASICREV_IS(r, STRIX_HALO)
+#define ASICREV_IS_GFX1156(r)          ASICREV_IS(r, GFX1156)
 #define ASICREV_IS_KRACKAN1(r)         ASICREV_IS(r, KRACKAN1)
 #define ASICREV_IS_GFX1153(r)          ASICREV_IS(r, GFX1153)
 #define ASICREV_IS_PHOENIX(r)          ASICREV_IS(r, PHOENIX)
@@ -192,6 +195,7 @@
 #define ASICREV_IS_HAWK_POINT1(r)      ASICREV_IS(r, HAWK_POINT1)
 #define ASICREV_IS_HAWK_POINT2(r)      ASICREV_IS(r, HAWK_POINT2)
 #define ASICREV_IS_GFX1170(r)         ASICREV_IS(r, GFX1170)
+#define ASICREV_IS_GFX1171(r)         ASICREV_IS(r, GFX1171)
 
 #define ASICREV_IS_REMBRANDT(r)        ASICREV_IS(r, REMBRANDT)
 #define ASICREV_IS_RAPHAEL(r)          ASICREV_IS(r, RAPHAEL)

@@ -31,13 +31,14 @@
 #include <stdint.h>
 
 #include "etnaviv_resource.h"
+#include "etnaviv_shader.h"
 #include "etnaviv_tiling.h"
 #include "etnaviv_yuv.h"
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
 #include "util/format/u_formats.h"
-#include "pipe/p_shader_tokens.h"
 #include "pipe/p_state.h"
+#include "util/macros.h"
 #include "util/slab.h"
 #include "util/u_framebuffer.h"
 #include <util/u_suballoc.h>
@@ -90,6 +91,7 @@ struct etna_vertexbuf_state {
 struct etna_shader_state {
    void *bind_vs, *bind_fs;
    struct etna_shader_variant *vs, *fs;
+   struct etna_shader_key key;
 };
 
 enum etna_xfb_hw_state {
@@ -114,6 +116,11 @@ struct etna_streamout {
    unsigned num_descriptors;
    uint32_t TFB_DESCRIPTOR_COUNT[VIVS_TFB_DESCRIPTOR_COUNT__LEN];
    uint32_t TFB_DESCRIPTOR[VIVS_TFB_DESCRIPTOR__LEN];
+
+   /* software XFB emulation */
+   uint32_t captured_bytes[PIPE_MAX_SO_BUFFERS];
+   uint32_t num_vertices;
+   uint32_t first_vertex;
 };
 
 enum etna_uniform_contents {
@@ -129,12 +136,26 @@ enum etna_uniform_contents {
    ETNA_UNIFORM_SAMPLER_LOD_MAX,
    ETNA_UNIFORM_SAMPLER_LOD_BIAS,
    ETNA_UNIFORM_UBO_ADDR,
+   ETNA_UNIFORM_CONSTANT_DATA_ADDR,
+   ETNA_UNIFORM_XFB_ADDR,
+   ETNA_UNIFORM_XFB_NUM_VERTICES,
+   ETNA_UNIFORM_XFB_FIRST_VERTEX,
 };
 
 struct etna_shader_uniform_info {
    enum etna_uniform_contents *contents;
    uint32_t *data;
    uint32_t count;
+};
+
+struct etna_framebuffer_state {
+   struct pipe_framebuffer_state base;
+
+   unsigned rt_is_128bit : ETNA_MAX_128BIT_RTS;
+   unsigned rt_pack_rgba16 : PIPE_MAX_COLOR_BUFS;
+   unsigned rt_companion[ETNA_MAX_128BIT_RTS];
+   int8_t companion_src[PIPE_MAX_COLOR_BUFS];
+   uint32_t rt_ts_mask;
 };
 
 struct etna_context {
@@ -185,10 +206,13 @@ struct etna_context {
 
    /* compiled bindable state */
    unsigned sample_mask;
+   float sample_coverage;
+   bool sample_coverage_invert;
    struct pipe_blend_state *blend;
    unsigned num_fragment_samplers;
    uint32_t active_samplers;
    uint32_t prev_active_samplers;
+   unsigned prev_vs_sampler_base;
    struct pipe_sampler_state *sampler[PIPE_MAX_SAMPLERS];
    struct pipe_rasterizer_state *rasterizer;
    struct pipe_depth_stencil_alpha_state *zsa;
@@ -205,6 +229,8 @@ struct etna_context {
    unsigned num_fragment_sampler_views;
    uint32_t active_sampler_views;
    uint32_t dirty_sampler_views;
+   uint32_t border_shadow_views;
+   uint32_t dirty_samplers;
    struct pipe_sampler_view *sampler_view[PIPE_MAX_SAMPLERS];
    struct etna_constbuf_state constant_buffer[MESA_SHADER_STAGES];
    struct etna_vertexbuf_state vertex_buffer;
@@ -212,7 +238,7 @@ struct etna_context {
    struct etna_shader_state shader;
 
    /* saved parameter-like state. these are mainly kept around for the blitter */
-   struct pipe_framebuffer_state framebuffer_s;
+   struct etna_framebuffer_state framebuffer_s;
    struct pipe_stencil_ref stencil_ref_s;
    struct pipe_viewport_state viewport_s;
    struct pipe_scissor_state scissor;
@@ -220,6 +246,7 @@ struct etna_context {
    /* stats/counters */
    struct {
       uint64_t prims_generated;
+      uint64_t prims_emitted;
       uint64_t draw_calls;
       uint64_t rs_operations;
       uint64_t flushes;
@@ -241,7 +268,7 @@ struct etna_context {
    bool is_noop;
 
    bool compute_only;
-   bool in_draw_vbo;
+   bool in_atomic_emit;
    bool in_transfer_blit;
 
    /* Set by etna_copy_resource/etna_copy_resource_box when the caller
@@ -249,6 +276,7 @@ struct etna_context {
     * pipe_blit_info has no driver-private field to carry this through. */
    bool blit_rb_swap;
    bool needs_gpu_state_reset;
+   bool mag_switchover_half;
    bool alpha_coverage_dither_emitted;
 
    /* conditional rendering */
@@ -257,6 +285,9 @@ struct etna_context {
    uint cond_mode;
 
    struct etna_streamout streamout;
+
+   unsigned sampler_companion[MESA_SHADER_STAGES][PIPE_MAX_SAMPLERS / 2];
+   uint16_t tex_is_128bit[MESA_SHADER_STAGES];
 };
 
 static inline struct etna_context *
@@ -269,6 +300,18 @@ static inline struct etna_transfer *
 etna_transfer(struct pipe_transfer *p)
 {
    return (struct etna_transfer *)p;
+}
+
+static inline bool
+etna_framebuffer_rt_use_ts(const struct etna_context *ctx, unsigned i)
+{
+   return ctx->framebuffer_s.rt_ts_mask & BITFIELD_BIT(i);
+}
+
+static inline bool
+etna_sampler_view_uses_border_shadow(const struct etna_context *ctx, unsigned num)
+{
+   return ctx->border_shadow_views & (1u << num);
 }
 
 struct pipe_context *
@@ -284,5 +327,17 @@ etna_flush(struct pipe_context *pctx, struct pipe_fence_handle **fence,
 
 bool
 etna_render_condition_check(struct pipe_context *pctx);
+
+#ifndef NDEBUG
+static inline void clear_atomic_emit_flag(struct etna_context **ctx_ptr) {
+   (*ctx_ptr)->in_atomic_emit = false;
+}
+
+#define ETNA_CONTEXT_ATOMIC_EMIT(_ctx) \
+   struct etna_context *_atomic_emit_cleanup __attribute__((cleanup(clear_atomic_emit_flag))) = (_ctx); \
+   (_ctx)->in_atomic_emit = true
+#else
+#define ETNA_CONTEXT_ATOMIC_EMIT(_ctx)
+#endif
 
 #endif

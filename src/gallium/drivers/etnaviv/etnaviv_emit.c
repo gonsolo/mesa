@@ -91,11 +91,15 @@ etna_stall(struct etna_cmd_stream *stream, uint32_t from, uint32_t to)
    etna_coalsence_emit_reloc(stream, &coalesce, VIVS_##state_name, src_value)
 
 #define ETNA_3D_CONTEXT_SIZE  (400) /* keep this number above "Total state updates (fixed)" from gen_weave_state tool */
+#define ETNA_RESET_GPU_STATE_SIZE (128) /* keep this number above the number of words etna_reset_gpu_state() emits */
 
-static unsigned
-required_stream_size(struct etna_context *ctx)
+void
+etna_reserve_emit_space(struct etna_context *ctx)
 {
-   unsigned size = ETNA_3D_CONTEXT_SIZE;
+   size_t size = ETNA_3D_CONTEXT_SIZE;
+
+   if (ctx->needs_gpu_state_reset)
+      size += ETNA_RESET_GPU_STATE_SIZE;
 
    /* stall + flush */
    size += 2 + 4;
@@ -108,8 +112,10 @@ required_stream_size(struct etna_context *ctx)
    size += ctx->shader.fs->uniforms.count * 2;
 
    /* shader */
-   size += ctx->shader_state.vs_inst_mem_size + 1;
-   size += ctx->shader_state.ps_inst_mem_size + 1;
+   if (!ctx->shader_state.VS_INST_ADDR.bo)
+      size += ctx->shader_state.vs_inst_mem_size + 1;
+   if (!ctx->shader_state.PS_INST_ADDR.bo)
+      size += ctx->shader_state.ps_inst_mem_size + 1;
 
    /* DRAW_INDEXED_PRIMITIVES command */
    size += 6;
@@ -117,7 +123,7 @@ required_stream_size(struct etna_context *ctx)
    /* reserve for alignment etc. */
    size += 64;
 
-   return size;
+   etna_cmd_stream_reserve(ctx->stream, size);
 }
 
 /* Emit state that only exists on HALTI5+ */
@@ -132,14 +138,14 @@ emit_halti5_only_state(struct etna_context *ctx, int vs_output_count)
    if (unlikely(dirty & (ETNA_DIRTY_SHADER))) {
       /* Magic states (load balancing, inter-unit sync, buffers) */
       /*007C4*/ EMIT_STATE(FE_HALTI5_ID_CONFIG, ctx->shader_state.FE_HALTI5_ID_CONFIG);
-      /*00870*/ EMIT_STATE(VS_HALTI5_OUTPUT_COUNT, vs_output_count | ((vs_output_count * 0x10) << 8));
-      /*008A0*/ EMIT_STATE(VS_HALTI5_UNK008A0, 0x0001000e | ((0x110/vs_output_count) << 20));
+      /*00870*/ EMIT_STATE(VS_HALTI5_OUTPUT_COUNT, ctx->shader_state.VS_HALTI5_OUTPUT_COUNT);
+      /*008A0*/ EMIT_STATE(VS_VERTEX_CACHE_CONFIG, ctx->shader_state.VS_VERTEX_CACHE_CONFIG);
       for (int x = 0; x < VIVS_VS_HALTI5_OUTPUT__LEN; ++x) {
          /*008E0*/ EMIT_STATE(VS_HALTI5_OUTPUT(x), ctx->shader_state.VS_OUTPUT[x]);
       }
    }
    if (unlikely(dirty & (ETNA_DIRTY_VERTEX_ELEMENTS | ETNA_DIRTY_SHADER))) {
-      for (int x = 0; x < 4; ++x) {
+      for (int x = 0; x < VIVS_VS_HALTI5_INPUT__LEN; ++x) {
          /*008C0*/ EMIT_STATE(VS_HALTI5_INPUT(x), ctx->shader_state.VS_INPUT[x]);
       }
    }
@@ -154,7 +160,7 @@ emit_halti5_only_state(struct etna_context *ctx, int vs_output_count)
          /*038C0*/ EMIT_STATE(GL_HALTI5_SHADER_ATTRIBUTES(x), ctx->shader_state.GL_HALTI5_SHADER_ATTRIBUTES[x]);
       }
    }
-   if (unlikely(dirty & (ETNA_DIRTY_BLEND))) {
+   if (unlikely(dirty & (ETNA_DIRTY_BLEND | ETNA_DIRTY_FRAMEBUFFER))) {
       for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
          const uint8_t rt = i - 1;
          /*14920*/ EMIT_STATE(PE_HALTI5_RT_COLORMASK(rt), etna_blend_state(ctx->blend)->rt[i].PE_HALTI5_COLORMASK);
@@ -164,7 +170,7 @@ emit_halti5_only_state(struct etna_context *ctx, int vs_output_count)
          /*14960*/ EMIT_STATE(PE_HALTI5_RT_ALPHA_CONFIG(rt), etna_blend_state(ctx->blend)->rt[i].PE_ALPHA_CONFIG);
       }
    }
-   if (unlikely(dirty & (ETNA_DIRTY_BLEND_COLOR))) {
+   if (unlikely(dirty & (ETNA_DIRTY_BLEND_COLOR | ETNA_DIRTY_FRAMEBUFFER))) {
       for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
          const uint8_t rt = i - 1;
          /*14980*/ EMIT_STATE(PE_HALTI5_RT_ALPHA_COLOR_EXT0(rt), ctx->blend_color.rt[i].PE_ALPHA_COLOR_EXT0);
@@ -245,11 +251,10 @@ etna_emit_state(struct etna_context *ctx)
    struct etna_screen *screen = ctx->screen;
    unsigned ccw = ctx->rasterizer->front_ccw;
 
-
-   /* Pre-reserve the command buffer space which we are likely to need.
-    * This must cover all the state emitted below, and the following
-    * draw command. */
-   etna_cmd_stream_reserve(stream, required_stream_size(ctx));
+   if (!ctx->dirty &&
+       !ctx->dirty_sampler_views &&
+       likely(!DBG_ENABLED(ETNA_DBG_CFLUSH_ALL)))
+      return;
 
    uint32_t dirty = ctx->dirty;
 
@@ -353,7 +358,9 @@ etna_emit_state(struct etna_context *ctx)
     * possibly PS.TEMP_REGISTER_CONTROL).
     */
    if (unlikely(dirty & (ETNA_DIRTY_FRAMEBUFFER | ETNA_DIRTY_SAMPLE_MASK))) {
-      uint32_t val = VIVS_GL_MULTI_SAMPLE_CONFIG_MSAA_ENABLES(ctx->sample_mask);
+      uint32_t val = VIVS_GL_MULTI_SAMPLE_CONFIG_MSAA_ENABLES(
+         VIV_FEATURE(screen, ETNA_FEATURE_MSAA_FRAGMENT_OPERATION)
+            ? 0xf : ctx->sample_mask);
       val |= ctx->framebuffer.GL_MULTI_SAMPLE_CONFIG;
 
       /*03818*/ EMIT_STATE(GL_MULTI_SAMPLE_CONFIG, val);
@@ -361,8 +368,6 @@ etna_emit_state(struct etna_context *ctx)
    if (likely(dirty & (ETNA_DIRTY_INDEX_BUFFER))) {
       /*00644*/ EMIT_STATE_RELOC(FE_INDEX_STREAM_BASE_ADDR, &ctx->index_buffer.FE_INDEX_STREAM_BASE_ADDR);
       /*00648*/ EMIT_STATE(FE_INDEX_STREAM_CONTROL, ctx->index_buffer.FE_INDEX_STREAM_CONTROL);
-   }
-   if (likely(dirty & (ETNA_DIRTY_INDEX_BUFFER))) {
       /*00674*/ EMIT_STATE(FE_PRIMITIVE_RESTART_INDEX, ctx->index_buffer.FE_PRIMITIVE_RESTART_INDEX);
    }
    if (likely(dirty & (ETNA_DIRTY_VERTEX_BUFFERS))) {
@@ -438,8 +443,8 @@ etna_emit_state(struct etna_context *ctx)
    if (unlikely(dirty & (ETNA_DIRTY_SCISSOR_CLIP))) {
       /*00C00*/ EMIT_STATE_FIXP(SE_SCISSOR_LEFT, ctx->clipping.minx << 16);
       /*00C04*/ EMIT_STATE_FIXP(SE_SCISSOR_TOP, ctx->clipping.miny << 16);
-      /*00C08*/ EMIT_STATE_FIXP(SE_SCISSOR_RIGHT, (ctx->clipping.maxx << 16) + ETNA_SE_SCISSOR_MARGIN_RIGHT);
-      /*00C0C*/ EMIT_STATE_FIXP(SE_SCISSOR_BOTTOM, (ctx->clipping.maxy << 16) + ETNA_SE_SCISSOR_MARGIN_BOTTOM);
+      /*00C08*/ EMIT_STATE_FIXP(SE_SCISSOR_RIGHT, MIN2((ctx->clipping.maxx << 16) + ETNA_SE_SCISSOR_MARGIN_RIGHT, ETNA_SE_FIXP_MAX));
+      /*00C0C*/ EMIT_STATE_FIXP(SE_SCISSOR_BOTTOM, MIN2((ctx->clipping.maxy << 16) + ETNA_SE_SCISSOR_MARGIN_BOTTOM, ETNA_SE_FIXP_MAX));
    }
    if (unlikely(dirty & (ETNA_DIRTY_RASTERIZER))) {
       /*00C10*/ EMIT_STATE(SE_DEPTH_SCALE, etna_rasterizer_state(ctx->rasterizer)->SE_DEPTH_SCALE);
@@ -479,8 +484,25 @@ etna_emit_state(struct etna_context *ctx)
       /*01030*/ EMIT_STATE(PS_CONTROL_EXT, ctx->framebuffer.PS_CONTROL_EXT);
    }
    if (unlikely(VIV_FEATURE(screen, ETNA_FEATURE_MSAA_FRAGMENT_OPERATION) &&
-                (dirty & ETNA_DIRTY_BLEND))) {
-      /*01054*/ EMIT_STATE(PS_MSAA_CONFIG, etna_blend_state(ctx->blend)->PS_MSAA_CONFIG);
+                (dirty & (ETNA_DIRTY_BLEND | ETNA_DIRTY_SAMPLE_MASK)))) {
+      uint32_t ps_msaa_config = etna_blend_state(ctx->blend)->PS_MSAA_CONFIG;
+
+      ps_msaa_config &= ~(VIVS_PS_MSAA_CONFIG_SAMPLE_COVERAGE_MASK |
+                          VIVS_PS_MSAA_CONFIG_SAMPLE_COVERAGE_VALUE_MASK |
+                          VIVS_PS_MSAA_CONFIG_SAMPLE_COVERAGE_VALUE__MASK |
+                          VIVS_PS_MSAA_CONFIG_SAMPLE_COVERAGE_INVERT |
+                          VIVS_PS_MSAA_CONFIG_SAMPLE_COVERAGE_INVERT_MASK |
+                          VIVS_PS_MSAA_CONFIG_SAMPLE_MASK_MASK |
+                          VIVS_PS_MSAA_CONFIG_SAMPLE_MASK_ENABLE_MASK |
+                          VIVS_PS_MSAA_CONFIG_SAMPLE_MASK__MASK);
+
+      ps_msaa_config |= VIVS_PS_MSAA_CONFIG_SAMPLE_COVERAGE |
+                        VIVS_PS_MSAA_CONFIG_SAMPLE_COVERAGE_VALUE((unsigned)(ctx->sample_coverage * 16.0f)) |
+                        COND(ctx->sample_coverage_invert, VIVS_PS_MSAA_CONFIG_SAMPLE_COVERAGE_INVERT) |
+                        VIVS_PS_MSAA_CONFIG_SAMPLE_MASK_ENABLE |
+                        VIVS_PS_MSAA_CONFIG_SAMPLE_MASK(ctx->sample_mask);
+
+      /*01054*/ EMIT_STATE(PS_MSAA_CONFIG, ps_msaa_config);
 
       if (ctx->blend->alpha_to_coverage &&
           !ctx->alpha_coverage_dither_emitted) {
@@ -583,6 +605,9 @@ etna_emit_state(struct etna_context *ctx)
    }
    if (unlikely(dirty & (ETNA_DIRTY_FRAMEBUFFER)) && screen->info->halti >= 3)
       /*014BC*/ EMIT_STATE(PE_MEM_CONFIG, ctx->framebuffer.PE_MEM_CONFIG);
+   if (unlikely(dirty & (ETNA_DIRTY_BLEND)) &&
+       VIV_FEATURE(screen, ETNA_FEATURE_PE_ADVANCE_BLEND_PART0))
+      /*014C0*/ EMIT_STATE(PE_ADVANCED_ALPHA_CONFIG, etna_blend_state(ctx->blend)->PE_ADVANCED_ALPHA_CONFIG);
    if (unlikely(dirty & (ETNA_DIRTY_FRAMEBUFFER | ETNA_DIRTY_TS))) {
       /*01654*/ EMIT_STATE(TS_MEM_CONFIG, ctx->framebuffer.TS_MEM_CONFIG);
       /*01658*/ EMIT_STATE_RELOC(TS_COLOR_STATUS_BASE, &ctx->framebuffer.TS_COLOR_STATUS_BASE);
@@ -602,32 +627,51 @@ etna_emit_state(struct etna_context *ctx)
          for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
             const uint8_t rt = i - 1;
             /*01500*/ EMIT_STATE_RELOC(PE_RT_ADDR_4_PIPE(rt, 0), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][0]);
-            /*01520*/ EMIT_STATE_RELOC(PE_RT_ADDR_4_PIPE(rt, 1), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][1]);
+            /*01504*/ EMIT_STATE_RELOC(PE_RT_ADDR_4_PIPE(rt, 1), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][1]);
+         }
+         for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
+            const uint8_t rt = i - 1;
             /*01580*/ EMIT_STATE(PE_RT_CONFIG_4(rt), ctx->framebuffer.PE_RT_CONFIG[rt]);
          }
       } else if (screen->specs.num_rts == 8) {
          for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
             const uint8_t rt = i - 1;
             /*14800*/ EMIT_STATE_RELOC(PE_RT_ADDR_8_PIPE(rt, 0), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][0]);
-            /*14800*/ EMIT_STATE_RELOC(PE_RT_ADDR_8_PIPE(rt, 1), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][1]);
+            /*14804*/ EMIT_STATE_RELOC(PE_RT_ADDR_8_PIPE(rt, 1), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][1]);
+         }
+         for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
+            const uint8_t rt = i - 1;
             /*14900*/ EMIT_STATE(PE_RT_CONFIG_8(rt), ctx->framebuffer.PE_RT_CONFIG[rt]);
          }
       }
    }
 
    if (unlikely(dirty & (ETNA_DIRTY_FRAMEBUFFER | ETNA_DIRTY_TS))) {
+      /* Index 0 is not used by the binary blob. */
       for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
          const uint8_t rt = i - 1;
-         /* Index 0 is not used by the binary blob. */
-         EMIT_STATE(TS_RT_CONFIG(i), ctx->framebuffer.RT_TS_MEM_CONFIG[rt]);
-         EMIT_STATE(TS_RT_CLEAR_VALUE(i), ctx->framebuffer.RT_TS_COLOR_CLEAR_VALUE[rt]);
-         EMIT_STATE(TS_RT_CLEAR_VALUE2(i), ctx->framebuffer.RT_TS_COLOR_CLEAR_VALUE_EXT[rt]);
-         EMIT_STATE_RELOC(TS_RT_STATUS_BASE(i), &ctx->framebuffer.RT_TS_COLOR_STATUS_BASE[rt]);
-         EMIT_STATE_RELOC(TS_RT_SURFACE_BASE(i), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][0]);
+         /*017A0*/ EMIT_STATE(TS_RT_CONFIG(i), ctx->framebuffer.RT_TS_MEM_CONFIG[rt]);
+      }
+      for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
+         const uint8_t rt = i - 1;
+         /*017C0*/ EMIT_STATE_RELOC(TS_RT_STATUS_BASE(i), &ctx->framebuffer.RT_TS_COLOR_STATUS_BASE[rt]);
+      }
+      for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
+         /*017E0*/ EMIT_STATE_RELOC(TS_RT_SURFACE_BASE(i), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][0]);
+      }
+      for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
+         const uint8_t rt = i - 1;
+         /*01A00*/ EMIT_STATE(TS_RT_CLEAR_VALUE(i), ctx->framebuffer.RT_TS_COLOR_CLEAR_VALUE[rt]);
+      }
+      for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
+         const uint8_t rt = i - 1;
+         /*01A20*/ EMIT_STATE(TS_RT_CLEAR_VALUE2(i), ctx->framebuffer.RT_TS_COLOR_CLEAR_VALUE_EXT[rt]);
       }
    }
 
    if (unlikely(VIV_FEATURE(screen, ETNA_FEATURE_HWTFB))) {
+      /* The emit order is important: TFB_COMMAND needs to emitted always last. */
+
       if (unlikely(dirty & ETNA_DIRTY_RASTERIZER)) {
          /*1C000*/ EMIT_STATE(TFB_CONFIG, etna_rasterizer_state(ctx->rasterizer)->TFB_CONFIG);
       }
@@ -640,11 +684,14 @@ etna_emit_state(struct etna_context *ctx)
 
          /*1C008*/ EMIT_STATE_RELOC(TFB_CONTEXT_BUFFER, &context_buffer);
 
-         for (int i = 0; i < 4; i++) {
+         for (int i = 0; i < ctx->streamout.num_targets; i++)
             /*1C040*/ EMIT_STATE_RELOC(TFB_BUFFER_ADDR(i), &ctx->streamout.TFB_BUFFER_ADDR[i]);
+
+         for (int i = 0; i < ctx->streamout.num_targets; i++)
             /*1C080*/ EMIT_STATE(TFB_BUFFER_SIZE(i), ctx->streamout.TFB_BUFFER_SIZE[i]);
+
+         for (int i = 0; i < ctx->streamout.num_targets; i++)
             /*1C0C0*/ EMIT_STATE(TFB_BUFFER_STRIDE(i), ctx->streamout.TFB_BUFFER_STRIDE[i]);
-         }
 
          for (int i = 0; i < 4; i++) {
             /*1C100*/ EMIT_STATE(TFB_DESCRIPTOR_COUNT(i), ctx->streamout.TFB_DESCRIPTOR_COUNT[i]);
@@ -826,4 +873,5 @@ etna_emit_state(struct etna_context *ctx)
 #undef EMIT_STATE_RELOC
    ctx->dirty = 0;
    ctx->dirty_sampler_views = 0;
+   ctx->dirty_samplers = 0;
 }

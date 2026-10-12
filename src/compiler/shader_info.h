@@ -37,6 +37,12 @@ extern "C" {
 #define MAX_XFB_BUFFERS        4
 #define MAX_INLINABLE_UNIFORMS 4
 
+enum shader_info_hash_type {
+   SHADER_INFO_HASH_TYPE_RAW = 0,
+   SHADER_INFO_HASH_TYPE_DXIL,
+   SHADER_INFO_HASH_TYPE_DXBC,
+};
+
 typedef struct shader_info {
    const char *name;
 
@@ -48,6 +54,9 @@ typedef struct shader_info {
 
    /* BLAKE3 of the original source, used by shader detection in drivers. */
    blake3_hash source_blake3;
+
+   /* Human-readable description of specialization constants passed to shader. */
+   const char *spec;
 
    /** The shader stage, such as MESA_SHADER_VERTEX. */
    mesa_shader_stage stage:8;
@@ -376,6 +385,10 @@ typedef struct shader_info {
     */
    bool occupancy_bounded_workgroup_fairness:1;
 
+   /* Type of hash carried in source_blake3.
+    */
+   enum shader_info_hash_type hash_type:2;
+
    union {
       struct {
          /* Which inputs are doubles */
@@ -470,6 +483,19 @@ typedef struct shader_info {
          bool uses_sample_shading:1;
 
          /**
+          * Whether the fragment shader outputs YUV color, ie. it has an output
+          * qualified with the EXT_YUV_target `yuv` layout qualifier.
+          *
+          * Note that the extension only allows this on a shader with a single
+          * color output and no depth write, so there is never a mix of YUV and
+          * RGB outputs: if this is set, the FS has exactly one output and it is
+          * YUV.  See detect_conflicting_assignments() in ast_to_hir.cpp, which
+          * rejects yuv-layout combined with gl_FragDepth or MRT at compile
+          * time.
+          */
+         bool yuv_color:1;
+
+         /**
           * Whether early fragment tests are enabled as defined by
           * ARB_shader_image_load_store.
           */
@@ -494,6 +520,24 @@ typedef struct shader_info {
          bool pixel_interlock_unordered:1;
          bool sample_interlock_ordered:1;
          bool sample_interlock_unordered:1;
+
+         /**
+          * Whether the original shader had sample_mask_in regardless of
+          * whether NIR lowered it or optimized it away. The presence of
+          * sample_mask_in has side effects such as
+          * fragmentShadingRateWithShaderSampleMask == VK_FALSE forcing FSR
+          * to be disabled even if sample_mask_in is later optimized away.
+          */
+         bool sample_mask_in_declared:1;
+
+         /**
+          * Records whether the shader originally had sample_mask_out in
+          * its output interface.
+          * When sample_mask_out_declared is set, the property
+          * fragmentShadingRateWithShaderSampleMask == VK_FALSE
+          * forces FSR to be disabled.
+          */
+         bool sample_mask_out_declared:1;
 
          /**
           * whether this shader has pixel_local_storage load/store instructions
@@ -550,6 +594,12 @@ typedef struct shader_info {
           * SPV_KHR_cooperative_matrix.
           */
          bool has_cooperative_matrix:1;
+
+         /*
+          * If the shader might have a control barrier with only one of
+          * NIR_MEMORY_CONTROL_ARRIVE/NIR_MEMORY_CONTROL_WAIT.
+          */
+         bool has_split_control_barriers:1;
 
          /**
           * Number of bytes of shared imageblock memory per thread. Currently,

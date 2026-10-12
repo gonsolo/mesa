@@ -682,7 +682,7 @@ read_uniform_remap_list(struct blob_reader *metadata,
 
       unsigned start = blob_read_uint32(metadata);
       unsigned end = blob_read_uint32(metadata);
-      util_range_insert_remap(start, end, range_remap, uniform);
+      util_range_insert_remap(start, end, range_remap, uniform, false);
    }
 
    util_range_switch_to_sorted_array(range_remap);
@@ -1188,6 +1188,7 @@ write_shader_metadata(struct blob *metadata, gl_linked_shader *shader)
                     sizeof(glprog->sh.SamplerTargets));
    blob_write_uint32(metadata, glprog->ShadowSamplers);
    blob_write_uint32(metadata, glprog->ExternalSamplersUsed);
+   blob_write_uint32(metadata, glprog->Y2YSamplersUsed);
    blob_write_uint32(metadata, glprog->sh.ShaderStorageBlocksWriteAccess);
 
    blob_write_bytes(metadata, glprog->sh.image_access,
@@ -1240,6 +1241,7 @@ read_shader_metadata(struct blob_reader *metadata,
                    sizeof(glprog->sh.SamplerTargets));
    glprog->ShadowSamplers = blob_read_uint32(metadata);
    glprog->ExternalSamplersUsed = blob_read_uint32(metadata);
+   glprog->Y2YSamplersUsed = blob_read_uint32(metadata);
    glprog->sh.ShaderStorageBlocksWriteAccess = blob_read_uint32(metadata);
 
    blob_copy_bytes(metadata, (uint8_t *) glprog->sh.image_access,

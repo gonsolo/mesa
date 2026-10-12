@@ -36,7 +36,7 @@
  *   buffer, accum buffer and alpha buffers.
  *
  * These types should be encapsulated by corresponding device driver
- * data types.  See xmesa.h and xmesaP.h for an example.
+ * data types.
  *
  * In OOP terms, struct gl_context, struct gl_config, and struct gl_framebuffer
  * are base classes which the device driver must derive from.
@@ -98,13 +98,13 @@ extern void
 _mesa_set_dispatch(struct gl_context *ctx, struct _glapi_table *t);
 
 extern struct _glapi_table *
+_mesa_get_dispatch(struct gl_context *ctx);
+
+extern struct _glapi_table *
 _mesa_new_nop_table(bool glthread);
 
 extern void
 _mesa_free_context_data(struct gl_context *ctx, bool destroy_debug_output);
-
-extern void
-_mesa_copy_context(const struct gl_context *src, struct gl_context *dst, GLuint mask);
 
 extern GLboolean
 _mesa_make_current( struct gl_context *ctx, struct gl_framebuffer *drawBuffer,

@@ -117,6 +117,7 @@ struct radv_shader_info {
    bool force_indirect_descriptors : 1;
    bool ngg_wave_id_en : 1;
    bool descriptor_heap : 1;
+   bool uses_sampler : 1;
 
    struct {
       uint64_t tcs_inputs_via_temp;
@@ -176,15 +177,15 @@ struct radv_shader_info {
       bool writes_z : 1;
       bool writes_stencil : 1;
       bool writes_sample_mask : 1;
-      bool writes_mrt0_alpha : 1;
+      bool writes_mrt0_alpha_to_mrtz : 1;
       bool mrt0_is_dual_src : 1;
-      bool exports_mrtz_via_epilog : 1;
       bool has_pcoord : 1;
       bool prim_id_input : 1;
       bool viewport_index_input : 1;
       bool can_discard : 1;
       bool early_fragment_test : 1;
       bool post_depth_coverage : 1;
+      bool uses_fbfetch_output : 1;
       uint8_t reads_frag_coord_mask;
       uint8_t depth_layout;
       bool reads_sample_mask_in : 1;
@@ -211,10 +212,13 @@ struct radv_shader_info {
       uint8_t color0_written;
       bool load_provoking_vtx : 1;
       bool load_rasterization_prim : 1;
-      bool force_sample_iter_shading_rate : 1;
+      bool force_disable_vrs : 1;
       bool allow_flat_shading : 1;
+      bool disallow_force_vrs_per_vertex : 1;
       bool selects_frag_coord_xy_dynamically : 1;
+      bool selects_quad_pos_dynamically : 1;
       bool selects_sample_mask_in_dynamically : 1;
+      bool selects_front_face_dynamically : 1;
 
       bool has_epilog : 1;
    } ps;
@@ -258,12 +262,19 @@ struct radv_shader_info {
    };
 };
 
+static inline bool
+radv_ps_writes_mrtz(const struct radv_shader_info *info)
+{
+   return info->ps.writes_z || info->ps.writes_stencil || info->ps.writes_sample_mask;
+}
+
 /* Precomputed register values. */
 struct radv_shader_regs {
    uint32_t pgm_lo;
    uint32_t pgm_rsrc1;
    uint32_t pgm_rsrc2;
    uint32_t pgm_rsrc3;
+   uint32_t pgm_rsrc4;
 
    union {
       struct {
@@ -302,6 +313,7 @@ struct radv_shader_regs {
          uint32_t spi_ps_in_control;
          uint32_t spi_shader_z_format;
          uint32_t spi_gs_out_config_ps;
+         uint32_t spi_shader_pgm_rsrc4_ps;
          uint32_t pa_sc_hisz_control;
       } ps;
 
@@ -317,7 +329,7 @@ struct radv_shader_regs {
    uint32_t vgt_gs_max_vert_out;
    uint32_t vgt_gs_onchip_cntl;
    uint32_t spi_shader_pgm_rsrc3_gs;
-   uint32_t spi_shader_pgm_rsrc4_gs;
+   uint32_t spi_shader_pgm_rsrc4_gs_hs;
    uint32_t ge_pc_alloc;
    uint32_t pa_cl_vs_out_cntl;
    uint32_t spi_vs_out_config;

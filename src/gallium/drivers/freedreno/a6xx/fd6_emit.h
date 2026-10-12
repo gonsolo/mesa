@@ -223,6 +223,8 @@ __event_write(fd_cs &cs, enum fd_gpu_event event,
    struct fd_gpu_event_info info = fd_gpu_events<CHIP>[event];
    unsigned len = info.needs_seqno ? 4 : 1;
 
+   assert(info.raw_event);
+
    if ((CHIP >= A7XX) && (event == FD_RB_DONE))
       len--;
 
@@ -326,15 +328,18 @@ fd6_set_rb_dbg_eco_mode(struct fd_context *ctx, fd_cs &cs, bool blit)
 
    const struct fd_dev_info *info = ctx->screen->info;
 
-   if (info->magic.RB_DBG_ECO_CNTL == info->magic.RB_DBG_ECO_CNTL_blit)
+   if (!FD_QUIRK(info, QCTDD04536579))
       return;
 
-   uint32_t dword = blit ? info->magic.RB_DBG_ECO_CNTL_blit :
-                           info->magic.RB_DBG_ECO_CNTL;
-
    fd_pkt7(cs, CP_WAIT_FOR_IDLE, 0);
-   fd_pkt4(cs, 1)
-      .add(A6XX_RB_DBG_ECO_CNTL(.dword = dword));
+
+   /* Set RB_DBG_ECO_CNTL b24 for 2d blits, clear after: */
+   fd_pkt7(cs, CP_REG_RMW, 3)
+      .add(CP_REG_RMW_0(
+         .dst_reg = A6XX_RB_DBG_ECO_CNTL().reg,
+      ))
+      .add(CP_REG_RMW_1(~BITFIELD_BIT(24)))
+      .add(CP_REG_RMW_2(blit ? BITFIELD_BIT(24) : 0));
 }
 
 struct fd6_set_render_mode {

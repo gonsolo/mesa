@@ -16,6 +16,7 @@
 
 #include "ac_vcn_enc.h"
 #include "radv_constants.h"
+#include "radv_drirc.h"
 #include "radv_instance.h"
 #include "radv_queue.h"
 #include "radv_radeon_winsys.h"
@@ -31,6 +32,8 @@
 #ifndef _WIN32
 #include <xf86drm.h>
 #endif
+
+typedef struct ac_drm_device ac_drm_device;
 
 struct radv_binning_settings {
    unsigned context_states_per_bin;    /* allowed range: [1, 6] */
@@ -58,17 +61,26 @@ enum radv_video_enc_hw_ver {
  *
  * - full: Disable HiZ/HiS at draw time when required to prevent the issue to happen. This solution
  *   should be completely safe but it might decrease performance in some cases.
+ *
+ * - full_rez: Disable HiZ/HiS like full and force the fragment Z-order to early-Z-then-ReZ to recover
+ *   some of the early-Z rejection lost by disabling HiZ.
  */
 enum radv_gfx12_hiz_wa {
    RADV_GFX12_HIZ_WA_DISABLED,
    RADV_GFX12_HIZ_WA_PARTIAL,
    RADV_GFX12_HIZ_WA_FULL,
+   RADV_GFX12_HIZ_WA_FULL_REZ,
+};
+
+enum radv_drm_device_type {
+   RADV_DRM_DEVICE_AMDGPU,
+   RADV_DRM_DEVICE_AMDGPU_VPIPE,
+   RADV_DRM_DEVICE_VIRTIO,
 };
 
 struct radv_physical_device {
    struct vk_physical_device vk;
 
-   struct radeon_winsys *ws;
    struct radeon_info info;
    char name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
    char marketing_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
@@ -82,6 +94,7 @@ struct radv_physical_device {
    struct ac_addrlib *addrlib;
 
    int wsi_master_fd;
+   int wsi_syncobj_fd;
    struct wsi_device wsi_device;
 
    /* Whether DCC should be enabled for MSAA textures. */
@@ -191,6 +204,15 @@ struct radv_physical_device {
    struct vk_sync_type syncobj_sync_type;
    struct vk_sync_timeline_type emulated_timeline_sync_type;
    const struct vk_sync_type *sync_types[3];
+
+   /* Type of DRM device. */
+   enum radv_drm_device_type drm_device_type;
+
+   /* Cached device used to query heap info. */
+   simple_mtx_t drm_device_mtx;
+   ac_drm_device *drm_device;
+
+   struct radv_drirc drirc;
 };
 
 VK_DEFINE_HANDLE_CASTS(radv_physical_device, vk.base, VkPhysicalDevice, VK_OBJECT_TYPE_PHYSICAL_DEVICE)
@@ -253,14 +275,12 @@ bool radv_use_bvh8(const struct radv_physical_device *pdev);
 
 bool radv_is_dcc_disabled(const struct radv_physical_device *pdev);
 
-bool radv_are_dcc_stores_disabled(const struct radv_physical_device *pdev);
-
-bool radv_are_dcc_mips_disabled(const struct radv_physical_device *pdev);
-
 VkResult create_drm_physical_device(struct vk_instance *vk_instance, struct _drmDevice *device,
                                     struct vk_physical_device **out);
 
 void radv_physical_device_destroy(struct vk_physical_device *vk_pdev);
+
+bool radv_graphics_queue_enabled(const struct radv_physical_device *pdev);
 
 bool radv_transfer_queue_enabled(const struct radv_physical_device *pdev);
 
@@ -269,6 +289,8 @@ bool radv_compute_queue_enabled(const struct radv_physical_device *pdev);
 bool radv_spm_trace_enabled(const struct radv_physical_device *pdev);
 
 bool radv_tmz_enabled(const struct radv_physical_device *pdev);
+
+bool radv_is_rt_wave64_enabled(const struct radv_physical_device *pdev);
 
 static inline uint32_t
 radv_get_sampled_image_desc_size(const struct radv_physical_device *pdev)

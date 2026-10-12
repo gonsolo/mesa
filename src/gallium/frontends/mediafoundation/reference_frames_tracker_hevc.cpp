@@ -32,6 +32,7 @@
 
 reference_frames_tracker_hevc::reference_frames_tracker_hevc( void *logId,
                                                               struct pipe_video_codec *codec,
+                                                              eAVEncH265VProfile hevcProfile,
                                                               uint32_t textureWidth,
                                                               uint32_t textureHeight,
                                                               uint32_t gopLength,
@@ -54,7 +55,7 @@ reference_frames_tracker_hevc::reference_frames_tracker_hevc( void *logId,
         m_codec,
         textureWidth,
         textureHeight,
-        ConvertProfileToFormat( m_codec->profile ),
+        ConvertAVEncVProfileToPipeFormat( hevcProfile ),
         m_codec->max_references + 1 /*curr pic*/ +
            ( bLowLatency ? 0 : MFT_INPUT_QUEUE_DEPTH ) /*MFT process input queue depth for delayed in flight recon pic release*/,
         hr ),
@@ -67,7 +68,7 @@ reference_frames_tracker_hevc::reference_frames_tracker_hevc( void *logId,
       m_gopLength = gopLength;
       m_force_idr_on_gop_start = true;
       m_p_picture_period = uiBPictureCount + 1;
-      m_gop_state.log2_max_pic_order_cnt_lsb_minus4 = 4;   // legal range is 0 to 12, we will fix to 4 which corresponds to [0..255]
+      m_gop_state.log2_max_pic_order_cnt_lsb_minus4 = HEVC_LOG2_MAX_PIC_ORDER_CNT_LSB_MINUS4; // legal range is 0 to 12, we will fix to 4 which corresponds to [0..255]
       ResetGopStateToIDR();
       m_frame_state_descriptor.gop_info = &m_gop_state;
 

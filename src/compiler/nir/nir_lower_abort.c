@@ -63,7 +63,7 @@ lower_abort_intrin(nir_builder *b, nir_intrinsic_instr *intrin, void *_options)
 
    const unsigned slot_header_size = sizeof(uint64_t);
    const unsigned message_data_size = glsl_get_explicit_size(message_deref->type, true);
-   const unsigned slot_size = slot_header_size + message_data_size;
+   const unsigned slot_size = align(slot_header_size + message_data_size, 8);
 
    /* Increment the counter at the beginning of the buffer */
    nir_deref_instr *counter = nir_build_deref_array_imm(b, buffer, 0);
@@ -102,13 +102,13 @@ lower_abort_intrin(nir_builder *b, nir_intrinsic_instr *intrin, void *_options)
    }
    nir_pop_if(b, NULL);
 
-   /* Halt is a jump instruction so can only appear at the end of a block.
-    * The abort might be in the middle of a block. So, wrap the halt and let
-    * control flow optimization clean up after us.
+   /* Abort is a jump instruction so can only appear at the end of a block.
+    * The abort might be in the middle of a block. So, wrap it and let control
+    * flow optimization clean up after us.
     */
    nir_push_if(b, nir_imm_true(b));
    {
-      nir_jump(b, nir_jump_halt);
+      nir_jump(b, nir_jump_abort);
    }
    nir_pop_if(b, NULL);
 

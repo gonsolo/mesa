@@ -39,6 +39,13 @@ struct panvk_sync_scope {
 #else
 #define MAX_LAYERS_PER_TILER_DESC 8
 #endif
+#if PAN_ARCH == 10
+#define PAN_CRC_VALID_OFFSET  0
+#endif
+#if PAN_ARCH >= 11
+#define PAN_CRC_INIT_OFFSET  0
+#define PAN_CRC_INIT_MASK    0xffff
+#endif
 
 struct panvk_cs_sync32 {
    uint32_t seqno;
@@ -157,6 +164,14 @@ struct panvk_cs_subqueue_context {
       /* Timestamp queries that need to happen after the current rp. */
       struct cs_single_link_list ts_chain;
       struct cs_single_link_list ts_done_chain;
+      /* Fields used to pass layer count information from primary cmdbufs to
+       * secondary cmdbufs. */
+#if PAN_ARCH >= 14
+      uint32_t layer_count;
+#else
+      uint32_t td_count;
+      uint32_t last_td_fullscreen_tiler_flags;
+#endif
    } render;
    struct {
       uint32_t counter;
@@ -170,6 +185,13 @@ struct panvk_cs_subqueue_context {
       uint64_t ir_descs[PANVK_IR_PASS_COUNT];
       uint32_t td_count;
       uint32_t layer_count;
+
+      /* Spill target and final regular target can differ for
+       * the same RT index and point to two different images. For CRC tracking,
+       * we need to store two CRC header addresses, one for the regular and one
+       * for the spill. */
+      uint32_t crc_header_addr_count;
+      uint64_t crc_header_addrs[PAN_MAX_RTS * 2];
    } tiler_oom_ctx;
    struct {
       struct {
@@ -189,6 +211,22 @@ struct panvk_cache_flush_info {
    enum mali_cs_other_flush_mode others;
 };
 
+/* Execute CRC state updates on a destination subqueue when possible.
+ * Fall back to compute when the destination scope maps to no subqueue.
+ */
+static inline enum panvk_subqueue_id
+panvk_crc_exec_subqueue(uint32_t dst_mask)
+{
+   return dst_mask ? u_bit_scan(&dst_mask) : PANVK_SUBQUEUE_COMPUTE;
+}
+
+struct panvk_cs_crc_deps {
+   const uint64_t *addrs;
+   uint32_t count;
+   uint32_t src_subqueue_mask;
+   uint32_t dst_subqueue_mask;
+};
+
 struct panvk_cs_deps {
    bool needs_fb_barrier;
 
@@ -203,6 +241,8 @@ struct panvk_cs_deps {
       enum mali_cs_condition cond;
       struct cs_index cond_value;
    } dst[PANVK_SUBQUEUE_COUNT];
+
+   struct panvk_cs_crc_deps crc;
 };
 
 enum panvk_sb_ids {
@@ -256,6 +296,15 @@ enum panvk_cs_regs {
    PANVK_CS_REG_RUN_FRAGMENT_SR_START = 0,
    PANVK_CS_REG_RUN_FRAGMENT_SR_END = 55,
    PANVK_CS_REG_TILER_DESC_PTR = 58,
+
+   /* RUN_FRAGMENT2 RW staging regs. The rest are initialized to zero at
+    * command stream initialization, and should never be touched again. */
+   PANVK_CS_REG_RUN_FRAGMENT_SR_RANGE_0_START = 28,
+   PANVK_CS_REG_RUN_FRAGMENT_SR_RANGE_0_END = 47,
+   PANVK_CS_REG_RUN_FRAGMENT_SR_RANGE_1_START = 52,
+   PANVK_CS_REG_RUN_FRAGMENT_SR_RANGE_1_END = 52,
+   PANVK_CS_REG_RUN_FRAGMENT_SR_RANGE_2_START = 54,
+   PANVK_CS_REG_RUN_FRAGMENT_SR_RANGE_2_END = 55,
 #else
    /* RUN_FRAGMENT staging regs.
     * SW ABI:
@@ -265,6 +314,11 @@ enum panvk_cs_regs {
    PANVK_CS_REG_RUN_FRAGMENT_SR_START = 38,
    PANVK_CS_REG_RUN_FRAGMENT_SR_END = 46,
    PANVK_CS_REG_TILER_DESC_PTR = 58,
+
+   /* RUN_FRAGMENT RW staging regs. The rest are initialized to zero at
+    * command stream initialization, and should never be touched again. */
+   PANVK_CS_REG_RUN_FRAGMENT_SR_RANGE_0_START = 0,
+   PANVK_CS_REG_RUN_FRAGMENT_SR_RANGE_0_END = 43,
 #endif
 
    /* RUN_COMPUTE staging regs. */
@@ -323,6 +377,21 @@ static inline struct cs_index
 cs_subqueue_ctx_reg(struct cs_builder *b)
 {
    return cs_reg64(b, PANVK_CS_REG_SUBQUEUE_CTX_START);
+}
+
+static inline void PRINTFLIKE(2, 3)
+   cs_debug_string(struct cs_builder *b, const char *format, ...)
+{
+   if (PANVK_DEBUG(DUMP) || PANVK_DEBUG(TRACE)) {
+      char string_buf[CS_DBG_STR_MAX_LEN];
+
+      va_list ap;
+      va_start(ap, format);
+      vsnprintf(string_buf, sizeof(string_buf), format, ap);
+      va_end(ap);
+
+      cs_dbg_str(b, string_buf);
+   }
 }
 
 static inline struct cs_index
@@ -445,7 +514,17 @@ panvk_cs_reg_whitelist(progress_seqno, PANVK_CS_REG_RANGE(PROGRESS_SEQNO));
 panvk_cs_reg_whitelist(compute_ctx, PANVK_CS_REG_RANGE(RUN_COMPUTE_SR));
 #define cs_update_compute_ctx(__b) panvk_cs_reg_upd_ctx(__b, compute_ctx)
 
-panvk_cs_reg_whitelist(frag_ctx, PANVK_CS_REG_RANGE(RUN_FRAGMENT_SR));
+#if PAN_ARCH >= 14
+#define PANVK_RUN_FRAG_SR_WHITELIST_RANGES                                     \
+   PANVK_CS_REG_RANGE(RUN_FRAGMENT_SR_RANGE_0),                                \
+      PANVK_CS_REG_RANGE(RUN_FRAGMENT_SR_RANGE_1),                             \
+      PANVK_CS_REG_RANGE(RUN_FRAGMENT_SR_RANGE_2)
+#else
+#define PANVK_RUN_FRAG_SR_WHITELIST_RANGES                                     \
+   PANVK_CS_REG_RANGE(RUN_FRAGMENT_SR_RANGE_0)
+#endif
+
+panvk_cs_reg_whitelist(frag_ctx, PANVK_RUN_FRAG_SR_WHITELIST_RANGES);
 #define cs_update_frag_ctx(__b) panvk_cs_reg_upd_ctx(__b, frag_ctx)
 
 panvk_cs_reg_whitelist(vt_ctx, PANVK_CS_REG_RANGE(RUN_IDVS_SR));
@@ -487,6 +566,7 @@ struct panvk_cmd_buffer {
       struct panvk_cs_state cs[PANVK_SUBQUEUE_COUNT];
       struct panvk_tls_state tls;
       bool contains_timestamp_queries;
+      bool uses_poly_heap;
 
       struct panvk_cond_render_state cond_render;
    } state;
@@ -837,6 +917,13 @@ panvk_per_arch(calculate_task_axis_and_increment)(
    assert(*task_increment > 0);
 }
 
+void panvk_per_arch(cmd_dispatch_shader)(
+   struct panvk_cmd_buffer *cmdbuf,
+   const struct panvk_shader_variant *cs,
+   const struct panvk_shader_desc_state *cs_desc_state,
+   uint64_t push_uniforms, uint64_t tsd,
+   const struct panvk_dispatch_info *info);
+
 static VkPipelineStageFlags2
 panvk_get_subqueue_stages(enum panvk_subqueue_id subqueue)
 {
@@ -858,6 +945,7 @@ panvk_get_subqueue_stages(enum panvk_subqueue_id subqueue)
    case PANVK_SUBQUEUE_COMPUTE:
       return VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
              VK_PIPELINE_STAGE_2_COPY_BIT |
+             VK_PIPELINE_STAGE_2_COPY_INDIRECT_BIT_KHR |
              VK_PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT;
    default:
       UNREACHABLE("Invalid subqueue id");
@@ -914,6 +1002,8 @@ vk_stages_to_subqueue_mask(VkPipelineStageFlags2 vk_stages,
 void panvk_per_arch(emit_barrier)(struct panvk_cmd_buffer *cmdbuf,
                                   struct panvk_cs_deps deps);
 
+VkResult panvk_per_arch(cmd_init_poly_heap)(struct panvk_cmd_buffer *cmdbuf);
+
 #if PAN_ARCH >= 14
 static inline void
 cs_emit_layer_fragment_state(struct cs_builder *b, struct cs_index fbd_ptr)
@@ -938,5 +1028,11 @@ cs_emit_layer_fragment_state(struct cs_builder *b, struct cs_index fbd_ptr)
                 offsetof(struct panvk_fb_layer_state, dcd_pointer));
 }
 #endif /* PAN_ARCH >= 14 */
+
+void panvk_per_arch(collect_crc_invalidation_deps)(const VkDependencyInfo *info,
+                                                   struct panvk_cs_deps *deps,
+                                                   uint64_t *crc_addrs);
+void panvk_per_arch(cmd_invalidate_crc)(struct cs_builder *b,
+                                        uint64_t crc_header_addr);
 
 #endif /* PANVK_CMD_BUFFER_H */

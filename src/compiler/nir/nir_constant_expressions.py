@@ -55,6 +55,7 @@ template = """\
  * IN THE SOFTWARE.
  */
 
+#include <fenv.h>
 #include <math.h>
 #include "util/rounding.h" /* for _mesa_roundeven */
 #include "util/half_float.h"
@@ -122,6 +123,9 @@ handle_intermediate_float_result(double value, unsigned execution_mode, unsigned
         } else {
             const_val.u16 = _mesa_float_to_float16_rtne(value);
         }
+        break;
+    default:
+        UNREACHABLE("Unsupported bit_size. Should be 64, 32, or 16");
     }
 
     return get_float_source(const_val, execution_mode, bit_size);
@@ -425,10 +429,7 @@ typedef float float16_t;
 typedef float float32_t;
 typedef double float64_t;
 typedef bool bool1_t;
-typedef bool bool8_t;
-typedef bool bool16_t;
 typedef bool bool32_t;
-typedef bool bool64_t;
 
 static inline bool
 util_add_check_overflow_int1_t(int1_t a, int1_t b)
@@ -659,6 +660,20 @@ nir_eval_const_opcode(nir_op op, nir_const_value *dest, nir_component_mask_t *ou
                       nir_const_value **src,
                       unsigned float_controls_execution_mode)
 {
+   /* Temporarily disable floating point exception flags while we
+    * evaluate shader constants. This avoids games unexpectedly crashing while
+    * we evalute shader math on the cpu if they have the exeption flags turn
+    * on such as in TY The Tasmainian Tiger 3.
+    */
+   int had_flags = 0;
+   fenv_t __nir_const_fenv;
+#if defined(_GNU_SOURCE) && defined(__GLIBC__)
+   /* Check exceptions are enabled before calling more expensive hold/set calls */
+   had_flags = fegetexcept();
+#endif
+   if (unlikely(had_flags))
+      feholdexcept(&__nir_const_fenv);
+
    nir_component_mask_t poison;
 
    switch (op) {
@@ -673,6 +688,10 @@ nir_eval_const_opcode(nir_op op, nir_const_value *dest, nir_component_mask_t *ou
 
    if (out_poison)
       *out_poison = poison;
+
+   /* Restore floating point exception flags */
+   if (unlikely(had_flags))
+      fesetenv(&__nir_const_fenv);
 }"""
 
 from mako.template import Template

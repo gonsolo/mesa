@@ -64,12 +64,12 @@ static const struct etna_op_info etna_ops[] = {
    /* type convert */
    IOP(i2f32, I2F),
    IOP(i2i32, I2I),
-   OPCT(i2i16, I2I, TRUE, S16),
-   OPCT(i2i8,  I2I, TRUE, S8),
+   IOP(i2i16, I2I),
+   IOP(i2i8,  I2I),
    UOP(u2f32, I2F),
    UOP(u2u32, I2I),
-   OPCT(u2u16, I2I, TRUE, U16),
-   OPCT(u2u8,  I2I, TRUE, U8),
+   UOP(u2u16, I2I),
+   UOP(u2u8,  I2I),
    IOP(f2i32, F2I),
    OPCT(f2i16, F2I, TRUE, S16),
    OPCT(f2i8,  F2I, TRUE, S8),
@@ -118,12 +118,44 @@ static const struct etna_op_info etna_ops[] = {
    IOP(ishr, RSHIFT),
    UOP(ushr, RSHIFT),
    UOP(uclz, LEADZERO),
+   UOP(bitfield_reverse, BIT_REV),
+   UOP(bit_count, POPCOUNT),
+   UOP(ubitfield_extract, BIT_EXTRACT),
+   IOP(ibitfield_extract, BIT_EXTRACT),
+   IOP(bitfield_insert_etna, BIT_INSERT),
 };
 
-void
-etna_emit_alu(struct etna_compile *c, nir_op op, struct etna_inst_dst dst,
-              struct etna_inst_src src[3], bool saturate)
+static enum isa_type
+i2i_type(unsigned bit_size, bool is_signed)
 {
+   switch (bit_size) {
+   case 32: return is_signed ? ISA_TYPE_S32 : ISA_TYPE_U32;
+   case 16: return is_signed ? ISA_TYPE_S16 : ISA_TYPE_U16;
+   case 8:  return is_signed ? ISA_TYPE_S8 : ISA_TYPE_U8;
+   default: UNREACHABLE("unsupported i2i width");
+   }
+}
+
+static struct etna_inst_src
+i2i_dst_type(unsigned bit_size, bool is_signed)
+{
+   unsigned code;
+
+   switch (bit_size) {
+   case 32: code = is_signed ? 2 : 5; break;
+   case 16: code = is_signed ? 3 : 6; break;
+   case 8:  code = is_signed ? 4 : 7; break;
+   default: UNREACHABLE("unsupported i2i width");
+   }
+
+   return etna_immediate_int(code << 4);
+}
+
+void
+etna_emit_alu(struct etna_compile *c, nir_alu_instr *alu, struct etna_inst_dst dst,
+              struct etna_inst_src src[3])
+{
+   nir_op op = alu->op;
    struct etna_op_info ei = etna_ops[op];
    unsigned swiz_scalar = INST_SWIZ_BROADCAST(ffs(dst.write_mask) - 1);
 
@@ -135,7 +167,7 @@ etna_emit_alu(struct etna_compile *c, nir_op op, struct etna_inst_dst dst,
       .type = ei.type,
       .cond = ei.cond,
       .dst = dst,
-      .sat = saturate,
+      .sat = op == nir_op_fsat,
       .src[0] = src[0],
       .src[1] = src[1],
       .src[2] = src[2],
@@ -156,8 +188,8 @@ etna_emit_alu(struct etna_compile *c, nir_op op, struct etna_inst_dst dst,
    case nir_op_fsqrt:
    case nir_op_imul:
       /* scalar instructions we want src to be in x component */
-      inst.src[0].swiz = inst_swiz_compose(src[0].swiz, swiz_scalar);
-      inst.src[1].swiz = inst_swiz_compose(src[1].swiz, swiz_scalar);
+      inst.src[0] = etna_src_swizzle(src[0], swiz_scalar);
+      inst.src[1] = etna_src_swizzle(src[1], swiz_scalar);
       break;
    /* deal with instructions which don't have 1:1 mapping */
    case nir_op_fmin:
@@ -179,6 +211,18 @@ etna_emit_alu(struct etna_compile *c, nir_op op, struct etna_inst_dst dst,
       break;
    case nir_op_f2f32:
       inst.src[1] = etna_immediate_int(1);
+      break;
+   case nir_op_i2i32:
+   case nir_op_i2i16:
+   case nir_op_i2i8:
+      inst.type = i2i_type(alu->src[0].src.ssa->bit_size, true);
+      inst.src[1] = i2i_dst_type(alu->def.bit_size, true);
+      break;
+   case nir_op_u2u32:
+   case nir_op_u2u16:
+   case nir_op_u2u8:
+      inst.type = i2i_type(alu->src[0].src.ssa->bit_size, false);
+      inst.src[1] = i2i_dst_type(alu->def.bit_size, false);
       break;
    case nir_op_ineg:
       /* ADD 0, -x */
@@ -202,9 +246,15 @@ etna_emit_tex(struct etna_compile *c, nir_tex_instr * tex, unsigned dst_swiz,
               struct etna_inst_dst dst, struct etna_inst_src coord,
               struct etna_inst_src src1, struct etna_inst_src src2)
 {
+   /* With unified samplers the VS sampler index is 0-based and the per-stage
+    * base comes from VS_SAMPLER_BASE at draw time.
+    */
+   unsigned sampler_base = (is_fs(c) || c->specs->unified_samplers)
+                           ? 0 : c->specs->vertex_sampler_offset;
+
    struct etna_inst inst = {
       .dst = dst,
-      .tex.id = tex->sampler_index + (is_fs(c) ? 0 : c->specs->vertex_sampler_offset),
+      .tex.id = tex->sampler_index + sampler_base,
       .tex.swiz = dst_swiz,
       .src[0] = coord,
    };
@@ -224,6 +274,13 @@ etna_emit_tex(struct etna_compile *c, nir_tex_instr * tex, unsigned dst_swiz,
       inst.opcode = ISA_OPC_TXF;
       inst.src[2] = etna_immediate_int(0x1100);
       break;
+   case nir_texop_txf_ms: {
+      int ms_index = nir_tex_instr_src_index(tex, nir_tex_src_ms_index);
+
+      inst.opcode = ISA_OPC_TXF_MS;
+      inst.src[1] = etna_immediate_int(nir_src_as_int(tex->src[ms_index].src));
+      break;
+   }
    case nir_texop_tg4:
       inst.opcode = ISA_OPC_TG4;
       inst.src[1] = etna_immediate_int(tex->component);

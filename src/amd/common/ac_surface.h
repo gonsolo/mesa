@@ -222,10 +222,15 @@ struct gfx9_meta_equation {
 struct gfx12_hiz_layout {
    uint64_t offset;
    uint32_t size;
+   uint32_t slice_size;
    uint16_t width_in_tiles;
    uint16_t height_in_tiles;
    uint8_t swizzle_mode;
    uint8_t alignment_log2;
+   struct {
+      uint32_t offset;
+      uint32_t size;
+   } mip_levels[RADEON_SURF_MAX_LEVELS];
 };
 
 struct gfx9_surf_layout {
@@ -515,6 +520,28 @@ bool ac_modifier_supports_dcc_image_stores(enum amd_gfx_level gfx_level, uint64_
 bool ac_modifier_supports_video(const struct radeon_info *info, uint64_t modifier);
 void ac_modifier_max_extent(const struct radeon_info *info,
                             uint64_t modifier, uint32_t *width, uint32_t *height);
+
+static inline uint32_t
+ac_surface_get_legacy_tiling_index(const struct radeon_surf *const surf,
+                                   const unsigned level,
+                                   const bool stencil)
+{
+   if (stencil)
+      return surf->u.legacy.zs.stencil_tiling_index[level];
+   else
+      return surf->u.legacy.tiling_index[level];
+}
+
+static inline const struct legacy_surf_level *
+ac_surface_get_legacy_level(const struct radeon_surf *const surf,
+                            const unsigned level,
+                            const bool stencil)
+{
+   if (stencil)
+      return &surf->u.legacy.zs.stencil_level[level];
+   else
+      return &surf->u.legacy.level[level];
+}
 
 unsigned ac_surface_get_nplanes(const struct radeon_surf *surf);
 uint64_t ac_surface_get_plane_offset(enum amd_gfx_level gfx_level,

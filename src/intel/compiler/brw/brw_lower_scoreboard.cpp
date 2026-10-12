@@ -76,6 +76,13 @@ inferred_exec_pipe(const struct intel_device_info *devinfo, const brw_inst *inst
             inst->opcode == SHADER_OPCODE_BROADCAST ||
             inst->opcode == SHADER_OPCODE_SHUFFLE)
       return GEN_PIPE_INT;
+   else if (devinfo->ver >= 35 &&
+            (inst->opcode == BRW_OPCODE_MOV ||
+             inst->opcode == BRW_OPCODE_SRND) &&
+            inst->dst.type != inst->src[0].type &&
+            brw_type_size_bytes(inst->dst.type) <= 4 &&
+            brw_type_is_float_or_bfloat(inst->dst.type))
+      return GEN_PIPE_INT;
    else if (inst->opcode == FS_OPCODE_PACK_HALF_2x16_SPLIT)
       return GEN_PIPE_FLOAT;
    else if (devinfo->ver >= 20 &&
@@ -400,6 +407,18 @@ namespace {
       std::vector<unsigned> is;
    };
 
+    /**
+     * Functional unit an out-of-order instruction is executed on.
+     * Used to determine whether read-after-read synchronization can
+     * be omitted between two out-of-order instructions accessing the
+     * same register, for out-of-order pipelines that guarantee that
+     * their sources are read in program order.
+     */
+    enum unordered_unit {
+       UNIT_OTHER = 0,
+       UNIT_DPAS
+    };
+
    /**
     * Representation of a data dependency between two instructions in the
     * program.
@@ -410,7 +429,7 @@ namespace {
        * No dependency information.
        */
       dependency() : ordered(TGL_REGDIST_NULL), jp(),
-                     unordered(GEN_SBID_NULL), id(0),
+                     unordered(GEN_SBID_NULL), unit(UNIT_OTHER), id(0),
                      exec_all(false) {}
 
       /**
@@ -419,15 +438,15 @@ namespace {
        */
       dependency(tgl_regdist_mode mode, const ordered_address &jp,
                  bool exec_all) :
-         ordered(mode), jp(jp), unordered(GEN_SBID_NULL), id(0),
+         ordered(mode), jp(jp), unordered(GEN_SBID_NULL), unit(), id(0),
          exec_all(exec_all) {}
 
       /**
        * Construct a dependency on the out-of-order instruction with the
        * specified synchronization token.
        */
-      dependency(gen_sbid_mode mode, unsigned id, bool exec_all) :
-         ordered(TGL_REGDIST_NULL), jp(), unordered(mode), id(id),
+      dependency(gen_sbid_mode mode, unsigned id, bool exec_all, unordered_unit u) :
+         ordered(TGL_REGDIST_NULL), jp(), unordered(mode), unit(u), id(id),
          exec_all(exec_all) {}
 
       /**
@@ -456,6 +475,7 @@ namespace {
        * dependency is present.
        */
       gen_sbid_mode unordered;
+      unordered_unit unit;
 
       /** Synchronization token of out-of-order dependency. */
       unsigned id;
@@ -484,6 +504,7 @@ namespace {
          return dep0.ordered == dep1.ordered &&
                 dep0.jp == dep1.jp &&
                 dep0.unordered == dep1.unordered &&
+                dep0.unit == dep1.unit &&
                 dep0.id == dep1.id &&
                 dep0.exec_all == dep1.exec_all;
       }
@@ -530,6 +551,10 @@ namespace {
          dep.unordered = dep0.unordered | dep1.unordered;
          dep.id = eq.link(dep0.unordered ? dep0.id : dep1.id,
                           dep1.unordered ? dep1.id : dep0.id);
+         dep.unit = (!dep1.unordered ? dep0.unit :
+                     !dep0.unordered ? dep1.unit :
+                     dep0.unit == dep1.unit ? dep0.unit :
+                     UNIT_OTHER);
       }
 
       dep.exec_all = dep0.exec_all || dep1.exec_all;
@@ -603,9 +628,11 @@ namespace {
     * applicable to an instruction reading the same register location.
     */
    dependency
-   dependency_for_read(dependency dep)
+   dependency_for_read(const brw_inst *inst, dependency dep)
    {
       dep.ordered &= TGL_REGDIST_DST;
+      if (inst->opcode == BRW_OPCODE_DPAS && dep.unit == UNIT_DPAS)
+         dep.unordered = (dep.unordered & GEN_SBID_DST);
       return dep;
    }
 
@@ -627,6 +654,12 @@ namespace {
    }
 
    /** @} */
+
+   static bool
+   is_address_register(const brw_reg &r)
+   {
+      return r.file == ADDRESS || brw_reg_is_arf(r, BRW_ARF_ADDRESS);
+   }
 
    /**
     * Scoreboard representation.  This keeps track of the data dependencies of
@@ -771,7 +804,7 @@ namespace {
                                reg_offset(r) / REG_SIZE);
 
          return (r.file == VGRF || r.file == FIXED_GRF ? &grf_deps[reg] :
-                 brw_reg_is_arf(r, BRW_ARF_ADDRESS) ? &addr_dep :
+                 is_address_register(r) ? &addr_dep :
                  brw_reg_is_arf(r, BRW_ARF_ACCUMULATOR) ? &accum_dep :
                  brw_reg_is_arf(r, BRW_ARF_FLAG) ? &flag_deps[r.nr & 0x0f] :
                  brw_reg_is_arf(r, BRW_ARF_SCALAR) ? &scalar_dep :
@@ -907,6 +940,24 @@ namespace {
    }
 
    /**
+    * Return whether an ordered RegDist dependency on pipe \p ordered_pipe can
+    * be combined with an unordered SBID dependency in a single instruction's
+    * SWSB annotation.  The combined RegDist + SBID encoding only provides a
+    * generic (datatype-inferred) RegDist or a RegDistAll -- there is no
+    * encoding for an explicit pipe such as the long pipe (Bspec 56701).  The
+    * generic RegDist resolves to the Float or Int pipe by source datatype, so
+    * those combine; RegDistAll combines on Xe2+; the long pipe never does.
+    */
+   bool
+   combinable_ordered_pipe(const struct intel_device_info *devinfo,
+                           gen_pipe ordered_pipe)
+   {
+      return ordered_pipe == GEN_PIPE_FLOAT ||
+             ordered_pipe == GEN_PIPE_INT ||
+             (devinfo->ver >= 20 && ordered_pipe == GEN_PIPE_ALL);
+   }
+
+   /**
     * Return the tgl_sbid_mode bitset of an unordered dependency from the list
     * \p deps that can be represented directly in the SWSB annotation of the
     * instruction without additional SYNC instructions, or zero if no such
@@ -931,9 +982,16 @@ namespace {
       else if (inst->is_send() && devinfo->ver >= 20)
          return GEN_SBID_NULL;
       else if (find_unordered_dependency(deps, GEN_SBID_DST, exec_all) &&
-               (!has_ordered || ordered_pipe == inferred_sync_pipe(devinfo, inst)))
+               (!has_ordered ||
+                (ordered_pipe == inferred_sync_pipe(devinfo, inst) &&
+                 (devinfo->ver < 20 ||
+                  combinable_ordered_pipe(devinfo, ordered_pipe))) ||
+                (devinfo->ver >= 20 && ordered_pipe == GEN_PIPE_ALL)))
          return find_unordered_dependency(deps, GEN_SBID_DST, exec_all);
-      else if (!has_ordered)
+      else if (!has_ordered ||
+               (devinfo->ver >= 20 &&
+                ordered_pipe == inferred_sync_pipe(devinfo, inst) &&
+                combinable_ordered_pipe(devinfo, ordered_pipe)))
          return find_unordered_dependency(deps, GEN_SBID_SRC, exec_all);
       else
          return GEN_SBID_NULL;
@@ -1013,10 +1071,20 @@ namespace {
        * subsequent redundant synchronization.
        */
       for (unsigned i = 0; i < inst->sources; i++) {
+         const bool is_send_address_descriptor =
+            inst->is_send() &&
+            (i == SEND_SRC_DESC || i == SEND_SRC_EX_DESC) &&
+            is_address_register(inst->src[i]);
+         const bool is_scalar_descriptor =
+            inst->is_send() && inst->as_send()->efficient_64bit &&
+            (i == SENDG_SRC_IND_0_DESC || i == SENDG_SRC_IND_1_DESC) &&
+            brw_reg_is_arf(inst->src[i], BRW_ARF_SCALAR);
          const dependency rd_dep =
+            inst->opcode == BRW_OPCODE_DPAS ? dependency(GEN_SBID_SRC, ip, exec_all, UNIT_DPAS) :
             (inst->is_payload(i) ||
-             inst->opcode == BRW_OPCODE_DPAS ||
-             is_unordered_math) ? dependency(GEN_SBID_SRC, ip, exec_all) :
+             is_send_address_descriptor ||
+             is_scalar_descriptor ||
+             is_unordered_math) ? dependency(GEN_SBID_SRC, ip, exec_all, UNIT_OTHER) :
             is_ordered ? dependency(TGL_REGDIST_SRC, jp, exec_all) :
             dependency::done;
 
@@ -1051,7 +1119,8 @@ namespace {
 
       /* Track any destination registers of this instruction. */
       const dependency wr_dep =
-         is_unordered(devinfo, inst) ? dependency(GEN_SBID_DST, ip, exec_all) :
+         inst->opcode == BRW_OPCODE_DPAS ? dependency(GEN_SBID_DST, ip, exec_all, UNIT_DPAS) :
+         is_unordered(devinfo, inst) ? dependency(GEN_SBID_DST, ip, exec_all, UNIT_OTHER) :
          is_ordered ? dependency(TGL_REGDIST_DST, jp, exec_all) :
          dependency();
 
@@ -1077,6 +1146,9 @@ namespace {
          for (unsigned j = 0; j < written; j++)
             sb.set(byte_offset(inst->dst, REG_SIZE * j), wr_dep);
       }
+
+      if (inst->uses_address_register_implicitly())
+         sb.set(brw_address_reg(0), dependency::done);
    }
 
    /**
@@ -1172,7 +1244,7 @@ namespace {
          for (unsigned i = 0; i < inst->sources; i++) {
             const unsigned read = regs_read(devinfo, inst, i);
             for (unsigned j = 0; j < read; j++)
-               add_dependency(ids, inst_deps, dependency_for_read(
+               add_dependency(ids, inst_deps, dependency_for_read(inst,
                   sb.get(byte_offset(inst->src[i], REG_SIZE * j))));
          }
 
@@ -1210,9 +1282,17 @@ namespace {
             }
          }
 
-         if (is_unordered(devinfo, inst) && !inst->eot)
+         if (is_unordered(devinfo, inst) && !inst->eot) {
+            const unordered_unit unit = inst->opcode == BRW_OPCODE_DPAS ?
+               UNIT_DPAS : UNIT_OTHER;
             add_dependency(ids, inst_deps,
-                           dependency(GEN_SBID_SET, ip, exec_all));
+                           dependency(GEN_SBID_SET, ip, exec_all, unit));
+         }
+
+         if (inst->uses_address_register_implicitly()) {
+            add_dependency(ids, inst_deps, dependency_for_write(devinfo, inst,
+               sb.get(brw_address_reg(0))));
+         }
 
          if (inst->dst.file != BAD_FILE && !inst->dst.is_null() &&
              !inst->dst.is_accumulator() &&
@@ -1251,7 +1331,7 @@ namespace {
             flags >>= 4;
          }
 
-         deps.push_back(inst_deps);
+         deps.push_back(std::move(inst_deps));
          update_inst_scoreboard(shader, jps, inst, ip, sb);
          ip++;
       }
@@ -1327,7 +1407,7 @@ namespace {
                }
             }
 
-            deps1.push_back(inst_deps1);
+            deps1.push_back(std::move(inst_deps1));
             ip++;
          }
       }
@@ -1374,7 +1454,7 @@ namespace {
             add_dependency(ids, inst_deps1, dep);
          }
 
-         deps1.push_back(inst_deps1);
+         deps1.push_back(std::move(inst_deps1));
       }
 
       return deps1;

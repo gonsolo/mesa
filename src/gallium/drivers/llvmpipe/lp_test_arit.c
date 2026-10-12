@@ -95,6 +95,18 @@ static float negf(float x)
 }
 
 
+static float minonef(float x)
+{
+   return fminf(x, 1.0f);
+}
+
+
+static float maxzerof(float x)
+{
+   return fmaxf(x, 0.0f);
+}
+
+
 static float sgnf(float x)
 {
    if (x > 0.0f) {
@@ -251,17 +263,6 @@ const float round_values[] = {
       -FLT_MAX
 };
 
-static float fractf(float x)
-{
-   x -= floorf(x);
-   if (x >= 1.0f) {
-      // clamp to the largest number smaller than one
-      x = 1.0f - 0.5f*FLT_EPSILON;
-   }
-   return x;
-}
-
-
 const float fract_values[] = {
    // http://en.wikipedia.org/wiki/IEEE_754-1985#Examples
    0.0f,
@@ -314,6 +315,20 @@ WRAP(ceilf)
 #define ceilf wrap_ceilf
 #endif
 
+static LLVMValueRef
+build_min_one(struct lp_build_context *bld, LLVMValueRef a)
+{
+   return lp_build_min(bld, a, bld->one);
+}
+
+
+static LLVMValueRef
+build_max_zero(struct lp_build_context *bld, LLVMValueRef a)
+{
+   return lp_build_max(bld, a, bld->zero);
+}
+
+
 static const struct unary_test_t
 unary_tests[] = {
    {"abs", &lp_build_abs, &fabsf, sgn_values, ARRAY_SIZE(sgn_values), 20.0 },
@@ -333,6 +348,8 @@ unary_tests[] = {
    {"floor", &lp_build_floor, &floorf, round_values, ARRAY_SIZE(round_values), 24.0 },
    {"ceil", &lp_build_ceil, &ceilf, round_values, ARRAY_SIZE(round_values), 24.0 },
    {"fract", &lp_build_fract_safe, &fractf, fract_values, ARRAY_SIZE(fract_values), 24.0 },
+   {"min1", &build_min_one, &minonef, fract_values, ARRAY_SIZE(fract_values), 24.0 },
+   {"max0", &build_max_zero, &maxzerof, fract_values, ARRAY_SIZE(fract_values), 24.0 },
 };
 
 
@@ -394,9 +411,8 @@ flush_denorm_to_zero(float val)
     * denormals as zero (FTZ/DAZ). Not using fpclassify because
     * a) some compilers are stuck at c89 (msvc)
     * b) not sure it reliably works with non-standard ftz/daz mode
-    * And, right now we only disable denorms with jited code on x86/sse
-    * (albeit this should be classified as a bug) so to get results which
-    * match we must only flush them to zero here in that case too.
+    * We disable denorms with jited code on x86/sse and arm/aarch64 (neon)
+    * so to get results which match we must flush them to zero here too.
     */
    union fi fi_val;
 
@@ -404,6 +420,13 @@ flush_denorm_to_zero(float val)
 
 #if DETECT_ARCH_SSE
    if (util_get_cpu_caps()->has_sse) {
+      if ((fi_val.ui & 0x7f800000) == 0) {
+         fi_val.ui &= 0xff800000;
+      }
+   }
+#endif
+#if DETECT_ARCH_ARM || DETECT_ARCH_AARCH64
+   if (util_get_cpu_caps()->has_neon) {
       if ((fi_val.ui & 0x7f800000) == 0) {
          fi_val.ui &= 0xff800000;
       }
@@ -480,6 +503,7 @@ test_unary(unsigned verbose, FILE *fp, const struct unary_test_t *test, unsigned
          }
 
          if (test->ref == &nearbyintf && length == 2 &&
+             !util_get_cpu_caps()->has_altivec &&
              !util_get_cpu_caps()->has_neon &&
              DETECT_ARCH_S390 == false &&
              !util_get_cpu_caps()->has_sse4_1 &&

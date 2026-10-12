@@ -39,6 +39,7 @@ static const struct spirv_to_nir_options spirv_options = {
 /** NIR options. */
 static const nir_shader_compiler_options nir_options = {
    .discard_is_demote = true,
+   .has_imad32 = true,
    .float_mul_add32 = nir_float_muladd_support_has_ffma |
                       nir_float_muladd_support_fuse,
 
@@ -54,10 +55,10 @@ static const nir_shader_compiler_options nir_options = {
    .lower_find_lsb = true,
    .lower_fquantize2f16 = true,
    .lower_flrp32 = true,
+   .lower_fminmax_signed_zero = true,
    .lower_fmod = true,
    .lower_fpow = true,
    .lower_fsqrt = true,
-   .lower_ftrunc = true,
    .lower_iadd_sat = true,
    .lower_ifind_msb = true,
    .lower_layer_fs_input_to_sysval = true,
@@ -108,7 +109,7 @@ const nir_shader_compiler_options *pco_nir_options(void)
  * \param[in] bindless Whether the access is bindless.
  * \return The size.
  */
-static int glsl_type_size(const struct glsl_type *type, UNUSED bool bindless)
+static unsigned glsl_type_size(const struct glsl_type *type, UNUSED bool bindless)
 {
    return glsl_count_attribute_slots(type, false);
 }
@@ -287,8 +288,8 @@ static void gather_fs_data(nir_shader *nir, pco_data *data)
    data->fs.uses.fbfetch = nir->info.fs.uses_fbfetch_output;
    data->fs.uses.fbfetch |= data->fs.meta_present.color_write_enable;
 
-   data->fs.uses.early_frag = nir->info.fs.early_fragment_tests;
    data->fs.uses.sample_shading |= nir->info.fs.uses_sample_shading;
+   data->fs.uses.sample_shading |= data->fs.uses.sample_locations;
 }
 
 /**
@@ -330,6 +331,7 @@ static inline bool intr_op_is_atomic(nir_intrinsic_op op)
    case nir_intrinsic_ssbo_atomic:
    case nir_intrinsic_shared_atomic:
    case nir_intrinsic_shared_atomic_swap:
+   case nir_intrinsic_global_atomic_pco:
       return true;
 
    default:
@@ -424,6 +426,17 @@ static void gather_data(nir_shader *nir, pco_data *data)
    UNREACHABLE("");
 }
 
+static inline bool is_inline_ubo(unsigned desc_set,
+                                 unsigned binding,
+                                 const pco_common_data *common)
+{
+   const pco_descriptor_set_data *desc_set_data = &common->desc_sets[desc_set];
+   assert(desc_set_data->bindings && binding < desc_set_data->binding_count);
+
+   const pco_binding_data *binding_data = &desc_set_data->bindings[binding];
+   return binding_data->is_inline_ubo;
+}
+
 static bool should_vectorize_mem_cb(unsigned align_mul,
                                     unsigned align_offset,
                                     unsigned bit_size,
@@ -433,16 +446,45 @@ static bool should_vectorize_mem_cb(unsigned align_mul,
                                     nir_intrinsic_instr *high,
                                     void *data)
 {
+   /* Don't bother with derefs, only try to vectorize after we're lowered. */
+   switch (low->intrinsic) {
+   case nir_intrinsic_global_atomic:
+   case nir_intrinsic_ssbo_atomic:
+
+   case nir_intrinsic_load_global:
+   case nir_intrinsic_load_ssbo:
+   case nir_intrinsic_load_ubo:
+
+   case nir_intrinsic_store_global:
+   case nir_intrinsic_store_ssbo:
+      break;
+
+   default:
+      return false;
+   }
+
    if (bit_size > 32 || hole_size > 0)
       return false;
 
    if (!nir_num_components_valid(num_components))
       return false;
 
+   if (low->intrinsic == nir_intrinsic_load_ubo) {
+      const pco_common_data *common = data;
+      unsigned desc_set;
+      unsigned binding;
+
+      nir_scalar scalar = nir_scalar_resolved(low->src[0].ssa, 0);
+      uint32_t packed_desc = nir_scalar_as_uint(scalar);
+
+      pco_unpack_desc(packed_desc, &desc_set, &binding);
+      return !is_inline_ubo(desc_set, binding, common);
+   }
+
    return true;
 }
 
-static void pco_nir_opt(pco_ctx *ctx, nir_shader *nir, bool algebraic)
+static void pco_nir_opt(pco_ctx *ctx, nir_shader *nir, pco_data *data, bool algebraic)
 {
    bool progress;
 
@@ -488,6 +530,7 @@ static void pco_nir_opt(pco_ctx *ctx, nir_shader *nir, bool algebraic)
 
       NIR_PASS(progress, nir, nir_opt_phi_precision);
       NIR_PASS(progress, nir, nir_lower_alu);
+      NIR_PASS(progress, nir, pco_nir_lower_alu);
       NIR_PASS(progress, nir, nir_lower_pack);
 
       if (algebraic) {
@@ -500,7 +543,12 @@ static void pco_nir_opt(pco_ctx *ctx, nir_shader *nir, bool algebraic)
       nir_load_store_vectorize_options vectorize_opts = {
          .modes = nir_var_mem_ubo | nir_var_mem_ssbo | nir_var_mem_global,
          .callback = should_vectorize_mem_cb,
+         .cb_data = &data->common,
       };
+
+      if (data->common.robust_buffer_access)
+         vectorize_opts.robust_modes = nir_var_mem_ubo | nir_var_mem_ssbo;
+
       NIR_PASS(progress, nir, nir_opt_load_store_vectorize, &vectorize_opts);
 
       NIR_PASS(progress, nir, nir_opt_shrink_stores, false);
@@ -526,16 +574,19 @@ static bool check_mem_writes(nir_builder *b,
  *
  * \param[in] ctx PCO compiler context.
  * \param[in,out] nir NIR shader.
+ * \param[in,out] data Shader data.
  */
-void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
+void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
 {
+   bool internal = nir->info.internal;
+
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
       nir_shader_intrinsics_pass(nir, check_mem_writes, nir_metadata_all, NULL);
 
-   if (nir->info.stage == MESA_SHADER_COMPUTE)
+   if (nir->info.stage == MESA_SHADER_COMPUTE && !internal)
       NIR_PASS(_, nir, pco_nir_compute_instance_check);
 
-   if (nir->info.internal)
+   if (internal)
       NIR_PASS(_, nir, nir_lower_returns);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
@@ -545,8 +596,7 @@ void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
          .primitive_id = nir->info.stage == MESA_SHADER_FRAGMENT,
       };
       NIR_PASS(_, nir, nir_lower_sysvals_to_varyings, &sysvals_to_varyings);
-      NIR_PASS(_, nir, nir_lower_helper_writes, true);
-      NIR_PASS(_, nir, nir_lower_is_helper_invocation);
+      NIR_PASS(_, nir, nir_lower_system_values);
       NIR_PASS(_, nir, nir_lower_terminate_to_demote);
       NIR_PASS(_, nir, nir_lower_halt_to_return);
       NIR_PASS(_, nir, nir_lower_returns);
@@ -562,6 +612,26 @@ void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
                   .lower_cs_local_id_to_index = true,
                });
    }
+
+   NIR_PASS(_, nir, nir_lower_subgroups, &(nir_lower_subgroups_options){
+         .subgroup_size = ROGUE_MAX_INSTANCES_PER_TASK,
+         .ballot_bit_size = 32,
+         .ballot_components = 1,
+         .lower_to_scalar = true,
+         .lower_vote_feq = true,
+         .lower_vote_ieq = true,
+         .lower_vote_bool_eq = true,
+         .lower_read_first_invocation = true,
+         .lower_subgroup_masks = true,
+         .lower_relative_shuffle = true,
+         .lower_quad_vote = true,
+         .lower_elect = true,
+         .lower_rotate_to_shuffle = true,
+         .lower_rotate_clustered_to_shuffle = true,
+         .lower_inverse_ballot = true,
+         .lower_boolean_reduce = true,
+         .lower_boolean_shuffle = true,
+      });
 
    NIR_PASS(_, nir, pco_nir_lower_subgroups);
 
@@ -584,7 +654,7 @@ void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
             nir_split_array_vars,
             nir_var_function_temp | nir_var_shader_temp);
 
-   pco_nir_opt(ctx, nir, true);
+   pco_nir_opt(ctx, nir, data, true);
 
    NIR_PASS(_,
             nir,
@@ -594,7 +664,7 @@ void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
 
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
 
-   if (!nir->info.internal) {
+   if (!internal) {
       /* TODO: test with different size_threshold values. */
       NIR_PASS(_,
                nir,
@@ -610,7 +680,7 @@ void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
             nir_var_function_temp,
             UINT32_MAX);
 
-   pco_nir_opt(ctx, nir, true);
+   pco_nir_opt(ctx, nir, data, true);
    NIR_PASS(_, nir, nir_opt_idiv_const, 32);
    NIR_PASS(_,
             nir,
@@ -625,7 +695,7 @@ void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
 
    NIR_PASS(_, nir, nir_remove_dead_derefs);
    NIR_PASS(_, nir, nir_opt_undef);
-   NIR_PASS(_, nir, nir_lower_undef_to_zero);
+   NIR_PASS(_, nir, nir_lower_undef_to_zero, NULL);
    NIR_PASS(_, nir, nir_opt_cse);
    NIR_PASS(_, nir, nir_opt_dce);
    NIR_PASS(_,
@@ -642,7 +712,7 @@ void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
             nir_lower_io_array_vars_to_elements_no_indirects,
             nir->info.stage == MESA_SHADER_VERTEX);
 
-   pco_nir_opt(ctx, nir, true);
+   pco_nir_opt(ctx, nir, data, true);
 
    if (pco_should_print_nir(nir)) {
       puts("after pco_preprocess_nir:");
@@ -680,11 +750,11 @@ void pco_link_nir(pco_ctx *ctx,
    NIR_PASS(_, producer, nir_lower_io_vars_to_scalar, nir_var_shader_out);
    NIR_PASS(_, consumer, nir_lower_io_vars_to_scalar, nir_var_shader_in);
 
-   pco_nir_opt(ctx, producer, true);
-   pco_nir_opt(ctx, consumer, true);
+   pco_nir_opt(ctx, producer, producer_data, true);
+   pco_nir_opt(ctx, consumer, consumer_data, true);
 
    if (nir_link_opt_varyings(producer, consumer))
-      pco_nir_opt(ctx, consumer, true);
+      pco_nir_opt(ctx, consumer, consumer_data, true);
 
    nir_remove_dead_variables_options rdv = {
       .can_remove_var = can_remove_var,
@@ -711,8 +781,8 @@ void pco_link_nir(pco_ctx *ctx,
                nir_var_shader_in | nir_var_shader_out,
                UINT32_MAX);
 
-      pco_nir_opt(ctx, producer, true);
-      pco_nir_opt(ctx, consumer, true);
+      pco_nir_opt(ctx, producer, producer_data, true);
+      pco_nir_opt(ctx, consumer, consumer_data, true);
    }
 
    NIR_PASS(_, producer, nir_opt_vectorize_io_vars, nir_var_shader_out);
@@ -769,16 +839,30 @@ void pco_rev_link_nir(pco_ctx *ctx, nir_shader *producer, nir_shader *consumer)
    }
 }
 
-static bool robustness_filter(const nir_intrinsic_instr *intr,
-                              UNUSED const void *data)
+static bool robustness_filter(const nir_intrinsic_instr *intr, const void *data)
 {
+   const pco_common_data *common = data;
+
    switch (intr->intrinsic) {
-   case nir_intrinsic_load_ubo:
    case nir_intrinsic_load_ssbo:
    case nir_intrinsic_store_ssbo:
    case nir_intrinsic_ssbo_atomic:
    case nir_intrinsic_ssbo_atomic_swap:
       return true;
+
+   case nir_intrinsic_load_ubo: {
+      nir_scalar scalar = nir_scalar_resolved(intr->src[0].ssa, 0);
+      nir_intrinsic_instr *load_vk_desc = nir_scalar_as_intrinsic(scalar);
+      assert(load_vk_desc->intrinsic == nir_intrinsic_load_vulkan_descriptor);
+
+      nir_intrinsic_instr *vk_res_idx = nir_src_as_intrinsic(load_vk_desc->src[0]);
+      assert(vk_res_idx->intrinsic == nir_intrinsic_vulkan_resource_index);
+
+      unsigned desc_set = nir_intrinsic_desc_set(vk_res_idx);
+      unsigned binding = nir_intrinsic_binding(vk_res_idx);
+
+      return !is_inline_ubo(desc_set, binding, common);
+   }
 
    default:
       break;
@@ -818,6 +902,8 @@ static inline bool should_spill_shmem(const pco_ctx *ctx, unsigned shared_size)
  */
 void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
 {
+   bool internal = nir->info.internal;
+
    NIR_PASS(_,
             nir,
             nir_opt_access,
@@ -836,11 +922,17 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
       NIR_PASS(_, nir, nir_opt_vectorize_io_vars, nir_var_shader_out);
 
-   NIR_PASS(_,
+   NIR_PASS(_, nir, pco_nir_prop_access);
+
+   bool progress = false;
+   NIR_PASS(progress,
             nir,
             nir_lower_explicit_io,
             nir_var_mem_ubo | nir_var_mem_ssbo,
             nir_address_format_vec2_index_32bit_offset);
+
+   if (progress)
+      NIR_PASS(_, nir, nir_opt_idiv_const, 32);
 
    NIR_PASS(_,
             nir,
@@ -874,8 +966,13 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
             NULL,
             NULL);
 
-   if (data->common.robust_buffer_access)
-      NIR_PASS(_, nir, nir_lower_robust_access, robustness_filter, NULL);
+   if (data->common.robust_buffer_access) {
+      NIR_PASS(_,
+               nir,
+               nir_lower_robust_access,
+               robustness_filter,
+               &data->common);
+   }
 
    if (nir->info.stage == MESA_SHADER_COMPUTE &&
        (PCO_DEBUG(GLOBAL_SHMEM) ||
@@ -893,7 +990,7 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
    }
 
    NIR_PASS(_, nir, pco_nir_lower_vk, data);
-   NIR_PASS(_, nir, pco_nir_lower_io);
+   NIR_PASS(_, nir, pco_nir_lower_io, data);
 
    NIR_PASS(_, nir, nir_opt_constant_folding);
 
@@ -917,12 +1014,15 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
    NIR_PASS(_, nir, nir_opt_dce);
    NIR_PASS(_, nir, nir_opt_constant_folding);
 
+   if (nir->info.stage == MESA_SHADER_FRAGMENT && !internal)
+      NIR_PASS(_, nir, nir_lower_helper_writes, true);
+
    /* Internal shaders will be using invalid32 types at this stage. */
-   if (!nir->info.internal)
+   if (!internal)
       NIR_PASS(_, nir, nir_unlower_io_to_vars, true);
 
-   if (nir->info.stage == MESA_SHADER_VERTEX)
-      NIR_PASS(_, nir, pco_nir_lower_clip_cull_vars);
+   if (nir->info.stage == MESA_SHADER_VERTEX && !internal)
+      pco_nir_lower_clip_cull_vars(nir);
 
    NIR_PASS(_, nir, pco_nir_lower_images, data, ctx);
    NIR_PASS(_, nir, pco_nir_lower_atomics, data);
@@ -936,7 +1036,8 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
    NIR_PASS(_, nir, pco_nir_lower_tex, data, ctx);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      NIR_PASS(_, nir, pco_nir_lower_alpha_to_coverage);
+      if (!internal)
+         NIR_PASS(_, nir, pco_nir_lower_alpha_to_coverage);
 
       NIR_PASS(_, nir, nir_lower_blend, &data->fs.blend_opts);
 
@@ -946,7 +1047,10 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
       };
       NIR_PASS(_, nir, nir_opt_peephole_select, &peep_opts);
       NIR_PASS(_, nir, pco_nir_lower_interpolation, &data->fs);
+      if (!internal)
+         NIR_PASS(_, nir, pco_nir_lower_sample_mask_out);
       NIR_PASS(_, nir, pco_nir_pfo, &data->fs);
+      NIR_PASS(_, nir, nir_lower_is_helper_invocation);
       NIR_PASS(_, nir, pco_nir_lower_fs_intrinsics);
    } else if (nir->info.stage == MESA_SHADER_VERTEX) {
       NIR_PASS(_,
@@ -955,7 +1059,7 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
                PVR_POINT_SIZE_RANGE_MIN,
                PVR_POINT_SIZE_RANGE_MAX);
 
-      if (!nir->info.internal)
+      if (!internal)
          NIR_PASS(_, nir, pco_nir_point_size);
 
       NIR_PASS(_, nir, pco_nir_pvi, &data->vs);
@@ -1003,14 +1107,9 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
    NIR_PASS(_, nir, nir_opt_dead_write_vars);
    NIR_PASS(_, nir, nir_opt_combine_stores, nir_var_all);
 
-   pco_nir_opt(ctx, nir, true);
+   pco_nir_opt(ctx, nir, data, true);
 
-   vec_modes = nir_var_shader_in;
-   /* Fragment shader needs scalar writes after pfo. */
-   if (nir->info.stage != MESA_SHADER_FRAGMENT)
-      vec_modes |= nir_var_shader_out;
-
-   NIR_PASS(_, nir, nir_opt_vectorize_io, vec_modes, false);
+   NIR_PASS(_, nir, nir_opt_vectorize_io, nir_var_shader_in, false);
 
    /* Special case for frag coords:
     * - x,y come from (non-consecutive) special regs - always scalar.
@@ -1026,7 +1125,7 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
                nir);
    }
 
-   pco_nir_opt(ctx, nir, true);
+   pco_nir_opt(ctx, nir, data, true);
 
    if (pco_should_print_nir(nir)) {
       puts("after pco_lower_nir:");
@@ -1086,6 +1185,8 @@ remat_load_const(nir_builder *b, nir_instr *instr, UNUSED void *cb_data)
  */
 void pco_postprocess_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
 {
+   bool internal = nir->info.internal;
+
    nir_move_options move_options = nir_move_const_undef | nir_move_copies |
                                    nir_move_comparisons | nir_move_alu;
    NIR_PASS(_, nir, nir_opt_sink, move_options);
@@ -1099,12 +1200,13 @@ void pco_postprocess_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
       NIR_PASS(_, nir, pco_nir_lower_algebraic_late);
       NIR_PASS(_, nir, nir_opt_constant_folding);
       NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
+      NIR_PASS(_, nir, nir_lower_all_phis_to_scalar);
       NIR_PASS(_, nir, nir_opt_copy_prop);
       NIR_PASS(_, nir, nir_opt_dce);
       NIR_PASS(_, nir, nir_opt_cse);
    } while (progress);
 
-   pco_nir_opt(ctx, nir, false);
+   pco_nir_opt(ctx, nir, data, false);
 
    NIR_PASS(_, nir, nir_lower_all_phis_to_scalar);
 
@@ -1128,7 +1230,7 @@ void pco_postprocess_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
 
    NIR_PASS(_, nir, nir_trivialize_registers);
 
-   if (!nir->info.internal) {
+   if (!internal) {
       nir_shader_instructions_pass(nir,
                                    remat_load_const,
                                    nir_metadata_none,

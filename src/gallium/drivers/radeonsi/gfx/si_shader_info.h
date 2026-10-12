@@ -145,6 +145,7 @@ struct si_shader_info {
    bool uses_sysval_linear_center;
    bool uses_sysval_linear_centroid;
    bool uses_sysval_linear_sample;
+   bool uses_sysval_pull_model;
    bool uses_interp_at_offset;
    bool uses_interp_at_sample;
    bool uses_sysval_primitive_id;
@@ -211,8 +212,6 @@ struct si_shader_variant_info {
    uint8_t ps_colors_read;
    uint8_t num_input_sgprs;
    uint8_t num_input_vgprs;
-   bool uses_vmem_load_other : 1; /* all other VMEM loads and atomics with return */
-   bool uses_vmem_sampler_or_bvh : 1;
    bool uses_sysval_instance_id : 1;
    bool uses_sysval_base_instance : 1;
    bool uses_sysval_draw_id : 1;

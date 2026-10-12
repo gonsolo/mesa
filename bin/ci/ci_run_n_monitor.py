@@ -18,6 +18,7 @@ import sys
 import time
 from collections import defaultdict, Counter
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, UTC
 from functools import partial
 from itertools import chain
 from subprocess import check_output, CalledProcessError
@@ -28,6 +29,7 @@ import gitlab.v4.objects
 from gitlab_common import (
     GITLAB_URL,
     TOKEN_DIR,
+    get_server_and_project_from_url,
     get_gitlab_pipeline_from_url,
     get_gitlab_project,
     get_token_from_default_dir,
@@ -56,6 +58,83 @@ STATUS_COLORS = defaultdict(lambda: "", {
 
 COMPLETED_STATUSES = frozenset({"success", "failed"})
 RUNNING_STATUSES = frozenset({"created", "pending", "running"})
+
+PROFILES: dict[str, dict] = {
+    # a750-vk runs both VKCTS and vkd3d together.
+    "uprev_vkd3d": {
+        "target": [".*vkd3d.*|a750-vk"],
+        "stress": 15,
+    },
+    "uprev_vkcts_main": {
+        "target": ["radv-.*-vkcts(-asan|-full)?"],
+        "stress": 25,
+    },
+    "uprev_piglit": {
+        "target": [
+            ".*piglit.*",
+            r"^zink-"
+            r"(anv-adl"
+            r"|anv-tgl"
+            r"|anv-cml-asan"
+            r"|tu-a618"
+            r"|lavapipe"
+            r"|radv-cezanne"
+            r"|radv-gfx1201-valve"
+            r"|radv-navi31-valve"
+            r"|radv-vangogh-valve)"
+            r"(?!-traces.*)"
+            r"( \d+/\d+)*",
+        ],
+        "stress": 2,
+    },
+    "uprev_piglit_nightlies": {
+        "target": [
+            ".*piglit.*",
+            r"(zink-radv-).*",
+        ],
+        "include_stage": [
+            "amd-nightly",
+            "arm-nightly",
+            "freedreno-nightly",
+            "etnaviv-nightly",
+        ],
+        "exclude_stage": [''],
+        "stress": 2,
+    },
+    "uprev_angle": {
+        "target": [
+            ".*angle.*",
+            "a618-android",
+        ],
+        "stress": 2,
+    },
+    "uprev_angle_nightly": {
+        "target": [".*angle.*"],
+        "include_stage": [
+            "amd-nightly",
+            "intel-nightly",
+            "arm",
+            "freedreno-nightly",
+            "software-renderer",
+        ],
+        "exclude_stage": [''],
+        "stress": 2,
+    },
+    "uprev_VVL": {
+        "target": [
+            "^zink-(anv-adl|anv-tgl|anv-cml-asan|tu-a618|lavapipe|radv-cezanne|radv-gfx1201-valve|radv-navi31-valve|radv-vangogh-valve)(?!-traces.*)"
+        ],
+        "stress": 2,
+    },
+    "uprev_VVL_nightly": {
+        "target": [
+            "^zink-(anv-adl|anv-tgl|anv-cml-asan|tu-a618|lavapipe|radv-cezanne|radv-gfx1201-valve|radv-navi31-valve|radv-vangogh-valve)(?!-traces.*)"
+        ],
+        "include_stage": ["layered-backends"],
+        "exclude_stage": [''],
+        "stress": 2,
+    },
+}
 
 if is_gitlab_job():
     console = Console(highlight=False, no_color=False, color_system="truecolor", width=120)
@@ -150,6 +229,7 @@ def monitor_pipeline(
     stress: int,
     inhibit_single_target_trace: int = False,
     polling_period: int = REFRESH_WAIT_JOBS,
+    no_new_job_after: datetime | None = None,
 ) -> tuple[Optional[int], Optional[int], Dict[str, Dict[int, Tuple[float, str, str]]]]:
     """Monitors pipeline and delegate canceling jobs"""
     statuses: dict[str, str] = defaultdict(str)
@@ -243,6 +323,8 @@ def monitor_pipeline(
                     enough = False
 
             if not enough:
+                if no_new_job_after is not None and datetime.now(UTC) > no_new_job_after:
+                    return None, None, execution_times
                 pretty_wait(polling_period)
                 continue
 
@@ -424,6 +506,26 @@ def print_log(
         pretty_wait(REFRESH_WAIT_LOG)
 
 
+DEADLINE_SUFFIXES = {
+    "m": "minutes",
+    "h": "hours",
+}
+
+
+def parse_deadline(value: str) -> timedelta:
+    if match := re.fullmatch(r"(\d*\.?\d*)([a-z])", value):
+        number, suffix = match.groups()
+        try:
+            number = float(number)
+        except ValueError as e:
+            raise argparse.ArgumentTypeError(str(e))
+
+        if key := DEADLINE_SUFFIXES.get(suffix):
+            return datetime.now(UTC) + timedelta(**{key: number})
+
+    raise argparse.ArgumentTypeError(f"Invalid duration: {value}")
+
+
 def parse_args() -> argparse.Namespace:
     """Parse args"""
     parser = argparse.ArgumentParser(
@@ -432,55 +534,24 @@ def parse_args() -> argparse.Namespace:
         epilog="Example: %(prog)s --rev $(git rev-parse HEAD) "
         + '--target ".*traces" ',
     )
-    parser.add_argument(
+
+    access_group = parser.add_argument_group("Access options")
+
+    access_group.add_argument(
         "--server",
         metavar="gitlab-server",
         type=str,
         default=GITLAB_URL,
         help=f"Specify the GitLab server work with (Default: {GITLAB_URL})",
     )
-    parser.add_argument(
-        "--target",
-        metavar="target-job",
-        help="Target job regex. For multiple targets, pass multiple values, "
-             "eg. `--target foo bar`. Only jobs in the target stage(s) "
-             "supplied, and their dependencies, will be considered.",
-        required=True,
-        nargs=argparse.ONE_OR_MORE,
+    access_group.add_argument(
+        "--project",
+        metavar="name",
+        type=str,
+        default="mesa",
+        help="GitLab project in the format <user>/<project> or just <project>",
     )
-    parser.add_argument(
-        "--include-stage",
-        metavar="include-stage",
-        help="Job stages to include when searching for target jobs. "
-             "For multiple targets, pass multiple values, eg. "
-             "`--include-stage foo bar`.",
-        default=[".*"],
-        nargs=argparse.ONE_OR_MORE,
-    )
-    parser.add_argument(
-        "--exclude-stage",
-        metavar="exclude-stage",
-        help="Job stages to exclude when searching for target jobs. "
-             "For multiple targets, pass multiple values, eg. "
-             "`--exclude-stage foo bar`. By default, performance and "
-             "nightly jobs are excluded; pass --exclude-stage '' to "
-             "include them for consideration.",
-        default=["performance", ".*-postmerge", ".*-nightly"],
-        nargs=argparse.ONE_OR_MORE,
-    )
-    parser.add_argument(
-        "--job-tags",
-        metavar="job-tags",
-        help="Job tags to require when searching for target jobs. If multiple "
-             "values are passed, eg. `--job-tags 'foo.*' 'bar'`, the job will "
-             "need to have a tag matching `foo.*` *and* a tag matching `bar` "
-             "to qualify. Passing `--job-tags '.*'` makes sure the job has "
-             "a tag defined, while not passing `--job-tags` also allows "
-             "untagged jobs.",
-        default=[],
-        nargs=argparse.ONE_OR_MORE,
-    )
-    parser.add_argument(
+    access_group.add_argument(
         "--token",
         metavar="token",
         type=str,
@@ -488,45 +559,10 @@ def parse_args() -> argparse.Namespace:
         help="Use the provided GitLab token (with `api` scope) or token file, "
              f"otherwise it's read from {TOKEN_DIR / 'gitlab-token'}",
     )
-    parser.add_argument(
-        "--force-manual", action="store_true",
-        help="Deprecated argument; manual jobs are always force-enabled"
-    )
-    parser.add_argument(
-        "--stress",
-        metavar="n",
-        type=int,
-        default=0,
-        help="Stresstest job(s). Specify the number of times to rerun the selected jobs, "
-             "or use -1 for indefinite. Defaults to 0. If jobs have already been executed, "
-             "this will ensure the total run count respects the specified number.",
-    )
-    parser.add_argument(
-        "--project",
-        metavar="name",
-        type=str,
-        default="mesa",
-        help="GitLab project in the format <user>/<project> or just <project>",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Exit after printing target jobs and dependencies",
-    )
-    parser.add_argument(
-        "--no-job-log",
-        action="store_true",
-        help="When there is only one target job, inhibit the job trace output in the console.",
-    )
-    parser.add_argument(
-        "--polling-period",
-        type=int,
-        default=REFRESH_WAIT_JOBS,
-        help=f"Specify the waiting seconds between monitor loops. (Default: {REFRESH_WAIT_JOBS})",
-     )
 
+    pipeline_discovery = parser.add_argument_group("Pipeline discovery options")
 
-    mutex_group1 = parser.add_mutually_exclusive_group()
+    mutex_group1 = pipeline_discovery.add_mutually_exclusive_group()
     mutex_group1.add_argument(
         "--rev",
         metavar="id",
@@ -547,14 +583,142 @@ def parse_args() -> argparse.Namespace:
         help="ID of a merge request; the latest pipeline in that MR will be used.",
     )
 
+    target_group = parser.add_argument_group("Target options")
+
+    target_group.add_argument(
+        "--target",
+        metavar="target-job",
+        help="Target job regex. For multiple targets, pass multiple values, "
+             "eg. `--target foo bar`. Only jobs in the target stage(s) "
+             "supplied, and their dependencies, will be considered.",
+        required=False,
+        default=[],
+        nargs=argparse.ONE_OR_MORE,
+    )
+    target_group.add_argument(
+        "--profile",
+        metavar="name",
+        choices=PROFILES,
+        help="Use a predefined set of target jobs",
+    )
+    target_group.add_argument(
+        "--include-stage",
+        metavar="include-stage",
+        help="Job stages to include when searching for target jobs. "
+             "For multiple targets, pass multiple values, eg. "
+             "`--include-stage foo bar`.",
+        default=[".*"],
+        nargs=argparse.ONE_OR_MORE,
+    )
+    target_group.add_argument(
+        "--exclude-stage",
+        metavar="exclude-stage",
+        help="Job stages to exclude when searching for target jobs. "
+             "For multiple targets, pass multiple values, eg. "
+             "`--exclude-stage foo bar`. By default, performance and "
+             "nightly jobs are excluded; pass --exclude-stage '' to "
+             "include them for consideration.",
+        default=["performance", ".*-postmerge", ".*-nightly"],
+        nargs=argparse.ONE_OR_MORE,
+    )
+    target_group.add_argument(
+        "--job-tags",
+        metavar="job-tags",
+        help="Job tags to require when searching for target jobs. If multiple "
+             "values are passed, eg. `--job-tags 'foo.*' 'bar'`, the job will "
+             "need to have a tag matching `foo.*` *and* a tag matching `bar` "
+             "to qualify. Passing `--job-tags '.*'` makes sure the job has "
+             "a tag defined, while not passing `--job-tags` also allows "
+             "untagged jobs.",
+        default=[],
+        nargs=argparse.ONE_OR_MORE,
+    )
+
+    stress_group = parser.add_argument_group("Stress test options")
+
+    stress_group.add_argument(
+        "--stress",
+        metavar="n",
+        type=int,
+        default=None,
+        help="Stresstest job(s). Specify the number of times to rerun the selected jobs, "
+             "or use -1 for indefinite. Defaults to 0. If jobs have already been executed, "
+             "this will ensure the total run count respects the specified number.",
+    )
+    stress_group.add_argument(
+        "--no-new-job-after",
+        metavar="duration",
+        type=parse_deadline,
+        help="Quit starting new jobs once ci_run_n_monitor has been running for "
+             "that long. Note that existing jobs will continue running until "
+             "they finish. Value must be positive int or float, and valid "
+             "suffixes are: "
+             f"{', '.join(f'`{s}` for {n}' for s, n in DEADLINE_SUFFIXES.items())}"
+    )
+
+    flowctrl_group = parser.add_argument_group("Flow control options")
+
+    flowctrl_group.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Exit after printing target jobs and dependencies",
+    )
+    flowctrl_group.add_argument(
+        "--force-manual", action="store_true",
+        help="Deprecated argument; manual jobs are always force-enabled"
+    )
+
+    flowctrl_group.add_argument(
+        "--no-job-log",
+        action="store_true",
+        help="When there is only one target job, inhibit the job trace output in the console.",
+    )
+    flowctrl_group.add_argument(
+        "--polling-period",
+        type=int,
+        default=REFRESH_WAIT_JOBS,
+        help=f"Specify the waiting seconds between monitor loops. (Default: {REFRESH_WAIT_JOBS})",
+    )
+
+
+
     args = parser.parse_args()
+
+    if args.profile:
+        profile = PROFILES[args.profile]
+        if not args.target:
+            args.target = profile["target"]
+        if args.include_stage == [".*"]:
+            args.include_stage = profile.get(
+                "include_stage",
+                [".*"],
+            )
+        if args.exclude_stage == ["performance", ".*-postmerge", ".*-nightly"]:
+            args.exclude_stage = profile.get(
+                "exclude_stage",
+                ["performance", ".*-postmerge", ".*-nightly"]
+            )
+        if args.stress is None:
+            args.stress = profile.get("stress", 0)
+    elif not args.target:
+        parser.error("one of --target or --profile is required")
+
+    if args.stress is None:
+        args.stress = 0
+
+    if args.stress == 0 and args.no_new_job_after is not None:
+        parser.error("--no-new-job-after is only applicable with --stress")
 
     # argparse doesn't support groups inside add_mutually_exclusive_group(),
     # which means we can't just put `--project` and `--rev` in a group together,
     # we have to do this by heand instead.
     if args.pipeline_url and args.project != parser.get_default("project"):
         # weird phrasing but it's the error add_mutually_exclusive_group() gives
-        parser.error("argument --project: not allowed with argument --pipeline-url")
+        parser.error("argument --project: not allowed with argument --pipeline-url. It is implicit in the url.")
+    # argparse neither support the exclude `--server` when this information is
+    # included in the url of the `--pipeline-url`.
+    if args.pipeline_url and args.server != parser.get_default("server"):
+        parser.error("argument --server: not allowed with argument --pipeline-url. It is implicit in the url.")
 
     return args
 
@@ -673,22 +837,35 @@ def main() -> None:
 
         token = read_token(args.token)
 
-        gl = gitlab.Gitlab(url=args.server,
+        if args.pipeline_url:
+            server_url, project_name = get_server_and_project_from_url(args.pipeline_url)
+        else:
+            server_url = args.server
+            project_name = args.project
+
+        gl = gitlab.Gitlab(url=server_url,
                            private_token=token,
                            retry_transient_errors=True)
 
         REV: str = args.rev
 
         if args.pipeline_url:
-            pipe, cur_project = get_gitlab_pipeline_from_url(gl, args.pipeline_url)
+            pipe, cur_project = get_gitlab_pipeline_from_url(gl, args.pipeline_url, server_url)
             REV = pipe.sha
+            print(f"Using the revision from pipeline {pipe.id}: {REV}.")
         else:
-            mesa_project = gl.projects.get("mesa/mesa")
-            projects = [mesa_project]
-            if args.mr:
-                REV = mesa_project.mergerequests.get(args.mr).sha
+            if server_url == GITLAB_URL and project_name == "mesa":  # the default valut
+                gl_project = gl.projects.get("mesa/mesa")
             else:
+                gl_project = get_gitlab_project(gl, project_name)
+            projects = {gl_project}
+            if args.mr:
+                REV = gl_project.mergerequests.get(args.mr).sha
+                print(f"Using the revision from {args.mr}: {REV}.")
+            else:
+                print(f"Using the revision from {REV}: ",end="")
                 REV = check_output(['git', 'rev-parse', REV]).decode('ascii').strip()
+                print(f"{REV}.")
 
                 if args.rev == 'HEAD':
                     try:
@@ -718,7 +895,7 @@ def main() -> None:
                                 )
                                 print("Did you forget to `git push` ?")
 
-                projects.append(get_gitlab_project(gl, args.project))
+            projects.add(get_gitlab_project(gl, project_name))
             (pipe, cur_project) = wait_for_pipeline(projects, REV)
 
         print(f"Revision: {REV}")
@@ -774,7 +951,7 @@ def main() -> None:
             return True
 
         deps = find_dependencies(
-            server=args.server,
+            server=server_url,
             token=token,
             job_filter=job_filter,
             iid=pipe.iid,
@@ -792,6 +969,7 @@ def main() -> None:
             args.stress,
             args.no_job_log,
             args.polling_period,
+            args.no_new_job_after,
         )
 
         if target_job_id:
@@ -800,6 +978,8 @@ def main() -> None:
         print_monitor_summary(exec_t, t_start)
 
         sys.exit(ret)
+    except gitlab.exceptions.GitlabAuthenticationError as exception:
+        print(f"[yellow]Gitlab authentication error {exception.error_message}.\n[red]Check the token!")
     except KeyboardInterrupt:
         sys.exit(1)
 

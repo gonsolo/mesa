@@ -993,6 +993,15 @@ struct gl_texture_object
     */
    struct pipe_resource *pt;
 
+   /* Cached flag: whether the extra YUV plane-view / lowering setup in
+    * st_get_sampler_views() and st_get_external_sampler_key() must run for
+    * this texture.  Computed whenever pt/surface_format is assigned
+    * (st_finalize_texture(), st_bind_egl_image(), st_context_teximage(),
+    * st_TextureView()), to avoid re-deriving it on every atom update and
+    * shader variant lookup.
+    */
+   bool needs_yuv_plane_views;
+
    /* Protect modifications of the sampler_views array */
    simple_mtx_t validate_mutex;
 
@@ -2557,12 +2566,6 @@ struct gl_renderbuffer
    /** Delete this renderbuffer */
    void (*Delete)(struct gl_context *ctx, struct gl_renderbuffer *rb);
 
-   /** Allocate new storage for this renderbuffer */
-   GLboolean (*AllocStorage)(struct gl_context *ctx,
-                             struct gl_renderbuffer *rb,
-                             GLenum internalFormat,
-                             GLuint width, GLuint height);
-
    struct pipe_resource *texture;
    enum pipe_format format_linear;
    enum pipe_format format_srgb;
@@ -2925,6 +2928,9 @@ struct gl_driver_flags
 
    /** For GL_CLAMP emulation */
    st_state_bitset NewSamplersWithClamp;
+
+   /** For polygon stipple emulation: the current draw's primitive type or the emulation state changed. */
+   st_state_bitset NewStippleEmulate;
 };
 
 struct gl_buffer_binding

@@ -24,6 +24,7 @@
 #include "nir/pipe_nir.h"
 #include "util/format/u_format.h"
 #include "util/perf/cpu_trace.h"
+#include "util/u_gen_mipmap.h"
 #include "util/u_surface.h"
 #include "util/u_blitter.h"
 #include "compiler/nir/nir_builder.h"
@@ -44,8 +45,6 @@
 void
 v3d_blitter_save(struct v3d_context *v3d, enum v3d_blitter_op op)
 {
-        util_blitter_save_fragment_constant_buffer_slot(v3d->blitter,
-                                                        v3d->constbuf[MESA_SHADER_FRAGMENT].cb);
         util_blitter_save_vertex_buffers(v3d->blitter, v3d->vertexbuf.vb, v3d->vertexbuf.count);
         util_blitter_save_vertex_elements(v3d->blitter, v3d->vtx);
         util_blitter_save_vertex_shader(v3d->blitter, v3d->prog.bind_vs);
@@ -53,14 +52,18 @@ v3d_blitter_save(struct v3d_context *v3d, enum v3d_blitter_op op)
         util_blitter_save_so_targets(v3d->blitter, v3d->streamout.num_targets,
                                      v3d->streamout.targets, MESA_PRIM_UNKNOWN);
         util_blitter_save_rasterizer(v3d->blitter, v3d->rasterizer);
-        util_blitter_save_viewport(v3d->blitter, &v3d->viewport);
-        util_blitter_save_fragment_shader(v3d->blitter, v3d->prog.bind_fs);
-        util_blitter_save_blend(v3d->blitter, v3d->blend);
-        util_blitter_save_depth_stencil_alpha(v3d->blitter, v3d->zsa);
-        util_blitter_save_stencil_ref(v3d->blitter, &v3d->stencil_ref);
-        util_blitter_save_sample_mask(v3d->blitter, v3d->sample_mask, 0);
-        util_blitter_save_so_targets(v3d->blitter, v3d->streamout.num_targets,
-                                     v3d->streamout.targets, MESA_PRIM_UNKNOWN);
+        if (op & V3D_SAVE_FRAGMENT_STATE) {
+                if (op & V3D_SAVE_FRAGMENT_CONSTANT) {
+                        util_blitter_save_fragment_constant_buffer_slot(v3d->blitter,
+                                                                        v3d->constbuf[MESA_SHADER_FRAGMENT].cb);
+                }
+                util_blitter_save_blend(v3d->blitter, v3d->blend);
+                util_blitter_save_depth_stencil_alpha(v3d->blitter, v3d->zsa);
+                util_blitter_save_stencil_ref(v3d->blitter, &v3d->stencil_ref);
+                util_blitter_save_fragment_shader(v3d->blitter, v3d->prog.bind_fs);
+                util_blitter_save_sample_mask(v3d->blitter, v3d->sample_mask, 0);
+                util_blitter_save_viewport(v3d->blitter, &v3d->viewport);
+        }
 
         if (op & V3D_SAVE_FRAMEBUFFER)
                 util_blitter_save_framebuffer(v3d->blitter, &v3d->framebuffer);
@@ -129,6 +132,7 @@ v3d_render_blit(struct pipe_context *ctx, struct pipe_blit_info *info)
                 mesa_loge("Blit unsupported %s -> %s",
                           util_format_short_name(info->src.format),
                           util_format_short_name(info->dst.format));
+                pipe_resource_reference(&tiled, NULL);
                 return;
         }
 
@@ -245,22 +249,42 @@ v3d_generate_mipmap(struct pipe_context *pctx,
         if (format != prsc->format)
                 return false;
 
-        /* We could maybe support looping over layers for array textures, but
-         * we definitely don't support 3D.
-         */
-        if (first_layer != last_layer)
+        /* We don't support 3D */
+        if (prsc->target == PIPE_TEXTURE_3D)
                 return false;
 
         struct v3d_context *v3d = v3d_context(pctx);
         struct v3d_screen *screen = v3d->screen;
         struct v3d_device_info *devinfo = &screen->devinfo;
 
-        return v3d_X(devinfo, tfu)(pctx,
-                                   prsc, prsc,
-                                   base_level,
-                                   base_level, last_level,
-                                   first_layer, first_layer,
-                                   true);
+        /* Loop over the array layers to generate the mipmaps. If it is works
+         * for the first layer, it must work for the rest, hence the
+         * assertion.
+         */
+        for (unsigned int layer = first_layer; layer <= last_layer; layer++) {
+                if (!v3d_X(devinfo, tfu)(pctx,
+                                         prsc, prsc,
+                                         base_level,
+                                         base_level, last_level,
+                                         layer, layer,
+                                         true)) {
+                        assert(layer == first_layer);
+                        goto fallback;
+                }
+        }
+
+        return true;
+
+fallback:
+        perf_debug("Software fallback for generate_mipmap()");
+        unsigned filter = PIPE_TEX_FILTER_NEAREST;
+
+        /* Check if the format supports filtering */
+        if (v3d_format_supports_filtering(devinfo, format))
+                filter = PIPE_TEX_FILTER_LINEAR;
+
+        return util_gen_mipmap(pctx, prsc, format, base_level, last_level,
+                               first_layer, last_layer, filter);
 }
 
 static void
@@ -278,12 +302,11 @@ v3d_tfu_blit(struct pipe_context *pctx, struct pipe_blit_info *info)
             info->dst.box.y != 0 ||
             info->dst.box.width != dst_width ||
             info->dst.box.height != dst_height ||
-            info->dst.box.depth != 1 ||
             info->src.box.x != 0 ||
             info->src.box.y != 0 ||
             info->src.box.width != info->dst.box.width ||
             info->src.box.height != info->dst.box.height ||
-            info->src.box.depth != 1) {
+            info->src.box.depth != info->dst.box.depth) {
                 return;
         }
 
@@ -294,13 +317,23 @@ v3d_tfu_blit(struct pipe_context *pctx, struct pipe_blit_info *info)
         struct v3d_screen *screen = v3d->screen;
         struct v3d_device_info *devinfo = &screen->devinfo;
 
-        if (v3d_X(devinfo, tfu)(pctx, info->dst.resource, info->src.resource,
-                                info->src.level,
-                                info->dst.level, info->dst.level,
-                                info->src.box.z, info->dst.box.z,
-                                false)) {
-                info->mask &= ~PIPE_MASK_RGBA;
+        /* Loop over the array layers to do the TFU blit. If it works for the
+         * first layer it must work for the rest, hence the assertion.
+         */
+        for (int i = 0; i < info->dst.box.depth; i++) {
+                if (!v3d_X(devinfo, tfu)(pctx,
+                                         info->dst.resource, info->src.resource,
+                                         info->src.level,
+                                         info->dst.level, info->dst.level,
+                                         info->src.box.z + i,
+                                         info->dst.box.z + i,
+                                         false)) {
+                        assert(i == 0);
+                        return;
+                }
         }
+
+        info->mask &= ~PIPE_MASK_RGBA;
 }
 
 static bool
@@ -816,7 +849,8 @@ v3d_sand8_blit(struct pipe_context *pctx, struct pipe_blit_info *info)
         MESA_TRACE_FUNC();
 
         v3d_blitter_save(v3d, info->render_condition_enable ?
-                         V3D_BLIT_COND : V3D_BLIT);
+                         V3D_BLIT_COND | V3D_SAVE_FRAGMENT_CONSTANT :
+                         V3D_BLIT | V3D_SAVE_FRAGMENT_CONSTANT);
 
         struct pipe_surface dst_surf;
         /* Although the src textures are cpp=1 or cpp=2, the dst texture
@@ -1128,7 +1162,8 @@ v3d_sand30_blit(struct pipe_context *pctx, struct pipe_blit_info *info)
         MESA_TRACE_FUNC();
 
         v3d_blitter_save(v3d, info->render_condition_enable ?
-                         V3D_BLIT_COND : V3D_BLIT);
+                         V3D_BLIT_COND | V3D_SAVE_FRAGMENT_CONSTANT :
+                         V3D_BLIT | V3D_SAVE_FRAGMENT_CONSTANT);
 
         struct pipe_surface dst_surf;
         v3d_set_blit_surface(&dst_surf, pctx, info->dst.resource,

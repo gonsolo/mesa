@@ -1,6 +1,6 @@
 /*
  * Copyright © 2014 Broadcom
- * Copyright © 208 Alyssa Rosenzweig
+ * Copyright © 2018 Alyssa Rosenzweig
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -44,5 +44,7 @@ struct renderonly_scanout *
 panfrost_create_kms_dumb_buffer_for_resource(struct pipe_resource *rsc,
                                              struct renderonly *ro,
                                              struct winsys_handle *out_handle);
+bool
+panfrost_drm_probe_nctx(int fd, const struct virgl_renderer_capset_drm *caps);
 
 #endif /* __PAN_DRM_PUBLIC_H__ */

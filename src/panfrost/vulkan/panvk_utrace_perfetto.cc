@@ -8,12 +8,6 @@
 
 #include <functional>
 
-#ifndef ANDROID_LIBPERFETTO
-#include <perfetto.h>
-#else
-#include <perfetto/tracing.h>
-#endif
-
 #include "c11/threads.h"
 #include "util/log.h"
 #include "util/perf/u_perfetto.h"
@@ -93,10 +87,9 @@ get_gpu_time_ns(struct panvk_device *dev)
 {
    const struct panvk_physical_device *pdev =
       to_panvk_physical_device(dev->vk.physical);
-   const struct pan_kmod_dev_props *props = &pdev->kmod.dev->props;
 
-   const uint64_t ts = pan_kmod_query_timestamp(dev->kmod.dev);
-   return ts * NSEC_PER_SEC / props->timestamp_frequency;
+   return pan_kmod_timestamp_cycles_to_ns(
+      pdev->kmod.dev, pan_kmod_query_timestamp(dev->kmod.dev));
 }
 
 static void
@@ -249,8 +242,9 @@ panvk_utrace_perfetto_end_event(
       const void *flush_data, const struct trace_begin_##tp *payload,          \
       const void *indirect_data)                                               \
    {                                                                           \
-      /* we can ignore them or save them if we choose to */                    \
-      assert(!payload && !indirect_data);                                      \
+      assert(!payload);                                                        \
+      /* Contains at most a dummy uint8_t. */                                  \
+      static_assert(sizeof(struct trace_begin_##tp) == 1);                     \
       panvk_utrace_perfetto_begin_event(                                       \
          dev, (const struct panvk_utrace_flush_data *)flush_data,              \
          PANVK_UTRACE_PERFETTO_STAGE_##stage, ts_ns);                          \

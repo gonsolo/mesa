@@ -3,6 +3,7 @@
  *
  * Copyright (C) 1999-2008  Brian Paul   All Rights Reserved.
  * Copyright (C) 1999-2009  VMware, Inc.  All Rights Reserved.
+ * Copyright (C) 2026 NXP
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -594,11 +595,6 @@ _mesa_update_texture_renderbuffer(struct gl_context *ctx,
          return;
       }
       att->Renderbuffer = rb;
-
-      /* This can't get called on a texture renderbuffer, so set it to NULL
-       * for clarity compared to user renderbuffers.
-       */
-      rb->AllocStorage = NULL;
    }
 
    if (!texImage)
@@ -1066,7 +1062,6 @@ test_attachment_completeness(const struct gl_context *ctx, GLenum format,
          if (_mesa_is_gles(ctx)) {
             switch (texImage->InternalFormat) {
             case GL_SRGB_EXT:
-            case GL_SRGB_ALPHA_EXT:
                att_incomplete("bad internal format");
                att->Complete = GL_FALSE;
                return;
@@ -1427,7 +1422,8 @@ _mesa_test_framebuffer_completeness(struct gl_context *ctx,
          if (!is_format_color_renderable(ctx, attFormat,
                                          texImg->InternalFormat) &&
              !is_legal_depth_format(ctx, f) &&
-             f != GL_STENCIL_INDEX) {
+             f != GL_STENCIL_INDEX &&
+            !util_format_is_yuv(attFormat)) {
             fb->_Status = GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
             fbo_incomplete(ctx, "texture attachment incomplete", -1);
             return;
@@ -1807,7 +1803,6 @@ allocate_renderbuffer_locked(struct gl_context *ctx, GLuint renderbuffer,
       _mesa_error(ctx, GL_OUT_OF_MEMORY, "%s", func);
       return NULL;
    }
-   assert(newRb->AllocStorage);
    _mesa_HashInsertLocked(&ctx->Shared->RenderBuffers, renderbuffer,
                           newRb);
 
@@ -2804,8 +2799,7 @@ _mesa_renderbuffer_storage(struct gl_context *ctx, struct gl_renderbuffer *rb,
    rb->NumStorageSamples = storageSamples;
 
    /* Now allocate the storage */
-   assert(rb->AllocStorage);
-   if (rb->AllocStorage(ctx, rb, internalFormat, width, height)) {
+   if (_mesa_renderbuffer_alloc_storage(ctx, rb, internalFormat, width, height)) {
       /* No error - check/set fields now */
       /* If rb->Format == MESA_FORMAT_NONE, the format is unsupported. */
       assert(rb->Width == (GLuint) width);
@@ -3959,6 +3953,15 @@ check_textarget(struct gl_context *ctx, int dims, GLenum target,
       err = dims != 3 ||
             (_mesa_is_gles2(ctx) && !ctx->Extensions.OES_texture_3D);
       break;
+   /* GL_EXT_YUV_target: TEXTURE_EXTERNAL_OES is a 2D texture target.
+    * It requires GLES3 and EXT_YUV_target extension.
+    * Note: OES_EGL_image_external also supports TEXTURE_EXTERNAL_OES,
+    * but EXT_YUV_target adds rendering capability.
+    */
+   case GL_TEXTURE_EXTERNAL_OES:
+      err = dims != 2 || !(_mesa_is_gles3(ctx) && ctx->Extensions.EXT_YUV_target &&
+            ctx->Extensions.OES_EGL_image_external);
+      break;
    default:
       _mesa_error(ctx, GL_INVALID_ENUM,
                   "%s(unknown textarget 0x%x)", caller, textarget);
@@ -4266,6 +4269,31 @@ framebuffer_texture_with_dims(int dims, GLenum target, GLuint framebuffer,
    if (texObj) {
       if (!check_textarget(ctx, dims, texObj->Target, textarget, caller))
          return;
+
+      /* GL_EXT_YUV_target: TEXTURE_EXTERNAL_OES can only attach to COLOR_ATTACHMENT0 */
+      if (texObj->Target == GL_TEXTURE_EXTERNAL_OES && attachment != GL_COLOR_ATTACHMENT0) {
+            _mesa_error(ctx, GL_INVALID_OPERATION,
+                        "%s(TEXTURE_EXTERNAL_OES can only attach to COLOR_ATTACHMENT0)",
+                        caller);
+            return;
+      }
+
+      /* GL_EXT_YUV_target spec:
+       * "TEXTURE_EXTERNAL_OES target with RGB color format are not allowed
+       *  with this extension."
+       * Only YUV-format external textures may be used as render targets.
+       * If the texture is surface-based (EGL image) and its pipe format is
+       * not a YUV format, reject the attachment.
+       */
+      if (textarget == GL_TEXTURE_EXTERNAL_OES &&
+          ctx->Extensions.EXT_YUV_target &&
+          texObj->surface_based &&
+          !util_format_is_yuv(texObj->surface_format)) {
+         _mesa_error(ctx, GL_INVALID_OPERATION,
+                     "%s(TEXTURE_EXTERNAL_OES with RGB color format is not "
+                     "allowed with GL_EXT_YUV_target)", caller);
+         return;
+      }
 
       if ((dims == 3) && !check_layer(ctx, texObj->Target, layer, caller))
          return;

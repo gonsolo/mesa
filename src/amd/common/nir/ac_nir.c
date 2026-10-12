@@ -180,7 +180,7 @@ ac_nir_sleep(nir_builder *b, unsigned num_cycles)
 /* Load argument with index start from arg plus relative_index. */
 nir_def *
 ac_nir_load_arg_at_offset(nir_builder *b, const struct ac_shader_args *ac_args,
-                          struct ac_arg arg, unsigned relative_index)
+                          struct ac_arg arg, unsigned relative_index, bool scalar_wg_div)
 {
    assert(arg.used);
 
@@ -190,23 +190,28 @@ ac_nir_load_arg_at_offset(nir_builder *b, const struct ac_shader_args *ac_args,
    if (ac_args->args[arg_index].skip)
       return nir_undef(b, num_components, 32);
 
-   if (ac_args->args[arg_index].file == AC_ARG_SGPR)
-      return nir_load_scalar_arg_amd(b, num_components, .base = arg_index);
-   else
+   if (ac_args->args[arg_index].file == AC_ARG_SGPR) {
+      if (scalar_wg_div)
+         return nir_load_scalar_arg_wg_div_amd(b, num_components, .base = arg_index);
+      else
+         return nir_load_scalar_arg_amd(b, num_components, .base = arg_index);
+   } else {
+      assert(!scalar_wg_div);
       return nir_load_vector_arg_amd(b, num_components, .base = arg_index);
+   }
 }
 
 nir_def *
 ac_nir_load_arg(nir_builder *b, const struct ac_shader_args *ac_args, struct ac_arg arg)
 {
-   return ac_nir_load_arg_at_offset(b, ac_args, arg, 0);
+   return ac_nir_load_arg_at_offset(b, ac_args, arg, 0, false);
 }
 
 nir_def *
 ac_nir_load_arg_upper_bound(nir_builder *b, const struct ac_shader_args *ac_args, struct ac_arg arg,
                             unsigned upper_bound)
 {
-   nir_def *value = ac_nir_load_arg_at_offset(b, ac_args, arg, 0);
+   nir_def *value = ac_nir_load_arg_at_offset(b, ac_args, arg, 0, false);
    nir_intrinsic_set_arg_upper_bound_u32_amd(nir_def_as_intrinsic(value),
                                              upper_bound);
    return value;
@@ -242,6 +247,14 @@ ac_nir_unpack_arg(nir_builder *b, const struct ac_shader_args *ac_args, struct a
                   unsigned rshift, unsigned bitwidth)
 {
    nir_def *value = ac_nir_load_arg(b, ac_args, arg);
+   return ac_nir_unpack_value(b, value, rshift, bitwidth);
+}
+
+nir_def *
+ac_nir_unpack_arg_wg_div(nir_builder *b, const struct ac_shader_args *ac_args, struct ac_arg arg,
+                         unsigned rshift, unsigned bitwidth)
+{
+   nir_def *value = ac_nir_load_arg_at_offset(b, ac_args, arg, 0, true);
    return ac_nir_unpack_value(b, value, rshift, bitwidth);
 }
 
@@ -370,20 +383,56 @@ ac_optimization_barrier_vgpr_array(const struct radeon_info *info, nir_builder *
 nir_def *
 ac_get_global_ids(nir_builder *b, unsigned num_components, unsigned bit_size)
 {
-   unsigned mask = BITFIELD_MASK(num_components);
+   assert(!b->shader->info.workgroup_size_variable);
+   assert(util_is_power_of_two_nonzero(b->shader->info.workgroup_size[0]));
+   assert(util_is_power_of_two_nonzero(b->shader->info.workgroup_size[1]));
+   assert(util_is_power_of_two_nonzero(b->shader->info.workgroup_size[2]));
 
-   nir_def *local_ids = nir_channels(b, nir_load_local_invocation_id(b), mask);
-   nir_def *block_ids = nir_channels(b, nir_load_workgroup_id(b), mask);
-   nir_def *block_size = nir_channels(b, nir_load_workgroup_size(b), mask);
+   unsigned log_block_size_x = util_logbase2(b->shader->info.workgroup_size[0]);
+   unsigned log_block_size_y = util_logbase2(b->shader->info.workgroup_size[1]);
+   unsigned log_block_size_z = util_logbase2(b->shader->info.workgroup_size[2]);
 
-   assert(bit_size == 32 || bit_size == 16);
-   if (bit_size == 16) {
-      local_ids = nir_i2iN(b, local_ids, bit_size);
-      block_ids = nir_i2iN(b, block_ids, bit_size);
-      block_size = nir_i2iN(b, block_size, bit_size);
+   /* Doing it in 32 bits results in smaller code size because each component becomes v_lshl_add_u32. */
+   if (bit_size != 16 || log_block_size_x != log_block_size_y || num_components == 1) {
+      return nir_u2uN(b, nir_trim_vector(b, nir_load_global_invocation_id(b, MAX2(32, bit_size)),
+                                         num_components), bit_size);
    }
 
-   return nir_iadd(b, nir_imul(b, block_ids, block_size), local_ids);
+   /* The following 16x2 ishl and iadd for XY is reduced to single v_lshl_add_u32 computing both
+    * components simultaneously because workgroup_size.xy is a square and there is no 16-bit
+    * integer wraparound. This is correct to do in general if all global IDs are representable
+    * in 16 bits.
+    *
+    * Z is computed in 32 bits to get v_lshl_add_u32.
+    */
+   nir_def *local_ids = nir_load_local_invocation_id(b);
+   nir_def *block_ids = nir_load_workgroup_id(b);
+
+   nir_def *xy = nir_i2i16(b, nir_trim_vector(b, block_ids, 2));
+   nir_def *z = nir_channel(b, block_ids, 2);
+
+   /* Promote a 16-bit vec2 ishl (imul) to a 32-bit scalar ishl (imul).
+    *    16x2 a.xy * k.xx = bitcast_u32(a) * k if (a.x * k) doesn't wrap around.
+    *
+    * TODO: nir_opt_algebraic could do this in the future. For that:
+    * - We need NUW to apply to ishl (meaning no bits shifted out).
+    * - We need nir_opt_algebraic to preserve NUW when replacing imul with ishl.
+    * - If the load_global_invocation_id lowering replaces this helper, it should set NUW
+    *   and the intrinsic should allow bit_size=16. (implying that all global IDs are
+    *   representable in 16 bits)
+    */
+   xy = nir_ishl_imm(b, nir_pack_32_2x16(b, xy), log_block_size_x);
+   z = nir_ishl_imm(b, z, log_block_size_z);
+
+   /* Promote 16-bit vec2 iadd to a 32-bit scalar iadd.
+    *    16x2 a.xy + b.xy = bitcast_u32(a) + bitcast_u32(b) if (a.x + b.x) doesn't wrap around.
+    */
+   xy = nir_iadd_nuw(b, xy, nir_pack_32_2x16(b, nir_i2i16(b, nir_trim_vector(b, local_ids, 2))));
+   z = nir_iadd_nuw(b, z, nir_channel(b, local_ids, 2));
+
+   nir_def *xyz = nir_vector_insert_imm(b, nir_pad_vector(b, nir_unpack_32_2x16(b, xy), 3),
+                                        nir_i2i16(b, z), 2);
+   return nir_trim_vector(b, xyz, num_components);
 }
 
 nir_def *
@@ -558,10 +607,8 @@ ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigne
                               nir_intrinsic_instr *high, void *data)
 {
    struct ac_nir_config *config = (struct ac_nir_config *)data;
-   bool uses_smem = (nir_intrinsic_has_access(low) &&
-                     nir_intrinsic_access(low) & ACCESS_SMEM_AMD) ||
-                    /* These don't have the "access" field. */
-                    low->intrinsic == nir_intrinsic_load_push_constant;
+   bool uses_smem = nir_intrinsic_has_access(low) &&
+                    nir_intrinsic_access(low) & ACCESS_SMEM_AMD;
    bool is_store = !nir_intrinsic_infos[low->intrinsic].has_dest;
    bool swizzled = low->intrinsic == nir_intrinsic_load_stack ||
                     low->intrinsic == nir_intrinsic_store_stack ||
@@ -576,6 +623,14 @@ ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigne
    unsigned swizzle_element_size = config->gfx_level <= GFX8 ? 4 : 16;
 
    assert(!is_store || hole_size <= 0);
+
+   /* We don't have 5 component stores, so it makes no sense to create them just to split
+    * them again later. Additionally, they can result in suboptimal vectorization,
+    * i.e. vec5 + vec1 + vec2 instead of vec4 + vec4 -> vec8 because NIR doesn't
+    * have vec6 or vec7, and only two instructions are combined at a time.
+    */
+   if (is_store && num_components == 5)
+      return false;
 
    /* If we get derefs here, only shared memory derefs are expected. */
    assert((low->intrinsic != nir_intrinsic_load_deref &&
@@ -991,7 +1046,7 @@ ac_nir_op_supports_packed_math_16bit(const nir_alu_instr* alu)
 {
    switch (alu->op) {
    case nir_op_f2f16: {
-      nir_shader* shader = nir_cf_node_get_function(&alu->instr.block->cf_node)->function->shader;
+      nir_shader* shader = alu->instr.block->impl->function->shader;
       unsigned execution_mode = shader->info.float_controls_execution_mode;
       return (shader->options->force_f2f16_rtz && !nir_is_rounding_mode_rtne(execution_mode, 16)) ||
              nir_is_rounding_mode_rtz(execution_mode, 16);
@@ -1052,6 +1107,15 @@ max_alu_src_identity_swizzle(const nir_alu_instr *alu, const nir_alu_src *src)
 uint8_t
 ac_nir_opt_vectorize_cb(const nir_instr *instr, const void *data)
 {
+   if (instr->type == nir_instr_type_phi) {
+      nir_phi_instr *phi = nir_instr_as_phi(instr);
+
+      if (phi->def.bit_size != 1 && phi->def.bit_size < 32)
+         return 32 / phi->def.bit_size;
+
+      return 1;
+   }
+
    if (instr->type != nir_instr_type_alu)
       return 0;
 

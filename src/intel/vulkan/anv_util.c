@@ -27,6 +27,8 @@
 #include <string.h>
 #include <errno.h>
 #include <assert.h>
+#include "util/os_file.h"
+#include "util/os_time.h"
 #include "util/u_printf.h"
 #include <sys/stat.h>
 
@@ -35,6 +37,7 @@
 #include "vk_enum_to_str.h"
 
 #include "compiler/brw/brw_nir_rt.h"
+#include "compiler/jay/jay.h"
 #include "shaders/float64_spv.h"
 
 #ifdef NO_REGEX
@@ -44,6 +47,7 @@ typedef int regex_t;
 #define REG_NOMATCH 1
 static inline int regcomp(regex_t *r, const char *s, int f) { return 0; }
 static inline int regexec(regex_t *r, const char *s, int n, void *p, int f) { return REG_NOMATCH; }
+static inline size_t regerror(int e, const regex_t *r, char *b, size_t s) { return 0; }
 static inline void regfree(regex_t* r) {}
 #else
 #include <regex.h>
@@ -244,6 +248,7 @@ anv_device_print_init(struct anv_device *device)
    if (result != VK_SUCCESS)
       return result;
 
+   device->vk.debug_output = stderr;
    u_printf_init(&device->printf, bo, (uint32_t*)bo->map);
    return VK_SUCCESS;
 }
@@ -261,12 +266,12 @@ create_directory(const char *dir, const char *sub_dir)
    char full_path[PATH_MAX];
    snprintf(full_path, sizeof(full_path), "%s/%s", dir, sub_dir);
 
-   if (mkdir(dir, 0777) == -1 && errno != EEXIST) {
+   if (os_mkdir(dir, 0777) == -1 && errno != EEXIST) {
       perror("Error creating directory");
       return;
    }
 
-   if (mkdir(full_path, 0777) == -1 && errno != EEXIST) {
+   if (os_mkdir(full_path, 0777) == -1 && errno != EEXIST) {
       perror("Error creating sub directory");
       return;
    }
@@ -293,6 +298,12 @@ create_bvh_dump_file(struct anv_bvh_dump *bvh)
       break;
    case BVH_IR_AS:
       dump_sub_directory = "BVH_IR_AS";
+      break;
+   case BVH_ANV_PCREL:
+      dump_sub_directory = "BVH_ANV_PCREL";
+      break;
+   case BVH_ANV_UPDATE:
+      dump_sub_directory = "BVH_ANV_UPDATE";
       break;
    default:
       UNREACHABLE("invalid dump type");
@@ -373,9 +384,33 @@ void anv_wait_for_attach() {
       if (wait_for_attach) {
          fprintf(stderr, "Sleeping 30 seconds for debugger attach...\n");
          fprintf(stderr, "PID for debugger: %d\n", getpid());
-         sleep(30);
+         os_time_sleep(30 * 1000 * 1000);
       }
    }
+}
+
+static debug_archiver *
+anv_rt_debug_archiver_open(void *mem_ctx,
+                            const struct nir_shader *nir,
+                            const void *key,
+                            unsigned key_size)
+{
+   if (!INTEL_DEBUG(DEBUG_MDA))
+      return NULL;
+
+   uint8_t blake3[BLAKE3_KEY_LEN];
+   _mesa_blake3_compute(key, key_size, blake3);
+   char name[BLAKE3_HEX_LEN + 16] = {};
+   _mesa_blake3_format(name, blake3);
+   memcpy(&name[BLAKE3_HEX_LEN - 1], ".init_rt_shaders", 16);
+
+   debug_archiver *archiver = debug_archiver_open(mem_ctx, name,
+                                                  "init_rt_shaders");
+   debug_archiver_set_prefix(
+      archiver,
+      _mesa_shader_stage_to_abbrev(nir->info.stage));
+
+   return archiver;
 }
 
 VkResult
@@ -393,7 +428,9 @@ anv_device_init_rt_shaders(struct anv_device *device)
       struct brw_cs_prog_key key;
    } trampoline_key = {
       .name = "rt-trampoline",
+      .key.base.use_efficient_64bit = device->physical->uses_efficient_64bit,
    };
+
    device->rt_trampoline =
       anv_device_search_for_kernel(device, device->internal_cache,
                                    &trampoline_key, sizeof(trampoline_key),
@@ -402,12 +439,17 @@ anv_device_init_rt_shaders(struct anv_device *device)
 
       void *tmp_ctx = ralloc_context(NULL);
       nir_shader *trampoline_nir =
-         brw_nir_create_raygen_trampoline(device->physical->compiler, tmp_ctx);
+         brw_nir_create_raygen_trampoline(device->physical->compiler,
+                                          &trampoline_key.key, tmp_ctx);
 
       unsigned require_size = device->info->ver >= 20 ? 16 : 8;
       trampoline_nir->info.api_subgroup_size = require_size;
       trampoline_nir->info.max_subgroup_size = require_size;
       trampoline_nir->info.min_subgroup_size = require_size;
+
+      debug_archiver *debug_archiver =
+         anv_rt_debug_archiver_open(tmp_ctx, trampoline_nir,
+                                    &trampoline_key, sizeof(trampoline_key));
 
       struct brw_cs_prog_data trampoline_prog_data = {
          .uses_btd_stack_ids = true,
@@ -419,10 +461,22 @@ anv_device_init_rt_shaders(struct anv_device *device)
             .prog_data = (struct brw_stage_prog_data *)&trampoline_prog_data,
             .log_data = device,
             .mem_ctx = tmp_ctx,
+            .archiver = debug_archiver,
          },
       };
-      const unsigned *tramp_data =
-         brw_compile(device->physical->compiler, &params.base);
+
+      const unsigned *tramp_data = NULL;
+      if (intel_use_jay(device->info, trampoline_nir)) {
+         struct jay_shader_bin *bin =
+            jay_compile(device->info, tmp_ctx, trampoline_nir,
+                        (union brw_any_prog_data *)&trampoline_prog_data,
+                        (union brw_any_prog_key *)&trampoline_key.key.base,
+                        debug_archiver, NULL);
+
+         tramp_data = bin->kernel;
+      } else {
+         tramp_data = brw_compile(device->physical->compiler, &params.base);
+      }
 
       struct anv_shader_upload_params upload_params = {
          .stage               = MESA_SHADER_COMPUTE,
@@ -440,6 +494,7 @@ anv_device_init_rt_shaders(struct anv_device *device)
          anv_device_upload_kernel(device, device->internal_cache,
                                   &upload_params);
 
+      debug_archiver_close(debug_archiver);
       ralloc_free(tmp_ctx);
 
       if (device->rt_trampoline == NULL)
@@ -464,7 +519,12 @@ anv_device_init_rt_shaders(struct anv_device *device)
    if (device->rt_trivial_return == NULL) {
       void *tmp_ctx = ralloc_context(NULL);
       nir_shader *trivial_return_nir =
-         brw_nir_create_trivial_return_shader(device->physical->compiler, tmp_ctx);
+         brw_nir_create_trivial_return_shader(device->physical->compiler,
+                                              &return_key.key, tmp_ctx);
+
+      debug_archiver *debug_archiver =
+         anv_rt_debug_archiver_open(tmp_ctx, trivial_return_nir,
+                                    &return_key, sizeof(return_key));
 
       NIR_PASS(_, trivial_return_nir, brw_nir_lower_rt_intrinsics,
                  &return_key.key.base, device->info);
@@ -477,10 +537,22 @@ anv_device_init_rt_shaders(struct anv_device *device)
             .prog_data = (struct brw_stage_prog_data *)&return_prog_data,
             .log_data = device,
             .mem_ctx = tmp_ctx,
+            .archiver = debug_archiver,
          },
       };
-      const unsigned *return_data =
-         brw_compile(device->physical->compiler, &params.base);
+
+      const unsigned *return_data = NULL;
+      if (intel_use_jay(device->info, trivial_return_nir)) {
+         struct jay_shader_bin *bin =
+            jay_compile(device->info, tmp_ctx, trivial_return_nir,
+                        (union brw_any_prog_data *)&return_prog_data,
+                        (union brw_any_prog_key *)&return_key.key.base,
+                        debug_archiver, NULL);
+
+         return_data = bin->kernel;
+      } else {
+         return_data = brw_compile(device->physical->compiler, &params.base);
+      }
 
       struct anv_shader_upload_params upload_params = {
          .stage               = MESA_SHADER_CALLABLE,
@@ -498,6 +570,7 @@ anv_device_init_rt_shaders(struct anv_device *device)
          anv_device_upload_kernel(device, device->internal_cache,
                                   &upload_params);
 
+      debug_archiver_close(debug_archiver);
       ralloc_free(tmp_ctx);
 
       if (device->rt_trivial_return == NULL)
@@ -522,8 +595,12 @@ anv_device_init_rt_shaders(struct anv_device *device)
    if (device->rt_null_ahs == NULL) {
       void *tmp_ctx = ralloc_context(NULL);
       nir_shader *null_ahs_nir =
-         brw_nir_create_null_ahs_shader(device->physical->compiler, tmp_ctx);
+         brw_nir_create_null_ahs_shader(device->physical->compiler,
+                                        &null_return_key.key, tmp_ctx);
 
+      debug_archiver *debug_archiver =
+         anv_rt_debug_archiver_open(tmp_ctx, null_ahs_nir,
+                                    &null_return_key, sizeof(null_return_key));
       NIR_PASS(_, null_ahs_nir, brw_nir_lower_rt_intrinsics,
                  &null_return_key.key.base, device->info);
 
@@ -537,8 +614,19 @@ anv_device_init_rt_shaders(struct anv_device *device)
             .mem_ctx = tmp_ctx,
          },
       };
-      const unsigned *return_data =
-         brw_compile(device->physical->compiler, &params.base);
+      const unsigned *return_data = NULL;
+      if (intel_use_jay(device->info, null_ahs_nir)) {
+         struct jay_shader_bin *bin =
+            jay_compile(device->info, tmp_ctx, null_ahs_nir,
+                        (union brw_any_prog_data *)&return_prog_data,
+                        (union brw_any_prog_key *)&null_return_key.key.base,
+                        debug_archiver, NULL);
+
+         return_data = bin->kernel;
+      } else {
+         return_data = brw_compile(device->physical->compiler, &params.base);
+      }
+
 
       struct anv_shader_upload_params upload_params = {
          .stage               = MESA_SHADER_CALLABLE,
@@ -556,6 +644,7 @@ anv_device_init_rt_shaders(struct anv_device *device)
          anv_device_upload_kernel(device, device->internal_cache,
                                   &upload_params);
 
+      debug_archiver_close(debug_archiver);
       ralloc_free(tmp_ctx);
 
       if (device->rt_null_ahs == NULL)
@@ -628,7 +717,8 @@ anv_cmd_buffer_dump_commands(struct anv_cmd_buffer *cmd_buffer,
                              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT_KHR |
                              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT_KHR,
                              VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                             0,
+                             ANV_PIPE_HDC_PIPELINE_FLUSH_BIT |
+                             ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT,
                              "pre gfx cmd dump");
    anv_genX(device->info, cmd_buffer_apply_pipe_flushes)(cmd_buffer);
 
@@ -636,7 +726,6 @@ anv_cmd_buffer_dump_commands(struct anv_cmd_buffer *cmd_buffer,
       .device               = device,
       .cmd_buffer           = cmd_buffer,
       .dynamic_state_stream = &cmd_buffer->dynamic_state_stream,
-      .general_state_stream = &cmd_buffer->general_state_stream,
       .batch                = &cmd_buffer->batch,
       .kernel               = generate_kernel,
    };

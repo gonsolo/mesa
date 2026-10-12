@@ -13,7 +13,13 @@ make-git-archive:
     # Compactify the .git directory
     - git gc --aggressive
     # Download & cache the perfetto subproject as well.
-    - rm -rf subprojects/perfetto ; mkdir -p subprojects/perfetto && curl --fail --location https://github.com/google/perfetto/archive/$(grep 'revision =' subprojects/perfetto.wrap | cut -d ' ' -f3).tar.gz | tar zxf - --strip-components=1 -C subprojects/perfetto
+    - |
+      perfetto_sdk_dir=$(grep -E '^directory = ' subprojects/perfetto-sdk.wrap | cut -d ' ' -f3)
+      rm -rf subprojects/"$perfetto_sdk_dir"
+      mkdir -p subprojects/"$perfetto_sdk_dir"
+      curl --fail --location $(grep -E '^source_url = ' subprojects/perfetto-sdk.wrap | cut -d ' ' -f3) --output perfetto-sdk.zip
+      unzip perfetto-sdk.zip -d subprojects/"$perfetto_sdk_dir"
+      rm perfetto-sdk.zip
     # compress the current folder
     - tar -cvzf ../$CI_PROJECT_NAME.tar.gz .
 
@@ -51,6 +57,49 @@ debian-x86_64:
   artifacts:
     reports:
       junit: artifacts/ci_scripts_report.xml
+
+debian-x86_64-no_gfx_compute:
+  extends:
+    - .meson-build-for-tests
+    - .use-debian/x86_64_build
+  variables:
+    UNWIND: "disabled"
+    C_ARGS: >
+      -Wno-error=stringop-overread
+      -Wno-error=deprecated-declarations
+    CPP_ARGS: >
+      -Wno-error=deprecated-declarations
+    RUN_MESON_TESTS: "false"
+    VIDEO_CODECS: "h264dec,h265dec,av1dec,vp9dec,jpegdec"
+    GALLIUM_DRIVERS: "radeonsi"
+    VULKAN_DRIVERS: ""
+    BUILDTYPE: "debugoptimized"
+    DRI_LOADERS: >
+      -D egl=disabled
+      -D gles1=disabled
+      -D gles2=disabled
+      -D gbm=disabled
+      -D glvnd=disabled
+      -D glx=disabled
+      -D opengl=false
+      -D platforms=
+    GALLIUM_ST: >
+      -D gallium-rusticl=false
+      -D gallium-va=enabled
+    EXTRA_OPTION: >
+      -D llvm=disabled
+      -D allow-fallback-for=libdrm,libva
+      -D libva:with_glx=no
+      -D libva:with_wayland=no
+      -D libva:with_x11=no
+      -D valgrind=disabled
+      -D spirv-tools=disabled
+      -D zlib=disabled
+      -D zstd=disabled
+      -D shader-cache=disabled
+      -D expat=disabled
+      -D perfetto=false
+    S3_ARTIFACT_NAME: mesa-x86_64-no_gfx_compute-${BUILDTYPE}
 
 debian-x86_64-asan:
   extends:
@@ -171,6 +220,7 @@ debian-build-x86_64:
   extends:
     - .meson-build-for-tests
     - .use-debian/x86_64_build
+    - .build-run-long  # but it really shouldn't! tracked in mesa#12544
   variables:
     UNWIND: "enabled"
     C_ARGS: >
@@ -292,7 +342,7 @@ fedora-release:
       -D glvnd=enabled
       -D platforms=x11,wayland
     EXTRA_OPTION: >
-      -D tools=drm-shim,etnaviv,freedreno,glsl,intel,nir,nouveau,lima,panfrost,imagination
+      -D tools=drm-shim,etnaviv,freedreno,glsl,intel,nir,nouveau,lima,panfrost,imagination,gamma
       -D vulkan-layers=device-select,overlay
       -D intel-rt=enabled
       -D imagination-srv=true
@@ -343,6 +393,7 @@ debian-android:
       -D valgrind=disabled
       -D android-libbacktrace=disabled
       -D mesa-clc=system
+      -D panfrost-rust=true
       -D precomp-compiler=system
       -D perfetto=true
       -D freedreno-kmds=msm,virtio
@@ -421,6 +472,8 @@ debian-arm32:
       -D gallium-rusticl=false
       -D mesa-clc=system
       -D precomp-compiler=system
+      -D panfrost-rust=true
+      -D tools=drm-shim
     HOST_BUILD_OPTIONS: >
       -D build-tests=false
       -D enable-glcpp-tests=false
@@ -477,6 +530,7 @@ debian-arm64:
       -D perfetto=true
       -D vulkan-layers=screenshot
       -D panfrost-rust=true
+      -D tools=drm-shim
     GALLIUM_ST:
       -D gallium-rusticl=true
       -D legacy-wayland=bind-wayland-display
@@ -637,7 +691,6 @@ debian-clang-release:
       -Wno-error=vla-cxx-extension
       -Wno-error=deprecated-declarations
     DRI_LOADERS: >
-      -D glx=xlib
       -D platforms=x11,wayland
     GALLIUM_ST: >
       -D gallium-extra-hud=true
@@ -709,6 +762,7 @@ debian-x86_32:
       -D glvnd=disabled
     EXTRA_OPTION: >
       -D vulkan-layers=device-select,overlay
+      -D panfrost-rust=true
       -D mesa-clc=system
     CPP_ARGS: >
       -Wno-error=deprecated-declarations
@@ -726,7 +780,6 @@ debian-x86_32:
       -D platforms=
       -D mesa-clc=enabled
       -D install-mesa-clc=true
-      -D panfrost-rust=true
 
 # In case of issues with this job, contact @frankbinns
 .debian-riscv64:

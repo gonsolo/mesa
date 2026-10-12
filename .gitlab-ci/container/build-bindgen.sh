@@ -8,8 +8,8 @@
 
 section_start bindgen "Building bindgen"
 
-BINDGEN_VER=0.71.1
-CBINDGEN_VER=0.26.0
+BINDGEN_VER=0.72.1
+CBINDGEN_VER=0.28.0
 
 # bindgen
 RUSTFLAGS='-L native=/usr/local/lib' cargo install \

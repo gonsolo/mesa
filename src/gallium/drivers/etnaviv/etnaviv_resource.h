@@ -38,7 +38,10 @@
 
 #include "drm-uapi/drm_fourcc.h"
 
+#define ETNA_RESOURCE_FLAG_CPU_READ    (PIPE_RESOURCE_FLAG_DRV_PRIV << 0)
+
 struct etna_context;
+struct etna_screen;
 struct pipe_screen;
 struct util_dynarray;
 
@@ -71,6 +74,7 @@ struct etna_resource_level {
    uint32_t ts_size;
    uint64_t clear_value; /* clear value of resource level (mainly for TS) */
    bool ts_valid;
+   bool ts_needs_clear;
    bool ts_flushed;
    uint8_t ts_mode;
    int8_t ts_compress_fmt; /* COLOR_COMPRESSION_FORMAT_* (-1 = disable) */
@@ -83,6 +87,15 @@ struct etna_resource_level {
 
    uint32_t seqno;
 };
+
+/* A 128-bit color level is emulated as two stacked G32R32F planes, the second
+ * (BA) plane starts halfway into the level.
+ */
+static inline unsigned
+etna_resource_level_second_plane_offset(const struct etna_resource_level *lvl)
+{
+   return (lvl->size * lvl->depth) / 2;
+}
 
 /* returns TRUE if a is newer than b */
 static inline bool
@@ -223,6 +236,10 @@ struct etna_resource {
    struct pipe_resource *texture;
    /* for when PE doesn't support the base layout */
    struct pipe_resource *render;
+   struct pipe_resource *border;
+   unsigned border_tail;
+   /* PE can render to the base layout directly */
+   bool render_compatible;
    /* frontend flushes resource via an explicit call to flush_resource */
    bool explicit_flush;
    /* resource is shared outside of the screen */
@@ -233,6 +250,9 @@ struct etna_resource {
 
    struct pipe_box *damage;
    unsigned num_damage;
+
+   enum pipe_format internal_format;
+   struct etna_resource *separate_stencil;
 };
 
 /* returns TRUE if a is newer than b */
@@ -274,19 +294,29 @@ etna_resource_sampler_only(const struct pipe_resource *pres)
 }
 
 static inline bool
-etna_resource_hw_tileable(bool use_blt, const struct pipe_resource *pres)
+etna_format_hw_tileable(bool use_blt, enum pipe_format format)
 {
    if (use_blt)
       return true;
 
    /* RS can only tile 16bpp or 32bpp formats */
-   return util_format_get_blocksize(pres->format) == 2 ||
-          util_format_get_blocksize(pres->format) == 4;
+   return util_format_get_blocksize(format) == 2 ||
+          util_format_get_blocksize(format) == 4;
 }
 
+static inline bool
+etna_resource_hw_tileable(bool use_blt, const struct pipe_resource *pres)
+{
+   return etna_format_hw_tileable(use_blt, pres->format);
+}
+
+bool
+etna_resource_needs_rb_swap(const struct etna_screen *screen,
+                            const struct etna_resource *rsc);
+
 struct etna_resource *
-etna_resource_get_render_compatible(struct pipe_context *pctx,
-                                    struct pipe_resource *prsc);
+etna_resource_alloc_render_shadow(struct pipe_context *pctx,
+                                  struct pipe_resource *prsc);
 
 /* returns TRUE if resource TS buffer is exposed externally */
 static inline bool
@@ -302,6 +332,21 @@ etna_resource(struct pipe_resource *p)
    return (struct etna_resource *)p;
 }
 
+static inline struct etna_resource *
+etna_resource_get_render_compatible(struct pipe_context *pctx,
+                                    struct pipe_resource *prsc)
+{
+   struct etna_resource *res = etna_resource(prsc);
+
+   if (res->render)
+      return etna_resource(res->render);
+
+   if (res->render_compatible)
+      return res;
+
+   return etna_resource_alloc_render_shadow(pctx, prsc);
+}
+
 static inline struct etna_buffer_resource *
 etna_buffer_resource(struct pipe_resource *p)
 {
@@ -312,6 +357,10 @@ etna_buffer_resource(struct pipe_resource *p)
 void
 etna_resource_used(struct etna_context *ctx, struct pipe_resource *prsc,
                    enum etna_resource_status status);
+
+bool
+etna_buffer_resource_realloc(struct etna_context *ctx,
+                             struct etna_buffer_resource *rsc);
 
 static inline void
 resource_read(struct etna_context *ctx, struct pipe_resource *prsc)
@@ -340,6 +389,10 @@ etna_screen_resource_alloc_ts(struct pipe_screen *pscreen,
 struct pipe_resource *
 etna_resource_alloc(struct pipe_screen *pscreen, unsigned layout,
                     uint64_t modifier, const struct pipe_resource *templat);
+
+struct etna_resource *
+etna_resource_alloc_border_shadow(struct pipe_context *pctx,
+                                  struct pipe_resource *prsc);
 
 void
 etna_resource_screen_init(struct pipe_screen *pscreen);

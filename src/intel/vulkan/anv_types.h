@@ -90,7 +90,9 @@
  * and we can't put anything else there we use 64b.
  */
 #define ANV_SURFACE_STATE_SIZE (64)
+
 #define ANV_SAMPLER_STATE_SIZE (32)
+#define ANV_SAMPLER_STATE_DWORDS (ANV_SAMPLER_STATE_SIZE / sizeof(uint32_t))
 
 /* For gfx12 we set the streamout buffers using 4 separate commands
  * (3DSTATE_SO_BUFFER_INDEX_*) instead of 3DSTATE_SO_BUFFER. However the layout
@@ -102,66 +104,50 @@
  */
 #define SO_BUFFER_INDEX_0_CMD 0x60
 
-struct anv_push_constants {
-   /** Push constant data provided by the client through vkPushConstants */
-   uint8_t client_data[MAX_PUSH_CONSTANTS_SIZE];
+#define ANV_DESCRIPTOR_SET_PUSH_POINTER       (UINT8_MAX - 5)
+#define ANV_DESCRIPTOR_SET_PER_PRIM_PADDING   (UINT8_MAX - 4)
+#define ANV_DESCRIPTOR_SET_NULL               (UINT8_MAX - 3)
+#define ANV_DESCRIPTOR_SET_PUSH_CONSTANTS     (UINT8_MAX - 2)
+#define ANV_DESCRIPTOR_SET_DESCRIPTORS        (UINT8_MAX - 1)
+#define ANV_DESCRIPTOR_SET_COLOR_ATTACHMENTS   UINT8_MAX
 
-#define ANV_DESCRIPTOR_SET_DYNAMIC_INDEX_MASK ((uint32_t)ANV_UBO_ALIGNMENT - 1)
-#define ANV_DESCRIPTOR_SET_OFFSET_MASK        (~(uint32_t)(ANV_UBO_ALIGNMENT - 1))
+enum anv_shader_binding_mode {
+   ANV_SHADER_BINDING_MODE_UNKNOWN,
+   ANV_SHADER_BINDING_MODE_LEGACY,
+   ANV_SHADER_BINDING_MODE_LEGACY_INDIRECT,
+   ANV_SHADER_BINDING_MODE_BUFFER,
+   ANV_SHADER_BINDING_MODE_HEAP,
+};
 
-   /**
-    * Base offsets for descriptor sets from
+struct anv_drv_push_data {
+   /** Ray query globals
     *
-    * The offset has different meaning depending on a number of factors :
-    *
-    *    - with descriptor sets (direct or indirect), this relative
-    *      pdevice->va.descriptor_pool
-    *
-    *    - with descriptor buffers on DG2+, relative
-    *      device->va.descriptor_buffer_pool
-    *
-    *    - with descriptor buffers prior to DG2, relative the programmed value
-    *      in STATE_BASE_ADDRESS::BindlessSurfaceStateBaseAddress
+    * Pointer to a couple of RT_DISPATCH_GLOBALS structures (see
+    * genX(cmd_buffer_ray_query_globals))
     */
-   uint32_t desc_surface_offsets[MAX_SETS];
-
-   /**
-    * Base offsets for descriptor sets from
-    */
-   uint32_t desc_sampler_offsets[MAX_SETS];
-
-   /** Dynamic offsets for dynamic UBOs and SSBOs */
-   uint32_t dynamic_offsets[MAX_DYNAMIC_BUFFERS];
-
-   union {
-      /** Surface buffer base offset
-       *
-       * Only used prior to DG2 with descriptor buffers.
-       *
-       * (surfaces_base_offset + desc_offsets[set_index]) is relative to
-       * device->va.descriptor_buffer_pool and can be used to compute a 64bit
-       * address to the descriptor buffer (using load_desc_set_address_intel).
-       */
-      uint32_t surfaces_base_offset;
-
-      /** Ray query globals
-       *
-       * Pointer to a couple of RT_DISPATCH_GLOBALS structures (see
-       * genX(cmd_buffer_ray_query_globals))
-       */
-      uint64_t ray_query_globals;
-   };
+   uint64_t ray_query_globals;
 
    union {
       struct {
-         /** Dynamic MSAA value */
+         /** Dynamic FS configuration value (see intel_fs_config) */
          uint32_t fs_config;
 
-         /** Dynamic TCS/TES configuration */
+         /** Fragment shader attachments RENDER_SURFACE_STATE location in
+          * internal heap (Gfx35+)
+          */
+         uint32_t fs_color_offset;
+
+         /** Fragment shader output remapping (Gfx35+)
+          *
+          * 8 elements of 4bits for each color output
+          */
+         uint32_t fs_color_map;
+
+         /** Dynamic TCS/TES configuration (see intel_tess_configs) */
          uint32_t tess_config;
 
          /** Robust access pushed registers. */
-         uint8_t push_reg_mask[MESA_SHADER_STAGES][4];
+         uint8_t push_reg_mask[MESA_SHADER_FRAGMENT + 1][4];
 
          /** Wa_18019110168
           * bits  4:0 : provoking vertex value
@@ -173,28 +159,141 @@ struct anv_push_constants {
       } gfx;
 
       struct {
+         /** gl_NumWorkgroups.
+          *
+          * Either directly specified or (if the last channel is the sentinel
+          * UINT_MAX) an indirect 64-bit address to load.  Putting this first
+          * helps reduce copies required in the shader by ensuring this is
+          * GRF-aligned if ray query is not used.
+          */
+         uint32_t num_workgroups[3];
+
          /** Base workgroup ID
           *
           * Used for vkCmdDispatchBase.
           */
          uint32_t base_workgroup[3];
 
-         /** gl_NumWorkgroups */
-         uint32_t num_workgroups[3];
-
-         uint32_t unaligned_invocations_x;
-
-         /** Subgroup ID
+         /** Unaligned invocation lane disabling
           *
-          * This is never set by software but is implicitly filled out when
-          * uploading the push constants for compute shaders.
-          *
-          * This *MUST* be the last field of the anv_push_constants structure.
+          * See anv_nir_lower_unaligned_dispatch()
           */
-         uint32_t subgroup_id;
+         uint32_t unaligned_invocations_x;
       } cs;
    };
 };
+
+static_assert(offsetof(struct anv_drv_push_data, cs.num_workgroups[0]) == 8,
+              "comes first if there is no ray query");
+
+struct anv_binding_heap_data {
+   /** Base offset of the surface descriptors */
+   uint32_t surfaces_offset;
+
+   /** Base offset of the sampler descriptors */
+   uint32_t samplers_offset;
+
+   /** Surface buffer base offset
+    *
+    * Only used prior to DG2.
+    *
+    * (surfaces_base_offset + desc_offsets[set_index]) is relative to
+    * device->va.descriptor_buffer_pool and can be used to compute a 64bit
+    * address to the descriptor buffer (using load_desc_set_address_intel).
+    */
+   uint32_t surfaces_base_offset;
+};
+
+struct anv_binding_buffer_data {
+   /**
+    * Base offsets for descriptor sets :
+    *
+    * The surface offset has different meaning depending on a number of
+    * factors :
+    *
+    *    - with descriptor buffers on DG2+, relative
+    *      device->va.descriptor_buffer_pool
+    *
+    *    - with descriptor buffers prior to DG2, relative the programmed value
+    *      in STATE_BASE_ADDRESS::BindlessSurfaceStateBaseAddress
+    *
+    * The sampler offset is relative to device->va.dynamic_state_pool.
+    */
+   struct {
+      uint32_t surfaces_offset;
+      uint32_t samplers_offset;
+   } sets[MAX_SETS];
+
+   /** Surface buffer base offset
+    *
+    * Only used prior to DG2.
+    *
+    * (surfaces_base_offset + desc_offsets[set_index]) is relative to
+    * device->va.descriptor_buffer_pool and can be used to compute a 64bit
+    * address to the descriptor buffer (using load_desc_set_address_intel).
+    */
+   uint32_t surfaces_base_offset;
+};
+
+struct anv_binding_legacy_data {
+#define ANV_DESCRIPTOR_SET_DYNAMIC_INDEX_MASK ((uint32_t)ANV_UBO_ALIGNMENT - 1)
+#define ANV_DESCRIPTOR_SET_OFFSET_MASK        (~(uint32_t)(ANV_UBO_ALIGNMENT - 1))
+
+   /**
+    * Base offsets for descriptor sets from
+    *
+    * The surface offset has different meaning depending on a number of
+    * factors :
+    *
+    *    - with descriptor sets (direct or indirect), this relative
+    *      pdevice->va.descriptor_pool
+    *
+    *    - with descriptor buffers on DG2+, relative
+    *      device->va.descriptor_buffer_pool
+    *
+    * The sampler offset is relative to device->va.dynamic_state_pool.
+    */
+   struct {
+      uint32_t surfaces_offset;
+      uint32_t samplers_offset;
+   } sets[MAX_SETS];
+
+   /** Dynamic offsets for dynamic UBOs and SSBOs */
+   uint32_t dynamic_offsets[MAX_DYNAMIC_BUFFERS];
+};
+
+struct anv_push_constants {
+   /** Push constant data provided by the client through vkPushConstants */
+   uint8_t client_data[MAX_PUSH_CONSTANTS_SIZE];
+
+   struct anv_drv_push_data drv_data;
+
+   union {
+      struct anv_binding_legacy_data legacy;
+      struct anv_binding_buffer_data buffer;
+      struct anv_binding_heap_data   heap;
+   };
+
+   /** Subgroup ID
+    *
+    * This is never set by software but is implicitly filled out when
+    * uploading the push constants for compute shaders on pre Gfx12.5 HW.
+    *
+    * This *MUST* be the last field of the anv_push_constants structure.
+    */
+   uint32_t subgroup_id;
+};
+
+#define anv_push_constants_size(mode) (                          \
+      ((mode) == ANV_SHADER_BINDING_MODE_LEGACY ||               \
+       (mode) == ANV_SHADER_BINDING_MODE_LEGACY_INDIRECT) ?      \
+      (offsetof(struct anv_push_constants, legacy) +             \
+       sizeof(struct anv_binding_legacy_data)) :                 \
+      (mode) == ANV_SHADER_BINDING_MODE_BUFFER ?                 \
+      (offsetof(struct anv_push_constants, buffer) +             \
+       sizeof(struct anv_binding_buffer_data)) :                 \
+      (offsetof(struct anv_push_constants, heap) +               \
+       sizeof(struct anv_binding_heap_data)))
 
 #define ANV_DRIVER_PUSH_CONSTANTS_SIZE (sizeof(struct anv_push_constants) - MAX_PUSH_CONSTANTS_SIZE)
 
@@ -347,11 +446,6 @@ struct anv_dgc_cs_layout {
    } dispatch;
 };
 
-enum anv_dgc_push_slot_type {
-   ANV_DGC_PUSH_SLOT_TYPE_PUSH_CONSTANTS,
-   ANV_DGC_PUSH_SLOT_TYPE_OTHER,
-};
-
 enum anv_dgc_draw_params {
    ANV_DGC_DRAW_PARAM_BASE_INSTANCE_VERTEX = BITFIELD_BIT(0),
    ANV_DGC_DRAW_PARAM_DRAW_ID              = BITFIELD_BIT(1),
@@ -381,9 +475,15 @@ struct anv_dgc_gfx_descriptor {
          union {
             struct {
                struct anv_dgc_push_stage_slot {
+                  uint16_t set; /* ANV_DESCRIPTOR_SET_* */
+                  /* Used for ANV_DESCRIPTOR_SET_PUSH_POINTER, byte offset in
+                   * the push data of where the 64bit pointer is located.
+                   */
+                  uint16_t push_data_index;
+                  /* Offset to be added to the base push constant pointer. */
                   uint16_t push_data_offset;
+                  /* Size of the push data. */
                   uint16_t push_data_size;
-                  uint32_t type; /* enum anv_dgc_push_slot_type */
                } slots[4];
                uint32_t n_slots;
             } legacy;
@@ -407,7 +507,9 @@ struct anv_dgc_gfx_state {
    struct anv_dgc_gfx_descriptor descriptor;
 
    struct {
-      uint64_t addresses[4];
+      struct {
+         uint64_t addresses[4];
+      } stages[ANV_DGC_N_GFX_STAGES];
    } push_constants;
 
    struct {

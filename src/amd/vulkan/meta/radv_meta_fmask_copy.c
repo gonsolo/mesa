@@ -180,9 +180,9 @@ radv_fmask_copy(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_blit2d_surf
 
    radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
 
-   const VkImageViewUsageCreateInfo src_iview_usage_info = {
-      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
-      .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
+   const VkImageViewUsage2CreateInfoKHR src_iview_usage_info = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_2_CREATE_INFO_KHR,
+      .usage = VK_IMAGE_USAGE_2_SAMPLED_BIT_KHR,
    };
 
    radv_image_view_init(&src_iview, device,
@@ -191,7 +191,7 @@ radv_fmask_copy(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_blit2d_surf
                            .pNext = &src_iview_usage_info,
                            .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
                            .image = radv_image_to_handle(src->image),
-                           .viewType = radv_meta_get_view_type(src->image),
+                           .viewType = radv_meta_get_view_type(src->image, false),
                            .format = vk_format_no_srgb(src->image->vk.format),
                            .subresourceRange =
                               {
@@ -204,9 +204,9 @@ radv_fmask_copy(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_blit2d_surf
                         },
                         NULL);
 
-   const VkImageViewUsageCreateInfo dst_iview_usage_info = {
-      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
-      .usage = VK_IMAGE_USAGE_STORAGE_BIT,
+   const VkImageViewUsage2CreateInfoKHR dst_iview_usage_info = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_2_CREATE_INFO_KHR,
+      .usage = VK_IMAGE_USAGE_2_STORAGE_BIT_KHR,
    };
 
    radv_image_view_init(&dst_iview, device,
@@ -215,7 +215,7 @@ radv_fmask_copy(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_blit2d_surf
                            .pNext = &dst_iview_usage_info,
                            .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
                            .image = radv_image_to_handle(dst->image),
-                           .viewType = radv_meta_get_view_type(dst->image),
+                           .viewType = radv_meta_get_view_type(dst->image, false),
                            .format = vk_format_no_srgb(dst->image->vk.format),
                            .subresourceRange =
                               {

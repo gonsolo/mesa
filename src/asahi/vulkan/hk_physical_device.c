@@ -92,6 +92,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_maintenance7 = true,
       .KHR_maintenance8 = true,
       .KHR_maintenance9 = true,
+      .KHR_maintenance10 = true,
       .KHR_map_memory2 = true,
       .KHR_multiview = true,
       .KHR_pipeline_binary = true,
@@ -116,6 +117,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_shader_float_controls = true,
       .KHR_shader_float_controls2 = true,
       .KHR_shader_float16_int8 = true,
+      .KHR_shader_fma = true,
       .KHR_shader_integer_dot_product = true,
       .KHR_shader_maximal_reconvergence = true,
       .KHR_shader_non_semantic_info = true,
@@ -125,6 +127,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_shader_subgroup_rotate = true,
       .KHR_shader_subgroup_uniform_control_flow = true,
       .KHR_shader_terminate_invocation = true,
+      .KHR_shader_untyped_pointers = true,
       .KHR_spirv_1_4 = true,
       .KHR_storage_buffer_storage_class = true,
       .KHR_timeline_semaphore = true,
@@ -172,7 +175,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .EXT_image_drm_format_modifier = true,
       .EXT_image_robustness = true,
       .EXT_image_sliced_view_of_3d = false,
-      .EXT_image_view_min_lod = instance->image_view_min_lod,
+      .EXT_image_view_min_lod = instance->drirc.misc.image_view_min_lod,
       .EXT_index_type_uint8 = true,
       .EXT_inline_uniform_block = true,
       .EXT_line_rasterization = true,
@@ -190,6 +193,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
 #ifdef HK_USE_WSI_PLATFORM
       .EXT_present_timing = true,
 #endif
+      .EXT_primitive_restart_index = true,
       .EXT_primitive_topology_list_restart = true,
       .EXT_private_data = true,
       .EXT_primitives_generated_query = false,
@@ -222,6 +226,9 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .EXT_ycbcr_2plane_444_formats = false,
       .EXT_ycbcr_image_arrays = false,
       .GOOGLE_decorate_string = true,
+#ifdef HK_USE_WSI_PLATFORM
+      .GOOGLE_display_timing = wsi_instance_supports_google_display_timing(&instance->vk, &instance->drirc.options),
+#endif
       .GOOGLE_hlsl_functionality1 = true,
       .GOOGLE_user_type = true,
       .VALVE_mutable_descriptor_type = true,
@@ -261,7 +268,7 @@ hk_get_device_features(
       .textureCompressionASTC_LDR = true,
       .occlusionQueryPrecise = true,
       .pipelineStatisticsQuery = true,
-      .vertexPipelineStoresAndAtomics = instance->vertex_stores,
+      .vertexPipelineStoresAndAtomics = instance->drirc.misc.enable_vertex_pipeline_stores_atomics,
       .fragmentStoresAndAtomics = true,
       .shaderTessellationAndGeometryPointSize = true,
       .shaderImageGatherExtended = true,
@@ -342,7 +349,7 @@ hk_get_device_features(
       .descriptorBindingPartiallyBound = true,
       .descriptorBindingVariableDescriptorCount = true,
       .runtimeDescriptorArray = true,
-      .samplerFilterMinmax = instance->fake_minmax,
+      .samplerFilterMinmax = instance->drirc.misc.fake_minmax,
       .scalarBlockLayout = true,
       .imagelessFramebuffer = true,
       .uniformBufferStandardLayout = true,
@@ -414,6 +421,9 @@ hk_get_device_features(
       /* VK_KHR_maintenance9 */
       .maintenance9 = true,
 
+      /* VK_KHR_maintenance10 */
+      .maintenance10 = true,
+
       /* VK_KHR_pipeline_binary */
       .pipelineBinaries = true,
 
@@ -441,6 +451,11 @@ hk_get_device_features(
 
       /* VK_KHR_shader_float_controls2 */
       .shaderFloatControls2 = true,
+
+      /* VK_KHR_shader_fma */
+      .shaderFmaFloat16 = true,
+      .shaderFmaFloat32 = true,
+      .shaderFmaFloat64 = false,
 
       /* VK_KHR_shader_maximal_reconvergence */
       .shaderMaximalReconvergence = true,
@@ -562,7 +577,7 @@ hk_get_device_features(
 #endif
 
       /* VK_EXT_image_view_min_lod */
-      .minLod = instance->image_view_min_lod,
+      .minLod = instance->drirc.misc.image_view_min_lod,
 
       /* VK_EXT_map_memory_placed */
       .memoryMapPlaced = true,
@@ -583,6 +598,9 @@ hk_get_device_features(
 
       /* VK_EXT_pipeline_robustness */
       .pipelineRobustness = true,
+
+      /* VK_EXT_primitive_restart_index */
+      .primitiveRestartIndex = true,
 
       /* VK_EXT_primitive_topology_list_restart */
       .primitiveTopologyListRestart = true,
@@ -617,6 +635,9 @@ hk_get_device_features(
 
       /* VK_KHR_shader_subgroup_uniform_control_flow */
       .shaderSubgroupUniformControlFlow = true,
+
+      /* VK_KHR_shader_untyped_pointers */
+      .shaderUntypedPointers = true,
 
       /* VK_EXT_shader_uniform_buffer_unsized_array */
       .shaderUniformBufferUnsizedArray = true,
@@ -675,7 +696,7 @@ hk_get_device_properties(const struct agx_device *dev,
    *properties = (struct vk_properties){
       .apiVersion = hk_get_vk_version(),
       .driverVersion = vk_get_driver_version(),
-      .vendorID = instance->force_vk_vendor ?: VK_VENDOR_ID_MESA,
+      .vendorID = instance->drirc.debug.force_vk_vendor ?: VK_VENDOR_ID_MESA,
       .deviceID = 0,
       .deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
 
@@ -889,7 +910,7 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxDescriptorSetUpdateAfterBindSampledImages = HK_MAX_DESCRIPTORS,
       .maxDescriptorSetUpdateAfterBindStorageImages = HK_MAX_DESCRIPTORS,
       .maxDescriptorSetUpdateAfterBindInputAttachments = HK_MAX_DESCRIPTORS,
-      .filterMinmaxSingleComponentFormats = instance->fake_minmax,
+      .filterMinmaxSingleComponentFormats = instance->drirc.misc.fake_minmax,
       .filterMinmaxImageComponentMapping = false,
       .maxTimelineSemaphoreValueDifference = UINT64_MAX,
       .framebufferIntegerColorSampleCounts = sample_counts,
@@ -967,6 +988,11 @@ hk_get_device_properties(const struct agx_device *dev,
       .defaultVertexAttributeValue =
          VK_DEFAULT_VERTEX_ATTRIBUTE_VALUE_ZERO_ZERO_ZERO_ONE_KHR,
 
+      /* VK_KHR_maintenance10 */
+      .rgba4OpaqueBlackSwizzled = true,
+      .resolveSrgbFormatAppliesTransferFunction = true,
+      .resolveSrgbFormatSupportsTransferFunctionControl = true,
+
       /* VK_EXT_map_memory_placed */
       .minPlacedMemoryMapAlignment = os_page_size,
 
@@ -1039,7 +1065,9 @@ hk_get_device_properties(const struct agx_device *dev,
       .advancedBlendAllOperations = true,
    };
 
-   strncpy(properties->deviceName, dev->name, sizeof(properties->deviceName));
+   snprintf(properties->deviceName, sizeof(properties->deviceName), "%s",
+            (strlen(instance->drirc.debug.force_vk_devicename) > 0) ?
+            instance->drirc.debug.force_vk_devicename : dev->name);
 
    /* VK_EXT_shader_module_identifier */
    static_assert(sizeof(vk_shaderModuleIdentifierAlgorithmUUID) ==
@@ -1168,8 +1196,8 @@ hk_get_sysmem_heap_size(struct hk_physical_device *pdev)
       return pdev->sysmem;
 
    struct hk_instance *instance = hk_physical_device_instance(pdev);
-   return os_get_gpu_heap_size(instance->heap_memory_percent,
-                               &instance->heap_memory_percent);
+   return os_get_gpu_heap_size(instance->drirc.misc.heap_memory_percent,
+                               &instance->drirc.misc.heap_memory_percent);
 }
 
 static uint64_t
@@ -1398,10 +1426,10 @@ hk_GetPhysicalDeviceMemoryProperties2(
       pMemoryProperties->memoryProperties.memoryTypes[i] = pdev->mem_types[i];
    }
 
-   vk_foreach_struct(ext, pMemoryProperties->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryProperties->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT: {
-         VkPhysicalDeviceMemoryBudgetPropertiesEXT *p = (void *)ext;
+         VkPhysicalDeviceMemoryBudgetPropertiesEXT *p = ext;
 
          uint64_t sysmem_budget =
             pdev->sysmem ? hk_get_sysmem_heap_available(pdev) : 0;
@@ -1430,7 +1458,7 @@ hk_GetPhysicalDeviceMemoryProperties2(
                budget = ROUND_DOWN_TO((uint64_t)(budget * percent), 1 << 20);
             } else {
                /* Scale the budget the same way the heap was scaled. */
-               percent *= instance->heap_memory_percent;
+               percent *= instance->drirc.misc.heap_memory_percent;
 
                budget = vk_physical_device_heap_budget_from_system(
                   &pdev->vk, percent, heap->size, used);
@@ -1454,7 +1482,7 @@ hk_GetPhysicalDeviceMemoryProperties2(
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }

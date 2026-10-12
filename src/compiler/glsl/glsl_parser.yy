@@ -105,6 +105,7 @@ static bool match_layout_qualifier(const char *s1, const char *s2,
    float real;
    double dreal;
    const char *identifier;
+   enum yuv_csc_standard csc_standard;
 
    struct ast_type_qualifier type_qualifier;
 
@@ -159,6 +160,7 @@ static bool match_layout_qualifier(const char *s1, const char *s2,
 %token <n> INTCONSTANT UINTCONSTANT BOOLCONSTANT
 %token <n64> INT64CONSTANT UINT64CONSTANT
 %token <identifier> FIELD_SELECTION
+%token <csc_standard> CSCSTANDARD
 %token LEFT_OP RIGHT_OP
 %token INC_OP DEC_OP LE_OP GE_OP EQ_OP NE_OP
 %token AND_OP OR_OP XOR_OP MUL_ASSIGN DIV_ASSIGN ADD_ASSIGN
@@ -311,6 +313,7 @@ translation_unit:
          }
          state->symbols->add_default_precision_qualifier("sampler2D", ast_precision_low);
          state->symbols->add_default_precision_qualifier("samplerExternalOES", ast_precision_low);
+         state->symbols->add_default_precision_qualifier("__samplerExternal2DY2YEXT", ast_precision_low);
          state->symbols->add_default_precision_qualifier("samplerCube", ast_precision_low);
          state->symbols->add_default_precision_qualifier("atomic_uint", ast_precision_high);
       }
@@ -492,6 +495,13 @@ primary_expression:
       $$ = new(ctx) ast_expression(ast_bool_constant, NULL, NULL, NULL);
       $$->set_location(@1);
       $$->primary_expression.bool_constant = $1;
+   }
+   | CSCSTANDARD
+   {
+      linear_ctx *ctx = state->linalloc;
+      $$ = new(ctx) ast_expression(ast_csc_standard, NULL, NULL, NULL);
+      $$->set_location(@1);
+      $$->primary_expression.csc_standard = $1;
    }
    | '(' expression ')'
    {
@@ -1269,7 +1279,9 @@ layout_qualifier_id:
       }
 
       /* See also interface_block_layout_qualifier. */
-      if (!$$.flags.i && state->has_uniform_buffer_objects()) {
+      if (!$$.flags.i &&
+          (state->has_uniform_buffer_objects() ||
+           state->has_shader_storage_buffer_objects())) {
          if (match_layout_qualifier($1, "std140", state) == 0) {
             $$.flags.q.std140 = 1;
          } else if (match_layout_qualifier($1, "shared", state) == 0) {
@@ -1300,9 +1312,12 @@ layout_qualifier_id:
            $$.flags.q.packed = 1;
          }
 
-         if ($$.flags.i && state->ARB_uniform_buffer_object_warn) {
+         if ($$.flags.i &&
+             (state->ARB_uniform_buffer_object_warn ||
+              state->ARB_shader_storage_buffer_object_warn)) {
             _mesa_glsl_warning(& @1, state,
                                "#version 140 / GL_ARB_uniform_buffer_object "
+                               "/ GL_ARB_shader_storage_buffer_object"
                                "layout qualifier `%s' is used", $1);
          }
       }
@@ -1628,7 +1643,7 @@ layout_qualifier_id:
                  { "blend_support_hsl_saturation", BITFIELD_BIT(PIPE_ADVANCED_BLEND_HSL_SATURATION) },
                  { "blend_support_hsl_color",      BITFIELD_BIT(PIPE_ADVANCED_BLEND_HSL_COLOR) },
                  { "blend_support_hsl_luminosity", BITFIELD_BIT(PIPE_ADVANCED_BLEND_HSL_LUMINOSITY) },
-                 { "blend_support_all_equations",  (1u << (PIPE_ADVANCED_BLEND_HSL_LUMINOSITY + 1)) - 2 },
+                 { "blend_support_all_equations",  PIPE_ADVANCED_BLEND_KHR_MODES_MASK },
          };
          for (unsigned i = 0; i < ARRAY_SIZE(map); i++) {
             if (match_layout_qualifier($1, map[i].s, state) == 0) {
@@ -1740,6 +1755,24 @@ layout_qualifier_id:
             _mesa_glsl_warning(& @1, state,
                                "GL_NV_viewport_array2 layout "
                                "identifier `%s' used", $1);
+         }
+      }
+
+      /* Layout qualifier for EXT_YUV_target. */
+      if (match_layout_qualifier($1, "yuv", state) == 0) {
+         if (state->stage != MESA_SHADER_FRAGMENT) {
+            _mesa_glsl_error(& @1, state,
+                              "yuv layout qualifier only valid in fragment "
+                              "shaders");
+         }
+
+         if (state->EXT_YUV_target_enable) {
+            $$.flags.q.yuv = 1;
+         } else {
+            _mesa_glsl_error(& @1, state,
+                              "yuv layout qualifier present, but the "
+                              "EXT_YUV_target_enable extension is not "
+                              "enabled.");
          }
       }
 

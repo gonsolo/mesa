@@ -230,7 +230,7 @@ struct radv_copy_image_key {
 
 static VkResult
 get_itoi_pipeline(struct radv_device *device, const struct radv_image *src_image, const struct radv_image *dst_image,
-                  int samples, VkPipeline *pipeline_out, VkPipelineLayout *layout_out)
+                  uint32_t samples, VkPipeline *pipeline_out, VkPipelineLayout *layout_out)
 {
    const bool src_3d = src_image->vk.image_type == VK_IMAGE_TYPE_3D;
    const bool dst_3d = dst_image->vk.image_type == VK_IMAGE_TYPE_3D;
@@ -423,15 +423,15 @@ get_cleari_96bit_pipeline(struct radv_device *device, VkPipeline *pipeline_out, 
 
 static void
 create_iview(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_blit2d_surf *surf, struct radv_image_view *iview,
-             VkFormat format, VkImageAspectFlagBits aspects, VkImageUsageFlags usage)
+             VkFormat format, VkImageAspectFlagBits aspects, VkImageUsageFlags2KHR usage)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
 
    if (format == VK_FORMAT_UNDEFINED)
       format = surf->format;
 
-   const VkImageViewUsageCreateInfo iview_usage_info = {
-      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+   const VkImageViewUsage2CreateInfoKHR iview_usage_info = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_2_CREATE_INFO_KHR,
       .usage = usage,
    };
 
@@ -441,7 +441,7 @@ create_iview(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_blit2d_surf *s
                            .pNext = &iview_usage_info,
                            .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
                            .image = radv_image_to_handle(surf->image),
-                           .viewType = radv_meta_get_view_type(surf->image),
+                           .viewType = radv_meta_get_view_type(surf->image, false),
                            .format = format,
                            .subresourceRange = {.aspectMask = aspects,
                                                 .baseMipLevel = surf->level,
@@ -512,7 +512,7 @@ fixup_gfx9_cs_copy(struct radv_cmd_buffer *cmd_buffer, const struct radv_meta_bl
        * while we're fixing them. If we're writing to an image, we do not need
        * to wait because the compute shader cannot write to those texels
        */
-      cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_L2 | RADV_CMD_FLAG_INV_VCACHE;
+      cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_L2 | AC_BARRIER_INV_VMEM;
    }
 
    if (image->bindings[0].bo)
@@ -559,7 +559,7 @@ radv_meta_image_to_buffer(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_b
       return;
    }
 
-   create_iview(cmd_buffer, src, &src_view, VK_FORMAT_UNDEFINED, src->aspect_mask, VK_IMAGE_USAGE_SAMPLED_BIT);
+   create_iview(cmd_buffer, src, &src_view, VK_FORMAT_UNDEFINED, src->aspect_mask, VK_IMAGE_USAGE_2_SAMPLED_BIT_KHR);
 
    radv_meta_bind_descriptors(
       cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 2,
@@ -620,7 +620,7 @@ radv_meta_buffer_to_image_cs(struct radv_cmd_buffer *cmd_buffer, struct radv_met
       return;
    }
 
-   create_iview(cmd_buffer, dst, &dst_view, VK_FORMAT_UNDEFINED, dst->aspect_mask, VK_IMAGE_USAGE_STORAGE_BIT);
+   create_iview(cmd_buffer, dst, &dst_view, VK_FORMAT_UNDEFINED, dst->aspect_mask, VK_IMAGE_USAGE_2_STORAGE_BIT_KHR);
 
    radv_meta_bind_descriptors(
       cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 2,
@@ -724,10 +724,10 @@ radv_meta_image_to_image_cs(struct radv_cmd_buffer *cmd_buffer, struct radv_meta
 
       create_iview(cmd_buffer, src, &src_view,
                    (src_aspect_mask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) ? depth_format : 0,
-                   src_aspect_mask, VK_IMAGE_USAGE_SAMPLED_BIT);
+                   src_aspect_mask, VK_IMAGE_USAGE_2_SAMPLED_BIT_KHR);
       create_iview(cmd_buffer, dst, &dst_view,
                    dst_aspect_mask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT) ? depth_format : 0,
-                   dst_aspect_mask, VK_IMAGE_USAGE_STORAGE_BIT);
+                   dst_aspect_mask, VK_IMAGE_USAGE_2_STORAGE_BIT_KHR);
 
       radv_meta_bind_descriptors(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 2,
                                  (VkDescriptorGetInfoEXT[]){{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_GET_INFO_EXT,
@@ -835,7 +835,7 @@ radv_meta_clear_image_cs(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_bl
       return;
    }
 
-   create_iview(cmd_buffer, dst, &dst_iview, VK_FORMAT_UNDEFINED, dst->aspect_mask, VK_IMAGE_USAGE_STORAGE_BIT);
+   create_iview(cmd_buffer, dst, &dst_iview, VK_FORMAT_UNDEFINED, dst->aspect_mask, VK_IMAGE_USAGE_2_STORAGE_BIT_KHR);
 
    radv_meta_bind_descriptors(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 1,
                               (VkDescriptorGetInfoEXT[]){

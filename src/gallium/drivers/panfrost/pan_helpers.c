@@ -87,7 +87,7 @@ panfrost_get_index_buffer(struct panfrost_batch *batch,
 
    if (!info->has_user_indices) {
       /* Only resources can be directly mapped */
-      panfrost_batch_read_rsrc(batch, rsrc, MESA_SHADER_VERTEX);
+      panfrost_batch_read_rsrc(batch, rsrc);
       return rsrc->plane.base + offset;
    } else {
       /* Otherwise, we need to upload to transient memory */
@@ -172,6 +172,42 @@ pan_assign_vertex_buffer(struct pan_vertex_buffer *buffers, unsigned *nr_bufs,
    return idx;
 }
 
+struct pan_ptr
+panfrost_emit_fullscreen_vertex_array(struct panfrost_batch *batch,
+                                      enum blitter_attrib_type type,
+                                      const struct blitter_attrib *attrib)
+{
+   struct pan_ptr array = { .cpu = NULL, .gpu = 0 };
+   struct panfrost_run_fullscreen_attrib *texcoords;
+
+   if (type != UTIL_BLITTER_ATTRIB_TEXCOORD_XY &&
+       type != UTIL_BLITTER_ATTRIB_TEXCOORD_XYZW)
+      return array;
+
+   array = pan_pool_alloc_aligned(&batch->pool.base,
+                                  PAN_RUN_FULLSCREEN_ARRAY_SIZE,
+                                  PAN_RUN_FULLSCREEN_ARRAY_ALIGN);
+   texcoords = (struct panfrost_run_fullscreen_attrib *)
+      ((uint8_t *)array.cpu + (PAN_RUN_FULLSCREEN_NUM_VERTICES *
+                               PAN_RUN_FULLSCREEN_ATTRIB_STRIDE));
+
+   /* The fullscreen quad is defined by 3 vertices. */
+   texcoords[0].x = attrib->texcoord.x1;
+   texcoords[0].y = attrib->texcoord.y1;
+   texcoords[0].z = attrib->texcoord.z;
+   texcoords[0].w = attrib->texcoord.w;
+   texcoords[1].x = attrib->texcoord.x2;
+   texcoords[1].y = attrib->texcoord.y1;
+   texcoords[1].z = attrib->texcoord.z;
+   texcoords[1].w = attrib->texcoord.w;
+   texcoords[2].x = attrib->texcoord.x1;
+   texcoords[2].y = attrib->texcoord.y2;
+   texcoords[2].z = attrib->texcoord.z;
+   texcoords[2].w = attrib->texcoord.w;
+
+   return array;
+}
+
 /*
  * Helper to add a PIPE_CLEAR_* to batch->draws and batch->resolve together,
  * meaning that we draw to a given target. Adding to only one mask does not
@@ -225,13 +261,12 @@ panfrost_set_batch_masks_zs(struct panfrost_batch *batch)
 
 void
 panfrost_track_image_access(struct panfrost_batch *batch,
-                            mesa_shader_stage stage,
                             struct pipe_image_view *image)
 {
    struct panfrost_resource *rsrc = pan_resource(image->resource);
 
    if (image->shader_access & PIPE_IMAGE_ACCESS_WRITE) {
-      panfrost_batch_write_rsrc(batch, rsrc, stage);
+      panfrost_batch_write_rsrc(batch, rsrc);
 
       bool is_buffer = rsrc->base.target == PIPE_BUFFER;
       unsigned level = is_buffer ? 0 : image->u.tex.level;
@@ -242,6 +277,6 @@ panfrost_track_image_access(struct panfrost_batch *batch,
                         rsrc->base.width0);
       }
    } else {
-      panfrost_batch_read_rsrc(batch, rsrc, stage);
+      panfrost_batch_read_rsrc(batch, rsrc);
    }
 }

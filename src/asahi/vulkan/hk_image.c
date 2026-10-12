@@ -107,6 +107,15 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
       features |= VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT;
       features |= VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
       features |= VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT;
+
+      if (vk_format_has_depth(vk_format)) {
+         features |= VK_FORMAT_FEATURE_2_DEPTH_COPY_ON_COMPUTE_QUEUE_BIT_KHR |
+                     VK_FORMAT_FEATURE_2_DEPTH_COPY_ON_TRANSFER_QUEUE_BIT_KHR;
+      }
+      if (vk_format_has_stencil(vk_format)) {
+         features |= VK_FORMAT_FEATURE_2_STENCIL_COPY_ON_COMPUTE_QUEUE_BIT_KHR |
+                     VK_FORMAT_FEATURE_2_STENCIL_COPY_ON_TRANSFER_QUEUE_BIT_KHR;
+      }
    }
 
    return features;
@@ -579,10 +588,10 @@ hk_GetPhysicalDeviceImageFormatProperties2(
       .maxResourceSize = UINT32_MAX, /* TODO */
    };
 
-   vk_foreach_struct(s, pImageFormatProperties->pNext) {
-      switch (s->sType) {
+   vk_foreach_struct(sType, s, pImageFormatProperties->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES: {
-         VkExternalImageFormatProperties *p = (void *)s;
+         VkExternalImageFormatProperties *p = s;
          /* From the Vulkan 1.3.256 spec:
           *
           *    "If handleType is 0, vkGetPhysicalDeviceImageFormatProperties2
@@ -597,12 +606,12 @@ hk_GetPhysicalDeviceImageFormatProperties2(
          break;
       }
       case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES: {
-         VkSamplerYcbcrConversionImageFormatProperties *ycbcr_props = (void *)s;
+         VkSamplerYcbcrConversionImageFormatProperties *ycbcr_props = s;
          ycbcr_props->combinedImageSamplerDescriptorCount = plane_count;
          break;
       }
       case VK_STRUCTURE_TYPE_HOST_IMAGE_COPY_DEVICE_PERFORMANCE_QUERY_EXT: {
-         VkHostImageCopyDevicePerformanceQueryEXT *hic_props = (void *)s;
+         VkHostImageCopyDevicePerformanceQueryEXT *hic_props = s;
 
          hic_props->optimalDeviceAccess = hic_props->identicalMemoryLayout =
             !(pImageFormatInfo->tiling == VK_IMAGE_TILING_OPTIMAL &&
@@ -610,7 +619,7 @@ hk_GetPhysicalDeviceImageFormatProperties2(
          break;
       }
       default:
-         vk_debug_ignored_stype(s->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -1074,16 +1083,16 @@ hk_get_image_memory_requirements(struct hk_device *dev, struct hk_image *image,
    pMemoryRequirements->memoryRequirements.alignment = align_B;
    pMemoryRequirements->memoryRequirements.size = size_B;
 
-   vk_foreach_struct_const(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
-         VkMemoryDedicatedRequirements *dedicated = (void *)ext;
+         VkMemoryDedicatedRequirements *dedicated = ext;
          dedicated->prefersDedicatedAllocation = false;
          dedicated->requiresDedicatedAllocation = false;
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }

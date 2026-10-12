@@ -117,7 +117,7 @@ radv_sdma_get_buf_surf(const struct radv_image *const image, const VkDeviceMemor
       .pitch = pitch,
       .slice_pitch = slice_pitch,
       .bpp = bpe,
-      .is_secure = image->vk.create_flags & VK_IMAGE_CREATE_PROTECTED_BIT,
+      .is_secure = image->vk.create_flags & VK_IMAGE_CREATE_2_PROTECTED_BIT_KHR,
    };
 
    return info;
@@ -152,7 +152,7 @@ radv_sdma_get_surf(struct radv_cmd_buffer *cmd_buffer, const struct radv_image *
       .first_level = subresource.mipLevel,
       .num_levels = image->vk.mip_levels,
       .is_stencil = subresource.aspectMask == VK_IMAGE_ASPECT_STENCIL_BIT,
-      .is_secure = image->vk.create_flags & VK_IMAGE_CREATE_PROTECTED_BIT,
+      .is_secure = image->vk.create_flags & VK_IMAGE_CREATE_2_PROTECTED_BIT_KHR,
    };
 
    info.offset.x = offset.x * radv_sdma_get_texel_scale(image);
@@ -178,7 +178,7 @@ radv_sdma_get_surf(struct radv_cmd_buffer *cmd_buffer, const struct radv_image *
       info.pitch = surf->u.gfx9.pitch[subresource.mipLevel] / blk_w;
       info.slice_pitch = surf->u.gfx9.surf_slice_size / bpe;
    } else {
-      const uint32_t queue_mask = radv_image_queue_family_mask(image, cmd_buffer->qf, cmd_buffer->qf);
+      const uint32_t queue_mask = radv_image_queue_family_mask(image, cmd_buffer->qf);
       const bool htile_compressed =
          radv_layout_is_htile_compressed(device, image, subresource.mipLevel, image_layout, queue_mask);
       const bool dcc_compressed =
@@ -189,12 +189,10 @@ radv_sdma_get_surf(struct radv_cmd_buffer *cmd_buffer, const struct radv_image *
 
       info.va = (va + surf_offset) | surf->tile_swizzle << 8;
 
-      if (pdev->info.sdma_supports_compression && (dcc_compressed || htile_compressed)) {
-         assert(pdev->info.gfx_level < GFX12);
-         info.is_compressed = true;
-      }
+      if (dcc_compressed || htile_compressed) {
+         assert(pdev->info.sdma_supports_compression && pdev->info.gfx_level < GFX12);
 
-      if (info.is_compressed) {
+         info.is_compressed = true;
          info.meta_va = va + surf->meta_offset;
          info.surf_type = radv_sdma_surf_type_from_aspect_mask(subresource.aspectMask);
          info.htile_enabled = htile_compressed;
@@ -524,15 +522,25 @@ radv_sdma_copy_image_t2t_scanline(const struct radv_device *device, struct radv_
 }
 
 bool
-radv_sdma_supports_image(const struct radv_device *device, const struct radv_image *image, bool to_image)
+radv_sdma_supports_image(const struct radv_cmd_buffer *cmd_buffer, const struct radv_image *image,
+                         VkImageLayout image_layout, const VkImageSubresourceLayers *subresource, bool to_image)
 {
+   const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
+   const uint32_t queue_mask = radv_image_queue_family_mask(image, cmd_buffer->qf);
+
+   /* Fallback to compute when SDMA doesn't support compression to avoid disabling DCC/HTILE for
+    * concurrent images. Only GFX9 and older, Navi10 and GFX1013 are affected.
+    */
+   if (!pdev->info.sdma_supports_compression &&
+       (radv_layout_dcc_compressed(device, image, subresource->mipLevel, image_layout, queue_mask) ||
+        radv_layout_is_htile_compressed(device, image, subresource->mipLevel, image_layout, queue_mask)))
+      return false;
 
    if (radv_is_format_emulated(pdev, image->vk.format))
       return to_image ? false : true;
 
-   if (!pdev->info.sdma_supports_sparse &&
-       (image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT))
+   if (!pdev->info.sdma_supports_sparse && (image->vk.create_flags & VK_IMAGE_CREATE_2_SPARSE_RESIDENCY_BIT_KHR))
       return false;
 
    if (image->vk.samples != VK_SAMPLE_COUNT_1_BIT)

@@ -1,8 +1,6 @@
 /*
  * Copyright © 2021 Collabora Ltd.
- *
- * Derived from tu_shader.c which is:
- * Copyright © 2019 Google LLC
+ * Copyright © 2019-2026 Google LLC
  *
  * Also derived from anv_pipeline.c which is
  * Copyright © 2015 Intel Corporation
@@ -11,11 +9,16 @@
  */
 
 #include "panvk_device.h"
+#include "panvk_image.h"
+#include "panvk_sampler.h"
 #include "panvk_shader.h"
 
+#include "vk_format.h"
 #include "vk_graphics_state.h"
+#include "vk_nir_convert_ycbcr.h"
 #include "vk_pipeline.h"
 #include "vk_pipeline_layout.h"
+#include "vk_ycbcr_conversion.h"
 
 #include "util/bitset.h"
 #include "pan_nir.h"
@@ -741,12 +744,100 @@ get_desc_array_stride(const struct panvk_descriptor_set_binding_layout *layout,
    }
 }
 
+static void
+lower_tex_ycbcr(nir_builder *b, nir_tex_instr *tex,
+                const struct vk_ycbcr_conversion_state *conversion)
+{
+   b->cursor = nir_after_instr(&tex->instr);
+
+   nir_def *raw = &tex->def;
+
+   VkFormat y_format = vk_format_get_plane_format(conversion->format, 0);
+   uint8_t bits = vk_format_get_bpc(y_format);
+   uint32_t bpcs[3] = {bits, bits, bits};
+
+#if PAN_ARCH < 14
+   if (bits == 10) {
+      /* Upon normalization, the 10-bit component is divided by 1020 (0xFF<<2)
+       * instead of 1023. So here we have to scale down accordingly.
+       */
+      const float factor = 1020.0f / 1023.0f;
+      nir_def *scale = nir_imm_vec4(b, factor, factor, factor, 1.0f);
+      raw = nir_fmul(b, raw, scale);
+   }
+#endif
+
+   nir_def *result = raw;
+   if (conversion->ycbcr_model !=
+       VK_SAMPLER_YCBCR_MODEL_CONVERSION_RGB_IDENTITY) {
+      result = nir_convert_ycbcr_to_rgb(b, conversion->ycbcr_model,
+                                        conversion->ycbcr_range, raw, bpcs);
+   }
+
+   nir_def_rewrite_uses_after(&tex->def, result);
+
+   b->cursor = nir_before_instr(&tex->instr);
+}
+
+static void
+lower_tex_immutable(nir_builder *b, nir_tex_instr *tex,
+                    const struct lower_desc_ctx *ctx)
+{
+   /* clang-format off */
+   if (tex->op == nir_texop_txs ||
+       tex->op == nir_texop_query_levels ||
+       tex->op == nir_texop_texture_samples ||
+       tex->op == nir_texop_lod)
+      return;
+   /* clang-format on */
+
+   int sampler_src_idx =
+      nir_tex_instr_src_index(tex, nir_tex_src_sampler_deref);
+   if (sampler_src_idx < 0)
+      return;
+
+   nir_deref_instr *deref = nir_src_as_deref(tex->src[sampler_src_idx].src);
+   uint32_t set, binding, index_imm, max_idx;
+   nir_def *index_ssa;
+   get_resource_deref_binding(deref, &set, &binding, &index_imm, &index_ssa,
+                              &max_idx);
+
+   const struct panvk_descriptor_set_layout *set_layout = ctx->set_layouts[set];
+   const struct panvk_descriptor_set_binding_layout *bind_layout =
+      &set_layout->bindings[binding];
+
+   if (!bind_layout->immutable_samplers)
+      return;
+
+   const struct panvk_sampler *sampler =
+      bind_layout->immutable_samplers[index_imm];
+   if (sampler && sampler->vk.ycbcr_conversion) {
+      const struct vk_ycbcr_conversion_state *conversion =
+         &sampler->vk.ycbcr_conversion->state;
+      if (panvk_image_use_yuv_tex(PAN_ARCH, conversion->format))
+         lower_tex_ycbcr(b, tex, conversion);
+   }
+}
+
 static bool
 lower_tex(nir_builder *b, nir_tex_instr *tex, const struct lower_desc_ctx *ctx)
 {
    bool progress = false;
 
    b->cursor = nir_before_instr(&tex->instr);
+
+   /* Remove index for input attachments, since after this pass the index is
+    * reinterpreted to mean the HW handle.
+    */
+   if (tex->input_attachment_index) {
+      tex->texture_index = 0;
+      int offset_src =
+         nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
+      if (offset_src >= 0)
+         nir_tex_instr_remove_src(tex, offset_src);
+   }
+
+   lower_tex_immutable(b, tex, ctx);
 
 #if PAN_ARCH < 9
    if (tex->op == nir_texop_txs || tex->op == nir_texop_query_levels ||
@@ -909,6 +1000,36 @@ lower_img_intrinsic(nir_builder *b, nir_intrinsic_instr *intr,
 
    nir_rewrite_image_intrinsic(intr, get_img_index(b, deref, ctx),
                                nir_image_intrinsic_type_default);
+
+   return true;
+}
+
+static bool
+lower_load_constant(nir_builder *b, nir_intrinsic_instr *intr,
+                    UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_constant)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+
+   /* On Valhall the backend resolves load_constant_base_ptr to the inline
+    * pool's PC. Bifrost has no such pool, so point at the separate data
+    * buffer whose address is passed through a sysval.
+    */
+   nir_def *offset =
+      nir_iadd_imm(b, intr->src[0].ssa, nir_intrinsic_base(intr));
+   nir_def *base = PAN_ARCH >= 9
+                      ? nir_load_constant_base_ptr(b, 1, 64)
+                      : load_sysval(b, common, 64, constant_data);
+   nir_def *addr = nir_iadd(b, base, nir_u2u64(b, offset));
+   nir_def *val = nir_load_global_constant(
+      b, intr->def.num_components, intr->def.bit_size, addr,
+      .access = ACCESS_CAN_REORDER | ACCESS_NON_WRITEABLE,
+      .align_mul = nir_intrinsic_align_mul(intr),
+      .align_offset = nir_intrinsic_align_offset(intr));
+
+   nir_def_replace(&intr->def, val);
 
    return true;
 }
@@ -1271,20 +1392,23 @@ upload_shader_desc_info(struct panvk_device *dev,
    assert(lower_info->dyn_ubos.count <=
           ARRAY_SIZE(desc_info->dyn_ubos.map));
    desc_info->dyn_ubos.count = lower_info->dyn_ubos.count;
-   memcpy(desc_info->dyn_ubos.map, lower_info->dyn_ubos.map,
-          lower_info->dyn_ubos.count * sizeof(*desc_info->dyn_ubos.map));
+   if (lower_info->dyn_ubos.count != 0)
+      memcpy(desc_info->dyn_ubos.map, lower_info->dyn_ubos.map,
+             lower_info->dyn_ubos.count * sizeof(*desc_info->dyn_ubos.map));
    assert(lower_info->dyn_ssbos.count <=
           ARRAY_SIZE(desc_info->dyn_ssbos.map));
    desc_info->dyn_ssbos.count = lower_info->dyn_ssbos.count;
-   memcpy(
-      desc_info->dyn_ssbos.map, lower_info->dyn_ssbos.map,
-      lower_info->dyn_ssbos.count * sizeof(*desc_info->dyn_ssbos.map));
+   if (lower_info->dyn_ssbos.count != 0)
+      memcpy(
+         desc_info->dyn_ssbos.map, lower_info->dyn_ssbos.map,
+         lower_info->dyn_ssbos.count * sizeof(*desc_info->dyn_ssbos.map));
 #else
    assert(lower_info->dyn_bufs.count <=
           ARRAY_SIZE(desc_info->dyn_bufs.map));
    desc_info->dyn_bufs.count = lower_info->dyn_bufs.count;
-   memcpy(desc_info->dyn_bufs.map, lower_info->dyn_bufs.map,
-          lower_info->dyn_bufs.count * sizeof(*desc_info->dyn_bufs.map));
+   if (lower_info->dyn_bufs.count != 0)
+      memcpy(desc_info->dyn_bufs.map, lower_info->dyn_bufs.map,
+             lower_info->dyn_bufs.count * sizeof(*desc_info->dyn_bufs.map));
 #endif
 
    desc_info->used_set_mask = lower_info->used_set_mask;
@@ -1348,4 +1472,8 @@ panvk_per_arch(nir_lower_descriptors)(
 
 out:
    _mesa_hash_table_u64_destroy(ctx.ht);
+
+   if (nir->constant_data_size)
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_load_constant,
+               nir_metadata_control_flow, NULL);
 }

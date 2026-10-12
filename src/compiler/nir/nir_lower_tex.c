@@ -353,6 +353,19 @@ convert_yuv_to_rgb(nir_builder *b, nir_tex_instr *tex,
                    const nir_lower_tex_options *options,
                    unsigned texture_index)
 {
+   /* GL_EXT_YUV_target: __samplerExternal2DY2YEXT outputs raw YUV directly */
+   if (options->bypass_csc_external & (1u << texture_index)) {
+      unsigned bit_size = tex->def.bit_size;
+      /* Most callers pass nir_imm_float(b, 1.0f) for a, which is always
+       * 32-bit regardless of the texture's bit_size, so convert it to
+       * match here.
+       */
+      if (a->bit_size != bit_size)
+         a = nir_f2fN(b, a, bit_size);
+      nir_def *result = nir_vec4(b, y, u, v, a);
+      nir_def_rewrite_uses(&tex->def, result);
+      return;
+   }
    unsigned bpc = 8;
    if (options->lower_sx10_external & (1u << texture_index)) {
       bpc = 10;
@@ -900,6 +913,8 @@ lower_tex_to_txd(nir_builder *b, nir_tex_instr *tex)
    txd->is_new_style_shadow = tex->is_new_style_shadow;
    txd->is_sparse = tex->is_sparse;
    txd->can_speculate = tex->can_speculate;
+   txd->texture_non_uniform = tex->texture_non_uniform;
+   txd->sampler_non_uniform = tex->sampler_non_uniform;
 
    /* reuse existing srcs */
    for (unsigned i = 0; i < tex->num_srcs; i++) {
@@ -944,6 +959,8 @@ lower_txb_to_txl(nir_builder *b, nir_tex_instr *tex)
    txl->is_new_style_shadow = tex->is_new_style_shadow;
    txl->is_sparse = tex->is_sparse;
    txl->can_speculate = tex->can_speculate;
+   txl->texture_non_uniform = tex->texture_non_uniform;
+   txl->sampler_non_uniform = tex->sampler_non_uniform;
 
    /* reuse all but bias src */
    for (int i = 0; i < tex->num_srcs; i++) {
@@ -968,12 +985,22 @@ lower_txb_to_txl(nir_builder *b, nir_tex_instr *tex)
 }
 
 static nir_tex_instr *
-saturate_src(nir_builder *b, nir_tex_instr *tex, unsigned sat_mask)
+saturate_src(nir_builder *b, nir_tex_instr *tex, unsigned sat_mask, bool lod_zero)
 {
-   if (tex->op == nir_texop_tex)
-      tex = lower_tex_to_txd(b, tex);
-   else if (tex->op == nir_texop_txb)
-      tex = lower_txb_to_txl(b, tex);
+   if (!lod_zero) {
+      if (tex->op == nir_texop_tex)
+         tex = lower_tex_to_txd(b, tex);
+      else if (tex->op == nir_texop_txb)
+         tex = lower_txb_to_txl(b, tex);
+   } else if (tex->sampler_dim != GLSL_SAMPLER_DIM_RECT &&
+              (tex->op == nir_texop_tex || tex->op == nir_texop_txb)) {
+      int bias_idx = nir_tex_instr_src_index(tex, nir_tex_src_bias);
+      if (bias_idx >= 0)
+         nir_tex_instr_remove_src(tex, bias_idx);
+      b->cursor = nir_before_instr(&tex->instr);
+      tex->op = nir_texop_txl;
+      nir_tex_instr_add_src(tex, nir_tex_src_lod, nir_imm_float(b, 0.0));
+   }
 
    b->cursor = nir_before_instr(&tex->instr);
    int coord_index = nir_tex_instr_src_index(tex, nir_tex_src_coord);
@@ -1199,6 +1226,8 @@ lower_tg4_offsets(nir_builder *b, nir_tex_instr *tex)
       tex_copy->sampler_index = tex->sampler_index;
       tex_copy->backend_flags = tex->backend_flags;
       tex_copy->can_speculate = tex->can_speculate;
+      tex_copy->texture_non_uniform = tex->texture_non_uniform;
+      tex_copy->sampler_non_uniform = tex->sampler_non_uniform;
 
       for (unsigned j = 0; j < tex->num_srcs; ++j) {
          tex_copy->src[j].src = nir_src_for_ssa(tex->src[j].src.ssa);
@@ -1321,16 +1350,19 @@ nir_lower_ms_txf_to_fragment_fetch(nir_builder *b, nir_tex_instr *tex)
    b->cursor = nir_before_instr(&tex->instr);
 
    /* Create FMASK fetch. */
-   assert(tex->texture_index == 0);
    nir_tex_instr *fmask_fetch = nir_tex_instr_create(b->shader, tex->num_srcs - 1);
    fmask_fetch->op = nir_texop_fragment_mask_fetch_amd;
    fmask_fetch->coord_components = tex->coord_components;
    fmask_fetch->sampler_dim = tex->sampler_dim;
    fmask_fetch->is_array = tex->is_array;
    fmask_fetch->texture_non_uniform = tex->texture_non_uniform;
-   fmask_fetch->offset_non_uniform = tex->offset_non_uniform;
    fmask_fetch->dest_type = nir_type_uint32;
    fmask_fetch->can_speculate = tex->can_speculate;
+   fmask_fetch->input_attachment_depth = tex->input_attachment_depth;
+   fmask_fetch->input_attachment_stencil = tex->input_attachment_stencil;
+   fmask_fetch->input_attachment_index = tex->input_attachment_index;
+   fmask_fetch->texture_index = tex->texture_index;
+   fmask_fetch->texture_array_size = tex->texture_array_size;
    nir_def_init(&fmask_fetch->instr, &fmask_fetch->def, 1, 32);
 
    fmask_fetch->num_srcs = 0;
@@ -1578,7 +1610,8 @@ nir_lower_tex_block(nir_block *block, nir_builder *b,
          continue;
       } else if (instr->type == nir_instr_type_jump) {
          if (nir_instr_as_jump(instr)->type == nir_jump_halt ||
-             nir_instr_as_jump(instr)->type == nir_jump_return)
+             nir_instr_as_jump(instr)->type == nir_jump_return ||
+             nir_instr_as_jump(instr)->type == nir_jump_abort)
             *prev_terminate_return = instr->index;
          continue;
       } else if (instr->type != nir_instr_type_tex) {
@@ -1717,7 +1750,8 @@ nir_lower_tex_block(nir_block *block, nir_builder *b,
       }
 
       if (sat_mask) {
-         tex = saturate_src(b, tex, sat_mask);
+         tex = saturate_src(b, tex, sat_mask,
+                            (options->saturate_lod_zero & (1u << tex->sampler_index)) != 0);
          progress = true;
       }
 
@@ -1801,6 +1835,25 @@ nir_lower_tex_block(nir_block *block, nir_builder *b,
          nir_tex_instr_add_src(tex, nir_tex_src_lod, nir_imm_int(b, 0));
          progress = true;
          continue;
+      }
+
+      if (tex->op == nir_texop_txl && tex->sampler_index < 32 &&
+          ((1u << tex->sampler_index) & options->lower_txl_mag_switchover)) {
+         int lod_index = nir_tex_instr_src_index(tex, nir_tex_src_lod);
+         assert(lod_index >= 0);
+
+         b->cursor = nir_before_instr(&tex->instr);
+
+         nir_def *lod = tex->src[lod_index].src.ssa;
+
+         /* Magnification reads the base level with the magnification filter,
+          * so the replacement LOD is only used to pick that path.
+          */
+         nir_src_rewrite(&tex->src[lod_index].src,
+                         nir_bcsel(b, nir_fle_imm(b, lod, 0.5),
+                                   nir_imm_floatN_t(b, 0.0, lod->bit_size),
+                                   lod));
+         progress = true;
       }
 
       /* Only fragment and compute (in some cases) support implicit

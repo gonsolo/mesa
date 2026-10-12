@@ -503,6 +503,16 @@ _mesa_bufferobj_map_range(struct gl_context *ctx,
          transfer_flags &= ~PIPE_MAP_UNSYNCHRONIZED;
    }
 
+   /* Some games keep a large buffer, where they map the entire buffer with the
+    * GL_MAP_INVALIDATE_BUFFER_BIT or GL_MAP_INVALIDATE_RANGE_BIT (but specify
+    * the range as the whole buffer), and only write to a portion of the buffer
+    * each time - so each subsequent map/write will discard the data that was
+    * previously written. This option tells the driver to ignore
+    * invalidating the entire buffer and keep the existing data in the buffer.
+    */
+   if (unlikely(ctx->st_opts->ignore_map_invalidate_buffer))
+      transfer_flags &= ~PIPE_MAP_DISCARD_WHOLE_RESOURCE;
+
    if (ctx->Const.ForceMapBufferSynchronized)
       transfer_flags &= ~PIPE_MAP_UNSYNCHRONIZED;
 
@@ -512,6 +522,18 @@ _mesa_bufferobj_map_range(struct gl_context *ctx,
                                                         transfer_flags,
                                                         &obj->transfer[index]);
    if (obj->Mappings[index].Pointer) {
+      /* Some games (e.g. Little Inferno) only partially write the mapped
+       * range and rely on the untouched bytes reading back as zero when
+       * drawn, which happens to be true with drivers that map buffer
+       * storage directly (llvmpipe), but not with staging-buffer uploads.
+       */
+      if (unlikely(ctx->st_opts->zero_invalidated_buffers) &&
+          index == MAP_USER &&
+          transfer_flags & (PIPE_MAP_DISCARD_RANGE |
+                            PIPE_MAP_DISCARD_WHOLE_RESOURCE) &&
+          !(transfer_flags & PIPE_MAP_READ))
+         memset(obj->Mappings[index].Pointer, 0, length);
+
       obj->Mappings[index].Offset = offset;
       obj->Mappings[index].Length = length;
       obj->Mappings[index].AccessFlags = access;
@@ -1488,8 +1510,22 @@ unbind(struct gl_context *ctx,
        struct gl_buffer_object *obj)
 {
    if (vao->BufferBinding[index].BufferObj == obj) {
+      const bool core_profile = _mesa_is_desktop_gl_core(ctx);
+
+      /* Core profiles don't support client arrays.  Clear the pointer state
+       * so that a buffer offset isn't interpreted as a user pointer if the
+       * array remains enabled after the buffer is deleted.
+       */
+      if (core_profile) {
+         GLbitfield mask = vao->BufferBinding[index]._BoundArrays;
+
+         while (mask)
+            vao->VertexAttrib[u_bit_scan(&mask)].Ptr = NULL;
+      }
+
       _mesa_bind_vertex_buffer(ctx, vao, index, NULL,
-                               vao->BufferBinding[index].Offset,
+                               core_profile ? 0 :
+                                  vao->BufferBinding[index].Offset,
                                vao->BufferBinding[index].Stride, true, false);
    }
 }

@@ -28,6 +28,7 @@
  */
 
 #include "xmlconfig.h"
+#include <ctype.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -57,9 +58,15 @@ static inline void regfree(regex_t* r) {}
 #include <fcntl.h>
 #include <math.h>
 #include "strndup.h"
+#include "log.h"
 #include "u_process.h"
 #include "os_file.h"
 #include "os_misc.h"
+#include "detect_os.h"
+
+#if DETECT_OS_LINUX
+#include <strings.h>
+#endif
 
 /* For systems like Hurd */
 #ifndef PATH_MAX
@@ -651,8 +658,15 @@ struct OptConfData {
    const char *driverName, *execName;
    const char *kernelDriverName;
    const char *deviceName;
+   uint32_t deviceVersion;
    const char *engineName;
    const char *applicationName;
+   union {
+      blake3_hash blake3;
+      uint64_t    u64;
+   } shaderHash;
+   uint32_t shaderHashSize;
+
    uint32_t engineVersion;
    uint32_t applicationVersion;
    uint32_t ignoringDevice;
@@ -660,7 +674,11 @@ struct OptConfData {
    uint32_t inDriConf;
    uint32_t inDevice;
    uint32_t inApp;
+   uint32_t inShader;
    uint32_t inOption;
+
+   driShaderOptionCallback shaderOptionCallback;
+   void *shaderOptionCallbackData;
 };
 
 /** \brief Parse a list of ranges of type info->type. */
@@ -710,11 +728,13 @@ parseDeviceAttr(struct OptConfData *data, const char **attr)
 {
    uint32_t i;
    const char *driver = NULL, *screen = NULL, *kernel = NULL, *device = NULL;
+   const char *device_version_regexp = NULL;
    for (i = 0; attr[i]; i += 2) {
       if (!strcmp(attr[i], "driver")) driver = attr[i+1];
       else if (!strcmp(attr[i], "screen")) screen = attr[i+1];
       else if (!strcmp(attr[i], "kernel_driver")) kernel = attr[i+1];
       else if (!strcmp(attr[i], "device")) device = attr[i+1];
+      else if (!strcmp(attr[i], "device_version_regexp")) device_version_regexp = attr[i+1];
       else XML_WARNING("unknown device attribute: %s.", attr[i]);
    }
    if (driver && strcmp(driver, data->driverName))
@@ -725,13 +745,100 @@ parseDeviceAttr(struct OptConfData *data, const char **attr)
    else if (device && (!data->deviceName ||
                        strcmp(device, data->deviceName)))
       data->ignoringDevice = data->inDevice;
-   else if (screen) {
+   else if (device_version_regexp) {
+      /* device_version_regexp: Extended regex pattern matching on device version.
+       * Uses POSIX extended regular expressions (ERE).
+       *
+       * Examples:
+       *   "^(40|50|60)$"       - Match exact versions 40, 50, or 60
+       *   "^[4-6][0-9]$"       - Match versions 40-69
+       *   "^12[0-9]"           - Match versions starting with 12 (120-129)
+       */
+      if (!data->deviceVersion) {
+         data->ignoringDevice = data->inDevice;
+      } else {
+         regex_t re;
+         if (regcomp(&re, device_version_regexp, REG_EXTENDED|REG_NOSUB) == 0) {
+            char device_version_str[32];
+            snprintf(device_version_str, sizeof(device_version_str), "%u", data->deviceVersion);
+
+            if (regexec(&re, device_version_str, 0, NULL, 0) == REG_NOMATCH)
+               data->ignoringDevice = data->inDevice;
+            regfree(&re);
+         } else
+            XML_WARNING("Invalid device_version_regexp=\"%s\".", device_version_regexp);
+      }
+   } else if (screen) {
       driOptionValue screenNum;
       if (!parseValue(&screenNum, DRI_INT, screen))
          XML_WARNING("illegal screen number: %s.", screen);
       else if (screenNum._int != data->screenNum)
          data->ignoringDevice = data->inDevice;
    }
+}
+
+/**
+ * Read the executable that execName refers to, for hashing.
+ *
+ * This is usually the process executable, but not under Wine: there
+ * /proc/self/exe is the wine loader, while execName comes from argv[0], which
+ * Wine sets to the PE executable (e.g. "C:\\path\\game.exe"). The PE file is
+ * mapped into the process, so find it among the mapped files instead. Falls
+ * back to the process executable when there is no better match.
+ */
+static char *
+readAppExecutable(struct OptConfData *data, size_t *len)
+{
+   char path[PATH_MAX];
+   const char *name;
+
+   if (util_get_process_exec_path(path, ARRAY_SIZE(path)) > 0) {
+      name = strrchr(path, '/');
+      name = name ? name + 1 : path;
+
+      if (!strcmp(name, data->execName))
+         return os_read_file(path, len);
+   } else {
+      path[0] = 0;
+   }
+
+#if DETECT_OS_LINUX
+   /* Not the process executable, so look for a mapped file called execName.
+    * Windows file names are case-insensitive, and argv[0] doesn't have to
+    * match the case on disk.
+    */
+   FILE *maps = fopen("/proc/self/maps", "r");
+   if (maps) {
+      char *content = NULL;
+      char *line = NULL;
+      size_t line_size = 0;
+
+      while (getline(&line, &line_size, maps) > 0) {
+         /* The only field of a maps line that can contain '/' is the path. */
+         char *mapped = strchr(line, '/');
+         if (!mapped)
+            continue;
+
+         char *end = strchr(mapped, '\n');
+         if (end)
+            *end = 0;
+
+         name = strrchr(mapped, '/') + 1;
+         if (!strcasecmp(name, data->execName)) {
+            content = os_read_file(mapped, len);
+            break;
+         }
+      }
+
+      free(line);
+      fclose(maps);
+
+      if (content)
+         return content;
+   }
+#endif
+
+   return path[0] ? os_read_file(path, len) : NULL;
 }
 
 /** \brief Parse attributes of an application element. */
@@ -778,9 +885,7 @@ parseAppAttr(struct OptConfData *data, const char **attr)
       } else {
          size_t len;
          char* content;
-         char path[PATH_MAX];
-         if (util_get_process_exec_path(path, ARRAY_SIZE(path)) > 0 &&
-             (content = os_read_file(path, &len))) {
+         if ((content = readAppExecutable(data, &len))) {
             uint8_t blake3x[BLAKE3_KEY_LEN];
             char blake3s[BLAKE3_HEX_LEN];
             _mesa_blake3_compute(content, len, blake3x);
@@ -853,6 +958,42 @@ parseEngineAttr(struct OptConfData *data, const char **attr)
    }
 }
 
+/** \brief Parse attributes of a shader element. */
+static void
+parseShaderAttr(struct OptConfData *data, const char **attr)
+{
+   uint32_t i;
+   const char *type = NULL, *hash = NULL;
+   for (i = 0; attr[i]; i += 2) {
+      if (!strcmp(attr[i], "type")) type = attr[i+1];
+      else if (!strcmp(attr[i], "hash")) hash = attr[i+1];
+      else XML_WARNING("unknown shader attribute: %s.", attr[i]);
+   }
+   if (!type) XML_WARNING1("type attribute missing in shader.");
+   if (!hash) XML_WARNING1("hash attribute missing in shader.");
+
+   if (type && hash) {
+      if (!strcmp(type, "dxbc") || !strcmp(type, "dxil")) {
+         data->shaderHash.u64 = strtoull(hash, NULL, 16);
+         data->shaderHashSize = sizeof(data->shaderHash.u64);
+      } else if (!strcmp(type, "spirv")) {
+         if (strlen(hash) != (BLAKE3_HEX_LEN - 1)) {
+            XML_WARNING("hash attribute value \"%s\" %u/%u not in blake3 format.",
+                        hash, strlen(hash), BLAKE3_HEX_LEN);
+         } else {
+            char blake3_str[BLAKE3_HEX_LEN] = {0};
+            for (unsigned i = 0; i < MIN2(strlen(hash), BLAKE3_HEX_LEN); i++)
+               blake3_str[i] = tolower(hash[i]);
+            _mesa_blake3_hex_to_blake3(data->shaderHash.blake3, blake3_str);
+            data->shaderHashSize = sizeof(data->shaderHash.blake3);
+         }
+      } else {
+         XML_WARNING("type attribute value \"%s\" invalid in shader (valid : spirv, dxbc, dxil).",
+                     type);
+      }
+   }
+}
+
 /** \brief Parse attributes of an option element. */
 static void
 parseOptConfAttr(struct OptConfData *data, const char **attr)
@@ -885,11 +1026,50 @@ parseOptConfAttr(struct OptConfData *data, const char **attr)
    }
 }
 
+/** \brief Parse attributes of an option element for <shader>. */
+static void
+parseShaderOptConfAttr(struct OptConfData *data, const char **attr)
+{
+   uint32_t i;
+   const char *name = NULL, *value = NULL;
+   for (i = 0; attr[i]; i += 2) {
+      if (!strcmp(attr[i], "name")) name = attr[i+1];
+      else if (!strcmp(attr[i], "value")) value = attr[i+1];
+      else XML_WARNING("unknown option attribute: %s.", attr[i]);
+   }
+   if (!name) XML_WARNING1("name attribute missing in option.");
+   if (!value) XML_WARNING1("value attribute missing in option.");
+   if (name && value && data->shaderHashSize != 0) {
+      driOptionCache *cache = data->cache;
+      uint32_t opt = findOption(cache, name);
+      if (cache->info[opt].name == NULL)
+         /* don't use XML_WARNING, drirc defines options for all drivers,
+          * but not all drivers support them */
+         return;
+      else if (os_get_option(cache->info[opt].name)) {
+         /* don't use XML_WARNING, we want the user to see this! */
+         if (be_verbose()) {
+            fprintf(stderr,
+                    "ATTENTION: option value of option %s ignored.\n",
+                    cache->info[opt].name);
+         }
+      } else if (!parseValue(&cache->values[opt], cache->info[opt].type, value)) {
+         XML_WARNING("illegal option value: %s.", value);
+      } else if (data->shaderOptionCallback != NULL) {
+         data->shaderOptionCallback(&data->shaderHash,
+                                    data->shaderHashSize,
+                                    &cache->info[opt],
+                                    &cache->values[opt],
+                                    data->shaderOptionCallbackData);
+      }
+   }
+}
+
 #if WITH_XMLCONFIG
 
 /** \brief Elements in configuration files. */
 enum OptConfElem {
-   OC_APPLICATION = 0, OC_DEVICE, OC_DRICONF, OC_ENGINE, OC_OPTION, OC_COUNT
+   OC_APPLICATION = 0, OC_DEVICE, OC_DRICONF, OC_ENGINE, OC_OPTION, OC_SHADER, OC_COUNT
 };
 static const char *OptConfElems[] = {
    [OC_APPLICATION]  = "application",
@@ -897,6 +1077,7 @@ static const char *OptConfElems[] = {
    [OC_DRICONF] = "driconf",
    [OC_ENGINE]  = "engine",
    [OC_OPTION] = "option",
+   [OC_SHADER] = "shader",
 };
 
 static int compare(const void *a, const void *b) {
@@ -956,14 +1137,27 @@ optConfStartElem(void *userData, const char *name,
       if (!data->ignoringDevice && !data->ignoringApp)
          parseEngineAttr(data, attr);
       break;
-   case OC_OPTION:
+   case OC_SHADER:
       if (!data->inApp)
-         XML_WARNING1("<option> should be inside <application>.");
+         XML_WARNING1("<shader> should be inside <application>.");
+      if (data->inShader)
+         XML_WARNING1("nested <shader> elements.");
+      data->inShader++;
+      if (!data->ignoringDevice && !data->ignoringApp)
+         parseShaderAttr(data, attr);
+      break;
+   case OC_OPTION:
+      if (!data->inApp && !data->inShader)
+         XML_WARNING1("<option> should be inside <application> or <shader>.");
       if (data->inOption)
          XML_WARNING1("nested <option> elements.");
       data->inOption++;
-      if (!data->ignoringDevice && !data->ignoringApp)
-         parseOptConfAttr(data, attr);
+      if (!data->ignoringDevice && !data->ignoringApp) {
+         if (data->inShader)
+            parseShaderOptConfAttr(data, attr);
+         else
+            parseOptConfAttr(data, attr);
+      }
       break;
    default:
       XML_WARNING("unknown element: %s.", name);
@@ -988,6 +1182,10 @@ optConfEndElem(void *userData, const char *name)
    case OC_ENGINE:
       if (data->inApp-- == data->ignoringApp)
          data->ignoringApp = 0;
+      break;
+   case OC_SHADER:
+      data->inShader--;
+      data->shaderHashSize = 0;
       break;
    case OC_OPTION:
       data->inOption--;
@@ -1228,6 +1426,51 @@ driInjectExecName(const char *exec)
    execname = exec;
 }
 
+static void
+driLogNonDefaultOptions(const driOptionCache *cache,
+                        const driOptionCache *defaults,
+                        const char *tag)
+{
+   assert(cache->tableSize == defaults->tableSize);
+   assert(cache->info == defaults->info);
+
+   for (unsigned i = 0; i < (1u << cache->tableSize); i++) {
+      const driOptionInfo *info = &cache->info[i];
+      if (!info->name)
+         continue;
+
+      const driOptionValue *value = &cache->values[i];
+      const driOptionValue *default_value = &defaults->values[i];
+
+      switch (info->type) {
+      case DRI_BOOL:
+         if (value->_bool != default_value->_bool)
+            mesa_log(MESA_LOG_INFO, tag, "drirc: %s=%s", info->name,
+                     value->_bool ? "true" : "false");
+         break;
+      case DRI_ENUM:
+      case DRI_INT:
+         if (value->_int != default_value->_int)
+            mesa_log(MESA_LOG_INFO, tag, "drirc: %s=%d", info->name, value->_int);
+         break;
+      case DRI_UINT64:
+         if (value->_uint64 != default_value->_uint64)
+            mesa_log(MESA_LOG_INFO, tag, "drirc: %s=%" PRIu64, info->name, value->_uint64);
+         break;
+      case DRI_FLOAT:
+         if (value->_float != default_value->_float)
+            mesa_log(MESA_LOG_INFO, tag, "drirc: %s=%g", info->name, value->_float);
+         break;
+      case DRI_STRING:
+         if (strcmp(value->_string, default_value->_string))
+            mesa_log(MESA_LOG_INFO, tag, "drirc: %s=%s", info->name, value->_string);
+         break;
+      case DRI_SECTION:
+         break;
+      }
+   }
+}
+
 void
 driParseConfigFiles(driOptionCache *cache, const driOptionCache *info,
                     const driConfigFileParseParams *params)
@@ -1245,20 +1488,30 @@ driParseConfigFiles(driOptionCache *cache, const driOptionCache *info,
    userData.driverName = params->driverName;
    userData.kernelDriverName = params->kernelDriverName;
    userData.deviceName = params->deviceName;
+   userData.deviceVersion = params->deviceVersion;
    userData.applicationName = params->applicationName ? params->applicationName : "";
    userData.applicationVersion = params->applicationVersion;
    userData.engineName = params->engineName ? params->engineName : "";
    userData.engineVersion = params->engineVersion;
    userData.execName = execname;
+   userData.shaderOptionCallback = params->shaderOptionCallback;
+   userData.shaderOptionCallbackData = params->shaderOptionCallbackData;
 
 #if WITH_XMLCONFIG
    const char *configdir;
    const char *home;
 
    /* parse from either $DRIRC_CONFIGDIR or $datadir/drirc.d */
-   if ((configdir = os_get_option("DRIRC_CONFIGDIR")))
-      parseConfigDir(&userData, configdir);
-   else {
+   if ((configdir = os_get_option("DRIRC_CONFIGDIR"))) {
+      for (size_t len; len = strcspn(configdir, ":"), *configdir; configdir += MAX2(1, len)) {
+         if (!len)
+            continue;
+
+         char *dir = strndup(configdir, len);
+         parseConfigDir(&userData, dir);
+         free(dir);
+      }
+   } else {
       parseConfigDir(&userData, DATADIR "/drirc.d");
       parseOneConfigFile(&userData, SYSCONFDIR "/drirc");
    }
@@ -1272,6 +1525,9 @@ driParseConfigFiles(driOptionCache *cache, const driOptionCache *info,
 #else
    parseStaticConfig(&userData);
 #endif /* WITH_XMLCONFIG */
+
+   if (params->logNonDefaultOptions)
+      driLogNonDefaultOptions(cache, info, params->driverName);
 }
 
 void

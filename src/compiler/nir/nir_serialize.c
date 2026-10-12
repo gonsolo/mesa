@@ -71,6 +71,8 @@ typedef struct {
 typedef struct {
    nir_shader *nir;
 
+   nir_function_impl *impl;
+
    struct blob_reader *blob;
 
    /* the next index to assign to a NIR in-memory object */
@@ -1372,13 +1374,16 @@ union packed_tex_data {
       unsigned is_sparse : 1;
       unsigned component : 2;
       unsigned texture_non_uniform : 1;
+      unsigned texture_2_non_uniform : 1;
       unsigned sampler_non_uniform : 1;
-      unsigned offset_non_uniform : 1;
+      unsigned sampler_2_non_uniform : 1;
       unsigned embedded_sampler : 1;
       unsigned array_is_lowered_cube : 1;
       unsigned is_gather_implicit_lod : 1;
       unsigned can_speculate : 1;
-      unsigned unused : 2; /* Mark unused for valgrind. */
+      unsigned input_attachment_index : 1;
+      unsigned input_attachment_depth : 1;
+      unsigned input_attachment_stencil : 1;
    } u;
 };
 
@@ -1398,6 +1403,7 @@ write_tex(write_ctx *ctx, const nir_tex_instr *tex)
    write_def(ctx, &tex->def, header, tex->instr.type);
 
    blob_write_uint32(ctx->blob, tex->texture_index);
+   blob_write_uint32(ctx->blob, tex->texture_array_size);
    blob_write_uint32(ctx->blob, tex->sampler_index);
    blob_write_uint32(ctx->blob, tex->backend_flags);
    if (tex->op == nir_texop_tg4)
@@ -1414,12 +1420,16 @@ write_tex(write_ctx *ctx, const nir_tex_instr *tex)
       .u.is_sparse = tex->is_sparse,
       .u.component = tex->component,
       .u.texture_non_uniform = tex->texture_non_uniform,
+      .u.texture_2_non_uniform = tex->texture_2_non_uniform,
       .u.sampler_non_uniform = tex->sampler_non_uniform,
-      .u.offset_non_uniform = tex->offset_non_uniform,
+      .u.sampler_2_non_uniform = tex->sampler_2_non_uniform,
       .u.embedded_sampler = tex->embedded_sampler,
       .u.array_is_lowered_cube = tex->array_is_lowered_cube,
       .u.is_gather_implicit_lod = tex->is_gather_implicit_lod,
       .u.can_speculate = tex->can_speculate,
+      .u.input_attachment_index = tex->input_attachment_index,
+      .u.input_attachment_depth = tex->input_attachment_depth,
+      .u.input_attachment_stencil = tex->input_attachment_stencil,
    };
    blob_write_uint32(ctx->blob, packed.u32);
 
@@ -1440,6 +1450,7 @@ read_tex(read_ctx *ctx, union packed_instr header)
 
    tex->op = header.tex.op;
    tex->texture_index = blob_read_uint32(ctx->blob);
+   tex->texture_array_size = blob_read_uint32(ctx->blob);
    tex->sampler_index = blob_read_uint32(ctx->blob);
    tex->backend_flags = blob_read_uint32(ctx->blob);
    if (tex->op == nir_texop_tg4)
@@ -1456,12 +1467,16 @@ read_tex(read_ctx *ctx, union packed_instr header)
    tex->is_sparse = packed.u.is_sparse;
    tex->component = packed.u.component;
    tex->texture_non_uniform = packed.u.texture_non_uniform;
+   tex->texture_2_non_uniform = packed.u.texture_2_non_uniform;
    tex->sampler_non_uniform = packed.u.sampler_non_uniform;
-   tex->offset_non_uniform = packed.u.offset_non_uniform;
+   tex->sampler_2_non_uniform = packed.u.sampler_2_non_uniform;
    tex->embedded_sampler = packed.u.embedded_sampler;
    tex->array_is_lowered_cube = packed.u.array_is_lowered_cube;
    tex->is_gather_implicit_lod = packed.u.is_gather_implicit_lod;
    tex->can_speculate = packed.u.can_speculate;
+   tex->input_attachment_index = packed.u.input_attachment_index;
+   tex->input_attachment_depth = packed.u.input_attachment_depth;
+   tex->input_attachment_stencil = packed.u.input_attachment_stencil;
 
    for (unsigned i = 0; i < tex->num_srcs; i++) {
       union packed_src src = read_src(ctx, &tex->src[i].src);
@@ -1617,7 +1632,10 @@ read_call(read_ctx *ctx)
 static void
 write_cmat_call(write_ctx *ctx, const nir_cmat_call_instr *call)
 {
-   blob_write_uint32(ctx->blob, write_lookup_object(ctx, call->callee));
+   if (call->callee)
+      blob_write_uint32(ctx->blob, write_lookup_object(ctx, call->callee));
+   else
+      blob_write_uint32(ctx->blob, 0);
 
    blob_write_uint32(ctx->blob, call->op);
 
@@ -1631,7 +1649,10 @@ write_cmat_call(write_ctx *ctx, const nir_cmat_call_instr *call)
 static nir_cmat_call_instr *
 read_cmat_call(read_ctx *ctx)
 {
-   nir_function *callee = read_object(ctx);
+   uint32_t callee_int = blob_read_uint32(ctx->blob);
+   nir_function *callee = NULL;
+   if (callee_int)
+      callee = read_lookup_object(ctx, callee_int);
    nir_cmat_call_op op = blob_read_uint32(ctx->blob);
    nir_cmat_call_instr *call = nir_cmat_call_instr_create(ctx->nir, op, callee);
 
@@ -1872,7 +1893,7 @@ write_if(write_ctx *ctx, nir_if *nif)
 static void
 read_if(read_ctx *ctx, struct exec_list *cf_list)
 {
-   nir_if *nif = nir_if_create(ctx->nir);
+   nir_if *nif = nir_if_create(ctx->impl);
 
    read_src(ctx, &nif->condition);
    nif->control = blob_read_uint8(ctx->blob);
@@ -1900,7 +1921,7 @@ write_loop(write_ctx *ctx, nir_loop *loop)
 static void
 read_loop(read_ctx *ctx, struct exec_list *cf_list)
 {
-   nir_loop *loop = nir_loop_create(ctx->nir);
+   nir_loop *loop = nir_loop_create(ctx->impl);
 
    nir_cf_node_insert_end(cf_list, &loop->cf_node);
 
@@ -2000,6 +2021,7 @@ read_function_impl(read_ctx *ctx)
 
    read_var_list(ctx, &fi->locals);
 
+   ctx->impl = fi;
    read_cf_list(ctx, &fi->body);
    read_fixup_phis(ctx);
 
@@ -2168,6 +2190,7 @@ enum nir_serialize_shader_flags {
    NIR_SERIALIZE_SHADER_NAME = 1 << 0,
    NIR_SERIALIZE_SHADER_LABEL = 1 << 1,
    NIR_SERIALIZE_DEBUG_INFO = 1 << 2,
+   NIR_SERIALIZE_SHADER_SPEC = 1 << 3,
 };
 
 void
@@ -2213,6 +2236,8 @@ serialize_internal(struct blob *blob, const nir_shader *nir, bool strip, bool se
       flags |= NIR_SERIALIZE_SHADER_NAME;
    if (!strip && info.label)
       flags |= NIR_SERIALIZE_SHADER_LABEL;
+   if (!strip && info.spec)
+      flags |= NIR_SERIALIZE_SHADER_SPEC;
    if (ctx.debug_info)
       flags |= NIR_SERIALIZE_DEBUG_INFO;
    blob_write_uint32(blob, flags);
@@ -2221,7 +2246,9 @@ serialize_internal(struct blob *blob, const nir_shader *nir, bool strip, bool se
       blob_write_string(blob, info.name);
    if (!strip && info.label)
       blob_write_string(blob, info.label);
-   info.name = info.label = NULL;
+   if (!strip && info.spec)
+      blob_write_string(blob, info.spec);
+   info.name = info.label = info.spec = NULL;
    blob_write_bytes(blob, (uint8_t *)&info, sizeof(info));
 
    write_var_list(&ctx, &nir->variables);
@@ -2282,6 +2309,7 @@ nir_deserialize(void *mem_ctx,
    enum nir_serialize_shader_flags flags = blob_read_uint32(blob);
    char *name = (flags & NIR_SERIALIZE_SHADER_NAME) ? blob_read_string(blob) : NULL;
    char *label = (flags & NIR_SERIALIZE_SHADER_LABEL) ? blob_read_string(blob) : NULL;
+   char *spec = (flags & NIR_SERIALIZE_SHADER_SPEC) ? blob_read_string(blob) : NULL;
 
    struct shader_info info;
    blob_copy_bytes(blob, (uint8_t *)&info, sizeof(info));
@@ -2294,6 +2322,7 @@ nir_deserialize(void *mem_ctx,
 
    info.name = name ? ralloc_strdup(ctx.nir, name) : NULL;
    info.label = label ? ralloc_strdup(ctx.nir, label) : NULL;
+   info.spec = spec ? ralloc_strdup(ctx.nir, spec) : NULL;
 
    ctx.nir->info = info;
 

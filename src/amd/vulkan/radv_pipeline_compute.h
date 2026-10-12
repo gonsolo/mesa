@@ -32,6 +32,7 @@ struct radv_compute_pipeline_metadata {
    uint32_t indirect_descriptors_sgpr;
    uint32_t heap_resource_sgpr;
    uint32_t heap_sampler_sgpr;
+   uint32_t cs_state_sgpr;
 };
 
 uint32_t radv_get_compute_resource_limits(const struct radv_physical_device *pdev, const struct radv_shader_info *info);
@@ -43,8 +44,7 @@ void radv_compute_pipeline_init(struct radv_compute_pipeline *pipeline, const st
                                 struct radv_shader *shader);
 
 struct radv_shader_binary *radv_compile_cs(const struct radv_compiler_info *compiler_info,
-                                           struct radv_shader_stage *cs_stage, bool keep_executable_info,
-                                           bool keep_statistic_info, bool is_internal,
+                                           struct radv_shader_stage *cs_stage, bool is_internal,
                                            struct radv_shader_debug_info *dbg);
 
 VkResult radv_compute_pipeline_create(VkDevice _device, VkPipelineCache _cache,

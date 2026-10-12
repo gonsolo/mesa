@@ -18,12 +18,13 @@
 /**
  * Return the IR key for the shader cache.
  */
-void si_get_ir_cache_key(struct si_shader_selector *sel, bool ngg, bool es,
-                         unsigned wave_size, unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN])
+void si_get_ir_cache_key(struct si_shader *shader, unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN])
 {
    struct blob blob = {};
    unsigned ir_size;
    void *ir_binary;
+   struct si_shader_selector *sel = shader->selector;
+   bool is_ge = (sel->stage <= MESA_SHADER_GEOMETRY || sel->stage == MESA_SHADER_MESH);
 
    if (sel->nir_binary) {
       ir_binary = sel->nir_binary;
@@ -43,10 +44,10 @@ void si_get_ir_cache_key(struct si_shader_selector *sel, bool ngg, bool es,
     */
    unsigned shader_variant_flags = 0;
 
-   if (ngg)
+   if (is_ge && shader->key.ge.as_ngg)
       shader_variant_flags |= 1 << 0;
    /* bit gap */
-   if (wave_size == 32)
+   if (shader->wave_size == 32)
       shader_variant_flags |= 1 << 2;
    /* bit gap */
    /* use_ngg_culling disables NGG passthrough for non-culling shaders to reduce context
@@ -65,7 +66,7 @@ void si_get_ir_cache_key(struct si_shader_selector *sel, bool ngg, bool es,
    if ((sel->stage == MESA_SHADER_VERTEX ||
         sel->stage == MESA_SHADER_TESS_EVAL ||
         sel->stage == MESA_SHADER_GEOMETRY) &&
-       !es &&
+       (!is_ge || !shader->key.ge.as_es) &&
        sel->screen->options.vrs2x2)
       shader_variant_flags |= 1 << 10;
    if (sel->screen->options.inline_uniforms)
@@ -279,7 +280,7 @@ void si_shader_cache_insert_shader(struct si_screen *sscreen, unsigned char ir_b
 
    if (!memory_cache_full) {
       if (_mesa_hash_table_insert(sscreen->shader_cache,
-                                  mem_dup(ir_blake3_cache_key, 20),
+                                  mem_dup(ir_blake3_cache_key, BLAKE3_KEY_LEN),
                                   hw_binary) == NULL) {
           FREE(hw_binary);
           return;
@@ -289,7 +290,7 @@ void si_shader_cache_insert_shader(struct si_screen *sscreen, unsigned char ir_b
    }
 
    if (sscreen->disk_shader_cache && insert_into_disk_cache) {
-      disk_cache_compute_key(sscreen->disk_shader_cache, ir_blake3_cache_key, 20, key);
+      disk_cache_compute_key(sscreen->disk_shader_cache, ir_blake3_cache_key, BLAKE3_KEY_LEN, key);
       disk_cache_put(sscreen->disk_shader_cache, key, hw_binary, size, NULL);
    }
 
@@ -314,7 +315,7 @@ bool si_shader_cache_load_shader(struct si_screen *sscreen, unsigned char ir_bla
       return false;
 
    unsigned char blake3[CACHE_KEY_SIZE];
-   disk_cache_compute_key(sscreen->disk_shader_cache, ir_blake3_cache_key, 20, blake3);
+   disk_cache_compute_key(sscreen->disk_shader_cache, ir_blake3_cache_key, BLAKE3_KEY_LEN, blake3);
 
    size_t total_size;
    uint32_t *buffer = (uint32_t*)disk_cache_get(sscreen->disk_shader_cache, blake3, &total_size);
@@ -356,7 +357,7 @@ static uint32_t si_shader_cache_key_hash(const void *key)
 static bool si_shader_cache_key_equals(const void *a, const void *b)
 {
    /* Compare BLAKE3s. */
-   return memcmp(a, b, 20) == 0;
+   return memcmp(a, b, BLAKE3_KEY_LEN) == 0;
 }
 
 static void si_destroy_shader_cache_entry(struct hash_entry *entry)

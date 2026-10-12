@@ -13,6 +13,7 @@
 #include "brw_eu.h"
 #include "brw_shader.h"
 #include "brw_cfg.h"
+#include "common/intel_common.h"
 #include "dev/intel_debug.h"
 #include "util/ralloc.h"
 #include "util/mesa-blake3.h"
@@ -208,6 +209,7 @@ brw_opcode_to_gen(enum opcode op)
    case BRW_OPCODE_MOV:      return GEN_OP_MOV;
    case BRW_OPCODE_MOVI:     return GEN_OP_MOVI;
    case BRW_OPCODE_MUL:      return GEN_OP_MUL;
+   case BRW_OPCODE_MULLH:    return GEN_OP_MULLH;
    case BRW_OPCODE_NOP:      return GEN_OP_NOP;
    case BRW_OPCODE_NOT:      return GEN_OP_NOT;
    case BRW_OPCODE_OR:       return GEN_OP_OR;
@@ -222,6 +224,8 @@ brw_opcode_to_gen(enum opcode op)
    case BRW_OPCODE_SEL:      return GEN_OP_SEL;
    case BRW_OPCODE_SEND:     return GEN_OP_SEND;
    case BRW_OPCODE_SENDC:    return GEN_OP_SENDC;
+   case BRW_OPCODE_SENDG:    return GEN_OP_SENDG;
+   case BRW_OPCODE_SENDGC:   return GEN_OP_SENDGC;
    case BRW_OPCODE_SENDS:    return GEN_OP_SENDS;
    case BRW_OPCODE_SENDSC:   return GEN_OP_SENDSC;
    case BRW_OPCODE_SHL:      return GEN_OP_SHL;
@@ -319,6 +323,7 @@ gen_math_func_for_opcode(enum opcode op)
    case SHADER_OPCODE_COS:           return GEN_MATH_COS;
    case SHADER_OPCODE_INT_QUOTIENT:  return GEN_MATH_INT_DIV_QUOTIENT;
    case SHADER_OPCODE_INT_REMAINDER: return GEN_MATH_INT_DIV_REMAINDER;
+   case SHADER_OPCODE_TANH:          return GEN_MATH_TANH;
    default:
       UNREACHABLE("not reached: unknown math function");
    }
@@ -372,7 +377,7 @@ void
 brw_generator::generate_send(brw_send_inst *inst,
                              struct brw_reg dst,
                              struct brw_reg desc,
-                             struct brw_reg ex_desc,
+                             struct brw_reg ex_desc, /* or indirect_desc_0 */
                              struct brw_reg payload,
                              struct brw_reg payload2,
                              bool ex_bso)
@@ -385,9 +390,18 @@ brw_generator::generate_send(brw_send_inst *inst,
       assert(payload2.nr == BRW_ARF_NULL);
    }
 
+   enum opcode op;
+   if (inst->efficient_64bit) {
+      assert(gather == false);
+      op = BRW_OPCODE_SENDG;
+   } else if (devinfo->ver >= 12) {
+      op = BRW_OPCODE_SEND;
+   } else {
+      op = BRW_OPCODE_SENDS;
+   }
+
    const brw_send_inst *send = inst->as_send();
-   gen_inst *gen = append(devinfo->ver >= 12 ? BRW_OPCODE_SEND
-                                             : BRW_OPCODE_SENDS);
+   gen_inst *gen = append(op);
    gen->send.eot = send->eot;
    gen->send.sfid = (gen_sfid) send->sfid;
 
@@ -398,12 +412,20 @@ brw_generator::generate_send(brw_send_inst *inst,
    gen->src[0] = to_gen(payload);
    gen->src[1] = to_gen(payload2);
 
-   if (desc.file == IMM)
+   if (inst->efficient_64bit) {
+      gen->send.combined_desc = inst->combined_desc;
+   } else if (desc.file == IMM) {
       gen->send.desc_imm = desc.ud;
-   else
+   } else {
       gen->send.desc_is_reg = true;
+   }
 
-   if (ex_desc.file == IMM) {
+   if (inst->efficient_64bit) {
+      assert(desc.file == ARF);
+      assert(ex_desc.file == ARF);
+      gen->send.indirect_desc[0] = to_gen(desc);
+      gen->send.indirect_desc[1] = to_gen(ex_desc);
+   } else if (ex_desc.file == IMM) {
       gen->send.ex_desc_imm = ex_desc.ud;
    } else {
       gen->send.ex_desc_is_reg = true;
@@ -413,18 +435,21 @@ brw_generator::generate_send(brw_send_inst *inst,
          gen->send.ex_desc_imm_extra = inst->offset;
    }
 
-   if (ex_bso) {
+   if (ex_bso && !inst->efficient_64bit) {
       gen->send.ex_bso = true;
       gen->send.src1_len = inst->ex_mlen / reg_unit(devinfo);
    }
 
-   if (devinfo->ver >= 20 && gen->send.sfid == GEN_SFID_UGM) {
+   if ((devinfo->ver >= 20 && gen->send.sfid == GEN_SFID_UGM) ||
+       inst->efficient_64bit) {
+      gen->send.src0_len = inst->mlen / reg_unit(devinfo);
       gen->send.src1_len = inst->ex_mlen / reg_unit(devinfo);
    }
 
    if (send->check_tdr) {
       if      (gen->opcode == GEN_OP_SEND)  gen->opcode = GEN_OP_SENDC;
       else if (gen->opcode == GEN_OP_SENDS) gen->opcode = GEN_OP_SENDSC;
+      else if (gen->opcode == GEN_OP_SENDG) gen->opcode = GEN_OP_SENDGC;
    }
 
    /* Serialize messages if needed */
@@ -752,19 +777,34 @@ brw_generator::generate_quad_swizzle(const brw_inst *inst,
 }
 
 void
-brw_generator::generate_barrier(brw_inst *, struct brw_reg src)
+brw_generator::generate_barrier(brw_inst *inst, struct brw_reg src)
 {
-   gen_inst *gen = append(devinfo->ver >= 12 ? BRW_OPCODE_SEND : BRW_OPCODE_SENDS,
+   enum opcode opcode;
+
+   if (params->key->use_efficient_64bit)
+      opcode = BRW_OPCODE_SENDG;
+   else if (devinfo->ver >= 12)
+      opcode = BRW_OPCODE_SEND;
+   else
+      opcode = BRW_OPCODE_SENDS;
+
+   gen_inst *gen = append(opcode,
                           retype(brw_null_reg(), BRW_TYPE_UD),
                           src,
                           brw_null_reg());
 
-   uint32_t desc =
-      brw_message_desc(devinfo, 1 * reg_unit(devinfo), 0, false);
-   desc |= (uint32_t)GEN_MESSAGE_GATEWAY_SFID_BARRIER_MSG;
+   if (params->key->use_efficient_64bit) {
+      gen->send.combined_desc = GEN_MESSAGE_GATEWAY_SFID_BARRIER_MSG;
+      gen->send.indirect_desc[0] = to_gen(brw_null_reg());
+      gen->send.indirect_desc[1] = to_gen(brw_null_reg());
+      gen->send.src0_len = 1;
+   } else {
+      uint32_t desc = brw_message_desc(devinfo, 1 * reg_unit(devinfo), 0, false);
+      desc |= (uint32_t)GEN_MESSAGE_GATEWAY_SFID_BARRIER_MSG;
+      gen->send.desc_imm = desc;
+   }
    gen->align16 = false;
    gen->send.sfid = GEN_SFID_MESSAGE_GATEWAY;
-   gen->send.desc_imm = desc;
    gen->no_mask = true;
 
    if (devinfo->ver >= 12) {
@@ -1479,6 +1519,7 @@ brw_generator::generate_code(const brw_shader &s,
 
       case BRW_OPCODE_ADD:
       case BRW_OPCODE_MUL:
+      case BRW_OPCODE_MULLH:
       case BRW_OPCODE_AVG:
       case BRW_OPCODE_MACH:
       case BRW_OPCODE_AND:
@@ -1498,6 +1539,10 @@ brw_generator::generate_code(const brw_shader &s,
       case BRW_OPCODE_ROR:
       case BRW_OPCODE_CMP:
       case BRW_OPCODE_CMPN:
+         assert(inst->opcode != BRW_OPCODE_MAC || devinfo->ver < 35);
+         assert(inst->opcode != BRW_OPCODE_MACH || devinfo->ver < 35);
+         assert(inst->opcode != BRW_OPCODE_MACL || devinfo->ver < 35);
+         assert(inst->opcode != BRW_OPCODE_MULLH || devinfo->ver >= 35);
          assert(inst->opcode != BRW_OPCODE_SRND || devinfo->ver >= 20);
          assert(inst->opcode != BRW_OPCODE_ROL || devinfo->ver >= 11);
          assert(inst->opcode != BRW_OPCODE_ROR || devinfo->ver >= 11);
@@ -1526,6 +1571,52 @@ brw_generator::generate_code(const brw_shader &s,
 
          if (devinfo->ver == 9)
             current_state()->align16 = true;
+
+         if (devinfo->verx10 == 90) {
+            /* On Gfx9, there are no bits in the instruction to store the
+             * destination register file. It must be GRF.
+             */
+            assert(dst.file == FIXED_GRF);
+         }
+
+         if (devinfo->verx10 == 110) {
+            /* On Gfx11, things are more complicated. Page 475 (page 481 of
+             * the PDF) of the Ice Lake PRM Volume 9: Render Engine says:
+             *
+             *    The 3-source instructions have the following restrictions:
+             *
+             *    - Only GRF registers can be sources and only GRF registers
+             *      can be the destination.
+             *
+             * Which is cool and all, but page 496 (page 502 of the PDF) of
+             * the Ice Lake PRM Volume 9: Render Engine says:
+             *
+             *    DstRegfile
+             *        0 - GRF
+             *        1 - ARF (Restriction : Only valid ARF type is Accumulator)
+             *
+             * The Bspec also shows examples of using MAD with accumulator
+             * source and destination as a replacement for PLN. In commit
+             * 432674ce93ce, this driver made use of this feature!
+             */
+            assert(dst.file == FIXED_GRF || inst->dst.is_accumulator());
+         }
+
+         if (devinfo->verx10 == 110 || devinfo->verx10 == 120) {
+            /* No supporting documentation has been found in the Bspec or
+             * the PRMs. However, the TGL simulator will produce the warning:
+             *
+             *    Source modifier is not allowed if source is an accumulator
+             *    for 3 src instructions.
+             *
+             * It has been experimentally determined that Gfx11 has the same
+             * restriction.
+             */
+            for (int i = 0; i < 3; i++) {
+               assert(!src[i].is_accumulator() ||
+                      (!src[i].abs && !src[i].negate));
+            }
+         }
 
          append(inst->opcode, dst, src[0], src[1], src[2]);
 	 break;
@@ -1652,6 +1743,7 @@ brw_generator::generate_code(const brw_shader &s,
       case SHADER_OPCODE_LOG2:
       case SHADER_OPCODE_SIN:
       case SHADER_OPCODE_COS:
+      case SHADER_OPCODE_TANH:
          assert(inst->conditional_mod == BRW_CONDITIONAL_NONE);
          generate_math(dst, src[0], retype(brw_null_reg(), src[0].type),
                        gen_math_func_for_opcode(inst->opcode));
@@ -1692,19 +1784,24 @@ brw_generator::generate_code(const brw_shader &s,
          break;
 
       case SHADER_OPCODE_SEND:
-         generate_send(inst->as_send(), dst, src[SEND_SRC_DESC], src[SEND_SRC_EX_DESC],
-                       src[SEND_SRC_PAYLOAD1], src[SEND_SRC_PAYLOAD2],
-                       inst->as_send()->bindless_surface &&
-                       intel_has_extended_bindless(devinfo));
+         generate_send(inst->as_send(),
+                       dst,
+                       src[SEND_SRC_DESC],
+                       src[SEND_SRC_EX_DESC],/* SENDG_SRC_IND_0_DESC in Sendg */
+                       src[SEND_SRC_PAYLOAD1],
+                       src[SEND_SRC_PAYLOAD2],
+                       inst->as_send()->bindless_surface && intel_has_extended_bindless(devinfo));
          send_count++;
          break;
 
       case SHADER_OPCODE_SEND_GATHER:
-         generate_send(inst->as_send(), dst,
-                       src[SEND_GATHER_SRC_DESC], src[SEND_GATHER_SRC_EX_DESC],
-                       src[SEND_GATHER_SRC_SCALAR], brw_null_reg(),
-                       inst->as_send()->bindless_surface &&
-                       intel_has_extended_bindless(devinfo));
+         generate_send(inst->as_send(),
+                       dst,
+                       src[SEND_GATHER_SRC_DESC],
+                       src[SEND_GATHER_SRC_EX_DESC],
+                       src[SEND_GATHER_SRC_SCALAR],
+                       brw_null_reg(),
+                       inst->as_send()->bindless_surface && intel_has_extended_bindless(devinfo));
          send_count++;
          break;
 
@@ -1988,6 +2085,11 @@ brw_generator::generate_code(const brw_shader &s,
       }
    }
 
+   if (INTEL_DEBUG(DEBUG_SHADER_HASH)) {
+      append_MOV(retype(brw_null_reg(), BRW_TYPE_UD), brw_imm_ud(prog_data->source_hash & 0xffffffff));
+      append_MOV(retype(brw_null_reg(), BRW_TYPE_UD), brw_imm_ud(prog_data->source_hash >> 32));
+   }
+
 #ifndef NDEBUG
    /* Pad with NULLs so annotations same size as gen_insts. */
    label_annotations.resize(gen_insts.size(), NULL);
@@ -2082,6 +2184,7 @@ brw_generator::generate_code(const brw_shader &s,
    gen_encode_params enc_params = {
       .devinfo = devinfo,
       .compact_all = !INTEL_DEBUG(DEBUG_NO_COMPACTION),
+      .use_efficient_64bit = params->key->use_efficient_64bit,
 
       /* Will explicitly call validation later. */
       .skip_validation = true,
@@ -2162,13 +2265,13 @@ brw_generator::generate_code(const brw_shader &s,
       FILE *files[2] = { NULL, NULL };
 
       if (debug_flag && (!intel_shader_dump_filter ||
-                         (intel_shader_dump_filter && intel_shader_dump_filter == params->source_hash)))
+                         (intel_shader_dump_filter && intel_shader_dump_filter == prog_data->source_hash)))
          files[0] = stderr;
 
       if (params->archiver) {
-         const char *filename =
-            ralloc_asprintf(mem_ctx, "GEN%d/0", dispatch_width);
-         files[1] = debug_archiver_start_file(params->archiver, filename);
+         files[1] = debug_archiver_start_file(
+            params->archiver,
+            ralloc_asprintf(mem_ctx, "GEN%d/0", dispatch_width));
       }
 
       for (unsigned i = 0; i < ARRAY_SIZE(files); i++) {
@@ -2179,9 +2282,8 @@ brw_generator::generate_code(const brw_shader &s,
                  "scheduled with mode %s. "
                  "Promoted %u constants. "
                  "GRF registers: %u. "
-                 "Non-SSA regs (after NIR): %u. "
                  "Compacted %d to %d bytes (%.0f%%)\n",
-                 shader_name, params->source_hash, blake3buf,
+                 shader_name, prog_data->source_hash, blake3buf,
                  dispatch_width,
                  before_size / 16 - nop_count - sync_nop_count,
                  loop_count, perf.latency,
@@ -2191,7 +2293,6 @@ brw_generator::generate_code(const brw_shader &s,
                  shader_stats.scheduler_mode,
                  shader_stats.promoted_constants,
                  s.grf_used,
-                 shader_stats.non_ssa_registers_after_nir,
                  before_size, after_size,
                  100.0f * (before_size - after_size) / before_size);
 
@@ -2211,6 +2312,13 @@ brw_generator::generate_code(const brw_shader &s,
       }
 
       if (params->archiver) {
+         debug_archiver_finish_file(params->archiver);
+
+         FILE *bin_dump =
+            debug_archiver_start_file(
+               params->archiver,
+               ralloc_asprintf(mem_ctx, "GEN%d/0.bin", dispatch_width));
+         fwrite(output, 1, output_size, bin_dump);
          debug_archiver_finish_file(params->archiver);
       }
    }
@@ -2242,11 +2350,14 @@ brw_generator::generate_code(const brw_shader &s,
       stats->cycles = perf.latency;
       stats->spills = shader_stats.spill_count;
       stats->fills = shader_stats.fill_count;
+      stats->scratch_memory_size = prog_data->total_scratch;
       stats->max_live_registers = shader_stats.max_register_pressure;
-      stats->non_ssa_regs_after_nir = shader_stats.non_ssa_registers_after_nir;
       stats->source_hash = prog_data->source_hash;
       stats->grf_registers = devinfo->ver >= 30 ? s.grf_used : 0;
-      stats->scheduler_mode = shader_stats.scheduler_mode;
+      stats->vrt_size =
+         intel_vrt_register_file_size(devinfo, stats->source_hash, stats->grf_registers);
+      stats->vrt_threads =
+         intel_max_vrt_threads(devinfo, stats->vrt_size);
 
       switch (stage) {
       case MESA_SHADER_VERTEX:
@@ -2503,13 +2614,13 @@ brw_generator::append_reloc(const intel_shader_reloc &r)
 static uint64_t
 brw_bsr(const struct intel_device_info *devinfo,
         uint32_t offset, uint8_t simd_size, uint8_t local_arg_offset,
-        uint8_t grf_used)
+        unsigned grf_used)
 {
    assert(offset % 64 == 0);
    assert(simd_size == 8 || simd_size == 16);
    assert(local_arg_offset % 8 == 0);
 
-   return ((uint64_t)ptl_register_blocks(grf_used) << 60) |
+   return ((uint64_t)intel_register_blocks(devinfo, grf_used) << 60) |
           offset |
           SET_BITS(simd_size == 8, 4, 4) |
           SET_BITS(local_arg_offset / 8, 2, 0);

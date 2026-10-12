@@ -29,6 +29,7 @@
 #include "util/u_math.h"
 #include "util/u_inlines.h"
 #include "lp_texture.h"
+#include "lp_texture_handle.h"
 
 static bool
 binding_has_immutable_samplers(const VkDescriptorSetLayoutBinding *binding)
@@ -276,9 +277,8 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreatePipelineLayout(
 }
 
 static struct pipe_resource *
-get_buffer_resource(struct pipe_context *ctx, VkDeviceAddress address, size_t range)
+get_buffer_resource(struct pipe_screen *pscreen, VkDeviceAddress address, size_t range)
 {
-   struct pipe_screen *pscreen = ctx->screen;
    struct pipe_resource templ = {0};
 
    templ.screen = pscreen;
@@ -307,9 +307,7 @@ get_buffer_resource(struct pipe_context *ctx, VkDeviceAddress address, size_t ra
 static struct lp_texture_handle
 get_texture_handle_bda(struct lvp_device *device, VkDeviceAddress address, size_t range, enum pipe_format format)
 {
-   struct pipe_context *ctx = device->queue.ctx;
-
-   struct pipe_resource *pres = get_buffer_resource(ctx, address, range);
+   struct pipe_resource *pres = get_buffer_resource(device->pscreen, address, range);
 
    struct pipe_sampler_view templ;
    memset(&templ, 0, sizeof(templ));
@@ -321,17 +319,13 @@ get_texture_handle_bda(struct lvp_device *device, VkDeviceAddress address, size_
    templ.format = format;
    templ.u.buf.size = range;
    templ.texture = pres;
-   templ.context = ctx;
-   struct pipe_sampler_view *view = ctx->create_sampler_view(ctx, pres, &templ);
 
-   simple_mtx_lock(&device->queue.lock);
+   struct lp_texture_handle *handle = llvmpipe_create_texture_handle(device->drv_pscreen, &templ, NULL);
 
-   struct lp_texture_handle *handle = (void *)(uintptr_t)ctx->create_texture_handle(ctx, view, NULL);
+   simple_mtx_lock(&device->bda_lock);
    util_dynarray_append(&device->bda_texture_handles, handle);
+   simple_mtx_unlock(&device->bda_lock);
 
-   simple_mtx_unlock(&device->queue.lock);
-
-   ctx->sampler_view_destroy(ctx, view);
    pipe_resource_reference(&pres, NULL);
 
    return *handle;
@@ -340,20 +334,17 @@ get_texture_handle_bda(struct lvp_device *device, VkDeviceAddress address, size_
 static struct lp_texture_handle
 get_image_handle_bda(struct lvp_device *device, VkDeviceAddress address, size_t range, enum pipe_format format)
 {
-   struct pipe_context *ctx = device->queue.ctx;
-
-   struct pipe_resource *pres = get_buffer_resource(ctx, address, range);
+   struct pipe_resource *pres = get_buffer_resource(device->pscreen, address, range);
    struct pipe_image_view view = {0};
    view.resource = pres;
    view.format = format;
    view.u.buf.size = range;
 
-   simple_mtx_lock(&device->queue.lock);
+   struct lp_texture_handle *handle = llvmpipe_create_image_handle(device->drv_pscreen, &view);
 
-   struct lp_texture_handle *handle = (void *)(uintptr_t)ctx->create_image_handle(ctx, &view);
+   simple_mtx_lock(&device->bda_lock);
    util_dynarray_append(&device->bda_image_handles, handle);
-
-   simple_mtx_unlock(&device->queue.lock);
+   simple_mtx_unlock(&device->bda_lock);
 
    pipe_resource_reference(&pres, NULL);
 
@@ -529,7 +520,7 @@ VKAPI_ATTR void VKAPI_CALL lvp_UpdateDescriptorSets(
                unsigned plane_count = iview->plane_count;
 
                for (unsigned p = 0; p < plane_count; p++) {
-                  lp_jit_bindless_texture_from_pipe(&desc[p].image.texture, iview->planes[p].sv);
+                  lp_jit_bindless_texture_from_pipe(&desc[p].image.texture, &iview->planes[p].sv);
                   desc[p].image.functions = iview->planes[p].texture_handle->functions;
                }
 
@@ -559,7 +550,7 @@ VKAPI_ATTR void VKAPI_CALL lvp_UpdateDescriptorSets(
                unsigned plane_count = iview->plane_count;
 
                for (unsigned p = 0; p < plane_count; p++) {
-                  lp_jit_bindless_texture_from_pipe(&desc[p].texture, iview->planes[p].sv);
+                  lp_jit_bindless_texture_from_pipe(&desc[p].texture, &iview->planes[p].sv);
                   desc[p].functions = iview->planes[p].texture_handle->functions;
                }
             } else {
@@ -596,7 +587,7 @@ VKAPI_ATTR void VKAPI_CALL lvp_UpdateDescriptorSets(
             struct lp_image_descriptor *desc =
                (struct lp_image_descriptor *)(descs + j * bind_layout->stride);
             if (bview) {
-               lp_jit_bindless_texture_from_pipe(&desc->texture, bview->sv);
+               lp_jit_bindless_texture_from_pipe(&desc->texture, &bview->sv);
                desc->functions = bview->texture_handle->functions;
             } else {
                desc->functions = device->null_texture_handle->functions;
@@ -851,7 +842,7 @@ lvp_descriptor_set_update_with_template(VkDevice _device, VkDescriptorSet descri
 
             if (iview) {
                for (unsigned p = 0; p < iview->plane_count; p++) {
-                  lp_jit_bindless_texture_from_pipe(&desc[p].image.texture, iview->planes[p].sv);
+                  lp_jit_bindless_texture_from_pipe(&desc[p].image.texture, &iview->planes[p].sv);
                   desc[p].image.functions = iview->planes[p].texture_handle->functions;
                }
 
@@ -878,7 +869,7 @@ lvp_descriptor_set_update_with_template(VkDevice _device, VkDescriptorSet descri
 
             if (iview) {
                for (unsigned p = 0; p < iview->plane_count; p++) {
-                  lp_jit_bindless_texture_from_pipe(&image_desc[p].texture, iview->planes[p].sv);
+                  lp_jit_bindless_texture_from_pipe(&image_desc[p].texture, &iview->planes[p].sv);
                   image_desc[p].functions = iview->planes[p].texture_handle->functions;
                }
             } else {
@@ -911,7 +902,7 @@ lvp_descriptor_set_update_with_template(VkDevice _device, VkDescriptorSet descri
                             *(VkBufferView *)pSrc);
             struct lp_image_descriptor *image_desc = (struct lp_image_descriptor *)descs;
             if (bview) {
-               lp_jit_bindless_texture_from_pipe(&image_desc->texture, bview->sv);
+               lp_jit_bindless_texture_from_pipe(&image_desc->texture, &bview->sv);
                image_desc->functions = bview->texture_handle->functions;
             } else {
                image_desc->functions = device->null_texture_handle->functions;
@@ -1073,7 +1064,7 @@ VKAPI_ATTR void VKAPI_CALL lvp_GetDescriptorEXT(
          unsigned plane_count = iview->plane_count;
 
          for (unsigned p = 0; p < plane_count; p++) {
-            lp_jit_bindless_texture_from_pipe(&image_sampler_desc[p].image.texture, iview->planes[p].sv);
+            lp_jit_bindless_texture_from_pipe(&image_sampler_desc[p].image.texture, &iview->planes[p].sv);
             image_sampler_desc[p].image.functions = iview->planes[p].texture_handle->functions;
 
             if (info->sampler) {
@@ -1103,7 +1094,7 @@ VKAPI_ATTR void VKAPI_CALL lvp_GetDescriptorEXT(
          unsigned plane_count = iview->plane_count;
 
          for (unsigned p = 0; p < plane_count; p++) {
-            lp_jit_bindless_texture_from_pipe(&image_desc[p].texture, iview->planes[p].sv);
+            lp_jit_bindless_texture_from_pipe(&image_desc[p].texture, &iview->planes[p].sv);
             image_desc[p].functions = iview->planes[p].texture_handle->functions;
          }
       } else {
@@ -1267,7 +1258,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_WriteResourceDescriptorsEXT(
 
             for (unsigned p = 0; p < plane_count; p++) {
                if (pResources[i].type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
-                  lp_jit_bindless_texture_from_pipe(&image_desc[p].texture, iview->planes[p].sv);
+                  lp_jit_bindless_texture_from_pipe(&image_desc[p].texture, &iview->planes[p].sv);
                   image_desc[p].functions = iview->planes[p].texture_handle->functions;
                } else {
                   lp_jit_image_from_pipe(&image_desc[p].image, &iview->planes[p].iv);

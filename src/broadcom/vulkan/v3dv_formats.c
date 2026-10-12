@@ -357,10 +357,10 @@ v3dv_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
       .bufferFeatures = vk_format_features2_to_features(buffer2),
    };
 
-   vk_foreach_struct(ext, pFormatProperties->pNext) {
-      switch ((unsigned)ext->sType) {
+   vk_foreach_struct(sType, ext, pFormatProperties->pNext) {
+      switch ((unsigned)sType) {
       case VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT: {
-         struct VkDrmFormatModifierPropertiesListEXT *list = (void *)ext;
+         struct VkDrmFormatModifierPropertiesListEXT *list = ext;
          VK_OUTARRAY_MAKE_TYPED(VkDrmFormatModifierPropertiesEXT, out,
                                 list->pDrmFormatModifierProperties,
                                 &list->drmFormatModifierCount);
@@ -385,7 +385,7 @@ v3dv_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
          break;
       }
       case VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_2_EXT: {
-         struct VkDrmFormatModifierPropertiesList2EXT *list = (void *)ext;
+         struct VkDrmFormatModifierPropertiesList2EXT *list = ext;
          VK_OUTARRAY_MAKE_TYPED(VkDrmFormatModifierProperties2EXT, out,
                                 list->pDrmFormatModifierProperties,
                                 &list->drmFormatModifierCount);
@@ -408,14 +408,14 @@ v3dv_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
          break;
       }
       case VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3: {
-         VkFormatProperties3 *props = (VkFormatProperties3 *)ext;
+         VkFormatProperties3 *props = ext;
          props->linearTilingFeatures = linear2;
          props->optimalTilingFeatures = optimal2;
          props->bufferFeatures = buffer2;
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -526,28 +526,46 @@ get_image_format_properties(
       }
    }
 
+   /* The TMU supports image dimensions up to 16384x16384 at single sample
+    * (halved to 8192x8192 for 2D images, the only ones that can be
+    * multisampled). For now we still cap maxImageDimension* at the framebuffer
+    * size because copy/blit/clear go through the TLB and blit-shader paths,
+    * which are bounded by the framebuffer size.
+    *
+    * With V3D_WEBGPU_OVERRIDE=1 expose larger limits for texture-only
+    * dimensions; the error in job_compute_frame_tiling() will fire if we
+    * ever actually render above the HW limit.
+    */
+   const bool webgpu = v3dv_webgpu_override_enabled();
+   const uint32_t max_image_dim =
+      webgpu ? 16384u : physical_device->devinfo.max_framebuffer_size;
+   const uint32_t max_image_2d_dim =
+      webgpu ? 8192u : physical_device->devinfo.max_framebuffer_size;
+   const uint32_t max_image_mip = webgpu ? 15 : V3D_MAX_MIP_LEVELS;
+   const uint32_t max_image_2d_mip = webgpu ? 14 : V3D_MAX_MIP_LEVELS;
+
    switch (info->type) {
    case VK_IMAGE_TYPE_1D:
-      pImageFormatProperties->maxExtent.width = V3D_MAX_IMAGE_DIMENSION;
+      pImageFormatProperties->maxExtent.width = max_image_dim;
       pImageFormatProperties->maxExtent.height = 1;
       pImageFormatProperties->maxExtent.depth = 1;
       pImageFormatProperties->maxArrayLayers = V3D_MAX_ARRAY_LAYERS;
-      pImageFormatProperties->maxMipLevels = V3D_MAX_MIP_LEVELS;
+      pImageFormatProperties->maxMipLevels = max_image_mip;
       break;
    case VK_IMAGE_TYPE_2D:
-      pImageFormatProperties->maxExtent.width = V3D_MAX_IMAGE_DIMENSION;
-      pImageFormatProperties->maxExtent.height = V3D_MAX_IMAGE_DIMENSION;
+      pImageFormatProperties->maxExtent.width = max_image_2d_dim;
+      pImageFormatProperties->maxExtent.height = max_image_2d_dim;
       pImageFormatProperties->maxExtent.depth = 1;
       pImageFormatProperties->maxArrayLayers =
          v3dv_format->plane_count == 1 ? V3D_MAX_ARRAY_LAYERS : 1;
-      pImageFormatProperties->maxMipLevels = V3D_MAX_MIP_LEVELS;
+      pImageFormatProperties->maxMipLevels = max_image_2d_mip;
       break;
    case VK_IMAGE_TYPE_3D:
-      pImageFormatProperties->maxExtent.width = V3D_MAX_IMAGE_DIMENSION;
-      pImageFormatProperties->maxExtent.height = V3D_MAX_IMAGE_DIMENSION;
-      pImageFormatProperties->maxExtent.depth = V3D_MAX_IMAGE_DIMENSION;
+      pImageFormatProperties->maxExtent.width = max_image_dim;
+      pImageFormatProperties->maxExtent.height = max_image_dim;
+      pImageFormatProperties->maxExtent.depth = max_image_dim;
       pImageFormatProperties->maxArrayLayers = 1;
-      pImageFormatProperties->maxMipLevels = V3D_MAX_MIP_LEVELS;
+      pImageFormatProperties->maxMipLevels = max_image_mip;
       break;
    default:
       UNREACHABLE("bad VkImageType");
@@ -684,16 +702,16 @@ v3dv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
    VkImageTiling tiling = base_info->tiling;
 
    /* Extract input structs */
-   vk_foreach_struct_const(s, base_info->pNext) {
-      switch ((unsigned)s->sType) {
+   vk_foreach_struct_const(sType, s, base_info->pNext) {
+      switch ((unsigned)sType) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO:
-         external_info = (const void *) s;
+         external_info = s;
          break;
       case VK_STRUCTURE_TYPE_IMAGE_STENCIL_USAGE_CREATE_INFO:
          /* Do nothing, get_image_format_properties() below will handle it */;
          break;
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT:
-         drm_format_mod_info = (const void *) s;
+         drm_format_mod_info = s;
          switch (drm_format_mod_info->drmFormatModifier) {
          case DRM_FORMAT_MOD_LINEAR:
             tiling = VK_IMAGE_TILING_LINEAR;
@@ -709,7 +727,7 @@ v3dv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
          /* Do nothing, v3dv_image_init will handle it */;
          break;
       default:
-         vk_debug_ignored_stype(s->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -718,16 +736,16 @@ v3dv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
           tiling == VK_IMAGE_TILING_LINEAR);
 
    /* Extract output structs */
-   vk_foreach_struct(s, base_props->pNext) {
-      switch (s->sType) {
+   vk_foreach_struct(sType, s, base_props->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES:
-         external_props = (void *) s;
+         external_props = s;
          break;
       case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES:
-         ycbcr_props = (void *) s;
+         ycbcr_props = s;
          break;
       default:
-         vk_debug_ignored_stype(s->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }

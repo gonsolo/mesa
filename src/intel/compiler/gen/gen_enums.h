@@ -6,89 +6,11 @@
 #pragma once
 
 #include "util/macros.h"
+#include "gen_opcodes.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-typedef enum ENUM_PACKED gen_opcode {
-   GEN_OP_ILLEGAL,
-
-   GEN_OP_ADD,
-   GEN_OP_ADD3,
-   GEN_OP_ADDC,
-   GEN_OP_AND,
-   GEN_OP_ASR,
-   GEN_OP_AVG,
-   GEN_OP_BFE,
-   GEN_OP_BFI1,
-   GEN_OP_BFI2,
-   GEN_OP_BFN,
-   GEN_OP_BFREV,
-   GEN_OP_BRC,
-   GEN_OP_BRD,
-   GEN_OP_BREAK,
-   GEN_OP_CALL,
-   GEN_OP_CALLA,
-   GEN_OP_CBIT,
-   GEN_OP_CMP,
-   GEN_OP_CMPN,
-   GEN_OP_CONTINUE,
-   GEN_OP_CSEL,
-   GEN_OP_DP2,
-   GEN_OP_DP3,
-   GEN_OP_DP4,
-   GEN_OP_DP4A,
-   GEN_OP_DPAS,
-   GEN_OP_DPH,
-   GEN_OP_ELSE,
-   GEN_OP_ENDIF,
-   GEN_OP_FBH,
-   GEN_OP_FBL,
-   GEN_OP_FRC,
-   GEN_OP_GOTO,
-   GEN_OP_HALT,
-   GEN_OP_IF,
-   GEN_OP_JMPI,
-   GEN_OP_JOIN,
-   GEN_OP_LINE,
-   GEN_OP_LRP,
-   GEN_OP_LZD,
-   GEN_OP_MAC,
-   GEN_OP_MACH,
-   GEN_OP_MACL,
-   GEN_OP_MAD,
-   GEN_OP_MADM,
-   GEN_OP_MATH,
-   GEN_OP_MOV,
-   GEN_OP_MOVI,
-   GEN_OP_MUL,
-   GEN_OP_NOP,
-   GEN_OP_NOT,
-   GEN_OP_OR,
-   GEN_OP_PLN,
-   GEN_OP_RET,
-   GEN_OP_RNDD,
-   GEN_OP_RNDE,
-   GEN_OP_RNDU,
-   GEN_OP_RNDZ,
-   GEN_OP_ROL,
-   GEN_OP_ROR,
-   GEN_OP_SEL,
-   GEN_OP_SEND,
-   GEN_OP_SENDC,
-   GEN_OP_SENDS,
-   GEN_OP_SENDSC,
-   GEN_OP_SHL,
-   GEN_OP_SHR,
-   GEN_OP_SMOV,
-   GEN_OP_SRND,
-   GEN_OP_SUBB,
-   GEN_OP_SYNC,
-   GEN_OP_WAIT,
-   GEN_OP_WHILE,
-   GEN_OP_XOR,
-} gen_opcode;
 
 typedef enum ENUM_PACKED gen_file {
    GEN_BAD_FILE,
@@ -199,7 +121,8 @@ typedef enum ENUM_PACKED gen_math {
    GEN_MATH_SIN               = 6,
    GEN_MATH_COS               = 7,
    /* 8 is reserved. */
-   GEN_MATH_FDIV              = 9,
+   GEN_MATH_FDIV              = 9, /* Older than GFX12.5 */
+   GEN_MATH_TANH              = 9, /* GFX35+ */
    GEN_MATH_POW               = 10,
    GEN_MATH_INT_DIV_BOTH      = 11,
    GEN_MATH_INT_DIV_QUOTIENT  = 12,
@@ -318,8 +241,10 @@ typedef enum ENUM_PACKED gen_sfid {
 enum ENUM_PACKED lsc_opcode {
    LSC_OP_LOAD            = 0,
    LSC_OP_LOAD_CMASK      = 2,
+   LSC_OP_LOAD_2D_BLOCK   = 3,
    LSC_OP_STORE           = 4,
    LSC_OP_STORE_CMASK     = 6,
+   LSC_OP_STORE_2D_BLOCK  = 7,
    LSC_OP_ATOMIC_INC      = 8,
    LSC_OP_ATOMIC_DEC      = 9,
    LSC_OP_ATOMIC_LOAD     = 10,
@@ -363,6 +288,18 @@ enum ENUM_PACKED lsc_addr_size {
   LSC_ADDR_SIZE_A16 = 1,    /* 16-bit address offset */
   LSC_ADDR_SIZE_A32 = 2,    /* 32-bit address offset */
   LSC_ADDR_SIZE_A64 = 3,    /* 64-bit address offset */
+};
+
+enum ENUM_PACKED lsc_addr_type_size {
+   LSC_ADDR_TYPE_SIZE_FLAT_A64_UA32_INDEX = 0,
+   LSC_ADDR_TYPE_SIZE_FLAT_A64_IA32_INDEX = 1,
+   LSC_ADDR_TYPE_SIZE_FLAT_A64_A64_INDEX = 2,
+   LSC_ADDR_TYPE_SIZE_STATEFUL_A32_INDEX = 3,
+};
+
+enum ENUM_PACKED lsc_urb_addr_type_size {
+   LSC_URB_ADDR_TYPE_SIZE_A32_A32_INDEX = 0,
+   LSC_URB_ADDR_TYPE_SIZE_A64 = 1
 };
 
 /*
@@ -798,6 +735,13 @@ enum {
    GEN_XE2_RT_WRITE_SUBTYPE_SIMD16_DUALSRC = 2,
 };
 
+/* GFX 35 + 64bits Render target opcodes */
+enum {
+   GFX35_RENDER_TARGET_WRITE             = 6,
+   GFX35_RENDER_TARGET_READ              = 2,
+   GFX35_RENDER_TARGET_DUAL_SOURCE_WRITE = 5,
+};
+
 /* Atomic op codes (msg_ctrl[3:0] of HDC untyped_atomic / similar). */
 enum {
    GEN_AOP_AND     = 1,
@@ -854,6 +798,10 @@ enum {
    GEN_MESSAGE_GATEWAY_SFID_MMIO_READ_WRITE      = 6,
 };
 
+enum gen_gateway_64bit_opcode {
+   GEN_MESSAGE_GATEWAY_64BIT_SFID_SIGNAL_EOT     = 0,
+};
+
 /* Pixel-interpolator msg_type (desc[13:12]). */
 enum {
    GEN_PIXEL_INTERPOLATOR_LOC_SHARED_OFFSET   = 0,
@@ -867,12 +815,25 @@ enum {
    GEN_RT_BTD_MESSAGE_SPAWN  = 1,
 };
 
+enum {
+   GFX35_BTD_MSG_NORMAL_BTD_SPAWN = 0,
+   GFX35_BTD_MSG_STACK_ID_RELEASE = 1,
+};
+
 /* Ray trace accelerator trace-ray control (desc[9:8]). */
 enum {
    GEN_RT_TRACE_RAY_INITIAL   = 0,
    GEN_RT_TRACE_RAY_INSTANCE  = 1,
    GEN_RT_TRACE_RAY_COMMIT    = 2,
    GEN_RT_TRACE_RAY_CONTINUE  = 3,
+};
+
+/* Ray trace accelerator trace-ray control (Gfx35+) */
+enum {
+   GFX35_OP_TRACE_RAY_ASYNC      = 0,
+   GFX35_OP_TRACE_RAY_SYNC       = 1,
+   GFX35_OP_RAYQUERY_CHECK       = 3,
+   GFX35_OP_RAYQUERY_RELEASE     = 4,
 };
 
 /* Bindless thread dispatch shader types. */
@@ -886,4 +847,3 @@ enum {
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
-

@@ -313,6 +313,30 @@ convert_pointer_to_64_bit(isel_context* ctx, Temp ptr, bool non_uniform)
                      Operand::c32((unsigned)ctx->options->address32_hi));
 }
 
+Temp
+add64_32(Builder& bld, Temp src0, Operand src1, Temp dst)
+{
+   Temp src00 = bld.tmp(src0.type(), 1);
+   Temp src01 = bld.tmp(src0.type(), 1);
+   bld.pseudo(aco_opcode::p_split_vector, Definition(src00), Definition(src01), src0);
+
+   if (src0.type() == RegType::vgpr || src1.isOfType(RegType::vgpr)) {
+      src1 = src1.isOfType(RegType::vgpr) ? src1 : bld.copy(bld.def(v1), src1);
+      Temp dst0 = bld.tmp(v1);
+      Temp carry = bld.vadd32(Definition(dst0), src00, src1, true).def(1).getTemp();
+      Temp dst1 = bld.vadd32(bld.def(v1), src01, Operand::zero(), false, carry);
+      Definition def = dst == Temp() ? bld.def(v2) : Definition(dst);
+      return bld.pseudo(aco_opcode::p_create_vector, def, dst0, dst1);
+   } else {
+      Temp carry = bld.tmp(s1);
+      Temp dst0 =
+         bld.sop2(aco_opcode::s_add_u32, bld.def(s1), bld.scc(Definition(carry)), src00, src1);
+      Temp dst1 = bld.sop2(aco_opcode::s_add_u32, bld.def(s1), bld.def(s1, scc), src01, carry);
+      Definition def = dst == Temp() ? bld.def(s2) : Definition(dst);
+      return bld.pseudo(aco_opcode::p_create_vector, def, dst0, dst1);
+   }
+}
+
 void
 select_vec2(isel_context* ctx, Temp dst, Temp cond, Temp then, Temp els)
 {
@@ -456,29 +480,25 @@ emit_interp_instr(isel_context* ctx, unsigned idx, unsigned component, Temp src,
 
 void
 emit_interp_mov_instr(isel_context* ctx, unsigned idx, unsigned component, unsigned vertex_id,
-                      Temp dst, Temp prim_mask, bool high_16bits)
+                      Temp dst, Temp prim_mask)
 {
    Builder bld(ctx->program, ctx->block);
-   Temp tmp = dst.bytes() == 2 ? bld.tmp(v1) : dst;
    if (ctx->options->gfx_level >= GFX11) {
       uint16_t dpp_ctrl = dpp_quad_perm(vertex_id, vertex_id, vertex_id, vertex_id);
       if (ctx->cf_info.in_divergent_cf || ctx->cf_info.had_divergent_discard) {
-         bld.pseudo(aco_opcode::p_interp_gfx11, Definition(tmp), Operand(lv1), Operand::c32(idx),
+         bld.pseudo(aco_opcode::p_interp_gfx11, Definition(dst), Operand(lv1), Operand::c32(idx),
                     Operand::c32(component), Operand::c32(dpp_ctrl), bld.m0(prim_mask));
       } else {
          Temp p =
             bld.ldsdir(aco_opcode::lds_param_load, bld.def(v1), bld.m0(prim_mask), idx, component);
-         bld.vop1_dpp(aco_opcode::v_mov_b32, Definition(tmp), p, dpp_ctrl);
+         bld.vop1_dpp(aco_opcode::v_mov_b32, Definition(dst), p, dpp_ctrl);
          /* lds_param_load must be done in WQM, and the result kept valid for helper lanes. */
          set_wqm(ctx, true);
       }
    } else {
-      bld.vintrp(aco_opcode::v_interp_mov_f32, Definition(tmp), Operand::c32((vertex_id + 2) % 3),
+      bld.vintrp(aco_opcode::v_interp_mov_f32, Definition(dst), Operand::c32((vertex_id + 2) % 3),
                  bld.m0(prim_mask), idx, component);
    }
-
-   if (dst.id() != tmp.id())
-      bld.pseudo(aco_opcode::p_extract_vector, Definition(dst), tmp, Operand::c32(high_16bits));
 }
 
 /* Packs multiple Temps of different sizes in to a vector of v1 Temps.
@@ -664,6 +684,26 @@ lanecount_to_mask(isel_context* ctx, Temp count, unsigned bit_offset)
          return bld.sop2(aco_opcode::s_bfe_u64, bld.def(bld.lm), bld.def(s1, scc),
                          Operand::c64(-1ll), count);
       }
+   }
+}
+
+void
+emit_barrier(Builder& bld, memory_sync_info sync, sync_scope exec_scope, aco_opcode op)
+{
+   if (bld.program->workgroup_size <= bld.program->wave_size) {
+      exec_scope = MIN2(exec_scope, scope_subgroup);
+      if (sync.scope == scope_workgroup)
+         sync.scope = scope_subgroup;
+   }
+
+   if (op == aco_opcode::p_barrier && bld.program->gfx_level >= GFX12 &&
+       exec_scope == scope_workgroup) {
+      memory_sync_info sync_release(sync.storage, sync.semantics & semantic_release, sync.scope);
+      memory_sync_info sync_acquire(sync.storage, sync.semantics & semantic_acquire, sync.scope);
+      bld.barrier(aco_opcode::p_barrier_signal, sync_release, exec_scope);
+      bld.barrier(aco_opcode::p_barrier_wait, sync_acquire, exec_scope);
+   } else {
+      bld.barrier(op, sync, exec_scope);
    }
 }
 

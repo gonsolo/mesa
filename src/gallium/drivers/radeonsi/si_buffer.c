@@ -57,10 +57,6 @@ void si_init_resource_fields(struct si_screen *sscreen, struct si_resource *res,
       break;
    }
 
-   /* If no compute/graphics -> use GTT since we can't copy/blit. */
-   if (!sscreen->has_gfx_compute)
-      res->domains = RADEON_DOMAIN_GTT;
-
    if (res->b.b.target == PIPE_BUFFER && res->b.b.flags & PIPE_RESOURCE_FLAG_MAP_PERSISTENT) {
       /* Use GTT for all persistent mappings with older
        * kernels, because they didn't always flush the HDP
@@ -285,7 +281,7 @@ static bool si_invalidate_buffer(struct si_context *sctx, struct si_resource *bu
 
 /* Replace the storage of dst with src. */
 void si_replace_buffer_storage(struct pipe_context *ctx, struct pipe_resource *dst,
-                               struct pipe_resource *src, unsigned num_rebinds, uint32_t rebind_mask,
+                               struct pipe_resource *src, unsigned num_rebinds, uint64_t rebind_mask,
                                uint32_t delete_buffer_id)
 {
    struct si_context *sctx = (struct si_context *)ctx;

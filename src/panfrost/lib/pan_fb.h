@@ -176,7 +176,9 @@ static inline bool
 pan_fb_has_partial_tiles(const struct pan_fb_layout *fb)
 {
    assert(pan_fb_bbox_contains_bbox(fb->tiling_area_px, fb->render_area_px));
-   return !pan_fb_bbox_equal(fb->tiling_area_px, fb->render_area_px);
+   /* we only care about partial-tile borders if the FB is not fully covered. */
+   return !pan_fb_bbox_equal(fb->tiling_area_px, fb->render_area_px) &&
+          !pan_fb_is_fully_covered(fb);
 }
 
 #ifdef PAN_ARCH
@@ -405,6 +407,9 @@ struct pan_fb_store_target {
 
    /** Image view to store to */
    const struct pan_image_view *iview;
+
+   /** GPU address of the CRC header for this store target */
+   uint64_t crc_header_addr;
 };
 
 static inline struct pan_fb_store_target
@@ -466,10 +471,13 @@ struct pan_fb_desc_info {
 
    uint64_t sample_pos_array_pointer;
 
-   /* Only used on Valhal */
+   /* Only used on Valhall */
    bool sprite_coord_origin_max_y;
    bool provoking_vertex_first;
    bool allow_hsr_prepass;
+
+   /* Force identical descriptor layouts across regular and IR passes. */
+   bool force_zs_crc_ext;
 
    uint16_t layer;
 
@@ -478,6 +486,16 @@ struct pan_fb_desc_info {
 };
 
 #ifdef PAN_ARCH
+struct pan_fb_crc_rt_info {
+   int8_t rt;
+   uint64_t header_addr;
+};
+
+bool GENX(pan_fb_get_crc_rt_info)(const struct pan_fb_desc_info *info,
+                                  struct pan_fb_crc_rt_info *out);
+
+bool GENX(pan_fb_needs_zs_crc_ext)(const struct pan_fb_desc_info *info);
+
 void GENX(pan_fill_fb_info)(const struct pan_fb_desc_info *info,
                             struct pan_fb_info *fbinfo);
 

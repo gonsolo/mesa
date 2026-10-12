@@ -321,6 +321,10 @@ bool fdl6_layout_image(struct fdl_layout *layout, const struct fd_dev_info *info
                        const struct fdl_image_params *params,
                        const struct fdl_explicit_layout *explicit_layout);
 
+uint64_t fdl6_layout_multiplanar_image(struct fdl_layout *y_layout,
+                                       struct fdl_layout *uv_layout,
+                                       uint32_t mip_levels);
+
 static inline void
 fdl_set_pitchalign(struct fdl_layout *layout, unsigned pitchalign)
 {
@@ -481,11 +485,18 @@ template <chip CHIP>
 void
 fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
                const struct fdl_view_args *args, bool has_z24uint_s8uint);
+
+enum fdl_ssbo_emulation_mode {
+   FDL_SSBO_EMULATION_DISABLED,
+   FDL_SSBO_EMULATION_ENABLED,
+};
+
 template <chip CHIP>
 void
 fdl6_buffer_view_init(uint32_t *descriptor, enum pipe_format format,
                       const uint8_t (&swiz)[4], uint64_t iova, uint32_t size,
-                      uint32_t struct_size_texels = 1);
+                      uint32_t struct_size_texels = 1,
+                      enum fdl_ssbo_emulation_mode ssbo_emulation = FDL_SSBO_EMULATION_DISABLED);
 #endif
 
 #endif /* FREEDRENO_LAYOUT_H_ */

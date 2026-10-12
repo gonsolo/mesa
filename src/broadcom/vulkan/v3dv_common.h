@@ -26,6 +26,7 @@
 #include "vk_object.h"
 #include "util/log.h"
 #include "common/v3d_debug.h"
+#include "vk_debug_utils.h"
 
 #ifdef HAVE_VALGRIND
 #include <valgrind.h>

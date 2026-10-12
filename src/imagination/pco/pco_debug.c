@@ -33,8 +33,15 @@ static const struct debug_named_value pco_debug_options[] = {
      PCO_DEBUG_INT_SMP,
      "Enable integer coordinate support for sampler instructions." },
    { "global_shmem",
-      PCO_DEBUG_GLOBAL_SHMEM,
-      "Force spill shared memory to global memory." },
+     PCO_DEBUG_GLOBAL_SHMEM,
+     "Force spill shared memory to global memory." },
+   { "ra_force_spill",
+     PCO_DEBUG_RA_FORCE_SPILL,
+     "Force spilling of temps during register allocation." },
+   { "ra_skip_opt",
+     PCO_DEBUG_RA_SKIP_OPT,
+     "Skip attempting to allocate temps with the optimal amount during RA." },
+   { "no_dma_cache", PCO_DEBUG_NO_DMA_CACHE, "Disable DMA cache." },
    DEBUG_NAMED_VALUE_END,
 };
 

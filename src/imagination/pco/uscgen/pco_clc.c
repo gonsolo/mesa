@@ -143,7 +143,7 @@ static void optimize(nir_shader *nir)
       NIR_PASS(progress, nir, nir_opt_deref);
       NIR_PASS(progress, nir, nir_opt_copy_prop_vars);
       NIR_PASS(progress, nir, nir_opt_undef);
-      NIR_PASS(progress, nir, nir_lower_undef_to_zero);
+      NIR_PASS(progress, nir, nir_lower_undef_to_zero, NULL);
 
       NIR_PASS(progress, nir, nir_opt_shrink_vectors, true);
       NIR_PASS(progress, nir, nir_opt_loop_unroll);
@@ -284,7 +284,7 @@ static nir_def *load_kernel_input(nir_builder *b,
  */
 static pco_shader *build_shader(pco_ctx *ctx, nir_shader *nir, pco_data *data)
 {
-   pco_preprocess_nir(ctx, nir);
+   pco_preprocess_nir(ctx, nir, data);
    pco_lower_nir(ctx, nir, data);
    pco_postprocess_nir(ctx, nir, data);
 

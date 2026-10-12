@@ -368,7 +368,7 @@ want_stencil_pma_fix(const struct vk_dynamic_graphics_state *dyn,
     * (3DSTATE_DEPTH_BUFFER::SURFACE_TYPE != NULL) &&
     * 3DSTATE_DEPTH_BUFFER::HIZ Enable
     */
-   if (!gfx->hiz_enabled)
+   if (gfx->hiz_usage == ISL_AUX_USAGE_NONE)
       return false;
 
    /* We can't possibly know if HiZ is enabled without the depth attachment */
@@ -850,19 +850,15 @@ update_fs_config(struct anv_gfx_dynamic_state *hw_state,
    if (!fs_prog_data)
       return;
 
-   /* If we have any dynamic bits here, we might need to update the value
-    * in the push constant for the shader.
-    */
-   if (!brw_fs_prog_data_is_dynamic(fs_prog_data))
+   /* Only update the value if the shader uses it. */
+   if (!fs_prog_data->uses_fs_config)
       return;
 
    UNUSED const struct brw_mesh_prog_data *mesh_prog_data = get_gfx_mesh_prog_data(gfx);
 
    enum intel_fs_config fs_config =
       intel_fs_config((struct intel_fs_params) {
-            .shader_sample_shading     = fs_prog_data->sample_shading,
-            .shader_min_sample_shading = fs_prog_data->min_sample_shading,
-            .state_sample_shading      = fs_prog_data->api_sample_shading,
+            .persample_interp          = fs_prog_data->persample_interp,
             .rasterization_samples     = dyn->ms.rasterization_samples,
             .coarse_pixel              = !vk_fragment_shading_rate_is_disabled(&dyn->fsr),
             .alpha_to_coverage         = dyn->ms.alpha_to_coverage_enable,
@@ -1038,14 +1034,14 @@ update_ps(struct anv_gfx_dynamic_state *hw_state,
                                hw_state->fs_config);
 
    SET(PS, ps.KernelStartPointer0,
-           fs->kernel.offset +
+           anv_shader_get_pointer(device, &fs->kernel) +
            brw_fs_prog_data_prog_offset(fs_prog_data, ps, 0));
    SET(PS, ps.KernelStartPointer1,
-           fs->kernel.offset +
+           anv_shader_get_pointer(device, &fs->kernel) +
            brw_fs_prog_data_prog_offset(fs_prog_data, ps, 1));
 #if GFX_VER < 20
    SET(PS, ps.KernelStartPointer2,
-           fs->kernel.offset +
+           anv_shader_get_pointer(device, &fs->kernel) +
            brw_fs_prog_data_prog_offset(fs_prog_data, ps, 2));
 #endif
 
@@ -1073,22 +1069,21 @@ update_ps(struct anv_gfx_dynamic_state *hw_state,
 
    SET(PS, ps.PositionXYOffsetSelect,
            !fs_prog_data->uses_pos_offset ? POSOFFSET_NONE :
-           brw_fs_prog_data_is_persample(fs_prog_data,
-                                         hw_state->fs_config) ?
-           POSOFFSET_SAMPLE : POSOFFSET_CENTROID);
+           fs_prog_data->persample_dispatch ? POSOFFSET_SAMPLE :
+           POSOFFSET_CENTROID);
 }
 
 ALWAYS_INLINE static void
 update_ps_extra_wm(struct anv_gfx_dynamic_state *hw_state,
-                   const struct anv_cmd_graphics_state *gfx)
+                   const struct anv_cmd_graphics_state *gfx,
+                   const struct anv_device *device)
 {
    const struct brw_fs_prog_data *fs_prog_data = get_gfx_fs_prog_data(gfx);
 
    if (!fs_prog_data)
       return;
 
-   UNUSED const bool uses_coarse_pixel =
-      brw_fs_prog_data_is_coarse(fs_prog_data, hw_state->fs_config);
+   UNUSED const bool uses_coarse_pixel = fs_prog_data->coarse_pixel_dispatch;
 
    uint32_t InputCoverageMaskState = ICMS_NONE;
    assert(!fs_prog_data->inner_coverage); /* Not available in SPIR-V */
@@ -1103,9 +1098,10 @@ update_ps_extra_wm(struct anv_gfx_dynamic_state *hw_state,
 
    SET(PS_EXTRA, ps_extra.InputCoverageMaskState, InputCoverageMaskState);
 
-   SET(PS_EXTRA, ps_extra.PixelShaderIsPerSample,
-                 brw_fs_prog_data_is_persample(fs_prog_data,
-                                               hw_state->fs_config));
+   bool is_per_sample =
+      fs_prog_data->persample_dispatch;
+
+   SET(PS_EXTRA, ps_extra.PixelShaderIsPerSample, is_per_sample);
 #if GFX_VER >= 11
    SET(PS_EXTRA, ps_extra.PixelShaderIsPerCoarsePixel, uses_coarse_pixel);
 #endif
@@ -1113,11 +1109,13 @@ update_ps_extra_wm(struct anv_gfx_dynamic_state *hw_state,
    /* TODO: We should only require this when the last geometry shader uses a
     *       fragment shading rate that is not constant.
     */
-   SET(PS_EXTRA, ps_extra.EnablePSDependencyOnCPsizeChange, uses_coarse_pixel);
+   SET(PS_EXTRA, ps_extra.EnablePSDependencyOnCPsizeChange,
+       intel_needs_workaround(device->info, 16030144090) ?
+       is_per_sample : uses_coarse_pixel);
 #endif
 
    SET(WM, wm.BarycentricInterpolationMode,
-           fs_prog_data_barycentric_modes(fs_prog_data, hw_state->fs_config));
+       fs_prog_data->barycentric_interp_modes);
 
 #if INTEL_WA_18038825448_GFX_VER
    SET(WA_18038825448, coarse_state, uses_coarse_pixel ?
@@ -1159,6 +1157,15 @@ update_ps_extra_kills_pixel(struct anv_gfx_dynamic_state *hw_state,
                        FRAGMENT);
 }
 
+ALWAYS_INLINE static uint8_t
+get_primitive_topology(const struct anv_cmd_graphics_state *gfx,
+                       const struct vk_dynamic_graphics_state *dyn)
+{
+   return gfx->shaders[MESA_SHADER_TESS_EVAL] != NULL ?
+          _3DPRIM_PATCHLIST(dyn->ts.patch_control_points) :
+          vk_to_intel_primitive_type[dyn->ia.primitive_topology];
+}
+
 #if GFX_VERx10 >= 125
 ALWAYS_INLINE static bool
 geom_or_tess_prim_id_used(const struct anv_cmd_graphics_state *gfx)
@@ -1177,6 +1184,7 @@ geom_or_tess_prim_id_used(const struct anv_cmd_graphics_state *gfx)
 
 ALWAYS_INLINE static void
 update_vfg_distribution_mode(struct anv_gfx_dynamic_state *hw_state,
+                             const struct vk_dynamic_graphics_state *dyn,
                              const struct anv_device *device,
                              const struct anv_cmd_graphics_state *gfx)
 {
@@ -1188,6 +1196,25 @@ update_vfg_distribution_mode(struct anv_gfx_dynamic_state *hw_state,
    SET(VFG, vfg.DistributionMode, (GFX_VER < 20 &&
                                    !anv_gfx_has_stage(gfx, MESA_SHADER_TESS_EVAL)) ?
                                   RR_FREE : RR_STRICT);
+
+#if INTEL_WA_16029281427_GFX_VER
+   /* Make sure that if we have cutindex enabled and use any strip primitive
+    * then VFG distribution mode must not be RR_FREE, use RR_STRICT instead.
+    */
+   const uint8_t primitive_topology = get_primitive_topology(gfx, dyn);
+   if (dyn->ia.primitive_restart_index &&
+       (primitive_topology == _3DPRIM_TRISTRIP ||
+        primitive_topology == _3DPRIM_TRISTRIP_ADJ ||
+        primitive_topology == _3DPRIM_QUADSTRIP ||
+        primitive_topology == _3DPRIM_LINESTRIP ||
+        primitive_topology == _3DPRIM_LINESTRIP_ADJ ||
+        primitive_topology == _3DPRIM_LINESTRIP_CONT ||
+        primitive_topology == _3DPRIM_LINESTRIP_BF ||
+        primitive_topology == _3DPRIM_LINESTRIP_CONT_BF)) {
+      SET(VFG, vfg.DistributionMode, RR_STRICT);
+   }
+#endif
+
    SET(VFG, vfg.DistributionGranularity, needs_instance_granularity ?
                                          InstanceLevelGranularity :
                                          BatchLevelGranularity);
@@ -1301,11 +1328,7 @@ update_topology(struct anv_gfx_dynamic_state *hw_state,
                 const struct vk_dynamic_graphics_state *dyn,
                 const struct anv_cmd_graphics_state *gfx)
 {
-   uint32_t topology =
-      gfx->shaders[MESA_SHADER_TESS_EVAL] != NULL ?
-      _3DPRIM_PATCHLIST(dyn->ts.patch_control_points) :
-      vk_to_intel_primitive_type[dyn->ia.primitive_topology];
-
+   const uint8_t topology = get_primitive_topology(gfx, dyn);
    SET(VF_TOPOLOGY, vft.PrimitiveTopologyType, topology);
 }
 
@@ -1405,7 +1428,7 @@ update_te(struct anv_gfx_dynamic_state *hw_state,
          distrib_mode = TEDMODE_OFF;
 
       /* Debug feature for hang analysis */
-      if (!device->physical->instance->drirc.debug.te_distribution)
+      if (!device->physical->drirc.debug.te_distribution)
          distrib_mode = TEDMODE_OFF;
 
       SET(TE, te.TessellationDistributionMode, distrib_mode);
@@ -1439,7 +1462,19 @@ ALWAYS_INLINE static void
 update_line_width(struct anv_gfx_dynamic_state *hw_state,
                   const struct vk_dynamic_graphics_state *dyn)
 {
-   SET(SF, sf.LineWidth, dyn->rs.line.width);
+   /* The way to enable Bresenham lines is to set LineWith = 0.0f in
+    * 3DSTATE_SF, see SKL PRMs, Volume 7: 3D-Media-GPGPU, Zero-Width
+    * (Cosmetic) Line Rasterization :
+    *
+    *    "When the LineWidth is set to zero, the device will use special rules
+    *     to rasterize “cosmetic” lines. The rasterization rules also comply
+    *     with the OpenGL conformance requirements (for 1-pixel wide non-
+    *     smooth lines)."
+    */
+   SET(SF, sf.LineWidth,
+           (dyn->rs.line.mode == VK_LINE_RASTERIZATION_MODE_BRESENHAM &&
+            dyn->rs.line.width == 1.0f) ?
+           0.0f : dyn->rs.line.width);
 }
 
 ALWAYS_INLINE static void
@@ -1514,6 +1549,7 @@ update_clip_max_viewport(struct anv_gfx_dynamic_state *hw_state,
 
 ALWAYS_INLINE static void
 update_clip_raster(struct anv_gfx_dynamic_state *hw_state,
+                   const struct anv_device *device,
                    const struct vk_dynamic_graphics_state *dyn,
                    const struct anv_cmd_graphics_state *gfx)
 {
@@ -1564,6 +1600,7 @@ update_clip_raster(struct anv_gfx_dynamic_state *hw_state,
 
    SET(RASTER, raster.APIMode, api_mode);
    SET(RASTER, raster.DXMultisampleRasterizationEnable, msaa_raster_enable);
+   SET(RASTER, raster.ForceMultisampling, false);
    SET(RASTER, raster.AntialiasingEnable, aa_enable);
    SET(RASTER, raster.CullMode, vk_to_intel_cullmode[dyn->rs.cull_mode]);
    SET(RASTER, raster.FrontWinding, vk_to_intel_front_face[dyn->rs.front_face]);
@@ -1748,7 +1785,7 @@ update_blend_state(struct anv_gfx_dynamic_state *hw_state,
                    bool has_fs_stage,
                    bool has_fs_dual_src)
 {
-   const struct anv_instance *instance = device->physical->instance;
+   const struct anv_physical_device *pdevice = device->physical;
    const uint8_t color_writes = dyn->cb.color_write_enables;
    bool has_writeable_rt =
       has_fs_stage &&
@@ -1920,7 +1957,7 @@ update_blend_state(struct anv_gfx_dynamic_state *hw_state,
             DestinationBlendFactor = BLENDFACTOR_ONE;
       }
 
-      if (instance->drirc.debug.wa_14018912822 &&
+      if (pdevice->drirc.debug.wa_14018912822 &&
           intel_needs_workaround(device->info, 14018912822) &&
           dyn->ms.rasterization_samples > 1) {
          if (DestinationBlendFactor == BLENDFACTOR_ZERO) {
@@ -1992,7 +2029,7 @@ update_viewports(struct anv_gfx_dynamic_state *hw_state,
                  const struct anv_cmd_graphics_state *gfx,
                  const struct anv_device *device)
 {
-   const struct anv_instance *instance = device->physical->instance;
+   const struct anv_physical_device *pdevice = device->physical;
    const VkViewport *viewports = dyn->vp.viewports;
 
    const float scale = dyn->vp.depth_clip_negative_one_to_one ? 0.5f : 1.0f;
@@ -2021,8 +2058,8 @@ update_viewports(struct anv_gfx_dynamic_state *hw_state,
          };
 
          /* Fix depth test misrenderings by lowering translated depth range */
-         if (instance->drirc.debug.lower_depth_range_rate != 1.0f)
-            sfv.ViewportMatrixElementm32 *= instance->drirc.debug.lower_depth_range_rate;
+         if (pdevice->drirc.debug.lower_depth_range_rate != 1.0f)
+            sfv.ViewportMatrixElementm32 *= pdevice->drirc.debug.lower_depth_range_rate;
 
          const uint32_t fb_size_max = 1 << 14;
          uint32_t x_min = 0, x_max = fb_size_max;
@@ -2217,10 +2254,10 @@ update_tbimr_info(struct anv_gfx_dynamic_state *hw_state,
                   const struct anv_cmd_graphics_state *gfx,
                   const struct intel_l3_config *l3_config)
 {
-   const struct anv_instance *instance = device->physical->instance;
+   const struct anv_physical_device *pdevice = device->physical;
    unsigned fb_width, fb_height, tile_width, tile_height;
 
-   if (instance->drirc.debug.tbimr &&
+   if (pdevice->drirc.debug.tbimr &&
        calculate_render_area(gfx, &fb_width, &fb_height) &&
        calculate_tile_dimensions(device, gfx, l3_config,
                                  fb_width, fb_height,
@@ -2304,6 +2341,46 @@ compute_mesh_provoking_vertex(const struct brw_mesh_prog_data *mesh_prog_data,
 }
 #endif
 
+#if GFX_VERx10 >= 350
+static inline void
+update_fs_color_offset(struct anv_gfx_dynamic_state *hw_state,
+                       const struct anv_cmd_graphics_state *gfx)
+{
+   const struct brw_fs_prog_data *fs_prog_data = get_gfx_fs_prog_data(gfx);
+   if (fs_prog_data == NULL || !fs_prog_data->uses_fs_color_offset)
+      return;
+
+   SET(FS_COLOR_OFFSET, fs_color_offset, gfx->att_states.offset);
+}
+
+static inline void
+update_fs_color_map(struct anv_gfx_dynamic_state *hw_state,
+                    const struct vk_dynamic_graphics_state *dyn,
+                    const struct anv_cmd_graphics_state *gfx)
+{
+   const struct brw_fs_prog_data *fs_prog_data = get_gfx_fs_prog_data(gfx);
+   if (fs_prog_data == NULL || !fs_prog_data->uses_fs_color_map)
+      return;
+
+    /* The surface states are layed out this way :
+     *   - null surface
+     *   - color attachment 0
+     *   - color attachment 1
+     *   - ...
+     *
+     * Hence we leave 0 if MESA_VK_ATTACHMENT_UNUSED and otherwise add 1 to
+     * the index.
+     */
+   uint32_t map = 0;
+   for (uint32_t i = 0; i < MAX_RTS; i++) {
+      if (dyn->cal.color_map[i] != MESA_VK_ATTACHMENT_UNUSED)
+         map |= (1 + i) << (dyn->cal.color_map[i] * 4);
+   }
+
+   SET(FS_COLOR_MAP, fs_color_map, map);
+}
+#endif
+
 /**
  * This function takes the vulkan runtime values & dirty states and updates
  * the values in anv_gfx_dynamic_state, flagging HW instructions for
@@ -2338,6 +2415,18 @@ cmd_buffer_flush_gfx_runtime_state(struct anv_gfx_dynamic_state *hw_state,
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_FSR))
       update_fs_config(hw_state, dyn, gfx);
 
+#if GFX_VERx10 >= 350
+   if (device->physical->uses_efficient_64bit) {
+      if (gfx->dirty & (ANV_CMD_DIRTY_PS |
+                        ANV_CMD_DIRTY_RENDER_TARGETS))
+         update_fs_color_offset(hw_state, gfx);
+
+      if ((gfx->dirty & ANV_CMD_DIRTY_PS) ||
+          BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_COLOR_ATTACHMENT_MAP))
+         update_fs_color_map(hw_state, dyn, gfx);
+   }
+#endif
+
    if (gfx->dirty & ANV_CMD_DIRTY_PRERASTER_SHADERS)
       update_urb_config(hw_state, gfx, device);
 
@@ -2349,7 +2438,7 @@ cmd_buffer_flush_gfx_runtime_state(struct anv_gfx_dynamic_state *hw_state,
    if ((gfx->dirty & ANV_CMD_DIRTY_PS) ||
        BITSET_TEST(hw_state->pack_dirty, ANV_GFX_STATE_FS_CONFIG)) {
       update_ps(hw_state, device, dyn, gfx);
-      update_ps_extra_wm(hw_state, gfx);
+      update_ps_extra_wm(hw_state, gfx, device);
    }
 
    if (gfx->dirty &
@@ -2412,7 +2501,8 @@ cmd_buffer_flush_gfx_runtime_state(struct anv_gfx_dynamic_state *hw_state,
       update_primitive_replication(hw_state, gfx);
 #endif
 
-   if (BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_LINE_WIDTH))
+   if (BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_LINE_WIDTH) ||
+       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_LINE_MODE))
       update_line_width(hw_state, dyn);
 
    if (gfx->dirty & ANV_CMD_DIRTY_PRERASTER_SHADERS)
@@ -2429,6 +2519,7 @@ cmd_buffer_flush_gfx_runtime_state(struct anv_gfx_dynamic_state *hw_state,
 
    if ((gfx->dirty & ANV_CMD_DIRTY_PRERASTER_SHADERS) ||
        (gfx->dirty & ANV_CMD_DIRTY_RENDER_TARGETS) ||
+       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES) ||
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_IA_PRIMITIVE_TOPOLOGY) ||
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_CULL_MODE) ||
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_FRONT_FACE) ||
@@ -2440,7 +2531,7 @@ cmd_buffer_flush_gfx_runtime_state(struct anv_gfx_dynamic_state *hw_state,
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_DEPTH_CLIP_ENABLE) ||
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_DEPTH_CLAMP_ENABLE) ||
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_CONSERVATIVE_MODE))
-      update_clip_raster(hw_state, dyn, gfx);
+      update_clip_raster(hw_state, device, dyn, gfx);
 
    if (gfx->dirty & ANV_CMD_DIRTY_PRERASTER_SHADERS)
       update_clip_preraster_stages(hw_state, gfx);
@@ -2489,8 +2580,12 @@ cmd_buffer_flush_gfx_runtime_state(struct anv_gfx_dynamic_state *hw_state,
       BITSET_SET(hw_state->pack_dirty, ANV_GFX_STATE_INDEX_BUFFER);
 
 #if GFX_VERx10 >= 125
-   if (gfx->dirty & ANV_CMD_DIRTY_PRERASTER_SHADERS)
-      update_vfg_distribution_mode(hw_state, device, gfx);
+   if (gfx->dirty & ANV_CMD_DIRTY_PRERASTER_SHADERS ||
+       (INTEL_WA_16029281427_GFX_VER &&
+        (BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_IA_PRIMITIVE_RESTART_ENABLE) ||
+         BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_IA_PRIMITIVE_TOPOLOGY)))) {
+      update_vfg_distribution_mode(hw_state, dyn, device, gfx);
+   }
 
    if (BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_IA_PRIMITIVE_RESTART_ENABLE))
       update_vfg_list_cut_index(hw_state, dyn);
@@ -2658,19 +2753,18 @@ cmd_buffer_repack_gfx_state(struct anv_gfx_dynamic_state *hw_state,
                             const struct anv_cmd_graphics_state *gfx)
 {
    struct anv_device *device = cmd_buffer->device;
-   struct anv_instance *instance = device->physical->instance;
+   struct anv_physical_device *pdevice = device->physical;
 
 #define INIT(category, name) \
    .name = hw_state->category.name
 #define SET(s, category, name) \
    s.name = hw_state->category.name
-#define SET_ARRAY(s, category, name)            \
-   do {                                         \
-      assert(sizeof(s.name) ==                  \
-             sizeof(hw_state->category.name));  \
-      memcpy(&s.name,                           \
-             &hw_state->category.name,          \
-             sizeof(s.name));                   \
+#define SET_ARRAY(s, category, name)                             \
+   do {                                                          \
+      assert(ARRAY_SIZE(s.name) ==                               \
+             ARRAY_SIZE(hw_state->category.name));               \
+      for (uint32_t __i = 0; __i < ARRAY_SIZE(s.name); __i++)    \
+         s.name[__i] = hw_state->category.name[__i];             \
    } while (0)
 #define IS_DIRTY(name) BITSET_TEST(hw_state->pack_dirty, ANV_GFX_STATE_##name)
 
@@ -2783,9 +2877,9 @@ cmd_buffer_repack_gfx_state(struct anv_gfx_dynamic_state *hw_state,
    if (IS_DIRTY(VF)) {
       anv_gfx_pack(vf, GENX(3DSTATE_VF), vf) {
 #if GFX_VERx10 >= 125
-         vf.GeometryDistributionEnable = instance->drirc.debug.vf_distribution;
+         vf.GeometryDistributionEnable = pdevice->drirc.debug.vf_distribution;
 #endif
-         vf.ComponentPackingEnable = instance->drirc.perf.vf_comp_packing;
+         vf.ComponentPackingEnable = pdevice->drirc.perf.vf_comp_packing;
          SET(vf, vf, IndexedDrawCutIndexEnable);
          SET(vf, vf, CutIndex);
       }
@@ -2840,7 +2934,7 @@ cmd_buffer_repack_gfx_state(struct anv_gfx_dynamic_state *hw_state,
    if (IS_DIRTY(VF_SGVS_INSTANCING))
       anv_gfx_copy_variable(vf_sgvs_instancing, MESA_SHADER_VERTEX, vs.vf_sgvs_instancing);
 
-   if (instance->drirc.perf.vf_comp_packing &&
+   if (pdevice->drirc.perf.vf_comp_packing &&
        IS_DIRTY(VF_COMPONENT_PACKING)) {
       anv_gfx_copy(vf_component_packing, GENX(3DSTATE_VF_COMPONENT_PACKING),
                    MESA_SHADER_VERTEX, vs.vf_component_packing);
@@ -2925,8 +3019,17 @@ cmd_buffer_repack_gfx_state(struct anv_gfx_dynamic_state *hw_state,
          GENX(SF_CLIP_VIEWPORT_pack)(NULL, sf_clip_state.map + i * 64, &sfv);
       }
 
-      anv_gfx_pack(sf_clip, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_SF_CLIP), clip) {
-         clip.SFClipViewportPointer = sf_clip_state.offset;
+      if (GFX_VERx10 >= 350 && device->physical->uses_efficient_64bit) {
+#if GFX_VERx10 >= 350
+         anv_gfx_pack(sf_clip, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_SF_CLIP_2), clip) {
+            clip.SFClipViewportPointer = anv_cmd_buffer_dynamic_state_address(
+               cmd_buffer, sf_clip_state);
+         }
+#endif
+      } else  {
+         anv_gfx_pack(sf_clip, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_SF_CLIP), clip) {
+            clip.SFClipViewportPointer = sf_clip_state.offset;
+         }
       }
    }
 
@@ -2944,9 +3047,19 @@ cmd_buffer_repack_gfx_state(struct anv_gfx_dynamic_state *hw_state,
                                 &cc_viewport);
       }
 
-      anv_gfx_pack(cc_viewport,
-                   GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC), cc) {
-         cc.CCViewportPointer = hw_state->vp_cc.state.offset;
+      if (GFX_VERx10 >= 350 && device->physical->uses_efficient_64bit) {
+#if GFX_VERx10 >= 350
+         anv_gfx_pack(cc_viewport,
+                      GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC_2), cc) {
+            cc.CCViewportPointer = anv_cmd_buffer_dynamic_state_address(
+               cmd_buffer, hw_state->vp_cc.state);
+         }
+#endif
+      } else {
+         anv_gfx_pack(cc_viewport,
+                      GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC), cc) {
+            cc.CCViewportPointer = hw_state->vp_cc.state.offset;
+         }
       }
    }
 
@@ -2972,8 +3085,17 @@ cmd_buffer_repack_gfx_state(struct anv_gfx_dynamic_state *hw_state,
          GENX(SCISSOR_RECT_pack)(NULL, scissor_state.map + i * 8, &scissor);
       }
 
-      anv_gfx_pack(scissor, GENX(3DSTATE_SCISSOR_STATE_POINTERS), ssp) {
-         ssp.ScissorRectPointer = scissor_state.offset;
+      if (GFX_VERx10 >= 350 && device->physical->uses_efficient_64bit) {
+#if GFX_VERx10 >= 350
+         anv_gfx_pack(scissor, GENX(3DSTATE_SCISSOR_STATE_POINTERS_2), ssp) {
+            ssp.ScissorRectPointer = anv_cmd_buffer_dynamic_state_address(
+               cmd_buffer, scissor_state);
+         }
+#endif
+      } else {
+         anv_gfx_pack(scissor, GENX(3DSTATE_SCISSOR_STATE_POINTERS), ssp) {
+            ssp.ScissorRectPointer = scissor_state.offset;
+         }
       }
    }
 
@@ -3012,6 +3134,7 @@ cmd_buffer_repack_gfx_state(struct anv_gfx_dynamic_state *hw_state,
          SET(sf, sf, DerefBlockSize);
 #endif
          SET(sf, sf, PointWidthSource);
+         SET(sf, sf, LastPixelEnable);
          SET(sf, sf, LineWidth);
          SET(sf, sf, TriangleStripListProvokingVertexSelect);
          SET(sf, sf, LineStripListProvokingVertexSelect);
@@ -3033,11 +3156,11 @@ cmd_buffer_repack_gfx_state(struct anv_gfx_dynamic_state *hw_state,
           * will need to be updated accordingly.
           */
          raster.ForcedSampleCount = FSC_NUMRASTSAMPLES_0;
-         raster.ForceMultisampling = false;
          raster.ScissorRectangleEnable = true;
 
          SET(raster, raster, APIMode);
          SET(raster, raster, DXMultisampleRasterizationEnable);
+         SET(raster, raster, ForceMultisampling);
          SET(raster, raster, AntialiasingEnable);
          SET(raster, raster, CullMode);
          SET(raster, raster, FrontWinding);
@@ -3229,9 +3352,19 @@ cmd_buffer_repack_gfx_state(struct anv_gfx_dynamic_state *hw_state,
       };
       GENX(COLOR_CALC_STATE_pack)(NULL, hw_state->cc.state.map, &cc);
 
-      anv_gfx_pack(cc_state, GENX(3DSTATE_CC_STATE_POINTERS), ccp) {
-         ccp.ColorCalcStatePointer = hw_state->cc.state.offset;
-         ccp.ColorCalcStatePointerValid = true;
+      if (GFX_VERx10 >= 350 && device->physical->uses_efficient_64bit) {
+#if GFX_VERx10 >= 350
+         anv_gfx_pack(cc_state, GENX(3DSTATE_CC_STATE_POINTERS_2), ccp) {
+            ccp.ColorCalcStatePointer = anv_cmd_buffer_dynamic_state_address(
+               cmd_buffer, hw_state->cc.state);
+            ccp.ColorCalcStatePointerValid = true;
+         }
+#endif
+      } else {
+         anv_gfx_pack(cc_state, GENX(3DSTATE_CC_STATE_POINTERS), ccp) {
+            ccp.ColorCalcStatePointer = hw_state->cc.state.offset;
+            ccp.ColorCalcStatePointerValid = true;
+         }
       }
    }
 
@@ -3282,9 +3415,19 @@ cmd_buffer_repack_gfx_state(struct anv_gfx_dynamic_state *hw_state,
          dws += GENX(BLEND_STATE_ENTRY_length);
       }
 
-      anv_gfx_pack(blend_state, GENX(3DSTATE_BLEND_STATE_POINTERS), bsp) {
-         bsp.BlendStatePointer      = hw_state->blend.state.offset;
-         bsp.BlendStatePointerValid = true;
+      if (GFX_VERx10 >= 350 && device->physical->uses_efficient_64bit) {
+#if GFX_VERx10 >= 350
+         anv_gfx_pack(blend_state, GENX(3DSTATE_BLEND_STATE_POINTERS_2), bsp) {
+            bsp.BlendStatePointer      = anv_cmd_buffer_dynamic_state_address(
+               cmd_buffer, hw_state->blend.state);
+            bsp.BlendStatePointerValid = true;
+         }
+#endif
+      } else {
+         anv_gfx_pack(blend_state, GENX(3DSTATE_BLEND_STATE_POINTERS), bsp) {
+            bsp.BlendStatePointer      = hw_state->blend.state.offset;
+            bsp.BlendStatePointerValid = true;
+         }
       }
    }
 
@@ -3490,7 +3633,7 @@ emit_wa_18020335297_dummy_draw(struct anv_cmd_buffer *cmd_buffer)
    }
    anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_VF), vf) {
       vf.GeometryDistributionEnable =
-         cmd_buffer->device->physical->instance->drirc.debug.vf_distribution;
+         cmd_buffer->device->physical->drirc.debug.vf_distribution;
    }
 #endif
 
@@ -3627,12 +3770,12 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
 {
    struct anv_batch *batch = &cmd_buffer->batch;
    struct anv_device *device = cmd_buffer->device;
-   const struct anv_instance *instance = device->physical->instance;
+   const struct anv_physical_device *pdevice = device->physical;
    struct anv_cmd_graphics_state *gfx = &cmd_buffer->state.gfx;
    const struct vk_dynamic_graphics_state *dyn =
       &cmd_buffer->vk.dynamic_graphics_state;
    struct anv_push_constants *push_consts =
-      &cmd_buffer->state.gfx.base.push_constants;
+      &gfx->base->push_constants;
    struct anv_gfx_dynamic_state *hw_state = &gfx->dyn_state;
 
 #define DEBUG_SHADER_HASH(stage) do {                                   \
@@ -3670,17 +3813,6 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
 
 #define IS_DIRTY(name) BITSET_TEST(hw_state->emit_dirty, ANV_GFX_STATE_##name)
 
-   /*
-    * Values provided by push constants
-    */
-
-   if (IS_DIRTY(TESS_CONFIG)) {
-      push_consts->gfx.tess_config = hw_state->tess_config;
-      cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
-                                                VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
-      gfx->base.push_constants_data_dirty = true;
-   }
-
 #if INTEL_WA_14024997852_GFX_VER
    if (IS_DIRTY(WA_14024997852) &&
        intel_needs_workaround(device->info, 14024997852)) {
@@ -3688,18 +3820,43 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
    }
 #endif
 
-   if (IS_DIRTY(FS_CONFIG)) {
-      push_consts->gfx.fs_config = hw_state->fs_config;
-      cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_FRAGMENT_BIT;
-      gfx->base.push_constants_data_dirty = true;
+   /*
+    * Values provided by push constants
+    */
+
+   if (IS_DIRTY(TESS_CONFIG)) {
+      push_consts->drv_data.gfx.tess_config = hw_state->tess_config;
+      cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+                                                VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+      gfx->base->push_constants_state = ANV_STATE_NULL;
    }
+
+   if (IS_DIRTY(FS_CONFIG)) {
+      push_consts->drv_data.gfx.fs_config = hw_state->fs_config;
+      cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_FRAGMENT_BIT;
+      gfx->base->push_constants_state = ANV_STATE_NULL;
+   }
+
+#if GFX_VERx10 >= 350
+   if (IS_DIRTY(FS_COLOR_OFFSET)) {
+      push_consts->drv_data.gfx.fs_color_offset = hw_state->fs_color_offset;
+      cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_FRAGMENT_BIT;
+      gfx->base->push_constants_state = ANV_STATE_NULL;
+   }
+
+   if (IS_DIRTY(FS_COLOR_MAP)) {
+      push_consts->drv_data.gfx.fs_color_map = hw_state->fs_color_map;
+      cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_FRAGMENT_BIT;
+      gfx->base->push_constants_state = ANV_STATE_NULL;
+   }
+#endif
 
 #if INTEL_WA_18019110168_GFX_VER
    if (IS_DIRTY(WA_18019110168)) {
-      push_consts->gfx.wa_18019110168 = hw_state->wa_18019110168;
+      push_consts->drv_data.gfx.wa_18019110168 = hw_state->wa_18019110168;
       cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_MESH_BIT_EXT |
                                                 VK_SHADER_STAGE_FRAGMENT_BIT;
-      gfx->base.push_constants_data_dirty = true;
+      gfx->base->push_constants_state = ANV_STATE_NULL;
    }
 #endif
 
@@ -3751,7 +3908,7 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
       anv_batch_emit_gfx(batch, GENX(3DSTATE_VF_SGVS_2), vf_sgvs_2);
 #endif
 
-   if (instance->drirc.perf.vf_comp_packing &&
+   if (pdevice->drirc.perf.vf_comp_packing &&
        IS_DIRTY(VF_COMPONENT_PACKING)) {
       anv_batch_emit_gfx(batch, GENX(3DSTATE_VF_COMPONENT_PACKING),
                          vf_component_packing);
@@ -3866,16 +4023,36 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
       anv_batch_emit_gfx(batch, GENX(3DSTATE_STREAMOUT), so);
    }
 
-   if (IS_DIRTY(VIEWPORT_SF_CLIP))
-      anv_batch_emit_gfx(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_SF_CLIP), sf_clip);
+   if (IS_DIRTY(VIEWPORT_SF_CLIP)) {
+      if (GFX_VERx10 >= 350 && device->physical->uses_efficient_64bit) {
+#if GFX_VERx10 >= 350
+         anv_batch_emit_gfx(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_SF_CLIP_2), sf_clip);
+#endif
+      } else {
+         anv_batch_emit_gfx(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_SF_CLIP), sf_clip);
+      }
+   }
 
    if (IS_DIRTY(VIEWPORT_CC)) {
-      anv_batch_emit_gfx(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC), cc_viewport);
+      if (GFX_VERx10 >= 350 && device->physical->uses_efficient_64bit) {
+#if GFX_VERx10 >= 350
+         anv_batch_emit_gfx(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC_2), cc_viewport);
+#endif
+      } else {
+         anv_batch_emit_gfx(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC), cc_viewport);
+      }
       cmd_buffer->state.gfx.viewport_set = true;
    }
 
-   if (IS_DIRTY(SCISSOR))
-      anv_batch_emit_gfx(batch, GENX(3DSTATE_SCISSOR_STATE_POINTERS), scissor);
+   if (IS_DIRTY(SCISSOR)) {
+      if (GFX_VERx10 >= 350 && device->physical->uses_efficient_64bit) {
+#if GFX_VERx10 >= 350
+         anv_batch_emit_gfx(batch, GENX(3DSTATE_SCISSOR_STATE_POINTERS_2), scissor);
+#endif
+      } else {
+         anv_batch_emit_gfx(batch, GENX(3DSTATE_SCISSOR_STATE_POINTERS), scissor);
+      }
+   }
 
    if (IS_DIRTY(VF_TOPOLOGY))
       anv_batch_emit_gfx(batch, GENX(3DSTATE_VF_TOPOLOGY), vft);
@@ -3931,8 +4108,15 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
    if (IS_DIRTY(MULTISAMPLE))
       anv_batch_emit_gfx(batch, GENX(3DSTATE_MULTISAMPLE), ms);
 
-   if (IS_DIRTY(CC_STATE))
-      anv_batch_emit_gfx(batch, GENX(3DSTATE_CC_STATE_POINTERS), cc_state);
+   if (IS_DIRTY(CC_STATE)) {
+      if (GFX_VERx10 >= 350 && device->physical->uses_efficient_64bit) {
+#if GFX_VERx10 >= 350
+         anv_batch_emit_gfx(batch, GENX(3DSTATE_CC_STATE_POINTERS_2), cc_state);
+#endif
+      } else {
+         anv_batch_emit_gfx(batch, GENX(3DSTATE_CC_STATE_POINTERS), cc_state);
+      }
+   }
 
    if (IS_DIRTY(SAMPLE_MASK))
       anv_batch_emit_gfx(batch, GENX(3DSTATE_SAMPLE_MASK), sm);
@@ -3988,8 +4172,15 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
    if (IS_DIRTY(PS_BLEND))
       anv_batch_emit_gfx(batch, GENX(3DSTATE_PS_BLEND), ps_blend);
 
-   if (IS_DIRTY(BLEND_STATE))
-      anv_batch_emit_gfx(batch, GENX(3DSTATE_BLEND_STATE_POINTERS), blend_state);
+   if (IS_DIRTY(BLEND_STATE)) {
+      if (GFX_VERx10 >= 350 && device->physical->uses_efficient_64bit) {
+#if GFX_VERx10 >= 350
+         anv_batch_emit_gfx(batch, GENX(3DSTATE_BLEND_STATE_POINTERS_2), blend_state);
+#endif
+      } else {
+         anv_batch_emit_gfx(batch, GENX(3DSTATE_BLEND_STATE_POINTERS), blend_state);
+      }
+   }
 
 #if INTEL_WA_18019816803_GFX_VER
    if (IS_DIRTY(WA_18019816803)) {
@@ -4082,8 +4273,7 @@ genX(cmd_buffer_flush_gfx_hw_state)(struct anv_cmd_buffer *cmd_buffer)
    const struct brw_fs_prog_data *fs_prog_data = get_gfx_fs_prog_data(gfx);
    if (fs_prog_data) {
       genX(cmd_buffer_set_coarse_pixel_active)(
-         cmd_buffer,
-         brw_fs_prog_data_is_coarse(fs_prog_data, hw_state->fs_config));
+         cmd_buffer, fs_prog_data->coarse_pixel_dispatch);
    }
 #endif
 

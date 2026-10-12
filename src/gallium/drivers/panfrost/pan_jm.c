@@ -16,6 +16,7 @@
 #include "pan_job.h"
 #include "pan_precomp.h"
 #include "pan_trace.h"
+#include "kmod/panfrost_kmod.h"
 
 #if PAN_ARCH >= 10
 #error "JM helpers are only used for gen < 10"
@@ -90,8 +91,8 @@ jm_submit_jc(struct panfrost_batch *batch, uint64_t first_job_desc,
    submit.requirements = reqs;
 
    if (ctx->in_sync_fd >= 0) {
-      ret = drmSyncobjImportSyncFile(panfrost_device_fd(dev), ctx->in_sync_obj,
-                                     ctx->in_sync_fd);
+      ret = pan_kmod_sync_import_file(dev->kmod.dev, ctx->in_sync_obj,
+                                       ctx->in_sync_fd);
       assert(!ret);
 
       in_syncs[submit.in_sync_count++] = ctx->in_sync_obj;
@@ -117,17 +118,7 @@ jm_submit_jc(struct panfrost_batch *batch, uint64_t first_job_desc,
 
       assert(submit.bo_handle_count < batch->num_bos);
       bo_handles[submit.bo_handle_count++] = i;
-
-      /* Update the BO access flags so that panfrost_bo_wait() knows
-       * about all pending accesses.
-       * We only keep the READ/WRITE info since this is all the BO
-       * wait logic cares about.
-       * We also preserve existing flags as this batch might not
-       * be the first one to access the BO.
-       */
-      struct panfrost_bo *bo = pan_lookup_bo(dev, i);
-
-      bo->gpu_access |= flags[i] & (PAN_BO_ACCESS_RW);
+      panfrost_context_report_bo_access(ctx, pan_lookup_bo(dev, i), flags[i]);
    }
 
    panfrost_pool_get_bo_handles(&batch->pool,
@@ -153,8 +144,7 @@ jm_submit_jc(struct panfrost_batch *batch, uint64_t first_job_desc,
    if (ctx->is_noop)
       ret = 0;
    else
-      ret = pan_kmod_ioctl(panfrost_device_fd(dev), DRM_IOCTL_PANFROST_SUBMIT,
-                           &submit);
+      ret = panfrost_kmod_submit(dev->kmod.dev, &submit);
    free(bo_handles);
 
    if (ret)
@@ -163,8 +153,7 @@ jm_submit_jc(struct panfrost_batch *batch, uint64_t first_job_desc,
    /* Trace the job if we're doing that */
    if (dev->debug & (PAN_DBG_TRACE | PAN_DBG_SYNC)) {
       /* Wait so we can get errors reported back */
-      ret = drmSyncobjWait(panfrost_device_fd(dev), &out_sync, 1, INT64_MAX,
-                           0, NULL);
+      ret = pan_kmod_sync_wait(dev->kmod.dev, &out_sync, 1, INT64_MAX, 0, NULL);
       if (ret)
          return errno;
 
@@ -512,7 +501,8 @@ jm_emit_vertex_job(struct panfrost_batch *batch,
 
 static void
 jm_emit_tiler_draw(struct mali_draw_packed *out, struct panfrost_batch *batch,
-                   bool fs_required, enum mesa_prim prim)
+                   bool fs_required, enum mesa_prim prim,
+                   struct pan_ptr *vertex_array)
 {
    struct panfrost_context *ctx = batch->ctx;
    struct pipe_rasterizer_state *rast = &ctx->rasterizer->base;
@@ -553,7 +543,7 @@ jm_emit_tiler_draw(struct mali_draw_packed *out, struct panfrost_batch *batch,
          struct panfrost_resource *rsrc =
             pan_resource(ctx->occlusion_query->rsrc);
          cfg.occlusion = rsrc->plane.base;
-         panfrost_batch_write_rsrc(ctx->batch, rsrc, MESA_SHADER_FRAGMENT);
+         panfrost_batch_write_rsrc(ctx->batch[PANFROST_BATCH_RENDER], rsrc);
       }
 
 #if PAN_ARCH >= 9
@@ -574,6 +564,13 @@ jm_emit_tiler_draw(struct mali_draw_packed *out, struct panfrost_batch *batch,
       cfg.flags_0.aligned_line_ends = !rast->line_rectangular;
 
       cfg.vertex_array.packet = true;
+      if (vertex_array) {
+         cfg.vertex_array.pointer = vertex_array->gpu;
+         cfg.vertex_array.vertex_packet_stride =
+            PAN_RUN_FULLSCREEN_PACKET_STRIDE;
+         cfg.vertex_array.vertex_attribute_stride =
+            PAN_RUN_FULLSCREEN_ATTRIB_STRIDE;
+      }
 
       cfg.minimum_z = batch->minimum_z;
       cfg.maximum_z = batch->maximum_z;
@@ -819,7 +816,7 @@ jm_emit_malloc_vertex_job(struct panfrost_batch *batch,
    }
 
    jm_emit_tiler_draw(pan_section_ptr(job, MALLOC_VERTEX_JOB, DRAW), batch,
-                      fs_required, u_reduced_prim(info->mode));
+                      fs_required, u_reduced_prim(info->mode), NULL);
 
    pan_section_pack(job, MALLOC_VERTEX_JOB, POSITION, cfg) {
       jm_emit_shader_env(batch, &cfg, MESA_SHADER_VERTEX,
@@ -867,7 +864,8 @@ jm_emit_tiler_job(struct panfrost_batch *batch,
       ;
 #endif
 
-   jm_emit_tiler_draw(pan_section_ptr(job, TILER_JOB, DRAW), batch, true, prim);
+   jm_emit_tiler_draw(pan_section_ptr(job, TILER_JOB, DRAW), batch, true,
+                      prim, NULL);
 
    panfrost_emit_primitive_size(ctx, prim == MESA_PRIM_POINTS,
                                 batch->varyings.psiz, prim_size);
@@ -1036,6 +1034,51 @@ GENX(jm_launch_draw_indirect)(struct panfrost_batch *batch,
 }
 
 void
+GENX(jm_launch_draw_fullscreen)(struct panfrost_batch *batch,
+                                enum blitter_attrib_type type,
+                                const struct blitter_attrib *attrib)
+{
+#if PAN_ARCH == 9
+   PAN_TRACE_FUNC(PAN_TRACE_GL_JM);
+
+   struct pan_ptr job, dcd, vertex_array;
+
+   job = pan_pool_alloc_desc(&batch->pool.base, FULLSCREEN_JOB);
+   if (!job.cpu) {
+      mesa_loge("jm_launch_draw failed");
+      return;
+   }
+
+   dcd = pan_pool_alloc_desc(&batch->pool.base, DRAW);
+   if (!dcd.cpu) {
+      mesa_loge("jm_launch_draw failed");
+      return;
+   }
+
+   vertex_array = panfrost_emit_fullscreen_vertex_array(batch, type, attrib);
+   jm_emit_tiler_draw(dcd.cpu, batch, true, u_reduced_prim(MESA_PRIM_QUADS),
+                      &vertex_array);
+
+   pan_section_pack(job.cpu, FULLSCREEN_JOB, PRIMITIVE, cfg) {
+      cfg.scissor_array_enable = false;
+   }
+   pan_section_pack(job.cpu, FULLSCREEN_JOB, DCD, cfg) {
+      cfg.address = dcd.gpu;
+   }
+   pan_section_pack(job.cpu, FULLSCREEN_JOB, TILER, cfg) {
+      cfg.address = jm_emit_tiler_desc(batch);
+   }
+   memcpy(pan_section_ptr(job.cpu, FULLSCREEN_JOB, SCISSOR), &batch->scissor,
+          pan_size(SCISSOR));
+
+   pan_jc_add_job(&batch->jm.jobs.vtc_jc, MALI_JOB_TYPE_FULLSCREEN, false,
+                  false, 0, 0, &job, false);
+#else
+   UNREACHABLE("draw fullscreen not available for arch < 9");
+#endif
+}
+
+void
 GENX(jm_emit_write_timestamp)(struct panfrost_batch *batch,
                               struct panfrost_resource *dst, unsigned offset)
 {
@@ -1050,7 +1093,7 @@ GENX(jm_emit_write_timestamp)(struct panfrost_batch *batch,
 
    pan_jc_add_job(&batch->jm.jobs.vtc_jc, MALI_JOB_TYPE_WRITE_VALUE, false,
                   false, 0, 0, &job, false);
-   panfrost_batch_write_rsrc(batch, dst, MESA_SHADER_VERTEX);
+   panfrost_batch_write_rsrc(batch, dst);
 }
 
 int
@@ -1094,10 +1137,22 @@ GENX(jm_cleanup_context)(struct panfrost_context *ctx)
 {
    PAN_TRACE_FUNC(PAN_TRACE_GL_JM);
 
-   if (!ctx->jm.handle)
-      return;
-
    struct panfrost_device *dev = pan_device(ctx->base.screen);
+
+   if (!ctx->jm.handle) {
+      /* Without an explicit JM context, nothing kills the jobs this context
+       * still has in flight, and they point at memory that is in no job's BO
+       * list -- the screen-wide shader and descriptor pools -- so nothing in
+       * the kernel keeps it alive either. An application that tears down
+       * without a glFinish() would have it released under the GPU, and every
+       * job still queued would fault and hit the scheduler timeout. The
+       * context syncobj is the out-fence of the last job submitted.
+       */
+      drmSyncobjWait(panfrost_device_fd(dev), &ctx->syncobj, 1, INT64_MAX, 0,
+                     NULL);
+      return;
+   }
+
    struct drm_panfrost_jm_ctx_destroy args = {
       .handle = ctx->jm.handle,
    };

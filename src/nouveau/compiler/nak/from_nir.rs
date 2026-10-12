@@ -948,21 +948,26 @@ impl<'a> ShaderFromNir<'a> {
                 }
                 dst
             }
-            nir_op_fabs | nir_op_fadd | nir_op_fneg => {
+            nir_op_fabs | nir_op_fadd | nir_op_fadd_rtne | nir_op_fneg => {
                 let (x, y) = match alu.op {
                     nir_op_fabs => (Src::ZERO.fneg(), srcs(0).fabs()),
                     nir_op_fadd => (srcs(0), srcs(1)),
+                    nir_op_fadd_rtne => (srcs(0), srcs(1)),
                     nir_op_fneg => (Src::ZERO.fneg(), srcs(0).fneg()),
                     _ => panic!("Unhandled case"),
                 };
                 let ftype = FloatType::from_bits(alu.def.bit_size().into());
+                let rnd_mode = match alu.op {
+                    nir_op_fadd_rtne => FRndMode::NearestEven,
+                    _ => self.float_ctl[ftype].rnd_mode,
+                };
                 let dst;
                 if alu.def.bit_size() == 64 {
                     dst = b.alloc_ssa_vec(RegFile::GPR, 2);
                     b.push_op(OpDAdd {
                         dst: dst.clone().into(),
                         srcs: [x, y],
-                        rnd_mode: self.float_ctl[ftype].rnd_mode,
+                        rnd_mode: rnd_mode,
                     });
                 } else if alu.def.bit_size() == 32 {
                     dst = b.alloc_ssa_vec(RegFile::GPR, 1);
@@ -970,7 +975,7 @@ impl<'a> ShaderFromNir<'a> {
                         dst: dst.clone().into(),
                         srcs: [x, y],
                         saturate: self.try_saturate_alu_dst(&alu.def),
-                        rnd_mode: self.float_ctl[ftype].rnd_mode,
+                        rnd_mode: rnd_mode,
                         ftz: self.float_ctl[ftype].ftz,
                     });
                 } else if alu.def.bit_size() == 16 {
@@ -1039,14 +1044,22 @@ impl<'a> ShaderFromNir<'a> {
                 )
                 .into()
             }
-            nir_op_feq | nir_op_fge | nir_op_flt | nir_op_fneu => {
+            nir_op_feq | nir_op_fequ | nir_op_fge | nir_op_fgeu
+            | nir_op_flt | nir_op_fltu | nir_op_fneu | nir_op_fneo
+            | nir_op_funord | nir_op_ford => {
                 let src_type =
                     FloatType::from_bits(alu.get_src(0).bit_size().into());
                 let cmp_op = match alu.op {
                     nir_op_feq => FloatCmpOp::OrdEq,
+                    nir_op_fequ => FloatCmpOp::UnordEq,
                     nir_op_fge => FloatCmpOp::OrdGe,
+                    nir_op_fgeu => FloatCmpOp::UnordGe,
                     nir_op_flt => FloatCmpOp::OrdLt,
+                    nir_op_fltu => FloatCmpOp::UnordLt,
+                    nir_op_fneo => FloatCmpOp::OrdNe,
                     nir_op_fneu => FloatCmpOp::UnordNe,
+                    nir_op_ford => FloatCmpOp::IsNum,
+                    nir_op_funord => FloatCmpOp::IsNan,
                     _ => panic!("Usupported float comparison"),
                 };
 
@@ -1626,6 +1639,21 @@ impl<'a> ShaderFromNir<'a> {
                 assert!(alu.get_src(0).bit_size() == 32);
                 b.uror(srcs(0), srcs(1)).into()
             }
+            nir_op_shfr => {
+                assert!(alu.get_src(0).bit_size() == 32);
+                let dst = b.alloc_ssa(RegFile::GPR);
+                b.push_op(OpShf {
+                    dst: dst.into(),
+                    low: srcs(1),
+                    high: srcs(0),
+                    shift: srcs(2),
+                    right: true,
+                    wrap: true,
+                    data_type: IntType::U32,
+                    dst_high: false,
+                });
+                dst.into()
+            }
             nir_op_lea_nv => {
                 let src_a = srcs(1);
                 let src_b = srcs(0);
@@ -2105,6 +2133,7 @@ impl<'a> ShaderFromNir<'a> {
 
     fn get_atomic_type(&self, intrin: &nir_intrinsic_instr) -> AtomType {
         let bit_size = intrin.def.bit_size();
+        let num_comps = intrin.def.num_components();
         match intrin.atomic_op() {
             nir_atomic_op_iadd => AtomType::U(bit_size),
             nir_atomic_op_imin => AtomType::I(bit_size),
@@ -2114,10 +2143,12 @@ impl<'a> ShaderFromNir<'a> {
             nir_atomic_op_iand => AtomType::U(bit_size),
             nir_atomic_op_ior => AtomType::U(bit_size),
             nir_atomic_op_ixor => AtomType::U(bit_size),
-            nir_atomic_op_xchg => AtomType::U(bit_size),
-            nir_atomic_op_fadd => AtomType::F(bit_size),
-            nir_atomic_op_fmin => AtomType::F(bit_size),
-            nir_atomic_op_fmax => AtomType::F(bit_size),
+            // Because no comparison is happening, it's safe to use a U32 type
+            // for xchg of F16v2 data.
+            nir_atomic_op_xchg => AtomType::U(bit_size * num_comps),
+            nir_atomic_op_fadd => AtomType::F(bit_size, num_comps),
+            nir_atomic_op_fmin => AtomType::F(bit_size, num_comps),
+            nir_atomic_op_fmax => AtomType::F(bit_size, num_comps),
             nir_atomic_op_cmpxchg => AtomType::U(bit_size),
             _ => panic!("Unsupported NIR atomic op"),
         }
@@ -2618,12 +2649,9 @@ impl<'a> ShaderFromNir<'a> {
                 let atom_type = self.get_atomic_type(intrin);
                 let atom_op = self.get_atomic_op(intrin, AtomCmpSrc::Packed);
 
-                assert!(
-                    intrin.def.bit_size() == 32 || intrin.def.bit_size() == 64
-                );
-                assert!(intrin.def.num_components() == 1);
-                let dst =
-                    b.alloc_ssa_vec(RegFile::GPR, intrin.def.bit_size() / 32);
+                let bits = intrin.def.bit_size() * intrin.def.num_components();
+                assert!(bits % 32 == 0);
+                let dst = b.alloc_ssa_vec(RegFile::GPR, (bits / 32) as u8);
 
                 let data = if intrin.intrinsic
                     == nir_intrinsic_bindless_image_atomic_swap
@@ -3027,15 +3055,15 @@ impl<'a> ShaderFromNir<'a> {
                 b.predicate(cond.into()).push_op(OpKill {});
             }
             nir_intrinsic_global_atomic_nv => {
-                let bit_size = intrin.def.bit_size();
                 let addr = self.get_src(&srcs[0]);
                 let uaddr = self.get_src(&srcs[1]);
                 let data = self.get_src(&srcs[2]);
                 let atom_type = self.get_atomic_type(intrin);
                 let atom_op = self.get_atomic_op(intrin, AtomCmpSrc::Separate);
 
-                assert!(intrin.def.num_components() == 1);
-                let dst = b.alloc_ssa_vec(RegFile::GPR, bit_size.div_ceil(32));
+                let bits = intrin.def.bit_size() * intrin.def.num_components();
+                assert!(bits % 32 == 0);
+                let dst = b.alloc_ssa_vec(RegFile::GPR, (bits / 32) as u8);
 
                 let is_reduction =
                     atom_op.is_reduction() && intrin.def.components_read() == 0;
@@ -3062,14 +3090,14 @@ impl<'a> ShaderFromNir<'a> {
             }
             nir_intrinsic_global_atomic_swap_nv => {
                 assert!(intrin.atomic_op() == nir_atomic_op_cmpxchg);
-                let bit_size = intrin.def.bit_size();
                 let addr = self.get_src(&srcs[0]);
                 let cmpr = self.get_src(&srcs[1]);
                 let data = self.get_src(&srcs[2]);
-                let atom_type = AtomType::U(bit_size);
+                let atom_type = self.get_atomic_type(intrin);
 
-                assert!(intrin.def.num_components() == 1);
-                let dst = b.alloc_ssa_vec(RegFile::GPR, bit_size.div_ceil(32));
+                let bits = intrin.def.bit_size() * intrin.def.num_components();
+                assert!(bits % 32 == 0);
+                let dst = b.alloc_ssa_vec(RegFile::GPR, (bits / 32) as u8);
 
                 b.push_op(OpAtom {
                     dst: dst.clone().into(),
@@ -3513,7 +3541,7 @@ impl<'a> ShaderFromNir<'a> {
                         buf: CBuf::Binding(idx_imm),
                         offset: off_imm,
                     };
-                    if srcs[1].is_zero() {
+                    if srcs[1].is_zero() && size_B >= 4 {
                         for (i, comp) in dst.iter().enumerate() {
                             let i = u16::try_from(i).unwrap();
                             b.copy_to(
@@ -3568,7 +3596,7 @@ impl<'a> ShaderFromNir<'a> {
                 };
 
                 let dst = b.alloc_ssa_vec(RegFile::GPR, size_B.div_ceil(4));
-                if srcs[1].is_zero() {
+                if srcs[1].is_zero() && size_B >= 4 {
                     for (i, comp) in dst.iter().enumerate() {
                         let i = u16::try_from(i).unwrap();
                         b.copy_to(
@@ -3753,15 +3781,15 @@ impl<'a> ShaderFromNir<'a> {
                         || self.nir.info.stage() == MESA_SHADER_KERNEL
                 );
 
-                let bit_size = intrin.def.bit_size();
                 let addr = self.get_src(&srcs[0]);
                 let uaddr = self.get_src(&srcs[1]);
                 let data = self.get_src(&srcs[2]);
                 let atom_type = self.get_atomic_type(intrin);
                 let atom_op = self.get_atomic_op(intrin, AtomCmpSrc::Separate);
 
-                assert!(intrin.def.num_components() == 1);
-                let dst = b.alloc_ssa_vec(RegFile::GPR, bit_size.div_ceil(32));
+                let bits = intrin.def.bit_size() * intrin.def.num_components();
+                assert!(bits % 32 == 0);
+                let dst = b.alloc_ssa_vec(RegFile::GPR, (bits / 32) as u8);
 
                 b.push_op(OpAtom {
                     dst: dst.clone().into(),
@@ -3786,14 +3814,14 @@ impl<'a> ShaderFromNir<'a> {
                 );
 
                 assert!(intrin.atomic_op() == nir_atomic_op_cmpxchg);
-                let bit_size = intrin.def.bit_size();
                 let addr = self.get_src(&srcs[0]);
                 let cmpr = self.get_src(&srcs[1]);
                 let data = self.get_src(&srcs[2]);
-                let atom_type = AtomType::U(bit_size);
+                let atom_type = self.get_atomic_type(intrin);
 
-                assert!(intrin.def.num_components() == 1);
-                let dst = b.alloc_ssa_vec(RegFile::GPR, bit_size.div_ceil(32));
+                let bits = intrin.def.bit_size() * intrin.def.num_components();
+                assert!(bits % 32 == 0);
+                let dst = b.alloc_ssa_vec(RegFile::GPR, (bits / 32) as u8);
 
                 b.push_op(OpAtom {
                     dst: dst.clone().into(),
@@ -4583,7 +4611,7 @@ impl<'a> ShaderFromNir<'a> {
 
         self.parse_cf_list(&mut ssa_alloc, &mut phi_map, nfi.iter_body());
 
-        let cfg = std::mem::take(&mut self.cfg).as_cfg();
+        let cfg = std::mem::take(&mut self.cfg).as_cfg(true);
         assert!(cfg.len() > 0);
         for i in 0..cfg.len() {
             if cfg[i].falls_through() {

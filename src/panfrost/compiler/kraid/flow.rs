@@ -1,7 +1,9 @@
 // Copyright © 2026 Collabora, Ltd.
 // SPDX-License-Identifier: MIT
 
-use crate::bitview::*;
+use std::fmt;
+
+use mesa_util::bitview::*;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
@@ -17,7 +19,9 @@ pub enum FlowWaitBit {
 #[repr(u8)]
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 enum FlowCtrlBit {
+    #[allow(dead_code)]
     MsgSlotBit0 = 0,
+    #[allow(dead_code)]
     MsgSlotBit1 = 1,
     Reconverge,
     Discard,
@@ -85,6 +89,7 @@ impl FlowCtrl {
         self.get_ctrl_bit(FlowCtrlBit::Discard)
     }
 
+    #[allow(dead_code)]
     pub fn set_discard(&mut self) {
         self.set_ctrl_bit(FlowCtrlBit::Discard)
     }
@@ -118,5 +123,44 @@ impl FlowCtrl {
         let val = bv.get_bit(bit as usize);
         bv.set_bit(bit as usize, false);
         val
+    }
+}
+
+impl fmt::Display for FlowCtrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(slot) = self.get_msg_slot_idx() {
+            write!(f, ".slot{slot}")?;
+        }
+
+        if self.get_reconverge() {
+            write!(f, ".reconverge")?;
+        }
+        if self.get_discard() {
+            write!(f, ".discard")?;
+        }
+        if self.get_end_shader() {
+            write!(f, ".end")?;
+        }
+
+        // Wait bit
+        let wait0 = self.get_wait_bit(FlowWaitBit::Slot0);
+        let wait1 = self.get_wait_bit(FlowWaitBit::Slot1);
+        let wait2 = self.get_wait_bit(FlowWaitBit::Slot2);
+        if wait0 || wait1 || wait2 {
+            let w0 = if wait0 { "0" } else { "" };
+            let w1 = if wait1 { "1" } else { "" };
+            let w2 = if wait2 { "2" } else { "" };
+            write!(f, ".wait{w0}{w1}{w2}")?;
+        }
+        if self.get_wait_bit(FlowWaitBit::Resource) {
+            write!(f, ".wait_resource")?;
+        }
+        if self.get_wait_bit(FlowWaitBit::ZS) {
+            write!(f, ".wait_zs")?;
+        }
+        if self.get_wait_bit(FlowWaitBit::Barrier) {
+            write!(f, ".barrier")?;
+        }
+        Ok(())
     }
 }

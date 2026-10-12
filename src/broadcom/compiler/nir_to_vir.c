@@ -1862,8 +1862,24 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
 
         case nir_op_fsat:
                 assert(v3d_device_has_unpack_sat(c->devinfo));
-                result = vir_FMOV(c, src[0]);
-                vir_set_unpack(c->defs[result.index], 0, V3D71_QPU_UNPACK_SAT);
+                if (instr->def.bit_size == 16) {
+                        /* The SAT unpack saturates a 32-bit float, so it
+                         * would misinterpret f16 bits. nir_opt_algebraic can
+                         * form a 16-bit fsat from native f16 fmin/fmax after
+                         * the last bit-size lowering.
+                         */
+                        struct qreg f32 = vir_FMOV(c, src[0]);
+                        vir_set_unpack(c->defs[f32.index], 0,
+                                       V3D_QPU_UNPACK_L);
+                        result = vir_FMOV(c, f32);
+                        vir_set_unpack(c->defs[result.index], 0,
+                                       V3D71_QPU_UNPACK_SAT);
+                        vir_set_pack(c->defs[result.index], V3D_QPU_PACK_L);
+                } else {
+                        result = vir_FMOV(c, src[0]);
+                        vir_set_unpack(c->defs[result.index], 0,
+                                       V3D71_QPU_UNPACK_SAT);
+                }
                 break;
 
         case nir_op_fsat_signed:
@@ -2320,7 +2336,7 @@ v3d_optimize_nir(struct v3d_compile *c, struct nir_shader *s)
                 }
         } while (progress);
 
-        NIR_PASS(progress, s, nir_lower_undef_to_zero);
+        NIR_PASS(progress, s, nir_lower_undef_to_zero, NULL);
 
         /* needs to be outside of optimization loop, otherwise it fights with
          * opt_algebraic optimizing the conversion lowering
@@ -2498,8 +2514,24 @@ ntq_setup_fs_inputs(struct v3d_compile *c)
                         c->inputs[loc * 4] = c->primitive_id;
                 } else if (util_varying_is_point_coord(var->data.location,
                                                        c->fs_key->point_sprite_mask)) {
+                        /* gl_PointCoord is flipped in lower_pntc_ytransform,
+                         * but varyings replaced through GL_COORD_REPLACE
+                         * don't go through this lowering, so we need to
+                         * handle them here.
+                         *
+                         * Also Gallium requires the texture coordinate be of
+                         * the form (s, t, 0, 1).
+                         */
                         c->inputs[loc * 4 + 0] = c->point_x;
-                        c->inputs[loc * 4 + 1] = c->point_y;
+                        if (var->data.location != VARYING_SLOT_PNTC &&
+                            c->fs_key->point_coord_upper_left) {
+                                c->inputs[loc * 4 + 1] = vir_FSUB(c, vir_uniform_f(c, 1.0),
+                                                                  c->point_y);
+                        } else {
+                                c->inputs[loc * 4 + 1] = c->point_y;
+                        }
+                        c->inputs[loc * 4 + 2] = vir_uniform_f(c, 0.0);
+                        c->inputs[loc * 4 + 3] = vir_uniform_f(c, 1.0);
                 } else if (var->data.compact) {
                         for (int j = 0; j < var_len; j++)
                                 emit_compact_fragment_input(c, loc, var, j);
@@ -2640,11 +2672,12 @@ vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
         int rt = nir_src_as_uint(instr->src[0]);
         assert(rt < V3D_MAX_DRAW_BUFFERS);
 
-        int sample_index = nir_intrinsic_base(instr) ;
+        int sample_index = nir_intrinsic_base(instr);
         assert(sample_index < V3D_MAX_SAMPLES);
 
         int component = nir_intrinsic_component(instr);
-        assert(component < 4);
+        int load_components = instr->def.num_components;
+        assert(component + load_components <= 4);
 
         /* We need to emit our TLB reads after we have acquired the scoreboard
          * lock, or the GPU will hang. Usually, we do our scoreboard locking on
@@ -2669,8 +2702,9 @@ vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
                 &c->color_reads[(rt * V3D_MAX_SAMPLES + sample_index) * 4];
 
         if (color_reads_for_sample[component].file == QFILE_NULL) {
-                nir_variable *var = c->output_color_var[rt];
-                int num_components = glsl_get_vector_elements(var->type);
+                /* Load and cache all components requested by this instruction.
+                 */
+                int num_components = component + load_components;
 
                 const bool swap_rb = c->fs_key->swap_color_rb & (1 << rt);
                 if (swap_rb)
@@ -2745,9 +2779,11 @@ vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
                 }
         }
 
-        assert(color_reads_for_sample[component].file != QFILE_NULL);
-        ntq_store_def(c, &instr->def, 0,
-                      vir_MOV(c, color_reads_for_sample[component]));
+        for (int i = 0; i < load_components; i++) {
+                assert(color_reads_for_sample[component + i].file != QFILE_NULL);
+                ntq_store_def(c, &instr->def, i,
+                              vir_MOV(c, color_reads_for_sample[component + i]));
+        }
 }
 
 static bool
@@ -4501,6 +4537,7 @@ ntq_emit_jump(struct v3d_compile *c, nir_jump_instr *jump)
                 break;
 
         case nir_jump_halt:
+        case nir_jump_abort:
         case nir_jump_goto:
         case nir_jump_goto_if:
                 UNREACHABLE("not supported\n");
@@ -4528,6 +4565,7 @@ ntq_emit_uniform_jump(struct v3d_compile *c, nir_jump_instr *jump)
                 break;
 
         case nir_jump_halt:
+        case nir_jump_abort:
         case nir_jump_goto:
         case nir_jump_goto_if:
                 UNREACHABLE("not supported\n");
@@ -5102,6 +5140,27 @@ v3d_nir_to_vir(struct v3d_compile *c)
                 vir_dumpi(c);
         }
 
+        /* Pressure-probe split: stash the pre-RA thrsw state. In probe-only
+         * mode, compute the pre-spill register pressure and stop before
+         * register allocation; the caller picks the lowest-pressure strategy
+         * and resumes it via v3d_nir_to_vir_finish().
+         */
+        c->restore_last_thrsw = restore_last_thrsw;
+        c->restore_scoreboard_lock = restore_scoreboard_lock;
+
+        if (c->probe_only) {
+                vir_calculate_live_intervals(c);
+                c->max_pressure = vir_get_max_temps(c);
+                return;
+        }
+
+        v3d_nir_to_vir_finish(c);
+}
+
+void
+v3d_nir_to_vir_finish(struct v3d_compile *c)
+{
+        assert(!c->probe_only);
         /* Attempt to allocate registers for the temporaries.  If we fail,
          * reduce thread count and try again.
          */
@@ -5148,8 +5207,8 @@ v3d_nir_to_vir(struct v3d_compile *c)
         /* If we didn't spill, then remove the last thread switch we injected
          * artificially (if any) and restore the previous one.
          */
-        if (!c->spills && c->last_thrsw != restore_last_thrsw)
-                vir_restore_last_thrsw(c, restore_last_thrsw, restore_scoreboard_lock);
+        if (!c->spills && c->last_thrsw != c->restore_last_thrsw)
+                vir_restore_last_thrsw(c, c->restore_last_thrsw, c->restore_scoreboard_lock);
 
         if (c->spills &&
             (V3D_DBG(VIR) ||

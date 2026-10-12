@@ -63,8 +63,8 @@ radv_create_descriptor_pool(struct radv_device *device, const VkDescriptorPoolCr
    const VkMutableDescriptorTypeCreateInfoEXT *mutable_info =
       vk_find_struct_const(pCreateInfo->pNext, MUTABLE_DESCRIPTOR_TYPE_CREATE_INFO_EXT);
 
-   vk_foreach_struct_const (ext, pCreateInfo->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct_const (sType, ext, pCreateInfo->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_INLINE_UNIFORM_BLOCK_CREATE_INFO: {
          const VkDescriptorPoolInlineUniformBlockCreateInfo *info =
             (const VkDescriptorPoolInlineUniformBlockCreateInfo *)ext;
@@ -169,9 +169,6 @@ radv_create_descriptor_pool(struct radv_device *device, const VkDescriptorPoolCr
       if (!(pCreateInfo->flags & VK_DESCRIPTOR_POOL_CREATE_HOST_ONLY_BIT_EXT)) {
          enum radeon_bo_flag flags = RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_READ_ONLY | RADEON_FLAG_32BIT;
 
-         if (radv_device_should_clear_vram(device))
-            flags |= RADEON_FLAG_ZERO_VRAM;
-
          result = radv_bo_create(device, &pool->base, bo_size, 32, RADEON_DOMAIN_VRAM, flags,
                                  RADV_BO_PRIORITY_DESCRIPTOR, 0, false, &pool->bo);
          if (result != VK_SUCCESS)
@@ -183,7 +180,7 @@ radv_create_descriptor_pool(struct radv_device *device, const VkDescriptorPoolCr
             goto fail;
          }
       } else {
-         pool->host_bo = vk_alloc2(&device->vk.alloc, pAllocator, bo_size, 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+         pool->host_bo = vk_zalloc2(&device->vk.alloc, pAllocator, bo_size, 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
          if (!pool->host_bo) {
             result = VK_ERROR_OUT_OF_HOST_MEMORY;
             goto fail;

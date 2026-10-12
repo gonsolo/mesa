@@ -10,9 +10,9 @@
 
 #include "vn_device_memory.h"
 
-#include "venus-protocol/vn_protocol_driver_device_memory.h"
-#include "venus-protocol/vn_protocol_driver_transport.h"
 #include "vk_debug_utils.h"
+#include "vn_protocol_driver_device_memory.h"
+#include "vn_protocol_driver_transport.h"
 
 #include "vn_android.h"
 #include "vn_buffer.h"
@@ -256,11 +256,11 @@ vn_device_memory_fix_alloc_info(
    struct vn_device_memory_alloc_info *local_info)
 {
    local_info->alloc = *alloc_info;
-   VkBaseOutStructure *cur = (void *)&local_info->alloc;
+   void *cur = (void *)&local_info->alloc;
 
-   vk_foreach_struct_const(src, alloc_info->pNext) {
+   vk_foreach_struct_const(sType, src, alloc_info->pNext) {
       void *next = NULL;
-      switch (src->sType) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO:
          /* guest vram turns export alloc into import, so drop export info */
          if (has_guest_vram)
@@ -286,12 +286,12 @@ vn_device_memory_fix_alloc_info(
       }
 
       if (next) {
-         cur->pNext = next;
+         vk_pnext_set_next(cur, next);
          cur = next;
       }
    }
 
-   cur->pNext = NULL;
+   vk_pnext_set_next(cur, NULL);
 
    return &local_info->alloc;
 }
@@ -339,31 +339,19 @@ vn_device_memory_emit_report(struct vn_device *dev,
 {
    struct vk_device *dev_vk = &dev->base.vk;
 
-   if (likely(!dev_vk->memory_reports))
-      return;
-
    const struct vk_device_memory *mem_vk = &mem->base.vk;
-   VkDeviceMemoryReportEventTypeEXT type;
-   if (result != VK_SUCCESS) {
-      type = VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATION_FAILED_EXT;
-   } else if (is_alloc) {
-      type = mem_vk->import_handle_type
-                ? VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_IMPORT_EXT
-                : VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATE_EXT;
-   } else {
-      type = mem_vk->import_handle_type
-                ? VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_UNIMPORT_EXT
-                : VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_FREE_EXT;
-   }
    const uint64_t mem_obj_id =
       (mem_vk->import_handle_type | mem_vk->export_handle_types)
          ? mem->base_bo->res_id
          : mem->base.id;
    const VkMemoryType *mem_type = &dev->physical_device->memory_properties
                                       .memoryTypes[mem_vk->memory_type_index];
-   vk_emit_device_memory_report(dev_vk, type, mem_obj_id, mem_vk->size,
-                                VK_OBJECT_TYPE_DEVICE_MEMORY, (uintptr_t)mem,
-                                mem_type->heapIndex);
+
+   vk_device_memory_report_emit(dev_vk, result, is_alloc,
+                                mem_vk->import_handle_type != 0,
+                                mem_obj_id, mem_vk->size,
+                                VK_OBJECT_TYPE_DEVICE_MEMORY,
+                                (uintptr_t)mem, mem_type->heapIndex);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -498,7 +486,7 @@ vn_MapMemory2(VkDevice device,
 
    mem->map_end = size == VK_WHOLE_SIZE ? mem_vk->size : offset + size;
 
-   *ppData = ptr + offset;
+   *ppData = (char *)ptr + offset;
 
    return VK_SUCCESS;
 }

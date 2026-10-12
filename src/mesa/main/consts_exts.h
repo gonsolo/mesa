@@ -168,6 +168,7 @@ struct gl_extensions
    GLboolean EXT_draw_buffers2;
    GLboolean EXT_EGL_image_storage;
    GLboolean EXT_float_blend;
+   GLboolean EXT_frag_depth;
    GLboolean EXT_framebuffer_multisample;
    GLboolean EXT_framebuffer_multisample_blit_scaled;
    GLboolean EXT_framebuffer_sRGB;
@@ -219,6 +220,7 @@ struct gl_extensions
    GLboolean EXT_timer_query;
    GLboolean EXT_vertex_array_bgra;
    GLboolean EXT_window_rectangles;
+   GLboolean EXT_YUV_target;
    GLboolean OES_copy_image;
    GLboolean OES_primitive_bounding_box;
    GLboolean OES_sample_variables;
@@ -530,6 +532,12 @@ struct gl_constants
     * with "#version ForceGLSLVersion".
     */
    GLuint ForceGLSLVersion;
+
+   /**
+    * For GLSL shaders that don't begin with "#version <version>",
+    * this version is used.
+    */
+   GLuint DefaultGLSLVersion;
 
    /**
     * Allow GLSL #extension directives in the middle of shaders.
@@ -904,6 +912,12 @@ struct gl_constants
 
    bool HasFBFetch;
 
+   /** Bitmask of enum pipe_advanced_blend_mode blended natively by the
+    * driver. Modes that aren't set in the mask are lowered into the
+    * fragment shader using framebuffer fetch.
+    */
+   GLbitfield NativeAdvancedBlendModes;
+
    bool PointSizeFixed;
 
    /** Wether or not glBitmap uses red textures rather than alpha */
@@ -977,6 +991,13 @@ struct gl_constants
    GLuint ShaderSubgroupSupportedStages;
    GLuint ShaderSubgroupSupportedFeatures;
    bool ShaderSubgroupQuadAllStages;
+
+   /**
+    * Whether GL_LINEAR_TILING_EXT affects regular GL textures, not just
+    * memory objects. For microbenchmarking. Enabled via
+    * MESA_DEBUG=api-tiling-linear.
+    */
+   bool AllowGLTextureLinearTiling;
 };
 
 #endif

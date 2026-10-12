@@ -7,14 +7,22 @@
 
 #include "kk_device.h"
 
+#include "kk_buffer.h"
+#include "kk_buffer_view.h"
 #include "kk_cmd_buffer.h"
 #include "kk_entrypoints.h"
+#include "kk_image.h"
+#include "kk_image_view.h"
 #include "kk_instance.h"
 #include "kk_physical_device.h"
 #include "kk_shader.h"
 
 #include "kosmickrisp/bridge/mtl_bridge.h"
+#include "kosmickrisp/bridge/mtl_device.h"
+#include "kosmickrisp/bridge/ns_process_info.h"
+#include "kosmickrisp/compiler/nir_to_msl.h"
 
+#include "kk_dispatch_cmd.h"
 #include "vk_cmd_enqueue_entrypoints.h"
 #include "vk_common_entrypoints.h"
 
@@ -43,7 +51,8 @@ static mtl_compiler *
 kk_acquire_compiler(struct kk_device *dev)
 {
    /* KK_WORKAROUND_11 */
-   if (dev->disabled_workarounds & BITFIELD64_BIT(11)) {
+   struct kk_physical_device *pdev = kk_device_physical(dev);
+   if (pdev->settings.disabled_workarounds & BITFIELD64_BIT(11)) {
       return mtl_new_compiler(dev->mtl_handle);
    }
 
@@ -62,6 +71,12 @@ kk_acquire_compiler(struct kk_device *dev)
       }
 
       compiler->handle = mtl_new_compiler(dev->mtl_handle);
+      if (compiler->handle == NULL) {
+         ralloc_free(compiler);
+         simple_mtx_unlock(&compilers_ht_lock);
+         return NULL;
+      }
+
       compiler->refcount = 1;
       _mesa_hash_table_insert(&compilers_ht, dev->mtl_handle, compiler);
    } else {
@@ -77,7 +92,8 @@ static void
 kk_release_compiler(struct kk_device *dev)
 {
    /* KK_WORKAROUND_11 */
-   if (dev->disabled_workarounds & BITFIELD64_BIT(11)) {
+   struct kk_physical_device *pdev = kk_device_physical(dev);
+   if (pdev->settings.disabled_workarounds & BITFIELD64_BIT(11)) {
       mtl_release(dev->mtl_compiler_handle);
       return;
    }
@@ -109,7 +125,10 @@ kk_init_sampler_heap(struct kk_device *dev, struct kk_sampler_heap *h)
    if (!h->ht)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-   VkResult result = kk_query_table_init(dev, &h->table, 1024);
+   /* We optimistically size the table to fit the maximum number of samplers we
+    * advertise. If this exceeds the hardware sampler limit, it is handled by
+    * additional checks in `kk_sampler_heap_add_locked` */
+   VkResult result = kk_query_table_init(dev, &h->table, MSL_MAX_SAMPLERS);
 
    if (result != VK_SUCCESS) {
       ralloc_free(h->ht);
@@ -139,6 +158,8 @@ kk_sampler_heap_add_locked(struct kk_device *dev, struct kk_sampler_heap *h,
                            struct mtl_sampler_packed desc,
                            struct kk_rc_sampler **out)
 {
+   struct kk_physical_device *pdev = kk_device_physical(dev);
+
    struct hash_entry *ent = _mesa_hash_table_search(h->ht, &desc);
    if (ent != NULL) {
       *out = ent->data;
@@ -148,6 +169,10 @@ kk_sampler_heap_add_locked(struct kk_device *dev, struct kk_sampler_heap *h,
 
       return VK_SUCCESS;
    }
+
+   /* Constrain to device max sampler count */
+   if (h->ht->entries >= pdev->info.max_sampler_count)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
 
    struct kk_rc_sampler *rc = ralloc(h->ht, struct kk_rc_sampler);
    if (!rc)
@@ -215,37 +240,16 @@ kk_sampler_heap_remove(struct kk_device *dev, struct kk_rc_sampler *rc)
    simple_mtx_unlock(&h->lock);
 }
 
-static void
-kk_parse_device_environment_options(struct kk_device *dev)
-{
-   dev->gpu_capture_enabled =
-      debug_get_bool_option("MESA_KK_GPU_CAPTURE", false);
-   if (dev->gpu_capture_enabled) {
-      const char *capture_directory =
-         debug_get_option("MESA_KK_GPU_CAPTURE_DIRECTORY", NULL);
-      mtl_start_gpu_capture(dev->mtl_handle, capture_directory);
-   }
-
-   const char *list = debug_get_option("MESA_KK_DISABLE_WORKAROUNDS", "");
-   const char *all_workarounds = "all";
-   const size_t all_len = strlen(all_workarounds);
-   for (unsigned n; n = strcspn(list, ","), *list; list += MAX2(1, n)) {
-      if (n == all_len && !strncmp(list, all_workarounds, n)) {
-         dev->disabled_workarounds = UINT64_MAX;
-         break;
-      }
-
-      int index = atoi(list);
-      dev->disabled_workarounds |= BITFIELD64_BIT(index);
-   }
-}
-
 static VkResult
 kk_get_timestamp(struct vk_device *device, uint64_t *timestamp)
 {
    struct kk_device *dev = container_of(device, struct kk_device, vk);
 
-   *timestamp = mtl_device_get_gpu_timestamp(dev->mtl_handle);
+   uint64_t gpu_ns = mtl_device_get_gpu_timestamp(dev->mtl_handle);
+   uint64_t frequency = mtl_device_timestamp_frequency(dev->mtl_handle);
+
+   *timestamp =
+      (uint64_t)(((unsigned __int128)gpu_ns * frequency) / 1000000000ull);
    return VK_SUCCESS;
 }
 
@@ -264,8 +268,7 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
       return vk_error(pdev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    /* Fill the dispatch table we will expose to the users */
-   vk_device_dispatch_table_from_entrypoints(
-      &dev->exposed_dispatch_table, &vk_cmd_enqueue_device_entrypoints, true);
+   dev->exposed_dispatch_table = kk_device_cmd_trampolines;
    vk_device_dispatch_table_from_entrypoints(&dev->exposed_dispatch_table,
                                              &kk_device_entrypoints, false);
    vk_device_dispatch_table_from_entrypoints(&dev->exposed_dispatch_table,
@@ -291,8 +294,6 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
    dev->vk.command_buffer_ops = &kk_cmd_buffer_ops;
    dev->vk.command_dispatch_table = &dev->vk.dispatch_table;
    dev->vk.get_timestamp = kk_get_timestamp;
-
-   kk_parse_device_environment_options(dev);
 
    /* Create a new Metal pipeline compiler for the device */
    dev->mtl_compiler_handle = kk_acquire_compiler(dev);
@@ -330,6 +331,12 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS)
       goto fail_sampler_heap;
 
+   if (pdev->settings.gpu_capture_enabled) {
+      const char *capture_directory =
+         debug_get_option("MESA_KK_GPU_CAPTURE_DIRECTORY", NULL);
+      mtl_start_gpu_capture(dev->mtl_handle, capture_directory);
+   }
+
    *pDevice = kk_device_to_handle(dev);
 
    return VK_SUCCESS;
@@ -361,13 +368,14 @@ VKAPI_ATTR void VKAPI_CALL
 kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 {
    VK_FROM_HANDLE(kk_device, dev, _device);
+   struct kk_physical_device *pdev = kk_device_physical(dev);
 
    if (!dev)
       return;
 
    /* End capture before we start releasing resources. Otherwise, Metal capture
     * may run into issues. */
-   if (dev->gpu_capture_enabled) {
+   if (pdev->settings.gpu_capture_enabled) {
       mtl_stop_gpu_capture();
    }
 
@@ -458,4 +466,44 @@ kk_device_make_resources_resident(struct kk_device *dev)
    mtl_residency_set_commit(dev->residency_set.handle);
    mtl_residency_set_request_residency(dev->residency_set.handle);
    simple_mtx_unlock(&dev->residency_set.mutex);
+}
+
+/* VK_EXT_debug_utils */
+VKAPI_ATTR VkResult VKAPI_CALL
+kk_SetDebugUtilsObjectNameEXT(VkDevice device,
+                              const VkDebugUtilsObjectNameInfoEXT *pNameInfo)
+{
+   VkResult result = vk_common_SetDebugUtilsObjectNameEXT(device, pNameInfo);
+   if (result != VK_SUCCESS)
+      return result;
+
+   if (pNameInfo->pObjectName == NULL)
+      return result;
+
+#define CASE(obj_type, kk_type, vk_type)                                       \
+   case VK_OBJECT_TYPE_##obj_type: {                                           \
+      VK_FROM_HANDLE(kk_type, obj, (vk_type)pNameInfo->objectHandle);          \
+      kk_type##_set_label(obj, pNameInfo->pObjectName);                        \
+      break;                                                                   \
+   }
+
+   switch (pNameInfo->objectType) {
+      CASE(COMMAND_BUFFER, kk_cmd_buffer, VkCommandBuffer);
+      CASE(COMMAND_POOL, kk_cmd_pool, VkCommandPool);
+      CASE(DEVICE_MEMORY, kk_device_memory, VkDeviceMemory);
+      CASE(BUFFER, kk_buffer, VkBuffer);
+      CASE(BUFFER_VIEW, kk_buffer_view, VkBufferView);
+      CASE(IMAGE, kk_image, VkImage);
+      CASE(IMAGE_VIEW, kk_image_view, VkImageView);
+      CASE(DESCRIPTOR_POOL, kk_descriptor_pool, VkDescriptorPool);
+      /* TODO: it would be nice to label pipelines and shaders, but we don't
+       * have easy access to the relevant vulkan runtime objects inside
+       * kk_compile_shaders(), where the Metal objects are set up.
+       */
+   default:
+      break;
+   }
+#undef CASE
+
+   return VK_SUCCESS;
 }

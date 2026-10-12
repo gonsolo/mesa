@@ -87,8 +87,6 @@ void si_get_shader_variant_info(struct si_shader *shader,
    /* Find out which frag coord components are used. */
    uint8_t frag_coord_mask = 0;
 
-   nir_divergence_analysis(nir);
-
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       NIR_PASS(_, nir, ac_nir_assign_fs_input_locations);
 
@@ -173,8 +171,6 @@ void si_get_shader_variant_info(struct si_shader *shader,
             case nir_intrinsic_load_per_primitive_input:
             case nir_intrinsic_load_interpolated_input: {
                if (nir->info.stage == MESA_SHADER_VERTEX) {
-                  shader->info.uses_vmem_load_other = true;
-
                   if (intr->intrinsic == nir_intrinsic_load_input &&
                       (shader->key.ge.mono.instance_divisor_is_one |
                        shader->key.ge.mono.instance_divisor_is_fetched) &
@@ -183,8 +179,6 @@ void si_get_shader_variant_info(struct si_shader *shader,
                      shader->info.uses_sysval_instance_id = true;
                      shader->info.uses_sysval_base_instance = true;
                   }
-               } else if (nir->info.stage == MESA_SHADER_TESS_EVAL) {
-                  shader->info.uses_vmem_load_other = true;
                } else if (nir->info.stage == MESA_SHADER_FRAGMENT) {
                   nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
                   unsigned index = nir_intrinsic_base(intr);
@@ -222,43 +216,6 @@ void si_get_shader_variant_info(struct si_shader *shader,
                   interp == INTERP_MODE_NONE ? INTERP_MODE_COLOR : interp;
                break;
             }
-            case nir_intrinsic_load_ubo:
-               if (intr->src[1].ssa->divergent)
-                  shader->info.uses_vmem_load_other = true;
-               break;
-            case nir_intrinsic_load_constant:
-               if (intr->src[0].ssa->divergent)
-                  shader->info.uses_vmem_load_other = true;
-               break;
-            /* Global */
-            case nir_intrinsic_load_global:
-            case nir_intrinsic_global_atomic:
-            case nir_intrinsic_global_atomic_swap:
-            /* SSBOs (this list is from si_nir_lower_resource.c) */
-            case nir_intrinsic_load_ssbo:
-            case nir_intrinsic_ssbo_atomic:
-            case nir_intrinsic_ssbo_atomic_swap:
-            /* Images (this list is from si_nir_lower_resource.c) */
-            case nir_intrinsic_image_deref_load:
-            case nir_intrinsic_image_deref_sparse_load:
-            case nir_intrinsic_image_deref_fragment_mask_load_amd:
-            case nir_intrinsic_image_deref_atomic:
-            case nir_intrinsic_image_deref_atomic_swap:
-            case nir_intrinsic_bindless_image_load:
-            case nir_intrinsic_bindless_image_sparse_load:
-            case nir_intrinsic_bindless_image_fragment_mask_load_amd:
-            case nir_intrinsic_bindless_image_atomic:
-            case nir_intrinsic_bindless_image_atomic_swap:
-            /* Scratch */
-            case nir_intrinsic_load_scratch:
-            /* AMD-specific. */
-            case nir_intrinsic_load_buffer_amd:
-               /* Atomics without return are not treated as loads. */
-               if (nir_def_components_read(&intr->def) &&
-                   (!nir_intrinsic_has_atomic_op(intr) ||
-                    nir_intrinsic_atomic_op(intr) != nir_atomic_op_ordered_add_gfx12_amd))
-                  shader->info.uses_vmem_load_other = true;
-               break;
             case nir_intrinsic_store_output:
             case nir_intrinsic_store_per_vertex_output:
                if (nir->info.stage == MESA_SHADER_FRAGMENT) {
@@ -312,28 +269,6 @@ void si_get_shader_variant_info(struct si_shader *shader,
 
             temp_info->has_non_uniform_tex_access |= tex->texture_non_uniform || tex->sampler_non_uniform;
             temp_info->has_shadow_comparison |= tex->is_shadow;
-
-            /* Gather the types of used VMEM instructions that return something. */
-            switch (tex->op) {
-            case nir_texop_tex:
-            case nir_texop_txb:
-            case nir_texop_txl:
-            case nir_texop_txd:
-            case nir_texop_lod:
-            case nir_texop_tg4:
-               shader->info.uses_vmem_sampler_or_bvh = true;
-               break;
-            case nir_texop_txs:
-            case nir_texop_query_levels:
-            case nir_texop_texture_samples:
-            case nir_texop_descriptor_amd:
-            case nir_texop_sampler_descriptor_amd:
-               /* These just return the descriptor or information from it. */
-               break;
-            default:
-               shader->info.uses_vmem_load_other = true;
-               break;
-            }
             break;
          }
 
@@ -368,6 +303,7 @@ void si_get_shader_variant_info(struct si_shader *shader,
          S_0286CC_PERSP_SAMPLE_ENA(BITSET_TEST(sysvals, SYSTEM_VALUE_BARYCENTRIC_PERSP_SAMPLE)) |
          S_0286CC_PERSP_CENTER_ENA(BITSET_TEST(sysvals, SYSTEM_VALUE_BARYCENTRIC_PERSP_PIXEL)) |
          S_0286CC_PERSP_CENTROID_ENA(BITSET_TEST(sysvals, SYSTEM_VALUE_BARYCENTRIC_PERSP_CENTROID)) |
+         S_0286CC_PERSP_PULL_MODEL_ENA(BITSET_TEST(sysvals, SYSTEM_VALUE_BARYCENTRIC_PULL_MODEL)) |
          S_0286CC_LINEAR_SAMPLE_ENA(BITSET_TEST(sysvals, SYSTEM_VALUE_BARYCENTRIC_LINEAR_SAMPLE)) |
          S_0286CC_LINEAR_CENTER_ENA(BITSET_TEST(sysvals, SYSTEM_VALUE_BARYCENTRIC_LINEAR_PIXEL)) |
          S_0286CC_LINEAR_CENTROID_ENA(BITSET_TEST(sysvals, SYSTEM_VALUE_BARYCENTRIC_LINEAR_CENTROID)) |
@@ -500,7 +436,7 @@ void si_get_late_shader_variant_info(struct si_shader *shader, struct si_shader_
             assert(args->vs_state_bits.used);
 
             /* Gather which VS_STATE and GS_STATE user SGPR bits are used. */
-            uint32_t bits_used = nir_def_bits_used(nir_instr_def(instr));
+            uint32_t bits_used = nir_def_bits_used(nir_get_scalar(&intr->def, 0));
 
             if (nir->info.stage == MESA_SHADER_VERTEX &&
                 bits_used & ENCODE_FIELD(VS_STATE_INDEXED, ~0))
@@ -584,22 +520,31 @@ void si_set_spi_ps_input_config_for_separate_prolog(struct si_shader *shader)
 
 void si_fixup_spi_ps_input_config(struct si_shader *shader)
 {
-   /* POW_W_FLOAT requires that one of the perspective weights is enabled. */
+   /* POW_W_FLOAT requires that one set of perspective barycentric coordinates is enabled. */
    if (G_0286CC_POS_W_FLOAT_ENA(shader->config.spi_ps_input_ena) &&
-       !(shader->config.spi_ps_input_ena & 0xf)) {
+       !G_0286CC_PERSP_SAMPLE_ENA(shader->config.spi_ps_input_ena) &&
+       !G_0286CC_PERSP_CENTER_ENA(shader->config.spi_ps_input_ena) &&
+       !G_0286CC_PERSP_CENTROID_ENA(shader->config.spi_ps_input_ena) &&
+       !G_0286CC_PERSP_PULL_MODEL_ENA(shader->config.spi_ps_input_ena))
       shader->config.spi_ps_input_ena |= S_0286CC_PERSP_SAMPLE_ENA(1);
-   }
 
-   /* At least one pair of barycentric coordinates or LINE_STIPPLE_TEX_ENA must be enabled.
+   /* At least one set of barycentric coordinates or LINE_STIPPLE_TEX_ENA must be enabled.
     * Since LINE_STIPPLE_TEX_ENA is the only one that loads only 1 VGPR, use it.
-    *
-    * We can't set LINE_STIPPLE_TEX_ENA on GFX12 because it reduces primitive throughput to only
-    * 1 SE. Other gens are fine (tested on Navi10, Navi21, Navi31).
-    * TODO: Test Strix Halo.
     */
-   if (!(shader->config.spi_ps_input_ena & 0x7f) &&
+   if (!G_0286CC_PERSP_SAMPLE_ENA(shader->config.spi_ps_input_ena) &&
+       !G_0286CC_PERSP_CENTER_ENA(shader->config.spi_ps_input_ena) &&
+       !G_0286CC_PERSP_CENTROID_ENA(shader->config.spi_ps_input_ena) &&
+       !G_0286CC_PERSP_PULL_MODEL_ENA(shader->config.spi_ps_input_ena) &&
+       !G_0286CC_LINEAR_SAMPLE_ENA(shader->config.spi_ps_input_ena) &&
+       !G_0286CC_LINEAR_CENTER_ENA(shader->config.spi_ps_input_ena) &&
+       !G_0286CC_LINEAR_CENTROID_ENA(shader->config.spi_ps_input_ena) &&
        !G_0286CC_LINE_STIPPLE_TEX_ENA(shader->config.spi_ps_input_ena)) {
-      /* LLVM sets PERSP_SAMPLE_ENA in this case, so we have to do the same. */
+      /* LLVM sets PERSP_SAMPLE_ENA in this case, so we have to do the same.
+       *
+       * We can't set LINE_STIPPLE_TEX_ENA on GFX12 because it reduces primitive throughput to only
+       * 1 SE. Other gens are fine (tested on Navi10, Navi21, Navi31).
+       * TODO: Test Strix Halo.
+       */
       if (shader->selector->info.base.use_aco_amd &&
           shader->selector->screen->info.gfx_level != GFX12)
          shader->config.spi_ps_input_ena |= S_0286CC_LINE_STIPPLE_TEX_ENA(1);

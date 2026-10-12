@@ -46,11 +46,7 @@ spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type
 spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA8I,Fail
 spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_SRGB8_ALPHA8,Fail
 spec@arb_transform_feedback_instanced@draw-auto instanced,Fail
-spec@egl 1.4@eglterminate then unbind context,Fail
 spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_depth_component24,Fail
-spec@egl_khr_surfaceless_context@viewport,Fail
-spec@egl_mesa_configless_context@basic,Fail
-spec@ext_framebuffer_blit@fbo-blit-check-limits,Fail
 spec@ext_transform_feedback2@draw-auto,Fail
 spec@ext_transform_feedback@builtin-varyings gl_clipdistance,Fail
 spec@ext_transform_feedback@change-size base-shrink,Fail
@@ -113,7 +109,6 @@ spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb-fp@sRGB decode full 
 spec@!opengl 1.0@gl-1.0-edgeflag-const,Fail
 spec@!opengl 1.0@gl-1.0-edgeflag,Fail
 spec@!opengl 1.0@gl-1.0-edgeflag-quads,Fail
-spec@!opengl 1.0@gl-1.0-no-op-paths,Fail
 spec@!opengl 1.1@linestipple@Factor 2x,Fail
 spec@!opengl 1.1@linestipple@Factor 3x,Fail
 spec@!opengl 1.1@linestipple,Fail
@@ -121,7 +116,6 @@ spec@!opengl 1.1@linestipple@Line loop,Fail
 spec@!opengl 1.1@linestipple@Line strip,Fail
 spec@!opengl 1.1@linestipple@Restarting lines within a single Begin-End block,Fail
 spec@!opengl 1.1@line-smooth-stipple,Fail
-spec@!opengl 1.1@longprim,Crash
 spec@!opengl 1.1@polygon-mode-facing,Fail
 spec@!opengl 1.1@polygon-mode,Fail
 spec@!opengl 1.1@polygon-mode-offset@config 0: Expected white pixel on bottom edge,Fail
@@ -151,9 +145,6 @@ spec@!opengl 1.1@polygon-mode-offset@config 6: Expected white pixel on top edge,
 spec@!opengl 1.1@polygon-mode-offset,Fail
 spec@!opengl 2.0@gl-2.0-edgeflag,Fail
 spec@!opengl 2.0@gl-2.0-edgeflag-immediate,Fail
-spec@!opengl 2.1@pbo,Fail
-spec@!opengl 2.1@pbo@test_polygon_stip,Fail
-spec@!opengl 2.1@polygon-stipple-fs,Fail
 spec@!opengl 3.1@primitive-restart-xfb flush,Fail
 spec@!opengl 3.1@primitive-restart-xfb generated,Fail
 spec@!opengl 3.1@primitive-restart-xfb written,Fail
@@ -174,7 +165,6 @@ spec@arb_shader_texture_lod@execution@tex-miplevel-selection *projgradarb 3d,Fai
 spec@arb_timer_query@query gl_timestamp,Fail
 spec@arb_timer_query@timestamp-get,Fail
 spec@ext_disjoint_timer_query@simple,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-refcount-multithread,Crash
 spec@ext_timer_query@time-elapsed,Fail
 spec@ext_transform_feedback@max-varyings,Fail
 spec@ext_transform_feedback@max-varyings@max-varying-single-dimension-array,Fail
@@ -329,7 +319,6 @@ afbcp-spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb-fp@sRGB decode
 afbcp-spec@!opengl 1.0@gl-1.0-edgeflag-const,Fail
 afbcp-spec@!opengl 1.0@gl-1.0-edgeflag,Fail
 afbcp-spec@!opengl 1.0@gl-1.0-edgeflag-quads,Fail
-afbcp-spec@!opengl 1.0@gl-1.0-no-op-paths,Fail
 afbcp-spec@!opengl 1.0@rasterpos,Crash
 afbcp-spec@!opengl 1.1@linestipple@Factor 2x,Fail
 afbcp-spec@!opengl 1.1@linestipple@Factor 3x,Fail
@@ -338,7 +327,6 @@ afbcp-spec@!opengl 1.1@linestipple@Line loop,Fail
 afbcp-spec@!opengl 1.1@linestipple@Line strip,Fail
 afbcp-spec@!opengl 1.1@linestipple@Restarting lines within a single Begin-End block,Fail
 afbcp-spec@!opengl 1.1@line-smooth-stipple,Fail
-afbcp-spec@!opengl 1.1@longprim,Crash
 afbcp-spec@!opengl 1.1@polygon-mode-facing,Fail
 afbcp-spec@!opengl 1.1@polygon-mode,Fail
 afbcp-spec@!opengl 1.1@polygon-mode-offset@config 0: Expected white pixel on bottom edge,Fail
@@ -368,9 +356,6 @@ afbcp-spec@!opengl 1.1@polygon-mode-offset@config 6: Expected white pixel on top
 afbcp-spec@!opengl 1.1@polygon-mode-offset,Fail
 afbcp-spec@!opengl 2.0@gl-2.0-edgeflag,Fail
 afbcp-spec@!opengl 2.0@gl-2.0-edgeflag-immediate,Fail
-afbcp-spec@!opengl 2.1@pbo,Fail
-afbcp-spec@!opengl 2.1@pbo@test_polygon_stip,Fail
-afbcp-spec@!opengl 2.1@polygon-stipple-fs,Fail
 afbcp-spec@!opengl 3.1@primitive-restart-xfb flush,Fail
 afbcp-spec@!opengl 3.1@primitive-restart-xfb generated,Fail
 afbcp-spec@!opengl 3.1@primitive-restart-xfb written,Fail
@@ -391,7 +376,6 @@ afbcp-spec@arb_shader_texture_lod@execution@tex-miplevel-selection *projgradarb 
 afbcp-spec@arb_timer_query@query gl_timestamp,Fail
 afbcp-spec@arb_timer_query@timestamp-get,Fail
 afbcp-spec@ext_disjoint_timer_query@simple,Fail
-afbcp-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-refcount-multithread,Crash
 afbcp-spec@ext_timer_query@time-elapsed,Fail
 afbcp-spec@ext_transform_feedback@max-varyings,Fail
 afbcp-spec@ext_transform_feedback@max-varyings@max-varying-single-dimension-array,Fail
@@ -439,7 +423,8 @@ spec@ext_framebuffer_multisample@sample-alpha-to-coverage 6 color,Fail
 spec@ext_framebuffer_multisample@sample-alpha-to-coverage 8 color,Fail
 
 # uprev Piglit in Mesa
-afbcp-spec@arb_texture_view@tex-view,Fail
 spec@!opengl 1.1@large-tex,Fail
-spec@arb_texture_view@tex-view,Fail
+spec@arb_framebuffer_object@framebuffer-blit-oblong tall,Fail
+spec@arb_framebuffer_object@framebuffer-blit-oblong wide,Fail
+spec@ext_transform_feedback2@draw-auto offset,Fail
 

@@ -50,10 +50,13 @@ struct tu_const_state
    uint32_t dynamic_offset_loc;
    unsigned num_inline_ubos;
    struct tu_inline_ubo ubos[MAX_INLINE_UBOS];
+   uint32_t num_bindless_base_addresses;
+   uint32_t bindless_base_const_offset_vec4;
 
    struct ir3_driver_ubo fdm_ubo;
    struct ir3_driver_ubo dynamic_offsets_ubo;
    struct ir3_driver_ubo inline_uniforms_ubo;
+   struct ir3_driver_ubo bindless_base_addrs_ubo;
 };
 
 struct tu_shader
@@ -113,6 +116,12 @@ struct tu_shader
          /* If per_layer_viewport is true, the maximum number of layers written to.
           */
          uint8_t max_fdm_layers;
+
+         /* Whether there are read-only input attachments, i.e. input
+          * attachments that are not patched to read from GMEM. Only used for
+          * dynamic rendering.
+          */
+         bool read_only_input_attachments;
       } fs;
    };
 };
@@ -121,16 +130,19 @@ struct tu_shader_key {
    unsigned multiview_mask;
    uint16_t read_only_input_attachments;
    uint8_t max_fdm_layers;
-   bool force_sample_interp; /* Set when VkPipelineMultisampleStateCreateInfo->sampleShadingEnable */
-   bool fragment_density_map;
-   bool fdm_per_layer;
-   bool dynamic_renderpass;
    uint8_t unscaled_input_fragcoord;
-   bool robust_storage_access2;
-   bool robust_uniform_access2;
-   bool lower_view_index_to_device_index;
-   bool custom_resolve;
-   bool emulate_alpha_to_coverage;
+
+   bool force_sample_interp : 1; /* Set when VkPipelineMultisampleStateCreateInfo->sampleShadingEnable */
+   bool fragment_density_map : 1;
+   bool fdm_per_layer : 1;
+   bool dynamic_renderpass : 1;
+   bool robust_storage_access2 : 1;
+   bool robust_uniform_access2 : 1;
+   bool lower_view_index_to_device_index : 1;
+   bool custom_resolve : 1;
+   bool emulate_alpha_to_coverage : 1;
+   uint32_t padding : 23;
+
    enum ir3_wavesize_option api_wavesize, real_wavesize;
 
    /* Shader version to force recompilation when TU_BUILD_ID_OVERRIDE is used. */
@@ -152,6 +164,12 @@ tu_destroy_softfloat(struct tu_device *device);
 bool
 tu_nir_lower_multiview(nir_shader *nir, uint32_t mask, struct tu_device *dev,
                        bool last_stage);
+
+bool
+tu_nir_lower_multiview_sw_vs(nir_shader *nir);
+
+bool
+tu_nir_lower_multiview_sw_fs(nir_shader *nir);
 
 bool
 tu_nir_lower_ray_queries(nir_shader *nir);

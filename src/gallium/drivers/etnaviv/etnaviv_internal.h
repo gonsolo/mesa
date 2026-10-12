@@ -44,6 +44,13 @@
 #define ETNA_MAX_UNIFORMS (256)
 #define ETNA_MAX_CONST_BUF 16
 #define ETNA_MAX_PIXELPIPES 2
+#define ETNA_MAX_SAMPLES 4
+
+/* 128-bit color emulation reserves the upper half of the render targets for
+ * companion targets, so at most this many color RTs can be bound (and be
+ * 128-bit). It bounds the per-RT rt_is_128bit mask and rt_companion table.
+ */
+#define ETNA_MAX_128BIT_RTS (PIPE_MAX_COLOR_BUFS / 2)
 
 /* All RS operations must have width%16 = 0 */
 #define ETNA_RS_WIDTH_MASK (16 - 1)
@@ -62,6 +69,7 @@
 #define ETNA_SE_SCISSOR_MARGIN_BOTTOM (0x1111)
 #define ETNA_SE_CLIP_MARGIN_RIGHT (0xffff)
 #define ETNA_SE_CLIP_MARGIN_BOTTOM (0xffff)
+#define ETNA_SE_FIXP_MAX (0x1fffffff)
 
 /* GPU chip 3D specs */
 struct etna_specs {
@@ -95,6 +103,8 @@ struct etna_specs {
    unsigned bits_per_tile;
    /* clear value for TS (dependent on bits_per_tile) */
    uint32_t ts_clear_value;
+   /* fragment and vertex samplers share one dynamically partitioned array */
+   unsigned unified_samplers : 1;
    /* base of vertex texture units */
    unsigned vertex_sampler_offset;
    /* number of fragment sampler units */
@@ -115,6 +125,8 @@ struct etna_specs {
    uint32_t max_instructions;
    /* maximum number of VS outputs */
    unsigned max_vs_outputs;
+   /* KB of the shader cache available for vertex shader results, HALTI5 only */
+   unsigned vs_usc_budget;
    /* maximum number of varyings */
    unsigned max_varyings;
    /* maximum vertex uniforms */
@@ -208,6 +220,7 @@ struct compiled_framebuffer_state {
 /* Compiled context->create_vertex_elements_state */
 struct compiled_vertex_elements_state {
    unsigned num_elements;
+   bool dummy_element;
    uint32_t FE_VERTEX_ELEMENT_CONFIG[VIVS_FE_VERTEX_ELEMENT_CONFIG__LEN];
    uint32_t NFE_GENERIC_ATTRIB_CONFIG0[VIVS_NFE_GENERIC_ATTRIB__LEN];
    uint32_t NFE_GENERIC_ATTRIB_SCALE[VIVS_NFE_GENERIC_ATTRIB__LEN];
@@ -232,10 +245,12 @@ struct compiled_shader_state {
    uint32_t VS_END_PC;
    uint32_t VS_OUTPUT_COUNT; /* number of outputs if point size per vertex disabled */
    uint32_t VS_OUTPUT_COUNT_PSIZE; /* number of outputs of point size per vertex enabled */
+   uint32_t VS_HALTI5_OUTPUT_COUNT;
+   uint32_t VS_VERTEX_CACHE_CONFIG;
    uint32_t VS_INPUT_COUNT;
    uint32_t VS_TEMP_REGISTER_CONTROL;
    uint32_t VS_OUTPUT[8];
-   uint32_t VS_INPUT[4];
+   uint32_t VS_INPUT[8];
    uint32_t VS_LOAD_BALANCING;
    uint32_t VS_START_PC;
    uint32_t PS_END_PC;
@@ -258,6 +273,7 @@ struct compiled_shader_state {
    uint32_t *PS_INST_MEM;
    struct etna_reloc PS_INST_ADDR;
    struct etna_reloc VS_INST_ADDR;
+   int8_t vs_output_slot[VARYING_SLOT_MAX];
    unsigned writes_z:1;
    unsigned uses_discard:1;
 };

@@ -972,6 +972,18 @@ clc_compile_to_llvm_module(LLVMContext &llvm_ctx,
    if (args->features.atomic_scope_device) {
       c->getTargetOpts().OpenCLExtensionsAsWritten.push_back("+__opencl_c_atomic_scope_device");
    }
+   if (args->features.atomic_fp32_add || args->features.atomic_fp32_minmax) {
+      // TODO: something inside clang unconditionally enables this and min_max?
+      c->getPreprocessorOpts().addMacroDef("cl_ext_float_atomics=1");
+      if (args->features.atomic_fp32_add) {
+         c->getPreprocessorOpts().addMacroDef("__opencl_c_ext_fp32_global_atomic_add=1");
+         c->getPreprocessorOpts().addMacroDef("__opencl_c_ext_fp32_local_atomic_add=1");
+      }
+      if (args->features.atomic_fp32_minmax) {
+         c->getPreprocessorOpts().addMacroDef("__opencl_c_ext_fp32_global_atomic_min_max=1");
+         c->getPreprocessorOpts().addMacroDef("__opencl_c_ext_fp32_local_atomic_min_max=1");
+      }
+   }
    if (args->features.extended_bit_ops) {
       c->getPreprocessorOpts().addMacroDef("cl_khr_extended_bit_ops=1");
    }
@@ -1186,15 +1198,14 @@ llvm_mod_to_spirv(std::unique_ptr<::llvm::Module> mod,
    if (args->use_llvm_spirv_target) {
       const char *triple = args->address_bits == 32 ? "spirv-unknown-unknown" : "spirv64-unknown-unknown";
       std::string error_msg("");
-      auto target = TargetRegistry::lookupTarget(triple, error_msg);
-      if (target) {
-         auto TM = target->createTargetMachine(
 #if LLVM_VERSION_MAJOR >= 21
-            llvm::Triple(triple),
+      auto temp_triple = llvm::Triple(triple);
 #else
-            triple,
+      auto temp_triple = triple;
 #endif
-            "", "", {}, std::nullopt, std::nullopt,
+      auto target = TargetRegistry::lookupTarget(temp_triple, error_msg);
+      if (target) {
+         auto TM = target->createTargetMachine(temp_triple, "", "", {}, std::nullopt, std::nullopt,
 #if LLVM_VERSION_MAJOR >= 18
             ::llvm::CodeGenOptLevel::None
 #else

@@ -94,6 +94,8 @@ gfx10_format_table_c = custom_target(
 )
 
 amd_common_files = files(
+  'ac_barrier.c',
+  'ac_barrier.h',
   'ac_binary.c',
   'ac_binary.h',
   'ac_cmdbuf.c',
@@ -127,10 +129,14 @@ amd_common_files = files(
   'ac_shadowed_regs.h',
   'ac_spm.c',
   'ac_spm.h',
+  'ac_spm_config.c',
+  'ac_spm_config.h',
   'ac_sqtt.c',
   'ac_sqtt.h',
   'ac_rgp.c',
   'ac_rgp.h',
+  'ac_rdf.c',
+  'ac_rdf.h',
   'ac_msgpack.c',
   'ac_msgpack.h',
   'amd_family.c',
@@ -167,6 +173,7 @@ if with_gfx_compute
     'nir/ac_nir_create_gs_copy_shader.c',
     'nir/ac_nir_fixup_smem_loads_null_prt.c',
     'nir/ac_nir_lower_esgs_io_to_mem.c',
+    'nir/ac_nir_lower_fs_input_loads.c',
     'nir/ac_nir_lower_global_access.c',
     'nir/ac_nir_lower_image_opcodes_cdna.c',
     'nir/ac_nir_lower_image_tex.c',
@@ -234,7 +241,7 @@ libamd_common = static_library(
     inc_include, inc_src, inc_amd, inc_virtio_gpu,
   ],
   dependencies : [dep_llvm.partial_dependency(compile_args: true, includes: true)] + [
-    dep_thread, dep_elf, dep_libdrm_amdgpu, dep_valgrind,
+    dep_thread, dep_elf, dep_libdrm_amdgpu, dep_valgrind, dep_zstd,
     idep_mesautil, idep_nir_headers, idep_nir, idep_amd_generated_headers
   ],
   link_with: [ link_with ],

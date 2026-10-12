@@ -465,6 +465,14 @@ vtn_pointer_dereference(struct vtn_builder *b,
       }
    }
 
+   /* Negative array indices into UBOs/SSBOs are UB (GLSL/SPIR-V spec), so
+    * we can treat all accesses as in-bounds regardless of whether the shader
+    * used OpInBoundsAccessChain.
+    */
+   const bool in_bounds = deref_chain->in_bounds ||
+                          base->mode == vtn_variable_mode_ubo ||
+                          base->mode == vtn_variable_mode_ssbo;
+
    if (idx == 0 && deref_chain->ptr_as_array) {
       /* We start with a deref cast to get the stride.  Hopefully, we'll be
        * able to delete that cast eventually.
@@ -475,7 +483,7 @@ vtn_pointer_dereference(struct vtn_builder *b,
       nir_def *index = vtn_access_link_as_ssa(b, deref_chain->link[0], 1,
                                                   tail->def.bit_size);
       tail = nir_build_deref_ptr_as_array(&b->nb, tail, index);
-      tail->arr.in_bounds = deref_chain->in_bounds;
+      tail->arr.in_bounds = in_bounds;
       idx++;
    }
 
@@ -498,7 +506,7 @@ vtn_pointer_dereference(struct vtn_builder *b,
             type = type->array_element;
          }
          tail = nir_build_deref_array(&b->nb, tail, arr_index);
-         tail->arr.in_bounds = deref_chain->in_bounds;
+         tail->arr.in_bounds = in_bounds;
       }
 
       access |= type->access;
@@ -935,7 +943,10 @@ vtn_get_builtin_location(struct vtn_builder *b,
       } else if (b->shader->info.stage == MESA_SHADER_GEOMETRY) {
          *location = VARYING_SLOT_LAYER;
          *mode = nir_var_shader_out;
-      } else if (b->supported_capabilities.ShaderViewportIndexLayerEXT &&
+      } else if ((b->supported_capabilities.ShaderViewportIndexLayerEXT ||
+                  b->supported_capabilities.ShaderLayer ||
+                  b->supported_capabilities.MeshShadingEXT ||
+                  b->supported_capabilities.MeshShadingNV) &&
                (b->shader->info.stage == MESA_SHADER_VERTEX ||
                 b->shader->info.stage == MESA_SHADER_TESS_EVAL ||
                 b->shader->info.stage == MESA_SHADER_MESH)) {
@@ -949,7 +960,10 @@ vtn_get_builtin_location(struct vtn_builder *b,
       *location = VARYING_SLOT_VIEWPORT;
       if (b->shader->info.stage == MESA_SHADER_GEOMETRY) {
          *mode = nir_var_shader_out;
-      } else if (b->supported_capabilities.ShaderViewportIndexLayerEXT &&
+      } else if ((b->supported_capabilities.ShaderViewportIndexLayerEXT ||
+                  b->supported_capabilities.ShaderViewportIndex ||
+                  b->supported_capabilities.MeshShadingEXT ||
+                  b->supported_capabilities.MeshShadingNV) &&
                (b->shader->info.stage == MESA_SHADER_VERTEX ||
                 b->shader->info.stage == MESA_SHADER_TESS_EVAL ||
                 b->shader->info.stage == MESA_SHADER_MESH)) {
@@ -1005,9 +1019,13 @@ vtn_get_builtin_location(struct vtn_builder *b,
    case SpvBuiltInSampleMask:
       if (*mode == nir_var_shader_out) {
          *location = FRAG_RESULT_SAMPLE_MASK;
+         assert(b->shader->info.stage == MESA_SHADER_FRAGMENT);
+         b->shader->info.fs.sample_mask_out_declared = true;
       } else {
          *location = SYSTEM_VALUE_SAMPLE_MASK_IN;
          set_mode_system_value(b, mode);
+         assert(b->shader->info.stage == MESA_SHADER_FRAGMENT);
+         b->shader->info.fs.sample_mask_in_declared = true;
       }
       break;
    case SpvBuiltInFragDepth:
@@ -1439,6 +1457,7 @@ apply_var_decoration(struct vtn_builder *b,
    case SpvDecorationMatrixStride:
    case SpvDecorationUniform:
    case SpvDecorationUniformId:
+   case SpvDecorationNonUniformEXT:
    case SpvDecorationLinkageAttributes:
       break; /* Do nothing with these here */
 
@@ -1626,7 +1645,6 @@ var_decoration_cb(struct vtn_builder *b, struct vtn_value *val, int member,
       return;
    case SpvDecorationInputAttachmentIndex:
       vtn_var->input_attachment_index = dec->operands[0];
-      vtn_var->access |= ACCESS_NON_WRITEABLE;
       return;
    case SpvDecorationAlignment:
       var_set_alignment(b, vtn_var, dec->operands[0]);
@@ -1718,6 +1736,7 @@ var_decoration_cb(struct vtn_builder *b, struct vtn_value *val, int member,
             vtn_var->var->members[member].location = location;
       }
 
+      vtn_var->var->data.explicit_location = true;
       return;
    } else {
       if (vtn_var->var) {
@@ -1858,6 +1877,7 @@ vtn_storage_class_to_mode(struct vtn_builder *b,
       nir_mode = nir_var_mem_global;
       break;
    case SpvStorageClassImage:
+   case SpvStorageClassTileImageEXT:
       mode = vtn_variable_mode_image;
       nir_mode = nir_var_image;
       break;
@@ -2165,7 +2185,8 @@ vtn_create_variable(struct vtn_builder *b, struct vtn_value *val,
       if (storage_class == SpvStorageClassImage)
          vtn_fail("Cannot create a variable with the Image storage class");
       else
-         vtn_assert(storage_class == SpvStorageClassUniformConstant);
+         vtn_assert(storage_class == SpvStorageClassUniformConstant ||
+                    storage_class == SpvStorageClassTileImageEXT);
       break;
 
    case vtn_variable_mode_phys_ssbo:
@@ -2760,6 +2781,13 @@ buffer_ptr_decoration_cb(struct vtn_builder *b, struct vtn_value *val,
       break;
    case SpvDecorationCoherent:
       *access |= ACCESS_COHERENT;
+      break;
+   case SpvDecorationUniform:
+   case SpvDecorationUniformId:
+      /* TODO: we should probably use these */
+      break;
+   case SpvDecorationNonUniformEXT:
+      /* Descriptor heaps are non-uniform by default. */
       break;
    default:
       vtn_fail_with_decoration("Unhandled decoration", dec->decoration);

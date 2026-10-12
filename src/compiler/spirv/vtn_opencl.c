@@ -131,15 +131,18 @@ static nir_function *mangle_and_find(struct vtn_builder *b,
    /* try and find in current shader first. */
    nir_function *found = nir_shader_get_function_for_name(b->shader, mname);
 
-   /* if not found here find in clc shader and create a decl mirroring it */
-   if (!found && b->options->clc_shader && b->options->clc_shader != b->shader) {
-      found = nir_shader_get_function_for_name(b->options->clc_shader, mname);
+   if (!found) {
+      /* if not found here find in clc shader and create a decl mirroring it */
+      if (b->options->clc_shader)
+         found = nir_shader_get_function_for_name(b->options->clc_shader, mname);
 
       /* try upcasting fp16 */
       if (!found && try_fp16_lowering) {
+         /* We might actually be inside libclc in which case clc_shader is NULL */
+         const nir_shader *libclc = b->options->clc_shader ? b->options->clc_shader : b->shader;
          fp16_name = mname;
          vtn_opencl_mangle(name, const_mask, num_srcs, src_types, true, &mname);
-         found = nir_shader_get_function_for_name(b->options->clc_shader, mname);
+         found = nir_shader_get_function_for_name(libclc, mname);
       }
 
       if (found) {
@@ -530,10 +533,12 @@ static uint8_t fp16_lowering_supported(enum OpenCLstd_Entrypoints opcode)
    case OpenCLstd_Ldexp:
    case OpenCLstd_Lgamma_r:
    case OpenCLstd_Pown:
-   case OpenCLstd_Remquo:
    case OpenCLstd_Rootn:
       /* second argument shouldn't be touched at all */
       return 0xff ^ (1 << 2);
+   case OpenCLstd_Remquo:
+      /* third argument is the integer quotient pointer. */
+      return 0xff ^ (1 << 3);
    /* the second argument is a pointer to a float
     * a new enough libclc supports it though
     */
@@ -695,6 +700,25 @@ handle_special(struct vtn_builder *b, uint32_t opcode,
    }
    case OpenCLstd_Rotate:
       return nir_urol(nb, srcs[0], nir_u2u32(nb, srcs[1]));
+   case OpenCLstd_Log2:
+   case OpenCLstd_Log:
+   case OpenCLstd_Exp2:
+      /* Emit precise log2/log/exp2 as hardware transcendentals when the
+       * driver's hardware units meet the CL ULP budget. fp32 only; exp/pow
+       * are intentionally excluded (change-of-base exceeds ULP budget). */
+      if (b->shader->options->has_cl_log2_exp2 && srcs[0]->bit_size == 32) {
+         switch (cl_opcode) {
+         case OpenCLstd_Log2:
+            return nir_flog2(nb, srcs[0]);
+         case OpenCLstd_Log:
+            return nir_fmul_imm(nb, nir_flog2(nb, srcs[0]), log(2.0));
+         case OpenCLstd_Exp2:
+            return nir_fexp2(nb, srcs[0]);
+         default:
+            break;
+         }
+      }
+      break;
    default:
       break;
    }

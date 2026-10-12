@@ -4,7 +4,7 @@ prog_cbindgen = find_program(
   'cbindgen',
   required : true,
   native : true,
-  version : '>= 0.25'
+  version : '>= 0.28'
 )
 
 dep_paste = dependency('paste',
@@ -34,7 +34,7 @@ _libnil_format_table = static_library(
 
 _libnil_deps = [
   dep_paste,
-  idep_bitview_rs,
+  idep_mesa_util_rs,
   idep_nvidia_headers_rs,
 ]
 

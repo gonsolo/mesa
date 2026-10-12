@@ -322,7 +322,7 @@ setup_uniform_remap_tables(const struct gl_constants *consts,
       /* Set remap table entry to the correct gl_uniform_storage. */
       util_range_insert_remap(uniform->remap_location,
                               uniform->remap_location + entries - 1,
-                              prog->UniformRemapTable, uniform);
+                              prog->UniformRemapTable, uniform, true);
    }
 
    /* Reserve locations for rest of the uniforms. */
@@ -376,7 +376,7 @@ setup_uniform_remap_tables(const struct gl_constants *consts,
       /* Set remap table entry to the correct gl_uniform_storage. */
       util_range_insert_remap(uniform->remap_location,
                               uniform->remap_location + entries - 1,
-                              prog->UniformRemapTable, uniform);
+                              prog->UniformRemapTable, uniform, true);
    }
 
    util_range_switch_to_sorted_array(prog->UniformRemapTable);
@@ -712,6 +712,7 @@ struct nir_link_uniforms_state {
    unsigned num_shader_uniform_components;
    unsigned shader_samplers_used;
    unsigned shader_shadow_samplers;
+   unsigned shader_y2y_samplers;
    unsigned shader_storage_blocks_write_access;
    struct gl_program_parameter_list *params;
 
@@ -846,6 +847,7 @@ texture_index_for_type(const struct glsl_type *type)
    case GLSL_SAMPLER_DIM_BUF:
       return TEXTURE_BUFFER_INDEX;
    case GLSL_SAMPLER_DIM_EXTERNAL:
+   case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
       return TEXTURE_EXTERNAL_INDEX;
    case GLSL_SAMPLER_DIM_MS:
       return sampler_array ? TEXTURE_2D_MULTISAMPLE_ARRAY_INDEX :
@@ -916,6 +918,10 @@ update_uniforms_shader_info(struct gl_shader_program *prog,
                   texture_index_for_type(type_no_array);
                state->shader_samplers_used |= 1U << i;
                state->shader_shadow_samplers |= shadow << i;
+
+               const enum glsl_sampler_dim dim = glsl_get_sampler_dim(type_no_array);
+               if (dim == GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y)
+                  state->shader_y2y_samplers |= 1U << i;
             }
          }
       }
@@ -1720,6 +1726,7 @@ gl_nir_link_uniforms(const struct gl_constants *consts,
       state.shader_storage_blocks_write_access = 0;
       state.shader_samplers_used = 0;
       state.shader_shadow_samplers = 0;
+      state.shader_y2y_samplers = 0;
       state.params = fill_parameters ? sh->Program->Parameters : NULL;
 
       nir_foreach_gl_uniform_variable(var, nir) {
@@ -2004,6 +2011,7 @@ gl_nir_link_uniforms(const struct gl_constants *consts,
       }
 
       sh->Program->SamplersUsed = state.shader_samplers_used;
+      sh->Program->Y2YSamplersUsed = state.shader_y2y_samplers;
       sh->Program->sh.ShaderStorageBlocksWriteAccess =
          state.shader_storage_blocks_write_access;
       sh->shadow_samplers = state.shader_shadow_samplers;

@@ -2032,6 +2032,7 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->query_memory_info = true;
    caps->primitive_restart = true;
    caps->primitive_restart_fixed_index = true;
+   caps->polygon_stipple = true;
    caps->anisotropic_filter = true;
    caps->native_fence_fd = true;
    caps->texture_barrier = true;
@@ -2132,8 +2133,7 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->max_vertex_element_src_offset = 0xffff;
 
    caps->texture_transfer_modes = PIPE_TEXTURE_TRANSFER_BLIT;
-
-   caps->endianness = PIPE_ENDIAN_LITTLE;
+   caps->device_type = PIPE_DEVICE_TYPE_INTEGRATED_GPU;
 
    caps->shader_group_vote = true;
    caps->shader_ballot = true;
@@ -2205,6 +2205,9 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->max_texture_anisotropy = 16.0;
 
    caps->max_texture_lod_bias = 16.0; /* arbitrary */
+
+   /* Up to 16 bytes are accelerated */
+   caps->hw_clear_buffer_sizes = 1 | 2 | 4 | 8 | 16;
 }
 
 static bool
@@ -2407,9 +2410,10 @@ agx_get_cl_cts_version(struct pipe_screen *pscreen)
    struct agx_device *dev = agx_device(pscreen);
 
    /* https://www.khronos.org/conformance/adopters/conformant-products/opencl#submission_433
+    * https://www.khronos.org/conformance/adopters/conformant-products/opencl#submission_471
     */
    if (dev->params.gpu_generation < 15)
-      return "v2024-08-08-00";
+      return "v2026-03-25-00";
 
    return NULL;
 }

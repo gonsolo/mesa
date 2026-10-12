@@ -200,6 +200,17 @@ typedef struct brw_reg {
 
    bool equals(const brw_reg &r) const;
    bool negative_equals(const brw_reg &r) const;
+
+   brw_reg without_src_mods() const
+   {
+      brw_reg r = *this;
+
+      r.negate = false;
+      r.abs = false;
+
+      return r;
+   }
+
    bool is_contiguous() const;
 
    bool is_zero() const;
@@ -230,6 +241,9 @@ typedef struct brw_reg {
    unsigned component_size(unsigned width) const;
 #endif /* __cplusplus */
 } brw_reg;
+
+uint32_t
+brw_register_file_size(const struct intel_device_info *devinfo);
 
 static inline unsigned
 phys_file(const struct brw_reg reg)
@@ -922,6 +936,12 @@ brw_null_reg(void)
    return brw_vec8_reg(ARF, BRW_ARF_NULL, 0);
 }
 
+static inline bool
+brw_reg_is_null(struct brw_reg reg)
+{
+   return reg.file == ARF && reg.nr == BRW_ARF_NULL;
+}
+
 static inline struct brw_reg
 brw_null_vec(unsigned width)
 {
@@ -1567,5 +1587,16 @@ byte_stride(const brw_reg &reg)
       UNREACHABLE("Invalid register file");
    }
 }
+
+/**
+ * Determine which SIMD8 parts of the accumulator register space are accessed.
+ *
+ * SIMD8 parts are used regardless of platform. A mask of 0x02 on DG2 means
+ * all SIMD8 of acc1, and a mask of 0x0c on BMG means all SIMD16 of acc1.
+ */
+unsigned brw_explicit_accumulator_bits(unsigned exec_size, const brw_reg &);
+
+unsigned brw_implicit_accumulator_bits(unsigned exec_size, unsigned group,
+                                       brw_reg_type);
 
 #endif /* __cplusplus */

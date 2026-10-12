@@ -1,5 +1,9 @@
 /*
  * Copyright © 2022 Collabora Ltd. and Red Hat Inc.
+ * Copyright 2023 Advanced Micro Devices, Inc.
+ * Copyright 2018 Intel Corporation
+ * Copyright 2025 Alyssa Rosenzweig
+ * Copyright 2026 Valve Corporation
  * SPDX-License-Identifier: MIT
  */
 #include "nvk_shader.h"
@@ -7,6 +11,7 @@
 #include "nvk_cmd_buffer.h"
 #include "nvk_descriptor_set_layout.h"
 #include "nvk_device.h"
+#include "nvk_instance.h"
 #include "nvk_mme.h"
 #include "nvk_physical_device.h"
 #include "nvk_sampler.h"
@@ -69,14 +74,16 @@ shared_var_info(const struct glsl_type *type, unsigned *size, unsigned *align)
 uint64_t
 nvk_physical_device_compiler_flags(const struct nvk_physical_device *pdev)
 {
+   const struct nvk_instance *instance = nvk_physical_device_instance(pdev);
    bool no_cbufs = pdev->debug_flags & NVK_DEBUG_NO_CBUF;
    bool use_edb_buffer_views = nvk_use_edb_buffer_views(pdev);
    uint64_t nak_flags = nak_debug_flags(pdev->nak);
 
    assert(nak_flags <= UINT16_MAX);
 
-   return ((uint64_t)no_cbufs << 12)
-      | ((uint64_t)use_edb_buffer_views << 13)
+   return (no_cbufs ? 1 << 12 : 0)
+      | (use_edb_buffer_views ? 1 << 13 : 0)
+      | (instance->drirc.misc.ssbo_align_4b ? 1 << 14 : 0)
       | (nak_flags << 48);
 }
 
@@ -139,13 +146,14 @@ nvk_get_spirv_options(struct vk_physical_device *vk_pdev,
 {
    const struct nvk_physical_device *pdev =
       container_of(vk_pdev, struct nvk_physical_device, vk);
+   const struct nvk_instance *instance = nvk_physical_device_instance(pdev);
 
    return (struct spirv_to_nir_options) {
       .ssbo_addr_format = nvk_ssbo_addr_format(pdev, rs),
       .phys_ssbo_addr_format = nir_address_format_64bit_global,
       .ubo_addr_format = nvk_ubo_addr_format(pdev, rs),
       .shared_addr_format = nir_address_format_32bit_offset,
-      .min_ssbo_alignment = NVK_MIN_SSBO_ALIGNMENT,
+      .min_ssbo_alignment = nvk_min_ssbo_alignment(instance),
       .min_ubo_alignment = nvk_min_cbuf_alignment(&pdev->info),
    };
 }
@@ -157,6 +165,12 @@ nvk_preprocess_nir(struct vk_physical_device *vk_pdev,
 {
    const struct nvk_physical_device *pdev =
       container_of(vk_pdev, struct nvk_physical_device, vk);
+
+   /* Lower primitive id to varyings to prepare for nir_opt_varyings_bulk */
+   struct nir_lower_sysvals_to_varyings_options sysvals_opts = {
+      .primitive_id = nir->info.stage == MESA_SHADER_FRAGMENT,
+   };
+   nir_lower_sysvals_to_varyings(nir, &sysvals_opts);
 
    nak_preprocess_nir(nir, pdev->nak);
 
@@ -302,7 +316,7 @@ lower_load_intrinsic(nir_builder *b, nir_intrinsic_instr *load,
          nir_def *sat_offset =
             nir_umin(b, offset, nir_imm_int(b, UINT32_MAX - (load_size - 1)));
          nir_def *in_bounds =
-            nir_ilt(b, nir_iadd_imm(b, sat_offset, load_size - 1), bound);
+            nir_ult(b, nir_iadd_imm(b, sat_offset, load_size - 1), bound);
 
          nir_push_if(b, in_bounds);
       }
@@ -473,7 +487,16 @@ nvk_lower_nir(struct nvk_device *dev, nir_shader *nir,
                shared_var_info);
       NIR_PASS(_, nir, nir_lower_explicit_io, var_modes,
                nir_address_format_32bit_offset);
+   }
 
+   nak_lower_nir_before_linking(nir, pdev->nak);
+   nir->info.io_lowered = true;
+}
+
+static void
+nvk_lower_nir_late(nir_shader *nir, VkShaderCreateFlagsEXT shader_flags)
+{
+   if (mesa_shader_stage_uses_workgroup(nir->info.stage)) {
       if (nir->info.stage == MESA_SHADER_TASK)
          NIR_PASS(_, nir, nvk_nir_lower_task_shader);
       else if (nir->info.stage == MESA_SHADER_MESH)
@@ -563,6 +586,7 @@ nvk_compile_nir(struct nvk_device *dev, nir_shader *nir,
       return vk_errorf(pdev, VK_ERROR_UNKNOWN, "Internal compiler error in NAK");
 
    shader->info = shader->nak->info;
+   shader->asm_str = shader->nak->asm_str;
    shader->code_ptr = shader->nak->code;
    shader->code_size = shader->nak->code_size;
 
@@ -1089,6 +1113,7 @@ nvk_shader_destroy(struct vk_device *vk_dev,
    } else {
       /* This came from deserialize, just free it */
       free((void *)shader->code_ptr);
+      free((void *)shader->asm_str);
    }
 
    free((void *)shader->data_ptr);
@@ -1102,7 +1127,8 @@ nvk_compile_shader(struct nvk_device *dev,
                    struct vk_shader_compile_info *info,
                    const struct vk_graphics_pipeline_state *state,
                    const VkAllocationCallbacks* pAllocator,
-                   struct vk_shader **shader_out)
+                   struct vk_shader **shader_out,
+                   struct nvk_cbuf_map *cbuf_map)
 {
    struct nvk_shader *shader;
    VkResult result;
@@ -1117,9 +1143,14 @@ nvk_compile_shader(struct nvk_device *dev,
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
    }
 
-   nvk_lower_nir(dev, nir, info->flags, info->robustness,
-                 info->set_layout_count, info->set_layouts,
-                 &shader->cbuf_map);
+   if (!nir->info.io_lowered) {
+      nvk_lower_nir(dev, nir, info->flags, info->robustness,
+                  info->set_layout_count, info->set_layouts,
+                  cbuf_map);
+   }
+
+   nvk_lower_nir_late(nir, info->flags);
+   shader->cbuf_map = *cbuf_map;
 
    struct nak_fs_key fs_key_tmp, *fs_key = NULL;
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
@@ -1189,13 +1220,46 @@ nvk_compile_nir_shader(struct nvk_device *dev, nir_shader *nir,
    };
 
    struct vk_shader *shader = NULL;
-   VkResult result = nvk_compile_shader(dev, &info, NULL, alloc, &shader);
+   struct nvk_cbuf_map cbuf_map = {0};
+   VkResult result = nvk_compile_shader(dev, &info, NULL, alloc, &shader, &cbuf_map);
    if (result != VK_SUCCESS)
       return result;
 
    *shader_out = container_of(shader, struct nvk_shader, vk);
 
    return VK_SUCCESS;
+}
+
+static void
+nir_opts(nir_shader *nir, void *data)
+{
+   bool progress;
+
+   do {
+      progress = false;
+
+      NIR_PASS(progress, nir, nir_opt_loop);
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
+      NIR_PASS(progress, nir, nir_opt_remove_phis);
+      NIR_PASS(progress, nir, nir_opt_dce);
+
+      NIR_PASS(progress, nir, nir_opt_if, 0);
+      NIR_PASS(progress, nir, nir_opt_dead_cf);
+      NIR_PASS(progress, nir, nir_opt_cse);
+
+      NIR_PASS(progress, nir, nir_opt_peephole_select,
+               &(nir_opt_peephole_select_options){
+                  .limit = 0,
+                  .discard_ok = true,
+               });
+
+      NIR_PASS(progress, nir, nir_opt_phi_precision);
+      NIR_PASS(progress, nir, nir_opt_algebraic);
+      NIR_PASS(progress, nir, nir_opt_constant_folding);
+
+      NIR_PASS(progress, nir, nir_opt_undef);
+      NIR_PASS(progress, nir, nir_opt_loop_unroll);
+   } while (progress);
 }
 
 static VkResult
@@ -1209,9 +1273,56 @@ nvk_compile_shaders(struct vk_device *vk_dev,
 {
    struct nvk_device *dev = container_of(vk_dev, struct nvk_device, vk);
 
+   nir_shader *mesh_shader = NULL;
+   nir_shader *shaders[shader_count];
+   struct nvk_cbuf_map cbuf_maps[shader_count];
+   memset(cbuf_maps, 0, sizeof(cbuf_maps));
+
+   /* Lower shaders, notably lowering I/O. This is a prerequisite for
+    * intershader optimization.
+    */
+   for (uint32_t i = 0; i < shader_count; i++) {
+      const struct vk_shader_compile_info *info = &infos[i];
+      nir_shader *nir = info->nir;
+
+      if (nir->info.stage == MESA_SHADER_MESH)
+         mesh_shader = nir;
+
+      if (nir->info.stage == MESA_SHADER_FRAGMENT && mesh_shader) {
+         nir_foreach_shader_in_variable(var, nir) {
+            /* These variables are implicitly per-primitive when used with
+             * mesh->fragment stages and this can't be determined with only the
+             * FS. nir_opt_varyings relies on inputs and outputs agreeing on
+             * per-primitive.
+             */
+            if (var->data.location == VARYING_SLOT_PRIMITIVE_ID ||
+                var->data.location == VARYING_SLOT_VIEWPORT ||
+                var->data.location == VARYING_SLOT_LAYER) {
+               var->data.per_primitive = true;
+            }
+         }
+      }
+
+      nvk_lower_nir(dev, nir, info->flags, info->robustness,
+                    info->set_layout_count, info->set_layouts,
+                    &cbuf_maps[i]);
+
+      if (nir->xfb_info) {
+         /* Fold constant offset srcs for IO. */
+         NIR_PASS(_, nir, nir_opt_constant_folding);
+
+         nir_io_add_intrinsic_xfb_info(nir);
+      }
+
+      shaders[i] = nir;
+   }
+
+   nir_opt_varyings_bulk(shaders, shader_count, true, UINT32_MAX, UINT32_MAX,
+                         nir_opts, NULL);
+
    for (uint32_t i = 0; i < shader_count; i++) {
       VkResult result = nvk_compile_shader(dev, &infos[i], state,
-                                           pAllocator, &shaders_out[i]);
+                                           pAllocator, &shaders_out[i], &cbuf_maps[i]);
       if (result != VK_SUCCESS) {
          /* Clean up all the shaders before this point */
          for (uint32_t j = 0; j < i; j++)
@@ -1229,6 +1340,20 @@ nvk_compile_shaders(struct vk_device *vk_dev,
    }
 
    return VK_SUCCESS;
+}
+
+static uint8_t
+nvk_shader_get_shader_version_override(const struct nvk_device *dev,
+                                       mesa_shader_stage stage)
+{
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_instance *instance = nvk_physical_device_instance(pdev);
+
+   if (mesa_shader_stage_is_compute(stage))
+      return instance->drirc.misc.override_compute_shader_version;
+
+   assert(!mesa_shader_stage_is_rt(stage));
+   return instance->drirc.misc.override_graphics_shader_version;
 }
 
 static VkResult
@@ -1253,6 +1378,13 @@ nvk_deserialize_shader(struct vk_device *vk_dev,
 
    float min_sample_shading;
    blob_copy_bytes(blob, &min_sample_shading, sizeof(min_sample_shading));
+
+   const uint8_t shader_version_override = blob_read_uint8(blob);
+   const uint8_t expected_shader_version_override =
+      nvk_shader_get_shader_version_override(dev, info.stage);
+
+   if (shader_version_override != expected_shader_version_override)
+      return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
 
    const uint32_t code_size = blob_read_uint32(blob);
    const uint32_t data_size = blob_read_uint32(blob);
@@ -1285,6 +1417,12 @@ nvk_deserialize_shader(struct vk_device *vk_dev,
 
    blob_copy_bytes(blob, (void *)shader->code_ptr, shader->code_size);
    blob_copy_bytes(blob, (void *)shader->data_ptr, shader->data_size);
+
+   const char *asm_str = blob_read_string(blob);
+   const char *nir_str = blob_read_string(blob);
+   shader->asm_str = (asm_str && asm_str[0]) ? strdup(asm_str) : NULL;
+   shader->nir_str = (nir_str && nir_str[0]) ? ralloc_strdup(NULL, nir_str) : NULL;
+
    if (blob->overrun) {
       nvk_shader_destroy(&dev->vk, &shader->vk, pAllocator);
       return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
@@ -1316,11 +1454,8 @@ nvk_shader_serialize(struct vk_device *vk_dev,
                      const struct vk_shader *vk_shader,
                      struct blob *blob)
 {
+   const struct nvk_device *dev = container_of(vk_dev, struct nvk_device, vk);
    struct nvk_shader *shader = container_of(vk_shader, struct nvk_shader, vk);
-
-   /* We can't currently cache assmbly */
-   if (shader->nak != NULL && shader->nak->asm_str != NULL)
-      return false;
 
    blob_write_bytes(blob, &shader->info, sizeof(shader->info));
    blob_write_bytes(blob, &shader->cbuf_map, sizeof(shader->cbuf_map));
@@ -1328,11 +1463,15 @@ nvk_shader_serialize(struct vk_device *vk_dev,
                     sizeof(shader->sample_shading_enable));
    blob_write_bytes(blob, &shader->min_sample_shading,
                     sizeof(shader->min_sample_shading));
+   blob_write_uint8(blob, nvk_shader_get_shader_version_override(dev, shader->info.stage));
 
    blob_write_uint32(blob, shader->code_size);
    blob_write_uint32(blob, shader->data_size);
    blob_write_bytes(blob, shader->code_ptr, shader->code_size);
    blob_write_bytes(blob, shader->data_ptr, shader->data_size);
+
+   blob_write_string(blob, shader->asm_str ? shader->asm_str : "");
+   blob_write_string(blob, shader->nir_str ? shader->nir_str : "");
 
    return !blob->out_of_memory;
 }
@@ -1414,7 +1553,7 @@ nvk_shader_get_executable_statistics(
       WRITE_STR(stat->name, "Fills from memory");
       WRITE_STR(stat->description, "Number of fills from memory to GPRs");
       stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
-      stat->value.u64 = shader->info.num_spills_to_mem;
+      stat->value.u64 = shader->info.num_fills_from_mem;
    }
 
    vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
@@ -1454,6 +1593,18 @@ nvk_shader_get_executable_statistics(
                 "Size of shader local (scratch) memory, in bytes");
       stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
       stat->value.u64 = shader->info.slm_size;
+   }
+
+   uint16_t smem_size = 0;
+   if (shader->info.stage == MESA_SHADER_COMPUTE)
+      smem_size = shader->info.cs.smem_size;
+
+   vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
+      WRITE_STR(stat->name, "Shared size");
+      WRITE_STR(stat->description,
+                "Size of shader shared memory, in bytes");
+      stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
+      stat->value.u64 = smem_size;
    }
 
    return vk_outarray_status(&out);
@@ -1505,11 +1656,11 @@ nvk_shader_get_executable_internal_representations(
       }
    }
 
-   if (shader->nak != NULL && shader->nak->asm_str != NULL) {
+   if (shader->asm_str != NULL) {
       vk_outarray_append_typed(VkPipelineExecutableInternalRepresentationKHR, &out, ir) {
          WRITE_STR(ir->name, "NAK assembly");
          WRITE_STR(ir->description, "NAK assembly");
-         if (!write_ir_text(ir, shader->nak->asm_str))
+         if (!write_ir_text(ir, shader->asm_str))
             incomplete_text = true;
       }
    }

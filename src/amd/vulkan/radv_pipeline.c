@@ -27,33 +27,16 @@
 #include "vk_shader_module.h"
 
 bool
-radv_pipeline_capture_shaders(const struct radv_compiler_info *compiler_info, VkPipelineCreateFlags2 flags)
-{
-   return (flags & VK_PIPELINE_CREATE_2_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR) ||
-          compiler_info->debug.capture_shaders;
-}
-
-bool
-radv_pipeline_capture_shader_stats(const struct radv_compiler_info *compiler_info, VkPipelineCreateFlags2 flags)
-{
-   return (flags & VK_PIPELINE_CREATE_2_CAPTURE_STATISTICS_BIT_KHR) || compiler_info->debug.capture_shader_stats;
-}
-
-bool
 radv_pipeline_skip_shaders_cache(const struct radv_device *device, const struct radv_pipeline *pipeline)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
    /* Skip the shaders cache when any of the below are true:
-    * - trap handler is present
     * - shaders are dumped for debugging (RADV_DEBUG=shaders)
-    * - shaders IR are captured (NIR, backend IR and ASM)
     * - binaries are captured (driver shouldn't store data to an internal cache)
     */
-   return device->trap_handler_shader || (instance->debug_flags & RADV_DEBUG_DUMP_SHADERS) ||
-          (pipeline->create_flags &
-           (VK_PIPELINE_CREATE_2_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR | VK_PIPELINE_CREATE_2_CAPTURE_DATA_BIT_KHR));
+   return RADV_DEBUG_DUMP_SHADERS(instance) || (pipeline->create_flags & VK_PIPELINE_CREATE_2_CAPTURE_DATA_BIT_KHR);
 }
 
 void
@@ -114,8 +97,11 @@ radv_pipeline_get_shader_key(const struct radv_compiler_info *compiler_info,
    struct vk_pipeline_robustness_state rs;
    struct radv_shader_stage_key key = {0};
 
-   key.keep_statistic_info = radv_pipeline_capture_shader_stats(compiler_info, flags);
-   key.keep_executable_info = radv_pipeline_capture_shaders(compiler_info, flags);
+   key.keep_shader_arg_info = compiler_info->debug.keep_shader_info;
+   key.keep_statistic_info =
+      (flags & VK_PIPELINE_CREATE_2_CAPTURE_STATISTICS_BIT_KHR) || compiler_info->debug.capture_shader_stats;
+   key.keep_executable_info =
+      (flags & VK_PIPELINE_CREATE_2_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR) || compiler_info->debug.capture_shaders;
 
    if (flags & VK_PIPELINE_CREATE_2_DISABLE_OPTIMIZATION_BIT)
       key.optimisations_disabled = 1;
@@ -138,14 +124,9 @@ radv_pipeline_get_shader_key(const struct radv_compiler_info *compiler_info,
       key.version = compiler_info->override_compute_shader_version;
    }
 
-   vk_pipeline_robustness_state_fill(compiler_info->device_robustness_state, &rs, pNext, stage->pNext);
+   vk_pipeline_robustness_state_fill(&compiler_info->device_robustness_state, &rs, pNext, stage->pNext);
 
    radv_set_stage_key_robustness(&rs, s, &key);
-
-   if (compiler_info->key.coop_matrix_robust_buffer_access) {
-      key.coop_matrix_storage_robustness = rs.storage_buffers != VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED;
-      key.coop_matrix_uniform_robustness = rs.uniform_buffers != VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED;
-   }
 
    const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo *const subgroup_size =
       vk_find_struct_const(stage->pNext, PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO);
@@ -168,6 +149,29 @@ radv_pipeline_get_shader_key(const struct radv_compiler_info *compiler_info,
    }
 
    return key;
+}
+
+void
+radv_merge_shader_stage_key(struct radv_shader_stage_key *dst, const struct radv_shader_stage_key *src)
+{
+   assert(dst->subgroup_required_size == src->subgroup_required_size);
+   assert(dst->view_index_from_device_index == src->view_index_from_device_index);
+   assert(dst->descriptor_heap == src->descriptor_heap);
+   assert(dst->version == src->version);
+   assert(dst->has_task_shader == src->has_task_shader);
+
+   dst->subgroup_require_full |= src->subgroup_require_full;
+   dst->subgroup_allow_varying &= src->subgroup_allow_varying;
+
+   dst->storage_robustness2 |= src->storage_robustness2;
+   dst->uniform_robustness2 |= src->uniform_robustness2;
+   dst->vertex_robustness1 |= src->vertex_robustness1;
+
+   dst->optimisations_disabled |= src->optimisations_disabled;
+   dst->keep_statistic_info |= src->keep_statistic_info;
+   dst->keep_executable_info |= src->keep_executable_info;
+   dst->keep_shader_arg_info |= src->keep_shader_arg_info;
+   dst->indirect_bindable |= src->indirect_bindable;
 }
 
 void
@@ -218,7 +222,6 @@ void
 radv_pipeline_stage_finish(struct radv_shader_stage *stage)
 {
    ralloc_free(stage->nir);
-   vk_sampler_state_array_finish(&stage->layout.embedded_samplers);
 }
 
 void
@@ -255,6 +258,9 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
    const bool use_llvm = compiler_info->key.use_llvm;
    bool progress;
 
+   if (stage->nir->info.uses_printf)
+      NIR_PASS(_, stage->nir, radv_nir_lower_printf, compiler_info->debug.debug_nir);
+
    /* Wave and workgroup size should already be filled. */
    assert(stage->info.wave_size && stage->info.workgroup_size);
 
@@ -269,8 +275,10 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
    radv_nir_opt_tid_function_options tid_options = {
       .use_masked_swizzle_amd = true,
       .use_dpp16_shift_amd = !use_llvm && gfx_level >= GFX8,
+      .use_quad_swap_broadcast = true,
       .use_clustered_rotate = !use_llvm,
-      .hw_subgroup_size = stage->info.wave_size,
+      .use_permute16_amd = !use_llvm && gfx_level >= GFX10,
+      .use_dpp8_swizzle_amd = !use_llvm && gfx_level >= GFX10,
       .hw_ballot_bit_size = stage->info.wave_size,
       .hw_ballot_num_comp = 1,
    };
@@ -341,8 +349,7 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
    NIR_PASS(_, stage->nir, ac_nir_lower_tex_coords,
             &(ac_nir_lower_tex_coords_options){
                .gfx_level = gfx_level,
-               .lower_array_layer_round_even =
-                  !compiler_info->ac->conformant_trunc_coord && !compiler_info->key.disable_trunc_coord,
+               .lower_array_layer_round_even = !compiler_info->ac->conformant_trunc_coord,
                .fix_derivs_in_divergent_cf = stage->stage == MESA_SHADER_FRAGMENT && !use_llvm,
                .max_wqm_vgprs = 64, // TODO: improve spiller and RA support for linear VGPRs
             });
@@ -439,11 +446,11 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
          .uses_discard = stage->info.ps.can_discard,
          .dcc_decompress_gfx11 = gfx_state->dcc_decompress_gfx11,
          .no_color_export = stage->info.ps.has_epilog,
-         .no_depth_export = stage->info.ps.exports_mrtz_via_epilog,
+         .no_depth_export = stage->info.ps.has_epilog,
 
       };
 
-      if (!late_options.no_color_export) {
+      if (!stage->info.ps.has_epilog) {
          late_options.dual_src_blend = gfx_state->ps.epilog.mrt0_is_dual_src;
          late_options.color_is_int8 = gfx_state->ps.epilog.color_is_int8;
          late_options.color_is_int10 = gfx_state->ps.epilog.color_is_int10;
@@ -453,18 +460,11 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
          late_options.spi_shader_col_format =
             gfx_state->ps.epilog.spi_shader_col_format & stage->info.ps.colors_written;
          late_options.alpha_to_one = gfx_state->ps.epilog.alpha_to_one;
-      }
-
-      if (!late_options.no_depth_export) {
-         /* Compared to gfx_state.ps.alpha_to_coverage_via_mrtz,
-          * radv_shader_info.ps.writes_mrt0_alpha need any depth/stencil/sample_mask exist.
-          * ac_nir_lower_ps() require this field to reflect whether alpha via mrtz is really
-          * present.
-          */
-         late_options.alpha_to_coverage_via_mrtz = stage->info.ps.writes_mrt0_alpha;
+         late_options.alpha_to_coverage_via_mrtz = stage->info.ps.writes_mrt0_alpha_to_mrtz;
       }
 
       NIR_PASS(_, stage->nir, ac_nir_lower_ps_late, &late_options);
+      NIR_PASS(_, stage->nir, ac_nir_lower_fs_input_loads, &stage->args.ac);
    }
 
    if (radv_shader_should_clear_lds(compiler_info, stage->nir)) {
@@ -532,7 +532,7 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
    }
 
    NIR_PASS(_, stage->nir, ac_nir_lower_mem_access_bit_sizes, gfx_level, use_llvm);
-   NIR_PASS(_, stage->nir, ac_nir_lower_global_access);
+   NIR_PASS(_, stage->nir, ac_nir_lower_global_access, gfx_level);
    NIR_PASS(_, stage->nir, nir_lower_int64);
 
    if (compiler_info->key.mitigate_smem_with_null_prt)
@@ -546,6 +546,8 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
       NIR_PASS(opt_intrinsics, stage->nir, ac_nir_opt_flip_if_for_mem_loads);
    if (opt_intrinsics) /* optimize inot(inverse_ballot) */
       NIR_PASS(_, stage->nir, nir_opt_intrinsics);
+
+   NIR_PASS(_, stage->nir, nir_opt_uub, &(nir_opt_uub_options){0});
 
    radv_optimize_nir_algebraic(
       stage->nir, io_to_mem || lowered_ngg || stage->stage == MESA_SHADER_COMPUTE || stage->stage == MESA_SHADER_TASK,
@@ -968,7 +970,7 @@ radv_GetPipelineExecutableStatisticsKHR(VkDevice _device, const VkPipelineExecut
    case MESA_SHADER_FRAGMENT:
       stats.outputs += DIV_ROUND_UP(util_bitcount(shader->info.ps.colors_written), 4) + !!shader->info.ps.writes_z +
                        !!shader->info.ps.writes_stencil + !!shader->info.ps.writes_sample_mask +
-                       !!shader->info.ps.writes_mrt0_alpha;
+                       !!shader->info.ps.writes_mrt0_alpha_to_mrtz;
       break;
 
    default:
@@ -1216,7 +1218,7 @@ radv_pipeline_report_pso_history(const struct radv_device *device, struct radv_p
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
    FILE *output = instance->pso_history_logfile ? instance->pso_history_logfile : stderr;
 
-   if (!(instance->debug_flags & RADV_DEBUG_PSO_HISTORY))
+   if (!(RADV_DEBUG(instance, PSO_HISTORY)))
       return;
 
    /* Only report PSO history for application pipelines. */

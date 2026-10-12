@@ -31,6 +31,7 @@
 #include "pan_props.h"
 #include "pan_samples.h"
 
+#include "poly/geometry.h"
 #include "vk_descriptor_update_template.h"
 #include "vk_format.h"
 
@@ -107,9 +108,8 @@ panvk_per_arch(cmd_close_batch)(struct panvk_cmd_buffer *cmdbuf)
    if (batch->tlsinfo.tls.size) {
       unsigned thread_tls_alloc =
          pan_query_thread_tls_alloc(&phys_dev->kmod.dev->props);
-      unsigned core_id_range;
-
-      pan_query_core_count(&phys_dev->kmod.dev->props, &core_id_range);
+      unsigned core_id_range =
+         pan_query_core_id_range(&phys_dev->kmod.dev->props);
 
       unsigned size = pan_get_total_stack_size(batch->tlsinfo.tls.size,
                                                thread_tls_alloc, core_id_range);
@@ -330,6 +330,43 @@ panvk_per_arch(cmd_open_batch)(struct panvk_cmd_buffer *cmdbuf)
    return cmdbuf->cur_batch;
 }
 
+VkResult
+panvk_per_arch(cmd_init_poly_heap)(struct panvk_cmd_buffer *cmdbuf,
+                                   unsigned *job_id)
+{
+   struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
+   struct panvk_batch *batch = cmdbuf->cur_batch;
+
+   /* The first time poly_heap is used in a primary command buffer, we need to
+    * reset the heap bottom position. */
+   if (cmdbuf->state.uses_poly_heap ||
+       cmdbuf->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY) {
+      *job_id = 0;
+      return VK_SUCCESS;
+   }
+
+   struct pan_ptr job =
+      pan_pool_alloc_desc(&cmdbuf->desc_pool.base, WRITE_VALUE_JOB);
+   if (!job.gpu)
+      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+   pan_section_pack(job.cpu, WRITE_VALUE_JOB, PAYLOAD, payload) {
+      payload.type = MALI_WRITE_VALUE_TYPE_IMMEDIATE_32;
+      payload.address = panvk_priv_mem_dev_addr(dev->poly_heap.state) +
+         offsetof(struct poly_heap, bottom);
+      payload.immediate_value = 0;
+   }
+
+   *job_id =
+      pan_jc_add_job(&batch->vtc_jc, MALI_JOB_TYPE_WRITE_VALUE, false, false,
+                     0, 0, &job, false);
+   util_dynarray_append(&batch->jobs, job.cpu);
+
+   cmdbuf->state.uses_poly_heap = true;
+
+   return VK_SUCCESS;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 panvk_per_arch(EndCommandBuffer)(VkCommandBuffer commandBuffer)
 {
@@ -427,8 +464,14 @@ panvk_create_cmdbuf(struct vk_command_pool *vk_pool, VkCommandBufferLevel level,
    if (!cmdbuf)
       return panvk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   VkResult result = vk_command_buffer_init(
-      &pool->vk, &cmdbuf->vk, &panvk_per_arch(cmd_buffer_ops), level);
+   VkResult result = vk_command_buffer_init_with_params(
+      &cmdbuf->vk,
+      &(struct vk_command_buffer_init_params) {
+         .pool = &pool->vk,
+         .ops = &panvk_per_arch(cmd_buffer_ops),
+         .level = level,
+         .needs_cmd_queue = level == VK_COMMAND_BUFFER_LEVEL_SECONDARY,
+      });
    if (result != VK_SUCCESS) {
       vk_free(&device->vk.alloc, cmdbuf);
       return result;

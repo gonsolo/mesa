@@ -1,6 +1,7 @@
 /*
  * Copyright (C) 2023 Collabora Ltd.
  * Copyright (C) 2026 Arm Ltd.
+ * Copyright (C) 2026 NXP
  * SPDX-License-Identifier: MIT
  */
 
@@ -17,6 +18,7 @@
 #include "pan_fb_preload.h"
 #include "pan_job.h"
 #include "pan_trace.h"
+#include "panfrost_tracepoints.h"
 
 #if PAN_ARCH < 10
 #error "CSF helpers are only used for gen >= 10"
@@ -177,25 +179,23 @@ init_fragment_state(const struct pan_fb_info *fb, unsigned layer_idx,
       cfg.z_write_enable = (fb->zs.view.zs && !fb->zs.discard.z);
 
       if (crc_rt >= 0) {
-         bool *valid = fb->rts[crc_rt].crc_valid;
-         bool full = !fb->draw_extent.minx && !fb->draw_extent.miny &&
-                     fb->draw_extent.maxx == (fb->width - 1) &&
-                     fb->draw_extent.maxy == (fb->height - 1);
+         struct pan_crc_state *state = fb->rts[crc_rt].crc_state;
+         bool full = pan_fb_info_is_fully_covered(fb);
 
          /* If the CRC was valid it stays valid, if it wasn't, we must
           * ensure the render operation covers the full frame, and
           * clean tiles are pushed to memory. */
-         bool new_valid = *valid | (full && pan_clean_tile_write_rt_enabled(
-                                               clean_tile, crc_rt));
+         bool new_valid = state->valid |
+            (full && pan_clean_tile_write_rt_enabled(clean_tile, crc_rt));
 
-         cfg.crc_read_enable = *valid;
+         cfg.crc_read_enable = state->valid;
 
          /* If the data is currently invalid, still write CRC
           * data if we are doing a full write, so that it is
           * valid for next time. */
          cfg.crc_write_enable = new_valid;
 
-         *valid = new_valid;
+         state->valid = new_valid;
       }
    }
 
@@ -303,13 +303,25 @@ csf_oom_handler_init(struct panfrost_context *ctx)
    cs_function_def(&b, &handler, handler_ctx) {
       struct cs_index tiler_oom_ctx = cs_reg64(&b, TILER_OOM_CTX_REG);
       struct cs_index counter = cs_reg32(&b, 31);
-      struct cs_index zero = cs_reg64(&b, 56);
-      struct cs_index flush_id = cs_reg32(&b, 58);
+      struct cs_index zero64 = cs_reg64(&b, 56);
+      /* zero32 aliases the low 32 bits of zero64 (both map to r56).
+       * Both are initialized to 0 immediately below; do not assign any
+       * other value to zero64/zero32 between here and cs_flush_caches(),
+       * and do not re-order cs_flush_caches() ahead of that initialization.
+       * A non-zero flush_id makes the hardware treat the cache flush as
+       * already completed and skip the invalidate.
+       */
+      struct cs_index zero32 = cs_reg32(&b, 56);
       struct cs_index tiler_ctx = cs_reg64(&b, 60);
       struct cs_index completed_top = cs_reg64(&b, 64);
       struct cs_index completed_bottom = cs_reg64(&b, 66);
       struct cs_index completed_chunks = cs_reg_tuple(&b, 64, 4);
       struct cs_index fbd_pointer = cs_sr_reg64(&b, FRAGMENT, FBD_POINTER);
+
+      /* Initialize zero64/zero32 to 0, zero32 is used as flush_id
+       * in cs_flush_caches() below, and zero64 is reused for the
+       * polygon-list and completed-chunks stores that follow. */
+      cs_move64_to(&b, zero64, 0);
 
       /* Ensure that the OTHER endpoint is valid */
 #if PAN_ARCH >= 11
@@ -321,7 +333,7 @@ csf_oom_handler_init(struct panfrost_context *ctx)
       /* Use different framebuffer descriptor depending on whether incremental
        * rendering has already been triggered */
       cs_load32_to(&b, counter, tiler_oom_ctx, FIELD_OFFSET(counter));
-      cs_wait_slot(&b, 0);
+      cs_wait_slot(&b, PANFROST_SB_LS);
       cs_if(&b, MALI_CS_CONDITION_GREATER, counter) {
          cs_load64_to(&b, fbd_pointer, tiler_oom_ctx, FBD_OFFSET(MIDDLE));
       }
@@ -340,13 +352,13 @@ csf_oom_handler_init(struct panfrost_context *ctx)
 #endif
 
       /* Run the fragment job and wait */
-      cs_select_endpoint_sb(&b, 3);
+      cs_select_endpoint_sb(&b, PANFROST_SB_AUX);
 #if PAN_ARCH >= 14
       cs_run_fragment2(&b, false, MALI_TILE_RENDER_ORDER_Z_ORDER);
 #else
       cs_run_fragment(&b, false, MALI_TILE_RENDER_ORDER_Z_ORDER);
 #endif
-      cs_wait_slot(&b, 3);
+      cs_wait_slot(&b, PANFROST_SB_AUX);
 
       /* Increment counter */
       cs_add_imm32(&b, counter, counter, 1);
@@ -354,27 +366,26 @@ csf_oom_handler_init(struct panfrost_context *ctx)
 
       /* Load completed chunks */
       cs_load64_to(&b, tiler_ctx, tiler_oom_ctx, FIELD_OFFSET(tiler_desc));
-      cs_wait_slot(&b, 0);
+      cs_wait_slot(&b, PANFROST_SB_LS);
       cs_load_to(&b, completed_chunks, tiler_ctx, BITFIELD_MASK(4), 10 * 4);
-      cs_wait_slot(&b, 0);
+      cs_wait_slot(&b, PANFROST_SB_LS);
 
       cs_finish_fragment(&b, false, completed_top, completed_bottom, cs_now());
 
       /* Zero out polygon list, completed_top and completed_bottom */
-      cs_move64_to(&b, zero, 0);
-      cs_store64(&b, zero, tiler_ctx, 0);
-      cs_store64(&b, zero, tiler_ctx, 10 * 4);
-      cs_store64(&b, zero, tiler_ctx, 12 * 4);
+      cs_store64(&b, zero64, tiler_ctx, 0);
+      cs_store64(&b, zero64, tiler_ctx, 10 * 4);
+      cs_store64(&b, zero64, tiler_ctx, 12 * 4);
 
       /* We need to flush the texture caches so future preloads see the new
        * content. */
       cs_flush_caches(&b, MALI_CS_FLUSH_MODE_NONE, MALI_CS_FLUSH_MODE_NONE,
-                      MALI_CS_OTHER_FLUSH_MODE_INVALIDATE, flush_id,
+                      MALI_CS_OTHER_FLUSH_MODE_INVALIDATE, zero32,
                       cs_defer(0, 0));
 
-      cs_wait_slot(&b, 0);
+      cs_wait_slot(&b, PANFROST_SB_LS);
 
-      cs_select_endpoint_sb(&b, 2);
+      cs_select_endpoint_sb(&b, PANFROST_SB_RENDER);
    }
 
    assert(cs_is_valid(&b));
@@ -436,6 +447,22 @@ alloc_fbd(struct panfrost_batch *batch)
 }
 #endif /* PAN_ARCH >= 14 */
 
+/*
+ * Wrap on cs_select_endpoint_sb to avoid unnecessary slot assignments.
+ *
+ * FIXME: Note that this would stop to work on v11+ if at some point panfrost
+ * starts to use cs_next_sb_entry as panvk does.
+ */
+static void
+csf_select_endpoint_sb(struct panfrost_batch *batch, unsigned slot)
+{
+   if (batch->csf.cs.current_ep_sb == slot)
+      return;
+
+   batch->csf.cs.current_ep_sb = slot;
+   cs_select_endpoint_sb(batch->csf.cs.builder, slot);
+}
+
 int
 GENX(csf_init_batch)(struct panfrost_batch *batch)
 {
@@ -465,23 +492,31 @@ GENX(csf_init_batch)(struct panfrost_batch *batch)
       .ls_sb_slot = 0,
    };
 
-   /* Setup the queue builder */
+   /* Setup the queue builder. Render batches need compute enabled for XFB. */
    batch->csf.cs.builder = malloc(sizeof(struct cs_builder));
+   batch->csf.cs.current_ep_sb = ~0u;
    cs_builder_init(batch->csf.cs.builder, &conf, queue);
-   cs_req_res(batch->csf.cs.builder,
-              CS_COMPUTE_RES | CS_TILER_RES | CS_IDVS_RES | CS_FRAG_RES);
+   cs_req_res(batch->csf.cs.builder, batch->type == PANFROST_BATCH_RENDER ?
+              CS_TILER_RES | CS_IDVS_RES | CS_FRAG_RES | CS_COMPUTE_RES :
+              CS_COMPUTE_RES);
 
    /* Set up entries */
-   struct cs_builder *b = batch->csf.cs.builder;
-   cs_select_endpoint_sb(b, 2);
+   csf_select_endpoint_sb(batch, PANFROST_SB_RENDER);
 
-   batch->framebuffer = alloc_fbd(batch);
-   if (!batch->framebuffer.gpu)
-      return -1;
+   if (batch->type == PANFROST_BATCH_RENDER) {
+      batch->framebuffer = alloc_fbd(batch);
+      if (!batch->framebuffer.gpu)
+         return -1;
+   }
 
    batch->tls = pan_pool_alloc_desc(&batch->pool.base, LOCAL_STORAGE);
    if (!batch->tls.cpu)
       return -1;
+
+#if PAN_ARCH >= 10
+   trace_panfrost_start_batch(&batch->trace,
+                     &(struct panfrost_trace_cs_info){ .batch = batch });
+#endif
 
    return 0;
 }
@@ -540,7 +575,14 @@ csf_emit_batch_end(struct panfrost_batch *batch)
    struct cs_builder *b = batch->csf.cs.builder;
 
    /* Barrier to let everything finish */
+#if PAN_ARCH >= 10
+   struct panfrost_trace_cs_info _tcs = { .batch = batch };
+   trace_panfrost_start_barrier(&batch->trace, &_tcs);
+#endif
    cs_wait_slots(b, BITFIELD_MASK(8));
+#if PAN_ARCH >= 10
+   trace_panfrost_end_barrier(&batch->trace, &_tcs);
+#endif
 
    if (dev->debug & PAN_DBG_SYNC) {
       /* Get the CS state */
@@ -555,12 +597,20 @@ csf_emit_batch_end(struct panfrost_batch *batch)
    }
 
    /* Flush caches now that we're done (synchronous) */
+#if PAN_ARCH >= 10
+   trace_panfrost_start_cache_flush(&batch->trace, &_tcs);
+#endif
    struct cs_index flush_id = cs_reg32(b, 74);
    cs_move32_to(b, flush_id, 0);
    cs_flush_caches(b, MALI_CS_FLUSH_MODE_CLEAN, MALI_CS_FLUSH_MODE_CLEAN,
                    MALI_CS_OTHER_FLUSH_MODE_INVALIDATE, flush_id,
                    cs_defer(0, 0));
-   cs_wait_slot(b, 0);
+   cs_wait_slot(b, PANFROST_SB_LS);
+
+#if PAN_ARCH >= 10
+   trace_panfrost_end_cache_flush(&batch->trace, &_tcs);
+   trace_panfrost_end_batch(&batch->trace, &_tcs);
+#endif
 
    /* Finish the command stream */
    if (cs_is_valid(batch->csf.cs.builder))
@@ -592,13 +642,6 @@ csf_submit_collect_wait_ops(struct panfrost_batch *batch,
       if (!flags)
          continue;
 
-      /* Update the BO access flags so that panfrost_bo_wait() knows
-       * about all pending accesses.
-       * We only keep the READ/WRITE info since this is all the BO
-       * wait logic cares about.
-       * We also preserve existing flags as this batch might not
-       * be the first one to access the BO.
-       */
       struct panfrost_bo *bo = pan_lookup_bo(dev, i);
 
       ret = panthor_kmod_bo_get_sync_point(bo->kmod_bo, &bo_sync_handle,
@@ -638,8 +681,8 @@ csf_submit_collect_wait_ops(struct panfrost_batch *batch,
    }
 
    if (ctx->in_sync_fd >= 0) {
-      ret = drmSyncobjImportSyncFile(panfrost_device_fd(dev), ctx->in_sync_obj,
-                                     ctx->in_sync_fd);
+      ret = pan_kmod_sync_import_file(dev->kmod.dev, ctx->in_sync_obj,
+                                      ctx->in_sync_fd);
       if (ret)
          return ret;
 
@@ -673,7 +716,6 @@ csf_attach_sync_points(struct panfrost_batch *batch, uint32_t vm_sync_handle,
     * be written by the GPU to keep things simple.
     */
    util_dynarray_foreach(&batch->pool.bos, struct panfrost_bo *, bo) {
-      (*bo)->gpu_access |= PAN_BO_ACCESS_RW;
       ret = panthor_kmod_bo_attach_sync_point((*bo)->kmod_bo, vm_sync_handle,
                                               vm_sync_signal_point, true);
       if (ret)
@@ -682,7 +724,6 @@ csf_attach_sync_points(struct panfrost_batch *batch, uint32_t vm_sync_handle,
 
    util_dynarray_foreach(&batch->csf.cs_chunk_pool.bos, struct panfrost_bo *,
                          bo) {
-      (*bo)->gpu_access |= PAN_BO_ACCESS_RW;
       ret = panthor_kmod_bo_attach_sync_point((*bo)->kmod_bo, vm_sync_handle,
                                               vm_sync_signal_point, true);
       if (ret)
@@ -699,7 +740,7 @@ csf_attach_sync_points(struct panfrost_batch *batch, uint32_t vm_sync_handle,
 
       struct panfrost_bo *bo = pan_lookup_bo(dev, i);
 
-      bo->gpu_access |= flags & (PAN_BO_ACCESS_RW);
+      panfrost_context_report_bo_access(ctx, bo, flags);
       ret = panthor_kmod_bo_attach_sync_point(bo->kmod_bo, vm_sync_handle,
                                               vm_sync_signal_point,
                                               flags & PAN_BO_ACCESS_WRITE);
@@ -708,8 +749,8 @@ csf_attach_sync_points(struct panfrost_batch *batch, uint32_t vm_sync_handle,
    }
 
    /* And finally transfer the VM sync point to the context syncobj. */
-   return drmSyncobjTransfer(panfrost_device_fd(dev), ctx->syncobj, 0,
-                             vm_sync_handle, vm_sync_signal_point, 0);
+   return pan_kmod_sync_transfer(dev->kmod.dev, ctx->syncobj, 0,
+                                 vm_sync_handle, vm_sync_signal_point, 0);
 }
 
 static void
@@ -819,8 +860,9 @@ csf_submit_wait_and_dump(struct panfrost_batch *batch,
    /* Wait so we can get errors reported back */
    if (wait) {
       ASSERTED int ret =
-         drmSyncobjTimelineWait(panfrost_device_fd(dev), &vm_sync_handle,
-                                &vm_sync_signal_point, 1, INT64_MAX, 0, NULL);
+         pan_kmod_sync_timeline_wait(dev->kmod.dev, &vm_sync_handle,
+                                     &vm_sync_signal_point, 1, INT64_MAX, 0,
+                                     NULL);
       assert(ret >= 0);
 
       struct pan_csf_tiler_oom_ctx *tiler_oom_ctx =
@@ -1119,13 +1161,14 @@ GENX(csf_emit_fragment_job)(struct panfrost_batch *batch,
 {
    PAN_TRACE_FUNC(PAN_TRACE_GL_CSF);
 
+   csf_select_endpoint_sb(batch, PANFROST_SB_RENDER);
    struct cs_builder *b = batch->csf.cs.builder;
    struct pan_csf_tiler_oom_ctx *oom_ctx = batch->csf.tiler_oom_ctx.cpu;
 
    if (batch->draw_count > 0) {
       /* Finish tiling and wait for IDVS and tiling */
       cs_finish_tiling(b);
-      cs_wait_slot(b, 2);
+      cs_wait_slot(b, PANFROST_SB_RENDER);
       cs_vt_end(b, cs_now());
    }
 
@@ -1145,7 +1188,7 @@ GENX(csf_emit_fragment_job)(struct panfrost_batch *batch,
    if (batch->draw_count > 0) {
       struct cs_index counter = cs_reg32(b, 78);
       cs_load32_to(b, counter, cs_reg64(b, TILER_OOM_CTX_REG), 0);
-      cs_wait_slot(b, 0);
+      cs_wait_slot(b, PANFROST_SB_LS);
       cs_if(b, MALI_CS_CONDITION_GREATER, counter) {
          cs_move64_to(b, fbd_pointer,
                       oom_ctx->fbds[PAN_INCREMENTAL_RENDERING_LAST_PASS].gpu);
@@ -1159,7 +1202,7 @@ GENX(csf_emit_fragment_job)(struct panfrost_batch *batch,
 #else
    cs_run_fragment(b, false, MALI_TILE_RENDER_ORDER_Z_ORDER);
 #endif
-   cs_wait_slot(b, 2);
+   cs_wait_slot(b, PANFROST_SB_RENDER);
 
    /* Gather freed heap chunks and add them to the heap context free list
     * so they can be re-used next time the tiler heap runs out of chunks.
@@ -1171,7 +1214,7 @@ GENX(csf_emit_fragment_job)(struct panfrost_batch *batch,
       cs_move64_to(b, cs_reg64(b, 90), batch->tiler_ctx.valhall.desc);
       cs_load_to(b, cs_reg_tuple(b, 86, 4), cs_reg64(b, 90), BITFIELD_MASK(4),
                  40);
-      cs_wait_slot(b, 0);
+      cs_wait_slot(b, PANFROST_SB_LS);
       cs_finish_fragment(b, true, cs_reg64(b, 86), cs_reg64(b, 88), cs_now());
    }
 }
@@ -1250,6 +1293,8 @@ GENX(csf_launch_grid)(struct panfrost_batch *batch,
    unsigned max_thread_cnt = pan_compute_max_thread_count(
       &dev->kmod.dev->props, cs->info.work_reg_count);
 
+   csf_select_endpoint_sb(batch, PANFROST_SB_COMPUTE);
+
    if (info->indirect) {
       /* Load size in workgroups per dimension from memory */
       struct cs_index address = cs_reg64(b, 64);
@@ -1261,7 +1306,7 @@ GENX(csf_launch_grid)(struct panfrost_batch *batch,
       cs_load_to(b, grid_xyz, address, BITFIELD_MASK(3), 0);
 
       /* Wait for the load */
-      cs_wait_slot(b, 0);
+      cs_wait_slot(b, PANFROST_SB_LS);
 
       /* Copy to FAU */
       for (unsigned i = 0; i < 3; ++i) {
@@ -1273,7 +1318,7 @@ GENX(csf_launch_grid)(struct panfrost_batch *batch,
       }
 
       /* Wait for the stores */
-      cs_wait_slot(b, 0);
+      cs_wait_slot(b, PANFROST_SB_LS);
 
       /* Use run_compute with a set task axis instead of run_compute_indirect as
        * run_compute_indirect has been found to cause intermittent hangs. This
@@ -1330,6 +1375,7 @@ GENX(csf_launch_xfb)(struct panfrost_batch *batch,
 {
    PAN_TRACE_FUNC(PAN_TRACE_GL_CSF);
 
+   csf_select_endpoint_sb(batch, PANFROST_SB_RENDER);
    struct cs_builder *b = batch->csf.cs.builder;
 
    cs_move64_to(b, cs_sr_reg64(b, COMPUTE, TSD_0), batch->tls.gpu);
@@ -1363,10 +1409,24 @@ GENX(csf_launch_xfb)(struct panfrost_batch *batch,
    csf_emit_shader_regs(batch, MESA_SHADER_VERTEX,
                         batch->rsd[MESA_SHADER_VERTEX]);
    /* force a barrier to avoid read/write sync issues with buffers */
-   cs_wait_slot(b, 2);
+   cs_wait_slot(b, PANFROST_SB_RENDER);
 
    /* XXX: Choose correctly */
    cs_run_compute(b, 1, MALI_TASK_AXIS_Z, cs_shader_res_sel(0, 0, 0, 0));
+
+   /* Flush GPU caches so that XFB buffer writes are visible to the
+    * subsequent vertex fetch. cs_defer(BIT(RENDER), SB_LS) makes the flush
+    * wait for the RENDER scoreboard slot (where the XFB compute ran) before
+    * executing, replacing the previously explicit cs_wait_slot(RENDER). The
+    * tiler flush mode is NONE because XFB is a pure compute pass with no
+    * tiler activity.
+    */
+   struct cs_index flush_id = cs_reg32(b, 74);
+   cs_move32_to(b, flush_id, 0);
+   cs_flush_caches(b, MALI_CS_FLUSH_MODE_CLEAN, MALI_CS_FLUSH_MODE_NONE,
+                   MALI_CS_OTHER_FLUSH_MODE_INVALIDATE, flush_id,
+                   cs_defer(BITFIELD_BIT(PANFROST_SB_RENDER), PANFROST_SB_LS));
+   cs_wait_slot(b, PANFROST_SB_LS);
 }
 
 static void
@@ -1388,6 +1448,120 @@ emit_tiler_oom_context(struct cs_builder *b, struct panfrost_batch *batch)
       ctx->fbds[i] = alloc_fbd(batch);
 
    csf_update_tiler_oom_ctx(b, batch->csf.tiler_oom_ctx.gpu);
+}
+
+static void
+csf_emit_draw_flags(struct panfrost_context *ctx, enum mesa_prim mode,
+                    bool fs_required, struct MALI_DCD_FLAGS_0 *flags_0,
+                    struct MALI_DCD_FLAGS_1 *flags_1)
+{
+   struct pipe_rasterizer_state *rast = &ctx->rasterizer->base;
+   struct panfrost_compiled_shader *fs = ctx->prog[MESA_SHADER_FRAGMENT];
+
+   if (flags_0) {
+      enum mesa_prim reduced_mode = u_reduced_prim(mode);
+      bool polygon = reduced_mode == MESA_PRIM_TRIANGLES;
+      bool lines = reduced_mode == MESA_PRIM_LINES;
+
+      /*
+       * From the Gallium documentation,
+       * pipe_rasterizer_state::cull_face "indicates which faces of
+       * polygons to cull". Points and lines are not considered
+       * polygons and should be drawn even if all faces are culled.
+       * The hardware does not take primitive type into account when
+       * culling, so we need to do that check ourselves.
+       */
+      flags_0->cull_front_face =
+         polygon && (rast->cull_face & PIPE_FACE_FRONT);
+      flags_0->cull_back_face = polygon && (rast->cull_face & PIPE_FACE_BACK);
+      flags_0->front_face_ccw = rast->front_ccw;
+
+      flags_0->multisample_enable = rast->multisample;
+
+      /* Use per-sample shading if required by API Also use it when a
+       * blend shader is used with multisampling, as this is handled
+       * by a single ST_TILE in the blend shader with the current
+       * sample ID, requiring per-sample shading.
+       */
+      flags_0->evaluate_per_sample =
+         (rast->multisample &&
+          ((ctx->min_samples > 1) || ctx->valhall_has_blend_shader));
+
+      flags_0->aligned_line_ends = !rast->line_rectangular;
+
+      if (lines && rast->line_smooth)
+         flags_0->multisample_enable = true;
+
+      bool has_oq = ctx->occlusion_query && ctx->active_queries;
+      if (has_oq) {
+         if (ctx->occlusion_query->type == PIPE_QUERY_OCCLUSION_COUNTER)
+            flags_0->occlusion_query = MALI_OCCLUSION_MODE_COUNTER;
+         else
+            flags_0->occlusion_query = MALI_OCCLUSION_MODE_PREDICATE;
+      }
+
+      if (fs_required) {
+         struct pan_earlyzs_state earlyzs = pan_earlyzs_get(
+            fs->earlyzs, ctx->depth_stencil->writes_zs || has_oq,
+            ctx->blend->base.alpha_to_coverage,
+            ctx->depth_stencil->zs_always_passes,
+            PAN_EARLYZS_ZS_TILEBUF_NOT_READ);
+
+         flags_0->pixel_kill_operation = (enum mali_pixel_kill)earlyzs.kill;
+         flags_0->zs_update_operation = (enum mali_pixel_kill)earlyzs.update;
+
+         flags_0->allow_forward_pixel_to_kill =
+            pan_allow_forward_pixel_to_kill(ctx, fs);
+         flags_0->allow_forward_pixel_to_be_killed = !fs->info.writes_global;
+
+         flags_0->overdraw_alpha0 = panfrost_overdraw_alpha(ctx, 0);
+         flags_0->overdraw_alpha1 = panfrost_overdraw_alpha(ctx, 1);
+
+         /* Also use per-sample shading if required by the shader
+          */
+         flags_0->evaluate_per_sample |=
+            (fs->info.fs.sample_shading && rast->multisample);
+
+         /* Unlike Bifrost, alpha-to-coverage must be included in
+          * this identically-named flag. Confusing, isn't it?
+          */
+         flags_0->shader_modifies_coverage = fs->info.fs.writes_coverage ||
+                                        fs->info.fs.can_discard ||
+                                        ctx->blend->base.alpha_to_coverage;
+
+         flags_0->alpha_to_coverage = ctx->blend->base.alpha_to_coverage;
+      } else {
+         /* These operations need to be FORCE to benefit from the
+          * depth-only pass optimizations.
+          */
+         flags_0->pixel_kill_operation = MALI_PIXEL_KILL_FORCE_EARLY;
+         flags_0->zs_update_operation = MALI_PIXEL_KILL_FORCE_EARLY;
+
+         /* No shader and no blend => no shader or blend
+          * reasons to disable FPK. The only FPK-related state
+          * not covered is alpha-to-coverage which we don't set
+          * without blend.
+          */
+         flags_0->allow_forward_pixel_to_kill = true;
+
+         /* No shader => no shader side effects */
+         flags_0->allow_forward_pixel_to_be_killed = true;
+
+         /* Alpha isn't written so these are vacuous */
+         flags_0->overdraw_alpha0 = true;
+         flags_0->overdraw_alpha1 = true;
+      }
+   }
+
+   if (flags_1) {
+      flags_1->sample_mask = rast->multisample ? ctx->sample_mask : 0xFFFF;
+
+      if (fs_required) {
+         /* See JM Valhall equivalent code */
+         flags_1->render_target_mask =
+            (fs->info.outputs_written >> FRAG_RESULT_DATA0) & ctx->fb_rt_mask;
+      }
+   }
 }
 
 static uint32_t
@@ -1461,7 +1635,7 @@ csf_emit_draw_state(struct panfrost_batch *batch,
    if (panfrost_occlusion_query_active(ctx)) {
       struct panfrost_resource *rsrc = pan_resource(ctx->occlusion_query->rsrc);
       cs_move64_to(b, cs_sr_reg64(b, IDVS, OQ), rsrc->plane.base);
-      panfrost_batch_write_rsrc(ctx->batch, rsrc, MESA_SHADER_FRAGMENT);
+      panfrost_batch_write_rsrc(ctx->batch[PANFROST_BATCH_RENDER], rsrc);
    }
 
    cs_move32_to(b, cs_sr_reg32(b, IDVS, VARY_SIZE),
@@ -1499,113 +1673,14 @@ csf_emit_draw_state(struct panfrost_batch *batch,
    cs_move32_to(b, cs_sr_reg32(b, IDVS, TILER_FLAGS),
                 primitive_flags.opaque[0]);
 
+   struct MALI_DCD_FLAGS_0 dcd_flags0_unpacked = { 0, };
+   struct MALI_DCD_FLAGS_1 dcd_flags1_unpacked = { 0, };
    struct mali_dcd_flags_0_packed dcd_flags0;
    struct mali_dcd_flags_1_packed dcd_flags1;
-
-   pan_pack(&dcd_flags0, DCD_FLAGS_0, cfg) {
-      enum mesa_prim reduced_mode = u_reduced_prim(info->mode);
-      bool polygon = reduced_mode == MESA_PRIM_TRIANGLES;
-      bool lines = reduced_mode == MESA_PRIM_LINES;
-
-      /*
-       * From the Gallium documentation,
-       * pipe_rasterizer_state::cull_face "indicates which faces of
-       * polygons to cull". Points and lines are not considered
-       * polygons and should be drawn even if all faces are culled.
-       * The hardware does not take primitive type into account when
-       * culling, so we need to do that check ourselves.
-       */
-      cfg.cull_front_face = polygon && (rast->cull_face & PIPE_FACE_FRONT);
-      cfg.cull_back_face = polygon && (rast->cull_face & PIPE_FACE_BACK);
-      cfg.front_face_ccw = rast->front_ccw;
-
-      cfg.multisample_enable = rast->multisample;
-
-      /* Use per-sample shading if required by API Also use it when a
-       * blend shader is used with multisampling, as this is handled
-       * by a single ST_TILE in the blend shader with the current
-       * sample ID, requiring per-sample shading.
-       */
-      cfg.evaluate_per_sample =
-         (rast->multisample &&
-          ((ctx->min_samples > 1) || ctx->valhall_has_blend_shader));
-
-      cfg.aligned_line_ends = !rast->line_rectangular;
-
-      if (lines && rast->line_smooth)
-         cfg.multisample_enable = true;
-
-      bool has_oq = ctx->occlusion_query && ctx->active_queries;
-      if (has_oq) {
-         if (ctx->occlusion_query->type == PIPE_QUERY_OCCLUSION_COUNTER)
-            cfg.occlusion_query = MALI_OCCLUSION_MODE_COUNTER;
-         else
-            cfg.occlusion_query = MALI_OCCLUSION_MODE_PREDICATE;
-      }
-
-      if (fs_required) {
-         struct pan_earlyzs_state earlyzs = pan_earlyzs_get(
-            fs->earlyzs, ctx->depth_stencil->writes_zs || has_oq,
-            ctx->blend->base.alpha_to_coverage,
-            ctx->depth_stencil->zs_always_passes,
-            PAN_EARLYZS_ZS_TILEBUF_NOT_READ);
-
-         cfg.pixel_kill_operation = (enum mali_pixel_kill)earlyzs.kill;
-         cfg.zs_update_operation = (enum mali_pixel_kill)earlyzs.update;
-
-         cfg.allow_forward_pixel_to_kill =
-            pan_allow_forward_pixel_to_kill(ctx, fs);
-         cfg.allow_forward_pixel_to_be_killed = !fs->info.writes_global;
-
-         cfg.overdraw_alpha0 = panfrost_overdraw_alpha(ctx, 0);
-         cfg.overdraw_alpha1 = panfrost_overdraw_alpha(ctx, 1);
-
-         /* Also use per-sample shading if required by the shader
-          */
-         cfg.evaluate_per_sample |=
-            (fs->info.fs.sample_shading && rast->multisample);
-
-         /* Unlike Bifrost, alpha-to-coverage must be included in
-          * this identically-named flag. Confusing, isn't it?
-          */
-         cfg.shader_modifies_coverage = fs->info.fs.writes_coverage ||
-                                        fs->info.fs.can_discard ||
-                                        ctx->blend->base.alpha_to_coverage;
-
-         cfg.alpha_to_coverage = ctx->blend->base.alpha_to_coverage;
-      } else {
-         /* These operations need to be FORCE to benefit from the
-          * depth-only pass optimizations.
-          */
-         cfg.pixel_kill_operation = MALI_PIXEL_KILL_FORCE_EARLY;
-         cfg.zs_update_operation = MALI_PIXEL_KILL_FORCE_EARLY;
-
-         /* No shader and no blend => no shader or blend
-          * reasons to disable FPK. The only FPK-related state
-          * not covered is alpha-to-coverage which we don't set
-          * without blend.
-          */
-         cfg.allow_forward_pixel_to_kill = true;
-
-         /* No shader => no shader side effects */
-         cfg.allow_forward_pixel_to_be_killed = true;
-
-         /* Alpha isn't written so these are vacuous */
-         cfg.overdraw_alpha0 = true;
-         cfg.overdraw_alpha1 = true;
-      }
-   }
-
-   pan_pack(&dcd_flags1, DCD_FLAGS_1, cfg) {
-      cfg.sample_mask = rast->multisample ? ctx->sample_mask : 0xFFFF;
-
-      if (fs_required) {
-         /* See JM Valhall equivalent code */
-         cfg.render_target_mask =
-            (fs->info.outputs_written >> FRAG_RESULT_DATA0) & ctx->fb_rt_mask;
-      }
-   }
-
+   csf_emit_draw_flags(ctx, info->mode, fs_required, &dcd_flags0_unpacked,
+                       &dcd_flags1_unpacked);
+   MALI_DCD_FLAGS_0_pack(&dcd_flags0, &dcd_flags0_unpacked);
+   MALI_DCD_FLAGS_1_pack(&dcd_flags1, &dcd_flags1_unpacked);
    cs_move32_to(b, cs_sr_reg32(b, IDVS, DCD0), dcd_flags0.opaque[0]);
    cs_move32_to(b, cs_sr_reg32(b, IDVS, DCD1), dcd_flags1.opaque[0]);
 
@@ -1616,9 +1691,9 @@ csf_emit_draw_state(struct panfrost_batch *batch,
    struct mali_primitive_size_packed primsize;
    panfrost_emit_primitive_size(ctx, info->mode == MESA_PRIM_POINTS, 0,
                                 &primsize);
-   struct mali_primitive_size_packed *primsize_ptr = &primsize;
+
    cs_move64_to(b, cs_sr_reg64(b, IDVS, PRIMITIVE_SIZE),
-                *((uint64_t *)primsize_ptr));
+                primsize.opaque[0] | (uint64_t)primsize.opaque[1] << 32);
 #endif
 
    struct mali_primitive_flags_packed flags_override;
@@ -1657,6 +1732,7 @@ GENX(csf_launch_draw)(struct panfrost_batch *batch,
 {
    PAN_TRACE_FUNC(PAN_TRACE_GL_CSF);
 
+   csf_select_endpoint_sb(batch, PANFROST_SB_RENDER);
    struct cs_builder *b = batch->csf.cs.builder;
 
    uint32_t flags_override = csf_emit_draw_state(batch, info, drawid_offset);
@@ -1696,6 +1772,7 @@ GENX(csf_launch_draw_indirect)(struct panfrost_batch *batch,
 {
    PAN_TRACE_FUNC(PAN_TRACE_GL_CSF);
 
+   csf_select_endpoint_sb(batch, PANFROST_SB_RENDER);
    struct cs_builder *b = batch->csf.cs.builder;
 
    uint32_t flags_override = csf_emit_draw_state(batch, info, drawid_offset);
@@ -1727,7 +1804,7 @@ GENX(csf_launch_draw_indirect)(struct panfrost_batch *batch,
          cs_move32_to(b, cs_sr_reg32(b, IDVS, INDEX_BUFFER_SIZE), 0);
       }
 
-      cs_wait_slot(b, 0);
+      cs_wait_slot(b, PANFROST_SB_LS);
 #if PAN_ARCH >= 12
       cs_run_idvs2(b, flags_override, true, drawid,
                   MALI_IDVS_SHADING_MODE_EARLY);
@@ -1741,6 +1818,107 @@ GENX(csf_launch_draw_indirect)(struct panfrost_batch *batch,
       if (drawid.type != CS_INDEX_UNDEF)
          cs_add_imm32(b, drawid, drawid, 1);
    }
+}
+
+static struct pan_ptr
+csf_emit_fullscreen_dcd(struct panfrost_batch *batch, uint64_t resources,
+                        struct MALI_DCD_FLAGS_0 *dcd_flags0,
+                        struct MALI_DCD_FLAGS_1 *dcd_flags1)
+{
+   struct panfrost_context *ctx = batch->ctx;
+   struct pan_ptr dcd = pan_pool_alloc_desc(&batch->pool.base, DRAW);
+
+   csf_emit_draw_flags(ctx, MESA_PRIM_QUADS, true, dcd_flags0, dcd_flags1);
+
+   pan_cast_and_pack(dcd.cpu, DRAW, cfg) {
+      /* Flags */
+      cfg.flags_0 = *dcd_flags0;
+      cfg.flags_1 = *dcd_flags1;
+      /* Depth/stencil and blend descriptor */
+#if PAN_ARCH == 10
+      cfg.minimum_z = batch->minimum_z;
+      cfg.maximum_z = batch->maximum_z;
+#endif
+      cfg.depth_stencil = batch->depth_stencil;
+      cfg.blend_count = MAX2(batch->key.nr_cbufs, 1);
+      cfg.blend = batch->blend;
+
+      /* Shader environment */
+#if PAN_ARCH >= 12
+      cfg.fragment_fau.count = DIV_ROUND_UP(
+         batch->nr_push_uniforms[MESA_SHADER_FRAGMENT], 2);
+      cfg.fragment_resources = resources;
+      cfg.fragment_shader = batch->rsd[MESA_SHADER_FRAGMENT];
+      cfg.thread_storage = batch->tls.gpu;
+      cfg.fragment_fau.pointer = batch->push_uniforms[MESA_SHADER_FRAGMENT];
+#else
+      cfg.shader.attribute_offset = 0;
+      cfg.shader.fau_count = DIV_ROUND_UP(
+         batch->nr_push_uniforms[MESA_SHADER_FRAGMENT], 2);
+      cfg.shader.resources = resources;
+      cfg.shader.shader = batch->rsd[MESA_SHADER_FRAGMENT];
+      cfg.shader.thread_storage = batch->tls.gpu;
+      cfg.shader.fau = batch->push_uniforms[MESA_SHADER_FRAGMENT];
+#endif
+   }
+
+   return dcd;
+}
+
+void
+GENX(csf_launch_draw_fullscreen)(struct panfrost_batch *batch,
+                                 enum blitter_attrib_type type,
+                                 const struct blitter_attrib *attrib)
+{
+   PAN_TRACE_FUNC(PAN_TRACE_GL_CSF);
+
+   struct cs_builder *b = batch->csf.cs.builder;
+   struct MALI_DCD_FLAGS_0 dcd_flags0_unpacked = { 0, };
+   struct MALI_DCD_FLAGS_1 dcd_flags1_unpacked = { 0, };
+
+   if (batch->draw_count == 0) {
+      emit_tiler_oom_context(b, batch);
+      cs_vt_start(batch->csf.cs.builder, cs_now());
+   }
+
+   /* Build draw call. */
+   uint64_t resources = panfrost_emit_resources(batch, MESA_SHADER_FRAGMENT);
+   struct pan_ptr dcd = csf_emit_fullscreen_dcd(
+      batch, resources, &dcd_flags0_unpacked, &dcd_flags1_unpacked);
+
+   struct mali_primitive_flags_packed primitive_flags;
+   pan_pack(&primitive_flags, PRIMITIVE_FLAGS, cfg) {
+      cfg.scissor_array_enable = false;
+#if PAN_ARCH >= 14
+      cfg.layer_index = 0;
+#else
+      cfg.view_mask = 0;
+#endif
+   }
+
+   /* Set input staging registers. */
+   uint64_t *sbd = (uint64_t *)batch->scissor;
+   cs_move64_to(b, cs_sr_reg64(b, FULLSCREEN, TILER_CTX),
+                csf_get_tiler_desc(batch));
+   cs_move64_to(b, cs_sr_reg64(b, FULLSCREEN, SCISSOR_BOX), *sbd);
+   cs_move32_to(b, cs_sr_reg32(b, FULLSCREEN, TILER_FLAGS),
+                primitive_flags.opaque[0]);
+#if PAN_ARCH >= 13
+   struct mali_dcd_flags_0_packed dcd_flags0;
+   struct mali_dcd_flags_1_packed dcd_flags1;
+   MALI_DCD_FLAGS_0_pack(&dcd_flags0, &dcd_flags0_unpacked);
+   MALI_DCD_FLAGS_1_pack(&dcd_flags1, &dcd_flags1_unpacked);
+   cs_move32_to(b, cs_sr_reg32(b, FULLSCREEN, TILER_DCD_FLAGS0),
+                dcd_flags0.opaque[0]);
+   cs_move32_to(b, cs_sr_reg32(b, FULLSCREEN, TILER_DCD_FLAGS1),
+                dcd_flags1.opaque[0]);
+   cs_move32_to(b, cs_sr_reg32(b, FULLSCREEN, TILER_DCD_FLAGS2), 0);
+#endif
+
+   /* Emit RUN_FULLSCREEN. */
+   struct cs_index dcd_pointer = cs_reg64(b, 64);
+   cs_move64_to(b, dcd_pointer, dcd.gpu);
+   cs_run_fullscreen(b, 0, dcd_pointer);
 }
 
 #define POSITION_FIFO_SIZE (64 * 1024)
@@ -1915,8 +2093,8 @@ GENX(csf_init_context)(struct panfrost_context *ctx)
       goto err_g_submit;
 
    /* Wait before freeing the buffer. */
-   ret = drmSyncobjWait(panfrost_device_fd(dev), &ctx->syncobj, 1, INT64_MAX, 0,
-                        NULL);
+   ret = pan_kmod_sync_wait(dev->kmod.dev, &ctx->syncobj, 1, INT64_MAX, 0,
+                            NULL);
    assert(!ret);
 
    panfrost_bo_unreference(cs_bo);
@@ -1956,8 +2134,8 @@ GENX(csf_cleanup_context)(struct panfrost_context *ctx)
    ASSERTED int ret;
 
    /* Make sure all jobs are done before destroying the heap. */
-   ret = drmSyncobjWait(panfrost_device_fd(dev), &ctx->syncobj, 1, INT64_MAX, 0,
-                        NULL);
+   ret = pan_kmod_sync_wait(dev->kmod.dev, &ctx->syncobj, 1, INT64_MAX, 0,
+                            NULL);
    assert(!ret);
 
    ret = pan_kmod_ioctl(panfrost_device_fd(dev),
@@ -1982,13 +2160,55 @@ GENX(csf_cleanup_context)(struct panfrost_context *ctx)
 
 void
 GENX(csf_emit_write_timestamp)(struct panfrost_batch *batch,
-                               struct panfrost_resource *dst, unsigned offset)
+                               struct panfrost_resource *dst, unsigned offset,
+                               uint16_t sb_wait_mask)
 {
    struct cs_builder *b = batch->csf.cs.builder;
 
    struct cs_index address = cs_reg64(b, 40);
    cs_move64_to(b, address, dst->plane.base + offset);
-   cs_store_state(b, address, 0, MALI_CS_STATE_TIMESTAMP, cs_now());
 
-   panfrost_batch_write_rsrc(batch, dst, MESA_SHADER_VERTEX);
+   /* When sb_wait_mask is non-zero, defer the write until those scoreboard
+    * slots signals.
+    *
+    * FIXME: cs_defer value for second parameter copied from panvk. Would be
+    * good to get something similar to panvk_sb_ids here, or move it to a
+    * common place.
+    */
+   struct cs_async_op async = sb_wait_mask
+      ? cs_defer(sb_wait_mask, PANFROST_SB_DEFERRED)
+      : cs_now();
+   cs_store_state(b, address, 0, MALI_CS_STATE_TIMESTAMP, async);
+
+   panfrost_batch_write_rsrc(batch, dst);
+}
+
+void
+GENX(csf_emit_copy_data)(struct panfrost_batch *batch,
+                         struct panfrost_resource *dst, uint64_t dst_offset_B,
+                         uint64_t src_gpu_addr, uint32_t size_B)
+{
+   assert(size_B > 0 && size_B % sizeof(uint32_t) == 0);
+
+   struct cs_builder *b = batch->csf.cs.builder;
+
+   /* FIXME: using 40 as the base register for scratch, using
+    * csf_emit_write_timestamp as reference, but not fully
+    * sure. cs_launch_draw_indirect uses 64, 66, that are values more similar
+    * to the PANVK_CS_REG_SCRATCH_START defined at panvk. Having something
+    * equivalent to panvk_cs_regs and cs_scratch_regXX on gallium would be
+    * really useful
+    */
+   const struct cs_index dst_addr = cs_reg64(b, 40);
+   const struct cs_index src_addr = cs_reg64(b, 42);
+   const uint32_t count = size_B / sizeof(uint32_t);
+   const struct cs_index data = cs_reg_tuple(b, 44, count);
+
+   cs_move64_to(b, src_addr, src_gpu_addr);
+   cs_move64_to(b, dst_addr, dst->plane.base + dst_offset_B);
+   cs_load_to(b, data, src_addr, BITFIELD_MASK(count), 0);
+   cs_wait_slot(b, 0);
+   cs_store(b, data, dst_addr, BITFIELD_MASK(count), 0);
+
+   panfrost_batch_write_rsrc(batch, dst);
 }

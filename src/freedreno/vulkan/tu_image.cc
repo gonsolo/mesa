@@ -12,6 +12,7 @@
 #include "drm-uapi/drm_fourcc.h"
 
 #include "util/format/u_format.h"
+#include "util/u_atomic.h"
 #include "util/u_debug.h"
 #include "vk_android.h"
 #include "vk_debug_utils.h"
@@ -282,17 +283,23 @@ tu_image_view_init(struct tu_device *device,
    TU_CALLX(device, fdl6_view_init)(&iview->view, layouts, &args, device->use_z24uint_s8uint);
 
    if (image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
-      struct fdl_layout *layout = &image->layout[0];
-      iview->depth_base_addr = image->iova +
-         fdl_surface_offset(layout, range->baseMipLevel, range->baseArrayLayer);
-      iview->depth_layer_size = fdl_layer_stride(layout, range->baseMipLevel);
-      iview->depth_pitch = fdl_pitch(layout, range->baseMipLevel);
+      VkImageAspectFlags other_aspect =
+         (aspect_mask & VK_IMAGE_ASPECT_DEPTH_BIT) ?
+         VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
+      const struct fdl_layout *other_layout =
+         &image->layout[tu6_plane_index(image->vk.format, other_aspect)];
+      args.format = tu_aspects_to_plane(iview->vk.format, other_aspect);
+      TU_CALLX(device, fdl6_view_init)(&iview->view_ds_other_aspect,
+                                       &other_layout, &args,
+                                       device->use_z24uint_s8uint);
 
-      layout = &image->layout[1];
-      iview->stencil_base_addr = image->iova +
-         fdl_surface_offset(layout, range->baseMipLevel, range->baseArrayLayer);
-      iview->stencil_layer_size = fdl_layer_stride(layout, range->baseMipLevel);
-      iview->stencil_pitch = fdl_pitch(layout, range->baseMipLevel);
+      iview->view_depth = (aspect_mask & VK_IMAGE_ASPECT_DEPTH_BIT) ? &iview->view : &iview->view_ds_other_aspect;
+      iview->view_stencil = (other_aspect & VK_IMAGE_ASPECT_DEPTH_BIT) ? &iview->view : &iview->view_ds_other_aspect;
+   } else {
+      if (aspect_mask & VK_IMAGE_ASPECT_DEPTH_BIT)
+         iview->view_depth = &iview->view;
+      if (aspect_mask & VK_IMAGE_ASPECT_STENCIL_BIT)
+         iview->view_stencil = &iview->view;
    }
 }
 
@@ -515,8 +522,20 @@ template <chip CHIP>
 VkResult
 tu_image_init(struct tu_device *device, struct tu_image *image,
               const VkImageCreateInfo *pCreateInfo, uint64_t modifier,
-              const VkSubresourceLayout *plane_layouts)
+              const VkSubresourceLayout *plane_layouts,
+              enum tu_image_id_mode id_mode)
 {
+   switch (id_mode) {
+   case TU_IMAGE_ID_ASSIGN:
+      image->id = p_atomic_inc_return(&device->next_image_id);
+      break;
+   case TU_IMAGE_ID_INTERNAL:
+      image->id = TU_IMAGE_ID_INTERNAL_ID;
+      break;
+   case TU_IMAGE_ID_NONE:
+      break;
+   }
+
    bool ubwc_enabled = true;
    bool force_linear_tile = false;
    bool is_mutable = false;
@@ -653,12 +672,25 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
          if (!device->physical_device->info->props
                  .supports_linear_mipmap_threshold_in_blocks &&
              vk_format_is_compressed(image->vk.format) &&
-             pCreateInfo->usage &
-                VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT &&
+             pCreateInfo->flags & VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT &&
              format_list_has_uncompressed_format(fmt_list)) {
             force_disable_linear_fallback = true;
          }
       }
+   }
+
+   /* VK_EXT_image_compression_control: honor the application's request to
+    * disable compression for this image.
+    */
+   if (image->vk.compr_flags & VK_IMAGE_COMPRESSION_DISABLED_EXT) {
+      if (ubwc_enabled) {
+         perf_debug(device,
+                    "Disabling UBWC on %dx%d %s resource due to "
+                    "VK_IMAGE_COMPRESSION_DISABLED_EXT",
+                    image->vk.extent.width, image->vk.extent.height,
+                    util_format_name(vk_format_to_pipe_format(image->vk.format)));
+      }
+      ubwc_enabled = false;
    }
 
    if (TU_DEBUG(NOUBWC)) {
@@ -730,15 +762,19 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
       struct fdl_explicit_layout plane_layout;
 
       if (plane_layouts) {
-         /* only expect simple 2D images for now */
-         if (image->vk.mip_levels != 1 ||
-            image->vk.array_layers != 1 ||
-            image->vk.extent.depth != 1)
+         /* Reject mipmap and 3D images; fdl6_layout_image only accepts
+          * explicit pitch for single-mip 2D images.
+          */
+         if (image->vk.mip_levels != 1 || image->vk.extent.depth != 1)
             return vk_error(device, VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT);
 
          plane_layout.offset = plane_layouts[i].offset;
          plane_layout.pitch = plane_layouts[i].rowPitch;
-         /* note: use plane_layouts[0].arrayPitch to support array formats */
+         /* arrayPitch is intentionally not consumed here. fdl6_layout_image
+          * deterministically computes layer_size from the imported pitch,
+          * format, and tiling mode. The per-layer stride is not an independent
+          * parameter, it is fully determined by the single-mip slice layout.
+          */
       }
 
       layout->tile_mode = tile_mode;
@@ -872,7 +908,7 @@ tu_android_get_wsi_memory(struct tu_device *dev,
 
    result = TU_CALLX(dev, tu_image_init)(
       dev, img, img->vk.android_deferred_create_info,
-      eci.drmFormatModifier, a_plane_layouts);
+      eci.drmFormatModifier, a_plane_layouts, TU_IMAGE_ID_ASSIGN);
    if (result != VK_SUCCESS)
       return result;
 
@@ -933,16 +969,27 @@ tu_CreateImage(VkDevice _device,
 
       assert(mod_info || drm_explicit_info);
 
+      /* VK_IMAGE_COMPRESSION_DISABLED_EXT means the app wants uncompressed
+       * (non-UBWC) storage. Since there's no way to fall back to linear
+       * tiling with an explicit modifier, the QCOM_COMPRESSED modifier must
+       * never be selected while compression is disabled.
+       */
+      bool compression_disabled =
+         image->vk.compr_flags & VK_IMAGE_COMPRESSION_DISABLED_EXT;
+
       if (mod_info) {
          modifier = DRM_FORMAT_MOD_LINEAR;
          for (unsigned i = 0; i < mod_info->drmFormatModifierCount; i++) {
-            if (mod_info->pDrmFormatModifiers[i] == DRM_FORMAT_MOD_QCOM_COMPRESSED)
+            if (mod_info->pDrmFormatModifiers[i] == DRM_FORMAT_MOD_QCOM_COMPRESSED &&
+                !compression_disabled)
                modifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
          }
       } else {
          modifier = drm_explicit_info->drmFormatModifier;
          assert(modifier == DRM_FORMAT_MOD_LINEAR ||
                 modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED);
+         assert(modifier != DRM_FORMAT_MOD_QCOM_COMPRESSED ||
+                !compression_disabled);
          plane_layouts = drm_explicit_info->pPlaneLayouts;
       }
    } else {
@@ -966,7 +1013,8 @@ tu_CreateImage(VkDevice _device,
    }
 
    result = TU_CALLX(device, tu_image_init)(device, image, pCreateInfo,
-                                             modifier, plane_layouts);
+                                             modifier, plane_layouts,
+                                             TU_IMAGE_ID_ASSIGN);
    if (result != VK_SUCCESS)
       goto fail;
 
@@ -993,12 +1041,12 @@ tu_CreateImage(VkDevice _device,
                               OPAQUE_CAPTURE_DESCRIPTOR_DATA_CREATE_INFO_EXT);
       if (replay_info && replay_info->opaqueCaptureDescriptorData) {
          flags |= TU_SPARSE_VMA_REPLAYABLE;
-         client_address =
-            *(const uint64_t *)replay_info->opaqueCaptureDescriptorData;
+         memcpy(&client_address, replay_info->opaqueCaptureDescriptorData,
+                sizeof(client_address));
       }
 
       result = tu_sparse_vma_init(device, &image->vk.base, &image->vma,
-                                  &image->iova, flags, image->total_size,
+                                  &image->iova, flags, image->total_size, 0,
                                   client_address);
 
       if (result != VK_SUCCESS)
@@ -1164,8 +1212,8 @@ tu_get_image_memory_requirements(struct tu_device *dev, struct tu_image *image,
       .memoryTypeBits = (1 << type_count) - 1,
    };
 
-   vk_foreach_struct(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *req =
             (VkMemoryDedicatedRequirements *) ext;
@@ -1255,9 +1303,10 @@ tu_GetPhysicalDeviceSparseImageFormatProperties2(
       vk_format_to_pipe_format(pFormatInfo->format);
 
    if (pFormatInfo->format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
-      u_foreach_bit (aspect, aspects) {
+      u_foreach_bit (b, aspects) {
+         VkImageAspectFlags aspect = BIT(b);
          enum pipe_format aspect_format =
-            tu6_plane_format(pFormatInfo->format, aspect);
+            tu6_plane_format(pFormatInfo->format, tu6_plane_index(pFormatInfo->format, aspect));
          vk_outarray_append_typed(VkSparseImageFormatProperties2, &out, props) {
             props->properties =
                tu_fill_sparse_image_fmt_props(aspect, aspect_format,
@@ -1312,7 +1361,8 @@ tu_get_image_sparse_memory_requirements(
       return;
 
    if (image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
-      u_foreach_bit (aspect, image->vk.aspects) {
+      u_foreach_bit (b, image->vk.aspects) {
+         VkImageAspectFlags aspect = BIT(b);
          const struct fdl_layout *layout =
             &image->layout[tu6_plane_index(image->vk.format, aspect)];
          vk_outarray_append_typed(VkSparseImageMemoryRequirements2, &out, reqs) {
@@ -1366,7 +1416,7 @@ tu_GetDeviceImageMemoryRequirements(
    struct tu_image image = {0};
 
    vk_image_init(&device->vk, &image.vk, pInfo->pCreateInfo);
-   TU_CALLX(device, tu_image_init)(device, &image, pInfo->pCreateInfo, DRM_FORMAT_MOD_INVALID, NULL);
+   TU_CALLX(device, tu_image_init)(device, &image, pInfo->pCreateInfo, DRM_FORMAT_MOD_INVALID, NULL, TU_IMAGE_ID_NONE);
 
    tu_get_image_memory_requirements(device, &image, pMemoryRequirements);
 }
@@ -1383,7 +1433,7 @@ tu_GetDeviceImageSparseMemoryRequirements(
    struct tu_image image = {0};
 
    vk_image_init(&device->vk, &image.vk, pInfo->pCreateInfo);
-   TU_CALLX(device, tu_image_init)(device, &image, pInfo->pCreateInfo, DRM_FORMAT_MOD_INVALID, NULL);
+   TU_CALLX(device, tu_image_init)(device, &image, pInfo->pCreateInfo, DRM_FORMAT_MOD_INVALID, NULL, TU_IMAGE_ID_NONE);
 
    tu_get_image_sparse_memory_requirements(device, &image,
                                            pSparseMemoryRequirementCount,
@@ -1409,16 +1459,44 @@ tu_get_image_subresource_layout(struct tu_image *image,
    pLayout->subresourceLayout.arrayPitch =
       fdl_layer_stride(layout, pSubresource->imageSubresource.mipLevel);
    pLayout->subresourceLayout.depthPitch = slice->size0;
-   pLayout->subresourceLayout.size = slice->size0 * layout->depth0;
+   pLayout->subresourceLayout.size = slice->size0;
+   if (image->vk.image_type == VK_IMAGE_TYPE_3D)
+      pLayout->subresourceLayout.size *= u_minify(layout->depth0, pSubresource->imageSubresource.mipLevel);
 
    VkSubresourceHostMemcpySizeEXT *memcpy_size =
       vk_find_struct(pLayout, SUBRESOURCE_HOST_MEMCPY_SIZE_EXT);
    if (memcpy_size) {
-      memcpy_size->size = slice->size0;
+      memcpy_size->size = pLayout->subresourceLayout.size;
    }
 
-   if (fdl_ubwc_enabled(layout, pSubresource->imageSubresource.mipLevel)) {
-      /* UBWC starts at offset 0 */
+   VkImageCompressionPropertiesEXT *compression_props =
+      vk_find_struct(pLayout, IMAGE_COMPRESSION_PROPERTIES_EXT);
+   if (compression_props) {
+      compression_props->imageCompressionFixedRateFlags =
+         VK_IMAGE_COMPRESSION_FIXED_RATE_NONE_EXT;
+      compression_props->imageCompressionFlags =
+         fdl_ubwc_enabled(layout, pSubresource->imageSubresource.mipLevel) ?
+            VK_IMAGE_COMPRESSION_DEFAULT_EXT :
+            VK_IMAGE_COMPRESSION_DISABLED_EXT;
+   }
+
+   /* UBWC layout fixups only apply to DRM modifier images. */
+   if (image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT &&
+       fdl_ubwc_enabled(layout, pSubresource->imageSubresource.mipLevel)) {
+      /* From the Vulkan 1.4.357 spec, vkGetImageSubresourceLayout():
+       *
+       *    "If the image’s tiling is VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT
+       *     and the image is non-linear, then the returned layout has an
+       *     implementation-dependent meaning; the vendor of the image’s DRM
+       *     format modifier may provide documentation that explains how to
+       *     interpret the returned layout."
+       *
+       * In particular, we report that the subresource offset is the
+       * beginning of any data related to the (single) subresource (in this
+       * case, the UBWC contents), since that value may get queried and
+       * passed as an offset within the FD for the image contents -- the
+       * position of the rest of the image data including uncompressed
+       * contents is implied from the format modifier. */
       pLayout->subresourceLayout.offset = 0;
       /* UBWC scanout won't match what the kernel wants if we have levels/layers */
       assert(image->vk.mip_levels == 1 && image->vk.array_layers == 1);
@@ -1446,7 +1524,7 @@ tu_GetDeviceImageSubresourceLayoutKHR(VkDevice _device,
    struct tu_image image = {0};
 
    vk_image_init(&device->vk, &image.vk, pInfo->pCreateInfo);
-   TU_CALLX(device, tu_image_init)(device, &image, pInfo->pCreateInfo, DRM_FORMAT_MOD_INVALID, NULL);
+   TU_CALLX(device, tu_image_init)(device, &image, pInfo->pCreateInfo, DRM_FORMAT_MOD_INVALID, NULL, TU_IMAGE_ID_NONE);
 
    tu_get_image_subresource_layout(&image, pInfo->pSubresource, pLayout);
 }
@@ -1527,10 +1605,14 @@ tu_GetImageOpaqueCaptureDescriptorDataEXT(VkDevice device,
 {
    VK_FROM_HANDLE(tu_image, image, pInfo->image);
 
-   /* Save the image iova so that when replaying sparse images have a
-    * consistent iova and therefore consistent descriptor contents.
-    */
-   *(uint64_t *)pData = image->iova;
+   if (image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) {
+      /* Save the image iova so that when replaying sparse images have a
+       * consistent iova and therefore consistent descriptor contents.
+       */
+      memcpy(pData, &image->iova, sizeof(image->iova));
+   } else {
+      memset(pData, 0, sizeof(image->iova));
+   }
    return VK_SUCCESS;
 }
 
@@ -1657,7 +1739,7 @@ tu_bind_sparse_image(struct tu_device *device, void *submit,
                   prev_bo_offset = bo ? column_bo_offset : 0;
                   bind_range = 4096;
                } else if (prev_image_offset + bind_range == image_offset &&
-                          (!bo || prev_bo_offset + bind_range == bo_offset)) {
+                          (!bo || prev_bo_offset + bind_range == column_bo_offset)) {
                   bind_range += 4096;
                } else {
                   tu_submit_add_bind(device, submit, &image->vma,

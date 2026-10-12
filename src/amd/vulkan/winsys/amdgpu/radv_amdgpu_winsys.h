@@ -49,7 +49,6 @@ struct radv_amdgpu_winsys {
    bool dump_ibs;
    FILE *bo_history_logfile;
    bool chain_ib;
-   bool zero_all_vram_allocs;
    bool debug_vm;
    uint64_t perftest;
 
@@ -82,6 +81,23 @@ static inline struct radv_amdgpu_winsys *
 radv_amdgpu_winsys(struct radeon_winsys *base)
 {
    return (struct radv_amdgpu_winsys *)base;
+}
+
+static inline uint32_t
+radeon_to_amdgpu_priority(enum radeon_ctx_priority priority)
+{
+   switch (priority) {
+   case RADEON_CTX_PRIORITY_REALTIME:
+      return AMDGPU_CTX_PRIORITY_VERY_HIGH;
+   case RADEON_CTX_PRIORITY_HIGH:
+      return AMDGPU_CTX_PRIORITY_HIGH;
+   case RADEON_CTX_PRIORITY_MEDIUM:
+      return AMDGPU_CTX_PRIORITY_NORMAL;
+   case RADEON_CTX_PRIORITY_LOW:
+      return AMDGPU_CTX_PRIORITY_LOW;
+   default:
+      UNREACHABLE("Invalid context priority");
+   }
 }
 
 #endif /* RADV_AMDGPU_WINSYS_H */

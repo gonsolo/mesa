@@ -160,11 +160,11 @@ instr_cost(nir_instr *instr, const void *data)
       nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
       switch (intrin->intrinsic) {
       case nir_intrinsic_load_ubo: {
-         /* If the UBO and offset are constant, then UBO lowering should do a
-          * better job trying to lower this, and opt_preamble shouldn't try to
-          * duplicate it. However if it has a non-constant offset then we can
-          * avoid setting up a0.x etc. in the main shader and potentially have
-          * to push less.
+         /* If the UBO and offset are constant and it is speculatable, then UBO
+          * lowering should do a better job trying to lower this, and
+          * opt_preamble shouldn't try to duplicate it. However if it has a
+          * non-constant offset then we can avoid setting up a0.x etc. in the
+          * main shader and potentially have to push less.
           */
          bool const_ubo = nir_src_is_const(intrin->src[0]);
          if (!const_ubo) {
@@ -173,10 +173,20 @@ instr_cost(nir_instr *instr, const void *data)
                const_ubo = nir_src_is_const(rsrc->src[0]);
          }
 
-         if (const_ubo && nir_src_is_const(intrin->src[1]))
+         if (const_ubo && nir_src_is_const(intrin->src[1]) &&
+             ir3_nir_is_prefetchable(intrin))
             return 0;
 
          /* TODO: get actual numbers for ldc */
+         return 8;
+      }
+
+      case nir_intrinsic_load_global_offset: {
+         /* If we can lower this to ldg.k, that should be preferred as it can
+          * use shared sources.
+          */
+         if (ir3_nir_can_lower_to_ldg_k(intrin))
+            return 0;
          return 8;
       }
 
@@ -268,44 +278,6 @@ avoid_instr(const nir_instr *instr, const void *data)
    return intrin->intrinsic == nir_intrinsic_bindless_resource_ir3;
 }
 
-static bool
-set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
-{
-   if (instr->type == nir_instr_type_tex) {
-      nir_instr_as_tex(instr)->can_speculate = true;
-      return true;
-   }
-
-   if (instr->type != nir_instr_type_intrinsic)
-      return false;
-
-   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-
-   switch (intr->intrinsic) {
-   /* These instructions go through bounds-checked hardware descriptors so
-    * should be safe to speculate.
-    *
-    * TODO: This isn't necessarily true in Vulkan, where descriptors don't need
-    * to be filled out and bindless descriptor offsets aren't bounds checked.
-    * We may need to plumb this information through from turnip for correctness
-    * to avoid regressing freedreno codegen.
-    */
-   case nir_intrinsic_load_ubo:
-   case nir_intrinsic_load_ubo_vec4:
-   case nir_intrinsic_image_load:
-   case nir_intrinsic_image_samples_identical:
-   case nir_intrinsic_bindless_image_load:
-   case nir_intrinsic_load_ssbo:
-   case nir_intrinsic_load_ssbo_ir3:
-      nir_intrinsic_set_access(intr, nir_intrinsic_access(intr) |
-                                     ACCESS_CAN_SPECULATE);
-      return true;
-
-   default:
-      return false;
-   }
-}
-
 bool
 ir3_nir_opt_preamble(nir_shader *nir, struct ir3_shader_variant *v)
 {
@@ -323,9 +295,6 @@ ir3_nir_opt_preamble(nir_shader *nir, struct ir3_shader_variant *v)
    if (max_size == 0)
       return false;
 
-   bool progress = nir_shader_instructions_pass(nir, set_speculate,
-                                                nir_metadata_control_flow, NULL);
-
    nir_opt_preamble_options options = {
       .drawid_uniform = true,
       .subgroup_size_uniform = true,
@@ -339,7 +308,7 @@ ir3_nir_opt_preamble(nir_shader *nir, struct ir3_shader_variant *v)
    };
 
    unsigned size = 0;
-   progress |= nir_opt_preamble(nir, &options, &size);
+   bool progress = nir_opt_preamble(nir, &options, &size);
 
    if (!v->binning_pass) {
       uint32_t preamble_size_vec4 =
@@ -366,16 +335,15 @@ ir3_def_is_rematerializable_for_preamble(nir_def *def,
       nir_intrinsic_instr *intrin = nir_def_as_intrinsic(def);
       switch (intrin->intrinsic) {
       case nir_intrinsic_load_ubo:
-         return ir3_def_is_rematerializable_for_preamble(intrin->src[0].ssa,
-                                                         preamble_defs) &&
-            ir3_def_is_rematerializable_for_preamble(intrin->src[1].ssa,
+         return ir3_nir_is_prefetchable(intrin) &&
+            ir3_def_is_rematerializable_for_preamble(intrin->src[0].ssa,
                                                      preamble_defs) &&
-            (nir_def_block(def)->cf_node.parent->type ==
-             nir_cf_node_function ||
-             (nir_intrinsic_access(intrin) & ACCESS_CAN_SPECULATE));
+            ir3_def_is_rematerializable_for_preamble(intrin->src[1].ssa,
+                                                     preamble_defs);
       case nir_intrinsic_bindless_resource_ir3:
-         return ir3_def_is_rematerializable_for_preamble(intrin->src[0].ssa,
-                                                         preamble_defs);
+         return ir3_nir_is_prefetchable(intrin) &&
+            ir3_def_is_rematerializable_for_preamble(intrin->src[0].ssa,
+                                                     preamble_defs);
       case nir_intrinsic_load_preamble:
          return !!preamble_defs;
       default:
@@ -520,7 +488,7 @@ _rematerialize_def(nir_builder *b, struct hash_table *remap_ht,
 
    if (instr_set) {
       nir_instr *other_instr =
-         nir_instr_set_add_or_rewrite(instr_set, instr, dominates);
+         nir_instr_set_add_or_rewrite(instr_set, instr, NULL, NULL, dominates);
       if (other_instr) {
          instr = other_instr;
          _mesa_hash_table_insert(remap_ht, def, nir_instr_def(other_instr));
@@ -596,6 +564,33 @@ get_descriptors(nir_instr *instr, nir_def **descs)
    }
 }
 
+static bool
+is_descriptor_prefetch_speculatable(nir_def *desc)
+{
+   nir_instr *instr = nir_def_instr(desc);
+
+   /* Non-bindless descriptors are always speculatable */
+   if (instr->type != nir_instr_type_intrinsic)
+      return true;
+
+   nir_intrinsic_instr *bindless = nir_instr_as_intrinsic(nir_def_instr(desc));
+
+   if (bindless->intrinsic != nir_intrinsic_bindless_resource_ir3)
+      return true;
+
+   return nir_intrinsic_access(bindless) & ACCESS_CAN_SPECULATE;
+}
+
+static bool
+is_descriptor_prefetchable(nir_def *desc)
+{
+   nir_instr *instr = nir_def_instr(desc);
+
+   return instr->block->cf_node.parent->type == nir_cf_node_function ||
+      is_descriptor_prefetch_speculatable(desc);
+}
+
+
 #define MAX_PREFETCHES 32
 
 struct prefetches {
@@ -627,9 +622,11 @@ struct prefetch_state {
 
 static bool
 emit_descriptor_prefetch(nir_builder *b, nir_instr *instr, nir_def **descs,
-                         struct prefetch_state *state)
+                         struct prefetch_state *state, bool can_speculate)
 {
    nir_block *insert_block = nir_def_block(descs[0]);
+
+   enum gl_access_qualifier access = can_speculate ? ACCESS_CAN_SPECULATE : 0;
 
    if (descs[1]) {
       insert_block = find_insert_block_for_defs(descs, 2);
@@ -679,13 +676,13 @@ emit_descriptor_prefetch(nir_builder *b, nir_instr *instr, nir_def **descs,
          if (!sampler_already_prefetched)
             add_prefetch(&state->sampler, descs[1]);
 
-         nir_prefetch_sam_ir3(b, descs[0], descs[1]);
+         nir_prefetch_sam_ir3(b, descs[0], descs[1], .access = access);
       } else {
          if (tex_already_prefetched)
             return false;
 
          add_prefetch(&state->tex, descs[0]);
-         nir_prefetch_tex_ir3(b, descs[0]);
+         nir_prefetch_tex_ir3(b, descs[0], .access = access);
       }
    } else {
       assert(instr->type == nir_instr_type_intrinsic);
@@ -700,9 +697,9 @@ emit_descriptor_prefetch(nir_builder *b, nir_instr *instr, nir_def **descs,
 
       nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
       if (intrin->intrinsic == nir_intrinsic_load_ubo)
-         nir_prefetch_ubo_ir3(b, descs[0]);
+         nir_prefetch_ubo_ir3(b, descs[0], .access = access);
       else
-         nir_prefetch_tex_ir3(b, descs[0]);
+         nir_prefetch_tex_ir3(b, descs[0], .access = access);
    }
 
    return true;
@@ -776,21 +773,6 @@ ir3_nir_opt_prefetch_descriptors(nir_shader *nir, struct ir3_shader_variant *v)
                should_prefetch_descriptor(descs[1])))
             continue;
 
-         /* The instruction itself must be hoistable.
-          * TODO: If the descriptor is statically referenced and in-bounds, then
-          * we should be able to hoist the descriptor load even if the
-          * descriptor contents aren't guaranteed. This would require more
-          * plumbing.
-          * TODO: Textures. This is broken in nir_opt_preamble at the moment and
-          * handling them would also require more plumbing.
-          */
-         if (instr->type == nir_instr_type_intrinsic &&
-             nir_intrinsic_has_access(nir_instr_as_intrinsic(instr)) &&
-             !(nir_intrinsic_access(nir_instr_as_intrinsic(instr)) &
-               ACCESS_CAN_SPECULATE) &&
-             block->cf_node.parent->type != nir_cf_node_function)
-            continue;
-
          /* Each descriptor must be rematerializable */
          if (descs[0] &&
              !ir3_def_is_rematerializable_for_preamble(descs[0], preamble_defs))
@@ -798,6 +780,10 @@ ir3_nir_opt_prefetch_descriptors(nir_shader *nir, struct ir3_shader_variant *v)
          if (descs[1] &&
              !ir3_def_is_rematerializable_for_preamble(descs[1], preamble_defs))
             continue;
+
+         bool is_speculatable =
+            (!descs[0] || is_descriptor_prefetch_speculatable(descs[0])) &&
+            (!descs[1] || is_descriptor_prefetch_speculatable(descs[1]));
 
          /* If the preamble hasn't been created then this descriptor isn't a
           * duplicate and we will definitely insert an instruction, so create
@@ -807,7 +793,31 @@ ir3_nir_opt_prefetch_descriptors(nir_shader *nir, struct ir3_shader_variant *v)
             preamble = nir_shader_get_preamble(nir);
          }
 
-         b = nir_builder_at(nir_after_impl(preamble));
+         /* When rematerializing defs in the preamble, we make sure to insert
+          * them in a block dominated by all their sources. When inserting a def
+          * that doesn't have any sources we have to make sure to insert them as
+          * early as possible. This important for sequences like this:
+          *
+          * 32      %34 = load_const (0x00000007 = 0.000000)
+          * ...
+          * if ... {
+          *     32     %184 = @load_preamble (base=8)
+          *     32     %185 = @bindless_resource_ir3 (%184) (desc_set=0)
+          *     32     %186 = @bindless_resource_ir3 (%34 (0x7)) (desc_set=1)
+          *     32x4   %187 = (float32)tex %186 (texture_handle), %185 (sampler_handle), ...
+          *     ...
+          *  }
+          *
+          * %185 has to be rematerialized in control flow since its source is
+          * defined there. %186 does not as its source is defined outside
+          * control flow. We used to insert %186 as late as possible
+          * (nir_after_impl(preamble)) but this causes issues as we cannot find
+          * a valid block (i.e., a block that is dominated by both) to insert
+          * the descriptor prefetch for (%185, %186). Therefore, we set the
+          * default block to insert rematerialized defs as the preamble's start
+          * block.
+          */
+         b = nir_builder_at(nir_before_impl(preamble));
 
          /* Materialize descriptors for the prefetch. Note that we deduplicate
           * descriptors so that we don't blow our budget when repeatedly loading
@@ -825,7 +835,8 @@ ir3_nir_opt_prefetch_descriptors(nir_shader *nir, struct ir3_shader_variant *v)
                                                   preamble_defs);
          }
 
-         progress |= emit_descriptor_prefetch(&b, instr, preamble_descs, &state);
+         progress |= emit_descriptor_prefetch(&b, instr, preamble_descs, &state,
+                                              is_speculatable);
 
          if (state.sampler.num_prefetches == MAX_PREFETCHES &&
              state.tex.num_prefetches == MAX_PREFETCHES)
@@ -964,6 +975,7 @@ ir3_nir_lower_preamble(nir_shader *nir, struct ir3_shader_variant *v)
     */
 
    /* @decl_regs need to stay in the first block. */
+   b = &builder_main;
    b->cursor = nir_after_reg_decls(main);
 
    nir_if *outer_if = nir_push_if(b, nir_preamble_start_ir3(b, 1));

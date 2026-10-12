@@ -182,8 +182,8 @@ radv_finish_address_binding_report(struct radv_device *device)
    struct radv_instance *instance = radv_physical_device_instance(pdev);
    struct radv_address_binding_tracker *tracker = device->addr_binding_tracker;
 
-   util_dynarray_foreach (&tracker->reports, struct radv_address_binding_report *, iter) {
-      vk_free(&instance->vk.alloc, (*iter)->object_name);
+   util_dynarray_foreach (&tracker->reports, struct radv_address_binding_report, iter) {
+      vk_free(&instance->vk.alloc, iter->object_name);
    }
    util_dynarray_fini(&tracker->reports);
    simple_mtx_destroy(&tracker->mtx);
@@ -198,10 +198,9 @@ radv_init_trace(struct radv_device *device)
    struct radeon_winsys *ws = device->ws;
    VkResult result;
 
-   result = radv_bo_create(
-      device, NULL, sizeof(struct radv_trace_data), 8, RADEON_DOMAIN_VRAM,
-      RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_ZERO_VRAM | RADEON_FLAG_GL2_BYPASS,
-      RADV_BO_PRIORITY_UPLOAD_BUFFER, 0, true, &device->trace_bo);
+   result = radv_bo_create(device, NULL, sizeof(struct radv_trace_data), 8, RADEON_DOMAIN_VRAM,
+                           RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_GL2_BYPASS,
+                           RADV_BO_PRIORITY_UPLOAD_BUFFER, 0, true, &device->trace_bo);
    if (result != VK_SUCCESS)
       return false;
 
@@ -586,7 +585,8 @@ radv_dump_shader(struct radv_device *device, struct radv_pipeline *pipeline, str
       _mesa_blake3_compute(shader->dbg.spirv, shader->dbg.spirv_size, blake3);
       _mesa_blake3_format(blake3buf, blake3);
 
-      if (device->vk.enabled_features.deviceFaultVendorBinaryEXT) {
+      if (device->vk.enabled_features.deviceFaultVendorBinaryEXT ||
+          device->vk.enabled_features.deviceFaultVendorBinary) {
          spirv_print_asm(f, (const uint32_t *)shader->dbg.spirv, shader->dbg.spirv_size / 4);
       } else {
          fprintf(f, "SPIRV (see %s.spv)\n\n", blake3buf);
@@ -818,12 +818,11 @@ radv_dump_enabled_options(const struct radv_device *device, FILE *f)
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
    uint64_t mask;
 
-   if (instance->debug_flags) {
+   if (!BITSET_IS_EMPTY(instance->debug_flags)) {
       fprintf(f, "Enabled debug options: ");
 
-      mask = instance->debug_flags;
-      while (mask) {
-         int i = u_bit_scan64(&mask);
+      unsigned i;
+      BITSET_FOREACH_SET(i, instance->debug_flags, RADV_DEBUG_COUNT) {
          fprintf(f, "%s, ", radv_get_debug_option_name(i));
       }
       fprintf(f, "\n");
@@ -928,12 +927,15 @@ radv_gpu_hang_occurred(struct radv_queue *queue, enum amd_ip_type ring)
 bool
 radv_vm_fault_occurred(struct radv_device *device, struct radv_winsys_gpuvm_fault_info *fault_info)
 {
-   const struct radv_physical_device *pdev = radv_device_physical(device);
-
-   if (!pdev->info.has_gpuvm_fault_query)
-      return false;
-
    return device->ws->query_gpuvm_fault(device->ws, fault_info);
+}
+
+bool
+radv_shader_abort_occurred(struct radv_device *device)
+{
+   const uint32_t *data = device->shader_abort.buffer.map;
+   /* Check if something was written to the abort buffer. */
+   return data && data[0] != sizeof(uint32_t);
 }
 
 enum radv_device_fault_chunk {
@@ -997,7 +999,8 @@ radv_check_gpu_hangs(struct radv_queue *queue, const struct radv_winsys_submit_i
 #ifndef _WIN32
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
-   const bool save_hang_report = !device->vk.enabled_features.deviceFaultVendorBinaryEXT;
+   const bool save_hang_report =
+      !(device->vk.enabled_features.deviceFaultVendorBinaryEXT || device->vk.enabled_features.deviceFaultVendorBinary);
    struct radv_winsys_gpuvm_fault_info fault_info = {0};
 
    /* Query if a VM fault happened for this GPU hang. */
@@ -1027,7 +1030,7 @@ radv_check_gpu_hangs(struct radv_queue *queue, const struct radv_winsys_submit_i
    };
 
    char *wave_dump = NULL;
-   if (!(instance->debug_flags & RADV_DEBUG_NO_UMR))
+   if (!RADV_DEBUG(instance, NO_UMR))
       wave_dump = ac_get_umr_waves(&pdev->info, radv_queue_ring(queue));
 
    for (uint32_t i = 0; i < RADV_DEVICE_FAULT_CHUNK_COUNT; i++) {
@@ -1051,11 +1054,11 @@ radv_check_gpu_hangs(struct radv_queue *queue, const struct radv_winsys_submit_i
          radv_dump_queue_state(queue, dump_dir, wave_dump, f);
          break;
       case RADV_DEVICE_FAULT_CHUNK_UMR_WAVES:
-         if (!(instance->debug_flags & RADV_DEBUG_NO_UMR))
+         if (!RADV_DEBUG(instance, NO_UMR))
             radv_dump_umr_waves(queue, wave_dump, f);
          break;
       case RADV_DEVICE_FAULT_CHUNK_UMR_RING:
-         if (!(instance->debug_flags & RADV_DEBUG_NO_UMR))
+         if (!RADV_DEBUG(instance, NO_UMR))
             radv_dump_umr_ring(queue, f);
          break;
       case RADV_DEVICE_FAULT_CHUNK_REGISTERS:
@@ -1141,10 +1144,9 @@ radv_trap_handler_init(struct radv_device *device)
    /* Compute the TMA BO size. */
    size = sizeof(desc) + sizeof(struct aco_trap_handler_layout);
 
-   result = radv_bo_create(
-      device, NULL, size, 256, RADEON_DOMAIN_VRAM,
-      RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_ZERO_VRAM | RADEON_FLAG_32BIT,
-      RADV_BO_PRIORITY_SCRATCH, 0, true, &device->tma_bo);
+   result = radv_bo_create(device, NULL, size, 256, RADEON_DOMAIN_VRAM,
+                           RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_32BIT,
+                           RADV_BO_PRIORITY_SCRATCH, 0, true, &device->tma_bo);
    if (result != VK_SUCCESS)
       return false;
 
@@ -1172,6 +1174,7 @@ radv_trap_handler_init(struct radv_device *device)
          },
       .gfx10_oob_select = V_008F0C_OOB_SELECT_RAW,
       .stride = 4, /* Used for VGPRs dump. */
+      .has_desc_resource_level = pdev->info.compiler_info.has_desc_resource_level,
    };
 
    ac_build_buffer_descriptor(pdev->info.gfx_level, &ac_state, desc);

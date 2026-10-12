@@ -1,6 +1,7 @@
 #include "vk_graphics_state.h"
 
 #include "vk_alloc.h"
+#include "vk_android.h"
 #include "vk_command_buffer.h"
 #include "vk_common_entrypoints.h"
 #include "vk_device.h"
@@ -630,8 +631,8 @@ vk_rasterization_state_init(struct vk_rasterization_state *rs,
    }
    rs->line.width = rs_info->lineWidth;
 
-   vk_foreach_struct_const(ext, rs_info->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct_const(sType, ext, rs_info->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_CONSERVATIVE_STATE_CREATE_INFO_EXT: {
          const VkPipelineRasterizationConservativeStateCreateInfoEXT *rcs_info =
             (const VkPipelineRasterizationConservativeStateCreateInfoEXT *)ext;
@@ -1308,6 +1309,14 @@ vk_render_pass_state_init(struct vk_render_pass_state *rp,
    if (r_info == NULL)
       return;
 
+   VkPipelineRenderingCreateInfo local_rendering_info;
+   VkFormat local_color_format;
+   if (vk_android_is_efr_pipeline_rendering_info(info, r_info)) {
+      r_info = vk_android_get_efr_pipeline_rendering_info(
+         info, r_info, &local_rendering_info,
+         &local_color_format);
+   }
+
    const VkCustomResolveCreateInfoEXT *crc_info =
       vk_find_struct_const(info->pNext, CUSTOM_RESOLVE_CREATE_INFO_EXT);
    rp->custom_resolve = crc_info != NULL && crc_info->customResolve;
@@ -1875,6 +1884,26 @@ vk_graphics_pipeline_state_fill(const struct vk_device *device,
                                                   ms_info, sl_info);
    }
 
+   /* VK_EXT_rasterization_order_attachment_access */
+   if (needs & MESA_VK_GRAPHICS_STATE_COLOR_BLEND_BIT) {
+      if (cb_info && (cb_info->flags &
+          VK_PIPELINE_COLOR_BLEND_STATE_CREATE_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_BIT_EXT)) {
+         state->rasterization_order_access |= VK_IMAGE_ASPECT_COLOR_BIT;
+      }
+   }
+   if (needs & MESA_VK_GRAPHICS_STATE_DEPTH_STENCIL_BIT) {
+      if (ds_info) {
+         if (ds_info->flags &
+             VK_PIPELINE_DEPTH_STENCIL_STATE_CREATE_RASTERIZATION_ORDER_ATTACHMENT_DEPTH_ACCESS_BIT_EXT) {
+            state->rasterization_order_access |= VK_IMAGE_ASPECT_DEPTH_BIT;
+         }
+         if (ds_info->flags &
+             VK_PIPELINE_DEPTH_STENCIL_STATE_CREATE_RASTERIZATION_ORDER_ATTACHMENT_STENCIL_ACCESS_BIT_EXT) {
+            state->rasterization_order_access |= VK_IMAGE_ASPECT_STENCIL_BIT;
+         }
+      }
+   }
+
    return VK_SUCCESS;
 }
 
@@ -1894,6 +1923,7 @@ vk_graphics_pipeline_state_merge(struct vk_graphics_pipeline_state *dst,
 
    dst->pipeline_flags |= src->pipeline_flags;
    dst->feedback_loop_not_input_only |= src->feedback_loop_not_input_only;
+   dst->rasterization_order_access |= src->rasterization_order_access;
 
    /* Render pass state needs special care because a render pass state may be
     * incomplete (view mask only).  See vk_render_pass_state_init().
@@ -1989,6 +2019,7 @@ vk_graphics_pipeline_state_copy(const struct vk_device *device,
    state->pipeline_flags = old_state->pipeline_flags;
    state->feedback_loop_not_input_only =
       old_state->feedback_loop_not_input_only;
+   state->rasterization_order_access = old_state->rasterization_order_access;
 
    vk_graphics_pipeline_state_validate(state);
    return VK_SUCCESS;
@@ -2111,6 +2142,8 @@ vk_dynamic_graphics_state_fill(struct vk_dynamic_graphics_state *dyn,
     * sure the dynamic state is reset to 0 when feedback loop state is static.
     */
    dyn->feedback_loops = 0;
+
+   dyn->rasterization_order_access = p->rasterization_order_access;
 
    get_dynamic_state_groups(dyn->set, groups);
 
@@ -2369,6 +2402,11 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
    }
 
    COPY_IF_SET(ATTACHMENT_FEEDBACK_LOOP_ENABLE, feedback_loops);
+
+   /* rasterization_order_access is not dynamic state, so propagate it
+    * unconditionally when copying (e.g., secondary command buffer execution).
+    */
+   dst->rasterization_order_access |= src->rasterization_order_access;
 
 #undef IS_SET_IN_SRC
 #undef MARK_DIRTY

@@ -21,6 +21,7 @@
  */
 
 #include "pipe/p_defines.h"
+#include "util/u_draw.h"
 #include "util/u_framebuffer.h"
 #include "util/u_upload_mgr.h"
 
@@ -36,7 +37,8 @@ nv50_flush(struct pipe_context *pipe,
    struct nouveau_context *context = nouveau_context(pipe);
 
    if (fence)
-      nouveau_fence_ref(context->fence, (struct nouveau_fence **)fence);
+      nouveau_fence_ref(context->fence, (struct nouveau_fence **)fence,
+                        context->screen);
 
    PUSH_KICK(context->pushbuf);
 
@@ -131,14 +133,17 @@ nv50_emit_string_marker(struct pipe_context *pipe, const char *str, int len)
    }
 }
 
-void
+bool
 nv50_default_kick_notify(struct nouveau_context *context)
 {
    struct nv50_context *nv50 = nv50_context(&context->pipe);
 
-   _nouveau_fence_next(context);
+   if (!_nouveau_fence_next(context))
+      return false;
+
    _nouveau_fence_update(context->screen, true);
    nv50->state.flushed = true;
+   return true;
 }
 
 static void
@@ -334,11 +339,16 @@ nv50_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    pipe->stream_uploader = u_upload_create_default(pipe);
    if (!pipe->stream_uploader)
       goto out_err;
+
+   if (!nouveau_fence_new(&nv50->base, &nv50->base.fence))
+      goto out_err;
+
    pipe->const_uploader = pipe->stream_uploader;
 
    pipe->destroy = nv50_destroy;
 
    pipe->draw_vbo = nv50_draw_vbo;
+   pipe->draw_vbo_buffers = util_draw_vbo_buffers;
    pipe->clear = nv50_clear;
    pipe->launch_grid = nv50_launch_grid;
 
@@ -417,8 +427,6 @@ nv50_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    // And mark samplers as dirty so that the first slot would get bound to the
    // zero entry if it's not otherwise set.
    nv50->dirty_3d |= NV50_NEW_3D_SAMPLERS;
-
-   nouveau_fence_new(&nv50->base, &nv50->base.fence);
 
    return pipe;
 

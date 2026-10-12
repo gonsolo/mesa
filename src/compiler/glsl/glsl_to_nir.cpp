@@ -290,6 +290,7 @@ nir_visitor::constant_copy(ir_constant *ir, void *mem_ctx)
       break;
 
    case GLSL_TYPE_INT:
+   case GLSL_TYPE_YUV_CSC_STANDARD_EXT:
       /* Only float base types can be matrices. */
       assert(cols == 1);
 
@@ -475,6 +476,7 @@ nir_visitor::visit(ir_variable *ir)
    var->data.implicit_sized_array = ir->data.implicit_sized_array;
    var->data.from_ssbo_unsized_array = ir->data.from_ssbo_unsized_array;
    var->data.per_primitive = ir->data.per_primitive;
+   var->data.yuv = ir->data.yuv;
 
    switch(ir->data.mode) {
    case ir_var_auto:
@@ -1371,6 +1373,7 @@ nir_visitor::visit(ir_call *ir)
 
          /* Atomic result */
          assert(ir->return_deref);
+         instr->num_components = 1;
          if (glsl_type_is_integer_64(ir->return_deref->type)) {
             nir_def_init(&instr->instr, &instr->def,
                          ir->return_deref->type->vector_elements, 64);
@@ -1438,6 +1441,7 @@ nir_visitor::visit(ir_call *ir)
          if (op == nir_intrinsic_image_deref_atomic ||
              op == nir_intrinsic_image_deref_atomic_swap) {
             nir_intrinsic_set_atomic_op(instr, atomic_op);
+            instr->num_components = 1;
          }
 
          instr->src[0] = nir_src_for_ssa(&deref->def);
@@ -2276,6 +2280,10 @@ nir_visitor::visit(ir_expression *ir)
    case ir_unop_round_even: result = nir_fround_even(&b, srcs[0]); break;
    case ir_unop_sin:   result = nir_fsin(&b, srcs[0]); break;
    case ir_unop_cos:   result = nir_fcos(&b, srcs[0]); break;
+   case ir_unop_tanh:
+      result = b.shader->options->has_tanh ? nir_ftanh(&b, srcs[0]) :
+                                             nir_tanh_emulated(&b, srcs[0]);
+      break;
    case ir_unop_dFdx:        result = nir_ddx(&b, srcs[0]); break;
    case ir_unop_dFdy:        result = nir_ddy(&b, srcs[0]); break;
    case ir_unop_dFdx_fine:   result = nir_ddx_fine(&b, srcs[0]); break;

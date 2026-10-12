@@ -899,6 +899,15 @@ isl_format_supports_ccs_e(const struct intel_device_info *devinfo,
    if (devinfo->ver >= 20)
       return true;
 
+   /* On gfx12.5, the following formats are not explicitly listed in the docs
+    * as supporting compression. However, we allow them because, just like
+    * Xe2+, they seem to work regardless of what the documentation implies.
+    */
+   if (devinfo->verx10 == 125 && (format == ISL_FORMAT_L8_UNORM_SRGB ||
+                                  format == ISL_FORMAT_L8A8_UNORM_SRGB ||
+                                  format == ISL_FORMAT_R9G9B9E5_SHAREDEXP))
+      return true;
+
    /* For simplicity, only report that a format supports CCS_E if blorp can
     * perform bit-for-bit copies with an image of that format while compressed.
     * Unfortunately, R11G11B10_FLOAT is in a compression class of its own, and
@@ -1216,23 +1225,15 @@ isl_format_rgbx_to_rgba(enum isl_format rgbx)
    }
 }
 
-/*
- * Xe2 allows route of LD messages from Sampler to LSC to improve performance
- * when some restrictions are met, here checking the format restrictions.
- *
- * RENDER_SURFACE_STATE::Enable Sampler Route to LSC:
- *   "The Surface Format is one of the following:
- *
- *     R8_UNORM, R8G8_UNORM, R16_UNORM, R16G16_UNORM, R16G16B16A16_UNORM
- *     R16_FLOAT, R16G16_FLOAT, R16G16B16A16_FLOAT
- *     R32_FLOAT, R32G32_FLOAT, R32G32B32A32_FLOAT, R32_UINT, R32G32_UINT, R32G32B32A32_UINT
- *     R10G10B10A2_UNORM, R11G11B10_FLOAT
- *   "
+/* Xe2+ allows route of LD messages from Sampler to LSC to improve
+ * performance when the format is supported.
  */
 bool
 isl_format_support_sampler_route_to_lsc(enum isl_format fmt)
 {
    switch (fmt) {
+   /* Bspec 57023 (r74473)
+    */
    case ISL_FORMAT_R8_UNORM:
    case ISL_FORMAT_R8G8_UNORM:
    case ISL_FORMAT_R16_UNORM:
@@ -1249,6 +1250,23 @@ isl_format_support_sampler_route_to_lsc(enum isl_format fmt)
    case ISL_FORMAT_R32G32B32A32_UINT:
    case ISL_FORMAT_R10G10B10A2_UNORM:
    case ISL_FORMAT_R11G11B10_FLOAT:
+   case ISL_FORMAT_R10G10B10A2_UINT:
+   case ISL_FORMAT_R16G16B16A16_SINT:
+   case ISL_FORMAT_R16G16B16A16_UINT:
+   case ISL_FORMAT_R16G16_SINT:
+   case ISL_FORMAT_R16G16_UINT:
+   case ISL_FORMAT_R16_SINT:
+   case ISL_FORMAT_R16_UINT:
+   case ISL_FORMAT_R32G32B32A32_SINT:
+   case ISL_FORMAT_R32G32_SINT:
+   case ISL_FORMAT_R32_SINT:
+   case ISL_FORMAT_R8G8B8A8_SINT:
+   case ISL_FORMAT_R8G8B8A8_UINT:
+   case ISL_FORMAT_R8G8B8A8_UNORM:
+   case ISL_FORMAT_R8G8_SINT:
+   case ISL_FORMAT_R8G8_UINT:
+   case ISL_FORMAT_R8_SINT:
+   case ISL_FORMAT_R8_UINT:
       return true;
    default:
       return false;

@@ -1,5 +1,22 @@
 # Copyright © 2022 Collabora Ltd. and Red Hat Inc.
 # SPDX-License-Identifier: MIT
+
+fs = import('fs')
+
+prog_cbindgen = find_program(
+  'cbindgen',
+  required : true,
+  native : true,
+  version : '>= 0.25'
+)
+
+dep_paste = dependency(
+  'paste',
+  version: '>= 1.0.14',
+  fallback: ['paste', 'dep_paste'],
+  required: true,
+)
+
 nvk_files = files(
   'nvk_acceleration_structure.c',
   'nvk_buffer.c',
@@ -16,6 +33,9 @@ nvk_files = files(
   'nvk_cmd_meta.c',
   'nvk_cmd_pool.c',
   'nvk_cmd_pool.h',
+  'nvk_cmd_video.c',
+  'nvk_cubin.c',
+  'nvk_cubin.h',
   'nvk_debug.h',
   'nvk_descriptor_set.h',
   'nvk_descriptor_set.c',
@@ -66,6 +86,8 @@ nvk_files = files(
   'nvk_shader.h',
   'nvk_upload_queue.c',
   'nvk_upload_queue.h',
+  'nvk_video_session.c',
+  'nvk_video_session.h',
   'nvk_wsi.c',
   'nvk_wsi.h',
   'layers/nvk_app_workarounds.c',
@@ -119,22 +141,136 @@ nvkcl = custom_target(
   command : [prog_vtn_bindgen2, '@INPUT@', '@OUTPUT@'],
 )
 
+nvk_drirc = custom_target(
+  'nvk_drirc',
+  input  : [files('nvk_drirc_gen.py'), drirc_gen, '00-nvk-defaults.conf'],
+  output : ['nvk_drirc.c', 'nvk_drirc.h'],
+  command : [
+    prog_python, '@INPUT0@',
+    '--import-path', join_paths(dir_source_root, 'src/util'),
+    '--drirc-src', '@OUTPUT0@',
+    '--drirc-hdr', '@OUTPUT1@',
+    '--validate', '@INPUT2@',
+  ],
+)
+
 nvk_deps = [
   dep_libdrm,
+  dep_elf,
   idep_nak,
   idep_nil,
   idep_nir,
+  idep_nir_headers,
   idep_mesautil,
+  idep_nouveau_cubin,
   idep_nouveau_mme,
   idep_nouveau_ws,
   idep_nvidia_headers,
   idep_vulkan_runtime,
+  idep_vulkan_runtime_headers,
   idep_vulkan_util,
+  idep_vulkan_util_headers,
   idep_vulkan_wsi,
   idep_vulkan_wsi_headers,
 ]
 
+nvk_include_directories = [
+  fs.relative_to(meson.project_build_root(), meson.current_source_dir()),
+  inc_include,
+  inc_src,
+]
+
+nvk_bindings_rs_gen = rust.bindgen(
+  input: ['rust/bindings.h', nvk_drirc[1]],
+  output: 'nvk_bindings.rs',
+  output_inline_wrapper : 'nvk_inline_wrappers.c',
+  c_args: [
+    pre_args,
+  ],
+  args: [
+    bindgen_output_args,
+    '--no-prepend-enum-name',
+    '--with-derive-default',
+    '--allowlist-type', 'Std.*|vk_video.*|.*nv.*|Vk.*|vk.*',
+    '--allowlist-function', '.*vk_find.*|.*vk_video.*|nvk.*',
+    '--allowlist-function', 'vk_buffer_address',
+    '--allowlist-var', '.*SUBC.*',
+  ],
+  include_directories : include_directories('.'),
+  dependencies : nvk_deps,
+)
+
+libnvk_bindings_rs_extern = static_library(
+  'nvk_bindings_rs_extern',
+  nvk_bindings_rs_gen[1],
+  c_args : [
+    no_override_init_args,
+    '-Wno-missing-prototypes',
+  ],
+  include_directories : nvk_include_directories,
+  dependencies : nvk_deps,
+)
+
+libnvk_bindings_rs = static_library(
+  'nvk_bindings_rs',
+  nvk_bindings_rs_gen[0],
+  link_with : [libnvk_bindings_rs_extern],
+  gnu_symbol_visibility: 'hidden',
+  rust_abi: 'rust',
+)
+
+libnvk_rs = static_library(
+  'nvk_rs',
+  files('rust/lib.rs'),
+  gnu_symbol_visibility: 'hidden',
+  rust_abi: 'c',
+  rust_args: nouveau_rust_args,
+  link_with: [
+    libnvk_bindings_rs,
+  ],
+  dependencies: [
+    dep_paste,
+    dep_rustc_hash,
+    idep_nv_push_rs,
+    idep_nvidia_headers_rs,
+  ],
+)
+
+# TODO: Linking Rust executables (such as unit tests) doesn't play nicely
+# with the sanitizers because meson doesn't know to pass -fsanitize to the
+# Rust linker.  See also https://github.com/mesonbuild/meson/issues/11741
+if with_tests and get_option('b_sanitize') == 'none' and not with_platform_android
+  rust.test(
+    'nvk_rs',
+    libnvk_rs,
+    suite : ['nouveau'],
+    # This is needed to ensure we link against glibc
+    # See also https://gitlab.freedesktop.org/mesa/mesa/-/issues/11632
+    rust_args: ['-C', 'default-linker-libraries'],
+    link_with: [
+      _libacorn_rs,
+    ],
+  )
+endif
+
+nvk_rust_h = custom_target(
+  'nvk_rust.h',
+  input : [files('rust/cbindgen.toml'), 'rust/lib.rs'],
+  output : ['nvk_rust.h'],
+  command : [
+    prog_cbindgen, '-q', '--config', '@INPUT0@', '--lang', 'c',
+    '--output', '@OUTPUT0@', '--depfile', '@DEPFILE@',
+    '--', '@INPUT1@',
+  ],
+  depfile : 'nvk_rust.h.d',
+)
+
 nvk_flags = []
+
+nvk_build_id = get_option('nvk-build-id')
+if nvk_build_id != ''
+  nvk_flags += '-DNVK_BUILD_ID_OVERRIDE="' + nvk_build_id + '"'
+endif
 
 if with_platform_android
   nvk_files += files('nvk_android.c')
@@ -144,16 +280,16 @@ libnvk = static_library(
   'nvk',
   [
     nvk_entrypoints,
+    nvk_drirc,
     cl_generated,
     nvk_files,
+    nvk_rust_h,
     nvkcl,
     sha1_h,
   ],
-  include_directories : [
-    inc_include,
-    inc_src,
-  ],
+  include_directories : nvk_include_directories,
   dependencies : nvk_deps,
+  link_with : [libnvk_rs],
   c_args : [no_override_init_args, nvk_flags],
   gnu_symbol_visibility : 'hidden',
 )

@@ -234,7 +234,7 @@ radv_gfx_copy_memory_to_image_indirect(struct radv_cmd_buffer *cmd_buffer,
          dst_image, pCopyMemoryToImageIndirectInfo->dstImageLayout, imageSubresource);
 
       if (!radv_is_buffer_format_supported(img_bsurf.format, NULL)) {
-         const uint32_t queue_mask = radv_image_queue_family_mask(dst_image, cmd_buffer->qf, cmd_buffer->qf);
+         const uint32_t queue_mask = radv_image_queue_family_mask(dst_image, cmd_buffer->qf);
          const VkFormat raw_format = vk_format_for_size(vk_format_get_blocksize(img_bsurf.format));
 
          if (!radv_dcc_formats_compatible(pdev->info.gfx_level, img_bsurf.format, raw_format, NULL) &&
@@ -278,10 +278,10 @@ radv_gfx_copy_memory_to_image_indirect(struct radv_cmd_buffer *cmd_buffer,
       radv_meta_set_viewport_and_scissor(cmd_buffer, 0, 0, img_extent_el.width, img_extent_el.height);
 
       for (uint32_t slice = 0; slice < slice_count; slice++) {
-         const VkImageViewUsageCreateInfo iview_usage_info = {
-            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
-            .usage = vk_format_is_color(format) ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
-                                                : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+         const VkImageViewUsage2CreateInfoKHR iview_usage_info = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_2_CREATE_INFO_KHR,
+            .usage = vk_format_is_color(format) ? VK_IMAGE_USAGE_2_COLOR_ATTACHMENT_BIT_KHR
+                                                : VK_IMAGE_USAGE_2_DEPTH_STENCIL_ATTACHMENT_BIT_KHR,
          };
 
          radv_image_view_init(
@@ -291,7 +291,7 @@ radv_gfx_copy_memory_to_image_indirect(struct radv_cmd_buffer *cmd_buffer,
                .pNext = &iview_usage_info,
                .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
                .image = radv_image_to_handle(dst_image),
-               .viewType = radv_meta_get_view_type(dst_image),
+               .viewType = radv_meta_get_view_type(dst_image, true),
                .format = format,
                .subresourceRange =
                   {

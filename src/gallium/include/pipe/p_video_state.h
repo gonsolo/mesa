@@ -241,6 +241,7 @@ struct pipe_picture_desc
    uint64_t in_fence_value;
    /* A fence for pipe_video_codec::end_frame to signal job completion */
    struct pipe_fence_handle **out_fence;
+   struct pipe_fence_handle **out_pipe_fence;
 };
 
 struct pipe_quant_matrix
@@ -763,20 +764,6 @@ struct h265_slice_descriptor
    uint32_t    num_ctu_in_slice;
    /** slice type. */
    enum pipe_h265_slice_type slice_type;
-};
-
-struct pipe_enc_hdr_cll {
-   uint16_t max_cll;
-   uint16_t max_fall;
-};
-
-struct pipe_enc_hdr_mdcv {
-   uint16_t primary_chromaticity_x[3];
-   uint16_t primary_chromaticity_y[3];
-   uint16_t white_point_chromaticity_x;
-   uint16_t white_point_chromaticity_y;
-   uint32_t luminance_max;
-   uint32_t luminance_min;
 };
 
 typedef struct pipe_h264_enc_hrd_params
@@ -1394,9 +1381,6 @@ struct pipe_h265_enc_picture_desc
    unsigned max_slice_bytes;
    enum pipe_video_feedback_metadata_type requested_metadata;
 
-   struct pipe_enc_hdr_cll metadata_hdr_cll;
-   struct pipe_enc_hdr_mdcv metadata_hdr_mdcv;
-
    struct pipe_h265_enc_dpb_entry dpb[PIPE_H265_MAX_DPB_SIZE];
    uint8_t dpb_size;
    uint8_t dpb_curr_pic; /* index in dpb */
@@ -1646,17 +1630,6 @@ struct pipe_av1_enc_picture_desc
    } tg_obu_header;
 
    enum pipe_video_feedback_metadata_type requested_metadata;
-
-   union {
-      struct {
-         uint32_t hdr_cll:1;
-         uint32_t hdr_mdcv:1;
-      };
-      uint32_t value;
-   } metadata_flags;
-
-   struct pipe_enc_hdr_cll metadata_hdr_cll;
-   struct pipe_enc_hdr_mdcv metadata_hdr_mdcv;
 
    struct pipe_av1_enc_dpb_entry dpb[PIPE_AV1_MAX_DPB_SIZE + 1];
    uint8_t dpb_size;

@@ -43,6 +43,7 @@ enum radv_dispatch_table {
    RADV_RGP_DISPATCH_TABLE,
    RADV_RRA_DISPATCH_TABLE,
    RADV_RMV_DISPATCH_TABLE,
+   RADV_UTRACE_DISPATCH_TABLE,
    RADV_CTX_ROLL_DISPATCH_TABLE,
    RADV_DISPATCH_TABLE_COUNT,
 };
@@ -53,6 +54,7 @@ struct radv_layer_dispatch_tables {
    struct vk_device_dispatch_table rgp;
    struct vk_device_dispatch_table rra;
    struct vk_device_dispatch_table rmv;
+   struct vk_device_dispatch_table utrace;
    struct vk_device_dispatch_table ctx_roll;
 };
 
@@ -83,8 +85,6 @@ struct radv_meta_state {
    mtx_t mtx;
 
    struct {
-      struct radix_sort_vk *radix_sort_64;
-      struct radix_sort_vk *radix_sort_96;
       struct vk_acceleration_structure_build_ops build_ops;
       struct vk_acceleration_structure_build_args build_args;
    } accel_struct_build;
@@ -149,10 +149,8 @@ struct radv_device {
 
    struct radv_meta_state meta_state;
 
-   struct radv_queue *queues[RADV_MAX_QUEUE_FAMILIES];
-   struct radv_queue *queues_protected[RADV_MAX_QUEUE_FAMILIES];
-   int queue_count[RADV_MAX_QUEUE_FAMILIES];
-   int queue_count_protected[RADV_MAX_QUEUE_FAMILIES];
+   struct radv_queue *queues;
+   uint32_t queue_count;
 
    bool pbb_allowed;
    uint32_t scratch_waves;
@@ -177,6 +175,8 @@ struct radv_device {
 
    /* Whether to keep shader debug info, for debugging. */
    bool keep_shader_info;
+
+   bool debug_after_draw;
 
    /* Backup in-memory cache to be used if the app doesn't provide one */
    struct vk_pipeline_cache *mem_cache;
@@ -240,6 +240,7 @@ struct radv_device {
 
    /* SPM. */
    struct ac_spm spm;
+   struct ac_spm_user_config *spm_user_config;
 
    struct radv_backed_buffer spm_buffer;
    struct radv_backed_buffer spm_staging_buffer;
@@ -285,7 +286,9 @@ struct radv_device {
    /* Whether per-vertex VRS is forced. */
    bool force_vrs_enabled;
 
-   simple_mtx_t pstate_mtx;
+   mtx_t pstate_mtx;
+   cnd_t pstate_cond;
+   bool pstate_pending;
    unsigned pstate_cnt;
 
    /* BO to contain some performance counter helpers:
@@ -321,6 +324,18 @@ struct radv_device {
    struct radv_compiler_info compiler_info;
 
    struct radv_shader_abort_data shader_abort;
+
+   struct {
+      struct u_trace_context *context;
+      simple_mtx_t lock;
+   } utrace;
+
+   struct {
+      simple_mtx_t mtx;
+      bool fault_addr_reported;
+      bool shader_abort_reported;
+      bool device_lost_reported;
+   } fault;
 };
 
 VK_DEFINE_HANDLE_CASTS(radv_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
@@ -358,12 +373,18 @@ void radv_emit_default_sample_locations(const struct radv_physical_device *pdev,
 void radv_gfx11_set_db_render_control(const struct radv_device *device, unsigned num_samples,
                                       unsigned *db_render_control);
 
-bool radv_device_set_pstate(struct radv_device *device, bool enable);
+VkResult radv_device_set_pstate(struct radv_device *device, bool enable, uint64_t timeout);
 
-bool radv_device_acquire_performance_counters(struct radv_device *device);
+VkResult radv_device_acquire_performance_counters(struct radv_device *device, uint64_t timeout);
 
 void radv_device_release_performance_counters(struct radv_device *device);
 
-bool radv_device_should_clear_vram(const struct radv_device *device);
+VkResult radv_device_init_utrace(struct radv_device *device);
+
+void radv_device_finish_utrace(struct radv_device *device);
+
+VkResult radv_device_init_anti_lag(struct radv_device *device);
+
+void radv_device_finish_anti_lag(struct radv_device *device);
 
 #endif /* RADV_DEVICE_H */

@@ -194,6 +194,17 @@ struct vk_command_buffer {
 VK_DEFINE_HANDLE_CASTS(vk_command_buffer, base, VkCommandBuffer,
                        VK_OBJECT_TYPE_COMMAND_BUFFER)
 
+struct vk_command_buffer_init_params {
+   struct vk_command_pool *pool;
+   const struct vk_command_buffer_ops *ops;
+   VkCommandBufferLevel level;
+   bool needs_cmd_queue;
+};
+
+VkResult MUST_CHECK
+vk_command_buffer_init_with_params(struct vk_command_buffer *command_buffer,
+                                   struct vk_command_buffer_init_params *params);
+
 VkResult MUST_CHECK
 vk_command_buffer_init(struct vk_command_pool *pool,
                        struct vk_command_buffer *command_buffer,
@@ -241,6 +252,18 @@ vk_command_buffer_get_record_result(struct vk_command_buffer *command_buffer)
 
 #define vk_command_buffer_has_error(command_buffer) \
    unlikely((command_buffer)->record_result != VK_SUCCESS)
+
+VkCopyDeviceMemoryInfoKHR
+vk_upgrade_copy_buffer2(const VkCopyBufferInfo2* pCopyBufferInfo,
+                        VkDeviceMemoryCopyKHR *regions);
+
+VkCopyDeviceMemoryImageInfoKHR
+vk_upgrade_copy_buffer_to_image2(const VkCopyBufferToImageInfo2* pCopyBufferToImageInfo,
+                                 VkDeviceMemoryImageCopyKHR* regions);
+
+VkCopyDeviceMemoryImageInfoKHR
+vk_upgrade_copy_image_to_buffer2(const VkCopyImageToBufferInfo2* pCopyImageToBufferInfo,
+                                 VkDeviceMemoryImageCopyKHR* regions);
 
 #ifdef __cplusplus
 }

@@ -129,7 +129,7 @@ brw_compile_cs(const struct brw_compiler *compiler,
    const bool debug_enabled =
       brw_should_print_shader(nir, params->base.debug_flag ?
                                    params->base.debug_flag : DEBUG_CS,
-                                   params->base.source_hash);
+                                   prog_data->base.source_hash);
 
    brw_prog_data_init(&prog_data->base, &params->base);
 
@@ -137,6 +137,17 @@ brw_compile_cs(const struct brw_compiler *compiler,
       prog_data->local_size[0] = nir->info.workgroup_size[0];
       prog_data->local_size[1] = nir->info.workgroup_size[1];
       prog_data->local_size[2] = nir->info.workgroup_size[2];
+
+      if (nir->info.workgroup_size[0] * nir->info.workgroup_size[1] % 32 == 0) {
+         struct nir_shader_compiler_options *options =
+            ralloc(nir, struct nir_shader_compiler_options);
+
+         *options = *nir->options;
+         options->divergence_analysis_options = nir_divergence_options(
+            options->divergence_analysis_options |
+            nir_divergence_uniform_local_invocation_id_z);
+         nir->options = options;
+      }
    }
 
    brw_pass_tracker pt_ = {
@@ -182,13 +193,14 @@ brw_compile_cs(const struct brw_compiler *compiler,
          .nir = shader,
          .dispatch_width = dispatch_width,
          .compiler = compiler,
+         .key = &key->base,
          .archiver = params->base.archiver,
       };
 
       BRW_NIR_SNAPSHOT("first");
       brw_nir_apply_key(pt, &key->base, dispatch_width);
 
-      brw_nir_optimize(pt);
+      brw_nir_optimize(pt, true);
       /* brw_nir_optimize undoes late lowerings. */
       BRW_NIR_PASS(nir_opt_algebraic_late);
       brw_postprocess_nir_out_of_ssa(pt, debug_enabled);
@@ -223,7 +235,9 @@ brw_compile_cs(const struct brw_compiler *compiler,
              !nir->info.workgroup_size_variable)
             break;
       } else {
-         simd_state.error[simd] = ralloc_strdup(params->base.mem_ctx, v[simd]->fail_msg);
+         brw_simd_mark_failed(simd_state, simd,
+                              ralloc_strdup(params->base.mem_ctx,
+                                            v[simd]->fail_msg));
          if (simd > 0) {
             brw_shader_perf_log(compiler, params->base.log_data,
                                 "SIMD%u shader failed to compile: %s\n",

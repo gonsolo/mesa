@@ -71,7 +71,8 @@ bool zink_tracing = false;
 #else
 #include <unistd.h>
 #if DETECT_OS_APPLE
-#define VK_LIBNAME "libvulkan.1.dylib"
+/* See the vulkan-loader-rpath meson option for how to specify rpath at build time. */
+#define VK_LIBNAME "@rpath/libvulkan.1.dylib"
 #elif DETECT_OS_ANDROID
 #define VK_LIBNAME "libvulkan.so"
 #else
@@ -727,6 +728,23 @@ zink_init_screen_caps(struct zink_screen *screen)
 
    u_init_pipe_screen_caps(&screen->base, screen->is_cpu ? 0 : 1);
 
+   /* Vulkan spec says the builtins count, so make GL count them towards
+    * link-failing.
+    *
+    * "The number of input and output locations available for a shader input or
+    *  output interface depend on the shader stage as described in Shader Input
+    *  and Output Locations.  All variables in both the built-in interface block
+    *  and the user-defined variable interface count against these limits."
+    *
+    * MESA_SHADER_TESS_CTRL is left as default, because that mask is the
+    * per-patch built-ins rather than fixed-function outputs, and the limit it
+    * applies to is maxTessellationControlPerVertexOutputComponents.
+    */
+   caps->ignored_output_varyings[MESA_SHADER_VERTEX] =
+   caps->ignored_output_varyings[MESA_SHADER_TESS_EVAL] =
+   caps->ignored_output_varyings[MESA_SHADER_GEOMETRY] =
+   caps->ignored_output_varyings[MESA_SHADER_MESH] = 0;
+
    caps->null_textures = screen->info.rb_image_feats.robustImageAccess;
    /* support OVR_multiview and OVR_multiview2 */
    caps->multiview = screen->info.feats11.multiview * 2;
@@ -1148,6 +1166,22 @@ zink_init_screen_caps(struct zink_screen *screen)
    caps->max_varyings =
       MIN2(screen->info.props.limits.maxVertexOutputComponents / 4 / 2, 16);
 
+   /* On drivers that report a maxVertexOutputComponents value of 64 the
+    * streamout reservation can lead to the max_varyings falling below the spec
+    * required minimum value. However on specific drivers as long as the
+    * outputs above this limit are only used for streamout this will still work
+    * (this is due to these drivers also not supporting geometry and
+    * tessellation shaders). So configure a value that meets the spec minimum
+    * value.
+    */
+   if ((zink_driverid(screen) == VK_DRIVER_ID_IMAGINATION_OPEN_SOURCE_MESA ||
+        zink_driverid(screen) == VK_DRIVER_ID_MESA_TURNIP) &&
+       screen->info.props.limits.maxVertexOutputComponents == 64){
+      assert(screen->info.feats.features.geometryShader == VK_FALSE);
+      assert(screen->info.feats.features.tessellationShader == VK_FALSE);
+      caps->max_varyings = 16;
+   }
+
    caps->dmabuf =
 #if defined(HAVE_LIBDRM) && (DETECT_OS_LINUX || DETECT_OS_BSD)
       screen->info.have_KHR_external_memory_fd &&
@@ -1212,6 +1246,10 @@ zink_init_screen_caps(struct zink_screen *screen)
 
    caps->max_texture_lod_bias = screen->info.props.limits.maxSamplerLodBias;
 
+   /* supporting negative offsets in software is non-trivial */
+   if (zink_driverid(screen) != VK_DRIVER_ID_MESA_LLVMPIPE)
+      caps->signed_vertex_buffer_offset = screen->info.have_KHR_device_address_commands;
+
    /* not about to deal with mesh + non-optimal */
    caps->mesh_shader = screen->info.have_EXT_mesh_shader && screen->optimal_keys;
 
@@ -1258,6 +1296,24 @@ zink_init_screen_caps(struct zink_screen *screen)
          caps->shader_subgroup_supported_stages = screen->info.subgroup.supportedStages & BITFIELD_MASK(MESA_SHADER_STAGES);
       caps->shader_subgroup_supported_features = screen->info.subgroup.supportedOperations & PIPE_SHADER_SUBGROUP_FEATURE_MASK;
       caps->shader_subgroup_quad_all_stages = screen->info.subgroup.quadOperationsInAllStages;
+   }
+
+   /* Vulkan supports only 4 byte clears */
+   caps->hw_clear_buffer_sizes = 4;
+
+   switch (screen->info.props.deviceType) {
+   case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+      caps->device_type = PIPE_DEVICE_TYPE_INTEGRATED_GPU;
+      break;
+   case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+      caps->device_type = PIPE_DEVICE_TYPE_DISCRETE_GPU;
+      break;
+   case VK_PHYSICAL_DEVICE_TYPE_CPU:
+      caps->device_type = PIPE_DEVICE_TYPE_CPU;
+      break;
+   default:
+      caps->device_type = PIPE_DEVICE_TYPE_UNKNOWN;
+      break;
    }
 }
 
@@ -1792,6 +1848,14 @@ choose_pdev(struct zink_screen *screen, int64_t dev_major, int64_t dev_minor, ui
       else
          idx = zink_get_display_device(screen, pdev_count, pdevs, dev_major,
                                        dev_minor);
+      /* Not all Vulkan implementations expose DRM device information through
+       * VK_EXT_physical_device_drm. When DRM matching is requested with a
+       * valid render node and only a single Vulkan physical device is
+       * available, select that device rather than failing due to the lack
+       * of DRM metadata.
+       */
+      if (idx == -1 && !adapter_luid && !cpu && pdev_count == 1)
+         idx = 0;
 
       if (idx != -1)
          /* valid cpu device */
@@ -1851,7 +1915,7 @@ update_queue_props(struct zink_screen *screen)
       mesa_loge("ZINK: failed to allocate props!");
       return;
    }
-      
+
    VKSCR(GetPhysicalDeviceQueueFamilyProperties)(screen->pdev, &num_queues, props);
 
    bool found_gfx = false;
@@ -1904,7 +1968,8 @@ zink_flush_frontbuffer(struct pipe_screen *pscreen,
 
    if (!zink_kopper_acquired(res->obj->dt, res->obj->dt_idx)) {
       /* swapbuffers to an undefined surface: acquire and present garbage */
-      zink_kopper_acquire(ctx, res, UINT64_MAX);
+      if (!zink_kopper_acquire(ctx, res, UINT64_MAX))
+         return;
       zink_resource_reference(&ctx->needs_present, res);
       /* set batch usage to submit acquire semaphore */
       zink_batch_resource_usage_set(ctx->bs, res, true, false);
@@ -1916,10 +1981,6 @@ zink_flush_frontbuffer(struct pipe_screen *pscreen,
    if (ctx->swapchain || ctx->needs_present) {
       ctx->bs->has_work = true;
       pctx->flush(pctx, NULL, PIPE_FLUSH_END_OF_FRAME);
-      if (ctx->last_batch_state && screen->threaded_submit) {
-         struct zink_batch_state *bs = ctx->last_batch_state;
-         util_queue_fence_wait(&bs->flush_completed);
-      }
    }
    res->use_damage = false;
 
@@ -2217,6 +2278,9 @@ retry:
       }
 
       if (screen->info.have_EXT_image_drm_format_modifier && mod_props.drmFormatModifierCount) {
+         /* The A8_UNORM workaround below can retry this query for the same pformat. */
+         ralloc_free(screen->modifier_props[pformat].pDrmFormatModifierProperties);
+
          screen->modifier_props[pformat].drmFormatModifierCount = mod_props.drmFormatModifierCount;
          screen->modifier_props[pformat].pDrmFormatModifierProperties = ralloc_array(screen, VkDrmFormatModifierPropertiesEXT, mod_props.drmFormatModifierCount);
          if (mod_props.pDrmFormatModifierProperties) {
@@ -2604,7 +2668,7 @@ zink_query_memory_info(struct pipe_screen *pscreen, struct pipe_memory_info *inf
       VKSCR(GetPhysicalDeviceMemoryProperties2)(screen->pdev, &mem);
 
       for (unsigned i = 0; i < mem.memoryProperties.memoryHeapCount; i++) {
-         if (mem.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
+         if (mem.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT && !screen->is_cpu) {
             /* VRAM */
             info->total_device_memory += mem.memoryProperties.memoryHeaps[i].size / 1024;
             info->avail_device_memory += (mem.memoryProperties.memoryHeaps[i].size - budget.heapUsage[i]) / 1024;
@@ -2910,6 +2974,7 @@ init_driver_workarounds(struct zink_screen *screen)
    case VK_DRIVER_ID_MESA_V3DV:
    case VK_DRIVER_ID_MESA_PANVK:
    case VK_DRIVER_ID_MESA_NVK:
+   case VK_DRIVER_ID_MESA_KOSMICKRISP:
    case VK_DRIVER_ID_QUALCOMM_PROPRIETARY:
       screen->driver_workarounds.implicit_sync = false;
       break;
@@ -3081,11 +3146,13 @@ init_driver_workarounds(struct zink_screen *screen)
    case VK_DRIVER_ID_MESA_TURNIP:
    case VK_DRIVER_ID_MESA_PANVK:
    case VK_DRIVER_ID_MESA_V3DV:
+   case VK_DRIVER_ID_IMAGINATION_OPEN_SOURCE_MESA:
    case VK_DRIVER_ID_IMAGINATION_PROPRIETARY:
    case VK_DRIVER_ID_QUALCOMM_PROPRIETARY:
    case VK_DRIVER_ID_BROADCOM_PROPRIETARY:
    case VK_DRIVER_ID_ARM_PROPRIETARY:
    case VK_DRIVER_ID_MESA_HONEYKRISP:
+   case VK_DRIVER_ID_MESA_KOSMICKRISP:
       screen->driver_workarounds.track_renderpasses = true; //screen->info.primgen_feats.primitivesGeneratedQueryWithRasterizerDiscard
       break;
    default:
@@ -3133,6 +3200,10 @@ init_driver_workarounds(struct zink_screen *screen)
       /* Interpolation is not consistent between two triangles of a rectangle. */
       screen->driver_workarounds.inconsistent_interpolation = true;
       break;
+   case VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA:
+   case VK_DRIVER_ID_MESA_TURNIP:
+      screen->driver_workarounds.inconsistent_interpolation = true;
+      break;
    default:
       break;
    }
@@ -3173,6 +3244,9 @@ init_driver_workarounds(struct zink_screen *screen)
 
    if (zink_debug & ZINK_DEBUG_NOGENERAL)
       screen->driver_workarounds.general_layout = false;
+
+   if (!screen->info.have_EXT_vertex_input_dynamic_state || !screen->info.have_EXT_transform_feedback)
+      screen->info.have_KHR_device_address_commands = false;
 
    if (!screen->resizable_bar)
       screen->info.have_EXT_host_image_copy = false;
@@ -3543,8 +3617,6 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
       /* determine if vis vram is roughly equal to total vram */
       if (biggest_vis_vram > biggest_vram * 0.9)
          screen->resizable_bar = true;
-      if (biggest_vis_vram >= 8ULL * 1024ULL * 1024ULL * 1024ULL)
-         screen->always_cached_upload = true;
    }
 
    setup_renderdoc(screen);

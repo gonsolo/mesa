@@ -17,6 +17,10 @@
 #include "ac_rgp.h"
 #include "ac_sqtt.h"
 
+#define SI_SQTT_TIMESTAMP_SIZE   8
+#define SI_SQTT_QUEUE_GRAPHICS   1
+#define SI_SQTT_QUEUE_COMPUTE    2
+
 static void
 si_emit_spi_config_cntl(struct si_context *sctx,
                         struct radeon_cmdbuf *cs, bool enable);
@@ -24,17 +28,16 @@ si_emit_spi_config_cntl(struct si_context *sctx,
 static bool si_sqtt_init_bo(struct si_context *sctx)
 {
    unsigned max_se = sctx->screen->info.max_se;
-   uint64_t per_se_size, size;
+   uint64_t size;
 
-   /* The buffer size and address need to be aligned in HW regs. Align the
-    * size as early as possible so that we do all the allocation & addressing
-    * correctly. */
-   per_se_size = align64(sctx->sqtt->buffer_size, 1ull << SQTT_BUFFER_ALIGN_SHIFT);
+   /* The buffer size and address need to be aligned in HW regs. The size is
+    * aligned when it is set. */
+   assert(!(sctx->sqtt->buffer_size & ((1u << SQTT_BUFFER_ALIGN_SHIFT) - 1)));
 
    /* Compute total size of the thread trace BO for all SEs. */
    size = align64(sizeof(struct ac_sqtt_data_info) * max_se,
                   1ull << SQTT_BUFFER_ALIGN_SHIFT);
-   size += per_se_size * (uint64_t)max_se;
+   size += sctx->sqtt->buffer_size * (uint64_t)max_se;
 
    if (size > UINT32_MAX)
       return false;
@@ -46,6 +49,30 @@ static bool si_sqtt_init_bo(struct si_context *sctx)
       return false;
 
    sctx->sqtt->buffer_va = si_resource(sctx->sqtt->bo)->gpu_address;
+
+   return true;
+}
+
+static bool si_sqtt_add_queue_info_record(struct si_context *sctx)
+{
+   struct rgp_queue_info *queue_info = &sctx->sqtt->rgp_queue_info;
+   struct rgp_queue_info_record *record;
+
+   record = calloc(1, sizeof(*record));
+   if (!record)
+      return false;
+
+   record->queue_id = (uintptr_t)sctx;
+   record->queue_context = (uintptr_t)sctx->ctx;
+   record->hardware_info.engine_type = sctx->is_gfx_queue ? SQTT_ENGINE_TYPE_UNIVERSAL
+                                                          : SQTT_ENGINE_TYPE_COMPUTE;
+   record->hardware_info.queue_type = sctx->is_gfx_queue ? SQTT_QUEUE_TYPE_UNIVERSAL
+                                                         : SQTT_QUEUE_TYPE_COMPUTE;
+
+   simple_mtx_lock(&queue_info->lock);
+   list_addtail(&record->list, &queue_info->record);
+   queue_info->record_count++;
+   simple_mtx_unlock(&queue_info->lock);
 
    return true;
 }
@@ -87,8 +114,8 @@ static void si_emit_sqtt_stop(struct si_context *sctx, struct radeon_cmdbuf *cs,
    if (sctx->screen->info.has_sqtt_rb_harvest_bug) {
       /* Some chips with disabled RBs should wait for idle because FINISH_DONE
        * doesn't work. */
-      sctx->barrier_flags |= SI_BARRIER_SYNC_AND_INV_CB | SI_BARRIER_SYNC_AND_INV_DB |
-                             SI_BARRIER_SYNC_CS;
+      sctx->barrier_flags |= AC_BARRIER_SYNC_AND_INV_CB | AC_BARRIER_SYNC_AND_INV_DB |
+                             AC_BARRIER_SYNC_CS;
       sctx->emit_barrier(sctx, cs);
    }
 
@@ -127,10 +154,10 @@ static void si_sqtt_start(struct si_context *sctx, struct radeon_cmdbuf *cs)
    si_cp_dma_wait_for_idle(sctx, cs);
 
    /* Make sure to wait-for-idle before starting SQTT. */
-   sctx->barrier_flags |= SI_BARRIER_SYNC_PS | SI_BARRIER_SYNC_CS |
-                          SI_BARRIER_INV_ICACHE | SI_BARRIER_INV_SMEM |
-                          SI_BARRIER_INV_VMEM | SI_BARRIER_INV_L2 |
-                          SI_BARRIER_PFP_SYNC_ME;
+   sctx->barrier_flags |= AC_BARRIER_SYNC_PS | AC_BARRIER_SYNC_CS |
+                          AC_BARRIER_INV_ICACHE | AC_BARRIER_INV_SMEM |
+                          AC_BARRIER_INV_VMEM | AC_BARRIER_INV_L2 |
+                          AC_BARRIER_PFP_SYNC_ME;
    sctx->emit_barrier(sctx, cs);
 
    si_inhibit_clockgating(sctx, cs, true);
@@ -186,10 +213,10 @@ static void si_sqtt_stop(struct si_context *sctx, struct radeon_cmdbuf *cs)
       ac_emit_spm_stop(&cs->current, AMD_IP_GFX, &sctx->screen->info);
 
    /* Make sure to wait-for-idle before stopping SQTT. */
-   sctx->barrier_flags |= SI_BARRIER_SYNC_PS | SI_BARRIER_SYNC_CS |
-                          SI_BARRIER_INV_ICACHE | SI_BARRIER_INV_SMEM |
-                          SI_BARRIER_INV_VMEM | SI_BARRIER_INV_L2 |
-                          SI_BARRIER_PFP_SYNC_ME;
+   sctx->barrier_flags |= AC_BARRIER_SYNC_PS | AC_BARRIER_SYNC_CS |
+                          AC_BARRIER_INV_ICACHE | AC_BARRIER_INV_SMEM |
+                          AC_BARRIER_INV_VMEM | AC_BARRIER_INV_L2 |
+                          AC_BARRIER_PFP_SYNC_ME;
    sctx->emit_barrier(sctx, cs);
 
    si_emit_sqtt_stop(sctx, cs, ip_type);
@@ -268,20 +295,22 @@ si_sqtt_resize_bo(struct si_context *sctx)
 }
 
 static bool si_get_sqtt_trace(struct si_context *sctx,
-                              struct ac_sqtt_trace *sqtt)
+                              struct ac_sqtt_trace *sqtt,
+                              struct pipe_transfer **transfer)
 {
-   struct pipe_transfer *transfer;
    struct pipe_resource *bo = sctx->sqtt->bo;
 
    memset(sqtt, 0, sizeof(*sqtt));
 
-   sctx->sqtt->ptr = pipe_buffer_map(&sctx->b, bo, PIPE_MAP_READ, &transfer);
+   sctx->sqtt->ptr = pipe_buffer_map(&sctx->b, bo, PIPE_MAP_READ, transfer);
 
    if (!sctx->sqtt->ptr)
       return false;
 
    if (!ac_sqtt_get_trace(sctx->sqtt, &sctx->screen->info, sqtt)) {
-      pipe_buffer_unmap(&sctx->b, transfer);
+      pipe_buffer_unmap(&sctx->b, *transfer);
+      *transfer = NULL;
+      sctx->sqtt->ptr = NULL;
 
       if (!si_sqtt_resize_bo(sctx)) {
          mesa_loge("Failed to resize the SQTT buffer.");
@@ -295,7 +324,6 @@ static bool si_get_sqtt_trace(struct si_context *sctx,
       return false;
    }
 
-   pipe_buffer_unmap(&sctx->b, transfer);
    return true;
 }
 
@@ -308,6 +336,8 @@ bool si_init_sqtt(struct si_context *sctx)
    }
 
    sctx->sqtt = CALLOC_STRUCT(ac_sqtt);
+
+   list_inithead(&sctx->sqtt_timestamp.list);
 
    if (sctx->gfx_level < GFX8) {
       mesa_loge("GPU hardware not supported: refer to "
@@ -327,6 +357,10 @@ bool si_init_sqtt(struct si_context *sctx)
 
    sctx->sqtt->instruction_timing_enabled =
       debug_get_bool_option("AMD_THREAD_TRACE_INSTRUCTION_TIMING", true);
+   sctx->sqtt->instruction_timing_se_mask =
+      sctx->sqtt->instruction_timing_enabled
+         ? (uint32_t)debug_get_num_option("AMD_THREAD_TRACE_INSTRUCTION_TIMING_SE_MASK", ~0u)
+         : 0;
    sctx->sqtt->start_frame = 10;
 
    const char *trigger = os_get_option("AMD_THREAD_TRACE_TRIGGER");
@@ -355,10 +389,61 @@ bool si_init_sqtt(struct si_context *sctx)
    }
 
    si_sqtt_init_cs(sctx);
+   if (!si_sqtt_add_queue_info_record(sctx))
+      mesa_loge("Failed to add queue info record");
 
    sctx->sqtt_next_event = EventInvalid;
+   sctx->sqtt_cb_id = 0;
+   sctx->sqtt_device_id = ((uint64_t)sctx->screen->info.pci.domain << 48) |
+                          ((uint64_t)sctx->screen->info.pci.bus << 40)    |
+                          ((uint64_t)sctx->screen->info.pci.dev << 35)    |
+                          ((uint64_t)sctx->screen->info.pci.func << 32)   |
+                          ((uint64_t)sctx->screen->info.pci_id);
+
+   /* TODO: Proper clock calibration */
+   uint64_t cpu_timestamp = os_time_get_nano();
+   uint64_t gpu_timestamp = sctx->ws->query_value(sctx->ws, RADEON_TIMESTAMP);   
+   ac_sqtt_add_clock_calibration(sctx->sqtt, cpu_timestamp, gpu_timestamp);
+
+   uint64_t shader_clock_freq, memory_clock_freq;
+   shader_clock_freq = sctx->ws->query_value(sctx->ws, RADEON_CURRENT_SCLK);
+   memory_clock_freq = sctx->ws->query_value(sctx->ws, RADEON_CURRENT_MCLK);
+   ac_sqtt_set_gpu_trace_clocks(sctx->sqtt, shader_clock_freq, memory_clock_freq); 
 
    return true;
+}
+
+static void si_sqtt_reset_queue_state(struct si_context *sctx)
+{
+   struct rgp_clock_calibration *clock_calibration = &sctx->sqtt->rgp_clock_calibration;
+   struct rgp_queue_event *queue_event = &sctx->sqtt->rgp_queue_event;
+
+   simple_mtx_lock(&clock_calibration->lock);
+   list_for_each_entry_safe (struct rgp_clock_calibration_record, record, &clock_calibration->record, list) {
+      clock_calibration->record_count--;
+      list_del(&record->list);
+      free(record);
+   }
+   simple_mtx_unlock(&clock_calibration->lock);
+
+   simple_mtx_lock(&queue_event->lock);
+   list_for_each_entry_safe (struct rgp_queue_event_record, record,
+                             &queue_event->record, list) {
+      list_del(&record->list);
+      queue_event->record_count--;
+      free(record);
+   }
+   simple_mtx_unlock(&queue_event->lock);
+
+   list_for_each_entry_safe (struct si_sqtt_timestamp, timestamp,
+                             &sctx->sqtt_timestamp.list, list) {
+      si_resource_reference(&timestamp->bo, NULL);
+      list_del(&timestamp->list);
+      free(timestamp);
+   }
+
+   sctx->sqtt_timestamp.offset = 0;
+   sctx->sqtt_cb_id = 0;
 }
 
 void si_destroy_sqtt(struct si_context *sctx)
@@ -370,14 +455,17 @@ void si_destroy_sqtt(struct si_context *sctx)
    free(sctx->sqtt->trigger_file);
 
    for (int i = 0; i < ARRAY_SIZE(sctx->sqtt->start_cs); i++) {
-      sscreen->ws->cs_destroy(sctx->sqtt->start_cs[i]);
-      sscreen->ws->cs_destroy(sctx->sqtt->stop_cs[i]);
+      if (sctx->sqtt->start_cs[i])
+         sscreen->ws->cs_destroy(sctx->sqtt->start_cs[i]);
+      if (sctx->sqtt->stop_cs[i])
+         sscreen->ws->cs_destroy(sctx->sqtt->stop_cs[i]);
    }
 
    struct rgp_pso_correlation *pso_correlation =
       &sctx->sqtt->rgp_pso_correlation;
    struct rgp_loader_events *loader_events = &sctx->sqtt->rgp_loader_events;
    struct rgp_code_object *code_object = &sctx->sqtt->rgp_code_object;
+   struct rgp_queue_info *queue_info = &sctx->sqtt->rgp_queue_info;
    list_for_each_entry_safe (struct rgp_pso_correlation_record, record,
                              &pso_correlation->record, list) {
       list_del(&record->list);
@@ -389,6 +477,13 @@ void si_destroy_sqtt(struct si_context *sctx)
                              &loader_events->record, list) {
       list_del(&record->list);
       loader_events->record_count--;
+      free(record);
+   }
+
+   list_for_each_entry_safe (struct rgp_queue_info_record, record,
+                             &queue_info->record, list) {
+      list_del(&record->list);
+      queue_info->record_count--;
       free(record);
    }
 
@@ -407,7 +502,10 @@ void si_destroy_sqtt(struct si_context *sctx)
       code_object->record_count--;
    }
 
+   si_sqtt_reset_queue_state(sctx);
    ac_sqtt_finish(sctx->sqtt);
+
+   si_resource_reference(&sctx->sqtt_timestamp.bo, NULL);
 
    hash_table_foreach (&sctx->sqtt->pipeline_bos->table, entry) {
       struct si_sqtt_fake_pipeline *pipeline =
@@ -463,6 +561,7 @@ void si_handle_sqtt(struct si_context *sctx, struct radeon_cmdbuf *rcs)
       }
    } else {
       struct ac_sqtt_trace sqtt_trace = {0};
+      struct pipe_transfer *transfers[2];
 
       /* Stop SQTT */
       si_end_sqtt(sctx, rcs);
@@ -473,13 +572,12 @@ void si_handle_sqtt(struct si_context *sctx, struct radeon_cmdbuf *rcs)
       /* Wait for SQTT to finish and read back the bo */
       if (sctx->ws->fence_wait(sctx->ws, sctx->last_sqtt_fence,
                                OS_TIMEOUT_INFINITE) &&
-          si_get_sqtt_trace(sctx, &sqtt_trace)) {
-         struct pipe_transfer *transfer;
+          si_get_sqtt_trace(sctx, &sqtt_trace, &transfers[0])) {
          struct ac_spm_trace spm_trace;
 
          /* Map the SPM counter buffer */
          if (sctx->spm.bo)
-            sctx->spm.ptr = pipe_buffer_map(&sctx->b, sctx->spm.bo, PIPE_MAP_READ, &transfer);
+            sctx->spm.ptr = pipe_buffer_map(&sctx->b, sctx->spm.bo, PIPE_MAP_READ, &transfers[1]);
 
          if (sctx->spm.ptr)
             ac_spm_get_trace(&sctx->spm, &spm_trace);
@@ -488,9 +586,12 @@ void si_handle_sqtt(struct si_context *sctx, struct radeon_cmdbuf *rcs)
                              sctx->spm.ptr ? &spm_trace : NULL, NULL);
 
          if (sctx->spm.ptr) {
-            pipe_buffer_unmap(&sctx->b, transfer);
+            pipe_buffer_unmap(&sctx->b, transfers[1]);
             sctx->spm.ptr = NULL;
          }
+
+         pipe_buffer_unmap(&sctx->b, transfers[0]);
+         sctx->sqtt->ptr = NULL;
       } else if (sctx->sqtt->bo) {
          if (!sctx->sqtt->trigger_file) {
             sctx->sqtt->start_frame = num_frames + 10;
@@ -500,6 +601,7 @@ void si_handle_sqtt(struct si_context *sctx, struct radeon_cmdbuf *rcs)
          si_begin_sqtt(sctx, rcs);
          sctx->sqtt_enabled = true;
       }
+      si_sqtt_reset_queue_state(sctx);
    }
 
    num_frames++;
@@ -547,7 +649,7 @@ void si_sqtt_write_event_marker(struct si_context *sctx, struct radeon_cmdbuf *r
    marker.identifier = RGP_SQTT_MARKER_IDENTIFIER_EVENT;
    marker.api_type = api_type == EventInvalid ? EventCmdDraw : api_type;
    marker.cmd_id = num_events++;
-   marker.cb_id = 0;
+   marker.cb_id = sctx->sqtt_cb_id;
 
    if (vertex_offset_user_data == UINT_MAX ||
        instance_offset_user_data == UINT_MAX) {
@@ -576,7 +678,7 @@ void si_write_event_with_dims_marker(struct si_context *sctx, struct radeon_cmdb
    marker.event.identifier = RGP_SQTT_MARKER_IDENTIFIER_EVENT;
    marker.event.api_type = api_type;
    marker.event.cmd_id = num_events++;
-   marker.event.cb_id = 0;
+   marker.event.cb_id = sctx->sqtt_cb_id;
    marker.event.has_thread_dims = 1;
 
    marker.thread_x = x;
@@ -592,47 +694,21 @@ void si_sqtt_describe_barrier_start(struct si_context *sctx, struct radeon_cmdbu
    struct rgp_sqtt_marker_barrier_start marker = {0};
 
    marker.identifier = RGP_SQTT_MARKER_IDENTIFIER_BARRIER_START;
-   marker.cb_id = 0;
+   marker.cb_id = sctx->sqtt_cb_id;
    marker.dword02 = 0xC0000000 + 10; /* RGP_BARRIER_INTERNAL_BASE */
 
    si_emit_sqtt_userdata(sctx, rcs, &marker, sizeof(marker) / 4);
 }
 
 void si_sqtt_describe_barrier_end(struct si_context *sctx, struct radeon_cmdbuf *rcs,
-                                  unsigned flags)
+                                  enum ac_rgp_flush_bits flush_bits)
 {
    struct rgp_sqtt_marker_barrier_end marker = {0};
 
    marker.identifier = RGP_SQTT_MARKER_IDENTIFIER_BARRIER_END;
-   marker.cb_id = 0;
+   marker.cb_id = sctx->sqtt_cb_id;
 
-   if (flags & SI_BARRIER_SYNC_VS)
-      marker.vs_partial_flush = true;
-   if (flags & SI_BARRIER_SYNC_PS)
-      marker.ps_partial_flush = true;
-   if (flags & SI_BARRIER_SYNC_CS)
-      marker.cs_partial_flush = true;
-
-   if (flags & SI_BARRIER_PFP_SYNC_ME)
-      marker.pfp_sync_me = true;
-
-   if (flags & SI_BARRIER_INV_VMEM)
-      marker.inval_tcp = true;
-   if (flags & SI_BARRIER_INV_ICACHE)
-      marker.inval_sqI = true;
-   if (flags & SI_BARRIER_INV_SMEM)
-      marker.inval_sqK = true;
-   if (flags & SI_BARRIER_INV_L2)
-      marker.inval_tcc = true;
-
-   if (flags & SI_BARRIER_SYNC_AND_INV_CB) {
-      marker.inval_cb = true;
-      marker.flush_cb = true;
-   }
-   if (flags & SI_BARRIER_SYNC_AND_INV_DB) {
-      marker.inval_db = true;
-      marker.flush_db = true;
-   }
+   ac_rgp_flush_bits_to_barrier_marker(flush_bits, &marker);
 
    si_emit_sqtt_userdata(sctx, rcs, &marker, sizeof(marker) / 4);
 }
@@ -659,7 +735,7 @@ void si_write_user_event(struct si_context *sctx, struct radeon_cmdbuf *rcs,
       uint8_t *buffer = alloca(sizeof(marker) + marker.length);
       memcpy(buffer, &marker, sizeof(marker));
       memcpy(buffer + sizeof(marker), str, len);
-      buffer[sizeof(marker) + len - 1] = '\0';
+      memset(buffer + sizeof(marker) + len, 0, marker.length - len);
 
       si_emit_sqtt_userdata(sctx, rcs, buffer,
                             sizeof(marker) / 4 + marker.length / 4);
@@ -828,10 +904,122 @@ void si_sqtt_describe_pipeline_bind(struct si_context *sctx,
    }
 
    marker.identifier = RGP_SQTT_MARKER_IDENTIFIER_BIND_PIPELINE;
-   marker.cb_id = 0;
+   marker.cb_id = sctx->sqtt_cb_id;
    marker.bind_point = bind_point;
    marker.api_pso_hash[0] = pipeline_hash;
    marker.api_pso_hash[1] = pipeline_hash >> 32;
 
    si_emit_sqtt_userdata(sctx, cs, &marker, sizeof(marker) / 4);
+}
+
+void si_sqtt_describe_begin(struct si_context *sctx, struct radeon_cmdbuf *rcs)
+{
+   enum amd_ip_type ip_type = sctx->ws->cs_get_ip_type(rcs);
+   
+   if (!sctx->sqtt)
+      return;
+
+   unsigned bo_size = sctx->sqtt_timestamp.bo ? sctx->sqtt_timestamp.bo->bo_size : 0;
+
+   if (sctx->sqtt_timestamp.offset + 2 * SI_SQTT_TIMESTAMP_SIZE > bo_size) {
+      uint8_t *map;
+      uint64_t new_size;
+      new_size = MAX2(4096, 2 * bo_size);
+
+      struct si_resource *ts_bo = NULL;
+      ts_bo = si_aligned_buffer_create(&sctx->screen->b, SI_RESOURCE_FLAG_DRIVER_INTERNAL,
+                                       PIPE_USAGE_STAGING, new_size, 4096);
+
+      if (!ts_bo) {
+         mesa_loge("Failed to create a timestamp buffer for SQTT.");
+         goto fail;
+      }
+
+      map = si_buffer_map(sctx, ts_bo, PIPE_MAP_READ);
+      if (!map) {
+         si_resource_reference(&ts_bo, NULL);
+         mesa_loge("Failed to map the timestamp buffer for SQTT.");
+         goto fail;
+      }
+
+      if (sctx->sqtt_timestamp.bo) {
+         struct si_sqtt_timestamp *new_timestamp;
+
+         new_timestamp = malloc(sizeof(*new_timestamp));
+         if (!new_timestamp) {
+            si_resource_reference(&ts_bo, NULL);
+            goto fail;
+         }
+
+         memcpy(new_timestamp, &sctx->sqtt_timestamp, sizeof(*new_timestamp));
+         list_add(&new_timestamp->list, &sctx->sqtt_timestamp.list);
+      }
+
+      sctx->sqtt_timestamp.bo = ts_bo;
+      sctx->sqtt_timestamp.offset = 0;
+      sctx->sqtt_timestamp.map = map;
+   }
+
+   si_emit_ts(sctx, sctx->sqtt_timestamp.bo, sctx->sqtt_timestamp.offset);
+
+   union rgp_sqtt_marker_cb_id cb_id = ac_sqtt_get_next_cmdbuf_id(sctx->sqtt, ip_type);
+   sctx->sqtt_cb_id = cb_id.all;
+
+   struct rgp_sqtt_marker_cb_start marker = {0};
+   marker.identifier = RGP_SQTT_MARKER_IDENTIFIER_CB_START;
+   marker.cb_id = sctx->sqtt_cb_id;
+   marker.device_id_low = sctx->sqtt_device_id;
+   marker.device_id_high = sctx->sqtt_device_id >> 32;
+   marker.queue_flags = SI_SQTT_QUEUE_COMPUTE;
+   if (sctx->is_gfx_queue)
+      marker.queue_flags |= SI_SQTT_QUEUE_GRAPHICS;
+
+   si_emit_sqtt_userdata(sctx, &sctx->gfx_cs, &marker, sizeof(marker) / 4);
+   return;
+
+fail:
+   sctx->sqtt_cb_id = 0;
+   return;
+}
+
+void si_sqtt_describe_flush(struct si_context *sctx)
+{
+   if (!sctx->sqtt || !sctx->sqtt_cb_id)
+      return;
+
+   struct rgp_queue_event *queue_event = &sctx->sqtt->rgp_queue_event;
+   struct rgp_queue_event_record *record;
+
+   unsigned pre_offset = sctx->sqtt_timestamp.offset;
+   unsigned post_offset = pre_offset + SI_SQTT_TIMESTAMP_SIZE;
+
+   sctx->sqtt_timestamp.offset = post_offset + SI_SQTT_TIMESTAMP_SIZE;
+   si_emit_ts(sctx, sctx->sqtt_timestamp.bo, post_offset);
+
+   struct rgp_sqtt_marker_cb_end marker = {0};
+   marker.identifier = RGP_SQTT_MARKER_IDENTIFIER_CB_END;
+   marker.cb_id = sctx->sqtt_cb_id;
+   marker.device_id_low = sctx->sqtt_device_id;
+   marker.device_id_high = sctx->sqtt_device_id >> 32;
+   si_emit_sqtt_userdata(sctx, &sctx->gfx_cs, &marker, sizeof(marker) / 4);
+
+   record = calloc(1, sizeof(*record));
+   if (!record)
+      return;
+
+   simple_mtx_lock(&queue_event->lock);
+
+   record->event_type = SQTT_QUEUE_TIMING_EVENT_CMDBUF_SUBMIT;
+   record->sqtt_cb_id = sctx->sqtt_cb_id;
+   record->cpu_timestamp = os_time_get_nano();
+   record->gpu_timestamps[0] = (uint64_t *)(sctx->sqtt_timestamp.map + pre_offset);
+   record->gpu_timestamps[1] = (uint64_t *)(sctx->sqtt_timestamp.map + post_offset);
+   record->frame_index = num_frames;
+   record->api_id = queue_event->record_count;
+   record->queue_info_index = 0;
+   record->submit_sub_index = 0;
+
+   list_addtail(&record->list, &queue_event->record);
+   queue_event->record_count++;
+   simple_mtx_unlock(&queue_event->lock);
 }

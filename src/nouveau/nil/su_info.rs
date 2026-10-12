@@ -7,7 +7,7 @@
 use crate::format::Format;
 use crate::image::ViewType;
 use crate::image::{Image, SampleLayout, View, ViewAccess};
-use bitview::{BitMutView, SetField};
+use mesa_util::bitview::{BitMutView, SetField};
 use nil_rs_bindings::*;
 
 fn format_info(fmt: Format) -> Option<(u8, u8)> {
@@ -197,7 +197,7 @@ fn compute_ms_table(layout: SampleLayout) -> u32 {
     map
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nil_fill_su_info(
     dev: &nil_rs_bindings::nv_device_info,
     image: &Image,
@@ -304,7 +304,7 @@ pub extern "C" fn nil_fill_su_info(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nil_buffer_fill_su_info(
     _dev: &nil_rs_bindings::nv_device_info,
     base_address: u64,
@@ -327,7 +327,7 @@ pub extern "C" fn nil_buffer_fill_su_info(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nil_fill_null_su_info(
     _dev: &nil_rs_bindings::nv_device_info,
 ) -> SuInfo {

@@ -7,6 +7,8 @@ bvh_shaders = [
   'encode.comp',
   'header.comp',
   'copy.comp',
+  'update.comp',
+  'pair_triangles.comp',
 ]
 
 # A mapping: [filename version, GFX_VERx10 define version]
@@ -20,9 +22,9 @@ gfx_versions = [
 anv_bvh_include_dir = dir_source_root + '/src/intel/vulkan/bvh'
 
 anv_bvh_includes = files(
-  'anv_build_helpers.h',
-  'anv_build_interface.h',
-  'anv_bvh.h',
+  'anv_bvh_helpers.h',
+  'anv_bvh_defines.h',
+  'encode.h',
 )
 
 foreach shader : bvh_shaders
@@ -33,7 +35,7 @@ foreach shader : bvh_shaders
       prog_glslang, '-V', '-I' + vk_bvh_include_dir, '-I' + anv_bvh_include_dir,
       '--target-env', 'spirv1.5', '-x', '-o', '@OUTPUT@', '@INPUT@',
       '-DGFX_VERx10=' + define_ver # so that we can use this macro inside shaders
-    ]
+    ] + (with_mesa_debug ? ['-g'] : [])
     command += glslang_quiet
     command += vk_glsl_shader_preamble
 

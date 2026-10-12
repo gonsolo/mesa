@@ -169,10 +169,12 @@ _eglGetNativePlatform(void *nativeDisplay)
       detection_method = "autodetected";
    }
 
+#if defined(_EGL_NATIVE_PLATFORM)
    if (detected_platform == _EGL_INVALID_PLATFORM) {
       detected_platform = _EGL_NATIVE_PLATFORM;
       detection_method = "build-time configuration";
    }
+#endif
 
    _eglLog(_EGL_DEBUG, "Native platform type: %s (%s)",
            egl_platforms[detected_platform].name, detection_method);
@@ -296,6 +298,25 @@ out:
    simple_mtx_unlock(_eglGlobal.Mutex);
 
    return disp;
+}
+
+/**
+ * Apply the device given via EGL_DEVICE_EXT (EGL_EXT_explicit_device) to a
+ * display returned by _eglFindDisplay().
+ *
+ * This is a no-op for displays which have already been initialized since
+ * eglGetPlatformDisplay may be called again for a one (e.g., by another thing
+ * in the same process asking for the same native display). The display's device
+ * is assigned by the driver during eglInitialize, and overwriting it here
+ * (likely with NULL, since most callers do not pass EGL_DEVICE_EXT) would make
+ * eglQueryDisplayAttribEXT(EGL_DEVICE_EXT) return EGL_NO_DEVICE_EXT for the
+ * rest of the display's lifetime.
+ */
+static void
+_eglSetExplicitDevice(_EGLDisplay *dpy, _EGLDevice *dev)
+{
+   if (dpy && !dpy->Initialized)
+      dpy->Device = dev;
 }
 
 /**
@@ -509,9 +530,7 @@ _eglGetX11Display(Display *native_display, const EGLAttrib *attrib_list)
    }
 
    dpy = _eglFindDisplay(_EGL_PLATFORM_X11, native_display, attrib_list);
-   if (dpy) {
-      dpy->Device = dev;
-   }
+   _eglSetExplicitDevice(dpy, dev);
 
    return dpy;
 }
@@ -553,9 +572,7 @@ _eglGetXcbDisplay(xcb_connection_t *native_display,
    }
 
    dpy = _eglFindDisplay(_EGL_PLATFORM_XCB, native_display, attrib_list);
-   if (dpy) {
-      dpy->Device = dev;
-   }
+   _eglSetExplicitDevice(dpy, dev);
 
    return dpy;
 }
@@ -592,9 +609,7 @@ _eglGetGbmDisplay(struct gbm_device *native_display,
    }
 
    dpy = _eglFindDisplay(_EGL_PLATFORM_DRM, native_display, attrib_list);
-   if (dpy) {
-      dpy->Device = dev;
-   }
+   _eglSetExplicitDevice(dpy, dev);
 
    return dpy;
 }
@@ -631,9 +646,7 @@ _eglGetWaylandDisplay(struct wl_display *native_display,
    }
 
    dpy = _eglFindDisplay(_EGL_PLATFORM_WAYLAND, native_display, attrib_list);
-   if (dpy) {
-      dpy->Device = dev;
-   }
+   _eglSetExplicitDevice(dpy, dev);
 
    return dpy;
 }
@@ -674,9 +687,7 @@ _eglGetSurfacelessDisplay(void *native_display, const EGLAttrib *attrib_list)
    }
 
    dpy = _eglFindDisplay(_EGL_PLATFORM_SURFACELESS, NULL, attrib_list);
-   if (dpy) {
-      dpy->Device = dev;
-   }
+   _eglSetExplicitDevice(dpy, dev);
 
    return dpy;
 }

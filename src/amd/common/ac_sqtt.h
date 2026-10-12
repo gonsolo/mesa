@@ -41,10 +41,13 @@ struct ac_sqtt {
    void *bo;
    uint64_t buffer_va;
    void *ptr;
+   /* Per-SE, aligned size */
    uint32_t buffer_size;
+   bool capture_cancelled;
    int start_frame;
    char *trigger_file;
    bool instruction_timing_enabled;
+   uint32_t instruction_timing_se_mask;
 
    /* Shader/memory clock frequencies in Mhz sampled at trace time. */
    uint32_t trace_shader_core_clock;
@@ -94,6 +97,7 @@ struct ac_sqtt_trace {
 
    uint32_t trace_shader_core_clock;
    uint32_t trace_memory_clock;
+   uint32_t instruction_timing_se_mask;
 
    uint32_t num_traces;
    struct ac_sqtt_data_se traces[SQTT_MAX_TRACES];
@@ -526,9 +530,9 @@ struct rgp_sqtt_marker_pipeline_bind {
       struct {
          uint32_t identifier : 4;
          uint32_t ext_dwords : 3;
-         uint32_t bind_point : 1;
+         uint32_t bind_point : 2;
          uint32_t cb_id : 20;
-         uint32_t reserved : 4;
+         uint32_t reserved : 3;
       };
       uint32_t dword01;
    };

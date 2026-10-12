@@ -187,7 +187,7 @@ enum ac_tracked_reg
    AC_TRACKED_PA_SC_AA_MASK_X0Y0_X1Y0,
    AC_TRACKED_PA_SC_AA_MASK_X0Y1_X1Y1,
 
-   AC_TRACKED_UNUSED0, /* To force alignment */
+   AC_TRACKED_DB_Z_INFO,            /* only GFX11.x for RADV */
 
    AC_NUM_TRACKED_CONTEXT_REGS,
    AC_FIRST_TRACKED_OTHER_REG = AC_NUM_TRACKED_CONTEXT_REGS,
@@ -356,15 +356,6 @@ struct ac_tracked_regs {
 
 #define ac_cmdbuf_set_sh_reg(reg, value) __ac_cmdbuf_set_reg(reg, 0, value, SI_SH, PKT3_SET_SH_REG)
 
-#define ac_cmdbuf_set_sh_reg_idx(info, reg, idx, value)        \
-   do {                                                        \
-      assert((idx));                                           \
-      unsigned __opcode = PKT3_SET_SH_REG_INDEX;               \
-      if ((info)->gfx_level < GFX10)                           \
-         __opcode = PKT3_SET_SH_REG;                           \
-      __ac_cmdbuf_set_reg(reg, idx, value, SI_SH, __opcode);   \
-   } while (0)
-
 #define ac_cmdbuf_emit_32bit_pointer(sh_offset, va, info)         \
    do {                                                           \
       assert((va) == 0 || ((va) >> 32) == (info)->address32_hi);  \
@@ -507,6 +498,29 @@ struct ac_tracked_regs {
          tracked_regs->reg_value[(reg_enum)] = __value;                    \
          __cs->context_roll = true;                                        \
       }                                                                    \
+   } while (0)
+
+#define ac_cmdbuf_opt_set_ctx_reg_idx(tracked_regs, reg, idx, reg_enum, value)   \
+   do {                                                                          \
+      const uint32_t __value = (value);                                          \
+      if (!BITSET_TEST(tracked_regs->reg_saved_mask, (reg_enum)) ||              \
+          tracked_regs->reg_value[(reg_enum)] != __value) {                      \
+         ac_cmdbuf_set_ctx_reg_idx(reg, idx, __value);                           \
+         BITSET_SET(tracked_regs->reg_saved_mask, (reg_enum));                   \
+         tracked_regs->reg_value[(reg_enum)] = __value;                          \
+         __cs->context_roll = true;                                              \
+      }                                                                          \
+   } while (0)
+
+#define ac_cmdbuf_opt_set_ucfg_reg_idx(tracked_regs, info, reg, idx, reg_enum, value)   \
+   do {                                                                          \
+      const uint32_t __value = (value);                                          \
+      if (!BITSET_TEST(tracked_regs->reg_saved_mask, (reg_enum)) ||              \
+          tracked_regs->reg_value[(reg_enum)] != __value) {                      \
+         ac_cmdbuf_set_ucfg_reg_idx(info, reg, idx, __value);                    \
+         BITSET_SET(tracked_regs->reg_saved_mask, (reg_enum));                   \
+         tracked_regs->reg_value[(reg_enum)] = __value;                          \
+      }                                                                          \
    } while (0)
 
 #define ac_cmdbuf_opt_set_ctx_reg2(tracked_regs, reg, reg_enum, v1, v2)                                     \

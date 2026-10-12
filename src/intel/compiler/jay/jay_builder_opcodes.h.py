@@ -15,8 +15,9 @@ if TYPE_CHECKING:
 
 
 def infer_type(op: 'Opcode') -> bool:
+    no_infer_ops = ['dpas', 'slice_repack']
     return op.has_dest and (set(op.types) <= set(["u1", "u32", "u64"]) or
-                            op.name == 'mov') and op.name != 'dpas'
+                            op.name == 'mov') and op.name not in no_infer_ops
 
 
 def signature(op: 'Opcode', with_dest: bool = True, with_types: bool = False,
@@ -58,7 +59,7 @@ TEMPLATE = """
     multi_type = len(op.types) > 1
     info_size = f'sizeof(jay_{op.name}_info)' if op.extra_struct else '0'
     operands = ["dst"] + [f"src{i}" for i in range(num_srcs)]
-    if num_srcs > 0 and op.name not in ['zip_ugpr16']:
+    if num_srcs > 0 and op.name not in ['zip']:
         uniform = " && " .join([f"jay_is_uniform(src{i})" for i in range(num_srcs)])
         reg_file = f"({uniform}) ? UGPR : GPR"
     else:
@@ -96,6 +97,10 @@ _jay_${OPCODE}(${signature(op, with_types = True)})
    inst->type = t;
 % if op.has_dest:
    inst->dst = dst;
+   inst->uniform = (jay_is_uniform(dst) && !jay_is_null(dst));
+   inst->uniform |= dst.file == FLAG;
+% elif op.name in ['sync']:
+   inst->uniform = true;
 % endif
 % for i in range(num_srcs):
    inst->src[${i}] = src${i};
@@ -146,7 +151,7 @@ def main() -> int:
                 opcodes=ops,
                 signature=signature,
                 infer_type=infer_type,
-                no_typed_wrappers={'dpas'}))
+                no_typed_wrappers={'dpas', 'slice_repack'}))
     except Exception:
         print(exceptions.text_error_template().render())
         return 1

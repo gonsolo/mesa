@@ -226,7 +226,9 @@ nvc0_init_screen_caps(struct nvc0_screen *screen)
    caps->max_viewports = NVC0_MAX_VIEWPORTS;
    caps->max_texture_gather_components = 4;
    caps->texture_border_color_quirk = PIPE_QUIRK_TEXTURE_BORDER_COLOR_SWIZZLE_NV50;
-   caps->endianness = PIPE_ENDIAN_LITTLE;
+   caps->device_type = dev->info.type == NV_DEVICE_TYPE_DIS
+      ? PIPE_DEVICE_TYPE_DISCRETE_GPU
+      : PIPE_DEVICE_TYPE_INTEGRATED_GPU;
    caps->max_shader_patch_varyings = 30;
    caps->max_window_rectangles = NVC0_MAX_WINDOW_RECTANGLES;
    caps->max_conservative_raster_subpixel_precision_bias = class_3d >= GM200_3D_CLASS ? 8 : 0;
@@ -329,6 +331,7 @@ nvc0_init_screen_caps(struct nvc0_screen *screen)
    caps->clear_scissored = true;
    caps->image_store_formatted = true;
    caps->query_memory_info = true;
+   caps->polygon_stipple = true;
    caps->texture_transfer_modes =
       screen->base.vram_domain & NOUVEAU_BO_VRAM ? PIPE_TEXTURE_TRANSFER_BLIT : 0;
    caps->fbfetch = class_3d >= NVE4_3D_CLASS ? 1 : 0; /* needs testing on fermi */
@@ -389,6 +392,9 @@ nvc0_init_screen_caps(struct nvc0_screen *screen)
    caps->min_conservative_raster_dilate = 0.0f;
    caps->max_conservative_raster_dilate = class_3d >= GM200_3D_CLASS ? 0.75f : 0.0f;
    caps->conservative_raster_dilate_granularity = class_3d >= GM200_3D_CLASS ? 0.25f : 0.0f;
+
+   /* Up to 16 bytes are accelerated */
+   caps->hw_clear_buffer_sizes = 1 | 2 | 4 | 8 | 16;
 }
 
 static void

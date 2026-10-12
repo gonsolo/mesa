@@ -47,6 +47,7 @@ libintel_compiler_brw_files = files(
   'brw_nir_lower_cooperative_matrix.c',
   'brw_nir_lower_cs_intrinsics.c',
   'brw_nir_lower_alpha_to_coverage.c',
+  'brw_nir_lower_divergent_barriers.c',
   'brw_nir_lower_fs_barycentrics.c',
   'brw_nir_lower_fs_load_output.c',
   'brw_nir_lower_fully_covered.c',
@@ -63,6 +64,7 @@ libintel_compiler_brw_files = files(
   'brw_nir_opt_divergent_atomics.c',
   'brw_nir_wa_18019110168.c',
   'brw_nir_opt_fsat.c',
+  'brw_nir_opt_systolic_vectorize.c',
   'brw_nir_rt.h',
   'brw_nir_rt.c',
   'brw_nir_rt_builder.h',
@@ -77,6 +79,8 @@ libintel_compiler_brw_files = files(
   'brw_opt_cse.cpp',
   'brw_opt_dead_code_eliminate.cpp',
   'brw_opt_fill_spill.cpp',
+  'brw_opt_mac.cpp',
+  'brw_opt_predicate_logic.cpp',
   'brw_opt_register_coalesce.cpp',
   'brw_opt_saturate_propagation.cpp',
   'brw_opt_txf_combiner.cpp',
@@ -134,7 +138,9 @@ libintel_compiler_brw = static_library(
   cpp_args : ['-Werror=vla'],
   gnu_symbol_visibility : 'hidden',
   link_with : libintel_compiler_nir,
-  dependencies : [idep_nir_headers, idep_mesautil, idep_intel_dev, idep_genxml, idep_vtn, idep_mda, idep_intel_compiler_gen],
+  dependencies : [idep_nir_headers, idep_mesautil, idep_libintel_common,
+                  idep_intel_dev, idep_genxml, idep_vtn, idep_mda,
+                  idep_intel_compiler_gen],
   build_by_default : false,
 )
 
@@ -160,11 +166,14 @@ if with_tests
         'test_insert_load_reg.cpp',
         'test_lower_regioning.cpp',
         'test_lower_scoreboard.cpp',
+        'test_lower_simd_width.cpp',
         'test_opt_algebraic.cpp',
         'test_opt_cmod_propagation.cpp',
         'test_opt_combine_constants.cpp',
         'test_opt_copy_propagation.cpp',
         'test_opt_cse.cpp',
+        'test_opt_mac.cpp',
+        'test_opt_predicate_logic.cpp',
         'test_opt_register_coalesce.cpp',
         'test_opt_saturate_propagation.cpp',
         'test_simd_selection.cpp',
@@ -181,30 +190,3 @@ if with_tests
   )
 endif
 
-if with_intel_tools
-
-asm_testcases = [
-  ['skl', 'gfx9'],
-  ['icl', 'gfx11'],
-  ['tgl', 'gfx12'],
-  ['dg2', 'gfx12.5'],
-]
-
-test_runner = find_program('tests/run-test.py')
-foreach testcase : asm_testcases
-  _gen_name = testcase[0]
-  _gen_num = testcase[1]
-  _gen_folder = join_paths(meson.current_source_dir(), 'tests',
-                           _gen_num.replace('gfx', 'gen'))
-  test(
-    'brw_asm_' + _gen_num, test_runner,
-    args : [
-      '--gentool', gentool,
-      '--gen_name', _gen_name,
-      '--gen_folder', _gen_folder,
-    ],
-    suite : 'intel',
-  )
-endforeach
-
-endif

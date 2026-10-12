@@ -49,7 +49,7 @@ static struct vc4_compiled_shader *
 vc4_get_compiled_shader(struct vc4_context *vc4, enum qstage stage,
                         struct vc4_key *key);
 
-static int
+static unsigned
 type_size(const struct glsl_type *type, bool bindless)
 {
    return glsl_count_attribute_slots(type, false);
@@ -2742,7 +2742,7 @@ vc4_setup_shared_key(struct vc4_context *vc4, struct vc4_key *key,
 }
 
 static void
-vc4_update_compiled_fs(struct vc4_context *vc4, uint8_t prim_mode)
+vc4_update_compiled_fs(struct vc4_context *vc4, enum mesa_prim prim_mode)
 {
         struct vc4_job *job = vc4->job;
         struct vc4_fs_key local_key;
@@ -2816,7 +2816,7 @@ vc4_update_compiled_fs(struct vc4_context *vc4, uint8_t prim_mode)
 }
 
 static void
-vc4_update_compiled_vs(struct vc4_context *vc4, uint8_t prim_mode)
+vc4_update_compiled_vs(struct vc4_context *vc4, enum mesa_prim prim_mode)
 {
         struct vc4_vs_key local_key;
         struct vc4_vs_key *key = &local_key;
@@ -2861,7 +2861,7 @@ vc4_update_compiled_vs(struct vc4_context *vc4, uint8_t prim_mode)
 }
 
 bool
-vc4_update_compiled_shaders(struct vc4_context *vc4, uint8_t prim_mode)
+vc4_update_compiled_shaders(struct vc4_context *vc4, enum mesa_prim prim_mode)
 {
         vc4_update_compiled_fs(vc4, prim_mode);
         vc4_update_compiled_vs(vc4, prim_mode);

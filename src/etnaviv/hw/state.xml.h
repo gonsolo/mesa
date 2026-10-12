@@ -8,14 +8,14 @@ http://0x04.net/cgit/index.cgi/rules-ng-ng
 git clone git://0x04.net/rules-ng-ng
 
 The rules-ng-ng source files this header was generated from are:
-- state.xml     (  30672 bytes, from 2026-05-31 19:31:30)
-- common.xml    (  35664 bytes, from 2026-05-31 19:31:30)
-- common_3d.xml (  15069 bytes, from 2026-05-31 19:31:30)
-- state_hi.xml  (  35909 bytes, from 2026-05-31 19:31:30)
+- state.xml     (  30841 bytes, from 2026-09-24 21:26:54)
+- common.xml    (  35664 bytes, from 2026-09-14 08:57:29)
+- common_3d.xml (  15069 bytes, from 2026-09-24 21:26:54)
+- state_hi.xml  (  35909 bytes, from 2026-09-14 08:57:29)
 - copyright.xml (   1597 bytes, from 2026-03-02 22:49:28)
-- state_2d.xml  (  52271 bytes, from 2026-03-02 22:49:28)
-- state_3d.xml  (  92217 bytes, from 2026-05-31 19:31:30)
-- state_blt.xml (  15754 bytes, from 2026-05-31 19:31:30)
+- state_2d.xml  (  52271 bytes, from 2026-09-02 08:26:36)
+- state_3d.xml  (  94405 bytes, from 2026-09-25 18:16:44)
+- state_blt.xml (  15758 bytes, from 2026-09-27 17:28:31)
 - state_vg.xml  (   5975 bytes, from 2026-03-02 22:49:28)
 
 Copyright (C) 2012-2026 by the following authors:
@@ -252,7 +252,7 @@ DEALINGS IN THE SOFTWARE.
 
 #define VIVS_FE_FENCE_WAIT_DATA_HIGH				0x000007f4
 
-#define VIVS_FE_ROBUSTNESS_UNK007F8				0x000007f8
+#define VIVS_FE_INDEX_STREAM_ROBUSTNESS				0x000007f8
 
 #define VIVS_FE_MULTI_CLUSTER_UNK007FC				0x000007fc
 
@@ -549,10 +549,13 @@ DEALINGS IN THE SOFTWARE.
 #define VIVS_NFE_VERTEX_STREAMS_BASE_ADDR(i0)		       (0x00014600 + 0x4*(i0))
 
 #define VIVS_NFE_VERTEX_STREAMS_CONTROL(i0)		       (0x00014640 + 0x4*(i0))
+#define VIVS_NFE_VERTEX_STREAMS_CONTROL_VERTEX_STRIDE__MASK	0x00000fff
+#define VIVS_NFE_VERTEX_STREAMS_CONTROL_VERTEX_STRIDE__SHIFT	0
+#define VIVS_NFE_VERTEX_STREAMS_CONTROL_VERTEX_STRIDE(x)	(((x) << VIVS_NFE_VERTEX_STREAMS_CONTROL_VERTEX_STRIDE__SHIFT) & VIVS_NFE_VERTEX_STREAMS_CONTROL_VERTEX_STRIDE__MASK)
 
 #define VIVS_NFE_VERTEX_STREAMS_VERTEX_DIVISOR(i0)	       (0x00014680 + 0x4*(i0))
 
-#define VIVS_NFE_VERTEX_STREAMS_ROBUSTNESS_UNK146C0(i0)	       (0x000146c0 + 0x4*(i0))
+#define VIVS_NFE_VERTEX_STREAMS_ROBUSTNESS(i0)		       (0x000146c0 + 0x4*(i0))
 
 #define VIVS_NFE_GENERIC_ATTRIB(i0)			       (0x00000000 + 0x4*(i0))
 #define VIVS_NFE_GENERIC_ATTRIB__ESIZE				0x00000004

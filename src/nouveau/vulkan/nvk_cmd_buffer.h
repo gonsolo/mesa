@@ -211,7 +211,7 @@ struct nvk_graphics_state {
    } cbuf_groups[5];
 
    /* Used for meta save/restore */
-   struct nvk_addr_range vb0;
+   VkDeviceAddressRangeKHR vb0;
 
    /* Needed by vk_command_buffer::dynamic_graphics_state */
    struct vk_vertex_input_state _dynamic_vi;
@@ -221,6 +221,12 @@ struct nvk_graphics_state {
 struct nvk_compute_state {
    struct nvk_descriptor_state descriptors;
    struct nvk_shader *shader;
+   bool active_compute_invocations_query;
+};
+
+struct nvk_video_state {
+   struct nvk_video_session *vid;
+   struct vk_video_session_parameters *params;
 };
 
 struct nvk_cmd_push {
@@ -238,6 +244,8 @@ struct nvk_cmd_buffer {
       uint64_t descriptor_buffers[NVK_MAX_SETS];
       struct nvk_graphics_state gfx;
       struct nvk_compute_state cs;
+      VkQueryPipelineStatisticFlags inherited_pipeline_statistics;
+      struct nvk_video_state video;
    } state;
 
    /** List of nvk_cmd_mem
@@ -275,6 +283,10 @@ VK_DEFINE_HANDLE_CASTS(nvk_cmd_buffer, vk.base, VkCommandBuffer,
                        VK_OBJECT_TYPE_COMMAND_BUFFER)
 
 extern const struct vk_command_buffer_ops nvk_cmd_buffer_ops;
+
+void
+nvk_descriptor_state_fini(struct nvk_cmd_buffer *cmd,
+                          struct nvk_descriptor_state *desc);
 
 static inline struct nvk_device *
 nvk_cmd_buffer_device(struct nvk_cmd_buffer *cmd)
@@ -334,7 +346,7 @@ void nvk_cmd_dirty_cbufs_for_descriptors(struct nvk_cmd_buffer *cmd,
                                          VkShaderStageFlags stages,
                                          uint32_t sets_start, uint32_t sets_end);
 void nvk_cmd_bind_vertex_buffer(struct nvk_cmd_buffer *cmd, uint32_t vb_idx,
-                                struct nvk_addr_range addr_range);
+                                VkDeviceAddressRangeKHR addr_range);
 
 static inline struct nvk_descriptor_state *
 nvk_get_descriptors_state(struct nvk_cmd_buffer *cmd,
@@ -382,6 +394,8 @@ nvk_cmd_buffer_last_subchannel(const struct nvk_cmd_buffer *cmd)
       return cmd->prev_subc;
    }
 }
+
+VkQueueFlags nvk_cmd_buffer_queue_flags(struct nvk_cmd_buffer *cmd);
 
 VkResult nvk_cmd_buffer_alloc_mem(struct nvk_cmd_buffer *cmd,
                                   bool force_gart,
@@ -443,9 +457,26 @@ void nvk_cmd_dispatch_shader(struct nvk_cmd_buffer *cmd,
                              uint32_t groupCountY,
                              uint32_t groupCountZ);
 
-void nvk_cmd_fill_memory(struct nvk_cmd_buffer *cmd,
-                         uint64_t dst_addr, uint64_t size,
-                         uint32_t data);
+void nvk_cmd_dispatch_with_root(struct nvk_cmd_buffer *cmd,
+                                struct nvk_shader *shader,
+                                const void *root,
+                                size_t root_size,
+                                uint32_t groupCountX,
+                                uint32_t groupCountY,
+                                uint32_t groupCountZ);
+
+void nvk_cmd_fill_memory_ce(struct nvk_cmd_buffer *cmd,
+                            uint64_t dst_addr, uint64_t size,
+                            uint32_t data);
+
+void nvk_cmd_copy_memory_ce(struct nvk_cmd_buffer *cmd,
+                            const VkCopyDeviceMemoryInfoKHR *pCopyMemoryInfo);
+void nvk_cmd_copy_memory_to_image_ce(struct nvk_cmd_buffer *cmd,
+                                     const VkCopyDeviceMemoryImageInfoKHR *pCopyMemoryInfo);
+void nvk_cmd_copy_image_to_memory_ce(struct nvk_cmd_buffer *cmd,
+                                     const VkCopyDeviceMemoryImageInfoKHR *pCopyMemoryInfo);
+void nvk_cmd_copy_image_ce(struct nvk_cmd_buffer *cmd,
+                           const VkCopyImageInfo2 *pCopyImageInfo);
 
 void nvk_meta_resolve_rendering(struct nvk_cmd_buffer *cmd,
                                 const VkRenderingInfo *pRenderingInfo);

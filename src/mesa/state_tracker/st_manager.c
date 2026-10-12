@@ -401,6 +401,9 @@ st_new_renderbuffer_fb(enum pipe_format format, unsigned samples, bool sw)
    case PIPE_FORMAT_Z32_UNORM:
       rb->InternalFormat = GL_DEPTH_COMPONENT32;
       break;
+   case PIPE_FORMAT_Z32_FLOAT:
+      rb->InternalFormat = GL_DEPTH_COMPONENT32F;
+      break;
    case PIPE_FORMAT_Z24_UNORM_S8_UINT:
    case PIPE_FORMAT_S8_UINT_Z24_UNORM:
       rb->InternalFormat = GL_DEPTH24_STENCIL8_EXT;
@@ -881,6 +884,14 @@ st_context_teximage(struct st_context *st, GLenum target,
    pipe_resource_reference(&texImage->pt, tex);
    texObj->surface_format = pipe_format;
 
+   /* Cache whether the extra YUV plane-view / lowering setup in
+    * st_get_sampler_views() and st_get_external_sampler_key() must run for
+    * this texture. st_finalize_texture() returns early for surface_based
+    * textures without computing this.
+    */
+   texObj->needs_yuv_plane_views = tex &&
+      (pipe_format != tex->format || util_format_is_yuv(pipe_format));
+
    texObj->needs_validation = true;
 
    _mesa_dirty_texobj(ctx, texObj);
@@ -1068,8 +1079,7 @@ st_api_create_context(struct pipe_frontend_screen *fscreen,
 
    st->can_scissor_clear = !!st->screen->caps.clear_scissored;
 
-   st->ctx->invalidate_on_gl_viewport =
-      fscreen->get_param(fscreen, ST_MANAGER_BROKEN_INVALIDATE);
+   st->ctx->invalidate_on_gl_viewport = fscreen->broken_invalidate;
 
    st->frontend_screen = fscreen;
 
@@ -1358,7 +1368,7 @@ get_version(struct pipe_screen *screen,
    _mesa_init_constants(&consts, api);
    _mesa_init_extensions(&extensions);
 
-   st_init_limits(screen, &consts, &extensions, api);
+   st_init_limits(screen, &consts, &extensions, options, api);
    st_init_extensions(screen, &consts, &extensions, options, api);
    version = _mesa_get_version(&extensions, &consts, api);
    free(consts.SpirVExtensions);

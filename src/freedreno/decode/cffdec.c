@@ -177,6 +177,20 @@ decode_shader_ir3(const uint32_t *dwords, uint32_t sizedwords, int level,
                         &shader_stats[stage]);
 }
 
+static void
+decode_shader_ir3_quiet(const uint32_t *dwords, uint32_t sizedwords, int level,
+                        enum mesa_shader_stage stage)
+{
+   static FILE *nullf;
+
+   if (!nullf)
+      nullf = fopen("/dev/null", "w");
+
+   try_disasm_a3xx_stat(dwords, sizedwords, level, nullf,
+                        options->info->chip * 100,
+                        &shader_stats[stage]);
+}
+
 struct shader_stats *
 get_shader_stats(enum mesa_shader_stage stage)
 {
@@ -359,6 +373,12 @@ static void
 clear_lastvals(void)
 {
    memset(lastvals, 0, sizeof(lastvals));
+}
+
+static void
+reset_lastvals(void)
+{
+   memcpy(lastvals, type0_reg_vals, sizeof(lastvals));
 }
 
 uint32_t
@@ -1295,7 +1315,7 @@ skip_query(void)
             continue;
          }
          uint32_t lastval = reg_val(regbase);
-         if (lastval != lastvals[regbase]) {
+         if (lastval != reg_lastval(regbase)) {
             return false;
          }
       }
@@ -1350,7 +1370,7 @@ __do_query(const char *primtype, uint32_t num_indices)
       if (thread)
          printf("%s:", deprefix(thread, "CP_SET_THREAD_"));
       printf("\t%08"PRIx64, r.value);
-      if (r.value != lastvals[regbase]) {
+      if (r.value != reg_lastval(regbase)) {
          printf("!");
       } else {
          printf(" ");
@@ -1789,11 +1809,49 @@ dump_tex_const(const uint32_t *texconst, int num_unit, int level)
 }
 
 static void
+parse_shader_stats(const char *regname, enum mesa_shader_stage stage)
+{
+   uint32_t base = regbase(regname);
+
+   /* If it hasn't changed since last draw, nothing to do. */
+   if (!reg_written(base))
+      return;
+
+   uint64_t gpuaddr = reg_val(base + 1);
+   gpuaddr <<= 32;
+   gpuaddr |= reg_val(base);
+
+   void *buf = hostptr(gpuaddr);
+   if (!buf)
+      return;
+
+   uint32_t sizedwords = hostlen(gpuaddr) / 4;
+
+   decode_shader_ir3_quiet(buf, sizedwords, 0, stage);
+}
+
+static void
 dump_bindless_descriptors(bool is_compute, int level)
 {
    /* Skip for devices which do not support bindless: */
    if (options->info->chip < 6)
       return;
+
+   if (quiet(2))
+      return;
+
+   if (options->summary) {
+      /* Ensure that updated shader stages are parsed.. in summary mode
+       * this only happens when dumping reg values, which happens after
+       * this fxn is called, resulting in using stale shaders:
+       */
+      parse_shader_stats("SP_VS_BASE", MESA_SHADER_VERTEX);
+      parse_shader_stats("SP_HS_BASE", MESA_SHADER_TESS_CTRL);
+      parse_shader_stats("SP_DS_BASE", MESA_SHADER_TESS_EVAL);
+      parse_shader_stats("SP_GS_BASE", MESA_SHADER_GEOMETRY);
+      parse_shader_stats("SP_PS_BASE", MESA_SHADER_FRAGMENT);
+      parse_shader_stats("SP_CS_BASE", MESA_SHADER_COMPUTE);
+   }
 
    printl(2, "%sdraw[%i] bindless descriptors\n", levels[level], draw_count);
 
@@ -2284,12 +2342,15 @@ dump_register_summary(int level, const char *usage)
 
    struct regacc r = regacc(NULL);
 
-   /* dump current state of registers: */
-   printl(2, "%sdraw[%i] register values\n", levels[level], draw_count);
-
    bool changed = false;
    bool written = false;
    bool used = false;
+
+   if (quiet(2))
+      goto out;
+
+   /* dump current state of registers: */
+   printl(2, "%sdraw[%i] register values\n", levels[level], draw_count);
 
    for (i = 0; i < regcnt(); i++) {
       uint32_t regbase = i;
@@ -2305,9 +2366,8 @@ dump_register_summary(int level, const char *usage)
        */
       if (!(options->allregs || written || used))
          continue;
-      if (lastval != lastvals[regbase]) {
+      if (lastval != reg_lastval(regbase)) {
          changed |= true;
-         lastvals[regbase] = lastval;
       }
       if (!quiet(2)) {
          if (regacc_push(&r, regbase, lastval)) {
@@ -2337,7 +2397,9 @@ dump_register_summary(int level, const char *usage)
       }
    }
 
+out:
    clear_rewritten();
+   reset_lastvals();
 
    in_summary = false;
 
@@ -2810,6 +2872,27 @@ cp_fixed_stride_draw_table(const uint32_t *dwords, uint32_t sizedwords,
 }
 
 static void
+cp_reg_to_scratch(const uint32_t *dwords, uint32_t sizedwords, int level)
+{
+   struct rnndomain *domain = rnn_finddomain(rnn->db, "CP_REG_TO_SCRATCH");
+   internal_packet(dwords, sizedwords, rnn, domain);
+}
+
+static void
+cp_scratch_to_reg(const uint32_t *dwords, uint32_t sizedwords, int level)
+{
+   struct rnndomain *domain = rnn_finddomain(rnn->db, "CP_SCRATCH_TO_REG");
+   internal_packet(dwords, sizedwords, rnn, domain);
+}
+
+static void
+cp_scratch_write(const uint32_t *dwords, uint32_t sizedwords, int level)
+{
+   struct rnndomain *domain = rnn_finddomain(rnn->db, "CP_SCRATCH_WRITE");
+   internal_packet(dwords, sizedwords, rnn, domain);
+}
+
+static void
 cp_wfi(const uint32_t *dwords, uint32_t sizedwords, int level)
 {
    needs_wfi = false;
@@ -2839,7 +2922,7 @@ cp_mem_write(const uint32_t *dwords, uint32_t sizedwords, int level)
 }
 
 static void
-cp_rmw(const uint32_t *dwords, uint32_t sizedwords, int level)
+cp_reg_rmw(const uint32_t *dwords, uint32_t sizedwords, int level)
 {
    struct rnndomain *domain;
    const char *str;
@@ -2855,7 +2938,7 @@ cp_rmw(const uint32_t *dwords, uint32_t sizedwords, int level)
 }
 
 static void
-cp_reg_mem(const uint32_t *dwords, uint32_t sizedwords, int level)
+cp_reg_mem(const uint32_t *dwords, int level)
 {
    uint32_t val = dwords[0] & 0xffff;
    printl(3, "%sbase register: %s\n", levels[level], regname(val, 1));
@@ -2870,6 +2953,22 @@ cp_reg_mem(const uint32_t *dwords, uint32_t sizedwords, int level)
       uint32_t cnt = (dwords[0] >> 19) & 0x3ff;
       dump_hex(ptr, cnt, level + 1);
    }
+}
+
+static void
+cp_reg_to_mem(const uint32_t *dwords, uint32_t sizedwords, int level)
+{
+   struct rnndomain *domain = rnn_finddomain(rnn->db, "CP_REG_TO_MEM");
+   internal_packet(dwords, sizedwords, rnn, domain);
+   cp_reg_mem(dwords, level);
+}
+
+static void
+cp_mem_to_reg(const uint32_t *dwords, uint32_t sizedwords, int level)
+{
+   struct rnndomain *domain = rnn_finddomain(rnn->db, "CP_MEM_TO_REG");
+   internal_packet(dwords, sizedwords, rnn, domain);
+   cp_reg_mem(dwords, level);
 }
 
 struct draw_state {
@@ -3259,9 +3358,9 @@ static const struct type3_op {
    CP(INDIRECT_BUFFER, cp_indirect),
    CP(INDIRECT_BUFFER_PFD, cp_indirect),
    CP(WAIT_FOR_IDLE, cp_wfi),
-   CP(REG_RMW, cp_rmw),
-   CP(REG_TO_MEM, cp_reg_mem),
-   CP(MEM_TO_REG, cp_reg_mem), /* same layout as CP_REG_TO_MEM */
+   CP(REG_RMW, cp_reg_rmw),
+   CP(REG_TO_MEM, cp_reg_to_mem),
+   CP(MEM_TO_REG, cp_mem_to_reg),
    CP(MEM_WRITE, cp_mem_write),
    CP(EVENT_WRITE, cp_event_write),
    CP(RUN_OPENCL, cp_run_cl),
@@ -3307,6 +3406,10 @@ static const struct type3_op {
    CP(START_BIN, cp_start_bin),
 
    CP(FIXED_STRIDE_DRAW_TABLE, cp_fixed_stride_draw_table),
+
+   CP(REG_TO_SCRATCH, cp_reg_to_scratch),
+   CP(SCRATCH_TO_REG, cp_scratch_to_reg),
+   CP(SCRATCH_WRITE, cp_scratch_write),
 
    /* for a7xx */
    CP(THREAD_CONTROL, cp_set_thread_control),

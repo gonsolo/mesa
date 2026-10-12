@@ -77,6 +77,7 @@ struct r300_blend_state {
     struct pipe_blend_state state;
 
     uint32_t cb_clamp[COLORMASK_NUM_SWIZZLES][8];
+    uint32_t cb_clamp_masked_write[COLORMASK_NUM_SWIZZLES][8];
     uint32_t cb_noclamp[8];
     uint32_t cb_noclamp_noalpha[8];
     uint32_t cb_no_readwrite[8];
@@ -335,9 +336,8 @@ struct r300_surface {
 struct r300_texture_desc {
     /* Width, height, and depth.
      * Most of the time, these are equal to pipe_texture::width0, height0,
-     * and depth0. However, NPOT 3D textures must have dimensions aligned
-     * to POT, and this is the only case when these variables differ from
-     * pipe_texture. */
+     * and depth0. However, NPOT 3D and cube textures must have dimensions
+     * aligned to POT. */
     unsigned width0, height0, depth0;
 
     /* Buffer tiling.
@@ -774,10 +774,16 @@ void r300_resume_query(struct r300_context *r300,
 void r300_stop_query(struct r300_context *r300);
 
 /* r300_render_translate.c */
+void r300_rebuild_elts_to_uint_userptr(struct pipe_context *context,
+                                       const struct pipe_draw_info *info,
+                                       unsigned add_transfer_flags,
+                                       int index_bias,
+                                       unsigned start, unsigned count,
+                                       void *out);
 void r300_translate_index_buffer(struct r300_context *r300,
                                  const struct pipe_draw_info *info,
                                  struct pipe_resource **out_index_buffer,
-                                 unsigned *index_size, unsigned index_offset,
+                                 unsigned *index_size, int index_offset,
                                  unsigned *start, unsigned count,
                                  const uint8_t **export_ptr);
 
@@ -805,6 +811,7 @@ enum r300_fb_state_change {
 void r300_mark_fb_state_dirty(struct r300_context *r300,
                               enum r300_fb_state_change change);
 void r300_mark_vs_code_dirty(struct r300_context *r300);
+void r300_bind_vertex_shader_variant(struct r300_context *r300);
 void r300_mark_fs_code_dirty(struct r300_context *r300);
 
 struct pipe_sampler_view *

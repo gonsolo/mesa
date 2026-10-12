@@ -56,10 +56,15 @@ tu_CreateBuffer(VkDevice _device,
          flags |= TU_SPARSE_VMA_REPLAYABLE;
       }
 
+      const VkBufferDeviceAddressAlignmentAllocateInfoVALVE *align_info =
+         vk_find_struct_const(pCreateInfo->pNext,
+                              BUFFER_DEVICE_ADDRESS_ALIGNMENT_ALLOCATE_INFO_VALVE);
+      uint64_t alignment = align_info ? align_info->alignment : 0;
+
       VkResult result =
          tu_sparse_vma_init(device, &buffer->vk.base, &buffer->vma,
                             &buffer->vk.device_address, flags,
-                            pCreateInfo->size, client_address);
+                            pCreateInfo->size, alignment, client_address);
 
       if (result != VK_SUCCESS) {
          vk_buffer_destroy(&device->vk, pAllocator, &buffer->vk);
@@ -133,8 +138,8 @@ tu_GetDeviceBufferMemoryRequirements(
       .memoryTypeBits = (1 << device->physical_device->memory.non_lazy_type_count) - 1,
    };
 
-   vk_foreach_struct(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *req =
             (VkMemoryDedicatedRequirements *) ext;
@@ -248,9 +253,14 @@ tu_GetBufferOpaqueCaptureDescriptorDataEXT(VkDevice device,
 {
    VK_FROM_HANDLE(tu_buffer, buffer, pInfo->buffer);
 
-   /* Save the buffer iova so that when replaying sparse buffers have a
-    * consistent iova and therefore consistent descriptor contents.
-    */
-   *(uint64_t *)pData = buffer->vk.device_address;
+   if (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT) {
+      /* Save the buffer iova so that when replaying sparse buffers have a
+       * consistent iova and therefore consistent descriptor contents.
+       */
+      memcpy(pData, &buffer->vk.device_address, sizeof(buffer->vk.device_address));
+   } else {
+      memset(pData, 0, sizeof(buffer->vk.device_address));
+   }
+
    return VK_SUCCESS;
 }

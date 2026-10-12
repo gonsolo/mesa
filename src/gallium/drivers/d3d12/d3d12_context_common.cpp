@@ -56,7 +56,6 @@
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
 #include "util/u_upload_mgr.h"
-#include "util/u_pstipple.h"
 #include "util/u_sample_positions.h"
 #include "util/u_dl.h"
 #include <dxguids/dxguids.h>
@@ -143,10 +142,7 @@ d3d12_context_destroy(struct pipe_context *pctx)
       d3d12_tcs_variant_cache_destroy(ctx);
       d3d12_gfx_pipeline_state_cache_destroy(ctx);
       util_primconvert_destroy(ctx->primconvert);
-      pipe_resource_reference(&ctx->pstipple.texture, nullptr);
-      pipe_sampler_view_reference(&ctx->pstipple.sampler_view, nullptr);
       util_dynarray_fini(&ctx->recently_destroyed_bos);
-      FREE(ctx->pstipple.sampler_cso);
       if (pctx->stream_uploader)
          u_upload_destroy(pctx->stream_uploader);
       if (pctx->const_uploader)
@@ -250,7 +246,7 @@ d3d12_replace_buffer_storage(struct pipe_context *pctx,
    struct pipe_resource *pdst,
    struct pipe_resource *psrc,
    unsigned minimum_num_rebinds,
-   uint32_t rebind_mask,
+   uint64_t rebind_mask,
    uint32_t delete_buffer_id)
 {
    struct d3d12_resource *dst = d3d12_resource(pdst);
@@ -283,10 +279,6 @@ d3d12_memory_barrier(struct pipe_context *pctx, unsigned flags)
    if (flags & PIPE_BARRIER_STREAMOUT_BUFFER)
       ctx->state_dirty |= D3D12_DIRTY_STREAM_OUTPUT;
 
-   /* TODO:
-    * PIPE_BARRIER_INDIRECT_BUFFER
-    */
-
    for (unsigned i = 0; i < D3D12_GFX_SHADER_STAGES; ++i) {
       if (flags & PIPE_BARRIER_CONSTANT_BUFFER)
          ctx->shader_dirty[i] |= D3D12_SHADER_DIRTY_CONSTBUF;
@@ -309,7 +301,70 @@ d3d12_memory_barrier(struct pipe_context *pctx, unsigned flags)
       PIPE_BARRIER_QUERY_BUFFER;
    d3d12_current_batch(ctx)->pending_memory_barrier = (flags & ~ignored_barrier_flags) != 0;
 
-   if (flags & (PIPE_BARRIER_IMAGE | PIPE_BARRIER_SHADER_BUFFER)) {
+   struct d3d12_screen *screen = d3d12_screen(pctx->screen);
+   bool use_enhanced_barriers = screen->opts12.EnhancedBarriersSupported && ctx->cmdlist8;
+
+   /* The stateful nature of pending_memory_barrier means that we can end up unable to issue
+    * appropriate resource-scope transitions to correctly order GPU work; the relevant resource
+    * may end up in a read state when it was actually being written. When we can, use enhanced
+    * barriers to insert the needed sync/access handling. This is best-effort.
+    */
+   if (use_enhanced_barriers) {
+      D3D12_BARRIER_SYNC sync_after = D3D12_BARRIER_SYNC_NONE;
+      D3D12_BARRIER_ACCESS access_after = (D3D12_BARRIER_ACCESS)0;
+
+      if (flags & PIPE_BARRIER_VERTEX_BUFFER) {
+         sync_after |= D3D12_BARRIER_SYNC_VERTEX_SHADING;
+         access_after |= D3D12_BARRIER_ACCESS_VERTEX_BUFFER;
+      }
+      if (flags & PIPE_BARRIER_INDEX_BUFFER) {
+         sync_after |= D3D12_BARRIER_SYNC_INDEX_INPUT;
+         access_after |= D3D12_BARRIER_ACCESS_INDEX_BUFFER;
+      }
+      if (flags & PIPE_BARRIER_CONSTANT_BUFFER) {
+         sync_after |= D3D12_BARRIER_SYNC_ALL_SHADING;
+         access_after |= D3D12_BARRIER_ACCESS_CONSTANT_BUFFER;
+      }
+      if (flags & PIPE_BARRIER_TEXTURE) {
+         sync_after |= D3D12_BARRIER_SYNC_ALL_SHADING;
+         access_after |= D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
+      }
+      if (flags & (PIPE_BARRIER_IMAGE | PIPE_BARRIER_SHADER_BUFFER)) {
+         sync_after |= D3D12_BARRIER_SYNC_ALL_SHADING;
+         access_after |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
+      }
+      if (flags & PIPE_BARRIER_INDIRECT_BUFFER) {
+         sync_after |= D3D12_BARRIER_SYNC_EXECUTE_INDIRECT;
+         access_after |= D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT;
+      }
+      if (flags & PIPE_BARRIER_FRAMEBUFFER) {
+         sync_after |= D3D12_BARRIER_SYNC_RENDER_TARGET;
+         access_after |= D3D12_BARRIER_ACCESS_RENDER_TARGET;
+      }
+      if (flags & PIPE_BARRIER_STREAMOUT_BUFFER) {
+         sync_after |= D3D12_BARRIER_SYNC_VERTEX_SHADING;
+         access_after |= D3D12_BARRIER_ACCESS_STREAM_OUTPUT;
+      }
+      if (flags & (PIPE_BARRIER_UPDATE_BUFFER | PIPE_BARRIER_UPDATE_TEXTURE | PIPE_BARRIER_QUERY_BUFFER)) {
+         sync_after |= D3D12_BARRIER_SYNC_COPY;
+         access_after |= D3D12_BARRIER_ACCESS_COPY_DEST | D3D12_BARRIER_ACCESS_COPY_SOURCE;
+      }
+
+      if (sync_after != D3D12_BARRIER_SYNC_NONE) {
+         D3D12_GLOBAL_BARRIER global = {};
+         global.SyncBefore = D3D12_BARRIER_SYNC_ALL;
+         global.SyncAfter = sync_after;
+         global.AccessBefore = D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
+         global.AccessAfter = access_after;
+
+         D3D12_BARRIER_GROUP group = {};
+         group.Type = D3D12_BARRIER_TYPE_GLOBAL;
+         group.NumBarriers = 1;
+         group.pGlobalBarriers = &global;
+         ctx->cmdlist8->Barrier(1, &group);
+         ctx->has_commands = true;
+      }
+   } else if (flags & (PIPE_BARRIER_IMAGE | PIPE_BARRIER_SHADER_BUFFER)) {
       D3D12_RESOURCE_BARRIER uavBarrier;
       uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
       uavBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -636,11 +691,6 @@ d3d12_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
       if (!ctx->blitter)
          return NULL;
 
-      if (!d3d12_init_polygon_stipple(&ctx->base)) {
-         debug_printf("D3D12: failed to initialize polygon stipple resources\n");
-         FREE(ctx);
-         return NULL;
-      }
 #ifdef _WIN32
          if (!(d3d12_debug & D3D12_DEBUG_EXPERIMENTAL) ||
             (d3d12_debug & D3D12_DEBUG_DISASS))

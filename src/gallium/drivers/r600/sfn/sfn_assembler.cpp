@@ -449,7 +449,7 @@ AssemblerVisitor::visit(const RatInstr& instr)
       emit_wait_ack();
 
    r600_bytecode_add_cfinst(&m_bc, instr.cf_opcode());
-   fill_bytecode_rat(*m_bc.cf_last, instr, m_shader.rat_base, m_bc.type);
+   fill_bytecode_rat(*m_bc.cf_last, instr, m_shader.dynamic.rat_base, m_bc.type);
 
    m_ack_suggested |= instr.need_ack();
 }
@@ -500,11 +500,6 @@ AssemblerVisitor::visit(const Block& block)
 void
 AssemblerVisitor::visit(const IfInstr& instr)
 {
-
-   auto pred = instr.predicate();
-   auto [addr, dummy0, dummy1] = pred->indirect_addr();
-   assert(!dummy1);
-   assert(!addr);
 
    r600_bytecode_add_cfinst(&m_bc, CF_OP_JUMP);
    clear_states(sf_all);

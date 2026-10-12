@@ -30,11 +30,12 @@
  */
 enum pipe_format r300_unbyteswap_array_format(enum pipe_format format)
 {
+#if !UTIL_ARCH_BIG_ENDIAN
     /* FIXME: Disabled on little endian because of a reported regression:
-     * https://bugs.freedesktop.org/show_bug.cgi?id=98869 */
-    if (PIPE_ENDIAN_NATIVE != PIPE_ENDIAN_BIG)
-        return format;
-
+     * https://bugs.freedesktop.org/show_bug.cgi?id=98869
+     */
+    return format;
+#else
     /* Only BGRA 8888 array formats are supported for simplicity of
      * the implementation. */
     switch (format) {
@@ -49,18 +50,91 @@ enum pipe_format r300_unbyteswap_array_format(enum pipe_format format)
     default:
         return format;
     }
+#endif
 }
 
-static unsigned r300_get_endian_swap(enum pipe_format format)
+/* Gallium reverses packed bitmask channel descriptions and swizzles on BE.
+ * The sampler still assigns lanes by numeric bit position within the texel.
+ * Undo the descriptor reversal so hardware format selection and sampler-view
+ * swizzling see the GPU's channel order. Border-color packing must use the
+ * same description to match sampled texels.
+ */
+const struct util_format_description *
+r300_get_sampler_format_desc(enum pipe_format format,
+                             struct util_format_description *storage)
 {
+    const struct util_format_description *desc = util_format_description(format);
+
+#if UTIL_ARCH_BIG_ENDIAN
+    if (desc->is_bitmask && !desc->is_array &&
+        ((desc->block.bits == 8 && desc->nr_channels == 2) ||
+         (desc->block.bits == 16 && desc->nr_channels == 4))) {
+        unsigned last_channel = desc->nr_channels - 1;
+        *storage = *desc;
+        for (unsigned i = 0; i < desc->nr_channels; i++)
+            storage->channel[i] = desc->channel[last_channel - i];
+        for (unsigned i = 0; i < 4; i++) {
+            storage->swizzle[i] = desc->swizzle[i] <= last_channel ?
+                last_channel - desc->swizzle[i] : desc->swizzle[i];
+        }
+        return storage;
+    }
+#endif
+
+    return desc;
+}
+
+static unsigned r300_get_endian_swap(enum pipe_format format,
+                                     struct r300_resource *tex)
+{
+#if !UTIL_ARCH_BIG_ENDIAN
+    (void)format;
+    (void)tex;
+    return R300_SURF_NO_SWAP;
+#else
     const struct util_format_description *desc;
     unsigned swap_size;
 
+    if (util_format_is_depth_or_stencil(tex->b.format)) {
+        switch (format) {
+        case PIPE_FORMAT_B8G8R8A8_UNORM:
+        case PIPE_FORMAT_B8G8R8X8_UNORM:
+        case PIPE_FORMAT_R8G8B8A8_UNORM:
+        case PIPE_FORMAT_R8G8B8X8_UNORM:
+            /* Depth/stencil transfer blits can alias 32-bit ZS storage as
+             * RGBA8. Keep the alias on the ZS dword endian convention instead
+             * of the 8-bit array convention.
+             */
+            return R300_SURF_DWORD_SWAP;
+        default:
+            break;
+        }
+    }
+
+    if ((tex->b.bind & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW)) ==
+        (PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW) &&
+        !(tex->b.flags & R300_RESOURCE_FLAG_TRANSFER) &&
+        !util_format_is_srgb(tex->b.format)) {
+        /* Normal BE 8888 array formats use DWORD_SWAP so CPU-visible bytes
+         * follow Gallium component order. Render-to-texture resources need one
+         * GPU convention for both RB3D writes and sampler reads; otherwise a
+         * VRAM-rendered glamor pixmap sampled after migration to GTT gets
+         * channel-swapped. Keep transfer staging, sRGB, and pure render
+         * targets on the normal policy.
+         */
+        switch (format) {
+        case PIPE_FORMAT_A8R8G8B8_UNORM:
+        case PIPE_FORMAT_X8R8G8B8_UNORM:
+        case PIPE_FORMAT_B8G8R8A8_UNORM:
+        case PIPE_FORMAT_B8G8R8X8_UNORM:
+            return R300_SURF_NO_SWAP;
+        default:
+            break;
+        }
+    }
+
     if (r300_unbyteswap_array_format(format) != format)
         return R300_SURF_DWORD_SWAP;
-
-    if (PIPE_ENDIAN_NATIVE != PIPE_ENDIAN_BIG)
-        return R300_SURF_NO_SWAP;
 
     desc = util_format_description(format);
 
@@ -79,6 +153,7 @@ static unsigned r300_get_endian_swap(enum pipe_format format)
     case 32:
         return R300_SURF_DWORD_SWAP;
     }
+#endif
 }
 
 unsigned r300_get_swizzle_combined(const unsigned char *swizzle_format,
@@ -151,6 +226,7 @@ uint32_t r300_translate_texformat(enum pipe_format format,
                                   bool dxtc_swizzle)
 {
     uint32_t result = 0;
+    struct util_format_description storage;
     const struct util_format_description *desc;
     int i;
     bool uniform = true;
@@ -162,7 +238,7 @@ uint32_t r300_translate_texformat(enum pipe_format format,
     };
 
     format = r300_unbyteswap_array_format(format);
-    desc = util_format_description(format);
+    desc = r300_get_sampler_format_desc(format, &storage);
 
     /* Colorspace (return non-RGB formats directly). */
     switch (desc->colorspace) {
@@ -477,6 +553,10 @@ static uint32_t r300_translate_colorformat(enum pipe_format format)
 
         case PIPE_FORMAT_B5G5R5A1_UNORM:
         case PIPE_FORMAT_B5G5R5X1_UNORM:
+#if UTIL_ARCH_BIG_ENDIAN
+        case PIPE_FORMAT_A1B5G5R5_UNORM:
+        case PIPE_FORMAT_X1B5G5R5_UNORM:
+#endif
             return R300_COLOR_FORMAT_ARGB1555;
 
         case PIPE_FORMAT_B4G4R4A4_UNORM:
@@ -685,8 +765,20 @@ static uint32_t r300_translate_out_fmt(enum pipe_format format)
 
         /*** Generic cases (standard channel mapping) ***/
 
-        /* BGRA outputs. */
+#if UTIL_ARCH_BIG_ENDIAN
+        /* BE RGB565/1555 aliases need RGB lane order, not BGRA. */
         case PIPE_FORMAT_B5G6R5_UNORM:
+        case PIPE_FORMAT_A1B5G5R5_UNORM:
+        case PIPE_FORMAT_X1B5G5R5_UNORM:
+            return modifier |
+                R300_C0_SEL_R | R300_C1_SEL_G |
+                R300_C2_SEL_B | R300_C3_SEL_A;
+#endif
+
+        /* BGRA outputs. */
+#if !UTIL_ARCH_BIG_ENDIAN
+        case PIPE_FORMAT_B5G6R5_UNORM:
+#endif
         case PIPE_FORMAT_B5G5R5A1_UNORM:
         case PIPE_FORMAT_B5G5R5X1_UNORM:
         case PIPE_FORMAT_B4G4R4A4_UNORM:
@@ -807,6 +899,18 @@ static uint32_t r300_translate_colormask_swizzle(enum pipe_format format)
     case PIPE_FORMAT_R32G32_FLOAT:
         return COLORMASK_GRRG;
 
+#if UTIL_ARCH_BIG_ENDIAN
+    /* Match BE RGB565 colormasks to RGB output lanes; no alpha. */
+    case PIPE_FORMAT_B5G6R5_UNORM:
+        return COLORMASK_RGBX;
+
+    case PIPE_FORMAT_X1B5G5R5_UNORM:
+        return COLORMASK_RGBX;
+
+    case PIPE_FORMAT_A1B5G5R5_UNORM:
+        return COLORMASK_RGBA;
+#endif
+
     case PIPE_FORMAT_B5G5R5X1_UNORM:
     case PIPE_FORMAT_B4G4R4X4_UNORM:
     case PIPE_FORMAT_B8G8R8X8_UNORM:
@@ -814,7 +918,9 @@ static uint32_t r300_translate_colormask_swizzle(enum pipe_format format)
     case PIPE_FORMAT_B10G10R10X2_UNORM:
         return COLORMASK_BGRX;
 
+#if !UTIL_ARCH_BIG_ENDIAN
     case PIPE_FORMAT_B5G6R5_UNORM:
+#endif
     case PIPE_FORMAT_B5G5R5A1_UNORM:
     case PIPE_FORMAT_B4G4R4A4_UNORM:
     case PIPE_FORMAT_B8G8R8A8_UNORM:
@@ -954,7 +1060,7 @@ void r300_texture_setup_format_state(struct r300_screen *screen,
 
     out->tile_config = R300_TXO_MACRO_TILE(desc->macrotile[level]) |
                        R300_TXO_MICRO_TILE(desc->microtile) |
-                       R300_TXO_ENDIAN(r300_get_endian_swap(format));
+                       R300_TXO_ENDIAN(r300_get_endian_swap(format, tex));
 }
 
 static void r300_texture_setup_fb_state(struct r300_surface *surf)
@@ -970,7 +1076,7 @@ static void r300_texture_setup_fb_state(struct r300_surface *surf)
                 stride |
                 R300_DEPTHMACROTILE(tex->tex.macrotile[level]) |
                 R300_DEPTHMICROTILE(tex->tex.microtile) |
-                R300_DEPTHENDIAN(r300_get_endian_swap(surf->base.format));
+                R300_DEPTHENDIAN(r300_get_endian_swap(surf->base.format, tex));
         surf->format = r300_translate_zsformat(surf->base.format);
         surf->pitch_zmask = tex->tex.zmask_stride_in_pixels[level];
         surf->pitch_hiz = tex->tex.hiz_stride_in_pixels[level];
@@ -982,7 +1088,7 @@ static void r300_texture_setup_fb_state(struct r300_surface *surf)
                 r300_translate_colorformat(format) |
                 R300_COLOR_TILE(tex->tex.macrotile[level]) |
                 R300_COLOR_MICROTILE(tex->tex.microtile) |
-                R300_COLOR_ENDIAN(r300_get_endian_swap(format));
+                R300_COLOR_ENDIAN(r300_get_endian_swap(format, tex));
         surf->format = r300_translate_out_fmt(format);
         surf->colormask_swizzle =
             r300_translate_colormask_swizzle(format);

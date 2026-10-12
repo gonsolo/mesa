@@ -186,7 +186,7 @@
 /* Read only flag if the register pipeline is busy. */
 #	define R300_VAP_REGPIPE_BUSY            (1 << 30)
 /* Read only flag if the VAP engine is busy. */
-#	define R300_VAP_VAP_BUSY                (1 << 31)
+#	define R300_VAP_VAP_BUSY                (1u << 31)
 
 /* gap */
 
@@ -1473,6 +1473,7 @@
 #	define R300_TX_MAX_ANISO_MASK            (7 << 21)
 #       define R300_TX_WRAP_S(x)                 ((x) << 0)
 #       define R300_TX_WRAP_T(x)                 ((x) << 3)
+#       define R300_TX_WRAP_R(x)                 ((x) << 6)
 #       define R300_TX_MAX_MIP_LEVEL(x)          ((x) << 17)
 
 #define R300_TX_FILTER1_0                      0x4440
@@ -1498,7 +1499,7 @@
 #       define R500_TX_MAX_ANISO(x)            ((x) << 23)
 #       define R500_TX_MAX_ANISO_MASK          (63 << 23)
 #       define R500_TX_ANISO_HIGH_QUALITY      (1 << 30)
-#	define R500_BORDER_FIX                 (1<<31)
+#	define R500_BORDER_FIX                 (1u<<31)
 
 #define R300_TX_FORMAT0_0                   0x4480
 #       define R300_TX_WIDTHMASK_SHIFT           0
@@ -1508,7 +1509,7 @@
 #	define R300_TX_DEPTHMASK_SHIFT           22
 #	define R300_TX_DEPTHMASK_MASK            (0xf << 22)
 #       define R300_TX_SIZE_PROJECTED            (1 << 30)
-#       define R300_TX_PITCH_EN                  (1 << 31)
+#       define R300_TX_PITCH_EN                  (1u << 31)
 #       define R300_TX_WIDTH(x)                  ((x) << 0)
 #       define R300_TX_HEIGHT(x)                 ((x) << 11)
 #       define R300_TX_DEPTH(x)                  ((x) << 22)
@@ -1770,7 +1771,7 @@
 #       define R400_PFS_CNTL_TEX_OFFSET_MSB_SHIFT 24
 #       define R400_PFS_CNTL_TEX_OFFSET_MSB_MASK (0xf << 24)
 #       define R400_PFS_CNTL_TEX_END_MSB_SHIFT   28
-#       define R400_PFS_CNTL_TEX_END_MSB_MASK    (0xf << 28)
+#       define R400_PFS_CNTL_TEX_END_MSB_MASK    (0xfu << 28)
 
 /* gap */
 
@@ -1798,7 +1799,7 @@
 #       define R400_TEX_START_MSB_SHIFT     24
 #       define R400_TEX_START_MSG_MASK      (0xf << 24)
 #       define R400_TEX_SIZE_MSB_SHIFT      28
-#       define R400_TEX_SIZE_MSG_MASK       (0xf << 28)
+#       define R400_TEX_SIZE_MSG_MASK       (0xfu << 28)
 
 /* TEX
  * As far as I can tell, texture instructions cannot write into output
@@ -2604,7 +2605,7 @@
 #       define R300_ZB_ZCACHE_CTLSTAT_ZC_FREE_NO_EFFECT       (0 << 1)
 #       define R300_ZB_ZCACHE_CTLSTAT_ZC_FREE_FREE            (1 << 1)
 #       define R300_ZB_ZCACHE_CTLSTAT_ZC_BUSY_IDLE            (0 << 31)
-#       define R300_ZB_ZCACHE_CTLSTAT_ZC_BUSY_BUSY            (1 << 31)
+#       define R300_ZB_ZCACHE_CTLSTAT_ZC_BUSY_BUSY            (1u << 31)
 
 #define R300_ZB_BW_CNTL                     0x4f1c
 #	define R300_HIZ_DISABLE                              (0 << 0)
@@ -3045,7 +3046,7 @@ enum {
 #   define R500_ALPHA_OMOD_DIV_8		(6 << R500_ALPHA_OMOD_SHIFT)
 #   define R500_ALPHA_OMOD_DISABLE		(7 << R500_ALPHA_OMOD_SHIFT)
 #   define R500_ALPHA_TARGET(x)				((x) << 29)
-#   define R500_ALPHA_W_OMASK				(1 << 31)
+#   define R500_ALPHA_W_OMASK				(1u << 31)
 #define R500_US_ALU_ALPHA_ADDR_0			0x9800
 #   define R500_ALPHA_ADDR0(x)				((x) << 0)
 #   define R500_ALPHA_ADDR0_CONST			(1 << 8)
@@ -3058,8 +3059,8 @@ enum {
 #   define R500_ALPHA_ADDR2_REL				(1 << 29)
 #   define R500_ALPHA_SRCP_OP_1_MINUS_2A0		(0 << 30)
 #   define R500_ALPHA_SRCP_OP_A1_MINUS_A0		(1 << 30)
-#   define R500_ALPHA_SRCP_OP_A1_PLUS_A0		(2 << 30)
-#   define R500_ALPHA_SRCP_OP_1_MINUS_A0		(3 << 30)
+#   define R500_ALPHA_SRCP_OP_A1_PLUS_A0		(2u << 30)
+#   define R500_ALPHA_SRCP_OP_1_MINUS_A0		(3u << 30)
 #define R500_US_ALU_RGBA_INST_0				0xb000
 #   define R500_ALU_RGBA_OP_MAD				(0 << 0)
 #   define R500_ALU_RGBA_OP_DP3				(1 << 0)
@@ -3124,8 +3125,8 @@ enum {
 /* #define R500_ALU_RGBA_A_SWIZ_UNUSED			(7 << 27) */
 #   define R500_ALU_RGBA_ALPHA_MOD_C_NOP		(0 << 30)
 #   define R500_ALU_RGBA_ALPHA_MOD_C_NEG		(1 << 30)
-#   define R500_ALU_RGBA_ALPHA_MOD_C_ABS		(2 << 30)
-#   define R500_ALU_RGBA_ALPHA_MOD_C_NAB		(3 << 30)
+#   define R500_ALU_RGBA_ALPHA_MOD_C_ABS		(2u << 30)
+#   define R500_ALU_RGBA_ALPHA_MOD_C_NAB		(3u << 30)
 #define R500_US_ALU_RGB_INST_0				0xa000
 #  define R500_ALU_RGB_SEL_A_SHIFT			0
 #   define R500_ALU_RGB_SEL_A_SRC0			(0 << 0)
@@ -3203,7 +3204,7 @@ enum {
 #   define R500_ALU_RGB_OMOD_DIV_8		(6 << R500_ALU_RGB_OMOD_SHIFT)
 #   define R500_ALU_RGB_OMOD_DISABLE		(7 << R500_ALU_RGB_OMOD_SHIFT)
 #   define R500_ALU_RGB_TARGET(x)			((x) << 29)
-#   define R500_ALU_RGB_WMASK				(1 << 31)
+#   define R500_ALU_RGB_WMASK				(1u << 31)
 #define R500_US_ALU_RGB_ADDR_0				0x9000
 #   define R500_RGB_ADDR0(x)				((x) << 0)
 #   define R500_RGB_ADDR0_CONST				(1 << 8)
@@ -3216,8 +3217,8 @@ enum {
 #   define R500_RGB_ADDR2_REL				(1 << 29)
 #   define R500_RGB_SRCP_OP_1_MINUS_2RGB0		(0 << 30)
 #   define R500_RGB_SRCP_OP_RGB1_MINUS_RGB0		(1 << 30)
-#   define R500_RGB_SRCP_OP_RGB1_PLUS_RGB0		(2 << 30)
-#   define R500_RGB_SRCP_OP_1_MINUS_RGB0		(3 << 30)
+#   define R500_RGB_SRCP_OP_RGB1_PLUS_RGB0		(2u << 30)
+#   define R500_RGB_SRCP_OP_1_MINUS_RGB0		(3u << 30)
 #define R500_US_CMN_INST_0				0xb800
 #  define R500_INST_TYPE_MASK				(3 << 0)
 #   define R500_INST_TYPE_ALU				(0 << 0)
@@ -3267,7 +3268,7 @@ enum {
 #   define R500_INST_STAT_WE_R				(1 << 28)
 #   define R500_INST_STAT_WE_G				(1 << 29)
 #   define R500_INST_STAT_WE_B				(1 << 30)
-#   define R500_INST_STAT_WE_A				(1 << 31)
+#   define R500_INST_STAT_WE_A				(1u << 31)
 
 /* note that these are 8 bit lengths, despite the offsets, at least for R500 */
 #define R500_US_CODE_ADDR				0x4630
@@ -3285,7 +3286,7 @@ enum {
 #   define R500_FC_BOOL_ADDR(x)				((x) << 0)
 #   define R500_FC_INT_ADDR(x)				((x) << 8)
 #   define R500_FC_JUMP_ADDR(x)				((x) << 16)
-#   define R500_FC_JUMP_GLOBAL				(1 << 31)
+#   define R500_FC_JUMP_GLOBAL				(1u << 31)
 #define R500_US_FC_BOOL_CONST				0x4620
 #   define R500_FC_KBOOL(x)				(x)
 #define R500_US_FC_CTRL					0x4624
@@ -3360,8 +3361,8 @@ enum {
 #   define R500_TEX_DST_B_SWIZ_A			(3 << 28)
 #   define R500_TEX_DST_A_SWIZ_R			(0 << 30)
 #   define R500_TEX_DST_A_SWIZ_G			(1 << 30)
-#   define R500_TEX_DST_A_SWIZ_B			(2 << 30)
-#   define R500_TEX_DST_A_SWIZ_A			(3 << 30)
+#   define R500_TEX_DST_A_SWIZ_B			(2u << 30)
+#   define R500_TEX_DST_A_SWIZ_A			(3u << 30)
 #define R500_US_TEX_ADDR_DXDY_0				0xa000
 #   define R500_DX_ADDR(x)				((x) << 0)
 #   define R500_DX_ADDR_REL				(1 << 7)
@@ -3397,8 +3398,8 @@ enum {
 #   define R500_DY_R_SWIZ_A				(3 << 28)
 #   define R500_DY_Q_SWIZ_R				(0 << 30)
 #   define R500_DY_Q_SWIZ_G				(1 << 30)
-#   define R500_DY_Q_SWIZ_B				(2 << 30)
-#   define R500_DY_Q_SWIZ_A				(3 << 30)
+#   define R500_DY_Q_SWIZ_B				(2u << 30)
+#   define R500_DY_Q_SWIZ_A				(3u << 30)
 #define R500_US_TEX_INST_0				0x9000
 #   define R500_TEX_ID(x)				((x) << 16)
 #   define R500_TEX_INST_NOP				(0 << 22)

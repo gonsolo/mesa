@@ -140,6 +140,15 @@ struct ac_video_enc_codec_caps {
       bool vbr;
       bool qvbr;
    } rc;
+   uint32_t min_qp;
+   uint32_t max_qp;
+
+   struct {
+      bool avg_qp;
+      bool minmax_qp;
+      bool skipped_pixels;
+      bool partition_count;
+   } feedback;
 
    union {
       struct {

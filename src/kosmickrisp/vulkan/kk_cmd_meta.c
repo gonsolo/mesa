@@ -11,7 +11,7 @@
 
 #include "kk_buffer.h"
 #include "kk_cmd_buffer.h"
-#include "kk_encoder.h"
+#include "kk_physical_device.h"
 
 #include "kosmickrisp/bridge/mtl_bridge.h"
 
@@ -30,9 +30,9 @@ kk_cmd_bind_map_buffer(struct vk_command_buffer *vk_cmd,
    if (unlikely(!buf.gpu))
       return VK_ERROR_OUT_OF_POOL_MEMORY;
 
-   /* Need to retain since VkBuffers release the mtl_handle too */
+   /* Need to retain since VkBuffers release the metal.handle too */
    mtl_retain(buf.buffer);
-   buffer->mtl_handle = buf.buffer;
+   buffer->metal.handle = buf.buffer;
    buffer->vk.device_address = buf.gpu;
    *map_out = buf.cpu;
 
@@ -83,7 +83,6 @@ struct kk_meta_save {
    struct kk_conditional_rendering_state cond_render;
    struct kk_descriptor_set *desc0;
    struct kk_push_descriptor_set *push_desc0;
-   mtl_buffer *vb0_handle;
    struct kk_addr_range vb0;
    struct kk_buffer_address desc0_set_addr;
    bool has_push_desc0;
@@ -92,7 +91,7 @@ struct kk_meta_save {
 
 static void
 kk_meta_begin(struct kk_cmd_buffer *cmd, struct kk_meta_save *save,
-              VkPipelineBindPoint bind_point)
+              VkPipelineBindPoint bind_point, const char *debug_label)
 {
    struct kk_descriptor_state *desc = kk_get_descriptors_state(cmd, bind_point);
 
@@ -123,7 +122,6 @@ kk_meta_begin(struct kk_cmd_buffer *cmd, struct kk_meta_save *save,
    save->cond_render = cmd->state.cond_render;
    cmd->state.cond_render.enabled = false;
 
-   save->vb0_handle = cmd->state.gfx.vb.handles[0];
    save->vb0 = cmd->state.gfx.vb.addr_range[0];
 
    save->desc0 = desc->sets[0];
@@ -134,6 +132,12 @@ kk_meta_begin(struct kk_cmd_buffer *cmd, struct kk_meta_save *save,
    static_assert(sizeof(save->push) == sizeof(desc->root.push),
                  "Size mismatch for push in meta_save");
    memcpy(save->push, desc->root.push, sizeof(save->push));
+
+   if (kk_device_physical(kk_cmd_buffer_device(cmd))
+          ->settings.gpu_capture_enabled) {
+      VkDebugUtilsLabelEXT label_info = {.pLabelName = debug_label};
+      kk_CmdBeginDebugUtilsLabelEXT(kk_cmd_buffer_to_handle(cmd), &label_info);
+   }
 }
 
 static void
@@ -142,6 +146,11 @@ kk_meta_end(struct kk_cmd_buffer *cmd, struct kk_meta_save *save,
 {
    struct kk_descriptor_state *desc = kk_get_descriptors_state(cmd, bind_point);
    desc->root_dirty = true;
+
+   if (kk_device_physical(kk_cmd_buffer_device(cmd))
+          ->settings.gpu_capture_enabled) {
+      kk_CmdEndDebugUtilsLabelEXT(kk_cmd_buffer_to_handle(cmd));
+   }
 
    if (save->desc0) {
       desc->sets[0] = save->desc0;
@@ -176,7 +185,6 @@ kk_meta_end(struct kk_cmd_buffer *cmd, struct kk_meta_save *save,
          save->pipeline.gfx.is_ds_dynamic;
 
       cmd->state.gfx.vb.addr_range[0] = save->vb0;
-      cmd->state.gfx.vb.handles[0] = save->vb0_handle;
       cmd->state.gfx.dirty |= KK_DIRTY_VB;
 
       cmd->state.gfx.occlusion.mode = save->pipeline.gfx.occlusion;
@@ -193,30 +201,33 @@ kk_meta_end(struct kk_cmd_buffer *cmd, struct kk_meta_save *save,
 }
 
 VKAPI_ATTR void VKAPI_CALL
-kk_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
-                 VkDeviceSize dstOffset, VkDeviceSize dstRange, uint32_t data)
+kk_CmdFillMemoryKHR(VkCommandBuffer commandBuffer,
+                    const VkDeviceAddressRangeKHR *dstRange,
+                    VkAddressCommandFlagsKHR dstFlags, uint32_t data)
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
    struct kk_device *dev = kk_cmd_buffer_device(cmd);
 
    struct kk_meta_save save;
-   kk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
-   vk_meta_fill_buffer(&cmd->vk, &dev->meta, dstBuffer, dstOffset, dstRange,
-                       data);
+   kk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE,
+                 "meta:vkCmdFillMemoryKHR");
+   vk_meta_fill_memory(&cmd->vk, &dev->meta, dstRange, dstFlags, data);
    kk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
 }
 
 VKAPI_ATTR void VKAPI_CALL
-kk_CmdUpdateBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
-                   VkDeviceSize dstOffset, VkDeviceSize dstRange,
-                   const void *pData)
+kk_CmdUpdateMemoryKHR(VkCommandBuffer commandBuffer,
+                      const VkDeviceAddressRangeKHR *pDstRange,
+                      VkAddressCommandFlagsKHR dstFlags, VkDeviceSize dataSize,
+                      const void *pData)
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
    struct kk_device *dev = kk_cmd_buffer_device(cmd);
 
    struct kk_meta_save save;
-   kk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
-   vk_meta_update_buffer(&cmd->vk, &dev->meta, dstBuffer, dstOffset, dstRange,
+   kk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE,
+                 "meta:vkCmdUpdateMemoryKHR");
+   vk_meta_update_memory(&cmd->vk, &dev->meta, pDstRange, dstFlags, dataSize,
                          pData);
    kk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
 }
@@ -229,7 +240,8 @@ kk_CmdBlitImage2(VkCommandBuffer commandBuffer,
    struct kk_device *dev = kk_cmd_buffer_device(cmd);
 
    struct kk_meta_save save;
-   kk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   kk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                 "meta:vkCmdBlitImage2");
    vk_meta_blit_image2(&cmd->vk, &dev->meta, pBlitImageInfo);
    kk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
 }
@@ -242,7 +254,8 @@ kk_CmdResolveImage2(VkCommandBuffer commandBuffer,
    struct kk_device *dev = kk_cmd_buffer_device(cmd);
 
    struct kk_meta_save save;
-   kk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   kk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                 "meta:vkCmdResolveImage2");
    vk_meta_resolve_image2(&cmd->vk, &dev->meta, pResolveImageInfo);
    kk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
 }
@@ -280,15 +293,15 @@ kk_CmdClearAttachments(VkCommandBuffer commandBuffer, uint32_t attachmentCount,
    kk_meta_init_render(cmd, &render_info);
 
    uint32_t view_mask = cmd->state.gfx.render.view_mask;
-   struct kk_encoder *encoder = cmd->encoder;
    uint32_t layer_ids[KK_MAX_MULTIVIEW_VIEW_COUNT] = {};
-   mtl_set_vertex_amplification_count(encoder->main.encoder, layer_ids, 1u);
+   mtl_set_vertex_amplification_count(cs_get_render(cmd), layer_ids, 1u);
 
    /* Preserve conditional rendering state for clearing attachments */
    struct kk_conditional_rendering_state cond_render = cmd->state.cond_render;
 
    struct kk_meta_save save;
-   kk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   kk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                 "meta:vkCmdClearAttachments");
    cmd->state.cond_render = cond_render;
    vk_meta_clear_attachments(&cmd->vk, &dev->meta, &render_info,
                              attachmentCount, pAttachments, rectCount, pRects);
@@ -300,7 +313,7 @@ kk_CmdClearAttachments(VkCommandBuffer commandBuffer, uint32_t attachmentCount,
    if (view_mask == 0u) {
       layer_ids[count++] = 0;
    }
-   mtl_set_vertex_amplification_count(encoder->main.encoder, layer_ids, count);
+   mtl_set_vertex_amplification_count(cs_get_render(cmd), layer_ids, count);
 }
 
 void
@@ -310,7 +323,8 @@ kk_meta_resolve_rendering(struct kk_cmd_buffer *cmd,
    struct kk_device *dev = kk_cmd_buffer_device(cmd);
 
    struct kk_meta_save save;
-   kk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   kk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                 "meta:resolve_rendering");
    vk_meta_resolve_rendering(&cmd->vk, &dev->meta, pRenderingInfo);
    kk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
 }

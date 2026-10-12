@@ -520,7 +520,7 @@ ac_build_gfx10_texture_descriptor(const struct radeon_info *info, const struct a
              S_00A004_WIDTH_LO(state->width - 1);
    desc[2] = S_00A008_WIDTH_HI((state->width - 1) >> 2) |
              S_00A008_HEIGHT(state->height - 1) |
-             S_00A008_RESOURCE_LEVEL(info->gfx_level < GFX11);
+             S_00A008_RESOURCE_LEVEL(info->compiler_info.has_desc_resource_level);
    desc[3] = S_00A00C_DST_SEL_X(ac_map_swizzle(state->swizzle[0])) |
              S_00A00C_DST_SEL_Y(ac_map_swizzle(state->swizzle[1])) |
              S_00A00C_DST_SEL_Z(ac_map_swizzle(state->swizzle[2])) |
@@ -621,15 +621,6 @@ ac_build_texture_descriptor(const struct radeon_info *info, const struct ac_text
    } else {
       ac_build_gfx6_texture_descriptor(info, state, desc);
    }
-}
-
-uint32_t
-ac_tile_mode_index(const struct radeon_surf *surf, unsigned level, bool stencil)
-{
-   if (stencil)
-      return surf->u.legacy.zs.stencil_tiling_index[level];
-   else
-      return surf->u.legacy.tiling_index[level];
 }
 
 void
@@ -792,7 +783,7 @@ ac_set_mutable_tex_desc_fields(const struct radeon_info *info, const struct ac_m
    } else {
       /* GFX6-GFX8 */
       unsigned pitch = base_level_info->nblk_x * state->gfx6.block_width;
-      unsigned index = ac_tile_mode_index(surf, state->gfx6.base_level, state->is_stencil);
+      unsigned index = ac_surface_get_legacy_tiling_index(surf, state->gfx6.base_level, state->is_stencil);
 
       /* Only macrotiled modes can set tile swizzle. */
       if (base_level_info->mode == RADEON_SURF_MODE_2D)
@@ -844,7 +835,7 @@ ac_set_buf_desc_word3(const enum amd_gfx_level gfx_level, const struct ac_buffer
       *rsrc_word3 |= (gfx_level >= GFX12 ? S_008F0C_FORMAT_GFX12(fmt->img_format) :
                                            S_008F0C_FORMAT_GFX10(fmt->img_format)) |
                      S_008F0C_OOB_SELECT(state->gfx10_oob_select) |
-                     S_008F0C_RESOURCE_LEVEL(gfx_level < GFX11);
+                     S_008F0C_RESOURCE_LEVEL(state->has_desc_resource_level);
 
       if (gfx_level >= GFX12) {
          *rsrc_word3 |= S_008F0C_COMPRESSION_EN(state->gfx12.compression_en) |
@@ -886,7 +877,8 @@ ac_build_buffer_descriptor(const enum amd_gfx_level gfx_level, const struct ac_b
 }
 
 void
-ac_build_raw_buffer_descriptor(const enum amd_gfx_level gfx_level, uint64_t va, uint32_t size, uint32_t desc[4])
+ac_build_raw_buffer_descriptor(const enum amd_gfx_level gfx_level, bool has_desc_resource_level,
+                               uint64_t va, uint32_t size, uint32_t desc[4])
 {
    const struct ac_buffer_state ac_state = {
       .va = va,
@@ -896,13 +888,15 @@ ac_build_raw_buffer_descriptor(const enum amd_gfx_level gfx_level, uint64_t va, 
          PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y, PIPE_SWIZZLE_Z, PIPE_SWIZZLE_W,
       },
       .gfx10_oob_select = V_008F0C_OOB_SELECT_RAW,
+      .has_desc_resource_level = has_desc_resource_level,
    };
 
    ac_build_buffer_descriptor(gfx_level, &ac_state, desc);
 }
 
 void
-ac_build_attr_ring_descriptor(const enum amd_gfx_level gfx_level, uint64_t va, uint32_t size, uint32_t stride, uint32_t desc[4])
+ac_build_attr_ring_descriptor(const enum amd_gfx_level gfx_level, bool has_desc_resource_level,
+                              uint64_t va, uint32_t size, uint32_t stride, uint32_t desc[4])
 {
    assert(gfx_level >= GFX11);
 
@@ -915,6 +909,7 @@ ac_build_attr_ring_descriptor(const enum amd_gfx_level gfx_level, uint64_t va, u
       },
       .stride = stride,
       .gfx10_oob_select = V_008F0C_OOB_SELECT_STRUCTURED_WITH_OFFSET,
+      .has_desc_resource_level = has_desc_resource_level,
       .swizzle_enable = 3, /* 16B */
       .index_stride = 2, /* 32 elements */
    };
@@ -947,8 +942,8 @@ ac_init_gfx6_ds_surface(const struct radeon_info *info, const struct ac_ds_state
    ds->db_stencil_info = S_028044_FORMAT(stencil_format);
 
    if (info->gfx_level >= GFX7) {
-      const uint32_t index = surf->u.legacy.tiling_index[state->level];
-      const uint32_t stencil_index = surf->u.legacy.zs.stencil_tiling_index[state->level];
+      const uint32_t index = ac_surface_get_legacy_tiling_index(surf, state->level, false);
+      const uint32_t stencil_index = ac_surface_get_legacy_tiling_index(surf, state->level, true);
       const uint32_t macro_index = surf->u.legacy.macro_tile_index;
       const uint32_t stencil_tile_mode = info->si_tile_mode_array[stencil_index];
       const uint32_t macro_mode = info->cik_macrotile_mode_array[macro_index];
@@ -966,10 +961,10 @@ ac_init_gfx6_ds_surface(const struct radeon_info *info, const struct ac_ds_state
       ds->db_z_info |= S_028040_TILE_SPLIT(G_009910_TILE_SPLIT(tile_mode));
       ds->db_stencil_info |= S_028044_TILE_SPLIT(G_009910_TILE_SPLIT(stencil_tile_mode));
    } else {
-      uint32_t tile_mode_index = ac_tile_mode_index(surf, state->level, false);
+      uint32_t tile_mode_index = ac_surface_get_legacy_tiling_index(surf, state->level, false);
       ds->db_z_info |= S_028040_TILE_MODE_INDEX(tile_mode_index);
 
-      tile_mode_index = ac_tile_mode_index(surf, state->level, true);
+      tile_mode_index = ac_surface_get_legacy_tiling_index(surf, state->level, true);
       ds->db_stencil_info |= S_028044_TILE_MODE_INDEX(tile_mode_index);
       if (state->stencil_only)
          ds->db_z_info |= S_028040_TILE_MODE_INDEX(tile_mode_index);
@@ -1323,7 +1318,7 @@ ac_init_gfx10_cb_surface(const struct radeon_info *info, const struct ac_cb_stat
                           S_028C68_MAX_MIP(num_levels - 1);
    cb->cb_color_attrib3 = S_028EE0_MIP0_DEPTH(state->num_layers) |
                           S_028EE0_RESOURCE_TYPE(surf->u.gfx9.resource_type) |
-                          S_028EE0_RESOURCE_LEVEL(info->gfx_level >= GFX11 ? 0 : 1);
+                          S_028EE0_RESOURCE_LEVEL(info->compiler_info.has_desc_resource_level);
    cb->cb_dcc_control = S_028C78_MAX_UNCOMPRESSED_BLOCK_SIZE(V_028C78_MAX_BLOCK_SIZE_256B) |
                         S_028C78_MAX_COMPRESSED_BLOCK_SIZE(surf->u.gfx9.color.dcc.max_compressed_block_size) |
                         S_028C78_MIN_COMPRESSED_BLOCK_SIZE(ac_get_dcc_min_compressed_block_size(info)) |
@@ -1541,7 +1536,7 @@ ac_set_mutable_cb_surface_fields(const struct radeon_info *info, const struct ac
 
       pitch_tile_max = level_info->nblk_x / 8 - 1;
       slice_tile_max = (level_info->nblk_x * level_info->nblk_y) / 64 - 1;
-      tile_mode_index = ac_tile_mode_index(surf, state->base_level, false);
+      tile_mode_index = ac_surface_get_legacy_tiling_index(surf, state->base_level, false);
 
       cb->cb_color_attrib |= S_028C74_TILE_MODE_INDEX(tile_mode_index);
       cb->cb_color_pitch = S_028C64_TILE_MAX(pitch_tile_max);

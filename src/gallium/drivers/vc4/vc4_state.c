@@ -101,6 +101,11 @@ vc4_create_rasterizer_state(struct pipe_context *pctx,
         if (!(cso->cull_face & PIPE_FACE_BACK))
                 so->config_bits[0] |= VC4_CONFIG_BITS_ENABLE_PRIM_BACK;
 
+        if (cso->fill_front != PIPE_POLYGON_MODE_FILL ||
+            cso->fill_back != PIPE_POLYGON_MODE_FILL) {
+                mesa_logw_once("Selecting a polygon rasterization mode other than GL_FILL is not supported");
+        }
+
         /* Workaround: HW-2726 PTB does not handle zero-size points (BCM2835,
          * BCM21553).
          */
@@ -378,6 +383,8 @@ vc4_set_constant_buffer(struct pipe_context *pctx,
         struct vc4_context *vc4 = vc4_context(pctx);
         struct vc4_constbuf_stateobj *so = &vc4->constbuf[shader];
 
+        util_copy_constant_buffer(&so->cb[index], cb);
+
         /* Note that the gallium frontend can unbind constant buffers by
          * passing NULL here.
          */
@@ -389,8 +396,6 @@ vc4_set_constant_buffer(struct pipe_context *pctx,
 
         if (index == 1 && so->cb[index].buffer_size != cb->buffer_size)
                 vc4->dirty |= VC4_DIRTY_UBO_1_SIZE;
-
-        util_copy_constant_buffer(&so->cb[index], cb);
 
         so->enabled_mask |= 1 << index;
         so->dirty_mask |= 1 << index;

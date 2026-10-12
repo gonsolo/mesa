@@ -112,6 +112,11 @@ static uint32_t r300_depth_clear_cb_value(enum pipe_format format,
 
     format = r300_unbyteswap_array_format(format);
 
+#if UTIL_ARCH_BIG_ENDIAN
+    if (format == PIPE_FORMAT_B5G6R5_UNORM)
+        format = PIPE_FORMAT_R5G6B5_UNORM;
+#endif
+
     util_pack_color(rgba, format, &uc);
 
     if (util_format_get_blocksizebits(format) == 32) {
@@ -121,7 +126,7 @@ static uint32_t r300_depth_clear_cb_value(enum pipe_format format,
         return util_cpu_to_le32(uc.ui[0]);
     }
 
-    return uc.us | (uc.us << 16);
+    return uc.us | ((uint32_t)(uc.us) << 16);
 }
 
 static bool r300_cbzb_clear_allowed(struct r300_context *r300,

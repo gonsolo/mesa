@@ -67,6 +67,9 @@ enum pco_debug {
    PCO_DEBUG_ALLOC_EXTRA_VTXINS = BITFIELD64_BIT(3),
    PCO_DEBUG_INT_SMP = BITFIELD64_BIT(4),
    PCO_DEBUG_GLOBAL_SHMEM = BITFIELD64_BIT(5),
+   PCO_DEBUG_RA_FORCE_SPILL = BITFIELD64_BIT(6),
+   PCO_DEBUG_RA_SKIP_OPT = BITFIELD64_BIT(7),
+   PCO_DEBUG_NO_DMA_CACHE = BITFIELD64_BIT(8),
 };
 
 extern uint64_t pco_debug;
@@ -103,6 +106,7 @@ typedef struct _pco_cf_node pco_cf_node;
 typedef struct _pco_func pco_func;
 typedef struct _pco_block pco_block;
 typedef struct _pco_instr pco_instr;
+typedef struct _pco_builder pco_builder;
 
 #define PCO_REF_VAL_BITS (32U)
 
@@ -1505,6 +1509,18 @@ static inline pco_instr *pco_last_instr(pco_block *block)
 }
 
 /**
+ * \brief Returns whether an instruction is the last instruction in its block.
+ *
+ * \param[in] instr The instruction.
+ * \return True if the instruction is the last instruction in its block.
+ */
+static inline bool pco_is_last_instr(pco_instr *instr)
+{
+   pco_instr *last_instr = pco_last_instr(instr->parent_block);
+   return instr == last_instr;
+}
+
+/**
  * \brief Returns the next instruction.
  *
  * \param[in] instr The current instruction.
@@ -1803,14 +1819,16 @@ bool pco_nir_link_multiview(nir_shader *producer,
 bool pco_nir_lower_algebraic(nir_shader *shader);
 bool pco_nir_lower_algebraic_late(nir_shader *shader);
 bool pco_nir_lower_alpha_to_coverage(nir_shader *shader);
+bool pco_nir_lower_alu(nir_shader *shader);
 bool pco_nir_lower_atomics(nir_shader *shader, pco_data *data);
 bool pco_nir_lower_barriers(nir_shader *shader, pco_data *data);
-bool pco_nir_lower_clip_cull_vars(nir_shader *shader);
+void pco_nir_lower_clip_cull_vars(nir_shader *shader);
 bool pco_nir_lower_fs_intrinsics(nir_shader *shader);
 bool pco_nir_lower_vs_intrinsics(nir_shader *shader);
 bool pco_nir_lower_images(nir_shader *shader, pco_data *data, pco_ctx *ctx);
 bool pco_nir_lower_interpolation(nir_shader *shader, pco_fs_data *fs);
-bool pco_nir_lower_io(nir_shader *shader);
+bool pco_nir_lower_io(nir_shader *shader, pco_data *data);
+bool pco_nir_lower_sample_mask_out(nir_shader *shader);
 bool pco_nir_lower_shared_io_to_global(nir_shader *shader, unsigned usc_slots);
 bool pco_nir_lower_subgroups(nir_shader *shader);
 bool pco_nir_lower_tex(nir_shader *shader, pco_data *data, pco_ctx *ctx);
@@ -1818,6 +1836,7 @@ bool pco_nir_lower_variables(nir_shader *shader, bool inputs, bool outputs);
 bool pco_nir_lower_vk(nir_shader *shader, pco_data *data);
 bool pco_nir_pfo(nir_shader *shader, pco_fs_data *fs);
 bool pco_nir_point_size(nir_shader *shader);
+bool pco_nir_prop_access(nir_shader *shader);
 bool pco_nir_pvi(nir_shader *shader, pco_vs_data *vs);
 bool pco_opt(pco_shader *shader);
 bool pco_ra(pco_shader *shader);
@@ -2139,6 +2158,25 @@ static inline unsigned pco_ref_get_reg_index(pco_ref ref)
    unsigned index = pco_ref_is_idx_reg(ref) ? ref.idx_reg.offset : ref.val;
 
    return index;
+}
+
+/**
+ * \brief Sets the register index of a reference ref.
+ *
+ * \param[in] ref Reference ref.
+ * \param[in] index New index.
+ * \return Updated ref.
+ */
+static inline pco_ref pco_ref_set_reg_index(pco_ref ref, unsigned index)
+{
+   assert(pco_ref_is_reg(ref) || pco_ref_is_idx_reg(ref));
+
+   if (pco_ref_is_idx_reg(ref))
+      ref.idx_reg.offset = index;
+   else
+      ref.val = index;
+
+   return ref;
 }
 
 /**
@@ -2925,6 +2963,40 @@ pco_refs_are_equal(pco_ref ref0, pco_ref ref1, bool ignore_dtype)
 }
 
 /**
+ * \brief Checks whether two register references overlap.
+ *
+ * \param[in] ref0 First register reference.
+ * \param[in] ref1 Second register reference.
+ * \return True if register references overlap.
+ */
+static inline bool pco_refs_are_overlapping_regs(pco_ref ref0, pco_ref ref1)
+{
+   assert(pco_ref_is_reg(ref0) || pco_ref_is_idx_reg(ref0));
+   assert(pco_ref_is_reg(ref1) || pco_ref_is_idx_reg(ref1));
+
+   if (pco_ref_get_reg_class(ref0) != pco_ref_get_reg_class(ref1))
+      return false;
+
+   unsigned ref0_start = pco_ref_get_reg_index(ref0);
+   unsigned ref0_end =
+      pco_ref_get_reg_index(ref0) + pco_ref_get_chans(ref0) - 1;
+   /**
+    * Index register accesses have a known minimum index but an unbounded
+    * maximum possible index.
+    */
+   if (pco_ref_is_idx_reg(ref0))
+      ref0_end = ~0;
+
+   unsigned ref1_start = pco_ref_get_reg_index(ref1);
+   unsigned ref1_end =
+      pco_ref_get_reg_index(ref1) + pco_ref_get_chans(ref1) - 1;
+   if (pco_ref_is_idx_reg(ref1))
+      ref1_end = ~0;
+
+   return ref0_start <= ref1_end && ref1_start <= ref0_end;
+}
+
+/**
  * \brief Checks a reference has a valid hardware source mapping.
  *
  * \param[in] ref Reference.
@@ -3115,10 +3187,15 @@ static inline unsigned pco_branch_rel_offset(pco_igrp *br, pco_cf_node *cf_node)
    return pco_cf_node_offset(cf_node) - pco_igrp_offset(br);
 }
 
-static inline unsigned pco_branch_rel_offset_next_igrp(pco_igrp *br)
+static inline unsigned pco_branch_rel_offset_next_igrp(pco_igrp *br, bool skip_next)
 {
    pco_igrp *next_igrp = pco_next_igrp(br);
    assert(next_igrp);
+
+   if (skip_next) {
+      next_igrp = pco_next_igrp(next_igrp);
+      assert(next_igrp);
+   }
 
    return pco_igrp_offset(next_igrp) - pco_igrp_offset(br);
 }
@@ -3151,8 +3228,12 @@ static inline bool pco_should_skip_pass(const char *pass)
 
 /* Common hw constants/references. */
 
-/** Integer/float zero. */
+/** Integer/float zero/false. */
 #define pco_zero pco_ref_hwreg(0, PCO_REG_CLASS_CONST)
+#define pco_false pco_zero
+
+/** Float negative zero. */
+#define pco_nzero pco_ref_hwreg(141, PCO_REG_CLASS_CONST)
 
 /** Integer one. */
 #define pco_one pco_ref_hwreg(1, PCO_REG_CLASS_CONST)
@@ -3228,5 +3309,15 @@ pco_unpack_desc(uint32_t packed, unsigned *desc_set, unsigned *binding)
    *desc_set = packed & 0xffff;
    *binding = packed >> 16;
 }
+
+/**
+ * \brief Returns a reference to the execution mask counter,
+ *        allocating and initialising one if it doesn't exist.
+ *
+ * \param[in,out] func The PCO function.
+ * \param[in,out] b The PCO builder.
+ * \return The execution mask counter reference.
+ */
+pco_ref pco_emc_ref(pco_func *func, pco_builder *b);
 
 #endif /* PCO_INTERNAL_H */

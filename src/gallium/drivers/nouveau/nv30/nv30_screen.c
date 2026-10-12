@@ -102,7 +102,9 @@ nv30_init_screen_caps(struct nv30_screen *screen)
    caps->max_texture_cube_levels = 13;
    caps->glsl_feature_level =
    caps->glsl_feature_level_compatibility = 120;
-   caps->endianness = PIPE_ENDIAN_LITTLE;
+   caps->device_type = dev->info.type == NV_DEVICE_TYPE_DIS
+      ? PIPE_DEVICE_TYPE_DISCRETE_GPU
+      : PIPE_DEVICE_TYPE_INTEGRATED_GPU;
    caps->constant_buffer_offset_alignment = 16;
    caps->min_map_buffer_alignment = NOUVEAU_MIN_BUFFER_MAP_ALIGN;
    caps->max_viewports = 1;
@@ -126,6 +128,7 @@ nv30_init_screen_caps(struct nv30_screen *screen)
    caps->clear_scissored = true;
    caps->allow_mapped_buffers_during_execution = true;
    caps->query_memory_info = true;
+   caps->polygon_stipple = true;
    caps->vertex_input_alignment = PIPE_VERTEX_INPUT_ALIGNMENT_4BYTE;
    caps->texture_transfer_modes = PIPE_TEXTURE_TRANSFER_BLIT;
    /* nv35 capabilities */
@@ -134,13 +137,14 @@ nv30_init_screen_caps(struct nv30_screen *screen)
    caps->supported_prim_modes_with_restart =
    caps->supported_prim_modes = BITFIELD_MASK(MESA_PRIM_COUNT);
    /* nv4x capabilities */
-   caps->blend_equation_separate =
-   caps->npot_textures =
    caps->conditional_render =
    caps->texture_mirror_clamp =
    caps->texture_mirror_clamp_to_edge =
    caps->primitive_restart =
    caps->primitive_restart_fixed_index = eng3d->oclass >= NV40_3D_CLASS;
+   /* nv4x only, but we need to fake these to get gles 2.0 on nv3x */
+   caps->blend_equation_separate = true;
+   caps->npot_textures = true;
    /* unsupported */
    caps->emulate_nonfixed_primitive_restart = false;
    caps->depth_clip_disable_separate = false;
@@ -334,25 +338,65 @@ nv30_screen_is_format_supported(struct pipe_screen *pscreen,
    return (nv30_format_info(pscreen, format)->bindings & bindings) == bindings;
 }
 
-static const nir_shader_compiler_options nv30_base_compiler_options = {
-   .float_mul_add32 = nir_float_muladd_support_has_fmad | nir_float_muladd_support_fuse,
-   .lower_bitops = true,
-   .lower_extract_byte = true,
-   .lower_extract_word = true,
-   .lower_fdiv = true,
+// todo:
+// reordering for better results?
+// lower_ftrunc, regression: dEQP-GLES2.functional.shaders.conversions.matrix_combine.float_ivec3_bvec3_vec4_ivec2_float_vec2_to_mat4_fragment
+// lower cmp (deeper changes needed),
+// lower DP2 (const or uninitialized tmp could be used for 0 to convert into dp3/dp4),
+// lower RSQ on nv40 (currently it's using scale that it not implemented outside),
+// cmp could be expressed as 2 instructions instead of three (moving conditionally first variable in spot of second or SLT + LRP on nv30)
+// fragment shader can use byte/word,
+// hardware allows for long shaders, figure out unrolling value,
+// hardware has opcodes that could be generated like lit/dst,
+// merging add/mov/mul into mad,
+// after isolating gallivm prepare separate config for it (for now speed of gpu is more important, as long as it works)
+
+#define NIR_OPTIONS_COMMONS \
+   .float_mul_add32 = nir_float_muladd_support_has_fmad | nir_float_muladd_support_fuse,\
+   .lower_bitops = true,\
+   .lower_extract_byte = true,\
+   .lower_extract_word = true,\
+   .lower_fdiv = true,\
+   .lower_insert_byte = true,\
+   .lower_insert_word = true,\
+   .lower_fdph = true,\
+   .lower_flrp64 = true,\
+   .lower_fmod = true, \
+   .lower_fceil = true, \
+   .lower_uniforms_to_ubo = true,\
+   .force_indirect_unrolling = nir_var_all,\
+   .force_indirect_unrolling_sampler = true,\
+   .max_unroll_iterations = 32,\
+   .no_integers = true, \
+   .fdot_replicates = true
+
+// VERTEX
+
+static const nir_shader_compiler_options nv30_vs_compiler_options = {
+   NIR_OPTIONS_COMMONS,
    .lower_fsat = true,
-   .lower_insert_byte = true,
-   .lower_insert_word = true,
-   .lower_fdph = true,
+   .lower_fpow = true,
    .lower_flrp32 = true,
-   .lower_flrp64 = true,
-   .lower_fmod = true,
-   .lower_fpow = true, /* In hardware as of nv40 FS */
-   .lower_uniforms_to_ubo = true,
-   .force_indirect_unrolling = nir_var_all,
-   .force_indirect_unrolling_sampler = true,
-   .max_unroll_iterations = 32,
-   .no_integers = true,
+};
+
+static const nir_shader_compiler_options nv40_vs_compiler_options = {
+   NIR_OPTIONS_COMMONS,
+   .lower_fpow = true,
+   .lower_flrp32 = true,
+};
+
+// FRAGMENT
+
+static const nir_shader_compiler_options nv30_fs_compiler_options = {
+   NIR_OPTIONS_COMMONS,
+   .lower_fsign = true,
+};
+
+static const nir_shader_compiler_options nv40_fs_compiler_options = {
+   NIR_OPTIONS_COMMONS,
+   .lower_fpow = true,
+   .lower_flrp32 = true,
+   .lower_fsign = true,
 };
 
 static void
@@ -487,8 +531,8 @@ nv30_screen_create(struct nouveau_device *dev)
    pscreen->context_create = nv30_context_create;
    pscreen->is_format_supported = nv30_screen_is_format_supported;
 
-   pscreen->nir_options[MESA_SHADER_VERTEX] = &nv30_base_compiler_options;
-   pscreen->nir_options[MESA_SHADER_FRAGMENT] = &screen->fs_compiler_options;
+   pscreen->nir_options[MESA_SHADER_VERTEX] = oclass < NV40_3D_CLASS ? &nv30_vs_compiler_options : &nv40_vs_compiler_options;
+   pscreen->nir_options[MESA_SHADER_FRAGMENT] = oclass < NV40_3D_CLASS ? &nv30_fs_compiler_options : &nv40_fs_compiler_options;
 
    nv30_resource_screen_init(pscreen);
    nouveau_screen_init_vdec(&screen->base);
@@ -506,11 +550,6 @@ nv30_screen_create(struct nouveau_device *dev)
       screen->base.vidmem_bindings |= PIPE_BIND_INDEX_BUFFER;
       screen->base.sysmem_bindings |= PIPE_BIND_INDEX_BUFFER;
    }
-
-   screen->fs_compiler_options = nv30_base_compiler_options;
-   screen->fs_compiler_options.lower_fsat = false;
-   if (oclass >= NV40_3D_CLASS)
-      screen->fs_compiler_options.lower_fpow = false;
 
    fifo = screen->base.channel->data;
    push = screen->base.pushbuf;

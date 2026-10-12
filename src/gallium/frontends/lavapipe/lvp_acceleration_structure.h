@@ -9,7 +9,7 @@
 #define LVP_ACCELERATION_STRUCTURE_H
 
 #include "lvp_private.h"
-#include "bvh/vk_bvh.h"
+#include "bvh/vk_bvh_defines.h"
 
 #define LVP_GEOMETRY_OPAQUE (1u << 31)
 
@@ -94,8 +94,5 @@ struct lvp_accel_struct_serialization_header {
 
 VkResult
 lvp_device_init_accel_struct_state(struct lvp_device *device);
-
-void
-lvp_device_finish_accel_struct_state(struct lvp_device *device);
 
 #endif

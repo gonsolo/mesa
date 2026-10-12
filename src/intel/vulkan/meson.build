@@ -95,7 +95,7 @@ endif
 
 libanv_drirc_files = custom_target(
   'libanv_drirc',
-  input : ['anv_drirc_gen.py', drirc_gen, join_paths(dir_source_root, 'src/util/00-anv-defaults.conf')],
+  input : ['anv_drirc_gen.py', drirc_gen, '00-anv-defaults.conf'],
   output : ['anv_drirc.c', 'anv_drirc.h'],
   command : [prog_python, '@INPUT0@',
              '-p', join_paths(dir_source_root, 'src/util/'),
@@ -129,6 +129,7 @@ anv_per_hw_ver_files = files(
   'genX_cmd_draw.c',
   'genX_cmd_draw_generated_flush.h',
   'genX_cmd_draw_generated_indirect.h',
+  'genX_huc.h',
   'genX_cmd_video.c',
   'genX_cmd_video_enc.c',
   'genX_gfx_state.c',
@@ -195,6 +196,7 @@ libanv_files = files(
   'anv_buffer.c',
   'anv_buffer_view.c',
   'anv_cmd_buffer.c',
+  'anv_debug.c',
   'anv_descriptor_set.c',
   'anv_device.c',
   'anv_dgc_layout.c',
@@ -226,6 +228,7 @@ libanv_files = files(
   'anv_nir_push_constants_analysis.c',
   'anv_nir_push_descriptor_analysis.c',
   'anv_nir_realign_cbv.c',
+  'anv_nir_xe2_r11g11b10_atomic_wa.c',
   'anv_perf.c',
   'anv_physical_device.c',
   'anv_pipeline_cache.c',
@@ -244,13 +247,14 @@ libanv_files = files(
   'anv_utrace.c',
   'anv_va.c',
   'anv_video.c',
+  'anv_video_brc_tables.c',
   'anv_wsi.c',
-  'bvh/anv_bvh.h',
-  'bvh/anv_build_interface.h',
+  'bvh/anv_bvh_defines.h',
 )
 
 anv_deps = [
   dep_libdrm,
+  dep_regex,
   dep_valgrind,
   idep_genxml,
   idep_mesautil,
@@ -262,6 +266,7 @@ anv_deps = [
   idep_intel_blorp,
   idep_mda,
   idep_anv_drirc,
+  idep_metrics_library_intel,
 ]
 
 if with_platform_x11

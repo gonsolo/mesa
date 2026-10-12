@@ -46,7 +46,6 @@ typedef struct {
    /* The loop we store information for */
    nir_loop *loop;
    nir_block *block_after_loop;
-   nir_block **exit_blocks;
 
    /* Whether to skip loop invariant variables */
    bool skip_invariants;
@@ -226,8 +225,19 @@ convert_loop_exit_for_ssa(nir_def *def, void *void_state)
    if (all_uses_inside_loop)
       return true;
 
+   state->progress = true;
+
    if (nir_def_is_deref(def)) {
-      nir_rematerialize_deref_in_use_blocks(nir_def_as_deref(def));
+      ASSERTED bool progress = nir_rematerialize_deref_in_use_blocks(nir_def_as_deref(def));
+      assert(progress);
+      return true;
+   } else if (nir_def_is_const(def)) {
+      /* Various things in NIR depend on constant sources,
+       * so move the constant before the loop to prevent creating phis.
+       */
+      nir_block *before_loop = nir_cf_node_as_block(nir_cf_node_prev(&state->loop->cf_node));
+      nir_cursor cursor = nir_after_block(before_loop);
+      nir_instr_move(cursor, nir_def_instr(def));
       return true;
    }
 
@@ -239,9 +249,8 @@ convert_loop_exit_for_ssa(nir_def *def, void *void_state)
    /* Create a phi node with as many sources pointing to the same ssa_def as
     * the block has predecessors.
     */
-   uint32_t num_exits = nir_block_num_preds(state->block_after_loop);
-   for (uint32_t i = 0; i < num_exits; i++) {
-      nir_phi_instr_add_src(phi, state->exit_blocks[i], def);
+   nir_foreach_pred(pred, state->block_after_loop) {
+      nir_phi_instr_add_src(phi, pred, def);
    }
 
    nir_instr_insert_before_block(state->block_after_loop, &phi->instr);
@@ -268,7 +277,6 @@ convert_loop_exit_for_ssa(nir_def *def, void *void_state)
       }
    }
 
-   state->progress = true;
    return true;
 }
 
@@ -278,9 +286,6 @@ setup_loop_state(lcssa_state *state, nir_loop *loop)
    state->loop = loop;
    state->block_after_loop =
       nir_cf_node_as_block(nir_cf_node_next(&loop->cf_node));
-
-   ralloc_free(state->exit_blocks);
-   state->exit_blocks = nir_block_get_predecessors_sorted(state->block_after_loop, state);
 }
 
 static void

@@ -46,14 +46,13 @@ enum radeon_bo_flag { /* bitfield */
                       RADEON_FLAG_READ_ONLY = (1 << 7),
                       RADEON_FLAG_32BIT = (1 << 8),
                       RADEON_FLAG_PREFER_LOCAL_BO = (1 << 9),
-                      RADEON_FLAG_ZERO_VRAM = (1 << 10),
-                      RADEON_FLAG_REPLAYABLE = (1 << 11),
-                      RADEON_FLAG_DISCARDABLE = (1 << 12),
-                      RADEON_FLAG_GFX12_ALLOW_DCC = (1 << 13),
-                      RADEON_FLAG_VM_UPDATE_WAIT = (1 << 14),
-                      RADEON_FLAG_VM_PAD_1PAGE = (1 << 15),
-                      RADEON_FLAG_ENCRYPTED = (1 << 16),
-                      RADEON_FLAG_EMULATE_SPARSE_RESIDENCY = (1 << 17),
+                      RADEON_FLAG_REPLAYABLE = (1 << 10),
+                      RADEON_FLAG_DISCARDABLE = (1 << 11),
+                      RADEON_FLAG_GFX12_ALLOW_DCC = (1 << 12),
+                      RADEON_FLAG_VM_UPDATE_WAIT = (1 << 13),
+                      RADEON_FLAG_VM_PAD_1PAGE = (1 << 14),
+                      RADEON_FLAG_ENCRYPTED = (1 << 15),
+                      RADEON_FLAG_EMULATE_SPARSE_RESIDENCY = (1 << 16),
 };
 
 enum radeon_ctx_priority {
@@ -228,8 +227,6 @@ enum radv_cs_dump_type {
 struct radeon_winsys {
    void (*destroy)(struct radeon_winsys *ws);
 
-   void (*query_info)(struct radeon_winsys *ws, struct radeon_info *gpu_info);
-
    uint64_t (*query_value)(struct radeon_winsys *ws, enum radeon_value_id value);
 
    bool (*read_registers)(struct radeon_winsys *ws, unsigned reg_offset, unsigned num_registers, uint32_t *out);
@@ -267,11 +264,9 @@ struct radeon_winsys {
    VkResult (*ctx_create)(struct radeon_winsys *ws, enum radeon_ctx_priority priority, struct radeon_winsys_ctx **ctx);
    void (*ctx_destroy)(struct radeon_winsys_ctx *ctx);
 
-   VkResult (*ctx_is_priority_permitted)(struct radeon_winsys *_ws, enum radeon_ctx_priority priority);
-
    bool (*ctx_wait_idle)(struct radeon_winsys_ctx *ctx, enum amd_ip_type amd_ip_type, int ring_index);
 
-   int (*ctx_set_pstate)(struct radeon_winsys_ctx *ctx, uint32_t pstate);
+   int (*ctx_set_pstate)(struct radeon_winsys_ctx *ctx, uint32_t pstate, uint64_t timeout);
 
    enum radeon_bo_domain (*cs_domain)(const struct radeon_winsys *ws);
 
@@ -288,6 +283,9 @@ struct radeon_winsys {
    VkResult (*cs_finalize)(struct ac_cmdbuf *cs);
 
    void (*cs_grow)(struct ac_cmdbuf *cs, size_t min_size);
+
+   void (*cs_set_last_cp_dma_header)(struct ac_cmdbuf *cs, uint32_t *ib_ptr);
+   uint32_t *(*cs_get_last_cp_dma_header)(struct ac_cmdbuf *cs);
 
    VkResult (*cs_submit)(struct radeon_winsys_ctx *ctx, const struct radv_winsys_submit_info *submit,
                          uint32_t wait_count, const struct vk_sync_wait *waits, uint32_t signal_count,
@@ -312,6 +310,8 @@ struct radeon_winsys {
    void (*dump_bo_ranges)(struct radeon_winsys *ws, FILE *file);
 
    void (*dump_bo_log)(struct radeon_winsys *ws, FILE *file);
+
+   bool (*bo_wait_for_idle)(struct radeon_winsys *ws, struct radeon_winsys_bo *bo);
 
    int (*get_fd)(struct radeon_winsys *ws);
 
