@@ -343,6 +343,8 @@ unsafe fn compile_nir_inner(
         return 0;
     }
     let stage = (*nir).info.stage();
+    let is_vertex = stage == MESA_SHADER_VERTEX;
+    let is_fragment = stage == MESA_SHADER_FRAGMENT;
 
     if env::var("BORGC_DUMP_NIR").is_ok() {
         if let Ok(s) = (*nir).to_string() {
@@ -485,7 +487,7 @@ unsafe fn compile_nir_inner(
     // edge/depth/barycentric setup, before the fragment shader's own body
     // even starts -- confirmed on real hardware (a value pinned there read
     // back as whatever the ROM last wrote, not what the firmware staged).
-    let const_regs: &[u8] = if stage == 0 {
+    let const_regs: &[u8] = if is_vertex {
         &[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     } else if tex > 0 {
         &[17, 18, 19]
@@ -530,7 +532,7 @@ unsafe fn compile_nir_inner(
     // u31 is never written by the DMA (Borg.scala keeps it firmware-owned), so the window ends at u30.
     const DRAW_VS_CONST_WORDS: usize = 6;
     let mut draw_vs_consts: Vec<(u8, u32)> = Vec::new(); // (u-index, bits)
-    let vs_const_window = draw_mode && stage == 0;
+    let vs_const_window = draw_mode && is_vertex;
     let mut vs_vreg_by_bits: HashMap<u32, u32> = HashMap::new();
     let mut vs_zero: Option<u32> = None;
     // A vertex-shader constant: a window word, shared by value; once the window is full a small
@@ -663,7 +665,7 @@ unsafe fn compile_nir_inner(
     // Moved up from the legacy I/O pass below so the draw-mode store_output
     // handling (in the main walk, ahead of that pass) can read it too; same
     // value, same meaning, in both modes.
-    let frag_alpha = env::var("BORGC_FRAG_ALPHA").is_ok() || (stage == 4 && flags.alpha_output());
+    let frag_alpha = env::var("BORGC_FRAG_ALPHA").is_ok() || (is_fragment && flags.alpha_output());
     // gl_VertexIndex's SSA def, once seen -- the index every vertex-pulling
     // load_ubo (position[], attr[]) is computed from. Always seen before any
     // load_ubo that depends on it: NIR/SPIR-V evaluates gl_VertexIndex where
@@ -776,11 +778,11 @@ unsafe fn compile_nir_inner(
                     if draw_mode && (matches!(alu.op, nir_op_fadd | nir_op_fmul | nir_op_ffma
                         | nir_op_flt | nir_op_fge | nir_op_feq | nir_op_fneu | nir_op_bcsel | nir_op_fmin | nir_op_fmax
                         | nir_op_ieq | nir_op_ine | nir_op_ilt | nir_op_ige | nir_op_ult | nir_op_uge)
-                        || (stage == 4 && matches!(alu.op, nir_op_iadd | nir_op_imul | nir_op_ishl
+                        || (is_fragment && matches!(alu.op, nir_op_iadd | nir_op_imul | nir_op_ishl
                             | nir_op_ishr | nir_op_ushr | nir_op_isub | nir_op_iand | nir_op_ior
                             | nir_op_ixor))
                         // Vertex bit operations are never address math (gl_VertexIndex & 2, say).
-                        || (stage == 0 && matches!(alu.op, nir_op_ishr | nir_op_ushr | nir_op_iand | nir_op_ior
+                        || (is_vertex && matches!(alu.op, nir_op_ishr | nir_op_ushr | nir_op_iand | nir_op_ior
                             | nir_op_ixor)))
                     {
                         let first = if alu.op == nir_op_bcsel { 1 } else { 0 };
@@ -879,7 +881,7 @@ unsafe fn compile_nir_inner(
                                         None => {
                                             let v = next_vreg;
                                             next_vreg += 1;
-                                            let v = if stage == 4 {
+                                            let v = if is_fragment {
                                                 let c = next_vreg;
                                                 next_vreg += 1;
                                                 ubo.insert(c, Ubo::Fixed(30));
@@ -930,7 +932,7 @@ unsafe fn compile_nir_inner(
                                         None => {
                                             let v = next_vreg;
                                             next_vreg += 1;
-                                            let v = if stage == 4 {
+                                            let v = if is_fragment {
                                                 let c = next_vreg;
                                                 next_vreg += 1;
                                                 ubo.insert(c, Ubo::Fixed(30));
@@ -975,7 +977,7 @@ unsafe fn compile_nir_inner(
                                     None => {
                                         let v = next_vreg;
                                         next_vreg += 1;
-                                        let v = if stage == 4 {
+                                        let v = if is_fragment {
                                             let c = next_vreg;
                                             next_vreg += 1;
                                             ubo.insert(c, Ubo::Fixed(30));
@@ -1376,7 +1378,7 @@ unsafe fn compile_nir_inner(
                                             return vs_const_vreg!(word_idx, true);
                                         }
                                         // Fragment: a window word too (no GPR is staged in draw mode).
-                                        if draw_mode && stage == 4 {
+                                        if draw_mode && is_fragment {
                                             let u = *frag_window_by_bits.entry(word_idx).or_insert_with(|| {
                                                 assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
                                                 let u = 20 + draw_uniform_count;
@@ -1533,7 +1535,7 @@ unsafe fn compile_nir_inner(
                         if !store {
                             vec_map.insert(intr.def.index, comps);
                         }
-                    } else if draw_mode && stage == 4 && intr.intrinsic == nir_intrinsic_load_frag_coord {
+                    } else if draw_mode && is_fragment && intr.intrinsic == nir_intrinsic_load_frag_coord {
                         // docs/B1_geometry_front_end.md, fragment ABI: FragCoord.xy = r30/r31
                         // (the pixel centre), .z = r29, .w = r8 (= 1/w). Read in place like the
                         // barycentrics; r8 has to survive the shader, so it is reserved.
@@ -1559,7 +1561,7 @@ unsafe fn compile_nir_inner(
                         // BorgInstr of its own, which load_vertex_id does not).
                         ubo.insert(intr.def.index, Ubo::Fixed(30));
                         vertex_id_def = Some(intr.def.index);
-                    } else if draw_mode && stage == 0 && flags.fetching()
+                    } else if draw_mode && is_vertex && flags.fetching()
                               && intr.intrinsic == nir_intrinsic_load_input {
                         // Vertex input as a typed fetch (docs/B1_geometry_front_end.md, "Vertex
                         // input"): attribute L is texture slot 128 + L, a 4096-wide linear image
@@ -1798,7 +1800,7 @@ unsafe fn compile_nir_inner(
                             vec_map.insert(d, vec![(v, 0u8)]);
                         }
                         let comps: Vec<(u32, u8)> = (0..ncomp).map(|c| resolve_vm(&vec_map, src, c as u8)).collect();
-                        if stage == 0 && loc == VARYING_SLOT_POS {
+                        if is_vertex && loc == VARYING_SLOT_POS {
                             for (c, &v0) in comps.iter().enumerate().take(4) {
                                 let mut v = v0;
                                 if matches!(ubo.get(&v.0), Some(Ubo::Uniform(_))) {
@@ -1809,17 +1811,17 @@ unsafe fn compile_nir_inner(
                                 draw_pos_out[c] = Some(v);
                                 draw_out_roots.push(v.0);
                             }
-                        } else if stage == 4 && flags.multi_target() && (4..8).contains(&loc) {
+                        } else if is_fragment && flags.multi_target() && (4..8).contains(&loc) {
                             // Several colour attachments: FRAG_RESULT_DATA0.. , one value per attachment.
                             // A constant (a window word) is copied into a register where it is packed.
                             mrt_out[(loc - 4) as usize] = Some(comps[0]);
-                        } else if stage == 4 {
+                        } else if is_fragment {
                             let ncomp2 = if frag_alpha || flags.bytes_packed() { 4 } else { 3 };
                             for (c, &v) in comps.iter().enumerate().take(ncomp2) {
                                 draw_frag_out[c] = Some(v);
                                 draw_out_roots.push(v.0);
                             }
-                        } else if stage == 0 && loc == 12 {
+                        } else if is_vertex && loc == 12 {
                             draw_psize = comps.first().copied();   // VARYING_SLOT_PSIZ
                         } else if loc < VARYING_SLOT_VAR0 {
                             // gl_PointSize and the other built-in outputs: triangles ignore them.
@@ -1843,7 +1845,7 @@ unsafe fn compile_nir_inner(
                             }
                         }
                         draw_output_stores.insert(loc, comps);
-                    } else if draw_mode && stage == 4 && intr.intrinsic == nir_intrinsic_load_output
+                    } else if draw_mode && is_fragment && intr.intrinsic == nir_intrinsic_load_output
                               && intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) >> 14 & 1 != 0 {
                         // The destination pixel as floats (nir_lower_blend's fb fetch): `TLD` returns the
                         // attachment's word, unpacked here by the same description the pack block uses.
@@ -1995,9 +1997,9 @@ unsafe fn compile_nir_inner(
                     // Only a plain implicit-LOD sample of a 2D texture so far;
                     // anything else is reported rather than sampled wrongly.
                     let srcs = tex.srcs_as_slice();
-                    let is_txl = tex.op == nir_texop_txl && stage == 4 && draw_mode;
-                    let is_txb = tex.op == nir_texop_txb && stage == 4 && draw_mode;
-                    let is_tg4 = tex.op == nir_texop_tg4 && stage == 4 && draw_mode;
+                    let is_txl = tex.op == nir_texop_txl && is_fragment && draw_mode;
+                    let is_txb = tex.op == nir_texop_txb && is_fragment && draw_mode;
+                    let is_tg4 = tex.op == nir_texop_tg4 && is_fragment && draw_mode;
                     if tex.op != nir_texop_tex && tex.op != nir_texop_txf && !is_txl && !is_txb && !is_tg4 {
                         eprintln!("borgc: WARNING texture op {} not supported yet, dropped", tex.op);
                         continue;
@@ -2024,7 +2026,7 @@ unsafe fn compile_nir_inner(
                         };
                         let is_cube = tex.sampler_dim == GLSL_SAMPLER_DIM_CUBE;
                         // A third coordinate (3D, 2D array) goes to TEXA as w; a cube's is the compiler's face math.
-                        let has_w = !is_fetch && tex.coord_components >= 3 && !is_cube && stage == 4 && draw_mode;
+                        let has_w = !is_fetch && tex.coord_components >= 3 && !is_cube && is_fragment && draw_mode;
                         let has_bias = (is_txb || tex.op == nir_texop_tex) && !is_fetch && srcs.iter().any(|s| s.src_type == nir_tex_src_bias);
                         if is_txl || has_w || has_bias {
                             // Explicit LOD: TEXA hands this lane's LOD to the TEX after it (w and the
@@ -2272,7 +2274,7 @@ unsafe fn compile_nir_inner(
                         nir_intrinsic_store_output => {
                             let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
                             let src = intr.srcs_as_slice()[0].as_def().index;
-                            if stage == 0 && loc == VARYING_SLOT_POS {
+                            if is_vertex && loc == VARYING_SLOT_POS {
                                 // gl_Position is a vec4 stored whole (wrmask=xyzw);
                                 // resolve each component to its scalar producer and
                                 // pin it to r0..r3 (also the DCE roots). Varyings
@@ -2284,7 +2286,7 @@ unsafe fn compile_nir_inner(
                                     pos_out[c] = Some(d);
                                     out_roots.push(d);
                                 }
-                            } else if stage == 4 {
+                            } else if is_fragment {
                                 // Fragment colour uFragColor (vec4) → r26/27/28 rgb,
                                 // plus r24 alpha when the blend path is in use.
                                 let ncomp = if frag_alpha { 4 } else { 3 };
@@ -2311,7 +2313,7 @@ unsafe fn compile_nir_inner(
         eprintln!("borgc: ERROR unhandled NIR ops, refusing to emit a wrong shader: {}", skipped.join(", "));
         return 0;
     }
-    if draw_mode && stage == 0 && flags.point_quads() {
+    if draw_mode && is_vertex && flags.point_quads() {
         // Point expansion: this vertex is a corner of the point's quad; the corner's clip-space
         // offset (slot 16: x y, then the point coordinate u v), times gl_PointSize, times w, moves it from the point's centre.
         let ctl_bits = (1u32 << 16) | (128 + 16);
@@ -2407,7 +2409,7 @@ unsafe fn compile_nir_inner(
             }
         }
     }
-    if draw_mode && stage == 4 && flags.multi_target() {
+    if draw_mode && is_fragment && flags.multi_target() {
         // Up to four R8 attachments, each rendered in its own pass (ATTIDX): the byte this pass stores is
         // chosen from the per-attachment values; one the shader never wrote keeps its own (TLD).
         let n = flags.target_count();
@@ -2489,7 +2491,7 @@ unsafe fn compile_nir_inner(
         draw_frag_out = [Some((acc, 0)), None, None, None];
         out_roots.push(acc);
     }
-    if draw_mode && stage == 4 && flags.r8_unorm() && draw_frag_out[0].is_some() {
+    if draw_mode && is_fragment && flags.r8_unorm() && draw_frag_out[0].is_some() {
         // R8_UNORM (RAW8): r26 = round(r * 255) & 0xFF.
         let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
             let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
@@ -2525,7 +2527,7 @@ unsafe fn compile_nir_inner(
         draw_frag_out = [Some((w, 0)), None, None, None];
         out_roots.push(w);
     }
-    if draw_mode && stage == 4 && flags.packed() && !flags.multi_target() && draw_frag_out[0].is_some() {
+    if draw_mode && is_fragment && flags.packed() && !flags.multi_target() && draw_frag_out[0].is_some() {
         // Packed colour (RAW8 .. RAW128): n channels of 8, 16 or 32 bits, kind 0 UNORM, 1 SNORM, 2 SRGB, 3 the
         // bits as they are; `swap` reads the components as B, G, R. Channel k fills bits k*size of the texel:
         // word w of the texel is r26 (w = 0), r27 (w = 1); a RAW128 texel renders in two slices of two words.
@@ -2624,7 +2626,7 @@ unsafe fn compile_nir_inner(
         }
         draw_frag_out = out;
     }
-    if draw_mode && stage == 4 && flags.half() && draw_frag_out[0].is_some() {
+    if draw_mode && is_fragment && flags.half() && draw_frag_out[0].is_some() {
         // R16G16_SFLOAT (RAW32; with bit 0x20 R16_SFLOAT, RAW16): r26 = half(r) | half(g) << 16 with integer ops (round to nearest even,
         // NaN to 0x7E00); a branch-free select between the denormal, normal and overflow results.
         let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
@@ -2711,7 +2713,7 @@ unsafe fn compile_nir_inner(
             out_roots.push(*p);
         }
     }
-    if draw_mode && stage == 4 && flags.bytes_packed() && draw_frag_out[3].is_some() {
+    if draw_mode && is_fragment && flags.bytes_packed() && draw_frag_out[3].is_some() {
         // Byte-packed integer colour (R8G8B8A8_UINT/SINT, RAW32): r26 = c0 | c1<<8 | c2<<16 | c3<<24.
         let (mut p, mut pc) = draw_frag_out[3].unwrap();
         let eight = *frag_window_by_bits.entry(8).or_insert_with(|| {
@@ -2747,7 +2749,7 @@ unsafe fn compile_nir_inner(
         // A fragment output that no instruction produces -- a constant colour, say, which lives in
         // the uniform window -- has no register to hand to the output stage: copy it with FMOV
         // (rs1 may be a uniform).
-        if stage == 4 {
+        if is_fragment {
             for c in 0..4 {
                 let Some((v, comp)) = draw_frag_out[c] else { continue };
                 // A TEX result block (r20-r23) or FATTR block is not the output register: copy that too.
@@ -2796,7 +2798,7 @@ unsafe fn compile_nir_inner(
     // load_input path populates it), so this never fires there, correctly:
     // the fragment shader not writing r29 IS draw mode's depth output.
     let mut frag_z: Option<u32> = None;
-    if stage == 4 {
+    if is_fragment {
         if let Some(w) = weights {
             let uz: Vec<u32> = [30u8, 29, 28]
                 .iter()
@@ -2824,7 +2826,7 @@ unsafe fn compile_nir_inner(
     // and the 1 the index steps by.
     #[allow(static_mut_refs)]
     unsafe { LAST_FRAG_POOL.clear(); }
-    if draw_mode && stage == 4 && draw_uniform_count > 11 {
+    if draw_mode && is_fragment && draw_uniform_count > 11 {
         let first_pool = 20 + 9;
         // The window keeps the nine constants read most often: a window word costs no register.
         {
@@ -2972,7 +2974,7 @@ unsafe fn compile_nir_inner(
     // (Ubo::Fixed, excluding the per-pixel edge-attr use of the same variant).
     // See opt::classify_uniform for the propagation rule and why DDX/DDY are
     // unconditional roots on this architecture.
-    if stage == 4 {
+    if is_fragment {
         let uniform_roots: std::collections::HashSet<u32> = ubo
             .iter()
             .filter_map(|(&v, u)| match u {
@@ -3001,7 +3003,6 @@ unsafe fn compile_nir_inner(
     // Pre-color outputs and reserve fixed registers.
     let mut forced: HashMap<u32, u8> = HashMap::new();
     let mut extra_reserved: Vec<u8> = Vec::new();
-    let is_vertex = stage == 0; // MESA_SHADER_VERTEX
     if is_vertex {
         // gl_Position components → r0..r3.
         for (c, v) in pos_out.iter().enumerate() {
@@ -3141,7 +3142,7 @@ unsafe fn compile_nir_inner(
             prog = out;
         }
     }
-    let soft: Vec<u8> = if stage == 4 && draw_mode { vec![20, 21, 22, 23, 24, 26, 27, 28] } else { Vec::new() };
+    let soft: Vec<u8> = if is_fragment && draw_mode { vec![20, 21, 22, 23, 24, 26, 27, 28] } else { Vec::new() };
     let mut block_len: HashMap<u32, u8> = HashMap::new();
     for &t in &tex_dsts {
         block_len.insert(t, 4);
