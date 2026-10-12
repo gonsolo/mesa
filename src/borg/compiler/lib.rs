@@ -22,6 +22,7 @@ mod encode;
 mod isel;
 mod opt;
 mod regalloc;
+mod select;
 mod state;
 mod survey;
 
@@ -32,7 +33,7 @@ use encode::{emit_blob, encode, encode_fattr, encode_sout};
 use isel::{borg_isel, resolve_vm};
 use opt::{classify_uniform, dce, fuse_fmadd, schedule_for_pressure};
 use regalloc::regalloc;
-use state::{ConstPool, DrawOutputs, FragWindow, Selector, DRAW_VS_CONST_U0, DRAW_VS_CONST_WORDS};
+use state::{Cx, DRAW_VS_CONST_U0, DRAW_VS_CONST_WORDS};
 use survey::{survey, Survey};
 use std::env;
 
@@ -358,7 +359,6 @@ unsafe fn compile_nir_inner(
 
     let entry = nir_shader_get_entrypoint(nir);
     let Survey { total, tex } = survey(entry, stage);
-    let mut skipped: Vec<&'static str> = Vec::new();
 
     use std::collections::HashMap;
 
@@ -375,43 +375,28 @@ unsafe fn compile_nir_inner(
     // Borg ops. Operands are resolved through sel.vec_map to their true scalar producer.
     // Synthetic results from expansions (ddx/ddy/fmax/tex/interp) use fresh vregs
     // above any NIR ssa index.
-    let mut sel = Selector::new();
     // Phi renames, collected during the selection walk and applied after it
     // (see the comment at the collection site).
     // Operand classification (populated here for fragment uniforms/attrs, and in the
     // I/O pass below for the vertex's load_ubo).
-    // Barycentric weights w_i = e_i·inv_area, emitted once on the first load_input.
-    let mut weights: Option<[u32; 3]> = None;
+    // Barycentric cx.weights w_i = e_i·inv_area, emitted once on the first load_input.
     // e0/e1/e2 (edge-function attrs r0/r1/r2) are Ubo::Fixed too, but unlike the
     // *other* Ubo::Fixed use (true shader constants pinned to r17+, e.g. lightDir),
     // they vary per pixel — exclude them from the uniformity classification's
     // "is this a per-triangle-constant root" test below.
-    let mut per_pixel_fixed: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    let mut frag_coord_w = false;
-    let mut fetch_ctl_uniform: Option<u32> = None;
-    let mut lod_ctl_uniform: Option<u32> = None;
-    let mut vfetch_ctl: HashMap<u32, u8> = HashMap::new();   // attribute location -> window uniform of its TEX control word
-    let mut fw = FragWindow::default();
-    let mut res_binding: HashMap<u32, u32> = HashMap::new();   // resource index / descriptor def -> binding
     // Scalar load_const f32 bits (for the sRGB idiom match) and a producer map
     // (alu def → its op + resolved scalar srcs) for recognising the bcsel tree.
-    let mut consts: HashMap<u32, u32> = HashMap::new();
-    let mut prod: HashMap<u32, (nir_op, Vec<(u32, u8)>)> = HashMap::new();
     // TEX results occupy 4 consecutive regs (rd..rd+3 = R, G, B, A).
-    let mut tex_dsts: std::collections::HashSet<u32> = std::collections::HashSet::new();
     // FATTR results occupy 3 consecutive regs (rd..rd+2 = per-vertex v0/v1/v2),
-    // same hardware shape as TEX's 4-wide result -- see tex_dsts's resolve-time
+    // same hardware shape as TEX's 4-wide result -- see cx.tex_dsts's resolve-time
     // (alloc[def] + component) handling below, mirrored for this set.
-    let mut fattr_dsts: std::collections::HashSet<u32> = std::collections::HashSet::new();
     // TEX's control word (docs/B2_texture_unit.md), created on first use. Word 0
     // is texture 0, sampler 0, a plain sample with the LOD taken from the quad,
     // no offsets -- all a shader with one sampler2D needs. It is built in the
     // shader rather than pinned: FSTEP of -r30 is exactly +0 (r30 >= 0 in every
     // stage), so it costs two instructions and no constant register.
-    let mut zero_ctl: Option<u32> = None;
     // Distinct texture derefs seen, to say so when a shader samples more than
     // one: every sample uses descriptor 0 until borgc maps bindings to indices.
-    let mut tex_derefs: std::collections::HashSet<u32> = std::collections::HashSet::new();
     // Shader constants (cube.frag's lightDir, push-constant word indices) live in
     // GPRs the firmware writes ONCE before the autonomous render, so they must
     // survive every stage that runs before the fragment on every triangle and
@@ -450,7 +435,7 @@ unsafe fn compile_nir_inner(
     } else {
         &[17, 18, 19, 23]
     };
-    let mut cp = ConstPool::new(regs, draw_mode && is_vertex);
+    let mut cx = Cx::new(regs, draw_mode, is_vertex, is_fragment, flags);
     // Pin a compile-time-constant integer to a GPR, reusing the same
     // register for every later reference to the same value (draw-mode LOAD
     // word indices and the literal 1 an address sequence increments by).
@@ -468,24 +453,22 @@ unsafe fn compile_nir_inner(
     // integer is derived from others (a sum) or zero (a difference) with an ALU op.
     // A fresh vreg standing for the compile-time integer `v`: a window
     // uniform in a draw-mode vertex shader, a pinned GPR otherwise. Same
-    // value, same slot, for every reference (cp.int_reg caches either).
+    // value, same slot, for every reference (cx.cp.int_reg caches either).
     // 1.0 for the inverting comparisons (fge/feq), created on first use. In a
     // fragment shader it is FSTEP(r30): r30 reads the pixel centre (>= 0.5)
     // during the fragment pass, so the result is exactly 1.0 and costs no
     // constant register. Vertex shaders see r30 = 0 and fall back to a const.
-    let mut one_vreg: Option<u32> = None;
     // Word-index constants for push-constant LOADs, pinned to const GPRs on
     // first use and shared across every load_push_constant reaching the same
     // word (a vec4 field reads 4 consecutive words; a scalar read elsewhere
     // in the shader at the same offset reuses the same pin rather than
     // burning a second scarce const register on an identical value).
-    let mut push_const_reg: HashMap<u32, u32> = HashMap::new();
     // Draw-mode fragment's own vector constants (lightDir etc): NOT GPR
     // pins (see the load_const arm below for why), but words in the
     // existing uniform memory window (draw_fs_const_offset / u20+, the
     // same mechanism legacy fragment shaders already read inv_area and
     // per-vertex varyings from). Reported here, not folded into
-    // cp.uniforms, since that Vec specifically means "GPR, poked once
+    // cx.cp.uniforms, since that Vec specifically means "GPR, poked once
     // via MMIO" -- a different delivery channel from "word in memory."
     // gl_varying_slot: VAR0=texcoord, VAR1=frag_pos (Mesa enum: VAR0 = 32).
     const VARYING_SLOT_VAR0: u32 = 32;
@@ -498,7 +481,7 @@ unsafe fn compile_nir_inner(
     // is draw_mode-specific is a parallel, independent I/O path: it shares
     // the generic ALU/tex/ddx selection above and nothing of the legacy
     // MVP/Pos/Attr/load_input scheme, which stays exactly as it was.
-    // (draw_mode itself is declared further up, before cp.regs, which
+    // (draw_mode itself is declared further up, before cx.cp.regs, which
     // also branches on it.)
     // Moved up from the legacy I/O pass below so the draw-mode store_output
     // handling (in the main walk, ahead of that pass) can read it too; same
@@ -509,12 +492,11 @@ unsafe fn compile_nir_inner(
     // load_ubo that depends on it: NIR/SPIR-V evaluates gl_VertexIndex where
     // the source first reads it, and a dynamic array index has to read it
     // before it can compute an offset from it.
-    let mut vertex_id_def: Option<u32> = None;
     // A compile-time-constant integer, pinned to a GPR on first use and
     // reused for every later reference to the SAME value -- word indices for
     // draw-mode LOADs (MVP columns, vertex-pulling base/stride) and the
     // literal 1 a multi-word LOAD sequence increments its address by.
-    // Deliberately separate from push_const_reg: that cache is word indices
+    // Deliberately separate from cx.push_const_reg: that cache is word indices
     // into the push-constant staging buffer, a different LS_BASE-relative
     // address space than the vertex/uniform buffer draw-mode LOADs read.
     // Vertex stage: resolved scalar producer per output location, built
@@ -526,9 +508,7 @@ unsafe fn compile_nir_inner(
     // (VARYING_SLOT_POS's own components are never SOUT, so it does not
     // compete with this), a fixed mapping the fragment compile computes
     // identically without any shared state between the two compiles.
-    let mut outs = DrawOutputs::default();
     // load_vulkan_descriptor results seen, for decompose_vertex_offset.
-    let mut descriptor_defs: std::collections::HashSet<u32> = std::collections::HashSet::new();
     // Running (next expected word address, its address vreg) for consecutive
     // constant-address loads (the MVP columns: 4 separate load_ubo calls, 16
     // words back to back). Chaining them through ONE running IADD-by-1
@@ -536,7 +516,6 @@ unsafe fn compile_nir_inner(
     // where the previous left off, is what keeps this under the ~4-word
     // constant-register budget -- pinning each of the 16 word indices on its
     // own does not fit (see git history).
-    let mut const_addr_chain: Option<(i32, u32)> = None;
     if !entry.is_null() {
         // Control-flow markers, collected from the CF tree so this flat block
         // walk can splice them in at the right seams. Must be here rather than
@@ -565,7 +544,7 @@ unsafe fn compile_nir_inner(
             // than inside it.
             if let Some(ms) = cf_marks.get(&(block as *const nir_block as usize)) {
                 for m in ms {
-                    sel.prog.push(BorgInstr {
+                    cx.sel.prog.push(BorgInstr {
                         mnem: m.mnem,
                         dst: NO_DST,
                         srcs: m.cond.map(|c| vec![c]).unwrap_or_default(),
@@ -577,14 +556,14 @@ unsafe fn compile_nir_inner(
                 if let Some(intr) = instr.as_intrinsic() {
                     if intr.intrinsic == nir_intrinsic_decl_reg {
                         let n = intr.get_const_index(NIR_INTRINSIC_NUM_COMPONENTS);
-                        let v: Vec<u32> = (0..n).map(|_| { let r = sel.next_vreg; sel.next_vreg += 1; r }).collect();
+                        let v: Vec<u32> = (0..n).map(|_| { let r = cx.sel.next_vreg; cx.sel.next_vreg += 1; r }).collect();
                         reg_vregs.insert(intr.def.index, v);
                         continue;
                     }
                     if intr.intrinsic == nir_intrinsic_load_reg {
                         let h = intr.get_src(0).as_def().index;
                         let comps: Vec<(u32, u8)> = reg_vregs[&h].iter().map(|&r| (r, 0u8)).collect();
-                        sel.vec_map.insert(intr.def.index, comps);
+                        cx.sel.vec_map.insert(intr.def.index, comps);
                         continue;
                     }
                     if intr.intrinsic == nir_intrinsic_store_reg {
@@ -594,8 +573,8 @@ unsafe fn compile_nir_inner(
                             if intr.write_mask() & (1 << c) == 0 {
                                 continue;
                             }
-                            let (v, comp) = resolve_vm(&sel.vec_map, src, c as u8);
-                            sel.prog.push(BorgInstr { mnem: "FMOV", dst: reg_vregs[&h][c], srcs: vec![v], swz: vec![comp] });
+                            let (v, comp) = resolve_vm(&cx.sel.vec_map, src, c as u8);
+                            cx.sel.prog.push(BorgInstr { mnem: "FMOV", dst: reg_vregs[&h][c], srcs: vec![v], swz: vec![comp] });
                         }
                         continue;
                     }
@@ -620,20 +599,20 @@ unsafe fn compile_nir_inner(
                         let first = if alu.op == nir_op_bcsel { 1 } else { 0 };
                         for sr in &alu.srcs_as_slice()[first..] {
                             let d = sr.src.as_def().index;
-                            let bits = match consts.get(&d) {
-                                Some(&b) if !sel.vec_map.contains_key(&d) => b,
+                            let bits = match cx.consts.get(&d) {
+                                Some(&b) if !cx.sel.vec_map.contains_key(&d) => b,
                                 _ => continue,
                             };
-                            if cp.vs_window {
-                                let v = cp.vs_const(&mut sel, bits, false);
-                                sel.vec_map.insert(d, vec![(v, 0u8)]);
+                            if cx.cp.vs_window {
+                                let v = cx.cp.vs_const(&mut cx.sel, bits, false);
+                                cx.sel.vec_map.insert(d, vec![(v, 0u8)]);
                                 continue;
                             }
-                            let u = fw.slot(bits);
-                            let v = sel.next_vreg;
-                            sel.next_vreg += 1;
-                            sel.ubo.insert(v, Ubo::Uniform(u as u8));
-                            sel.vec_map.insert(d, vec![(v, 0u8)]);
+                            let u = cx.fw.slot(bits);
+                            let v = cx.sel.next_vreg;
+                            cx.sel.next_vreg += 1;
+                            cx.sel.ubo.insert(v, Ubo::Uniform(u as u8));
+                            cx.sel.vec_map.insert(d, vec![(v, 0u8)]);
                         }
                     }
                     match alu.op {
@@ -643,7 +622,7 @@ unsafe fn compile_nir_inner(
                                 .iter()
                                 .map(|s| (s.src.as_def().index, s.swizzle[0]))
                                 .collect();
-                            sel.vec_map.insert(alu.def.index, c);
+                            cx.sel.vec_map.insert(alu.def.index, c);
                         }
                         // A graphics condition already is 1.0 or 0.0 (comparisons below), so b2f is a copy.
                         nir_op_mov | nir_op_b2f16 | nir_op_b2f32 | nir_op_i2i16 | nir_op_i2i32 | nir_op_u2u16
@@ -652,7 +631,7 @@ unsafe fn compile_nir_inner(
                             let n = alu.def.num_components as usize;
                             let c: Vec<(u32, u8)> =
                                 (0..n).map(|k| (s.src.as_def().index, s.swizzle[k])).collect();
-                            sel.vec_map.insert(alu.def.index, c);
+                            cx.sel.vec_map.insert(alu.def.index, c);
                         }
                         // Float comparisons, built from FSTEP.
                         //
@@ -671,104 +650,104 @@ unsafe fn compile_nir_inner(
                         // conversion.
                         nir_op_flt | nir_op_fge | nir_op_fneu | nir_op_feq => {
                             let sl = alu.srcs_as_slice();
-                            let a = resolve_vm(&sel.vec_map, sl[0].src.as_def().index, sl[0].swizzle[0]);
-                            let b = resolve_vm(&sel.vec_map, sl[1].src.as_def().index, sl[1].swizzle[0]);
+                            let a = resolve_vm(&cx.sel.vec_map, sl[0].src.as_def().index, sl[0].swizzle[0]);
+                            let b = resolve_vm(&cx.sel.vec_map, sl[1].src.as_def().index, sl[1].swizzle[0]);
 
                             // diff(hi, lo) = hi - lo, as a fresh vreg.
 
                             match alu.op {
                                 // a < b  ->  FSTEP(b - a)
                                 nir_op_flt => {
-                                    let d = sel.fsub(b, a);
-                                    sel.prog.push(BorgInstr { mnem: "FSTEP", dst: alu.def.index, srcs: vec![d], swz: vec![0] });
+                                    let d = cx.sel.fsub(b, a);
+                                    cx.sel.prog.push(BorgInstr { mnem: "FSTEP", dst: alu.def.index, srcs: vec![d], swz: vec![0] });
                                 }
                                 // a >= b  ->  1 - FSTEP(b - a), as
                                 // FADD(1.0, FNEG(step)). The 1.0 comes from a
                                 // pinned constant register, same mechanism as
-                                // the existing cp.uniforms.
+                                // the existing cx.cp.uniforms.
                                 nir_op_fge => {
-                                    let d = sel.fsub(b, a);
-                                    let st = sel.next_vreg; sel.next_vreg += 1;
-                                    let nst = sel.next_vreg; sel.next_vreg += 1;
-                                    sel.prog.push(BorgInstr { mnem: "FSTEP", dst: st, srcs: vec![d], swz: vec![0] });
-                                    sel.prog.push(BorgInstr { mnem: "FNEG", dst: nst, srcs: vec![st], swz: vec![0] });
-                                    let one = match one_vreg {
+                                    let d = cx.sel.fsub(b, a);
+                                    let st = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                    let nst = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                    cx.sel.prog.push(BorgInstr { mnem: "FSTEP", dst: st, srcs: vec![d], swz: vec![0] });
+                                    cx.sel.prog.push(BorgInstr { mnem: "FNEG", dst: nst, srcs: vec![st], swz: vec![0] });
+                                    let one = match cx.one_vreg {
                                         Some(v) => v,
                                         None => {
-                                            let v = sel.next_vreg;
-                                            sel.next_vreg += 1;
+                                            let v = cx.sel.next_vreg;
+                                            cx.sel.next_vreg += 1;
                                             let v = if is_fragment {
-                                                let c = sel.next_vreg;
-                                                sel.next_vreg += 1;
-                                                sel.ubo.insert(c, Ubo::Fixed(30));
-                                                per_pixel_fixed.insert(c);
-                                                sel.prog.push(BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
+                                                let c = cx.sel.next_vreg;
+                                                cx.sel.next_vreg += 1;
+                                                cx.sel.ubo.insert(c, Ubo::Fixed(30));
+                                                cx.per_pixel_fixed.insert(c);
+                                                cx.sel.prog.push(BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
                                                 v
-                                            } else if cp.vs_window {
+                                            } else if cx.cp.vs_window {
                                                 // A pinned register is not staged for a draw's vertex shader.
-                                                cp.vs_const(&mut sel, 1.0f32.to_bits(), false)
+                                                cx.cp.vs_const(&mut cx.sel, 1.0f32.to_bits(), false)
                                             } else {
-                                                let reg = cp.alloc_reg();
-                                                cp.uniforms.push((reg, 1.0f32.to_bits()));
-                                                sel.ubo.insert(v, Ubo::Fixed(reg));
+                                                let reg = cx.cp.alloc_reg();
+                                                cx.cp.uniforms.push((reg, 1.0f32.to_bits()));
+                                                cx.sel.ubo.insert(v, Ubo::Fixed(reg));
                                                 v
                                             };
-                                            one_vreg = Some(v);
+                                            cx.one_vreg = Some(v);
                                             v
                                         }
                                     };
-                                    sel.prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![one, nst], swz: vec![0, 0] });
+                                    cx.sel.prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![one, nst], swz: vec![0, 0] });
                                 }
                                 // a != b  ->  FSTEP(a-b) + FSTEP(b-a). At most
                                 // one term is 1.0, so the sum is a clean 0/1
                                 // and needs no clamp.
                                 nir_op_fneu => {
-                                    let dab = sel.fsub(a, b);
-                                    let dba = sel.fsub(b, a);
-                                    let s1 = sel.next_vreg; sel.next_vreg += 1;
-                                    let s2 = sel.next_vreg; sel.next_vreg += 1;
-                                    sel.prog.push(BorgInstr { mnem: "FSTEP", dst: s1, srcs: vec![dab], swz: vec![0] });
-                                    sel.prog.push(BorgInstr { mnem: "FSTEP", dst: s2, srcs: vec![dba], swz: vec![0] });
-                                    sel.prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![s1, s2], swz: vec![0, 0] });
+                                    let dab = cx.sel.fsub(a, b);
+                                    let dba = cx.sel.fsub(b, a);
+                                    let s1 = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                    let s2 = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                    cx.sel.prog.push(BorgInstr { mnem: "FSTEP", dst: s1, srcs: vec![dab], swz: vec![0] });
+                                    cx.sel.prog.push(BorgInstr { mnem: "FSTEP", dst: s2, srcs: vec![dba], swz: vec![0] });
+                                    cx.sel.prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![s1, s2], swz: vec![0, 0] });
                                 }
                                 // a == b  ->  1 - (a != b)
                                 _ => {
-                                    let dab = sel.fsub(a, b);
-                                    let dba = sel.fsub(b, a);
-                                    let s1 = sel.next_vreg; sel.next_vreg += 1;
-                                    let s2 = sel.next_vreg; sel.next_vreg += 1;
-                                    let ne = sel.next_vreg; sel.next_vreg += 1;
-                                    let nne = sel.next_vreg; sel.next_vreg += 1;
-                                    sel.prog.push(BorgInstr { mnem: "FSTEP", dst: s1, srcs: vec![dab], swz: vec![0] });
-                                    sel.prog.push(BorgInstr { mnem: "FSTEP", dst: s2, srcs: vec![dba], swz: vec![0] });
-                                    sel.prog.push(BorgInstr { mnem: "FADD", dst: ne, srcs: vec![s1, s2], swz: vec![0, 0] });
-                                    sel.prog.push(BorgInstr { mnem: "FNEG", dst: nne, srcs: vec![ne], swz: vec![0] });
-                                    let one = match one_vreg {
+                                    let dab = cx.sel.fsub(a, b);
+                                    let dba = cx.sel.fsub(b, a);
+                                    let s1 = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                    let s2 = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                    let ne = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                    let nne = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                    cx.sel.prog.push(BorgInstr { mnem: "FSTEP", dst: s1, srcs: vec![dab], swz: vec![0] });
+                                    cx.sel.prog.push(BorgInstr { mnem: "FSTEP", dst: s2, srcs: vec![dba], swz: vec![0] });
+                                    cx.sel.prog.push(BorgInstr { mnem: "FADD", dst: ne, srcs: vec![s1, s2], swz: vec![0, 0] });
+                                    cx.sel.prog.push(BorgInstr { mnem: "FNEG", dst: nne, srcs: vec![ne], swz: vec![0] });
+                                    let one = match cx.one_vreg {
                                         Some(v) => v,
                                         None => {
-                                            let v = sel.next_vreg;
-                                            sel.next_vreg += 1;
+                                            let v = cx.sel.next_vreg;
+                                            cx.sel.next_vreg += 1;
                                             let v = if is_fragment {
-                                                let c = sel.next_vreg;
-                                                sel.next_vreg += 1;
-                                                sel.ubo.insert(c, Ubo::Fixed(30));
-                                                per_pixel_fixed.insert(c);
-                                                sel.prog.push(BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
+                                                let c = cx.sel.next_vreg;
+                                                cx.sel.next_vreg += 1;
+                                                cx.sel.ubo.insert(c, Ubo::Fixed(30));
+                                                cx.per_pixel_fixed.insert(c);
+                                                cx.sel.prog.push(BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
                                                 v
-                                            } else if cp.vs_window {
+                                            } else if cx.cp.vs_window {
                                                 // A pinned register is not staged for a draw's vertex shader.
-                                                cp.vs_const(&mut sel, 1.0f32.to_bits(), false)
+                                                cx.cp.vs_const(&mut cx.sel, 1.0f32.to_bits(), false)
                                             } else {
-                                                let reg = cp.alloc_reg();
-                                                cp.uniforms.push((reg, 1.0f32.to_bits()));
-                                                sel.ubo.insert(v, Ubo::Fixed(reg));
+                                                let reg = cx.cp.alloc_reg();
+                                                cx.cp.uniforms.push((reg, 1.0f32.to_bits()));
+                                                cx.sel.ubo.insert(v, Ubo::Fixed(reg));
                                                 v
                                             };
-                                            one_vreg = Some(v);
+                                            cx.one_vreg = Some(v);
                                             v
                                         }
                                     };
-                                    sel.prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![one, nne], swz: vec![0, 0] });
+                                    cx.sel.prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![one, nne], swz: vec![0, 0] });
                                 }
                             }
                         }
@@ -779,51 +758,51 @@ unsafe fn compile_nir_inner(
                             let b_zero = s[1].comp_as_uint(0) == Some(0);
                             if alu.op == nir_op_fmax && (a_zero || b_zero) {
                                 let xs = if a_zero { &s[1] } else { &s[0] };
-                                let x = resolve_vm(&sel.vec_map, xs.src.as_def().index, xs.swizzle[0]);
-                                let vstep = sel.next_vreg;
-                                sel.next_vreg += 1;
-                                sel.prog.push(BorgInstr { mnem: "FSTEP", dst: vstep, srcs: vec![x.0], swz: vec![x.1] });
-                                sel.prog.push(BorgInstr { mnem: "FMUL", dst: alu.def.index, srcs: vec![x.0, vstep], swz: vec![x.1, 0] });
+                                let x = resolve_vm(&cx.sel.vec_map, xs.src.as_def().index, xs.swizzle[0]);
+                                let vstep = cx.sel.next_vreg;
+                                cx.sel.next_vreg += 1;
+                                cx.sel.prog.push(BorgInstr { mnem: "FSTEP", dst: vstep, srcs: vec![x.0], swz: vec![x.1] });
+                                cx.sel.prog.push(BorgInstr { mnem: "FMUL", dst: alu.def.index, srcs: vec![x.0, vstep], swz: vec![x.1, 0] });
                             } else {
                                 // max(a, b) = b + (a >= b) * (a - b); min(a, b) = a + (a >= b) * (b - a)
-                                let a = resolve_vm(&sel.vec_map, s[0].src.as_def().index, s[0].swizzle[0]);
-                                let b = resolve_vm(&sel.vec_map, s[1].src.as_def().index, s[1].swizzle[0]);
-                                let one = match one_vreg {
+                                let a = resolve_vm(&cx.sel.vec_map, s[0].src.as_def().index, s[0].swizzle[0]);
+                                let b = resolve_vm(&cx.sel.vec_map, s[1].src.as_def().index, s[1].swizzle[0]);
+                                let one = match cx.one_vreg {
                                     Some(v) => v,
                                     None => {
-                                        let v = sel.next_vreg;
-                                        sel.next_vreg += 1;
+                                        let v = cx.sel.next_vreg;
+                                        cx.sel.next_vreg += 1;
                                         let v = if is_fragment {
-                                            let c = sel.next_vreg;
-                                            sel.next_vreg += 1;
-                                            sel.ubo.insert(c, Ubo::Fixed(30));
-                                            per_pixel_fixed.insert(c);
-                                            sel.prog.push(BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
+                                            let c = cx.sel.next_vreg;
+                                            cx.sel.next_vreg += 1;
+                                            cx.sel.ubo.insert(c, Ubo::Fixed(30));
+                                            cx.per_pixel_fixed.insert(c);
+                                            cx.sel.prog.push(BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
                                             v
-                                        } else if cp.vs_window {
-                                            cp.vs_const(&mut sel, 1.0f32.to_bits(), false)
+                                        } else if cx.cp.vs_window {
+                                            cx.cp.vs_const(&mut cx.sel, 1.0f32.to_bits(), false)
                                         } else {
-                                            let reg = cp.alloc_reg();
-                                            cp.uniforms.push((reg, 1.0f32.to_bits()));
-                                            sel.ubo.insert(v, Ubo::Fixed(reg));
+                                            let reg = cx.cp.alloc_reg();
+                                            cx.cp.uniforms.push((reg, 1.0f32.to_bits()));
+                                            cx.sel.ubo.insert(v, Ubo::Fixed(reg));
                                             v
                                         };
-                                        one_vreg = Some(v);
+                                        cx.one_vreg = Some(v);
                                         v
                                     }
                                 };
-                                let v = sel.next_vreg;
-                                sel.next_vreg += 8;
-                                sel.prog.push(BorgInstr { mnem: "FNEG", dst: v, srcs: vec![a.0], swz: vec![a.1] });          // -a
-                                sel.prog.push(BorgInstr { mnem: "FADD", dst: v + 1, srcs: vec![b.0, v], swz: vec![b.1, 0] }); // b - a
-                                sel.prog.push(BorgInstr { mnem: "FSTEP", dst: v + 2, srcs: vec![v + 1], swz: vec![0] });      // a < b
-                                sel.prog.push(BorgInstr { mnem: "FNEG", dst: v + 3, srcs: vec![v + 2], swz: vec![0] });
-                                sel.prog.push(BorgInstr { mnem: "FADD", dst: v + 4, srcs: vec![one, v + 3], swz: vec![0, 0] }); // a >= b
+                                let v = cx.sel.next_vreg;
+                                cx.sel.next_vreg += 8;
+                                cx.sel.prog.push(BorgInstr { mnem: "FNEG", dst: v, srcs: vec![a.0], swz: vec![a.1] });          // -a
+                                cx.sel.prog.push(BorgInstr { mnem: "FADD", dst: v + 1, srcs: vec![b.0, v], swz: vec![b.1, 0] }); // b - a
+                                cx.sel.prog.push(BorgInstr { mnem: "FSTEP", dst: v + 2, srcs: vec![v + 1], swz: vec![0] });      // a < b
+                                cx.sel.prog.push(BorgInstr { mnem: "FNEG", dst: v + 3, srcs: vec![v + 2], swz: vec![0] });
+                                cx.sel.prog.push(BorgInstr { mnem: "FADD", dst: v + 4, srcs: vec![one, v + 3], swz: vec![0, 0] }); // a >= b
                                 if alu.op == nir_op_fmax {
-                                    sel.prog.push(BorgInstr { mnem: "FNEG", dst: v + 5, srcs: vec![v + 1], swz: vec![0] });    // a - b
-                                    sel.prog.push(BorgInstr { mnem: "FMADD", dst: alu.def.index, srcs: vec![v + 4, v + 5, b.0], swz: vec![0, 0, b.1] });
+                                    cx.sel.prog.push(BorgInstr { mnem: "FNEG", dst: v + 5, srcs: vec![v + 1], swz: vec![0] });    // a - b
+                                    cx.sel.prog.push(BorgInstr { mnem: "FMADD", dst: alu.def.index, srcs: vec![v + 4, v + 5, b.0], swz: vec![0, 0, b.1] });
                                 } else {
-                                    sel.prog.push(BorgInstr { mnem: "FMADD", dst: alu.def.index, srcs: vec![v + 4, v + 1, a.0], swz: vec![0, 0, a.1] });
+                                    cx.sel.prog.push(BorgInstr { mnem: "FMADD", dst: alu.def.index, srcs: vec![v + 4, v + 1, a.0], swz: vec![0, 0, a.1] });
                                 }
                             }
                         }
@@ -833,35 +812,35 @@ unsafe fn compile_nir_inner(
                         // Integer comparisons give the 1.0 / 0.0 condition bcsel expects.
                         nir_op_ieq | nir_op_ine | nir_op_ilt | nir_op_ige | nir_op_ult | nir_op_uge if draw_mode => {
                             let sl = alu.srcs_as_slice();
-                            let a = resolve_vm(&sel.vec_map, sl[0].src.as_def().index, sl[0].swizzle[0]);
-                            let b = resolve_vm(&sel.vec_map, sl[1].src.as_def().index, sl[1].swizzle[0]);
+                            let a = resolve_vm(&cx.sel.vec_map, sl[0].src.as_def().index, sl[0].swizzle[0]);
+                            let b = resolve_vm(&cx.sel.vec_map, sl[1].src.as_def().index, sl[1].swizzle[0]);
                             let lt = if matches!(alu.op, nir_op_ult | nir_op_uge) { "ISLTU" } else { "ISLT" };
                             let bits = match alu.op {
-                                nir_op_ieq => sel.pair("ISEQ", a, b),
-                                nir_op_ilt | nir_op_ult => sel.pair(lt, a, b),
+                                nir_op_ieq => cx.sel.pair("ISEQ", a, b),
+                                nir_op_ilt | nir_op_ult => cx.sel.pair(lt, a, b),
                                 nir_op_ine => {
-                                    let l = sel.pair("ISLT", a, b);
-                                    let g = sel.pair("ISLT", b, a);
-                                    sel.pair("IADD", l, g)
+                                    let l = cx.sel.pair("ISLT", a, b);
+                                    let g = cx.sel.pair("ISLT", b, a);
+                                    cx.sel.pair("IADD", l, g)
                                 }
                                 _ => {
-                                    let g = sel.pair(lt, b, a);
-                                    let e = sel.pair("ISEQ", a, b);
-                                    sel.pair("IADD", g, e)
+                                    let g = cx.sel.pair(lt, b, a);
+                                    let e = cx.sel.pair("ISEQ", a, b);
+                                    cx.sel.pair("IADD", g, e)
                                 }
                             };
-                            sel.prog.push(BorgInstr { mnem: "I2F", dst: alu.def.index, srcs: vec![bits.0], swz: vec![bits.1] });
+                            cx.sel.prog.push(BorgInstr { mnem: "I2F", dst: alu.def.index, srcs: vec![bits.0], swz: vec![bits.1] });
                         }
                         nir_op_bcsel => {
                             let s = alu.srcs_as_slice();
                             let then_def = s[1].src.as_def().index;
                             let mut x: Option<(u32, u8)> = None;
-                            if let Some((op, tsrcs)) = prod.get(&then_def) {
+                            if let Some((op, tsrcs)) = cx.prod.get(&then_def) {
                                 if *op == nir_op_fmul && tsrcs.len() == 2 {
                                     // 12.92 is a NIR constant, or a window word once an arithmetic reader gave it one.
                                     let is12 = |d: u32| {
-                                        let bits = consts.get(&d).copied().or_else(|| match sel.ubo.get(&d) {
-                                            Some(Ubo::Uniform(u)) => fw.consts.iter()
+                                        let bits = cx.consts.get(&d).copied().or_else(|| match cx.sel.ubo.get(&d) {
+                                            Some(Ubo::Uniform(u)) => cx.fw.consts.iter()
                                                 .find(|(w, _)| *w == *u as u32).map(|&(_, b)| b),
                                             _ => None,
                                         });
@@ -877,10 +856,10 @@ unsafe fn compile_nir_inner(
                                 }
                             }
                             if let Some(x) = x {
-                                let v = sel.next_vreg;
-                                sel.next_vreg += 1;
-                                sel.prog.push(BorgInstr { mnem: "FSRGB", dst: v, srcs: vec![x.0], swz: vec![x.1] });
-                                sel.vec_map.insert(alu.def.index, vec![(v, 0)]);
+                                let v = cx.sel.next_vreg;
+                                cx.sel.next_vreg += 1;
+                                cx.sel.prog.push(BorgInstr { mnem: "FSRGB", dst: v, srcs: vec![x.0], swz: vec![x.1] });
+                                cx.sel.vec_map.insert(alu.def.index, vec![(v, 0)]);
                             } else {
                                 // General select: the ISA has none, but the condition
                                 // is a 0.0/1.0 float (see the comparisons above), so
@@ -889,94 +868,94 @@ unsafe fn compile_nir_inner(
                                 let n = alu.def.num_components as usize;
                                 let mut comps = Vec::new();
                                 for k in 0..n {
-                                    let c = resolve_vm(&sel.vec_map, s[0].src.as_def().index, s[0].swizzle[k]);
-                                    let t = resolve_vm(&sel.vec_map, s[1].src.as_def().index, s[1].swizzle[k]);
-                                    let e = resolve_vm(&sel.vec_map, s[2].src.as_def().index, s[2].swizzle[k]);
-                                    let ne = sel.next_vreg;
-                                    let d = sel.next_vreg + 1;
-                                    let r = sel.next_vreg + 2;
-                                    sel.next_vreg += 3;
-                                    sel.prog.push(BorgInstr { mnem: "FNEG", dst: ne, srcs: vec![e.0], swz: vec![e.1] });
-                                    sel.prog.push(BorgInstr { mnem: "FADD", dst: d, srcs: vec![t.0, ne], swz: vec![t.1, 0] });
-                                    sel.prog.push(BorgInstr { mnem: "FMADD", dst: r, srcs: vec![c.0, d, e.0], swz: vec![c.1, 0, e.1] });
+                                    let c = resolve_vm(&cx.sel.vec_map, s[0].src.as_def().index, s[0].swizzle[k]);
+                                    let t = resolve_vm(&cx.sel.vec_map, s[1].src.as_def().index, s[1].swizzle[k]);
+                                    let e = resolve_vm(&cx.sel.vec_map, s[2].src.as_def().index, s[2].swizzle[k]);
+                                    let ne = cx.sel.next_vreg;
+                                    let d = cx.sel.next_vreg + 1;
+                                    let r = cx.sel.next_vreg + 2;
+                                    cx.sel.next_vreg += 3;
+                                    cx.sel.prog.push(BorgInstr { mnem: "FNEG", dst: ne, srcs: vec![e.0], swz: vec![e.1] });
+                                    cx.sel.prog.push(BorgInstr { mnem: "FADD", dst: d, srcs: vec![t.0, ne], swz: vec![t.1, 0] });
+                                    cx.sel.prog.push(BorgInstr { mnem: "FMADD", dst: r, srcs: vec![c.0, d, e.0], swz: vec![c.1, 0, e.1] });
                                     comps.push((r, 0u8));
                                 }
-                                sel.vec_map.insert(alu.def.index, comps);
+                                cx.sel.vec_map.insert(alu.def.index, comps);
                             }
                         }
                         // max/min of integers: a + (a < b) * (b - a) for max, b + (a < b) * (a - b) for min.
                         nir_op_umax | nir_op_umin | nir_op_imax | nir_op_imin => {
                             let sl = alu.srcs_as_slice();
-                            let a = resolve_vm(&sel.vec_map, sl[0].src.as_def().index, sl[0].swizzle[0]);
-                            let b = resolve_vm(&sel.vec_map, sl[1].src.as_def().index, sl[1].swizzle[0]);
+                            let a = resolve_vm(&cx.sel.vec_map, sl[0].src.as_def().index, sl[0].swizzle[0]);
+                            let b = resolve_vm(&cx.sel.vec_map, sl[1].src.as_def().index, sl[1].swizzle[0]);
                             let lt = if matches!(alu.op, nir_op_umax | nir_op_umin) { "ISLTU" } else { "ISLT" };
                             let is_max = matches!(alu.op, nir_op_umax | nir_op_imax);
                             let (p, q) = if is_max { (a, b) } else { (b, a) };
-                            let v = sel.next_vreg;
-                            sel.next_vreg += 3;
-                            sel.prog.push(BorgInstr { mnem: lt, dst: v, srcs: vec![a.0, b.0], swz: vec![a.1, b.1] });
-                            sel.prog.push(BorgInstr { mnem: "ISUB", dst: v + 1, srcs: vec![q.0, p.0], swz: vec![q.1, p.1] });
-                            sel.prog.push(BorgInstr { mnem: "IMUL", dst: v + 2, srcs: vec![v, v + 1], swz: vec![0, 0] });
-                            sel.prog.push(BorgInstr { mnem: "IADD", dst: alu.def.index, srcs: vec![p.0, v + 2], swz: vec![p.1, 0] });
+                            let v = cx.sel.next_vreg;
+                            cx.sel.next_vreg += 3;
+                            cx.sel.prog.push(BorgInstr { mnem: lt, dst: v, srcs: vec![a.0, b.0], swz: vec![a.1, b.1] });
+                            cx.sel.prog.push(BorgInstr { mnem: "ISUB", dst: v + 1, srcs: vec![q.0, p.0], swz: vec![q.1, p.1] });
+                            cx.sel.prog.push(BorgInstr { mnem: "IMUL", dst: v + 2, srcs: vec![v, v + 1], swz: vec![0, 0] });
+                            cx.sel.prog.push(BorgInstr { mnem: "IADD", dst: alu.def.index, srcs: vec![p.0, v + 2], swz: vec![p.1, 0] });
                         }
                         // |x|: clear the sign bit.
                         nir_op_fabs => {
                             let sl = &alu.srcs_as_slice()[0];
-                            let (x, xc) = resolve_vm(&sel.vec_map, sl.src.as_def().index, sl.swizzle[0]);
+                            let (x, xc) = resolve_vm(&cx.sel.vec_map, sl.src.as_def().index, sl.swizzle[0]);
                             let mut kreg = |bits: u32| -> u32 {
-                                if !draw_mode || cp.vs_window {
-                                    return cp.int_operand(&mut sel, bits as i32);
+                                if !draw_mode || cx.cp.vs_window {
+                                    return cx.cp.int_operand(&mut cx.sel, bits as i32);
                                 }
-                                let u = fw.slot(bits);
-                                sel.next_vreg += 1;
-                                sel.ubo.insert(sel.next_vreg - 1, Ubo::Uniform(u as u8));
-                                sel.next_vreg - 1
+                                let u = cx.fw.slot(bits);
+                                cx.sel.next_vreg += 1;
+                                cx.sel.ubo.insert(cx.sel.next_vreg - 1, Ubo::Uniform(u as u8));
+                                cx.sel.next_vreg - 1
                             };
                             let m = kreg(0x7fff_ffff);
-                            sel.prog.push(BorgInstr { mnem: "IAND", dst: alu.def.index, srcs: vec![x, m], swz: vec![xc, 0] });
+                            cx.sel.prog.push(BorgInstr { mnem: "IAND", dst: alu.def.index, srcs: vec![x, m], swz: vec![xc, 0] });
                         }
                         // A condition is 1.0 or 0.0: its inverse is 1.0 - c.
                         nir_op_inot if alu.def.bit_size == 1 => {
                             let sl = &alu.srcs_as_slice()[0];
-                            let (x, xc) = resolve_vm(&sel.vec_map, sl.src.as_def().index, sl.swizzle[0]);
+                            let (x, xc) = resolve_vm(&cx.sel.vec_map, sl.src.as_def().index, sl.swizzle[0]);
                             let mut kreg = |bits: u32| -> u32 {
-                                if !draw_mode || cp.vs_window {
-                                    return cp.int_operand(&mut sel, bits as i32);
+                                if !draw_mode || cx.cp.vs_window {
+                                    return cx.cp.int_operand(&mut cx.sel, bits as i32);
                                 }
-                                let u = fw.slot(bits);
-                                sel.next_vreg += 1;
-                                sel.ubo.insert(sel.next_vreg - 1, Ubo::Uniform(u as u8));
-                                sel.next_vreg - 1
+                                let u = cx.fw.slot(bits);
+                                cx.sel.next_vreg += 1;
+                                cx.sel.ubo.insert(cx.sel.next_vreg - 1, Ubo::Uniform(u as u8));
+                                cx.sel.next_vreg - 1
                             };
                             let one = kreg(1.0f32.to_bits());
-                            let n = sel.next_vreg;
-                            sel.next_vreg += 1;
-                            sel.prog.push(BorgInstr { mnem: "FNEG", dst: n, srcs: vec![x], swz: vec![xc] });
-                            sel.prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![n, one], swz: vec![0, 0] });
+                            let n = cx.sel.next_vreg;
+                            cx.sel.next_vreg += 1;
+                            cx.sel.prog.push(BorgInstr { mnem: "FNEG", dst: n, srcs: vec![x], swz: vec![xc] });
+                            cx.sel.prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![n, one], swz: vec![0, 0] });
                         }
                         // I2F is signed: convert x >> 1 and x & 1 and join them with one FMADD,
                         // which rounds once.
                         nir_op_u2f16 | nir_op_u2f32 => {
                             let s = &alu.srcs_as_slice()[0];
-                            let (x, xc) = resolve_vm(&sel.vec_map, s.src.as_def().index, s.swizzle[0]);
+                            let (x, xc) = resolve_vm(&cx.sel.vec_map, s.src.as_def().index, s.swizzle[0]);
                             let mut kreg = |bits: u32| -> u32 {
-                                if !draw_mode || cp.vs_window {
-                                    return cp.int_operand(&mut sel, bits as i32);
+                                if !draw_mode || cx.cp.vs_window {
+                                    return cx.cp.int_operand(&mut cx.sel, bits as i32);
                                 }
-                                let u = fw.slot(bits);
-                                sel.next_vreg += 1;
-                                sel.ubo.insert(sel.next_vreg - 1, Ubo::Uniform(u as u8));
-                                sel.next_vreg - 1
+                                let u = cx.fw.slot(bits);
+                                cx.sel.next_vreg += 1;
+                                cx.sel.ubo.insert(cx.sel.next_vreg - 1, Ubo::Uniform(u as u8));
+                                cx.sel.next_vreg - 1
                             };
                             let c1 = kreg(1);
                             let k = kreg(2.0f32.to_bits());
-                            let v = sel.next_vreg;
-                            sel.next_vreg += 5;
-                            sel.prog.push(BorgInstr { mnem: "ISRL", dst: v, srcs: vec![x, c1], swz: vec![xc, 0] });
-                            sel.prog.push(BorgInstr { mnem: "IAND", dst: v + 2, srcs: vec![x, c1], swz: vec![xc, 0] });
-                            sel.prog.push(BorgInstr { mnem: "I2F", dst: v + 3, srcs: vec![v], swz: vec![0] });
-                            sel.prog.push(BorgInstr { mnem: "I2F", dst: v + 4, srcs: vec![v + 2], swz: vec![0] });
-                            sel.prog.push(BorgInstr { mnem: "FMADD", dst: alu.def.index, srcs: vec![v + 3, k, v + 4], swz: vec![0, 0, 0] });
+                            let v = cx.sel.next_vreg;
+                            cx.sel.next_vreg += 5;
+                            cx.sel.prog.push(BorgInstr { mnem: "ISRL", dst: v, srcs: vec![x, c1], swz: vec![xc, 0] });
+                            cx.sel.prog.push(BorgInstr { mnem: "IAND", dst: v + 2, srcs: vec![x, c1], swz: vec![xc, 0] });
+                            cx.sel.prog.push(BorgInstr { mnem: "I2F", dst: v + 3, srcs: vec![v], swz: vec![0] });
+                            cx.sel.prog.push(BorgInstr { mnem: "I2F", dst: v + 4, srcs: vec![v + 2], swz: vec![0] });
+                            cx.sel.prog.push(BorgInstr { mnem: "FMADD", dst: alu.def.index, srcs: vec![v + 3, k, v + 4], swz: vec![0, 0, 0] });
                         }
                         _ => {
                             if let Some(mnem) = borg_isel(alu.op) {
@@ -985,24 +964,24 @@ unsafe fn compile_nir_inner(
                                     let mut swz = Vec::new();
                                     for s in alu.srcs_as_slice() {
                                         let (d, c) =
-                                            resolve_vm(&sel.vec_map, s.src.as_def().index, s.swizzle[0]);
+                                            resolve_vm(&cx.sel.vec_map, s.src.as_def().index, s.swizzle[0]);
                                         srcs.push(d);
                                         swz.push(c);
                                     }
                                     let pairs: Vec<(u32, u8)> =
                                         srcs.iter().cloned().zip(swz.iter().cloned()).collect();
-                                    prod.insert(alu.def.index, (alu.op, pairs));
-                                    sel.prog.push(BorgInstr { mnem, dst: alu.def.index, srcs, swz });
+                                    cx.prod.insert(alu.def.index, (alu.op, pairs));
+                                    cx.sel.prog.push(BorgInstr { mnem, dst: alu.def.index, srcs, swz });
                                 }
                             }
-                            else if !skipped.contains(&alu.info().name()) {
-                                skipped.push(alu.info().name());
+                            else if !cx.skipped.contains(&alu.info().name()) {
+                                cx.skipped.push(alu.info().name());
                             }
                         }
                     }
                 } else if let Some(intr) = instr.as_intrinsic() {
                     // Vector-wide quad derivatives → per-component scalar DDX/DDY,
-                    // registered in sel.vec_map so reads of the result resolve correctly.
+                    // registered in cx.sel.vec_map so reads of the result resolve correctly.
                     let deriv = match intr.intrinsic {
                         nir_intrinsic_ddx | nir_intrinsic_ddx_coarse | nir_intrinsic_ddx_fine => Some("DDX"),
                         nir_intrinsic_ddy | nir_intrinsic_ddy_coarse | nir_intrinsic_ddy_fine => Some("DDY"),
@@ -1013,10 +992,10 @@ unsafe fn compile_nir_inner(
                         let n = intr.def.num_components as usize;
                         let raw: Vec<u32> = (0..n)
                             .map(|c| {
-                                let (sd, sc) = resolve_vm(&sel.vec_map, src, c as u8);
-                                let v = sel.next_vreg;
-                                sel.next_vreg += 1;
-                                sel.prog.push(BorgInstr { mnem, dst: v, srcs: vec![sd], swz: vec![sc] });
+                                let (sd, sc) = resolve_vm(&cx.sel.vec_map, src, c as u8);
+                                let v = cx.sel.next_vreg;
+                                cx.sel.next_vreg += 1;
+                                cx.sel.prog.push(BorgInstr { mnem, dst: v, srcs: vec![sd], swz: vec![sc] });
                                 v
                             })
                             .collect();
@@ -1024,8 +1003,8 @@ unsafe fn compile_nir_inner(
                         // |cross(ddx, ddy)|^2 underflowed below FP16's minimum
                         // normal at 128x128. FP32 has no such floor.)
                         let comps: Vec<(u32, u8)> = raw.into_iter().map(|v| (v, 0u8)).collect();
-                        sel.vec_map.insert(intr.def.index, comps);
-                    } else if (intr.intrinsic == nir_intrinsic_load_input || intr.intrinsic == nir_intrinsic_load_point_coord) && draw_mode && !cp.vs_window {
+                        cx.sel.vec_map.insert(intr.def.index, comps);
+                    } else if (intr.intrinsic == nir_intrinsic_load_input || intr.intrinsic == nir_intrinsic_load_point_coord) && draw_mode && !cx.cp.vs_window {
                         // Draw front end: FATTR + the perspective-correct barycentrics
                         // already in r5-r7 at fragment start (docs/B1_geometry_front_end.md),
                         // one component at a time -- FATTR loads a component's three
@@ -1034,10 +1013,10 @@ unsafe fn compile_nir_inner(
                         // requesting the next.
                         //
                         // FATTR's rd..rd+2 is a single hardware-implied 3-register write,
-                        // exactly like TEX's rd..rd+3 (tex_dsts above) -- it must be
+                        // exactly like TEX's rd..rd+3 (cx.tex_dsts above) -- it must be
                         // referenced the SAME way: one tracked def (fattr_rd) plus a
-                        // component offset resolved at encode time (fattr_dsts, mirroring
-                        // tex_dsts), never as bare `fattr_rd + 1`/`+ 2` integers. Those
+                        // component offset resolved at encode time (cx.fattr_dsts, mirroring
+                        // cx.tex_dsts), never as bare `fattr_rd + 1`/`+ 2` integers. Those
                         // never appear as any instruction's dst, so regalloc never assigns
                         // them a register -- they silently resolved to r0 (whatever
                         // instruction happened to be encoding "unresolved operand"),
@@ -1051,9 +1030,9 @@ unsafe fn compile_nir_inner(
                         // the driver passes in the option word's top byte.
                         let base_index = if loc == 25 { flags.pntc_base() } else { 4 * loc.wrapping_sub(VARYING_SLOT_VAR0) };
                         let bary = [5u8, 6, 7].map(|r| {
-                            let v = sel.next_vreg; sel.next_vreg += 1;
-                            sel.ubo.insert(v, Ubo::Fixed(r));
-                            per_pixel_fixed.insert(v);
+                            let v = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                            cx.sel.ubo.insert(v, Ubo::Fixed(r));
+                            cx.per_pixel_fixed.insert(v);
                             v
                         });
                         let n = intr.def.num_components as usize;
@@ -1062,47 +1041,47 @@ unsafe fn compile_nir_inner(
                         let flat = dtype != 0 && dtype & 0x80 == 0;
                         let comps: Vec<(u32, u8)> = (0..n)
                             .map(|c| {
-                                let fattr_rd = sel.next_vreg; sel.next_vreg += 1;
-                                fattr_dsts.insert(fattr_rd);
-                                sel.prog.push(BorgInstr {
+                                let fattr_rd = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                cx.fattr_dsts.insert(fattr_rd);
+                                cx.sel.prog.push(BorgInstr {
                                     mnem: "FATTR", dst: fattr_rd, srcs: vec![],
                                     swz: vec![(base_index + c as u32) as u8],
                                 });
                                 if flat {
-                                    let res = sel.next_vreg; sel.next_vreg += 1;
-                                    sel.prog.push(BorgInstr { mnem: "IOR", dst: res, srcs: vec![fattr_rd, fattr_rd], swz: vec![0, 0] });
+                                    let res = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                    cx.sel.prog.push(BorgInstr { mnem: "IOR", dst: res, srcs: vec![fattr_rd, fattr_rd], swz: vec![0, 0] });
                                     return (res, 0u8);
                                 }
-                                let t0 = sel.next_vreg; sel.next_vreg += 1;
-                                sel.prog.push(BorgInstr { mnem: "FMUL", dst: t0, srcs: vec![bary[0], fattr_rd], swz: vec![0, 0] });
-                                let t1 = sel.next_vreg; sel.next_vreg += 1;
-                                sel.prog.push(BorgInstr { mnem: "FMADD", dst: t1, srcs: vec![bary[1], fattr_rd, t0], swz: vec![0, 1, 0] });
-                                let res = sel.next_vreg; sel.next_vreg += 1;
-                                sel.prog.push(BorgInstr { mnem: "FMADD", dst: res, srcs: vec![bary[2], fattr_rd, t1], swz: vec![0, 2, 0] });
+                                let t0 = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                cx.sel.prog.push(BorgInstr { mnem: "FMUL", dst: t0, srcs: vec![bary[0], fattr_rd], swz: vec![0, 0] });
+                                let t1 = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                cx.sel.prog.push(BorgInstr { mnem: "FMADD", dst: t1, srcs: vec![bary[1], fattr_rd, t0], swz: vec![0, 1, 0] });
+                                let res = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                cx.sel.prog.push(BorgInstr { mnem: "FMADD", dst: res, srcs: vec![bary[2], fattr_rd, t1], swz: vec![0, 2, 0] });
                                 (res, 0u8)
                             })
                             .collect();
-                        sel.vec_map.insert(intr.def.index, comps);
-                    } else if intr.intrinsic == nir_intrinsic_load_input && !cp.vs_window {
+                        cx.sel.vec_map.insert(intr.def.index, comps);
+                    } else if intr.intrinsic == nir_intrinsic_load_input && !cx.cp.vs_window {
                         // Interpolated varying. Borg has no fixed-function interpolation:
-                        // the shader computes it barycentrically. Emit the weights once
+                        // the shader computes it barycentrically. Emit the cx.weights once
                         // (w_i = e_i·inv_area; e0/1/2 = attrs r0/1/2, inv_area = u12), then
                         // per component: w0·v0 + w1·v1 + w2·v2 over the per-vertex uniforms.
-                        if weights.is_none() {
+                        if cx.weights.is_none() {
                             let mut w = [0u32; 3];
                             for (i, wi) in w.iter_mut().enumerate() {
-                                let e = sel.next_vreg; sel.next_vreg += 1;
-                                sel.ubo.insert(e, Ubo::Fixed(i as u8));        // e_i in r0/r1/r2
-                                per_pixel_fixed.insert(e); // NOT uniform: varies per pixel
-                                let inv = sel.next_vreg; sel.next_vreg += 1;
-                                sel.ubo.insert(inv, Ubo::Uniform(12));         // inv_area = u12
-                                let v = sel.next_vreg; sel.next_vreg += 1;
-                                sel.prog.push(BorgInstr { mnem: "FMUL", dst: v, srcs: vec![e, inv], swz: vec![0, 0] });
+                                let e = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                cx.sel.ubo.insert(e, Ubo::Fixed(i as u8));        // e_i in r0/r1/r2
+                                cx.per_pixel_fixed.insert(e); // NOT uniform: varies per pixel
+                                let inv = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                cx.sel.ubo.insert(inv, Ubo::Uniform(12));         // inv_area = u12
+                                let v = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                cx.sel.prog.push(BorgInstr { mnem: "FMUL", dst: v, srcs: vec![e, inv], swz: vec![0, 0] });
                                 *wi = v;
                             }
-                            weights = Some(w);
+                            cx.weights = Some(w);
                         }
-                        let w = weights.unwrap();
+                        let w = cx.weights.unwrap();
                         let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
                         // Per-vertex uniform base per varying (sequencer convention,
                         // each group stored (v2,v1,v0)): VAR0 texcoord → u13.., VAR1
@@ -1116,21 +1095,21 @@ unsafe fn compile_nir_inner(
                                 let uv: Vec<u32> = [2u8, 1, 0]
                                     .iter()
                                     .map(|&o| {
-                                        let v = sel.next_vreg; sel.next_vreg += 1;
-                                        sel.ubo.insert(v, Ubo::Uniform(base + o));
+                                        let v = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                        cx.sel.ubo.insert(v, Ubo::Uniform(base + o));
                                         v
                                     })
                                     .collect();
-                                let t0 = sel.next_vreg; sel.next_vreg += 1;
-                                sel.prog.push(BorgInstr { mnem: "FMUL", dst: t0, srcs: vec![w[0], uv[0]], swz: vec![0, 0] });
-                                let t1 = sel.next_vreg; sel.next_vreg += 1;
-                                sel.prog.push(BorgInstr { mnem: "FMADD", dst: t1, srcs: vec![w[1], uv[1], t0], swz: vec![0, 0, 0] });
-                                let res = sel.next_vreg; sel.next_vreg += 1;
-                                sel.prog.push(BorgInstr { mnem: "FMADD", dst: res, srcs: vec![w[2], uv[2], t1], swz: vec![0, 0, 0] });
+                                let t0 = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                cx.sel.prog.push(BorgInstr { mnem: "FMUL", dst: t0, srcs: vec![w[0], uv[0]], swz: vec![0, 0] });
+                                let t1 = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                cx.sel.prog.push(BorgInstr { mnem: "FMADD", dst: t1, srcs: vec![w[1], uv[1], t0], swz: vec![0, 0, 0] });
+                                let res = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                cx.sel.prog.push(BorgInstr { mnem: "FMADD", dst: res, srcs: vec![w[2], uv[2], t1], swz: vec![0, 0, 0] });
                                 (res, 0u8)
                             })
                             .collect();
-                        sel.vec_map.insert(intr.def.index, comps);
+                        cx.sel.vec_map.insert(intr.def.index, comps);
                     } else if intr.intrinsic == nir_intrinsic_load_push_constant {
                         // layout(push_constant) reads. Reached here only after
                         // borg_nir_passes.c's nir_lower_explicit_io turns the
@@ -1165,23 +1144,23 @@ unsafe fn compile_nir_inner(
                                     assert_eq!(byte_off % 4, 0,
                                         "push constant field at byte {byte_off} is not word-aligned");
                                     let word_idx = (byte_off / 4) as u32;
-                                    let idx_reg = *push_const_reg.entry(word_idx).or_insert_with(|| {
+                                    let idx_reg = *cx.push_const_reg.entry(word_idx).or_insert_with(|| {
                                         // Vertex: a window word per run; a pinned GPR is clobbered by the fragment pass.
-                                        if cp.vs_window {
-                                            return cp.vs_const(&mut sel, word_idx, true);
+                                        if cx.cp.vs_window {
+                                            return cx.cp.vs_const(&mut cx.sel, word_idx, true);
                                         }
                                         // Fragment: a window word too (no GPR is staged in draw mode).
                                         if draw_mode && is_fragment {
-                                            let u = fw.slot(word_idx);
-                                            let v = sel.next_vreg;
-                                            sel.next_vreg += 1;
-                                            sel.ubo.insert(v, Ubo::Uniform(u as u8));
+                                            let u = cx.fw.slot(word_idx);
+                                            let v = cx.sel.next_vreg;
+                                            cx.sel.next_vreg += 1;
+                                            cx.sel.ubo.insert(v, Ubo::Uniform(u as u8));
                                             return v;
                                         }
                                         // KNOWN GAP, not fixed here: unlike the
                                         // load_const vector-constant case above,
                                         // this pins a GPR regardless of
-                                        // draw_mode (the cp.regs reservation
+                                        // draw_mode (the cx.cp.regs reservation
                                         // comment has the vertex-collision
                                         // story) -- this value becomes LOAD's
                                         // own address operand, which must be an
@@ -1194,25 +1173,25 @@ unsafe fn compile_nir_inner(
                                         // (no push constants), so left as-is
                                         // rather than risk a change nothing
                                         // currently tests.
-                                        let reg = cp.alloc_reg();
+                                        let reg = cx.cp.alloc_reg();
                                         // RAW integer, not a float -- this
                                         // becomes rs1 for LOAD, a word INDEX,
                                         // not a shader-visible float value.
-                                        cp.uniforms.push((reg, word_idx));
-                                        let v = sel.next_vreg;
-                                        sel.next_vreg += 1;
-                                        sel.ubo.insert(v, Ubo::Fixed(reg));
+                                        cx.cp.uniforms.push((reg, word_idx));
+                                        let v = cx.sel.next_vreg;
+                                        cx.sel.next_vreg += 1;
+                                        cx.sel.ubo.insert(v, Ubo::Fixed(reg));
                                         v
                                     });
-                                    let dst = sel.next_vreg;
-                                    sel.next_vreg += 1;
-                                    sel.prog.push(BorgInstr {
+                                    let dst = cx.sel.next_vreg;
+                                    cx.sel.next_vreg += 1;
+                                    cx.sel.prog.push(BorgInstr {
                                         mnem: "LOAD", dst, srcs: vec![idx_reg], swz: vec![0],
                                     });
                                     (dst, 0u8)
                                 })
                                 .collect();
-                            sel.vec_map.insert(intr.def.index, comps);
+                            cx.sel.vec_map.insert(intr.def.index, comps);
                         } else {
                             eprintln!(
                                 "borgc: WARNING push constant at base={} read with a \
@@ -1224,11 +1203,11 @@ unsafe fn compile_nir_inner(
                     // load_ubo/store_output handled in the I/O pass below
                     // (legacy) or inline here (draw mode).
                     else if intr.intrinsic == nir_intrinsic_vulkan_resource_index {
-                        res_binding.insert(intr.def.index, intr.get_const_index(NIR_INTRINSIC_BINDING));
+                        cx.res_binding.insert(intr.def.index, intr.get_const_index(NIR_INTRINSIC_BINDING));
                     } else if intr.intrinsic == nir_intrinsic_load_vulkan_descriptor {
-                        descriptor_defs.insert(intr.def.index);
-                        if let Some(&b) = res_binding.get(&intr.get_src(0).as_def().index) {
-                            res_binding.insert(intr.def.index, b);
+                        cx.descriptor_defs.insert(intr.def.index);
+                        if let Some(&b) = cx.res_binding.get(&intr.get_src(0).as_def().index) {
+                            cx.res_binding.insert(intr.def.index, b);
                         }
                     } else if draw_mode && (intr.intrinsic == nir_intrinsic_load_ssbo
                                             || intr.intrinsic == nir_intrinsic_store_ssbo) {
@@ -1239,45 +1218,45 @@ unsafe fn compile_nir_inner(
                         const SSBO_SLOT_WORDS: u32 = 16384;
                         let store = intr.intrinsic == nir_intrinsic_store_ssbo;
                         let (bsrc, osrc) = if store { (1, 2) } else { (0, 1) };
-                        let mut bd = resolve_vm(&sel.vec_map, intr.get_src(bsrc).as_def().index, 0).0;
+                        let mut bd = resolve_vm(&cx.sel.vec_map, intr.get_src(bsrc).as_def().index, 0).0;
                         for _ in 0..8 {
-                            if res_binding.contains_key(&bd) { break; }
-                            match prod.get(&bd) { Some((_, srcs)) if !srcs.is_empty() => bd = resolve_vm(&sel.vec_map, srcs[0].0, 0).0, _ => break }
+                            if cx.res_binding.contains_key(&bd) { break; }
+                            match cx.prod.get(&bd) { Some((_, srcs)) if !srcs.is_empty() => bd = resolve_vm(&cx.sel.vec_map, srcs[0].0, 0).0, _ => break }
                         }
-                        let binding = res_binding.get(&bd).copied().unwrap_or(0);
+                        let binding = cx.res_binding.get(&bd).copied().unwrap_or(0);
                         let slot = SSBO_SLOT_WORDS * (1 + binding);
                         macro_rules! kc {
                             ($b:expr) => {{
                                 let bits: u32 = $b;
-                                if cp.vs_window {
-                                    cp.vs_const(&mut sel, bits, true)
+                                if cx.cp.vs_window {
+                                    cx.cp.vs_const(&mut cx.sel, bits, true)
                                 } else {
-                                    let u = fw.slot(bits);
-                                    let v = sel.next_vreg;
-                                    sel.next_vreg += 1;
-                                    sel.ubo.insert(v, Ubo::Uniform(u as u8));
+                                    let u = cx.fw.slot(bits);
+                                    let v = cx.sel.next_vreg;
+                                    cx.sel.next_vreg += 1;
+                                    cx.sel.ubo.insert(v, Ubo::Uniform(u as u8));
                                     v
                                 }
                             }};
                         }
-                        if cp.vs_window {
-                            let _ = cp.vs_const(&mut sel, 1u32, false);   // each word's address is the slot's base plus 1
+                        if cx.cp.vs_window {
+                            let _ = cx.cp.vs_const(&mut cx.sel, 1u32, false);   // each word's address is the slot's base plus 1
                         }
                         // A register holding 0, to copy window words through (an instruction reads one).
-                        let f = sel.next_vreg; sel.next_vreg += 1;
-                        sel.ubo.insert(f, Ubo::Fixed(30));
-                        let zero = sel.next_vreg; sel.next_vreg += 1;
-                        sel.prog.push(BorgInstr { mnem: "ISUB", dst: zero, srcs: vec![f, f], swz: vec![0, 0] });
+                        let f = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                        cx.sel.ubo.insert(f, Ubo::Fixed(30));
+                        let zero = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                        cx.sel.prog.push(BorgInstr { mnem: "ISUB", dst: zero, srcs: vec![f, f], swz: vec![0, 0] });
                         // The descriptor's own offset component (a dynamic buffer's) is the window base: 0.
-                        let off_is_descriptor = descriptor_defs.contains(&resolve_vm(&sel.vec_map, intr.get_src(osrc).as_def().index, 0).0);
+                        let off_is_descriptor = cx.descriptor_defs.contains(&resolve_vm(&cx.sel.vec_map, intr.get_src(osrc).as_def().index, 0).0);
                         let word = match intr.get_src(osrc).comp_as_uint(0) {
                             Some(_) => None,
                             None if off_is_descriptor => None,
                             None => {
-                                let o = resolve_vm(&sel.vec_map, intr.get_src(osrc).as_def().index, 0);
+                                let o = resolve_vm(&cx.sel.vec_map, intr.get_src(osrc).as_def().index, 0);
                                 let two = kc!(2);
-                                let w = sel.next_vreg; sel.next_vreg += 1;
-                                sel.prog.push(BorgInstr { mnem: "ISRL", dst: w, srcs: vec![o.0, two], swz: vec![o.1, 0] });
+                                let w = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                cx.sel.prog.push(BorgInstr { mnem: "ISRL", dst: w, srcs: vec![o.0, two], swz: vec![o.1, 0] });
                                 Some(w)
                             }
                         };
@@ -1289,29 +1268,29 @@ unsafe fn compile_nir_inner(
                                 continue;
                             }
                             let k = kc!(slot + const_word.unwrap_or(0) + c as u32);
-                            let addr = sel.next_vreg; sel.next_vreg += 1;
-                            sel.prog.push(BorgInstr { mnem: "IADD", dst: addr, srcs: vec![word.unwrap_or(zero), k], swz: vec![0, 0] });
+                            let addr = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                            cx.sel.prog.push(BorgInstr { mnem: "IADD", dst: addr, srcs: vec![word.unwrap_or(zero), k], swz: vec![0, 0] });
                             if store {
                                 let src = intr.get_src(0).as_def().index;
-                                let d = resolve_vm(&sel.vec_map, src, c as u8);
-                                let val = match consts.get(&d.0) {
-                                    Some(&bits) if !sel.vec_map.contains_key(&d.0) => {
+                                let d = resolve_vm(&cx.sel.vec_map, src, c as u8);
+                                let val = match cx.consts.get(&d.0) {
+                                    Some(&bits) if !cx.sel.vec_map.contains_key(&d.0) => {
                                         let kv = kc!(bits);
-                                        let t = sel.next_vreg; sel.next_vreg += 1;
-                                        sel.prog.push(BorgInstr { mnem: "IADD", dst: t, srcs: vec![zero, kv], swz: vec![0, 0] });
+                                        let t = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                        cx.sel.prog.push(BorgInstr { mnem: "IADD", dst: t, srcs: vec![zero, kv], swz: vec![0, 0] });
                                         (t, 0u8)
                                     }
                                     _ => d,
                                 };
-                                sel.prog.push(BorgInstr { mnem: "STORE", dst: NO_DST, srcs: vec![addr, val.0], swz: vec![0, val.1] });
+                                cx.sel.prog.push(BorgInstr { mnem: "STORE", dst: NO_DST, srcs: vec![addr, val.0], swz: vec![0, val.1] });
                             } else {
-                                let dst = sel.next_vreg; sel.next_vreg += 1;
-                                sel.prog.push(BorgInstr { mnem: "LOAD", dst, srcs: vec![addr], swz: vec![0] });
+                                let dst = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                cx.sel.prog.push(BorgInstr { mnem: "LOAD", dst, srcs: vec![addr], swz: vec![0] });
                                 comps.push((dst, 0u8));
                             }
                         }
                         if !store {
-                            sel.vec_map.insert(intr.def.index, comps);
+                            cx.sel.vec_map.insert(intr.def.index, comps);
                         }
                     } else if draw_mode && is_fragment && intr.intrinsic == nir_intrinsic_load_frag_coord {
                         // docs/B1_geometry_front_end.md, fragment ABI: FragCoord.xy = r30/r31
@@ -1320,25 +1299,25 @@ unsafe fn compile_nir_inner(
                         let comps: Vec<(u32, u8)> = [30u8, 31, 29, 8]
                             .iter()
                             .map(|&r| {
-                                let v = sel.next_vreg;
-                                sel.next_vreg += 1;
-                                sel.ubo.insert(v, Ubo::Fixed(r));
-                                per_pixel_fixed.insert(v);
+                                let v = cx.sel.next_vreg;
+                                cx.sel.next_vreg += 1;
+                                cx.sel.ubo.insert(v, Ubo::Fixed(r));
+                                cx.per_pixel_fixed.insert(v);
                                 (v, 0u8)
                             })
                             .collect();
-                        frag_coord_w = true;
-                        sel.vec_map.insert(intr.def.index, comps);
+                        cx.frag_coord_w = true;
+                        cx.sel.vec_map.insert(intr.def.index, comps);
                     } else if draw_mode && intr.intrinsic == nir_intrinsic_load_vertex_id {
                         // r30 = VertexIndex at vertex-shader start
                         // (docs/B1_geometry_front_end.md); referenced directly,
                         // like the fragment stage's e0-e2/barycentrics, never
-                        // through sel.vec_map/regalloc (see resolve_op's Ubo::Fixed
+                        // through cx.sel.vec_map/regalloc (see resolve_op's Ubo::Fixed
                         // arm -- checked before the alloc fallback for every
                         // source, whether or not that source has a producing
                         // BorgInstr of its own, which load_vertex_id does not).
-                        sel.ubo.insert(intr.def.index, Ubo::Fixed(30));
-                        vertex_id_def = Some(intr.def.index);
+                        cx.sel.ubo.insert(intr.def.index, Ubo::Fixed(30));
+                        cx.vertex_id_def = Some(intr.def.index);
                     } else if draw_mode && is_vertex && flags.fetching()
                               && intr.intrinsic == nir_intrinsic_load_input {
                         // Vertex input as a typed fetch (docs/B1_geometry_front_end.md, "Vertex
@@ -1351,30 +1330,30 @@ unsafe fn compile_nir_inner(
                             .wrapping_sub(VERT_ATTRIB_GENERIC0);
                         let n = intr.def.num_components as usize;
                         let ctl_bits = (1u32 << 16) | (128 + loc);
-                        let twelve = cp.vs_const(&mut sel, 12, false);
+                        let twelve = cx.cp.vs_const(&mut cx.sel, 12, false);
                         // A line's other endpoint (location + 24): the control word is built from
                         // the endpoint's own, so the pair costs one window word.
                         let ctl = if loc >= 24 {
-                            let _ = cp.vs_const(&mut sel, ctl_bits - 24, false);
-                            let _ = cp.vs_const(&mut sel, 24, true);
-                            cp.vs_const(&mut sel, ctl_bits, true)
+                            let _ = cx.cp.vs_const(&mut cx.sel, ctl_bits - 24, false);
+                            let _ = cx.cp.vs_const(&mut cx.sel, 24, true);
+                            cx.cp.vs_const(&mut cx.sel, ctl_bits, true)
                         } else {
-                            cp.vs_const(&mut sel, ctl_bits, false)
+                            cx.cp.vs_const(&mut cx.sel, ctl_bits, false)
                         };
                         // The index register: r30 (VertexIndex) or r31 (InstanceIndex).
                         let idx_reg = if loc < 16 && flags.instanced(loc) { 31 } else { 30 };
-                        let idx = sel.next_vreg; sel.next_vreg += 1;
-                        sel.ubo.insert(idx, Ubo::Fixed(idx_reg));
+                        let idx = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                        cx.sel.ubo.insert(idx, Ubo::Fixed(idx_reg));
                         // The element index i is texel (i & 4095, i >> 12) of a 4096-wide image.
-                        let ty = sel.next_vreg; sel.next_vreg += 1;
-                        sel.prog.push(BorgInstr { mnem: "ISRL", dst: ty, srcs: vec![idx, twelve], swz: vec![0, 0] });
-                        let hi = sel.next_vreg; sel.next_vreg += 1;
-                        sel.prog.push(BorgInstr { mnem: "ISHL", dst: hi, srcs: vec![ty, twelve], swz: vec![0, 0] });
-                        let tx = sel.next_vreg; sel.next_vreg += 1;
-                        sel.prog.push(BorgInstr { mnem: "ISUB", dst: tx, srcs: vec![idx, hi], swz: vec![0, 0] });
-                        let tex_v = sel.next_vreg; sel.next_vreg += 1;
-                        sel.prog.push(BorgInstr { mnem: "TEX", dst: tex_v, srcs: vec![tx, ty, ctl], swz: vec![0, 0, 0] });
-                        tex_dsts.insert(tex_v);
+                        let ty = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                        cx.sel.prog.push(BorgInstr { mnem: "ISRL", dst: ty, srcs: vec![idx, twelve], swz: vec![0, 0] });
+                        let hi = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                        cx.sel.prog.push(BorgInstr { mnem: "ISHL", dst: hi, srcs: vec![ty, twelve], swz: vec![0, 0] });
+                        let tx = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                        cx.sel.prog.push(BorgInstr { mnem: "ISUB", dst: tx, srcs: vec![idx, hi], swz: vec![0, 0] });
+                        let tex_v = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                        cx.sel.prog.push(BorgInstr { mnem: "TEX", dst: tex_v, srcs: vec![tx, ty, ctl], swz: vec![0, 0, 0] });
+                        cx.tex_dsts.insert(tex_v);
                         // The fetch fills a fixed four-register block (see the vertex `forced`
                         // below); every component a shader uses is copied out of it at once, so
                         // the next fetch can reuse the block and the rest of the compiler sees
@@ -1382,14 +1361,14 @@ unsafe fn compile_nir_inner(
                         let comp0 = intr.get_const_index(NIR_INTRINSIC_COMPONENT) as u8;
                         let mut comps = Vec::with_capacity(n);
                         for c in 0..n {
-                            let m = sel.next_vreg; sel.next_vreg += 1;
-                            sel.prog.push(BorgInstr { mnem: "IOR", dst: m, srcs: vec![tex_v, tex_v],
+                            let m = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                            cx.sel.prog.push(BorgInstr { mnem: "IOR", dst: m, srcs: vec![tex_v, tex_v],
                                                   swz: vec![comp0 + c as u8, comp0 + c as u8] });
                             comps.push((m, 0u8));
                         }
-                        sel.vec_map.insert(intr.def.index, comps);
+                        cx.sel.vec_map.insert(intr.def.index, comps);
                     } else if draw_mode && (intr.intrinsic == nir_intrinsic_load_ubo
-                                            || (cp.vs_window && intr.intrinsic == nir_intrinsic_load_input)) {
+                                            || (cx.cp.vs_window && intr.intrinsic == nir_intrinsic_load_input)) {
                         // A draw-mode vertex shader's `in` attributes are read from
                         // the same per-vertex UBO region the firmware fills for
                         // cube.vert: input location L is `vec4 attr[]` at word
@@ -1400,7 +1379,7 @@ unsafe fn compile_nir_inner(
                         let is_input = intr.intrinsic == nir_intrinsic_load_input;
                         let offset_def = if is_input { 0 } else { intr.get_src(1).as_def().index };
                         let n = intr.def.num_components as usize;
-                        // vertex_id_def is always Some by now if the shader reads
+                        // cx.vertex_id_def is always Some by now if the shader reads
                         // gl_VertexIndex anywhere, which every load_ubo here does
                         // transitively via the descriptor's own address term
                         // (see decompose_vertex_offset's doc) even when THIS
@@ -1418,8 +1397,8 @@ unsafe fn compile_nir_inner(
                         let (base_words, stride_words) = match input_slot
                             .map(|l| Some((16 + 144 * l as i32, 4i32)))
                             .unwrap_or_else(|| decompose_vertex_offset(
-                                &sel.vec_map, &prod, &consts, &descriptor_defs,
-                                vertex_id_def.unwrap_or(u32::MAX), offset_def,
+                                &cx.sel.vec_map, &cx.prod, &cx.consts, &cx.descriptor_defs,
+                                cx.vertex_id_def.unwrap_or(u32::MAX), offset_def,
                             )) {
                             Some(bs) => bs,
                             None => {
@@ -1433,12 +1412,12 @@ unsafe fn compile_nir_inner(
                         // A uniform buffer other than binding 0 is a window of the draw's buffer
                         // region, SSBO_SLOT_WORDS * (1 + binding) words above LS_BASE.
                         let base_words = if base_words >= 0 && !is_input {
-                            let mut d = resolve_vm(&sel.vec_map, intr.get_src(0).as_def().index, 0).0;
+                            let mut d = resolve_vm(&cx.sel.vec_map, intr.get_src(0).as_def().index, 0).0;
                             for _ in 0..8 {
-                                if res_binding.contains_key(&d) { break; }
-                                match prod.get(&d) { Some((_, srcs)) if !srcs.is_empty() => d = resolve_vm(&sel.vec_map, srcs[0].0, 0).0, _ => break }
+                                if cx.res_binding.contains_key(&d) { break; }
+                                match cx.prod.get(&d) { Some((_, srcs)) if !srcs.is_empty() => d = resolve_vm(&cx.sel.vec_map, srcs[0].0, 0).0, _ => break }
                             }
-                            let b = res_binding.get(&d).copied().unwrap_or(0);
+                            let b = cx.res_binding.get(&d).copied().unwrap_or(0);
                             if b == 0 { base_words } else { base_words + 16384 * (1 + b as i32) }
                         } else {
                             base_words
@@ -1450,27 +1429,27 @@ unsafe fn compile_nir_inner(
                             // holds SSA/vreg indices, and a small GPR number
                             // could collide with a real NIR SSA index.
                             // The slot size seeds the window so each further buffer's base is a sum.
-                            if cp.vs_window && base_words >= 16384 {
-                                let _ = cp.vs_const(&mut sel, 16384u32, false);
+                            if cx.cp.vs_window && base_words >= 16384 {
+                                let _ = cx.cp.vs_const(&mut cx.sel, 16384u32, false);
                             }
                             macro_rules! cint {
                                 ($v:expr) => {{
                                     let v: i32 = $v;
-                                    if cp.vs_window {
-                                        cp.vs_const(&mut sel, v as u32, false)
+                                    if cx.cp.vs_window {
+                                        cx.cp.vs_const(&mut cx.sel, v as u32, false)
                                     } else {
-                                        cp.int_operand(&mut sel, v)
+                                        cx.cp.int_operand(&mut cx.sel, v)
                                     }
                                 }};
                             }
                             // The running address register this load's words come
                             // from. A constant address (stride_words == 0, the MVP
                             // columns) continues an earlier load_ubo's chain when it
-                            // left off exactly here (const_addr_chain), instead of
+                            // left off exactly here (cx.const_addr_chain), instead of
                             // pinning every one of the (here) 16 word indices to its
                             // own constant register -- which does not fit the ~4-word
-                            // budget (see const_addr_chain's doc).
-                            let addr = match (stride_words, const_addr_chain) {
+                            // budget (see cx.const_addr_chain's doc).
+                            let addr = match (stride_words, cx.const_addr_chain) {
                                 (0, Some((next, a))) if next == base_words => a,
                                 // A pinned GPR can seed the chain directly. A
                                 // window uniform cannot: the chain's IADD would
@@ -1479,44 +1458,44 @@ unsafe fn compile_nir_inner(
                                 // goes through the strided path below instead,
                                 // with stride 0 (VertexIndex * 0 + base).
                                 // A base past 16 bits does not fit a staged register: a window constant.
-                                (0, _) if !cp.vs_window && base_words >= 65536 => {
+                                (0, _) if !cx.cp.vs_window && base_words >= 65536 => {
                                     let bits = base_words as u32;
-                                    let u = fw.slot(bits);
-                                    let v = sel.next_vreg;
-                                    sel.next_vreg += 1;
-                                    sel.ubo.insert(v, Ubo::Uniform(u as u8));
+                                    let u = cx.fw.slot(bits);
+                                    let v = cx.sel.next_vreg;
+                                    cx.sel.next_vreg += 1;
+                                    cx.sel.ubo.insert(v, Ubo::Uniform(u as u8));
                                     v
                                 }
-                                (0, _) if !cp.vs_window => cint!(base_words),
+                                (0, _) if !cx.cp.vs_window => cint!(base_words),
                                 // A single constant word: the address is a window word, no chain.
                                 (0, _) if n == 1 => cint!(base_words),
                                 _ => {
-                                    let vid = match vertex_id_def {
+                                    let vid = match cx.vertex_id_def {
                                         Some(v) => v,
                                         None => {
-                                            let v = sel.next_vreg; sel.next_vreg += 1;
-                                            sel.ubo.insert(v, Ubo::Fixed(30));
+                                            let v = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                            cx.sel.ubo.insert(v, Ubo::Fixed(30));
                                             v
                                         }
                                     };
                                     let stride_v = cint!(stride_words);
-                                    let tmp = sel.next_vreg; sel.next_vreg += 1;
-                                    sel.prog.push(BorgInstr { mnem: "IMUL", dst: tmp, srcs: vec![vid, stride_v], swz: vec![0, 0] });
+                                    let tmp = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                    cx.sel.prog.push(BorgInstr { mnem: "IMUL", dst: tmp, srcs: vec![vid, stride_v], swz: vec![0, 0] });
                                     let base_v = cint!(base_words);
-                                    let a = sel.next_vreg; sel.next_vreg += 1;
-                                    sel.prog.push(BorgInstr { mnem: "IADD", dst: a, srcs: vec![tmp, base_v], swz: vec![0, 0] });
+                                    let a = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                    cx.sel.prog.push(BorgInstr { mnem: "IADD", dst: a, srcs: vec![tmp, base_v], swz: vec![0, 0] });
                                     a
                                 }
                             };
                             let mut cur = addr;
                             let comps: Vec<(u32, u8)> = (0..n)
                                 .map(|c| {
-                                    let dst = sel.next_vreg; sel.next_vreg += 1;
-                                    sel.prog.push(BorgInstr { mnem: "LOAD", dst, srcs: vec![cur], swz: vec![0] });
+                                    let dst = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                    cx.sel.prog.push(BorgInstr { mnem: "LOAD", dst, srcs: vec![cur], swz: vec![0] });
                                     if c + 1 < n {
                                         let one_v = cint!(1);
-                                        let next_a = sel.next_vreg; sel.next_vreg += 1;
-                                        sel.prog.push(BorgInstr {
+                                        let next_a = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                        cx.sel.prog.push(BorgInstr {
                                             mnem: "IADD", dst: next_a, srcs: vec![cur, one_v], swz: vec![0, 0],
                                         });
                                         cur = next_a;
@@ -1530,11 +1509,11 @@ unsafe fn compile_nir_inner(
                             // then drops like any other dead instruction).
                             if stride_words == 0 && n > 1 {
                                 let one_v = cint!(1);
-                                let past = sel.next_vreg; sel.next_vreg += 1;
-                                sel.prog.push(BorgInstr { mnem: "IADD", dst: past, srcs: vec![cur, one_v], swz: vec![0, 0] });
-                                const_addr_chain = Some((base_words + n as i32, past));
+                                let past = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                cx.sel.prog.push(BorgInstr { mnem: "IADD", dst: past, srcs: vec![cur, one_v], swz: vec![0, 0] });
+                                cx.const_addr_chain = Some((base_words + n as i32, past));
                             }
-                            sel.vec_map.insert(intr.def.index, comps);
+                            cx.sel.vec_map.insert(intr.def.index, comps);
                         }
                     } else if draw_mode && intr.intrinsic == nir_intrinsic_store_output {
                         let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
@@ -1542,46 +1521,46 @@ unsafe fn compile_nir_inner(
                         let ncomp = intr.get_src(0).num_components() as usize;
                         // A scalar constant stored directly has no register yet: give it a window word.
                         for c in 0..ncomp {
-                            let d = resolve_vm(&sel.vec_map, src, c as u8).0;
-                            let bits = match consts.get(&d) {
-                                Some(&b) if !sel.vec_map.contains_key(&d) => b,
+                            let d = resolve_vm(&cx.sel.vec_map, src, c as u8).0;
+                            let bits = match cx.consts.get(&d) {
+                                Some(&b) if !cx.sel.vec_map.contains_key(&d) => b,
                                 _ => continue,
                             };
-                            if cp.vs_window {
-                                let v = cp.vs_const(&mut sel, bits, false);
-                                sel.vec_map.insert(d, vec![(v, 0u8)]);
+                            if cx.cp.vs_window {
+                                let v = cx.cp.vs_const(&mut cx.sel, bits, false);
+                                cx.sel.vec_map.insert(d, vec![(v, 0u8)]);
                                 continue;
                             }
-                            let u = fw.slot(bits);
-                            let v = sel.next_vreg;
-                            sel.next_vreg += 1;
-                            sel.ubo.insert(v, Ubo::Uniform(u as u8));
-                            sel.vec_map.insert(d, vec![(v, 0u8)]);
+                            let u = cx.fw.slot(bits);
+                            let v = cx.sel.next_vreg;
+                            cx.sel.next_vreg += 1;
+                            cx.sel.ubo.insert(v, Ubo::Uniform(u as u8));
+                            cx.sel.vec_map.insert(d, vec![(v, 0u8)]);
                         }
-                        let comps: Vec<(u32, u8)> = (0..ncomp).map(|c| resolve_vm(&sel.vec_map, src, c as u8)).collect();
+                        let comps: Vec<(u32, u8)> = (0..ncomp).map(|c| resolve_vm(&cx.sel.vec_map, src, c as u8)).collect();
                         if is_vertex && loc == VARYING_SLOT_POS {
                             for (c, &v0) in comps.iter().enumerate().take(4) {
                                 let mut v = v0;
-                                if matches!(sel.ubo.get(&v.0), Some(Ubo::Uniform(_))) {
-                                    let out = sel.next_vreg; sel.next_vreg += 1;
-                                    sel.prog.push(BorgInstr { mnem: "FMOV", dst: out, srcs: vec![v.0], swz: vec![0] });
+                                if matches!(cx.sel.ubo.get(&v.0), Some(Ubo::Uniform(_))) {
+                                    let out = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                    cx.sel.prog.push(BorgInstr { mnem: "FMOV", dst: out, srcs: vec![v.0], swz: vec![0] });
                                     v = (out, 0);
                                 }
-                                outs.pos[c] = Some(v);
-                                outs.roots.push(v.0);
+                                cx.outs.pos[c] = Some(v);
+                                cx.outs.roots.push(v.0);
                             }
                         } else if is_fragment && flags.multi_target() && (4..8).contains(&loc) {
                             // Several colour attachments: FRAG_RESULT_DATA0.. , one value per attachment.
                             // A constant (a window word) is copied into a register where it is packed.
-                            outs.mrt[(loc - 4) as usize] = Some(comps[0]);
+                            cx.outs.mrt[(loc - 4) as usize] = Some(comps[0]);
                         } else if is_fragment {
                             let ncomp2 = if frag_alpha || flags.bytes_packed() { 4 } else { 3 };
                             for (c, &v) in comps.iter().enumerate().take(ncomp2) {
-                                outs.frag[c] = Some(v);
-                                outs.roots.push(v.0);
+                                cx.outs.frag[c] = Some(v);
+                                cx.outs.roots.push(v.0);
                             }
                         } else if is_vertex && loc == 12 {
-                            outs.psize = comps.first().copied();   // VARYING_SLOT_PSIZ
+                            cx.outs.psize = comps.first().copied();   // VARYING_SLOT_PSIZ
                         } else if loc < VARYING_SLOT_VAR0 {
                             // gl_PointSize and the other built-in outputs: triangles ignore them.
                         } else {
@@ -1589,21 +1568,21 @@ unsafe fn compile_nir_inner(
                             for (c, &(vd0, vc)) in comps.iter().enumerate() {
                                 let mut vd = vd0;
                                 // SOUT stores a register; a constant living in the uniform window needs a copy.
-                                if matches!(sel.ubo.get(&vd), Some(Ubo::Uniform(_))) {
-                                    let out = sel.next_vreg; sel.next_vreg += 1;
-                                    sel.prog.push(BorgInstr { mnem: "FMOV", dst: out, srcs: vec![vd], swz: vec![0] });
+                                if matches!(cx.sel.ubo.get(&vd), Some(Ubo::Uniform(_))) {
+                                    let out = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                                    cx.sel.prog.push(BorgInstr { mnem: "FMOV", dst: out, srcs: vec![vd], swz: vec![0] });
                                     vd = out;
                                 }
                                 let index = base_index + c as u32;
                                 assert!(index < 256, "borgc: SOUT index {index} does not fit a byte");
-                                sel.prog.push(BorgInstr {
+                                cx.sel.prog.push(BorgInstr {
                                     mnem: "SOUT", dst: NO_DST, srcs: vec![vd], swz: vec![index as u8],
                                 });
-                                outs.roots.push(vd);
+                                cx.outs.roots.push(vd);
                                 let _ = vc; // see decompose_vertex_offset's doc: draw-mode producers are scalar (c=0) by construction
                             }
                         }
-                        outs.stores.insert(loc, comps);
+                        cx.outs.stores.insert(loc, comps);
                     } else if draw_mode && is_fragment && intr.intrinsic == nir_intrinsic_load_output
                               && intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) >> 14 & 1 != 0 {
                         // The destination pixel as floats (nir_lower_blend's fb fetch): `TLD` returns the
@@ -1618,114 +1597,114 @@ unsafe fn compile_nir_inner(
                         };
                         match desc {
                             Some((kind, layout)) if layout.iter().all(|&(_, sh, b)| sh + b <= 32) => {
-                                let w = sel.op0("TLD", vec![]);
-                                let zero = sel.op0("ISUB", vec![w, w]);
+                                let w = cx.sel.op0("TLD", vec![]);
+                                let zero = cx.sel.op0("ISUB", vec![w, w]);
                                 let mut rgba: [Option<u32>; 4] = [None; 4];
                                 for &(comp, sh, bits) in layout.iter() {
                                     let mut f = w;
                                     if sh != 0 {
-                                        let s = fw.win(&mut sel, sh);
-                                        f = sel.op0("ISRL", vec![f, s]);
+                                        let s = cx.fw.win(&mut cx.sel, sh);
+                                        f = cx.sel.op0("ISRL", vec![f, s]);
                                     }
                                     if bits < 32 && (kind != 1) && sh + bits < 32 {
-                                        let m = fw.win(&mut sel, (1u32 << bits) - 1);
-                                        f = sel.op0("IAND", vec![f, m]);
+                                        let m = cx.fw.win(&mut cx.sel, (1u32 << bits) - 1);
+                                        f = cx.sel.op0("IAND", vec![f, m]);
                                     }
                                     let v = match kind {
                                         2 if comp != 3 => {
                                             // sRGB to linear: a fetch from the driver's 256-entry table (slot 41).
-                                            let ctl = fw.win(&mut sel, (1 << 16) | (128 + 41));
-                                            let t = sel.op0("TEX", vec![f, zero, ctl]);
-                                            tex_dsts.insert(t);
-                                            sel.op0("IOR", vec![t, t])
+                                            let ctl = cx.fw.win(&mut cx.sel, (1 << 16) | (128 + 41));
+                                            let t = cx.sel.op0("TEX", vec![f, zero, ctl]);
+                                            cx.tex_dsts.insert(t);
+                                            cx.sel.op0("IOR", vec![t, t])
                                         }
                                         0 | 2 => {
-                                            let i = sel.op0("I2F", vec![f]);
-                                            let inv = fw.win(&mut sel, (1.0f32 / ((1u64 << bits) - 1) as f32).to_bits());
-                                            sel.op0("FMUL", vec![i, inv])
+                                            let i = cx.sel.op0("I2F", vec![f]);
+                                            let inv = cx.fw.win(&mut cx.sel, (1.0f32 / ((1u64 << bits) - 1) as f32).to_bits());
+                                            cx.sel.op0("FMUL", vec![i, inv])
                                         }
                                         1 => {
                                             // Sign-extend the field from the word itself.
-                                            let up = fw.win(&mut sel, 32 - bits - sh);
-                                            let a = if 32 - bits - sh != 0 { sel.op0("ISHL", vec![w, up]) } else { w };
-                                            let dn = fw.win(&mut sel, 32 - bits);
-                                            let s = sel.op0("ISHR", vec![a, dn]);
-                                            let i = sel.op0("I2F", vec![s]);
-                                            let inv = fw.win(&mut sel, (1.0f32 / ((1u64 << (bits - 1)) - 1) as f32).to_bits());
-                                            sel.op0("FMUL", vec![i, inv])
+                                            let up = cx.fw.win(&mut cx.sel, 32 - bits - sh);
+                                            let a = if 32 - bits - sh != 0 { cx.sel.op0("ISHL", vec![w, up]) } else { w };
+                                            let dn = cx.fw.win(&mut cx.sel, 32 - bits);
+                                            let s = cx.sel.op0("ISHR", vec![a, dn]);
+                                            let i = cx.sel.op0("I2F", vec![s]);
+                                            let inv = cx.fw.win(&mut cx.sel, (1.0f32 / ((1u64 << (bits - 1)) - 1) as f32).to_bits());
+                                            cx.sel.op0("FMUL", vec![i, inv])
                                         }
                                         _ => f,
                                     };
                                     rgba[comp] = Some(v);
                                 }
-                                let one = fw.win(&mut sel, 1.0f32.to_bits());
+                                let one = cx.fw.win(&mut cx.sel, 1.0f32.to_bits());
                                 let comp0 = intr.get_const_index(NIR_INTRINSIC_COMPONENT) as usize;
                                 let nc = intr.def.num_components as usize;
                                 let comps: Vec<(u32, u8)> = (0..nc).map(|c| {
                                     let c = c + comp0;
                                     (rgba[c].unwrap_or(if c == 3 { one } else { zero }), 0u8)
                                 }).collect();
-                                sel.vec_map.insert(intr.def.index, comps);
+                                cx.sel.vec_map.insert(intr.def.index, comps);
                             }
                             _ if flags.half() => {
                                 // Half floats: R, G in word 0, B, A in word 1. A channel's bits become the
                                 // float's: exponent rebased by 112, an infinity or NaN by another 112, and a
                                 // denormal is its mantissa times 2^-24.
                                 let nch = flags.half_channels();
-                                let w0 = sel.op0("TLD", vec![]);
-                                let w1 = if nch > 2 { sel.op0("TLD1", vec![]) } else { w0 };
-                                let zero = sel.op0("ISUB", vec![w0, w0]);
+                                let w0 = cx.sel.op0("TLD", vec![]);
+                                let w1 = if nch > 2 { cx.sel.op0("TLD1", vec![]) } else { w0 };
+                                let zero = cx.sel.op0("ISUB", vec![w0, w0]);
                                 let mut rgba: [Option<u32>; 4] = [None; 4];
                                 for k in 0..nch {
                                     let mut h = if k < 2 { w0 } else { w1 };
                                     if k % 2 == 1 {
-                                        let c16 = fw.win(&mut sel, 16);
-                                        h = sel.op0("ISRL", vec![h, c16]);
+                                        let c16 = cx.fw.win(&mut cx.sel, 16);
+                                        h = cx.sel.op0("ISRL", vec![h, c16]);
                                     }
-                                    let c7fff = fw.win(&mut sel, 0x7FFF);
-                                    let mag = sel.op0("IAND", vec![h, c7fff]);
-                                    let c13 = fw.win(&mut sel, 13);
-                                    let n = sel.op0("ISHL", vec![mag, c13]);
-                                    let bias = fw.win(&mut sel, 112 << 23);
-                                    let n = sel.op0("IADD", vec![n, bias]);
-                                    let c10 = fw.win(&mut sel, 10);
-                                    let e = sel.op0("ISRL", vec![mag, c10]);
-                                    let c31 = fw.win(&mut sel, 31);
-                                    let isinf = sel.op0("ISEQ", vec![e, c31]);
-                                    let bias2 = fw.win(&mut sel, 112 << 23);
-                                    let add = sel.op0("IMUL", vec![isinf, bias2]);
-                                    let n = sel.op0("IADD", vec![n, add]);
-                                    let c3ff = fw.win(&mut sel, 0x3FF);
-                                    let m = sel.op0("IAND", vec![mag, c3ff]);
-                                    let mf = sel.op0("I2F", vec![m]);
-                                    let sc = fw.win(&mut sel, (2.0f32).powi(-24).to_bits());
-                                    let df = sel.op0("FMUL", vec![mf, sc]);
-                                    let isden = sel.op0("ISEQ", vec![e, zero]);
-                                    let mask = sel.op0("ISUB", vec![zero, isden]);
-                                    let x = sel.op0("IXOR", vec![n, df]);
-                                    let x = sel.op0("IAND", vec![x, mask]);
-                                    let r = sel.op0("IXOR", vec![n, x]);
-                                    let c15 = fw.win(&mut sel, 15);
-                                    let sg = sel.op0("ISRL", vec![h, c15]);
-                                    let c31b = fw.win(&mut sel, 31);
-                                    let sg = sel.op0("ISHL", vec![sg, c31b]);
-                                    rgba[k] = Some(sel.op0("IOR", vec![r, sg]));
+                                    let c7fff = cx.fw.win(&mut cx.sel, 0x7FFF);
+                                    let mag = cx.sel.op0("IAND", vec![h, c7fff]);
+                                    let c13 = cx.fw.win(&mut cx.sel, 13);
+                                    let n = cx.sel.op0("ISHL", vec![mag, c13]);
+                                    let bias = cx.fw.win(&mut cx.sel, 112 << 23);
+                                    let n = cx.sel.op0("IADD", vec![n, bias]);
+                                    let c10 = cx.fw.win(&mut cx.sel, 10);
+                                    let e = cx.sel.op0("ISRL", vec![mag, c10]);
+                                    let c31 = cx.fw.win(&mut cx.sel, 31);
+                                    let isinf = cx.sel.op0("ISEQ", vec![e, c31]);
+                                    let bias2 = cx.fw.win(&mut cx.sel, 112 << 23);
+                                    let add = cx.sel.op0("IMUL", vec![isinf, bias2]);
+                                    let n = cx.sel.op0("IADD", vec![n, add]);
+                                    let c3ff = cx.fw.win(&mut cx.sel, 0x3FF);
+                                    let m = cx.sel.op0("IAND", vec![mag, c3ff]);
+                                    let mf = cx.sel.op0("I2F", vec![m]);
+                                    let sc = cx.fw.win(&mut cx.sel, (2.0f32).powi(-24).to_bits());
+                                    let df = cx.sel.op0("FMUL", vec![mf, sc]);
+                                    let isden = cx.sel.op0("ISEQ", vec![e, zero]);
+                                    let mask = cx.sel.op0("ISUB", vec![zero, isden]);
+                                    let x = cx.sel.op0("IXOR", vec![n, df]);
+                                    let x = cx.sel.op0("IAND", vec![x, mask]);
+                                    let r = cx.sel.op0("IXOR", vec![n, x]);
+                                    let c15 = cx.fw.win(&mut cx.sel, 15);
+                                    let sg = cx.sel.op0("ISRL", vec![h, c15]);
+                                    let c31b = cx.fw.win(&mut cx.sel, 31);
+                                    let sg = cx.sel.op0("ISHL", vec![sg, c31b]);
+                                    rgba[k] = Some(cx.sel.op0("IOR", vec![r, sg]));
                                 }
-                                let one = fw.win(&mut sel, 1.0f32.to_bits());
+                                let one = cx.fw.win(&mut cx.sel, 1.0f32.to_bits());
                                 let comp0 = intr.get_const_index(NIR_INTRINSIC_COMPONENT) as usize;
                                 let nc = intr.def.num_components as usize;
                                 let comps: Vec<(u32, u8)> = (0..nc).map(|c| {
                                     let c = c + comp0;
                                     (rgba[c].unwrap_or(if c == 3 { one } else { zero }), 0u8)
                                 }).collect();
-                                sel.vec_map.insert(intr.def.index, comps);
+                                cx.sel.vec_map.insert(intr.def.index, comps);
                             }
                             _ => eprintln!("borgc: ERROR blending on this attachment format is not implemented"),
                         }
                     } else if draw_mode && intr.intrinsic == nir_intrinsic_load_output {
                         let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
-                        match outs.stores.get(&loc) {
-                            Some(v) => { sel.vec_map.insert(intr.def.index, v.clone()); }
+                        match cx.outs.stores.get(&loc) {
+                            Some(v) => { cx.sel.vec_map.insert(intr.def.index, v.clone()); }
                             None => eprintln!(
                                 "borgc: WARNING load_output of location {loc}, never stored earlier \
                                  in program order -- dropped (draw mode resolves it from the store, \
@@ -1734,184 +1713,16 @@ unsafe fn compile_nir_inner(
                         }
                     }
                 } else if let Some(tex) = instr.as_tex() {
-                    // Texture sample → TEX rd, u, v, ctl: R, G, B, A to rd..rd+3.
-                    // Only a plain implicit-LOD sample of a 2D texture so far;
-                    // anything else is reported rather than sampled wrongly.
-                    let srcs = tex.srcs_as_slice();
-                    let is_txl = tex.op == nir_texop_txl && is_fragment && draw_mode;
-                    let is_txb = tex.op == nir_texop_txb && is_fragment && draw_mode;
-                    let is_tg4 = tex.op == nir_texop_tg4 && is_fragment && draw_mode;
-                    if tex.op != nir_texop_tex && tex.op != nir_texop_txf && !is_txl && !is_txb && !is_tg4 {
-                        eprintln!("borgc: WARNING texture op {} not supported yet, dropped", tex.op);
-                        continue;
-                    }
-                    if let Some(t) = srcs.iter().find(|s| s.src_type == nir_tex_src_texture_deref) {
-                        tex_derefs.insert(t.src.as_def().index);
-                        if tex_derefs.len() == 2 {
-                            eprintln!("borgc: WARNING more than one texture: all sample descriptor 0");
-                        }
-                    }
-                    let coord = srcs
-                        .iter()
-                        .find(|s| s.src_type == nir_tex_src_coord)
-                        .map(|s| s.src.as_def().index);
-                    if let Some(cd) = coord {
-                        let (ud, uc) = resolve_vm(&sel.vec_map, cd, 0);
-                        let is_fetch = tex.op == nir_texop_txf;
-                        // A fetch of a 1D texture or texel buffer takes the integer texel in u;
-                        // v is unused, so u is passed twice.
-                        let (vd, vc) = if is_fetch && tex.coord_components == 1 {
-                            (ud, uc)
-                        } else {
-                            resolve_vm(&sel.vec_map, cd, 1)
-                        };
-                        let is_cube = tex.sampler_dim == GLSL_SAMPLER_DIM_CUBE;
-                        // A third coordinate (3D, 2D array) goes to TEXA as w; a cube's is the compiler's face math.
-                        let has_w = !is_fetch && tex.coord_components >= 3 && !is_cube && is_fragment && draw_mode;
-                        let has_bias = (is_txb || tex.op == nir_texop_tex) && !is_fetch && srcs.iter().any(|s| s.src_type == nir_tex_src_bias);
-                        if is_txl || has_w || has_bias {
-                            // Explicit LOD: TEXA hands this lane's LOD to the TEX after it (w and the
-                            // depth reference are unused for a 2D sample, so r30 stands in for both).
-                            let ld = srcs.iter().find(|s| s.src_type == nir_tex_src_lod || s.src_type == nir_tex_src_bias).map(|s| s.src.as_def().index).unwrap_or(cd);
-                            if let Some(&bits) = consts.get(&ld).filter(|_| is_txl || has_bias) {
-                                if !sel.vec_map.contains_key(&ld) {
-                                    let u = fw.slot(bits);
-                                    let v = sel.next_vreg;
-                                    sel.next_vreg += 1;
-                                    sel.ubo.insert(v, Ubo::Uniform(u as u8));
-                                    sel.vec_map.insert(ld, vec![(v, 0u8)]);
-                                }
-                            }
-                            let wz = sel.next_vreg;
-                            sel.next_vreg += 1;
-                            sel.ubo.insert(wz, Ubo::Fixed(30));
-                            per_pixel_fixed.insert(wz);
-                            let (lv, lc) = if is_txl || has_bias { resolve_vm(&sel.vec_map, ld, 0) } else { (wz, 0u8) };
-                            let (wv, wc) = if has_w { resolve_vm(&sel.vec_map, cd, 2) } else { (wz, 0u8) };
-                            sel.prog.push(BorgInstr { mnem: "TEXA", dst: NO_DST, srcs: vec![wv, lv, wz], swz: vec![wc, lc, 0] });
-                        }
-                        let ctl = if is_tg4 {
-                            // Operation 2 (gather) of the component in bits 19:18.
-                            let bits = 2u32 << 16 | (tex.component() & 3) << 18;
-                            let u = fw.slot(bits);
-                            let c = sel.next_vreg;
-                            sel.next_vreg += 1;
-                            sel.ubo.insert(c, Ubo::Uniform(u as u8));
-                            c
-                        } else if has_bias {
-                            // LOD mode 1: implicit LOD plus TEXA's bias.
-                            let u = fw.slot(1u32 << 21);
-                            let c = sel.next_vreg;
-                            sel.next_vreg += 1;
-                            sel.ubo.insert(c, Ubo::Uniform(u as u8));
-                            c
-                        } else if is_fetch || is_txl {
-                            // Control word: operation 1 (fetch) in bits 17:16, texture 0, sampler 0,
-                            // read from the constant window (docs/B2_texture_unit.md).
-                            let ctl_bits = if is_txl { 2u32 << 21 } else { 1u32 << 16 };
-                            let slot = if is_txl { &mut lod_ctl_uniform } else { &mut fetch_ctl_uniform };
-                            let u = match *slot {
-                                Some(u) => u,
-                                None => {
-                                    assert!(fw.count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                                    let u = 20 + fw.count;
-                                    fw.count += 1;
-                                    fw.consts.push((u, ctl_bits));
-                                    *slot = Some(u);
-                                    u
-                                }
-                            };
-                            let c = sel.next_vreg;
-                            sel.next_vreg += 1;
-                            sel.ubo.insert(c, Ubo::Uniform(u as u8));
-                            c
-                        } else {
-                            match zero_ctl {
-                            Some(v) => v,
-                            None => {
-                                let c = sel.next_vreg;
-                                let neg = sel.next_vreg + 1;
-                                let z = sel.next_vreg + 2;
-                                sel.next_vreg += 3;
-                                sel.ubo.insert(c, Ubo::Fixed(30));
-                                per_pixel_fixed.insert(c);
-                                sel.prog.push(BorgInstr { mnem: "FNEG", dst: neg, srcs: vec![c], swz: vec![0] });
-                                sel.prog.push(BorgInstr { mnem: "FSTEP", dst: z, srcs: vec![neg], swz: vec![0] });
-                                zero_ctl = Some(z);
-                                z
-                            }
-                            }
-                        };
-                        let tex_v = sel.next_vreg;
-                        sel.next_vreg += 1;
-                        sel.prog.push(BorgInstr {
-                            mnem: "TEX", dst: tex_v, srcs: vec![ud, vd, ctl], swz: vec![uc, vc, 0],
-                        });
-                        tex_dsts.insert(tex_v);
-                        sel.vec_map.insert(
-                            tex.def.index,
-                            vec![(tex_v, 0), (tex_v, 1), (tex_v, 2), (tex_v, 3)],
-                        );
-                    }
+                    cx.tex(tex);
                 } else if let Some(lc) = instr.as_load_const() {
-                    let n = lc.def.num_components as usize;
-                    if n == 1 {
-                        consts.insert(lc.def.index, unsafe { lc.values()[0].u32_ });
-                    } else if draw_mode {
-                        // Vector constant (lightDir): a word in the existing
-                        // uniform memory window (u20+, draw_fs_const_offset)
-                        // rather than a pinned GPR. NOT a legacy-style GPR
-                        // pin: legacy's r17-19(+23) sit inside a register-
-                        // pressured draw-mode VERTEX shader's own reachable
-                        // general-pool range (the cp.regs reservation
-                        // comment has the full story -- a hardware-caught
-                        // bug, cube.vert's address-chain LOADs silently
-                        // zeroing cube.frag's lightDir), and r0-4 cannot be
-                        // the fix either (BorgRasterRom's "REGISTER CLOBBER
-                        // ABI" destroys them every pixel). A uniform-memory
-                        // read shares nothing with the GPR file vertex also
-                        // uses, so it cannot collide with vertex at all --
-                        // and unlike a real register spill, it costs no
-                        // extra instructions: the funct3 tag that marks an
-                        // operand as "read from memory" is already free on
-                        // every instruction, not a separate LOAD.
-                        let comps: Vec<(u32, u8)> = (0..n)
-                            .map(|c| {
-                                let bits = unsafe { lc.values()[c].u32_ };
-                                if cp.vs_window {
-                                    return (cp.vs_const(&mut sel, bits, false), 0u8);
-                                }
-                                let idx = fw.slot(bits);
-                                let v = sel.next_vreg;
-                                sel.next_vreg += 1;
-                                sel.ubo.insert(v, Ubo::Uniform(idx as u8));
-                                (v, 0u8)
-                            })
-                            .collect();
-                        sel.vec_map.insert(lc.def.index, comps);
-                    } else {
-                        // Legacy: pin components to constant GPRs (firmware
-                        // writes them once via MMIO).
-                        let comps: Vec<(u32, u8)> = (0..n)
-                            .map(|c| {
-                                let reg = cp.alloc_reg();
-                                let bits = unsafe { lc.values()[c].u32_ };
-                                cp.uniforms.push((reg, bits));
-                                let v = sel.next_vreg;
-                                sel.next_vreg += 1;
-                                sel.ubo.insert(v, Ubo::Fixed(reg));
-                                (v, 0u8)
-                            })
-                            .collect();
-                        sel.vec_map.insert(lc.def.index, comps);
-                    }
+                    cx.load_const(lc);
                 }
             }
         }
     }
-    eprintln!("borgc: selected {} Borg instruction(s) (virtual regs)", sel.prog.len());
+    eprintln!("borgc: selected {} Borg instruction(s) (virtual regs)", cx.sel.prog.len());
     if env::var("BORGC_DUMP_ISA").is_ok() {
-        for i in &sel.prog {
+        for i in &cx.sel.prog {
             let s: Vec<String> = i.srcs.iter().map(|v| format!("v{v}")).collect();
             eprintln!("borgc:   {} v{}, {}", i.mnem, i.dst, s.join(", "));
         }
@@ -1931,7 +1742,7 @@ unsafe fn compile_nir_inner(
     let mut attr_loads = 0u32;
     let mut gl_position: Option<u32> = None;
     let mut varying_outs = 0u32;
-    // (`sel.ubo` is declared above the selection walk so the fragment path can populate it.)
+    // (`cx.sel.ubo` is declared above the selection walk so the fragment path can populate it.)
     // Output roots for DCE: every value a store_output consumes is live.
     let mut out_roots: Vec<u32> = Vec::new();
     // gl_Position component c (x/y/z/w) → the SSA value that produces it. These
@@ -1951,7 +1762,7 @@ unsafe fn compile_nir_inner(
     // with blendEnable.
     let mut frag_out: [Option<u32>; 4] = [None; 4];
     // Legacy-only: draw mode built pos_out/frag_out/out_roots inline in the
-    // main walk above (outs.pos/outs.frag/outs.roots), in program
+    // main walk above (cx.outs.pos/cx.outs.frag/cx.outs.roots), in program
     // order, so a load_output reading back an earlier store_output resolves
     // -- SOUT has no matching load, so that is the only way such a read can
     // ever be answered, which rules out a second, later pass like this one.
@@ -1980,7 +1791,7 @@ unsafe fn compile_nir_inner(
                                     Ubo::Attr
                                 }
                             };
-                            sel.ubo.insert(intr.def.index, kind);
+                            cx.sel.ubo.insert(intr.def.index, kind);
                         }
                         nir_intrinsic_store_output => {
                             let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
@@ -1991,9 +1802,9 @@ unsafe fn compile_nir_inner(
                                 // pin it to r0..r3 (also the DCE roots). Varyings
                                 // (texcoord/frag_pos) are firmware-handled — not rooted.
                                 gl_position = Some(src);
-                                let n = sel.vec_map.get(&src).map_or(1, |v| v.len()).min(4);
+                                let n = cx.sel.vec_map.get(&src).map_or(1, |v| v.len()).min(4);
                                 for c in 0..n {
-                                    let (d, _) = resolve_vm(&sel.vec_map, src, c as u8);
+                                    let (d, _) = resolve_vm(&cx.sel.vec_map, src, c as u8);
                                     pos_out[c] = Some(d);
                                     out_roots.push(d);
                                 }
@@ -2001,9 +1812,9 @@ unsafe fn compile_nir_inner(
                                 // Fragment colour uFragColor (vec4) → r26/27/28 rgb,
                                 // plus r24 alpha when the blend path is in use.
                                 let ncomp = if frag_alpha { 4 } else { 3 };
-                                let n = sel.vec_map.get(&src).map_or(1, |v| v.len()).min(ncomp);
+                                let n = cx.sel.vec_map.get(&src).map_or(1, |v| v.len()).min(ncomp);
                                 for c in 0..n {
-                                    let (d, _) = resolve_vm(&sel.vec_map, src, c as u8);
+                                    let (d, _) = resolve_vm(&cx.sel.vec_map, src, c as u8);
                                     frag_out[c] = Some(d);
                                     out_roots.push(d);
                                 }
@@ -2017,85 +1828,85 @@ unsafe fn compile_nir_inner(
             }
         }
     }
-    // fpow/fge only vanish into the sRGB idiom (FSRGB); any other skipped op is a missing lowering.
-    let srgb = sel.prog.iter().any(|i| i.mnem == "FSRGB");
-    skipped.retain(|&op| !(matches!(op, "fpow" | "fge") && srgb));
-    if !skipped.is_empty() {
-        eprintln!("borgc: ERROR unhandled NIR ops, refusing to emit a wrong shader: {}", skipped.join(", "));
+    // fpow/fge only vanish into the sRGB idiom (FSRGB); any other cx.skipped op is a missing lowering.
+    let srgb = cx.sel.prog.iter().any(|i| i.mnem == "FSRGB");
+    cx.skipped.retain(|&op| !(matches!(op, "fpow" | "fge") && srgb));
+    if !cx.skipped.is_empty() {
+        eprintln!("borgc: ERROR unhandled NIR ops, refusing to emit a wrong shader: {}", cx.skipped.join(", "));
         return 0;
     }
     if draw_mode && is_vertex && flags.point_quads() {
         // Point expansion: this vertex is a corner of the point's quad; the corner's clip-space
         // offset (slot 16: x y, then the point coordinate u v), times gl_PointSize, times w, moves it from the point's centre.
         let ctl_bits = (1u32 << 16) | (128 + 16);
-        assert!(cp.vs_consts.len() < DRAW_VS_CONST_WORDS,
+        assert!(cx.cp.vs_consts.len() < DRAW_VS_CONST_WORDS,
             "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
-        let u = DRAW_VS_CONST_U0 + cp.vs_consts.len() as u8;
-        cp.vs_consts.push((u, ctl_bits));
-        let ctl = sel.next_vreg; sel.next_vreg += 1;
-        sel.ubo.insert(ctl, Ubo::Uniform(u));
-        let idx = sel.next_vreg; sel.next_vreg += 1;
-        sel.ubo.insert(idx, Ubo::Fixed(30));
-        let twelve = cp.vs_const(&mut sel, 12, false);   // shared with the attribute fetches
-        let ty = sel.next_vreg; sel.next_vreg += 1;
-        sel.prog.push(BorgInstr { mnem: "ISRL", dst: ty, srcs: vec![idx, twelve], swz: vec![0, 0] });
-        let hi = sel.next_vreg; sel.next_vreg += 1;
-        sel.prog.push(BorgInstr { mnem: "ISHL", dst: hi, srcs: vec![ty, twelve], swz: vec![0, 0] });
-        let tx = sel.next_vreg; sel.next_vreg += 1;
-        sel.prog.push(BorgInstr { mnem: "ISUB", dst: tx, srcs: vec![idx, hi], swz: vec![0, 0] });
-        let tex_v = sel.next_vreg; sel.next_vreg += 1;
-        sel.prog.push(BorgInstr { mnem: "TEX", dst: tex_v, srcs: vec![tx, ty, ctl], swz: vec![0, 0, 0] });
-        tex_dsts.insert(tex_v);
+        let u = DRAW_VS_CONST_U0 + cx.cp.vs_consts.len() as u8;
+        cx.cp.vs_consts.push((u, ctl_bits));
+        let ctl = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+        cx.sel.ubo.insert(ctl, Ubo::Uniform(u));
+        let idx = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+        cx.sel.ubo.insert(idx, Ubo::Fixed(30));
+        let twelve = cx.cp.vs_const(&mut cx.sel, 12, false);   // shared with the attribute fetches
+        let ty = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+        cx.sel.prog.push(BorgInstr { mnem: "ISRL", dst: ty, srcs: vec![idx, twelve], swz: vec![0, 0] });
+        let hi = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+        cx.sel.prog.push(BorgInstr { mnem: "ISHL", dst: hi, srcs: vec![ty, twelve], swz: vec![0, 0] });
+        let tx = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+        cx.sel.prog.push(BorgInstr { mnem: "ISUB", dst: tx, srcs: vec![idx, hi], swz: vec![0, 0] });
+        let tex_v = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+        cx.sel.prog.push(BorgInstr { mnem: "TEX", dst: tex_v, srcs: vec![tx, ty, ctl], swz: vec![0, 0, 0] });
+        cx.tex_dsts.insert(tex_v);
         let mut d = [0u32; 4];
         for k in 0..4 {
-            let m = sel.next_vreg; sel.next_vreg += 1;
-            sel.prog.push(BorgInstr { mnem: "IOR", dst: m, srcs: vec![tex_v, tex_v], swz: vec![k as u8, k as u8] });
+            let m = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+            cx.sel.prog.push(BorgInstr { mnem: "IOR", dst: m, srcs: vec![tex_v, tex_v], swz: vec![k as u8, k as u8] });
             d[k] = m;
         }
         // gl_PointCoord rides as two more varyings, after the shader's own.
         if flags.pntc_varyings() {
-            let base = sel.prog.iter().filter(|i| i.mnem == "SOUT").map(|i| i.swz[0] as u32 + 1).max().unwrap_or(0);
+            let base = cx.sel.prog.iter().filter(|i| i.mnem == "SOUT").map(|i| i.swz[0] as u32 + 1).max().unwrap_or(0);
             assert!(base + 2 <= 255, "borgc: no varying slot left for the point coordinate");
             for k in 0..2u32 {
-                sel.prog.push(BorgInstr { mnem: "SOUT", dst: NO_DST, srcs: vec![d[2 + k as usize]], swz: vec![(base + k) as u8] });
-                outs.roots.push(d[2 + k as usize]);
+                cx.sel.prog.push(BorgInstr { mnem: "SOUT", dst: NO_DST, srcs: vec![d[2 + k as usize]], swz: vec![(base + k) as u8] });
+                cx.outs.roots.push(d[2 + k as usize]);
             }
         }
-        if let (Some(px), Some(py), Some(pw)) = (outs.pos[0], outs.pos[1], outs.pos[3]) {
-            let w = sel.reg(pw);
-            let size = outs.psize.map(|ps| {
+        if let (Some(px), Some(py), Some(pw)) = (cx.outs.pos[0], cx.outs.pos[1], cx.outs.pos[3]) {
+            let w = cx.sel.reg(pw);
+            let size = cx.outs.psize.map(|ps| {
                 // Clamp to the advertised range [1, 64]: x - c*(x - 64), c = step(x - 64).
-                let x = sel.reg(ps).0;
+                let x = cx.sel.reg(ps).0;
                 // upper: x -= step(x - 64) * (x - 64)
-                let neg_hi = cp.vs_win(&mut sel, (-64.0f32).to_bits());
-                let t = sel.op0("FADD", vec![x, neg_hi]);
-                let c = sel.op0("FSTEP", vec![t]);
-                let ct = sel.op0("FMUL", vec![c, t]);
-                let nct = sel.op0("FNEG", vec![ct]);
-                let x = sel.op0("FADD", vec![x, nct]);
+                let neg_hi = cx.cp.vs_win(&mut cx.sel, (-64.0f32).to_bits());
+                let t = cx.sel.op0("FADD", vec![x, neg_hi]);
+                let c = cx.sel.op0("FSTEP", vec![t]);
+                let ct = cx.sel.op0("FMUL", vec![c, t]);
+                let nct = cx.sel.op0("FNEG", vec![ct]);
+                let x = cx.sel.op0("FADD", vec![x, nct]);
                 // lower: x += step(1 - x) * (1 - x); 1.0 = step(dx * dx), as the window has no word left
-                let dd = sel.op0("FMUL", vec![d[0], d[0]]);
-                let one = sel.op0("FSTEP", vec![dd]);
-                let nx = sel.op0("FNEG", vec![x]);
-                let t2 = sel.op0("FADD", vec![nx, one]);
-                let c2 = sel.op0("FSTEP", vec![t2]);
-                let m2 = sel.op0("FMUL", vec![c2, t2]);
-                let x = sel.op0("FADD", vec![x, m2]);
+                let dd = cx.sel.op0("FMUL", vec![d[0], d[0]]);
+                let one = cx.sel.op0("FSTEP", vec![dd]);
+                let nx = cx.sel.op0("FNEG", vec![x]);
+                let t2 = cx.sel.op0("FADD", vec![nx, one]);
+                let c2 = cx.sel.op0("FSTEP", vec![t2]);
+                let m2 = cx.sel.op0("FMUL", vec![c2, t2]);
+                let x = cx.sel.op0("FADD", vec![x, m2]);
                 (x, 0u8)
             });
             for (k, pc) in [px, py].into_iter().enumerate() {
-                let base = sel.reg(pc);
+                let base = cx.sel.reg(pc);
                 let mut off = d[k];
                 if let Some(sz) = size {
-                    let o = sel.next_vreg; sel.next_vreg += 1;
-                    sel.prog.push(BorgInstr { mnem: "FMUL", dst: o, srcs: vec![off, sz.0], swz: vec![0, sz.1] });
+                    let o = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                    cx.sel.prog.push(BorgInstr { mnem: "FMUL", dst: o, srcs: vec![off, sz.0], swz: vec![0, sz.1] });
                     off = o;
                 }
-                let o = sel.next_vreg; sel.next_vreg += 1;
-                sel.prog.push(BorgInstr { mnem: "FMADD", dst: o, srcs: vec![off, w.0, base.0],
+                let o = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                cx.sel.prog.push(BorgInstr { mnem: "FMADD", dst: o, srcs: vec![off, w.0, base.0],
                                       swz: vec![0, w.1, base.1] });
-                outs.pos[k] = Some((o, 0));
-                outs.roots.push(o);
+                cx.outs.pos[k] = Some((o, 0));
+                cx.outs.roots.push(o);
             }
         }
     }
@@ -2104,43 +1915,43 @@ unsafe fn compile_nir_inner(
         // chosen from the per-attachment values; one the shader never wrote keeps its own (TLD).
         let n = flags.target_count();
         let class = |k: usize| flags.target_class(k);
-        let cff = fw.win(&mut sel, 0xFF);
+        let cff = cx.fw.win(&mut cx.sel, 0xFF);
         // x + 0 in integer arithmetic copies a window word bit for bit (FMOV would flush a denormal).
-        let idx = sel.op0("ATTIDX", vec![]);
-        let zero = sel.op0("ISUB", vec![idx, idx]);
+        let idx = cx.sel.op0("ATTIDX", vec![]);
+        let zero = cx.sel.op0("ISUB", vec![idx, idx]);
         let mut vals: Vec<u32> = Vec::new();
         for k in 0..n {
-            let w = match outs.mrt[k] {
-                None => sel.op0("TLD", vec![]),
+            let w = match cx.outs.mrt[k] {
+                None => cx.sel.op0("TLD", vec![]),
                 Some((x, xc)) => {
-                    let x = if matches!(sel.ubo.get(&x), Some(Ubo::Uniform(_))) {
-                        sel.op0("IADD", vec![x, zero])
+                    let x = if matches!(cx.sel.ubo.get(&x), Some(Ubo::Uniform(_))) {
+                        cx.sel.op0("IADD", vec![x, zero])
                     } else if xc != 0 {
-                        let o = sel.next_vreg; sel.next_vreg += 1;
-                        sel.prog.push(BorgInstr { mnem: "FMOV", dst: o, srcs: vec![x], swz: vec![xc] });
+                        let o = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+                        cx.sel.prog.push(BorgInstr { mnem: "FMOV", dst: o, srcs: vec![x], swz: vec![xc] });
                         o
                     } else { x };
                     match class(k) {
                         1 => {
-                            let c255 = fw.win(&mut sel, 255.0f32.to_bits());
-                            let c05 = fw.win(&mut sel, 0.5f32.to_bits());
-                            let m = sel.op0("FMUL", vec![x, c255]);
-                            let h = sel.op0("FADD", vec![m, c05]);
-                            let i = sel.op0("F2I", vec![h]);
-                            sel.op0("IAND", vec![i, cff])
+                            let c255 = cx.fw.win(&mut cx.sel, 255.0f32.to_bits());
+                            let c05 = cx.fw.win(&mut cx.sel, 0.5f32.to_bits());
+                            let m = cx.sel.op0("FMUL", vec![x, c255]);
+                            let h = cx.sel.op0("FADD", vec![m, c05]);
+                            let i = cx.sel.op0("F2I", vec![h]);
+                            cx.sel.op0("IAND", vec![i, cff])
                         }
                         2 => {
-                            let c127 = fw.win(&mut sel, 127.0f32.to_bits());
-                            let c05 = fw.win(&mut sel, 0.5f32.to_bits());
-                            let t = sel.op0("FMUL", vec![x, c127]);
-                            let s = sel.op0("FSTEP", vec![t]);
-                            let nh = sel.op0("FNEG", vec![c05]);
-                            let hh = sel.op0("FADD", vec![s, nh]);
-                            let u = sel.op0("FADD", vec![t, hh]);
-                            let i = sel.op0("F2I", vec![u]);
-                            sel.op0("IAND", vec![i, cff])
+                            let c127 = cx.fw.win(&mut cx.sel, 127.0f32.to_bits());
+                            let c05 = cx.fw.win(&mut cx.sel, 0.5f32.to_bits());
+                            let t = cx.sel.op0("FMUL", vec![x, c127]);
+                            let s = cx.sel.op0("FSTEP", vec![t]);
+                            let nh = cx.sel.op0("FNEG", vec![c05]);
+                            let hh = cx.sel.op0("FADD", vec![s, nh]);
+                            let u = cx.sel.op0("FADD", vec![t, hh]);
+                            let i = cx.sel.op0("F2I", vec![u]);
+                            cx.sel.op0("IAND", vec![i, cff])
                         }
-                        _ => sel.op0("IAND", vec![x, cff]),
+                        _ => cx.sel.op0("IAND", vec![x, cff]),
                     }
                 }
             };
@@ -2148,41 +1959,41 @@ unsafe fn compile_nir_inner(
         }
         let mut acc = vals[0];
         if n > 1 {
-            let one_u = fw.win(&mut sel, 1);
-            let one = sel.op0("IADD", vec![one_u, zero]);
+            let one_u = cx.fw.win(&mut cx.sel, 1);
+            let one = cx.sel.op0("IADD", vec![one_u, zero]);
             let mut kreg = one;
             for k in 1..n {
-                if k == 2 { kreg = sel.op0("IADD", vec![one, one]); }
-                if k == 3 { kreg = sel.op0("IADD", vec![kreg, one]); }
-                let hit = sel.op0("ISEQ", vec![idx, kreg]);
-                let diff = sel.op0("ISUB", vec![vals[k], acc]);
-                let prod = sel.op0("IMUL", vec![hit, diff]);
-                acc = sel.op0("IADD", vec![acc, prod]);
+                if k == 2 { kreg = cx.sel.op0("IADD", vec![one, one]); }
+                if k == 3 { kreg = cx.sel.op0("IADD", vec![kreg, one]); }
+                let hit = cx.sel.op0("ISEQ", vec![idx, kreg]);
+                let diff = cx.sel.op0("ISUB", vec![vals[k], acc]);
+                let term = cx.sel.op0("IMUL", vec![hit, diff]);
+                acc = cx.sel.op0("IADD", vec![acc, term]);
             }
         }
-        outs.frag = [Some((acc, 0)), None, None, None];
+        cx.outs.frag = [Some((acc, 0)), None, None, None];
         out_roots.push(acc);
     }
-    if draw_mode && is_fragment && flags.r8_unorm() && outs.frag[0].is_some() {
+    if draw_mode && is_fragment && flags.r8_unorm() && cx.outs.frag[0].is_some() {
         // R8_UNORM (RAW8): r26 = round(r * 255) & 0xFF.
-        let c255 = fw.win(&mut sel, 255.0f32.to_bits());
-        let c05 = fw.win(&mut sel, 0.5f32.to_bits());
-        let cff = fw.win(&mut sel, 0xFF);
-        let (x, xc) = outs.frag[0].unwrap();
-        let x = if matches!(sel.ubo.get(&x), Some(Ubo::Uniform(_))) {
-            let o = sel.next_vreg; sel.next_vreg += 1;
-            sel.prog.push(BorgInstr { mnem: "FMOV", dst: o, srcs: vec![x], swz: vec![xc] });
+        let c255 = cx.fw.win(&mut cx.sel, 255.0f32.to_bits());
+        let c05 = cx.fw.win(&mut cx.sel, 0.5f32.to_bits());
+        let cff = cx.fw.win(&mut cx.sel, 0xFF);
+        let (x, xc) = cx.outs.frag[0].unwrap();
+        let x = if matches!(cx.sel.ubo.get(&x), Some(Ubo::Uniform(_))) {
+            let o = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+            cx.sel.prog.push(BorgInstr { mnem: "FMOV", dst: o, srcs: vec![x], swz: vec![xc] });
             o
         } else { x };
-        let xc = if x == outs.frag[0].unwrap().0 { xc } else { 0 };
-        let m = sel.op("FMUL", vec![x, c255], vec![xc, 0]);
-        let h = sel.op("FADD", vec![m, c05], vec![0, 0]);
-        let i = sel.op("F2I", vec![h], vec![0]);
-        let w = sel.op("IAND", vec![i, cff], vec![0, 0]);
-        outs.frag = [Some((w, 0)), None, None, None];
+        let xc = if x == cx.outs.frag[0].unwrap().0 { xc } else { 0 };
+        let m = cx.sel.op("FMUL", vec![x, c255], vec![xc, 0]);
+        let h = cx.sel.op("FADD", vec![m, c05], vec![0, 0]);
+        let i = cx.sel.op("F2I", vec![h], vec![0]);
+        let w = cx.sel.op("IAND", vec![i, cff], vec![0, 0]);
+        cx.outs.frag = [Some((w, 0)), None, None, None];
         out_roots.push(w);
     }
-    if draw_mode && is_fragment && flags.packed() && !flags.multi_target() && outs.frag[0].is_some() {
+    if draw_mode && is_fragment && flags.packed() && !flags.multi_target() && cx.outs.frag[0].is_some() {
         // Packed colour (RAW8 .. RAW128): n channels of 8, 16 or 32 bits, kind 0 UNORM, 1 SNORM, 2 SRGB, 3 the
         // bits as they are; `swap` reads the components as B, G, R. Channel k fills bits k*size of the texel:
         // word w of the texel is r26 (w = 0), r27 (w = 1); a RAW128 texel renders in two slices of two words.
@@ -2190,46 +2001,46 @@ unsafe fn compile_nir_inner(
         let total_bits = layout.iter().map(|&(_, sh, b)| sh + b).max().unwrap_or(0);
         let mut words: [Option<u32>; 4] = [None; 4];
         for &(comp, bitpos, bits) in layout.iter() {
-            let Some((x, xc)) = outs.frag[comp] else { continue };
-            let mask = if bits < 32 && (kind == 1 || kind == 3) { Some(fw.win(&mut sel, (1u32 << bits) - 1)) } else { None };
-            let (x, xc) = if matches!(sel.ubo.get(&x), Some(Ubo::Uniform(_))) {
-                (sel.op("FMOV", vec![x], vec![xc]), 0)
+            let Some((x, xc)) = cx.outs.frag[comp] else { continue };
+            let mask = if bits < 32 && (kind == 1 || kind == 3) { Some(cx.fw.win(&mut cx.sel, (1u32 << bits) - 1)) } else { None };
+            let (x, xc) = if matches!(cx.sel.ubo.get(&x), Some(Ubo::Uniform(_))) {
+                (cx.sel.op("FMOV", vec![x], vec![xc]), 0)
             } else { (x, xc) };
             let (x, xc) = if kind == 2 && comp != 3 {
-                (sel.op("FSRGB", vec![x], vec![xc]), 0)
+                (cx.sel.op("FSRGB", vec![x], vec![xc]), 0)
             } else { (x, xc) };
             let q = match kind {
                 0 | 2 => {
-                    let cmax = fw.win(&mut sel, ((1u32 << bits) as f32 - 1.0).to_bits());
-                    let c05 = fw.win(&mut sel, 0.5f32.to_bits());
-                    let m = sel.op("FMUL", vec![x, cmax], vec![xc, 0]);
-                    let h = sel.op("FADD", vec![m, c05], vec![0, 0]);
-                    sel.op("F2I", vec![h], vec![0])
+                    let cmax = cx.fw.win(&mut cx.sel, ((1u32 << bits) as f32 - 1.0).to_bits());
+                    let c05 = cx.fw.win(&mut cx.sel, 0.5f32.to_bits());
+                    let m = cx.sel.op("FMUL", vec![x, cmax], vec![xc, 0]);
+                    let h = cx.sel.op("FADD", vec![m, c05], vec![0, 0]);
+                    cx.sel.op("F2I", vec![h], vec![0])
                 }
                 1 => {
-                    let cmax = fw.win(&mut sel, (((1u32 << (bits - 1)) - 1) as f32).to_bits());
-                    let c05 = fw.win(&mut sel, 0.5f32.to_bits());
-                    let t = sel.op("FMUL", vec![x, cmax], vec![xc, 0]);
-                    let st = sel.op("FSTEP", vec![t], vec![0]);
-                    let nh = sel.op("FNEG", vec![c05], vec![0]);
-                    let hh = sel.op("FADD", vec![st, nh], vec![0, 0]);
-                    let u = sel.op("FADD", vec![t, hh], vec![0, 0]);
-                    let i = sel.op("F2I", vec![u], vec![0]);
-                    sel.op("IAND", vec![i, mask.unwrap()], vec![0, 0])
+                    let cmax = cx.fw.win(&mut cx.sel, (((1u32 << (bits - 1)) - 1) as f32).to_bits());
+                    let c05 = cx.fw.win(&mut cx.sel, 0.5f32.to_bits());
+                    let t = cx.sel.op("FMUL", vec![x, cmax], vec![xc, 0]);
+                    let st = cx.sel.op("FSTEP", vec![t], vec![0]);
+                    let nh = cx.sel.op("FNEG", vec![c05], vec![0]);
+                    let hh = cx.sel.op("FADD", vec![st, nh], vec![0, 0]);
+                    let u = cx.sel.op("FADD", vec![t, hh], vec![0, 0]);
+                    let i = cx.sel.op("F2I", vec![u], vec![0]);
+                    cx.sel.op("IAND", vec![i, mask.unwrap()], vec![0, 0])
                 }
                 _ => match mask {
-                    Some(m) => sel.op("IAND", vec![x, m], vec![xc, 0]),
-                    None => sel.op("IOR", vec![x, x], vec![xc, xc]),
+                    Some(m) => cx.sel.op("IAND", vec![x, m], vec![xc, 0]),
+                    None => cx.sel.op("IOR", vec![x, x], vec![xc, xc]),
                 },
             };
             let (wi, sh) = ((bitpos / 32) as usize, bitpos % 32);
             let q = if sh == 0 { q } else {
-                let shv = fw.win(&mut sel, sh);
-                sel.op("ISHL", vec![q, shv], vec![0, 0])
+                let shv = cx.fw.win(&mut cx.sel, sh);
+                cx.sel.op("ISHL", vec![q, shv], vec![0, 0])
             };
             words[wi] = Some(match words[wi] {
                 None => q,
-                Some(a) => sel.op("IOR", vec![a, q], vec![0, 0]),
+                Some(a) => cx.sel.op("IOR", vec![a, q], vec![0, 0]),
             });
         }
         let nwords = (total_bits + 31) / 32;
@@ -2240,47 +2051,47 @@ unsafe fn compile_nir_inner(
             }
         } else {
             // RAW128: the slice this pass renders (ATTIDX / 4) picks words 0-1 or 2-3.
-            let idx = sel.op0("ATTIDX", vec![]);
-            let zero = sel.op0("ISUB", vec![idx, idx]);
-            let four_w = fw.win(&mut sel, 4);
-            let four = sel.op0("IADD", vec![four_w, zero]);
-            let hit = sel.op0("ISEQ", vec![idx, four]);
+            let idx = cx.sel.op0("ATTIDX", vec![]);
+            let zero = cx.sel.op0("ISUB", vec![idx, idx]);
+            let four_w = cx.fw.win(&mut cx.sel, 4);
+            let four = cx.sel.op0("IADD", vec![four_w, zero]);
+            let hit = cx.sel.op0("ISEQ", vec![idx, four]);
             for w in 0..2 {
                 let lo = words[w].unwrap_or(zero);
                 let hi = words[w + 2].unwrap_or(zero);
-                let d = sel.op0("ISUB", vec![hi, lo]);
-                let m = sel.op0("IMUL", vec![hit, d]);
-                out[w] = Some((sel.op0("IADD", vec![lo, m]), 0u8));
+                let d = cx.sel.op0("ISUB", vec![hi, lo]);
+                let m = cx.sel.op0("IMUL", vec![hit, d]);
+                out[w] = Some((cx.sel.op0("IADD", vec![lo, m]), 0u8));
             }
         }
         for o in out.iter().flatten() {
             out_roots.push(o.0);
         }
-        outs.frag = out;
+        cx.outs.frag = out;
     }
-    if draw_mode && is_fragment && flags.half() && outs.frag[0].is_some() {
+    if draw_mode && is_fragment && flags.half() && cx.outs.frag[0].is_some() {
         // R16G16_SFLOAT (RAW32; with bit 0x20 R16_SFLOAT, RAW16): r26 = half(r) | half(g) << 16 with integer ops (round to nearest even,
         // NaN to 0x7E00); a branch-free select between the denormal, normal and overflow results.
         macro_rules! i {
-            ($m:expr, $a:expr, $b:expr) => { sel.opc($m, &[($a, 0u8), ($b, 0u8)]) };
-            ($m:expr, $a:expr) => { sel.opc($m, &[($a, 0u8)]) };
+            ($m:expr, $a:expr, $b:expr) => { cx.sel.opc($m, &[($a, 0u8), ($b, 0u8)]) };
+            ($m:expr, $a:expr) => { cx.sel.opc($m, &[($a, 0u8)]) };
         }
         macro_rules! k {
-            ($b:expr) => { fw.win(&mut sel, $b) };
+            ($b:expr) => { cx.fw.win(&mut cx.sel, $b) };
         }
-        let (x0, x0c) = outs.frag[0].unwrap();
-        let first = if matches!(sel.ubo.get(&x0), Some(Ubo::Uniform(_))) {
-            (sel.opc("FMOV", &[(x0, x0c)]), 0u8)
+        let (x0, x0c) = cx.outs.frag[0].unwrap();
+        let first = if matches!(cx.sel.ubo.get(&x0), Some(Ubo::Uniform(_))) {
+            (cx.sel.opc("FMOV", &[(x0, x0c)]), 0u8)
         } else { (x0, x0c) };
-        let zero = sel.opc("ISUB", &[first, first]);
+        let zero = cx.sel.opc("ISUB", &[first, first]);
         let nch = flags.half_channels();
         // The small integers are constants like the rest: a register each for the whole block
         // was more than a blending shader has (the pool pass keeps the busiest in the window).
         let mut pw: [Option<u32>; 2] = [None; 2];
         for n in 0..nch {
-            let src = if n == 0 { Some((x0, x0c)) } else { outs.frag[n] };
+            let src = if n == 0 { Some((x0, x0c)) } else { cx.outs.frag[n] };
             let Some((x, xc)) = src else { continue };
-            let xr = sel.opc("IADD", &[(x, xc), (zero, 0)]);
+            let xr = cx.sel.opc("IADD", &[(x, xc), (zero, 0)]);
             // The sign first, so the input register is free early; 0x8000 and 0x200 are built here.
             let c = k!(16);
             let s16 = i!("ISRL", xr, c);
@@ -2323,35 +2134,35 @@ unsafe fn compile_nir_inner(
             let h = if n & 1 == 0 { h } else { let c = k!(16); i!("ISHL", h, c) };
             pw[n / 2] = Some(match pw[n / 2] { None => h, Some(a) => i!("IOR", a, h) });
         }
-        outs.frag = [pw[0].map(|p| (p, 0)), pw[1].map(|p| (p, 0)), None, None];
+        cx.outs.frag = [pw[0].map(|p| (p, 0)), pw[1].map(|p| (p, 0)), None, None];
         for p in pw.iter().flatten() {
             out_roots.push(*p);
         }
     }
-    if draw_mode && is_fragment && flags.bytes_packed() && outs.frag[3].is_some() {
+    if draw_mode && is_fragment && flags.bytes_packed() && cx.outs.frag[3].is_some() {
         // Byte-packed integer colour (R8G8B8A8_UINT/SINT, RAW32): r26 = c0 | c1<<8 | c2<<16 | c3<<24.
-        let (mut p, mut pc) = outs.frag[3].unwrap();
-        let eight = fw.slot(8);
-        let sh = sel.next_vreg;
-        sel.next_vreg += 1;
-        sel.ubo.insert(sh, Ubo::Uniform(eight as u8));
+        let (mut p, mut pc) = cx.outs.frag[3].unwrap();
+        let eight = cx.fw.slot(8);
+        let sh = cx.sel.next_vreg;
+        cx.sel.next_vreg += 1;
+        cx.sel.ubo.insert(sh, Ubo::Uniform(eight as u8));
         for c in (0..3).rev() {
             {
-                let d = sel.next_vreg;
-                sel.next_vreg += 1;
-                sel.prog.push(BorgInstr { mnem: "ISHL", dst: d, srcs: vec![p, sh], swz: vec![pc, 0] });
+                let d = cx.sel.next_vreg;
+                cx.sel.next_vreg += 1;
+                cx.sel.prog.push(BorgInstr { mnem: "ISHL", dst: d, srcs: vec![p, sh], swz: vec![pc, 0] });
                 p = d;
                 pc = 0;
             }
-            if let Some((v, comp)) = outs.frag[c] {
-                let d = sel.next_vreg;
-                sel.next_vreg += 1;
-                sel.prog.push(BorgInstr { mnem: "IOR", dst: d, srcs: vec![p, v], swz: vec![pc, comp] });
+            if let Some((v, comp)) = cx.outs.frag[c] {
+                let d = cx.sel.next_vreg;
+                cx.sel.next_vreg += 1;
+                cx.sel.prog.push(BorgInstr { mnem: "IOR", dst: d, srcs: vec![p, v], swz: vec![pc, comp] });
                 p = d;
                 pc = 0;
             }
         }
-        outs.frag = [Some((p, pc)), None, None, None];
+        cx.outs.frag = [Some((p, pc)), None, None, None];
         out_roots.push(p);
     }
     if draw_mode {
@@ -2360,36 +2171,36 @@ unsafe fn compile_nir_inner(
         // (rs1 may be a uniform).
         if is_fragment {
             for c in 0..4 {
-                let Some((v, comp)) = outs.frag[c] else { continue };
+                let Some((v, comp)) = cx.outs.frag[c] else { continue };
                 // A TEX result block (r20-r23) or FATTR block is not the output register: copy that too.
-                if sel.prog.iter().any(|i| i.dst == v) && !tex_dsts.contains(&v) && !fattr_dsts.contains(&v) {
+                if cx.sel.prog.iter().any(|i| i.dst == v) && !cx.tex_dsts.contains(&v) && !cx.fattr_dsts.contains(&v) {
                     continue;
                 }
-                let out = sel.next_vreg;
-                sel.next_vreg += 1;
+                let out = cx.sel.next_vreg;
+                cx.sel.next_vreg += 1;
                 // A register is copied bit for bit (IOR): FMOV turns an integer that looks like a NaN into 0x7FC00000.
-                if tex_dsts.contains(&v) || fattr_dsts.contains(&v) {
-                    sel.prog.push(BorgInstr { mnem: "IOR", dst: out, srcs: vec![v, v], swz: vec![comp, comp] });
+                if cx.tex_dsts.contains(&v) || cx.fattr_dsts.contains(&v) {
+                    cx.sel.prog.push(BorgInstr { mnem: "IOR", dst: out, srcs: vec![v, v], swz: vec![comp, comp] });
                 } else {
-                    sel.prog.push(BorgInstr { mnem: "FMOV", dst: out, srcs: vec![v], swz: vec![comp] });
+                    cx.sel.prog.push(BorgInstr { mnem: "FMOV", dst: out, srcs: vec![v], swz: vec![comp] });
                 }
-                outs.frag[c] = Some((out, 0));
+                cx.outs.frag[c] = Some((out, 0));
                 out_roots.push(out);
             }
         }
-        for (c, v) in outs.pos.iter().enumerate() {
+        for (c, v) in cx.outs.pos.iter().enumerate() {
             pos_out[c] = v.map(|(d, _)| d);
         }
-        for (c, v) in outs.frag.iter().enumerate() {
+        for (c, v) in cx.outs.frag.iter().enumerate() {
             frag_out[c] = v.map(|(d, _)| d);
         }
-        out_roots.extend(outs.roots.iter().copied());
+        out_roots.extend(cx.outs.roots.iter().copied());
         eprintln!(
             "borgc: draw-mode I/O map — {} vertex-pulling/MVP load(s), {} SOUT(s), \
              gl_Position={}",
-            descriptor_defs.len(), // proxy: one load_ubo per descriptor use
-            outs.stores.len(),
-            outs.pos[0].is_some(),
+            cx.descriptor_defs.len(), // proxy: one load_ubo per descriptor use
+            cx.outs.stores.len(),
+            cx.outs.pos[0].is_some(),
         );
     } else {
         eprintln!(
@@ -2403,27 +2214,27 @@ unsafe fn compile_nir_inner(
     // the tile-buffer depth test needs r29 = interpolated z. z is staged per-vertex
     // at u28-30 ((v2,v1,v0) → v0=u30); emit w0·u30 + w1·u29 + w2·u28 → r29.
     // Draw mode: r29 is FragCoord.z already, from the raster ROM
-    // (docs/B1_geometry_front_end.md) -- weights stays None (only the legacy
+    // (docs/B1_geometry_front_end.md) -- cx.weights stays None (only the legacy
     // load_input path populates it), so this never fires there, correctly:
     // the fragment shader not writing r29 IS draw mode's depth output.
     let mut frag_z: Option<u32> = None;
     if is_fragment {
-        if let Some(w) = weights {
+        if let Some(w) = cx.weights {
             let uz: Vec<u32> = [30u8, 29, 28]
                 .iter()
                 .map(|&idx| {
-                    let v = sel.next_vreg;
-                    sel.next_vreg += 1;
-                    sel.ubo.insert(v, Ubo::Uniform(idx));
+                    let v = cx.sel.next_vreg;
+                    cx.sel.next_vreg += 1;
+                    cx.sel.ubo.insert(v, Ubo::Uniform(idx));
                     v
                 })
                 .collect();
-            let t0 = sel.next_vreg; sel.next_vreg += 1;
-            sel.prog.push(BorgInstr { mnem: "FMUL", dst: t0, srcs: vec![w[0], uz[0]], swz: vec![0, 0] });
-            let t1 = sel.next_vreg; sel.next_vreg += 1;
-            sel.prog.push(BorgInstr { mnem: "FMADD", dst: t1, srcs: vec![w[1], uz[1], t0], swz: vec![0, 0, 0] });
-            let zr = sel.next_vreg; sel.next_vreg += 1;
-            sel.prog.push(BorgInstr { mnem: "FMADD", dst: zr, srcs: vec![w[2], uz[2], t1], swz: vec![0, 0, 0] });
+            let t0 = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+            cx.sel.prog.push(BorgInstr { mnem: "FMUL", dst: t0, srcs: vec![w[0], uz[0]], swz: vec![0, 0] });
+            let t1 = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+            cx.sel.prog.push(BorgInstr { mnem: "FMADD", dst: t1, srcs: vec![w[1], uz[1], t0], swz: vec![0, 0, 0] });
+            let zr = cx.sel.next_vreg; cx.sel.next_vreg += 1;
+            cx.sel.prog.push(BorgInstr { mnem: "FMADD", dst: zr, srcs: vec![w[2], uz[2], t1], swz: vec![0, 0, 0] });
             out_roots.push(zr);
             frag_z = Some(zr);
         }
@@ -2435,54 +2246,54 @@ unsafe fn compile_nir_inner(
     // and the 1 the index steps by.
     #[allow(static_mut_refs)]
     unsafe { LAST_FRAG_POOL.clear(); }
-    if draw_mode && is_fragment && fw.count > 11 {
+    if draw_mode && is_fragment && cx.fw.count > 11 {
         let first_pool = 20 + 9;
         // The window keeps the nine constants read most often: a window word costs no register.
         {
             let mut uses: HashMap<u32, usize> = HashMap::new();
-            for i in sel.prog.iter() {
+            for i in cx.sel.prog.iter() {
                 for s in i.srcs.iter() {
-                    if let Some(&Ubo::Uniform(u)) = sel.ubo.get(s) {
+                    if let Some(&Ubo::Uniform(u)) = cx.sel.ubo.get(s) {
                         if u >= 20 {
                             *uses.entry(u as u32).or_insert(0) += 1;
                         }
                     }
                 }
             }
-            let mut by_use: Vec<(u32, u32)> = fw.consts.clone();
+            let mut by_use: Vec<(u32, u32)> = cx.fw.consts.clone();
             by_use.sort_by_key(|&(u, _)| (std::cmp::Reverse(uses.get(&u).copied().unwrap_or(0)), u));
             let renum: HashMap<u32, u32> = by_use.iter().enumerate().map(|(k, &(u, _))| (u, 20 + k as u32)).collect();
-            for (_, m) in sel.ubo.iter_mut() {
+            for (_, m) in cx.sel.ubo.iter_mut() {
                 if let Ubo::Uniform(u) = m {
                     if let Some(&n) = renum.get(&(*u as u32)) {
                         *u = n as u8;
                     }
                 }
             }
-            fw.consts = by_use.iter().map(|&(u, bits)| (renum[&u], bits)).collect();
+            cx.fw.consts = by_use.iter().map(|&(u, bits)| (renum[&u], bits)).collect();
         }
-        let mut pool: Vec<u32> = vec![0; (20 + fw.count - first_pool) as usize];
-        for &(u, bits) in fw.consts.iter() {
+        let mut pool: Vec<u32> = vec![0; (20 + cx.fw.count - first_pool) as usize];
+        for &(u, bits) in cx.fw.consts.iter() {
             if u >= first_pool {
                 pool[(u - first_pool) as usize] = bits;
             }
         }
-        fw.consts.retain(|&(u, _)| u < first_pool);
-        fw.consts.push((first_pool, (1 << 16) | (128 + FRAG_POOL_SLOT)));
-        fw.consts.push((first_pool + 1, 1));
+        cx.fw.consts.retain(|&(u, _)| u < first_pool);
+        cx.fw.consts.push((first_pool, (1 << 16) | (128 + FRAG_POOL_SLOT)));
+        cx.fw.consts.push((first_pool + 1, 1));
         let mut fresh = |ubo: &mut HashMap<u32, Ubo>, u: Option<Ubo>| {
-            let v = sel.next_vreg;
-            sel.next_vreg += 1;
+            let v = cx.sel.next_vreg;
+            cx.sel.next_vreg += 1;
             if let Some(u) = u {
                 ubo.insert(v, u);
             }
             v
         };
-        let ctl = fresh(&mut sel.ubo, Some(Ubo::Uniform(first_pool as u8)));
-        let one = fresh(&mut sel.ubo, Some(Ubo::Uniform(first_pool as u8 + 1)));
-        let f = fresh(&mut sel.ubo, Some(Ubo::Fixed(30)));
-        per_pixel_fixed.insert(f);
-        let zero = fresh(&mut sel.ubo, None);
+        let ctl = fresh(&mut cx.sel.ubo, Some(Ubo::Uniform(first_pool as u8)));
+        let one = fresh(&mut cx.sel.ubo, Some(Ubo::Uniform(first_pool as u8 + 1)));
+        let f = fresh(&mut cx.sel.ubo, Some(Ubo::Fixed(30)));
+        cx.per_pixel_fixed.insert(f);
+        let zero = fresh(&mut cx.sel.ubo, None);
         // A group of four is fetched just before its first use, so a constant holds a register
         // only while it is needed: the pool is ordered by first use.
         let is_pool = |v: &u32, ubo: &HashMap<u32, Ubo>| match ubo.get(v) {
@@ -2490,9 +2301,9 @@ unsafe fn compile_nir_inner(
             _ => None,
         };
         let mut first_use: Vec<Option<usize>> = vec![None; pool.len()];
-        for (at, i) in sel.prog.iter().enumerate() {
+        for (at, i) in cx.sel.prog.iter().enumerate() {
             for s in i.srcs.iter() {
-                if let Some(k) = is_pool(s, &sel.ubo) {
+                if let Some(k) = is_pool(s, &cx.sel.ubo) {
                     first_use[k as usize].get_or_insert(at);
                 }
             }
@@ -2511,16 +2322,16 @@ unsafe fn compile_nir_inner(
         let ngroups = (pool.len() + 3) / 4;
         let mut last: Vec<Option<usize>> = vec![None; ngroups];
         let mut events: Vec<(usize, usize)> = Vec::new();   // (before instruction, group)
-        for (at, i) in sel.prog.iter().enumerate() {
+        for (at, i) in cx.sel.prog.iter().enumerate() {
             for s in i.srcs.iter() {
-                let Some(k) = is_pool(s, &sel.ubo) else { continue };
+                let Some(k) = is_pool(s, &cx.sel.ubo) else { continue };
                 let g = slot_of[k as usize] / 4;
                 if last[g].map_or(true, |l| at - l > GAP) {
                     let mut p = at;
                     loop {
-                        let Some(t) = (0..p).rev().find(|&t| sel.prog[t].mnem == "TEX") else { break };
-                        let d = sel.prog[t].dst;
-                        if sel.prog[p..].iter().any(|i| i.srcs.contains(&d)) { p = t; } else { break; }
+                        let Some(t) = (0..p).rev().find(|&t| cx.sel.prog[t].mnem == "TEX") else { break };
+                        let d = cx.sel.prog[t].dst;
+                        if cx.sel.prog[p..].iter().any(|i| i.srcs.contains(&d)) { p = t; } else { break; }
                     }
                     events.push((p, g));
                 }
@@ -2531,41 +2342,41 @@ unsafe fn compile_nir_inner(
         let mut cur: Vec<[u32; 4]> = vec![[0; 4]; ngroups];
         let mut out: Vec<BorgInstr> = vec![BorgInstr { mnem: "ISUB", dst: zero, srcs: vec![f, f], swz: vec![0, 0] }];
         let mut e = 0;
-        for (at, mut i) in std::mem::take(&mut sel.prog).into_iter().enumerate() {
+        for (at, mut i) in std::mem::take(&mut cx.sel.prog).into_iter().enumerate() {
             while e < events.len() && events[e].0 == at {
                 let g = events[e].1;
                 let mut idx = zero;
                 for _ in 0..g {
-                    let n = fresh(&mut sel.ubo, None);
+                    let n = fresh(&mut cx.sel.ubo, None);
                     out.push(BorgInstr { mnem: "IADD", dst: n, srcs: vec![idx, one], swz: vec![0, 0] });
                     idx = n;
                 }
-                let t = fresh(&mut sel.ubo, None);
+                let t = fresh(&mut cx.sel.ubo, None);
                 out.push(BorgInstr { mnem: "TEX", dst: t, srcs: vec![idx, zero, ctl], swz: vec![0, 0, 0] });
-                tex_dsts.insert(t);
+                cx.tex_dsts.insert(t);
                 for c in 0..4u8 {
-                    let r = fresh(&mut sel.ubo, None);
+                    let r = fresh(&mut cx.sel.ubo, None);
                     out.push(BorgInstr { mnem: "IOR", dst: r, srcs: vec![t, t], swz: vec![c, c] });
                     cur[g][c as usize] = r;
                 }
                 e += 1;
             }
             for s in i.srcs.iter_mut() {
-                if let Some(k) = is_pool(s, &sel.ubo) {
+                if let Some(k) = is_pool(s, &cx.sel.ubo) {
                     let slot = slot_of[k as usize];
                     *s = cur[slot / 4][slot % 4];
                 }
             }
             out.push(i);
         }
-        sel.prog = out;
+        cx.sel.prog = out;
         eprintln!("borgc: constant pool of {} word(s)", pool.len());
         #[allow(static_mut_refs)]
         unsafe { LAST_FRAG_POOL = pool; }
     }
-    dce(&mut sel.prog, &out_roots);
-    fuse_fmadd(&mut sel.prog, &out_roots, &|v| {
-        matches!(sel.ubo.get(&v), Some(Ubo::Mvp(_)) | Some(Ubo::Uniform(_)) | Some(Ubo::Attr))
+    dce(&mut cx.sel.prog, &out_roots);
+    fuse_fmadd(&mut cx.sel.prog, &out_roots, &|v| {
+        matches!(cx.sel.ubo.get(&v), Some(Ubo::Mvp(_)) | Some(Ubo::Uniform(_)) | Some(Ubo::Attr))
     });
     // draw_mode only: legacy's register assignment is checked into
     // shader_blobs.h and must stay byte-identical (docs/B1's own
@@ -2573,7 +2384,7 @@ unsafe fn compile_nir_inner(
     // provably equivalent schedule, changes the checked-in blob for no
     // reason legacy needs.
     if draw_mode {
-        schedule_for_pressure(&mut sel.prog, &out_roots);
+        schedule_for_pressure(&mut cx.sel.prog, &out_roots);
     }
 
     // Uniformity classification (fragment shaders only — vertex/setup shaders
@@ -2584,23 +2395,23 @@ unsafe fn compile_nir_inner(
     // See opt::classify_uniform for the propagation rule and why DDX/DDY are
     // unconditional roots on this architecture.
     if is_fragment {
-        let uniform_roots: std::collections::HashSet<u32> = sel.ubo
+        let uniform_roots: std::collections::HashSet<u32> = cx.sel.ubo
             .iter()
             .filter_map(|(&v, u)| match u {
                 Ubo::Uniform(_) => Some(v),
-                Ubo::Fixed(_) if !per_pixel_fixed.contains(&v) => Some(v),
+                Ubo::Fixed(_) if !cx.per_pixel_fixed.contains(&v) => Some(v),
                 _ => None,
             })
             .collect();
-        let uniform = classify_uniform(&sel.prog, &uniform_roots);
+        let uniform = classify_uniform(&cx.sel.prog, &uniform_roots);
         if env::var("BORGC_DUMP_ISA").is_ok() {
-            let n_uniform = sel.prog.iter().filter(|i| uniform.contains(&i.dst)).count();
+            let n_uniform = cx.sel.prog.iter().filter(|i| uniform.contains(&i.dst)).count();
             eprintln!(
                 "borgc: uniformity — {} of {} instr(s) are primitive-uniform (hoistable)",
                 n_uniform,
-                sel.prog.len()
+                cx.sel.prog.len()
             );
-            for i in &sel.prog {
+            for i in &cx.sel.prog {
                 if uniform.contains(&i.dst) {
                     let s: Vec<String> = i.srcs.iter().map(|v| format!("v{v}")).collect();
                     eprintln!("borgc:   [uniform] {} v{}, {}", i.mnem, i.dst, s.join(", "));
@@ -2629,13 +2440,13 @@ unsafe fn compile_nir_inner(
             extra_reserved.push(4);
         }
         // A typed vertex fetch (TEX) writes rd..rd+3: one block, r20..r23, for all of them.
-        for &t in &tex_dsts {
+        for &t in &cx.tex_dsts {
             forced.insert(t, 20);
         }
-        if !tex_dsts.is_empty() {
+        if !cx.tex_dsts.is_empty() {
             extra_reserved.extend_from_slice(&[21, 22, 23]);
         }
-        // Only the cp.regs prefix actually pinned (cp.count) --
+        // Only the cx.cp.regs prefix actually pinned (cx.cp.count) --
         // reserving the whole 12-register pool regardless of use starved the
         // general ALU pool for a shader that only pins a few (a 4x4 matmul
         // alone needs more than 30-17 live registers at once, spilling to
@@ -2644,7 +2455,7 @@ unsafe fn compile_nir_inner(
         // hand one of them to an ordinary ALU temporary, clobbering a pinned
         // LOAD-address constant -- latent since no vertex shader pinned any
         // before draw mode's LOADs.
-        extra_reserved.extend_from_slice(&cp.regs[..cp.count]);
+        extra_reserved.extend_from_slice(&cx.cp.regs[..cx.cp.count]);
     } else {
         // Fragment: colour → r26/27/28; edge-function attrs occupy r0/r1/r2; the
         // TEX result occupies a fixed 4-reg block r20..r23.
@@ -2655,7 +2466,7 @@ unsafe fn compile_nir_inner(
                 forced.insert(*def, if c == 3 { 24 } else { 26 + c as u8 });
             }
         }
-        for &t in &tex_dsts {
+        for &t in &cx.tex_dsts {
             forced.insert(t, 20);
         }
         // FATTR's rd..rd+2 block, pinned to r10 -- matching the hand-written
@@ -2663,7 +2474,7 @@ unsafe fn compile_nir_inner(
         // BorgDrawTests.scala's fs), so every load_input call reuses the
         // same 3-register slot rather than leaving it to the general pool
         // (which has no idea the hardware write spans 3 registers).
-        for &f in &fattr_dsts {
+        for &f in &cx.fattr_dsts {
             forced.insert(f, 10);
         }
         if let Some(zr) = frag_z {
@@ -2687,7 +2498,7 @@ unsafe fn compile_nir_inner(
             // the free pool via `forced`; listed again here for clarity,
             // not because it changes anything.
             extra_reserved.extend_from_slice(&[5, 6, 7, 10, 11, 12]);
-            if frag_coord_w {
+            if cx.frag_coord_w {
                 extra_reserved.push(8);
             }
         } else {
@@ -2697,8 +2508,8 @@ unsafe fn compile_nir_inner(
             // there too would shrink its pool for no reason.
             extra_reserved.extend_from_slice(&[0, 1, 2]);
         }
-        // cp.regs[..cp.count]: r17-19(+23), the actually-pinned
-        // prefix of this shader's constant registers (see cp.regs
+        // cx.cp.regs[..cx.cp.count]: r17-19(+23), the actually-pinned
+        // prefix of this shader's constant registers (see cx.cp.regs
         // above) -- needed in both modes. KNOWN GAP, not fixed here: a
         // register-pressured draw-mode VERTEX shader's own general ALU
         // pool can also reach r17-19 (nothing there knows they are spoken
@@ -2707,11 +2518,11 @@ unsafe fn compile_nir_inner(
         // (cube.vert's address-chain LOADs did exactly this, silently
         // zeroing cube.frag's lightDir). r0-4 cannot be the fix either:
         // the draw front end's raster ROM destroys them on every pixel
-        // (see cp.regs's own comment). Needs either lowering cube.vert's
+        // (see cx.cp.regs's own comment). Needs either lowering cube.vert's
         // register pressure or a firmware-side re-poke of the fragment's
         // consts after vertex processing, neither of which is a
         // register-allocation change.
-        extra_reserved.extend_from_slice(&cp.regs[..cp.count]);
+        extra_reserved.extend_from_slice(&cx.cp.regs[..cx.cp.count]);
         // r24 (alpha) only when it is actually an output. Reserving it
         // unconditionally would shrink the allocator's pool for every
         // existing shader to no purpose.
@@ -2724,42 +2535,42 @@ unsafe fn compile_nir_inner(
     // (x + 0 in integer arithmetic, bit for bit; r30 - r30 is the zero).
     if draw_mode {
         let is_win = |v: &u32, ubo: &HashMap<u32, Ubo>| matches!(ubo.get(v), Some(Ubo::Uniform(_)));
-        if sel.prog.iter().any(|i| i.srcs.iter().filter(|v| is_win(v, &sel.ubo)).count() > 1) {
-            let f = sel.next_vreg;
-            let z = sel.next_vreg + 1;
-            sel.next_vreg += 2;
-            sel.ubo.insert(f, Ubo::Fixed(30));
+        if cx.sel.prog.iter().any(|i| i.srcs.iter().filter(|v| is_win(v, &cx.sel.ubo)).count() > 1) {
+            let f = cx.sel.next_vreg;
+            let z = cx.sel.next_vreg + 1;
+            cx.sel.next_vreg += 2;
+            cx.sel.ubo.insert(f, Ubo::Fixed(30));
             let mut out = vec![BorgInstr { mnem: "ISUB", dst: z, srcs: vec![f, f], swz: vec![0, 0] }];
-            for mut ins in std::mem::take(&mut sel.prog) {
+            for mut ins in std::mem::take(&mut cx.sel.prog) {
                 let mut seen = false;
                 for k in 0..ins.srcs.len() {
-                    if !is_win(&ins.srcs[k], &sel.ubo) {
+                    if !is_win(&ins.srcs[k], &cx.sel.ubo) {
                         continue;
                     }
                     if !seen {
                         seen = true;
                         continue;
                     }
-                    let t = sel.next_vreg;
-                    sel.next_vreg += 1;
+                    let t = cx.sel.next_vreg;
+                    cx.sel.next_vreg += 1;
                     out.push(BorgInstr { mnem: "IADD", dst: t, srcs: vec![ins.srcs[k], z], swz: vec![ins.swz[k], 0] });
                     ins.srcs[k] = t;
                     ins.swz[k] = 0;
                 }
                 out.push(ins);
             }
-            sel.prog = out;
+            cx.sel.prog = out;
         }
     }
     let soft: Vec<u8> = if is_fragment && draw_mode { vec![20, 21, 22, 23, 24, 26, 27, 28] } else { Vec::new() };
     let mut block_len: HashMap<u32, u8> = HashMap::new();
-    for &t in &tex_dsts {
+    for &t in &cx.tex_dsts {
         block_len.insert(t, 4);
     }
     extra_reserved.retain(|r| !soft.contains(r));
-    let alloc = regalloc(&sel.prog, &forced, &extra_reserved, &soft, &block_len);
+    let alloc = regalloc(&cx.sel.prog, &forced, &extra_reserved, &soft, &block_len);
     // A value without a register would be read and written as r0.
-    if let Some(i) = sel.prog.iter().find(|i| i.dst != NO_DST && !alloc.contains_key(&i.dst)) {
+    if let Some(i) = cx.sel.prog.iter().find(|i| i.dst != NO_DST && !alloc.contains_key(&i.dst)) {
         let mut res: Vec<u8> = extra_reserved.clone();
         res.sort();
         res.dedup();
@@ -2767,8 +2578,8 @@ unsafe fn compile_nir_inner(
         return 0;
     }
     if env::var("BORGC_DUMP_ALLOC").is_ok() {
-        for i in &sel.prog {
-            let r = |v: &u32| match (alloc.get(v), sel.ubo.get(v)) {
+        for i in &cx.sel.prog {
+            let r = |v: &u32| match (alloc.get(v), cx.sel.ubo.get(v)) {
                 (Some(r), _) => format!("r{r}"),
                 (None, Some(Ubo::Uniform(u))) => format!("u{u}"),
                 (None, Some(Ubo::Fixed(f))) => format!("R{f}"),
@@ -2786,16 +2597,16 @@ unsafe fn compile_nir_inner(
     // uniform. cube.c's transform is position×MVP, so positions are pre-loaded
     // into high GPRs (firmware idiom `FADD g, u<comp>, r30, f3=1` → g = u[comp])
     // and the MVP column is read in place as the single uniform operand. `mov`
-    // ops are register copies handled by coalescing (skipped).
+    // ops are register copies handled by coalescing (cx.skipped).
     let mut words: Vec<u32> = Vec::new();
     let mut pos_gpr: std::collections::HashMap<(u32, u8), u8> = HashMap::new();
     let mut next_pre: u8 = 24; // r24..r29: above regalloc's low-GPR fill
-    for i in &sel.prog {
+    for i in &cx.sel.prog {
         if i.mnem == "mov" {
             continue;
         }
         for (s, &c) in i.srcs.iter().zip(i.swz.iter()) {
-            if sel.ubo.get(s) == Some(&Ubo::Pos)
+            if cx.sel.ubo.get(s) == Some(&Ubo::Pos)
                 && c != 3 // pos.w is the constant 1.0 (folded below), never pre-loaded
                 && !pos_gpr.contains_key(&(*s, c))
                 && next_pre <= 29
@@ -2816,14 +2627,14 @@ unsafe fn compile_nir_inner(
     // Resolve one source operand to (physical register, reads-from-uniform).
     let resolve_op = |s: u32, c: u8| -> (u8, bool) {
         // TEX result component c → rd+c (R/G/B/A in consecutive regs).
-        if tex_dsts.contains(&s) {
+        if cx.tex_dsts.contains(&s) {
             return (alloc.get(&s).map_or(0, |&r| r + c), false);
         }
         // FATTR result component c → rd+c (per-vertex v0/v1/v2 in consecutive regs).
-        if fattr_dsts.contains(&s) {
+        if cx.fattr_dsts.contains(&s) {
             return (alloc.get(&s).map_or(0, |&r| r + c), false);
         }
-        match sel.ubo.get(&s) {
+        match cx.sel.ubo.get(&s) {
             Some(&Ubo::Mvp(rb)) => ((8 + (rb / 16) * 4 + c as i32) as u8, true),
             Some(&Ubo::Pos) => (*pos_gpr.get(&(s, c)).unwrap_or(&0), false),
             Some(&Ubo::Uniform(idx)) => (idx, true),
@@ -2832,7 +2643,7 @@ unsafe fn compile_nir_inner(
             _ => (*alloc.get(&s).unwrap_or(&0), false),
         }
     };
-    for i in &sel.prog {
+    for i in &cx.sel.prog {
         if i.mnem == "mov" {
             continue;
         }
@@ -2884,7 +2695,7 @@ unsafe fn compile_nir_inner(
             .iter()
             .zip(i.swz.iter())
             .take(2) // only the multiply operands (rs1/rs2) can be pos.w
-            .position(|(s, &c)| sel.ubo.get(s) == Some(&Ubo::Pos) && c == 3);
+            .position(|(s, &c)| cx.sel.ubo.get(s) == Some(&Ubo::Pos) && c == 3);
         if let Some(k) = posw {
             if i.mnem == "FMUL" || i.mnem == "FMADD" {
                 let other = 1 - k; // the surviving multiply operand
@@ -2905,15 +2716,15 @@ unsafe fn compile_nir_inner(
         let mut r = [0u8; 3];
         let mut f3 = 0u32;
         for (k, (s, &c)) in i.srcs.iter().zip(i.swz.iter()).take(3).enumerate() {
-            if tex_dsts.contains(s) {
+            if cx.tex_dsts.contains(s) {
                 r[k] = alloc.get(s).map_or(0, |&rr| rr + c); // TEX result rd+c
                 continue;
             }
-            if fattr_dsts.contains(s) {
+            if cx.fattr_dsts.contains(s) {
                 r[k] = alloc.get(s).map_or(0, |&rr| rr + c); // FATTR result rd+c
                 continue;
             }
-            match sel.ubo.get(s) {
+            match cx.sel.ubo.get(s) {
                 // MVP column → uniform u(8 + column*4 + component), read in place.
                 Some(&Ubo::Mvp(rb)) => {
                     if f3 == 0 {
@@ -2985,19 +2796,19 @@ unsafe fn compile_nir_inner(
         words.len() - n_body,
         pending
     );
-    if !cp.uniforms.is_empty() {
-        let cs: Vec<String> = cp.uniforms.iter().map(|(r, v)| format!("r{r}={v:#06x}")).collect();
+    if !cx.cp.uniforms.is_empty() {
+        let cs: Vec<String> = cx.cp.uniforms.iter().map(|(r, v)| format!("r{r}={v:#06x}")).collect();
         eprintln!("borgc: const regs (firmware-staged via MMIO): {}", cs.join(" "));
     }
-    if !fw.consts.is_empty() {
-        let cs: Vec<String> = fw.consts.iter().map(|(u, v)| format!("u{u}={v:#010x}")).collect();
+    if !cx.fw.consts.is_empty() {
+        let cs: Vec<String> = cx.fw.consts.iter().map(|(u, v)| format!("u{u}={v:#010x}")).collect();
         eprintln!(
             "borgc: draw-mode uniform consts (write to draw_fs_const_offset + 4*(u-20) before the draw): {}",
             cs.join(" ")
         );
     }
-    if !cp.vs_consts.is_empty() {
-        let cs: Vec<String> = cp.vs_consts.iter().map(|(u, v)| format!("u{u}={v:#010x}")).collect();
+    if !cx.cp.vs_consts.is_empty() {
+        let cs: Vec<String> = cx.cp.vs_consts.iter().map(|(u, v)| format!("u{u}={v:#010x}")).collect();
         eprintln!(
             "borgc: draw-mode vertex window consts (write to draw_vs_const_offset + 4*(u-25) before the draw): {}",
             cs.join(" ")
@@ -3032,20 +2843,20 @@ unsafe fn compile_nir_inner(
     // vertex shader, u20+ for a fragment shader) and, for a vertex shader,
     // how many varying components it SOUTs (the record size).
     let window: Vec<(u8, u32)> = if is_vertex {
-        cp.vs_consts.clone()
+        cx.cp.vs_consts.clone()
     } else {
-        fw.consts.iter().map(|&(u, v)| (u as u8, v)).collect()
+        cx.fw.consts.iter().map(|&(u, v)| (u as u8, v)).collect()
     };
-    let num_varyings: u8 = sel.prog
+    let num_varyings: u8 = cx.sel.prog
         .iter()
         .filter(|i| i.mnem == "SOUT")
         .map(|i| i.swz[0] + 1)
         .max()
         .unwrap_or(0);
-    let blob = emit_blob(&words, &outputs, &cp.uniforms,
+    let blob = emit_blob(&words, &outputs, &cx.cp.uniforms,
                          if draw_mode { Some((num_varyings, &window[..])) } else { None });
     eprintln!(
-        "borgc: .borg blob = {} bytes ({} instr, {} output regs, {} window consts, {} varyings)",
+        "borgc: .borg blob = {} bytes ({} instr, {} output regs, {} window cx.consts, {} varyings)",
         blob.len(), words.len(), outputs.len(), window.len(), num_varyings
     );
     if let Ok(prefix) = env::var("BORGC_EMIT_BLOB") {

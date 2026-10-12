@@ -1,3 +1,5 @@
+use crate::config::Flags;
+use compiler::bindings::*;
 use std::collections::HashMap;
 #[derive(Default)]
 pub struct DrawOutputs {
@@ -214,6 +216,70 @@ impl ConstPool {
         } else {
             self.vs_by_bits.insert(bits, v);
             v
+        }
+    }
+}
+
+pub struct Cx {
+    pub sel: Selector,
+    pub cp: ConstPool,
+    pub fw: FragWindow,
+    pub outs: DrawOutputs,
+    pub consts: HashMap<u32, u32>,
+    pub draw_mode: bool,
+    pub is_vertex: bool,
+    pub is_fragment: bool,
+    pub flags: Flags,
+    pub skipped: Vec<&'static str>,
+    pub weights: Option<[u32; 3]>,
+    pub per_pixel_fixed: std::collections::HashSet<u32>,
+    pub frag_coord_w: bool,
+    pub fetch_ctl_uniform: Option<u32>,
+    pub lod_ctl_uniform: Option<u32>,
+    pub vfetch_ctl: HashMap<u32, u8>,
+    pub res_binding: HashMap<u32, u32>,
+    pub prod: HashMap<u32, (nir_op, Vec<(u32, u8)>)>,
+    pub tex_dsts: std::collections::HashSet<u32>,
+    pub fattr_dsts: std::collections::HashSet<u32>,
+    pub zero_ctl: Option<u32>,
+    pub tex_derefs: std::collections::HashSet<u32>,
+    pub one_vreg: Option<u32>,
+    pub push_const_reg: HashMap<u32, u32>,
+    pub vertex_id_def: Option<u32>,
+    pub descriptor_defs: std::collections::HashSet<u32>,
+    pub const_addr_chain: Option<(i32, u32)>,
+}
+
+impl Cx {
+    pub fn new(regs: &'static [u8], draw_mode: bool, is_vertex: bool, is_fragment: bool, flags: Flags) -> Self {
+        Cx {
+            sel: Selector::new(),
+            cp: ConstPool::new(regs, draw_mode && is_vertex),
+            fw: FragWindow::default(),
+            outs: DrawOutputs::default(),
+            consts: HashMap::new(),
+            draw_mode,
+            is_vertex,
+            is_fragment,
+            flags,
+            skipped: Default::default(),
+            weights: Default::default(),
+            per_pixel_fixed: Default::default(),
+            frag_coord_w: Default::default(),
+            fetch_ctl_uniform: Default::default(),
+            lod_ctl_uniform: Default::default(),
+            vfetch_ctl: Default::default(),
+            res_binding: Default::default(),
+            prod: Default::default(),
+            tex_dsts: Default::default(),
+            fattr_dsts: Default::default(),
+            zero_ctl: Default::default(),
+            tex_derefs: Default::default(),
+            one_vreg: Default::default(),
+            push_const_reg: Default::default(),
+            vertex_id_def: Default::default(),
+            descriptor_defs: Default::default(),
+            const_addr_chain: Default::default(),
         }
     }
 }
