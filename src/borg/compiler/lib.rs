@@ -32,7 +32,7 @@ use encode::{emit_blob, encode, encode_fattr, encode_sout};
 use isel::{borg_isel, resolve_vm};
 use opt::{classify_uniform, dce, fuse_fmadd, schedule_for_pressure};
 use regalloc::regalloc;
-use state::{DrawOutputs, Selector};
+use state::{DrawOutputs, FragWindow, Selector};
 use survey::{survey, Survey};
 use std::env;
 
@@ -391,7 +391,7 @@ unsafe fn compile_nir_inner(
     let mut fetch_ctl_uniform: Option<u32> = None;
     let mut lod_ctl_uniform: Option<u32> = None;
     let mut vfetch_ctl: HashMap<u32, u8> = HashMap::new();   // attribute location -> window uniform of its TEX control word
-    let mut frag_window_by_bits: HashMap<u32, u32> = HashMap::new();
+    let mut fw = FragWindow::default();
     let mut res_binding: HashMap<u32, u32> = HashMap::new();   // resource index / descriptor def -> binding
     // Scalar load_const f32 bits (for the sRGB idiom match) and a producer map
     // (alu def → its op + resolved scalar srcs) for recognising the bcsel tree.
@@ -603,8 +603,6 @@ unsafe fn compile_nir_inner(
     // per-vertex varyings from). Reported here, not folded into
     // const_uniforms, since that Vec specifically means "GPR, poked once
     // via MMIO" -- a different delivery channel from "word in memory."
-    let mut draw_uniform_count: u32 = 0;
-    let mut draw_uniform_consts: Vec<(u32, u32)> = Vec::new(); // (u-index, bits)
     // gl_varying_slot: VAR0=texcoord, VAR1=frag_pos (Mesa enum: VAR0 = 32).
     const VARYING_SLOT_VAR0: u32 = 32;
     const VARYING_SLOT_POS: u32 = 0;
@@ -748,16 +746,7 @@ unsafe fn compile_nir_inner(
                                 sel.vec_map.insert(d, vec![(v, 0u8)]);
                                 continue;
                             }
-                            let u = if let Some(&u) = frag_window_by_bits.get(&bits) {
-                                u   // the same value already has a word
-                            } else {
-                                assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                                let u = 20 + draw_uniform_count;
-                                draw_uniform_count += 1;
-                                draw_uniform_consts.push((u, bits));
-                                frag_window_by_bits.insert(bits, u);
-                                u
-                            };
+                            let u = fw.slot(bits);
                             let v = sel.next_vreg;
                             sel.next_vreg += 1;
                             sel.ubo.insert(v, Ubo::Uniform(u as u8));
@@ -1001,7 +990,7 @@ unsafe fn compile_nir_inner(
                                     // 12.92 is a NIR constant, or a window word once an arithmetic reader gave it one.
                                     let is12 = |d: u32| {
                                         let bits = consts.get(&d).copied().or_else(|| match sel.ubo.get(&d) {
-                                            Some(Ubo::Uniform(u)) => draw_uniform_consts.iter()
+                                            Some(Ubo::Uniform(u)) => fw.consts.iter()
                                                 .find(|(w, _)| *w == *u as u32).map(|&(_, b)| b),
                                             _ => None,
                                         });
@@ -1068,12 +1057,7 @@ unsafe fn compile_nir_inner(
                                     return const_int_operand(bits as i32, &mut const_int_reg, &mut const_reg_count,
                                         &mut const_uniforms, &mut draw_vs_consts, &mut sel.next_vreg, &mut sel.ubo);
                                 }
-                                let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
-                                    assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                                    draw_uniform_count += 1;
-                                    draw_uniform_consts.push((19 + draw_uniform_count, bits));
-                                    19 + draw_uniform_count
-                                });
+                                let u = fw.slot(bits);
                                 sel.next_vreg += 1;
                                 sel.ubo.insert(sel.next_vreg - 1, Ubo::Uniform(u as u8));
                                 sel.next_vreg - 1
@@ -1090,12 +1074,7 @@ unsafe fn compile_nir_inner(
                                     return const_int_operand(bits as i32, &mut const_int_reg, &mut const_reg_count,
                                         &mut const_uniforms, &mut draw_vs_consts, &mut sel.next_vreg, &mut sel.ubo);
                                 }
-                                let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
-                                    assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                                    draw_uniform_count += 1;
-                                    draw_uniform_consts.push((19 + draw_uniform_count, bits));
-                                    19 + draw_uniform_count
-                                });
+                                let u = fw.slot(bits);
                                 sel.next_vreg += 1;
                                 sel.ubo.insert(sel.next_vreg - 1, Ubo::Uniform(u as u8));
                                 sel.next_vreg - 1
@@ -1116,12 +1095,7 @@ unsafe fn compile_nir_inner(
                                     return const_int_operand(bits as i32, &mut const_int_reg, &mut const_reg_count,
                                         &mut const_uniforms, &mut draw_vs_consts, &mut sel.next_vreg, &mut sel.ubo);
                                 }
-                                let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
-                                    assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                                    draw_uniform_count += 1;
-                                    draw_uniform_consts.push((19 + draw_uniform_count, bits));
-                                    19 + draw_uniform_count
-                                });
+                                let u = fw.slot(bits);
                                 sel.next_vreg += 1;
                                 sel.ubo.insert(sel.next_vreg - 1, Ubo::Uniform(u as u8));
                                 sel.next_vreg - 1
@@ -1330,13 +1304,7 @@ unsafe fn compile_nir_inner(
                                         }
                                         // Fragment: a window word too (no GPR is staged in draw mode).
                                         if draw_mode && is_fragment {
-                                            let u = *frag_window_by_bits.entry(word_idx).or_insert_with(|| {
-                                                assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                                                let u = 20 + draw_uniform_count;
-                                                draw_uniform_count += 1;
-                                                draw_uniform_consts.push((u, word_idx));
-                                                u
-                                            });
+                                            let u = fw.slot(word_idx);
                                             let v = sel.next_vreg;
                                             sel.next_vreg += 1;
                                             sel.ubo.insert(v, Ubo::Uniform(u as u8));
@@ -1416,16 +1384,7 @@ unsafe fn compile_nir_inner(
                                 if vs_const_window {
                                     vs_const_vreg!(bits, true)
                                 } else {
-                                    let u = if let Some(&u) = frag_window_by_bits.get(&bits) {
-                                        u
-                                    } else {
-                                        assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                                        let u = 20 + draw_uniform_count;
-                                        draw_uniform_count += 1;
-                                        draw_uniform_consts.push((u, bits));
-                                        frag_window_by_bits.insert(bits, u);
-                                        u
-                                    };
+                                    let u = fw.slot(bits);
                                     let v = sel.next_vreg;
                                     sel.next_vreg += 1;
                                     sel.ubo.insert(v, Ubo::Uniform(u as u8));
@@ -1655,16 +1614,7 @@ unsafe fn compile_nir_inner(
                                 // A base past 16 bits does not fit a staged register: a window constant.
                                 (0, _) if !vs_const_window && base_words >= 65536 => {
                                     let bits = base_words as u32;
-                                    let u = if let Some(&u) = frag_window_by_bits.get(&bits) {
-                                        u
-                                    } else {
-                                        assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                                        let u = 20 + draw_uniform_count;
-                                        draw_uniform_count += 1;
-                                        draw_uniform_consts.push((u, bits));
-                                        frag_window_by_bits.insert(bits, u);
-                                        u
-                                    };
+                                    let u = fw.slot(bits);
                                     let v = sel.next_vreg;
                                     sel.next_vreg += 1;
                                     sel.ubo.insert(v, Ubo::Uniform(u as u8));
@@ -1735,16 +1685,7 @@ unsafe fn compile_nir_inner(
                                 sel.vec_map.insert(d, vec![(v, 0u8)]);
                                 continue;
                             }
-                            let u = if let Some(&u) = frag_window_by_bits.get(&bits) {
-                                u
-                            } else {
-                                assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                                let u = 20 + draw_uniform_count;
-                                draw_uniform_count += 1;
-                                draw_uniform_consts.push((u, bits));
-                                frag_window_by_bits.insert(bits, u);
-                                u
-                            };
+                            let u = fw.slot(bits);
                             let v = sel.next_vreg;
                             sel.next_vreg += 1;
                             sel.ubo.insert(v, Ubo::Uniform(u as u8));
@@ -1801,13 +1742,7 @@ unsafe fn compile_nir_inner(
                         // The destination pixel as floats (nir_lower_blend's fb fetch): `TLD` returns the
                         // attachment's word, unpacked here by the same description the pack block uses.
                         let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
-                            let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
-                                assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                                let u = 20 + draw_uniform_count;
-                                draw_uniform_count += 1;
-                                draw_uniform_consts.push((u, bits));
-                                u
-                            });
+                            let u = fw.slot(bits);
                             let v = *next_vreg; *next_vreg += 1;
                             ubo.insert(v, Ubo::Uniform(u as u8));
                             v
@@ -1979,16 +1914,7 @@ unsafe fn compile_nir_inner(
                             let ld = srcs.iter().find(|s| s.src_type == nir_tex_src_lod || s.src_type == nir_tex_src_bias).map(|s| s.src.as_def().index).unwrap_or(cd);
                             if let Some(&bits) = consts.get(&ld).filter(|_| is_txl || has_bias) {
                                 if !sel.vec_map.contains_key(&ld) {
-                                    let u = if let Some(&u) = frag_window_by_bits.get(&bits) {
-                                        u
-                                    } else {
-                                        assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                                        let u = 20 + draw_uniform_count;
-                                        draw_uniform_count += 1;
-                                        draw_uniform_consts.push((u, bits));
-                                        frag_window_by_bits.insert(bits, u);
-                                        u
-                                    };
+                                    let u = fw.slot(bits);
                                     let v = sel.next_vreg;
                                     sel.next_vreg += 1;
                                     sel.ubo.insert(v, Ubo::Uniform(u as u8));
@@ -2006,26 +1932,14 @@ unsafe fn compile_nir_inner(
                         let ctl = if is_tg4 {
                             // Operation 2 (gather) of the component in bits 19:18.
                             let bits = 2u32 << 16 | (tex.component() & 3) << 18;
-                            let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
-                                assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                                let u = 20 + draw_uniform_count;
-                                draw_uniform_count += 1;
-                                draw_uniform_consts.push((u, bits));
-                                u
-                            });
+                            let u = fw.slot(bits);
                             let c = sel.next_vreg;
                             sel.next_vreg += 1;
                             sel.ubo.insert(c, Ubo::Uniform(u as u8));
                             c
                         } else if has_bias {
                             // LOD mode 1: implicit LOD plus TEXA's bias.
-                            let u = *frag_window_by_bits.entry(1u32 << 21).or_insert_with(|| {
-                                assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                                let u = 20 + draw_uniform_count;
-                                draw_uniform_count += 1;
-                                draw_uniform_consts.push((u, 1u32 << 21));
-                                u
-                            });
+                            let u = fw.slot(1u32 << 21);
                             let c = sel.next_vreg;
                             sel.next_vreg += 1;
                             sel.ubo.insert(c, Ubo::Uniform(u as u8));
@@ -2038,10 +1952,10 @@ unsafe fn compile_nir_inner(
                             let u = match *slot {
                                 Some(u) => u,
                                 None => {
-                                    assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                                    let u = 20 + draw_uniform_count;
-                                    draw_uniform_count += 1;
-                                    draw_uniform_consts.push((u, ctl_bits));
+                                    assert!(fw.count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
+                                    let u = 20 + fw.count;
+                                    fw.count += 1;
+                                    fw.consts.push((u, ctl_bits));
                                     *slot = Some(u);
                                     u
                                 }
@@ -2106,16 +2020,7 @@ unsafe fn compile_nir_inner(
                                 if vs_const_window {
                                     return (vs_const_vreg!(bits), 0u8);
                                 }
-                                let idx = if let Some(&u) = frag_window_by_bits.get(&bits) {
-                                    u   // the same value already has a word
-                                } else {
-                                    assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                                    let u = 20 + draw_uniform_count;
-                                    draw_uniform_count += 1;
-                                    draw_uniform_consts.push((u, bits));
-                                    frag_window_by_bits.insert(bits, u);
-                                    u
-                                };
+                                let idx = fw.slot(bits);
                                 let v = sel.next_vreg;
                                 sel.next_vreg += 1;
                                 sel.ubo.insert(v, Ubo::Uniform(idx as u8));
@@ -2353,13 +2258,7 @@ unsafe fn compile_nir_inner(
         // chosen from the per-attachment values; one the shader never wrote keeps its own (TLD).
         let n = flags.target_count();
         let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
-            let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
-                assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                let u = 20 + draw_uniform_count;
-                draw_uniform_count += 1;
-                draw_uniform_consts.push((u, bits));
-                u
-            });
+            let u = fw.slot(bits);
             let v = *next_vreg; *next_vreg += 1;
             ubo.insert(v, Ubo::Uniform(u as u8));
             v
@@ -2427,13 +2326,7 @@ unsafe fn compile_nir_inner(
     if draw_mode && is_fragment && flags.r8_unorm() && outs.frag[0].is_some() {
         // R8_UNORM (RAW8): r26 = round(r * 255) & 0xFF.
         let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
-            let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
-                assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                let u = 20 + draw_uniform_count;
-                draw_uniform_count += 1;
-                draw_uniform_consts.push((u, bits));
-                u
-            });
+            let u = fw.slot(bits);
             let v = *next_vreg; *next_vreg += 1;
             ubo.insert(v, Ubo::Uniform(u as u8));
             v
@@ -2462,13 +2355,7 @@ unsafe fn compile_nir_inner(
         let (kind, layout) = packed_layout(flags);
         let total_bits = layout.iter().map(|&(_, sh, b)| sh + b).max().unwrap_or(0);
         let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
-            let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
-                assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                let u = 20 + draw_uniform_count;
-                draw_uniform_count += 1;
-                draw_uniform_consts.push((u, bits));
-                u
-            });
+            let u = fw.slot(bits);
             let v = *next_vreg; *next_vreg += 1;
             ubo.insert(v, Ubo::Uniform(u as u8));
             v
@@ -2547,13 +2434,7 @@ unsafe fn compile_nir_inner(
         // R16G16_SFLOAT (RAW32; with bit 0x20 R16_SFLOAT, RAW16): r26 = half(r) | half(g) << 16 with integer ops (round to nearest even,
         // NaN to 0x7E00); a branch-free select between the denormal, normal and overflow results.
         let mut win = |bits: u32, ubo: &mut HashMap<u32, Ubo>, next_vreg: &mut u32| -> u32 {
-            let u = *frag_window_by_bits.entry(bits).or_insert_with(|| {
-                assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                let u = 20 + draw_uniform_count;
-                draw_uniform_count += 1;
-                draw_uniform_consts.push((u, bits));
-                u
-            });
+            let u = fw.slot(bits);
             let v = *next_vreg; *next_vreg += 1;
             ubo.insert(v, Ubo::Uniform(u as u8));
             v
@@ -2633,13 +2514,7 @@ unsafe fn compile_nir_inner(
     if draw_mode && is_fragment && flags.bytes_packed() && outs.frag[3].is_some() {
         // Byte-packed integer colour (R8G8B8A8_UINT/SINT, RAW32): r26 = c0 | c1<<8 | c2<<16 | c3<<24.
         let (mut p, mut pc) = outs.frag[3].unwrap();
-        let eight = *frag_window_by_bits.entry(8).or_insert_with(|| {
-            assert!(draw_uniform_count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-            let u = 20 + draw_uniform_count;
-            draw_uniform_count += 1;
-            draw_uniform_consts.push((u, 8));
-            u
-        });
+        let eight = fw.slot(8);
         let sh = sel.next_vreg;
         sel.next_vreg += 1;
         sel.ubo.insert(sh, Ubo::Uniform(eight as u8));
@@ -2743,7 +2618,7 @@ unsafe fn compile_nir_inner(
     // and the 1 the index steps by.
     #[allow(static_mut_refs)]
     unsafe { LAST_FRAG_POOL.clear(); }
-    if draw_mode && is_fragment && draw_uniform_count > 11 {
+    if draw_mode && is_fragment && fw.count > 11 {
         let first_pool = 20 + 9;
         // The window keeps the nine constants read most often: a window word costs no register.
         {
@@ -2757,7 +2632,7 @@ unsafe fn compile_nir_inner(
                     }
                 }
             }
-            let mut by_use: Vec<(u32, u32)> = draw_uniform_consts.clone();
+            let mut by_use: Vec<(u32, u32)> = fw.consts.clone();
             by_use.sort_by_key(|&(u, _)| (std::cmp::Reverse(uses.get(&u).copied().unwrap_or(0)), u));
             let renum: HashMap<u32, u32> = by_use.iter().enumerate().map(|(k, &(u, _))| (u, 20 + k as u32)).collect();
             for (_, m) in sel.ubo.iter_mut() {
@@ -2767,17 +2642,17 @@ unsafe fn compile_nir_inner(
                     }
                 }
             }
-            draw_uniform_consts = by_use.iter().map(|&(u, bits)| (renum[&u], bits)).collect();
+            fw.consts = by_use.iter().map(|&(u, bits)| (renum[&u], bits)).collect();
         }
-        let mut pool: Vec<u32> = vec![0; (20 + draw_uniform_count - first_pool) as usize];
-        for &(u, bits) in draw_uniform_consts.iter() {
+        let mut pool: Vec<u32> = vec![0; (20 + fw.count - first_pool) as usize];
+        for &(u, bits) in fw.consts.iter() {
             if u >= first_pool {
                 pool[(u - first_pool) as usize] = bits;
             }
         }
-        draw_uniform_consts.retain(|&(u, _)| u < first_pool);
-        draw_uniform_consts.push((first_pool, (1 << 16) | (128 + FRAG_POOL_SLOT)));
-        draw_uniform_consts.push((first_pool + 1, 1));
+        fw.consts.retain(|&(u, _)| u < first_pool);
+        fw.consts.push((first_pool, (1 << 16) | (128 + FRAG_POOL_SLOT)));
+        fw.consts.push((first_pool + 1, 1));
         let mut fresh = |ubo: &mut HashMap<u32, Ubo>, u: Option<Ubo>| {
             let v = sel.next_vreg;
             sel.next_vreg += 1;
@@ -3297,8 +3172,8 @@ unsafe fn compile_nir_inner(
         let cs: Vec<String> = const_uniforms.iter().map(|(r, v)| format!("r{r}={v:#06x}")).collect();
         eprintln!("borgc: const regs (firmware-staged via MMIO): {}", cs.join(" "));
     }
-    if !draw_uniform_consts.is_empty() {
-        let cs: Vec<String> = draw_uniform_consts.iter().map(|(u, v)| format!("u{u}={v:#010x}")).collect();
+    if !fw.consts.is_empty() {
+        let cs: Vec<String> = fw.consts.iter().map(|(u, v)| format!("u{u}={v:#010x}")).collect();
         eprintln!(
             "borgc: draw-mode uniform consts (write to draw_fs_const_offset + 4*(u-20) before the draw): {}",
             cs.join(" ")
@@ -3342,7 +3217,7 @@ unsafe fn compile_nir_inner(
     let window: Vec<(u8, u32)> = if is_vertex {
         draw_vs_consts.clone()
     } else {
-        draw_uniform_consts.iter().map(|&(u, v)| (u as u8, v)).collect()
+        fw.consts.iter().map(|&(u, v)| (u as u8, v)).collect()
     };
     let num_varyings: u8 = sel.prog
         .iter()

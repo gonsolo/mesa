@@ -49,3 +49,27 @@ impl Selector {
         self.op(mnem, srcs, swz)
     }
 }
+
+/// Fragment window constants: draw-mode uniforms u20.. holding values by bit pattern.
+#[derive(Default)]
+pub struct FragWindow {
+    pub by_bits: HashMap<u32, u32>,
+    pub count: u32,
+    /// (u-index, bits)
+    pub consts: Vec<(u32, u32)>,
+}
+
+impl FragWindow {
+    /// The window word holding `bits`, allocating the next one if it is new.
+    pub fn slot(&mut self, bits: u32) -> u32 {
+        if let Some(&u) = self.by_bits.get(&bits) {
+            return u;
+        }
+        assert!(self.count < crate::FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
+        let u = 20 + self.count;
+        self.count += 1;
+        self.consts.push((u, bits));
+        self.by_bits.insert(bits, u);
+        u
+    }
+}
