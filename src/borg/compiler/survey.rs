@@ -6,7 +6,6 @@ pub struct Survey {
     pub tex: u32,
 }
 
-/// Count the entry point's instructions and report the ops borgc has no selection for.
 pub unsafe fn survey(entry: *mut nir_function_impl, stage: mesa_shader_stage) -> Survey {
     let mut total = 0u32;
     let mut alu_ok = 0u32;
