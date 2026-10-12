@@ -1,4 +1,7 @@
+use crate::regalloc::regalloc;
 use crate::state::Cx;
+use crate::{Ubo, NO_DST};
+use std::env;
 use std::collections::HashMap;
 
 pub fn fixed_regs(
@@ -52,4 +55,36 @@ pub fn fixed_regs(
         }
     }
     (forced, extra_reserved)
+}
+
+pub fn allocate(cx: &Cx, forced: &HashMap<u32, u8>, extra_reserved: &mut Vec<u8>) -> Option<HashMap<u32, u8>> {
+    let is_fragment = cx.is_fragment;
+    let soft: Vec<u8> = if is_fragment { vec![20, 21, 22, 23, 24, 26, 27, 28] } else { Vec::new() };
+    let mut block_len: HashMap<u32, u8> = HashMap::new();
+    for &t in &cx.tex_dsts {
+        block_len.insert(t, 4);
+    }
+    extra_reserved.retain(|r| !soft.contains(r));
+    let alloc = regalloc(&cx.sel.prog, forced, extra_reserved, &soft, &block_len);
+    // A value without a register would be read and written as r0.
+    if let Some(i) = cx.sel.prog.iter().find(|i| i.dst != NO_DST && !alloc.contains_key(&i.dst)) {
+        let mut res: Vec<u8> = extra_reserved.clone();
+        res.sort();
+        res.dedup();
+        eprintln!("borgc: ERROR out of registers ({} has none; reserved {:?}), refusing to emit a wrong shader", i.mnem, res);
+        return None;
+    }
+    if env::var("BORGC_DUMP_ALLOC").is_ok() {
+        for i in &cx.sel.prog {
+            let r = |v: &u32| match (alloc.get(v), cx.sel.ubo.get(v)) {
+                (Some(r), _) => format!("r{r}"),
+                (None, Some(Ubo::Uniform(u))) => format!("u{u}"),
+                (None, Some(Ubo::Fixed(f))) => format!("R{f}"),
+                _ => format!("?{v}"),
+            };
+            let s: Vec<String> = i.srcs.iter().zip(i.swz.iter()).map(|(v, c)| format!("{}.{}", r(v), c)).collect();
+            eprintln!("borgc:A {} {} <- {}", i.mnem, r(&i.dst), s.join(", "));
+        }
+    }
+    Some(alloc)
 }

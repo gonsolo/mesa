@@ -20,11 +20,10 @@ mod survey;
 use compiler::bindings::*;
 use compiler::nir::AsDef;
 use config::Flags;
-use fixed::fixed_regs;
+use fixed::{allocate, fixed_regs};
 use emit::{build_blob, encode_program, Encoded};
 use isel::resolve_vm;
 use opt::{classify_uniform, dce, fuse_fmadd, schedule_for_pressure};
-use regalloc::regalloc;
 use state::Cx;
 use survey::{survey, Survey};
 use std::env;
@@ -459,33 +458,7 @@ unsafe fn compile_nir_inner(
     cx.split_window_reads();
 
 
-    let soft: Vec<u8> = if is_fragment { vec![20, 21, 22, 23, 24, 26, 27, 28] } else { Vec::new() };
-    let mut block_len: HashMap<u32, u8> = HashMap::new();
-    for &t in &cx.tex_dsts {
-        block_len.insert(t, 4);
-    }
-    extra_reserved.retain(|r| !soft.contains(r));
-    let alloc = regalloc(&cx.sel.prog, &forced, &extra_reserved, &soft, &block_len);
-    // A value without a register would be read and written as r0.
-    if let Some(i) = cx.sel.prog.iter().find(|i| i.dst != NO_DST && !alloc.contains_key(&i.dst)) {
-        let mut res: Vec<u8> = extra_reserved.clone();
-        res.sort();
-        res.dedup();
-        eprintln!("borgc: ERROR out of registers ({} has none; reserved {:?}), refusing to emit a wrong shader", i.mnem, res);
-        return 0;
-    }
-    if env::var("BORGC_DUMP_ALLOC").is_ok() {
-        for i in &cx.sel.prog {
-            let r = |v: &u32| match (alloc.get(v), cx.sel.ubo.get(v)) {
-                (Some(r), _) => format!("r{r}"),
-                (None, Some(Ubo::Uniform(u))) => format!("u{u}"),
-                (None, Some(Ubo::Fixed(f))) => format!("R{f}"),
-                _ => format!("?{v}"),
-            };
-            let s: Vec<String> = i.srcs.iter().zip(i.swz.iter()).map(|(v, c)| format!("{}.{}", r(v), c)).collect();
-            eprintln!("borgc:A {} {} <- {}", i.mnem, r(&i.dst), s.join(", "));
-        }
-    }
+    let Some(alloc) = allocate(&cx, &forced, &mut extra_reserved) else { return 0 };
 
     let Encoded { mut words, n_preload, n_body, pending } = encode_program(&cx, &alloc);
     words.push(0x0000_0000);
