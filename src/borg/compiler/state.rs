@@ -73,3 +73,13 @@ impl FragWindow {
         u
     }
 }
+
+impl FragWindow {
+    /// A fresh vreg reading the window word that holds `bits`.
+    pub fn win(&mut self, sel: &mut Selector, bits: u32) -> u32 {
+        let u = self.slot(bits);
+        let v = sel.fresh();
+        sel.ubo.insert(v, crate::Ubo::Uniform(u as u8));
+        v
+    }
+}
