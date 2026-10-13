@@ -1,10 +1,6 @@
 /*
  * Copyright © 2026 Andreas Wendleder
  * SPDX-License-Identifier: MIT
- *
- * C side of the borgvk shader compiler. The NIR→Borg-ISA lowering lives in the
- * Rust crate `borgc` (src/borg/compiler/); this file turns the app's SPIR-V into
- * NIR (via the Mesa runtime) and hands each stage to Rust.
  */
 #include "borgvk_private.h"
 #include "nir_builder.h"
@@ -23,11 +19,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
-
-/* Implemented in Rust: src/borg/compiler/lib.rs. borgc_compile_nir compiles the
- * shader to a .borg blob: it writes up to buf_cap bytes into out_buf and sets
- * *out_len to the true blob size (so *out_len > buf_cap signals an undersized
- * buffer); the return value is the instruction count. */
 
 /* The uniform-buffer bindings the shader loads from, as a bit mask. */
 static uint32_t
@@ -62,7 +53,6 @@ ubo_mask_used(nir_shader *nir)
    return mask;
 }
 
-/* The binding of the texture the shader samples (-1 for none); a draw sends one texture. */
 static int
 sampled_binding(nir_shader *nir)
 {
@@ -101,7 +91,6 @@ reads_point_coord(nir_shader *nir)
 }
 
 /* Turn one pipeline shader stage's SPIR-V into NIR and hand it to borgc. */
-/* The draw extension's varying count of a compiled blob (software/borg/borg_spirb.c layout). */
 uint32_t
 borgvk_blob_num_varyings(const struct borgvk_shader_blob *b)
 {
@@ -111,8 +100,6 @@ borgvk_blob_num_varyings(const struct borgvk_shader_blob *b)
    return at < b->len ? b->data[at] : 0;
 }
 
-/* The sets of a layout are numbered flat: set s starts where the sets before it end, so the
- * buffer windows borgc names by binding alone cannot collide. */
 void
 borgvk_layout_set_base(struct borgvk_device *device, uint8_t base[4])
 {
@@ -126,8 +113,6 @@ borgvk_layout_set_base(struct borgvk_device *device, uint8_t base[4])
    }
 }
 
-/* borgc names buffers by (set, binding): point each constant array index at its flat slot (the
- * slot the descriptor update wrote) and fold the set number in. */
 static void
 remap_array_bindings(struct borgvk_device *device, nir_shader *nir)
 {
@@ -163,11 +148,6 @@ remap_array_bindings(struct borgvk_device *device, nir_shader *nir)
    }
 }
 
-/* A line is drawn as a quad (borgvk_queue.c gathers six rows per line). This shader runs once
- * per corner: a copy of it computes the other endpoint's position from the attributes at
- * location + BORGVK_LINE_OTHER, and the corner moves half a pixel along the line's minor axis.
- * The line attribute (location BORGVK_LINE_SLOT) holds that step in clip units for x and y,
- * then the target's width and height. */
 static void
 borgvk_lower_lines(nir_shader *nir, uint32_t instance_mask)
 {
@@ -303,8 +283,6 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
    remap_array_bindings(device, nir);
    if (stage_info->stage == VK_SHADER_STAGE_VERTEX_BIT && (vfetch & 0xD0000000u) == 0x90000000u)
       borgvk_lower_lines(nir, vfetch & 0xFFFFu);
-   /* Shared with the offline borgc CLI -- see borg_nir_passes.h for why this
-    * must not be a second copy. */
    borg_lower_nir_for_borgc_blend(nir, blend);
    device->frag_reads_pntc = stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT && reads_point_coord(nir);
    if (stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT)
@@ -312,9 +290,6 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
    if (stage_info->stage == VK_SHADER_STAGE_VERTEX_BIT || stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT)
       device->stage_ubo[stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT] = ubo_mask_used(nir);
 
-   /* Map the Vulkan stage to a firmware shader slot. Only the vertex and
-    * fragment stages are app-derived; anything else (e.g. compute) has no Borg
-    * slot, so compile for diagnostics but don't capture a blob. */
    int slot = -1;
    switch (stage_info->stage) {
    case VK_SHADER_STAGE_VERTEX_BIT:   slot = BORGVK_STAGE_VERT; break;
