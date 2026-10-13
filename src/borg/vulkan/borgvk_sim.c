@@ -1,15 +1,6 @@
 /*
  * Copyright © 2026 Andreas Wendleder
  * SPDX-License-Identifier: MIT
- *
- * borgvk_sim.c — the persistent simulator behind the driver.
- *
- * One `direct_sim --serve` process per driver process stands in for the GPU: it keeps
- * its state between passes, takes wire packets on a pipe and shares its memory with the
- * driver, so attachments go in and come back by copying memory instead of through a
- * process per draw. The application's images stay the truth: a pass copies its
- * attachments into GPU memory, every draw loads them (and leaves alone the tiles it does
- * not reach), and the pixels the pass changed are copied back.
  */
 #include "borgvk_private.h"
 
@@ -28,7 +19,7 @@
 #include "vk_format.h"
 #include "vk_log.h"
 
-#define SIM_MEM_BYTES 0x8000000u   /* simulation/direct/direct_sim.h DirectSim::MEM_BYTES */
+#define SIM_MEM_BYTES 0x8000000u
 #define SIM_MAX_PARTS 24
 #define SIM_PARALLEL_BYTES 65536   /* a pass this large is split over several simulators */
 
@@ -101,7 +92,6 @@ struct feed {
    bool ok;
 };
 
-/* Each server consumes its stream at simulation speed, so they are fed side by side. */
 static void *
 feed_server(void *arg)
 {
@@ -125,7 +115,7 @@ sim_start(struct sim_srv *S, const char *bin)
          close(mfd);
          return false;
       }
-      S->memfd = mfd;   /* stays open, and inheritable, for the server started on it */
+      S->memfd = mfd;
    }
    char memfd_arg[16];
    snprintf(memfd_arg, sizeof(memfd_arg), "%d", S->memfd);
@@ -173,8 +163,6 @@ sim_set_size(struct sim_srv *S, uint32_t w, uint32_t h)
    return true;
 }
 
-/* Colour flush format of an attachment (software/borg FlushFormat as borg_core takes it):
- * 1 R8G8B8A8, 2 B8G8R8A8, 3 RAW32; 0 = R5G6B5 for everything else. */
 bool
 borgvk_sim_bytes_packed(VkFormat f)
 {
@@ -199,8 +187,6 @@ borgvk_sim_half2(VkFormat f)
    return f == VK_FORMAT_R16G16_SFLOAT;
 }
 
-/* Plain 8-, 16- or 32-bit channel formats of 1 to 4 channels that the fragment stage packs into RAW words
- * (compiler option bits, see borgc "Packed colour" and the half-float block); false for any other format. */
 static bool
 packed_info(VkFormat f, uint32_t *opt, unsigned *bytes)
 {
@@ -274,8 +260,6 @@ borgvk_sim_flush_format(VkFormat f)
           borgvk_sim_raw32(f) || borgvk_sim_bytes_packed(f) || borgvk_sim_half2(f) ? 3 : 0;
 }
 
-/* Whether the persistent simulator can render to this colour attachment: the direct
- * simulator, and a power-of-two-wide target of up to 1024 x 1024 pixels with depth, 4096 x 4096 without. */
 bool
 borgvk_sim_serves(const struct borgvk_image *color, bool has_depth_stencil)
 {
@@ -283,7 +267,6 @@ borgvk_sim_serves(const struct borgvk_image *color, bool has_depth_stencil)
    if (!direct || !direct[0] || !color)
       return false;
    uint32_t w = color->vk.extent.width, h = color->vk.extent.height;
-   /* The depth plane (BORG_ZB_SPI) holds 1024 x 1024 D32 pixels; colour alone goes up to 4096 x 4096. */
    const uint32_t max_dim = has_depth_stencil ? 1024 : 4096;
    return w >= 1 && w <= max_dim && h >= 1 && h <= max_dim;
 }
@@ -317,8 +300,6 @@ px_put(uint8_t *g, uint32_t cpx, const uint8_t *in)
    }
 }
 
-/* Byte address inside an attachment of pixel (x, y): 4x4 tiles of `tile_bytes`, row-major
- * tiles, row-major pixels of `px_bytes` in a tile. */
 static inline uint32_t
 tiled(uint32_t base, uint32_t w, uint32_t x, uint32_t y, uint32_t tile_bytes, uint32_t px_bytes)
 {
@@ -387,16 +368,12 @@ pack_s(enum pipe_format pfmt, uint8_t *texel, uint8_t s)
    util_format_pack_s_8uint(pfmt, texel, &s, 1);
 }
 
-/* Depth as the GPU stores it for this attachment: D16_UNORM for a 16-bit host depth,
- * D32_SFLOAT for everything else. */
 bool
 borgvk_sim_depth_is_d32(VkFormat f)
 {
    return !(f == VK_FORMAT_D16_UNORM || f == VK_FORMAT_D16_UNORM_S8_UINT);
 }
 
-/* Run one pass: `stream` holds its packets (pass, state, draws). The attachments' content
- * goes to the GPU first and what the draws changed comes back. */
 VkResult
 borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
                     struct borgvk_image *const *extra, uint32_t nextra,
@@ -410,7 +387,7 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
    if (!size)
       return VK_SUCCESS;
    const uint32_t w = size->vk.extent.width, h = size->vk.extent.height;
-   const uint32_t hp = (h + 3) & ~3u;   /* the GPU renders whole tiles: a short, narrow or odd target is padded */
+   const uint32_t hp = (h + 3) & ~3u;
    const uint32_t wp = (w + 3) & ~3u;
    if (color && !image_backed(color, w, h))
       return VK_SUCCESS;
@@ -439,7 +416,7 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
    const size_t npx = (size_t)w * h;
 
    VkResult result = VK_SUCCESS;
-   uint8_t *before = malloc(npx * (16 + 4 + 1 + 3));   /* what went in: colour, depth, stencil, attachments 1-3 */
+   uint8_t *before = malloc(npx * (16 + 4 + 1 + 3));
    if (!before)
       return VK_SUCCESS;
    uint8_t *cb = before, *zb = before + npx * 16, *sb = before + npx * 20, *eb = before + npx * 21;
@@ -596,8 +573,6 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
       }
    }
    }
-   /* Storage buffers: the bytes a draw's shaders stored, back into the application's buffer.
-    * Every strip started from the same bytes, so a byte that differs was stored. */
    for (uint32_t i = 0; i < nwb; i++)
       for (int part = np - 1; part >= 0; part--) {
          const uint8_t *g = sim.s[part].mem + sim.s[part].heap + wb[i].off;
