@@ -221,7 +221,7 @@ impl ConstPool {
 }
 
 /// Compile state of one shader: selector, constant pool, window and output bookkeeping.
-pub struct Cx {
+pub struct ShaderState {
     pub sel: Selector,
     pub cp: ConstPool,
     pub fw: FragWindow,
@@ -254,9 +254,9 @@ pub struct Cx {
     pub const_addr_chain: Option<(i32, u32)>,
 }
 
-impl Cx {
+impl ShaderState {
     pub fn new(regs: &'static [u8], is_vertex: bool, is_fragment: bool, flags: Flags) -> Self {
-        Cx {
+        ShaderState {
             sel: Selector::new(),
             cp: ConstPool::new(regs, is_vertex),
             fw: FragWindow::default(),
@@ -295,8 +295,8 @@ impl Cx {
 mod tests {
     use super::*;
 
-    fn cx(vertex: bool) -> Cx {
-        Cx::new(&[17, 18, 19], vertex, !vertex, Flags(0))
+    fn cx(vertex: bool) -> ShaderState {
+        ShaderState::new(&[17, 18, 19], vertex, !vertex, Flags(0))
     }
 
     #[test]

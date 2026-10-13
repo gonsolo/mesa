@@ -22,7 +22,7 @@ use compiler::bindings::*;
 use compiler::nir::AsDef;
 use config::{bit, Flags};
 use isel::resolve_vm;
-use state::Cx;
+use state::ShaderState;
 use std::env;
 
 fn packed_layout(flags: Flags) -> (u32, Vec<(usize, u32, u32)>) {
@@ -238,7 +238,7 @@ unsafe fn compile_nir_inner(
     if nir.is_null() {
         return 0;
     }
-    let (mut cx, entry, total) = Cx::start(nir, flags);
+    let (mut cx, entry, total) = ShaderState::start(nir, flags);
     cx.select_entry(entry);
     if !cx.check_selected() {
         return 0;

@@ -1,8 +1,8 @@
-use crate::state::{Cx, DRAW_VS_CONST_U0, DRAW_VS_CONST_WORDS};
+use crate::state::{ShaderState, DRAW_VS_CONST_U0, DRAW_VS_CONST_WORDS};
 use std::collections::HashMap;
 use crate::{FRAG_POOL_SLOT, packed_layout, BorgInstr, Ubo, NO_DST};
 
-impl Cx {
+impl ShaderState {
     pub unsafe fn epilogue_point_quads(&mut self) {
         let ctl_bits = (1u32 << 16) | (128 + 16);
         assert!(self.cp.vs_consts.len() < DRAW_VS_CONST_WORDS,

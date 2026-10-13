@@ -1,11 +1,11 @@
 use crate::regalloc::regalloc;
-use crate::state::Cx;
+use crate::state::ShaderState;
 use crate::{Ubo, NO_DST};
 use std::env;
 use std::collections::HashMap;
 
 pub fn fixed_regs(
-    cx: &Cx,
+    cx: &ShaderState,
     pos_out: &[Option<u32>; 4],
     frag_out: &[Option<u32>; 4],
     frag_z: Option<u32>,
@@ -57,7 +57,7 @@ pub fn fixed_regs(
     (forced, extra_reserved)
 }
 
-pub fn allocate(cx: &Cx, forced: &HashMap<u32, u8>, extra_reserved: &mut Vec<u8>) -> Option<HashMap<u32, u8>> {
+pub fn allocate(cx: &ShaderState, forced: &HashMap<u32, u8>, extra_reserved: &mut Vec<u8>) -> Option<HashMap<u32, u8>> {
     let is_fragment = cx.is_fragment;
     let soft: Vec<u8> = if is_fragment { vec![20, 21, 22, 23, 24, 26, 27, 28] } else { Vec::new() };
     let mut block_len: HashMap<u32, u8> = HashMap::new();

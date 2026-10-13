@@ -1,6 +1,6 @@
 use crate::encode::{emit_blob, encode, encode_fattr, encode_sout};
 use std::env;
-use crate::state::Cx;
+use crate::state::ShaderState;
 use crate::Ubo;
 use std::collections::HashMap;
 
@@ -11,7 +11,7 @@ pub struct Encoded {
     pub pending: u32,
 }
 
-pub fn encode_program(cx: &Cx, alloc: &HashMap<u32, u8>) -> Encoded {
+pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
     let mut words: Vec<u32> = Vec::new();
     let mut pos_gpr: std::collections::HashMap<(u32, u8), u8> = HashMap::new();
     let mut next_pre: u8 = 24; // r24..r29: above regalloc's low-GPR fill
@@ -152,7 +152,7 @@ pub fn encode_program(cx: &Cx, alloc: &HashMap<u32, u8>) -> Encoded {
 }
 
 pub fn build_blob(
-    cx: &Cx,
+    cx: &ShaderState,
     words: &[u32],
     n_preload: usize,
     n_body: usize,

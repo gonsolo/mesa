@@ -1,4 +1,4 @@
-use crate::state::Cx;
+use crate::state::ShaderState;
 use crate::isel::borg_isel;
 use crate::opt::classify_uniform;
 use std::env;
@@ -7,7 +7,7 @@ use crate::{collect_cf_marks, decompose_vertex_offset, packed_layout, CfMark, re
 use compiler::bindings::*;
 use compiler::nir::AsDef;
 
-impl Cx {
+impl ShaderState {
     pub unsafe fn load_const(&mut self, lc: &nir_load_const_instr) {
         let n = lc.def.num_components as usize;
         if n == 1 {

@@ -1,14 +1,14 @@
 use crate::emit::{build_blob, encode_program, Encoded};
 use crate::fixed::{allocate, fixed_regs};
 use crate::opt::{dce, fuse_fmadd, schedule_for_pressure};
-use crate::state::Cx;
+use crate::state::ShaderState;
 use crate::survey::{survey, Survey};
 use crate::{set_frag_pool, Flags, Ubo};
 use compiler::bindings::*;
 use std::env;
 
-impl Cx {
-    pub unsafe fn start(nir: *mut nir_shader, flags: Flags) -> (Cx, *mut nir_function_impl, u32) {
+impl ShaderState {
+    pub unsafe fn start(nir: *mut nir_shader, flags: Flags) -> (ShaderState, *mut nir_function_impl, u32) {
         let stage = (*nir).info.stage();
         let is_vertex = stage == MESA_SHADER_VERTEX;
         let is_fragment = stage == MESA_SHADER_FRAGMENT;
@@ -26,7 +26,7 @@ impl Cx {
         } else {
             &[17, 18, 19, 23]
         };
-        (Cx::new(regs, is_vertex, is_fragment, flags), entry, total)
+        (ShaderState::new(regs, is_vertex, is_fragment, flags), entry, total)
     }
 
     pub fn check_selected(&mut self) -> bool {
