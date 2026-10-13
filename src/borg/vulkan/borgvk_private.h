@@ -259,7 +259,6 @@ void borgvk_serial_send_viewport(const struct borgvk_vp *vp);
 void borgvk_serial_send_target(uint8_t flush_format, const float clear[4]);
 void borgvk_serial_send_pass(uint8_t flush_format, uint8_t flags);
 void borgvk_serial_send_att(uint8_t count, const uint8_t fmt[3]);
-void borgvk_serial_send_attr4(const float *attr, int n);
 /* 0xB8 / 0xB9 / 0xBA (simulator): heap write, vertex-attribute fetch descriptor, draw. */
 void borgvk_serial_send_mem(uint32_t off, const uint8_t *data, uint32_t n);
 void borgvk_serial_send_vattr(uint32_t slot, uint32_t fmt, uint32_t base, uint32_t count,
@@ -334,7 +333,6 @@ VkResult borgvk_queue_submit(struct vk_queue *queue,
                              struct vk_queue_submit *submit);
 
 /* Compiler shim (borgvk_compiler.c → Rust borgc crate). */
-void borgvk_compiler_selftest(void);
 void borgvk_layout_set_base(struct borgvk_device *device, uint8_t base[4]);
 void borgvk_compile_compute_stage(struct borgvk_device *device,
                                   const VkPipelineShaderStageCreateInfo *stage_info,
@@ -466,8 +464,6 @@ struct borgvk_vertex_attr {
 
 struct borgvk_pipeline {
    struct vk_object_base base;
-   VkCullModeFlags cull_mode;      /* from VkPipelineRasterizationStateCreateInfo */
-   VkFrontFace     front_face;
    /* VkPipelineVertexInputStateCreateInfo, so a generic draw can find
     * position and texture coordinates in the bound vertex buffers. */
    VkPrimitiveTopology       topology;

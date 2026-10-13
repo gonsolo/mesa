@@ -29,12 +29,6 @@
  * *out_len to the true blob size (so *out_len > buf_cap signals an undersized
  * buffer); the return value is the instruction count. */
 
-void
-borgvk_compiler_selftest(void)
-{
-   mesa_logi("borgvk: borgc (Rust compiler) selftest = 0x%x", borgc_selftest());
-}
-
 /* The uniform-buffer bindings the shader loads from, as a bit mask. */
 static uint32_t
 ubo_mask_used(nir_shader *nir)

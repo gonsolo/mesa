@@ -8,12 +8,6 @@
 #include "borgvk_private.h"
 #include "util/log.h"
 
-void
-borgvk_compiler_selftest(void)
-{
-   mesa_logi("borgvk: shader compiler is cache-only");
-}
-
 uint32_t
 borgvk_blob_num_varyings(const struct borgvk_shader_blob *b)
 {

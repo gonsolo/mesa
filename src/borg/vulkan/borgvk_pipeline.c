@@ -171,8 +171,6 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
       pl->mrt = mrt;
       const VkPipelineRasterizationStateCreateInfo *rs =
          pCreateInfos[i].pRasterizationState;
-      pl->cull_mode  = rs ? rs->cullMode  : VK_CULL_MODE_NONE;
-      pl->front_face = rs ? rs->frontFace : VK_FRONT_FACE_COUNTER_CLOCKWISE;
       const VkPipelineInputAssemblyStateCreateInfo *ia =
          pCreateInfos[i].pInputAssemblyState;
       pl->topology = ia ? ia->topology : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -206,8 +204,6 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
       borgvk_state_pack(&ci, device->state_reg);
       if (points)
          device->state_reg[4] &= ~3u;   /* points are not culled */
-      if (lines)
-         device->state_reg[4] &= ~3u;
       if (lines)
          device->state_reg[4] &= ~3u;
       device->state_valid = true;
