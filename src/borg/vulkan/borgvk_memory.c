@@ -1,11 +1,6 @@
 /*
  * Copyright © 2026 Andreas Wendleder
  * SPDX-License-Identifier: MIT
- *
- * Memory, buffers, images, image views and samplers for borgvk. Everything is
- * backed by plain host RAM (the real GPU is the FPGA over serial); these
- * entrypoints exist so an app can allocate/bind/map resources during init. The
- * submit path (Phase 3) reads the bound uniform buffer's mapped bytes.
  */
 #include "borgvk_private.h"
 
@@ -169,15 +164,6 @@ borgvk_DestroyBuffer(VkDevice _device, VkBuffer _buffer,
    vk_buffer_destroy(&device->vk, pAllocator, &buffer->vk);
 }
 
-/* ---- Buffer views -------------------------------------------------------
- * Was entirely missing: vkCreateBufferView/vkDestroyBufferView are
- * mandatory core Vulkan 1.0 entry points (not extension-gated like sparse
- * binding), so their dispatch-table slot was null and calling through it
- * crashed with a SEGV at instruction address 0 -- confirmed via
- * coredumpctl/gdb backtrace through vk::createBufferView() ->
- * BufferViewTestInstance -- rather than any real driver logic being wrong.
- */
-
 VKAPI_ATTR VkResult VKAPI_CALL
 borgvk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
                         const VkAllocationCallbacks *pAllocator, VkBufferView *pView)
@@ -214,13 +200,6 @@ borgvk_GetDeviceBufferMemoryRequirements(
    const VkDeviceBufferMemoryRequirements *pInfo,
    VkMemoryRequirements2 *pMemoryRequirements)
 {
-   /* align64(size, 256) overflows (wraps toward 0) for a size within 255 of
-    * UINT64_MAX. borgvk_CreateBuffer never rejects an oversized VkBuffer (it
-    * defers all real allocation to vkAllocateMemory/vkBindBufferMemory), so
-    * reporting a wrapped, too-small size here made VK-GL-CTS's
-    * api.buffer.basic.size_max_uint64 fail: it requires
-    * memoryRequirements.size >= the buffer's own requested size whenever
-    * creation succeeds. Saturate instead of wrapping. */
    uint64_t size = pInfo->pCreateInfo->size;
    pMemoryRequirements->memoryRequirements.size =
       size > UINT64_MAX - 255 ? UINT64_MAX : align64(size, 256);
@@ -254,11 +233,6 @@ borgvk_BindBufferMemory2(VkDevice _device, uint32_t bindInfoCount,
    return VK_SUCCESS;
 }
 
-/* Was entirely missing (discarded into the generic vk_cmd_queue). Needed by
- * ImageClearingTestInstance::preClearImage, which cmdFillBuffer(0)s a staging
- * buffer before uploading it into an image via CmdCopyBufferToImage -- a
- * no-op fill meant that upload copied whatever garbage the staging buffer's
- * host allocation already contained instead of zero. */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer _buffer,
                      VkDeviceSize dstOffset, VkDeviceSize size, uint32_t data)
@@ -275,16 +249,6 @@ borgvk_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer _buffer,
       ((uint32_t *)dst)[i] = data;
 }
 
-/* vkCmdUpdateBuffer: inline data embedded in the command buffer, copied into
- * the destination at submit time.  Was entirely missing -- same discard-into-
- * vk_cmd_queue story as CmdFillBuffer above, so every
- * dEQP-VK.api.fill_and_update_buffer.*.update_buffer_* case read back whatever
- * the destination already held.  (The fill_buffer_* cases in the same group
- * passed, which is exactly why this looked implemented from the group name.)
- *
- * Spec constraints that make this a plain memcpy: dataSize is at most 65536,
- * and both dstOffset and dataSize must be 4-byte multiples, so there is no
- * partial-word or oversized case to handle. */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdUpdateBuffer(VkCommandBuffer commandBuffer, VkBuffer _dstBuffer,
                        VkDeviceSize dstOffset, VkDeviceSize dataSize,
@@ -298,9 +262,6 @@ borgvk_CmdUpdateBuffer(VkCommandBuffer commandBuffer, VkBuffer _dstBuffer,
    memcpy((uint8_t *)buffer->mem->map + buffer->offset + dstOffset, pData, dataSize);
 }
 
-/* Plain buffer-to-buffer copy: also entirely missing, same no-op-via-
- * vk_cmd_queue-discard story as every other unimplemented vkCmd* in this
- * file. No format/block-size concerns at all here -- just raw bytes. */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdCopyBuffer(VkCommandBuffer commandBuffer, VkBuffer _srcBuffer,
                      VkBuffer _dstBuffer, uint32_t regionCount,
@@ -336,18 +297,6 @@ borgvk_CmdCopyBuffer2(VkCommandBuffer commandBuffer, const VkCopyBufferInfo2 *pC
 
 /* ---- Images ----------------------------------------------------------- */
 
-/* One consistent linear layout, shared by every place that reads or writes
- * image bytes (borgvk_image_size, CmdClearColorImage, CmdCopyImage,
- * CmdCopyImageToBuffer): layer-major, mip-minor -- layer 0's full mip chain
- * (level 0, level 1, ...) is contiguous, then layer 1's, etc. This is
- * internal to borgvk only (VK_IMAGE_TILING_LINEAR's real layout is
- * implementation-defined, and nothing outside this driver ever reads this
- * memory), but every reader/writer MUST agree, or an offset computed one way
- * and validated against a total computed another way silently walks off the
- * end of the allocation -- the same class of bug as the earlier CmdCopyImage
- * block-size overflow. Returns the level's size in bytes and, via
- * *width_blocks_out, its row stride (in format blocks) for callers doing
- * row-by-row copies. */
 static uint64_t
 borgvk_mip_level_size(uint32_t width, uint32_t height, uint32_t depth,
                       uint32_t level, uint32_t bs, uint32_t bw, uint32_t bh,
@@ -358,15 +307,6 @@ borgvk_mip_level_size(uint32_t width, uint32_t height, uint32_t depth,
    uint32_t d = MAX2(depth >> level, 1);
    uint32_t w_blocks = DIV_ROUND_UP(w, bw);
    uint32_t h_blocks = DIV_ROUND_UP(h, bh);
-   /* bd (block depth) is >1 only for 3D block-compressed formats (e.g. any
-    * ASTC_*x*x*_BLOCK_EXT), where a single bs-byte block already encodes a
-    * bd-texel-deep volume -- not accounting for it here overstated the level
-    * size (and every offset derived from it) by a factor of bd, which
-    * combined with the 3D copy paths' per-Z-slice addressing walked off the
-    * end of the allocation. Confirmed via coredumpctl/gdb: "corrupted
-    * double-linked list" surfacing in a later borgvk_FreeMemory, found
-    * running dEQP-VK.api.copy_and_blit...3d_to_3d.astc_3x3x3_unorm_block_ext.
-    * bd=1 for every other format, so this is a no-op there. */
    uint32_t d_blocks = DIV_ROUND_UP(d, bd);
 
    if (width_blocks_out)
@@ -374,10 +314,6 @@ borgvk_mip_level_size(uint32_t width, uint32_t height, uint32_t depth,
    return (uint64_t)w_blocks * h_blocks * d_blocks * bs;
 }
 
-/* Byte size of ONE sample plane of ONE array layer (the full mip chain, for
- * a single MSAA sample index). Multisampled images always have exactly 1
- * mip level (Vulkan requires mipLevels=1 whenever samples>1), so for those
- * this is just that single level's size. */
 static uint64_t
 borgvk_image_sample_plane_size(const struct borgvk_image *image, uint32_t bs,
                                uint32_t bw, uint32_t bh, uint32_t bd)
@@ -391,13 +327,6 @@ borgvk_image_sample_plane_size(const struct borgvk_image *image, uint32_t bs,
    return plane_size;
 }
 
-/* Byte size of ONE array layer, including all its MSAA sample planes (a
- * layer of a samples>1 image packs `image->vk.samples` consecutive sample
- * planes back to back -- see borgvk_image_size and the CmdResolveImage/
- * clear-to-all-samples code, which add a sample's plane offset on top of
- * what borgvk_image_level_offset (below) returns for this layer/level).
- * For samples==1 (every non-MSAA image) this is a no-op multiply by 1, so
- * every existing copy/blit/clear caller of this function is unaffected. */
 static uint64_t
 borgvk_image_layer_size(const struct borgvk_image *image, uint32_t bs,
                         uint32_t bw, uint32_t bh, uint32_t bd)
@@ -406,8 +335,6 @@ borgvk_image_layer_size(const struct borgvk_image *image, uint32_t bs,
           MAX2(image->vk.samples, 1);
 }
 
-/* Byte offset of (level, layer)'s data within the image's backing memory,
- * plus that level's row stride (in format blocks). */
 static uint64_t
 borgvk_image_level_offset(const struct borgvk_image *image, uint32_t level,
                           uint32_t layer, uint32_t bs, uint32_t bw, uint32_t bh,
@@ -428,15 +355,6 @@ borgvk_image_level_offset(const struct borgvk_image *image, uint32_t level,
    return (uint64_t)layer * layer_size + level_offset;
 }
 
-/* PIPE_FORMAT_Z16_UNORM_S8_UINT (VK_FORMAT_D16_UNORM_S8_UINT) has NO
- * util_format_{pack,unpack}_{z_float,s_8uint} implementation anywhere in
- * Mesa -- every one of those six functions is a bare UNREACHABLE() stub
- * (src/util/format/u_format_zs.c), confirmed by hitting the assertion
- * running dEQP-VK.api.image_clearing...d16_unorm_s8_uint. This is an
- * upstream Mesa gap, not something to route around silently: hand-roll the
- * packing here instead, using the format's own documented layout
- * (u_format.yaml: channels [UN16, UP8], no padding -- 2-byte little-endian
- * UNORM16 depth followed directly by a 1-byte stencil, 3 bytes/texel). */
 static inline bool
 borgvk_is_z16_s8(enum pipe_format fmt)
 {
@@ -458,23 +376,6 @@ borgvk_z16_s8_unpack_z(const uint8_t *texel)
    return z16 / 65535.0f;
 }
 
-/* VK_FORMAT_R4G4_UNORM_PACK8 has no entry anywhere in
- * vk_format_to_pipe_format()'s mapping table -- unlike Z16_UNORM_S8_UINT
- * (which has a valid pipe_format with stub pack/unpack functions),
- * this format has no pipe_format counterpart at all, so
- * vk_format_to_pipe_format() silently returns PIPE_FORMAT_NONE for it.
- * Every util_format_*() call downstream (pack_rgba, unpack_rgba, ...) then
- * operates on a dummy "no format" description and produces all-zero output
- * with no crash and no error -- confirmed via
- * dEQP-VK.api.image_clearing...r4g4_unorm_pack8 reading back (0,0,0,1)
- * instead of the requested clear colour, and the same format appearing as
- * a blit destination in dEQP-VK.api.copy_and_blit...blit_image failures.
- * vk_format_get_blocksize() still happens to return the numerically
- * correct answer (1 byte) purely by coincidence: its own !desc fallback
- * defaults to 1, which is simply correct here. Hand-rolled: bits [7:4] = R,
- * bits [3:0] = G (Vulkan's PACK8 component order is MSB-first), each a
- * plain 4-bit UNORM channel -- this format is never pure-integer, so only
- * the float unpack/pack path needs the special case. */
 static inline bool
 borgvk_is_r4g4_unorm(VkFormat fmt)
 {
@@ -508,13 +409,6 @@ borgvk_pack_rgba_float(VkFormat vk_fmt, enum pipe_format pfmt,
    }
 }
 
-/* Which VkClearColorValue union member a format's clear color uses. Matches
- * CTS's own classification (VK-GL-CTS's getTextureChannelClass): UINT and
- * USCALED both read .uint32, SINT and SSCALED both read .int32, everything
- * else (UNORM/SNORM/UFLOAT/SFLOAT/SRGB) reads .float32. Gallium's
- * util_format_is_pure_uint/sint alone isn't enough here -- it deliberately
- * excludes SCALED formats (pure_integer is false for "U10"/"S10"-style
- * unnormalized-but-not-pure-integer channels). */
 static inline bool
 borgvk_clear_color_is_uint(enum pipe_format pfmt)
 {
@@ -537,44 +431,10 @@ borgvk_clear_color_is_sint(enum pipe_format pfmt)
    return ch >= 0 && util_format_description(pfmt)->channel[ch].type == UTIL_FORMAT_TYPE_SIGNED;
 }
 
-/* Packs a VkClearColorValue into `pixel` for the given format, picking the
- * right union member per borgvk_clear_color_is_uint/is_sint above. For a
- * TRUE pure-integer format (UINT/SINT) this hands the union member's raw
- * array straight to util_format_pack_rgba, matching its own internal
- * is_pure_uint/is_pure_sint dispatch exactly. For a SCALED format, though,
- * util_format_pack_rgba's dispatch (which only checks pure_integer, not
- * is_scaled) would take its non-pure "else" branch and reinterpret our
- * uint32_t/int32_t array's raw BITS as a float* -- type-punning e.g. the
- * integer 51 into the float bit-pattern of a tiny denormal near zero,
- * packing to all-zero bytes. Confirmed via a debug print on
- * dEQP-VK...clear_color_image...a2b10g10r10_sscaled_pack32: is_sint=1,
- * int32={51,255,153,0} (exactly the expected value -- classification was
- * already correct), yet packed pixel={0,0,0,0}. Converting the integer
- * components to float first fixes it: that's exactly the representation a
- * SCALED format's pack_rgba_float expects (the raw integer value presented
- * as float, no normalization), which is what CTS's own reference does too
- * (VK-GL-CTS's makeClearColorValue routes SSCALED/USCALED through
- * .int32/.uint32 while the shader-facing numeric value is still the plain
- * integer, just typed as float in the pipeline -- SCALED's whole point). */
 static inline void
 borgvk_pack_clear_color(VkFormat vk_fmt, enum pipe_format pfmt, uint8_t *pixel,
                         const VkClearColorValue *color)
 {
-   /* R64_UINT/R64_SINT/R64G64_UINT/R64G64_SINT (64-bit-per-channel integer
-    * formats): util_format_pack_rgba's generic dispatch always casts src to
-    * a 32-bit-per-component pointer, matching every other integer format's
-    * clear-value convention, regardless of the format's actual channel
-    * width, so it cannot correctly pack one of these; confirmed via a debug
-    * print on dEQP-VK...clear_color_image...r64_uint: the real 64-bit clear
-    * value's low 32 bits packed correctly but the high 32 bits were
-    * silently discarded, reading back as 2147483647 (0x7FFFFFFF, exactly
-    * color->uint32[0] alone) instead of the actual huge reference value.
-    * These formats are a raw native 64-bit integer per channel with no
-    * bit-packing math at all, and CTS builds their VkClearColorValue via a
-    * straight memcpy of each 64-bit value into a consecutive uint32 pair
-    * (vktApiImageClearingTests.cpp, makeClearColorValue64), which is
-    * therefore already byte-identical to this format's storage layout; skip
-    * the pack machinery entirely and copy the union's raw bytes instead. */
    int first_ch = util_format_get_first_non_void_channel(pfmt);
    if (first_ch >= 0 && util_format_is_pure_integer(pfmt) &&
        util_format_description(pfmt)->channel[first_ch].size == 64) {
@@ -599,36 +459,6 @@ borgvk_pack_clear_color(VkFormat vk_fmt, enum pipe_format pfmt, uint8_t *pixel,
    }
 }
 
-/* For a combined depth-stencil image, a copy naming only one aspect
- * (VkBufferImageCopy::imageSubresource.aspectMask) writes/reads a buffer
- * packed with just that aspect's own element size (e.g. 1 tightly-packed
- * byte per texel for VK_IMAGE_ASPECT_STENCIL_BIT on D24_UNORM_S8_UINT), not
- * the combined format's element size (4 bytes there). Blindly using
- * vk_format_get_blocksize(image->vk.format) for that side overflowed the
- * buffer by up to 8x -- a real "double free or corruption" heap-overflow
- * abort confirmed via coredumpctl/gdb in a later borgvk_FreeMemory (found
- * running dEQP-VK.api.command_buffers.record_many_draws_primary_1, which
- * exercises a depth-stencil attachment readback). For VK_IMAGE_ASPECT_COLOR_BIT
- * this returns the image's own format unchanged, so callers that always pass
- * COLOR_BIT see no behavior change. A region can also legally name BOTH
- * VK_IMAGE_ASPECT_DEPTH_BIT and _STENCIL_BIT together (image-to-image copies
- * between two images of the same combined format): that means "copy the
- * whole combined texel" and must NOT be forwarded to
- * vk_format_get_aspect_format(), which asserts on a single-bit aspect mask
- * (confirmed via a clean assertion failure, not a crash, running
- * dEQP-VK.api.copy_and_blit...depth_stencil_aspects tests) -- so it's handled
- * as the identity case here, same as passing the format through unchanged. */
-/* True when `aspect` names only ONE aspect of a combined depth+stencil format.
- *
- * This is exactly the case where a raw whole-texel memcpy is wrong even though
- * the two element sizes happen to match. For VK_FORMAT_D24_UNORM_S8_UINT the
- * depth aspect's transfer format is X8_D24_UNORM_PACK32 -- also 4 bytes -- so
- * a `bs == img_bs` fast path would memcpy the full 32-bit texel and blow away
- * the stencil byte that shares it. The aspect-selective pack/unpack path
- * read-modify-writes only the named aspect's bits and must be used instead.
- * Confirmed by dEQP-VK.api.copy_and_blit.*.buffer_to_depthstencil.
- * buffer_offset_d24_unorm_s8_uint_{SD,S_D} reporting "Stencil comparison
- * failed" while depth compared clean. */
 static bool
 borgvk_is_partial_ds_aspect(VkFormat fmt, VkImageAspectFlags aspect)
 {
@@ -661,10 +491,6 @@ borgvk_image_size(const VkImageCreateInfo *info)
       layer_size += borgvk_mip_level_size(info->extent.width, info->extent.height,
                                           info->extent.depth, l, bs, bw, bh, bd, NULL);
 
-   /* Multisampled images pack `samples` consecutive sample planes per array
-    * layer (matches borgvk_image_layer_size's convention) -- Vulkan requires
-    * mipLevels==1 whenever samples>1, so layer_size above is already a
-    * single sample plane's size for those. No-op for samples==1. */
    uint64_t size = layer_size * MAX2(info->arrayLayers, 1) * MAX2(info->samples, 1);
    return align64(size, 256);
 }
@@ -725,23 +551,6 @@ borgvk_GetImageMemoryRequirements2(VkDevice _device,
    }
 }
 
-/* Linear subresource layout. cube.c queries this to upload its staging texture
- * row by row; report a tightly-packed linear layout matching how an app maps and
- * writes the malloc-backed image memory (mip 0 / layer 0 at offset 0).
- *
- * This computed row = width(texels) * blocksize(bytes/BLOCK) directly, with no
- * division by block width/height/depth at all -- for any block-compressed
- * format that overstated the real row pitch by a factor of the block extent
- * (e.g. 16x for a 4x4-block format, up to 27x for a 3x3x3 3D-block ASTC
- * format). Real apps and CTS alike use exactly this query to know how far
- * apart rows are before writing into a mapped LINEAR image directly, so a
- * wrong answer here doesn't fail loudly at the call site -- it silently walks
- * the write past the real allocation, corrupting unrelated heap state that
- * only aborts later. This was a live, previously-unaudited bug independent
- * of every other block-size fix earlier in this file (nothing else calls
- * this function's math). Addressed via the same shared block-aware layout
- * (borgvk_image_level_offset) as everything else, generalized to any
- * mip level/array layer instead of always assuming (0, 0). */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_GetImageSubresourceLayout2KHR(VkDevice _device, VkImage _image,
                                      const VkImageSubresource2KHR *pSubresource,
@@ -822,23 +631,6 @@ borgvk_DestroyImageView(VkDevice _device, VkImageView _view,
    vk_image_view_destroy(&device->vk, pAllocator, view);
 }
 
-/* Every other vkCmd* is recorded into the generic vk_cmd_queue and discarded
- * on reset (see the file comment in borgvk_cmd_buffer.c) -- fine for
- * rendering, since the cube's real state is read from bound
- * buffers/descriptors at submit time, not replayed commands. But
- * CmdClearColorImage's whole observable effect IS the write it makes to image
- * memory, and CTS's image_clearing tests read that memory back afterward. Left
- * unimplemented, the clear byte pattern was whatever the host malloc arena
- * happened to already contain -- which is why the *_clamp_input tests were
- * flipping Pass/Fail between otherwise-identical runs (confirmed by diffing
- * two full CTS runs where the only driver change was unrelated: whatever
- * garbage ended up in a given allocation depends on the process's prior
- * allocation history). Fixed the same way as CmdCopyImage: execute for real
- * at record time instead of queuing, addressed via the shared
- * borgvk_image_level_offset layout so every mip level/array layer in range is
- * covered, not just level 0. util_format_pack_rgba() clamps to the
- * destination format's representable range, which is exactly the
- * "_clamp_input" semantics CTS is checking. */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage _image,
                           VkImageLayout imageLayout,
@@ -855,12 +647,6 @@ borgvk_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage _image,
    uint32_t bw = vk_format_get_blockwidth(image->vk.format);
    uint32_t bh = vk_format_get_blockheight(image->vk.format);
    uint32_t bd = util_format_get_blockdepth(pfmt);
-   /* 3D-block-compressed formats (any ASTC_*x*x*_BLOCK_EXT) remain a defended
-    * gap: the format-query rejection in borgvk_GetPhysicalDeviceImageFormatProperties2
-    * doesn't reliably stop every CTS code path from creating one anyway, and
-    * getting this addressing fully right cost more debugging than this format
-    * class's near-zero real-world usage justifies. No-op rather than risk
-    * writing outside the allocation. */
    if (bd > 1)
       return;
 
@@ -882,11 +668,6 @@ borgvk_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage _image,
             uint32_t layer = range->baseArrayLayer + l;
             uint64_t off = borgvk_image_level_offset(image, level, layer, bs, bw, bh, bd,
                                                      &stride_blocks);
-            /* Multisampled images clear identically to every sample plane --
-             * a clear has no per-sample coverage, it's a uniform fill. See
-             * borgvk_image_layer_size's comment for the sample-plane packing
-             * this offset math relies on. No-op loop (1 iteration, +0 offset)
-             * for samples==1. */
             uint64_t plane_size = borgvk_image_sample_plane_size(image, bs, bw, bh, bd);
             for (uint32_t s = 0; s < MAX2(image->vk.samples, 1); s++) {
                uint8_t *dst = (uint8_t *)image->mem->map + image->offset + off +
@@ -900,15 +681,6 @@ borgvk_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage _image,
    }
 }
 
-/* Same reasoning and layout as CmdClearColorImage, but depth/stencil clears
- * can legally touch only ONE aspect of a combined format (e.g. depth-only on
- * D24_UNORM_S8_UINT), which must leave the other aspect's bits in each texel
- * untouched -- unlike a colour clear, this can't be a blind per-texel
- * memcpy/overwrite. Rather than hand-deriving each combined format's bit
- * layout, this uses gallium's own util_format_pack_z_float/pack_s_8uint,
- * which read-modify-write exactly the requested aspect's bits and leave the
- * rest alone (the same packing tables CTS's own reference implementation is
- * built on, so this matches what CTS expects by construction). */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage _image,
                                  VkImageLayout imageLayout,
@@ -925,8 +697,6 @@ borgvk_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage _image,
    uint32_t bw = vk_format_get_blockwidth(image->vk.format);
    uint32_t bh = vk_format_get_blockheight(image->vk.format);
    uint32_t bd = util_format_get_blockdepth(pfmt);
-   /* See the matching comment in CmdClearColorImage: 3D-block-compressed
-    * formats remain a defended gap, not a supported combination. */
    if (bd > 1)
       return;
    uint8_t stencil8 = (uint8_t)pDepthStencil->stencil;
@@ -948,8 +718,6 @@ borgvk_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage _image,
                                                      &stride_blocks);
             uint64_t texel_count = (uint64_t)stride_blocks * h_blocks * d;
 
-            /* See the matching comment in CmdClearColorImage: a clear fills
-             * every sample plane identically. No-op loop for samples==1. */
             uint64_t plane_size = borgvk_image_sample_plane_size(image, bs, bw, bh, bd);
             for (uint32_t s = 0; s < MAX2(image->vk.samples, 1); s++) {
                uint8_t *base = (uint8_t *)image->mem->map + image->offset + off +
@@ -975,13 +743,6 @@ borgvk_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage _image,
    }
 }
 
-/* Clears a rectangular sub-region of one image view's base mip level, across
- * `layerCount` array layers starting at the view's base layer + baseLayer.
- * Shared by borgvk_CmdBeginRendering (VK_ATTACHMENT_LOAD_OP_CLEAR) and
- * borgvk_CmdClearAttachments -- both are "clear this rectangle of this
- * attachment" in the end, just triggered differently. Unlike
- * CmdClearColorImage/CmdClearDepthStencilImage (which always clear a whole
- * subresource), this is bounded to an arbitrary rect within the level. */
 static void
 borgvk_clear_attachment_rect(struct vk_image_view *view, VkImageAspectFlags aspectMask,
                              const VkClearValue *clearValue, VkRect2D rect,
@@ -999,9 +760,6 @@ borgvk_clear_attachment_rect(struct vk_image_view *view, VkImageAspectFlags aspe
    uint32_t bw = vk_format_get_blockwidth(image->vk.format);
    uint32_t bh = vk_format_get_blockheight(image->vk.format);
    uint32_t bd = util_format_get_blockdepth(pfmt);
-   /* See the matching comment in CmdClearColorImage: 3D-block-compressed
-    * formats remain a defended gap, not a supported combination -- and
-    * attachments are never 3D images with real depth slices in practice. */
    if (bd > 1)
       return;
 
@@ -1021,8 +779,6 @@ borgvk_clear_attachment_rect(struct vk_image_view *view, VkImageAspectFlags aspe
       uint64_t off = borgvk_image_level_offset(image, level, layer, bs, bw, bh, bd,
                                                &stride_texels);
 
-      /* See the matching comment in CmdClearColorImage: a clear fills every
-       * sample plane identically. No-op loop for samples==1. */
       uint64_t plane_size = borgvk_image_sample_plane_size(image, bs, bw, bh, bd);
       for (uint32_t s = 0; s < MAX2(image->vk.samples, 1); s++) {
          uint8_t *level_base = (uint8_t *)image->mem->map + image->offset + off +
@@ -1054,23 +810,9 @@ borgvk_clear_attachment_rect(struct vk_image_view *view, VkImageAspectFlags aspe
    }
 }
 
-/* Defined below (near CmdResolveImage); forward-declared here so
- * CmdEndRendering2EXT can call it for implicit render-pass resolve. */
 static void borgvk_resolve_region(struct borgvk_image *src, struct borgvk_image *dst,
                                   const VkImageResolve *reg);
 
-/* borgvk never overrides RenderPass/Framebuffer creation, nor the legacy
- * CmdBeginRenderPass(2)/CmdEndRenderPass(2) entrypoints -- Mesa's own
- * vk_common_* runtime code (src/vulkan/runtime/vk_render_pass.c) emulates
- * all of that generically for any driver, always resolving down to a
- * VkRenderingInfo and calling the driver's CmdBeginRendering, whether the
- * app used the legacy API or dynamic rendering directly. This was the only
- * entrypoint actually missing: without it, every attachment's
- * VK_ATTACHMENT_LOAD_OP_CLEAR silently did nothing (same discard-into-
- * vk_cmd_queue story as every other unimplemented vkCmd* in this file), and
- * CmdClearAttachments had no way to resolve its attachment indices back to
- * real images -- so this also captures the current attachment set on the
- * command buffer for CmdClearAttachments to use. */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRenderingInfo)
 {
@@ -1096,10 +838,6 @@ borgvk_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *p
       VK_FROM_HANDLE(vk_image_view, view, att->imageView);
       VK_FROM_HANDLE(vk_image_view, resolve_view, att->resolveImageView);
       cmd->color_views[i] = view;
-      /* resolveMode is always NONE or AVERAGE for a color attachment per
-       * spec, and resolveImageView is only set when a resolve was actually
-       * requested, so a non-NULL view is a sufficient "should resolve"
-       * signal without also checking resolveMode. */
       cmd->color_resolve_views[i] = resolve_view;
       if (view && att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
          borgvk_clear_attachment_rect(view, VK_IMAGE_ASPECT_COLOR_BIT, &att->clearValue,
@@ -1133,34 +871,12 @@ borgvk_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *p
    }
 }
 
-/* A direct vkCmdEndRendering call resolves to vk_common_CmdEndRendering,
- * which forwards to CmdEndRendering2EXT below -- but the LEGACY render-pass
- * path (vkCmdEndRenderPass/2, which is how CTS's clear_color_attachment MSAA
- * tests actually end their render pass) does NOT go through
- * vk_common_CmdEndRendering at all: vk_common_CmdEndRenderPass2 calls
- * `disp->CmdEndRendering` on the main dispatch table directly
- * (src/vulkan/runtime/vk_render_pass.c). Since borgvk never gave that a real
- * borgvk_ symbol, it fell into the same generic record-and-discard fallback
- * that bit CmdBeginRenderPass earlier (see that function's comment) -- a
- * debug print confirmed CmdBeginRendering fires (so the resolve views below
- * get captured fine) but CmdEndRendering2EXT never did. Same fix: an
- * explicit thin wrapper instead of relying on it being reached indirectly. */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdEndRendering(VkCommandBuffer commandBuffer)
 {
    vk_common_CmdEndRendering(commandBuffer);
 }
 
-/* This is where a multisample resolve actually has to happen: CTS's
- * clear_color_attachment MSAA tests' resolve is driven entirely by
- * VkSubpassDescription::pResolveAttachments -- there is no explicit
- * vkCmdResolveImage call anywhere in that path (confirmed by reading
- * ClearAttachmentTestInstance::iterate() in CTS). Mesa's
- * vk_common_CmdEndRenderPass2 emulation turns that subpass resolve
- * attachment into VkRenderingAttachmentInfo::resolveImageView/resolveMode
- * when it calls our CmdBeginRendering, which is why the resolve targets are
- * captured there and performed here at end-of-rendering, matching real
- * Vulkan's resolve-at-subpass-end timing. */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdEndRendering2EXT(VkCommandBuffer commandBuffer,
                            const VkRenderingEndInfoEXT *pRenderingEndInfo)
@@ -1169,7 +885,7 @@ borgvk_CmdEndRendering2EXT(VkCommandBuffer commandBuffer,
    struct borgvk_command_buffer *cmd =
       container_of(vk_cmd, struct borgvk_command_buffer, vk);
 
-   borgvk_flush_draws(cmd);   /* the pass's draws land in the attachment before it is resolved */
+   borgvk_flush_draws(cmd);
 
    for (uint32_t i = 0; i < cmd->color_attachment_count; i++) {
       struct vk_image_view *view = cmd->color_views[i];
@@ -1207,10 +923,6 @@ borgvk_CmdEndRendering2EXT(VkCommandBuffer commandBuffer,
    cmd->stencil_view = NULL;
 }
 
-/* Was entirely missing -- discarded into the generic vk_cmd_queue like every
- * other unimplemented vkCmd*. Resolves each VkClearAttachment against the
- * attachment set borgvk_CmdBeginRendering captured on this command buffer,
- * then does a real rect clear (borgvk_clear_attachment_rect) per VkClearRect. */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdClearAttachments(VkCommandBuffer commandBuffer, uint32_t attachmentCount,
                            const VkClearAttachment *pAttachments,
@@ -1252,18 +964,6 @@ borgvk_CmdClearAttachments(VkCommandBuffer commandBuffer, uint32_t attachmentCou
    }
 }
 
-/* Legacy render-pass entrypoints (CmdBeginRenderPass[2], CmdNextSubpass[2],
- * CmdEndRenderPass[2]) are NOT auto-serviced by vk_common_* the way they are
- * in drivers without their own generic-record-and-discard fallback: borgvk's
- * main dispatch table fills any vkCmd* without a borgvk_ symbol from
- * vk_cmd_enqueue_device_entrypoints (record into the command buffer's
- * vk_cmd_queue, discarded on reset -- see the file comment in
- * borgvk_cmd_buffer.c), and that fallback applies to these entrypoints too
- * since we never gave them real borgvk_ symbols. That silently ate every
- * legacy-render-pass CmdBeginRenderPass call, so vk_common_CmdBeginRenderPass2's
- * translation to our CmdBeginRendering (see the comment above it) was never
- * reached. Fix: explicit thin wrappers that call the vk_common_* emulation
- * directly instead of relying on it being picked up as a fallback. */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdBeginRenderPass(VkCommandBuffer commandBuffer,
                           const VkRenderPassBeginInfo *pRenderPassBegin,
@@ -1307,9 +1007,6 @@ borgvk_CmdEndRenderPass2(VkCommandBuffer commandBuffer,
    vk_common_CmdEndRenderPass2(commandBuffer, pSubpassEndInfo);
 }
 
-/* Image copy for readback: both images are linear host-RAM; just memcpy the
- * region, addressed via the shared borgvk_image_level_offset layout so every
- * mip level/array layer a region names is handled, not just level 0/layer 0. */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
                     VkImage srcImage, VkImageLayout srcImageLayout,
@@ -1323,15 +1020,6 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
        !src->mem->map || !dst->mem->map)
       return;
 
-   /* Strides and extents must be counted in compressed blocks, not texels:
-    * vk_format_get_blocksize() returns bytes per BLOCK (e.g. 16 B covering a
-    * 4x4 texel block for ETC2/EAC), not bytes per texel. Multiplying texel
-    * width/height directly by bs overflowed the destination allocation for
-    * any block-compressed format -- surfaced as a heap "double free or
-    * corruption" abort in a later borgvk_FreeMemory, not here. VkImageCopy
-    * offsets/extents are always block-aligned per the spec, so the divisions
-    * below are exact. For uncompressed formats bw = bh = 1 and this is
-    * unchanged from the original per-texel math. */
    enum pipe_format src_pfmt = vk_format_to_pipe_format(src->vk.format);
    enum pipe_format dst_pfmt = vk_format_to_pipe_format(dst->vk.format);
    uint32_t src_bs = vk_format_get_blocksize(src->vk.format);
@@ -1342,20 +1030,12 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
    uint32_t dst_bw = vk_format_get_blockwidth(dst->vk.format);
    uint32_t dst_bh = vk_format_get_blockheight(dst->vk.format);
    uint32_t dst_bd = util_format_get_blockdepth(dst_pfmt);
-   /* See the matching comment in CmdClearColorImage: 3D-block-compressed
-    * formats remain a defended gap, not a supported combination. */
    if (src_bd > 1 || dst_bd > 1)
       return;
 
    for (uint32_t r = 0; r < regionCount; r++) {
       const VkImageCopy *reg = &pRegions[r];
 
-      /* Element size actually moved per texel: for a combined depth-stencil
-       * image with an aspect-selective region this differs from the
-       * image's own (combined) block size -- see borgvk_aspect_block_size.
-       * Addressing within each image still uses its own combined format
-       * (that's the real backing layout); src_elem_bs/dst_elem_bs is only
-       * how many bytes of each texel are actually copied. */
       uint32_t src_elem_bs, src_elem_bw, src_elem_bh;
       uint32_t dst_elem_bs, dst_elem_bw, dst_elem_bh;
       borgvk_aspect_block_size(src->vk.format, reg->srcSubresource.aspectMask,
@@ -1367,32 +1047,8 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
       uint32_t w_blocks = DIV_ROUND_UP(reg->extent.width, src_elem_bw);
       uint32_t h_blocks = DIV_ROUND_UP(reg->extent.height, src_elem_bh);
 
-      /* A copy between a 2D (array) image and a 3D image is a spec-defined
-       * special case (VUID-vkCmdCopyImage-srcImage-07743 and friends): the
-       * 2D side's array layers correspond to Z slices within the 3D image's
-       * SINGLE array layer, not to separate array layers of their own (a 3D
-       * image always has arrayLayers=1). Treating each slice as a real array
-       * layer on the 3D side -- which borgvk_image_level_offset's "layer"
-       * parameter always multiplies by the image's full per-layer size --
-       * walked off the end of the 3D image's allocation for slice > 0. Real
-       * bug, not a corner case: confirmed via coredumpctl/gdb, a heap
-       * corruption surfacing later as a SEGV inside CTS's own posix_memalign
-       * while logging the (unrelated, already-corrupted) test result, found
-       * running dEQP-VK.api.copy_and_blit.core.image_to_image.3d_images.*. */
       bool src_3d = src->vk.image_type == VK_IMAGE_TYPE_3D;
       bool dst_3d = dst->vk.image_type == VK_IMAGE_TYPE_3D;
-      /* For a 3D image whose format is 3D-block-compressed (e.g. any
-       * ASTC_*x*x*_BLOCK_EXT), Z must be walked in blocks, not texels --
-       * VkImageCopy offsets/extents for such a format are block-aligned per
-       * spec, and a single bs-byte block already covers `bd` texels of
-       * depth (see the borgvk_mip_level_size comment). Getting this wrong
-       * doesn't just miscount slices, it multiplies the per-slice offset by
-       * the wrong stride: confirmed via coredumpctl/gdb, a
-       * "corrupted double-linked list" surfacing later in borgvk_FreeMemory,
-       * running dEQP-VK.api.copy_and_blit...3d_to_3d.astc_3x3x3_*. A 2D
-       * image can never use a 3D-block-compressed format, so bd is always 1
-       * whenever only one side is 3D -- this reduces to the prior
-       * texel-granular stepping for every other case. */
       uint32_t slice_bd = src_3d ? src_bd : (dst_3d ? dst_bd : 1);
       uint32_t sliceCount = (src_3d || dst_3d) ?
          DIV_ROUND_UP(reg->extent.depth, slice_bd) :
@@ -1428,21 +1084,6 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
                     + (VkDeviceSize)(reg->dstOffset.x / dst_bw) * dst_bs;
 
          if (src_elem_bs == src_bs && dst_elem_bs == dst_bs) {
-            /* Common case (whole-texel copy, e.g. plain colour formats):
-             * one memcpy per row. Row advance MUST use the destination
-             * image's own real row stride (dst_stride_blocks, its full mip
-             * level width), not the copy region's width (w_blocks) -- those
-             * only coincide for a full-image-width copy, which is why every
-             * earlier single-region "whole image" test passed while a
-             * partial-width region (e.g. any multi-region test placing
-             * several sub-rectangles) silently corrupted adjacent rows: a
-             * region narrower than the image walked into the next row's
-             * bytes early, drifting further with every row. Found via a
-             * pixel-level diff against CTS's reference image, running
-             * dEQP-VK.api.copy_and_blit.core.image_to_image.all_formats.
-             * color.2d_to_2d (100% of that group was failing this way). */
-            /* A multisampled image packs one plane per sample; both sides have the
-             * same sample count (VUID-vkCmdCopyImage-srcImage-00136). */
             uint64_t src_plane = borgvk_image_sample_plane_size(src, src_bs, src_bw, src_bh, src_bd);
             uint64_t dst_plane = borgvk_image_sample_plane_size(dst, dst_bs, dst_bw, dst_bh, dst_bd);
             for (uint32_t smp = 0; smp < MAX2(src->vk.samples, 1); smp++)
@@ -1452,19 +1093,6 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
                          (size_t)w_blocks * elem_bs);
                }
          } else {
-            /* Aspect-selective copy on a combined format (e.g. STENCIL_BIT
-             * only, image-to-image, between two combined depth-stencil
-             * images): both sides are real images with their own full
-             * combined-format texel storage, not a tightly-packed buffer, so
-             * the row/column stride here must use dst_bs/src_bs (the real
-             * per-texel spacing), not dst_elem_bs/elem_bs. And a naive
-             * "copy the first N bytes of each texel" is wrong whenever the
-             * aspect isn't literally stored first (true for stencil in
-             * several Mesa depth-stencil pipe formats) -- use the same real
-             * per-aspect pack/unpack as the depth/stencil copy-to/from-buffer
-             * paths, including the PIPE_FORMAT_Z16_UNORM_S8_UINT special
-             * case (see borgvk_is_z16_s8's comment: every one of its six
-             * pack/unpack functions is an UNREACHABLE() stub in Mesa itself). */
             VkImageAspectFlags aspect = reg->srcSubresource.aspectMask;
             bool stencil = (aspect & VK_IMAGE_ASPECT_STENCIL_BIT) != 0;
 
@@ -1500,32 +1128,6 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
    }
 }
 
-/* Like CmdClearColorImage, this was entirely missing -- discarded into the
- * generic vk_cmd_queue and never executed, so a blit's destination read back
- * whatever the image's fresh host allocation already contained. This was the
- * single largest concentration of failures anywhere in the api/info surface
- * (~44k of ~79k total). Unlike CmdCopyImage, a blit can rescale (src/dst
- * region sizes differ) and convert between compatible formats, so texels
- * are addressed and copied individually rather than row-at-once, going
- * through util_format_{un,}pack_rgba (same normalized intermediate as
- * CmdClearColorImage) for the format conversion.
- *
- * Nearest is exact. Linear does real bilinear (2D) / trilinear (3D)
- * filtering by blending the up-to-8 texels around the sampled position --
- * always through float, matching Vulkan's own requirement that only
- * non-integer formats support VK_FILTER_LINEAR (borgvk's own
- * borgvk_optimal_features only grants SAMPLED_IMAGE_FILTER_LINEAR to
- * non-integer color formats, so this assumption holds for any image this
- * driver would let an app filter in the first place).
- *
- * Blit source/destination formats are never block-compressed (invalid usage
- * per spec: VUID-vkCmdBlitImage-srcImage-06421 and friends), so block
- * width/height/depth are always 1 here and addressing reduces to plain texel
- * indexing -- no need for the block-aware machinery CmdCopyImage needs. */
-/* Decode a block-compressed (BC1-7) image into R32G32B32A32_SFLOAT, level by level,
- * layer by layer, so the generic blit path can read it as an ordinary image.  The
- * compressed texels in image memory are left alone (they must read back unchanged).
- * Returns the decoded buffer (caller frees) and describes it in *out/*mem. */
 static void *
 borgvk_decode_compressed_image(const struct borgvk_image *src,
                                struct borgvk_image *out,
@@ -1587,8 +1189,6 @@ borgvk_CmdBlitImage(VkCommandBuffer commandBuffer,
    uint32_t src_bs = vk_format_get_blocksize(src->vk.format);
    uint32_t dst_bs = vk_format_get_blocksize(dst->vk.format);
 
-   /* A block-compressed destination cannot be blitted to (BLIT_DST is not advertised). A
-    * BC source is decoded to float first; ETC2/ASTC are not advertised at all. */
    if (vk_format_get_blockwidth(dst->vk.format) > 1 ||
        vk_format_get_blockheight(dst->vk.format) > 1)
       return;
@@ -1605,9 +1205,6 @@ borgvk_CmdBlitImage(VkCommandBuffer commandBuffer,
       src_bs = vk_format_get_blocksize(src->vk.format);
    }
 
-   /* Per spec, blit source/dest formats must be from the same numeric-format
-    * class (both pure-uint, both pure-sint, or neither), so one class check
-    * per region -- taken from src -- applies to both sides. */
    bool is_uint = util_format_is_pure_uint(src_pfmt);
    bool is_sint = util_format_is_pure_sint(src_pfmt);
 
@@ -1616,16 +1213,6 @@ borgvk_CmdBlitImage(VkCommandBuffer commandBuffer,
 
    for (uint32_t r = 0; r < regionCount; r++) {
       const VkImageBlit *reg = &pRegions[r];
-      /* A depth or stencil aspect has no "RGBA" concept at all -- Mesa's
-       * format table doesn't populate pack_rgba/unpack_rgba for pure
-       * depth/stencil pipe formats, so calling them crashed through a null
-       * function pointer. Confirmed via coredumpctl/gdb: SIGSEGV running
-       * dEQP-VK...blit_image...depth_stencil.1d.d16_unorm_d16_unorm. Use the
-       * same z_float/s_8uint helpers CmdClearDepthStencilImage and the
-       * depth/stencil copy paths already rely on instead. Stencil is never a
-       * valid VK_FILTER_LINEAR target per spec (integer data, no filtering
-       * feature ever granted for it), so it always samples nearest
-       * regardless of `filter`. */
       bool is_depth_aspect = (reg->srcSubresource.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT) != 0;
       bool is_stencil_aspect = (reg->srcSubresource.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT) != 0;
 
@@ -1636,9 +1223,6 @@ borgvk_CmdBlitImage(VkCommandBuffer commandBuffer,
       int32_t dst_z0 = MIN2(reg->dstOffsets[0].z, reg->dstOffsets[1].z);
       int32_t dst_z1 = MAX2(reg->dstOffsets[0].z, reg->dstOffsets[1].z);
 
-      /* Signed extents of each box, corner 0 to corner 1 -- negative when the
-       * region is flipped on that axis. The parametric formulas below give
-       * the correct (possibly mirrored) source position regardless of sign. */
       float dst_ex = (float)(reg->dstOffsets[1].x - reg->dstOffsets[0].x);
       float dst_ey = (float)(reg->dstOffsets[1].y - reg->dstOffsets[0].y);
       float dst_ez = (float)(reg->dstOffsets[1].z - reg->dstOffsets[0].z);
@@ -1685,18 +1269,6 @@ borgvk_CmdBlitImage(VkCommandBuffer commandBuffer,
                   float sx = reg->srcOffsets[0].x + wx * src_ex;
                   uint8_t *dtexel = drow + (uint64_t)dx * dst_bs;
 
-                  /* A combined DEPTH+STENCIL region has both aspect bits set
-                   * at once (CTS's defaultDSSourceLayer does exactly this),
-                   * so stencil and depth/color must be handled as
-                   * independent writes to the same texel rather than a
-                   * mutually-exclusive dispatch -- an earlier else-if chain
-                   * here meant a combined-aspect blit only ever wrote
-                   * stencil (nearest-filter case) or silently dropped depth
-                   * entirely (linear-filter case, since is_stencil_aspect
-                   * alone routed the whole texel through the nearest/stencil
-                   * path). Stencil is never filtered (no LINEAR feature ever
-                   * granted for it), so it always samples nearest regardless
-                   * of `filter`. */
                   int32_t six = CLAMP((int32_t)floorf(sx), 0, (int32_t)src_level_w - 1);
                   int32_t siy = CLAMP((int32_t)floorf(sy), 0, (int32_t)src_level_h - 1);
                   int32_t siz = CLAMP((int32_t)floorf(sz), 0, (int32_t)src_level_d - 1);
@@ -1704,10 +1276,6 @@ borgvk_CmdBlitImage(VkCommandBuffer commandBuffer,
                   if (is_stencil_aspect) {
                      const uint8_t *stexel = src_base +
                         (((uint64_t)siz * src_level_h + siy) * src_stride_texels + six) * src_bs;
-                     /* PIPE_FORMAT_Z16_UNORM_S8_UINT has no
-                      * pack_s_8uint/unpack_s_8uint either -- see
-                      * borgvk_is_z16_s8's comment. Byte 2 of its 3-byte
-                      * texel is the stencil value directly. */
                      uint8_t s = borgvk_is_z16_s8(src_pfmt) ? stexel[2] : 0;
                      if (!borgvk_is_z16_s8(src_pfmt))
                         util_format_unpack_s_8uint(src_pfmt, &s, stexel, 1);
@@ -1729,9 +1297,6 @@ borgvk_CmdBlitImage(VkCommandBuffer commandBuffer,
                         else
                            util_format_pack_z_float(dst_pfmt, dtexel, &z, 1);
                      } else {
-                        /* Bilinear (2D) / trilinear (3D), texel-center
-                         * sampling with edge clamping -- degenerates to a
-                         * single sample per axis with only one texel. */
                         float fx = sx - 0.5f, fy = sy - 0.5f, fz = sz - 0.5f;
                         int32_t x0 = (int32_t)floorf(fx), y0 = (int32_t)floorf(fy), z0 = (int32_t)floorf(fz);
                         float tx = fx - (float)x0, ty = fy - (float)y0, tz = fz - (float)z0;
@@ -1788,9 +1353,6 @@ borgvk_CmdBlitImage(VkCommandBuffer commandBuffer,
                            borgvk_pack_rgba_float(dst->vk.format, dst_pfmt, dtexel, v);
                         }
                      } else {
-                        /* Bilinear (2D) / trilinear (3D), texel-center
-                         * sampling with edge clamping -- degenerates to a
-                         * single sample per axis with only one texel. */
                         float fx = sx - 0.5f, fy = sy - 0.5f, fz = sz - 0.5f;
                         int32_t x0 = (int32_t)floorf(fx), y0 = (int32_t)floorf(fy), z0 = (int32_t)floorf(fz);
                         float tx = fx - (float)x0, ty = fy - (float)y0, tz = fz - (float)z0;
@@ -1834,17 +1396,6 @@ borgvk_CmdBlitImage(VkCommandBuffer commandBuffer,
    free(src_decoded);
 }
 
-/* Like CmdClearColorImage, this was entirely missing -- discarded into the
- * generic vk_cmd_queue like every other unimplemented vkCmd*. That's the
- * actual reason CmdClearColorImage's fix alone didn't make image_clearing
- * tests pass: CTS's own readback path (ImageClearingTestInstance::readImage)
- * doesn't read the image directly, it always goes through
- * vkCmdCopyImageToBuffer into a host-visible staging buffer first. With this
- * missing, that staging buffer was never actually written, so verification
- * saw whatever the buffer's fresh host allocation already contained,
- * regardless of what CmdClearColorImage or anything else wrote to the image.
- * Addressed via the shared borgvk_image_level_offset layout so every mip
- * level CTS reads back (not just level 0) sees real data. */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdCopyImageToBuffer(VkCommandBuffer commandBuffer,
                             VkImage _srcImage, VkImageLayout srcImageLayout,
@@ -1861,21 +1412,12 @@ borgvk_CmdCopyImageToBuffer(VkCommandBuffer commandBuffer,
    uint32_t img_bw = vk_format_get_blockwidth(src->vk.format);
    uint32_t img_bh = vk_format_get_blockheight(src->vk.format);
    uint32_t img_bd = util_format_get_blockdepth(vk_format_to_pipe_format(src->vk.format));
-   /* See the matching comment in CmdClearColorImage: 3D-block-compressed
-    * formats remain a defended gap, not a supported combination. */
    if (img_bd > 1)
       return;
 
    for (uint32_t r = 0; r < regionCount; r++) {
       const VkBufferImageCopy *reg = &pRegions[r];
 
-      /* The buffer side is packed with the SELECTED ASPECT's element size,
-       * which for an aspect-selective region on a combined depth-stencil
-       * image (e.g. VK_IMAGE_ASPECT_STENCIL_BIT on D24_UNORM_S8_UINT) is
-       * smaller than the image's own combined element size -- see
-       * borgvk_aspect_block_size. Using the combined size for the buffer
-       * side overflowed it by up to 8x, a real heap-overflow "double free
-       * or corruption" abort confirmed via coredumpctl/gdb. */
       uint32_t bs, bw, bh;
       borgvk_aspect_block_size(src->vk.format, reg->imageSubresource.aspectMask,
                                &bs, &bw, &bh);
@@ -1890,14 +1432,6 @@ borgvk_CmdCopyImageToBuffer(VkCommandBuffer commandBuffer,
       uint32_t img_h_blocks = reg->bufferImageHeight ?
          DIV_ROUND_UP(reg->bufferImageHeight, bh) : h_blocks;
       uint64_t layer_pitch = (uint64_t)row_len_blocks * img_h_blocks * bs;
-      /* A 3D image has exactly one array layer (imageSubresource.layerCount
-       * is always 1); its depth slices are what iterate here instead, via
-       * imageExtent.depth. Without this, only the first Z slice (z=0) was
-       * ever copied -- imageOffset.z was silently ignored -- so a 3D
-       * image's remaining slices in the destination buffer stayed whatever
-       * that buffer's fresh host allocation already contained. Found via
-       * dEQP-VK.api.image_clearing...clear_depth_stencil_image.3d.*
-       * reading back Depth:0 for every slice past the first. */
       bool img_3d = src->vk.image_type == VK_IMAGE_TYPE_3D;
       uint32_t sliceCount = img_3d ?
          DIV_ROUND_UP(MAX2(reg->imageExtent.depth, 1), img_bd) :
@@ -1928,13 +1462,6 @@ borgvk_CmdCopyImageToBuffer(VkCommandBuffer commandBuffer,
                       (size_t)w_blocks * bs);
             }
          } else if (reg->imageSubresource.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT) {
-            /* A raw byte-copy of the first `bs` bytes of each combined texel
-             * would be wrong here -- stencil isn't necessarily stored in the
-             * texel's first byte(s) (Mesa's combined depth-stencil pipe
-             * formats put depth first, stencil last). Use gallium's own
-             * stencil pack/unpack so this matches CTS's own reference
-             * layout regardless of the combined format's actual bit
-             * packing. */
             enum pipe_format img_pfmt = vk_format_to_pipe_format(src->vk.format);
             bool z16_s8 = borgvk_is_z16_s8(img_pfmt);
             for (uint32_t row = 0; row < h_blocks; row++) {
@@ -1950,12 +1477,6 @@ borgvk_CmdCopyImageToBuffer(VkCommandBuffer commandBuffer,
                }
             }
          } else {
-            /* Depth-only extraction where the aspect-only format isn't the
-             * same size as the combined format (e.g. D32_SFLOAT_S8_UINT's
-             * depth-only view is 4 B vs its own 8 B combined texel).
-             * util_format_unpack_z_float/pack_z_float convert through a
-             * normalized float intermediate, so this is correct regardless
-             * of either format's exact bit layout. */
             enum pipe_format img_pfmt = vk_format_to_pipe_format(src->vk.format);
             enum pipe_format dst_pfmt = vk_format_to_pipe_format(
                vk_format_get_aspect_format(src->vk.format, VK_IMAGE_ASPECT_DEPTH_BIT));
@@ -1982,17 +1503,6 @@ borgvk_CmdCopyImageToBuffer(VkCommandBuffer commandBuffer,
    }
 }
 
-/* Upload counterpart of CmdCopyImageToBuffer, same reasoning: was entirely
- * missing (discarded into the generic vk_cmd_queue), which broke every test
- * that pre-fills an image from a host buffer before checking a partial
- * operation against it. Concretely: ImageClearingTestInstance::preClearImage
- * cmdFillBuffer(0)s a staging buffer then vkCmdCopyBufferToImage()s it across
- * every mip level and array layer *before* the real (possibly partial-range)
- * clear -- so pixels/layers the real clear doesn't touch are supposed to read
- * back as zero. Without this, they read back whatever the image's fresh host
- * allocation already contained, which is why clear_color_image's
- * multiple_layers/remaining_array_layers* groups kept failing even after
- * CmdClearColorImage and CmdCopyImageToBuffer were both fixed. */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdCopyBufferToImage(VkCommandBuffer commandBuffer,
                             VkBuffer _srcBuffer, VkImage _dstImage,
@@ -2009,17 +1519,12 @@ borgvk_CmdCopyBufferToImage(VkCommandBuffer commandBuffer,
    uint32_t img_bw = vk_format_get_blockwidth(dst->vk.format);
    uint32_t img_bh = vk_format_get_blockheight(dst->vk.format);
    uint32_t img_bd = util_format_get_blockdepth(vk_format_to_pipe_format(dst->vk.format));
-   /* See the matching comment in CmdClearColorImage: 3D-block-compressed
-    * formats remain a defended gap, not a supported combination. */
    if (img_bd > 1)
       return;
 
    for (uint32_t r = 0; r < regionCount; r++) {
       const VkBufferImageCopy *reg = &pRegions[r];
 
-      /* See the matching comment in CmdCopyImageToBuffer: the buffer side is
-       * packed with the selected aspect's element size, not the image's
-       * combined element size. */
       uint32_t bs, bw, bh;
       borgvk_aspect_block_size(dst->vk.format, reg->imageSubresource.aspectMask,
                                &bs, &bw, &bh);
@@ -2033,9 +1538,6 @@ borgvk_CmdCopyBufferToImage(VkCommandBuffer commandBuffer,
       uint32_t img_h_blocks = reg->bufferImageHeight ?
          DIV_ROUND_UP(reg->bufferImageHeight, bh) : h_blocks;
       uint64_t layer_pitch = (uint64_t)row_len_blocks * img_h_blocks * bs;
-      /* See the matching comment in CmdCopyImageToBuffer: a 3D image's depth
-       * slices iterate via imageExtent.depth, not imageSubresource.layerCount
-       * (always 1 for a 3D image). */
       bool img_3d = dst->vk.image_type == VK_IMAGE_TYPE_3D;
       uint32_t sliceCount = img_3d ?
          DIV_ROUND_UP(MAX2(reg->imageExtent.depth, 1), img_bd) :
@@ -2066,11 +1568,6 @@ borgvk_CmdCopyBufferToImage(VkCommandBuffer commandBuffer,
                       (size_t)w_blocks * bs);
             }
          } else if (reg->imageSubresource.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT) {
-            /* See the matching comment in CmdCopyImageToBuffer: a raw byte
-             * write into the first `bs` bytes of the combined texel would
-             * land in the wrong bit position (and clobber depth bits) --
-             * use gallium's stencil pack, which writes only the stencil
-             * bits and preserves the rest. */
             enum pipe_format img_pfmt = vk_format_to_pipe_format(dst->vk.format);
             bool z16_s8 = borgvk_is_z16_s8(img_pfmt);
             for (uint32_t row = 0; row < h_blocks; row++) {
@@ -2085,9 +1582,6 @@ borgvk_CmdCopyBufferToImage(VkCommandBuffer commandBuffer,
                }
             }
          } else {
-            /* Depth-only upload where the aspect-only format isn't the same
-             * size as the combined format -- see the matching comment in
-             * CmdCopyImageToBuffer. */
             enum pipe_format img_pfmt = vk_format_to_pipe_format(dst->vk.format);
             enum pipe_format src_pfmt = vk_format_to_pipe_format(
                vk_format_get_aspect_format(dst->vk.format, VK_IMAGE_ASPECT_DEPTH_BIT));
@@ -2109,25 +1603,6 @@ borgvk_CmdCopyBufferToImage(VkCommandBuffer commandBuffer,
       }
    }
 }
-
-/* VK_KHR_copy_commands2 / core-1.3 struct-based variants of the four
- * commands above. Their region types (VkImageCopy2, VkBufferImageCopy2,
- * VkImageBlit2) are the exact same fields as the legacy structs with an
- * sType/pNext header prepended -- not implementing these at all meant
- * vkCmdCopyImage2/vkCmdBlitImage2/etc. fell through to the generic
- * discard-on-reset vk_cmd_queue path like any other unimplemented vkCmd*,
- * so the copy silently did nothing. This was invisible relative to the
- * legacy-struct entrypoints being fixed earlier in this file: CTS's
- * copy_commands2.* test group mirrors the exact same combinatorial test
- * matrix as core and dedicated_allocation, just calling the *2 entrypoints
- * instead, so it needed this separately. Confirmed by the pattern of the
- * failures themselves: the destination image read back its untouched
- * original fill pattern everywhere, as if the copy were never issued at
- * all -- found running
- * dEQP-VK.api.copy_and_blit.copy_commands2.image_to_image.all_formats.*.
- * Each wrapper strips the header and forwards to the already-verified
- * legacy-struct implementation via a small on-stack VLA (region counts here
- * are always small, test-parameter-bounded). */
 
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdCopyImage2(VkCommandBuffer commandBuffer, const VkCopyImageInfo2 *pCopyImageInfo)
@@ -2202,14 +1677,6 @@ borgvk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
                                pCopyBufferToImageInfo->regionCount, regions);
 }
 
-/* Resolves one region of a multisampled COLOR image down to a single-sample
- * destination by averaging each pixel's src->vk.samples sample planes (see
- * borgvk_image_layer_size's comment for how those planes are packed in
- * memory). Multisampled images are always 2D, non-block-compressed, single
- * mip level (Vulkan requires this whenever samples>1), so this needs none of
- * CmdBlitImage's 1D/3D/block-compressed handling. Shared by CmdResolveImage
- * (explicit resolve) and CmdEndRendering2EXT's implicit render-pass-resolve
- * handling below -- see that function's comment for why both are needed. */
 static void
 borgvk_resolve_region(struct borgvk_image *src, struct borgvk_image *dst,
                       const VkImageResolve *reg)
@@ -2246,8 +1713,6 @@ borgvk_resolve_region(struct borgvk_image *src, struct borgvk_image *dst,
             uint32_t sx = reg->srcOffset.x + x, dx = reg->dstOffset.x + x;
             uint8_t *dtexel = dst_base + ((uint64_t)dy * dst_stride + dx) * dst_bs;
 
-            /* Integer formats do not average: the resolve takes sample 0 bit-exact
-             * (the float path would round 32-bit values). */
             if (util_format_is_pure_integer(src_pfmt) && src_bs == dst_bs) {
                memcpy(dtexel, src_base + ((uint64_t)sy * src_stride + sx) * src_bs, src_bs);
                continue;
@@ -2267,9 +1732,6 @@ borgvk_resolve_region(struct borgvk_image *src, struct borgvk_image *dst,
    }
 }
 
-/* Depth/stencil resolve is a separate mechanism
- * (VK_KHR_depth_stencil_resolve, via a render pass, not this entrypoint) --
- * core vkCmdResolveImage is colour-only per spec. */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdResolveImage(VkCommandBuffer commandBuffer,
                        VkImage srcImage, VkImageLayout srcImageLayout,
@@ -2306,12 +1768,6 @@ borgvk_CmdResolveImage2(VkCommandBuffer commandBuffer,
                           pResolveImageInfo->regionCount, regions);
 }
 
-/* The texture unit's sampler descriptor (docs/B2_texture_unit.md), word 0:
- * [0] mag linear, [1] min linear, [2] mip linear, [5:3] [8:6] [11:9] address
- * mode U V W (VkSamplerAddressMode), [14:12] border colour (VkBorderColor),
- * [15] compare, [18:16] compare op (VkCompareOp), [19] unnormalized
- * coordinates; words 1-3: mip LOD bias, min LOD, max LOD as FP32. The Vulkan
- * enums go in as they are -- the hardware uses the same encodings. */
 static void
 borgvk_pack_sampler(const VkSamplerCreateInfo *info, uint32_t desc[4])
 {
