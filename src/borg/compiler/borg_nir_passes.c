@@ -5,6 +5,7 @@
  * See borg_nir_passes.h for why this is shared rather than duplicated.
  */
 #include "borg_nir_passes.h"
+#include "borgc_flags.h"
 #include "util/format/u_format.h"
 
 #include "glsl_types.h"
@@ -162,7 +163,9 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
 
 /* Cube sampling: the hardware takes the face (TEXA's layer) and the face coordinates s, t in
  * [0, 1]; the direction's major-axis projection is done here (Vulkan 16.5.4). The cube
- * becomes a 2D array sample whose layer is the face. */
+ * becomes a 2D array sample whose layer is the face. An implicit-LOD sample gets its LOD from
+ * the direction's derivatives, which stay continuous where the quad's lanes pick different
+ * faces; the sampler turns rho (face units) into a LOD with the face's width. */
 static bool
 borg_lower_cube(nir_builder *b, nir_instr *instr, void *data)
 {
@@ -194,6 +197,26 @@ borg_lower_cube(nir_builder *b, nir_instr *instr, void *data)
    nir_def *half_inv = nir_fmul_imm(b, nir_frcp(b, r[0]), 0.5f);
    nir_def *half = nir_imm_float(b, 0.5f);
    nir_def *st = nir_vec3(b, nir_ffma(b, r[1], half_inv, half), nir_ffma(b, r[2], half_inv, half), r[3]);
+   if (tex->op == nir_texop_tex) {
+      /* With w = c x dc, d(s, t) * 2 |ma|^2 are w's two components off the major axis, so
+       * |ds| + |dt| = (|wx| + |wy| + |wz| - |w[major]|) / (2 |ma|^2). */
+      nir_def *rho = NULL;
+      for (int axis = 0; axis < 2; axis++) {
+         nir_def *d = axis ? nir_ddy(b, c) : nir_ddx(b, c);
+         nir_def *dx = nir_channel(b, d, 0), *dy = nir_channel(b, d, 1), *dz = nir_channel(b, d, 2);
+         nir_def *w[3] = { nir_fsub(b, nir_fmul(b, y, dz), nir_fmul(b, z, dy)),
+                           nir_fsub(b, nir_fmul(b, z, dx), nir_fmul(b, x, dz)),
+                           nir_fsub(b, nir_fmul(b, x, dy), nir_fmul(b, y, dx)) };
+         nir_def *major = nir_bcsel(b, not_z, nir_bcsel(b, x_over_y, w[0], w[1]), w[2]);
+         nir_def *sum = nir_fadd(b, nir_fadd(b, nir_fabs(b, w[0]), nir_fabs(b, w[1])), nir_fabs(b, w[2]));
+         nir_def *off = nir_fsub(b, sum, nir_fabs(b, major));
+         rho = rho ? nir_fmax(b, rho, off) : off;
+      }
+      rho = nir_fmul(b, rho, nir_fmul_imm(b, nir_fmul(b, half_inv, half_inv), 2.0f));
+      nir_tex_instr_add_src(tex, nir_tex_src_lod, rho);
+      tex->op = nir_texop_txl;
+      tex->backend_flags |= BORGC_TEX_LOD_RHO;
+   }
    nir_src_rewrite(&tex->src[ci].src, st);
    tex->coord_components = 3;
    tex->is_array = true;

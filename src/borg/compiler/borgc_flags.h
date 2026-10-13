@@ -28,4 +28,8 @@
 #define BORGC_FS_PACKED_SWAP_SHIFT  23
 #define BORGC_FS_PNTC_BASE_SHIFT    24
 
+
+/* tex->backend_flags: the LOD source is rho (derivative in face units); the sampler adds the width. */
+#define BORGC_TEX_LOD_RHO           0x1u
+
 #endif
