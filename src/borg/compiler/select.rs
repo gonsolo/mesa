@@ -67,7 +67,12 @@ impl ShaderState {
         self.sel.prog.push(BorgInstr { mnem: "TEX", dst: tex_v, srcs: vec![wz, wz, ctl], swz: vec![0, 0, 0] });
         self.tex_dsts.insert(tex_v);
         let n = tex.def.num_components as usize;
-        self.sel.vec_map.insert(tex.def.index, (0..n).map(|k| (tex_v, k as u8)).collect());
+        // A 1D array's second size component is its layer count, the third word.
+        let one_d_array = tex.sampler_dim == GLSL_SAMPLER_DIM_1D && tex.is_array;
+        self.sel.vec_map.insert(
+            tex.def.index,
+            (0..n).map(|k| (tex_v, if one_d_array && k == 1 { 2 } else { k as u8 })).collect(),
+        );
     }
 
     pub unsafe fn tex(&mut self, tex: &nir_tex_instr) {
