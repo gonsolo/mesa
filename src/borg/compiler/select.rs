@@ -1,4 +1,3 @@
-use borgc_flags::BORGC_TEX_LOD_RHO;
 use crate::state::ShaderState;
 use crate::isel::borg_isel;
 use crate::opt::classify_uniform;
@@ -140,15 +139,8 @@ impl ShaderState {
                 self.sel.ubo.insert(c, Ubo::Uniform(u as u8));
                 c
             } else if is_fetch || is_txl {
-                let rho = is_txl && tex.backend_flags & BORGC_TEX_LOD_RHO != 0;
-                let ctl_bits = if rho { 3u32 << 21 } else if is_txl { 2u32 << 21 } else { 1u32 << 16 };
-                let slot = if rho {
-                    &mut self.rho_ctl_uniform
-                } else if is_txl {
-                    &mut self.lod_ctl_uniform
-                } else {
-                    &mut self.fetch_ctl_uniform
-                };
+                let ctl_bits = if is_txl { 2u32 << 21 } else { 1u32 << 16 };
+                let slot = if is_txl { &mut self.lod_ctl_uniform } else { &mut self.fetch_ctl_uniform };
                 let u = match *slot {
                     Some(u) => u,
                     None => {
