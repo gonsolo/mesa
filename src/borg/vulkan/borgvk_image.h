@@ -7,6 +7,9 @@
 
 #include "borgvk_private.h"
 
+#include "util/format/u_format.h"
+#include "vk_format.h"
+
 static inline uint64_t
 borgvk_mip_level_size(uint32_t width, uint32_t height, uint32_t depth,
                       uint32_t level, uint32_t bs, uint32_t bw, uint32_t bh,

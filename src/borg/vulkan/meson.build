@@ -115,6 +115,22 @@ test(
   suite : ['borg'],
 )
 
+borgvk_format_test = executable(
+  'borgvk_format_test',
+  ['borgvk_format_test.c', 'borgvk_format.c'],
+  include_directories : [
+    inc_include, inc_src, inc_util,
+    include_directories('../../../../'),
+  ],
+  dependencies : borgvk_deps,
+)
+
+test(
+  'borgvk formats and image helpers',
+  borgvk_format_test,
+  suite : ['borg'],
+)
+
 # Generates a replayable wire burst for the simulator's push-constant
 # end-to-end test. Built from the same serial sources as the unit test above,
 # so the burst is produced by the real senders rather than a reimplementation.
