@@ -890,7 +890,7 @@ impl ShaderState {
                 }
                 let addr = match (stride_words, self.const_addr_chain) {
                     (0, Some((next, a))) if next == base_words => a,
-                    (0, _) if !self.cp.vs_window && base_words >= 65536 => {
+                    (0, _) if !self.cp.vs_window && base_words > 0 => {
                         let bits = base_words as u32;
                         let u = self.fw.slot(bits);
                         let v = self.sel.next_vreg;
