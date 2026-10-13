@@ -252,6 +252,7 @@ pub struct ShaderState {
     pub vertex_id_def: Option<u32>,
     pub descriptor_defs: std::collections::HashSet<u32>,
     pub const_addr_chain: Option<(i32, u32)>,
+    pub dst_half: Option<([Option<u32>; 4], u32)>,
 }
 
 impl ShaderState {
@@ -287,6 +288,7 @@ impl ShaderState {
             vertex_id_def: Default::default(),
             descriptor_defs: Default::default(),
             const_addr_chain: Default::default(),
+            dst_half: None,
         }
     }
 }

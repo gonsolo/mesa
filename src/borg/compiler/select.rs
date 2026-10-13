@@ -1076,45 +1076,39 @@ impl ShaderState {
                 }
                 _ if self.flags.half() => {
                     let nch = self.flags.half_channels();
-                    let w0 = self.sel.op0("TLD", vec![]);
-                    let w1 = if nch > 2 { self.sel.op0("TLD1", vec![]) } else { w0 };
-                    let zero = self.sel.op0("ISUB", vec![w0, w0]);
-                    let mut rgba: [Option<u32>; 4] = [None; 4];
-                    for k in 0..nch {
-                        let mut h = if k < 2 { w0 } else { w1 };
-                        if k % 2 == 1 {
-                            let c16 = self.fw.win(&mut self.sel, 16);
-                            h = self.sel.op0("ISRL", vec![h, c16]);
+                    let (rgba, zero) = if let Some(c) = self.dst_half { c } else {
+                        let w0 = self.sel.op0("TLD", vec![]);
+                        let w1 = if nch > 2 { self.sel.op0("TLD1", vec![]) } else { w0 };
+                        let zero = self.sel.op0("ISUB", vec![w0, w0]);
+                        let mut rgba: [Option<u32>; 4] = [None; 4];
+                        for k in 0..nch {
+                            let mut h = if k < 2 { w0 } else { w1 };
+                            if k % 2 == 1 {
+                                let c16 = self.fw.win(&mut self.sel, 16);
+                                h = self.sel.op0("ISRL", vec![h, c16]);
+                            }
+                            let c7fff = self.fw.win(&mut self.sel, 0x7FFF);
+                            let mag = self.sel.op0("IAND", vec![h, c7fff]);
+                            let c13 = self.fw.win(&mut self.sel, 13);
+                            let n = self.sel.op0("ISHL", vec![mag, c13]);
+                            let scale = self.fw.win(&mut self.sel, (2.0f32).powi(112).to_bits());
+                            let f = self.sel.op0("FMUL", vec![n, scale]);
+                            let c10 = self.fw.win(&mut self.sel, 10);
+                            let e = self.sel.op0("ISRL", vec![mag, c10]);
+                            let c31 = self.fw.win(&mut self.sel, 31);
+                            let isinf = self.sel.op0("ISEQ", vec![e, c31]);
+                            let cexp = self.fw.win(&mut self.sel, 0x7F80_0000);
+                            let infbits = self.sel.op0("IMUL", vec![isinf, cexp]);
+                            let r = self.sel.op0("IOR", vec![f, infbits]);
+                            let c15 = self.fw.win(&mut self.sel, 15);
+                            let sg = self.sel.op0("ISRL", vec![h, c15]);
+                            let c31b = self.fw.win(&mut self.sel, 31);
+                            let sg = self.sel.op0("ISHL", vec![sg, c31b]);
+                            rgba[k] = Some(self.sel.op0("IOR", vec![r, sg]));
                         }
-                        let c7fff = self.fw.win(&mut self.sel, 0x7FFF);
-                        let mag = self.sel.op0("IAND", vec![h, c7fff]);
-                        let c13 = self.fw.win(&mut self.sel, 13);
-                        let n = self.sel.op0("ISHL", vec![mag, c13]);
-                        let bias = self.fw.win(&mut self.sel, 112 << 23);
-                        let n = self.sel.op0("IADD", vec![n, bias]);
-                        let c10 = self.fw.win(&mut self.sel, 10);
-                        let e = self.sel.op0("ISRL", vec![mag, c10]);
-                        let c31 = self.fw.win(&mut self.sel, 31);
-                        let isinf = self.sel.op0("ISEQ", vec![e, c31]);
-                        let bias2 = self.fw.win(&mut self.sel, 112 << 23);
-                        let add = self.sel.op0("IMUL", vec![isinf, bias2]);
-                        let n = self.sel.op0("IADD", vec![n, add]);
-                        let c3ff = self.fw.win(&mut self.sel, 0x3FF);
-                        let m = self.sel.op0("IAND", vec![mag, c3ff]);
-                        let mf = self.sel.op0("I2F", vec![m]);
-                        let sc = self.fw.win(&mut self.sel, (2.0f32).powi(-24).to_bits());
-                        let df = self.sel.op0("FMUL", vec![mf, sc]);
-                        let isden = self.sel.op0("ISEQ", vec![e, zero]);
-                        let mask = self.sel.op0("ISUB", vec![zero, isden]);
-                        let x = self.sel.op0("IXOR", vec![n, df]);
-                        let x = self.sel.op0("IAND", vec![x, mask]);
-                        let r = self.sel.op0("IXOR", vec![n, x]);
-                        let c15 = self.fw.win(&mut self.sel, 15);
-                        let sg = self.sel.op0("ISRL", vec![h, c15]);
-                        let c31b = self.fw.win(&mut self.sel, 31);
-                        let sg = self.sel.op0("ISHL", vec![sg, c31b]);
-                        rgba[k] = Some(self.sel.op0("IOR", vec![r, sg]));
-                    }
+                        self.dst_half = Some((rgba, zero));
+                        (rgba, zero)
+                    };
                     let one = self.fw.win(&mut self.sel, 1.0f32.to_bits());
                     let comp0 = intr.get_const_index(NIR_INTRINSIC_COMPONENT) as usize;
                     let nc = intr.def.num_components as usize;
