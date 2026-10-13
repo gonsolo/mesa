@@ -1,14 +1,6 @@
 /*
  * Copyright © 2026 Andreas Wendleder
  * SPDX-License-Identifier: MIT
- *
- * borgvk_shader_cache.c — compiled shaders keyed by their SPIR-V.
- *
- * A board running borgvk compiles slowly. $BORGVK_SHADER_CACHE names a file of compiled
- * blobs; a stage whose SPIR-V is in it skips SPIR-V → NIR → borgc altogether.
- * $BORGVK_SHADER_CACHE_RECORD=<file> appends every compiled stage to such a file.
- *
- * Entry: u64 key, u8 flags (bit 0: reads gl_PointCoord), u16 len, blob.
  */
 #include <stdio.h>
 #include <stdlib.h>
