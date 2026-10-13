@@ -155,7 +155,7 @@ test_geometry_packet(void)
    borgvk_transport_capture_begin();
    borgvk_serial_send_geom(verts, 2, idx, uv, 1);
    size_t len = 0;
-   uint8_t *pkt = borgvk_transport_borgvk_transport_capture_end(&len);
+   uint8_t *pkt = borgvk_transport_capture_end(&len);
 
    check(pkt != NULL && len == GEOM_PKT_LEN, "geometry packet is the fixed 520-byte length");
    if (!pkt || len != GEOM_PKT_LEN) {
@@ -199,7 +199,7 @@ test_texture_row_packet(void)
    borgvk_transport_capture_begin();
    borgvk_serial_send_tex_row(5, rgba, sampler);
    size_t len = 0;
-   uint8_t *pkt = borgvk_transport_borgvk_transport_capture_end(&len);
+   uint8_t *pkt = borgvk_transport_capture_end(&len);
 
    check(pkt != NULL && len == (size_t)len_expected, "texture row packet is 275 bytes");
    if (!pkt || len != (size_t)len_expected) {
