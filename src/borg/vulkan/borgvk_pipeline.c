@@ -42,7 +42,7 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
       const VkPipelineVertexInputStateCreateInfo *vi = pCreateInfos[i].pVertexInputState;
       uint32_t vfetch = 0;
       if (vi && vi->vertexAttributeDescriptionCount > 0) {
-         vfetch = 0x80000000u;
+         vfetch = BORGC_VS_FETCH;
          for (uint32_t b = 0; b < vi->vertexBindingDescriptionCount; b++) {
             const VkVertexInputBindingDescription *vb = &vi->pVertexBindingDescriptions[b];
             if (vb->inputRate != VK_VERTEX_INPUT_RATE_INSTANCE)
@@ -50,7 +50,7 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
             for (uint32_t a = 0; a < vi->vertexAttributeDescriptionCount; a++) {
                const VkVertexInputAttributeDescription *va = &vi->pVertexAttributeDescriptions[a];
                if (va->binding == vb->binding && va->location < 16)
-                  vfetch |= 1u << va->location;
+                  vfetch |= BORGC_VS_INSTANCED(va->location);
             }
          }
       }
@@ -58,12 +58,12 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
       const bool points = pCreateInfos[i].pInputAssemblyState &&
                           pCreateInfos[i].pInputAssemblyState->topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
       if (points)
-         vfetch |= 0xC0000000u;
+         vfetch |= BORGC_VS_FETCH | BORGC_VS_POINT_QUADS;
       const VkPrimitiveTopology topology_in =
          pCreateInfos[i].pInputAssemblyState ? pCreateInfos[i].pInputAssemblyState->topology : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
       const bool lines = topology_in == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || topology_in == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
       if (lines)
-         vfetch |= 0x90000000u;
+         vfetch |= BORGC_VS_FETCH | BORGC_VS_LINES_BIT;
 
       for (int st = 0; st < BORGVK_SHADER_STAGE_COUNT; st++)
          device->shader_blob[st].len = 0;
@@ -75,16 +75,16 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
          const uint32_t cls = f == VK_FORMAT_R8_UNORM ? 1 : f == VK_FORMAT_R8_SNORM ? 2 :
                               f == VK_FORMAT_R8_UINT || f == VK_FORMAT_R8_SINT ? 3 : 0;
          mrt = cls != 0;
-         mrt_opt |= cls << (12 + 3 * k);
+         mrt_opt |= cls << (BORGC_FS_TARGET_CLASS_SHIFT + 3 * k);
       }
       const uint32_t frag_opt =
-         mrt ? 0x100u | ((color_count - 1) << 9) | mrt_opt :
-         ri && ri->colorAttachmentCount && borgvk_sim_bytes_packed(ri->pColorAttachmentFormats[0]) ? 1 :
-         ri && ri->colorAttachmentCount && ri->pColorAttachmentFormats[0] == VK_FORMAT_R8_UNORM ? 2 :
+         mrt ? BORGC_FS_MULTI_TARGET | ((color_count - 1) << BORGC_FS_TARGETS_SHIFT) | mrt_opt :
+         ri && ri->colorAttachmentCount && borgvk_sim_bytes_packed(ri->pColorAttachmentFormats[0]) ? BORGC_FS_BYTES_PACKED :
+         ri && ri->colorAttachmentCount && ri->pColorAttachmentFormats[0] == VK_FORMAT_R8_UNORM ? BORGC_FS_R8_UNORM :
          ri && ri->colorAttachmentCount && borgvk_sim_packed_opt(ri->pColorAttachmentFormats[0]) ? borgvk_sim_packed_opt(ri->pColorAttachmentFormats[0]) :
-         ri && ri->colorAttachmentCount && borgvk_sim_half1(ri->pColorAttachmentFormats[0]) ? 0x28 :
-         ri && ri->colorAttachmentCount && borgvk_sim_half2(ri->pColorAttachmentFormats[0]) ? 8 :
-         ri && ri->colorAttachmentCount && vk_format_has_alpha(ri->pColorAttachmentFormats[0]) ? 4 : 0;   /* 4: alpha is an output */
+         ri && ri->colorAttachmentCount && borgvk_sim_half1(ri->pColorAttachmentFormats[0]) ? BORGC_FS_HALF | BORGC_FS_HALF1 :
+         ri && ri->colorAttachmentCount && borgvk_sim_half2(ri->pColorAttachmentFormats[0]) ? BORGC_FS_HALF :
+         ri && ri->colorAttachmentCount && vk_format_has_alpha(ri->pColorAttachmentFormats[0]) ? BORGC_FS_ALPHA_OUTPUT : 0;   /* 4: alpha is an output */
       struct borg_blend blend = { 0 };
       device->blend_lower = NULL;
       {
@@ -132,9 +132,9 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
          }
          if (vs && fs) {
             const uint32_t base = borgvk_blob_num_varyings(&device->shader_blob[BORGVK_STAGE_VERT]);
-            borgvk_compile_stage(device, frag_opt | (base << 24), fs);
+            borgvk_compile_stage(device, frag_opt | (base << BORGC_FS_PNTC_BASE_SHIFT), fs);
             if (device->frag_reads_pntc && base + 2 <= 255) {
-               borgvk_compile_stage(device, vfetch | 0x20000000u, vs);
+               borgvk_compile_stage(device, vfetch | BORGC_VS_PNTC_VARYINGS, vs);
             } else {
                borgvk_compile_stage(device, frag_opt, fs);
             }

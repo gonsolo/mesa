@@ -20,16 +20,16 @@ mod survey;
 
 use compiler::bindings::*;
 use compiler::nir::AsDef;
-use config::Flags;
+use config::{bit, Flags};
 use isel::resolve_vm;
 use state::Cx;
 use std::env;
 
 fn packed_layout(flags: Flags) -> (u32, Vec<(usize, u32, u32)>) {
     let vfetch = flags.0;
-    let kind = (vfetch >> 16) & 7;
-    if (vfetch >> 19) & 3 == 3 {
-        let id = kind | ((vfetch >> 21) & 7) << 3;
+    let kind = (vfetch >> bit::FS_PACKED_KIND_SHIFT) & 7;
+    if (vfetch >> bit::FS_PACKED_SIZE_SHIFT) & 3 == 3 {
+        let id = kind | ((vfetch >> bit::FS_PACKED_N_SHIFT) & 7) << 3;
         let l: &[(usize, u32, u32)] = match id {
             0 => &[(0, 10, 5), (1, 5, 5), (2, 0, 5), (3, 15, 1)],    // A1R5G5B5
             1 => &[(0, 11, 5), (1, 6, 5), (2, 1, 5), (3, 0, 1)],     // R5G5B5A1
@@ -46,9 +46,9 @@ fn packed_layout(flags: Flags) -> (u32, Vec<(usize, u32, u32)>) {
         };
         return (0, l.to_vec());
     }
-    let bits: u32 = match (vfetch >> 19) & 3 { 0 => 8, 1 => 16, _ => 32 };
-    let n = ((vfetch >> 21) & 3) as usize + 1;
-    let swap = (vfetch >> 23) & 1 != 0;
+    let bits: u32 = match (vfetch >> bit::FS_PACKED_SIZE_SHIFT) & 3 { 0 => 8, 1 => 16, _ => 32 };
+    let n = ((vfetch >> bit::FS_PACKED_N_SHIFT) & 3) as usize + 1;
+    let swap = (vfetch >> bit::FS_PACKED_SWAP_SHIFT) & 1 != 0;
     (kind, (0..n).map(|k| (if swap && k < 3 { 2 - k } else { k }, k as u32 * bits, bits)).collect())
 }
 

@@ -204,7 +204,8 @@ packed_info(VkFormat f, uint32_t *opt, unsigned *bytes)
    };
    for (unsigned i = 0; i < ARRAY_SIZE(uneven); i++) {
       if (uneven[i].f == f) {
-         *opt = 0x10u | 3u << 19 | (uneven[i].id & 7u) << 16 | (uneven[i].id >> 3) << 21 | (uneven[i].alpha ? 4u : 0u);
+         *opt = BORGC_FS_PACKED | 3u << BORGC_FS_PACKED_SIZE_SHIFT | (uneven[i].id & 7u) << BORGC_FS_PACKED_KIND_SHIFT |
+                 (uneven[i].id >> 3) << BORGC_FS_PACKED_N_SHIFT | (uneven[i].alpha ? BORGC_FS_ALPHA_OUTPUT : 0u);
          *bytes = uneven[i].bytes;
          return true;
       }
@@ -223,7 +224,7 @@ packed_info(VkFormat f, uint32_t *opt, unsigned *bytes)
       return false;
    const bool is_float = d->channel[0].type == UTIL_FORMAT_TYPE_FLOAT;
    if (is_float && bits == 16) {
-      *opt = 0x8u | (n == 3 ? 0x40u : n == 4 ? 0x84u : 0u);
+      *opt = BORGC_FS_HALF | (n == 3 ? BORGC_FS_HALF3 : n == 4 ? BORGC_FS_HALF4 | BORGC_FS_ALPHA_OUTPUT : 0u);
       return true;
    }
    uint32_t kind;
@@ -236,7 +237,8 @@ packed_info(VkFormat f, uint32_t *opt, unsigned *bytes)
    else
       return false;
    const bool swap = n >= 3 && d->swizzle[0] == PIPE_SWIZZLE_Z;
-   *opt = 0x10u | kind << 16 | (bits == 8 ? 0u : bits == 16 ? 1u : 2u) << 19 | (n - 1) << 21 | swap << 23 | (n == 4 ? 4u : 0u);
+   *opt = BORGC_FS_PACKED | kind << BORGC_FS_PACKED_KIND_SHIFT | (bits == 8 ? 0u : bits == 16 ? 1u : 2u) << BORGC_FS_PACKED_SIZE_SHIFT |
+           (n - 1) << BORGC_FS_PACKED_N_SHIFT | swap << BORGC_FS_PACKED_SWAP_SHIFT | (n == 4 ? BORGC_FS_ALPHA_OUTPUT : 0u);
    return true;
 }
 

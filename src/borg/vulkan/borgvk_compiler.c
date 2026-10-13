@@ -281,7 +281,7 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
    }
 
    remap_array_bindings(device, nir);
-   if (stage_info->stage == VK_SHADER_STAGE_VERTEX_BIT && (vfetch & 0xD0000000u) == 0x90000000u)
+   if (stage_info->stage == VK_SHADER_STAGE_VERTEX_BIT && (vfetch & (BORGC_VS_FETCH | BORGC_VS_POINT_QUADS | BORGC_VS_LINES_BIT)) == (BORGC_VS_FETCH | BORGC_VS_LINES_BIT))
       borgvk_lower_lines(nir, vfetch & 0xFFFFu);
    borg_lower_nir_for_borgc_blend(nir, blend);
    device->frag_reads_pntc = stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT && reads_point_coord(nir);

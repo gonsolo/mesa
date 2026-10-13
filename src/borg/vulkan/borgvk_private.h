@@ -5,6 +5,7 @@
 #ifndef BORGVK_PRIVATE_H
 #define BORGVK_PRIVATE_H
 
+#include "borgc_flags.h"
 #include "vk_instance.h"
 #include "vk_physical_device.h"
 #include "vk_device.h"
