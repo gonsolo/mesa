@@ -1,13 +1,6 @@
 /*
  * Copyright © 2026 Andreas Wendleder
  * SPDX-License-Identifier: MIT
- *
- * Synchronization for borgvk. vkQueueSubmit ships the frame to the FPGA over
- * serial and returns once it's been sent, so from the host's perspective all
- * GPU work is already complete by the time anyone waits. That makes every sync
- * operation trivial: init/signal/reset/wait all succeed immediately. This one
- * type advertises every feature fences and (binary) semaphores need, so no
- * timeline/binary wrappers are required.
  */
 #include "borgvk_private.h"
 
@@ -20,15 +13,6 @@
 #include "vk_log.h"
 #include "vk_sync.h"
 
-/* ---- Binary sync (fences, binary semaphores) -------------------------------------------- *
- * A signalled flag per object under one process-wide lock and condition variable: waiters are
- * few and short-lived, and a single condvar lets wait_many sleep on several syncs at once.
- * Real state matters now that submission can be threaded (vk_device_enable_threaded_submit):
- * a fence or semaphore must stay unsignalled until the queue has actually run the work, and
- * a wait must block until then. "GPU" waits and signals are done by borgvk_queue_submit itself
- * (borgvk's GPU is driven from the submit thread, in order): it waits on submit->waits before
- * running the work and signals submit->signals after. A wait on a sync whose signal has not
- * been submitted yet just blocks until it is, which is what WAIT_PENDING asks for. */
 struct borgvk_sync {
    struct vk_sync base;
    bool signaled;
@@ -85,8 +69,6 @@ borgvk_sync_reset(struct vk_device *device, struct vk_sync *sync)
    return VK_SUCCESS;
 }
 
-/* Moves the signalled state from src to dst and resets src (required of binary types
- * once the device can submit on a thread). */
 static VkResult
 borgvk_sync_move(struct vk_device *device, struct vk_sync *dst,
                  struct vk_sync *src)
@@ -154,15 +136,6 @@ const struct vk_sync_type borgvk_sync_type = {
    .move = borgvk_sync_move,
    .wait_many = borgvk_sync_wait_many,
 };
-
-
-/* ---- Events ---------------------------------------------------------- *
- * VkEvent is a separate mandatory core-1.0 object (not a vk_sync type), and
- * was entirely missing -- same story as vkCreateBufferView: a null dispatch
- * slot that SEGVs the moment CTS's command_buffers.* tests call through it.
- * Host-only storage, modeled on lavapipe's lvp_event: Borg has no device-side
- * event wait/signal, and every command-buffer op here is already complete by
- * the time an app can observe it (see borgvk_sync_wait_many above). */
 
 struct borgvk_event {
    struct vk_object_base base;
@@ -235,9 +208,6 @@ borgvk_ResetEvent(VkDevice _device, VkEvent _event)
    return VK_SUCCESS;
 }
 
-/* ---- Event commands, run when the command buffer is submitted ---------------------------- *
- * (cmd_dispatch in borgvk_device.c; the application-facing table only records them.) The v1
- * and v2 forms are both implemented because the runtime records whichever the app called. */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdSetEvent(VkCommandBuffer commandBuffer, VkEvent event, VkPipelineStageFlags stageMask)
 {
