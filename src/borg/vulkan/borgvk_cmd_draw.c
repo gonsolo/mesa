@@ -150,6 +150,9 @@ struct draw_ctx {
    bool points, lines;
    struct borgvk_image *color_img, *size_img, *extra[3];
    uint32_t nextra;
+   const uint8_t *idx_host;
+   int64_t vmin, vmax;
+   uint32_t (*pairs)[2], nlines;
 };
 
 static bool
@@ -212,25 +215,16 @@ draw_validate(struct draw_ctx *g)
 }
 
 static bool
-borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buffer *cmd,
-                        const struct draw_params *dp)
+draw_index_range(struct draw_ctx *g)
 {
-   struct draw_ctx g = { .device = device, .cmd = cmd, .dp = dp, .pipeline = cmd->gfx_pipeline };
-   if (!draw_validate(&g))
-      return false;
-   struct borgvk_pipeline *pipeline = g.pipeline;
-   struct borgvk_descriptor_set *set = cmd->desc_set;
-   const uint32_t topo = g.topo, X = g.X, nextra = g.nextra;
-   const bool points = g.points, lines = g.lines;
-   struct borgvk_image *color_img = g.color_img, *size_img = g.size_img, **extra = g.extra;
-
-   /* The index range each binding needs. */
+   const struct draw_params *dp = g->dp;
+   const struct borgvk_pipeline *pipeline = g->pipeline;
    const uint8_t *idx_host = NULL;
    if (dp->indexed) {
-      if (!cmd->index_ptr)
+      if (!g->cmd->index_ptr)
          return generic_reject(REJECT_NO_INDEX_BUFFER);
-      idx_host = cmd->index_ptr + (size_t)dp->first * dp->index_size;
-      if ((size_t)(dp->first + dp->count) * dp->index_size > cmd->index_avail)
+      idx_host = g->cmd->index_ptr + (size_t)dp->first * dp->index_size;
+      if ((size_t)(dp->first + dp->count) * dp->index_size > g->cmd->index_avail)
          return generic_reject(REJECT_NO_INDEX_BUFFER);
    }
    int64_t vmin = INT64_MAX, vmax = -1;
@@ -252,9 +246,12 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    }
    if (vmax < 0)
       return generic_reject(REJECT_INDEX_RANGE);
+   g->idx_host = idx_host;
+   g->vmin = vmin;
+   g->vmax = vmax;
    /* Lines: the two vertex rows of each line. */
    uint32_t (*pairs)[2] = NULL, nlines = 0;
-   if (lines) {
+   if (g->lines) {
       const bool strip = pipeline->topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
       const uint32_t restart_val = dp->index_size == 2 ? 0xFFFFu : 0xFFFFFFFFu;
       pairs = malloc(sizeof(*pairs) * MAX2(dp->count, 1));
@@ -285,6 +282,29 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
          return generic_reject(REJECT_INDEX_RANGE);
       }
    }
+   g->pairs = pairs;
+   g->nlines = nlines;
+   return true;
+}
+
+static bool
+borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buffer *cmd,
+                        const struct draw_params *dp)
+{
+   struct draw_ctx g = { .device = device, .cmd = cmd, .dp = dp, .pipeline = cmd->gfx_pipeline };
+   if (!draw_validate(&g))
+      return false;
+   struct borgvk_pipeline *pipeline = g.pipeline;
+   struct borgvk_descriptor_set *set = cmd->desc_set;
+   const uint32_t topo = g.topo, X = g.X, nextra = g.nextra;
+   const bool points = g.points, lines = g.lines;
+   struct borgvk_image *color_img = g.color_img, *size_img = g.size_img, **extra = g.extra;
+
+   if (!draw_index_range(&g))
+      return false;
+   const uint8_t *idx_host = g.idx_host;
+   const int64_t vmin = g.vmin, vmax = g.vmax;
+   uint32_t (*pairs)[2] = g.pairs, nlines = g.nlines;
    static const uint8_t line_end[6] = { 0, 0, 1, 0, 1, 1 };
    static const float line_side[6] = { -1, 1, -1, 1, 1, -1 };
    int64_t imin = dp->first_instance, imax = (int64_t)dp->first_instance + dp->instances - 1;
