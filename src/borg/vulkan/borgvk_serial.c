@@ -1,26 +1,6 @@
 /*
  * Copyright © 2026 Andreas Wendleder
  * SPDX-License-Identifier: MIT
- *
- * Serial transport for borgvk. The real GPU is the ULX3S FPGA, reached over the
- * board's FT231X USB-serial bridge (/dev/ttyUSB0 @115200). Each frame the submit
- * path hands us the 4×4 model-view-projection matrix; we frame it and write it to
- * the port. The firmware (software/borg/borg_kernel.c) decodes the packet and
- * renders the frame through the autonomous TBR sequencer.
- *
- * Packet format ("0xAD" full-MVP):
- *   byte 0      : 0xAD marker
- *   bytes 1..64 : 16 little-endian float32, row-major mvp[4][4] (cube.c order)
- *   byte 65     : XOR checksum of bytes 1..64
- * Total 66 bytes. Unlike the legacy 0xAC rotation matrix, MVP entries are not
- * bounded to [-1,1] (projection scales them), so the firmware validates with the
- * checksum instead of a magnitude range.
- *
- * Sim transport: when $BORGVK_SIM_SOCKET is set, packets go to a Unix domain
- * socket instead of the serial port — the interactive verilator/arcilator
- * viewer (simulation/verilator/viewer.py) listens there and injects the same
- * bytes into the simulated hardware UART RXD line.  Same wire protocol, same
- * borg_kernel.c firmware image; only the transport differs.
  */
 #include "borgvk_private.h"
 
@@ -41,17 +21,10 @@
 #define BORGVK_MARKER_MVP     0xAD
 #define BORGVK_MARKER_GEOM    0xAE
 
-/* The geometry packet is a fixed length with padded, fixed-offset regions so the
- * UART drain reads a constant byte count (must match the firmware RX_GEOM_*):
- * marker, nverts, ntris, MAX_VERTS*3 float32 positions, MAX_TRIS*3 u8 indices,
- * MAX_TRIS*3*2 float32 UVs, XOR checksum -- 520 B.
- * BORGVK_GEOM_MAX_VERTS/TRIS come from borgvk_private.h. */
 #define BORGVK_GEOM_PKT_LEN \
   (1 + 2 + BORGVK_GEOM_MAX_VERTS * 12 + BORGVK_GEOM_MAX_TRIS * 3 + \
    BORGVK_GEOM_MAX_TRIS * 24 + 1)
 
-/* Opened lazily on first submit and kept open for the process lifetime. -1 = not
- * yet attempted, -2 = open failed (don't retry every frame). */
 static int borgvk_serial_fd = -1;
 
 static int
@@ -92,9 +65,6 @@ borgvk_serial_open(void)
 /* -1 = not yet attempted, -2 = connect failed (don't retry every frame). */
 static int borgvk_sim_socket_fd = -1;
 
-/* Connect to the interactive sim viewer's Unix domain socket (see
- * simulation/verilator/viewer.py).  Lazily opened on first submit, kept open
- * for the process lifetime — same lifecycle as borgvk_serial_open(). */
 static int
 borgvk_sim_socket_open(const char *path)
 {
@@ -125,8 +95,6 @@ borgvk_sim_socket_open(const char *path)
    return fd;
 }
 
-/* A float32 as its IEEE bits, little-endian: positions and UVs are shader
- * datapath values, and the datapath is FP32 -- no conversion. */
 static void
 put_f32_le(uint8_t *dst, float f)
 {
@@ -137,11 +105,6 @@ put_f32_le(uint8_t *dst, float f)
    dst[3] = (uint8_t)((in.u >> 24) & 0xff);
 }
 
-/* Write the full packet, then idle so the receiver sees an inter-packet gap
- * to sync on (the firmware's gap-sync waits for the line to go idle before
- * trusting the next marker byte — see borg_kernel.c).  `is_socket` selects
- * tcdrain() (serial, flushes the kernel TTY write buffer) vs a plain sleep
- * (socket writes are already synchronous once write() returns). */
 static void
 borgvk_transport_write_paced(int fd, const uint8_t *pkt, size_t len, bool is_socket)
 {
@@ -162,19 +125,11 @@ borgvk_transport_write_paced(int fd, const uint8_t *pkt, size_t len, bool is_soc
    usleep(3000);
 }
 
-/* ---- Transport sink: serial port / sim socket (default) or capture buffer ---
- * Selection: capture (during a frame wrapped in capture_begin/end) takes
- * priority; otherwise $BORGVK_SIM_SOCKET routes to the interactive sim
- * viewer; otherwise the real serial port. */
 static bool     borgvk_capture_active = false;
 static uint8_t *borgvk_capture_buf    = NULL;
 static size_t   borgvk_capture_len    = 0;
 static size_t   borgvk_capture_cap    = 0;
 
-/* Single emit chokepoint for every framed packet.  In capture mode the bytes
- * are appended to the growable buffer (no serial port, no pacing — the sim
- * injects them all at once); otherwise they are paced out to the socket or
- * serial fd. */
 static void
 borgvk_transport_emit(const uint8_t *pkt, size_t len)
 {
@@ -232,9 +187,6 @@ borgvk_transport_capture_end(size_t *out_len)
    return buf;
 }
 
-/* Ship the app's real mesh: nverts unique model-space positions, ntris triangles
- * each indexing 3 of them, with per-triangle-vertex UVs.  Fixed-offset padded
- * regions keep the packet a constant length (see firmware RX_GEOM_*). */
 void
 borgvk_serial_send_geom(const float *verts, int nverts,
                         const uint8_t *idx, const float *uv, int ntris)
@@ -269,9 +221,6 @@ borgvk_serial_send_geom(const float *verts, int nverts,
 }
 
 #define BORGVK_MARKER_TEX  0xAF
-/* 0xAF: marker, y, sampler descriptor (4 words LE), BORGVK_TEX_DIM RGBA8
- * texels, checksum. Every row carries the sampler, so any row that arrives
- * intact delivers it. */
 #define BORGVK_TEX_PKT_LEN (1 + 1 + 16 + BORGVK_TEX_DIM * 4 + 1)
 
 void
@@ -293,11 +242,7 @@ borgvk_serial_send_tex_row(int y, const uint8_t *rgba, const uint32_t sampler[4]
 }
 
 #define BORGVK_MARKER_SHADER  0xB0
-/* 0xB0 shader upload: marker, stage(1B), len(2B LE), blob padded to
- * BORGVK_SHADER_BLOB_MAX, checksum. Fixed length so the firmware drain reads a
- * constant byte count (like 0xAE/0xAF); `len` says how many blob bytes are valid.
- * 517 B total < the firmware's 0xAF drain buffer, so no RX buffer growth needed. */
-#define BORGVK_SHADER_SMALL   512   /* the firmware's BC_SHADER_MAX; a larger blob goes in a 0xC1 packet */
+#define BORGVK_SHADER_SMALL   512
 #define BORGVK_MARKER_SHADER_BIG 0xC1
 
 void
@@ -330,17 +275,6 @@ borgvk_serial_send_shader(uint8_t stage, const uint8_t *blob, uint32_t len)
 }
 
 #define BORGVK_MARKER_PUSH    0xB2
-/* 0xB2 push constants: marker, off_words(1B), n_words(1B), data padded to
- * BORGVK_PUSH_MAX_WORDS words, checksum.  0xB1 is the firmware's serial-reload
- * trigger, hence 0xB2.  Fixed length for the same reason as 0xAE/0xAF/0xB0:
- * the firmware drain reads a constant byte count per marker, and `n_words`
- * says how much of the payload is valid.
- *
- * 32 words = 128 B = Vulkan 1.0's minimum maxPushConstantsSize, which is what
- * this driver advertises.  Raising that limit means growing this AND the
- * firmware's BORG_PUSH_CONST_MAX_WORDS together -- the firmware clamps, so a
- * mismatch truncates silently rather than corrupting, but it would still be a
- * wrong answer. */
 #define BORGVK_PUSH_MAX_WORDS 32
 #define BORGVK_PUSH_PKT_LEN   (1 + 1 + 1 + BORGVK_PUSH_MAX_WORDS * 4 + 1)
 
@@ -348,9 +282,6 @@ void
 borgvk_serial_send_push_constants(uint32_t offset, uint32_t size,
                                   const void *values)
 {
-   /* Vulkan requires both to be multiples of 4 (VUID-vkCmdPushConstants-offset
-    * -00368 / -size-00369); check rather than assume, because the whole
-    * word-index mapping below is built on it. */
    if (!values || size == 0 || (offset & 3) || (size & 3)) {
       mesa_logw("borgvk: bad push-constant range (offset %u, size %u)",
                 offset, size);
@@ -371,9 +302,6 @@ borgvk_serial_send_push_constants(uint32_t offset, uint32_t size,
    pkt[0] = BORGVK_MARKER_PUSH;
    pkt[1] = (uint8_t)off_words;
    pkt[2] = (uint8_t)n_words;
-   /* memcpy, not a u32 store loop: `values` is void* from the application and
-    * carries no alignment guarantee, and the wire format is little-endian
-    * bytes either way. */
    memcpy(&pkt[3], values, size);
 
    uint8_t csum = 0;
@@ -448,24 +376,12 @@ borgvk_serial_send_mvp(const float mvp[16])
       csum ^= pkt[i];
    pkt[65] = csum;
 
-   /* Paced write: the firmware aligns to packets via the inter-packet IDLE GAP,
-    * so a blocking app's back-to-back submits would otherwise stream gaplessly
-    * and freeze the cube (it locks onto the first packet and never re-syncs). */
    borgvk_transport_emit(pkt, sizeof(pkt));
 
    /* Live-display frame pacing is meaningless when capturing for the sim. */
    if (borgvk_capture_active)
       return;
 
-   /* Steady frame pacing (BORGVK_FRAME_MS): hold each host frame to a fixed
-    * wall-clock period.  cube.c spins by a CONSTANT angle per frame, so emitting
-    * MVPs at a steady rate at/below the FPGA's sustained render rate makes the
-    * displayed motion advance by exactly one angle step per shown frame —
-    * removing the judder from subsampling ~60 host fps down to ~15 with a
-    * variable stride.  Because re-rendering the same MVP yields an identical
-    * image, the FPGA's per-frame time variance no longer affects the motion.
-    * Drift-free: the deadline advances by a fixed period, not from "now".
-    * Unset = no throttle (legacy free-run behaviour). */
    const char *ms_env = getenv("BORGVK_FRAME_MS");
    if (ms_env && ms_env[0]) {
       long period_ns = atol(ms_env) * 1000000L;
@@ -515,8 +431,6 @@ borgvk_serial_send_state(const uint32_t reg[5])
 }
 
 #define BORGVK_MARKER_VP      0xC2
-/* 0xC2 viewport and scissor: marker, x y w h minDepth maxDepth (float32 LE), scissor x0 y0 x1 y1
- * (u32 LE), csum. Only the simulator's host driver acts on it. */
 void
 borgvk_serial_send_viewport(const struct borgvk_vp *vp)
 {
@@ -535,8 +449,6 @@ borgvk_serial_send_viewport(const struct borgvk_vp *vp)
 }
 
 #define BORGVK_MARKER_TARGET  0xB6
-/* 0xB6 render target: marker, flush format (0 R5G6B5, 1 R8G8B8A8, 2 B8G8R8A8), the clear colour
- * (4 x float32 LE), csum. Only the simulator's host driver acts on it. */
 void
 borgvk_serial_send_target(uint8_t flush_format, const float clear[4])
 {
@@ -568,8 +480,6 @@ emit_checked(uint8_t *pkt, size_t len)
    borgvk_transport_emit(pkt, len);
 }
 
-/* Host-simulator only. 0xB8: write n (<= 256, a multiple of 4 is enough; the rest is padded)
- * bytes at heap offset `off` (BORG_HEAP_SPI + off in the device's memory). */
 void
 borgvk_serial_send_mem(uint32_t off, const uint8_t *data, uint32_t n)
 {
@@ -582,9 +492,6 @@ borgvk_serial_send_mem(uint32_t off, const uint8_t *data, uint32_t n)
    emit_checked(pkt, sizeof(pkt));
 }
 
-/* Host-simulator only. 0xB9: vertex attribute `slot` is a typed fetch (texture format code
- * `fmt`, component swizzle bits `swz` as in the texture descriptor) of `count` rows `stride`
- * bytes apart from heap offset `base` (two's complement, may precede the uploaded data). */
 void
 borgvk_serial_send_vattr(uint32_t slot, uint32_t fmt, uint32_t base, uint32_t count,
                          uint32_t stride, uint32_t swz)
@@ -600,8 +507,6 @@ borgvk_serial_send_vattr(uint32_t slot, uint32_t fmt, uint32_t base, uint32_t co
    emit_checked(pkt, sizeof(pkt));
 }
 
-/* Host-simulator only. 0xBA: run a draw. topology 0 list / 1 strip / 2 fan, index_type 0 none /
- * 1 16-bit / 2 32-bit, index_base = heap offset of the first index. */
 void
 borgvk_serial_send_draw(uint32_t topology, uint32_t index_type, uint32_t restart,
                         uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex,
@@ -620,7 +525,6 @@ borgvk_serial_send_draw(uint32_t topology, uint32_t index_type, uint32_t restart
    emit_checked(pkt, sizeof(pkt));
 }
 
-/* Host-simulator only: how many colour attachments the pass has, and the flush formats of 1-3. */
 void
 borgvk_serial_send_att(uint8_t count, const uint8_t fmt[3])
 {
@@ -628,7 +532,6 @@ borgvk_serial_send_att(uint8_t count, const uint8_t fmt[3])
    emit_checked(pkt, sizeof(pkt));
 }
 
-/* Host-simulator only: the pass's attachments. flags bit 0 depth, 1 stencil, 2 D32_SFLOAT depth. */
 void
 borgvk_serial_send_pass(uint8_t flush_format, uint8_t flags)
 {
@@ -671,16 +574,12 @@ borgvk_state_pack(const VkGraphicsPipelineCreateInfo *ci, uint32_t reg[5])
    }
    const VkPipelineRasterizationStateCreateInfo *rs = ci->pRasterizationState;
    if (rs) {
-      /* VkCullModeFlags bit 0 = front, bit 1 = back, as in CULL_CFG. cube.c's
-       * CCW winding is the hardware's unmodified facing; CW inverts it. */
       reg[4] = ((uint32_t)rs->cullMode & 3) |
                (rs->frontFace == VK_FRONT_FACE_CLOCKWISE ? 1u << 2 : 0u);
    }
 }
 
 #define BORGVK_MARKER_TEXG 0xB5
-/* 0xB5: marker, off (LE u32), n (LE u16), desc words 1..3, sampler words,
- * BORGVK_TEXG_CHUNK data bytes (zero padded), csum. */
 void
 borgvk_serial_send_texture_chunk(uint32_t off, const uint8_t *data, uint32_t n,
                                  const uint32_t desc_w123[3],
@@ -709,8 +608,6 @@ borgvk_serial_send_texture_chunk(uint32_t off, const uint8_t *data, uint32_t n,
 }
 
 #define BORGVK_MARKER_TEXL 0xC0
-/* 0xC0: marker, the byte offsets of levels 1..12 (LE u32 each), checksum. Precedes the 0xB5
- * chunks of a texture with several levels. */
 void
 borgvk_serial_send_texture_levels(const uint32_t offs[12])
 {
