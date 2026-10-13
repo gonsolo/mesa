@@ -10,6 +10,7 @@
 
 #include "glsl_types.h"
 #include "nir_builder.h"
+#include "nir_builtin_builder.h"
 #include "vulkan/vulkan_core.h"
 #include "util/ralloc.h"
 
@@ -163,9 +164,9 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
 
 /* Cube sampling: the hardware takes the face (TEXA's layer) and the face coordinates s, t in
  * [0, 1]; the direction's major-axis projection is done here (Vulkan 16.5.4). The cube
- * becomes a 2D array sample whose layer is the face. An implicit-LOD sample gets its LOD from
- * the direction's derivatives, which stay continuous where the quad's lanes pick different
- * faces; the sampler turns rho (face units) into a LOD with the face's width. */
+ * becomes a 2D array sample whose layer is the face. An implicit-LOD sample gets an explicit
+ * LOD from the direction's derivatives, which stay continuous where the quad's lanes pick
+ * different faces (their projected (s, t) do not); gradients go through nir_lower_tex. */
 static bool
 borg_lower_cube(nir_builder *b, nir_instr *instr, void *data)
 {
@@ -212,16 +213,36 @@ borg_lower_cube(nir_builder *b, nir_instr *instr, void *data)
          nir_def *off = nir_fsub(b, sum, nir_fabs(b, major));
          rho = rho ? nir_fmax(b, rho, off) : off;
       }
-      rho = nir_fmul(b, rho, nir_fmul_imm(b, nir_fmul(b, half_inv, half_inv), 2.0f));
-      nir_tex_instr_add_src(tex, nir_tex_src_lod, rho);
+      nir_def *width = nir_i2f32(b, nir_channel(b, nir_get_texture_size(b, tex), 0));
+      /* rho in face units * 2 |ma|^2 -> texels per pixel: * width / (2 |ma|^2) */
+      rho = nir_fmul(b, nir_fmul(b, rho, width), nir_fmul_imm(b, nir_fmul(b, half_inv, half_inv), 2.0f));
+      nir_tex_instr_add_src(tex, nir_tex_src_lod, nir_flog2(b, rho));
       tex->op = nir_texop_txl;
-      tex->backend_flags |= BORGC_TEX_LOD_RHO;
    }
    nir_src_rewrite(&tex->src[ci].src, st);
    tex->coord_components = 3;
    tex->is_array = true;
    tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
    return true;
+}
+
+/* log2(x) for x > 0: the exponent plus a polynomial of the mantissa (error under 0.0011). */
+static bool
+borg_flog2_filter(const nir_instr *instr, const void *data)
+{
+   return instr->type == nir_instr_type_alu && nir_instr_as_alu(instr)->op == nir_op_flog2;
+}
+
+static nir_def *
+borg_flog2_lower(nir_builder *b, nir_instr *instr, void *data)
+{
+   nir_def *x = nir_ssa_for_alu_src(b, nir_instr_as_alu(instr), 0);
+   nir_def *e = nir_iadd_imm(b, nir_ushr_imm(b, nir_iand_imm(b, x, 0x7fffffff), 23), -127);
+   nir_def *m = nir_ior_imm(b, nir_iand_imm(b, x, 0x7fffff), 0x3f800000);
+   nir_def *t = nir_fadd_imm(b, m, -1.0f);
+   nir_def *q = nir_ffma(b, t, nir_imm_float(b, -0.15638611f), nir_imm_float(b, 0.42086454f));
+   nir_def *tt = nir_fsub(b, t, nir_fmul(b, t, t));
+   return nir_fadd(b, nir_i2f32(b, e), nir_ffma(b, tt, q, t));
 }
 
 #ifdef BORG_SMALL_NIR
@@ -414,8 +435,12 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    /* Lower/optimize toward the Borg ISA: scalarize, then fold and lower ALU ops
     * (fsub→fadd, fdiv→fmul·frcp via lower_fdiv, fdot→fmul+ffma, constant
     * folding) so the backend sees the small supported op set. */
-   if (nir->info.stage == MESA_SHADER_FRAGMENT)
+   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      const nir_lower_tex_options tex_options = { .lower_txd_cube_map = true };
+      NIR_PASS(_, nir, nir_lower_tex, &tex_options);
       NIR_PASS(_, nir, nir_shader_instructions_pass, borg_lower_cube, nir_metadata_control_flow, NULL);
+      NIR_PASS(_, nir, nir_shader_lower_instructions, borg_flog2_filter, borg_flog2_lower, NULL);
+   }
    NIR_PASS(_, nir, nir_lower_alu_to_scalar, NULL, NULL);
    bool progress;
    do {
