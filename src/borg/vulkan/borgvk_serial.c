@@ -125,10 +125,10 @@ borgvk_transport_write_paced(int fd, const uint8_t *pkt, size_t len, bool is_soc
    usleep(3000);
 }
 
-static bool     borgvk_capture_active = false;
-static uint8_t *borgvk_capture_buf    = NULL;
-static size_t   borgvk_capture_len    = 0;
-static size_t   borgvk_capture_cap    = 0;
+static _Thread_local bool     borgvk_capture_active = false;
+static _Thread_local uint8_t *borgvk_capture_buf    = NULL;
+static _Thread_local size_t   borgvk_capture_len    = 0;
+static _Thread_local size_t   borgvk_capture_cap    = 0;
 
 static void
 borgvk_transport_emit(const uint8_t *pkt, size_t len)
