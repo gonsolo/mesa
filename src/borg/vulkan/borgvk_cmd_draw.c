@@ -151,7 +151,7 @@ struct draw_ctx {
    struct borgvk_image *color_img, *size_img, *extra[3];
    uint32_t nextra;
    const uint8_t *idx_host;
-   int64_t vmin, vmax;
+   int64_t vmin, vmax, imin, imax;
    uint32_t (*pairs)[2], nlines;
 };
 
@@ -287,6 +287,37 @@ draw_index_range(struct draw_ctx *g)
    return true;
 }
 
+static void
+draw_reserve(struct draw_ctx *g)
+{
+   struct borgvk_command_buffer *cmd = g->cmd;
+   const struct draw_params *dp = g->dp;
+   const struct borgvk_pipeline *pipeline = g->pipeline;
+   const int64_t vmin = g->vmin, vmax = g->vmax, imin = g->imin, imax = g->imax;
+   const uint32_t X = g->X;
+
+   uint64_t need = dp->indexed ? (uint64_t)dp->count * dp->index_size + 32 : 0;
+   for (uint32_t b = 0; b < BORGVK_MAX_VERTEX_BINDINGS; b++) {
+      bool used = false;
+      for (uint32_t a = 0; a < pipeline->attr_count; a++)
+         used |= pipeline->attrs[a].binding == b;
+      if (!used)
+         continue;
+      int64_t r0 = pipeline->binding_instance[b] ? imin : vmin;
+      int64_t r1 = pipeline->binding_instance[b] ? imax : vmax;
+      need += (uint64_t)(r1 - r0 + 1) * X * pipeline->binding_stride[b] + 32;
+   }
+   if (g->points)
+      need += (uint64_t)(vmax - vmin + 1) * X * 16 + 32;
+   if (g->lines)
+      need = (uint64_t)g->nlines * 6 * (16 + 2 * 16 * pipeline->attr_count) + 64;
+   if (cmd->batch_draws && cmd->heap_top + need > BORGVK_HEAP_BYTES)
+      borgvk_flush_draws(cmd);
+   /* The constant pool's slot is one per pass. */
+   if (cmd->batch_draws && pipeline->blob[BORGVK_STAGE_FRAG].npool && cmd->batch_pool && cmd->batch_pool != pipeline)
+      borgvk_flush_draws(cmd);
+}
+
 static bool
 borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buffer *cmd,
                         const struct draw_params *dp)
@@ -307,30 +338,10 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    uint32_t (*pairs)[2] = g.pairs, nlines = g.nlines;
    static const uint8_t line_end[6] = { 0, 0, 1, 0, 1, 1 };
    static const float line_side[6] = { -1, 1, -1, 1, 1, -1 };
-   int64_t imin = dp->first_instance, imax = (int64_t)dp->first_instance + dp->instances - 1;
-
-   {
-      uint64_t need = dp->indexed ? (uint64_t)dp->count * dp->index_size + 32 : 0;
-      for (uint32_t b = 0; b < BORGVK_MAX_VERTEX_BINDINGS; b++) {
-         bool used = false;
-         for (uint32_t a = 0; a < pipeline->attr_count; a++)
-            used |= pipeline->attrs[a].binding == b;
-         if (!used)
-            continue;
-         int64_t r0 = pipeline->binding_instance[b] ? imin : vmin;
-         int64_t r1 = pipeline->binding_instance[b] ? imax : vmax;
-         need += (uint64_t)(r1 - r0 + 1) * X * pipeline->binding_stride[b] + 32;
-      }
-      if (points)
-         need += (uint64_t)(vmax - vmin + 1) * X * 16 + 32;
-      if (lines)
-         need = (uint64_t)nlines * 6 * (16 + 2 * 16 * pipeline->attr_count) + 64;
-      if (cmd->batch_draws && cmd->heap_top + need > BORGVK_HEAP_BYTES)
-         borgvk_flush_draws(cmd);
-      /* The constant pool's slot is one per pass. */
-      if (cmd->batch_draws && pipeline->blob[BORGVK_STAGE_FRAG].npool && cmd->batch_pool && cmd->batch_pool != pipeline)
-         borgvk_flush_draws(cmd);
-   }
+   g.imin = dp->first_instance;
+   g.imax = (int64_t)dp->first_instance + dp->instances - 1;
+   const int64_t imin = g.imin, imax = g.imax;
+   draw_reserve(&g);
    const bool first_of_batch = cmd->batch_draws == 0;
 
    borgvk_transport_capture_begin();
