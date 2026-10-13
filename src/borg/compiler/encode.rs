@@ -4,12 +4,12 @@
 pub(crate) fn emit_blob(words: &[u32], outputs: &[u8], consts: &[(u8, u32)],
                         draw: Option<(u8, &[(u8, u32)])>) -> Vec<u8> {
     let mut b = Vec::new();
-    b.push(words.len() as u8); // num_instrs
+    b.push(words.len() as u8); // num_instrs, low byte; the high bits ride in the extensions byte
     b.push(0); // num_uniforms (inline funct3 reads, no host interface)
     b.push(0); // num_attributes
     b.push(outputs.len() as u8); // num_outputs
     b.push(consts.len() as u8); // num_consts
-    b.push(if draw.is_some() { 1 } else { 0 }); // extensions: bit 0 = draw
+    b.push((if draw.is_some() { 1 } else { 0 }) | ((words.len() >> 8) as u8) << 1); // extensions: bit 0 = draw, bits 7:1 = num_instrs >> 8
     for &w in words {
         b.extend_from_slice(&w.to_le_bytes());
     }
@@ -126,6 +126,13 @@ mod tests {
         assert_eq!(&b[12..16], &[0x00, 0x00, 0x80, 0x3F], "1.0f as LE binary32");
         assert_eq!(&b[16..20], &[9, 0, 0, 0], "raw integer (a word index)");
         assert_eq!(b.len(), 20, "a legacy blob ends at const_vals");
+    }
+
+    #[test]
+    fn blob_counts_more_than_255_instructions() {
+        let b = emit_blob(&[0; 300], &[], &[], None);
+        assert_eq!(&b[..6], &[44, 0, 0, 0, 0, 2], "300 = 1 * 256 + 44");
+        assert_eq!(b.len(), 6 + 300 * 4);
     }
 
     #[test]
