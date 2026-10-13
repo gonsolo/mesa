@@ -155,7 +155,7 @@ test_geometry_packet(void)
    borgvk_transport_capture_begin();
    borgvk_serial_send_geom(verts, 2, idx, uv, 1);
    size_t len = 0;
-   uint8_t *pkt = borgvk_transport_capture_end(&len);
+   uint8_t *pkt = borgvk_transport_borgvk_transport_capture_end(&len);
 
    check(pkt != NULL && len == GEOM_PKT_LEN, "geometry packet is the fixed 520-byte length");
    if (!pkt || len != GEOM_PKT_LEN) {
@@ -199,7 +199,7 @@ test_texture_row_packet(void)
    borgvk_transport_capture_begin();
    borgvk_serial_send_tex_row(5, rgba, sampler);
    size_t len = 0;
-   uint8_t *pkt = borgvk_transport_capture_end(&len);
+   uint8_t *pkt = borgvk_transport_borgvk_transport_capture_end(&len);
 
    check(pkt != NULL && len == (size_t)len_expected, "texture row packet is 275 bytes");
    if (!pkt || len != (size_t)len_expected) {
@@ -217,9 +217,93 @@ test_texture_row_packet(void)
    free(pkt);
 }
 
+static bool
+xor_ok(const uint8_t *pkt, size_t len)
+{
+   uint8_t c = 0;
+   for (size_t i = 1; i + 1 < len; i++)
+      c ^= pkt[i];
+   return c == pkt[len - 1];
+}
+
+static uint32_t
+le32(const uint8_t *p)
+{
+   return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static void
+test_fixed_packets(void)
+{
+   size_t len;
+   uint8_t *p;
+
+   borgvk_transport_capture_begin();
+   borgvk_serial_send_blend(0x11223344, 0x55667788);
+   p = borgvk_transport_capture_end(&len);
+   check(len == 10 && xor_ok(p, len), "blend packet length and checksum");
+   check(len == 10 && le32(p + 1) == 0x11223344 && le32(p + 5) == 0x55667788, "blend fields");
+   free(p);
+
+   const uint32_t reg[5] = { 1, 2, 3, 4, 0xdeadbeef };
+   borgvk_transport_capture_begin();
+   borgvk_serial_send_state(reg);
+   p = borgvk_transport_capture_end(&len);
+   check(len == 22 && xor_ok(p, len), "state packet length and checksum");
+   check(len == 22 && le32(p + 17) == 0xdeadbeef, "state last register");
+   free(p);
+
+   const float clear[4] = { 0.0f, 0.5f, 1.0f, 0.25f };
+   borgvk_transport_capture_begin();
+   borgvk_serial_send_target(2, clear);
+   p = borgvk_transport_capture_end(&len);
+   check(len == 19 && xor_ok(p, len) && p[1] == 2, "target packet");
+   free(p);
+
+   uint8_t data[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+   borgvk_transport_capture_begin();
+   borgvk_serial_send_mem(0x1000, data, sizeof(data));
+   p = borgvk_transport_capture_end(&len);
+   check(len == 1 + 4 + 2 + 256 + 1 && xor_ok(p, len), "mem packet length and checksum");
+   check(len > 14 && p[0] == 0xB8 && le32(p + 1) == 0x1000 && p[5] == 8 && p[6] == 0 && p[7] == 1 && p[14] == 8,
+         "mem fields");
+   free(p);
+
+   borgvk_transport_capture_begin();
+   borgvk_serial_send_vattr(3, 41, 0x100, 12, 16, 0x40000000);
+   p = borgvk_transport_capture_end(&len);
+   check(len == 20 && xor_ok(p, len), "vattr packet length and checksum");
+   check(len == 20 && p[0] == 0xB9 && p[1] == 3 && p[2] == 41 && le32(p + 3) == 0x100 &&
+         le32(p + 7) == 12 && le32(p + 11) == 16 && le32(p + 15) == 0x40000000, "vattr fields");
+   free(p);
+
+   borgvk_transport_capture_begin();
+   borgvk_serial_send_draw(1, 2, 1, 30, 4, 5, 6, -7, 0x200, 0x300);
+   p = borgvk_transport_capture_end(&len);
+   check(len == 33 && xor_ok(p, len), "draw packet length and checksum");
+   check(len == 33 && p[0] == 0xBA && p[1] == 1 && p[2] == 2 && p[3] == 1 && le32(p + 4) == 30 &&
+         le32(p + 8) == 4 && le32(p + 12) == 5 && le32(p + 16) == 6 && (int32_t)le32(p + 20) == -7 &&
+         le32(p + 24) == 0x200 && le32(p + 28) == 0x300, "draw fields");
+   free(p);
+
+   const uint8_t fmt[3] = { 5, 6, 7 };
+   borgvk_transport_capture_begin();
+   borgvk_serial_send_att(3, fmt);
+   p = borgvk_transport_capture_end(&len);
+   check(len == 6 && xor_ok(p, len) && p[0] == 0xBF && p[1] == 3 && p[4] == 7, "att packet");
+   free(p);
+
+   borgvk_transport_capture_begin();
+   borgvk_serial_send_pass(4, 9);
+   p = borgvk_transport_capture_end(&len);
+   check(len == 4 && xor_ok(p, len) && p[0] == 0xBB && p[1] == 4 && p[2] == 9, "pass packet");
+   free(p);
+}
+
 int
 main(void)
 {
+   test_fixed_packets();
    test_texture_row_packet();
    test_geometry_packet();
    test_well_formed_range();
