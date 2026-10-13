@@ -1,4 +1,4 @@
-use crate::state::{ShaderState, DRAW_VS_CONST_U0, DRAW_VS_CONST_WORDS};
+use crate::state::{Selector, ShaderState, DRAW_VS_CONST_U0, DRAW_VS_CONST_WORDS};
 use std::collections::HashMap;
 use crate::{FRAG_POOL_SLOT, packed_layout, BorgInstr, Ubo, NO_DST};
 
@@ -251,16 +251,22 @@ impl ShaderState {
             ($b:expr) => { self.fw.win(&mut self.sel, $b) };
         }
         let (x0, x0c) = self.outs.frag[0].unwrap();
-        let first = if matches!(self.sel.ubo.get(&x0), Some(Ubo::Uniform(_))) {
-            (self.sel.opc("FMOV", &[(x0, x0c)]), 0u8)
-        } else { (x0, x0c) };
-        let zero = self.sel.opc("ISUB", &[first, first]);
         let nch = self.flags.half_channels();
+        let is_uni = |sel: &Selector, v: u32| matches!(sel.ubo.get(&v), Some(Ubo::Uniform(_)));
+        let src_of = |n: usize, o: &Option<(u32, u8)>| if n == 0 { Some((x0, x0c)) } else { *o };
+        let any_uni = (0..nch).any(|n| src_of(n, &self.outs.frag[n]).map_or(false, |(x, xc)| xc != 0 || is_uni(&self.sel, x)));
+        let zero = if any_uni {
+            let first = if is_uni(&self.sel, x0) { (self.sel.opc("FMOV", &[(x0, x0c)]), 0u8) } else { (x0, x0c) };
+            Some(self.sel.opc("ISUB", &[first, first]))
+        } else { None };
         let mut pw: [Option<u32>; 2] = [None; 2];
         for n in 0..nch {
             let src = if n == 0 { Some((x0, x0c)) } else { self.outs.frag[n] };
             let Some((x, xc)) = src else { continue };
-            let xr = self.sel.opc("IADD", &[(x, xc), (zero, 0)]);
+            let xr = match zero {
+                Some(z) if xc != 0 || is_uni(&self.sel, x) => self.sel.opc("IADD", &[(x, xc), (z, 0)]),
+                _ => x,
+            };
             // The sign first, so the input register is free early; 0x8000 and 0x200 are built here.
             let c = k!(16);
             let s16 = i!("ISRL", xr, c);
@@ -279,14 +285,9 @@ impl ShaderState {
             let u2 = i!("IADD", u, lsb);
             let c = k!(13);
             let r = i!("ISRL", u2, c);
-            let c = k!(16777216.0f32.to_bits());
-            let f = i!("FMUL", a, c);
-            let d = i!("F2I", f);
-            let c = k!(0x3880_0000);
-            let sd = i!("ISLTU", a, c);
-            let dd = i!("ISUB", d, r);
-            let md = i!("IMUL", sd, dd);
-            let v1 = i!("IADD", r, md);
+            let c = k!(0x387F_FFFF);
+            let ge = i!("ISLTU", c, a);
+            let v1 = i!("IMUL", r, ge);
             let c = k!(0x477F_F000);
             let ib = i!("ISLTU", a, c);
             let c = k!(0x7C00);
