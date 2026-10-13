@@ -17,6 +17,9 @@
 #include "util/format/u_format.h"
 #include "util/simple_mtx.h"
 #include "vk_format.h"
+#include "software/borg/borg_core.h"
+#include "software/borg/borg_hw.h"
+#include "software/borg/borg_layout.h"
 #include "vk_log.h"
 
 #define SIM_MEM_BYTES 0x8000000u
@@ -25,6 +28,7 @@
 
 struct sim_srv {
    pid_t pid;
+   bool hw;   /* no server process: borg_core runs in this one, on the DRM device */
    int to, from, memfd;
    uint8_t *mem;
    uint32_t w, h;
@@ -92,6 +96,37 @@ struct feed {
    bool ok;
 };
 
+/* The server's packet loop (simulation/direct/driver.cpp, Driver::serve), in this process. */
+static void
+hw_feed(const uint8_t *p, size_t n)
+{
+   for (size_t i = 0; i < n;) {
+      const int len = borg_core_pkt_len(p[i]);
+      if (!len || i + (size_t)len > n)
+         break;
+      if (borg_core_packet(&p[i]) == BC_DRAW)
+         borg_core_list_draw();
+      i += (size_t)len;
+   }
+   borg_core_list_flush();
+}
+
+struct hw_range { uint32_t addr, size; };
+
+static void
+hw_upload(const struct sim_srv *S, const struct hw_range *r, unsigned n)
+{
+   for (unsigned i = 0; i < n; i++)
+      borg_hw_mem_write(r[i].addr, S->mem + r[i].addr, r[i].size);
+}
+
+static void
+hw_download(const struct sim_srv *S, const struct hw_range *r, unsigned n)
+{
+   for (unsigned i = 0; i < n; i++)
+      borg_hw_mem_read(r[i].addr, S->mem + r[i].addr, r[i].size);
+}
+
 static void *
 feed_server(void *arg)
 {
@@ -103,8 +138,19 @@ feed_server(void *arg)
 static bool
 sim_start(struct sim_srv *S, const char *bin)
 {
-   if (S->pid > 0)
+   if (S->pid > 0 || S->hw)
       return true;
+   if (!bin) {
+      if (!borgvk_hw_enabled() || borg_hw_open())
+         return false;
+      S->mem = mmap(NULL, SIM_MEM_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+      if (S->mem == MAP_FAILED) {
+         S->mem = NULL;
+         return false;
+      }
+      S->hw = true;
+      return true;
+   }
    if (!S->mem) {
       int mfd = memfd_create("borg-dram", 0);
       if (mfd < 0 || ftruncate(mfd, SIM_MEM_BYTES) < 0)
@@ -151,6 +197,16 @@ sim_set_size(struct sim_srv *S, uint32_t w, uint32_t h)
 {
    if (S->w == w && S->h == h)
       return true;
+   if (S->hw) {
+      borg_core_list_flush();
+      borg_core_set_flush_format(0);
+      borg_core_init(w, h);
+      S->fb = DRAM_OUT_BASE_SPI; S->zb = BORG_ZB_SPI; S->sb = BORG_SB_SPI; S->heap = BORG_HEAP_SPI;
+      for (int a = 1; a <= 3; a++)
+         S->att[a] = BORG_ATT_SPI(a);
+      S->w = w; S->h = h;
+      return true;
+   }
    uint8_t cmd[5] = { 0xBC, w & 0xff, w >> 8, h & 0xff, h >> 8 };
    uint8_t r[28];
    if (!write_all(S->to, cmd, sizeof(cmd)) || !read_all(S->from, r, sizeof(r)))
@@ -266,7 +322,9 @@ bool
 borgvk_sim_serves(const struct borgvk_image *color, bool has_depth_stencil)
 {
    const char *direct = getenv("BORGVK_SIM_DIRECT");
-   if (!direct || !direct[0] || !color)
+   if (!direct || !direct[0])
+      direct = NULL;
+   if ((!direct && !borgvk_hw_enabled()) || !color)
       return false;
    uint32_t w = color->vk.extent.width, h = color->vk.extent.height;
    const uint32_t max_dim = has_depth_stencil ? 1024 : 4096;
@@ -426,7 +484,8 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
    /* A large pass is split into horizontal strips of tile rows, one simulator each. */
    const char *pe = getenv("BORGVK_SERVE_PARTS");
    int np = pe ? atoi(pe) : (int)MIN2(12, MAX2(1, sysconf(_SC_NPROCESSORS_ONLN)));
-   np = n >= SIM_PARALLEL_BYTES ? CLAMP(np, 1, SIM_MAX_PARTS) : 1;
+   const bool hw = !getenv("BORGVK_SIM_DIRECT");
+   np = !hw && n >= SIM_PARALLEL_BYTES ? CLAMP(np, 1, SIM_MAX_PARTS) : 1;
    const uint32_t ftiles = hp >> 2;
    const uint32_t rows_per = (ftiles + np - 1) / np;
    np = (int)((ftiles + rows_per - 1) / rows_per);
@@ -435,7 +494,8 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
    for (int part = 0; part < np; part++) {
       uint8_t sp[5] = { 0xBE, (uint8_t)part, (uint8_t)np, (uint8_t)rows_per, (uint8_t)(rows_per >> 8) };
       if (!sim_start(&sim.s[part], getenv("BORGVK_SIM_DIRECT")) || !sim_set_size(&sim.s[part], wp, hp) ||
-          !write_all(sim.s[part].to, sp, sizeof(sp))) {
+          (hw ? (borg_core_list_flush(), borg_core_set_strip(part, np, rows_per), false)
+              : !write_all(sim.s[part].to, sp, sizeof(sp)))) {
          mesa_logw("borgvk: cannot start the simulator");
          sim_stop();
          goto out;
@@ -486,6 +546,21 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
    }
    }
 
+   struct hw_range ranges[8 + 64];
+   unsigned nranges = 0;
+   if (hw) {
+      const uint32_t tiles16 = (wp >> 2) * (hp >> 2) * 16;
+      const struct sim_srv *S = &sim.s[0];
+      if (color)
+         ranges[nranges++] = (struct hw_range){ S->fb, tiles16 * cpx };
+      for (uint32_t a = 0; a < nextra; a++)
+         ranges[nranges++] = (struct hw_range){ S->att[a + 1], tiles16 };
+      if (zimg)
+         ranges[nranges++] = (struct hw_range){ S->zb, tiles16 * zpx };
+      if (simg)
+         ranges[nranges++] = (struct hw_range){ S->sb, tiles16 };
+      hw_upload(S, ranges, nranges);
+   }
    const char *keep = getenv("BORGVK_SIM_KEEP");   /* the stream, for replaying it by hand */
    if (keep && keep[0]) {
       FILE *f = fopen(keep, "wb");
@@ -494,15 +569,24 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
          fclose(f);
       }
    }
+   if (hw) {
+      hw_feed(stream, n);
+      hw_download(&sim.s[0], ranges, nranges);
+      for (uint32_t i = 0; i < nwb && nranges < 8 + 64; i++) {
+         const uint32_t a0 = (sim.s[0].heap + wb[i].off) & ~3u, a1 = (sim.s[0].heap + wb[i].off + wb[i].size + 3) & ~3u;
+         const struct hw_range r = { a0, a1 - a0 };
+         hw_download(&sim.s[0], &r, 1);
+      }
+   }
    uint8_t sync = 0xBD, ack;
    struct feed feeds[SIM_MAX_PARTS];
    pthread_t th[SIM_MAX_PARTS];
-   for (int part = 0; part < np; part++) {
+   for (int part = 0; part < np && !hw; part++) {
       feeds[part] = (struct feed){ sim.s[part].to, stream, n, &sync, false };
       pthread_create(&th[part], NULL, feed_server, &feeds[part]);
    }
    bool fed = true;
-   for (int part = 0; part < np; part++) {
+   for (int part = 0; part < np && !hw; part++) {
       pthread_join(th[part], NULL);
       fed &= feeds[part].ok;
    }
@@ -511,7 +595,7 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
       sim_stop();
       goto out;
    }
-   for (int part = 0; part < np; part++) {
+   for (int part = 0; part < np && !hw; part++) {
       if (!read_all(sim.s[part].from, &ack, 1)) {
          mesa_logw("borgvk: the simulator stopped answering");
          sim_stop();
