@@ -1,13 +1,6 @@
 /*
  * Copyright © 2026 Andreas Wendleder
  * SPDX-License-Identifier: MIT
- *
- * Minimal query-pool stubs. borgvk does no host-side timestamping or occlusion
- * queries, but Mesa's common WSI references vkCreateQueryPool/vkDestroyQueryPool
- * for swapchain present-timing bookkeeping (and calls DestroyQueryPool even when
- * no pool was created). There's no vk_common implementation for these, so the
- * driver must provide non-NULL entrypoints. They allocate an opaque object and
- * report zeroed results.
  */
 #include "borgvk_private.h"
 
