@@ -94,3 +94,81 @@ borgvk_hw_render(const uint8_t *b, size_t n, uint32_t dim, uint8_t *out)
    free(words);
    return ret;
 }
+
+/* The register/memory program of direct_sim --compute (simulation/direct/main.cpp), on the device. */
+int
+borgvk_hw_compute(const uint8_t *job, size_t len, const char *outf)
+{
+   enum { GPR = 0, IMEM = 128, CONTROL = 424, LS_BASE = 724, C_CTRL = 752, C_PC = 756, C_XY = 760,
+          C_Z = 764, C_LOCAL = 768, CODE_BASE = 0x318 };
+   const uint32_t IMEM_WORDS = 72, CODE_ADDR = 0xF0000;
+   if (len < 48 || borg_hw_open())
+      return -1;
+   const uint32_t *h = (const uint32_t *)job;
+   const uint32_t nprog = h[0], gx = h[1], gy = h[2], gz = h[3], lx = h[4], ly = h[5], lz = h[6],
+                  nregs = h[7], nbufs = h[8], bx = h[9], by = h[10], bz = h[11];
+   size_t p = 48;
+   const uint32_t *prog = (const uint32_t *)(job + p);
+   p += (size_t)nprog * 4;
+   bh_reg_write(CONTROL, 2);
+   bh_reg_write(LS_BASE, 0);
+   if (nprog > IMEM_WORDS) {
+      uint32_t *code = calloc(nprog + 1, 4);
+      if (!code)
+         return -1;
+      memcpy(code, prog, (size_t)nprog * 4);
+      borg_hw_mem_write(CODE_ADDR, code, (nprog + 1) * 4);
+      free(code);
+      bh_reg_write(CODE_BASE, CODE_ADDR);
+   }
+   for (uint32_t i = 0; i < nprog && i < IMEM_WORDS; i++)
+      bh_reg_write(IMEM + 4 * i, prog[i]);
+   if (nprog < IMEM_WORDS)
+      bh_reg_write(IMEM + 4 * nprog, 0);
+   for (uint32_t i = 0; i < nregs; i++, p += 8) {
+      const uint32_t *rv = (const uint32_t *)(job + p);
+      bh_reg_write(GPR + 4 * rv[0], rv[1]);
+   }
+   if (bx | by | bz) {
+      bh_reg_write(GPR + 4 * 12, bx);
+      bh_reg_write(GPR + 4 * 13, by);
+      bh_reg_write(GPR + 4 * 14, bz);
+   }
+   uint32_t addr[BORGVK_CS_MAX_BUFS], size[BORGVK_CS_MAX_BUFS];
+   if (nbufs > BORGVK_CS_MAX_BUFS)
+      return -1;
+   for (uint32_t i = 0; i < nbufs; i++) {
+      const uint32_t *bh = (const uint32_t *)(job + p);
+      addr[i] = bh[0];
+      size[i] = bh[1];
+      p += 8;
+      borg_hw_mem_write(addr[i], job + p, (size[i] + 3) & ~3u);
+      p += (size[i] + 3) & ~3u;
+   }
+   bh_reg_write(C_PC, 0);
+   bh_reg_write(C_XY, gx | (gy << 16));
+   bh_reg_write(C_Z, gz);
+   bh_reg_write(C_LOCAL, lx | (ly << 8) | ((lx * ly * lz) << 16));
+   bh_reg_write(C_CTRL, 1);
+   uint32_t st = 0;
+   for (int n = 0; n < 2000000 && !(st & 1); n++)
+      st = bh_reg_read(C_CTRL);
+   if (!(st & 1) || (st & 8))
+      return -1;
+   FILE *o = fopen(outf, "wb");
+   if (!o)
+      return -1;
+   for (uint32_t i = 0; i < nbufs; i++) {
+      uint32_t padded = (size[i] + 3) & ~3u;
+      uint8_t *tmp = malloc(padded);
+      if (!tmp) {
+         fclose(o);
+         return -1;
+      }
+      borg_hw_mem_read(addr[i], tmp, padded);
+      fwrite(tmp, 1, size[i], o);
+      free(tmp);
+   }
+   fclose(o);
+   return 0;
+}

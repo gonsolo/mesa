@@ -11,7 +11,6 @@
 #define BORGVK_CS_SLOT_BYTES (0x80000u * 4)
 #define BORGVK_CS_BASE_BYTES (0x40000u * 4)
 #define BORGVK_MAX_CS_PARTS 64
-#define BORGVK_CS_MAX_BUFS 34   /* 32 binding slots and the push constants */
 
 static void
 put_u32(uint8_t **p, uint32_t v)
@@ -194,6 +193,18 @@ cs_start(const struct borgvk_pipeline *pl, const char *direct, uint32_t gx, uint
    uint32_t axis = gy > 1 && gy >= gx ? 1 : gx > 1 ? 0 : 2;
    uint32_t extent = axis == 0 ? gx : axis == 1 ? gy : gz;
    uint32_t nparts = 1;
+   if (!direct) {
+      snprintf(r->jpath[0], sizeof r->jpath[0], "/tmp/borgvk_cs_job_XXXXXX");
+      snprintf(r->opath[0], sizeof r->opath[0], "/tmp/borgvk_cs_out_XXXXXX");
+      int ofd = mkstemp(r->opath[0]);
+      if (ofd >= 0)
+         close(ofd);
+      r->jpath[0][0] = 0;
+      r->pids[0] = ofd >= 0 && borgvk_hw_compute(job, job_len, r->opath[0]) == 0 ? -2 : -1;
+      r->nparts = 1;
+      r->ran = ofd >= 0;
+      return;
+   }
    if (!(pl->cs_flags & 1) && (uint64_t)gx * gy * gz >= 4096 && extent > 1) {
       long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
       nparts = (uint32_t)MIN2((long)extent, MAX2(ncpu, 1));
@@ -251,7 +262,8 @@ cs_merge(const struct cs_bufs *cb, struct cs_run *r, uint8_t **merged)
       int st = 0;
       if (pids[k] > 0)
          waitpid(pids[k], &st, 0);
-      FILE *f = pids[k] > 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0 ? fopen(opath[k], "rb") : NULL;
+      FILE *f = pids[k] == -2 || (pids[k] > 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0)
+                   ? fopen(opath[k], "rb") : NULL;
       if (!f) {
          mesa_logw("borgvk: compute sim failed (status %d)", st);
          ran = false;
@@ -308,7 +320,9 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
    struct borgvk_command_buffer *cmd = container_of(vk_cmd, struct borgvk_command_buffer, vk);
    const struct borgvk_pipeline *pl = cmd->cs_pipeline;
    const char *direct = getenv("BORGVK_SIM_DIRECT");
-   if (!pl || !pl->cs_ok || !gx || !gy || !gz || !direct || !direct[0])
+   if (direct && !direct[0])
+      direct = NULL;
+   if (!pl || !pl->cs_ok || !gx || !gy || !gz || (!direct && !borgvk_hw_enabled()))
       return;
    struct cs_bufs cb;
    cs_gather(cmd, pl, &cb);
@@ -325,7 +339,7 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
       cmd->dispatched = true;
    }
    for (uint32_t k = 0; k < run.nparts; k++) {
-      if (!getenv("BORGVK_KEEP_JOB"))
+      if (!getenv("BORGVK_KEEP_JOB") && run.jpath[k][0])
          unlink(run.jpath[k]);
       unlink(run.opath[k]);
    }
