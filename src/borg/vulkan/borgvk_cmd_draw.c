@@ -141,64 +141,88 @@ struct draw_params {
    uint32_t      first_instance;
 };
 
-static bool
-borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buffer *cmd,
-                        const struct draw_params *dp)
-{
-   struct borgvk_pipeline *pipeline = cmd->gfx_pipeline;
-   struct borgvk_descriptor_set *set = cmd->desc_set;
+struct draw_ctx {
+   struct borgvk_device *device;
+   struct borgvk_command_buffer *cmd;
+   const struct draw_params *dp;
+   struct borgvk_pipeline *pipeline;
+   uint32_t topo, X;
+   bool points, lines;
+   struct borgvk_image *color_img, *size_img, *extra[3];
+   uint32_t nextra;
+};
 
-   if (!pipeline || dp->count == 0 || dp->instances == 0)
+static bool
+draw_validate(struct draw_ctx *g)
+{
+   struct borgvk_command_buffer *cmd = g->cmd;
+   struct borgvk_pipeline *pipeline = g->pipeline;
+
+   if (!pipeline || g->dp->count == 0 || g->dp->instances == 0)
       return generic_reject(REJECT_UNDRAWABLE);
-   uint32_t topo;
    switch (pipeline->topology) {
-   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:  topo = 0; break;
-   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP: topo = 1; break;
-   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN:   topo = 2; break;
-   case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:     topo = 0; break;
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:  g->topo = 0; break;
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP: g->topo = 1; break;
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN:   g->topo = 2; break;
+   case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:     g->topo = 0; break;
    case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
-   case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:     topo = 0; break;
+   case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:     g->topo = 0; break;
    default: return generic_reject(REJECT_UNDRAWABLE);
    }
    if (pipeline->blob[BORGVK_STAGE_VERT].len == 0 || pipeline->blob[BORGVK_STAGE_FRAG].len == 0)
       return generic_reject(REJECT_NO_SHADER);
-   const bool points = pipeline->topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
-   const uint32_t X = points ? 6 : 1;
+   g->points = pipeline->topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+   g->X = g->points ? 6 : 1;
    /* A line is a quad too, but its six rows are gathered per line (see `pairs`). */
-   const bool lines = pipeline->topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST ||
-                      pipeline->topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+   g->lines = pipeline->topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST ||
+              pipeline->topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
 
-   struct borgvk_image *color_img =
+   g->color_img =
       cmd->color_views[0] && cmd->color_views[0]->image
          ? container_of(cmd->color_views[0]->image, struct borgvk_image, vk) : NULL;
    /* Depth only: no colour attachment, the depth or stencil image gives the size. */
    const struct vk_image_view *ds_view = cmd->depth_view ? cmd->depth_view : cmd->stencil_view;
-   struct borgvk_image *size_img =
-      color_img ? color_img : ds_view && ds_view->image ? container_of(ds_view->image, struct borgvk_image, vk) : NULL;
-   if (!size_img || !size_img->mem || !size_img->mem->map)
+   g->size_img =
+      g->color_img ? g->color_img : ds_view && ds_view->image ? container_of(ds_view->image, struct borgvk_image, vk) : NULL;
+   if (!g->size_img || !g->size_img->mem || !g->size_img->mem->map)
       return generic_reject(REJECT_NO_TARGET_MEMORY);
-   if (!color_img && !borgvk_sim_serves(size_img, true))
+   if (!g->color_img && !borgvk_sim_serves(g->size_img, true))
       return generic_reject(REJECT_NO_TARGET_MEMORY);
-   struct borgvk_image *extra[3] = { NULL, NULL, NULL };
-   const uint32_t nextra = pipeline->mrt ? pipeline->color_count - 1 : 0;
+   g->nextra = pipeline->mrt ? pipeline->color_count - 1 : 0;
    if (pipeline->color_count >= 2 && !pipeline->mrt)
       return generic_reject(REJECT_MRT_FORMATS);
-   for (uint32_t k = 0; k < nextra; k++) {
+   for (uint32_t k = 0; k < g->nextra; k++) {
       struct vk_image_view *v = cmd->color_views[k + 1];
-      extra[k] = v && v->image ? container_of(v->image, struct borgvk_image, vk) : NULL;
-      if (!extra[k] || !extra[k]->mem || !extra[k]->mem->map ||
-          extra[k]->vk.extent.width != color_img->vk.extent.width ||
-          extra[k]->vk.extent.height != color_img->vk.extent.height)
+      struct borgvk_image *e = v && v->image ? container_of(v->image, struct borgvk_image, vk) : NULL;
+      g->extra[k] = e;
+      if (!e || !e->mem || !e->mem->map ||
+          e->vk.extent.width != g->color_img->vk.extent.width ||
+          e->vk.extent.height != g->color_img->vk.extent.height)
          return generic_reject(REJECT_MRT_EXTENT);
    }
-   if (nextra && !borgvk_sim_serves(color_img, cmd->depth_view || cmd->stencil_view))
+   if (g->nextra && !borgvk_sim_serves(g->color_img, cmd->depth_view || cmd->stencil_view))
       return generic_reject(REJECT_MRT_NOT_SERVED);
-   bool same_extra = cmd->batch_nextra == nextra;
-   for (uint32_t k = 0; k < nextra; k++)
-      same_extra &= cmd->batch_extra[k] == extra[k];
-   if (cmd->batch_draws && (!same_extra || cmd->batch_img != color_img || cmd->batch_depth != cmd->depth_view ||
+   bool same_extra = cmd->batch_nextra == g->nextra;
+   for (uint32_t k = 0; k < g->nextra; k++)
+      same_extra &= cmd->batch_extra[k] == g->extra[k];
+   if (cmd->batch_draws && (!same_extra || cmd->batch_img != g->color_img || cmd->batch_depth != cmd->depth_view ||
                             cmd->batch_stencil != cmd->stencil_view))
       borgvk_flush_draws(cmd);
+   return true;
+}
+
+static bool
+borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buffer *cmd,
+                        const struct draw_params *dp)
+{
+   struct draw_ctx g = { .device = device, .cmd = cmd, .dp = dp, .pipeline = cmd->gfx_pipeline };
+   if (!draw_validate(&g))
+      return false;
+   struct borgvk_pipeline *pipeline = g.pipeline;
+   struct borgvk_descriptor_set *set = cmd->desc_set;
+   const uint32_t topo = g.topo, X = g.X, nextra = g.nextra;
+   const bool points = g.points, lines = g.lines;
+   struct borgvk_image *color_img = g.color_img, *size_img = g.size_img, **extra = g.extra;
 
    /* The index range each binding needs. */
    const uint8_t *idx_host = NULL;
