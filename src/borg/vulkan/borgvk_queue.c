@@ -1,24 +1,6 @@
 /*
  * Copyright © 2026 Andreas Wendleder
  * SPDX-License-Identifier: MIT
- *
- * Queue submit for borgvk — the single interception point of the driver. cube.c
- * records a frame into a command buffer (captured into cmd_buffer->cmd_queue by
- * the runtime's vk_cmd_enqueue emulation) and submits it. We never replay those
- * commands; instead we locate the bound descriptor set and forward the app's
- * real data to the FPGA over serial:
- *
- *   binding 0 (uniform buffer) = `struct vktexcube_vs_uniform`:
- *       float mvp[4][4];          // bytes   0..63   (updated every frame → 0xAD)
- *       float position[12*3][4];  // bytes  64..639  (static mesh → 0xAE)
- *       float attr[12*3][4];      // bytes 640..1215 (static UVs)
- *   binding 1 (combined image sampler) = the texture (RGBA8 → 0xAF rows)
- *
- * Startup: geometry + texture are burst-uploaded once on the first submit, then
- * every subsequent submit ships only the MVP.  A sentinel file in /tmp records
- * that the FPGA already holds the mesh+texture so subsequent runs in the same
- * power cycle skip the upload entirely (~0 s startup instead of ~2 s).
- * Set BORGVK_FORCE_UPLOAD=1 to ignore the sentinel and re-upload unconditionally.
  */
 #include "util/format_srgb.h"
 #include "borgvk_private.h"
@@ -53,7 +35,6 @@
 #define UBO_ATTR_FLOAT0  (UBO_MVP_FLOATS + UBO_NUM_VERTS * 4)  /* attr[36][4] */
 #define UBO_MIN_FLOATS   (UBO_ATTR_FLOAT0 + UBO_NUM_VERTS * 4) /* 304 = 1216 B */
 
-
 /* Locate the bound descriptor set (binding 0 = UBO, binding 1 = texture). */
 static struct borgvk_descriptor_set *
 find_set(struct vk_queue_submit *submit)
@@ -80,9 +61,6 @@ find_color_attachment(struct vk_queue_submit *submit)
 {
    for (uint32_t ci = 0; ci < submit->command_buffer_count; ci++) {
       struct vk_command_buffer *cb = submit->command_buffers[ci];
-      /* Mesa emulates the legacy render-pass entrypoints on top of
-       * CmdBeginRendering, which does not enqueue; the command buffer
-       * remembers the colour view it last rendered to instead. */
       struct borgvk_command_buffer *bcb =
          container_of(cb, struct borgvk_command_buffer, vk);
       if (bcb->color_views[0] &&
@@ -92,8 +70,6 @@ find_color_attachment(struct vk_queue_submit *submit)
    return NULL;
 }
 
-/* Dedup the 36 expanded positions to unique corners; build the indexed triangle
- * list + per-tri-vertex UVs, then ship the mesh. */
 static void
 send_geometry(const float *ubo)
 {
@@ -128,10 +104,6 @@ send_geometry(const float *ubo)
    borgvk_serial_send_geom(verts, nverts, idx, uv, UBO_NUM_VERTS / 3);
 }
 
-/* Box-downsample the linear RGBA8 texture to one BORGVK_TEX_DIM-wide RGBA8
- * row and ship it with the sampler's packed descriptor. With no sampler
- * recorded (an immutable one, which borgvk does not track yet) it sends the
- * firmware's own default: nearest, CLAMP_TO_EDGE, LOD clamped to 0. */
 static const uint32_t default_sampler[4] = { (2u << 3) | (2u << 6) | (2u << 9), 0, 0, 0 };
 
 static const uint32_t *
@@ -174,8 +146,6 @@ send_texture_row(struct borgvk_image *tex, const struct borgvk_sampler *sampler,
    borgvk_serial_send_tex_row(dy, row, sampler_desc(sampler));
 }
 
-/* Sentinel path: /tmp/borgvk_<devbasename>_setup — presence means the FPGA
- * already holds the current session's geometry+texture in PSRAM. */
 static void
 sentinel_path(char *buf, size_t n)
 {
@@ -207,9 +177,6 @@ mark_setup_done(void)
       close(fd);
 }
 
-/* Ship the pipeline's colour-blend state (BLEND_CFG/BLEND_CONST). blend_cfg is
- * never 0 once a graphics pipeline has set it (the write mask resets to 0xF),
- * so 0 means "no pipeline yet": leave the hardware at its reset state. */
 static void
 send_blend_state(const struct borgvk_device *device)
 {
@@ -249,10 +216,6 @@ send_blend_state(const struct borgvk_device *device)
    }
 }
 
-/* Ship the borgc-compiled shader blobs (captured at pipeline creation) to the
- * firmware once, as part of setup. DRM path → inline ioctl (the shim/kernel owns
- * the serial port); serial fallback → direct send. The firmware stages each blob
- * into PSRAM in place of its baked borgc_vert/frag_shader[] array. */
 static void
 upload_shaders(struct borgvk_device *device)
 {
@@ -294,7 +257,6 @@ submit_is_cube(struct vk_queue_submit *submit)
    return set && set_is_cube(set);
 }
 
-/* RGB888 sdim×sdim (or the raw words of a RAW32 target) → the colour attachment. Takes ownership of `rgb`. */
 static VkResult
 sim_store_rgb(struct borgvk_image *color_img, uint8_t *rgb, bool ok, bool raw32, uint32_t sdim)
 {
@@ -310,10 +272,6 @@ sim_store_rgb(struct borgvk_image *color_img, uint8_t *rgb, bool ok, bool raw32,
          fclose(f);
       }
    }
-   /* RGB888 sdim×sdim → R8G8B8A8_UNORM attachment (width×height),
-    * nearest-neighbour upscale, opaque alpha. */
-   /* The write below assumes a 4-byte texel; an attachment of another size (or unmapped
-    * memory) must not be written past its backing. */
    bool fits = color_img->mem && color_img->mem->map &&
                (uint64_t)width * height * 4 * MAX2(color_img->vk.samples, 1) <= color_img->size;
    if (rgb && got == expected && !fits) {
@@ -321,9 +279,6 @@ sim_store_rgb(struct borgvk_image *color_img, uint8_t *rgb, bool ok, bool raw32,
    } else if (rgb && got == expected && raw32) {
       memcpy((uint8_t *)color_img->mem->map + color_img->offset, rgb, expected);
    } else if (rgb && got == expected) {
-      /* The sim returns the resolved pixel. A multisampled image packs one plane per
-       * sample (see borgvk_image_layer_size): put the resolved value in every plane,
-       * so a later vkCmdResolveImage averages it back to itself. */
       uint64_t plane_size = (uint64_t)width * height * 4;
       for (uint32_t smp = 0; smp < MAX2(color_img->vk.samples, 1); smp++) {
          uint8_t *dst = (uint8_t *)color_img->mem->map + color_img->offset + smp * plane_size;
@@ -342,10 +297,6 @@ sim_store_rgb(struct borgvk_image *color_img, uint8_t *rgb, bool ok, bool raw32,
    return VK_SUCCESS;
 }
 
-/* Feed a captured wire stream to `arcilator_sim --cts-uart` and write the
- * rendered RGB888 pixels into the colour attachment (nearest-neighbour scaled,
- * opaque alpha). `sim_dim` = 0 uses the vkcube default (128, BORGVK_SIM_DIM);
- * otherwise the simulator renders sim_dim x sim_dim. Takes ownership of `bytes`. */
 static VkResult
 sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
                uint32_t sim_dim)
@@ -359,17 +310,10 @@ sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
    if (width == 0 || height == 0)
       { free(bytes); return VK_SUCCESS; }
 
-   /* The firmware renders at its fixed native size (128² fallback for the cube),
-    * which need not match the swapchain extent.  Render the sim at that size and
-    * nearest-upscale into the attachment.  Override with BORGVK_SIM_DIM. */
    uint32_t sdim = sim_dim ? sim_dim : 128;
-   /* A RAW32 attachment (R32_UINT) comes back as its raw words and is never resampled. */
    const bool raw32 = borgvk_sim_raw32(color_img->vk.format) && width == height;
    if (raw32)
       sdim = width;
-   /* BORGVK_SIM_DIRECT=<direct_sim>: Borg alone driven by a host-side driver
-    * (simulation/direct) -- no firmware, so the target size is free (power of
-    * two, 4..256, square) and a draw takes well under a second. */
    const char *direct = getenv("BORGVK_SIM_DIRECT");
    if (direct && direct[0]) {
       uint32_t d = color_img->vk.extent.width;
@@ -384,8 +328,6 @@ sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
          sdim = (uint32_t)d;
    }
 
-   /* BORGVK_SIM_KEEP=<path>: also keep the stream, for replaying it by hand
-    * with scripts/cts_uart_render.py. */
    const char *keep = getenv("BORGVK_SIM_KEEP");
    if (keep && keep[0]) {
       int kfd = open(keep, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -427,10 +369,6 @@ sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
    snprintf(w_str, sizeof(w_str), "%u", sdim);
    snprintf(h_str, sizeof(h_str), "%u", sdim);
 
-   /* A target over 128 pixels is rendered as 128-pixel windows (the hardware draws a large
-    * framebuffer as several windows, docs/B1_geometry_front_end.md); the windows are
-    * independent, so with the direct simulator they are dealt out to one process per core
-    * and the pieces merged. Window w (row-major) belongs to process w % nparts. */
    const uint32_t WIN = 128;
    uint32_t nwx = sdim > WIN ? sdim / WIN : 1;
    uint32_t nparts = 1;
@@ -517,13 +455,6 @@ sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
    return sim_store_rgb(color_img, rgb, rgb && got == expected, raw32, sdim);
 }
 
-
-/* Sim path for cube.c: capture the EXACT serial byte stream borgvk would put on
- * the wire (0xB0 borgc shaders + 0xAE geom + 0xAF texture + 0xAD MVP), feed it to
- * `arcilator_sim --cts-uart`, and write the rendered pixels into the colour
- * attachment.  Unlike the live serial path there is no once-only sentinel: every
- * frame ships the full stream because the sim boots fresh per invocation.  This
- * exercises the same borgc shaders + protocol as the FPGA, with no serial port. */
 static VkResult
 borgvk_submit_sim_cube(struct borgvk_device *device,
                        struct vk_queue_submit *submit)
@@ -565,10 +496,6 @@ borgvk_submit_sim_cube(struct borgvk_device *device,
       return VK_SUCCESS;
    }
 
-   /* Dump the captured wire stream and skip the sim fork -- how the simulation
-    * goldens' borgvk_capture.bin is produced. Needs no mappable colour
-    * attachment, so it works against a real WSI swapchain.
-    *   BORGVK_SIM_DUMP=/path  → write one frame's stream there, then return. */
    const char *dump = getenv("BORGVK_SIM_DUMP");
    if (dump && dump[0]) {
       int dfd = open(dump, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -594,8 +521,6 @@ borgvk_submit_sim_cube(struct borgvk_device *device,
    return res;
 }
 
-/* A format's source texel to the hardware's: copied, widened from three channels or R/B
- * swapped (cs bytes per channel), repacked 16-bit, or a depth part cut from depth/stencil. */
 struct tex_conv {
    uint32_t bpp, obpp, cs, sch, alpha, pack16, zstride, soff;
    bool swap_rb;
@@ -634,9 +559,6 @@ tex_convert(const struct tex_conv *c, uint8_t *dst, const uint8_t *src, uint32_t
    }
 }
 
-/* Convert a sampled image to texels the texture unit reads (linear for one level,
- * tiled for several) and ship it as 0xB5 chunks. Returns false for formats not handled
- * yet, in which case nothing is sent. */
 static bool
 send_generic_texture(const struct vk_image_view *view,
                      const struct borgvk_image *img,
@@ -662,9 +584,6 @@ send_generic_texture(const struct vk_image_view *view,
    if (layers == 0 || layers > 1024 || depth > 1024)
       return false;
 
-   /* source texel layout -> a TexFormat code (borg_isa.h) and its texels:
-    * copied (RAWFMT), widened from three channels or R/B swapped (CHFMT, cs bytes
-    * per channel), or 16-bit repacked (pack16). */
    uint32_t bpp, fmt_code, cs = 0, sch = 0, alpha = 0, pack16 = 0, zstride = 0, sten_off = 0;
    bool swap_rb = false;
    switch (view->format) {
@@ -737,8 +656,6 @@ send_generic_texture(const struct vk_image_view *view,
    if (levels == 0 || levels > 13)
       return false;
 
-   /* the source image keeps a layer's levels one after the other, rows packed, a 3D level
-    * slice after slice; layers follow each other */
    uint32_t lw[13], lh[13], ld[13];
    uint64_t soff[13], sum = 0;
    for (uint32_t l = 0; l < img->vk.mip_levels; l++) {
@@ -756,9 +673,6 @@ send_generic_texture(const struct vk_image_view *view,
    h = lh[0];
    const uint8_t *src = (const uint8_t *)img->mem->map + img->offset;
 
-   /* One level of one layer is linear. Anything more is tiled (4x4 texels, a 16-byte texel in
-    * two halves): a layer's levels one after the other, the layers after each other, the level
-    * offsets within a layer sent ahead in a 0xC0 packet. */
    const bool tiled = levels > 1 || layers > 1 || depth > 1 || type == 3;
    uint32_t offs[12] = { 0 }, ltotal = 0, total = 0;
    uint8_t *out = NULL;
@@ -807,8 +721,6 @@ send_generic_texture(const struct vk_image_view *view,
    if (!out)
       return false;
 
-   /* descriptor words 1..3: layout, levels, depth or layers, view swizzle (the
-    * VkComponentSwizzle values are the hardware's own encoding). */
    uint32_t sw[4] = { view->swizzle.r, view->swizzle.g, view->swizzle.b, view->swizzle.a };
    const bool no_alpha = sch && !util_format_has_alpha(vk_format_to_pipe_format(view->format));
    for (uint32_t i = 0; no_alpha && i < 4; i++) {
@@ -834,8 +746,6 @@ send_generic_texture(const struct vk_image_view *view,
    return true;
 }
 
-/* A texel buffer as a 1D texture of the same texels (linear layout, one level), so a
- * texelFetch reads it through the texture unit. Only 32-bit single-channel formats so far. */
 static bool
 send_buffer_texture(const struct vk_buffer_view *bv)
 {
@@ -864,10 +774,6 @@ send_buffer_texture(const struct vk_buffer_view *bv)
    return true;
 }
 
-/* VkFormat of a vertex attribute -> the texture unit's format code (software/borg/borg_isa.h
- * BORG_TEX_FORMAT_*), the component swizzle bits of its descriptor, and how many bytes the
- * typed fetch reads. Three-component formats are fetched as four with alpha forced to one (the
- * Vulkan default), which reads the next vertex's first bytes: the upload keeps slack for it. */
 static bool
 vertex_format_to_fetch(VkFormat f, uint32_t *code, uint32_t *swz, uint32_t *read_bytes)
 {
@@ -937,16 +843,13 @@ generic_reject(int why)
    return false;
 }
 
-/* The simulator's heap (software/borg/borg_layout.h BORG_HEAP_*): a bump allocator per stream. */
 #define BORGVK_HEAP_BYTES 0x2000000u
-#define BORGVK_POINT_SLOT 16   /* the point corner attribute's vertex slot (BORG_MAX_VATTRS - 1) */
+#define BORGVK_POINT_SLOT 16
 
 struct draw_heap {
    uint32_t top;
 };
 
-/* Run the accumulated draws of the open render pass (one simulator process for all of them) and
- * read the render target back. A no-op when nothing is pending. */
 static VkResult sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
                                uint32_t sim_dim);
 
@@ -1027,8 +930,6 @@ stream_append(struct borgvk_command_buffer *cmd, const uint8_t *data, size_t n)
    return true;
 }
 
-/* Upload n bytes (the tail up to a multiple of 4 is zero) and return their heap offset, or
- * UINT32_MAX when the heap is full. */
 static uint32_t
 heap_upload(struct draw_heap *h, const uint8_t *data, uint32_t n)
 {
@@ -1057,11 +958,6 @@ struct draw_params {
    uint32_t      first_instance;
 };
 
-/* Sim path for a draw (CTS and applications): the pipeline's vertex shader fetches its inputs
- * through the texture unit (borgc, load_input -> TEX fetch from slot 128 + location), so the
- * driver uploads the bound vertex (and index) buffers into the GPU heap, describes each
- * attribute with a texture descriptor, and sends the draw parameters. No vertex data is read
- * on the host except to find the index range. Returns true when it handled the draw. */
 static bool
 borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buffer *cmd,
                         const struct draw_params *dp)
@@ -1083,7 +979,6 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    }
    if (pipeline->blob[BORGVK_STAGE_VERT].len == 0 || pipeline->blob[BORGVK_STAGE_FRAG].len == 0)
       return generic_reject(4);
-   /* A point is a quad of two triangles: six vertices, whose clip offsets come from slot 15. */
    const bool points = pipeline->topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
    const uint32_t X = points ? 6 : 1;
    /* A line is a quad too, but its six rows are gathered per line (see `pairs`). */
@@ -1101,7 +996,6 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       return generic_reject(5);
    if (!color_img && !borgvk_sim_serves(size_img, true))
       return generic_reject(5);
-   /* Colour attachments 1-3, when the pipeline's render pass has several (all R8, one pass each). */
    struct borgvk_image *extra[3] = { NULL, NULL, NULL };
    const uint32_t nextra = pipeline->mrt ? pipeline->color_count - 1 : 0;
    if (pipeline->color_count >= 2 && !pipeline->mrt)
@@ -1188,7 +1082,6 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    static const float line_side[6] = { -1, 1, -1, 1, 1, -1 };
    int64_t imin = dp->first_instance, imax = (int64_t)dp->first_instance + dp->instances - 1;
 
-   /* The heap this draw needs: flush the pass so far when it would not fit next to it. */
    {
       uint64_t need = dp->indexed ? (uint64_t)dp->count * dp->index_size + 32 : 0;
       for (uint32_t b = 0; b < BORGVK_MAX_VERTEX_BINDINGS; b++) {
@@ -1252,8 +1145,6 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    if (first_of_batch)
       cmd->batch_serve = borgvk_sim_serves(size_img, cmd->depth_view || cmd->stencil_view);
    const bool serve = cmd->batch_serve;
-   /* Persistent simulator: the attachments hold what the application's images hold, so every
-    * draw loads them (colour, depth, stencil) and keeps the tiles it does not reach. */
    uint32_t load = first_of_batch ? 0u : 1u;
    if (serve) {
       const bool has_z = cmd->depth_view != NULL, has_s = cmd->stencil_view != NULL;
@@ -1267,7 +1158,6 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
          borgvk_serial_send_att(nextra + 1, raw8);
       }
    } else if (first_of_batch) {
-      /* Render target: the attachment's format and the clear colour its render pass asked for. */
       uint8_t fmt = color_img->vk.format == VK_FORMAT_R8G8B8A8_UNORM ? 1 :
                     color_img->vk.format == VK_FORMAT_B8G8R8A8_UNORM ? 2 :
                     borgvk_sim_raw32(color_img->vk.format) ? 3 : 0;   /* 3 = RAW32 */
@@ -1292,7 +1182,6 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       const uint32_t stride = pipeline->binding_stride[b];
       const bool inst = pipeline->binding_instance[b];
       if (lines && !inst) {
-         /* Row 6 * line + corner: the corner's own endpoint, and in a second slot the other one. */
          const uint32_t asz = vk_format_get_blocksize(at->format);
          for (uint32_t other = 0; ok && other < 2; other++) {
             uint8_t *tight = calloc((size_t)nlines * 6, rbytes);
@@ -1321,9 +1210,6 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
          ok = generic_reject(9);
          break;
       }
-      /* The attribute, gathered into a tight array of `rbytes` elements: element r of the buffer
-       * is element r of the array, so the base is shifted back by row0 elements (a 32-bit
-       * two's-complement heap offset). The unit reads it as a 4096-wide linear image. */
       const uint32_t nrows = (uint32_t)(e1 - e0 + 1);
       const uint32_t asz = vk_format_get_blocksize(at->format);
       uint8_t *tight = calloc(nrows, rbytes);
@@ -1449,8 +1335,6 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       if (ok && idx_off == UINT32_MAX)
          ok = generic_reject(10);
    }
-   /* The first bound uniform buffer is the shader's LOAD window (ls_base). Buffers of all bound
-    * sets are numbered flat (set_base + slot), as the compiler numbers them. */
    uint32_t ubo_base = 0;
    uint32_t smask = 0;
    struct borgvk_descriptor_set *sets[4] = { set, cmd->desc_sets[1], cmd->desc_sets[2], cmd->desc_sets[3] };
@@ -1464,11 +1348,8 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
              sets[si]->buffers[b]->mem->map)
             smask |= 1u << (pipeline->set_base[si] + b);
    }
-   const uint32_t umask = pipeline->ubo_mask & ~1u;   /* uniform buffers past binding 0 live in the region too */
+   const uint32_t umask = pipeline->ubo_mask & ~1u;
    if (ok && (smask || umask)) {
-      /* With storage buffers the window is a region: the uniform buffer in slot 0, buffer number
-       * f in slot 1 + f. A draw with the same set as the one before shares its region, so it
-       * sees that draw's stores. */
       const uint32_t slots = 1 + util_last_bit(smask | umask);
       const bool reuse = cmd->region_set == set && cmd->batch_draws && !umask && !any_dyn && !sets[1];
       uint32_t base = cmd->region_base;
@@ -1528,7 +1409,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       break;
    }
    if (ok) {
-      int want = -1;   /* the slot of the binding the fragment shader samples */
+      int want = -1;
       if (set && pipeline->tex_binding >= 0) {
          want = set->map.n ? -2 : pipeline->tex_binding;
          for (uint32_t j = 0; j < set->map.n; j++)
@@ -1583,11 +1464,6 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    return true;
 }
 
-/* ---- Draw state and the draw itself, run in submission order -------------------------------- *
- * The application-facing table only records these (see borgvk_CreateDevice); cmd_dispatch runs
- * them when the command buffer is submitted. Tracking the state here, instead of scanning the
- * queue afterwards, is what lets a draw happen at its place in the command stream: a
- * vkCmdCopyImageToBuffer recorded after it sees the rendered image. */
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdBindPipeline(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,
                        VkPipeline _pipeline)
@@ -1601,11 +1477,6 @@ borgvk_CmdBindPipeline(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipeli
       cmd->cs_pipeline = pl;
 }
 
-/* Compute (simulator only): the compute shader's buffers live in fixed windows of GPU memory,
- * one per binding, which the host fills before the dispatch and reads back afterwards (the
- * addresses are baked into the program by borgc's compute backend, see compute.rs). The job
- * goes to `direct_sim --compute`. Runs when the recorded commands replay at submit, so it
- * lands in command order. */
 #define BORGVK_CS_SLOT_BYTES (0x80000u * 4)
 #define BORGVK_CS_BASE_BYTES (0x40000u * 4)
 #define BORGVK_MAX_CS_PARTS 64
@@ -1626,9 +1497,6 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
    const char *direct = getenv("BORGVK_SIM_DIRECT");
    if (!pl || !pl->cs_ok || !gx || !gy || !gz || !direct || !direct[0])
       return;
-   /* wb: copy the window back to the app's buffer afterwards.  A texel buffer is decoded into a
-    * private array (the canonical 4-word texel the compiler reads, see borg_nir_passes.c); the
-    * texels a shader changed are encoded back. */
    struct { uint8_t *host; uint8_t *decoded; bool wb; uint32_t skip, size, addr;
             uint8_t *texels; enum pipe_format pf; } bufs[34];
    memset(bufs, 0, sizeof(bufs));
@@ -1667,7 +1535,6 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
       struct borgvk_image *simg = set->images[b];
       if (!buf && !bv && simg && (set->sampled_mask >> b & 1) && simg->mem && simg->mem->map &&
           simg->vk.image_type == VK_IMAGE_TYPE_2D && simg->vk.samples == 1) {
-         /* A sampled image: word 0 = width, then level 0 / layer 0 decoded to 16-byte texels. */
          enum pipe_format pf = vk_format_to_pipe_format(simg->vk.format);
          uint32_t w = simg->vk.extent.width, h = simg->vk.extent.height;
          uint32_t bs = util_format_get_blocksize(pf);
@@ -1693,8 +1560,6 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
       }
       if (!buf && !bv && simg && simg->mem && simg->mem->map && simg->vk.image_type == VK_IMAGE_TYPE_2D &&
           vk_format_get_blocksize(simg->vk.format) == 4 && simg->vk.samples == 1) {
-         /* A storage image: word 0 = width, then level 0 / layer 0 texel by texel (4-byte
-          * formats; the compiler addresses it as y * width + x + 1). */
          uint32_t w = simg->vk.extent.width, h = simg->vk.extent.height;
          uint32_t n = MIN2(w * h, BORGVK_CS_SLOT_BYTES / 4 - 1);
          uint8_t *dec = calloc(1 + n, 4);
@@ -1746,8 +1611,6 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
       }
    }
 
-   /* Job header: nprog gx gy gz lx ly lz nregs nbufs bx by bz (b* = the grid origin, which the
-    * compiled program adds to the workgroup id). */
    const uint32_t HDR = 12;
    size_t cap = HDR * 4 + pl->cs_nwords * 4 + pl->cs_nregs * 8 + total;
    uint8_t *job = malloc(cap), *w = job;
@@ -1765,11 +1628,6 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
    }
    const size_t job_len = (size_t)(w - job);
 
-   /* A big grid is cut along one axis into slices that run as separate simulator processes
-    * (the simulator is cycle-accurate: a 512x512 grid of one-invocation workgroups takes
-    * minutes in one process). Each slice starts from the same buffers and the changed bytes
-    * are merged afterwards, so it is only done for shaders without atomics, whose result does
-    * not depend on how the workgroups are ordered. */
    uint32_t axis = gy > 1 && gy >= gx ? 1 : gx > 1 ? 0 : 2;
    uint32_t extent = axis == 0 ? gx : axis == 1 ? gy : gz;
    uint32_t nparts = 1;
@@ -1810,7 +1668,6 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
          _exit(127);
       }
    }
-   /* Merged result per buffer: the original bytes with every changed byte of every slice. */
    uint8_t *merged[BORGVK_MAX_BINDINGS + 1] = { 0 };
    for (uint32_t i = 0; i < nbufs; i++) {
       merged[i] = malloc(((bufs[i].size + 3) & ~3u) + 1);
@@ -2008,8 +1865,6 @@ borgvk_CmdDrawIndexedIndirect(VkCommandBuffer commandBuffer, VkBuffer _buffer, V
 
 static VkResult borgvk_queue_submit_work(struct vk_queue *vk_queue, struct vk_queue_submit *submit);
 
-/* driver_submit: honour the submit's semaphore/fence waits and signals (the runtime leaves both
- * to the driver for a sync type with GPU_WAIT), around the actual work. */
 VkResult
 borgvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
 {
@@ -2035,9 +1890,6 @@ borgvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
 static VkResult
 borgvk_queue_submit_work(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
 {
-   /* Run the recorded commands (copies, clears, blits, events, push constants, render-pass
-    * state, secondaries) in submission order. The application-facing dispatch only records;
-    * cmd_dispatch holds the real implementations (see borgvk_CreateDevice). */
    struct borgvk_device *replay_dev =
       container_of(vk_queue->base.device, struct borgvk_device, vk);
    for (uint32_t ci = 0; ci < submit->command_buffer_count; ci++) {
@@ -2049,12 +1901,6 @@ borgvk_queue_submit_work(struct vk_queue *vk_queue, struct vk_queue_submit *subm
    struct borgvk_device *device =
       container_of(vk_queue->base.device, struct borgvk_device, vk);
 
-   /* Sim path: if BORGVK_SIM is set, render via arcilator_sim and write pixels
-    * into the colour attachment instead of shipping to the FPGA.
-    *   - cube.c (UBO-driven): borgvk_submit_sim_cube captures the full serial
-    *     stream incl. 0xB0 borgc shaders and replays it via --cts-uart, so the
-    *     sim runs the exact protocol + real shaders as the FPGA.
-    *   - generic draws already ran, at their place in the replay. */
    if (getenv("BORGVK_SIM") || borgvk_hw_enabled()) {
       if (submit_is_cube(submit))
          return borgvk_submit_sim_cube(device, submit);
@@ -2082,9 +1928,6 @@ borgvk_queue_submit_work(struct vk_queue *vk_queue, struct vk_queue_submit *subm
    static bool g_setup_done = false;
 
    if (device->drm_fd >= 0) {
-      /* DRM path: delegate geometry/texture upload and per-frame MVP to the
-       * shim (or kernel driver) via ioctls.  The shim manages the sentinel
-       * and serial transport; we just pass the GEM handles. */
       bool has_gem = ubuf->mem->gem_handle != 0 &&
                      tex && tex->mem && tex->mem->gem_handle != 0;
 
@@ -2110,8 +1953,6 @@ borgvk_queue_submit_work(struct vk_queue *vk_queue, struct vk_queue_submit *subm
          drmIoctl(device->drm_fd, DRM_IOCTL_BORG_SUBMIT, &sub);
       }
    } else {
-      /* Serial fallback: no DRM device (shim not loaded).  Run the legacy
-       * direct-serial path exactly as before. */
       if (!g_setup_done) {
          if (setup_already_done()) {
             mesa_logi("borgvk: skipping upload (sentinel present); "
