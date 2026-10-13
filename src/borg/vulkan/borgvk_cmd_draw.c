@@ -158,6 +158,7 @@ struct draw_ctx {
    uint32_t load;
    uint32_t (*pairs)[2], nlines;
    struct draw_heap heap;
+   uint32_t idx_off, index_code, voff_out;
 };
 
 static bool
@@ -599,6 +600,48 @@ draw_line_consts(struct draw_ctx *g)
 }
 
 static bool
+draw_indices(struct draw_ctx *g)
+{
+   const struct draw_params *dp = g->dp;
+   struct draw_heap *heap = &g->heap;
+   const uint8_t *idx_host = g->idx_host;
+   const uint32_t X = g->X;
+   const bool points = g->points;
+   uint32_t idx_off = 0, index_code = dp->index_size == 2 ? 1 : 2, voff_out = dp->vertex_offset;
+   bool ok = true;
+   g->idx_off = idx_off;
+   g->index_code = index_code;
+   g->voff_out = voff_out;
+   if (!dp->indexed || g->lines)
+      return true;
+   if (points) {
+      uint32_t *ex = malloc((size_t)dp->count * X * 4);
+      if (!ex) {
+         ok = generic_reject(REJECT_UPLOAD);
+      } else {
+         for (uint32_t i = 0; i < dp->count; i++) {
+            int64_t v = (dp->index_size == 2 ? ((const uint16_t *)idx_host)[i] : ((const uint32_t *)idx_host)[i]) +
+                        (int64_t)dp->vertex_offset;
+            for (uint32_t k = 0; k < X; k++)
+               ex[i * X + k] = (uint32_t)(v * X + k);
+         }
+         idx_off = heap_upload(heap, (const uint8_t *)ex, dp->count * X * 4);
+         free(ex);
+         index_code = 2;
+         voff_out = 0;
+      }
+   } else {
+      idx_off = heap_upload(heap, idx_host, dp->count * dp->index_size);
+   }
+   if (ok && idx_off == UINT32_MAX)
+      ok = generic_reject(REJECT_UPLOAD);
+   g->idx_off = idx_off;
+   g->index_code = index_code;
+   g->voff_out = voff_out;
+   return ok;
+}
+
+static bool
 borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buffer *cmd,
                         const struct draw_params *dp)
 {
@@ -608,12 +651,11 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    struct borgvk_pipeline *pipeline = g.pipeline;
    struct borgvk_descriptor_set *set = cmd->desc_set;
    const uint32_t topo = g.topo, X = g.X, nextra = g.nextra;
-   const bool points = g.points, lines = g.lines;
+   const bool lines = g.lines;
    struct borgvk_image *color_img = g.color_img, **extra = g.extra;
 
    if (!draw_index_range(&g))
       return false;
-   const uint8_t *idx_host = g.idx_host;
    uint32_t (*pairs)[2] = g.pairs, nlines = g.nlines;
    g.imin = dp->first_instance;
    g.imax = (int64_t)dp->first_instance + dp->instances - 1;
@@ -631,30 +673,10 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
              draw_line_consts(&g);
    struct draw_heap heap = g.heap;
    free(pairs);
-   uint32_t idx_off = 0, index_code = dp->index_size == 2 ? 1 : 2, voff_out = dp->vertex_offset;
-   if (ok && dp->indexed && !lines) {
-      if (points) {
-         uint32_t *ex = malloc((size_t)dp->count * X * 4);
-         if (!ex) {
-            ok = generic_reject(REJECT_UPLOAD);
-         } else {
-            for (uint32_t i = 0; i < dp->count; i++) {
-               int64_t v = (dp->index_size == 2 ? ((const uint16_t *)idx_host)[i] : ((const uint32_t *)idx_host)[i]) +
-                           (int64_t)dp->vertex_offset;
-               for (uint32_t k = 0; k < X; k++)
-                  ex[i * X + k] = (uint32_t)(v * X + k);
-            }
-            idx_off = heap_upload(&heap, (const uint8_t *)ex, dp->count * X * 4);
-            free(ex);
-            index_code = 2;
-            voff_out = 0;
-         }
-      } else {
-         idx_off = heap_upload(&heap, idx_host, dp->count * dp->index_size);
-      }
-      if (ok && idx_off == UINT32_MAX)
-         ok = generic_reject(REJECT_UPLOAD);
-   }
+   if (ok)
+      ok = draw_indices(&g);
+   heap = g.heap;
+   const uint32_t idx_off = g.idx_off, index_code = g.index_code, voff_out = g.voff_out;
    uint32_t ubo_base = 0;
    uint32_t smask = 0;
    struct borgvk_descriptor_set *sets[4] = { set, cmd->desc_sets[1], cmd->desc_sets[2], cmd->desc_sets[3] };
