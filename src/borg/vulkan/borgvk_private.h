@@ -385,6 +385,26 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_pipeline, base, VkPipeline,
 }
 #endif
 
+struct borgvk_descriptor_set *borgvk_find_set(struct vk_queue_submit *submit);
+const uint32_t *borgvk_sampler_desc(const struct borgvk_sampler *sampler);
+void borgvk_send_texture_row(struct borgvk_image *tex, const struct borgvk_sampler *sampler, int dy);
+void borgvk_send_blend_state(const struct borgvk_device *device);
+void borgvk_upload_shaders(struct borgvk_device *device);
+bool borgvk_set_is_cube(struct borgvk_descriptor_set *set);
+bool borgvk_submit_is_cube(struct vk_queue_submit *submit);
+VkResult borgvk_sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img, uint32_t sim_dim);
+VkResult borgvk_submit_sim_cube(struct borgvk_device *device, struct vk_queue_submit *submit);
+VkResult borgvk_submit_cube_live(struct borgvk_device *device, struct vk_queue_submit *submit);
+struct tex_conv {
+   uint32_t bpp, obpp, cs, sch, alpha, pack16, zstride, soff;
+   bool swap_rb;
+};
+void borgvk_tex_convert(const struct tex_conv *c, uint8_t *dst, const uint8_t *src, uint32_t n);
+bool borgvk_send_generic_texture(const struct vk_image_view *view, const struct borgvk_image *img,
+                                 const struct borgvk_sampler *sampler);
+bool borgvk_send_buffer_texture(const struct vk_buffer_view *bv);
+bool borgvk_vertex_format_to_fetch(VkFormat f, uint32_t *code, uint32_t *swz, uint32_t *read_bytes);
+
 void borgvk_event_set_status(VkEvent event, bool set);
 
 #endif /* BORGVK_PRIVATE_H */
