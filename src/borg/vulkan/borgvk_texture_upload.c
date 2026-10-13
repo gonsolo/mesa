@@ -152,6 +152,8 @@ borgvk_send_generic_texture(const struct vk_image_view *view,
    }
    w = lw[0];
    h = lh[0];
+   if (type == 2)
+      depth = ld[0];
    const uint8_t *src = (const uint8_t *)img->mem->map + img->offset;
 
    const bool tiled = levels > 1 || layers > 1 || depth > 1 || type == 3;
