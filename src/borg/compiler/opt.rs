@@ -38,6 +38,10 @@ pub(crate) fn dce(prog: &mut Vec<BorgInstr>, out_roots: &[u32]) {
     }
 }
 
+/// Reorders the program to keep few values live at once, since registers are scarce. Each run
+/// of side-effect-free instructions between TEX, FATTR and stores is scheduled on its own,
+/// preferring instructions that free their sources, and the order inside a run follows the
+/// dependencies.
 pub(crate) fn schedule_for_pressure(prog: &mut Vec<BorgInstr>, out_roots: &[u32]) {
     let out_roots: HashSet<u32> = out_roots.iter().copied().collect();
 
