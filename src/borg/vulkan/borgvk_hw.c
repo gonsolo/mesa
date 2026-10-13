@@ -1,12 +1,6 @@
 /*
  * Copyright © 2026 Andreas Wendleder
  * SPDX-License-Identifier: MIT
- *
- * borgvk_hw.c — the Borg behind the DRM render node (or `direct_sim --raw` on a host).
- *
- * The wire stream a frame would send over the serial link is run through borg_core
- * (software/borg) in this process; its register and memory hooks (borg_hw.c) are ioctls
- * on /dev/dri/renderD128. The colour attachment comes back by reading GPU memory.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,8 +18,6 @@ borgvk_hw_enabled(void)
    return e && e[0];
 }
 
-/* Render `n` bytes of wire stream on a dim x dim target; the pixels (RGB888, or the raw
- * 32-bit words of a RAW32 target) go to `out`. Returns the number of bytes, 0 on failure. */
 size_t
 borgvk_hw_render(const uint8_t *b, size_t n, uint32_t dim, uint8_t *out)
 {
@@ -37,7 +29,7 @@ borgvk_hw_render(const uint8_t *b, size_t n, uint32_t dim, uint8_t *out)
    borg_core_init(dim, dim);
 
    int draws = 0;
-   bool target_seen = false;   /* a 0xB6 packet carries the app's clear colour; otherwise the default */
+   bool target_seen = false;
    for (size_t i = 0; i < n;) {
       if (b[i] == 0xB1) { i++; continue; }   /* serial-reload trigger: not a draw packet */
       int len = borg_core_pkt_len(b[i]);
@@ -84,7 +76,7 @@ borgvk_hw_render(const uint8_t *b, size_t n, uint32_t dim, uint8_t *out)
             continue;
          }
          uint8_t r, g, bl;
-         if (fmt) {   /* tile = 16 pixels x 4 B: R,G,B,A (fmt 1) or B,G,R,A (fmt 2) */
+         if (fmt) {
             uint32_t px = words[tile * 16 + ti];
             uint8_t b0 = px & 0xFF, b1 = (px >> 8) & 0xFF, b2 = (px >> 16) & 0xFF;
             r = fmt == 1 ? b0 : b2; g = b1; bl = fmt == 1 ? b2 : b0;
