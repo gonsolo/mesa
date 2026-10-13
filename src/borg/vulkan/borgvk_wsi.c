@@ -1,21 +1,6 @@
 /*
  * Copyright © 2026 Andreas Wendleder
  * SPDX-License-Identifier: MIT
- *
- * WSI (window-system integration) for borgvk.  borgvk's real output is the
- * FPGA's HDMI monitor, reached over serial at submit time.  WSI only needs to
- * function (surfaces, swapchains, acquire/present all succeed) so an unmodified
- * app (e.g. Vulkan-Tools/cube.c) runs its render loop and submits each frame.
- *
- * No host window is created.  borgvk overrides every platform surface-creation
- * entrypoint to silently return a headless surface (VK_ICD_WSI_PLATFORM_HEADLESS)
- * regardless of what WSI the app requests.  Mesa's headless WSI backend (always
- * initialized by wsi_device_init) then handles swapchain/acquire/present without
- * opening any display connection.  The app's window-system call succeeds, its
- * extension check passes, and nothing appears on the workstation screen.
- *
- * wsi_device_init + the wsi_*_entrypoints still provide GetSurfaceCapabilities,
- * GetSurfaceFormats, etc.; only surface *creation* is overridden here.
  */
 #include "borgvk_private.h"
 
@@ -60,12 +45,6 @@ borgvk_wsi_finish(struct borgvk_physical_device *physical_device)
                      &physical_device->vk.instance->alloc);
 }
 
-/* ── Surface-creation overrides ─────────────────────────────────────────────
- * These are picked up automatically by borgvk_instance_entrypoints (which is
- * loaded with priority=true before wsi_instance_entrypoints in CreateInstance).
- * Each function ignores its platform-specific parameters and returns a minimal
- * headless surface so no window-system connection is ever opened. */
-
 static VkResult
 make_headless_surface(VkInstance _instance,
                       const VkAllocationCallbacks *pAllocator,
@@ -81,7 +60,6 @@ make_headless_surface(VkInstance _instance,
    *pSurface = VkIcdSurfaceBase_to_handle(&surface->base);
    return VK_SUCCESS;
 }
-
 
 #ifdef VK_USE_PLATFORM_XLIB_KHR
 VKAPI_ATTR VkResult VKAPI_CALL
