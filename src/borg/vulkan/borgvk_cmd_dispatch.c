@@ -19,19 +19,32 @@ put_u32(uint8_t **p, uint32_t v)
    *p += 4;
 }
 
-VKAPI_ATTR void VKAPI_CALL
-borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint32_t gz)
+struct cs_buf {
+   uint8_t *host, *decoded;
+   bool wb;
+   uint32_t skip, size, addr;
+   uint8_t *texels;
+   enum pipe_format pf;
+};
+
+struct cs_bufs {
+   struct cs_buf b[34];
+   uint32_t n, total;
+};
+
+struct cs_run {
+   char jpath[BORGVK_MAX_CS_PARTS][32], opath[BORGVK_MAX_CS_PARTS][32];
+   pid_t pids[BORGVK_MAX_CS_PARTS];
+   uint32_t nparts;
+   bool ran;
+};
+
+static void
+cs_gather(const struct borgvk_command_buffer *cmd, const struct borgvk_pipeline *pl, struct cs_bufs *cb)
 {
-   VK_FROM_HANDLE(vk_command_buffer, vk_cmd, commandBuffer);
-   struct borgvk_command_buffer *cmd = container_of(vk_cmd, struct borgvk_command_buffer, vk);
-   const struct borgvk_pipeline *pl = cmd->cs_pipeline;
-   const char *direct = getenv("BORGVK_SIM_DIRECT");
-   if (!pl || !pl->cs_ok || !gx || !gy || !gz || !direct || !direct[0])
-      return;
-   struct { uint8_t *host; uint8_t *decoded; bool wb; uint32_t skip, size, addr;
-            uint8_t *texels; enum pipe_format pf; } bufs[34];
-   memset(bufs, 0, sizeof(bufs));
+   struct cs_buf *bufs = cb->b;
    uint32_t nbufs = 0, total = 0;
+   memset(bufs, 0, sizeof(cb->b));
    for (uint32_t si = 0; si < 4; si++) {
    struct borgvk_descriptor_set *set = cmd->cs_sets[si];
    const VkDeviceSize *dyn_off = cmd->cs_dyn_offs[si];
@@ -141,7 +154,16 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
          nbufs++;
       }
    }
+   cb->n = nbufs;
+   cb->total = total;
+}
 
+static uint8_t *
+cs_build_job(const struct borgvk_pipeline *pl, uint32_t gx, uint32_t gy, uint32_t gz, const struct cs_bufs *cb,
+             size_t *job_len_out)
+{
+   const struct cs_buf *bufs = cb->b;
+   const uint32_t nbufs = cb->n, total = cb->total;
    const uint32_t HDR = 12;
    size_t cap = HDR * 4 + pl->cs_nwords * 4 + pl->cs_nregs * 8 + total;
    uint8_t *job = malloc(cap), *w = job;
@@ -158,7 +180,15 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
       w += (bufs[i].size + 3) & ~3u;
    }
    const size_t job_len = (size_t)(w - job);
+   *job_len_out = job_len;
+   return job;
+}
 
+static void
+cs_start(const struct borgvk_pipeline *pl, const char *direct, uint32_t gx, uint32_t gy, uint32_t gz,
+         const uint8_t *job, size_t job_len, struct cs_run *r)
+{
+   const uint32_t HDR = 12;
    uint32_t axis = gy > 1 && gy >= gx ? 1 : gx > 1 ? 0 : 2;
    uint32_t extent = axis == 0 ? gx : axis == 1 ? gy : gz;
    uint32_t nparts = 1;
@@ -169,8 +199,8 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
          nparts = (uint32_t)MAX2(1, MIN2((long)extent, atol(getenv("BORGVK_CS_PARTS"))));
    }
 
-   char jpath[BORGVK_MAX_CS_PARTS][32], opath[BORGVK_MAX_CS_PARTS][32];
-   pid_t pids[BORGVK_MAX_CS_PARTS];
+   char (*jpath)[32] = r->jpath, (*opath)[32] = r->opath;
+   pid_t *pids = r->pids;
    nparts = MIN2(nparts, BORGVK_MAX_CS_PARTS);
    bool ran = true;
    for (uint32_t k = 0; k < nparts; k++) {
@@ -199,7 +229,18 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
          _exit(127);
       }
    }
-   uint8_t *merged[BORGVK_MAX_BINDINGS + 1] = { 0 };
+   r->nparts = nparts;
+   r->ran = ran;
+}
+
+static void
+cs_merge(const struct cs_bufs *cb, struct cs_run *r, uint8_t **merged)
+{
+   const struct cs_buf *bufs = cb->b;
+   const uint32_t nbufs = cb->n, nparts = r->nparts;
+   char (*opath)[32] = r->opath;
+   pid_t *pids = r->pids;
+   bool ran = r->ran;
    for (uint32_t i = 0; i < nbufs; i++) {
       merged[i] = malloc(((bufs[i].size + 3) & ~3u) + 1);
       memcpy(merged[i], bufs[i].decoded ? bufs[i].decoded : bufs[i].host, bufs[i].size);
@@ -226,35 +267,69 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
       }
       fclose(f);
    }
-   if (borgvk_corpus_on()) {
-      uint64_t out = borgvk_corpus_hash(BORGVK_CORPUS_SEED, &ran, sizeof(ran));
-      for (uint32_t i = 0; i < nbufs; i++)
-         out = borgvk_corpus_hash(out, merged[i], bufs[i].size);
-      borgvk_corpus_log('D', borgvk_corpus_hash(BORGVK_CORPUS_SEED, job, job_len), out);
+   r->ran = ran;
+}
+
+static void
+cs_apply(struct borgvk_command_buffer *cmd, const struct cs_bufs *cb, uint8_t *const *merged)
+{
+   const struct cs_buf *bufs = cb->b;
+   const uint32_t nbufs = cb->n;
+
+   for (uint32_t i = 0; i < nbufs; i++)
+      if (bufs[i].wb)
+         memcpy(bufs[i].host, merged[i] + bufs[i].skip, bufs[i].size - bufs[i].skip);
+   /* A texel buffer: the texels a shader stored, encoded back into the view's format. */
+   for (uint32_t i = 0; i < nbufs; i++) {
+      if (!bufs[i].texels)
+         continue;
+      const uint32_t bs = util_format_get_blocksize(bufs[i].pf);
+      for (uint32_t t = 0; t < bufs[i].size / 16; t++)
+         if (memcmp(merged[i] + t * 16, bufs[i].decoded + t * 16, 16) != 0)
+            util_format_pack_rgba(bufs[i].pf, bufs[i].texels + (size_t)t * bs, merged[i] + t * 16, 1);
    }
-   if (ran) {
-      for (uint32_t i = 0; i < nbufs; i++)
-         if (bufs[i].wb)
-            memcpy(bufs[i].host, merged[i] + bufs[i].skip, bufs[i].size - bufs[i].skip);
-      /* A texel buffer: the texels a shader stored, encoded back into the view's format. */
-      for (uint32_t i = 0; i < nbufs; i++) {
-         if (!bufs[i].texels)
-            continue;
-         const uint32_t bs = util_format_get_blocksize(bufs[i].pf);
-         for (uint32_t t = 0; t < bufs[i].size / 16; t++)
-            if (memcmp(merged[i] + t * 16, bufs[i].decoded + t * 16, 16) != 0)
-               util_format_pack_rgba(bufs[i].pf, bufs[i].texels + (size_t)t * bs, merged[i] + t * 16, 1);
-      }
+}
+
+static void
+cs_log(const struct cs_bufs *cb, const uint8_t *job, size_t job_len, uint8_t *const *merged, bool ran)
+{
+   uint64_t out = borgvk_corpus_hash(BORGVK_CORPUS_SEED, &ran, sizeof(ran));
+   for (uint32_t i = 0; i < cb->n; i++)
+      out = borgvk_corpus_hash(out, merged[i], cb->b[i].size);
+   borgvk_corpus_log('D', borgvk_corpus_hash(BORGVK_CORPUS_SEED, job, job_len), out);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint32_t gz)
+{
+   VK_FROM_HANDLE(vk_command_buffer, vk_cmd, commandBuffer);
+   struct borgvk_command_buffer *cmd = container_of(vk_cmd, struct borgvk_command_buffer, vk);
+   const struct borgvk_pipeline *pl = cmd->cs_pipeline;
+   const char *direct = getenv("BORGVK_SIM_DIRECT");
+   if (!pl || !pl->cs_ok || !gx || !gy || !gz || !direct || !direct[0])
+      return;
+   struct cs_bufs cb;
+   cs_gather(cmd, pl, &cb);
+   size_t job_len;
+   uint8_t *job = cs_build_job(pl, gx, gy, gz, &cb, &job_len);
+   struct cs_run run;
+   cs_start(pl, direct, gx, gy, gz, job, job_len, &run);
+   uint8_t *merged[BORGVK_MAX_BINDINGS + 1] = { 0 };
+   cs_merge(&cb, &run, merged);
+   if (borgvk_corpus_on())
+      cs_log(&cb, job, job_len, merged, run.ran);
+   if (run.ran) {
+      cs_apply(cmd, &cb, merged);
       cmd->dispatched = true;
    }
-   for (uint32_t k = 0; k < nparts; k++) {
+   for (uint32_t k = 0; k < run.nparts; k++) {
       if (!getenv("BORGVK_KEEP_JOB"))
-         unlink(jpath[k]);
-      unlink(opath[k]);
+         unlink(run.jpath[k]);
+      unlink(run.opath[k]);
    }
-   for (uint32_t i = 0; i < nbufs; i++) {
+   for (uint32_t i = 0; i < cb.n; i++) {
       free(merged[i]);
-      free(bufs[i].decoded);
+      free(cb.b[i].decoded);
    }
    free(job);
 }
