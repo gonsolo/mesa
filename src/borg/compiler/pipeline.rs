@@ -48,6 +48,9 @@ impl ShaderState {
         true
     }
 
+    /// Final pass over the outputs: runs the epilogues the option word asks for (point quads,
+    /// multiple targets, packed, half or byte formats), records the output registers and, for
+    /// fragments, interpolates depth.
     pub unsafe fn lower_outputs(&mut self) {
         let (is_vertex, is_fragment, flags) = (self.is_vertex, self.is_fragment, self.flags);
         if is_vertex && flags.point_quads() {

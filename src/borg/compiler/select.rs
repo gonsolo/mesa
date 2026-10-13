@@ -1156,6 +1156,8 @@ impl ShaderState {
         }
     
     }
+    /// Gives each fragment output a register of its own where the value lives elsewhere (a
+    /// uniform, a TEX or FATTR result block), so it can be placed in the output register.
     pub unsafe fn copy_frag_outputs(&mut self) {
     for c in 0..4 {
         let Some((v, comp)) = self.outs.frag[c] else { continue };
@@ -1175,6 +1177,8 @@ impl ShaderState {
     }
     
     }
+    /// Fragment depth as the barycentric-weighted sum of the three vertex depths, which arrive in
+    /// uniform slots 30, 29 and 28. None when the shader has no weights.
     pub unsafe fn interpolate_depth(&mut self) -> Option<u32> {
     let mut frag_z: Option<u32> = None;
     if let Some(w) = self.weights {

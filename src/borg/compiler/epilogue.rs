@@ -3,6 +3,10 @@ use std::collections::HashMap;
 use crate::{FRAG_POOL_SLOT, packed_layout, BorgInstr, Ubo, NO_DST};
 
 impl ShaderState {
+    /// Vertex epilogue for points, which are drawn as quads of six vertices. Fetches the corner's
+    /// clip-space offset and point coordinate by vertex index, scales the offset by gl_PointSize
+    /// (clamped to 1..64) and w, and adds it to the position. The point coordinate also goes out
+    /// as two varyings when the fragment shader reads gl_PointCoord.
     pub unsafe fn epilogue_point_quads(&mut self) {
         let ctl_bits = (1u32 << 16) | (128 + 16);
         assert!(self.cp.vs_consts.len() < DRAW_VS_CONST_WORDS,
@@ -76,6 +80,9 @@ impl ShaderState {
             }
         }
     }
+    /// Multiple render targets: converts each target's value to its class (unorm8, snorm8 or
+    /// raw bits), then selects the one for the attachment being rendered (ATTIDX). A target the
+    /// shader does not write keeps its destination value (TLD).
     pub unsafe fn epilogue_multi_target(&mut self) {
         let n = self.flags.target_count();
         let class = |k: usize| self.flags.target_class(k);
@@ -137,6 +144,7 @@ impl ShaderState {
         self.outs.frag = [Some((acc, 0)), None, None, None];
         self.out_roots.push(acc);
     }
+    /// R8_UNORM output (RAW8): the red value as round(r * 255) & 0xFF.
     pub unsafe fn epilogue_r8_unorm(&mut self) {
         // R8_UNORM (RAW8): r26 = round(r * 255) & 0xFF.
         let c255 = self.fw.win(&mut self.sel, 255.0f32.to_bits());
@@ -156,6 +164,9 @@ impl ShaderState {
         self.outs.frag = [Some((w, 0)), None, None, None];
         self.out_roots.push(w);
     }
+    /// Packed output formats (565, 4444, 5551, 10:10:10:2, 8/16/32-bit channels; unorm, snorm,
+    /// sRGB or raw): quantizes each channel, shifts it to its bit position and ORs the channels
+    /// into up to four words. RAW128 renders two words per pass, picked by the slice index.
     pub unsafe fn epilogue_packed(&mut self) {
         let (kind, layout) = packed_layout(self.flags);
         let total_bits = layout.iter().map(|&(_, sh, b)| sh + b).max().unwrap_or(0);
@@ -229,6 +240,8 @@ impl ShaderState {
         }
         self.outs.frag = out;
     }
+    /// Half-float output: converts each f32 channel to f16 (round to nearest even, denormals,
+    /// overflow to infinity, NaN) and packs two channels per word.
     pub unsafe fn epilogue_half(&mut self) {
         macro_rules! i {
             ($m:expr, $a:expr, $b:expr) => { self.sel.opc($m, &[($a, 0u8), ($b, 0u8)]) };
@@ -295,6 +308,7 @@ impl ShaderState {
             self.out_roots.push(*p);
         }
     }
+    /// Packs four 8-bit channel values into one word, channel 3 in the top byte.
     pub unsafe fn epilogue_bytes_packed(&mut self) {
         let (mut p, mut pc) = self.outs.frag[3].unwrap();
         let eight = self.fw.slot(8);
