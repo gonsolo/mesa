@@ -47,21 +47,11 @@ sim_store_rgb(struct borgvk_image *color_img, uint8_t *rgb, bool ok, bool raw32,
    return VK_SUCCESS;
 }
 
-VkResult
-borgvk_sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
-                     uint32_t sim_dim)
+static uint32_t
+sim_choose_dim(const struct borgvk_image *color_img, uint32_t sim_dim, bool raw32)
 {
-   const char *sim_bin = getenv("BORGVK_SIM");
-   const char *sim_fw  = getenv("BORGVK_SIM_FW");
-   if (!color_img || !color_img->mem || !color_img->mem->map)
-      { free(bytes); return VK_SUCCESS; }
-   uint32_t width  = color_img->vk.extent.width;
-   uint32_t height = color_img->vk.extent.height;
-   if (width == 0 || height == 0)
-      { free(bytes); return VK_SUCCESS; }
-
+   const uint32_t width = color_img->vk.extent.width;
    uint32_t sdim = sim_dim ? sim_dim : 128;
-   const bool raw32 = borgvk_sim_raw32(color_img->vk.format) && width == height;
    if (raw32)
       sdim = width;
    const char *direct = getenv("BORGVK_SIM_DIRECT");
@@ -77,7 +67,12 @@ borgvk_sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_
       if (d > 0)
          sdim = (uint32_t)d;
    }
+   return sdim;
+}
 
+static void
+sim_keep_stream(const uint8_t *bytes, size_t nbytes)
+{
    const char *keep = getenv("BORGVK_SIM_KEEP");
    if (keep && keep[0]) {
       int kfd = open(keep, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -90,16 +85,24 @@ borgvk_sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_
          close(kfd);
       }
    }
+}
 
-   if (borgvk_hw_enabled()) {
-      const size_t bpp_hw = raw32 ? 4 : 3, expected_hw = (size_t)sdim * sdim * bpp_hw;
-      uint8_t *rgb_hw = malloc(expected_hw);
-      size_t got_hw = rgb_hw ? borgvk_hw_render(bytes, nbytes, sdim, rgb_hw) : 0;
-      free(bytes);
-      return sim_store_rgb(color_img, rgb_hw, got_hw == expected_hw, raw32, sdim);
-   }
+static VkResult
+sim_run_hardware(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img, uint32_t sdim, bool raw32)
+{
+   const size_t bpp_hw = raw32 ? 4 : 3, expected_hw = (size_t)sdim * sdim * bpp_hw;
+   uint8_t *rgb_hw = malloc(expected_hw);
+   size_t got_hw = rgb_hw ? borgvk_hw_render(bytes, nbytes, sdim, rgb_hw) : 0;
+   free(bytes);
+   return sim_store_rgb(color_img, rgb_hw, got_hw == expected_hw, raw32, sdim);
+}
 
-   /* Hand the byte stream to arcilator_sim --cts-uart via a temp file. */
+static VkResult
+sim_run_processes(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img, uint32_t sdim, bool raw32)
+{
+   const char *sim_bin = getenv("BORGVK_SIM");
+   const char *sim_fw  = getenv("BORGVK_SIM_FW");
+   const char *direct = getenv("BORGVK_SIM_DIRECT");
    char uart_path[] = "/tmp/borgvk_uart_XXXXXX";
    int ufd = mkstemp(uart_path);
    if (ufd < 0) {
@@ -203,4 +206,23 @@ borgvk_sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_
       mesa_logi("borgvk: sim returned %zu of %zu bytes", got, expected);
 
    return sim_store_rgb(color_img, rgb, rgb && got == expected, raw32, sdim);
+}
+
+VkResult
+borgvk_sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
+                     uint32_t sim_dim)
+{
+   if (!color_img || !color_img->mem || !color_img->mem->map)
+      { free(bytes); return VK_SUCCESS; }
+   uint32_t width  = color_img->vk.extent.width;
+   uint32_t height = color_img->vk.extent.height;
+   if (width == 0 || height == 0)
+      { free(bytes); return VK_SUCCESS; }
+
+   const bool raw32 = borgvk_sim_raw32(color_img->vk.format) && width == height;
+   const uint32_t sdim = sim_choose_dim(color_img, sim_dim, raw32);
+   sim_keep_stream(bytes, nbytes);
+   if (borgvk_hw_enabled())
+      return sim_run_hardware(bytes, nbytes, color_img, sdim, raw32);
+   return sim_run_processes(bytes, nbytes, color_img, sdim, raw32);
 }
