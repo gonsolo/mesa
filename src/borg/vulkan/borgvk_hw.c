@@ -19,14 +19,14 @@ borgvk_hw_enabled(void)
 }
 
 size_t
-borgvk_hw_render(const uint8_t *b, size_t n, uint32_t dim, uint8_t *out)
+borgvk_hw_render(const uint8_t *b, size_t n, uint32_t w, uint32_t h, uint8_t *out)
 {
    if (borg_hw_open()) {
       mesa_logw("borgvk: cannot open the Borg device");
       return 0;
    }
    borg_core_set_flush_format(0);
-   borg_core_init(dim, dim);
+   borg_core_init(w, h);
 
    int draws = 0;
    bool target_seen = false;
@@ -61,18 +61,18 @@ borgvk_hw_render(const uint8_t *b, size_t n, uint32_t dim, uint8_t *out)
       return 0;
 
    const int fmt = borg_core_flush_format();   /* 0 = R5G6B5, 1 = RGBA8, 2 = BGRA8, 3 = RAW32 */
-   const size_t bytes = (size_t)dim * dim * (fmt ? 4 : 2);
+   const size_t bytes = (size_t)w * h * (fmt ? 4 : 2);
    uint32_t *words = malloc(bytes);
    if (!words)
       return 0;
    borg_hw_mem_read(DRAM_OUT_BASE_SPI, words, (uint32_t)bytes);
 
    size_t ret = 0;
-   for (uint32_t y = 0; y < dim; y++) {
-      for (uint32_t x = 0; x < dim; x++) {
-         const uint32_t tile = (y >> 2) * (dim >> 2) + (x >> 2), ti = (x & 3) | ((y & 3) << 2);
+   for (uint32_t y = 0; y < h; y++) {
+      for (uint32_t x = 0; x < w; x++) {
+         const uint32_t tile = (y >> 2) * (w >> 2) + (x >> 2), ti = (x & 3) | ((y & 3) << 2);
          if (fmt == 3) {
-            memcpy(out + ((size_t)y * dim + x) * 4, &words[tile * 16 + ti], 4);
+            memcpy(out + ((size_t)y * w + x) * 4, &words[tile * 16 + ti], 4);
             continue;
          }
          uint8_t r, g, bl;
@@ -86,11 +86,11 @@ borgvk_hw_render(const uint8_t *b, size_t n, uint32_t dim, uint8_t *out)
             r = ((px >> 11) & 0x1F) << 3; g = ((px >> 5) & 0x3F) << 2; bl = (px & 0x1F) << 3;
             r |= r >> 5; g |= g >> 6; bl |= bl >> 5;
          }
-         uint8_t *o = out + ((size_t)y * dim + x) * 3;
+         uint8_t *o = out + ((size_t)y * w + x) * 3;
          o[0] = r; o[1] = g; o[2] = bl;
       }
    }
-   ret = (size_t)dim * dim * (fmt == 3 ? 4 : 3);
+   ret = (size_t)w * h * (fmt == 3 ? 4 : 3);
    free(words);
    return ret;
 }

@@ -168,7 +168,7 @@ void borgvk_flush_draws(struct borgvk_command_buffer *cmd);
 struct borgvk_image;
 #define BORGVK_CS_MAX_BUFS 34   /* 32 binding slots and the push constants */
 bool borgvk_hw_enabled(void);
-size_t borgvk_hw_render(const uint8_t *stream, size_t n, uint32_t dim, uint8_t *out);
+size_t borgvk_hw_render(const uint8_t *stream, size_t n, uint32_t w, uint32_t h, uint8_t *out);
 int borgvk_hw_compute(const uint8_t *job, size_t len, const char *outf);
 bool borgvk_sim_serves(const struct borgvk_image *color, bool has_depth_stencil);
 uint8_t borgvk_sim_flush_format(VkFormat f);

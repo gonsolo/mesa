@@ -8,16 +8,16 @@
 #include <sys/wait.h>
 
 static VkResult
-sim_store_rgb(struct borgvk_image *color_img, uint8_t *rgb, bool ok, bool raw32, uint32_t sdim)
+sim_store_rgb(struct borgvk_image *color_img, uint8_t *rgb, bool ok, bool raw32, uint32_t sw, uint32_t sh)
 {
    const uint32_t width = color_img->vk.extent.width, height = color_img->vk.extent.height;
-   const size_t expected = (size_t)sdim * sdim * (raw32 ? 4 : 3);
+   const size_t expected = (size_t)sw * sh * (raw32 ? 4 : 3);
    const size_t got = ok ? expected : 0;
    const char *ppm = getenv("BORGVK_DUMP_PPM");   /* the rendered frame as it came from the Borg */
    if (ppm && ppm[0] && ok && !raw32) {
       FILE *f = fopen(ppm, "wb");
       if (f) {
-         fprintf(f, "P6\n%u %u\n255\n", sdim, sdim);
+         fprintf(f, "P6\n%u %u\n255\n", sw, sh);
          fwrite(rgb, 1, expected, f);
          fclose(f);
       }
@@ -29,14 +29,15 @@ sim_store_rgb(struct borgvk_image *color_img, uint8_t *rgb, bool ok, bool raw32,
    } else if (rgb && got == expected && raw32) {
       memcpy((uint8_t *)color_img->mem->map + color_img->offset, rgb, expected);
    } else if (rgb && got == expected) {
+      const bool crop = sw >= width && sh >= height && sw - width < 4 && sh - height < 4;
       uint64_t plane_size = (uint64_t)width * height * 4;
       for (uint32_t smp = 0; smp < MAX2(color_img->vk.samples, 1); smp++) {
          uint8_t *dst = (uint8_t *)color_img->mem->map + color_img->offset + smp * plane_size;
          for (uint32_t y = 0; y < height; y++) {
-            uint32_t sy = (uint32_t)((uint64_t)(2 * y + 1) * sdim / (2 * (uint64_t)height));
+            uint32_t sy = crop ? y : (uint32_t)((uint64_t)(2 * y + 1) * sh / (2 * (uint64_t)height));
             for (uint32_t x = 0; x < width; x++) {
-               uint32_t sx = (uint32_t)((uint64_t)(2 * x + 1) * sdim / (2 * (uint64_t)width));
-               const uint8_t *s = rgb + ((size_t)sy * sdim + sx) * 3;
+               uint32_t sx = crop ? x : (uint32_t)((uint64_t)(2 * x + 1) * sw / (2 * (uint64_t)width));
+               const uint8_t *s = rgb + ((size_t)sy * sw + sx) * 3;
                uint8_t *d = dst + ((size_t)y * width + x) * 4;
                d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
             }
@@ -88,13 +89,13 @@ sim_keep_stream(const uint8_t *bytes, size_t nbytes)
 }
 
 static VkResult
-sim_run_hardware(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img, uint32_t sdim, bool raw32)
+sim_run_hardware(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img, uint32_t sw, uint32_t sh, bool raw32)
 {
-   const size_t bpp_hw = raw32 ? 4 : 3, expected_hw = (size_t)sdim * sdim * bpp_hw;
+   const size_t bpp_hw = raw32 ? 4 : 3, expected_hw = (size_t)sw * sh * bpp_hw;
    uint8_t *rgb_hw = malloc(expected_hw);
-   size_t got_hw = rgb_hw ? borgvk_hw_render(bytes, nbytes, sdim, rgb_hw) : 0;
+   size_t got_hw = rgb_hw ? borgvk_hw_render(bytes, nbytes, sw, sh, rgb_hw) : 0;
    free(bytes);
-   return sim_store_rgb(color_img, rgb_hw, got_hw == expected_hw, raw32, sdim);
+   return sim_store_rgb(color_img, rgb_hw, got_hw == expected_hw, raw32, sw, sh);
 }
 
 static VkResult
@@ -205,7 +206,7 @@ sim_run_processes(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img,
    if (getenv("BORGVK_DEBUG"))
       mesa_logi("borgvk: sim returned %zu of %zu bytes", got, expected);
 
-   return sim_store_rgb(color_img, rgb, rgb && got == expected, raw32, sdim);
+   return sim_store_rgb(color_img, rgb, rgb && got == expected, raw32, sdim, sdim);
 }
 
 VkResult
@@ -222,7 +223,11 @@ borgvk_sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_
    const bool raw32 = borgvk_sim_raw32(color_img->vk.format) && width == height;
    const uint32_t sdim = sim_choose_dim(color_img, sim_dim, raw32);
    sim_keep_stream(bytes, nbytes);
-   if (borgvk_hw_enabled())
-      return sim_run_hardware(bytes, nbytes, color_img, sdim, raw32);
+   if (borgvk_hw_enabled()) {
+      uint32_t sw = sdim, sh = sdim, rw = (width + 3) & ~3u, rh = (height + 3) & ~3u;
+      if (!raw32 && rw <= 1024 && rh <= 1024)
+         sw = rw, sh = rh;
+      return sim_run_hardware(bytes, nbytes, color_img, sw, sh, raw32);
+   }
    return sim_run_processes(bytes, nbytes, color_img, sdim, raw32);
 }
