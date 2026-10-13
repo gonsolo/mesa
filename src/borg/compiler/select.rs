@@ -31,8 +31,52 @@ impl ShaderState {
         }
     }
 
+    /// textureSize: TEX operation 3 at the level in TEXA's lod; the result block holds width,
+    /// height, depth or layers and levels.
+    unsafe fn tex_size(&mut self, tex: &nir_tex_instr) {
+        let srcs = tex.srcs_as_slice();
+        if let Some(t) = srcs.iter().find(|s| s.src_type == nir_tex_src_texture_deref) {
+            self.tex_derefs.insert(t.src.as_def().index);
+        }
+        let ld = srcs.iter().find(|s| s.src_type == nir_tex_src_lod).map(|s| s.src.as_def().index);
+        let wz = self.sel.next_vreg;
+        self.sel.next_vreg += 1;
+        self.sel.ubo.insert(wz, Ubo::Fixed(30));
+        self.per_pixel_fixed.insert(wz);
+        let (lv, lc) = match ld {
+            Some(ld) => {
+                if let Some(&bits) = self.consts.get(&ld) {
+                    if !self.sel.vec_map.contains_key(&ld) {
+                        let u = self.fw.slot(bits);
+                        let v = self.sel.next_vreg;
+                        self.sel.next_vreg += 1;
+                        self.sel.ubo.insert(v, Ubo::Uniform(u as u8));
+                        self.sel.vec_map.insert(ld, vec![(v, 0u8)]);
+                    }
+                }
+                resolve_vm(&self.sel.vec_map, ld, 0)
+            }
+            None => (wz, 0u8),
+        };
+        self.sel.prog.push(BorgInstr { mnem: "TEXA", dst: NO_DST, srcs: vec![wz, lv, wz], swz: vec![0, lc, 0] });
+        let u = self.fw.slot(3u32 << 16);
+        let ctl = self.sel.next_vreg;
+        self.sel.next_vreg += 1;
+        self.sel.ubo.insert(ctl, Ubo::Uniform(u as u8));
+        let tex_v = self.sel.next_vreg;
+        self.sel.next_vreg += 1;
+        self.sel.prog.push(BorgInstr { mnem: "TEX", dst: tex_v, srcs: vec![wz, wz, ctl], swz: vec![0, 0, 0] });
+        self.tex_dsts.insert(tex_v);
+        let n = tex.def.num_components as usize;
+        self.sel.vec_map.insert(tex.def.index, (0..n).map(|k| (tex_v, k as u8)).collect());
+    }
+
     pub unsafe fn tex(&mut self, tex: &nir_tex_instr) {
         let srcs = tex.srcs_as_slice();
+        if tex.op == nir_texop_txs && self.is_fragment {
+            self.tex_size(tex);
+            return;
+        }
         let is_txl = tex.op == nir_texop_txl && self.is_fragment;
         let is_txb = tex.op == nir_texop_txb && self.is_fragment;
         let is_tg4 = tex.op == nir_texop_tg4 && self.is_fragment;
