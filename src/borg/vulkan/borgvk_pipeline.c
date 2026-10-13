@@ -1,12 +1,6 @@
 /*
  * Copyright © 2026 Andreas Wendleder
  * SPDX-License-Identifier: MIT
- *
- * Pipelines for borgvk. The cube's vertex/fragment shaders are already
- * hand-compiled to SPIR-B in the firmware (vert_borg/frag_borg), so there is no
- * host-side shader compilation: a VkPipeline is an opaque placeholder that lets
- * pipeline creation and binding succeed. The actual draw is realized at submit
- * time by shipping the MVP to the FPGA.
  */
 #include "vk_blend.h"
 #include "borg_nir_passes.h"
@@ -64,20 +58,16 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
       const bool points = pCreateInfos[i].pInputAssemblyState &&
                           pCreateInfos[i].pInputAssemblyState->topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
       if (points)
-         vfetch |= 0xC0000000u;   /* fetching, and each point is a quad of two triangles */
+         vfetch |= 0xC0000000u;
       const VkPrimitiveTopology topology_in =
          pCreateInfos[i].pInputAssemblyState ? pCreateInfos[i].pInputAssemblyState->topology : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
       const bool lines = topology_in == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || topology_in == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
       if (lines)
-         vfetch |= 0x90000000u;   /* fetching, and each line is a quad: borgvk_lower_lines */
+         vfetch |= 0x90000000u;
 
-      /* Compile each shader stage's SPIR-V → NIR → Borg ISA (borgc). The blobs land in the
-       * device (the cube's path uploads those) and are kept in the pipeline for generic draws. */
       for (int st = 0; st < BORGVK_SHADER_STAGE_COUNT; st++)
          device->shader_blob[st].len = 0;
       const VkPipelineRenderingCreateInfo *ri = vk_get_pipeline_rendering_create_info(&pCreateInfos[i]);
-      /* Several colour attachments: every one an R8 format, whose class the fragment stage packs
-       * (1 UNORM, 2 SNORM, 3 UINT or SINT). */
       uint32_t color_count = ri ? ri->colorAttachmentCount : 0, mrt_opt = 0;
       bool mrt = color_count >= 2 && color_count <= 4;
       for (uint32_t k = 0; mrt && k < color_count; k++) {
@@ -95,7 +85,6 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
          ri && ri->colorAttachmentCount && borgvk_sim_half1(ri->pColorAttachmentFormats[0]) ? 0x28 :
          ri && ri->colorAttachmentCount && borgvk_sim_half2(ri->pColorAttachmentFormats[0]) ? 8 :
          ri && ri->colorAttachmentCount && vk_format_has_alpha(ri->pColorAttachmentFormats[0]) ? 4 : 0;   /* 4: alpha is an output */
-      /* A RAW attachment has no fixed-function blend or write mask: the shader does both. */
       struct borg_blend blend = { 0 };
       device->blend_lower = NULL;
       {
@@ -134,7 +123,6 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
       if (!has_fs)
          borgvk_compile_empty_frag(device, frag_opt);
       if (points) {
-         /* gl_PointCoord: the fragment stage reads two varyings placed after the vertex stage's own. */
          const VkPipelineShaderStageCreateInfo *vs = NULL, *fs = NULL;
          for (uint32_t s = 0; s < pCreateInfos[i].stageCount; s++) {
             if (pCreateInfos[i].pStages[s].stage == VK_SHADER_STAGE_VERTEX_BIT)
@@ -191,8 +179,6 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
                .offset = va->offset, .format = va->format };
          }
       }
-      /* With rasterizer discard the spec ignores the viewport, multisample, depth/stencil
-       * and colour-blend pointers (they may be invalid), so never read them. */
       VkGraphicsPipelineCreateInfo ci = pCreateInfos[i];
       if (rs && rs->rasterizerDiscardEnable) {
          ci.pViewportState = NULL;
