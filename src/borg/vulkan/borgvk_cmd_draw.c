@@ -7,6 +7,20 @@
 
 #include "vk_format.h"
 
+enum {
+   REJECT_UNDRAWABLE = 3,
+   REJECT_NO_SHADER = 4,
+   REJECT_NO_TARGET_MEMORY = 5,
+   REJECT_NO_INDEX_BUFFER = 6,
+   REJECT_INDEX_RANGE = 7,
+   REJECT_VERTEX_INPUT = 8,
+   REJECT_VERTEX_RANGE = 9,
+   REJECT_UPLOAD = 10,
+   REJECT_MRT_FORMATS = 12,
+   REJECT_MRT_EXTENT = 13,
+   REJECT_MRT_NOT_SERVED = 14,
+};
+
 static bool
 generic_reject(int why)
 {
@@ -135,7 +149,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    struct borgvk_descriptor_set *set = cmd->desc_set;
 
    if (!pipeline || dp->count == 0 || dp->instances == 0)
-      return generic_reject(3);
+      return generic_reject(REJECT_UNDRAWABLE);
    uint32_t topo;
    switch (pipeline->topology) {
    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:  topo = 0; break;
@@ -144,10 +158,10 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:     topo = 0; break;
    case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
    case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:     topo = 0; break;
-   default: return generic_reject(3);
+   default: return generic_reject(REJECT_UNDRAWABLE);
    }
    if (pipeline->blob[BORGVK_STAGE_VERT].len == 0 || pipeline->blob[BORGVK_STAGE_FRAG].len == 0)
-      return generic_reject(4);
+      return generic_reject(REJECT_NO_SHADER);
    const bool points = pipeline->topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
    const uint32_t X = points ? 6 : 1;
    /* A line is a quad too, but its six rows are gathered per line (see `pairs`). */
@@ -162,23 +176,23 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    struct borgvk_image *size_img =
       color_img ? color_img : ds_view && ds_view->image ? container_of(ds_view->image, struct borgvk_image, vk) : NULL;
    if (!size_img || !size_img->mem || !size_img->mem->map)
-      return generic_reject(5);
+      return generic_reject(REJECT_NO_TARGET_MEMORY);
    if (!color_img && !borgvk_sim_serves(size_img, true))
-      return generic_reject(5);
+      return generic_reject(REJECT_NO_TARGET_MEMORY);
    struct borgvk_image *extra[3] = { NULL, NULL, NULL };
    const uint32_t nextra = pipeline->mrt ? pipeline->color_count - 1 : 0;
    if (pipeline->color_count >= 2 && !pipeline->mrt)
-      return generic_reject(12);
+      return generic_reject(REJECT_MRT_FORMATS);
    for (uint32_t k = 0; k < nextra; k++) {
       struct vk_image_view *v = cmd->color_views[k + 1];
       extra[k] = v && v->image ? container_of(v->image, struct borgvk_image, vk) : NULL;
       if (!extra[k] || !extra[k]->mem || !extra[k]->mem->map ||
           extra[k]->vk.extent.width != color_img->vk.extent.width ||
           extra[k]->vk.extent.height != color_img->vk.extent.height)
-         return generic_reject(13);
+         return generic_reject(REJECT_MRT_EXTENT);
    }
    if (nextra && !borgvk_sim_serves(color_img, cmd->depth_view || cmd->stencil_view))
-      return generic_reject(14);
+      return generic_reject(REJECT_MRT_NOT_SERVED);
    bool same_extra = cmd->batch_nextra == nextra;
    for (uint32_t k = 0; k < nextra; k++)
       same_extra &= cmd->batch_extra[k] == extra[k];
@@ -190,10 +204,10 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    const uint8_t *idx_host = NULL;
    if (dp->indexed) {
       if (!cmd->index_ptr)
-         return generic_reject(6);
+         return generic_reject(REJECT_NO_INDEX_BUFFER);
       idx_host = cmd->index_ptr + (size_t)dp->first * dp->index_size;
       if ((size_t)(dp->first + dp->count) * dp->index_size > cmd->index_avail)
-         return generic_reject(6);
+         return generic_reject(REJECT_NO_INDEX_BUFFER);
    }
    int64_t vmin = INT64_MAX, vmax = -1;
    if (dp->indexed) {
@@ -204,7 +218,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
             continue;
          int64_t r = (int64_t)v + dp->vertex_offset;
          if (r < 0)
-            return generic_reject(7);
+            return generic_reject(REJECT_INDEX_RANGE);
          vmin = MIN2(vmin, r);
          vmax = MAX2(vmax, r);
       }
@@ -213,7 +227,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       vmax = (int64_t)dp->first + dp->count - 1;
    }
    if (vmax < 0)
-      return generic_reject(7);
+      return generic_reject(REJECT_INDEX_RANGE);
    /* Lines: the two vertex rows of each line. */
    uint32_t (*pairs)[2] = NULL, nlines = 0;
    if (lines) {
@@ -221,7 +235,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       const uint32_t restart_val = dp->index_size == 2 ? 0xFFFFu : 0xFFFFFFFFu;
       pairs = malloc(sizeof(*pairs) * MAX2(dp->count, 1));
       if (!pairs)
-         return generic_reject(10);
+         return generic_reject(REJECT_UPLOAD);
       int64_t prev = -1;
       for (uint32_t i = 0; i < dp->count; i++) {
          int64_t r = (int64_t)dp->first + i;
@@ -244,7 +258,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       }
       if (nlines == 0 || (uint64_t)nlines * 6 > 4096 * 4096) {
          free(pairs);
-         return generic_reject(7);
+         return generic_reject(REJECT_INDEX_RANGE);
       }
    }
    static const uint8_t line_end[6] = { 0, 0, 1, 0, 1, 1 };
@@ -345,7 +359,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       if (at->location >= 16 || b >= BORGVK_MAX_VERTEX_BINDINGS ||
           !borgvk_vertex_format_to_fetch(at->format, &code, &swz, &rbytes) ||
           !cmd->vb[b]) {
-         ok = generic_reject(8);
+         ok = generic_reject(REJECT_VERTEX_INPUT);
          break;
       }
       const uint32_t stride = pipeline->binding_stride[b];
@@ -355,7 +369,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
          for (uint32_t other = 0; ok && other < 2; other++) {
             uint8_t *tight = calloc((size_t)nlines * 6, rbytes);
             if (!tight) {
-               ok = generic_reject(10);
+               ok = generic_reject(REJECT_UPLOAD);
                break;
             }
             for (uint32_t r = 0; r < nlines * 6; r++) {
@@ -366,7 +380,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
             const uint32_t off = heap_upload(&heap, tight, nlines * 6 * rbytes);
             free(tight);
             if (off == UINT32_MAX)
-               ok = generic_reject(10);
+               ok = generic_reject(REJECT_UPLOAD);
             else
                borgvk_serial_send_vattr(at->location + (other ? BORGVK_LINE_OTHER : 0), code, off, nlines * 6, rbytes, swz);
          }
@@ -376,14 +390,14 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       const bool expand = points && !inst;
       const int64_t e0 = expand ? row0 * X : row0, e1 = expand ? row1 * X + X - 1 : row1;
       if (e1 + 1 > 4096 * 4096) {
-         ok = generic_reject(9);
+         ok = generic_reject(REJECT_VERTEX_RANGE);
          break;
       }
       const uint32_t nrows = (uint32_t)(e1 - e0 + 1);
       const uint32_t asz = vk_format_get_blocksize(at->format);
       uint8_t *tight = calloc(nrows, rbytes);
       if (!tight) {
-         ok = generic_reject(10);
+         ok = generic_reject(REJECT_UPLOAD);
          break;
       }
       const uint64_t avail = cmd->vb_avail[b];
@@ -395,7 +409,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       const uint32_t off = heap_upload(&heap, tight, nrows * rbytes);
       free(tight);
       if (off == UINT32_MAX) {
-         ok = generic_reject(10);
+         ok = generic_reject(REJECT_UPLOAD);
          break;
       }
       const uint32_t base = off - (uint32_t)e0 * rbytes;
@@ -409,11 +423,11 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       uint32_t code, swz, rbytes;
       const int64_t e0 = vmin * X, e1 = vmax * X + X - 1;
       if (e1 + 1 > 4096 * 4096 || !borgvk_vertex_format_to_fetch(VK_FORMAT_R32G32B32A32_SFLOAT, &code, &swz, &rbytes)) {
-         ok = generic_reject(9);
+         ok = generic_reject(REJECT_VERTEX_RANGE);
       } else {
          float *c = malloc((size_t)(e1 - e0 + 1) * 16);
          if (!c) {
-            ok = generic_reject(10);
+            ok = generic_reject(REJECT_UPLOAD);
          } else {
             for (int64_t e = e0; e <= e1; e++) {
                float *o = c + 4 * (e - e0);
@@ -425,7 +439,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
             const uint32_t off = heap_upload(&heap, (const uint8_t *)c, (uint32_t)(e1 - e0 + 1) * 16);
             free(c);
             if (off == UINT32_MAX)
-               ok = generic_reject(10);
+               ok = generic_reject(REJECT_UPLOAD);
             else
                borgvk_serial_send_vattr(BORGVK_POINT_SLOT, code, off - (uint32_t)e0 * rbytes, (uint32_t)e1 + 1, rbytes, swz);
          }
@@ -438,7 +452,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       const uint32_t rows = (fb->npool + 3) / 4;
       const uint32_t off = heap_upload(&heap, (const uint8_t *)words, rows * 16);
       if (off == UINT32_MAX || !borgvk_vertex_format_to_fetch(VK_FORMAT_R32G32B32A32_UINT, &code, &swz, &rbytes)) {
-         ok = generic_reject(10);
+         ok = generic_reject(REJECT_UPLOAD);
       } else {
          borgvk_serial_send_vattr(BORGVK_POOL_SLOT, code, off, rows, rbytes, swz);
          cmd->batch_pool = pipeline;
@@ -451,7 +465,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
          t[i] = util_format_srgb_8unorm_to_linear_float(i);
       const uint32_t off = heap_upload(&heap, (const uint8_t *)t, sizeof(t));
       if (off == UINT32_MAX || !borgvk_vertex_format_to_fetch(VK_FORMAT_R32_SFLOAT, &code, &swz, &rbytes)) {
-         ok = generic_reject(10);
+         ok = generic_reject(REJECT_UPLOAD);
       } else {
          borgvk_serial_send_vattr(BORGVK_SRGB_SLOT, code, off, 256, rbytes, swz);
          cmd->batch_srgb = true;
@@ -462,7 +476,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       uint32_t code, swz, rbytes;
       float *c = malloc((size_t)nlines * 6 * 16);
       if (!c || !borgvk_vertex_format_to_fetch(VK_FORMAT_R32G32B32A32_SFLOAT, &code, &swz, &rbytes)) {
-         ok = generic_reject(10);
+         ok = generic_reject(REJECT_UPLOAD);
       } else {
          const float w = size_img->vk.extent.width, h = size_img->vk.extent.height;
          for (uint32_t r = 0; r < nlines * 6; r++) {
@@ -473,7 +487,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
          }
          const uint32_t off = heap_upload(&heap, (const uint8_t *)c, nlines * 6 * 16);
          if (off == UINT32_MAX)
-            ok = generic_reject(10);
+            ok = generic_reject(REJECT_UPLOAD);
          else
             borgvk_serial_send_vattr(BORGVK_LINE_SLOT, code, off, nlines * 6, rbytes, swz);
       }
@@ -485,7 +499,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       if (points) {
          uint32_t *ex = malloc((size_t)dp->count * X * 4);
          if (!ex) {
-            ok = generic_reject(10);
+            ok = generic_reject(REJECT_UPLOAD);
          } else {
             for (uint32_t i = 0; i < dp->count; i++) {
                int64_t v = (dp->index_size == 2 ? ((const uint16_t *)idx_host)[i] : ((const uint32_t *)idx_host)[i]) +
@@ -502,7 +516,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
          idx_off = heap_upload(&heap, idx_host, dp->count * dp->index_size);
       }
       if (ok && idx_off == UINT32_MAX)
-         ok = generic_reject(10);
+         ok = generic_reject(REJECT_UPLOAD);
    }
    uint32_t ubo_base = 0;
    uint32_t smask = 0;
@@ -525,7 +539,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       if (!reuse) {
          base = (heap.top + 3) & ~3u;
          if (base + slots * BORGVK_SSBO_SLOT_BYTES + 16 > BORGVK_HEAP_BYTES) {
-            ok = generic_reject(10);
+            ok = generic_reject(REJECT_UPLOAD);
          } else {
             heap.top = base + slots * BORGVK_SSBO_SLOT_BYTES + 16;
             for (int si = 0; si < 4; si++) {
@@ -572,7 +586,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       len = MIN2(len, MIN2(ub->vk.size - off, 65536));
       uint32_t at = heap_upload(&heap, (const uint8_t *)ub->mem->map + ub->offset + off, (uint32_t)len);
       if (at == UINT32_MAX)
-         ok = generic_reject(10);
+         ok = generic_reject(REJECT_UPLOAD);
       else
          ubo_base = at + 1;
       break;
