@@ -391,6 +391,8 @@ const uint32_t *borgvk_sampler_desc(const struct borgvk_sampler *sampler);
 void borgvk_send_texture_row(struct borgvk_image *tex, const struct borgvk_sampler *sampler, int dy);
 void borgvk_send_blend_state(const struct borgvk_device *device);
 void borgvk_upload_shaders(struct borgvk_device *device);
+void borgvk_upload_shaders_serial(struct borgvk_device *device);
+void borgvk_send_blend_state_serial(const struct borgvk_device *device);
 bool borgvk_set_is_cube(struct borgvk_descriptor_set *set);
 bool borgvk_submit_is_cube(struct vk_queue_submit *submit);
 VkResult borgvk_sim_run_stream(uint8_t *bytes, size_t nbytes, struct borgvk_image *color_img, uint32_t sim_dim);

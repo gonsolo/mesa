@@ -289,9 +289,6 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    }
    const bool first_of_batch = cmd->batch_draws == 0;
 
-   /* The DRM shim's ioctls bypass the capture buffer; force the serial path. */
-   int saved_fd = device->drm_fd;
-   device->drm_fd = -1;
    borgvk_transport_capture_begin();
    memcpy(device->shader_blob, pipeline->blob, sizeof(device->shader_blob));
    device->blend_cfg = pipeline->blend_cfg;
@@ -318,8 +315,8 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
          device->vp.valid = true;
       }
    }
-   borgvk_upload_shaders(device);
-   borgvk_send_blend_state(device);
+   borgvk_upload_shaders_serial(device);
+   borgvk_send_blend_state_serial(device);
    size_t state_len = 0;
    uint8_t *state = borgvk_transport_capture_end(&state_len);
    const bool state_same = state && cmd->state_sent && state_len == cmd->state_sent_len &&
@@ -618,7 +615,6 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    }
    size_t nbytes = 0;
    uint8_t *bytes = borgvk_transport_capture_end(&nbytes);
-   device->drm_fd = saved_fd;
    if (!ok || !bytes || nbytes == 0) {
       free(bytes);
       free(state);

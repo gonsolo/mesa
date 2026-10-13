@@ -37,58 +37,74 @@ borgvk_sampler_desc(const struct borgvk_sampler *sampler)
 }
 
 void
-borgvk_send_blend_state(const struct borgvk_device *device)
+borgvk_send_blend_state_serial(const struct borgvk_device *device)
+{
+   if (device->state_valid)
+      borgvk_serial_send_state(device->state_reg);
+   if (device->push_lo < device->push_hi) {
+      const uint32_t n = device->push_hi - device->push_lo;
+      borgvk_serial_send_push_constants(device->push_lo * 4, n * 4, device->push_words + device->push_lo);
+   }
+   if (device->vp.valid)
+      borgvk_serial_send_viewport(&device->vp);
+   if (device->blend_cfg)
+      borgvk_serial_send_blend(device->blend_cfg, device->blend_const);
+}
+
+static void
+send_blend_state_drm(const struct borgvk_device *device)
 {
    if (device->state_valid) {
-      if (device->drm_fd >= 0) {
-         struct drm_borg_state s;
-         memcpy(s.reg, device->state_reg, sizeof(s.reg));
-         if (drmIoctl(device->drm_fd, DRM_IOCTL_BORG_STATE, &s) != 0)
-            mesa_logw("borgvk: DRM_IOCTL_BORG_STATE failed");
-      } else {
-         borgvk_serial_send_state(device->state_reg);
-      }
+      struct drm_borg_state s;
+      memcpy(s.reg, device->state_reg, sizeof(s.reg));
+      if (drmIoctl(device->drm_fd, DRM_IOCTL_BORG_STATE, &s) != 0)
+         mesa_logw("borgvk: DRM_IOCTL_BORG_STATE failed");
    }
    if (device->push_lo < device->push_hi) {
       const uint32_t n = device->push_hi - device->push_lo;
-      if (device->drm_fd >= 0) {
-         struct drm_borg_push p = { .off_words = device->push_lo, .n_words = n };
-         memcpy(p.words, device->push_words + device->push_lo, n * 4);
-         if (drmIoctl(device->drm_fd, DRM_IOCTL_BORG_PUSH, &p) != 0)
-            mesa_logw("borgvk: DRM_IOCTL_BORG_PUSH failed");
-      } else {
-         borgvk_serial_send_push_constants(device->push_lo * 4, n * 4,
-                                           device->push_words + device->push_lo);
-      }
+      struct drm_borg_push p = { .off_words = device->push_lo, .n_words = n };
+      memcpy(p.words, device->push_words + device->push_lo, n * 4);
+      if (drmIoctl(device->drm_fd, DRM_IOCTL_BORG_PUSH, &p) != 0)
+         mesa_logw("borgvk: DRM_IOCTL_BORG_PUSH failed");
    }
-   if (device->vp.valid && device->drm_fd < 0)
-      borgvk_serial_send_viewport(&device->vp);
-   if (!device->blend_cfg)
-      return;
-   if (device->drm_fd >= 0) {
-      struct drm_borg_blend b = { .cfg = device->blend_cfg,
-                                  .constant = device->blend_const };
+   if (device->blend_cfg) {
+      struct drm_borg_blend b = { .cfg = device->blend_cfg, .constant = device->blend_const };
       if (drmIoctl(device->drm_fd, DRM_IOCTL_BORG_BLEND, &b) != 0)
          mesa_logw("borgvk: DRM_IOCTL_BORG_BLEND failed");
-   } else {
-      borgvk_serial_send_blend(device->blend_cfg, device->blend_const);
    }
+}
+
+void
+borgvk_send_blend_state(const struct borgvk_device *device)
+{
+   if (device->drm_fd >= 0)
+      send_blend_state_drm(device);
+   else
+      borgvk_send_blend_state_serial(device);
+}
+
+void
+borgvk_upload_shaders_serial(struct borgvk_device *device)
+{
+   for (int st = 0; st < BORGVK_SHADER_STAGE_COUNT; st++)
+      if (device->shader_blob[st].len)
+         borgvk_serial_send_shader((uint8_t)st, device->shader_blob[st].data, device->shader_blob[st].len);
 }
 
 void
 borgvk_upload_shaders(struct borgvk_device *device)
 {
+   if (device->drm_fd < 0) {
+      borgvk_upload_shaders_serial(device);
+      return;
+   }
    for (int st = 0; st < BORGVK_SHADER_STAGE_COUNT; st++) {
       struct borgvk_shader_blob *b = &device->shader_blob[st];
       if (b->len == 0)
-         continue;   /* stage not compiled (app didn't bind it) */
-      if (device->drm_fd >= 0) {
-         struct drm_borg_shader s = { .stage = (uint32_t)st, .len = b->len };
-         memcpy(s.data, b->data, b->len);
-         if (drmIoctl(device->drm_fd, DRM_IOCTL_BORG_SHADER, &s) != 0)
-            mesa_logw("borgvk: DRM_IOCTL_BORG_SHADER failed (stage %d)", st);
-      } else {
-         borgvk_serial_send_shader((uint8_t)st, b->data, b->len);
-      }
+         continue;
+      struct drm_borg_shader s = { .stage = (uint32_t)st, .len = b->len };
+      memcpy(s.data, b->data, b->len);
+      if (drmIoctl(device->drm_fd, DRM_IOCTL_BORG_SHADER, &s) != 0)
+         mesa_logw("borgvk: DRM_IOCTL_BORG_SHADER failed (stage %d)", st);
    }
 }
