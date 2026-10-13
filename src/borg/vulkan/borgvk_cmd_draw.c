@@ -152,6 +152,10 @@ struct draw_ctx {
    uint32_t nextra;
    const uint8_t *idx_host;
    int64_t vmin, vmax, imin, imax;
+   bool first_of_batch, state_same;
+   uint8_t *state;
+   size_t state_len;
+   uint32_t load;
    uint32_t (*pairs)[2], nlines;
 };
 
@@ -318,31 +322,12 @@ draw_reserve(struct draw_ctx *g)
       borgvk_flush_draws(cmd);
 }
 
-static bool
-borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buffer *cmd,
-                        const struct draw_params *dp)
+static void
+draw_state(struct draw_ctx *g)
 {
-   struct draw_ctx g = { .device = device, .cmd = cmd, .dp = dp, .pipeline = cmd->gfx_pipeline };
-   if (!draw_validate(&g))
-      return false;
-   struct borgvk_pipeline *pipeline = g.pipeline;
-   struct borgvk_descriptor_set *set = cmd->desc_set;
-   const uint32_t topo = g.topo, X = g.X, nextra = g.nextra;
-   const bool points = g.points, lines = g.lines;
-   struct borgvk_image *color_img = g.color_img, *size_img = g.size_img, **extra = g.extra;
-
-   if (!draw_index_range(&g))
-      return false;
-   const uint8_t *idx_host = g.idx_host;
-   const int64_t vmin = g.vmin, vmax = g.vmax;
-   uint32_t (*pairs)[2] = g.pairs, nlines = g.nlines;
-   static const uint8_t line_end[6] = { 0, 0, 1, 0, 1, 1 };
-   static const float line_side[6] = { -1, 1, -1, 1, 1, -1 };
-   g.imin = dp->first_instance;
-   g.imax = (int64_t)dp->first_instance + dp->instances - 1;
-   const int64_t imin = g.imin, imax = g.imax;
-   draw_reserve(&g);
-   const bool first_of_batch = cmd->batch_draws == 0;
+   struct borgvk_device *device = g->device;
+   struct borgvk_command_buffer *cmd = g->cmd;
+   const struct borgvk_pipeline *pipeline = g->pipeline;
 
    borgvk_transport_capture_begin();
    memcpy(device->shader_blob, pipeline->blob, sizeof(device->shader_blob));
@@ -372,10 +357,19 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
    }
    borgvk_upload_shaders_serial(device);
    borgvk_send_blend_state_serial(device);
-   size_t state_len = 0;
-   uint8_t *state = borgvk_transport_capture_end(&state_len);
-   const bool state_same = state && cmd->state_sent && state_len == cmd->state_sent_len &&
-                           memcmp(state, cmd->state_sent, state_len) == 0;
+   g->state = borgvk_transport_capture_end(&g->state_len);
+   g->state_same = g->state && cmd->state_sent && g->state_len == cmd->state_sent_len &&
+                   memcmp(g->state, cmd->state_sent, g->state_len) == 0;
+}
+
+static void
+draw_begin_pass(struct draw_ctx *g)
+{
+   struct borgvk_command_buffer *cmd = g->cmd;
+   const struct borgvk_image *color_img = g->color_img, *size_img = g->size_img;
+   const bool first_of_batch = g->first_of_batch;
+   const uint32_t nextra = g->nextra;
+
    borgvk_transport_capture_begin();
    if (first_of_batch)
       cmd->batch_serve = borgvk_sim_serves(size_img, cmd->depth_view || cmd->stencil_view);
@@ -401,6 +395,41 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
          memcpy(clear, cmd->clear_color, sizeof(clear));
       borgvk_serial_send_target(fmt, clear);
    }
+   g->load = load;
+}
+
+static bool
+borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buffer *cmd,
+                        const struct draw_params *dp)
+{
+   struct draw_ctx g = { .device = device, .cmd = cmd, .dp = dp, .pipeline = cmd->gfx_pipeline };
+   if (!draw_validate(&g))
+      return false;
+   struct borgvk_pipeline *pipeline = g.pipeline;
+   struct borgvk_descriptor_set *set = cmd->desc_set;
+   const uint32_t topo = g.topo, X = g.X, nextra = g.nextra;
+   const bool points = g.points, lines = g.lines;
+   struct borgvk_image *color_img = g.color_img, *size_img = g.size_img, **extra = g.extra;
+
+   if (!draw_index_range(&g))
+      return false;
+   const uint8_t *idx_host = g.idx_host;
+   const int64_t vmin = g.vmin, vmax = g.vmax;
+   uint32_t (*pairs)[2] = g.pairs, nlines = g.nlines;
+   static const uint8_t line_end[6] = { 0, 0, 1, 0, 1, 1 };
+   static const float line_side[6] = { -1, 1, -1, 1, 1, -1 };
+   g.imin = dp->first_instance;
+   g.imax = (int64_t)dp->first_instance + dp->instances - 1;
+   const int64_t imin = g.imin, imax = g.imax;
+   draw_reserve(&g);
+   g.first_of_batch = cmd->batch_draws == 0;
+   draw_state(&g);
+   draw_begin_pass(&g);
+   uint8_t *state = g.state;
+   const size_t state_len = g.state_len;
+   const bool state_same = g.state_same;
+   const uint32_t load = g.load;
+   const bool first_of_batch = g.first_of_batch;
 
    struct draw_heap heap = { cmd->heap_top };
    bool ok = true;
