@@ -1,12 +1,6 @@
 /*
  * Copyright © 2026 Andreas Wendleder
  * SPDX-License-Identifier: MIT
- *
- * Descriptor set layouts, pools and sets for borgvk. We don't drive shaders
- * with descriptors on the host; a set simply records which buffer, image and
- * sampler is bound at each binding so the submit path can locate the cube's
- * uniform buffer (binding 0, the per-frame MVP) and its texture and sampler
- * (binding 1).
  */
 #include "borgvk_private.h"
 
@@ -69,13 +63,6 @@ borgvk_GetDescriptorSetLayoutSupport(VkDevice _device,
                                      const VkDescriptorSetLayoutCreateInfo *pCreateInfo,
                                      VkDescriptorSetLayoutSupport *pSupport)
 {
-   /* Mandatory core Vulkan 1.1 entry point, entirely missing -- same failure
-    * mode as the other gaps this pass has been finding: a null
-    * dispatch-table slot, SEGV the moment CTS's maintenance3_check.* calls
-    * through it. borgvk has no descriptor-indexing/mutable-descriptor-type
-    * support to account for (not advertised anywhere in this driver), so the
-    * only real constraint is the fixed per-set binding array used by
-    * borgvk_descriptor_set (BORGVK_MAX_BINDINGS, see borgvk_UpdateDescriptorSets). */
    pSupport->supported = pCreateInfo->bindingCount <= BORGVK_MAX_BINDINGS;
 }
 
@@ -201,8 +188,6 @@ borgvk_FreeDescriptorSets(VkDevice _device, VkDescriptorPool pool,
    return VK_SUCCESS;
 }
 
-/* The flat slot of element `elem` of `binding`, counting on into the next bindings when the
- * element is past the end of its own (a write may span several). False past the last binding. */
 static bool
 desc_slot(const struct borgvk_desc_map *m, uint32_t binding, uint32_t elem, uint32_t *slot)
 {
@@ -275,8 +260,6 @@ borgvk_UpdateDescriptorSets(VkDevice _device,
             set->buffer_views[slot] = bview;
          }
 
-         /* The sampler (combined image sampler or a plain sampler); the submit path ships its
-          * packed descriptor with the texture. */
          if (w->pImageInfo &&
              (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
               w->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER) &&
@@ -285,8 +268,6 @@ borgvk_UpdateDescriptorSets(VkDevice _device,
             set->samplers[slot] = sampler;
          }
 
-         /* Image bindings (the cube's texture is a combined image sampler at binding 1); the
-          * submit path reads its mapped RGBA8 to upload it. */
          if (w->pImageInfo &&
              (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
               w->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
