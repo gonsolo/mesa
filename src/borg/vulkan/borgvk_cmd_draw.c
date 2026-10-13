@@ -157,6 +157,7 @@ struct draw_ctx {
    size_t state_len;
    uint32_t load;
    uint32_t (*pairs)[2], nlines;
+   struct draw_heap heap;
 };
 
 static bool
@@ -398,40 +399,19 @@ draw_begin_pass(struct draw_ctx *g)
    g->load = load;
 }
 
+static const uint8_t line_end[6] = { 0, 0, 1, 0, 1, 1 };
+static const float line_side[6] = { -1, 1, -1, 1, 1, -1 };
+
 static bool
-borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buffer *cmd,
-                        const struct draw_params *dp)
+draw_vertex_attrs(struct draw_ctx *g)
 {
-   struct draw_ctx g = { .device = device, .cmd = cmd, .dp = dp, .pipeline = cmd->gfx_pipeline };
-   if (!draw_validate(&g))
-      return false;
-   struct borgvk_pipeline *pipeline = g.pipeline;
-   struct borgvk_descriptor_set *set = cmd->desc_set;
-   const uint32_t topo = g.topo, X = g.X, nextra = g.nextra;
-   const bool points = g.points, lines = g.lines;
-   struct borgvk_image *color_img = g.color_img, *size_img = g.size_img, **extra = g.extra;
-
-   if (!draw_index_range(&g))
-      return false;
-   const uint8_t *idx_host = g.idx_host;
-   const int64_t vmin = g.vmin, vmax = g.vmax;
-   uint32_t (*pairs)[2] = g.pairs, nlines = g.nlines;
-   static const uint8_t line_end[6] = { 0, 0, 1, 0, 1, 1 };
-   static const float line_side[6] = { -1, 1, -1, 1, 1, -1 };
-   g.imin = dp->first_instance;
-   g.imax = (int64_t)dp->first_instance + dp->instances - 1;
-   const int64_t imin = g.imin, imax = g.imax;
-   draw_reserve(&g);
-   g.first_of_batch = cmd->batch_draws == 0;
-   draw_state(&g);
-   draw_begin_pass(&g);
-   uint8_t *state = g.state;
-   const size_t state_len = g.state_len;
-   const bool state_same = g.state_same;
-   const uint32_t load = g.load;
-   const bool first_of_batch = g.first_of_batch;
-
-   struct draw_heap heap = { cmd->heap_top };
+   struct borgvk_command_buffer *cmd = g->cmd;
+   const struct borgvk_pipeline *pipeline = g->pipeline;
+   struct draw_heap *heap = &g->heap;
+   const bool points = g->points, lines = g->lines;
+   const uint32_t X = g->X, nlines = g->nlines;
+   const int64_t vmin = g->vmin, vmax = g->vmax, imin = g->imin, imax = g->imax;
+   uint32_t (*pairs)[2] = g->pairs;
    bool ok = true;
    for (uint32_t a = 0; ok && a < pipeline->attr_count; a++) {
       const struct borgvk_vertex_attr *at = &pipeline->attrs[a];
@@ -458,7 +438,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
                if (src + asz <= cmd->vb_avail[b])
                   memcpy(tight + (size_t)r * rbytes, cmd->vb[b] + src, MIN2(asz, rbytes));
             }
-            const uint32_t off = heap_upload(&heap, tight, nlines * 6 * rbytes);
+            const uint32_t off = heap_upload(heap, tight, nlines * 6 * rbytes);
             free(tight);
             if (off == UINT32_MAX)
                ok = generic_reject(REJECT_UPLOAD);
@@ -487,7 +467,7 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
          if (src + asz <= avail)
             memcpy(tight + (size_t)r * rbytes, cmd->vb[b] + src, MIN2(asz, rbytes));
       }
-      const uint32_t off = heap_upload(&heap, tight, nrows * rbytes);
+      const uint32_t off = heap_upload(heap, tight, nrows * rbytes);
       free(tight);
       if (off == UINT32_MAX) {
          ok = generic_reject(REJECT_UPLOAD);
@@ -497,83 +477,159 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       const uint32_t count = (uint32_t)e1 + 1;
       borgvk_serial_send_vattr(at->location, code, base, count, rbytes, swz);
    }
-   if (ok && points) {
-      static const float corner[6][2] = { { -.5f, -.5f }, { .5f, -.5f }, { -.5f, .5f },
-                                          { .5f, -.5f }, { .5f, .5f }, { -.5f, .5f } };
-      /* (dx, dy) in clip units, then the point coordinate (u, v) of the corner. */
-      uint32_t code, swz, rbytes;
-      const int64_t e0 = vmin * X, e1 = vmax * X + X - 1;
-      if (e1 + 1 > 4096 * 4096 || !borgvk_vertex_format_to_fetch(VK_FORMAT_R32G32B32A32_SFLOAT, &code, &swz, &rbytes)) {
-         ok = generic_reject(REJECT_VERTEX_RANGE);
+   return ok;
+}
+
+static bool
+draw_point_corners(struct draw_ctx *g)
+{
+   if (!g->points)
+      return true;
+   const struct borgvk_image *size_img = g->size_img;
+   struct draw_heap *heap = &g->heap;
+   const uint32_t X = g->X;
+   const int64_t vmin = g->vmin, vmax = g->vmax;
+   bool ok = true;
+   static const float corner[6][2] = { { -.5f, -.5f }, { .5f, -.5f }, { -.5f, .5f },
+                                       { .5f, -.5f }, { .5f, .5f }, { -.5f, .5f } };
+   /* (dx, dy) in clip units, then the point coordinate (u, v) of the corner. */
+   uint32_t code, swz, rbytes;
+   const int64_t e0 = vmin * X, e1 = vmax * X + X - 1;
+   if (e1 + 1 > 4096 * 4096 || !borgvk_vertex_format_to_fetch(VK_FORMAT_R32G32B32A32_SFLOAT, &code, &swz, &rbytes)) {
+      ok = generic_reject(REJECT_VERTEX_RANGE);
+   } else {
+      float *c = malloc((size_t)(e1 - e0 + 1) * 16);
+      if (!c) {
+         ok = generic_reject(REJECT_UPLOAD);
       } else {
-         float *c = malloc((size_t)(e1 - e0 + 1) * 16);
-         if (!c) {
-            ok = generic_reject(REJECT_UPLOAD);
-         } else {
-            for (int64_t e = e0; e <= e1; e++) {
-               float *o = c + 4 * (e - e0);
-               o[0] = corner[e % X][0] * 2.0f / size_img->vk.extent.width;
-               o[1] = corner[e % X][1] * 2.0f / size_img->vk.extent.height;
-               o[2] = corner[e % X][0] + 0.5f;
-               o[3] = corner[e % X][1] + 0.5f;
-            }
-            const uint32_t off = heap_upload(&heap, (const uint8_t *)c, (uint32_t)(e1 - e0 + 1) * 16);
-            free(c);
-            if (off == UINT32_MAX)
-               ok = generic_reject(REJECT_UPLOAD);
-            else
-               borgvk_serial_send_vattr(BORGVK_POINT_SLOT, code, off - (uint32_t)e0 * rbytes, (uint32_t)e1 + 1, rbytes, swz);
+         for (int64_t e = e0; e <= e1; e++) {
+            float *o = c + 4 * (e - e0);
+            o[0] = corner[e % X][0] * 2.0f / size_img->vk.extent.width;
+            o[1] = corner[e % X][1] * 2.0f / size_img->vk.extent.height;
+            o[2] = corner[e % X][0] + 0.5f;
+            o[3] = corner[e % X][1] + 0.5f;
          }
-      }
-   }
-   if (ok && pipeline->blob[BORGVK_STAGE_FRAG].npool && cmd->batch_pool != pipeline) {
-      const struct borgvk_shader_blob *fb = &pipeline->blob[BORGVK_STAGE_FRAG];
-      uint32_t code, swz, rbytes, words[BORGVK_POOL_MAX + 4] = { 0 };
-      memcpy(words, fb->pool, fb->npool * 4);
-      const uint32_t rows = (fb->npool + 3) / 4;
-      const uint32_t off = heap_upload(&heap, (const uint8_t *)words, rows * 16);
-      if (off == UINT32_MAX || !borgvk_vertex_format_to_fetch(VK_FORMAT_R32G32B32A32_UINT, &code, &swz, &rbytes)) {
-         ok = generic_reject(REJECT_UPLOAD);
-      } else {
-         borgvk_serial_send_vattr(BORGVK_POOL_SLOT, code, off, rows, rbytes, swz);
-         cmd->batch_pool = pipeline;
-      }
-   }
-   if (ok && pipeline->srgb_table && !cmd->batch_srgb) {
-      float t[256];
-      uint32_t code, swz, rbytes;
-      for (int i = 0; i < 256; i++)
-         t[i] = util_format_srgb_8unorm_to_linear_float(i);
-      const uint32_t off = heap_upload(&heap, (const uint8_t *)t, sizeof(t));
-      if (off == UINT32_MAX || !borgvk_vertex_format_to_fetch(VK_FORMAT_R32_SFLOAT, &code, &swz, &rbytes)) {
-         ok = generic_reject(REJECT_UPLOAD);
-      } else {
-         borgvk_serial_send_vattr(BORGVK_SRGB_SLOT, code, off, 256, rbytes, swz);
-         cmd->batch_srgb = true;
-      }
-   }
-   if (ok && lines) {
-      /* The half-pixel step in clip units for x and y, then the target's size. */
-      uint32_t code, swz, rbytes;
-      float *c = malloc((size_t)nlines * 6 * 16);
-      if (!c || !borgvk_vertex_format_to_fetch(VK_FORMAT_R32G32B32A32_SFLOAT, &code, &swz, &rbytes)) {
-         ok = generic_reject(REJECT_UPLOAD);
-      } else {
-         const float w = size_img->vk.extent.width, h = size_img->vk.extent.height;
-         for (uint32_t r = 0; r < nlines * 6; r++) {
-            c[4 * r + 0] = line_side[r % 6] / w;
-            c[4 * r + 1] = line_side[r % 6] / h;
-            c[4 * r + 2] = w;
-            c[4 * r + 3] = h;
-         }
-         const uint32_t off = heap_upload(&heap, (const uint8_t *)c, nlines * 6 * 16);
+         const uint32_t off = heap_upload(heap, (const uint8_t *)c, (uint32_t)(e1 - e0 + 1) * 16);
+         free(c);
          if (off == UINT32_MAX)
             ok = generic_reject(REJECT_UPLOAD);
          else
-            borgvk_serial_send_vattr(BORGVK_LINE_SLOT, code, off, nlines * 6, rbytes, swz);
+            borgvk_serial_send_vattr(BORGVK_POINT_SLOT, code, off - (uint32_t)e0 * rbytes, (uint32_t)e1 + 1, rbytes, swz);
       }
-      free(c);
    }
+   return ok;
+}
+
+static bool
+draw_pool(struct draw_ctx *g)
+{
+   struct borgvk_command_buffer *cmd = g->cmd;
+   struct borgvk_pipeline *pipeline = g->pipeline;
+   struct draw_heap *heap = &g->heap;
+   if (!(pipeline->blob[BORGVK_STAGE_FRAG].npool && cmd->batch_pool != pipeline))
+      return true;
+   bool ok = true;
+   const struct borgvk_shader_blob *fb = &pipeline->blob[BORGVK_STAGE_FRAG];
+   uint32_t code, swz, rbytes, words[BORGVK_POOL_MAX + 4] = { 0 };
+   memcpy(words, fb->pool, fb->npool * 4);
+   const uint32_t rows = (fb->npool + 3) / 4;
+   const uint32_t off = heap_upload(heap, (const uint8_t *)words, rows * 16);
+   if (off == UINT32_MAX || !borgvk_vertex_format_to_fetch(VK_FORMAT_R32G32B32A32_UINT, &code, &swz, &rbytes)) {
+      ok = generic_reject(REJECT_UPLOAD);
+   } else {
+      borgvk_serial_send_vattr(BORGVK_POOL_SLOT, code, off, rows, rbytes, swz);
+      cmd->batch_pool = pipeline;
+   }
+   return ok;
+}
+
+static bool
+draw_srgb_table(struct draw_ctx *g)
+{
+   struct borgvk_command_buffer *cmd = g->cmd;
+   const struct borgvk_pipeline *pipeline = g->pipeline;
+   struct draw_heap *heap = &g->heap;
+   if (!(pipeline->srgb_table && !cmd->batch_srgb))
+      return true;
+   bool ok = true;
+   float t[256];
+   uint32_t code, swz, rbytes;
+   for (int i = 0; i < 256; i++)
+      t[i] = util_format_srgb_8unorm_to_linear_float(i);
+   const uint32_t off = heap_upload(heap, (const uint8_t *)t, sizeof(t));
+   if (off == UINT32_MAX || !borgvk_vertex_format_to_fetch(VK_FORMAT_R32_SFLOAT, &code, &swz, &rbytes)) {
+      ok = generic_reject(REJECT_UPLOAD);
+   } else {
+      borgvk_serial_send_vattr(BORGVK_SRGB_SLOT, code, off, 256, rbytes, swz);
+      cmd->batch_srgb = true;
+   }
+   return ok;
+}
+
+static bool
+draw_line_consts(struct draw_ctx *g)
+{
+   if (!g->lines)
+      return true;
+   const struct borgvk_image *size_img = g->size_img;
+   struct draw_heap *heap = &g->heap;
+   const uint32_t nlines = g->nlines;
+   bool ok = true;
+   /* The half-pixel step in clip units for x and y, then the target's size. */
+   uint32_t code, swz, rbytes;
+   float *c = malloc((size_t)nlines * 6 * 16);
+   if (!c || !borgvk_vertex_format_to_fetch(VK_FORMAT_R32G32B32A32_SFLOAT, &code, &swz, &rbytes)) {
+      ok = generic_reject(REJECT_UPLOAD);
+   } else {
+      const float w = size_img->vk.extent.width, h = size_img->vk.extent.height;
+      for (uint32_t r = 0; r < nlines * 6; r++) {
+         c[4 * r + 0] = line_side[r % 6] / w;
+         c[4 * r + 1] = line_side[r % 6] / h;
+         c[4 * r + 2] = w;
+         c[4 * r + 3] = h;
+      }
+      const uint32_t off = heap_upload(heap, (const uint8_t *)c, nlines * 6 * 16);
+      if (off == UINT32_MAX)
+         ok = generic_reject(REJECT_UPLOAD);
+      else
+         borgvk_serial_send_vattr(BORGVK_LINE_SLOT, code, off, nlines * 6, rbytes, swz);
+   }
+   free(c);
+   return ok;
+}
+
+static bool
+borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buffer *cmd,
+                        const struct draw_params *dp)
+{
+   struct draw_ctx g = { .device = device, .cmd = cmd, .dp = dp, .pipeline = cmd->gfx_pipeline };
+   if (!draw_validate(&g))
+      return false;
+   struct borgvk_pipeline *pipeline = g.pipeline;
+   struct borgvk_descriptor_set *set = cmd->desc_set;
+   const uint32_t topo = g.topo, X = g.X, nextra = g.nextra;
+   const bool points = g.points, lines = g.lines;
+   struct borgvk_image *color_img = g.color_img, **extra = g.extra;
+
+   if (!draw_index_range(&g))
+      return false;
+   const uint8_t *idx_host = g.idx_host;
+   uint32_t (*pairs)[2] = g.pairs, nlines = g.nlines;
+   g.imin = dp->first_instance;
+   g.imax = (int64_t)dp->first_instance + dp->instances - 1;
+   draw_reserve(&g);
+   g.first_of_batch = cmd->batch_draws == 0;
+   draw_state(&g);
+   draw_begin_pass(&g);
+   uint8_t *state = g.state;
+   const size_t state_len = g.state_len;
+   const bool state_same = g.state_same;
+   const uint32_t load = g.load;
+
+   g.heap = (struct draw_heap){ cmd->heap_top };
+   bool ok = draw_vertex_attrs(&g) && draw_point_corners(&g) && draw_pool(&g) && draw_srgb_table(&g) &&
+             draw_line_consts(&g);
+   struct draw_heap heap = g.heap;
    free(pairs);
    uint32_t idx_off = 0, index_code = dp->index_size == 2 ? 1 : 2, voff_out = dp->vertex_offset;
    if (ok && dp->indexed && !lines) {
