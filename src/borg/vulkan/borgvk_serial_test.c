@@ -1,20 +1,6 @@
 /*
  * Copyright © 2026 Andreas Wendleder
  * SPDX-License-Identifier: MIT
- *
- * Unit tests for wire packets: push constants (0xB2) and geometry (0xAE).
- *
- * This exists because the simulator-side test
- * (simulation/verilator/main.cpp --push-const-test) BUILDS its own packets
- * rather than calling this sender, so on its own it proves the firmware
- * parses a correctly-formed packet -- not that borgvk emits one. A byte-order
- * slip or an offset miscalculation here would sail straight past it.
- *
- * So the expected bytes below are written out literally, in the same shape
- * the simulator test constructs, and compared against what the real sender
- * produces through the capture transport. The two tests together cover the
- * host->firmware path end to end: this one pins the bytes borgvk emits, and
- * the simulator one proves the firmware stages exactly those bytes correctly.
  */
 
 #include "borgvk_private.h"
@@ -50,8 +36,6 @@ emit(uint32_t offset, uint32_t size, const void *values, size_t *out_len)
 static void
 test_well_formed_range(void)
 {
-   /* Word offset 8, four words -- deliberately the same range the simulator
-    * test's second packet uses, so the two tests pin the same bytes. */
    const uint32_t words[4] = {
       0xB2B20000u, 0xB2B20001u, 0xB2B20002u, 0xB2B20003u,
    };
@@ -68,8 +52,6 @@ test_well_formed_range(void)
    check(pkt[1] == 8, "byte offset 32 is sent as word offset 8");
    check(pkt[2] == 4, "byte size 16 is sent as 4 words");
 
-   /* Payload is little-endian, at the head of the buffer regardless of the
-    * offset field -- the offset says where it lands, not where it sits. */
    for (unsigned i = 0; i < 4; i++) {
       uint32_t v = words[i];
       bool ok = pkt[3 + i * 4 + 0] == (uint8_t)(v & 0xff) &&
@@ -79,8 +61,6 @@ test_well_formed_range(void)
       check(ok, "payload word is little-endian at the head of the packet");
    }
 
-   /* Everything past the supplied words must be zero: the firmware reads a
-    * constant byte count, so the tail is padding it checksums but ignores. */
    bool padded = true;
    for (int i = 3 + 4 * 4; i < PKT_LEN - 1; i++)
       if (pkt[i] != 0)
@@ -121,9 +101,6 @@ test_rejected_ranges(void)
    size_t len;
    uint8_t *pkt;
 
-   /* Vulkan requires offset and size to be multiples of 4
-    * (VUID-vkCmdPushConstants-offset-00368 / -size-00369). The word-index
-    * mapping depends on it, so the sender checks rather than assuming. */
    len = 0;
    pkt = emit(2, 8, v, &len);
    check(len == 0, "an unaligned offset emits nothing");
@@ -156,9 +133,6 @@ test_rejected_ranges(void)
    free(pkt);
 }
 
-/* 0xAE geometry: positions and UVs are shader datapath values, so they must
- * go out as float32 bits (the FP16 packing they used to have reads as
- * denormals on the FP32 datapath). Layout mirrors borg_kernel.c RX_GEOM_*. */
 #define GEOM_MAX_VERTS 16
 #define GEOM_MAX_TRIS  12
 #define GEOM_PKT_LEN   (1 + 2 + GEOM_MAX_VERTS * 12 + GEOM_MAX_TRIS * 3 + \
@@ -213,8 +187,6 @@ test_geometry_packet(void)
    free(pkt);
 }
 
-/* 0xAF: the firmware (borg_kernel.c) reads y at [1], the sampler descriptor
- * as four little-endian words at [2..17], the RGBA8 texels from [18]. */
 static void
 test_texture_row_packet(void)
 {
