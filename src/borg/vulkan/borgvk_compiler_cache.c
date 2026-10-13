@@ -1,9 +1,6 @@
 /*
  * Copyright © 2026 Andreas Wendleder
  * SPDX-License-Identifier: MIT
- *
- * The shader compiler of a borgvk without borgc (-Dborg-compiler=cache): stages come from
- * the shader cache ($BORGVK_SHADER_CACHE, borgvk_shader_cache.c) or are not compiled.
  */
 #include "borgvk_private.h"
 #include "util/log.h"
