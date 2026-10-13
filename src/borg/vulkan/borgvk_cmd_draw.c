@@ -726,70 +726,51 @@ draw_buffers(struct draw_ctx *g)
    return ok;
 }
 
-static bool
-borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buffer *cmd,
-                        const struct draw_params *dp)
+static void
+draw_textures(struct draw_ctx *g)
 {
-   struct draw_ctx g = { .device = device, .cmd = cmd, .dp = dp, .pipeline = cmd->gfx_pipeline };
-   if (!draw_validate(&g))
-      return false;
-   struct borgvk_pipeline *pipeline = g.pipeline;
-   struct borgvk_descriptor_set *set = cmd->desc_set;
-   const uint32_t topo = g.topo, X = g.X, nextra = g.nextra;
-   const bool lines = g.lines;
-   struct borgvk_image *color_img = g.color_img, **extra = g.extra;
+   const struct borgvk_pipeline *pipeline = g->pipeline;
+   const struct borgvk_descriptor_set *set = g->cmd->desc_set;
+   int want = -1;
+   if (set && pipeline->tex_binding >= 0) {
+      want = set->map.n ? -2 : pipeline->tex_binding;
+      for (uint32_t j = 0; j < set->map.n; j++)
+         if (set->map.num[j] == pipeline->tex_binding)
+            want = set->map.slot[j];
+      if (want < 0 || want >= BORGVK_MAX_BINDINGS)
+         want = -1;
+   }
+   for (int b = 0; set && b < BORGVK_MAX_BINDINGS; b++) {
+      if (want >= 0 && b != want)
+         continue;
+      if (set->views[b] && borgvk_send_generic_texture(set->views[b], set->images[b], set->samplers[b]))
+         break;
+      if (set->buffer_views[b] && borgvk_send_buffer_texture(set->buffer_views[b]))
+         break;
+   }
+}
 
-   if (!draw_index_range(&g))
-      return false;
-   uint32_t (*pairs)[2] = g.pairs, nlines = g.nlines;
-   g.imin = dp->first_instance;
-   g.imax = (int64_t)dp->first_instance + dp->instances - 1;
-   draw_reserve(&g);
-   g.first_of_batch = cmd->batch_draws == 0;
-   draw_state(&g);
-   draw_begin_pass(&g);
-   uint8_t *state = g.state;
-   const size_t state_len = g.state_len;
-   const bool state_same = g.state_same;
-   const uint32_t load = g.load;
-
-   g.heap = (struct draw_heap){ cmd->heap_top };
-   bool ok = draw_vertex_attrs(&g) && draw_point_corners(&g) && draw_pool(&g) && draw_srgb_table(&g) &&
-             draw_line_consts(&g);
-   struct draw_heap heap = g.heap;
-   free(pairs);
-   if (ok)
-      ok = draw_indices(&g);
-   const uint32_t idx_off = g.idx_off, index_code = g.index_code, voff_out = g.voff_out;
-   if (ok)
-      ok = draw_buffers(&g);
-   heap = g.heap;
-   const uint32_t ubo_base = g.ubo_base;
-   if (ok) {
-      int want = -1;
-      if (set && pipeline->tex_binding >= 0) {
-         want = set->map.n ? -2 : pipeline->tex_binding;
-         for (uint32_t j = 0; j < set->map.n; j++)
-            if (set->map.num[j] == pipeline->tex_binding)
-               want = set->map.slot[j];
-         if (want < 0 || want >= BORGVK_MAX_BINDINGS)
-            want = -1;
-      }
-      for (int b = 0; set && b < BORGVK_MAX_BINDINGS; b++) {
-         if (want >= 0 && b != want)
-            continue;
-         if (set->views[b] && borgvk_send_generic_texture(set->views[b], set->images[b], set->samplers[b]))
-            break;
-         if (set->buffer_views[b] && borgvk_send_buffer_texture(set->buffer_views[b]))
-            break;
-      }
-      if (lines)
-         borgvk_serial_send_draw(0, 0, load << 1, nlines * 6, dp->instances, 0, dp->first_instance, 0, 0, ubo_base);
-      else
+static void
+draw_emit(struct draw_ctx *g)
+{
+   const struct draw_params *dp = g->dp;
+   const struct borgvk_pipeline *pipeline = g->pipeline;
+   const uint32_t load = g->load, topo = g->topo, X = g->X, nlines = g->nlines;
+   const uint32_t ubo_base = g->ubo_base, index_code = g->index_code, voff_out = g->voff_out, idx_off = g->idx_off;
+   const bool lines = g->lines;
+   if (lines)
+      borgvk_serial_send_draw(0, 0, load << 1, nlines * 6, dp->instances, 0, dp->first_instance, 0, 0, ubo_base);
+   else
       borgvk_serial_send_draw(topo, dp->indexed ? index_code : 0,
                               (pipeline->restart ? 1u : 0u) | (load << 1), dp->count * X, dp->instances,
                               dp->indexed ? 0 : dp->first * X, dp->first_instance, voff_out, idx_off, ubo_base);
-   }
+}
+
+static bool
+draw_finish(struct draw_ctx *g, bool ok)
+{
+   struct borgvk_command_buffer *cmd = g->cmd;
+   uint8_t *state = g->state;
    size_t nbytes = 0;
    uint8_t *bytes = borgvk_transport_capture_end(&nbytes);
    if (!ok || !bytes || nbytes == 0) {
@@ -797,27 +778,53 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       free(state);
       return ok;
    }
-   bool appended = (state_same || !state || stream_append(cmd, state, state_len)) &&
+   bool appended = (g->state_same || !state || stream_append(cmd, state, g->state_len)) &&
                    stream_append(cmd, bytes, nbytes);
    free(bytes);
-   if (!state_same && state && appended) {
+   if (!g->state_same && state && appended) {
       free(cmd->state_sent);
       cmd->state_sent = state;
-      cmd->state_sent_len = state_len;
+      cmd->state_sent_len = g->state_len;
    } else {
       free(state);
    }
    if (!appended)
       return false;
-   cmd->heap_top = heap.top;
+   cmd->heap_top = g->heap.top;
    cmd->batch_draws++;
-   cmd->batch_img = color_img;
-   cmd->batch_nextra = nextra;
+   cmd->batch_img = g->color_img;
+   cmd->batch_nextra = g->nextra;
    for (uint32_t k = 0; k < 3; k++)
-      cmd->batch_extra[k] = extra[k];
+      cmd->batch_extra[k] = g->extra[k];
    cmd->batch_depth = cmd->depth_view;
    cmd->batch_stencil = cmd->stencil_view;
    return true;
+}
+
+static bool
+borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buffer *cmd,
+                        const struct draw_params *dp)
+{
+   struct draw_ctx g = { .device = device, .cmd = cmd, .dp = dp, .pipeline = cmd->gfx_pipeline };
+   if (!draw_validate(&g) || !draw_index_range(&g))
+      return false;
+   g.imin = dp->first_instance;
+   g.imax = (int64_t)dp->first_instance + dp->instances - 1;
+   draw_reserve(&g);
+   g.first_of_batch = cmd->batch_draws == 0;
+   draw_state(&g);
+   draw_begin_pass(&g);
+
+   g.heap = (struct draw_heap){ cmd->heap_top };
+   bool ok = draw_vertex_attrs(&g) && draw_point_corners(&g) && draw_pool(&g) && draw_srgb_table(&g) &&
+             draw_line_consts(&g);
+   free(g.pairs);
+   ok = ok && draw_indices(&g) && draw_buffers(&g);
+   if (ok) {
+      draw_textures(&g);
+      draw_emit(&g);
+   }
+   return draw_finish(&g, ok);
 }
 
 VKAPI_ATTR void VKAPI_CALL
