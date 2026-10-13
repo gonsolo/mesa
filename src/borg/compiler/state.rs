@@ -220,6 +220,7 @@ impl ConstPool {
     }
 }
 
+/// Compile state of one shader: selector, constant pool, window and output bookkeeping.
 pub struct Cx {
     pub sel: Selector,
     pub cp: ConstPool,

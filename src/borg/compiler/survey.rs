@@ -1,6 +1,7 @@
 use crate::isel::borg_isel;
 use compiler::bindings::*;
 
+/// Instruction counts of a shader; `tex` picks the fragment register set.
 pub struct Survey {
     pub total: u32,
     pub tex: u32,
