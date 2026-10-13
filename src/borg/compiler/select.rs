@@ -1089,6 +1089,8 @@ impl ShaderState {
             }
         }
     }
+    /// Selects Borg instructions for the entry function in virtual registers, one NIR instruction
+    /// at a time.
     pub unsafe fn select_entry(&mut self, entry: *mut nir_function_impl) {
         let mut cf_marks: std::collections::HashMap<usize, Vec<CfMark>> =
             std::collections::HashMap::new();

@@ -29,6 +29,8 @@ impl ShaderState {
         (ShaderState::new(regs, is_vertex, is_fragment, flags), entry, total)
     }
 
+    /// After instruction selection: logs the result, and returns false if a NIR op had no Borg
+    /// instruction, so no wrong shader is emitted.
     pub fn check_selected(&mut self) -> bool {
         eprintln!("borgc: selected {} Borg instruction(s) (virtual regs)", self.sel.prog.len());
         if env::var("BORGC_DUMP_ISA").is_ok() {
