@@ -171,7 +171,9 @@ borgvk_send_generic_texture(const struct vk_image_view *view,
          ltotal += lsz[l];
       }
       total = ltotal * layers;
-      out = total <= 0x70000 ? calloc(1, total) : NULL;
+      /* the board's texture region is 512 KB, the direct simulator's 6 MB */
+      const char *direct = getenv("BORGVK_SIM_DIRECT");
+      out = total <= (direct && direct[0] ? 0x600000u : 0x70000u) ? calloc(1, total) : NULL;
       uint8_t *lin = out ? malloc((size_t)w * h * depth * obpp) : NULL;
       if (!lin) {
          free(out);
