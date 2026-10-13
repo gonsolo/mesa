@@ -1,11 +1,6 @@
 /*
  * Copyright © 2026 Andreas Wendleder
  * SPDX-License-Identifier: MIT
- *
- * Instance + physical-device bring-up for borgvk.  When libborg_drm_shim.so is
- * preloaded, enumerate_devices finds the "borg" DRM device and opens it; all
- * GEM and submit ioctls go through that fd.  Without the shim (drm_fd == -1),
- * the driver falls back to malloc + direct serial (legacy path).
  */
 #include "borgvk_private.h"
 
@@ -24,8 +19,6 @@
 #include <string.h>
 #include "borgvk_drm_compat.h"
 
-/* The Vulkan version borgvk claims. It implements the Vulkan 1.0 feature set (the target of
- * the conformance work), and says so: reporting a higher version would promise 1.1+ behaviour. */
 #define BORGVK_API_VERSION VK_API_VERSION_1_0
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -35,9 +28,6 @@ borgvk_EnumerateInstanceVersion(uint32_t *pApiVersion)
    return VK_SUCCESS;
 }
 
-/* Instance extensions advertised by borgvk. The WSI surface extensions let an
- * app create a swapchain so its render loop runs; the actual pixels go to the
- * FPGA over serial, the host window is just a formality (software WSI path). */
 static const struct vk_instance_extension_table instance_extensions = {
    .KHR_external_fence_capabilities     = true,
    .KHR_external_memory_capabilities    = true,
@@ -152,9 +142,6 @@ is_depth_stencil_format(VkFormat format)
 static bool
 is_ycbcr_format(VkFormat format)
 {
-   /* Multi-planar and 4:2:x packed formats require samplerYcbcrConversion
-    * (VK_KHR_sampler_ycbcr_conversion) which borgvk does not advertise.
-    * Report zero features for all of them. */
    switch (format) {
    case VK_FORMAT_G8B8G8R8_422_UNORM:
    case VK_FORMAT_B8G8R8G8_422_UNORM:
@@ -203,28 +190,6 @@ is_ycbcr_format(VkFormat format)
 static bool
 is_compressed_format(VkFormat format)
 {
-   /* BC and ASTC — zero features (not advertised in device features).
-    * The 3D ASTC formats (VK_EXT_texture_compression_astc_3d,
-    * VK_FORMAT_ASTC_3x3x3_UNORM_BLOCK_EXT .. VK_FORMAT_ASTC_6x6x6_SFLOAT_BLOCK_EXT,
-    * enum range 1000288000-1000288029) live in the extension's own enum
-    * range, well outside VK_FORMAT_ASTC_12x12_SRGB_BLOCK -- this range check
-    * alone let them fall through to borgvk_optimal_features' generic "any
-    * other format" branch and get full feature support as if fully
-    * supported. That's what let CTS create and actually copy/read back a
-    * real 3D-block-compressed image, hitting a genuine heap corruption in
-    * that path (borgvk's addressing has never been correctly worked out for
-    * block-compressed depth).
-    *
-    * A block-depth-based generic check (util_format_get_blockdepth) was
-    * tried first instead of hardcoding this range, but doesn't work:
-    * vk_format_to_pipe_format() has NO mapping at all for these EXT enum
-    * values (confirmed by direct probe: vkGetPhysicalDeviceFormatProperties
-    * still returned nonzero optimalTilingFeatures after that fix), so it
-    * silently returns PIPE_FORMAT_NONE, and util_format_get_blockdepth's
-    * !desc fallback returns 1 -- indistinguishable from an ordinary 2D
-    * format. Hardcoding the range is the only thing that actually reaches
-    * this format at all, confirmed by re-running the same direct probe
-    * after this change (optimalTilingFeatures == 0). */
    return (format >= VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK &&
            format <= VK_FORMAT_EAC_R11G11_SNORM_BLOCK) ||
           (format >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK &&
@@ -233,9 +198,6 @@ is_compressed_format(VkFormat format)
           util_format_get_blockdepth(vk_format_to_pipe_format(format)) > 1;
 }
 
-/* BC1-BC7: the one compression family Vulkan 1.0 asks for.  The texels stay compressed
- * in image memory; the driver decodes them (Mesa's util/format decoders) when it blits
- * from them or hands them to the texture unit. */
 static bool
 is_bc_format(VkFormat format)
 {
@@ -243,8 +205,6 @@ is_bc_format(VkFormat format)
           format <= VK_FORMAT_BC7_SRGB_BLOCK;
 }
 
-/* Sample counts the device supports per use; VkPhysicalDeviceLimits and the per-format
- * sampleCounts both derive from these, so the two cannot disagree. */
 #define BORGVK_SC_MSAA      (VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT)
 #define BORGVK_SC_INTEGER   VK_SAMPLE_COUNT_1_BIT
 #define BORGVK_SC_STORAGE   VK_SAMPLE_COUNT_1_BIT
@@ -257,26 +217,16 @@ borgvk_optimal_features(VkFormat format)
        is_compressed_format(format))
       return 0;
 
-   /* Scaled-integer formats (*_USCALED, *_SSCALED) are vertex-buffer formats in Vulkan 1.0;
-    * the spec requires no image feature for them.  The texture unit cannot sample them and
-    * the blit/attachment paths do not convert to them, so advertise none. */
    if (vk_format_is_scaled(format))
       return 0;
 
-   /* 10-bit signed packed formats: the texture unit has none (only UNORM and UINT), and
-    * Vulkan 1.0 does not require them. */
    if (format == VK_FORMAT_A2R10G10B10_SNORM_PACK32 || format == VK_FORMAT_A2B10G10R10_SNORM_PACK32 ||
        format == VK_FORMAT_A2R10G10B10_SINT_PACK32 || format == VK_FORMAT_A2B10G10R10_SINT_PACK32)
       return 0;
 
-   /* 64-bit-per-channel formats (R64*): the texture unit and the tile buffer top out at
-    * 32 bits per channel, and Vulkan 1.0 does not require them. */
    if (format >= VK_FORMAT_R64_UINT && format <= VK_FORMAT_R64G64B64A64_SFLOAT)
       return 0;
 
-   /* BC1-7: sampled, blit source, transfer (the Vulkan 1.0 requirement for a
-    * compression family, vkGetPhysicalDeviceFormatProperties tables).  No blit
-    * destination, colour attachment or storage: the block formats cannot be rendered to. */
    if (is_bc_format(format)) {
       return VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
              VK_FORMAT_FEATURE_BLIT_SRC_BIT |
@@ -293,19 +243,13 @@ borgvk_optimal_features(VkFormat format)
       VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
 
    if (is_depth_stencil_format(format)) {
-      /* Depth/stencil formats: sampled + depth/stencil attachment only.
-       * No color attachment (CTS unsupported_image_usage.optimal checks this). */
       return common | VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
    }
 
-   /* Color formats: full feature set, no depth/stencil.
-    * Storage image atomics mandated by spec for R32_UINT and R32_SINT. */
    VkFormatFeatureFlags f =
       common |
       VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT |
       VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
-   /* Blending: the formats Vulkan 1.0 requires it for, no others (the fixed-function blend does
-    * the UNORM8 ones; docs/B3_colour_formats.md has the plan for the rest). */
    switch (format) {
    case VK_FORMAT_R5G6B5_UNORM_PACK16:
    case VK_FORMAT_A1R5G5B5_UNORM_PACK16:
@@ -326,12 +270,6 @@ borgvk_optimal_features(VkFormat format)
    default:
       break;
    }
-   /* Integer and scaled formats (the sampler has no scaled-integer formats) can't be linearly filtered -- interpolating between
-    * integer texel values is meaningless, and no real hardware advertises
-    * this bit for them. Without this exclusion CTS legitimately runs
-    * VK_FILTER_LINEAR blits/samples against e.g. R32_UINT (since we claimed
-    * to support it) and gets "incorrect" results compared to its NEAREST-only
-    * reference for integer formats. */
    if (!vk_format_is_int(format) && !vk_format_is_scaled(format))
       f |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
    if (format == VK_FORMAT_R32_UINT || format == VK_FORMAT_R32_SINT)
@@ -339,9 +277,6 @@ borgvk_optimal_features(VkFormat format)
    return f;
 }
 
-/* Texel-buffer features Vulkan 1.0 requires (the mandatory format tables; verified by
- * dEQP-VK.api.info.format_properties.*).  Nothing else is advertised: the compute path only
- * implements these.  Every format listed for storage is also listed for uniform. */
 static VkFormatFeatureFlags
 borgvk_texel_buffer_features(VkFormat format)
 {
@@ -401,13 +336,6 @@ borgvk_GetPhysicalDeviceFormatProperties2(
    VkFormatProperties2 *pFormatProperties)
 {
    const VkFormatFeatureFlags opt = borgvk_optimal_features(format);
-   /* Linear tiling: transfer + sampling.  borgvk samples textures by reading the
-    * host-visible image memory directly over serial, so a LINEAR host-visible
-    * image is sampleable.  Advertising SAMPLED here lets cube.c upload its texture
-    * straight into a linear host-visible image (the path the shim reads) instead
-    * of falling back to a staging buffer + OPTIMAL image + vkCmdCopyBufferToImage,
-    * which borgvk does not execute (that fallback left the texture all-black).
-    * Only for color formats that the optimal path already samples. */
    VkFormatFeatureFlags lin =
       (opt != 0 && !is_bc_format(format)) ? (VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
                     VK_FORMAT_FEATURE_TRANSFER_DST_BIT) : 0;
@@ -417,8 +345,6 @@ borgvk_GetPhysicalDeviceFormatProperties2(
       if (opt & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)
          lin |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
    }
-   /* Buffer features: for non-compressed non-depth color formats only.
-    * BC formats are sampled-only (no buffer/vertex support). */
    VkFormatFeatureFlags buf = 0;
    if ((opt != 0 || vk_format_is_scaled(format)) &&
        !is_depth_stencil_format(format) && !is_bc_format(format)) {
@@ -434,23 +360,11 @@ borgvk_GetPhysicalDeviceFormatProperties2(
    vk_foreach_struct(ext_stype, ext, pFormatProperties->pNext) {
       switch (ext_stype) {
       case VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3: {
-         /* VkFormatProperties3 mirrors VkFormatProperties with 64-bit flags.
-          * CTS checks these are consistent with the core struct. */
          VkFormatProperties3 *fp3 = (VkFormatProperties3 *)ext;
          fp3->linearTilingFeatures  = lin;
          fp3->optimalTilingFeatures = opt;
          fp3->bufferFeatures        = buf;
 
-         /* VkFormatFeatureFlagBits2 has bits with NO 32-bit counterpart, so a
-          * straight copy of the core flags under-reports them.
-          * SAMPLED_IMAGE_DEPTH_COMPARISON (bit 33) is one: the spec's mandatory
-          * format table requires it for every depth format that supports
-          * SAMPLED_IMAGE, and dEQP-VK.api.format_feature_flags2.* compares
-          * against exactly that table (vktApiFormatPropertiesExtendedKHRtests
-          * checkFlags → "missing flags 0x0000000200000000" for all six depth
-          * formats).  Only optimal tiling: borgvk deliberately withholds
-          * SAMPLED_IMAGE from depth formats in the linear path above, so there
-          * is nothing to qualify there. */
          if (vk_format_has_depth(format) &&
              (opt & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))
             fp3->optimalTilingFeatures |=
@@ -497,43 +411,21 @@ borgvk_GetPhysicalDeviceImageFormatProperties2(
    if (usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT)
       required |= VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
 
-   /* Always zero the output so callers see clean data even on NOT_SUPPORTED.
-    * The v1 bridge (vk_common_GetPhysicalDeviceImageFormatProperties) zero-inits
-    * its VkImageFormatProperties2 on the stack; v1 and v2 must agree exactly,
-    * including on error paths. */
    pImageFormatProperties->imageFormatProperties =
       (VkImageFormatProperties){ 0 };
 
    if ((feats & required) != required)
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
-   /* 3D images using a 3D-block-compressed format (any ASTC_*x*x*_BLOCK_EXT,
-    * e.g. ASTC_3x3x3) require real block-depth-aware addressing throughout
-    * the copy/clear paths. That math was added (borgvk_mip_level_size's `bd`
-    * parameter) but a heap corruption still surfaced running
-    * dEQP-VK.api.copy_and_blit...3d_to_3d.astc_3x3x3_* even after fixing the
-    * addressing CmdCopyImage itself does -- meaning some other path (the
-    * initial data upload via CmdCopyBufferToImage, or CTS's own readback)
-    * still isn't right for this narrow combination. Rather than ship a
-    * partially-debugged data-corruption risk for a combination real content
-    * essentially never uses (3D block compression has minimal real-world
-    * adoption), decline it honestly here so CTS reports NotSupported instead
-    * of crashing or corrupting memory. */
    if (pImageFormatInfo->type == VK_IMAGE_TYPE_3D &&
        util_format_get_blockdepth(vk_format_to_pipe_format(pImageFormatInfo->format)) > 1)
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
-   /* INPUT_ATTACHMENT requires color or depth-stencil attachment capability.
-    * Compressed formats (ETC2/EAC) are sampled-only — reject them here. */
    if ((usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) &&
        !(feats & (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
                   VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
-   /* Sample counts follow the device limits for the way the image will be used (the
-    * CTS requires exactly that intersection): storage, sampled (depth / stencil / integer
-    * / other colour) and attachment usage each narrow the set. Only 2D optimal images
-    * that are not cube-compatible and have an attachment feature can be multisampled. */
    const bool cube_compatible =
       (pImageFormatInfo->flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) != 0;
    const bool has_attach_feature =
@@ -587,10 +479,6 @@ borgvk_GetPhysicalDeviceSparseImageFormatProperties2(
    uint32_t *pPropertyCount,
    VkSparseImageFormatProperties2 *pProperties)
 {
-   /* Borg has no sparse-residency support, so no format supports sparse images.
-    * Report zero properties.  Without this entrypoint the Mesa runtime's common
-    * v1 shim (vk_common_GetPhysicalDeviceSparseImageFormatProperties) calls a
-    * NULL dispatch slot and segfaults. */
    *pPropertyCount = 0;
 }
 
@@ -600,15 +488,6 @@ borgvk_GetPhysicalDeviceExternalBufferProperties(
    const VkPhysicalDeviceExternalBufferInfo *pExternalBufferInfo,
    VkExternalBufferProperties *pExternalBufferProperties)
 {
-   /* Unlike External{Fence,Semaphore}Properties, Mesa's vk runtime has no
-    * vk_common_ fallback for this one -- every driver must implement it
-    * itself, and borgvk didn't, so this was a NULL dispatch-table call
-    * (confirmed via coredumpctl/gdb: SEGV in
-    * vk::InstanceDriver::getPhysicalDeviceExternalBufferProperties).
-    * Borg has no import/export path for any external memory handle type
-    * (malloc+serial only), so every handle type reports unsupported --
-    * same "no support" answer lvp_GetPhysicalDeviceExternalBufferProperties
-    * gives for any handle type it doesn't implement. */
    pExternalBufferProperties->externalMemoryProperties = (VkExternalMemoryProperties){
       .externalMemoryFeatures = 0,
       .exportFromImportedHandleTypes = 0,
@@ -626,8 +505,6 @@ borgvk_get_properties(struct vk_properties *p)
       .deviceID = 0xb049,
       .deviceType = VK_PHYSICAL_DEVICE_TYPE_OTHER,
 
-      /* Vulkan 1.0 limits — modest, sane values so vulkaninfo and apps see a
-       * coherent device. Tightened/grown as real features come online. */
       .maxImageDimension1D = 4096,
       .maxImageDimension2D = 4096,
       .maxImageDimension3D = 256,
@@ -769,8 +646,6 @@ create_physical_device(struct borgvk_instance *instance, int drm_fd)
 #endif
 
    struct vk_features features = {
-      /* Buffer accesses stay inside the bound range: see compute.rs (window mask) and
-       * fetch_vertex_attr (bounded vertex fetch). */
       .robustBufferAccess = true,
       /* Vulkan 1.3 spec §43 mandates at least one compressed texture family. */
       .textureCompressionBC = true,
@@ -802,8 +677,6 @@ create_physical_device(struct borgvk_instance *instance, int drm_fd)
    device->sync_types[1] = NULL;
    device->vk.supported_sync_types = device->sync_types;
 
-   /* WSI init must follow supported_sync_types: wsi_device_init queries external
-    * semaphore/fence properties, which walk that list. */
 #ifdef BORGVK_USE_WSI_PLATFORM
    result = borgvk_wsi_init(device);
    if (result != VK_SUCCESS) {
@@ -818,8 +691,6 @@ create_physical_device(struct borgvk_instance *instance, int drm_fd)
    return VK_SUCCESS;
 }
 
-/* Try to open a /dev/dri/renderD* node whose DRM driver name is "borg".
- * Returns an open fd, or -1 if no such device is found. */
 static int
 find_borg_drm_device(void)
 {
@@ -949,8 +820,6 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO);
 
-   /* The runtime's feature check ignores Vulkan 1.1 feature structs on a device that reports
-    * 1.0, so enabling a 1.1 feature we do not have would succeed. Refuse them here. */
    vk_foreach_struct_const(f_stype, f, pCreateInfo->pNext) {
       switch (f_stype) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES:
@@ -978,8 +847,6 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (!device)
       return vk_error(physical_device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   /* Main device dispatch: our entrypoints, then fill every vkCmd* we don't
-    * implement with the runtime's record-into-queue emulation. */
    struct vk_device_dispatch_table dispatch_table;
    vk_device_dispatch_table_from_entrypoints(&dispatch_table,
                                              &borgvk_device_entrypoints, true);
@@ -989,17 +856,8 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
 #endif
    vk_device_dispatch_table_from_entrypoints(&dispatch_table,
                                              &vk_cmd_enqueue_device_entrypoints, false);
-   /* Every vkCmd* the application calls only RECORDS (the runtime's vk_cmd_enqueue_*). The real
-    * borgvk_Cmd* implementations are in cmd_dispatch below and run when the command buffer is
-    * submitted (borgvk_queue_submit -> vk_cmd_queue_execute), in submission order, so a copy
-    * waits for its semaphores and a command buffer can be submitted again. The commands borgvk
-    * implements itself are listed here: borgvk_device_entrypoints put them in this table first
-    * and the line above only fills what was empty. */
 #define BORGVK_RECORD_CMD(name) dispatch_table.name = vk_cmd_enqueue_##name
    BORGVK_RECORD_CMD(CmdPushConstants);
-   /* The legacy vkCmd{Begin,Next,End}RenderPass* stay borgvk's translators (they call
-    * vk_common_*, which turns them into vkCmdBeginRendering / vkCmdEndRendering through this
-    * table); the dynamic-rendering commands they produce are what gets recorded and replayed. */
    BORGVK_RECORD_CMD(CmdBeginRendering);   BORGVK_RECORD_CMD(CmdEndRendering);
    BORGVK_RECORD_CMD(CmdClearAttachments);
    BORGVK_RECORD_CMD(CmdClearColorImage);  BORGVK_RECORD_CMD(CmdClearDepthStencilImage);
@@ -1018,38 +876,14 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
    BORGVK_RECORD_CMD(CmdDispatch);
    BORGVK_RECORD_CMD(CmdDrawIndirect);     BORGVK_RECORD_CMD(CmdDrawIndexedIndirect);
 #undef BORGVK_RECORD_CMD
-   /* Finally, fill anything STILL null from the runtime's generic
-    * implementations.  vk_cmd_enqueue_device_entrypoints above only covers
-    * vkCmd* functions, so before this every non-Cmd core entrypoint that
-    * borgvk didn't implement itself resolved to NULL and
-    * vkGetDeviceProcAddr returned nullptr for it -- caught by
-    * dEQP-VK.api.version_check.entry_points listing eight of them
-    * (GetDeviceMemoryCommitment, GetImageSparseMemoryRequirements2,
-    * UpdateDescriptorSetWithTemplate, ResetQueryPool,
-    * Get{Buffer,DeviceMemory}OpaqueCaptureAddress,
-    * GetDeviceImage{,Sparse}MemoryRequirements), all of which Mesa already
-    * implements generically.
-    *
-    * Ordering matters and is deliberate: this comes AFTER the cmd-enqueue
-    * table, so every vkCmd* keeps its existing record-into-queue behaviour
-    * and only genuinely-empty slots change.  overwrite=false throughout means
-    * borgvk's own entrypoints always win. */
    vk_device_dispatch_table_from_entrypoints(&dispatch_table,
                                              &vk_common_device_entrypoints, false);
 
    /* Dispatch used to replay a recorded queue (secondary cmd buffers). */
    vk_device_dispatch_table_from_entrypoints(&device->cmd_dispatch,
                                              &borgvk_device_entrypoints, true);
-   /* Not vk_common_device_entrypoints wholesale: its vkCmd* wrappers (vk_common_CmdSetEvent,
-    * vk_common_CmdPipelineBarrier, ...) call through the MAIN table, which now records, so a
-    * replay would append to the very queue it is walking. ExecuteCommands is the one wanted:
-    * it replays the secondaries through command_dispatch_table, i.e. this table. */
    if (!device->cmd_dispatch.CmdExecuteCommands)
       device->cmd_dispatch.CmdExecuteCommands = vk_common_CmdExecuteCommands;
-   /* vk_cmd_queue_execute calls every recorded command through this table without a NULL check:
-    * give the commands borgvk does not act on (state setting, draws on the way to the generic
-    * path, ...) an empty body. A command's arguments sit in registers and the callee ignores
-    * them, so one function serves every signature. */
    {
       void **slots = (void **)&device->cmd_dispatch;
       for (size_t i = 0; i < sizeof(device->cmd_dispatch) / sizeof(void *); i++)
@@ -1064,8 +898,6 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
       return vk_error(physical_device, result);
    }
 
-   /* Queue work runs on a thread when it has to (a submit waiting on work that has not been
-    * submitted yet), as in lavapipe and v3dv; the sync type has real state and a move(). */
    vk_device_enable_threaded_submit(&device->vk);
 
    device->vk.command_dispatch_table = &device->cmd_dispatch;
@@ -1084,8 +916,6 @@ borgvk_CreateDevice(VkPhysicalDevice physicalDevice,
    /* Non-owning copy — lifetime is managed by the physical device. */
    device->drm_fd = physical_device->drm_fd;
 
-   /* On every vkQueueSubmit, read the MVP from the bound uniform buffer and
-    * ship it to the FPGA over serial. This is the driver's whole render path. */
    device->queue.driver_submit = borgvk_queue_submit;
 
    *pDevice = borgvk_device_to_handle(device);
@@ -1113,8 +943,6 @@ borgvk_GetInstanceProcAddr(VkInstance _instance, const char *pName)
                                     &borgvk_instance_entrypoints, pName);
 }
 
-/* With version 1+ of the loader interface the ICD should expose
- * vk_icdGetInstanceProcAddr to work around certain LD_PRELOAD issues. */
 PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName)
 {
