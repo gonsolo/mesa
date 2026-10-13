@@ -55,7 +55,7 @@ sim_choose_dim(const struct borgvk_image *color_img, uint32_t sim_dim, bool raw3
    if (raw32)
       sdim = width;
    const char *direct = getenv("BORGVK_SIM_DIRECT");
-   if (direct && direct[0]) {
+   if ((direct && direct[0]) || borgvk_hw_enabled()) {
       uint32_t d = color_img->vk.extent.width;
       if (d >= 4 && d <= 256 && (d & (d - 1)) == 0 &&
           color_img->vk.extent.height == d)
