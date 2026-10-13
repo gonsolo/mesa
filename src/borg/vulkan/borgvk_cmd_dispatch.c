@@ -11,6 +11,7 @@
 #define BORGVK_CS_SLOT_BYTES (0x80000u * 4)
 #define BORGVK_CS_BASE_BYTES (0x40000u * 4)
 #define BORGVK_MAX_CS_PARTS 64
+#define BORGVK_CS_MAX_BUFS 34   /* 32 binding slots and the push constants */
 
 static void
 put_u32(uint8_t **p, uint32_t v)
@@ -28,7 +29,7 @@ struct cs_buf {
 };
 
 struct cs_bufs {
-   struct cs_buf b[34];
+   struct cs_buf b[BORGVK_CS_MAX_BUFS];
    uint32_t n, total;
 };
 
@@ -48,7 +49,8 @@ cs_gather(const struct borgvk_command_buffer *cmd, const struct borgvk_pipeline 
    for (uint32_t si = 0; si < 4; si++) {
    struct borgvk_descriptor_set *set = cmd->cs_sets[si];
    const VkDeviceSize *dyn_off = cmd->cs_dyn_offs[si];
-   for (uint32_t b = 0; set && b < BORGVK_MAX_BINDINGS && pl->set_base[si] + b < 32; b++) {
+   for (uint32_t b = 0; set && b < BORGVK_MAX_BINDINGS && pl->set_base[si] + b < 32 &&
+        nbufs < BORGVK_CS_MAX_BUFS - 1; b++) {
       const struct vk_buffer_view *bv = set->buffer_views[b];
       if (bv && !set->buffers[b]) {
          struct borgvk_buffer *tb = container_of(bv->buffer, struct borgvk_buffer, vk);
@@ -314,7 +316,7 @@ borgvk_CmdDispatch(VkCommandBuffer commandBuffer, uint32_t gx, uint32_t gy, uint
    uint8_t *job = cs_build_job(pl, gx, gy, gz, &cb, &job_len);
    struct cs_run run;
    cs_start(pl, direct, gx, gy, gz, job, job_len, &run);
-   uint8_t *merged[BORGVK_MAX_BINDINGS + 1] = { 0 };
+   uint8_t *merged[BORGVK_CS_MAX_BUFS] = { 0 };
    cs_merge(&cb, &run, merged);
    if (borgvk_corpus_on())
       cs_log(&cb, job, job_len, merged, run.ran);
