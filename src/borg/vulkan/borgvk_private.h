@@ -405,6 +405,11 @@ bool borgvk_send_generic_texture(const struct vk_image_view *view, const struct 
 bool borgvk_send_buffer_texture(const struct vk_buffer_view *bv);
 bool borgvk_vertex_format_to_fetch(VkFormat f, uint32_t *code, uint32_t *swz, uint32_t *read_bytes);
 
+void borgvk_resolve_region(struct borgvk_image *src, struct borgvk_image *dst, const VkImageResolve *reg);
+void borgvk_clear_attachment_rect(struct vk_image_view *view, VkImageAspectFlags aspectMask,
+                                  const VkClearValue *clearValue, VkRect2D rect,
+                                  uint32_t baseLayer, uint32_t layerCount);
+
 void borgvk_event_set_status(VkEvent event, bool set);
 
 #endif /* BORGVK_PRIVATE_H */
