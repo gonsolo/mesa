@@ -904,6 +904,12 @@ impl ShaderState {
                         let v: i32 = $v;
                         if self.cp.vs_window {
                             self.cp.vs_const(&mut self.sel, v as u32, false)
+                        } else if self.is_fragment {
+                            let u = self.fw.slot(v as u32);
+                            let w = self.sel.next_vreg;
+                            self.sel.next_vreg += 1;
+                            self.sel.ubo.insert(w, Ubo::Uniform(u as u8));
+                            w
                         } else {
                             self.cp.int_operand(&mut self.sel, v)
                         }
