@@ -2,6 +2,7 @@
  * Copyright © 2026 Andreas Wendleder
  * SPDX-License-Identifier: MIT
  */
+#include "util/format/u_format.h"
 #include "util/format_srgb.h"
 #include "borgvk_private.h"
 
@@ -405,6 +406,27 @@ draw_begin_pass(struct draw_ctx *g)
 static const uint8_t line_end[6] = { 0, 0, 1, 0, 1, 1 };
 static const float line_side[6] = { -1, 1, -1, 1, 1, -1 };
 
+/* Scaled, sRGB and the rest of the plain float-converted vertex formats are expanded to RGBA32F on upload. */
+static bool
+vertex_format_converts(VkFormat f)
+{
+   uint32_t c, w, r;
+   if (borgvk_vertex_format_to_fetch(f, &c, &w, &r))
+      return false;
+   const enum pipe_format pf = vk_format_to_pipe_format(f);
+   return pf != PIPE_FORMAT_NONE && util_format_is_plain(pf) && !util_format_is_pure_integer(pf) &&
+          !util_format_is_depth_or_stencil(pf);
+}
+
+static void
+vattr_copy(VkFormat f, bool conv, uint8_t *dst, const uint8_t *src, uint32_t asz, uint32_t rbytes)
+{
+   if (conv)
+      util_format_unpack_rgba(vk_format_to_pipe_format(f), dst, src, 1);
+   else
+      memcpy(dst, src, MIN2(asz, rbytes));
+}
+
 static bool
 draw_vertex_attrs(struct draw_ctx *g)
 {
@@ -420,8 +442,12 @@ draw_vertex_attrs(struct draw_ctx *g)
       const struct borgvk_vertex_attr *at = &pipeline->attrs[a];
       uint32_t code, swz, rbytes;
       uint32_t b = at->binding;
+      const bool conv = at->location < 16 && b < BORGVK_MAX_VERTEX_BINDINGS && vertex_format_converts(at->format);
+      if (conv) {
+         code = 41; swz = 0; rbytes = 16;
+      }
       if (at->location >= 16 || b >= BORGVK_MAX_VERTEX_BINDINGS ||
-          !borgvk_vertex_format_to_fetch(at->format, &code, &swz, &rbytes) ||
+          (!conv && !borgvk_vertex_format_to_fetch(at->format, &code, &swz, &rbytes)) ||
           !cmd->vb[b]) {
          ok = generic_reject(REJECT_VERTEX_INPUT);
          break;
@@ -439,7 +465,7 @@ draw_vertex_attrs(struct draw_ctx *g)
             for (uint32_t r = 0; r < nlines * 6; r++) {
                const uint64_t src = (uint64_t)pairs[r / 6][line_end[r % 6] ^ other] * stride + at->offset;
                if (src + asz <= cmd->vb_avail[b])
-                  memcpy(tight + (size_t)r * rbytes, cmd->vb[b] + src, MIN2(asz, rbytes));
+                  vattr_copy(at->format, conv, tight + (size_t)r * rbytes, cmd->vb[b] + src, asz, rbytes);
             }
             const uint32_t off = heap_upload(heap, tight, nlines * 6 * rbytes);
             free(tight);
@@ -468,7 +494,7 @@ draw_vertex_attrs(struct draw_ctx *g)
       for (uint32_t r = 0; r < nrows; r++) {
          const uint64_t src = (uint64_t)(expand ? (e0 + r) / X : row0 + r) * stride + at->offset;
          if (src + asz <= avail)
-            memcpy(tight + (size_t)r * rbytes, cmd->vb[b] + src, MIN2(asz, rbytes));
+            vattr_copy(at->format, conv, tight + (size_t)r * rbytes, cmd->vb[b] + src, asz, rbytes);
       }
       const uint32_t off = heap_upload(heap, tight, nrows * rbytes);
       free(tight);
