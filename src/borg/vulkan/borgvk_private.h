@@ -369,6 +369,7 @@ struct borgvk_pipeline {
    bool                      mrt;
    uint32_t                  ubo_mask;      /* the uniform buffer bindings the draw loads from */
    bool                      push_used;     /* a shader loads push constants */
+   uint8_t                   push_stage;    /* bit per stage: loads push constants, no UBO */
    uint8_t                   set_base[4];
    int                       tex_binding;   /* binding of the texture the fragment shader samples */
    uint32_t                  vfetch;

@@ -796,10 +796,10 @@ draw_emit(struct draw_ctx *g)
    const uint32_t ubo_base = g->ubo_base, index_code = g->index_code, voff_out = g->voff_out, idx_off = g->idx_off;
    const bool lines = g->lines;
    if (lines)
-      borgvk_serial_send_draw(0, 0, load << 1, nlines * 6, dp->instances, 0, dp->first_instance, 0, 0, ubo_base);
+      borgvk_serial_send_draw(0, 0, (load << 1) | ((uint32_t)pipeline->push_stage << 5), nlines * 6, dp->instances, 0, dp->first_instance, 0, 0, ubo_base);
    else
       borgvk_serial_send_draw(topo, dp->indexed ? index_code : 0,
-                              (pipeline->restart ? 1u : 0u) | (load << 1), dp->count * X, dp->instances,
+                              (pipeline->restart ? 1u : 0u) | (load << 1) | ((uint32_t)pipeline->push_stage << 5), dp->count * X, dp->instances,
                               dp->indexed ? 0 : dp->first * X, dp->first_instance, voff_out, idx_off, ubo_base);
 }
 
