@@ -53,7 +53,7 @@ void borgvk_wsi_finish(struct borgvk_physical_device *physical_device);
 
 extern const struct vk_sync_type borgvk_sync_type;
 
-#define BORGVK_SHADER_BLOB_MAX 2048
+#define BORGVK_SHADER_BLOB_MAX 4096
 enum borgvk_shader_stage {
    BORGVK_STAGE_VERT = 0,
    BORGVK_STAGE_FRAG = 1,
