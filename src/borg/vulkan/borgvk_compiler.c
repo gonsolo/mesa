@@ -53,6 +53,18 @@ ubo_mask_used(nir_shader *nir)
    return mask;
 }
 
+static bool
+uses_push_constants(nir_shader *nir)
+{
+   nir_foreach_function_impl(impl, nir)
+      nir_foreach_block(block, impl)
+         nir_foreach_instr(instr, block)
+            if (instr->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_push_constant)
+               return true;
+   return false;
+}
+
 static int
 sampled_binding(nir_shader *nir)
 {
@@ -246,6 +258,7 @@ borgvk_compile_empty_frag(struct borgvk_device *device, uint32_t opt)
    device->frag_reads_pntc = false;
    device->frag_tex_binding = -1;
    device->stage_ubo[1] = 0;
+   device->stage_push[0] = device->stage_push[1] = false;
    ralloc_free(nb.shader);
 }
 
@@ -264,6 +277,7 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
             device->frag_tex_binding = -1;
          }
          device->stage_ubo[cslot == BORGVK_STAGE_FRAG] = 0;
+         device->stage_push[cslot == BORGVK_STAGE_FRAG] = false;
          device->shader_blob[cslot].npool = 0;
          mesa_logi("borgvk: shader blob from the cache (%u bytes)", device->shader_blob[cslot].len);
          return;
@@ -288,7 +302,11 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
    if (stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT)
       device->frag_tex_binding = sampled_binding(nir);
    if (stage_info->stage == VK_SHADER_STAGE_VERTEX_BIT || stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT)
-      device->stage_ubo[stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT] = ubo_mask_used(nir);
+{
+      const int fs = stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT;
+      device->stage_ubo[fs] = ubo_mask_used(nir);
+      device->stage_push[fs] = uses_push_constants(nir);
+   }
 
    int slot = -1;
    switch (stage_info->stage) {

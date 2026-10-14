@@ -91,6 +91,7 @@ struct borgvk_device {
    struct borgvk_shader_blob shader_blob[BORGVK_SHADER_STAGE_COUNT];
    VkPipelineLayout compile_layout;
    uint32_t stage_ubo[2];
+   bool stage_push[2];
    int frag_tex_binding;
    bool frag_reads_pntc;
    uint32_t blend_cfg;
@@ -367,6 +368,7 @@ struct borgvk_pipeline {
    uint32_t                  color_count;  /* colour attachments of the pipeline's render pass */
    bool                      mrt;
    uint32_t                  ubo_mask;      /* the uniform buffer bindings the draw loads from */
+   bool                      push_used;     /* a shader loads push constants */
    uint8_t                   set_base[4];
    int                       tex_binding;   /* binding of the texture the fragment shader samples */
    uint32_t                  vfetch;

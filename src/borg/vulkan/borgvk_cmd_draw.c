@@ -743,7 +743,7 @@ draw_buffers(struct draw_ctx *g)
       }
       ubo_base = base + 1;
    }
-   for (int b = 0; ok && !smask && !umask && set && b < BORGVK_MAX_BINDINGS; b++) {
+   for (int b = 0; ok && !smask && !umask && set && !(pipeline->push_used && !pipeline->ubo_mask) && b < BORGVK_MAX_BINDINGS; b++) {
       struct borgvk_buffer *ub = set->buffers[b];
       if (!ub || !ub->mem || !ub->mem->map || (pipeline->ubo_mask && !(pipeline->ubo_mask >> b & 1)))
          continue;
