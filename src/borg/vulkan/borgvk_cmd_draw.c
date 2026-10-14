@@ -414,15 +414,14 @@ vertex_format_converts(VkFormat f)
    if (borgvk_vertex_format_to_fetch(f, &c, &w, &r))
       return false;
    const enum pipe_format pf = vk_format_to_pipe_format(f);
-   return pf != PIPE_FORMAT_NONE && util_format_is_plain(pf) && !util_format_is_pure_integer(pf) &&
-          !util_format_is_depth_or_stencil(pf);
+   return pf != PIPE_FORMAT_NONE && !util_format_is_compressed(pf) && !util_format_is_depth_or_stencil(pf);
 }
 
 static void
 vattr_copy(VkFormat f, bool conv, uint8_t *dst, const uint8_t *src, uint32_t asz, uint32_t rbytes)
 {
    if (conv)
-      util_format_unpack_rgba(vk_format_to_pipe_format(f), dst, src, 1);
+      util_format_unpack_rgba(util_format_linear(vk_format_to_pipe_format(f)), dst, src, 1);   /* sRGB: as UNORM */
    else
       memcpy(dst, src, MIN2(asz, rbytes));
 }
@@ -444,7 +443,9 @@ draw_vertex_attrs(struct draw_ctx *g)
       uint32_t b = at->binding;
       const bool conv = at->location < 16 && b < BORGVK_MAX_VERTEX_BINDINGS && vertex_format_converts(at->format);
       if (conv) {
-         code = 41; swz = 0; rbytes = 16;
+         const enum pipe_format pf = vk_format_to_pipe_format(at->format);
+         code = util_format_is_pure_sint(pf) ? 40 : util_format_is_pure_uint(pf) ? 39 : 41;
+         swz = 0; rbytes = 16;
       }
       if (at->location >= 16 || b >= BORGVK_MAX_VERTEX_BINDINGS ||
           (!conv && !borgvk_vertex_format_to_fetch(at->format, &code, &swz, &rbytes)) ||
