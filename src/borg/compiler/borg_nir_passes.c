@@ -322,6 +322,36 @@ borg_blend_const_lower(nir_builder *b, nir_instr *instr, void *data)
    return nir_imm_vec4(b, k[0], k[1], k[2], k[3]);
 }
 
+/* The vertex id, instance id and base instance are the same everywhere in the shader: one load at the top,
+ * so a branch holds nothing nir_opt_peephole_select refuses to flatten. */
+static bool
+borg_hoist_vertex_ids(nir_shader *nir)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_def *first[nir_num_intrinsics] = { 0 };
+   bool progress = false;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *i = nir_instr_as_intrinsic(instr);
+         if (i->intrinsic != nir_intrinsic_load_vertex_id && i->intrinsic != nir_intrinsic_load_instance_id &&
+             i->intrinsic != nir_intrinsic_load_base_instance)
+            continue;
+         if (!first[i->intrinsic]) {
+            nir_builder b = nir_builder_at(nir_before_impl(impl));
+            first[i->intrinsic] = nir_load_system_value(&b, i->intrinsic, 0, 1, 32);
+         }
+         if (first[i->intrinsic] == &i->def)
+            continue;
+         nir_def_rewrite_uses(&i->def, first[i->intrinsic]);
+         nir_instr_remove(instr);
+         progress = true;
+      }
+   }
+   return nir_progress(progress, impl, nir_metadata_control_flow);
+}
+
 /* The blended colour is clamped to what the format holds (the pack block only rounds). */
 static bool
 borg_clamp_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
@@ -401,17 +431,18 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(_, nir, nir_lower_global_vars_to_local);
    }
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+   NIR_PASS(_, nir, nir_lower_system_values);
    if (nir->info.stage == MESA_SHADER_VERTEX) {
       bool progress;
+      NIR_PASS(_, nir, borg_hoist_vertex_ids);
       do {
          progress = false;
-         const nir_opt_peephole_select_options sel = { .limit = 64, .indirect_load_ok = true, .expensive_alu_ok = true };
+         const nir_opt_peephole_select_options sel = { .limit = 1024, .indirect_load_ok = true, .expensive_alu_ok = true };
          NIR_PASS(progress, nir, nir_opt_peephole_select, &sel);
          NIR_PASS(progress, nir, nir_opt_dce);
          NIR_PASS(progress, nir, nir_opt_dead_cf);
       } while (progress);
    }
-   NIR_PASS(_, nir, nir_lower_system_values);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_view_index_filter, borg_view_index_lower, NULL);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
             borg_spirv_options.ubo_addr_format);
