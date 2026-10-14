@@ -239,6 +239,18 @@ impl ShaderState {
                     (0..n).map(|k| (s.src.as_def().index, s.swizzle[k])).collect();
                 self.sel.vec_map.insert(alu.def.index, c);
             }
+            nir_op_ineg => {
+                let s = &alu.srcs_as_slice()[0];
+                let x = resolve_vm(&self.sel.vec_map, s.src.as_def().index, s.swizzle[0]);
+                let zero = self.sel.pair("ISUB", x, x);
+                self.sel.prog.push(BorgInstr { mnem: "ISUB", dst: alu.def.index, srcs: vec![zero.0, x.0], swz: vec![0, x.1] });
+            }
+            // A condition is 1.0 or 0.0, so the integer 0 or 1 is its truncation.
+            nir_op_b2i32 => {
+                let s = &alu.srcs_as_slice()[0];
+                let (v, c) = resolve_vm(&self.sel.vec_map, s.src.as_def().index, s.swizzle[0]);
+                self.sel.prog.push(BorgInstr { mnem: "F2I", dst: alu.def.index, srcs: vec![v], swz: vec![c] });
+            }
             nir_op_flt | nir_op_fge | nir_op_fneu | nir_op_feq => {
                 let sl = alu.srcs_as_slice();
                 let a = resolve_vm(&self.sel.vec_map, sl[0].src.as_def().index, sl[0].swizzle[0]);
