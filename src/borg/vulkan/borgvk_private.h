@@ -62,6 +62,7 @@ enum borgvk_shader_stage {
 #define BORGVK_POOL_MAX  64
 #define BORGVK_POOL_SLOT 40
 #define BORGVK_SRGB_SLOT 41
+#define BORGVK_VPOOL_SLOT 42
 struct borgvk_shader_blob {
    uint8_t  data[BORGVK_SHADER_BLOB_MAX];
    uint32_t len;   /* 0 = not compiled (or didn't fit) */
@@ -145,7 +146,7 @@ struct borgvk_command_buffer {
    struct borgvk_writeback { uint32_t off, size; uint8_t *host; } wb[BORGVK_MAX_WRITEBACKS];
    uint32_t nwb;
    bool batch_srgb;
-   const void *batch_pool;
+   const void *batch_pool, *batch_vpool;
    struct borgvk_descriptor_set *region_set;   /* the set whose buffer region is at region_base */
    uint32_t region_base;
    const uint8_t *index_ptr;                    /* bound index buffer, at its offset */

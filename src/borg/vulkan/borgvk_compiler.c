@@ -304,7 +304,8 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
                         vfetch);
       if (len > 0 && len <= BORGVK_SHADER_BLOB_MAX) {
          b->len = len;
-         b->npool = slot == BORGVK_STAGE_FRAG ? borgc_last_frag_pool(b->pool, BORGVK_POOL_MAX) : 0;
+         b->npool = slot == BORGVK_STAGE_FRAG ? borgc_last_frag_pool(b->pool, BORGVK_POOL_MAX) :
+                    borgc_last_vert_pool(b->pool, BORGVK_POOL_MAX);
          if (!blend && !b->npool)   /* the cache holds neither */
             borgvk_shader_cache_record(stage_info, vfetch, b, device->frag_reads_pntc);
          mesa_logi("borgvk: captured %s shader blob (%u bytes) for upload",

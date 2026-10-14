@@ -69,7 +69,7 @@ borgvk_flush_draws(struct borgvk_command_buffer *cmd)
    memcpy(wb, cmd->wb, sizeof(wb));
    cmd->nwb = 0;
    cmd->region_set = NULL;
-   cmd->batch_pool = NULL;
+   cmd->batch_pool = cmd->batch_vpool = NULL;
    cmd->batch_srgb = false;
    cmd->stream = NULL;
    cmd->stream_len = cmd->stream_cap = 0;
@@ -322,6 +322,8 @@ draw_reserve(struct draw_ctx *g)
    /* The constant pool's slot is one per pass. */
    if (cmd->batch_draws && pipeline->blob[BORGVK_STAGE_FRAG].npool && cmd->batch_pool && cmd->batch_pool != pipeline)
       borgvk_flush_draws(cmd);
+   if (cmd->batch_draws && pipeline->blob[BORGVK_STAGE_VERT].npool && cmd->batch_vpool && cmd->batch_vpool != pipeline)
+      borgvk_flush_draws(cmd);
 }
 
 static void
@@ -522,15 +524,15 @@ draw_point_corners(struct draw_ctx *g)
 }
 
 static bool
-draw_pool(struct draw_ctx *g)
+draw_pool_stage(struct draw_ctx *g, int stage, uint32_t slot, const void **batch)
 {
    struct borgvk_command_buffer *cmd = g->cmd;
    struct borgvk_pipeline *pipeline = g->pipeline;
    struct draw_heap *heap = &g->heap;
-   if (!(pipeline->blob[BORGVK_STAGE_FRAG].npool && cmd->batch_pool != pipeline))
+   if (!(pipeline->blob[stage].npool && *batch != pipeline))
       return true;
    bool ok = true;
-   const struct borgvk_shader_blob *fb = &pipeline->blob[BORGVK_STAGE_FRAG];
+   const struct borgvk_shader_blob *fb = &pipeline->blob[stage];
    uint32_t code, swz, rbytes, words[BORGVK_POOL_MAX + 4] = { 0 };
    memcpy(words, fb->pool, fb->npool * 4);
    const uint32_t rows = (fb->npool + 3) / 4;
@@ -538,10 +540,18 @@ draw_pool(struct draw_ctx *g)
    if (off == UINT32_MAX || !borgvk_vertex_format_to_fetch(VK_FORMAT_R32G32B32A32_UINT, &code, &swz, &rbytes)) {
       ok = generic_reject(REJECT_UPLOAD);
    } else {
-      borgvk_serial_send_vattr(BORGVK_POOL_SLOT, code, off, rows, rbytes, swz);
-      cmd->batch_pool = pipeline;
+      borgvk_serial_send_vattr(slot, code, off, rows, rbytes, swz);
+      *batch = pipeline;
    }
+   (void)cmd;
    return ok;
+}
+
+static bool
+draw_pool(struct draw_ctx *g)
+{
+   return draw_pool_stage(g, BORGVK_STAGE_FRAG, BORGVK_POOL_SLOT, &g->cmd->batch_pool) &&
+          draw_pool_stage(g, BORGVK_STAGE_VERT, BORGVK_VPOOL_SLOT, &g->cmd->batch_vpool);
 }
 
 static bool
