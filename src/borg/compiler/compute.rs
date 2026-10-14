@@ -348,13 +348,19 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                         let o = em.src(i.get_src(0), 0);
                         let w = em.shr(o, 2);
                         let base_w = (i.base() as u32) / 4;
+                        let a0 = match w {
+                            V::C(x) => Some(V::C(SLOT_BASE_WORDS + 32 * SLOT_WORDS + ((x + base_w) & (SLOT_WORDS - 1)))),
+                            _ => None,
+                        };
                         for c in 0..i.def.num_components as u32 {
-                            let w2 = em.add(w, V::C(base_w + c));
-                            let w2 = match w2 {
-                                V::C(x) => V::C(x & (SLOT_WORDS - 1)),
-                                _ => em.bin("IAND", w2, V::C(SLOT_WORDS - 1)),
+                            let a = match a0 {
+                                Some(a0) => em.word_n(a0, c),
+                                None => {
+                                    let w2 = em.add(w, V::C(base_w + c));
+                                    let w2 = em.bin("IAND", w2, V::C(SLOT_WORDS - 1));
+                                    em.add(V::C(SLOT_BASE_WORDS + 32 * SLOT_WORDS), w2)
+                                }
                             };
-                            let a = em.add(V::C(SLOT_BASE_WORDS + 32 * SLOT_WORDS), w2);
                             let ra = em.reg(a);
                             let rd = em.fresh();
                             em.op("LOAD", rd, ra, 0, 0);
