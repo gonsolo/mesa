@@ -257,6 +257,7 @@ packed_info(VkFormat f, uint32_t *opt, unsigned *bytes)
       { VK_FORMAT_A4B4G4R4_UNORM_PACK16, 6, 2, 1 },  { VK_FORMAT_A2B10G10R10_UNORM_PACK32, 7, 4, 1 },
       { VK_FORMAT_A2R10G10B10_UNORM_PACK32, 8, 4, 1 }, { VK_FORMAT_B5G6R5_UNORM_PACK16, 9, 2, 0 },
       { VK_FORMAT_R4G4_UNORM_PACK8, 10, 1, 0 },       { VK_FORMAT_R5G6B5_UNORM_PACK16, 11, 2, 0 },
+      { VK_FORMAT_A2B10G10R10_UINT_PACK32, 12, 4, 1 }, { VK_FORMAT_A2R10G10B10_UINT_PACK32, 13, 4, 1 },
    };
    for (unsigned i = 0; i < ARRAY_SIZE(uneven); i++) {
       if (uneven[i].f == f) {

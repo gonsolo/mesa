@@ -199,6 +199,13 @@ impl ShaderState {
                     let i = self.sel.op("F2I", vec![u], vec![0]);
                     self.sel.op("IAND", vec![i, mask.unwrap()], vec![0, 0])
                 }
+                4 => {
+                    let cmax = self.fw.win(&mut self.sel, (1u32 << bits) - 1);
+                    let lt = self.sel.op("ISLTU", vec![x, cmax], vec![xc, 0]);
+                    let d = self.sel.op("ISUB", vec![x, cmax], vec![xc, 0]);
+                    let m = self.sel.op("IMUL", vec![lt, d], vec![0, 0]);
+                    self.sel.op("IADD", vec![cmax, m], vec![0, 0])
+                }
                 _ => match mask {
                     Some(m) => self.sel.op("IAND", vec![x, m], vec![xc, 0]),
                     None => self.sel.op("IOR", vec![x, x], vec![xc, xc]),
