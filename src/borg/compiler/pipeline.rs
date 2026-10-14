@@ -3,7 +3,7 @@ use crate::fixed::{allocate, fixed_regs};
 use crate::opt::{dce, fuse_fmadd, schedule_for_pressure};
 use crate::state::ShaderState;
 use crate::survey::{survey, Survey};
-use crate::{set_frag_pool, Flags, Ubo};
+use crate::{set_frag_pool, set_vert_pool, Flags, Ubo};
 use compiler::bindings::*;
 use std::env;
 
@@ -88,6 +88,10 @@ impl ShaderState {
 
     pub unsafe fn optimise(&mut self) {
         set_frag_pool(Vec::new());
+        set_vert_pool(Vec::new());
+        if self.cp.vs_window && self.cp.vs_consts.len() > crate::state::DRAW_VS_CONST_WORDS {
+            self.pool_vs_consts();
+        }
         if self.is_fragment && self.fw.count > 11 {
             self.pool_window_consts();
         }

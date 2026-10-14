@@ -96,6 +96,8 @@ impl Selector {
 
 pub const DRAW_VS_CONST_U0: u8 = 25;
 pub const DRAW_VS_CONST_WORDS: usize = 6;
+/// Window words a vertex shader may ask for before the pool pass sorts them out.
+pub const VS_VIRTUAL_MAX: usize = DRAW_VS_CONST_WORDS + 64;
 
 pub struct ConstPool {
     pub regs: &'static [u8],
@@ -145,8 +147,8 @@ impl ConstPool {
             let idx = match self.int_reg.get(&v) {
                 Some(&u) => u,
                 None => {
-                    assert!(self.vs_consts.len() < DRAW_VS_CONST_WORDS,
-                        "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
+                    assert!(self.vs_consts.len() < VS_VIRTUAL_MAX,
+                        "borgc: vertex shader needs more than {} constants", VS_VIRTUAL_MAX);
                     let u = DRAW_VS_CONST_U0 + self.vs_consts.len() as u8;
                     self.vs_consts.push((u, v as u32));
                     self.int_reg.insert(v, u);
@@ -164,8 +166,8 @@ impl ConstPool {
 
     pub fn vs_win(&mut self, sel: &mut Selector, bits: u32) -> u32 {
         let u = DRAW_VS_CONST_U0 + self.vs_consts.len() as u8;
-        assert!(self.vs_consts.len() < DRAW_VS_CONST_WORDS,
-            "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
+        assert!(self.vs_consts.len() < VS_VIRTUAL_MAX,
+            "borgc: vertex shader needs more than {} constants", VS_VIRTUAL_MAX);
         self.vs_consts.push((u, bits));
         let v = sel.fresh();
         sel.ubo.insert(v, crate::Ubo::Uniform(u));
@@ -203,12 +205,18 @@ impl ConstPool {
                 let pair = small.iter().find_map(|&(a, ra)| {
                     small.iter().find(|&&(b, _)| a + b == bits).map(|&(_, rb)| (ra, rb))
                 });
-                let (ra, rb) = pair.unwrap_or_else(|| {
-                    panic!("borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS)
-                });
-                let t = sel.fresh();
-                sel.prog.push(crate::BorgInstr { mnem: "IADD", dst: t, srcs: vec![z, ra], swz: vec![0, 0] });
-                sel.prog.push(crate::BorgInstr { mnem: "IADD", dst: v, srcs: vec![t, rb], swz: vec![0, 0] });
+                if let Some((ra, rb)) = pair {
+                    let t = sel.fresh();
+                    sel.prog.push(crate::BorgInstr { mnem: "IADD", dst: t, srcs: vec![z, ra], swz: vec![0, 0] });
+                    sel.prog.push(crate::BorgInstr { mnem: "IADD", dst: v, srcs: vec![t, rb], swz: vec![0, 0] });
+                } else {
+                    // Nothing to derive it from: a virtual window word, which the pool pass moves to memory.
+                    assert!(self.vs_consts.len() < VS_VIRTUAL_MAX,
+                        "borgc: vertex shader needs more than {} constants", VS_VIRTUAL_MAX);
+                    let u = DRAW_VS_CONST_U0 as u32 + self.vs_consts.len() as u32;
+                    self.vs_consts.push((u as u8, bits));
+                    sel.ubo.insert(v, crate::Ubo::Uniform(u as u8));
+                }
             }
         }
         if return_zero {

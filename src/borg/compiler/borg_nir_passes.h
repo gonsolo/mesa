@@ -56,6 +56,7 @@ uint32_t borgc_compile_nir(struct nir_shader *nir, uint8_t *out_buf,
 uint32_t borgc_selftest(void);
 /* The constant pool of the fragment shader compiled last: words fetched from vertex slot 40. */
 uint32_t borgc_last_frag_pool(uint32_t *out, uint32_t cap);
+uint32_t borgc_last_vert_pool(uint32_t *out, uint32_t cap);
 
 /* Compute: program words, (register, value) presets and LocalSize. 0 on success. */
 uint32_t borgc_compile_compute(struct nir_shader *nir,
