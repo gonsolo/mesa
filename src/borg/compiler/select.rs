@@ -1087,24 +1087,7 @@ impl ShaderState {
                                 let c16 = self.fw.win(&mut self.sel, 16);
                                 h = self.sel.op0("ISRL", vec![h, c16]);
                             }
-                            let c7fff = self.fw.win(&mut self.sel, 0x7FFF);
-                            let mag = self.sel.op0("IAND", vec![h, c7fff]);
-                            let c13 = self.fw.win(&mut self.sel, 13);
-                            let n = self.sel.op0("ISHL", vec![mag, c13]);
-                            let scale = self.fw.win(&mut self.sel, (2.0f32).powi(112).to_bits());
-                            let f = self.sel.op0("FMUL", vec![n, scale]);
-                            let c10 = self.fw.win(&mut self.sel, 10);
-                            let e = self.sel.op0("ISRL", vec![mag, c10]);
-                            let c31 = self.fw.win(&mut self.sel, 31);
-                            let isinf = self.sel.op0("ISEQ", vec![e, c31]);
-                            let cexp = self.fw.win(&mut self.sel, 0x7F80_0000);
-                            let infbits = self.sel.op0("IMUL", vec![isinf, cexp]);
-                            let r = self.sel.op0("IOR", vec![f, infbits]);
-                            let c15 = self.fw.win(&mut self.sel, 15);
-                            let sg = self.sel.op0("ISRL", vec![h, c15]);
-                            let c31b = self.fw.win(&mut self.sel, 31);
-                            let sg = self.sel.op0("ISHL", vec![sg, c31b]);
-                            rgba[k] = Some(self.sel.op0("IOR", vec![r, sg]));
+                            rgba[k] = Some(self.sel.op0("H2F", vec![h]));
                         }
                         self.dst_half = Some((rgba, zero));
                         (rgba, zero)

@@ -243,66 +243,18 @@ impl ShaderState {
     /// Half-float output: converts each f32 channel to f16 (round to nearest even, denormals,
     /// overflow to infinity, NaN) and packs two channels per word.
     pub unsafe fn epilogue_half(&mut self) {
-        macro_rules! i {
-            ($m:expr, $a:expr, $b:expr) => { self.sel.opc($m, &[($a, 0u8), ($b, 0u8)]) };
-            ($m:expr, $a:expr) => { self.sel.opc($m, &[($a, 0u8)]) };
-        }
-        macro_rules! k {
-            ($b:expr) => { self.fw.win(&mut self.sel, $b) };
-        }
-        let (x0, x0c) = self.outs.frag[0].unwrap();
         let nch = self.flags.half_channels();
-        let is_uni = |sel: &Selector, v: u32| matches!(sel.ubo.get(&v), Some(Ubo::Uniform(_)));
-        let src_of = |n: usize, o: &Option<(u32, u8)>| if n == 0 { Some((x0, x0c)) } else { *o };
-        let any_uni = (0..nch).any(|n| src_of(n, &self.outs.frag[n]).map_or(false, |(x, xc)| xc != 0 || is_uni(&self.sel, x)));
-        let zero = if any_uni {
-            let first = if is_uni(&self.sel, x0) { (self.sel.opc("FMOV", &[(x0, x0c)]), 0u8) } else { (x0, x0c) };
-            Some(self.sel.opc("ISUB", &[first, first]))
-        } else { None };
+        let (x0, x0c) = self.outs.frag[0].unwrap();
         let mut pw: [Option<u32>; 2] = [None; 2];
         for n in 0..nch {
             let src = if n == 0 { Some((x0, x0c)) } else { self.outs.frag[n] };
-            let Some((x, xc)) = src else { continue };
-            let xr = match zero {
-                Some(z) if xc != 0 || is_uni(&self.sel, x) => self.sel.opc("IADD", &[(x, xc), (z, 0)]),
-                _ => x,
+            let Some(x) = src else { continue };
+            let h = self.sel.opc("F2H", &[x]);
+            let h = if n & 1 == 0 { h } else {
+                let c = self.fw.win(&mut self.sel, 16);
+                self.sel.opc("ISHL", &[(h, 0), (c, 0)])
             };
-            // The sign first, so the input register is free early; 0x8000 and 0x200 are built here.
-            let c = k!(16);
-            let s16 = i!("ISRL", xr, c);
-            let c = k!(0x8000);
-            let sg = i!("IAND", s16, c);
-            let c = k!(0x7FFF_FFFF);
-            let a = i!("IAND", xr, c);
-            let c = k!(0x3800_0000);
-            let t = i!("ISUB", a, c);
-            let c = k!(13);
-            let sh = i!("ISRL", a, c);
-            let c = k!(1);
-            let lsb = i!("IAND", sh, c);
-            let c = k!(0xFFF);
-            let u = i!("IADD", t, c);
-            let u2 = i!("IADD", u, lsb);
-            let c = k!(13);
-            let r = i!("ISRL", u2, c);
-            let c = k!(0x387F_FFFF);
-            let ge = i!("ISLTU", c, a);
-            let v1 = i!("IMUL", r, ge);
-            let c = k!(0x477F_F000);
-            let ib = i!("ISLTU", a, c);
-            let c = k!(0x7C00);
-            let dv = i!("ISUB", v1, c);
-            let mb = i!("IMUL", ib, dv);
-            let c = k!(0x7C00);
-            let v2 = i!("IADD", mb, c);
-            let c = k!(0x7F80_0000);
-            let nan = i!("ISLTU", c, a);
-            let c = k!(0x200);
-            let nb = i!("IMUL", nan, c);
-            let v3 = i!("IOR", v2, nb);
-            let h = i!("IOR", v3, sg);
-            let h = if n & 1 == 0 { h } else { let c = k!(16); i!("ISHL", h, c) };
-            pw[n / 2] = Some(match pw[n / 2] { None => h, Some(a) => i!("IOR", a, h) });
+            pw[n / 2] = Some(match pw[n / 2] { None => h, Some(a) => self.sel.opc("IOR", &[(a, 0), (h, 0)]) });
         }
         self.outs.frag = [pw[0].map(|p| (p, 0)), pw[1].map(|p| (p, 0)), None, None];
         for p in pw.iter().flatten() {

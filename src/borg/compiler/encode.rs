@@ -63,6 +63,8 @@ pub(crate) fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
         "ISLTU" => bin(0x9800_0000),
         "I2F" => un(0x2C00_0000),
         "F2I" => un(0x3000_0000),
+        "F2H" => un(0xA800_0000),
+        "H2F" => un(0xAC00_0000),
         "FRSQ" => un(0x3400_0000),
         "FSRGB" => un(0x3800_0000),
         "DDX" => un(0x3C00_0000),
@@ -185,6 +187,14 @@ mod tests {
         assert_eq!((w >> 27, (w >> 20) & 0x1F, (w >> 15) & 0x1F, (w >> 7) & 0x1F),
                    (9, 7, 15, 20), "rs3 ctl, rs2 v, rs1 u, rd");
         assert!(encode("FTEX", 20, 15, 7, 0, 0).is_none(), "FTEX is retired");
+    }
+
+    #[test]
+    fn half_conversions_are_funct7_0x54_and_0x56() {
+        for (m, f7) in [("F2H", 0x54u32), ("H2F", 0x56)] {
+            let w = encode(m, 7, 5, 0, 0, 0).unwrap();
+            assert_eq!((w >> 25, (w >> 15) & 0x1F, (w >> 7) & 0x1F), (f7, 5, 7), "{m}: funct7, rs1, rd");
+        }
     }
 
     #[test]
