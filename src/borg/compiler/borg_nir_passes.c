@@ -32,6 +32,10 @@ const struct nir_shader_compiler_options borg_nir_options = {
    .lower_fsat = true,
    .lower_flrp32 = true,
    .lower_ffract = true,
+   .lower_extract_byte = true,
+   .lower_extract_word = true,
+   .lower_unpack_unorm_4x8 = true,
+   .lower_pack_unorm_4x8 = true,
    .max_unroll_iterations = 32,   /* the ISA has no backward branch: constant loops are unrolled */
 };
 
@@ -95,12 +99,30 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
       nir_def *x = nir_channel(b, st->src[1].ssa, 0);
       nir_def *y = nir_channel(b, st->src[1].ssa, 1);
       nir_def *word = nir_iadd(b, nir_iadd(b, nir_imul(b, y, width), x), nir_imm_int(b, 1));
-      const bool rgba8 = nir_intrinsic_format(st) == PIPE_FORMAT_R8G8B8A8_UNORM;
+      const enum pipe_format fmt = nir_intrinsic_format(st);
+      const bool rgba8 = fmt == PIPE_FORMAT_R8G8B8A8_UNORM;
+      const bool rgba8i = fmt == PIPE_FORMAT_R8G8B8A8_UINT || fmt == PIPE_FORMAT_R8G8B8A8_SINT;
       if (st->intrinsic == nir_intrinsic_image_deref_load) {
          nir_def *v = nir_load_ssbo(b, 1, 32, buf, nir_ishl_imm(b, word, 2), .align_mul = 4);
+         if (rgba8i) {
+            nir_def *c[4];
+            for (unsigned i = 0; i < 4; i++) {
+               nir_def *s = nir_ushr_imm(b, v, 8 * i);
+               c[i] = fmt == PIPE_FORMAT_R8G8B8A8_SINT ? nir_ishr_imm(b, nir_ishl_imm(b, s, 24), 24)
+                                                       : nir_iand_imm(b, s, 255);
+            }
+            return nir_vec(b, c, 4);
+         }
          return rgba8 ? nir_unpack_unorm_4x8(b, v) : nir_vec4(b, v, nir_imm_int(b, 0), nir_imm_int(b, 0), nir_imm_int(b, 0));
       }
-      nir_def *val = rgba8 ? nir_pack_unorm_4x8(b, st->src[3].ssa) : nir_channel(b, st->src[3].ssa, 0);
+      nir_def *val;
+      if (rgba8i) {
+         val = nir_iand_imm(b, nir_channel(b, st->src[3].ssa, 3), 255);
+         for (int i = 2; i >= 0; i--)
+            val = nir_iadd(b, nir_ishl_imm(b, val, 8), nir_iand_imm(b, nir_channel(b, st->src[3].ssa, i), 255));
+      } else {
+         val = rgba8 ? nir_pack_unorm_4x8(b, st->src[3].ssa) : nir_channel(b, st->src[3].ssa, 0);
+      }
       nir_store_ssbo(b, val, buf, nir_ishl_imm(b, word, 2), .write_mask = 1, .align_mul = 4);
       return NIR_LOWER_INSTR_PROGRESS_REPLACE;
    }
