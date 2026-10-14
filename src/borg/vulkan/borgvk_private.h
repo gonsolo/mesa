@@ -415,6 +415,7 @@ struct tex_conv {
    bool swap_rb;
 };
 void borgvk_tex_convert(const struct tex_conv *c, uint8_t *dst, const uint8_t *src, uint32_t n);
+void *borgvk_decode_compressed_image(const struct borgvk_image *src, struct borgvk_image *out, struct borgvk_device_memory *mem);
 bool borgvk_send_generic_texture(const struct vk_image_view *view, const struct borgvk_image *img,
                                  const struct borgvk_sampler *sampler);
 bool borgvk_send_buffer_texture(const struct vk_buffer_view *bv);

@@ -47,6 +47,18 @@ borgvk_send_generic_texture(const struct vk_image_view *view,
 {
    if (!img || !img->mem || !img->mem->map)
       return false;
+   if (vk_format_get_blockwidth(img->vk.format) > 1 || vk_format_get_blockheight(img->vk.format) > 1) {
+      struct borgvk_image dimg;
+      struct borgvk_device_memory dmem;
+      void *buf = borgvk_decode_compressed_image(img, &dimg, &dmem);
+      if (!buf)
+         return false;
+      struct vk_image_view dview = *view;
+      dview.format = dimg.vk.format;
+      bool ok = borgvk_send_generic_texture(&dview, &dimg, sampler);
+      free(buf);
+      return ok;
+   }
    uint32_t w = img->vk.extent.width, h = img->vk.extent.height;
    if (w == 0 || h == 0 || w > 4096 || h > 4096)
       return false;

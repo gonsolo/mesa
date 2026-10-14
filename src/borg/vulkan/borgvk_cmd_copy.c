@@ -191,7 +191,7 @@ borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
    }
 }
 
-static void *
+void *
 borgvk_decode_compressed_image(const struct borgvk_image *src,
                                struct borgvk_image *out,
                                struct borgvk_device_memory *mem)
