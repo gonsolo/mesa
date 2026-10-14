@@ -202,7 +202,7 @@ impl ShaderState {
             || (self.is_vertex && matches!(alu.op, nir_op_ishr | nir_op_ushr | nir_op_iand | nir_op_ior
                 | nir_op_ixor))
             || (self.is_vertex && self.flags.fetching() && matches!(alu.op, nir_op_iadd | nir_op_imul
-                | nir_op_isub | nir_op_ishl)))
+                | nir_op_isub | nir_op_ishl | nir_op_umin | nir_op_umax | nir_op_imin | nir_op_imax)))
         {
             let first = if alu.op == nir_op_bcsel { 1 } else { 0 };
             for sr in &alu.srcs_as_slice()[first..] {
