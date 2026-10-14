@@ -707,6 +707,37 @@ impl ShaderState {
                     })
                     .collect();
                 self.sel.vec_map.insert(intr.def.index, comps);
+            } else if self.cp.vs_window || self.is_fragment {
+                macro_rules! kc {
+                    ($b:expr) => {{
+                        let bits: u32 = $b;
+                        if self.cp.vs_window {
+                            self.cp.vs_const(&mut self.sel, bits, true)
+                        } else {
+                            let u = self.fw.slot(bits);
+                            let v = self.sel.next_vreg;
+                            self.sel.next_vreg += 1;
+                            self.sel.ubo.insert(v, Ubo::Uniform(u as u8));
+                            v
+                        }
+                    }};
+                }
+                let o = resolve_vm(&self.sel.vec_map, intr.get_src(0).as_def().index, 0);
+                let two = kc!(2);
+                let w = self.sel.next_vreg; self.sel.next_vreg += 1;
+                self.sel.prog.push(BorgInstr { mnem: "ISRL", dst: w, srcs: vec![o.0, two], swz: vec![o.1, 0] });
+                let base_word = (intr.base() / 4) as u32;
+                let comps: Vec<(u32, u8)> = (0..intr.def.num_components as u32)
+                    .map(|c| {
+                        let k = kc!(base_word + c);
+                        let addr = self.sel.next_vreg; self.sel.next_vreg += 1;
+                        self.sel.prog.push(BorgInstr { mnem: "IADD", dst: addr, srcs: vec![w, k], swz: vec![0, 0] });
+                        let dst = self.sel.next_vreg; self.sel.next_vreg += 1;
+                        self.sel.prog.push(BorgInstr { mnem: "LOAD", dst, srcs: vec![addr], swz: vec![0] });
+                        (dst, 0u8)
+                    })
+                    .collect();
+                self.sel.vec_map.insert(intr.def.index, comps);
             } else {
                 eprintln!(
                     "borgc: WARNING push constant at base={} read with a \
