@@ -395,7 +395,22 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
     * triangle/quad) becomes a bcsel chain. */
    NIR_PASS(_, nir, nir_lower_global_vars_to_local);
    NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees, nir_var_function_temp | nir_var_shader_temp, UINT32_MAX);
+   /* A vertex shader that writes an output in a branch: turn the branches into selects. */
+   if (nir->info.stage == MESA_SHADER_VERTEX) {
+      NIR_PASS(_, nir, nir_lower_io_vars_to_temporaries, nir_shader_get_entrypoint(nir), nir_var_shader_out);
+      NIR_PASS(_, nir, nir_lower_global_vars_to_local);
+   }
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+   if (nir->info.stage == MESA_SHADER_VERTEX) {
+      bool progress;
+      do {
+         progress = false;
+         const nir_opt_peephole_select_options sel = { .limit = 64, .indirect_load_ok = true, .expensive_alu_ok = true };
+         NIR_PASS(progress, nir, nir_opt_peephole_select, &sel);
+         NIR_PASS(progress, nir, nir_opt_dce);
+         NIR_PASS(progress, nir, nir_opt_dead_cf);
+      } while (progress);
+   }
    NIR_PASS(_, nir, nir_lower_system_values);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_view_index_filter, borg_view_index_lower, NULL);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
