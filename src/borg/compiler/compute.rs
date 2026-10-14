@@ -247,6 +247,12 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                         nir_op_ior => em.bin("IOR", s[0], s[1]),
                         nir_op_fadd => em.bin("FADD", s[0], s[1]),
                         nir_op_fmul => em.bin("FMUL", s[0], s[1]),
+                        nir_op_i2f32 | nir_op_u2f32 | nir_op_f2i32 | nir_op_f2u32 => {
+                            let m = if matches!(alu.op, nir_op_i2f32 | nir_op_u2f32) { "I2F" } else { "F2I" };
+                            let (ra, rd) = (em.reg(s[0]), em.fresh());
+                            em.op(m, rd, ra, 0, 0);
+                            V::R(rd)
+                        }
                         nir_op_fneg => {
                             let (ra, rd) = (em.reg(s[0]), em.fresh());
                             em.op("FNEG", rd, ra, 0, 0);
@@ -348,17 +354,26 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                         let o = em.src(i.get_src(0), 0);
                         let w = em.shr(o, 2);
                         let base_w = (i.base() as u32) / 4;
-                        let a0 = match w {
-                            V::C(x) => Some(V::C(SLOT_BASE_WORDS + 32 * SLOT_WORDS + ((x + base_w) & (SLOT_WORDS - 1)))),
-                            _ => None,
-                        };
+                        let pbase = SLOT_BASE_WORDS + 32 * SLOT_WORDS;
                         for c in 0..i.def.num_components as u32 {
-                            let a = match a0 {
-                                Some(a0) => em.word_n(a0, c),
-                                None => {
+                            let a = match w {
+                                V::C(x) => {
+                                    let mut r = ((x + base_w) & (SLOT_WORDS - 1)) + c;
+                                    let rb = em.creg(pbase);
+                                    let mut a = V::R(rb);
+                                    while r >= 4 {
+                                        a = em.bin("IADD", a, V::C(4));
+                                        r -= 4;
+                                    }
+                                    if r > 0 {
+                                        a = em.bin("IADD", a, V::C(r));
+                                    }
+                                    a
+                                }
+                                _ => {
                                     let w2 = em.add(w, V::C(base_w + c));
                                     let w2 = em.bin("IAND", w2, V::C(SLOT_WORDS - 1));
-                                    em.add(V::C(SLOT_BASE_WORDS + 32 * SLOT_WORDS), w2)
+                                    em.add(V::C(pbase), w2)
                                 }
                             };
                             let ra = em.reg(a);
