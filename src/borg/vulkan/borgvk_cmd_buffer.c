@@ -19,6 +19,7 @@ borgvk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
    vk_command_buffer_finish(&cmd->vk);
    free(cmd->stream);
    free(cmd->state_sent);
+   borgvk_free_targets(cmd);
    vk_free(&cmd->vk.pool->alloc, cmd);
 }
 
@@ -60,6 +61,7 @@ borgvk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
 
    free(cmd->stream);
    cmd->stream = NULL;
+   borgvk_free_targets(cmd);
    free(cmd->state_sent);
    cmd->state_sent = NULL;
    cmd->state_sent_len = 0;

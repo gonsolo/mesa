@@ -6,6 +6,55 @@
 
 #include "vk_common_entrypoints.h"
 #include "vk_format.h"
+#include "borgvk_image.h"
+
+void
+borgvk_free_targets(struct borgvk_command_buffer *cmd)
+{
+   while (cmd->targets) {
+      struct borgvk_target *t = cmd->targets;
+      cmd->targets = t->next;
+      free(t);
+   }
+}
+
+/* A view of a mip level above 0 or a layer above 0 renders as the single-level, single-layer image it is. */
+static struct vk_image_view *
+target_view(struct borgvk_command_buffer *cmd, struct vk_image_view *view)
+{
+   if (!view || !view->image || (view->base_mip_level == 0 && view->base_array_layer == 0))
+      return view;
+   struct borgvk_image *img = container_of(view->image, struct borgvk_image, vk);
+   if (img->vk.samples > 1 || img->vk.image_type == VK_IMAGE_TYPE_3D || view->layer_count != 1 || !img->mem)
+      return view;
+   for (struct borgvk_target *t = cmd->targets; t; t = t->next)
+      if (t->orig == view)
+         return &t->view;
+   const uint32_t bs = vk_format_get_blocksize(img->vk.format);
+   const uint32_t bw = vk_format_get_blockwidth(img->vk.format), bh = vk_format_get_blockheight(img->vk.format);
+   if (bw != 1 || bh != 1)
+      return view;
+   struct borgvk_target *t = calloc(1, sizeof(*t));
+   if (!t)
+      return view;
+   uint32_t stride;
+   const uint64_t off = borgvk_image_level_offset(img, view->base_mip_level, view->base_array_layer, bs, 1, 1, 1, &stride);
+   t->orig = view;
+   t->image = *img;
+   t->image.offset += off;
+   t->image.size = img->size > off ? img->size - off : 0;
+   t->image.vk.extent.width = MAX2(img->vk.extent.width >> view->base_mip_level, 1);
+   t->image.vk.extent.height = MAX2(img->vk.extent.height >> view->base_mip_level, 1);
+   t->image.vk.mip_levels = 1;
+   t->image.vk.array_layers = 1;
+   t->view = *view;
+   t->view.image = &t->image.vk;
+   t->view.base_mip_level = 0;
+   t->view.base_array_layer = 0;
+   t->next = cmd->targets;
+   cmd->targets = t;
+   return &t->view;
+}
 
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRenderingInfo)
@@ -31,7 +80,7 @@ borgvk_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *p
       const VkRenderingAttachmentInfo *att = &pRenderingInfo->pColorAttachments[i];
       VK_FROM_HANDLE(vk_image_view, view, att->imageView);
       VK_FROM_HANDLE(vk_image_view, resolve_view, att->resolveImageView);
-      cmd->color_views[i] = view;
+      cmd->color_views[i] = target_view(cmd, view);
       cmd->color_resolve_views[i] = resolve_view;
       if (view && att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
          borgvk_clear_attachment_rect(view, VK_IMAGE_ASPECT_COLOR_BIT, &att->clearValue,
@@ -48,7 +97,7 @@ borgvk_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *p
        pRenderingInfo->pDepthAttachment->imageView != VK_NULL_HANDLE) {
       const VkRenderingAttachmentInfo *att = pRenderingInfo->pDepthAttachment;
       VK_FROM_HANDLE(vk_image_view, view, att->imageView);
-      cmd->depth_view = view;
+      cmd->depth_view = target_view(cmd, view);
       if (att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
          borgvk_clear_attachment_rect(view, VK_IMAGE_ASPECT_DEPTH_BIT, &att->clearValue,
                                       cmd->render_area, 0, layerCount);
@@ -58,7 +107,7 @@ borgvk_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *p
        pRenderingInfo->pStencilAttachment->imageView != VK_NULL_HANDLE) {
       const VkRenderingAttachmentInfo *att = pRenderingInfo->pStencilAttachment;
       VK_FROM_HANDLE(vk_image_view, view, att->imageView);
-      cmd->stencil_view = view;
+      cmd->stencil_view = target_view(cmd, view);
       if (att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
          borgvk_clear_attachment_rect(view, VK_IMAGE_ASPECT_STENCIL_BIT, &att->clearValue,
                                       cmd->render_area, 0, layerCount);

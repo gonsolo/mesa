@@ -117,6 +117,7 @@ struct borgvk_command_buffer {
    bool in_rendering;
    VkRect2D render_area;
    uint32_t layer_count;
+   struct borgvk_target *targets;
    uint32_t color_attachment_count;
    struct vk_image_view *color_views[BORGVK_MAX_COLOR_ATTACHMENTS];
    struct vk_image_view *depth_view;
@@ -280,6 +281,14 @@ struct borgvk_image {
    VkDeviceSize offset;
 };
 
+/* One mip level and layer of an image, rendered to as an image of its own. */
+struct borgvk_target {
+   struct borgvk_target *next;
+   const struct vk_image_view *orig;
+   struct borgvk_image image;
+   struct vk_image_view view;
+};
+
 struct borgvk_buffer_view {
    struct vk_buffer_view vk;
 };
@@ -412,6 +421,7 @@ bool borgvk_send_buffer_texture(const struct vk_buffer_view *bv);
 bool borgvk_vertex_format_to_fetch(VkFormat f, uint32_t *code, uint32_t *swz, uint32_t *read_bytes);
 
 void borgvk_resolve_region(struct borgvk_image *src, struct borgvk_image *dst, const VkImageResolve *reg);
+void borgvk_free_targets(struct borgvk_command_buffer *cmd);
 void borgvk_clear_attachment_rect(struct vk_image_view *view, VkImageAspectFlags aspectMask,
                                   const VkClearValue *clearValue, VkRect2D rect,
                                   uint32_t baseLayer, uint32_t layerCount);
