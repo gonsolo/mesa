@@ -272,14 +272,14 @@ borg_basic_alu_lower(nir_builder *b, nir_instr *instr, void *data)
 }
 #endif
 
-/* F2I truncates: trunc(x) = float(int(x)), floor(x) = trunc(x) - (x < trunc(x)). */
+/* F2I truncates: trunc(x) = float(int(x)), floor(x) = trunc(x) - (x < trunc(x)); fmod(x, y) = x - y * floor(x / y). */
 static bool
 borg_trunc_filter(const nir_instr *instr, const void *data)
 {
    if (instr->type != nir_instr_type_alu)
       return false;
    const nir_op op = nir_instr_as_alu(instr)->op;
-   return op == nir_op_ftrunc || op == nir_op_ffloor;
+   return op == nir_op_ftrunc || op == nir_op_ffloor || op == nir_op_fmod;
 }
 
 static nir_def *
@@ -287,7 +287,14 @@ borg_trunc_lower(nir_builder *b, nir_instr *instr, void *data)
 {
    nir_alu_instr *alu = nir_instr_as_alu(instr);
    nir_def *x = nir_ssa_for_alu_src(b, alu, 0);
+   if (alu->op == nir_op_fmod) {
+      nir_def *y = nir_ssa_for_alu_src(b, alu, 1);
+      return nir_fsub(b, x, nir_fmul(b, y, nir_ffloor(b, nir_fmul(b, x, nir_frcp(b, y)))));
+   }
+   const uint32_t fp = b->fp_math_ctrl;
+   b->fp_math_ctrl = nir_fp_exact;   /* else nir_opt_algebraic turns i2f(f2i(x)) back into ftrunc, forever */
    nir_def *t = nir_i2f32(b, nir_f2i32(b, x));
+   b->fp_math_ctrl = fp;
    if (alu->op == nir_op_ftrunc)
       return t;
    return nir_fsub(b, t, nir_b2f32(b, nir_flt(b, x, t)));
