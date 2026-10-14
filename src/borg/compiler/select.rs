@@ -817,6 +817,8 @@ impl ShaderState {
         } else if intr.intrinsic == nir_intrinsic_load_vertex_id {
             self.sel.ubo.insert(intr.def.index, Ubo::Fixed(30));
             self.vertex_id_def = Some(intr.def.index);
+        } else if intr.intrinsic == nir_intrinsic_load_instance_id {
+            self.sel.ubo.insert(intr.def.index, Ubo::Fixed(31));
         } else if self.is_vertex && self.flags.fetching()
                   && intr.intrinsic == nir_intrinsic_load_input {
             const VERT_ATTRIB_GENERIC0: u32 = 15;
