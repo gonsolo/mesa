@@ -444,6 +444,12 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
          NIR_PASS(progress, nir, nir_opt_dead_cf);
       } while (progress);
    }
+   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      /* A storage image the shader only reads is sampled with texelFetch. */
+      const nir_opt_access_options access = { .is_vulkan = true };
+      NIR_PASS(_, nir, nir_opt_access, &access);
+      NIR_PASS(_, nir, nir_lower_readonly_images_to_tex, false);
+   }
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_view_index_filter, borg_view_index_lower, NULL);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
             borg_spirv_options.ubo_addr_format);
