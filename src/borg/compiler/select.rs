@@ -200,7 +200,9 @@ impl ShaderState {
                 | nir_op_ixor))
             // Vertex bit operations are never address math (gl_VertexIndex & 2, say).
             || (self.is_vertex && matches!(alu.op, nir_op_ishr | nir_op_ushr | nir_op_iand | nir_op_ior
-                | nir_op_ixor)))
+                | nir_op_ixor))
+            || (self.is_vertex && self.flags.fetching() && matches!(alu.op, nir_op_iadd | nir_op_imul
+                | nir_op_isub | nir_op_ishl)))
         {
             let first = if alu.op == nir_op_bcsel { 1 } else { 0 };
             for sr in &alu.srcs_as_slice()[first..] {

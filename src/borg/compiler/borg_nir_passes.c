@@ -340,7 +340,8 @@ borg_hoist_vertex_ids(nir_shader *nir)
             continue;
          if (!first[i->intrinsic]) {
             nir_builder b = nir_builder_at(nir_before_impl(impl));
-            first[i->intrinsic] = nir_load_system_value(&b, i->intrinsic, 0, 1, 32);
+            first[i->intrinsic] = i->intrinsic == nir_intrinsic_load_base_instance ?
+               nir_imm_int(&b, 0) : nir_load_system_value(&b, i->intrinsic, 0, 1, 32);
          }
          if (first[i->intrinsic] == &i->def)
             continue;
