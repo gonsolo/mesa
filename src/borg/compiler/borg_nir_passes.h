@@ -57,6 +57,7 @@ uint32_t borgc_selftest(void);
 /* The constant pool of the fragment shader compiled last: words fetched from vertex slot 40. */
 uint32_t borgc_last_frag_pool(uint32_t *out, uint32_t cap);
 bool borgc_last_push_window(void);
+void borgc_set_output_select(int k);
 uint32_t borgc_last_vert_pool(uint32_t *out, uint32_t cap);
 
 /* Compute: program words, (register, value) presets and LocalSize. 0 on success. */

@@ -29,6 +29,7 @@ impl ShaderState {
         crate::set_push_window(push_window && is_fragment);
         let mut st = ShaderState::new(regs, is_vertex, is_fragment, flags);
         st.push_window = push_window && is_fragment;
+        st.out_select = crate::output_select();
         (st, entry, total)
     }
 

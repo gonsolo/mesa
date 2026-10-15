@@ -1003,6 +1003,9 @@ impl ShaderState {
             }
         } else if intr.intrinsic == nir_intrinsic_store_output {
             let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
+            if self.is_fragment && self.out_select >= 0 && (4..12).contains(&loc) && loc != 4 + self.out_select as u32 {
+                return;
+            }
             let src = intr.get_src(0).as_def().index;
             let ncomp = intr.get_src(0).num_components() as usize;
             // A scalar constant stored directly has no register yet: give it a window word.

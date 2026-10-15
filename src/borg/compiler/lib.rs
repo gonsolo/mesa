@@ -66,6 +66,20 @@ thread_local! {
 /// Where a window shader finds its push words: the heap region's slot 33, past the 32 binding slots.
 pub(crate) const PUSH_WINDOW_WORDS: u32 = 16384 * 33;
 thread_local! {
+    static OUTPUT_SELECT: std::cell::Cell<i32> = const { std::cell::Cell::new(-1) };
+}
+
+/// A fragment shader keeps only colour output `k` (-1: all), for a target drawn on its own.
+#[no_mangle]
+pub extern "C" fn borgc_set_output_select(k: i32) {
+    OUTPUT_SELECT.with(|c| c.set(k));
+}
+
+pub(crate) fn output_select() -> i32 {
+    OUTPUT_SELECT.with(|c| c.get())
+}
+
+thread_local! {
     static LAST_PUSH_WINDOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
