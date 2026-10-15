@@ -577,6 +577,9 @@ borgvk_state_pack(const VkGraphicsPipelineCreateInfo *ci, uint32_t reg[5])
       reg[4] = ((uint32_t)rs->cullMode & 3) |
                (rs->frontFace == VK_FRONT_FACE_CLOCKWISE ? 1u << 2 : 0u);
    }
+   const VkPipelineMultisampleStateCreateInfo *ms = ci->pMultisampleState;
+   if (ms && ms->rasterizationSamples == VK_SAMPLE_COUNT_4_BIT && !(rs && rs->rasterizerDiscardEnable))
+      reg[4] |= 1u << 31 | (ms->pSampleMask ? ms->pSampleMask[0] & 0xF : 0xFu) << 8 | (ms->alphaToCoverageEnable ? 1u << 12 : 0u);
 }
 
 #define BORGVK_MARKER_TEXG 0xB5
