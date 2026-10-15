@@ -320,8 +320,10 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
    if (slot >= 0) {
       struct borgvk_shader_blob *b = &device->shader_blob[slot];
       uint32_t len = 0;
+      borgc_set_output_select(slot == BORGVK_STAGE_FRAG ? (int)device->frag_select - 1 : -1);
       borgc_compile_nir(nir, b->data, BORGVK_SHADER_BLOB_MAX, &len,
                         vfetch);
+      borgc_set_output_select(-1);
       device->stage_pwin[slot == BORGVK_STAGE_FRAG] = borgc_last_push_window();
       if (len > 0 && len <= BORGVK_SHADER_BLOB_MAX) {
          b->len = len;

@@ -375,10 +375,10 @@ tiled(uint32_t base, uint32_t w, uint32_t x, uint32_t y, uint32_t tile_bytes, ui
 static bool
 image_backed(const struct borgvk_image *img, uint32_t w, uint32_t h)
 {
-   if (!img || !img->mem || !img->mem->map || img->vk.extent.width != w || img->vk.extent.height != h)
+   if (!img || !img->mem || !img->mem->map || img->vk.extent.width < w || img->vk.extent.height < h)
       return false;
    uint32_t bs = vk_format_get_blocksize(img->vk.format);
-   return (uint64_t)w * h * bs * MAX2(img->vk.samples, 1) <= img->size;
+   return (uint64_t)img->vk.extent.width * img->vk.extent.height * bs * MAX2(img->vk.samples, 1) <= img->size;
 }
 
 static inline uint16_t
@@ -452,7 +452,7 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
    const struct borgvk_image *size = color ? color : zimg ? zimg : simg;
    if (!size && !area.width)
       return VK_SUCCESS;
-   const uint32_t w = size ? size->vk.extent.width : area.width, h = size ? size->vk.extent.height : area.height;
+   const uint32_t w = area.width ? area.width : size->vk.extent.width, h = area.width ? area.height : size->vk.extent.height;
    const uint32_t hp = (h + 3) & ~3u;
    const uint32_t wp = (w + 3) & ~3u;
    if (color && !image_backed(color, w, h))
@@ -480,6 +480,11 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
    uint8_t *zhost = zimg ? (uint8_t *)zimg->mem->map + zimg->offset : NULL;
    uint8_t *shost = simg ? (uint8_t *)simg->mem->map + simg->offset : NULL;
    const size_t npx = (size_t)w * h;
+   const uint32_t cw = color ? color->vk.extent.width : 0, zw = zimg ? zimg->vk.extent.width : 0,
+                  sw = simg ? simg->vk.extent.width : 0;
+   const size_t cnpx = color ? (size_t)cw * color->vk.extent.height : 0,
+                znpx = zimg ? (size_t)zw * zimg->vk.extent.height : 0,
+                snpx = simg ? (size_t)sw * simg->vk.extent.height : 0;
 
    VkResult result = VK_SUCCESS;
    uint8_t *before = malloc(npx * (16 + 4 + 1 + 3));
@@ -514,27 +519,28 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
    for (uint32_t y = part * rows_per * 4; y < MIN2(h, (part + 1) * rows_per * 4); y++) {
       for (uint32_t x = 0; x < w; x++) {
          const size_t i = (size_t)y * w + x;
+         const size_t hc = (size_t)y * cw + x, hz = (size_t)y * zw + x, hs = (size_t)y * sw + x;
          uint8_t *g = S->mem + tiled(S->fb, wp, x, y, 16 * cpx, cpx == 16 ? 8 : cpx);
          if (!color) {
          } else if (fmt) {
             uint8_t px[16] = { 0 };
-            memcpy(px, chost + i * cbs, MIN2(cbs, cpx));
+            memcpy(px, chost + hc * cbs, MIN2(cbs, cpx));
             px_put(g, cpx, px);
          } else {
             float c[4];
-            util_format_unpack_rgba(cpf, c, chost + i * cbs, 1);
+            util_format_unpack_rgba(cpf, c, chost + hc * cbs, 1);
             uint16_t v = to565(c);
             memcpy(g, &v, 2);
          }
          px_get(g, cpx, cb + i * 16);
          for (uint32_t a = 0; a < nextra; a++) {
             uint8_t *ge = S->mem + tiled(S->att[a + 1], wp, x, y, 16, 1);
-            *ge = ((uint8_t *)extra[a]->mem->map + extra[a]->offset)[i];
+            *ge = ((uint8_t *)extra[a]->mem->map + extra[a]->offset)[(size_t)y * extra[a]->vk.extent.width + x];
             eb[a * npx + i] = *ge;
          }
          if (zimg) {
             uint8_t *gz = S->mem + tiled(S->zb, wp, x, y, 16 * zpx, zpx);
-            float z = unpack_z(zpf, zhost + i * zbs);
+            float z = unpack_z(zpf, zhost + hz * zbs);
             if (d32) {
                memcpy(gz, &z, 4);
             } else {
@@ -545,7 +551,7 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
          }
          if (simg) {
             uint8_t *gs = S->mem + tiled(S->sb, wp, x, y, 16, 1);
-            *gs = unpack_s(spf, shost + i * sbs);
+            *gs = unpack_s(spf, shost + hs * sbs);
             sb[i] = *gs;
          }
       }
@@ -617,13 +623,14 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
    for (uint32_t y = part * rows_per * 4; y < MIN2(h, (part + 1) * rows_per * 4); y++) {
       for (uint32_t x = 0; x < w; x++) {
          const size_t i = (size_t)y * w + x;
+         const size_t hc = (size_t)y * cw + x, hz = (size_t)y * zw + x, hs = (size_t)y * sw + x;
          const uint8_t *g = S->mem + tiled(S->fb, wp, x, y, 16 * cpx, cpx == 16 ? 8 : cpx);
          uint8_t cur[16];
          px_get(g, cpx, cur);
          if (color && memcmp(cur, cb + i * 16, cpx) != 0) {
             changed++;
             for (uint32_t p = 0; p < cplanes; p++) {
-               uint8_t *d = chost + (p * npx + i) * cbs;
+               uint8_t *d = chost + (p * cnpx + hc) * cbs;
                if (fmt) {
                   memcpy(d, cur, MIN2(cbs, cpx));
                } else {
@@ -638,7 +645,7 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
             const uint8_t ge = S->mem[tiled(S->att[a + 1], wp, x, y, 16, 1)];
             if (ge != eb[a * npx + i]) {
                changed++;
-               ((uint8_t *)extra[a]->mem->map + extra[a]->offset)[i] = ge;
+               ((uint8_t *)extra[a]->mem->map + extra[a]->offset)[(size_t)y * extra[a]->vk.extent.width + x] = ge;
             }
          }
          if (zimg) {
@@ -653,14 +660,14 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
                   z = (float)v / 65535.0f;
                }
                for (uint32_t p = 0; p < MAX2(zimg->vk.samples, 1); p++)
-                  pack_z(zpf, zhost + (p * npx + i) * zbs, z);
+                  pack_z(zpf, zhost + (p * znpx + hz) * zbs, z);
             }
          }
          if (simg) {
             const uint8_t gs = S->mem[tiled(S->sb, wp, x, y, 16, 1)];
             if (gs != sb[i])
                for (uint32_t p = 0; p < MAX2(simg->vk.samples, 1); p++)
-                  pack_s(spf, shost + (p * npx + i) * sbs, gs);
+                  pack_s(spf, shost + (p * snpx + hs) * sbs, gs);
          }
       }
    }

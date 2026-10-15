@@ -94,6 +94,7 @@ struct borgvk_device {
    bool stage_push[2];
    bool stage_pwin[2];   /* the stage reads push constants from the heap window */
    int frag_tex_binding;
+   uint32_t frag_select;   /* 1 + the colour output the fragment shader keeps; 0 keeps all */
    bool frag_reads_pntc;
    uint32_t blend_cfg;
    uint32_t blend_const;
@@ -373,6 +374,8 @@ struct borgvk_pipeline {
    bool                      mrt;
    uint32_t                  ubo_mask;      /* the uniform buffer bindings the draw loads from */
    bool                      push_used;     /* a shader loads push constants */
+   uint8_t                   emul_n;        /* wide colour targets: this and emul[] draw one each */
+   VkPipeline                emul[3];
    bool                      push_window;   /* a stage reads push constants from the heap window */
    uint8_t                   push_stage;    /* bit per stage: loads push constants, no UBO */
    uint8_t                   set_base[4];

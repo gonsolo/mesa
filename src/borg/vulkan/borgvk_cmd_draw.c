@@ -202,6 +202,11 @@ draw_validate(struct draw_ctx *g)
          return generic_reject(REJECT_NO_TARGET_MEMORY);
       g->w = g->size_img->vk.extent.width;
       g->h = g->size_img->vk.extent.height;
+      const VkRect2D *ra = &cmd->render_area;
+      if (!ra->offset.x && !ra->offset.y && ra->extent.width && ra->extent.width <= g->w && ra->extent.height <= g->h) {
+         g->w = ra->extent.width;
+         g->h = ra->extent.height;
+      }
    } else {
       g->w = cmd->render_area.extent.width;
       g->h = cmd->render_area.extent.height;
@@ -216,17 +221,16 @@ draw_validate(struct draw_ctx *g)
       struct borgvk_image *e = v && v->image ? container_of(v->image, struct borgvk_image, vk) : NULL;
       g->extra[k] = e;
       if (!e || !e->mem || !e->mem->map ||
-          e->vk.extent.width != g->color_img->vk.extent.width ||
-          e->vk.extent.height != g->color_img->vk.extent.height)
+          e->vk.extent.width < g->w || e->vk.extent.height < g->h)
          return generic_reject(REJECT_MRT_EXTENT);
    }
-   if (g->nextra && !borgvk_sim_serves(g->color_img, cmd->depth_view || cmd->stencil_view))
+   if (g->nextra && !borgvk_sim_serves_extent(g->w, g->h, cmd->depth_view || cmd->stencil_view))
       return generic_reject(REJECT_MRT_NOT_SERVED);
    bool same_extra = cmd->batch_nextra == g->nextra;
    for (uint32_t k = 0; k < g->nextra; k++)
       same_extra &= cmd->batch_extra[k] == g->extra[k];
    if (cmd->batch_draws && (!same_extra || cmd->batch_img != g->color_img ||
-                            (!g->size_img && cmd->batch_area.width != g->w) || cmd->batch_depth != cmd->depth_view ||
+                            cmd->batch_area.width != g->w || cmd->batch_area.height != g->h || cmd->batch_depth != cmd->depth_view ||
                             cmd->batch_stencil != cmd->stencil_view))
       borgvk_flush_draws(cmd);
    return true;
@@ -391,7 +395,7 @@ draw_begin_pass(struct draw_ctx *g)
    borgvk_transport_capture_begin();
    if (first_of_batch) {
       cmd->batch_serve = borgvk_sim_serves_extent(g->w, g->h, cmd->depth_view || cmd->stencil_view);
-      cmd->batch_area = g->size_img ? (VkExtent2D){ 0, 0 } : (VkExtent2D){ g->w, g->h };
+      cmd->batch_area = (VkExtent2D){ g->w, g->h };
    }
    const bool serve = cmd->batch_serve;
    uint32_t load = first_of_batch ? 0u : 1u;
@@ -883,8 +887,7 @@ draw_finish(struct draw_ctx *g, bool ok)
 }
 
 static bool
-borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buffer *cmd,
-                        const struct draw_params *dp)
+draw_one(struct borgvk_device *device, struct borgvk_command_buffer *cmd, const struct draw_params *dp)
 {
    struct draw_ctx g = { .device = device, .cmd = cmd, .dp = dp, .pipeline = cmd->gfx_pipeline };
    if (!draw_validate(&g) || !draw_index_range(&g))
@@ -906,6 +909,29 @@ borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buff
       draw_emit(&g);
    }
    return draw_finish(&g, ok);
+}
+
+/* Wide colour targets are one pipeline each, drawn in turn (no depth or stencil: a second pass would fail the test). */
+static bool
+borgvk_sim_generic_draw(struct borgvk_device *device, struct borgvk_command_buffer *cmd, const struct draw_params *dp)
+{
+   struct borgvk_pipeline *first = cmd->gfx_pipeline;
+   if (!first || !first->emul_n)
+      return draw_one(device, cmd, dp);
+   if (cmd->depth_view || cmd->stencil_view)
+      return generic_reject(REJECT_MRT_FORMATS);
+   struct vk_image_view *views[4];
+   memcpy(views, cmd->color_views, sizeof(views));
+   bool ok = true;
+   for (uint32_t k = 0; ok && k < first->emul_n; k++) {
+      if (k)
+         cmd->gfx_pipeline = borgvk_pipeline_from_handle(first->emul[k - 1]);
+      cmd->color_views[0] = views[k];
+      ok = draw_one(device, cmd, dp);
+   }
+   memcpy(cmd->color_views, views, sizeof(views));
+   cmd->gfx_pipeline = first;
+   return ok;
 }
 
 VKAPI_ATTR void VKAPI_CALL
