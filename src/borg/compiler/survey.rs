@@ -5,6 +5,7 @@ use compiler::bindings::*;
 pub struct Survey {
     pub total: u32,
     pub tex: u32,
+    pub push_window: bool,
 }
 
 pub unsafe fn survey(entry: *mut nir_function_impl, stage: mesa_shader_stage) -> Survey {
@@ -15,6 +16,7 @@ pub unsafe fn survey(entry: *mut nir_function_impl, stage: mesa_shader_stage) ->
     let mut consts = 0u32;
     let mut intrinsics = 0u32;
     let mut other = 0u32;
+    let (mut push, mut mem) = (false, false);
     let mut todo: Vec<&'static str> = Vec::new();
     let mut note = |op: &'static str| {
         if !todo.contains(&op) {
@@ -37,6 +39,9 @@ pub unsafe fn survey(entry: *mut nir_function_impl, stage: mesa_shader_stage) ->
                     tex += 1; // → TEX
                 } else if let Some(i) = instr.as_intrinsic() {
                     intrinsics += 1;
+                    push |= i.intrinsic == nir_intrinsic_load_push_constant;
+                    mem |= i.intrinsic == nir_intrinsic_load_ubo || i.intrinsic == nir_intrinsic_load_ssbo
+                        || i.intrinsic == nir_intrinsic_store_ssbo;
                     note(i.info().name());
                 } else if instr.as_load_const().is_some() {
                     consts += 1;
@@ -54,5 +59,5 @@ pub unsafe fn survey(entry: *mut nir_function_impl, stage: mesa_shader_stage) ->
     if !todo.is_empty() {
         eprintln!("borgc:   needs lowering/selection: {}", todo.join(", "));
     }
-    Survey { total, tex }
+    Survey { total, tex, push_window: push && mem }
 }

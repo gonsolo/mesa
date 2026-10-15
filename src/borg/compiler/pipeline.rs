@@ -18,7 +18,7 @@ impl ShaderState {
             }
         }
         let entry = nir_shader_get_entrypoint(nir);
-        let Survey { total, tex } = survey(entry, stage);
+        let Survey { total, tex, push_window } = survey(entry, stage);
         let regs: &'static [u8] = if is_vertex {
             &[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         } else if tex > 0 {
@@ -26,7 +26,10 @@ impl ShaderState {
         } else {
             &[17, 18, 19, 23]
         };
-        (ShaderState::new(regs, is_vertex, is_fragment, flags), entry, total)
+        crate::set_push_window(push_window && is_fragment);
+        let mut st = ShaderState::new(regs, is_vertex, is_fragment, flags);
+        st.push_window = push_window && is_fragment;
+        (st, entry, total)
     }
 
     /// After instruction selection: logs the result, and returns false if a NIR op had no Borg

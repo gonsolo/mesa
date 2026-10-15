@@ -70,6 +70,13 @@ borg_texel_buffer_filter(const nir_instr *instr, const void *data)
    return false;
 }
 
+static bool
+borg_frag_image_filter(const nir_instr *instr, const void *data)
+{
+   return instr->type == nir_instr_type_intrinsic && borg_texel_buffer_filter(instr, data) &&
+          nir_intrinsic_image_dim(nir_instr_as_intrinsic(instr)) == GLSL_SAMPLER_DIM_2D;
+}
+
 static nir_def *
 borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
 {
@@ -488,6 +495,8 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    if (nir->info.stage == MESA_SHADER_COMPUTE)
       NIR_PASS(_, nir, nir_shader_lower_instructions, borg_texel_buffer_filter,
                borg_texel_buffer_lower, NULL);
+   else if (nir->info.stage == MESA_SHADER_FRAGMENT)
+      NIR_PASS(_, nir, nir_shader_lower_instructions, borg_frag_image_filter, borg_texel_buffer_lower, NULL);
    /* Push constants. Confirmed empirically (not assumed): with
     * push_const_addr_format left at its default, a `layout(push_constant)`
     * access arrives here as a plain load_deref, same as any other pointer,

@@ -63,6 +63,22 @@ thread_local! {
     static LAST_VERT_POOL: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// Where a window shader finds its push words: the heap region's slot 33, past the 32 binding slots.
+pub(crate) const PUSH_WINDOW_WORDS: u32 = 16384 * 33;
+thread_local! {
+    static LAST_PUSH_WINDOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn set_push_window(on: bool) {
+    LAST_PUSH_WINDOW.with(|c| c.set(on));
+}
+
+/// The last shader read its push constants from the heap window (it also loads a buffer).
+#[no_mangle]
+pub extern "C" fn borgc_last_push_window() -> bool {
+    LAST_PUSH_WINDOW.with(|c| c.get())
+}
+
 pub(crate) fn set_vert_pool(pool: Vec<u32>) {
     LAST_VERT_POOL.with(|p| *p.borrow_mut() = pool);
 }

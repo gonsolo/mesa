@@ -3,7 +3,7 @@ use crate::isel::borg_isel;
 use crate::opt::classify_uniform;
 use std::env;
 use std::collections::HashMap;
-use crate::{collect_cf_marks, decompose_vertex_offset, packed_layout, CfMark, resolve_vm, BorgInstr, Ubo, FRAG_CONST_MAX, NO_DST};
+use crate::{collect_cf_marks, decompose_vertex_offset, packed_layout, CfMark, resolve_vm, BorgInstr, Ubo, FRAG_CONST_MAX, NO_DST, PUSH_WINDOW_WORDS};
 use compiler::bindings::*;
 use compiler::nir::AsDef;
 
@@ -670,7 +670,7 @@ impl ShaderState {
         } else if intr.intrinsic == nir_intrinsic_load_push_constant {
             let dyn_off = intr.get_src(0).comp_as_uint(0);
             if let Some(dyn_off) = dyn_off {
-                let base = intr.base() + dyn_off as i32;
+                let base = intr.base() + dyn_off as i32 + if self.push_window { PUSH_WINDOW_WORDS as i32 * 4 } else { 0 };
                 let n = intr.def.num_components as usize;
                 let comps: Vec<(u32, u8)> = (0..n)
                     .map(|c| {
@@ -726,7 +726,7 @@ impl ShaderState {
                 let two = kc!(2);
                 let w = self.sel.next_vreg; self.sel.next_vreg += 1;
                 self.sel.prog.push(BorgInstr { mnem: "ISRL", dst: w, srcs: vec![o.0, two], swz: vec![o.1, 0] });
-                let base_word = (intr.base() / 4) as u32;
+                let base_word = (intr.base() / 4) as u32 + if self.push_window { PUSH_WINDOW_WORDS } else { 0 };
                 let comps: Vec<(u32, u8)> = (0..intr.def.num_components as u32)
                     .map(|c| {
                         let k = kc!(base_word + c);
