@@ -322,12 +322,17 @@ borgvk_sim_flush_format(VkFormat f)
 bool
 borgvk_sim_serves(const struct borgvk_image *color, bool has_depth_stencil)
 {
+   return color && borgvk_sim_serves_extent(color->vk.extent.width, color->vk.extent.height, has_depth_stencil);
+}
+
+bool
+borgvk_sim_serves_extent(uint32_t w, uint32_t h, bool has_depth_stencil)
+{
    const char *direct = getenv("BORGVK_SIM_DIRECT");
    if (!direct || !direct[0])
       direct = NULL;
-   if ((!direct && !borgvk_hw_enabled()) || !color)
+   if (!direct && !borgvk_hw_enabled())
       return false;
-   uint32_t w = color->vk.extent.width, h = color->vk.extent.height;
    const uint32_t max_dim = has_depth_stencil ? 1024 : 4096;
    return w >= 1 && w <= max_dim && h >= 1 && h <= max_dim;
 }
@@ -440,14 +445,14 @@ borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
                     struct borgvk_image *const *extra, uint32_t nextra,
                     const struct vk_image_view *depth_view,
                     const struct vk_image_view *stencil_view,
-                    const struct borgvk_writeback *wb, uint32_t nwb)
+                    const struct borgvk_writeback *wb, uint32_t nwb, VkExtent2D area)
 {
    struct borgvk_image *zimg = view_image(depth_view), *simg = view_image(stencil_view);
    /* Depth only: no colour attachment, nothing of it goes in or comes back. */
    const struct borgvk_image *size = color ? color : zimg ? zimg : simg;
-   if (!size)
+   if (!size && !area.width)
       return VK_SUCCESS;
-   const uint32_t w = size->vk.extent.width, h = size->vk.extent.height;
+   const uint32_t w = size ? size->vk.extent.width : area.width, h = size ? size->vk.extent.height : area.height;
    const uint32_t hp = (h + 3) & ~3u;
    const uint32_t wp = (w + 3) & ~3u;
    if (color && !image_backed(color, w, h))

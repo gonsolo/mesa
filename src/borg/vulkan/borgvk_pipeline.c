@@ -156,7 +156,9 @@ borgvk_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache cache,
       borgvk_layout_set_base(device, pl->set_base);
       pl->ubo_mask = device->stage_ubo[0] | device->stage_ubo[1];
       pl->push_used = device->stage_push[0] || device->stage_push[1];
-      pl->push_stage = (device->stage_push[0] && !device->stage_ubo[0]) | (device->stage_push[1] && !device->stage_ubo[1]) << 1;
+      pl->push_window = device->stage_pwin[0] || device->stage_pwin[1];
+      pl->push_stage = (device->stage_push[0] && !device->stage_ubo[0] && !device->stage_pwin[0]) |
+                       (device->stage_push[1] && !device->stage_ubo[1] && !device->stage_pwin[1]) << 1;
       pl->color_count = color_count;
       pl->mrt = mrt;
       const VkPipelineRasterizationStateCreateInfo *rs =

@@ -32,6 +32,7 @@ generic_reject(int why)
 
 #define BORGVK_HEAP_BYTES 0x2000000u
 #define BORGVK_POINT_SLOT 16
+#define PUSH_WINDOW_SLOT 33   /* borgc: PUSH_WINDOW_WORDS */
 
 struct draw_heap {
    uint32_t top;
@@ -65,6 +66,7 @@ borgvk_flush_draws(struct borgvk_command_buffer *cmd)
    struct borgvk_image *extra[3] = { cmd->batch_extra[0], cmd->batch_extra[1], cmd->batch_extra[2] };
    const uint32_t nextra = cmd->batch_nextra;
    const bool serve = cmd->batch_serve;
+   const VkExtent2D area = cmd->batch_area;
    struct borgvk_writeback wb[BORGVK_MAX_WRITEBACKS];
    const uint32_t nwb = cmd->nwb;
    memcpy(wb, cmd->wb, sizeof(wb));
@@ -88,7 +90,7 @@ borgvk_flush_draws(struct borgvk_command_buffer *cmd)
       key = corpus_state(key, img, extra, nextra, cmd->batch_depth, cmd->batch_stencil, wb, nwb);
    }
    if (serve) {
-      borgvk_sim_run_pass(bytes, n, img, extra, nextra, cmd->batch_depth, cmd->batch_stencil, wb, nwb);
+      borgvk_sim_run_pass(bytes, n, img, extra, nextra, cmd->batch_depth, cmd->batch_stencil, wb, nwb, area);
       free(bytes);
    } else {
       borgvk_sim_run_stream(bytes, n, img, 0);   /* takes ownership of bytes */
@@ -150,6 +152,7 @@ struct draw_ctx {
    uint32_t topo, X;
    bool points, lines;
    struct borgvk_image *color_img, *size_img, *extra[3];
+   uint32_t w, h;
    uint32_t nextra;
    const uint8_t *idx_host;
    int64_t vmin, vmax, imin, imax;
@@ -194,9 +197,16 @@ draw_validate(struct draw_ctx *g)
    const struct vk_image_view *ds_view = cmd->depth_view ? cmd->depth_view : cmd->stencil_view;
    g->size_img =
       g->color_img ? g->color_img : ds_view && ds_view->image ? container_of(ds_view->image, struct borgvk_image, vk) : NULL;
-   if (!g->size_img || !g->size_img->mem || !g->size_img->mem->map)
-      return generic_reject(REJECT_NO_TARGET_MEMORY);
-   if (!g->color_img && !borgvk_sim_serves(g->size_img, true))
+   if (g->size_img) {
+      if (!g->size_img->mem || !g->size_img->mem->map)
+         return generic_reject(REJECT_NO_TARGET_MEMORY);
+      g->w = g->size_img->vk.extent.width;
+      g->h = g->size_img->vk.extent.height;
+   } else {
+      g->w = cmd->render_area.extent.width;
+      g->h = cmd->render_area.extent.height;
+   }
+   if (!g->color_img && !borgvk_sim_serves_extent(g->w, g->h, true))
       return generic_reject(REJECT_NO_TARGET_MEMORY);
    g->nextra = pipeline->mrt ? pipeline->color_count - 1 : 0;
    if (pipeline->color_count >= 2 && !pipeline->mrt)
@@ -215,7 +225,8 @@ draw_validate(struct draw_ctx *g)
    bool same_extra = cmd->batch_nextra == g->nextra;
    for (uint32_t k = 0; k < g->nextra; k++)
       same_extra &= cmd->batch_extra[k] == g->extra[k];
-   if (cmd->batch_draws && (!same_extra || cmd->batch_img != g->color_img || cmd->batch_depth != cmd->depth_view ||
+   if (cmd->batch_draws && (!same_extra || cmd->batch_img != g->color_img ||
+                            (!g->size_img && cmd->batch_area.width != g->w) || cmd->batch_depth != cmd->depth_view ||
                             cmd->batch_stencil != cmd->stencil_view))
       borgvk_flush_draws(cmd);
    return true;
@@ -320,6 +331,8 @@ draw_reserve(struct draw_ctx *g)
       need = (uint64_t)g->nlines * 6 * (16 + 2 * 16 * pipeline->attr_count) + 64;
    if (cmd->batch_draws && cmd->heap_top + need > BORGVK_HEAP_BYTES)
       borgvk_flush_draws(cmd);
+   if (cmd->batch_draws && pipeline->push_used && memcmp(cmd->batch_push, g->device->push_words, sizeof(cmd->batch_push)))
+      borgvk_flush_draws(cmd);
    /* The constant pool's slot is one per pass. */
    if (cmd->batch_draws && pipeline->blob[BORGVK_STAGE_FRAG].npool && cmd->batch_pool && cmd->batch_pool != pipeline)
       borgvk_flush_draws(cmd);
@@ -371,13 +384,15 @@ static void
 draw_begin_pass(struct draw_ctx *g)
 {
    struct borgvk_command_buffer *cmd = g->cmd;
-   const struct borgvk_image *color_img = g->color_img, *size_img = g->size_img;
+   const struct borgvk_image *color_img = g->color_img;
    const bool first_of_batch = g->first_of_batch;
    const uint32_t nextra = g->nextra;
 
    borgvk_transport_capture_begin();
-   if (first_of_batch)
-      cmd->batch_serve = borgvk_sim_serves(size_img, cmd->depth_view || cmd->stencil_view);
+   if (first_of_batch) {
+      cmd->batch_serve = borgvk_sim_serves_extent(g->w, g->h, cmd->depth_view || cmd->stencil_view);
+      cmd->batch_area = g->size_img ? (VkExtent2D){ 0, 0 } : (VkExtent2D){ g->w, g->h };
+   }
    const bool serve = cmd->batch_serve;
    uint32_t load = first_of_batch ? 0u : 1u;
    if (serve) {
@@ -515,7 +530,6 @@ draw_point_corners(struct draw_ctx *g)
 {
    if (!g->points)
       return true;
-   const struct borgvk_image *size_img = g->size_img;
    struct draw_heap *heap = &g->heap;
    const uint32_t X = g->X;
    const int64_t vmin = g->vmin, vmax = g->vmax;
@@ -534,8 +548,8 @@ draw_point_corners(struct draw_ctx *g)
       } else {
          for (int64_t e = e0; e <= e1; e++) {
             float *o = c + 4 * (e - e0);
-            o[0] = corner[e % X][0] * 2.0f / size_img->vk.extent.width;
-            o[1] = corner[e % X][1] * 2.0f / size_img->vk.extent.height;
+            o[0] = corner[e % X][0] * 2.0f / g->w;
+            o[1] = corner[e % X][1] * 2.0f / g->h;
             o[2] = corner[e % X][0] + 0.5f;
             o[3] = corner[e % X][1] + 0.5f;
          }
@@ -609,7 +623,6 @@ draw_line_consts(struct draw_ctx *g)
 {
    if (!g->lines)
       return true;
-   const struct borgvk_image *size_img = g->size_img;
    struct draw_heap *heap = &g->heap;
    const uint32_t nlines = g->nlines;
    bool ok = true;
@@ -619,7 +632,7 @@ draw_line_consts(struct draw_ctx *g)
    if (!c || !borgvk_vertex_format_to_fetch(VK_FORMAT_R32G32B32A32_SFLOAT, &code, &swz, &rbytes)) {
       ok = generic_reject(REJECT_UPLOAD);
    } else {
-      const float w = size_img->vk.extent.width, h = size_img->vk.extent.height;
+      const float w = g->w, h = g->h;
       for (uint32_t r = 0; r < nlines * 6; r++) {
          c[4 * r + 0] = line_side[r % 6] / w;
          c[4 * r + 1] = line_side[r % 6] / h;
@@ -678,6 +691,16 @@ draw_indices(struct draw_ctx *g)
    return ok;
 }
 
+static struct borgvk_image *
+draw_storage_image(const struct borgvk_descriptor_set *set, uint32_t b)
+{
+   struct borgvk_image *img = set->images[b];
+   if (set->buffers[b] || set->buffer_views[b] || (set->sampled_mask >> b & 1) || !img || !img->mem || !img->mem->map)
+      return NULL;
+   return img->vk.image_type == VK_IMAGE_TYPE_2D && img->vk.samples == 1 && vk_format_get_blocksize(img->vk.format) == 4
+             ? img : NULL;
+}
+
 static bool
 draw_buffers(struct draw_ctx *g)
 {
@@ -695,13 +718,13 @@ draw_buffers(struct draw_ctx *g)
          continue;
       any_dyn |= sets[si]->dyn_mask != 0;
       for (int b = 0; b < BORGVK_MAX_BINDINGS && pipeline->set_base[si] + b < 32; b++)
-         if ((sets[si]->storage_mask >> b & 1) && sets[si]->buffers[b] && sets[si]->buffers[b]->mem &&
-             sets[si]->buffers[b]->mem->map)
+         if (((sets[si]->storage_mask >> b & 1) && sets[si]->buffers[b] && sets[si]->buffers[b]->mem &&
+              sets[si]->buffers[b]->mem->map) || draw_storage_image(sets[si], b))
             smask |= 1u << (pipeline->set_base[si] + b);
    }
    const uint32_t umask = pipeline->ubo_mask & ~1u;
-   if (ok && (smask || umask)) {
-      const uint32_t slots = 1 + util_last_bit(smask | umask);
+   if (ok && (smask || umask || pipeline->push_window)) {
+      const uint32_t slots = pipeline->push_window ? PUSH_WINDOW_SLOT + 1 : 1 + util_last_bit(smask | umask);
       const bool reuse = cmd->region_set == set && cmd->batch_draws && !umask && !any_dyn && !sets[1];
       uint32_t base = cmd->region_base;
       if (!reuse) {
@@ -715,6 +738,23 @@ draw_buffers(struct draw_ctx *g)
                   const struct borgvk_descriptor_set *ds = sets[si];
                   const int fb = pipeline->set_base[si] + b;
                   struct borgvk_buffer *ub = ds->buffers[b];
+                  struct borgvk_image *simg = fb < 32 ? draw_storage_image(ds, b) : NULL;
+                  if (simg) {
+                     const uint32_t n = MIN2(simg->vk.extent.width * simg->vk.extent.height, BORGVK_SSBO_SLOT_BYTES / 4 - 1);
+                     uint8_t *host = (uint8_t *)simg->mem->map + simg->offset;
+                     const uint32_t at = base + (1 + fb) * BORGVK_SSBO_SLOT_BYTES;
+                     uint8_t *win = calloc(1 + n, 4);
+                     if (!win)
+                        continue;
+                     memcpy(win, &simg->vk.extent.width, 4);
+                     memcpy(win + 4, host, (size_t)n * 4);
+                     for (uint32_t i = 0; i < (1 + n) * 4; i += 256)
+                        borgvk_serial_send_mem(at + i, win + i, MIN2(256u, (1 + n) * 4 - i));
+                     free(win);
+                     if (cmd->nwb < BORGVK_MAX_WRITEBACKS)
+                        cmd->wb[cmd->nwb++] = (struct borgvk_writeback){ at + 4, n * 4, host };
+                     continue;
+                  }
                   if (fb >= 32 || !ub || !ub->mem || !ub->mem->map)
                      continue;
                   const bool st = smask >> fb & 1;
@@ -737,6 +777,9 @@ draw_buffers(struct draw_ctx *g)
                      cmd->wb[cmd->nwb++] = (struct borgvk_writeback){ at, (uint32_t)len, host };
                }
             }
+            if (pipeline->push_window)
+               borgvk_serial_send_mem(base + PUSH_WINDOW_SLOT * BORGVK_SSBO_SLOT_BYTES, (const uint8_t *)g->device->push_words,
+                                      sizeof(g->device->push_words));
             cmd->region_set = set;
             cmd->region_base = base;
          }
@@ -829,6 +872,7 @@ draw_finish(struct draw_ctx *g, bool ok)
       return false;
    cmd->heap_top = g->heap.top;
    cmd->batch_draws++;
+   memcpy(cmd->batch_push, g->device->push_words, sizeof(cmd->batch_push));
    cmd->batch_img = g->color_img;
    cmd->batch_nextra = g->nextra;
    for (uint32_t k = 0; k < 3; k++)

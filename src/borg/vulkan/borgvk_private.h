@@ -92,6 +92,7 @@ struct borgvk_device {
    VkPipelineLayout compile_layout;
    uint32_t stage_ubo[2];
    bool stage_push[2];
+   bool stage_pwin[2];   /* the stage reads push constants from the heap window */
    int frag_tex_binding;
    bool frag_reads_pntc;
    uint32_t blend_cfg;
@@ -144,6 +145,7 @@ struct borgvk_command_buffer {
    struct borgvk_image *batch_extra[3];   /* colour attachments 1-3 of the batch */
    uint32_t batch_nextra;
    bool batch_serve;
+   VkExtent2D batch_area;   /* the pass size when it has no attachment */
    struct vk_image_view *batch_depth, *batch_stencil;
    struct borgvk_writeback { uint32_t off, size; uint8_t *host; } wb[BORGVK_MAX_WRITEBACKS];
    uint32_t nwb;
@@ -154,6 +156,7 @@ struct borgvk_command_buffer {
    const uint8_t *index_ptr;                    /* bound index buffer, at its offset */
    VkDeviceSize index_avail;
    uint32_t index_size;                         /* 2, 4, or 0 for an unsupported type */
+   uint32_t batch_push[32];                     /* the push words the open batch was drawn with */
    uint32_t pc[32];                             /* push-constant bytes, for compute */
    VkDeviceSize dyn_off[BORGVK_MAX_BINDINGS];   /* dynamic offsets of desc_set, by binding */
    /* The compute bind point has its own set. */
@@ -174,6 +177,7 @@ bool borgvk_hw_enabled(void);
 size_t borgvk_hw_render(const uint8_t *stream, size_t n, uint32_t w, uint32_t h, uint8_t *out);
 int borgvk_hw_compute(const uint8_t *job, size_t len, const char *outf);
 bool borgvk_sim_serves(const struct borgvk_image *color, bool has_depth_stencil);
+bool borgvk_sim_serves_extent(uint32_t w, uint32_t h, bool has_depth_stencil);
 uint8_t borgvk_sim_flush_format(VkFormat f);
 bool borgvk_sim_bytes_packed(VkFormat f);
 bool borgvk_sim_half2(VkFormat f);
@@ -191,7 +195,7 @@ VkResult borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_imag
                              struct borgvk_image *const *extra, uint32_t nextra,
                              const struct vk_image_view *depth_view,
                              const struct vk_image_view *stencil_view,
-                             const struct borgvk_writeback *wb, uint32_t nwb);
+                             const struct borgvk_writeback *wb, uint32_t nwb, VkExtent2D area);
 
 void borgvk_serial_send_mvp(const float mvp[16]);
 void borgvk_serial_send_blend(uint32_t blend_cfg, uint32_t blend_const);
@@ -369,6 +373,7 @@ struct borgvk_pipeline {
    bool                      mrt;
    uint32_t                  ubo_mask;      /* the uniform buffer bindings the draw loads from */
    bool                      push_used;     /* a shader loads push constants */
+   bool                      push_window;   /* a stage reads push constants from the heap window */
    uint8_t                   push_stage;    /* bit per stage: loads push constants, no UBO */
    uint8_t                   set_base[4];
    int                       tex_binding;   /* binding of the texture the fragment shader samples */
