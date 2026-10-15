@@ -165,6 +165,10 @@ fn decompose_vertex_offset(
         if let Some(&v) = consts.get(&d) {
             return Some((v as i32, None));
         }
+        // A constant already mapped to a register by alu().
+        if let Some((&k, _)) = vec_map.iter().find(|(k, c)| consts.contains_key(k) && c.first() == Some(&(d, 0))) {
+            return Some((consts[&k] as i32, None));
+        }
         let (op, srcs) = prod.get(&d)?;
         match *op {
             nir_op_iadd if srcs.len() == 2 => {
