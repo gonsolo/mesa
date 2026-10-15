@@ -332,8 +332,9 @@ borg_idiv_lower(nir_builder *b, nir_instr *instr, void *data)
    nir_alu_instr *alu = nir_instr_as_alu(instr);
    nir_def *x = nir_ssa_for_alu_src(b, alu, 0), *y = nir_ssa_for_alu_src(b, alu, 1);
    const bool sgn = alu->op == nir_op_idiv || alu->op == nir_op_imod || alu->op == nir_op_irem;
-   nir_def *a = sgn ? nir_bcsel(b, nir_ilt_imm(b, x, 0), nir_ineg(b, x), x) : x;
-   nir_def *d = sgn ? nir_bcsel(b, nir_ilt_imm(b, y, 0), nir_ineg(b, y), y) : y;
+   nir_def *sx = nir_ishr_imm(b, x, 31), *sy = nir_ishr_imm(b, y, 31);
+   nir_def *a = sgn ? nir_isub(b, nir_ixor(b, x, sx), sx) : x;
+   nir_def *d = sgn ? nir_isub(b, nir_ixor(b, y, sy), sy) : y;
    nir_def *q = nir_f2i32(b, nir_fmul(b, nir_i2f32(b, a), nir_frcp(b, nir_i2f32(b, d))));
    nir_def *r = nir_isub(b, a, nir_imul(b, q, d));
    nir_def *lo = nir_ilt_imm(b, r, 0);
@@ -341,17 +342,19 @@ borg_idiv_lower(nir_builder *b, nir_instr *instr, void *data)
    r = nir_bcsel(b, lo, nir_iadd(b, r, d), r);
    nir_def *hi = nir_uge(b, r, d);
    q = nir_bcsel(b, hi, nir_iadd_imm(b, q, 1), q);
-   r = nir_bcsel(b, hi, nir_isub(b, r, d), r);
+   r = nir_isub(b, a, nir_imul(b, q, d));
    const bool quot = alu->op == nir_op_idiv || alu->op == nir_op_udiv;
    if (!sgn)
       return quot ? q : r;
-   nir_def *neg_x = nir_ilt_imm(b, x, 0), *neg_y = nir_ilt_imm(b, y, 0);
-   if (quot)
-      return nir_bcsel(b, nir_ixor(b, neg_x, neg_y), nir_ineg(b, q), q);
-   r = nir_bcsel(b, neg_x, nir_ineg(b, r), r);
+   if (quot) {
+      nir_def *sq = nir_ixor(b, sx, sy);
+      return nir_isub(b, nir_ixor(b, q, sq), sq);
+   }
+   r = nir_isub(b, nir_ixor(b, r, sx), sx);
    if (alu->op == nir_op_irem)
       return r;
-   return nir_bcsel(b, nir_iand(b, nir_ine_imm(b, r, 0), nir_ixor(b, nir_ilt_imm(b, r, 0), neg_y)), nir_iadd(b, r, y), r);
+   nir_def *nz = nir_ishr_imm(b, nir_ior(b, r, nir_ineg(b, r)), 31);
+   return nir_iadd(b, r, nir_iand(b, nir_iand(b, nz, nir_ishr_imm(b, nir_ixor(b, r, y), 31)), y));
 }
 
 /* F2I truncates: trunc(x) = float(int(x)), floor(x) = trunc(x) - (x < trunc(x)); fmod(x, y) = x - y * floor(x / y). */
