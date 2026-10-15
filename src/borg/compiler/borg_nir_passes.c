@@ -70,6 +70,21 @@ borg_texel_buffer_filter(const nir_instr *instr, const void *data)
    return false;
 }
 
+/* A flat float varying is the provoking vertex's bits, like an integer one: the load says so. */
+static bool
+borg_flat_input(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_input)
+      return false;
+   const nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   const unsigned slot = sem.location - VARYING_SLOT_VAR0 + (nir_src_is_const(intr->src[0]) ? nir_src_as_uint(intr->src[0]) : 0);
+   if (sem.location < VARYING_SLOT_VAR0 || slot > 63 || !(*(uint64_t *)data >> slot & 1) ||
+       nir_alu_type_get_base_type(nir_intrinsic_dest_type(intr)) != nir_type_float)
+      return false;
+   nir_intrinsic_set_dest_type(intr, nir_type_uint | intr->def.bit_size);
+   return true;
+}
+
 static bool
 borg_frag_image_filter(const nir_instr *instr, const void *data)
 {
@@ -466,6 +481,8 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    if (nir->info.stage == MESA_SHADER_VERTEX || nir->info.stage == MESA_SHADER_FRAGMENT) {
       NIR_PASS(_, nir, nir_lower_io_vars_to_temporaries, nir_shader_get_entrypoint(nir), nir_var_shader_out);
       NIR_PASS(_, nir, nir_lower_global_vars_to_local);
+      NIR_PASS(_, nir, nir_split_var_copies);
+      NIR_PASS(_, nir, nir_lower_var_copies);
    }
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
    NIR_PASS(_, nir, nir_lower_system_values);
@@ -512,9 +529,19 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(_, nir, nir_lower_vars_to_explicit_types, nir_var_mem_shared, glsl_get_natural_size_align_bytes);
       NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_shared, nir_address_format_32bit_offset);
    }
+   uint64_t flat_slots = 0;
+   if (nir->info.stage == MESA_SHADER_FRAGMENT)
+      nir_foreach_shader_in_variable(var, nir)
+         if (var->data.interpolation == INTERP_MODE_FLAT && var->data.location >= VARYING_SLOT_VAR0) {
+            const unsigned n = glsl_count_attribute_slots(var->type, false);
+            for (unsigned i = 0; i < n; i++)
+               flat_slots |= 1ull << (var->data.location - VARYING_SLOT_VAR0 + i);
+         }
    /* Varying I/O → load_input/store_output(location). vec4-slot sizing. */
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
             borg_type_size, 0);
+   if (flat_slots)
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, borg_flat_input, nir_metadata_control_flow, &flat_slots);
    if (blend && nir->info.stage == MESA_SHADER_FRAGMENT) {
       NIR_PASS(_, nir, nir_lower_blend, &blend->opts);
       NIR_PASS(_, nir, nir_shader_lower_instructions, borg_blend_const_filter, borg_blend_const_lower,
