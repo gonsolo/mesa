@@ -25,7 +25,7 @@ target_view(struct borgvk_command_buffer *cmd, struct vk_image_view *view)
    if (!view || !view->image || (view->base_mip_level == 0 && view->base_array_layer == 0))
       return view;
    struct borgvk_image *img = container_of(view->image, struct borgvk_image, vk);
-   if (img->vk.samples > 1 || img->vk.image_type == VK_IMAGE_TYPE_3D || view->layer_count != 1 || !img->mem)
+   if (img->vk.image_type == VK_IMAGE_TYPE_3D || view->layer_count != 1 || !img->mem)
       return view;
    for (struct borgvk_target *t = cmd->targets; t; t = t->next)
       if (t->orig == view)
