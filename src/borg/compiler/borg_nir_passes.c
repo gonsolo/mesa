@@ -316,6 +316,44 @@ borg_basic_alu_lower(nir_builder *b, nir_instr *instr, void *data)
 }
 #endif
 
+/* Integer division through the float reciprocal, one correction step: exact for operands below 2^24. */
+static bool
+borg_idiv_filter(const nir_instr *instr, const void *data)
+{
+   if (instr->type != nir_instr_type_alu)
+      return false;
+   const nir_op op = nir_instr_as_alu(instr)->op;
+   return op == nir_op_idiv || op == nir_op_udiv || op == nir_op_imod || op == nir_op_umod || op == nir_op_irem;
+}
+
+static nir_def *
+borg_idiv_lower(nir_builder *b, nir_instr *instr, void *data)
+{
+   nir_alu_instr *alu = nir_instr_as_alu(instr);
+   nir_def *x = nir_ssa_for_alu_src(b, alu, 0), *y = nir_ssa_for_alu_src(b, alu, 1);
+   const bool sgn = alu->op == nir_op_idiv || alu->op == nir_op_imod || alu->op == nir_op_irem;
+   nir_def *a = sgn ? nir_bcsel(b, nir_ilt_imm(b, x, 0), nir_ineg(b, x), x) : x;
+   nir_def *d = sgn ? nir_bcsel(b, nir_ilt_imm(b, y, 0), nir_ineg(b, y), y) : y;
+   nir_def *q = nir_f2i32(b, nir_fmul(b, nir_i2f32(b, a), nir_frcp(b, nir_i2f32(b, d))));
+   nir_def *r = nir_isub(b, a, nir_imul(b, q, d));
+   nir_def *lo = nir_ilt_imm(b, r, 0);
+   q = nir_bcsel(b, lo, nir_iadd_imm(b, q, -1), q);
+   r = nir_bcsel(b, lo, nir_iadd(b, r, d), r);
+   nir_def *hi = nir_uge(b, r, d);
+   q = nir_bcsel(b, hi, nir_iadd_imm(b, q, 1), q);
+   r = nir_bcsel(b, hi, nir_isub(b, r, d), r);
+   const bool quot = alu->op == nir_op_idiv || alu->op == nir_op_udiv;
+   if (!sgn)
+      return quot ? q : r;
+   nir_def *neg_x = nir_ilt_imm(b, x, 0), *neg_y = nir_ilt_imm(b, y, 0);
+   if (quot)
+      return nir_bcsel(b, nir_ixor(b, neg_x, neg_y), nir_ineg(b, q), q);
+   r = nir_bcsel(b, neg_x, nir_ineg(b, r), r);
+   if (alu->op == nir_op_irem)
+      return r;
+   return nir_bcsel(b, nir_iand(b, nir_ine_imm(b, r, 0), nir_ixor(b, nir_ilt_imm(b, r, 0), neg_y)), nir_iadd(b, r, y), r);
+}
+
 /* F2I truncates: trunc(x) = float(int(x)), floor(x) = trunc(x) - (x < trunc(x)); fmod(x, y) = x - y * floor(x / y). */
 static bool
 borg_trunc_filter(const nir_instr *instr, const void *data)
@@ -559,6 +597,7 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(_, nir, nir_shader_instructions_pass, borg_lower_cube, nir_metadata_control_flow, NULL);
       NIR_PASS(_, nir, nir_shader_lower_instructions, borg_flog2_filter, borg_flog2_lower, NULL);
    }
+   NIR_PASS(_, nir, nir_shader_lower_instructions, borg_idiv_filter, borg_idiv_lower, NULL);
    NIR_PASS(_, nir, nir_lower_alu_to_scalar, NULL, NULL);
    bool progress;
    do {
