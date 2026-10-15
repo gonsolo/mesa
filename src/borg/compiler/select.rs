@@ -592,7 +592,7 @@ impl ShaderState {
         } else if (intr.intrinsic == nir_intrinsic_load_input || intr.intrinsic == nir_intrinsic_load_point_coord) && !self.cp.vs_window {
             let is_pc = intr.intrinsic == nir_intrinsic_load_point_coord;
             let loc = if is_pc { 25 } else { intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F };
-            let base_index = if loc == 25 { self.flags.pntc_base() } else { 4 * loc.wrapping_sub(VARYING_SLOT_VAR0) };
+            let base_index = if loc == 25 { self.flags.pntc_base() } else { 4 * loc.wrapping_sub(VARYING_SLOT_VAR0) + intr.get_const_index(NIR_INTRINSIC_COMPONENT) as u32 };
             let bary = [5u8, 6, 7].map(|r| {
                 let v = self.sel.next_vreg; self.sel.next_vreg += 1;
                 self.sel.ubo.insert(v, Ubo::Fixed(r));
@@ -1048,13 +1048,25 @@ impl ShaderState {
             } else if loc < VARYING_SLOT_VAR0 {
                 // gl_PointSize and the other built-in outputs: triangles ignore them.
             } else {
-                let base_index = 4 * loc.wrapping_sub(VARYING_SLOT_VAR0);
+                let base_index = 4 * loc.wrapping_sub(VARYING_SLOT_VAR0) + intr.get_const_index(NIR_INTRINSIC_COMPONENT) as u32;
                 for (c, &(vd0, vc)) in comps.iter().enumerate() {
                     let mut vd = vd0;
                     // SOUT stores a register; a constant living in the uniform window needs a copy.
                     if matches!(self.sel.ubo.get(&vd), Some(Ubo::Uniform(_))) {
+                        // An integer add keeps the bits of an integer constant (a float move changes a NaN or denormal).
+                        let zero = match self.cp.vs_zero {
+                            Some(z) => z,
+                            None => {
+                                let f = self.sel.fresh();
+                                self.sel.ubo.insert(f, Ubo::Fixed(30));
+                                let z = self.sel.fresh();
+                                self.sel.prog.push(BorgInstr { mnem: "ISUB", dst: z, srcs: vec![f, f], swz: vec![0, 0] });
+                                self.cp.vs_zero = Some(z);
+                                z
+                            }
+                        };
                         let out = self.sel.next_vreg; self.sel.next_vreg += 1;
-                        self.sel.prog.push(BorgInstr { mnem: "FMOV", dst: out, srcs: vec![vd], swz: vec![0] });
+                        self.sel.prog.push(BorgInstr { mnem: "IADD", dst: out, srcs: vec![zero, vd], swz: vec![0, 0] });
                         vd = out;
                     }
                     let index = base_index + c as u32;
@@ -1238,10 +1250,12 @@ impl ShaderState {
     /// Gives each fragment output a register of its own where the value lives elsewhere (a
     /// uniform, a TEX or FATTR result block), so it can be placed in the output register.
     pub unsafe fn copy_frag_outputs(&mut self) {
+    let mut seen = std::collections::HashSet::new();
     for c in 0..4 {
         let Some((v, comp)) = self.outs.frag[c] else { continue };
-        // A TEX result block (r20-r23) or FATTR block is not the output register: copy that too.
-        if self.sel.prog.iter().any(|i| i.dst == v) && !self.tex_dsts.contains(&v) && !self.fattr_dsts.contains(&v) {
+        // A TEX result block (r20-r23) or FATTR block is not the output register: copy that too;
+        // so is a value that already is another channel's output.
+        if seen.insert(v) && self.sel.prog.iter().any(|i| i.dst == v) && !self.tex_dsts.contains(&v) && !self.fattr_dsts.contains(&v) {
             continue;
         }
         let out = self.sel.next_vreg;
