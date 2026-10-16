@@ -94,12 +94,12 @@ impl ShaderState {
     pub unsafe fn optimise(&mut self) {
         set_frag_pool(Vec::new());
         set_vert_pool(Vec::new());
-        if self.cp.vs_window && self.cp.vs_consts.len() > crate::state::DRAW_VS_CONST_WORDS {
-            self.pool_vs_consts();
-        }
-        if let (true, Some(limit)) = (self.is_fragment, self.spill_limit) {
+        if let Some(limit) = self.spill_limit {
             dce(&mut self.sel.prog, &self.out_roots);
             self.spill_to_pressure(limit);
+        }
+        if self.cp.vs_window && self.cp.vs_consts.len() > crate::state::DRAW_VS_CONST_WORDS {
+            self.pool_vs_consts();
         }
         if self.is_fragment && self.fw.count > 11 {
             self.pool_window_consts();

@@ -322,7 +322,7 @@ unsafe fn compile_nir_inner(
         }
         let blob = match cx.assemble() {
             Some(blob) => blob,
-            None if cx.is_fragment && cx.alloc_failed => continue,
+            None if (cx.is_fragment || cx.is_vertex) && cx.alloc_failed => continue,
             None => return 0,
         };
         if !out_len.is_null() {

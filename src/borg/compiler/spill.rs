@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 use std::collections::HashMap;
-use crate::state::ShaderState;
+use crate::state::{ShaderState, DRAW_VS_CONST_U0, VS_VIRTUAL_MAX};
 use crate::{BorgInstr, Ubo, NO_DST};
 
 const SCRATCH_WORDS: u32 = 16384 * 34;
 const MAX_SPILL_SLOTS: u32 = 16;
+// The vertex lane key's two words, after the slots; the word after the second takes the other lanes' store.
+const KEY_WORDS: u32 = SCRATCH_WORDS + 4 * MAX_SPILL_SLOTS;
 
 impl ShaderState {
     fn op(&mut self, at: &mut Vec<BorgInstr>, mnem: &'static str, srcs: &[u32]) -> u32 {
@@ -16,15 +18,59 @@ impl ShaderState {
         dst
     }
 
+    /// A constant: a fragment window word, or a vertex window word the pool pass may move to memory.
+    fn konst(&mut self, bits: u32) -> u32 {
+        if self.is_fragment {
+            return self.fw.win(&mut self.sel, bits);
+        }
+        if let Some(&v) = self.cp.vs_by_bits.get(&bits) {
+            return v;
+        }
+        let v = self.sel.fresh();
+        let u = DRAW_VS_CONST_U0 as u32 + self.cp.vs_consts.len() as u32;
+        self.cp.vs_consts.push((u as u8, bits));
+        self.sel.ubo.insert(v, Ubo::Uniform(u as u8));
+        self.cp.vs_by_bits.insert(bits, v);
+        v
+    }
+
+    /// A per-lane word in 0..3. Memory ops run lane by lane, so the last lane's VertexIndex wins a
+    /// shared word: lanes holding it get 0, the rest repeat that on a second word. Lanes with equal
+    /// VertexIndex share a key, and their values are equal too.
+    fn vertex_lane_key(&mut self) -> Vec<BorgInstr> {
+        let mut out = Vec::new();
+        let vi = self.sel.fresh();
+        self.sel.ubo.insert(vi, Ubo::Fixed(30));
+        let (k0, k1, c1, c2) = (self.konst(KEY_WORDS), self.konst(KEY_WORDS + 2), self.konst(1), self.konst(2));
+        let z = self.op(&mut out, "ISUB", &[vi, vi]);
+        let a0 = self.op(&mut out, "IADD", &[z, k0]);
+        out.push(BorgInstr { mnem: "STORE", dst: NO_DST, srcs: vec![a0, vi], swz: vec![0, 0] });
+        let t0 = self.op(&mut out, "LOAD", &[a0]);
+        let e0 = self.op(&mut out, "ISEQ", &[vi, t0]);
+        let a1 = self.op(&mut out, "IADD", &[e0, k1]);
+        out.push(BorgInstr { mnem: "STORE", dst: NO_DST, srcs: vec![a1, vi], swz: vec![0, 0] });
+        let a2 = self.op(&mut out, "IADD", &[z, k1]);
+        let t1 = self.op(&mut out, "LOAD", &[a2]);
+        let e1 = self.op(&mut out, "ISEQ", &[vi, t1]);
+        let n0 = self.op(&mut out, "ISUB", &[c1, e0]);
+        let m = self.op(&mut out, "ISUB", &[c2, e1]);
+        let key = self.op(&mut out, "IMUL", &[n0, m]);
+        self.spill_lane = Some(key);
+        out
+    }
+
     /// A per-lane word in 0..4, unique within a quad.
     fn lane_key(&mut self) -> Vec<BorgInstr> {
+        if self.is_vertex {
+            return self.vertex_lane_key();
+        }
         let mut out = Vec::new();
         let (f30, f31) = (self.sel.fresh(), self.sel.fresh());
         for (f, r) in [(f30, 30), (f31, 31)] {
             self.sel.ubo.insert(f, Ubo::Fixed(r));
             self.per_pixel_fixed.insert(f);
         }
-        let c1 = self.fw.win(&mut self.sel, 1);
+        let c1 = self.konst(1);
         let xi = self.op(&mut out, "F2I", &[f30]);
         let yi = self.op(&mut out, "F2I", &[f31]);
         let xb = self.op(&mut out, "IAND", &[xi, c1]);
@@ -37,6 +83,9 @@ impl ShaderState {
 
     /// Helper lanes skip STOREs, so their spilled values would come back wrong: derivatives and implicit LOD need them.
     fn needs_helper_lanes(&self, i: &BorgInstr) -> bool {
+        if self.is_vertex {
+            return matches!(i.mnem, "BRZ" | "BRNZ");
+        }
         match i.mnem {
             "DDX" | "DDY" | "TEXA" | "BRZ" | "BRNZ" => true,
             "TEX" => {
@@ -80,10 +129,11 @@ impl ShaderState {
 
     /// Spills the live value with the furthest next use; false when nothing can be spilled.
     fn spill_one(&mut self, live: &[(u32, usize)]) -> bool {
-        if !self.is_fragment || self.sel.prog.iter().any(|i| self.needs_helper_lanes(i)) {
+        let vs_room = self.cp.vs_window && self.cp.vs_consts.len() + 5 < VS_VIRTUAL_MAX;
+        if !(self.is_fragment || self.is_vertex && vs_room) || self.sel.prog.iter().any(|i| self.needs_helper_lanes(i)) {
             return false;
         }
-        let pinned: Vec<u32> = self.out_roots.iter().copied().chain(self.tex_dsts.iter().copied()).chain(self.fattr_dsts.iter().copied()).chain(self.frag_z).collect();
+        let pinned: Vec<u32> = self.out_roots.iter().copied().chain(self.tex_dsts.iter().copied()).chain(self.fattr_dsts.iter().copied()).chain(self.frag_z).chain(self.pos_out.iter().flatten().copied()).chain(self.frag_out.iter().flatten().copied()).collect();
         let single_def = |prog: &[BorgInstr], v: u32| {
             prog.iter().filter(|i| i.dst == v).count() == 1
                 && prog.iter().all(|i| i.srcs.iter().zip(&i.swz).all(|(s, &c)| *s != v || c == 0))
@@ -102,7 +152,7 @@ impl ShaderState {
             prog.splice(0..0, head);
         }
         let lane = self.spill_lane.unwrap();
-        let k = self.fw.win(&mut self.sel, slot_bits);
+        let k = self.konst(slot_bits);
         self.spill_slots += 1;
         crate::set_spill_slots(self.spill_slots);
         let mut out = Vec::with_capacity(prog.len() + 8);

@@ -93,7 +93,7 @@ struct borgvk_device {
    uint32_t stage_ubo[2];
    bool stage_push[2];
    bool stage_pwin[2];   /* the stage reads push constants from the heap window */
-   bool frag_spills;     /* the fragment shader spills to the region's scratch slot */
+   bool stage_spill[2];  /* the stage spills to the region's scratch slot */
    int frag_tex_binding;
    uint32_t frag_select;   /* 1 + the colour output the fragment shader keeps; 0 keeps all */
    bool frag_reads_pntc;
@@ -378,7 +378,7 @@ struct borgvk_pipeline {
    uint8_t                   emul_n;        /* wide colour targets: this and emul[] draw one each */
    VkPipeline                emul[3];
    bool                      push_window;   /* a stage reads push constants from the heap window */
-   bool                      spills;        /* the fragment shader spills to the region's scratch slot */
+   bool                      spills;        /* a stage spills to the region's scratch slot */
    uint8_t                   push_stage;    /* bit per stage: loads push constants, no UBO */
    uint8_t                   set_base[4];
    int                       tex_binding;   /* binding of the texture the fragment shader samples */
