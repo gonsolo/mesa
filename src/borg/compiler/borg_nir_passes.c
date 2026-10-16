@@ -317,6 +317,75 @@ borg_basic_alu_lower(nir_builder *b, nir_instr *instr, void *data)
 #endif
 
 /* Integer division through the float reciprocal, one correction step: exact for operands below 2^24. */
+/* A fragment shader that loads many inputs and uniform vectors up front runs out of registers:
+ * load the components one at a time and sink each load to its first use. */
+static bool
+borg_wide_loads(nir_shader *nir)
+{
+   unsigned comps = 0;
+   nir_foreach_function_impl(impl, nir)
+      nir_foreach_block(blk, impl)
+         nir_foreach_instr(instr, blk) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *i = nir_instr_as_intrinsic(instr);
+            if (i->intrinsic == nir_intrinsic_load_input || i->intrinsic == nir_intrinsic_load_ubo)
+               comps += i->def.num_components;
+         }
+   return comps >= 16;
+}
+
+static bool
+borg_ubo_split_filter(const nir_instr *instr, const void *data)
+{
+   return instr->type == nir_instr_type_intrinsic &&
+          nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_ubo &&
+          nir_instr_as_intrinsic(instr)->def.num_components > 1;
+}
+
+static nir_def *
+borg_ubo_split_lower(nir_builder *b, nir_instr *instr, void *data)
+{
+   nir_intrinsic_instr *ld = nir_instr_as_intrinsic(instr);
+   nir_def *c[4];
+   for (unsigned i = 0; i < ld->def.num_components; i++)
+      c[i] = nir_load_ubo(b, 1, 32, ld->src[0].ssa, nir_iadd_imm(b, ld->src[1].ssa, 4 * i),
+                          .access = nir_intrinsic_access(ld), .align_mul = 4, .align_offset = 0,
+                          .range_base = nir_intrinsic_range_base(ld) + 4 * i, .range = 4);
+   return nir_vec(b, c, ld->def.num_components);
+}
+
+/* Repeat a scalar input or uniform load at each ALU use: reloading is cheaper than holding the register. */
+static bool
+borg_dup_load(nir_builder *b, nir_intrinsic_instr *ld, void *data)
+{
+   if ((ld->intrinsic != nir_intrinsic_load_input && ld->intrinsic != nir_intrinsic_load_ubo) ||
+       ld->def.num_components != 1)
+      return false;
+   unsigned n = 0;
+   if (nir_def_used_by_if(&ld->def))
+      return false;
+   nir_foreach_use(use, &ld->def) {
+      if (nir_src_use_instr(use)->type != nir_instr_type_alu)
+         return false;
+      n++;
+   }
+   if (n < 2)
+      return false;
+   nir_src *uses[64];
+   unsigned k = 0;
+   nir_foreach_use(use, &ld->def)
+      if (k < 64)
+         uses[k++] = use;
+   for (unsigned i = 1; i < k; i++) {
+      b->cursor = nir_before_instr(nir_src_use_instr(uses[i]));
+      nir_instr *c = nir_instr_clone(b->shader, &ld->instr);
+      nir_builder_instr_insert(b, c);
+      nir_src_rewrite(uses[i], &nir_instr_as_intrinsic(c)->def);
+   }
+   return k > 1;
+}
+
 static bool
 borg_idiv_filter(const nir_instr *instr, const void *data)
 {
@@ -602,6 +671,11 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    }
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_idiv_filter, borg_idiv_lower, NULL);
    NIR_PASS(_, nir, nir_lower_alu_to_scalar, NULL, NULL);
+   const bool wide = nir->info.stage == MESA_SHADER_FRAGMENT && borg_wide_loads(nir);
+   if (wide) {
+      NIR_PASS(_, nir, nir_shader_lower_instructions, borg_ubo_split_filter, borg_ubo_split_lower, NULL);
+      NIR_PASS(_, nir, nir_lower_io_to_scalar, nir_var_shader_in, NULL, NULL);
+   }
    bool progress;
    do {
       progress = false;
@@ -646,6 +720,10 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
     * of an `if` store into the phi's register. */
    if (nir->info.stage == MESA_SHADER_COMPUTE)
       NIR_PASS(_, nir, nir_lower_bool_to_int32);
+   if (wide) {
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, borg_dup_load, nir_metadata_control_flow, NULL);
+      NIR_PASS(_, nir, nir_opt_move, nir_move_load_ubo | nir_move_load_input | nir_move_const_undef);
+   }
    /* Phis become registers for every stage. */
    NIR_PASS(_, nir, nir_convert_from_ssa, true, false);
 
