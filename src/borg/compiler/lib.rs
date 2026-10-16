@@ -15,6 +15,7 @@ mod opt;
 mod pipeline;
 mod regalloc;
 mod select;
+mod spill;
 mod state;
 mod survey;
 
@@ -81,6 +82,20 @@ pub(crate) fn output_select() -> i32 {
 
 thread_local! {
     static LAST_PUSH_WINDOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+thread_local! {
+    static LAST_SPILL_SLOTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) fn set_spill_slots(n: u32) {
+    LAST_SPILL_SLOTS.with(|c| c.set(n));
+}
+
+/// The last fragment shader spills to this many scratch slots of the draw's buffer region.
+#[no_mangle]
+pub extern "C" fn borgc_last_spill_slots() -> u32 {
+    LAST_SPILL_SLOTS.with(|c| c.get())
 }
 
 pub(crate) fn set_push_window(on: bool) {
@@ -292,21 +307,33 @@ unsafe fn compile_nir_inner(
     if nir.is_null() {
         return 0;
     }
-    let (mut cx, entry, total) = ShaderState::start(nir, flags);
-    cx.select_entry(entry);
-    if !cx.check_selected() {
-        return 0;
+    let forced = env::var("BORGC_SPILL_LIMIT").ok().and_then(|v| v.parse::<usize>().ok());
+    for limit in [forced, Some(20), Some(18), Some(16), Some(14), Some(12), Some(10)] {
+        let (mut cx, entry, total) = ShaderState::start(nir, flags);
+        cx.spill_limit = limit;
+        cx.select_entry(entry);
+        if !cx.check_selected() {
+            return 0;
+        }
+        cx.lower_outputs();
+        cx.optimise();
+        if cx.spill_slots > 0 {
+            eprintln!("borgc: spilled {} value(s) to keep {:?} live", cx.spill_slots, limit);
+        }
+        let blob = match cx.assemble() {
+            Some(blob) => blob,
+            None if cx.is_fragment && cx.alloc_failed => continue,
+            None => return 0,
+        };
+        if !out_len.is_null() {
+            *out_len = blob.len() as u32;
+        }
+        if !out_buf.is_null() && (blob.len() as u32) <= buf_cap {
+            std::ptr::copy_nonoverlapping(blob.as_ptr(), out_buf, blob.len());
+        }
+        return total;
     }
-    cx.lower_outputs();
-    cx.optimise();
-    let Some(blob) = cx.assemble() else { return 0 };
-    if !out_len.is_null() {
-        *out_len = blob.len() as u32;
-    }
-    if !out_buf.is_null() && (blob.len() as u32) <= buf_cap {
-        std::ptr::copy_nonoverlapping(blob.as_ptr(), out_buf, blob.len());
-    }
-    total
+    0
 }
 
 #[cfg(test)]

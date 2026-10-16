@@ -1,0 +1,129 @@
+// Copyright © 2026 Andreas Wendleder
+// SPDX-License-Identifier: MIT
+
+use std::collections::HashMap;
+use crate::state::ShaderState;
+use crate::{BorgInstr, Ubo, NO_DST};
+
+const SCRATCH_WORDS: u32 = 16384 * 34;
+const MAX_SPILL_SLOTS: u32 = 16;
+
+impl ShaderState {
+    fn op(&mut self, at: &mut Vec<BorgInstr>, mnem: &'static str, srcs: &[u32]) -> u32 {
+        let dst = self.sel.fresh();
+        at.push(BorgInstr { mnem, dst, srcs: srcs.to_vec(), swz: vec![0; srcs.len()] });
+        self.no_spill.insert(dst);
+        dst
+    }
+
+    /// A per-lane word in 0..4, unique within a quad.
+    fn lane_key(&mut self) -> Vec<BorgInstr> {
+        let mut out = Vec::new();
+        let (f30, f31) = (self.sel.fresh(), self.sel.fresh());
+        for (f, r) in [(f30, 30), (f31, 31)] {
+            self.sel.ubo.insert(f, Ubo::Fixed(r));
+            self.per_pixel_fixed.insert(f);
+        }
+        let c1 = self.fw.win(&mut self.sel, 1);
+        let xi = self.op(&mut out, "F2I", &[f30]);
+        let yi = self.op(&mut out, "F2I", &[f31]);
+        let xb = self.op(&mut out, "IAND", &[xi, c1]);
+        let yb = self.op(&mut out, "IAND", &[yi, c1]);
+        let y2 = self.op(&mut out, "ISHL", &[yb, c1]);
+        let key = self.op(&mut out, "IOR", &[xb, y2]);
+        self.spill_lane = Some(key);
+        out
+    }
+
+    /// Helper lanes skip STOREs, so their spilled values would come back wrong: derivatives and implicit LOD need them.
+    fn needs_helper_lanes(&self, i: &BorgInstr) -> bool {
+        match i.mnem {
+            "DDX" | "DDY" | "TEXA" | "BRZ" | "BRNZ" => true,
+            "TEX" => {
+                let op = i.srcs.get(2).and_then(|c| match self.sel.ubo.get(c) {
+                    Some(Ubo::Uniform(u)) => self.fw.consts.iter().find(|(w, _)| w == &(*u as u32)).map(|&(_, bits)| (bits >> 16) & 3),
+                    _ => None,
+                });
+                !matches!(op, Some(1 | 3))
+            }
+            _ => false,
+        }
+    }
+
+    /// The first position with more than `limit` live values, with the values that cross it.
+    fn over_limit(&self, limit: usize) -> Option<Vec<(u32, usize)>> {
+        let mut def_at: HashMap<u32, usize> = HashMap::new();
+        let mut last: HashMap<u32, usize> = HashMap::new();
+        for (at, i) in self.sel.prog.iter().enumerate() {
+            if i.dst != NO_DST {
+                def_at.entry(i.dst).or_insert(at);
+                last.insert(i.dst, at);
+            }
+            for s in &i.srcs {
+                last.insert(*s, at);
+            }
+        }
+        let pinned = |v: &u32| self.sel.ubo.contains_key(v);
+        let vals: Vec<(u32, usize, usize)> = def_at.iter().filter(|(v, _)| !pinned(v)).map(|(&v, &d)| (v, d, last[&v])).collect();
+        let at = (0..self.sel.prog.len()).find(|&p| vals.iter().filter(|&&(_, d, l)| d <= p && p <= l).count() > limit)?;
+        Some(vals.iter().filter(|&&(_, d, l)| d < at && l > at).map(|&(v, _, l)| (v, l)).collect())
+    }
+
+    pub fn spill_to_pressure(&mut self, limit: usize) {
+        while self.spill_slots < MAX_SPILL_SLOTS {
+            let Some(live) = self.over_limit(limit) else { return };
+            if !self.spill_one(&live) {
+                return;
+            }
+        }
+    }
+
+    /// Spills the live value with the furthest next use; false when nothing can be spilled.
+    fn spill_one(&mut self, live: &[(u32, usize)]) -> bool {
+        if !self.is_fragment || self.sel.prog.iter().any(|i| self.needs_helper_lanes(i)) {
+            return false;
+        }
+        let pinned: Vec<u32> = self.out_roots.iter().copied().chain(self.tex_dsts.iter().copied()).chain(self.fattr_dsts.iter().copied()).chain(self.frag_z).collect();
+        let single_def = |prog: &[BorgInstr], v: u32| {
+            prog.iter().filter(|i| i.dst == v).count() == 1
+                && prog.iter().all(|i| i.srcs.iter().zip(&i.swz).all(|(s, &c)| *s != v || c == 0))
+        };
+        let Some(&(v, _)) = live
+            .iter()
+            .filter(|(v, _)| !self.no_spill.contains(v) && !pinned.contains(v) && single_def(&self.sel.prog, *v))
+            .max_by_key(|&&(v, end)| (end, std::cmp::Reverse(v)))
+        else {
+            return false;
+        };
+        let slot_bits = SCRATCH_WORDS + 4 * self.spill_slots;
+        let mut prog = std::mem::take(&mut self.sel.prog);
+        if self.spill_lane.is_none() {
+            let head = self.lane_key();
+            prog.splice(0..0, head);
+        }
+        let lane = self.spill_lane.unwrap();
+        let k = self.fw.win(&mut self.sel, slot_bits);
+        self.spill_slots += 1;
+        crate::set_spill_slots(self.spill_slots);
+        let mut out = Vec::with_capacity(prog.len() + 8);
+        for mut i in prog {
+            if i.srcs.contains(&v) {
+                let a = self.op(&mut out, "IADD", &[lane, k]);
+                let t = self.sel.fresh();
+                self.no_spill.insert(t);
+                out.push(BorgInstr { mnem: "LOAD", dst: t, srcs: vec![a], swz: vec![0] });
+                for s in i.srcs.iter_mut().filter(|s| **s == v) {
+                    *s = t;
+                }
+            }
+            let defines = i.dst == v;
+            out.push(i);
+            if defines {
+                let a = self.op(&mut out, "IADD", &[lane, k]);
+                out.push(BorgInstr { mnem: "STORE", dst: NO_DST, srcs: vec![a, v], swz: vec![0, 0] });
+            }
+        }
+        self.sel.prog = out;
+        true
+    }
+}

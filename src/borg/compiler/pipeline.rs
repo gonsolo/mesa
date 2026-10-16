@@ -27,6 +27,7 @@ impl ShaderState {
             &[17, 18, 19, 23]
         };
         crate::set_push_window(push_window && is_fragment);
+        crate::set_spill_slots(0);
         let mut st = ShaderState::new(regs, is_vertex, is_fragment, flags);
         st.push_window = push_window && is_fragment;
         st.out_select = crate::output_select();
@@ -96,6 +97,10 @@ impl ShaderState {
         if self.cp.vs_window && self.cp.vs_consts.len() > crate::state::DRAW_VS_CONST_WORDS {
             self.pool_vs_consts();
         }
+        if let (true, Some(limit)) = (self.is_fragment, self.spill_limit) {
+            dce(&mut self.sel.prog, &self.out_roots);
+            self.spill_to_pressure(limit);
+        }
         if self.is_fragment && self.fw.count > 11 {
             self.pool_window_consts();
         }
@@ -111,7 +116,10 @@ impl ShaderState {
     pub fn assemble(&mut self) -> Option<Vec<u8>> {
         let (forced, mut extra_reserved) = fixed_regs(self, &self.pos_out, &self.frag_out, self.frag_z);
         self.split_window_reads();
-        let alloc = allocate(self, &forced, &mut extra_reserved)?;
+        let Some(alloc) = allocate(self, &forced, &mut extra_reserved) else {
+            self.alloc_failed = true;
+            return None;
+        };
         let Encoded { mut words, n_preload, n_body, pending } = encode_program(self, &alloc);
         words.push(0x0000_0000);
         Some(build_blob(self, &words, n_preload, n_body, pending, &self.frag_out, self.frag_z))
