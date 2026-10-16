@@ -386,6 +386,30 @@ borg_dup_load(nir_builder *b, nir_intrinsic_instr *ld, void *data)
    return k > 1;
 }
 
+/* Same for the constant + descriptor address a UBO load adds, so it does not stay live between loads. */
+static bool
+borg_dup_addr(nir_builder *b, nir_alu_instr *alu, void *data)
+{
+   if (alu->op != nir_op_iadd || !nir_src_is_const(alu->src[0].src))
+      return false;
+   unsigned k = 0;
+   nir_src *uses[64];
+   nir_foreach_use(use, &alu->def) {
+      nir_instr *u = nir_src_use_instr(use);
+      if (u->type != nir_instr_type_intrinsic || nir_instr_as_intrinsic(u)->intrinsic != nir_intrinsic_load_ubo ||
+          use != &nir_instr_as_intrinsic(u)->src[1] || k == 64)
+         return false;
+      uses[k++] = use;
+   }
+   for (unsigned i = 1; i < k; i++) {
+      b->cursor = nir_before_instr(nir_src_use_instr(uses[i]));
+      nir_instr *c = nir_instr_clone(b->shader, &alu->instr);
+      nir_builder_instr_insert(b, c);
+      nir_src_rewrite(uses[i], &nir_instr_as_alu(c)->def);
+   }
+   return k > 1;
+}
+
 static bool
 borg_idiv_filter(const nir_instr *instr, const void *data)
 {
@@ -722,7 +746,8 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(_, nir, nir_lower_bool_to_int32);
    if (wide) {
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, borg_dup_load, nir_metadata_control_flow, NULL);
-      NIR_PASS(_, nir, nir_opt_move, nir_move_load_ubo | nir_move_load_input | nir_move_const_undef);
+      NIR_PASS(_, nir, nir_shader_alu_pass, borg_dup_addr, nir_metadata_control_flow, NULL);
+      NIR_PASS(_, nir, nir_opt_move, nir_move_load_ubo | nir_move_load_input | nir_move_const_undef | nir_move_alu);
    }
    /* Phis become registers for every stage. */
    NIR_PASS(_, nir, nir_convert_from_ssa, true, false);
