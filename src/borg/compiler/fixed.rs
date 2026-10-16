@@ -44,7 +44,13 @@ pub fn fixed_regs(
             forced.insert(zr, 29); // interpolated depth → r29
         }
         extra_reserved.extend_from_slice(&[4, 21, 22, 23, 25, 26, 27, 28, 29]);   // r25 is the kill flag
-        extra_reserved.extend_from_slice(&[5, 6, 7, 10, 11, 12]);
+        let reads_bary = cx.sel.prog.iter().flat_map(|i| i.srcs.iter()).any(|v| matches!(cx.sel.ubo.get(v), Some(Ubo::Fixed(5..=7))));
+        if reads_bary {
+            extra_reserved.extend_from_slice(&[5, 6, 7]);
+        }
+        if !cx.fattr_dsts.is_empty() {
+            extra_reserved.extend_from_slice(&[10, 11, 12]);
+        }
         if cx.frag_coord_w {
             extra_reserved.push(8);
         }
