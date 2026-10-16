@@ -150,6 +150,7 @@ borgvk_build_graphics(struct borgvk_device *device, const VkAllocationCallbacks 
    pl->ubo_mask = device->stage_ubo[0] | device->stage_ubo[1];
    pl->push_used = device->stage_push[0] || device->stage_push[1];
    pl->push_window = device->stage_pwin[0] || device->stage_pwin[1];
+   pl->spills = device->frag_spills;
    pl->push_stage = (device->stage_push[0] && !device->stage_ubo[0] && !device->stage_pwin[0]) |
                     (device->stage_push[1] && !device->stage_ubo[1] && !device->stage_pwin[1]) << 1;
    pl->color_count = color_count;

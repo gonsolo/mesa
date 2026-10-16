@@ -33,6 +33,7 @@ generic_reject(int why)
 #define BORGVK_HEAP_BYTES 0x2000000u
 #define BORGVK_POINT_SLOT 16
 #define PUSH_WINDOW_SLOT 33   /* borgc: PUSH_WINDOW_WORDS */
+#define SPILL_SLOT 34         /* borgc: spill.rs SCRATCH_WORDS */
 
 struct draw_heap {
    uint32_t top;
@@ -727,9 +728,9 @@ draw_buffers(struct draw_ctx *g)
             smask |= 1u << (pipeline->set_base[si] + b);
    }
    const uint32_t umask = pipeline->ubo_mask & ~1u;
-   if (ok && (smask || umask || pipeline->push_window)) {
-      const uint32_t slots = pipeline->push_window ? PUSH_WINDOW_SLOT + 1 : 1 + util_last_bit(smask | umask);
-      const bool reuse = cmd->region_set == set && cmd->batch_draws && !umask && !any_dyn && !sets[1];
+   if (ok && (smask || umask || pipeline->push_window || pipeline->spills)) {
+      const uint32_t slots = pipeline->spills ? SPILL_SLOT + 1 : pipeline->push_window ? PUSH_WINDOW_SLOT + 1 : 1 + util_last_bit(smask | umask);
+      const bool reuse = cmd->region_set == set && cmd->batch_draws && !umask && !any_dyn && !sets[1] && !pipeline->spills;
       uint32_t base = cmd->region_base;
       if (!reuse) {
          base = (heap->top + 3) & ~3u;
@@ -790,7 +791,7 @@ draw_buffers(struct draw_ctx *g)
       }
       ubo_base = base + 1;
    }
-   for (int b = 0; ok && !smask && !umask && set && !(pipeline->push_used && !pipeline->ubo_mask) && b < BORGVK_MAX_BINDINGS; b++) {
+   for (int b = 0; ok && !smask && !umask && !pipeline->spills && set && !(pipeline->push_used && !pipeline->ubo_mask) && b < BORGVK_MAX_BINDINGS; b++) {
       struct borgvk_buffer *ub = set->buffers[b];
       if (!ub || !ub->mem || !ub->mem->map || (pipeline->ubo_mask && !(pipeline->ubo_mask >> b & 1)))
          continue;

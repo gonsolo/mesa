@@ -260,6 +260,7 @@ borgvk_compile_empty_frag(struct borgvk_device *device, uint32_t opt)
    device->stage_ubo[1] = 0;
    device->stage_push[0] = device->stage_push[1] = false;
    device->stage_pwin[1] = false;
+   device->frag_spills = false;
    ralloc_free(nb.shader);
 }
 
@@ -280,6 +281,8 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
          device->stage_ubo[cslot == BORGVK_STAGE_FRAG] = 0;
          device->stage_push[cslot == BORGVK_STAGE_FRAG] = false;
          device->stage_pwin[cslot == BORGVK_STAGE_FRAG] = false;
+         if (cslot == BORGVK_STAGE_FRAG)
+            device->frag_spills = false;
          device->shader_blob[cslot].npool = 0;
          mesa_logi("borgvk: shader blob from the cache (%u bytes)", device->shader_blob[cslot].len);
          return;
@@ -325,6 +328,8 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
                         vfetch);
       borgc_set_output_select(-1);
       device->stage_pwin[slot == BORGVK_STAGE_FRAG] = borgc_last_push_window();
+      if (slot == BORGVK_STAGE_FRAG)
+         device->frag_spills = borgc_last_spill_slots() > 0;
       if (len > 0 && len <= BORGVK_SHADER_BLOB_MAX) {
          b->len = len;
          b->npool = slot == BORGVK_STAGE_FRAG ? borgc_last_frag_pool(b->pool, BORGVK_POOL_MAX) :
