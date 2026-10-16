@@ -38,6 +38,9 @@ extern const struct nir_shader_compiler_options borg_nir_options;
  * SPIR-V → NIR. */
 void borg_lower_nir_for_borgc(struct nir_shader *nir);
 
+/* Vertex shaders: fetch each input again at every use (a retry for a shader out of registers). */
+void borg_lower_set_vertex_remat(bool on);
+
 /* Blending in the fragment shader (docs/B3_colour_formats.md): the attachment's blend state for
  * nir_lower_blend, and the blend constants. */
 struct borg_blend {

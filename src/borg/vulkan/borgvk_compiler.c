@@ -301,6 +301,7 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
    remap_array_bindings(device, nir);
    if (stage_info->stage == VK_SHADER_STAGE_VERTEX_BIT && (vfetch & (BORGC_VS_FETCH | BORGC_VS_POINT_QUADS | BORGC_VS_LINES_BIT)) == (BORGC_VS_FETCH | BORGC_VS_LINES_BIT))
       borgvk_lower_lines(nir, vfetch & 0xFFFFu);
+   nir_shader *retry = stage_info->stage == VK_SHADER_STAGE_VERTEX_BIT ? nir_shader_clone(NULL, nir) : NULL;
    borg_lower_nir_for_borgc_blend(nir, blend);
    device->frag_reads_pntc = stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT && reads_point_coord(nir);
    if (stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT)
@@ -325,6 +326,12 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
       borgc_set_output_select(slot == BORGVK_STAGE_FRAG ? (int)device->frag_select - 1 : -1);
       borgc_compile_nir(nir, b->data, BORGVK_SHADER_BLOB_MAX, &len,
                         vfetch);
+      if (!len && retry) {
+         borg_lower_set_vertex_remat(true);
+         borg_lower_nir_for_borgc_blend(retry, blend);
+         borg_lower_set_vertex_remat(false);
+         borgc_compile_nir(retry, b->data, BORGVK_SHADER_BLOB_MAX, &len, vfetch);
+      }
       borgc_set_output_select(-1);
       device->stage_pwin[slot == BORGVK_STAGE_FRAG] = borgc_last_push_window();
       device->stage_spill[slot == BORGVK_STAGE_FRAG] = borgc_last_spill_slots() > 0;
@@ -345,6 +352,7 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
    } else {
       borgc_compile_nir(nir, NULL, 0, NULL, 0);   /* diagnostics only */
    }
+   ralloc_free(retry);
    ralloc_free(nir);
 }
 

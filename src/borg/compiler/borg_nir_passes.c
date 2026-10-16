@@ -356,11 +356,19 @@ borg_ubo_split_lower(nir_builder *b, nir_instr *instr, void *data)
 }
 
 /* Repeat a scalar input or uniform load at each ALU use: reloading is cheaper than holding the register. */
+static int
+borg_use_order(const void *a, const void *b)
+{
+   const nir_instr *x = nir_src_use_instr(*(nir_src *const *)a), *y = nir_src_use_instr(*(nir_src *const *)b);
+   return x->index < y->index ? -1 : x->index > y->index;
+}
+
 static bool
 borg_dup_load(nir_builder *b, nir_intrinsic_instr *ld, void *data)
 {
+   const bool vec_input = ld->intrinsic == nir_intrinsic_load_input && b->shader->info.stage == MESA_SHADER_VERTEX;
    if ((ld->intrinsic != nir_intrinsic_load_input && ld->intrinsic != nir_intrinsic_load_ubo) ||
-       ld->def.num_components != 1)
+       (ld->def.num_components != 1 && !vec_input))
       return false;
    unsigned n = 0;
    if (nir_def_used_by_if(&ld->def))
@@ -377,13 +385,27 @@ borg_dup_load(nir_builder *b, nir_intrinsic_instr *ld, void *data)
    nir_foreach_use(use, &ld->def)
       if (k < 64)
          uses[k++] = use;
+   if (vec_input)
+      qsort(uses, k, sizeof(uses[0]), borg_use_order);
+   /* A vertex input is a whole fetch: uses close together share one. */
+   nir_instr *cur = nir_src_use_instr(uses[0]);
+   nir_def *def = &ld->def;
+   bool changed = false;
    for (unsigned i = 1; i < k; i++) {
-      b->cursor = nir_before_instr(nir_src_use_instr(uses[i]));
+      nir_instr *u = nir_src_use_instr(uses[i]);
+      if (vec_input && u->block == cur->block && u->index - cur->index <= 16) {
+         nir_src_rewrite(uses[i], def);
+         continue;
+      }
+      b->cursor = nir_before_instr(u);
       nir_instr *c = nir_instr_clone(b->shader, &ld->instr);
       nir_builder_instr_insert(b, c);
-      nir_src_rewrite(uses[i], &nir_instr_as_intrinsic(c)->def);
+      def = &nir_instr_as_intrinsic(c)->def;
+      nir_src_rewrite(uses[i], def);
+      cur = u;
+      changed = true;
    }
-   return k > 1;
+   return changed;
 }
 
 /* Same for the constant + descriptor address a UBO load adds, so it does not stay live between loads. */
@@ -558,6 +580,14 @@ borg_clamp_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    return true;
 }
 
+static bool remat_vertex_inputs;
+
+void
+borg_lower_set_vertex_remat(bool on)
+{
+   remat_vertex_inputs = on;
+}
+
 void
 borg_lower_nir_for_borgc(struct nir_shader *nir)
 {
@@ -695,8 +725,9 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    }
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_idiv_filter, borg_idiv_lower, NULL);
    NIR_PASS(_, nir, nir_lower_alu_to_scalar, NULL, NULL);
-   const bool wide = nir->info.stage == MESA_SHADER_FRAGMENT && borg_wide_loads(nir);
-   if (wide) {
+   const bool wide = (nir->info.stage == MESA_SHADER_FRAGMENT || (nir->info.stage == MESA_SHADER_VERTEX && remat_vertex_inputs)) &&
+                     borg_wide_loads(nir);
+   if (wide && nir->info.stage == MESA_SHADER_FRAGMENT) {
       NIR_PASS(_, nir, nir_shader_lower_instructions, borg_ubo_split_filter, borg_ubo_split_lower, NULL);
       NIR_PASS(_, nir, nir_lower_io_to_scalar, nir_var_shader_in, NULL, NULL);
    }
@@ -745,6 +776,8 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    if (nir->info.stage == MESA_SHADER_COMPUTE)
       NIR_PASS(_, nir, nir_lower_bool_to_int32);
    if (wide) {
+      nir_foreach_function_impl(impl, nir)
+         nir_index_instrs(impl);
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, borg_dup_load, nir_metadata_control_flow, NULL);
       NIR_PASS(_, nir, nir_shader_alu_pass, borg_dup_addr, nir_metadata_control_flow, NULL);
       NIR_PASS(_, nir, nir_opt_move, nir_move_load_ubo | nir_move_load_input | nir_move_const_undef | nir_move_alu);
