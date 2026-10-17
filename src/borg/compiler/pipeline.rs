@@ -12,6 +12,7 @@ impl ShaderState {
         let stage = (*nir).info.stage();
         let is_vertex = stage == MESA_SHADER_VERTEX;
         let is_fragment = stage == MESA_SHADER_FRAGMENT;
+        let is_compute = stage == MESA_SHADER_COMPUTE;
         if env::var("BORGC_DUMP_NIR").is_ok() {
             if let Ok(s) = (*nir).to_string() {
                 eprintln!("{s}");
@@ -21,6 +22,9 @@ impl ShaderState {
         let Survey { total, tex, push_window } = survey(entry, stage);
         let regs: &'static [u8] = if is_vertex {
             &[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        } else if is_compute {
+            // Preset registers, from the top; r30/r31 are the invocation IDs, r12-r14 the grid base.
+            &[29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15]
         } else if tex > 0 {
             &[17, 18, 19]
         } else {
@@ -30,6 +34,7 @@ impl ShaderState {
         crate::set_spill_slots(0);
         let mut st = ShaderState::new(regs, is_vertex, is_fragment, flags);
         st.push_window = push_window && is_fragment;
+        st.is_compute = is_compute;
         st.out_select = crate::output_select();
         (st, entry, total)
     }

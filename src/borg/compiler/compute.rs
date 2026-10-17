@@ -5,6 +5,9 @@ use crate::encode::encode;
 use crate::regalloc::regalloc;
 use crate::{BorgInstr, NO_DST};
 use crate::{collect_cf_marks, CfMark};
+use crate::isel::resolve_vm;
+use crate::state::{Kv, ShaderState};
+use crate::Ubo;
 use compiler::bindings::*;
 use compiler::nir::AsDef;
 use std::collections::HashMap;
@@ -539,6 +542,448 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
     Ok(Out { words: em.words, regs: em.regs, local: [ws[0] as u32, ws[1] as u32, ws[2] as u32], flags: em.atomics as u32 | em.nwg_reg.map_or(0, |r| 2 | (r as u32) << 8) })
 }
 
+// ---------------------------------------------------------------------------------------------
+// Compute as a stage of the graphics selector (BORGC_UNIFIED_CS=1): the ALU ops are select.rs's,
+// what follows is only what a compute shader has and a draw has not.
+
+/// Compute-only selection state.
+#[derive(Default)]
+pub struct ComputeState {
+    desc: HashMap<u32, (u32, u32)>, // descriptor marker vreg -> (set, binding)
+    base_used: bool,
+    atomics: bool,
+    nwg: Option<u8>,
+    presets: Vec<(u8, u32)>, // registers the driver or the grid split fills
+    ws: [u32; 3],
+    pub err: Option<String>,
+}
+
+/// A value while selecting: a known constant or a register component.
+#[derive(Clone, Copy)]
+enum Val {
+    K(u32),
+    R(u32, u8),
+}
+
+impl ShaderState {
+    /// A source component as a register operand; a scalar constant gets a preset register.
+    pub(crate) fn operand(&mut self, d: u32, c: u8) -> (u32, u8) {
+        if self.is_compute && !self.sel.vec_map.contains_key(&d) {
+            if let Some(&bits) = self.consts.get(&d) {
+                return (self.konst(bits, Kv::Int), 0);
+            }
+        }
+        resolve_vm(&self.sel.vec_map, d, c)
+    }
+
+    fn known(&self, d: u32, c: u8) -> Option<u32> {
+        let (v, _) = resolve_vm(&self.sel.vec_map, d, c);
+        if !self.sel.vec_map.contains_key(&v) {
+            if let Some(&b) = self.consts.get(&v) {
+                return Some(b);
+            }
+        }
+        match self.sel.ubo.get(&v) {
+            Some(Ubo::Fixed(r)) => self.cp.uniforms.iter().find(|(x, _)| x == r).map(|&(_, b)| b),
+            _ => None,
+        }
+    }
+
+    fn val(&mut self, s: &nir_src, c: u8) -> Val {
+        let d = s.as_def().index;
+        match self.known(d, c) {
+            Some(b) => Val::K(b),
+            None => {
+                let (v, k) = self.operand(d, c);
+                Val::R(v, k)
+            }
+        }
+    }
+
+    fn vreg(&mut self, v: Val) -> (u32, u8) {
+        match v {
+            Val::K(b) => (self.konst(b, Kv::Int), 0),
+            Val::R(r, c) => (r, c),
+        }
+    }
+
+    fn fixed(&mut self, r: u8) -> u32 {
+        let v = self.sel.fresh();
+        self.sel.ubo.insert(v, Ubo::Fixed(r));
+        v
+    }
+
+    fn bin(&mut self, mnem: &'static str, a: Val, b: Val) -> Val {
+        let (a, b) = (self.vreg(a), self.vreg(b));
+        Val::R(self.sel.opc(mnem, &[a, b]), 0)
+    }
+
+    fn add(&mut self, a: Val, b: Val) -> Val {
+        match (a, b) {
+            (Val::K(x), Val::K(y)) => Val::K(x.wrapping_add(y)),
+            (Val::K(0), o) | (o, Val::K(0)) => o,
+            _ => self.bin("IADD", a, b),
+        }
+    }
+
+    fn mul(&mut self, a: Val, b: Val) -> Val {
+        match (a, b) {
+            (Val::K(x), Val::K(y)) => Val::K(x.wrapping_mul(y)),
+            _ => self.bin("IMUL", a, b),
+        }
+    }
+
+    fn shr(&mut self, a: Val, n: u32) -> Val {
+        match a {
+            Val::K(x) => Val::K(x >> n),
+            _ => self.bin("ISRL", a, Val::K(n)),
+        }
+    }
+
+    fn mask(&mut self, a: Val) -> Val {
+        match a {
+            Val::K(x) => Val::K(x & (SLOT_WORDS - 1)),
+            _ => self.bin("IAND", a, Val::K(SLOT_WORDS - 1)),
+        }
+    }
+
+    fn set(&mut self, d: u32, vals: &[Val]) {
+        if let [Val::K(b)] = vals {
+            self.consts.insert(d, *b);
+            return;
+        }
+        let comps: Vec<(u32, u8)> = vals.iter().map(|&v| self.vreg(v)).collect();
+        self.sel.vec_map.insert(d, comps);
+    }
+
+    fn fail(&mut self, m: String) {
+        if self.cs.err.is_none() {
+            eprintln!("borgc[compute]: {m}");
+            self.cs.err = Some(m);
+        }
+    }
+
+    /// An integer op on constants: folded, so an address stays a constant.
+    pub(crate) fn fold_const(&mut self, alu: &nir_alu_instr) -> bool {
+        let s = alu.srcs_as_slice();
+        if alu.def.num_components != 1 || s.len() != 2 {
+            return false;
+        }
+        let (Some(a), Some(b)) = (self.known(s[0].src.as_def().index, s[0].swizzle[0]), self.known(s[1].src.as_def().index, s[1].swizzle[0])) else {
+            return false;
+        };
+        let r = match alu.op {
+            nir_op_iadd => a.wrapping_add(b),
+            nir_op_isub => a.wrapping_sub(b),
+            nir_op_imul => a.wrapping_mul(b),
+            nir_op_ishl => a << (b & 31),
+            nir_op_ushr => a >> (b & 31),
+            nir_op_iand => a & b,
+            nir_op_ior => a | b,
+            nir_op_ixor => a ^ b,
+            _ => return false,
+        };
+        self.consts.insert(alu.def.index, r);
+        true
+    }
+
+    /// `t` where the condition `c` (1.0 or 0.0) holds, else `e`, bit for bit: an arithmetic blend
+    /// turns an infinity into NaN and changes integer bits.
+    fn select(&mut self, c: (u32, u8), t: (u32, u8), e: (u32, u8)) -> u32 {
+        let zero = self.vreg(Val::K(0));
+        let ci = self.sel.opc("F2I", &[c]);
+        let mask = self.sel.opc("ISUB", &[zero, (ci, 0)]);
+        let x = self.sel.opc("IXOR", &[t, e]);
+        let xm = self.sel.opc("IAND", &[(x, 0), (mask, 0)]);
+        self.sel.opc("IXOR", &[e, (xm, 0)])
+    }
+
+    pub(crate) unsafe fn exact_minmax(&mut self, alu: &nir_alu_instr) {
+        let s = alu.srcs_as_slice();
+        let a = resolve_vm(&self.sel.vec_map, s[0].src.as_def().index, s[0].swizzle[0]);
+        let b = resolve_vm(&self.sel.vec_map, s[1].src.as_def().index, s[1].swizzle[0]);
+        let d = self.sel.fsub(b, a);
+        let lt = self.sel.opc("FSTEP", &[(d, 0)]);
+        let v = if alu.op == nir_op_fmin { self.select((lt, 0), a, b) } else { self.select((lt, 0), b, a) };
+        self.sel.vec_map.insert(alu.def.index, vec![(v, 0)]);
+    }
+
+    pub(crate) unsafe fn exact_bcsel(&mut self, alu: &nir_alu_instr) {
+        let s = alu.srcs_as_slice();
+        let comps = (0..alu.def.num_components as usize)
+            .map(|k| {
+                let c = resolve_vm(&self.sel.vec_map, s[0].src.as_def().index, s[0].swizzle[k]);
+                let t = resolve_vm(&self.sel.vec_map, s[1].src.as_def().index, s[1].swizzle[k]);
+                let e = resolve_vm(&self.sel.vec_map, s[2].src.as_def().index, s[2].swizzle[k]);
+                (self.select(c, t, e), 0u8)
+            })
+            .collect();
+        self.sel.vec_map.insert(alu.def.index, comps);
+    }
+
+    pub(crate) unsafe fn undef(&mut self, u: &nir_undef_instr) {
+        let zeros = vec![Val::K(0); u.def.num_components as usize];
+        self.set(u.def.index, &zeros);
+    }
+
+    /// Word index of the byte offset `off` in the buffer named by `idx`'s first component.
+    fn word_addr(&mut self, idx: &nir_src, off: &nir_src, extra: u32) -> Val {
+        let m = resolve_vm(&self.sel.vec_map, idx.as_def().index, 0).0;
+        let Some(&(set, binding)) = self.cs.desc.get(&m) else {
+            self.fail("buffer index is not a known binding".into());
+            return Val::K(0);
+        };
+        let base = SLOT_BASE_WORDS + (set * 16 + binding) * SLOT_WORDS;
+        let o = self.val(off, 0);
+        let w = self.shr(o, 2);
+        let w = self.add(w, Val::K(extra));
+        let w = self.mask(w);
+        self.add(Val::K(base), w)
+    }
+
+    /// Component `c` of a buffer access starting at `a0`.
+    fn word_n(&mut self, a0: Val, idx: &nir_src, off: &nir_src, c: u32) -> Val {
+        match a0 {
+            _ if c == 0 => a0,
+            Val::K(x) if x.wrapping_sub(SLOT_BASE_WORDS) % SLOT_WORDS + c >= SLOT_WORDS => Val::K(x.wrapping_add(c)),
+            Val::K(_) => {
+                let r = self.vreg(a0);
+                self.bin("IADD", Val::R(r.0, r.1), Val::K(c))
+            }
+            _ => self.word_addr(idx, off, c),
+        }
+    }
+
+    fn load(&mut self, a: Val) -> Val {
+        let a = self.vreg(a);
+        Val::R(self.sel.opc("LOAD", &[a]), 0)
+    }
+
+    fn store(&mut self, a: Val, v: Val) {
+        let (a, v) = (self.vreg(a), self.vreg(v));
+        self.sel.prog.push(BorgInstr { mnem: "STORE", dst: NO_DST, srcs: vec![a.0, v.0], swz: vec![a.1, v.1] });
+    }
+
+    fn workgroup_id(&mut self, c: u8) -> Val {
+        self.cs.base_used = true;
+        let u = self.sel.fresh();
+        self.sel.ubo.insert(u, Ubo::Uniform(29 + c));
+        let b = self.fixed(WG_BASE_REG as u8 + c);
+        Val::R(self.sel.opc("IADD", &[(u, 0), (b, 0)]), 0)
+    }
+
+    pub(crate) unsafe fn compute_intrinsic(&mut self, i: &nir_intrinsic_instr) {
+        let d = i.def.index;
+        match i.intrinsic {
+            nir_intrinsic_load_base_workgroup_id | nir_intrinsic_load_base_global_invocation_id => {
+                self.set(d, &[Val::K(0); 3]);
+            }
+            nir_intrinsic_load_workgroup_id => {
+                let v: Vec<Val> = (0..3).map(|c| self.workgroup_id(c)).collect();
+                self.set(d, &v);
+            }
+            nir_intrinsic_load_global_invocation_id => {
+                // workgroup_id * local_size + local_id (r31 = x | y << 10 | z << 20).
+                let ws = self.cs.ws;
+                let mut v = vec![];
+                for c in 0..3u8 {
+                    let wg = self.workgroup_id(c);
+                    let size = ws[c as usize];
+                    let mut x = if size == 1 { wg } else { self.mul(wg, Val::K(size)) };
+                    if size > 1 {
+                        let r31 = self.fixed(31);
+                        let sh = self.bin("ISRL", Val::R(r31, 0), Val::K(10 * c as u32));
+                        let lid = self.bin("IAND", sh, Val::K(1023));
+                        x = self.add(x, lid);
+                    }
+                    v.push(x);
+                }
+                self.set(d, &v);
+            }
+            nir_intrinsic_load_local_invocation_id => {
+                // r31 = x | y << 10 | z << 20.
+                let r31 = self.fixed(31);
+                let mut v = vec![];
+                for c in 0..3u32 {
+                    let sh = self.shr(Val::R(r31, 0), 10 * c);
+                    v.push(if c == 2 { sh } else { self.bin("IAND", sh, Val::K(1023)) });
+                }
+                self.set(d, &v);
+            }
+            nir_intrinsic_load_local_invocation_index => {
+                let r30 = self.fixed(30);
+                self.set(d, &[Val::R(r30, 0)]);
+            }
+            nir_intrinsic_load_num_workgroups => {
+                // Presets the driver fills with the dispatch's group counts.
+                let x = match self.cs.nwg {
+                    Some(x) => x,
+                    None => {
+                        let x = self.cp.alloc_reg();
+                        let (y, z) = (self.cp.alloc_reg(), self.cp.alloc_reg());
+                        self.cs.presets.extend([(x, 0), (y, 0), (z, 0)]);
+                        self.cs.nwg = Some(x);
+                        x
+                    }
+                };
+                let v: Vec<Val> = (0..3).map(|c| Val::R(self.fixed(x - c), 0)).collect();
+                self.set(d, &v);
+            }
+            nir_intrinsic_vulkan_resource_index => {
+                let m = self.sel.fresh();
+                self.cs.desc.insert(m, (i.get_const_index(NIR_INTRINSIC_DESC_SET), i.get_const_index(NIR_INTRINSIC_BINDING)));
+                let zero = self.vreg(Val::K(0));
+                self.sel.vec_map.insert(d, vec![(m, 0), (m, 1), zero]);
+            }
+            nir_intrinsic_load_vulkan_descriptor => {
+                let s = i.get_src(0).as_def().index;
+                let comps = (0..3).map(|c| resolve_vm(&self.sel.vec_map, s, c)).collect();
+                self.sel.vec_map.insert(d, comps);
+            }
+            nir_intrinsic_load_push_constant => {
+                let o = self.val(i.get_src(0), 0);
+                let w = self.shr(o, 2);
+                let base_w = (i.base() as u32) / 4;
+                let pbase = SLOT_BASE_WORDS + 32 * SLOT_WORDS;
+                let mut v = vec![];
+                for c in 0..i.def.num_components as u32 {
+                    let a = match w {
+                        Val::K(x) => {
+                            // Small steps from one base keep the distinct constants few.
+                            let mut r = ((x + base_w) & (SLOT_WORDS - 1)) + c;
+                            let rb = self.konst(pbase, Kv::Int);
+                            let mut a = Val::R(rb, 0);
+                            while r >= 4 {
+                                a = self.bin("IADD", a, Val::K(4));
+                                r -= 4;
+                            }
+                            if r > 0 {
+                                a = self.bin("IADD", a, Val::K(r));
+                            }
+                            a
+                        }
+                        _ => {
+                            let w2 = self.add(w, Val::K(base_w + c));
+                            let w2 = self.bin("IAND", w2, Val::K(SLOT_WORDS - 1));
+                            self.add(Val::K(pbase), w2)
+                        }
+                    };
+                    v.push(self.load(a));
+                }
+                self.set(d, &v);
+            }
+            nir_intrinsic_load_ubo | nir_intrinsic_load_ssbo => {
+                let a0 = self.word_addr(i.get_src(0), i.get_src(1), 0);
+                let mut v = vec![];
+                for c in 0..i.def.num_components as u32 {
+                    let a = self.word_n(a0, i.get_src(0), i.get_src(1), c);
+                    v.push(self.load(a));
+                }
+                self.set(d, &v);
+            }
+            nir_intrinsic_store_ssbo => {
+                let a0 = self.word_addr(i.get_src(1), i.get_src(2), 0);
+                for c in 0..i.get_src(0).num_components() as u32 {
+                    if i.write_mask() & (1 << c) == 0 {
+                        continue;
+                    }
+                    let a = self.word_n(a0, i.get_src(1), i.get_src(2), c);
+                    let v = self.val(i.get_src(0), c as u8);
+                    self.store(a, v);
+                }
+            }
+            nir_intrinsic_barrier => {
+                let ws = self.cs.ws;
+                let control = i.get_const_index(NIR_INTRINSIC_EXECUTION_SCOPE) != 0;
+                if control && ws[0] * ws[1] * ws[2] != 1 {
+                    self.fail("barrier() with more than one invocation per workgroup".into());
+                }
+            }
+            nir_intrinsic_load_shared | nir_intrinsic_store_shared => {
+                let store = i.intrinsic == nir_intrinsic_store_shared;
+                let o = self.val(i.get_src(if store { 1 } else { 0 }), 0);
+                let w = self.shr(o, 2);
+                let base_w = (i.base() as u32) / 4;
+                let n = if store { i.get_src(0).num_components() as u32 } else { i.def.num_components as u32 };
+                let mut v = vec![];
+                for c in 0..n {
+                    if store && i.write_mask() & (1 << c) == 0 {
+                        continue;
+                    }
+                    let w2 = self.add(w, Val::K(base_w + c));
+                    let w2 = self.mask(w2);
+                    let a = self.add(Val::K(SLOT_BASE_WORDS + 33 * SLOT_WORDS), w2);
+                    if store {
+                        let x = self.val(i.get_src(0), c as u8);
+                        self.store(a, x);
+                    } else {
+                        v.push(self.load(a));
+                    }
+                }
+                if !store {
+                    self.set(d, &v);
+                }
+            }
+            nir_intrinsic_ssbo_atomic => {
+                self.cs.atomics = true;
+                if i.atomic_op() != nir_atomic_op_iadd {
+                    self.fail("only atomicAdd is supported".into());
+                    return;
+                }
+                let a = self.word_addr(i.get_src(0), i.get_src(1), 0);
+                let a = self.vreg(a);
+                let x = self.val(i.get_src(2), 0);
+                let x = self.vreg(x);
+                // One lane at a time; the same registers in every lane's turn.
+                let (old, sum, t) = (self.sel.fresh(), self.sel.fresh(), self.sel.fresh());
+                let r30 = self.fixed(30);
+                for lane in 0..LANES {
+                    let l = self.konst(lane, Kv::Int);
+                    self.sel.prog.push(BorgInstr { mnem: "ISEQ", dst: t, srcs: vec![r30, l], swz: vec![0, 0] });
+                    self.sel.prog.push(BorgInstr { mnem: "EXPUSH", dst: NO_DST, srcs: vec![t], swz: vec![0] });
+                    self.sel.prog.push(BorgInstr { mnem: "LOAD", dst: old, srcs: vec![a.0], swz: vec![a.1] });
+                    self.sel.prog.push(BorgInstr { mnem: "IADD", dst: sum, srcs: vec![old, x.0], swz: vec![0, x.1] });
+                    self.sel.prog.push(BorgInstr { mnem: "STORE", dst: NO_DST, srcs: vec![a.0, sum], swz: vec![a.1, 0] });
+                    self.sel.prog.push(BorgInstr { mnem: "EXPOP", dst: NO_DST, srcs: vec![], swz: vec![] });
+                }
+                self.set(d, &[Val::R(old, 0)]);
+            }
+            _ => self.fail(format!("unsupported intrinsic {}", i.info().name())),
+        }
+    }
+}
+
+pub(crate) unsafe fn compile_unified(nir: *mut nir_shader) -> Result<Out, String> {
+    let (mut cx, entry, _) = ShaderState::start(nir, crate::config::Flags(0));
+    let ws = (*nir).info.workgroup_size;
+    cx.cs.ws = [ws[0] as u32, ws[1] as u32, ws[2] as u32];
+    cx.select_entry(entry);
+    if let Some(e) = cx.cs.err.take() {
+        return Err(e);
+    }
+    if !cx.check_selected() {
+        return Err(format!("unsupported: {}", cx.skipped.join(", ")));
+    }
+    cx.optimise();
+    let mut reserved: Vec<u8> = cx.cp.regs[..cx.cp.count].to_vec();
+    reserved.extend([30u8, 31, 12, 13, 14]);
+    let alloc = crate::fixed::allocate(&cx, &HashMap::new(), &mut reserved).ok_or("out of registers")?;
+    let enc = crate::emit::encode_program(&cx, &alloc);
+    if enc.pending > 0 || enc.n_preload > 0 {
+        return Err(format!("{} operand(s) without a register", enc.pending));
+    }
+    if enc.words.len() > MAX_WORDS {
+        return Err(format!("{} instructions exceed the {MAX_WORDS}-word program limit", enc.words.len()));
+    }
+    let mut regs = cx.cp.uniforms.clone();
+    regs.extend(cx.cs.presets.iter().copied());
+    if cx.cs.base_used {
+        regs.extend((0..3).map(|c| ((WG_BASE_REG + c) as u8, 0)));
+    }
+    let flags = cx.cs.atomics as u32 | cx.cs.nwg.map_or(0, |r| 2 | (r as u32) << 8);
+    Ok(Out { words: enc.words, regs, local: cx.cs.ws, flags })
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn borgc_compile_compute(
     nir: *mut nir_shader,
@@ -574,7 +1019,8 @@ unsafe fn compile_compute_inner(
     local: *mut u32, flags: *mut u32,
 ) -> u32 {
     // An assert in the backend must refuse the shader, not abort the process.
-    let compiled = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile(nir))) {
+    let unified = std::env::var("BORGC_UNIFIED_CS").is_ok();
+    let compiled = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| if unified { compile_unified(nir) } else { compile(nir) })) {
         Ok(r) => r,
         Err(_) => return 1,
     };

@@ -772,8 +772,9 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    } while (progress);
 
    /* Compute: booleans as 32-bit integers. The backend has no select; both arms
-    * of an `if` store into the phi's register. */
-   if (nir->info.stage == MESA_SHADER_COMPUTE)
+    * of an `if` store into the phi's register. The unified selector keeps the
+    * graphics convention, 1.0 or 0.0. */
+   if (nir->info.stage == MESA_SHADER_COMPUTE && !getenv("BORGC_UNIFIED_CS"))
       NIR_PASS(_, nir, nir_lower_bool_to_int32);
    if (wide) {
       nir_foreach_function_impl(impl, nir)

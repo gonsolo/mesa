@@ -168,7 +168,10 @@ impl ShaderState {
     }
 
     pub unsafe fn alu(&mut self, alu: &nir_alu_instr) {
-        if (matches!(alu.op, nir_op_fadd | nir_op_fmul | nir_op_ffma
+        if self.is_compute && self.fold_const(alu) {
+            return;
+        }
+        if self.is_compute || (matches!(alu.op, nir_op_fadd | nir_op_fmul | nir_op_ffma
             | nir_op_flt | nir_op_fge | nir_op_feq | nir_op_fneu | nir_op_bcsel | nir_op_fmin | nir_op_fmax
             | nir_op_slt | nir_op_sge | nir_op_seq | nir_op_sne
             | nir_op_ieq | nir_op_ine | nir_op_ilt | nir_op_ige | nir_op_ult | nir_op_uge)
@@ -272,6 +275,8 @@ impl ShaderState {
                 }
             }
             // fmax(0, x) → x · FSTEP(x)  (FSTEP(x)=1 if x>0 else 0).
+            nir_op_fmax | nir_op_fmin if self.is_compute => self.exact_minmax(alu),
+            nir_op_bcsel if self.is_compute => self.exact_bcsel(alu),
             nir_op_fmax | nir_op_fmin => {
                 let s = alu.srcs_as_slice();
                 let a_zero = s[0].comp_as_uint(0) == Some(0);
@@ -448,6 +453,10 @@ impl ShaderState {
     }
 
     pub unsafe fn intrinsic(&mut self, intr: &nir_intrinsic_instr) {
+        if self.is_compute {
+            self.compute_intrinsic(intr);
+            return;
+        }
         let deriv = match intr.intrinsic {
             nir_intrinsic_ddx | nir_intrinsic_ddx_coarse | nir_intrinsic_ddx_fine => Some("DDX"),
             nir_intrinsic_ddy | nir_intrinsic_ddy_coarse | nir_intrinsic_ddy_fine => Some("DDY"),
@@ -1039,8 +1048,10 @@ impl ShaderState {
                             if intr.write_mask() & (1 << c) == 0 {
                                 continue;
                             }
-                            let (v, comp) = resolve_vm(&self.sel.vec_map, src, c as u8);
-                            self.sel.prog.push(BorgInstr { mnem: "FMOV", dst: reg_vregs[&h][c], srcs: vec![v], swz: vec![comp] });
+                            let (v, comp) = self.operand(src, c as u8);
+                            // A compute value is often an integer: copy its bits.
+                            let (mnem, srcs, swz) = if self.is_compute { ("IOR", vec![v, v], vec![comp, comp]) } else { ("FMOV", vec![v], vec![comp]) };
+                            self.sel.prog.push(BorgInstr { mnem, dst: reg_vregs[&h][c], srcs, swz });
                         }
                         continue;
                     }
@@ -1050,9 +1061,15 @@ impl ShaderState {
                 } else if let Some(intr) = instr.as_intrinsic() {
                     self.intrinsic(intr);
                 } else if let Some(tex) = instr.as_tex() {
+                    if self.is_compute {
+                        self.skipped.push("tex");
+                        continue;
+                    }
                     self.tex(tex);
                 } else if let Some(lc) = instr.as_load_const() {
                     self.load_const(lc);
+                } else if let Some(u) = instr.as_undef().filter(|_| self.is_compute) {
+                    self.undef(u);
                 }
             }
         }

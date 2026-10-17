@@ -280,6 +280,8 @@ pub struct ShaderState {
     pub descriptor_defs: std::collections::HashSet<u32>,
     pub const_addr_chain: Option<(i32, u32)>,
     pub dst_half: Option<([Option<u32>; 4], u32)>,
+    pub is_compute: bool,
+    pub cs: crate::compute::ComputeState,
 }
 
 impl ShaderState {
@@ -323,12 +325,17 @@ impl ShaderState {
             descriptor_defs: Default::default(),
             const_addr_chain: Default::default(),
             dst_half: None,
+            is_compute: false,
+            cs: Default::default(),
         }
     }
 
     /// A register holding `bits`: a window word in a fragment shader, a vertex constant built the
-    /// `kv` way in a vertex shader.
+    /// `kv` way in a vertex shader, a preset register in a compute shader.
     pub fn konst(&mut self, bits: u32, kv: Kv) -> u32 {
+        if self.is_compute {
+            return self.cp.int_operand(&mut self.sel, bits as i32);
+        }
         if self.cp.vs_window {
             return match kv {
                 Kv::Word => self.cp.vs_const(&mut self.sel, bits, false),
