@@ -748,6 +748,8 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
                borg_basic_alu_lower, NULL);
 #else
       NIR_PASS(progress, nir, nir_opt_algebraic);
+      /* Algebraic lowerings (unpackUnorm4x8, say) emit vector ALU ops; the selector is scalar. */
+      NIR_PASS(progress, nir, nir_lower_alu_to_scalar, NULL, NULL);
 #endif
       /* Flatten if/else into bcsel selects where that is cheaper than
        * predication.
