@@ -49,7 +49,7 @@ cs_gather(const struct borgvk_command_buffer *cmd, const struct borgvk_pipeline 
    struct borgvk_descriptor_set *set = cmd->cs_sets[si];
    const VkDeviceSize *dyn_off = cmd->cs_dyn_offs[si];
    for (uint32_t b = 0; set && b < BORGVK_MAX_BINDINGS && pl->set_base[si] + b < 32 &&
-        nbufs < BORGVK_CS_MAX_BUFS - 1; b++) {
+        nbufs < BORGVK_CS_MAX_BUFS - 2; b++) {
       const struct vk_buffer_view *bv = set->buffer_views[b];
       if (bv && !set->buffers[b]) {
          struct borgvk_buffer *tb = container_of(bv->buffer, struct borgvk_buffer, vk);
@@ -152,6 +152,21 @@ cs_gather(const struct borgvk_command_buffer *cmd, const struct borgvk_pipeline 
          bufs[nbufs].size = sizeof(cmd->pc);
          bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + 32 * BORGVK_CS_SLOT_BYTES;
          total += 8 + sizeof(cmd->pc);
+         nbufs++;
+      }
+   }
+   /* The compiler's constant pool: slot 34, read only. */
+   if (pl->cs_npool) {
+      uint8_t *dec = malloc(pl->cs_npool * 4);
+      if (dec) {
+         memcpy(dec, pl->cs_pool, pl->cs_npool * 4);
+         bufs[nbufs].host = NULL;
+         bufs[nbufs].decoded = dec;
+         bufs[nbufs].wb = false;
+         bufs[nbufs].skip = 0;
+         bufs[nbufs].size = pl->cs_npool * 4;
+         bufs[nbufs].addr = BORGVK_CS_BASE_BYTES + 34 * BORGVK_CS_SLOT_BYTES;
+         total += 8 + pl->cs_npool * 4;
          nbufs++;
       }
    }

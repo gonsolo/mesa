@@ -377,6 +377,7 @@ borgvk_compile_compute_stage(struct borgvk_device *device,
                                        pipeline->cs_regs, 32, &pipeline->cs_nregs,
                                        pipeline->cs_local, &pipeline->cs_flags);
    pipeline->cs_ok = rc == 0;
+   pipeline->cs_npool = rc == 0 ? borgc_last_cs_pool(pipeline->cs_pool, BORGVK_CS_POOL_MAX) : 0;
    borgvk_layout_set_base(device, pipeline->set_base);
    mesa_logi("borgvk: compute shader %s (%u words, %u presets)", rc == 0 ? "compiled" : "REFUSED",
              pipeline->cs_nwords, pipeline->cs_nregs);

@@ -331,10 +331,10 @@ impl ShaderState {
     }
 
     /// A register holding `bits`: a window word in a fragment shader, a vertex constant built the
-    /// `kv` way in a vertex shader, a preset register in a compute shader.
+    /// `kv` way in a vertex shader, a preset register or pool word in a compute shader.
     pub fn konst(&mut self, bits: u32, kv: Kv) -> u32 {
         if self.is_compute {
-            return self.cp.int_operand(&mut self.sel, bits as i32);
+            return self.cs_const(bits);
         }
         if self.cp.vs_window {
             return match kv {
@@ -350,6 +350,11 @@ impl ShaderState {
     /// 1.0, built once: FSTEP of r30 in a fragment shader (no window word).
     pub fn one(&mut self) -> u32 {
         if let Some(v) = self.one_vreg {
+            return v;
+        }
+        if self.is_compute {
+            let v = self.cs_const(1.0f32.to_bits());
+            self.one_vreg = Some(v);
             return v;
         }
         let v = self.sel.fresh();

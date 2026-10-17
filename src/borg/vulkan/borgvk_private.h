@@ -174,7 +174,8 @@ void borgvk_flush_draws(struct borgvk_command_buffer *cmd);
 
 /* The persistent simulator (borgvk_sim.c). */
 struct borgvk_image;
-#define BORGVK_CS_MAX_BUFS 34   /* 32 binding slots and the push constants */
+#define BORGVK_CS_MAX_BUFS 35   /* 32 binding slots, the push constants and the constant pool */
+#define BORGVK_CS_POOL_MAX 256
 bool borgvk_hw_enabled(void);
 size_t borgvk_hw_render(const uint8_t *stream, size_t n, uint32_t w, uint32_t h, uint8_t *out);
 int borgvk_hw_compute(const uint8_t *job, size_t len, const char *outf);
@@ -395,6 +396,7 @@ struct borgvk_pipeline {
    uint32_t cs_regs[64];
    uint32_t cs_local[3];
    uint32_t cs_flags;
+   uint32_t cs_pool[BORGVK_CS_POOL_MAX], cs_npool;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_descriptor_set_layout, vk.base,

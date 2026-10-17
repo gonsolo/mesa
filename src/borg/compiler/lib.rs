@@ -60,6 +60,7 @@ const FRAG_POOL_SLOT: u32 = 40;
 /// The vertex shader's pool slot in the vertex attribute table.
 pub(crate) const VERT_POOL_SLOT: u32 = 42;
 thread_local! {
+    static LAST_CS_POOL: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
     static LAST_FRAG_POOL: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
     static LAST_VERT_POOL: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -115,6 +116,23 @@ pub(crate) fn set_vert_pool(pool: Vec<u32>) {
 #[no_mangle]
 pub unsafe extern "C" fn borgc_last_vert_pool(out: *mut u32, cap: u32) -> u32 {
     LAST_VERT_POOL.with(|p| {
+        let p = p.borrow();
+        let n = p.len().min(cap as usize);
+        for (i, &w) in p.iter().take(n).enumerate() {
+            *out.add(i) = w;
+        }
+        n as u32
+    })
+}
+
+pub(crate) fn set_cs_pool(pool: Vec<u32>) {
+    LAST_CS_POOL.with(|p| *p.borrow_mut() = pool);
+}
+
+/// The last compute shader's constant pool, for the job's slot 34.
+#[no_mangle]
+pub unsafe extern "C" fn borgc_last_cs_pool(out: *mut u32, cap: u32) -> u32 {
+    LAST_CS_POOL.with(|p| {
         let p = p.borrow();
         let n = p.len().min(cap as usize);
         for (i, &w) in p.iter().take(n).enumerate() {

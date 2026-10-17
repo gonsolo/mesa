@@ -555,6 +555,9 @@ pub struct ComputeState {
     nwg: Option<u8>,
     presets: Vec<(u8, u32)>, // registers the driver or the grid split fills
     ws: [u32; 3],
+    kreg: HashMap<u32, u32>, // constant bits -> placeholder vreg, placed by pool_consts
+    kval: HashMap<u32, u32>,
+    pub pool: Vec<u32>,
     pub err: Option<String>,
 }
 
@@ -565,7 +568,109 @@ enum Val {
     R(u32, u8),
 }
 
+/// Word index of the constant pool, the compute job's slot 34.
+pub(crate) const POOL_BASE_WORDS: u32 = SLOT_BASE_WORDS + 34 * SLOT_WORDS;
+const POOL_MAX: usize = 256;
+
 impl ShaderState {
+    /// A constant's placeholder register; pool_consts makes it a preset or a pool load.
+    pub(crate) fn cs_const(&mut self, bits: u32) -> u32 {
+        if let Some(&v) = self.cs.kreg.get(&bits) {
+            return v;
+        }
+        let v = self.sel.fresh();
+        self.cs.kreg.insert(bits, v);
+        self.cs.kval.insert(v, bits);
+        v
+    }
+
+    /// The `cap` most used constants become preset registers; the rest are loaded from the pool
+    /// near each use (a load is reused for 16 instructions), each load a word of its own, so the
+    /// pointer only steps forward. A load inside an `if` moves before its outermost EXPUSH: a
+    /// masked step would leave the inactive lanes' pointer behind.
+    pub(crate) fn pool_consts(&mut self, cap: usize) -> Result<(), String> {
+        let mut uses: HashMap<u32, usize> = HashMap::new();
+        for i in &self.sel.prog {
+            for s in &i.srcs {
+                if self.cs.kval.contains_key(s) {
+                    *uses.entry(*s).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut ks: Vec<(u32, u32)> = uses.keys().map(|&v| (v, self.cs.kval[&v])).collect();
+        ks.sort_by_key(|&(v, b)| (std::cmp::Reverse(uses[&v]), b));
+        let free = self.cp.regs.len() - self.cp.count;
+        let pooled_n = if ks.len() <= free.min(cap) { 0 } else { ks.len() - free.saturating_sub(2).min(cap) };
+        let (keep, pooled) = ks.split_at(ks.len() - pooled_n);
+        for &(v, bits) in keep {
+            let r = self.cp.alloc_reg();
+            self.cp.uniforms.push((r, bits));
+            self.sel.ubo.insert(v, Ubo::Fixed(r));
+        }
+        if pooled.is_empty() {
+            return Ok(());
+        }
+        if free < 2 {
+            return Err(format!("{} constants do not fit {free} registers", ks.len()));
+        }
+        let rb = self.cp.alloc_reg();
+        self.cp.uniforms.push((rb, POOL_BASE_WORDS));
+        let base = self.fixed(rb);
+        let r1 = self.cp.alloc_reg();
+        self.cp.uniforms.push((r1, 1));
+        let one = self.fixed(r1);
+        let pooled: HashMap<u32, u32> = pooled.iter().copied().collect();
+        const GAP: usize = 16;
+        let mut loaded: HashMap<u32, (u32, usize)> = HashMap::new();
+        let mut ptr: Option<u32> = None;
+        let (mut depth, mut anchor) = (0usize, 0usize);
+        let mut out: Vec<BorgInstr> = Vec::with_capacity(self.sel.prog.len());
+        for (n, mut ins) in std::mem::take(&mut self.sel.prog).into_iter().enumerate() {
+            for s in ins.srcs.iter_mut() {
+                let Some(&bits) = pooled.get(s) else { continue };
+                if loaded.get(s).map_or(true, |&(_, last)| n - last > GAP) {
+                    let at = if depth == 0 { out.len() } else { anchor };
+                    let p = match ptr {
+                        None => base,
+                        Some(prev) => {
+                            let p = self.sel.fresh();
+                            out.insert(at, BorgInstr { mnem: "IADD", dst: p, srcs: vec![prev, one], swz: vec![0, 0] });
+                            anchor += (depth > 0) as usize;
+                            p
+                        }
+                    };
+                    let at = if depth == 0 { out.len() } else { anchor };
+                    let v = self.sel.fresh();
+                    out.insert(at, BorgInstr { mnem: "LOAD", dst: v, srcs: vec![p], swz: vec![0] });
+                    anchor += (depth > 0) as usize;
+                    ptr = Some(p);
+                    self.cs.pool.push(bits);
+                    loaded.insert(*s, (v, n));
+                }
+                let e = loaded.get_mut(s).unwrap();
+                e.1 = n;
+                *s = e.0;
+            }
+            match ins.mnem {
+                "EXPUSH" => {
+                    if depth == 0 {
+                        anchor = out.len();
+                    }
+                    depth += 1;
+                }
+                "EXPOP" => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            out.push(ins);
+        }
+        self.sel.prog = out;
+        if self.cs.pool.len() > POOL_MAX {
+            return Err(format!("a constant pool of {} words ({POOL_MAX} fit)", self.cs.pool.len()));
+        }
+        eprintln!("borgc[compute]: constant pool of {} word(s)", self.cs.pool.len());
+        Ok(())
+    }
+
     /// A source component as a register operand; a scalar constant gets a preset register.
     pub(crate) fn operand(&mut self, d: u32, c: u8) -> (u32, u8) {
         if self.is_compute && !self.sel.vec_map.contains_key(&d) {
@@ -578,6 +683,9 @@ impl ShaderState {
 
     fn known(&self, d: u32, c: u8) -> Option<u32> {
         let (v, _) = resolve_vm(&self.sel.vec_map, d, c);
+        if let Some(&b) = self.cs.kval.get(&v) {
+            return Some(b);
+        }
         if !self.sel.vec_map.contains_key(&v) {
             if let Some(&b) = self.consts.get(&v) {
                 return Some(b);
@@ -953,7 +1061,21 @@ impl ShaderState {
     }
 }
 
+const OUT_OF_REGISTERS: &str = "out of registers";
+
+/// Fewer constants in registers leave more for values: retried like the graphics spill limits.
 pub(crate) unsafe fn compile_unified(nir: *mut nir_shader) -> Result<Out, String> {
+    let mut r = Err(String::new());
+    for cap in [usize::MAX, 8, 4, 0] {
+        r = compile_unified_with(nir, cap);
+        if !matches!(&r, Err(e) if e == OUT_OF_REGISTERS) {
+            break;
+        }
+    }
+    r
+}
+
+unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize) -> Result<Out, String> {
     let (mut cx, entry, _) = ShaderState::start(nir, crate::config::Flags(0));
     let ws = (*nir).info.workgroup_size;
     cx.cs.ws = [ws[0] as u32, ws[1] as u32, ws[2] as u32];
@@ -965,9 +1087,11 @@ pub(crate) unsafe fn compile_unified(nir: *mut nir_shader) -> Result<Out, String
         return Err(format!("unsupported: {}", cx.skipped.join(", ")));
     }
     cx.optimise();
+    cx.pool_consts(cap)?;
+    crate::set_cs_pool(std::mem::take(&mut cx.cs.pool));
     let mut reserved: Vec<u8> = cx.cp.regs[..cx.cp.count].to_vec();
     reserved.extend([30u8, 31, 12, 13, 14]);
-    let alloc = crate::fixed::allocate(&cx, &HashMap::new(), &mut reserved).ok_or("out of registers")?;
+    let alloc = crate::fixed::allocate(&cx, &HashMap::new(), &mut reserved).ok_or(OUT_OF_REGISTERS)?;
     let enc = crate::emit::encode_program(&cx, &alloc);
     if enc.pending > 0 || enc.n_preload > 0 {
         return Err(format!("{} operand(s) without a register", enc.pending));
@@ -1019,6 +1143,7 @@ unsafe fn compile_compute_inner(
     local: *mut u32, flags: *mut u32,
 ) -> u32 {
     // An assert in the backend must refuse the shader, not abort the process.
+    crate::set_cs_pool(Vec::new());
     let unified = std::env::var("BORGC_UNIFIED_CS").is_ok();
     let compiled = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| if unified { compile_unified(nir) } else { compile(nir) })) {
         Ok(r) => r,

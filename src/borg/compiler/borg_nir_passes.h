@@ -63,6 +63,7 @@ bool borgc_last_push_window(void);
 uint32_t borgc_last_spill_slots(void);
 void borgc_set_output_select(int k);
 uint32_t borgc_last_vert_pool(uint32_t *out, uint32_t cap);
+uint32_t borgc_last_cs_pool(uint32_t *out, uint32_t cap);
 
 /* Compute: program words, (register, value) presets and LocalSize. 0 on success. */
 uint32_t borgc_compile_compute(struct nir_shader *nir,
