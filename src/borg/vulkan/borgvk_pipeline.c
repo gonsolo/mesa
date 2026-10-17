@@ -322,6 +322,13 @@ borgvk_CreateComputePipelines(VkDevice _device, VkPipelineCache cache,
       VK_FROM_HANDLE(borgvk_pipeline, pl, pPipelines[i]);
       device->compile_layout = pCreateInfos[i].layout;
       borgvk_compile_compute_stage(device, &pCreateInfos[i].stage, pl);
+      /* A refused shader fails here, not as a dispatch that silently does nothing. */
+      if (!pl->cs_ok) {
+         borgvk_DestroyPipeline(_device, pPipelines[i], pAllocator);
+         pPipelines[i] = VK_NULL_HANDLE;
+         result = VK_ERROR_UNKNOWN;
+         break;
+      }
    }
    for (; i < count; i++)
       pPipelines[i] = VK_NULL_HANDLE;
