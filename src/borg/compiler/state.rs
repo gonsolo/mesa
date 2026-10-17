@@ -174,6 +174,18 @@ impl ConstPool {
         v
     }
 
+    pub fn vs_virtual(&mut self, sel: &mut Selector, bits: u32) -> u32 {
+        if let Some(&v) = self.vs_by_bits.get(&bits) {
+            return v;
+        }
+        let v = sel.fresh();
+        let u = DRAW_VS_CONST_U0 as u32 + self.vs_consts.len() as u32;
+        self.vs_consts.push((u as u8, bits));
+        sel.ubo.insert(v, crate::Ubo::Uniform(u as u8));
+        self.vs_by_bits.insert(bits, v);
+        v
+    }
+
     pub fn vs_const(&mut self, sel: &mut Selector, bits: u32, derive: bool) -> u32 {
         if let Some(&v) = self.vs_by_bits.get(&bits) {
             return v;
@@ -313,6 +325,55 @@ impl ShaderState {
             dst_half: None,
         }
     }
+
+    /// A register holding `bits`: a window word in a fragment shader, a vertex constant built the
+    /// `kv` way in a vertex shader.
+    pub fn konst(&mut self, bits: u32, kv: Kv) -> u32 {
+        if self.cp.vs_window {
+            return match kv {
+                Kv::Word => self.cp.vs_const(&mut self.sel, bits, false),
+                Kv::Derive => self.cp.vs_const(&mut self.sel, bits, true),
+                Kv::Int => self.cp.int_operand(&mut self.sel, bits as i32),
+                Kv::Virtual => self.cp.vs_virtual(&mut self.sel, bits),
+            };
+        }
+        self.fw.win(&mut self.sel, bits)
+    }
+
+    /// 1.0, built once: FSTEP of r30 in a fragment shader (no window word).
+    pub fn one(&mut self) -> u32 {
+        if let Some(v) = self.one_vreg {
+            return v;
+        }
+        let v = self.sel.fresh();
+        let v = if self.is_fragment {
+            let c = self.sel.fresh();
+            self.sel.ubo.insert(c, crate::Ubo::Fixed(30));
+            self.per_pixel_fixed.insert(c);
+            self.sel.prog.push(crate::BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
+            v
+        } else if self.cp.vs_window {
+            // A pinned register is not staged for a draw's vertex shader.
+            self.cp.vs_const(&mut self.sel, 1.0f32.to_bits(), false)
+        } else {
+            let reg = self.cp.alloc_reg();
+            self.cp.uniforms.push((reg, 1.0f32.to_bits()));
+            self.sel.ubo.insert(v, crate::Ubo::Fixed(reg));
+            v
+        };
+        self.one_vreg = Some(v);
+        v
+    }
+}
+
+/// How a vertex shader builds a constant (`ShaderState::konst`): a window word, one it may derive
+/// from two others, an integer operand, or a virtual word the pool pass may move to memory.
+#[derive(Clone, Copy)]
+pub enum Kv {
+    Word,
+    Derive,
+    Int,
+    Virtual,
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use std::collections::HashMap;
-use crate::state::{ShaderState, DRAW_VS_CONST_U0, VS_VIRTUAL_MAX};
+use crate::state::{Kv, ShaderState, VS_VIRTUAL_MAX};
 use crate::{BorgInstr, Ubo, NO_DST};
 
 const SCRATCH_WORDS: u32 = 16384 * 34;
@@ -18,22 +18,6 @@ impl ShaderState {
         dst
     }
 
-    /// A constant: a fragment window word, or a vertex window word the pool pass may move to memory.
-    fn konst(&mut self, bits: u32) -> u32 {
-        if self.is_fragment {
-            return self.fw.win(&mut self.sel, bits);
-        }
-        if let Some(&v) = self.cp.vs_by_bits.get(&bits) {
-            return v;
-        }
-        let v = self.sel.fresh();
-        let u = DRAW_VS_CONST_U0 as u32 + self.cp.vs_consts.len() as u32;
-        self.cp.vs_consts.push((u as u8, bits));
-        self.sel.ubo.insert(v, Ubo::Uniform(u as u8));
-        self.cp.vs_by_bits.insert(bits, v);
-        v
-    }
-
     /// A per-lane word in 0..3. Memory ops run lane by lane, so the last lane's VertexIndex wins a
     /// shared word: lanes holding it get 0, the rest repeat that on a second word. Lanes with equal
     /// VertexIndex share a key, and their values are equal too.
@@ -41,7 +25,7 @@ impl ShaderState {
         let mut out = Vec::new();
         let vi = self.sel.fresh();
         self.sel.ubo.insert(vi, Ubo::Fixed(30));
-        let (k0, k1, c1, c2) = (self.konst(KEY_WORDS), self.konst(KEY_WORDS + 2), self.konst(1), self.konst(2));
+        let (k0, k1, c1, c2) = (self.konst(KEY_WORDS, Kv::Virtual), self.konst(KEY_WORDS + 2, Kv::Virtual), self.konst(1, Kv::Virtual), self.konst(2, Kv::Virtual));
         let z = self.op(&mut out, "ISUB", &[vi, vi]);
         let a0 = self.op(&mut out, "IADD", &[z, k0]);
         out.push(BorgInstr { mnem: "STORE", dst: NO_DST, srcs: vec![a0, vi], swz: vec![0, 0] });
@@ -70,7 +54,7 @@ impl ShaderState {
             self.sel.ubo.insert(f, Ubo::Fixed(r));
             self.per_pixel_fixed.insert(f);
         }
-        let c1 = self.konst(1);
+        let c1 = self.konst(1, Kv::Virtual);
         let xi = self.op(&mut out, "F2I", &[f30]);
         let yi = self.op(&mut out, "F2I", &[f31]);
         let xb = self.op(&mut out, "IAND", &[xi, c1]);
@@ -152,7 +136,7 @@ impl ShaderState {
             prog.splice(0..0, head);
         }
         let lane = self.spill_lane.unwrap();
-        let k = self.konst(slot_bits);
+        let k = self.konst(slot_bits, Kv::Virtual);
         self.spill_slots += 1;
         crate::set_spill_slots(self.spill_slots);
         let mut out = Vec::with_capacity(prog.len() + 8);

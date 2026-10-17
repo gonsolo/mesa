@@ -1,4 +1,4 @@
-use crate::state::ShaderState;
+use crate::state::{Kv, ShaderState};
 use crate::isel::borg_isel;
 use crate::opt::classify_uniform;
 use std::env;
@@ -16,14 +16,7 @@ impl ShaderState {
             let comps: Vec<(u32, u8)> = (0..n)
                 .map(|c| {
                     let bits = unsafe { lc.values()[c].u32_ };
-                    if self.cp.vs_window {
-                        return (self.cp.vs_const(&mut self.sel, bits, false), 0u8);
-                    }
-                    let idx = self.fw.slot(bits);
-                    let v = self.sel.next_vreg;
-                    self.sel.next_vreg += 1;
-                    self.sel.ubo.insert(v, Ubo::Uniform(idx as u8));
-                    (v, 0u8)
+                    (self.konst(bits, Kv::Word), 0u8)
                 })
                 .collect();
             self.sel.vec_map.insert(lc.def.index, comps);
@@ -46,10 +39,7 @@ impl ShaderState {
             Some(ld) => {
                 if let Some(&bits) = self.consts.get(&ld) {
                     if !self.sel.vec_map.contains_key(&ld) {
-                        let u = self.fw.slot(bits);
-                        let v = self.sel.next_vreg;
-                        self.sel.next_vreg += 1;
-                        self.sel.ubo.insert(v, Ubo::Uniform(u as u8));
+                        let v = self.fw.win(&mut self.sel, bits);
                         self.sel.vec_map.insert(ld, vec![(v, 0u8)]);
                     }
                 }
@@ -58,10 +48,7 @@ impl ShaderState {
             None => (wz, 0u8),
         };
         self.sel.prog.push(BorgInstr { mnem: "TEXA", dst: NO_DST, srcs: vec![wz, lv, wz], swz: vec![0, lc, 0] });
-        let u = self.fw.slot(3u32 << 16);
-        let ctl = self.sel.next_vreg;
-        self.sel.next_vreg += 1;
-        self.sel.ubo.insert(ctl, Ubo::Uniform(u as u8));
+        let ctl = self.fw.win(&mut self.sel, 3u32 << 16);
         let tex_v = self.sel.next_vreg;
         self.sel.next_vreg += 1;
         self.sel.prog.push(BorgInstr { mnem: "TEX", dst: tex_v, srcs: vec![wz, wz, ctl], swz: vec![0, 0, 0] });
@@ -113,10 +100,7 @@ impl ShaderState {
                 let ld = srcs.iter().find(|s| s.src_type == nir_tex_src_lod || s.src_type == nir_tex_src_bias).map(|s| s.src.as_def().index).unwrap_or(cd);
                 if let Some(&bits) = self.consts.get(&ld).filter(|_| is_txl || has_bias) {
                     if !self.sel.vec_map.contains_key(&ld) {
-                        let u = self.fw.slot(bits);
-                        let v = self.sel.next_vreg;
-                        self.sel.next_vreg += 1;
-                        self.sel.ubo.insert(v, Ubo::Uniform(u as u8));
+                        let v = self.fw.win(&mut self.sel, bits);
                         self.sel.vec_map.insert(ld, vec![(v, 0u8)]);
                     }
                 }
@@ -131,18 +115,10 @@ impl ShaderState {
             let ctl = if is_tg4 {
                 // Operation 2 (gather) of the component in bits 19:18.
                 let bits = 2u32 << 16 | (tex.component() & 3) << 18;
-                let u = self.fw.slot(bits);
-                let c = self.sel.next_vreg;
-                self.sel.next_vreg += 1;
-                self.sel.ubo.insert(c, Ubo::Uniform(u as u8));
-                c
+                self.fw.win(&mut self.sel, bits)
             } else if has_bias {
                 // LOD mode 1: implicit LOD plus TEXA's bias.
-                let u = self.fw.slot(1u32 << 21);
-                let c = self.sel.next_vreg;
-                self.sel.next_vreg += 1;
-                self.sel.ubo.insert(c, Ubo::Uniform(u as u8));
-                c
+                self.fw.win(&mut self.sel, 1u32 << 21)
             } else if is_fetch || is_txl {
                 let ctl_bits = if is_txl { 2u32 << 21 } else { 1u32 << 16 };
                 let slot = if is_txl { &mut self.lod_ctl_uniform } else { &mut self.fetch_ctl_uniform };
@@ -211,15 +187,7 @@ impl ShaderState {
                     Some(&b) if !self.sel.vec_map.contains_key(&d) => b,
                     _ => continue,
                 };
-                if self.cp.vs_window {
-                    let v = self.cp.vs_const(&mut self.sel, bits, false);
-                    self.sel.vec_map.insert(d, vec![(v, 0u8)]);
-                    continue;
-                }
-                let u = self.fw.slot(bits);
-                let v = self.sel.next_vreg;
-                self.sel.next_vreg += 1;
-                self.sel.ubo.insert(v, Ubo::Uniform(u as u8));
+                let v = self.konst(bits, Kv::Word);
                 self.sel.vec_map.insert(d, vec![(v, 0u8)]);
             }
         }
@@ -272,31 +240,7 @@ impl ShaderState {
                         let nst = self.sel.next_vreg; self.sel.next_vreg += 1;
                         self.sel.prog.push(BorgInstr { mnem: "FSTEP", dst: st, srcs: vec![d], swz: vec![0] });
                         self.sel.prog.push(BorgInstr { mnem: "FNEG", dst: nst, srcs: vec![st], swz: vec![0] });
-                        let one = match self.one_vreg {
-                            Some(v) => v,
-                            None => {
-                                let v = self.sel.next_vreg;
-                                self.sel.next_vreg += 1;
-                                let v = if self.is_fragment {
-                                    let c = self.sel.next_vreg;
-                                    self.sel.next_vreg += 1;
-                                    self.sel.ubo.insert(c, Ubo::Fixed(30));
-                                    self.per_pixel_fixed.insert(c);
-                                    self.sel.prog.push(BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
-                                    v
-                                } else if self.cp.vs_window {
-                                    // A pinned register is not staged for a draw's vertex shader.
-                                    self.cp.vs_const(&mut self.sel, 1.0f32.to_bits(), false)
-                                } else {
-                                    let reg = self.cp.alloc_reg();
-                                    self.cp.uniforms.push((reg, 1.0f32.to_bits()));
-                                    self.sel.ubo.insert(v, Ubo::Fixed(reg));
-                                    v
-                                };
-                                self.one_vreg = Some(v);
-                                v
-                            }
-                        };
+                        let one = self.one();
                         self.sel.prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![one, nst], swz: vec![0, 0] });
                     }
                     nir_op_fneu => {
@@ -320,31 +264,7 @@ impl ShaderState {
                         self.sel.prog.push(BorgInstr { mnem: "FSTEP", dst: s2, srcs: vec![dba], swz: vec![0] });
                         self.sel.prog.push(BorgInstr { mnem: "FADD", dst: ne, srcs: vec![s1, s2], swz: vec![0, 0] });
                         self.sel.prog.push(BorgInstr { mnem: "FNEG", dst: nne, srcs: vec![ne], swz: vec![0] });
-                        let one = match self.one_vreg {
-                            Some(v) => v,
-                            None => {
-                                let v = self.sel.next_vreg;
-                                self.sel.next_vreg += 1;
-                                let v = if self.is_fragment {
-                                    let c = self.sel.next_vreg;
-                                    self.sel.next_vreg += 1;
-                                    self.sel.ubo.insert(c, Ubo::Fixed(30));
-                                    self.per_pixel_fixed.insert(c);
-                                    self.sel.prog.push(BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
-                                    v
-                                } else if self.cp.vs_window {
-                                    // A pinned register is not staged for a draw's vertex shader.
-                                    self.cp.vs_const(&mut self.sel, 1.0f32.to_bits(), false)
-                                } else {
-                                    let reg = self.cp.alloc_reg();
-                                    self.cp.uniforms.push((reg, 1.0f32.to_bits()));
-                                    self.sel.ubo.insert(v, Ubo::Fixed(reg));
-                                    v
-                                };
-                                self.one_vreg = Some(v);
-                                v
-                            }
-                        };
+                        let one = self.one();
                         self.sel.prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![one, nne], swz: vec![0, 0] });
                     }
                 }
@@ -365,30 +285,7 @@ impl ShaderState {
                     // max(a, b) = b + (a >= b) * (a - b); min(a, b) = a + (a >= b) * (b - a)
                     let a = resolve_vm(&self.sel.vec_map, s[0].src.as_def().index, s[0].swizzle[0]);
                     let b = resolve_vm(&self.sel.vec_map, s[1].src.as_def().index, s[1].swizzle[0]);
-                    let one = match self.one_vreg {
-                        Some(v) => v,
-                        None => {
-                            let v = self.sel.next_vreg;
-                            self.sel.next_vreg += 1;
-                            let v = if self.is_fragment {
-                                let c = self.sel.next_vreg;
-                                self.sel.next_vreg += 1;
-                                self.sel.ubo.insert(c, Ubo::Fixed(30));
-                                self.per_pixel_fixed.insert(c);
-                                self.sel.prog.push(BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
-                                v
-                            } else if self.cp.vs_window {
-                                self.cp.vs_const(&mut self.sel, 1.0f32.to_bits(), false)
-                            } else {
-                                let reg = self.cp.alloc_reg();
-                                self.cp.uniforms.push((reg, 1.0f32.to_bits()));
-                                self.sel.ubo.insert(v, Ubo::Fixed(reg));
-                                v
-                            };
-                            self.one_vreg = Some(v);
-                            v
-                        }
-                    };
+                    let one = self.one();
                     let v = self.sel.next_vreg;
                     self.sel.next_vreg += 8;
                     self.sel.prog.push(BorgInstr { mnem: "FNEG", dst: v, srcs: vec![a.0], swz: vec![a.1] });          // -a
@@ -492,32 +389,14 @@ impl ShaderState {
             nir_op_fabs => {
                 let sl = &alu.srcs_as_slice()[0];
                 let (x, xc) = resolve_vm(&self.sel.vec_map, sl.src.as_def().index, sl.swizzle[0]);
-                let mut kreg = |bits: u32| -> u32 {
-                    if self.cp.vs_window {
-                        return self.cp.int_operand(&mut self.sel, bits as i32);
-                    }
-                    let u = self.fw.slot(bits);
-                    self.sel.next_vreg += 1;
-                    self.sel.ubo.insert(self.sel.next_vreg - 1, Ubo::Uniform(u as u8));
-                    self.sel.next_vreg - 1
-                };
-                let m = kreg(0x7fff_ffff);
+                let m = self.konst(0x7fff_ffff, Kv::Int);
                 self.sel.prog.push(BorgInstr { mnem: "IAND", dst: alu.def.index, srcs: vec![x, m], swz: vec![xc, 0] });
             }
             // A condition is 1.0 or 0.0: its inverse is 1.0 - c.
             nir_op_inot if alu.def.bit_size == 1 => {
                 let sl = &alu.srcs_as_slice()[0];
                 let (x, xc) = resolve_vm(&self.sel.vec_map, sl.src.as_def().index, sl.swizzle[0]);
-                let mut kreg = |bits: u32| -> u32 {
-                    if self.cp.vs_window {
-                        return self.cp.int_operand(&mut self.sel, bits as i32);
-                    }
-                    let u = self.fw.slot(bits);
-                    self.sel.next_vreg += 1;
-                    self.sel.ubo.insert(self.sel.next_vreg - 1, Ubo::Uniform(u as u8));
-                    self.sel.next_vreg - 1
-                };
-                let one = kreg(1.0f32.to_bits());
+                let one = self.konst(1.0f32.to_bits(), Kv::Int);
                 let n = self.sel.next_vreg;
                 self.sel.next_vreg += 1;
                 self.sel.prog.push(BorgInstr { mnem: "FNEG", dst: n, srcs: vec![x], swz: vec![xc] });
@@ -526,17 +405,8 @@ impl ShaderState {
             nir_op_u2f16 | nir_op_u2f32 => {
                 let s = &alu.srcs_as_slice()[0];
                 let (x, xc) = resolve_vm(&self.sel.vec_map, s.src.as_def().index, s.swizzle[0]);
-                let mut kreg = |bits: u32| -> u32 {
-                    if self.cp.vs_window {
-                        return self.cp.int_operand(&mut self.sel, bits as i32);
-                    }
-                    let u = self.fw.slot(bits);
-                    self.sel.next_vreg += 1;
-                    self.sel.ubo.insert(self.sel.next_vreg - 1, Ubo::Uniform(u as u8));
-                    self.sel.next_vreg - 1
-                };
-                let c1 = kreg(1);
-                let k = kreg(2.0f32.to_bits());
+                let c1 = self.konst(1, Kv::Int);
+                let k = self.konst(2.0f32.to_bits(), Kv::Int);
                 let v = self.sel.next_vreg;
                 self.sel.next_vreg += 5;
                 self.sel.prog.push(BorgInstr { mnem: "ISRL", dst: v, srcs: vec![x, c1], swz: vec![xc, 0] });
@@ -678,26 +548,15 @@ impl ShaderState {
                         assert_eq!(byte_off % 4, 0,
                             "push constant field at byte {byte_off} is not word-aligned");
                         let word_idx = (byte_off / 4) as u32;
-                        let idx_reg = *self.push_const_reg.entry(word_idx).or_insert_with(|| {
-                            // Vertex: a window word per run; a pinned GPR is clobbered by the fragment pass.
-                            if self.cp.vs_window {
-                                return self.cp.vs_const(&mut self.sel, word_idx, true);
+                        // A window word per run (a pinned GPR is clobbered by the fragment pass).
+                        let idx_reg = match self.push_const_reg.get(&word_idx) {
+                            Some(&r) => r,
+                            None => {
+                                let r = self.konst(word_idx, Kv::Derive);
+                                self.push_const_reg.insert(word_idx, r);
+                                r
                             }
-                            // Fragment: a window word too (no GPR is staged in draw mode).
-                            if self.is_fragment {
-                                let u = self.fw.slot(word_idx);
-                                let v = self.sel.next_vreg;
-                                self.sel.next_vreg += 1;
-                                self.sel.ubo.insert(v, Ubo::Uniform(u as u8));
-                                return v;
-                            }
-                            let reg = self.cp.alloc_reg();
-                            self.cp.uniforms.push((reg, word_idx));
-                            let v = self.sel.next_vreg;
-                            self.sel.next_vreg += 1;
-                            self.sel.ubo.insert(v, Ubo::Fixed(reg));
-                            v
-                        });
+                        };
                         let dst = self.sel.next_vreg;
                         self.sel.next_vreg += 1;
                         self.sel.prog.push(BorgInstr {
@@ -708,28 +567,14 @@ impl ShaderState {
                     .collect();
                 self.sel.vec_map.insert(intr.def.index, comps);
             } else if self.cp.vs_window || self.is_fragment {
-                macro_rules! kc {
-                    ($b:expr) => {{
-                        let bits: u32 = $b;
-                        if self.cp.vs_window {
-                            self.cp.vs_const(&mut self.sel, bits, true)
-                        } else {
-                            let u = self.fw.slot(bits);
-                            let v = self.sel.next_vreg;
-                            self.sel.next_vreg += 1;
-                            self.sel.ubo.insert(v, Ubo::Uniform(u as u8));
-                            v
-                        }
-                    }};
-                }
-                let o = resolve_vm(&self.sel.vec_map, intr.get_src(0).as_def().index, 0);
-                let two = kc!(2);
+                                let o = resolve_vm(&self.sel.vec_map, intr.get_src(0).as_def().index, 0);
+                let two = self.konst(2, Kv::Derive);
                 let w = self.sel.next_vreg; self.sel.next_vreg += 1;
                 self.sel.prog.push(BorgInstr { mnem: "ISRL", dst: w, srcs: vec![o.0, two], swz: vec![o.1, 0] });
                 let base_word = (intr.base() / 4) as u32 + if self.push_window { PUSH_WINDOW_WORDS } else { 0 };
                 let comps: Vec<(u32, u8)> = (0..intr.def.num_components as u32)
                     .map(|c| {
-                        let k = kc!(base_word + c);
+                        let k = self.konst(base_word + c, Kv::Derive);
                         let addr = self.sel.next_vreg; self.sel.next_vreg += 1;
                         self.sel.prog.push(BorgInstr { mnem: "IADD", dst: addr, srcs: vec![w, k], swz: vec![0, 0] });
                         let dst = self.sel.next_vreg; self.sel.next_vreg += 1;
@@ -765,21 +610,7 @@ impl ShaderState {
             }
             let binding = self.res_binding.get(&bd).copied().unwrap_or(0);
             let slot = SSBO_SLOT_WORDS * (1 + binding);
-            macro_rules! kc {
-                ($b:expr) => {{
-                    let bits: u32 = $b;
-                    if self.cp.vs_window {
-                        self.cp.vs_const(&mut self.sel, bits, true)
-                    } else {
-                        let u = self.fw.slot(bits);
-                        let v = self.sel.next_vreg;
-                        self.sel.next_vreg += 1;
-                        self.sel.ubo.insert(v, Ubo::Uniform(u as u8));
-                        v
-                    }
-                }};
-            }
-            if self.cp.vs_window {
+                        if self.cp.vs_window {
                 let _ = self.cp.vs_const(&mut self.sel, 1u32, false);   // each word's address is the slot's base plus 1
             }
             // A register holding 0, to copy window words through (an instruction reads one).
@@ -794,7 +625,7 @@ impl ShaderState {
                 None if off_is_descriptor => None,
                 None => {
                     let o = resolve_vm(&self.sel.vec_map, intr.get_src(osrc).as_def().index, 0);
-                    let two = kc!(2);
+                    let two = self.konst(2, Kv::Derive);
                     let w = self.sel.next_vreg; self.sel.next_vreg += 1;
                     self.sel.prog.push(BorgInstr { mnem: "ISRL", dst: w, srcs: vec![o.0, two], swz: vec![o.1, 0] });
                     Some(w)
@@ -807,7 +638,7 @@ impl ShaderState {
                 if store && intr.write_mask() & (1 << c) == 0 {
                     continue;
                 }
-                let k = kc!(slot + const_word.unwrap_or(0) + c as u32);
+                let k = self.konst(slot + const_word.unwrap_or(0) + c as u32, Kv::Derive);
                 let addr = self.sel.next_vreg; self.sel.next_vreg += 1;
                 self.sel.prog.push(BorgInstr { mnem: "IADD", dst: addr, srcs: vec![word.unwrap_or(zero), k], swz: vec![0, 0] });
                 if store {
@@ -815,7 +646,7 @@ impl ShaderState {
                     let d = resolve_vm(&self.sel.vec_map, src, c as u8);
                     let val = match self.consts.get(&d.0) {
                         Some(&bits) if !self.sel.vec_map.contains_key(&d.0) => {
-                            let kv = kc!(bits);
+                            let kv = self.konst(bits, Kv::Derive);
                             let t = self.sel.next_vreg; self.sel.next_vreg += 1;
                             self.sel.prog.push(BorgInstr { mnem: "IADD", dst: t, srcs: vec![zero, kv], swz: vec![0, 0] });
                             (t, 0u8)
@@ -930,35 +761,12 @@ impl ShaderState {
                 if self.cp.vs_window && base_words >= 16384 {
                     let _ = self.cp.vs_const(&mut self.sel, 16384u32, false);
                 }
-                macro_rules! cint {
-                    ($v:expr) => {{
-                        let v: i32 = $v;
-                        if self.cp.vs_window {
-                            self.cp.vs_const(&mut self.sel, v as u32, false)
-                        } else if self.is_fragment {
-                            let u = self.fw.slot(v as u32);
-                            let w = self.sel.next_vreg;
-                            self.sel.next_vreg += 1;
-                            self.sel.ubo.insert(w, Ubo::Uniform(u as u8));
-                            w
-                        } else {
-                            self.cp.int_operand(&mut self.sel, v)
-                        }
-                    }};
-                }
                 let addr = match (stride_words, self.const_addr_chain) {
                     (0, Some((next, a))) if next == base_words => a,
-                    (0, _) if !self.cp.vs_window && base_words > 0 => {
-                        let bits = base_words as u32;
-                        let u = self.fw.slot(bits);
-                        let v = self.sel.next_vreg;
-                        self.sel.next_vreg += 1;
-                        self.sel.ubo.insert(v, Ubo::Uniform(u as u8));
-                        v
-                    }
-                    (0, _) if !self.cp.vs_window => cint!(base_words),
+                    (0, _) if !self.cp.vs_window && base_words > 0 => self.fw.win(&mut self.sel, base_words as u32),
+                    (0, _) if !self.cp.vs_window => self.konst(base_words as u32, Kv::Word),
                     // A single constant word: the address is a window word, no chain.
-                    (0, _) if n == 1 => cint!(base_words),
+                    (0, _) if n == 1 => self.konst(base_words as u32, Kv::Word),
                     _ => {
                         let vid = match self.vertex_id_def {
                             Some(v) => v,
@@ -968,10 +776,10 @@ impl ShaderState {
                                 v
                             }
                         };
-                        let stride_v = cint!(stride_words);
+                        let stride_v = self.konst(stride_words as u32, Kv::Word);
                         let tmp = self.sel.next_vreg; self.sel.next_vreg += 1;
                         self.sel.prog.push(BorgInstr { mnem: "IMUL", dst: tmp, srcs: vec![vid, stride_v], swz: vec![0, 0] });
-                        let base_v = cint!(base_words);
+                        let base_v = self.konst(base_words as u32, Kv::Word);
                         let a = self.sel.next_vreg; self.sel.next_vreg += 1;
                         self.sel.prog.push(BorgInstr { mnem: "IADD", dst: a, srcs: vec![tmp, base_v], swz: vec![0, 0] });
                         a
@@ -983,7 +791,7 @@ impl ShaderState {
                         let dst = self.sel.next_vreg; self.sel.next_vreg += 1;
                         self.sel.prog.push(BorgInstr { mnem: "LOAD", dst, srcs: vec![cur], swz: vec![0] });
                         if c + 1 < n {
-                            let one_v = cint!(1);
+                            let one_v = self.konst(1, Kv::Word);
                             let next_a = self.sel.next_vreg; self.sel.next_vreg += 1;
                             self.sel.prog.push(BorgInstr {
                                 mnem: "IADD", dst: next_a, srcs: vec![cur, one_v], swz: vec![0, 0],
@@ -994,7 +802,7 @@ impl ShaderState {
                     })
                     .collect();
                 if stride_words == 0 && n > 1 {
-                    let one_v = cint!(1);
+                    let one_v = self.konst(1, Kv::Word);
                     let past = self.sel.next_vreg; self.sel.next_vreg += 1;
                     self.sel.prog.push(BorgInstr { mnem: "IADD", dst: past, srcs: vec![cur, one_v], swz: vec![0, 0] });
                     self.const_addr_chain = Some((base_words + n as i32, past));
@@ -1015,15 +823,7 @@ impl ShaderState {
                     Some(&b) if !self.sel.vec_map.contains_key(&d) => b,
                     _ => continue,
                 };
-                if self.cp.vs_window {
-                    let v = self.cp.vs_const(&mut self.sel, bits, false);
-                    self.sel.vec_map.insert(d, vec![(v, 0u8)]);
-                    continue;
-                }
-                let u = self.fw.slot(bits);
-                let v = self.sel.next_vreg;
-                self.sel.next_vreg += 1;
-                self.sel.ubo.insert(v, Ubo::Uniform(u as u8));
+                let v = self.konst(bits, Kv::Word);
                 self.sel.vec_map.insert(d, vec![(v, 0u8)]);
             }
             let comps: Vec<(u32, u8)> = (0..ncomp).map(|c| resolve_vm(&self.sel.vec_map, src, c as u8)).collect();
