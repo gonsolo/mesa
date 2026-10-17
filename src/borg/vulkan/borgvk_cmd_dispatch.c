@@ -173,7 +173,13 @@ cs_build_job(const struct borgvk_pipeline *pl, uint32_t gx, uint32_t gy, uint32_
    put_u32(&w, pl->cs_nregs); put_u32(&w, nbufs);
    put_u32(&w, 0); put_u32(&w, 0); put_u32(&w, 0);
    for (uint32_t i = 0; i < pl->cs_nwords; i++) put_u32(&w, pl->cs_words[i]);
-   for (uint32_t i = 0; i < pl->cs_nregs; i++) { put_u32(&w, pl->cs_regs[2 * i]); put_u32(&w, pl->cs_regs[2 * i + 1]); }
+   const uint32_t nwg = pl->cs_flags & 2 ? (pl->cs_flags >> 8) & 31 : 0, g[3] = { gx, gy, gz };
+   for (uint32_t i = 0; i < pl->cs_nregs; i++) {
+      uint32_t r = pl->cs_regs[2 * i], v = pl->cs_regs[2 * i + 1];
+      if (nwg && r <= nwg && r + 2 >= nwg)
+         v = g[nwg - r];
+      put_u32(&w, r); put_u32(&w, v);
+   }
    for (uint32_t i = 0; i < nbufs; i++) {
       put_u32(&w, bufs[i].addr); put_u32(&w, bufs[i].size);
       memcpy(w, bufs[i].decoded ? bufs[i].decoded : bufs[i].host, bufs[i].size);

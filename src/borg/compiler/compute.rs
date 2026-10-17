@@ -37,6 +37,7 @@ pub(crate) struct Out {
     pub regs: Vec<(u8, u32)>,
     pub local: [u32; 3],
     /// bit 0: uses atomics, so the grid must not be split across runs.
+    /// bit 1: reads NumWorkGroups; bits 8-12 name the preset register of x (y, z below it).
     pub flags: u32,
 }
 
@@ -53,6 +54,7 @@ struct Em {
     err: Option<String>,
     base_used: bool,
     atomics: bool,
+    nwg_reg: Option<u8>,
 }
 
 impl Em {
@@ -174,7 +176,7 @@ impl Em {
 }
 
 pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
-    let mut em = Em { words: vec![], prog: vec![], next: FIRST_VREG, next_const: 29, regs: vec![], cmap: HashMap::new(), vals: HashMap::new(), nregs: HashMap::new(), err: None, base_used: false, atomics: false };
+    let mut em = Em { words: vec![], prog: vec![], next: FIRST_VREG, next_const: 29, regs: vec![], cmap: HashMap::new(), vals: HashMap::new(), nregs: HashMap::new(), err: None, base_used: false, atomics: false, nwg_reg: None };
     let entry = nir_shader_get_entrypoint(nir);
     let mut marks: HashMap<usize, Vec<CfMark>> = HashMap::new();
     let mut unsupported: Vec<&'static str> = Vec::new();
@@ -302,6 +304,24 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
                     nir_intrinsic_load_base_workgroup_id => {
                         for c in 0..3 {
                             em.vals.insert((d, c), V::C(0));
+                        }
+                    }
+                    nir_intrinsic_load_num_workgroups => {
+                        // Presets the driver fills with the dispatch's group counts.
+                        if em.nwg_reg.is_none() {
+                            if em.next_const < 17 {
+                                em.fail("too many distinct constants".into());
+                            } else {
+                                em.nwg_reg = Some(em.next_const);
+                                for _ in 0..3 {
+                                    em.regs.push((em.next_const, 0));
+                                    em.next_const -= 1;
+                                }
+                            }
+                        }
+                        let x = em.nwg_reg.unwrap_or(15) as u32;
+                        for c in 0..3u8 {
+                            em.vals.insert((d, c), V::R(PHYS + x - c as u32));
                         }
                     }
                     nir_intrinsic_load_workgroup_id => {
@@ -497,7 +517,8 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
             em.regs.push(((WG_BASE_REG + c) as u8, 0));
         }
     }
-    let reserved: Vec<u8> = em.cmap.values().copied().chain([30u8, 31, 12, 13, 14]).collect();
+    let nwg: Vec<u8> = em.nwg_reg.map_or(vec![], |r| vec![r, r - 1, r - 2]);
+    let reserved: Vec<u8> = em.cmap.values().copied().chain(nwg).chain([30u8, 31, 12, 13, 14]).collect();
     let alloc = regalloc(&bp, &HashMap::new(), &reserved, &[], &HashMap::new());
     let phys = |x: u32| -> u8 { if x >= PHYS { (x - PHYS) as u8 } else { *alloc.get(&x).unwrap_or(&0) } };
     for i in &em.prog {
@@ -515,7 +536,7 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
         return Err(format!("{} instructions exceed the {MAX_WORDS}-word program limit", em.words.len()));
     }
     let ws = (*nir).info.workgroup_size;
-    Ok(Out { words: em.words, regs: em.regs, local: [ws[0] as u32, ws[1] as u32, ws[2] as u32], flags: em.atomics as u32 })
+    Ok(Out { words: em.words, regs: em.regs, local: [ws[0] as u32, ws[1] as u32, ws[2] as u32], flags: em.atomics as u32 | em.nwg_reg.map_or(0, |r| 2 | (r as u32) << 8) })
 }
 
 #[no_mangle]
