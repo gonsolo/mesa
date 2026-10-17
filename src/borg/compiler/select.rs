@@ -170,6 +170,7 @@ impl ShaderState {
     pub unsafe fn alu(&mut self, alu: &nir_alu_instr) {
         if (matches!(alu.op, nir_op_fadd | nir_op_fmul | nir_op_ffma
             | nir_op_flt | nir_op_fge | nir_op_feq | nir_op_fneu | nir_op_bcsel | nir_op_fmin | nir_op_fmax
+            | nir_op_slt | nir_op_sge | nir_op_seq | nir_op_sne
             | nir_op_ieq | nir_op_ine | nir_op_ilt | nir_op_ige | nir_op_ult | nir_op_uge)
             || (self.is_fragment && matches!(alu.op, nir_op_iadd | nir_op_imul | nir_op_ishl
                 | nir_op_ishr | nir_op_ushr | nir_op_isub | nir_op_iand | nir_op_ior
@@ -221,7 +222,8 @@ impl ShaderState {
                 let (v, c) = resolve_vm(&self.sel.vec_map, s.src.as_def().index, s.swizzle[0]);
                 self.sel.prog.push(BorgInstr { mnem: "F2I", dst: alu.def.index, srcs: vec![v], swz: vec![c] });
             }
-            nir_op_flt | nir_op_fge | nir_op_fneu | nir_op_feq => {
+            // slt and friends are the same compares with a float result, which a condition is here.
+            nir_op_flt | nir_op_fge | nir_op_fneu | nir_op_feq | nir_op_slt | nir_op_sge | nir_op_sne | nir_op_seq => {
                 let sl = alu.srcs_as_slice();
                 let a = resolve_vm(&self.sel.vec_map, sl[0].src.as_def().index, sl[0].swizzle[0]);
                 let b = resolve_vm(&self.sel.vec_map, sl[1].src.as_def().index, sl[1].swizzle[0]);
@@ -230,11 +232,11 @@ impl ShaderState {
 
                 match alu.op {
                     // a < b  ->  FSTEP(b - a)
-                    nir_op_flt => {
+                    nir_op_flt | nir_op_slt => {
                         let d = self.sel.fsub(b, a);
                         self.sel.prog.push(BorgInstr { mnem: "FSTEP", dst: alu.def.index, srcs: vec![d], swz: vec![0] });
                     }
-                    nir_op_fge => {
+                    nir_op_fge | nir_op_sge => {
                         let d = self.sel.fsub(b, a);
                         let st = self.sel.next_vreg; self.sel.next_vreg += 1;
                         let nst = self.sel.next_vreg; self.sel.next_vreg += 1;
@@ -243,7 +245,7 @@ impl ShaderState {
                         let one = self.one();
                         self.sel.prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![one, nst], swz: vec![0, 0] });
                     }
-                    nir_op_fneu => {
+                    nir_op_fneu | nir_op_sne => {
                         let dab = self.sel.fsub(a, b);
                         let dba = self.sel.fsub(b, a);
                         let s1 = self.sel.next_vreg; self.sel.next_vreg += 1;
@@ -401,6 +403,12 @@ impl ShaderState {
                 self.sel.next_vreg += 1;
                 self.sel.prog.push(BorgInstr { mnem: "FNEG", dst: n, srcs: vec![x], swz: vec![xc] });
                 self.sel.prog.push(BorgInstr { mnem: "FADD", dst: alu.def.index, srcs: vec![n, one], swz: vec![0, 0] });
+            }
+            nir_op_inot => {
+                let sl = &alu.srcs_as_slice()[0];
+                let x = resolve_vm(&self.sel.vec_map, sl.src.as_def().index, sl.swizzle[0]);
+                let m = self.konst(u32::MAX, Kv::Int);
+                self.sel.prog.push(BorgInstr { mnem: "IXOR", dst: alu.def.index, srcs: vec![x.0, m], swz: vec![x.1, 0] });
             }
             nir_op_u2f16 | nir_op_u2f32 => {
                 let s = &alu.srcs_as_slice()[0];
