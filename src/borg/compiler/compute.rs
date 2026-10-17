@@ -525,6 +525,33 @@ pub unsafe extern "C" fn borgc_compile_compute(
     regs: *mut u32, reg_cap: u32, nregs: *mut u32,
     local: *mut u32, flags: *mut u32,
 ) -> u32 {
+    let key = if !nir.is_null() && std::env::var("BORGC_CORPUS_DIR").is_ok() {
+        (*nir).to_string().ok().map(|s| crate::corpus::key(&s, 0))
+    } else {
+        None
+    };
+    let ret = compile_compute_inner(nir, words, word_cap, nwords, regs, reg_cap, nregs, local, flags);
+    if let Some(key) = key {
+        // flags, local size, program words, then the (register, value) presets.
+        let mut blob: Vec<u32> = vec![];
+        if ret == 0 {
+            blob.push(*flags);
+            blob.extend((0..3).map(|k| *local.add(k)));
+            blob.extend(std::slice::from_raw_parts(words, *nwords as usize));
+            blob.extend(std::slice::from_raw_parts(regs, 2 * *nregs as usize));
+        }
+        let bytes: Vec<u8> = blob.iter().flat_map(|w| w.to_le_bytes()).collect();
+        crate::corpus::record(key, ret, &bytes);
+    }
+    ret
+}
+
+unsafe fn compile_compute_inner(
+    nir: *mut nir_shader,
+    words: *mut u32, word_cap: u32, nwords: *mut u32,
+    regs: *mut u32, reg_cap: u32, nregs: *mut u32,
+    local: *mut u32, flags: *mut u32,
+) -> u32 {
     // An assert in the backend must refuse the shader, not abort the process.
     let compiled = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile(nir))) {
         Ok(r) => r,
