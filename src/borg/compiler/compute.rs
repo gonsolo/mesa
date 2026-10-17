@@ -543,7 +543,7 @@ pub(crate) unsafe fn compile(nir: *mut nir_shader) -> Result<Out, String> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Compute as a stage of the graphics selector (BORGC_UNIFIED_CS=1): the ALU ops are select.rs's,
+// Compute as a stage of the graphics selector: the ALU ops are select.rs's,
 // what follows is only what a compute shader has and a draw has not.
 
 /// Compute-only selection state.
@@ -1144,8 +1144,7 @@ unsafe fn compile_compute_inner(
 ) -> u32 {
     // An assert in the backend must refuse the shader, not abort the process.
     crate::set_cs_pool(Vec::new());
-    let unified = std::env::var("BORGC_UNIFIED_CS").is_ok();
-    let compiled = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| if unified { compile_unified(nir) } else { compile(nir) })) {
+    let compiled = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile_unified(nir))) {
         Ok(r) => r,
         Err(_) => return 1,
     };
