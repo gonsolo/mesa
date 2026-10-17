@@ -15,7 +15,7 @@ use std::collections::HashMap;
 pub(crate) const SLOT_BASE_WORDS: u32 = 0x40000;
 pub(crate) const SLOT_WORDS: u32 = 0x80000;
 const LANES: u32 = 4; // BorgConfig.Simt: fragLanes
-const MAX_WORDS: usize = 512;
+const MAX_WORDS: usize = 4096; // the DRAM code region below the first slot holds 16k
 const PHYS: u32 = 0x4000_0000;
 const FIRST_VREG: u32 = 1000;
 pub(crate) const WG_BASE_REG: u32 = 12;
@@ -570,7 +570,7 @@ enum Val {
 
 /// Word index of the constant pool, the compute job's slot 34.
 pub(crate) const POOL_BASE_WORDS: u32 = SLOT_BASE_WORDS + 34 * SLOT_WORDS;
-const POOL_MAX: usize = 256;
+const POOL_MAX: usize = 4096;
 
 impl ShaderState {
     /// A constant's placeholder register; pool_consts makes it a preset or a pool load.

@@ -373,7 +373,7 @@ borgvk_compile_compute_stage(struct borgvk_device *device,
    }
    remap_array_bindings(device, nir);
    borg_lower_nir_for_borgc(nir);
-   uint32_t rc = borgc_compile_compute(nir, pipeline->cs_words, 512, &pipeline->cs_nwords,
+   uint32_t rc = borgc_compile_compute(nir, pipeline->cs_words, BORGVK_CS_WORDS_MAX, &pipeline->cs_nwords,
                                        pipeline->cs_regs, 32, &pipeline->cs_nregs,
                                        pipeline->cs_local, &pipeline->cs_flags);
    pipeline->cs_ok = rc == 0;
