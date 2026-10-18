@@ -325,7 +325,8 @@ borg_precise_filter(const nir_instr *instr, const void *data)
    const nir_alu_instr *alu = nir_instr_as_alu(instr);
    if (alu->def.bit_size != 32 || alu->fp_math_ctrl == nir_fp_no_fast_math)
       return false;
-   return alu->op == nir_op_fdiv || alu->op == nir_op_fsqrt || alu->op == nir_op_frcp || alu->op == nir_op_frsq;
+   return alu->op == nir_op_fdiv || alu->op == nir_op_fsqrt || alu->op == nir_op_frcp || alu->op == nir_op_frsq ||
+          alu->op == nir_op_fexp2 || alu->op == nir_op_flog2 || alu->op == nir_op_fpow;
 }
 
 static nir_def *
@@ -363,6 +364,61 @@ borg_is_normal(nir_builder *b, nir_def *x)
 }
 
 static nir_def *
+borg_poly(nir_builder *b, nir_def *t, const float *c, int n)
+{
+   nir_def *r = nir_imm_float(b, c[n - 1]);
+   for (int i = n - 2; i >= 0; i--)
+      r = nir_ffma(b, r, t, nir_imm_float(b, c[i]));
+   return r;
+}
+
+/* log2 of a positive normal x: exponent plus t * P(t), t = mantissa - 1 centred on 1 (abs error 1.4e-7). */
+static nir_def *
+borg_log2_core(nir_builder *b, nir_def *x)
+{
+   static const float c[] = { 1.44269490f, -0.72135276f, 0.48092404f, -0.36024198f,
+                              0.28707561f, -0.24882181f, 0.23420985f, -0.14620353f };
+   nir_def *e = nir_iadd_imm(b, nir_ushr_imm(b, nir_iand_imm(b, x, 0x7fffffff), 23), -127);
+   nir_def *m = nir_ior_imm(b, nir_iand_imm(b, x, 0x7fffff), 0x3f800000);
+   nir_def *big = nir_fge(b, m, nir_imm_float(b, 1.41421356f));
+   m = nir_bcsel(b, big, nir_fmul_imm(b, m, 0.5f), m);
+   e = nir_bcsel(b, big, nir_iadd_imm(b, e, 1), e);
+   nir_def *t = nir_fadd_imm(b, m, -1.0f);
+   return nir_fadd(b, nir_i2f32(b, e), nir_fmul(b, t, borg_poly(b, t, c, 8)));
+}
+
+static nir_def *
+borg_is_nan(nir_builder *b, nir_def *x)
+{
+   return nir_flt(b, nir_imm_float(b, INFINITY), nir_fabs(b, x));
+}
+
+static nir_def *
+borg_log2_precise(nir_builder *b, nir_def *x)
+{
+   nir_def *positive = nir_iand(b, borg_is_normal(b, x), nir_flt(b, nir_imm_float(b, 0.0f), x));
+   nir_def *tiny = nir_flt(b, nir_fabs(b, x), nir_imm_float(b, FLT_MIN));
+   nir_def *other = nir_bcsel(b, tiny, nir_imm_float(b, -INFINITY),
+                              nir_bcsel(b, nir_flt(b, x, nir_imm_float(b, 0.0f)), nir_imm_float(b, NAN), x));
+   return nir_bcsel(b, positive, borg_log2_core(b, x), other);
+}
+
+/* 2^x: round x to n, 2^(x-n) from a polynomial, then n added into the exponent field. */
+static nir_def *
+borg_exp2_precise(nir_builder *b, nir_def *x)
+{
+   static const float c[] = { 1.0f, 0.69314718f, 0.24022651f, 0.05550328f, 0.00961803f, 0.00134004f, 0.00015470f };
+   nir_def *xc = nir_bcsel(b, nir_flt(b, x, nir_imm_float(b, -127.0f)), nir_imm_float(b, -127.0f),
+                           nir_bcsel(b, nir_flt(b, nir_imm_float(b, 128.0f), x), nir_imm_float(b, 128.0f), x));
+   nir_def *half = nir_bcsel(b, nir_flt(b, xc, nir_imm_float(b, 0.0f)), nir_imm_float(b, -0.5f), nir_imm_float(b, 0.5f));
+   nir_def *n = nir_f2i32(b, nir_fadd(b, xc, half));
+   nir_def *f = nir_fsub(b, xc, nir_i2f32(b, n));
+   nir_def *bits = nir_iadd(b, borg_poly(b, f, c, 7), nir_ishl_imm(b, n, 23));
+   nir_def *r = nir_bcsel(b, nir_ilt_imm(b, bits, 0x00800000), nir_imm_float(b, 0.0f), bits);
+   return nir_bcsel(b, borg_is_nan(b, x), x, r);
+}
+
+static nir_def *
 borg_precise_lower_exact(nir_builder *b, nir_instr *instr, void *data)
 {
    nir_alu_instr *alu = nir_instr_as_alu(instr);
@@ -387,6 +443,12 @@ borg_precise_lower_exact(nir_builder *b, nir_instr *instr, void *data)
       return nir_bcsel(b, ok, nir_bcsel(b, borg_is_finite(b, q), q2, q),
                        nir_bcsel(b, borg_is_finite(b, y), nir_fmul(b, x, nir_frcp(b, y)), zero));
    }
+   case nir_op_flog2:
+      return borg_log2_precise(b, x);
+   case nir_op_fexp2:
+      return borg_exp2_precise(b, x);
+   case nir_op_fpow:
+      return borg_exp2_precise(b, nir_fmul(b, nir_ssa_for_alu_src(b, alu, 1), borg_log2_precise(b, x)));
    default: {
       nir_def *r = borg_rsq_refined(b, x);
       nir_def *s = nir_fmul(b, x, r);
