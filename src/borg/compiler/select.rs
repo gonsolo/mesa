@@ -1019,11 +1019,15 @@ impl ShaderState {
         for block in (*entry).iter_blocks() {
             if let Some(ms) = cf_marks.get(&(block as *const nir_block as usize)) {
                 for m in ms {
+                    let cond = m.cond.map(|c| match self.consts.get(&c) {
+                        Some(&b) if !self.sel.vec_map.contains_key(&c) => (self.konst(b, Kv::Word), 0),
+                        _ => resolve_vm(&self.sel.vec_map, c, 0),
+                    });
                     self.sel.prog.push(BorgInstr {
                         mnem: m.mnem,
                         dst: NO_DST,
-                        srcs: m.cond.map(|c| vec![c]).unwrap_or_default(),
-                        swz: m.cond.map(|_| vec![0u8]).unwrap_or_default(),
+                        srcs: cond.map(|c| vec![c.0]).unwrap_or_default(),
+                        swz: cond.map(|c| vec![c.1]).unwrap_or_default(),
                     });
                 }
             }
