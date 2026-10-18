@@ -659,6 +659,33 @@ borg_frexp_lower(nir_builder *b, nir_instr *instr, void *data)
    return nir_bcsel(b, special, x, sig);
 }
 
+static bool
+borg_sincos_filter(const nir_instr *instr, const void *data)
+{
+   return instr->type == nir_instr_type_alu &&
+          (nir_instr_as_alu(instr)->op == nir_op_fsin || nir_instr_as_alu(instr)->op == nir_op_fcos);
+}
+
+/* sin(2 pi r) with r = t - round(t), t = x / 2pi (+ 1/4 for cos), r folded into [-1/4, 1/4];
+ * the odd polynomial is a minimax fit, 7e-7 in FP32. */
+static nir_def *
+borg_sincos_lower(nir_builder *b, nir_instr *instr, void *data)
+{
+   nir_alu_instr *alu = nir_instr_as_alu(instr);
+   nir_def *x = nir_ssa_for_alu_src(b, alu, 0);
+   nir_def *t = nir_fmul_imm(b, x, 0.5 / M_PI);
+   if (alu->op == nir_op_fcos)
+      t = nir_fadd_imm(b, t, 0.25);
+   nir_def *r = nir_fsub(b, t, nir_ffloor(b, nir_fadd_imm(b, t, 0.5)));
+   nir_def *m = nir_fsub(b, nir_imm_float(b, 0.25f), nir_fabs(b, nir_fsub(b, nir_imm_float(b, 0.25f), nir_fabs(b, r))));
+   r = nir_ior(b, m, nir_iand_imm(b, r, 0x80000000));
+   nir_def *r2 = nir_fmul(b, r, r);
+   nir_def *p = nir_fadd_imm(b, nir_fmul_imm(b, r2, -70.9936981), 81.3407974);
+   p = nir_fadd_imm(b, nir_fmul(b, r2, p), -41.3371429);
+   p = nir_fadd_imm(b, nir_fmul(b, r2, p), 6.28316402);
+   return nir_fmul(b, r, p);
+}
+
 /* F2I truncates: trunc(x) = float(int(x)), floor(x) = trunc(x) - (x < trunc(x)), round_even from trunc's
  * fraction and parity; fmod(x, y) = x - y * floor(x / y). */
 static bool
@@ -928,6 +955,7 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(_, nir, nir_shader_lower_instructions, borg_precise_filter, borg_precise_lower, NULL);
    NIR_PASS(_, nir, nir_lower_flrp, 32, false);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_frexp_filter, borg_frexp_lower, NULL);
+   NIR_PASS(_, nir, nir_shader_lower_instructions, borg_sincos_filter, borg_sincos_lower, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_idiv_filter, borg_idiv_lower, NULL);
    NIR_PASS(_, nir, nir_lower_alu_to_scalar, NULL, NULL);
    const bool wide = (nir->info.stage == MESA_SHADER_FRAGMENT || (nir->info.stage == MESA_SHADER_VERTEX && remat_vertex_inputs)) &&
