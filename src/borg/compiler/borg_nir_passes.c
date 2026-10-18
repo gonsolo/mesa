@@ -32,6 +32,7 @@ const struct nir_shader_compiler_options borg_nir_options = {
    .lower_fsat = true,
    .lower_flrp32 = true,
    .lower_ffract = true,
+   .lower_fsign = true,
    .lower_extract_byte = true,
    .lower_extract_word = true,
    .lower_unpack_unorm_4x8 = true,
