@@ -609,30 +609,88 @@ impl ShaderState {
                     self.set(d, &v);
                 }
             }
-            nir_intrinsic_ssbo_atomic => {
-                self.cs.atomics = true;
-                if i.atomic_op() != nir_atomic_op_iadd {
-                    self.fail("only atomicAdd is supported".into());
-                    return;
-                }
-                let a = self.word_addr(i.get_src(0), i.get_src(1), 0);
+            nir_intrinsic_ssbo_atomic | nir_intrinsic_shared_atomic | nir_intrinsic_ssbo_atomic_swap
+            | nir_intrinsic_shared_atomic_swap => {
+                let ssbo = matches!(i.intrinsic, nir_intrinsic_ssbo_atomic | nir_intrinsic_ssbo_atomic_swap);
+                let a = if ssbo {
+                    self.cs.atomics = true;
+                    self.word_addr(i.get_src(0), i.get_src(1), 0)
+                } else {
+                    let o = self.val(i.get_src(0), 0);
+                    let w = self.shr(o, 2);
+                    let w = self.add(w, Val::K(i.base() as u32 / 4));
+                    let w = self.mask(w);
+                    self.add(Val::K(SLOT_BASE_WORDS + 33 * SLOT_WORDS), w)
+                };
+                let s = if ssbo { 2 } else { 1 };
+                let swap = i.atomic_op() == nir_atomic_op_cmpxchg;
                 let a = self.vreg(a);
-                let x = self.val(i.get_src(2), 0);
+                // A swap's sources are the comparator, then the new value.
+                let x = self.val(i.get_src(s + swap as usize), 0);
                 let x = self.vreg(x);
+                let cmp = if swap {
+                    let c = self.val(i.get_src(s), 0);
+                    Some(self.vreg(c))
+                } else {
+                    None
+                };
+                let lt = match i.atomic_op() {
+                    nir_atomic_op_imin | nir_atomic_op_imax => Some("ISLT"),
+                    nir_atomic_op_umin | nir_atomic_op_umax => Some("ISLTU"),
+                    _ => None,
+                };
+                let alu = match i.atomic_op() {
+                    nir_atomic_op_iadd => "IADD",
+                    nir_atomic_op_iand => "IAND",
+                    nir_atomic_op_ior => "IOR",
+                    nir_atomic_op_ixor => "IXOR",
+                    nir_atomic_op_xchg | nir_atomic_op_cmpxchg => "",
+                    _ if lt.is_some() => "",
+                    _ => {
+                        self.fail("unsupported atomic op".into());
+                        return;
+                    }
+                };
+                let is_min = matches!(i.atomic_op(), nir_atomic_op_imin | nir_atomic_op_umin);
                 // One lane at a time; the same registers in every lane's turn.
-                let (old, sum, t) = (self.sel.fresh(), self.sel.fresh(), self.sel.fresh());
+                let (old, new, t, u, w) = (self.sel.fresh(), self.sel.fresh(), self.sel.fresh(), self.sel.fresh(), self.sel.fresh());
                 let r30 = self.fixed(30);
                 // r30 counts across the workgroup's quads; the lane is its low bits.
                 let (m, q) = (self.konst(LANES - 1, Kv::Int), self.sel.fresh());
                 self.sel.prog.push(BorgInstr { mnem: "IAND", dst: q, srcs: vec![r30, m], swz: vec![0, 0] });
                 for lane in 0..LANES {
                     let l = self.konst(lane, Kv::Int);
-                    self.sel.prog.push(BorgInstr { mnem: "ISEQ", dst: t, srcs: vec![q, l], swz: vec![0, 0] });
-                    self.sel.prog.push(BorgInstr { mnem: "EXPUSH", dst: NO_DST, srcs: vec![t], swz: vec![0] });
-                    self.sel.prog.push(BorgInstr { mnem: "LOAD", dst: old, srcs: vec![a.0], swz: vec![a.1] });
-                    self.sel.prog.push(BorgInstr { mnem: "IADD", dst: sum, srcs: vec![old, x.0], swz: vec![0, x.1] });
-                    self.sel.prog.push(BorgInstr { mnem: "STORE", dst: NO_DST, srcs: vec![a.0, sum], swz: vec![a.1, 0] });
-                    self.sel.prog.push(BorgInstr { mnem: "EXPOP", dst: NO_DST, srcs: vec![], swz: vec![] });
+                    let p = &mut self.sel.prog;
+                    let mut op = |mnem: &'static str, dst: u32, srcs: Vec<(u32, u8)>| {
+                        let (srcs, swz) = srcs.into_iter().unzip();
+                        p.push(BorgInstr { mnem, dst, srcs, swz });
+                    };
+                    op("ISEQ", t, vec![(q, 0), (l, 0)]);
+                    op("EXPUSH", NO_DST, vec![(t, 0)]);
+                    op("LOAD", old, vec![a]);
+                    let v = if !alu.is_empty() {
+                        op(alu, new, vec![(old, 0), x]);
+                        (new, 0)
+                    } else if let Some(c) = cmp {
+                        // old + (old == cmp) * (x - old)
+                        op("ISEQ", t, vec![(old, 0), c]);
+                        op("ISUB", u, vec![x, (old, 0)]);
+                        op("IMUL", w, vec![(t, 0), (u, 0)]);
+                        op("IADD", new, vec![(old, 0), (w, 0)]);
+                        (new, 0)
+                    } else if let Some(lt) = lt {
+                        // max: old + (old < x) * (x - old); min: x + (old < x) * (old - x)
+                        let (p0, q0) = if is_min { (x, (old, 0)) } else { ((old, 0), x) };
+                        op(lt, t, vec![(old, 0), x]);
+                        op("ISUB", u, vec![q0, p0]);
+                        op("IMUL", w, vec![(t, 0), (u, 0)]);
+                        op("IADD", new, vec![p0, (w, 0)]);
+                        (new, 0)
+                    } else {
+                        x
+                    };
+                    op("STORE", NO_DST, vec![a, v]);
+                    op("EXPOP", NO_DST, vec![]);
                 }
                 self.set(d, &[Val::R(old, 0)]);
             }
