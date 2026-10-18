@@ -140,6 +140,41 @@ impl ShaderState {
         else {
             return false;
         };
+        self.spill(v);
+        true
+    }
+
+    /// Every quad of a workgroup runs up to a BARRIER on the same registers before any goes on,
+    /// so a value live across one is kept in memory.
+    pub fn spill_across_barriers(&mut self) -> Result<(), String> {
+        loop {
+            let bars: Vec<usize> = self.sel.prog.iter().enumerate().filter(|(_, i)| i.mnem == "BARRIER").map(|(at, _)| at).collect();
+            let mut def_at: HashMap<u32, usize> = HashMap::new();
+            let mut last: HashMap<u32, usize> = HashMap::new();
+            for (at, i) in self.sel.prog.iter().enumerate() {
+                if i.dst != NO_DST {
+                    def_at.entry(i.dst).or_insert(at);
+                }
+                for s in &i.srcs {
+                    last.insert(*s, at);
+                }
+            }
+            let crossing = def_at
+                .iter()
+                .filter(|(v, &d)| !self.sel.ubo.contains_key(v) && last.get(v).is_some_and(|&l| bars.iter().any(|&b| d < b && b < l)))
+                .map(|(&v, _)| v)
+                .min();
+            let Some(v) = crossing else { return Ok(()) };
+            let single = self.sel.prog.iter().filter(|i| i.dst == v).count() == 1
+                && self.sel.prog.iter().all(|i| i.srcs.iter().zip(&i.swz).all(|(s, &c)| *s != v || c == 0));
+            if !single || self.spill_slots >= MAX_COMPUTE_SPILL_SLOTS {
+                return Err("a value live across barrier() cannot be spilled".into());
+            }
+            self.spill(v);
+        }
+    }
+
+    fn spill(&mut self, v: u32) {
         let slot_bits = if self.is_compute {
             crate::compute::SPILL_BASE_WORDS + self.spill_slots * self.invocations()
         } else {
@@ -173,6 +208,5 @@ impl ShaderState {
             }
         }
         self.sel.prog = out;
-        true
     }
 }

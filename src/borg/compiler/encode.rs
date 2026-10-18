@@ -78,6 +78,7 @@ pub(crate) fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
         "EXPUSH" => un(0x5400_0000) & !(0x1F << 7),
         "EXELSE" => 0x5800_0000,
         "EXPOP" => 0x5C00_0000,
+        "BARRIER" => 0x7800_0000,
         _ => return None, // mov is handled separately (register copy)
     })
 }
@@ -158,6 +159,7 @@ mod tests {
         assert_eq!(encode("EXPUSH", 0, 5, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2A << 25);
         assert_eq!(encode("EXELSE", 0, 0, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2C << 25);
         assert_eq!(encode("EXPOP", 0, 0, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2E << 25);
+        assert_eq!(encode("BARRIER", 0, 0, 0, 0, 0).unwrap(), 0x3C << 25);
         assert_eq!(encode_sout(0, 0, 0).unwrap() & 0xFE00_0000, 0x42 << 25);
         assert_eq!(encode_fattr(0, 0).unwrap() & 0xFE00_0000, 0x44 << 25);
     }
