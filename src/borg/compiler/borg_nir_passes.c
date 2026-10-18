@@ -327,7 +327,7 @@ borg_precise_filter(const nir_instr *instr, const void *data)
    if (alu->def.bit_size != 32 || alu->fp_math_ctrl == nir_fp_no_fast_math)
       return false;
    return alu->op == nir_op_fdiv || alu->op == nir_op_fsqrt || alu->op == nir_op_frcp || alu->op == nir_op_frsq ||
-          alu->op == nir_op_fexp2 || alu->op == nir_op_flog2 || alu->op == nir_op_fpow;
+          alu->op == nir_op_fexp2 || alu->op == nir_op_flog2 || alu->op == nir_op_fpow || alu->op == nir_op_fmod;
 }
 
 static nir_def *
@@ -419,6 +419,21 @@ borg_exp2_precise(nir_builder *b, nir_def *x)
    return nir_bcsel(b, borg_is_nan(b, x), x, r);
 }
 
+/* x / y; a divisor of 2^120 and above is scaled down first so 1/y stays normal. */
+static nir_def *
+borg_fdiv_precise(nir_builder *b, nir_def *x, nir_def *y)
+{
+   nir_def *big = nir_fge(b, nir_fabs(b, y), nir_imm_float(b, 0x1p120f));
+   nir_def *scale = nir_bcsel(b, big, nir_imm_float(b, 0x1p-64f), nir_imm_float(b, 1.0f));
+   nir_def *ys = nir_fmul(b, y, scale), *xs = nir_fmul(b, x, scale);
+   nir_def *r = borg_rcp_refined(b, ys);
+   nir_def *q = nir_fmul(b, xs, r);
+   nir_def *q2 = nir_ffma(b, nir_ffma(b, nir_fneg(b, ys), q, xs), r, q);
+   nir_def *ok = nir_iand(b, borg_is_finite(b, x), borg_is_normal(b, y));
+   return nir_bcsel(b, ok, nir_bcsel(b, borg_is_finite(b, q), q2, q),
+                    nir_bcsel(b, borg_is_finite(b, y), nir_fmul(b, x, nir_frcp(b, y)), nir_imm_float(b, 0.0f)));
+}
+
 static nir_def *
 borg_precise_lower_exact(nir_builder *b, nir_instr *instr, void *data)
 {
@@ -427,22 +442,15 @@ borg_precise_lower_exact(nir_builder *b, nir_instr *instr, void *data)
    nir_def *zero = nir_imm_float(b, 0.0f);
    switch (alu->op) {
    case nir_op_frcp:
-      return nir_bcsel(b, borg_is_normal(b, x), borg_rcp_refined(b, x),
-                       nir_bcsel(b, borg_is_finite(b, x), nir_frcp(b, x), zero));
+      return borg_fdiv_precise(b, nir_imm_float(b, 1.0f), x);
    case nir_op_frsq:
       return nir_bcsel(b, borg_is_normal(b, x), borg_rsq_refined(b, x),
                        nir_bcsel(b, borg_is_finite(b, x), nir_frsq(b, x), zero));
-   case nir_op_fdiv: {
+   case nir_op_fdiv:
+      return borg_fdiv_precise(b, x, nir_ssa_for_alu_src(b, alu, 1));
+   case nir_op_fmod: {
       nir_def *y = nir_ssa_for_alu_src(b, alu, 1);
-      nir_def *big = nir_fge(b, nir_fabs(b, y), nir_imm_float(b, 0x1p120f));
-      nir_def *scale = nir_bcsel(b, big, nir_imm_float(b, 0x1p-64f), nir_imm_float(b, 1.0f));
-      nir_def *ys = nir_fmul(b, y, scale), *xs = nir_fmul(b, x, scale);
-      nir_def *r = borg_rcp_refined(b, ys);
-      nir_def *q = nir_fmul(b, xs, r);
-      nir_def *q2 = nir_ffma(b, nir_ffma(b, nir_fneg(b, ys), q, xs), r, q);
-      nir_def *ok = nir_iand(b, borg_is_finite(b, x), borg_is_normal(b, y));
-      return nir_bcsel(b, ok, nir_bcsel(b, borg_is_finite(b, q), q2, q),
-                       nir_bcsel(b, borg_is_finite(b, y), nir_fmul(b, x, nir_frcp(b, y)), zero));
+      return nir_fsub(b, x, nir_fmul(b, y, nir_ffloor(b, borg_fdiv_precise(b, x, y))));
    }
    case nir_op_flog2:
       return borg_log2_precise(b, x);
