@@ -53,8 +53,14 @@ enum Val {
 /// Word index of the constant pool, the compute job's slot 34.
 pub(crate) const POOL_BASE_WORDS: u32 = SLOT_BASE_WORDS + 34 * SLOT_WORDS;
 const POOL_MAX: usize = 4096;
+/// Spill slots follow the pool in slot 34, one word per invocation of the workgroup.
+pub(crate) const SPILL_BASE_WORDS: u32 = POOL_BASE_WORDS + POOL_MAX as u32;
 
 impl ShaderState {
+    pub(crate) fn invocations(&self) -> u32 {
+        self.cs.ws.iter().product()
+    }
+
     /// A constant's placeholder register; pool_consts makes it a preset or a pool load.
     pub(crate) fn cs_const(&mut self, bits: u32) -> u32 {
         if let Some(&v) = self.cs.kreg.get(&bits) {
@@ -627,17 +633,20 @@ const OUT_OF_REGISTERS: &str = "out of registers";
 /// Fewer constants in registers leave more for values: retried like the graphics spill limits.
 pub(crate) unsafe fn compile_unified(nir: *mut nir_shader) -> Result<Out, String> {
     let mut r = Err(String::new());
-    for cap in [usize::MAX, 8, 4, 0] {
-        r = compile_unified_with(nir, cap);
-        if !matches!(&r, Err(e) if e == OUT_OF_REGISTERS) {
-            break;
+    for limit in [None, Some(10), Some(8), Some(6), Some(4)] {
+        for cap in [usize::MAX, 8, 4, 0] {
+            r = compile_unified_with(nir, cap, limit);
+            if !matches!(&r, Err(e) if e == OUT_OF_REGISTERS) {
+                return r;
+            }
         }
     }
     r
 }
 
-unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize) -> Result<Out, String> {
+unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<usize>) -> Result<Out, String> {
     let (mut cx, entry, _) = ShaderState::start(nir, crate::config::Flags(0));
+    cx.spill_limit = limit;
     let ws = (*nir).info.workgroup_size;
     cx.cs.ws = [ws[0] as u32, ws[1] as u32, ws[2] as u32];
     cx.select_entry(entry);
@@ -648,6 +657,9 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize) -> Result<Out, 
         return Err(format!("unsupported: {}", cx.skipped.join(", ")));
     }
     cx.optimise();
+    if cx.spill_slots > 0 {
+        eprintln!("borgc[compute]: spilled {} value(s) to keep {:?} live", cx.spill_slots, limit);
+    }
     cx.pool_consts(cap)?;
     crate::set_cs_pool(std::mem::take(&mut cx.cs.pool));
     let mut reserved: Vec<u8> = cx.cp.regs[..cx.cp.count].to_vec();
