@@ -75,8 +75,10 @@ impl ShaderState {
     /// The `cap` most used constants become preset registers; the rest are loaded from the pool
     /// near each use (a load is reused for 16 instructions), each load a word of its own, so the
     /// pointer only steps forward. A load inside an `if` moves before its outermost EXPUSH: a
-    /// masked step would leave the inactive lanes' pointer behind.
-    pub(crate) fn pool_consts(&mut self, cap: usize) -> Result<(), String> {
+    /// masked step would leave the inactive lanes' pointer behind. With `hoist` off a load stays
+    /// in place: after a mask change the pointer restarts from the one valid at the region's entry
+    /// and steps over the words the branch used.
+    pub(crate) fn pool_consts(&mut self, cap: usize, hoist: bool) -> Result<(), String> {
         let mut uses: HashMap<u32, usize> = HashMap::new();
         for i in &self.sel.prog {
             for s in &i.srcs {
@@ -110,28 +112,27 @@ impl ShaderState {
         let pooled: HashMap<u32, u32> = pooled.iter().copied().collect();
         const GAP: usize = 16;
         let mut loaded: HashMap<u32, (u32, usize)> = HashMap::new();
-        let mut ptr: Option<u32> = None;
+        // A pointer valid in the active lanes and the pool word it points at.
+        let mut ptr = (base, 0usize);
+        let mut frames: Vec<((u32, usize), HashMap<u32, (u32, usize)>)> = vec![];
         let (mut depth, mut anchor) = (0usize, 0usize);
         let mut out: Vec<BorgInstr> = Vec::with_capacity(self.sel.prog.len());
         for (n, mut ins) in std::mem::take(&mut self.sel.prog).into_iter().enumerate() {
             for s in ins.srcs.iter_mut() {
                 let Some(&bits) = pooled.get(s) else { continue };
                 if loaded.get(s).map_or(true, |&(_, last)| n - last > GAP) {
-                    let at = if depth == 0 { out.len() } else { anchor };
-                    let p = match ptr {
-                        None => base,
-                        Some(prev) => {
-                            let p = self.sel.fresh();
-                            out.insert(at, BorgInstr { mnem: "IADD", dst: p, srcs: vec![prev, one], swz: vec![0, 0] });
-                            anchor += (depth > 0) as usize;
-                            p
-                        }
-                    };
-                    let at = if depth == 0 { out.len() } else { anchor };
+                    let hoisted = hoist && depth > 0;
+                    while ptr.1 < self.cs.pool.len() {
+                        let p = self.sel.fresh();
+                        let at = if hoisted { anchor } else { out.len() };
+                        out.insert(at, BorgInstr { mnem: "IADD", dst: p, srcs: vec![ptr.0, one], swz: vec![0, 0] });
+                        anchor += hoisted as usize;
+                        ptr = (p, ptr.1 + 1);
+                    }
+                    let at = if hoisted { anchor } else { out.len() };
                     let v = self.sel.fresh();
-                    out.insert(at, BorgInstr { mnem: "LOAD", dst: v, srcs: vec![p], swz: vec![0] });
-                    anchor += (depth > 0) as usize;
-                    ptr = Some(p);
+                    out.insert(at, BorgInstr { mnem: "LOAD", dst: v, srcs: vec![ptr.0], swz: vec![0] });
+                    anchor += hoisted as usize;
                     self.cs.pool.push(bits);
                     loaded.insert(*s, (v, n));
                 }
@@ -145,8 +146,17 @@ impl ShaderState {
                         anchor = out.len();
                     }
                     depth += 1;
+                    if !hoist {
+                        frames.push((ptr, loaded.clone()));
+                    }
                 }
-                "EXPOP" => depth = depth.saturating_sub(1),
+                "EXELSE" if !hoist => (ptr, loaded) = frames.last().cloned().unwrap_or((ptr, loaded)),
+                "EXPOP" => {
+                    depth = depth.saturating_sub(1);
+                    if let Some(f) = frames.pop() {
+                        (ptr, loaded) = f;
+                    }
+                }
                 _ => {}
             }
             out.push(ins);
@@ -633,21 +643,24 @@ impl ShaderState {
 
 const OUT_OF_REGISTERS: &str = "out of registers";
 
-/// Fewer constants in registers leave more for values: retried like the graphics spill limits.
+/// Fewer constants in registers leave more for values: retried like the graphics spill limits,
+/// last with pool loads kept inside branches.
 pub(crate) unsafe fn compile_unified(nir: *mut nir_shader) -> Result<Out, String> {
     let mut r = Err(String::new());
-    for limit in [None, Some(10), Some(8), Some(6), Some(4)] {
-        for cap in [usize::MAX, 8, 4, 0] {
-            r = compile_unified_with(nir, cap, limit);
-            if !matches!(&r, Err(e) if e == OUT_OF_REGISTERS) {
-                return r;
+    for hoist in [true, false] {
+        for limit in [None, Some(10), Some(8), Some(6), Some(4)] {
+            for cap in [usize::MAX, 8, 4, 0] {
+                r = compile_unified_with(nir, cap, limit, hoist);
+                if !matches!(&r, Err(e) if e == OUT_OF_REGISTERS) {
+                    return r;
+                }
             }
         }
     }
     r
 }
 
-unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<usize>) -> Result<Out, String> {
+unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<usize>, hoist: bool) -> Result<Out, String> {
     let (mut cx, entry, _) = ShaderState::start(nir, crate::config::Flags(0));
     cx.spill_limit = limit;
     let ws = (*nir).info.workgroup_size;
@@ -663,7 +676,7 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
     if cx.spill_slots > 0 {
         eprintln!("borgc[compute]: spilled {} value(s) to keep {:?} live", cx.spill_slots, limit);
     }
-    cx.pool_consts(cap)?;
+    cx.pool_consts(cap, hoist)?;
     crate::set_cs_pool(std::mem::take(&mut cx.cs.pool));
     let mut reserved: Vec<u8> = cx.cp.regs[..cx.cp.count].to_vec();
     reserved.extend([30u8, 31, 12, 13, 14]);
