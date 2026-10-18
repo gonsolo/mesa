@@ -647,6 +647,8 @@ borg_trunc_lower(nir_builder *b, nir_instr *instr, void *data)
    b->fp_math_ctrl = nir_fp_exact;   /* else nir_opt_algebraic turns i2f(f2i(x)) back into ftrunc, forever */
    nir_def *t = nir_i2f32(b, nir_f2i32(b, x));
    b->fp_math_ctrl = fp;
+   /* |x| >= 2^23, inf and NaN are already integral; F2I would overflow. */
+   t = nir_bcsel(b, nir_flt(b, nir_fabs(b, x), nir_imm_float(b, 0x1p23f)), t, x);
    if (alu->op == nir_op_ftrunc)
       return t;
    return nir_fsub(b, t, nir_b2f32(b, nir_flt(b, x, t)));
