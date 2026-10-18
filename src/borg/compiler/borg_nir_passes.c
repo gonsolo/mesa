@@ -316,6 +316,96 @@ borg_basic_alu_lower(nir_builder *b, nir_instr *instr, void *data)
 }
 #endif
 
+/* FRCP and FRSQ are 10-bit table lookups; compute shaders need full precision, so refine them. */
+static bool
+borg_precise_filter(const nir_instr *instr, const void *data)
+{
+   if (instr->type != nir_instr_type_alu)
+      return false;
+   const nir_alu_instr *alu = nir_instr_as_alu(instr);
+   if (alu->def.bit_size != 32 || alu->fp_math_ctrl == nir_fp_no_fast_math)
+      return false;
+   return alu->op == nir_op_fdiv || alu->op == nir_op_fsqrt || alu->op == nir_op_frcp || alu->op == nir_op_frsq;
+}
+
+static nir_def *
+borg_rcp_refined(nir_builder *b, nir_def *y)
+{
+   nir_def *r = nir_frcp(b, y);
+   for (int i = 0; i < 2; i++)
+      r = nir_ffma(b, r, nir_ffma(b, nir_fneg(b, y), r, nir_imm_float(b, 1.0f)), r);
+   return r;
+}
+
+static nir_def *
+borg_rsq_refined(nir_builder *b, nir_def *x)
+{
+   nir_def *r = nir_frsq(b, x);
+   for (int i = 0; i < 2; i++) {
+      nir_def *h = nir_fmul_imm(b, nir_fmul(b, x, r), 0.5f);
+      r = nir_fmul(b, r, nir_ffma(b, nir_fneg(b, h), r, nir_imm_float(b, 1.5f)));
+   }
+   return r;
+}
+
+static nir_def *
+borg_is_finite(nir_builder *b, nir_def *x)
+{
+   return nir_fge(b, nir_imm_float(b, FLT_MAX), nir_fabs(b, x));
+}
+
+/* True for a normal finite value; the refinement steps turn zero, denormals and infinities into NaN. */
+static nir_def *
+borg_is_normal(nir_builder *b, nir_def *x)
+{
+   nir_def *ax = nir_fabs(b, x);
+   return nir_iand(b, nir_fge(b, ax, nir_imm_float(b, FLT_MIN)), borg_is_finite(b, x));
+}
+
+static nir_def *
+borg_precise_lower_exact(nir_builder *b, nir_instr *instr, void *data)
+{
+   nir_alu_instr *alu = nir_instr_as_alu(instr);
+   nir_def *x = nir_ssa_for_alu_src(b, alu, 0);
+   nir_def *zero = nir_imm_float(b, 0.0f);
+   switch (alu->op) {
+   case nir_op_frcp:
+      return nir_bcsel(b, borg_is_normal(b, x), borg_rcp_refined(b, x),
+                       nir_bcsel(b, borg_is_finite(b, x), nir_frcp(b, x), zero));
+   case nir_op_frsq:
+      return nir_bcsel(b, borg_is_normal(b, x), borg_rsq_refined(b, x),
+                       nir_bcsel(b, borg_is_finite(b, x), nir_frsq(b, x), zero));
+   case nir_op_fdiv: {
+      nir_def *y = nir_ssa_for_alu_src(b, alu, 1);
+      nir_def *big = nir_fge(b, nir_fabs(b, y), nir_imm_float(b, 0x1p120f));
+      nir_def *scale = nir_bcsel(b, big, nir_imm_float(b, 0x1p-64f), nir_imm_float(b, 1.0f));
+      nir_def *ys = nir_fmul(b, y, scale), *xs = nir_fmul(b, x, scale);
+      nir_def *r = borg_rcp_refined(b, ys);
+      nir_def *q = nir_fmul(b, xs, r);
+      nir_def *q2 = nir_ffma(b, nir_ffma(b, nir_fneg(b, ys), q, xs), r, q);
+      nir_def *ok = nir_iand(b, borg_is_finite(b, x), borg_is_normal(b, y));
+      return nir_bcsel(b, ok, nir_bcsel(b, borg_is_finite(b, q), q2, q),
+                       nir_bcsel(b, borg_is_finite(b, y), nir_fmul(b, x, nir_frcp(b, y)), zero));
+   }
+   default: {
+      nir_def *r = borg_rsq_refined(b, x);
+      nir_def *s = nir_fmul(b, x, r);
+      nir_def *s2 = nir_ffma(b, nir_ffma(b, nir_fneg(b, s), s, x), nir_fmul_imm(b, r, 0.5f), s);
+      return nir_bcsel(b, borg_is_normal(b, x), s2, x);
+   }
+   }
+}
+
+static nir_def *
+borg_precise_lower(nir_builder *b, nir_instr *instr, void *data)
+{
+   const unsigned ctrl = b->fp_math_ctrl;
+   b->fp_math_ctrl = nir_fp_no_fast_math;
+   nir_def *res = borg_precise_lower_exact(b, instr, data);
+   b->fp_math_ctrl = ctrl;
+   return res;
+}
+
 /* Integer division through the float reciprocal, one correction step: exact for operands below 2^24. */
 /* A fragment shader that loads many inputs and uniform vectors up front runs out of registers:
  * load the components one at a time and sink each load to its first use. */
@@ -723,6 +813,8 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(_, nir, nir_shader_instructions_pass, borg_lower_cube, nir_metadata_control_flow, NULL);
       NIR_PASS(_, nir, nir_shader_lower_instructions, borg_flog2_filter, borg_flog2_lower, NULL);
    }
+   if (nir->info.stage == MESA_SHADER_COMPUTE)
+      NIR_PASS(_, nir, nir_shader_lower_instructions, borg_precise_filter, borg_precise_lower, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_idiv_filter, borg_idiv_lower, NULL);
    NIR_PASS(_, nir, nir_lower_alu_to_scalar, NULL, NULL);
    const bool wide = (nir->info.stage == MESA_SHADER_FRAGMENT || (nir->info.stage == MESA_SHADER_VERTEX && remat_vertex_inputs)) &&
