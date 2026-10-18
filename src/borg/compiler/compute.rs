@@ -72,6 +72,34 @@ impl ShaderState {
         v
     }
 
+    /// Moves each load of a constant address down to its first use, past stores to other constant
+    /// addresses: a whole-struct copy loads every word before it stores any.
+    fn sink_loads(&mut self) {
+        let (prog, kval) = (&mut self.sel.prog, &self.cs.kval);
+        for i in (0..prog.len()).rev() {
+            if prog[i].mnem != "LOAD" {
+                continue;
+            }
+            let Some(&a) = kval.get(&prog[i].srcs[0]) else { continue };
+            let d = prog[i].dst;
+            let mut j = i + 1;
+            while j < prog.len() {
+                let n = &prog[j];
+                let stop = n.dst == d || n.srcs.contains(&d) || match n.mnem {
+                    "STORE" => kval.get(&n.srcs[0]).map_or(true, |&b| b == a),
+                    "EXPUSH" | "EXELSE" | "EXPOP" | "BRZ" | "BRNZ" | "BARRIER" => true,
+                    _ => false,
+                };
+                if stop {
+                    break;
+                }
+                j += 1;
+            }
+            let ins = prog.remove(i);
+            prog.insert(j - 1, ins);
+        }
+    }
+
     /// The `cap` most used constants become preset registers; the rest are loaded from the pool
     /// near each use (a load is reused for 16 instructions), each load a word of its own, so the
     /// pointer only steps forward. A load inside an `if` moves before its outermost EXPUSH: a
@@ -712,13 +740,13 @@ impl ShaderState {
 const OUT_OF_REGISTERS: &str = "out of registers";
 
 /// Fewer constants in registers leave more for values: retried like the graphics spill limits,
-/// last with pool loads kept inside branches.
+/// last compact: loads sunk to their uses and pool loads kept inside branches.
 pub(crate) unsafe fn compile_unified(nir: *mut nir_shader) -> Result<Out, String> {
     let mut r = Err(String::new());
-    for hoist in [true, false] {
+    for compact in [false, true] {
         for limit in [None, Some(10), Some(8), Some(6), Some(4)] {
             for cap in [usize::MAX, 8, 4, 0] {
-                r = compile_unified_with(nir, cap, limit, hoist);
+                r = compile_unified_with(nir, cap, limit, compact);
                 if !matches!(&r, Err(e) if e == OUT_OF_REGISTERS) {
                     return r;
                 }
@@ -728,7 +756,7 @@ pub(crate) unsafe fn compile_unified(nir: *mut nir_shader) -> Result<Out, String
     r
 }
 
-unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<usize>, hoist: bool) -> Result<Out, String> {
+unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<usize>, compact: bool) -> Result<Out, String> {
     let (mut cx, entry, _) = ShaderState::start(nir, crate::config::Flags(0));
     cx.spill_limit = limit;
     let ws = (*nir).info.workgroup_size;
@@ -740,6 +768,9 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
     if !cx.check_selected() {
         return Err(format!("unsupported: {}", cx.skipped.join(", ")));
     }
+    if compact {
+        cx.sink_loads();
+    }
     if cx.sel.prog.iter().any(|i| i.mnem == "BARRIER") {
         crate::opt::dce(&mut cx.sel.prog, &cx.out_roots);
         cx.spill_across_barriers()?;
@@ -748,7 +779,7 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
     if cx.spill_slots > 0 {
         eprintln!("borgc[compute]: spilled {} value(s) to keep {:?} live", cx.spill_slots, limit);
     }
-    cx.pool_consts(cap, hoist)?;
+    cx.pool_consts(cap, !compact)?;
     crate::set_cs_pool(std::mem::take(&mut cx.cs.pool));
     let mut reserved: Vec<u8> = cx.cp.regs[..cx.cp.count].to_vec();
     reserved.extend([30u8, 31, 12, 13, 14]);
