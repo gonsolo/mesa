@@ -624,14 +624,15 @@ borg_idiv_lower(nir_builder *b, nir_instr *instr, void *data)
    return nir_iadd(b, r, nir_iand(b, nir_iand(b, nz, nir_ishr_imm(b, nir_ixor(b, r, y), 31)), y));
 }
 
-/* F2I truncates: trunc(x) = float(int(x)), floor(x) = trunc(x) - (x < trunc(x)); fmod(x, y) = x - y * floor(x / y). */
+/* F2I truncates: trunc(x) = float(int(x)), floor(x) = trunc(x) - (x < trunc(x)), round_even from trunc's
+ * fraction and parity; fmod(x, y) = x - y * floor(x / y). */
 static bool
 borg_trunc_filter(const nir_instr *instr, const void *data)
 {
    if (instr->type != nir_instr_type_alu)
       return false;
    const nir_op op = nir_instr_as_alu(instr)->op;
-   return op == nir_op_ftrunc || op == nir_op_ffloor || op == nir_op_fmod;
+   return op == nir_op_ftrunc || op == nir_op_ffloor || op == nir_op_fround_even || op == nir_op_fmod;
 }
 
 static nir_def *
@@ -645,12 +646,23 @@ borg_trunc_lower(nir_builder *b, nir_instr *instr, void *data)
    }
    const uint32_t fp = b->fp_math_ctrl;
    b->fp_math_ctrl = nir_fp_exact;   /* else nir_opt_algebraic turns i2f(f2i(x)) back into ftrunc, forever */
-   nir_def *t = nir_i2f32(b, nir_f2i32(b, x));
+   nir_def *i = nir_f2i32(b, x);
+   nir_def *t = nir_i2f32(b, i);
    b->fp_math_ctrl = fp;
+   nir_def *small = nir_flt(b, nir_fabs(b, x), nir_imm_float(b, 0x1p23f));
    /* |x| >= 2^23, inf and NaN are already integral; F2I would overflow. */
-   t = nir_bcsel(b, nir_flt(b, nir_fabs(b, x), nir_imm_float(b, 0x1p23f)), t, x);
+   t = nir_bcsel(b, small, t, x);
    if (alu->op == nir_op_ftrunc)
       return t;
+   if (alu->op == nir_op_fround_even) {
+      nir_def *f = nir_fabs(b, nir_fsub(b, x, t));
+      nir_def *up = nir_ior(b, nir_flt(b, nir_imm_float(b, 0.5f), f),
+                            nir_iand(b, nir_feq(b, f, nir_imm_float(b, 0.5f)), nir_ieq_imm(b, nir_iand_imm(b, i, 1), 1)));
+      nir_def *step = nir_bcsel(b, up, nir_bcsel(b, nir_flt(b, x, nir_imm_float(b, 0.0f)),
+                                                 nir_imm_float(b, -1.0f), nir_imm_float(b, 1.0f)), nir_imm_float(b, 0.0f));
+      nir_def *r = nir_ior(b, nir_fadd(b, t, step), nir_iand_imm(b, x, 0x80000000));
+      return nir_bcsel(b, small, r, x);
+   }
    return nir_fsub(b, t, nir_b2f32(b, nir_flt(b, x, t)));
 }
 
