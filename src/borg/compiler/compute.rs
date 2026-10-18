@@ -612,9 +612,12 @@ impl ShaderState {
                 // One lane at a time; the same registers in every lane's turn.
                 let (old, sum, t) = (self.sel.fresh(), self.sel.fresh(), self.sel.fresh());
                 let r30 = self.fixed(30);
+                // r30 counts across the workgroup's quads; the lane is its low bits.
+                let (m, q) = (self.konst(LANES - 1, Kv::Int), self.sel.fresh());
+                self.sel.prog.push(BorgInstr { mnem: "IAND", dst: q, srcs: vec![r30, m], swz: vec![0, 0] });
                 for lane in 0..LANES {
                     let l = self.konst(lane, Kv::Int);
-                    self.sel.prog.push(BorgInstr { mnem: "ISEQ", dst: t, srcs: vec![r30, l], swz: vec![0, 0] });
+                    self.sel.prog.push(BorgInstr { mnem: "ISEQ", dst: t, srcs: vec![q, l], swz: vec![0, 0] });
                     self.sel.prog.push(BorgInstr { mnem: "EXPUSH", dst: NO_DST, srcs: vec![t], swz: vec![0] });
                     self.sel.prog.push(BorgInstr { mnem: "LOAD", dst: old, srcs: vec![a.0], swz: vec![a.1] });
                     self.sel.prog.push(BorgInstr { mnem: "IADD", dst: sum, srcs: vec![old, x.0], swz: vec![0, x.1] });
