@@ -311,6 +311,85 @@ impl ShaderState {
         self.sel.vec_map.insert(alu.def.index, comps);
     }
 
+    fn int(&mut self, mnem: &'static str, a: Val, b: Val) -> Val {
+        match (mnem, a, b) {
+            (_, Val::K(x), Val::K(y)) => Val::K(match mnem {
+                "ISLT" => ((x as i32) < (y as i32)) as u32,
+                "ISEQ" => (x == y) as u32,
+                "IAND" => x & y,
+                "IOR" => x | y,
+                _ => x ^ y,
+            }),
+            ("IAND", Val::K(1), o) | ("IAND", o, Val::K(1)) | ("IOR", Val::K(0), o) | ("IOR", o, Val::K(0)) => o,
+            ("IAND", Val::K(0), _) | ("IAND", _, Val::K(0)) => Val::K(0),
+            ("IOR", Val::K(1), _) | ("IOR", _, Val::K(1)) => Val::K(1),
+            _ => self.bin(mnem, a, b),
+        }
+    }
+
+    /// An integer that orders like the float, with -0 equal to +0, whether it is NaN, and
+    /// whether a NaN key can lie below or above every number's key.
+    unsafe fn float_key(&mut self, s: &nir_alu_src) -> (Val, Val, bool, bool) {
+        let d = s.src.as_def();
+        if let Some(&b) = self.consts.get(&d.index).filter(|_| d.num_components == 1) {
+            let m = b & 0x7fff_ffff;
+            let nan = m > 0x7f80_0000;
+            return (Val::K(if b >> 31 != 0 { m.wrapping_neg() } else { m }), Val::K(nan as u32), nan, nan);
+        }
+        let x = resolve_vm(&self.sel.vec_map, d.index, s.swizzle[0]);
+        let (x, inf) = (Val::R(x.0, x.1), Val::K(0x7f80_0000));
+        if d.parent_instr().as_alu().is_some_and(|p| p.op == nir_op_fabs) {
+            return (x, self.int("ISLT", inf, x), false, true);
+        }
+        let m = self.bin("IAND", x, Val::K(0x7fff_ffff));
+        let sign = self.bin("ISHR", x, Val::K(31));
+        let f = self.bin("IXOR", m, sign);
+        (self.bin("ISUB", f, sign), self.int("ISLT", inf, m), true, true)
+    }
+
+    /// Float compares on the bits: the FSTEP of a difference is wrong for NaN, equal infinities
+    /// and differences that flush to zero.
+    pub(crate) unsafe fn exact_compare(&mut self, alu: &nir_alu_instr) {
+        let s = alu.srcs_as_slice();
+        let same = s[0].src.as_def().index == s[1].src.as_def().index && s[0].swizzle[0] == s[1].swizzle[0];
+        let (ka, na, alo, ahi) = self.float_key(&s[0]);
+        let (kb, nb, blo, bhi) = if same { (ka, na, alo, ahi) } else { self.float_key(&s[1]) };
+        let unord = self.int("IOR", na, nb);
+        let ord = self.int("IXOR", unord, Val::K(1));
+        // NaN keys lie outside the numbers' keys: a NaN where it already makes the compare false
+        // needs no mask.
+        let eq_ord = if !(alo || ahi) || !(blo || bhi) { Val::K(1) } else { ord };
+        let lt_ord = if !alo && !bhi { Val::K(1) } else { ord };
+        let ge_ord = if !ahi && !blo { Val::K(1) } else { ord };
+        let r = match alu.op {
+            nir_op_flt | nir_op_slt => {
+                let lt = self.int("ISLT", ka, kb);
+                self.int("IAND", lt, lt_ord)
+            }
+            nir_op_fge | nir_op_sge => {
+                let lt = self.int("ISLT", ka, kb);
+                let ge = self.int("IXOR", lt, Val::K(1));
+                self.int("IAND", ge, ge_ord)
+            }
+            nir_op_feq | nir_op_seq => {
+                let eq = if same { Val::K(1) } else { self.int("ISEQ", ka, kb) };
+                self.int("IAND", eq, eq_ord)
+            }
+            _ => {
+                let eq = if same { Val::K(1) } else { self.int("ISEQ", ka, kb) };
+                let eq = self.int("IAND", eq, eq_ord);
+                self.int("IXOR", eq, Val::K(1))
+            }
+        };
+        match r {
+            Val::K(b) => self.set(alu.def.index, &[Val::K(if b != 0 { 1.0f32.to_bits() } else { 0 })]),
+            Val::R(v, c) => {
+                let f = self.sel.opc("I2F", &[(v, c)]);
+                self.sel.vec_map.insert(alu.def.index, vec![(f, 0)]);
+            }
+        }
+    }
+
     pub(crate) unsafe fn undef(&mut self, u: &nir_undef_instr) {
         let zeros = vec![Val::K(0); u.def.num_components as usize];
         self.set(u.def.index, &zeros);

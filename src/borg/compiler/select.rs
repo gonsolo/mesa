@@ -225,6 +225,8 @@ impl ShaderState {
                 let (v, c) = resolve_vm(&self.sel.vec_map, s.src.as_def().index, s.swizzle[0]);
                 self.sel.prog.push(BorgInstr { mnem: "F2I", dst: alu.def.index, srcs: vec![v], swz: vec![c] });
             }
+            nir_op_flt | nir_op_fge | nir_op_fneu | nir_op_feq | nir_op_slt | nir_op_sge | nir_op_sne | nir_op_seq
+                if self.is_compute => self.exact_compare(alu),
             // slt and friends are the same compares with a float result, which a condition is here.
             nir_op_flt | nir_op_fge | nir_op_fneu | nir_op_feq | nir_op_slt | nir_op_sge | nir_op_sne | nir_op_seq => {
                 let sl = alu.srcs_as_slice();
