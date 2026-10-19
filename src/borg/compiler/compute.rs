@@ -21,6 +21,7 @@ pub(crate) struct Out {
     pub local: [u32; 3],
     /// bit 0: uses atomics, so the grid must not be split across runs.
     /// bit 1: reads NumWorkGroups; bits 8-12 name the preset register of x (y, z below it).
+    /// bit 2: packed: four one-invocation workgroups along x share a quad, `local` is (4, 1, 1).
     pub flags: u32,
 }
 
@@ -34,6 +35,7 @@ pub struct ComputeState {
     desc: HashMap<u32, (u32, u32)>, // descriptor marker vreg -> (set, binding)
     base_used: bool,
     atomics: bool,
+    packed: bool,
     nwg: Option<u8>,
     presets: Vec<(u8, u32)>, // registers the driver or the grid split fills
     ws: [u32; 3],
@@ -487,12 +489,23 @@ impl ShaderState {
         self.sel.prog.push(BorgInstr { mnem: "STORE", dst: NO_DST, srcs: vec![a.0, v.0], swz: vec![a.1, v.1] });
     }
 
-    fn workgroup_id(&mut self, c: u8) -> Val {
+    /// The group the hardware runs: a packed quad holds four workgroups.
+    fn group_id(&mut self, c: u8) -> Val {
         self.cs.base_used = true;
         let u = self.sel.fresh();
         self.sel.ubo.insert(u, Ubo::Uniform(29 + c));
         let b = self.fixed(WG_BASE_REG as u8 + c);
         Val::R(self.sel.opc("IADD", &[(u, 0), (b, 0)]), 0)
+    }
+
+    fn workgroup_id(&mut self, c: u8) -> Val {
+        let g = self.group_id(c);
+        if !self.cs.packed || c != 0 {
+            return g;
+        }
+        let g = self.bin("ISHL", g, Val::K(2));
+        let r30 = self.fixed(30);
+        self.add(g, Val::R(r30, 0))
     }
 
     pub(crate) unsafe fn compute_intrinsic(&mut self, i: &nir_intrinsic_instr) {
@@ -510,7 +523,7 @@ impl ShaderState {
                 let ws = self.cs.ws;
                 let mut v = vec![];
                 for c in 0..3u8 {
-                    let wg = self.workgroup_id(c);
+                    let wg = self.group_id(c);
                     let size = ws[c as usize];
                     let mut x = if size == 1 { wg } else { self.mul(wg, Val::K(size)) };
                     if size > 1 {
@@ -522,6 +535,10 @@ impl ShaderState {
                     v.push(x);
                 }
                 self.set(d, &v);
+            }
+            nir_intrinsic_load_local_invocation_id | nir_intrinsic_load_local_invocation_index if self.cs.packed => {
+                let n = i.def.num_components as usize;
+                self.set(d, &vec![Val::K(0); n]);
             }
             nir_intrinsic_load_local_invocation_id => {
                 // r31 = x | y << 10 | z << 20.
@@ -747,7 +764,11 @@ pub(crate) unsafe fn compile_unified(nir: *mut nir_shader) -> Result<Out, String
     for compact in [false, true] {
         for limit in [None, Some(10), Some(8), Some(6), Some(4)] {
             for cap in [usize::MAX, 8, 4, 0] {
-                r = compile_unified_with(nir, cap, limit, compact);
+                r = compile_unified_with(nir, cap, limit, compact, true);
+                // Packed runs merge by bytes changed: atomics would lose updates.
+                if matches!(&r, Ok(o) if o.flags & 5 == 5) {
+                    r = compile_unified_with(nir, cap, limit, compact, false);
+                }
                 if !matches!(&r, Err(e) if e == OUT_OF_REGISTERS) {
                     return r;
                 }
@@ -757,11 +778,14 @@ pub(crate) unsafe fn compile_unified(nir: *mut nir_shader) -> Result<Out, String
     r
 }
 
-unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<usize>, compact: bool) -> Result<Out, String> {
+unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<usize>, compact: bool, pack: bool) -> Result<Out, String> {
     let (mut cx, entry, _) = ShaderState::start(nir, crate::config::Flags(0));
     cx.spill_limit = limit;
     let ws = (*nir).info.workgroup_size;
     cx.cs.ws = [ws[0] as u32, ws[1] as u32, ws[2] as u32];
+    if pack && cx.cs.ws == [1, 1, 1] {
+        (cx.cs.ws, cx.cs.packed) = ([LANES, 1, 1], true);
+    }
     cx.select_entry(entry);
     if let Some(e) = cx.cs.err.take() {
         return Err(e);
@@ -797,7 +821,7 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
     if cx.cs.base_used {
         regs.extend((0..3).map(|c| ((WG_BASE_REG + c) as u8, 0)));
     }
-    let flags = cx.cs.atomics as u32 | cx.cs.nwg.map_or(0, |r| 2 | (r as u32) << 8);
+    let flags = cx.cs.atomics as u32 | cx.cs.nwg.map_or(0, |r| 2 | (r as u32) << 8) | (cx.cs.packed as u32) << 2;
     Ok(Out { words: enc.words, regs, local: cx.cs.ws, flags })
 }
 

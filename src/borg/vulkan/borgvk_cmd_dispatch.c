@@ -211,51 +211,65 @@ cs_start(const struct borgvk_pipeline *pl, const char *direct, uint32_t gx, uint
          const uint8_t *job, size_t job_len, struct cs_run *r)
 {
    const uint32_t HDR = 12;
-   uint32_t axis = gy > 1 && gy >= gx ? 1 : gx > 1 ? 0 : 2;
-   uint32_t extent = axis == 0 ? gx : axis == 1 ? gy : gz;
-   uint32_t nparts = 1;
-   if (!direct) {
-      snprintf(r->jpath[0], sizeof r->jpath[0], "/tmp/borgvk_cs_job_XXXXXX");
-      snprintf(r->opath[0], sizeof r->opath[0], "/tmp/borgvk_cs_out_XXXXXX");
-      int ofd = mkstemp(r->opath[0]);
-      if (ofd >= 0)
-         close(ofd);
-      r->jpath[0][0] = 0;
-      r->pids[0] = ofd >= 0 && borgvk_hw_compute(job, job_len, r->opath[0]) == 0 ? -2 : -1;
-      r->nparts = 1;
-      r->ran = ofd >= 0;
-      return;
-   }
-   if (!(pl->cs_flags & 1) && (uint64_t)gx * gy * gz >= 4096 && extent > 1) {
+   /* A packed program runs four one-invocation workgroups along x in a quad: gx / 4 groups of
+    * four, then the gx % 4 left over in one group of that size. */
+   const bool packed = pl->cs_flags & 4;
+   const uint32_t px = packed ? gx / 4 : gx, rem = packed ? gx % 4 : 0;
+   uint32_t axis = gy > 1 && gy >= px ? 1 : px > 1 ? 0 : 2;
+   uint32_t extent = axis == 0 ? px : axis == 1 ? gy : gz;
+   uint32_t nparts = px ? 1 : 0;
+   if (direct && px && !(pl->cs_flags & 1) && (uint64_t)gx * gy * gz >= 4096 && extent > 1) {
       long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
       nparts = (uint32_t)MIN2((long)extent, MAX2(ncpu, 1));
       if (getenv("BORGVK_CS_PARTS"))
          nparts = (uint32_t)MAX2(1, MIN2((long)extent, atol(getenv("BORGVK_CS_PARTS"))));
    }
+   nparts = MIN2(nparts, BORGVK_MAX_CS_PARTS - 1);
+
+   uint32_t hdr[BORGVK_MAX_CS_PARTS][HDR], n = 0;
+   for (uint32_t k = 0; k < nparts; k++, n++) {
+      memcpy(hdr[n], job, sizeof hdr[n]);
+      hdr[n][1] = px;
+      hdr[n][1 + axis] = extent * (k + 1) / nparts - extent * k / nparts;   /* gx gy gz */
+      hdr[n][9 + axis] = extent * k / nparts;                               /* bx by bz */
+   }
+   if (rem) {
+      memcpy(hdr[n], job, sizeof hdr[n]);
+      hdr[n][1] = 1;
+      hdr[n][4] = rem;
+      hdr[n][9] = px;
+      n++;
+   }
 
    char (*jpath)[32] = r->jpath, (*opath)[32] = r->opath;
    pid_t *pids = r->pids;
-   nparts = MIN2(nparts, BORGVK_MAX_CS_PARTS);
    bool ran = true;
-   for (uint32_t k = 0; k < nparts; k++) {
+   for (uint32_t k = 0; k < n; k++) {
       snprintf(jpath[k], sizeof jpath[k], "/tmp/borgvk_cs_job_XXXXXX");
       snprintf(opath[k], sizeof opath[k], "/tmp/borgvk_cs_out_XXXXXX");
       pids[k] = -1;
-      int jfd = mkstemp(jpath[k]), ofd = mkstemp(opath[k]);
+      int ofd = mkstemp(opath[k]);
+      if (ofd >= 0)
+         close(ofd);
+      if (!direct) {
+         jpath[k][0] = 0;
+         uint8_t *part = ofd >= 0 ? malloc(job_len) : NULL;
+         if (!part) { ran = false; continue; }
+         memcpy(part, job, job_len);
+         memcpy(part, hdr[k], sizeof hdr[k]);
+         pids[k] = borgvk_hw_compute(part, job_len, opath[k]) == 0 ? -2 : -1;
+         free(part);
+         continue;
+      }
+      int jfd = mkstemp(jpath[k]);
       if (jfd < 0 || ofd < 0) { ran = false; continue; }
-      uint32_t lo = extent * k / nparts, hi = extent * (k + 1) / nparts;
-      uint32_t hdr[HDR];
-      memcpy(hdr, job, sizeof hdr);
-      hdr[1 + axis] = hi - lo;        /* gx gy gz */
-      hdr[9 + axis] = lo;             /* bx by bz */
-      if (write(jfd, hdr, sizeof hdr) != (ssize_t)sizeof hdr) ran = false;
-      for (size_t o = sizeof hdr; o < job_len; ) {
-         ssize_t n = write(jfd, job + o, job_len - o);
-         if (n <= 0) break;
-         o += (size_t)n;
+      if (write(jfd, hdr[k], sizeof hdr[k]) != (ssize_t)sizeof hdr[k]) ran = false;
+      for (size_t o = sizeof hdr[k]; o < job_len; ) {
+         ssize_t w = write(jfd, job + o, job_len - o);
+         if (w <= 0) break;
+         o += (size_t)w;
       }
       close(jfd);
-      close(ofd);
       pids[k] = fork();
       if (pids[k] == 0) {
          setenv("BORG_SIM_CFG", "simt", 1);
@@ -263,7 +277,7 @@ cs_start(const struct borgvk_pipeline *pl, const char *direct, uint32_t gx, uint
          _exit(127);
       }
    }
-   r->nparts = nparts;
+   r->nparts = n;
    r->ran = ran;
 }
 
