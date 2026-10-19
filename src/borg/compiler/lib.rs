@@ -6,7 +6,7 @@
 /// A progress message, printed with BORGC_DEBUG set; errors and warnings use eprintln.
 macro_rules! debug {
     ($($arg:tt)*) => {
-        if crate::debug_enabled() {
+        if crate::config::env().debug {
             eprintln!($($arg)*)
         }
     };
@@ -37,7 +37,6 @@ use opcodes::Op;
 use config::Flags;
 use isel::resolve_vm;
 use state::ShaderState;
-use std::env;
 use crate::state::Stage;
 
 fn packed_layout(flags: Flags) -> (u32, Vec<(usize, u32, u32)>) {
@@ -77,11 +76,6 @@ pub struct BorgcInfo {
     pub npool: u32,
     pub spill_slots: u32,
     pub push_window: u32,
-}
-
-pub(crate) fn debug_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| env::var("BORGC_DEBUG").is_ok())
 }
 
 pub(crate) const NO_DST: u32 = u32::MAX;
@@ -317,7 +311,7 @@ pub unsafe extern "C" fn borgc_compile_nir(
     info: *mut BorgcInfo,
 ) -> u32 {
     borgc_capture(nir, 0, vfetch, out_select);
-    let key = if !nir.is_null() && env::var("BORGC_CORPUS_DIR").is_ok() {
+    let key = if !nir.is_null() && config::env().corpus_dir.is_some() {
         (*nir).to_string().ok().map(|s| corpus::key(&s, vfetch))
     } else {
         None
@@ -363,7 +357,7 @@ unsafe fn compile_nir_inner(
     if nir.is_null() {
         return 0;
     }
-    let forced = env::var("BORGC_SPILL_LIMIT").ok().and_then(|v| v.parse::<usize>().ok());
+    let forced = config::env().spill_limit;
     for limit in [forced, Some(20), Some(18), Some(16), Some(14), Some(12), Some(10)] {
         let (mut cx, entry, total) = ShaderState::start(nir, flags, out_select);
         (info.push_window, info.spill_slots) = (cx.frag.push_window as u32, 0);

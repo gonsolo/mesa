@@ -1,7 +1,6 @@
 use crate::regalloc::regalloc;
 use crate::state::{ShaderState, Stage};
 use crate::{Loc, NO_DST};
-use std::env;
 use std::collections::HashMap;
 
 pub fn fixed_regs(
@@ -76,7 +75,7 @@ pub fn allocate(cx: &ShaderState, forced: &HashMap<u32, u8>, extra_reserved: &mu
         debug!("borgc: out of registers ({} has none; reserved {:?})", i.mnem, res);
         return None;
     }
-    if env::var("BORGC_DUMP_ALLOC").is_ok() {
+    if crate::config::env().dump_alloc {
         for i in &cx.sel.prog {
             let r = |v: &u32| match (alloc.get(v), cx.sel.loc.get(v)) {
                 (Some(r), _) => format!("r{r}"),

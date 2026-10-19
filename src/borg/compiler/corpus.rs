@@ -1,4 +1,3 @@
-use std::env;
 
 pub fn key(nir_text: &str, vfetch: u32) -> u64 {
     let mut h = 0xcbf29ce484222325u64;
@@ -9,7 +8,7 @@ pub fn key(nir_text: &str, vfetch: u32) -> u64 {
 }
 
 pub fn record(key: u64, ret: u32, blob: &[u8]) {
-    let Ok(dir) = env::var("BORGC_CORPUS_DIR") else { return };
+    let Some(dir) = &crate::config::env().corpus_dir else { return };
     let mut out = ret.to_le_bytes().to_vec();
     out.extend_from_slice(blob);
     let _ = std::fs::write(format!("{dir}/{key:016x}.out"), out);

@@ -1,4 +1,39 @@
 use borgc_flags::*;
+use std::sync::OnceLock;
+
+/// The BORGC_* environment variables, read once per process.
+pub struct Env {
+    /// Progress messages (debug!).
+    pub debug: bool,
+    pub dump_nir: bool,
+    pub dump_isa: bool,
+    pub dump_alloc: bool,
+    /// Writes each blob to <prefix>.vert.borg or .frag.borg.
+    pub emit_blob: Option<String>,
+    /// The first live-value limit tried before the built-in ones.
+    pub spill_limit: Option<usize>,
+    /// Every fragment shader writes alpha.
+    pub frag_alpha: bool,
+    /// Records each compile's NIR hash and result for scripts/borgc_corpus.
+    pub corpus_dir: Option<String>,
+}
+
+pub fn env() -> &'static Env {
+    static ENV: OnceLock<Env> = OnceLock::new();
+    ENV.get_or_init(|| {
+        let set = |k| std::env::var(k).is_ok();
+        Env {
+            debug: set("BORGC_DEBUG"),
+            dump_nir: set("BORGC_DUMP_NIR"),
+            dump_isa: set("BORGC_DUMP_ISA"),
+            dump_alloc: set("BORGC_DUMP_ALLOC"),
+            emit_blob: std::env::var("BORGC_EMIT_BLOB").ok(),
+            spill_limit: std::env::var("BORGC_SPILL_LIMIT").ok().and_then(|v| v.parse().ok()),
+            frag_alpha: set("BORGC_FRAG_ALPHA"),
+            corpus_dir: std::env::var("BORGC_CORPUS_DIR").ok(),
+        }
+    })
+}
 
 #[derive(Clone, Copy)]
 pub struct Flags(pub u32);

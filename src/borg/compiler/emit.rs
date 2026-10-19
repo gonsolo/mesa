@@ -1,5 +1,4 @@
 use crate::encode::{emit_blob, encode, encode_branch, encode_fattr, encode_jmp, encode_sout};
-use std::env;
 use crate::state::{ShaderState, Stage};
 use crate::{BorgInstr, Loc};
 use std::collections::HashMap;
@@ -226,7 +225,7 @@ pub fn build_blob(
             cs.join(" ")
         );
     }
-    if env::var("BORGC_DUMP_ISA").is_ok() {
+    if crate::config::env().dump_isa {
         let hex: Vec<String> = words.iter().map(|w| format!("{w:#010x}")).collect();
         eprintln!("borgc:   first words: {}", hex.join(" "));
     }
@@ -253,7 +252,7 @@ pub fn build_blob(
         "borgc: .borg blob = {} bytes ({} instr, {} output regs, {} window consts, {} varyings)",
         blob.len(), words.len(), outputs.len(), window.len(), num_varyings
     );
-    if let Ok(prefix) = env::var("BORGC_EMIT_BLOB") {
+    if let Some(prefix) = &crate::config::env().emit_blob {
         let path = format!("{prefix}.{}.borg", if is_vertex { "vert" } else { "frag" });
         match std::fs::write(&path, &blob) {
             Ok(()) => eprintln!("borgc: wrote {path}"),

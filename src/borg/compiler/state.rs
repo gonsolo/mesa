@@ -184,7 +184,7 @@ impl ShaderState {
             const_addr_chain: Default::default(),
             refused: None,
             frag: Frag {
-                alpha: std::env::var("BORGC_FRAG_ALPHA").is_ok() || (stage == Stage::Fragment && flags.alpha_output()),
+                alpha: crate::config::env().frag_alpha || (stage == Stage::Fragment && flags.alpha_output()),
                 out: [None; 4],
                 per_pixel_fixed: Default::default(),
                 coord_w: false,

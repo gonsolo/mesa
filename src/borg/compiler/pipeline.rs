@@ -5,14 +5,13 @@ use crate::state::{ShaderState, Stage};
 use crate::survey::{survey, Survey};
 use crate::{Flags, Loc};
 use compiler::bindings::*;
-use std::env;
 use crate::opcodes::Op;
 
 impl ShaderState {
     pub unsafe fn start(nir: *mut nir_shader, flags: Flags, out_select: i32) -> (ShaderState, *mut nir_function_impl, u32) {
         let mesa_stage = (*nir).info.stage();
         let stage = Stage::of(mesa_stage);
-        if env::var("BORGC_DUMP_NIR").is_ok() {
+        if crate::config::env().dump_nir {
             if let Ok(s) = (*nir).to_string() {
                 eprintln!("{s}");
             }
@@ -37,7 +36,7 @@ impl ShaderState {
     pub fn check_selected(&mut self) -> Result<(), String> {
         self.refusal()?;
         debug!("borgc: selected {} Borg instruction(s) (virtual regs)", self.sel.prog.len());
-        if env::var("BORGC_DUMP_ISA").is_ok() {
+        if crate::config::env().dump_isa {
             for i in &self.sel.prog {
                 let s: Vec<String> = i.srcs.iter().map(|v| format!("v{v}")).collect();
                 eprintln!("borgc:   {} v{}, {}", i.mnem, i.dst, s.join(", "));

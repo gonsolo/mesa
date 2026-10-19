@@ -1,7 +1,6 @@
 use crate::state::{ShaderState, Stage};
 use crate::isel::borg_isel;
 use crate::opt::classify_uniform;
-use std::env;
 use std::collections::HashMap;
 use crate::{collect_cf_marks, decompose_vertex_offset, packed_layout, CfMark, resolve_vm, BorgInstr, Loc, NO_DST, PUSH_WINDOW_WORDS};
 use compiler::bindings::*;
@@ -1148,7 +1147,7 @@ impl ShaderState {
         })
         .collect();
     let uniform = classify_uniform(&self.sel.prog, &uniform_roots);
-    if env::var("BORGC_DUMP_ISA").is_ok() {
+    if crate::config::env().dump_isa {
         let n_uniform = self.sel.prog.iter().filter(|i| uniform.contains(&i.dst)).count();
         eprintln!(
             "borgc: uniformity — {} of {} instr(s) are primitive-uniform (hoistable)",
