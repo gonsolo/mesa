@@ -73,13 +73,13 @@ impl ShaderState {
         let is_txb = tex.op == nir_texop_txb && self.stage == Stage::Fragment;
         let is_tg4 = tex.op == nir_texop_tg4 && self.stage == Stage::Fragment;
         if tex.op != nir_texop_tex && tex.op != nir_texop_txf && !is_txl && !is_txb && !is_tg4 {
-            eprintln!("borgc: WARNING texture op {} not supported yet, dropped", tex.op);
+            self.refuse(format!("texture op {}", tex.op));
             return;
         }
         if let Some(t) = srcs.iter().find(|s| s.src_type == nir_tex_src_texture_deref) {
             self.tex_derefs.insert(t.src.as_def().index);
             if self.tex_derefs.len() == 2 {
-                eprintln!("borgc: WARNING more than one texture: all sample descriptor 0");
+                self.refuse("more than one texture");
             }
         }
         let coord = srcs
@@ -496,11 +496,7 @@ impl ShaderState {
                 let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
                 match self.outs.stores.get(&loc) {
                     Some(v) => { self.sel.vec_map.insert(intr.def.index, v.clone()); }
-                    None => eprintln!(
-                        "borgc: WARNING load_output of location {loc}, never stored earlier \
-                         in program order -- dropped (draw mode resolves it from the store, \
-                         not a real load; see decompose_vertex_offset's neighbor)"
-                    ),
+                    None => self.refuse(format!("load_output of location {loc} before any store to it")),
                 }
             }
             _ => {}
@@ -706,11 +702,7 @@ impl ShaderState {
                 .collect();
             self.sel.vec_map.insert(intr.def.index, comps);
         } else {
-            eprintln!(
-                "borgc: WARNING push constant at base={} read with a \
-                 non-constant dynamic offset -- not supported, dropped",
-                intr.base()
-            );
+            self.refuse(format!("push constant at base {} read with a dynamic offset", intr.base()));
         }
     }
 
@@ -849,10 +841,7 @@ impl ShaderState {
             )) {
             Some(bs) => bs,
             None => {
-                eprintln!(
-                    "borgc: WARNING load_ubo offset (def {offset_def}) is \
-                     not a recognized draw-mode address shape -- dropped"
-                );
+                self.refuse(format!("load_ubo offset (def {offset_def}) of an unknown address shape"));
                 (-1, 0)
             }
         };
