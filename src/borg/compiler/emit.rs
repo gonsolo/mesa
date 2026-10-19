@@ -1,6 +1,6 @@
 use crate::encode::{emit_blob, encode, encode_branch, encode_fattr, encode_jmp, encode_sout};
 use std::env;
-use crate::state::ShaderState;
+use crate::state::{ShaderState, Stage};
 use crate::{BorgInstr, Ubo};
 use std::collections::HashMap;
 use crate::opcodes::Op;
@@ -211,7 +211,7 @@ pub fn build_blob(
     frag_out: &[Option<u32>; 4],
     frag_z: Option<u32>,
 ) -> Vec<u8> {
-    let is_vertex = cx.is_vertex;
+    let is_vertex = cx.stage == Stage::Vertex;
     eprintln!(
         "borgc: encoded {} word(s) = {} uniform pre-load(s) + {} op(s) + {} epilogue \
          ({} operand(s) still pending)",

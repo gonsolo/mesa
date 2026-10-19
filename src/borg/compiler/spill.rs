@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use std::collections::HashMap;
-use crate::state::ShaderState;
+use crate::state::{ShaderState, Stage};
 use crate::{BorgInstr, Ubo, NO_DST};
 use crate::opcodes::Op;
 use crate::Mnem;
@@ -48,13 +48,13 @@ impl ShaderState {
 
     /// A per-lane word in 0..4, unique within a quad; in compute the LocalInvocationIndex.
     fn lane_key(&mut self) -> Vec<BorgInstr> {
-        if self.is_compute {
+        if self.stage == Stage::Compute {
             let r30 = self.sel.fresh();
             self.sel.ubo.insert(r30, Ubo::Fixed(30));
             self.spill_lane = Some(r30);
             return Vec::new();
         }
-        if self.is_vertex {
+        if self.stage == Stage::Vertex {
             return self.vertex_lane_key();
         }
         let mut out = Vec::new();
@@ -76,10 +76,10 @@ impl ShaderState {
 
     /// Helper lanes skip STOREs, so their spilled values would come back wrong: derivatives and implicit LOD need them.
     fn needs_helper_lanes(&self, i: &BorgInstr) -> bool {
-        if self.is_compute {
+        if self.stage == Stage::Compute {
             return false;
         }
-        if self.is_vertex {
+        if self.stage == Stage::Vertex {
             return matches!(i.mnem, Mnem::Op(Op::Brz | Op::Brnz));
         }
         match i.mnem {
@@ -116,7 +116,7 @@ impl ShaderState {
     }
 
     pub fn spill_to_pressure(&mut self, limit: usize) {
-        let max = if self.is_compute { MAX_COMPUTE_SPILL_SLOTS } else { MAX_SPILL_SLOTS };
+        let max = if self.stage == Stage::Compute { MAX_COMPUTE_SPILL_SLOTS } else { MAX_SPILL_SLOTS };
         while self.spill_slots < max {
             let Some(live) = self.over_limit(limit) else { return };
             if !self.spill_one(&live) {
@@ -127,8 +127,8 @@ impl ShaderState {
 
     /// Spills the live value with the furthest next use; false when nothing can be spilled.
     fn spill_one(&mut self, live: &[(u32, usize)]) -> bool {
-        let vs_room = self.is_vertex && self.win.room(5);
-        if !(self.is_fragment || self.is_compute || self.is_vertex && vs_room) || self.sel.prog.iter().any(|i| self.needs_helper_lanes(i)) {
+        let vs_room = self.stage == Stage::Vertex && self.win.room(5);
+        if !(self.stage == Stage::Fragment || self.stage == Stage::Compute || self.stage == Stage::Vertex && vs_room) || self.sel.prog.iter().any(|i| self.needs_helper_lanes(i)) {
             return false;
         }
         let pinned: Vec<u32> = self.out_roots.iter().copied().chain(self.tex_dsts.iter().copied()).chain(self.fattr_dsts.iter().copied()).chain(self.frag_z).chain(self.pos_out.iter().flatten().copied()).chain(self.frag_out.iter().flatten().copied()).collect();
@@ -179,7 +179,7 @@ impl ShaderState {
     }
 
     fn spill(&mut self, v: u32) {
-        let slot_bits = if self.is_compute {
+        let slot_bits = if self.stage == Stage::Compute {
             crate::compute::SPILL_BASE_WORDS + self.spill_slots * self.invocations()
         } else {
             SCRATCH_WORDS + 4 * self.spill_slots

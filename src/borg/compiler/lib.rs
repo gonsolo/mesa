@@ -29,6 +29,7 @@ use config::Flags;
 use isel::resolve_vm;
 use state::ShaderState;
 use std::env;
+use crate::state::Stage;
 
 fn packed_layout(flags: Flags) -> (u32, Vec<(usize, u32, u32)>) {
     let vfetch = flags.0;
@@ -358,7 +359,7 @@ unsafe fn compile_nir_inner(
         }
         let blob = match cx.assemble() {
             Some(blob) => blob,
-            None if (cx.is_fragment || cx.is_vertex) && cx.alloc_failed => continue,
+            None if (cx.stage == Stage::Fragment || cx.stage == Stage::Vertex) && cx.alloc_failed => continue,
             None => return 0,
         };
         if !out_len.is_null() {

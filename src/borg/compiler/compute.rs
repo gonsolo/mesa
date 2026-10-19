@@ -3,7 +3,7 @@
 
 use crate::{BorgInstr, NO_DST};
 use crate::isel::resolve_vm;
-use crate::state::ShaderState;
+use crate::state::{ShaderState, Stage};
 use crate::Ubo;
 use compiler::bindings::*;
 use compiler::nir::AsDef;
@@ -96,7 +96,7 @@ impl ShaderState {
 
     /// A source component as a register operand; a scalar constant gets a preset register.
     pub(crate) fn operand(&mut self, d: u32, c: u8) -> (u32, u8) {
-        if self.is_compute && !self.sel.vec_map.contains_key(&d) {
+        if self.stage == Stage::Compute && !self.sel.vec_map.contains_key(&d) {
             if let Some(&bits) = self.consts.get(&d) {
                 return (self.konst(bits), 0);
             }

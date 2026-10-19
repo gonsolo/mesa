@@ -1,4 +1,4 @@
-use crate::state::ShaderState;
+use crate::state::{ShaderState, Stage};
 use crate::isel::borg_isel;
 use crate::opt::classify_uniform;
 use std::env;
@@ -66,13 +66,13 @@ impl ShaderState {
 
     pub unsafe fn tex(&mut self, tex: &nir_tex_instr) {
         let srcs = tex.srcs_as_slice();
-        if tex.op == nir_texop_txs && self.is_fragment {
+        if tex.op == nir_texop_txs && self.stage == Stage::Fragment {
             self.tex_size(tex);
             return;
         }
-        let is_txl = tex.op == nir_texop_txl && self.is_fragment;
-        let is_txb = tex.op == nir_texop_txb && self.is_fragment;
-        let is_tg4 = tex.op == nir_texop_tg4 && self.is_fragment;
+        let is_txl = tex.op == nir_texop_txl && self.stage == Stage::Fragment;
+        let is_txb = tex.op == nir_texop_txb && self.stage == Stage::Fragment;
+        let is_tg4 = tex.op == nir_texop_tg4 && self.stage == Stage::Fragment;
         if tex.op != nir_texop_tex && tex.op != nir_texop_txf && !is_txl && !is_txb && !is_tg4 {
             eprintln!("borgc: WARNING texture op {} not supported yet, dropped", tex.op);
             return;
@@ -96,7 +96,7 @@ impl ShaderState {
                 resolve_vm(&self.sel.vec_map, cd, 1)
             };
             let is_cube = tex.sampler_dim == GLSL_SAMPLER_DIM_CUBE;
-            let has_w = !is_fetch && tex.coord_components >= 3 && !is_cube && self.is_fragment;
+            let has_w = !is_fetch && tex.coord_components >= 3 && !is_cube && self.stage == Stage::Fragment;
             let has_bias = (is_txb || tex.op == nir_texop_tex) && !is_fetch && srcs.iter().any(|s| s.src_type == nir_tex_src_bias);
             if is_txl || has_w || has_bias {
                 let ld = srcs.iter().find(|s| s.src_type == nir_tex_src_lod || s.src_type == nir_tex_src_bias).map(|s| s.src.as_def().index).unwrap_or(cd);
@@ -154,20 +154,20 @@ impl ShaderState {
     }
 
     pub unsafe fn alu(&mut self, alu: &nir_alu_instr) {
-        if self.is_compute && self.fold_const(alu) {
+        if self.stage == Stage::Compute && self.fold_const(alu) {
             return;
         }
-        if self.is_compute || (matches!(alu.op, nir_op_fadd | nir_op_fmul | nir_op_ffma
+        if self.stage == Stage::Compute || (matches!(alu.op, nir_op_fadd | nir_op_fmul | nir_op_ffma
             | nir_op_flt | nir_op_fge | nir_op_feq | nir_op_fneu | nir_op_bcsel | nir_op_fmin | nir_op_fmax
             | nir_op_slt | nir_op_sge | nir_op_seq | nir_op_sne
             | nir_op_ieq | nir_op_ine | nir_op_ilt | nir_op_ige | nir_op_ult | nir_op_uge)
-            || (self.is_fragment && matches!(alu.op, nir_op_iadd | nir_op_imul | nir_op_ishl
+            || (self.stage == Stage::Fragment && matches!(alu.op, nir_op_iadd | nir_op_imul | nir_op_ishl
                 | nir_op_ishr | nir_op_ushr | nir_op_isub | nir_op_iand | nir_op_ior
                 | nir_op_ixor))
             // Vertex bit operations are never address math (gl_VertexIndex & 2, say).
-            || (self.is_vertex && matches!(alu.op, nir_op_ishr | nir_op_ushr | nir_op_iand | nir_op_ior
+            || (self.stage == Stage::Vertex && matches!(alu.op, nir_op_ishr | nir_op_ushr | nir_op_iand | nir_op_ior
                 | nir_op_ixor))
-            || (self.is_vertex && self.flags.fetching() && matches!(alu.op, nir_op_iadd | nir_op_imul
+            || (self.stage == Stage::Vertex && self.flags.fetching() && matches!(alu.op, nir_op_iadd | nir_op_imul
                 | nir_op_isub | nir_op_ishl | nir_op_umin | nir_op_umax | nir_op_imin | nir_op_imax)))
         {
             let first = if alu.op == nir_op_bcsel { 1 } else { 0 };
@@ -212,7 +212,7 @@ impl ShaderState {
                 self.sel.prog.push(BorgInstr { mnem: Op::F2i.into(), dst: alu.def.index, srcs: vec![v], swz: vec![c] });
             }
             nir_op_flt | nir_op_fge | nir_op_fneu | nir_op_feq | nir_op_slt | nir_op_sge | nir_op_sne | nir_op_seq
-                if self.is_compute => self.exact_compare(alu),
+                if self.stage == Stage::Compute => self.exact_compare(alu),
             // slt and friends are the same compares with a float result, which a condition is here.
             nir_op_flt | nir_op_fge | nir_op_fneu | nir_op_feq | nir_op_slt | nir_op_sge | nir_op_sne | nir_op_seq => {
                 let sl = alu.srcs_as_slice();
@@ -263,8 +263,8 @@ impl ShaderState {
                 }
             }
             // fmax(0, x) → x · FSTEP(x)  (FSTEP(x)=1 if x>0 else 0).
-            nir_op_fmax | nir_op_fmin if self.is_compute => self.exact_minmax(alu),
-            nir_op_bcsel if self.is_compute => self.exact_bcsel(alu),
+            nir_op_fmax | nir_op_fmin if self.stage == Stage::Compute => self.exact_minmax(alu),
+            nir_op_bcsel if self.stage == Stage::Compute => self.exact_bcsel(alu),
             nir_op_fmax | nir_op_fmin => {
                 let s = alu.srcs_as_slice();
                 let a_zero = s[0].comp_as_uint(0) == Some(0);
@@ -440,7 +440,7 @@ impl ShaderState {
     }
 
     pub unsafe fn intrinsic(&mut self, intr: &nir_intrinsic_instr) {
-        if self.is_compute {
+        if self.stage == Stage::Compute {
             self.compute_intrinsic(intr);
             return;
         }
@@ -463,7 +463,7 @@ impl ShaderState {
                 .collect();
             let comps: Vec<(u32, u8)> = raw.into_iter().map(|v| (v, 0u8)).collect();
             self.sel.vec_map.insert(intr.def.index, comps);
-        } else if (intr.intrinsic == nir_intrinsic_load_input || intr.intrinsic == nir_intrinsic_load_point_coord) && !self.is_vertex {
+        } else if (intr.intrinsic == nir_intrinsic_load_input || intr.intrinsic == nir_intrinsic_load_point_coord) && self.stage != Stage::Vertex {
             let is_pc = intr.intrinsic == nir_intrinsic_load_point_coord;
             let loc = if is_pc { 25 } else { intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F };
             let base_index = if loc == 25 { self.flags.pntc_base() } else { 4 * loc.wrapping_sub(VARYING_SLOT_VAR0) + intr.get_const_index(NIR_INTRINSIC_COMPONENT) as u32 };
@@ -500,7 +500,7 @@ impl ShaderState {
                 })
                 .collect();
             self.sel.vec_map.insert(intr.def.index, comps);
-        } else if intr.intrinsic == nir_intrinsic_load_input && !self.is_vertex {
+        } else if intr.intrinsic == nir_intrinsic_load_input && self.stage != Stage::Vertex {
             if self.weights.is_none() {
                 let mut w = [0u32; 3];
                 for (i, wi) in w.iter_mut().enumerate() {
@@ -570,7 +570,7 @@ impl ShaderState {
                     })
                     .collect();
                 self.sel.vec_map.insert(intr.def.index, comps);
-            } else if self.is_vertex || self.is_fragment {
+            } else if self.stage == Stage::Vertex || self.stage == Stage::Fragment {
                                 let o = resolve_vm(&self.sel.vec_map, intr.get_src(0).as_def().index, 0);
                 let two = self.konst(2);
                 let w = self.sel.next_vreg; self.sel.next_vreg += 1;
@@ -664,7 +664,7 @@ impl ShaderState {
             if !store {
                 self.sel.vec_map.insert(intr.def.index, comps);
             }
-        } else if self.is_fragment && intr.intrinsic == nir_intrinsic_load_frag_coord {
+        } else if self.stage == Stage::Fragment && intr.intrinsic == nir_intrinsic_load_frag_coord {
             let comps: Vec<(u32, u8)> = [30u8, 31, 29, 8]
                 .iter()
                 .map(|&r| {
@@ -682,7 +682,7 @@ impl ShaderState {
             self.vertex_id_def = Some(intr.def.index);
         } else if intr.intrinsic == nir_intrinsic_load_instance_id {
             self.sel.ubo.insert(intr.def.index, Ubo::Fixed(31));
-        } else if self.is_vertex && self.flags.fetching()
+        } else if self.stage == Stage::Vertex && self.flags.fetching()
                   && intr.intrinsic == nir_intrinsic_load_input {
             const VERT_ATTRIB_GENERIC0: u32 = 15;
             let loc = (intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F)
@@ -715,7 +715,7 @@ impl ShaderState {
             }
             self.sel.vec_map.insert(intr.def.index, comps);
         } else if intr.intrinsic == nir_intrinsic_load_ubo
-                                || (self.is_vertex && intr.intrinsic == nir_intrinsic_load_input) {
+                                || (self.stage == Stage::Vertex && intr.intrinsic == nir_intrinsic_load_input) {
             let is_input = intr.intrinsic == nir_intrinsic_load_input;
             let offset_def = if is_input { 0 } else { intr.get_src(1).as_def().index };
             let n = intr.def.num_components as usize;
@@ -755,8 +755,8 @@ impl ShaderState {
             if base_words >= 0 {
                 let addr = match (stride_words, self.const_addr_chain) {
                     (0, Some((next, a))) if next == base_words => a,
-                    (0, _) if !self.is_vertex && base_words > 0 => self.konst(base_words as u32),
-                    (0, _) if !self.is_vertex => self.konst(base_words as u32),
+                    (0, _) if self.stage != Stage::Vertex && base_words > 0 => self.konst(base_words as u32),
+                    (0, _) if self.stage != Stage::Vertex => self.konst(base_words as u32),
                     // A single constant word: the address is a window word, no chain.
                     (0, _) if n == 1 => self.konst(base_words as u32),
                     _ => {
@@ -803,7 +803,7 @@ impl ShaderState {
             }
         } else if intr.intrinsic == nir_intrinsic_store_output {
             let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
-            if self.is_fragment && self.out_select >= 0 && (4..12).contains(&loc) && loc != 4 + self.out_select as u32 {
+            if self.stage == Stage::Fragment && self.out_select >= 0 && (4..12).contains(&loc) && loc != 4 + self.out_select as u32 {
                 return;
             }
             let src = intr.get_src(0).as_def().index;
@@ -819,7 +819,7 @@ impl ShaderState {
                 self.sel.vec_map.insert(d, vec![(v, 0u8)]);
             }
             let comps: Vec<(u32, u8)> = (0..ncomp).map(|c| resolve_vm(&self.sel.vec_map, src, c as u8)).collect();
-            if self.is_vertex && loc == VARYING_SLOT_POS {
+            if self.stage == Stage::Vertex && loc == VARYING_SLOT_POS {
                 for (c, &v0) in comps.iter().enumerate().take(4) {
                     let mut v = v0;
                     if matches!(self.sel.ubo.get(&v.0), Some(Ubo::Uniform(_))) {
@@ -830,15 +830,15 @@ impl ShaderState {
                     self.outs.pos[c] = Some(v);
                     self.outs.roots.push(v.0);
                 }
-            } else if self.is_fragment && self.flags.multi_target() && (4..8).contains(&loc) {
+            } else if self.stage == Stage::Fragment && self.flags.multi_target() && (4..8).contains(&loc) {
                 self.outs.mrt[(loc - 4) as usize] = Some(comps[0]);
-            } else if self.is_fragment {
+            } else if self.stage == Stage::Fragment {
                 let ncomp2 = if self.frag_alpha || self.flags.bytes_packed() { 4 } else { 3 };
                 for (c, &v) in comps.iter().enumerate().take(ncomp2) {
                     self.outs.frag[c] = Some(v);
                     self.outs.roots.push(v.0);
                 }
-            } else if self.is_vertex && loc == 12 {
+            } else if self.stage == Stage::Vertex && loc == 12 {
                 self.outs.psize = comps.first().copied();   // VARYING_SLOT_PSIZ
             } else if loc < VARYING_SLOT_VAR0 {
                 // gl_PointSize and the other built-in outputs: triangles ignore them.
@@ -864,7 +864,7 @@ impl ShaderState {
                 }
             }
             self.outs.stores.insert(loc, comps);
-        } else if self.is_fragment && intr.intrinsic == nir_intrinsic_load_output
+        } else if self.stage == Stage::Fragment && intr.intrinsic == nir_intrinsic_load_output
                   && intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) >> 14 & 1 != 0 {
             let desc = if self.flags.packed() && !self.flags.multi_target() {
                 Some(packed_layout(self.flags))
@@ -996,7 +996,7 @@ impl ShaderState {
             std::collections::HashMap::new();
         let mut cf_unsupported: Vec<&'static str> = Vec::new();
         let mut loops = crate::Loops::default();
-        collect_cf_marks((*entry).iter_body(), &mut cf_marks, &mut cf_unsupported, self.is_compute.then_some(&mut loops), None);
+        collect_cf_marks((*entry).iter_body(), &mut cf_marks, &mut cf_unsupported, (self.stage == Stage::Compute).then_some(&mut loops), None);
         if loops.count > 256 {
             loops.err = Some(format!("{} loops; labels are 8 bits", loops.count));
         }
@@ -1067,7 +1067,7 @@ impl ShaderState {
                             }
                             let (v, comp) = self.operand(src, c as u8);
                             // A compute value is often an integer: copy its bits.
-                            let (mnem, srcs, swz) = if self.is_compute { (Op::Ior, vec![v, v], vec![comp, comp]) } else { (Op::Fmov, vec![v], vec![comp]) };
+                            let (mnem, srcs, swz) = if self.stage == Stage::Compute { (Op::Ior, vec![v, v], vec![comp, comp]) } else { (Op::Fmov, vec![v], vec![comp]) };
                             self.sel.prog.push(BorgInstr { mnem: mnem.into(), dst: reg_vregs[&h][c], srcs, swz });
                         }
                         continue;
@@ -1078,14 +1078,14 @@ impl ShaderState {
                 } else if let Some(intr) = instr.as_intrinsic() {
                     self.intrinsic(intr);
                 } else if let Some(tex) = instr.as_tex() {
-                    if self.is_compute {
+                    if self.stage == Stage::Compute {
                         self.skipped.push("tex");
                         continue;
                     }
                     self.tex(tex);
                 } else if let Some(lc) = instr.as_load_const() {
                     self.load_const(lc);
-                } else if let Some(u) = instr.as_undef().filter(|_| self.is_compute) {
+                } else if let Some(u) = instr.as_undef().filter(|_| self.stage == Stage::Compute) {
                     self.undef(u);
                 }
             }

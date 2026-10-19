@@ -1,7 +1,7 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-use crate::state::{Selector, ShaderState};
+use crate::state::{Selector, ShaderState, Stage};
 use crate::compute::{POOL_BASE_WORDS, POOL_MAX as CS_POOL_MAX};
 use crate::{BorgInstr, Ubo};
 use std::collections::HashMap;
@@ -121,10 +121,10 @@ impl ShaderState {
     /// A register holding `bits`: a window word in a fragment or vertex shader (in memory when the
     /// window is full), a preset register or pool word in a compute shader.
     pub fn konst(&mut self, bits: u32) -> u32 {
-        if self.is_compute {
+        if self.stage == Stage::Compute {
             return self.cs_const(bits);
         }
-        if self.is_vertex && bits == 0 {
+        if self.stage == Stage::Vertex && bits == 0 {
             return self.cp.zero(&mut self.sel);
         }
         self.win.word(&mut self.sel, bits)
@@ -152,19 +152,19 @@ impl ShaderState {
         if let Some(v) = self.one_vreg {
             return v;
         }
-        if self.is_compute {
+        if self.stage == Stage::Compute {
             let v = self.cs_const(1.0f32.to_bits());
             self.one_vreg = Some(v);
             return v;
         }
         let v = self.sel.fresh();
-        let v = if self.is_fragment {
+        let v = if self.stage == Stage::Fragment {
             let c = self.sel.fresh();
             self.sel.ubo.insert(c, crate::Ubo::Fixed(30));
             self.per_pixel_fixed.insert(c);
             self.sel.prog.push(crate::BorgInstr { mnem: Op::Fstep.into(), dst: v, srcs: vec![c], swz: vec![0] });
             v
-        } else if self.is_vertex {
+        } else if self.stage == Stage::Vertex {
             // A pinned register is not staged for a draw's vertex shader.
             self.win.word(&mut self.sel, 1.0f32.to_bits())
         } else {
@@ -180,7 +180,7 @@ impl ShaderState {
     /// A window with more words than it holds keeps the most read ones, the constant 1 and the
     /// pool's control word; the rest are fetched from the pool in memory.
     pub unsafe fn pool_window(&mut self) {
-        if self.win.words.len() <= self.win.size || !(self.is_vertex || self.is_fragment) {
+        if self.win.words.len() <= self.win.size || !(self.stage == Stage::Vertex || self.stage == Stage::Fragment) {
             return;
         }
         let (base, words) = (self.win.base, std::mem::take(&mut self.win.words));
@@ -212,7 +212,7 @@ impl ShaderState {
         self.sel.ubo.insert(one, Ubo::Uniform(base + n - 2));
         let f = self.sel.fresh();
         self.sel.ubo.insert(f, Ubo::Fixed(30));
-        if self.is_fragment {
+        if self.stage == Stage::Fragment {
             self.per_pixel_fixed.insert(f);
         }
         let zero = self.sel.fresh();
@@ -460,7 +460,7 @@ mod tests {
     use crate::config::Flags;
 
     fn cx(vertex: bool) -> ShaderState {
-        ShaderState::new(&[17, 18, 19], vertex, !vertex, Flags(0))
+        ShaderState::new(&[17, 18, 19], if vertex { Stage::Vertex } else { Stage::Fragment }, Flags(0))
     }
 
     #[test]

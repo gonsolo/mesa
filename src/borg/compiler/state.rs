@@ -68,6 +68,26 @@ impl Selector {
     }
 }
 
+/// The shader stage; Other is compiled for its diagnostics only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    Vertex,
+    Fragment,
+    Compute,
+    Other,
+}
+
+impl Stage {
+    pub fn of(stage: mesa_shader_stage) -> Self {
+        match stage {
+            MESA_SHADER_VERTEX => Stage::Vertex,
+            MESA_SHADER_FRAGMENT => Stage::Fragment,
+            MESA_SHADER_COMPUTE => Stage::Compute,
+            _ => Stage::Other,
+        }
+    }
+}
+
 /// Compile state of one shader: selector, constant pool, window and output bookkeeping.
 pub struct ShaderState {
     pub sel: Selector,
@@ -76,8 +96,7 @@ pub struct ShaderState {
     pub outs: DrawOutputs,
     pub consts: HashMap<u32, u32>,
     pub out_roots: Vec<u32>,
-    pub is_vertex: bool,
-    pub is_fragment: bool,
+    pub stage: Stage,
     pub flags: Flags,
     pub frag_alpha: bool,
     pub frag_z: Option<u32>,
@@ -107,23 +126,21 @@ pub struct ShaderState {
     pub descriptor_defs: std::collections::HashSet<u32>,
     pub const_addr_chain: Option<(i32, u32)>,
     pub dst_half: Option<([Option<u32>; 4], u32)>,
-    pub is_compute: bool,
     pub cs: crate::compute::ComputeState,
 }
 
 impl ShaderState {
-    pub fn new(regs: &'static [u8], is_vertex: bool, is_fragment: bool, flags: Flags) -> Self {
+    pub fn new(regs: &'static [u8], stage: Stage, flags: Flags) -> Self {
         ShaderState {
             sel: Selector::new(),
             cp: ConstPool::new(regs),
-            win: if is_vertex { Window::vertex() } else { Window::fragment() },
+            win: if stage == Stage::Vertex { Window::vertex() } else { Window::fragment() },
             outs: DrawOutputs::default(),
             consts: HashMap::new(),
             out_roots: Vec::new(),
-            is_vertex,
-            is_fragment,
+            stage,
             flags,
-            frag_alpha: std::env::var("BORGC_FRAG_ALPHA").is_ok() || (is_fragment && flags.alpha_output()),
+            frag_alpha: std::env::var("BORGC_FRAG_ALPHA").is_ok() || (stage == Stage::Fragment && flags.alpha_output()),
             frag_z: None,
             pos_out: [None; 4],
             frag_out: [None; 4],
@@ -151,7 +168,6 @@ impl ShaderState {
             descriptor_defs: Default::default(),
             const_addr_chain: Default::default(),
             dst_half: None,
-            is_compute: false,
             cs: Default::default(),
         }
     }

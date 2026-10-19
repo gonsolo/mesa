@@ -1,7 +1,7 @@
 use crate::emit::{build_blob, encode_program, Encoded};
 use crate::fixed::{allocate, fixed_regs};
 use crate::opt::{dce, fuse_fmadd, schedule_for_pressure};
-use crate::state::ShaderState;
+use crate::state::{ShaderState, Stage};
 use crate::survey::{survey, Survey};
 use crate::{Flags, Ubo};
 use compiler::bindings::*;
@@ -10,30 +10,24 @@ use crate::opcodes::Op;
 
 impl ShaderState {
     pub unsafe fn start(nir: *mut nir_shader, flags: Flags, out_select: i32) -> (ShaderState, *mut nir_function_impl, u32) {
-        let stage = (*nir).info.stage();
-        let is_vertex = stage == MESA_SHADER_VERTEX;
-        let is_fragment = stage == MESA_SHADER_FRAGMENT;
-        let is_compute = stage == MESA_SHADER_COMPUTE;
+        let mesa_stage = (*nir).info.stage();
+        let stage = Stage::of(mesa_stage);
         if env::var("BORGC_DUMP_NIR").is_ok() {
             if let Ok(s) = (*nir).to_string() {
                 eprintln!("{s}");
             }
         }
         let entry = nir_shader_get_entrypoint(nir);
-        let Survey { total, tex, push_window } = survey(entry, stage);
-        let regs: &'static [u8] = if is_vertex {
-            &[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-        } else if is_compute {
+        let Survey { total, tex, push_window } = survey(entry, mesa_stage);
+        let regs: &'static [u8] = match stage {
+            Stage::Vertex => &[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             // Preset registers, from the top; r30/r31 are the invocation IDs, r12-r14 the grid base.
-            &[29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15]
-        } else if tex > 0 {
-            &[17, 18, 19]
-        } else {
-            &[17, 18, 19, 23]
+            Stage::Compute => &[29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15],
+            _ if tex > 0 => &[17, 18, 19],
+            _ => &[17, 18, 19, 23],
         };
-        let mut st = ShaderState::new(regs, is_vertex, is_fragment, flags);
-        st.push_window = push_window && is_fragment;
-        st.is_compute = is_compute;
+        let mut st = ShaderState::new(regs, stage, flags);
+        st.push_window = push_window && stage == Stage::Fragment;
         st.out_select = out_select;
         (st, entry, total)
     }
@@ -61,7 +55,7 @@ impl ShaderState {
     /// multiple targets, packed, half or byte formats), records the output registers and, for
     /// fragments, interpolates depth.
     pub unsafe fn lower_outputs(&mut self) {
-        let (is_vertex, is_fragment, flags) = (self.is_vertex, self.is_fragment, self.flags);
+        let (is_vertex, is_fragment, flags) = (self.stage == Stage::Vertex, self.stage == Stage::Fragment, self.flags);
         if is_vertex && flags.point_quads() {
             self.epilogue_point_quads();
         }
@@ -105,7 +99,7 @@ impl ShaderState {
         let ubo = &self.sel.ubo;
         fuse_fmadd(&mut self.sel.prog, &self.out_roots, &|v| matches!(ubo.get(&v), Some(Ubo::Uniform(_))));
         schedule_for_pressure(&mut self.sel.prog, &self.out_roots);
-        if self.is_fragment {
+        if self.stage == Stage::Fragment {
             self.log_uniformity();
         }
     }
