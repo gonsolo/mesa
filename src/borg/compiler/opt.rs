@@ -195,6 +195,10 @@ pub(crate) fn fuse_fmadd(
                     && uses.get(&m) == Some(&1)
                 {
                     let (a, b) = (prog[mi].srcs[0], prog[mi].srcs[1]);
+                    // The fused multiply reads its operands at the add.
+                    if prog[mi + 1..i].iter().any(|x| x.dst == a || x.dst == b || x.mnem == "LABEL" || x.mnem == "BRNZ") {
+                        continue;
+                    }
                     let (sa, sb) = (prog[mi].swz[0], prog[mi].swz[1]);
                     let c = prog[i].srcs[1 - k];
                     let sc = prog[i].swz[1 - k];
