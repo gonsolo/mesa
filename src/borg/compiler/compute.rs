@@ -189,7 +189,6 @@ impl ShaderState {
 
     fn fail(&mut self, m: String) {
         if self.cs.err.is_none() {
-            eprintln!("borgc[compute]: {m}");
             self.cs.err = Some(m);
         }
     }
@@ -695,9 +694,7 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
     if let Some(e) = cx.cs.err.take() {
         return Err(e);
     }
-    if !cx.check_selected() {
-        return Err(format!("unsupported: {}", cx.skipped.join(", ")));
-    }
+    cx.check_selected()?;
     if compact {
         cx.sink_loads();
     }
@@ -707,7 +704,7 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
     }
     cx.optimise();
     if cx.spill.slots > 0 {
-        eprintln!("borgc[compute]: spilled {} value(s) to keep {:?} live", cx.spill.slots, limit);
+        debug!("borgc[compute]: spilled {} value(s) to keep {:?} live", cx.spill.slots, limit);
     }
     cx.pool_consts(cap, !compact)?;
     let mut reserved: Vec<u8> = cx.cp.preset_regs().to_vec();

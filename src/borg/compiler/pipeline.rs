@@ -32,10 +32,10 @@ impl ShaderState {
         (st, entry, total)
     }
 
-    /// After instruction selection: logs the result, and returns false if a NIR op had no Borg
-    /// instruction, so no wrong shader is emitted.
-    pub fn check_selected(&mut self) -> bool {
-        eprintln!("borgc: selected {} Borg instruction(s) (virtual regs)", self.sel.prog.len());
+    /// After instruction selection: logs the result, and refuses the shader when a NIR op had no
+    /// Borg instruction, so no wrong shader is emitted.
+    pub fn check_selected(&mut self) -> Result<(), String> {
+        debug!("borgc: selected {} Borg instruction(s) (virtual regs)", self.sel.prog.len());
         if env::var("BORGC_DUMP_ISA").is_ok() {
             for i in &self.sel.prog {
                 let s: Vec<String> = i.srcs.iter().map(|v| format!("v{v}")).collect();
@@ -45,10 +45,9 @@ impl ShaderState {
         let srgb = self.sel.prog.iter().any(|i| i.mnem == Op::Fsrgb);
         self.skipped.retain(|&op| !(matches!(op, "fpow" | "fge") && srgb));
         if !self.skipped.is_empty() {
-            eprintln!("borgc: ERROR unhandled NIR ops, refusing to emit a wrong shader: {}", self.skipped.join(", "));
-            return false;
+            return Err(format!("unsupported: {}", self.skipped.join(", ")));
         }
-        true
+        Ok(())
     }
 
     /// Final pass over the outputs: runs the epilogues the option word asks for (point quads,
@@ -80,7 +79,7 @@ impl ShaderState {
         self.vert.pos_out = self.outs.pos.map(|v| v.map(|(d, _)| d));
         self.frag.out = self.outs.frag.map(|v| v.map(|(d, _)| d));
         self.out_roots.extend(self.outs.roots.iter().copied());
-        eprintln!(
+        debug!(
             "borgc: draw-mode I/O map — {} vertex-pulling/MVP load(s), {} SOUT(s), gl_Position={}",
             self.vert.descriptor_defs.len(),
             self.outs.stores.len(),

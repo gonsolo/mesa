@@ -219,7 +219,7 @@ impl ShaderState {
         let pool = self.fetch_pool(&bits, is_pool, ctl, one, f, zero);
         assert!(pool.len() <= POOL_MAX, "borgc: a constant pool of {} words ({POOL_MAX} fit)", pool.len());
         self.win.words = window.iter().enumerate().map(|(k, &(_, b))| (base + k as u8, b)).collect();
-        eprintln!("borgc: constant pool of {} word(s)", pool.len());
+        debug!("borgc: constant pool of {} word(s)", pool.len());
         self.pool = pool;
     }
 
@@ -333,7 +333,7 @@ impl ShaderState {
         if self.cs.pool.len() > CS_POOL_MAX {
             return Err(format!("a constant pool of {} words ({CS_POOL_MAX} fit)", self.cs.pool.len()));
         }
-        eprintln!("borgc[compute]: constant pool of {} word(s)", self.cs.pool.len());
+        debug!("borgc[compute]: constant pool of {} word(s)", self.cs.pool.len());
         Ok(())
     }
 

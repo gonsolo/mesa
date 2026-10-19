@@ -73,7 +73,7 @@ pub fn allocate(cx: &ShaderState, forced: &HashMap<u32, u8>, extra_reserved: &mu
         let mut res: Vec<u8> = extra_reserved.clone();
         res.sort();
         res.dedup();
-        eprintln!("borgc: ERROR out of registers ({} has none; reserved {:?}), refusing to emit a wrong shader", i.mnem, res);
+        debug!("borgc: out of registers ({} has none; reserved {:?})", i.mnem, res);
         return None;
     }
     if env::var("BORGC_DUMP_ALLOC").is_ok() {

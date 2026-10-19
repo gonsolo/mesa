@@ -3,6 +3,15 @@
 
 #![allow(non_upper_case_globals)]
 
+/// A progress message, printed with BORGC_DEBUG set; errors and warnings use eprintln.
+macro_rules! debug {
+    ($($arg:tt)*) => {
+        if crate::debug_enabled() {
+            eprintln!($($arg)*)
+        }
+    };
+}
+
 mod compute;
 mod config;
 mod consts;
@@ -68,6 +77,11 @@ pub struct BorgcInfo {
     pub npool: u32,
     pub spill_slots: u32,
     pub push_window: u32,
+}
+
+pub(crate) fn debug_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| env::var("BORGC_DEBUG").is_ok())
 }
 
 pub(crate) const NO_DST: u32 = u32::MAX;
@@ -348,14 +362,15 @@ unsafe fn compile_nir_inner(
         (info.push_window, info.spill_slots) = (cx.frag.push_window as u32, 0);
         cx.spill.limit = limit;
         cx.select_entry(entry);
-        if !cx.check_selected() {
+        if let Err(e) = cx.check_selected() {
+            eprintln!("borgc: refused: {e}");
             return 0;
         }
         cx.lower_outputs();
         cx.optimise();
         info.spill_slots = cx.spill.slots;
         if cx.spill.slots > 0 {
-            eprintln!("borgc: spilled {} value(s) to keep {:?} live", cx.spill.slots, limit);
+            debug!("borgc: spilled {} value(s) to keep {:?} live", cx.spill.slots, limit);
         }
         let blob = match cx.assemble() {
             Some(blob) => blob,
@@ -373,5 +388,6 @@ unsafe fn compile_nir_inner(
         info.npool = n as u32;
         return total;
     }
+    eprintln!("borgc: ERROR out of registers at every spill limit, refusing the shader");
     0
 }

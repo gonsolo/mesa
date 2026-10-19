@@ -198,7 +198,7 @@ pub fn build_blob(
     frag_out: &[Option<u32>; 4],
 ) -> Vec<u8> {
     let is_vertex = cx.stage == Stage::Vertex;
-    eprintln!(
+    debug!(
         "borgc: encoded {} word(s) = {} uniform pre-load(s) + {} op(s) + {} epilogue \
          ({} operand(s) still pending)",
         words.len(),
@@ -209,19 +209,19 @@ pub fn build_blob(
     );
     if !cx.cp.presets().is_empty() {
         let cs: Vec<String> = cx.cp.presets().iter().map(|(r, v)| format!("r{r}={v:#06x}")).collect();
-        eprintln!("borgc: const regs (firmware-staged via MMIO): {}", cs.join(" "));
+        debug!("borgc: const regs (firmware-staged via MMIO): {}", cs.join(" "));
     }
     let window = cx.window();
     if !window.is_empty() && !is_vertex {
         let cs: Vec<String> = window.iter().map(|(u, v)| format!("u{u}={v:#010x}")).collect();
-        eprintln!(
+        debug!(
             "borgc: draw-mode uniform consts (write to draw_fs_const_offset + 4*(u-20) before the draw): {}",
             cs.join(" ")
         );
     }
     if !window.is_empty() && is_vertex {
         let cs: Vec<String> = window.iter().map(|(u, v)| format!("u{u}={v:#010x}")).collect();
-        eprintln!(
+        debug!(
             "borgc: draw-mode vertex window consts (write to draw_vs_const_offset + 4*(u-25) before the draw): {}",
             cs.join(" ")
         );
@@ -249,7 +249,7 @@ pub fn build_blob(
         .unwrap_or(0);
     let blob = emit_blob(words, &outputs, cx.cp.presets(),
                          Some((num_varyings, &window[..])));
-    eprintln!(
+    debug!(
         "borgc: .borg blob = {} bytes ({} instr, {} output regs, {} window consts, {} varyings)",
         blob.len(), words.len(), outputs.len(), window.len(), num_varyings
     );

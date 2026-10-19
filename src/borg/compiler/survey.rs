@@ -52,12 +52,12 @@ pub unsafe fn survey(entry: *mut nir_function_impl, stage: mesa_shader_stage) ->
         }
     }
 
-    eprintln!(
+    debug!(
         "borgc: stage={stage} instrs={total} | alu_ok={alu_ok} alu_todo={alu_todo} \
          tex={tex} const={consts} intrinsic={intrinsics} other={other}"
     );
     if !todo.is_empty() {
-        eprintln!("borgc:   needs lowering/selection: {}", todo.join(", "));
+        debug!("borgc:   needs lowering/selection: {}", todo.join(", "));
     }
     Survey { total, tex, push_window: push && mem }
 }

@@ -32,7 +32,7 @@ pub(crate) fn dce(prog: &mut Vec<BorgInstr>, out_roots: &[u32]) {
     }
     prog.retain(|i| side_effecting(i) || live.contains(&i.dst));
     if pre_dce != prog.len() {
-        eprintln!(
+        debug!(
             "borgc: DCE — dropped {} dead instr(s) (UBO address math), {} live",
             pre_dce - prog.len(),
             prog.len()
@@ -224,7 +224,7 @@ pub(crate) fn fuse_fmadd(
         });
     }
     if pre_fuse != prog.len() {
-        eprintln!(
+        debug!(
             "borgc: FMADD fusion — {} FMUL+FADD pair(s) fused, {} instr(s)",
             pre_fuse - prog.len(),
             prog.len()

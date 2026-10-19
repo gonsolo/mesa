@@ -139,7 +139,7 @@ pub(crate) fn regalloc(
         peak = peak.max(active.len());
     }
 
-    eprintln!(
+    debug!(
         "borgc: regalloc — {} values → r0..r{}, peak pressure {}, spills {}",
         alloc.len(),
         NUM_GPRS - 1,
