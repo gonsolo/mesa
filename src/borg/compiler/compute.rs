@@ -403,24 +403,7 @@ impl ShaderState {
                 let v: Vec<Val> = (0..3).map(|c| self.workgroup_id(c)).collect();
                 self.set(d, &v);
             }
-            nir_intrinsic_load_global_invocation_id => {
-                // workgroup_id * local_size + local_id (r31 = x | y << 10 | z << 20).
-                let ws = self.cs.ws;
-                let mut v = vec![];
-                for c in 0..3u8 {
-                    let wg = self.group_id(c);
-                    let size = ws[c as usize];
-                    let mut x = if size == 1 { wg } else { self.mul(wg, Val::K(size)) };
-                    if size > 1 {
-                        let r31 = self.fixed(31);
-                        let sh = self.bin(Op::Isrl, Val::R(r31, 0), Val::K(10 * c as u32));
-                        let lid = self.bin(Op::Iand, sh, Val::K(1023));
-                        x = self.add(x, lid);
-                    }
-                    v.push(x);
-                }
-                self.set(d, &v);
-            }
+            nir_intrinsic_load_global_invocation_id => self.global_invocation_id(i),
             nir_intrinsic_load_local_invocation_id | nir_intrinsic_load_local_invocation_index if self.cs.packed => {
                 let n = i.def.num_components as usize;
                 self.set(d, &vec![Val::K(0); n]);
@@ -439,21 +422,7 @@ impl ShaderState {
                 let r30 = self.fixed(30);
                 self.set(d, &[Val::R(r30, 0)]);
             }
-            nir_intrinsic_load_num_workgroups => {
-                // Presets the driver fills with the dispatch's group counts.
-                let x = match self.cs.nwg {
-                    Some(x) => x,
-                    None => {
-                        let x = self.cp.alloc_reg();
-                        let (y, z) = (self.cp.alloc_reg(), self.cp.alloc_reg());
-                        self.cs.presets.extend([(x, 0), (y, 0), (z, 0)]);
-                        self.cs.nwg = Some(x);
-                        x
-                    }
-                };
-                let v: Vec<Val> = (0..3).map(|c| Val::R(self.fixed(x - c), 0)).collect();
-                self.set(d, &v);
-            }
+            nir_intrinsic_load_num_workgroups => self.num_workgroups(i),
             nir_intrinsic_vulkan_resource_index => {
                 let m = self.sel.fresh();
                 self.cs.desc.insert(m, (i.get_const_index(NIR_INTRINSIC_DESC_SET), i.get_const_index(NIR_INTRINSIC_BINDING)));
@@ -465,38 +434,7 @@ impl ShaderState {
                 let comps = (0..3).map(|c| resolve_vm(&self.sel.vec_map, s, c)).collect();
                 self.sel.vec_map.insert(d, comps);
             }
-            nir_intrinsic_load_push_constant => {
-                let o = self.val(i.get_src(0), 0);
-                let w = self.shr(o, 2);
-                let base_w = (i.base() as u32) / 4;
-                let pbase = SLOT_BASE_WORDS + 32 * SLOT_WORDS;
-                let mut v = vec![];
-                for c in 0..i.def.num_components as u32 {
-                    let a = match w {
-                        Val::K(x) => {
-                            // Small steps from one base keep the distinct constants few.
-                            let mut r = ((x + base_w) & (SLOT_WORDS - 1)) + c;
-                            let rb = self.konst(pbase);
-                            let mut a = Val::R(rb, 0);
-                            while r >= 4 {
-                                a = self.bin(Op::Iadd, a, Val::K(4));
-                                r -= 4;
-                            }
-                            if r > 0 {
-                                a = self.bin(Op::Iadd, a, Val::K(r));
-                            }
-                            a
-                        }
-                        _ => {
-                            let w2 = self.add(w, Val::K(base_w + c));
-                            let w2 = self.bin(Op::Iand, w2, Val::K(SLOT_WORDS - 1));
-                            self.add(Val::K(pbase), w2)
-                        }
-                    };
-                    v.push(self.load(a));
-                }
-                self.set(d, &v);
-            }
+            nir_intrinsic_load_push_constant => self.cs_push_constant(i),
             nir_intrinsic_load_ubo | nir_intrinsic_load_ssbo => {
                 let a0 = self.word_addr(i.get_src(0), i.get_src(1), 0);
                 let mut v = vec![];
@@ -525,118 +463,200 @@ impl ShaderState {
                     self.sel.prog.push(BorgInstr { mnem: Op::Barrier.into(), dst: NO_DST, srcs: vec![], swz: vec![] });
                 }
             }
-            nir_intrinsic_load_shared | nir_intrinsic_store_shared => {
-                let store = i.intrinsic == nir_intrinsic_store_shared;
-                let o = self.val(i.get_src(if store { 1 } else { 0 }), 0);
-                let w = self.shr(o, 2);
-                let base_w = (i.base() as u32) / 4;
-                let n = if store { i.get_src(0).num_components() as u32 } else { i.def.num_components as u32 };
-                let mut v = vec![];
-                for c in 0..n {
-                    if store && i.write_mask() & (1 << c) == 0 {
-                        continue;
-                    }
-                    let w2 = self.add(w, Val::K(base_w + c));
-                    let w2 = self.mask(w2);
-                    let a = self.add(Val::K(SLOT_BASE_WORDS + 33 * SLOT_WORDS), w2);
-                    if store {
-                        let x = self.val(i.get_src(0), c as u8);
-                        self.store(a, x);
-                    } else {
-                        v.push(self.load(a));
-                    }
-                }
-                if !store {
-                    self.set(d, &v);
-                }
-            }
+            nir_intrinsic_load_shared | nir_intrinsic_store_shared => self.shared_access(i),
             nir_intrinsic_ssbo_atomic | nir_intrinsic_shared_atomic | nir_intrinsic_ssbo_atomic_swap
-            | nir_intrinsic_shared_atomic_swap => {
-                let ssbo = matches!(i.intrinsic, nir_intrinsic_ssbo_atomic | nir_intrinsic_ssbo_atomic_swap);
-                let a = if ssbo {
-                    self.cs.atomics = true;
-                    self.word_addr(i.get_src(0), i.get_src(1), 0)
-                } else {
-                    let o = self.val(i.get_src(0), 0);
-                    let w = self.shr(o, 2);
-                    let w = self.add(w, Val::K(i.base() as u32 / 4));
-                    let w = self.mask(w);
-                    self.add(Val::K(SLOT_BASE_WORDS + 33 * SLOT_WORDS), w)
-                };
-                let s = if ssbo { 2 } else { 1 };
-                let swap = i.atomic_op() == nir_atomic_op_cmpxchg;
-                let a = self.vreg(a);
-                // A swap's sources are the comparator, then the new value.
-                let x = self.val(i.get_src(s + swap as usize), 0);
-                let x = self.vreg(x);
-                let cmp = if swap {
-                    let c = self.val(i.get_src(s), 0);
-                    Some(self.vreg(c))
-                } else {
-                    None
-                };
-                let lt = match i.atomic_op() {
-                    nir_atomic_op_imin | nir_atomic_op_imax => Some(Op::Islt),
-                    nir_atomic_op_umin | nir_atomic_op_umax => Some(Op::Isltu),
-                    _ => None,
-                };
-                let alu = match i.atomic_op() {
-                    nir_atomic_op_iadd => Some(Op::Iadd),
-                    nir_atomic_op_iand => Some(Op::Iand),
-                    nir_atomic_op_ior => Some(Op::Ior),
-                    nir_atomic_op_ixor => Some(Op::Ixor),
-                    nir_atomic_op_xchg | nir_atomic_op_cmpxchg => None,
-                    _ if lt.is_some() => None,
-                    _ => {
-                        self.fail("unsupported atomic op".into());
-                        return;
-                    }
-                };
-                let is_min = matches!(i.atomic_op(), nir_atomic_op_imin | nir_atomic_op_umin);
-                // One lane at a time; the same registers in every lane's turn.
-                let (old, new, t, u, w) = (self.sel.fresh(), self.sel.fresh(), self.sel.fresh(), self.sel.fresh(), self.sel.fresh());
-                let r30 = self.fixed(30);
-                // r30 counts across the workgroup's quads; the lane is its low bits.
-                let (m, q) = (self.konst(LANES - 1), self.sel.fresh());
-                self.sel.prog.push(BorgInstr { mnem: Op::Iand.into(), dst: q, srcs: vec![r30, m], swz: vec![0, 0] });
-                for lane in 0..LANES {
-                    let l = self.konst(lane);
-                    let p = &mut self.sel.prog;
-                    let mut op = |mnem: Op, dst: u32, srcs: Vec<(u32, u8)>| {
-                        let (srcs, swz) = srcs.into_iter().unzip();
-                        p.push(BorgInstr { mnem: mnem.into(), dst, srcs, swz });
-                    };
-                    op(Op::Iseq, t, vec![(q, 0), (l, 0)]);
-                    op(Op::Expush, NO_DST, vec![(t, 0)]);
-                    op(Op::Load, old, vec![a]);
-                    let v = if let Some(alu) = alu {
-                        op(alu, new, vec![(old, 0), x]);
-                        (new, 0)
-                    } else if let Some(c) = cmp {
-                        // old + (old == cmp) * (x - old)
-                        op(Op::Iseq, t, vec![(old, 0), c]);
-                        op(Op::Isub, u, vec![x, (old, 0)]);
-                        op(Op::Imul, w, vec![(t, 0), (u, 0)]);
-                        op(Op::Iadd, new, vec![(old, 0), (w, 0)]);
-                        (new, 0)
-                    } else if let Some(lt) = lt {
-                        // max: old + (old < x) * (x - old); min: x + (old < x) * (old - x)
-                        let (p0, q0) = if is_min { (x, (old, 0)) } else { ((old, 0), x) };
-                        op(lt, t, vec![(old, 0), x]);
-                        op(Op::Isub, u, vec![q0, p0]);
-                        op(Op::Imul, w, vec![(t, 0), (u, 0)]);
-                        op(Op::Iadd, new, vec![p0, (w, 0)]);
-                        (new, 0)
-                    } else {
-                        x
-                    };
-                    op(Op::Store, NO_DST, vec![a, v]);
-                    op(Op::Expop, NO_DST, vec![]);
-                }
-                self.set(d, &[Val::R(old, 0)]);
-            }
+            | nir_intrinsic_shared_atomic_swap => self.atomic(i),
             _ => self.fail(format!("unsupported intrinsic {}", i.info().name())),
         }
+    }
+
+    /// GlobalInvocationID as WorkgroupID * LocalSize + LocalInvocationID.
+    unsafe fn global_invocation_id(&mut self, i: &nir_intrinsic_instr) {
+        let d = i.def.index;
+        // workgroup_id * local_size + local_id (r31 = x | y << 10 | z << 20).
+        let ws = self.cs.ws;
+        let mut v = vec![];
+        for c in 0..3u8 {
+            let wg = self.group_id(c);
+            let size = ws[c as usize];
+            let mut x = if size == 1 { wg } else { self.mul(wg, Val::K(size)) };
+            if size > 1 {
+                let r31 = self.fixed(31);
+                let sh = self.bin(Op::Isrl, Val::R(r31, 0), Val::K(10 * c as u32));
+                let lid = self.bin(Op::Iand, sh, Val::K(1023));
+                x = self.add(x, lid);
+            }
+            v.push(x);
+        }
+        self.set(d, &v);
+    }
+
+    /// NumWorkGroups, from preset registers the driver fills.
+    unsafe fn num_workgroups(&mut self, i: &nir_intrinsic_instr) {
+        let d = i.def.index;
+        // Presets the driver fills with the dispatch's group counts.
+        let x = match self.cs.nwg {
+            Some(x) => x,
+            None => {
+                let x = self.cp.alloc_reg();
+                let (y, z) = (self.cp.alloc_reg(), self.cp.alloc_reg());
+                self.cs.presets.extend([(x, 0), (y, 0), (z, 0)]);
+                self.cs.nwg = Some(x);
+                x
+            }
+        };
+        let v: Vec<Val> = (0..3).map(|c| Val::R(self.fixed(x - c), 0)).collect();
+        self.set(d, &v);
+    }
+
+    /// Push constant words, loaded from the job's slot 32.
+    unsafe fn cs_push_constant(&mut self, i: &nir_intrinsic_instr) {
+        let d = i.def.index;
+        let o = self.val(i.get_src(0), 0);
+        let w = self.shr(o, 2);
+        let base_w = (i.base() as u32) / 4;
+        let pbase = SLOT_BASE_WORDS + 32 * SLOT_WORDS;
+        let mut v = vec![];
+        for c in 0..i.def.num_components as u32 {
+            let a = match w {
+                Val::K(x) => {
+                    // Small steps from one base keep the distinct constants few.
+                    let mut r = ((x + base_w) & (SLOT_WORDS - 1)) + c;
+                    let rb = self.konst(pbase);
+                    let mut a = Val::R(rb, 0);
+                    while r >= 4 {
+                        a = self.bin(Op::Iadd, a, Val::K(4));
+                        r -= 4;
+                    }
+                    if r > 0 {
+                        a = self.bin(Op::Iadd, a, Val::K(r));
+                    }
+                    a
+                }
+                _ => {
+                    let w2 = self.add(w, Val::K(base_w + c));
+                    let w2 = self.bin(Op::Iand, w2, Val::K(SLOT_WORDS - 1));
+                    self.add(Val::K(pbase), w2)
+                }
+            };
+            v.push(self.load(a));
+        }
+        self.set(d, &v);
+    }
+
+    /// A shared-memory load or store, in the workgroup's DRAM region.
+    unsafe fn shared_access(&mut self, i: &nir_intrinsic_instr) {
+        let d = i.def.index;
+        let store = i.intrinsic == nir_intrinsic_store_shared;
+        let o = self.val(i.get_src(if store { 1 } else { 0 }), 0);
+        let w = self.shr(o, 2);
+        let base_w = (i.base() as u32) / 4;
+        let n = if store { i.get_src(0).num_components() as u32 } else { i.def.num_components as u32 };
+        let mut v = vec![];
+        for c in 0..n {
+            if store && i.write_mask() & (1 << c) == 0 {
+                continue;
+            }
+            let w2 = self.add(w, Val::K(base_w + c));
+            let w2 = self.mask(w2);
+            let a = self.add(Val::K(SLOT_BASE_WORDS + 33 * SLOT_WORDS), w2);
+            if store {
+                let x = self.val(i.get_src(0), c as u8);
+                self.store(a, x);
+            } else {
+                v.push(self.load(a));
+            }
+        }
+        if !store {
+            self.set(d, &v);
+        }
+    }
+
+    /// An atomic, run one lane at a time under the execution mask.
+    unsafe fn atomic(&mut self, i: &nir_intrinsic_instr) {
+        let d = i.def.index;
+        let ssbo = matches!(i.intrinsic, nir_intrinsic_ssbo_atomic | nir_intrinsic_ssbo_atomic_swap);
+        let a = if ssbo {
+            self.cs.atomics = true;
+            self.word_addr(i.get_src(0), i.get_src(1), 0)
+        } else {
+            let o = self.val(i.get_src(0), 0);
+            let w = self.shr(o, 2);
+            let w = self.add(w, Val::K(i.base() as u32 / 4));
+            let w = self.mask(w);
+            self.add(Val::K(SLOT_BASE_WORDS + 33 * SLOT_WORDS), w)
+        };
+        let s = if ssbo { 2 } else { 1 };
+        let swap = i.atomic_op() == nir_atomic_op_cmpxchg;
+        let a = self.vreg(a);
+        // A swap's sources are the comparator, then the new value.
+        let x = self.val(i.get_src(s + swap as usize), 0);
+        let x = self.vreg(x);
+        let cmp = if swap {
+            let c = self.val(i.get_src(s), 0);
+            Some(self.vreg(c))
+        } else {
+            None
+        };
+        let lt = match i.atomic_op() {
+            nir_atomic_op_imin | nir_atomic_op_imax => Some(Op::Islt),
+            nir_atomic_op_umin | nir_atomic_op_umax => Some(Op::Isltu),
+            _ => None,
+        };
+        let alu = match i.atomic_op() {
+            nir_atomic_op_iadd => Some(Op::Iadd),
+            nir_atomic_op_iand => Some(Op::Iand),
+            nir_atomic_op_ior => Some(Op::Ior),
+            nir_atomic_op_ixor => Some(Op::Ixor),
+            nir_atomic_op_xchg | nir_atomic_op_cmpxchg => None,
+            _ if lt.is_some() => None,
+            _ => {
+                self.fail("unsupported atomic op".into());
+                return;
+            }
+        };
+        let is_min = matches!(i.atomic_op(), nir_atomic_op_imin | nir_atomic_op_umin);
+        // One lane at a time; the same registers in every lane's turn.
+        let (old, new, t, u, w) = (self.sel.fresh(), self.sel.fresh(), self.sel.fresh(), self.sel.fresh(), self.sel.fresh());
+        let r30 = self.fixed(30);
+        // r30 counts across the workgroup's quads; the lane is its low bits.
+        let (m, q) = (self.konst(LANES - 1), self.sel.fresh());
+        self.sel.prog.push(BorgInstr { mnem: Op::Iand.into(), dst: q, srcs: vec![r30, m], swz: vec![0, 0] });
+        for lane in 0..LANES {
+            let l = self.konst(lane);
+            let p = &mut self.sel.prog;
+            let mut op = |mnem: Op, dst: u32, srcs: Vec<(u32, u8)>| {
+                let (srcs, swz) = srcs.into_iter().unzip();
+                p.push(BorgInstr { mnem: mnem.into(), dst, srcs, swz });
+            };
+            op(Op::Iseq, t, vec![(q, 0), (l, 0)]);
+            op(Op::Expush, NO_DST, vec![(t, 0)]);
+            op(Op::Load, old, vec![a]);
+            let v = if let Some(alu) = alu {
+                op(alu, new, vec![(old, 0), x]);
+                (new, 0)
+            } else if let Some(c) = cmp {
+                // old + (old == cmp) * (x - old)
+                op(Op::Iseq, t, vec![(old, 0), c]);
+                op(Op::Isub, u, vec![x, (old, 0)]);
+                op(Op::Imul, w, vec![(t, 0), (u, 0)]);
+                op(Op::Iadd, new, vec![(old, 0), (w, 0)]);
+                (new, 0)
+            } else if let Some(lt) = lt {
+                // max: old + (old < x) * (x - old); min: x + (old < x) * (old - x)
+                let (p0, q0) = if is_min { (x, (old, 0)) } else { ((old, 0), x) };
+                op(lt, t, vec![(old, 0), x]);
+                op(Op::Isub, u, vec![q0, p0]);
+                op(Op::Imul, w, vec![(t, 0), (u, 0)]);
+                op(Op::Iadd, new, vec![p0, (w, 0)]);
+                (new, 0)
+            } else {
+                x
+            };
+            op(Op::Store, NO_DST, vec![a, v]);
+            op(Op::Expop, NO_DST, vec![]);
+        }
+        self.set(d, &[Val::R(old, 0)]);
     }
 }
 
