@@ -17,7 +17,7 @@ impl FragWindow {
         if let Some(&u) = self.by_bits.get(&bits) {
             return u;
         }
-        assert!(self.count < crate::FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
+        assert!(self.count < crate::FRAG_CONST_MAX, "borgc: fragment shader needs more than {} constants", crate::FRAG_CONST_MAX);
         let u = 20 + self.count;
         self.count += 1;
         self.consts.push((u, bits));
