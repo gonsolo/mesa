@@ -5,6 +5,7 @@
 
 mod compute;
 mod config;
+mod consts;
 mod corpus;
 mod emit;
 mod fixed;

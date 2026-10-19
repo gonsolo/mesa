@@ -1,4 +1,5 @@
-use crate::state::{Kv, ShaderState};
+use crate::consts::Kv;
+use crate::state::ShaderState;
 use crate::isel::borg_isel;
 use crate::opt::classify_uniform;
 use std::env;

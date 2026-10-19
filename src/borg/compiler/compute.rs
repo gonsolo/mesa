@@ -3,7 +3,8 @@
 
 use crate::{BorgInstr, NO_DST};
 use crate::isel::resolve_vm;
-use crate::state::{Kv, ShaderState};
+use crate::consts::Kv;
+use crate::state::ShaderState;
 use crate::Ubo;
 use compiler::bindings::*;
 use compiler::nir::AsDef;

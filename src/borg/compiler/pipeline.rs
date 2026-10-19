@@ -103,7 +103,7 @@ impl ShaderState {
             dce(&mut self.sel.prog, &self.out_roots);
             self.spill_to_pressure(limit);
         }
-        if self.cp.vs_window && self.cp.vs_consts.len() > crate::state::DRAW_VS_CONST_WORDS {
+        if self.cp.vs_window && self.cp.vs_consts.len() > crate::consts::DRAW_VS_CONST_WORDS {
             self.pool_vs_consts();
         }
         if self.is_fragment && self.fw.count > 11 {

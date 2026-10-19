@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 use std::collections::HashMap;
-use crate::state::{Kv, ShaderState, VS_VIRTUAL_MAX};
+use crate::consts::{Kv, VS_VIRTUAL_MAX};
+use crate::state::ShaderState;
 use crate::{BorgInstr, Ubo, NO_DST};
 
 const SCRATCH_WORDS: u32 = 16384 * 34;
