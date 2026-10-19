@@ -51,10 +51,11 @@ compile_graphics(struct blob *o, nir_shader *nir, uint32_t vfetch, int32_t out_s
    put(o, buf, len <= BLOB_MAX ? len : 0);
    put32(o, borgc_last_push_window());
    put32(o, borgc_last_spill_slots());
-   uint32_t n = borgc_last_frag_pool(pool, POOL_MAX);
-   put32(o, n);
-   put(o, pool, 4 * n);
-   n = borgc_last_vert_pool(pool, POOL_MAX);
+   /* The pool of the shader's stage, read only for a blob the driver keeps. */
+   uint32_t n = 0;
+   if (len > 0 && len <= BLOB_MAX)
+      n = nir->info.stage == MESA_SHADER_FRAGMENT ? borgc_last_frag_pool(pool, POOL_MAX)
+                                                 : borgc_last_vert_pool(pool, POOL_MAX);
    put32(o, n);
    put(o, pool, 4 * n);
 }
