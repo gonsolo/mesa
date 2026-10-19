@@ -325,8 +325,7 @@ impl ShaderState {
                         // 12.92 is a NIR constant, or a window word once an arithmetic reader gave it one.
                         let is12 = |d: u32| {
                             let bits = self.consts.get(&d).copied().or_else(|| match self.sel.ubo.get(&d) {
-                                Some(Ubo::Uniform(u)) => self.fw.consts.iter()
-                                    .find(|(w, _)| *w == *u as u32).map(|&(_, b)| b),
+                                Some(Ubo::Uniform(_)) => self.bits_of(d),
                                 _ => None,
                             });
                             bits.map_or(false, |b| (f32::from_bits(b) - 12.92).abs() < 0.1)

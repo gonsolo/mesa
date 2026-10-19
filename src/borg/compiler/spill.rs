@@ -85,7 +85,7 @@ impl ShaderState {
             "DDX" | "DDY" | "TEXA" | "BRZ" | "BRNZ" => true,
             "TEX" => {
                 let op = i.srcs.get(2).and_then(|c| match self.sel.ubo.get(c) {
-                    Some(Ubo::Uniform(u)) => self.fw.consts.iter().find(|(w, _)| w == &(*u as u32)).map(|&(_, bits)| (bits >> 16) & 3),
+                    Some(Ubo::Uniform(_)) => self.bits_of(*c).map(|bits| (bits >> 16) & 3),
                     _ => None,
                 });
                 !matches!(op, Some(1 | 3))

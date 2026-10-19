@@ -189,6 +189,18 @@ impl ShaderState {
         self.fw.win(&mut self.sel, bits)
     }
 
+    /// The bits a constant's register holds: a placeholder, a window word or a preset register.
+    pub fn bits_of(&self, v: u32) -> Option<u32> {
+        if let Some(&b) = self.cs.kval.get(&v) {
+            return Some(b);
+        }
+        match self.sel.ubo.get(&v) {
+            Some(&Ubo::Uniform(u)) => self.fw.consts.iter().find(|&&(w, _)| w == u as u32).map(|&(_, b)| b),
+            Some(&Ubo::Fixed(r)) => self.cp.uniforms.iter().find(|&&(x, _)| x == r).map(|&(_, b)| b),
+            _ => None,
+        }
+    }
+
     /// 1.0, built once: FSTEP of r30 in a fragment shader (no window word).
     pub fn one(&mut self) -> u32 {
         if let Some(v) = self.one_vreg {

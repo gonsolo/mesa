@@ -41,7 +41,7 @@ pub struct ComputeState {
     presets: Vec<(u8, u32)>, // registers the driver or the grid split fills
     ws: [u32; 3],
     kreg: HashMap<u32, u32>, // constant bits -> placeholder vreg, placed by pool_consts
-    kval: HashMap<u32, u32>,
+    pub(crate) kval: HashMap<u32, u32>,
     pub pool: Vec<u32>,
     pub err: Option<String>,
 }
@@ -231,7 +231,7 @@ impl ShaderState {
             }
         }
         match self.sel.ubo.get(&v) {
-            Some(Ubo::Fixed(r)) => self.cp.uniforms.iter().find(|(x, _)| x == r).map(|&(_, b)| b),
+            Some(Ubo::Fixed(_)) => self.bits_of(v),
             _ => None,
         }
     }
