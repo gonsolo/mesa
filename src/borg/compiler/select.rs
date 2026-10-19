@@ -444,485 +444,524 @@ impl ShaderState {
             self.compute_intrinsic(intr);
             return;
         }
-        let deriv = match intr.intrinsic {
-            nir_intrinsic_ddx | nir_intrinsic_ddx_coarse | nir_intrinsic_ddx_fine => Some(Op::Ddx),
-            nir_intrinsic_ddy | nir_intrinsic_ddy_coarse | nir_intrinsic_ddy_fine => Some(Op::Ddy),
-            _ => None,
+        match intr.intrinsic {
+            nir_intrinsic_ddx | nir_intrinsic_ddx_coarse | nir_intrinsic_ddx_fine => self.derivative(intr, Op::Ddx),
+            nir_intrinsic_ddy | nir_intrinsic_ddy_coarse | nir_intrinsic_ddy_fine => self.derivative(intr, Op::Ddy),
+            nir_intrinsic_load_input | nir_intrinsic_load_point_coord if self.stage != Stage::Vertex => self.frag_input(intr),
+            nir_intrinsic_load_push_constant => self.push_constant(intr),
+            nir_intrinsic_vulkan_resource_index => {
+                self.res_binding.insert(intr.def.index, intr.get_const_index(NIR_INTRINSIC_BINDING));
+            }
+            nir_intrinsic_load_vulkan_descriptor => {
+                self.vert.descriptor_defs.insert(intr.def.index);
+                if let Some(&b) = self.res_binding.get(&intr.get_src(0).as_def().index) {
+                    self.res_binding.insert(intr.def.index, b);
+                }
+            }
+            nir_intrinsic_load_ssbo | nir_intrinsic_store_ssbo => self.ssbo(intr),
+            nir_intrinsic_load_frag_coord if self.stage == Stage::Fragment => self.frag_coord(intr),
+            nir_intrinsic_load_vertex_id => {
+                self.sel.ubo.insert(intr.def.index, Ubo::Fixed(30));
+                self.vert.vertex_id_def = Some(intr.def.index);
+            }
+            nir_intrinsic_load_instance_id => {
+                self.sel.ubo.insert(intr.def.index, Ubo::Fixed(31));
+            }
+            nir_intrinsic_load_input if self.stage == Stage::Vertex && self.flags.fetching() => self.vertex_fetch(intr),
+            nir_intrinsic_load_ubo => self.uniform_load(intr),
+            nir_intrinsic_load_input if self.stage == Stage::Vertex => self.uniform_load(intr),
+            nir_intrinsic_store_output => self.store_output(intr),
+            nir_intrinsic_load_output
+                if self.stage == Stage::Fragment && intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) >> 14 & 1 != 0 =>
+            {
+                self.dst_read(intr)
+            }
+            nir_intrinsic_load_output => {
+                let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
+                match self.outs.stores.get(&loc) {
+                    Some(v) => { self.sel.vec_map.insert(intr.def.index, v.clone()); }
+                    None => eprintln!(
+                        "borgc: WARNING load_output of location {loc}, never stored earlier \
+                         in program order -- dropped (draw mode resolves it from the store, \
+                         not a real load; see decompose_vertex_offset's neighbor)"
+                    ),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A blend's read of the destination: the colour attachment's current value at this pixel.
+    unsafe fn dst_read(&mut self, intr: &nir_intrinsic_instr) {
+        let desc = if self.flags.packed() && !self.flags.multi_target() {
+            Some(packed_layout(self.flags))
+        } else if self.flags.r8_unorm() {
+            Some((0, vec![(0usize, 0u32, 8u32)]))
+        } else {
+            None
         };
-        if let Some(mnem) = deriv {
-            let src = intr.srcs_as_slice()[0].as_def().index;
-            let n = intr.def.num_components as usize;
-            let raw: Vec<u32> = (0..n)
-                .map(|c| {
-                    let (sd, sc) = resolve_vm(&self.sel.vec_map, src, c as u8);
-                    let v = self.sel.next_vreg;
-                    self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: mnem.into(), dst: v, srcs: vec![sd], swz: vec![sc] });
-                    v
-                })
-                .collect();
-            let comps: Vec<(u32, u8)> = raw.into_iter().map(|v| (v, 0u8)).collect();
-            self.sel.vec_map.insert(intr.def.index, comps);
-        } else if (intr.intrinsic == nir_intrinsic_load_input || intr.intrinsic == nir_intrinsic_load_point_coord) && self.stage != Stage::Vertex {
-            let is_pc = intr.intrinsic == nir_intrinsic_load_point_coord;
-            let loc = if is_pc { 25 } else { intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F };
-            let base_index = if loc == 25 { self.flags.pntc_base() } else { 4 * loc.wrapping_sub(VARYING_SLOT_VAR0) + intr.get_const_index(NIR_INTRINSIC_COMPONENT) as u32 };
-            let bary = [5u8, 6, 7].map(|r| {
-                let v = self.sel.next_vreg; self.sel.next_vreg += 1;
-                self.sel.ubo.insert(v, Ubo::Fixed(r));
-                self.frag.per_pixel_fixed.insert(v);
+        match desc {
+            Some((kind, layout)) if layout.iter().all(|&(_, sh, b)| sh + b <= 32) => {
+                let w = self.sel.op0(Op::Tld, vec![]);
+                let zero = self.sel.op0(Op::Isub, vec![w, w]);
+                let mut rgba: [Option<u32>; 4] = [None; 4];
+                for &(comp, sh, bits) in layout.iter() {
+                    let mut f = w;
+                    if sh != 0 {
+                        let s = self.konst(sh);
+                        f = self.sel.op0(Op::Isrl, vec![f, s]);
+                    }
+                    if bits < 32 && (kind != 1) && sh + bits < 32 {
+                        let m = self.konst((1u32 << bits) - 1);
+                        f = self.sel.op0(Op::Iand, vec![f, m]);
+                    }
+                    let v = match kind {
+                        2 if comp != 3 => {
+                            // sRGB to linear: a fetch from the driver's 256-entry table (slot 41).
+                            let ctl = self.konst((1 << 16) | (128 + 41));
+                            let t = self.sel.op0(Op::Tex, vec![f, zero, ctl]);
+                            self.tex_dsts.insert(t);
+                            self.sel.op0(Op::Ior, vec![t, t])
+                        }
+                        0 | 2 => {
+                            let i = self.sel.op0(Op::I2f, vec![f]);
+                            let inv = self.konst((1.0f32 / ((1u64 << bits) - 1) as f32).to_bits());
+                            self.sel.op0(Op::Fmul, vec![i, inv])
+                        }
+                        1 => {
+                            // Sign-extend the field from the word itself.
+                            let up = self.konst(32 - bits - sh);
+                            let a = if 32 - bits - sh != 0 { self.sel.op0(Op::Ishl, vec![w, up]) } else { w };
+                            let dn = self.konst(32 - bits);
+                            let s = self.sel.op0(Op::Ishr, vec![a, dn]);
+                            let i = self.sel.op0(Op::I2f, vec![s]);
+                            let inv = self.konst((1.0f32 / ((1u64 << (bits - 1)) - 1) as f32).to_bits());
+                            self.sel.op0(Op::Fmul, vec![i, inv])
+                        }
+                        _ => f,
+                    };
+                    rgba[comp] = Some(v);
+                }
+                let one = self.konst(1.0f32.to_bits());
+                let comp0 = intr.get_const_index(NIR_INTRINSIC_COMPONENT) as usize;
+                let nc = intr.def.num_components as usize;
+                let comps: Vec<(u32, u8)> = (0..nc).map(|c| {
+                    let c = c + comp0;
+                    (rgba[c].unwrap_or(if c == 3 { one } else { zero }), 0u8)
+                }).collect();
+                self.sel.vec_map.insert(intr.def.index, comps);
+            }
+            _ if self.flags.half() => {
+                let nch = self.flags.half_channels();
+                let (rgba, zero) = if let Some(c) = self.frag.dst_half { c } else {
+                    let w0 = self.sel.op0(Op::Tld, vec![]);
+                    let w1 = if nch > 2 { self.sel.op0(Mnem::Tld1, vec![]) } else { w0 };
+                    let zero = self.sel.op0(Op::Isub, vec![w0, w0]);
+                    let mut rgba: [Option<u32>; 4] = [None; 4];
+                    for k in 0..nch {
+                        let mut h = if k < 2 { w0 } else { w1 };
+                        if k % 2 == 1 {
+                            let c16 = self.konst(16);
+                            h = self.sel.op0(Op::Isrl, vec![h, c16]);
+                        }
+                        rgba[k] = Some(self.sel.op0(Op::H2f, vec![h]));
+                    }
+                    self.frag.dst_half = Some((rgba, zero));
+                    (rgba, zero)
+                };
+                let one = self.konst(1.0f32.to_bits());
+                let comp0 = intr.get_const_index(NIR_INTRINSIC_COMPONENT) as usize;
+                let nc = intr.def.num_components as usize;
+                let comps: Vec<(u32, u8)> = (0..nc).map(|c| {
+                    let c = c + comp0;
+                    (rgba[c].unwrap_or(if c == 3 { one } else { zero }), 0u8)
+                }).collect();
+                self.sel.vec_map.insert(intr.def.index, comps);
+            }
+            _ => eprintln!("borgc: ERROR blending on this attachment format is not implemented"),
+        }
+    }
+
+    /// Derivatives across the quad, one instruction per component.
+    unsafe fn derivative(&mut self, intr: &nir_intrinsic_instr, mnem: Op) {
+        let src = intr.srcs_as_slice()[0].as_def().index;
+        let n = intr.def.num_components as usize;
+        let raw: Vec<u32> = (0..n)
+            .map(|c| {
+                let (sd, sc) = resolve_vm(&self.sel.vec_map, src, c as u8);
+                let v = self.sel.next_vreg;
+                self.sel.next_vreg += 1;
+                self.sel.prog.push(BorgInstr { mnem: mnem.into(), dst: v, srcs: vec![sd], swz: vec![sc] });
                 v
-            });
+            })
+            .collect();
+        let comps: Vec<(u32, u8)> = raw.into_iter().map(|v| (v, 0u8)).collect();
+        self.sel.vec_map.insert(intr.def.index, comps);
+    }
+
+    /// A fragment input: a varying interpolated with the barycentrics, or gl_PointCoord.
+    unsafe fn frag_input(&mut self, intr: &nir_intrinsic_instr) {
+        let is_pc = intr.intrinsic == nir_intrinsic_load_point_coord;
+        let loc = if is_pc { 25 } else { intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F };
+        let base_index = if loc == 25 { self.flags.pntc_base() } else { 4 * loc.wrapping_sub(VARYING_SLOT_VAR0) + intr.get_const_index(NIR_INTRINSIC_COMPONENT) as u32 };
+        let bary = [5u8, 6, 7].map(|r| {
+            let v = self.sel.next_vreg; self.sel.next_vreg += 1;
+            self.sel.ubo.insert(v, Ubo::Fixed(r));
+            self.frag.per_pixel_fixed.insert(v);
+            v
+        });
+        let n = intr.def.num_components as usize;
+        // Integer varyings are flat (Vulkan): the provoking vertex's bits, not a blend.
+        let dtype = if is_pc { 0x80 } else { intr.get_const_index(NIR_INTRINSIC_DEST_TYPE) };
+        let flat = dtype != 0 && dtype & 0x80 == 0;
+        let comps: Vec<(u32, u8)> = (0..n)
+            .map(|c| {
+                let fattr_rd = self.sel.next_vreg; self.sel.next_vreg += 1;
+                self.fattr_dsts.insert(fattr_rd);
+                self.sel.prog.push(BorgInstr {
+                    mnem: Op::Fattr.into(), dst: fattr_rd, srcs: vec![],
+                    swz: vec![(base_index + c as u32) as u8],
+                });
+                if flat {
+                    let res = self.sel.next_vreg; self.sel.next_vreg += 1;
+                    self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: res, srcs: vec![fattr_rd, fattr_rd], swz: vec![0, 0] });
+                    return (res, 0u8);
+                }
+                let t0 = self.sel.next_vreg; self.sel.next_vreg += 1;
+                self.sel.prog.push(BorgInstr { mnem: Op::Fmul.into(), dst: t0, srcs: vec![bary[0], fattr_rd], swz: vec![0, 0] });
+                let t1 = self.sel.next_vreg; self.sel.next_vreg += 1;
+                self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: t1, srcs: vec![bary[1], fattr_rd, t0], swz: vec![0, 1, 0] });
+                let res = self.sel.next_vreg; self.sel.next_vreg += 1;
+                self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: res, srcs: vec![bary[2], fattr_rd, t1], swz: vec![0, 2, 0] });
+                (res, 0u8)
+            })
+            .collect();
+        self.sel.vec_map.insert(intr.def.index, comps);
+    }
+
+    /// Push constants, from the uniform window or, with a buffer in the shader, the heap window.
+    unsafe fn push_constant(&mut self, intr: &nir_intrinsic_instr) {
+        let dyn_off = intr.get_src(0).comp_as_uint(0);
+        if let Some(dyn_off) = dyn_off {
+            let base = intr.base() + dyn_off as i32 + if self.frag.push_window { PUSH_WINDOW_WORDS as i32 * 4 } else { 0 };
             let n = intr.def.num_components as usize;
-            // Integer varyings are flat (Vulkan): the provoking vertex's bits, not a blend.
-            let dtype = if is_pc { 0x80 } else { intr.get_const_index(NIR_INTRINSIC_DEST_TYPE) };
-            let flat = dtype != 0 && dtype & 0x80 == 0;
             let comps: Vec<(u32, u8)> = (0..n)
                 .map(|c| {
-                    let fattr_rd = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.fattr_dsts.insert(fattr_rd);
+                    let byte_off = base + 4 * (c as i32);
+                    assert_eq!(byte_off % 4, 0,
+                        "push constant field at byte {byte_off} is not word-aligned");
+                    let word_idx = (byte_off / 4) as u32;
+                    // A window word per run (a pinned GPR is clobbered by the fragment pass).
+                    let idx_reg = match self.push_const_reg.get(&word_idx) {
+                        Some(&r) => r,
+                        None => {
+                            let r = self.konst(word_idx);
+                            self.push_const_reg.insert(word_idx, r);
+                            r
+                        }
+                    };
+                    let dst = self.sel.next_vreg;
+                    self.sel.next_vreg += 1;
                     self.sel.prog.push(BorgInstr {
-                        mnem: Op::Fattr.into(), dst: fattr_rd, srcs: vec![],
-                        swz: vec![(base_index + c as u32) as u8],
+                        mnem: Op::Load.into(), dst, srcs: vec![idx_reg], swz: vec![0],
                     });
-                    if flat {
-                        let res = self.sel.next_vreg; self.sel.next_vreg += 1;
-                        self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: res, srcs: vec![fattr_rd, fattr_rd], swz: vec![0, 0] });
-                        return (res, 0u8);
-                    }
-                    let t0 = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: Op::Fmul.into(), dst: t0, srcs: vec![bary[0], fattr_rd], swz: vec![0, 0] });
-                    let t1 = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: t1, srcs: vec![bary[1], fattr_rd, t0], swz: vec![0, 1, 0] });
-                    let res = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: res, srcs: vec![bary[2], fattr_rd, t1], swz: vec![0, 2, 0] });
-                    (res, 0u8)
+                    (dst, 0u8)
                 })
                 .collect();
             self.sel.vec_map.insert(intr.def.index, comps);
-        } else if intr.intrinsic == nir_intrinsic_load_push_constant {
-            let dyn_off = intr.get_src(0).comp_as_uint(0);
-            if let Some(dyn_off) = dyn_off {
-                let base = intr.base() + dyn_off as i32 + if self.frag.push_window { PUSH_WINDOW_WORDS as i32 * 4 } else { 0 };
-                let n = intr.def.num_components as usize;
-                let comps: Vec<(u32, u8)> = (0..n)
-                    .map(|c| {
-                        let byte_off = base + 4 * (c as i32);
-                        assert_eq!(byte_off % 4, 0,
-                            "push constant field at byte {byte_off} is not word-aligned");
-                        let word_idx = (byte_off / 4) as u32;
-                        // A window word per run (a pinned GPR is clobbered by the fragment pass).
-                        let idx_reg = match self.push_const_reg.get(&word_idx) {
-                            Some(&r) => r,
-                            None => {
-                                let r = self.konst(word_idx);
-                                self.push_const_reg.insert(word_idx, r);
-                                r
-                            }
-                        };
-                        let dst = self.sel.next_vreg;
-                        self.sel.next_vreg += 1;
-                        self.sel.prog.push(BorgInstr {
-                            mnem: Op::Load.into(), dst, srcs: vec![idx_reg], swz: vec![0],
-                        });
-                        (dst, 0u8)
-                    })
-                    .collect();
-                self.sel.vec_map.insert(intr.def.index, comps);
-            } else if matches!(self.stage, Stage::Vertex | Stage::Fragment) {
-                                let o = resolve_vm(&self.sel.vec_map, intr.get_src(0).as_def().index, 0);
+        } else if matches!(self.stage, Stage::Vertex | Stage::Fragment) {
+                            let o = resolve_vm(&self.sel.vec_map, intr.get_src(0).as_def().index, 0);
+            let two = self.konst(2);
+            let w = self.sel.next_vreg; self.sel.next_vreg += 1;
+            self.sel.prog.push(BorgInstr { mnem: Op::Isrl.into(), dst: w, srcs: vec![o.0, two], swz: vec![o.1, 0] });
+            let base_word = (intr.base() / 4) as u32 + if self.frag.push_window { PUSH_WINDOW_WORDS } else { 0 };
+            let comps: Vec<(u32, u8)> = (0..intr.def.num_components as u32)
+                .map(|c| {
+                    let k = self.konst(base_word + c);
+                    let addr = self.sel.next_vreg; self.sel.next_vreg += 1;
+                    self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: addr, srcs: vec![w, k], swz: vec![0, 0] });
+                    let dst = self.sel.next_vreg; self.sel.next_vreg += 1;
+                    self.sel.prog.push(BorgInstr { mnem: Op::Load.into(), dst, srcs: vec![addr], swz: vec![0] });
+                    (dst, 0u8)
+                })
+                .collect();
+            self.sel.vec_map.insert(intr.def.index, comps);
+        } else {
+            eprintln!(
+                "borgc: WARNING push constant at base={} read with a \
+                 non-constant dynamic offset -- not supported, dropped",
+                intr.base()
+            );
+        }
+    }
+
+    /// A storage buffer load or store.
+    unsafe fn ssbo(&mut self, intr: &nir_intrinsic_instr) {
+        const SSBO_SLOT_WORDS: u32 = 16384;
+        let store = intr.intrinsic == nir_intrinsic_store_ssbo;
+        let (bsrc, osrc) = if store { (1, 2) } else { (0, 1) };
+        let mut bd = resolve_vm(&self.sel.vec_map, intr.get_src(bsrc).as_def().index, 0).0;
+        for _ in 0..8 {
+            if self.res_binding.contains_key(&bd) { break; }
+            match self.prod.get(&bd) { Some((_, srcs)) if !srcs.is_empty() => bd = resolve_vm(&self.sel.vec_map, srcs[0].0, 0).0, _ => break }
+        }
+        let binding = self.res_binding.get(&bd).copied().unwrap_or(0);
+        let slot = SSBO_SLOT_WORDS * (1 + binding);
+        // A register holding 0, to copy window words through (an instruction reads one).
+        let f = self.sel.next_vreg; self.sel.next_vreg += 1;
+        self.sel.ubo.insert(f, Ubo::Fixed(30));
+        let zero = self.sel.next_vreg; self.sel.next_vreg += 1;
+        self.sel.prog.push(BorgInstr { mnem: Op::Isub.into(), dst: zero, srcs: vec![f, f], swz: vec![0, 0] });
+        // The descriptor's own offset component (a dynamic buffer's) is the window base: 0.
+        let off_is_descriptor = self.vert.descriptor_defs.contains(&resolve_vm(&self.sel.vec_map, intr.get_src(osrc).as_def().index, 0).0);
+        let word = match intr.get_src(osrc).comp_as_uint(0) {
+            Some(_) => None,
+            None if off_is_descriptor => None,
+            None => {
+                let o = resolve_vm(&self.sel.vec_map, intr.get_src(osrc).as_def().index, 0);
                 let two = self.konst(2);
                 let w = self.sel.next_vreg; self.sel.next_vreg += 1;
                 self.sel.prog.push(BorgInstr { mnem: Op::Isrl.into(), dst: w, srcs: vec![o.0, two], swz: vec![o.1, 0] });
-                let base_word = (intr.base() / 4) as u32 + if self.frag.push_window { PUSH_WINDOW_WORDS } else { 0 };
-                let comps: Vec<(u32, u8)> = (0..intr.def.num_components as u32)
-                    .map(|c| {
-                        let k = self.konst(base_word + c);
-                        let addr = self.sel.next_vreg; self.sel.next_vreg += 1;
-                        self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: addr, srcs: vec![w, k], swz: vec![0, 0] });
-                        let dst = self.sel.next_vreg; self.sel.next_vreg += 1;
-                        self.sel.prog.push(BorgInstr { mnem: Op::Load.into(), dst, srcs: vec![addr], swz: vec![0] });
-                        (dst, 0u8)
-                    })
-                    .collect();
-                self.sel.vec_map.insert(intr.def.index, comps);
+                Some(w)
+            }
+        };
+        let const_word = intr.get_src(osrc).comp_as_uint(0).map(|o| o as u32 / 4);
+        let n = if store { intr.get_src(0).num_components() as usize } else { intr.def.num_components as usize };
+        let mut comps = Vec::with_capacity(n);
+        for c in 0..n {
+            if store && intr.write_mask() & (1 << c) == 0 {
+                continue;
+            }
+            let k = self.konst(slot + const_word.unwrap_or(0) + c as u32);
+            let addr = self.sel.next_vreg; self.sel.next_vreg += 1;
+            self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: addr, srcs: vec![word.unwrap_or(zero), k], swz: vec![0, 0] });
+            if store {
+                let src = intr.get_src(0).as_def().index;
+                let d = resolve_vm(&self.sel.vec_map, src, c as u8);
+                let val = match self.consts.get(&d.0) {
+                    Some(&bits) if !self.sel.vec_map.contains_key(&d.0) => {
+                        let kv = self.konst(bits);
+                        let t = self.sel.next_vreg; self.sel.next_vreg += 1;
+                        self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: t, srcs: vec![zero, kv], swz: vec![0, 0] });
+                        (t, 0u8)
+                    }
+                    _ => d,
+                };
+                self.sel.prog.push(BorgInstr { mnem: Op::Store.into(), dst: NO_DST, srcs: vec![addr, val.0], swz: vec![0, val.1] });
             } else {
-                eprintln!(
-                    "borgc: WARNING push constant at base={} read with a \
-                     non-constant dynamic offset -- not supported, dropped",
-                    intr.base()
-                );
+                let dst = self.sel.next_vreg; self.sel.next_vreg += 1;
+                self.sel.prog.push(BorgInstr { mnem: Op::Load.into(), dst, srcs: vec![addr], swz: vec![0] });
+                comps.push((dst, 0u8));
             }
         }
-        else if intr.intrinsic == nir_intrinsic_vulkan_resource_index {
-            self.res_binding.insert(intr.def.index, intr.get_const_index(NIR_INTRINSIC_BINDING));
-        } else if intr.intrinsic == nir_intrinsic_load_vulkan_descriptor {
-            self.vert.descriptor_defs.insert(intr.def.index);
-            if let Some(&b) = self.res_binding.get(&intr.get_src(0).as_def().index) {
-                self.res_binding.insert(intr.def.index, b);
+        if !store {
+            self.sel.vec_map.insert(intr.def.index, comps);
+        }
+    }
+
+    /// gl_FragCoord.
+    unsafe fn frag_coord(&mut self, intr: &nir_intrinsic_instr) {
+        let comps: Vec<(u32, u8)> = [30u8, 31, 29, 8]
+            .iter()
+            .map(|&r| {
+                let v = self.sel.next_vreg;
+                self.sel.next_vreg += 1;
+                self.sel.ubo.insert(v, Ubo::Fixed(r));
+                self.frag.per_pixel_fixed.insert(v);
+                (v, 0u8)
+            })
+            .collect();
+        self.frag.coord_w = true;
+        self.sel.vec_map.insert(intr.def.index, comps);
+    }
+
+    /// A vertex attribute fetched with TEX from its binding.
+    unsafe fn vertex_fetch(&mut self, intr: &nir_intrinsic_instr) {
+        const VERT_ATTRIB_GENERIC0: u32 = 15;
+        let loc = (intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F)
+            .wrapping_sub(VERT_ATTRIB_GENERIC0);
+        let n = intr.def.num_components as usize;
+        let ctl_bits = (1u32 << 16) | (128 + loc);
+        let twelve = self.konst(12);
+        let ctl = self.konst(ctl_bits);
+        // The index register: r30 (VertexIndex) or r31 (InstanceIndex).
+        let idx_reg = if loc < 16 && self.flags.instanced(loc) { 31 } else { 30 };
+        let idx = self.sel.next_vreg; self.sel.next_vreg += 1;
+        self.sel.ubo.insert(idx, Ubo::Fixed(idx_reg));
+        // The element index i is texel (i & 4095, i >> 12) of a 4096-wide image.
+        let ty = self.sel.next_vreg; self.sel.next_vreg += 1;
+        self.sel.prog.push(BorgInstr { mnem: Op::Isrl.into(), dst: ty, srcs: vec![idx, twelve], swz: vec![0, 0] });
+        let hi = self.sel.next_vreg; self.sel.next_vreg += 1;
+        self.sel.prog.push(BorgInstr { mnem: Op::Ishl.into(), dst: hi, srcs: vec![ty, twelve], swz: vec![0, 0] });
+        let tx = self.sel.next_vreg; self.sel.next_vreg += 1;
+        self.sel.prog.push(BorgInstr { mnem: Op::Isub.into(), dst: tx, srcs: vec![idx, hi], swz: vec![0, 0] });
+        let tex_v = self.sel.next_vreg; self.sel.next_vreg += 1;
+        self.sel.prog.push(BorgInstr { mnem: Op::Tex.into(), dst: tex_v, srcs: vec![tx, ty, ctl], swz: vec![0, 0, 0] });
+        self.tex_dsts.insert(tex_v);
+        let comp0 = intr.get_const_index(NIR_INTRINSIC_COMPONENT) as u8;
+        let mut comps = Vec::with_capacity(n);
+        for c in 0..n {
+            let m = self.sel.next_vreg; self.sel.next_vreg += 1;
+            self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: m, srcs: vec![tex_v, tex_v],
+                                  swz: vec![comp0 + c as u8, comp0 + c as u8] });
+            comps.push((m, 0u8));
+        }
+        self.sel.vec_map.insert(intr.def.index, comps);
+    }
+
+    /// A uniform buffer load, or a vertex input pulled from the vertex buffer.
+    unsafe fn uniform_load(&mut self, intr: &nir_intrinsic_instr) {
+        let is_input = intr.intrinsic == nir_intrinsic_load_input;
+        let offset_def = if is_input { 0 } else { intr.get_src(1).as_def().index };
+        let n = intr.def.num_components as usize;
+        const VERT_ATTRIB_GENERIC0: u32 = 15;
+        let input_slot = if is_input {
+            let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
+            Some(loc.wrapping_sub(VERT_ATTRIB_GENERIC0))
+        } else {
+            None
+        };
+        let (base_words, stride_words) = match input_slot
+            .map(|l| Some((16 + 144 * l as i32, 4i32)))
+            .unwrap_or_else(|| decompose_vertex_offset(
+                &self.sel.vec_map, &self.prod, &self.consts, &self.vert.descriptor_defs,
+                self.vert.vertex_id_def.unwrap_or(u32::MAX), offset_def,
+            )) {
+            Some(bs) => bs,
+            None => {
+                eprintln!(
+                    "borgc: WARNING load_ubo offset (def {offset_def}) is \
+                     not a recognized draw-mode address shape -- dropped"
+                );
+                (-1, 0)
             }
-        } else if intr.intrinsic == nir_intrinsic_load_ssbo
-                                || intr.intrinsic == nir_intrinsic_store_ssbo {
-            const SSBO_SLOT_WORDS: u32 = 16384;
-            let store = intr.intrinsic == nir_intrinsic_store_ssbo;
-            let (bsrc, osrc) = if store { (1, 2) } else { (0, 1) };
-            let mut bd = resolve_vm(&self.sel.vec_map, intr.get_src(bsrc).as_def().index, 0).0;
+        };
+        let base_words = if base_words >= 0 && !is_input {
+            let mut d = resolve_vm(&self.sel.vec_map, intr.get_src(0).as_def().index, 0).0;
             for _ in 0..8 {
-                if self.res_binding.contains_key(&bd) { break; }
-                match self.prod.get(&bd) { Some((_, srcs)) if !srcs.is_empty() => bd = resolve_vm(&self.sel.vec_map, srcs[0].0, 0).0, _ => break }
+                if self.res_binding.contains_key(&d) { break; }
+                match self.prod.get(&d) { Some((_, srcs)) if !srcs.is_empty() => d = resolve_vm(&self.sel.vec_map, srcs[0].0, 0).0, _ => break }
             }
-            let binding = self.res_binding.get(&bd).copied().unwrap_or(0);
-            let slot = SSBO_SLOT_WORDS * (1 + binding);
-            // A register holding 0, to copy window words through (an instruction reads one).
-            let f = self.sel.next_vreg; self.sel.next_vreg += 1;
-            self.sel.ubo.insert(f, Ubo::Fixed(30));
-            let zero = self.sel.next_vreg; self.sel.next_vreg += 1;
-            self.sel.prog.push(BorgInstr { mnem: Op::Isub.into(), dst: zero, srcs: vec![f, f], swz: vec![0, 0] });
-            // The descriptor's own offset component (a dynamic buffer's) is the window base: 0.
-            let off_is_descriptor = self.vert.descriptor_defs.contains(&resolve_vm(&self.sel.vec_map, intr.get_src(osrc).as_def().index, 0).0);
-            let word = match intr.get_src(osrc).comp_as_uint(0) {
-                Some(_) => None,
-                None if off_is_descriptor => None,
-                None => {
-                    let o = resolve_vm(&self.sel.vec_map, intr.get_src(osrc).as_def().index, 0);
-                    let two = self.konst(2);
-                    let w = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: Op::Isrl.into(), dst: w, srcs: vec![o.0, two], swz: vec![o.1, 0] });
-                    Some(w)
+            let b = self.res_binding.get(&d).copied().unwrap_or(0);
+            if b == 0 { base_words } else { base_words + 16384 * (1 + b as i32) }
+        } else {
+            base_words
+        };
+        if base_words >= 0 {
+            let addr = match (stride_words, self.const_addr_chain) {
+                (0, Some((next, a))) if next == base_words => a,
+                (0, _) if self.stage != Stage::Vertex && base_words > 0 => self.konst(base_words as u32),
+                (0, _) if self.stage != Stage::Vertex => self.konst(base_words as u32),
+                // A single constant word: the address is a window word, no chain.
+                (0, _) if n == 1 => self.konst(base_words as u32),
+                _ => {
+                    let vid = match self.vert.vertex_id_def {
+                        Some(v) => v,
+                        None => {
+                            let v = self.sel.next_vreg; self.sel.next_vreg += 1;
+                            self.sel.ubo.insert(v, Ubo::Fixed(30));
+                            v
+                        }
+                    };
+                    let stride_v = self.konst(stride_words as u32);
+                    let tmp = self.sel.next_vreg; self.sel.next_vreg += 1;
+                    self.sel.prog.push(BorgInstr { mnem: Op::Imul.into(), dst: tmp, srcs: vec![vid, stride_v], swz: vec![0, 0] });
+                    let base_v = self.konst(base_words as u32);
+                    let a = self.sel.next_vreg; self.sel.next_vreg += 1;
+                    self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: a, srcs: vec![tmp, base_v], swz: vec![0, 0] });
+                    a
                 }
             };
-            let const_word = intr.get_src(osrc).comp_as_uint(0).map(|o| o as u32 / 4);
-            let n = if store { intr.get_src(0).num_components() as usize } else { intr.def.num_components as usize };
-            let mut comps = Vec::with_capacity(n);
-            for c in 0..n {
-                if store && intr.write_mask() & (1 << c) == 0 {
-                    continue;
-                }
-                let k = self.konst(slot + const_word.unwrap_or(0) + c as u32);
-                let addr = self.sel.next_vreg; self.sel.next_vreg += 1;
-                self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: addr, srcs: vec![word.unwrap_or(zero), k], swz: vec![0, 0] });
-                if store {
-                    let src = intr.get_src(0).as_def().index;
-                    let d = resolve_vm(&self.sel.vec_map, src, c as u8);
-                    let val = match self.consts.get(&d.0) {
-                        Some(&bits) if !self.sel.vec_map.contains_key(&d.0) => {
-                            let kv = self.konst(bits);
-                            let t = self.sel.next_vreg; self.sel.next_vreg += 1;
-                            self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: t, srcs: vec![zero, kv], swz: vec![0, 0] });
-                            (t, 0u8)
-                        }
-                        _ => d,
-                    };
-                    self.sel.prog.push(BorgInstr { mnem: Op::Store.into(), dst: NO_DST, srcs: vec![addr, val.0], swz: vec![0, val.1] });
-                } else {
+            let mut cur = addr;
+            let comps: Vec<(u32, u8)> = (0..n)
+                .map(|c| {
                     let dst = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: Op::Load.into(), dst, srcs: vec![addr], swz: vec![0] });
-                    comps.push((dst, 0u8));
-                }
-            }
-            if !store {
-                self.sel.vec_map.insert(intr.def.index, comps);
-            }
-        } else if self.stage == Stage::Fragment && intr.intrinsic == nir_intrinsic_load_frag_coord {
-            let comps: Vec<(u32, u8)> = [30u8, 31, 29, 8]
-                .iter()
-                .map(|&r| {
-                    let v = self.sel.next_vreg;
-                    self.sel.next_vreg += 1;
-                    self.sel.ubo.insert(v, Ubo::Fixed(r));
-                    self.frag.per_pixel_fixed.insert(v);
-                    (v, 0u8)
+                    self.sel.prog.push(BorgInstr { mnem: Op::Load.into(), dst, srcs: vec![cur], swz: vec![0] });
+                    if c + 1 < n {
+                        let one_v = self.konst(1);
+                        let next_a = self.sel.next_vreg; self.sel.next_vreg += 1;
+                        self.sel.prog.push(BorgInstr {
+                            mnem: Op::Iadd.into(), dst: next_a, srcs: vec![cur, one_v], swz: vec![0, 0],
+                        });
+                        cur = next_a;
+                    }
+                    (dst, 0u8)
                 })
                 .collect();
-            self.frag.coord_w = true;
-            self.sel.vec_map.insert(intr.def.index, comps);
-        } else if intr.intrinsic == nir_intrinsic_load_vertex_id {
-            self.sel.ubo.insert(intr.def.index, Ubo::Fixed(30));
-            self.vert.vertex_id_def = Some(intr.def.index);
-        } else if intr.intrinsic == nir_intrinsic_load_instance_id {
-            self.sel.ubo.insert(intr.def.index, Ubo::Fixed(31));
-        } else if self.stage == Stage::Vertex && self.flags.fetching()
-                  && intr.intrinsic == nir_intrinsic_load_input {
-            const VERT_ATTRIB_GENERIC0: u32 = 15;
-            let loc = (intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F)
-                .wrapping_sub(VERT_ATTRIB_GENERIC0);
-            let n = intr.def.num_components as usize;
-            let ctl_bits = (1u32 << 16) | (128 + loc);
-            let twelve = self.konst(12);
-            let ctl = self.konst(ctl_bits);
-            // The index register: r30 (VertexIndex) or r31 (InstanceIndex).
-            let idx_reg = if loc < 16 && self.flags.instanced(loc) { 31 } else { 30 };
-            let idx = self.sel.next_vreg; self.sel.next_vreg += 1;
-            self.sel.ubo.insert(idx, Ubo::Fixed(idx_reg));
-            // The element index i is texel (i & 4095, i >> 12) of a 4096-wide image.
-            let ty = self.sel.next_vreg; self.sel.next_vreg += 1;
-            self.sel.prog.push(BorgInstr { mnem: Op::Isrl.into(), dst: ty, srcs: vec![idx, twelve], swz: vec![0, 0] });
-            let hi = self.sel.next_vreg; self.sel.next_vreg += 1;
-            self.sel.prog.push(BorgInstr { mnem: Op::Ishl.into(), dst: hi, srcs: vec![ty, twelve], swz: vec![0, 0] });
-            let tx = self.sel.next_vreg; self.sel.next_vreg += 1;
-            self.sel.prog.push(BorgInstr { mnem: Op::Isub.into(), dst: tx, srcs: vec![idx, hi], swz: vec![0, 0] });
-            let tex_v = self.sel.next_vreg; self.sel.next_vreg += 1;
-            self.sel.prog.push(BorgInstr { mnem: Op::Tex.into(), dst: tex_v, srcs: vec![tx, ty, ctl], swz: vec![0, 0, 0] });
-            self.tex_dsts.insert(tex_v);
-            let comp0 = intr.get_const_index(NIR_INTRINSIC_COMPONENT) as u8;
-            let mut comps = Vec::with_capacity(n);
-            for c in 0..n {
-                let m = self.sel.next_vreg; self.sel.next_vreg += 1;
-                self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: m, srcs: vec![tex_v, tex_v],
-                                      swz: vec![comp0 + c as u8, comp0 + c as u8] });
-                comps.push((m, 0u8));
+            if stride_words == 0 && n > 1 {
+                let one_v = self.konst(1);
+                let past = self.sel.next_vreg; self.sel.next_vreg += 1;
+                self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: past, srcs: vec![cur, one_v], swz: vec![0, 0] });
+                self.const_addr_chain = Some((base_words + n as i32, past));
             }
             self.sel.vec_map.insert(intr.def.index, comps);
-        } else if intr.intrinsic == nir_intrinsic_load_ubo
-                                || (self.stage == Stage::Vertex && intr.intrinsic == nir_intrinsic_load_input) {
-            let is_input = intr.intrinsic == nir_intrinsic_load_input;
-            let offset_def = if is_input { 0 } else { intr.get_src(1).as_def().index };
-            let n = intr.def.num_components as usize;
-            const VERT_ATTRIB_GENERIC0: u32 = 15;
-            let input_slot = if is_input {
-                let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
-                Some(loc.wrapping_sub(VERT_ATTRIB_GENERIC0))
-            } else {
-                None
+        }
+    }
+
+    /// An output store: position, varyings, colour targets.
+    unsafe fn store_output(&mut self, intr: &nir_intrinsic_instr) {
+        let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
+        if self.stage == Stage::Fragment && self.frag.out_select >= 0 && (4..12).contains(&loc) && loc != 4 + self.frag.out_select as u32 {
+            return;
+        }
+        let src = intr.get_src(0).as_def().index;
+        let ncomp = intr.get_src(0).num_components() as usize;
+        // A scalar constant stored directly has no register yet: give it a window word.
+        for c in 0..ncomp {
+            let d = resolve_vm(&self.sel.vec_map, src, c as u8).0;
+            let bits = match self.consts.get(&d) {
+                Some(&b) if !self.sel.vec_map.contains_key(&d) => b,
+                _ => continue,
             };
-            let (base_words, stride_words) = match input_slot
-                .map(|l| Some((16 + 144 * l as i32, 4i32)))
-                .unwrap_or_else(|| decompose_vertex_offset(
-                    &self.sel.vec_map, &self.prod, &self.consts, &self.vert.descriptor_defs,
-                    self.vert.vertex_id_def.unwrap_or(u32::MAX), offset_def,
-                )) {
-                Some(bs) => bs,
-                None => {
-                    eprintln!(
-                        "borgc: WARNING load_ubo offset (def {offset_def}) is \
-                         not a recognized draw-mode address shape -- dropped"
-                    );
-                    (-1, 0)
+            let v = self.konst(bits);
+            self.sel.vec_map.insert(d, vec![(v, 0u8)]);
+        }
+        let comps: Vec<(u32, u8)> = (0..ncomp).map(|c| resolve_vm(&self.sel.vec_map, src, c as u8)).collect();
+        if self.stage == Stage::Vertex && loc == VARYING_SLOT_POS {
+            for (c, &v0) in comps.iter().enumerate().take(4) {
+                let mut v = v0;
+                if matches!(self.sel.ubo.get(&v.0), Some(Ubo::Uniform(_))) {
+                    let out = self.sel.next_vreg; self.sel.next_vreg += 1;
+                    self.sel.prog.push(BorgInstr { mnem: Op::Fmov.into(), dst: out, srcs: vec![v.0], swz: vec![0] });
+                    v = (out, 0);
                 }
-            };
-            let base_words = if base_words >= 0 && !is_input {
-                let mut d = resolve_vm(&self.sel.vec_map, intr.get_src(0).as_def().index, 0).0;
-                for _ in 0..8 {
-                    if self.res_binding.contains_key(&d) { break; }
-                    match self.prod.get(&d) { Some((_, srcs)) if !srcs.is_empty() => d = resolve_vm(&self.sel.vec_map, srcs[0].0, 0).0, _ => break }
-                }
-                let b = self.res_binding.get(&d).copied().unwrap_or(0);
-                if b == 0 { base_words } else { base_words + 16384 * (1 + b as i32) }
-            } else {
-                base_words
-            };
-            if base_words >= 0 {
-                let addr = match (stride_words, self.const_addr_chain) {
-                    (0, Some((next, a))) if next == base_words => a,
-                    (0, _) if self.stage != Stage::Vertex && base_words > 0 => self.konst(base_words as u32),
-                    (0, _) if self.stage != Stage::Vertex => self.konst(base_words as u32),
-                    // A single constant word: the address is a window word, no chain.
-                    (0, _) if n == 1 => self.konst(base_words as u32),
-                    _ => {
-                        let vid = match self.vert.vertex_id_def {
-                            Some(v) => v,
-                            None => {
-                                let v = self.sel.next_vreg; self.sel.next_vreg += 1;
-                                self.sel.ubo.insert(v, Ubo::Fixed(30));
-                                v
-                            }
-                        };
-                        let stride_v = self.konst(stride_words as u32);
-                        let tmp = self.sel.next_vreg; self.sel.next_vreg += 1;
-                        self.sel.prog.push(BorgInstr { mnem: Op::Imul.into(), dst: tmp, srcs: vec![vid, stride_v], swz: vec![0, 0] });
-                        let base_v = self.konst(base_words as u32);
-                        let a = self.sel.next_vreg; self.sel.next_vreg += 1;
-                        self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: a, srcs: vec![tmp, base_v], swz: vec![0, 0] });
-                        a
-                    }
-                };
-                let mut cur = addr;
-                let comps: Vec<(u32, u8)> = (0..n)
-                    .map(|c| {
-                        let dst = self.sel.next_vreg; self.sel.next_vreg += 1;
-                        self.sel.prog.push(BorgInstr { mnem: Op::Load.into(), dst, srcs: vec![cur], swz: vec![0] });
-                        if c + 1 < n {
-                            let one_v = self.konst(1);
-                            let next_a = self.sel.next_vreg; self.sel.next_vreg += 1;
-                            self.sel.prog.push(BorgInstr {
-                                mnem: Op::Iadd.into(), dst: next_a, srcs: vec![cur, one_v], swz: vec![0, 0],
-                            });
-                            cur = next_a;
-                        }
-                        (dst, 0u8)
-                    })
-                    .collect();
-                if stride_words == 0 && n > 1 {
-                    let one_v = self.konst(1);
-                    let past = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: past, srcs: vec![cur, one_v], swz: vec![0, 0] });
-                    self.const_addr_chain = Some((base_words + n as i32, past));
-                }
-                self.sel.vec_map.insert(intr.def.index, comps);
+                self.outs.pos[c] = Some(v);
+                self.outs.roots.push(v.0);
             }
-        } else if intr.intrinsic == nir_intrinsic_store_output {
-            let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
-            if self.stage == Stage::Fragment && self.frag.out_select >= 0 && (4..12).contains(&loc) && loc != 4 + self.frag.out_select as u32 {
-                return;
+        } else if self.stage == Stage::Fragment && self.flags.multi_target() && (4..8).contains(&loc) {
+            self.outs.mrt[(loc - 4) as usize] = Some(comps[0]);
+        } else if self.stage == Stage::Fragment {
+            let ncomp2 = if self.frag.alpha || self.flags.bytes_packed() { 4 } else { 3 };
+            for (c, &v) in comps.iter().enumerate().take(ncomp2) {
+                self.outs.frag[c] = Some(v);
+                self.outs.roots.push(v.0);
             }
-            let src = intr.get_src(0).as_def().index;
-            let ncomp = intr.get_src(0).num_components() as usize;
-            // A scalar constant stored directly has no register yet: give it a window word.
-            for c in 0..ncomp {
-                let d = resolve_vm(&self.sel.vec_map, src, c as u8).0;
-                let bits = match self.consts.get(&d) {
-                    Some(&b) if !self.sel.vec_map.contains_key(&d) => b,
-                    _ => continue,
-                };
-                let v = self.konst(bits);
-                self.sel.vec_map.insert(d, vec![(v, 0u8)]);
-            }
-            let comps: Vec<(u32, u8)> = (0..ncomp).map(|c| resolve_vm(&self.sel.vec_map, src, c as u8)).collect();
-            if self.stage == Stage::Vertex && loc == VARYING_SLOT_POS {
-                for (c, &v0) in comps.iter().enumerate().take(4) {
-                    let mut v = v0;
-                    if matches!(self.sel.ubo.get(&v.0), Some(Ubo::Uniform(_))) {
-                        let out = self.sel.next_vreg; self.sel.next_vreg += 1;
-                        self.sel.prog.push(BorgInstr { mnem: Op::Fmov.into(), dst: out, srcs: vec![v.0], swz: vec![0] });
-                        v = (out, 0);
-                    }
-                    self.outs.pos[c] = Some(v);
-                    self.outs.roots.push(v.0);
+        } else if self.stage == Stage::Vertex && loc == 12 {
+            self.outs.psize = comps.first().copied();   // VARYING_SLOT_PSIZ
+        } else if loc < VARYING_SLOT_VAR0 {
+            // gl_PointSize and the other built-in outputs: triangles ignore them.
+        } else {
+            let base_index = 4 * loc.wrapping_sub(VARYING_SLOT_VAR0) + intr.get_const_index(NIR_INTRINSIC_COMPONENT) as u32;
+            for (c, &(vd0, vc)) in comps.iter().enumerate() {
+                let mut vd = vd0;
+                // SOUT stores a register; a constant living in the uniform window needs a copy.
+                if matches!(self.sel.ubo.get(&vd), Some(Ubo::Uniform(_))) {
+                    // An integer add keeps the bits of an integer constant (a float move changes a NaN or denormal).
+                    let zero = self.cp.zero(&mut self.sel);
+                    let out = self.sel.next_vreg; self.sel.next_vreg += 1;
+                    self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: out, srcs: vec![zero, vd], swz: vec![0, 0] });
+                    vd = out;
                 }
-            } else if self.stage == Stage::Fragment && self.flags.multi_target() && (4..8).contains(&loc) {
-                self.outs.mrt[(loc - 4) as usize] = Some(comps[0]);
-            } else if self.stage == Stage::Fragment {
-                let ncomp2 = if self.frag.alpha || self.flags.bytes_packed() { 4 } else { 3 };
-                for (c, &v) in comps.iter().enumerate().take(ncomp2) {
-                    self.outs.frag[c] = Some(v);
-                    self.outs.roots.push(v.0);
-                }
-            } else if self.stage == Stage::Vertex && loc == 12 {
-                self.outs.psize = comps.first().copied();   // VARYING_SLOT_PSIZ
-            } else if loc < VARYING_SLOT_VAR0 {
-                // gl_PointSize and the other built-in outputs: triangles ignore them.
-            } else {
-                let base_index = 4 * loc.wrapping_sub(VARYING_SLOT_VAR0) + intr.get_const_index(NIR_INTRINSIC_COMPONENT) as u32;
-                for (c, &(vd0, vc)) in comps.iter().enumerate() {
-                    let mut vd = vd0;
-                    // SOUT stores a register; a constant living in the uniform window needs a copy.
-                    if matches!(self.sel.ubo.get(&vd), Some(Ubo::Uniform(_))) {
-                        // An integer add keeps the bits of an integer constant (a float move changes a NaN or denormal).
-                        let zero = self.cp.zero(&mut self.sel);
-                        let out = self.sel.next_vreg; self.sel.next_vreg += 1;
-                        self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: out, srcs: vec![zero, vd], swz: vec![0, 0] });
-                        vd = out;
-                    }
-                    let index = base_index + c as u32;
-                    assert!(index < 256, "borgc: SOUT index {index} does not fit a byte");
-                    self.sel.prog.push(BorgInstr {
-                        mnem: Op::Sout.into(), dst: NO_DST, srcs: vec![vd], swz: vec![index as u8],
-                    });
-                    self.outs.roots.push(vd);
-                    let _ = vc;
-                }
-            }
-            self.outs.stores.insert(loc, comps);
-        } else if self.stage == Stage::Fragment && intr.intrinsic == nir_intrinsic_load_output
-                  && intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) >> 14 & 1 != 0 {
-            let desc = if self.flags.packed() && !self.flags.multi_target() {
-                Some(packed_layout(self.flags))
-            } else if self.flags.r8_unorm() {
-                Some((0, vec![(0usize, 0u32, 8u32)]))
-            } else {
-                None
-            };
-            match desc {
-                Some((kind, layout)) if layout.iter().all(|&(_, sh, b)| sh + b <= 32) => {
-                    let w = self.sel.op0(Op::Tld, vec![]);
-                    let zero = self.sel.op0(Op::Isub, vec![w, w]);
-                    let mut rgba: [Option<u32>; 4] = [None; 4];
-                    for &(comp, sh, bits) in layout.iter() {
-                        let mut f = w;
-                        if sh != 0 {
-                            let s = self.konst(sh);
-                            f = self.sel.op0(Op::Isrl, vec![f, s]);
-                        }
-                        if bits < 32 && (kind != 1) && sh + bits < 32 {
-                            let m = self.konst((1u32 << bits) - 1);
-                            f = self.sel.op0(Op::Iand, vec![f, m]);
-                        }
-                        let v = match kind {
-                            2 if comp != 3 => {
-                                // sRGB to linear: a fetch from the driver's 256-entry table (slot 41).
-                                let ctl = self.konst((1 << 16) | (128 + 41));
-                                let t = self.sel.op0(Op::Tex, vec![f, zero, ctl]);
-                                self.tex_dsts.insert(t);
-                                self.sel.op0(Op::Ior, vec![t, t])
-                            }
-                            0 | 2 => {
-                                let i = self.sel.op0(Op::I2f, vec![f]);
-                                let inv = self.konst((1.0f32 / ((1u64 << bits) - 1) as f32).to_bits());
-                                self.sel.op0(Op::Fmul, vec![i, inv])
-                            }
-                            1 => {
-                                // Sign-extend the field from the word itself.
-                                let up = self.konst(32 - bits - sh);
-                                let a = if 32 - bits - sh != 0 { self.sel.op0(Op::Ishl, vec![w, up]) } else { w };
-                                let dn = self.konst(32 - bits);
-                                let s = self.sel.op0(Op::Ishr, vec![a, dn]);
-                                let i = self.sel.op0(Op::I2f, vec![s]);
-                                let inv = self.konst((1.0f32 / ((1u64 << (bits - 1)) - 1) as f32).to_bits());
-                                self.sel.op0(Op::Fmul, vec![i, inv])
-                            }
-                            _ => f,
-                        };
-                        rgba[comp] = Some(v);
-                    }
-                    let one = self.konst(1.0f32.to_bits());
-                    let comp0 = intr.get_const_index(NIR_INTRINSIC_COMPONENT) as usize;
-                    let nc = intr.def.num_components as usize;
-                    let comps: Vec<(u32, u8)> = (0..nc).map(|c| {
-                        let c = c + comp0;
-                        (rgba[c].unwrap_or(if c == 3 { one } else { zero }), 0u8)
-                    }).collect();
-                    self.sel.vec_map.insert(intr.def.index, comps);
-                }
-                _ if self.flags.half() => {
-                    let nch = self.flags.half_channels();
-                    let (rgba, zero) = if let Some(c) = self.frag.dst_half { c } else {
-                        let w0 = self.sel.op0(Op::Tld, vec![]);
-                        let w1 = if nch > 2 { self.sel.op0(Mnem::Tld1, vec![]) } else { w0 };
-                        let zero = self.sel.op0(Op::Isub, vec![w0, w0]);
-                        let mut rgba: [Option<u32>; 4] = [None; 4];
-                        for k in 0..nch {
-                            let mut h = if k < 2 { w0 } else { w1 };
-                            if k % 2 == 1 {
-                                let c16 = self.konst(16);
-                                h = self.sel.op0(Op::Isrl, vec![h, c16]);
-                            }
-                            rgba[k] = Some(self.sel.op0(Op::H2f, vec![h]));
-                        }
-                        self.frag.dst_half = Some((rgba, zero));
-                        (rgba, zero)
-                    };
-                    let one = self.konst(1.0f32.to_bits());
-                    let comp0 = intr.get_const_index(NIR_INTRINSIC_COMPONENT) as usize;
-                    let nc = intr.def.num_components as usize;
-                    let comps: Vec<(u32, u8)> = (0..nc).map(|c| {
-                        let c = c + comp0;
-                        (rgba[c].unwrap_or(if c == 3 { one } else { zero }), 0u8)
-                    }).collect();
-                    self.sel.vec_map.insert(intr.def.index, comps);
-                }
-                _ => eprintln!("borgc: ERROR blending on this attachment format is not implemented"),
-            }
-        } else if intr.intrinsic == nir_intrinsic_load_output {
-            let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
-            match self.outs.stores.get(&loc) {
-                Some(v) => { self.sel.vec_map.insert(intr.def.index, v.clone()); }
-                None => eprintln!(
-                    "borgc: WARNING load_output of location {loc}, never stored earlier \
-                     in program order -- dropped (draw mode resolves it from the store, \
-                     not a real load; see decompose_vertex_offset's neighbor)"
-                ),
+                let index = base_index + c as u32;
+                assert!(index < 256, "borgc: SOUT index {index} does not fit a byte");
+                self.sel.prog.push(BorgInstr {
+                    mnem: Op::Sout.into(), dst: NO_DST, srcs: vec![vd], swz: vec![index as u8],
+                });
+                self.outs.roots.push(vd);
+                let _ = vc;
             }
         }
+        self.outs.stores.insert(loc, comps);
     }
     /// A loop runs while EXANY sees an alive lane: `go` masks one trip, a jump clears it.
     fn loop_mark(&mut self, mnem: Mnem, id: usize, (alive, go, any): (u32, u32, u32)) {
