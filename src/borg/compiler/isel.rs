@@ -5,23 +5,21 @@ use crate::opcodes::Op;
 use crate::Mnem;
 use compiler::bindings::*;
 
+/// The value component c of d stands for, following vec_map's copies to their end. A chain is
+/// at most as long as the map; a cycle is a compiler bug.
 pub(crate) fn resolve_vm(
     vec_map: &std::collections::HashMap<u32, Vec<(u32, u8)>>,
     d0: u32,
     c0: u8,
 ) -> (u32, u8) {
     let (mut d, mut c) = (d0, c0);
-    for _ in 0..64 {
+    for _ in 0..=vec_map.len() {
         match vec_map.get(&d) {
-            Some(v) if (c as usize) < v.len() => {
-                let (nd, nc) = v[c as usize];
-                d = nd;
-                c = nc;
-            }
-            _ => break,
+            Some(v) if (c as usize) < v.len() && v[c as usize] != (d, c) => (d, c) = v[c as usize],
+            _ => return (d, c),
         }
     }
-    (d, c)
+    panic!("borgc: vec_map has a cycle through {d0}");
 }
 
 /// Does this NIR ALU op map directly onto a Borg ISA opcode?
@@ -50,4 +48,22 @@ pub(crate) fn borg_isel(op: nir_op) -> Option<Mnem> {
         nir_op_i2i16 | nir_op_i2i32 | nir_op_u2u16 | nir_op_u2u32 => Mnem::Mov,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_vm;
+    use std::collections::HashMap;
+
+    #[test]
+    fn follows_a_chain_longer_than_64_copies() {
+        let m: HashMap<u32, Vec<(u32, u8)>> = (0..100).map(|d| (d, vec![(d + 1, 0)])).collect();
+        assert_eq!(resolve_vm(&m, 0, 0), (100, 0));
+    }
+
+    #[test]
+    fn a_self_copy_ends_the_chain() {
+        let m: HashMap<u32, Vec<(u32, u8)>> = [(5, vec![(5, 0), (7, 2)])].into_iter().collect();
+        assert_eq!((resolve_vm(&m, 5, 0), resolve_vm(&m, 5, 1)), ((5, 0), (7, 2)));
+    }
 }
