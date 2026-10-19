@@ -5,6 +5,8 @@ use crate::state::{Selector, ShaderState};
 use crate::compute::{POOL_BASE_WORDS, POOL_MAX as CS_POOL_MAX};
 use crate::{BorgInstr, Ubo};
 use std::collections::HashMap;
+use crate::opcodes::Op;
+use crate::Mnem;
 
 /// Words of a window's pool in memory, the driver's BORGC_POOL_MAX.
 const POOL_MAX: usize = 64;
@@ -81,7 +83,7 @@ impl ConstPool {
         let f = sel.fresh();
         sel.ubo.insert(f, crate::Ubo::Fixed(30));
         let z = sel.fresh();
-        sel.prog.push(crate::BorgInstr { mnem: "ISUB", dst: z, srcs: vec![f, f], swz: vec![0, 0] });
+        sel.prog.push(crate::BorgInstr { mnem: Op::Isub.into(), dst: z, srcs: vec![f, f], swz: vec![0, 0] });
         self.zero = Some(z);
         z
     }
@@ -160,7 +162,7 @@ impl ShaderState {
             let c = self.sel.fresh();
             self.sel.ubo.insert(c, crate::Ubo::Fixed(30));
             self.per_pixel_fixed.insert(c);
-            self.sel.prog.push(crate::BorgInstr { mnem: "FSTEP", dst: v, srcs: vec![c], swz: vec![0] });
+            self.sel.prog.push(crate::BorgInstr { mnem: Op::Fstep.into(), dst: v, srcs: vec![c], swz: vec![0] });
             v
         } else if self.is_vertex {
             // A pinned register is not staged for a draw's vertex shader.
@@ -256,7 +258,7 @@ impl ShaderState {
         ks.sort_by_key(|&(v, b)| (std::cmp::Reverse(uses[&v]), b));
         let free = self.cp.free_regs();
         // The pool base, one, and a pointer to restart from after each barrier, loop head and loop.
-        let ptrs = 2 + self.sel.prog.iter().filter(|i| matches!(i.mnem, "BARRIER" | "LABEL" | "BRNZ")).count();
+        let ptrs = 2 + self.sel.prog.iter().filter(|i| matches!(i.mnem, Mnem::Op(Op::Barrier) | Mnem::Label | Mnem::Op(Op::Brnz))).count();
         let pooled_n = if ks.len() <= free.min(cap) { 0 } else { ks.len() - free.saturating_sub(ptrs).min(cap) };
         let (keep, pooled) = ks.split_at(ks.len() - pooled_n);
         for &(v, bits) in keep {
@@ -289,13 +291,13 @@ impl ShaderState {
                     while ptr.1 < self.cs.pool.len() {
                         let p = self.sel.fresh();
                         let at = if hoisted { anchor } else { out.len() };
-                        out.insert(at, BorgInstr { mnem: "IADD", dst: p, srcs: vec![ptr.0, one], swz: vec![0, 0] });
+                        out.insert(at, BorgInstr { mnem: Op::Iadd.into(), dst: p, srcs: vec![ptr.0, one], swz: vec![0, 0] });
                         anchor += hoisted as usize;
                         ptr = (p, ptr.1 + 1);
                     }
                     let at = if hoisted { anchor } else { out.len() };
                     let v = self.sel.fresh();
-                    out.insert(at, BorgInstr { mnem: "LOAD", dst: v, srcs: vec![ptr.0], swz: vec![0] });
+                    out.insert(at, BorgInstr { mnem: Op::Load.into(), dst: v, srcs: vec![ptr.0], swz: vec![0] });
                     anchor += hoisted as usize;
                     self.cs.pool.push(bits);
                     loaded.insert(*s, (v, n));
@@ -305,7 +307,7 @@ impl ShaderState {
                 *s = e.0;
             }
             match ins.mnem {
-                "EXPUSH" => {
+                Mnem::Op(Op::Expush) => {
                     if depth == 0 {
                         anchor = out.len();
                     }
@@ -316,13 +318,13 @@ impl ShaderState {
                 }
                 // Registers do not survive the other quads' turns, a pointer stepped in a loop
                 // differs between trips, and one stepped under its mask between lanes.
-                "BARRIER" | "LABEL" | "BRNZ" => {
+                Mnem::Op(Op::Barrier) | Mnem::Label | Mnem::Op(Op::Brnz) => {
                     let r = self.cp.preset(POOL_BASE_WORDS + self.cs.pool.len() as u32);
                     ptr = (self.fixed(r), self.cs.pool.len());
                     loaded.clear();
                 }
-                "EXELSE" if !hoist => (ptr, loaded) = frames.last().cloned().unwrap_or((ptr, loaded)),
-                "EXPOP" => {
+                Mnem::Op(Op::Exelse) if !hoist => (ptr, loaded) = frames.last().cloned().unwrap_or((ptr, loaded)),
+                Mnem::Op(Op::Expop) => {
                     depth = depth.saturating_sub(1);
                     if let Some(f) = frames.pop() {
                         (ptr, loaded) = f;
@@ -378,7 +380,7 @@ impl ShaderState {
                 if last[g].map_or(true, |l| at - l > GAP) {
                     let mut p = at;
                     loop {
-                        let Some(t) = (0..p).rev().find(|&t| self.sel.prog[t].mnem == "TEX") else { break };
+                        let Some(t) = (0..p).rev().find(|&t| self.sel.prog[t].mnem == Op::Tex) else { break };
                         let d = self.sel.prog[t].dst;
                         if self.sel.prog[p..].iter().any(|i| i.srcs.contains(&d)) { p = t; } else { break; }
                     }
@@ -389,7 +391,7 @@ impl ShaderState {
         }
         events.sort();
         let mut cur: Vec<[u32; 4]> = vec![[0; 4]; ngroups];
-        let mut out: Vec<BorgInstr> = vec![BorgInstr { mnem: "ISUB", dst: zero, srcs: vec![f, f], swz: vec![0, 0] }];
+        let mut out: Vec<BorgInstr> = vec![BorgInstr { mnem: Op::Isub.into(), dst: zero, srcs: vec![f, f], swz: vec![0, 0] }];
         let mut e = 0;
         for (at, mut i) in std::mem::take(&mut self.sel.prog).into_iter().enumerate() {
             while e < events.len() && events[e].0 == at {
@@ -397,15 +399,15 @@ impl ShaderState {
                 let mut idx = zero;
                 for _ in 0..g {
                     let n = fresh(&mut self.sel.ubo, None);
-                    out.push(BorgInstr { mnem: "IADD", dst: n, srcs: vec![idx, one], swz: vec![0, 0] });
+                    out.push(BorgInstr { mnem: Op::Iadd.into(), dst: n, srcs: vec![idx, one], swz: vec![0, 0] });
                     idx = n;
                 }
                 let t = fresh(&mut self.sel.ubo, None);
-                out.push(BorgInstr { mnem: "TEX", dst: t, srcs: vec![idx, zero, ctl], swz: vec![0, 0, 0] });
+                out.push(BorgInstr { mnem: Op::Tex.into(), dst: t, srcs: vec![idx, zero, ctl], swz: vec![0, 0, 0] });
                 self.tex_dsts.insert(t);
                 for c in 0..4u8 {
                     let r = fresh(&mut self.sel.ubo, None);
-                    out.push(BorgInstr { mnem: "IOR", dst: r, srcs: vec![t, t], swz: vec![c, c] });
+                    out.push(BorgInstr { mnem: Op::Ior.into(), dst: r, srcs: vec![t, t], swz: vec![c, c] });
                     cur[g][c as usize] = r;
                 }
                 e += 1;
@@ -428,7 +430,7 @@ impl ShaderState {
             let z = self.sel.next_vreg + 1;
             self.sel.next_vreg += 2;
             self.sel.ubo.insert(f, Ubo::Fixed(30));
-            let mut out = vec![BorgInstr { mnem: "ISUB", dst: z, srcs: vec![f, f], swz: vec![0, 0] }];
+            let mut out = vec![BorgInstr { mnem: Op::Isub.into(), dst: z, srcs: vec![f, f], swz: vec![0, 0] }];
             for mut ins in std::mem::take(&mut self.sel.prog) {
                 let mut seen = false;
                 for k in 0..ins.srcs.len() {
@@ -441,7 +443,7 @@ impl ShaderState {
                     }
                     let t = self.sel.next_vreg;
                     self.sel.next_vreg += 1;
-                    out.push(BorgInstr { mnem: "IADD", dst: t, srcs: vec![ins.srcs[k], z], swz: vec![ins.swz[k], 0] });
+                    out.push(BorgInstr { mnem: Op::Iadd.into(), dst: t, srcs: vec![ins.srcs[k], z], swz: vec![ins.swz[k], 0] });
                     ins.srcs[k] = t;
                     ins.swz[k] = 0;
                 }
@@ -482,7 +484,7 @@ mod tests {
     fn vertex_zero_is_r30_minus_r30_and_words_go_past_the_window() {
         let mut c = cx(true);
         let z = c.konst(0);
-        assert_eq!((c.sel.prog[0].mnem, c.konst(0)), ("ISUB", z));
+        assert_eq!((c.sel.prog[0].mnem, c.konst(0)), (Mnem::Op(Op::Isub), z));
         for b in 1..=7 {
             c.konst(b);
         }

@@ -3,6 +3,8 @@ use std::env;
 use crate::state::ShaderState;
 use crate::{BorgInstr, Ubo};
 use std::collections::HashMap;
+use crate::opcodes::Op;
+use crate::Mnem;
 
 pub struct Encoded {
     pub words: Vec<u32>,
@@ -16,7 +18,7 @@ pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
     let mut pos_gpr: std::collections::HashMap<(u32, u8), u8> = HashMap::new();
     let mut next_pre: u8 = 24; // r24..r29: above regalloc's low-GPR fill
     for i in &cx.sel.prog {
-        if i.mnem == "mov" {
+        if i.mnem == Mnem::Mov {
             continue;
         }
         for (s, &c) in i.srcs.iter().zip(i.swz.iter()) {
@@ -29,7 +31,7 @@ pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
                 next_pre += 1;
                 pos_gpr.insert((*s, c), g);
                 // g = u[c] (position component c → uniform u0..u2), funct3=1.
-                if let Some(w) = encode("FADD", g, c, 30, 0, 1) {
+                if let Some(w) = encode(Op::Fadd.into(), g, c, 30, 0, 1) {
                     words.push(w);
                 }
             }
@@ -57,25 +59,25 @@ pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
     };
     let (labels, far) = branch_layout(&cx.sel.prog, n_preload);
     for (k, i) in cx.sel.prog.iter().enumerate() {
-        if i.mnem == "mov" || i.mnem == "LABEL" {
+        if i.mnem == Mnem::Mov || i.mnem == Mnem::Label {
             continue;
         }
-        if i.mnem == "BRNZ" {
+        if i.mnem == Op::Brnz {
             let t = labels[&i.swz[1]] as u32;
             let rs1 = resolve_op(i.srcs[0], i.swz[0]).0;
             match far.get(&k) {
-                None => words.extend(encode_branch("BRNZ", rs1, (t % 1024) as u16)),
+                None => words.extend(encode_branch(Op::Brnz, rs1, (t % 1024) as u16)),
                 Some(&pad) => {
                     for _ in 0..pad {
                         words.push(encode_jmp(words.len() as u32 + 1));
                     }
-                    words.extend(encode_branch("BRZ", rs1, ((words.len() + 2) % 1024) as u16));
+                    words.extend(encode_branch(Op::Brz, rs1, ((words.len() + 2) % 1024) as u16));
                     words.push(encode_jmp(t));
                 }
             }
             continue;
         }
-        if matches!(i.mnem, "EXPUSH" | "EXELSE" | "EXPOP") {
+        if matches!(i.mnem, Mnem::Op(Op::Expush | Op::Exelse | Op::Expop)) {
             let rs1 = if i.srcs.is_empty() {
                 0
             } else {
@@ -86,7 +88,7 @@ pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
             }
             continue;
         }
-        if i.mnem == "SOUT" {
+        if i.mnem == Op::Sout {
             let index = i.swz[0] as u16;
             let rs2 = resolve_op(i.srcs[0], 0).0;
             if let Some(w) = encode_sout(rs2, index, 0) {
@@ -94,7 +96,7 @@ pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
             }
             continue;
         }
-        if i.mnem == "FATTR" {
+        if i.mnem == Op::Fattr {
             let index = i.swz[0] as u16;
             let rd = *alloc.get(&i.dst).unwrap_or(&0);
             if let Some(w) = encode_fattr(rd, index) {
@@ -111,16 +113,16 @@ pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
             .take(2) // only the multiply operands (rs1/rs2) can be pos.w
             .position(|(s, &c)| cx.sel.ubo.get(s) == Some(&Ubo::Pos) && c == 3);
         if let Some(k) = posw {
-            if i.mnem == "FMUL" || i.mnem == "FMADD" {
+            if i.mnem == Op::Fmul || i.mnem == Op::Fmadd {
                 let other = 1 - k; // the surviving multiply operand
                 let (oreg, ouni) = resolve_op(i.srcs[other], i.swz[other]);
                 // FMUL → FADD(rd, other, 0); FMADD → FADD(rd, other, acc).
-                let (addend, f3) = if i.mnem == "FMADD" {
+                let (addend, f3) = if i.mnem == Op::Fmadd {
                     (resolve_op(i.srcs[2], i.swz[2]).0, if ouni { 1 } else { 0 })
                 } else {
                     (30, if ouni { 1 } else { 0 }) // r30 = 0 → load `other`
                 };
-                if let Some(w) = encode("FADD", rd, oreg, addend, 0, f3) {
+                if let Some(w) = encode(Op::Fadd.into(), rd, oreg, addend, 0, f3) {
                     words.push(w);
                 }
                 continue;
@@ -175,11 +177,11 @@ fn branch_layout(prog: &[BorgInstr], start: usize) -> (HashMap<u8, usize>, HashM
         let (mut a, mut labels, mut at) = (start, HashMap::new(), Vec::new());
         for (k, i) in prog.iter().enumerate() {
             match i.mnem {
-                "mov" => {}
-                "LABEL" => {
+                Mnem::Mov => {}
+                Mnem::Label => {
                     labels.insert(i.swz[0], a);
                 }
-                "BRNZ" => {
+                Mnem::Op(Op::Brnz) => {
                     at.push((k, a));
                     a += far.get(&k).map_or(1, |p| p + 2);
                 }
@@ -258,7 +260,7 @@ pub fn build_blob(
     };
     let num_varyings: u8 = cx.sel.prog
         .iter()
-        .filter(|i| i.mnem == "SOUT")
+        .filter(|i| i.mnem == Op::Sout)
         .map(|i| i.swz[0] + 1)
         .max()
         .unwrap_or(0);
@@ -281,12 +283,13 @@ pub fn build_blob(
 #[cfg(test)]
 mod tests {
     use super::branch_layout;
-    use crate::{BorgInstr, NO_DST};
+    use crate::opcodes::Op;
+    use crate::{BorgInstr, Mnem, NO_DST};
 
     fn prog(body: usize) -> Vec<BorgInstr> {
-        let mut p = vec![BorgInstr { mnem: "LABEL", dst: NO_DST, srcs: vec![], swz: vec![7] }];
-        p.extend((0..body).map(|k| BorgInstr { mnem: "IADD", dst: k as u32, srcs: vec![], swz: vec![] }));
-        p.push(BorgInstr { mnem: "BRNZ", dst: NO_DST, srcs: vec![0], swz: vec![0, 7] });
+        let mut p = vec![BorgInstr { mnem: Mnem::Label, dst: NO_DST, srcs: vec![], swz: vec![7] }];
+        p.extend((0..body).map(|k| BorgInstr { mnem: Op::Iadd.into(), dst: k as u32, srcs: vec![], swz: vec![] }));
+        p.push(BorgInstr { mnem: Op::Brnz.into(), dst: NO_DST, srcs: vec![0], swz: vec![0, 7] });
         p
     }
 

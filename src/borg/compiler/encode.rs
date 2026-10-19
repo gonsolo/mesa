@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::opcodes::{Fields, Op};
+use crate::Mnem;
 
 pub(crate) fn emit_blob(words: &[u32], outputs: &[u8], consts: &[(u8, u32)],
                         draw: Option<(u8, &[(u8, u32)])>) -> Vec<u8> {
@@ -35,13 +36,12 @@ pub(crate) fn emit_blob(words: &[u32], outputs: &[u8], consts: &[(u8, u32)],
     b
 }
 
-pub(crate) fn op_named(mnem: &str) -> Option<Op> {
-    Op::ALL.into_iter().find(|o| o.name() == mnem)
-}
-
-pub(crate) fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32) -> Option<u32> {
-    // TLD1: word 1 of a RAW64 texel.
-    let (op, f3) = if mnem == "TLD1" { (Op::Tld, funct3 | 1) } else { (op_named(mnem)?, funct3) };
+pub(crate) fn encode(mnem: Mnem, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32) -> Option<u32> {
+    let (op, f3) = match mnem {
+        Mnem::Op(op) => (op, funct3),
+        Mnem::Tld1 => (Op::Tld, funct3 | 1),
+        _ => return None,
+    };
     let (rd, rs1, rs2, rs3) = (rd as u32, rs1 as u32, rs2 as u32, rs3 as u32);
     Some(op.encode(&Fields { rd, rs1, rs2, rs3, f3, ..Default::default() }))
 }
@@ -65,12 +65,7 @@ pub(crate) fn encode_jmp(target: u32) -> u32 {
     Op::Jmp.encode(&Fields { jtarget: target, ..Default::default() })
 }
 
-pub(crate) fn encode_branch(mnem: &str, rs1: u8, target: u16) -> Option<u32> {
-    let op = match mnem {
-        "BRZ" => Op::Brz,
-        "BRNZ" => Op::Brnz,
-        _ => return None,
-    };
+pub(crate) fn encode_branch(op: Op, rs1: u8, target: u16) -> Option<u32> {
     if target >= 1024 {
         return None; // 10 bits: the low bits of a target in the branch's own page
     }
@@ -111,16 +106,16 @@ mod tests {
 
     #[test]
     fn extended_isa_bases_match_hardware() {
-        // funct7 << 25, from hardware/borg/src/Instructions.scala.
-        assert_eq!(encode("LOAD", 3, 5, 0, 0, 0).unwrap() & 0xFE00_0000, 0x22 << 25);
-        assert_eq!(encode("STORE", 0, 5, 7, 0, 0).unwrap() & 0xFE00_0000, 0x24 << 25);
-        assert_eq!(encode_branch("BRZ", 5, 0).unwrap() & 0xFE00_0000, 0x26 << 25);
-        assert_eq!(encode_branch("BRNZ", 5, 0).unwrap() & 0xFE00_0000, 0x28 << 25);
-        assert_eq!(encode("EXPUSH", 0, 5, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2A << 25);
-        assert_eq!(encode("EXELSE", 0, 0, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2C << 25);
-        assert_eq!(encode("EXPOP", 0, 0, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2E << 25);
-        assert_eq!(encode("BARRIER", 0, 0, 0, 0, 0).unwrap(), 0x3C << 25);
-        assert_eq!(encode("EXANY", 3, 0, 0, 0, 0).unwrap(), 0x3E << 25 | 3 << 7);
+        // funct7 << 25, from hardware/borg/isa/opcodes.
+        assert_eq!(encode(Op::Load.into(), 3, 5, 0, 0, 0).unwrap() & 0xFE00_0000, 0x22 << 25);
+        assert_eq!(encode(Op::Store.into(), 0, 5, 7, 0, 0).unwrap() & 0xFE00_0000, 0x24 << 25);
+        assert_eq!(encode_branch(Op::Brz, 5, 0).unwrap() & 0xFE00_0000, 0x26 << 25);
+        assert_eq!(encode_branch(Op::Brnz, 5, 0).unwrap() & 0xFE00_0000, 0x28 << 25);
+        assert_eq!(encode(Op::Expush.into(), 0, 5, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2A << 25);
+        assert_eq!(encode(Op::Exelse.into(), 0, 0, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2C << 25);
+        assert_eq!(encode(Op::Expop.into(), 0, 0, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2E << 25);
+        assert_eq!(encode(Op::Barrier.into(), 0, 0, 0, 0, 0).unwrap(), 0x3C << 25);
+        assert_eq!(encode(Op::Exany.into(), 3, 0, 0, 0, 0).unwrap(), 0x3E << 25 | 3 << 7);
         // Instructions.JMP(0x2_5ABC): rs2 = 22, rs1 = 21, rd = 28, funct3 = 4.
         assert_eq!(encode_jmp(0x2_5ABC), 0x50 << 25 | 22 << 20 | 21 << 15 | 4 << 12 | 28 << 7);
         assert_eq!(encode_sout(0, 0, 0).unwrap() & 0xFE00_0000, 0x42 << 25);
@@ -146,50 +141,49 @@ mod tests {
 
     #[test]
     fn tex_is_r4_type_funct2_2_with_the_control_word_in_rs3() {
-        let w = encode("TEX", 20, 15, 7, 9, 0).unwrap();
+        let w = encode(Op::Tex.into(), 20, 15, 7, 9, 0).unwrap();
         assert_eq!(w & 0x7F, 0x04, "R4-type opcode");
         assert_eq!((w >> 25) & 0x3, 2, "funct2 = TEX");
         assert_eq!((w >> 27, (w >> 20) & 0x1F, (w >> 15) & 0x1F, (w >> 7) & 0x1F),
                    (9, 7, 15, 20), "rs3 ctl, rs2 v, rs1 u, rd");
-        assert!(encode("FTEX", 20, 15, 7, 0, 0).is_none(), "FTEX is retired");
     }
 
     #[test]
     fn half_conversions_are_funct7_0x54_and_0x56() {
-        for (m, f7) in [("F2H", 0x54u32), ("H2F", 0x56)] {
-            let w = encode(m, 7, 5, 0, 0, 0).unwrap();
-            assert_eq!((w >> 25, (w >> 15) & 0x1F, (w >> 7) & 0x1F), (f7, 5, 7), "{m}: funct7, rs1, rd");
+        for (m, f7) in [(Op::F2h, 0x54u32), (Op::H2f, 0x56)] {
+            let w = encode(m.into(), 7, 5, 0, 0, 0).unwrap();
+            assert_eq!((w >> 25, (w >> 15) & 0x1F, (w >> 7) & 0x1F), (f7, 5, 7), "{m:?}: funct7, rs1, rd");
         }
     }
 
     #[test]
     fn load_places_operands_where_the_hardware_reads_them() {
-        let w = encode("LOAD", 7, 5, 0, 0, 0).unwrap();
+        let w = encode(Op::Load.into(), 7, 5, 0, 0, 0).unwrap();
         assert_eq!((w >> 15) & 0x1F, 5, "rs1 = address index");
         assert_eq!((w >> 7) & 0x1F, 7, "rd = destination");
     }
 
     #[test]
     fn store_and_mask_ops_leave_no_destination() {
-        assert_eq!((encode("STORE", 31, 5, 7, 0, 0).unwrap() >> 7) & 0x1F, 0);
-        assert_eq!((encode("EXPUSH", 31, 5, 0, 0, 0).unwrap() >> 7) & 0x1F, 0);
+        assert_eq!((encode(Op::Store.into(), 31, 5, 7, 0, 0).unwrap() >> 7) & 0x1F, 0);
+        assert_eq!((encode(Op::Expush.into(), 31, 5, 0, 0, 0).unwrap() >> 7) & 0x1F, 0);
         // STORE's data operand is rs2.
-        assert_eq!((encode("STORE", 0, 5, 7, 0, 0).unwrap() >> 20) & 0x1F, 7);
+        assert_eq!((encode(Op::Store.into(), 0, 5, 7, 0, 0).unwrap() >> 20) & 0x1F, 7);
     }
 
     #[test]
     fn branch_target_splits_across_rs2_and_rd() {
         // Target 33 = 0b1_00001 -> high bits 1 in rs2, low bits 1 in rd.
-        let w = encode_branch("BRZ", 2, 33).unwrap();
+        let w = encode_branch(Op::Brz, 2, 33).unwrap();
         assert_eq!((w >> 20) & 0x1F, 1, "target high 5 bits");
         assert_eq!((w >> 7) & 0x1F, 1, "target low 5 bits");
         assert_eq!((w >> 15) & 0x1F, 2, "rs1 = condition");
         // Round-trip every representable target.
         for t in 0..1024u16 {
-            let w = encode_branch("BRNZ", 0, t).unwrap();
+            let w = encode_branch(Op::Brnz, 0, t).unwrap();
             let back = (((w >> 20) & 0x1F) << 5) | ((w >> 7) & 0x1F);
             assert_eq!(back, t as u32, "target {t} did not round-trip");
         }
-        assert!(encode_branch("BRZ", 0, 1024).is_none(), "out of range must not encode");
+        assert!(encode_branch(Op::Brz, 0, 1024).is_none(), "out of range must not encode");
     }
 }

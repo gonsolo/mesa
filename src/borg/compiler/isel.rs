@@ -1,6 +1,8 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
+use crate::opcodes::Op;
+use crate::Mnem;
 use compiler::bindings::*;
 
 pub(crate) fn resolve_vm(
@@ -23,29 +25,29 @@ pub(crate) fn resolve_vm(
 }
 
 /// Does this NIR ALU op map directly onto a Borg ISA opcode?
-pub(crate) fn borg_isel(op: nir_op) -> Option<&'static str> {
-    match op {
-        nir_op_fadd => Some("FADD"),
-        nir_op_fmul => Some("FMUL"),
-        nir_op_ffma | nir_op_ffma_weak => Some("FMADD"),
-        nir_op_fneg => Some("FNEG"),
-        nir_op_frcp => Some("FRCP"),
-        nir_op_frsq => Some("FRSQ"),
+pub(crate) fn borg_isel(op: nir_op) -> Option<Mnem> {
+    Some(match op {
+        nir_op_fadd => Op::Fadd.into(),
+        nir_op_fmul => Op::Fmul.into(),
+        nir_op_ffma | nir_op_ffma_weak => Op::Fmadd.into(),
+        nir_op_fneg => Op::Fneg.into(),
+        nir_op_frcp => Op::Frcp.into(),
+        nir_op_frsq => Op::Frsq.into(),
         // Integer ops (the Borg core now has these — enables standard addressing).
-        nir_op_iadd => Some("IADD"),
-        nir_op_ishl => Some("ISHL"),
-        nir_op_ishr => Some("ISHR"),
-        nir_op_ushr => Some("ISRL"),
-        nir_op_isub => Some("ISUB"),
-        nir_op_iand => Some("IAND"),
-        nir_op_ior => Some("IOR"),
-        nir_op_ixor => Some("IXOR"),
-        nir_op_imul => Some("IMUL"),
-        nir_op_i2f16 | nir_op_i2f32 | nir_op_u2f16 | nir_op_u2f32 => Some("I2F"),
-        nir_op_f2i16 | nir_op_f2i32 | nir_op_f2u16 | nir_op_f2u32 => Some("F2I"),
+        nir_op_iadd => Op::Iadd.into(),
+        nir_op_ishl => Op::Ishl.into(),
+        nir_op_ishr => Op::Ishr.into(),
+        nir_op_ushr => Op::Isrl.into(),
+        nir_op_isub => Op::Isub.into(),
+        nir_op_iand => Op::Iand.into(),
+        nir_op_ior => Op::Ior.into(),
+        nir_op_ixor => Op::Ixor.into(),
+        nir_op_imul => Op::Imul.into(),
+        nir_op_i2f16 | nir_op_i2f32 | nir_op_u2f16 | nir_op_u2f32 => Op::I2f.into(),
+        nir_op_f2i16 | nir_op_f2i32 | nir_op_f2u16 | nir_op_f2u32 => Op::F2i.into(),
         // Moves / vector (de)construction become register copies, no ISA op.
-        nir_op_mov | nir_op_vec2 | nir_op_vec3 | nir_op_vec4 => Some("mov"),
-        nir_op_i2i16 | nir_op_i2i32 | nir_op_u2u16 | nir_op_u2u32 => Some("mov"),
-        _ => None,
-    }
+        nir_op_mov | nir_op_vec2 | nir_op_vec3 | nir_op_vec4 => Mnem::Mov,
+        nir_op_i2i16 | nir_op_i2i32 | nir_op_u2u16 | nir_op_u2u32 => Mnem::Mov,
+        _ => return None,
+    })
 }

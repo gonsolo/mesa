@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 use crate::BorgInstr;
+use crate::opcodes::Op;
+use crate::Mnem;
 
 /// A value live into a loop or carried round it lives for the whole loop, and so does one defined
 /// in it and live after it: a lane that left early keeps its last trip's value.
@@ -14,10 +16,10 @@ pub(crate) fn extend_for_loops(
     let mut spans = Vec::new();
     for (k, i) in prog.iter().enumerate() {
         match i.mnem {
-            "LABEL" => {
+            Mnem::Label => {
                 heads.insert(i.swz[0], k);
             }
-            "BRNZ" => spans.push((heads[&i.swz[1]], k)),
+            Mnem::Op(Op::Brnz) => spans.push((heads[&i.swz[1]], k)),
             _ => {}
         }
     }
@@ -150,26 +152,27 @@ pub(crate) fn regalloc(
 #[cfg(test)]
 mod tests {
     use super::{extend_for_loops, regalloc};
-    use crate::{BorgInstr, NO_DST};
+    use crate::opcodes::Op;
+    use crate::{BorgInstr, Mnem, NO_DST};
     use std::collections::HashMap;
 
-    fn op(mnem: &'static str, dst: u32, srcs: &[u32]) -> BorgInstr {
-        BorgInstr { mnem, dst, srcs: srcs.to_vec(), swz: vec![0; srcs.len()] }
+    fn op(mnem: impl Into<Mnem>, dst: u32, srcs: &[u32]) -> BorgInstr {
+        BorgInstr { mnem: mnem.into(), dst, srcs: srcs.to_vec(), swz: vec![0; srcs.len()] }
     }
 
     #[test]
     fn loop_values_live_for_the_whole_loop() {
         // 1 = before; LABEL; 3 = 2 + 1 (2 carried: read, then written); 4 defined, used after.
         let prog = vec![
-            op("IOR", 1, &[9, 9]),
-            op("IOR", 2, &[9, 9]),
-            BorgInstr { mnem: "LABEL", dst: NO_DST, srcs: vec![], swz: vec![0] },
-            op("IADD", 3, &[2, 1]),
-            op("IOR", 2, &[3, 3]),
-            op("IOR", 4, &[3, 3]),
-            op("IADD", 5, &[1, 1]),
-            BorgInstr { mnem: "BRNZ", dst: NO_DST, srcs: vec![5], swz: vec![0, 0] },
-            op("IADD", 6, &[4, 4]),
+            op(Op::Ior, 1, &[9, 9]),
+            op(Op::Ior, 2, &[9, 9]),
+            BorgInstr { mnem: Mnem::Label, dst: NO_DST, srcs: vec![], swz: vec![0] },
+            op(Op::Iadd, 3, &[2, 1]),
+            op(Op::Ior, 2, &[3, 3]),
+            op(Op::Ior, 4, &[3, 3]),
+            op(Op::Iadd, 5, &[1, 1]),
+            BorgInstr { mnem: Op::Brnz.into(), dst: NO_DST, srcs: vec![5], swz: vec![0, 0] },
+            op(Op::Iadd, 6, &[4, 4]),
         ];
         let (mut d, mut l) = (HashMap::new(), HashMap::new());
         for (k, i) in prog.iter().enumerate() {
@@ -187,7 +190,7 @@ mod tests {
 
     fn chain(n: u32) -> Vec<BorgInstr> {
         (1..=n)
-            .map(|d| BorgInstr { mnem: "FADD", dst: d, srcs: vec![d - 1, d.saturating_sub(2)], swz: vec![0, 0] })
+            .map(|d| BorgInstr { mnem: Op::Fadd.into(), dst: d, srcs: vec![d - 1, d.saturating_sub(2)], swz: vec![0, 0] })
             .collect()
     }
 

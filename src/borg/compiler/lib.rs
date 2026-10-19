@@ -24,6 +24,7 @@ mod survey;
 use compiler::bindings::*;
 use compiler::nir::AsDef;
 use borgc_flags::*;
+use opcodes::Op;
 use config::Flags;
 use isel::resolve_vm;
 use state::ShaderState;
@@ -71,7 +72,7 @@ pub struct BorgcInfo {
 pub(crate) const NO_DST: u32 = u32::MAX;
 
 pub(crate) struct CfMark {
-    pub(crate) mnem: &'static str,
+    pub(crate) mnem: Mnem,
     /// Condition def index, for EXPUSH only.
     pub(crate) cond: Option<u32>,
     /// The loop of a LOOP_HEAD, LOOP_END or REPUSH.
@@ -86,8 +87,48 @@ pub(crate) struct Loops {
     pub(crate) err: Option<String>,
 }
 
+/// What a BorgInstr is: a Borg instruction, or a marker the emitter resolves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Mnem {
+    Op(Op),
+    /// A register copy, coalesced or emitted as a move.
+    Mov,
+    Label,
+    LoopHead,
+    LoopEnd,
+    Repush,
+    /// TLD of word 1 of a RAW64 texel.
+    Tld1,
+}
+
+impl From<Op> for Mnem {
+    fn from(op: Op) -> Self {
+        Mnem::Op(op)
+    }
+}
+
+impl PartialEq<Op> for Mnem {
+    fn eq(&self, op: &Op) -> bool {
+        *self == Mnem::Op(*op)
+    }
+}
+
+impl std::fmt::Display for Mnem {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(match self {
+            Mnem::Op(op) => op.name(),
+            Mnem::Mov => "mov",
+            Mnem::Label => "LABEL",
+            Mnem::LoopHead => "LOOP_HEAD",
+            Mnem::LoopEnd => "LOOP_END",
+            Mnem::Repush => "REPUSH",
+            Mnem::Tld1 => "TLD1",
+        })
+    }
+}
+
 pub(crate) struct BorgInstr {
-    pub(crate) mnem: &'static str,
+    pub(crate) mnem: Mnem,
     pub(crate) dst: u32,
     pub(crate) srcs: Vec<u32>,
     pub(crate) swz: Vec<u8>,
@@ -184,22 +225,22 @@ pub(crate) unsafe fn collect_cf_marks(
         if let Some(nif) = node.as_if() {
             let (tj, tr) = collect_cf_marks(nif.iter_then_list(), marks, unsupported, loops.as_deref_mut(), cur);
             let (ej, er) = collect_cf_marks(nif.iter_else_list(), marks, unsupported, loops.as_deref_mut(), cur);
-            marks.entry(key(nif.first_then_block())).or_default().push(mark("EXPUSH", Some(nif.condition.as_def().index), None));
+            marks.entry(key(nif.first_then_block())).or_default().push(mark(Op::Expush.into(), Some(nif.condition.as_def().index), None));
             let e = marks.entry(key(nif.first_else_block())).or_default();
             if tr {
-                e.push(mark("EXPOP", None, None));
+                e.push(mark(Op::Expop.into(), None, None));
             }
-            e.push(mark("EXELSE", None, None));
+            e.push(mark(Op::Exelse.into(), None, None));
             let f = marks.entry(key(nif.following_block())).or_default();
             if er {
-                f.push(mark("EXPOP", None, None));
+                f.push(mark(Op::Expop.into(), None, None));
             }
-            f.push(mark("EXPOP", None, None));
+            f.push(mark(Op::Expop.into(), None, None));
             if tj || ej {
                 if repushed {
-                    f.push(mark("EXPOP", None, None));
+                    f.push(mark(Op::Expop.into(), None, None));
                 }
-                f.push(mark("REPUSH", None, cur));
+                f.push(mark(Mnem::Repush, None, cur));
                 (jumps, repushed) = (true, true);
             }
         } else if let Some(nloop) = node.as_loop() {
@@ -214,13 +255,13 @@ pub(crate) unsafe fn collect_cf_marks(
             if !std::ptr::eq(cl.head_sentinel.next, &cl.tail_sentinel) {
                 l.err = Some("a loop with a continue construct".into());
             }
-            marks.entry(key(nloop.first_block())).or_default().push(mark("LOOP_HEAD", None, Some(id)));
+            marks.entry(key(nloop.first_block())).or_default().push(mark(Mnem::LoopHead, None, Some(id)));
             let (_, br) = collect_cf_marks(nloop.iter_body(), marks, unsupported, loops.as_deref_mut(), Some(id));
             let f = marks.entry(key(nloop.following_block())).or_default();
             if br {
-                f.push(mark("EXPOP", None, None));
+                f.push(mark(Op::Expop.into(), None, None));
             }
-            f.push(mark("LOOP_END", None, Some(id)));
+            f.push(mark(Mnem::LoopEnd, None, Some(id)));
         }
     }
     (jumps, repushed)

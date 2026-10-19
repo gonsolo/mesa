@@ -8,6 +8,8 @@ use crate::Ubo;
 use compiler::bindings::*;
 use compiler::nir::AsDef;
 use std::collections::HashMap;
+use crate::opcodes::Op;
+use crate::Mnem;
 
 pub(crate) const SLOT_BASE_WORDS: u32 = 0x40000;
 pub(crate) const SLOT_WORDS: u32 = 0x80000;
@@ -69,7 +71,7 @@ impl ShaderState {
     fn sink_loads(&mut self) {
         let (prog, kval) = (&mut self.sel.prog, &self.cs.kval);
         for i in (0..prog.len()).rev() {
-            if prog[i].mnem != "LOAD" {
+            if prog[i].mnem != Op::Load {
                 continue;
             }
             let Some(&a) = kval.get(&prog[i].srcs[0]) else { continue };
@@ -78,8 +80,8 @@ impl ShaderState {
             while j < prog.len() {
                 let n = &prog[j];
                 let stop = n.dst == d || n.srcs.contains(&d) || match n.mnem {
-                    "STORE" => kval.get(&n.srcs[0]).map_or(true, |&b| b == a),
-                    "EXPUSH" | "EXELSE" | "EXPOP" | "BRZ" | "BRNZ" | "BARRIER" | "LABEL" => true,
+                    Mnem::Op(Op::Store) => kval.get(&n.srcs[0]).map_or(true, |&b| b == a),
+                    Mnem::Op(Op::Expush | Op::Exelse | Op::Expop | Op::Brz | Op::Brnz | Op::Barrier) | Mnem::Label => true,
                     _ => false,
                 };
                 if stop {
@@ -142,7 +144,7 @@ impl ShaderState {
         v
     }
 
-    fn bin(&mut self, mnem: &'static str, a: Val, b: Val) -> Val {
+    fn bin(&mut self, mnem: Op, a: Val, b: Val) -> Val {
         let (a, b) = (self.vreg(a), self.vreg(b));
         Val::R(self.sel.opc(mnem, &[a, b]), 0)
     }
@@ -151,28 +153,28 @@ impl ShaderState {
         match (a, b) {
             (Val::K(x), Val::K(y)) => Val::K(x.wrapping_add(y)),
             (Val::K(0), o) | (o, Val::K(0)) => o,
-            _ => self.bin("IADD", a, b),
+            _ => self.bin(Op::Iadd, a, b),
         }
     }
 
     fn mul(&mut self, a: Val, b: Val) -> Val {
         match (a, b) {
             (Val::K(x), Val::K(y)) => Val::K(x.wrapping_mul(y)),
-            _ => self.bin("IMUL", a, b),
+            _ => self.bin(Op::Imul, a, b),
         }
     }
 
     fn shr(&mut self, a: Val, n: u32) -> Val {
         match a {
             Val::K(x) => Val::K(x >> n),
-            _ => self.bin("ISRL", a, Val::K(n)),
+            _ => self.bin(Op::Isrl, a, Val::K(n)),
         }
     }
 
     fn mask(&mut self, a: Val) -> Val {
         match a {
             Val::K(x) => Val::K(x & (SLOT_WORDS - 1)),
-            _ => self.bin("IAND", a, Val::K(SLOT_WORDS - 1)),
+            _ => self.bin(Op::Iand, a, Val::K(SLOT_WORDS - 1)),
         }
     }
 
@@ -220,11 +222,11 @@ impl ShaderState {
     /// turns an infinity into NaN and changes integer bits.
     fn select(&mut self, c: (u32, u8), t: (u32, u8), e: (u32, u8)) -> u32 {
         let zero = self.vreg(Val::K(0));
-        let ci = self.sel.opc("F2I", &[c]);
-        let mask = self.sel.opc("ISUB", &[zero, (ci, 0)]);
-        let x = self.sel.opc("IXOR", &[t, e]);
-        let xm = self.sel.opc("IAND", &[(x, 0), (mask, 0)]);
-        self.sel.opc("IXOR", &[e, (xm, 0)])
+        let ci = self.sel.opc(Op::F2i, &[c]);
+        let mask = self.sel.opc(Op::Isub, &[zero, (ci, 0)]);
+        let x = self.sel.opc(Op::Ixor, &[t, e]);
+        let xm = self.sel.opc(Op::Iand, &[(x, 0), (mask, 0)]);
+        self.sel.opc(Op::Ixor, &[e, (xm, 0)])
     }
 
     pub(crate) unsafe fn exact_minmax(&mut self, alu: &nir_alu_instr) {
@@ -232,7 +234,7 @@ impl ShaderState {
         let a = resolve_vm(&self.sel.vec_map, s[0].src.as_def().index, s[0].swizzle[0]);
         let b = resolve_vm(&self.sel.vec_map, s[1].src.as_def().index, s[1].swizzle[0]);
         let d = self.sel.fsub(b, a);
-        let lt = self.sel.opc("FSTEP", &[(d, 0)]);
+        let lt = self.sel.opc(Op::Fstep, &[(d, 0)]);
         let v = if alu.op == nir_op_fmin { self.select((lt, 0), a, b) } else { self.select((lt, 0), b, a) };
         self.sel.vec_map.insert(alu.def.index, vec![(v, 0)]);
     }
@@ -250,18 +252,18 @@ impl ShaderState {
         self.sel.vec_map.insert(alu.def.index, comps);
     }
 
-    fn int(&mut self, mnem: &'static str, a: Val, b: Val) -> Val {
+    fn int(&mut self, mnem: Op, a: Val, b: Val) -> Val {
         match (mnem, a, b) {
             (_, Val::K(x), Val::K(y)) => Val::K(match mnem {
-                "ISLT" => ((x as i32) < (y as i32)) as u32,
-                "ISEQ" => (x == y) as u32,
-                "IAND" => x & y,
-                "IOR" => x | y,
+                Op::Islt => ((x as i32) < (y as i32)) as u32,
+                Op::Iseq => (x == y) as u32,
+                Op::Iand => x & y,
+                Op::Ior => x | y,
                 _ => x ^ y,
             }),
-            ("IAND", Val::K(1), o) | ("IAND", o, Val::K(1)) | ("IOR", Val::K(0), o) | ("IOR", o, Val::K(0)) => o,
-            ("IAND", Val::K(0), _) | ("IAND", _, Val::K(0)) => Val::K(0),
-            ("IOR", Val::K(1), _) | ("IOR", _, Val::K(1)) => Val::K(1),
+            (Op::Iand, Val::K(1), o) | (Op::Iand, o, Val::K(1)) | (Op::Ior, Val::K(0), o) | (Op::Ior, o, Val::K(0)) => o,
+            (Op::Iand, Val::K(0), _) | (Op::Iand, _, Val::K(0)) => Val::K(0),
+            (Op::Ior, Val::K(1), _) | (Op::Ior, _, Val::K(1)) => Val::K(1),
             _ => self.bin(mnem, a, b),
         }
     }
@@ -278,12 +280,12 @@ impl ShaderState {
         let x = resolve_vm(&self.sel.vec_map, d.index, s.swizzle[0]);
         let (x, inf) = (Val::R(x.0, x.1), Val::K(0x7f80_0000));
         if d.parent_instr().as_alu().is_some_and(|p| p.op == nir_op_fabs) {
-            return (x, self.int("ISLT", inf, x), false, true);
+            return (x, self.int(Op::Islt, inf, x), false, true);
         }
-        let m = self.bin("IAND", x, Val::K(0x7fff_ffff));
-        let sign = self.bin("ISHR", x, Val::K(31));
-        let f = self.bin("IXOR", m, sign);
-        (self.bin("ISUB", f, sign), self.int("ISLT", inf, m), true, true)
+        let m = self.bin(Op::Iand, x, Val::K(0x7fff_ffff));
+        let sign = self.bin(Op::Ishr, x, Val::K(31));
+        let f = self.bin(Op::Ixor, m, sign);
+        (self.bin(Op::Isub, f, sign), self.int(Op::Islt, inf, m), true, true)
     }
 
     /// Float compares on the bits: the FSTEP of a difference is wrong for NaN, equal infinities
@@ -293,8 +295,8 @@ impl ShaderState {
         let same = s[0].src.as_def().index == s[1].src.as_def().index && s[0].swizzle[0] == s[1].swizzle[0];
         let (ka, na, alo, ahi) = self.float_key(&s[0]);
         let (kb, nb, blo, bhi) = if same { (ka, na, alo, ahi) } else { self.float_key(&s[1]) };
-        let unord = self.int("IOR", na, nb);
-        let ord = self.int("IXOR", unord, Val::K(1));
+        let unord = self.int(Op::Ior, na, nb);
+        let ord = self.int(Op::Ixor, unord, Val::K(1));
         // NaN keys lie outside the numbers' keys: a NaN where it already makes the compare false
         // needs no mask.
         let eq_ord = if !(alo || ahi) || !(blo || bhi) { Val::K(1) } else { ord };
@@ -302,28 +304,28 @@ impl ShaderState {
         let ge_ord = if !ahi && !blo { Val::K(1) } else { ord };
         let r = match alu.op {
             nir_op_flt | nir_op_slt => {
-                let lt = self.int("ISLT", ka, kb);
-                self.int("IAND", lt, lt_ord)
+                let lt = self.int(Op::Islt, ka, kb);
+                self.int(Op::Iand, lt, lt_ord)
             }
             nir_op_fge | nir_op_sge => {
-                let lt = self.int("ISLT", ka, kb);
-                let ge = self.int("IXOR", lt, Val::K(1));
-                self.int("IAND", ge, ge_ord)
+                let lt = self.int(Op::Islt, ka, kb);
+                let ge = self.int(Op::Ixor, lt, Val::K(1));
+                self.int(Op::Iand, ge, ge_ord)
             }
             nir_op_feq | nir_op_seq => {
-                let eq = if same { Val::K(1) } else { self.int("ISEQ", ka, kb) };
-                self.int("IAND", eq, eq_ord)
+                let eq = if same { Val::K(1) } else { self.int(Op::Iseq, ka, kb) };
+                self.int(Op::Iand, eq, eq_ord)
             }
             _ => {
-                let eq = if same { Val::K(1) } else { self.int("ISEQ", ka, kb) };
-                let eq = self.int("IAND", eq, eq_ord);
-                self.int("IXOR", eq, Val::K(1))
+                let eq = if same { Val::K(1) } else { self.int(Op::Iseq, ka, kb) };
+                let eq = self.int(Op::Iand, eq, eq_ord);
+                self.int(Op::Ixor, eq, Val::K(1))
             }
         };
         match r {
             Val::K(b) => self.set(alu.def.index, &[Val::K(if b != 0 { 1.0f32.to_bits() } else { 0 })]),
             Val::R(v, c) => {
-                let f = self.sel.opc("I2F", &[(v, c)]);
+                let f = self.sel.opc(Op::I2f, &[(v, c)]);
                 self.sel.vec_map.insert(alu.def.index, vec![(f, 0)]);
             }
         }
@@ -356,7 +358,7 @@ impl ShaderState {
             Val::K(x) if x.wrapping_sub(SLOT_BASE_WORDS) % SLOT_WORDS + c >= SLOT_WORDS => Val::K(x.wrapping_add(c)),
             Val::K(_) => {
                 let r = self.vreg(a0);
-                self.bin("IADD", Val::R(r.0, r.1), Val::K(c))
+                self.bin(Op::Iadd, Val::R(r.0, r.1), Val::K(c))
             }
             _ => self.word_addr(idx, off, c),
         }
@@ -364,12 +366,12 @@ impl ShaderState {
 
     fn load(&mut self, a: Val) -> Val {
         let a = self.vreg(a);
-        Val::R(self.sel.opc("LOAD", &[a]), 0)
+        Val::R(self.sel.opc(Op::Load, &[a]), 0)
     }
 
     fn store(&mut self, a: Val, v: Val) {
         let (a, v) = (self.vreg(a), self.vreg(v));
-        self.sel.prog.push(BorgInstr { mnem: "STORE", dst: NO_DST, srcs: vec![a.0, v.0], swz: vec![a.1, v.1] });
+        self.sel.prog.push(BorgInstr { mnem: Op::Store.into(), dst: NO_DST, srcs: vec![a.0, v.0], swz: vec![a.1, v.1] });
     }
 
     /// The group the hardware runs: a packed quad holds four workgroups.
@@ -378,7 +380,7 @@ impl ShaderState {
         let u = self.sel.fresh();
         self.sel.ubo.insert(u, Ubo::Uniform(29 + c));
         let b = self.fixed(WG_BASE_REG as u8 + c);
-        Val::R(self.sel.opc("IADD", &[(u, 0), (b, 0)]), 0)
+        Val::R(self.sel.opc(Op::Iadd, &[(u, 0), (b, 0)]), 0)
     }
 
     fn workgroup_id(&mut self, c: u8) -> Val {
@@ -386,7 +388,7 @@ impl ShaderState {
         if !self.cs.packed || c != 0 {
             return g;
         }
-        let g = self.bin("ISHL", g, Val::K(2));
+        let g = self.bin(Op::Ishl, g, Val::K(2));
         let r30 = self.fixed(30);
         self.add(g, Val::R(r30, 0))
     }
@@ -411,8 +413,8 @@ impl ShaderState {
                     let mut x = if size == 1 { wg } else { self.mul(wg, Val::K(size)) };
                     if size > 1 {
                         let r31 = self.fixed(31);
-                        let sh = self.bin("ISRL", Val::R(r31, 0), Val::K(10 * c as u32));
-                        let lid = self.bin("IAND", sh, Val::K(1023));
+                        let sh = self.bin(Op::Isrl, Val::R(r31, 0), Val::K(10 * c as u32));
+                        let lid = self.bin(Op::Iand, sh, Val::K(1023));
                         x = self.add(x, lid);
                     }
                     v.push(x);
@@ -429,7 +431,7 @@ impl ShaderState {
                 let mut v = vec![];
                 for c in 0..3u32 {
                     let sh = self.shr(Val::R(r31, 0), 10 * c);
-                    v.push(if c == 2 { sh } else { self.bin("IAND", sh, Val::K(1023)) });
+                    v.push(if c == 2 { sh } else { self.bin(Op::Iand, sh, Val::K(1023)) });
                 }
                 self.set(d, &v);
             }
@@ -477,17 +479,17 @@ impl ShaderState {
                             let rb = self.konst(pbase);
                             let mut a = Val::R(rb, 0);
                             while r >= 4 {
-                                a = self.bin("IADD", a, Val::K(4));
+                                a = self.bin(Op::Iadd, a, Val::K(4));
                                 r -= 4;
                             }
                             if r > 0 {
-                                a = self.bin("IADD", a, Val::K(r));
+                                a = self.bin(Op::Iadd, a, Val::K(r));
                             }
                             a
                         }
                         _ => {
                             let w2 = self.add(w, Val::K(base_w + c));
-                            let w2 = self.bin("IAND", w2, Val::K(SLOT_WORDS - 1));
+                            let w2 = self.bin(Op::Iand, w2, Val::K(SLOT_WORDS - 1));
                             self.add(Val::K(pbase), w2)
                         }
                     };
@@ -520,7 +522,7 @@ impl ShaderState {
                 let control = i.get_const_index(NIR_INTRINSIC_EXECUTION_SCOPE) != 0;
                 // One quad runs every instruction in all its lanes in order: it needs no barrier.
                 if control && ws[0] * ws[1] * ws[2] > LANES {
-                    self.sel.prog.push(BorgInstr { mnem: "BARRIER", dst: NO_DST, srcs: vec![], swz: vec![] });
+                    self.sel.prog.push(BorgInstr { mnem: Op::Barrier.into(), dst: NO_DST, srcs: vec![], swz: vec![] });
                 }
             }
             nir_intrinsic_load_shared | nir_intrinsic_store_shared => {
@@ -574,17 +576,17 @@ impl ShaderState {
                     None
                 };
                 let lt = match i.atomic_op() {
-                    nir_atomic_op_imin | nir_atomic_op_imax => Some("ISLT"),
-                    nir_atomic_op_umin | nir_atomic_op_umax => Some("ISLTU"),
+                    nir_atomic_op_imin | nir_atomic_op_imax => Some(Op::Islt),
+                    nir_atomic_op_umin | nir_atomic_op_umax => Some(Op::Isltu),
                     _ => None,
                 };
                 let alu = match i.atomic_op() {
-                    nir_atomic_op_iadd => "IADD",
-                    nir_atomic_op_iand => "IAND",
-                    nir_atomic_op_ior => "IOR",
-                    nir_atomic_op_ixor => "IXOR",
-                    nir_atomic_op_xchg | nir_atomic_op_cmpxchg => "",
-                    _ if lt.is_some() => "",
+                    nir_atomic_op_iadd => Some(Op::Iadd),
+                    nir_atomic_op_iand => Some(Op::Iand),
+                    nir_atomic_op_ior => Some(Op::Ior),
+                    nir_atomic_op_ixor => Some(Op::Ixor),
+                    nir_atomic_op_xchg | nir_atomic_op_cmpxchg => None,
+                    _ if lt.is_some() => None,
                     _ => {
                         self.fail("unsupported atomic op".into());
                         return;
@@ -596,40 +598,40 @@ impl ShaderState {
                 let r30 = self.fixed(30);
                 // r30 counts across the workgroup's quads; the lane is its low bits.
                 let (m, q) = (self.konst(LANES - 1), self.sel.fresh());
-                self.sel.prog.push(BorgInstr { mnem: "IAND", dst: q, srcs: vec![r30, m], swz: vec![0, 0] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Iand.into(), dst: q, srcs: vec![r30, m], swz: vec![0, 0] });
                 for lane in 0..LANES {
                     let l = self.konst(lane);
                     let p = &mut self.sel.prog;
-                    let mut op = |mnem: &'static str, dst: u32, srcs: Vec<(u32, u8)>| {
+                    let mut op = |mnem: Op, dst: u32, srcs: Vec<(u32, u8)>| {
                         let (srcs, swz) = srcs.into_iter().unzip();
-                        p.push(BorgInstr { mnem, dst, srcs, swz });
+                        p.push(BorgInstr { mnem: mnem.into(), dst, srcs, swz });
                     };
-                    op("ISEQ", t, vec![(q, 0), (l, 0)]);
-                    op("EXPUSH", NO_DST, vec![(t, 0)]);
-                    op("LOAD", old, vec![a]);
-                    let v = if !alu.is_empty() {
+                    op(Op::Iseq, t, vec![(q, 0), (l, 0)]);
+                    op(Op::Expush, NO_DST, vec![(t, 0)]);
+                    op(Op::Load, old, vec![a]);
+                    let v = if let Some(alu) = alu {
                         op(alu, new, vec![(old, 0), x]);
                         (new, 0)
                     } else if let Some(c) = cmp {
                         // old + (old == cmp) * (x - old)
-                        op("ISEQ", t, vec![(old, 0), c]);
-                        op("ISUB", u, vec![x, (old, 0)]);
-                        op("IMUL", w, vec![(t, 0), (u, 0)]);
-                        op("IADD", new, vec![(old, 0), (w, 0)]);
+                        op(Op::Iseq, t, vec![(old, 0), c]);
+                        op(Op::Isub, u, vec![x, (old, 0)]);
+                        op(Op::Imul, w, vec![(t, 0), (u, 0)]);
+                        op(Op::Iadd, new, vec![(old, 0), (w, 0)]);
                         (new, 0)
                     } else if let Some(lt) = lt {
                         // max: old + (old < x) * (x - old); min: x + (old < x) * (old - x)
                         let (p0, q0) = if is_min { (x, (old, 0)) } else { ((old, 0), x) };
                         op(lt, t, vec![(old, 0), x]);
-                        op("ISUB", u, vec![q0, p0]);
-                        op("IMUL", w, vec![(t, 0), (u, 0)]);
-                        op("IADD", new, vec![p0, (w, 0)]);
+                        op(Op::Isub, u, vec![q0, p0]);
+                        op(Op::Imul, w, vec![(t, 0), (u, 0)]);
+                        op(Op::Iadd, new, vec![p0, (w, 0)]);
                         (new, 0)
                     } else {
                         x
                     };
-                    op("STORE", NO_DST, vec![a, v]);
-                    op("EXPOP", NO_DST, vec![]);
+                    op(Op::Store, NO_DST, vec![a, v]);
+                    op(Op::Expop, NO_DST, vec![]);
                 }
                 self.set(d, &[Val::R(old, 0)]);
             }
@@ -679,7 +681,7 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
     if compact {
         cx.sink_loads();
     }
-    if cx.sel.prog.iter().any(|i| i.mnem == "BARRIER") {
+    if cx.sel.prog.iter().any(|i| i.mnem == Op::Barrier) {
         crate::opt::dce(&mut cx.sel.prog, &cx.out_roots);
         cx.spill_across_barriers()?;
     }

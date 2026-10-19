@@ -3,6 +3,8 @@
 
 use crate::BorgInstr;
 use std::collections::{HashMap, HashSet};
+use crate::opcodes::Op;
+use crate::Mnem;
 
 pub(crate) fn dce(prog: &mut Vec<BorgInstr>, out_roots: &[u32]) {
     let pre_dce = prog.len();
@@ -49,7 +51,7 @@ pub(crate) fn schedule_for_pressure(prog: &mut Vec<BorgInstr>, out_roots: &[u32]
     {
         let mut cur: Vec<BorgInstr> = Vec::new();
         for instr in prog.drain(..) {
-            if instr.dst == crate::NO_DST || instr.mnem == "TEX" || instr.mnem == "FATTR" {
+            if instr.dst == crate::NO_DST || instr.mnem == Op::Tex || instr.mnem == Op::Fattr {
                 runs.push((std::mem::take(&mut cur), Some(instr)));
             } else {
                 cur.push(instr);
@@ -182,7 +184,7 @@ pub(crate) fn fuse_fmadd(
         }
         let mut remove = vec![false; prog.len()];
         for i in 0..prog.len() {
-            if prog[i].mnem != "FADD" || prog[i].srcs.len() != 2 {
+            if prog[i].mnem != Op::Fadd || prog[i].srcs.len() != 2 {
                 continue;
             }
             for k in 0..2 {
@@ -190,13 +192,13 @@ pub(crate) fn fuse_fmadd(
                 let Some(&mi) = def_idx.get(&m) else { continue };
                 if mi < i
                     && !remove[mi]
-                    && prog[mi].mnem == "FMUL"
+                    && prog[mi].mnem == Op::Fmul
                     && prog[mi].srcs.len() == 2
                     && uses.get(&m) == Some(&1)
                 {
                     let (a, b) = (prog[mi].srcs[0], prog[mi].srcs[1]);
                     // The fused multiply reads its operands at the add.
-                    if prog[mi + 1..i].iter().any(|x| x.dst == a || x.dst == b || x.mnem == "LABEL" || x.mnem == "BRNZ") {
+                    if prog[mi + 1..i].iter().any(|x| x.dst == a || x.dst == b || x.mnem == Mnem::Label || x.mnem == Op::Brnz) {
                         continue;
                     }
                     let (sa, sb) = (prog[mi].swz[0], prog[mi].swz[1]);
@@ -206,7 +208,7 @@ pub(crate) fn fuse_fmadd(
                     if n_uniform > 1 {
                         continue;
                     }
-                    prog[i].mnem = "FMADD";
+                    prog[i].mnem = Op::Fmadd.into();
                     prog[i].srcs = vec![a, b, c];
                     prog[i].swz = vec![sa, sb, sc];
                     remove[mi] = true;
@@ -233,7 +235,7 @@ pub(crate) fn fuse_fmadd(
 pub(crate) fn classify_uniform(prog: &[BorgInstr], roots: &HashSet<u32>) -> HashSet<u32> {
     let mut uniform: HashSet<u32> = roots.clone();
     for i in prog {
-        if i.mnem == "DDX" || i.mnem == "DDY" {
+        if i.mnem == Op::Ddx || i.mnem == Op::Ddy {
             uniform.insert(i.dst);
         } else if !i.srcs.is_empty() && i.srcs.iter().all(|s| uniform.contains(s)) {
             uniform.insert(i.dst);

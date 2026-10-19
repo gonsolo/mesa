@@ -6,6 +6,7 @@ use crate::survey::{survey, Survey};
 use crate::{Flags, Ubo};
 use compiler::bindings::*;
 use std::env;
+use crate::opcodes::Op;
 
 impl ShaderState {
     pub unsafe fn start(nir: *mut nir_shader, flags: Flags, out_select: i32) -> (ShaderState, *mut nir_function_impl, u32) {
@@ -47,7 +48,7 @@ impl ShaderState {
                 eprintln!("borgc:   {} v{}, {}", i.mnem, i.dst, s.join(", "));
             }
         }
-        let srgb = self.sel.prog.iter().any(|i| i.mnem == "FSRGB");
+        let srgb = self.sel.prog.iter().any(|i| i.mnem == Op::Fsrgb);
         self.skipped.retain(|&op| !(matches!(op, "fpow" | "fge") && srgb));
         if !self.skipped.is_empty() {
             eprintln!("borgc: ERROR unhandled NIR ops, refusing to emit a wrong shader: {}", self.skipped.join(", "));

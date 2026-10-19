@@ -1,4 +1,6 @@
 use crate::config::Flags;
+use crate::opcodes::Op;
+use crate::Mnem;
 use crate::consts::{ConstPool, Window};
 use compiler::bindings::*;
 use std::collections::HashMap;
@@ -30,36 +32,36 @@ impl Selector {
         self.next_vreg += 1;
         v
     }
-    pub fn op(&mut self, mnem: &'static str, srcs: Vec<u32>, swz: Vec<u8>) -> u32 {
+    pub fn op(&mut self, mnem: impl Into<Mnem>, srcs: Vec<u32>, swz: Vec<u8>) -> u32 {
         let dst = self.fresh();
-        self.prog.push(crate::BorgInstr { mnem, dst, srcs, swz });
+        self.prog.push(crate::BorgInstr { mnem: mnem.into(), dst, srcs, swz });
         dst
     }
-    pub fn op0(&mut self, mnem: &'static str, srcs: Vec<u32>) -> u32 {
+    pub fn op0(&mut self, mnem: impl Into<Mnem>, srcs: Vec<u32>) -> u32 {
         let swz = vec![0; srcs.len()];
         self.op(mnem, srcs, swz)
     }
 }
 
 impl Selector {
-    pub fn opc(&mut self, mnem: &'static str, s: &[(u32, u8)]) -> u32 {
+    pub fn opc(&mut self, mnem: impl Into<Mnem>, s: &[(u32, u8)]) -> u32 {
         let srcs = s.iter().map(|x| x.0).collect();
         let swz = s.iter().map(|x| x.1).collect();
         self.op(mnem, srcs, swz)
     }
 
-    pub fn pair(&mut self, mnem: &'static str, x: (u32, u8), y: (u32, u8)) -> (u32, u8) {
+    pub fn pair(&mut self, mnem: impl Into<Mnem>, x: (u32, u8), y: (u32, u8)) -> (u32, u8) {
         (self.opc(mnem, &[x, y]), 0)
     }
 
     pub fn fsub(&mut self, hi: (u32, u8), lo: (u32, u8)) -> u32 {
-        let neg = self.opc("FNEG", &[lo]);
-        self.opc("FADD", &[hi, (neg, 0)])
+        let neg = self.opc(Op::Fneg, &[lo]);
+        self.opc(Op::Fadd, &[hi, (neg, 0)])
     }
 
     pub fn reg(&mut self, v: (u32, u8)) -> (u32, u8) {
         if matches!(self.ubo.get(&v.0), Some(crate::Ubo::Uniform(_))) {
-            (self.opc("FMOV", &[(v.0, 0)]), 0)
+            (self.opc(Op::Fmov, &[(v.0, 0)]), 0)
         } else {
             v
         }
@@ -168,7 +170,7 @@ mod tests {
     #[test]
     fn op0_reads_component_zero_of_every_source() {
         let mut s = Selector::new();
-        let d = s.op0("FADD", vec![3, 4]);
+        let d = s.op0(Op::Fadd, vec![3, 4]);
         assert_eq!((s.prog[0].dst, s.prog[0].swz.clone()), (d, vec![0, 0]));
     }
 
@@ -177,7 +179,7 @@ mod tests {
         let mut s = Selector::new();
         let d = s.fsub((7, 2), (8, 1));
         let mnems: Vec<_> = s.prog.iter().map(|i| i.mnem).collect();
-        assert_eq!(mnems, ["FNEG", "FADD"]);
+        assert_eq!(mnems, [Op::Fneg, Op::Fadd]);
         assert_eq!((s.prog[1].dst, s.prog[1].srcs[0], s.prog[1].swz[0]), (d, 7, 2));
     }
 
@@ -187,6 +189,6 @@ mod tests {
         s.ubo.insert(5, crate::Ubo::Uniform(20));
         assert_eq!(s.reg((6, 1)), (6, 1));
         let (v, c) = s.reg((5, 0));
-        assert!(v != 5 && c == 0 && s.prog[0].mnem == "FMOV");
+        assert!(v != 5 && c == 0 && s.prog[0].mnem == Op::Fmov);
     }
 }
