@@ -79,6 +79,7 @@ pub(crate) fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
         "EXELSE" => 0x5800_0000,
         "EXPOP" => 0x5C00_0000,
         "BARRIER" => 0x7800_0000,
+        "EXANY" => un(0x7C00_0000),
         _ => return None, // mov is handled separately (register copy)
     })
 }
@@ -103,7 +104,12 @@ pub(crate) fn encode_fattr(rd: u8, index: u16) -> Option<u32> {
     Some(0x8800_0000u32 | (((t >> 5) & 0x1F) << 20) | ((t & 0x1F) << 15) | ((rd as u32) << 7))
 }
 
-#[cfg(test)]
+/// JMP: absolute, 18 bits packed as funct3:rs2:rs1:rd.
+pub(crate) fn encode_jmp(target: u32) -> u32 {
+    let t = target;
+    0xA000_0000 | ((t >> 10) & 0x1F) << 20 | ((t >> 5) & 0x1F) << 15 | ((t >> 15) & 7) << 12 | (t & 0x1F) << 7
+}
+
 pub(crate) fn encode_branch(mnem: &str, rs1: u8, target: u16) -> Option<u32> {
     let base = match mnem {
         "BRZ" => 0x4C00_0000u32,
@@ -111,7 +117,7 @@ pub(crate) fn encode_branch(mnem: &str, rs1: u8, target: u16) -> Option<u32> {
         _ => return None,
     };
     if target >= 1024 {
-        return None; // 10 bits; far past any IMEM Borg builds
+        return None; // 10 bits: the low bits of a target in the branch's own page
     }
     let t = target as u32;
     Some(base | (((t >> 5) & 0x1F) << 20) | ((rs1 as u32) << 15) | ((t & 0x1F) << 7))
@@ -160,6 +166,9 @@ mod tests {
         assert_eq!(encode("EXELSE", 0, 0, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2C << 25);
         assert_eq!(encode("EXPOP", 0, 0, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2E << 25);
         assert_eq!(encode("BARRIER", 0, 0, 0, 0, 0).unwrap(), 0x3C << 25);
+        assert_eq!(encode("EXANY", 3, 0, 0, 0, 0).unwrap(), 0x3E << 25 | 3 << 7);
+        // Instructions.JMP(0x2_5ABC): rs2 = 22, rs1 = 21, rd = 28, funct3 = 4.
+        assert_eq!(encode_jmp(0x2_5ABC), 0x50 << 25 | 22 << 20 | 21 << 15 | 4 << 12 | 28 << 7);
         assert_eq!(encode_sout(0, 0, 0).unwrap() & 0xFE00_0000, 0x42 << 25);
         assert_eq!(encode_fattr(0, 0).unwrap() & 0xFE00_0000, 0x44 << 25);
     }

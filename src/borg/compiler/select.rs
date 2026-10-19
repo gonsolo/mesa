@@ -1002,13 +1002,46 @@ impl ShaderState {
             }
         }
     }
+    /// A loop runs while EXANY sees an alive lane: `go` masks one trip, a jump clears it.
+    fn loop_mark(&mut self, mnem: &str, id: usize, (alive, go, any): (u32, u32, u32)) {
+        let one = if mnem == "LOOP_HEAD" { self.konst(1, Kv::Int) } else { 0 };
+        let i = |mnem: &'static str, dst: u32, srcs: Vec<u32>, swz: Vec<u8>| BorgInstr { mnem, dst, srcs, swz };
+        let seq = match mnem {
+            "LOOP_HEAD" => vec![
+                i("IOR", alive, vec![one, one], vec![0, 0]),
+                i("LABEL", NO_DST, vec![], vec![id as u8]),
+                i("IOR", go, vec![alive, alive], vec![0, 0]),
+                i("EXPUSH", NO_DST, vec![go], vec![0]),
+            ],
+            "LOOP_END" => vec![
+                i("EXPOP", NO_DST, vec![], vec![]),
+                i("EXPUSH", NO_DST, vec![alive], vec![0]),
+                i("EXANY", any, vec![], vec![]),
+                i("EXPOP", NO_DST, vec![], vec![]),
+                // The branch names its LABEL in its second swizzle slot.
+                i("BRNZ", NO_DST, vec![any], vec![0, id as u8]),
+            ],
+            _ => vec![i("EXPUSH", NO_DST, vec![go], vec![0])],
+        };
+        self.sel.prog.extend(seq);
+    }
+
     /// Selects Borg instructions for the entry function in virtual registers, one NIR instruction
     /// at a time.
     pub unsafe fn select_entry(&mut self, entry: *mut nir_function_impl) {
         let mut cf_marks: std::collections::HashMap<usize, Vec<CfMark>> =
             std::collections::HashMap::new();
         let mut cf_unsupported: Vec<&'static str> = Vec::new();
-        collect_cf_marks((*entry).iter_body(), &mut cf_marks, &mut cf_unsupported);
+        let mut loops = crate::Loops::default();
+        collect_cf_marks((*entry).iter_body(), &mut cf_marks, &mut cf_unsupported, self.is_compute.then_some(&mut loops), None);
+        if loops.count > 256 {
+            loops.err = Some(format!("{} loops; labels are 8 bits", loops.count));
+        }
+        if let Some(e) = loops.err.take() {
+            self.cs.err.get_or_insert(e);
+        }
+        // Per loop: lanes still looping, lanes going round this time, and whether any lane is.
+        let lv: Vec<(u32, u32, u32)> = (0..loops.count).map(|_| (self.sel.fresh(), self.sel.fresh(), self.sel.fresh())).collect();
         if !cf_unsupported.is_empty() {
             eprintln!(
                 "borgc: WARNING unsupported control flow ({}) -- the body will be \
@@ -1021,6 +1054,10 @@ impl ShaderState {
         for block in (*entry).iter_blocks() {
             if let Some(ms) = cf_marks.get(&(block as *const nir_block as usize)) {
                 for m in ms {
+                    if let Some(id) = m.lp {
+                        self.loop_mark(m.mnem, id, lv[id]);
+                        continue;
+                    }
                     let cond = m.cond.map(|c| match self.consts.get(&c) {
                         Some(&b) if !self.sel.vec_map.contains_key(&c) => (self.konst(b, Kv::Word), 0),
                         _ => resolve_vm(&self.sel.vec_map, c, 0),
@@ -1034,6 +1071,17 @@ impl ShaderState {
                 }
             }
             for instr in block.iter_instr_list() {
+                if let Some(j) = instr.as_jump() {
+                    if let Some(&id) = loops.jumps.get(&(block as *const nir_block as usize)) {
+                        let (alive, go, _) = lv[id];
+                        let zero = self.konst(0, Kv::Int);
+                        let clear = if j.type_ == nir_jump_break { vec![alive, go] } else { vec![go] };
+                        for d in clear {
+                            self.sel.prog.push(BorgInstr { mnem: "IOR", dst: d, srcs: vec![zero, zero], swz: vec![0, 0] });
+                        }
+                    }
+                    continue;
+                }
                 if let Some(intr) = instr.as_intrinsic() {
                     if intr.intrinsic == nir_intrinsic_decl_reg {
                         let n = intr.get_const_index(NIR_INTRINSIC_NUM_COMPONENTS);

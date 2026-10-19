@@ -37,7 +37,7 @@ const struct nir_shader_compiler_options borg_nir_options = {
    .lower_extract_word = true,
    .lower_unpack_unorm_4x8 = true,
    .lower_pack_unorm_4x8 = true,
-   .max_unroll_iterations = 32,   /* the ISA has no backward branch: constant loops are unrolled */
+   .max_unroll_iterations = 32,   /* graphics shaders have no loops: constant loops are unrolled */
 };
 
 /* Location (vec4-slot) sizing for nir_lower_io of varyings. */

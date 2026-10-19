@@ -1,7 +1,7 @@
-use crate::encode::{emit_blob, encode, encode_fattr, encode_sout};
+use crate::encode::{emit_blob, encode, encode_branch, encode_fattr, encode_jmp, encode_sout};
 use std::env;
 use crate::state::ShaderState;
-use crate::Ubo;
+use crate::{BorgInstr, Ubo};
 use std::collections::HashMap;
 
 pub struct Encoded {
@@ -55,8 +55,24 @@ pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
             _ => (*alloc.get(&s).unwrap_or(&0), false),
         }
     };
-    for i in &cx.sel.prog {
-        if i.mnem == "mov" {
+    let (labels, far) = branch_layout(&cx.sel.prog, n_preload);
+    for (k, i) in cx.sel.prog.iter().enumerate() {
+        if i.mnem == "mov" || i.mnem == "LABEL" {
+            continue;
+        }
+        if i.mnem == "BRNZ" {
+            let t = labels[&i.swz[1]] as u32;
+            let rs1 = resolve_op(i.srcs[0], i.swz[0]).0;
+            match far.get(&k) {
+                None => words.extend(encode_branch("BRNZ", rs1, (t % 1024) as u16)),
+                Some(&pad) => {
+                    for _ in 0..pad {
+                        words.push(encode_jmp(words.len() as u32 + 1));
+                    }
+                    words.extend(encode_branch("BRZ", rs1, ((words.len() + 2) % 1024) as u16));
+                    words.push(encode_jmp(t));
+                }
+            }
             continue;
         }
         if matches!(i.mnem, "EXPUSH" | "EXELSE" | "EXPOP") {
@@ -151,6 +167,39 @@ pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
     Encoded { words, n_preload, n_body, pending }
 }
 
+/// LABEL word addresses, and the BRNZ whose target lies in another 1024-word page: those become
+/// BRZ over a JMP, after JMP-to-next padding that keeps the BRZ's own target in its page.
+fn branch_layout(prog: &[BorgInstr], start: usize) -> (HashMap<u8, usize>, HashMap<usize, usize>) {
+    let mut far: HashMap<usize, usize> = HashMap::new();
+    loop {
+        let (mut a, mut labels, mut at) = (start, HashMap::new(), Vec::new());
+        for (k, i) in prog.iter().enumerate() {
+            match i.mnem {
+                "mov" => {}
+                "LABEL" => {
+                    labels.insert(i.swz[0], a);
+                }
+                "BRNZ" => {
+                    at.push((k, a));
+                    a += far.get(&k).map_or(1, |p| p + 2);
+                }
+                _ => a += 1,
+            }
+        }
+        let mut changed = false;
+        for (k, a) in at {
+            let t = labels[&prog[k].swz[1]];
+            if far.contains_key(&k) || a / 1024 != t / 1024 {
+                let pad = if a % 1024 > 1021 { 1024 - a % 1024 } else { 0 };
+                changed |= far.insert(k, pad) != Some(pad);
+            }
+        }
+        if !changed {
+            return (labels, far);
+        }
+    }
+}
+
 pub fn build_blob(
     cx: &ShaderState,
     words: &[u32],
@@ -231,4 +280,34 @@ pub fn build_blob(
         }
     }
     blob
+}
+
+#[cfg(test)]
+mod tests {
+    use super::branch_layout;
+    use crate::{BorgInstr, NO_DST};
+
+    fn prog(body: usize) -> Vec<BorgInstr> {
+        let mut p = vec![BorgInstr { mnem: "LABEL", dst: NO_DST, srcs: vec![], swz: vec![7] }];
+        p.extend((0..body).map(|k| BorgInstr { mnem: "IADD", dst: k as u32, srcs: vec![], swz: vec![] }));
+        p.push(BorgInstr { mnem: "BRNZ", dst: NO_DST, srcs: vec![0], swz: vec![0, 7] });
+        p
+    }
+
+    #[test]
+    fn a_branch_in_its_targets_page_is_near() {
+        let (labels, far) = branch_layout(&prog(10), 3);
+        assert_eq!(labels[&7], 3);
+        assert!(far.is_empty());
+    }
+
+    #[test]
+    fn a_far_branch_is_padded_off_the_page_end() {
+        // Label at 1000, BRNZ at 2046 (1022 in its page): its BRZ would skip into the next page.
+        let p = prog(1046);
+        let (_, far) = branch_layout(&p, 1000);
+        assert_eq!(far[&(p.len() - 1)], 2);
+        let (_, far) = branch_layout(&prog(1100), 0);
+        assert_eq!(far.values().copied().collect::<Vec<_>>(), vec![0]);
+    }
 }

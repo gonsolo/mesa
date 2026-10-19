@@ -106,6 +106,7 @@ impl ShaderState {
                 last.insert(*s, at);
             }
         }
+        crate::regalloc::extend_for_loops(&self.sel.prog, &mut def_at, &mut last);
         let pinned = |v: &u32| self.sel.ubo.contains_key(v);
         let vals: Vec<(u32, usize, usize)> = def_at.iter().filter(|(v, _)| !pinned(v)).map(|(&v, &d)| (v, d, last[&v])).collect();
         let at = (0..self.sel.prog.len()).find(|&p| vals.iter().filter(|&&(_, d, l)| d <= p && p <= l).count() > limit)?;
@@ -159,6 +160,7 @@ impl ShaderState {
                     last.insert(*s, at);
                 }
             }
+            crate::regalloc::extend_for_loops(&self.sel.prog, &mut def_at, &mut last);
             let crossing = def_at
                 .iter()
                 .filter(|(v, &d)| !self.sel.ubo.contains_key(v) && last.get(v).is_some_and(|&l| bars.iter().any(|&b| d < b && b < l)))

@@ -87,7 +87,7 @@ impl ShaderState {
                 let n = &prog[j];
                 let stop = n.dst == d || n.srcs.contains(&d) || match n.mnem {
                     "STORE" => kval.get(&n.srcs[0]).map_or(true, |&b| b == a),
-                    "EXPUSH" | "EXELSE" | "EXPOP" | "BRZ" | "BRNZ" | "BARRIER" => true,
+                    "EXPUSH" | "EXELSE" | "EXPOP" | "BRZ" | "BRNZ" | "BARRIER" | "LABEL" => true,
                     _ => false,
                 };
                 if stop {
@@ -118,8 +118,8 @@ impl ShaderState {
         let mut ks: Vec<(u32, u32)> = uses.keys().map(|&v| (v, self.cs.kval[&v])).collect();
         ks.sort_by_key(|&(v, b)| (std::cmp::Reverse(uses[&v]), b));
         let free = self.cp.regs.len() - self.cp.count;
-        // The pool base, one, and a pointer to restart from after each barrier.
-        let ptrs = 2 + self.sel.prog.iter().filter(|i| i.mnem == "BARRIER").count();
+        // The pool base, one, and a pointer to restart from after each barrier, loop head and loop.
+        let ptrs = 2 + self.sel.prog.iter().filter(|i| matches!(i.mnem, "BARRIER" | "LABEL" | "BRNZ")).count();
         let pooled_n = if ks.len() <= free.min(cap) { 0 } else { ks.len() - free.saturating_sub(ptrs).min(cap) };
         let (keep, pooled) = ks.split_at(ks.len() - pooled_n);
         for &(v, bits) in keep {
@@ -180,8 +180,9 @@ impl ShaderState {
                         frames.push((ptr, loaded.clone()));
                     }
                 }
-                // Registers do not survive the other quads' turns.
-                "BARRIER" => {
+                // Registers do not survive the other quads' turns, a pointer stepped in a loop
+                // differs between trips, and one stepped under its mask between lanes.
+                "BARRIER" | "LABEL" | "BRNZ" => {
                     let r = self.cp.alloc_reg();
                     self.cp.uniforms.push((r, POOL_BASE_WORDS + self.cs.pool.len() as u32));
                     ptr = (self.fixed(r), self.cs.pool.len());
