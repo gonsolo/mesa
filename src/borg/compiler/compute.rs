@@ -24,6 +24,7 @@ pub(crate) struct Out {
     /// bit 1: reads NumWorkGroups; bits 8-12 name the preset register of x (y, z below it).
     /// bit 2: packed: four one-invocation workgroups along x share a quad, `local` is (4, 1, 1).
     pub flags: u32,
+    pub pool: Vec<u32>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -776,7 +777,7 @@ pub(crate) unsafe fn compile_unified(nir: *mut nir_shader) -> Result<Out, String
 }
 
 unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<usize>, compact: bool, pack: bool) -> Result<Out, String> {
-    let (mut cx, entry, _) = ShaderState::start(nir, crate::config::Flags(0));
+    let (mut cx, entry, _) = ShaderState::start(nir, crate::config::Flags(0), -1);
     cx.spill_limit = limit;
     let ws = (*nir).info.workgroup_size;
     cx.cs.ws = [ws[0] as u32, ws[1] as u32, ws[2] as u32];
@@ -802,7 +803,6 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
         eprintln!("borgc[compute]: spilled {} value(s) to keep {:?} live", cx.spill_slots, limit);
     }
     cx.pool_consts(cap, !compact)?;
-    crate::set_cs_pool(std::mem::take(&mut cx.cs.pool));
     let mut reserved: Vec<u8> = cx.cp.preset_regs().to_vec();
     reserved.extend([30u8, 31, 12, 13, 14]);
     let alloc = crate::fixed::allocate(&cx, &HashMap::new(), &mut reserved).ok_or(OUT_OF_REGISTERS)?;
@@ -819,7 +819,7 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
         regs.extend((0..3).map(|c| ((WG_BASE_REG + c) as u8, 0)));
     }
     let flags = cx.cs.atomics as u32 | cx.cs.nwg.map_or(0, |r| 2 | (r as u32) << 8) | (cx.cs.packed as u32) << 2;
-    Ok(Out { words: enc.words, regs, local: cx.cs.ws, flags })
+    Ok(Out { words: enc.words, regs, local: cx.cs.ws, flags, pool: std::mem::take(&mut cx.cs.pool) })
 }
 
 #[no_mangle]
@@ -828,6 +828,7 @@ pub unsafe extern "C" fn borgc_compile_compute(
     words: *mut u32, word_cap: u32, nwords: *mut u32,
     regs: *mut u32, reg_cap: u32, nregs: *mut u32,
     local: *mut u32, flags: *mut u32,
+    pool: *mut u32, pool_cap: u32, npool: *mut u32,
 ) -> u32 {
     crate::borgc_capture(nir, 1, 0, -1);
     let key = if !nir.is_null() && std::env::var("BORGC_CORPUS_DIR").is_ok() {
@@ -835,7 +836,7 @@ pub unsafe extern "C" fn borgc_compile_compute(
     } else {
         None
     };
-    let ret = compile_compute_inner(nir, words, word_cap, nwords, regs, reg_cap, nregs, local, flags);
+    let ret = compile_compute_inner(nir, words, word_cap, nwords, regs, reg_cap, nregs, local, flags, pool, pool_cap, npool);
     if let Some(key) = key {
         // flags, local size, program words, then the (register, value) presets.
         let mut blob: Vec<u32> = vec![];
@@ -856,9 +857,10 @@ unsafe fn compile_compute_inner(
     words: *mut u32, word_cap: u32, nwords: *mut u32,
     regs: *mut u32, reg_cap: u32, nregs: *mut u32,
     local: *mut u32, flags: *mut u32,
+    pool: *mut u32, pool_cap: u32, npool: *mut u32,
 ) -> u32 {
     // An assert in the backend must refuse the shader, not abort the process.
-    crate::set_cs_pool(Vec::new());
+    *npool = 0;
     let compiled = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile_unified(nir))) {
         Ok(r) => r,
         Err(_) => return 1,
@@ -878,6 +880,9 @@ unsafe fn compile_compute_inner(
                 *local.add(k) = o.local[k];
             }
             *flags = o.flags;
+            let n = o.pool.len().min(pool_cap as usize);
+            std::ptr::copy_nonoverlapping(o.pool.as_ptr(), pool, n);
+            *npool = n as u32;
             0
         }
         Ok(o) => {

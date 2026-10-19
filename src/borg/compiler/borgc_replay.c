@@ -41,32 +41,27 @@ static void
 compile_graphics(struct blob *o, nir_shader *nir, uint32_t vfetch, int32_t out_select)
 {
    static uint8_t buf[BLOB_MAX];
-   static uint32_t pool[POOL_MAX];
+   struct borgc_info info;
    uint32_t len = 0;
-   borgc_set_output_select(out_select);
-   uint32_t ret = borgc_compile_nir(nir, buf, BLOB_MAX, &len, vfetch);
-   borgc_set_output_select(-1);
+   uint32_t ret = borgc_compile_nir(nir, buf, BLOB_MAX, &len, vfetch, out_select, &info);
    put32(o, ret);
    put32(o, len);
    put(o, buf, len <= BLOB_MAX ? len : 0);
-   put32(o, borgc_last_push_window());
-   put32(o, borgc_last_spill_slots());
+   put32(o, info.push_window);
+   put32(o, info.spill_slots);
    /* The pool of the shader's stage, read only for a blob the driver keeps. */
-   uint32_t n = 0;
-   if (len > 0 && len <= BLOB_MAX)
-      n = nir->info.stage == MESA_SHADER_FRAGMENT ? borgc_last_frag_pool(pool, POOL_MAX)
-                                                 : borgc_last_vert_pool(pool, POOL_MAX);
+   uint32_t n = len > 0 && len <= BLOB_MAX ? MIN2(info.npool, POOL_MAX) : 0;
    put32(o, n);
-   put(o, pool, 4 * n);
+   put(o, info.pool, 4 * n);
 }
 
 static void
 compile_compute(struct blob *o, nir_shader *nir)
 {
    static uint32_t words[CS_WORDS_MAX], regs[2 * CS_REGS_MAX], pool[CS_POOL_MAX];
-   uint32_t nwords = 0, nregs = 0, local[3] = { 0 }, flags = 0;
+   uint32_t nwords = 0, nregs = 0, local[3] = { 0 }, flags = 0, npool = 0;
    uint32_t rc = borgc_compile_compute(nir, words, CS_WORDS_MAX, &nwords, regs, CS_REGS_MAX,
-                                       &nregs, local, &flags);
+                                       &nregs, local, &flags, pool, CS_POOL_MAX, &npool);
    put32(o, rc);
    if (rc == 0) {
       put32(o, nwords);
@@ -76,9 +71,8 @@ compile_compute(struct blob *o, nir_shader *nir)
       put(o, local, sizeof local);
       put32(o, flags);
    }
-   uint32_t n = rc == 0 ? borgc_last_cs_pool(pool, CS_POOL_MAX) : 0;
-   put32(o, n);
-   put(o, pool, 4 * n);
+   put32(o, rc == 0 ? npool : 0);
+   put(o, pool, rc == 0 ? 4 * npool : 0);
 }
 
 static bool

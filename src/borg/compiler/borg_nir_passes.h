@@ -54,22 +54,27 @@ void borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_bl
  * signals an undersized buffer; returns the instruction count. */
 /* vfetch: bit 31 = fetch vertex inputs with TEX (slot 128 + location); bits 0..15 = the
  * locations whose binding is instance-rate. 0 keeps the cube's uniform-buffer pulling. */
+/* out_select: a fragment shader keeps only colour output k (-1: all), for a target drawn on its
+ * own. info, if not NULL, gets what the driver stages beside the blob. */
+#define BORGC_POOL_MAX 64
+struct borgc_info {
+   uint32_t pool[BORGC_POOL_MAX]; /* with a blob: words fetched from vertex slot 40 (fragment) or 42 */
+   uint32_t npool;
+   uint32_t spill_slots;          /* scratch slots of the draw's buffer region */
+   uint32_t push_window;          /* push constants read from the heap window */
+};
 uint32_t borgc_compile_nir(struct nir_shader *nir, uint8_t *out_buf,
-                           uint32_t buf_cap, uint32_t *out_len, uint32_t vfetch);
+                           uint32_t buf_cap, uint32_t *out_len, uint32_t vfetch,
+                           int32_t out_select, struct borgc_info *info);
 uint32_t borgc_selftest(void);
-/* The constant pool of the fragment shader compiled last: words fetched from vertex slot 40. */
-uint32_t borgc_last_frag_pool(uint32_t *out, uint32_t cap);
-bool borgc_last_push_window(void);
-uint32_t borgc_last_spill_slots(void);
-void borgc_set_output_select(int k);
-uint32_t borgc_last_vert_pool(uint32_t *out, uint32_t cap);
-uint32_t borgc_last_cs_pool(uint32_t *out, uint32_t cap);
 
-/* Compute: program words, (register, value) presets and LocalSize. 0 on success. */
+/* Compute: program words, (register, value) presets, LocalSize and the constant pool for the
+ * job's slot 34. 0 on success. */
 uint32_t borgc_compile_compute(struct nir_shader *nir,
                                uint32_t *words, uint32_t word_cap, uint32_t *nwords,
                                uint32_t *regs, uint32_t reg_cap, uint32_t *nregs,
-                               uint32_t *local, uint32_t *flags);
+                               uint32_t *local, uint32_t *flags,
+                               uint32_t *pool, uint32_t pool_cap, uint32_t *npool);
 
 #ifdef __cplusplus
 }

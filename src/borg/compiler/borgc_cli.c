@@ -152,14 +152,16 @@ main(int argc, char **argv)
    if (stage == MESA_SHADER_COMPUTE) {
       static uint32_t w[4096];
       uint32_t r[64], nw = 0, nr = 0, local[3];
-      uint32_t cflags = 0;
-      uint32_t rc = borgc_compile_compute(nir, w, 4096, &nw, r, 32, &nr, local, &cflags);
+      static uint32_t pool[4096];
+      uint32_t cflags = 0, npool = 0;
+      uint32_t rc = borgc_compile_compute(nir, w, 4096, &nw, r, 32, &nr, local, &cflags, pool, 4096, &npool);
       printf("compute rc=%u local=%u,%u,%u words=%u\n", rc, local[0], local[1], local[2], nw);
       for (uint32_t i = 0; rc == 0 && i < nw; i++) printf("  %08x\n", w[i]);
       for (uint32_t i = 0; rc == 0 && i < nr; i++) printf("  r%u = %u\n", r[2*i], r[2*i+1]);
       return rc;
    }
-   uint32_t n_instrs = borgc_compile_nir(nir, blob, sizeof blob, &len, getenv("BORGC_VFETCH") ? 0x80000000u : 0);
+   uint32_t n_instrs = borgc_compile_nir(nir, blob, sizeof blob, &len, getenv("BORGC_VFETCH") ? 0x80000000u : 0,
+                                        -1, NULL);
    int rc = 0;
 
    if (len == 0) {

@@ -191,7 +191,6 @@ impl ShaderState {
         let lane = self.spill_lane.unwrap();
         let k = self.konst(slot_bits, Kv::Virtual);
         self.spill_slots += 1;
-        crate::set_spill_slots(self.spill_slots);
         let mut out = Vec::with_capacity(prog.len() + 8);
         for mut i in prog {
             if i.srcs.contains(&v) {

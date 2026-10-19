@@ -252,7 +252,7 @@ borgvk_compile_empty_frag(struct borgvk_device *device, uint32_t opt)
    nir_builder nb = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, &borg_nir_options, "borgvk_empty_fs");
    borg_lower_nir_for_borgc(nb.shader);
    uint32_t len = 0;
-   borgc_compile_nir(nb.shader, b->data, BORGVK_SHADER_BLOB_MAX, &len, opt);
+   borgc_compile_nir(nb.shader, b->data, BORGVK_SHADER_BLOB_MAX, &len, opt, -1, NULL);
    b->len = len <= BORGVK_SHADER_BLOB_MAX ? len : 0;
    b->npool = 0;
    device->frag_reads_pntc = false;
@@ -323,22 +323,21 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
    if (slot >= 0) {
       struct borgvk_shader_blob *b = &device->shader_blob[slot];
       uint32_t len = 0;
-      borgc_set_output_select(slot == BORGVK_STAGE_FRAG ? (int)device->frag_select - 1 : -1);
-      borgc_compile_nir(nir, b->data, BORGVK_SHADER_BLOB_MAX, &len,
-                        vfetch);
+      const int32_t out_select = slot == BORGVK_STAGE_FRAG ? (int)device->frag_select - 1 : -1;
+      struct borgc_info info;
+      borgc_compile_nir(nir, b->data, BORGVK_SHADER_BLOB_MAX, &len, vfetch, out_select, &info);
       if (!len && retry) {
          borg_lower_set_vertex_remat(true);
          borg_lower_nir_for_borgc_blend(retry, blend);
          borg_lower_set_vertex_remat(false);
-         borgc_compile_nir(retry, b->data, BORGVK_SHADER_BLOB_MAX, &len, vfetch);
+         borgc_compile_nir(retry, b->data, BORGVK_SHADER_BLOB_MAX, &len, vfetch, out_select, &info);
       }
-      borgc_set_output_select(-1);
-      device->stage_pwin[slot == BORGVK_STAGE_FRAG] = borgc_last_push_window();
-      device->stage_spill[slot == BORGVK_STAGE_FRAG] = borgc_last_spill_slots() > 0;
+      device->stage_pwin[slot == BORGVK_STAGE_FRAG] = info.push_window;
+      device->stage_spill[slot == BORGVK_STAGE_FRAG] = info.spill_slots > 0;
       if (len > 0 && len <= BORGVK_SHADER_BLOB_MAX) {
          b->len = len;
-         b->npool = slot == BORGVK_STAGE_FRAG ? borgc_last_frag_pool(b->pool, BORGVK_POOL_MAX) :
-                    borgc_last_vert_pool(b->pool, BORGVK_POOL_MAX);
+         b->npool = MIN2(info.npool, BORGVK_POOL_MAX);
+         memcpy(b->pool, info.pool, 4 * b->npool);
          if (!blend && !b->npool)   /* the cache holds neither */
             borgvk_shader_cache_record(stage_info, vfetch, b, device->frag_reads_pntc);
          mesa_logi("borgvk: captured %s shader blob (%u bytes) for upload",
@@ -350,7 +349,7 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
                    len, BORGVK_SHADER_BLOB_MAX);
       }
    } else {
-      borgc_compile_nir(nir, NULL, 0, NULL, 0);   /* diagnostics only */
+      borgc_compile_nir(nir, NULL, 0, NULL, 0, -1, NULL);   /* diagnostics only */
    }
    ralloc_free(retry);
    ralloc_free(nir);
@@ -375,9 +374,9 @@ borgvk_compile_compute_stage(struct borgvk_device *device,
    borg_lower_nir_for_borgc(nir);
    uint32_t rc = borgc_compile_compute(nir, pipeline->cs_words, BORGVK_CS_WORDS_MAX, &pipeline->cs_nwords,
                                        pipeline->cs_regs, 32, &pipeline->cs_nregs,
-                                       pipeline->cs_local, &pipeline->cs_flags);
+                                       pipeline->cs_local, &pipeline->cs_flags,
+                                       pipeline->cs_pool, BORGVK_CS_POOL_MAX, &pipeline->cs_npool);
    pipeline->cs_ok = rc == 0;
-   pipeline->cs_npool = rc == 0 ? borgc_last_cs_pool(pipeline->cs_pool, BORGVK_CS_POOL_MAX) : 0;
    borgvk_layout_set_base(device, pipeline->set_base);
    mesa_logi("borgvk: compute shader %s (%u words, %u presets)", rc == 0 ? "compiled" : "REFUSED",
              pipeline->cs_nwords, pipeline->cs_nregs);

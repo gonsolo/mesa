@@ -346,8 +346,7 @@ impl ShaderState {
         };
         let pool = self.fetch_pool(&pool, is_pool, ctl, one, f, zero);
         eprintln!("borgc: constant pool of {} word(s)", pool.len());
-        #[allow(static_mut_refs)]
-        crate::set_frag_pool(pool);
+        self.pool = pool;
     }
     /// A vertex shader with more constants than its window holds: the most used stay in the window, the rest
     /// are fetched from a pool in memory, four words per TEX (the way a fragment shader's are).
@@ -403,7 +402,7 @@ impl ShaderState {
         assert!(pool.len() <= 64, "borgc: vertex shader needs a constant pool of {} words (64 fit)", pool.len());
         self.cp.vs_consts = window.iter().map(|&(u, bits)| (renum[&u] as u8, bits)).collect();
         eprintln!("borgc: vertex constant pool of {} word(s)", pool.len());
-        crate::set_vert_pool(pool);
+        self.pool = pool;
     }
     /// Fetches the pooled words from memory four per TEX, again when a group goes unused for a while,
     /// and hoisted above the TEX results its first use waits for. Returns the pool in fetch order.

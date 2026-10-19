@@ -60,103 +60,16 @@ const FRAG_CONST_MAX: u32 = 11 + 64;
 const FRAG_POOL_SLOT: u32 = 40;
 /// The vertex shader's pool slot in the vertex attribute table.
 pub(crate) const VERT_POOL_SLOT: u32 = 42;
-thread_local! {
-    static LAST_CS_POOL: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
-    static LAST_FRAG_POOL: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
-    static LAST_VERT_POOL: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
 /// Where a window shader finds its push words: the heap region's slot 33, past the 32 binding slots.
 pub(crate) const PUSH_WINDOW_WORDS: u32 = 16384 * 33;
-thread_local! {
-    static OUTPUT_SELECT: std::cell::Cell<i32> = const { std::cell::Cell::new(-1) };
-}
 
-/// A fragment shader keeps only colour output `k` (-1: all), for a target drawn on its own.
-#[no_mangle]
-pub extern "C" fn borgc_set_output_select(k: i32) {
-    OUTPUT_SELECT.with(|c| c.set(k));
-}
-
-pub(crate) fn output_select() -> i32 {
-    OUTPUT_SELECT.with(|c| c.get())
-}
-
-thread_local! {
-    static LAST_PUSH_WINDOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-thread_local! {
-    static LAST_SPILL_SLOTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
-pub(crate) fn set_spill_slots(n: u32) {
-    LAST_SPILL_SLOTS.with(|c| c.set(n));
-}
-
-/// The last fragment shader spills to this many scratch slots of the draw's buffer region.
-#[no_mangle]
-pub extern "C" fn borgc_last_spill_slots() -> u32 {
-    LAST_SPILL_SLOTS.with(|c| c.get())
-}
-
-pub(crate) fn set_push_window(on: bool) {
-    LAST_PUSH_WINDOW.with(|c| c.set(on));
-}
-
-/// The last shader read its push constants from the heap window (it also loads a buffer).
-#[no_mangle]
-pub extern "C" fn borgc_last_push_window() -> bool {
-    LAST_PUSH_WINDOW.with(|c| c.get())
-}
-
-pub(crate) fn set_vert_pool(pool: Vec<u32>) {
-    LAST_VERT_POOL.with(|p| *p.borrow_mut() = pool);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn borgc_last_vert_pool(out: *mut u32, cap: u32) -> u32 {
-    LAST_VERT_POOL.with(|p| {
-        let p = p.borrow();
-        let n = p.len().min(cap as usize);
-        for (i, &w) in p.iter().take(n).enumerate() {
-            *out.add(i) = w;
-        }
-        n as u32
-    })
-}
-
-pub(crate) fn set_cs_pool(pool: Vec<u32>) {
-    LAST_CS_POOL.with(|p| *p.borrow_mut() = pool);
-}
-
-/// The last compute shader's constant pool, for the job's slot 34.
-#[no_mangle]
-pub unsafe extern "C" fn borgc_last_cs_pool(out: *mut u32, cap: u32) -> u32 {
-    LAST_CS_POOL.with(|p| {
-        let p = p.borrow();
-        let n = p.len().min(cap as usize);
-        for (i, &w) in p.iter().take(n).enumerate() {
-            *out.add(i) = w;
-        }
-        n as u32
-    })
-}
-
-pub(crate) fn set_frag_pool(pool: Vec<u32>) {
-    LAST_FRAG_POOL.with(|p| *p.borrow_mut() = pool);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn borgc_last_frag_pool(out: *mut u32, cap: u32) -> u32 {
-    LAST_FRAG_POOL.with(|p| {
-        let p = p.borrow();
-        let n = p.len().min(cap as usize);
-        for (i, &w) in p.iter().take(n).enumerate() {
-            *out.add(i) = w;
-        }
-        n as u32
-    })
+/// What the driver stages beside a graphics blob (borgc_info in borg_nir_passes.h).
+#[repr(C)]
+pub struct BorgcInfo {
+    pub pool: [u32; 64],
+    pub npool: u32,
+    pub spill_slots: u32,
+    pub push_window: u32,
 }
 
 pub(crate) const NO_DST: u32 = u32::MAX;
@@ -342,15 +255,18 @@ pub unsafe extern "C" fn borgc_compile_nir(
     buf_cap: u32,
     out_len: *mut u32,
     vfetch: u32,
+    out_select: i32,
+    info: *mut BorgcInfo,
 ) -> u32 {
-    borgc_capture(nir, 0, vfetch, output_select());
+    borgc_capture(nir, 0, vfetch, out_select);
     let key = if !nir.is_null() && env::var("BORGC_CORPUS_DIR").is_ok() {
         (*nir).to_string().ok().map(|s| corpus::key(&s, vfetch))
     } else {
         None
     };
+    let mut inf = BorgcInfo { pool: [0; 64], npool: 0, spill_slots: 0, push_window: 0 };
     let ret = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        compile_nir_inner(nir, out_buf, buf_cap, out_len, Flags(vfetch))
+        compile_nir_inner(nir, out_buf, buf_cap, out_len, Flags(vfetch), out_select, &mut inf)
     }))
     .unwrap_or_else(|_| {
         if !out_len.is_null() {
@@ -367,6 +283,9 @@ pub unsafe extern "C" fn borgc_compile_nir(
         };
         corpus::record(key, ret, blob);
     }
+    if !info.is_null() {
+        *info = inf;
+    }
     ret
 }
 
@@ -376,6 +295,8 @@ unsafe fn compile_nir_inner(
     buf_cap: u32,
     out_len: *mut u32,
     flags: Flags,
+    out_select: i32,
+    info: &mut BorgcInfo,
 ) -> u32 {
     if !out_len.is_null() {
         *out_len = 0;
@@ -385,7 +306,8 @@ unsafe fn compile_nir_inner(
     }
     let forced = env::var("BORGC_SPILL_LIMIT").ok().and_then(|v| v.parse::<usize>().ok());
     for limit in [forced, Some(20), Some(18), Some(16), Some(14), Some(12), Some(10)] {
-        let (mut cx, entry, total) = ShaderState::start(nir, flags);
+        let (mut cx, entry, total) = ShaderState::start(nir, flags, out_select);
+        (info.push_window, info.spill_slots) = (cx.push_window as u32, 0);
         cx.spill_limit = limit;
         cx.select_entry(entry);
         if !cx.check_selected() {
@@ -393,6 +315,7 @@ unsafe fn compile_nir_inner(
         }
         cx.lower_outputs();
         cx.optimise();
+        info.spill_slots = cx.spill_slots;
         if cx.spill_slots > 0 {
             eprintln!("borgc: spilled {} value(s) to keep {:?} live", cx.spill_slots, limit);
         }
@@ -407,22 +330,10 @@ unsafe fn compile_nir_inner(
         if !out_buf.is_null() && (blob.len() as u32) <= buf_cap {
             std::ptr::copy_nonoverlapping(blob.as_ptr(), out_buf, blob.len());
         }
+        let n = cx.pool.len().min(info.pool.len());
+        info.pool[..n].copy_from_slice(&cx.pool[..n]);
+        info.npool = n as u32;
         return total;
     }
     0
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn frag_pool_round_trips_and_clears() {
-        set_frag_pool(vec![1, 2, 3]);
-        let mut out = [0u32; 2];
-        let n = unsafe { borgc_last_frag_pool(out.as_mut_ptr(), 2) };
-        assert_eq!((n, out), (2, [1, 2]));
-        set_frag_pool(Vec::new());
-        assert_eq!(unsafe { borgc_last_frag_pool(out.as_mut_ptr(), 2) }, 0);
-    }
 }

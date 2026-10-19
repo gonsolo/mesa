@@ -3,12 +3,12 @@ use crate::fixed::{allocate, fixed_regs};
 use crate::opt::{dce, fuse_fmadd, schedule_for_pressure};
 use crate::state::ShaderState;
 use crate::survey::{survey, Survey};
-use crate::{set_frag_pool, set_vert_pool, Flags, Ubo};
+use crate::{Flags, Ubo};
 use compiler::bindings::*;
 use std::env;
 
 impl ShaderState {
-    pub unsafe fn start(nir: *mut nir_shader, flags: Flags) -> (ShaderState, *mut nir_function_impl, u32) {
+    pub unsafe fn start(nir: *mut nir_shader, flags: Flags, out_select: i32) -> (ShaderState, *mut nir_function_impl, u32) {
         let stage = (*nir).info.stage();
         let is_vertex = stage == MESA_SHADER_VERTEX;
         let is_fragment = stage == MESA_SHADER_FRAGMENT;
@@ -30,12 +30,10 @@ impl ShaderState {
         } else {
             &[17, 18, 19, 23]
         };
-        crate::set_push_window(push_window && is_fragment);
-        crate::set_spill_slots(0);
         let mut st = ShaderState::new(regs, is_vertex, is_fragment, flags);
         st.push_window = push_window && is_fragment;
         st.is_compute = is_compute;
-        st.out_select = crate::output_select();
+        st.out_select = out_select;
         (st, entry, total)
     }
 
@@ -97,8 +95,6 @@ impl ShaderState {
     }
 
     pub unsafe fn optimise(&mut self) {
-        set_frag_pool(Vec::new());
-        set_vert_pool(Vec::new());
         if let Some(limit) = self.spill_limit {
             dce(&mut self.sel.prog, &self.out_roots);
             self.spill_to_pressure(limit);
