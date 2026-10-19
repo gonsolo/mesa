@@ -323,6 +323,11 @@ enum Ubo {
     Fixed(u8),
 }
 
+extern "C" {
+    /// borgc_capture.c: the shader for borgc-replay, with BORGC_REPLAY_DIR set.
+    pub(crate) fn borgc_capture(nir: *const nir_shader, kind: u32, vfetch: u32, out_select: i32);
+}
+
 /// Self-test: confirms the Rust crate is linked and callable across the FFI.
 #[no_mangle]
 pub extern "C" fn borgc_selftest() -> u32 {
@@ -337,6 +342,7 @@ pub unsafe extern "C" fn borgc_compile_nir(
     out_len: *mut u32,
     vfetch: u32,
 ) -> u32 {
+    borgc_capture(nir, 0, vfetch, output_select());
     let key = if !nir.is_null() && env::var("BORGC_CORPUS_DIR").is_ok() {
         (*nir).to_string().ok().map(|s| corpus::key(&s, vfetch))
     } else {

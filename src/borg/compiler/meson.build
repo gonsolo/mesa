@@ -35,7 +35,7 @@ libborgc = static_library(
 # the offline CLI so the two cannot drift (see borg_nir_passes.h).
 libborg_nir_passes = static_library(
   'borg_nir_passes',
-  files('borg_nir_passes.c'),
+  files('borg_nir_passes.c', 'borgc_capture.c'),
   c_args : get_option('borg-small-nir') ? ['-DBORG_SMALL_NIR'] : [],
   include_directories : [inc_include, inc_src, inc_compiler],
   dependencies : [idep_nir, idep_mesautil],
@@ -64,6 +64,16 @@ borgc_cli = executable(
   install : false,
 )
 
+# Recompiles the shaders borgc_capture wrote, to check a compiler change without the CTS.
+borgc_replay = executable(
+  'borgc-replay',
+  files('borgc_replay.c'),
+  include_directories : [inc_include, inc_src, inc_compiler],
+  dependencies : [idep_borgc, idep_nir, idep_mesautil],
+  link_with : [libborgc],
+  install : false,
+)
+
 # Unit tests for the instruction encoders. These matter more than most: the
 # encodings are a hand-maintained mirror of the hardware's Instructions.scala,
 # and a divergence is SILENT -- the shader would execute a different opcode
@@ -72,6 +82,7 @@ if with_tests and get_option('b_sanitize') == 'none'
   rust.test(
     'borgc_test',
     libborgc,
+    link_with : [libborg_nir_passes],
     suite : ['borg', 'rs'],
   )
 endif

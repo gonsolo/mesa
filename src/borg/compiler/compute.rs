@@ -832,6 +832,7 @@ pub unsafe extern "C" fn borgc_compile_compute(
     regs: *mut u32, reg_cap: u32, nregs: *mut u32,
     local: *mut u32, flags: *mut u32,
 ) -> u32 {
+    crate::borgc_capture(nir, 1, 0, -1);
     let key = if !nir.is_null() && std::env::var("BORGC_CORPUS_DIR").is_ok() {
         (*nir).to_string().ok().map(|s| crate::corpus::key(&s, 0))
     } else {
