@@ -105,16 +105,6 @@ impl ConstPool {
         r
     }
 
-    pub fn vs_win(&mut self, sel: &mut Selector, bits: u32) -> u32 {
-        let u = DRAW_VS_CONST_U0 + self.vs_consts.len() as u8;
-        assert!(self.vs_consts.len() < VS_VIRTUAL_MAX,
-            "borgc: vertex shader needs more than {} constants", VS_VIRTUAL_MAX);
-        self.vs_consts.push((u, bits));
-        let v = sel.fresh();
-        sel.ubo.insert(v, crate::Ubo::Uniform(u));
-        v
-    }
-
     pub fn vs_virtual(&mut self, sel: &mut Selector, bits: u32) -> u32 {
         if let Some(&v) = self.vs_by_bits.get(&bits) {
             return v;

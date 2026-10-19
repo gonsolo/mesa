@@ -615,7 +615,7 @@ impl ShaderState {
             let binding = self.res_binding.get(&bd).copied().unwrap_or(0);
             let slot = SSBO_SLOT_WORDS * (1 + binding);
                         if self.cp.vs_window {
-                let _ = self.cp.vs_const(&mut self.sel, 1u32, false);   // each word's address is the slot's base plus 1
+                let _ = self.konst(1u32, Kv::Word);   // each word's address is the slot's base plus 1
             }
             // A register holding 0, to copy window words through (an instruction reads one).
             let f = self.sel.next_vreg; self.sel.next_vreg += 1;
@@ -692,13 +692,13 @@ impl ShaderState {
                 .wrapping_sub(VERT_ATTRIB_GENERIC0);
             let n = intr.def.num_components as usize;
             let ctl_bits = (1u32 << 16) | (128 + loc);
-            let twelve = self.cp.vs_const(&mut self.sel, 12, false);
+            let twelve = self.konst(12, Kv::Word);
             let ctl = if loc >= 24 {
-                let _ = self.cp.vs_const(&mut self.sel, ctl_bits - 24, false);
-                let _ = self.cp.vs_const(&mut self.sel, 24, true);
-                self.cp.vs_const(&mut self.sel, ctl_bits, true)
+                let _ = self.konst(ctl_bits - 24, Kv::Word);
+                let _ = self.konst(24, Kv::Derive);
+                self.konst(ctl_bits, Kv::Derive)
             } else {
-                self.cp.vs_const(&mut self.sel, ctl_bits, false)
+                self.konst(ctl_bits, Kv::Word)
             };
             // The index register: r30 (VertexIndex) or r31 (InstanceIndex).
             let idx_reg = if loc < 16 && self.flags.instanced(loc) { 31 } else { 30 };
@@ -763,7 +763,7 @@ impl ShaderState {
             };
             if base_words >= 0 {
                 if self.cp.vs_window && base_words >= 16384 {
-                    let _ = self.cp.vs_const(&mut self.sel, 16384u32, false);
+                    let _ = self.konst(16384u32, Kv::Word);
                 }
                 let addr = match (stride_words, self.const_addr_chain) {
                     (0, Some((next, a))) if next == base_words => a,

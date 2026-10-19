@@ -17,7 +17,7 @@ impl ShaderState {
         self.sel.ubo.insert(ctl, Ubo::Uniform(u));
         let idx = self.sel.next_vreg; self.sel.next_vreg += 1;
         self.sel.ubo.insert(idx, Ubo::Fixed(30));
-        let twelve = self.cp.vs_const(&mut self.sel, 12, false);   // shared with the attribute fetches
+        let twelve = self.konst(12, Kv::Word);   // shared with the attribute fetches
         let ty = self.sel.next_vreg; self.sel.next_vreg += 1;
         self.sel.prog.push(BorgInstr { mnem: "ISRL", dst: ty, srcs: vec![idx, twelve], swz: vec![0, 0] });
         let hi = self.sel.next_vreg; self.sel.next_vreg += 1;
@@ -48,7 +48,7 @@ impl ShaderState {
                 // Clamp to the advertised range [1, 64]: x - c*(x - 64), c = step(x - 64).
                 let x = self.sel.reg(ps).0;
                 // upper: x -= step(x - 64) * (x - 64)
-                let neg_hi = self.cp.vs_win(&mut self.sel, (-64.0f32).to_bits());
+                let neg_hi = self.konst((-64.0f32).to_bits(), Kv::Virtual);
                 let t = self.sel.op0("FADD", vec![x, neg_hi]);
                 let c = self.sel.op0("FSTEP", vec![t]);
                 let ct = self.sel.op0("FMUL", vec![c, t]);
