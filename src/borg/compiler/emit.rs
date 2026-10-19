@@ -19,6 +19,8 @@ struct Emitter<'a> {
     pos_gpr: HashMap<(u32, u8), u8>,
     words: Vec<u32>,
     pending: u32,
+    /// The instruction memory address of the program's first word; branch targets are absolute.
+    base: u32,
 }
 
 impl Emitter<'_> {
@@ -66,10 +68,10 @@ impl Emitter<'_> {
             None => self.push(encode_branch(Op::Brnz, rs1, (t % 1024) as u16)),
             Some(&pad) => {
                 for _ in 0..pad {
-                    let w = encode_jmp(self.words.len() as u32 + 1);
+                    let w = encode_jmp(self.base + self.words.len() as u32 + 1);
                     self.words.push(w);
                 }
-                let w = encode_branch(Op::Brz, rs1, ((self.words.len() + 2) % 1024) as u16);
+                let w = encode_branch(Op::Brz, rs1, ((self.base as usize + self.words.len() + 2) % 1024) as u16);
                 self.push(w);
                 self.words.push(encode_jmp(t));
             }
@@ -126,10 +128,12 @@ impl Emitter<'_> {
 }
 
 pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
-    let mut e = Emitter { cx, alloc, pos_gpr: HashMap::new(), words: Vec::new(), pending: 0 };
+    // A fragment program starts at word 1 (software/borg BORG_IMEM_FRAG_OFFSET; frag_pc 0 means none).
+    let base = if cx.stage == Stage::Fragment { 1 } else { 0 };
+    let mut e = Emitter { cx, alloc, pos_gpr: HashMap::new(), words: Vec::new(), pending: 0, base };
     e.preload_positions();
     let n_preload = e.words.len();
-    let (labels, far) = branch_layout(&cx.sel.prog, n_preload);
+    let (labels, far) = branch_layout(&cx.sel.prog, base as usize + n_preload);
     for (k, i) in cx.sel.prog.iter().enumerate() {
         let rd = *alloc.get(&i.dst).unwrap_or(&0);
         match i.mnem {
