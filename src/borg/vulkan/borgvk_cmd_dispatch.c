@@ -218,7 +218,7 @@ cs_start(const struct borgvk_pipeline *pl, const char *direct, uint32_t gx, uint
    uint32_t axis = gy > 1 && gy >= px ? 1 : px > 1 ? 0 : 2;
    uint32_t extent = axis == 0 ? px : axis == 1 ? gy : gz;
    uint32_t nparts = px ? 1 : 0;
-   if (direct && px && !(pl->cs_flags & 1) && (uint64_t)gx * gy * gz >= 4096 && extent > 1) {
+   if (direct && px && !(pl->cs_flags & 1) && (uint64_t)gx * gy * gz >= 64 && extent > 1) {
       long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
       nparts = (uint32_t)MIN2((long)extent, MAX2(ncpu, 1));
       if (getenv("BORGVK_CS_PARTS"))
