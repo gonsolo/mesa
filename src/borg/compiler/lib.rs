@@ -55,12 +55,6 @@ fn packed_layout(flags: Flags) -> (u32, Vec<(usize, u32, u32)>) {
     (kind, (0..n).map(|k| (if swap && k < 3 { 2 - k } else { k }, k as u32 * bits, bits)).collect())
 }
 
-/// Constants a fragment shader may have: the nine the window keeps beside the pool's two words,
-/// and a pool of the driver's BORGC_POOL_MAX words.
-const FRAG_CONST_MAX: u32 = 9 + 64;
-const FRAG_POOL_SLOT: u32 = 40;
-/// The vertex shader's pool slot in the vertex attribute table.
-pub(crate) const VERT_POOL_SLOT: u32 = 42;
 /// Where a window shader finds its push words: the heap region's slot 33, past the 32 binding slots.
 pub(crate) const PUSH_WINDOW_WORDS: u32 = 16384 * 33;
 
