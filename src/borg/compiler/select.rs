@@ -49,11 +49,11 @@ impl ShaderState {
             }
             None => (wz, 0u8),
         };
-        self.sel.prog.push(BorgInstr { mnem: Op::Texa.into(), dst: NO_DST, srcs: vec![wz, lv, wz], swz: vec![0, lc, 0] });
+        self.sel.prog.push(BorgInstr { mnem: Op::Texa.into(), dst: NO_DST, srcs: vec![wz, lv, wz], swz: vec![0, lc, 0], imm: 0 });
         let ctl = self.konst(3u32 << 16);
         let tex_v = self.sel.next_vreg;
         self.sel.next_vreg += 1;
-        self.sel.prog.push(BorgInstr { mnem: Op::Tex.into(), dst: tex_v, srcs: vec![wz, wz, ctl], swz: vec![0, 0, 0] });
+        self.sel.prog.push(BorgInstr { mnem: Op::Tex.into(), dst: tex_v, srcs: vec![wz, wz, ctl], swz: vec![0, 0, 0], imm: 0 });
         self.tex_dsts.insert(tex_v);
         let n = tex.def.num_components as usize;
         // A 1D array's second size component is its layer count, the third word.
@@ -112,7 +112,7 @@ impl ShaderState {
                 self.frag.per_pixel_fixed.insert(wz);
                 let (lv, lc) = if is_txl || has_bias { resolve_vm(&self.sel.vec_map, ld, 0) } else { (wz, 0u8) };
                 let (wv, wc) = if has_w { resolve_vm(&self.sel.vec_map, cd, 2) } else { (wz, 0u8) };
-                self.sel.prog.push(BorgInstr { mnem: Op::Texa.into(), dst: NO_DST, srcs: vec![wv, lv, wz], swz: vec![wc, lc, 0] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Texa.into(), dst: NO_DST, srcs: vec![wv, lv, wz], swz: vec![wc, lc, 0], imm: 0 });
             }
             let ctl = if is_tg4 {
                 // Operation 2 (gather) of the component in bits 19:18.
@@ -133,8 +133,8 @@ impl ShaderState {
                     self.sel.next_vreg += 3;
                     self.sel.loc.insert(c, Loc::Fixed(30));
                     self.frag.per_pixel_fixed.insert(c);
-                    self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: neg, srcs: vec![c], swz: vec![0] });
-                    self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: z, srcs: vec![neg], swz: vec![0] });
+                    self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: neg, srcs: vec![c], swz: vec![0], imm: 0 });
+                    self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: z, srcs: vec![neg], swz: vec![0], imm: 0 });
                     self.zero_ctl = Some(z);
                     z
                 }
@@ -144,6 +144,7 @@ impl ShaderState {
             self.sel.next_vreg += 1;
             self.sel.prog.push(BorgInstr {
                 mnem: Op::Tex.into(), dst: tex_v, srcs: vec![ud, vd, ctl], swz: vec![uc, vc, 0],
+                imm: 0,
             });
             self.tex_dsts.insert(tex_v);
             self.sel.vec_map.insert(
@@ -203,13 +204,13 @@ impl ShaderState {
                 let s = &alu.srcs_as_slice()[0];
                 let x = resolve_vm(&self.sel.vec_map, s.src.as_def().index, s.swizzle[0]);
                 let zero = self.sel.pair(Op::Isub, x, x);
-                self.sel.prog.push(BorgInstr { mnem: Op::Isub.into(), dst: alu.def.index, srcs: vec![zero.0, x.0], swz: vec![0, x.1] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Isub.into(), dst: alu.def.index, srcs: vec![zero.0, x.0], swz: vec![0, x.1], imm: 0 });
             }
             // A condition is 1.0 or 0.0, so the integer 0 or 1 is its truncation.
             nir_op_b2i32 => {
                 let s = &alu.srcs_as_slice()[0];
                 let (v, c) = resolve_vm(&self.sel.vec_map, s.src.as_def().index, s.swizzle[0]);
-                self.sel.prog.push(BorgInstr { mnem: Op::F2i.into(), dst: alu.def.index, srcs: vec![v], swz: vec![c] });
+                self.sel.prog.push(BorgInstr { mnem: Op::F2i.into(), dst: alu.def.index, srcs: vec![v], swz: vec![c], imm: 0 });
             }
             nir_op_flt | nir_op_fge | nir_op_fneu | nir_op_feq | nir_op_slt | nir_op_sge | nir_op_sne | nir_op_seq
                 if self.stage == Stage::Compute => self.exact_compare(alu),
@@ -228,7 +229,7 @@ impl ShaderState {
                 let sl = &alu.srcs_as_slice()[0];
                 let (x, xc) = resolve_vm(&self.sel.vec_map, sl.src.as_def().index, sl.swizzle[0]);
                 let m = self.konst(0x7fff_ffff);
-                self.sel.prog.push(BorgInstr { mnem: Op::Iand.into(), dst: alu.def.index, srcs: vec![x, m], swz: vec![xc, 0] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Iand.into(), dst: alu.def.index, srcs: vec![x, m], swz: vec![xc, 0], imm: 0 });
             }
             // A condition is 1.0 or 0.0: its inverse is 1.0 - c.
             nir_op_inot if alu.def.bit_size == 1 => {
@@ -237,14 +238,14 @@ impl ShaderState {
                 let one = self.konst(1.0f32.to_bits());
                 let n = self.sel.next_vreg;
                 self.sel.next_vreg += 1;
-                self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: n, srcs: vec![x], swz: vec![xc] });
-                self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: alu.def.index, srcs: vec![n, one], swz: vec![0, 0] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: n, srcs: vec![x], swz: vec![xc], imm: 0 });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: alu.def.index, srcs: vec![n, one], swz: vec![0, 0], imm: 0 });
             }
             nir_op_inot => {
                 let sl = &alu.srcs_as_slice()[0];
                 let x = resolve_vm(&self.sel.vec_map, sl.src.as_def().index, sl.swizzle[0]);
                 let m = self.konst(u32::MAX);
-                self.sel.prog.push(BorgInstr { mnem: Op::Ixor.into(), dst: alu.def.index, srcs: vec![x.0, m], swz: vec![x.1, 0] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Ixor.into(), dst: alu.def.index, srcs: vec![x.0, m], swz: vec![x.1, 0], imm: 0 });
             }
             nir_op_u2f16 | nir_op_u2f32 => {
                 let s = &alu.srcs_as_slice()[0];
@@ -253,11 +254,11 @@ impl ShaderState {
                 let k = self.konst(2.0f32.to_bits());
                 let v = self.sel.next_vreg;
                 self.sel.next_vreg += 5;
-                self.sel.prog.push(BorgInstr { mnem: Op::Isrl.into(), dst: v, srcs: vec![x, c1], swz: vec![xc, 0] });
-                self.sel.prog.push(BorgInstr { mnem: Op::Iand.into(), dst: v + 2, srcs: vec![x, c1], swz: vec![xc, 0] });
-                self.sel.prog.push(BorgInstr { mnem: Op::I2f.into(), dst: v + 3, srcs: vec![v], swz: vec![0] });
-                self.sel.prog.push(BorgInstr { mnem: Op::I2f.into(), dst: v + 4, srcs: vec![v + 2], swz: vec![0] });
-                self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: alu.def.index, srcs: vec![v + 3, k, v + 4], swz: vec![0, 0, 0] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Isrl.into(), dst: v, srcs: vec![x, c1], swz: vec![xc, 0], imm: 0 });
+                self.sel.prog.push(BorgInstr { mnem: Op::Iand.into(), dst: v + 2, srcs: vec![x, c1], swz: vec![xc, 0], imm: 0 });
+                self.sel.prog.push(BorgInstr { mnem: Op::I2f.into(), dst: v + 3, srcs: vec![v], swz: vec![0], imm: 0 });
+                self.sel.prog.push(BorgInstr { mnem: Op::I2f.into(), dst: v + 4, srcs: vec![v + 2], swz: vec![0], imm: 0 });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: alu.def.index, srcs: vec![v + 3, k, v + 4], swz: vec![0, 0, 0], imm: 0 });
             }
             _ => {
                 if let Some(mnem) = borg_isel(alu.op) {
@@ -273,7 +274,7 @@ impl ShaderState {
                         let pairs: Vec<(u32, u8)> =
                             srcs.iter().cloned().zip(swz.iter().cloned()).collect();
                         self.prod.insert(alu.def.index, (alu.op, pairs));
-                        self.sel.prog.push(BorgInstr { mnem, dst: alu.def.index, srcs, swz });
+                        self.sel.prog.push(BorgInstr { mnem, dst: alu.def.index, srcs, swz, imm: 0 });
                     }
                 }
                 else if !self.skipped.contains(&alu.info().name()) {
@@ -295,25 +296,25 @@ impl ShaderState {
             // a < b  ->  FSTEP(b - a)
             nir_op_flt | nir_op_slt => {
                 let d = self.sel.fsub(b, a);
-                self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: alu.def.index, srcs: vec![d], swz: vec![0] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: alu.def.index, srcs: vec![d], swz: vec![0], imm: 0 });
             }
             nir_op_fge | nir_op_sge => {
                 let d = self.sel.fsub(b, a);
                 let st = self.sel.next_vreg; self.sel.next_vreg += 1;
                 let nst = self.sel.next_vreg; self.sel.next_vreg += 1;
-                self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: st, srcs: vec![d], swz: vec![0] });
-                self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: nst, srcs: vec![st], swz: vec![0] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: st, srcs: vec![d], swz: vec![0], imm: 0 });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: nst, srcs: vec![st], swz: vec![0], imm: 0 });
                 let one = self.one();
-                self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: alu.def.index, srcs: vec![one, nst], swz: vec![0, 0] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: alu.def.index, srcs: vec![one, nst], swz: vec![0, 0], imm: 0 });
             }
             nir_op_fneu | nir_op_sne => {
                 let dab = self.sel.fsub(a, b);
                 let dba = self.sel.fsub(b, a);
                 let s1 = self.sel.next_vreg; self.sel.next_vreg += 1;
                 let s2 = self.sel.next_vreg; self.sel.next_vreg += 1;
-                self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: s1, srcs: vec![dab], swz: vec![0] });
-                self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: s2, srcs: vec![dba], swz: vec![0] });
-                self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: alu.def.index, srcs: vec![s1, s2], swz: vec![0, 0] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: s1, srcs: vec![dab], swz: vec![0], imm: 0 });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: s2, srcs: vec![dba], swz: vec![0], imm: 0 });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: alu.def.index, srcs: vec![s1, s2], swz: vec![0, 0], imm: 0 });
             }
             // a == b  ->  1 - (a != b)
             _ => {
@@ -323,12 +324,12 @@ impl ShaderState {
                 let s2 = self.sel.next_vreg; self.sel.next_vreg += 1;
                 let ne = self.sel.next_vreg; self.sel.next_vreg += 1;
                 let nne = self.sel.next_vreg; self.sel.next_vreg += 1;
-                self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: s1, srcs: vec![dab], swz: vec![0] });
-                self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: s2, srcs: vec![dba], swz: vec![0] });
-                self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: ne, srcs: vec![s1, s2], swz: vec![0, 0] });
-                self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: nne, srcs: vec![ne], swz: vec![0] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: s1, srcs: vec![dab], swz: vec![0], imm: 0 });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: s2, srcs: vec![dba], swz: vec![0], imm: 0 });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: ne, srcs: vec![s1, s2], swz: vec![0, 0], imm: 0 });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: nne, srcs: vec![ne], swz: vec![0], imm: 0 });
                 let one = self.one();
-                self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: alu.def.index, srcs: vec![one, nne], swz: vec![0, 0] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: alu.def.index, srcs: vec![one, nne], swz: vec![0, 0], imm: 0 });
             }
         }
     }
@@ -343,8 +344,8 @@ impl ShaderState {
             let x = resolve_vm(&self.sel.vec_map, xs.src.as_def().index, xs.swizzle[0]);
             let vstep = self.sel.next_vreg;
             self.sel.next_vreg += 1;
-            self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: vstep, srcs: vec![x.0], swz: vec![x.1] });
-            self.sel.prog.push(BorgInstr { mnem: Op::Fmul.into(), dst: alu.def.index, srcs: vec![x.0, vstep], swz: vec![x.1, 0] });
+            self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: vstep, srcs: vec![x.0], swz: vec![x.1], imm: 0 });
+            self.sel.prog.push(BorgInstr { mnem: Op::Fmul.into(), dst: alu.def.index, srcs: vec![x.0, vstep], swz: vec![x.1, 0], imm: 0 });
         } else {
             // max(a, b) = b + (a >= b) * (a - b); min(a, b) = a + (a >= b) * (b - a)
             let a = resolve_vm(&self.sel.vec_map, s[0].src.as_def().index, s[0].swizzle[0]);
@@ -352,16 +353,16 @@ impl ShaderState {
             let one = self.one();
             let v = self.sel.next_vreg;
             self.sel.next_vreg += 8;
-            self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: v, srcs: vec![a.0], swz: vec![a.1] });          // -a
-            self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: v + 1, srcs: vec![b.0, v], swz: vec![b.1, 0] }); // b - a
-            self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: v + 2, srcs: vec![v + 1], swz: vec![0] });      // a < b
-            self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: v + 3, srcs: vec![v + 2], swz: vec![0] });
-            self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: v + 4, srcs: vec![one, v + 3], swz: vec![0, 0] }); // a >= b
+            self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: v, srcs: vec![a.0], swz: vec![a.1], imm: 0 });          // -a
+            self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: v + 1, srcs: vec![b.0, v], swz: vec![b.1, 0], imm: 0 }); // b - a
+            self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: v + 2, srcs: vec![v + 1], swz: vec![0], imm: 0 });      // a < b
+            self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: v + 3, srcs: vec![v + 2], swz: vec![0], imm: 0 });
+            self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: v + 4, srcs: vec![one, v + 3], swz: vec![0, 0], imm: 0 }); // a >= b
             if alu.op == nir_op_fmax {
-                self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: v + 5, srcs: vec![v + 1], swz: vec![0] });    // a - b
-                self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: alu.def.index, srcs: vec![v + 4, v + 5, b.0], swz: vec![0, 0, b.1] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: v + 5, srcs: vec![v + 1], swz: vec![0], imm: 0 });    // a - b
+                self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: alu.def.index, srcs: vec![v + 4, v + 5, b.0], swz: vec![0, 0, b.1], imm: 0 });
             } else {
-                self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: alu.def.index, srcs: vec![v + 4, v + 1, a.0], swz: vec![0, 0, a.1] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: alu.def.index, srcs: vec![v + 4, v + 1, a.0], swz: vec![0, 0, a.1], imm: 0 });
             }
         }
     }
@@ -386,7 +387,7 @@ impl ShaderState {
                 self.sel.pair(Op::Iadd, g, e)
             }
         };
-        self.sel.prog.push(BorgInstr { mnem: Op::I2f.into(), dst: alu.def.index, srcs: vec![bits.0], swz: vec![bits.1] });
+        self.sel.prog.push(BorgInstr { mnem: Op::I2f.into(), dst: alu.def.index, srcs: vec![bits.0], swz: vec![bits.1], imm: 0 });
     }
 
     /// A select as c * (a - b) + b; the select of the sRGB curve becomes FSRGB.
@@ -416,7 +417,7 @@ impl ShaderState {
         if let Some(x) = x {
             let v = self.sel.next_vreg;
             self.sel.next_vreg += 1;
-            self.sel.prog.push(BorgInstr { mnem: Op::Fsrgb.into(), dst: v, srcs: vec![x.0], swz: vec![x.1] });
+            self.sel.prog.push(BorgInstr { mnem: Op::Fsrgb.into(), dst: v, srcs: vec![x.0], swz: vec![x.1], imm: 0 });
             self.sel.vec_map.insert(alu.def.index, vec![(v, 0)]);
         } else {
             let n = alu.def.num_components as usize;
@@ -429,9 +430,9 @@ impl ShaderState {
                 let d = self.sel.next_vreg + 1;
                 let r = self.sel.next_vreg + 2;
                 self.sel.next_vreg += 3;
-                self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: ne, srcs: vec![e.0], swz: vec![e.1] });
-                self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: d, srcs: vec![t.0, ne], swz: vec![t.1, 0] });
-                self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: r, srcs: vec![c.0, d, e.0], swz: vec![c.1, 0, e.1] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: ne, srcs: vec![e.0], swz: vec![e.1], imm: 0 });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: d, srcs: vec![t.0, ne], swz: vec![t.1, 0], imm: 0 });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: r, srcs: vec![c.0, d, e.0], swz: vec![c.1, 0, e.1], imm: 0 });
                 comps.push((r, 0u8));
             }
             self.sel.vec_map.insert(alu.def.index, comps);
@@ -448,10 +449,10 @@ impl ShaderState {
         let (p, q) = if is_max { (a, b) } else { (b, a) };
         let v = self.sel.next_vreg;
         self.sel.next_vreg += 3;
-        self.sel.prog.push(BorgInstr { mnem: lt.into(), dst: v, srcs: vec![a.0, b.0], swz: vec![a.1, b.1] });
-        self.sel.prog.push(BorgInstr { mnem: Op::Isub.into(), dst: v + 1, srcs: vec![q.0, p.0], swz: vec![q.1, p.1] });
-        self.sel.prog.push(BorgInstr { mnem: Op::Imul.into(), dst: v + 2, srcs: vec![v, v + 1], swz: vec![0, 0] });
-        self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: alu.def.index, srcs: vec![p.0, v + 2], swz: vec![p.1, 0] });
+        self.sel.prog.push(BorgInstr { mnem: lt.into(), dst: v, srcs: vec![a.0, b.0], swz: vec![a.1, b.1], imm: 0 });
+        self.sel.prog.push(BorgInstr { mnem: Op::Isub.into(), dst: v + 1, srcs: vec![q.0, p.0], swz: vec![q.1, p.1], imm: 0 });
+        self.sel.prog.push(BorgInstr { mnem: Op::Imul.into(), dst: v + 2, srcs: vec![v, v + 1], swz: vec![0, 0], imm: 0 });
+        self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: alu.def.index, srcs: vec![p.0, v + 2], swz: vec![p.1, 0], imm: 0 });
     }
 
     pub unsafe fn intrinsic(&mut self, intr: &nir_intrinsic_instr) {
@@ -606,7 +607,7 @@ impl ShaderState {
                 let (sd, sc) = resolve_vm(&self.sel.vec_map, src, c as u8);
                 let v = self.sel.next_vreg;
                 self.sel.next_vreg += 1;
-                self.sel.prog.push(BorgInstr { mnem: mnem.into(), dst: v, srcs: vec![sd], swz: vec![sc] });
+                self.sel.prog.push(BorgInstr { mnem: mnem.into(), dst: v, srcs: vec![sd], swz: vec![sc], imm: 0 });
                 v
             })
             .collect();
@@ -635,19 +636,20 @@ impl ShaderState {
                 self.fattr_dsts.insert(fattr_rd);
                 self.sel.prog.push(BorgInstr {
                     mnem: Op::Fattr.into(), dst: fattr_rd, srcs: vec![],
-                    swz: vec![(base_index + c as u32) as u8],
+                    swz: vec![],
+                    imm: base_index + c as u32,
                 });
                 if flat {
                     let res = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: res, srcs: vec![fattr_rd, fattr_rd], swz: vec![0, 0] });
+                    self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: res, srcs: vec![fattr_rd, fattr_rd], swz: vec![0, 0], imm: 0 });
                     return (res, 0u8);
                 }
                 let t0 = self.sel.next_vreg; self.sel.next_vreg += 1;
-                self.sel.prog.push(BorgInstr { mnem: Op::Fmul.into(), dst: t0, srcs: vec![bary[0], fattr_rd], swz: vec![0, 0] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fmul.into(), dst: t0, srcs: vec![bary[0], fattr_rd], swz: vec![0, 0], imm: 0 });
                 let t1 = self.sel.next_vreg; self.sel.next_vreg += 1;
-                self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: t1, srcs: vec![bary[1], fattr_rd, t0], swz: vec![0, 1, 0] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: t1, srcs: vec![bary[1], fattr_rd, t0], swz: vec![0, 1, 0], imm: 0 });
                 let res = self.sel.next_vreg; self.sel.next_vreg += 1;
-                self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: res, srcs: vec![bary[2], fattr_rd, t1], swz: vec![0, 2, 0] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: res, srcs: vec![bary[2], fattr_rd, t1], swz: vec![0, 2, 0], imm: 0 });
                 (res, 0u8)
             })
             .collect();
@@ -680,6 +682,7 @@ impl ShaderState {
                     self.sel.next_vreg += 1;
                     self.sel.prog.push(BorgInstr {
                         mnem: Op::Load.into(), dst, srcs: vec![idx_reg], swz: vec![0],
+                        imm: 0,
                     });
                     (dst, 0u8)
                 })
@@ -689,15 +692,15 @@ impl ShaderState {
                             let o = resolve_vm(&self.sel.vec_map, intr.get_src(0).as_def().index, 0);
             let two = self.konst(2);
             let w = self.sel.next_vreg; self.sel.next_vreg += 1;
-            self.sel.prog.push(BorgInstr { mnem: Op::Isrl.into(), dst: w, srcs: vec![o.0, two], swz: vec![o.1, 0] });
+            self.sel.prog.push(BorgInstr { mnem: Op::Isrl.into(), dst: w, srcs: vec![o.0, two], swz: vec![o.1, 0], imm: 0 });
             let base_word = (intr.base() / 4) as u32 + if self.frag.push_window { PUSH_WINDOW_WORDS } else { 0 };
             let comps: Vec<(u32, u8)> = (0..intr.def.num_components as u32)
                 .map(|c| {
                     let k = self.konst(base_word + c);
                     let addr = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: addr, srcs: vec![w, k], swz: vec![0, 0] });
+                    self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: addr, srcs: vec![w, k], swz: vec![0, 0], imm: 0 });
                     let dst = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: Op::Load.into(), dst, srcs: vec![addr], swz: vec![0] });
+                    self.sel.prog.push(BorgInstr { mnem: Op::Load.into(), dst, srcs: vec![addr], swz: vec![0], imm: 0 });
                     (dst, 0u8)
                 })
                 .collect();
@@ -727,7 +730,7 @@ impl ShaderState {
         let f = self.sel.next_vreg; self.sel.next_vreg += 1;
         self.sel.loc.insert(f, Loc::Fixed(30));
         let zero = self.sel.next_vreg; self.sel.next_vreg += 1;
-        self.sel.prog.push(BorgInstr { mnem: Op::Isub.into(), dst: zero, srcs: vec![f, f], swz: vec![0, 0] });
+        self.sel.prog.push(BorgInstr { mnem: Op::Isub.into(), dst: zero, srcs: vec![f, f], swz: vec![0, 0], imm: 0 });
         // The descriptor's own offset component (a dynamic buffer's) is the window base: 0.
         let off_is_descriptor = self.vert.descriptor_defs.contains(&resolve_vm(&self.sel.vec_map, intr.get_src(osrc).as_def().index, 0).0);
         let word = match intr.get_src(osrc).comp_as_uint(0) {
@@ -737,7 +740,7 @@ impl ShaderState {
                 let o = resolve_vm(&self.sel.vec_map, intr.get_src(osrc).as_def().index, 0);
                 let two = self.konst(2);
                 let w = self.sel.next_vreg; self.sel.next_vreg += 1;
-                self.sel.prog.push(BorgInstr { mnem: Op::Isrl.into(), dst: w, srcs: vec![o.0, two], swz: vec![o.1, 0] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Isrl.into(), dst: w, srcs: vec![o.0, two], swz: vec![o.1, 0], imm: 0 });
                 Some(w)
             }
         };
@@ -750,7 +753,7 @@ impl ShaderState {
             }
             let k = self.konst(slot + const_word.unwrap_or(0) + c as u32);
             let addr = self.sel.next_vreg; self.sel.next_vreg += 1;
-            self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: addr, srcs: vec![word.unwrap_or(zero), k], swz: vec![0, 0] });
+            self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: addr, srcs: vec![word.unwrap_or(zero), k], swz: vec![0, 0], imm: 0 });
             if store {
                 let src = intr.get_src(0).as_def().index;
                 let d = resolve_vm(&self.sel.vec_map, src, c as u8);
@@ -758,15 +761,15 @@ impl ShaderState {
                     Some(&bits) if !self.sel.vec_map.contains_key(&d.0) => {
                         let kv = self.konst(bits);
                         let t = self.sel.next_vreg; self.sel.next_vreg += 1;
-                        self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: t, srcs: vec![zero, kv], swz: vec![0, 0] });
+                        self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: t, srcs: vec![zero, kv], swz: vec![0, 0], imm: 0 });
                         (t, 0u8)
                     }
                     _ => d,
                 };
-                self.sel.prog.push(BorgInstr { mnem: Op::Store.into(), dst: NO_DST, srcs: vec![addr, val.0], swz: vec![0, val.1] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Store.into(), dst: NO_DST, srcs: vec![addr, val.0], swz: vec![0, val.1], imm: 0 });
             } else {
                 let dst = self.sel.next_vreg; self.sel.next_vreg += 1;
-                self.sel.prog.push(BorgInstr { mnem: Op::Load.into(), dst, srcs: vec![addr], swz: vec![0] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Load.into(), dst, srcs: vec![addr], swz: vec![0], imm: 0 });
                 comps.push((dst, 0u8));
             }
         }
@@ -806,20 +809,21 @@ impl ShaderState {
         self.sel.loc.insert(idx, Loc::Fixed(idx_reg));
         // The element index i is texel (i & 4095, i >> 12) of a 4096-wide image.
         let ty = self.sel.next_vreg; self.sel.next_vreg += 1;
-        self.sel.prog.push(BorgInstr { mnem: Op::Isrl.into(), dst: ty, srcs: vec![idx, twelve], swz: vec![0, 0] });
+        self.sel.prog.push(BorgInstr { mnem: Op::Isrl.into(), dst: ty, srcs: vec![idx, twelve], swz: vec![0, 0], imm: 0 });
         let hi = self.sel.next_vreg; self.sel.next_vreg += 1;
-        self.sel.prog.push(BorgInstr { mnem: Op::Ishl.into(), dst: hi, srcs: vec![ty, twelve], swz: vec![0, 0] });
+        self.sel.prog.push(BorgInstr { mnem: Op::Ishl.into(), dst: hi, srcs: vec![ty, twelve], swz: vec![0, 0], imm: 0 });
         let tx = self.sel.next_vreg; self.sel.next_vreg += 1;
-        self.sel.prog.push(BorgInstr { mnem: Op::Isub.into(), dst: tx, srcs: vec![idx, hi], swz: vec![0, 0] });
+        self.sel.prog.push(BorgInstr { mnem: Op::Isub.into(), dst: tx, srcs: vec![idx, hi], swz: vec![0, 0], imm: 0 });
         let tex_v = self.sel.next_vreg; self.sel.next_vreg += 1;
-        self.sel.prog.push(BorgInstr { mnem: Op::Tex.into(), dst: tex_v, srcs: vec![tx, ty, ctl], swz: vec![0, 0, 0] });
+        self.sel.prog.push(BorgInstr { mnem: Op::Tex.into(), dst: tex_v, srcs: vec![tx, ty, ctl], swz: vec![0, 0, 0], imm: 0 });
         self.tex_dsts.insert(tex_v);
         let comp0 = intr.get_const_index(NIR_INTRINSIC_COMPONENT) as u8;
         let mut comps = Vec::with_capacity(n);
         for c in 0..n {
             let m = self.sel.next_vreg; self.sel.next_vreg += 1;
             self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: m, srcs: vec![tex_v, tex_v],
-                                  swz: vec![comp0 + c as u8, comp0 + c as u8] });
+                                  swz: vec![comp0 + c as u8, comp0 + c as u8],
+                                  imm: 0, });
             comps.push((m, 0u8));
         }
         self.sel.vec_map.insert(intr.def.index, comps);
@@ -881,10 +885,10 @@ impl ShaderState {
                     };
                     let stride_v = self.konst(stride_words as u32);
                     let tmp = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: Op::Imul.into(), dst: tmp, srcs: vec![vid, stride_v], swz: vec![0, 0] });
+                    self.sel.prog.push(BorgInstr { mnem: Op::Imul.into(), dst: tmp, srcs: vec![vid, stride_v], swz: vec![0, 0], imm: 0 });
                     let base_v = self.konst(base_words as u32);
                     let a = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: a, srcs: vec![tmp, base_v], swz: vec![0, 0] });
+                    self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: a, srcs: vec![tmp, base_v], swz: vec![0, 0], imm: 0 });
                     a
                 }
             };
@@ -892,12 +896,13 @@ impl ShaderState {
             let comps: Vec<(u32, u8)> = (0..n)
                 .map(|c| {
                     let dst = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: Op::Load.into(), dst, srcs: vec![cur], swz: vec![0] });
+                    self.sel.prog.push(BorgInstr { mnem: Op::Load.into(), dst, srcs: vec![cur], swz: vec![0], imm: 0 });
                     if c + 1 < n {
                         let one_v = self.konst(1);
                         let next_a = self.sel.next_vreg; self.sel.next_vreg += 1;
                         self.sel.prog.push(BorgInstr {
                             mnem: Op::Iadd.into(), dst: next_a, srcs: vec![cur, one_v], swz: vec![0, 0],
+                            imm: 0,
                         });
                         cur = next_a;
                     }
@@ -907,7 +912,7 @@ impl ShaderState {
             if stride_words == 0 && n > 1 {
                 let one_v = self.konst(1);
                 let past = self.sel.next_vreg; self.sel.next_vreg += 1;
-                self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: past, srcs: vec![cur, one_v], swz: vec![0, 0] });
+                self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: past, srcs: vec![cur, one_v], swz: vec![0, 0], imm: 0 });
                 self.const_addr_chain = Some((base_words + n as i32, past));
             }
             self.sel.vec_map.insert(intr.def.index, comps);
@@ -938,7 +943,7 @@ impl ShaderState {
                 let mut v = v0;
                 if matches!(self.sel.loc.get(&v.0), Some(Loc::Uniform(_))) {
                     let out = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: Op::Fmov.into(), dst: out, srcs: vec![v.0], swz: vec![0] });
+                    self.sel.prog.push(BorgInstr { mnem: Op::Fmov.into(), dst: out, srcs: vec![v.0], swz: vec![0], imm: 0 });
                     v = (out, 0);
                 }
                 self.outs.pos[c] = Some(v);
@@ -965,7 +970,7 @@ impl ShaderState {
                     // An integer add keeps the bits of an integer constant (a float move changes a NaN or denormal).
                     let zero = self.cp.zero(&mut self.sel);
                     let out = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: out, srcs: vec![zero, vd], swz: vec![0, 0] });
+                    self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: out, srcs: vec![zero, vd], swz: vec![0, 0], imm: 0 });
                     vd = out;
                 }
                 let index = base_index + c as u32;
@@ -973,7 +978,8 @@ impl ShaderState {
                     self.refuse(format!("SOUT index {index} does not fit a byte"));
                 }
                 self.sel.prog.push(BorgInstr {
-                    mnem: Op::Sout.into(), dst: NO_DST, srcs: vec![vd], swz: vec![index as u8],
+                    mnem: Op::Sout.into(), dst: NO_DST, srcs: vec![vd], swz: vec![0],
+                    imm: index,
                 });
                 self.outs.roots.push(vd);
                 let _ = vc;
@@ -984,11 +990,12 @@ impl ShaderState {
     /// A loop runs while EXANY sees an alive lane: `go` masks one trip, a jump clears it.
     fn loop_mark(&mut self, mnem: Mnem, id: usize, (alive, go, any): (u32, u32, u32)) {
         let one = if mnem == Mnem::LoopHead { self.konst(1) } else { 0 };
-        let i = |mnem: Mnem, dst: u32, srcs: Vec<u32>, swz: Vec<u8>| BorgInstr { mnem, dst, srcs, swz };
+        let i = |mnem: Mnem, dst: u32, srcs: Vec<u32>, swz: Vec<u8>| BorgInstr { mnem, dst, srcs, swz, imm: 0 };
+        let label = BorgInstr { mnem: Mnem::Label, dst: NO_DST, srcs: vec![], swz: vec![], imm: id as u32 };
         let seq = match mnem {
             Mnem::LoopHead => vec![
                 i(Op::Ior.into(), alive, vec![one, one], vec![0, 0]),
-                i(Mnem::Label, NO_DST, vec![], vec![id as u8]),
+                label,
                 i(Op::Ior.into(), go, vec![alive, alive], vec![0, 0]),
                 i(Op::Expush.into(), NO_DST, vec![go], vec![0]),
             ],
@@ -997,8 +1004,7 @@ impl ShaderState {
                 i(Op::Expush.into(), NO_DST, vec![alive], vec![0]),
                 i(Op::Exany.into(), any, vec![], vec![]),
                 i(Op::Expop.into(), NO_DST, vec![], vec![]),
-                // The branch names its LABEL in its second swizzle slot.
-                i(Op::Brnz.into(), NO_DST, vec![any], vec![0, id as u8]),
+                BorgInstr { mnem: Op::Brnz.into(), dst: NO_DST, srcs: vec![any], swz: vec![0], imm: id as u32 },
             ],
             _ => vec![i(Op::Expush.into(), NO_DST, vec![go], vec![0])],
         };
@@ -1046,6 +1052,7 @@ impl ShaderState {
                         dst: NO_DST,
                         srcs: cond.map(|c| vec![c.0]).unwrap_or_default(),
                         swz: cond.map(|c| vec![c.1]).unwrap_or_default(),
+                        imm: 0,
                     });
                 }
             }
@@ -1056,7 +1063,7 @@ impl ShaderState {
                         let zero = self.konst(0);
                         let clear = if j.type_ == nir_jump_break { vec![alive, go] } else { vec![go] };
                         for d in clear {
-                            self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: d, srcs: vec![zero, zero], swz: vec![0, 0] });
+                            self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: d, srcs: vec![zero, zero], swz: vec![0, 0], imm: 0 });
                         }
                     }
                     continue;
@@ -1084,7 +1091,7 @@ impl ShaderState {
                             let (v, comp) = self.operand(src, c as u8);
                             // A compute value is often an integer: copy its bits.
                             let (mnem, srcs, swz) = if self.stage == Stage::Compute { (Op::Ior, vec![v, v], vec![comp, comp]) } else { (Op::Fmov, vec![v], vec![comp]) };
-                            self.sel.prog.push(BorgInstr { mnem: mnem.into(), dst: reg_vregs[&h][c], srcs, swz });
+                            self.sel.prog.push(BorgInstr { mnem: mnem.into(), dst: reg_vregs[&h][c], srcs, swz, imm: 0 });
                         }
                         continue;
                     }
@@ -1122,9 +1129,9 @@ impl ShaderState {
         let out = self.sel.next_vreg;
         self.sel.next_vreg += 1;
         if self.tex_dsts.contains(&v) || self.fattr_dsts.contains(&v) {
-            self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: out, srcs: vec![v, v], swz: vec![comp, comp] });
+            self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: out, srcs: vec![v, v], swz: vec![comp, comp], imm: 0 });
         } else {
-            self.sel.prog.push(BorgInstr { mnem: Op::Fmov.into(), dst: out, srcs: vec![v], swz: vec![comp] });
+            self.sel.prog.push(BorgInstr { mnem: Op::Fmov.into(), dst: out, srcs: vec![v], swz: vec![comp], imm: 0 });
         }
         self.outs.frag[c] = Some((out, 0));
         self.out_roots.push(out);

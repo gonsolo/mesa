@@ -16,7 +16,7 @@ const KEY_WORDS: u32 = SCRATCH_WORDS + 4 * MAX_SPILL_SLOTS;
 impl ShaderState {
     fn op(&mut self, at: &mut Vec<BorgInstr>, op: Op, srcs: &[u32]) -> u32 {
         let dst = self.sel.fresh();
-        at.push(BorgInstr { mnem: op.into(), dst, srcs: srcs.to_vec(), swz: vec![0; srcs.len()] });
+        at.push(BorgInstr { mnem: op.into(), dst, srcs: srcs.to_vec(), swz: vec![0; srcs.len()], imm: 0 });
         self.spill.exempt.insert(dst);
         dst
     }
@@ -31,11 +31,11 @@ impl ShaderState {
         let (k0, k1, c1, c2) = (self.konst(KEY_WORDS), self.konst(KEY_WORDS + 2), self.konst(1), self.konst(2));
         let z = self.op(&mut out, Op::Isub, &[vi, vi]);
         let a0 = self.op(&mut out, Op::Iadd, &[z, k0]);
-        out.push(BorgInstr { mnem: Op::Store.into(), dst: NO_DST, srcs: vec![a0, vi], swz: vec![0, 0] });
+        out.push(BorgInstr { mnem: Op::Store.into(), dst: NO_DST, srcs: vec![a0, vi], swz: vec![0, 0], imm: 0 });
         let t0 = self.op(&mut out, Op::Load, &[a0]);
         let e0 = self.op(&mut out, Op::Iseq, &[vi, t0]);
         let a1 = self.op(&mut out, Op::Iadd, &[e0, k1]);
-        out.push(BorgInstr { mnem: Op::Store.into(), dst: NO_DST, srcs: vec![a1, vi], swz: vec![0, 0] });
+        out.push(BorgInstr { mnem: Op::Store.into(), dst: NO_DST, srcs: vec![a1, vi], swz: vec![0, 0], imm: 0 });
         let a2 = self.op(&mut out, Op::Iadd, &[z, k1]);
         let t1 = self.op(&mut out, Op::Load, &[a2]);
         let e1 = self.op(&mut out, Op::Iseq, &[vi, t1]);
@@ -199,7 +199,7 @@ impl ShaderState {
                 let a = self.op(&mut out, Op::Iadd, &[lane, k]);
                 let t = self.sel.fresh();
                 self.spill.exempt.insert(t);
-                out.push(BorgInstr { mnem: Op::Load.into(), dst: t, srcs: vec![a], swz: vec![0] });
+                out.push(BorgInstr { mnem: Op::Load.into(), dst: t, srcs: vec![a], swz: vec![0], imm: 0 });
                 for s in i.srcs.iter_mut().filter(|s| **s == v) {
                     *s = t;
                 }
@@ -208,7 +208,7 @@ impl ShaderState {
             out.push(i);
             if defines {
                 let a = self.op(&mut out, Op::Iadd, &[lane, k]);
-                out.push(BorgInstr { mnem: Op::Store.into(), dst: NO_DST, srcs: vec![a, v], swz: vec![0, 0] });
+                out.push(BorgInstr { mnem: Op::Store.into(), dst: NO_DST, srcs: vec![a, v], swz: vec![0, 0], imm: 0 });
             }
         }
         self.sel.prog = out;

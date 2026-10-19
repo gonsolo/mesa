@@ -17,9 +17,9 @@ pub(crate) fn extend_for_loops(
     for (k, i) in prog.iter().enumerate() {
         match i.mnem {
             Mnem::Label => {
-                heads.insert(i.swz[0], k);
+                heads.insert(i.imm, k);
             }
-            Mnem::Op(Op::Brnz) => spans.push((heads[&i.swz[1]], k)),
+            Mnem::Op(Op::Brnz) => spans.push((heads[&i.imm], k)),
             _ => {}
         }
     }
@@ -157,7 +157,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn op(mnem: impl Into<Mnem>, dst: u32, srcs: &[u32]) -> BorgInstr {
-        BorgInstr { mnem: mnem.into(), dst, srcs: srcs.to_vec(), swz: vec![0; srcs.len()] }
+        BorgInstr { mnem: mnem.into(), dst, srcs: srcs.to_vec(), swz: vec![0; srcs.len()], imm: 0 }
     }
 
     #[test]
@@ -166,12 +166,12 @@ mod tests {
         let prog = vec![
             op(Op::Ior, 1, &[9, 9]),
             op(Op::Ior, 2, &[9, 9]),
-            BorgInstr { mnem: Mnem::Label, dst: NO_DST, srcs: vec![], swz: vec![0] },
+            BorgInstr { mnem: Mnem::Label, dst: NO_DST, srcs: vec![], swz: vec![], imm: 0 },
             op(Op::Iadd, 3, &[2, 1]),
             op(Op::Ior, 2, &[3, 3]),
             op(Op::Ior, 4, &[3, 3]),
             op(Op::Iadd, 5, &[1, 1]),
-            BorgInstr { mnem: Op::Brnz.into(), dst: NO_DST, srcs: vec![5], swz: vec![0, 0] },
+            BorgInstr { mnem: Op::Brnz.into(), dst: NO_DST, srcs: vec![5], swz: vec![0], imm: 0 },
             op(Op::Iadd, 6, &[4, 4]),
         ];
         let (mut d, mut l) = (HashMap::new(), HashMap::new());
@@ -190,7 +190,7 @@ mod tests {
 
     fn chain(n: u32) -> Vec<BorgInstr> {
         (1..=n)
-            .map(|d| BorgInstr { mnem: Op::Fadd.into(), dst: d, srcs: vec![d - 1, d.saturating_sub(2)], swz: vec![0, 0] })
+            .map(|d| BorgInstr { mnem: Op::Fadd.into(), dst: d, srcs: vec![d - 1, d.saturating_sub(2)], swz: vec![0, 0], imm: 0 })
             .collect()
     }
 

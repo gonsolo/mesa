@@ -59,9 +59,9 @@ impl Emitter<'_> {
         }
     }
 
-    /// BRNZ to the LABEL named in swz[1]; a target in another page is a BRZ over a JMP.
-    fn branch(&mut self, k: usize, i: &BorgInstr, labels: &HashMap<u8, usize>, far: &HashMap<usize, usize>) {
-        let t = labels[&i.swz[1]] as u32;
+    /// BRNZ to the LABEL named in imm; a target in another page is a BRZ over a JMP.
+    fn branch(&mut self, k: usize, i: &BorgInstr, labels: &HashMap<u32, usize>, far: &HashMap<usize, usize>) {
+        let t = labels[&i.imm] as u32;
         let rs1 = self.operand(i.srcs[0], i.swz[0]).0;
         match far.get(&k) {
             None => self.push(encode_branch(Op::Brnz, rs1, (t % 1024) as u16)),
@@ -142,9 +142,9 @@ pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
             }
             Mnem::Op(Op::Sout) => {
                 let rs2 = e.operand(i.srcs[0], 0).0;
-                e.push(encode_sout(rs2, i.swz[0] as u16, 0));
+                e.push(encode_sout(rs2, i.imm as u16, 0));
             }
-            Mnem::Op(Op::Fattr) => e.push(encode_fattr(rd, i.swz[0] as u16)),
+            Mnem::Op(Op::Fattr) => e.push(encode_fattr(rd, i.imm as u16)),
             _ => {
                 if !e.fold_pos_w(i, rd) {
                     e.instr(i, rd);
@@ -158,7 +158,7 @@ pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
 
 /// LABEL word addresses, and the BRNZ whose target lies in another 1024-word page: those become
 /// BRZ over a JMP, after JMP-to-next padding that keeps the BRZ's own target in its page.
-fn branch_layout(prog: &[BorgInstr], start: usize) -> (HashMap<u8, usize>, HashMap<usize, usize>) {
+fn branch_layout(prog: &[BorgInstr], start: usize) -> (HashMap<u32, usize>, HashMap<usize, usize>) {
     let mut far: HashMap<usize, usize> = HashMap::new();
     loop {
         let (mut a, mut labels, mut at) = (start, HashMap::new(), Vec::new());
@@ -166,7 +166,7 @@ fn branch_layout(prog: &[BorgInstr], start: usize) -> (HashMap<u8, usize>, HashM
             match i.mnem {
                 Mnem::Mov => {}
                 Mnem::Label => {
-                    labels.insert(i.swz[0], a);
+                    labels.insert(i.imm, a);
                 }
                 Mnem::Op(Op::Brnz) => {
                     at.push((k, a));
@@ -177,7 +177,7 @@ fn branch_layout(prog: &[BorgInstr], start: usize) -> (HashMap<u8, usize>, HashM
         }
         let mut changed = false;
         for (k, a) in at {
-            let t = labels[&prog[k].swz[1]];
+            let t = labels[&prog[k].imm];
             if far.contains_key(&k) || a / 1024 != t / 1024 {
                 let pad = if a % 1024 > 1021 { 1024 - a % 1024 } else { 0 };
                 changed |= far.insert(k, pad) != Some(pad);
@@ -244,7 +244,7 @@ pub fn build_blob(
     let num_varyings: u8 = cx.sel.prog
         .iter()
         .filter(|i| i.mnem == Op::Sout)
-        .map(|i| i.swz[0] + 1)
+        .map(|i| i.imm as u8 + 1)
         .max()
         .unwrap_or(0);
     let blob = emit_blob(words, &outputs, cx.cp.presets(),
@@ -270,9 +270,9 @@ mod tests {
     use crate::{BorgInstr, Mnem, NO_DST};
 
     fn prog(body: usize) -> Vec<BorgInstr> {
-        let mut p = vec![BorgInstr { mnem: Mnem::Label, dst: NO_DST, srcs: vec![], swz: vec![7] }];
-        p.extend((0..body).map(|k| BorgInstr { mnem: Op::Iadd.into(), dst: k as u32, srcs: vec![], swz: vec![] }));
-        p.push(BorgInstr { mnem: Op::Brnz.into(), dst: NO_DST, srcs: vec![0], swz: vec![0, 7] });
+        let mut p = vec![BorgInstr { mnem: Mnem::Label, dst: NO_DST, srcs: vec![], swz: vec![], imm: 7 }];
+        p.extend((0..body).map(|k| BorgInstr { mnem: Op::Iadd.into(), dst: k as u32, srcs: vec![], swz: vec![], imm: 0 }));
+        p.push(BorgInstr { mnem: Op::Brnz.into(), dst: NO_DST, srcs: vec![0], swz: vec![0], imm: 7 });
         p
     }
 

@@ -147,6 +147,8 @@ pub(crate) struct BorgInstr {
     pub(crate) dst: u32,
     pub(crate) srcs: Vec<u32>,
     pub(crate) swz: Vec<u8>,
+    /// SOUT and FATTR: the component index; LABEL and a loop's BRNZ: the label.
+    pub(crate) imm: u32,
 }
 
 fn decompose_vertex_offset(

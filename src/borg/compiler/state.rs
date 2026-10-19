@@ -35,7 +35,7 @@ impl Selector {
     }
     pub fn op(&mut self, mnem: impl Into<Mnem>, srcs: Vec<u32>, swz: Vec<u8>) -> u32 {
         let dst = self.fresh();
-        self.prog.push(crate::BorgInstr { mnem: mnem.into(), dst, srcs, swz });
+        self.prog.push(crate::BorgInstr { mnem: mnem.into(), dst, srcs, swz, imm: 0 });
         dst
     }
     pub fn op0(&mut self, mnem: impl Into<Mnem>, srcs: Vec<u32>) -> u32 {

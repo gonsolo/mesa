@@ -367,7 +367,7 @@ impl ShaderState {
 
     fn store(&mut self, a: Val, v: Val) {
         let (a, v) = (self.vreg(a), self.vreg(v));
-        self.sel.prog.push(BorgInstr { mnem: Op::Store.into(), dst: NO_DST, srcs: vec![a.0, v.0], swz: vec![a.1, v.1] });
+        self.sel.prog.push(BorgInstr { mnem: Op::Store.into(), dst: NO_DST, srcs: vec![a.0, v.0], swz: vec![a.1, v.1], imm: 0 });
     }
 
     /// The group the hardware runs: a packed quad holds four workgroups.
@@ -456,7 +456,7 @@ impl ShaderState {
                 let control = i.get_const_index(NIR_INTRINSIC_EXECUTION_SCOPE) != 0;
                 // One quad runs every instruction in all its lanes in order: it needs no barrier.
                 if control && ws[0] * ws[1] * ws[2] > LANES {
-                    self.sel.prog.push(BorgInstr { mnem: Op::Barrier.into(), dst: NO_DST, srcs: vec![], swz: vec![] });
+                    self.sel.prog.push(BorgInstr { mnem: Op::Barrier.into(), dst: NO_DST, srcs: vec![], swz: vec![], imm: 0 });
                 }
             }
             nir_intrinsic_load_shared | nir_intrinsic_store_shared => self.shared_access(i),
@@ -617,13 +617,13 @@ impl ShaderState {
         let r30 = self.fixed(30);
         // r30 counts across the workgroup's quads; the lane is its low bits.
         let (m, q) = (self.konst(LANES - 1), self.sel.fresh());
-        self.sel.prog.push(BorgInstr { mnem: Op::Iand.into(), dst: q, srcs: vec![r30, m], swz: vec![0, 0] });
+        self.sel.prog.push(BorgInstr { mnem: Op::Iand.into(), dst: q, srcs: vec![r30, m], swz: vec![0, 0], imm: 0 });
         for lane in 0..LANES {
             let l = self.konst(lane);
             let p = &mut self.sel.prog;
             let mut op = |mnem: Op, dst: u32, srcs: Vec<(u32, u8)>| {
                 let (srcs, swz) = srcs.into_iter().unzip();
-                p.push(BorgInstr { mnem: mnem.into(), dst, srcs, swz });
+                p.push(BorgInstr { mnem: mnem.into(), dst, srcs, swz, imm: 0 });
             };
             op(Op::Iseq, t, vec![(q, 0), (l, 0)]);
             op(Op::Expush, NO_DST, vec![(t, 0)]);

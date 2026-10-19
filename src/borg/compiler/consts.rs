@@ -86,7 +86,7 @@ impl ConstPool {
         let f = sel.fresh();
         sel.loc.insert(f, crate::Loc::Fixed(30));
         let z = sel.fresh();
-        sel.prog.push(crate::BorgInstr { mnem: Op::Isub.into(), dst: z, srcs: vec![f, f], swz: vec![0, 0] });
+        sel.prog.push(crate::BorgInstr { mnem: Op::Isub.into(), dst: z, srcs: vec![f, f], swz: vec![0, 0], imm: 0 });
         self.zero = Some(z);
         z
     }
@@ -184,7 +184,7 @@ impl ShaderState {
                 let (v, c) = (self.sel.fresh(), self.sel.fresh());
                 self.sel.loc.insert(c, crate::Loc::Fixed(30));
                 self.frag.per_pixel_fixed.insert(c);
-                self.sel.prog.push(crate::BorgInstr { mnem: Op::Fstep.into(), dst: v, srcs: vec![c], swz: vec![0] });
+                self.sel.prog.push(crate::BorgInstr { mnem: Op::Fstep.into(), dst: v, srcs: vec![c], swz: vec![0], imm: 0 });
                 v
             }
             // A pinned register is not staged for a draw's vertex shader.
@@ -315,13 +315,13 @@ impl ShaderState {
                     while ptr.1 < self.cs.pool.len() {
                         let p = self.sel.fresh();
                         let at = if hoisted { anchor } else { out.len() };
-                        out.insert(at, BorgInstr { mnem: Op::Iadd.into(), dst: p, srcs: vec![ptr.0, one], swz: vec![0, 0] });
+                        out.insert(at, BorgInstr { mnem: Op::Iadd.into(), dst: p, srcs: vec![ptr.0, one], swz: vec![0, 0], imm: 0 });
                         anchor += hoisted as usize;
                         ptr = (p, ptr.1 + 1);
                     }
                     let at = if hoisted { anchor } else { out.len() };
                     let v = self.sel.fresh();
-                    out.insert(at, BorgInstr { mnem: Op::Load.into(), dst: v, srcs: vec![ptr.0], swz: vec![0] });
+                    out.insert(at, BorgInstr { mnem: Op::Load.into(), dst: v, srcs: vec![ptr.0], swz: vec![0], imm: 0 });
                     anchor += hoisted as usize;
                     self.cs.pool.push(bits);
                     loaded.insert(*s, (v, n));
@@ -415,7 +415,7 @@ impl ShaderState {
         }
         events.sort();
         let mut cur: Vec<[u32; 4]> = vec![[0; 4]; ngroups];
-        let mut out: Vec<BorgInstr> = vec![BorgInstr { mnem: Op::Isub.into(), dst: zero, srcs: vec![f, f], swz: vec![0, 0] }];
+        let mut out: Vec<BorgInstr> = vec![BorgInstr { mnem: Op::Isub.into(), dst: zero, srcs: vec![f, f], swz: vec![0, 0], imm: 0 }];
         let mut e = 0;
         for (at, mut i) in std::mem::take(&mut self.sel.prog).into_iter().enumerate() {
             while e < events.len() && events[e].0 == at {
@@ -423,15 +423,15 @@ impl ShaderState {
                 let mut idx = zero;
                 for _ in 0..g {
                     let n = fresh(&mut self.sel.loc, None);
-                    out.push(BorgInstr { mnem: Op::Iadd.into(), dst: n, srcs: vec![idx, one], swz: vec![0, 0] });
+                    out.push(BorgInstr { mnem: Op::Iadd.into(), dst: n, srcs: vec![idx, one], swz: vec![0, 0], imm: 0 });
                     idx = n;
                 }
                 let t = fresh(&mut self.sel.loc, None);
-                out.push(BorgInstr { mnem: Op::Tex.into(), dst: t, srcs: vec![idx, zero, ctl], swz: vec![0, 0, 0] });
+                out.push(BorgInstr { mnem: Op::Tex.into(), dst: t, srcs: vec![idx, zero, ctl], swz: vec![0, 0, 0], imm: 0 });
                 self.tex_dsts.insert(t);
                 for c in 0..4u8 {
                     let r = fresh(&mut self.sel.loc, None);
-                    out.push(BorgInstr { mnem: Op::Ior.into(), dst: r, srcs: vec![t, t], swz: vec![c, c] });
+                    out.push(BorgInstr { mnem: Op::Ior.into(), dst: r, srcs: vec![t, t], swz: vec![c, c], imm: 0 });
                     cur[g][c as usize] = r;
                 }
                 e += 1;
@@ -454,7 +454,7 @@ impl ShaderState {
             let z = self.sel.next_vreg + 1;
             self.sel.next_vreg += 2;
             self.sel.loc.insert(f, Loc::Fixed(30));
-            let mut out = vec![BorgInstr { mnem: Op::Isub.into(), dst: z, srcs: vec![f, f], swz: vec![0, 0] }];
+            let mut out = vec![BorgInstr { mnem: Op::Isub.into(), dst: z, srcs: vec![f, f], swz: vec![0, 0], imm: 0 }];
             for mut ins in std::mem::take(&mut self.sel.prog) {
                 let mut seen = false;
                 for k in 0..ins.srcs.len() {
@@ -467,7 +467,7 @@ impl ShaderState {
                     }
                     let t = self.sel.next_vreg;
                     self.sel.next_vreg += 1;
-                    out.push(BorgInstr { mnem: Op::Iadd.into(), dst: t, srcs: vec![ins.srcs[k], z], swz: vec![ins.swz[k], 0] });
+                    out.push(BorgInstr { mnem: Op::Iadd.into(), dst: t, srcs: vec![ins.srcs[k], z], swz: vec![ins.swz[k], 0], imm: 0 });
                     ins.srcs[k] = t;
                     ins.swz[k] = 0;
                 }
