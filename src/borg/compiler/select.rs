@@ -570,7 +570,7 @@ impl ShaderState {
                     })
                     .collect();
                 self.sel.vec_map.insert(intr.def.index, comps);
-            } else if self.stage == Stage::Vertex || self.stage == Stage::Fragment {
+            } else if matches!(self.stage, Stage::Vertex | Stage::Fragment) {
                                 let o = resolve_vm(&self.sel.vec_map, intr.get_src(0).as_def().index, 0);
                 let two = self.konst(2);
                 let w = self.sel.next_vreg; self.sel.next_vreg += 1;

@@ -121,13 +121,11 @@ impl ShaderState {
     /// A register holding `bits`: a window word in a fragment or vertex shader (in memory when the
     /// window is full), a preset register or pool word in a compute shader.
     pub fn konst(&mut self, bits: u32) -> u32 {
-        if self.stage == Stage::Compute {
-            return self.cs_const(bits);
+        match self.stage {
+            Stage::Compute => self.cs_const(bits),
+            Stage::Vertex if bits == 0 => self.cp.zero(&mut self.sel),
+            _ => self.win.word(&mut self.sel, bits),
         }
-        if self.stage == Stage::Vertex && bits == 0 {
-            return self.cp.zero(&mut self.sel);
-        }
-        self.win.word(&mut self.sel, bits)
     }
 
     /// The window words the driver stages for the draw, (u, bits).
@@ -152,26 +150,23 @@ impl ShaderState {
         if let Some(v) = self.one_vreg {
             return v;
         }
-        if self.stage == Stage::Compute {
-            let v = self.cs_const(1.0f32.to_bits());
-            self.one_vreg = Some(v);
-            return v;
-        }
-        let v = self.sel.fresh();
-        let v = if self.stage == Stage::Fragment {
-            let c = self.sel.fresh();
-            self.sel.ubo.insert(c, crate::Ubo::Fixed(30));
-            self.per_pixel_fixed.insert(c);
-            self.sel.prog.push(crate::BorgInstr { mnem: Op::Fstep.into(), dst: v, srcs: vec![c], swz: vec![0] });
-            v
-        } else if self.stage == Stage::Vertex {
+        let v = match self.stage {
+            Stage::Compute => self.cs_const(1.0f32.to_bits()),
+            Stage::Fragment => {
+                let (v, c) = (self.sel.fresh(), self.sel.fresh());
+                self.sel.ubo.insert(c, crate::Ubo::Fixed(30));
+                self.per_pixel_fixed.insert(c);
+                self.sel.prog.push(crate::BorgInstr { mnem: Op::Fstep.into(), dst: v, srcs: vec![c], swz: vec![0] });
+                v
+            }
             // A pinned register is not staged for a draw's vertex shader.
-            self.win.word(&mut self.sel, 1.0f32.to_bits())
-        } else {
-            let reg = self.cp.alloc_reg();
-            self.cp.uniforms.push((reg, 1.0f32.to_bits()));
-            self.sel.ubo.insert(v, crate::Ubo::Fixed(reg));
-            v
+            Stage::Vertex => self.win.word(&mut self.sel, 1.0f32.to_bits()),
+            Stage::Other => {
+                let (v, reg) = (self.sel.fresh(), self.cp.alloc_reg());
+                self.cp.uniforms.push((reg, 1.0f32.to_bits()));
+                self.sel.ubo.insert(v, crate::Ubo::Fixed(reg));
+                v
+            }
         };
         self.one_vreg = Some(v);
         v
@@ -180,7 +175,7 @@ impl ShaderState {
     /// A window with more words than it holds keeps the most read ones, the constant 1 and the
     /// pool's control word; the rest are fetched from the pool in memory.
     pub unsafe fn pool_window(&mut self) {
-        if self.win.words.len() <= self.win.size || !(self.stage == Stage::Vertex || self.stage == Stage::Fragment) {
+        if self.win.words.len() <= self.win.size || !matches!(self.stage, Stage::Vertex | Stage::Fragment) {
             return;
         }
         let (base, words) = (self.win.base, std::mem::take(&mut self.win.words));

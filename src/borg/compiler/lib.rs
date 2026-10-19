@@ -359,7 +359,7 @@ unsafe fn compile_nir_inner(
         }
         let blob = match cx.assemble() {
             Some(blob) => blob,
-            None if (cx.stage == Stage::Fragment || cx.stage == Stage::Vertex) && cx.alloc_failed => continue,
+            None if matches!(cx.stage, Stage::Fragment | Stage::Vertex) && cx.alloc_failed => continue,
             None => return 0,
         };
         if !out_len.is_null() {

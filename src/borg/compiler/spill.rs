@@ -48,14 +48,15 @@ impl ShaderState {
 
     /// A per-lane word in 0..4, unique within a quad; in compute the LocalInvocationIndex.
     fn lane_key(&mut self) -> Vec<BorgInstr> {
-        if self.stage == Stage::Compute {
-            let r30 = self.sel.fresh();
-            self.sel.ubo.insert(r30, Ubo::Fixed(30));
-            self.spill_lane = Some(r30);
-            return Vec::new();
-        }
-        if self.stage == Stage::Vertex {
-            return self.vertex_lane_key();
+        match self.stage {
+            Stage::Compute => {
+                let r30 = self.sel.fresh();
+                self.sel.ubo.insert(r30, Ubo::Fixed(30));
+                self.spill_lane = Some(r30);
+                return Vec::new();
+            }
+            Stage::Vertex => return self.vertex_lane_key(),
+            _ => {}
         }
         let mut out = Vec::new();
         let (f30, f31) = (self.sel.fresh(), self.sel.fresh());
@@ -76,15 +77,11 @@ impl ShaderState {
 
     /// Helper lanes skip STOREs, so their spilled values would come back wrong: derivatives and implicit LOD need them.
     fn needs_helper_lanes(&self, i: &BorgInstr) -> bool {
-        if self.stage == Stage::Compute {
-            return false;
-        }
-        if self.stage == Stage::Vertex {
-            return matches!(i.mnem, Mnem::Op(Op::Brz | Op::Brnz));
-        }
-        match i.mnem {
-            Mnem::Op(Op::Ddx | Op::Ddy | Op::Texa | Op::Brz | Op::Brnz) => true,
-            Mnem::Op(Op::Tex) => {
+        match (self.stage, i.mnem) {
+            (Stage::Compute, _) => false,
+            (Stage::Vertex, m) => matches!(m, Mnem::Op(Op::Brz | Op::Brnz)),
+            (_, Mnem::Op(Op::Ddx | Op::Ddy | Op::Texa | Op::Brz | Op::Brnz)) => true,
+            (_, Mnem::Op(Op::Tex)) => {
                 let op = i.srcs.get(2).and_then(|c| match self.sel.ubo.get(c) {
                     Some(Ubo::Uniform(_)) => self.bits_of(*c).map(|bits| (bits >> 16) & 3),
                     _ => None,
@@ -127,8 +124,12 @@ impl ShaderState {
 
     /// Spills the live value with the furthest next use; false when nothing can be spilled.
     fn spill_one(&mut self, live: &[(u32, usize)]) -> bool {
-        let vs_room = self.stage == Stage::Vertex && self.win.room(5);
-        if !(self.stage == Stage::Fragment || self.stage == Stage::Compute || self.stage == Stage::Vertex && vs_room) || self.sel.prog.iter().any(|i| self.needs_helper_lanes(i)) {
+        let room = match self.stage {
+            Stage::Fragment | Stage::Compute => true,
+            Stage::Vertex => self.win.room(5),
+            Stage::Other => false,
+        };
+        if !room || self.sel.prog.iter().any(|i| self.needs_helper_lanes(i)) {
             return false;
         }
         let pinned: Vec<u32> = self.out_roots.iter().copied().chain(self.tex_dsts.iter().copied()).chain(self.fattr_dsts.iter().copied()).chain(self.frag_z).chain(self.pos_out.iter().flatten().copied()).chain(self.frag_out.iter().flatten().copied()).collect();
