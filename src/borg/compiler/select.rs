@@ -4,7 +4,7 @@ use crate::isel::borg_isel;
 use crate::opt::classify_uniform;
 use std::env;
 use std::collections::HashMap;
-use crate::{collect_cf_marks, decompose_vertex_offset, packed_layout, CfMark, resolve_vm, BorgInstr, Ubo, FRAG_CONST_MAX, NO_DST, PUSH_WINDOW_WORDS};
+use crate::{collect_cf_marks, decompose_vertex_offset, packed_layout, CfMark, resolve_vm, BorgInstr, Ubo, NO_DST, PUSH_WINDOW_WORDS};
 use compiler::bindings::*;
 use compiler::nir::AsDef;
 
@@ -40,7 +40,7 @@ impl ShaderState {
             Some(ld) => {
                 if let Some(&bits) = self.consts.get(&ld) {
                     if !self.sel.vec_map.contains_key(&ld) {
-                        let v = self.fw.win(&mut self.sel, bits);
+                        let v = self.konst(bits, Kv::Word);
                         self.sel.vec_map.insert(ld, vec![(v, 0u8)]);
                     }
                 }
@@ -49,7 +49,7 @@ impl ShaderState {
             None => (wz, 0u8),
         };
         self.sel.prog.push(BorgInstr { mnem: "TEXA", dst: NO_DST, srcs: vec![wz, lv, wz], swz: vec![0, lc, 0] });
-        let ctl = self.fw.win(&mut self.sel, 3u32 << 16);
+        let ctl = self.konst(3u32 << 16, Kv::Word);
         let tex_v = self.sel.next_vreg;
         self.sel.next_vreg += 1;
         self.sel.prog.push(BorgInstr { mnem: "TEX", dst: tex_v, srcs: vec![wz, wz, ctl], swz: vec![0, 0, 0] });
@@ -101,7 +101,7 @@ impl ShaderState {
                 let ld = srcs.iter().find(|s| s.src_type == nir_tex_src_lod || s.src_type == nir_tex_src_bias).map(|s| s.src.as_def().index).unwrap_or(cd);
                 if let Some(&bits) = self.consts.get(&ld).filter(|_| is_txl || has_bias) {
                     if !self.sel.vec_map.contains_key(&ld) {
-                        let v = self.fw.win(&mut self.sel, bits);
+                        let v = self.konst(bits, Kv::Word);
                         self.sel.vec_map.insert(ld, vec![(v, 0u8)]);
                     }
                 }
@@ -116,28 +116,12 @@ impl ShaderState {
             let ctl = if is_tg4 {
                 // Operation 2 (gather) of the component in bits 19:18.
                 let bits = 2u32 << 16 | (tex.component() & 3) << 18;
-                self.fw.win(&mut self.sel, bits)
+                self.konst(bits, Kv::Word)
             } else if has_bias {
                 // LOD mode 1: implicit LOD plus TEXA's bias.
-                self.fw.win(&mut self.sel, 1u32 << 21)
+                self.konst(1u32 << 21, Kv::Word)
             } else if is_fetch || is_txl {
-                let ctl_bits = if is_txl { 2u32 << 21 } else { 1u32 << 16 };
-                let slot = if is_txl { &mut self.lod_ctl_uniform } else { &mut self.fetch_ctl_uniform };
-                let u = match *slot {
-                    Some(u) => u,
-                    None => {
-                        assert!(self.fw.count < FRAG_CONST_MAX, "borgc: fragment shader needs more than 11 window constants");
-                        let u = 20 + self.fw.count;
-                        self.fw.count += 1;
-                        self.fw.consts.push((u, ctl_bits));
-                        *slot = Some(u);
-                        u
-                    }
-                };
-                let c = self.sel.next_vreg;
-                self.sel.next_vreg += 1;
-                self.sel.ubo.insert(c, Ubo::Uniform(u as u8));
-                c
+                self.konst(if is_txl { 2u32 << 21 } else { 1u32 << 16 }, Kv::Word)
             } else {
                 match self.zero_ctl {
                 Some(v) => v,
@@ -783,7 +767,7 @@ impl ShaderState {
                 }
                 let addr = match (stride_words, self.const_addr_chain) {
                     (0, Some((next, a))) if next == base_words => a,
-                    (0, _) if !self.cp.vs_window && base_words > 0 => self.fw.win(&mut self.sel, base_words as u32),
+                    (0, _) if !self.cp.vs_window && base_words > 0 => self.konst(base_words as u32, Kv::Word),
                     (0, _) if !self.cp.vs_window => self.konst(base_words as u32, Kv::Word),
                     // A single constant word: the address is a window word, no chain.
                     (0, _) if n == 1 => self.konst(base_words as u32, Kv::Word),
@@ -919,41 +903,41 @@ impl ShaderState {
                     for &(comp, sh, bits) in layout.iter() {
                         let mut f = w;
                         if sh != 0 {
-                            let s = self.fw.win(&mut self.sel, sh);
+                            let s = self.konst(sh, Kv::Word);
                             f = self.sel.op0("ISRL", vec![f, s]);
                         }
                         if bits < 32 && (kind != 1) && sh + bits < 32 {
-                            let m = self.fw.win(&mut self.sel, (1u32 << bits) - 1);
+                            let m = self.konst((1u32 << bits) - 1, Kv::Word);
                             f = self.sel.op0("IAND", vec![f, m]);
                         }
                         let v = match kind {
                             2 if comp != 3 => {
                                 // sRGB to linear: a fetch from the driver's 256-entry table (slot 41).
-                                let ctl = self.fw.win(&mut self.sel, (1 << 16) | (128 + 41));
+                                let ctl = self.konst((1 << 16) | (128 + 41), Kv::Word);
                                 let t = self.sel.op0("TEX", vec![f, zero, ctl]);
                                 self.tex_dsts.insert(t);
                                 self.sel.op0("IOR", vec![t, t])
                             }
                             0 | 2 => {
                                 let i = self.sel.op0("I2F", vec![f]);
-                                let inv = self.fw.win(&mut self.sel, (1.0f32 / ((1u64 << bits) - 1) as f32).to_bits());
+                                let inv = self.konst((1.0f32 / ((1u64 << bits) - 1) as f32).to_bits(), Kv::Word);
                                 self.sel.op0("FMUL", vec![i, inv])
                             }
                             1 => {
                                 // Sign-extend the field from the word itself.
-                                let up = self.fw.win(&mut self.sel, 32 - bits - sh);
+                                let up = self.konst(32 - bits - sh, Kv::Word);
                                 let a = if 32 - bits - sh != 0 { self.sel.op0("ISHL", vec![w, up]) } else { w };
-                                let dn = self.fw.win(&mut self.sel, 32 - bits);
+                                let dn = self.konst(32 - bits, Kv::Word);
                                 let s = self.sel.op0("ISHR", vec![a, dn]);
                                 let i = self.sel.op0("I2F", vec![s]);
-                                let inv = self.fw.win(&mut self.sel, (1.0f32 / ((1u64 << (bits - 1)) - 1) as f32).to_bits());
+                                let inv = self.konst((1.0f32 / ((1u64 << (bits - 1)) - 1) as f32).to_bits(), Kv::Word);
                                 self.sel.op0("FMUL", vec![i, inv])
                             }
                             _ => f,
                         };
                         rgba[comp] = Some(v);
                     }
-                    let one = self.fw.win(&mut self.sel, 1.0f32.to_bits());
+                    let one = self.konst(1.0f32.to_bits(), Kv::Word);
                     let comp0 = intr.get_const_index(NIR_INTRINSIC_COMPONENT) as usize;
                     let nc = intr.def.num_components as usize;
                     let comps: Vec<(u32, u8)> = (0..nc).map(|c| {
@@ -972,7 +956,7 @@ impl ShaderState {
                         for k in 0..nch {
                             let mut h = if k < 2 { w0 } else { w1 };
                             if k % 2 == 1 {
-                                let c16 = self.fw.win(&mut self.sel, 16);
+                                let c16 = self.konst(16, Kv::Word);
                                 h = self.sel.op0("ISRL", vec![h, c16]);
                             }
                             rgba[k] = Some(self.sel.op0("H2F", vec![h]));
@@ -980,7 +964,7 @@ impl ShaderState {
                         self.dst_half = Some((rgba, zero));
                         (rgba, zero)
                     };
-                    let one = self.fw.win(&mut self.sel, 1.0f32.to_bits());
+                    let one = self.konst(1.0f32.to_bits(), Kv::Word);
                     let comp0 = intr.get_const_index(NIR_INTRINSIC_COMPONENT) as usize;
                     let nc = intr.def.num_components as usize;
                     let comps: Vec<(u32, u8)> = (0..nc).map(|c| {
