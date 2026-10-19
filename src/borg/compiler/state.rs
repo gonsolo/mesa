@@ -118,9 +118,7 @@ pub struct ShaderState {
 /// What only a fragment shader has.
 pub struct Frag {
     pub alpha: bool,
-    pub z: Option<u32>,
     pub out: [Option<u32>; 4],
-    pub weights: Option<[u32; 3]>,
     pub per_pixel_fixed: HashSet<u32>,
     pub coord_w: bool,
     pub push_window: bool,
@@ -172,9 +170,7 @@ impl ShaderState {
             const_addr_chain: Default::default(),
             frag: Frag {
                 alpha: std::env::var("BORGC_FRAG_ALPHA").is_ok() || (stage == Stage::Fragment && flags.alpha_output()),
-                z: None,
                 out: [None; 4],
-                weights: None,
                 per_pixel_fixed: Default::default(),
                 coord_w: false,
                 push_window: false,

@@ -86,7 +86,6 @@ impl ShaderState {
             self.outs.stores.len(),
             self.outs.pos[0].is_some(),
         );
-        self.frag.z = if is_fragment { self.interpolate_depth() } else { None };
     }
 
     pub unsafe fn optimise(&mut self) {
@@ -105,7 +104,7 @@ impl ShaderState {
     }
 
     pub fn assemble(&mut self) -> Option<Vec<u8>> {
-        let (forced, mut extra_reserved) = fixed_regs(self, &self.vert.pos_out, &self.frag.out, self.frag.z);
+        let (forced, mut extra_reserved) = fixed_regs(self, &self.vert.pos_out, &self.frag.out);
         self.split_window_reads();
         let Some(alloc) = allocate(self, &forced, &mut extra_reserved) else {
             self.spill.alloc_failed = true;
@@ -113,6 +112,6 @@ impl ShaderState {
         };
         let Encoded { mut words, n_preload, n_body, pending } = encode_program(self, &alloc);
         words.push(0x0000_0000);
-        Some(build_blob(self, &words, n_preload, n_body, pending, &self.frag.out, self.frag.z))
+        Some(build_blob(self, &words, n_preload, n_body, pending, &self.frag.out))
     }
 }

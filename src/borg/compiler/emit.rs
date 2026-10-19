@@ -209,7 +209,6 @@ pub fn build_blob(
     n_body: usize,
     pending: u32,
     frag_out: &[Option<u32>; 4],
-    frag_z: Option<u32>,
 ) -> Vec<u8> {
     let is_vertex = cx.stage == Stage::Vertex;
     eprintln!(
@@ -246,13 +245,10 @@ pub fn build_blob(
     }
 
     let outputs: Vec<u8> = if !is_vertex {
-        // Fragment colour outputs r26/27/28 + r29 = interpolated depth.
+        // Fragment colour outputs r26/27/28, alpha in r24.
         let mut o: Vec<u8> = (0..3).filter(|&c| frag_out[c].is_some()).map(|c| 26 + c as u8).collect();
         if frag_out[3].is_some() {
             o.push(24);
-        }
-        if frag_z.is_some() {
-            o.push(29);
         }
         o
     } else {

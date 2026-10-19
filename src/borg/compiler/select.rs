@@ -500,47 +500,6 @@ impl ShaderState {
                 })
                 .collect();
             self.sel.vec_map.insert(intr.def.index, comps);
-        } else if intr.intrinsic == nir_intrinsic_load_input && self.stage != Stage::Vertex {
-            if self.frag.weights.is_none() {
-                let mut w = [0u32; 3];
-                for (i, wi) in w.iter_mut().enumerate() {
-                    let e = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.ubo.insert(e, Ubo::Fixed(i as u8));        // e_i in r0/r1/r2
-                    self.frag.per_pixel_fixed.insert(e); // NOT uniform: varies per pixel
-                    let inv = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.ubo.insert(inv, Ubo::Uniform(12));         // inv_area = u12
-                    let v = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: Op::Fmul.into(), dst: v, srcs: vec![e, inv], swz: vec![0, 0] });
-                    *wi = v;
-                }
-                self.frag.weights = Some(w);
-            }
-            let w = self.frag.weights.unwrap();
-            let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
-            let var = loc.wrapping_sub(VARYING_SLOT_VAR0); // 0 = texcoord, 1 = frag_pos
-            let n = intr.def.num_components as usize;
-            let comps: Vec<(u32, u8)> = (0..n)
-                .map(|c| {
-                    let base = ((if var == 0 { 13 } else { 19 }) + (c as u32) * 3) as u8;
-                    // uniforms for (v0, v1, v2) = (base+2, base+1, base+0)
-                    let uv: Vec<u32> = [2u8, 1, 0]
-                        .iter()
-                        .map(|&o| {
-                            let v = self.sel.next_vreg; self.sel.next_vreg += 1;
-                            self.sel.ubo.insert(v, Ubo::Uniform(base + o));
-                            v
-                        })
-                        .collect();
-                    let t0 = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: Op::Fmul.into(), dst: t0, srcs: vec![w[0], uv[0]], swz: vec![0, 0] });
-                    let t1 = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: t1, srcs: vec![w[1], uv[1], t0], swz: vec![0, 0, 0] });
-                    let res = self.sel.next_vreg; self.sel.next_vreg += 1;
-                    self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: res, srcs: vec![w[2], uv[2], t1], swz: vec![0, 0, 0] });
-                    (res, 0u8)
-                })
-                .collect();
-            self.sel.vec_map.insert(intr.def.index, comps);
         } else if intr.intrinsic == nir_intrinsic_load_push_constant {
             let dyn_off = intr.get_src(0).comp_as_uint(0);
             if let Some(dyn_off) = dyn_off {
@@ -1114,32 +1073,6 @@ impl ShaderState {
         self.out_roots.push(out);
     }
     
-    }
-    /// Fragment depth as the barycentric-weighted sum of the three vertex depths, which arrive in
-    /// uniform slots 30, 29 and 28. None when the shader has no weights.
-    pub unsafe fn interpolate_depth(&mut self) -> Option<u32> {
-    let mut frag_z: Option<u32> = None;
-    if let Some(w) = self.frag.weights {
-        let uz: Vec<u32> = [30u8, 29, 28]
-            .iter()
-            .map(|&idx| {
-                let v = self.sel.next_vreg;
-                self.sel.next_vreg += 1;
-                self.sel.ubo.insert(v, Ubo::Uniform(idx));
-                v
-            })
-            .collect();
-        let t0 = self.sel.next_vreg; self.sel.next_vreg += 1;
-        self.sel.prog.push(BorgInstr { mnem: Op::Fmul.into(), dst: t0, srcs: vec![w[0], uz[0]], swz: vec![0, 0] });
-        let t1 = self.sel.next_vreg; self.sel.next_vreg += 1;
-        self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: t1, srcs: vec![w[1], uz[1], t0], swz: vec![0, 0, 0] });
-        let zr = self.sel.next_vreg; self.sel.next_vreg += 1;
-        self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: zr, srcs: vec![w[2], uz[2], t1], swz: vec![0, 0, 0] });
-        self.out_roots.push(zr);
-        frag_z = Some(zr);
-    }
-    
-    frag_z
     }
     pub fn log_uniformity(&self) {
     let uniform_roots: std::collections::HashSet<u32> = self.sel.ubo

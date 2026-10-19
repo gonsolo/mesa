@@ -8,7 +8,6 @@ pub fn fixed_regs(
     cx: &ShaderState,
     pos_out: &[Option<u32>; 4],
     frag_out: &[Option<u32>; 4],
-    frag_z: Option<u32>,
 ) -> (HashMap<u32, u8>, Vec<u8>) {
     let is_vertex = cx.stage == Stage::Vertex;
     let mut forced: HashMap<u32, u8> = HashMap::new();
@@ -39,9 +38,6 @@ pub fn fixed_regs(
         }
         for &f in &cx.fattr_dsts {
             forced.insert(f, 10);
-        }
-        if let Some(zr) = frag_z {
-            forced.insert(zr, 29); // interpolated depth → r29
         }
         extra_reserved.extend_from_slice(&[4, 21, 22, 23, 25, 26, 27, 28, 29]);   // r25 is the kill flag
         let reads_bary = cx.sel.prog.iter().flat_map(|i| i.srcs.iter()).any(|v| matches!(cx.sel.ubo.get(v), Some(Ubo::Fixed(5..=7))));
