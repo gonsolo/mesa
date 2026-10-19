@@ -27,8 +27,8 @@ impl ShaderState {
             _ => &[17, 18, 19, 23],
         };
         let mut st = ShaderState::new(regs, stage, flags);
-        st.push_window = push_window && stage == Stage::Fragment;
-        st.out_select = out_select;
+        st.frag.push_window = push_window && stage == Stage::Fragment;
+        st.frag.out_select = out_select;
         (st, entry, total)
     }
 
@@ -77,20 +77,20 @@ impl ShaderState {
         if is_fragment {
             self.copy_frag_outputs();
         }
-        self.pos_out = self.outs.pos.map(|v| v.map(|(d, _)| d));
-        self.frag_out = self.outs.frag.map(|v| v.map(|(d, _)| d));
+        self.vert.pos_out = self.outs.pos.map(|v| v.map(|(d, _)| d));
+        self.frag.out = self.outs.frag.map(|v| v.map(|(d, _)| d));
         self.out_roots.extend(self.outs.roots.iter().copied());
         eprintln!(
             "borgc: draw-mode I/O map — {} vertex-pulling/MVP load(s), {} SOUT(s), gl_Position={}",
-            self.descriptor_defs.len(),
+            self.vert.descriptor_defs.len(),
             self.outs.stores.len(),
             self.outs.pos[0].is_some(),
         );
-        self.frag_z = if is_fragment { self.interpolate_depth() } else { None };
+        self.frag.z = if is_fragment { self.interpolate_depth() } else { None };
     }
 
     pub unsafe fn optimise(&mut self) {
-        if let Some(limit) = self.spill_limit {
+        if let Some(limit) = self.spill.limit {
             dce(&mut self.sel.prog, &self.out_roots);
             self.spill_to_pressure(limit);
         }
@@ -105,14 +105,14 @@ impl ShaderState {
     }
 
     pub fn assemble(&mut self) -> Option<Vec<u8>> {
-        let (forced, mut extra_reserved) = fixed_regs(self, &self.pos_out, &self.frag_out, self.frag_z);
+        let (forced, mut extra_reserved) = fixed_regs(self, &self.vert.pos_out, &self.frag.out, self.frag.z);
         self.split_window_reads();
         let Some(alloc) = allocate(self, &forced, &mut extra_reserved) else {
-            self.alloc_failed = true;
+            self.spill.alloc_failed = true;
             return None;
         };
         let Encoded { mut words, n_preload, n_body, pending } = encode_program(self, &alloc);
         words.push(0x0000_0000);
-        Some(build_blob(self, &words, n_preload, n_body, pending, &self.frag_out, self.frag_z))
+        Some(build_blob(self, &words, n_preload, n_body, pending, &self.frag.out, self.frag.z))
     }
 }

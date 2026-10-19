@@ -155,7 +155,7 @@ impl ShaderState {
             Stage::Fragment => {
                 let (v, c) = (self.sel.fresh(), self.sel.fresh());
                 self.sel.ubo.insert(c, crate::Ubo::Fixed(30));
-                self.per_pixel_fixed.insert(c);
+                self.frag.per_pixel_fixed.insert(c);
                 self.sel.prog.push(crate::BorgInstr { mnem: Op::Fstep.into(), dst: v, srcs: vec![c], swz: vec![0] });
                 v
             }
@@ -208,7 +208,7 @@ impl ShaderState {
         let f = self.sel.fresh();
         self.sel.ubo.insert(f, Ubo::Fixed(30));
         if self.stage == Stage::Fragment {
-            self.per_pixel_fixed.insert(f);
+            self.frag.per_pixel_fixed.insert(f);
         }
         let zero = self.sel.fresh();
         let is_pool = |v: &u32, ubo: &HashMap<u32, Ubo>| match ubo.get(v) {

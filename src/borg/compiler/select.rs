@@ -36,7 +36,7 @@ impl ShaderState {
         let wz = self.sel.next_vreg;
         self.sel.next_vreg += 1;
         self.sel.ubo.insert(wz, Ubo::Fixed(30));
-        self.per_pixel_fixed.insert(wz);
+        self.frag.per_pixel_fixed.insert(wz);
         let (lv, lc) = match ld {
             Some(ld) => {
                 if let Some(&bits) = self.consts.get(&ld) {
@@ -109,7 +109,7 @@ impl ShaderState {
                 let wz = self.sel.next_vreg;
                 self.sel.next_vreg += 1;
                 self.sel.ubo.insert(wz, Ubo::Fixed(30));
-                self.per_pixel_fixed.insert(wz);
+                self.frag.per_pixel_fixed.insert(wz);
                 let (lv, lc) = if is_txl || has_bias { resolve_vm(&self.sel.vec_map, ld, 0) } else { (wz, 0u8) };
                 let (wv, wc) = if has_w { resolve_vm(&self.sel.vec_map, cd, 2) } else { (wz, 0u8) };
                 self.sel.prog.push(BorgInstr { mnem: Op::Texa.into(), dst: NO_DST, srcs: vec![wv, lv, wz], swz: vec![wc, lc, 0] });
@@ -132,7 +132,7 @@ impl ShaderState {
                     let z = self.sel.next_vreg + 2;
                     self.sel.next_vreg += 3;
                     self.sel.ubo.insert(c, Ubo::Fixed(30));
-                    self.per_pixel_fixed.insert(c);
+                    self.frag.per_pixel_fixed.insert(c);
                     self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: neg, srcs: vec![c], swz: vec![0] });
                     self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: z, srcs: vec![neg], swz: vec![0] });
                     self.zero_ctl = Some(z);
@@ -470,7 +470,7 @@ impl ShaderState {
             let bary = [5u8, 6, 7].map(|r| {
                 let v = self.sel.next_vreg; self.sel.next_vreg += 1;
                 self.sel.ubo.insert(v, Ubo::Fixed(r));
-                self.per_pixel_fixed.insert(v);
+                self.frag.per_pixel_fixed.insert(v);
                 v
             });
             let n = intr.def.num_components as usize;
@@ -501,21 +501,21 @@ impl ShaderState {
                 .collect();
             self.sel.vec_map.insert(intr.def.index, comps);
         } else if intr.intrinsic == nir_intrinsic_load_input && self.stage != Stage::Vertex {
-            if self.weights.is_none() {
+            if self.frag.weights.is_none() {
                 let mut w = [0u32; 3];
                 for (i, wi) in w.iter_mut().enumerate() {
                     let e = self.sel.next_vreg; self.sel.next_vreg += 1;
                     self.sel.ubo.insert(e, Ubo::Fixed(i as u8));        // e_i in r0/r1/r2
-                    self.per_pixel_fixed.insert(e); // NOT uniform: varies per pixel
+                    self.frag.per_pixel_fixed.insert(e); // NOT uniform: varies per pixel
                     let inv = self.sel.next_vreg; self.sel.next_vreg += 1;
                     self.sel.ubo.insert(inv, Ubo::Uniform(12));         // inv_area = u12
                     let v = self.sel.next_vreg; self.sel.next_vreg += 1;
                     self.sel.prog.push(BorgInstr { mnem: Op::Fmul.into(), dst: v, srcs: vec![e, inv], swz: vec![0, 0] });
                     *wi = v;
                 }
-                self.weights = Some(w);
+                self.frag.weights = Some(w);
             }
-            let w = self.weights.unwrap();
+            let w = self.frag.weights.unwrap();
             let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
             let var = loc.wrapping_sub(VARYING_SLOT_VAR0); // 0 = texcoord, 1 = frag_pos
             let n = intr.def.num_components as usize;
@@ -544,7 +544,7 @@ impl ShaderState {
         } else if intr.intrinsic == nir_intrinsic_load_push_constant {
             let dyn_off = intr.get_src(0).comp_as_uint(0);
             if let Some(dyn_off) = dyn_off {
-                let base = intr.base() + dyn_off as i32 + if self.push_window { PUSH_WINDOW_WORDS as i32 * 4 } else { 0 };
+                let base = intr.base() + dyn_off as i32 + if self.frag.push_window { PUSH_WINDOW_WORDS as i32 * 4 } else { 0 };
                 let n = intr.def.num_components as usize;
                 let comps: Vec<(u32, u8)> = (0..n)
                     .map(|c| {
@@ -575,7 +575,7 @@ impl ShaderState {
                 let two = self.konst(2);
                 let w = self.sel.next_vreg; self.sel.next_vreg += 1;
                 self.sel.prog.push(BorgInstr { mnem: Op::Isrl.into(), dst: w, srcs: vec![o.0, two], swz: vec![o.1, 0] });
-                let base_word = (intr.base() / 4) as u32 + if self.push_window { PUSH_WINDOW_WORDS } else { 0 };
+                let base_word = (intr.base() / 4) as u32 + if self.frag.push_window { PUSH_WINDOW_WORDS } else { 0 };
                 let comps: Vec<(u32, u8)> = (0..intr.def.num_components as u32)
                     .map(|c| {
                         let k = self.konst(base_word + c);
@@ -598,7 +598,7 @@ impl ShaderState {
         else if intr.intrinsic == nir_intrinsic_vulkan_resource_index {
             self.res_binding.insert(intr.def.index, intr.get_const_index(NIR_INTRINSIC_BINDING));
         } else if intr.intrinsic == nir_intrinsic_load_vulkan_descriptor {
-            self.descriptor_defs.insert(intr.def.index);
+            self.vert.descriptor_defs.insert(intr.def.index);
             if let Some(&b) = self.res_binding.get(&intr.get_src(0).as_def().index) {
                 self.res_binding.insert(intr.def.index, b);
             }
@@ -620,7 +620,7 @@ impl ShaderState {
             let zero = self.sel.next_vreg; self.sel.next_vreg += 1;
             self.sel.prog.push(BorgInstr { mnem: Op::Isub.into(), dst: zero, srcs: vec![f, f], swz: vec![0, 0] });
             // The descriptor's own offset component (a dynamic buffer's) is the window base: 0.
-            let off_is_descriptor = self.descriptor_defs.contains(&resolve_vm(&self.sel.vec_map, intr.get_src(osrc).as_def().index, 0).0);
+            let off_is_descriptor = self.vert.descriptor_defs.contains(&resolve_vm(&self.sel.vec_map, intr.get_src(osrc).as_def().index, 0).0);
             let word = match intr.get_src(osrc).comp_as_uint(0) {
                 Some(_) => None,
                 None if off_is_descriptor => None,
@@ -671,15 +671,15 @@ impl ShaderState {
                     let v = self.sel.next_vreg;
                     self.sel.next_vreg += 1;
                     self.sel.ubo.insert(v, Ubo::Fixed(r));
-                    self.per_pixel_fixed.insert(v);
+                    self.frag.per_pixel_fixed.insert(v);
                     (v, 0u8)
                 })
                 .collect();
-            self.frag_coord_w = true;
+            self.frag.coord_w = true;
             self.sel.vec_map.insert(intr.def.index, comps);
         } else if intr.intrinsic == nir_intrinsic_load_vertex_id {
             self.sel.ubo.insert(intr.def.index, Ubo::Fixed(30));
-            self.vertex_id_def = Some(intr.def.index);
+            self.vert.vertex_id_def = Some(intr.def.index);
         } else if intr.intrinsic == nir_intrinsic_load_instance_id {
             self.sel.ubo.insert(intr.def.index, Ubo::Fixed(31));
         } else if self.stage == Stage::Vertex && self.flags.fetching()
@@ -729,8 +729,8 @@ impl ShaderState {
             let (base_words, stride_words) = match input_slot
                 .map(|l| Some((16 + 144 * l as i32, 4i32)))
                 .unwrap_or_else(|| decompose_vertex_offset(
-                    &self.sel.vec_map, &self.prod, &self.consts, &self.descriptor_defs,
-                    self.vertex_id_def.unwrap_or(u32::MAX), offset_def,
+                    &self.sel.vec_map, &self.prod, &self.consts, &self.vert.descriptor_defs,
+                    self.vert.vertex_id_def.unwrap_or(u32::MAX), offset_def,
                 )) {
                 Some(bs) => bs,
                 None => {
@@ -760,7 +760,7 @@ impl ShaderState {
                     // A single constant word: the address is a window word, no chain.
                     (0, _) if n == 1 => self.konst(base_words as u32),
                     _ => {
-                        let vid = match self.vertex_id_def {
+                        let vid = match self.vert.vertex_id_def {
                             Some(v) => v,
                             None => {
                                 let v = self.sel.next_vreg; self.sel.next_vreg += 1;
@@ -803,7 +803,7 @@ impl ShaderState {
             }
         } else if intr.intrinsic == nir_intrinsic_store_output {
             let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
-            if self.stage == Stage::Fragment && self.out_select >= 0 && (4..12).contains(&loc) && loc != 4 + self.out_select as u32 {
+            if self.stage == Stage::Fragment && self.frag.out_select >= 0 && (4..12).contains(&loc) && loc != 4 + self.frag.out_select as u32 {
                 return;
             }
             let src = intr.get_src(0).as_def().index;
@@ -833,7 +833,7 @@ impl ShaderState {
             } else if self.stage == Stage::Fragment && self.flags.multi_target() && (4..8).contains(&loc) {
                 self.outs.mrt[(loc - 4) as usize] = Some(comps[0]);
             } else if self.stage == Stage::Fragment {
-                let ncomp2 = if self.frag_alpha || self.flags.bytes_packed() { 4 } else { 3 };
+                let ncomp2 = if self.frag.alpha || self.flags.bytes_packed() { 4 } else { 3 };
                 for (c, &v) in comps.iter().enumerate().take(ncomp2) {
                     self.outs.frag[c] = Some(v);
                     self.outs.roots.push(v.0);
@@ -926,7 +926,7 @@ impl ShaderState {
                 }
                 _ if self.flags.half() => {
                     let nch = self.flags.half_channels();
-                    let (rgba, zero) = if let Some(c) = self.dst_half { c } else {
+                    let (rgba, zero) = if let Some(c) = self.frag.dst_half { c } else {
                         let w0 = self.sel.op0(Op::Tld, vec![]);
                         let w1 = if nch > 2 { self.sel.op0(Mnem::Tld1, vec![]) } else { w0 };
                         let zero = self.sel.op0(Op::Isub, vec![w0, w0]);
@@ -939,7 +939,7 @@ impl ShaderState {
                             }
                             rgba[k] = Some(self.sel.op0(Op::H2f, vec![h]));
                         }
-                        self.dst_half = Some((rgba, zero));
+                        self.frag.dst_half = Some((rgba, zero));
                         (rgba, zero)
                     };
                     let one = self.konst(1.0f32.to_bits());
@@ -1119,7 +1119,7 @@ impl ShaderState {
     /// uniform slots 30, 29 and 28. None when the shader has no weights.
     pub unsafe fn interpolate_depth(&mut self) -> Option<u32> {
     let mut frag_z: Option<u32> = None;
-    if let Some(w) = self.weights {
+    if let Some(w) = self.frag.weights {
         let uz: Vec<u32> = [30u8, 29, 28]
             .iter()
             .map(|&idx| {
@@ -1146,7 +1146,7 @@ impl ShaderState {
         .iter()
         .filter_map(|(&v, u)| match u {
             Ubo::Uniform(_) => Some(v),
-            Ubo::Fixed(_) if !self.per_pixel_fixed.contains(&v) => Some(v),
+            Ubo::Fixed(_) if !self.frag.per_pixel_fixed.contains(&v) => Some(v),
             _ => None,
         })
         .collect();

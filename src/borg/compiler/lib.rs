@@ -345,21 +345,21 @@ unsafe fn compile_nir_inner(
     let forced = env::var("BORGC_SPILL_LIMIT").ok().and_then(|v| v.parse::<usize>().ok());
     for limit in [forced, Some(20), Some(18), Some(16), Some(14), Some(12), Some(10)] {
         let (mut cx, entry, total) = ShaderState::start(nir, flags, out_select);
-        (info.push_window, info.spill_slots) = (cx.push_window as u32, 0);
-        cx.spill_limit = limit;
+        (info.push_window, info.spill_slots) = (cx.frag.push_window as u32, 0);
+        cx.spill.limit = limit;
         cx.select_entry(entry);
         if !cx.check_selected() {
             return 0;
         }
         cx.lower_outputs();
         cx.optimise();
-        info.spill_slots = cx.spill_slots;
-        if cx.spill_slots > 0 {
-            eprintln!("borgc: spilled {} value(s) to keep {:?} live", cx.spill_slots, limit);
+        info.spill_slots = cx.spill.slots;
+        if cx.spill.slots > 0 {
+            eprintln!("borgc: spilled {} value(s) to keep {:?} live", cx.spill.slots, limit);
         }
         let blob = match cx.assemble() {
             Some(blob) => blob,
-            None if matches!(cx.stage, Stage::Fragment | Stage::Vertex) && cx.alloc_failed => continue,
+            None if matches!(cx.stage, Stage::Fragment | Stage::Vertex) && cx.spill.alloc_failed => continue,
             None => return 0,
         };
         if !out_len.is_null() {

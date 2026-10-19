@@ -665,7 +665,7 @@ pub(crate) unsafe fn compile_unified(nir: *mut nir_shader) -> Result<Out, String
 
 unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<usize>, compact: bool, pack: bool) -> Result<Out, String> {
     let (mut cx, entry, _) = ShaderState::start(nir, crate::config::Flags(0), -1);
-    cx.spill_limit = limit;
+    cx.spill.limit = limit;
     let ws = (*nir).info.workgroup_size;
     cx.cs.ws = [ws[0] as u32, ws[1] as u32, ws[2] as u32];
     if pack && cx.cs.ws == [1, 1, 1] {
@@ -686,8 +686,8 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
         cx.spill_across_barriers()?;
     }
     cx.optimise();
-    if cx.spill_slots > 0 {
-        eprintln!("borgc[compute]: spilled {} value(s) to keep {:?} live", cx.spill_slots, limit);
+    if cx.spill.slots > 0 {
+        eprintln!("borgc[compute]: spilled {} value(s) to keep {:?} live", cx.spill.slots, limit);
     }
     cx.pool_consts(cap, !compact)?;
     let mut reserved: Vec<u8> = cx.cp.preset_regs().to_vec();

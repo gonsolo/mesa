@@ -17,7 +17,7 @@ impl ShaderState {
     fn op(&mut self, at: &mut Vec<BorgInstr>, op: Op, srcs: &[u32]) -> u32 {
         let dst = self.sel.fresh();
         at.push(BorgInstr { mnem: op.into(), dst, srcs: srcs.to_vec(), swz: vec![0; srcs.len()] });
-        self.no_spill.insert(dst);
+        self.spill.exempt.insert(dst);
         dst
     }
 
@@ -42,7 +42,7 @@ impl ShaderState {
         let n0 = self.op(&mut out, Op::Isub, &[c1, e0]);
         let m = self.op(&mut out, Op::Isub, &[c2, e1]);
         let key = self.op(&mut out, Op::Imul, &[n0, m]);
-        self.spill_lane = Some(key);
+        self.spill.lane = Some(key);
         out
     }
 
@@ -52,7 +52,7 @@ impl ShaderState {
             Stage::Compute => {
                 let r30 = self.sel.fresh();
                 self.sel.ubo.insert(r30, Ubo::Fixed(30));
-                self.spill_lane = Some(r30);
+                self.spill.lane = Some(r30);
                 return Vec::new();
             }
             Stage::Vertex => return self.vertex_lane_key(),
@@ -62,7 +62,7 @@ impl ShaderState {
         let (f30, f31) = (self.sel.fresh(), self.sel.fresh());
         for (f, r) in [(f30, 30), (f31, 31)] {
             self.sel.ubo.insert(f, Ubo::Fixed(r));
-            self.per_pixel_fixed.insert(f);
+            self.frag.per_pixel_fixed.insert(f);
         }
         let c1 = self.konst(1);
         let xi = self.op(&mut out, Op::F2i, &[f30]);
@@ -71,7 +71,7 @@ impl ShaderState {
         let yb = self.op(&mut out, Op::Iand, &[yi, c1]);
         let y2 = self.op(&mut out, Op::Ishl, &[yb, c1]);
         let key = self.op(&mut out, Op::Ior, &[xb, y2]);
-        self.spill_lane = Some(key);
+        self.spill.lane = Some(key);
         out
     }
 
@@ -114,7 +114,7 @@ impl ShaderState {
 
     pub fn spill_to_pressure(&mut self, limit: usize) {
         let max = if self.stage == Stage::Compute { MAX_COMPUTE_SPILL_SLOTS } else { MAX_SPILL_SLOTS };
-        while self.spill_slots < max {
+        while self.spill.slots < max {
             let Some(live) = self.over_limit(limit) else { return };
             if !self.spill_one(&live) {
                 return;
@@ -132,14 +132,14 @@ impl ShaderState {
         if !room || self.sel.prog.iter().any(|i| self.needs_helper_lanes(i)) {
             return false;
         }
-        let pinned: Vec<u32> = self.out_roots.iter().copied().chain(self.tex_dsts.iter().copied()).chain(self.fattr_dsts.iter().copied()).chain(self.frag_z).chain(self.pos_out.iter().flatten().copied()).chain(self.frag_out.iter().flatten().copied()).collect();
+        let pinned: Vec<u32> = self.out_roots.iter().copied().chain(self.tex_dsts.iter().copied()).chain(self.fattr_dsts.iter().copied()).chain(self.frag.z).chain(self.vert.pos_out.iter().flatten().copied()).chain(self.frag.out.iter().flatten().copied()).collect();
         let single_def = |prog: &[BorgInstr], v: u32| {
             prog.iter().filter(|i| i.dst == v).count() == 1
                 && prog.iter().all(|i| i.srcs.iter().zip(&i.swz).all(|(s, &c)| *s != v || c == 0))
         };
         let Some(&(v, _)) = live
             .iter()
-            .filter(|(v, _)| !self.no_spill.contains(v) && !pinned.contains(v) && single_def(&self.sel.prog, *v))
+            .filter(|(v, _)| !self.spill.exempt.contains(v) && !pinned.contains(v) && single_def(&self.sel.prog, *v))
             .max_by_key(|&&(v, end)| (end, std::cmp::Reverse(v)))
         else {
             return false;
@@ -172,7 +172,7 @@ impl ShaderState {
             let Some(v) = crossing else { return Ok(()) };
             let single = self.sel.prog.iter().filter(|i| i.dst == v).count() == 1
                 && self.sel.prog.iter().all(|i| i.srcs.iter().zip(&i.swz).all(|(s, &c)| *s != v || c == 0));
-            if !single || self.spill_slots >= MAX_COMPUTE_SPILL_SLOTS {
+            if !single || self.spill.slots >= MAX_COMPUTE_SPILL_SLOTS {
                 return Err("a value live across barrier() cannot be spilled".into());
             }
             self.spill(v);
@@ -181,24 +181,24 @@ impl ShaderState {
 
     fn spill(&mut self, v: u32) {
         let slot_bits = if self.stage == Stage::Compute {
-            crate::compute::SPILL_BASE_WORDS + self.spill_slots * self.invocations()
+            crate::compute::SPILL_BASE_WORDS + self.spill.slots * self.invocations()
         } else {
-            SCRATCH_WORDS + 4 * self.spill_slots
+            SCRATCH_WORDS + 4 * self.spill.slots
         };
         let mut prog = std::mem::take(&mut self.sel.prog);
-        if self.spill_lane.is_none() {
+        if self.spill.lane.is_none() {
             let head = self.lane_key();
             prog.splice(0..0, head);
         }
-        let lane = self.spill_lane.unwrap();
+        let lane = self.spill.lane.unwrap();
         let k = self.konst(slot_bits);
-        self.spill_slots += 1;
+        self.spill.slots += 1;
         let mut out = Vec::with_capacity(prog.len() + 8);
         for mut i in prog {
             if i.srcs.contains(&v) {
                 let a = self.op(&mut out, Op::Iadd, &[lane, k]);
                 let t = self.sel.fresh();
-                self.no_spill.insert(t);
+                self.spill.exempt.insert(t);
                 out.push(BorgInstr { mnem: Op::Load.into(), dst: t, srcs: vec![a], swz: vec![0] });
                 for s in i.srcs.iter_mut().filter(|s| **s == v) {
                     *s = t;

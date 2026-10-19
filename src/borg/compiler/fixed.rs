@@ -51,7 +51,7 @@ pub fn fixed_regs(
         if !cx.fattr_dsts.is_empty() {
             extra_reserved.extend_from_slice(&[10, 11, 12]);
         }
-        if cx.frag_coord_w {
+        if cx.frag.coord_w {
             extra_reserved.push(8);
         }
 

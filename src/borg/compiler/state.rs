@@ -3,7 +3,7 @@ use crate::opcodes::Op;
 use crate::Mnem;
 use crate::consts::{ConstPool, Window};
 use compiler::bindings::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[derive(Default)]
 pub struct DrawOutputs {
     pub stores: HashMap<u32, Vec<(u32, u8)>>,
@@ -98,35 +98,54 @@ pub struct ShaderState {
     pub out_roots: Vec<u32>,
     pub stage: Stage,
     pub flags: Flags,
-    pub frag_alpha: bool,
-    pub frag_z: Option<u32>,
-    pub pos_out: [Option<u32>; 4],
-    pub frag_out: [Option<u32>; 4],
     pub skipped: Vec<&'static str>,
-    pub weights: Option<[u32; 3]>,
-    pub per_pixel_fixed: std::collections::HashSet<u32>,
-    pub spill_limit: Option<usize>,
-    pub alloc_failed: bool,
-    pub spill_slots: u32,
     pub pool: Vec<u32>,
-    pub spill_lane: Option<u32>,
-    pub no_spill: std::collections::HashSet<u32>,
-    pub frag_coord_w: bool,
     pub res_binding: HashMap<u32, u32>,
     pub prod: HashMap<u32, (nir_op, Vec<(u32, u8)>)>,
-    pub tex_dsts: std::collections::HashSet<u32>,
-    pub fattr_dsts: std::collections::HashSet<u32>,
+    pub tex_dsts: HashSet<u32>,
+    pub fattr_dsts: HashSet<u32>,
     pub zero_ctl: Option<u32>,
-    pub tex_derefs: std::collections::HashSet<u32>,
+    pub tex_derefs: HashSet<u32>,
     pub one_vreg: Option<u32>,
     pub push_const_reg: HashMap<u32, u32>,
-    pub push_window: bool,
-    pub out_select: i32,
-    pub vertex_id_def: Option<u32>,
-    pub descriptor_defs: std::collections::HashSet<u32>,
     pub const_addr_chain: Option<(i32, u32)>,
-    pub dst_half: Option<([Option<u32>; 4], u32)>,
+    pub frag: Frag,
+    pub vert: Vert,
+    pub spill: Spill,
     pub cs: crate::compute::ComputeState,
+}
+
+/// What only a fragment shader has.
+pub struct Frag {
+    pub alpha: bool,
+    pub z: Option<u32>,
+    pub out: [Option<u32>; 4],
+    pub weights: Option<[u32; 3]>,
+    pub per_pixel_fixed: HashSet<u32>,
+    pub coord_w: bool,
+    pub push_window: bool,
+    /// The one colour output kept for a target drawn on its own, -1 for all.
+    pub out_select: i32,
+    pub dst_half: Option<([Option<u32>; 4], u32)>,
+}
+
+/// What only a vertex shader has.
+#[derive(Default)]
+pub struct Vert {
+    pub pos_out: [Option<u32>; 4],
+    pub vertex_id_def: Option<u32>,
+    pub descriptor_defs: HashSet<u32>,
+}
+
+/// Spilling: the live-value limit of this attempt, its outcome and the scratch slots used.
+#[derive(Default)]
+pub struct Spill {
+    pub limit: Option<usize>,
+    pub alloc_failed: bool,
+    pub slots: u32,
+    pub lane: Option<u32>,
+    /// Values never spilled: the spill code's own.
+    pub exempt: HashSet<u32>,
 }
 
 impl ShaderState {
@@ -140,20 +159,8 @@ impl ShaderState {
             out_roots: Vec::new(),
             stage,
             flags,
-            frag_alpha: std::env::var("BORGC_FRAG_ALPHA").is_ok() || (stage == Stage::Fragment && flags.alpha_output()),
-            frag_z: None,
-            pos_out: [None; 4],
-            frag_out: [None; 4],
             skipped: Default::default(),
-            weights: Default::default(),
-            per_pixel_fixed: Default::default(),
-            spill_limit: None,
-            alloc_failed: false,
-            spill_slots: 0,
             pool: Vec::new(),
-            spill_lane: None,
-            no_spill: Default::default(),
-            frag_coord_w: Default::default(),
             res_binding: Default::default(),
             prod: Default::default(),
             tex_dsts: Default::default(),
@@ -162,12 +169,20 @@ impl ShaderState {
             tex_derefs: Default::default(),
             one_vreg: Default::default(),
             push_const_reg: Default::default(),
-            push_window: false,
-            out_select: -1,
-            vertex_id_def: Default::default(),
-            descriptor_defs: Default::default(),
             const_addr_chain: Default::default(),
-            dst_half: None,
+            frag: Frag {
+                alpha: std::env::var("BORGC_FRAG_ALPHA").is_ok() || (stage == Stage::Fragment && flags.alpha_output()),
+                z: None,
+                out: [None; 4],
+                weights: None,
+                per_pixel_fixed: Default::default(),
+                coord_w: false,
+                push_window: false,
+                out_select: -1,
+                dst_half: None,
+            },
+            vert: Default::default(),
+            spill: Default::default(),
             cs: Default::default(),
         }
     }
