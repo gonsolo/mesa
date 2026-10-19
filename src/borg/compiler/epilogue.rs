@@ -346,73 +346,7 @@ impl ShaderState {
             Some(&Ubo::Uniform(u)) if u as u32 >= first_pool && *v != ctl && *v != one => Some(u as u32 - first_pool),
             _ => None,
         };
-        let mut first_use: Vec<Option<usize>> = vec![None; pool.len()];
-        for (at, i) in self.sel.prog.iter().enumerate() {
-            for s in i.srcs.iter() {
-                if let Some(k) = is_pool(s, &self.sel.ubo) {
-                    first_use[k as usize].get_or_insert(at);
-                }
-            }
-        }
-        let mut order: Vec<usize> = (0..pool.len()).filter(|&k| first_use[k].is_some()).collect();
-        order.sort_by_key(|&k| first_use[k]);
-        let mut slot_of: Vec<usize> = vec![0; pool.len()];
-        for (slot, &k) in order.iter().enumerate() {
-            slot_of[k] = slot;
-        }
-        let pool: Vec<u32> = order.iter().map(|&k| pool[k]).collect();
-        const GAP: usize = 16;
-        let ngroups = (pool.len() + 3) / 4;
-        let mut last: Vec<Option<usize>> = vec![None; ngroups];
-        let mut events: Vec<(usize, usize)> = Vec::new();   // (before instruction, group)
-        for (at, i) in self.sel.prog.iter().enumerate() {
-            for s in i.srcs.iter() {
-                let Some(k) = is_pool(s, &self.sel.ubo) else { continue };
-                let g = slot_of[k as usize] / 4;
-                if last[g].map_or(true, |l| at - l > GAP) {
-                    let mut p = at;
-                    loop {
-                        let Some(t) = (0..p).rev().find(|&t| self.sel.prog[t].mnem == "TEX") else { break };
-                        let d = self.sel.prog[t].dst;
-                        if self.sel.prog[p..].iter().any(|i| i.srcs.contains(&d)) { p = t; } else { break; }
-                    }
-                    events.push((p, g));
-                }
-                last[g] = Some(at);
-            }
-        }
-        events.sort();
-        let mut cur: Vec<[u32; 4]> = vec![[0; 4]; ngroups];
-        let mut out: Vec<BorgInstr> = vec![BorgInstr { mnem: "ISUB", dst: zero, srcs: vec![f, f], swz: vec![0, 0] }];
-        let mut e = 0;
-        for (at, mut i) in std::mem::take(&mut self.sel.prog).into_iter().enumerate() {
-            while e < events.len() && events[e].0 == at {
-                let g = events[e].1;
-                let mut idx = zero;
-                for _ in 0..g {
-                    let n = fresh(&mut self.sel.ubo, None);
-                    out.push(BorgInstr { mnem: "IADD", dst: n, srcs: vec![idx, one], swz: vec![0, 0] });
-                    idx = n;
-                }
-                let t = fresh(&mut self.sel.ubo, None);
-                out.push(BorgInstr { mnem: "TEX", dst: t, srcs: vec![idx, zero, ctl], swz: vec![0, 0, 0] });
-                self.tex_dsts.insert(t);
-                for c in 0..4u8 {
-                    let r = fresh(&mut self.sel.ubo, None);
-                    out.push(BorgInstr { mnem: "IOR", dst: r, srcs: vec![t, t], swz: vec![c, c] });
-                    cur[g][c as usize] = r;
-                }
-                e += 1;
-            }
-            for s in i.srcs.iter_mut() {
-                if let Some(k) = is_pool(s, &self.sel.ubo) {
-                    let slot = slot_of[k as usize];
-                    *s = cur[slot / 4][slot % 4];
-                }
-            }
-            out.push(i);
-        }
-        self.sel.prog = out;
+        let pool = self.fetch_pool(&pool, is_pool, ctl, one, f, zero);
         eprintln!("borgc: constant pool of {} word(s)", pool.len());
         #[allow(static_mut_refs)]
         crate::set_frag_pool(pool);
@@ -467,22 +401,43 @@ impl ShaderState {
             Some(&Ubo::Uniform(u)) if u as u32 >= POOL_TAG => Some(u as u32 - POOL_TAG),
             _ => None,
         };
-        let mut first_use: Vec<Option<usize>> = vec![None; pool_bits.len()];
+        let pool = self.fetch_pool(&pool_bits, is_pool, ctl, one, f, zero);
+        assert!(pool.len() <= 64, "borgc: vertex shader needs a constant pool of {} words (64 fit)", pool.len());
+        self.cp.vs_consts = window.iter().map(|&(u, bits)| (renum[&u] as u8, bits)).collect();
+        eprintln!("borgc: vertex constant pool of {} word(s)", pool.len());
+        crate::set_vert_pool(pool);
+    }
+    /// Fetches the pooled words from memory four per TEX, again when a group goes unused for a while,
+    /// and hoisted above the TEX results its first use waits for. Returns the pool in fetch order.
+    fn fetch_pool(&mut self, words: &[u32], is_pool: impl Fn(&u32, &HashMap<u32, Ubo>) -> Option<u32>,
+                  ctl: u32, one: u32, f: u32, zero: u32) -> Vec<u32> {
+        let mut fresh = |ubo: &mut HashMap<u32, Ubo>, u: Option<Ubo>| {
+            let v = self.sel.next_vreg;
+            self.sel.next_vreg += 1;
+            if let Some(u) = u {
+                ubo.insert(v, u);
+            }
+            v
+        };
+        let mut first_use: Vec<Option<usize>> = vec![None; words.len()];
         for (at, i) in self.sel.prog.iter().enumerate() {
             for s in i.srcs.iter() {
-                if let Some(k) = is_pool(s, &self.sel.ubo) { first_use[k as usize].get_or_insert(at); }
+                if let Some(k) = is_pool(s, &self.sel.ubo) {
+                    first_use[k as usize].get_or_insert(at);
+                }
             }
         }
-        let mut order: Vec<usize> = (0..pool_bits.len()).filter(|&k| first_use[k].is_some()).collect();
+        let mut order: Vec<usize> = (0..words.len()).filter(|&k| first_use[k].is_some()).collect();
         order.sort_by_key(|&k| first_use[k]);
-        let mut slot_of: Vec<usize> = vec![0; pool_bits.len()];
-        for (slot, &k) in order.iter().enumerate() { slot_of[k] = slot; }
-        let pool: Vec<u32> = order.iter().map(|&k| pool_bits[k]).collect();
-        assert!(pool.len() <= 64, "borgc: vertex shader needs a constant pool of {} words (64 fit)", pool.len());
+        let mut slot_of: Vec<usize> = vec![0; words.len()];
+        for (slot, &k) in order.iter().enumerate() {
+            slot_of[k] = slot;
+        }
+        let pool: Vec<u32> = order.iter().map(|&k| words[k]).collect();
         const GAP: usize = 16;
         let ngroups = (pool.len() + 3) / 4;
         let mut last: Vec<Option<usize>> = vec![None; ngroups];
-        let mut events: Vec<(usize, usize)> = Vec::new();
+        let mut events: Vec<(usize, usize)> = Vec::new();   // (before instruction, group)
         for (at, i) in self.sel.prog.iter().enumerate() {
             for s in i.srcs.iter() {
                 let Some(k) = is_pool(s, &self.sel.ubo) else { continue };
@@ -508,9 +463,9 @@ impl ShaderState {
                 let g = events[e].1;
                 let mut idx = zero;
                 for _ in 0..g {
-                    let nv = fresh(&mut self.sel.ubo, None);
-                    out.push(BorgInstr { mnem: "IADD", dst: nv, srcs: vec![idx, one], swz: vec![0, 0] });
-                    idx = nv;
+                    let n = fresh(&mut self.sel.ubo, None);
+                    out.push(BorgInstr { mnem: "IADD", dst: n, srcs: vec![idx, one], swz: vec![0, 0] });
+                    idx = n;
                 }
                 let t = fresh(&mut self.sel.ubo, None);
                 out.push(BorgInstr { mnem: "TEX", dst: t, srcs: vec![idx, zero, ctl], swz: vec![0, 0, 0] });
@@ -531,9 +486,7 @@ impl ShaderState {
             out.push(i);
         }
         self.sel.prog = out;
-        self.cp.vs_consts = window.iter().map(|&(u, bits)| (renum[&u] as u8, bits)).collect();
-        eprintln!("borgc: vertex constant pool of {} word(s)", pool.len());
-        crate::set_vert_pool(pool);
+        pool
     }
     pub fn split_window_reads(&mut self) {
         let is_win = |v: &u32, ubo: &HashMap<u32, Ubo>| matches!(ubo.get(v), Some(Ubo::Uniform(_)));
