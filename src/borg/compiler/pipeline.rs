@@ -35,6 +35,7 @@ impl ShaderState {
     /// After instruction selection: logs the result, and refuses the shader when a NIR op had no
     /// Borg instruction, so no wrong shader is emitted.
     pub fn check_selected(&mut self) -> Result<(), String> {
+        self.refusal()?;
         debug!("borgc: selected {} Borg instruction(s) (virtual regs)", self.sel.prog.len());
         if env::var("BORGC_DUMP_ISA").is_ok() {
             for i in &self.sel.prog {

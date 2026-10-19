@@ -663,8 +663,9 @@ impl ShaderState {
             let comps: Vec<(u32, u8)> = (0..n)
                 .map(|c| {
                     let byte_off = base + 4 * (c as i32);
-                    assert_eq!(byte_off % 4, 0,
-                        "push constant field at byte {byte_off} is not word-aligned");
+                    if byte_off % 4 != 0 {
+                        self.refuse(format!("push constant field at byte {byte_off} is not word-aligned"));
+                    }
                     let word_idx = (byte_off / 4) as u32;
                     // A window word per run (a pinned GPR is clobbered by the fragment pass).
                     let idx_reg = match self.push_const_reg.get(&word_idx) {
@@ -968,7 +969,9 @@ impl ShaderState {
                     vd = out;
                 }
                 let index = base_index + c as u32;
-                assert!(index < 256, "borgc: SOUT index {index} does not fit a byte");
+                if index >= 256 {
+                    self.refuse(format!("SOUT index {index} does not fit a byte"));
+                }
                 self.sel.prog.push(BorgInstr {
                     mnem: Op::Sout.into(), dst: NO_DST, srcs: vec![vd], swz: vec![index as u8],
                 });
@@ -1014,7 +1017,7 @@ impl ShaderState {
             loops.err = Some(format!("{} loops; labels are 8 bits", loops.count));
         }
         if let Some(e) = loops.err.take() {
-            self.cs.err.get_or_insert(e);
+            self.refuse(e);
         }
         // Per loop: lanes still looping, lanes going round this time, and whether any lane is.
         let lv: Vec<(u32, u32, u32)> = (0..loops.count).map(|_| (self.sel.fresh(), self.sel.fresh(), self.sel.fresh())).collect();

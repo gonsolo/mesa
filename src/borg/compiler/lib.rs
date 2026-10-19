@@ -317,6 +317,7 @@ pub unsafe extern "C" fn borgc_compile_nir(
         None
     };
     let mut inf = BorgcInfo { pool: [0; 64], npool: 0, spill_slots: 0, push_window: 0 };
+    // A compiler bug refuses the shader instead of aborting the driver.
     let ret = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         compile_nir_inner(nir, out_buf, buf_cap, out_len, Flags(vfetch), out_select, &mut inf)
     }))
@@ -369,6 +370,10 @@ unsafe fn compile_nir_inner(
         cx.lower_outputs();
         cx.optimise();
         info.spill_slots = cx.spill.slots;
+        if let Err(e) = cx.refusal() {
+            eprintln!("borgc: refused: {e}");
+            return 0;
+        }
         if cx.spill.slots > 0 {
             debug!("borgc: spilled {} value(s) to keep {:?} live", cx.spill.slots, limit);
         }

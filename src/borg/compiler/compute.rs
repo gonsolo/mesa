@@ -45,7 +45,6 @@ pub struct ComputeState {
     pub(crate) kreg: HashMap<u32, u32>, // constant bits -> placeholder vreg, placed by pool_consts
     pub(crate) kval: HashMap<u32, u32>,
     pub pool: Vec<u32>,
-    pub err: Option<String>,
 }
 
 /// A value while selecting: a known constant or a register component.
@@ -188,9 +187,7 @@ impl ShaderState {
     }
 
     fn fail(&mut self, m: String) {
-        if self.cs.err.is_none() {
-            self.cs.err = Some(m);
-        }
+        self.refuse(m);
     }
 
     /// An integer op on constants: folded, so an address stays a constant.
@@ -497,8 +494,8 @@ impl ShaderState {
         let x = match self.cs.nwg {
             Some(x) => x,
             None => {
-                let x = self.cp.alloc_reg();
-                let (y, z) = (self.cp.alloc_reg(), self.cp.alloc_reg());
+                let x = self.spare_reg();
+                let (y, z) = (self.spare_reg(), self.spare_reg());
                 self.cs.presets.extend([(x, 0), (y, 0), (z, 0)]);
                 self.cs.nwg = Some(x);
                 x
@@ -691,9 +688,6 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
         (cx.cs.ws, cx.cs.packed) = ([LANES, 1, 1], true);
     }
     cx.select_entry(entry);
-    if let Some(e) = cx.cs.err.take() {
-        return Err(e);
-    }
     cx.check_selected()?;
     if compact {
         cx.sink_loads();
@@ -707,6 +701,7 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
         debug!("borgc[compute]: spilled {} value(s) to keep {:?} live", cx.spill.slots, limit);
     }
     cx.pool_consts(cap, !compact)?;
+    cx.refusal()?;
     let mut reserved: Vec<u8> = cx.cp.preset_regs().to_vec();
     reserved.extend([30u8, 31, 12, 13, 14]);
     let alloc = crate::fixed::allocate(&cx, &HashMap::new(), &mut reserved).ok_or(OUT_OF_REGISTERS)?;
@@ -763,7 +758,7 @@ unsafe fn compile_compute_inner(
     local: *mut u32, flags: *mut u32,
     pool: *mut u32, pool_cap: u32, npool: *mut u32,
 ) -> u32 {
-    // An assert in the backend must refuse the shader, not abort the process.
+    // A compiler bug refuses the shader instead of aborting the driver.
     *npool = 0;
     let compiled = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile_unified(nir))) {
         Ok(r) => r,

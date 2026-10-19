@@ -109,6 +109,8 @@ pub struct ShaderState {
     pub one_vreg: Option<u32>,
     pub push_const_reg: HashMap<u32, u32>,
     pub const_addr_chain: Option<(i32, u32)>,
+    /// Why the shader is refused: the first reason, reported when the phase ends.
+    pub refused: Option<String>,
     pub frag: Frag,
     pub vert: Vert,
     pub spill: Spill,
@@ -147,6 +149,17 @@ pub struct Spill {
 }
 
 impl ShaderState {
+    pub fn refuse(&mut self, why: impl Into<String>) {
+        self.refused.get_or_insert_with(|| why.into());
+    }
+
+    /// Ends a phase: the reason the shader is refused, if it is.
+    pub fn refusal(&mut self) -> Result<(), String> {
+        self.refused.take().map_or(Ok(()), Err)
+    }
+}
+
+impl ShaderState {
     pub fn new(regs: &'static [u8], stage: Stage, flags: Flags) -> Self {
         ShaderState {
             sel: Selector::new(),
@@ -168,6 +181,7 @@ impl ShaderState {
             one_vreg: Default::default(),
             push_const_reg: Default::default(),
             const_addr_chain: Default::default(),
+            refused: None,
             frag: Frag {
                 alpha: std::env::var("BORGC_FRAG_ALPHA").is_ok() || (stage == Stage::Fragment && flags.alpha_output()),
                 out: [None; 4],

@@ -39,17 +39,20 @@ impl Window {
         self.size - 2 + POOL_MAX
     }
 
-    pub fn word(&mut self, sel: &mut Selector, bits: u32) -> u32 {
+    /// The window word holding `bits`; None when the shader has more constants than fit.
+    pub fn word(&mut self, sel: &mut Selector, bits: u32) -> Option<u32> {
         if let Some(&v) = self.vregs.get(&bits) {
-            return v;
+            return Some(v);
         }
-        assert!(self.words.len() < self.max(), "borgc: shader needs more than {} constants", self.max());
+        if self.words.len() >= self.max() {
+            return None;
+        }
         let u = self.base + self.words.len() as u8;
         self.words.push((u, bits));
         let v = sel.fresh();
         sel.ubo.insert(v, Ubo::Uniform(u));
         self.vregs.insert(bits, v);
-        v
+        Some(v)
     }
 
     /// Room for `n` more words before the pool pass.
@@ -89,10 +92,10 @@ impl ConstPool {
     }
 
     /// A preset register the driver fills with `bits`.
-    pub fn preset(&mut self, bits: u32) -> u8 {
-        let r = self.alloc_reg();
+    pub fn preset(&mut self, bits: u32) -> Option<u8> {
+        let r = self.alloc_reg()?;
         self.uniforms.push((r, bits));
-        r
+        Some(r)
     }
 
     /// The registers handed out as presets so far.
@@ -108,23 +111,48 @@ impl ConstPool {
         &self.uniforms
     }
 
-    pub fn alloc_reg(&mut self) -> u8 {
-        assert!(self.count < self.regs.len(),
-            "borgc: shader needs more than {} constant registers ({:?})", self.regs.len(), self.regs);
-        let reg = self.regs[self.count];
+    /// The next preset register; None when they are all taken.
+    pub fn alloc_reg(&mut self) -> Option<u8> {
+        let reg = *self.regs.get(self.count)?;
         self.count += 1;
-        reg
+        Some(reg)
     }
 }
 
 impl ShaderState {
+    fn window_word(&mut self, bits: u32) -> u32 {
+        match self.win.word(&mut self.sel, bits) {
+            Some(v) => v,
+            None => {
+                self.refuse(format!("more than {} constants", self.win.max()));
+                self.sel.fresh()
+            }
+        }
+    }
+
+    /// A preset register the driver fills with `bits`.
+    pub(crate) fn preset(&mut self, bits: u32) -> u8 {
+        self.cp.preset(bits).unwrap_or_else(|| {
+            self.refuse("more constants than preset registers");
+            0
+        })
+    }
+
+    /// A preset register the driver or the grid split fills.
+    pub(crate) fn spare_reg(&mut self) -> u8 {
+        self.cp.alloc_reg().unwrap_or_else(|| {
+            self.refuse("more constants than preset registers");
+            0
+        })
+    }
+
     /// A register holding `bits`: a window word in a fragment or vertex shader (in memory when the
     /// window is full), a preset register or pool word in a compute shader.
     pub fn konst(&mut self, bits: u32) -> u32 {
         match self.stage {
             Stage::Compute => self.cs_const(bits),
             Stage::Vertex if bits == 0 => self.cp.zero(&mut self.sel),
-            _ => self.win.word(&mut self.sel, bits),
+            _ => self.window_word(bits),
         }
     }
 
@@ -160,10 +188,9 @@ impl ShaderState {
                 v
             }
             // A pinned register is not staged for a draw's vertex shader.
-            Stage::Vertex => self.win.word(&mut self.sel, 1.0f32.to_bits()),
+            Stage::Vertex => self.window_word(1.0f32.to_bits()),
             Stage::Other => {
-                let (v, reg) = (self.sel.fresh(), self.cp.alloc_reg());
-                self.cp.uniforms.push((reg, 1.0f32.to_bits()));
+                let (v, reg) = (self.sel.fresh(), self.preset(1.0f32.to_bits()));
                 self.sel.ubo.insert(v, crate::Ubo::Fixed(reg));
                 v
             }
@@ -217,7 +244,9 @@ impl ShaderState {
         };
         let bits: Vec<u32> = pooled.iter().map(|&(_, b)| b).collect();
         let pool = self.fetch_pool(&bits, is_pool, ctl, one, f, zero);
-        assert!(pool.len() <= POOL_MAX, "borgc: a constant pool of {} words ({POOL_MAX} fit)", pool.len());
+        if pool.len() > POOL_MAX {
+            self.refuse(format!("a constant pool of {} words ({POOL_MAX} fit)", pool.len()));
+        }
         self.win.words = window.iter().enumerate().map(|(k, &(_, b))| (base + k as u8, b)).collect();
         debug!("borgc: constant pool of {} word(s)", pool.len());
         self.pool = pool;
@@ -257,7 +286,7 @@ impl ShaderState {
         let pooled_n = if ks.len() <= free.min(cap) { 0 } else { ks.len() - free.saturating_sub(ptrs).min(cap) };
         let (keep, pooled) = ks.split_at(ks.len() - pooled_n);
         for &(v, bits) in keep {
-            let r = self.cp.preset(bits);
+            let r = self.preset(bits);
             self.sel.ubo.insert(v, Ubo::Fixed(r));
         }
         if pooled.is_empty() {
@@ -266,9 +295,9 @@ impl ShaderState {
         if free < ptrs {
             return Err(format!("{} constants do not fit {free} registers", ks.len()));
         }
-        let rb = self.cp.preset(POOL_BASE_WORDS);
+        let rb = self.preset(POOL_BASE_WORDS);
         let base = self.fixed(rb);
-        let r1 = self.cp.preset(1);
+        let r1 = self.preset(1);
         let one = self.fixed(r1);
         let pooled: HashMap<u32, u32> = pooled.iter().copied().collect();
         const GAP: usize = 16;
@@ -314,7 +343,7 @@ impl ShaderState {
                 // Registers do not survive the other quads' turns, a pointer stepped in a loop
                 // differs between trips, and one stepped under its mask between lanes.
                 Mnem::Op(Op::Barrier) | Mnem::Label | Mnem::Op(Op::Brnz) => {
-                    let r = self.cp.preset(POOL_BASE_WORDS + self.cs.pool.len() as u32);
+                    let r = self.preset(POOL_BASE_WORDS + self.cs.pool.len() as u32);
                     ptr = (self.fixed(r), self.cs.pool.len());
                     loaded.clear();
                 }
@@ -461,8 +490,8 @@ mod tests {
     #[test]
     fn const_regs_run_out() {
         let mut c = cx(false);
-        assert_eq!((c.cp.alloc_reg(), c.cp.alloc_reg(), c.cp.alloc_reg()), (17, 18, 19));
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.cp.alloc_reg())).is_err());
+        assert_eq!((c.cp.alloc_reg(), c.cp.alloc_reg(), c.cp.alloc_reg()), (Some(17), Some(18), Some(19)));
+        assert_eq!(c.cp.alloc_reg(), None);
     }
 
     #[test]
@@ -495,13 +524,11 @@ mod tests {
     }
 
     #[test]
-    fn fragment_window_overflow_panics() {
+    fn fragment_window_overflow_refuses() {
         let mut c = cx(false);
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            for b in 0..=Window::fragment().max() as u32 {
-                c.konst(b);
-            }
-        }));
-        assert!(r.is_err());
+        for b in 0..=Window::fragment().max() as u32 {
+            c.konst(b);
+        }
+        assert!(c.refusal().is_err());
     }
 }

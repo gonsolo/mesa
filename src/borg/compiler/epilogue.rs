@@ -31,7 +31,9 @@ impl ShaderState {
         // gl_PointCoord rides as two more varyings, after the shader's own.
         if self.flags.pntc_varyings() {
             let base = self.sel.prog.iter().filter(|i| i.mnem == Op::Sout).map(|i| i.swz[0] as u32 + 1).max().unwrap_or(0);
-            assert!(base + 2 <= 255, "borgc: no varying slot left for the point coordinate");
+            if base + 2 > 255 {
+                self.refuse("no varying slot left for the point coordinate");
+            }
             for k in 0..2u32 {
                 self.sel.prog.push(BorgInstr { mnem: Op::Sout.into(), dst: NO_DST, srcs: vec![d[2 + k as usize]], swz: vec![(base + k) as u8] });
                 self.outs.roots.push(d[2 + k as usize]);
