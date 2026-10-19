@@ -555,7 +555,7 @@ impl ShaderState {
                         let idx_reg = match self.push_const_reg.get(&word_idx) {
                             Some(&r) => r,
                             None => {
-                                let r = self.konst(word_idx, Kv::Derive);
+                                let r = self.konst(word_idx, Kv::Word);
                                 self.push_const_reg.insert(word_idx, r);
                                 r
                             }
@@ -571,13 +571,13 @@ impl ShaderState {
                 self.sel.vec_map.insert(intr.def.index, comps);
             } else if self.is_vertex || self.is_fragment {
                                 let o = resolve_vm(&self.sel.vec_map, intr.get_src(0).as_def().index, 0);
-                let two = self.konst(2, Kv::Derive);
+                let two = self.konst(2, Kv::Word);
                 let w = self.sel.next_vreg; self.sel.next_vreg += 1;
                 self.sel.prog.push(BorgInstr { mnem: "ISRL", dst: w, srcs: vec![o.0, two], swz: vec![o.1, 0] });
                 let base_word = (intr.base() / 4) as u32 + if self.push_window { PUSH_WINDOW_WORDS } else { 0 };
                 let comps: Vec<(u32, u8)> = (0..intr.def.num_components as u32)
                     .map(|c| {
-                        let k = self.konst(base_word + c, Kv::Derive);
+                        let k = self.konst(base_word + c, Kv::Word);
                         let addr = self.sel.next_vreg; self.sel.next_vreg += 1;
                         self.sel.prog.push(BorgInstr { mnem: "IADD", dst: addr, srcs: vec![w, k], swz: vec![0, 0] });
                         let dst = self.sel.next_vreg; self.sel.next_vreg += 1;
@@ -613,9 +613,6 @@ impl ShaderState {
             }
             let binding = self.res_binding.get(&bd).copied().unwrap_or(0);
             let slot = SSBO_SLOT_WORDS * (1 + binding);
-                        if self.is_vertex {
-                let _ = self.konst(1u32, Kv::Word);   // each word's address is the slot's base plus 1
-            }
             // A register holding 0, to copy window words through (an instruction reads one).
             let f = self.sel.next_vreg; self.sel.next_vreg += 1;
             self.sel.ubo.insert(f, Ubo::Fixed(30));
@@ -628,7 +625,7 @@ impl ShaderState {
                 None if off_is_descriptor => None,
                 None => {
                     let o = resolve_vm(&self.sel.vec_map, intr.get_src(osrc).as_def().index, 0);
-                    let two = self.konst(2, Kv::Derive);
+                    let two = self.konst(2, Kv::Word);
                     let w = self.sel.next_vreg; self.sel.next_vreg += 1;
                     self.sel.prog.push(BorgInstr { mnem: "ISRL", dst: w, srcs: vec![o.0, two], swz: vec![o.1, 0] });
                     Some(w)
@@ -641,7 +638,7 @@ impl ShaderState {
                 if store && intr.write_mask() & (1 << c) == 0 {
                     continue;
                 }
-                let k = self.konst(slot + const_word.unwrap_or(0) + c as u32, Kv::Derive);
+                let k = self.konst(slot + const_word.unwrap_or(0) + c as u32, Kv::Word);
                 let addr = self.sel.next_vreg; self.sel.next_vreg += 1;
                 self.sel.prog.push(BorgInstr { mnem: "IADD", dst: addr, srcs: vec![word.unwrap_or(zero), k], swz: vec![0, 0] });
                 if store {
@@ -649,7 +646,7 @@ impl ShaderState {
                     let d = resolve_vm(&self.sel.vec_map, src, c as u8);
                     let val = match self.consts.get(&d.0) {
                         Some(&bits) if !self.sel.vec_map.contains_key(&d.0) => {
-                            let kv = self.konst(bits, Kv::Derive);
+                            let kv = self.konst(bits, Kv::Word);
                             let t = self.sel.next_vreg; self.sel.next_vreg += 1;
                             self.sel.prog.push(BorgInstr { mnem: "IADD", dst: t, srcs: vec![zero, kv], swz: vec![0, 0] });
                             (t, 0u8)
@@ -692,13 +689,7 @@ impl ShaderState {
             let n = intr.def.num_components as usize;
             let ctl_bits = (1u32 << 16) | (128 + loc);
             let twelve = self.konst(12, Kv::Word);
-            let ctl = if loc >= 24 {
-                let _ = self.konst(ctl_bits - 24, Kv::Word);
-                let _ = self.konst(24, Kv::Derive);
-                self.konst(ctl_bits, Kv::Derive)
-            } else {
-                self.konst(ctl_bits, Kv::Word)
-            };
+            let ctl = self.konst(ctl_bits, Kv::Word);
             // The index register: r30 (VertexIndex) or r31 (InstanceIndex).
             let idx_reg = if loc < 16 && self.flags.instanced(loc) { 31 } else { 30 };
             let idx = self.sel.next_vreg; self.sel.next_vreg += 1;
@@ -761,9 +752,6 @@ impl ShaderState {
                 base_words
             };
             if base_words >= 0 {
-                if self.is_vertex && base_words >= 16384 {
-                    let _ = self.konst(16384u32, Kv::Word);
-                }
                 let addr = match (stride_words, self.const_addr_chain) {
                     (0, Some((next, a))) if next == base_words => a,
                     (0, _) if !self.is_vertex && base_words > 0 => self.konst(base_words as u32, Kv::Word),

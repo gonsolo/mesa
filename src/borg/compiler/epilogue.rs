@@ -9,7 +9,7 @@ impl ShaderState {
     /// as two varyings when the fragment shader reads gl_PointCoord.
     pub unsafe fn epilogue_point_quads(&mut self) {
         let ctl_bits = (1u32 << 16) | (128 + 16);
-        let ctl = self.cp.vs_word(&mut self.sel, ctl_bits);
+        let ctl = self.konst(ctl_bits, Kv::Word);
         let idx = self.sel.next_vreg; self.sel.next_vreg += 1;
         self.sel.ubo.insert(idx, Ubo::Fixed(30));
         let twelve = self.konst(12, Kv::Word);   // shared with the attribute fetches
@@ -43,7 +43,7 @@ impl ShaderState {
                 // Clamp to the advertised range [1, 64]: x - c*(x - 64), c = step(x - 64).
                 let x = self.sel.reg(ps).0;
                 // upper: x -= step(x - 64) * (x - 64)
-                let neg_hi = self.konst((-64.0f32).to_bits(), Kv::Virtual);
+                let neg_hi = self.konst((-64.0f32).to_bits(), Kv::Word);
                 let t = self.sel.op0("FADD", vec![x, neg_hi]);
                 let c = self.sel.op0("FSTEP", vec![t]);
                 let ct = self.sel.op0("FMUL", vec![c, t]);

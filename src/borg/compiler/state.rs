@@ -113,7 +113,7 @@ impl ShaderState {
     pub fn new(regs: &'static [u8], is_vertex: bool, is_fragment: bool, flags: Flags) -> Self {
         ShaderState {
             sel: Selector::new(),
-            cp: ConstPool::new(regs, is_vertex),
+            cp: ConstPool::new(regs),
             fw: FragWindow::default(),
             outs: DrawOutputs::default(),
             consts: HashMap::new(),
