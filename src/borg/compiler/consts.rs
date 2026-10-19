@@ -5,38 +5,41 @@ use crate::state::{Selector, ShaderState};
 use crate::{BorgInstr, Ubo, FRAG_POOL_SLOT};
 use std::collections::HashMap;
 
-#[derive(Default)]
-pub struct FragWindow {
-    by_bits: HashMap<u32, u32>,
-    count: u32,
-    consts: Vec<(u32, u32)>,
+/// A draw shader's uniform window: words u{base}.. in creation order, more than it holds until
+/// the pool pass moves the rest to memory.
+pub struct Window {
+    base: u8,
+    size: usize,
+    max: usize,
+    words: Vec<(u8, u32)>,
     vregs: HashMap<u32, u32>,
 }
 
-impl FragWindow {
-    pub fn slot(&mut self, bits: u32) -> u32 {
-        if let Some(&u) = self.by_bits.get(&bits) {
-            return u;
-        }
-        assert!(self.count < crate::FRAG_CONST_MAX, "borgc: fragment shader needs more than {} constants", crate::FRAG_CONST_MAX);
-        let u = 20 + self.count;
-        self.count += 1;
-        self.consts.push((u, bits));
-        self.by_bits.insert(bits, u);
-        u
+impl Window {
+    pub fn fragment() -> Self {
+        Window { base: 20, size: 11, max: crate::FRAG_CONST_MAX as usize, words: Vec::new(), vregs: HashMap::new() }
     }
-}
 
-impl FragWindow {
-    pub fn win(&mut self, sel: &mut Selector, bits: u32) -> u32 {
+    pub fn vertex() -> Self {
+        Window { base: DRAW_VS_CONST_U0, size: DRAW_VS_CONST_WORDS, max: VS_VIRTUAL_MAX, words: Vec::new(), vregs: HashMap::new() }
+    }
+
+    pub fn word(&mut self, sel: &mut Selector, bits: u32) -> u32 {
         if let Some(&v) = self.vregs.get(&bits) {
             return v;
         }
-        let u = self.slot(bits);
+        assert!(self.words.len() < self.max, "borgc: shader needs more than {} constants", self.max);
+        let u = self.base + self.words.len() as u8;
+        self.words.push((u, bits));
         let v = sel.fresh();
-        sel.ubo.insert(v, crate::Ubo::Uniform(u as u8));
+        sel.ubo.insert(v, Ubo::Uniform(u));
         self.vregs.insert(bits, v);
         v
+    }
+
+    /// Room for `n` more words before the pool pass.
+    pub fn room(&self, n: usize) -> bool {
+        self.words.len() + n < self.max
     }
 }
 
@@ -49,9 +52,7 @@ pub struct ConstPool {
     regs: &'static [u8],
     count: usize,
     uniforms: Vec<(u8, u32)>,
-    vs_consts: Vec<(u8, u32)>,
-    vs_by_bits: HashMap<u32, u32>,
-    vs_zero: Option<u32>,
+    zero: Option<u32>,
 }
 
 impl ConstPool {
@@ -60,22 +61,20 @@ impl ConstPool {
             regs,
             count: 0,
             uniforms: Vec::new(),
-            vs_consts: Vec::new(),
-            vs_by_bits: HashMap::new(),
-            vs_zero: None,
+            zero: None,
         }
     }
 
     /// 0, built once as r30 - r30.
     pub fn zero(&mut self, sel: &mut Selector) -> u32 {
-        if let Some(z) = self.vs_zero {
+        if let Some(z) = self.zero {
             return z;
         }
         let f = sel.fresh();
         sel.ubo.insert(f, crate::Ubo::Fixed(30));
         let z = sel.fresh();
         sel.prog.push(crate::BorgInstr { mnem: "ISUB", dst: z, srcs: vec![f, f], swz: vec![0, 0] });
-        self.vs_zero = Some(z);
+        self.zero = Some(z);
         z
     }
 
@@ -99,35 +98,12 @@ impl ConstPool {
         &self.uniforms
     }
 
-    /// Room for `n` more vertex window words before the pool pass.
-    pub fn vs_room(&self, n: usize) -> bool {
-        self.vs_consts.len() + n < VS_VIRTUAL_MAX
-    }
-
     pub fn alloc_reg(&mut self) -> u8 {
         assert!(self.count < self.regs.len(),
             "borgc: shader needs more than {} constant registers ({:?})", self.regs.len(), self.regs);
         let reg = self.regs[self.count];
         self.count += 1;
         reg
-    }
-
-    /// A vertex constant: 0 is r30 - r30, any other a window word, which the pool pass moves to
-    /// memory when the window is full.
-    pub fn vs_word(&mut self, sel: &mut Selector, bits: u32) -> u32 {
-        if bits == 0 {
-            return self.zero(sel);
-        }
-        if let Some(&v) = self.vs_by_bits.get(&bits) {
-            return v;
-        }
-        assert!(self.vs_consts.len() < VS_VIRTUAL_MAX, "borgc: vertex shader needs more than {} constants", VS_VIRTUAL_MAX);
-        let v = sel.fresh();
-        let u = DRAW_VS_CONST_U0 as u32 + self.vs_consts.len() as u32;
-        self.vs_consts.push((u as u8, bits));
-        sel.ubo.insert(v, crate::Ubo::Uniform(u as u8));
-        self.vs_by_bits.insert(bits, v);
-        v
     }
 }
 
@@ -138,28 +114,25 @@ impl ShaderState {
         if self.is_compute {
             return self.cs_const(bits);
         }
-        if self.is_vertex {
-            return self.cp.vs_word(&mut self.sel, bits);
+        if self.is_vertex && bits == 0 {
+            return self.cp.zero(&mut self.sel);
         }
-        self.fw.win(&mut self.sel, bits)
+        self.win.word(&mut self.sel, bits)
     }
 
     /// The window words the driver stages for the draw, (u, bits).
     pub fn window(&self) -> Vec<(u8, u32)> {
-        if self.is_vertex {
-            self.cp.vs_consts.clone()
-        } else {
-            self.fw.consts.iter().map(|&(u, v)| (u as u8, v)).collect()
-        }
+        self.win.words.clone()
     }
 
     /// Moves the window words past the window's end to the memory pool.
     pub unsafe fn pool_window(&mut self) {
-        if self.is_vertex && self.cp.vs_consts.len() > DRAW_VS_CONST_WORDS {
-            self.pool_vs_consts();
-        }
-        if self.is_fragment && self.fw.count > 11 {
-            self.pool_window_consts();
+        if self.win.words.len() > self.win.size {
+            if self.is_vertex {
+                self.pool_vs_consts();
+            } else if self.is_fragment {
+                self.pool_window_consts();
+            }
         }
     }
 
@@ -169,7 +142,7 @@ impl ShaderState {
             return Some(b);
         }
         match self.sel.ubo.get(&v) {
-            Some(&Ubo::Uniform(u)) => self.fw.consts.iter().find(|&&(w, _)| w == u as u32).map(|&(_, b)| b),
+            Some(&Ubo::Uniform(u)) => self.win.words.iter().find(|&&(w, _)| w == u).map(|&(_, b)| b),
             Some(&Ubo::Fixed(r)) => self.cp.uniforms.iter().find(|&&(x, _)| x == r).map(|&(_, b)| b),
             _ => None,
         }
@@ -194,7 +167,7 @@ impl ShaderState {
             v
         } else if self.is_vertex {
             // A pinned register is not staged for a draw's vertex shader.
-            self.cp.vs_word(&mut self.sel, 1.0f32.to_bits())
+            self.win.word(&mut self.sel, 1.0f32.to_bits())
         } else {
             let reg = self.cp.alloc_reg();
             self.cp.uniforms.push((reg, 1.0f32.to_bits()));
@@ -219,7 +192,7 @@ impl ShaderState {
                     }
                 }
             }
-            let mut by_use: Vec<(u32, u32)> = self.fw.consts.clone();
+            let mut by_use: Vec<(u32, u32)> = self.win.words.iter().map(|&(u, b)| (u as u32, b)).collect();
             by_use.sort_by_key(|&(u, _)| (std::cmp::Reverse(uses.get(&u).copied().unwrap_or(0)), u));
             let renum: HashMap<u32, u32> = by_use.iter().enumerate().map(|(k, &(u, _))| (u, 20 + k as u32)).collect();
             for (_, m) in self.sel.ubo.iter_mut() {
@@ -229,17 +202,17 @@ impl ShaderState {
                     }
                 }
             }
-            self.fw.consts = by_use.iter().map(|&(u, bits)| (renum[&u], bits)).collect();
+            self.win.words = by_use.iter().map(|&(u, bits)| (renum[&u] as u8, bits)).collect();
         }
-        let mut pool: Vec<u32> = vec![0; (20 + self.fw.count - first_pool) as usize];
-        for &(u, bits) in self.fw.consts.iter() {
-            if u >= first_pool {
-                pool[(u - first_pool) as usize] = bits;
+        let mut pool: Vec<u32> = vec![0; (20 + self.win.words.len() as u32 - first_pool) as usize];
+        for &(u, bits) in self.win.words.iter() {
+            if u as u32 >= first_pool {
+                pool[(u as u32 - first_pool) as usize] = bits;
             }
         }
-        self.fw.consts.retain(|&(u, _)| u < first_pool);
-        self.fw.consts.push((first_pool, (1 << 16) | (128 + FRAG_POOL_SLOT)));
-        self.fw.consts.push((first_pool + 1, 1));
+        self.win.words.retain(|&(u, _)| (u as u32) < first_pool);
+        self.win.words.push((first_pool as u8, (1 << 16) | (128 + FRAG_POOL_SLOT)));
+        self.win.words.push((first_pool as u8 + 1, 1));
         let mut fresh = |ubo: &mut HashMap<u32, Ubo>, u: Option<Ubo>| {
             let v = self.sel.next_vreg;
             self.sel.next_vreg += 1;
@@ -276,7 +249,7 @@ impl ShaderState {
                 }
             }
         }
-        let consts = self.cp.vs_consts.clone();
+        let consts = self.win.words.clone();
         let one_old = consts.iter().find(|c| c.1 == 1).map(|c| c.0 as u32);
         let mut others: Vec<(u32, u32)> = consts.iter().filter(|c| Some(c.0 as u32) != one_old).map(|&(u, b)| (u as u32, b)).collect();
         others.sort_by_key(|&(u, _)| (std::cmp::Reverse(uses.get(&u).copied().unwrap_or(0)), u));
@@ -313,7 +286,7 @@ impl ShaderState {
         };
         let pool = self.fetch_pool(&pool_bits, is_pool, ctl, one, f, zero);
         assert!(pool.len() <= 64, "borgc: vertex shader needs a constant pool of {} words (64 fit)", pool.len());
-        self.cp.vs_consts = window.iter().map(|&(u, bits)| (renum[&u] as u8, bits)).collect();
+        self.win.words = window.iter().map(|&(u, bits)| (renum[&u] as u8, bits)).collect();
         eprintln!("borgc: vertex constant pool of {} word(s)", pool.len());
         self.pool = pool;
     }
@@ -448,46 +421,40 @@ mod tests {
     #[test]
     fn vertex_window_words_start_at_u25_and_dedupe() {
         let mut c = cx(true);
-        let a = c.cp.vs_word(&mut c.sel, 0x3f80_0000);
-        assert_eq!(c.cp.vs_word(&mut c.sel, 0x3f80_0000), a);
-        c.cp.vs_word(&mut c.sel, 0x4000_0000);
-        assert_eq!(c.cp.vs_consts, [(25, 0x3f80_0000), (26, 0x4000_0000)]);
+        let a = c.konst(0x3f80_0000);
+        assert_eq!(c.konst(0x3f80_0000), a);
+        c.konst(0x4000_0000);
+        assert_eq!(c.window(), [(25, 0x3f80_0000), (26, 0x4000_0000)]);
         assert!(matches!(c.sel.ubo[&a], crate::Ubo::Uniform(25)));
     }
 
     #[test]
     fn vertex_zero_is_r30_minus_r30_and_words_go_past_the_window() {
         let mut c = cx(true);
-        let z = c.cp.vs_word(&mut c.sel, 0);
-        assert_eq!((c.sel.prog[0].mnem, c.cp.vs_word(&mut c.sel, 0)), ("ISUB", z));
+        let z = c.konst(0);
+        assert_eq!((c.sel.prog[0].mnem, c.konst(0)), ("ISUB", z));
         for b in 1..=DRAW_VS_CONST_WORDS as u32 + 1 {
-            c.cp.vs_word(&mut c.sel, b);
+            c.konst(b);
         }
-        assert_eq!(c.cp.vs_consts.len(), DRAW_VS_CONST_WORDS + 1);
+        assert_eq!(c.window().len(), DRAW_VS_CONST_WORDS + 1);
     }
 
     #[test]
     fn fragment_window_numbers_from_u20_and_dedupes() {
-        let mut w = FragWindow::default();
-        assert_eq!((w.slot(5), w.slot(6), w.slot(5)), (20, 21, 20));
-        assert_eq!(w.consts, [(20, 5), (21, 6)]);
+        let mut c = cx(false);
+        let (a, b) = (c.konst(5), c.konst(6));
+        assert_eq!((c.konst(5), c.window()), (a, vec![(20, 5), (21, 6)]));
+        assert!(matches!((c.sel.ubo[&a], c.sel.ubo[&b]), (crate::Ubo::Uniform(20), crate::Ubo::Uniform(21))));
     }
 
     #[test]
     fn fragment_window_overflow_panics() {
-        let mut w = FragWindow::default();
+        let mut c = cx(false);
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             for b in 0..=crate::FRAG_CONST_MAX {
-                w.slot(b);
+                c.konst(b);
             }
         }));
         assert!(r.is_err());
-    }
-
-    #[test]
-    fn win_makes_a_uniform_vreg() {
-        let (mut w, mut s) = (FragWindow::default(), Selector::new());
-        let v = w.win(&mut s, 42);
-        assert!(matches!(s.ubo[&v], crate::Ubo::Uniform(20)));
     }
 }

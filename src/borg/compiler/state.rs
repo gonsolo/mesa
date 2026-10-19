@@ -1,5 +1,5 @@
 use crate::config::Flags;
-use crate::consts::{ConstPool, FragWindow};
+use crate::consts::{ConstPool, Window};
 use compiler::bindings::*;
 use std::collections::HashMap;
 #[derive(Default)]
@@ -70,7 +70,7 @@ impl Selector {
 pub struct ShaderState {
     pub sel: Selector,
     pub cp: ConstPool,
-    pub fw: FragWindow,
+    pub win: Window,
     pub outs: DrawOutputs,
     pub consts: HashMap<u32, u32>,
     pub out_roots: Vec<u32>,
@@ -114,7 +114,7 @@ impl ShaderState {
         ShaderState {
             sel: Selector::new(),
             cp: ConstPool::new(regs),
-            fw: FragWindow::default(),
+            win: if is_vertex { Window::vertex() } else { Window::fragment() },
             outs: DrawOutputs::default(),
             consts: HashMap::new(),
             out_roots: Vec::new(),

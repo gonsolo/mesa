@@ -125,7 +125,7 @@ impl ShaderState {
 
     /// Spills the live value with the furthest next use; false when nothing can be spilled.
     fn spill_one(&mut self, live: &[(u32, usize)]) -> bool {
-        let vs_room = self.is_vertex && self.cp.vs_room(5);
+        let vs_room = self.is_vertex && self.win.room(5);
         if !(self.is_fragment || self.is_compute || self.is_vertex && vs_room) || self.sel.prog.iter().any(|i| self.needs_helper_lanes(i)) {
             return false;
         }
