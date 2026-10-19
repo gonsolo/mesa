@@ -1088,9 +1088,8 @@ impl ShaderState {
                                 continue;
                             }
                             let (v, comp) = self.operand(src, c as u8);
-                            // A compute value is often an integer: copy its bits.
-                            let (mnem, srcs, swz) = if self.stage == Stage::Compute { (Op::Ior, vec![v, v], vec![comp, comp]) } else { (Op::Fmov, vec![v], vec![comp]) };
-                            self.sel.prog.push(BorgInstr { mnem: mnem.into(), dst: reg_vregs[&h][c], srcs, swz, imm: 0 });
+                            // Copy the bits: a float move flushes an integer that looks denormal.
+                            self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: reg_vregs[&h][c], srcs: vec![v, v], swz: vec![comp, comp], imm: 0 });
                         }
                         continue;
                     }
