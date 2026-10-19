@@ -1,6 +1,8 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
+use crate::opcodes::{Fields, Op};
+
 pub(crate) fn emit_blob(words: &[u32], outputs: &[u8], consts: &[(u8, u32)],
                         draw: Option<(u8, &[(u8, u32)])>) -> Vec<u8> {
     let mut b = Vec::new();
@@ -33,94 +35,46 @@ pub(crate) fn emit_blob(words: &[u32], outputs: &[u8], consts: &[(u8, u32)],
     b
 }
 
+pub(crate) fn op_named(mnem: &str) -> Option<Op> {
+    Op::ALL.into_iter().find(|o| o.name() == mnem)
+}
+
 pub(crate) fn encode(mnem: &str, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32) -> Option<u32> {
+    // TLD1: word 1 of a RAW64 texel.
+    let (op, f3) = if mnem == "TLD1" { (Op::Tld, funct3 | 1) } else { (op_named(mnem)?, funct3) };
     let (rd, rs1, rs2, rs3) = (rd as u32, rs1 as u32, rs2 as u32, rs3 as u32);
-    let f3 = (funct3 & 0x7) << 12;
-    let bin = |base: u32| base | f3 | (rs2 << 20) | (rs1 << 15) | (rd << 7);
-    let un = |base: u32| base | f3 | (rs1 << 15) | (rd << 7);
-    let r4 = |base: u32| base | f3 | (rs3 << 27) | (rs2 << 20) | (rs1 << 15) | (rd << 7);
-    Some(match mnem {
-        "FMADD" => r4(0x0000_0004),
-        "TEX" => r4(0x0400_0004),
-        // TEXA w, lod, dref: this lane's extra arguments for the TEX after it (funct2 = 3).
-        "TEXA" => r4(0x0600_0004),
-        "FADD" => bin(0x0000_0000),
-        "FMUL" => bin(0x0800_0000),
-        "FNEG" => un(0x0C00_0000),
-        "FMOV" => un(0xA400_0000),
-        "FRCP" => un(0x1400_0000),
-        "IADD" => bin(0x1C00_0000),
-        "ISHL" => bin(0x2000_0000),
-        "ISHR" => bin(0x2400_0000),
-        "IMUL" => bin(0x2800_0000),
-        "ISUB" => bin(0x6000_0000),
-        "IAND" => bin(0x6400_0000),
-        "IOR" => bin(0x6800_0000),
-        "IXOR" => bin(0x6C00_0000),
-        "ISLT" => bin(0x7000_0000),
-        "ISEQ" => bin(0x7400_0000),
-        "ISRL" => bin(0x9400_0000),
-        "ISLTU" => bin(0x9800_0000),
-        "I2F" => un(0x2C00_0000),
-        "F2I" => un(0x3000_0000),
-        "F2H" => un(0xA800_0000),
-        "H2F" => un(0xAC00_0000),
-        "FRSQ" => un(0x3400_0000),
-        "FSRGB" => un(0x3800_0000),
-        "DDX" => un(0x3C00_0000),
-        "DDY" => un(0x4000_0000),
-        "FSTEP" => un(0x1000_0000),
-        "ATTIDX" => un(0x9000_0000),
-        "TLD" => un(0x9C00_0000),
-        "TLD1" => un(0x9C00_0000) | (1 << 12),   // word 1 of a RAW64 texel
-        "LOAD" => un(0x4400_0000),
-        "STORE" => bin(0x4800_0000) & !(0x1F << 7), // rd field is unused
-        "EXPUSH" => un(0x5400_0000) & !(0x1F << 7),
-        "EXELSE" => 0x5800_0000,
-        "EXPOP" => 0x5C00_0000,
-        "BARRIER" => 0x7800_0000,
-        "EXANY" => un(0x7C00_0000),
-        _ => return None, // mov is handled separately (register copy)
-    })
+    Some(op.encode(&Fields { rd, rs1, rs2, rs3, f3, ..Default::default() }))
 }
 
 pub(crate) fn encode_sout(rs2: u8, index: u16, funct3: u32) -> Option<u32> {
     if index >= 1024 {
         return None; // 10 bits
     }
-    let t = index as u32;
-    Some(0x8400_0000u32
-        | ((funct3 & 0x7) << 12)
-        | ((rs2 as u32) << 20)
-        | (((t >> 5) & 0x1F) << 15)
-        | ((t & 0x1F) << 7))
+    Some(Op::Sout.encode(&Fields { rs2: rs2 as u32, index: index as u32, f3: funct3, ..Default::default() }))
 }
 
 pub(crate) fn encode_fattr(rd: u8, index: u16) -> Option<u32> {
     if index >= 1024 {
         return None; // 10 bits
     }
-    let t = index as u32;
-    Some(0x8800_0000u32 | (((t >> 5) & 0x1F) << 20) | ((t & 0x1F) << 15) | ((rd as u32) << 7))
+    Some(Op::Fattr.encode(&Fields { rd: rd as u32, aindex: index as u32, ..Default::default() }))
 }
 
-/// JMP: absolute, 18 bits packed as funct3:rs2:rs1:rd.
+/// JMP: absolute, 18 bits.
 pub(crate) fn encode_jmp(target: u32) -> u32 {
-    let t = target;
-    0xA000_0000 | ((t >> 10) & 0x1F) << 20 | ((t >> 5) & 0x1F) << 15 | ((t >> 15) & 7) << 12 | (t & 0x1F) << 7
+    Op::Jmp.encode(&Fields { jtarget: target, ..Default::default() })
 }
 
 pub(crate) fn encode_branch(mnem: &str, rs1: u8, target: u16) -> Option<u32> {
-    let base = match mnem {
-        "BRZ" => 0x4C00_0000u32,
-        "BRNZ" => 0x5000_0000u32,
+    let op = match mnem {
+        "BRZ" => Op::Brz,
+        "BRNZ" => Op::Brnz,
         _ => return None,
     };
     if target >= 1024 {
         return None; // 10 bits: the low bits of a target in the branch's own page
     }
-    let t = target as u32;
-    Some(base | (((t >> 5) & 0x1F) << 20) | ((rs1 as u32) << 15) | ((t & 0x1F) << 7))
+    Some(op.encode(&Fields { rs1: rs1 as u32, target: target as u32, ..Default::default() }))
 }
 
 #[cfg(test)]

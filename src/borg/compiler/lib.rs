@@ -12,6 +12,7 @@ mod fixed;
 mod encode;
 mod epilogue;
 mod isel;
+mod opcodes;
 mod opt;
 mod pipeline;
 mod regalloc;
