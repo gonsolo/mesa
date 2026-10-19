@@ -1,6 +1,6 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
-// GENERATED from hardware/borg/isa/opcodes by hardware/borg/isa/gen.py; do not edit.
+// GENERATED from hardware/borg/isa by scripts/isa_gen.py; do not edit.
 
 #![allow(dead_code)]
 
