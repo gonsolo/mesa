@@ -7,9 +7,9 @@ use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct FragWindow {
-    pub by_bits: HashMap<u32, u32>,
-    pub count: u32,
-    pub consts: Vec<(u32, u32)>,
+    by_bits: HashMap<u32, u32>,
+    count: u32,
+    consts: Vec<(u32, u32)>,
 }
 
 impl FragWindow {
@@ -41,14 +41,14 @@ pub const DRAW_VS_CONST_WORDS: usize = 6;
 pub const VS_VIRTUAL_MAX: usize = DRAW_VS_CONST_WORDS + 64;
 
 pub struct ConstPool {
-    pub regs: &'static [u8],
-    pub count: usize,
-    pub int_reg: HashMap<i32, u8>,
-    pub uniforms: Vec<(u8, u32)>,
-    pub vs_consts: Vec<(u8, u32)>,
-    pub vs_by_bits: HashMap<u32, u32>,
-    pub vs_zero: Option<u32>,
-    pub vs_window: bool,
+    regs: &'static [u8],
+    count: usize,
+    int_reg: HashMap<i32, u8>,
+    uniforms: Vec<(u8, u32)>,
+    vs_consts: Vec<(u8, u32)>,
+    vs_by_bits: HashMap<u32, u32>,
+    vs_zero: Option<u32>,
+    vs_window: bool,
 }
 
 impl ConstPool {
@@ -63,6 +63,55 @@ impl ConstPool {
             vs_zero: None,
             vs_window,
         }
+    }
+
+    /// 0, built once as r30 - r30.
+    pub fn zero(&mut self, sel: &mut Selector) -> u32 {
+        if let Some(z) = self.vs_zero {
+            return z;
+        }
+        let f = sel.fresh();
+        sel.ubo.insert(f, crate::Ubo::Fixed(30));
+        let z = sel.fresh();
+        sel.prog.push(crate::BorgInstr { mnem: "ISUB", dst: z, srcs: vec![f, f], swz: vec![0, 0] });
+        self.vs_zero = Some(z);
+        z
+    }
+
+    /// A preset register the driver fills with `bits`.
+    pub fn preset(&mut self, bits: u32) -> u8 {
+        let r = self.alloc_reg();
+        self.uniforms.push((r, bits));
+        r
+    }
+
+    /// The registers handed out as presets so far.
+    pub fn preset_regs(&self) -> &[u8] {
+        &self.regs[..self.count]
+    }
+
+    pub fn free_regs(&self) -> usize {
+        self.regs.len() - self.count
+    }
+
+    pub fn presets(&self) -> &[(u8, u32)] {
+        &self.uniforms
+    }
+
+    /// A vertex window word of its own, never derived or pooled (a TEX control word).
+    pub fn vs_word(&mut self, sel: &mut Selector, bits: u32) -> u32 {
+        assert!(self.vs_consts.len() < DRAW_VS_CONST_WORDS,
+            "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
+        let u = DRAW_VS_CONST_U0 + self.vs_consts.len() as u8;
+        self.vs_consts.push((u, bits));
+        let v = sel.fresh();
+        sel.ubo.insert(v, crate::Ubo::Uniform(u));
+        v
+    }
+
+    /// Room for `n` more vertex window words before the pool pass.
+    pub fn vs_room(&self, n: usize) -> bool {
+        self.vs_consts.len() + n < VS_VIRTUAL_MAX
     }
 
     pub fn alloc_reg(&mut self) -> u8 {
@@ -130,14 +179,7 @@ impl ConstPool {
             self.vs_consts.push((u as u8, bits));
             sel.ubo.insert(v, crate::Ubo::Uniform(u as u8));
         } else {
-            if self.vs_zero.is_none() {
-                let f = sel.fresh();
-                sel.ubo.insert(f, crate::Ubo::Fixed(30));
-                let z = sel.fresh();
-                sel.prog.push(crate::BorgInstr { mnem: "ISUB", dst: z, srcs: vec![f, f], swz: vec![0, 0] });
-                self.vs_zero = Some(z);
-            }
-            let z = self.vs_zero.unwrap();
+            let z = self.zero(sel);
             let mut small: Vec<(u32, u32)> =
                 self.vs_by_bits.iter().filter(|(&b, _)| b >= 1 && b < bits).map(|(&b, &r)| (b, r)).collect();
             small.sort();
@@ -189,6 +231,25 @@ impl ShaderState {
         self.fw.win(&mut self.sel, bits)
     }
 
+    /// The window words the driver stages for the draw, (u, bits).
+    pub fn window(&self) -> Vec<(u8, u32)> {
+        if self.is_vertex {
+            self.cp.vs_consts.clone()
+        } else {
+            self.fw.consts.iter().map(|&(u, v)| (u as u8, v)).collect()
+        }
+    }
+
+    /// Moves the window words past the window's end to the memory pool.
+    pub unsafe fn pool_window(&mut self) {
+        if self.cp.vs_window && self.cp.vs_consts.len() > DRAW_VS_CONST_WORDS {
+            self.pool_vs_consts();
+        }
+        if self.is_fragment && self.fw.count > 11 {
+            self.pool_window_consts();
+        }
+    }
+
     /// The bits a constant's register holds: a placeholder, a window word or a preset register.
     pub fn bits_of(&self, v: u32) -> Option<u32> {
         if let Some(&b) = self.cs.kval.get(&v) {
@@ -231,7 +292,7 @@ impl ShaderState {
         v
     }
 
-    pub unsafe fn pool_window_consts(&mut self) {
+    unsafe fn pool_window_consts(&mut self) {
         let first_pool = 20 + 9;
         // The window keeps the nine constants read most often: a window word costs no register.
         {
@@ -290,7 +351,7 @@ impl ShaderState {
     }
     /// A vertex shader with more constants than its window holds: the most used stay in the window, the rest
     /// are fetched from a pool in memory, four words per TEX (the way a fragment shader's are).
-    pub unsafe fn pool_vs_consts(&mut self) {
+    unsafe fn pool_vs_consts(&mut self) {
         const POOL_TAG: u32 = 100;
         let first = DRAW_VS_CONST_U0 as u32;
         let mut uses: HashMap<u32, usize> = HashMap::new();

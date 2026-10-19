@@ -219,19 +219,20 @@ pub fn build_blob(
         words.len() - n_body,
         pending
     );
-    if !cx.cp.uniforms.is_empty() {
-        let cs: Vec<String> = cx.cp.uniforms.iter().map(|(r, v)| format!("r{r}={v:#06x}")).collect();
+    if !cx.cp.presets().is_empty() {
+        let cs: Vec<String> = cx.cp.presets().iter().map(|(r, v)| format!("r{r}={v:#06x}")).collect();
         eprintln!("borgc: const regs (firmware-staged via MMIO): {}", cs.join(" "));
     }
-    if !cx.fw.consts.is_empty() {
-        let cs: Vec<String> = cx.fw.consts.iter().map(|(u, v)| format!("u{u}={v:#010x}")).collect();
+    let window = cx.window();
+    if !window.is_empty() && !is_vertex {
+        let cs: Vec<String> = window.iter().map(|(u, v)| format!("u{u}={v:#010x}")).collect();
         eprintln!(
             "borgc: draw-mode uniform consts (write to draw_fs_const_offset + 4*(u-20) before the draw): {}",
             cs.join(" ")
         );
     }
-    if !cx.cp.vs_consts.is_empty() {
-        let cs: Vec<String> = cx.cp.vs_consts.iter().map(|(u, v)| format!("u{u}={v:#010x}")).collect();
+    if !window.is_empty() && is_vertex {
+        let cs: Vec<String> = window.iter().map(|(u, v)| format!("u{u}={v:#010x}")).collect();
         eprintln!(
             "borgc: draw-mode vertex window consts (write to draw_vs_const_offset + 4*(u-25) before the draw): {}",
             cs.join(" ")
@@ -255,18 +256,13 @@ pub fn build_blob(
     } else {
         vec![]
     };
-    let window: Vec<(u8, u32)> = if is_vertex {
-        cx.cp.vs_consts.clone()
-    } else {
-        cx.fw.consts.iter().map(|&(u, v)| (u as u8, v)).collect()
-    };
     let num_varyings: u8 = cx.sel.prog
         .iter()
         .filter(|i| i.mnem == "SOUT")
         .map(|i| i.swz[0] + 1)
         .max()
         .unwrap_or(0);
-    let blob = emit_blob(words, &outputs, &cx.cp.uniforms,
+    let blob = emit_blob(words, &outputs, cx.cp.presets(),
                          Some((num_varyings, &window[..])));
     eprintln!(
         "borgc: .borg blob = {} bytes ({} instr, {} output regs, {} window consts, {} varyings)",

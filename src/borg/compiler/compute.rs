@@ -120,14 +120,13 @@ impl ShaderState {
         }
         let mut ks: Vec<(u32, u32)> = uses.keys().map(|&v| (v, self.cs.kval[&v])).collect();
         ks.sort_by_key(|&(v, b)| (std::cmp::Reverse(uses[&v]), b));
-        let free = self.cp.regs.len() - self.cp.count;
+        let free = self.cp.free_regs();
         // The pool base, one, and a pointer to restart from after each barrier, loop head and loop.
         let ptrs = 2 + self.sel.prog.iter().filter(|i| matches!(i.mnem, "BARRIER" | "LABEL" | "BRNZ")).count();
         let pooled_n = if ks.len() <= free.min(cap) { 0 } else { ks.len() - free.saturating_sub(ptrs).min(cap) };
         let (keep, pooled) = ks.split_at(ks.len() - pooled_n);
         for &(v, bits) in keep {
-            let r = self.cp.alloc_reg();
-            self.cp.uniforms.push((r, bits));
+            let r = self.cp.preset(bits);
             self.sel.ubo.insert(v, Ubo::Fixed(r));
         }
         if pooled.is_empty() {
@@ -136,11 +135,9 @@ impl ShaderState {
         if free < ptrs {
             return Err(format!("{} constants do not fit {free} registers", ks.len()));
         }
-        let rb = self.cp.alloc_reg();
-        self.cp.uniforms.push((rb, POOL_BASE_WORDS));
+        let rb = self.cp.preset(POOL_BASE_WORDS);
         let base = self.fixed(rb);
-        let r1 = self.cp.alloc_reg();
-        self.cp.uniforms.push((r1, 1));
+        let r1 = self.cp.preset(1);
         let one = self.fixed(r1);
         let pooled: HashMap<u32, u32> = pooled.iter().copied().collect();
         const GAP: usize = 16;
@@ -186,8 +183,7 @@ impl ShaderState {
                 // Registers do not survive the other quads' turns, a pointer stepped in a loop
                 // differs between trips, and one stepped under its mask between lanes.
                 "BARRIER" | "LABEL" | "BRNZ" => {
-                    let r = self.cp.alloc_reg();
-                    self.cp.uniforms.push((r, POOL_BASE_WORDS + self.cs.pool.len() as u32));
+                    let r = self.cp.preset(POOL_BASE_WORDS + self.cs.pool.len() as u32);
                     ptr = (self.fixed(r), self.cs.pool.len());
                     loaded.clear();
                 }
@@ -807,7 +803,7 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
     }
     cx.pool_consts(cap, !compact)?;
     crate::set_cs_pool(std::mem::take(&mut cx.cs.pool));
-    let mut reserved: Vec<u8> = cx.cp.regs[..cx.cp.count].to_vec();
+    let mut reserved: Vec<u8> = cx.cp.preset_regs().to_vec();
     reserved.extend([30u8, 31, 12, 13, 14]);
     let alloc = crate::fixed::allocate(&cx, &HashMap::new(), &mut reserved).ok_or(OUT_OF_REGISTERS)?;
     let enc = crate::emit::encode_program(&cx, &alloc);
@@ -817,7 +813,7 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
     if enc.words.len() > MAX_WORDS {
         return Err(format!("{} instructions exceed the {MAX_WORDS}-word program limit", enc.words.len()));
     }
-    let mut regs = cx.cp.uniforms.clone();
+    let mut regs = cx.cp.presets().to_vec();
     regs.extend(cx.cs.presets.iter().copied());
     if cx.cs.base_used {
         regs.extend((0..3).map(|c| ((WG_BASE_REG + c) as u8, 0)));

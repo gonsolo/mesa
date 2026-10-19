@@ -27,7 +27,7 @@ pub fn fixed_regs(
         if !cx.tex_dsts.is_empty() {
             extra_reserved.extend_from_slice(&[21, 22, 23]);
         }
-        extra_reserved.extend_from_slice(&cx.cp.regs[..cx.cp.count]);
+        extra_reserved.extend_from_slice(cx.cp.preset_regs());
     } else {
         for (c, v) in frag_out.iter().enumerate() {
             if let Some(def) = v {
@@ -55,7 +55,7 @@ pub fn fixed_regs(
             extra_reserved.push(8);
         }
 
-        extra_reserved.extend_from_slice(&cx.cp.regs[..cx.cp.count]);
+        extra_reserved.extend_from_slice(cx.cp.preset_regs());
         if frag_out[3].is_some() {
             extra_reserved.push(24);
         }

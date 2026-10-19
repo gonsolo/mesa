@@ -103,12 +103,7 @@ impl ShaderState {
             dce(&mut self.sel.prog, &self.out_roots);
             self.spill_to_pressure(limit);
         }
-        if self.cp.vs_window && self.cp.vs_consts.len() > crate::consts::DRAW_VS_CONST_WORDS {
-            self.pool_vs_consts();
-        }
-        if self.is_fragment && self.fw.count > 11 {
-            self.pool_window_consts();
-        }
+        self.pool_window();
         dce(&mut self.sel.prog, &self.out_roots);
         let ubo = &self.sel.ubo;
         fuse_fmadd(&mut self.sel.prog, &self.out_roots, &|v| matches!(ubo.get(&v), Some(Ubo::Uniform(_))));

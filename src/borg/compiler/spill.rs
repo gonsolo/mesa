@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use std::collections::HashMap;
-use crate::consts::{Kv, VS_VIRTUAL_MAX};
+use crate::consts::Kv;
 use crate::state::ShaderState;
 use crate::{BorgInstr, Ubo, NO_DST};
 
@@ -126,7 +126,7 @@ impl ShaderState {
 
     /// Spills the live value with the furthest next use; false when nothing can be spilled.
     fn spill_one(&mut self, live: &[(u32, usize)]) -> bool {
-        let vs_room = self.cp.vs_window && self.cp.vs_consts.len() + 5 < VS_VIRTUAL_MAX;
+        let vs_room = self.is_vertex && self.cp.vs_room(5);
         if !(self.is_fragment || self.is_compute || self.is_vertex && vs_room) || self.sel.prog.iter().any(|i| self.needs_helper_lanes(i)) {
             return false;
         }

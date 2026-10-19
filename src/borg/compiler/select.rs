@@ -462,7 +462,7 @@ impl ShaderState {
                 .collect();
             let comps: Vec<(u32, u8)> = raw.into_iter().map(|v| (v, 0u8)).collect();
             self.sel.vec_map.insert(intr.def.index, comps);
-        } else if (intr.intrinsic == nir_intrinsic_load_input || intr.intrinsic == nir_intrinsic_load_point_coord) && !self.cp.vs_window {
+        } else if (intr.intrinsic == nir_intrinsic_load_input || intr.intrinsic == nir_intrinsic_load_point_coord) && !self.is_vertex {
             let is_pc = intr.intrinsic == nir_intrinsic_load_point_coord;
             let loc = if is_pc { 25 } else { intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F };
             let base_index = if loc == 25 { self.flags.pntc_base() } else { 4 * loc.wrapping_sub(VARYING_SLOT_VAR0) + intr.get_const_index(NIR_INTRINSIC_COMPONENT) as u32 };
@@ -499,7 +499,7 @@ impl ShaderState {
                 })
                 .collect();
             self.sel.vec_map.insert(intr.def.index, comps);
-        } else if intr.intrinsic == nir_intrinsic_load_input && !self.cp.vs_window {
+        } else if intr.intrinsic == nir_intrinsic_load_input && !self.is_vertex {
             if self.weights.is_none() {
                 let mut w = [0u32; 3];
                 for (i, wi) in w.iter_mut().enumerate() {
@@ -569,7 +569,7 @@ impl ShaderState {
                     })
                     .collect();
                 self.sel.vec_map.insert(intr.def.index, comps);
-            } else if self.cp.vs_window || self.is_fragment {
+            } else if self.is_vertex || self.is_fragment {
                                 let o = resolve_vm(&self.sel.vec_map, intr.get_src(0).as_def().index, 0);
                 let two = self.konst(2, Kv::Derive);
                 let w = self.sel.next_vreg; self.sel.next_vreg += 1;
@@ -613,7 +613,7 @@ impl ShaderState {
             }
             let binding = self.res_binding.get(&bd).copied().unwrap_or(0);
             let slot = SSBO_SLOT_WORDS * (1 + binding);
-                        if self.cp.vs_window {
+                        if self.is_vertex {
                 let _ = self.konst(1u32, Kv::Word);   // each word's address is the slot's base plus 1
             }
             // A register holding 0, to copy window words through (an instruction reads one).
@@ -723,7 +723,7 @@ impl ShaderState {
             }
             self.sel.vec_map.insert(intr.def.index, comps);
         } else if intr.intrinsic == nir_intrinsic_load_ubo
-                                || (self.cp.vs_window && intr.intrinsic == nir_intrinsic_load_input) {
+                                || (self.is_vertex && intr.intrinsic == nir_intrinsic_load_input) {
             let is_input = intr.intrinsic == nir_intrinsic_load_input;
             let offset_def = if is_input { 0 } else { intr.get_src(1).as_def().index };
             let n = intr.def.num_components as usize;
@@ -761,13 +761,13 @@ impl ShaderState {
                 base_words
             };
             if base_words >= 0 {
-                if self.cp.vs_window && base_words >= 16384 {
+                if self.is_vertex && base_words >= 16384 {
                     let _ = self.konst(16384u32, Kv::Word);
                 }
                 let addr = match (stride_words, self.const_addr_chain) {
                     (0, Some((next, a))) if next == base_words => a,
-                    (0, _) if !self.cp.vs_window && base_words > 0 => self.konst(base_words as u32, Kv::Word),
-                    (0, _) if !self.cp.vs_window => self.konst(base_words as u32, Kv::Word),
+                    (0, _) if !self.is_vertex && base_words > 0 => self.konst(base_words as u32, Kv::Word),
+                    (0, _) if !self.is_vertex => self.konst(base_words as u32, Kv::Word),
                     // A single constant word: the address is a window word, no chain.
                     (0, _) if n == 1 => self.konst(base_words as u32, Kv::Word),
                     _ => {
@@ -860,17 +860,7 @@ impl ShaderState {
                     // SOUT stores a register; a constant living in the uniform window needs a copy.
                     if matches!(self.sel.ubo.get(&vd), Some(Ubo::Uniform(_))) {
                         // An integer add keeps the bits of an integer constant (a float move changes a NaN or denormal).
-                        let zero = match self.cp.vs_zero {
-                            Some(z) => z,
-                            None => {
-                                let f = self.sel.fresh();
-                                self.sel.ubo.insert(f, Ubo::Fixed(30));
-                                let z = self.sel.fresh();
-                                self.sel.prog.push(BorgInstr { mnem: "ISUB", dst: z, srcs: vec![f, f], swz: vec![0, 0] });
-                                self.cp.vs_zero = Some(z);
-                                z
-                            }
-                        };
+                        let zero = self.cp.zero(&mut self.sel);
                         let out = self.sel.next_vreg; self.sel.next_vreg += 1;
                         self.sel.prog.push(BorgInstr { mnem: "IADD", dst: out, srcs: vec![zero, vd], swz: vec![0, 0] });
                         vd = out;

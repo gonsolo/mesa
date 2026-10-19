@@ -1,4 +1,4 @@
-use crate::consts::{Kv, DRAW_VS_CONST_U0, DRAW_VS_CONST_WORDS};
+use crate::consts::Kv;
 use crate::state::ShaderState;
 use crate::{packed_layout, BorgInstr, Ubo, NO_DST};
 
@@ -9,12 +9,7 @@ impl ShaderState {
     /// as two varyings when the fragment shader reads gl_PointCoord.
     pub unsafe fn epilogue_point_quads(&mut self) {
         let ctl_bits = (1u32 << 16) | (128 + 16);
-        assert!(self.cp.vs_consts.len() < DRAW_VS_CONST_WORDS,
-            "borgc: vertex shader needs more than {} window constants", DRAW_VS_CONST_WORDS);
-        let u = DRAW_VS_CONST_U0 + self.cp.vs_consts.len() as u8;
-        self.cp.vs_consts.push((u, ctl_bits));
-        let ctl = self.sel.next_vreg; self.sel.next_vreg += 1;
-        self.sel.ubo.insert(ctl, Ubo::Uniform(u));
+        let ctl = self.cp.vs_word(&mut self.sel, ctl_bits);
         let idx = self.sel.next_vreg; self.sel.next_vreg += 1;
         self.sel.ubo.insert(idx, Ubo::Fixed(30));
         let twelve = self.konst(12, Kv::Word);   // shared with the attribute fetches
@@ -272,10 +267,7 @@ impl ShaderState {
     /// Packs four 8-bit channel values into one word, channel 3 in the top byte.
     pub unsafe fn epilogue_bytes_packed(&mut self) {
         let (mut p, mut pc) = self.outs.frag[3].unwrap();
-        let eight = self.fw.slot(8);
-        let sh = self.sel.next_vreg;
-        self.sel.next_vreg += 1;
-        self.sel.ubo.insert(sh, Ubo::Uniform(eight as u8));
+        let sh = self.konst(8, Kv::Word);
         for c in (0..3).rev() {
             {
                 let d = self.sel.next_vreg;
