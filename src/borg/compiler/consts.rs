@@ -10,6 +10,7 @@ pub struct FragWindow {
     by_bits: HashMap<u32, u32>,
     count: u32,
     consts: Vec<(u32, u32)>,
+    vregs: HashMap<u32, u32>,
 }
 
 impl FragWindow {
@@ -28,9 +29,13 @@ impl FragWindow {
 
 impl FragWindow {
     pub fn win(&mut self, sel: &mut Selector, bits: u32) -> u32 {
+        if let Some(&v) = self.vregs.get(&bits) {
+            return v;
+        }
         let u = self.slot(bits);
         let v = sel.fresh();
         sel.ubo.insert(v, crate::Ubo::Uniform(u as u8));
+        self.vregs.insert(bits, v);
         v
     }
 }
