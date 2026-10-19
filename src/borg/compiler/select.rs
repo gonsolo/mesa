@@ -3,7 +3,7 @@ use crate::isel::borg_isel;
 use crate::opt::classify_uniform;
 use std::env;
 use std::collections::HashMap;
-use crate::{collect_cf_marks, decompose_vertex_offset, packed_layout, CfMark, resolve_vm, BorgInstr, Ubo, NO_DST, PUSH_WINDOW_WORDS};
+use crate::{collect_cf_marks, decompose_vertex_offset, packed_layout, CfMark, resolve_vm, BorgInstr, Loc, NO_DST, PUSH_WINDOW_WORDS};
 use compiler::bindings::*;
 use compiler::nir::AsDef;
 use crate::opcodes::Op;
@@ -35,7 +35,7 @@ impl ShaderState {
         let ld = srcs.iter().find(|s| s.src_type == nir_tex_src_lod).map(|s| s.src.as_def().index);
         let wz = self.sel.next_vreg;
         self.sel.next_vreg += 1;
-        self.sel.ubo.insert(wz, Ubo::Fixed(30));
+        self.sel.loc.insert(wz, Loc::Fixed(30));
         self.frag.per_pixel_fixed.insert(wz);
         let (lv, lc) = match ld {
             Some(ld) => {
@@ -108,7 +108,7 @@ impl ShaderState {
                 }
                 let wz = self.sel.next_vreg;
                 self.sel.next_vreg += 1;
-                self.sel.ubo.insert(wz, Ubo::Fixed(30));
+                self.sel.loc.insert(wz, Loc::Fixed(30));
                 self.frag.per_pixel_fixed.insert(wz);
                 let (lv, lc) = if is_txl || has_bias { resolve_vm(&self.sel.vec_map, ld, 0) } else { (wz, 0u8) };
                 let (wv, wc) = if has_w { resolve_vm(&self.sel.vec_map, cd, 2) } else { (wz, 0u8) };
@@ -131,7 +131,7 @@ impl ShaderState {
                     let neg = self.sel.next_vreg + 1;
                     let z = self.sel.next_vreg + 2;
                     self.sel.next_vreg += 3;
-                    self.sel.ubo.insert(c, Ubo::Fixed(30));
+                    self.sel.loc.insert(c, Loc::Fixed(30));
                     self.frag.per_pixel_fixed.insert(c);
                     self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: neg, srcs: vec![c], swz: vec![0] });
                     self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: z, srcs: vec![neg], swz: vec![0] });
@@ -398,8 +398,8 @@ impl ShaderState {
             if *op == nir_op_fmul && tsrcs.len() == 2 {
                 // 12.92 is a NIR constant, or a window word once an arithmetic reader gave it one.
                 let is12 = |d: u32| {
-                    let bits = self.consts.get(&d).copied().or_else(|| match self.sel.ubo.get(&d) {
-                        Some(Ubo::Uniform(_)) => self.bits_of(d),
+                    let bits = self.consts.get(&d).copied().or_else(|| match self.sel.loc.get(&d) {
+                        Some(Loc::Uniform(_)) => self.bits_of(d),
                         _ => None,
                     });
                     bits.map_or(false, |b| (f32::from_bits(b) - 12.92).abs() < 0.1)
@@ -476,11 +476,11 @@ impl ShaderState {
             nir_intrinsic_load_ssbo | nir_intrinsic_store_ssbo => self.ssbo(intr),
             nir_intrinsic_load_frag_coord if self.stage == Stage::Fragment => self.frag_coord(intr),
             nir_intrinsic_load_vertex_id => {
-                self.sel.ubo.insert(intr.def.index, Ubo::Fixed(30));
+                self.sel.loc.insert(intr.def.index, Loc::Fixed(30));
                 self.vert.vertex_id_def = Some(intr.def.index);
             }
             nir_intrinsic_load_instance_id => {
-                self.sel.ubo.insert(intr.def.index, Ubo::Fixed(31));
+                self.sel.loc.insert(intr.def.index, Loc::Fixed(31));
             }
             nir_intrinsic_load_input if self.stage == Stage::Vertex && self.flags.fetching() => self.vertex_fetch(intr),
             nir_intrinsic_load_ubo => self.uniform_load(intr),
@@ -621,7 +621,7 @@ impl ShaderState {
         let base_index = if loc == 25 { self.flags.pntc_base() } else { 4 * loc.wrapping_sub(VARYING_SLOT_VAR0) + intr.get_const_index(NIR_INTRINSIC_COMPONENT) as u32 };
         let bary = [5u8, 6, 7].map(|r| {
             let v = self.sel.next_vreg; self.sel.next_vreg += 1;
-            self.sel.ubo.insert(v, Ubo::Fixed(r));
+            self.sel.loc.insert(v, Loc::Fixed(r));
             self.frag.per_pixel_fixed.insert(v);
             v
         });
@@ -725,7 +725,7 @@ impl ShaderState {
         let slot = SSBO_SLOT_WORDS * (1 + binding);
         // A register holding 0, to copy window words through (an instruction reads one).
         let f = self.sel.next_vreg; self.sel.next_vreg += 1;
-        self.sel.ubo.insert(f, Ubo::Fixed(30));
+        self.sel.loc.insert(f, Loc::Fixed(30));
         let zero = self.sel.next_vreg; self.sel.next_vreg += 1;
         self.sel.prog.push(BorgInstr { mnem: Op::Isub.into(), dst: zero, srcs: vec![f, f], swz: vec![0, 0] });
         // The descriptor's own offset component (a dynamic buffer's) is the window base: 0.
@@ -782,7 +782,7 @@ impl ShaderState {
             .map(|&r| {
                 let v = self.sel.next_vreg;
                 self.sel.next_vreg += 1;
-                self.sel.ubo.insert(v, Ubo::Fixed(r));
+                self.sel.loc.insert(v, Loc::Fixed(r));
                 self.frag.per_pixel_fixed.insert(v);
                 (v, 0u8)
             })
@@ -803,7 +803,7 @@ impl ShaderState {
         // The index register: r30 (VertexIndex) or r31 (InstanceIndex).
         let idx_reg = if loc < 16 && self.flags.instanced(loc) { 31 } else { 30 };
         let idx = self.sel.next_vreg; self.sel.next_vreg += 1;
-        self.sel.ubo.insert(idx, Ubo::Fixed(idx_reg));
+        self.sel.loc.insert(idx, Loc::Fixed(idx_reg));
         // The element index i is texel (i & 4095, i >> 12) of a 4096-wide image.
         let ty = self.sel.next_vreg; self.sel.next_vreg += 1;
         self.sel.prog.push(BorgInstr { mnem: Op::Isrl.into(), dst: ty, srcs: vec![idx, twelve], swz: vec![0, 0] });
@@ -875,7 +875,7 @@ impl ShaderState {
                         Some(v) => v,
                         None => {
                             let v = self.sel.next_vreg; self.sel.next_vreg += 1;
-                            self.sel.ubo.insert(v, Ubo::Fixed(30));
+                            self.sel.loc.insert(v, Loc::Fixed(30));
                             v
                         }
                     };
@@ -936,7 +936,7 @@ impl ShaderState {
         if self.stage == Stage::Vertex && loc == VARYING_SLOT_POS {
             for (c, &v0) in comps.iter().enumerate().take(4) {
                 let mut v = v0;
-                if matches!(self.sel.ubo.get(&v.0), Some(Ubo::Uniform(_))) {
+                if matches!(self.sel.loc.get(&v.0), Some(Loc::Uniform(_))) {
                     let out = self.sel.next_vreg; self.sel.next_vreg += 1;
                     self.sel.prog.push(BorgInstr { mnem: Op::Fmov.into(), dst: out, srcs: vec![v.0], swz: vec![0] });
                     v = (out, 0);
@@ -961,7 +961,7 @@ impl ShaderState {
             for (c, &(vd0, vc)) in comps.iter().enumerate() {
                 let mut vd = vd0;
                 // SOUT stores a register; a constant living in the uniform window needs a copy.
-                if matches!(self.sel.ubo.get(&vd), Some(Ubo::Uniform(_))) {
+                if matches!(self.sel.loc.get(&vd), Some(Loc::Uniform(_))) {
                     // An integer add keeps the bits of an integer constant (a float move changes a NaN or denormal).
                     let zero = self.cp.zero(&mut self.sel);
                     let out = self.sel.next_vreg; self.sel.next_vreg += 1;
@@ -1132,11 +1132,11 @@ impl ShaderState {
     
     }
     pub fn log_uniformity(&self) {
-    let uniform_roots: std::collections::HashSet<u32> = self.sel.ubo
+    let uniform_roots: std::collections::HashSet<u32> = self.sel.loc
         .iter()
         .filter_map(|(&v, u)| match u {
-            Ubo::Uniform(_) => Some(v),
-            Ubo::Fixed(_) if !self.frag.per_pixel_fixed.contains(&v) => Some(v),
+            Loc::Uniform(_) => Some(v),
+            Loc::Fixed(_) if !self.frag.per_pixel_fixed.contains(&v) => Some(v),
             _ => None,
         })
         .collect();

@@ -282,10 +282,14 @@ pub(crate) unsafe fn collect_cf_marks(
     (jumps, repushed)
 }
 
+/// Where a value lives that the register allocator does not place.
 #[derive(Clone, Copy, PartialEq)]
-enum Ubo {
+enum Loc {
+    /// A position component, preloaded into r24..r29 (w is 1.0).
     Pos,
+    /// A word of the uniform window, read through funct3.
     Uniform(u8),
+    /// A fixed register: an invocation ID, a preset or the edge functions.
     Fixed(u8),
 }
 

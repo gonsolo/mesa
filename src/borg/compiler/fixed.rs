@@ -1,6 +1,6 @@
 use crate::regalloc::regalloc;
 use crate::state::{ShaderState, Stage};
-use crate::{Ubo, NO_DST};
+use crate::{Loc, NO_DST};
 use std::env;
 use std::collections::HashMap;
 
@@ -40,7 +40,7 @@ pub fn fixed_regs(
             forced.insert(f, 10);
         }
         extra_reserved.extend_from_slice(&[4, 21, 22, 23, 25, 26, 27, 28, 29]);   // r25 is the kill flag
-        let reads_bary = cx.sel.prog.iter().flat_map(|i| i.srcs.iter()).any(|v| matches!(cx.sel.ubo.get(v), Some(Ubo::Fixed(5..=7))));
+        let reads_bary = cx.sel.prog.iter().flat_map(|i| i.srcs.iter()).any(|v| matches!(cx.sel.loc.get(v), Some(Loc::Fixed(5..=7))));
         if reads_bary {
             extra_reserved.extend_from_slice(&[5, 6, 7]);
         }
@@ -78,10 +78,10 @@ pub fn allocate(cx: &ShaderState, forced: &HashMap<u32, u8>, extra_reserved: &mu
     }
     if env::var("BORGC_DUMP_ALLOC").is_ok() {
         for i in &cx.sel.prog {
-            let r = |v: &u32| match (alloc.get(v), cx.sel.ubo.get(v)) {
+            let r = |v: &u32| match (alloc.get(v), cx.sel.loc.get(v)) {
                 (Some(r), _) => format!("r{r}"),
-                (None, Some(Ubo::Uniform(u))) => format!("u{u}"),
-                (None, Some(Ubo::Fixed(f))) => format!("R{f}"),
+                (None, Some(Loc::Uniform(u))) => format!("u{u}"),
+                (None, Some(Loc::Fixed(f))) => format!("R{f}"),
                 _ => format!("?{v}"),
             };
             let s: Vec<String> = i.srcs.iter().zip(i.swz.iter()).map(|(v, c)| format!("{}.{}", r(v), c)).collect();

@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use crate::state::{ShaderState, Stage};
-use crate::{BorgInstr, Ubo, NO_DST};
+use crate::{BorgInstr, Loc, NO_DST};
 use crate::opcodes::Op;
 use crate::Mnem;
 
@@ -27,7 +27,7 @@ impl ShaderState {
     fn vertex_lane_key(&mut self) -> Vec<BorgInstr> {
         let mut out = Vec::new();
         let vi = self.sel.fresh();
-        self.sel.ubo.insert(vi, Ubo::Fixed(30));
+        self.sel.loc.insert(vi, Loc::Fixed(30));
         let (k0, k1, c1, c2) = (self.konst(KEY_WORDS), self.konst(KEY_WORDS + 2), self.konst(1), self.konst(2));
         let z = self.op(&mut out, Op::Isub, &[vi, vi]);
         let a0 = self.op(&mut out, Op::Iadd, &[z, k0]);
@@ -51,7 +51,7 @@ impl ShaderState {
         match self.stage {
             Stage::Compute => {
                 let r30 = self.sel.fresh();
-                self.sel.ubo.insert(r30, Ubo::Fixed(30));
+                self.sel.loc.insert(r30, Loc::Fixed(30));
                 self.spill.lane = Some(r30);
                 return Vec::new();
             }
@@ -61,7 +61,7 @@ impl ShaderState {
         let mut out = Vec::new();
         let (f30, f31) = (self.sel.fresh(), self.sel.fresh());
         for (f, r) in [(f30, 30), (f31, 31)] {
-            self.sel.ubo.insert(f, Ubo::Fixed(r));
+            self.sel.loc.insert(f, Loc::Fixed(r));
             self.frag.per_pixel_fixed.insert(f);
         }
         let c1 = self.konst(1);
@@ -82,8 +82,8 @@ impl ShaderState {
             (Stage::Vertex, m) => matches!(m, Mnem::Op(Op::Brz | Op::Brnz)),
             (_, Mnem::Op(Op::Ddx | Op::Ddy | Op::Texa | Op::Brz | Op::Brnz)) => true,
             (_, Mnem::Op(Op::Tex)) => {
-                let op = i.srcs.get(2).and_then(|c| match self.sel.ubo.get(c) {
-                    Some(Ubo::Uniform(_)) => self.bits_of(*c).map(|bits| (bits >> 16) & 3),
+                let op = i.srcs.get(2).and_then(|c| match self.sel.loc.get(c) {
+                    Some(Loc::Uniform(_)) => self.bits_of(*c).map(|bits| (bits >> 16) & 3),
                     _ => None,
                 });
                 !matches!(op, Some(1 | 3))
@@ -106,7 +106,7 @@ impl ShaderState {
             }
         }
         crate::regalloc::extend_for_loops(&self.sel.prog, &mut def_at, &mut last);
-        let pinned = |v: &u32| self.sel.ubo.contains_key(v);
+        let pinned = |v: &u32| self.sel.loc.contains_key(v);
         let vals: Vec<(u32, usize, usize)> = def_at.iter().filter(|(v, _)| !pinned(v)).map(|(&v, &d)| (v, d, last[&v])).collect();
         let at = (0..self.sel.prog.len()).find(|&p| vals.iter().filter(|&&(_, d, l)| d <= p && p <= l).count() > limit)?;
         Some(vals.iter().filter(|&&(_, d, l)| d < at && l > at).map(|&(v, _, l)| (v, l)).collect())
@@ -166,7 +166,7 @@ impl ShaderState {
             crate::regalloc::extend_for_loops(&self.sel.prog, &mut def_at, &mut last);
             let crossing = def_at
                 .iter()
-                .filter(|(v, &d)| !self.sel.ubo.contains_key(v) && last.get(v).is_some_and(|&l| bars.iter().any(|&b| d < b && b < l)))
+                .filter(|(v, &d)| !self.sel.loc.contains_key(v) && last.get(v).is_some_and(|&l| bars.iter().any(|&b| d < b && b < l)))
                 .map(|(&v, _)| v)
                 .min();
             let Some(v) = crossing else { return Ok(()) };

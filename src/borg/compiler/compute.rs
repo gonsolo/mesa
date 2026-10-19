@@ -4,7 +4,7 @@
 use crate::{BorgInstr, NO_DST};
 use crate::isel::resolve_vm;
 use crate::state::{ShaderState, Stage};
-use crate::Ubo;
+use crate::Loc;
 use compiler::bindings::*;
 use compiler::nir::AsDef;
 use std::collections::HashMap;
@@ -113,8 +113,8 @@ impl ShaderState {
                 return Some(b);
             }
         }
-        match self.sel.ubo.get(&v) {
-            Some(Ubo::Fixed(_)) => self.bits_of(v),
+        match self.sel.loc.get(&v) {
+            Some(Loc::Fixed(_)) => self.bits_of(v),
             _ => None,
         }
     }
@@ -139,7 +139,7 @@ impl ShaderState {
 
     pub(crate) fn fixed(&mut self, r: u8) -> u32 {
         let v = self.sel.fresh();
-        self.sel.ubo.insert(v, Ubo::Fixed(r));
+        self.sel.loc.insert(v, Loc::Fixed(r));
         v
     }
 
@@ -374,7 +374,7 @@ impl ShaderState {
     fn group_id(&mut self, c: u8) -> Val {
         self.cs.base_used = true;
         let u = self.sel.fresh();
-        self.sel.ubo.insert(u, Ubo::Uniform(29 + c));
+        self.sel.loc.insert(u, Loc::Uniform(29 + c));
         let b = self.fixed(WG_BASE_REG as u8 + c);
         Val::R(self.sel.opc(Op::Iadd, &[(u, 0), (b, 0)]), 0)
     }

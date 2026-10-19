@@ -17,12 +17,13 @@ pub struct Selector {
     pub vec_map: HashMap<u32, Vec<(u32, u8)>>,
     pub prog: Vec<crate::BorgInstr>,
     pub next_vreg: u32,
-    pub ubo: HashMap<u32, crate::Ubo>,
+    /// Values that live outside the allocated registers.
+    pub loc: HashMap<u32, crate::Loc>,
 }
 
 impl Selector {
     pub fn new() -> Self {
-        Selector { vec_map: HashMap::new(), prog: Vec::new(), next_vreg: 1_000_000, ubo: HashMap::new() }
+        Selector { vec_map: HashMap::new(), prog: Vec::new(), next_vreg: 1_000_000, loc: HashMap::new() }
     }
 }
 
@@ -60,7 +61,7 @@ impl Selector {
     }
 
     pub fn reg(&mut self, v: (u32, u8)) -> (u32, u8) {
-        if matches!(self.ubo.get(&v.0), Some(crate::Ubo::Uniform(_))) {
+        if matches!(self.loc.get(&v.0), Some(crate::Loc::Uniform(_))) {
             (self.opc(Op::Fmov, &[(v.0, 0)]), 0)
         } else {
             v
@@ -227,7 +228,7 @@ mod tests {
     #[test]
     fn reg_copies_only_uniform_operands() {
         let mut s = Selector::new();
-        s.ubo.insert(5, crate::Ubo::Uniform(20));
+        s.loc.insert(5, crate::Loc::Uniform(20));
         assert_eq!(s.reg((6, 1)), (6, 1));
         let (v, c) = s.reg((5, 0));
         assert!(v != 5 && c == 0 && s.prog[0].mnem == Op::Fmov);

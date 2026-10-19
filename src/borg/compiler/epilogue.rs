@@ -1,5 +1,5 @@
 use crate::state::ShaderState;
-use crate::{packed_layout, BorgInstr, Ubo, NO_DST};
+use crate::{packed_layout, BorgInstr, Loc, NO_DST};
 use crate::opcodes::Op;
 
 impl ShaderState {
@@ -11,7 +11,7 @@ impl ShaderState {
         let ctl_bits = (1u32 << 16) | (128 + 16);
         let ctl = self.konst(ctl_bits);
         let idx = self.sel.next_vreg; self.sel.next_vreg += 1;
-        self.sel.ubo.insert(idx, Ubo::Fixed(30));
+        self.sel.loc.insert(idx, Loc::Fixed(30));
         let twelve = self.konst(12);   // shared with the attribute fetches
         let ty = self.sel.next_vreg; self.sel.next_vreg += 1;
         self.sel.prog.push(BorgInstr { mnem: Op::Isrl.into(), dst: ty, srcs: vec![idx, twelve], swz: vec![0, 0] });
@@ -92,7 +92,7 @@ impl ShaderState {
             let w = match self.outs.mrt[k] {
                 None => self.sel.op0(Op::Tld, vec![]),
                 Some((x, xc)) => {
-                    let x = if matches!(self.sel.ubo.get(&x), Some(Ubo::Uniform(_))) {
+                    let x = if matches!(self.sel.loc.get(&x), Some(Loc::Uniform(_))) {
                         self.sel.op0(Op::Iadd, vec![x, zero])
                     } else if xc != 0 {
                         let o = self.sel.next_vreg; self.sel.next_vreg += 1;
@@ -149,7 +149,7 @@ impl ShaderState {
         let c05 = self.konst(0.5f32.to_bits());
         let cff = self.konst(0xFF);
         let (x, xc) = self.outs.frag[0].unwrap();
-        let x = if matches!(self.sel.ubo.get(&x), Some(Ubo::Uniform(_))) {
+        let x = if matches!(self.sel.loc.get(&x), Some(Loc::Uniform(_))) {
             let o = self.sel.next_vreg; self.sel.next_vreg += 1;
             self.sel.prog.push(BorgInstr { mnem: Op::Fmov.into(), dst: o, srcs: vec![x], swz: vec![xc] });
             o
@@ -172,7 +172,7 @@ impl ShaderState {
         for &(comp, bitpos, bits) in layout.iter() {
             let Some((x, xc)) = self.outs.frag[comp] else { continue };
             let mask = if bits < 32 && (kind == 1 || kind == 3) { Some(self.konst((1u32 << bits) - 1)) } else { None };
-            let (x, xc) = if matches!(self.sel.ubo.get(&x), Some(Ubo::Uniform(_))) {
+            let (x, xc) = if matches!(self.sel.loc.get(&x), Some(Loc::Uniform(_))) {
                 (self.sel.op(Op::Fmov, vec![x], vec![xc]), 0)
             } else { (x, xc) };
             let (x, xc) = if kind == 2 && comp != 3 {

@@ -3,7 +3,7 @@
 
 use crate::state::{Selector, ShaderState, Stage};
 use crate::compute::{POOL_BASE_WORDS, POOL_MAX as CS_POOL_MAX};
-use crate::{BorgInstr, Ubo};
+use crate::{BorgInstr, Loc};
 use std::collections::HashMap;
 use crate::opcodes::Op;
 use crate::Mnem;
@@ -50,7 +50,7 @@ impl Window {
         let u = self.base + self.words.len() as u8;
         self.words.push((u, bits));
         let v = sel.fresh();
-        sel.ubo.insert(v, Ubo::Uniform(u));
+        sel.loc.insert(v, Loc::Uniform(u));
         self.vregs.insert(bits, v);
         Some(v)
     }
@@ -84,7 +84,7 @@ impl ConstPool {
             return z;
         }
         let f = sel.fresh();
-        sel.ubo.insert(f, crate::Ubo::Fixed(30));
+        sel.loc.insert(f, crate::Loc::Fixed(30));
         let z = sel.fresh();
         sel.prog.push(crate::BorgInstr { mnem: Op::Isub.into(), dst: z, srcs: vec![f, f], swz: vec![0, 0] });
         self.zero = Some(z);
@@ -166,9 +166,9 @@ impl ShaderState {
         if let Some(&b) = self.cs.kval.get(&v) {
             return Some(b);
         }
-        match self.sel.ubo.get(&v) {
-            Some(&Ubo::Uniform(u)) => self.win.words.iter().find(|&&(w, _)| w == u).map(|&(_, b)| b),
-            Some(&Ubo::Fixed(r)) => self.cp.uniforms.iter().find(|&&(x, _)| x == r).map(|&(_, b)| b),
+        match self.sel.loc.get(&v) {
+            Some(&Loc::Uniform(u)) => self.win.words.iter().find(|&&(w, _)| w == u).map(|&(_, b)| b),
+            Some(&Loc::Fixed(r)) => self.cp.uniforms.iter().find(|&&(x, _)| x == r).map(|&(_, b)| b),
             _ => None,
         }
     }
@@ -182,7 +182,7 @@ impl ShaderState {
             Stage::Compute => self.cs_const(1.0f32.to_bits()),
             Stage::Fragment => {
                 let (v, c) = (self.sel.fresh(), self.sel.fresh());
-                self.sel.ubo.insert(c, crate::Ubo::Fixed(30));
+                self.sel.loc.insert(c, crate::Loc::Fixed(30));
                 self.frag.per_pixel_fixed.insert(c);
                 self.sel.prog.push(crate::BorgInstr { mnem: Op::Fstep.into(), dst: v, srcs: vec![c], swz: vec![0] });
                 v
@@ -191,7 +191,7 @@ impl ShaderState {
             Stage::Vertex => self.window_word(1.0f32.to_bits()),
             Stage::Other => {
                 let (v, reg) = (self.sel.fresh(), self.preset(1.0f32.to_bits()));
-                self.sel.ubo.insert(v, crate::Ubo::Fixed(reg));
+                self.sel.loc.insert(v, crate::Loc::Fixed(reg));
                 v
             }
         };
@@ -208,7 +208,7 @@ impl ShaderState {
         let (base, words) = (self.win.base, std::mem::take(&mut self.win.words));
         let mut uses: HashMap<u8, usize> = HashMap::new();
         for s in self.sel.prog.iter().flat_map(|i| i.srcs.iter()) {
-            if let Some(&Ubo::Uniform(u)) = self.sel.ubo.get(s) {
+            if let Some(&Loc::Uniform(u)) = self.sel.loc.get(s) {
                 *uses.entry(u).or_insert(0) += 1;
             }
         }
@@ -222,24 +222,24 @@ impl ShaderState {
         window.push((None, (1 << 16) | (128 + self.win.slot)));
         let renum: HashMap<u8, u8> = window.iter().enumerate().filter_map(|(k, &(u, _))| Some((u?, base + k as u8))).collect();
         let tag: HashMap<u8, u8> = pooled.iter().enumerate().map(|(k, &(u, _))| (u, POOL_TAG + k as u8)).collect();
-        for m in self.sel.ubo.values_mut() {
-            if let Ubo::Uniform(u) = m {
+        for m in self.sel.loc.values_mut() {
+            if let Loc::Uniform(u) = m {
                 *u = renum.get(u).or(tag.get(u)).copied().unwrap_or(*u);
             }
         }
         let n = window.len() as u8;
         let ctl = self.sel.fresh();
-        self.sel.ubo.insert(ctl, Ubo::Uniform(base + n - 1));
+        self.sel.loc.insert(ctl, Loc::Uniform(base + n - 1));
         let one = self.sel.fresh();
-        self.sel.ubo.insert(one, Ubo::Uniform(base + n - 2));
+        self.sel.loc.insert(one, Loc::Uniform(base + n - 2));
         let f = self.sel.fresh();
-        self.sel.ubo.insert(f, Ubo::Fixed(30));
+        self.sel.loc.insert(f, Loc::Fixed(30));
         if self.stage == Stage::Fragment {
             self.frag.per_pixel_fixed.insert(f);
         }
         let zero = self.sel.fresh();
-        let is_pool = |v: &u32, ubo: &HashMap<u32, Ubo>| match ubo.get(v) {
-            Some(&Ubo::Uniform(u)) if u >= POOL_TAG => Some((u - POOL_TAG) as u32),
+        let is_pool = |v: &u32, loc: &HashMap<u32, Loc>| match loc.get(v) {
+            Some(&Loc::Uniform(u)) if u >= POOL_TAG => Some((u - POOL_TAG) as u32),
             _ => None,
         };
         let bits: Vec<u32> = pooled.iter().map(|&(_, b)| b).collect();
@@ -287,7 +287,7 @@ impl ShaderState {
         let (keep, pooled) = ks.split_at(ks.len() - pooled_n);
         for &(v, bits) in keep {
             let r = self.preset(bits);
-            self.sel.ubo.insert(v, Ubo::Fixed(r));
+            self.sel.loc.insert(v, Loc::Fixed(r));
         }
         if pooled.is_empty() {
             return Ok(());
@@ -368,20 +368,20 @@ impl ShaderState {
 
     /// Fetches the pooled words from memory four per TEX, again when a group goes unused for a while,
     /// and hoisted above the TEX results its first use waits for. Returns the pool in fetch order.
-    fn fetch_pool(&mut self, words: &[u32], is_pool: impl Fn(&u32, &HashMap<u32, Ubo>) -> Option<u32>,
+    fn fetch_pool(&mut self, words: &[u32], is_pool: impl Fn(&u32, &HashMap<u32, Loc>) -> Option<u32>,
                   ctl: u32, one: u32, f: u32, zero: u32) -> Vec<u32> {
-        let mut fresh = |ubo: &mut HashMap<u32, Ubo>, u: Option<Ubo>| {
+        let mut fresh = |loc: &mut HashMap<u32, Loc>, u: Option<Loc>| {
             let v = self.sel.next_vreg;
             self.sel.next_vreg += 1;
             if let Some(u) = u {
-                ubo.insert(v, u);
+                loc.insert(v, u);
             }
             v
         };
         let mut first_use: Vec<Option<usize>> = vec![None; words.len()];
         for (at, i) in self.sel.prog.iter().enumerate() {
             for s in i.srcs.iter() {
-                if let Some(k) = is_pool(s, &self.sel.ubo) {
+                if let Some(k) = is_pool(s, &self.sel.loc) {
                     first_use[k as usize].get_or_insert(at);
                 }
             }
@@ -399,7 +399,7 @@ impl ShaderState {
         let mut events: Vec<(usize, usize)> = Vec::new();   // (before instruction, group)
         for (at, i) in self.sel.prog.iter().enumerate() {
             for s in i.srcs.iter() {
-                let Some(k) = is_pool(s, &self.sel.ubo) else { continue };
+                let Some(k) = is_pool(s, &self.sel.loc) else { continue };
                 let g = slot_of[k as usize] / 4;
                 if last[g].map_or(true, |l| at - l > GAP) {
                     let mut p = at;
@@ -422,22 +422,22 @@ impl ShaderState {
                 let g = events[e].1;
                 let mut idx = zero;
                 for _ in 0..g {
-                    let n = fresh(&mut self.sel.ubo, None);
+                    let n = fresh(&mut self.sel.loc, None);
                     out.push(BorgInstr { mnem: Op::Iadd.into(), dst: n, srcs: vec![idx, one], swz: vec![0, 0] });
                     idx = n;
                 }
-                let t = fresh(&mut self.sel.ubo, None);
+                let t = fresh(&mut self.sel.loc, None);
                 out.push(BorgInstr { mnem: Op::Tex.into(), dst: t, srcs: vec![idx, zero, ctl], swz: vec![0, 0, 0] });
                 self.tex_dsts.insert(t);
                 for c in 0..4u8 {
-                    let r = fresh(&mut self.sel.ubo, None);
+                    let r = fresh(&mut self.sel.loc, None);
                     out.push(BorgInstr { mnem: Op::Ior.into(), dst: r, srcs: vec![t, t], swz: vec![c, c] });
                     cur[g][c as usize] = r;
                 }
                 e += 1;
             }
             for s in i.srcs.iter_mut() {
-                if let Some(k) = is_pool(s, &self.sel.ubo) {
+                if let Some(k) = is_pool(s, &self.sel.loc) {
                     let slot = slot_of[k as usize];
                     *s = cur[slot / 4][slot % 4];
                 }
@@ -448,17 +448,17 @@ impl ShaderState {
         pool
     }
     pub fn split_window_reads(&mut self) {
-        let is_win = |v: &u32, ubo: &HashMap<u32, Ubo>| matches!(ubo.get(v), Some(Ubo::Uniform(_)));
-        if self.sel.prog.iter().any(|i| i.srcs.iter().filter(|v| is_win(v, &self.sel.ubo)).count() > 1) {
+        let is_win = |v: &u32, loc: &HashMap<u32, Loc>| matches!(loc.get(v), Some(Loc::Uniform(_)));
+        if self.sel.prog.iter().any(|i| i.srcs.iter().filter(|v| is_win(v, &self.sel.loc)).count() > 1) {
             let f = self.sel.next_vreg;
             let z = self.sel.next_vreg + 1;
             self.sel.next_vreg += 2;
-            self.sel.ubo.insert(f, Ubo::Fixed(30));
+            self.sel.loc.insert(f, Loc::Fixed(30));
             let mut out = vec![BorgInstr { mnem: Op::Isub.into(), dst: z, srcs: vec![f, f], swz: vec![0, 0] }];
             for mut ins in std::mem::take(&mut self.sel.prog) {
                 let mut seen = false;
                 for k in 0..ins.srcs.len() {
-                    if !is_win(&ins.srcs[k], &self.sel.ubo) {
+                    if !is_win(&ins.srcs[k], &self.sel.loc) {
                         continue;
                     }
                     if !seen {
@@ -501,7 +501,7 @@ mod tests {
         assert_eq!(c.konst(0x3f80_0000), a);
         c.konst(0x4000_0000);
         assert_eq!(c.window(), [(25, 0x3f80_0000), (26, 0x4000_0000)]);
-        assert!(matches!(c.sel.ubo[&a], crate::Ubo::Uniform(25)));
+        assert!(matches!(c.sel.loc[&a], crate::Loc::Uniform(25)));
     }
 
     #[test]
@@ -520,7 +520,7 @@ mod tests {
         let mut c = cx(false);
         let (a, b) = (c.konst(5), c.konst(6));
         assert_eq!((c.konst(5), c.window()), (a, vec![(20, 5), (21, 6)]));
-        assert!(matches!((c.sel.ubo[&a], c.sel.ubo[&b]), (crate::Ubo::Uniform(20), crate::Ubo::Uniform(21))));
+        assert!(matches!((c.sel.loc[&a], c.sel.loc[&b]), (crate::Loc::Uniform(20), crate::Loc::Uniform(21))));
     }
 
     #[test]

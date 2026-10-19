@@ -3,7 +3,7 @@ use crate::fixed::{allocate, fixed_regs};
 use crate::opt::{dce, fuse_fmadd, schedule_for_pressure};
 use crate::state::{ShaderState, Stage};
 use crate::survey::{survey, Survey};
-use crate::{Flags, Ubo};
+use crate::{Flags, Loc};
 use compiler::bindings::*;
 use std::env;
 use crate::opcodes::Op;
@@ -95,8 +95,8 @@ impl ShaderState {
         }
         self.pool_window();
         dce(&mut self.sel.prog, &self.out_roots);
-        let ubo = &self.sel.ubo;
-        fuse_fmadd(&mut self.sel.prog, &self.out_roots, &|v| matches!(ubo.get(&v), Some(Ubo::Uniform(_))));
+        let loc = &self.sel.loc;
+        fuse_fmadd(&mut self.sel.prog, &self.out_roots, &|v| matches!(loc.get(&v), Some(Loc::Uniform(_))));
         schedule_for_pressure(&mut self.sel.prog, &self.out_roots);
         if self.stage == Stage::Fragment {
             self.log_uniformity();

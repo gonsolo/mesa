@@ -1,7 +1,7 @@
 use crate::encode::{emit_blob, encode, encode_branch, encode_fattr, encode_jmp, encode_sout};
 use std::env;
 use crate::state::{ShaderState, Stage};
-use crate::{BorgInstr, Ubo};
+use crate::{BorgInstr, Loc};
 use std::collections::HashMap;
 use crate::opcodes::Op;
 use crate::Mnem;
@@ -33,7 +33,7 @@ impl Emitter<'_> {
         let mut next_pre: u8 = 24; // above regalloc's low-GPR fill
         for i in cx.sel.prog.iter().filter(|i| i.mnem != Mnem::Mov) {
             for (s, &c) in i.srcs.iter().zip(i.swz.iter()) {
-                if cx.sel.ubo.get(s) == Some(&Ubo::Pos) && c != 3 && !self.pos_gpr.contains_key(&(*s, c)) && next_pre <= 29 {
+                if cx.sel.loc.get(s) == Some(&Loc::Pos) && c != 3 && !self.pos_gpr.contains_key(&(*s, c)) && next_pre <= 29 {
                     let g = next_pre;
                     next_pre += 1;
                     self.pos_gpr.insert((*s, c), g);
@@ -51,10 +51,10 @@ impl Emitter<'_> {
         if cx.tex_dsts.contains(&s) || cx.fattr_dsts.contains(&s) {
             return (alloc.get(&s).map_or(0, |&r| r + c), false);
         }
-        match cx.sel.ubo.get(&s) {
-            Some(&Ubo::Pos) => (*self.pos_gpr.get(&(s, c)).unwrap_or(&0), false),
-            Some(&Ubo::Uniform(idx)) => (idx, true),
-            Some(&Ubo::Fixed(reg)) => (reg, false),
+        match cx.sel.loc.get(&s) {
+            Some(&Loc::Pos) => (*self.pos_gpr.get(&(s, c)).unwrap_or(&0), false),
+            Some(&Loc::Uniform(idx)) => (idx, true),
+            Some(&Loc::Fixed(reg)) => (reg, false),
             _ => (*alloc.get(&s).unwrap_or(&0), false),
         }
     }
@@ -82,7 +82,7 @@ impl Emitter<'_> {
         let cx = self.cx;
         let posw = i.srcs.iter().zip(i.swz.iter())
             .take(2) // only the multiply operands (rs1/rs2) can be pos.w
-            .position(|(s, &c)| cx.sel.ubo.get(s) == Some(&Ubo::Pos) && c == 3);
+            .position(|(s, &c)| cx.sel.loc.get(s) == Some(&Loc::Pos) && c == 3);
         let Some(k) = posw else { return false };
         if i.mnem != Op::Fmul && i.mnem != Op::Fmadd {
             return false;
@@ -104,9 +104,9 @@ impl Emitter<'_> {
                 r[k] = alloc.get(s).map_or(0, |&rr| rr + c);
                 continue;
             }
-            match cx.sel.ubo.get(s) {
-                Some(&Ubo::Pos) => r[k] = *self.pos_gpr.get(&(*s, c)).unwrap_or(&0),
-                Some(&Ubo::Uniform(idx)) => {
+            match cx.sel.loc.get(s) {
+                Some(&Loc::Pos) => r[k] = *self.pos_gpr.get(&(*s, c)).unwrap_or(&0),
+                Some(&Loc::Uniform(idx)) => {
                     if f3 == 0 {
                         r[k] = idx;
                         f3 = k as u32 + 1;
@@ -114,7 +114,7 @@ impl Emitter<'_> {
                         self.pending += 1; // 2nd uniform in one op needs a preload
                     }
                 }
-                Some(&Ubo::Fixed(reg)) => r[k] = reg,
+                Some(&Loc::Fixed(reg)) => r[k] = reg,
                 // ALU intermediate → allocated GPR (or pending if a stray input).
                 None => match alloc.get(s) {
                     Some(&phys) => r[k] = phys,
