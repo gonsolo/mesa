@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::state::{Selector, ShaderState};
+use crate::compute::{POOL_BASE_WORDS, POOL_MAX as CS_POOL_MAX};
 use crate::{BorgInstr, Ubo};
 use std::collections::HashMap;
 
@@ -223,6 +224,120 @@ impl ShaderState {
         self.win.words = window.iter().enumerate().map(|(k, &(_, b))| (base + k as u8, b)).collect();
         eprintln!("borgc: constant pool of {} word(s)", pool.len());
         self.pool = pool;
+    }
+
+    /// A constant's placeholder register; pool_consts makes it a preset or a pool load.
+    pub(crate) fn cs_const(&mut self, bits: u32) -> u32 {
+        if let Some(&v) = self.cs.kreg.get(&bits) {
+            return v;
+        }
+        let v = self.sel.fresh();
+        self.cs.kreg.insert(bits, v);
+        self.cs.kval.insert(v, bits);
+        v
+    }
+
+    /// The `cap` most used constants become preset registers; the rest are loaded from the pool
+    /// near each use (a load is reused for 16 instructions), each load a word of its own, so the
+    /// pointer only steps forward. A load inside an `if` moves before its outermost EXPUSH: a
+    /// masked step would leave the inactive lanes' pointer behind. With `hoist` off a load stays
+    /// in place: after a mask change the pointer restarts from the one valid at the region's entry
+    /// and steps over the words the branch used.
+    pub(crate) fn pool_consts(&mut self, cap: usize, hoist: bool) -> Result<(), String> {
+        let mut uses: HashMap<u32, usize> = HashMap::new();
+        for i in &self.sel.prog {
+            for s in &i.srcs {
+                if self.cs.kval.contains_key(s) {
+                    *uses.entry(*s).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut ks: Vec<(u32, u32)> = uses.keys().map(|&v| (v, self.cs.kval[&v])).collect();
+        ks.sort_by_key(|&(v, b)| (std::cmp::Reverse(uses[&v]), b));
+        let free = self.cp.free_regs();
+        // The pool base, one, and a pointer to restart from after each barrier, loop head and loop.
+        let ptrs = 2 + self.sel.prog.iter().filter(|i| matches!(i.mnem, "BARRIER" | "LABEL" | "BRNZ")).count();
+        let pooled_n = if ks.len() <= free.min(cap) { 0 } else { ks.len() - free.saturating_sub(ptrs).min(cap) };
+        let (keep, pooled) = ks.split_at(ks.len() - pooled_n);
+        for &(v, bits) in keep {
+            let r = self.cp.preset(bits);
+            self.sel.ubo.insert(v, Ubo::Fixed(r));
+        }
+        if pooled.is_empty() {
+            return Ok(());
+        }
+        if free < ptrs {
+            return Err(format!("{} constants do not fit {free} registers", ks.len()));
+        }
+        let rb = self.cp.preset(POOL_BASE_WORDS);
+        let base = self.fixed(rb);
+        let r1 = self.cp.preset(1);
+        let one = self.fixed(r1);
+        let pooled: HashMap<u32, u32> = pooled.iter().copied().collect();
+        const GAP: usize = 16;
+        let mut loaded: HashMap<u32, (u32, usize)> = HashMap::new();
+        // A pointer valid in the active lanes and the pool word it points at.
+        let mut ptr = (base, 0usize);
+        let mut frames: Vec<((u32, usize), HashMap<u32, (u32, usize)>)> = vec![];
+        let (mut depth, mut anchor) = (0usize, 0usize);
+        let mut out: Vec<BorgInstr> = Vec::with_capacity(self.sel.prog.len());
+        for (n, mut ins) in std::mem::take(&mut self.sel.prog).into_iter().enumerate() {
+            for s in ins.srcs.iter_mut() {
+                let Some(&bits) = pooled.get(s) else { continue };
+                if loaded.get(s).map_or(true, |&(_, last)| n - last > GAP) {
+                    let hoisted = hoist && depth > 0;
+                    while ptr.1 < self.cs.pool.len() {
+                        let p = self.sel.fresh();
+                        let at = if hoisted { anchor } else { out.len() };
+                        out.insert(at, BorgInstr { mnem: "IADD", dst: p, srcs: vec![ptr.0, one], swz: vec![0, 0] });
+                        anchor += hoisted as usize;
+                        ptr = (p, ptr.1 + 1);
+                    }
+                    let at = if hoisted { anchor } else { out.len() };
+                    let v = self.sel.fresh();
+                    out.insert(at, BorgInstr { mnem: "LOAD", dst: v, srcs: vec![ptr.0], swz: vec![0] });
+                    anchor += hoisted as usize;
+                    self.cs.pool.push(bits);
+                    loaded.insert(*s, (v, n));
+                }
+                let e = loaded.get_mut(s).unwrap();
+                e.1 = n;
+                *s = e.0;
+            }
+            match ins.mnem {
+                "EXPUSH" => {
+                    if depth == 0 {
+                        anchor = out.len();
+                    }
+                    depth += 1;
+                    if !hoist {
+                        frames.push((ptr, loaded.clone()));
+                    }
+                }
+                // Registers do not survive the other quads' turns, a pointer stepped in a loop
+                // differs between trips, and one stepped under its mask between lanes.
+                "BARRIER" | "LABEL" | "BRNZ" => {
+                    let r = self.cp.preset(POOL_BASE_WORDS + self.cs.pool.len() as u32);
+                    ptr = (self.fixed(r), self.cs.pool.len());
+                    loaded.clear();
+                }
+                "EXELSE" if !hoist => (ptr, loaded) = frames.last().cloned().unwrap_or((ptr, loaded)),
+                "EXPOP" => {
+                    depth = depth.saturating_sub(1);
+                    if let Some(f) = frames.pop() {
+                        (ptr, loaded) = f;
+                    }
+                }
+                _ => {}
+            }
+            out.push(ins);
+        }
+        self.sel.prog = out;
+        if self.cs.pool.len() > CS_POOL_MAX {
+            return Err(format!("a constant pool of {} words ({CS_POOL_MAX} fit)", self.cs.pool.len()));
+        }
+        eprintln!("borgc[compute]: constant pool of {} word(s)", self.cs.pool.len());
+        Ok(())
     }
 
     /// Fetches the pooled words from memory four per TEX, again when a group goes unused for a while,
