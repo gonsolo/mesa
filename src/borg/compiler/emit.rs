@@ -1,7 +1,7 @@
 use crate::encode::{emit_blob, encode, encode_branch, encode_fattr, encode_jmp, encode_sout};
 use crate::state::{ShaderState, Stage};
 use crate::{BorgInstr, Loc};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::opcodes::Op;
 use crate::Mnem;
 
@@ -19,8 +19,6 @@ struct Emitter<'a> {
     pos_gpr: HashMap<(u32, u8), u8>,
     words: Vec<u32>,
     pending: u32,
-    /// The instruction memory address of the program's first word; branch targets are absolute.
-    base: u32,
 }
 
 impl Emitter<'_> {
@@ -60,21 +58,15 @@ impl Emitter<'_> {
         }
     }
 
-    /// BRNZ to the LABEL named in imm; a target in another page is a BRZ over a JMP.
-    fn branch(&mut self, k: usize, i: &BorgInstr, labels: &HashMap<u32, usize>, far: &HashMap<usize, usize>) {
-        let t = labels[&i.imm] as u32;
-        let rs1 = self.operand(i.srcs[0], i.swz[0]).0;
-        match far.get(&k) {
-            None => self.push(encode_branch(Op::Brnz, rs1, (t % 1024) as u16)),
-            Some(&pad) => {
-                for _ in 0..pad {
-                    let w = encode_jmp(self.base + self.words.len() as u32 + 1);
-                    self.words.push(w);
-                }
-                let w = encode_branch(Op::Brz, rs1, ((self.base as usize + self.words.len() + 2) % 1024) as u16);
-                self.push(w);
-                self.words.push(encode_jmp(t));
-            }
+    /// BRNZ to the LABEL named in imm; a target out of its reach is a BRZ over a JMP.
+    fn branch(&mut self, k: usize, i: &BorgInstr, labels: &HashMap<u32, usize>, far: &HashSet<usize>) {
+        let t = labels[&i.imm] as i32;
+        let (rs1, at) = (self.operand(i.srcs[0], i.swz[0]).0, self.words.len() as i32);
+        if far.contains(&k) {
+            self.push(encode_branch(Op::Brz, rs1, 2));
+            self.push(encode_jmp(t - (at + 1)));
+        } else {
+            self.push(encode_branch(Op::Brnz, rs1, t - at));
         }
     }
 
@@ -128,12 +120,10 @@ impl Emitter<'_> {
 }
 
 pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
-    // A fragment program starts at word 1 (software/borg BORG_IMEM_FRAG_OFFSET; frag_pc 0 means none).
-    let base = if cx.stage == Stage::Fragment { 1 } else { 0 };
-    let mut e = Emitter { cx, alloc, pos_gpr: HashMap::new(), words: Vec::new(), pending: 0, base };
+    let mut e = Emitter { cx, alloc, pos_gpr: HashMap::new(), words: Vec::new(), pending: 0 };
     e.preload_positions();
     let n_preload = e.words.len();
-    let (labels, far) = branch_layout(&cx.sel.prog, base as usize + n_preload);
+    let (labels, far) = branch_layout(&cx.sel.prog, n_preload);
     for (k, i) in cx.sel.prog.iter().enumerate() {
         let rd = *alloc.get(&i.dst).unwrap_or(&0);
         match i.mnem {
@@ -159,10 +149,10 @@ pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
     Encoded { words: e.words, n_preload, n_body, pending: e.pending }
 }
 
-/// LABEL word addresses, and the BRNZ whose target lies in another 1024-word page: those become
-/// BRZ over a JMP, after JMP-to-next padding that keeps the BRZ's own target in its page.
-fn branch_layout(prog: &[BorgInstr], start: usize) -> (HashMap<u32, usize>, HashMap<usize, usize>) {
-    let mut far: HashMap<usize, usize> = HashMap::new();
+/// LABEL word addresses from the program's start, and the BRNZ whose label is out of a branch's
+/// reach: those become BRZ over a JMP, one word longer, so the layout repeats until it settles.
+fn branch_layout(prog: &[BorgInstr], start: usize) -> (HashMap<u32, usize>, HashSet<usize>) {
+    let mut far = HashSet::new();
     loop {
         let (mut a, mut labels, mut at) = (start, HashMap::new(), Vec::new());
         for (k, i) in prog.iter().enumerate() {
@@ -173,17 +163,15 @@ fn branch_layout(prog: &[BorgInstr], start: usize) -> (HashMap<u32, usize>, Hash
                 }
                 Mnem::Op(Op::Brnz) => {
                     at.push((k, a));
-                    a += far.get(&k).map_or(1, |p| p + 2);
+                    a += if far.contains(&k) { 2 } else { 1 };
                 }
                 _ => a += 1,
             }
         }
         let mut changed = false;
         for (k, a) in at {
-            let t = labels[&prog[k].imm];
-            if far.contains_key(&k) || a / 1024 != t / 1024 {
-                let pad = if a % 1024 > 1021 { 1024 - a % 1024 } else { 0 };
-                changed |= far.insert(k, pad) != Some(pad);
+            if !(-512..512).contains(&(labels[&prog[k].imm] as i64 - a as i64)) {
+                changed |= far.insert(k);
             }
         }
         if !changed {
@@ -280,19 +268,17 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_in_its_targets_page_is_near() {
-        let (labels, far) = branch_layout(&prog(10), 3);
+    fn a_branch_back_512_words_is_near() {
+        // Label at 3, BRNZ at 3 + 512: offset -512, the farthest a branch reaches back.
+        let (labels, far) = branch_layout(&prog(512), 3);
         assert_eq!(labels[&7], 3);
         assert!(far.is_empty());
     }
 
     #[test]
-    fn a_far_branch_is_padded_off_the_page_end() {
-        // Label at 1000, BRNZ at 2046 (1022 in its page): its BRZ would skip into the next page.
-        let p = prog(1046);
-        let (_, far) = branch_layout(&p, 1000);
-        assert_eq!(far[&(p.len() - 1)], 2);
-        let (_, far) = branch_layout(&prog(1100), 0);
-        assert_eq!(far.values().copied().collect::<Vec<_>>(), vec![0]);
+    fn a_branch_back_513_words_is_a_brz_over_a_jmp() {
+        let p = prog(513);
+        let (_, far) = branch_layout(&p, 3);
+        assert_eq!(far.into_iter().collect::<Vec<_>>(), vec![p.len() - 1]);
     }
 }

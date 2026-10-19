@@ -63,10 +63,10 @@ pub(crate) struct Fields {
     pub f3: u32,
     pub fine: u32,
     pub private: u32,
-    pub target: u32,
+    pub offset: u32,
     pub index: u32,
     pub aindex: u32,
-    pub jtarget: u32,
+    pub joffset: u32,
 }
 
 impl Op {
@@ -299,8 +299,8 @@ impl Op {
             Op::Ddy => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.fine & 0x1f) << 20) | ((f.f3 & 0x7) << 12),
             Op::Load => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.f3 & 0x7) << 12),
             Op::Store => ((f.rs1 & 0x1f) << 15) | ((f.rs2 & 0x1f) << 20) | ((f.private & 0x1f) << 7) | ((f.f3 & 0x7) << 12),
-            Op::Brz => ((f.rs1 & 0x1f) << 15) | (((f.target >> 5) & 0x1f) << 20) | ((f.target & 0x1f) << 7) | ((f.f3 & 0x7) << 12),
-            Op::Brnz => ((f.rs1 & 0x1f) << 15) | (((f.target >> 5) & 0x1f) << 20) | ((f.target & 0x1f) << 7) | ((f.f3 & 0x7) << 12),
+            Op::Brz => ((f.rs1 & 0x1f) << 15) | (((f.offset >> 5) & 0x1f) << 20) | ((f.offset & 0x1f) << 7) | ((f.f3 & 0x7) << 12),
+            Op::Brnz => ((f.rs1 & 0x1f) << 15) | (((f.offset >> 5) & 0x1f) << 20) | ((f.offset & 0x1f) << 7) | ((f.f3 & 0x7) << 12),
             Op::Expush => ((f.rs1 & 0x1f) << 15) | ((f.f3 & 0x7) << 12),
             Op::Exelse => (f.f3 & 0x7) << 12,
             Op::Expop => (f.f3 & 0x7) << 12,
@@ -314,7 +314,7 @@ impl Op {
             Op::Isrl => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.rs2 & 0x1f) << 20) | ((f.f3 & 0x7) << 12),
             Op::Isltu => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.rs2 & 0x1f) << 20) | ((f.f3 & 0x7) << 12),
             Op::Tld => ((f.rd & 0x1f) << 7) | ((f.f3 & 0x7) << 12),
-            Op::Jmp => (((f.jtarget >> 15) & 0x7) << 12) | (((f.jtarget >> 10) & 0x1f) << 20) | (((f.jtarget >> 5) & 0x1f) << 15) | ((f.jtarget & 0x1f) << 7),
+            Op::Jmp => (((f.joffset >> 15) & 0x7) << 12) | (((f.joffset >> 10) & 0x1f) << 20) | (((f.joffset >> 5) & 0x1f) << 15) | ((f.joffset & 0x1f) << 7),
         }
     }
 }

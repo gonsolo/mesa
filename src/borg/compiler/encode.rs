@@ -60,16 +60,20 @@ pub(crate) fn encode_fattr(rd: u8, index: u16) -> Option<u32> {
     Some(Op::Fattr.encode(&Fields { rd: rd as u32, aindex: index as u32, ..Default::default() }))
 }
 
-/// JMP: absolute, 18 bits.
-pub(crate) fn encode_jmp(target: u32) -> u32 {
-    Op::Jmp.encode(&Fields { jtarget: target, ..Default::default() })
+/// JMP by `offset` words from the jump (18 bits, signed).
+pub(crate) fn encode_jmp(offset: i32) -> Option<u32> {
+    if !(-(1 << 17)..1 << 17).contains(&offset) {
+        return None;
+    }
+    Some(Op::Jmp.encode(&Fields { joffset: offset as u32, ..Default::default() }))
 }
 
-pub(crate) fn encode_branch(op: Op, rs1: u8, target: u16) -> Option<u32> {
-    if target >= 1024 {
-        return None; // 10 bits: the low bits of a target in the branch's own page
+/// BRZ or BRNZ by `offset` words from the branch (10 bits, signed).
+pub(crate) fn encode_branch(op: Op, rs1: u8, offset: i32) -> Option<u32> {
+    if !(-512..512).contains(&offset) {
+        return None;
     }
-    Some(op.encode(&Fields { rs1: rs1 as u32, target: target as u32, ..Default::default() }))
+    Some(op.encode(&Fields { rs1: rs1 as u32, offset: offset as u32, ..Default::default() }))
 }
 
 #[cfg(test)]
@@ -116,8 +120,10 @@ mod tests {
         assert_eq!(encode(Op::Expop.into(), 0, 0, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2E << 25);
         assert_eq!(encode(Op::Barrier.into(), 0, 0, 0, 0, 0).unwrap(), 0x3C << 25);
         assert_eq!(encode(Op::Exany.into(), 3, 0, 0, 0, 0).unwrap(), 0x3E << 25 | 3 << 7);
-        // Instructions.JMP(0x2_5ABC): rs2 = 22, rs1 = 21, rd = 28, funct3 = 4.
-        assert_eq!(encode_jmp(0x2_5ABC), 0x50 << 25 | 22 << 20 | 21 << 15 | 4 << 12 | 28 << 7);
+        // JMP by 0x1_5ABC: funct3 = 2, rs2 = 22, rs1 = 21, rd = 28; by -1: every offset bit set.
+        assert_eq!(encode_jmp(0x1_5ABC), Some(0x50 << 25 | 22 << 20 | 21 << 15 | 2 << 12 | 28 << 7));
+        assert_eq!(encode_jmp(-1), Some(0x50 << 25 | 31 << 20 | 31 << 15 | 7 << 12 | 31 << 7));
+        assert_eq!(encode_jmp(1 << 17), None);
         assert_eq!(encode_sout(0, 0, 0).unwrap() & 0xFE00_0000, 0x42 << 25);
         assert_eq!(encode_fattr(0, 0).unwrap() & 0xFE00_0000, 0x44 << 25);
     }
@@ -172,18 +178,16 @@ mod tests {
     }
 
     #[test]
-    fn branch_target_splits_across_rs2_and_rd() {
-        // Target 33 = 0b1_00001 -> high bits 1 in rs2, low bits 1 in rd.
+    fn branch_offset_splits_across_rs2_and_rd() {
+        // Offset 33 = 0b1_00001 -> high bits 1 in rs2, low bits 1 in rd.
         let w = encode_branch(Op::Brz, 2, 33).unwrap();
-        assert_eq!((w >> 20) & 0x1F, 1, "target high 5 bits");
-        assert_eq!((w >> 7) & 0x1F, 1, "target low 5 bits");
-        assert_eq!((w >> 15) & 0x1F, 2, "rs1 = condition");
-        // Round-trip every representable target.
-        for t in 0..1024u16 {
+        assert_eq!(((w >> 20) & 0x1F, (w >> 7) & 0x1F, (w >> 15) & 0x1F), (1, 1, 2), "offset high, low, rs1");
+        // Every offset round-trips as a signed 10-bit value.
+        for t in -512..512i32 {
             let w = encode_branch(Op::Brnz, 0, t).unwrap();
-            let back = (((w >> 20) & 0x1F) << 5) | ((w >> 7) & 0x1F);
-            assert_eq!(back, t as u32, "target {t} did not round-trip");
+            let back = ((((w >> 20) & 0x1F) << 5 | ((w >> 7) & 0x1F)) as i32) << 22 >> 22;
+            assert_eq!(back, t, "offset {t} did not round-trip");
         }
-        assert!(encode_branch(Op::Brz, 0, 1024).is_none(), "out of range must not encode");
+        assert!(encode_branch(Op::Brz, 0, 512).is_none() && encode_branch(Op::Brz, 0, -513).is_none());
     }
 }
