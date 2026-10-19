@@ -380,7 +380,12 @@ unsafe fn compile_nir_inner(
         let blob = match cx.assemble() {
             Some(blob) => blob,
             None if matches!(cx.stage, Stage::Fragment | Stage::Vertex) && cx.spill.alloc_failed => continue,
-            None => return 0,
+            None => {
+                if let Err(e) = cx.refusal() {
+                    eprintln!("borgc: refused: {e}");
+                }
+                return 0;
+            }
         };
         if !out_len.is_null() {
             *out_len = blob.len() as u32;

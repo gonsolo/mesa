@@ -110,6 +110,10 @@ impl ShaderState {
             return None;
         };
         let Encoded { mut words, n_preload, n_body, pending } = encode_program(self, &alloc);
+        if pending > 0 {
+            self.refuse(format!("{pending} operand(s) without a register"));
+            return None;
+        }
         words.push(0x0000_0000);
         Some(build_blob(self, &words, n_preload, n_body, pending, &self.frag.out))
     }

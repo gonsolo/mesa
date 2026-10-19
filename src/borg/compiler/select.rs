@@ -89,10 +89,11 @@ impl ShaderState {
         if let Some(cd) = coord {
             let (ud, uc) = resolve_vm(&self.sel.vec_map, cd, 0);
             let is_fetch = tex.op == nir_texop_txf;
-            let (vd, vc) = if is_fetch && tex.coord_components == 1 {
-                (ud, uc)
-            } else {
-                resolve_vm(&self.sel.vec_map, cd, 1)
+            // A 1D coordinate has no v: a fetch reuses u, a sample takes the centre of the one row.
+            let (vd, vc) = match (is_fetch, tex.coord_components) {
+                (true, 1) => (ud, uc),
+                (false, 1) => (self.konst(0.5f32.to_bits()), 0),
+                _ => resolve_vm(&self.sel.vec_map, cd, 1),
             };
             let is_cube = tex.sampler_dim == GLSL_SAMPLER_DIM_CUBE;
             let has_w = !is_fetch && tex.coord_components >= 3 && !is_cube && self.stage == Stage::Fragment;
@@ -262,16 +263,16 @@ impl ShaderState {
             _ => {
                 if let Some(mnem) = borg_isel(alu.op) {
                     if mnem != Mnem::Mov {
-                        let mut srcs = Vec::new();
-                        let mut swz = Vec::new();
+                        let (mut srcs, mut swz, mut pairs) = (Vec::new(), Vec::new(), Vec::new());
                         for s in alu.srcs_as_slice() {
                             let (d, c) =
                                 resolve_vm(&self.sel.vec_map, s.src.as_def().index, s.swizzle[0]);
+                            pairs.push((d, c));
+                            // A descriptor's offset (.z) is 0: the driver places each binding at its slot's start.
+                            let (d, c) = if c == 2 && self.vert.descriptor_defs.contains(&d) { (self.konst(0), 0) } else { (d, c) };
                             srcs.push(d);
                             swz.push(c);
                         }
-                        let pairs: Vec<(u32, u8)> =
-                            srcs.iter().cloned().zip(swz.iter().cloned()).collect();
                         self.prod.insert(alu.def.index, (alu.op, pairs));
                         self.sel.prog.push(BorgInstr { mnem, dst: alu.def.index, srcs, swz, imm: 0 });
                     }
@@ -286,8 +287,8 @@ impl ShaderState {
     /// A float comparison as 0.0 or 1.0, from FSTEP of the difference.
     unsafe fn float_compare(&mut self, alu: &nir_alu_instr) {
         let sl = alu.srcs_as_slice();
-        let a = resolve_vm(&self.sel.vec_map, sl[0].src.as_def().index, sl[0].swizzle[0]);
-        let b = resolve_vm(&self.sel.vec_map, sl[1].src.as_def().index, sl[1].swizzle[0]);
+        let a = self.operand(sl[0].src.as_def().index, sl[0].swizzle[0]);
+        let b = self.operand(sl[1].src.as_def().index, sl[1].swizzle[0]);
 
         // diff(hi, lo) = hi - lo, as a fresh vreg.
 
@@ -347,8 +348,8 @@ impl ShaderState {
             self.sel.prog.push(BorgInstr { mnem: Op::Fmul.into(), dst: alu.def.index, srcs: vec![x.0, vstep], swz: vec![x.1, 0], imm: 0 });
         } else {
             // max(a, b) = b + (a >= b) * (a - b); min(a, b) = a + (a >= b) * (b - a)
-            let a = resolve_vm(&self.sel.vec_map, s[0].src.as_def().index, s[0].swizzle[0]);
-            let b = resolve_vm(&self.sel.vec_map, s[1].src.as_def().index, s[1].swizzle[0]);
+            let a = self.operand(s[0].src.as_def().index, s[0].swizzle[0]);
+            let b = self.operand(s[1].src.as_def().index, s[1].swizzle[0]);
             let one = self.one();
             let v = self.sel.next_vreg;
             self.sel.next_vreg += 8;
@@ -369,8 +370,8 @@ impl ShaderState {
     /// An integer comparison, from ISLT, ISLTU and ISEQ.
     unsafe fn int_compare(&mut self, alu: &nir_alu_instr) {
         let sl = alu.srcs_as_slice();
-        let a = resolve_vm(&self.sel.vec_map, sl[0].src.as_def().index, sl[0].swizzle[0]);
-        let b = resolve_vm(&self.sel.vec_map, sl[1].src.as_def().index, sl[1].swizzle[0]);
+        let a = self.operand(sl[0].src.as_def().index, sl[0].swizzle[0]);
+        let b = self.operand(sl[1].src.as_def().index, sl[1].swizzle[0]);
         let lt = if matches!(alu.op, nir_op_ult | nir_op_uge) { Op::Isltu } else { Op::Islt };
         let bits = match alu.op {
             nir_op_ieq => self.sel.pair(Op::Iseq, a, b),
@@ -422,9 +423,9 @@ impl ShaderState {
             let n = alu.def.num_components as usize;
             let mut comps = Vec::new();
             for k in 0..n {
-                let c = resolve_vm(&self.sel.vec_map, s[0].src.as_def().index, s[0].swizzle[k]);
-                let t = resolve_vm(&self.sel.vec_map, s[1].src.as_def().index, s[1].swizzle[k]);
-                let e = resolve_vm(&self.sel.vec_map, s[2].src.as_def().index, s[2].swizzle[k]);
+                let c = self.operand(s[0].src.as_def().index, s[0].swizzle[k]);
+                let t = self.operand(s[1].src.as_def().index, s[1].swizzle[k]);
+                let e = self.operand(s[2].src.as_def().index, s[2].swizzle[k]);
                 let ne = self.sel.next_vreg;
                 let d = self.sel.next_vreg + 1;
                 let r = self.sel.next_vreg + 2;
@@ -441,8 +442,8 @@ impl ShaderState {
     /// Integer min and max from ISLT or ISLTU and a multiply.
     unsafe fn int_minmax(&mut self, alu: &nir_alu_instr) {
         let sl = alu.srcs_as_slice();
-        let a = resolve_vm(&self.sel.vec_map, sl[0].src.as_def().index, sl[0].swizzle[0]);
-        let b = resolve_vm(&self.sel.vec_map, sl[1].src.as_def().index, sl[1].swizzle[0]);
+        let a = self.operand(sl[0].src.as_def().index, sl[0].swizzle[0]);
+        let b = self.operand(sl[1].src.as_def().index, sl[1].swizzle[0]);
         let lt = if matches!(alu.op, nir_op_umax | nir_op_umin) { Op::Isltu } else { Op::Islt };
         let is_max = matches!(alu.op, nir_op_umax | nir_op_imax);
         let (p, q) = if is_max { (a, b) } else { (b, a) };
