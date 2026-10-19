@@ -3,7 +3,7 @@
 
 use crate::{BorgInstr, NO_DST};
 use crate::isel::resolve_vm;
-use crate::state::{ShaderState, Stage};
+use crate::state::ShaderState;
 use crate::Loc;
 use compiler::bindings::*;
 use compiler::nir::AsDef;
