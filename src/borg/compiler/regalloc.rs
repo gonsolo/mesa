@@ -184,7 +184,6 @@ mod tests {
         assert_eq!((d[&4], l[&4]), (2, 8), "defined in it, live after it");
         assert_eq!((d[&3], l[&3]), (3, 5), "a value of one trip");
     }
-    use std::collections::HashMap;
 
     fn chain(n: u32) -> Vec<BorgInstr> {
         (1..=n)
