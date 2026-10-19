@@ -1,4 +1,3 @@
-use crate::consts::Kv;
 use crate::state::ShaderState;
 use crate::{packed_layout, BorgInstr, Ubo, NO_DST};
 
@@ -9,10 +8,10 @@ impl ShaderState {
     /// as two varyings when the fragment shader reads gl_PointCoord.
     pub unsafe fn epilogue_point_quads(&mut self) {
         let ctl_bits = (1u32 << 16) | (128 + 16);
-        let ctl = self.konst(ctl_bits, Kv::Word);
+        let ctl = self.konst(ctl_bits);
         let idx = self.sel.next_vreg; self.sel.next_vreg += 1;
         self.sel.ubo.insert(idx, Ubo::Fixed(30));
-        let twelve = self.konst(12, Kv::Word);   // shared with the attribute fetches
+        let twelve = self.konst(12);   // shared with the attribute fetches
         let ty = self.sel.next_vreg; self.sel.next_vreg += 1;
         self.sel.prog.push(BorgInstr { mnem: "ISRL", dst: ty, srcs: vec![idx, twelve], swz: vec![0, 0] });
         let hi = self.sel.next_vreg; self.sel.next_vreg += 1;
@@ -43,7 +42,7 @@ impl ShaderState {
                 // Clamp to the advertised range [1, 64]: x - c*(x - 64), c = step(x - 64).
                 let x = self.sel.reg(ps).0;
                 // upper: x -= step(x - 64) * (x - 64)
-                let neg_hi = self.konst((-64.0f32).to_bits(), Kv::Word);
+                let neg_hi = self.konst((-64.0f32).to_bits());
                 let t = self.sel.op0("FADD", vec![x, neg_hi]);
                 let c = self.sel.op0("FSTEP", vec![t]);
                 let ct = self.sel.op0("FMUL", vec![c, t]);
@@ -82,7 +81,7 @@ impl ShaderState {
         let n = self.flags.target_count();
         let flags = self.flags;
         let class = |k: usize| flags.target_class(k);
-        let cff = self.konst(0xFF, Kv::Word);
+        let cff = self.konst(0xFF);
         let idx = self.sel.op0("ATTIDX", vec![]);
         let zero = self.sel.op0("ISUB", vec![idx, idx]);
         let mut vals: Vec<u32> = Vec::new();
@@ -99,16 +98,16 @@ impl ShaderState {
                     } else { x };
                     match class(k) {
                         1 => {
-                            let c255 = self.konst(255.0f32.to_bits(), Kv::Word);
-                            let c05 = self.konst(0.5f32.to_bits(), Kv::Word);
+                            let c255 = self.konst(255.0f32.to_bits());
+                            let c05 = self.konst(0.5f32.to_bits());
                             let m = self.sel.op0("FMUL", vec![x, c255]);
                             let h = self.sel.op0("FADD", vec![m, c05]);
                             let i = self.sel.op0("F2I", vec![h]);
                             self.sel.op0("IAND", vec![i, cff])
                         }
                         2 => {
-                            let c127 = self.konst(127.0f32.to_bits(), Kv::Word);
-                            let c05 = self.konst(0.5f32.to_bits(), Kv::Word);
+                            let c127 = self.konst(127.0f32.to_bits());
+                            let c05 = self.konst(0.5f32.to_bits());
                             let t = self.sel.op0("FMUL", vec![x, c127]);
                             let s = self.sel.op0("FSTEP", vec![t]);
                             let nh = self.sel.op0("FNEG", vec![c05]);
@@ -125,7 +124,7 @@ impl ShaderState {
         }
         let mut acc = vals[0];
         if n > 1 {
-            let one_u = self.konst(1, Kv::Word);
+            let one_u = self.konst(1);
             let one = self.sel.op0("IADD", vec![one_u, zero]);
             let mut kreg = one;
             for k in 1..n {
@@ -143,9 +142,9 @@ impl ShaderState {
     /// R8_UNORM output (RAW8): the red value as round(r * 255) & 0xFF.
     pub unsafe fn epilogue_r8_unorm(&mut self) {
         // R8_UNORM (RAW8): r26 = round(r * 255) & 0xFF.
-        let c255 = self.konst(255.0f32.to_bits(), Kv::Word);
-        let c05 = self.konst(0.5f32.to_bits(), Kv::Word);
-        let cff = self.konst(0xFF, Kv::Word);
+        let c255 = self.konst(255.0f32.to_bits());
+        let c05 = self.konst(0.5f32.to_bits());
+        let cff = self.konst(0xFF);
         let (x, xc) = self.outs.frag[0].unwrap();
         let x = if matches!(self.sel.ubo.get(&x), Some(Ubo::Uniform(_))) {
             let o = self.sel.next_vreg; self.sel.next_vreg += 1;
@@ -169,7 +168,7 @@ impl ShaderState {
         let mut words: [Option<u32>; 4] = [None; 4];
         for &(comp, bitpos, bits) in layout.iter() {
             let Some((x, xc)) = self.outs.frag[comp] else { continue };
-            let mask = if bits < 32 && (kind == 1 || kind == 3) { Some(self.konst((1u32 << bits) - 1, Kv::Word)) } else { None };
+            let mask = if bits < 32 && (kind == 1 || kind == 3) { Some(self.konst((1u32 << bits) - 1)) } else { None };
             let (x, xc) = if matches!(self.sel.ubo.get(&x), Some(Ubo::Uniform(_))) {
                 (self.sel.op("FMOV", vec![x], vec![xc]), 0)
             } else { (x, xc) };
@@ -178,15 +177,15 @@ impl ShaderState {
             } else { (x, xc) };
             let q = match kind {
                 0 | 2 => {
-                    let cmax = self.konst(((1u32 << bits) as f32 - 1.0).to_bits(), Kv::Word);
-                    let c05 = self.konst(0.5f32.to_bits(), Kv::Word);
+                    let cmax = self.konst(((1u32 << bits) as f32 - 1.0).to_bits());
+                    let c05 = self.konst(0.5f32.to_bits());
                     let m = self.sel.op("FMUL", vec![x, cmax], vec![xc, 0]);
                     let h = self.sel.op("FADD", vec![m, c05], vec![0, 0]);
                     self.sel.op("F2I", vec![h], vec![0])
                 }
                 1 => {
-                    let cmax = self.konst((((1u32 << (bits - 1)) - 1) as f32).to_bits(), Kv::Word);
-                    let c05 = self.konst(0.5f32.to_bits(), Kv::Word);
+                    let cmax = self.konst((((1u32 << (bits - 1)) - 1) as f32).to_bits());
+                    let c05 = self.konst(0.5f32.to_bits());
                     let t = self.sel.op("FMUL", vec![x, cmax], vec![xc, 0]);
                     let st = self.sel.op("FSTEP", vec![t], vec![0]);
                     let nh = self.sel.op("FNEG", vec![c05], vec![0]);
@@ -196,7 +195,7 @@ impl ShaderState {
                     self.sel.op("IAND", vec![i, mask.unwrap()], vec![0, 0])
                 }
                 4 => {
-                    let cmax = self.konst((1u32 << bits) - 1, Kv::Word);
+                    let cmax = self.konst((1u32 << bits) - 1);
                     let lt = self.sel.op("ISLTU", vec![x, cmax], vec![xc, 0]);
                     let d = self.sel.op("ISUB", vec![x, cmax], vec![xc, 0]);
                     let m = self.sel.op("IMUL", vec![lt, d], vec![0, 0]);
@@ -209,7 +208,7 @@ impl ShaderState {
             };
             let (wi, sh) = ((bitpos / 32) as usize, bitpos % 32);
             let q = if sh == 0 { q } else {
-                let shv = self.konst(sh, Kv::Word);
+                let shv = self.konst(sh);
                 self.sel.op("ISHL", vec![q, shv], vec![0, 0])
             };
             words[wi] = Some(match words[wi] {
@@ -227,7 +226,7 @@ impl ShaderState {
             // RAW128: the slice this pass renders (ATTIDX / 4) picks words 0-1 or 2-3.
             let idx = self.sel.op0("ATTIDX", vec![]);
             let zero = self.sel.op0("ISUB", vec![idx, idx]);
-            let four_w = self.konst(4, Kv::Word);
+            let four_w = self.konst(4);
             let four = self.sel.op0("IADD", vec![four_w, zero]);
             let hit = self.sel.op0("ISEQ", vec![idx, four]);
             for w in 0..2 {
@@ -254,7 +253,7 @@ impl ShaderState {
             let Some(x) = src else { continue };
             let h = self.sel.opc("F2H", &[x]);
             let h = if n & 1 == 0 { h } else {
-                let c = self.konst(16, Kv::Word);
+                let c = self.konst(16);
                 self.sel.opc("ISHL", &[(h, 0), (c, 0)])
             };
             pw[n / 2] = Some(match pw[n / 2] { None => h, Some(a) => self.sel.opc("IOR", &[(a, 0), (h, 0)]) });
@@ -267,7 +266,7 @@ impl ShaderState {
     /// Packs four 8-bit channel values into one word, channel 3 in the top byte.
     pub unsafe fn epilogue_bytes_packed(&mut self) {
         let (mut p, mut pc) = self.outs.frag[3].unwrap();
-        let sh = self.konst(8, Kv::Word);
+        let sh = self.konst(8);
         for c in (0..3).rev() {
             {
                 let d = self.sel.next_vreg;

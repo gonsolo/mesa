@@ -3,7 +3,6 @@
 
 use crate::{BorgInstr, NO_DST};
 use crate::isel::resolve_vm;
-use crate::consts::Kv;
 use crate::state::ShaderState;
 use crate::Ubo;
 use compiler::bindings::*;
@@ -211,7 +210,7 @@ impl ShaderState {
     pub(crate) fn operand(&mut self, d: u32, c: u8) -> (u32, u8) {
         if self.is_compute && !self.sel.vec_map.contains_key(&d) {
             if let Some(&bits) = self.consts.get(&d) {
-                return (self.konst(bits, Kv::Int), 0);
+                return (self.konst(bits), 0);
             }
         }
         resolve_vm(&self.sel.vec_map, d, c)
@@ -246,7 +245,7 @@ impl ShaderState {
 
     fn vreg(&mut self, v: Val) -> (u32, u8) {
         match v {
-            Val::K(b) => (self.konst(b, Kv::Int), 0),
+            Val::K(b) => (self.konst(b), 0),
             Val::R(r, c) => (r, c),
         }
     }
@@ -589,7 +588,7 @@ impl ShaderState {
                         Val::K(x) => {
                             // Small steps from one base keep the distinct constants few.
                             let mut r = ((x + base_w) & (SLOT_WORDS - 1)) + c;
-                            let rb = self.konst(pbase, Kv::Int);
+                            let rb = self.konst(pbase);
                             let mut a = Val::R(rb, 0);
                             while r >= 4 {
                                 a = self.bin("IADD", a, Val::K(4));
@@ -710,10 +709,10 @@ impl ShaderState {
                 let (old, new, t, u, w) = (self.sel.fresh(), self.sel.fresh(), self.sel.fresh(), self.sel.fresh(), self.sel.fresh());
                 let r30 = self.fixed(30);
                 // r30 counts across the workgroup's quads; the lane is its low bits.
-                let (m, q) = (self.konst(LANES - 1, Kv::Int), self.sel.fresh());
+                let (m, q) = (self.konst(LANES - 1), self.sel.fresh());
                 self.sel.prog.push(BorgInstr { mnem: "IAND", dst: q, srcs: vec![r30, m], swz: vec![0, 0] });
                 for lane in 0..LANES {
-                    let l = self.konst(lane, Kv::Int);
+                    let l = self.konst(lane);
                     let p = &mut self.sel.prog;
                     let mut op = |mnem: &'static str, dst: u32, srcs: Vec<(u32, u8)>| {
                         let (srcs, swz) = srcs.into_iter().unzip();

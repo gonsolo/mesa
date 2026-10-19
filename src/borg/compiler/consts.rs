@@ -129,7 +129,7 @@ impl ConstPool {
 impl ShaderState {
     /// A register holding `bits`: a window word in a fragment or vertex shader (in memory when the
     /// window is full), a preset register or pool word in a compute shader.
-    pub fn konst(&mut self, bits: u32, _kv: Kv) -> u32 {
+    pub fn konst(&mut self, bits: u32) -> u32 {
         if self.is_compute {
             return self.cs_const(bits);
         }
@@ -422,12 +422,6 @@ impl ShaderState {
             self.sel.prog = out;
         }
     }
-}
-
-#[derive(Clone, Copy)]
-pub enum Kv {
-    Word,
-    Int,
 }
 
 #[cfg(test)]

@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT
 
 use std::collections::HashMap;
-use crate::consts::Kv;
 use crate::state::ShaderState;
 use crate::{BorgInstr, Ubo, NO_DST};
 
@@ -27,7 +26,7 @@ impl ShaderState {
         let mut out = Vec::new();
         let vi = self.sel.fresh();
         self.sel.ubo.insert(vi, Ubo::Fixed(30));
-        let (k0, k1, c1, c2) = (self.konst(KEY_WORDS, Kv::Word), self.konst(KEY_WORDS + 2, Kv::Word), self.konst(1, Kv::Word), self.konst(2, Kv::Word));
+        let (k0, k1, c1, c2) = (self.konst(KEY_WORDS), self.konst(KEY_WORDS + 2), self.konst(1), self.konst(2));
         let z = self.op(&mut out, "ISUB", &[vi, vi]);
         let a0 = self.op(&mut out, "IADD", &[z, k0]);
         out.push(BorgInstr { mnem: "STORE", dst: NO_DST, srcs: vec![a0, vi], swz: vec![0, 0] });
@@ -62,7 +61,7 @@ impl ShaderState {
             self.sel.ubo.insert(f, Ubo::Fixed(r));
             self.per_pixel_fixed.insert(f);
         }
-        let c1 = self.konst(1, Kv::Word);
+        let c1 = self.konst(1);
         let xi = self.op(&mut out, "F2I", &[f30]);
         let yi = self.op(&mut out, "F2I", &[f31]);
         let xb = self.op(&mut out, "IAND", &[xi, c1]);
@@ -189,7 +188,7 @@ impl ShaderState {
             prog.splice(0..0, head);
         }
         let lane = self.spill_lane.unwrap();
-        let k = self.konst(slot_bits, Kv::Word);
+        let k = self.konst(slot_bits);
         self.spill_slots += 1;
         let mut out = Vec::with_capacity(prog.len() + 8);
         for mut i in prog {
