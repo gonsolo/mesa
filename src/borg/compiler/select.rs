@@ -1005,9 +1005,8 @@ impl ShaderState {
     pub unsafe fn select_entry(&mut self, entry: *mut nir_function_impl) {
         let mut cf_marks: std::collections::HashMap<usize, Vec<CfMark>> =
             std::collections::HashMap::new();
-        let mut cf_unsupported: Vec<&'static str> = Vec::new();
         let mut loops = crate::Loops::default();
-        collect_cf_marks((*entry).iter_body(), &mut cf_marks, &mut cf_unsupported, (self.stage == Stage::Compute).then_some(&mut loops), None);
+        collect_cf_marks((*entry).iter_body(), &mut cf_marks, &mut loops, None);
         if loops.count > 256 {
             loops.err = Some(format!("{} loops; labels are 8 bits", loops.count));
         }
@@ -1016,13 +1015,6 @@ impl ShaderState {
         }
         // Per loop: lanes still looping, lanes going round this time, and whether any lane is.
         let lv: Vec<(u32, u32, u32)> = (0..loops.count).map(|_| (self.sel.fresh(), self.sel.fresh(), self.sel.fresh())).collect();
-        if !cf_unsupported.is_empty() {
-            eprintln!(
-                "borgc: WARNING unsupported control flow ({}) -- the body will be \
-                 emitted UNMASKED and run for every lane. See BorgCore.wireExecMask.",
-                cf_unsupported.join(", ")
-            );
-        }
 
         let mut reg_vregs: HashMap<u32, Vec<u32>> = HashMap::new();
         for block in (*entry).iter_blocks() {

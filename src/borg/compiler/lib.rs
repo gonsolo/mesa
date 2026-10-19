@@ -204,15 +204,14 @@ fn decompose_vertex_offset(
     Some((base / 4, stride / 4))
 }
 
-/// EXPUSH/EXELSE/EXPOP at the blocks an `if` starts, switches and ends at. With `loops` a loop
+/// EXPUSH/EXELSE/EXPOP at the blocks an `if` starts, switches and ends at. A loop
 /// runs while any lane is alive: LOOP_HEAD masks to the lanes going round, a jump clears them,
 /// and after an `if` holding a jump REPUSH masks the rest of the list again (popped at its end).
 /// Returns whether the list holds a jump and whether it needs that extra pop.
 pub(crate) unsafe fn collect_cf_marks(
     nodes: compiler::nir::ExecListIter<'_, nir_cf_node>,
     marks: &mut std::collections::HashMap<usize, Vec<CfMark>>,
-    unsupported: &mut Vec<&'static str>,
-    mut loops: Option<&mut Loops>,
+    loops: &mut Loops,
     cur: Option<usize>,
 ) -> (bool, bool) {
     let key = |b: &nir_block| b as *const nir_block as usize;
@@ -220,22 +219,20 @@ pub(crate) unsafe fn collect_cf_marks(
     let (mut jumps, mut repushed) = (false, false);
     for node in nodes {
         if let Some(b) = node.as_block() {
-            if let Some(l) = loops.as_deref_mut() {
-                if b.iter_instr_list().any(|i| i.as_jump().is_some()) {
-                    match cur {
-                        Some(c) => {
-                            l.jumps.insert(key(b), c);
-                            jumps = true;
-                        }
-                        None => l.err = Some("a jump outside a loop".into()),
+            if b.iter_instr_list().any(|i| i.as_jump().is_some()) {
+                match cur {
+                    Some(c) => {
+                        loops.jumps.insert(key(b), c);
+                        jumps = true;
                     }
+                    None => loops.err = Some("a jump outside a loop".into()),
                 }
             }
             continue;
         }
         if let Some(nif) = node.as_if() {
-            let (tj, tr) = collect_cf_marks(nif.iter_then_list(), marks, unsupported, loops.as_deref_mut(), cur);
-            let (ej, er) = collect_cf_marks(nif.iter_else_list(), marks, unsupported, loops.as_deref_mut(), cur);
+            let (tj, tr) = collect_cf_marks(nif.iter_then_list(), marks, loops, cur);
+            let (ej, er) = collect_cf_marks(nif.iter_else_list(), marks, loops, cur);
             marks.entry(key(nif.first_then_block())).or_default().push(mark(Op::Expush.into(), Some(nif.condition.as_def().index), None));
             let e = marks.entry(key(nif.first_else_block())).or_default();
             if tr {
@@ -255,19 +252,14 @@ pub(crate) unsafe fn collect_cf_marks(
                 (jumps, repushed) = (true, true);
             }
         } else if let Some(nloop) = node.as_loop() {
-            let Some(l) = loops.as_deref_mut() else {
-                unsupported.push("loop");
-                collect_cf_marks(nloop.iter_body(), marks, unsupported, None, None);
-                continue;
-            };
-            let id = l.count;
-            l.count += 1;
+            let id = loops.count;
+            loops.count += 1;
             let cl = &nloop.continue_list;
             if !std::ptr::eq(cl.head_sentinel.next, &cl.tail_sentinel) {
-                l.err = Some("a loop with a continue construct".into());
+                loops.err = Some("a loop with a continue construct".into());
             }
             marks.entry(key(nloop.first_block())).or_default().push(mark(Mnem::LoopHead, None, Some(id)));
-            let (_, br) = collect_cf_marks(nloop.iter_body(), marks, unsupported, loops.as_deref_mut(), Some(id));
+            let (_, br) = collect_cf_marks(nloop.iter_body(), marks, loops, Some(id));
             let f = marks.entry(key(nloop.following_block())).or_default();
             if br {
                 f.push(mark(Op::Expop.into(), None, None));
