@@ -13,160 +13,147 @@ pub struct Encoded {
     pub pending: u32,
 }
 
-pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
-    let mut words: Vec<u32> = Vec::new();
-    let mut pos_gpr: std::collections::HashMap<(u32, u8), u8> = HashMap::new();
-    let mut next_pre: u8 = 24; // r24..r29: above regalloc's low-GPR fill
-    for i in &cx.sel.prog {
-        if i.mnem == Mnem::Mov {
-            continue;
-        }
-        for (s, &c) in i.srcs.iter().zip(i.swz.iter()) {
-            if cx.sel.ubo.get(s) == Some(&Ubo::Pos)
-                && c != 3 // pos.w is the constant 1.0 (folded below), never pre-loaded
-                && !pos_gpr.contains_key(&(*s, c))
-                && next_pre <= 29
-            {
-                let g = next_pre;
-                next_pre += 1;
-                pos_gpr.insert((*s, c), g);
-                // g = u[c] (position component c → uniform u0..u2), funct3=1.
-                if let Some(w) = encode(Op::Fadd.into(), g, c, 30, 0, 1) {
-                    words.push(w);
+/// Encodes the allocated program: physical registers for every operand, and the words.
+struct Emitter<'a> {
+    cx: &'a ShaderState,
+    alloc: &'a HashMap<u32, u8>,
+    pos_gpr: HashMap<(u32, u8), u8>,
+    words: Vec<u32>,
+    pending: u32,
+}
+
+impl Emitter<'_> {
+    fn push(&mut self, w: Option<u32>) {
+        self.words.extend(w);
+    }
+
+    /// Loads the position components the program reads into r24..r29; pos.w (1.0) is folded.
+    fn preload_positions(&mut self) {
+        let cx = self.cx;
+        let mut next_pre: u8 = 24; // above regalloc's low-GPR fill
+        for i in cx.sel.prog.iter().filter(|i| i.mnem != Mnem::Mov) {
+            for (s, &c) in i.srcs.iter().zip(i.swz.iter()) {
+                if cx.sel.ubo.get(s) == Some(&Ubo::Pos) && c != 3 && !self.pos_gpr.contains_key(&(*s, c)) && next_pre <= 29 {
+                    let g = next_pre;
+                    next_pre += 1;
+                    self.pos_gpr.insert((*s, c), g);
+                    // g = u[c] (position component c → uniform u0..u2), funct3=1.
+                    self.push(encode(Op::Fadd.into(), g, c, 30, 0, 1));
                 }
             }
         }
     }
-    let n_preload = words.len();
 
-    let mut pending = 0u32;
-    // Resolve one source operand to (physical register, reads-from-uniform).
-    let resolve_op = |s: u32, c: u8| -> (u8, bool) {
-        // TEX result component c → rd+c (R/G/B/A in consecutive regs).
-        if cx.tex_dsts.contains(&s) {
-            return (alloc.get(&s).map_or(0, |&r| r + c), false);
-        }
-        // FATTR result component c → rd+c (per-vertex v0/v1/v2 in consecutive regs).
-        if cx.fattr_dsts.contains(&s) {
+    /// One source operand as (physical register, read from the uniform window).
+    fn operand(&self, s: u32, c: u8) -> (u8, bool) {
+        let (cx, alloc) = (self.cx, self.alloc);
+        // TEX and FATTR results: component c is rd + c.
+        if cx.tex_dsts.contains(&s) || cx.fattr_dsts.contains(&s) {
             return (alloc.get(&s).map_or(0, |&r| r + c), false);
         }
         match cx.sel.ubo.get(&s) {
-            Some(&Ubo::Pos) => (*pos_gpr.get(&(s, c)).unwrap_or(&0), false),
+            Some(&Ubo::Pos) => (*self.pos_gpr.get(&(s, c)).unwrap_or(&0), false),
             Some(&Ubo::Uniform(idx)) => (idx, true),
             Some(&Ubo::Fixed(reg)) => (reg, false),
             _ => (*alloc.get(&s).unwrap_or(&0), false),
         }
-    };
-    let (labels, far) = branch_layout(&cx.sel.prog, n_preload);
-    for (k, i) in cx.sel.prog.iter().enumerate() {
-        if i.mnem == Mnem::Mov || i.mnem == Mnem::Label {
-            continue;
-        }
-        if i.mnem == Op::Brnz {
-            let t = labels[&i.swz[1]] as u32;
-            let rs1 = resolve_op(i.srcs[0], i.swz[0]).0;
-            match far.get(&k) {
-                None => words.extend(encode_branch(Op::Brnz, rs1, (t % 1024) as u16)),
-                Some(&pad) => {
-                    for _ in 0..pad {
-                        words.push(encode_jmp(words.len() as u32 + 1));
-                    }
-                    words.extend(encode_branch(Op::Brz, rs1, ((words.len() + 2) % 1024) as u16));
-                    words.push(encode_jmp(t));
-                }
-            }
-            continue;
-        }
-        if matches!(i.mnem, Mnem::Op(Op::Expush | Op::Exelse | Op::Expop)) {
-            let rs1 = if i.srcs.is_empty() {
-                0
-            } else {
-                resolve_op(i.srcs[0], i.swz[0]).0
-            };
-            if let Some(w) = encode(i.mnem, 0, rs1, 0, 0, 0) {
-                words.push(w);
-            }
-            continue;
-        }
-        if i.mnem == Op::Sout {
-            let index = i.swz[0] as u16;
-            let rs2 = resolve_op(i.srcs[0], 0).0;
-            if let Some(w) = encode_sout(rs2, index, 0) {
-                words.push(w);
-            }
-            continue;
-        }
-        if i.mnem == Op::Fattr {
-            let index = i.swz[0] as u16;
-            let rd = *alloc.get(&i.dst).unwrap_or(&0);
-            if let Some(w) = encode_fattr(rd, index) {
-                words.push(w);
-            }
-            continue;
-        }
-        let rd = *alloc.get(&i.dst).unwrap_or(&0);
+    }
 
-        let posw = i
-            .srcs
-            .iter()
-            .zip(i.swz.iter())
+    /// BRNZ to the LABEL named in swz[1]; a target in another page is a BRZ over a JMP.
+    fn branch(&mut self, k: usize, i: &BorgInstr, labels: &HashMap<u8, usize>, far: &HashMap<usize, usize>) {
+        let t = labels[&i.swz[1]] as u32;
+        let rs1 = self.operand(i.srcs[0], i.swz[0]).0;
+        match far.get(&k) {
+            None => self.push(encode_branch(Op::Brnz, rs1, (t % 1024) as u16)),
+            Some(&pad) => {
+                for _ in 0..pad {
+                    let w = encode_jmp(self.words.len() as u32 + 1);
+                    self.words.push(w);
+                }
+                let w = encode_branch(Op::Brz, rs1, ((self.words.len() + 2) % 1024) as u16);
+                self.push(w);
+                self.words.push(encode_jmp(t));
+            }
+        }
+    }
+
+    /// FMUL or FMADD by pos.w (1.0) becomes FADD of the other operand; false for anything else.
+    fn fold_pos_w(&mut self, i: &BorgInstr, rd: u8) -> bool {
+        let cx = self.cx;
+        let posw = i.srcs.iter().zip(i.swz.iter())
             .take(2) // only the multiply operands (rs1/rs2) can be pos.w
             .position(|(s, &c)| cx.sel.ubo.get(s) == Some(&Ubo::Pos) && c == 3);
-        if let Some(k) = posw {
-            if i.mnem == Op::Fmul || i.mnem == Op::Fmadd {
-                let other = 1 - k; // the surviving multiply operand
-                let (oreg, ouni) = resolve_op(i.srcs[other], i.swz[other]);
-                // FMUL → FADD(rd, other, 0); FMADD → FADD(rd, other, acc).
-                let (addend, f3) = if i.mnem == Op::Fmadd {
-                    (resolve_op(i.srcs[2], i.swz[2]).0, if ouni { 1 } else { 0 })
-                } else {
-                    (30, if ouni { 1 } else { 0 }) // r30 = 0 → load `other`
-                };
-                if let Some(w) = encode(Op::Fadd.into(), rd, oreg, addend, 0, f3) {
-                    words.push(w);
-                }
-                continue;
-            }
+        let Some(k) = posw else { return false };
+        if i.mnem != Op::Fmul && i.mnem != Op::Fmadd {
+            return false;
         }
+        let (oreg, ouni) = self.operand(i.srcs[1 - k], i.swz[1 - k]);
+        // FMUL → FADD(rd, other, 0); FMADD → FADD(rd, other, acc); r30 = 0.
+        let addend = if i.mnem == Op::Fmadd { self.operand(i.srcs[2], i.swz[2]).0 } else { 30 };
+        self.push(encode(Op::Fadd.into(), rd, oreg, addend, 0, ouni as u32));
+        true
+    }
 
+    /// Any other instruction: a register per operand, the first window word read through funct3.
+    fn instr(&mut self, i: &BorgInstr, rd: u8) {
+        let (cx, alloc) = (self.cx, self.alloc);
         let mut r = [0u8; 3];
         let mut f3 = 0u32;
         for (k, (s, &c)) in i.srcs.iter().zip(i.swz.iter()).take(3).enumerate() {
-            if cx.tex_dsts.contains(s) {
-                r[k] = alloc.get(s).map_or(0, |&rr| rr + c); // TEX result rd+c
-                continue;
-            }
-            if cx.fattr_dsts.contains(s) {
-                r[k] = alloc.get(s).map_or(0, |&rr| rr + c); // FATTR result rd+c
+            if cx.tex_dsts.contains(s) || cx.fattr_dsts.contains(s) {
+                r[k] = alloc.get(s).map_or(0, |&rr| rr + c);
                 continue;
             }
             match cx.sel.ubo.get(s) {
-                // position component → its pre-loaded GPR.
-                Some(&Ubo::Pos) => r[k] = *pos_gpr.get(&(*s, c)).unwrap_or(&0),
-                // fragment uniform (inv_area / per-vertex varying) → funct3 read.
+                Some(&Ubo::Pos) => r[k] = *self.pos_gpr.get(&(*s, c)).unwrap_or(&0),
                 Some(&Ubo::Uniform(idx)) => {
                     if f3 == 0 {
                         r[k] = idx;
                         f3 = k as u32 + 1;
                     } else {
-                        pending += 1; // 2nd uniform in one op needs a preload
+                        self.pending += 1; // 2nd uniform in one op needs a preload
                     }
                 }
-                // edge-function attribute in a fixed register (r0/r1/r2).
                 Some(&Ubo::Fixed(reg)) => r[k] = reg,
                 // ALU intermediate → allocated GPR (or pending if a stray input).
                 None => match alloc.get(s) {
                     Some(&phys) => r[k] = phys,
-                    None => pending += 1,
+                    None => self.pending += 1,
                 },
             }
         }
-        if let Some(w) = encode(i.mnem, rd, r[0], r[1], r[2], f3) {
-            words.push(w);
+        self.push(encode(i.mnem, rd, r[0], r[1], r[2], f3));
+    }
+}
+
+pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
+    let mut e = Emitter { cx, alloc, pos_gpr: HashMap::new(), words: Vec::new(), pending: 0 };
+    e.preload_positions();
+    let n_preload = e.words.len();
+    let (labels, far) = branch_layout(&cx.sel.prog, n_preload);
+    for (k, i) in cx.sel.prog.iter().enumerate() {
+        let rd = *alloc.get(&i.dst).unwrap_or(&0);
+        match i.mnem {
+            Mnem::Mov | Mnem::Label => {}
+            Mnem::Op(Op::Brnz) => e.branch(k, i, &labels, &far),
+            Mnem::Op(Op::Expush | Op::Exelse | Op::Expop) => {
+                let rs1 = if i.srcs.is_empty() { 0 } else { e.operand(i.srcs[0], i.swz[0]).0 };
+                e.push(encode(i.mnem, 0, rs1, 0, 0, 0));
+            }
+            Mnem::Op(Op::Sout) => {
+                let rs2 = e.operand(i.srcs[0], 0).0;
+                e.push(encode_sout(rs2, i.swz[0] as u16, 0));
+            }
+            Mnem::Op(Op::Fattr) => e.push(encode_fattr(rd, i.swz[0] as u16)),
+            _ => {
+                if !e.fold_pos_w(i, rd) {
+                    e.instr(i, rd);
+                }
+            }
         }
     }
-    let n_body = words.len();
-    Encoded { words, n_preload, n_body, pending }
+    let n_body = e.words.len();
+    Encoded { words: e.words, n_preload, n_body, pending: e.pending }
 }
 
 /// LABEL word addresses, and the BRNZ whose target lies in another 1024-word page: those become
