@@ -100,7 +100,13 @@ impl ShaderState {
                 return (self.konst(bits), 0);
             }
         }
-        resolve_vm(&self.sel.vec_map, d, c)
+        let (v, c) = resolve_vm(&self.sel.vec_map, d, c);
+        if !self.sel.vec_map.contains_key(&v) && !self.sel.loc.contains_key(&v) {
+            if let Some(&bits) = self.consts.get(&v) {
+                return (self.konst(bits), 0);
+            }
+        }
+        (v, c)
     }
 
     fn known(&self, d: u32, c: u8) -> Option<u32> {
