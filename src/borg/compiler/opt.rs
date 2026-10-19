@@ -73,6 +73,14 @@ fn schedule_run(run: Vec<BorgInstr>, out_roots: &HashSet<u32>) -> Vec<BorgInstr>
     }
 
     let defined_here: HashSet<u32> = run.iter().map(|i| i.dst).collect();
+    // The order below follows def-use edges, so a value redefined or read before its definition
+    // here (a NIR register, a loop counter) keeps the run as it is.
+    let mut seen = HashSet::new();
+    for i in &run {
+        if i.srcs.iter().any(|s| defined_here.contains(s) && !seen.contains(s)) || !seen.insert(i.dst) {
+            return run;
+        }
+    }
 
     let mut remaining_uses: HashMap<u32, i32> = HashMap::new();
     for instr in &run {
