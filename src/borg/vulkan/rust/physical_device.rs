@@ -406,8 +406,7 @@ fn find_borg_drm_device() -> i32 {
 
 /// # Safety
 /// `instance` is a borgvk instance.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_enumerate_devices(instance: *mut vk_instance) -> VkResult {
+pub unsafe extern "C" fn enumerate_devices(instance: *mut vk_instance) -> VkResult {
     let fd = find_borg_drm_device();
     if fd >= 0 {
         log(MESA_LOG_INFO, format!("borgvk: found borg DRM device (fd {fd})"));
@@ -419,8 +418,7 @@ pub unsafe extern "C" fn borgvk_enumerate_devices(instance: *mut vk_instance) ->
 
 /// # Safety
 /// `pdev` is a borgvk physical device.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_destroy_physical_device(pdev: *mut vk_physical_device) {
+pub unsafe extern "C" fn destroy_physical_device(pdev: *mut vk_physical_device) {
     let d = pdev.cast::<borgvk_physical_device>();
     unsafe {
         borgvk_wsi_finish(d);

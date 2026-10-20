@@ -14,7 +14,6 @@ borgvk_entrypoints = custom_target(
 )
 
 libborgvk_files = files(
-  'borgvk_device.c',
   'borgvk_private.h',
 )
 
@@ -131,7 +130,9 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-var', 'VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT',
     '--allowlist-function', 'vk_physical_device_(init|finish|dispatch_table_from_entrypoints)|drm(Get|Free)Version|open|close',
     '--allowlist-type', 'borgvk_instance|vk_properties|vk_features|vk_device_extension_table|VkQueueFamilyProperties2|VkPhysicalDeviceMemoryProperties2|VkQueueFlagBits|VkMemoryHeapFlagBits|VkMemoryPropertyFlagBits|VkDriverId|VkPhysicalDeviceType',
-    '--allowlist-var', '(borgvk|wsi)_physical_device_entrypoints|O_RDWR|O_CLOEXEC',
+    '--allowlist-var', '(borgvk|wsi)_(instance|physical_device|device)_entrypoints|O_RDWR|O_CLOEXEC',
+    '--allowlist-function', 'vk_(instance|device)_(init|finish|dispatch_table_from_entrypoints)|vk_instance_get_proc_addr|vk_enumerate_instance_extension_properties|vk_default_allocator|vk_(alloc|zalloc2|free2)|vk_queue_(init|finish)|vk_device_enable_threaded_submit',
+    '--allowlist-type', 'vk_instance_extension_table|vk_device_entrypoint_table|VkPhysicalDevice(ProtectedMemory|ShaderDrawParameters|Vulkan11)Features|VkLayerProperties|VkExtensionProperties',
     '--allowlist-type', 'borgvk_target|VkRenderingInfo|VkRenderingAttachmentInfo|VkImageResolve|VkRenderingEndInfoEXT',
     '--allowlist-type', 'borgvk_command_buffer|vk_command_buffer_ops|vk_command_pool|VkCommandBufferBeginInfo|borg_blend|VkComputePipelineCreateInfo|VkPipelineRenderingCreateInfo|VkPipelineCache',
     '--allowlist-type', 'borgvk_descriptor_pool|borgvk_descriptor_set|VkDescriptorSetLayoutCreateInfo|VkDescriptorSetLayoutSupport|VkDescriptorPoolCreateInfo',
@@ -174,6 +175,12 @@ _libborgvk_bindings_rs = static_library(
   dependencies : with_borgc ? [idep_compiler_rs] : [],
 )
 borgvk_rs_args = rust_global_args
+if with_platform_x11
+  borgvk_rs_args += ['--cfg', 'vk_x11']
+endif
+if with_platform_wayland
+  borgvk_rs_args += ['--cfg', 'vk_wayland']
+endif
 borgvk_rs_link = [_libborgvk_bindings_rs, libborg_layout]
 borgvk_rs_deps = []
 if with_borgc

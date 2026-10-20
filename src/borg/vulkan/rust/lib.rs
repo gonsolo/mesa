@@ -14,6 +14,7 @@ mod copy;
 mod corpus;
 mod cube;
 mod descriptor_set;
+mod device;
 mod dispatch;
 mod draw;
 mod drm;
