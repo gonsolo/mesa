@@ -115,6 +115,12 @@ struct borgvk_device {
 #define BORGVK_MAX_WRITEBACKS 16
 #define BORGVK_SSBO_SLOT_BYTES 65536u
 
+/* A buffer range the GPU may write, copied back to host memory after the pass. */
+struct borgvk_writeback {
+   uint32_t off, size;
+   uint8_t *host;
+};
+
 struct borgvk_command_buffer {
    struct vk_command_buffer vk;
 
@@ -149,7 +155,7 @@ struct borgvk_command_buffer {
    bool batch_serve;
    VkExtent2D batch_area;   /* the pass size when it has no attachment */
    struct vk_image_view *batch_depth, *batch_stencil;
-   struct borgvk_writeback { uint32_t off, size; uint8_t *host; } wb[BORGVK_MAX_WRITEBACKS];
+   struct borgvk_writeback wb[BORGVK_MAX_WRITEBACKS];
    uint32_t nwb;
    bool batch_srgb;
    const void *batch_pool, *batch_vpool;
@@ -188,11 +194,6 @@ uint64_t borgvk_corpus_hash(uint64_t h, const void *p, size_t n);
 uint64_t borgvk_corpus_image(uint64_t h, const struct borgvk_image *img);
 void borgvk_corpus_log(char kind, uint64_t key, uint64_t content);
 struct borgvk_writeback;
-VkResult borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_image *color,
-                             struct borgvk_image *const *extra, uint32_t nextra,
-                             const struct vk_image_view *depth_view,
-                             const struct vk_image_view *stencil_view,
-                             const struct borgvk_writeback *wb, uint32_t nwb, VkExtent2D area);
 
 /* 0xB4: STENCIL_CFG, STENCIL_FRONT, STENCIL_BACK, DEPTH_CFG, CULL_CFG. */
 #define BORGVK_TEXG_CHUNK 256

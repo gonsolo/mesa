@@ -8,6 +8,13 @@
 #include "vk_format.h"
 #include "borgc_flags.h"
 
+#include "software/borg/borg_core.h"
+#include "software/borg/borg_hw.h"
+#include "software/borg/borg_layout.h"
+
 #include <fcntl.h>
+#include <signal.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <termios.h>

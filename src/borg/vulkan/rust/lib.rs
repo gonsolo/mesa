@@ -8,5 +8,6 @@ mod ffi {
 mod format;
 mod image;
 mod serial;
+mod sim;
 mod transport;
 mod util;
