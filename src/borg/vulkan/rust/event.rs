@@ -3,8 +3,10 @@
 
 //! VkEvent: a flag the host and command buffers set and reset.
 
+use crate::device::Device;
 use crate::entrypoint::{entrypoint, handle, vk_error, Handle};
 use crate::ffi::*;
+use crate::object::{allocate, Zeroed};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[repr(C)]
@@ -21,74 +23,75 @@ impl Event {
     }
 }
 
-/// Commands set events when they are recorded.
-fn record(event: VkEvent, set: bool) {
-    if let Some(e) = unsafe { event.get() } {
-        e.store(set);
-    }
-}
+// The runtime's object base, which it zero-allocates, and an atomic.
+unsafe impl Zeroed for Event {}
 
 entrypoint! {
-    unsafe fn borgvk_CreateEvent(device: VkDevice, _info: *const VkEventCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkEvent) -> Result<(), VkError> {
-        let dev = device.get().unwrap();
-        let e = vk_object_zalloc(&mut dev.vk, alloc, size_of::<Event>(), VK_OBJECT_TYPE_EVENT);
-        if e.is_null() {
-            return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
-        }
-        *out = VkEvent::from_object(e.cast());
+    fn borgvk_CreateEvent(device: &Device, _info: *const VkEventCreateInfo, alloc: *const VkAllocationCallbacks, out: &mut VkEvent) -> Result<(), VkError> {
+        let e = unsafe { allocate::<Event>(|n| vk_object_zalloc(device.vk_ptr(), alloc, n, VK_OBJECT_TYPE_EVENT)) };
+        *out = VkEvent::from_object(e.ok_or_else(|| vk_error!(device, VK_ERROR_OUT_OF_HOST_MEMORY))?);
         Ok(())
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_DestroyEvent(device: VkDevice, event: VkEvent, alloc: *const VkAllocationCallbacks) {
-        if let Some(e) = event.get() {
-            vk_object_free(&mut device.get().unwrap().vk, alloc, (e as *mut Event).cast());
+    fn borgvk_DestroyEvent(device: &Device, event: Option<&mut Event>, alloc: *const VkAllocationCallbacks) {
+        if let Some(e) = event {
+            unsafe { vk_object_free(device.vk_ptr(), alloc, std::ptr::from_mut(e).cast()) };
         }
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_GetEventStatus(_device: VkDevice, event: VkEvent) -> VkResult {
-        if event.get().unwrap().set.load(Ordering::Relaxed) != 0 { VK_EVENT_SET } else { VK_EVENT_RESET }
+    fn borgvk_GetEventStatus(_device: VkDevice, event: &Event) -> VkResult {
+        if event.set.load(Ordering::Relaxed) != 0 { VK_EVENT_SET } else { VK_EVENT_RESET }
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_SetEvent(_device: VkDevice, event: VkEvent) -> Result<(), VkError> {
-        event.get().unwrap().store(true);
+    fn borgvk_SetEvent(_device: VkDevice, event: &Event) -> Result<(), VkError> {
+        event.store(true);
         Ok(())
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_ResetEvent(_device: VkDevice, event: VkEvent) -> Result<(), VkError> {
-        event.get().unwrap().store(false);
+    fn borgvk_ResetEvent(_device: VkDevice, event: &Event) -> Result<(), VkError> {
+        event.store(false);
         Ok(())
     }
 }
 
+// Commands set events when they are recorded.
 entrypoint! {
-    unsafe fn borgvk_CmdSetEvent(_cmd: VkCommandBuffer, event: VkEvent, _stages: VkPipelineStageFlags) {
-        record(event, true);
+    fn borgvk_CmdSetEvent(_cmd: VkCommandBuffer, event: Option<&Event>, _stages: VkPipelineStageFlags) {
+        if let Some(e) = event {
+            e.store(true);
+        }
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_CmdResetEvent(_cmd: VkCommandBuffer, event: VkEvent, _stages: VkPipelineStageFlags) {
-        record(event, false);
+    fn borgvk_CmdResetEvent(_cmd: VkCommandBuffer, event: Option<&Event>, _stages: VkPipelineStageFlags) {
+        if let Some(e) = event {
+            e.store(false);
+        }
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_CmdSetEvent2(_cmd: VkCommandBuffer, event: VkEvent, _dep: *const VkDependencyInfo) {
-        record(event, true);
+    fn borgvk_CmdSetEvent2(_cmd: VkCommandBuffer, event: Option<&Event>, _dep: *const VkDependencyInfo) {
+        if let Some(e) = event {
+            e.store(true);
+        }
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_CmdResetEvent2(_cmd: VkCommandBuffer, event: VkEvent, _stages: VkPipelineStageFlags2) {
-        record(event, false);
+    fn borgvk_CmdResetEvent2(_cmd: VkCommandBuffer, event: Option<&Event>, _stages: VkPipelineStageFlags2) {
+        if let Some(e) = event {
+            e.store(false);
+        }
     }
 }
 

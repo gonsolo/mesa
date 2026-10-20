@@ -3,8 +3,10 @@
 
 //! VkQueryPool: no queries are counted yet, every result reads as zero.
 
+use crate::device::Device;
 use crate::entrypoint::{entrypoint, handle, vk_error, Handle};
 use crate::ffi::*;
+use crate::object::{allocate, Zeroed};
 use std::ffi::c_void;
 
 #[repr(C)]
@@ -14,30 +16,29 @@ pub struct QueryPool {
 
 handle!(VkQueryPool, QueryPool, VK_OBJECT_TYPE_QUERY_POOL);
 
+// The runtime's object base, which it zero-allocates.
+unsafe impl Zeroed for QueryPool {}
+
 entrypoint! {
-    unsafe fn borgvk_CreateQueryPool(device: VkDevice, _info: *const VkQueryPoolCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkQueryPool) -> Result<(), VkError> {
-        let dev = device.get().unwrap();
-        let p = vk_object_zalloc(&mut dev.vk, alloc, size_of::<QueryPool>(), VK_OBJECT_TYPE_QUERY_POOL);
-        if p.is_null() {
-            return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
-        }
-        *out = VkQueryPool::from_object(p.cast());
+    fn borgvk_CreateQueryPool(device: &Device, _info: *const VkQueryPoolCreateInfo, alloc: *const VkAllocationCallbacks, out: &mut VkQueryPool) -> Result<(), VkError> {
+        let p = unsafe { allocate::<QueryPool>(|n| vk_object_zalloc(device.vk_ptr(), alloc, n, VK_OBJECT_TYPE_QUERY_POOL)) };
+        *out = VkQueryPool::from_object(p.ok_or_else(|| vk_error!(device, VK_ERROR_OUT_OF_HOST_MEMORY))?);
         Ok(())
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_DestroyQueryPool(device: VkDevice, pool: VkQueryPool, alloc: *const VkAllocationCallbacks) {
-        if let Some(p) = pool.get() {
-            vk_object_free(&mut device.get().unwrap().vk, alloc, (p as *mut QueryPool).cast());
+    fn borgvk_DestroyQueryPool(device: &Device, pool: Option<&mut QueryPool>, alloc: *const VkAllocationCallbacks) {
+        if let Some(p) = pool {
+            unsafe { vk_object_free(device.vk_ptr(), alloc, std::ptr::from_mut(p).cast()) };
         }
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_GetQueryPoolResults(_device: VkDevice, _pool: VkQueryPool, _first: u32, _count: u32, size: usize, data: *mut c_void, _stride: VkDeviceSize, _flags: VkQueryResultFlags) -> VkResult {
+    fn borgvk_GetQueryPoolResults(_device: VkDevice, _pool: VkQueryPool, _first: u32, _count: u32, size: usize, data: *mut c_void, _stride: VkDeviceSize, _flags: VkQueryResultFlags) -> VkResult {
         if !data.is_null() && size != 0 {
-            data.cast::<u8>().write_bytes(0, size);
+            unsafe { data.cast::<u8>().write_bytes(0, size) };
         }
         VK_SUCCESS
     }
