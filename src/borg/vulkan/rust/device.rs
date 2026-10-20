@@ -94,7 +94,7 @@ static INSTANCE_EXTENSIONS: LazyLock<vk_instance_extension_table> = LazyLock::ne
 });
 
 entrypoint! {
-    unsafe fn borgvk_EnumerateInstanceVersion(version: *mut u32) -> VkResult {
+    fn borgvk_EnumerateInstanceVersion(version: &mut u32) -> VkResult {
         *version = API_VERSION;
         VK_SUCCESS
     }
@@ -110,7 +110,7 @@ entrypoint! {
 }
 
 entrypoint! {
-    unsafe fn borgvk_EnumerateInstanceLayerProperties(count: *mut u32, props: *mut VkLayerProperties) -> VkResult {
+    fn borgvk_EnumerateInstanceLayerProperties(count: &mut u32, props: *mut VkLayerProperties) -> VkResult {
         if props.is_null() {
             *count = 0;
             return VK_SUCCESS;
@@ -150,10 +150,12 @@ entrypoint! {
 }
 
 entrypoint! {
-    unsafe fn borgvk_DestroyInstance(instance: VkInstance, _alloc: *const VkAllocationCallbacks) {
-        let Some(i) = instance.get() else { return };
-        vk_instance_finish(&mut i.vk);
-        vk_free(&i.vk.alloc, instance.ptr().cast());
+    fn borgvk_DestroyInstance(instance: Option<&mut Instance>, _alloc: *const VkAllocationCallbacks) {
+        let Some(i) = instance else { return };
+        unsafe {
+            vk_instance_finish(&mut i.vk);
+            vk_free(&i.vk.alloc, std::ptr::from_mut(i).cast());
+        }
     }
 }
 
@@ -237,11 +239,13 @@ entrypoint! {
 }
 
 entrypoint! {
-    unsafe fn borgvk_DestroyDevice(device: VkDevice, alloc: *const VkAllocationCallbacks) {
-        let Some(d) = device.get() else { return };
-        vk_queue_finish(&mut d.queue);
-        vk_device_finish(&mut d.vk);
-        vk_free2(&d.vk.alloc, alloc, device.ptr().cast());
+    fn borgvk_DestroyDevice(device: Option<&mut Device>, alloc: *const VkAllocationCallbacks) {
+        let Some(d) = device else { return };
+        unsafe {
+            vk_queue_finish(&mut d.queue);
+            vk_device_finish(&mut d.vk);
+            vk_free2(&d.vk.alloc, alloc, std::ptr::from_mut(d).cast());
+        }
     }
 }
 
