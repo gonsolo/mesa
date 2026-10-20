@@ -587,4 +587,81 @@ mod tests {
         let ops = 7 | 1 << 3 | 2 << 6 | 3 << 9;
         assert_eq!(state_pack(&ci), [1 | ops << 1 | ops << 13, 0xFF | 0xAB << 8 | 0xCD << 16, 0xFF | 0xAB << 8 | 0xCD << 16, 3, 1 | 1 << 2 | 1 << 31 | 0xF << 8]);
     }
+
+    fn push(offset: u32, size: u32, values: *const u32) -> Vec<u8> {
+        captured(|| unsafe { borgvk_serial_send_push_constants(offset, size, values.cast()) })
+    }
+
+    #[test]
+    fn push_constants() {
+        let words = [0xB2B20000u32, 0xB2B20001, 0xB2B20002, 0xB2B20003];
+        let p = push(8 * 4, 16, words.as_ptr());
+        assert_eq!(p.len(), 132);
+        assert_eq!(p[..3], [0xB2, 8, 4]); // 0xB1 is the serial-reload trigger
+        for (i, &w) in words.iter().enumerate() {
+            assert_eq!(u32_at(&p, 3 + 4 * i), w);
+        }
+        assert!(p[3 + 16..131].iter().all(|&b| b == 0));
+        assert_eq!(p[1..].iter().fold(0, |c, b| c ^ b), 0, "checksum");
+
+        let full: Vec<u32> = (0..32).map(|i| 0xA5A50000 + i).collect();
+        let p = push(0, 128, full.as_ptr());
+        assert_eq!((p.len(), p[1], p[2]), (132, 0, 32));
+
+        let v = [1u32, 2];
+        for (offset, size) in [(2, 8), (0, 6), (0, 33 * 4), (32 * 4, 4), (0, 0)] {
+            assert!(push(offset, size, v.as_ptr()).is_empty(), "{offset} {size}");
+        }
+        assert!(push(0, 4, std::ptr::null()).is_empty());
+    }
+
+    #[test]
+    fn geometry() {
+        let verts = [-1.0f32, 0.5, 0.1, 1.0, -0.25, 3.0];
+        let (idx, uv) = ([0u8, 1, 1], [0.0f32, 1.0, 0.75, 0.5, 0.1, 0.9]);
+        let p = sent(|| unsafe { borgvk_serial_send_geom(verts.as_ptr(), 2, idx.as_ptr(), uv.as_ptr(), 1) });
+        assert_eq!(p.len(), GEOM_PKT_LEN);
+        assert_eq!(p[..3], [0xAE, 2, 1]);
+        let (vb, ib) = (3, 3 + GEOM_MAX_VERTS * 12);
+        let ub = ib + GEOM_MAX_TRIS * 3;
+        assert_eq!([u32_at(&p, vb), u32_at(&p, vb + 4), u32_at(&p, vb + 8), u32_at(&p, vb + 20)], [0xBF800000, 0x3F000000, 0x3DCCCCCD, 0x40400000]);
+        assert_eq!(p[ib..ib + 3], [0, 1, 1]);
+        assert_eq!([u32_at(&p, ub + 8), u32_at(&p, ub + 12)], [0x3F400000, 0x3F000000]);
+        assert!(p[vb + 24..ib].iter().chain(&p[ub + 24..GEOM_PKT_LEN - 1]).all(|&b| b == 0));
+    }
+
+    #[test]
+    fn texture_row() {
+        let rgba: Vec<u8> = (0..TEX_DIM * 4).map(|i| (i * 7) as u8).collect();
+        let sampler = [0x000A0493u32, 0x3F800000, 0, 0x447A0000];
+        let p = sent(|| unsafe { borgvk_serial_send_tex_row(5, rgba.as_ptr(), sampler.as_ptr()) });
+        assert_eq!(p.len(), 1 + 1 + 16 + TEX_DIM * 4 + 1);
+        assert_eq!(p[..2], [0xAF, 5]);
+        assert_eq!((0..4).map(|w| u32_at(&p, 2 + 4 * w)).collect::<Vec<_>>(), sampler);
+        assert_eq!(p[18..18 + TEX_DIM * 4], rgba[..]);
+    }
+
+    #[test]
+    fn fixed_packets() {
+        let p = sent(|| send_blend(0x11223344, 0x55667788));
+        assert_eq!((p.len(), u32_at(&p, 1), u32_at(&p, 5)), (10, 0x11223344, 0x55667788));
+        let p = sent(|| send_state(&[1, 2, 3, 4, 0xdeadbeef]));
+        assert_eq!((p.len(), u32_at(&p, 17)), (22, 0xdeadbeef));
+        let p = sent(|| send_target(2, &[0.0, 0.5, 1.0, 0.25]));
+        assert_eq!((p.len(), p[1]), (19, 2));
+        let p = sent(|| send_mem(0x1000, &[1, 2, 3, 4, 5, 6, 7, 8]));
+        assert_eq!(p.len(), 1 + 4 + 2 + 256 + 1);
+        assert_eq!((p[0], u32_at(&p, 1), p[5], p[6], p[7], p[14]), (0xB8, 0x1000, 8, 0, 1, 8));
+        let p = sent(|| send_vattr(3, 41, 0x100, 12, 16, 0x40000000));
+        assert_eq!((p.len(), p[0], p[1], p[2]), (20, 0xB9, 3, 41));
+        assert_eq!([u32_at(&p, 3), u32_at(&p, 7), u32_at(&p, 11), u32_at(&p, 15)], [0x100, 12, 16, 0x40000000]);
+        let p = sent(|| borgvk_serial_send_draw(1, 2, 1, 30, 4, 5, 6, -7, 0x200, 0x300));
+        assert_eq!((p.len(), p[0], p[1], p[2], p[3]), (33, 0xBA, 1, 2, 1));
+        assert_eq!((4..11).map(|i| u32_at(&p, 4 * i - 12)).collect::<Vec<_>>(), [30, 4, 5, 6, -7i32 as u32, 0x200, 0x300]);
+        let p = sent(|| send_att(3, &[5, 6, 7]));
+        assert_eq!((p.len(), p[0], p[1], p[4]), (6, 0xBF, 3, 7));
+        let p = sent(|| send_pass(4, 9));
+        assert_eq!(p[..3], [0xBB, 4, 9]);
+        assert_eq!(p.len(), 4);
+    }
 }

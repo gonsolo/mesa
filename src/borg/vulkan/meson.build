@@ -227,26 +227,6 @@ test(
   suite : ['borg'],
 )
 
-# The wire packet test links the Rust library itself: libvulkan_borg exports only the ICD entrypoints.
-# Without the driver's C files, unused Rust code that calls them goes with --gc-sections.
-borgvk_serial_test = executable(
-  'borgvk_serial_test',
-  ['borgvk_serial_test.c', borgvk_rust_h],
-  include_directories : [
-    inc_include, inc_src, inc_util,
-    include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h
-  ],
-  link_with : [libborgvk_rs],
-  dependencies : borgvk_deps,
-  link_args : ld_args_gc_sections,
-)
-
-test(
-  'borgvk wire packets',
-  borgvk_serial_test,
-  suite : ['borg'],
-)
-
 # Generates a replayable wire burst for the simulator's push-constant
 # end-to-end test, with the driver's own senders rather than a reimplementation.
 borgvk_burst_gen = executable(
