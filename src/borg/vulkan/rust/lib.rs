@@ -9,5 +9,6 @@ mod format;
 mod image;
 mod serial;
 mod sim;
+mod sim_process;
 mod transport;
 mod util;

@@ -455,7 +455,7 @@ fn copy_out(s: &Server, l: &Layout, rows: Range<u32>, t: &Targets, b: &Before) -
 }
 
 /// C's atoi: leading blanks, a sign, then digits; 0 without any.
-fn atoi(s: &str) -> i64 {
+pub(crate) fn atoi(s: &str) -> i64 {
     let s = s.trim_start();
     let (neg, digits) = match s.strip_prefix('-') {
         Some(r) => (true, r),
