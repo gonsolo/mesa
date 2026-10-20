@@ -7,6 +7,7 @@
 use crate::entrypoint::{chain, entrypoint, handle, slice, vk_error, Handle};
 use crate::drm::{gem_close, ioctl, GEM_CREATE, GEM_MMAP};
 use crate::ffi::*;
+use crate::device::Device;
 use crate::util::mmap;
 use std::ffi::c_void;
 use std::ptr::null_mut;
@@ -16,7 +17,7 @@ handle!(VkBuffer, borgvk_buffer, VK_OBJECT_TYPE_BUFFER);
 handle!(VkBufferView, borgvk_buffer_view, VK_OBJECT_TYPE_BUFFER_VIEW);
 
 /// Backing for `size` bytes and its GEM handle, 0 for malloc'd memory.
-fn back(dev: &borgvk_device, size: usize) -> Result<(*mut c_void, u32), VkResult> {
+fn back(dev: &Device, size: usize) -> Result<(*mut c_void, u32), VkResult> {
     let fd = dev.drm_fd;
     if fd < 0 {
         let map = unsafe { malloc(size as _) };

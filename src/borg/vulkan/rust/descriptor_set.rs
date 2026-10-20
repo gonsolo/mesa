@@ -6,6 +6,7 @@
 
 use crate::entrypoint::{entrypoint, handle, slice, vk_error, Handle};
 use crate::ffi::*;
+use crate::device::Device;
 use crate::object::{allocate, Zeroed};
 use std::ptr::null;
 
@@ -145,7 +146,7 @@ entrypoint! {
 }
 
 /// Unlinks a set from its pool and frees it.
-unsafe fn free_set(dev: &mut borgvk_device, set: *mut DescriptorSet) {
+unsafe fn free_set(dev: &mut Device, set: *mut DescriptorSet) {
     unsafe {
         list_del(&mut (*set).link);
         (*(*set).pool).num_sets = (*(*set).pool).num_sets.wrapping_sub(1);
@@ -153,7 +154,7 @@ unsafe fn free_set(dev: &mut borgvk_device, set: *mut DescriptorSet) {
     }
 }
 
-fn free_pool_sets(dev: &mut borgvk_device, pool: &mut DescriptorPool) {
+fn free_pool_sets(dev: &mut Device, pool: &mut DescriptorPool) {
     let head: *mut list_head = &mut pool.sets;
     let mut p = pool.sets.next;
     while p != head {

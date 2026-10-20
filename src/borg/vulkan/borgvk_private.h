@@ -28,23 +28,7 @@ extern "C" {
 
 #define BORGVK_USE_WSI_PLATFORM   /* Mesa's headless WSI backend needs no platform */
 
-struct borgvk_instance {
-   struct vk_instance vk;
-};
 
-struct borgvk_physical_device {
-   struct vk_physical_device vk;
-
-   VkPhysicalDeviceMemoryProperties memory;
-
-   const struct vk_sync_type *sync_types[2];
-
-   int drm_fd;
-
-#ifdef BORGVK_USE_WSI_PLATFORM
-   struct wsi_device wsi_device;
-#endif
-};
 
 #define BORGVK_SHADER_BLOB_MAX 4096
 enum borgvk_shader_stage {
@@ -70,35 +54,6 @@ struct borgvk_vp {
    uint32_t sc[4];          /* scissor x0, y0, x1, y1 */
 };
 
-struct borgvk_device {
-   struct vk_device vk;
-
-   struct vk_device_dispatch_table cmd_dispatch;
-
-   struct vk_queue queue;
-
-   /* Non-owning copy of physical_device->drm_fd.  -1 → malloc+serial fallback. */
-   int drm_fd;
-
-   const struct borg_blend *blend_lower;
-   struct borgvk_shader_blob shader_blob[BORGVK_SHADER_STAGE_COUNT];
-   VkPipelineLayout compile_layout;
-   uint32_t stage_ubo[2];
-   bool stage_push[2];
-   bool stage_pwin[2];   /* the stage reads push constants from the heap window */
-   bool stage_spill[2];  /* the stage spills to the region's scratch slot */
-   int frag_tex_binding;
-   uint32_t frag_select;   /* 1 + the colour output the fragment shader keeps; 0 keeps all */
-   bool frag_reads_pntc;
-   uint32_t blend_cfg;
-   uint32_t blend_const;
-   uint32_t state_reg[5];
-   struct borgvk_vp vp;      /* the viewport and scissor of the draw being queued */
-   bool     state_valid;
-   /* Push constants set by vkCmdPushConstants, replayed at submit (DRM path). */
-   uint32_t push_words[32];
-   uint32_t push_lo, push_hi;   /* word range written so far; empty when lo >= hi */
-};
 
 #define BORGVK_MAX_COLOR_ATTACHMENTS 8
 
@@ -136,12 +91,6 @@ struct borgvk_writeback;
 #define BORGVK_LINE_SLOT  16
 #define BORGVK_LINE_OTHER 24
 
-VK_DEFINE_HANDLE_CASTS(borgvk_instance, vk.base, VkInstance,
-                       VK_OBJECT_TYPE_INSTANCE)
-VK_DEFINE_HANDLE_CASTS(borgvk_physical_device, vk.base, VkPhysicalDevice,
-                       VK_OBJECT_TYPE_PHYSICAL_DEVICE)
-VK_DEFINE_HANDLE_CASTS(borgvk_device, vk.base, VkDevice,
-                       VK_OBJECT_TYPE_DEVICE)
 
 struct borgvk_device_memory {
    struct vk_device_memory vk;

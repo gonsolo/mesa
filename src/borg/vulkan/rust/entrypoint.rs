@@ -60,7 +60,6 @@ macro_rules! handle {
 }
 pub(crate) use handle;
 
-handle!(VkDevice, borgvk_device, VK_OBJECT_TYPE_DEVICE);
 
 /// An entry point the dispatch table calls by name, its body in an unsafe block. A body of
 /// `Result<(), VkError>` returns `VK_SUCCESS` or the error, so `?` works.

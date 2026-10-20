@@ -7,6 +7,7 @@
 use crate::entrypoint::{entrypoint, handle, Handle};
 use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
+use crate::device::Device;
 use crate::pipeline::Pipeline;
 use crate::object::{allocate, Zeroed};
 use crate::render::Target;
@@ -155,7 +156,7 @@ entrypoint! {
     fn borgvk_CmdPushConstants(command_buffer: VkCommandBuffer, _layout: VkPipelineLayout, _stages: VkShaderStageFlags, offset: u32, size: u32, values: *const c_void) {
         let c = cmd(command_buffer.ptr());
         put(&mut c.pc, offset, size, values);
-        let dev = &mut *c.vk.base.device.cast::<borgvk_device>();
+        let dev = &mut *c.vk.base.device.cast::<Device>();
         if size == 0 || !put(&mut dev.push_words, offset, size, values) {
             return;
         }

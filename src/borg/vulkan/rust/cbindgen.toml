@@ -10,10 +10,8 @@ style = "tag"
 # Types bindgen took from C keep their C names.
 [export.rename]
 "tex_conv" = "struct tex_conv"
-"borgvk_device" = "struct borgvk_device"
 "borgvk_device_memory" = "struct borgvk_device_memory"
 "borgvk_sampler" = "struct borgvk_sampler"
-"borgvk_physical_device" = "struct borgvk_physical_device"
 "vk_sync_type" = "struct vk_sync_type"
 "vk_queue" = "struct vk_queue"
 "vk_queue_submit" = "struct vk_queue_submit"

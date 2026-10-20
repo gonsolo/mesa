@@ -5,6 +5,7 @@
 
 use crate::descriptor_set::DescriptorSetLayout;
 use crate::ffi::*;
+use crate::device::Device;
 #[cfg(not(borgc))]
 use crate::pipeline::Pipeline;
 #[cfg(borgc)]
@@ -21,7 +22,7 @@ pub fn num_varyings(b: &[u8]) -> u32 {
 
 /// The pipeline layout being compiled for, from its handle.
 #[cfg(borgc)]
-pub fn compile_layout(dev: &borgvk_device) -> Option<&vk_pipeline_layout> {
+pub fn compile_layout(dev: &Device) -> Option<&vk_pipeline_layout> {
     unsafe { (dev.compile_layout as *const vk_pipeline_layout).as_ref() }
 }
 
@@ -39,7 +40,7 @@ pub fn set_map(pl: &vk_pipeline_layout, s: usize) -> Option<&borgvk_desc_map> {
 
 /// The first flat descriptor slot of each of the first four sets.
 #[cfg(borgc)]
-pub fn set_base(dev: &borgvk_device) -> [u8; 4] {
+pub fn set_base(dev: &Device) -> [u8; 4] {
     let mut base = [0u8; 4];
     let Some(pl) = compile_layout(dev) else {
         return base;
@@ -56,14 +57,14 @@ pub fn set_base(dev: &borgvk_device) -> [u8; 4] {
 
 /// Without the compiler the shaders come from the cache, which numbers slots per set.
 #[cfg(not(borgc))]
-pub fn set_base(_dev: &borgvk_device) -> [u8; 4] {
+pub fn set_base(_dev: &Device) -> [u8; 4] {
     [0; 4]
 }
 
 /// # Safety
 /// `device` and `stage_info` are valid.
 #[cfg(not(borgc))]
-pub unsafe fn borgvk_compile_stage(device: *mut borgvk_device, vfetch: u32, stage_info: *const VkPipelineShaderStageCreateInfo) {
+pub unsafe fn borgvk_compile_stage(device: *mut Device, vfetch: u32, stage_info: *const VkPipelineShaderStageCreateInfo) {
     let (dev, si) = unsafe { (&mut *device, &*stage_info) };
     let slot = match si.stage {
         VK_SHADER_STAGE_VERTEX_BIT => BORGVK_STAGE_VERT,
@@ -84,7 +85,7 @@ pub unsafe fn borgvk_compile_stage(device: *mut borgvk_device, vfetch: u32, stag
 /// `pipeline` is valid.
 #[cfg(not(borgc))]
 pub unsafe fn borgvk_compile_compute_stage(
-    _device: *mut borgvk_device,
+    _device: *mut Device,
     _stage_info: *const VkPipelineShaderStageCreateInfo,
     pipeline: *mut Pipeline,
 ) {
@@ -94,7 +95,7 @@ pub unsafe fn borgvk_compile_compute_stage(
 /// # Safety
 /// `device` is valid.
 #[cfg(not(borgc))]
-pub unsafe fn borgvk_compile_empty_frag(device: *mut borgvk_device, _opt: u32) {
+pub unsafe fn borgvk_compile_empty_frag(device: *mut Device, _opt: u32) {
     unsafe { (*device).shader_blob[BORGVK_STAGE_FRAG as usize].len = 0 };
 }
 

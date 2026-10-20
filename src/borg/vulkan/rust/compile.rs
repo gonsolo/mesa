@@ -5,6 +5,7 @@
 
 use crate::compiler::set_base;
 use crate::ffi::*;
+use crate::device::Device;
 use crate::pipeline::Pipeline;
 use crate::nir_info::*;
 use crate::nir_passes::{lower_lines, remap_array_bindings};
@@ -17,7 +18,7 @@ const VERT: usize = BORGVK_STAGE_VERT as usize;
 const FRAG: usize = BORGVK_STAGE_FRAG as usize;
 const BLOB_MAX: u32 = BORGVK_SHADER_BLOB_MAX;
 
-fn to_nir(dev: &mut borgvk_device, si: &VkPipelineShaderStageCreateInfo) -> Result<*mut nir_shader, VkResult> {
+fn to_nir(dev: &mut Device, si: &VkPipelineShaderStageCreateInfo) -> Result<*mut nir_shader, VkResult> {
     let mut nir = null_mut();
     let r = unsafe {
         vk_pipeline_shader_stage_to_nir(&mut dev.vk, 0, si, &borg_spirv_options, &borg_nir_options, null_mut(), &mut nir)
@@ -30,7 +31,7 @@ fn empty_info() -> BorgcInfo {
 }
 
 /// A pipeline without a fragment stage (depth only): a shader that writes nothing.
-fn empty_frag(dev: &mut borgvk_device, opt: u32) {
+fn empty_frag(dev: &mut Device, opt: u32) {
     let b = &mut dev.shader_blob[FRAG];
     let nb = unsafe { nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, &borg_nir_options, c"borgvk_empty_fs".as_ptr()) };
     let mut len = 0;
@@ -50,7 +51,7 @@ fn empty_frag(dev: &mut borgvk_device, opt: u32) {
 }
 
 /// The blob from the shader cache, which knows neither the blend state nor a constant pool.
-fn from_cache(dev: &mut borgvk_device, si: &VkPipelineShaderStageCreateInfo, vfetch: u32, slot: usize) -> bool {
+fn from_cache(dev: &mut Device, si: &VkPipelineShaderStageCreateInfo, vfetch: u32, slot: usize) -> bool {
     let Some(pntc) = shader_cache::get(si, vfetch, &mut dev.shader_blob[slot]) else {
         return false;
     };
@@ -68,7 +69,7 @@ fn from_cache(dev: &mut borgvk_device, si: &VkPipelineShaderStageCreateInfo, vfe
     true
 }
 
-fn compile_stage(dev: &mut borgvk_device, vfetch: u32, si: &VkPipelineShaderStageCreateInfo) {
+fn compile_stage(dev: &mut Device, vfetch: u32, si: &VkPipelineShaderStageCreateInfo) {
     let (vs, fs) = (si.stage == VK_SHADER_STAGE_VERTEX_BIT, si.stage == VK_SHADER_STAGE_FRAGMENT_BIT);
     let slot = if vs { Some(VERT) } else if fs { Some(FRAG) } else { None };
     let blend = if fs { dev.blend_lower } else { null() };
@@ -115,7 +116,7 @@ fn compile_stage(dev: &mut borgvk_device, vfetch: u32, si: &VkPipelineShaderStag
 /// borgc's blob for `slot`; a vertex shader that does not fit is retried with rematerialized
 /// values from `retry`, its unlowered clone.
 fn compile_blob(
-    dev: &mut borgvk_device,
+    dev: &mut Device,
     si: &VkPipelineShaderStageCreateInfo,
     vfetch: u32,
     slot: usize,
@@ -155,7 +156,7 @@ fn compile_blob(
 }
 
 /// Compute pipeline: SPIR-V to NIR to borgc's compute backend.
-fn compile_compute(dev: &mut borgvk_device, si: &VkPipelineShaderStageCreateInfo, p: &mut Pipeline) {
+fn compile_compute(dev: &mut Device, si: &VkPipelineShaderStageCreateInfo, p: &mut Pipeline) {
     let nir = match to_nir(dev, si) {
         Ok(nir) => nir,
         Err(r) => {
@@ -183,20 +184,20 @@ fn compile_compute(dev: &mut borgvk_device, si: &VkPipelineShaderStageCreateInfo
 
 /// # Safety
 /// `device` is valid.
-pub unsafe fn borgvk_compile_empty_frag(device: *mut borgvk_device, opt: u32) {
+pub unsafe fn borgvk_compile_empty_frag(device: *mut Device, opt: u32) {
     empty_frag(unsafe { &mut *device }, opt);
 }
 
 /// # Safety
 /// `device` and `stage_info` are valid.
-pub unsafe fn borgvk_compile_stage(device: *mut borgvk_device, vfetch: u32, stage_info: *const VkPipelineShaderStageCreateInfo) {
+pub unsafe fn borgvk_compile_stage(device: *mut Device, vfetch: u32, stage_info: *const VkPipelineShaderStageCreateInfo) {
     compile_stage(unsafe { &mut *device }, vfetch, unsafe { &*stage_info });
 }
 
 /// # Safety
 /// `device`, `stage_info` and `pipeline` are valid.
 pub unsafe fn borgvk_compile_compute_stage(
-    device: *mut borgvk_device,
+    device: *mut Device,
     stage_info: *const VkPipelineShaderStageCreateInfo,
     pipeline: *mut Pipeline,
 ) {

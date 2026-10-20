@@ -7,6 +7,7 @@
 use crate::compiler::{borgvk_compile_compute_stage, borgvk_compile_empty_frag, borgvk_compile_stage, num_varyings, set_base};
 use crate::entrypoint::{entrypoint, handle, slice, vk_error, Handle, VkError};
 use crate::ffi::*;
+use crate::device::Device;
 use crate::object::{allocate, Zeroed};
 use crate::format::{bytes_packed, half1, half2, packed_info};
 use crate::serial::{borgvk_blend_pack, borgvk_state_pack};
@@ -62,7 +63,7 @@ unsafe impl Zeroed for Pipeline {}
 
 const VERT: usize = BORGVK_STAGE_VERT as usize;
 
-fn create(dev: &mut borgvk_device, alloc: *const VkAllocationCallbacks) -> Result<&'static mut Pipeline, VkError> {
+fn create(dev: &mut Device, alloc: *const VkAllocationCallbacks) -> Result<&'static mut Pipeline, VkError> {
     let p = unsafe { allocate::<Pipeline>(|n| vk_object_zalloc(&mut dev.vk, alloc, n, VK_OBJECT_TYPE_PIPELINE)) };
     p.ok_or_else(|| vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY))
 }
@@ -170,7 +171,7 @@ fn shader_blend(cb: Option<&VkPipelineColorBlendStateCreateInfo>, f0: VkFormat, 
     Some(b)
 }
 
-fn compile_stages(dev: &mut borgvk_device, stages: &[VkPipelineShaderStageCreateInfo], vfetch: u32, frag_opt: u32, points: bool) {
+fn compile_stages(dev: &mut Device, stages: &[VkPipelineShaderStageCreateInfo], vfetch: u32, frag_opt: u32, points: bool) {
     let opt = |s: &VkPipelineShaderStageCreateInfo| if s.stage == VK_SHADER_STAGE_FRAGMENT_BIT { frag_opt } else { vfetch };
     for s in stages {
         unsafe { borgvk_compile_stage(dev, opt(s), s) };
@@ -194,7 +195,7 @@ fn compile_stages(dev: &mut borgvk_device, stages: &[VkPipelineShaderStageCreate
     }
 }
 
-fn build_graphics(dev: &mut borgvk_device, alloc: *const VkAllocationCallbacks, ci: &VkGraphicsPipelineCreateInfo) -> Result<VkPipeline, VkError> {
+fn build_graphics(dev: &mut Device, alloc: *const VkAllocationCallbacks, ci: &VkGraphicsPipelineCreateInfo) -> Result<VkPipeline, VkError> {
     dev.compile_layout = ci.layout;
     let vi = unsafe { ci.pVertexInputState.as_ref() };
     let ia = unsafe { ci.pInputAssemblyState.as_ref() };
@@ -297,7 +298,7 @@ fn viewport(pl: &mut Pipeline, c: &VkGraphicsPipelineCreateInfo, discard: bool) 
 
 /// Several wide colour targets: one pipeline per target, drawn one after the other.
 fn build_emulated(
-    dev: &mut borgvk_device,
+    dev: &mut Device,
     alloc: *const VkAllocationCallbacks,
     ci: &VkGraphicsPipelineCreateInfo,
     ri: &VkPipelineRenderingCreateInfo,

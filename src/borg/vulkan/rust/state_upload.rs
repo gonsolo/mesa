@@ -7,6 +7,7 @@ use crate::drm::{ioctl, BLEND, PUSH, SHADER, STATE};
 use crate::entrypoint::slice;
 use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
+use crate::device::Device;
 use crate::serial::*;
 use crate::util::{log, MESA_LOG_WARN};
 
@@ -46,13 +47,13 @@ pub unsafe fn borgvk_sampler_desc(sampler: *const borgvk_sampler) -> *const u32 
     unsafe { sampler.as_ref() }.map_or(DEFAULT_SAMPLER.as_ptr(), |s| s.desc.as_ptr())
 }
 
-fn push_range(d: &borgvk_device) -> Option<(u32, &[u32])> {
+fn push_range(d: &Device) -> Option<(u32, &[u32])> {
     (d.push_lo < d.push_hi).then(|| (d.push_lo, &d.push_words[d.push_lo as usize..d.push_hi as usize]))
 }
 
 /// # Safety
 /// `device` is valid.
-pub unsafe fn borgvk_send_blend_state_serial(device: *const borgvk_device) {
+pub unsafe fn borgvk_send_blend_state_serial(device: *const Device) {
     let d = unsafe { &*device };
     unsafe {
         if d.state_valid {
@@ -70,7 +71,7 @@ pub unsafe fn borgvk_send_blend_state_serial(device: *const borgvk_device) {
     }
 }
 
-fn send_blend_state_drm(d: &borgvk_device) {
+fn send_blend_state_drm(d: &Device) {
     let fd = d.drm_fd;
     if d.state_valid && !ioctl(fd, STATE, &mut drm_borg_state { reg: d.state_reg }) {
         log(MESA_LOG_WARN, "borgvk: DRM_IOCTL_BORG_STATE failed".into());
@@ -89,7 +90,7 @@ fn send_blend_state_drm(d: &borgvk_device) {
 
 /// # Safety
 /// `device` is valid.
-pub unsafe fn borgvk_send_blend_state(device: *const borgvk_device) {
+pub unsafe fn borgvk_send_blend_state(device: *const Device) {
     let d = unsafe { &*device };
     if d.drm_fd >= 0 {
         send_blend_state_drm(d);
@@ -100,7 +101,7 @@ pub unsafe fn borgvk_send_blend_state(device: *const borgvk_device) {
 
 /// # Safety
 /// `device` is valid.
-pub unsafe fn borgvk_upload_shaders_serial(device: *mut borgvk_device) {
+pub unsafe fn borgvk_upload_shaders_serial(device: *mut Device) {
     for (st, b) in unsafe { &*device }.shader_blob.iter().enumerate().filter(|(_, b)| b.len != 0) {
         unsafe { borgvk_serial_send_shader(st as u8, b.data.as_ptr(), b.len) };
     }
@@ -108,7 +109,7 @@ pub unsafe fn borgvk_upload_shaders_serial(device: *mut borgvk_device) {
 
 /// # Safety
 /// `device` is valid.
-pub unsafe fn borgvk_upload_shaders(device: *mut borgvk_device) {
+pub unsafe fn borgvk_upload_shaders(device: *mut Device) {
     let d = unsafe { &*device };
     if d.drm_fd < 0 {
         unsafe { borgvk_upload_shaders_serial(device) };

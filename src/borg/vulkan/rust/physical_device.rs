@@ -6,6 +6,8 @@
 
 use crate::entrypoint::{chain, entrypoint, vk_error, Handle};
 use crate::ffi::*;
+use crate::object::{allocate, Zeroed};
+use crate::device::Instance;
 use crate::image::blocks;
 use crate::sync::SYNC_TYPE;
 use crate::util::log;
@@ -13,6 +15,18 @@ use crate::wsi::{borgvk_wsi_finish, borgvk_wsi_init};
 use std::ffi::CStr;
 use std::fs::OpenOptions;
 use std::os::fd::{AsRawFd, IntoRawFd};
+
+#[repr(C)]
+pub struct PhysicalDevice {
+    pub vk: vk_physical_device,
+    pub memory: VkPhysicalDeviceMemoryProperties,
+    pub sync_types: [*const vk_sync_type; 2],
+    pub drm_fd: i32,
+    pub wsi_device: wsi_device,
+}
+
+// Numbers, raw pointers and runtime structs the runtime zeroes itself.
+unsafe impl Zeroed for PhysicalDevice {}
 
 pub const API_VERSION: u32 = 1 << 22; // VK_API_VERSION_1_0
 
@@ -343,9 +357,9 @@ fn properties() -> vk_properties {
     p
 }
 
-unsafe fn create(instance: &mut borgvk_instance, drm_fd: i32) -> VkResult {
-    let d = unsafe { vk_zalloc(&instance.vk.alloc, size_of::<borgvk_physical_device>(), 8, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE) };
-    let Some(d) = (unsafe { d.cast::<borgvk_physical_device>().as_mut() }) else { return vk_error!(instance, VK_ERROR_OUT_OF_HOST_MEMORY).0 };
+unsafe fn create(instance: &mut Instance, drm_fd: i32) -> VkResult {
+    let d = unsafe { allocate::<PhysicalDevice>(|n| vk_zalloc(&instance.vk.alloc, n, 8, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE)) };
+    let Some(d) = d else { return vk_error!(instance, VK_ERROR_OUT_OF_HOST_MEMORY).0 };
     d.drm_fd = drm_fd;
     let mut dispatch: vk_physical_device_dispatch_table = unsafe { std::mem::zeroed() };
     let mut extensions: vk_device_extension_table = unsafe { std::mem::zeroed() };
@@ -417,7 +431,7 @@ pub unsafe extern "C" fn enumerate_devices(instance: *mut vk_instance) -> VkResu
 /// # Safety
 /// `pdev` is a borgvk physical device.
 pub unsafe extern "C" fn destroy_physical_device(pdev: *mut vk_physical_device) {
-    let d = pdev.cast::<borgvk_physical_device>();
+    let d = pdev.cast::<PhysicalDevice>();
     unsafe {
         borgvk_wsi_finish(d);
         if (*d).drm_fd >= 0 {

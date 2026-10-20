@@ -6,11 +6,12 @@
 
 use crate::entrypoint::{entrypoint, handle, Handle};
 use crate::ffi::*;
+use crate::physical_device::PhysicalDevice;
 use std::ffi::{c_char, c_void};
 use std::mem::zeroed;
 use std::ptr::null;
 
-handle!(VkPhysicalDevice, borgvk_physical_device, VK_OBJECT_TYPE_PHYSICAL_DEVICE);
+handle!(VkPhysicalDevice, PhysicalDevice, VK_OBJECT_TYPE_PHYSICAL_DEVICE);
 
 unsafe extern "C" fn proc_addr(pd: VkPhysicalDevice, name: *const c_char) -> PFN_vkVoidFunction {
     unsafe { vk_instance_get_proc_addr_unchecked(pd.get().unwrap().vk.instance, name) }
@@ -18,7 +19,7 @@ unsafe extern "C" fn proc_addr(pd: VkPhysicalDevice, name: *const c_char) -> PFN
 
 /// # Safety
 /// `pd` is a valid physical device.
-pub unsafe fn borgvk_wsi_init(pd: *mut borgvk_physical_device) -> VkResult {
+pub unsafe fn borgvk_wsi_init(pd: *mut PhysicalDevice) -> VkResult {
     let p = unsafe { &mut *pd };
     let opts = wsi_device_options { sw_device: true, ..unsafe { zeroed() } };
     let alloc = unsafe { &(*p.vk.instance).alloc };
@@ -33,7 +34,7 @@ pub unsafe fn borgvk_wsi_init(pd: *mut borgvk_physical_device) -> VkResult {
 
 /// # Safety
 /// `pd` is a valid physical device with WSI.
-pub unsafe fn borgvk_wsi_finish(pd: *mut borgvk_physical_device) {
+pub unsafe fn borgvk_wsi_finish(pd: *mut PhysicalDevice) {
     let p = unsafe { &mut *pd };
     p.vk.wsi_device = std::ptr::null_mut();
     unsafe { wsi_device_finish(&mut p.wsi_device, &(*p.vk.instance).alloc) };

@@ -9,6 +9,7 @@ use crate::drm::{ioctl, SETUP, SUBMIT};
 use crate::cmd_buffer::CommandBuffer;
 use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
+use crate::device::Device;
 use crate::serial::{borgvk_serial_send_geom, borgvk_serial_send_mvp};
 use crate::sim_process::borgvk_sim_run_stream;
 use crate::state_upload::{borgvk_find_set, borgvk_sampler_desc, borgvk_send_blend_state, borgvk_upload_shaders};
@@ -122,7 +123,7 @@ pub unsafe fn borgvk_submit_is_cube(submit: *mut vk_queue_submit) -> bool {
 ///
 /// # Safety
 /// A valid device and the runtime's submit.
-pub unsafe fn borgvk_submit_sim_cube(device: *mut borgvk_device, submit: *mut vk_queue_submit) -> VkResult {
+pub unsafe fn borgvk_submit_sim_cube(device: *mut Device, submit: *mut vk_queue_submit) -> VkResult {
     let sim = std::env::var_os("BORGVK_SIM").is_some() && std::env::var_os("BORGVK_SIM_FW").is_some();
     if !crate::hw::enabled() && !sim {
         return VK_SUCCESS;
@@ -168,7 +169,7 @@ static SETUP_DONE: AtomicBool = AtomicBool::new(false);
 ///
 /// # Safety
 /// A valid device and the runtime's submit.
-pub unsafe fn borgvk_submit_cube_live(device: *mut borgvk_device, submit: *mut vk_queue_submit) -> VkResult {
+pub unsafe fn borgvk_submit_cube_live(device: *mut Device, submit: *mut vk_queue_submit) -> VkResult {
     let Some(set) = (unsafe { borgvk_find_set(submit).as_ref() }) else { return VK_SUCCESS };
     let Some(ubo) = ubo(set) else { return VK_SUCCESS };
     let d = unsafe { &*device };

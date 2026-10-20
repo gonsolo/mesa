@@ -10,6 +10,7 @@ use crate::corpus::{borgvk_corpus_hash, borgvk_corpus_image, borgvk_corpus_log, 
 use crate::entrypoint::{entrypoint, slice, Handle};
 use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
+use crate::device::Device;
 use crate::pipeline::Pipeline;
 use crate::format::{depth_is_d32, flush_format, raw32, vertex_fetch, Fetch};
 use crate::hw::{enabled, serves_extent};
@@ -247,7 +248,7 @@ fn fetch(f: VkFormat) -> Result<Fetch, Reject> {
 }
 
 struct Ctx<'a> {
-    device: &'a mut borgvk_device,
+    device: &'a mut Device,
     c: &'a mut CommandBuffer,
     p: Params,
     pl: &'a Pipeline,
@@ -890,7 +891,7 @@ fn storage_image(set: &DescriptorSet, b: usize) -> Option<&borgvk_image> {
     (img.vk.image_type == VK_IMAGE_TYPE_2D && img.vk.samples == 1 && blocks(img.vk.format).bs == 4).then_some(img)
 }
 
-fn draw_one(device: &mut borgvk_device, c: &mut CommandBuffer, p: &Params) -> bool {
+fn draw_one(device: &mut Device, c: &mut CommandBuffer, p: &Params) -> bool {
     let Some(pl) = (unsafe { c.gfx_pipeline.as_ref() }) else { return reject(Reject::Undrawable) };
     let mut g = Ctx {
         device,
@@ -939,7 +940,7 @@ fn draw_one(device: &mut borgvk_device, c: &mut CommandBuffer, p: &Params) -> bo
 }
 
 /// Wide colour targets are one pipeline each, drawn in turn (no depth or stencil: a second pass would fail the test).
-fn generic_draw(device: &mut borgvk_device, c: &mut CommandBuffer, p: &Params) -> bool {
+fn generic_draw(device: &mut Device, c: &mut CommandBuffer, p: &Params) -> bool {
     let first = c.gfx_pipeline;
     let Some(fp) = (unsafe { first.as_ref() }).filter(|f| f.emul_n != 0) else { return draw_one(device, c, p) };
     if !c.depth_view.is_null() || !c.stencil_view.is_null() {
@@ -964,7 +965,7 @@ fn generic_draw(device: &mut borgvk_device, c: &mut CommandBuffer, p: &Params) -
 
 fn sim_draw(command_buffer: VkCommandBuffer, mut p: Params) {
     let c = unsafe { cmd(command_buffer.ptr()) };
-    let device = unsafe { &mut *c.vk.base.device.cast::<borgvk_device>() };
+    let device = unsafe { &mut *c.vk.base.device.cast::<Device>() };
     // Only the simulator renders; cube.c (UBO-driven) has its own path at submit.
     if !(std::env::var_os("BORGVK_SIM").is_some() || enabled()) || (!c.desc_set.is_null() && unsafe { borgvk_set_is_cube(c.desc_set) }) {
         return;

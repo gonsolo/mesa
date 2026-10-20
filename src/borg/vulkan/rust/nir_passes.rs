@@ -4,12 +4,12 @@
 //! NIR passes the driver runs before borgc.
 
 use crate::compiler::{compile_layout, set_base, set_map};
-use crate::ffi::borgvk_device;
+use crate::device::Device;
 use compiler::bindings::*;
 
 /// Descriptor (set, binding, array element) to the flat slot borgc addresses: set 0, binding
 /// base of the set plus the element's slot.
-pub fn remap_array_bindings(dev: &borgvk_device, nir: &nir_shader) {
+pub fn remap_array_bindings(dev: &Device, nir: &nir_shader) {
     let Some(pl) = compile_layout(dev) else {
         return;
     };

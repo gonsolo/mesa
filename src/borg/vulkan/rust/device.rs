@@ -6,13 +6,50 @@
 use crate::cmd_buffer::CMD_BUFFER_OPS;
 use crate::entrypoint::{chain, entrypoint, handle, vk_error, Handle};
 use crate::ffi::*;
+use crate::object::{allocate, Zeroed};
 use crate::physical_device::{destroy_physical_device, enumerate_devices, API_VERSION};
 use crate::queue::borgvk_queue_submit;
 use std::ffi::{c_char, c_void};
 use std::ptr::null;
 use std::sync::LazyLock;
 
-handle!(VkInstance, borgvk_instance, VK_OBJECT_TYPE_INSTANCE);
+handle!(VkInstance, Instance, VK_OBJECT_TYPE_INSTANCE);
+handle!(VkDevice, Device, VK_OBJECT_TYPE_DEVICE);
+
+#[repr(C)]
+pub struct Instance {
+    pub vk: vk_instance,
+}
+
+#[repr(C)]
+pub struct Device {
+    pub vk: vk_device,
+    pub cmd_dispatch: vk_device_dispatch_table,
+    pub queue: vk_queue,
+    pub drm_fd: i32, // the physical device's; -1 is the malloc and serial fallback
+    pub blend_lower: *const borg_blend,
+    pub shader_blob: [borgvk_shader_blob; BORGVK_SHADER_STAGE_COUNT as usize],
+    pub compile_layout: VkPipelineLayout,
+    pub stage_ubo: [u32; 2],
+    pub stage_push: [bool; 2],
+    pub stage_pwin: [bool; 2],  // the stage reads push constants from the heap window
+    pub stage_spill: [bool; 2], // the stage spills to the region's scratch slot
+    pub frag_tex_binding: i32,
+    pub frag_select: u32, // 1 + the colour output the fragment shader keeps; 0 keeps all
+    pub frag_reads_pntc: bool,
+    pub blend_cfg: u32,
+    pub blend_const: u32,
+    pub state_reg: [u32; 5],
+    pub vp: borgvk_vp, // the viewport and scissor of the draw being queued
+    pub state_valid: bool,
+    pub push_words: [u32; 32], // set by vkCmdPushConstants, replayed at submit (DRM path)
+    pub push_lo: u32,          // word range written so far; empty when lo >= hi
+    pub push_hi: u32,
+}
+
+// Numbers, raw pointers, handles, the shader blobs and runtime structs the runtime zeroes.
+unsafe impl Zeroed for Instance {}
+unsafe impl Zeroed for Device {}
 
 // By hand: bindgen leaves out the runtime's hidden tables.
 extern "C" {
@@ -86,10 +123,10 @@ entrypoint! {
             }
         }
         let alloc = if alloc.is_null() { vk_default_allocator() } else { alloc };
-        let inst = vk_alloc(alloc, size_of::<borgvk_instance>(), 8, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE).cast::<borgvk_instance>();
-        if inst.is_null() {
+        let Some(inst) = allocate::<Instance>(|n| vk_zalloc(alloc, n, 8, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE)) else {
             return error(VK_ERROR_OUT_OF_HOST_MEMORY);
-        }
+        };
+        let inst = std::ptr::from_mut(inst);
         let mut dispatch: vk_instance_dispatch_table = std::mem::zeroed();
         vk_instance_dispatch_table_from_entrypoints(&mut dispatch, &borgvk_instance_entrypoints, true);
         vk_instance_dispatch_table_from_entrypoints(&mut dispatch, &wsi_instance_entrypoints, false);
@@ -134,8 +171,9 @@ entrypoint! {
             }
         }
         let ialloc = &(*pdev.vk.instance).alloc;
-        let d = vk_zalloc2(ialloc, alloc, size_of::<borgvk_device>(), 8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE).cast::<borgvk_device>();
-        let Some(d) = d.as_mut() else { return vk_error!(pdev, VK_ERROR_OUT_OF_HOST_MEMORY).0 };
+        let Some(d) = allocate::<Device>(|n| vk_zalloc2(ialloc, alloc, n, 8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE)) else {
+            return vk_error!(pdev, VK_ERROR_OUT_OF_HOST_MEMORY).0;
+        };
 
         // These record, and replay through cmd_dispatch at submit; they win over borgvk's.
         let e = &vk_cmd_enqueue_device_entrypoints;
