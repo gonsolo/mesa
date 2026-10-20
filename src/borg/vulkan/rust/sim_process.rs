@@ -247,6 +247,7 @@ pub unsafe fn borgvk_sim_run_stream(bytes: *mut u8, nbytes: usize, color_img: *m
 
 #[cfg(test)]
 mod tests {
+    use crate::memory::DeviceMemory;
     use super::*;
 
     #[test]
@@ -268,7 +269,7 @@ mod tests {
             let out = Command::new(&sim).arg(&cap).arg(dim.to_string()).arg(dim.to_string()).output().unwrap();
             assert_eq!(out.stdout.len(), (dim * dim * 3) as usize);
             let mut pixels = vec![0u8; (dim * dim * 4) as usize];
-            let mut mem = borgvk_device_memory { map: pixels.as_mut_ptr().cast(), ..Default::default() };
+            let mut mem = DeviceMemory { map: pixels.as_mut_ptr().cast(), ..Default::default() };
             let mut img = Image { size: pixels.len() as u64, mem: &mut mem, ..Default::default() };
             img.vk.extent = VkExtent3D { width: dim, height: dim, depth: 1 };
             img.vk.samples = 1;

@@ -7,6 +7,7 @@
 use crate::corpus::{borgvk_corpus_hash, borgvk_corpus_log, borgvk_corpus_on, hash};
 use crate::entrypoint::{entrypoint, slice, Handle};
 use crate::ffi::*;
+use crate::memory::{Buffer, DeviceMemory};
 use crate::image::Image;
 use crate::image::{aspect_blocks, blocks, shape, z16_pack, z16_unpack};
 use crate::texel::{is_partial_ds_aspect, pack_rgba_float, unpack_rgba_float};
@@ -14,7 +15,7 @@ use borg_layout::image::{mip_level_size, Blocks};
 use std::ffi::c_void;
 
 /// The buffer's bytes from its binding on, when it is bound to mapped memory.
-pub fn host(b: &borgvk_buffer) -> Option<*mut u8> {
+pub fn host(b: &Buffer) -> Option<*mut u8> {
     let m = unsafe { b.mem.as_ref() }.filter(|m| !m.map.is_null())?;
     Some(unsafe { m.map.cast::<u8>().add(b.offset as usize) })
 }
@@ -166,7 +167,7 @@ entrypoint! {
 }
 
 /// One region between an image and a buffer, towards the buffer when `to_buffer`.
-fn buffer_image(img: &Image, buf: &borgvk_buffer, reg: &VkBufferImageCopy, to_buffer: bool) {
+fn buffer_image(img: &Image, buf: &Buffer, reg: &VkBufferImageCopy, to_buffer: bool) {
     let (Some(ibase), Some(bbase)) = (image_host(img), host(buf)) else { return };
     let (ib, sub) = (blocks(img.vk.format), reg.imageSubresource);
     let a = aspect_blocks(img.vk.format, sub.aspectMask);
@@ -266,7 +267,7 @@ entrypoint! {
 ///
 /// # Safety
 /// `src` is a mapped image; `out` and `mem` are valid for writes.
-pub unsafe fn borgvk_decode_compressed_image(src: *const Image, out: *mut Image, mem: *mut borgvk_device_memory) -> *mut c_void {
+pub unsafe fn borgvk_decode_compressed_image(src: *const Image, out: *mut Image, mem: *mut DeviceMemory) -> *mut c_void {
     let s = unsafe { &*src };
     let pf = unsafe { vk_format_to_pipe_format(s.vk.format) };
     let sb = Blocks { bd: 1, ..blocks(s.vk.format) };
@@ -344,7 +345,7 @@ fn blit(src: &Image, dst: &Image, regions: &[VkImageBlit], filter: VkFilter) {
     if db.bw > 1 || db.bh > 1 {
         return;
     }
-    let (mut dimg, mut dmem) = unsafe { (std::mem::zeroed::<Image>(), std::mem::zeroed::<borgvk_device_memory>()) };
+    let (mut dimg, mut dmem) = unsafe { (std::mem::zeroed::<Image>(), std::mem::zeroed::<DeviceMemory>()) };
     let mut decoded = std::ptr::null_mut();
     let sb = blocks(src.vk.format);
     let src = if sb.bw > 1 || sb.bh > 1 {

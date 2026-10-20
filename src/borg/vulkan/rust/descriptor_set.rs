@@ -6,6 +6,7 @@
 
 use crate::entrypoint::{entrypoint, handle, slice, vk_error, Handle};
 use crate::ffi::*;
+use crate::memory::Buffer;
 use crate::sampler::Sampler;
 use crate::image::Image;
 use crate::device::Device;
@@ -37,7 +38,7 @@ pub struct DescriptorSet {
     pub base: vk_object_base,
     pub link: list_head, // in the pool's list
     pub pool: *mut DescriptorPool,
-    pub buffers: [*mut borgvk_buffer; BINDINGS],
+    pub buffers: [*mut Buffer; BINDINGS],
     pub offsets: [VkDeviceSize; BINDINGS],
     pub ranges: [VkDeviceSize; BINDINGS],
     pub images: [*mut Image; BINDINGS],

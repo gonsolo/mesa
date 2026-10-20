@@ -6,6 +6,7 @@
 
 use crate::copy::borgvk_decode_compressed_image;
 use crate::ffi::*;
+use crate::memory::{Buffer, DeviceMemory};
 use crate::sampler::Sampler;
 use crate::image::Image;
 use crate::format::{borgvk_tex_convert, tex_format};
@@ -19,7 +20,7 @@ use std::ptr::null;
 const CHUNK: u32 = BORGVK_TEXG_CHUNK;
 const DIM: u32 = BORGVK_TEX_DIM;
 
-fn mapped(mem: *mut borgvk_device_memory) -> Option<*const u8> {
+fn mapped(mem: *mut DeviceMemory) -> Option<*const u8> {
     unsafe { mem.as_ref() }.filter(|m| !m.map.is_null()).map(|m| m.map.cast::<u8>().cast_const())
 }
 
@@ -212,7 +213,7 @@ pub unsafe fn borgvk_send_generic_texture(view: *const vk_image_view, img: *cons
         return texture(view, img, sampler);
     }
     // Block-compressed: decoded first.
-    let (mut dimg, mut dmem) = unsafe { (std::mem::zeroed::<Image>(), std::mem::zeroed::<borgvk_device_memory>()) };
+    let (mut dimg, mut dmem) = unsafe { (std::mem::zeroed::<Image>(), std::mem::zeroed::<DeviceMemory>()) };
     let buf = unsafe { borgvk_decode_compressed_image(img, &mut dimg, &mut dmem) };
     if buf.is_null() {
         return false;
@@ -235,7 +236,7 @@ pub unsafe fn borgvk_send_buffer_texture(bv: *const vk_buffer_view) -> bool {
         VK_FORMAT_R32_SFLOAT => TexFormat::R32_SFLOAT,
         _ => return false,
     };
-    let buf = unsafe { &*bv.buffer.cast::<borgvk_buffer>() };
+    let buf = unsafe { &*bv.buffer.cast::<Buffer>() };
     let Some(map) = mapped(buf.mem) else { return false };
     let w = (bv.range / 4) as u32;
     if w == 0 || w > 65536 {

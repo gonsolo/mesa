@@ -8,6 +8,7 @@ use crate::cmd_buffer::{cmd, CommandBuffer};
 use crate::corpus::{borgvk_corpus_log, borgvk_corpus_on, hash};
 use crate::entrypoint::{entrypoint, Handle};
 use crate::ffi::*;
+use crate::memory::{Buffer, DeviceMemory};
 use crate::pipeline::Pipeline;
 use crate::hw::borgvk_hw_compute;
 use crate::util::{log, temp_file, MESA_LOG_WARN};
@@ -49,7 +50,7 @@ fn decoded(addr: u32, data: Vec<u8>, size: u32) -> CsBuf {
     CsBuf { host: std::ptr::null_mut(), decoded: Some(data), wb: false, skip: 0, size, addr, texels: std::ptr::null_mut(), pf: PIPE_FORMAT_NONE }
 }
 
-fn mapped(mem: *mut borgvk_device_memory) -> Option<*mut u8> {
+fn mapped(mem: *mut DeviceMemory) -> Option<*mut u8> {
     unsafe { mem.as_ref() }.filter(|m| !m.map.is_null()).map(|m| m.map.cast())
 }
 
@@ -72,7 +73,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
             let (buf, bv, img) = (set.buffers[b], unsafe { set.buffer_views[b].as_ref() }, unsafe { set.images[b].as_ref() });
             if let Some(bv) = bv.filter(|_| buf.is_null()) {
                 // A texel buffer, decoded to RGBA32 per texel.
-                let tb = unsafe { &*bv.buffer.cast::<borgvk_buffer>() };
+                let tb = unsafe { &*bv.buffer.cast::<Buffer>() };
                 let pf = unsafe { vk_format_to_pipe_format(bv.format) };
                 let bs = unsafe { util_format_get_blocksize(pf) };
                 let Some(map) = mapped(tb.mem).filter(|_| pf != PIPE_FORMAT_NONE && bs != 0) else { continue };

@@ -7,14 +7,46 @@
 use crate::entrypoint::{chain, entrypoint, handle, slice, vk_error, Handle};
 use crate::drm::{gem_close, ioctl, GEM_CREATE, GEM_MMAP};
 use crate::ffi::*;
+use crate::object::{allocate, Zeroed};
 use crate::device::Device;
 use crate::util::mmap;
 use std::ffi::c_void;
 use std::ptr::null_mut;
 
-handle!(VkDeviceMemory, borgvk_device_memory, VK_OBJECT_TYPE_DEVICE_MEMORY);
-handle!(VkBuffer, borgvk_buffer, VK_OBJECT_TYPE_BUFFER);
-handle!(VkBufferView, borgvk_buffer_view, VK_OBJECT_TYPE_BUFFER_VIEW);
+handle!(VkDeviceMemory, DeviceMemory, VK_OBJECT_TYPE_DEVICE_MEMORY);
+handle!(VkBuffer, Buffer, VK_OBJECT_TYPE_BUFFER);
+handle!(VkBufferView, BufferView, VK_OBJECT_TYPE_BUFFER_VIEW);
+
+#[repr(C)]
+pub struct DeviceMemory {
+    pub vk: vk_device_memory,
+    pub map: *mut c_void,  // mmap(drm_fd, gem_offset) or malloc'd
+    pub size: usize,       // allocation size for munmap
+    pub gem_handle: u32,   // 0 = malloc path (no DRM)
+}
+
+#[repr(C)]
+pub struct Buffer {
+    pub vk: vk_buffer,
+    pub mem: *mut DeviceMemory,
+    pub offset: VkDeviceSize,
+}
+
+#[repr(C)]
+pub struct BufferView {
+    pub vk: vk_buffer_view,
+}
+
+// Numbers, raw pointers and runtime objects the runtime zero-allocates.
+unsafe impl Zeroed for DeviceMemory {}
+unsafe impl Zeroed for Buffer {}
+unsafe impl Zeroed for BufferView {}
+
+impl Default for DeviceMemory {
+    fn default() -> Self {
+        unsafe { std::mem::zeroed() }
+    }
+}
 
 /// Backing for `size` bytes and its GEM handle, 0 for malloc'd memory.
 fn back(dev: &Device, size: usize) -> Result<(*mut c_void, u32), VkResult> {
@@ -43,8 +75,7 @@ fn back(dev: &Device, size: usize) -> Result<(*mut c_void, u32), VkResult> {
 entrypoint! {
     fn borgvk_AllocateMemory(device: VkDevice, info: *const VkMemoryAllocateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkDeviceMemory) -> Result<(), VkError> {
         let dev = device.get().unwrap();
-        let mem = vk_device_memory_create(&mut dev.vk, info, alloc, size_of::<borgvk_device_memory>());
-        let Some(mem) = mem.cast::<borgvk_device_memory>().as_mut() else {
+        let Some(mem) = allocate::<DeviceMemory>(|n| vk_device_memory_create(&mut dev.vk, info, alloc, n)) else {
             return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
         };
         let size = ((*info).allocationSize as usize).max(1);
@@ -112,10 +143,9 @@ entrypoint! {
 entrypoint! {
     fn borgvk_CreateBuffer(device: VkDevice, info: *const VkBufferCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkBuffer) -> Result<(), VkError> {
         let dev = device.get().unwrap();
-        let b = vk_buffer_create(&mut dev.vk, info, alloc, size_of::<borgvk_buffer>()).cast::<borgvk_buffer>();
-        if b.is_null() {
+        let Some(b) = allocate::<Buffer>(|n| vk_buffer_create(&mut dev.vk, info, alloc, n)) else {
             return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
-        }
+        };
         *out = VkBuffer::from_object(b);
         Ok(())
     }
@@ -132,10 +162,9 @@ entrypoint! {
 entrypoint! {
     fn borgvk_CreateBufferView(device: VkDevice, info: *const VkBufferViewCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkBufferView) -> Result<(), VkError> {
         let dev = device.get().unwrap();
-        let v = vk_buffer_view_create(&mut dev.vk, info, alloc, size_of::<borgvk_buffer_view>()).cast::<borgvk_buffer_view>();
-        if v.is_null() {
+        let Some(v) = allocate::<BufferView>(|n| vk_buffer_view_create(&mut dev.vk, info, alloc, n)) else {
             return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
-        }
+        };
         *out = VkBufferView::from_object(v);
         Ok(())
     }

@@ -3,6 +3,7 @@
 
 use crate::entrypoint::{entrypoint, handle, slice, vk_error, Handle};
 use crate::ffi::*;
+use crate::memory::DeviceMemory;
 use crate::object::{allocate, Zeroed};
 use crate::memory::requirements;
 
@@ -15,7 +16,7 @@ handle!(VkImageView, vk_image_view, VK_OBJECT_TYPE_IMAGE_VIEW);
 pub struct Image {
     pub vk: vk_image,
     pub size: VkDeviceSize, // bytes needed to back this image
-    pub mem: *mut borgvk_device_memory,
+    pub mem: *mut DeviceMemory,
     pub offset: VkDeviceSize,
 }
 

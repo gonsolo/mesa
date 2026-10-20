@@ -91,33 +91,13 @@ struct borgvk_writeback;
 #define BORGVK_LINE_OTHER 24
 
 
-struct borgvk_device_memory {
-   struct vk_device_memory vk;
-   void    *map;         /* mmap(drm_fd, gem_offset) or malloc'd              */
-   size_t   size;        /* allocation size for munmap                         */
-   uint32_t gem_handle;  /* 0 = malloc path (no DRM)                          */
-};
 
-struct borgvk_buffer {
-   struct vk_buffer vk;
-   struct borgvk_device_memory *mem;
-   VkDeviceSize offset;
-};
 
 
 /* One mip level and layer of an image, rendered to as an image of its own. */
 
-struct borgvk_buffer_view {
-   struct vk_buffer_view vk;
-};
 
 
-VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_device_memory, vk.base, VkDeviceMemory,
-                               VK_OBJECT_TYPE_DEVICE_MEMORY)
-VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_buffer, vk.base, VkBuffer,
-                               VK_OBJECT_TYPE_BUFFER)
-VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_buffer_view, vk.base, VkBufferView,
-                               VK_OBJECT_TYPE_BUFFER_VIEW)
 
 struct borgvk_desc_map {
    uint8_t n, num[BORGVK_MAX_BINDINGS], slot[BORGVK_MAX_BINDINGS], count[BORGVK_MAX_BINDINGS];
