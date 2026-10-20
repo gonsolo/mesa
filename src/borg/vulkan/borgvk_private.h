@@ -345,7 +345,6 @@ struct tex_conv {
    uint32_t bpp, obpp, cs, sch, alpha, pack16, zstride, soff;
    bool swap_rb;
 };
-void *borgvk_decode_compressed_image(const struct borgvk_image *src, struct borgvk_image *out, struct borgvk_device_memory *mem);
 
 void borgvk_resolve_region(struct borgvk_image *src, struct borgvk_image *dst, const VkImageResolve *reg);
 
