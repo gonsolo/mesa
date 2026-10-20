@@ -79,14 +79,69 @@ borgvk_deps = [
   idep_mesautil,
 ]
 
+borgvk_inc = [
+  inc_include, inc_src, inc_util,
+  include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h
+  include_directories('../compiler'),
+]
+
+prog_cbindgen = find_program('cbindgen', required : true, native : true, version : '>= 0.25')
+
+_borgvk_bindings_rs = rust.bindgen(
+  input : ['rust/bindings.h', borgvk_entrypoints[0]],
+  output : 'borgvk_bindings.rs',
+  c_args : [pre_args],
+  args : [bindgen_output_args, '--no-prepend-enum-name', '--allowlist-type', 'VkFormat'],
+  include_directories : [borgvk_inc, include_directories('.')],
+  dependencies : [
+    borgvk_deps,
+    idep_vulkan_runtime_headers,
+    idep_vulkan_util_headers,
+    idep_vulkan_wsi_headers,
+  ],
+)
+_libborgvk_bindings_rs = static_library(
+  'borgvk_bindings_rs',
+  _borgvk_bindings_rs,
+  gnu_symbol_visibility : 'hidden',
+  rust_abi : 'rust',
+  rust_args : rust_global_args,
+)
+libborgvk_rs = static_library(
+  'borgvk_rs',
+  files('rust/lib.rs'),
+  gnu_symbol_visibility : 'hidden',
+  rust_abi : 'c',
+  rust_args : rust_global_args,
+  link_with : [_libborgvk_bindings_rs],
+)
+borgvk_rust_h = custom_target(
+  'borgvk_rust.h',
+  input : [files('rust/cbindgen.toml'), 'rust/lib.rs'],
+  output : ['borgvk_rust.h'],
+  command : [
+    prog_cbindgen, '-q', '--config', '@INPUT0@', '--lang', 'c',
+    '--output', '@OUTPUT0@', '--depfile', '@DEPFILE@',
+    '--', '@INPUT1@',
+  ],
+  depfile : 'borgvk_rust.h.d',
+)
+libborgvk_files += borgvk_rust_h
+
+if with_tests and get_option('b_sanitize') == 'none'
+  rust.test(
+    'borgvk_rs',
+    libborgvk_rs,
+    suite : ['borg', 'rs'],
+    rust_args : ['-C', 'default-linker-libraries'],
+  )
+endif
+
 libvulkan_borg = shared_library(
   'vulkan_borg',
   [libborgvk_files, borgvk_entrypoints],
-  include_directories : [
-    inc_include, inc_src, inc_util,
-    include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h
-    include_directories('../compiler'),
-  ],
+  include_directories : borgvk_inc,
+  link_with : [libborgvk_rs],
   dependencies : borgvk_deps,
   link_args : [vulkan_icd_link_args, ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections],
   link_depends : vulkan_icd_link_depends,
@@ -204,6 +259,7 @@ borgvk_static = executable(
     inc_include, inc_src, inc_util,
     include_directories('../../../../'),
   ],
+  link_with : [libborgvk_rs],
   dependencies : borgvk_deps,
   link_args : ['-static', '-Wl,--gc-sections'],
   build_by_default : false,

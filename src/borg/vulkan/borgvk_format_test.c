@@ -21,20 +21,6 @@ check(bool cond, const char *what)
 }
 
 static void
-test_vertex_formats(void)
-{
-   uint32_t code, swz, rb;
-   check(borgvk_vertex_format_to_fetch(VK_FORMAT_R32G32B32A32_SFLOAT, &code, &swz, &rb) &&
-         code == 41 && swz == 0 && rb == 16, "rgba32f fetch");
-   check(borgvk_vertex_format_to_fetch(VK_FORMAT_R32G32B32_SFLOAT, &code, &swz, &rb) &&
-         code == 41 && swz != 0 && rb == 16, "rgb32f fetch forces alpha one");
-   check(borgvk_vertex_format_to_fetch(VK_FORMAT_R8_UNORM, &code, &swz, &rb) && code == 1 && rb == 1,
-         "r8 unorm fetch");
-   check(!borgvk_vertex_format_to_fetch(VK_FORMAT_UNDEFINED, &code, &swz, &rb), "undefined has no fetch");
-   check(!borgvk_vertex_format_to_fetch(VK_FORMAT_R64_SFLOAT, &code, &swz, &rb), "r64 has no fetch");
-}
-
-static void
 test_tex_convert(void)
 {
    const uint8_t bgra[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
@@ -77,7 +63,6 @@ test_image_helpers(void)
 int
 main(void)
 {
-   test_vertex_formats();
    test_tex_convert();
    test_image_helpers();
    if (failures) {

@@ -936,7 +936,7 @@ with_any_rust = [
   with_panfrost_rust,
   with_tools.contains('etnaviv'),
   with_virtgpu_kumquat,
-  with_borgc,
+  with_borg_vk,
 ].contains(true)
 
 if with_any_rust
