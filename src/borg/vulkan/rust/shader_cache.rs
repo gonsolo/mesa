@@ -7,8 +7,8 @@
 
 use crate::entrypoint::chain;
 use crate::ffi::*;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::Read;
 use std::sync::OnceLock;
 
 const MAX: usize = BORGVK_SHADER_BLOB_MAX as usize;
@@ -82,7 +82,9 @@ pub fn get(si: &VkPipelineShaderStageCreateInfo, vfetch: u32, blob: &mut borgvk_
     Some(e.flags & 1 != 0)
 }
 
+#[cfg(borgc)]
 pub fn record(si: &VkPipelineShaderStageCreateInfo, vfetch: u32, blob: &borgvk_shader_blob, reads_pntc: bool) {
+    use std::{fs::OpenOptions, io::Write};
     let Some(path) = env_path("BORGVK_SHADER_CACHE_RECORD") else {
         return;
     };
