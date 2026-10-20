@@ -153,7 +153,7 @@ fn corpus_state(
     extra: &[*mut Image],
     depth: *const vk_image_view,
     stencil: *const vk_image_view,
-    wb: &[borgvk_writeback],
+    wb: &[Writeback],
 ) -> u64 {
     let mut h = unsafe { borgvk_corpus_image(h, img) };
     for &e in extra.iter().chain(&[view_image(depth), view_image(stencil)]) {
@@ -860,7 +860,7 @@ impl Ctx<'_> {
 
 fn push_writeback(c: &mut CommandBuffer, off: u32, size: u32, host: *mut u8) {
     if c.nwb < BORGVK_MAX_WRITEBACKS {
-        c.wb[c.nwb as usize] = borgvk_writeback { off, size, host };
+        c.wb[c.nwb as usize] = Writeback { off, size, host };
         c.nwb += 1;
     }
 }

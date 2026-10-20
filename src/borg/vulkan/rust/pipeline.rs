@@ -21,7 +21,7 @@ pub struct Pipeline {
     pub topology: VkPrimitiveTopology,
     pub binding_stride: [u32; VB],
     pub attr_count: u32,
-    pub attrs: [borgvk_vertex_attr; BORGVK_MAX_VERTEX_ATTRS as usize],
+    pub attrs: [VertexAttr; BORGVK_MAX_VERTEX_ATTRS as usize],
     pub binding_instance: [bool; VB], // per-instance rate
     pub restart: bool,                // primitiveRestartEnable
     pub color_count: u32,             // colour attachments of the pipeline's render pass
@@ -36,11 +36,11 @@ pub struct Pipeline {
     pub set_base: [u8; 4],
     pub tex_binding: i32,    // binding of the texture the fragment shader samples
     pub vfetch: u32,
-    pub blob: [borgvk_shader_blob; BORGVK_SHADER_STAGE_COUNT as usize],
+    pub blob: [ShaderBlob; BORGVK_SHADER_STAGE_COUNT as usize],
     pub blend_cfg: u32,
     pub blend_const: u32,
     pub state_reg: [u32; 5],
-    pub vp: borgvk_vp,       // static viewport/scissor, if the pipeline has them
+    pub vp: Vp,       // static viewport/scissor, if the pipeline has them
     pub vp_dyn: bool,        // taken from the command buffer
     pub sc_dyn: bool,
     pub srgb_table: bool,    // the fragment shader decodes the destination
@@ -245,7 +245,7 @@ fn build_graphics(dev: &mut Device, alloc: *const VkAllocationCallbacks, ci: &Vk
             if pl.attr_count >= BORGVK_MAX_VERTEX_ATTRS {
                 break;
             }
-            pl.attrs[pl.attr_count as usize] = borgvk_vertex_attr { location: va.location, binding: va.binding, offset: va.offset, format: va.format };
+            pl.attrs[pl.attr_count as usize] = VertexAttr { location: va.location, binding: va.binding, offset: va.offset, format: va.format };
             pl.attr_count += 1;
         }
     }
@@ -278,7 +278,7 @@ fn viewport(pl: &mut Pipeline, c: &VkGraphicsPipelineCreateInfo, discard: bool) 
             pl.sc_dyn |= matches!(ds, VK_DYNAMIC_STATE_SCISSOR | VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT);
         }
     }
-    pl.vp = borgvk_vp::default();
+    pl.vp = Vp::default();
     let Some(vs) = unsafe { c.pViewportState.as_ref() }.filter(|_| !discard) else {
         return;
     };

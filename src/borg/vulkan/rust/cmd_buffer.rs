@@ -56,7 +56,7 @@ pub struct CommandBuffer {
     pub batch_area: VkExtent2D, // the pass size when it has no attachment
     pub batch_depth: *mut vk_image_view,
     pub batch_stencil: *mut vk_image_view,
-    pub wb: [borgvk_writeback; BORGVK_MAX_WRITEBACKS as usize],
+    pub wb: [Writeback; BORGVK_MAX_WRITEBACKS as usize],
     pub nwb: u32,
     pub batch_srgb: bool,
     pub batch_pool: *const c_void,

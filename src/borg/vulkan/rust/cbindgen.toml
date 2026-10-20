@@ -9,15 +9,11 @@ style = "tag"
 
 # Types bindgen took from C keep their C names.
 [export.rename]
-"tex_conv" = "struct tex_conv"
 "vk_sync_type" = "struct vk_sync_type"
 "vk_queue" = "struct vk_queue"
 "vk_queue_submit" = "struct vk_queue_submit"
 "vk_command_buffer_ops" = "struct vk_command_buffer_ops"
 "nir_shader" = "struct nir_shader"
-"borgvk_shader_blob" = "struct borgvk_shader_blob"
 "pipe_format" = "enum pipe_format"
-"borgvk_vp" = "struct borgvk_vp"
-"borgvk_writeback" = "struct borgvk_writeback"
 "vk_image_view" = "struct vk_image_view"
 "vk_buffer_view" = "struct vk_buffer_view"

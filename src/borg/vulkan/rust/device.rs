@@ -28,7 +28,7 @@ pub struct Device {
     pub queue: vk_queue,
     pub drm_fd: i32, // the physical device's; -1 is the malloc and serial fallback
     pub blend_lower: *const borg_blend,
-    pub shader_blob: [borgvk_shader_blob; BORGVK_SHADER_STAGE_COUNT as usize],
+    pub shader_blob: [ShaderBlob; BORGVK_SHADER_STAGE_COUNT as usize],
     pub compile_layout: VkPipelineLayout,
     pub stage_ubo: [u32; 2],
     pub stage_push: [bool; 2],
@@ -40,7 +40,7 @@ pub struct Device {
     pub blend_cfg: u32,
     pub blend_const: u32,
     pub state_reg: [u32; 5],
-    pub vp: borgvk_vp, // the viewport and scissor of the draw being queued
+    pub vp: Vp, // the viewport and scissor of the draw being queued
     pub state_valid: bool,
     pub push_words: [u32; 32], // set by vkCmdPushConstants, replayed at submit (DRM path)
     pub push_lo: u32,          // word range written so far; empty when lo >= hi

@@ -508,7 +508,7 @@ fn start_servers(all: &mut [Server], np: usize, rows_per: u32, wp: u32, hp: u32,
 }
 
 /// The device: upload the attachments, run the stream, download them and the writebacks.
-fn run_on_device(s: &Server, l: &Layout, t: &Targets, stream: &[u8], wb: &[borgvk_writeback]) {
+fn run_on_device(s: &Server, l: &Layout, t: &Targets, stream: &[u8], wb: &[Writeback]) {
     let tiles16 = (l.wp >> 2) * (l.h.next_multiple_of(4) >> 2) * 16;
     let mut ranges = Vec::new();
     if t.color.is_some() {
@@ -545,7 +545,7 @@ fn run_pass(
     extra: &[&Image],
     zimg: Option<&Image>,
     simg: Option<&Image>,
-    wb: &[borgvk_writeback],
+    wb: &[Writeback],
     area: VkExtent2D,
 ) {
     // Depth only: no colour attachment, nothing of it goes in or comes back.
@@ -634,7 +634,7 @@ pub unsafe fn borgvk_sim_run_pass(
     nextra: u32,
     depth_view: *const vk_image_view,
     stencil_view: *const vk_image_view,
-    wb: *const borgvk_writeback,
+    wb: *const Writeback,
     nwb: u32,
     area: VkExtent2D,
 ) -> VkResult {

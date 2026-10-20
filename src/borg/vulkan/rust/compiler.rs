@@ -28,7 +28,7 @@ pub fn compile_layout(dev: &Device) -> Option<&vk_pipeline_layout> {
 
 /// The map of set `s` of a layout: its bindings' flat slots.
 #[cfg(borgc)]
-pub fn set_map(pl: &vk_pipeline_layout, s: usize) -> Option<&borgvk_desc_map> {
+pub fn set_map(pl: &vk_pipeline_layout, s: usize) -> Option<&DescMap> {
     let l = pl.set_layouts[s];
     if l.is_null() {
         return None;

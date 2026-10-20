@@ -196,11 +196,11 @@ pub fn depth_is_d32(f: VkFormat) -> bool {
 
 /// How a view of format `f` reaches the sampler: the hardware format and the conversion of its
 /// texels; the stencil aspect samples as R8_UINT.
-pub fn tex_format(f: VkFormat, stencil: bool) -> Option<(TexFormat, tex_conv)> {
+pub fn tex_format(f: VkFormat, stencil: bool) -> Option<(TexFormat, TexConv)> {
     use TexFormat as T;
-    let raw = |t: T| (t, tex_conv { bpp: t.bytes(), ..Default::default() });
-    let ch = |t, cs, sch, swap_rb, alpha| (t, tex_conv { bpp: cs * sch, cs, sch, alpha, swap_rb, ..Default::default() });
-    let p16 = |t: T, pack16| (t, tex_conv { bpp: t.bytes(), pack16, ..Default::default() });
+    let raw = |t: T| (t, TexConv { bpp: t.bytes(), ..Default::default() });
+    let ch = |t, cs, sch, swap_rb, alpha| (t, TexConv { bpp: cs * sch, cs, sch, alpha, swap_rb, ..Default::default() });
+    let p16 = |t: T, pack16| (t, TexConv { bpp: t.bytes(), pack16, ..Default::default() });
     let (mut t, mut c) = match f {
         VK_FORMAT_R8_UNORM => raw(T::R8_UNORM),
         VK_FORMAT_R8_SNORM => raw(T::R8_SNORM),
@@ -279,12 +279,12 @@ pub fn tex_format(f: VkFormat, stencil: bool) -> Option<(TexFormat, tex_conv)> {
         VK_FORMAT_A4B4G4R4_UNORM_PACK16 => p16(T::B4G4R4A4_UNORM_PACK16, 8),
         VK_FORMAT_A2R10G10B10_UNORM_PACK32 => p16(T::A2B10G10R10_UNORM_PACK32, 6),
         VK_FORMAT_A2R10G10B10_UINT_PACK32 => p16(T::A2B10G10R10_UINT_PACK32, 6),
-        VK_FORMAT_R4G4_UNORM_PACK8 => (T::R8G8_UNORM, tex_conv { bpp: 1, pack16: 5, ..Default::default() }),
+        VK_FORMAT_R4G4_UNORM_PACK8 => (T::R8G8_UNORM, TexConv { bpp: 1, pack16: 5, ..Default::default() }),
         VK_FORMAT_D16_UNORM => raw(T::D16_UNORM),
         VK_FORMAT_X8_D24_UNORM_PACK32 | VK_FORMAT_D24_UNORM_S8_UINT => raw(T::X8_D24_UNORM_PACK32),
         VK_FORMAT_D32_SFLOAT => raw(T::D32_SFLOAT),
-        VK_FORMAT_D16_UNORM_S8_UINT => (T::D16_UNORM, tex_conv { bpp: 2, zstride: 3, ..Default::default() }),
-        VK_FORMAT_D32_SFLOAT_S8_UINT => (T::D32_SFLOAT, tex_conv { bpp: 4, zstride: 8, ..Default::default() }),
+        VK_FORMAT_D16_UNORM_S8_UINT => (T::D16_UNORM, TexConv { bpp: 2, zstride: 3, ..Default::default() }),
+        VK_FORMAT_D32_SFLOAT_S8_UINT => (T::D32_SFLOAT, TexConv { bpp: 4, zstride: 8, ..Default::default() }),
         _ => return None,
     };
     if stencil {
@@ -302,7 +302,7 @@ pub fn tex_format(f: VkFormat, stencil: bool) -> Option<(TexFormat, tex_conv)> {
 }
 
 /// Converts `n` texels from `src` to the layout the texture unit reads.
-pub fn tex_convert(c: &tex_conv, dst: &mut [u8], src: &[u8], n: usize) {
+pub fn tex_convert(c: &TexConv, dst: &mut [u8], src: &[u8], n: usize) {
     let (bpp, obpp, cs) = (c.bpp as usize, c.obpp as usize, c.cs as usize);
     if c.sch == 0 && c.pack16 == 0 && c.zstride == 0 {
         dst[..n * obpp].copy_from_slice(&src[..n * obpp]);
@@ -347,7 +347,7 @@ pub fn tex_convert(c: &tex_conv, dst: &mut [u8], src: &[u8], n: usize) {
 
 /// # Safety
 /// `c` is valid, `dst` holds `n` output texels and `src` the `n` input texels `c` describes.
-pub unsafe fn borgvk_tex_convert(c: *const tex_conv, dst: *mut u8, src: *const u8, n: u32) {
+pub unsafe fn borgvk_tex_convert(c: *const TexConv, dst: *mut u8, src: *const u8, n: u32) {
     let (c, n) = (unsafe { &*c }, n as usize);
     let mut src_len = n * c.bpp as usize;
     if c.sch == 0 && c.pack16 == 0 && c.zstride == 0 {
@@ -377,8 +377,8 @@ mod tests {
         assert!(tex_format(VK_FORMAT_BC1_RGB_UNORM_BLOCK, false).is_none());
     }
 
-    fn conv(bpp: u32, obpp: u32, cs: u32, sch: u32, alpha: u32, swap_rb: bool) -> tex_conv {
-        tex_conv { bpp, obpp, cs, sch, alpha, swap_rb, ..Default::default() }
+    fn conv(bpp: u32, obpp: u32, cs: u32, sch: u32, alpha: u32, swap_rb: bool) -> TexConv {
+        TexConv { bpp, obpp, cs, sch, alpha, swap_rb, ..Default::default() }
     }
 
     #[test]

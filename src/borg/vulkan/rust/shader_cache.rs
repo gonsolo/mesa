@@ -70,7 +70,7 @@ fn entries() -> &'static [Entry] {
 }
 
 /// The cached blob of a stage and whether it reads gl_PointCoord.
-pub fn get(si: &VkPipelineShaderStageCreateInfo, vfetch: u32, blob: &mut borgvk_shader_blob) -> Option<bool> {
+pub fn get(si: &VkPipelineShaderStageCreateInfo, vfetch: u32, blob: &mut ShaderBlob) -> Option<bool> {
     let cache = entries();
     if cache.is_empty() {
         return None;
@@ -83,7 +83,7 @@ pub fn get(si: &VkPipelineShaderStageCreateInfo, vfetch: u32, blob: &mut borgvk_
 }
 
 #[cfg(borgc)]
-pub fn record(si: &VkPipelineShaderStageCreateInfo, vfetch: u32, blob: &borgvk_shader_blob, reads_pntc: bool) {
+pub fn record(si: &VkPipelineShaderStageCreateInfo, vfetch: u32, blob: &ShaderBlob, reads_pntc: bool) {
     use std::{fs::OpenOptions, io::Write};
     let Some(path) = env_path("BORGVK_SHADER_CACHE_RECORD") else {
         return;

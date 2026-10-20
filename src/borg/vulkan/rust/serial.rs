@@ -210,7 +210,7 @@ pub fn send_state(reg: &[u32; 5]) {
     emit(&mut pkt);
 }
 
-pub fn send_viewport(vp: &borgvk_vp) {
+pub fn send_viewport(vp: &Vp) {
     let mut pkt = [0u8; 42];
     pkt[0] = MARKER_VP;
     for (k, &v) in vp.v.iter().enumerate() {
@@ -396,7 +396,7 @@ pub unsafe fn borgvk_serial_send_state(reg: *const u32) {
     send_state(unsafe { &*(reg as *const [u32; 5]) });
 }
 
-pub unsafe fn borgvk_serial_send_viewport(vp: *const borgvk_vp) {
+pub unsafe fn borgvk_serial_send_viewport(vp: *const Vp) {
     send_viewport(unsafe { &*vp });
 }
 
@@ -451,7 +451,7 @@ mod tests {
 
     #[test]
     fn viewport() {
-        let vp = borgvk_vp { valid: true, v: [1.0, 2.0, 3.0, 4.0, 0.0, 1.0], sc: [5, 6, 7, 8] };
+        let vp = Vp { valid: true, v: [1.0, 2.0, 3.0, 4.0, 0.0, 1.0], sc: [5, 6, 7, 8] };
         let p = sent(|| send_viewport(&vp));
         assert_eq!((p.len(), p[0]), (42, MARKER_VP));
         assert_eq!(f32::from_le_bytes(p[9..13].try_into().unwrap()), 3.0);

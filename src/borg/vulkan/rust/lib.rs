@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 mod ffi {
+    pub use crate::types::*;
     pub use borgvk_bindings_rs::*;
 }
 
@@ -44,5 +45,6 @@ mod sync;
 mod texel;
 mod texture_upload;
 mod transport;
+mod types;
 mod util;
 mod wsi;

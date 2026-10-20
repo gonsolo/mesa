@@ -22,7 +22,7 @@ pub struct DescriptorSetLayout {
     pub vk: vk_descriptor_set_layout,
     pub binding_count: u32,
     pub dyn_mask: u64, // slots of *_BUFFER_DYNAMIC descriptors
-    pub map: borgvk_desc_map,
+    pub map: DescMap,
 }
 
 #[repr(C)]
@@ -48,7 +48,7 @@ pub struct DescriptorSet {
     pub dyn_mask: u64,      // from the layout: dynamic-offset slots
     pub storage_mask: u32,  // slots whose buffer is a storage buffer
     pub sampled_mask: u32,  // slots whose image is sampled (not storage)
-    pub map: borgvk_desc_map,
+    pub map: DescMap,
 }
 
 const BINDINGS: usize = BORGVK_MAX_BINDINGS as usize;
@@ -66,7 +66,7 @@ fn bit(slot: u32) -> u32 {
 
 /// The slot map of a layout's bindings and the slots of its dynamic buffers: bindings in
 /// order, each array taking as many slots as it has elements.
-pub fn layout_map(bindings: &[VkDescriptorSetLayoutBinding]) -> (borgvk_desc_map, u64) {
+pub fn layout_map(bindings: &[VkDescriptorSetLayoutBinding]) -> (DescMap, u64) {
     let (mut count_of, mut dyn_of) = ([0u32; MAX], [false; MAX]);
     for b in bindings.iter().filter(|b| (b.binding as usize) < MAX) {
         count_of[b.binding as usize] = b.descriptorCount.max(1).min(MAX as u32);
@@ -75,7 +75,7 @@ pub fn layout_map(bindings: &[VkDescriptorSetLayoutBinding]) -> (borgvk_desc_map
             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC | VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC
         );
     }
-    let (mut m, mut dyn_mask, mut extra) = (borgvk_desc_map::default(), 0u64, 0u32);
+    let (mut m, mut dyn_mask, mut extra) = (DescMap::default(), 0u64, 0u32);
     for b in (0..MAX as u32).filter(|&b| count_of[b as usize] != 0) {
         let slot = b + extra;
         if slot >= MAX as u32 {
@@ -96,7 +96,7 @@ pub fn layout_map(bindings: &[VkDescriptorSetLayoutBinding]) -> (borgvk_desc_map
 }
 
 /// The slot of element `elem` of `binding`; past the end of an array the next bindings follow.
-pub fn desc_slot(m: &borgvk_desc_map, binding: u32, mut elem: u32) -> Option<u32> {
+pub fn desc_slot(m: &DescMap, binding: u32, mut elem: u32) -> Option<u32> {
     if m.n == 0 {
         let slot = binding + elem;
         return (slot < MAX as u32).then_some(slot);
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn without_a_map_bindings_are_slots() {
-        let m = borgvk_desc_map::default();
+        let m = DescMap::default();
         assert_eq!(desc_slot(&m, 3, 2), Some(5));
         assert_eq!(desc_slot(&m, 15, 1), None);
     }
