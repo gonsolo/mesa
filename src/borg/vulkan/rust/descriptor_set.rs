@@ -114,7 +114,7 @@ pub fn desc_slot(m: &DescMap, binding: u32, mut elem: u32) -> Option<u32> {
 }
 
 entrypoint! {
-    fn borgvk_CreateDescriptorSetLayout(device: VkDevice, info: *const VkDescriptorSetLayoutCreateInfo, _alloc: *const VkAllocationCallbacks, out: *mut VkDescriptorSetLayout) -> Result<(), VkError> {
+    unsafe fn borgvk_CreateDescriptorSetLayout(device: VkDevice, info: *const VkDescriptorSetLayoutCreateInfo, _alloc: *const VkAllocationCallbacks, out: *mut VkDescriptorSetLayout) -> Result<(), VkError> {
         let dev = device.get().unwrap();
         let Some(l) = allocate::<DescriptorSetLayout>(|n| vk_descriptor_set_layout_zalloc(&mut dev.vk, n, info)) else {
             return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
@@ -130,13 +130,13 @@ entrypoint! {
 // DestroyDescriptorSetLayout is the common, refcounted entry point.
 
 entrypoint! {
-    fn borgvk_GetDescriptorSetLayoutSupport(_device: VkDevice, info: *const VkDescriptorSetLayoutCreateInfo, support: *mut VkDescriptorSetLayoutSupport) {
+    unsafe fn borgvk_GetDescriptorSetLayoutSupport(_device: VkDevice, info: *const VkDescriptorSetLayoutCreateInfo, support: *mut VkDescriptorSetLayoutSupport) {
         (*support).supported = ((*info).bindingCount <= BORGVK_MAX_BINDINGS) as VkBool32;
     }
 }
 
 entrypoint! {
-    fn borgvk_CreateDescriptorPool(device: VkDevice, info: *const VkDescriptorPoolCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkDescriptorPool) -> Result<(), VkError> {
+    unsafe fn borgvk_CreateDescriptorPool(device: VkDevice, info: *const VkDescriptorPoolCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkDescriptorPool) -> Result<(), VkError> {
         let dev = device.get().unwrap();
         let Some(p) = allocate::<DescriptorPool>(|n| vk_object_zalloc(&mut dev.vk, alloc, n, VK_OBJECT_TYPE_DESCRIPTOR_POOL)) else {
             return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
@@ -170,7 +170,7 @@ fn free_pool_sets(dev: &mut Device, pool: &mut DescriptorPool) {
 }
 
 entrypoint! {
-    fn borgvk_DestroyDescriptorPool(device: VkDevice, pool: VkDescriptorPool, alloc: *const VkAllocationCallbacks) {
+    unsafe fn borgvk_DestroyDescriptorPool(device: VkDevice, pool: VkDescriptorPool, alloc: *const VkAllocationCallbacks) {
         if let Some(p) = pool.get() {
             let dev = device.get().unwrap();
             free_pool_sets(dev, p);
@@ -180,14 +180,14 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_ResetDescriptorPool(device: VkDevice, pool: VkDescriptorPool, _flags: VkDescriptorPoolResetFlags) -> VkResult {
+    unsafe fn borgvk_ResetDescriptorPool(device: VkDevice, pool: VkDescriptorPool, _flags: VkDescriptorPoolResetFlags) -> VkResult {
         free_pool_sets(device.get().unwrap(), pool.get().unwrap());
         VK_SUCCESS
     }
 }
 
 entrypoint! {
-    fn borgvk_AllocateDescriptorSets(device: VkDevice, info: *const VkDescriptorSetAllocateInfo, out: *mut VkDescriptorSet) -> Result<(), VkError> {
+    unsafe fn borgvk_AllocateDescriptorSets(device: VkDevice, info: *const VkDescriptorSetAllocateInfo, out: *mut VkDescriptorSet) -> Result<(), VkError> {
         let dev = device.get().unwrap();
         let i = &*info;
         let pool = i.descriptorPool.get().unwrap();
@@ -218,7 +218,7 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_FreeDescriptorSets(device: VkDevice, _pool: VkDescriptorPool, count: u32, sets: *const VkDescriptorSet) -> VkResult {
+    unsafe fn borgvk_FreeDescriptorSets(device: VkDevice, _pool: VkDescriptorPool, count: u32, sets: *const VkDescriptorSet) -> VkResult {
         let dev = device.get().unwrap();
         for s in slice(sets, count).iter().filter(|s| !s.is_null()) {
             free_set(dev, s.ptr());
@@ -294,7 +294,7 @@ unsafe fn write(w: &VkWriteDescriptorSet) {
 }
 
 entrypoint! {
-    fn borgvk_UpdateDescriptorSets(_device: VkDevice, nwrites: u32, writes: *const VkWriteDescriptorSet, ncopies: u32, copies: *const VkCopyDescriptorSet) {
+    unsafe fn borgvk_UpdateDescriptorSets(_device: VkDevice, nwrites: u32, writes: *const VkWriteDescriptorSet, ncopies: u32, copies: *const VkCopyDescriptorSet) {
         for w in slice(writes, nwrites) {
             write(w);
         }

@@ -286,7 +286,7 @@ fn apply(bufs: &[CsBuf], merged: &[Vec<u8>]) {
 }
 
 entrypoint! {
-    fn borgvk_CmdDispatch(command_buffer: VkCommandBuffer, gx: u32, gy: u32, gz: u32) {
+    unsafe fn borgvk_CmdDispatch(command_buffer: VkCommandBuffer, gx: u32, gy: u32, gz: u32) {
         let c = cmd(command_buffer.ptr());
         let direct = std::env::var_os("BORGVK_SIM_DIRECT").filter(|d| !d.is_empty());
         let Some(pl) = c.cs_pipeline.as_ref().filter(|p| p.cs_ok) else { return };

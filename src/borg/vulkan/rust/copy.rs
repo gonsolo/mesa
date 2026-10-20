@@ -21,7 +21,7 @@ pub fn host(b: &Buffer) -> Option<*mut u8> {
 }
 
 entrypoint! {
-    fn borgvk_CmdFillBuffer(_cmd: VkCommandBuffer, buffer: VkBuffer, offset: VkDeviceSize, size: VkDeviceSize, data: u32) {
+    unsafe fn borgvk_CmdFillBuffer(_cmd: VkCommandBuffer, buffer: VkBuffer, offset: VkDeviceSize, size: VkDeviceSize, data: u32) {
         let Some(b) = buffer.get() else { return };
         let Some(base) = host(b) else { return };
         let size = if size == VK_WHOLE_SIZE as u64 { b.vk.size - offset } else { size };
@@ -33,7 +33,7 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_CmdUpdateBuffer(_cmd: VkCommandBuffer, buffer: VkBuffer, offset: VkDeviceSize, size: VkDeviceSize, data: *const c_void) {
+    unsafe fn borgvk_CmdUpdateBuffer(_cmd: VkCommandBuffer, buffer: VkBuffer, offset: VkDeviceSize, size: VkDeviceSize, data: *const c_void) {
         let Some(base) = buffer.get().and_then(|b| host(b)) else { return };
         if !data.is_null() {
             std::ptr::copy_nonoverlapping(data.cast::<u8>(), base.add(offset as usize), size as usize);
@@ -49,13 +49,13 @@ fn copy_buffer(src: VkBuffer, dst: VkBuffer, regions: impl Iterator<Item = (u64,
 }
 
 entrypoint! {
-    fn borgvk_CmdCopyBuffer(_cmd: VkCommandBuffer, src: VkBuffer, dst: VkBuffer, count: u32, regions: *const VkBufferCopy) {
+    unsafe fn borgvk_CmdCopyBuffer(_cmd: VkCommandBuffer, src: VkBuffer, dst: VkBuffer, count: u32, regions: *const VkBufferCopy) {
         copy_buffer(src, dst, slice(regions, count).iter().map(|r| (r.srcOffset, r.dstOffset, r.size)));
     }
 }
 
 entrypoint! {
-    fn borgvk_CmdCopyBuffer2(_cmd: VkCommandBuffer, info: *const VkCopyBufferInfo2) {
+    unsafe fn borgvk_CmdCopyBuffer2(_cmd: VkCommandBuffer, info: *const VkCopyBufferInfo2) {
         let i = &*info;
         copy_buffer(i.srcBuffer, i.dstBuffer, slice(i.pRegions, i.regionCount).iter().map(|r| (r.srcOffset, r.dstOffset, r.size)));
     }
@@ -147,7 +147,7 @@ fn copy_image(src: &Image, dst: &Image, reg: &VkImageCopy) {
 }
 
 entrypoint! {
-    fn borgvk_CmdCopyImage(_cmd: VkCommandBuffer, src: VkImage, _sl: VkImageLayout, dst: VkImage, _dl: VkImageLayout, count: u32, regions: *const VkImageCopy) {
+    unsafe fn borgvk_CmdCopyImage(_cmd: VkCommandBuffer, src: VkImage, _sl: VkImageLayout, dst: VkImage, _dl: VkImageLayout, count: u32, regions: *const VkImageCopy) {
         let (Some(s), Some(d)) = (src.get(), dst.get()) else { return };
         for r in slice(regions, count) {
             copy_image(s, d, r);
@@ -156,7 +156,7 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_CmdCopyImage2(_cmd: VkCommandBuffer, info: *const VkCopyImageInfo2) {
+    unsafe fn borgvk_CmdCopyImage2(_cmd: VkCommandBuffer, info: *const VkCopyImageInfo2) {
         let i = &*info;
         let (Some(s), Some(d)) = (i.srcImage.get(), i.dstImage.get()) else { return };
         for r in slice(i.pRegions, i.regionCount) {
@@ -235,19 +235,19 @@ fn buffer_image_copy(r: &VkBufferImageCopy2) -> VkBufferImageCopy {
 }
 
 entrypoint! {
-    fn borgvk_CmdCopyImageToBuffer(_cmd: VkCommandBuffer, src: VkImage, _sl: VkImageLayout, dst: VkBuffer, count: u32, regions: *const VkBufferImageCopy) {
+    unsafe fn borgvk_CmdCopyImageToBuffer(_cmd: VkCommandBuffer, src: VkImage, _sl: VkImageLayout, dst: VkBuffer, count: u32, regions: *const VkBufferImageCopy) {
         buffer_image_copies(src, dst, slice(regions, count), true);
     }
 }
 
 entrypoint! {
-    fn borgvk_CmdCopyBufferToImage(_cmd: VkCommandBuffer, src: VkBuffer, dst: VkImage, _dl: VkImageLayout, count: u32, regions: *const VkBufferImageCopy) {
+    unsafe fn borgvk_CmdCopyBufferToImage(_cmd: VkCommandBuffer, src: VkBuffer, dst: VkImage, _dl: VkImageLayout, count: u32, regions: *const VkBufferImageCopy) {
         buffer_image_copies(dst, src, slice(regions, count), false);
     }
 }
 
 entrypoint! {
-    fn borgvk_CmdCopyImageToBuffer2(_cmd: VkCommandBuffer, info: *const VkCopyImageToBufferInfo2) {
+    unsafe fn borgvk_CmdCopyImageToBuffer2(_cmd: VkCommandBuffer, info: *const VkCopyImageToBufferInfo2) {
         let i = &*info;
         let regions: Vec<_> = slice(i.pRegions, i.regionCount).iter().map(buffer_image_copy).collect();
         buffer_image_copies(i.srcImage, i.dstBuffer, &regions, true);
@@ -255,7 +255,7 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_CmdCopyBufferToImage2(_cmd: VkCommandBuffer, info: *const VkCopyBufferToImageInfo2) {
+    unsafe fn borgvk_CmdCopyBufferToImage2(_cmd: VkCommandBuffer, info: *const VkCopyBufferToImageInfo2) {
         let i = &*info;
         let regions: Vec<_> = slice(i.pRegions, i.regionCount).iter().map(buffer_image_copy).collect();
         buffer_image_copies(i.dstImage, i.srcBuffer, &regions, false);
@@ -454,14 +454,14 @@ fn blit(src: &Image, dst: &Image, regions: &[VkImageBlit], filter: VkFilter) {
 }
 
 entrypoint! {
-    fn borgvk_CmdBlitImage(_cmd: VkCommandBuffer, src: VkImage, _sl: VkImageLayout, dst: VkImage, _dl: VkImageLayout, count: u32, regions: *const VkImageBlit, filter: VkFilter) {
+    unsafe fn borgvk_CmdBlitImage(_cmd: VkCommandBuffer, src: VkImage, _sl: VkImageLayout, dst: VkImage, _dl: VkImageLayout, count: u32, regions: *const VkImageBlit, filter: VkFilter) {
         let (Some(s), Some(d)) = (src.get(), dst.get()) else { return };
         blit(s, d, slice(regions, count), filter);
     }
 }
 
 entrypoint! {
-    fn borgvk_CmdBlitImage2(_cmd: VkCommandBuffer, info: *const VkBlitImageInfo2) {
+    unsafe fn borgvk_CmdBlitImage2(_cmd: VkCommandBuffer, info: *const VkBlitImageInfo2) {
         let i = &*info;
         let (Some(s), Some(d)) = (i.srcImage.get(), i.dstImage.get()) else { return };
         let regions: Vec<VkImageBlit> = slice(i.pRegions, i.regionCount)
@@ -510,7 +510,7 @@ pub fn resolve_region(src: &Image, dst: &Image, reg: &VkImageResolve) {
 }
 
 entrypoint! {
-    fn borgvk_CmdResolveImage(_cmd: VkCommandBuffer, src: VkImage, _sl: VkImageLayout, dst: VkImage, _dl: VkImageLayout, count: u32, regions: *const VkImageResolve) {
+    unsafe fn borgvk_CmdResolveImage(_cmd: VkCommandBuffer, src: VkImage, _sl: VkImageLayout, dst: VkImage, _dl: VkImageLayout, count: u32, regions: *const VkImageResolve) {
         let (Some(s), Some(d)) = (src.get(), dst.get()) else { return };
         for r in slice(regions, count) {
             resolve_region(s, d, r);
@@ -519,7 +519,7 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_CmdResolveImage2(_cmd: VkCommandBuffer, info: *const VkResolveImageInfo2) {
+    unsafe fn borgvk_CmdResolveImage2(_cmd: VkCommandBuffer, info: *const VkResolveImageInfo2) {
         let i = &*info;
         let (Some(s), Some(d)) = (i.srcImage.get(), i.dstImage.get()) else { return };
         for r in slice(i.pRegions, i.regionCount) {

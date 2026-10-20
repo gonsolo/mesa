@@ -3,7 +3,8 @@
 
 //! VkSampler: the runtime's sampler and the descriptor the texture unit reads.
 
-use crate::entrypoint::{entrypoint, handle, vk_error, Handle};
+use crate::device::Device;
+use crate::entrypoint::{entrypoint, handle, pointee, vk_error, Handle};
 use crate::ffi::*;
 use crate::object::{allocate, Zeroed};
 use borg_layout::descriptor::SamplerDesc;
@@ -35,22 +36,22 @@ pub fn desc(i: &VkSamplerCreateInfo) -> SamplerDesc {
     }
 }
 
+pointee!(VkSamplerCreateInfo);
+
 entrypoint! {
-    fn borgvk_CreateSampler(device: VkDevice, info: *const VkSamplerCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkSampler) -> Result<(), VkError> {
-        let dev = device.get().unwrap();
-        let Some(s) = allocate::<Sampler>(|n| vk_sampler_create(&mut dev.vk, info, alloc, n)) else {
-            return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
-        };
-        s.desc = desc(&*info).pack();
+    fn borgvk_CreateSampler(device: &Device, info: &VkSamplerCreateInfo, alloc: *const VkAllocationCallbacks, out: &mut VkSampler) -> Result<(), VkError> {
+        let s = unsafe { allocate::<Sampler>(|n| vk_sampler_create(device.vk_ptr(), info, alloc, n)) };
+        let s = s.ok_or_else(|| vk_error!(device, VK_ERROR_OUT_OF_HOST_MEMORY))?;
+        s.desc = desc(info).pack();
         *out = VkSampler::from_object(s);
         Ok(())
     }
 }
 
 entrypoint! {
-    fn borgvk_DestroySampler(device: VkDevice, sampler: VkSampler, alloc: *const VkAllocationCallbacks) {
-        if let Some(s) = sampler.get() {
-            vk_sampler_destroy(&mut device.get().unwrap().vk, alloc, &mut s.vk);
+    fn borgvk_DestroySampler(device: &Device, sampler: Option<&mut Sampler>, alloc: *const VkAllocationCallbacks) {
+        if let Some(s) = sampler {
+            unsafe { vk_sampler_destroy(device.vk_ptr(), alloc, &mut s.vk) };
         }
     }
 }

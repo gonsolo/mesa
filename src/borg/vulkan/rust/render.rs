@@ -78,7 +78,7 @@ fn depth_stencil(c: &mut CommandBuffer, att: *const VkRenderingAttachmentInfo, a
 }
 
 entrypoint! {
-    fn borgvk_CmdBeginRendering(command_buffer: VkCommandBuffer, info: *const VkRenderingInfo) {
+    unsafe fn borgvk_CmdBeginRendering(command_buffer: VkCommandBuffer, info: *const VkRenderingInfo) {
         let (c, ri) = (cmd(command_buffer.ptr()), &*info);
         c.in_rendering = true;
         c.render_area = ri.renderArea;
@@ -115,7 +115,7 @@ fn layers(view: &vk_image_view, count: u32) -> VkImageSubresourceLayers {
 }
 
 entrypoint! {
-    fn borgvk_CmdEndRendering2EXT(command_buffer: VkCommandBuffer, _info: *const VkRenderingEndInfoEXT) {
+    unsafe fn borgvk_CmdEndRendering2EXT(command_buffer: VkCommandBuffer, _info: *const VkRenderingEndInfoEXT) {
         let c = cmd(command_buffer.ptr());
         crate::draw::flush_draws(c);
         let ra = c.render_area;
@@ -151,43 +151,43 @@ extern "C" {
 // Recorded commands replay through the device's cmd_dispatch, which holds only borgvk's entry
 // points; these forward to the runtime's render passes.
 entrypoint! {
-    fn borgvk_CmdEndRendering(command_buffer: VkCommandBuffer) {
+    unsafe fn borgvk_CmdEndRendering(command_buffer: VkCommandBuffer) {
         vk_common_CmdEndRendering(command_buffer);
     }
 }
 
 entrypoint! {
-    fn borgvk_CmdBeginRenderPass(command_buffer: VkCommandBuffer, info: *const VkRenderPassBeginInfo, contents: VkSubpassContents) {
+    unsafe fn borgvk_CmdBeginRenderPass(command_buffer: VkCommandBuffer, info: *const VkRenderPassBeginInfo, contents: VkSubpassContents) {
         vk_common_CmdBeginRenderPass(command_buffer, info, contents);
     }
 }
 
 entrypoint! {
-    fn borgvk_CmdBeginRenderPass2(command_buffer: VkCommandBuffer, info: *const VkRenderPassBeginInfo, subpass: *const VkSubpassBeginInfo) {
+    unsafe fn borgvk_CmdBeginRenderPass2(command_buffer: VkCommandBuffer, info: *const VkRenderPassBeginInfo, subpass: *const VkSubpassBeginInfo) {
         vk_common_CmdBeginRenderPass2(command_buffer, info, subpass);
     }
 }
 
 entrypoint! {
-    fn borgvk_CmdNextSubpass(command_buffer: VkCommandBuffer, contents: VkSubpassContents) {
+    unsafe fn borgvk_CmdNextSubpass(command_buffer: VkCommandBuffer, contents: VkSubpassContents) {
         vk_common_CmdNextSubpass(command_buffer, contents);
     }
 }
 
 entrypoint! {
-    fn borgvk_CmdNextSubpass2(command_buffer: VkCommandBuffer, begin: *const VkSubpassBeginInfo, end: *const VkSubpassEndInfo) {
+    unsafe fn borgvk_CmdNextSubpass2(command_buffer: VkCommandBuffer, begin: *const VkSubpassBeginInfo, end: *const VkSubpassEndInfo) {
         vk_common_CmdNextSubpass2(command_buffer, begin, end);
     }
 }
 
 entrypoint! {
-    fn borgvk_CmdEndRenderPass(command_buffer: VkCommandBuffer) {
+    unsafe fn borgvk_CmdEndRenderPass(command_buffer: VkCommandBuffer) {
         vk_common_CmdEndRenderPass(command_buffer);
     }
 }
 
 entrypoint! {
-    fn borgvk_CmdEndRenderPass2(command_buffer: VkCommandBuffer, end: *const VkSubpassEndInfo) {
+    unsafe fn borgvk_CmdEndRenderPass2(command_buffer: VkCommandBuffer, end: *const VkSubpassEndInfo) {
         vk_common_CmdEndRenderPass2(command_buffer, end);
     }
 }

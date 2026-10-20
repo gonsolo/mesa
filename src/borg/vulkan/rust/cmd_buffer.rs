@@ -130,7 +130,7 @@ pub static CMD_BUFFER_OPS: vk_command_buffer_ops =
     vk_command_buffer_ops { create: Some(create), reset: Some(reset), destroy: Some(destroy), ..unsafe { zeroed() } };
 
 entrypoint! {
-    fn borgvk_BeginCommandBuffer(command_buffer: VkCommandBuffer, info: *const VkCommandBufferBeginInfo) -> VkResult {
+    unsafe fn borgvk_BeginCommandBuffer(command_buffer: VkCommandBuffer, info: *const VkCommandBufferBeginInfo) -> VkResult {
         let c = command_buffer.ptr();
         vk_command_buffer_begin(c, info);
         vk_command_buffer_get_record_result(c)
@@ -138,7 +138,7 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_EndCommandBuffer(command_buffer: VkCommandBuffer) -> VkResult {
+    unsafe fn borgvk_EndCommandBuffer(command_buffer: VkCommandBuffer) -> VkResult {
         vk_command_buffer_end(command_buffer.ptr())
     }
 }
@@ -154,7 +154,7 @@ fn put(dst: &mut [u32], offset: u32, size: u32, values: *const c_void) -> bool {
 }
 
 entrypoint! {
-    fn borgvk_CmdPushConstants(command_buffer: VkCommandBuffer, _layout: VkPipelineLayout, _stages: VkShaderStageFlags, offset: u32, size: u32, values: *const c_void) {
+    unsafe fn borgvk_CmdPushConstants(command_buffer: VkCommandBuffer, _layout: VkPipelineLayout, _stages: VkShaderStageFlags, offset: u32, size: u32, values: *const c_void) {
         let c = cmd(command_buffer.ptr());
         put(&mut c.pc, offset, size, values);
         let dev = &mut *c.vk.base.device.cast::<Device>();

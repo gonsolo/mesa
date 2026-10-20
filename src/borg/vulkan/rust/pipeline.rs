@@ -349,7 +349,7 @@ fn mrt_formats(formats: &[VkFormat]) -> bool {
 }
 
 entrypoint! {
-    fn borgvk_CreateGraphicsPipelines(device: VkDevice, _cache: VkPipelineCache, count: u32, infos: *const VkGraphicsPipelineCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkPipeline) -> Result<(), VkError> {
+    unsafe fn borgvk_CreateGraphicsPipelines(device: VkDevice, _cache: VkPipelineCache, count: u32, infos: *const VkGraphicsPipelineCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkPipeline) -> Result<(), VkError> {
         let dev = device.get().unwrap();
         let out = std::slice::from_raw_parts_mut(out, count as usize);
         let mut result = Ok(());
@@ -375,7 +375,7 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_CreateComputePipelines(device: VkDevice, _cache: VkPipelineCache, count: u32, infos: *const VkComputePipelineCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkPipeline) -> Result<(), VkError> {
+    unsafe fn borgvk_CreateComputePipelines(device: VkDevice, _cache: VkPipelineCache, count: u32, infos: *const VkComputePipelineCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkPipeline) -> Result<(), VkError> {
         let dev = device.get().unwrap();
         let out = std::slice::from_raw_parts_mut(out, count as usize);
         for (i, ci) in slice(infos, count).iter().enumerate() {
@@ -401,7 +401,7 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_DestroyPipeline(device: VkDevice, pipeline: VkPipeline, alloc: *const VkAllocationCallbacks) {
+    unsafe fn borgvk_DestroyPipeline(device: VkDevice, pipeline: VkPipeline, alloc: *const VkAllocationCallbacks) {
         let Some(pl) = pipeline.get() else {
             return;
         };

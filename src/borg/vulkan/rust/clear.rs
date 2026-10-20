@@ -45,7 +45,7 @@ fn for_each_plane(image: &Image, ranges: &[VkImageSubresourceRange], b: Blocks, 
 }
 
 entrypoint! {
-    fn borgvk_CmdClearColorImage(_cmd: VkCommandBuffer, image: VkImage, _layout: VkImageLayout, color: *const VkClearColorValue, count: u32, ranges: *const VkImageSubresourceRange) {
+    unsafe fn borgvk_CmdClearColorImage(_cmd: VkCommandBuffer, image: VkImage, _layout: VkImageLayout, color: *const VkClearColorValue, count: u32, ranges: *const VkImageSubresourceRange) {
         let Some(image) = image.get() else { return };
         let Some((base, pf, b)) = mapped(image) else { return };
         let mut pixel = [0u8; 16];
@@ -61,7 +61,7 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_CmdClearDepthStencilImage(_cmd: VkCommandBuffer, image: VkImage, _layout: VkImageLayout, ds: *const VkClearDepthStencilValue, count: u32, ranges: *const VkImageSubresourceRange) {
+    unsafe fn borgvk_CmdClearDepthStencilImage(_cmd: VkCommandBuffer, image: VkImage, _layout: VkImageLayout, ds: *const VkClearDepthStencilValue, count: u32, ranges: *const VkImageSubresourceRange) {
         let Some(image) = image.get() else { return };
         let Some((base, pf, b)) = mapped(image) else { return };
         let ds = &*ds;
@@ -106,7 +106,7 @@ pub fn clear_rect(view: *mut vk_image_view, aspect: VkImageAspectFlags, value: &
 }
 
 entrypoint! {
-    fn borgvk_CmdClearAttachments(command_buffer: VkCommandBuffer, natt: u32, atts: *const VkClearAttachment, nrects: u32, rects: *const VkClearRect) {
+    unsafe fn borgvk_CmdClearAttachments(command_buffer: VkCommandBuffer, natt: u32, atts: *const VkClearAttachment, nrects: u32, rects: *const VkClearRect) {
         let c = cmd(command_buffer.ptr());
         crate::draw::flush_draws(c); // the draws so far come first
         if !c.in_rendering {

@@ -56,13 +56,13 @@ unsafe fn headless_surface(instance: VkInstance, alloc: *const VkAllocationCallb
 
 // The create infos are not read: any X11 surface becomes a headless one.
 entrypoint! {
-    fn borgvk_CreateXlibSurfaceKHR(instance: VkInstance, _info: *const c_void, alloc: *const VkAllocationCallbacks, out: *mut VkSurfaceKHR) -> VkResult {
+    unsafe fn borgvk_CreateXlibSurfaceKHR(instance: VkInstance, _info: *const c_void, alloc: *const VkAllocationCallbacks, out: *mut VkSurfaceKHR) -> VkResult {
         headless_surface(instance, alloc, out)
     }
 }
 
 entrypoint! {
-    fn borgvk_CreateXcbSurfaceKHR(instance: VkInstance, _info: *const c_void, alloc: *const VkAllocationCallbacks, out: *mut VkSurfaceKHR) -> VkResult {
+    unsafe fn borgvk_CreateXcbSurfaceKHR(instance: VkInstance, _info: *const c_void, alloc: *const VkAllocationCallbacks, out: *mut VkSurfaceKHR) -> VkResult {
         headless_surface(instance, alloc, out)
     }
 }

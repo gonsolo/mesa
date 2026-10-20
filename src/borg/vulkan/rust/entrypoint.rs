@@ -56,15 +56,124 @@ macro_rules! handle {
                 o.cast()
             }
         }
+
+        impl $crate::entrypoint::Pointee for $obj {
+            type Raw = $h;
+            unsafe fn ptr(raw: $h) -> *mut $obj {
+                let o: *mut $obj = raw.cast();
+                debug_assert!(o.is_null() || unsafe { (*o.cast::<$crate::ffi::vk_object_base>()).type_ } == $t);
+                o
+            }
+        }
+
+        impl $crate::entrypoint::Pointee for $h {
+            type Raw = *mut $h;
+            unsafe fn ptr(raw: *mut $h) -> *mut $h {
+                raw
+            }
+        }
     };
 }
 pub(crate) use handle;
 
 
-/// An entry point the dispatch table calls by name, its body in an unsafe block. A body of
-/// `Result<(), VkError>` returns `VK_SUCCESS` or the error, so `?` works.
+/// What a parameter of a safe entry point is converted from at the boundary: a handle, or a
+/// pointer to a Vulkan struct or an out value.
+pub trait Pointee {
+    type Raw: Copy;
+
+    /// # Safety
+    /// `raw` is null or points at a live `Self`.
+    unsafe fn ptr(raw: Self::Raw) -> *mut Self;
+}
+
+/// A parameter of a safe entry point, converted from its C type once, at the boundary.
+pub trait Param: Sized {
+    type Raw;
+
+    /// # Safety
+    /// `raw` meets the Vulkan valid usage of the command.
+    unsafe fn from_raw(raw: Self::Raw) -> Self;
+}
+
+impl<T: Pointee> Param for &T {
+    type Raw = T::Raw;
+    unsafe fn from_raw(raw: T::Raw) -> Self {
+        let p = unsafe { T::ptr(raw) };
+        debug_assert!(!p.is_null());
+        unsafe { &*p }
+    }
+}
+
+/// For the externally synchronized parameters, which nothing else touches during the call.
+impl<T: Pointee> Param for &mut T {
+    type Raw = T::Raw;
+    unsafe fn from_raw(raw: T::Raw) -> Self {
+        let p = unsafe { T::ptr(raw) };
+        debug_assert!(!p.is_null());
+        unsafe { &mut *p }
+    }
+}
+
+impl<T: Pointee> Param for Option<&T> {
+    type Raw = T::Raw;
+    unsafe fn from_raw(raw: T::Raw) -> Self {
+        unsafe { T::ptr(raw).as_ref() }
+    }
+}
+
+impl<T: Pointee> Param for Option<&mut T> {
+    type Raw = T::Raw;
+    unsafe fn from_raw(raw: T::Raw) -> Self {
+        unsafe { T::ptr(raw).as_mut() }
+    }
+}
+
+impl<T> Param for *const T {
+    type Raw = Self;
+    unsafe fn from_raw(raw: Self) -> Self {
+        raw
+    }
+}
+
+impl<T> Param for *mut T {
+    type Raw = Self;
+    unsafe fn from_raw(raw: Self) -> Self {
+        raw
+    }
+}
+
+macro_rules! by_value {
+    ($($t:ty),*) => {
+        $(impl Param for $t {
+            type Raw = Self;
+            unsafe fn from_raw(raw: Self) -> Self {
+                raw
+            }
+        })*
+    };
+}
+by_value!(u8, u32, i32, u64, f32, usize);
+
+/// Vulkan structs and plain values passed by pointer.
+macro_rules! pointee {
+    ($($t:ty),* $(,)?) => {
+        $(impl $crate::entrypoint::Pointee for $t {
+            type Raw = *mut $t;
+            unsafe fn ptr(raw: *mut $t) -> *mut $t {
+                raw
+            }
+        })*
+    };
+}
+pub(crate) use pointee;
+pointee!(u32, u64);
+
+/// An entry point the dispatch table calls by name. `fn` converts the parameters at the
+/// boundary (see `Param`) and runs a safe body; `unsafe fn` takes them raw, its body in an
+/// unsafe block. A body of `Result<(), VkError>` returns `VK_SUCCESS` or the error.
 macro_rules! entrypoint {
-    (fn $name:ident($($p:ident: $t:ty),* $(,)?) -> Result<(), VkError> $body:block) => {
+    (unsafe fn $name:ident($($p:ident: $t:ty),* $(,)?) -> Result<(), VkError> $body:block) => {
         /// # Safety
         /// The arguments meet the Vulkan valid usage of the command.
         #[no_mangle]
@@ -74,13 +183,31 @@ macro_rules! entrypoint {
             r.map_or_else(|e| e.0, |()| $crate::ffi::VK_SUCCESS)
         }
     };
-    (fn $name:ident($($p:ident: $t:ty),* $(,)?) $(-> $ret:ty)? $body:block) => {
+    (unsafe fn $name:ident($($p:ident: $t:ty),* $(,)?) $(-> $ret:ty)? $body:block) => {
         /// # Safety
         /// The arguments meet the Vulkan valid usage of the command.
         #[no_mangle]
         pub unsafe extern "C" fn $name($($p: $t),*) $(-> $ret)? {
             #[allow(unused_unsafe)]
             unsafe { $body }
+        }
+    };
+    (fn $name:ident($($p:ident: $t:ty),* $(,)?) -> Result<(), VkError> $body:block) => {
+        /// # Safety
+        /// The arguments meet the Vulkan valid usage of the command.
+        #[no_mangle]
+        pub unsafe extern "C" fn $name($($p: <$t as $crate::entrypoint::Param>::Raw),*) -> $crate::ffi::VkResult {
+            fn body($($p: $t),*) -> Result<(), $crate::entrypoint::VkError> $body
+            body($(unsafe { <$t as $crate::entrypoint::Param>::from_raw($p) }),*).map_or_else(|e| e.0, |()| $crate::ffi::VK_SUCCESS)
+        }
+    };
+    (fn $name:ident($($p:ident: $t:ty),* $(,)?) $(-> $ret:ty)? $body:block) => {
+        /// # Safety
+        /// The arguments meet the Vulkan valid usage of the command.
+        #[no_mangle]
+        pub unsafe extern "C" fn $name($($p: <$t as $crate::entrypoint::Param>::Raw),*) $(-> $ret)? {
+            fn body($($p: $t),*) $(-> $ret)? $body
+            body($(unsafe { <$t as $crate::entrypoint::Param>::from_raw($p) }),*)
         }
     };
 }

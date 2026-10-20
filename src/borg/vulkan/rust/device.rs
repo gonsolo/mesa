@@ -47,6 +47,13 @@ pub struct Device {
     pub push_hi: u32,
 }
 
+impl Device {
+    /// For the runtime's calls; they synchronize what they change themselves.
+    pub fn vk_ptr(&self) -> *mut vk_device {
+        std::ptr::from_ref(&self.vk).cast_mut()
+    }
+}
+
 // Numbers, raw pointers, handles, the shader blobs and runtime structs the runtime zeroes.
 unsafe impl Zeroed for Instance {}
 unsafe impl Zeroed for Device {}
@@ -87,14 +94,14 @@ static INSTANCE_EXTENSIONS: LazyLock<vk_instance_extension_table> = LazyLock::ne
 });
 
 entrypoint! {
-    fn borgvk_EnumerateInstanceVersion(version: *mut u32) -> VkResult {
+    unsafe fn borgvk_EnumerateInstanceVersion(version: *mut u32) -> VkResult {
         *version = API_VERSION;
         VK_SUCCESS
     }
 }
 
 entrypoint! {
-    fn borgvk_EnumerateInstanceExtensionProperties(layer: *const c_char, count: *mut u32, props: *mut VkExtensionProperties) -> VkResult {
+    unsafe fn borgvk_EnumerateInstanceExtensionProperties(layer: *const c_char, count: *mut u32, props: *mut VkExtensionProperties) -> VkResult {
         if !layer.is_null() {
             return error(VK_ERROR_LAYER_NOT_PRESENT);
         }
@@ -103,7 +110,7 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_EnumerateInstanceLayerProperties(count: *mut u32, props: *mut VkLayerProperties) -> VkResult {
+    unsafe fn borgvk_EnumerateInstanceLayerProperties(count: *mut u32, props: *mut VkLayerProperties) -> VkResult {
         if props.is_null() {
             *count = 0;
             return VK_SUCCESS;
@@ -113,7 +120,7 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_CreateInstance(info: *const VkInstanceCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkInstance) -> VkResult {
+    unsafe fn borgvk_CreateInstance(info: *const VkInstanceCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkInstance) -> VkResult {
         // A Vulkan 1.0 implementation rejects a newer requested version.
         if let Some(app) = (*info).pApplicationInfo.as_ref().filter(|a| a.apiVersion != 0) {
             let major = |v: u32| v >> 22 & 0x7f;
@@ -143,7 +150,7 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_DestroyInstance(instance: VkInstance, _alloc: *const VkAllocationCallbacks) {
+    unsafe fn borgvk_DestroyInstance(instance: VkInstance, _alloc: *const VkAllocationCallbacks) {
         let Some(i) = instance.get() else { return };
         vk_instance_finish(&mut i.vk);
         vk_free(&i.vk.alloc, instance.ptr().cast());
@@ -154,7 +161,7 @@ entrypoint! {
 unsafe extern "C" fn noop_cmd() {}
 
 entrypoint! {
-    fn borgvk_CreateDevice(physical_device: VkPhysicalDevice, info: *const VkDeviceCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkDevice) -> VkResult {
+    unsafe fn borgvk_CreateDevice(physical_device: VkPhysicalDevice, info: *const VkDeviceCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkDevice) -> VkResult {
         let pdev = physical_device.get().unwrap();
         for s in chain((*info).pNext.cast_mut()) {
             let unsupported = match (*s).sType {
@@ -230,7 +237,7 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_DestroyDevice(device: VkDevice, alloc: *const VkAllocationCallbacks) {
+    unsafe fn borgvk_DestroyDevice(device: VkDevice, alloc: *const VkAllocationCallbacks) {
         let Some(d) = device.get() else { return };
         vk_queue_finish(&mut d.queue);
         vk_device_finish(&mut d.vk);

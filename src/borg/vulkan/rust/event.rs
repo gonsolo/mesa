@@ -29,7 +29,7 @@ fn record(event: VkEvent, set: bool) {
 }
 
 entrypoint! {
-    fn borgvk_CreateEvent(device: VkDevice, _info: *const VkEventCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkEvent) -> Result<(), VkError> {
+    unsafe fn borgvk_CreateEvent(device: VkDevice, _info: *const VkEventCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkEvent) -> Result<(), VkError> {
         let dev = device.get().unwrap();
         let e = vk_object_zalloc(&mut dev.vk, alloc, size_of::<Event>(), VK_OBJECT_TYPE_EVENT);
         if e.is_null() {
@@ -41,7 +41,7 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_DestroyEvent(device: VkDevice, event: VkEvent, alloc: *const VkAllocationCallbacks) {
+    unsafe fn borgvk_DestroyEvent(device: VkDevice, event: VkEvent, alloc: *const VkAllocationCallbacks) {
         if let Some(e) = event.get() {
             vk_object_free(&mut device.get().unwrap().vk, alloc, (e as *mut Event).cast());
         }
@@ -49,45 +49,45 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_GetEventStatus(_device: VkDevice, event: VkEvent) -> VkResult {
+    unsafe fn borgvk_GetEventStatus(_device: VkDevice, event: VkEvent) -> VkResult {
         if event.get().unwrap().set.load(Ordering::Relaxed) != 0 { VK_EVENT_SET } else { VK_EVENT_RESET }
     }
 }
 
 entrypoint! {
-    fn borgvk_SetEvent(_device: VkDevice, event: VkEvent) -> Result<(), VkError> {
+    unsafe fn borgvk_SetEvent(_device: VkDevice, event: VkEvent) -> Result<(), VkError> {
         event.get().unwrap().store(true);
         Ok(())
     }
 }
 
 entrypoint! {
-    fn borgvk_ResetEvent(_device: VkDevice, event: VkEvent) -> Result<(), VkError> {
+    unsafe fn borgvk_ResetEvent(_device: VkDevice, event: VkEvent) -> Result<(), VkError> {
         event.get().unwrap().store(false);
         Ok(())
     }
 }
 
 entrypoint! {
-    fn borgvk_CmdSetEvent(_cmd: VkCommandBuffer, event: VkEvent, _stages: VkPipelineStageFlags) {
+    unsafe fn borgvk_CmdSetEvent(_cmd: VkCommandBuffer, event: VkEvent, _stages: VkPipelineStageFlags) {
         record(event, true);
     }
 }
 
 entrypoint! {
-    fn borgvk_CmdResetEvent(_cmd: VkCommandBuffer, event: VkEvent, _stages: VkPipelineStageFlags) {
+    unsafe fn borgvk_CmdResetEvent(_cmd: VkCommandBuffer, event: VkEvent, _stages: VkPipelineStageFlags) {
         record(event, false);
     }
 }
 
 entrypoint! {
-    fn borgvk_CmdSetEvent2(_cmd: VkCommandBuffer, event: VkEvent, _dep: *const VkDependencyInfo) {
+    unsafe fn borgvk_CmdSetEvent2(_cmd: VkCommandBuffer, event: VkEvent, _dep: *const VkDependencyInfo) {
         record(event, true);
     }
 }
 
 entrypoint! {
-    fn borgvk_CmdResetEvent2(_cmd: VkCommandBuffer, event: VkEvent, _stages: VkPipelineStageFlags2) {
+    unsafe fn borgvk_CmdResetEvent2(_cmd: VkCommandBuffer, event: VkEvent, _stages: VkPipelineStageFlags2) {
         record(event, false);
     }
 }

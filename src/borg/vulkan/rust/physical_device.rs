@@ -183,7 +183,7 @@ fn format_properties(f: VkFormat) -> VkFormatProperties {
 }
 
 entrypoint! {
-    fn borgvk_GetPhysicalDeviceFormatProperties2(_pd: VkPhysicalDevice, format: VkFormat, props: *mut VkFormatProperties2) {
+    unsafe fn borgvk_GetPhysicalDeviceFormatProperties2(_pd: VkPhysicalDevice, format: VkFormat, props: *mut VkFormatProperties2) {
         let p = format_properties(format);
         (*props).formatProperties = p;
         for s in chain((*props).pNext) {
@@ -246,7 +246,7 @@ fn image_format_properties(info: &VkPhysicalDeviceImageFormatInfo2) -> Result<Vk
 }
 
 entrypoint! {
-    fn borgvk_GetPhysicalDeviceImageFormatProperties2(_pd: VkPhysicalDevice, info: *const VkPhysicalDeviceImageFormatInfo2, props: *mut VkImageFormatProperties2) -> VkResult {
+    unsafe fn borgvk_GetPhysicalDeviceImageFormatProperties2(_pd: VkPhysicalDevice, info: *const VkPhysicalDeviceImageFormatInfo2, props: *mut VkImageFormatProperties2) -> VkResult {
         let r = image_format_properties(&*info);
         (*props).imageFormatProperties = *r.as_ref().unwrap_or(&std::mem::zeroed());
         r.map_or_else(|e| e, |_| VK_SUCCESS)
@@ -254,19 +254,19 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_GetPhysicalDeviceSparseImageFormatProperties2(_pd: VkPhysicalDevice, _info: *const VkPhysicalDeviceSparseImageFormatInfo2, count: *mut u32, _props: *mut VkSparseImageFormatProperties2) {
+    unsafe fn borgvk_GetPhysicalDeviceSparseImageFormatProperties2(_pd: VkPhysicalDevice, _info: *const VkPhysicalDeviceSparseImageFormatInfo2, count: *mut u32, _props: *mut VkSparseImageFormatProperties2) {
         *count = 0;
     }
 }
 
 entrypoint! {
-    fn borgvk_GetPhysicalDeviceExternalBufferProperties(_pd: VkPhysicalDevice, _info: *const VkPhysicalDeviceExternalBufferInfo, props: *mut VkExternalBufferProperties) {
+    unsafe fn borgvk_GetPhysicalDeviceExternalBufferProperties(_pd: VkPhysicalDevice, _info: *const VkPhysicalDeviceExternalBufferInfo, props: *mut VkExternalBufferProperties) {
         (*props).externalMemoryProperties = std::mem::zeroed();
     }
 }
 
 entrypoint! {
-    fn borgvk_GetPhysicalDeviceQueueFamilyProperties2(_pd: VkPhysicalDevice, count: *mut u32, props: *mut VkQueueFamilyProperties2) {
+    unsafe fn borgvk_GetPhysicalDeviceQueueFamilyProperties2(_pd: VkPhysicalDevice, count: *mut u32, props: *mut VkQueueFamilyProperties2) {
         // One family: graphics, compute and transfer, a single queue.
         if props.is_null() {
             *count = 1;
@@ -286,7 +286,7 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_GetPhysicalDeviceMemoryProperties2(pd: VkPhysicalDevice, props: *mut VkPhysicalDeviceMemoryProperties2) {
+    unsafe fn borgvk_GetPhysicalDeviceMemoryProperties2(pd: VkPhysicalDevice, props: *mut VkPhysicalDeviceMemoryProperties2) {
         (*props).memoryProperties = pd.get().unwrap().memory;
     }
 }
