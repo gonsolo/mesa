@@ -19,7 +19,6 @@ libborgvk_files = files(
   'borgvk_cmd_clear.c',
   'borgvk_cmd_copy.c',
   'borgvk_cmd_render.c',
-  'borgvk_pipeline.c',
   'borgvk_queue.c',
   'borgvk_corpus.c',
   'borgvk_cube.c',
@@ -87,11 +86,10 @@ libborgvk_files += borgvk_rust_h
 
 borgvk_bindgen_args = []
 borgvk_bindgen_c_args = []
-borgvk_bindgen_deps = []
+borgvk_bindgen_deps = [idep_nir_headers]
 if with_borgc
   # NIR from Mesa's NIR crate, as NAK does; nir_builder, Borg's NIR passes and SPIR-V to NIR here.
   borgvk_bindgen_c_args += ['-DBORGVK_NIR']
-  borgvk_bindgen_deps += [idep_nir_headers]
   borgvk_bindgen_args += [
     compiler_rs_bindgen_blocklist,
     '--raw-line', 'pub use compiler::bindings::*;',
@@ -100,7 +98,7 @@ if with_borgc
     '--allowlist-function', 'nir_function_set_impl|nir_progress',
     '--allowlist-function', 'borg_lower_.*|vk_pipeline_shader_stage_to_nir|nir_builder_init_simple_shader|ralloc_free',
     '--allowlist-var', 'borg_(spirv|nir)_options|BORGVK_LINE_.*',
-    '--opaque-type', 'spirv_to_nir_options.*|borg_blend.*',
+    '--opaque-type', 'spirv_to_nir_options.*',
     '--blocklist-type', 'spirv_to_nir_options__.*',
   ]
 endif
@@ -127,6 +125,8 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-var', 'DRM_COMMAND_BASE|DRM_BORG_GEM_.*|VK_(TRUE|FALSE)',
     '--allowlist-function', 'vk_image_(view_)?(create|destroy)|vk_format_get_aspect_format|os_time_get_nano',
     '--allowlist-function', 'vk_descriptor_set_layout_zalloc|list_(inithead|addtail|del)',
+    '--allowlist-function', 'vk_blend_(op|factor)_to_pipe|vk_get_pipeline_rendering_create_info|vk_format_(is_int|has_alpha)|util_format_is_srgb',
+    '--allowlist-type', 'borg_blend|VkComputePipelineCreateInfo|VkPipelineRenderingCreateInfo|VkPipelineCache',
     '--allowlist-type', 'borgvk_descriptor_pool|borgvk_descriptor_set|VkDescriptorSetLayoutCreateInfo|VkDescriptorSetLayoutSupport|VkDescriptorPoolCreateInfo',
     '--allowlist-type', 'VkDescriptorSetAllocateInfo|VkWriteDescriptorSet|VkCopyDescriptorSet|VkDescriptorPoolResetFlags',
     '--allowlist-type', 'vk_sync_type|vk_sync_wait|vk_sync_features|vk_sync_wait_flags|VkQueryPoolCreateInfo|VkQueryPool|VkImageMemoryRequirementsInfo2|VkImageSubresource2KHR|VkSubresourceLayout2KHR|VkBindImageMemoryInfo|VkImageViewCreateInfo',

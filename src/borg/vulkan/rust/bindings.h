@@ -31,12 +31,18 @@
 #include <stdlib.h>
 #include <termios.h>
 
-#ifdef BORGVK_NIR
 /* The firmware headers have their own FP16 constants; NIR brings Mesa's. */
 #undef FP16_ONE
-/* Mesa's NIR crate only knows the name; here the struct, under its own name. */
+/* Mesa's NIR crate only knows these names; here the structs, under their own names. */
 #define nir_builder borgvk_nir_builder
-#include "nir_builder.h"
+#define nir_lower_blend_channel borgvk_blend_channel
+#define nir_lower_blend_rt borgvk_blend_rt
+#define nir_lower_blend_options borgvk_blend_options
 #include "borg_nir_passes.h"
+#include "vk_blend.h"
+#include "vk_render_pass.h"
+
+#ifdef BORGVK_NIR
+#include "nir_builder.h"
 #include "vk_pipeline.h"
 #endif

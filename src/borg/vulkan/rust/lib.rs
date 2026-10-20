@@ -19,6 +19,7 @@ mod nir_info;
 mod nir_passes;
 mod image;
 mod memory;
+mod pipeline;
 mod query;
 mod sampler;
 mod serial;

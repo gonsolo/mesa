@@ -4,6 +4,8 @@
 //! Shaders for pipelines: from the shader cache, or through NIR and borgc.
 
 use crate::ffi::*;
+#[cfg(borgc)]
+pub use crate::compile::{borgvk_compile_compute_stage, borgvk_compile_empty_frag, borgvk_compile_stage};
 
 /// The number of varyings a vertex shader blob writes, from its header; 0 without the flag.
 pub fn num_varyings(b: &[u8]) -> u32 {
