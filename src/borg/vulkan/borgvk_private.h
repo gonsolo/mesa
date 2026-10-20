@@ -203,43 +203,7 @@ struct borgvk_vertex_attr {
    VkFormat format;
 };
 
-struct borgvk_pipeline {
-   struct vk_object_base base;
-   VkPrimitiveTopology       topology;
-   uint32_t                  binding_stride[BORGVK_MAX_VERTEX_BINDINGS];
-   uint32_t                  attr_count;
-   struct borgvk_vertex_attr attrs[BORGVK_MAX_VERTEX_ATTRS];
-   bool                      binding_instance[BORGVK_MAX_VERTEX_BINDINGS];   /* per-instance rate */
-   bool                      restart;      /* primitiveRestartEnable */
-   uint32_t                  color_count;  /* colour attachments of the pipeline's render pass */
-   bool                      mrt;
-   uint32_t                  ubo_mask;      /* the uniform buffer bindings the draw loads from */
-   bool                      push_used;     /* a shader loads push constants */
-   uint8_t                   emul_n;        /* wide colour targets: this and emul[] draw one each */
-   VkPipeline                emul[3];
-   bool                      push_window;   /* a stage reads push constants from the heap window */
-   bool                      spills;        /* a stage spills to the region's scratch slot */
-   uint8_t                   push_stage;    /* bit per stage: loads push constants, no UBO */
-   uint8_t                   set_base[4];
-   int                       tex_binding;   /* binding of the texture the fragment shader samples */
-   uint32_t                  vfetch;
-   struct borgvk_shader_blob blob[BORGVK_SHADER_STAGE_COUNT];
-   uint32_t                  blend_cfg, blend_const, state_reg[5];
-   struct borgvk_vp          vp;                 /* static viewport/scissor, if the pipeline has them */
-   bool                      vp_dyn, sc_dyn;     /* taken from the command buffer */
-   bool                      srgb_table;   /* the fragment shader decodes the destination */
-   bool                      state_valid;
-   bool     cs_ok;
-   uint32_t cs_nwords, cs_nregs;
-   uint32_t cs_words[BORGVK_CS_WORDS_MAX];
-   uint32_t cs_regs[64];
-   uint32_t cs_local[3];
-   uint32_t cs_flags;
-   uint32_t cs_pool[BORGVK_CS_POOL_MAX], cs_npool;
-};
 
-VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_pipeline, base, VkPipeline,
-                               VK_OBJECT_TYPE_PIPELINE)
 
 #ifdef __cplusplus
 }

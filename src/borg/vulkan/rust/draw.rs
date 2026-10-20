@@ -10,6 +10,7 @@ use crate::corpus::{borgvk_corpus_hash, borgvk_corpus_image, borgvk_corpus_log, 
 use crate::entrypoint::{entrypoint, slice, Handle};
 use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
+use crate::pipeline::Pipeline;
 use crate::format::{depth_is_d32, flush_format, raw32, vertex_fetch, Fetch};
 use crate::hw::{enabled, serves_extent};
 use crate::image::blocks;
@@ -249,7 +250,7 @@ struct Ctx<'a> {
     device: &'a mut borgvk_device,
     c: &'a mut CommandBuffer,
     p: Params,
-    pl: &'a borgvk_pipeline,
+    pl: &'a Pipeline,
     topo: u32,
     x: u32,
     points: bool,

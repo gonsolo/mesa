@@ -8,6 +8,7 @@ use crate::cmd_buffer::{cmd, CommandBuffer};
 use crate::corpus::{borgvk_corpus_log, borgvk_corpus_on, hash};
 use crate::entrypoint::{entrypoint, Handle};
 use crate::ffi::*;
+use crate::pipeline::Pipeline;
 use crate::hw::borgvk_hw_compute;
 use crate::util::{log, temp_file, MESA_LOG_WARN};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -57,7 +58,7 @@ fn unpack(pf: pipe_format, dst: &mut [u8], src: *const u8) {
 }
 
 /// The windows of the bound sets, the push constants (slot 32) and the constant pool (slot 34).
-fn gather(c: &CommandBuffer, pl: &borgvk_pipeline) -> Vec<CsBuf> {
+fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
     let mut bufs = Vec::new();
     for si in 0..4 {
         let Some(set) = (unsafe { c.cs_sets[si].as_ref() }) else { continue };
@@ -136,7 +137,7 @@ fn gather(c: &CommandBuffer, pl: &borgvk_pipeline) -> Vec<CsBuf> {
 
 /// Header (program size, groups, local size, presets, windows, group base), program, register
 /// presets with the group count where the program reads it, windows.
-fn build_job(pl: &borgvk_pipeline, g: [u32; 3], bufs: &[CsBuf]) -> Vec<u8> {
+fn build_job(pl: &Pipeline, g: [u32; 3], bufs: &[CsBuf]) -> Vec<u8> {
     fn put(job: &mut Vec<u8>, v: u32) {
         job.extend_from_slice(&v.to_ne_bytes());
     }
@@ -167,7 +168,7 @@ fn build_job(pl: &borgvk_pipeline, g: [u32; 3], bufs: &[CsBuf]) -> Vec<u8> {
 
 /// The headers of the parts: a packed program runs four one-invocation workgroups along x in a
 /// quad, so gx / 4 groups of four, then the gx % 4 left over in one group of that size.
-fn part_headers(pl: &borgvk_pipeline, direct: bool, g: [u32; 3], job: &[u8]) -> Vec<[u32; HDR]> {
+fn part_headers(pl: &Pipeline, direct: bool, g: [u32; 3], job: &[u8]) -> Vec<[u32; HDR]> {
     let [gx, gy, gz] = g;
     let packed = pl.cs_flags & 4 != 0;
     let (px, rem) = if packed { (gx / 4, gx % 4) } else { (gx, 0) };

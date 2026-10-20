@@ -7,17 +7,64 @@
 use crate::compiler::{borgvk_compile_compute_stage, borgvk_compile_empty_frag, borgvk_compile_stage, num_varyings, set_base};
 use crate::entrypoint::{entrypoint, handle, slice, vk_error, Handle, VkError};
 use crate::ffi::*;
+use crate::object::{allocate, Zeroed};
 use crate::format::{bytes_packed, half1, half2, packed_info};
 use crate::serial::{borgvk_blend_pack, borgvk_state_pack};
 use std::ptr::{null, null_mut};
 
-handle!(VkPipeline, borgvk_pipeline, VK_OBJECT_TYPE_PIPELINE);
+handle!(VkPipeline, Pipeline, VK_OBJECT_TYPE_PIPELINE);
+
+#[repr(C)]
+pub struct Pipeline {
+    pub base: vk_object_base,
+    pub topology: VkPrimitiveTopology,
+    pub binding_stride: [u32; VB],
+    pub attr_count: u32,
+    pub attrs: [borgvk_vertex_attr; BORGVK_MAX_VERTEX_ATTRS as usize],
+    pub binding_instance: [bool; VB], // per-instance rate
+    pub restart: bool,                // primitiveRestartEnable
+    pub color_count: u32,             // colour attachments of the pipeline's render pass
+    pub mrt: bool,
+    pub ubo_mask: u32,       // the uniform buffer bindings the draw loads from
+    pub push_used: bool,     // a shader loads push constants
+    pub emul_n: u8,          // wide colour targets: this and emul[] draw one each
+    pub emul: [VkPipeline; 3],
+    pub push_window: bool,   // a stage reads push constants from the heap window
+    pub spills: bool,        // a stage spills to the region's scratch slot
+    pub push_stage: u8,      // bit per stage: loads push constants, no UBO
+    pub set_base: [u8; 4],
+    pub tex_binding: i32,    // binding of the texture the fragment shader samples
+    pub vfetch: u32,
+    pub blob: [borgvk_shader_blob; BORGVK_SHADER_STAGE_COUNT as usize],
+    pub blend_cfg: u32,
+    pub blend_const: u32,
+    pub state_reg: [u32; 5],
+    pub vp: borgvk_vp,       // static viewport/scissor, if the pipeline has them
+    pub vp_dyn: bool,        // taken from the command buffer
+    pub sc_dyn: bool,
+    pub srgb_table: bool,    // the fragment shader decodes the destination
+    pub state_valid: bool,
+    pub cs_ok: bool,
+    pub cs_nwords: u32,
+    pub cs_nregs: u32,
+    pub cs_words: [u32; BORGVK_CS_WORDS_MAX as usize],
+    pub cs_regs: [u32; 64],
+    pub cs_local: [u32; 3],
+    pub cs_flags: u32,
+    pub cs_pool: [u32; BORGVK_CS_POOL_MAX as usize],
+    pub cs_npool: u32,
+}
+
+const VB: usize = BORGVK_MAX_VERTEX_BINDINGS as usize;
+
+// Numbers, handles, the shader blobs and the runtime's object base.
+unsafe impl Zeroed for Pipeline {}
 
 const VERT: usize = BORGVK_STAGE_VERT as usize;
 
-fn create(dev: &mut borgvk_device, alloc: *const VkAllocationCallbacks) -> Result<&'static mut borgvk_pipeline, VkError> {
-    let p = unsafe { vk_object_zalloc(&mut dev.vk, alloc, size_of::<borgvk_pipeline>(), VK_OBJECT_TYPE_PIPELINE) };
-    unsafe { p.cast::<borgvk_pipeline>().as_mut() }.ok_or_else(|| vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY))
+fn create(dev: &mut borgvk_device, alloc: *const VkAllocationCallbacks) -> Result<&'static mut Pipeline, VkError> {
+    let p = unsafe { allocate::<Pipeline>(|n| vk_object_zalloc(&mut dev.vk, alloc, n, VK_OBJECT_TYPE_PIPELINE)) };
+    p.ok_or_else(|| vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY))
 }
 
 /// Vertex fetch options: fetched inputs, instance-rate locations, points as quads, lines.
@@ -222,7 +269,7 @@ fn build_graphics(dev: &mut borgvk_device, alloc: *const VkAllocationCallbacks, 
 }
 
 /// The static viewport and scissor; dynamic ones come from the command buffer.
-fn viewport(pl: &mut borgvk_pipeline, c: &VkGraphicsPipelineCreateInfo, discard: bool) {
+fn viewport(pl: &mut Pipeline, c: &VkGraphicsPipelineCreateInfo, discard: bool) {
     (pl.vp_dyn, pl.sc_dyn) = (false, false);
     if let Some(d) = unsafe { c.pDynamicState.as_ref() } {
         for &ds in unsafe { slice(d.pDynamicStates, d.dynamicStateCount) } {
@@ -360,7 +407,7 @@ entrypoint! {
         for &p in pl.emul.iter().filter(|p| !p.is_null()) {
             borgvk_DestroyPipeline(device, p, alloc);
         }
-        vk_object_free(&mut device.get().unwrap().vk, alloc, (pl as *mut borgvk_pipeline).cast());
+        vk_object_free(&mut device.get().unwrap().vk, alloc, (pl as *mut Pipeline).cast());
     }
 }
 

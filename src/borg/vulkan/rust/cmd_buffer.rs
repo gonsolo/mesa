@@ -7,6 +7,7 @@
 use crate::entrypoint::{entrypoint, handle, Handle};
 use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
+use crate::pipeline::Pipeline;
 use crate::object::{allocate, Zeroed};
 use crate::render::Target;
 use std::ffi::c_void;
@@ -31,12 +32,12 @@ pub struct CommandBuffer {
     pub has_clear: bool,
     pub clear_color: [f32; 4],
     // Draw state, tracked as the recorded commands replay at submit.
-    pub gfx_pipeline: *mut borgvk_pipeline,
+    pub gfx_pipeline: *mut Pipeline,
     pub vb: [*const u8; BORGVK_MAX_VERTEX_BINDINGS as usize],
     pub vb_avail: [VkDeviceSize; BORGVK_MAX_VERTEX_BINDINGS as usize], // bytes from vb[] to the buffer's end
     pub desc_set: *mut DescriptorSet,
     pub generic_drawn: bool,
-    pub cs_pipeline: *const borgvk_pipeline,
+    pub cs_pipeline: *const Pipeline,
     pub dispatched: bool, // ran a compute dispatch at replay
     // Draws of the open render pass, as one wire stream the simulator runs at its end.
     pub stream: *mut u8,

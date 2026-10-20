@@ -5,6 +5,7 @@
 
 use crate::compiler::set_base;
 use crate::ffi::*;
+use crate::pipeline::Pipeline;
 use crate::nir_info::*;
 use crate::nir_passes::{lower_lines, remap_array_bindings};
 use crate::shader_cache;
@@ -154,7 +155,7 @@ fn compile_blob(
 }
 
 /// Compute pipeline: SPIR-V to NIR to borgc's compute backend.
-fn compile_compute(dev: &mut borgvk_device, si: &VkPipelineShaderStageCreateInfo, p: &mut borgvk_pipeline) {
+fn compile_compute(dev: &mut borgvk_device, si: &VkPipelineShaderStageCreateInfo, p: &mut Pipeline) {
     let nir = match to_nir(dev, si) {
         Ok(nir) => nir,
         Err(r) => {
@@ -197,7 +198,7 @@ pub unsafe fn borgvk_compile_stage(device: *mut borgvk_device, vfetch: u32, stag
 pub unsafe fn borgvk_compile_compute_stage(
     device: *mut borgvk_device,
     stage_info: *const VkPipelineShaderStageCreateInfo,
-    pipeline: *mut borgvk_pipeline,
+    pipeline: *mut Pipeline,
 ) {
     compile_compute(unsafe { &mut *device }, unsafe { &*stage_info }, unsafe { &mut *pipeline });
 }

@@ -5,6 +5,8 @@
 
 use crate::descriptor_set::DescriptorSetLayout;
 use crate::ffi::*;
+#[cfg(not(borgc))]
+use crate::pipeline::Pipeline;
 #[cfg(borgc)]
 pub use crate::compile::{borgvk_compile_compute_stage, borgvk_compile_empty_frag, borgvk_compile_stage};
 
@@ -84,7 +86,7 @@ pub unsafe fn borgvk_compile_stage(device: *mut borgvk_device, vfetch: u32, stag
 pub unsafe fn borgvk_compile_compute_stage(
     _device: *mut borgvk_device,
     _stage_info: *const VkPipelineShaderStageCreateInfo,
-    pipeline: *mut borgvk_pipeline,
+    pipeline: *mut Pipeline,
 ) {
     unsafe { (*pipeline).cs_ok = false };
 }
