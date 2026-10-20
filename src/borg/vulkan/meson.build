@@ -33,7 +33,6 @@ libborgvk_files = files(
   'borgvk_corpus.c',
   'borgvk_cube.c',
   'borgvk_texture_upload.c',
-  'borgvk_format.c',
   'borgvk_sim_process.c',
   'borgvk_state_upload.c',
   'borgvk_cmd_dispatch.c',
@@ -91,7 +90,10 @@ _borgvk_bindings_rs = rust.bindgen(
   input : ['rust/bindings.h', borgvk_entrypoints[0]],
   output : 'borgvk_bindings.rs',
   c_args : [pre_args],
-  args : [bindgen_output_args, '--no-prepend-enum-name', '--allowlist-type', 'VkFormat'],
+  args : [
+    bindgen_output_args, '--no-prepend-enum-name', '--with-derive-default',
+    '--allowlist-type', 'VkFormat|tex_conv',
+  ],
   include_directories : [borgvk_inc, include_directories('.')],
   dependencies : [
     borgvk_deps,
@@ -172,7 +174,7 @@ test(
 
 borgvk_format_test = executable(
   'borgvk_format_test',
-  ['borgvk_format_test.c', 'borgvk_format.c'],
+  ['borgvk_format_test.c'],
   include_directories : [
     inc_include, inc_src, inc_util,
     include_directories('../../../../'),

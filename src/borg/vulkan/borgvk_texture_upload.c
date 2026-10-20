@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "borgvk_private.h"
+#include "borgvk_rust.h"
 
 #include "vk_format.h"
 

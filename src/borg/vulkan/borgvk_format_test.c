@@ -21,26 +21,6 @@ check(bool cond, const char *what)
 }
 
 static void
-test_tex_convert(void)
-{
-   const uint8_t bgra[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
-   uint8_t out[8] = { 0 };
-   struct tex_conv swap = { .bpp = 4, .obpp = 4, .cs = 1, .sch = 4, .swap_rb = true };
-   borgvk_tex_convert(&swap, out, bgra, 2);
-   const uint8_t rgba[8] = { 3, 2, 1, 4, 7, 6, 5, 8 };
-   check(memcmp(out, rgba, 8) == 0, "tex convert swaps red and blue");
-
-   struct tex_conv copy = { .bpp = 4, .obpp = 4 };
-   borgvk_tex_convert(&copy, out, bgra, 2);
-   check(memcmp(out, bgra, 8) == 0, "tex convert plain copy");
-
-   const uint8_t rgb[3] = { 9, 8, 7 };
-   struct tex_conv pad = { .bpp = 3, .obpp = 4, .cs = 1, .sch = 3, .alpha = 255 };
-   borgvk_tex_convert(&pad, out, rgb, 1);
-   check(out[0] == 9 && out[1] == 8 && out[2] == 7 && out[3] == 255, "tex convert pads alpha");
-}
-
-static void
 test_image_helpers(void)
 {
    uint32_t wb = 0;
@@ -63,7 +43,6 @@ test_image_helpers(void)
 int
 main(void)
 {
-   test_tex_convert();
    test_image_helpers();
    if (failures) {
       fprintf(stderr, "%d check(s) failed\n", failures);

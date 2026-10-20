@@ -92,9 +92,95 @@ pub unsafe extern "C" fn borgvk_vertex_format_to_fetch(
     fetch.is_some()
 }
 
+/// Converts `n` texels from `src` to the layout the texture unit reads.
+pub fn tex_convert(c: &tex_conv, dst: &mut [u8], src: &[u8], n: usize) {
+    let (bpp, obpp, cs) = (c.bpp as usize, c.obpp as usize, c.cs as usize);
+    if c.sch == 0 && c.pack16 == 0 && c.zstride == 0 {
+        dst[..n * obpp].copy_from_slice(&src[..n * obpp]);
+    }
+    if c.zstride != 0 {
+        let (zs, soff) = (c.zstride as usize, c.soff as usize);
+        for i in 0..n {
+            dst[i * obpp..][..obpp].copy_from_slice(&src[i * zs + soff..][..obpp]);
+        }
+    }
+    if c.sch != 0 {
+        let alpha = c.alpha.to_ne_bytes();
+        let (r, b) = if c.swap_rb { (2 * cs, 0) } else { (0, 2 * cs) };
+        for i in 0..n {
+            let p = &src[i * bpp..];
+            let d = &mut dst[i * obpp..];
+            d[..cs].copy_from_slice(&p[r..][..cs]);
+            d[cs..2 * cs].copy_from_slice(&p[cs..2 * cs]);
+            d[2 * cs..3 * cs].copy_from_slice(&p[b..][..cs]);
+            d[3 * cs..4 * cs].copy_from_slice(if c.sch == 4 { &p[3 * cs..4 * cs] } else { &alpha[..cs] });
+        }
+    }
+    if c.pack16 != 0 {
+        for i in 0..n {
+            let mut w = [0u8; 4];
+            w[..bpp].copy_from_slice(&src[i * bpp..][..bpp]);
+            let v = u32::from_ne_bytes(w);
+            let v = match c.pack16 {
+                1 => (v >> 11) | (v & 0x07e0) | ((v & 0x1f) << 11),
+                2 => ((v & 1) << 15) | (v >> 1),
+                3 => ((v & 1) << 15) | ((v & 0x3e) << 9) | ((v >> 1) & 0x03e0) | (v >> 11),
+                4 => ((v & 0x00f0) << 8) | (v & 0x0f0f) | ((v >> 8) & 0x00f0),
+                5 => (v >> 4).wrapping_mul(17) | ((v & 0xf).wrapping_mul(17) << 8),
+                7 => ((v & 0xf) << 12) | ((v & 0xf0) << 4) | ((v >> 4) & 0xf0) | (v >> 12),
+                8 => ((v & 0xf00) << 4) | ((v & 0xf0) << 4) | ((v & 0xf) << 4) | (v >> 12),
+                _ => (v & 0xc00ffc00) | ((v >> 20) & 0x3ff) | ((v & 0x3ff) << 20),
+            };
+            dst[i * obpp..][..obpp].copy_from_slice(&v.to_ne_bytes()[..obpp]);
+        }
+    }
+}
+
+/// # Safety
+/// `c` is valid, `dst` holds `n` output texels and `src` the `n` input texels `c` describes.
+#[no_mangle]
+pub unsafe extern "C" fn borgvk_tex_convert(c: *const tex_conv, dst: *mut u8, src: *const u8, n: u32) {
+    let (c, n) = (unsafe { &*c }, n as usize);
+    let mut src_len = n * c.bpp as usize;
+    if c.sch == 0 && c.pack16 == 0 && c.zstride == 0 {
+        src_len = n * c.obpp as usize;
+    }
+    if c.zstride != 0 && n > 0 {
+        src_len = src_len.max((n - 1) * c.zstride as usize + c.soff as usize + c.obpp as usize);
+    }
+    let dst = unsafe { std::slice::from_raw_parts_mut(dst, n * c.obpp as usize) };
+    let src = unsafe { std::slice::from_raw_parts(src, src_len) };
+    tex_convert(c, dst, src, n);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn conv(bpp: u32, obpp: u32, cs: u32, sch: u32, alpha: u32, swap_rb: bool) -> tex_conv {
+        tex_conv { bpp, obpp, cs, sch, alpha, swap_rb, ..Default::default() }
+    }
+
+    #[test]
+    fn tex_convert_swaps_red_and_blue() {
+        let mut out = [0u8; 8];
+        tex_convert(&conv(4, 4, 1, 4, 0, true), &mut out, &[1, 2, 3, 4, 5, 6, 7, 8], 2);
+        assert_eq!(out, [3, 2, 1, 4, 7, 6, 5, 8]);
+    }
+
+    #[test]
+    fn tex_convert_plain_copy() {
+        let mut out = [0u8; 8];
+        tex_convert(&conv(4, 4, 0, 0, 0, false), &mut out, &[1, 2, 3, 4, 5, 6, 7, 8], 2);
+        assert_eq!(out, [1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn tex_convert_pads_alpha() {
+        let mut out = [0u8; 4];
+        tex_convert(&conv(3, 4, 1, 3, 255, false), &mut out, &[9, 8, 7], 1);
+        assert_eq!(out, [9, 8, 7, 255]);
+    }
 
     #[test]
     fn rgba32f() {
