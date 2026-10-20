@@ -71,7 +71,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                 break;
             }
             let addr = BASE_BYTES + (base + b as u32) * SLOT_BYTES;
-            let (buf, bv, img) = (set.buffers[b], unsafe { set.buffer_views[b].as_ref() }, unsafe { set.images[b].as_ref() });
+            let (buf, bv, img) = (set.buffers[b], set.buffer_view(b), set.image(b));
             if let Some(bv) = bv.filter(|_| buf.is_null()) {
                 // A texel buffer, decoded to RGBA32 per texel.
                 let tb = unsafe { &*bv.buffer.cast::<Buffer>() };

@@ -670,7 +670,7 @@ impl Ctx<'_> {
             let Some(s) = (unsafe { s.as_ref() }) else { continue };
             any_dyn |= s.dyn_mask != 0;
             for b in 0..BINDINGS.min(32usize.saturating_sub(pl.set_base[si] as usize)) {
-                let buf = s.storage_mask >> b & 1 != 0 && unsafe { s.buffers[b].as_ref() }.is_some_and(|u| host(u).is_some());
+                let buf = s.storage_mask >> b & 1 != 0 && s.buffer(b).is_some_and(|u| host(u).is_some());
                 if buf || storage_image(s, b).is_some() {
                     smask |= 1 << (pl.set_base[si] as usize + b);
                 }
@@ -709,7 +709,7 @@ impl Ctx<'_> {
                             push_writeback(c, at + 4, n * 4, host);
                             continue;
                         }
-                        let Some(ub) = (unsafe { ds.buffers[b].as_ref() }) else { continue };
+                        let Some(ub) = ds.buffer(b) else { continue };
                         let Some(uhost) = host(ub).filter(|_| fb < 32) else { continue };
                         let st = smask >> fb & 1 != 0;
                         if !st && pl.ubo_mask != 0 && pl.ubo_mask >> fb & 1 == 0 {
@@ -750,7 +750,7 @@ impl Ctx<'_> {
         }
         for b in 0..BINDINGS {
             let Some(s) = set else { break };
-            let Some(ub) = (unsafe { s.buffers[b].as_ref() }) else { continue };
+            let Some(ub) = s.buffer(b) else { continue };
             let Some(uhost) = host(ub) else { continue };
             if pl.ubo_mask != 0 && pl.ubo_mask >> b & 1 == 0 {
                 continue;
@@ -886,7 +886,7 @@ fn storage_image(set: &DescriptorSet, b: usize) -> Option<&Image> {
     if !set.buffers[b].is_null() || !set.buffer_views[b].is_null() || set.sampled_mask >> b & 1 != 0 {
         return None;
     }
-    let img = unsafe { set.images[b].as_ref() }.filter(|i| image_host(i).is_some())?;
+    let img = set.image(b).filter(|i| image_host(i).is_some())?;
     (img.vk.image_type == VK_IMAGE_TYPE_2D && img.vk.samples == 1 && blocks(img.vk.format).bs == 4).then_some(img)
 }
 

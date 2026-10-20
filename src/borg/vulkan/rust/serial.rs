@@ -353,10 +353,6 @@ pub unsafe extern "C" fn borgvk_serial_send_geom(verts: *const f32, nverts: i32,
     };
 }
 
-pub unsafe fn borgvk_serial_send_tex_row(y: i32, rgba: *const u8, sampler: *const u32) {
-    unsafe { send_tex_row(y as u8, std::slice::from_raw_parts(rgba, TEX_DIM * 4), &*(sampler as *const [u32; 4])) };
-}
-
 #[no_mangle]
 pub unsafe extern "C" fn borgvk_serial_send_shader(stage: u8, blob: *const u8, len: u32) {
     if blob.is_null() || len == 0 || len as usize > SHADER_MAX {
@@ -375,48 +371,9 @@ pub unsafe extern "C" fn borgvk_serial_send_push_constants(offset: u32, size: u3
     send_push_constants(offset, unsafe { std::slice::from_raw_parts(values as *const u8, size as usize) });
 }
 
-pub fn borgvk_serial_send_blend(blend_cfg: u32, blend_const: u32) {
-    send_blend(blend_cfg, blend_const);
-}
-
-pub unsafe fn borgvk_blend_pack(cb: *const VkPipelineColorBlendStateCreateInfo, cfg: *mut u32, konst: *mut u32) {
-    let (c, k) = blend_pack(unsafe { cb.as_ref() });
-    unsafe {
-        *cfg = c;
-        *konst = k;
-    }
-}
-
 #[no_mangle]
 pub unsafe extern "C" fn borgvk_serial_send_mvp(mvp: *const f32) {
     send_mvp(unsafe { &*(mvp as *const [f32; 16]) });
-}
-
-pub unsafe fn borgvk_serial_send_state(reg: *const u32) {
-    send_state(unsafe { &*(reg as *const [u32; 5]) });
-}
-
-pub unsafe fn borgvk_serial_send_viewport(vp: *const Vp) {
-    send_viewport(unsafe { &*vp });
-}
-
-pub unsafe fn borgvk_state_pack(ci: *const VkGraphicsPipelineCreateInfo, reg: *mut u32) {
-    unsafe { *(reg as *mut [u32; 5]) = state_pack(&*ci) };
-}
-
-pub unsafe fn borgvk_serial_send_texture_chunk(
-    off: u32,
-    data: *const u8,
-    n: u32,
-    desc_w123: *const u32,
-    sampler: *const u32,
-) {
-    let n = (n as usize).min(TEXG_CHUNK);
-    unsafe { send_texture_chunk(off, std::slice::from_raw_parts(data, n), &*(desc_w123 as *const [u32; 3]), &*(sampler as *const [u32; 4])) };
-}
-
-pub unsafe fn borgvk_serial_send_texture_levels(offs: *const u32) {
-    send_texture_levels(unsafe { &*(offs as *const [u32; 12]) });
 }
 
 #[cfg(test)]
@@ -583,7 +540,7 @@ mod tests {
     fn texture_row() {
         let rgba: Vec<u8> = (0..TEX_DIM * 4).map(|i| (i * 7) as u8).collect();
         let sampler = [0x000A0493u32, 0x3F800000, 0, 0x447A0000];
-        let p = sent(|| unsafe { borgvk_serial_send_tex_row(5, rgba.as_ptr(), sampler.as_ptr()) });
+        let p = sent(|| send_tex_row(5, &rgba, &sampler));
         assert_eq!(p.len(), 1 + 1 + 16 + TEX_DIM * 4 + 1);
         assert_eq!(p[..2], [0xAF, 5]);
         assert_eq!((0..4).map(|w| u32_at(&p, 2 + 4 * w)).collect::<Vec<_>>(), sampler);

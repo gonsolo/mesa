@@ -53,6 +53,25 @@ pub struct DescriptorSet {
 
 const BINDINGS: usize = BORGVK_MAX_BINDINGS as usize;
 
+// A set's slots hold objects the app keeps alive while the set is in use.
+impl DescriptorSet {
+    pub fn buffer(&self, b: usize) -> Option<&Buffer> {
+        unsafe { self.buffers[b].as_ref() }
+    }
+
+    pub fn image(&self, b: usize) -> Option<&Image> {
+        unsafe { self.images[b].as_ref() }
+    }
+
+    pub fn sampler(&self, b: usize) -> Option<&Sampler> {
+        unsafe { self.samplers[b].as_ref() }
+    }
+
+    pub fn buffer_view(&self, b: usize) -> Option<&vk_buffer_view> {
+        unsafe { self.buffer_views[b].as_ref() }
+    }
+}
+
 // Numbers, raw pointers, the binding map and runtime bases the runtime zero-allocates.
 unsafe impl Zeroed for DescriptorSetLayout {}
 unsafe impl Zeroed for DescriptorPool {}

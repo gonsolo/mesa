@@ -42,10 +42,9 @@ pub unsafe fn borgvk_find_set(submit: *mut vk_queue_submit) -> *mut DescriptorSe
 /// Clamp to edge in U, V and W, nearest.
 static DEFAULT_SAMPLER: [u32; 4] = [2 << 3 | 2 << 6 | 2 << 9, 0, 0, 0];
 
-/// # Safety
-/// `sampler` is null or valid.
-pub unsafe fn borgvk_sampler_desc(sampler: *const Sampler) -> *const u32 {
-    unsafe { sampler.as_ref() }.map_or(DEFAULT_SAMPLER.as_ptr(), |s| s.desc.as_ptr())
+/// The sampler's descriptor, the default without one.
+pub fn sampler_desc(sampler: Option<&Sampler>) -> &[u32; 4] {
+    sampler.map_or(&DEFAULT_SAMPLER, |s| &s.desc)
 }
 
 fn push_range(sc: &Scratch) -> Option<(u32, &[u32])> {
@@ -53,19 +52,17 @@ fn push_range(sc: &Scratch) -> Option<(u32, &[u32])> {
 }
 
 pub fn send_blend_state_serial(sc: &Scratch) {
-    unsafe {
-        if sc.state_valid {
-            borgvk_serial_send_state(sc.state_reg.as_ptr());
-        }
-        if let Some((lo, words)) = push_range(sc) {
-            borgvk_serial_send_push_constants(lo * 4, words.len() as u32 * 4, words.as_ptr().cast());
-        }
-        if sc.vp.valid {
-            borgvk_serial_send_viewport(&sc.vp);
-        }
+    if sc.state_valid {
+        send_state(&sc.state_reg);
+    }
+    if let Some((lo, words)) = push_range(sc) {
+        send_push_constants(lo * 4, &words.iter().flat_map(|w| w.to_ne_bytes()).collect::<Vec<u8>>());
+    }
+    if sc.vp.valid {
+        send_viewport(&sc.vp);
     }
     if sc.blend_cfg != 0 {
-        borgvk_serial_send_blend(sc.blend_cfg, sc.blend_const);
+        send_blend(sc.blend_cfg, sc.blend_const);
     }
 }
 
@@ -95,7 +92,7 @@ pub fn send_blend_state(dev: &Device, sc: &Scratch) {
 
 pub fn upload_shaders_serial(sc: &Scratch) {
     for (st, b) in sc.shader_blob.iter().enumerate().filter(|(_, b)| b.len != 0) {
-        unsafe { borgvk_serial_send_shader(st as u8, b.data.as_ptr(), b.len) };
+        send_shader(st as u8, &b.data[..b.len as usize]);
     }
 }
 

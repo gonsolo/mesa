@@ -11,7 +11,7 @@ use crate::fmt;
 use crate::device::{Device, Scratch};
 use crate::object::{allocate, Zeroed};
 use crate::format::{bytes_packed, half1, half2, packed_info};
-use crate::serial::{borgvk_blend_pack, borgvk_state_pack};
+use crate::serial::{blend_pack, state_pack};
 use std::ptr::{null, null_mut};
 
 handle!(VkPipeline, Pipeline, VK_OBJECT_TYPE_PIPELINE);
@@ -254,10 +254,8 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     if discard {
         (c.pViewportState, c.pMultisampleState, c.pDepthStencilState, c.pColorBlendState) = (null(), null(), null(), null());
     }
-    unsafe {
-        borgvk_blend_pack(c.pColorBlendState, &mut sc.blend_cfg, &mut sc.blend_const);
-        borgvk_state_pack(&c, sc.state_reg.as_mut_ptr());
-    }
+    (sc.blend_cfg, sc.blend_const) = blend_pack(unsafe { c.pColorBlendState.as_ref() });
+    sc.state_reg = state_pack(&c);
     if points || lines {
         sc.state_reg[4] &= !3; // points and lines are not culled
     }

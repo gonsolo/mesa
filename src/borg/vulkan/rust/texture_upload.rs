@@ -12,7 +12,7 @@ use crate::sampler::Sampler;
 use crate::image::Image;
 use crate::format::{borgvk_tex_convert, tex_format};
 use crate::serial::*;
-use crate::state_upload::borgvk_sampler_desc;
+use crate::state_upload::sampler_desc;
 use borg_layout::descriptor::{TexDesc, TexType};
 use borg_layout::tex_format::TexFormat;
 use borg_layout::tile::texture_index;
@@ -29,7 +29,7 @@ fn send(data: &[u8], desc: &TexDesc, sampler: *const Sampler) {
     let d = desc.pack();
     for off in (0..data.len() as u32).step_by(CHUNK as usize) {
         let n = (data.len() as u32 - off).min(CHUNK);
-        unsafe { borgvk_serial_send_texture_chunk(off, data.as_ptr().add(off as usize), n, d.as_ptr(), borgvk_sampler_desc(sampler)) };
+        send_texture_chunk(off, &data[off as usize..(off + n) as usize], d[..3].try_into().unwrap(), sampler_desc(unsafe { sampler.as_ref() }));
     }
 }
 
@@ -62,7 +62,7 @@ pub unsafe fn borgvk_send_texture_row(tex: *mut Image, sampler: *const Sampler, 
             row[dx as usize * 4 + c] = ((sum[c] + n / 2) / n) as u8;
         }
     }
-    unsafe { borgvk_serial_send_tex_row(dy, row.as_ptr(), borgvk_sampler_desc(sampler)) };
+    send_tex_row(dy as u8, &row, sampler_desc(unsafe { sampler.as_ref() }));
 }
 
 /// The view's levels and layers, converted and, unless it is one linear level, tiled.
@@ -196,7 +196,7 @@ fn texture(view: &vk_image_view, img: &Image, sampler: *const Sampler) -> bool {
         pitch,
     };
     if levels > 1 {
-        unsafe { borgvk_serial_send_texture_levels(offs.as_ptr()) };
+        send_texture_levels(&offs);
     }
     send(&out, &desc, sampler);
     true

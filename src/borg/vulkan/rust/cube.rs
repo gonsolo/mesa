@@ -11,9 +11,9 @@ use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
 use crate::image::Image;
 use crate::device::Device;
-use crate::serial::{borgvk_serial_send_geom, borgvk_serial_send_mvp};
+use crate::serial::{send_geom, send_mvp};
 use crate::sim_process::borgvk_sim_run_stream;
-use crate::state_upload::{borgvk_find_set, borgvk_sampler_desc, send_blend_state, upload_shaders};
+use crate::state_upload::{borgvk_find_set, sampler_desc, send_blend_state, upload_shaders};
 use crate::texture_upload::borgvk_send_texture_row;
 use crate::transport::{borgvk_transport_capture_begin, borgvk_transport_capture_end};
 use crate::util::{log, MESA_LOG_INFO, MESA_LOG_WARN};
@@ -54,7 +54,7 @@ fn send_geometry(ubo: &[f32]) {
         idx[i] = u as u8;
         uv[i * 2..i * 2 + 2].copy_from_slice(&att[i * 4..i * 4 + 2]);
     }
-    unsafe { borgvk_serial_send_geom(verts.as_ptr().cast(), verts.len() as i32, idx.as_ptr(), uv.as_ptr(), (NUM_VERTS / 3) as i32) };
+    send_geom(verts.as_flattened(), &idx, &uv);
 }
 
 fn sentinel_path() -> String {
@@ -68,7 +68,7 @@ fn setup_already_done() -> bool {
 
 /// The set's uniform buffer from its offset on, as floats.
 fn ubo(set: &DescriptorSet) -> Option<&[f32]> {
-    let b = unsafe { set.buffers[0].as_ref() }?;
+    let b = set.buffer(0)?;
     let mem = unsafe { b.mem.as_ref() }.filter(|m| !m.map.is_null())?;
     let off = b.offset + set.offsets[0];
     if off >= b.vk.size {
@@ -97,7 +97,7 @@ fn send_texture(set: &DescriptorSet, tex: *mut Image) {
 /// `set` is valid.
 pub unsafe fn borgvk_set_is_cube(set: *mut DescriptorSet) -> bool {
     let set = unsafe { &*set };
-    let Some(b) = (unsafe { set.buffers[0].as_ref() }) else { return false };
+    let Some(b) = set.buffer(0) else { return false };
     if unsafe { b.mem.as_ref() }.is_none_or(|m| m.map.is_null()) {
         return false;
     }
@@ -134,14 +134,14 @@ pub unsafe fn borgvk_submit_sim_cube(device: *mut Device, submit: *mut vk_queue_
     let d = unsafe { &*device };
     let sc = d.scratch.lock().unwrap();
     borgvk_transport_capture_begin();
-    unsafe {
-        upload_shaders(d, &sc);
-        send_geometry(ubo);
-        send_blend_state(d, &sc);
-        if let Some(tex) = texture(set) {
-            send_texture(set, tex);
-        }
-        borgvk_serial_send_mvp(ubo.as_ptr());
+    upload_shaders(d, &sc);
+    send_geometry(ubo);
+    send_blend_state(d, &sc);
+    if let Some(tex) = texture(set) {
+        send_texture(set, tex);
+    }
+    if let Some(m) = ubo.first_chunk() {
+        send_mvp(m);
     }
     let mut n = 0usize;
     let bytes = unsafe { borgvk_transport_capture_end(&mut n) };
@@ -192,7 +192,7 @@ pub unsafe fn borgvk_submit_cube_live(device: *mut Device, submit: *mut vk_queue
                 tex_offset: t.offset,
                 tex_width: t.vk.extent.width,
                 tex_height: t.vk.extent.height,
-                sampler: unsafe { *borgvk_sampler_desc(set.samplers[1]).cast::<[u32; 4]>() },
+                sampler: *sampler_desc(set.sampler(1)),
             };
             if ioctl(d.drm_fd, SETUP, &mut s) {
                 SETUP_DONE.store(true, Ordering::Relaxed);
@@ -222,7 +222,9 @@ pub unsafe fn borgvk_submit_cube_live(device: *mut Device, submit: *mut vk_queue
     }
     if done() {
         send_blend_state(d, &sc);
-        unsafe { borgvk_serial_send_mvp(ubo.as_ptr()) };
+        if let Some(m) = ubo.first_chunk() {
+            send_mvp(m);
+        }
     }
     VK_SUCCESS
 }
