@@ -58,6 +58,12 @@ impl Host {
         Some(Host { base: m.map.cast::<u8>().wrapping_add(off), len: m.size.saturating_sub(off) })
     }
 
+    /// # Safety
+    /// `base..base + len` is mapped while the Host is used.
+    pub unsafe fn new(base: *mut u8, len: usize) -> Host {
+        Host { base, len: if base.is_null() { 0 } else { len } }
+    }
+
     /// The address of `n` bytes at `off`, for a call that reads or writes them.
     pub fn ptr(&self, off: usize, n: usize) -> Option<*mut u8> {
         (off.checked_add(n)? <= self.len).then(|| self.base.wrapping_add(off))

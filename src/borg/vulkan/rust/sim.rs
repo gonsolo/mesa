@@ -6,6 +6,8 @@
 //! strips of tile rows, one simulator each.
 
 use crate::ffi::*;
+use crate::memory::Host;
+use crate::texel::Texel;
 use crate::fmt;
 use crate::image::Image;
 use crate::format::{depth_is_d32, flush_format};
@@ -61,6 +63,11 @@ impl Server {
 
     fn mem(&self, addr: u32) -> *mut u8 {
         unsafe { self.mem.add(addr as usize) }
+    }
+
+    /// The memory shared with the simulator, mapped from start to stop.
+    fn host(&self) -> Host {
+        unsafe { Host::new(self.mem, MEM_BYTES) }
     }
 
     fn start(&mut self, bin: Option<&OsStr>) -> bool {
@@ -189,25 +196,23 @@ fn tiled(base: u32, w: u32, x: u32, y: u32, tile_bytes: u32, px_bytes: u32) -> u
 }
 
 /// A RAW128 pixel is two 8-byte halves, 128 bytes apart in its tile (two slices).
-unsafe fn px_get(g: *const u8, cpx: u32, out: &mut [u8; 16]) {
-    unsafe {
-        if cpx == 16 {
-            std::ptr::copy_nonoverlapping(g, out.as_mut_ptr(), 8);
-            std::ptr::copy_nonoverlapping(g.add(128), out.as_mut_ptr().add(8), 8);
-        } else {
-            std::ptr::copy_nonoverlapping(g, out.as_mut_ptr(), cpx as usize);
-        }
+fn px_get(h: &Host, g: usize, cpx: u32) -> [u8; 16] {
+    let mut px = [0u8; 16];
+    if cpx == 16 {
+        h.read(g, &mut px[..8]);
+        h.read(g + 128, &mut px[8..]);
+    } else {
+        h.read(g, &mut px[..cpx as usize]);
     }
+    px
 }
 
-unsafe fn px_put(g: *mut u8, cpx: u32, px: &[u8; 16]) {
-    unsafe {
-        if cpx == 16 {
-            std::ptr::copy_nonoverlapping(px.as_ptr(), g, 8);
-            std::ptr::copy_nonoverlapping(px.as_ptr().add(8), g.add(128), 8);
-        } else {
-            std::ptr::copy_nonoverlapping(px.as_ptr(), g, cpx as usize);
-        }
+fn px_put(h: &Host, g: usize, cpx: u32, px: &[u8; 16]) {
+    if cpx == 16 {
+        h.write(g, &px[..8]);
+        h.write(g + 128, &px[8..]);
+    } else {
+        h.write(g, &px[..cpx as usize]);
     }
 }
 
@@ -242,45 +247,45 @@ fn z16(z: f32) -> u16 {
     (z.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16
 }
 
-fn unpack_z(pf: pipe_format, texel: *const u8) -> f32 {
+fn unpack_z(pf: pipe_format, t: &Texel) -> f32 {
     if pf == PIPE_FORMAT_Z16_UNORM_S8_UINT {
-        return u16::from_ne_bytes(unsafe { [*texel, *texel.add(1)] }) as f32 / 65535.0;
+        return u16::from_ne_bytes([t[0], t[1]]) as f32 / 65535.0;
     }
     let mut z = 0.0f32;
-    unsafe { util_format_unpack_z_float(pf, &mut z, texel.cast(), 1) };
+    unsafe { util_format_unpack_z_float(pf, &mut z, t.as_ptr().cast(), 1) };
     z
 }
 
-fn pack_z(pf: pipe_format, texel: *mut u8, z: f32) {
+fn pack_z(pf: pipe_format, t: &mut Texel, z: f32) {
     if pf == PIPE_FORMAT_Z16_UNORM_S8_UINT {
-        unsafe { std::ptr::copy_nonoverlapping(z16(z).to_ne_bytes().as_ptr(), texel, 2) };
+        t[..2].copy_from_slice(&z16(z).to_ne_bytes());
         return;
     }
-    unsafe { util_format_pack_z_float(pf, texel.cast(), &z, 1) };
+    unsafe { util_format_pack_z_float(pf, t.as_mut_ptr().cast(), &z, 1) };
 }
 
-fn unpack_s(pf: pipe_format, texel: *const u8) -> u8 {
+fn unpack_s(pf: pipe_format, t: &Texel) -> u8 {
     if pf == PIPE_FORMAT_Z16_UNORM_S8_UINT {
-        return unsafe { *texel.add(2) };
+        return t[2];
     }
     let mut s = 0u8;
-    unsafe { util_format_unpack_s_8uint(pf, &mut s, texel.cast(), 1) };
+    unsafe { util_format_unpack_s_8uint(pf, &mut s, t.as_ptr().cast(), 1) };
     s
 }
 
-fn pack_s(pf: pipe_format, texel: *mut u8, s: u8) {
+fn pack_s(pf: pipe_format, t: &mut Texel, s: u8) {
     if pf == PIPE_FORMAT_Z16_UNORM_S8_UINT {
-        unsafe { *texel.add(2) = s };
+        t[2] = s;
         return;
     }
-    unsafe { util_format_pack_s_8uint(pf, texel.cast(), &s, 1) };
+    unsafe { util_format_pack_s_8uint(pf, t.as_mut_ptr().cast(), &s, 1) };
 }
 
 /// One attachment of the pass on the host side.
 struct Surface {
     pf: pipe_format,
     bs: u32,
-    host: *mut u8,
+    host: Host,
     width: usize,
     plane: usize,
     planes: u32,
@@ -292,22 +297,34 @@ impl Surface {
         Surface {
             pf: fmt::pipe(img.vk.format),
             bs: blocksize(img.vk.format),
-            host: unsafe { ((*img.mem).map as *mut u8).add(img.offset as usize) },
+            host: img.host().unwrap(),
             width: e.width as usize,
             plane: e.width as usize * e.height as usize,
             planes: img.vk.samples.max(1),
         }
     }
 
-    /// Texel (x, y) of sample plane `p`.
-    fn texel(&self, p: u32, x: u32, y: u32) -> *mut u8 {
-        let i = p as usize * self.plane + y as usize * self.width + x as usize;
-        unsafe { self.host.add(i * self.bs as usize) }
+    /// Offset of texel (x, y) of sample plane `p`.
+    fn texel(&self, p: u32, x: u32, y: u32) -> usize {
+        (p as usize * self.plane + y as usize * self.width + x as usize) * self.bs as usize
     }
 
-    /// Byte (x, y): extra colour attachments are one byte per pixel.
-    fn byte(&self, x: u32, y: u32) -> *mut u8 {
-        unsafe { self.host.add(y as usize * self.width + x as usize) }
+    /// Offset of byte (x, y): extra colour attachments are one byte per pixel.
+    fn byte(&self, x: u32, y: u32) -> usize {
+        y as usize * self.width + x as usize
+    }
+
+    fn read(&self, p: u32, x: u32, y: u32) -> Texel {
+        let mut t: Texel = [0; 32];
+        self.host.read(self.texel(p, x, y), &mut t[..self.bs as usize]);
+        t
+    }
+
+    /// Changes texel (x, y) of plane `p` in place: `f` sees its current bytes.
+    fn update(&self, p: u32, x: u32, y: u32, f: impl FnOnce(&mut Texel)) {
+        let mut t = self.read(p, x, y);
+        f(&mut t);
+        self.host.write(self.texel(p, x, y), &t[..self.bs as usize]);
     }
 }
 
@@ -331,8 +348,8 @@ struct Layout {
 }
 
 impl Layout {
-    fn color(&self, s: &Server, x: u32, y: u32) -> *mut u8 {
-        s.mem(tiled(s.fb, self.wp, x, y, 16 * self.cpx, if self.cpx == 16 { 8 } else { self.cpx }))
+    fn color(&self, s: &Server, x: u32, y: u32) -> usize {
+        tiled(s.fb, self.wp, x, y, 16 * self.cpx, if self.cpx == 16 { 8 } else { self.cpx }) as usize
     }
 }
 
@@ -347,46 +364,51 @@ struct Before {
 /// In: the application's images into the GPU's attachments.
 fn copy_in(s: &Server, l: &Layout, rows: Range<u32>, t: &Targets, b: &mut Before) {
     let npx = (l.w * l.h) as usize;
+    let m = s.host();
     for y in rows {
         for x in 0..l.w {
             let i = (y * l.w + x) as usize;
             let g = l.color(s, x, y);
             if let Some(c) = &t.color {
-                let src = c.texel(0, x, y);
+                let src = c.read(0, x, y);
                 if l.fmt != 0 {
                     let mut px = [0u8; 16];
-                    unsafe { std::ptr::copy_nonoverlapping(src, px.as_mut_ptr(), c.bs.min(l.cpx) as usize) };
-                    unsafe { px_put(g, l.cpx, &px) };
+                    let n = c.bs.min(l.cpx) as usize;
+                    px[..n].copy_from_slice(&src[..n]);
+                    px_put(&m, g, l.cpx, &px);
                 } else {
                     let mut f = [0f32; 4];
-                    unsafe { util_format_unpack_rgba(c.pf, f.as_mut_ptr().cast(), src.cast(), 1) };
-                    unsafe { std::ptr::copy_nonoverlapping(to565(&f).to_ne_bytes().as_ptr(), g, 2) };
+                    unsafe { util_format_unpack_rgba(c.pf, f.as_mut_ptr().cast(), src.as_ptr().cast(), 1) };
+                    m.write(g, &to565(&f).to_ne_bytes());
                 }
             }
-            let mut cur = [0u8; 16];
-            unsafe { px_get(g, l.cpx, &mut cur) };
-            b.c[i * 16..i * 16 + 16].copy_from_slice(&cur);
+            b.c[i * 16..i * 16 + 16].copy_from_slice(&px_get(&m, g, l.cpx));
             for (a, e) in t.extra.iter().enumerate() {
-                let ge = s.mem(tiled(s.att[a + 1], l.wp, x, y, 16, 1));
-                unsafe { *ge = *e.byte(x, y) };
-                b.e[a * npx + i] = unsafe { *ge };
+                let ge = tiled(s.att[a + 1], l.wp, x, y, 16, 1) as usize;
+                let mut v = [0u8];
+                e.host.read(e.byte(x, y), &mut v);
+                m.write(ge, &v);
+                m.read(ge, &mut v);
+                b.e[a * npx + i] = v[0];
             }
             if let Some(zs) = &t.z {
-                let gz = s.mem(tiled(s.zb, l.wp, x, y, 16 * l.zpx, l.zpx));
-                let v = unpack_z(zs.pf, zs.texel(0, x, y));
+                let gz = tiled(s.zb, l.wp, x, y, 16 * l.zpx, l.zpx) as usize;
+                let v = unpack_z(zs.pf, &zs.read(0, x, y));
                 let bytes = if l.d32 {
                     v.to_ne_bytes()
                 } else {
                     let h = z16(v).to_ne_bytes();
                     [h[0], h[1], 0, 0]
                 };
-                unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), gz, l.zpx as usize) };
+                m.write(gz, &bytes[..l.zpx as usize]);
                 b.z[i * 4..i * 4 + l.zpx as usize].copy_from_slice(&bytes[..l.zpx as usize]);
             }
             if let Some(ss) = &t.s {
-                let gs = s.mem(tiled(s.sb, l.wp, x, y, 16, 1));
-                unsafe { *gs = unpack_s(ss.pf, ss.texel(0, x, y)) };
-                b.s[i] = unsafe { *gs };
+                let gs = tiled(s.sb, l.wp, x, y, 16, 1) as usize;
+                let mut v = [unpack_s(ss.pf, &ss.read(0, x, y))];
+                m.write(gs, &v);
+                m.read(gs, &mut v);
+                b.s[i] = v[0];
             }
         }
     }
@@ -396,51 +418,53 @@ fn copy_in(s: &Server, l: &Layout, rows: Range<u32>, t: &Targets, b: &mut Before
 fn copy_out(s: &Server, l: &Layout, rows: Range<u32>, t: &Targets, b: &Before) -> u32 {
     let npx = (l.w * l.h) as usize;
     let cpx = l.cpx as usize;
+    let m = s.host();
     let mut changed = 0;
     for y in rows {
         for x in 0..l.w {
             let i = (y * l.w + x) as usize;
-            let mut cur = [0u8; 16];
-            unsafe { px_get(l.color(s, x, y), l.cpx, &mut cur) };
+            let cur = px_get(&m, l.color(s, x, y), l.cpx);
             if let Some(c) = t.color.as_ref().filter(|_| cur[..cpx] != b.c[i * 16..i * 16 + cpx]) {
                 changed += 1;
                 for p in 0..c.planes {
-                    let d = c.texel(p, x, y);
                     if l.fmt != 0 {
-                        unsafe { std::ptr::copy_nonoverlapping(cur.as_ptr(), d, c.bs.min(l.cpx) as usize) };
+                        c.host.write(c.texel(p, x, y), &cur[..c.bs.min(l.cpx) as usize]);
                     } else {
                         let v = u16::from_ne_bytes([cur[0], cur[1]]) as u32;
                         let f = [((v >> 11) & 31) as f32 / 31.0, ((v >> 5) & 63) as f32 / 63.0, (v & 31) as f32 / 31.0, 1.0];
-                        unsafe { util_format_pack_rgba(c.pf, d.cast(), f.as_ptr().cast(), 1) };
+                        c.update(p, x, y, |d| unsafe { util_format_pack_rgba(c.pf, d.as_mut_ptr().cast(), f.as_ptr().cast(), 1) });
                     }
                 }
             }
             for (a, e) in t.extra.iter().enumerate() {
-                let ge = unsafe { *s.mem(tiled(s.att[a + 1], l.wp, x, y, 16, 1)) };
-                if ge != b.e[a * npx + i] {
+                let mut ge = [0u8];
+                m.read(tiled(s.att[a + 1], l.wp, x, y, 16, 1) as usize, &mut ge);
+                if ge[0] != b.e[a * npx + i] {
                     changed += 1;
-                    unsafe { *e.byte(x, y) = ge };
+                    e.host.write(e.byte(x, y), &ge);
                 }
             }
             if let Some(zs) = &t.z {
-                let gz = s.mem(tiled(s.zb, l.wp, x, y, 16 * l.zpx, l.zpx));
-                let cur = unsafe { std::slice::from_raw_parts(gz, l.zpx as usize) };
-                if cur != &b.z[i * 4..i * 4 + l.zpx as usize] {
+                let mut cur = [0u8; 4];
+                let cur = &mut cur[..l.zpx as usize];
+                m.read(tiled(s.zb, l.wp, x, y, 16 * l.zpx, l.zpx) as usize, cur);
+                if *cur != b.z[i * 4..i * 4 + l.zpx as usize] {
                     let v = if l.d32 {
-                        f32::from_ne_bytes(cur.try_into().unwrap())
+                        f32::from_ne_bytes((&*cur).try_into().unwrap())
                     } else {
-                        u16::from_ne_bytes(cur.try_into().unwrap()) as f32 / 65535.0
+                        u16::from_ne_bytes((&*cur).try_into().unwrap()) as f32 / 65535.0
                     };
                     for p in 0..zs.planes {
-                        pack_z(zs.pf, zs.texel(p, x, y), v);
+                        zs.update(p, x, y, |d| pack_z(zs.pf, d, v));
                     }
                 }
             }
             if let Some(ss) = &t.s {
-                let gs = unsafe { *s.mem(tiled(s.sb, l.wp, x, y, 16, 1)) };
-                if gs != b.s[i] {
+                let mut gs = [0u8];
+                m.read(tiled(s.sb, l.wp, x, y, 16, 1) as usize, &mut gs);
+                if gs[0] != b.s[i] {
                     for p in 0..ss.planes {
-                        pack_s(ss.pf, ss.texel(p, x, y), gs);
+                        ss.update(p, x, y, |d| pack_s(ss.pf, d, gs[0]));
                     }
                 }
             }
