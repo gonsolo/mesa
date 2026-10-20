@@ -771,7 +771,7 @@ impl Ctx<'_> {
     }
 
     fn textures(&self) {
-        let Some(set) = (unsafe { self.c.desc_set.as_ref() }) else { return };
+        let Some(set) = self.c.desc_set() else { return };
         let tb = self.pl.tex_binding;
         let mut want = -1;
         if tb >= 0 {
@@ -891,7 +891,7 @@ fn storage_image(set: &DescriptorSet, b: usize) -> Option<&Image> {
 }
 
 fn draw_one(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
-    let Some(pl) = (unsafe { c.gfx_pipeline.as_ref() }) else { return reject(Reject::Undrawable) };
+    let Some(pl) = c.gfx_pipeline() else { return reject(Reject::Undrawable) };
     let mut g = Ctx {
         device,
         c,

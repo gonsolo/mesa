@@ -80,6 +80,19 @@ impl CommandBuffer {
     pub fn device<'a>(&self) -> &'a Device {
         unsafe { &*self.vk.base.device.cast::<Device>() }
     }
+
+    // What is bound stays alive while the command buffer records and runs.
+    pub fn gfx_pipeline<'a>(&self) -> Option<&'a Pipeline> {
+        unsafe { self.gfx_pipeline.as_ref() }
+    }
+
+    pub fn cs_pipeline<'a>(&self) -> Option<&'a Pipeline> {
+        unsafe { self.cs_pipeline.as_ref() }
+    }
+
+    pub fn desc_set<'a>(&self) -> Option<&'a DescriptorSet> {
+        unsafe { self.desc_set.as_ref() }
+    }
 }
 
 impl crate::entrypoint::Pointee for CommandBuffer {

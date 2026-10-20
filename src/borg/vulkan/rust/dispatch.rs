@@ -289,7 +289,7 @@ fn apply(bufs: &[CsBuf], merged: &[Vec<u8>]) {
 entrypoint! {
     fn borgvk_CmdDispatch(c: &mut CommandBuffer, gx: u32, gy: u32, gz: u32) {
         let direct = std::env::var_os("BORGVK_SIM_DIRECT").filter(|d| !d.is_empty());
-        let Some(pl) = (unsafe { c.cs_pipeline.as_ref() }).filter(|p| p.cs_ok) else { return };
+        let Some(pl) = c.cs_pipeline().filter(|p| p.cs_ok) else { return };
         if gx == 0 || gy == 0 || gz == 0 || (direct.is_none() && !crate::hw::enabled()) {
             return;
         }
