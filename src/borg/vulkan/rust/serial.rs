@@ -384,14 +384,7 @@ mod tests {
     fn captured(f: impl FnOnce()) -> Vec<u8> {
         crate::transport::borgvk_transport_capture_begin();
         f();
-        let mut len = 0;
-        let buf = unsafe { crate::transport::borgvk_transport_capture_end(&mut len) };
-        if buf.is_null() {
-            return Vec::new();
-        }
-        let v = unsafe { std::slice::from_raw_parts(buf, len) }.to_vec();
-        unsafe { free(buf.cast()) };
-        v
+        crate::transport::capture_end()
     }
 
     /// Runs `f` and returns the one packet it sent, after checking its checksum.

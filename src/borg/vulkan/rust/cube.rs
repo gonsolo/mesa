@@ -15,7 +15,7 @@ use crate::serial::{send_geom, send_mvp};
 use crate::sim_process::sim_run_stream;
 use crate::state_upload::{borgvk_find_set, sampler_desc, send_blend_state, upload_shaders};
 use crate::texture_upload::borgvk_send_texture_row;
-use crate::transport::{borgvk_transport_capture_begin, borgvk_transport_capture_end};
+use crate::transport::{borgvk_transport_capture_begin, capture_end};
 use crate::util::{log, MESA_LOG_INFO, MESA_LOG_WARN};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -143,23 +143,19 @@ pub unsafe fn borgvk_submit_sim_cube(device: *mut Device, submit: *mut vk_queue_
     if let Some(m) = ubo.first_chunk() {
         send_mvp(m);
     }
-    let mut n = 0usize;
-    let bytes = unsafe { borgvk_transport_capture_end(&mut n) };
-    if bytes.is_null() || n == 0 {
-        unsafe { free(bytes.cast()) };
+    let bytes = capture_end();
+    if bytes.is_empty() {
         return VK_SUCCESS;
     }
     if let Some(dump) = std::env::var_os("BORGVK_SIM_DUMP").filter(|d| !d.is_empty()) {
-        let _ = std::fs::write(&dump, unsafe { std::slice::from_raw_parts(bytes, n) });
-        log(MESA_LOG_INFO, format!("borgvk: dumped {n}-byte sim stream to {}", dump.to_string_lossy()));
-        unsafe { free(bytes.cast()) };
+        let _ = std::fs::write(&dump, &bytes);
+        log(MESA_LOG_INFO, format!("borgvk: dumped {}-byte sim stream to {}", bytes.len(), dump.to_string_lossy()));
         return VK_SUCCESS;
     }
     let color = color_attachment(unsafe { &*submit });
     let rec = borgvk_corpus_on();
-    let key = if rec { unsafe { borgvk_corpus_hash(BORGVK_CORPUS_SEED as u64, bytes.cast(), n) } } else { 0 };
-    let res = sim_run_stream(unsafe { std::slice::from_raw_parts(bytes, n) }, unsafe { color.as_ref() }, 0);
-    unsafe { free(bytes.cast()) };
+    let key = if rec { unsafe { borgvk_corpus_hash(BORGVK_CORPUS_SEED as u64, bytes.as_ptr().cast(), bytes.len()) } } else { 0 };
+    let res = sim_run_stream(&bytes, unsafe { color.as_ref() }, 0);
     if rec {
         borgvk_corpus_log(b'C' as _, key, unsafe { borgvk_corpus_image(BORGVK_CORPUS_SEED as u64, color) });
     }

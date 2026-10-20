@@ -27,17 +27,13 @@ enum Link<T> {
 static SERIAL: Mutex<Link<File>> = Mutex::new(Link::Untried);
 static SOCKET: Mutex<Link<UnixStream>> = Mutex::new(Link::Untried);
 
-/// A malloc'd buffer, so the C caller that takes it over can free() it.
 struct Capture {
     active: bool,
-    buf: *mut u8,
-    len: usize,
-    cap: usize,
+    buf: Vec<u8>,
 }
 
 thread_local! {
-    static CAPTURE: RefCell<Capture> =
-        const { RefCell::new(Capture { active: false, buf: std::ptr::null_mut(), len: 0, cap: 0 }) };
+    static CAPTURE: RefCell<Capture> = const { RefCell::new(Capture { active: false, buf: Vec::new() }) };
 }
 
 fn raw_serial(f: &File) {
@@ -105,20 +101,11 @@ fn send<T: Write>(link: &Mutex<Link<T>>, open: impl FnOnce() -> Option<T>, pkt: 
 }
 
 fn capture(c: &mut Capture, pkt: &[u8]) {
-    if c.len + pkt.len() > c.cap {
-        let mut ncap = if c.cap > 0 { c.cap } else { 4096 };
-        while ncap < c.len + pkt.len() {
-            ncap *= 2;
-        }
-        let nbuf = unsafe { realloc(c.buf.cast(), ncap as _) }.cast::<u8>();
-        if nbuf.is_null() {
-            log(MESA_LOG_WARN, format!("borgvk: transport capture realloc({ncap}) failed"));
-            return;
-        }
-        (c.buf, c.cap) = (nbuf, ncap);
+    if c.buf.try_reserve(pkt.len()).is_err() {
+        log(MESA_LOG_WARN, format!("borgvk: transport capture of {} bytes failed", c.buf.len() + pkt.len()));
+        return;
     }
-    unsafe { std::ptr::copy_nonoverlapping(pkt.as_ptr(), c.buf.add(c.len), pkt.len()) };
-    c.len += pkt.len();
+    c.buf.extend_from_slice(pkt);
 }
 
 pub fn emit(pkt: &[u8]) {
@@ -148,9 +135,18 @@ pub fn capturing() -> bool {
 pub extern "C" fn borgvk_transport_capture_begin() {
     CAPTURE.with(|c| {
         let mut c = c.borrow_mut();
-        c.len = 0;
+        c.buf.clear();
         c.active = true;
     });
+}
+
+/// Ends the capture and returns what was sent.
+pub fn capture_end() -> Vec<u8> {
+    CAPTURE.with(|c| {
+        let mut c = c.borrow_mut();
+        c.active = false;
+        std::mem::take(&mut c.buf)
+    })
 }
 
 /// Ends the capture and hands its malloc'd buffer (null if nothing was sent) to the caller.
@@ -159,14 +155,13 @@ pub extern "C" fn borgvk_transport_capture_begin() {
 /// `out_len` is null or valid for a write.
 #[no_mangle]
 pub unsafe extern "C" fn borgvk_transport_capture_end(out_len: *mut usize) -> *mut u8 {
-    let (buf, len) = CAPTURE.with(|c| {
-        let mut c = c.borrow_mut();
-        let taken = (c.buf, c.len);
-        *c = Capture { active: false, buf: std::ptr::null_mut(), len: 0, cap: 0 };
-        taken
-    });
+    let buf = capture_end();
     if let Some(out) = unsafe { out_len.as_mut() } {
-        *out = len;
+        *out = buf.len();
     }
-    buf
+    let p = if buf.is_empty() { std::ptr::null_mut() } else { unsafe { malloc(buf.len() as _) }.cast::<u8>() };
+    if !p.is_null() {
+        unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr(), p, buf.len()) };
+    }
+    p
 }

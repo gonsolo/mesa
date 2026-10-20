@@ -23,7 +23,7 @@ use crate::sim::borgvk_sim_run_pass;
 use crate::sim_process::sim_run_stream;
 use crate::state_upload::{send_blend_state_serial, upload_shaders_serial};
 use crate::texture_upload::{borgvk_send_buffer_texture, borgvk_send_generic_texture};
-use crate::transport::{borgvk_transport_capture_begin, borgvk_transport_capture_end};
+use crate::transport::{borgvk_transport_capture_begin, capture_end};
 use crate::cube::borgvk_set_is_cube;
 use crate::util::log;
 use std::ffi::c_void;
@@ -250,8 +250,7 @@ struct Ctx<'a> {
     imin: i64,
     imax: i64,
     first_of_batch: bool,
-    state: *mut u8,
-    state_len: usize,
+    state: Vec<u8>,
     state_same: bool,
     load: u32,
     pairs: Vec<[u32; 2]>,
@@ -463,9 +462,8 @@ impl Ctx<'_> {
         }
         upload_shaders_serial(&d);
         send_blend_state_serial(&d);
-        self.state = unsafe { borgvk_transport_capture_end(&mut self.state_len) };
-        self.state_same = !self.state.is_null()
-            && unsafe { std::slice::from_raw_parts(self.state, self.state_len) } == c.state_sent.as_slice();
+        self.state = capture_end();
+        self.state_same = !self.state.is_empty() && self.state == c.state_sent.as_slice();
     }
 
     fn begin_pass(&mut self) {
@@ -812,21 +810,16 @@ impl Ctx<'_> {
     }
 
     fn finish(&mut self, ok: bool) -> bool {
-        let mut n = 0;
-        let bytes = unsafe { borgvk_transport_capture_end(&mut n) };
+        let bytes = capture_end();
         let c = &mut *self.c;
-        let state = self.state;
-        if !ok || bytes.is_null() || n == 0 {
-            unsafe { (free(bytes.cast()), free(state.cast())) };
+        let state = std::mem::take(&mut self.state);
+        if !ok || bytes.is_empty() {
             return ok;
         }
-        let slice = |p: *mut u8, n| unsafe { std::slice::from_raw_parts(p, n) };
-        let appended = (self.state_same || state.is_null() || c.stream.extend(slice(state, self.state_len))) && c.stream.extend(slice(bytes, n));
-        unsafe { free(bytes.cast()) };
-        if !self.state_same && !state.is_null() && appended {
-            c.state_sent.set(slice(state, self.state_len));
+        let appended = (self.state_same || state.is_empty() || c.stream.extend(&state)) && c.stream.extend(&bytes);
+        if !self.state_same && !state.is_empty() && appended {
+            c.state_sent.set(&state);
         }
-        unsafe { free(state.cast()) };
         if !appended {
             return false;
         }
@@ -896,8 +889,7 @@ fn draw_one(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
         imin: p.first_instance as i64,
         imax: p.first_instance as i64 + p.instances as i64 - 1,
         first_of_batch: false,
-        state: null_mut(),
-        state_len: 0,
+        state: Vec::new(),
         state_same: false,
         load: 0,
         pairs: Vec::new(),
