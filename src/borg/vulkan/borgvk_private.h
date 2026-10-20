@@ -46,10 +46,6 @@ struct borgvk_physical_device {
 #endif
 };
 
-#ifdef BORGVK_USE_WSI_PLATFORM
-VkResult borgvk_wsi_init(struct borgvk_physical_device *physical_device);
-void borgvk_wsi_finish(struct borgvk_physical_device *physical_device);
-#endif
 
 
 #define BORGVK_SHADER_BLOB_MAX 4096

@@ -33,3 +33,4 @@ mod sync;
 mod texel;
 mod transport;
 mod util;
+mod wsi;
