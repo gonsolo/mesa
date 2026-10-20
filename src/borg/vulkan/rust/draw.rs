@@ -19,7 +19,7 @@ use crate::image::blocks;
 use crate::serial::{send_att, send_draw, send_mem, send_pass, send_target, send_vattr, Draw};
 use crate::sim::borgvk_sim_run_pass;
 use crate::sim_process::borgvk_sim_run_stream;
-use crate::state_upload::{borgvk_send_blend_state_serial, borgvk_upload_shaders_serial};
+use crate::state_upload::{send_blend_state_serial, upload_shaders_serial};
 use crate::texture_upload::{borgvk_send_buffer_texture, borgvk_send_generic_texture};
 use crate::transport::{borgvk_transport_capture_begin, borgvk_transport_capture_end};
 use crate::cube::borgvk_set_is_cube;
@@ -249,7 +249,7 @@ fn fetch(f: VkFormat) -> Result<Fetch, Reject> {
 }
 
 struct Ctx<'a> {
-    device: &'a mut Device,
+    device: &'a Device,
     c: &'a mut CommandBuffer,
     p: Params,
     pl: &'a Pipeline,
@@ -448,7 +448,7 @@ impl Ctx<'_> {
         if c.batch_draws != 0 && c.heap_top as u64 + need > HEAP_BYTES as u64 {
             flush_draws(c);
         }
-        if c.batch_draws != 0 && pl.push_used && c.batch_push != self.device.push_words {
+        if c.batch_draws != 0 && pl.push_used && c.batch_push != self.device.scratch.lock().unwrap().push_words {
             flush_draws(c);
         }
         // The constant pool's slot is one per pass.
@@ -462,7 +462,8 @@ impl Ctx<'_> {
     }
 
     fn state(&mut self) {
-        let (d, c, pl) = (&mut *self.device, &*self.c, self.pl);
+        let (c, pl) = (&*self.c, self.pl);
+        let mut d = self.device.scratch.lock().unwrap();
         borgvk_transport_capture_begin();
         d.shader_blob = pl.blob;
         (d.blend_cfg, d.blend_const, d.state_reg, d.state_valid, d.vp) = (pl.blend_cfg, pl.blend_const, pl.state_reg, pl.state_valid, pl.vp);
@@ -479,11 +480,9 @@ impl Ctx<'_> {
             d.vp.sc = [r.offset.x.max(0) as u32, r.offset.y.max(0) as u32, x1.max(0) as u32, y1.max(0) as u32];
             d.vp.valid = true;
         }
-        unsafe {
-            borgvk_upload_shaders_serial(d);
-            borgvk_send_blend_state_serial(d);
-            self.state = borgvk_transport_capture_end(&mut self.state_len);
-        }
+        upload_shaders_serial(&d);
+        send_blend_state_serial(&d);
+        self.state = unsafe { borgvk_transport_capture_end(&mut self.state_len) };
         self.state_same = !self.state.is_null()
             && !c.state_sent.is_null()
             && self.state_len == c.state_sent_len
@@ -740,7 +739,7 @@ impl Ctx<'_> {
                     }
                 }
                 if pl.push_window {
-                    send_mem(base + PUSH_WINDOW_SLOT * SLOT_BYTES, bytes_of(&self.device.push_words));
+                    send_mem(base + PUSH_WINDOW_SLOT * SLOT_BYTES, bytes_of(&self.device.scratch.lock().unwrap().push_words));
                 }
                 (c.region_set, c.region_base) = (set, base);
             }
@@ -851,7 +850,7 @@ impl Ctx<'_> {
         }
         c.heap_top = self.heap.top;
         c.batch_draws += 1;
-        c.batch_push = self.device.push_words;
+        c.batch_push = self.device.scratch.lock().unwrap().push_words;
         (c.batch_img, c.batch_nextra, c.batch_extra) = (self.color, self.nextra as u32, self.extra);
         (c.batch_depth, c.batch_stencil) = (c.depth_view, c.stencil_view);
         true
@@ -892,7 +891,7 @@ fn storage_image(set: &DescriptorSet, b: usize) -> Option<&Image> {
     (img.vk.image_type == VK_IMAGE_TYPE_2D && img.vk.samples == 1 && blocks(img.vk.format).bs == 4).then_some(img)
 }
 
-fn draw_one(device: &mut Device, c: &mut CommandBuffer, p: &Params) -> bool {
+fn draw_one(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
     let Some(pl) = (unsafe { c.gfx_pipeline.as_ref() }) else { return reject(Reject::Undrawable) };
     let mut g = Ctx {
         device,
@@ -941,7 +940,7 @@ fn draw_one(device: &mut Device, c: &mut CommandBuffer, p: &Params) -> bool {
 }
 
 /// Wide colour targets are one pipeline each, drawn in turn (no depth or stencil: a second pass would fail the test).
-fn generic_draw(device: &mut Device, c: &mut CommandBuffer, p: &Params) -> bool {
+fn generic_draw(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
     let first = c.gfx_pipeline;
     let Some(fp) = (unsafe { first.as_ref() }).filter(|f| f.emul_n != 0) else { return draw_one(device, c, p) };
     if !c.depth_view.is_null() || !c.stencil_view.is_null() {
@@ -966,7 +965,7 @@ fn generic_draw(device: &mut Device, c: &mut CommandBuffer, p: &Params) -> bool 
 
 fn sim_draw(command_buffer: VkCommandBuffer, mut p: Params) {
     let c = unsafe { cmd(command_buffer.ptr()) };
-    let device = unsafe { &mut *c.vk.base.device.cast::<Device>() };
+    let device = unsafe { &*c.vk.base.device.cast::<Device>() };
     // Only the simulator renders; cube.c (UBO-driven) has its own path at submit.
     if !(std::env::var_os("BORGVK_SIM").is_some() || enabled()) || (!c.desc_set.is_null() && unsafe { borgvk_set_is_cube(c.desc_set) }) {
         return;

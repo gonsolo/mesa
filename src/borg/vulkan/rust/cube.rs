@@ -13,7 +13,7 @@ use crate::image::Image;
 use crate::device::Device;
 use crate::serial::{borgvk_serial_send_geom, borgvk_serial_send_mvp};
 use crate::sim_process::borgvk_sim_run_stream;
-use crate::state_upload::{borgvk_find_set, borgvk_sampler_desc, borgvk_send_blend_state, borgvk_upload_shaders};
+use crate::state_upload::{borgvk_find_set, borgvk_sampler_desc, send_blend_state, upload_shaders};
 use crate::texture_upload::borgvk_send_texture_row;
 use crate::transport::{borgvk_transport_capture_begin, borgvk_transport_capture_end};
 use crate::util::{log, MESA_LOG_INFO, MESA_LOG_WARN};
@@ -131,11 +131,13 @@ pub unsafe fn borgvk_submit_sim_cube(device: *mut Device, submit: *mut vk_queue_
     }
     let Some(set) = (unsafe { borgvk_find_set(submit).as_ref() }) else { return VK_SUCCESS };
     let Some(ubo) = ubo(set).filter(|u| u.len() >= MIN_FLOATS) else { return VK_SUCCESS };
+    let d = unsafe { &*device };
+    let sc = d.scratch.lock().unwrap();
     borgvk_transport_capture_begin();
     unsafe {
-        borgvk_upload_shaders(device);
+        upload_shaders(d, &sc);
         send_geometry(ubo);
-        borgvk_send_blend_state(device);
+        send_blend_state(d, &sc);
         if let Some(tex) = texture(set) {
             send_texture(set, tex);
         }
@@ -174,6 +176,7 @@ pub unsafe fn borgvk_submit_cube_live(device: *mut Device, submit: *mut vk_queue
     let Some(set) = (unsafe { borgvk_find_set(submit).as_ref() }) else { return VK_SUCCESS };
     let Some(ubo) = ubo(set) else { return VK_SUCCESS };
     let d = unsafe { &*device };
+    let sc = d.scratch.lock().unwrap();
     let ubuf = unsafe { &*set.buffers[0] };
     let tex = texture(set);
     let done = || SETUP_DONE.load(Ordering::Relaxed);
@@ -182,7 +185,7 @@ pub unsafe fn borgvk_submit_cube_live(device: *mut Device, submit: *mut vk_queue
         let ubo_gem = unsafe { (*ubuf.mem).gem_handle };
         if !done() && ubo_gem != 0 && tex_mem.is_some_and(|m| m.gem_handle != 0) {
             let t = unsafe { &*set.images[1] };
-            unsafe { borgvk_upload_shaders(device) }; // borgc-compiled shaders, before geometry and texture
+            upload_shaders(d, &sc); // borgc-compiled shaders, before geometry and texture
             let mut s = drm_borg_setup {
                 ubo_handle: ubo_gem,
                 tex_handle: tex_mem.unwrap().gem_handle,
@@ -198,7 +201,7 @@ pub unsafe fn borgvk_submit_cube_live(device: *mut Device, submit: *mut vk_queue
             }
         }
         if done() {
-            unsafe { borgvk_send_blend_state(device) };
+            send_blend_state(d, &sc);
             ioctl(d.drm_fd, SUBMIT, &mut drm_borg_submit { ubo_handle: ubo_gem, pad: 0 });
         }
         return VK_SUCCESS;
@@ -209,7 +212,7 @@ pub unsafe fn borgvk_submit_cube_live(device: *mut Device, submit: *mut vk_queue
             SETUP_DONE.store(true, Ordering::Relaxed);
         } else if let (true, Some(tex)) = (ubo.len() >= MIN_FLOATS, tex) {
             log(MESA_LOG_INFO, "borgvk: uploading shaders + geometry + texture burst...".into());
-            unsafe { borgvk_upload_shaders(device) }; // borgc-compiled shaders, before geometry and texture
+            upload_shaders(d, &sc); // borgc-compiled shaders, before geometry and texture
             send_geometry(ubo);
             send_texture(set, tex);
             let _ = std::fs::File::create(sentinel_path());
@@ -218,10 +221,8 @@ pub unsafe fn borgvk_submit_cube_live(device: *mut Device, submit: *mut vk_queue
         }
     }
     if done() {
-        unsafe {
-            borgvk_send_blend_state(device);
-            borgvk_serial_send_mvp(ubo.as_ptr());
-        }
+        send_blend_state(d, &sc);
+        unsafe { borgvk_serial_send_mvp(ubo.as_ptr()) };
     }
     VK_SUCCESS
 }

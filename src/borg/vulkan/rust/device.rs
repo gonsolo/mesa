@@ -11,7 +11,7 @@ use crate::physical_device::{destroy_physical_device, enumerate_devices, API_VER
 use crate::queue::borgvk_queue_submit;
 use std::ffi::{c_char, c_void};
 use std::ptr::null;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
 handle!(VkInstance, Instance, VK_OBJECT_TYPE_INSTANCE);
 handle!(VkDevice, Device, VK_OBJECT_TYPE_DEVICE);
@@ -27,6 +27,12 @@ pub struct Device {
     pub cmd_dispatch: vk_device_dispatch_table,
     pub queue: vk_queue,
     pub drm_fd: i32, // the physical device's; -1 is the malloc and serial fallback
+    // Locked: the runtime's submit thread replays draws while the app builds pipelines.
+    pub scratch: Mutex<Scratch>,
+}
+
+/// What pipeline creation compiles into, and draws and submits upload from.
+pub struct Scratch {
     pub blend_lower: *const borg_blend,
     pub shader_blob: [ShaderBlob; BORGVK_SHADER_STAGE_COUNT as usize],
     pub compile_layout: VkPipelineLayout,
@@ -47,6 +53,31 @@ pub struct Device {
     pub push_hi: u32,
 }
 
+impl Default for Scratch {
+    fn default() -> Self {
+        Scratch {
+            blend_lower: null(),
+            shader_blob: Default::default(),
+            compile_layout: std::ptr::null_mut(),
+            stage_ubo: [0; 2],
+            stage_push: [false; 2],
+            stage_pwin: [false; 2],
+            stage_spill: [false; 2],
+            frag_tex_binding: 0,
+            frag_select: 0,
+            frag_reads_pntc: false,
+            blend_cfg: 0,
+            blend_const: 0,
+            state_reg: [0; 5],
+            vp: Vp::default(),
+            state_valid: false,
+            push_words: [0; 32],
+            push_lo: 0,
+            push_hi: 0,
+        }
+    }
+}
+
 impl Device {
     /// For the runtime's calls; they synchronize what they change themselves.
     pub fn vk_ptr(&self) -> *mut vk_device {
@@ -54,9 +85,8 @@ impl Device {
     }
 }
 
-// Numbers, raw pointers, handles, the shader blobs and runtime structs the runtime zeroes.
+// The runtime's instance, which vk_instance_init zeroes.
 unsafe impl Zeroed for Instance {}
-unsafe impl Zeroed for Device {}
 
 // By hand: bindgen leaves out the runtime's hidden tables.
 extern "C" {
@@ -180,9 +210,12 @@ entrypoint! {
             }
         }
         let ialloc = &(*pdev.vk.instance).alloc;
-        let Some(d) = allocate::<Device>(|n| vk_zalloc2(ialloc, alloc, n, 8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE)) else {
+        let d = vk_zalloc2(ialloc, alloc, size_of::<Device>(), 8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE).cast::<Device>();
+        if d.is_null() {
             return vk_error!(pdev, VK_ERROR_OUT_OF_HOST_MEMORY).0;
-        };
+        }
+        std::ptr::addr_of_mut!((*d).scratch).write(Mutex::new(Scratch::default()));
+        let d = &mut *d;
 
         // These record, and replay through cmd_dispatch at submit; they win over borgvk's.
         let e = &vk_cmd_enqueue_device_entrypoints;
@@ -219,6 +252,7 @@ entrypoint! {
 
         let r = vk_device_init(&mut d.vk, &mut pdev.vk, &dt, info, alloc);
         if r != VK_SUCCESS {
+            std::ptr::drop_in_place(&mut d.scratch);
             vk_free2(ialloc, alloc, std::ptr::from_mut(d).cast());
             return vk_error!(pdev, r).0;
         }
@@ -228,6 +262,7 @@ entrypoint! {
         let r = vk_queue_init(&mut d.queue, &mut d.vk, (*info).pQueueCreateInfos, 0);
         if r != VK_SUCCESS {
             vk_device_finish(&mut d.vk);
+            std::ptr::drop_in_place(&mut d.scratch);
             vk_free2(ialloc, alloc, std::ptr::from_mut(d).cast());
             return vk_error!(pdev, r).0;
         }
@@ -244,6 +279,7 @@ entrypoint! {
         unsafe {
             vk_queue_finish(&mut d.queue);
             vk_device_finish(&mut d.vk);
+            std::ptr::drop_in_place(&mut d.scratch);
             vk_free2(&d.vk.alloc, alloc, std::ptr::from_mut(d).cast());
         }
     }

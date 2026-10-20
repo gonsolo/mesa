@@ -6,11 +6,13 @@
 #[cfg(borgc)]
 use crate::descriptor_set::DescriptorSetLayout;
 use crate::ffi::*;
+#[cfg(not(borgc))]
 use crate::device::Device;
+use crate::device::Scratch;
 #[cfg(not(borgc))]
 use crate::pipeline::Pipeline;
 #[cfg(borgc)]
-pub use crate::compile::{borgvk_compile_compute_stage, borgvk_compile_empty_frag, borgvk_compile_stage};
+pub use crate::compile::{compile_compute_stage, compile_empty_frag, compile_stage};
 
 /// The number of varyings a vertex shader blob writes, from its header; 0 without the flag.
 pub fn num_varyings(b: &[u8]) -> u32 {
@@ -23,8 +25,8 @@ pub fn num_varyings(b: &[u8]) -> u32 {
 
 /// The pipeline layout being compiled for, from its handle.
 #[cfg(borgc)]
-pub fn compile_layout(dev: &Device) -> Option<&vk_pipeline_layout> {
-    unsafe { (dev.compile_layout as *const vk_pipeline_layout).as_ref() }
+pub fn compile_layout(sc: &Scratch) -> Option<&vk_pipeline_layout> {
+    unsafe { (sc.compile_layout as *const vk_pipeline_layout).as_ref() }
 }
 
 /// The map of set `s` of a layout: its bindings' flat slots.
@@ -41,9 +43,9 @@ pub fn set_map(pl: &vk_pipeline_layout, s: usize) -> Option<&DescMap> {
 
 /// The first flat descriptor slot of each of the first four sets.
 #[cfg(borgc)]
-pub fn set_base(dev: &Device) -> [u8; 4] {
+pub fn set_base(sc: &Scratch) -> [u8; 4] {
     let mut base = [0u8; 4];
-    let Some(pl) = compile_layout(dev) else {
+    let Some(pl) = compile_layout(sc) else {
         return base;
     };
     let mut at = 0u32;
@@ -58,46 +60,35 @@ pub fn set_base(dev: &Device) -> [u8; 4] {
 
 /// Without the compiler the shaders come from the cache, which numbers slots per set.
 #[cfg(not(borgc))]
-pub fn set_base(_dev: &Device) -> [u8; 4] {
+pub fn set_base(_sc: &Scratch) -> [u8; 4] {
     [0; 4]
 }
 
-/// # Safety
-/// `device` and `stage_info` are valid.
 #[cfg(not(borgc))]
-pub unsafe fn borgvk_compile_stage(device: *mut Device, vfetch: u32, stage_info: *const VkPipelineShaderStageCreateInfo) {
-    let (dev, si) = unsafe { (&mut *device, &*stage_info) };
+pub fn compile_stage(_dev: &Device, sc: &mut Scratch, vfetch: u32, si: &VkPipelineShaderStageCreateInfo) {
     let slot = match si.stage {
         VK_SHADER_STAGE_VERTEX_BIT => BORGVK_STAGE_VERT,
         VK_SHADER_STAGE_FRAGMENT_BIT => BORGVK_STAGE_FRAG,
         _ => return,
     } as usize;
-    if let Some(pntc) = crate::shader_cache::get(si, vfetch, &mut dev.shader_blob[slot]) {
+    if let Some(pntc) = crate::shader_cache::get(si, vfetch, &mut sc.shader_blob[slot]) {
         if slot == BORGVK_STAGE_FRAG as usize {
-            dev.frag_reads_pntc = pntc;
+            sc.frag_reads_pntc = pntc;
         }
         return;
     }
-    dev.shader_blob[slot].len = 0;
+    sc.shader_blob[slot].len = 0;
     crate::util::log(crate::util::MESA_LOG_WARN, "borgvk: shader not in the cache and no compiler in this build".into());
 }
 
-/// # Safety
-/// `pipeline` is valid.
 #[cfg(not(borgc))]
-pub unsafe fn borgvk_compile_compute_stage(
-    _device: *mut Device,
-    _stage_info: *const VkPipelineShaderStageCreateInfo,
-    pipeline: *mut Pipeline,
-) {
-    unsafe { (*pipeline).cs_ok = false };
+pub fn compile_compute_stage(_dev: &Device, _sc: &mut Scratch, _si: &VkPipelineShaderStageCreateInfo, pipeline: &mut Pipeline) {
+    pipeline.cs_ok = false;
 }
 
-/// # Safety
-/// `device` is valid.
 #[cfg(not(borgc))]
-pub unsafe fn borgvk_compile_empty_frag(device: *mut Device, _opt: u32) {
-    unsafe { (*device).shader_blob[BORGVK_STAGE_FRAG as usize].len = 0 };
+pub fn compile_empty_frag(sc: &mut Scratch, _opt: u32) {
+    sc.shader_blob[BORGVK_STAGE_FRAG as usize].len = 0;
 }
 
 #[cfg(test)]

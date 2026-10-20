@@ -164,7 +164,7 @@ entrypoint! {
     unsafe fn borgvk_CmdPushConstants(command_buffer: VkCommandBuffer, _layout: VkPipelineLayout, _stages: VkShaderStageFlags, offset: u32, size: u32, values: *const c_void) {
         let c = cmd(command_buffer.ptr());
         put(&mut c.pc, offset, size, values);
-        let dev = &mut *c.vk.base.device.cast::<Device>();
+        let mut dev = (*c.vk.base.device.cast::<Device>()).scratch.lock().unwrap();
         if size == 0 || !put(&mut dev.push_words, offset, size, values) {
             return;
         }

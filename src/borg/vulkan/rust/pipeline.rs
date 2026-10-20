@@ -4,10 +4,10 @@
 //! Graphics and compute pipelines: the stages compiled with the fetch, target and blend options
 //! of the pipeline, and the state the draw and the hardware registers take from it.
 
-use crate::compiler::{borgvk_compile_compute_stage, borgvk_compile_empty_frag, borgvk_compile_stage, num_varyings, set_base};
+use crate::compiler::{compile_compute_stage, compile_empty_frag, compile_stage, num_varyings, set_base};
 use crate::entrypoint::{entrypoint, handle, slice, vk_error, Handle, VkError};
 use crate::ffi::*;
-use crate::device::Device;
+use crate::device::{Device, Scratch};
 use crate::object::{allocate, Zeroed};
 use crate::format::{bytes_packed, half1, half2, packed_info};
 use crate::serial::{borgvk_blend_pack, borgvk_state_pack};
@@ -63,8 +63,8 @@ unsafe impl Zeroed for Pipeline {}
 
 const VERT: usize = BORGVK_STAGE_VERT as usize;
 
-fn create(dev: &mut Device, alloc: *const VkAllocationCallbacks) -> Result<&'static mut Pipeline, VkError> {
-    let p = unsafe { allocate::<Pipeline>(|n| vk_object_zalloc(&mut dev.vk, alloc, n, VK_OBJECT_TYPE_PIPELINE)) };
+fn create(dev: &Device, alloc: *const VkAllocationCallbacks) -> Result<&'static mut Pipeline, VkError> {
+    let p = unsafe { allocate::<Pipeline>(|n| vk_object_zalloc(dev.vk_ptr(), alloc, n, VK_OBJECT_TYPE_PIPELINE)) };
     p.ok_or_else(|| vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY))
 }
 
@@ -171,32 +171,32 @@ fn shader_blend(cb: Option<&VkPipelineColorBlendStateCreateInfo>, f0: VkFormat, 
     Some(b)
 }
 
-fn compile_stages(dev: &mut Device, stages: &[VkPipelineShaderStageCreateInfo], vfetch: u32, frag_opt: u32, points: bool) {
+fn compile_stages(dev: &Device, sc: &mut Scratch, stages: &[VkPipelineShaderStageCreateInfo], vfetch: u32, frag_opt: u32, points: bool) {
     let opt = |s: &VkPipelineShaderStageCreateInfo| if s.stage == VK_SHADER_STAGE_FRAGMENT_BIT { frag_opt } else { vfetch };
     for s in stages {
-        unsafe { borgvk_compile_stage(dev, opt(s), s) };
+        compile_stage(dev, sc, opt(s), s);
     }
     let fs = stages.iter().find(|s| s.stage == VK_SHADER_STAGE_FRAGMENT_BIT);
     if fs.is_none() {
-        unsafe { borgvk_compile_empty_frag(dev, frag_opt) };
+        compile_empty_frag(sc, frag_opt);
     }
     let vs = stages.iter().filter(|s| s.stage == VK_SHADER_STAGE_VERTEX_BIT).last();
     let fs = stages.iter().filter(|s| s.stage == VK_SHADER_STAGE_FRAGMENT_BIT).last();
     // Points: gl_PointCoord as varyings past the vertex shader's own.
     if let (true, Some(vs), Some(fs)) = (points, vs, fs) {
-        let b = &dev.shader_blob[VERT];
+        let b = &sc.shader_blob[VERT];
         let base = num_varyings(&b.data[..(b.len as usize).min(b.data.len())]);
-        unsafe { borgvk_compile_stage(dev, frag_opt | base << BORGC_FS_PNTC_BASE_SHIFT, fs) };
-        if dev.frag_reads_pntc && base + 2 <= 255 {
-            unsafe { borgvk_compile_stage(dev, vfetch | BORGC_VS_PNTC_VARYINGS, vs) };
+        compile_stage(dev, sc, frag_opt | base << BORGC_FS_PNTC_BASE_SHIFT, fs);
+        if sc.frag_reads_pntc && base + 2 <= 255 {
+            compile_stage(dev, sc, vfetch | BORGC_VS_PNTC_VARYINGS, vs);
         } else {
-            unsafe { borgvk_compile_stage(dev, frag_opt, fs) };
+            compile_stage(dev, sc, frag_opt, fs);
         }
     }
 }
 
-fn build_graphics(dev: &mut Device, alloc: *const VkAllocationCallbacks, ci: &VkGraphicsPipelineCreateInfo) -> Result<VkPipeline, VkError> {
-    dev.compile_layout = ci.layout;
+fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCallbacks, ci: &VkGraphicsPipelineCreateInfo) -> Result<VkPipeline, VkError> {
+    sc.compile_layout = ci.layout;
     let vi = unsafe { ci.pVertexInputState.as_ref() };
     let ia = unsafe { ci.pInputAssemblyState.as_ref() };
     let rs = unsafe { ci.pRasterizationState.as_ref() };
@@ -204,7 +204,7 @@ fn build_graphics(dev: &mut Device, alloc: *const VkAllocationCallbacks, ci: &Vk
     let points = ia.is_some_and(|ia| ia.topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST);
     let lines = matches!(topology, VK_PRIMITIVE_TOPOLOGY_LINE_LIST | VK_PRIMITIVE_TOPOLOGY_LINE_STRIP);
     let vfetch = vertex_fetch(vi, points, lines);
-    for b in &mut dev.shader_blob {
+    for b in &mut sc.shader_blob {
         b.len = 0;
     }
     let ri = unsafe { vk_get_pipeline_rendering_create_info(ci).as_ref() };
@@ -214,21 +214,21 @@ fn build_graphics(dev: &mut Device, alloc: *const VkAllocationCallbacks, ci: &Vk
     let discard = rs.is_some_and(|r| r.rasterizerDiscardEnable != 0);
     let cb = if discard { None } else { unsafe { ci.pColorBlendState.as_ref() } };
     let blend = shader_blend(cb, formats.first().copied().unwrap_or(VK_FORMAT_UNDEFINED), mrt);
-    dev.blend_lower = blend.as_ref().map_or(null(), |b| b);
+    sc.blend_lower = blend.as_ref().map_or(null(), |b| b);
     let stages = unsafe { slice(ci.pStages, ci.stageCount) };
-    compile_stages(dev, stages, vfetch, frag_opt, points);
-    dev.blend_lower = null();
+    compile_stages(dev, sc, stages, vfetch, frag_opt, points);
+    sc.blend_lower = null();
 
     let pl = create(dev, alloc)?;
-    pl.blob = dev.shader_blob;
+    pl.blob = sc.shader_blob;
     pl.vfetch = vfetch;
-    pl.tex_binding = dev.frag_tex_binding;
-    pl.set_base = set_base(dev);
-    pl.ubo_mask = dev.stage_ubo[0] | dev.stage_ubo[1];
-    pl.push_used = dev.stage_push[0] || dev.stage_push[1];
-    pl.push_window = dev.stage_pwin[0] || dev.stage_pwin[1];
-    pl.spills = dev.stage_spill[0] || dev.stage_spill[1];
-    let push_only = |s: usize| (dev.stage_push[s] && dev.stage_ubo[s] == 0 && !dev.stage_pwin[s]) as u8;
+    pl.tex_binding = sc.frag_tex_binding;
+    pl.set_base = set_base(sc);
+    pl.ubo_mask = sc.stage_ubo[0] | sc.stage_ubo[1];
+    pl.push_used = sc.stage_push[0] || sc.stage_push[1];
+    pl.push_window = sc.stage_pwin[0] || sc.stage_pwin[1];
+    pl.spills = sc.stage_spill[0] || sc.stage_spill[1];
+    let push_only = |s: usize| (sc.stage_push[s] && sc.stage_ubo[s] == 0 && !sc.stage_pwin[s]) as u8;
     pl.push_stage = push_only(0) | push_only(1) << 1;
     pl.color_count = formats.len() as u32;
     pl.mrt = mrt;
@@ -254,16 +254,16 @@ fn build_graphics(dev: &mut Device, alloc: *const VkAllocationCallbacks, ci: &Vk
         (c.pViewportState, c.pMultisampleState, c.pDepthStencilState, c.pColorBlendState) = (null(), null(), null(), null());
     }
     unsafe {
-        borgvk_blend_pack(c.pColorBlendState, &mut dev.blend_cfg, &mut dev.blend_const);
-        borgvk_state_pack(&c, dev.state_reg.as_mut_ptr());
+        borgvk_blend_pack(c.pColorBlendState, &mut sc.blend_cfg, &mut sc.blend_const);
+        borgvk_state_pack(&c, sc.state_reg.as_mut_ptr());
     }
     if points || lines {
-        dev.state_reg[4] &= !3; // points and lines are not culled
+        sc.state_reg[4] &= !3; // points and lines are not culled
     }
-    dev.state_valid = true;
+    sc.state_valid = true;
     let rt0 = blend.map_or(PIPE_FORMAT_NONE, |b| b.opts.rt[0].format);
     pl.srgb_table = rt0 != PIPE_FORMAT_NONE && unsafe { util_format_is_srgb(rt0) };
-    (pl.blend_cfg, pl.blend_const, pl.state_reg) = (dev.blend_cfg, dev.blend_const, dev.state_reg);
+    (pl.blend_cfg, pl.blend_const, pl.state_reg) = (sc.blend_cfg, sc.blend_const, sc.state_reg);
     pl.state_valid = true;
     viewport(pl, &c, discard);
     Ok(VkPipeline::from_object(pl))
@@ -298,7 +298,8 @@ fn viewport(pl: &mut Pipeline, c: &VkGraphicsPipelineCreateInfo, discard: bool) 
 
 /// Several wide colour targets: one pipeline per target, drawn one after the other.
 fn build_emulated(
-    dev: &mut Device,
+    dev: &Device,
+    sc: &mut Scratch,
     alloc: *const VkAllocationCallbacks,
     ci: &VkGraphicsPipelineCreateInfo,
     ri: &VkPipelineRenderingCreateInfo,
@@ -321,8 +322,8 @@ fn build_emulated(
             cbk.pAttachments = unsafe { cb.pAttachments.add(k) };
             ck.pColorBlendState = &cbk;
         }
-        dev.frag_select = k as u32 + 1;
-        match build_graphics(dev, alloc, &ck) {
+        sc.frag_select = k as u32 + 1;
+        match build_graphics(dev, sc, alloc, &ck) {
             Ok(p) => sub[k] = p,
             Err(e) => {
                 result = Err(e);
@@ -330,11 +331,10 @@ fn build_emulated(
             }
         }
     }
-    dev.frag_select = 0;
+    sc.frag_select = 0;
     if let Err(e) = result {
-        let device = VkDevice::from_object(dev);
-        for p in sub.into_iter().filter(|p| !p.is_null()) {
-            unsafe { borgvk_DestroyPipeline(device, p, alloc) };
+        for p in sub.into_iter().filter_map(|p| unsafe { p.get() }) {
+            destroy(dev, p, alloc);
         }
         return Err(e);
     }
@@ -349,17 +349,17 @@ fn mrt_formats(formats: &[VkFormat]) -> bool {
 }
 
 entrypoint! {
-    unsafe fn borgvk_CreateGraphicsPipelines(device: VkDevice, _cache: VkPipelineCache, count: u32, infos: *const VkGraphicsPipelineCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkPipeline) -> Result<(), VkError> {
-        let dev = device.get().unwrap();
-        let out = std::slice::from_raw_parts_mut(out, count as usize);
+    fn borgvk_CreateGraphicsPipelines(device: &Device, _cache: VkPipelineCache, count: u32, infos: *const VkGraphicsPipelineCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkPipeline) -> Result<(), VkError> {
+        let out = unsafe { std::slice::from_raw_parts_mut(out, count as usize) };
+        let mut sc = device.scratch.lock().unwrap();
         let mut result = Ok(());
-        for (i, ci) in slice(infos, count).iter().enumerate() {
-            let ri = vk_get_pipeline_rendering_create_info(ci).as_ref();
-            let formats = ri.map_or(&[][..], |ri| slice(ri.pColorAttachmentFormats, ri.colorAttachmentCount));
+        for (i, ci) in unsafe { slice(infos, count) }.iter().enumerate() {
+            let ri = unsafe { vk_get_pipeline_rendering_create_info(ci).as_ref() };
+            let formats = ri.map_or(&[][..], |ri| unsafe { slice(ri.pColorAttachmentFormats, ri.colorAttachmentCount) });
             let emulate = (2..=4).contains(&formats.len()) && !mrt_formats(formats);
             let r = match ri {
-                Some(ri) if emulate => build_emulated(dev, alloc, ci, ri),
-                _ => build_graphics(dev, alloc, ci),
+                Some(ri) if emulate => build_emulated(device, &mut sc, alloc, ci, ri),
+                _ => build_graphics(device, &mut sc, alloc, ci),
             };
             match r {
                 Ok(p) => out[i] = p,
@@ -375,22 +375,22 @@ entrypoint! {
 }
 
 entrypoint! {
-    unsafe fn borgvk_CreateComputePipelines(device: VkDevice, _cache: VkPipelineCache, count: u32, infos: *const VkComputePipelineCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkPipeline) -> Result<(), VkError> {
-        let dev = device.get().unwrap();
-        let out = std::slice::from_raw_parts_mut(out, count as usize);
-        for (i, ci) in slice(infos, count).iter().enumerate() {
-            let pl = match create(dev, alloc) {
+    fn borgvk_CreateComputePipelines(device: &Device, _cache: VkPipelineCache, count: u32, infos: *const VkComputePipelineCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkPipeline) -> Result<(), VkError> {
+        let out = unsafe { std::slice::from_raw_parts_mut(out, count as usize) };
+        let mut sc = device.scratch.lock().unwrap();
+        for (i, ci) in unsafe { slice(infos, count) }.iter().enumerate() {
+            let pl = match create(device, alloc) {
                 Ok(pl) => pl,
                 Err(e) => {
                     out[i..].fill(null_mut());
                     return Err(e);
                 }
             };
-            dev.compile_layout = ci.layout;
-            borgvk_compile_compute_stage(dev, &ci.stage, pl);
+            sc.compile_layout = ci.layout;
+            compile_compute_stage(device, &mut sc, &ci.stage, pl);
             // A refused shader fails here, not as a dispatch that silently does nothing.
             if !pl.cs_ok {
-                borgvk_DestroyPipeline(device, VkPipeline::from_object(pl), alloc);
+                destroy(device, pl, alloc);
                 out[i..].fill(null_mut());
                 return Err(VkError(VK_ERROR_UNKNOWN));
             }
@@ -400,15 +400,19 @@ entrypoint! {
     }
 }
 
+/// Frees a pipeline and the pipelines of its other colour targets.
+fn destroy(dev: &Device, pl: &mut Pipeline, alloc: *const VkAllocationCallbacks) {
+    for p in pl.emul.into_iter().filter_map(|p| unsafe { p.get() }) {
+        destroy(dev, p, alloc);
+    }
+    unsafe { vk_object_free(dev.vk_ptr(), alloc, std::ptr::from_mut(pl).cast()) };
+}
+
 entrypoint! {
-    unsafe fn borgvk_DestroyPipeline(device: VkDevice, pipeline: VkPipeline, alloc: *const VkAllocationCallbacks) {
-        let Some(pl) = pipeline.get() else {
-            return;
-        };
-        for &p in pl.emul.iter().filter(|p| !p.is_null()) {
-            borgvk_DestroyPipeline(device, p, alloc);
+    fn borgvk_DestroyPipeline(device: &Device, pipeline: Option<&mut Pipeline>, alloc: *const VkAllocationCallbacks) {
+        if let Some(pl) = pipeline {
+            destroy(device, pl, alloc);
         }
-        vk_object_free(&mut device.get().unwrap().vk, alloc, (pl as *mut Pipeline).cast());
     }
 }
 

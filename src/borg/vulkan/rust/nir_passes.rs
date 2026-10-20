@@ -4,16 +4,16 @@
 //! NIR passes the driver runs before borgc.
 
 use crate::compiler::{compile_layout, set_base, set_map};
-use crate::device::Device;
+use crate::device::Scratch;
 use compiler::bindings::*;
 
 /// Descriptor (set, binding, array element) to the flat slot borgc addresses: set 0, binding
 /// base of the set plus the element's slot.
-pub fn remap_array_bindings(dev: &Device, nir: &nir_shader) {
-    let Some(pl) = compile_layout(dev) else {
+pub fn remap_array_bindings(sc: &Scratch, nir: &nir_shader) {
+    let Some(pl) = compile_layout(sc) else {
         return;
     };
-    let base = set_base(dev);
+    let base = set_base(sc);
     let intrs = nir.iter_functions().filter_map(|f| f.get_impl()).flat_map(|i| i.iter_blocks()).flat_map(|b| b.iter_instr_list());
     for intr in intrs.filter_map(|i| i.as_intrinsic()) {
         if intr.intrinsic != nir_intrinsic_vulkan_resource_index {
