@@ -341,7 +341,6 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_pipeline, base, VkPipeline,
 }
 #endif
 
-void borgvk_send_texture_row(struct borgvk_image *tex, const struct borgvk_sampler *sampler, int dy);
 bool borgvk_set_is_cube(struct borgvk_descriptor_set *set);
 bool borgvk_submit_is_cube(struct vk_queue_submit *submit);
 VkResult borgvk_submit_sim_cube(struct borgvk_device *device, struct vk_queue_submit *submit);
@@ -351,9 +350,6 @@ struct tex_conv {
    bool swap_rb;
 };
 void *borgvk_decode_compressed_image(const struct borgvk_image *src, struct borgvk_image *out, struct borgvk_device_memory *mem);
-bool borgvk_send_generic_texture(const struct vk_image_view *view, const struct borgvk_image *img,
-                                 const struct borgvk_sampler *sampler);
-bool borgvk_send_buffer_texture(const struct vk_buffer_view *bv);
 
 void borgvk_resolve_region(struct borgvk_image *src, struct borgvk_image *dst, const VkImageResolve *reg);
 

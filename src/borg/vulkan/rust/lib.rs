@@ -35,6 +35,7 @@ mod sim;
 mod sim_process;
 mod sync;
 mod texel;
+mod texture_upload;
 mod transport;
 mod util;
 mod wsi;
