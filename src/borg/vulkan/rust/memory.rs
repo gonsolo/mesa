@@ -4,7 +4,7 @@
 //! Device memory, buffers and buffer views. Memory is a GEM buffer of the DRM device mapped into
 //! the process, or malloc'd without one; either way host-coherent.
 
-use crate::entrypoint::{chain, entrypoint, handle, slice, vk_error, Handle};
+use crate::entrypoint::{chain, entrypoint, handle, pointee, slice, vk_error, Handle};
 use crate::drm::{gem_close, ioctl, GEM_CREATE, GEM_MMAP};
 use crate::ffi::*;
 use crate::object::{allocate, Zeroed};
@@ -72,18 +72,18 @@ fn back(dev: &Device, size: usize) -> Result<(*mut c_void, u32), VkResult> {
     Ok((map, create.handle))
 }
 
+pointee!(VkMemoryAllocateInfo, VkMemoryMapInfo, VkBufferCreateInfo, VkBufferViewCreateInfo, VkDeviceBufferMemoryRequirements, VkMemoryRequirements2, *mut c_void);
+
 entrypoint! {
-    unsafe fn borgvk_AllocateMemory(device: VkDevice, info: *const VkMemoryAllocateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkDeviceMemory) -> Result<(), VkError> {
-        let dev = device.get().unwrap();
-        let Some(mem) = allocate::<DeviceMemory>(|n| vk_device_memory_create(&mut dev.vk, info, alloc, n)) else {
-            return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
-        };
-        let size = ((*info).allocationSize as usize).max(1);
-        match back(dev, size) {
+    fn borgvk_AllocateMemory(device: &Device, info: &VkMemoryAllocateInfo, alloc: *const VkAllocationCallbacks, out: &mut VkDeviceMemory) -> Result<(), VkError> {
+        let mem = unsafe { allocate::<DeviceMemory>(|n| vk_device_memory_create(device.vk_ptr(), info, alloc, n)) };
+        let mem = mem.ok_or_else(|| vk_error!(device, VK_ERROR_OUT_OF_HOST_MEMORY))?;
+        let size = (info.allocationSize as usize).max(1);
+        match back(device, size) {
             Ok((map, gem_handle)) => (mem.map, mem.size, mem.gem_handle) = (map, size, gem_handle),
             Err(r) => {
-                vk_device_memory_destroy(&mut dev.vk, alloc, &mut mem.vk);
-                return Err(vk_error!(dev, r));
+                unsafe { vk_device_memory_destroy(device.vk_ptr(), alloc, &mut mem.vk) };
+                return Err(vk_error!(device, r));
             }
         }
         *out = VkDeviceMemory::from_object(mem);
@@ -92,88 +92,81 @@ entrypoint! {
 }
 
 entrypoint! {
-    unsafe fn borgvk_FreeMemory(device: VkDevice, memory: VkDeviceMemory, alloc: *const VkAllocationCallbacks) {
-        let Some(mem) = memory.get() else {
-            return;
-        };
-        let dev = device.get().unwrap();
-        if mem.gem_handle != 0 {
-            munmap(mem.map, mem.size as _);
-            gem_close(dev.drm_fd, mem.gem_handle);
-        } else {
-            free(mem.map);
+    fn borgvk_FreeMemory(device: &Device, memory: Option<&mut DeviceMemory>, alloc: *const VkAllocationCallbacks) {
+        let Some(mem) = memory else { return };
+        unsafe {
+            if mem.gem_handle != 0 {
+                munmap(mem.map, mem.size as _);
+                gem_close(device.drm_fd, mem.gem_handle);
+            } else {
+                free(mem.map);
+            }
+            vk_device_memory_destroy(device.vk_ptr(), alloc, &mut mem.vk);
         }
-        vk_device_memory_destroy(&mut dev.vk, alloc, &mut mem.vk);
     }
 }
 
 // No memory type is lazily allocated, so everything allocated is committed.
 entrypoint! {
-    unsafe fn borgvk_GetDeviceMemoryCommitment(_device: VkDevice, memory: VkDeviceMemory, out: *mut VkDeviceSize) {
-        *out = memory.get().map_or(0, |m| m.vk.size);
+    fn borgvk_GetDeviceMemoryCommitment(_device: VkDevice, memory: &DeviceMemory, out: &mut VkDeviceSize) {
+        *out = memory.vk.size;
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_MapMemory2(_device: VkDevice, info: *const VkMemoryMapInfo, out: *mut *mut c_void) -> VkResult {
-        let mem = (*info).memory.get().unwrap();
-        *out = mem.map.byte_add((*info).offset as usize);
+    fn borgvk_MapMemory2(_device: VkDevice, info: &VkMemoryMapInfo, out: &mut *mut c_void) -> VkResult {
+        let mem = unsafe { info.memory.get() }.unwrap();
+        *out = mem.map.wrapping_byte_add(info.offset as usize);
         VK_SUCCESS
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_UnmapMemory2(_device: VkDevice, _info: *const VkMemoryUnmapInfo) -> VkResult {
+    fn borgvk_UnmapMemory2(_device: VkDevice, _info: *const VkMemoryUnmapInfo) -> VkResult {
         VK_SUCCESS
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_FlushMappedMemoryRanges(_device: VkDevice, _count: u32, _ranges: *const VkMappedMemoryRange) -> VkResult {
+    fn borgvk_FlushMappedMemoryRanges(_device: VkDevice, _count: u32, _ranges: *const VkMappedMemoryRange) -> VkResult {
         VK_SUCCESS
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_InvalidateMappedMemoryRanges(_device: VkDevice, _count: u32, _ranges: *const VkMappedMemoryRange) -> VkResult {
+    fn borgvk_InvalidateMappedMemoryRanges(_device: VkDevice, _count: u32, _ranges: *const VkMappedMemoryRange) -> VkResult {
         VK_SUCCESS
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_CreateBuffer(device: VkDevice, info: *const VkBufferCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkBuffer) -> Result<(), VkError> {
-        let dev = device.get().unwrap();
-        let Some(b) = allocate::<Buffer>(|n| vk_buffer_create(&mut dev.vk, info, alloc, n)) else {
-            return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
-        };
-        *out = VkBuffer::from_object(b);
+    fn borgvk_CreateBuffer(device: &Device, info: &VkBufferCreateInfo, alloc: *const VkAllocationCallbacks, out: &mut VkBuffer) -> Result<(), VkError> {
+        let b = unsafe { allocate::<Buffer>(|n| vk_buffer_create(device.vk_ptr(), info, alloc, n)) };
+        *out = VkBuffer::from_object(b.ok_or_else(|| vk_error!(device, VK_ERROR_OUT_OF_HOST_MEMORY))?);
         Ok(())
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_DestroyBuffer(device: VkDevice, buffer: VkBuffer, alloc: *const VkAllocationCallbacks) {
-        if let Some(b) = buffer.get() {
-            vk_buffer_destroy(&mut device.get().unwrap().vk, alloc, &mut b.vk);
+    fn borgvk_DestroyBuffer(device: &Device, buffer: Option<&mut Buffer>, alloc: *const VkAllocationCallbacks) {
+        if let Some(b) = buffer {
+            unsafe { vk_buffer_destroy(device.vk_ptr(), alloc, &mut b.vk) };
         }
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_CreateBufferView(device: VkDevice, info: *const VkBufferViewCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkBufferView) -> Result<(), VkError> {
-        let dev = device.get().unwrap();
-        let Some(v) = allocate::<BufferView>(|n| vk_buffer_view_create(&mut dev.vk, info, alloc, n)) else {
-            return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
-        };
-        *out = VkBufferView::from_object(v);
+    fn borgvk_CreateBufferView(device: &Device, info: &VkBufferViewCreateInfo, alloc: *const VkAllocationCallbacks, out: &mut VkBufferView) -> Result<(), VkError> {
+        let v = unsafe { allocate::<BufferView>(|n| vk_buffer_view_create(device.vk_ptr(), info, alloc, n)) };
+        *out = VkBufferView::from_object(v.ok_or_else(|| vk_error!(device, VK_ERROR_OUT_OF_HOST_MEMORY))?);
         Ok(())
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_DestroyBufferView(device: VkDevice, view: VkBufferView, alloc: *const VkAllocationCallbacks) {
-        if let Some(v) = view.get() {
-            vk_buffer_view_destroy(&mut device.get().unwrap().vk, alloc, &mut v.vk);
+    fn borgvk_DestroyBufferView(device: &Device, view: Option<&mut BufferView>, alloc: *const VkAllocationCallbacks) {
+        if let Some(v) = view {
+            unsafe { vk_buffer_view_destroy(device.vk_ptr(), alloc, &mut v.vk) };
         }
     }
 }
@@ -197,15 +190,15 @@ fn buffer_size(size: u64) -> u64 {
 
 // The common GetBufferMemoryRequirements2 delegates here (maintenance4).
 entrypoint! {
-    unsafe fn borgvk_GetDeviceBufferMemoryRequirements(_device: VkDevice, info: *const VkDeviceBufferMemoryRequirements, reqs: *mut VkMemoryRequirements2) {
-        requirements(buffer_size((*(*info).pCreateInfo).size), &mut *reqs);
+    fn borgvk_GetDeviceBufferMemoryRequirements(_device: VkDevice, info: &VkDeviceBufferMemoryRequirements, reqs: &mut VkMemoryRequirements2) {
+        requirements(buffer_size(unsafe { (*info.pCreateInfo).size }), reqs);
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_BindBufferMemory2(_device: VkDevice, count: u32, infos: *const VkBindBufferMemoryInfo) -> VkResult {
-        for i in slice(infos, count) {
-            let b = i.buffer.get().unwrap();
+    fn borgvk_BindBufferMemory2(_device: VkDevice, count: u32, infos: *const VkBindBufferMemoryInfo) -> VkResult {
+        for i in unsafe { slice(infos, count) } {
+            let b = unsafe { i.buffer.get() }.unwrap();
             (b.mem, b.offset) = (i.memory.ptr(), i.memoryOffset);
         }
         VK_SUCCESS
