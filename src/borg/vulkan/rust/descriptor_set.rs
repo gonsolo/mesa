@@ -4,7 +4,7 @@
 //! Descriptor set layouts, pools and sets. A layout maps its (binding, array element) pairs to
 //! flat slots, at most BORGVK_MAX_BINDINGS of them; a set holds one descriptor per slot.
 
-use crate::entrypoint::{entrypoint, handle, slice, vk_error, Handle};
+use crate::entrypoint::{entrypoint, handle, pointee, slice, vk_error, Handle};
 use crate::ffi::*;
 use crate::memory::Buffer;
 use crate::sampler::Sampler;
@@ -113,15 +113,14 @@ pub fn desc_slot(m: &DescMap, binding: u32, mut elem: u32) -> Option<u32> {
     Some(m.slot[j] as u32 + elem)
 }
 
+pointee!(VkDescriptorSetLayoutCreateInfo, VkDescriptorSetLayoutSupport, VkDescriptorPoolCreateInfo, VkDescriptorSetAllocateInfo);
+
 entrypoint! {
-    unsafe fn borgvk_CreateDescriptorSetLayout(device: VkDevice, info: *const VkDescriptorSetLayoutCreateInfo, _alloc: *const VkAllocationCallbacks, out: *mut VkDescriptorSetLayout) -> Result<(), VkError> {
-        let dev = device.get().unwrap();
-        let Some(l) = allocate::<DescriptorSetLayout>(|n| vk_descriptor_set_layout_zalloc(&mut dev.vk, n, info)) else {
-            return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
-        };
-        let i = &*info;
-        l.binding_count = i.bindingCount;
-        (l.map, l.dyn_mask) = layout_map(slice(i.pBindings, i.bindingCount));
+    fn borgvk_CreateDescriptorSetLayout(device: &Device, info: &VkDescriptorSetLayoutCreateInfo, _alloc: *const VkAllocationCallbacks, out: &mut VkDescriptorSetLayout) -> Result<(), VkError> {
+        let l = unsafe { allocate::<DescriptorSetLayout>(|n| vk_descriptor_set_layout_zalloc(device.vk_ptr(), n, info)) };
+        let l = l.ok_or_else(|| vk_error!(device, VK_ERROR_OUT_OF_HOST_MEMORY))?;
+        l.binding_count = info.bindingCount;
+        (l.map, l.dyn_mask) = layout_map(unsafe { slice(info.pBindings, info.bindingCount) });
         *out = VkDescriptorSetLayout::from_object(l);
         Ok(())
     }
@@ -130,34 +129,32 @@ entrypoint! {
 // DestroyDescriptorSetLayout is the common, refcounted entry point.
 
 entrypoint! {
-    unsafe fn borgvk_GetDescriptorSetLayoutSupport(_device: VkDevice, info: *const VkDescriptorSetLayoutCreateInfo, support: *mut VkDescriptorSetLayoutSupport) {
-        (*support).supported = ((*info).bindingCount <= BORGVK_MAX_BINDINGS) as VkBool32;
+    fn borgvk_GetDescriptorSetLayoutSupport(_device: VkDevice, info: &VkDescriptorSetLayoutCreateInfo, support: &mut VkDescriptorSetLayoutSupport) {
+        support.supported = (info.bindingCount <= BORGVK_MAX_BINDINGS) as VkBool32;
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_CreateDescriptorPool(device: VkDevice, info: *const VkDescriptorPoolCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkDescriptorPool) -> Result<(), VkError> {
-        let dev = device.get().unwrap();
-        let Some(p) = allocate::<DescriptorPool>(|n| vk_object_zalloc(&mut dev.vk, alloc, n, VK_OBJECT_TYPE_DESCRIPTOR_POOL)) else {
-            return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
-        };
-        list_inithead(&mut p.sets);
-        p.max_sets = (*info).maxSets;
+    fn borgvk_CreateDescriptorPool(device: &Device, info: &VkDescriptorPoolCreateInfo, alloc: *const VkAllocationCallbacks, out: &mut VkDescriptorPool) -> Result<(), VkError> {
+        let p = unsafe { allocate::<DescriptorPool>(|n| vk_object_zalloc(device.vk_ptr(), alloc, n, VK_OBJECT_TYPE_DESCRIPTOR_POOL)) };
+        let p = p.ok_or_else(|| vk_error!(device, VK_ERROR_OUT_OF_HOST_MEMORY))?;
+        unsafe { list_inithead(&mut p.sets) };
+        p.max_sets = info.maxSets;
         *out = VkDescriptorPool::from_object(p);
         Ok(())
     }
 }
 
 /// Unlinks a set from its pool and frees it.
-unsafe fn free_set(dev: &mut Device, set: *mut DescriptorSet) {
+unsafe fn free_set(dev: &Device, set: *mut DescriptorSet) {
     unsafe {
         list_del(&mut (*set).link);
         (*(*set).pool).num_sets = (*(*set).pool).num_sets.wrapping_sub(1);
-        vk_object_free(&mut dev.vk, null(), set.cast());
+        vk_object_free(dev.vk_ptr(), null(), set.cast());
     }
 }
 
-fn free_pool_sets(dev: &mut Device, pool: &mut DescriptorPool) {
+fn free_pool_sets(dev: &Device, pool: &mut DescriptorPool) {
     let head: *mut list_head = &mut pool.sets;
     let mut p = pool.sets.next;
     while p != head {
@@ -170,46 +167,46 @@ fn free_pool_sets(dev: &mut Device, pool: &mut DescriptorPool) {
 }
 
 entrypoint! {
-    unsafe fn borgvk_DestroyDescriptorPool(device: VkDevice, pool: VkDescriptorPool, alloc: *const VkAllocationCallbacks) {
-        if let Some(p) = pool.get() {
-            let dev = device.get().unwrap();
-            free_pool_sets(dev, p);
-            vk_object_free(&mut dev.vk, alloc, (p as *mut DescriptorPool).cast());
+    fn borgvk_DestroyDescriptorPool(device: &Device, pool: Option<&mut DescriptorPool>, alloc: *const VkAllocationCallbacks) {
+        if let Some(p) = pool {
+            free_pool_sets(device, p);
+            unsafe { vk_object_free(device.vk_ptr(), alloc, std::ptr::from_mut(p).cast()) };
         }
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_ResetDescriptorPool(device: VkDevice, pool: VkDescriptorPool, _flags: VkDescriptorPoolResetFlags) -> VkResult {
-        free_pool_sets(device.get().unwrap(), pool.get().unwrap());
+    fn borgvk_ResetDescriptorPool(device: &Device, pool: &mut DescriptorPool, _flags: VkDescriptorPoolResetFlags) -> VkResult {
+        free_pool_sets(device, pool);
         VK_SUCCESS
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_AllocateDescriptorSets(device: VkDevice, info: *const VkDescriptorSetAllocateInfo, out: *mut VkDescriptorSet) -> Result<(), VkError> {
-        let dev = device.get().unwrap();
-        let i = &*info;
-        let pool = i.descriptorPool.get().unwrap();
+    fn borgvk_AllocateDescriptorSets(device: &Device, info: &VkDescriptorSetAllocateInfo, out: *mut VkDescriptorSet) -> Result<(), VkError> {
+        let (dev, i) = (device, info);
+        // The pool is externally synchronized.
+        let pool = unsafe { i.descriptorPool.get() }.unwrap();
         if pool.num_sets.wrapping_add(i.descriptorSetCount) > pool.max_sets {
             return Err(vk_error!(dev, VK_ERROR_OUT_OF_POOL_MEMORY));
         }
-        let out = std::slice::from_raw_parts_mut(out, i.descriptorSetCount as usize);
+        let out = unsafe { std::slice::from_raw_parts_mut(out, i.descriptorSetCount as usize) };
         for k in 0..out.len() {
-            let Some(set) = allocate::<DescriptorSet>(|n| vk_object_zalloc(&mut dev.vk, null(), n, VK_OBJECT_TYPE_DESCRIPTOR_SET)) else {
+            let set = unsafe { allocate::<DescriptorSet>(|n| vk_object_zalloc(dev.vk_ptr(), null(), n, VK_OBJECT_TYPE_DESCRIPTOR_SET)) };
+            let Some(set) = set else {
                 for h in &mut out[..k] {
-                    free_set(dev, h.ptr());
+                    unsafe { free_set(dev, h.ptr()) };
                     *h = VkDescriptorSet::from_object(std::ptr::null_mut());
                 }
                 return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
             };
             if !i.pSetLayouts.is_null() {
-                if let Some(l) = (*i.pSetLayouts.add(k)).get() {
+                if let Some(l) = unsafe { (*i.pSetLayouts.add(k)).get_ref() } {
                     (set.dyn_mask, set.map) = (l.dyn_mask, l.map);
                 }
             }
             set.pool = pool;
-            list_addtail(&mut set.link, &mut pool.sets);
+            unsafe { list_addtail(&mut set.link, &mut pool.sets) };
             pool.num_sets = pool.num_sets.wrapping_add(1);
             out[k] = VkDescriptorSet::from_object(set);
         }
@@ -218,10 +215,9 @@ entrypoint! {
 }
 
 entrypoint! {
-    unsafe fn borgvk_FreeDescriptorSets(device: VkDevice, _pool: VkDescriptorPool, count: u32, sets: *const VkDescriptorSet) -> VkResult {
-        let dev = device.get().unwrap();
-        for s in slice(sets, count).iter().filter(|s| !s.is_null()) {
-            free_set(dev, s.ptr());
+    fn borgvk_FreeDescriptorSets(device: &Device, _pool: VkDescriptorPool, count: u32, sets: *const VkDescriptorSet) -> VkResult {
+        for s in unsafe { slice(sets, count) }.iter().filter(|s| !s.is_null()) {
+            unsafe { free_set(device, s.ptr()) };
         }
         VK_SUCCESS
     }
@@ -294,19 +290,19 @@ unsafe fn write(w: &VkWriteDescriptorSet) {
 }
 
 entrypoint! {
-    unsafe fn borgvk_UpdateDescriptorSets(_device: VkDevice, nwrites: u32, writes: *const VkWriteDescriptorSet, ncopies: u32, copies: *const VkCopyDescriptorSet) {
-        for w in slice(writes, nwrites) {
-            write(w);
+    fn borgvk_UpdateDescriptorSets(_device: VkDevice, nwrites: u32, writes: *const VkWriteDescriptorSet, ncopies: u32, copies: *const VkCopyDescriptorSet) {
+        for w in unsafe { slice(writes, nwrites) } {
+            unsafe { write(w) };
         }
-        for c in slice(copies, ncopies) {
+        for c in unsafe { slice(copies, ncopies) } {
             let (src, dst) = (c.srcSet.ptr(), c.dstSet.ptr());
             for k in 0..c.descriptorCount {
-                let s = desc_slot(&(*src).map, c.srcBinding, c.srcArrayElement + k);
-                let d = desc_slot(&(*dst).map, c.dstBinding, c.dstArrayElement + k);
+                let s = desc_slot(unsafe { &(*src).map }, c.srcBinding, c.srcArrayElement + k);
+                let d = desc_slot(unsafe { &(*dst).map }, c.dstBinding, c.dstArrayElement + k);
                 let (Some(s), Some(d)) = (s, d) else {
                     break;
                 };
-                copy_slot(dst, d as usize, src, s as usize);
+                unsafe { copy_slot(dst, d as usize, src, s as usize) };
             }
         }
     }
