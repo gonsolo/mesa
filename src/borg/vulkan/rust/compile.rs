@@ -7,6 +7,7 @@ use crate::compiler::set_base;
 use crate::ffi::*;
 use crate::nir_info::*;
 use crate::nir_passes::{lower_lines, remap_array_bindings};
+use crate::shader_cache;
 use crate::util::{log, MESA_LOG_INFO, MESA_LOG_WARN};
 use borgc_rs::{borgc_compile_compute, borgc_compile_nir, BorgcInfo};
 use std::ptr::{null, null_mut};
@@ -49,10 +50,9 @@ fn empty_frag(dev: &mut borgvk_device, opt: u32) {
 
 /// The blob from the shader cache, which knows neither the blend state nor a constant pool.
 fn from_cache(dev: &mut borgvk_device, si: &VkPipelineShaderStageCreateInfo, vfetch: u32, slot: usize) -> bool {
-    let mut pntc = false;
-    if !unsafe { borgvk_shader_cache_get(si, vfetch, &mut dev.shader_blob[slot], &mut pntc) } {
+    let Some(pntc) = shader_cache::get(si, vfetch, &mut dev.shader_blob[slot]) else {
         return false;
-    }
+    };
     let fs = slot == FRAG;
     if fs {
         dev.frag_reads_pntc = pntc;
@@ -142,7 +142,7 @@ fn compile_blob(
         let n = b.npool as usize;
         b.pool[..n].copy_from_slice(&info.pool[..n]);
         if blend.is_null() && n == 0 {
-            unsafe { borgvk_shader_cache_record(si, vfetch, b, dev.frag_reads_pntc) };
+            shader_cache::record(si, vfetch, b, dev.frag_reads_pntc);
         }
         log(MESA_LOG_INFO, format!("borgvk: captured {kind} shader blob ({len} bytes) for upload"));
     } else {

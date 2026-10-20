@@ -206,10 +206,6 @@ struct borgvk_writeback;
 VkResult borgvk_queue_submit(struct vk_queue *queue,
                              struct vk_queue_submit *submit);
 
-bool borgvk_shader_cache_get(const VkPipelineShaderStageCreateInfo *si, uint32_t vfetch,
-                             struct borgvk_shader_blob *blob, bool *reads_pntc);
-void borgvk_shader_cache_record(const VkPipelineShaderStageCreateInfo *si, uint32_t vfetch,
-                                const struct borgvk_shader_blob *blob, bool reads_pntc);
 #define BORGVK_LINE_SLOT  16
 #define BORGVK_LINE_OTHER 24
 

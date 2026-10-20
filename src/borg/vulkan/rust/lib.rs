@@ -22,6 +22,7 @@ mod memory;
 mod query;
 mod sampler;
 mod serial;
+mod shader_cache;
 mod sim;
 mod sim_process;
 mod sync;

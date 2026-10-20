@@ -82,8 +82,7 @@ pub unsafe extern "C" fn borgvk_compile_stage(device: *mut borgvk_device, vfetch
         VK_SHADER_STAGE_FRAGMENT_BIT => BORGVK_STAGE_FRAG,
         _ => return,
     } as usize;
-    let mut pntc = false;
-    if unsafe { borgvk_shader_cache_get(si, vfetch, &mut dev.shader_blob[slot], &mut pntc) } {
+    if let Some(pntc) = crate::shader_cache::get(si, vfetch, &mut dev.shader_blob[slot]) {
         if slot == BORGVK_STAGE_FRAG as usize {
             dev.frag_reads_pntc = pntc;
         }

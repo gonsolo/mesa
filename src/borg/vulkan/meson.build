@@ -21,7 +21,6 @@ libborgvk_files = files(
   'borgvk_cmd_render.c',
   'borgvk_pipeline.c',
   'borgvk_queue.c',
-  'borgvk_shader_cache.c',
   'borgvk_corpus.c',
   'borgvk_cube.c',
   'borgvk_texture_upload.c',
@@ -119,10 +118,10 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-function', 'util_format_(un)?pack_(rgba|z_float|s_8uint)',
     '--allowlist-function', 'borg_core_.*|borg_hw_.*|bh_.*',
     '--allowlist-function', 'mesa_log|malloc|realloc|free|tcgetattr|tcsetattr|cfmakeraw|cfsetispeed|cfsetospeed|tcdrain',
-    '--allowlist-function', 'memfd_create|close|signal|sysconf|borgvk_shader_cache_.*',
+    '--allowlist-function', 'memfd_create|close|signal|sysconf',
     '--allowlist-function', 'vk_object_zalloc|vk_object_free|__vk_errorf|vk_sampler_(create|destroy)',
     '--allowlist-function', 'vk_device_memory_(create|destroy)|vk_buffer_(view_)?(create|destroy)|drmIoctl|munmap',
-    '--allowlist-type', 'borgvk_buffer|borgvk_buffer_view|VkMemoryAllocateInfo|VkMemoryMapInfo|VkMemoryUnmapInfo|VkMappedMemoryRange',
+    '--allowlist-type', 'vk_shader_module|VkShaderModuleCreateInfo|borgvk_buffer|borgvk_buffer_view|VkMemoryAllocateInfo|VkMemoryMapInfo|VkMemoryUnmapInfo|VkMappedMemoryRange',
     '--allowlist-type', 'VkBufferCreateInfo|VkBufferViewCreateInfo|VkDeviceBufferMemoryRequirements|VkMemoryRequirements2',
     '--allowlist-type', 'VkMemoryDedicatedRequirements|VkBindBufferMemoryInfo|VkBaseOutStructure|drm_borg_gem_(create|mmap)|drm_gem_close',
     '--allowlist-var', 'DRM_COMMAND_BASE|DRM_BORG_GEM_.*|VK_(TRUE|FALSE)',
@@ -210,7 +209,7 @@ libvulkan_borg = shared_library(
 # The wire packet test links the Rust library itself: libvulkan_borg exports only the ICD entrypoints.
 borgvk_serial_test = executable(
   'borgvk_serial_test',
-  ['borgvk_serial_test.c', 'borgvk_shader_cache.c', borgvk_rust_h],
+  ['borgvk_serial_test.c', borgvk_rust_h],
   include_directories : [
     inc_include, inc_src, inc_util,
     include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h
@@ -229,7 +228,7 @@ test(
 # end-to-end test, with the driver's own senders rather than a reimplementation.
 borgvk_burst_gen = executable(
   'borgvk_burst_gen',
-  ['borgvk_burst_gen.c', 'borgvk_shader_cache.c', borgvk_rust_h],
+  ['borgvk_burst_gen.c', borgvk_rust_h],
   include_directories : [
     inc_include, inc_src, inc_util,
     include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h

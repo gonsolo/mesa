@@ -12,6 +12,7 @@
 #include "vk_buffer_view.h"
 #include "vk_device_memory.h"
 #include "vk_sync.h"
+#include "vk_shader_module.h"
 #include "vk_descriptor_set_layout.h"
 #include "util/list.h"
 #include "util/os_time.h"
