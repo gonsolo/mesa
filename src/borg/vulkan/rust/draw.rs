@@ -11,7 +11,8 @@ use crate::entrypoint::{entrypoint, slice, Handle};
 use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
 use crate::fmt;
-use crate::memory::Buffer;
+use crate::memory::{Buffer, Host};
+use crate::texel::Texel;
 use crate::image::Image;
 use crate::device::Device;
 use crate::pipeline::Pipeline;
@@ -261,7 +262,8 @@ struct Ctx<'a> {
     nextra: usize,
     w: u32,
     h: u32,
-    idx: *const u8,
+    idx: Host,
+    idx_base: usize,
     vmin: i64,
     vmax: i64,
     imin: i64,
@@ -285,13 +287,10 @@ impl Ctx<'_> {
     }
 
     fn index(&self, i: u32) -> u32 {
-        unsafe {
-            if self.p.index_size == 2 {
-                self.idx.cast::<u16>().add(i as usize).read_unaligned() as u32
-            } else {
-                self.idx.cast::<u32>().add(i as usize).read_unaligned()
-            }
-        }
+        let n = self.p.index_size as usize;
+        let mut b = [0u8; 4];
+        self.idx.read(self.idx_base + i as usize * n, &mut b[..n]);
+        if n == 2 { u16::from_ne_bytes([b[0], b[1]]) as u32 } else { u32::from_ne_bytes(b) }
     }
 
     fn validate(&mut self) -> Result<(), Reject> {
@@ -373,7 +372,9 @@ impl Ctx<'_> {
             if self.c.index_ptr.is_null() {
                 return Err(Reject::NoIndexBuffer);
             }
-            self.idx = self.c.index_ptr.wrapping_add(p.first as usize * p.index_size as usize);
+            // The bound index buffer from its offset on, `index_avail` bytes.
+            self.idx = unsafe { Host::new(self.c.index_ptr.cast_mut(), self.c.index_avail as usize) };
+            self.idx_base = p.first as usize * p.index_size as usize;
             if p.first.wrapping_add(p.count) as u64 * p.index_size as u64 > self.c.index_avail {
                 return Err(Reject::NoIndexBuffer);
             }
@@ -537,11 +538,14 @@ impl Ctx<'_> {
             let Some(f) = f.filter(|_| !self.c.vb[b].is_null()) else { return Err(Reject::VertexInput) };
             let rb = f.read_bytes as usize;
             let (stride, inst) = (pl.binding_stride[b] as u64, pl.binding_instance[b]);
-            let (vb, avail) = (self.c.vb[b], self.c.vb_avail[b]);
+            let avail = self.c.vb_avail[b];
+            // The bound vertex buffer from its offset on, `avail` bytes.
+            let vb = unsafe { Host::new(self.c.vb[b].cast_mut(), avail as usize) };
             let asz = blocks(at.format).bs as u64;
             let copy = |dst: &mut [u8], src: u64| {
-                if src + asz <= avail {
-                    vattr_copy(at.format, conv, dst, unsafe { vb.add(src as usize) }, asz as usize);
+                let mut t: Texel = [0; 32];
+                if src + asz <= avail && vb.read(src as usize, &mut t[..asz as usize]) {
+                    vattr_copy(at.format, conv, dst, &t, asz as usize);
                 }
             };
             if self.lines && !inst {
@@ -655,7 +659,8 @@ impl Ctx<'_> {
             self.idx_off = off?;
         } else {
             let n = p.count as usize * p.index_size as usize;
-            self.idx_off = self.heap.upload(unsafe { std::slice::from_raw_parts(self.idx, n) })?;
+            let (idx, base) = (self.idx, self.idx_base);
+            self.idx_off = idx.with_bytes(base, n, |b| self.heap.upload(b)).ok_or(Reject::Upload)??;
         }
         Ok(())
     }
@@ -699,18 +704,20 @@ impl Ctx<'_> {
                         let fb = pl.set_base[si] as u32 + b as u32;
                         if let Some(simg) = storage_image(ds, b).filter(|_| fb < 32) {
                             let n = (simg.vk.extent.width.wrapping_mul(simg.vk.extent.height)).min(SLOT_BYTES / 4 - 1);
-                            let host = image_host(simg).unwrap();
+                            let host = simg.host().unwrap();
                             let at = base + (1 + fb) * SLOT_BYTES;
                             let mut win = simg.vk.extent.width.to_ne_bytes().to_vec();
-                            win.extend_from_slice(unsafe { std::slice::from_raw_parts(host, n as usize * 4) });
+                            host.with_bytes(0, n as usize * 4, |b| win.extend_from_slice(b));
                             for (i, chunk) in win.chunks(256).enumerate() {
                                 send_mem(at + i as u32 * 256, chunk);
                             }
-                            push_writeback(c, at + 4, n * 4, host);
+                            if let Some(p) = host.ptr(0, n as usize * 4) {
+                                push_writeback(c, at + 4, n * 4, p);
+                            }
                             continue;
                         }
                         let Some(ub) = ds.buffer(b) else { continue };
-                        let Some(uhost) = host(ub).filter(|_| fb < 32) else { continue };
+                        let Some(uhost) = ub.host().filter(|_| fb < 32) else { continue };
                         let st = smask >> fb & 1 != 0;
                         if !st && pl.ubo_mask != 0 && pl.ubo_mask >> fb & 1 == 0 {
                             continue;
@@ -724,16 +731,15 @@ impl Ctx<'_> {
                         let range = ds.ranges[b];
                         let len = if range == VK_WHOLE_SIZE as u64 || range == 0 { size - off } else { range };
                         let len = len.min((size - off).min(SLOT_BYTES as u64)) as u32;
-                        let h = unsafe { uhost.add(off as usize) };
                         let at = base + if st || (fb != 0 && pl.ubo_mask != 0) { (1 + fb) * SLOT_BYTES } else { 0 };
                         for i in (0..len).step_by(256) {
                             let n = 256.min(len - i);
                             let mut tmp = [0u8; 256];
-                            unsafe { std::ptr::copy_nonoverlapping(h.add(i as usize), tmp.as_mut_ptr(), n as usize) };
+                            uhost.read(off as usize + i as usize, &mut tmp[..n as usize]);
                             send_mem(at + i, &tmp[..((n + 3) & !3) as usize]);
                         }
-                        if st {
-                            push_writeback(c, at, len, h);
+                        if let Some(p) = uhost.ptr(off as usize, len as usize).filter(|_| st) {
+                            push_writeback(c, at, len, p);
                         }
                     }
                 }
@@ -751,7 +757,7 @@ impl Ctx<'_> {
         for b in 0..BINDINGS {
             let Some(s) = set else { break };
             let Some(ub) = s.buffer(b) else { continue };
-            let Some(uhost) = host(ub) else { continue };
+            let Some(uhost) = ub.host() else { continue };
             if pl.ubo_mask != 0 && pl.ubo_mask >> b & 1 == 0 {
                 continue;
             }
@@ -763,7 +769,7 @@ impl Ctx<'_> {
             let range = s.ranges[b];
             let len = if range == VK_WHOLE_SIZE as u64 || range == 0 { size - off } else { range };
             let len = len.min((size - off).min(65536)) as usize;
-            let at = self.heap.upload(unsafe { std::slice::from_raw_parts(uhost.add(off as usize), len) })?;
+            let at = uhost.with_bytes(off as usize, len, |b| self.heap.upload(b)).ok_or(Reject::Upload)??;
             self.ubo_base = at + 1;
             break;
         }
@@ -872,13 +878,13 @@ fn converts(f: VkFormat) -> bool {
     pf != PIPE_FORMAT_NONE && !fmt::is_compressed(pf) && !fmt::is_depth_or_stencil(pf)
 }
 
-fn vattr_copy(f: VkFormat, conv: bool, dst: &mut [u8], src: *const u8, asz: usize) {
+fn vattr_copy(f: VkFormat, conv: bool, dst: &mut [u8], src: &Texel, asz: usize) {
     if conv {
-        // sRGB: as UNORM
-        unsafe { util_format_unpack_rgba(fmt::linear(fmt::pipe(f)), dst.as_mut_ptr().cast(), src.cast(), 1) };
+        // sRGB: as UNORM; the 16 bytes of RGBA32
+        unsafe { util_format_unpack_rgba(fmt::linear(fmt::pipe(f)), dst[..16].as_mut_ptr().cast(), src.as_ptr().cast(), 1) };
     } else {
         let n = asz.min(dst.len());
-        unsafe { std::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), n) };
+        dst[..n].copy_from_slice(&src[..n]);
     }
 }
 
@@ -906,7 +912,8 @@ fn draw_one(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
         nextra: 0,
         w: 0,
         h: 0,
-        idx: null(),
+        idx: Host::empty(),
+        idx_base: 0,
         vmin: 0,
         vmax: 0,
         imin: p.first_instance as i64,

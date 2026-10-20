@@ -58,6 +58,10 @@ impl Host {
         Some(Host { base: m.map.cast::<u8>().wrapping_add(off), len: m.size.saturating_sub(off) })
     }
 
+    pub const fn empty() -> Host {
+        Host { base: std::ptr::null_mut(), len: 0 }
+    }
+
     /// # Safety
     /// `base..base + len` is mapped while the Host is used.
     pub unsafe fn new(base: *mut u8, len: usize) -> Host {
