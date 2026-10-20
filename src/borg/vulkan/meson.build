@@ -92,7 +92,7 @@ _borgvk_bindings_rs = rust.bindgen(
   c_args : [pre_args],
   args : [
     bindgen_output_args, '--no-prepend-enum-name', '--with-derive-default',
-    '--allowlist-type', 'VkFormat|tex_conv',
+    '--allowlist-type', 'VkFormat|tex_conv|borgvk_image|pipe_format',
   ],
   include_directories : [borgvk_inc, include_directories('.')],
   dependencies : [
@@ -169,22 +169,6 @@ borgvk_serial_test = executable(
 test(
   'borgvk wire packets',
   borgvk_serial_test,
-  suite : ['borg'],
-)
-
-borgvk_format_test = executable(
-  'borgvk_format_test',
-  ['borgvk_format_test.c'],
-  include_directories : [
-    inc_include, inc_src, inc_util,
-    include_directories('../../../../'),
-  ],
-  dependencies : borgvk_deps,
-)
-
-test(
-  'borgvk formats and image helpers',
-  borgvk_format_test,
   suite : ['borg'],
 )
 

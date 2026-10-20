@@ -6,3 +6,4 @@ mod ffi {
 }
 
 mod format;
+mod image;
