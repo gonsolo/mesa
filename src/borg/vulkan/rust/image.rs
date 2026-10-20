@@ -4,7 +4,7 @@
 use crate::device::Device;
 use crate::entrypoint::{entrypoint, handle, pointee, slice, vk_error, Handle};
 use crate::ffi::*;
-use crate::memory::DeviceMemory;
+use crate::memory::{DeviceMemory, Host};
 use crate::object::{allocate, Zeroed};
 use crate::memory::requirements;
 
@@ -19,6 +19,12 @@ pub struct Image {
     pub size: VkDeviceSize, // bytes needed to back this image
     pub mem: *mut DeviceMemory,
     pub offset: VkDeviceSize,
+}
+
+impl Image {
+    pub fn host(&self) -> Option<Host> {
+        Host::of(self.mem, self.offset)
+    }
 }
 
 // Numbers, a raw pointer and the runtime's image, which it zero-allocates.

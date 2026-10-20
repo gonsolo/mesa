@@ -6,21 +6,24 @@
 use crate::ffi::*;
 use crate::image::z16_pack;
 
-pub fn unpack_rgba_float(vk: VkFormat, pf: pipe_format, texel: *const u8, out: &mut [f32; 4]) {
+/// One texel's bytes, room for the widest format.
+pub type Texel = [u8; 32];
+
+pub fn unpack_rgba_float(vk: VkFormat, pf: pipe_format, texel: &Texel, out: &mut [f32; 4]) {
     if vk == VK_FORMAT_R4G4_UNORM_PACK8 {
-        let t = unsafe { *texel };
+        let t = texel[0];
         *out = [(t >> 4 & 0xF) as f32 / 15.0, (t & 0xF) as f32 / 15.0, 0.0, 1.0];
     } else {
-        unsafe { util_format_unpack_rgba(pf, out.as_mut_ptr().cast(), texel.cast(), 1) };
+        unsafe { util_format_unpack_rgba(pf, out.as_mut_ptr().cast(), texel.as_ptr().cast(), 1) };
     }
 }
 
-pub fn pack_rgba_float(vk: VkFormat, pf: pipe_format, texel: *mut u8, v: &[f32; 4]) {
+pub fn pack_rgba_float(vk: VkFormat, pf: pipe_format, texel: &mut Texel, v: &[f32; 4]) {
     if vk == VK_FORMAT_R4G4_UNORM_PACK8 {
         let q = |x: f32| (x.clamp(0.0, 1.0) * 15.0 + 0.5) as u8;
-        unsafe { *texel = q(v[0]) << 4 | q(v[1]) };
+        texel[0] = q(v[0]) << 4 | q(v[1]);
     } else {
-        unsafe { util_format_pack_rgba(pf, texel.cast(), v.as_ptr().cast(), 1) };
+        unsafe { util_format_pack_rgba(pf, texel.as_mut_ptr().cast(), v.as_ptr().cast(), 1) };
     }
 }
 
@@ -52,30 +55,30 @@ pub fn pack_clear_color(vk: VkFormat, pf: pipe_format, pixel: &mut [u8; 16], c: 
             let v = c.int32.map(|x| x as f32);
             util_format_pack_rgba(pf, pixel.as_mut_ptr().cast(), v.as_ptr().cast(), 1);
         } else {
-            pack_rgba_float(vk, pf, pixel.as_mut_ptr(), &c.float32);
+            let mut t: Texel = [0; 32];
+            pack_rgba_float(vk, pf, &mut t, &c.float32);
+            pixel.copy_from_slice(&t[..16]);
         }
     }
 }
 
-/// Writes the depth and stencil aspects in `aspect` of one texel.
-pub fn write_depth_stencil(pf: pipe_format, texel: *mut u8, aspect: VkImageAspectFlags, depth: f32, stencil: u8) {
+/// Writes the depth and stencil aspects in `aspect` of one texel, keeping the other.
+pub fn write_depth_stencil(pf: pipe_format, texel: &mut Texel, aspect: VkImageAspectFlags, depth: f32, stencil: u8) {
     let (d, s) = (aspect & VK_IMAGE_ASPECT_DEPTH_BIT != 0, aspect & VK_IMAGE_ASPECT_STENCIL_BIT != 0);
-    unsafe {
-        if pf == PIPE_FORMAT_Z16_UNORM_S8_UINT {
-            if d {
-                std::ptr::copy_nonoverlapping(z16_pack(depth).as_ptr(), texel, 2);
-            }
-            if s {
-                *texel.add(2) = stencil;
-            }
-            return;
-        }
+    if pf == PIPE_FORMAT_Z16_UNORM_S8_UINT {
         if d {
-            util_format_pack_z_float(pf, texel.cast(), &depth, 1);
+            texel[..2].copy_from_slice(&z16_pack(depth));
         }
         if s {
-            util_format_pack_s_8uint(pf, texel.cast(), &stencil, 1);
+            texel[2] = stencil;
         }
+        return;
+    }
+    if d {
+        unsafe { util_format_pack_z_float(pf, texel.as_mut_ptr().cast(), &depth, 1) };
+    }
+    if s {
+        unsafe { util_format_pack_s_8uint(pf, texel.as_mut_ptr().cast(), &stencil, 1) };
     }
 }
 
@@ -91,9 +94,9 @@ mod tests {
 
     #[test]
     fn r4g4_packs_by_hand() {
-        let mut t = 0u8;
+        let mut t = [0u8; 32];
         pack_rgba_float(VK_FORMAT_R4G4_UNORM_PACK8, PIPE_FORMAT_NONE, &mut t, &[1.0, 0.2, 0.0, 1.0]);
-        assert_eq!(t, 0xF3);
+        assert_eq!(t[0], 0xF3);
         let mut v = [0.0; 4];
         unpack_rgba_float(VK_FORMAT_R4G4_UNORM_PACK8, PIPE_FORMAT_NONE, &t, &mut v);
         assert_eq!(v, [1.0, 0.2, 0.0, 1.0]);
@@ -101,8 +104,8 @@ mod tests {
 
     #[test]
     fn z16_s8_writes_its_own_bytes() {
-        let mut t = [0u8; 4];
-        write_depth_stencil(PIPE_FORMAT_Z16_UNORM_S8_UINT, t.as_mut_ptr(), VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 1.0, 7);
-        assert_eq!(t, [0xff, 0xff, 7, 0]);
+        let mut t = [0u8; 32];
+        write_depth_stencil(PIPE_FORMAT_Z16_UNORM_S8_UINT, &mut t, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 1.0, 7);
+        assert_eq!(t[..4], [0xff, 0xff, 7, 0]);
     }
 }

@@ -3,12 +3,12 @@
 
 //! Clears of images and of attachments, written by the host into the image memory.
 
-use crate::cmd_buffer::cmd;
-use crate::entrypoint::{entrypoint, slice, Handle};
+use crate::cmd_buffer::CommandBuffer;
+use crate::entrypoint::{entrypoint, pointee, slice};
 use crate::ffi::*;
-use crate::image::Image;
-use crate::image::{blocks, shape};
-use crate::texel::{pack_clear_color, write_depth_stencil};
+use crate::image::{blocks, shape, Image};
+use crate::memory::Host;
+use crate::texel::{pack_clear_color, write_depth_stencil, Texel};
 use borg_layout::image::Blocks;
 
 fn level_count(image: &vk_image, r: &VkImageSubresourceRange) -> u32 {
@@ -20,10 +20,10 @@ fn layer_count(image: &vk_image, r: &VkImageSubresourceRange) -> u32 {
 }
 
 /// The mapped image and its blocks, when it has memory and a block is one texel deep.
-fn mapped(image: &Image) -> Option<(*mut u8, pipe_format, Blocks)> {
-    let mem = unsafe { image.mem.as_ref() }.filter(|m| !m.map.is_null())?;
+fn mapped(image: &Image) -> Option<(Host, pipe_format, Blocks)> {
     let b = blocks(image.vk.format);
-    (b.bd <= 1).then(|| (unsafe { mem.map.cast::<u8>().add(image.offset as usize) }, unsafe { vk_format_to_pipe_format(image.vk.format) }, b))
+    (b.bd <= 1).then_some(())?;
+    Some((image.host()?, unsafe { vk_format_to_pipe_format(image.vk.format) }, b))
 }
 
 /// Calls `f` with the start and texel count of every sample plane of every level and layer in
@@ -44,31 +44,37 @@ fn for_each_plane(image: &Image, ranges: &[VkImageSubresourceRange], b: Blocks, 
     }
 }
 
+pointee!(VkClearColorValue, VkClearDepthStencilValue);
+
 entrypoint! {
-    unsafe fn borgvk_CmdClearColorImage(_cmd: VkCommandBuffer, image: VkImage, _layout: VkImageLayout, color: *const VkClearColorValue, count: u32, ranges: *const VkImageSubresourceRange) {
-        let Some(image) = image.get() else { return };
-        let Some((base, pf, b)) = mapped(image) else { return };
+    fn borgvk_CmdClearColorImage(_cmd: VkCommandBuffer, image: &Image, _layout: VkImageLayout, color: &VkClearColorValue, count: u32, ranges: *const VkImageSubresourceRange) {
+        let Some((host, pf, b)) = mapped(image) else { return };
         let mut pixel = [0u8; 16];
-        pack_clear_color(image.vk.format, pf, &mut pixel, &*color);
+        pack_clear_color(image.vk.format, pf, &mut pixel, color);
         let bs = b.bs as usize;
-        for_each_plane(image, slice(ranges, count), b, |off, n| {
-            let dst = std::slice::from_raw_parts_mut(base.add(off as usize), n as usize * bs);
-            for t in dst.chunks_exact_mut(bs) {
-                t.copy_from_slice(&pixel[..bs]);
-            }
+        for_each_plane(image, unsafe { slice(ranges, count) }, b, |off, n| {
+            host.fill(off as usize, &pixel[..bs], n as usize);
         });
     }
 }
 
+/// Writes the depth and stencil in `aspect` of the texel at `off`, keeping the other aspect.
+fn write_ds(host: &Host, off: usize, bs: usize, pf: pipe_format, aspect: VkImageAspectFlags, ds: &VkClearDepthStencilValue) {
+    let mut t: Texel = [0; 32];
+    if host.read(off, &mut t[..bs]) {
+        write_depth_stencil(pf, &mut t, aspect, ds.depth, ds.stencil as u8);
+        host.write(off, &t[..bs]);
+    }
+}
+
 entrypoint! {
-    unsafe fn borgvk_CmdClearDepthStencilImage(_cmd: VkCommandBuffer, image: VkImage, _layout: VkImageLayout, ds: *const VkClearDepthStencilValue, count: u32, ranges: *const VkImageSubresourceRange) {
-        let Some(image) = image.get() else { return };
-        let Some((base, pf, b)) = mapped(image) else { return };
-        let ds = &*ds;
-        for r in slice(ranges, count) {
+    fn borgvk_CmdClearDepthStencilImage(_cmd: VkCommandBuffer, image: &Image, _layout: VkImageLayout, ds: &VkClearDepthStencilValue, count: u32, ranges: *const VkImageSubresourceRange) {
+        let Some((host, pf, b)) = mapped(image) else { return };
+        let bs = b.bs as usize;
+        for r in unsafe { slice(ranges, count) } {
             for_each_plane(image, std::slice::from_ref(r), b, |off, n| {
-                for t in 0..n {
-                    write_depth_stencil(pf, base.add((off + t * b.bs as u64) as usize), r.aspectMask, ds.depth, ds.stencil as u8);
+                for t in 0..n as usize {
+                    write_ds(&host, off as usize + t * bs, bs, pf, r.aspectMask, ds);
                 }
             });
         }
@@ -79,10 +85,10 @@ entrypoint! {
 pub fn clear_rect(view: *mut vk_image_view, aspect: VkImageAspectFlags, value: &VkClearValue, rect: VkRect2D, base_layer: u32, layers: u32) {
     let Some(view) = (unsafe { view.as_ref() }) else { return };
     let image = unsafe { &*view.image.cast::<Image>() };
-    let Some((base, pf, b)) = mapped(image) else { return };
+    let Some((host, pf, b)) = mapped(image) else { return };
     let mut pixel = [0u8; 16];
-    let ds = unsafe { value.depthStencil };
-    if aspect & VK_IMAGE_ASPECT_COLOR_BIT != 0 {
+    let (color, ds) = (aspect & VK_IMAGE_ASPECT_COLOR_BIT != 0, unsafe { value.depthStencil });
+    if color {
         pack_clear_color(image.vk.format, pf, &mut pixel, unsafe { &value.color });
     }
     let (x0, y0, w, h) = (rect.offset.x as u32, rect.offset.y as u32, rect.extent.width, rect.extent.height);
@@ -93,11 +99,11 @@ pub fn clear_rect(view: *mut vk_image_view, aspect: VkImageAspectFlags, value: &
         for s in 0..image.vk.samples.max(1) as u64 {
             for y in y0..y0.wrapping_add(h) {
                 for x in x0..x0.wrapping_add(w) {
-                    let texel = unsafe { base.add((off + s * plane + (y as u64 * stride as u64 + x as u64) * bs) as usize) };
-                    if aspect & VK_IMAGE_ASPECT_COLOR_BIT != 0 {
-                        unsafe { std::ptr::copy_nonoverlapping(pixel.as_ptr(), texel, bs as usize) };
+                    let t = (off + s * plane + (y as u64 * stride as u64 + x as u64) * bs) as usize;
+                    if color {
+                        host.write(t, &pixel[..bs as usize]);
                     } else {
-                        write_depth_stencil(pf, texel, aspect, ds.depth, ds.stencil as u8);
+                        write_ds(&host, t, bs as usize, pf, aspect, &ds);
                     }
                 }
             }
@@ -106,14 +112,13 @@ pub fn clear_rect(view: *mut vk_image_view, aspect: VkImageAspectFlags, value: &
 }
 
 entrypoint! {
-    unsafe fn borgvk_CmdClearAttachments(command_buffer: VkCommandBuffer, natt: u32, atts: *const VkClearAttachment, nrects: u32, rects: *const VkClearRect) {
-        let c = cmd(command_buffer.ptr());
+    fn borgvk_CmdClearAttachments(c: &mut CommandBuffer, natt: u32, atts: *const VkClearAttachment, nrects: u32, rects: *const VkClearRect) {
         crate::draw::flush_draws(c); // the draws so far come first
         if !c.in_rendering {
             return;
         }
-        let rects = slice(rects, nrects);
-        for att in slice(atts, natt) {
+        let rects = unsafe { slice(rects, nrects) };
+        for att in unsafe { slice(atts, natt) } {
             let clear = |view, aspect| {
                 for r in rects {
                     clear_rect(view, aspect, &att.clearValue, r.rect, r.baseArrayLayer, r.layerCount);

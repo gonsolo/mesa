@@ -75,6 +75,13 @@ pub struct CommandBuffer {
     pub dyn_offs: [[VkDeviceSize; BORGVK_MAX_BINDINGS as usize]; 4],
 }
 
+impl crate::entrypoint::Pointee for CommandBuffer {
+    type Raw = VkCommandBuffer;
+    unsafe fn ptr(raw: VkCommandBuffer) -> *mut Self {
+        raw.cast()
+    }
+}
+
 // Raw pointers, numbers and the runtime's command buffer, which it zero-allocates itself.
 unsafe impl Zeroed for CommandBuffer {}
 
