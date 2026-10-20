@@ -173,7 +173,6 @@ struct borgvk_command_buffer {
    VkDeviceSize dyn_offs[4][BORGVK_MAX_BINDINGS];
 };
 
-extern const struct vk_command_buffer_ops borgvk_cmd_buffer_ops;
 struct borgvk_command_buffer;
 void borgvk_flush_draws(struct borgvk_command_buffer *cmd);
 

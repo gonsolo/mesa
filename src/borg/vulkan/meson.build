@@ -14,7 +14,6 @@ borgvk_entrypoints = custom_target(
 )
 
 libborgvk_files = files(
-  'borgvk_cmd_buffer.c',
   'borgvk_device.c',
   'borgvk_cmd_clear.c',
   'borgvk_cmd_copy.c',
@@ -126,7 +125,8 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-function', 'vk_image_(view_)?(create|destroy)|vk_format_get_aspect_format|os_time_get_nano',
     '--allowlist-function', 'vk_descriptor_set_layout_zalloc|list_(inithead|addtail|del)',
     '--allowlist-function', 'vk_blend_(op|factor)_to_pipe|vk_get_pipeline_rendering_create_info|vk_format_(is_int|has_alpha)|util_format_is_srgb',
-    '--allowlist-type', 'borg_blend|VkComputePipelineCreateInfo|VkPipelineRenderingCreateInfo|VkPipelineCache',
+    '--allowlist-function', 'vk_(zalloc|free)|vk_command_buffer_(init_with_params|reset|finish|begin|end|get_record_result)|borgvk_free_targets',
+    '--allowlist-type', 'borgvk_command_buffer|vk_command_buffer_ops|vk_command_pool|VkCommandBufferBeginInfo|borg_blend|VkComputePipelineCreateInfo|VkPipelineRenderingCreateInfo|VkPipelineCache',
     '--allowlist-type', 'borgvk_descriptor_pool|borgvk_descriptor_set|VkDescriptorSetLayoutCreateInfo|VkDescriptorSetLayoutSupport|VkDescriptorPoolCreateInfo',
     '--allowlist-type', 'VkDescriptorSetAllocateInfo|VkWriteDescriptorSet|VkCopyDescriptorSet|VkDescriptorPoolResetFlags',
     '--allowlist-type', 'vk_sync_type|vk_sync_wait|vk_sync_features|vk_sync_wait_flags|VkQueryPoolCreateInfo|VkQueryPool|VkImageMemoryRequirementsInfo2|VkImageSubresource2KHR|VkSubresourceLayout2KHR|VkBindImageMemoryInfo|VkImageViewCreateInfo',
@@ -214,6 +214,7 @@ test(
 )
 
 # The wire packet test links the Rust library itself: libvulkan_borg exports only the ICD entrypoints.
+# Without the driver's C files, unused Rust code that calls them goes with --gc-sections.
 borgvk_serial_test = executable(
   'borgvk_serial_test',
   ['borgvk_serial_test.c', borgvk_rust_h],
@@ -223,6 +224,7 @@ borgvk_serial_test = executable(
   ],
   link_with : [libborgvk_rs],
   dependencies : borgvk_deps,
+  link_args : ld_args_gc_sections,
 )
 
 test(
@@ -242,6 +244,7 @@ borgvk_burst_gen = executable(
   ],
   link_with : [libborgvk_rs],
   dependencies : borgvk_deps,
+  link_args : ld_args_gc_sections,
 )
 
 if with_symbols_check

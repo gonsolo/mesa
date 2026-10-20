@@ -5,6 +5,7 @@ mod ffi {
     pub use borgvk_bindings_rs::*;
 }
 
+mod cmd_buffer;
 #[cfg(borgc)]
 mod compile;
 mod compiler;
