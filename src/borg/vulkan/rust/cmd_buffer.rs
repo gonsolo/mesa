@@ -10,7 +10,7 @@ use crate::ffi::*;
 use crate::image::Image;
 use crate::device::Device;
 use crate::pipeline::Pipeline;
-use crate::object::{allocate, Zeroed};
+use crate::object::{allocate, Owned, Zeroed};
 use crate::render::Target;
 use std::ffi::c_void;
 use std::mem::zeroed;
@@ -116,13 +116,13 @@ unsafe extern "C" fn create(pool: *mut vk_command_pool, level: VkCommandBufferLe
     let Some(c) = (unsafe { allocate::<CommandBuffer>(|n| vk_zalloc(alloc, n, 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT)) }) else {
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     };
+    let mut c = Owned::new(c, |c| unsafe { vk_free(alloc, std::ptr::from_mut(c).cast()) });
     let mut params = vk_command_buffer_init_params { pool, ops: &CMD_BUFFER_OPS, level, needs_cmd_queue: true, ..unsafe { zeroed() } };
     let r = unsafe { vk_command_buffer_init_with_params(&mut c.vk, &mut params) };
     if r != VK_SUCCESS {
-        unsafe { vk_free(alloc, std::ptr::from_mut(c).cast()) };
         return r;
     }
-    unsafe { *out = &mut c.vk };
+    unsafe { *out = &mut c.keep().vk };
     VK_SUCCESS
 }
 
