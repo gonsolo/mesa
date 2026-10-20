@@ -5,3 +5,7 @@
 #include "borgvk_private.h"
 #include "util/format/u_formats.h"
 #include "util/log.h"
+
+#include <fcntl.h>
+#include <stdlib.h>
+#include <termios.h>

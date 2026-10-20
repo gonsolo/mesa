@@ -28,7 +28,6 @@ libborgvk_files = files(
   'borgvk_pipeline.c',
   'borgvk_query.c',
   'borgvk_queue.c',
-  'borgvk_serial.c',
   'borgvk_shader_cache.c',
   'borgvk_corpus.c',
   'borgvk_cube.c',
@@ -94,8 +93,9 @@ _borgvk_bindings_rs = rust.bindgen(
     bindgen_output_args, '--no-prepend-enum-name', '--with-derive-default',
     '--allowlist-type', 'VkFormat|tex_conv|borgvk_image|borgvk_vp|pipe_format',
     '--allowlist-type', 'VkGraphicsPipelineCreateInfo|VkPipelineColorBlendStateCreateInfo|mesa_log_level',
-    '--allowlist-function', 'borgvk_transport_emit|borgvk_transport_capturing|mesa_log',
-    '--allowlist-var', 'BORGVK_.*',
+    '--allowlist-function', 'mesa_log|malloc|realloc|free|tcgetattr|tcsetattr|cfmakeraw|cfsetispeed|cfsetospeed|tcdrain',
+    '--allowlist-type', 'termios',
+    '--allowlist-var', 'BORGVK_.*|B115200|TCSANOW|CLOCAL|CREAD|CRTSCTS|O_NOCTTY',
   ],
   include_directories : [borgvk_inc, include_directories('.')],
   dependencies : [
@@ -154,14 +154,10 @@ libvulkan_borg = shared_library(
   install : true,
 )
 
-# Unit test for the wire packet builders. Compiles borgvk_serial.c directly
-# rather than linking libvulkan_borg, because the library is built with hidden
-# symbol visibility (only the ICD entrypoints are exported) -- and because the
-# serial layer has no dependency on the device/instance types, so it stands up
-# on its own.
+# The wire packet test links the Rust library itself: libvulkan_borg exports only the ICD entrypoints.
 borgvk_serial_test = executable(
   'borgvk_serial_test',
-  ['borgvk_serial_test.c', 'borgvk_serial.c'],
+  ['borgvk_serial_test.c'],
   include_directories : [
     inc_include, inc_src, inc_util,
     include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h
@@ -177,11 +173,10 @@ test(
 )
 
 # Generates a replayable wire burst for the simulator's push-constant
-# end-to-end test. Built from the same serial sources as the unit test above,
-# so the burst is produced by the real senders rather than a reimplementation.
+# end-to-end test, with the driver's own senders rather than a reimplementation.
 borgvk_burst_gen = executable(
   'borgvk_burst_gen',
-  ['borgvk_burst_gen.c', 'borgvk_serial.c'],
+  ['borgvk_burst_gen.c'],
   include_directories : [
     inc_include, inc_src, inc_util,
     include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h

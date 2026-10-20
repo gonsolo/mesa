@@ -5,8 +5,8 @@
 //! a marker byte, a payload and an XOR checksum over everything between them.
 
 use crate::ffi::*;
-#[cfg(not(test))]
-use std::ffi::CString;
+use crate::transport::capturing;
+use crate::util::{log, MESA_LOG_INFO, MESA_LOG_WARN};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -41,12 +41,7 @@ const TEXG_CHUNK: usize = BORGVK_TEXG_CHUNK as usize;
 fn emit(pkt: &mut [u8]) {
     let n = pkt.len();
     pkt[n - 1] = pkt[1..n - 1].iter().fold(0, |c, b| c ^ b);
-    transport(pkt);
-}
-
-#[cfg(not(test))]
-fn transport(pkt: &[u8]) {
-    unsafe { borgvk_transport_emit(pkt.as_ptr(), pkt.len()) };
+    crate::transport::emit(pkt);
 }
 
 fn put_u32(d: &mut [u8], v: u32) {
@@ -56,35 +51,6 @@ fn put_u32(d: &mut [u8], v: u32) {
 fn put_f32(d: &mut [u8], f: f32) {
     put_u32(d, f.to_bits());
 }
-
-#[cfg(not(test))]
-fn capturing() -> bool {
-    unsafe { borgvk_transport_capturing() }
-}
-
-#[cfg(not(test))]
-fn log(level: mesa_log_level, msg: String) {
-    let msg = CString::new(msg).unwrap_or_default();
-    unsafe { mesa_log(level, c"MESA".as_ptr(), c"%s".as_ptr(), msg.as_ptr()) };
-}
-
-#[cfg(test)]
-thread_local! {
-    static SENT: std::cell::RefCell<Vec<Vec<u8>>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-#[cfg(test)]
-fn transport(pkt: &[u8]) {
-    SENT.with(|s| s.borrow_mut().push(pkt.to_vec()));
-}
-
-#[cfg(test)]
-fn capturing() -> bool {
-    false
-}
-
-#[cfg(test)]
-fn log(_level: mesa_log_level, _msg: String) {}
 
 pub fn send_geom(verts: &[f32], idx: &[u8], uv: &[f32]) {
     let (nverts, ntris) = (verts.len() / 3, idx.len() / 3);
@@ -508,13 +474,24 @@ pub unsafe extern "C" fn borgvk_serial_send_texture_levels(offs: *const u32) {
 mod tests {
     use super::*;
 
+    /// Runs `f` under a capture and returns what it sent; empty if nothing.
+    fn captured(f: impl FnOnce()) -> Vec<u8> {
+        crate::transport::borgvk_transport_capture_begin();
+        f();
+        let mut len = 0;
+        let buf = unsafe { crate::transport::borgvk_transport_capture_end(&mut len) };
+        if buf.is_null() {
+            return Vec::new();
+        }
+        let v = unsafe { std::slice::from_raw_parts(buf, len) }.to_vec();
+        unsafe { free(buf.cast()) };
+        v
+    }
+
     /// Runs `f` and returns the one packet it sent, after checking its checksum.
     fn sent(f: impl FnOnce()) -> Vec<u8> {
-        SENT.with(|s| s.borrow_mut().clear());
-        f();
-        let mut pkts = SENT.with(|s| s.take());
-        assert_eq!(pkts.len(), 1);
-        let p = pkts.pop().unwrap();
+        let p = captured(f);
+        assert!(!p.is_empty());
         assert_eq!(p[1..].iter().fold(0, |c, b| c ^ b), 0, "checksum");
         p
     }
@@ -538,9 +515,7 @@ mod tests {
         assert_eq!((p.len(), p[0], p[1], &p[2..7]), (517, MARKER_SHADER, 1, &[3, 0, 7, 8, 9][..]));
         let p = sent(|| send_shader(0, &[1; 600]));
         assert_eq!((p.len(), p[0], u16::from_le_bytes([p[2], p[3]])), (1 + 1 + 2 + SHADER_MAX + 1, MARKER_SHADER_BIG, 600));
-        SENT.with(|s| s.borrow_mut().clear());
-        send_shader(0, &[]);
-        assert!(SENT.with(|s| s.borrow().is_empty()), "an empty shader is refused");
+        assert!(captured(|| send_shader(0, &[])).is_empty(), "an empty shader is refused");
     }
 
     #[test]
