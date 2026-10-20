@@ -5,6 +5,7 @@
 
 use crate::drm::{ioctl, BLEND, PUSH, SHADER, STATE};
 use crate::entrypoint::slice;
+use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
 use crate::serial::*;
 use crate::util::{log, MESA_LOG_WARN};
@@ -13,7 +14,7 @@ use crate::util::{log, MESA_LOG_WARN};
 ///
 /// # Safety
 /// The runtime's submit.
-pub unsafe fn borgvk_find_set(submit: *mut vk_queue_submit) -> *mut borgvk_descriptor_set {
+pub unsafe fn borgvk_find_set(submit: *mut vk_queue_submit) -> *mut DescriptorSet {
     let s = unsafe { &*submit };
     for &cb in unsafe { slice(s.command_buffers, s.command_buffer_count) } {
         let head: *mut list_head = unsafe { &mut (*cb).cmd_queue.cmds };
@@ -26,7 +27,7 @@ pub unsafe fn borgvk_find_set(submit: *mut vk_queue_submit) -> *mut borgvk_descr
             }
             let b = unsafe { &e.u.bind_descriptor_sets };
             if b.descriptor_set_count != 0 && !b.descriptor_sets.is_null() {
-                let set = unsafe { *b.descriptor_sets }.cast::<borgvk_descriptor_set>();
+                let set = unsafe { *b.descriptor_sets }.cast::<DescriptorSet>();
                 if !set.is_null() {
                     return set;
                 }

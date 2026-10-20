@@ -6,11 +6,53 @@
 
 use crate::entrypoint::{entrypoint, handle, slice, vk_error, Handle};
 use crate::ffi::*;
+use crate::object::{allocate, Zeroed};
 use std::ptr::null;
 
-handle!(VkDescriptorSetLayout, borgvk_descriptor_set_layout, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT);
-handle!(VkDescriptorPool, borgvk_descriptor_pool, VK_OBJECT_TYPE_DESCRIPTOR_POOL);
-handle!(VkDescriptorSet, borgvk_descriptor_set, VK_OBJECT_TYPE_DESCRIPTOR_SET);
+handle!(VkDescriptorSetLayout, DescriptorSetLayout, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT);
+handle!(VkDescriptorPool, DescriptorPool, VK_OBJECT_TYPE_DESCRIPTOR_POOL);
+handle!(VkDescriptorSet, DescriptorSet, VK_OBJECT_TYPE_DESCRIPTOR_SET);
+
+#[repr(C)]
+pub struct DescriptorSetLayout {
+    pub vk: vk_descriptor_set_layout,
+    pub binding_count: u32,
+    pub dyn_mask: u64, // slots of *_BUFFER_DYNAMIC descriptors
+    pub map: borgvk_desc_map,
+}
+
+#[repr(C)]
+pub struct DescriptorPool {
+    pub base: vk_object_base,
+    pub sets: list_head, // every live set allocated from this pool
+    pub max_sets: u32,
+    pub num_sets: u32,
+}
+
+#[repr(C)]
+pub struct DescriptorSet {
+    pub base: vk_object_base,
+    pub link: list_head, // in the pool's list
+    pub pool: *mut DescriptorPool,
+    pub buffers: [*mut borgvk_buffer; BINDINGS],
+    pub offsets: [VkDeviceSize; BINDINGS],
+    pub ranges: [VkDeviceSize; BINDINGS],
+    pub images: [*mut borgvk_image; BINDINGS],
+    pub views: [*mut vk_image_view; BINDINGS], // behind images[]: view type, format, mip/layer range, swizzle
+    pub samplers: [*mut borgvk_sampler; BINDINGS],
+    pub buffer_views: [*mut vk_buffer_view; BINDINGS], // texel buffers
+    pub dyn_mask: u64,      // from the layout: dynamic-offset slots
+    pub storage_mask: u32,  // slots whose buffer is a storage buffer
+    pub sampled_mask: u32,  // slots whose image is sampled (not storage)
+    pub map: borgvk_desc_map,
+}
+
+const BINDINGS: usize = BORGVK_MAX_BINDINGS as usize;
+
+// Numbers, raw pointers, the binding map and runtime bases the runtime zero-allocates.
+unsafe impl Zeroed for DescriptorSetLayout {}
+unsafe impl Zeroed for DescriptorPool {}
+unsafe impl Zeroed for DescriptorSet {}
 
 const MAX: usize = BORGVK_MAX_BINDINGS as usize;
 
@@ -70,8 +112,7 @@ pub fn desc_slot(m: &borgvk_desc_map, binding: u32, mut elem: u32) -> Option<u32
 entrypoint! {
     fn borgvk_CreateDescriptorSetLayout(device: VkDevice, info: *const VkDescriptorSetLayoutCreateInfo, _alloc: *const VkAllocationCallbacks, out: *mut VkDescriptorSetLayout) -> Result<(), VkError> {
         let dev = device.get().unwrap();
-        let l = vk_descriptor_set_layout_zalloc(&mut dev.vk, size_of::<borgvk_descriptor_set_layout>(), info);
-        let Some(l) = l.cast::<borgvk_descriptor_set_layout>().as_mut() else {
+        let Some(l) = allocate::<DescriptorSetLayout>(|n| vk_descriptor_set_layout_zalloc(&mut dev.vk, n, info)) else {
             return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
         };
         let i = &*info;
@@ -93,8 +134,7 @@ entrypoint! {
 entrypoint! {
     fn borgvk_CreateDescriptorPool(device: VkDevice, info: *const VkDescriptorPoolCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkDescriptorPool) -> Result<(), VkError> {
         let dev = device.get().unwrap();
-        let p = vk_object_zalloc(&mut dev.vk, alloc, size_of::<borgvk_descriptor_pool>(), VK_OBJECT_TYPE_DESCRIPTOR_POOL);
-        let Some(p) = p.cast::<borgvk_descriptor_pool>().as_mut() else {
+        let Some(p) = allocate::<DescriptorPool>(|n| vk_object_zalloc(&mut dev.vk, alloc, n, VK_OBJECT_TYPE_DESCRIPTOR_POOL)) else {
             return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
         };
         list_inithead(&mut p.sets);
@@ -105,7 +145,7 @@ entrypoint! {
 }
 
 /// Unlinks a set from its pool and frees it.
-unsafe fn free_set(dev: &mut borgvk_device, set: *mut borgvk_descriptor_set) {
+unsafe fn free_set(dev: &mut borgvk_device, set: *mut DescriptorSet) {
     unsafe {
         list_del(&mut (*set).link);
         (*(*set).pool).num_sets = (*(*set).pool).num_sets.wrapping_sub(1);
@@ -113,12 +153,12 @@ unsafe fn free_set(dev: &mut borgvk_device, set: *mut borgvk_descriptor_set) {
     }
 }
 
-fn free_pool_sets(dev: &mut borgvk_device, pool: &mut borgvk_descriptor_pool) {
+fn free_pool_sets(dev: &mut borgvk_device, pool: &mut DescriptorPool) {
     let head: *mut list_head = &mut pool.sets;
     let mut p = pool.sets.next;
     while p != head {
         let next = unsafe { (*p).next };
-        let set = unsafe { p.byte_sub(std::mem::offset_of!(borgvk_descriptor_set, link)) }.cast::<borgvk_descriptor_set>();
+        let set = unsafe { p.byte_sub(std::mem::offset_of!(DescriptorSet, link)) }.cast::<DescriptorSet>();
         unsafe { free_set(dev, set) };
         p = next;
     }
@@ -130,7 +170,7 @@ entrypoint! {
         if let Some(p) = pool.get() {
             let dev = device.get().unwrap();
             free_pool_sets(dev, p);
-            vk_object_free(&mut dev.vk, alloc, (p as *mut borgvk_descriptor_pool).cast());
+            vk_object_free(&mut dev.vk, alloc, (p as *mut DescriptorPool).cast());
         }
     }
 }
@@ -152,8 +192,7 @@ entrypoint! {
         }
         let out = std::slice::from_raw_parts_mut(out, i.descriptorSetCount as usize);
         for k in 0..out.len() {
-            let s = vk_object_zalloc(&mut dev.vk, null(), size_of::<borgvk_descriptor_set>(), VK_OBJECT_TYPE_DESCRIPTOR_SET);
-            let Some(set) = s.cast::<borgvk_descriptor_set>().as_mut() else {
+            let Some(set) = allocate::<DescriptorSet>(|n| vk_object_zalloc(&mut dev.vk, null(), n, VK_OBJECT_TYPE_DESCRIPTOR_SET)) else {
                 for h in &mut out[..k] {
                     free_set(dev, h.ptr());
                     *h = VkDescriptorSet::from_object(std::ptr::null_mut());
@@ -189,7 +228,7 @@ fn set_bit(mask: &mut u32, slot: u32, on: bool) {
 }
 
 /// Copies slot `s` of `src` to slot `d` of `dst`, which may be the same set.
-unsafe fn copy_slot(dst: *mut borgvk_descriptor_set, d: usize, src: *const borgvk_descriptor_set, s: usize) {
+unsafe fn copy_slot(dst: *mut DescriptorSet, d: usize, src: *const DescriptorSet, s: usize) {
     let from = unsafe { &*src };
     let v = (from.buffers[s], from.offsets[s], from.ranges[s], from.images[s], from.views[s]);
     let (sampled, sampler, bview) = (from.sampled_mask & bit(s as u32) != 0, from.samplers[s], from.buffer_views[s]);

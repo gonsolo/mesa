@@ -7,6 +7,7 @@
 use crate::corpus::{borgvk_corpus_hash, borgvk_corpus_image, borgvk_corpus_log, borgvk_corpus_on};
 use crate::drm::{ioctl, SETUP, SUBMIT};
 use crate::cmd_buffer::CommandBuffer;
+use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
 use crate::serial::{borgvk_serial_send_geom, borgvk_serial_send_mvp};
 use crate::sim_process::borgvk_sim_run_stream;
@@ -64,7 +65,7 @@ fn setup_already_done() -> bool {
 }
 
 /// The set's uniform buffer from its offset on, as floats.
-fn ubo(set: &borgvk_descriptor_set) -> Option<&[f32]> {
+fn ubo(set: &DescriptorSet) -> Option<&[f32]> {
     let b = unsafe { set.buffers[0].as_ref() }?;
     let mem = unsafe { b.mem.as_ref() }.filter(|m| !m.map.is_null())?;
     let off = b.offset + set.offsets[0];
@@ -75,14 +76,14 @@ fn ubo(set: &borgvk_descriptor_set) -> Option<&[f32]> {
     Some(unsafe { std::slice::from_raw_parts(mem.map.byte_add(off as usize).cast(), n) })
 }
 
-fn texture(set: &borgvk_descriptor_set) -> Option<*mut borgvk_image> {
+fn texture(set: &DescriptorSet) -> Option<*mut borgvk_image> {
     let t = set.images[1];
     let ti = unsafe { t.as_ref() }?;
     let mapped = unsafe { ti.mem.as_ref() }.is_some_and(|m| !m.map.is_null());
     (mapped && ti.vk.extent.width != 0 && ti.vk.extent.height != 0).then_some(t)
 }
 
-fn send_texture(set: &borgvk_descriptor_set, tex: *mut borgvk_image) {
+fn send_texture(set: &DescriptorSet, tex: *mut borgvk_image) {
     for row in 0..BORGVK_TEX_DIM as i32 {
         unsafe { borgvk_send_texture_row(tex, set.samplers[1], row) };
     }
@@ -92,7 +93,7 @@ fn send_texture(set: &borgvk_descriptor_set, tex: *mut borgvk_image) {
 ///
 /// # Safety
 /// `set` is valid.
-pub unsafe fn borgvk_set_is_cube(set: *mut borgvk_descriptor_set) -> bool {
+pub unsafe fn borgvk_set_is_cube(set: *mut DescriptorSet) -> bool {
     let set = unsafe { &*set };
     let Some(b) = (unsafe { set.buffers[0].as_ref() }) else { return false };
     if unsafe { b.mem.as_ref() }.is_none_or(|m| m.map.is_null()) {

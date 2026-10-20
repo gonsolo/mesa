@@ -191,37 +191,8 @@ struct borgvk_desc_map {
    bool arrays;
 };
 
-struct borgvk_descriptor_set_layout {
-   struct vk_descriptor_set_layout vk;
-   uint32_t binding_count;
-   uint64_t dyn_mask;           /* slots of *_BUFFER_DYNAMIC descriptors */
-   struct borgvk_desc_map map;
-};
 
-struct borgvk_descriptor_pool {
-   struct vk_object_base base;
-   struct list_head sets;       /* every live set allocated from this pool */
-   uint32_t max_sets;
-   uint32_t num_sets;
-};
 
-struct borgvk_descriptor_set {
-   struct vk_object_base base;
-   struct list_head link;       /* in the pool's list */
-   struct borgvk_descriptor_pool *pool;
-   struct borgvk_buffer *buffers[BORGVK_MAX_BINDINGS];
-   VkDeviceSize offsets[BORGVK_MAX_BINDINGS];
-   VkDeviceSize ranges[BORGVK_MAX_BINDINGS];
-   struct borgvk_image *images[BORGVK_MAX_BINDINGS];
-   /* The view behind images[]: view type, format, mip/layer range, swizzle. */
-   struct vk_image_view *views[BORGVK_MAX_BINDINGS];
-   struct borgvk_sampler *samplers[BORGVK_MAX_BINDINGS];
-   struct vk_buffer_view *buffer_views[BORGVK_MAX_BINDINGS];   /* texel buffers */
-   uint64_t dyn_mask;           /* from the layout: dynamic-offset slots */
-   uint32_t storage_mask;       /* slots whose buffer is a storage buffer */
-   uint32_t sampled_mask;       /* slots whose image is sampled (not storage) */
-   struct borgvk_desc_map map;
-};
 
 #define BORGVK_MAX_VERTEX_ATTRS    16
 
@@ -267,13 +238,6 @@ struct borgvk_pipeline {
    uint32_t cs_pool[BORGVK_CS_POOL_MAX], cs_npool;
 };
 
-VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_descriptor_set_layout, vk.base,
-                               VkDescriptorSetLayout,
-                               VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT)
-VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_descriptor_pool, base, VkDescriptorPool,
-                               VK_OBJECT_TYPE_DESCRIPTOR_POOL)
-VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_descriptor_set, base, VkDescriptorSet,
-                               VK_OBJECT_TYPE_DESCRIPTOR_SET)
 VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_pipeline, base, VkPipeline,
                                VK_OBJECT_TYPE_PIPELINE)
 

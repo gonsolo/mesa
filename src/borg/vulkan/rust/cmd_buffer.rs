@@ -5,8 +5,9 @@
 //! the C recorders; push constants.
 
 use crate::entrypoint::{entrypoint, handle, Handle};
+use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
-use crate::object::{zalloc, Zeroed};
+use crate::object::{allocate, Zeroed};
 use crate::render::Target;
 use std::ffi::c_void;
 use std::mem::zeroed;
@@ -33,7 +34,7 @@ pub struct CommandBuffer {
     pub gfx_pipeline: *mut borgvk_pipeline,
     pub vb: [*const u8; BORGVK_MAX_VERTEX_BINDINGS as usize],
     pub vb_avail: [VkDeviceSize; BORGVK_MAX_VERTEX_BINDINGS as usize], // bytes from vb[] to the buffer's end
-    pub desc_set: *mut borgvk_descriptor_set,
+    pub desc_set: *mut DescriptorSet,
     pub generic_drawn: bool,
     pub cs_pipeline: *const borgvk_pipeline,
     pub dispatched: bool, // ran a compute dispatch at replay
@@ -57,7 +58,7 @@ pub struct CommandBuffer {
     pub batch_srgb: bool,
     pub batch_pool: *const c_void,
     pub batch_vpool: *const c_void,
-    pub region_set: *mut borgvk_descriptor_set, // the set whose buffer region is at region_base
+    pub region_set: *mut DescriptorSet, // the set whose buffer region is at region_base
     pub region_base: u32,
     pub index_ptr: *const u8, // bound index buffer, at its offset
     pub index_avail: VkDeviceSize,
@@ -65,9 +66,9 @@ pub struct CommandBuffer {
     pub batch_push: [u32; 32],   // the push words the open batch was drawn with
     pub pc: [u32; 32],           // push-constant bytes, for compute
     pub dyn_off: [VkDeviceSize; BORGVK_MAX_BINDINGS as usize], // dynamic offsets of desc_set
-    pub cs_sets: [*mut borgvk_descriptor_set; 4], // the compute bind point's own sets
+    pub cs_sets: [*mut DescriptorSet; 4], // the compute bind point's own sets
     pub cs_dyn_offs: [[VkDeviceSize; BORGVK_MAX_BINDINGS as usize]; 4],
-    pub desc_sets: [*mut borgvk_descriptor_set; 4], // [0] is desc_set; dyn_offs[0] is unused (dyn_off)
+    pub desc_sets: [*mut DescriptorSet; 4], // [0] is desc_set; dyn_offs[0] is unused (dyn_off)
     pub dyn_offs: [[VkDeviceSize; BORGVK_MAX_BINDINGS as usize]; 4],
 }
 
@@ -82,7 +83,7 @@ pub unsafe fn cmd<'a>(c: *mut vk_command_buffer) -> &'a mut CommandBuffer {
 
 unsafe extern "C" fn create(pool: *mut vk_command_pool, level: VkCommandBufferLevel, out: *mut *mut vk_command_buffer) -> VkResult {
     let alloc = unsafe { &(*pool).alloc };
-    let Some(c) = zalloc::<CommandBuffer>(alloc, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT) else {
+    let Some(c) = (unsafe { allocate::<CommandBuffer>(|n| vk_zalloc(alloc, n, 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT)) }) else {
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     };
     let mut params = vk_command_buffer_init_params { pool, ops: &CMD_BUFFER_OPS, level, needs_cmd_queue: true, ..unsafe { zeroed() } };

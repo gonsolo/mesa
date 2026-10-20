@@ -8,6 +8,7 @@ use crate::cmd_buffer::{cmd, CommandBuffer};
 use crate::copy::{host, image_host};
 use crate::corpus::{borgvk_corpus_hash, borgvk_corpus_image, borgvk_corpus_log, borgvk_corpus_on};
 use crate::entrypoint::{entrypoint, slice, Handle};
+use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
 use crate::format::{depth_is_d32, flush_format, raw32, vertex_fetch, Fetch};
 use crate::hw::{enabled, serves_extent};
@@ -880,7 +881,7 @@ fn vattr_copy(f: VkFormat, conv: bool, dst: &mut [u8], src: *const u8, asz: usiz
     }
 }
 
-fn storage_image(set: &borgvk_descriptor_set, b: usize) -> Option<&borgvk_image> {
+fn storage_image(set: &DescriptorSet, b: usize) -> Option<&borgvk_image> {
     if !set.buffers[b].is_null() || !set.buffer_views[b].is_null() || set.sampled_mask >> b & 1 != 0 {
         return None;
     }

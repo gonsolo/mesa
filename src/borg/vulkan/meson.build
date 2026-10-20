@@ -96,7 +96,7 @@ _borgvk_bindings_rs = rust.bindgen(
   c_args : [pre_args, borgvk_bindgen_c_args],
   args : [
     bindgen_output_args, borgvk_bindgen_args, '--no-prepend-enum-name', '--with-derive-default',
-    '--allowlist-type', 'borgvk_device|borgvk_descriptor_set_layout|borgvk_desc_map|vk_pipeline_layout|borgvk_shader_blob|VkFormat|tex_conv|borgvk_image|borgvk_vp|borgvk_writeback|pipe_format',
+    '--allowlist-type', 'borgvk_device|vk_descriptor_set_layout|list_head|borgvk_desc_map|vk_pipeline_layout|borgvk_shader_blob|VkFormat|tex_conv|borgvk_image|borgvk_vp|borgvk_writeback|pipe_format',
     '--allowlist-type', 'borgvk_shader_stage|borgvk_pipeline|VkPipelineShaderStageCreateInfo|VkGraphicsPipelineCreateInfo|VkPipelineColorBlendStateCreateInfo|mesa_log_level',
     '--allowlist-type', 'vk_image_view|VkExtent2D|VkExtent3D|VkResult|borgvk_device_memory|pipe_swizzle|util_format_type|termios',
     '--allowlist-function', 'util_format_description|util_format_get_block(size|width|height|depth)|vk_format_to_pipe_format',
@@ -135,7 +135,7 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-type', 'vk_instance_extension_table|vk_device_entrypoint_table|VkPhysicalDevice(ProtectedMemory|ShaderDrawParameters|Vulkan11)Features|VkLayerProperties|VkExtensionProperties',
     '--allowlist-type', 'VkRenderingInfo|VkRenderingAttachmentInfo|VkImageResolve|VkRenderingEndInfoEXT',
     '--allowlist-type', 'vk_command_buffer|vk_command_buffer_ops|vk_command_pool|VkCommandBufferBeginInfo|borg_blend|VkComputePipelineCreateInfo|VkPipelineRenderingCreateInfo|VkPipelineCache',
-    '--allowlist-type', 'borgvk_descriptor_pool|borgvk_descriptor_set|VkDescriptorSetLayoutCreateInfo|VkDescriptorSetLayoutSupport|VkDescriptorPoolCreateInfo',
+    '--allowlist-type', 'VkDescriptorSetLayoutCreateInfo|VkDescriptorSetLayoutSupport|VkDescriptorPoolCreateInfo',
     '--allowlist-type', 'VkDescriptorSetAllocateInfo|VkWriteDescriptorSet|VkCopyDescriptorSet|VkDescriptorPoolResetFlags',
     '--allowlist-type', 'vk_sync_type|vk_sync_wait|vk_sync_features|vk_sync_wait_flags|VkQueryPoolCreateInfo|VkQueryPool|VkImageMemoryRequirementsInfo2|VkImageSubresource2KHR|VkSubresourceLayout2KHR|VkBindImageMemoryInfo|VkImageViewCreateInfo',
     '--allowlist-type', 'borgvk_sampler|VkSamplerCreateInfo|VkImageCreateInfo|vk_object_base|VkEventCreateInfo|VkDependencyInfo|VkCommandBuffer|VkEvent|VkPipelineStageFlags2?',

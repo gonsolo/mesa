@@ -1,10 +1,10 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-//! Driver objects live where the runtime's allocator put them: zeroed memory, initialized in
+//! Driver objects live where the runtime's allocators put them: zeroed memory, initialized in
 //! place and never moved.
 
-use crate::ffi::*;
+use std::ffi::c_void;
 
 /// A type whose all-zero bit pattern is a valid value.
 ///
@@ -13,7 +13,10 @@ use crate::ffi::*;
 /// references or boxes, and runtime structs the runtime itself zero-allocates.
 pub unsafe trait Zeroed: Sized {}
 
-/// A zeroed `T` from `alloc`, to be initialized in place.
-pub fn zalloc<'a, T: Zeroed>(alloc: *const VkAllocationCallbacks, scope: VkSystemAllocationScope) -> Option<&'a mut T> {
-    unsafe { vk_zalloc(alloc, size_of::<T>(), align_of::<T>(), scope).cast::<T>().as_mut() }
+/// The zeroed `T` a runtime allocator returns for `size_of::<T>()` bytes, or `None`.
+///
+/// # Safety
+/// `alloc` returns null or zeroed memory of the size it is given, aligned for `T`.
+pub unsafe fn allocate<'a, T: Zeroed>(alloc: impl FnOnce(usize) -> *mut c_void) -> Option<&'a mut T> {
+    unsafe { alloc(size_of::<T>()).cast::<T>().as_mut() }
 }

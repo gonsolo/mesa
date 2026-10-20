@@ -3,6 +3,7 @@
 
 //! Shaders for pipelines: from the shader cache, or through NIR and borgc.
 
+use crate::descriptor_set::DescriptorSetLayout;
 use crate::ffi::*;
 #[cfg(borgc)]
 pub use crate::compile::{borgvk_compile_compute_stage, borgvk_compile_empty_frag, borgvk_compile_stage};
@@ -30,8 +31,8 @@ pub fn set_map(pl: &vk_pipeline_layout, s: usize) -> Option<&borgvk_desc_map> {
         return None;
     }
     // container_of
-    let l = unsafe { (l as *const u8).sub(std::mem::offset_of!(borgvk_descriptor_set_layout, vk)) };
-    Some(unsafe { &(*l.cast::<borgvk_descriptor_set_layout>()).map })
+    let l = unsafe { (l as *const u8).sub(std::mem::offset_of!(DescriptorSetLayout, vk)) };
+    Some(unsafe { &(*l.cast::<DescriptorSetLayout>()).map })
 }
 
 /// The first flat descriptor slot of each of the first four sets.
