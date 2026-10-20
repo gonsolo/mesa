@@ -14,7 +14,7 @@ handle!(VkCommandBuffer, vk_command_buffer, VK_OBJECT_TYPE_COMMAND_BUFFER);
 
 /// # Safety
 /// `c` is the `vk` of a `borgvk_command_buffer`, which comes first.
-unsafe fn cmd<'a>(c: *mut vk_command_buffer) -> &'a mut borgvk_command_buffer {
+pub unsafe fn cmd<'a>(c: *mut vk_command_buffer) -> &'a mut borgvk_command_buffer {
     unsafe { &mut *c.cast() }
 }
 

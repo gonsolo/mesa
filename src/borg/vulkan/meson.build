@@ -15,7 +15,6 @@ borgvk_entrypoints = custom_target(
 
 libborgvk_files = files(
   'borgvk_device.c',
-  'borgvk_cmd_clear.c',
   'borgvk_cmd_copy.c',
   'borgvk_cmd_render.c',
   'borgvk_queue.c',
@@ -126,6 +125,9 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-function', 'vk_descriptor_set_layout_zalloc|list_(inithead|addtail|del)',
     '--allowlist-function', 'vk_blend_(op|factor)_to_pipe|vk_get_pipeline_rendering_create_info|vk_format_(is_int|has_alpha)|util_format_is_srgb',
     '--allowlist-function', 'vk_(zalloc|free)|vk_command_buffer_(init_with_params|reset|finish|begin|end|get_record_result)|borgvk_free_targets',
+    '--allowlist-function', 'util_format_(is_scaled|get_first_non_void_channel|is_pure_(integer|uint|sint))|vk_format_has_(depth|stencil)|borgvk_flush_draws',
+    '--allowlist-type', 'VkClear(ColorValue|DepthStencilValue|Value|Attachment|Rect)|VkImageSubresourceRange|util_format_type',
+    '--allowlist-var', 'VK_REMAINING_(MIP_LEVELS|ARRAY_LAYERS)',
     '--allowlist-type', 'borgvk_command_buffer|vk_command_buffer_ops|vk_command_pool|VkCommandBufferBeginInfo|borg_blend|VkComputePipelineCreateInfo|VkPipelineRenderingCreateInfo|VkPipelineCache',
     '--allowlist-type', 'borgvk_descriptor_pool|borgvk_descriptor_set|VkDescriptorSetLayoutCreateInfo|VkDescriptorSetLayoutSupport|VkDescriptorPoolCreateInfo',
     '--allowlist-type', 'VkDescriptorSetAllocateInfo|VkWriteDescriptorSet|VkCopyDescriptorSet|VkDescriptorPoolResetFlags',

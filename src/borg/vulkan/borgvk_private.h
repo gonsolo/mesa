@@ -381,9 +381,6 @@ bool borgvk_send_buffer_texture(const struct vk_buffer_view *bv);
 
 void borgvk_resolve_region(struct borgvk_image *src, struct borgvk_image *dst, const VkImageResolve *reg);
 void borgvk_free_targets(struct borgvk_command_buffer *cmd);
-void borgvk_clear_attachment_rect(struct vk_image_view *view, VkImageAspectFlags aspectMask,
-                                  const VkClearValue *clearValue, VkRect2D rect,
-                                  uint32_t baseLayer, uint32_t layerCount);
 
 #include "borgvk_rust.h"
 

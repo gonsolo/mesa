@@ -6,7 +6,7 @@
 
 #include "vk_common_entrypoints.h"
 #include "vk_format.h"
-#include "borgvk_image.h"
+#include "util/format/u_format.h"
 
 void
 borgvk_free_targets(struct borgvk_command_buffer *cmd)

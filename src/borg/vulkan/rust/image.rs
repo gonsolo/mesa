@@ -10,13 +10,13 @@ use borg_layout::image::{mip_level_size, Blocks, Shape};
 handle!(VkImage, borgvk_image, VK_OBJECT_TYPE_IMAGE);
 handle!(VkImageView, vk_image_view, VK_OBJECT_TYPE_IMAGE_VIEW);
 
-fn shape(image: &borgvk_image) -> Shape {
+pub fn shape(image: &borgvk_image) -> Shape {
     let e = image.vk.extent;
     Shape { extent: [e.width, e.height, e.depth], levels: image.vk.mip_levels, layers: image.vk.array_layers, samples: image.vk.samples }
 }
 
 /// The blocks of a format.
-fn blocks(fmt: VkFormat) -> Blocks {
+pub fn blocks(fmt: VkFormat) -> Blocks {
     let pf = unsafe { vk_format_to_pipe_format(fmt) };
     unsafe {
         Blocks {
@@ -30,7 +30,7 @@ fn blocks(fmt: VkFormat) -> Blocks {
 
 /// The blocks of one aspect: a depth or stencil aspect of a combined format has its own size,
 /// the block depth stays the combined format's.
-fn aspect_blocks(fmt: VkFormat, aspect: VkImageAspectFlags) -> Blocks {
+pub fn aspect_blocks(fmt: VkFormat, aspect: VkImageAspectFlags) -> Blocks {
     let a = if aspect.count_ones() == 1 { unsafe { vk_format_get_aspect_format(fmt, aspect) } } else { fmt };
     Blocks { bd: blocks(fmt).bd, ..blocks(a) }
 }
@@ -202,6 +202,14 @@ pub unsafe extern "C" fn borgvk_image_level_offset(
         *out = stride;
     }
     offset
+}
+
+/// # Safety
+/// The outputs are valid for writes.
+#[no_mangle]
+pub unsafe extern "C" fn borgvk_aspect_block_size(fmt: VkFormat, aspect: VkImageAspectFlags, bs: *mut u32, bw: *mut u32, bh: *mut u32) {
+    let b = aspect_blocks(fmt, aspect);
+    unsafe { (*bs, *bw, *bh) = (b.bs, b.bw, b.bh) };
 }
 
 /// # Safety

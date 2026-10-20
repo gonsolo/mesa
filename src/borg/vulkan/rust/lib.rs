@@ -5,6 +5,7 @@ mod ffi {
     pub use borgvk_bindings_rs::*;
 }
 
+mod clear;
 mod cmd_buffer;
 #[cfg(borgc)]
 mod compile;
@@ -28,5 +29,6 @@ mod shader_cache;
 mod sim;
 mod sim_process;
 mod sync;
+mod texel;
 mod transport;
 mod util;

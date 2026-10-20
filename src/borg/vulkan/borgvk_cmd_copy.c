@@ -6,7 +6,7 @@
 
 #include "vk_format.h"
 
-#include "borgvk_image.h"
+#include "util/format/u_format.h"
 
 VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer _buffer,
