@@ -5,7 +5,7 @@ use crate::entrypoint::{entrypoint, handle, slice, vk_error, Handle};
 use crate::ffi::*;
 use crate::memory::requirements;
 
-use borg_layout::image::{mip_level_size, Blocks, Shape};
+use borg_layout::image::{Blocks, Shape};
 
 handle!(VkImage, borgvk_image, VK_OBJECT_TYPE_IMAGE);
 handle!(VkImageView, vk_image_view, VK_OBJECT_TYPE_IMAGE_VIEW);

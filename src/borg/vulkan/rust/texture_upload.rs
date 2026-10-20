@@ -71,13 +71,10 @@ fn texture(view: &vk_image_view, img: &borgvk_image, sampler: *const borgvk_samp
     let (mut layers, mut depth) = (1, 1);
     let ty = match view.view_type {
         VK_IMAGE_VIEW_TYPE_1D_ARRAY => {
-            (layers, h) = (view.layer_count, 1);
+            layers = view.layer_count;
             TexType::D1
         }
-        VK_IMAGE_VIEW_TYPE_1D => {
-            h = 1;
-            TexType::D1
-        }
+        VK_IMAGE_VIEW_TYPE_1D => TexType::D1,
         VK_IMAGE_VIEW_TYPE_2D_ARRAY => {
             layers = view.layer_count;
             TexType::D2
