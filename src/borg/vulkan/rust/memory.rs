@@ -7,7 +7,7 @@
 use crate::entrypoint::{chain, entrypoint, handle, pointee, slice, vk_error, Handle};
 use crate::drm::{gem_close, ioctl, GEM_CREATE, GEM_MMAP};
 use crate::ffi::*;
-use crate::object::{allocate, Zeroed};
+use crate::object::{allocate, Owned, Zeroed};
 use crate::device::Device;
 use crate::util::mmap;
 use std::ffi::c_void;
@@ -150,15 +150,11 @@ entrypoint! {
     fn borgvk_AllocateMemory(device: &Device, info: &VkMemoryAllocateInfo, alloc: *const VkAllocationCallbacks, out: &mut VkDeviceMemory) -> Result<(), VkError> {
         let mem = unsafe { allocate::<DeviceMemory>(|n| vk_device_memory_create(device.vk_ptr(), info, alloc, n)) };
         let mem = mem.ok_or_else(|| vk_error!(device, VK_ERROR_OUT_OF_HOST_MEMORY))?;
+        let mut mem = Owned::new(mem, |m| unsafe { vk_device_memory_destroy(device.vk_ptr(), alloc, &mut m.vk) });
         let size = (info.allocationSize as usize).max(1);
-        match back(device, size) {
-            Ok((map, gem_handle)) => (mem.map, mem.size, mem.gem_handle) = (map, size, gem_handle),
-            Err(r) => {
-                unsafe { vk_device_memory_destroy(device.vk_ptr(), alloc, &mut mem.vk) };
-                return Err(vk_error!(device, r));
-            }
-        }
-        *out = VkDeviceMemory::from_object(mem);
+        let (map, gem_handle) = back(device, size).map_err(|r| vk_error!(device, r))?;
+        (mem.map, mem.size, mem.gem_handle) = (map, size, gem_handle);
+        *out = VkDeviceMemory::from_object(mem.keep());
         Ok(())
     }
 }
