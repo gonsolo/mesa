@@ -10,7 +10,7 @@ use crate::memory::Buffer;
 use crate::sampler::Sampler;
 use crate::image::Image;
 use crate::device::Device;
-use crate::object::{allocate, Zeroed};
+use crate::object::{allocate, Owned, Zeroed};
 use std::ptr::null;
 
 handle!(VkDescriptorSetLayout, DescriptorSetLayout, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT);
@@ -210,15 +210,16 @@ entrypoint! {
             return Err(vk_error!(dev, VK_ERROR_OUT_OF_POOL_MEMORY));
         }
         let out = unsafe { std::slice::from_raw_parts_mut(out, i.descriptorSetCount as usize) };
+        out.fill(VkDescriptorSet::from_object(std::ptr::null_mut()));
+        let mut out = Owned::new(out, |out| {
+            for h in out.iter_mut().filter(|h| !h.ptr().is_null()) {
+                unsafe { free_set(dev, h.ptr()) };
+                *h = VkDescriptorSet::from_object(std::ptr::null_mut());
+            }
+        });
         for k in 0..out.len() {
             let set = unsafe { allocate::<DescriptorSet>(|n| vk_object_zalloc(dev.vk_ptr(), null(), n, VK_OBJECT_TYPE_DESCRIPTOR_SET)) };
-            let Some(set) = set else {
-                for h in &mut out[..k] {
-                    unsafe { free_set(dev, h.ptr()) };
-                    *h = VkDescriptorSet::from_object(std::ptr::null_mut());
-                }
-                return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
-            };
+            let set = set.ok_or_else(|| vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY))?;
             if !i.pSetLayouts.is_null() {
                 if let Some(l) = unsafe { (*i.pSetLayouts.add(k)).get_ref() } {
                     (set.dyn_mask, set.map) = (l.dyn_mask, l.map);
@@ -229,6 +230,7 @@ entrypoint! {
             pool.num_sets = pool.num_sets.wrapping_add(1);
             out[k] = VkDescriptorSet::from_object(set);
         }
+        out.keep();
         Ok(())
     }
 }
