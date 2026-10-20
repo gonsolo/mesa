@@ -11,6 +11,8 @@ style = "tag"
 [export.rename]
 "tex_conv" = "struct tex_conv"
 "borgvk_device" = "struct borgvk_device"
+"borgvk_sampler" = "struct borgvk_sampler"
+"borgvk_descriptor_set" = "struct borgvk_descriptor_set"
 "borgvk_physical_device" = "struct borgvk_physical_device"
 "borgvk_pipeline" = "struct borgvk_pipeline"
 "vk_sync_type" = "struct vk_sync_type"

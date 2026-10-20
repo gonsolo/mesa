@@ -5,6 +5,7 @@
 //! the process, or malloc'd without one; either way host-coherent.
 
 use crate::entrypoint::{chain, entrypoint, handle, slice, vk_error, Handle};
+use crate::drm::{gem_close, ioctl, GEM_CREATE, GEM_MMAP};
 use crate::ffi::*;
 use crate::util::mmap;
 use std::ffi::c_void;
@@ -13,22 +14,6 @@ use std::ptr::null_mut;
 handle!(VkDeviceMemory, borgvk_device_memory, VK_OBJECT_TYPE_DEVICE_MEMORY);
 handle!(VkBuffer, borgvk_buffer, VK_OBJECT_TYPE_BUFFER);
 handle!(VkBufferView, borgvk_buffer_view, VK_OBJECT_TYPE_BUFFER_VIEW);
-
-/// `_IOC` in Linux's generic ioctl encoding, which x86 and RISC-V use, for DRM's type 'd'.
-const fn drm_ioc(dir: u64, nr: u32, size: usize) -> u64 {
-    dir << 30 | (size as u64) << 16 | (b'd' as u64) << 8 | nr as u64
-}
-const GEM_CREATE: u64 = drm_ioc(3, DRM_COMMAND_BASE + DRM_BORG_GEM_CREATE, size_of::<drm_borg_gem_create>());
-const GEM_MMAP: u64 = drm_ioc(3, DRM_COMMAND_BASE + DRM_BORG_GEM_MMAP, size_of::<drm_borg_gem_mmap>());
-const GEM_CLOSE: u64 = drm_ioc(1, 0x09, size_of::<drm_gem_close>());
-
-fn ioctl<T>(fd: i32, request: u64, arg: &mut T) -> bool {
-    unsafe { drmIoctl(fd, request as _, (arg as *mut T).cast()) >= 0 }
-}
-
-fn gem_close(fd: i32, handle: u32) {
-    ioctl(fd, GEM_CLOSE, &mut drm_gem_close { handle, ..Default::default() });
-}
 
 /// Backing for `size` bytes and its GEM handle, 0 for malloc'd memory.
 fn back(dev: &borgvk_device, size: usize) -> Result<(*mut c_void, u32), VkResult> {
@@ -200,13 +185,6 @@ entrypoint! {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ioctl_numbers() {
-        assert_eq!(GEM_CLOSE, 0x4008_6409);
-        assert_eq!(GEM_CREATE, 0xc010_6445);
-        assert_eq!(GEM_MMAP, 0xc010_6446);
-    }
 
     #[test]
     fn buffers_round_up_to_256_and_saturate() {
