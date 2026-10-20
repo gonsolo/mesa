@@ -16,7 +16,6 @@ borgvk_entrypoints = custom_target(
 libborgvk_files = files(
   'borgvk_device.c',
   'borgvk_cmd_copy.c',
-  'borgvk_cmd_dispatch.c',
   'borgvk_cmd_draw.c',
   'borgvk_private.h',
 )
@@ -118,7 +117,7 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-function', 'vk_descriptor_set_layout_zalloc|list_(inithead|addtail|del)',
     '--allowlist-function', 'vk_blend_(op|factor)_to_pipe|vk_get_pipeline_rendering_create_info|vk_format_(is_int|has_alpha)|util_format_is_srgb',
     '--allowlist-function', 'vk_(zalloc|free)|vk_command_buffer_(init_with_params|reset|finish|begin|end|get_record_result)',
-    '--allowlist-function', 'util_format_(is_scaled|get_first_non_void_channel|is_pure_(integer|uint|sint))|vk_format_has_(depth|stencil)|borgvk_flush_draws|borgvk_resolve_region|borgvk_decode_compressed_image|util_format_has_alpha',
+    '--allowlist-function', 'util_format_(is_scaled|get_first_non_void_channel|is_pure_(integer|uint|sint))|vk_format_has_(depth|stencil)|borgvk_flush_draws|borgvk_resolve_region|borgvk_decode_compressed_image|util_format_has_alpha|util_format_is_compressed',
     '--allowlist-type', 'VkClear(ColorValue|DepthStencilValue|Value|Attachment|Rect)|VkImageSubresourceRange|util_format_type',
     '--allowlist-var', 'VK_REMAINING_(MIP_LEVELS|ARRAY_LAYERS)',
     '--allowlist-function', 'wsi_device_(init|finish)|vk_instance_get_proc_addr_unchecked|vk_alloc2',

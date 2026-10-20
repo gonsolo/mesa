@@ -13,6 +13,7 @@ mod compiler;
 mod corpus;
 mod cube;
 mod descriptor_set;
+mod dispatch;
 mod drm;
 mod entrypoint;
 mod event;

@@ -19,4 +19,14 @@ pub fn log(_level: mesa_log_level, _msg: String) {}
 extern "C" {
     pub fn mmap(addr: *mut std::ffi::c_void, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut std::ffi::c_void;
     pub fn ftruncate(fd: i32, len: i64) -> i32;
+    pub fn mkstemp(template: *mut std::ffi::c_char) -> i32;
+}
+
+/// A new empty file from a mkstemp template ending in XXXXXX, and its path.
+pub fn temp_file(template: &str) -> Option<(String, std::fs::File)> {
+    use std::os::fd::FromRawFd;
+    let mut t = std::ffi::CString::new(template).ok()?.into_bytes_with_nul();
+    let fd = unsafe { mkstemp(t.as_mut_ptr().cast()) };
+    t.pop();
+    (fd >= 0).then(|| (String::from_utf8(t).unwrap_or_default(), unsafe { std::fs::File::from_raw_fd(fd) }))
 }

@@ -7,7 +7,7 @@
 
 use crate::ffi::*;
 use crate::format::raw32;
-use crate::util::{log, MESA_LOG_INFO};
+use crate::util::{log, mkstemp, MESA_LOG_INFO};
 use std::ffi::{OsStr, OsString};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
@@ -17,10 +17,6 @@ use std::process::{Child, Command, Stdio};
 
 const WIN: u32 = 128;
 
-// By hand: glibc's headers redirect mkstemp to mkstemp64, which musl lacks.
-extern "C" {
-    fn mkstemp(template: *mut std::ffi::c_char) -> i32;
-}
 
 fn env_set(name: &str) -> Option<OsString> {
     std::env::var_os(name).filter(|v| !v.is_empty())
