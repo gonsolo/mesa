@@ -3,6 +3,7 @@
 
 //! Shaders for pipelines: from the shader cache, or through NIR and borgc.
 
+#[cfg(borgc)]
 use crate::descriptor_set::DescriptorSetLayout;
 use crate::ffi::*;
 use crate::device::Device;
