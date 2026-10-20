@@ -165,18 +165,18 @@ fn corpus_state(
 
 /// Runs the draws batched so far.
 pub fn flush_draws(c: &mut CommandBuffer) {
-    if c.stream_len == 0 {
+    if c.stream.is_empty() {
         return;
     }
-    let (bytes, n, img, extra, serve, area) = (c.stream, c.stream_len, c.batch_img, c.batch_extra, c.batch_serve, c.batch_area);
+    let stream = c.stream.take();
+    let (bytes, n) = (stream.as_slice().as_ptr(), stream.as_slice().len());
+    let (img, extra, serve, area) = (c.batch_img, c.batch_extra, c.batch_serve, c.batch_area);
     let (wb, nwb, nextra) = (c.wb, c.nwb as usize, c.batch_nextra as usize);
     c.nwb = 0;
     c.region_set = null_mut();
     (c.batch_pool, c.batch_vpool, c.batch_srgb) = (null(), null(), false);
-    (c.stream, c.stream_len, c.stream_cap) = (null_mut(), 0, 0);
     (c.heap_top, c.batch_draws, c.batch_img, c.batch_nextra) = (0, 0, null_mut(), 0);
-    unsafe { free(c.state_sent.cast()) };
-    (c.state_sent, c.state_sent_len) = (null_mut(), 0);
+    drop(c.state_sent.take());
     let rec = borgvk_corpus_on();
     let seed = BORGVK_CORPUS_SEED as u64;
     let state = |h| corpus_state(h, img, &extra[..nextra], c.batch_depth, c.batch_stencil, &wb[..nwb]);
@@ -184,27 +184,11 @@ pub fn flush_draws(c: &mut CommandBuffer) {
     if serve {
         unsafe { borgvk_sim_run_pass(bytes, n, img, extra.as_ptr(), nextra as u32, c.batch_depth, c.batch_stencil, wb.as_ptr(), nwb as u32, area) };
     } else {
-        sim_run_stream(unsafe { std::slice::from_raw_parts(bytes, n) }, unsafe { img.as_ref() }, 0);
+        sim_run_stream(stream.as_slice(), unsafe { img.as_ref() }, 0);
     }
-    unsafe { free(bytes.cast()) };
     if rec {
         borgvk_corpus_log(b'F' as _, key, state(seed));
     }
-}
-
-fn stream_append(c: &mut CommandBuffer, data: &[u8]) -> bool {
-    let n = data.len();
-    if c.stream_len + n > c.stream_cap {
-        let cap = (c.stream_cap * 2).max(c.stream_len + n + 65536);
-        let p = unsafe { realloc(c.stream.cast(), cap as _) }.cast::<u8>();
-        if p.is_null() {
-            return false;
-        }
-        (c.stream, c.stream_cap) = (p, cap);
-    }
-    unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), c.stream.add(c.stream_len), n) };
-    c.stream_len += n;
-    true
 }
 
 struct Heap {
@@ -481,9 +465,7 @@ impl Ctx<'_> {
         send_blend_state_serial(&d);
         self.state = unsafe { borgvk_transport_capture_end(&mut self.state_len) };
         self.state_same = !self.state.is_null()
-            && !c.state_sent.is_null()
-            && self.state_len == c.state_sent_len
-            && unsafe { std::slice::from_raw_parts(self.state, self.state_len) == std::slice::from_raw_parts(c.state_sent, c.state_sent_len) };
+            && unsafe { std::slice::from_raw_parts(self.state, self.state_len) } == c.state_sent.as_slice();
     }
 
     fn begin_pass(&mut self) {
@@ -839,14 +821,12 @@ impl Ctx<'_> {
             return ok;
         }
         let slice = |p: *mut u8, n| unsafe { std::slice::from_raw_parts(p, n) };
-        let appended = (self.state_same || state.is_null() || stream_append(c, slice(state, self.state_len))) && stream_append(c, slice(bytes, n));
+        let appended = (self.state_same || state.is_null() || c.stream.extend(slice(state, self.state_len))) && c.stream.extend(slice(bytes, n));
         unsafe { free(bytes.cast()) };
         if !self.state_same && !state.is_null() && appended {
-            unsafe { free(c.state_sent.cast()) };
-            (c.state_sent, c.state_sent_len) = (state, self.state_len);
-        } else {
-            unsafe { free(state.cast()) };
+            c.state_sent.set(slice(state, self.state_len));
         }
+        unsafe { free(state.cast()) };
         if !appended {
             return false;
         }

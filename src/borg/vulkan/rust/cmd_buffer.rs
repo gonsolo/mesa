@@ -10,7 +10,7 @@ use crate::ffi::*;
 use crate::image::Image;
 use crate::device::Device;
 use crate::pipeline::Pipeline;
-use crate::object::{allocate, Owned, Zeroed};
+use crate::object::{allocate, Owned, VkBuf, Zeroed};
 use crate::render::Target;
 use std::ffi::c_void;
 use std::mem::zeroed;
@@ -42,13 +42,10 @@ pub struct CommandBuffer {
     pub cs_pipeline: *const Pipeline,
     pub dispatched: bool, // ran a compute dispatch at replay
     // Draws of the open render pass, as one wire stream the simulator runs at its end.
-    pub stream: *mut u8,
-    pub stream_len: usize,
-    pub stream_cap: usize,
+    pub stream: VkBuf,
     pub heap_top: u32,
     pub batch_draws: u32,
-    pub state_sent: *mut u8,
-    pub state_sent_len: usize,
+    pub state_sent: VkBuf,
     pub batch_img: *mut Image,
     pub batch_extra: [*mut Image; 3], // colour attachments 1-3 of the batch
     pub batch_nextra: u32,
@@ -117,6 +114,7 @@ unsafe extern "C" fn create(pool: *mut vk_command_pool, level: VkCommandBufferLe
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     };
     let mut c = Owned::new(c, |c| unsafe { vk_free(alloc, std::ptr::from_mut(c).cast()) });
+    unsafe { (c.stream, c.state_sent) = (VkBuf::new(alloc), VkBuf::new(alloc)) };
     let mut params = vk_command_buffer_init_params { pool, ops: &CMD_BUFFER_OPS, level, needs_cmd_queue: true, ..unsafe { zeroed() } };
     let r = unsafe { vk_command_buffer_init_with_params(&mut c.vk, &mut params) };
     if r != VK_SUCCESS {
@@ -128,13 +126,9 @@ unsafe extern "C" fn create(pool: *mut vk_command_pool, level: VkCommandBufferLe
 
 unsafe extern "C" fn reset(vk: *mut vk_command_buffer, _flags: VkCommandBufferResetFlags) {
     let c = unsafe { cmd(vk) };
-    unsafe {
-        free(c.stream.cast());
-        crate::render::free_targets(c);
-        free(c.state_sent.cast());
-    }
-    (c.stream, c.state_sent, c.state_sent_len) = (null_mut(), null_mut(), 0);
-    (c.stream_len, c.stream_cap, c.heap_top, c.batch_draws) = (0, 0, 0, 0);
+    drop((c.stream.take(), c.state_sent.take()));
+    crate::render::free_targets(c);
+    (c.heap_top, c.batch_draws) = (0, 0);
     (c.batch_img, c.index_ptr, c.gfx_pipeline, c.desc_set, c.cs_pipeline) = (null_mut(), null_mut(), null_mut(), null_mut(), null_mut());
     (c.in_rendering, c.has_clear, c.generic_drawn, c.dispatched) = (false, false, false, false);
     unsafe { (c.vb, c.vb_avail, c.cs_sets, c.desc_sets) = (zeroed(), zeroed(), zeroed(), zeroed()) };
@@ -146,8 +140,7 @@ unsafe extern "C" fn destroy(vk: *mut vk_command_buffer) {
     let c = unsafe { cmd(vk) };
     unsafe {
         vk_command_buffer_finish(&mut c.vk);
-        free(c.stream.cast());
-        free(c.state_sent.cast());
+        drop((c.stream.take(), c.state_sent.take()));
         crate::render::free_targets(c);
         vk_free(&(*c.vk.pool).alloc, (c as *mut CommandBuffer).cast());
     }
