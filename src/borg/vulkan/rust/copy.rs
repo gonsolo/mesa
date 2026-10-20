@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 //! Transfers, done by the host in mapped memory: buffer fills, updates and copies, image
-//! copies and blits.
+//! copies, blits and resolves.
 
+use crate::corpus::{borgvk_corpus_hash, borgvk_corpus_log, borgvk_corpus_on, hash};
 use crate::entrypoint::{entrypoint, slice, Handle};
 use crate::ffi::*;
 use crate::image::{aspect_blocks, blocks, shape, z16_pack, z16_unpack};
-use crate::texel::{pack_rgba_float, unpack_rgba_float};
+use crate::texel::{is_partial_ds_aspect, pack_rgba_float, unpack_rgba_float};
 use borg_layout::image::{mip_level_size, Blocks};
 use std::ffi::c_void;
 
@@ -160,6 +161,102 @@ entrypoint! {
             let r = VkImageCopy { srcSubresource: r.srcSubresource, srcOffset: r.srcOffset, dstSubresource: r.dstSubresource, dstOffset: r.dstOffset, extent: r.extent };
             copy_image(s, d, &r);
         }
+    }
+}
+
+/// One region between an image and a buffer, towards the buffer when `to_buffer`.
+fn buffer_image(img: &borgvk_image, buf: &borgvk_buffer, reg: &VkBufferImageCopy, to_buffer: bool) {
+    let (Some(ibase), Some(bbase)) = (image_host(img), host(buf)) else { return };
+    let (ib, sub) = (blocks(img.vk.format), reg.imageSubresource);
+    let a = aspect_blocks(img.vk.format, sub.aspectMask);
+    let w_blocks = reg.imageExtent.width.div_ceil(a.bw) as usize;
+    let h_blocks = reg.imageExtent.height.div_ceil(a.bh) as usize;
+    // 0 means tightly packed.
+    let row_len = if reg.bufferRowLength != 0 { reg.bufferRowLength.div_ceil(a.bw) as usize } else { w_blocks };
+    let img_h = if reg.bufferImageHeight != 0 { reg.bufferImageHeight.div_ceil(a.bh) as usize } else { h_blocks };
+    let is3d = img.vk.image_type == VK_IMAGE_TYPE_3D;
+    let slices = if is3d { reg.imageExtent.depth.max(1) } else { sub.layerCount.max(1) };
+    let partial = is_partial_ds_aspect(img.vk.format, sub.aspectMask);
+    let (ibs, abs) = (ib.bs as usize, a.bs as usize);
+    let brow = row_len * abs;
+    for l in 0..slices {
+        let z = is3d.then(|| reg.imageOffset.z as u32 + l);
+        let (off, stride) = slice_offset(img, ib, sub.mipLevel, sub.baseArrayLayer + l, z);
+        let irow = stride as usize * ibs;
+        let it = unsafe { ibase.add(off as usize + (reg.imageOffset.y as u32 / ib.bh) as usize * irow + (reg.imageOffset.x as u32 / ib.bw) as usize * ibs) };
+        let bt = unsafe { bbase.add(reg.bufferOffset as usize + l as usize * img_h * brow) };
+        if a.bs == ib.bs && !partial {
+            for row in 0..h_blocks {
+                let (i, b) = unsafe { (it.add(row * irow), bt.add(row * brow)) };
+                let (from, to) = if to_buffer { (i, b) } else { (b, i) };
+                unsafe { std::ptr::copy(from, to, w_blocks * abs) };
+            }
+            continue;
+        }
+        let stencil = sub.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT != 0;
+        let aspect = if stencil { VK_IMAGE_ASPECT_STENCIL_BIT } else { VK_IMAGE_ASPECT_DEPTH_BIT };
+        let (ipf, bpf) = unsafe { (vk_format_to_pipe_format(img.vk.format), vk_format_to_pipe_format(vk_format_get_aspect_format(img.vk.format, aspect))) };
+        for row in 0..h_blocks {
+            for col in 0..w_blocks {
+                let (i, b) = unsafe { (it.add(row * irow + col * ibs), bt.add(row * brow + col * abs)) };
+                if to_buffer { copy_depth_stencil(ipf, i, bpf, b, stencil) } else { copy_depth_stencil(bpf, b, ipf, i, stencil) }
+            }
+        }
+    }
+}
+
+fn buffer_image_copies(image: VkImage, buffer: VkBuffer, regions: &[VkBufferImageCopy], to_buffer: bool) {
+    let (Some(img), Some(buf)) = (unsafe { (image.get(), buffer.get()) }) else { return };
+    if image_host(img).is_none() || host(buf).is_none() || blocks(img.vk.format).bd > 1 {
+        return;
+    }
+    for r in regions {
+        buffer_image(img, buf, r, to_buffer);
+    }
+    if to_buffer && borgvk_corpus_on() {
+        let key = hash(BORGVK_CORPUS_SEED as u64, &img.vk.format.to_ne_bytes());
+        let key = unsafe { borgvk_corpus_hash(key, regions.as_ptr().cast(), size_of_val(regions)) };
+        let content = unsafe { borgvk_corpus_hash(BORGVK_CORPUS_SEED as u64, host(buf).unwrap().cast(), buf.vk.size as usize) };
+        borgvk_corpus_log(b'R' as _, key, content);
+    }
+}
+
+fn buffer_image_copy(r: &VkBufferImageCopy2) -> VkBufferImageCopy {
+    VkBufferImageCopy {
+        bufferOffset: r.bufferOffset,
+        bufferRowLength: r.bufferRowLength,
+        bufferImageHeight: r.bufferImageHeight,
+        imageSubresource: r.imageSubresource,
+        imageOffset: r.imageOffset,
+        imageExtent: r.imageExtent,
+    }
+}
+
+entrypoint! {
+    fn borgvk_CmdCopyImageToBuffer(_cmd: VkCommandBuffer, src: VkImage, _sl: VkImageLayout, dst: VkBuffer, count: u32, regions: *const VkBufferImageCopy) {
+        buffer_image_copies(src, dst, slice(regions, count), true);
+    }
+}
+
+entrypoint! {
+    fn borgvk_CmdCopyBufferToImage(_cmd: VkCommandBuffer, src: VkBuffer, dst: VkImage, _dl: VkImageLayout, count: u32, regions: *const VkBufferImageCopy) {
+        buffer_image_copies(dst, src, slice(regions, count), false);
+    }
+}
+
+entrypoint! {
+    fn borgvk_CmdCopyImageToBuffer2(_cmd: VkCommandBuffer, info: *const VkCopyImageToBufferInfo2) {
+        let i = &*info;
+        let regions: Vec<_> = slice(i.pRegions, i.regionCount).iter().map(buffer_image_copy).collect();
+        buffer_image_copies(i.srcImage, i.dstBuffer, &regions, true);
+    }
+}
+
+entrypoint! {
+    fn borgvk_CmdCopyBufferToImage2(_cmd: VkCommandBuffer, info: *const VkCopyBufferToImageInfo2) {
+        let i = &*info;
+        let regions: Vec<_> = slice(i.pRegions, i.regionCount).iter().map(buffer_image_copy).collect();
+        buffer_image_copies(i.dstImage, i.srcBuffer, &regions, false);
     }
 }
 
@@ -371,5 +468,62 @@ entrypoint! {
             .map(|r| VkImageBlit { srcSubresource: r.srcSubresource, srcOffsets: r.srcOffsets, dstSubresource: r.dstSubresource, dstOffsets: r.dstOffsets })
             .collect();
         blit(s, d, &regions, i.filter);
+    }
+}
+
+/// Averages the samples of one region into a single-sampled image.
+pub fn resolve_region(src: &borgvk_image, dst: &borgvk_image, reg: &VkImageResolve) {
+    let (Some(sbase), Some(dbase)) = (image_host(src), image_host(dst)) else { return };
+    let (spf, dpf) = unsafe { (vk_format_to_pipe_format(src.vk.format), vk_format_to_pipe_format(dst.vk.format)) };
+    let texel = |f: VkFormat| Blocks { bs: blocks(f).bs, bw: 1, bh: 1, bd: 1 };
+    let (sb, db) = (texel(src.vk.format), texel(dst.vk.format));
+    let (sbs, dbs) = (sb.bs as usize, db.bs as usize);
+    let samples = src.vk.samples.max(1);
+    let plane = shape(src).sample_plane_size(sb) as usize;
+    let int_copy = unsafe { util_format_is_pure_integer(spf) } && sbs == dbs;
+    let (ss, ds) = (reg.srcSubresource, reg.dstSubresource);
+    for l in 0..layers(&src.vk, &ss) {
+        let (soff, sstride) = shape(src).level_offset(ss.mipLevel, ss.baseArrayLayer + l, sb);
+        let (doff, dstride) = shape(dst).level_offset(ds.mipLevel, ds.baseArrayLayer + l, db);
+        for y in 0..reg.extent.height as usize {
+            let (sy, dy) = (reg.srcOffset.y as usize + y, reg.dstOffset.y as usize + y);
+            for x in 0..reg.extent.width as usize {
+                let (sx, dx) = (reg.srcOffset.x as usize + x, reg.dstOffset.x as usize + x);
+                let st = unsafe { sbase.add(soff as usize + (sy * sstride as usize + sx) * sbs) };
+                let dt = unsafe { dbase.add(doff as usize + (dy * dstride as usize + dx) * dbs) };
+                if int_copy {
+                    unsafe { std::ptr::copy(st, dt, sbs) };
+                    continue;
+                }
+                let mut acc = [0.0f32; 4];
+                for s in 0..samples as usize {
+                    let mut v = [0.0; 4];
+                    unpack_rgba_float(src.vk.format, spf, unsafe { st.add(s * plane) }, &mut v);
+                    acc.iter_mut().zip(v).for_each(|(a, v)| *a += v);
+                }
+                acc.iter_mut().for_each(|a| *a /= samples as f32);
+                pack_rgba_float(dst.vk.format, dpf, dt, &acc);
+            }
+        }
+    }
+}
+
+entrypoint! {
+    fn borgvk_CmdResolveImage(_cmd: VkCommandBuffer, src: VkImage, _sl: VkImageLayout, dst: VkImage, _dl: VkImageLayout, count: u32, regions: *const VkImageResolve) {
+        let (Some(s), Some(d)) = (src.get(), dst.get()) else { return };
+        for r in slice(regions, count) {
+            resolve_region(s, d, r);
+        }
+    }
+}
+
+entrypoint! {
+    fn borgvk_CmdResolveImage2(_cmd: VkCommandBuffer, info: *const VkResolveImageInfo2) {
+        let i = &*info;
+        let (Some(s), Some(d)) = (i.srcImage.get(), i.dstImage.get()) else { return };
+        for r in slice(i.pRegions, i.regionCount) {
+            let r = VkImageResolve { srcSubresource: r.srcSubresource, srcOffset: r.srcOffset, dstSubresource: r.dstSubresource, dstOffset: r.dstOffset, extent: r.extent };
+            resolve_region(s, d, &r);
+        }
     }
 }

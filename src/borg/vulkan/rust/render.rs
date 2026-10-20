@@ -6,6 +6,7 @@
 
 use crate::clear::clear_rect;
 use crate::cmd_buffer::cmd;
+use crate::copy::resolve_region;
 use crate::entrypoint::{entrypoint, Handle};
 use crate::ffi::*;
 use crate::image::{blocks, shape};
@@ -119,7 +120,7 @@ entrypoint! {
                 dstOffset: at,
                 extent: VkExtent3D { width: ra.extent.width, height: ra.extent.height, depth: 1 },
             };
-            borgvk_resolve_region(v.image.cast(), r.image.cast(), &region);
+            resolve_region(&*v.image.cast(), &*r.image.cast(), &region);
         }
         c.in_rendering = false;
         c.color_attachment_count = 0;

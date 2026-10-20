@@ -346,7 +346,6 @@ struct tex_conv {
    bool swap_rb;
 };
 
-void borgvk_resolve_region(struct borgvk_image *src, struct borgvk_image *dst, const VkImageResolve *reg);
 
 #include "borgvk_rust.h"
 
