@@ -391,8 +391,6 @@ void borgvk_clear_attachment_rect(struct vk_image_view *view, VkImageAspectFlags
                                   const VkClearValue *clearValue, VkRect2D rect,
                                   uint32_t baseLayer, uint32_t layerCount);
 
-void borgvk_event_set_status(VkEvent event, bool set);
-
 #include "borgvk_rust.h"
 
 #endif /* BORGVK_PRIVATE_H */
