@@ -56,10 +56,8 @@ libborg_host = static_library(
 idep_borg_host = declare_dependency(link_with : libborg_host, include_directories : borg_sw_inc)
 
 if with_borgc
-  libborgvk_files += files('borgvk_compiler.c')
   borgvk_compiler_deps = [idep_borg_nir_passes, idep_nir]
 else
-  libborgvk_files += files('borgvk_compiler_cache.c')
   borgvk_compiler_deps = [declare_dependency(include_directories : [inc_compiler, include_directories('../compiler')])]
 endif
 
@@ -108,7 +106,7 @@ if with_borgc
     '--allowlist-function', 'nir_builder_at|nir_(before|after)_impl|nir_build_call|nir_(load|store)_var',
     '--allowlist-function', 'nir_(channel|channels|trim_vector|imm_float|vec4|fdiv|fmul|fsub|fadd|fge|fabs|bcsel)',
     '--allowlist-function', 'nir_function_set_impl|nir_progress',
-    '--allowlist-function', 'borg_lower_.*|vk_pipeline_shader_stage_to_nir',
+    '--allowlist-function', 'borg_lower_.*|vk_pipeline_shader_stage_to_nir|nir_builder_init_simple_shader|ralloc_free',
     '--allowlist-var', 'borg_(spirv|nir)_options|BORGVK_LINE_.*',
     '--opaque-type', 'spirv_to_nir_options.*|borg_blend.*',
     '--blocklist-type', 'spirv_to_nir_options__.*',
@@ -122,13 +120,13 @@ _borgvk_bindings_rs = rust.bindgen(
   args : [
     bindgen_output_args, borgvk_bindgen_args, '--no-prepend-enum-name', '--with-derive-default',
     '--allowlist-type', 'borgvk_device|borgvk_descriptor_set_layout|borgvk_desc_map|vk_pipeline_layout|borgvk_shader_blob|VkFormat|tex_conv|borgvk_image|borgvk_vp|borgvk_writeback|pipe_format',
-    '--allowlist-type', 'VkGraphicsPipelineCreateInfo|VkPipelineColorBlendStateCreateInfo|mesa_log_level',
+    '--allowlist-type', 'borgvk_shader_stage|borgvk_pipeline|VkPipelineShaderStageCreateInfo|VkGraphicsPipelineCreateInfo|VkPipelineColorBlendStateCreateInfo|mesa_log_level',
     '--allowlist-type', 'vk_image_view|VkExtent2D|VkExtent3D|VkResult|borgvk_device_memory|pipe_swizzle|util_format_type|termios',
     '--allowlist-function', 'util_format_description|util_format_get_blocksize|vk_format_to_pipe_format',
     '--allowlist-function', 'util_format_(un)?pack_(rgba|z_float|s_8uint)',
     '--allowlist-function', 'borg_core_.*|borg_hw_.*|bh_.*',
     '--allowlist-function', 'mesa_log|malloc|realloc|free|tcgetattr|tcsetattr|cfmakeraw|cfsetispeed|cfsetospeed|tcdrain',
-    '--allowlist-function', 'memfd_create|close|signal|sysconf',
+    '--allowlist-function', 'memfd_create|close|signal|sysconf|borgvk_shader_cache_.*',
     '--allowlist-var', 'BORGC_.*|BORGVK_.*|BC_.*|BORG_(ZB|SB|HEAP)_SPI|DRAM_OUT_BASE_SPI',
     '--allowlist-var', 'B115200|TCSANOW|CLOCAL|CREAD|CRTSCTS|O_NOCTTY',
     '--allowlist-var', 'PROT_(READ|WRITE)|MAP_(PRIVATE|ANONYMOUS|NORESERVE|SHARED)|SIGPIPE|_SC_NPROCESSORS_ONLN',
@@ -207,7 +205,7 @@ libvulkan_borg = shared_library(
 # The wire packet test links the Rust library itself: libvulkan_borg exports only the ICD entrypoints.
 borgvk_serial_test = executable(
   'borgvk_serial_test',
-  ['borgvk_serial_test.c', borgvk_rust_h],
+  ['borgvk_serial_test.c', 'borgvk_shader_cache.c', borgvk_rust_h],
   include_directories : [
     inc_include, inc_src, inc_util,
     include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h
@@ -226,7 +224,7 @@ test(
 # end-to-end test, with the driver's own senders rather than a reimplementation.
 borgvk_burst_gen = executable(
   'borgvk_burst_gen',
-  ['borgvk_burst_gen.c', borgvk_rust_h],
+  ['borgvk_burst_gen.c', 'borgvk_shader_cache.c', borgvk_rust_h],
   include_directories : [
     inc_include, inc_src, inc_util,
     include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h

@@ -11,6 +11,7 @@ style = "tag"
 [export.rename]
 "tex_conv" = "struct tex_conv"
 "borgvk_device" = "struct borgvk_device"
+"borgvk_pipeline" = "struct borgvk_pipeline"
 "nir_shader" = "struct nir_shader"
 "borgvk_shader_blob" = "struct borgvk_shader_blob"
 "borgvk_image" = "struct borgvk_image"

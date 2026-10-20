@@ -207,19 +207,12 @@ struct borgvk_writeback;
 VkResult borgvk_queue_submit(struct vk_queue *queue,
                              struct vk_queue_submit *submit);
 
-/* Compiler shim (borgvk_compiler.c → Rust borgc crate). */
-void borgvk_compile_compute_stage(struct borgvk_device *device,
-                                  const VkPipelineShaderStageCreateInfo *stage_info,
-                                  struct borgvk_pipeline *pipeline);
 bool borgvk_shader_cache_get(const VkPipelineShaderStageCreateInfo *si, uint32_t vfetch,
                              struct borgvk_shader_blob *blob, bool *reads_pntc);
 void borgvk_shader_cache_record(const VkPipelineShaderStageCreateInfo *si, uint32_t vfetch,
                                 const struct borgvk_shader_blob *blob, bool reads_pntc);
 #define BORGVK_LINE_SLOT  16
 #define BORGVK_LINE_OTHER 24
-void borgvk_compile_empty_frag(struct borgvk_device *device, uint32_t opt);
-void borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
-                          const VkPipelineShaderStageCreateInfo *stage_info);
 
 VK_DEFINE_HANDLE_CASTS(borgvk_instance, vk.base, VkInstance,
                        VK_OBJECT_TYPE_INSTANCE)

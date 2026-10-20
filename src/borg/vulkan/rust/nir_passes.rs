@@ -150,17 +150,3 @@ unsafe fn derefs(imp: *mut nir_function_impl) -> Vec<*mut nir_deref_instr> {
         .filter(|&d| unsafe { (*d).deref_type } == nir_deref_type_var)
         .collect()
 }
-
-/// # Safety
-/// `nir` is a valid vertex shader.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_lower_lines(nir: *mut nir_shader, instance_mask: u32) {
-    lower_lines(nir, instance_mask);
-}
-
-/// # Safety
-/// `device` and `nir` are valid.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_nir_remap_array_bindings(device: *const borgvk_device, nir: *mut nir_shader) {
-    remap_array_bindings(unsafe { &*device }, unsafe { &*nir });
-}

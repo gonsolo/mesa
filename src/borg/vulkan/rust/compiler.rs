@@ -71,6 +71,48 @@ pub unsafe extern "C" fn borgvk_layout_set_base(device: *const borgvk_device, ba
     unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), base, 4) };
 }
 
+/// # Safety
+/// `device` and `stage_info` are valid.
+#[cfg(not(borgc))]
+#[no_mangle]
+pub unsafe extern "C" fn borgvk_compile_stage(device: *mut borgvk_device, vfetch: u32, stage_info: *const VkPipelineShaderStageCreateInfo) {
+    let (dev, si) = unsafe { (&mut *device, &*stage_info) };
+    let slot = match si.stage {
+        VK_SHADER_STAGE_VERTEX_BIT => BORGVK_STAGE_VERT,
+        VK_SHADER_STAGE_FRAGMENT_BIT => BORGVK_STAGE_FRAG,
+        _ => return,
+    } as usize;
+    let mut pntc = false;
+    if unsafe { borgvk_shader_cache_get(si, vfetch, &mut dev.shader_blob[slot], &mut pntc) } {
+        if slot == BORGVK_STAGE_FRAG as usize {
+            dev.frag_reads_pntc = pntc;
+        }
+        return;
+    }
+    dev.shader_blob[slot].len = 0;
+    crate::util::log(crate::util::MESA_LOG_WARN, "borgvk: shader not in the cache and no compiler in this build".into());
+}
+
+/// # Safety
+/// `pipeline` is valid.
+#[cfg(not(borgc))]
+#[no_mangle]
+pub unsafe extern "C" fn borgvk_compile_compute_stage(
+    _device: *mut borgvk_device,
+    _stage_info: *const VkPipelineShaderStageCreateInfo,
+    pipeline: *mut borgvk_pipeline,
+) {
+    unsafe { (*pipeline).cs_ok = false };
+}
+
+/// # Safety
+/// `device` is valid.
+#[cfg(not(borgc))]
+#[no_mangle]
+pub unsafe extern "C" fn borgvk_compile_empty_frag(device: *mut borgvk_device, _opt: u32) {
+    unsafe { (*device).shader_blob[BORGVK_STAGE_FRAG as usize].len = 0 };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
