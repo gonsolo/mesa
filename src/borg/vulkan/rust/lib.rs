@@ -8,6 +8,7 @@ mod ffi {
 #[cfg(borgc)]
 mod compile;
 mod compiler;
+mod descriptor_set;
 mod entrypoint;
 mod event;
 mod format;

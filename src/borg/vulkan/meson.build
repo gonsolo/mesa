@@ -15,7 +15,6 @@ borgvk_entrypoints = custom_target(
 
 libborgvk_files = files(
   'borgvk_cmd_buffer.c',
-  'borgvk_descriptor_set.c',
   'borgvk_device.c',
   'borgvk_cmd_clear.c',
   'borgvk_cmd_copy.c',
@@ -128,6 +127,9 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-type', 'VkMemoryDedicatedRequirements|VkBindBufferMemoryInfo|VkBaseOutStructure|drm_borg_gem_(create|mmap)|drm_gem_close',
     '--allowlist-var', 'DRM_COMMAND_BASE|DRM_BORG_GEM_.*|VK_(TRUE|FALSE)',
     '--allowlist-function', 'vk_image_(view_)?(create|destroy)|vk_format_get_aspect_format|os_time_get_nano',
+    '--allowlist-function', 'vk_descriptor_set_layout_zalloc|list_(inithead|addtail|del)',
+    '--allowlist-type', 'borgvk_descriptor_pool|borgvk_descriptor_set|VkDescriptorSetLayoutCreateInfo|VkDescriptorSetLayoutSupport|VkDescriptorPoolCreateInfo',
+    '--allowlist-type', 'VkDescriptorSetAllocateInfo|VkWriteDescriptorSet|VkCopyDescriptorSet|VkDescriptorPoolResetFlags',
     '--allowlist-type', 'vk_sync_type|vk_sync_wait|vk_sync_features|vk_sync_wait_flags|VkQueryPoolCreateInfo|VkQueryPool|VkImageMemoryRequirementsInfo2|VkImageSubresource2KHR|VkSubresourceLayout2KHR|VkBindImageMemoryInfo|VkImageViewCreateInfo',
     '--allowlist-type', 'borgvk_sampler|VkSamplerCreateInfo|VkImageCreateInfo|vk_object_base|VkEventCreateInfo|VkDependencyInfo|VkCommandBuffer|VkEvent|VkPipelineStageFlags2?',
     '--allowlist-var', 'BORGC_.*|BORGVK_.*|BC_.*|BORG_(ZB|SB|HEAP)_SPI|DRAM_OUT_BASE_SPI',

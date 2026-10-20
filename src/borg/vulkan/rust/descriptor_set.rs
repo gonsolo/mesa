@@ -1,0 +1,308 @@
+// Copyright © 2026 Andreas Wendleder
+// SPDX-License-Identifier: MIT
+
+//! Descriptor set layouts, pools and sets. A layout maps its (binding, array element) pairs to
+//! flat slots, at most BORGVK_MAX_BINDINGS of them; a set holds one descriptor per slot.
+
+use crate::entrypoint::{entrypoint, handle, slice, vk_error, Handle};
+use crate::ffi::*;
+use std::ptr::null;
+
+handle!(VkDescriptorSetLayout, borgvk_descriptor_set_layout, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT);
+handle!(VkDescriptorPool, borgvk_descriptor_pool, VK_OBJECT_TYPE_DESCRIPTOR_POOL);
+handle!(VkDescriptorSet, borgvk_descriptor_set, VK_OBJECT_TYPE_DESCRIPTOR_SET);
+
+const MAX: usize = BORGVK_MAX_BINDINGS as usize;
+
+fn bit(slot: u32) -> u32 {
+    1u32.wrapping_shl(slot)
+}
+
+/// The slot map of a layout's bindings and the slots of its dynamic buffers: bindings in
+/// order, each array taking as many slots as it has elements.
+pub fn layout_map(bindings: &[VkDescriptorSetLayoutBinding]) -> (borgvk_desc_map, u64) {
+    let (mut count_of, mut dyn_of) = ([0u32; MAX], [false; MAX]);
+    for b in bindings.iter().filter(|b| (b.binding as usize) < MAX) {
+        count_of[b.binding as usize] = b.descriptorCount.max(1).min(MAX as u32);
+        dyn_of[b.binding as usize] = matches!(
+            b.descriptorType,
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC | VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC
+        );
+    }
+    let (mut m, mut dyn_mask, mut extra) = (borgvk_desc_map::default(), 0u64, 0u32);
+    for b in (0..MAX as u32).filter(|&b| count_of[b as usize] != 0) {
+        let slot = b + extra;
+        if slot >= MAX as u32 {
+            break;
+        }
+        let cnt = count_of[b as usize].min(MAX as u32 - slot);
+        let n = m.n as usize;
+        (m.num[n], m.slot[n], m.count[n]) = (b as u8, slot as u8, cnt as u8);
+        m.n += 1;
+        m.arrays |= cnt > 1;
+        if dyn_of[b as usize] {
+            dyn_mask |= ((1u64 << cnt) - 1) << slot;
+        }
+        extra += cnt - 1;
+        m.total = m.total.max((slot + cnt) as u8);
+    }
+    (m, dyn_mask)
+}
+
+/// The slot of element `elem` of `binding`; past the end of an array the next bindings follow.
+pub fn desc_slot(m: &borgvk_desc_map, binding: u32, mut elem: u32) -> Option<u32> {
+    if m.n == 0 {
+        let slot = binding + elem;
+        return (slot < MAX as u32).then_some(slot);
+    }
+    let n = m.n as usize;
+    let mut j = (0..n).find(|&j| m.num[j] as u32 == binding)?;
+    while elem >= m.count[j] as u32 {
+        elem -= m.count[j] as u32;
+        j += 1;
+        if j == n {
+            return None;
+        }
+    }
+    Some(m.slot[j] as u32 + elem)
+}
+
+entrypoint! {
+    fn borgvk_CreateDescriptorSetLayout(device: VkDevice, info: *const VkDescriptorSetLayoutCreateInfo, _alloc: *const VkAllocationCallbacks, out: *mut VkDescriptorSetLayout) -> Result<(), VkError> {
+        let dev = device.get().unwrap();
+        let l = vk_descriptor_set_layout_zalloc(&mut dev.vk, size_of::<borgvk_descriptor_set_layout>(), info);
+        let Some(l) = l.cast::<borgvk_descriptor_set_layout>().as_mut() else {
+            return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
+        };
+        let i = &*info;
+        l.binding_count = i.bindingCount;
+        (l.map, l.dyn_mask) = layout_map(slice(i.pBindings, i.bindingCount));
+        *out = VkDescriptorSetLayout::from_object(l);
+        Ok(())
+    }
+}
+
+// DestroyDescriptorSetLayout is the common, refcounted entry point.
+
+entrypoint! {
+    fn borgvk_GetDescriptorSetLayoutSupport(_device: VkDevice, info: *const VkDescriptorSetLayoutCreateInfo, support: *mut VkDescriptorSetLayoutSupport) {
+        (*support).supported = ((*info).bindingCount <= BORGVK_MAX_BINDINGS) as VkBool32;
+    }
+}
+
+entrypoint! {
+    fn borgvk_CreateDescriptorPool(device: VkDevice, info: *const VkDescriptorPoolCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkDescriptorPool) -> Result<(), VkError> {
+        let dev = device.get().unwrap();
+        let p = vk_object_zalloc(&mut dev.vk, alloc, size_of::<borgvk_descriptor_pool>(), VK_OBJECT_TYPE_DESCRIPTOR_POOL);
+        let Some(p) = p.cast::<borgvk_descriptor_pool>().as_mut() else {
+            return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
+        };
+        list_inithead(&mut p.sets);
+        p.max_sets = (*info).maxSets;
+        *out = VkDescriptorPool::from_object(p);
+        Ok(())
+    }
+}
+
+/// Unlinks a set from its pool and frees it.
+unsafe fn free_set(dev: &mut borgvk_device, set: *mut borgvk_descriptor_set) {
+    unsafe {
+        list_del(&mut (*set).link);
+        (*(*set).pool).num_sets = (*(*set).pool).num_sets.wrapping_sub(1);
+        vk_object_free(&mut dev.vk, null(), set.cast());
+    }
+}
+
+fn free_pool_sets(dev: &mut borgvk_device, pool: &mut borgvk_descriptor_pool) {
+    let head: *mut list_head = &mut pool.sets;
+    let mut p = pool.sets.next;
+    while p != head {
+        let next = unsafe { (*p).next };
+        let set = unsafe { p.byte_sub(std::mem::offset_of!(borgvk_descriptor_set, link)) }.cast::<borgvk_descriptor_set>();
+        unsafe { free_set(dev, set) };
+        p = next;
+    }
+    pool.num_sets = 0;
+}
+
+entrypoint! {
+    fn borgvk_DestroyDescriptorPool(device: VkDevice, pool: VkDescriptorPool, alloc: *const VkAllocationCallbacks) {
+        if let Some(p) = pool.get() {
+            let dev = device.get().unwrap();
+            free_pool_sets(dev, p);
+            vk_object_free(&mut dev.vk, alloc, (p as *mut borgvk_descriptor_pool).cast());
+        }
+    }
+}
+
+entrypoint! {
+    fn borgvk_ResetDescriptorPool(device: VkDevice, pool: VkDescriptorPool, _flags: VkDescriptorPoolResetFlags) -> VkResult {
+        free_pool_sets(device.get().unwrap(), pool.get().unwrap());
+        VK_SUCCESS
+    }
+}
+
+entrypoint! {
+    fn borgvk_AllocateDescriptorSets(device: VkDevice, info: *const VkDescriptorSetAllocateInfo, out: *mut VkDescriptorSet) -> Result<(), VkError> {
+        let dev = device.get().unwrap();
+        let i = &*info;
+        let pool = i.descriptorPool.get().unwrap();
+        if pool.num_sets.wrapping_add(i.descriptorSetCount) > pool.max_sets {
+            return Err(vk_error!(dev, VK_ERROR_OUT_OF_POOL_MEMORY));
+        }
+        let out = std::slice::from_raw_parts_mut(out, i.descriptorSetCount as usize);
+        for k in 0..out.len() {
+            let s = vk_object_zalloc(&mut dev.vk, null(), size_of::<borgvk_descriptor_set>(), VK_OBJECT_TYPE_DESCRIPTOR_SET);
+            let Some(set) = s.cast::<borgvk_descriptor_set>().as_mut() else {
+                for h in &mut out[..k] {
+                    free_set(dev, h.ptr());
+                    *h = VkDescriptorSet::from_object(std::ptr::null_mut());
+                }
+                return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
+            };
+            if !i.pSetLayouts.is_null() {
+                if let Some(l) = (*i.pSetLayouts.add(k)).get() {
+                    (set.dyn_mask, set.map) = (l.dyn_mask, l.map);
+                }
+            }
+            set.pool = pool;
+            list_addtail(&mut set.link, &mut pool.sets);
+            pool.num_sets = pool.num_sets.wrapping_add(1);
+            out[k] = VkDescriptorSet::from_object(set);
+        }
+        Ok(())
+    }
+}
+
+entrypoint! {
+    fn borgvk_FreeDescriptorSets(device: VkDevice, _pool: VkDescriptorPool, count: u32, sets: *const VkDescriptorSet) -> VkResult {
+        let dev = device.get().unwrap();
+        for s in slice(sets, count).iter().filter(|s| !s.is_null()) {
+            free_set(dev, s.ptr());
+        }
+        VK_SUCCESS
+    }
+}
+
+fn set_bit(mask: &mut u32, slot: u32, on: bool) {
+    *mask = (*mask & !bit(slot)) | if on { bit(slot) } else { 0 };
+}
+
+/// Copies slot `s` of `src` to slot `d` of `dst`, which may be the same set.
+unsafe fn copy_slot(dst: *mut borgvk_descriptor_set, d: usize, src: *const borgvk_descriptor_set, s: usize) {
+    let from = unsafe { &*src };
+    let v = (from.buffers[s], from.offsets[s], from.ranges[s], from.images[s], from.views[s]);
+    let (sampled, sampler, bview) = (from.sampled_mask & bit(s as u32) != 0, from.samplers[s], from.buffer_views[s]);
+    let to = unsafe { &mut *dst };
+    (to.buffers[d], to.offsets[d], to.ranges[d], to.images[d], to.views[d]) = v;
+    set_bit(&mut to.sampled_mask, d as u32, sampled);
+    (to.samplers[d], to.buffer_views[d]) = (sampler, bview);
+}
+
+unsafe fn write(w: &VkWriteDescriptorSet) {
+    let set = unsafe { w.dstSet.get() }.unwrap();
+    let ty = w.descriptorType;
+    for k in 0..w.descriptorCount as usize {
+        let Some(slot) = desc_slot(&set.map, w.dstBinding, w.dstArrayElement + k as u32) else {
+            break;
+        };
+        let s = slot as usize;
+        if !w.pBufferInfo.is_null()
+            && matches!(
+                ty,
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                    | VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
+                    | VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+                    | VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC
+            )
+        {
+            let b = unsafe { &*w.pBufferInfo.add(k) };
+            (set.buffers[s], set.offsets[s], set.ranges[s]) = (b.buffer.ptr(), b.offset, b.range);
+            let storage = matches!(ty, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER | VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC);
+            set_bit(&mut set.storage_mask, slot, storage);
+        }
+        // Texel buffers: the view carries the buffer, format, offset and range.
+        if !w.pTexelBufferView.is_null()
+            && matches!(ty, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER | VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)
+        {
+            set.buffer_views[s] = unsafe { *w.pTexelBufferView.add(k) }.ptr().cast();
+        }
+        let image = if w.pImageInfo.is_null() { None } else { Some(unsafe { &*w.pImageInfo.add(k) }) };
+        if let Some(info) = image {
+            if matches!(ty, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER | VK_DESCRIPTOR_TYPE_SAMPLER) && !info.sampler.is_null() {
+                set.samplers[s] = info.sampler.ptr();
+            }
+            let is_image = matches!(
+                ty,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                    | VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
+                    | VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT
+                    | VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+            );
+            if is_image {
+                if let Some(view) = unsafe { info.imageView.get() } {
+                    set.images[s] = view.image.cast();
+                    set.views[s] = view;
+                    set_bit(&mut set.sampled_mask, slot, ty != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+                }
+            }
+        }
+    }
+}
+
+entrypoint! {
+    fn borgvk_UpdateDescriptorSets(_device: VkDevice, nwrites: u32, writes: *const VkWriteDescriptorSet, ncopies: u32, copies: *const VkCopyDescriptorSet) {
+        for w in slice(writes, nwrites) {
+            write(w);
+        }
+        for c in slice(copies, ncopies) {
+            let (src, dst) = (c.srcSet.ptr(), c.dstSet.ptr());
+            for k in 0..c.descriptorCount {
+                let s = desc_slot(&(*src).map, c.srcBinding, c.srcArrayElement + k);
+                let d = desc_slot(&(*dst).map, c.dstBinding, c.dstArrayElement + k);
+                let (Some(s), Some(d)) = (s, d) else {
+                    break;
+                };
+                copy_slot(dst, d as usize, src, s as usize);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn binding(binding: u32, count: u32, ty: VkDescriptorType) -> VkDescriptorSetLayoutBinding {
+        VkDescriptorSetLayoutBinding { binding, descriptorCount: count, descriptorType: ty, ..Default::default() }
+    }
+
+    #[test]
+    fn arrays_take_consecutive_slots() {
+        let b = [
+            binding(0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
+            binding(1, 3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC),
+            binding(4, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
+        ];
+        let (m, dyn_mask) = layout_map(&b);
+        assert_eq!((m.n, &m.num[..3], &m.slot[..3], &m.count[..3]), (3, &[0, 1, 4][..], &[0, 1, 6][..], &[1, 3, 1][..]));
+        assert_eq!((m.total, m.arrays, dyn_mask), (7, true, 0b1110));
+        assert_eq!(desc_slot(&m, 1, 2), Some(3));
+        assert_eq!(desc_slot(&m, 1, 3), Some(6));
+        assert_eq!(desc_slot(&m, 4, 1), None);
+        assert_eq!(desc_slot(&m, 2, 0), None);
+    }
+
+    #[test]
+    fn without_a_map_bindings_are_slots() {
+        let m = borgvk_desc_map::default();
+        assert_eq!(desc_slot(&m, 3, 2), Some(5));
+        assert_eq!(desc_slot(&m, 15, 1), None);
+    }
+
+    #[test]
+    fn slots_stop_at_the_limit() {
+        let (m, _) = layout_map(&[binding(0, 20, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE), binding(1, 1, VK_DESCRIPTOR_TYPE_SAMPLER)]);
+        assert_eq!((m.n, m.count[0], m.total), (1, 16, 16));
+    }
+}
