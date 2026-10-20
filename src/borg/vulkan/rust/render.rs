@@ -24,8 +24,9 @@ pub struct Target {
 
 pub fn free_targets(c: &mut CommandBuffer) {
     while !c.targets.is_null() {
-        let t = unsafe { Box::from_raw(c.targets) };
-        c.targets = t.next;
+        let t = c.targets;
+        c.targets = unsafe { (*t).next };
+        unsafe { vk_free(&(*c.vk.pool).alloc, t.cast()) };
     }
 }
 
@@ -53,7 +54,14 @@ fn target_view(c: &mut CommandBuffer, view: *mut vk_image_view) -> *mut vk_image
     }
     let level = v.base_mip_level;
     let off = shape(img).level_offset(level, v.base_array_layer, Blocks { bw: 1, bh: 1, bd: 1, ..b }).0;
-    let mut t = Box::new(Target { next: c.targets, orig: view, image: unsafe { std::ptr::read(img) }, view: unsafe { std::ptr::read(v) } });
+    let alloc = unsafe { &(*c.vk.pool).alloc };
+    let p = unsafe { vk_alloc(alloc, size_of::<Target>(), align_of::<Target>(), VK_SYSTEM_ALLOCATION_SCOPE_OBJECT) }.cast::<Target>();
+    if p.is_null() {
+        unsafe { __vk_command_buffer_set_error(&mut c.vk, VK_ERROR_OUT_OF_HOST_MEMORY, c"render.rs".as_ptr(), line!() as i32) };
+        return view;
+    }
+    unsafe { p.write(Target { next: c.targets, orig: view, image: std::ptr::read(img), view: std::ptr::read(v) }) };
+    let t = unsafe { &mut *p };
     let i = &mut t.image;
     i.offset += off;
     i.size = img.size.saturating_sub(off);
@@ -62,8 +70,8 @@ fn target_view(c: &mut CommandBuffer, view: *mut vk_image_view) -> *mut vk_image
     (i.vk.mip_levels, i.vk.array_layers) = (1, 1);
     t.view.image = &mut t.image.vk;
     (t.view.base_mip_level, t.view.base_array_layer) = (0, 0);
-    c.targets = Box::into_raw(t);
-    unsafe { &mut (*c.targets).view }
+    c.targets = p;
+    &mut t.view
 }
 
 /// The depth or stencil attachment's view, cleared on load.
