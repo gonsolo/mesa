@@ -14,16 +14,6 @@ use crate::texel::{is_partial_ds_aspect, pack_rgba_float, unpack_rgba_float, Tex
 use borg_layout::image::{mip_level_size, Blocks};
 use std::ffi::c_void;
 
-/// The buffer's bytes from its binding on, when it is bound to mapped memory.
-pub fn host(b: &Buffer) -> Option<*mut u8> {
-    b.host()?.ptr(0, 0)
-}
-
-/// The image's bytes from its binding on, when it is bound to mapped memory.
-pub fn image_host(i: &Image) -> Option<*mut u8> {
-    i.host()?.ptr(0, 0)
-}
-
 /// The texel of `n` bytes at `off`.
 fn texel(h: &Host, off: usize, n: usize) -> Option<Texel> {
     let mut t: Texel = [0; 32];
@@ -295,7 +285,7 @@ pub unsafe fn borgvk_decode_compressed_image(src: *const Image, out: *mut Image,
     if buf.is_null() {
         return std::ptr::null_mut();
     }
-    let sbase = image_host(s).unwrap();
+    let sh = s.host().unwrap();
     let shr = |e: u32, l: u32| e.checked_shr(l).unwrap_or(0).max(1);
     for layer in 0..layers {
         for l in 0..s.vk.mip_levels {
@@ -305,12 +295,13 @@ pub unsafe fn borgvk_decode_compressed_image(src: *const Image, out: *mut Image,
             let sslice = wb as u64 * h.div_ceil(sb.bh) as u64 * sb.bs as u64;
             let dslice = w as u64 * h as u64 * 16;
             for z in 0..d as u64 {
+                let Some(src) = sh.ptr((soff + z * sslice) as usize, sslice as usize) else { continue };
                 unsafe {
                     util_format_unpack_rgba_rect(
                         pf,
                         buf.add((doff + z * dslice) as usize).cast(),
                         w * 16,
-                        sbase.add((soff + z * sslice) as usize).cast(),
+                        src.cast(),
                         wb * sb.bs,
                         w,
                         h,

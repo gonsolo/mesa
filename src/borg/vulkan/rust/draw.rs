@@ -5,7 +5,6 @@
 //! into the open pass's stream, which the simulator runs at the pass's end.
 
 use crate::cmd_buffer::CommandBuffer;
-use crate::copy::{host, image_host};
 use crate::corpus::{borgvk_corpus_hash, borgvk_corpus_image, borgvk_corpus_log, borgvk_corpus_on};
 use crate::entrypoint::{entrypoint, slice, Handle};
 use crate::descriptor_set::DescriptorSet;
@@ -49,7 +48,7 @@ entrypoint! {
                 continue;
             }
             let buf = unsafe { b.get_ref() };
-            c.vb[slot] = buf.and_then(host).map_or(null(), |p| p.wrapping_add(off as usize));
+            c.vb[slot] = buf.and_then(|b| b.host()?.ptr(0, 0)).map_or(null(), |p| p.wrapping_add(off as usize));
             c.vb_avail[slot] = buf.filter(|b| b.vk.size > off).map_or(0, |b| b.vk.size - off);
         }
     }
@@ -99,7 +98,7 @@ entrypoint! {
             _ => 0,
         };
         let Some(b) = buffer else { return };
-        if let Some(p) = host(b).filter(|_| b.vk.size > offset) {
+        if let Some(p) = b.host().and_then(|h| h.ptr(0, 0)).filter(|_| b.vk.size > offset) {
             (c.index_ptr, c.index_avail) = (p.wrapping_add(offset as usize), b.vk.size - offset);
         }
     }
@@ -321,7 +320,7 @@ impl Ctx<'_> {
         let ds_view = if c.depth_view.is_null() { c.stencil_view } else { c.depth_view };
         let size_img = if self.color.is_null() { view_image(ds_view) } else { self.color };
         if let Some(s) = unsafe { size_img.as_ref() } {
-            if image_host(s).is_none() {
+            if s.host().is_none() {
                 return Err(Reject::NoTargetMemory);
             }
             (self.w, self.h) = (s.vk.extent.width, s.vk.extent.height);
@@ -343,7 +342,7 @@ impl Ctx<'_> {
             let e = view_image(c.color_views[k + 1]);
             self.extra[k] = e;
             match unsafe { e.as_ref() } {
-                Some(e) if image_host(e).is_some() && e.vk.extent.width >= self.w && e.vk.extent.height >= self.h => {}
+                Some(e) if e.host().is_some() && e.vk.extent.width >= self.w && e.vk.extent.height >= self.h => {}
                 _ => return Err(Reject::MrtExtent),
             }
         }
@@ -675,7 +674,7 @@ impl Ctx<'_> {
             let Some(s) = (unsafe { s.as_ref() }) else { continue };
             any_dyn |= s.dyn_mask != 0;
             for b in 0..BINDINGS.min(32usize.saturating_sub(pl.set_base[si] as usize)) {
-                let buf = s.storage_mask >> b & 1 != 0 && s.buffer(b).is_some_and(|u| host(u).is_some());
+                let buf = s.storage_mask >> b & 1 != 0 && s.buffer(b).is_some_and(|u| u.host().is_some());
                 if buf || storage_image(s, b).is_some() {
                     smask |= 1 << (pl.set_base[si] as usize + b);
                 }
@@ -892,7 +891,7 @@ fn storage_image(set: &DescriptorSet, b: usize) -> Option<&Image> {
     if !set.buffers[b].is_null() || !set.buffer_views[b].is_null() || set.sampled_mask >> b & 1 != 0 {
         return None;
     }
-    let img = set.image(b).filter(|i| image_host(i).is_some())?;
+    let img = set.image(b).filter(|i| i.host().is_some())?;
     (img.vk.image_type == VK_IMAGE_TYPE_2D && img.vk.samples == 1 && blocks(img.vk.format).bs == 4).then_some(img)
 }
 
