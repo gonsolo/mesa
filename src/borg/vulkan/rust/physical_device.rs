@@ -11,6 +11,8 @@ use crate::sync::borgvk_sync_type;
 use crate::util::log;
 use crate::wsi::{borgvk_wsi_finish, borgvk_wsi_init};
 use std::ffi::CStr;
+use std::fs::OpenOptions;
+use std::os::fd::{AsRawFd, IntoRawFd};
 
 pub const API_VERSION: u32 = 1 << 22; // VK_API_VERSION_1_0
 
@@ -385,21 +387,17 @@ unsafe fn create(instance: &mut borgvk_instance, drm_fd: i32) -> VkResult {
 
 fn find_borg_drm_device() -> i32 {
     for i in 128..192 {
-        let path = format!("/dev/dri/renderD{i}\0");
-        let fd = unsafe { open(path.as_ptr().cast(), (O_RDWR | O_CLOEXEC) as i32) };
-        if fd < 0 {
+        let Ok(f) = OpenOptions::new().read(true).write(true).open(format!("/dev/dri/renderD{i}")) else { continue };
+        let ver = unsafe { drmGetVersion(f.as_raw_fd()) };
+        if ver.is_null() {
             continue;
         }
-        let ver = unsafe { drmGetVersion(fd) };
-        if !ver.is_null() {
-            let name = unsafe { (*ver).name };
-            let borg = !name.is_null() && unsafe { CStr::from_ptr(name) } == c"borg";
-            unsafe { drmFreeVersion(ver) };
-            if borg {
-                return fd;
-            }
+        let name = unsafe { (*ver).name };
+        let borg = !name.is_null() && unsafe { CStr::from_ptr(name) } == c"borg";
+        unsafe { drmFreeVersion(ver) };
+        if borg {
+            return f.into_raw_fd();
         }
-        unsafe { close(fd) };
     }
     -1
 }
