@@ -1,9 +1,14 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
+use crate::entrypoint::{entrypoint, handle, slice, vk_error, Handle};
 use crate::ffi::*;
+use crate::memory::requirements;
 
 use borg_layout::image::{mip_level_size, Blocks, Shape};
+
+handle!(VkImage, borgvk_image, VK_OBJECT_TYPE_IMAGE);
+handle!(VkImageView, vk_image_view, VK_OBJECT_TYPE_IMAGE_VIEW);
 
 fn shape(image: &borgvk_image) -> Shape {
     let e = image.vk.extent;
@@ -19,6 +24,97 @@ fn blocks(fmt: VkFormat) -> Blocks {
             bw: util_format_get_blockwidth(pf),
             bh: util_format_get_blockheight(pf),
             bd: util_format_get_blockdepth(pf),
+        }
+    }
+}
+
+/// The blocks of one aspect: a depth or stencil aspect of a combined format has its own size,
+/// the block depth stays the combined format's.
+fn aspect_blocks(fmt: VkFormat, aspect: VkImageAspectFlags) -> Blocks {
+    let a = if aspect.count_ones() == 1 { unsafe { vk_format_get_aspect_format(fmt, aspect) } } else { fmt };
+    Blocks { bd: blocks(fmt).bd, ..blocks(a) }
+}
+
+fn size(i: &VkImageCreateInfo) -> u64 {
+    let e = i.extent;
+    let s = Shape { extent: [e.width, e.height, e.depth], levels: i.mipLevels, layers: i.arrayLayers, samples: i.samples };
+    s.size(blocks(i.format))
+}
+
+fn subresource_layout(image: &borgvk_image, sub: &VkImageSubresource) -> VkSubresourceLayout {
+    let b = aspect_blocks(image.vk.format, sub.aspectMask);
+    let level = sub.mipLevel;
+    let (offset, stride) = shape(image).level_offset(level, sub.arrayLayer, b);
+    let dim = |e: u32, block: u32| e.checked_shr(level).unwrap_or(0).max(1).div_ceil(block) as u64;
+    let row = stride as u64 * b.bs as u64;
+    let slice = row * dim(image.vk.extent.height, b.bh);
+    VkSubresourceLayout {
+        offset,
+        size: slice * dim(image.vk.extent.depth, b.bd),
+        rowPitch: row,
+        arrayPitch: shape(image).layer_size(b),
+        depthPitch: slice,
+    }
+}
+
+entrypoint! {
+    fn borgvk_CreateImage(device: VkDevice, info: *const VkImageCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkImage) -> Result<(), VkError> {
+        let dev = device.get().unwrap();
+        let Some(image) = vk_image_create(&mut dev.vk, info, alloc, size_of::<borgvk_image>()).cast::<borgvk_image>().as_mut() else {
+            return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
+        };
+        image.size = size(&*info);
+        *out = VkImage::from_object(image);
+        Ok(())
+    }
+}
+
+entrypoint! {
+    fn borgvk_DestroyImage(device: VkDevice, image: VkImage, alloc: *const VkAllocationCallbacks) {
+        if let Some(i) = image.get() {
+            vk_image_destroy(&mut device.get().unwrap().vk, alloc, &mut i.vk);
+        }
+    }
+}
+
+entrypoint! {
+    fn borgvk_GetImageMemoryRequirements2(_device: VkDevice, info: *const VkImageMemoryRequirementsInfo2, reqs: *mut VkMemoryRequirements2) {
+        requirements((*info).image.get().unwrap().size, &mut *reqs);
+    }
+}
+
+entrypoint! {
+    fn borgvk_GetImageSubresourceLayout2KHR(_device: VkDevice, image: VkImage, sub: *const VkImageSubresource2KHR, layout: *mut VkSubresourceLayout2KHR) {
+        (*layout).subresourceLayout = subresource_layout(image.get().unwrap(), &(*sub).imageSubresource);
+    }
+}
+
+entrypoint! {
+    fn borgvk_BindImageMemory2(_device: VkDevice, count: u32, infos: *const VkBindImageMemoryInfo) -> VkResult {
+        for i in slice(infos, count) {
+            let image = i.image.get().unwrap();
+            (image.mem, image.offset) = (i.memory.ptr(), i.memoryOffset);
+        }
+        VK_SUCCESS
+    }
+}
+
+entrypoint! {
+    fn borgvk_CreateImageView(device: VkDevice, info: *const VkImageViewCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkImageView) -> Result<(), VkError> {
+        let dev = device.get().unwrap();
+        let v = vk_image_view_create(&mut dev.vk, info, alloc, size_of::<vk_image_view>()).cast::<vk_image_view>();
+        if v.is_null() {
+            return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
+        }
+        *out = VkImageView::from_object(v);
+        Ok(())
+    }
+}
+
+entrypoint! {
+    fn borgvk_DestroyImageView(device: VkDevice, view: VkImageView, alloc: *const VkAllocationCallbacks) {
+        if let Some(v) = view.get() {
+            vk_image_view_destroy(&mut device.get().unwrap().vk, alloc, v);
         }
     }
 }
@@ -109,16 +205,6 @@ pub unsafe extern "C" fn borgvk_image_level_offset(
 }
 
 /// # Safety
-/// `info` is valid.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_image_size(info: *const VkImageCreateInfo) -> u64 {
-    let i = unsafe { &*info };
-    let e = i.extent;
-    let s = Shape { extent: [e.width, e.height, e.depth], levels: i.mipLevels, layers: i.arrayLayers, samples: i.samples };
-    s.size(blocks(i.format))
-}
-
-/// # Safety
 /// `texel` is valid for writing two bytes.
 #[no_mangle]
 pub unsafe extern "C" fn borgvk_z16_s8_pack_z(texel: *mut u8, z: f32) {
@@ -135,6 +221,17 @@ pub unsafe extern "C" fn borgvk_z16_s8_unpack_z(texel: *const u8) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subresource_layout_of_a_mip_in_a_layer() {
+        let mut image = borgvk_image::default();
+        image.vk.format = VK_FORMAT_R8G8B8A8_UNORM;
+        image.vk.extent = VkExtent3D { width: 8, height: 8, depth: 1 };
+        (image.vk.mip_levels, image.vk.array_layers, image.vk.samples) = (3, 2, 1);
+        let sub = VkImageSubresource { aspectMask: VK_IMAGE_ASPECT_COLOR_BIT, mipLevel: 1, arrayLayer: 1 };
+        let l = subresource_layout(&image, &sub);
+        assert_eq!((l.offset, l.size, l.rowPitch, l.arrayPitch, l.depthPitch), (336 + 256, 64, 16, 336, 64));
+    }
 
     #[test]
     fn z16_round_trips() {
