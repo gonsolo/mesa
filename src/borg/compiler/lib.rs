@@ -13,6 +13,7 @@ macro_rules! debug {
 }
 
 mod compute;
+pub use compute::borgc_compile_compute;
 mod config;
 mod consts;
 mod corpus;
