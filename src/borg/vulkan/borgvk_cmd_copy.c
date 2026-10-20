@@ -9,68 +9,6 @@
 #include "util/format/u_format.h"
 
 VKAPI_ATTR void VKAPI_CALL
-borgvk_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer _buffer,
-                     VkDeviceSize dstOffset, VkDeviceSize size, uint32_t data)
-{
-   VK_FROM_HANDLE(borgvk_buffer, buffer, _buffer);
-
-   if (!buffer || !buffer->mem || !buffer->mem->map)
-      return;
-
-   VkDeviceSize fill_size = size == VK_WHOLE_SIZE ? buffer->vk.size - dstOffset : size;
-   uint8_t *dst = (uint8_t *)buffer->mem->map + buffer->offset + dstOffset;
-
-   for (VkDeviceSize i = 0; i < fill_size / 4; i++)
-      ((uint32_t *)dst)[i] = data;
-}
-
-VKAPI_ATTR void VKAPI_CALL
-borgvk_CmdUpdateBuffer(VkCommandBuffer commandBuffer, VkBuffer _dstBuffer,
-                       VkDeviceSize dstOffset, VkDeviceSize dataSize,
-                       const void *pData)
-{
-   VK_FROM_HANDLE(borgvk_buffer, buffer, _dstBuffer);
-
-   if (!buffer || !buffer->mem || !buffer->mem->map || !pData)
-      return;
-
-   memcpy((uint8_t *)buffer->mem->map + buffer->offset + dstOffset, pData, dataSize);
-}
-
-VKAPI_ATTR void VKAPI_CALL
-borgvk_CmdCopyBuffer(VkCommandBuffer commandBuffer, VkBuffer _srcBuffer,
-                     VkBuffer _dstBuffer, uint32_t regionCount,
-                     const VkBufferCopy *pRegions)
-{
-   VK_FROM_HANDLE(borgvk_buffer, src, _srcBuffer);
-   VK_FROM_HANDLE(borgvk_buffer, dst, _dstBuffer);
-
-   if (!src || !dst || !src->mem || !dst->mem || !src->mem->map || !dst->mem->map)
-      return;
-
-   for (uint32_t i = 0; i < regionCount; i++) {
-      const VkBufferCopy *r = &pRegions[i];
-      memcpy((uint8_t *)dst->mem->map + dst->offset + r->dstOffset,
-             (const uint8_t *)src->mem->map + src->offset + r->srcOffset,
-             (size_t)r->size);
-   }
-}
-
-VKAPI_ATTR void VKAPI_CALL
-borgvk_CmdCopyBuffer2(VkCommandBuffer commandBuffer, const VkCopyBufferInfo2 *pCopyBufferInfo)
-{
-   VkBufferCopy regions[MAX2(pCopyBufferInfo->regionCount, 1)];
-   for (uint32_t i = 0; i < pCopyBufferInfo->regionCount; i++) {
-      const VkBufferCopy2 *r = &pCopyBufferInfo->pRegions[i];
-      regions[i] = (VkBufferCopy){
-         .srcOffset = r->srcOffset, .dstOffset = r->dstOffset, .size = r->size,
-      };
-   }
-   borgvk_CmdCopyBuffer(commandBuffer, pCopyBufferInfo->srcBuffer, pCopyBufferInfo->dstBuffer,
-                        pCopyBufferInfo->regionCount, regions);
-}
-
-VKAPI_ATTR void VKAPI_CALL
 borgvk_CmdCopyImage(VkCommandBuffer commandBuffer,
                     VkImage srcImage, VkImageLayout srcImageLayout,
                     VkImage dstImage, VkImageLayout dstImageLayout,

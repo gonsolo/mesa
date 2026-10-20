@@ -10,6 +10,7 @@ mod cmd_buffer;
 #[cfg(borgc)]
 mod compile;
 mod compiler;
+mod copy;
 mod corpus;
 mod cube;
 mod descriptor_set;
