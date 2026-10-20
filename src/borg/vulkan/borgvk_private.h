@@ -380,7 +380,6 @@ bool borgvk_send_generic_texture(const struct vk_image_view *view, const struct 
 bool borgvk_send_buffer_texture(const struct vk_buffer_view *bv);
 
 void borgvk_resolve_region(struct borgvk_image *src, struct borgvk_image *dst, const VkImageResolve *reg);
-void borgvk_free_targets(struct borgvk_command_buffer *cmd);
 
 #include "borgvk_rust.h"
 

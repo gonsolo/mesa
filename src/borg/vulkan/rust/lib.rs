@@ -23,6 +23,7 @@ mod image;
 mod memory;
 mod pipeline;
 mod query;
+mod render;
 mod sampler;
 mod serial;
 mod shader_cache;

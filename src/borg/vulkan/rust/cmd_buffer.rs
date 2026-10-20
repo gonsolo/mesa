@@ -38,7 +38,7 @@ unsafe extern "C" fn reset(vk: *mut vk_command_buffer, _flags: VkCommandBufferRe
     let c = unsafe { cmd(vk) };
     unsafe {
         free(c.stream.cast());
-        borgvk_free_targets(c);
+        crate::render::free_targets(c);
         free(c.state_sent.cast());
     }
     (c.stream, c.state_sent, c.state_sent_len) = (null_mut(), null_mut(), 0);
@@ -56,7 +56,7 @@ unsafe extern "C" fn destroy(vk: *mut vk_command_buffer) {
         vk_command_buffer_finish(&mut c.vk);
         free(c.stream.cast());
         free(c.state_sent.cast());
-        borgvk_free_targets(c);
+        crate::render::free_targets(c);
         vk_free(&(*c.vk.pool).alloc, (c as *mut borgvk_command_buffer).cast());
     }
 }
