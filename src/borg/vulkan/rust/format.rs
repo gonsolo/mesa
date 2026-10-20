@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::ffi::*;
+use borg_layout::tex_format::TexFormat;
 
 /// How the vertex fetch unit reads one attribute.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,6 +250,127 @@ pub extern "C" fn borgvk_sim_depth_is_d32(f: VkFormat) -> bool {
     depth_is_d32(f)
 }
 
+/// How a view of format `f` reaches the sampler: the hardware format and the conversion of its
+/// texels; the stencil aspect samples as R8_UINT.
+pub fn tex_format(f: VkFormat, stencil: bool) -> Option<(TexFormat, tex_conv)> {
+    use TexFormat as T;
+    let raw = |t: T| (t, tex_conv { bpp: t.bytes(), ..Default::default() });
+    let ch = |t, cs, sch, swap_rb, alpha| (t, tex_conv { bpp: cs * sch, cs, sch, alpha, swap_rb, ..Default::default() });
+    let p16 = |t: T, pack16| (t, tex_conv { bpp: t.bytes(), pack16, ..Default::default() });
+    let (mut t, mut c) = match f {
+        VK_FORMAT_R8_UNORM => raw(T::R8_UNORM),
+        VK_FORMAT_R8_SNORM => raw(T::R8_SNORM),
+        VK_FORMAT_R8_UINT | VK_FORMAT_S8_UINT => raw(T::R8_UINT),
+        VK_FORMAT_R8_SINT => raw(T::R8_SINT),
+        VK_FORMAT_R8_SRGB => raw(T::R8_SRGB),
+        VK_FORMAT_R8G8_UNORM => raw(T::R8G8_UNORM),
+        VK_FORMAT_R8G8_SNORM => raw(T::R8G8_SNORM),
+        VK_FORMAT_R8G8_UINT => raw(T::R8G8_UINT),
+        VK_FORMAT_R8G8_SINT => raw(T::R8G8_SINT),
+        VK_FORMAT_R8G8_SRGB => raw(T::R8G8_SRGB),
+        VK_FORMAT_R8G8B8A8_UNORM | VK_FORMAT_A8B8G8R8_UNORM_PACK32 => raw(T::R8G8B8A8_UNORM),
+        VK_FORMAT_R8G8B8A8_SNORM | VK_FORMAT_A8B8G8R8_SNORM_PACK32 => raw(T::R8G8B8A8_SNORM),
+        VK_FORMAT_R8G8B8A8_UINT | VK_FORMAT_A8B8G8R8_UINT_PACK32 => raw(T::R8G8B8A8_UINT),
+        VK_FORMAT_R8G8B8A8_SINT | VK_FORMAT_A8B8G8R8_SINT_PACK32 => raw(T::R8G8B8A8_SINT),
+        VK_FORMAT_R8G8B8A8_SRGB | VK_FORMAT_A8B8G8R8_SRGB_PACK32 => raw(T::R8G8B8A8_SRGB),
+        VK_FORMAT_B8G8R8A8_UNORM => raw(T::B8G8R8A8_UNORM),
+        VK_FORMAT_B8G8R8A8_SRGB => raw(T::B8G8R8A8_SRGB),
+        VK_FORMAT_B8G8R8A8_SNORM => ch(T::R8G8B8A8_SNORM, 1, 4, true, 0),
+        VK_FORMAT_B8G8R8A8_UINT => ch(T::R8G8B8A8_UINT, 1, 4, true, 0),
+        VK_FORMAT_B8G8R8A8_SINT => ch(T::R8G8B8A8_SINT, 1, 4, true, 0),
+        VK_FORMAT_R8G8B8_UNORM => ch(T::R8G8B8A8_UNORM, 1, 3, false, 255),
+        VK_FORMAT_R8G8B8_SNORM => ch(T::R8G8B8A8_SNORM, 1, 3, false, 127),
+        VK_FORMAT_R8G8B8_UINT => ch(T::R8G8B8A8_UINT, 1, 3, false, 1),
+        VK_FORMAT_R8G8B8_SINT => ch(T::R8G8B8A8_SINT, 1, 3, false, 1),
+        VK_FORMAT_R8G8B8_SRGB => ch(T::R8G8B8A8_SRGB, 1, 3, false, 255),
+        VK_FORMAT_B8G8R8_UNORM => ch(T::R8G8B8A8_UNORM, 1, 3, true, 255),
+        VK_FORMAT_B8G8R8_SNORM => ch(T::R8G8B8A8_SNORM, 1, 3, true, 127),
+        VK_FORMAT_B8G8R8_UINT => ch(T::R8G8B8A8_UINT, 1, 3, true, 1),
+        VK_FORMAT_B8G8R8_SINT => ch(T::R8G8B8A8_SINT, 1, 3, true, 1),
+        VK_FORMAT_B8G8R8_SRGB => ch(T::R8G8B8A8_SRGB, 1, 3, true, 255),
+        VK_FORMAT_R16_UNORM => raw(T::R16_UNORM),
+        VK_FORMAT_R16_SNORM => raw(T::R16_SNORM),
+        VK_FORMAT_R16_UINT => raw(T::R16_UINT),
+        VK_FORMAT_R16_SINT => raw(T::R16_SINT),
+        VK_FORMAT_R16_SFLOAT => raw(T::R16_SFLOAT),
+        VK_FORMAT_R16G16_UNORM => raw(T::R16G16_UNORM),
+        VK_FORMAT_R16G16_SNORM => raw(T::R16G16_SNORM),
+        VK_FORMAT_R16G16_UINT => raw(T::R16G16_UINT),
+        VK_FORMAT_R16G16_SINT => raw(T::R16G16_SINT),
+        VK_FORMAT_R16G16_SFLOAT => raw(T::R16G16_SFLOAT),
+        VK_FORMAT_R16G16B16_UNORM => ch(T::R16G16B16A16_UNORM, 2, 3, false, 0xffff),
+        VK_FORMAT_R16G16B16_SNORM => ch(T::R16G16B16A16_SNORM, 2, 3, false, 0x7fff),
+        VK_FORMAT_R16G16B16_UINT => ch(T::R16G16B16A16_UINT, 2, 3, false, 1),
+        VK_FORMAT_R16G16B16_SINT => ch(T::R16G16B16A16_SINT, 2, 3, false, 1),
+        VK_FORMAT_R16G16B16_SFLOAT => ch(T::R16G16B16A16_SFLOAT, 2, 3, false, 0x3c00),
+        VK_FORMAT_R16G16B16A16_UNORM => raw(T::R16G16B16A16_UNORM),
+        VK_FORMAT_R16G16B16A16_SNORM => raw(T::R16G16B16A16_SNORM),
+        VK_FORMAT_R16G16B16A16_UINT => raw(T::R16G16B16A16_UINT),
+        VK_FORMAT_R16G16B16A16_SINT => raw(T::R16G16B16A16_SINT),
+        VK_FORMAT_R16G16B16A16_SFLOAT => raw(T::R16G16B16A16_SFLOAT),
+        VK_FORMAT_R32_UINT => raw(T::R32_UINT),
+        VK_FORMAT_R32_SINT => raw(T::R32_SINT),
+        VK_FORMAT_R32_SFLOAT => raw(T::R32_SFLOAT),
+        VK_FORMAT_R32G32_UINT => raw(T::R32G32_UINT),
+        VK_FORMAT_R32G32_SINT => raw(T::R32G32_SINT),
+        VK_FORMAT_R32G32_SFLOAT => raw(T::R32G32_SFLOAT),
+        VK_FORMAT_R32G32B32_UINT => ch(T::R32G32B32A32_UINT, 4, 3, false, 1),
+        VK_FORMAT_R32G32B32_SINT => ch(T::R32G32B32A32_SINT, 4, 3, false, 1),
+        VK_FORMAT_R32G32B32_SFLOAT => ch(T::R32G32B32A32_SFLOAT, 4, 3, false, 0x3f800000),
+        VK_FORMAT_R32G32B32A32_UINT => raw(T::R32G32B32A32_UINT),
+        VK_FORMAT_R32G32B32A32_SINT => raw(T::R32G32B32A32_SINT),
+        VK_FORMAT_R32G32B32A32_SFLOAT => raw(T::R32G32B32A32_SFLOAT),
+        VK_FORMAT_A2B10G10R10_UNORM_PACK32 => raw(T::A2B10G10R10_UNORM_PACK32),
+        VK_FORMAT_A2B10G10R10_UINT_PACK32 => raw(T::A2B10G10R10_UINT_PACK32),
+        VK_FORMAT_R5G6B5_UNORM_PACK16 => raw(T::R5G6B5_UNORM_PACK16),
+        VK_FORMAT_A1R5G5B5_UNORM_PACK16 => raw(T::A1R5G5B5_UNORM_PACK16),
+        VK_FORMAT_B4G4R4A4_UNORM_PACK16 => raw(T::B4G4R4A4_UNORM_PACK16),
+        VK_FORMAT_B10G11R11_UFLOAT_PACK32 => raw(T::B10G11R11_UFLOAT_PACK32),
+        VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 => raw(T::E5B9G9R9_UFLOAT_PACK32),
+        VK_FORMAT_B5G6R5_UNORM_PACK16 => p16(T::R5G6B5_UNORM_PACK16, 1),
+        VK_FORMAT_R5G5B5A1_UNORM_PACK16 => p16(T::A1R5G5B5_UNORM_PACK16, 2),
+        VK_FORMAT_B5G5R5A1_UNORM_PACK16 => p16(T::A1R5G5B5_UNORM_PACK16, 3),
+        VK_FORMAT_R4G4B4A4_UNORM_PACK16 => p16(T::B4G4R4A4_UNORM_PACK16, 4),
+        VK_FORMAT_A4R4G4B4_UNORM_PACK16 => p16(T::B4G4R4A4_UNORM_PACK16, 7),
+        VK_FORMAT_A4B4G4R4_UNORM_PACK16 => p16(T::B4G4R4A4_UNORM_PACK16, 8),
+        VK_FORMAT_A2R10G10B10_UNORM_PACK32 => p16(T::A2B10G10R10_UNORM_PACK32, 6),
+        VK_FORMAT_A2R10G10B10_UINT_PACK32 => p16(T::A2B10G10R10_UINT_PACK32, 6),
+        VK_FORMAT_R4G4_UNORM_PACK8 => (T::R8G8_UNORM, tex_conv { bpp: 1, pack16: 5, ..Default::default() }),
+        VK_FORMAT_D16_UNORM => raw(T::D16_UNORM),
+        VK_FORMAT_X8_D24_UNORM_PACK32 | VK_FORMAT_D24_UNORM_S8_UINT => raw(T::X8_D24_UNORM_PACK32),
+        VK_FORMAT_D32_SFLOAT => raw(T::D32_SFLOAT),
+        VK_FORMAT_D16_UNORM_S8_UINT => (T::D16_UNORM, tex_conv { bpp: 2, zstride: 3, ..Default::default() }),
+        VK_FORMAT_D32_SFLOAT_S8_UINT => (T::D32_SFLOAT, tex_conv { bpp: 4, zstride: 8, ..Default::default() }),
+        _ => return None,
+    };
+    if stencil {
+        (c.zstride, c.soff) = match f {
+            VK_FORMAT_S8_UINT => (c.zstride, c.soff),
+            VK_FORMAT_D16_UNORM_S8_UINT => (3, 2),
+            VK_FORMAT_D24_UNORM_S8_UINT => (4, 3),
+            VK_FORMAT_D32_SFLOAT_S8_UINT => (8, 4),
+            _ => return None,
+        };
+        (t, c.bpp) = (T::R8_UINT, 1);
+    }
+    c.obpp = if c.sch != 0 { c.cs * 4 } else if c.pack16 == 5 { 2 } else { c.bpp };
+    Some((t, c))
+}
+
+/// # Safety
+/// `code` and `conv` are valid for writes.
+#[no_mangle]
+pub unsafe extern "C" fn borgvk_tex_format(f: VkFormat, stencil: bool, code: *mut u32, conv: *mut tex_conv) -> bool {
+    let Some((t, c)) = tex_format(f, stencil) else {
+        return false;
+    };
+    unsafe {
+        *code = t as u32;
+        *conv = c;
+    }
+    true
+}
+
 /// Converts `n` texels from `src` to the layout the texture unit reads.
 pub fn tex_convert(c: &tex_conv, dst: &mut [u8], src: &[u8], n: usize) {
     let (bpp, obpp, cs) = (c.bpp as usize, c.obpp as usize, c.cs as usize);
@@ -313,6 +435,18 @@ pub unsafe extern "C" fn borgvk_tex_convert(c: *const tex_conv, dst: *mut u8, sr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tex_formats_and_their_conversions() {
+        let (t, c) = tex_format(VK_FORMAT_B8G8R8_UNORM, false).unwrap();
+        assert_eq!((t, c.bpp, c.obpp, c.cs, c.sch, c.alpha, c.swap_rb), (TexFormat::R8G8B8A8_UNORM, 3, 4, 1, 3, 255, true));
+        let (t, c) = tex_format(VK_FORMAT_D24_UNORM_S8_UINT, true).unwrap();
+        assert_eq!((t, c.bpp, c.obpp, c.zstride, c.soff), (TexFormat::R8_UINT, 1, 1, 4, 3));
+        assert_eq!(tex_format(VK_FORMAT_D24_UNORM_S8_UINT, false).unwrap().0, TexFormat::X8_D24_UNORM_PACK32);
+        assert_eq!(tex_format(VK_FORMAT_R4G4_UNORM_PACK8, false).unwrap().1.obpp, 2);
+        assert!(tex_format(VK_FORMAT_R8_UNORM, true).is_none());
+        assert!(tex_format(VK_FORMAT_BC1_RGB_UNORM_BLOCK, false).is_none());
+    }
 
     fn conv(bpp: u32, obpp: u32, cs: u32, sch: u32, alpha: u32, swap_rb: bool) -> tex_conv {
         tex_conv { bpp, obpp, cs, sch, alpha, swap_rb, ..Default::default() }
