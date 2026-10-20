@@ -4,12 +4,13 @@
 //! Draws: the bound pipeline, vertex, index and descriptor state, and each draw as packets
 //! into the open pass's stream, which the simulator runs at the pass's end.
 
-use crate::cmd_buffer::{cmd, CommandBuffer};
+use crate::cmd_buffer::CommandBuffer;
 use crate::copy::{host, image_host};
 use crate::corpus::{borgvk_corpus_hash, borgvk_corpus_image, borgvk_corpus_log, borgvk_corpus_on};
 use crate::entrypoint::{entrypoint, slice, Handle};
 use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
+use crate::memory::Buffer;
 use crate::image::Image;
 use crate::device::Device;
 use crate::pipeline::Pipeline;
@@ -28,8 +29,7 @@ use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 
 entrypoint! {
-    unsafe fn borgvk_CmdBindPipeline(command_buffer: VkCommandBuffer, bind_point: VkPipelineBindPoint, pipeline: VkPipeline) {
-        let c = cmd(command_buffer.ptr());
+    fn borgvk_CmdBindPipeline(c: &mut CommandBuffer, bind_point: VkPipelineBindPoint, pipeline: VkPipeline) {
         match bind_point {
             VK_PIPELINE_BIND_POINT_GRAPHICS => c.gfx_pipeline = pipeline.ptr(),
             VK_PIPELINE_BIND_POINT_COMPUTE => c.cs_pipeline = pipeline.ptr(),
@@ -39,29 +39,28 @@ entrypoint! {
 }
 
 entrypoint! {
-    unsafe fn borgvk_CmdBindVertexBuffers(command_buffer: VkCommandBuffer, first: u32, count: u32, buffers: *const VkBuffer, offsets: *const VkDeviceSize) {
-        let c = cmd(command_buffer.ptr());
-        for (i, (b, &off)) in slice(buffers, count).iter().zip(slice(offsets, count)).enumerate() {
+    fn borgvk_CmdBindVertexBuffers(c: &mut CommandBuffer, first: u32, count: u32, buffers: *const VkBuffer, offsets: *const VkDeviceSize) {
+        let (buffers, offsets) = unsafe { (slice(buffers, count), slice(offsets, count)) };
+        for (i, (b, &off)) in buffers.iter().zip(offsets).enumerate() {
             let slot = first as usize + i;
             if slot >= BORGVK_MAX_VERTEX_BINDINGS as usize {
                 continue;
             }
-            let buf = b.get().map(|b| &*b);
-            c.vb[slot] = buf.and_then(host).map_or(null(), |p| p.add(off as usize));
+            let buf = unsafe { b.get_ref() };
+            c.vb[slot] = buf.and_then(host).map_or(null(), |p| p.wrapping_add(off as usize));
             c.vb_avail[slot] = buf.filter(|b| b.vk.size > off).map_or(0, |b| b.vk.size - off);
         }
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_CmdBindDescriptorSets(command_buffer: VkCommandBuffer, bind_point: VkPipelineBindPoint, _layout: VkPipelineLayout, first_set: u32, count: u32, sets: *const VkDescriptorSet, dyn_count: u32, dyn_offsets: *const u32) {
-        let c = cmd(command_buffer.ptr());
+    fn borgvk_CmdBindDescriptorSets(c: &mut CommandBuffer, bind_point: VkPipelineBindPoint, _layout: VkPipelineLayout, first_set: u32, count: u32, sets: *const VkDescriptorSet, dyn_count: u32, dyn_offsets: *const u32) {
         let cs = bind_point == VK_PIPELINE_BIND_POINT_COMPUTE;
-        let dyn_offsets = slice(dyn_offsets, dyn_count);
+        let (sets, dyn_offsets) = unsafe { (slice(sets, count), slice(dyn_offsets, dyn_count)) };
         let mut k = 0;
-        for (i, &h) in slice(sets, count).iter().enumerate() {
+        for (i, &h) in sets.iter().enumerate() {
             let si = first_set as usize + i;
-            let Some(set) = h.get() else { continue };
+            let Some(set) = (unsafe { h.get_ref() }) else { continue };
             if si > 3 {
                 continue;
             }
@@ -90,17 +89,16 @@ entrypoint! {
 }
 
 entrypoint! {
-    unsafe fn borgvk_CmdBindIndexBuffer(command_buffer: VkCommandBuffer, buffer: VkBuffer, offset: VkDeviceSize, index_type: VkIndexType) {
-        let c = cmd(command_buffer.ptr());
+    fn borgvk_CmdBindIndexBuffer(c: &mut CommandBuffer, buffer: Option<&Buffer>, offset: VkDeviceSize, index_type: VkIndexType) {
         (c.index_ptr, c.index_avail) = (null(), 0);
         c.index_size = match index_type {
             VK_INDEX_TYPE_UINT16 => 2,
             VK_INDEX_TYPE_UINT32 => 4,
             _ => 0,
         };
-        let Some(b) = buffer.get() else { return };
+        let Some(b) = buffer else { return };
         if let Some(p) = host(b).filter(|_| b.vk.size > offset) {
-            (c.index_ptr, c.index_avail) = (p.add(offset as usize), b.vk.size - offset);
+            (c.index_ptr, c.index_avail) = (p.wrapping_add(offset as usize), b.vk.size - offset);
         }
     }
 }
@@ -963,9 +961,8 @@ fn generic_draw(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
     ok
 }
 
-fn sim_draw(command_buffer: VkCommandBuffer, mut p: Params) {
-    let c = unsafe { cmd(command_buffer.ptr()) };
-    let device = unsafe { &*c.vk.base.device.cast::<Device>() };
+fn sim_draw(c: &mut CommandBuffer, mut p: Params) {
+    let device = c.device();
     // Only the simulator renders; cube.c (UBO-driven) has its own path at submit.
     if !(std::env::var_os("BORGVK_SIM").is_some() || enabled()) || (!c.desc_set.is_null() && unsafe { borgvk_set_is_cube(c.desc_set) }) {
         return;
@@ -980,34 +977,42 @@ fn sim_draw(command_buffer: VkCommandBuffer, mut p: Params) {
 }
 
 entrypoint! {
-    unsafe fn borgvk_CmdDraw(command_buffer: VkCommandBuffer, count: u32, instances: u32, first: u32, first_instance: u32) {
-        sim_draw(command_buffer, Params { count, instances, first, first_instance, ..Default::default() });
+    fn borgvk_CmdDraw(c: &mut CommandBuffer, count: u32, instances: u32, first: u32, first_instance: u32) {
+        sim_draw(c, Params { count, instances, first, first_instance, ..Default::default() });
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_CmdDrawIndexed(command_buffer: VkCommandBuffer, count: u32, instances: u32, first: u32, vertex_offset: i32, first_instance: u32) {
-        sim_draw(command_buffer, Params { indexed: true, count, instances, first, vertex_offset, first_instance, ..Default::default() });
+    fn borgvk_CmdDrawIndexed(c: &mut CommandBuffer, count: u32, instances: u32, first: u32, vertex_offset: i32, first_instance: u32) {
+        sim_draw(c, Params { indexed: true, count, instances, first, vertex_offset, first_instance, ..Default::default() });
     }
 }
 
-fn indirect<T: Copy>(buffer: VkBuffer, offset: VkDeviceSize, count: u32, stride: u32) -> Vec<T> {
-    let Some(base) = (unsafe { buffer.get() }).and_then(|b| host(b)) else { return Vec::new() };
+/// The `count` commands of type `T` in `buffer`; zeros for one past the memory.
+fn indirect<T: Copy + Default>(buffer: Option<&Buffer>, offset: VkDeviceSize, count: u32, stride: u32) -> Vec<T> {
+    let Some(h) = buffer.and_then(|b| b.host()) else { return Vec::new() };
     let stride = if stride != 0 { stride as usize } else { size_of::<T>() };
-    (0..count as usize).map(|i| unsafe { base.add(offset as usize + i * stride).cast::<T>().read_unaligned() }).collect()
+    (0..count as usize)
+        .map(|i| {
+            let mut v = T::default();
+            // T is a plain struct of integers: any bytes are a valid T.
+            h.read(offset as usize + i * stride, unsafe { std::slice::from_raw_parts_mut(std::ptr::from_mut(&mut v).cast(), size_of::<T>()) });
+            v
+        })
+        .collect()
 }
 
 entrypoint! {
-    unsafe fn borgvk_CmdDrawIndirect(command_buffer: VkCommandBuffer, buffer: VkBuffer, offset: VkDeviceSize, count: u32, stride: u32) {
+    fn borgvk_CmdDrawIndirect(c: &mut CommandBuffer, buffer: Option<&Buffer>, offset: VkDeviceSize, count: u32, stride: u32) {
         for d in indirect::<VkDrawIndirectCommand>(buffer, offset, count, stride) {
             let p = Params { count: d.vertexCount, instances: d.instanceCount, first: d.firstVertex, first_instance: d.firstInstance, ..Default::default() };
-            sim_draw(command_buffer, p);
+            sim_draw(c, p);
         }
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_CmdDrawIndexedIndirect(command_buffer: VkCommandBuffer, buffer: VkBuffer, offset: VkDeviceSize, count: u32, stride: u32) {
+    fn borgvk_CmdDrawIndexedIndirect(c: &mut CommandBuffer, buffer: Option<&Buffer>, offset: VkDeviceSize, count: u32, stride: u32) {
         for d in indirect::<VkDrawIndexedIndirectCommand>(buffer, offset, count, stride) {
             let p = Params {
                 indexed: true,
@@ -1018,7 +1023,7 @@ entrypoint! {
                 first_instance: d.firstInstance,
                 ..Default::default()
             };
-            sim_draw(command_buffer, p);
+            sim_draw(c, p);
         }
     }
 }

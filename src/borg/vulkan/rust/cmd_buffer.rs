@@ -4,7 +4,7 @@
 //! Command buffers: the runtime's, with the recorded stream and draw state of rust/serial.rs and
 //! the C recorders; push constants.
 
-use crate::entrypoint::{entrypoint, handle, Handle};
+use crate::entrypoint::{entrypoint, handle, pointee};
 use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
 use crate::image::Image;
@@ -75,6 +75,13 @@ pub struct CommandBuffer {
     pub dyn_offs: [[VkDeviceSize; BORGVK_MAX_BINDINGS as usize]; 4],
 }
 
+impl CommandBuffer {
+    /// The device the runtime created it on, which outlives it.
+    pub fn device<'a>(&self) -> &'a Device {
+        unsafe { &*self.vk.base.device.cast::<Device>() }
+    }
+}
+
 impl crate::entrypoint::Pointee for CommandBuffer {
     type Raw = VkCommandBuffer;
     unsafe fn ptr(raw: VkCommandBuffer) -> *mut Self {
@@ -133,39 +140,43 @@ unsafe extern "C" fn destroy(vk: *mut vk_command_buffer) {
     }
 }
 
+pointee!(VkCommandBufferBeginInfo);
+
 pub static CMD_BUFFER_OPS: vk_command_buffer_ops =
     vk_command_buffer_ops { create: Some(create), reset: Some(reset), destroy: Some(destroy), ..unsafe { zeroed() } };
 
 entrypoint! {
-    unsafe fn borgvk_BeginCommandBuffer(command_buffer: VkCommandBuffer, info: *const VkCommandBufferBeginInfo) -> VkResult {
-        let c = command_buffer.ptr();
-        vk_command_buffer_begin(c, info);
-        vk_command_buffer_get_record_result(c)
+    fn borgvk_BeginCommandBuffer(c: &mut CommandBuffer, info: &VkCommandBufferBeginInfo) -> VkResult {
+        unsafe {
+            vk_command_buffer_begin(&mut c.vk, info);
+            vk_command_buffer_get_record_result(&mut c.vk)
+        }
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_EndCommandBuffer(command_buffer: VkCommandBuffer) -> VkResult {
-        vk_command_buffer_end(command_buffer.ptr())
+    fn borgvk_EndCommandBuffer(c: &mut CommandBuffer) -> VkResult {
+        unsafe { vk_command_buffer_end(&mut c.vk) }
     }
 }
 
-/// Copies `size` bytes to `offset` of `dst` when they fit.
-fn put(dst: &mut [u32], offset: u32, size: u32, values: *const c_void) -> bool {
-    let end = offset.wrapping_add(size) as usize;
-    if end > size_of_val(dst) {
-        return false;
+/// Copies `values` to byte `offset` of `dst` when they fit.
+fn put(dst: &mut [u32], offset: u32, values: &[u8]) -> bool {
+    let at = offset as usize;
+    let Some(d) = (at.checked_add(values.len()).filter(|&e| e <= size_of_val(dst))).map(|e| at..e) else { return false };
+    for (i, &b) in d.zip(values) {
+        let w = &mut dst[i / 4];
+        *w = *w & !(0xff << (i % 4 * 8)) | (b as u32) << (i % 4 * 8);
     }
-    unsafe { std::ptr::copy_nonoverlapping(values.cast::<u8>(), dst.as_mut_ptr().cast::<u8>().add(offset as usize), size as usize) };
     true
 }
 
 entrypoint! {
-    unsafe fn borgvk_CmdPushConstants(command_buffer: VkCommandBuffer, _layout: VkPipelineLayout, _stages: VkShaderStageFlags, offset: u32, size: u32, values: *const c_void) {
-        let c = cmd(command_buffer.ptr());
-        put(&mut c.pc, offset, size, values);
-        let mut dev = (*c.vk.base.device.cast::<Device>()).scratch.lock().unwrap();
-        if size == 0 || !put(&mut dev.push_words, offset, size, values) {
+    fn borgvk_CmdPushConstants(c: &mut CommandBuffer, _layout: VkPipelineLayout, _stages: VkShaderStageFlags, offset: u32, size: u32, values: *const c_void) {
+        let values = if size == 0 { &[][..] } else { unsafe { std::slice::from_raw_parts(values.cast::<u8>(), size as usize) } };
+        put(&mut c.pc, offset, values);
+        let mut dev = c.device().scratch.lock().unwrap();
+        if size == 0 || !put(&mut dev.push_words, offset, values) {
             return;
         }
         let (lo, hi) = (offset / 4, (offset + size + 3) / 4);
