@@ -346,20 +346,13 @@ pub fn tex_convert(c: &TexConv, dst: &mut [u8], src: &[u8], n: usize) {
     }
 }
 
-/// # Safety
-/// `c` is valid, `dst` holds `n` output texels and `src` the `n` input texels `c` describes.
-pub unsafe fn borgvk_tex_convert(c: *const TexConv, dst: *mut u8, src: *const u8, n: u32) {
-    let (c, n) = (unsafe { &*c }, n as usize);
-    let mut src_len = n * c.bpp as usize;
-    if c.sch == 0 && c.pack16 == 0 && c.zstride == 0 {
-        src_len = n * c.obpp as usize;
-    }
+/// The source bytes `n` texels take.
+pub fn src_len(c: &TexConv, n: usize) -> usize {
+    let mut len = n * if c.sch == 0 && c.pack16 == 0 && c.zstride == 0 { c.obpp } else { c.bpp } as usize;
     if c.zstride != 0 && n > 0 {
-        src_len = src_len.max((n - 1) * c.zstride as usize + c.soff as usize + c.obpp as usize);
+        len = len.max((n - 1) * c.zstride as usize + c.soff as usize + c.obpp as usize);
     }
-    let dst = unsafe { std::slice::from_raw_parts_mut(dst, n * c.obpp as usize) };
-    let src = unsafe { std::slice::from_raw_parts(src, src_len) };
-    tex_convert(c, dst, src, n);
+    len
 }
 
 #[cfg(test)]

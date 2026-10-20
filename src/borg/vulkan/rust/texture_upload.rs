@@ -10,7 +10,7 @@ use crate::fmt;
 use crate::memory::{Buffer, DeviceMemory};
 use crate::sampler::Sampler;
 use crate::image::Image;
-use crate::format::{borgvk_tex_convert, tex_format};
+use crate::format::{src_len, tex_convert, tex_format};
 use crate::serial::*;
 use crate::state_upload::sampler_desc;
 use borg_layout::descriptor::{TexDesc, TexType};
@@ -20,10 +20,6 @@ use std::ptr::null;
 
 const CHUNK: u32 = BORGVK_TEXG_CHUNK;
 const DIM: u32 = BORGVK_TEX_DIM;
-
-fn mapped(mem: *mut DeviceMemory) -> Option<*const u8> {
-    unsafe { mem.as_ref() }.filter(|m| !m.map.is_null()).map(|m| m.map.cast::<u8>().cast_const())
-}
 
 fn send(data: &[u8], desc: &TexDesc, sampler: *const Sampler) {
     let d = desc.pack();
@@ -39,20 +35,18 @@ fn send(data: &[u8], desc: &TexDesc, sampler: *const Sampler) {
 /// `tex` is a mapped RGBA8 image, `sampler` null or valid.
 pub unsafe fn borgvk_send_texture_row(tex: *mut Image, sampler: *const Sampler, dy: i32) {
     let t = unsafe { &*tex };
-    let base = unsafe { (*t.mem).map.cast::<u8>().add(t.offset as usize) };
     let (sw, sh) = (t.vk.extent.width, t.vk.extent.height);
-    if sw == 0 || sh == 0 {
-        return;
-    }
+    let Some(host) = t.host().filter(|_| sw != 0 && sh != 0) else { return };
     let (sxs, sys) = ((sw / DIM).max(1), (sh / DIM).max(1));
     let mut row = [0u8; DIM as usize * 4];
     for dx in 0..DIM {
         let (mut sum, mut n) = ([0u32; 4], 0u32);
         for sy in (0..sys).map(|oy| dy as u32 * sys + oy).take_while(|&sy| sy < sh) {
             for sx in (0..sxs).map(|ox| dx * sxs + ox).take_while(|&sx| sx < sw) {
-                let p = unsafe { base.add((sy * sw * 4 + sx * 4) as usize) };
-                for (c, s) in sum.iter_mut().enumerate() {
-                    *s += unsafe { *p.add(c) } as u32;
+                let mut p = [0u8; 4];
+                host.read((sy * sw * 4 + sx * 4) as usize, &mut p);
+                for (s, &v) in sum.iter_mut().zip(&p) {
+                    *s += v as u32;
                 }
                 n += 1;
             }
@@ -67,7 +61,7 @@ pub unsafe fn borgvk_send_texture_row(tex: *mut Image, sampler: *const Sampler, 
 
 /// The view's levels and layers, converted and, unless it is one linear level, tiled.
 fn texture(view: &vk_image_view, img: &Image, sampler: *const Sampler) -> bool {
-    let Some(map) = mapped(img.mem) else { return false };
+    let Some(host) = img.host() else { return false };
     let (mut w, mut h) = (img.vk.extent.width, img.vk.extent.height);
     if w == 0 || h == 0 || w > 4096 || h > 4096 {
         return false;
@@ -122,13 +116,15 @@ fn texture(view: &vk_image_view, img: &Image, sampler: *const Sampler) -> bool {
     if ty == TexType::D3 {
         depth = ld[0];
     }
-    let src = unsafe { map.add(img.offset as usize) };
-    let layer_src = |layer: u32, l: usize| unsafe { src.add((view.base_array_layer as u64 + layer as u64) as usize * sum as usize + soff[l] as usize) };
+    let layer_src = |layer: u32, l: usize| (view.base_array_layer as u64 + layer as u64) as usize * sum as usize + soff[l] as usize;
+    let convert = |out: &mut [u8], from: usize, n: u32| {
+        host.with_bytes(from, src_len(&tc, n as usize), |s| tex_convert(&tc, out, s, n as usize));
+    };
     let tiled = levels > 1 || layers > 1 || depth > 1 || ty == TexType::Cube;
     let mut offs = [0u32; 12];
     let (out, pitch) = if !tiled {
         let mut out = vec![0u8; (w * h * obpp).next_multiple_of(4) as usize];
-        unsafe { borgvk_tex_convert(&tc, out.as_mut_ptr(), layer_src(0, 0), w * h) };
+        convert(&mut out, layer_src(0, 0), w * h);
         (out, w * obpp)
     } else {
         let mut ltotal = 0u32;
@@ -152,7 +148,7 @@ fn texture(view: &vk_image_view, img: &Image, sampler: *const Sampler) -> bool {
             for l in 0..levels as usize {
                 let tw = lw[l].div_ceil(4);
                 let lev = layer as usize * ltotal as usize + if l > 0 { offs[l - 1] as usize } else { 0 };
-                unsafe { borgvk_tex_convert(&tc, lin.as_mut_ptr(), layer_src(layer, l), lw[l] * lh[l] * ld[l]) };
+                convert(&mut lin, layer_src(layer, l), lw[l] * lh[l] * ld[l]);
                 for z in 0..ld[l] {
                     let slice = lev + z as usize * tw as usize * lh[l].div_ceil(4) as usize * 16 * ob;
                     for y in 0..lh[l] {
@@ -206,7 +202,7 @@ fn texture(view: &vk_image_view, img: &Image, sampler: *const Sampler) -> bool {
 /// `view` is valid; `img` and `sampler` are null or valid.
 pub unsafe fn borgvk_send_generic_texture(view: *const vk_image_view, img: *const Image, sampler: *const Sampler) -> bool {
     let (view, Some(img)) = (unsafe { &*view }, unsafe { img.as_ref() }) else { return false };
-    if mapped(img.mem).is_none() {
+    if img.host().is_none() {
         return false;
     }
     let b = crate::image::blocks(img.vk.format);
@@ -214,12 +210,12 @@ pub unsafe fn borgvk_send_generic_texture(view: *const vk_image_view, img: *cons
         return texture(view, img, sampler);
     }
     // Block-compressed: decoded first.
-    let (mut dimg, mut dmem) = unsafe { (std::mem::zeroed::<Image>(), std::mem::zeroed::<DeviceMemory>()) };
+    let (mut dimg, mut dmem) = (Image::default(), DeviceMemory::default());
     let buf = unsafe { borgvk_decode_compressed_image(img, &mut dimg, &mut dmem) };
     if buf.is_null() {
         return false;
     }
-    let mut dview = unsafe { std::ptr::read(view) };
+    let mut dview = *view;
     dview.format = dimg.vk.format;
     let ok = texture(&dview, &dimg, sampler);
     unsafe { free(buf) };
@@ -238,13 +234,12 @@ pub unsafe fn borgvk_send_buffer_texture(bv: *const vk_buffer_view) -> bool {
         _ => return false,
     };
     let buf = unsafe { &*bv.buffer.cast::<Buffer>() };
-    let Some(map) = mapped(buf.mem) else { return false };
+    let Some(host) = buf.host() else { return false };
     let w = (bv.range / 4) as u32;
     if w == 0 || w > 65536 {
         return false;
     }
-    let src = unsafe { std::slice::from_raw_parts(map.add((buf.offset + bv.offset) as usize), w as usize * 4) };
     let desc = TexDesc { width: w, height: 1, ty: TexType::D1, linear: true, depth_or_layers: 1, levels: 1, format, swizzle: [0; 4], pitch: w * 4 };
-    send(src, &desc, null());
+    host.with_bytes(bv.offset as usize, w as usize * 4, |src| send(src, &desc, null()));
     true
 }
