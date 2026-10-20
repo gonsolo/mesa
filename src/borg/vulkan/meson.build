@@ -105,8 +105,11 @@ if with_borgc
   borgvk_bindgen_args += [
     compiler_rs_bindgen_blocklist,
     '--raw-line', 'pub use compiler::bindings::*;',
+    '--allowlist-function', 'nir_builder_at|nir_(before|after)_impl|nir_build_call|nir_(load|store)_var',
+    '--allowlist-function', 'nir_(channel|channels|trim_vector|imm_float|vec4|fdiv|fmul|fsub|fadd|fge|fabs|bcsel)',
+    '--allowlist-function', 'nir_function_set_impl|nir_progress',
     '--allowlist-function', 'borg_lower_.*|vk_pipeline_shader_stage_to_nir',
-    '--allowlist-var', 'borg_(spirv|nir)_options',
+    '--allowlist-var', 'borg_(spirv|nir)_options|BORGVK_LINE_.*',
     '--opaque-type', 'spirv_to_nir_options.*|borg_blend.*',
     '--blocklist-type', 'spirv_to_nir_options__.*',
   ]

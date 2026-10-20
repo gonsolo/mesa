@@ -23,6 +23,8 @@
 #ifdef BORGVK_NIR
 /* The firmware headers have their own FP16 constants; NIR brings Mesa's. */
 #undef FP16_ONE
+/* Mesa's NIR crate only knows the name; here the struct, under its own name. */
+#define nir_builder borgvk_nir_builder
 #include "nir_builder.h"
 #include "borg_nir_passes.h"
 #include "vk_pipeline.h"
