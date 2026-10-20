@@ -20,7 +20,7 @@ use crate::hw::{enabled, serves_extent};
 use crate::image::blocks;
 use crate::serial::{send_att, send_draw, send_mem, send_pass, send_target, send_vattr, Draw};
 use crate::sim::borgvk_sim_run_pass;
-use crate::sim_process::borgvk_sim_run_stream;
+use crate::sim_process::sim_run_stream;
 use crate::state_upload::{send_blend_state_serial, upload_shaders_serial};
 use crate::texture_upload::{borgvk_send_buffer_texture, borgvk_send_generic_texture};
 use crate::transport::{borgvk_transport_capture_begin, borgvk_transport_capture_end};
@@ -182,13 +182,11 @@ pub fn flush_draws(c: &mut CommandBuffer) {
     let state = |h| corpus_state(h, img, &extra[..nextra], c.batch_depth, c.batch_stencil, &wb[..nwb]);
     let key = if rec { state(unsafe { borgvk_corpus_hash(seed, bytes.cast(), n) }) } else { seed };
     if serve {
-        unsafe {
-            borgvk_sim_run_pass(bytes, n, img, extra.as_ptr(), nextra as u32, c.batch_depth, c.batch_stencil, wb.as_ptr(), nwb as u32, area);
-            free(bytes.cast());
-        }
+        unsafe { borgvk_sim_run_pass(bytes, n, img, extra.as_ptr(), nextra as u32, c.batch_depth, c.batch_stencil, wb.as_ptr(), nwb as u32, area) };
     } else {
-        unsafe { borgvk_sim_run_stream(bytes, n, img, 0) }; // takes the bytes
+        sim_run_stream(unsafe { std::slice::from_raw_parts(bytes, n) }, unsafe { img.as_ref() }, 0);
     }
+    unsafe { free(bytes.cast()) };
     if rec {
         borgvk_corpus_log(b'F' as _, key, state(seed));
     }

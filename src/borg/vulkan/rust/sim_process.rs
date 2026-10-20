@@ -229,19 +229,14 @@ fn run_stream(bytes: &[u8], img: &Image, sim_dim: u32) {
     run_processes(bytes, img, sdim, raw32);
 }
 
-/// Renders the stream in `bytes` (malloc'd, freed here) into `color_img`.
-///
-/// # Safety
-/// `bytes` holds `nbytes` bytes from malloc; `color_img` is null or a valid image.
-pub unsafe fn borgvk_sim_run_stream(bytes: *mut u8, nbytes: usize, color_img: *mut Image, sim_dim: u32) -> VkResult {
-    if let Some(img) = unsafe { color_img.as_ref() } {
+/// Renders `stream` into `color_img`.
+pub fn sim_run_stream(stream: &[u8], color_img: Option<&Image>, sim_dim: u32) -> VkResult {
+    if let Some(img) = color_img {
         let mapped = img.host().is_some();
         if mapped && img.vk.extent.width != 0 && img.vk.extent.height != 0 {
-            let stream = if bytes.is_null() { &[][..] } else { unsafe { std::slice::from_raw_parts(bytes, nbytes) } };
             run_stream(stream, img, sim_dim);
         }
     }
-    unsafe { free(bytes.cast()) };
     VK_SUCCESS
 }
 

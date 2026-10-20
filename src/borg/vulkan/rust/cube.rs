@@ -12,7 +12,7 @@ use crate::ffi::*;
 use crate::image::Image;
 use crate::device::Device;
 use crate::serial::{send_geom, send_mvp};
-use crate::sim_process::borgvk_sim_run_stream;
+use crate::sim_process::sim_run_stream;
 use crate::state_upload::{borgvk_find_set, sampler_desc, send_blend_state, upload_shaders};
 use crate::texture_upload::borgvk_send_texture_row;
 use crate::transport::{borgvk_transport_capture_begin, borgvk_transport_capture_end};
@@ -158,7 +158,8 @@ pub unsafe fn borgvk_submit_sim_cube(device: *mut Device, submit: *mut vk_queue_
     let color = color_attachment(unsafe { &*submit });
     let rec = borgvk_corpus_on();
     let key = if rec { unsafe { borgvk_corpus_hash(BORGVK_CORPUS_SEED as u64, bytes.cast(), n) } } else { 0 };
-    let res = unsafe { borgvk_sim_run_stream(bytes, n, color, 0) };
+    let res = sim_run_stream(unsafe { std::slice::from_raw_parts(bytes, n) }, unsafe { color.as_ref() }, 0);
+    unsafe { free(bytes.cast()) };
     if rec {
         borgvk_corpus_log(b'C' as _, key, unsafe { borgvk_corpus_image(BORGVK_CORPUS_SEED as u64, color) });
     }
