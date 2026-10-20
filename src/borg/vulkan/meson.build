@@ -16,8 +16,6 @@ borgvk_entrypoints = custom_target(
 libborgvk_files = files(
   'borgvk_device.c',
   'borgvk_cmd_copy.c',
-  'borgvk_queue.c',
-  'borgvk_corpus.c',
   'borgvk_cube.c',
   'borgvk_texture_upload.c',
   'borgvk_state_upload.c',
@@ -128,6 +126,8 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-var', 'VK_REMAINING_(MIP_LEVELS|ARRAY_LAYERS)',
     '--allowlist-function', 'wsi_device_(init|finish)|vk_instance_get_proc_addr_unchecked|vk_alloc2',
     '--allowlist-type', 'borgvk_physical_device|vk_instance|wsi_device_options|VkIcdSurfaceHeadless|VkSurfaceKHR|VkInstance',
+    '--allowlist-function', 'vk_cmd_queue_execute|vk_sync_(wait|signal)|borgvk_submit_(is_cube|sim_cube|cube_live)',
+    '--allowlist-type', 'vk_queue|vk_queue_submit',
     '--allowlist-type', 'borgvk_target|VkRenderingInfo|VkRenderingAttachmentInfo|VkImageResolve|VkRenderingEndInfoEXT',
     '--allowlist-type', 'borgvk_command_buffer|vk_command_buffer_ops|vk_command_pool|VkCommandBufferBeginInfo|borg_blend|VkComputePipelineCreateInfo|VkPipelineRenderingCreateInfo|VkPipelineCache',
     '--allowlist-type', 'borgvk_descriptor_pool|borgvk_descriptor_set|VkDescriptorSetLayoutCreateInfo|VkDescriptorSetLayoutSupport|VkDescriptorPoolCreateInfo',

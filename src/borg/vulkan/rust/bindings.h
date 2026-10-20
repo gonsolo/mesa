@@ -12,6 +12,8 @@
 #include "vk_buffer_view.h"
 #include "vk_device_memory.h"
 #include "vk_sync.h"
+#include "vk_queue.h"
+#include "vk_cmd_queue.h"
 #include "vk_instance.h"
 #include "wsi_common.h"
 #include "vulkan/vk_icd.h"

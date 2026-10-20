@@ -46,8 +46,6 @@ struct borgvk_physical_device {
 #endif
 };
 
-
-
 #define BORGVK_SHADER_BLOB_MAX 4096
 enum borgvk_shader_stage {
    BORGVK_STAGE_VERT = 0,
@@ -178,10 +176,6 @@ struct borgvk_image;
 #define BORGVK_CS_POOL_MAX 4096
 #define BORGVK_CS_WORDS_MAX 4096
 #define BORGVK_CORPUS_SEED 0xcbf29ce484222325ull
-bool borgvk_corpus_on(void);
-uint64_t borgvk_corpus_hash(uint64_t h, const void *p, size_t n);
-uint64_t borgvk_corpus_image(uint64_t h, const struct borgvk_image *img);
-void borgvk_corpus_log(char kind, uint64_t key, uint64_t content);
 struct borgvk_writeback;
 
 /* 0xB4: STENCIL_CFG, STENCIL_FRONT, STENCIL_BACK, DEPTH_CFG, CULL_CFG. */
@@ -191,15 +185,7 @@ struct borgvk_writeback;
 #define BORGVK_GEOM_MAX_VERTS 16
 #define BORGVK_GEOM_MAX_TRIS  12
 
-
 #define BORGVK_TEX_DIM 64
-
-
-
-
-
-VkResult borgvk_queue_submit(struct vk_queue *queue,
-                             struct vk_queue_submit *submit);
 
 #define BORGVK_LINE_SLOT  16
 #define BORGVK_LINE_OTHER 24

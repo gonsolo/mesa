@@ -10,6 +10,7 @@ mod cmd_buffer;
 #[cfg(borgc)]
 mod compile;
 mod compiler;
+mod corpus;
 mod descriptor_set;
 mod entrypoint;
 mod event;
@@ -23,6 +24,7 @@ mod image;
 mod memory;
 mod pipeline;
 mod query;
+mod queue;
 mod render;
 mod sampler;
 mod serial;
