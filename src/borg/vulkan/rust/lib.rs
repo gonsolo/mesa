@@ -21,6 +21,7 @@ mod draw;
 mod drm;
 mod entrypoint;
 mod event;
+mod fmt;
 mod format;
 mod hw;
 #[cfg(borgc)]

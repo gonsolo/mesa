@@ -6,6 +6,7 @@
 
 use crate::entrypoint::{entrypoint, find_out, pointee, vk_error};
 use crate::ffi::*;
+use crate::fmt;
 use crate::object::{allocate, Zeroed};
 use crate::device::Instance;
 use crate::image::blocks;
@@ -64,7 +65,7 @@ fn is_bc(f: VkFormat) -> bool {
 }
 
 fn is_scaled(f: VkFormat) -> bool {
-    unsafe { util_format_is_scaled(vk_format_to_pipe_format(f)) }
+    fmt::is_scaled(fmt::pipe(f))
 }
 
 /// Optimal-tiling format features.
@@ -114,7 +115,7 @@ fn optimal_features(f: VkFormat) -> VkFormatFeatureFlags {
     ) {
         r |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
     }
-    if unsafe { !vk_format_is_int(f) } {
+    if !fmt::vk_is_int(f) {
         r |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
     }
     if matches!(f, VK_FORMAT_R32_UINT | VK_FORMAT_R32_SINT) {
@@ -192,7 +193,7 @@ entrypoint! {
             p3.linearTilingFeatures = p.linearTilingFeatures as u64;
             p3.optimalTilingFeatures = p.optimalTilingFeatures as u64;
             p3.bufferFeatures = p.bufferFeatures as u64;
-            if unsafe { vk_format_has_depth(format) } && p.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT != 0 {
+            if fmt::vk_has_depth(format) && p.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT != 0 {
                 p3.optimalTilingFeatures |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT;
             }
         }
@@ -223,7 +224,7 @@ fn image_format_properties(info: &VkPhysicalDeviceImageFormatInfo2) -> Result<Vk
     let cube = info.flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT != 0;
     let mut samples = VK_SAMPLE_COUNT_1_BIT;
     if info.type_ == VK_IMAGE_TYPE_2D && info.tiling == VK_IMAGE_TILING_OPTIMAL && !cube && attach {
-        let sampled = if is_depth_stencil(info.format) || unsafe { !vk_format_is_int(info.format) } { SC_MSAA } else { SC_INTEGER };
+        let sampled = if is_depth_stencil(info.format) || !fmt::vk_is_int(info.format) { SC_MSAA } else { SC_INTEGER };
         let narrow = [
             (VK_IMAGE_USAGE_STORAGE_BIT, SC_STORAGE),
             (VK_IMAGE_USAGE_SAMPLED_BIT, sampled),

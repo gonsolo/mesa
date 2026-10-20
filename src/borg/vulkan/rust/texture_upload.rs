@@ -6,6 +6,7 @@
 
 use crate::copy::borgvk_decode_compressed_image;
 use crate::ffi::*;
+use crate::fmt;
 use crate::memory::{Buffer, DeviceMemory};
 use crate::sampler::Sampler;
 use crate::image::Image;
@@ -175,7 +176,7 @@ fn texture(view: &vk_image_view, img: &Image, sampler: *const Sampler) -> bool {
         (out, ltotal)
     };
     let mut sw = [view.swizzle.r, view.swizzle.g, view.swizzle.b, view.swizzle.a];
-    if tc.sch != 0 && !unsafe { util_format_has_alpha(vk_format_to_pipe_format(view.format)) } {
+    if tc.sch != 0 && !fmt::has_alpha(fmt::pipe(view.format)) {
         for (i, s) in sw.iter_mut().enumerate() {
             let from = if *s == VK_COMPONENT_SWIZZLE_IDENTITY { VK_COMPONENT_SWIZZLE_R + i as u32 } else { *s };
             if from == VK_COMPONENT_SWIZZLE_A {

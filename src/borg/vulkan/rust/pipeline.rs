@@ -7,6 +7,7 @@
 use crate::compiler::{compile_compute_stage, compile_empty_frag, compile_stage, num_varyings, set_base};
 use crate::entrypoint::{entrypoint, handle, slice, vk_error, Handle, VkError};
 use crate::ffi::*;
+use crate::fmt;
 use crate::device::{Device, Scratch};
 use crate::object::{allocate, Zeroed};
 use crate::format::{bytes_packed, half1, half2, packed_info};
@@ -128,7 +129,7 @@ fn frag_options(formats: &[VkFormat], mrt: bool, mrt_opt: u32) -> u32 {
         BORGC_FS_HALF | BORGC_FS_HALF1
     } else if half2(f) {
         BORGC_FS_HALF
-    } else if unsafe { vk_format_has_alpha(f) } {
+    } else if fmt::vk_has_alpha(f) {
         BORGC_FS_ALPHA_OUTPUT
     } else {
         0
@@ -153,7 +154,7 @@ fn shader_blend(cb: Option<&VkPipelineColorBlendStateCreateInfo>, f0: VkFormat, 
         return None;
     }
     let a = unsafe { &*cb.pAttachments };
-    let enable = a.blendEnable != 0 && !unsafe { vk_format_is_int(f0) };
+    let enable = a.blendEnable != 0 && !fmt::vk_is_int(f0);
     if !enable && a.colorWriteMask & 0xF == 0xF {
         return None;
     }
@@ -162,7 +163,7 @@ fn shader_blend(cb: Option<&VkPipelineColorBlendStateCreateInfo>, f0: VkFormat, 
     let mut b = borg_blend::default();
     b.opts.rt = [blend_rt(PIPE_FORMAT_NONE, 0xF, pass, pass); 8];
     b.opts.rt[0] = blend_rt(
-        unsafe { vk_format_to_pipe_format(f0) },
+        fmt::pipe(f0),
         a.colorWriteMask & 0xF,
         if enable { ch(a.colorBlendOp, a.srcColorBlendFactor, a.dstColorBlendFactor) } else { pass },
         if enable { ch(a.alphaBlendOp, a.srcAlphaBlendFactor, a.dstAlphaBlendFactor) } else { pass },
@@ -262,7 +263,7 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     }
     sc.state_valid = true;
     let rt0 = blend.map_or(PIPE_FORMAT_NONE, |b| b.opts.rt[0].format);
-    pl.srgb_table = rt0 != PIPE_FORMAT_NONE && unsafe { util_format_is_srgb(rt0) };
+    pl.srgb_table = rt0 != PIPE_FORMAT_NONE && fmt::is_srgb(rt0);
     (pl.blend_cfg, pl.blend_const, pl.state_reg) = (sc.blend_cfg, sc.blend_const, sc.state_reg);
     pl.state_valid = true;
     viewport(pl, &c, discard);

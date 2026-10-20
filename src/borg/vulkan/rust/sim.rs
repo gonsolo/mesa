@@ -6,6 +6,7 @@
 //! strips of tile rows, one simulator each.
 
 use crate::ffi::*;
+use crate::fmt;
 use crate::image::Image;
 use crate::format::{depth_is_d32, flush_format};
 use crate::util::{ftruncate, log, mmap, MESA_LOG_INFO, MESA_LOG_WARN};
@@ -211,7 +212,7 @@ unsafe fn px_put(g: *mut u8, cpx: u32, px: &[u8; 16]) {
 }
 
 fn blocksize(f: VkFormat) -> u32 {
-    unsafe { util_format_get_blocksize(vk_format_to_pipe_format(f)) }
+    fmt::blocksize(fmt::pipe(f))
 }
 
 fn view_image(view: *const vk_image_view) -> Option<&'static Image> {
@@ -289,7 +290,7 @@ impl Surface {
     fn new(img: &Image) -> Self {
         let e = img.vk.extent;
         Surface {
-            pf: unsafe { vk_format_to_pipe_format(img.vk.format) },
+            pf: fmt::pipe(img.vk.format),
             bs: blocksize(img.vk.format),
             host: unsafe { ((*img.mem).map as *mut u8).add(img.offset as usize) },
             width: e.width as usize,

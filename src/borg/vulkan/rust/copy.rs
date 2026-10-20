@@ -7,6 +7,7 @@
 use crate::corpus::{borgvk_corpus_log, borgvk_corpus_on, hash};
 use crate::entrypoint::{entrypoint, pointee, slice, Handle};
 use crate::ffi::*;
+use crate::fmt;
 use crate::image::{aspect_blocks, blocks, shape, z16_pack, z16_unpack, Image};
 use crate::memory::{Buffer, DeviceMemory, Host};
 use crate::texel::{is_partial_ds_aspect, pack_rgba_float, unpack_rgba_float, Texel};
@@ -121,7 +122,7 @@ fn copy_image(src: &Image, dst: &Image, reg: &VkImageCopy) {
     if sb.bd > 1 || db.bd > 1 {
         return;
     }
-    let (spf, dpf) = unsafe { (vk_format_to_pipe_format(src.vk.format), vk_format_to_pipe_format(dst.vk.format)) };
+    let (spf, dpf) = (fmt::pipe(src.vk.format), fmt::pipe(dst.vk.format));
     let (se, de) = (aspect_blocks(src.vk.format, reg.srcSubresource.aspectMask), aspect_blocks(dst.vk.format, reg.dstSubresource.aspectMask));
     let elem_bs = se.bs.min(de.bs) as usize;
     let w_blocks = reg.extent.width.div_ceil(se.bw);
@@ -206,7 +207,7 @@ fn buffer_image(img: &Image, buf: &Buffer, reg: &VkBufferImageCopy, to_buffer: b
         }
         let stencil = sub.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT != 0;
         let aspect = if stencil { VK_IMAGE_ASPECT_STENCIL_BIT } else { VK_IMAGE_ASPECT_DEPTH_BIT };
-        let (ipf, bpf) = unsafe { (vk_format_to_pipe_format(img.vk.format), vk_format_to_pipe_format(vk_format_get_aspect_format(img.vk.format, aspect))) };
+        let (ipf, bpf) = (fmt::pipe(img.vk.format), fmt::pipe(fmt::aspect_format(img.vk.format, aspect)));
         for row in 0..h_blocks {
             for col in 0..w_blocks {
                 let (i, b) = (it + row * irow + col * ibs, bt + row * brow + col * abs);
@@ -282,7 +283,7 @@ entrypoint! {
 /// `src` is a mapped image; `out` and `mem` are valid for writes.
 pub unsafe fn borgvk_decode_compressed_image(src: *const Image, out: *mut Image, mem: *mut DeviceMemory) -> *mut c_void {
     let s = unsafe { &*src };
-    let pf = unsafe { vk_format_to_pipe_format(s.vk.format) };
+    let pf = fmt::pipe(s.vk.format);
     let sb = Blocks { bd: 1, ..blocks(s.vk.format) };
     let rgba = Blocks { bs: 16, bw: 1, bh: 1, bd: 1 };
     let layers = s.vk.array_layers.max(1);
@@ -371,9 +372,9 @@ fn blit(src: &Image, dst: &Image, regions: &[VkImageBlit], filter: VkFilter) {
         src
     };
     let (sh, dh) = (src.host().unwrap(), dst.host().unwrap());
-    let (spf, dpf) = unsafe { (vk_format_to_pipe_format(src.vk.format), vk_format_to_pipe_format(dst.vk.format)) };
+    let (spf, dpf) = (fmt::pipe(src.vk.format), fmt::pipe(dst.vk.format));
     let (sbs, dbs) = (blocks(src.vk.format).bs, db.bs);
-    let (is_uint, is_sint) = unsafe { (util_format_is_pure_uint(spf), util_format_is_pure_sint(spf)) };
+    let (is_uint, is_sint) = (fmt::is_pure_uint(spf), fmt::is_pure_sint(spf));
     let (s3d, d3d) = (src.vk.image_type == VK_IMAGE_TYPE_3D, dst.vk.image_type == VK_IMAGE_TYPE_3D);
     let shr = |e: u32, l: u32| e.checked_shr(l).unwrap_or(0).max(1);
     for reg in regions {
@@ -485,13 +486,13 @@ entrypoint! {
 /// Averages the samples of one region into a single-sampled image.
 pub fn resolve_region(src: &Image, dst: &Image, reg: &VkImageResolve) {
     let (Some(sh), Some(dh)) = (src.host(), dst.host()) else { return };
-    let (spf, dpf) = unsafe { (vk_format_to_pipe_format(src.vk.format), vk_format_to_pipe_format(dst.vk.format)) };
+    let (spf, dpf) = (fmt::pipe(src.vk.format), fmt::pipe(dst.vk.format));
     let texel_blocks = |f: VkFormat| Blocks { bs: blocks(f).bs, bw: 1, bh: 1, bd: 1 };
     let (sb, db) = (texel_blocks(src.vk.format), texel_blocks(dst.vk.format));
     let (sbs, dbs) = (sb.bs as usize, db.bs as usize);
     let samples = src.vk.samples.max(1);
     let plane = shape(src).sample_plane_size(sb) as usize;
-    let int_copy = unsafe { util_format_is_pure_integer(spf) } && sbs == dbs;
+    let int_copy = fmt::is_pure_integer(spf) && sbs == dbs;
     let (ss, ds) = (reg.srcSubresource, reg.dstSubresource);
     for l in 0..layers(&src.vk, &ss) {
         let (soff, sstride) = shape(src).level_offset(ss.mipLevel, ss.baseArrayLayer + l, sb);

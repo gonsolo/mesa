@@ -10,6 +10,7 @@ use crate::corpus::{borgvk_corpus_hash, borgvk_corpus_image, borgvk_corpus_log, 
 use crate::entrypoint::{entrypoint, slice, Handle};
 use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
+use crate::fmt;
 use crate::memory::Buffer;
 use crate::image::Image;
 use crate::device::Device;
@@ -527,8 +528,8 @@ impl Ctx<'_> {
             let f = if !usable {
                 None
             } else if conv {
-                let pf = unsafe { vk_format_to_pipe_format(at.format) };
-                let code = unsafe { if util_format_is_pure_sint(pf) { 40 } else if util_format_is_pure_uint(pf) { 39 } else { 41 } };
+                let pf = fmt::pipe(at.format);
+                let code = if fmt::is_pure_sint(pf) { 40 } else if fmt::is_pure_uint(pf) { 39 } else { 41 };
                 Some(Fetch { code, swz: 0, read_bytes: 16 })
             } else {
                 vertex_fetch(at.format)
@@ -867,14 +868,14 @@ fn converts(f: VkFormat) -> bool {
     if vertex_fetch(f).is_some() {
         return false;
     }
-    let pf = unsafe { vk_format_to_pipe_format(f) };
-    pf != PIPE_FORMAT_NONE && unsafe { !util_format_is_compressed(pf) && !util_format_is_depth_or_stencil(pf) }
+    let pf = fmt::pipe(f);
+    pf != PIPE_FORMAT_NONE && !fmt::is_compressed(pf) && !fmt::is_depth_or_stencil(pf)
 }
 
 fn vattr_copy(f: VkFormat, conv: bool, dst: &mut [u8], src: *const u8, asz: usize) {
     if conv {
         // sRGB: as UNORM
-        unsafe { util_format_unpack_rgba(util_format_linear(vk_format_to_pipe_format(f)), dst.as_mut_ptr().cast(), src.cast(), 1) };
+        unsafe { util_format_unpack_rgba(fmt::linear(fmt::pipe(f)), dst.as_mut_ptr().cast(), src.cast(), 1) };
     } else {
         let n = asz.min(dst.len());
         unsafe { std::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), n) };

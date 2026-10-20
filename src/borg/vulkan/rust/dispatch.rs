@@ -8,6 +8,7 @@ use crate::cmd_buffer::CommandBuffer;
 use crate::corpus::{borgvk_corpus_log, borgvk_corpus_on, hash};
 use crate::entrypoint::entrypoint;
 use crate::ffi::*;
+use crate::fmt;
 use crate::memory::{Buffer, DeviceMemory};
 use crate::pipeline::Pipeline;
 use crate::hw::borgvk_hw_compute;
@@ -74,8 +75,8 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
             if let Some(bv) = bv.filter(|_| buf.is_null()) {
                 // A texel buffer, decoded to RGBA32 per texel.
                 let tb = unsafe { &*bv.buffer.cast::<Buffer>() };
-                let pf = unsafe { vk_format_to_pipe_format(bv.format) };
-                let bs = unsafe { util_format_get_blocksize(pf) };
+                let pf = fmt::pipe(bv.format);
+                let bs = fmt::blocksize(pf);
                 let Some(map) = mapped(tb.mem).filter(|_| pf != PIPE_FORMAT_NONE && bs != 0) else { continue };
                 let n = (bv.range / bs as u64).min(SLOT_BYTES as u64 / 16) as u32;
                 let mut dec = vec![0u8; n.max(1) as usize * 16];
@@ -92,9 +93,9 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                 let (w, h) = (img.vk.extent.width, img.vk.extent.height);
                 if set.sampled_mask >> b & 1 != 0 {
                     // A sampled image: its width, then RGBA32 texels.
-                    let pf = unsafe { vk_format_to_pipe_format(img.vk.format) };
-                    let bs = unsafe { util_format_get_blocksize(pf) };
-                    if pf == PIPE_FORMAT_NONE || bs == 0 || unsafe { util_format_is_compressed(pf) } {
+                    let pf = fmt::pipe(img.vk.format);
+                    let bs = fmt::blocksize(pf);
+                    if pf == PIPE_FORMAT_NONE || bs == 0 || fmt::is_compressed(pf) {
                         continue;
                     }
                     let n = (w * h).min(SLOT_BYTES / 16 - 1);
@@ -106,7 +107,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                     bufs.push(decoded(addr, dec, (1 + n) * 16));
                     continue;
                 }
-                if unsafe { util_format_get_blocksize(vk_format_to_pipe_format(img.vk.format)) } == 4 {
+                if fmt::blocksize(fmt::pipe(img.vk.format)) == 4 {
                     // A storage image of 4-byte texels: its width, then the texels, written back.
                     let n = (w * h).min(SLOT_BYTES / 4 - 1);
                     let mut dec = vec![0u8; (1 + n) as usize * 4];
@@ -275,7 +276,7 @@ fn apply(bufs: &[CsBuf], merged: &[Vec<u8>]) {
         }
     }
     for (b, m) in bufs.iter().zip(merged).filter(|(b, _)| !b.texels.is_null()) {
-        let bs = unsafe { util_format_get_blocksize(b.pf) } as usize;
+        let bs = fmt::blocksize(b.pf) as usize;
         let orig = b.data();
         for t in 0..b.size as usize / 16 {
             if m[t * 16..t * 16 + 16] != orig[t * 16..t * 16 + 16] {

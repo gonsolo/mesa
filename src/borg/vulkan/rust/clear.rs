@@ -6,6 +6,7 @@
 use crate::cmd_buffer::CommandBuffer;
 use crate::entrypoint::{entrypoint, pointee, slice};
 use crate::ffi::*;
+use crate::fmt;
 use crate::image::{blocks, shape, Image};
 use crate::memory::Host;
 use crate::texel::{pack_clear_color, write_depth_stencil, Texel};
@@ -23,7 +24,7 @@ fn layer_count(image: &vk_image, r: &VkImageSubresourceRange) -> u32 {
 fn mapped(image: &Image) -> Option<(Host, pipe_format, Blocks)> {
     let b = blocks(image.vk.format);
     (b.bd <= 1).then_some(())?;
-    Some((image.host()?, unsafe { vk_format_to_pipe_format(image.vk.format) }, b))
+    Some((image.host()?, fmt::pipe(image.vk.format), b))
 }
 
 /// Calls `f` with the start and texel count of every sample plane of every level and layer in

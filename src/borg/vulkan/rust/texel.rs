@@ -4,6 +4,7 @@
 //! Single texels in an image's format: clear colours, depth and stencil, RGBA in and out.
 
 use crate::ffi::*;
+use crate::fmt;
 use crate::image::z16_pack;
 
 /// One texel's bytes, room for the widest format.
@@ -29,24 +30,24 @@ pub fn pack_rgba_float(vk: VkFormat, pf: pipe_format, texel: &mut Texel, v: &[f3
 
 /// The type of the first channel of a scaled format.
 fn scaled_type(pf: pipe_format) -> Option<util_format_type> {
-    if !unsafe { util_format_is_scaled(pf) } {
+    if !fmt::is_scaled(pf) {
         return None;
     }
-    let ch = unsafe { util_format_get_first_non_void_channel(pf) };
-    (ch >= 0).then(|| unsafe { (*util_format_description(pf)).channel[ch as usize].type_() } as util_format_type)
+    let ch = fmt::first_non_void_channel(pf);
+    (ch >= 0).then(|| fmt::description(pf).map_or(0, |d| d.channel[ch as usize].type_()) as util_format_type)
 }
 
 /// Packs a clear colour: integers as they are, scaled formats from their integer value.
 pub fn pack_clear_color(vk: VkFormat, pf: pipe_format, pixel: &mut [u8; 16], c: &VkClearColorValue) {
-    let ch = unsafe { util_format_get_first_non_void_channel(pf) };
-    let wide = ch >= 0 && unsafe { util_format_is_pure_integer(pf) && (*util_format_description(pf)).channel[ch as usize].size() == 64 };
+    let ch = fmt::first_non_void_channel(pf);
+    let wide = ch >= 0 && fmt::is_pure_integer(pf) && fmt::description(pf).is_some_and(|d| d.channel[ch as usize].size() == 64);
     unsafe {
         if wide {
-            let n = (util_format_get_blocksize(pf) as usize).min(16);
+            let n = (fmt::blocksize(pf) as usize).min(16);
             std::ptr::copy_nonoverlapping(c.uint32.as_ptr().cast::<u8>(), pixel.as_mut_ptr(), n);
-        } else if util_format_is_pure_uint(pf) {
+        } else if fmt::is_pure_uint(pf) {
             util_format_pack_rgba(pf, pixel.as_mut_ptr().cast(), c.uint32.as_ptr().cast(), 1);
-        } else if util_format_is_pure_sint(pf) {
+        } else if fmt::is_pure_sint(pf) {
             util_format_pack_rgba(pf, pixel.as_mut_ptr().cast(), c.int32.as_ptr().cast(), 1);
         } else if scaled_type(pf) == Some(UTIL_FORMAT_TYPE_UNSIGNED) {
             let v = c.uint32.map(|x| x as f32);
@@ -84,7 +85,7 @@ pub fn write_depth_stencil(pf: pipe_format, texel: &mut Texel, aspect: VkImageAs
 
 /// One aspect of a combined depth/stencil format, but not both.
 pub fn is_partial_ds_aspect(f: VkFormat, aspect: VkImageAspectFlags) -> bool {
-    let ds = unsafe { vk_format_has_depth(f) && vk_format_has_stencil(f) };
+    let ds = fmt::vk_has_depth(f) && fmt::vk_has_stencil(f);
     ds && aspect != (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)
 }
 

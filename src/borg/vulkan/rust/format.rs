@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::ffi::*;
+use crate::fmt;
 use borg_layout::tex_format::TexFormat;
 
 /// How the vertex fetch unit reads one attribute.
@@ -122,7 +123,7 @@ pub fn packed_info(f: VkFormat) -> Option<(u32, u32)> {
             | if alpha { BORGC_FS_ALPHA_OUTPUT } else { 0 };
         return Some((opt, bytes));
     }
-    let d = unsafe { util_format_description(vk_format_to_pipe_format(f)).as_ref() }?;
+    let d = fmt::description(fmt::pipe(f))?;
     let n = d.nr_channels();
     if d.layout != UTIL_FORMAT_LAYOUT_PLAIN || !(1..=4).contains(&n) {
         return None;

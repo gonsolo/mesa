@@ -4,6 +4,7 @@
 use crate::device::Device;
 use crate::entrypoint::{entrypoint, handle, pointee, slice, vk_error, Handle};
 use crate::ffi::*;
+use crate::fmt;
 use crate::memory::{DeviceMemory, Host};
 use crate::object::{allocate, Zeroed};
 use crate::memory::requirements;
@@ -43,21 +44,14 @@ pub fn shape(image: &Image) -> Shape {
 
 /// The blocks of a format.
 pub fn blocks(fmt: VkFormat) -> Blocks {
-    let pf = unsafe { vk_format_to_pipe_format(fmt) };
-    unsafe {
-        Blocks {
-            bs: util_format_get_blocksize(pf),
-            bw: util_format_get_blockwidth(pf),
-            bh: util_format_get_blockheight(pf),
-            bd: util_format_get_blockdepth(pf),
-        }
-    }
+    let pf = fmt::pipe(fmt);
+    Blocks { bs: fmt::blocksize(pf), bw: fmt::blockwidth(pf), bh: fmt::blockheight(pf), bd: fmt::blockdepth(pf) }
 }
 
 /// The blocks of one aspect: a depth or stencil aspect of a combined format has its own size,
 /// the block depth stays the combined format's.
 pub fn aspect_blocks(fmt: VkFormat, aspect: VkImageAspectFlags) -> Blocks {
-    let a = if aspect.count_ones() == 1 { unsafe { vk_format_get_aspect_format(fmt, aspect) } } else { fmt };
+    let a = if aspect.count_ones() == 1 { fmt::aspect_format(fmt, aspect) } else { fmt };
     Blocks { bd: blocks(fmt).bd, ..blocks(a) }
 }
 
