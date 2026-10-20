@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: MIT
 
 //! Transfers, done by the host in mapped memory: buffer fills, updates and copies, image
-//! copies.
+//! copies and blits.
 
 use crate::entrypoint::{entrypoint, slice, Handle};
 use crate::ffi::*;
 use crate::image::{aspect_blocks, blocks, shape, z16_pack, z16_unpack};
+use crate::texel::{pack_rgba_float, unpack_rgba_float};
 use borg_layout::image::{mip_level_size, Blocks};
 use std::ffi::c_void;
 
@@ -211,4 +212,164 @@ pub unsafe extern "C" fn borgvk_decode_compressed_image(src: *const borgvk_image
     (m.map, m.size) = (buf.cast(), total as usize);
     (o.mem, o.offset) = (mem, 0);
     buf.cast()
+}
+
+fn read_z(pf: pipe_format, t: *const u8) -> f32 {
+    if pf == PIPE_FORMAT_Z16_UNORM_S8_UINT {
+        return unsafe { z16_unpack([*t, *t.add(1)]) };
+    }
+    let mut z = 0.0;
+    unsafe { util_format_unpack_z_float(pf, &mut z, t.cast(), 1) };
+    z
+}
+
+fn write_z(pf: pipe_format, t: *mut u8, z: f32) {
+    if pf == PIPE_FORMAT_Z16_UNORM_S8_UINT {
+        unsafe { std::ptr::copy_nonoverlapping(z16_pack(z).as_ptr(), t, 2) };
+    } else {
+        unsafe { util_format_pack_z_float(pf, t.cast(), &z, 1) };
+    }
+}
+
+/// The two texels around a coordinate along one axis and their weights.
+fn taps(f: f32, size: u32) -> ([i32; 2], [f32; 2]) {
+    let i0 = f.floor() as i32;
+    let t = f - i0 as f32;
+    let c = |i: i32| i.clamp(0, size as i32 - 1);
+    ([c(i0), c(i0 + 1)], [1.0 - t, t])
+}
+
+fn blit(src: &borgvk_image, dst: &borgvk_image, regions: &[VkImageBlit], filter: VkFilter) {
+    if image_host(src).is_none() || image_host(dst).is_none() {
+        return;
+    }
+    let db = blocks(dst.vk.format);
+    if db.bw > 1 || db.bh > 1 {
+        return;
+    }
+    let (mut dimg, mut dmem) = unsafe { (std::mem::zeroed::<borgvk_image>(), std::mem::zeroed::<borgvk_device_memory>()) };
+    let mut decoded = std::ptr::null_mut();
+    let sb = blocks(src.vk.format);
+    let src = if sb.bw > 1 || sb.bh > 1 {
+        decoded = unsafe { borgvk_decode_compressed_image(src, &mut dimg, &mut dmem) };
+        if decoded.is_null() {
+            return;
+        }
+        &dimg
+    } else {
+        src
+    };
+    let (spf, dpf) = unsafe { (vk_format_to_pipe_format(src.vk.format), vk_format_to_pipe_format(dst.vk.format)) };
+    let (sbs, dbs) = (blocks(src.vk.format).bs, db.bs);
+    let (is_uint, is_sint) = unsafe { (util_format_is_pure_uint(spf), util_format_is_pure_sint(spf)) };
+    let (s3d, d3d) = (src.vk.image_type == VK_IMAGE_TYPE_3D, dst.vk.image_type == VK_IMAGE_TYPE_3D);
+    let shr = |e: u32, l: u32| e.checked_shr(l).unwrap_or(0).max(1);
+    for reg in regions {
+        let aspect = reg.srcSubresource.aspectMask;
+        let (depth, stencil) = (aspect & VK_IMAGE_ASPECT_DEPTH_BIT != 0, aspect & VK_IMAGE_ASPECT_STENCIL_BIT != 0);
+        let ([s0, s1], [d0, d1]) = (reg.srcOffsets, reg.dstOffsets);
+        let (dex, dey, dez) = ((d1.x - d0.x) as f32, (d1.y - d0.y) as f32, (d1.z - d0.z) as f32);
+        let (sex, sey, sez) = ((s1.x - s0.x) as f32, (s1.y - s0.y) as f32, (s1.z - s0.z) as f32);
+        let (sl, dl) = (reg.srcSubresource.mipLevel, reg.dstSubresource.mipLevel);
+        let nlayers = if s3d || d3d { 1 } else { layers(&src.vk, &reg.srcSubresource) };
+        for l in 0..nlayers {
+            let (sw, sh) = (shr(src.vk.extent.width, sl), shr(src.vk.extent.height, sl));
+            let sd = if s3d { shr(src.vk.extent.depth, sl) } else { 1 };
+            let dh = shr(dst.vk.extent.height, dl);
+            let one = |bs| Blocks { bs, bw: 1, bh: 1, bd: 1 };
+            let (soff, sstride) = shape(src).level_offset(sl, if s3d { 0 } else { reg.srcSubresource.baseArrayLayer + l }, one(sbs));
+            let (doff, dstride) = shape(dst).level_offset(dl, if d3d { 0 } else { reg.dstSubresource.baseArrayLayer + l }, one(dbs));
+            let sbase = unsafe { image_host(src).unwrap().add(soff as usize) };
+            let dbase = unsafe { image_host(dst).unwrap().add(doff as usize) };
+            let st = |x: i32, y: i32, z: i32| unsafe {
+                sbase.add((((z as u64 * sh as u64 + y as u64) * sstride as u64 + x as u64) * sbs as u64) as usize)
+            };
+            let w = |d: i32, o: i32, e: f32| if e != 0.0 { (d as f32 + 0.5 - o as f32) / e } else { 0.5 };
+            for dz in d0.z.min(d1.z)..d0.z.max(d1.z) {
+                let sz = s0.z as f32 + w(dz, d0.z, dez) * sez;
+                for dy in d0.y.min(d1.y)..d0.y.max(d1.y) {
+                    let sy = s0.y as f32 + w(dy, d0.y, dey) * sey;
+                    let drow = (dz as i64 as u64).wrapping_mul(dh as u64).wrapping_add(dy as i64 as u64).wrapping_mul(dstride as u64 * dbs as u64);
+                    for dx in d0.x.min(d1.x)..d0.x.max(d1.x) {
+                        let sx = s0.x as f32 + w(dx, d0.x, dex) * sex;
+                        let dt = unsafe { dbase.add(drow.wrapping_add((dx as i64 as u64).wrapping_mul(dbs as u64)) as usize) };
+                        let near = || {
+                            let c = |f: f32, n: u32| (f.floor() as i32).clamp(0, n as i32 - 1);
+                            st(c(sx, sw), c(sy, sh), c(sz, sd))
+                        };
+                        let (xs, xw) = taps(sx - 0.5, sw);
+                        let (ys, yw) = taps(sy - 0.5, sh);
+                        let (zs, zw) = taps(sz - 0.5, sd);
+                        // The weighted taps of the linear filter, z outermost.
+                        let linear = || {
+                            (0..8).filter_map(move |i| {
+                                let (ix, iy, iz) = (i & 1, i >> 1 & 1, i >> 2);
+                                let weight = xw[ix] * yw[iy] * zw[iz];
+                                (weight != 0.0).then(|| (st(xs[ix], ys[iy], zs[iz]), weight))
+                            })
+                        };
+                        if stencil {
+                            copy_depth_stencil(spf, near(), dpf, dt, true);
+                        }
+                        if depth {
+                            if filter == VK_FILTER_NEAREST {
+                                copy_depth_stencil(spf, near(), dpf, dt, false);
+                            } else {
+                                let acc = linear().fold(0.0, |acc, (t, wt)| acc + read_z(spf, t) * wt);
+                                write_z(dpf, dt, acc);
+                            }
+                        }
+                        if depth || stencil {
+                            continue;
+                        }
+                        if filter == VK_FILTER_NEAREST {
+                            let t = near();
+                            if is_uint || is_sint {
+                                // The integer bit pattern either way.
+                                let mut v = [0u32; 4];
+                                unsafe {
+                                    util_format_unpack_rgba(spf, v.as_mut_ptr().cast(), t.cast(), 1);
+                                    util_format_pack_rgba(dpf, dt.cast(), v.as_ptr().cast(), 1);
+                                }
+                            } else {
+                                let mut v = [0.0; 4];
+                                unpack_rgba_float(src.vk.format, spf, t, &mut v);
+                                pack_rgba_float(dst.vk.format, dpf, dt, &v);
+                            }
+                        } else {
+                            let mut acc = [0f32; 4];
+                            for (t, wt) in linear() {
+                                let mut v = [0.0; 4];
+                                unpack_rgba_float(src.vk.format, spf, t, &mut v);
+                                for c in 0..4 {
+                                    acc[c] += v[c] * wt;
+                                }
+                            }
+                            pack_rgba_float(dst.vk.format, dpf, dt, &acc);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    unsafe { free(decoded) };
+}
+
+entrypoint! {
+    fn borgvk_CmdBlitImage(_cmd: VkCommandBuffer, src: VkImage, _sl: VkImageLayout, dst: VkImage, _dl: VkImageLayout, count: u32, regions: *const VkImageBlit, filter: VkFilter) {
+        let (Some(s), Some(d)) = (src.get(), dst.get()) else { return };
+        blit(s, d, slice(regions, count), filter);
+    }
+}
+
+entrypoint! {
+    fn borgvk_CmdBlitImage2(_cmd: VkCommandBuffer, info: *const VkBlitImageInfo2) {
+        let i = &*info;
+        let (Some(s), Some(d)) = (i.srcImage.get(), i.dstImage.get()) else { return };
+        let regions: Vec<VkImageBlit> = slice(i.pRegions, i.regionCount)
+            .iter()
+            .map(|r| VkImageBlit { srcSubresource: r.srcSubresource, srcOffsets: r.srcOffsets, dstSubresource: r.dstSubresource, dstOffsets: r.dstOffsets })
+            .collect();
+        blit(s, d, &regions, i.filter);
+    }
 }

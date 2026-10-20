@@ -125,7 +125,7 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-function', 'vk_cmd_queue_execute|vk_sync_(wait|signal)',
     '--allowlist-type', 'vk_queue|vk_queue_submit|vk_cmd_queue_entry',
     '--allowlist-type', 'VkRenderPassBeginInfo|VkSubpassContents|VkSubpass(Begin|End)Info',
-    '--allowlist-type', 'vk_buffer_view|VkComponentSwizzle|VkBufferCopy|VkCopyBufferInfo2|VkImageCopy|VkCopyImageInfo2',
+    '--allowlist-type', 'vk_buffer_view|VkComponentSwizzle|VkBufferCopy|VkCopyBufferInfo2|VkImageCopy|VkCopyImageInfo2|VkImageBlit|VkBlitImageInfo2|VkFilter',
     '--allowlist-var', 'BORGVK_TEXG_CHUNK|BORGVK_TEX_DIM|VK_WHOLE_SIZE',
     '--allowlist-type', 'borgvk_target|VkRenderingInfo|VkRenderingAttachmentInfo|VkImageResolve|VkRenderingEndInfoEXT',
     '--allowlist-type', 'borgvk_command_buffer|vk_command_buffer_ops|vk_command_pool|VkCommandBufferBeginInfo|borg_blend|VkComputePipelineCreateInfo|VkPipelineRenderingCreateInfo|VkPipelineCache',
