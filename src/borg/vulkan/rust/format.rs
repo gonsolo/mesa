@@ -72,27 +72,6 @@ pub fn vertex_fetch(f: VkFormat) -> Option<Fetch> {
     Some(Fetch { code, swz, read_bytes })
 }
 
-/// # Safety
-/// `code`, `swz` and `read_bytes` are valid for writes.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_vertex_format_to_fetch(
-    f: VkFormat,
-    code: *mut u32,
-    swz: *mut u32,
-    read_bytes: *mut u32,
-) -> bool {
-    let fetch = vertex_fetch(f);
-    unsafe {
-        *swz = 0;
-        if let Some(v) = fetch {
-            *code = v.code;
-            *swz = v.swz;
-            *read_bytes = v.read_bytes;
-        }
-    }
-    fetch.is_some()
-}
-
 pub fn bytes_packed(f: VkFormat) -> bool {
     f == VK_FORMAT_R8G8B8A8_UINT || f == VK_FORMAT_R8G8B8A8_SINT
 }
@@ -215,41 +194,6 @@ pub fn depth_is_d32(f: VkFormat) -> bool {
     !(f == VK_FORMAT_D16_UNORM || f == VK_FORMAT_D16_UNORM_S8_UINT)
 }
 
-#[no_mangle]
-pub extern "C" fn borgvk_sim_bytes_packed(f: VkFormat) -> bool {
-    bytes_packed(f)
-}
-
-#[no_mangle]
-pub extern "C" fn borgvk_sim_raw32(f: VkFormat) -> bool {
-    raw32(f)
-}
-
-#[no_mangle]
-pub extern "C" fn borgvk_sim_half1(f: VkFormat) -> bool {
-    half1(f)
-}
-
-#[no_mangle]
-pub extern "C" fn borgvk_sim_half2(f: VkFormat) -> bool {
-    half2(f)
-}
-
-#[no_mangle]
-pub extern "C" fn borgvk_sim_packed_opt(f: VkFormat) -> u32 {
-    packed_info(f).map_or(0, |(opt, _)| opt)
-}
-
-#[no_mangle]
-pub extern "C" fn borgvk_sim_flush_format(f: VkFormat) -> u8 {
-    flush_format(f)
-}
-
-#[no_mangle]
-pub extern "C" fn borgvk_sim_depth_is_d32(f: VkFormat) -> bool {
-    depth_is_d32(f)
-}
-
 /// How a view of format `f` reaches the sampler: the hardware format and the conversion of its
 /// texels; the stencil aspect samples as R8_UINT.
 pub fn tex_format(f: VkFormat, stencil: bool) -> Option<(TexFormat, tex_conv)> {
@@ -357,20 +301,6 @@ pub fn tex_format(f: VkFormat, stencil: bool) -> Option<(TexFormat, tex_conv)> {
     Some((t, c))
 }
 
-/// # Safety
-/// `code` and `conv` are valid for writes.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_tex_format(f: VkFormat, stencil: bool, code: *mut u32, conv: *mut tex_conv) -> bool {
-    let Some((t, c)) = tex_format(f, stencil) else {
-        return false;
-    };
-    unsafe {
-        *code = t as u32;
-        *conv = c;
-    }
-    true
-}
-
 /// Converts `n` texels from `src` to the layout the texture unit reads.
 pub fn tex_convert(c: &tex_conv, dst: &mut [u8], src: &[u8], n: usize) {
     let (bpp, obpp, cs) = (c.bpp as usize, c.obpp as usize, c.cs as usize);
@@ -417,8 +347,7 @@ pub fn tex_convert(c: &tex_conv, dst: &mut [u8], src: &[u8], n: usize) {
 
 /// # Safety
 /// `c` is valid, `dst` holds `n` output texels and `src` the `n` input texels `c` describes.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_tex_convert(c: *const tex_conv, dst: *mut u8, src: *const u8, n: u32) {
+pub unsafe fn borgvk_tex_convert(c: *const tex_conv, dst: *mut u8, src: *const u8, n: u32) {
     let (c, n) = (unsafe { &*c }, n as usize);
     let mut src_len = n * c.bpp as usize;
     if c.sch == 0 && c.pack16 == 0 && c.zstride == 0 {

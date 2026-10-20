@@ -207,37 +207,12 @@ fn compute(job: &[u8], outf: &std::ffi::CStr) -> bool {
     std::fs::write(path, out).is_ok()
 }
 
-#[no_mangle]
-pub extern "C" fn borgvk_hw_enabled() -> bool {
-    enabled()
-}
-
-#[no_mangle]
-pub extern "C" fn borgvk_sim_serves_extent(w: u32, h: u32, has_depth_stencil: bool) -> bool {
-    serves_extent(w, h, has_depth_stencil)
-}
-
-/// # Safety
-/// `color` is null or a valid image.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_sim_serves(color: *const borgvk_image, has_depth_stencil: bool) -> bool {
-    unsafe { color.as_ref() }.is_some_and(|c| serves_extent(c.vk.extent.width, c.vk.extent.height, has_depth_stencil))
-}
-
-/// # Safety
-/// `b` holds `n` bytes; `out` has room for `w * h` pixels of 3 bytes (4 for RAW32).
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_hw_render(b: *const u8, n: usize, w: u32, h: u32, out: *mut u8) -> usize {
-    render(unsafe { std::slice::from_raw_parts(b, n) }, w, h, out)
-}
-
 /// The register/memory program of direct_sim --compute (simulation/direct/main.cpp), on the
 /// device; 0 on success.
 ///
 /// # Safety
 /// `job` holds `len` bytes; `outf` is a C string.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_hw_compute(job: *const u8, len: usize, outf: *const std::ffi::c_char) -> i32 {
+pub unsafe fn borgvk_hw_compute(job: *const u8, len: usize, outf: *const std::ffi::c_char) -> i32 {
     let job = unsafe { std::slice::from_raw_parts(job, len) };
     if compute(job, unsafe { std::ffi::CStr::from_ptr(outf) }) {
         0

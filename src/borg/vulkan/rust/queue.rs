@@ -26,7 +26,6 @@ unsafe fn work(q: &mut vk_queue, submit: &mut vk_queue_submit) -> VkResult {
 
 /// # Safety
 /// The runtime's queue and submit.
-#[no_mangle]
 pub unsafe extern "C" fn borgvk_queue_submit(q: *mut vk_queue, submit: *mut vk_queue_submit) -> VkResult {
     let (q, s) = unsafe { (&mut *q, &mut *submit) };
     let dev = q.base.device;

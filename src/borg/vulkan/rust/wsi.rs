@@ -18,8 +18,7 @@ unsafe extern "C" fn proc_addr(pd: VkPhysicalDevice, name: *const c_char) -> PFN
 
 /// # Safety
 /// `pd` is a valid physical device.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_wsi_init(pd: *mut borgvk_physical_device) -> VkResult {
+pub unsafe fn borgvk_wsi_init(pd: *mut borgvk_physical_device) -> VkResult {
     let p = unsafe { &mut *pd };
     let opts = wsi_device_options { sw_device: true, ..unsafe { zeroed() } };
     let alloc = unsafe { &(*p.vk.instance).alloc };
@@ -34,8 +33,7 @@ pub unsafe extern "C" fn borgvk_wsi_init(pd: *mut borgvk_physical_device) -> VkR
 
 /// # Safety
 /// `pd` is a valid physical device with WSI.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_wsi_finish(pd: *mut borgvk_physical_device) {
+pub unsafe fn borgvk_wsi_finish(pd: *mut borgvk_physical_device) {
     let p = unsafe { &mut *pd };
     p.vk.wsi_device = std::ptr::null_mut();
     unsafe { wsi_device_finish(&mut p.wsi_device, &(*p.vk.instance).alloc) };

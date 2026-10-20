@@ -1,7 +1,7 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-//! The cube path: one render of a whole recorded stream, by `borgvk_hw_render` on the device or
+//! The cube path: one render of a whole recorded stream, by `hw::render` on the device or
 //! by simulator processes that write the frame to stdout. Wide frames are split into windows of
 //! 128 pixels, dealt to several processes.
 
@@ -16,7 +16,6 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::process::{Child, Command, Stdio};
 
 const WIN: u32 = 128;
-
 
 fn env_set(name: &str) -> Option<OsString> {
     std::env::var_os(name).filter(|v| !v.is_empty())
@@ -233,8 +232,7 @@ fn run_stream(bytes: &[u8], img: &borgvk_image, sim_dim: u32) {
 ///
 /// # Safety
 /// `bytes` holds `nbytes` bytes from malloc; `color_img` is null or a valid image.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_sim_run_stream(bytes: *mut u8, nbytes: usize, color_img: *mut borgvk_image, sim_dim: u32) -> VkResult {
+pub unsafe fn borgvk_sim_run_stream(bytes: *mut u8, nbytes: usize, color_img: *mut borgvk_image, sim_dim: u32) -> VkResult {
     if let Some(img) = unsafe { color_img.as_ref() } {
         let mapped = unsafe { img.mem.as_ref() }.is_some_and(|m| !m.map.is_null());
         if mapped && img.vk.extent.width != 0 && img.vk.extent.height != 0 {

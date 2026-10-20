@@ -24,7 +24,7 @@ unsafe extern "C" fn create(pool: *mut vk_command_pool, level: VkCommandBufferLe
     if c.is_null() {
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     }
-    let mut params = vk_command_buffer_init_params { pool, ops: &borgvk_cmd_buffer_ops, level, needs_cmd_queue: true, ..unsafe { zeroed() } };
+    let mut params = vk_command_buffer_init_params { pool, ops: &CMD_BUFFER_OPS, level, needs_cmd_queue: true, ..unsafe { zeroed() } };
     let r = unsafe { vk_command_buffer_init_with_params(&mut (*c).vk, &mut params) };
     if r != VK_SUCCESS {
         unsafe { vk_free(alloc, c.cast()) };
@@ -61,8 +61,7 @@ unsafe extern "C" fn destroy(vk: *mut vk_command_buffer) {
     }
 }
 
-#[no_mangle]
-pub static borgvk_cmd_buffer_ops: vk_command_buffer_ops =
+pub static CMD_BUFFER_OPS: vk_command_buffer_ops =
     vk_command_buffer_ops { create: Some(create), reset: Some(reset), destroy: Some(destroy), ..unsafe { zeroed() } };
 
 entrypoint! {

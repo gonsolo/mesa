@@ -13,8 +13,7 @@ use crate::util::{log, MESA_LOG_WARN};
 ///
 /// # Safety
 /// The runtime's submit.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_find_set(submit: *mut vk_queue_submit) -> *mut borgvk_descriptor_set {
+pub unsafe fn borgvk_find_set(submit: *mut vk_queue_submit) -> *mut borgvk_descriptor_set {
     let s = unsafe { &*submit };
     for &cb in unsafe { slice(s.command_buffers, s.command_buffer_count) } {
         let head: *mut list_head = unsafe { &mut (*cb).cmd_queue.cmds };
@@ -42,8 +41,7 @@ static DEFAULT_SAMPLER: [u32; 4] = [2 << 3 | 2 << 6 | 2 << 9, 0, 0, 0];
 
 /// # Safety
 /// `sampler` is null or valid.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_sampler_desc(sampler: *const borgvk_sampler) -> *const u32 {
+pub unsafe fn borgvk_sampler_desc(sampler: *const borgvk_sampler) -> *const u32 {
     unsafe { sampler.as_ref() }.map_or(DEFAULT_SAMPLER.as_ptr(), |s| s.desc.as_ptr())
 }
 
@@ -53,8 +51,7 @@ fn push_range(d: &borgvk_device) -> Option<(u32, &[u32])> {
 
 /// # Safety
 /// `device` is valid.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_send_blend_state_serial(device: *const borgvk_device) {
+pub unsafe fn borgvk_send_blend_state_serial(device: *const borgvk_device) {
     let d = unsafe { &*device };
     unsafe {
         if d.state_valid {
@@ -91,8 +88,7 @@ fn send_blend_state_drm(d: &borgvk_device) {
 
 /// # Safety
 /// `device` is valid.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_send_blend_state(device: *const borgvk_device) {
+pub unsafe fn borgvk_send_blend_state(device: *const borgvk_device) {
     let d = unsafe { &*device };
     if d.drm_fd >= 0 {
         send_blend_state_drm(d);
@@ -103,8 +99,7 @@ pub unsafe extern "C" fn borgvk_send_blend_state(device: *const borgvk_device) {
 
 /// # Safety
 /// `device` is valid.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_upload_shaders_serial(device: *mut borgvk_device) {
+pub unsafe fn borgvk_upload_shaders_serial(device: *mut borgvk_device) {
     for (st, b) in unsafe { &*device }.shader_blob.iter().enumerate().filter(|(_, b)| b.len != 0) {
         unsafe { borgvk_serial_send_shader(st as u8, b.data.as_ptr(), b.len) };
     }
@@ -112,8 +107,7 @@ pub unsafe extern "C" fn borgvk_upload_shaders_serial(device: *mut borgvk_device
 
 /// # Safety
 /// `device` is valid.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_upload_shaders(device: *mut borgvk_device) {
+pub unsafe fn borgvk_upload_shaders(device: *mut borgvk_device) {
     let d = unsafe { &*device };
     if d.drm_fd < 0 {
         unsafe { borgvk_upload_shaders_serial(device) };

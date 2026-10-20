@@ -7,7 +7,7 @@
 use crate::entrypoint::{chain, entrypoint, vk_error, Handle};
 use crate::ffi::*;
 use crate::image::blocks;
-use crate::sync::borgvk_sync_type;
+use crate::sync::SYNC_TYPE;
 use crate::util::log;
 use crate::wsi::{borgvk_wsi_finish, borgvk_wsi_init};
 use std::ffi::CStr;
@@ -371,7 +371,7 @@ unsafe fn create(instance: &mut borgvk_instance, drm_fd: i32) -> VkResult {
     m.memoryTypeCount = 1;
     m.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     m.memoryTypes[0].heapIndex = 0;
-    d.sync_types = [&borgvk_sync_type, std::ptr::null()];
+    d.sync_types = [&SYNC_TYPE, std::ptr::null()];
     d.vk.supported_sync_types = d.sync_types.as_ptr();
     let r = unsafe { borgvk_wsi_init(d) };
     if r != VK_SUCCESS {

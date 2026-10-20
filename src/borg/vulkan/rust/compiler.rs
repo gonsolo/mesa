@@ -16,14 +16,6 @@ pub fn num_varyings(b: &[u8]) -> u32 {
     b.get(at).map_or(0, |&n| n as u32)
 }
 
-/// # Safety
-/// `b` is a valid blob.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_blob_num_varyings(b: *const borgvk_shader_blob) -> u32 {
-    let b = unsafe { &*b };
-    num_varyings(&b.data[..(b.len as usize).min(b.data.len())])
-}
-
 /// The pipeline layout being compiled for, from its handle.
 #[cfg(borgc)]
 pub fn compile_layout(dev: &borgvk_device) -> Option<&vk_pipeline_layout> {
@@ -66,18 +58,9 @@ pub fn set_base(_dev: &borgvk_device) -> [u8; 4] {
 }
 
 /// # Safety
-/// `device` is valid and `base` has room for 4 bytes.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_layout_set_base(device: *const borgvk_device, base: *mut u8) {
-    let b = set_base(unsafe { &*device });
-    unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), base, 4) };
-}
-
-/// # Safety
 /// `device` and `stage_info` are valid.
 #[cfg(not(borgc))]
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_compile_stage(device: *mut borgvk_device, vfetch: u32, stage_info: *const VkPipelineShaderStageCreateInfo) {
+pub unsafe fn borgvk_compile_stage(device: *mut borgvk_device, vfetch: u32, stage_info: *const VkPipelineShaderStageCreateInfo) {
     let (dev, si) = unsafe { (&mut *device, &*stage_info) };
     let slot = match si.stage {
         VK_SHADER_STAGE_VERTEX_BIT => BORGVK_STAGE_VERT,
@@ -97,8 +80,7 @@ pub unsafe extern "C" fn borgvk_compile_stage(device: *mut borgvk_device, vfetch
 /// # Safety
 /// `pipeline` is valid.
 #[cfg(not(borgc))]
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_compile_compute_stage(
+pub unsafe fn borgvk_compile_compute_stage(
     _device: *mut borgvk_device,
     _stage_info: *const VkPipelineShaderStageCreateInfo,
     pipeline: *mut borgvk_pipeline,
@@ -109,8 +91,7 @@ pub unsafe extern "C" fn borgvk_compile_compute_stage(
 /// # Safety
 /// `device` is valid.
 #[cfg(not(borgc))]
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_compile_empty_frag(device: *mut borgvk_device, _opt: u32) {
+pub unsafe fn borgvk_compile_empty_frag(device: *mut borgvk_device, _opt: u32) {
     unsafe { (*device).shader_blob[BORGVK_STAGE_FRAG as usize].len = 0 };
 }
 

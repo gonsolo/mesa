@@ -104,20 +104,6 @@ pub fn clear_rect(view: *mut vk_image_view, aspect: VkImageAspectFlags, value: &
     }
 }
 
-/// # Safety
-/// `view` is null or valid, `value` is valid.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_clear_attachment_rect(
-    view: *mut vk_image_view,
-    aspect: VkImageAspectFlags,
-    value: *const VkClearValue,
-    rect: VkRect2D,
-    base_layer: u32,
-    layers: u32,
-) {
-    clear_rect(view, aspect, unsafe { &*value }, rect, base_layer, layers);
-}
-
 entrypoint! {
     fn borgvk_CmdClearAttachments(command_buffer: VkCommandBuffer, natt: u32, atts: *const VkClearAttachment, nrects: u32, rects: *const VkClearRect) {
         let c = cmd(command_buffer.ptr());

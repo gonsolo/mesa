@@ -182,22 +182,19 @@ fn compile_compute(dev: &mut borgvk_device, si: &VkPipelineShaderStageCreateInfo
 
 /// # Safety
 /// `device` is valid.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_compile_empty_frag(device: *mut borgvk_device, opt: u32) {
+pub unsafe fn borgvk_compile_empty_frag(device: *mut borgvk_device, opt: u32) {
     empty_frag(unsafe { &mut *device }, opt);
 }
 
 /// # Safety
 /// `device` and `stage_info` are valid.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_compile_stage(device: *mut borgvk_device, vfetch: u32, stage_info: *const VkPipelineShaderStageCreateInfo) {
+pub unsafe fn borgvk_compile_stage(device: *mut borgvk_device, vfetch: u32, stage_info: *const VkPipelineShaderStageCreateInfo) {
     compile_stage(unsafe { &mut *device }, vfetch, unsafe { &*stage_info });
 }
 
 /// # Safety
 /// `device`, `stage_info` and `pipeline` are valid.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_compile_compute_stage(
+pub unsafe fn borgvk_compile_compute_stage(
     device: *mut borgvk_device,
     stage_info: *const VkPipelineShaderStageCreateInfo,
     pipeline: *mut borgvk_pipeline,

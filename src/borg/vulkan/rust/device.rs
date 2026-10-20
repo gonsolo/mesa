@@ -3,7 +3,7 @@
 
 //! The instance and the logical device.
 
-use crate::cmd_buffer::borgvk_cmd_buffer_ops;
+use crate::cmd_buffer::CMD_BUFFER_OPS;
 use crate::entrypoint::{chain, entrypoint, handle, vk_error, Handle};
 use crate::ffi::*;
 use crate::physical_device::{destroy_physical_device, enumerate_devices, API_VERSION};
@@ -177,7 +177,7 @@ entrypoint! {
         }
         vk_device_enable_threaded_submit(&mut d.vk);
         d.vk.command_dispatch_table = &d.cmd_dispatch;
-        d.vk.command_buffer_ops = &borgvk_cmd_buffer_ops;
+        d.vk.command_buffer_ops = &CMD_BUFFER_OPS;
         let r = vk_queue_init(&mut d.queue, &mut d.vk, (*info).pQueueCreateInfos, 0);
         if r != VK_SUCCESS {
             vk_device_finish(&mut d.vk);

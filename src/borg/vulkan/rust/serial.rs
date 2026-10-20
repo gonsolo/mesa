@@ -353,8 +353,7 @@ pub unsafe extern "C" fn borgvk_serial_send_geom(verts: *const f32, nverts: i32,
     };
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_serial_send_tex_row(y: i32, rgba: *const u8, sampler: *const u32) {
+pub unsafe fn borgvk_serial_send_tex_row(y: i32, rgba: *const u8, sampler: *const u32) {
     unsafe { send_tex_row(y as u8, std::slice::from_raw_parts(rgba, TEX_DIM * 4), &*(sampler as *const [u32; 4])) };
 }
 
@@ -376,13 +375,11 @@ pub unsafe extern "C" fn borgvk_serial_send_push_constants(offset: u32, size: u3
     send_push_constants(offset, unsafe { std::slice::from_raw_parts(values as *const u8, size as usize) });
 }
 
-#[no_mangle]
-pub extern "C" fn borgvk_serial_send_blend(blend_cfg: u32, blend_const: u32) {
+pub fn borgvk_serial_send_blend(blend_cfg: u32, blend_const: u32) {
     send_blend(blend_cfg, blend_const);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_blend_pack(cb: *const VkPipelineColorBlendStateCreateInfo, cfg: *mut u32, konst: *mut u32) {
+pub unsafe fn borgvk_blend_pack(cb: *const VkPipelineColorBlendStateCreateInfo, cfg: *mut u32, konst: *mut u32) {
     let (c, k) = blend_pack(unsafe { cb.as_ref() });
     unsafe {
         *cfg = c;
@@ -395,66 +392,19 @@ pub unsafe extern "C" fn borgvk_serial_send_mvp(mvp: *const f32) {
     send_mvp(unsafe { &*(mvp as *const [f32; 16]) });
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_serial_send_state(reg: *const u32) {
+pub unsafe fn borgvk_serial_send_state(reg: *const u32) {
     send_state(unsafe { &*(reg as *const [u32; 5]) });
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_serial_send_viewport(vp: *const borgvk_vp) {
+pub unsafe fn borgvk_serial_send_viewport(vp: *const borgvk_vp) {
     send_viewport(unsafe { &*vp });
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_serial_send_target(flush_format: u8, clear: *const f32) {
-    send_target(flush_format, unsafe { &*(clear as *const [f32; 4]) });
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_serial_send_pass(flush_format: u8, flags: u8) {
-    send_pass(flush_format, flags);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_serial_send_att(count: u8, fmt: *const u8) {
-    send_att(count, unsafe { &*(fmt as *const [u8; 3]) });
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_serial_send_mem(off: u32, data: *const u8, n: u32) {
-    send_mem(off, unsafe { std::slice::from_raw_parts(data, n as usize) });
-}
-
-#[no_mangle]
-pub extern "C" fn borgvk_serial_send_vattr(slot: u32, fmt: u32, base: u32, count: u32, stride: u32, swz: u32) {
-    send_vattr(slot, fmt, base, count, stride, swz);
-}
-
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub extern "C" fn borgvk_serial_send_draw(
-    topology: u32,
-    index_type: u32,
-    restart: u32,
-    vertex_count: u32,
-    instance_count: u32,
-    first_vertex: u32,
-    first_instance: u32,
-    vertex_offset: i32,
-    index_base: u32,
-    ubo_base: u32,
-) {
-    let words = [vertex_count, instance_count, first_vertex, first_instance, vertex_offset as u32, index_base, ubo_base];
-    send_draw(&Draw { topology, index_type, restart, words });
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_state_pack(ci: *const VkGraphicsPipelineCreateInfo, reg: *mut u32) {
+pub unsafe fn borgvk_state_pack(ci: *const VkGraphicsPipelineCreateInfo, reg: *mut u32) {
     unsafe { *(reg as *mut [u32; 5]) = state_pack(&*ci) };
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_serial_send_texture_chunk(
+pub unsafe fn borgvk_serial_send_texture_chunk(
     off: u32,
     data: *const u8,
     n: u32,
@@ -465,8 +415,7 @@ pub unsafe extern "C" fn borgvk_serial_send_texture_chunk(
     unsafe { send_texture_chunk(off, std::slice::from_raw_parts(data, n), &*(desc_w123 as *const [u32; 3]), &*(sampler as *const [u32; 4])) };
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_serial_send_texture_levels(offs: *const u32) {
+pub unsafe fn borgvk_serial_send_texture_levels(offs: *const u32) {
     send_texture_levels(unsafe { &*(offs as *const [u32; 12]) });
 }
 
@@ -655,7 +604,7 @@ mod tests {
         let p = sent(|| send_vattr(3, 41, 0x100, 12, 16, 0x40000000));
         assert_eq!((p.len(), p[0], p[1], p[2]), (20, 0xB9, 3, 41));
         assert_eq!([u32_at(&p, 3), u32_at(&p, 7), u32_at(&p, 11), u32_at(&p, 15)], [0x100, 12, 16, 0x40000000]);
-        let p = sent(|| borgvk_serial_send_draw(1, 2, 1, 30, 4, 5, 6, -7, 0x200, 0x300));
+        let p = sent(|| send_draw(&Draw { topology: 1, index_type: 2, restart: 1, words: [30, 4, 5, 6, -7i32 as u32, 0x200, 0x300] }));
         assert_eq!((p.len(), p[0], p[1], p[2], p[3]), (33, 0xBA, 1, 2, 1));
         assert_eq!((4..11).map(|i| u32_at(&p, 4 * i - 12)).collect::<Vec<_>>(), [30, 4, 5, 6, -7i32 as u32, 0x200, 0x300]);
         let p = sent(|| send_att(3, &[5, 6, 7]));

@@ -4,6 +4,7 @@
 //! Textures to the Borg as wire packets: whole views in the sampler's layout and format, texel
 //! buffers, and the cube's downscaled RGBA8 rows.
 
+use crate::copy::borgvk_decode_compressed_image;
 use crate::ffi::*;
 use crate::format::{borgvk_tex_convert, tex_format};
 use crate::serial::*;
@@ -32,8 +33,7 @@ fn send(data: &[u8], desc: &TexDesc, sampler: *const borgvk_sampler) {
 ///
 /// # Safety
 /// `tex` is a mapped RGBA8 image, `sampler` null or valid.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_send_texture_row(tex: *mut borgvk_image, sampler: *const borgvk_sampler, dy: i32) {
+pub unsafe fn borgvk_send_texture_row(tex: *mut borgvk_image, sampler: *const borgvk_sampler, dy: i32) {
     let t = unsafe { &*tex };
     let base = unsafe { (*t.mem).map.cast::<u8>().add(t.offset as usize) };
     let (sw, sh) = (t.vk.extent.width, t.vk.extent.height);
@@ -200,8 +200,7 @@ fn texture(view: &vk_image_view, img: &borgvk_image, sampler: *const borgvk_samp
 
 /// # Safety
 /// `view` is valid; `img` and `sampler` are null or valid.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_send_generic_texture(view: *const vk_image_view, img: *const borgvk_image, sampler: *const borgvk_sampler) -> bool {
+pub unsafe fn borgvk_send_generic_texture(view: *const vk_image_view, img: *const borgvk_image, sampler: *const borgvk_sampler) -> bool {
     let (view, Some(img)) = (unsafe { &*view }, unsafe { img.as_ref() }) else { return false };
     if mapped(img.mem).is_none() {
         return false;
@@ -227,8 +226,7 @@ pub unsafe extern "C" fn borgvk_send_generic_texture(view: *const vk_image_view,
 ///
 /// # Safety
 /// `bv` is valid.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_send_buffer_texture(bv: *const vk_buffer_view) -> bool {
+pub unsafe fn borgvk_send_buffer_texture(bv: *const vk_buffer_view) -> bool {
     let bv = unsafe { &*bv };
     let format = match bv.format {
         VK_FORMAT_R32_UINT => TexFormat::R32_UINT,

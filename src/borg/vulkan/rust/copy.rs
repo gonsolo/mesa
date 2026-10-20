@@ -265,8 +265,7 @@ entrypoint! {
 ///
 /// # Safety
 /// `src` is a mapped image; `out` and `mem` are valid for writes.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_decode_compressed_image(src: *const borgvk_image, out: *mut borgvk_image, mem: *mut borgvk_device_memory) -> *mut c_void {
+pub unsafe fn borgvk_decode_compressed_image(src: *const borgvk_image, out: *mut borgvk_image, mem: *mut borgvk_device_memory) -> *mut c_void {
     let s = unsafe { &*src };
     let pf = unsafe { vk_format_to_pipe_format(s.vk.format) };
     let sb = Blocks { bd: 1, ..blocks(s.vk.format) };

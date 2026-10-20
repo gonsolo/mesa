@@ -91,8 +91,7 @@ fn send_texture(set: &borgvk_descriptor_set, tex: *mut borgvk_image) {
 ///
 /// # Safety
 /// `set` is valid.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_set_is_cube(set: *mut borgvk_descriptor_set) -> bool {
+pub unsafe fn borgvk_set_is_cube(set: *mut borgvk_descriptor_set) -> bool {
     let set = unsafe { &*set };
     let Some(b) = (unsafe { set.buffers[0].as_ref() }) else { return false };
     if unsafe { b.mem.as_ref() }.is_none_or(|m| m.map.is_null()) {
@@ -111,8 +110,7 @@ pub unsafe extern "C" fn borgvk_set_is_cube(set: *mut borgvk_descriptor_set) -> 
 
 /// # Safety
 /// The runtime's submit.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_submit_is_cube(submit: *mut vk_queue_submit) -> bool {
+pub unsafe fn borgvk_submit_is_cube(submit: *mut vk_queue_submit) -> bool {
     let set = unsafe { borgvk_find_set(submit) };
     !set.is_null() && unsafe { borgvk_set_is_cube(set) }
 }
@@ -122,8 +120,7 @@ pub unsafe extern "C" fn borgvk_submit_is_cube(submit: *mut vk_queue_submit) -> 
 ///
 /// # Safety
 /// A valid device and the runtime's submit.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_submit_sim_cube(device: *mut borgvk_device, submit: *mut vk_queue_submit) -> VkResult {
+pub unsafe fn borgvk_submit_sim_cube(device: *mut borgvk_device, submit: *mut vk_queue_submit) -> VkResult {
     let sim = std::env::var_os("BORGVK_SIM").is_some() && std::env::var_os("BORGVK_SIM_FW").is_some();
     if !crate::hw::enabled() && !sim {
         return VK_SUCCESS;
@@ -169,8 +166,7 @@ static SETUP_DONE: AtomicBool = AtomicBool::new(false);
 ///
 /// # Safety
 /// A valid device and the runtime's submit.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_submit_cube_live(device: *mut borgvk_device, submit: *mut vk_queue_submit) -> VkResult {
+pub unsafe fn borgvk_submit_cube_live(device: *mut borgvk_device, submit: *mut vk_queue_submit) -> VkResult {
     let Some(set) = (unsafe { borgvk_find_set(submit).as_ref() }) else { return VK_SUCCESS };
     let Some(ubo) = ubo(set) else { return VK_SUCCESS };
     let d = unsafe { &*device };

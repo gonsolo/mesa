@@ -14,7 +14,6 @@ use std::ops::Range;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
 
-
 const MEM_BYTES: usize = 0x800_0000;
 const MAX_PARTS: usize = 24;
 const PARALLEL_BYTES: usize = 65536;
@@ -625,9 +624,8 @@ fn run_pass(
 
 /// # Safety
 /// The images, views and writebacks are valid; `stream` holds `n` bytes.
-#[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn borgvk_sim_run_pass(
+pub unsafe fn borgvk_sim_run_pass(
     stream: *const u8,
     n: usize,
     color: *mut borgvk_image,

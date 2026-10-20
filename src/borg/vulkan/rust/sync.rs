@@ -83,8 +83,7 @@ unsafe extern "C" fn wait_many(
     }
 }
 
-#[no_mangle]
-pub static borgvk_sync_type: vk_sync_type = vk_sync_type {
+pub static SYNC_TYPE: vk_sync_type = vk_sync_type {
     size: size_of::<BinarySync>(),
     features: VK_SYNC_FEATURE_BINARY
         | VK_SYNC_FEATURE_GPU_WAIT
