@@ -4,10 +4,10 @@
 //! Single texels in an image's format: clear colours, depth and stencil, RGBA in and out.
 
 use crate::ffi::*;
-use crate::image::{borgvk_is_r4g4_unorm, z16_pack};
+use crate::image::z16_pack;
 
 pub fn unpack_rgba_float(vk: VkFormat, pf: pipe_format, texel: *const u8, out: &mut [f32; 4]) {
-    if borgvk_is_r4g4_unorm(vk) {
+    if vk == VK_FORMAT_R4G4_UNORM_PACK8 {
         let t = unsafe { *texel };
         *out = [(t >> 4 & 0xF) as f32 / 15.0, (t & 0xF) as f32 / 15.0, 0.0, 1.0];
     } else {
@@ -16,7 +16,7 @@ pub fn unpack_rgba_float(vk: VkFormat, pf: pipe_format, texel: *const u8, out: &
 }
 
 pub fn pack_rgba_float(vk: VkFormat, pf: pipe_format, texel: *mut u8, v: &[f32; 4]) {
-    if borgvk_is_r4g4_unorm(vk) {
+    if vk == VK_FORMAT_R4G4_UNORM_PACK8 {
         let q = |x: f32| (x.clamp(0.0, 1.0) * 15.0 + 0.5) as u8;
         unsafe { *texel = q(v[0]) << 4 | q(v[1]) };
     } else {
@@ -83,25 +83,6 @@ pub fn write_depth_stencil(pf: pipe_format, texel: *mut u8, aspect: VkImageAspec
 pub fn is_partial_ds_aspect(f: VkFormat, aspect: VkImageAspectFlags) -> bool {
     let ds = unsafe { vk_format_has_depth(f) && vk_format_has_stencil(f) };
     ds && aspect != (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)
-}
-
-/// # Safety
-/// `texel` holds a texel of the format, `out` has room for 4 floats.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_unpack_rgba_float(vk: VkFormat, pf: pipe_format, texel: *const u8, out: *mut f32) {
-    unpack_rgba_float(vk, pf, texel, unsafe { &mut *out.cast() });
-}
-
-/// # Safety
-/// `texel` has room for a texel of the format, `v` holds 4 floats.
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_pack_rgba_float(vk: VkFormat, pf: pipe_format, texel: *mut u8, v: *const f32) {
-    pack_rgba_float(vk, pf, texel, unsafe { &*v.cast() });
-}
-
-#[no_mangle]
-pub extern "C" fn borgvk_is_partial_ds_aspect(f: VkFormat, aspect: VkImageAspectFlags) -> bool {
-    is_partial_ds_aspect(f, aspect)
 }
 
 #[cfg(test)]
