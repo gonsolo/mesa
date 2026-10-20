@@ -13,7 +13,7 @@ use borg_layout::image::{mip_level_size, Blocks};
 use std::ffi::c_void;
 
 /// The buffer's bytes from its binding on, when it is bound to mapped memory.
-fn host(b: &borgvk_buffer) -> Option<*mut u8> {
+pub fn host(b: &borgvk_buffer) -> Option<*mut u8> {
     let m = unsafe { b.mem.as_ref() }.filter(|m| !m.map.is_null())?;
     Some(unsafe { m.map.cast::<u8>().add(b.offset as usize) })
 }

@@ -15,6 +15,7 @@ mod corpus;
 mod cube;
 mod descriptor_set;
 mod dispatch;
+mod draw;
 mod drm;
 mod entrypoint;
 mod event;
