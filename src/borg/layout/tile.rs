@@ -9,6 +9,11 @@ pub fn index(w: u32, x: u32, y: u32) -> (usize, usize) {
     (((y >> 2) * (w >> 2) + (x >> 2)) as usize, ((x & 3) | (y & 3) << 2) as usize)
 }
 
+/// The same in a texture `w` texels wide, whose rows hold ceil(w / 4) tiles.
+pub fn texture_index(w: u32, x: u32, y: u32) -> (usize, usize) {
+    (((y >> 2) * w.div_ceil(4) + (x >> 2)) as usize, ((x & 3) | (y & 3) << 2) as usize)
+}
+
 /// Byte offset of pixel (x, y) with tiles of `tile_bytes` and pixels of `px_bytes`.
 pub fn offset(w: u32, x: u32, y: u32, tile_bytes: u32, px_bytes: u32) -> u32 {
     let (t, i) = index(w, x, y);
@@ -27,5 +32,7 @@ mod tests {
         assert_eq!(index(8, 4, 0), (1, 0));
         assert_eq!(index(8, 5, 5), (3, 5));
         assert_eq!(offset(8, 5, 5, 64, 4), 3 * 64 + 5 * 4);
+        assert_eq!(texture_index(6, 1, 4), (2, 1));
+        assert_eq!(index(6, 1, 4), (1, 1));
     }
 }
