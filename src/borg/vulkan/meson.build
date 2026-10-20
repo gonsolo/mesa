@@ -198,12 +198,19 @@ libvulkan_borg = shared_library(
   'vulkan_borg',
   [libborgvk_files, borgvk_entrypoints],
   include_directories : borgvk_inc,
-  link_with : [libborgvk_rs],
+  link_whole : [libborgvk_rs],   # the dispatch table's references are weak and pull nothing in
   dependencies : borgvk_deps,
   link_args : [vulkan_icd_link_args, ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections],
   link_depends : vulkan_icd_link_depends,
   gnu_symbol_visibility : 'hidden',
   install : true,
+)
+
+test(
+  'borgvk rust entrypoints',
+  find_program('check_rust_entrypoints.sh'),
+  args : [libvulkan_borg, meson.current_source_dir() / 'rust'],
+  suite : ['borg'],
 )
 
 # The wire packet test links the Rust library itself: libvulkan_borg exports only the ICD entrypoints.
@@ -297,7 +304,7 @@ borgvk_static = executable(
     inc_include, inc_src, inc_util,
     include_directories('../../../../'),
   ],
-  link_with : [libborgvk_rs],
+  link_whole : [libborgvk_rs],
   dependencies : borgvk_deps,
   link_args : ['-static', '-Wl,--gc-sections'],
   build_by_default : false,
