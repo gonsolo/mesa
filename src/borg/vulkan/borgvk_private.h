@@ -241,6 +241,8 @@ void borgvk_serial_send_shader(uint8_t stage, const uint8_t *blob, uint32_t len)
 void borgvk_serial_send_push_constants(uint32_t offset, uint32_t size,
                                        const void *values);
 
+void borgvk_transport_emit(const uint8_t *pkt, size_t len);
+bool borgvk_transport_capturing(void);
 void borgvk_transport_capture_begin(void);
 uint8_t *borgvk_transport_capture_end(size_t *out_len);
 

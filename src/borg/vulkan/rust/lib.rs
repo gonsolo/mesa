@@ -7,3 +7,4 @@ mod ffi {
 
 mod format;
 mod image;
+mod serial;

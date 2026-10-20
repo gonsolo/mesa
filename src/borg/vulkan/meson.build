@@ -92,7 +92,10 @@ _borgvk_bindings_rs = rust.bindgen(
   c_args : [pre_args],
   args : [
     bindgen_output_args, '--no-prepend-enum-name', '--with-derive-default',
-    '--allowlist-type', 'VkFormat|tex_conv|borgvk_image|pipe_format',
+    '--allowlist-type', 'VkFormat|tex_conv|borgvk_image|borgvk_vp|pipe_format',
+    '--allowlist-type', 'VkGraphicsPipelineCreateInfo|VkPipelineColorBlendStateCreateInfo|mesa_log_level',
+    '--allowlist-function', 'borgvk_transport_emit|borgvk_transport_capturing|mesa_log',
+    '--allowlist-var', 'BORGVK_.*',
   ],
   include_directories : [borgvk_inc, include_directories('.')],
   dependencies : [
@@ -163,6 +166,7 @@ borgvk_serial_test = executable(
     inc_include, inc_src, inc_util,
     include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h
   ],
+  link_with : [libborgvk_rs],
   dependencies : borgvk_deps,
 )
 
@@ -182,6 +186,7 @@ borgvk_burst_gen = executable(
     inc_include, inc_src, inc_util,
     include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h
   ],
+  link_with : [libborgvk_rs],
   dependencies : borgvk_deps,
 )
 
