@@ -1,7 +1,8 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-use crate::entrypoint::{entrypoint, handle, slice, vk_error, Handle};
+use crate::device::Device;
+use crate::entrypoint::{entrypoint, handle, pointee, slice, vk_error, Handle};
 use crate::ffi::*;
 use crate::memory::DeviceMemory;
 use crate::object::{allocate, Zeroed};
@@ -76,42 +77,42 @@ fn subresource_layout(image: &Image, sub: &VkImageSubresource) -> VkSubresourceL
     }
 }
 
+pointee!(VkImageCreateInfo, VkImageMemoryRequirementsInfo2, VkImageSubresource2KHR, VkSubresourceLayout2KHR, VkImageViewCreateInfo);
+
 entrypoint! {
-    unsafe fn borgvk_CreateImage(device: VkDevice, info: *const VkImageCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkImage) -> Result<(), VkError> {
-        let dev = device.get().unwrap();
-        let Some(image) = allocate::<Image>(|n| vk_image_create(&mut dev.vk, info, alloc, n)) else {
-            return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
-        };
-        image.size = size(&*info);
+    fn borgvk_CreateImage(device: &Device, info: &VkImageCreateInfo, alloc: *const VkAllocationCallbacks, out: &mut VkImage) -> Result<(), VkError> {
+        let image = unsafe { allocate::<Image>(|n| vk_image_create(device.vk_ptr(), info, alloc, n)) };
+        let image = image.ok_or_else(|| vk_error!(device, VK_ERROR_OUT_OF_HOST_MEMORY))?;
+        image.size = size(info);
         *out = VkImage::from_object(image);
         Ok(())
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_DestroyImage(device: VkDevice, image: VkImage, alloc: *const VkAllocationCallbacks) {
-        if let Some(i) = image.get() {
-            vk_image_destroy(&mut device.get().unwrap().vk, alloc, &mut i.vk);
+    fn borgvk_DestroyImage(device: &Device, image: Option<&mut Image>, alloc: *const VkAllocationCallbacks) {
+        if let Some(i) = image {
+            unsafe { vk_image_destroy(device.vk_ptr(), alloc, &mut i.vk) };
         }
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_GetImageMemoryRequirements2(_device: VkDevice, info: *const VkImageMemoryRequirementsInfo2, reqs: *mut VkMemoryRequirements2) {
-        requirements((*info).image.get().unwrap().size, &mut *reqs);
+    fn borgvk_GetImageMemoryRequirements2(_device: VkDevice, info: &VkImageMemoryRequirementsInfo2, reqs: &mut VkMemoryRequirements2) {
+        requirements(unsafe { info.image.get_ref() }.unwrap().size, reqs);
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_GetImageSubresourceLayout2KHR(_device: VkDevice, image: VkImage, sub: *const VkImageSubresource2KHR, layout: *mut VkSubresourceLayout2KHR) {
-        (*layout).subresourceLayout = subresource_layout(image.get().unwrap(), &(*sub).imageSubresource);
+    fn borgvk_GetImageSubresourceLayout2KHR(_device: VkDevice, image: &Image, sub: &VkImageSubresource2KHR, layout: &mut VkSubresourceLayout2KHR) {
+        layout.subresourceLayout = subresource_layout(image, &sub.imageSubresource);
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_BindImageMemory2(_device: VkDevice, count: u32, infos: *const VkBindImageMemoryInfo) -> VkResult {
-        for i in slice(infos, count) {
-            let image = i.image.get().unwrap();
+    fn borgvk_BindImageMemory2(_device: VkDevice, count: u32, infos: *const VkBindImageMemoryInfo) -> VkResult {
+        for i in unsafe { slice(infos, count) } {
+            let image = unsafe { i.image.get() }.unwrap();
             (image.mem, image.offset) = (i.memory.ptr(), i.memoryOffset);
         }
         VK_SUCCESS
@@ -119,11 +120,10 @@ entrypoint! {
 }
 
 entrypoint! {
-    unsafe fn borgvk_CreateImageView(device: VkDevice, info: *const VkImageViewCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkImageView) -> Result<(), VkError> {
-        let dev = device.get().unwrap();
-        let v = vk_image_view_create(&mut dev.vk, info, alloc, size_of::<vk_image_view>()).cast::<vk_image_view>();
+    fn borgvk_CreateImageView(device: &Device, info: &VkImageViewCreateInfo, alloc: *const VkAllocationCallbacks, out: &mut VkImageView) -> Result<(), VkError> {
+        let v = unsafe { vk_image_view_create(device.vk_ptr(), info, alloc, size_of::<vk_image_view>()) }.cast::<vk_image_view>();
         if v.is_null() {
-            return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
+            return Err(vk_error!(device, VK_ERROR_OUT_OF_HOST_MEMORY));
         }
         *out = VkImageView::from_object(v);
         Ok(())
@@ -131,9 +131,9 @@ entrypoint! {
 }
 
 entrypoint! {
-    unsafe fn borgvk_DestroyImageView(device: VkDevice, view: VkImageView, alloc: *const VkAllocationCallbacks) {
-        if let Some(v) = view.get() {
-            vk_image_view_destroy(&mut device.get().unwrap().vk, alloc, v);
+    fn borgvk_DestroyImageView(device: &Device, view: Option<&mut vk_image_view>, alloc: *const VkAllocationCallbacks) {
+        if let Some(v) = view {
+            unsafe { vk_image_view_destroy(device.vk_ptr(), alloc, v) };
         }
     }
 }

@@ -40,6 +40,12 @@ pub trait Handle: Copy {
         debug_assert!(o.is_null() || unsafe { (*o.cast::<vk_object_base>()).type_ } == Self::TYPE);
         unsafe { o.as_mut() }
     }
+
+    /// # Safety
+    /// The handle is null or a live object of this type.
+    unsafe fn get_ref<'a>(self) -> Option<&'a Self::Object> {
+        unsafe { self.get() }.map(|o| &*o)
+    }
 }
 
 macro_rules! handle {
