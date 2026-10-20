@@ -92,6 +92,163 @@ pub unsafe extern "C" fn borgvk_vertex_format_to_fetch(
     fetch.is_some()
 }
 
+pub fn bytes_packed(f: VkFormat) -> bool {
+    f == VK_FORMAT_R8G8B8A8_UINT || f == VK_FORMAT_R8G8B8A8_SINT
+}
+
+pub fn raw32(f: VkFormat) -> bool {
+    f == VK_FORMAT_R32_UINT || f == VK_FORMAT_R32_SINT || f == VK_FORMAT_R32_SFLOAT
+}
+
+pub fn half1(f: VkFormat) -> bool {
+    f == VK_FORMAT_R16_SFLOAT
+}
+
+pub fn half2(f: VkFormat) -> bool {
+    f == VK_FORMAT_R16G16_SFLOAT
+}
+
+/// UNORM formats with uneven channels: (format, borgc packed_layout number, bytes, alpha).
+const UNEVEN: [(VkFormat, u32, u32, bool); 14] = [
+    (VK_FORMAT_A1R5G5B5_UNORM_PACK16, 0, 2, true),
+    (VK_FORMAT_R5G5B5A1_UNORM_PACK16, 1, 2, true),
+    (VK_FORMAT_B5G5R5A1_UNORM_PACK16, 2, 2, true),
+    (VK_FORMAT_R4G4B4A4_UNORM_PACK16, 3, 2, true),
+    (VK_FORMAT_B4G4R4A4_UNORM_PACK16, 4, 2, true),
+    (VK_FORMAT_A4R4G4B4_UNORM_PACK16, 5, 2, true),
+    (VK_FORMAT_A4B4G4R4_UNORM_PACK16, 6, 2, true),
+    (VK_FORMAT_A2B10G10R10_UNORM_PACK32, 7, 4, true),
+    (VK_FORMAT_A2R10G10B10_UNORM_PACK32, 8, 4, true),
+    (VK_FORMAT_B5G6R5_UNORM_PACK16, 9, 2, false),
+    (VK_FORMAT_R4G4_UNORM_PACK8, 10, 1, false),
+    (VK_FORMAT_R5G6B5_UNORM_PACK16, 11, 2, false),
+    (VK_FORMAT_A2B10G10R10_UINT_PACK32, 12, 4, true),
+    (VK_FORMAT_A2R10G10B10_UINT_PACK32, 13, 4, true),
+];
+
+/// The fragment shader's packing option word for a raw attachment format, and its bytes per
+/// pixel; None for the natively flushed formats and those not packed.
+pub fn packed_info(f: VkFormat) -> Option<(u32, u32)> {
+    if f == VK_FORMAT_R8_UNORM || f == VK_FORMAT_R8G8B8A8_UNORM || f == VK_FORMAT_B8G8R8A8_UNORM
+        || bytes_packed(f) || half1(f) || half2(f) || raw32(f)
+    {
+        return None;
+    }
+    if let Some(&(_, id, bytes, alpha)) = UNEVEN.iter().find(|u| u.0 == f) {
+        let opt = BORGC_FS_PACKED
+            | 3 << BORGC_FS_PACKED_SIZE_SHIFT
+            | (id & 7) << BORGC_FS_PACKED_KIND_SHIFT
+            | (id >> 3) << BORGC_FS_PACKED_N_SHIFT
+            | if alpha { BORGC_FS_ALPHA_OUTPUT } else { 0 };
+        return Some((opt, bytes));
+    }
+    let d = unsafe { util_format_description(vk_format_to_pipe_format(f)).as_ref() }?;
+    let n = d.nr_channels();
+    if d.layout != UTIL_FORMAT_LAYOUT_PLAIN || !(1..=4).contains(&n) {
+        return None;
+    }
+    let ch = &d.channel[..n as usize];
+    let bits = ch[0].size();
+    if !matches!(bits, 8 | 16 | 32) || ch.iter().any(|c| c.size() != bits) {
+        return None;
+    }
+    let bytes = n * bits / 8;
+    if bytes > 16 {
+        return None;
+    }
+    let is_float = ch[0].type_() == UTIL_FORMAT_TYPE_FLOAT;
+    if is_float && bits == 16 {
+        let extra = match n {
+            3 => BORGC_FS_HALF3,
+            4 => BORGC_FS_HALF4 | BORGC_FS_ALPHA_OUTPUT,
+            _ => 0,
+        };
+        return Some((BORGC_FS_HALF | extra, bytes));
+    }
+    let kind = if d.colorspace == UTIL_FORMAT_COLORSPACE_SRGB {
+        2
+    } else if ch[0].pure_integer() != 0 || is_float {
+        3
+    } else if bits < 32 && ch[0].normalized() != 0 {
+        if ch[0].type_() == UTIL_FORMAT_TYPE_SIGNED { 1 } else { 0 }
+    } else {
+        return None;
+    };
+    let swap = n >= 3 && d.swizzle[0] as u32 == PIPE_SWIZZLE_Z;
+    let size = match bits {
+        8 => 0,
+        16 => 1,
+        _ => 2,
+    };
+    let opt = BORGC_FS_PACKED
+        | kind << BORGC_FS_PACKED_KIND_SHIFT
+        | size << BORGC_FS_PACKED_SIZE_SHIFT
+        | (n - 1) << BORGC_FS_PACKED_N_SHIFT
+        | (swap as u32) << BORGC_FS_PACKED_SWAP_SHIFT
+        | if n == 4 { BORGC_FS_ALPHA_OUTPUT } else { 0 };
+    Some((opt, bytes))
+}
+
+/// The tile flusher's format code for a colour attachment.
+pub fn flush_format(f: VkFormat) -> u8 {
+    if let Some((_, bytes)) = packed_info(f) {
+        return match bytes {
+            1 => 5,
+            2 => 4,
+            ..=4 => 3,
+            ..=8 => 6,
+            _ => 7,
+        };
+    }
+    match f {
+        VK_FORMAT_R8_UNORM => 5,
+        VK_FORMAT_R8G8B8A8_UNORM => 1,
+        VK_FORMAT_B8G8R8A8_UNORM => 2,
+        _ if half1(f) => 4,
+        _ if raw32(f) || bytes_packed(f) || half2(f) => 3,
+        _ => 0,
+    }
+}
+
+pub fn depth_is_d32(f: VkFormat) -> bool {
+    !(f == VK_FORMAT_D16_UNORM || f == VK_FORMAT_D16_UNORM_S8_UINT)
+}
+
+#[no_mangle]
+pub extern "C" fn borgvk_sim_bytes_packed(f: VkFormat) -> bool {
+    bytes_packed(f)
+}
+
+#[no_mangle]
+pub extern "C" fn borgvk_sim_raw32(f: VkFormat) -> bool {
+    raw32(f)
+}
+
+#[no_mangle]
+pub extern "C" fn borgvk_sim_half1(f: VkFormat) -> bool {
+    half1(f)
+}
+
+#[no_mangle]
+pub extern "C" fn borgvk_sim_half2(f: VkFormat) -> bool {
+    half2(f)
+}
+
+#[no_mangle]
+pub extern "C" fn borgvk_sim_packed_opt(f: VkFormat) -> u32 {
+    packed_info(f).map_or(0, |(opt, _)| opt)
+}
+
+#[no_mangle]
+pub extern "C" fn borgvk_sim_flush_format(f: VkFormat) -> u8 {
+    flush_format(f)
+}
+
+#[no_mangle]
+pub extern "C" fn borgvk_sim_depth_is_d32(f: VkFormat) -> bool {
+    depth_is_d32(f)
+}
+
 /// Converts `n` texels from `src` to the layout the texture unit reads.
 pub fn tex_convert(c: &tex_conv, dst: &mut [u8], src: &[u8], n: usize) {
     let (bpp, obpp, cs) = (c.bpp as usize, c.obpp as usize, c.cs as usize);
@@ -195,6 +352,25 @@ mod tests {
     #[test]
     fn r8_unorm() {
         assert_eq!(vertex_fetch(VK_FORMAT_R8_UNORM), Some(Fetch { code: 1, swz: 0, read_bytes: 1 }));
+    }
+
+    #[test]
+    fn flush_formats() {
+        assert_eq!(flush_format(VK_FORMAT_R8G8B8A8_UNORM), 1);
+        assert_eq!(flush_format(VK_FORMAT_B8G8R8A8_UNORM), 2);
+        assert_eq!(flush_format(VK_FORMAT_R32_SFLOAT), 3);
+        assert_eq!(flush_format(VK_FORMAT_R16_SFLOAT), 4);
+        assert_eq!(flush_format(VK_FORMAT_R8_UNORM), 5);
+        assert_eq!(flush_format(VK_FORMAT_R5G6B5_UNORM_PACK16), 4);
+        assert_eq!(flush_format(VK_FORMAT_R4G4_UNORM_PACK8), 5);
+    }
+
+    #[test]
+    fn uneven_formats_pack_by_number() {
+        let (opt, bytes) = packed_info(VK_FORMAT_A2B10G10R10_UINT_PACK32).unwrap();
+        assert_eq!(bytes, 4);
+        assert_eq!(opt, BORGC_FS_PACKED | 3 << BORGC_FS_PACKED_SIZE_SHIFT | 4 << BORGC_FS_PACKED_KIND_SHIFT | 1 << BORGC_FS_PACKED_N_SHIFT | BORGC_FS_ALPHA_OUTPUT);
+        assert_eq!(packed_info(VK_FORMAT_R8G8B8A8_UNORM), None);
     }
 
     #[test]

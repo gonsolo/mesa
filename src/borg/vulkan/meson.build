@@ -93,6 +93,9 @@ _borgvk_bindings_rs = rust.bindgen(
     bindgen_output_args, '--no-prepend-enum-name', '--with-derive-default',
     '--allowlist-type', 'VkFormat|tex_conv|borgvk_image|borgvk_vp|pipe_format',
     '--allowlist-type', 'VkGraphicsPipelineCreateInfo|VkPipelineColorBlendStateCreateInfo|mesa_log_level',
+    '--allowlist-function', 'util_format_description|vk_format_to_pipe_format',
+    '--allowlist-type', 'pipe_swizzle|util_format_type',
+    '--allowlist-var', 'BORGC_.*',
     '--allowlist-function', 'mesa_log|malloc|realloc|free|tcgetattr|tcsetattr|cfmakeraw|cfsetispeed|cfsetospeed|tcdrain',
     '--allowlist-type', 'termios',
     '--allowlist-var', 'BORGVK_.*|B115200|TCSANOW|CLOCAL|CREAD|CRTSCTS|O_NOCTTY',
@@ -139,6 +142,7 @@ if with_tests and get_option('b_sanitize') == 'none'
     libborgvk_rs,
     suite : ['borg', 'rs'],
     rust_args : ['-C', 'default-linker-libraries'],
+    dependencies : [idep_vulkan_util, idep_mesautil],
   )
 endif
 

@@ -220,106 +220,6 @@ sim_set_size(struct sim_srv *S, uint32_t w, uint32_t h)
 }
 
 bool
-borgvk_sim_bytes_packed(VkFormat f)
-{
-   return f == VK_FORMAT_R8G8B8A8_UINT || f == VK_FORMAT_R8G8B8A8_SINT;
-}
-
-bool
-borgvk_sim_raw32(VkFormat f)
-{
-   return f == VK_FORMAT_R32_UINT || f == VK_FORMAT_R32_SINT || f == VK_FORMAT_R32_SFLOAT;
-}
-
-bool
-borgvk_sim_half1(VkFormat f)
-{
-   return f == VK_FORMAT_R16_SFLOAT;
-}
-
-bool
-borgvk_sim_half2(VkFormat f)
-{
-   return f == VK_FORMAT_R16G16_SFLOAT;
-}
-
-static bool
-packed_info(VkFormat f, uint32_t *opt, unsigned *bytes)
-{
-   if (f == VK_FORMAT_R8_UNORM || f == VK_FORMAT_R8G8B8A8_UNORM || f == VK_FORMAT_B8G8R8A8_UNORM ||
-       borgvk_sim_bytes_packed(f) || borgvk_sim_half1(f) || borgvk_sim_half2(f) || borgvk_sim_raw32(f))
-      return false;
-   /* UNORM formats with uneven channels, by number (borgc packed_layout). */
-   static const struct { VkFormat f; uint8_t id, bytes, alpha; } uneven[] = {
-      { VK_FORMAT_A1R5G5B5_UNORM_PACK16, 0, 2, 1 },  { VK_FORMAT_R5G5B5A1_UNORM_PACK16, 1, 2, 1 },
-      { VK_FORMAT_B5G5R5A1_UNORM_PACK16, 2, 2, 1 },  { VK_FORMAT_R4G4B4A4_UNORM_PACK16, 3, 2, 1 },
-      { VK_FORMAT_B4G4R4A4_UNORM_PACK16, 4, 2, 1 },  { VK_FORMAT_A4R4G4B4_UNORM_PACK16, 5, 2, 1 },
-      { VK_FORMAT_A4B4G4R4_UNORM_PACK16, 6, 2, 1 },  { VK_FORMAT_A2B10G10R10_UNORM_PACK32, 7, 4, 1 },
-      { VK_FORMAT_A2R10G10B10_UNORM_PACK32, 8, 4, 1 }, { VK_FORMAT_B5G6R5_UNORM_PACK16, 9, 2, 0 },
-      { VK_FORMAT_R4G4_UNORM_PACK8, 10, 1, 0 },       { VK_FORMAT_R5G6B5_UNORM_PACK16, 11, 2, 0 },
-      { VK_FORMAT_A2B10G10R10_UINT_PACK32, 12, 4, 1 }, { VK_FORMAT_A2R10G10B10_UINT_PACK32, 13, 4, 1 },
-   };
-   for (unsigned i = 0; i < ARRAY_SIZE(uneven); i++) {
-      if (uneven[i].f == f) {
-         *opt = BORGC_FS_PACKED | 3u << BORGC_FS_PACKED_SIZE_SHIFT | (uneven[i].id & 7u) << BORGC_FS_PACKED_KIND_SHIFT |
-                 (uneven[i].id >> 3) << BORGC_FS_PACKED_N_SHIFT | (uneven[i].alpha ? BORGC_FS_ALPHA_OUTPUT : 0u);
-         *bytes = uneven[i].bytes;
-         return true;
-      }
-   }
-   const struct util_format_description *d = vk_format_description(f);
-   if (!d || d->layout != UTIL_FORMAT_LAYOUT_PLAIN || d->nr_channels < 1 || d->nr_channels > 4)
-      return false;
-   const unsigned n = d->nr_channels, bits = d->channel[0].size;
-   if (bits != 8 && bits != 16 && bits != 32)
-      return false;
-   for (unsigned i = 0; i < n; i++)
-      if (d->channel[i].size != bits)
-         return false;
-   *bytes = n * bits / 8;
-   if (*bytes > 16)
-      return false;
-   const bool is_float = d->channel[0].type == UTIL_FORMAT_TYPE_FLOAT;
-   if (is_float && bits == 16) {
-      *opt = BORGC_FS_HALF | (n == 3 ? BORGC_FS_HALF3 : n == 4 ? BORGC_FS_HALF4 | BORGC_FS_ALPHA_OUTPUT : 0u);
-      return true;
-   }
-   uint32_t kind;
-   if (d->colorspace == UTIL_FORMAT_COLORSPACE_SRGB)
-      kind = 2;
-   else if (d->channel[0].pure_integer || is_float)
-      kind = 3;   /* the bits as they are */
-   else if (bits < 32 && d->channel[0].normalized)
-      kind = d->channel[0].type == UTIL_FORMAT_TYPE_SIGNED ? 1 : 0;
-   else
-      return false;
-   const bool swap = n >= 3 && d->swizzle[0] == PIPE_SWIZZLE_Z;
-   *opt = BORGC_FS_PACKED | kind << BORGC_FS_PACKED_KIND_SHIFT | (bits == 8 ? 0u : bits == 16 ? 1u : 2u) << BORGC_FS_PACKED_SIZE_SHIFT |
-           (n - 1) << BORGC_FS_PACKED_N_SHIFT | swap << BORGC_FS_PACKED_SWAP_SHIFT | (n == 4 ? BORGC_FS_ALPHA_OUTPUT : 0u);
-   return true;
-}
-
-uint32_t
-borgvk_sim_packed_opt(VkFormat f)
-{
-   uint32_t opt;
-   unsigned bytes;
-   return packed_info(f, &opt, &bytes) ? opt : 0;
-}
-
-uint8_t
-borgvk_sim_flush_format(VkFormat f)
-{
-   uint32_t opt;
-   unsigned bytes;
-   if (packed_info(f, &opt, &bytes))
-      return bytes == 1 ? 5 : bytes == 2 ? 4 : bytes <= 4 ? 3 : bytes <= 8 ? 6 : 7;
-   return f == VK_FORMAT_R8_UNORM ? 5 : borgvk_sim_half1(f) ? 4 :
-          f == VK_FORMAT_R8G8B8A8_UNORM ? 1 : f == VK_FORMAT_B8G8R8A8_UNORM ? 2 :
-          borgvk_sim_raw32(f) || borgvk_sim_bytes_packed(f) || borgvk_sim_half2(f) ? 3 : 0;
-}
-
-bool
 borgvk_sim_serves(const struct borgvk_image *color, bool has_depth_stencil)
 {
    return color && borgvk_sim_serves_extent(color->vk.extent.width, color->vk.extent.height, has_depth_stencil);
@@ -432,12 +332,6 @@ pack_s(enum pipe_format pfmt, uint8_t *texel, uint8_t s)
       return;
    }
    util_format_pack_s_8uint(pfmt, texel, &s, 1);
-}
-
-bool
-borgvk_sim_depth_is_d32(VkFormat f)
-{
-   return !(f == VK_FORMAT_D16_UNORM || f == VK_FORMAT_D16_UNORM_S8_UINT);
 }
 
 VkResult

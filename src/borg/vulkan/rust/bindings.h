@@ -5,6 +5,8 @@
 #include "borgvk_private.h"
 #include "util/format/u_formats.h"
 #include "util/log.h"
+#include "vk_format.h"
+#include "borgc_flags.h"
 
 #include <fcntl.h>
 #include <stdlib.h>
