@@ -1,11 +1,18 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-//! The physical device's queries: format features and image limits.
+//! The physical device: its properties, queue family, memory and format queries, and the
+//! search for a Borg DRM device.
 
-use crate::entrypoint::{chain, entrypoint};
+use crate::entrypoint::{chain, entrypoint, vk_error, Handle};
 use crate::ffi::*;
 use crate::image::blocks;
+use crate::sync::borgvk_sync_type;
+use crate::util::log;
+use crate::wsi::{borgvk_wsi_finish, borgvk_wsi_init};
+use std::ffi::CStr;
+
+pub const API_VERSION: u32 = 1 << 22; // VK_API_VERSION_1_0
 
 pub const SC_MSAA: VkSampleCountFlags = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
 pub const SC_INTEGER: VkSampleCountFlags = VK_SAMPLE_COUNT_1_BIT;
@@ -239,5 +246,188 @@ entrypoint! {
 entrypoint! {
     fn borgvk_GetPhysicalDeviceExternalBufferProperties(_pd: VkPhysicalDevice, _info: *const VkPhysicalDeviceExternalBufferInfo, props: *mut VkExternalBufferProperties) {
         (*props).externalMemoryProperties = std::mem::zeroed();
+    }
+}
+
+entrypoint! {
+    fn borgvk_GetPhysicalDeviceQueueFamilyProperties2(_pd: VkPhysicalDevice, count: *mut u32, props: *mut VkQueueFamilyProperties2) {
+        // One family: graphics, compute and transfer, a single queue.
+        if props.is_null() {
+            *count = 1;
+            return;
+        }
+        if *count == 0 {
+            return;
+        }
+        *count = 1;
+        (*props).queueFamilyProperties = VkQueueFamilyProperties {
+            queueFlags: VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
+            queueCount: 1,
+            timestampValidBits: 0,
+            minImageTransferGranularity: VkExtent3D { width: 1, height: 1, depth: 1 },
+        };
+    }
+}
+
+entrypoint! {
+    fn borgvk_GetPhysicalDeviceMemoryProperties2(pd: VkPhysicalDevice, props: *mut VkPhysicalDeviceMemoryProperties2) {
+        (*props).memoryProperties = pd.get().unwrap().memory;
+    }
+}
+
+fn set_name<const N: usize>(dst: &mut [std::ffi::c_char; N], s: &str) {
+    for (d, &b) in dst.iter_mut().zip(s.as_bytes().iter().chain(&[0])) {
+        *d = b as _;
+    }
+}
+
+fn properties() -> vk_properties {
+    let mut p: vk_properties = unsafe { std::mem::zeroed() };
+    p.apiVersion = API_VERSION;
+    p.driverVersion = 1 << 12; // 0.1.0
+    p.vendorID = 0x1de0; // not a registered ID
+    p.deviceID = 0xb049;
+    p.deviceType = VK_PHYSICAL_DEVICE_TYPE_OTHER;
+
+    (p.maxImageDimension1D, p.maxImageDimension2D, p.maxImageDimension3D, p.maxImageDimensionCube) = (4096, 4096, 256, 4096);
+    (p.maxImageArrayLayers, p.maxTexelBufferElements, p.maxUniformBufferRange, p.maxStorageBufferRange) = (256, 65536, 65536, u32::MAX);
+    (p.maxPushConstantsSize, p.maxMemoryAllocationCount, p.maxSamplerAllocationCount) = (128, 4096, 4000);
+    (p.bufferImageGranularity, p.maxBoundDescriptorSets, p.maxPerStageResources) = (1, 8, 128);
+    (p.maxVertexInputAttributes, p.maxVertexInputBindings, p.maxVertexInputAttributeOffset, p.maxVertexInputBindingStride) = (16, 16, 2047, 2048);
+    (p.maxVertexOutputComponents, p.maxFragmentInputComponents) = (64, 64);
+    (p.maxFragmentOutputAttachments, p.maxFragmentCombinedOutputResources, p.maxColorAttachments) = (4, 4, 4);
+    (p.maxFramebufferWidth, p.maxFramebufferHeight, p.maxFramebufferLayers) = (4096, 4096, 256);
+    (p.maxViewports, p.maxViewportDimensions, p.viewportBoundsRange) = (1, [4096, 4096], [-8192.0, 8191.0]);
+
+    // Descriptor limits: the spec's minimums.
+    (p.maxPerStageDescriptorSamplers, p.maxPerStageDescriptorUniformBuffers, p.maxPerStageDescriptorStorageBuffers) = (16, 12, 4);
+    (p.maxPerStageDescriptorSampledImages, p.maxPerStageDescriptorStorageImages, p.maxPerStageDescriptorInputAttachments) = (16, 4, 4);
+    (p.maxDescriptorSetSamplers, p.maxDescriptorSetUniformBuffers, p.maxDescriptorSetUniformBuffersDynamic) = (96, 72, 8);
+    (p.maxDescriptorSetStorageBuffers, p.maxDescriptorSetStorageBuffersDynamic, p.maxDescriptorSetSampledImages) = (24, 4, 96);
+    (p.maxDescriptorSetStorageImages, p.maxDescriptorSetInputAttachments) = (24, 4);
+
+    (p.maxComputeSharedMemorySize, p.maxComputeWorkGroupCount) = (16384, [65535; 3]);
+    (p.maxComputeWorkGroupInvocations, p.maxComputeWorkGroupSize) = (128, [128, 128, 64]);
+
+    (p.maxSamplerLodBias, p.minTexelOffset, p.maxTexelOffset) = (15.0, -8, 7); // BorgSampler.MaxLodBias
+
+    (p.minMemoryMapAlignment, p.minTexelBufferOffsetAlignment) = (64, 64);
+    (p.minUniformBufferOffsetAlignment, p.minStorageBufferOffsetAlignment, p.nonCoherentAtomSize) = (256, 256, 1);
+    (p.storageTexelBufferOffsetAlignmentBytes, p.uniformTexelBufferOffsetAlignmentBytes) = (256, 256);
+    (p.storageTexelBufferOffsetSingleTexelAlignment, p.uniformTexelBufferOffsetSingleTexelAlignment) = (VK_TRUE, VK_TRUE);
+
+    (p.framebufferColorSampleCounts, p.framebufferDepthSampleCounts) = (SC_MSAA, SC_MSAA);
+    (p.framebufferStencilSampleCounts, p.framebufferNoAttachmentsSampleCounts) = (SC_MSAA, SC_MSAA);
+    (p.sampledImageColorSampleCounts, p.sampledImageIntegerSampleCounts) = (SC_MSAA, SC_INTEGER);
+    (p.sampledImageDepthSampleCounts, p.sampledImageStencilSampleCounts, p.storageImageSampleCounts) = (SC_MSAA, SC_MSAA, SC_STORAGE);
+    (p.maxSampleMaskWords, p.discreteQueuePriorities) = (1, 2);
+
+    (p.maxSamplerAnisotropy, p.maxDrawIndexedIndexValue, p.maxDrawIndirectCount) = (1.0, u32::MAX, u32::MAX);
+    (p.pointSizeRange, p.lineWidthRange, p.pointSizeGranularity, p.lineWidthGranularity) = ([1.0, 64.0], [1.0, 1.0], 0.125, 0.0);
+    (p.optimalBufferCopyOffsetAlignment, p.optimalBufferCopyRowPitchAlignment) = (1, 1);
+    (p.subPixelPrecisionBits, p.subTexelPrecisionBits, p.mipmapPrecisionBits, p.subPixelInterpolationOffsetBits) = (8, 8, 8, 8);
+
+    (p.maxMultiviewViewCount, p.maxMultiviewInstanceIndex, p.maxPerSetDescriptors) = (6, (1 << 27) - 1, 1024);
+    p.maxMemoryAllocationSize = 1 << 30;
+    p.framebufferIntegerColorSampleCounts = VK_SAMPLE_COUNT_1_BIT;
+    p.maxTimelineSemaphoreValueDifference = i64::MAX as u64;
+    p.maxInlineUniformTotalSize = 256;
+    p.driverID = VK_DRIVER_ID_MESA_DOZEN; // until Borg has an ID
+    p.conformanceVersion = VkConformanceVersion { major: 1, minor: 3, subminor: 0, patch: 0 };
+
+    set_name(&mut p.deviceName, "Borg (ULX3S)");
+    set_name(&mut p.driverName, "borgvk");
+    set_name(&mut p.driverInfo, "Mesa borgvk (serial/FPGA)");
+    p
+}
+
+unsafe fn create(instance: &mut borgvk_instance, drm_fd: i32) -> VkResult {
+    let d = unsafe { vk_zalloc(&instance.vk.alloc, size_of::<borgvk_physical_device>(), 8, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE) };
+    let Some(d) = (unsafe { d.cast::<borgvk_physical_device>().as_mut() }) else { return vk_error!(instance, VK_ERROR_OUT_OF_HOST_MEMORY).0 };
+    d.drm_fd = drm_fd;
+    let mut dispatch: vk_physical_device_dispatch_table = unsafe { std::mem::zeroed() };
+    let mut extensions: vk_device_extension_table = unsafe { std::mem::zeroed() };
+    let mut features: vk_features = unsafe { std::mem::zeroed() };
+    unsafe {
+        vk_physical_device_dispatch_table_from_entrypoints(&mut dispatch, &borgvk_physical_device_entrypoints, true);
+        vk_physical_device_dispatch_table_from_entrypoints(&mut dispatch, &wsi_physical_device_entrypoints, false);
+        extensions.__bindgen_anon_1.__bindgen_anon_1.KHR_swapchain = true;
+    }
+    features.robustBufferAccess = true;
+    features.textureCompressionBC = true; // the spec wants one compressed family
+    features.largePoints = true;
+    let r = unsafe { vk_physical_device_init(&mut d.vk, &mut instance.vk, &extensions, &features, &properties(), &dispatch) };
+    if r != VK_SUCCESS {
+        unsafe { vk_free(&instance.vk.alloc, std::ptr::from_mut(d).cast()) };
+        return r;
+    }
+    // One host-visible coherent heap: host RAM, staged to the board.
+    let m = &mut d.memory;
+    m.memoryHeapCount = 1;
+    m.memoryHeaps[0].size = 256 << 20;
+    m.memoryHeaps[0].flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
+    m.memoryTypeCount = 1;
+    m.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    m.memoryTypes[0].heapIndex = 0;
+    d.sync_types = [&borgvk_sync_type, std::ptr::null()];
+    d.vk.supported_sync_types = d.sync_types.as_ptr();
+    let r = unsafe { borgvk_wsi_init(d) };
+    if r != VK_SUCCESS {
+        unsafe {
+            vk_physical_device_finish(&mut d.vk);
+            vk_free(&instance.vk.alloc, std::ptr::from_mut(d).cast());
+        }
+        return r;
+    }
+    unsafe { list_addtail(&mut d.vk.link, &mut instance.vk.physical_devices.list) };
+    VK_SUCCESS
+}
+
+fn find_borg_drm_device() -> i32 {
+    for i in 128..192 {
+        let path = format!("/dev/dri/renderD{i}\0");
+        let fd = unsafe { open(path.as_ptr().cast(), (O_RDWR | O_CLOEXEC) as i32) };
+        if fd < 0 {
+            continue;
+        }
+        let ver = unsafe { drmGetVersion(fd) };
+        if !ver.is_null() {
+            let name = unsafe { (*ver).name };
+            let borg = !name.is_null() && unsafe { CStr::from_ptr(name) } == c"borg";
+            unsafe { drmFreeVersion(ver) };
+            if borg {
+                return fd;
+            }
+        }
+        unsafe { close(fd) };
+    }
+    -1
+}
+
+/// # Safety
+/// `instance` is a borgvk instance.
+#[no_mangle]
+pub unsafe extern "C" fn borgvk_enumerate_devices(instance: *mut vk_instance) -> VkResult {
+    let fd = find_borg_drm_device();
+    if fd >= 0 {
+        log(MESA_LOG_INFO, format!("borgvk: found borg DRM device (fd {fd})"));
+    } else {
+        log(MESA_LOG_INFO, "borgvk: no borg DRM device; using malloc+serial fallback".into());
+    }
+    unsafe { create(&mut *instance.cast(), fd) }
+}
+
+/// # Safety
+/// `pdev` is a borgvk physical device.
+#[no_mangle]
+pub unsafe extern "C" fn borgvk_destroy_physical_device(pdev: *mut vk_physical_device) {
+    let d = pdev.cast::<borgvk_physical_device>();
+    unsafe {
+        borgvk_wsi_finish(d);
+        if (*d).drm_fd >= 0 {
+            close((*d).drm_fd);
+        }
+        vk_physical_device_finish(pdev);
+        vk_free(&(*(*pdev).instance).alloc, pdev.cast());
     }
 }

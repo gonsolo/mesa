@@ -17,6 +17,7 @@
 #include "vk_cmd_queue.h"
 #include "vk_instance.h"
 #include "wsi_common.h"
+#include "wsi_common_entrypoints.h"
 #include "vulkan/vk_icd.h"
 #include "vk_alloc.h"
 #include "vk_command_buffer.h"
