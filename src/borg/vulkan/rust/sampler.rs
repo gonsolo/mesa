@@ -5,9 +5,19 @@
 
 use crate::entrypoint::{entrypoint, handle, vk_error, Handle};
 use crate::ffi::*;
+use crate::object::{allocate, Zeroed};
 use borg_layout::descriptor::SamplerDesc;
 
-handle!(VkSampler, borgvk_sampler, VK_OBJECT_TYPE_SAMPLER);
+handle!(VkSampler, Sampler, VK_OBJECT_TYPE_SAMPLER);
+
+#[repr(C)]
+pub struct Sampler {
+    pub vk: vk_sampler,
+    pub desc: [u32; 4],
+}
+
+// Numbers and the runtime's sampler, which it zero-allocates.
+unsafe impl Zeroed for Sampler {}
 
 pub fn desc(i: &VkSamplerCreateInfo) -> SamplerDesc {
     SamplerDesc {
@@ -28,8 +38,7 @@ pub fn desc(i: &VkSamplerCreateInfo) -> SamplerDesc {
 entrypoint! {
     fn borgvk_CreateSampler(device: VkDevice, info: *const VkSamplerCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkSampler) -> Result<(), VkError> {
         let dev = device.get().unwrap();
-        let s = vk_sampler_create(&mut dev.vk, info, alloc, size_of::<borgvk_sampler>()).cast::<borgvk_sampler>();
-        let Some(s) = s.as_mut() else {
+        let Some(s) = allocate::<Sampler>(|n| vk_sampler_create(&mut dev.vk, info, alloc, n)) else {
             return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
         };
         s.desc = desc(&*info).pack();

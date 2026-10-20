@@ -138,7 +138,7 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-type', 'VkDescriptorSetLayoutCreateInfo|VkDescriptorSetLayoutSupport|VkDescriptorPoolCreateInfo',
     '--allowlist-type', 'VkDescriptorSetAllocateInfo|VkWriteDescriptorSet|VkCopyDescriptorSet|VkDescriptorPoolResetFlags',
     '--allowlist-type', 'vk_sync_type|vk_sync_wait|vk_sync_features|vk_sync_wait_flags|VkQueryPoolCreateInfo|VkQueryPool|VkImageMemoryRequirementsInfo2|VkImageSubresource2KHR|VkSubresourceLayout2KHR|VkBindImageMemoryInfo|VkImageViewCreateInfo',
-    '--allowlist-type', 'borgvk_sampler|VkSamplerCreateInfo|VkImageCreateInfo|vk_object_base|VkEventCreateInfo|VkDependencyInfo|VkCommandBuffer|VkEvent|VkPipelineStageFlags2?',
+    '--allowlist-type', 'VkSamplerCreateInfo|VkImageCreateInfo|vk_object_base|VkEventCreateInfo|VkDependencyInfo|VkCommandBuffer|VkEvent|VkPipelineStageFlags2?',
     '--allowlist-var', 'BORGC_.*|BORGVK_.*|BC_.*|BORG_(ZB|SB|HEAP)_SPI|DRAM_OUT_BASE_SPI',
     '--allowlist-var', 'B115200|TCSANOW|CLOCAL|CREAD|CRTSCTS|O_NOCTTY',
     '--allowlist-var', 'PROT_(READ|WRITE)|MAP_(PRIVATE|ANONYMOUS|NORESERVE|SHARED)|SIGPIPE|_SC_NPROCESSORS_ONLN',

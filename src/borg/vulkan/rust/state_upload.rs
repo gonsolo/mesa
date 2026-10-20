@@ -7,6 +7,7 @@ use crate::drm::{ioctl, BLEND, PUSH, SHADER, STATE};
 use crate::entrypoint::slice;
 use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
+use crate::sampler::Sampler;
 use crate::device::Device;
 use crate::serial::*;
 use crate::util::{log, MESA_LOG_WARN};
@@ -43,7 +44,7 @@ static DEFAULT_SAMPLER: [u32; 4] = [2 << 3 | 2 << 6 | 2 << 9, 0, 0, 0];
 
 /// # Safety
 /// `sampler` is null or valid.
-pub unsafe fn borgvk_sampler_desc(sampler: *const borgvk_sampler) -> *const u32 {
+pub unsafe fn borgvk_sampler_desc(sampler: *const Sampler) -> *const u32 {
     unsafe { sampler.as_ref() }.map_or(DEFAULT_SAMPLER.as_ptr(), |s| s.desc.as_ptr())
 }
 

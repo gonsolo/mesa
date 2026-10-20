@@ -111,10 +111,6 @@ struct borgvk_buffer_view {
    struct vk_buffer_view vk;
 };
 
-struct borgvk_sampler {
-   struct vk_sampler vk;
-   uint32_t desc[4];
-};
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_device_memory, vk.base, VkDeviceMemory,
                                VK_OBJECT_TYPE_DEVICE_MEMORY)
@@ -122,8 +118,6 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_buffer, vk.base, VkBuffer,
                                VK_OBJECT_TYPE_BUFFER)
 VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_buffer_view, vk.base, VkBufferView,
                                VK_OBJECT_TYPE_BUFFER_VIEW)
-VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_sampler, vk.base, VkSampler,
-                               VK_OBJECT_TYPE_SAMPLER)
 
 struct borgvk_desc_map {
    uint8_t n, num[BORGVK_MAX_BINDINGS], slot[BORGVK_MAX_BINDINGS], count[BORGVK_MAX_BINDINGS];

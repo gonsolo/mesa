@@ -6,6 +6,7 @@
 
 use crate::copy::borgvk_decode_compressed_image;
 use crate::ffi::*;
+use crate::sampler::Sampler;
 use crate::image::Image;
 use crate::format::{borgvk_tex_convert, tex_format};
 use crate::serial::*;
@@ -22,7 +23,7 @@ fn mapped(mem: *mut borgvk_device_memory) -> Option<*const u8> {
     unsafe { mem.as_ref() }.filter(|m| !m.map.is_null()).map(|m| m.map.cast::<u8>().cast_const())
 }
 
-fn send(data: &[u8], desc: &TexDesc, sampler: *const borgvk_sampler) {
+fn send(data: &[u8], desc: &TexDesc, sampler: *const Sampler) {
     let d = desc.pack();
     for off in (0..data.len() as u32).step_by(CHUNK as usize) {
         let n = (data.len() as u32 - off).min(CHUNK);
@@ -34,7 +35,7 @@ fn send(data: &[u8], desc: &TexDesc, sampler: *const borgvk_sampler) {
 ///
 /// # Safety
 /// `tex` is a mapped RGBA8 image, `sampler` null or valid.
-pub unsafe fn borgvk_send_texture_row(tex: *mut Image, sampler: *const borgvk_sampler, dy: i32) {
+pub unsafe fn borgvk_send_texture_row(tex: *mut Image, sampler: *const Sampler, dy: i32) {
     let t = unsafe { &*tex };
     let base = unsafe { (*t.mem).map.cast::<u8>().add(t.offset as usize) };
     let (sw, sh) = (t.vk.extent.width, t.vk.extent.height);
@@ -63,7 +64,7 @@ pub unsafe fn borgvk_send_texture_row(tex: *mut Image, sampler: *const borgvk_sa
 }
 
 /// The view's levels and layers, converted and, unless it is one linear level, tiled.
-fn texture(view: &vk_image_view, img: &Image, sampler: *const borgvk_sampler) -> bool {
+fn texture(view: &vk_image_view, img: &Image, sampler: *const Sampler) -> bool {
     let Some(map) = mapped(img.mem) else { return false };
     let (mut w, mut h) = (img.vk.extent.width, img.vk.extent.height);
     if w == 0 || h == 0 || w > 4096 || h > 4096 {
@@ -201,7 +202,7 @@ fn texture(view: &vk_image_view, img: &Image, sampler: *const borgvk_sampler) ->
 
 /// # Safety
 /// `view` is valid; `img` and `sampler` are null or valid.
-pub unsafe fn borgvk_send_generic_texture(view: *const vk_image_view, img: *const Image, sampler: *const borgvk_sampler) -> bool {
+pub unsafe fn borgvk_send_generic_texture(view: *const vk_image_view, img: *const Image, sampler: *const Sampler) -> bool {
     let (view, Some(img)) = (unsafe { &*view }, unsafe { img.as_ref() }) else { return false };
     if mapped(img.mem).is_none() {
         return false;

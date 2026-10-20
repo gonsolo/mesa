@@ -6,6 +6,7 @@
 
 use crate::entrypoint::{entrypoint, handle, slice, vk_error, Handle};
 use crate::ffi::*;
+use crate::sampler::Sampler;
 use crate::image::Image;
 use crate::device::Device;
 use crate::object::{allocate, Zeroed};
@@ -41,7 +42,7 @@ pub struct DescriptorSet {
     pub ranges: [VkDeviceSize; BINDINGS],
     pub images: [*mut Image; BINDINGS],
     pub views: [*mut vk_image_view; BINDINGS], // behind images[]: view type, format, mip/layer range, swizzle
-    pub samplers: [*mut borgvk_sampler; BINDINGS],
+    pub samplers: [*mut Sampler; BINDINGS],
     pub buffer_views: [*mut vk_buffer_view; BINDINGS], // texel buffers
     pub dyn_mask: u64,      // from the layout: dynamic-offset slots
     pub storage_mask: u32,  // slots whose buffer is a storage buffer
