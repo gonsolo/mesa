@@ -19,6 +19,8 @@ pub const SHADER: u64 = borg(1, DRM_BORG_SHADER, size_of::<drm_borg_shader>());
 pub const BLEND: u64 = borg(1, DRM_BORG_BLEND, size_of::<drm_borg_blend>());
 pub const STATE: u64 = borg(1, DRM_BORG_STATE, size_of::<drm_borg_state>());
 pub const PUSH: u64 = borg(1, DRM_BORG_PUSH, size_of::<drm_borg_push>());
+pub const SETUP: u64 = borg(1, DRM_BORG_SETUP, size_of::<drm_borg_setup>());
+pub const SUBMIT: u64 = borg(1, DRM_BORG_SUBMIT, size_of::<drm_borg_submit>());
 
 pub fn ioctl<T>(fd: i32, request: u64, arg: &mut T) -> bool {
     unsafe { drmIoctl(fd, request as _, (arg as *mut T).cast()) >= 0 }

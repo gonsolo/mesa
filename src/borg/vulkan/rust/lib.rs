@@ -11,6 +11,7 @@ mod cmd_buffer;
 mod compile;
 mod compiler;
 mod corpus;
+mod cube;
 mod descriptor_set;
 mod drm;
 mod entrypoint;

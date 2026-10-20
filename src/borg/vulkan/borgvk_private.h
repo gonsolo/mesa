@@ -341,10 +341,6 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_pipeline, base, VkPipeline,
 }
 #endif
 
-bool borgvk_set_is_cube(struct borgvk_descriptor_set *set);
-bool borgvk_submit_is_cube(struct vk_queue_submit *submit);
-VkResult borgvk_submit_sim_cube(struct borgvk_device *device, struct vk_queue_submit *submit);
-VkResult borgvk_submit_cube_live(struct borgvk_device *device, struct vk_queue_submit *submit);
 struct tex_conv {
    uint32_t bpp, obpp, cs, sch, alpha, pack16, zstride, soff;
    bool swap_rb;

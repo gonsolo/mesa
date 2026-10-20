@@ -4,6 +4,7 @@
 //! Queue submission: the waits, the recorded commands replayed through the device's dispatch
 //! table, the cube path, the signals.
 
+use crate::cube::{borgvk_submit_cube_live, borgvk_submit_is_cube, borgvk_submit_sim_cube};
 use crate::ffi::*;
 
 unsafe fn work(q: &mut vk_queue, submit: &mut vk_queue_submit) -> VkResult {
