@@ -108,7 +108,7 @@ fn layers(view: &vk_image_view, count: u32) -> VkImageSubresourceLayers {
 entrypoint! {
     fn borgvk_CmdEndRendering2EXT(command_buffer: VkCommandBuffer, _info: *const VkRenderingEndInfoEXT) {
         let c = cmd(command_buffer.ptr());
-        borgvk_flush_draws(c);
+        crate::draw::flush_draws(c);
         let ra = c.render_area;
         let at = VkOffset3D { x: ra.offset.x, y: ra.offset.y, z: 0 };
         for i in 0..c.color_attachment_count as usize {

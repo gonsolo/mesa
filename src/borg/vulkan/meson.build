@@ -15,7 +15,6 @@ borgvk_entrypoints = custom_target(
 
 libborgvk_files = files(
   'borgvk_device.c',
-  'borgvk_cmd_draw.c',
   'borgvk_private.h',
 )
 
@@ -116,7 +115,7 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-function', 'vk_descriptor_set_layout_zalloc|list_(inithead|addtail|del)',
     '--allowlist-function', 'vk_blend_(op|factor)_to_pipe|vk_get_pipeline_rendering_create_info|vk_format_(is_int|has_alpha)|util_format_is_srgb',
     '--allowlist-function', 'vk_(zalloc|free)|vk_command_buffer_(init_with_params|reset|finish|begin|end|get_record_result)',
-    '--allowlist-function', 'util_format_(is_scaled|get_first_non_void_channel|is_pure_(integer|uint|sint))|vk_format_has_(depth|stencil)|borgvk_flush_draws|borgvk_decode_compressed_image|util_format_has_alpha|util_format_is_compressed|util_format_unpack_rgba_rect|calloc',
+    '--allowlist-function', 'util_format_(is_scaled|get_first_non_void_channel|is_pure_(integer|uint|sint))|vk_format_has_(depth|stencil)|borgvk_decode_compressed_image|util_format_has_alpha|util_format_is_compressed|util_format_unpack_rgba_rect|calloc',
     '--allowlist-type', 'VkClear(ColorValue|DepthStencilValue|Value|Attachment|Rect)|VkImageSubresourceRange|util_format_type',
     '--allowlist-var', 'VK_REMAINING_(MIP_LEVELS|ARRAY_LAYERS)',
     '--allowlist-function', 'wsi_device_(init|finish)|vk_instance_get_proc_addr_unchecked|vk_alloc2',
@@ -126,6 +125,8 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-type', 'VkRenderPassBeginInfo|VkSubpassContents|VkSubpass(Begin|End)Info',
     '--allowlist-type', 'vk_buffer_view|VkComponentSwizzle|VkBufferCopy|VkCopyBufferInfo2|VkImageCopy|VkCopyImageInfo2|VkImageBlit|VkBlitImageInfo2|VkFilter',
     '--allowlist-var', 'BORGVK_TEXG_CHUNK|BORGVK_TEX_DIM|VK_WHOLE_SIZE',
+    '--allowlist-function', 'util_format_(linear|is_depth_or_stencil|srgb_8unorm_to_linear_float)',
+    '--allowlist-type', 'mesa_vk_dynamic_graphics_state|VkDraw(Indexed)?IndirectCommand',
     '--allowlist-type', 'borgvk_target|VkRenderingInfo|VkRenderingAttachmentInfo|VkImageResolve|VkRenderingEndInfoEXT',
     '--allowlist-type', 'borgvk_command_buffer|vk_command_buffer_ops|vk_command_pool|VkCommandBufferBeginInfo|borg_blend|VkComputePipelineCreateInfo|VkPipelineRenderingCreateInfo|VkPipelineCache',
     '--allowlist-type', 'borgvk_descriptor_pool|borgvk_descriptor_set|VkDescriptorSetLayoutCreateInfo|VkDescriptorSetLayoutSupport|VkDescriptorPoolCreateInfo',

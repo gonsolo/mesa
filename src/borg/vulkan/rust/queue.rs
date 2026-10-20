@@ -12,7 +12,7 @@ unsafe fn work(q: &mut vk_queue, submit: &mut vk_queue_submit) -> VkResult {
     for &cb in unsafe { crate::entrypoint::slice(submit.command_buffers, submit.command_buffer_count) } {
         unsafe {
             vk_cmd_queue_execute(&mut (*cb).cmd_queue, cb.cast(), &device.cmd_dispatch);
-            borgvk_flush_draws(cb.cast()); // draws outside a pass end
+            crate::draw::flush_draws(&mut *cb.cast()); // draws outside a pass end
         }
     }
     if std::env::var_os("BORGVK_SIM").is_some() || crate::hw::enabled() {

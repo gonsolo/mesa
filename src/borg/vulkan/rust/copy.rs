@@ -60,7 +60,7 @@ entrypoint! {
 }
 
 /// The image's bytes from its binding on, when it is bound to mapped memory.
-fn image_host(i: &borgvk_image) -> Option<*mut u8> {
+pub fn image_host(i: &borgvk_image) -> Option<*mut u8> {
     let m = unsafe { i.mem.as_ref() }.filter(|m| !m.map.is_null())?;
     Some(unsafe { m.map.cast::<u8>().add(i.offset as usize) })
 }

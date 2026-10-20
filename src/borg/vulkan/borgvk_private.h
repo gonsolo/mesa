@@ -167,8 +167,6 @@ struct borgvk_command_buffer {
    VkDeviceSize dyn_offs[4][BORGVK_MAX_BINDINGS];
 };
 
-struct borgvk_command_buffer;
-void borgvk_flush_draws(struct borgvk_command_buffer *cmd);
 
 /* The persistent simulator (borgvk_sim.c). */
 struct borgvk_image;

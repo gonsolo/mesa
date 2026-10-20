@@ -5,6 +5,7 @@
 #include "borgvk_private.h"
 #include "util/format/u_formats.h"
 #include "util/log.h"
+#include "util/format_srgb.h"
 #include "vk_format.h"
 #include "vk_pipeline_layout.h"
 #include "vk_sampler.h"

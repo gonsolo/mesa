@@ -121,7 +121,7 @@ pub unsafe extern "C" fn borgvk_clear_attachment_rect(
 entrypoint! {
     fn borgvk_CmdClearAttachments(command_buffer: VkCommandBuffer, natt: u32, atts: *const VkClearAttachment, nrects: u32, rects: *const VkClearRect) {
         let c = cmd(command_buffer.ptr());
-        borgvk_flush_draws(c); // the draws so far come first
+        crate::draw::flush_draws(c); // the draws so far come first
         if !c.in_rendering {
             return;
         }
