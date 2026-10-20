@@ -9,7 +9,7 @@ use crate::entrypoint::{entrypoint, handle, slice, vk_error, Handle, VkError};
 use crate::ffi::*;
 use crate::fmt;
 use crate::device::{Device, Scratch};
-use crate::object::{allocate, Zeroed};
+use crate::object::{allocate, Owned, Zeroed};
 use crate::format::{bytes_packed, half1, half2, packed_info};
 use crate::serial::{blend_pack, state_pack};
 use std::ptr::{null, null_mut};
@@ -303,7 +303,12 @@ fn build_emulated(
     ci: &VkGraphicsPipelineCreateInfo,
     ri: &VkPipelineRenderingCreateInfo,
 ) -> Result<VkPipeline, VkError> {
-    let mut sub = [null_mut(); 4];
+    let mut sub: [VkPipeline; 4] = [null_mut(); 4];
+    let mut sub = Owned::new(&mut sub, |s| {
+        for p in s.iter().filter_map(|p| unsafe { p.get() }) {
+            destroy(dev, p, alloc);
+        }
+    });
     let mut result = Ok(());
     for k in 0..ri.colorAttachmentCount as usize {
         let mut rk = *ri;
@@ -331,12 +336,8 @@ fn build_emulated(
         }
     }
     sc.frag_select = 0;
-    if let Err(e) = result {
-        for p in sub.into_iter().filter_map(|p| unsafe { p.get() }) {
-            destroy(dev, p, alloc);
-        }
-        return Err(e);
-    }
+    result?;
+    let sub = sub.keep();
     let first = unsafe { sub[0].get() }.unwrap();
     first.emul_n = ri.colorAttachmentCount as u8;
     first.emul.copy_from_slice(&sub[1..]);
@@ -378,22 +379,16 @@ entrypoint! {
         let out = unsafe { std::slice::from_raw_parts_mut(out, count as usize) };
         let mut sc = device.scratch.lock().unwrap();
         for (i, ci) in unsafe { slice(infos, count) }.iter().enumerate() {
-            let pl = match create(device, alloc) {
-                Ok(pl) => pl,
-                Err(e) => {
-                    out[i..].fill(null_mut());
-                    return Err(e);
-                }
-            };
+            let pl = create(device, alloc).inspect_err(|_| out[i..].fill(null_mut()))?;
+            let mut pl = Owned::new(pl, |p| destroy(device, p, alloc));
             sc.compile_layout = ci.layout;
-            compile_compute_stage(device, &mut sc, &ci.stage, pl);
+            compile_compute_stage(device, &mut sc, &ci.stage, &mut pl);
             // A refused shader fails here, not as a dispatch that silently does nothing.
             if !pl.cs_ok {
-                destroy(device, pl, alloc);
                 out[i..].fill(null_mut());
                 return Err(VkError(VK_ERROR_UNKNOWN));
             }
-            out[i] = VkPipeline::from_object(pl);
+            out[i] = VkPipeline::from_object(pl.keep());
         }
         Ok(())
     }
