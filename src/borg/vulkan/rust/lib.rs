@@ -27,6 +27,7 @@ mod nir_info;
 mod nir_passes;
 mod image;
 mod memory;
+mod physical_device;
 mod pipeline;
 mod query;
 mod queue;

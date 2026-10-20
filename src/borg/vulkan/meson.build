@@ -127,6 +127,8 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-var', 'BORGVK_TEXG_CHUNK|BORGVK_TEX_DIM|VK_WHOLE_SIZE',
     '--allowlist-function', 'util_format_(linear|is_depth_or_stencil|srgb_8unorm_to_linear_float)',
     '--allowlist-type', 'mesa_vk_dynamic_graphics_state|VkDraw(Indexed)?IndirectCommand',
+    '--allowlist-type', 'VkFormatFeatureFlagBits|VkImageCreateFlagBits|VkFormatProperties[23]|VkPhysicalDeviceImageFormatInfo2|VkImageFormatProperties2|VkPhysicalDeviceSparseImageFormatInfo2|VkSparseImageFormatProperties2|VkPhysicalDeviceExternalBufferInfo|VkExternalBufferProperties',
+    '--allowlist-var', 'VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT',
     '--allowlist-type', 'borgvk_target|VkRenderingInfo|VkRenderingAttachmentInfo|VkImageResolve|VkRenderingEndInfoEXT',
     '--allowlist-type', 'borgvk_command_buffer|vk_command_buffer_ops|vk_command_pool|VkCommandBufferBeginInfo|borg_blend|VkComputePipelineCreateInfo|VkPipelineRenderingCreateInfo|VkPipelineCache',
     '--allowlist-type', 'borgvk_descriptor_pool|borgvk_descriptor_set|VkDescriptorSetLayoutCreateInfo|VkDescriptorSetLayoutSupport|VkDescriptorPoolCreateInfo',
