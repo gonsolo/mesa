@@ -26,6 +26,7 @@ mod hw;
 mod nir_info;
 #[cfg(borgc)]
 mod nir_passes;
+mod object;
 mod image;
 mod memory;
 mod physical_device;

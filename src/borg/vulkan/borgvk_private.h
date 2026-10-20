@@ -114,58 +114,6 @@ struct borgvk_writeback {
    uint8_t *host;
 };
 
-struct borgvk_command_buffer {
-   struct vk_command_buffer vk;
-
-   bool in_rendering;
-   VkRect2D render_area;
-   uint32_t layer_count;
-   struct borgvk_target *targets;
-   uint32_t color_attachment_count;
-   struct vk_image_view *color_views[BORGVK_MAX_COLOR_ATTACHMENTS];
-   struct vk_image_view *depth_view;
-   struct vk_image_view *stencil_view;
-   struct vk_image_view *color_resolve_views[BORGVK_MAX_COLOR_ATTACHMENTS];
-   bool has_clear;
-   float clear_color[4];
-   /* Draw state tracked as the recorded commands replay at submit (borgvk_queue.c). */
-   struct borgvk_pipeline *gfx_pipeline;
-   const uint8_t *vb[BORGVK_MAX_VERTEX_BINDINGS];
-   VkDeviceSize vb_avail[BORGVK_MAX_VERTEX_BINDINGS];   /* bytes from vb[] to the buffer's end */
-   struct borgvk_descriptor_set *desc_set;
-   bool generic_drawn;
-   const struct borgvk_pipeline *cs_pipeline;   /* bound compute pipeline */
-   bool dispatched;                             /* ran a compute dispatch at replay */
-   /* Draws of the open render pass, as one wire stream the simulator runs at its end. */
-   uint8_t *stream;
-   size_t stream_len, stream_cap;
-   uint32_t heap_top, batch_draws;
-   uint8_t *state_sent;
-   size_t state_sent_len;
-   struct borgvk_image *batch_img;
-   struct borgvk_image *batch_extra[3];   /* colour attachments 1-3 of the batch */
-   uint32_t batch_nextra;
-   bool batch_serve;
-   VkExtent2D batch_area;   /* the pass size when it has no attachment */
-   struct vk_image_view *batch_depth, *batch_stencil;
-   struct borgvk_writeback wb[BORGVK_MAX_WRITEBACKS];
-   uint32_t nwb;
-   bool batch_srgb;
-   const void *batch_pool, *batch_vpool;
-   struct borgvk_descriptor_set *region_set;   /* the set whose buffer region is at region_base */
-   uint32_t region_base;
-   const uint8_t *index_ptr;                    /* bound index buffer, at its offset */
-   VkDeviceSize index_avail;
-   uint32_t index_size;                         /* 2, 4, or 0 for an unsupported type */
-   uint32_t batch_push[32];                     /* the push words the open batch was drawn with */
-   uint32_t pc[32];                             /* push-constant bytes, for compute */
-   VkDeviceSize dyn_off[BORGVK_MAX_BINDINGS];   /* dynamic offsets of desc_set, by binding */
-   /* The compute bind point has its own set. */
-   struct borgvk_descriptor_set *cs_sets[4];
-   VkDeviceSize cs_dyn_offs[4][BORGVK_MAX_BINDINGS];
-   struct borgvk_descriptor_set *desc_sets[4];   /* [0] is desc_set; dyn_offs[0] is unused (dyn_off) */
-   VkDeviceSize dyn_offs[4][BORGVK_MAX_BINDINGS];
-};
 
 
 /* The persistent simulator (borgvk_sim.c). */
@@ -216,12 +164,6 @@ struct borgvk_image {
 };
 
 /* One mip level and layer of an image, rendered to as an image of its own. */
-struct borgvk_target {
-   struct borgvk_target *next;
-   const struct vk_image_view *orig;
-   struct borgvk_image image;
-   struct vk_image_view view;
-};
 
 struct borgvk_buffer_view {
    struct vk_buffer_view vk;

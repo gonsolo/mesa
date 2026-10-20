@@ -4,7 +4,7 @@
 //! vkCmdDispatch: the bound buffers and images as one compute job for direct_sim --compute
 //! (split over processes along one axis) or the device; what the shader wrote goes back.
 
-use crate::cmd_buffer::cmd;
+use crate::cmd_buffer::{cmd, CommandBuffer};
 use crate::corpus::{borgvk_corpus_log, borgvk_corpus_on, hash};
 use crate::entrypoint::{entrypoint, Handle};
 use crate::ffi::*;
@@ -57,7 +57,7 @@ fn unpack(pf: pipe_format, dst: &mut [u8], src: *const u8) {
 }
 
 /// The windows of the bound sets, the push constants (slot 32) and the constant pool (slot 34).
-fn gather(c: &borgvk_command_buffer, pl: &borgvk_pipeline) -> Vec<CsBuf> {
+fn gather(c: &CommandBuffer, pl: &borgvk_pipeline) -> Vec<CsBuf> {
     let mut bufs = Vec::new();
     for si in 0..4 {
         let Some(set) = (unsafe { c.cs_sets[si].as_ref() }) else { continue };

@@ -5,7 +5,7 @@
 //! runtime's, which call these.
 
 use crate::clear::clear_rect;
-use crate::cmd_buffer::cmd;
+use crate::cmd_buffer::{cmd, CommandBuffer};
 use crate::copy::resolve_region;
 use crate::entrypoint::{entrypoint, Handle};
 use crate::ffi::*;
@@ -13,7 +13,15 @@ use crate::image::{blocks, shape};
 use borg_layout::image::Blocks;
 use std::ptr::null_mut;
 
-pub fn free_targets(c: &mut borgvk_command_buffer) {
+/// A single-level, single-layer copy of an attachment's image, for rendering into one level.
+pub struct Target {
+    next: *mut Target,
+    orig: *const vk_image_view,
+    image: borgvk_image,
+    view: vk_image_view,
+}
+
+pub fn free_targets(c: &mut CommandBuffer) {
     while !c.targets.is_null() {
         let t = unsafe { Box::from_raw(c.targets) };
         c.targets = t.next;
@@ -22,7 +30,7 @@ pub fn free_targets(c: &mut borgvk_command_buffer) {
 
 /// A view of a mip level or layer above 0 renders as the single-level, single-layer image it
 /// is: a copy of the image placed at that level, kept with the command buffer.
-fn target_view(c: &mut borgvk_command_buffer, view: *mut vk_image_view) -> *mut vk_image_view {
+fn target_view(c: &mut CommandBuffer, view: *mut vk_image_view) -> *mut vk_image_view {
     let Some(v) = (unsafe { view.as_ref() }) else { return view };
     if v.image.is_null() || (v.base_mip_level == 0 && v.base_array_layer == 0) {
         return view;
@@ -44,7 +52,7 @@ fn target_view(c: &mut borgvk_command_buffer, view: *mut vk_image_view) -> *mut 
     }
     let level = v.base_mip_level;
     let off = shape(img).level_offset(level, v.base_array_layer, Blocks { bw: 1, bh: 1, bd: 1, ..b }).0;
-    let mut t = Box::new(borgvk_target { next: c.targets, orig: view, image: unsafe { std::ptr::read(img) }, view: unsafe { std::ptr::read(v) } });
+    let mut t = Box::new(Target { next: c.targets, orig: view, image: unsafe { std::ptr::read(img) }, view: unsafe { std::ptr::read(v) } });
     let i = &mut t.image;
     i.offset += off;
     i.size = img.size.saturating_sub(off);
@@ -58,7 +66,7 @@ fn target_view(c: &mut borgvk_command_buffer, view: *mut vk_image_view) -> *mut 
 }
 
 /// The depth or stencil attachment's view, cleared on load.
-fn depth_stencil(c: &mut borgvk_command_buffer, att: *const VkRenderingAttachmentInfo, aspect: VkImageAspectFlags, layers: u32) -> *mut vk_image_view {
+fn depth_stencil(c: &mut CommandBuffer, att: *const VkRenderingAttachmentInfo, aspect: VkImageAspectFlags, layers: u32) -> *mut vk_image_view {
     let Some(att) = (unsafe { att.as_ref() }).filter(|a| !a.imageView.is_null()) else { return null_mut() };
     let view = att.imageView.ptr();
     let target = target_view(c, view);

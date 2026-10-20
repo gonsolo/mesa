@@ -4,7 +4,7 @@
 //! Draws: the bound pipeline, vertex, index and descriptor state, and each draw as packets
 //! into the open pass's stream, which the simulator runs at the pass's end.
 
-use crate::cmd_buffer::cmd;
+use crate::cmd_buffer::{cmd, CommandBuffer};
 use crate::copy::{host, image_host};
 use crate::corpus::{borgvk_corpus_hash, borgvk_corpus_image, borgvk_corpus_log, borgvk_corpus_on};
 use crate::entrypoint::{entrypoint, slice, Handle};
@@ -161,7 +161,7 @@ fn corpus_state(
 }
 
 /// Runs the draws batched so far.
-pub fn flush_draws(c: &mut borgvk_command_buffer) {
+pub fn flush_draws(c: &mut CommandBuffer) {
     if c.stream_len == 0 {
         return;
     }
@@ -191,7 +191,7 @@ pub fn flush_draws(c: &mut borgvk_command_buffer) {
     }
 }
 
-fn stream_append(c: &mut borgvk_command_buffer, data: &[u8]) -> bool {
+fn stream_append(c: &mut CommandBuffer, data: &[u8]) -> bool {
     let n = data.len();
     if c.stream_len + n > c.stream_cap {
         let cap = (c.stream_cap * 2).max(c.stream_len + n + 65536);
@@ -246,7 +246,7 @@ fn fetch(f: VkFormat) -> Result<Fetch, Reject> {
 
 struct Ctx<'a> {
     device: &'a mut borgvk_device,
-    c: &'a mut borgvk_command_buffer,
+    c: &'a mut CommandBuffer,
     p: Params,
     pl: &'a borgvk_pipeline,
     topo: u32,
@@ -854,7 +854,7 @@ impl Ctx<'_> {
     }
 }
 
-fn push_writeback(c: &mut borgvk_command_buffer, off: u32, size: u32, host: *mut u8) {
+fn push_writeback(c: &mut CommandBuffer, off: u32, size: u32, host: *mut u8) {
     if c.nwb < BORGVK_MAX_WRITEBACKS {
         c.wb[c.nwb as usize] = borgvk_writeback { off, size, host };
         c.nwb += 1;
@@ -888,7 +888,7 @@ fn storage_image(set: &borgvk_descriptor_set, b: usize) -> Option<&borgvk_image>
     (img.vk.image_type == VK_IMAGE_TYPE_2D && img.vk.samples == 1 && blocks(img.vk.format).bs == 4).then_some(img)
 }
 
-fn draw_one(device: &mut borgvk_device, c: &mut borgvk_command_buffer, p: &Params) -> bool {
+fn draw_one(device: &mut borgvk_device, c: &mut CommandBuffer, p: &Params) -> bool {
     let Some(pl) = (unsafe { c.gfx_pipeline.as_ref() }) else { return reject(Reject::Undrawable) };
     let mut g = Ctx {
         device,
@@ -937,7 +937,7 @@ fn draw_one(device: &mut borgvk_device, c: &mut borgvk_command_buffer, p: &Param
 }
 
 /// Wide colour targets are one pipeline each, drawn in turn (no depth or stencil: a second pass would fail the test).
-fn generic_draw(device: &mut borgvk_device, c: &mut borgvk_command_buffer, p: &Params) -> bool {
+fn generic_draw(device: &mut borgvk_device, c: &mut CommandBuffer, p: &Params) -> bool {
     let first = c.gfx_pipeline;
     let Some(fp) = (unsafe { first.as_ref() }).filter(|f| f.emul_n != 0) else { return draw_one(device, c, p) };
     if !c.depth_view.is_null() || !c.stencil_view.is_null() {
