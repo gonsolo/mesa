@@ -4,7 +4,7 @@
 //! The physical device: its properties, queue family, memory and format queries, and the
 //! search for a Borg DRM device.
 
-use crate::entrypoint::{chain, entrypoint, vk_error, Handle};
+use crate::entrypoint::{entrypoint, find_out, pointee, vk_error};
 use crate::ffi::*;
 use crate::object::{allocate, Zeroed};
 use crate::device::Instance;
@@ -182,19 +182,18 @@ fn format_properties(f: VkFormat) -> VkFormatProperties {
     VkFormatProperties { linearTilingFeatures: lin, optimalTilingFeatures: opt, bufferFeatures: buf }
 }
 
+pointee!(VkFormatProperties2, VkPhysicalDeviceImageFormatInfo2, VkImageFormatProperties2, VkExternalBufferProperties, VkQueueFamilyProperties2, VkPhysicalDeviceMemoryProperties2);
+
 entrypoint! {
-    unsafe fn borgvk_GetPhysicalDeviceFormatProperties2(_pd: VkPhysicalDevice, format: VkFormat, props: *mut VkFormatProperties2) {
+    fn borgvk_GetPhysicalDeviceFormatProperties2(_pd: VkPhysicalDevice, format: VkFormat, props: &mut VkFormatProperties2) {
         let p = format_properties(format);
-        (*props).formatProperties = p;
-        for s in chain((*props).pNext) {
-            if (*s).sType == VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3 {
-                let p3 = &mut *s.cast::<VkFormatProperties3>();
-                p3.linearTilingFeatures = p.linearTilingFeatures as u64;
-                p3.optimalTilingFeatures = p.optimalTilingFeatures as u64;
-                p3.bufferFeatures = p.bufferFeatures as u64;
-                if vk_format_has_depth(format) && p.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT != 0 {
-                    p3.optimalTilingFeatures |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT;
-                }
+        props.formatProperties = p;
+        if let Some(p3) = unsafe { find_out::<VkFormatProperties3>(props.pNext, VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3) } {
+            p3.linearTilingFeatures = p.linearTilingFeatures as u64;
+            p3.optimalTilingFeatures = p.optimalTilingFeatures as u64;
+            p3.bufferFeatures = p.bufferFeatures as u64;
+            if unsafe { vk_format_has_depth(format) } && p.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT != 0 {
+                p3.optimalTilingFeatures |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT;
             }
         }
     }
@@ -246,37 +245,37 @@ fn image_format_properties(info: &VkPhysicalDeviceImageFormatInfo2) -> Result<Vk
 }
 
 entrypoint! {
-    unsafe fn borgvk_GetPhysicalDeviceImageFormatProperties2(_pd: VkPhysicalDevice, info: *const VkPhysicalDeviceImageFormatInfo2, props: *mut VkImageFormatProperties2) -> VkResult {
-        let r = image_format_properties(&*info);
-        (*props).imageFormatProperties = *r.as_ref().unwrap_or(&std::mem::zeroed());
+    fn borgvk_GetPhysicalDeviceImageFormatProperties2(_pd: VkPhysicalDevice, info: &VkPhysicalDeviceImageFormatInfo2, props: &mut VkImageFormatProperties2) -> VkResult {
+        let r = image_format_properties(info);
+        props.imageFormatProperties = r.unwrap_or_default();
         r.map_or_else(|e| e, |_| VK_SUCCESS)
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_GetPhysicalDeviceSparseImageFormatProperties2(_pd: VkPhysicalDevice, _info: *const VkPhysicalDeviceSparseImageFormatInfo2, count: *mut u32, _props: *mut VkSparseImageFormatProperties2) {
+    fn borgvk_GetPhysicalDeviceSparseImageFormatProperties2(_pd: VkPhysicalDevice, _info: *const VkPhysicalDeviceSparseImageFormatInfo2, count: &mut u32, _props: *mut VkSparseImageFormatProperties2) {
         *count = 0;
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_GetPhysicalDeviceExternalBufferProperties(_pd: VkPhysicalDevice, _info: *const VkPhysicalDeviceExternalBufferInfo, props: *mut VkExternalBufferProperties) {
-        (*props).externalMemoryProperties = std::mem::zeroed();
+    fn borgvk_GetPhysicalDeviceExternalBufferProperties(_pd: VkPhysicalDevice, _info: *const VkPhysicalDeviceExternalBufferInfo, props: &mut VkExternalBufferProperties) {
+        props.externalMemoryProperties = Default::default();
     }
 }
 
 entrypoint! {
-    unsafe fn borgvk_GetPhysicalDeviceQueueFamilyProperties2(_pd: VkPhysicalDevice, count: *mut u32, props: *mut VkQueueFamilyProperties2) {
+    fn borgvk_GetPhysicalDeviceQueueFamilyProperties2(_pd: VkPhysicalDevice, count: &mut u32, props: Option<&mut VkQueueFamilyProperties2>) {
         // One family: graphics, compute and transfer, a single queue.
-        if props.is_null() {
+        let Some(props) = props else {
             *count = 1;
             return;
-        }
+        };
         if *count == 0 {
             return;
         }
         *count = 1;
-        (*props).queueFamilyProperties = VkQueueFamilyProperties {
+        props.queueFamilyProperties = VkQueueFamilyProperties {
             queueFlags: VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
             queueCount: 1,
             timestampValidBits: 0,
@@ -286,8 +285,8 @@ entrypoint! {
 }
 
 entrypoint! {
-    unsafe fn borgvk_GetPhysicalDeviceMemoryProperties2(pd: VkPhysicalDevice, props: *mut VkPhysicalDeviceMemoryProperties2) {
-        (*props).memoryProperties = pd.get().unwrap().memory;
+    fn borgvk_GetPhysicalDeviceMemoryProperties2(pd: &PhysicalDevice, props: &mut VkPhysicalDeviceMemoryProperties2) {
+        props.memoryProperties = pd.memory;
     }
 }
 

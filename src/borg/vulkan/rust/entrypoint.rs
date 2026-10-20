@@ -227,6 +227,14 @@ pub unsafe fn slice<'a, T>(p: *const T, n: u32) -> &'a [T] {
     if n == 0 { &[] } else { unsafe { std::slice::from_raw_parts(p, n as usize) } }
 }
 
+/// The output struct of type `stype` in a `pNext` chain.
+///
+/// # Safety
+/// `p` is null or the head of a valid chain, and the struct of type `stype` is a `T`.
+pub unsafe fn find_out<'a, T>(p: *mut std::ffi::c_void, stype: VkStructureType) -> Option<&'a mut T> {
+    unsafe { chain(p).find(|&s| (*s).sType == stype).map(|s| &mut *s.cast::<T>()) }
+}
+
 /// The structs chained to an output struct by `pNext`.
 ///
 /// # Safety
