@@ -8,6 +8,11 @@
 #include "vk_format.h"
 #include "vk_pipeline_layout.h"
 #include "vk_sampler.h"
+#include "vk_buffer.h"
+#include "vk_buffer_view.h"
+#include "vk_device_memory.h"
+#include "drm-uapi/borg_drm.h"
+#include "borgvk_drm_compat.h"
 #include "borgc_flags.h"
 
 #include "software/borg/borg_core.h"

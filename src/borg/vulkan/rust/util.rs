@@ -13,3 +13,10 @@ pub fn log(level: mesa_log_level, msg: String) {
 
 #[cfg(test)]
 pub fn log(_level: mesa_log_level, _msg: String) {}
+
+// By hand, not through bindgen: glibc's headers redirect these to the *64 names musl lacks. Borg's
+// targets are all 64-bit, so off_t is 64 bits either way.
+extern "C" {
+    pub fn mmap(addr: *mut std::ffi::c_void, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut std::ffi::c_void;
+    pub fn ftruncate(fd: i32, len: i64) -> i32;
+}

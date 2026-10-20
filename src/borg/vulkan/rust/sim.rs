@@ -7,19 +7,13 @@
 
 use crate::ffi::*;
 use crate::format::{depth_is_d32, flush_format};
-use crate::util::{log, MESA_LOG_INFO, MESA_LOG_WARN};
+use crate::util::{ftruncate, log, mmap, MESA_LOG_INFO, MESA_LOG_WARN};
 use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::ops::Range;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
 
-// By hand, not through bindgen: glibc's headers redirect these to the *64 names musl lacks. Borg's
-// targets are all 64-bit, so off_t is 64 bits either way.
-extern "C" {
-    fn mmap(addr: *mut std::ffi::c_void, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut std::ffi::c_void;
-    fn ftruncate(fd: i32, len: i64) -> i32;
-}
 
 const MEM_BYTES: usize = 0x800_0000;
 const MAX_PARTS: usize = 24;

@@ -86,3 +86,20 @@ macro_rules! entrypoint {
     };
 }
 pub(crate) use entrypoint;
+
+/// The `n` elements at `p`; empty when `n` is 0, where Vulkan allows `p` to be anything.
+///
+/// # Safety
+/// For `n` > 0, `p` points at `n` valid elements.
+pub unsafe fn slice<'a, T>(p: *const T, n: u32) -> &'a [T] {
+    if n == 0 { &[] } else { unsafe { std::slice::from_raw_parts(p, n as usize) } }
+}
+
+/// The structs chained to an output struct by `pNext`.
+///
+/// # Safety
+/// `p` is null or the head of a valid chain.
+pub unsafe fn chain(p: *mut std::ffi::c_void) -> impl Iterator<Item = *mut VkBaseOutStructure> {
+    let next = |s: *mut VkBaseOutStructure| (!s.is_null()).then_some(s);
+    std::iter::successors(next(p.cast()), move |&s| next(unsafe { (*s).pNext }))
+}
