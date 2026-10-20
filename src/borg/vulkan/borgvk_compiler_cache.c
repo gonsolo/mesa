@@ -36,9 +36,3 @@ borgvk_compile_empty_frag(struct borgvk_device *device, uint32_t opt)
 {
    device->shader_blob[BORGVK_STAGE_FRAG].len = 0;
 }
-
-void
-borgvk_layout_set_base(struct borgvk_device *device, uint8_t base[4])
-{
-   memset(base, 0, 4);
-}

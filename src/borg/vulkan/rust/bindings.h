@@ -6,6 +6,7 @@
 #include "util/format/u_formats.h"
 #include "util/log.h"
 #include "vk_format.h"
+#include "vk_pipeline_layout.h"
 #include "borgc_flags.h"
 
 #include "software/borg/borg_core.h"
@@ -18,3 +19,11 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <termios.h>
+
+#ifdef BORGVK_NIR
+/* The firmware headers have their own FP16 constants; NIR brings Mesa's. */
+#undef FP16_ONE
+#include "nir_builder.h"
+#include "borg_nir_passes.h"
+#include "vk_pipeline.h"
+#endif

@@ -208,7 +208,6 @@ VkResult borgvk_queue_submit(struct vk_queue *queue,
                              struct vk_queue_submit *submit);
 
 /* Compiler shim (borgvk_compiler.c → Rust borgc crate). */
-void borgvk_layout_set_base(struct borgvk_device *device, uint8_t base[4]);
 void borgvk_compile_compute_stage(struct borgvk_device *device,
                                   const VkPipelineShaderStageCreateInfo *stage_info,
                                   struct borgvk_pipeline *pipeline);

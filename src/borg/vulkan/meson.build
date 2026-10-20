@@ -95,14 +95,30 @@ borgvk_rust_h = custom_target(
 )
 libborgvk_files += borgvk_rust_h
 
+borgvk_bindgen_args = []
+borgvk_bindgen_c_args = []
+borgvk_bindgen_deps = []
+if with_borgc
+  # NIR from Mesa's NIR crate, as NAK does; nir_builder, Borg's NIR passes and SPIR-V to NIR here.
+  borgvk_bindgen_c_args += ['-DBORGVK_NIR']
+  borgvk_bindgen_deps += [idep_nir_headers]
+  borgvk_bindgen_args += [
+    compiler_rs_bindgen_blocklist,
+    '--raw-line', 'pub use compiler::bindings::*;',
+    '--allowlist-function', 'borg_lower_.*|vk_pipeline_shader_stage_to_nir',
+    '--allowlist-var', 'borg_(spirv|nir)_options',
+    '--opaque-type', 'spirv_to_nir_options.*|borg_blend.*',
+    '--blocklist-type', 'spirv_to_nir_options__.*',
+  ]
+endif
 _borgvk_bindings_rs = rust.bindgen(
   input : ['rust/bindings.h', borgvk_entrypoints[0], borgvk_rust_h],
   output : 'borgvk_bindings.rs',
   output_inline_wrapper : 'borgvk_inline_wrappers.c',
-  c_args : [pre_args],
+  c_args : [pre_args, borgvk_bindgen_c_args],
   args : [
-    bindgen_output_args, '--no-prepend-enum-name', '--with-derive-default',
-    '--allowlist-type', 'borgvk_shader_blob|VkFormat|tex_conv|borgvk_image|borgvk_vp|borgvk_writeback|pipe_format',
+    bindgen_output_args, borgvk_bindgen_args, '--no-prepend-enum-name', '--with-derive-default',
+    '--allowlist-type', 'borgvk_device|borgvk_descriptor_set_layout|borgvk_desc_map|vk_pipeline_layout|borgvk_shader_blob|VkFormat|tex_conv|borgvk_image|borgvk_vp|borgvk_writeback|pipe_format',
     '--allowlist-type', 'VkGraphicsPipelineCreateInfo|VkPipelineColorBlendStateCreateInfo|mesa_log_level',
     '--allowlist-type', 'vk_image_view|VkExtent2D|VkExtent3D|VkResult|borgvk_device_memory|pipe_swizzle|util_format_type|termios',
     '--allowlist-function', 'util_format_description|util_format_get_blocksize|vk_format_to_pipe_format',
@@ -116,6 +132,7 @@ _borgvk_bindings_rs = rust.bindgen(
   ],
   include_directories : [borgvk_inc, include_directories('.')],
   dependencies : [
+    borgvk_bindgen_deps,
     borgvk_deps,
     idep_vulkan_runtime_headers,
     idep_vulkan_util_headers,
@@ -125,9 +142,10 @@ _borgvk_bindings_rs = rust.bindgen(
 _libborgvk_bindings_rs_extern = static_library(
   'borgvk_bindings_rs_extern',
   _borgvk_bindings_rs[1],
-  c_args : [no_override_init_args, '-Wno-missing-prototypes'],
+  c_args : [no_override_init_args, '-Wno-missing-prototypes', borgvk_bindgen_c_args],
   include_directories : [borgvk_inc, include_directories('.')],
   dependencies : [
+    borgvk_bindgen_deps,
     borgvk_deps,
     idep_vulkan_runtime_headers,
     idep_vulkan_util_headers,
@@ -141,6 +159,7 @@ _libborgvk_bindings_rs = static_library(
   gnu_symbol_visibility : 'hidden',
   rust_abi : 'rust',
   rust_args : rust_global_args,
+  dependencies : with_borgc ? [idep_compiler_rs] : [],
 )
 borgvk_rs_args = rust_global_args
 borgvk_rs_link = [_libborgvk_bindings_rs]

@@ -12,6 +12,10 @@ mod ffi {
 mod compiler;
 mod format;
 mod hw;
+#[cfg(borgc)]
+mod nir_info;
+#[cfg(borgc)]
+mod nir_passes;
 mod image;
 mod serial;
 mod sim;

@@ -20,137 +20,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-/* The uniform-buffer bindings the shader loads from, as a bit mask. */
-static uint32_t
-ubo_mask_used(nir_shader *nir)
-{
-   uint32_t mask = 0;
-   nir_foreach_function_impl(impl, nir) {
-      nir_foreach_block(block, impl) {
-         nir_foreach_instr(instr, block) {
-            if (instr->type != nir_instr_type_intrinsic ||
-                nir_instr_as_intrinsic(instr)->intrinsic != nir_intrinsic_load_ubo)
-               continue;
-            nir_def *d = nir_instr_as_intrinsic(instr)->src[0].ssa;
-            for (int n = 0; n < 8 && d; n++) {
-               nir_instr *di = nir_def_instr(d);
-               if (di->type == nir_instr_type_alu) {
-                  d = nir_instr_as_alu(di)->src[0].src.ssa;
-               } else if (di->type == nir_instr_type_intrinsic) {
-                  nir_intrinsic_instr *r = nir_instr_as_intrinsic(di);
-                  if (r->intrinsic == nir_intrinsic_vulkan_resource_index) {
-                     mask |= 1u << nir_intrinsic_binding(r);
-                     break;
-                  }
-                  d = r->intrinsic == nir_intrinsic_load_vulkan_descriptor ? r->src[0].ssa : NULL;
-               } else {
-                  break;
-               }
-            }
-         }
-      }
-   }
-   return mask;
-}
-
-static bool
-uses_push_constants(nir_shader *nir)
-{
-   nir_foreach_function_impl(impl, nir)
-      nir_foreach_block(block, impl)
-         nir_foreach_instr(instr, block)
-            if (instr->type == nir_instr_type_intrinsic &&
-                nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_push_constant)
-               return true;
-   return false;
-}
-
-static int
-sampled_binding(nir_shader *nir)
-{
-   int binding = -1;
-   nir_foreach_function_impl(impl, nir) {
-      nir_foreach_block(block, impl) {
-         nir_foreach_instr(instr, block) {
-            if (instr->type != nir_instr_type_tex)
-               continue;
-            nir_tex_instr *tex = nir_instr_as_tex(instr);
-            int di = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
-            nir_variable *var = di >= 0 ? nir_deref_instr_get_variable(nir_src_as_deref(tex->src[di].src)) : NULL;
-            if (var && binding < 0)
-               binding = var->data.binding;
-         }
-      }
-   }
-   return binding;
-}
-
-static bool
-reads_point_coord(nir_shader *nir)
-{
-   nir_foreach_function_impl(impl, nir) {
-      nir_foreach_block(block, impl) {
-         nir_foreach_instr(instr, block) {
-            if (instr->type != nir_instr_type_intrinsic)
-               continue;
-            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-            if (intr->intrinsic == nir_intrinsic_load_point_coord)
-               return true;
-         }
-      }
-   }
-   return false;
-}
-
-/* Turn one pipeline shader stage's SPIR-V into NIR and hand it to borgc. */
-void
-borgvk_layout_set_base(struct borgvk_device *device, uint8_t base[4])
-{
-   VK_FROM_HANDLE(vk_pipeline_layout, pl, device->compile_layout);
-   uint32_t at = 0;
-   memset(base, 0, 4);
-   for (uint32_t s = 0; pl && s < pl->set_count && s < 4; s++) {
-      base[s] = MIN2(at, 255u);
-      if (pl->set_layouts[s])
-         at += container_of(pl->set_layouts[s], struct borgvk_descriptor_set_layout, vk)->map.total;
-   }
-}
-
-static void
-remap_array_bindings(struct borgvk_device *device, nir_shader *nir)
-{
-   VK_FROM_HANDLE(vk_pipeline_layout, pl, device->compile_layout);
-   if (!pl)
-      return;
-   uint8_t base[4];
-   borgvk_layout_set_base(device, base);
-   nir_foreach_function_impl(impl, nir) {
-      nir_foreach_block(block, impl) {
-         nir_foreach_instr(instr, block) {
-            if (instr->type != nir_instr_type_intrinsic)
-               continue;
-            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-            if (intr->intrinsic != nir_intrinsic_vulkan_resource_index)
-               continue;
-            uint32_t set = nir_intrinsic_desc_set(intr), binding = nir_intrinsic_binding(intr);
-            if (set >= pl->set_count || set >= 4 || !pl->set_layouts[set])
-               continue;
-            const struct borgvk_desc_map *m =
-               &container_of(pl->set_layouts[set], struct borgvk_descriptor_set_layout, vk)->map;
-            uint32_t slot = binding, elem = nir_src_is_const(intr->src[0]) ? nir_src_as_uint(intr->src[0]) : 0;
-            for (uint32_t j = 0; j < m->n; j++) {
-               if (m->num[j] == binding) {
-                  slot = m->slot[j] + MIN2(elem, m->count[j] - 1u);
-                  break;
-               }
-            }
-            nir_intrinsic_set_binding(intr, base[set] + slot);
-            nir_intrinsic_set_desc_set(intr, 0);
-         }
-      }
-   }
-}
-
 static void
 borgvk_lower_lines(nir_shader *nir, uint32_t instance_mask)
 {
@@ -235,6 +104,7 @@ borgvk_lower_lines(nir_shader *nir, uint32_t instance_mask)
    nir_remove_non_entrypoints(nir);
 }
 
+/* Turn one pipeline shader stage's SPIR-V into NIR and hand it to borgc. */
 /* A pipeline without a fragment stage (depth only): a shader that writes nothing. */
 void
 borgvk_compile_empty_frag(struct borgvk_device *device, uint32_t opt)
@@ -289,19 +159,19 @@ borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
       return;
    }
 
-   remap_array_bindings(device, nir);
+   borgvk_nir_remap_array_bindings(device, nir);
    if (stage_info->stage == VK_SHADER_STAGE_VERTEX_BIT && (vfetch & (BORGC_VS_FETCH | BORGC_VS_POINT_QUADS | BORGC_VS_LINES_BIT)) == (BORGC_VS_FETCH | BORGC_VS_LINES_BIT))
       borgvk_lower_lines(nir, vfetch & 0xFFFFu);
    nir_shader *retry = stage_info->stage == VK_SHADER_STAGE_VERTEX_BIT ? nir_shader_clone(NULL, nir) : NULL;
    borg_lower_nir_for_borgc_blend(nir, blend);
-   device->frag_reads_pntc = stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT && reads_point_coord(nir);
+   device->frag_reads_pntc = stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT && borgvk_nir_reads_point_coord(nir);
    if (stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT)
-      device->frag_tex_binding = sampled_binding(nir);
+      device->frag_tex_binding = borgvk_nir_sampled_binding(nir);
    if (stage_info->stage == VK_SHADER_STAGE_VERTEX_BIT || stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT)
 {
       const int fs = stage_info->stage == VK_SHADER_STAGE_FRAGMENT_BIT;
-      device->stage_ubo[fs] = ubo_mask_used(nir);
-      device->stage_push[fs] = uses_push_constants(nir);
+      device->stage_ubo[fs] = borgvk_nir_ubo_mask(nir);
+      device->stage_push[fs] = borgvk_nir_uses_push_constants(nir);
    }
 
    int slot = -1;
@@ -361,7 +231,7 @@ borgvk_compile_compute_stage(struct borgvk_device *device,
       mesa_logw("borgvk: SPIR-V->NIR failed for compute stage (%d)", result);
       return;
    }
-   remap_array_bindings(device, nir);
+   borgvk_nir_remap_array_bindings(device, nir);
    borg_lower_nir_for_borgc(nir);
    uint32_t rc = borgc_compile_compute(nir, pipeline->cs_words, BORGVK_CS_WORDS_MAX, &pipeline->cs_nwords,
                                        pipeline->cs_regs, 32, &pipeline->cs_nregs,

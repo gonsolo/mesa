@@ -22,6 +22,55 @@ pub unsafe extern "C" fn borgvk_blob_num_varyings(b: *const borgvk_shader_blob) 
     num_varyings(&b.data[..(b.len as usize).min(b.data.len())])
 }
 
+/// The pipeline layout being compiled for, from its handle.
+#[cfg(borgc)]
+pub fn compile_layout(dev: &borgvk_device) -> Option<&vk_pipeline_layout> {
+    unsafe { (dev.compile_layout as *const vk_pipeline_layout).as_ref() }
+}
+
+/// The map of set `s` of a layout: its bindings' flat slots.
+#[cfg(borgc)]
+pub fn set_map(pl: &vk_pipeline_layout, s: usize) -> Option<&borgvk_desc_map> {
+    let l = pl.set_layouts[s];
+    if l.is_null() {
+        return None;
+    }
+    // container_of
+    let l = unsafe { (l as *const u8).sub(std::mem::offset_of!(borgvk_descriptor_set_layout, vk)) };
+    Some(unsafe { &(*l.cast::<borgvk_descriptor_set_layout>()).map })
+}
+
+/// The first flat descriptor slot of each of the first four sets.
+#[cfg(borgc)]
+pub fn set_base(dev: &borgvk_device) -> [u8; 4] {
+    let mut base = [0u8; 4];
+    let Some(pl) = compile_layout(dev) else {
+        return base;
+    };
+    let mut at = 0u32;
+    for (s, b) in base.iter_mut().enumerate().take(pl.set_count as usize) {
+        *b = at.min(255) as u8;
+        if let Some(m) = set_map(pl, s) {
+            at += m.total as u32;
+        }
+    }
+    base
+}
+
+/// Without the compiler the shaders come from the cache, which numbers slots per set.
+#[cfg(not(borgc))]
+pub fn set_base(_dev: &borgvk_device) -> [u8; 4] {
+    [0; 4]
+}
+
+/// # Safety
+/// `device` is valid and `base` has room for 4 bytes.
+#[no_mangle]
+pub unsafe extern "C" fn borgvk_layout_set_base(device: *const borgvk_device, base: *mut u8) {
+    let b = set_base(unsafe { &*device });
+    unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), base, 4) };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
