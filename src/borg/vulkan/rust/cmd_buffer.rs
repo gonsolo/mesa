@@ -7,6 +7,7 @@
 use crate::entrypoint::{entrypoint, handle, Handle};
 use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
+use crate::image::Image;
 use crate::device::Device;
 use crate::pipeline::Pipeline;
 use crate::object::{allocate, Zeroed};
@@ -48,8 +49,8 @@ pub struct CommandBuffer {
     pub batch_draws: u32,
     pub state_sent: *mut u8,
     pub state_sent_len: usize,
-    pub batch_img: *mut borgvk_image,
-    pub batch_extra: [*mut borgvk_image; 3], // colour attachments 1-3 of the batch
+    pub batch_img: *mut Image,
+    pub batch_extra: [*mut Image; 3], // colour attachments 1-3 of the batch
     pub batch_nextra: u32,
     pub batch_serve: bool,
     pub batch_area: VkExtent2D, // the pass size when it has no attachment

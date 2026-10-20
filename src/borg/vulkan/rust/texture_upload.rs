@@ -6,6 +6,7 @@
 
 use crate::copy::borgvk_decode_compressed_image;
 use crate::ffi::*;
+use crate::image::Image;
 use crate::format::{borgvk_tex_convert, tex_format};
 use crate::serial::*;
 use crate::state_upload::borgvk_sampler_desc;
@@ -33,7 +34,7 @@ fn send(data: &[u8], desc: &TexDesc, sampler: *const borgvk_sampler) {
 ///
 /// # Safety
 /// `tex` is a mapped RGBA8 image, `sampler` null or valid.
-pub unsafe fn borgvk_send_texture_row(tex: *mut borgvk_image, sampler: *const borgvk_sampler, dy: i32) {
+pub unsafe fn borgvk_send_texture_row(tex: *mut Image, sampler: *const borgvk_sampler, dy: i32) {
     let t = unsafe { &*tex };
     let base = unsafe { (*t.mem).map.cast::<u8>().add(t.offset as usize) };
     let (sw, sh) = (t.vk.extent.width, t.vk.extent.height);
@@ -62,7 +63,7 @@ pub unsafe fn borgvk_send_texture_row(tex: *mut borgvk_image, sampler: *const bo
 }
 
 /// The view's levels and layers, converted and, unless it is one linear level, tiled.
-fn texture(view: &vk_image_view, img: &borgvk_image, sampler: *const borgvk_sampler) -> bool {
+fn texture(view: &vk_image_view, img: &Image, sampler: *const borgvk_sampler) -> bool {
     let Some(map) = mapped(img.mem) else { return false };
     let (mut w, mut h) = (img.vk.extent.width, img.vk.extent.height);
     if w == 0 || h == 0 || w > 4096 || h > 4096 {
@@ -200,7 +201,7 @@ fn texture(view: &vk_image_view, img: &borgvk_image, sampler: *const borgvk_samp
 
 /// # Safety
 /// `view` is valid; `img` and `sampler` are null or valid.
-pub unsafe fn borgvk_send_generic_texture(view: *const vk_image_view, img: *const borgvk_image, sampler: *const borgvk_sampler) -> bool {
+pub unsafe fn borgvk_send_generic_texture(view: *const vk_image_view, img: *const Image, sampler: *const borgvk_sampler) -> bool {
     let (view, Some(img)) = (unsafe { &*view }, unsafe { img.as_ref() }) else { return false };
     if mapped(img.mem).is_none() {
         return false;
@@ -210,7 +211,7 @@ pub unsafe fn borgvk_send_generic_texture(view: *const vk_image_view, img: *cons
         return texture(view, img, sampler);
     }
     // Block-compressed: decoded first.
-    let (mut dimg, mut dmem) = unsafe { (std::mem::zeroed::<borgvk_image>(), std::mem::zeroed::<borgvk_device_memory>()) };
+    let (mut dimg, mut dmem) = unsafe { (std::mem::zeroed::<Image>(), std::mem::zeroed::<borgvk_device_memory>()) };
     let buf = unsafe { borgvk_decode_compressed_image(img, &mut dimg, &mut dmem) };
     if buf.is_null() {
         return false;

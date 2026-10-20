@@ -9,6 +9,7 @@ use crate::cmd_buffer::{cmd, CommandBuffer};
 use crate::copy::resolve_region;
 use crate::entrypoint::{entrypoint, Handle};
 use crate::ffi::*;
+use crate::image::Image;
 use crate::image::{blocks, shape};
 use borg_layout::image::Blocks;
 use std::ptr::null_mut;
@@ -17,7 +18,7 @@ use std::ptr::null_mut;
 pub struct Target {
     next: *mut Target,
     orig: *const vk_image_view,
-    image: borgvk_image,
+    image: Image,
     view: vk_image_view,
 }
 
@@ -35,7 +36,7 @@ fn target_view(c: &mut CommandBuffer, view: *mut vk_image_view) -> *mut vk_image
     if v.image.is_null() || (v.base_mip_level == 0 && v.base_array_layer == 0) {
         return view;
     }
-    let img = unsafe { &*v.image.cast::<borgvk_image>() };
+    let img = unsafe { &*v.image.cast::<Image>() };
     if img.vk.image_type == VK_IMAGE_TYPE_3D || v.layer_count != 1 || img.mem.is_null() {
         return view;
     }

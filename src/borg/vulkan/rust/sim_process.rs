@@ -6,6 +6,7 @@
 //! 128 pixels, dealt to several processes.
 
 use crate::ffi::*;
+use crate::image::Image;
 use crate::format::raw32;
 use crate::util::{log, mkstemp, MESA_LOG_INFO};
 use std::ffi::{OsStr, OsString};
@@ -22,7 +23,7 @@ fn env_set(name: &str) -> Option<OsString> {
 }
 
 /// The frame into the image: cropped when it is up to 3 pixels larger, else scaled.
-fn store_rgb(img: &borgvk_image, rgb: Option<&[u8]>, raw32: bool, sw: u32, sh: u32) {
+fn store_rgb(img: &Image, rgb: Option<&[u8]>, raw32: bool, sw: u32, sh: u32) {
     let (width, height) = (img.vk.extent.width, img.vk.extent.height);
     let Some(rgb) = rgb else {
         return;
@@ -61,7 +62,7 @@ fn store_rgb(img: &borgvk_image, rgb: Option<&[u8]>, raw32: bool, sw: u32, sh: u
     }
 }
 
-fn choose_dim(img: &borgvk_image, sim_dim: u32, raw32: bool) -> u32 {
+fn choose_dim(img: &Image, sim_dim: u32, raw32: bool) -> u32 {
     let e = img.vk.extent;
     let mut sdim = if raw32 { e.width } else if sim_dim != 0 { sim_dim } else { 128 };
     if env_set("BORGVK_SIM_DIRECT").is_some() || crate::hw::enabled() {
@@ -167,7 +168,7 @@ fn read_frame(child: &mut Child, out: &mut [u8]) -> usize {
     got
 }
 
-fn run_processes(bytes: &[u8], img: &borgvk_image, sdim: u32, raw32: bool) {
+fn run_processes(bytes: &[u8], img: &Image, sdim: u32, raw32: bool) {
     let Some(uart) = UartFile::new(bytes) else {
         return;
     };
@@ -209,7 +210,7 @@ fn run_processes(bytes: &[u8], img: &borgvk_image, sdim: u32, raw32: bool) {
     store_rgb(img, (got == expected).then_some(&rgb[..]), raw32, sdim, sdim);
 }
 
-fn run_stream(bytes: &[u8], img: &borgvk_image, sim_dim: u32) {
+fn run_stream(bytes: &[u8], img: &Image, sim_dim: u32) {
     let e = img.vk.extent;
     let raw32 = raw32(img.vk.format) && e.width == e.height;
     let sdim = choose_dim(img, sim_dim, raw32);
@@ -232,7 +233,7 @@ fn run_stream(bytes: &[u8], img: &borgvk_image, sim_dim: u32) {
 ///
 /// # Safety
 /// `bytes` holds `nbytes` bytes from malloc; `color_img` is null or a valid image.
-pub unsafe fn borgvk_sim_run_stream(bytes: *mut u8, nbytes: usize, color_img: *mut borgvk_image, sim_dim: u32) -> VkResult {
+pub unsafe fn borgvk_sim_run_stream(bytes: *mut u8, nbytes: usize, color_img: *mut Image, sim_dim: u32) -> VkResult {
     if let Some(img) = unsafe { color_img.as_ref() } {
         let mapped = unsafe { img.mem.as_ref() }.is_some_and(|m| !m.map.is_null());
         if mapped && img.vk.extent.width != 0 && img.vk.extent.height != 0 {
@@ -268,7 +269,7 @@ mod tests {
             assert_eq!(out.stdout.len(), (dim * dim * 3) as usize);
             let mut pixels = vec![0u8; (dim * dim * 4) as usize];
             let mut mem = borgvk_device_memory { map: pixels.as_mut_ptr().cast(), ..Default::default() };
-            let mut img = borgvk_image { size: pixels.len() as u64, mem: &mut mem, ..Default::default() };
+            let mut img = Image { size: pixels.len() as u64, mem: &mut mem, ..Default::default() };
             img.vk.extent = VkExtent3D { width: dim, height: dim, depth: 1 };
             img.vk.samples = 1;
             run_processes(&bytes, &img, dim, false);

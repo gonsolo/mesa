@@ -6,6 +6,7 @@
 use crate::cmd_buffer::cmd;
 use crate::entrypoint::{entrypoint, slice, Handle};
 use crate::ffi::*;
+use crate::image::Image;
 use crate::image::{blocks, shape};
 use crate::texel::{pack_clear_color, write_depth_stencil};
 use borg_layout::image::Blocks;
@@ -19,7 +20,7 @@ fn layer_count(image: &vk_image, r: &VkImageSubresourceRange) -> u32 {
 }
 
 /// The mapped image and its blocks, when it has memory and a block is one texel deep.
-fn mapped(image: &borgvk_image) -> Option<(*mut u8, pipe_format, Blocks)> {
+fn mapped(image: &Image) -> Option<(*mut u8, pipe_format, Blocks)> {
     let mem = unsafe { image.mem.as_ref() }.filter(|m| !m.map.is_null())?;
     let b = blocks(image.vk.format);
     (b.bd <= 1).then(|| (unsafe { mem.map.cast::<u8>().add(image.offset as usize) }, unsafe { vk_format_to_pipe_format(image.vk.format) }, b))
@@ -27,7 +28,7 @@ fn mapped(image: &borgvk_image) -> Option<(*mut u8, pipe_format, Blocks)> {
 
 /// Calls `f` with the start and texel count of every sample plane of every level and layer in
 /// the ranges.
-fn for_each_plane(image: &borgvk_image, ranges: &[VkImageSubresourceRange], b: Blocks, mut f: impl FnMut(u64, u64)) {
+fn for_each_plane(image: &Image, ranges: &[VkImageSubresourceRange], b: Blocks, mut f: impl FnMut(u64, u64)) {
     let dim = |e: u32, level: u32, block: u32| e.checked_shr(level).unwrap_or(0).max(1).div_ceil(block) as u64;
     let plane = shape(image).sample_plane_size(b);
     for r in ranges {
@@ -77,7 +78,7 @@ entrypoint! {
 /// Clears `rect` of the attachment `view` in `aspect`, in layers from `base_layer` on.
 pub fn clear_rect(view: *mut vk_image_view, aspect: VkImageAspectFlags, value: &VkClearValue, rect: VkRect2D, base_layer: u32, layers: u32) {
     let Some(view) = (unsafe { view.as_ref() }) else { return };
-    let image = unsafe { &*view.image.cast::<borgvk_image>() };
+    let image = unsafe { &*view.image.cast::<Image>() };
     let Some((base, pf, b)) = mapped(image) else { return };
     let mut pixel = [0u8; 16];
     let ds = unsafe { value.depthStencil };

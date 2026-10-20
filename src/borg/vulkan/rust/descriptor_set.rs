@@ -6,6 +6,7 @@
 
 use crate::entrypoint::{entrypoint, handle, slice, vk_error, Handle};
 use crate::ffi::*;
+use crate::image::Image;
 use crate::device::Device;
 use crate::object::{allocate, Zeroed};
 use std::ptr::null;
@@ -38,7 +39,7 @@ pub struct DescriptorSet {
     pub buffers: [*mut borgvk_buffer; BINDINGS],
     pub offsets: [VkDeviceSize; BINDINGS],
     pub ranges: [VkDeviceSize; BINDINGS],
-    pub images: [*mut borgvk_image; BINDINGS],
+    pub images: [*mut Image; BINDINGS],
     pub views: [*mut vk_image_view; BINDINGS], // behind images[]: view type, format, mip/layer range, swizzle
     pub samplers: [*mut borgvk_sampler; BINDINGS],
     pub buffer_views: [*mut vk_buffer_view; BINDINGS], // texel buffers

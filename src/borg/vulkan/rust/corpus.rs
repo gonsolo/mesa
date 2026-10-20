@@ -4,7 +4,7 @@
 //! The driver corpus (scripts/borgvk_corpus): with BORGVK_CORPUS_DIR set, every recorded
 //! output as a line "kind key content" in <dir>/<pid>.log.
 
-use crate::ffi::*;
+use crate::image::Image;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -37,7 +37,7 @@ pub unsafe fn borgvk_corpus_hash(h: u64, p: *const std::ffi::c_void, n: usize) -
 
 /// # Safety
 /// `img` is null or a valid image.
-pub unsafe fn borgvk_corpus_image(h: u64, img: *const borgvk_image) -> u64 {
+pub unsafe fn borgvk_corpus_image(h: u64, img: *const Image) -> u64 {
     let Some(img) = (unsafe { img.as_ref() }) else { return h };
     match unsafe { img.mem.as_ref() }.filter(|m| !m.map.is_null()) {
         Some(m) => unsafe { borgvk_corpus_hash(h, m.map.byte_add(img.offset as usize), img.size as usize) },

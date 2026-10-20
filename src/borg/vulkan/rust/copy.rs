@@ -7,6 +7,7 @@
 use crate::corpus::{borgvk_corpus_hash, borgvk_corpus_log, borgvk_corpus_on, hash};
 use crate::entrypoint::{entrypoint, slice, Handle};
 use crate::ffi::*;
+use crate::image::Image;
 use crate::image::{aspect_blocks, blocks, shape, z16_pack, z16_unpack};
 use crate::texel::{is_partial_ds_aspect, pack_rgba_float, unpack_rgba_float};
 use borg_layout::image::{mip_level_size, Blocks};
@@ -60,7 +61,7 @@ entrypoint! {
 }
 
 /// The image's bytes from its binding on, when it is bound to mapped memory.
-pub fn image_host(i: &borgvk_image) -> Option<*mut u8> {
+pub fn image_host(i: &Image) -> Option<*mut u8> {
     let m = unsafe { i.mem.as_ref() }.filter(|m| !m.map.is_null())?;
     Some(unsafe { m.map.cast::<u8>().add(i.offset as usize) })
 }
@@ -70,7 +71,7 @@ pub fn layers(image: &vk_image, s: &VkImageSubresourceLayers) -> u32 {
 }
 
 /// Offset of a 2D layer or 3D slice of a level, and its row stride in blocks.
-fn slice_offset(img: &borgvk_image, b: Blocks, level: u32, layer: u32, z: Option<u32>) -> (u64, u32) {
+fn slice_offset(img: &Image, b: Blocks, level: u32, layer: u32, z: Option<u32>) -> (u64, u32) {
     let (off, stride) = shape(img).level_offset(level, if z.is_some() { 0 } else { layer }, b);
     let e = img.vk.extent;
     let z = z.map_or(0, |z| z as u64 * mip_level_size([e.width, e.height, 1], level, b).0);
@@ -101,7 +102,7 @@ fn copy_depth_stencil(spf: pipe_format, s: *const u8, dpf: pipe_format, d: *mut 
     }
 }
 
-fn copy_image(src: &borgvk_image, dst: &borgvk_image, reg: &VkImageCopy) {
+fn copy_image(src: &Image, dst: &Image, reg: &VkImageCopy) {
     let (Some(sbase), Some(dbase)) = (image_host(src), image_host(dst)) else { return };
     let (sb, db) = (blocks(src.vk.format), blocks(dst.vk.format));
     if sb.bd > 1 || db.bd > 1 {
@@ -165,7 +166,7 @@ entrypoint! {
 }
 
 /// One region between an image and a buffer, towards the buffer when `to_buffer`.
-fn buffer_image(img: &borgvk_image, buf: &borgvk_buffer, reg: &VkBufferImageCopy, to_buffer: bool) {
+fn buffer_image(img: &Image, buf: &borgvk_buffer, reg: &VkBufferImageCopy, to_buffer: bool) {
     let (Some(ibase), Some(bbase)) = (image_host(img), host(buf)) else { return };
     let (ib, sub) = (blocks(img.vk.format), reg.imageSubresource);
     let a = aspect_blocks(img.vk.format, sub.aspectMask);
@@ -265,7 +266,7 @@ entrypoint! {
 ///
 /// # Safety
 /// `src` is a mapped image; `out` and `mem` are valid for writes.
-pub unsafe fn borgvk_decode_compressed_image(src: *const borgvk_image, out: *mut borgvk_image, mem: *mut borgvk_device_memory) -> *mut c_void {
+pub unsafe fn borgvk_decode_compressed_image(src: *const Image, out: *mut Image, mem: *mut borgvk_device_memory) -> *mut c_void {
     let s = unsafe { &*src };
     let pf = unsafe { vk_format_to_pipe_format(s.vk.format) };
     let sb = Blocks { bd: 1, ..blocks(s.vk.format) };
@@ -335,7 +336,7 @@ fn taps(f: f32, size: u32) -> ([i32; 2], [f32; 2]) {
     ([c(i0), c(i0 + 1)], [1.0 - t, t])
 }
 
-fn blit(src: &borgvk_image, dst: &borgvk_image, regions: &[VkImageBlit], filter: VkFilter) {
+fn blit(src: &Image, dst: &Image, regions: &[VkImageBlit], filter: VkFilter) {
     if image_host(src).is_none() || image_host(dst).is_none() {
         return;
     }
@@ -343,7 +344,7 @@ fn blit(src: &borgvk_image, dst: &borgvk_image, regions: &[VkImageBlit], filter:
     if db.bw > 1 || db.bh > 1 {
         return;
     }
-    let (mut dimg, mut dmem) = unsafe { (std::mem::zeroed::<borgvk_image>(), std::mem::zeroed::<borgvk_device_memory>()) };
+    let (mut dimg, mut dmem) = unsafe { (std::mem::zeroed::<Image>(), std::mem::zeroed::<borgvk_device_memory>()) };
     let mut decoded = std::ptr::null_mut();
     let sb = blocks(src.vk.format);
     let src = if sb.bw > 1 || sb.bh > 1 {
@@ -471,7 +472,7 @@ entrypoint! {
 }
 
 /// Averages the samples of one region into a single-sampled image.
-pub fn resolve_region(src: &borgvk_image, dst: &borgvk_image, reg: &VkImageResolve) {
+pub fn resolve_region(src: &Image, dst: &Image, reg: &VkImageResolve) {
     let (Some(sbase), Some(dbase)) = (image_host(src), image_host(dst)) else { return };
     let (spf, dpf) = unsafe { (vk_format_to_pipe_format(src.vk.format), vk_format_to_pipe_format(dst.vk.format)) };
     let texel = |f: VkFormat| Blocks { bs: blocks(f).bs, bw: 1, bh: 1, bd: 1 };

@@ -10,6 +10,7 @@ use crate::corpus::{borgvk_corpus_hash, borgvk_corpus_image, borgvk_corpus_log, 
 use crate::entrypoint::{entrypoint, slice, Handle};
 use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
+use crate::image::Image;
 use crate::device::Device;
 use crate::pipeline::Pipeline;
 use crate::format::{depth_is_d32, flush_format, raw32, vertex_fetch, Fetch};
@@ -138,7 +139,7 @@ fn reject(why: Reject) -> bool {
     false
 }
 
-fn view_image(v: *const vk_image_view) -> *mut borgvk_image {
+fn view_image(v: *const vk_image_view) -> *mut Image {
     unsafe { v.as_ref() }.map_or(null_mut(), |v| v.image.cast())
 }
 
@@ -148,8 +149,8 @@ fn bytes_of<T>(v: &[T]) -> &[u8] {
 
 fn corpus_state(
     h: u64,
-    img: *const borgvk_image,
-    extra: &[*mut borgvk_image],
+    img: *const Image,
+    extra: &[*mut Image],
     depth: *const vk_image_view,
     stencil: *const vk_image_view,
     wb: &[borgvk_writeback],
@@ -256,8 +257,8 @@ struct Ctx<'a> {
     x: u32,
     points: bool,
     lines: bool,
-    color: *mut borgvk_image,
-    extra: [*mut borgvk_image; 3],
+    color: *mut Image,
+    extra: [*mut Image; 3],
     nextra: usize,
     w: u32,
     h: u32,
@@ -883,7 +884,7 @@ fn vattr_copy(f: VkFormat, conv: bool, dst: &mut [u8], src: *const u8, asz: usiz
     }
 }
 
-fn storage_image(set: &DescriptorSet, b: usize) -> Option<&borgvk_image> {
+fn storage_image(set: &DescriptorSet, b: usize) -> Option<&Image> {
     if !set.buffers[b].is_null() || !set.buffer_views[b].is_null() || set.sampled_mask >> b & 1 != 0 {
         return None;
     }

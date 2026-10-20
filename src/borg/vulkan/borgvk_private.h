@@ -72,7 +72,6 @@ struct borgvk_writeback {
 
 
 /* The persistent simulator (borgvk_sim.c). */
-struct borgvk_image;
 #define BORGVK_CS_MAX_BUFS 35   /* 32 binding slots, the push constants and the constant pool */
 #define BORGVK_CS_POOL_MAX 4096
 #define BORGVK_CS_WORDS_MAX 4096
@@ -105,12 +104,6 @@ struct borgvk_buffer {
    VkDeviceSize offset;
 };
 
-struct borgvk_image {
-   struct vk_image vk;
-   VkDeviceSize size;     /* bytes needed to back this image */
-   struct borgvk_device_memory *mem;
-   VkDeviceSize offset;
-};
 
 /* One mip level and layer of an image, rendered to as an image of its own. */
 
@@ -129,8 +122,6 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_buffer, vk.base, VkBuffer,
                                VK_OBJECT_TYPE_BUFFER)
 VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_buffer_view, vk.base, VkBufferView,
                                VK_OBJECT_TYPE_BUFFER_VIEW)
-VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_image, vk.base, VkImage,
-                               VK_OBJECT_TYPE_IMAGE)
 VK_DEFINE_NONDISP_HANDLE_CASTS(borgvk_sampler, vk.base, VkSampler,
                                VK_OBJECT_TYPE_SAMPLER)
 

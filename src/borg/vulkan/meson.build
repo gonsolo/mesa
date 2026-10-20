@@ -96,7 +96,7 @@ _borgvk_bindings_rs = rust.bindgen(
   c_args : [pre_args, borgvk_bindgen_c_args],
   args : [
     bindgen_output_args, borgvk_bindgen_args, '--no-prepend-enum-name', '--with-derive-default',
-    '--allowlist-type', 'vk_device|vk_device_dispatch_table|borg_blend|vk_descriptor_set_layout|list_head|borgvk_desc_map|vk_pipeline_layout|borgvk_shader_blob|VkFormat|tex_conv|borgvk_image|borgvk_vp|borgvk_writeback|pipe_format',
+    '--allowlist-type', 'vk_device|vk_device_dispatch_table|borg_blend|vk_descriptor_set_layout|list_head|borgvk_desc_map|vk_pipeline_layout|borgvk_shader_blob|VkFormat|tex_conv|borgvk_vp|borgvk_writeback|pipe_format',
     '--allowlist-type', 'borgvk_shader_stage|borgvk_vertex_attr|vk_object_base|VkPipelineShaderStageCreateInfo|VkGraphicsPipelineCreateInfo|VkPipelineColorBlendStateCreateInfo|mesa_log_level',
     '--allowlist-type', 'vk_image_view|VkExtent2D|VkExtent3D|VkResult|borgvk_device_memory|pipe_swizzle|util_format_type|termios',
     '--allowlist-function', 'util_format_description|util_format_get_block(size|width|height|depth)|vk_format_to_pipe_format',

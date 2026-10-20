@@ -3,14 +3,32 @@
 
 use crate::entrypoint::{entrypoint, handle, slice, vk_error, Handle};
 use crate::ffi::*;
+use crate::object::{allocate, Zeroed};
 use crate::memory::requirements;
 
 use borg_layout::image::{Blocks, Shape};
 
-handle!(VkImage, borgvk_image, VK_OBJECT_TYPE_IMAGE);
+handle!(VkImage, Image, VK_OBJECT_TYPE_IMAGE);
 handle!(VkImageView, vk_image_view, VK_OBJECT_TYPE_IMAGE_VIEW);
 
-pub fn shape(image: &borgvk_image) -> Shape {
+#[repr(C)]
+pub struct Image {
+    pub vk: vk_image,
+    pub size: VkDeviceSize, // bytes needed to back this image
+    pub mem: *mut borgvk_device_memory,
+    pub offset: VkDeviceSize,
+}
+
+// Numbers, a raw pointer and the runtime's image, which it zero-allocates.
+unsafe impl Zeroed for Image {}
+
+impl Default for Image {
+    fn default() -> Self {
+        unsafe { std::mem::zeroed() }
+    }
+}
+
+pub fn shape(image: &Image) -> Shape {
     let e = image.vk.extent;
     Shape { extent: [e.width, e.height, e.depth], levels: image.vk.mip_levels, layers: image.vk.array_layers, samples: image.vk.samples }
 }
@@ -41,7 +59,7 @@ fn size(i: &VkImageCreateInfo) -> u64 {
     s.size(blocks(i.format))
 }
 
-fn subresource_layout(image: &borgvk_image, sub: &VkImageSubresource) -> VkSubresourceLayout {
+fn subresource_layout(image: &Image, sub: &VkImageSubresource) -> VkSubresourceLayout {
     let b = aspect_blocks(image.vk.format, sub.aspectMask);
     let level = sub.mipLevel;
     let (offset, stride) = shape(image).level_offset(level, sub.arrayLayer, b);
@@ -60,7 +78,7 @@ fn subresource_layout(image: &borgvk_image, sub: &VkImageSubresource) -> VkSubre
 entrypoint! {
     fn borgvk_CreateImage(device: VkDevice, info: *const VkImageCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkImage) -> Result<(), VkError> {
         let dev = device.get().unwrap();
-        let Some(image) = vk_image_create(&mut dev.vk, info, alloc, size_of::<borgvk_image>()).cast::<borgvk_image>().as_mut() else {
+        let Some(image) = allocate::<Image>(|n| vk_image_create(&mut dev.vk, info, alloc, n)) else {
             return Err(vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY));
         };
         image.size = size(&*info);
@@ -133,7 +151,7 @@ mod tests {
 
     #[test]
     fn subresource_layout_of_a_mip_in_a_layer() {
-        let mut image = borgvk_image::default();
+        let mut image = Image::default();
         image.vk.format = VK_FORMAT_R8G8B8A8_UNORM;
         image.vk.extent = VkExtent3D { width: 8, height: 8, depth: 1 };
         (image.vk.mip_levels, image.vk.array_layers, image.vk.samples) = (3, 2, 1);

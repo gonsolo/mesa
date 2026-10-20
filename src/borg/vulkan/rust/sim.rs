@@ -6,6 +6,7 @@
 //! strips of tile rows, one simulator each.
 
 use crate::ffi::*;
+use crate::image::Image;
 use crate::format::{depth_is_d32, flush_format};
 use crate::util::{ftruncate, log, mmap, MESA_LOG_INFO, MESA_LOG_WARN};
 use std::ffi::OsStr;
@@ -213,16 +214,16 @@ fn blocksize(f: VkFormat) -> u32 {
     unsafe { util_format_get_blocksize(vk_format_to_pipe_format(f)) }
 }
 
-fn view_image(view: *const vk_image_view) -> Option<&'static borgvk_image> {
+fn view_image(view: *const vk_image_view) -> Option<&'static Image> {
     let image = unsafe { view.as_ref() }?.image;
     if image.is_null() {
         return None;
     }
     // container_of
-    unsafe { (image as *const u8).sub(std::mem::offset_of!(borgvk_image, vk)).cast::<borgvk_image>().as_ref() }
+    unsafe { (image as *const u8).sub(std::mem::offset_of!(Image, vk)).cast::<Image>().as_ref() }
 }
 
-fn image_backed(img: &borgvk_image, w: u32, h: u32) -> bool {
+fn image_backed(img: &Image, w: u32, h: u32) -> bool {
     let e = img.vk.extent;
     let mapped = unsafe { img.mem.as_ref() }.is_some_and(|m| !m.map.is_null());
     mapped
@@ -285,7 +286,7 @@ struct Surface {
 }
 
 impl Surface {
-    fn new(img: &borgvk_image) -> Self {
+    fn new(img: &Image) -> Self {
         let e = img.vk.extent;
         Surface {
             pf: unsafe { vk_format_to_pipe_format(img.vk.format) },
@@ -540,10 +541,10 @@ fn keep_stream(stream: &[u8]) {
 #[allow(clippy::too_many_arguments)]
 fn run_pass(
     stream: &[u8],
-    color: Option<&borgvk_image>,
-    extra: &[&borgvk_image],
-    zimg: Option<&borgvk_image>,
-    simg: Option<&borgvk_image>,
+    color: Option<&Image>,
+    extra: &[&Image],
+    zimg: Option<&Image>,
+    simg: Option<&Image>,
     wb: &[borgvk_writeback],
     area: VkExtent2D,
 ) {
@@ -628,8 +629,8 @@ fn run_pass(
 pub unsafe fn borgvk_sim_run_pass(
     stream: *const u8,
     n: usize,
-    color: *mut borgvk_image,
-    extra: *const *mut borgvk_image,
+    color: *mut Image,
+    extra: *const *mut Image,
     nextra: u32,
     depth_view: *const vk_image_view,
     stencil_view: *const vk_image_view,
@@ -638,7 +639,7 @@ pub unsafe fn borgvk_sim_run_pass(
     area: VkExtent2D,
 ) -> VkResult {
     let stream = unsafe { std::slice::from_raw_parts(stream, n) };
-    let extra: Vec<&borgvk_image> = (0..nextra as usize).map(|a| unsafe { &**extra.add(a) }).collect();
+    let extra: Vec<&Image> = (0..nextra as usize).map(|a| unsafe { &**extra.add(a) }).collect();
     let wb = if nwb == 0 { &[][..] } else { unsafe { std::slice::from_raw_parts(wb, nwb as usize) } };
     run_pass(stream, unsafe { color.as_ref() }, &extra, view_image(depth_view), view_image(stencil_view), wb, area);
     VK_SUCCESS

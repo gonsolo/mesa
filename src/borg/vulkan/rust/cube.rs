@@ -9,6 +9,7 @@ use crate::drm::{ioctl, SETUP, SUBMIT};
 use crate::cmd_buffer::CommandBuffer;
 use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
+use crate::image::Image;
 use crate::device::Device;
 use crate::serial::{borgvk_serial_send_geom, borgvk_serial_send_mvp};
 use crate::sim_process::borgvk_sim_run_stream;
@@ -25,7 +26,7 @@ const ATTR_FLOAT0: usize = MVP_FLOATS + NUM_VERTS * 4; // attr[36][4]
 const MIN_FLOATS: usize = ATTR_FLOAT0 + NUM_VERTS * 4; // 304 = 1216 B
 
 /// The first colour attachment of the submit's command buffers.
-fn color_attachment(s: &vk_queue_submit) -> *mut borgvk_image {
+fn color_attachment(s: &vk_queue_submit) -> *mut Image {
     for &cb in unsafe { crate::entrypoint::slice(s.command_buffers, s.command_buffer_count) } {
         let v = unsafe { (*cb.cast::<CommandBuffer>()).color_views[0] };
         if let Some(v) = unsafe { v.as_ref() }.filter(|v| !v.image.is_null()) {
@@ -77,14 +78,14 @@ fn ubo(set: &DescriptorSet) -> Option<&[f32]> {
     Some(unsafe { std::slice::from_raw_parts(mem.map.byte_add(off as usize).cast(), n) })
 }
 
-fn texture(set: &DescriptorSet) -> Option<*mut borgvk_image> {
+fn texture(set: &DescriptorSet) -> Option<*mut Image> {
     let t = set.images[1];
     let ti = unsafe { t.as_ref() }?;
     let mapped = unsafe { ti.mem.as_ref() }.is_some_and(|m| !m.map.is_null());
     (mapped && ti.vk.extent.width != 0 && ti.vk.extent.height != 0).then_some(t)
 }
 
-fn send_texture(set: &DescriptorSet, tex: *mut borgvk_image) {
+fn send_texture(set: &DescriptorSet, tex: *mut Image) {
     for row in 0..BORGVK_TEX_DIM as i32 {
         unsafe { borgvk_send_texture_row(tex, set.samplers[1], row) };
     }
