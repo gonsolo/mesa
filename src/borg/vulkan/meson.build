@@ -85,8 +85,21 @@ borgvk_inc = [
 
 prog_cbindgen = find_program('cbindgen', required : true, native : true, version : '>= 0.25')
 
+borgvk_rust_h = custom_target(
+  'borgvk_rust.h',
+  input : [files('rust/cbindgen.toml'), 'rust/lib.rs'],
+  output : ['borgvk_rust.h'],
+  command : [
+    prog_cbindgen, '-q', '--config', '@INPUT0@', '--lang', 'c',
+    '--output', '@OUTPUT0@', '--depfile', '@DEPFILE@',
+    '--', '@INPUT1@',
+  ],
+  depfile : 'borgvk_rust.h.d',
+)
+libborgvk_files += borgvk_rust_h
+
 _borgvk_bindings_rs = rust.bindgen(
-  input : ['rust/bindings.h', borgvk_entrypoints[0]],
+  input : ['rust/bindings.h', borgvk_entrypoints[0], borgvk_rust_h],
   output : 'borgvk_bindings.rs',
   c_args : [pre_args],
   args : [
@@ -123,18 +136,6 @@ libborgvk_rs = static_library(
   rust_args : rust_global_args,
   link_with : [_libborgvk_bindings_rs],
 )
-borgvk_rust_h = custom_target(
-  'borgvk_rust.h',
-  input : [files('rust/cbindgen.toml'), 'rust/lib.rs'],
-  output : ['borgvk_rust.h'],
-  command : [
-    prog_cbindgen, '-q', '--config', '@INPUT0@', '--lang', 'c',
-    '--output', '@OUTPUT0@', '--depfile', '@DEPFILE@',
-    '--', '@INPUT1@',
-  ],
-  depfile : 'borgvk_rust.h.d',
-)
-libborgvk_files += borgvk_rust_h
 
 if with_tests and get_option('b_sanitize') == 'none'
   rust.test(
@@ -161,7 +162,7 @@ libvulkan_borg = shared_library(
 # The wire packet test links the Rust library itself: libvulkan_borg exports only the ICD entrypoints.
 borgvk_serial_test = executable(
   'borgvk_serial_test',
-  ['borgvk_serial_test.c'],
+  ['borgvk_serial_test.c', borgvk_rust_h],
   include_directories : [
     inc_include, inc_src, inc_util,
     include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h
@@ -180,7 +181,7 @@ test(
 # end-to-end test, with the driver's own senders rather than a reimplementation.
 borgvk_burst_gen = executable(
   'borgvk_burst_gen',
-  ['borgvk_burst_gen.c'],
+  ['borgvk_burst_gen.c', borgvk_rust_h],
   include_directories : [
     inc_include, inc_src, inc_util,
     include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h

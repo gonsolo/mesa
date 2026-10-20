@@ -6,7 +6,6 @@
 #define BORGVK_IMAGE_H
 
 #include "borgvk_private.h"
-#include "borgvk_rust.h"
 
 #include "util/format/u_format.h"
 #include "vk_format.h"

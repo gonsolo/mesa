@@ -182,13 +182,6 @@ size_t borgvk_hw_render(const uint8_t *stream, size_t n, uint32_t w, uint32_t h,
 int borgvk_hw_compute(const uint8_t *job, size_t len, const char *outf);
 bool borgvk_sim_serves(const struct borgvk_image *color, bool has_depth_stencil);
 bool borgvk_sim_serves_extent(uint32_t w, uint32_t h, bool has_depth_stencil);
-uint8_t borgvk_sim_flush_format(VkFormat f);
-bool borgvk_sim_bytes_packed(VkFormat f);
-bool borgvk_sim_half2(VkFormat f);
-bool borgvk_sim_half1(VkFormat f);
-bool borgvk_sim_raw32(VkFormat f);
-uint32_t borgvk_sim_packed_opt(VkFormat f);
-bool borgvk_sim_depth_is_d32(VkFormat f);
 #define BORGVK_CORPUS_SEED 0xcbf29ce484222325ull
 bool borgvk_corpus_on(void);
 uint64_t borgvk_corpus_hash(uint64_t h, const void *p, size_t n);
@@ -201,48 +194,19 @@ VkResult borgvk_sim_run_pass(const uint8_t *stream, size_t n, struct borgvk_imag
                              const struct vk_image_view *stencil_view,
                              const struct borgvk_writeback *wb, uint32_t nwb, VkExtent2D area);
 
-void borgvk_serial_send_mvp(const float mvp[16]);
-void borgvk_serial_send_blend(uint32_t blend_cfg, uint32_t blend_const);
-void borgvk_blend_pack(const VkPipelineColorBlendStateCreateInfo *cb,
-                       uint32_t *cfg, uint32_t *konst);
 /* 0xB4: STENCIL_CFG, STENCIL_FRONT, STENCIL_BACK, DEPTH_CFG, CULL_CFG. */
-void borgvk_serial_send_state(const uint32_t reg[5]);
-void borgvk_serial_send_viewport(const struct borgvk_vp *vp);
-void borgvk_serial_send_target(uint8_t flush_format, const float clear[4]);
-void borgvk_serial_send_pass(uint8_t flush_format, uint8_t flags);
-void borgvk_serial_send_att(uint8_t count, const uint8_t fmt[3]);
-void borgvk_serial_send_mem(uint32_t off, const uint8_t *data, uint32_t n);
-void borgvk_serial_send_vattr(uint32_t slot, uint32_t fmt, uint32_t base, uint32_t count,
-                              uint32_t stride, uint32_t swz);
-void borgvk_serial_send_draw(uint32_t topology, uint32_t index_type, uint32_t restart,
-                             uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex,
-                             uint32_t first_instance, int32_t vertex_offset, uint32_t index_base,
-                             uint32_t ubo_base);
 #define BORGVK_TEXG_CHUNK 256
-void borgvk_serial_send_texture_chunk(uint32_t off, const uint8_t *data, uint32_t n,
-                                      const uint32_t desc_w123[3],
-                                      const uint32_t sampler[4]);
-void borgvk_serial_send_texture_levels(const uint32_t offs[12]);
 /* Pack a pipeline's stencil, depth and cull state into register layout. */
-void borgvk_state_pack(const VkGraphicsPipelineCreateInfo *ci, uint32_t reg[5]);
 
 #define BORGVK_GEOM_MAX_VERTS 16
 #define BORGVK_GEOM_MAX_TRIS  12
 
-void borgvk_serial_send_geom(const float *verts, int nverts,
-                             const uint8_t *idx, const float *uv, int ntris);
 
 #define BORGVK_TEX_DIM 64
 
-void borgvk_serial_send_tex_row(int y, const uint8_t *rgba, const uint32_t sampler[4]);
 
-void borgvk_serial_send_shader(uint8_t stage, const uint8_t *blob, uint32_t len);
 
-void borgvk_serial_send_push_constants(uint32_t offset, uint32_t size,
-                                       const void *values);
 
-void borgvk_transport_capture_begin(void);
-uint8_t *borgvk_transport_capture_end(size_t *out_len);
 
 VkResult borgvk_queue_submit(struct vk_queue *queue,
                              struct vk_queue_submit *submit);
@@ -442,5 +406,7 @@ void borgvk_clear_attachment_rect(struct vk_image_view *view, VkImageAspectFlags
                                   uint32_t baseLayer, uint32_t layerCount);
 
 void borgvk_event_set_status(VkEvent event, bool set);
+
+#include "borgvk_rust.h"
 
 #endif /* BORGVK_PRIVATE_H */

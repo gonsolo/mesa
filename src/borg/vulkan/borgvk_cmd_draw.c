@@ -5,7 +5,6 @@
 #include "util/format/u_format.h"
 #include "util/format_srgb.h"
 #include "borgvk_private.h"
-#include "borgvk_rust.h"
 
 #include "vk_format.h"
 
