@@ -126,3 +126,58 @@ entrypoint! {
         (c.depth_view, c.stencil_view) = (null_mut(), null_mut());
     }
 }
+
+// By hand: bindgen leaves out vk_common_entrypoints.h's hidden declarations.
+extern "C" {
+    fn vk_common_CmdEndRendering(cb: VkCommandBuffer);
+    fn vk_common_CmdBeginRenderPass(cb: VkCommandBuffer, info: *const VkRenderPassBeginInfo, contents: VkSubpassContents);
+    fn vk_common_CmdBeginRenderPass2(cb: VkCommandBuffer, info: *const VkRenderPassBeginInfo, subpass: *const VkSubpassBeginInfo);
+    fn vk_common_CmdNextSubpass(cb: VkCommandBuffer, contents: VkSubpassContents);
+    fn vk_common_CmdNextSubpass2(cb: VkCommandBuffer, begin: *const VkSubpassBeginInfo, end: *const VkSubpassEndInfo);
+    fn vk_common_CmdEndRenderPass(cb: VkCommandBuffer);
+    fn vk_common_CmdEndRenderPass2(cb: VkCommandBuffer, end: *const VkSubpassEndInfo);
+}
+
+// Recorded commands replay through the device's cmd_dispatch, which holds only borgvk's entry
+// points; these forward to the runtime's render passes.
+entrypoint! {
+    fn borgvk_CmdEndRendering(command_buffer: VkCommandBuffer) {
+        vk_common_CmdEndRendering(command_buffer);
+    }
+}
+
+entrypoint! {
+    fn borgvk_CmdBeginRenderPass(command_buffer: VkCommandBuffer, info: *const VkRenderPassBeginInfo, contents: VkSubpassContents) {
+        vk_common_CmdBeginRenderPass(command_buffer, info, contents);
+    }
+}
+
+entrypoint! {
+    fn borgvk_CmdBeginRenderPass2(command_buffer: VkCommandBuffer, info: *const VkRenderPassBeginInfo, subpass: *const VkSubpassBeginInfo) {
+        vk_common_CmdBeginRenderPass2(command_buffer, info, subpass);
+    }
+}
+
+entrypoint! {
+    fn borgvk_CmdNextSubpass(command_buffer: VkCommandBuffer, contents: VkSubpassContents) {
+        vk_common_CmdNextSubpass(command_buffer, contents);
+    }
+}
+
+entrypoint! {
+    fn borgvk_CmdNextSubpass2(command_buffer: VkCommandBuffer, begin: *const VkSubpassBeginInfo, end: *const VkSubpassEndInfo) {
+        vk_common_CmdNextSubpass2(command_buffer, begin, end);
+    }
+}
+
+entrypoint! {
+    fn borgvk_CmdEndRenderPass(command_buffer: VkCommandBuffer) {
+        vk_common_CmdEndRenderPass(command_buffer);
+    }
+}
+
+entrypoint! {
+    fn borgvk_CmdEndRenderPass2(command_buffer: VkCommandBuffer, end: *const VkSubpassEndInfo) {
+        vk_common_CmdEndRenderPass2(command_buffer, end);
+    }
+}

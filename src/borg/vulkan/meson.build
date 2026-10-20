@@ -128,6 +128,7 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-type', 'borgvk_physical_device|vk_instance|wsi_device_options|VkIcdSurfaceHeadless|VkSurfaceKHR|VkInstance',
     '--allowlist-function', 'vk_cmd_queue_execute|vk_sync_(wait|signal)|borgvk_submit_(is_cube|sim_cube|cube_live)',
     '--allowlist-type', 'vk_queue|vk_queue_submit',
+    '--allowlist-type', 'VkRenderPassBeginInfo|VkSubpassContents|VkSubpass(Begin|End)Info',
     '--allowlist-type', 'borgvk_target|VkRenderingInfo|VkRenderingAttachmentInfo|VkImageResolve|VkRenderingEndInfoEXT',
     '--allowlist-type', 'borgvk_command_buffer|vk_command_buffer_ops|vk_command_pool|VkCommandBufferBeginInfo|borg_blend|VkComputePipelineCreateInfo|VkPipelineRenderingCreateInfo|VkPipelineCache',
     '--allowlist-type', 'borgvk_descriptor_pool|borgvk_descriptor_set|VkDescriptorSetLayoutCreateInfo|VkDescriptorSetLayoutSupport|VkDescriptorPoolCreateInfo',
