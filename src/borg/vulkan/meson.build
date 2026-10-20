@@ -17,7 +17,6 @@ libborgvk_files = files(
   'borgvk_cmd_buffer.c',
   'borgvk_descriptor_set.c',
   'borgvk_device.c',
-  'borgvk_hw.c',
   'borgvk_device_memory.c',
   'borgvk_buffer.c',
   'borgvk_image.c',
@@ -35,7 +34,6 @@ libborgvk_files = files(
   'borgvk_state_upload.c',
   'borgvk_cmd_dispatch.c',
   'borgvk_cmd_draw.c',
-  'borgvk_sim.c',
   'borgvk_sync.c',
   'borgvk_wsi.c',
   'borgvk_private.h',
@@ -109,7 +107,7 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-type', 'vk_image_view|VkExtent2D|VkExtent3D|VkResult|borgvk_device_memory|pipe_swizzle|util_format_type|termios',
     '--allowlist-function', 'util_format_description|util_format_get_blocksize|vk_format_to_pipe_format',
     '--allowlist-function', 'util_format_(un)?pack_(rgba|z_float|s_8uint)',
-    '--allowlist-function', 'borgvk_hw_.*|borg_core_.*|borg_hw_.*',
+    '--allowlist-function', 'borg_core_.*|borg_hw_.*|bh_.*',
     '--allowlist-function', 'mesa_log|malloc|realloc|free|tcgetattr|tcsetattr|cfmakeraw|cfsetispeed|cfsetospeed|tcdrain',
     '--allowlist-function', 'memfd_create|close|signal|sysconf',
     '--allowlist-var', 'BORGC_.*|BORGVK_.*|BC_.*|BORG_(ZB|SB|HEAP)_SPI|DRAM_OUT_BASE_SPI',
@@ -178,7 +176,7 @@ libvulkan_borg = shared_library(
 # The wire packet test links the Rust library itself: libvulkan_borg exports only the ICD entrypoints.
 borgvk_serial_test = executable(
   'borgvk_serial_test',
-  ['borgvk_serial_test.c', 'borgvk_hw.c', borgvk_rust_h],
+  ['borgvk_serial_test.c', borgvk_rust_h],
   include_directories : [
     inc_include, inc_src, inc_util,
     include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h
@@ -197,7 +195,7 @@ test(
 # end-to-end test, with the driver's own senders rather than a reimplementation.
 borgvk_burst_gen = executable(
   'borgvk_burst_gen',
-  ['borgvk_burst_gen.c', 'borgvk_hw.c', borgvk_rust_h],
+  ['borgvk_burst_gen.c', borgvk_rust_h],
   include_directories : [
     inc_include, inc_src, inc_util,
     include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h

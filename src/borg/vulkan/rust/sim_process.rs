@@ -69,7 +69,7 @@ fn store_rgb(img: &borgvk_image, rgb: Option<&[u8]>, raw32: bool, sw: u32, sh: u
 fn choose_dim(img: &borgvk_image, sim_dim: u32, raw32: bool) -> u32 {
     let e = img.vk.extent;
     let mut sdim = if raw32 { e.width } else if sim_dim != 0 { sim_dim } else { 128 };
-    if env_set("BORGVK_SIM_DIRECT").is_some() || unsafe { borgvk_hw_enabled() } {
+    if env_set("BORGVK_SIM_DIRECT").is_some() || crate::hw::enabled() {
         let d = e.width;
         if (4..=256).contains(&d) && d.is_power_of_two() && e.height == d {
             sdim = d;
@@ -219,15 +219,15 @@ fn run_stream(bytes: &[u8], img: &borgvk_image, sim_dim: u32) {
     let raw32 = raw32(img.vk.format) && e.width == e.height;
     let sdim = choose_dim(img, sim_dim, raw32);
     keep_stream(bytes);
-    if unsafe { borgvk_hw_enabled() } {
+    if crate::hw::enabled() {
         let (mut sw, mut sh) = (sdim, sdim);
         let (rw, rh) = ((e.width + 3) & !3, (e.height + 3) & !3);
         if !raw32 && rw <= 1024 && rh <= 1024 {
             (sw, sh) = (rw, rh);
         }
         let mut rgb = vec![0u8; sw as usize * sh as usize * if raw32 { 4 } else { 3 }];
-        let got = unsafe { borgvk_hw_render(bytes.as_ptr(), bytes.len() as _, sw, sh, rgb.as_mut_ptr()) };
-        store_rgb(img, (got as usize == rgb.len()).then_some(&rgb[..]), raw32, sw, sh);
+        let got = crate::hw::render(bytes, sw, sh, rgb.as_mut_ptr());
+        store_rgb(img, (got == rgb.len()).then_some(&rgb[..]), raw32, sw, sh);
         return;
     }
     run_processes(bytes, img, sdim, raw32);

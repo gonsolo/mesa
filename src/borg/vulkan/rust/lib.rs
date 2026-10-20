@@ -6,6 +6,7 @@ mod ffi {
 }
 
 mod format;
+mod hw;
 mod image;
 mod serial;
 mod sim;

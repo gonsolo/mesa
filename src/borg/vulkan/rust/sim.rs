@@ -74,7 +74,7 @@ impl Server {
         }
         let prot = (PROT_READ | PROT_WRITE) as i32;
         let Some(bin) = bin else {
-            if !unsafe { borgvk_hw_enabled() } || unsafe { borg_hw_open() } != 0 {
+            if !crate::hw::enabled() || unsafe { borg_hw_open() } != 0 {
                 return false;
             }
             let flags = (MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE) as i32;

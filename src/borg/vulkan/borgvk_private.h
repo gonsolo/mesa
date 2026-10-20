@@ -183,11 +183,6 @@ struct borgvk_image;
 #define BORGVK_CS_MAX_BUFS 35   /* 32 binding slots, the push constants and the constant pool */
 #define BORGVK_CS_POOL_MAX 4096
 #define BORGVK_CS_WORDS_MAX 4096
-bool borgvk_hw_enabled(void);
-size_t borgvk_hw_render(const uint8_t *stream, size_t n, uint32_t w, uint32_t h, uint8_t *out);
-int borgvk_hw_compute(const uint8_t *job, size_t len, const char *outf);
-bool borgvk_sim_serves(const struct borgvk_image *color, bool has_depth_stencil);
-bool borgvk_sim_serves_extent(uint32_t w, uint32_t h, bool has_depth_stencil);
 #define BORGVK_CORPUS_SEED 0xcbf29ce484222325ull
 bool borgvk_corpus_on(void);
 uint64_t borgvk_corpus_hash(uint64_t h, const void *p, size_t n);
