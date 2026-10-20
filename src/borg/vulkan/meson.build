@@ -13,9 +13,7 @@ borgvk_entrypoints = custom_target(
   depend_files : vk_entrypoints_gen_depend_files,
 )
 
-libborgvk_files = files(
-  'borgvk_private.h',
-)
+libborgvk_files = []
 
 # The Borg's own driver code (software/borg), host build, with its hooks over the DRM render node.
 borg_sw = '../../../../software/borg/'
