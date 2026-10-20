@@ -216,7 +216,6 @@ bool borgvk_shader_cache_get(const VkPipelineShaderStageCreateInfo *si, uint32_t
                              struct borgvk_shader_blob *blob, bool *reads_pntc);
 void borgvk_shader_cache_record(const VkPipelineShaderStageCreateInfo *si, uint32_t vfetch,
                                 const struct borgvk_shader_blob *blob, bool reads_pntc);
-uint32_t borgvk_blob_num_varyings(const struct borgvk_shader_blob *b);
 #define BORGVK_LINE_SLOT  16
 #define BORGVK_LINE_OTHER 24
 void borgvk_compile_empty_frag(struct borgvk_device *device, uint32_t opt);

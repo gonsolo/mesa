@@ -30,6 +30,16 @@ libborgc = static_library(
     idep_compiler_rs,   # Mesa's NIR Rust bindings (compiler::bindings / ::nir)
   ],
 )
+# The same crate for Rust callers (the driver).
+libborgc_rs = static_library(
+  'borgc_rs',
+  files('lib.rs'),
+  gnu_symbol_visibility : 'hidden',
+  rust_abi : 'rust',
+  rust_args : rust_global_args,
+  link_with : [_libborgc_flags],
+  dependencies : [idep_compiler_rs],
+)
 
 # The SPIR-V options and NIR pass list borgc expects, shared by the driver and
 # the offline CLI so the two cannot drift (see borg_nir_passes.h).

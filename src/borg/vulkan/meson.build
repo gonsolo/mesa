@@ -57,7 +57,7 @@ idep_borg_host = declare_dependency(link_with : libborg_host, include_directorie
 
 if with_borgc
   libborgvk_files += files('borgvk_compiler.c')
-  borgvk_compiler_deps = [idep_borgc, idep_nir]
+  borgvk_compiler_deps = [idep_borg_nir_passes, idep_nir]
 else
   libborgvk_files += files('borgvk_compiler_cache.c')
   borgvk_compiler_deps = [declare_dependency(include_directories : [inc_compiler, include_directories('../compiler')])]
@@ -102,7 +102,7 @@ _borgvk_bindings_rs = rust.bindgen(
   c_args : [pre_args],
   args : [
     bindgen_output_args, '--no-prepend-enum-name', '--with-derive-default',
-    '--allowlist-type', 'VkFormat|tex_conv|borgvk_image|borgvk_vp|borgvk_writeback|pipe_format',
+    '--allowlist-type', 'borgvk_shader_blob|VkFormat|tex_conv|borgvk_image|borgvk_vp|borgvk_writeback|pipe_format',
     '--allowlist-type', 'VkGraphicsPipelineCreateInfo|VkPipelineColorBlendStateCreateInfo|mesa_log_level',
     '--allowlist-type', 'vk_image_view|VkExtent2D|VkExtent3D|VkResult|borgvk_device_memory|pipe_swizzle|util_format_type|termios',
     '--allowlist-function', 'util_format_description|util_format_get_blocksize|vk_format_to_pipe_format',
@@ -142,13 +142,22 @@ _libborgvk_bindings_rs = static_library(
   rust_abi : 'rust',
   rust_args : rust_global_args,
 )
+borgvk_rs_args = rust_global_args
+borgvk_rs_link = [_libborgvk_bindings_rs]
+borgvk_rs_deps = []
+if with_borgc
+  borgvk_rs_args += ['--cfg', 'borgc']
+  borgvk_rs_link += [libborgc_rs]
+  borgvk_rs_deps += [idep_compiler_rs]
+endif
 libborgvk_rs = static_library(
   'borgvk_rs',
   files('rust/lib.rs'),
   gnu_symbol_visibility : 'hidden',
   rust_abi : 'c',
-  rust_args : rust_global_args,
-  link_with : [_libborgvk_bindings_rs],
+  rust_args : borgvk_rs_args,
+  link_with : borgvk_rs_link,
+  dependencies : borgvk_rs_deps,
 )
 
 if with_tests and get_option('b_sanitize') == 'none'

@@ -5,15 +5,6 @@
 #include "borgvk_private.h"
 #include "util/log.h"
 
-uint32_t
-borgvk_blob_num_varyings(const struct borgvk_shader_blob *b)
-{
-   if (b->len < 6 || !(b->data[5] & 1))
-      return 0;
-   const uint32_t at = 6 + 4 * b->data[0] + b->data[3] + b->data[4] + 4 * b->data[4];
-   return at < b->len ? b->data[at] : 0;
-}
-
 void
 borgvk_compile_stage(struct borgvk_device *device, uint32_t vfetch,
                      const VkPipelineShaderStageCreateInfo *stage_info)
