@@ -11,6 +11,8 @@
 #include "vk_buffer.h"
 #include "vk_buffer_view.h"
 #include "vk_device_memory.h"
+#include "vk_sync.h"
+#include "util/os_time.h"
 #include "drm-uapi/borg_drm.h"
 #include "borgvk_drm_compat.h"
 #include "borgc_flags.h"

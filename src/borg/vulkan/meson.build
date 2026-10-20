@@ -29,7 +29,6 @@ libborgvk_files = files(
   'borgvk_state_upload.c',
   'borgvk_cmd_dispatch.c',
   'borgvk_cmd_draw.c',
-  'borgvk_sync.c',
   'borgvk_wsi.c',
   'borgvk_private.h',
 )
@@ -128,8 +127,8 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-type', 'VkBufferCreateInfo|VkBufferViewCreateInfo|VkDeviceBufferMemoryRequirements|VkMemoryRequirements2',
     '--allowlist-type', 'VkMemoryDedicatedRequirements|VkBindBufferMemoryInfo|VkBaseOutStructure|drm_borg_gem_(create|mmap)|drm_gem_close',
     '--allowlist-var', 'DRM_COMMAND_BASE|DRM_BORG_GEM_.*|VK_(TRUE|FALSE)',
-    '--allowlist-function', 'vk_image_(view_)?(create|destroy)|vk_format_get_aspect_format',
-    '--allowlist-type', 'VkQueryPoolCreateInfo|VkQueryPool|VkImageMemoryRequirementsInfo2|VkImageSubresource2KHR|VkSubresourceLayout2KHR|VkBindImageMemoryInfo|VkImageViewCreateInfo',
+    '--allowlist-function', 'vk_image_(view_)?(create|destroy)|vk_format_get_aspect_format|os_time_get_nano',
+    '--allowlist-type', 'vk_sync_type|vk_sync_wait|vk_sync_features|vk_sync_wait_flags|VkQueryPoolCreateInfo|VkQueryPool|VkImageMemoryRequirementsInfo2|VkImageSubresource2KHR|VkSubresourceLayout2KHR|VkBindImageMemoryInfo|VkImageViewCreateInfo',
     '--allowlist-type', 'borgvk_sampler|VkSamplerCreateInfo|VkImageCreateInfo|vk_object_base|VkEventCreateInfo|VkDependencyInfo|VkCommandBuffer|VkEvent|VkPipelineStageFlags2?',
     '--allowlist-var', 'BORGC_.*|BORGVK_.*|BC_.*|BORG_(ZB|SB|HEAP)_SPI|DRAM_OUT_BASE_SPI',
     '--allowlist-var', 'B115200|TCSANOW|CLOCAL|CREAD|CRTSCTS|O_NOCTTY',

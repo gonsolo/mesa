@@ -23,5 +23,6 @@ mod sampler;
 mod serial;
 mod sim;
 mod sim_process;
+mod sync;
 mod transport;
 mod util;
