@@ -7,7 +7,7 @@
 use crate::entrypoint::{entrypoint, find_out, pointee, vk_error};
 use crate::ffi::*;
 use crate::fmt;
-use crate::object::{allocate, Zeroed};
+use crate::object::{allocate, Owned, Zeroed};
 use crate::device::Instance;
 use crate::image::blocks;
 use crate::sync::SYNC_TYPE;
@@ -360,6 +360,8 @@ fn properties() -> vk_properties {
 unsafe fn create(instance: &mut Instance, drm_fd: i32) -> VkResult {
     let d = unsafe { allocate::<PhysicalDevice>(|n| vk_zalloc(&instance.vk.alloc, n, 8, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE)) };
     let Some(d) = d else { return vk_error!(instance, VK_ERROR_OUT_OF_HOST_MEMORY).0 };
+    let ialloc: *const VkAllocationCallbacks = &instance.vk.alloc;
+    let mut d = Owned::new(d, |d| unsafe { vk_free(ialloc, std::ptr::from_mut(d).cast()) });
     d.drm_fd = drm_fd;
     let mut dispatch: vk_physical_device_dispatch_table = unsafe { std::mem::zeroed() };
     let mut extensions: vk_device_extension_table = unsafe { std::mem::zeroed() };
@@ -374,9 +376,9 @@ unsafe fn create(instance: &mut Instance, drm_fd: i32) -> VkResult {
     features.largePoints = true;
     let r = unsafe { vk_physical_device_init(&mut d.vk, &mut instance.vk, &extensions, &features, &properties(), &dispatch) };
     if r != VK_SUCCESS {
-        unsafe { vk_free(&instance.vk.alloc, std::ptr::from_mut(d).cast()) };
         return r;
     }
+    let mut d = d.then(|d| unsafe { vk_physical_device_finish(&mut d.vk) });
     // One host-visible coherent heap: host RAM, staged to the board.
     let m = &mut d.memory;
     m.memoryHeapCount = 1;
@@ -387,15 +389,11 @@ unsafe fn create(instance: &mut Instance, drm_fd: i32) -> VkResult {
     m.memoryTypes[0].heapIndex = 0;
     d.sync_types = [&SYNC_TYPE, std::ptr::null()];
     d.vk.supported_sync_types = d.sync_types.as_ptr();
-    let r = unsafe { borgvk_wsi_init(d) };
+    let r = unsafe { borgvk_wsi_init(&mut *d) };
     if r != VK_SUCCESS {
-        unsafe {
-            vk_physical_device_finish(&mut d.vk);
-            vk_free(&instance.vk.alloc, std::ptr::from_mut(d).cast());
-        }
         return r;
     }
-    unsafe { list_addtail(&mut d.vk.link, &mut instance.vk.physical_devices.list) };
+    unsafe { list_addtail(&mut d.keep().vk.link, &mut instance.vk.physical_devices.list) };
     VK_SUCCESS
 }
 

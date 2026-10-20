@@ -6,7 +6,7 @@
 use crate::cmd_buffer::CMD_BUFFER_OPS;
 use crate::entrypoint::{chain, entrypoint, handle, vk_error, Handle};
 use crate::ffi::*;
-use crate::object::{allocate, Zeroed};
+use crate::object::{allocate, Owned, Zeroed};
 use crate::physical_device::{destroy_physical_device, enumerate_devices, API_VERSION};
 use crate::queue::borgvk_queue_submit;
 use std::ffi::{c_char, c_void};
@@ -163,18 +163,17 @@ entrypoint! {
         let Some(inst) = allocate::<Instance>(|n| vk_zalloc(alloc, n, 8, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE)) else {
             return error(VK_ERROR_OUT_OF_HOST_MEMORY);
         };
-        let inst = std::ptr::from_mut(inst);
+        let mut inst = Owned::new(inst, |i| vk_free(alloc, std::ptr::from_mut(i).cast()));
         let mut dispatch: vk_instance_dispatch_table = std::mem::zeroed();
         vk_instance_dispatch_table_from_entrypoints(&mut dispatch, &borgvk_instance_entrypoints, true);
         vk_instance_dispatch_table_from_entrypoints(&mut dispatch, &wsi_instance_entrypoints, false);
-        let r = vk_instance_init(&mut (*inst).vk, &*INSTANCE_EXTENSIONS, &dispatch, info, alloc);
+        let r = vk_instance_init(&mut inst.vk, &*INSTANCE_EXTENSIONS, &dispatch, info, alloc);
         if r != VK_SUCCESS {
-            vk_free(alloc, inst.cast());
             return error(r);
         }
-        (*inst).vk.physical_devices.enumerate = Some(enumerate_devices);
-        (*inst).vk.physical_devices.destroy = Some(destroy_physical_device);
-        *out = VkInstance::from_object(inst);
+        inst.vk.physical_devices.enumerate = Some(enumerate_devices);
+        inst.vk.physical_devices.destroy = Some(destroy_physical_device);
+        *out = VkInstance::from_object(inst.keep());
         VK_SUCCESS
     }
 }
@@ -215,7 +214,10 @@ entrypoint! {
             return vk_error!(pdev, VK_ERROR_OUT_OF_HOST_MEMORY).0;
         }
         std::ptr::addr_of_mut!((*d).scratch).write(Mutex::new(Scratch::default()));
-        let d = &mut *d;
+        let mut d = Owned::new(&mut *d, |d| {
+            std::ptr::drop_in_place(&mut d.scratch);
+            vk_free2(ialloc, alloc, std::ptr::from_mut(d).cast());
+        });
 
         // These record, and replay through cmd_dispatch at submit; they win over borgvk's.
         let e = &vk_cmd_enqueue_device_entrypoints;
@@ -252,23 +254,19 @@ entrypoint! {
 
         let r = vk_device_init(&mut d.vk, &mut pdev.vk, &dt, info, alloc);
         if r != VK_SUCCESS {
-            std::ptr::drop_in_place(&mut d.scratch);
-            vk_free2(ialloc, alloc, std::ptr::from_mut(d).cast());
             return vk_error!(pdev, r).0;
         }
+        let mut d = d.then(|d| vk_device_finish(&mut d.vk));
         vk_device_enable_threaded_submit(&mut d.vk);
-        d.vk.command_dispatch_table = &d.cmd_dispatch;
+        d.vk.command_dispatch_table = &raw const d.cmd_dispatch;
         d.vk.command_buffer_ops = &CMD_BUFFER_OPS;
         let r = vk_queue_init(&mut d.queue, &mut d.vk, (*info).pQueueCreateInfos, 0);
         if r != VK_SUCCESS {
-            vk_device_finish(&mut d.vk);
-            std::ptr::drop_in_place(&mut d.scratch);
-            vk_free2(ialloc, alloc, std::ptr::from_mut(d).cast());
             return vk_error!(pdev, r).0;
         }
         d.drm_fd = pdev.drm_fd; // owned by the physical device
         d.queue.driver_submit = Some(borgvk_queue_submit);
-        *out = VkDevice::from_object(d);
+        *out = VkDevice::from_object(d.keep());
         VK_SUCCESS
     }
 }

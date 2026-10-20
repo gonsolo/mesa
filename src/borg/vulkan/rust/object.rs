@@ -30,6 +30,15 @@ impl<'a, T: ?Sized, F: FnOnce(&mut T)> Owned<'a, T, F> {
         Self(Some((obj, free)))
     }
 
+    /// Adds a step that undoes the latest init, run before the earlier ones.
+    pub fn then(mut self, undo: impl FnOnce(&mut T)) -> Owned<'a, T, impl FnOnce(&mut T)> {
+        let (obj, free) = self.0.take().unwrap();
+        Owned::new(obj, move |t: &mut T| {
+            undo(t);
+            free(t)
+        })
+    }
+
     pub fn keep(mut self) -> &'a mut T {
         self.0.take().unwrap().0
     }
@@ -62,14 +71,15 @@ mod tests {
     use std::cell::RefCell;
 
     #[test]
-    fn owned_tears_down_unless_kept() {
+    fn owned_tears_down_in_reverse_unless_kept() {
         let log = RefCell::new(Vec::new());
         let (mut a, mut b) = (0, 0);
         {
-            let _o = Owned::new(&mut a, |_| log.borrow_mut().push("free"));
+            let o = Owned::new(&mut a, |_| log.borrow_mut().push("free"));
+            let _o = o.then(|_| log.borrow_mut().push("finish"));
         }
-        assert_eq!(*log.borrow(), ["free"]);
+        assert_eq!(*log.borrow(), ["finish", "free"]);
         *Owned::new(&mut b, |_| log.borrow_mut().push("kept")).keep() = 1;
-        assert_eq!((log.borrow().len(), b), (1, 1));
+        assert_eq!((log.borrow().len(), b), (2, 1));
     }
 }
