@@ -7,6 +7,7 @@
 #include "util/log.h"
 #include "vk_format.h"
 #include "vk_pipeline_layout.h"
+#include "vk_sampler.h"
 #include "borgc_flags.h"
 
 #include "software/borg/borg_core.h"

@@ -17,6 +17,7 @@ mod nir_info;
 #[cfg(borgc)]
 mod nir_passes;
 mod image;
+mod sampler;
 mod serial;
 mod sim;
 mod sim_process;
