@@ -81,7 +81,7 @@ fn ubo(set: &DescriptorSet) -> Option<&[f32]> {
 fn texture(set: &DescriptorSet) -> Option<*mut Image> {
     let t = set.images[1];
     let ti = unsafe { t.as_ref() }?;
-    let mapped = unsafe { ti.mem.as_ref() }.is_some_and(|m| !m.map.is_null());
+    let mapped = ti.host().is_some();
     (mapped && ti.vk.extent.width != 0 && ti.vk.extent.height != 0).then_some(t)
 }
 
@@ -98,7 +98,7 @@ fn send_texture(set: &DescriptorSet, tex: *mut Image) {
 pub unsafe fn borgvk_set_is_cube(set: *mut DescriptorSet) -> bool {
     let set = unsafe { &*set };
     let Some(b) = set.buffer(0) else { return false };
-    if unsafe { b.mem.as_ref() }.is_none_or(|m| m.map.is_null()) {
+    if b.host().is_none() {
         return false;
     }
     let off = b.offset + set.offsets[0];

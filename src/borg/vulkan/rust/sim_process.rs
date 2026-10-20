@@ -35,7 +35,7 @@ fn store_rgb(img: &Image, rgb: Option<&[u8]>, raw32: bool, sw: u32, sh: u32) {
         }
     }
     let samples = img.vk.samples.max(1);
-    let mapped = unsafe { img.mem.as_ref() }.is_some_and(|m| !m.map.is_null());
+    let mapped = img.host().is_some();
     if !mapped || width as u64 * height as u64 * 4 * samples as u64 > img.size {
         return;
     }
@@ -235,7 +235,7 @@ fn run_stream(bytes: &[u8], img: &Image, sim_dim: u32) {
 /// `bytes` holds `nbytes` bytes from malloc; `color_img` is null or a valid image.
 pub unsafe fn borgvk_sim_run_stream(bytes: *mut u8, nbytes: usize, color_img: *mut Image, sim_dim: u32) -> VkResult {
     if let Some(img) = unsafe { color_img.as_ref() } {
-        let mapped = unsafe { img.mem.as_ref() }.is_some_and(|m| !m.map.is_null());
+        let mapped = img.host().is_some();
         if mapped && img.vk.extent.width != 0 && img.vk.extent.height != 0 {
             let stream = if bytes.is_null() { &[][..] } else { unsafe { std::slice::from_raw_parts(bytes, nbytes) } };
             run_stream(stream, img, sim_dim);

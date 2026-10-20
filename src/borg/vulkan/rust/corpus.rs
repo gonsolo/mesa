@@ -39,10 +39,7 @@ pub unsafe fn borgvk_corpus_hash(h: u64, p: *const std::ffi::c_void, n: usize) -
 /// `img` is null or a valid image.
 pub unsafe fn borgvk_corpus_image(h: u64, img: *const Image) -> u64 {
     let Some(img) = (unsafe { img.as_ref() }) else { return h };
-    match unsafe { img.mem.as_ref() }.filter(|m| !m.map.is_null()) {
-        Some(m) => unsafe { borgvk_corpus_hash(h, m.map.byte_add(img.offset as usize), img.size as usize) },
-        None => h,
-    }
+    img.host().and_then(|m| m.with_bytes(0, img.size as usize, |b| hash(h, b))).unwrap_or(h)
 }
 
 pub fn borgvk_corpus_log(kind: std::ffi::c_char, key: u64, content: u64) {

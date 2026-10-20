@@ -226,7 +226,7 @@ fn view_image(view: *const vk_image_view) -> Option<&'static Image> {
 
 fn image_backed(img: &Image, w: u32, h: u32) -> bool {
     let e = img.vk.extent;
-    let mapped = unsafe { img.mem.as_ref() }.is_some_and(|m| !m.map.is_null());
+    let mapped = img.host().is_some();
     mapped
         && e.width >= w
         && e.height >= h
