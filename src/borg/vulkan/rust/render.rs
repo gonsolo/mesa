@@ -5,9 +5,9 @@
 //! runtime's, which call these.
 
 use crate::clear::clear_rect;
-use crate::cmd_buffer::{cmd, CommandBuffer};
+use crate::cmd_buffer::CommandBuffer;
 use crate::copy::resolve_region;
-use crate::entrypoint::{entrypoint, Handle};
+use crate::entrypoint::{entrypoint, pointee, slice, Handle};
 use crate::ffi::*;
 use crate::image::Image;
 use crate::image::{blocks, shape};
@@ -77,9 +77,10 @@ fn depth_stencil(c: &mut CommandBuffer, att: *const VkRenderingAttachmentInfo, a
     target
 }
 
+pointee!(VkRenderingInfo);
+
 entrypoint! {
-    unsafe fn borgvk_CmdBeginRendering(command_buffer: VkCommandBuffer, info: *const VkRenderingInfo) {
-        let (c, ri) = (cmd(command_buffer.ptr()), &*info);
+    fn borgvk_CmdBeginRendering(c: &mut CommandBuffer, ri: &VkRenderingInfo) {
         c.in_rendering = true;
         c.render_area = ri.renderArea;
         c.layer_count = ri.layerCount.max(1);
@@ -87,8 +88,8 @@ entrypoint! {
         // A subpass without colour must not draw into the previous one's attachment.
         (c.color_views, c.color_resolve_views) = (Default::default(), Default::default());
         let layers = c.layer_count;
-        for i in 0..c.color_attachment_count as usize {
-            let att = &*ri.pColorAttachments.add(i);
+        let atts = unsafe { slice(ri.pColorAttachments, c.color_attachment_count) };
+        for (i, att) in atts.iter().enumerate() {
             let view = att.imageView.ptr();
             c.color_views[i] = target_view(c, view);
             c.color_resolve_views[i] = att.resolveImageView.ptr();
@@ -96,7 +97,7 @@ entrypoint! {
                 clear_rect(view, VK_IMAGE_ASPECT_COLOR_BIT, &att.clearValue, c.render_area, 0, layers);
                 if i == 0 {
                     c.has_clear = true;
-                    c.clear_color = att.clearValue.color.float32;
+                    c.clear_color = unsafe { att.clearValue.color.float32 };
                 }
             }
         }
@@ -115,13 +116,12 @@ fn layers(view: &vk_image_view, count: u32) -> VkImageSubresourceLayers {
 }
 
 entrypoint! {
-    unsafe fn borgvk_CmdEndRendering2EXT(command_buffer: VkCommandBuffer, _info: *const VkRenderingEndInfoEXT) {
-        let c = cmd(command_buffer.ptr());
+    fn borgvk_CmdEndRendering2EXT(c: &mut CommandBuffer, _info: *const VkRenderingEndInfoEXT) {
         crate::draw::flush_draws(c);
         let ra = c.render_area;
         let at = VkOffset3D { x: ra.offset.x, y: ra.offset.y, z: 0 };
         for i in 0..c.color_attachment_count as usize {
-            let (Some(v), Some(r)) = (c.color_views[i].as_ref(), c.color_resolve_views[i].as_ref()) else { continue };
+            let (Some(v), Some(r)) = (unsafe { (c.color_views[i].as_ref(), c.color_resolve_views[i].as_ref()) }) else { continue };
             let region = VkImageResolve {
                 srcSubresource: layers(v, c.layer_count),
                 srcOffset: at,
@@ -129,7 +129,7 @@ entrypoint! {
                 dstOffset: at,
                 extent: VkExtent3D { width: ra.extent.width, height: ra.extent.height, depth: 1 },
             };
-            resolve_region(&*v.image.cast(), &*r.image.cast(), &region);
+            resolve_region(unsafe { &*v.image.cast() }, unsafe { &*r.image.cast() }, &region);
         }
         c.in_rendering = false;
         c.color_attachment_count = 0;
