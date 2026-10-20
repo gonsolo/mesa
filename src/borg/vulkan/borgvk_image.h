@@ -106,21 +106,4 @@ borgvk_aspect_block_size(VkFormat combined_format, VkImageAspectFlags aspect,
    *bh_out = vk_format_get_blockheight(fmt);
 }
 
-static inline VkDeviceSize
-borgvk_image_size(const VkImageCreateInfo *info)
-{
-   uint32_t bs = vk_format_get_blocksize(info->format);
-   uint32_t bw = vk_format_get_blockwidth(info->format);
-   uint32_t bh = vk_format_get_blockheight(info->format);
-   uint32_t bd = util_format_get_blockdepth(vk_format_to_pipe_format(info->format));
-   uint64_t layer_size = 0;
-
-   for (uint32_t l = 0; l < MAX2(info->mipLevels, 1); l++)
-      layer_size += borgvk_mip_level_size(info->extent.width, info->extent.height,
-                                          info->extent.depth, l, bs, bw, bh, bd, NULL);
-
-   uint64_t size = layer_size * MAX2(info->arrayLayers, 1) * MAX2(info->samples, 1);
-   return align64(size, 256);
-}
-
 #endif /* BORGVK_IMAGE_H */

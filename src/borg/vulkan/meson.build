@@ -122,13 +122,13 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-type', 'borgvk_device|borgvk_descriptor_set_layout|borgvk_desc_map|vk_pipeline_layout|borgvk_shader_blob|VkFormat|tex_conv|borgvk_image|borgvk_vp|borgvk_writeback|pipe_format',
     '--allowlist-type', 'borgvk_shader_stage|borgvk_pipeline|VkPipelineShaderStageCreateInfo|VkGraphicsPipelineCreateInfo|VkPipelineColorBlendStateCreateInfo|mesa_log_level',
     '--allowlist-type', 'vk_image_view|VkExtent2D|VkExtent3D|VkResult|borgvk_device_memory|pipe_swizzle|util_format_type|termios',
-    '--allowlist-function', 'util_format_description|util_format_get_blocksize|vk_format_to_pipe_format',
+    '--allowlist-function', 'util_format_description|util_format_get_block(size|width|height|depth)|vk_format_to_pipe_format',
     '--allowlist-function', 'util_format_(un)?pack_(rgba|z_float|s_8uint)',
     '--allowlist-function', 'borg_core_.*|borg_hw_.*|bh_.*',
     '--allowlist-function', 'mesa_log|malloc|realloc|free|tcgetattr|tcsetattr|cfmakeraw|cfsetispeed|cfsetospeed|tcdrain',
     '--allowlist-function', 'memfd_create|close|signal|sysconf|borgvk_shader_cache_.*',
     '--allowlist-function', 'vk_object_zalloc|vk_object_free|__vk_errorf',
-    '--allowlist-type', 'vk_object_base|VkEventCreateInfo|VkDependencyInfo|VkCommandBuffer|VkEvent|VkPipelineStageFlags2?',
+    '--allowlist-type', 'VkImageCreateInfo|vk_object_base|VkEventCreateInfo|VkDependencyInfo|VkCommandBuffer|VkEvent|VkPipelineStageFlags2?',
     '--allowlist-var', 'BORGC_.*|BORGVK_.*|BC_.*|BORG_(ZB|SB|HEAP)_SPI|DRAM_OUT_BASE_SPI',
     '--allowlist-var', 'B115200|TCSANOW|CLOCAL|CREAD|CRTSCTS|O_NOCTTY',
     '--allowlist-var', 'PROT_(READ|WRITE)|MAP_(PRIVATE|ANONYMOUS|NORESERVE|SHARED)|SIGPIPE|_SC_NPROCESSORS_ONLN',
@@ -165,7 +165,7 @@ _libborgvk_bindings_rs = static_library(
   dependencies : with_borgc ? [idep_compiler_rs] : [],
 )
 borgvk_rs_args = rust_global_args
-borgvk_rs_link = [_libborgvk_bindings_rs]
+borgvk_rs_link = [_libborgvk_bindings_rs, libborg_layout]
 borgvk_rs_deps = []
 if with_borgc
   borgvk_rs_args += ['--cfg', 'borgc']

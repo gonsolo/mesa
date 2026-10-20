@@ -28,8 +28,7 @@ pub fn serves_extent(w: u32, h: u32, has_depth_stencil: bool) -> bool {
 /// Pixel (x, y) of a flushed 4x4-tiled frame: RGB for R5G6B5 (0), RGBA8 (1) and BGRA8 (2), the
 /// raw word for RAW32 (3).
 fn pixel(fmt: i32, words: &[u32], w: u32, x: u32, y: u32) -> ([u8; 4], usize) {
-    let tile = ((y >> 2) * (w >> 2) + (x >> 2)) as usize;
-    let ti = ((x & 3) | (y & 3) << 2) as usize;
+    let (tile, ti) = borg_layout::tile::index(w, x, y);
     match fmt {
         3 => (words[tile * 16 + ti].to_ne_bytes(), 4),
         0 => {

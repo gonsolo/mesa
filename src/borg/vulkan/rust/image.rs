@@ -3,43 +3,24 @@
 
 use crate::ffi::*;
 
-/// Block size and dimensions of a format: bytes per block, texels per block in x, y and z.
-#[derive(Clone, Copy)]
-pub struct Blocks {
-    pub bs: u32,
-    pub bw: u32,
-    pub bh: u32,
-    pub bd: u32,
-}
+use borg_layout::image::{mip_level_size, Blocks, Shape};
 
-/// Bytes of mip `level` and its width in blocks.
-pub fn mip_level_size(extent: [u32; 3], level: u32, b: Blocks) -> (u64, u32) {
-    let dim = |e: u32, block: u32| e.checked_shr(level).unwrap_or(0).max(1).div_ceil(block);
-    let w = dim(extent[0], b.bw);
-    let (h, d) = (dim(extent[1], b.bh), dim(extent[2], b.bd));
-    (w as u64 * h as u64 * d as u64 * b.bs as u64, w)
-}
-
-fn extent(image: &borgvk_image) -> [u32; 3] {
+fn shape(image: &borgvk_image) -> Shape {
     let e = image.vk.extent;
-    [e.width, e.height, e.depth]
+    Shape { extent: [e.width, e.height, e.depth], levels: image.vk.mip_levels, layers: image.vk.array_layers, samples: image.vk.samples }
 }
 
-/// Bytes of all mip levels of one sample plane.
-pub fn sample_plane_size(image: &borgvk_image, b: Blocks) -> u64 {
-    (0..image.vk.mip_levels).map(|l| mip_level_size(extent(image), l, b).0).sum()
-}
-
-/// Bytes of one array layer: every sample plane.
-pub fn layer_size(image: &borgvk_image, b: Blocks) -> u64 {
-    sample_plane_size(image, b) * (image.vk.samples as u64).max(1)
-}
-
-/// Offset of `level` in `layer`, and that level's row stride in blocks.
-pub fn level_offset(image: &borgvk_image, level: u32, layer: u32, b: Blocks) -> (u64, u32) {
-    let before: u64 = (0..level).map(|l| mip_level_size(extent(image), l, b).0).sum();
-    let stride = mip_level_size(extent(image), level, b).1;
-    (layer as u64 * layer_size(image, b) + before, stride)
+/// The blocks of a format.
+fn blocks(fmt: VkFormat) -> Blocks {
+    let pf = unsafe { vk_format_to_pipe_format(fmt) };
+    unsafe {
+        Blocks {
+            bs: util_format_get_blocksize(pf),
+            bw: util_format_get_blockwidth(pf),
+            bh: util_format_get_blockheight(pf),
+            bd: util_format_get_blockdepth(pf),
+        }
+    }
 }
 
 pub fn z16_pack(z: f32) -> [u8; 2] {
@@ -91,7 +72,7 @@ pub unsafe extern "C" fn borgvk_image_sample_plane_size(
     bh: u32,
     bd: u32,
 ) -> u64 {
-    sample_plane_size(unsafe { &*image }, Blocks { bs, bw, bh, bd })
+    shape(unsafe { &*image }).sample_plane_size(Blocks { bs, bw, bh, bd })
 }
 
 /// # Safety
@@ -104,7 +85,7 @@ pub unsafe extern "C" fn borgvk_image_layer_size(
     bh: u32,
     bd: u32,
 ) -> u64 {
-    layer_size(unsafe { &*image }, Blocks { bs, bw, bh, bd })
+    shape(unsafe { &*image }).layer_size(Blocks { bs, bw, bh, bd })
 }
 
 /// # Safety
@@ -120,11 +101,21 @@ pub unsafe extern "C" fn borgvk_image_level_offset(
     bd: u32,
     stride_blocks_out: *mut u32,
 ) -> u64 {
-    let (offset, stride) = level_offset(unsafe { &*image }, level, layer, Blocks { bs, bw, bh, bd });
+    let (offset, stride) = shape(unsafe { &*image }).level_offset(level, layer, Blocks { bs, bw, bh, bd });
     if let Some(out) = unsafe { stride_blocks_out.as_mut() } {
         *out = stride;
     }
     offset
+}
+
+/// # Safety
+/// `info` is valid.
+#[no_mangle]
+pub unsafe extern "C" fn borgvk_image_size(info: *const VkImageCreateInfo) -> u64 {
+    let i = unsafe { &*info };
+    let e = i.extent;
+    let s = Shape { extent: [e.width, e.height, e.depth], levels: i.mipLevels, layers: i.arrayLayers, samples: i.samples };
+    s.size(blocks(i.format))
 }
 
 /// # Safety
@@ -144,20 +135,6 @@ pub unsafe extern "C" fn borgvk_z16_s8_unpack_z(texel: *const u8) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const RGBA8: Blocks = Blocks { bs: 4, bw: 1, bh: 1, bd: 1 };
-
-    #[test]
-    fn mip_sizes() {
-        assert_eq!(mip_level_size([16, 16, 1], 0, RGBA8), (1024, 16));
-        assert_eq!(mip_level_size([16, 16, 1], 4, RGBA8).0, 4);
-        assert_eq!(mip_level_size([16, 16, 1], 9, RGBA8).0, 4);
-    }
-
-    #[test]
-    fn block_compressed_size_rounds_up() {
-        assert_eq!(mip_level_size([10, 10, 1], 0, Blocks { bs: 8, bw: 4, bh: 4, bd: 1 }), (72, 3));
-    }
 
     #[test]
     fn z16_round_trips() {

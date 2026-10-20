@@ -190,7 +190,7 @@ fn hw_download(s: &Server, ranges: &[(u32, u32)]) {
 
 /// Byte address of pixel (x, y) in a 4x4-tiled surface `w` pixels wide.
 fn tiled(base: u32, w: u32, x: u32, y: u32, tile_bytes: u32, px_bytes: u32) -> u32 {
-    base + ((y >> 2) * (w >> 2) + (x >> 2)) * tile_bytes + ((x & 3) | (y & 3) << 2) * px_bytes
+    base + borg_layout::tile::offset(w, x, y, tile_bytes, px_bytes)
 }
 
 /// A RAW128 pixel is two 8-byte halves, 128 bytes apart in its tile (two slices).
