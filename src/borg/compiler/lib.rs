@@ -137,6 +137,7 @@ impl std::fmt::Display for Mnem {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct BorgInstr {
     pub(crate) mnem: Mnem,
     pub(crate) dst: u32,

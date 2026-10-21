@@ -88,6 +88,7 @@ impl ShaderState {
     }
 
     pub unsafe fn optimise(&mut self) {
+        self.place_const_operands();
         if let Some(limit) = self.spill.limit {
             dce(&mut self.sel.prog, &self.out_roots);
             self.spill_to_pressure(limit);
