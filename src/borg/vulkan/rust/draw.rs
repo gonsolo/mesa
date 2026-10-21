@@ -856,7 +856,19 @@ fn storage_image(set: &DescriptorSet, b: usize) -> Option<&Image> {
 }
 
 fn draw_one(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
-    let (Some(pl), c) = c.split_gfx_pipeline() else { return reject(Reject::Undrawable) };
+    let r = match draw_batched(device, c, p) {
+        // The heap is full: run the batch, then the draw on its own.
+        Err(Reject::Upload) if c.batch_draws != 0 => {
+            flush_draws(c);
+            draw_batched(device, c, p)
+        }
+        r => r,
+    };
+    r.unwrap_or_else(reject)
+}
+
+fn draw_batched(device: &Device, c: &mut CommandBuffer, p: &Params) -> Result<bool, Reject> {
+    let (Some(pl), c) = c.split_gfx_pipeline() else { return Err(Reject::Undrawable) };
     let mut g = Ctx {
         device,
         c,
@@ -888,9 +900,7 @@ fn draw_one(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
         voff_out: 0,
         ubo_base: 0,
     };
-    if let Err(why) = g.validate().and_then(|_| g.index_range()) {
-        return reject(why);
-    }
+    g.validate().and_then(|_| g.index_range())?;
     g.reserve();
     g.first_of_batch = g.c.batch_draws == 0;
     g.state();
@@ -898,11 +908,11 @@ fn draw_one(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
     g.heap = Heap { top: g.c.heap_top };
     let nwb = g.c.nwb;
     let r = g.record();
-    if let Err(why) = r {
+    if r.is_err() {
         g.c.nwb = nwb;
-        reject(why);
     }
-    g.finish(r.is_ok())
+    let ok = g.finish(r.is_ok());
+    r.map(|_| ok)
 }
 
 /// Wide colour targets are one pipeline each, drawn in turn (no depth or stencil: a second pass would fail the test).
