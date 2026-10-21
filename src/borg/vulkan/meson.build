@@ -225,6 +225,13 @@ test(
   suite : ['borg'],
 )
 
+test(
+  'borgvk rust signatures',
+  prog_python,
+  args : [files('check_rust_signatures.py'), vk_api_xml, meson.current_source_dir() / 'rust'],
+  suite : ['borg'],
+)
+
 # Generates a replayable wire burst for the simulator's push-constant
 # end-to-end test, with the driver's own senders rather than a reimplementation.
 borgvk_burst_gen = executable(
