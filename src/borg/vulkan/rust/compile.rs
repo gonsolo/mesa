@@ -59,6 +59,8 @@ fn from_cache(sc: &mut Scratch, si: &VkPipelineShaderStageCreateInfo, vfetch: u3
     if fs {
         sc.frag_reads_pntc = pntc;
         sc.frag_tex_binding = -1;
+    } else {
+        sc.vert_tex_binding = -1;
     }
     sc.stage_ubo[fs as usize] = 0;
     sc.stage_push[fs as usize] = false;
@@ -96,6 +98,8 @@ pub fn compile_stage(dev: &Device, sc: &mut Scratch, vfetch: u32, si: &VkPipelin
     sc.frag_reads_pntc = fs && reads_point_coord(n);
     if fs {
         sc.frag_tex_binding = sampled_binding(n);
+    } else if vs {
+        sc.vert_tex_binding = sampled_binding(n);
     }
     if vs || fs {
         sc.stage_ubo[fs as usize] = ubo_mask(n);

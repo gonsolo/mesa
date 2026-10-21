@@ -36,7 +36,7 @@ pub struct Pipeline {
     pub spills: bool,        // a stage spills to the region's scratch slot
     pub push_stage: u8,      // bit per stage: loads push constants, no UBO
     pub set_base: [u8; 4],
-    pub tex_binding: i32,    // binding of the texture the fragment shader samples
+    pub tex_binding: i32,    // binding of the texture the draw samples (fragment, else vertex shader)
     pub vfetch: u32,
     pub blob: [ShaderBlob; BORGVK_SHADER_STAGE_COUNT as usize],
     pub blend_cfg: u32,
@@ -227,7 +227,8 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     let pl = create(dev, alloc)?;
     pl.blob = sc.shader_blob;
     pl.vfetch = vfetch;
-    pl.tex_binding = sc.frag_tex_binding;
+    // One texture per draw: the fragment shader's, else the vertex shader's.
+    pl.tex_binding = if sc.frag_tex_binding >= 0 { sc.frag_tex_binding } else { sc.vert_tex_binding };
     pl.set_base = set_base(sc);
     pl.ubo_mask = sc.stage_ubo[0] | sc.stage_ubo[1];
     pl.push_used = sc.stage_push[0] || sc.stage_push[1];
