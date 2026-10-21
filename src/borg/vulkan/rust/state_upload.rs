@@ -12,12 +12,9 @@ use crate::device::{Device, Scratch};
 use crate::serial::*;
 use crate::util::{log, MESA_LOG_WARN};
 
-/// The first descriptor set a submit binds.
-///
-/// # Safety
-/// The runtime's submit.
-pub unsafe fn borgvk_find_set(submit: *mut vk_queue_submit) -> *mut DescriptorSet {
-    let s = unsafe { &*submit };
+/// The first descriptor set a submit binds; its command buffers and their recorded commands are
+/// the runtime's, valid for the submit.
+pub fn find_set(s: &vk_queue_submit) -> Option<&DescriptorSet> {
     for &cb in unsafe { slice(s.command_buffers, s.command_buffer_count) } {
         let head: *mut list_head = unsafe { &mut (*cb).cmd_queue.cmds };
         let mut p = unsafe { (*head).next };
@@ -29,14 +26,13 @@ pub unsafe fn borgvk_find_set(submit: *mut vk_queue_submit) -> *mut DescriptorSe
             }
             let b = unsafe { &e.u.bind_descriptor_sets };
             if b.descriptor_set_count != 0 && !b.descriptor_sets.is_null() {
-                let set = unsafe { *b.descriptor_sets }.cast::<DescriptorSet>();
-                if !set.is_null() {
-                    return set;
+                if let Some(set) = unsafe { (*b.descriptor_sets).cast::<DescriptorSet>().as_ref() } {
+                    return Some(set);
                 }
             }
         }
     }
-    std::ptr::null_mut()
+    None
 }
 
 /// Clamp to edge in U, V and W, nearest.

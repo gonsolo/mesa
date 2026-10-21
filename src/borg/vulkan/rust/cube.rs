@@ -13,7 +13,7 @@ use crate::image::{Image, ViewImage};
 use crate::device::Device;
 use crate::serial::{send_geom, send_mvp};
 use crate::sim_process::sim_run_stream;
-use crate::state_upload::{borgvk_find_set, sampler_desc, send_blend_state, upload_shaders};
+use crate::state_upload::{find_set, sampler_desc, send_blend_state, upload_shaders};
 use crate::texture_upload::send_texture_row;
 use crate::transport::{borgvk_transport_capture_begin, capture_end};
 use crate::util::{log, MESA_LOG_INFO, MESA_LOG_WARN};
@@ -88,11 +88,7 @@ fn send_texture(set: &DescriptorSet, tex: &Image) {
 }
 
 /// True when the set is cube.c's UBO-driven frame, not a CTS draw from vertex buffers.
-///
-/// # Safety
-/// `set` is valid.
-pub unsafe fn borgvk_set_is_cube(set: *mut DescriptorSet) -> bool {
-    let set = unsafe { &*set };
+pub fn set_is_cube(set: &DescriptorSet) -> bool {
     let Some(b) = set.buffer(0) else { return false };
     if b.host().is_none() {
         return false;
@@ -108,26 +104,19 @@ pub unsafe fn borgvk_set_is_cube(set: *mut DescriptorSet) -> bool {
     avail / 4 >= MIN_FLOATS as u64
 }
 
-/// # Safety
-/// The runtime's submit.
-pub unsafe fn borgvk_submit_is_cube(submit: *mut vk_queue_submit) -> bool {
-    let set = unsafe { borgvk_find_set(submit) };
-    !set.is_null() && unsafe { borgvk_set_is_cube(set) }
+pub fn submit_is_cube(submit: &vk_queue_submit) -> bool {
+    find_set(submit).is_some_and(set_is_cube)
 }
 
 /// One frame's whole wire stream rendered by the simulator or the device into the colour
 /// attachment.
-///
-/// # Safety
-/// A valid device and the runtime's submit.
-pub unsafe fn borgvk_submit_sim_cube(device: *mut Device, submit: *mut vk_queue_submit) -> VkResult {
+pub fn submit_sim_cube(d: &Device, submit: &vk_queue_submit) -> VkResult {
     let sim = std::env::var_os("BORGVK_SIM").is_some() && std::env::var_os("BORGVK_SIM_FW").is_some();
     if !crate::hw::enabled() && !sim {
         return VK_SUCCESS;
     }
-    let Some(set) = (unsafe { borgvk_find_set(submit).as_ref() }) else { return VK_SUCCESS };
+    let Some(set) = find_set(submit) else { return VK_SUCCESS };
     let Some(ubo) = ubo(set).filter(|u| u.len() >= MIN_FLOATS) else { return VK_SUCCESS };
-    let d = unsafe { &*device };
     let sc = d.scratch.lock().unwrap();
     borgvk_transport_capture_begin();
     upload_shaders(d, &sc);
@@ -148,7 +137,7 @@ pub unsafe fn borgvk_submit_sim_cube(device: *mut Device, submit: *mut vk_queue_
         log(MESA_LOG_INFO, format!("borgvk: dumped {}-byte sim stream to {}", bytes.len(), dump.to_string_lossy()));
         return VK_SUCCESS;
     }
-    let color = color_attachment(unsafe { &*submit });
+    let color = color_attachment(submit);
     let rec = borgvk_corpus_on();
     let key = if rec { hash(BORGVK_CORPUS_SEED as u64, &bytes) } else { 0 };
     let res = sim_run_stream(&bytes, color, 0);
@@ -162,13 +151,9 @@ static SETUP_DONE: AtomicBool = AtomicBool::new(false);
 
 /// The board: the upload once (DRM SETUP, or the serial burst unless its sentinel file exists),
 /// then the blend state and an MVP per frame.
-///
-/// # Safety
-/// A valid device and the runtime's submit.
-pub unsafe fn borgvk_submit_cube_live(device: *mut Device, submit: *mut vk_queue_submit) -> VkResult {
-    let Some(set) = (unsafe { borgvk_find_set(submit).as_ref() }) else { return VK_SUCCESS };
+pub fn submit_cube_live(d: &Device, submit: &vk_queue_submit) -> VkResult {
+    let Some(set) = find_set(submit) else { return VK_SUCCESS };
     let Some(ubo) = ubo(set) else { return VK_SUCCESS };
-    let d = unsafe { &*device };
     let sc = d.scratch.lock().unwrap();
     let tex = texture(set);
     let done = || SETUP_DONE.load(Ordering::Relaxed);

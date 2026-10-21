@@ -4,12 +4,12 @@
 //! Queue submission: the waits, the recorded commands replayed through the device's dispatch
 //! table, the cube path, the signals.
 
-use crate::cube::{borgvk_submit_cube_live, borgvk_submit_is_cube, borgvk_submit_sim_cube};
+use crate::cube::{submit_cube_live, submit_is_cube, submit_sim_cube};
 use crate::ffi::*;
 use crate::device::Device;
 
 unsafe fn work(q: &mut vk_queue, submit: &mut vk_queue_submit) -> VkResult {
-    let device = unsafe { &mut *q.base.device.cast::<Device>() };
+    let device = unsafe { &*q.base.device.cast::<Device>() };
     for &cb in unsafe { crate::entrypoint::slice(submit.command_buffers, submit.command_buffer_count) } {
         unsafe {
             vk_cmd_queue_execute(&mut (*cb).cmd_queue, cb.cast(), &device.cmd_dispatch);
@@ -17,12 +17,12 @@ unsafe fn work(q: &mut vk_queue, submit: &mut vk_queue_submit) -> VkResult {
         }
     }
     if std::env::var_os("BORGVK_SIM").is_some() || crate::hw::enabled() {
-        if unsafe { borgvk_submit_is_cube(submit) } {
-            return unsafe { borgvk_submit_sim_cube(device, submit) };
+        if submit_is_cube(submit) {
+            return submit_sim_cube(device, submit);
         }
         return VK_SUCCESS;
     }
-    unsafe { borgvk_submit_cube_live(device, submit) }
+    submit_cube_live(device, submit)
 }
 
 /// # Safety
