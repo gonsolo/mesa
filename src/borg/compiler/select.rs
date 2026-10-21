@@ -1004,11 +1004,14 @@ impl ShaderState {
     /// An output store: position, varyings, colour targets.
     unsafe fn store_output(&mut self, intr: &nir_intrinsic_instr) {
         let loc = intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F;
-        if self.stage == Stage::Fragment && self.frag.out_select >= 0 && (4..12).contains(&loc) && loc != 4 + self.frag.out_select as u32 {
-            return;
-        }
+        let skip = self.stage == Stage::Fragment && self.frag.out_select >= 0 && (4..12).contains(&loc) && loc != 4 + self.frag.out_select as u32;
         let src = intr.get_src(0).as_def().index;
         let ncomp = intr.get_src(0).num_components() as usize;
+        // Alpha to coverage takes location 0's alpha, also while drawing another target.
+        let a2c_alpha = skip && loc == 4 && self.frag.alpha && ncomp == 4;
+        if skip && !a2c_alpha {
+            return;
+        }
         // A scalar constant stored directly has no register yet: give it a window word.
         for c in 0..ncomp {
             let d = resolve_vm(&self.sel.vec_map, src, c as u8).0;
@@ -1020,7 +1023,10 @@ impl ShaderState {
             self.sel.vec_map.insert(d, vec![(v, 0u8)]);
         }
         let comps: Vec<(u32, u8)> = (0..ncomp).map(|c| resolve_vm(&self.sel.vec_map, src, c as u8)).collect();
-        if self.stage == Stage::Vertex && loc == VARYING_SLOT_POS {
+        if a2c_alpha {
+            self.outs.frag[3] = Some(comps[3]);
+            self.outs.roots.push(comps[3].0);
+        } else if self.stage == Stage::Vertex && loc == VARYING_SLOT_POS {
             for (c, &v0) in comps.iter().enumerate().take(4) {
                 let mut v = v0;
                 if matches!(self.sel.loc.get(&v.0), Some(Loc::Uniform(_))) {
