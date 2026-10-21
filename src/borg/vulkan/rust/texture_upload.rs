@@ -55,11 +55,18 @@ pub fn send_texture_row(t: &Image, sampler: Option<&Sampler>, dy: i32) {
 }
 
 /// The view's levels and layers, converted and, unless it is one linear level, tiled.
-fn texture(view: &vk_image_view, img: &Image, sampler: Option<&Sampler>) -> bool {
-    let Some(host) = img.host() else { return false };
+/// A view in the sampler's layout: its texels, descriptor and level offsets.
+pub struct Texture {
+    pub data: Vec<u8>,
+    pub desc: TexDesc,
+    pub offs: [u32; 12],
+}
+
+fn build(view: &vk_image_view, img: &Image) -> Option<Texture> {
+    let host = img.host()?;
     let (mut w, mut h) = (img.vk.extent.width, img.vk.extent.height);
     if w == 0 || h == 0 || w > 4096 || h > 4096 {
-        return false;
+        return None;
     }
     let (mut layers, mut depth) = (1, 1);
     let ty = match view.view_type {
@@ -81,18 +88,18 @@ fn texture(view: &vk_image_view, img: &Image, sampler: Option<&Sampler>) -> bool
             depth = img.vk.extent.depth;
             TexType::D3
         }
-        _ => return false,
+        _ => return None,
     };
     if layers == 0 || layers > 1024 || depth > 1024 {
-        return false;
+        return None;
     }
     let stencil = view.aspects & VK_IMAGE_ASPECT_STENCIL_BIT != 0;
-    let Some((format, tc)) = tex_format(view.format, stencil) else { return false };
+    let (format, tc) = tex_format(view.format, stencil)?;
     let (obpp, sbpp) = (tc.obpp, if tc.zstride != 0 { tc.zstride } else { tc.bpp });
     let base = view.base_mip_level;
     let levels = if base < img.vk.mip_levels { view.level_count.min(img.vk.mip_levels - base) } else { 0 };
     if levels == 0 || levels > 13 {
-        return false;
+        return None;
     }
     // Every level's size and source offset within a layer.
     let (mut lw, mut lh, mut ld, mut soff, mut sum) = ([0u32; 13], [0u32; 13], [0u32; 13], [0u64; 13], 0u64);
@@ -134,7 +141,7 @@ fn texture(view: &vk_image_view, img: &Image, sampler: Option<&Sampler>) -> bool
         // The board's texture region is 512 KB, the direct simulator's 6 MB.
         let direct = std::env::var_os("BORGVK_SIM_DIRECT").is_some_and(|d| !d.is_empty());
         if total > if direct { 0x60_0000 } else { 0x7_0000 } {
-            return false;
+            return None;
         }
         let mut out = vec![0u8; total as usize];
         let mut lin = vec![0u8; w as usize * h as usize * depth as usize * obpp as usize];
@@ -186,27 +193,29 @@ fn texture(view: &vk_image_view, img: &Image, sampler: Option<&Sampler>) -> bool
         swizzle: sw,
         pitch,
     };
-    if levels > 1 {
-        send_texture_levels(&offs);
+    Some(Texture { data: out, desc, offs })
+}
+
+/// A sampled view, block-compressed images decoded first.
+pub fn generic_texture(view: &vk_image_view, img: &Image) -> Option<Texture> {
+    img.host()?;
+    let b = crate::image::blocks(img.vk.format);
+    if b.bw <= 1 && b.bh <= 1 {
+        return build(view, img);
     }
-    send(&out, &desc, sampler);
-    true
+    let d = decode_compressed_image(img)?;
+    let mut dview = *view;
+    dview.format = d.img.vk.format;
+    build(&dview, &d.img)
 }
 
 pub fn send_generic_texture(view: &vk_image_view, img: Option<&Image>, sampler: Option<&Sampler>) -> bool {
-    let Some(img) = img else { return false };
-    if img.host().is_none() {
-        return false;
+    let Some(t) = img.and_then(|i| generic_texture(view, i)) else { return false };
+    if t.desc.levels > 1 {
+        send_texture_levels(&t.offs);
     }
-    let b = crate::image::blocks(img.vk.format);
-    if b.bw <= 1 && b.bh <= 1 {
-        return texture(view, img, sampler);
-    }
-    // Block-compressed: decoded first.
-    let Some(d) = decode_compressed_image(img) else { return false };
-    let mut dview = *view;
-    dview.format = d.img.vk.format;
-    texture(&dview, &d.img, sampler)
+    send(&t.data, &t.desc, sampler);
+    true
 }
 
 /// A texel buffer as a linear 1D texture.
