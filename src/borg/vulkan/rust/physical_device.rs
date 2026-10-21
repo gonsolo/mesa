@@ -12,7 +12,7 @@ use crate::device::Instance;
 use crate::image::blocks;
 use crate::sync::SYNC_TYPE;
 use crate::util::log;
-use crate::wsi::{borgvk_wsi_finish, borgvk_wsi_init};
+use crate::wsi::{wsi_finish, wsi_init};
 use std::ffi::CStr;
 use std::fs::OpenOptions;
 use std::os::fd::{AsRawFd, IntoRawFd};
@@ -389,7 +389,7 @@ unsafe fn create(instance: &mut Instance, drm_fd: i32) -> VkResult {
     m.memoryTypes[0].heapIndex = 0;
     d.sync_types = [&SYNC_TYPE, std::ptr::null()];
     d.vk.supported_sync_types = d.sync_types.as_ptr();
-    let r = unsafe { borgvk_wsi_init(&mut *d) };
+    let r = wsi_init(&mut d);
     if r != VK_SUCCESS {
         return r;
     }
@@ -431,7 +431,7 @@ pub unsafe extern "C" fn enumerate_devices(instance: *mut vk_instance) -> VkResu
 pub unsafe extern "C" fn destroy_physical_device(pdev: *mut vk_physical_device) {
     let d = pdev.cast::<PhysicalDevice>();
     unsafe {
-        borgvk_wsi_finish(d);
+        wsi_finish(&mut *d);
         if (*d).drm_fd >= 0 {
             close((*d).drm_fd);
         }
