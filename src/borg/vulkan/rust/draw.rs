@@ -896,8 +896,10 @@ fn draw_one(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
     g.state();
     g.begin_pass();
     g.heap = Heap { top: g.c.heap_top };
+    let nwb = g.c.nwb;
     let r = g.record();
     if let Err(why) = r {
+        g.c.nwb = nwb;
         reject(why);
     }
     g.finish(r.is_ok())
