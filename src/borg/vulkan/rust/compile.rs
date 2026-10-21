@@ -177,6 +177,7 @@ pub fn compile_compute_stage(dev: &Device, sc: &mut Scratch, si: &VkPipelineShad
     };
     p.cs_ok = rc == 0;
     p.set_base = set_base(sc);
+    p.cs_tex = filtered_binding(unsafe { &*nir }).map_or(-1, |(s, b)| p.set_base[s as usize & 3] as i32 + b as i32);
     let what = if rc == 0 { "compiled" } else { "REFUSED" };
     log(MESA_LOG_INFO, format!("borgvk: compute shader {what} ({} words, {} presets)", p.cs_nwords, p.cs_nregs));
     unsafe { ralloc_free(nir.cast()) };

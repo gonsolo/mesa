@@ -11,6 +11,8 @@ use crate::ffi::*;
 use crate::fmt;
 use crate::memory::{DeviceMemory, Host, ViewBuffer};
 use crate::pipeline::Pipeline;
+use crate::state_upload::sampler_desc;
+use crate::texture_upload::generic_texture;
 use crate::util::{log, temp_file, MESA_LOG_WARN};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::{Child, Command};
@@ -18,6 +20,10 @@ use std::process::{Child, Command};
 const SLOT_BYTES: u32 = 0x80000 * 4;
 const BASE_BYTES: u32 = 0x40000 * 4;
 const MAX_PARTS: u32 = 64;
+// The filtered texture: its descriptor, the sampler's at +64, the texels at +256.
+const TEX_BYTES: u32 = BASE_BYTES + 36 * SLOT_BYTES;
+const TEX_DESC_BASE: u32 = 0x378 / 4;
+const SAMPLER_DESC_BASE: u32 = 0x37C / 4;
 const HDR: usize = 12;
 
 /// One window of the job: a buffer, a decoded image or texel buffer, the push constants or the
@@ -63,6 +69,7 @@ fn unpack(pf: pipe_format, dst: &mut [u8], host: &Host, off: usize) {
 /// The windows of the bound sets, the push constants (slot 32) and the constant pool (slot 34).
 fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
     let mut bufs = Vec::new();
+    let mut tex = None;
     for si in 0..4 {
         let Some(set) = c.cs_set(si) else { continue };
         let dyn_off = &c.cs_dyn_offs[si];
@@ -73,6 +80,9 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
             }
             let addr = BASE_BYTES + (base + b as u32) * SLOT_BYTES;
             let (buf, bv, img) = (set.buffer(b), set.buffer_view(b), set.image(b));
+            if base as i32 + b as i32 == pl.cs_tex {
+                tex = set.view(b).zip(img).and_then(|(v, i)| generic_texture(v, i)).map(|t| (t, *sampler_desc(set.sampler(b))));
+            }
             if let Some(bv) = bv.filter(|_| buf.is_none()) {
                 // A texel buffer, decoded to RGBA32 per texel.
                 let Some(tb) = bv.buffer() else { continue };
@@ -137,6 +147,16 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
         let pool: Vec<u8> = pl.cs_pool[..pl.cs_npool as usize].iter().flat_map(|w| w.to_ne_bytes()).collect();
         bufs.push(decoded(BASE_BYTES + 34 * SLOT_BYTES, pool, pl.cs_npool * 4));
     }
+    if let Some((t, samp)) = tex.filter(|_| bufs.len() < BORGVK_CS_MAX_BUFS as usize) {
+        let offs = if t.desc.levels > 1 { t.offs } else { [0; 12] };
+        let d = t.desc.pack();
+        let words = [TEX_BYTES + 256, d[0], d[1], d[2]].into_iter().chain(offs).chain(samp);
+        let mut data: Vec<u8> = words.flat_map(|w| w.to_ne_bytes()).collect();
+        data.resize(256, 0);
+        data.extend_from_slice(&t.data);
+        let n = data.len() as u32;
+        bufs.push(decoded(TEX_BYTES, data, n));
+    }
     bufs
 }
 
@@ -147,7 +167,9 @@ fn build_job(pl: &Pipeline, g: [u32; 3], bufs: &[CsBuf]) -> Vec<u8> {
         job.extend_from_slice(&v.to_ne_bytes());
     }
     let mut job = Vec::new();
-    for v in [pl.cs_nwords, g[0], g[1], g[2], pl.cs_local[0], pl.cs_local[1], pl.cs_local[2], pl.cs_nregs, bufs.len() as u32, 0, 0, 0] {
+    let tex = bufs.iter().any(|b| b.addr == TEX_BYTES);
+    let nregs = pl.cs_nregs + if tex { 2 } else { 0 };
+    for v in [pl.cs_nwords, g[0], g[1], g[2], pl.cs_local[0], pl.cs_local[1], pl.cs_local[2], nregs, bufs.len() as u32, 0, 0, 0] {
         put(&mut job, v);
     }
     for &w in &pl.cs_words[..pl.cs_nwords as usize] {
@@ -161,6 +183,12 @@ fn build_job(pl: &Pipeline, g: [u32; 3], bufs: &[CsBuf]) -> Vec<u8> {
         }
         put(&mut job, r);
         put(&mut job, v);
+    }
+    if tex {
+        for (r, v) in [(TEX_DESC_BASE, TEX_BYTES), (SAMPLER_DESC_BASE, TEX_BYTES + 64)] {
+            put(&mut job, r);
+            put(&mut job, v);
+        }
     }
     for b in bufs {
         put(&mut job, b.addr);

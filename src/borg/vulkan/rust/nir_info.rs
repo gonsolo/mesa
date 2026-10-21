@@ -51,17 +51,26 @@ pub fn reads_point_coord(nir: &nir_shader) -> bool {
     intrinsics(nir).any(|i| i.intrinsic == nir_intrinsic_load_point_coord)
 }
 
-/// The binding of the first texture the shader samples through a deref; -1 without one.
-pub fn sampled_binding(nir: &nir_shader) -> i32 {
-    for tex in instrs(nir).filter_map(|i| i.as_tex()) {
+fn tex_var(nir: &nir_shader, fetch: bool) -> Option<&nir_variable> {
+    for tex in instrs(nir).filter_map(|i| i.as_tex()).filter(|t| fetch || t.op != nir_texop_txf) {
         let di = unsafe { nir_tex_instr_src_index(tex, nir_tex_src_texture_deref) };
         if di < 0 {
             continue;
         }
         let deref = unsafe { nir_src_as_deref(tex.get_src(di as usize).src) };
         if let Some(var) = unsafe { nir_deref_instr_get_variable(deref).as_ref() } {
-            return var.data.binding as i32;
+            return Some(var);
         }
     }
-    -1
+    None
+}
+
+/// The binding of the first texture the shader samples through a deref; -1 without one.
+pub fn sampled_binding(nir: &nir_shader) -> i32 {
+    tex_var(nir, true).map_or(-1, |v| v.data.binding as i32)
+}
+
+/// The set and binding of the first texture the shader filters (not texelFetch).
+pub fn filtered_binding(nir: &nir_shader) -> Option<(u32, u32)> {
+    tex_var(nir, false).map(|v| (v.data.descriptor_set, v.data.binding))
 }
