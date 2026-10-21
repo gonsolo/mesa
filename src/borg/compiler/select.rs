@@ -69,7 +69,7 @@ impl ShaderState {
             self.tex_size(tex);
             return;
         }
-        let is_txl = tex.op == nir_texop_txl && matches!(self.stage, Stage::Fragment | Stage::Compute);
+        let is_txl = tex.op == nir_texop_txl && matches!(self.stage, Stage::Fragment | Stage::Compute | Stage::Vertex);
         let is_txb = tex.op == nir_texop_txb && self.stage == Stage::Fragment;
         let is_tg4 = tex.op == nir_texop_tg4 && self.stage == Stage::Fragment;
         // A multisampled image is an array of its sample planes: layer = array layer * 4 + sample.
@@ -157,7 +157,9 @@ impl ShaderState {
                 // LOD mode 1: implicit LOD plus TEXA's bias.
                 self.konst(1u32 << 21)
             } else if is_fetch || is_txl {
-                self.konst(if is_txl { 2u32 << 21 } else { 1u32 << 16 })
+                // A vertex shader's table is its attributes': the texture is borg_core's BORG_VTEX_SLOT copy.
+                let slot = if self.stage == Stage::Vertex { 128 + 43 } else { 0 };
+                self.konst(if is_txl { 2u32 << 21 | slot } else { 1u32 << 16 | slot })
             } else {
                 match self.zero_ctl {
                 Some(v) => v,
