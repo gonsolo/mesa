@@ -19,7 +19,7 @@ use crate::format::{depth_is_d32, flush_format, raw32, vertex_fetch, Fetch};
 use crate::hw::{enabled, serves_extent};
 use crate::image::blocks;
 use crate::serial::{send_att, send_draw, send_mem, send_pass, send_target, send_vattr, Draw};
-use crate::sim::run_pass;
+use crate::sim::{per_sample, run_pass};
 use crate::sim_process::sim_run_stream;
 use crate::state_upload::{send_blend_state_serial, upload_shaders_serial};
 use crate::texture_upload::{send_buffer_texture, send_generic_texture};
@@ -472,7 +472,10 @@ impl Ctx<'_> {
             if first {
                 let fmt = if self.nextra != 0 { 5 } else { color.map_or(0, |i| flush_format(i.vk.format)) };
                 let d32 = has_z && depth_is_d32(unsafe { (*(*c.depth_view).image).format });
-                send_pass(fmt, has_z as u8 | (has_s as u8) << 1 | if color.is_none() { 8 } else { 0 } | if d32 { 4 } else { 0 });
+                let zs = if has_z { c.depth_view } else { c.stencil_view };
+                let samples = color.map(|i| i.vk.samples).or_else(|| (has_z || has_s).then(|| unsafe { (*(*zs).image).samples })).unwrap_or(1);
+                let ms = per_sample(samples, (self.w + 3) & !3, (self.h + 3) & !3, self.nextra != 0);
+                send_pass(fmt, has_z as u8 | (has_s as u8) << 1 | if color.is_none() { 8 } else { 0 } | if d32 { 4 } else { 0 } | (ms as u8) << 4);
                 send_att(self.nextra as u8 + 1, &[5, 5, 5]);
             }
         } else if first {

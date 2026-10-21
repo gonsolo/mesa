@@ -332,12 +332,32 @@ struct Layout {
     cpx: u32,
     d32: bool,
     zpx: u32,
+    ms: u32, // tiles per attachment tile: 4 when stored per sample (ATTACH_MS), else 1
 }
 
 impl Layout {
-    fn color(&self, s: &Server, x: u32, y: u32) -> usize {
-        tiled(s.fb, self.wp, x, y, 16 * self.cpx, if self.cpx == 16 { 8 } else { self.cpx }) as usize
+    fn color(&self, s: &Server, x: u32, y: u32, smp: u32) -> usize {
+        self.at(s.fb, x, y, 16 * self.cpx, if self.cpx == 16 { 8 } else { self.cpx }, smp)
     }
+
+    fn depth(&self, s: &Server, x: u32, y: u32, smp: u32) -> usize {
+        self.at(s.zb, x, y, 16 * self.zpx, self.zpx, smp)
+    }
+
+    fn stencil(&self, s: &Server, x: u32, y: u32, smp: u32) -> usize {
+        self.at(s.sb, x, y, 16, 1, smp)
+    }
+
+    /// Sample `smp`'s tile follows the tile's earlier samples.
+    fn at(&self, base: u32, x: u32, y: u32, tile_bytes: u32, px_bytes: u32, smp: u32) -> usize {
+        let o = borg_layout::tile::offset(self.wp, x, y, tile_bytes, px_bytes);
+        (base + (o / tile_bytes * self.ms + smp) * tile_bytes + o % tile_bytes) as usize
+    }
+}
+
+/// A 4x pass small enough to keep every sample in each attachment region is stored per sample.
+pub fn per_sample(samples: u32, wp: u32, hp: u32, extra: bool) -> bool {
+    samples == 4 && !extra && wp * hp <= 1 << 16
 }
 
 /// Before the pass: the GPU's copy of each pixel, to find what the pass changed.
@@ -348,60 +368,65 @@ struct Before {
     e: Vec<u8>,
 }
 
-/// In: the application's images into the GPU's attachments.
+/// In: the application's images into the GPU's attachments, each sample in its own tile when
+/// the pass stores per sample.
 fn copy_in(s: &Server, l: &Layout, rows: Range<u32>, t: &Targets, b: &mut Before) {
     let npx = (l.w * l.h) as usize;
     let m = s.host();
     for y in rows {
         for x in 0..l.w {
-            let i = (y * l.w + x) as usize;
-            let g = l.color(s, x, y);
-            if let Some(c) = &t.color {
-                let src = c.read(0, x, y);
-                if l.fmt != 0 {
-                    let mut px = [0u8; 16];
-                    let n = c.bs.min(l.cpx) as usize;
-                    px[..n].copy_from_slice(&src[..n]);
-                    px_put(&m, g, l.cpx, &px);
-                } else {
-                    let mut f = [0f32; 4];
-                    fmt::unpack_rgba(c.pf, &src, &mut f);
-                    m.write(g, &to565(&f).to_ne_bytes());
+            for p in 0..l.ms {
+                let px_i = (y * l.w + x) as usize;
+                let i = p as usize * npx + px_i;
+                let g = l.color(s, x, y, p);
+                if let Some(c) = &t.color {
+                    let src = c.read(p, x, y);
+                    if l.fmt != 0 {
+                        let mut px = [0u8; 16];
+                        let n = c.bs.min(l.cpx) as usize;
+                        px[..n].copy_from_slice(&src[..n]);
+                        px_put(&m, g, l.cpx, &px);
+                    } else {
+                        let mut f = [0f32; 4];
+                        fmt::unpack_rgba(c.pf, &src, &mut f);
+                        m.write(g, &to565(&f).to_ne_bytes());
+                    }
                 }
-            }
-            b.c[i * 16..i * 16 + 16].copy_from_slice(&px_get(&m, g, l.cpx));
-            for (a, e) in t.extra.iter().enumerate() {
-                let ge = tiled(s.att[a + 1], l.wp, x, y, 16, 1) as usize;
-                let mut v = [0u8];
-                e.host.read(e.byte(x, y), &mut v);
-                m.write(ge, &v);
-                m.read(ge, &mut v);
-                b.e[a * npx + i] = v[0];
-            }
-            if let Some(zs) = &t.z {
-                let gz = tiled(s.zb, l.wp, x, y, 16 * l.zpx, l.zpx) as usize;
-                let v = unpack_z(zs.pf, &zs.read(0, x, y));
-                let bytes = if l.d32 {
-                    v.to_ne_bytes()
-                } else {
-                    let h = z16(v).to_ne_bytes();
-                    [h[0], h[1], 0, 0]
-                };
-                m.write(gz, &bytes[..l.zpx as usize]);
-                b.z[i * 4..i * 4 + l.zpx as usize].copy_from_slice(&bytes[..l.zpx as usize]);
-            }
-            if let Some(ss) = &t.s {
-                let gs = tiled(s.sb, l.wp, x, y, 16, 1) as usize;
-                let mut v = [unpack_s(ss.pf, &ss.read(0, x, y))];
-                m.write(gs, &v);
-                m.read(gs, &mut v);
-                b.s[i] = v[0];
+                b.c[i * 16..i * 16 + 16].copy_from_slice(&px_get(&m, g, l.cpx));
+                for (a, e) in t.extra.iter().enumerate().filter(|_| p == 0) {
+                    let ge = tiled(s.att[a + 1], l.wp, x, y, 16, 1) as usize;
+                    let mut v = [0u8];
+                    e.host.read(e.byte(x, y), &mut v);
+                    m.write(ge, &v);
+                    m.read(ge, &mut v);
+                    b.e[a * npx + px_i] = v[0];
+                }
+                if let Some(zs) = &t.z {
+                    let gz = l.depth(s, x, y, p);
+                    let v = unpack_z(zs.pf, &zs.read(p, x, y));
+                    let bytes = if l.d32 {
+                        v.to_ne_bytes()
+                    } else {
+                        let h = z16(v).to_ne_bytes();
+                        [h[0], h[1], 0, 0]
+                    };
+                    m.write(gz, &bytes[..l.zpx as usize]);
+                    b.z[i * 4..i * 4 + l.zpx as usize].copy_from_slice(&bytes[..l.zpx as usize]);
+                }
+                if let Some(ss) = &t.s {
+                    let gs = l.stencil(s, x, y, p);
+                    let mut v = [unpack_s(ss.pf, &ss.read(p, x, y))];
+                    m.write(gs, &v);
+                    m.read(gs, &mut v);
+                    b.s[i] = v[0];
+                }
             }
         }
     }
 }
 
-/// Out: the pixels the pass changed, into every sample plane of the image; returns how many.
+/// Out: the pixels the pass changed, into their sample plane, or every plane of a resolved
+/// pass; returns how many.
 fn copy_out(s: &Server, l: &Layout, rows: Range<u32>, t: &Targets, b: &Before) -> u32 {
     let npx = (l.w * l.h) as usize;
     let cpx = l.cpx as usize;
@@ -409,49 +434,53 @@ fn copy_out(s: &Server, l: &Layout, rows: Range<u32>, t: &Targets, b: &Before) -
     let mut changed = 0;
     for y in rows {
         for x in 0..l.w {
-            let i = (y * l.w + x) as usize;
-            let cur = px_get(&m, l.color(s, x, y), l.cpx);
-            if let Some(c) = t.color.as_ref().filter(|_| cur[..cpx] != b.c[i * 16..i * 16 + cpx]) {
-                changed += 1;
-                for p in 0..c.planes {
-                    if l.fmt != 0 {
-                        c.host.write(c.texel(p, x, y), &cur[..c.bs.min(l.cpx) as usize]);
-                    } else {
-                        let v = u16::from_ne_bytes([cur[0], cur[1]]) as u32;
-                        let f = [((v >> 11) & 31) as f32 / 31.0, ((v >> 5) & 63) as f32 / 63.0, (v & 31) as f32 / 31.0, 1.0];
-                        c.update(p, x, y, |d| fmt::pack_rgba(c.pf, d, &f));
-                    }
-                }
-            }
-            for (a, e) in t.extra.iter().enumerate() {
-                let mut ge = [0u8];
-                m.read(tiled(s.att[a + 1], l.wp, x, y, 16, 1) as usize, &mut ge);
-                if ge[0] != b.e[a * npx + i] {
+            for p in 0..l.ms {
+                let px_i = (y * l.w + x) as usize;
+                let i = p as usize * npx + px_i;
+                let planes = |n: u32| if l.ms > 1 { p..p + 1 } else { 0..n };
+                let cur = px_get(&m, l.color(s, x, y, p), l.cpx);
+                if let Some(c) = t.color.as_ref().filter(|_| cur[..cpx] != b.c[i * 16..i * 16 + cpx]) {
                     changed += 1;
-                    e.host.write(e.byte(x, y), &ge);
-                }
-            }
-            if let Some(zs) = &t.z {
-                let mut cur = [0u8; 4];
-                let cur = &mut cur[..l.zpx as usize];
-                m.read(tiled(s.zb, l.wp, x, y, 16 * l.zpx, l.zpx) as usize, cur);
-                if *cur != b.z[i * 4..i * 4 + l.zpx as usize] {
-                    let v = if l.d32 {
-                        f32::from_ne_bytes((&*cur).try_into().unwrap())
-                    } else {
-                        u16::from_ne_bytes((&*cur).try_into().unwrap()) as f32 / 65535.0
-                    };
-                    for p in 0..zs.planes {
-                        zs.update(p, x, y, |d| pack_z(zs.pf, d, v));
+                    for q in planes(c.planes) {
+                        if l.fmt != 0 {
+                            c.host.write(c.texel(q, x, y), &cur[..c.bs.min(l.cpx) as usize]);
+                        } else {
+                            let v = u16::from_ne_bytes([cur[0], cur[1]]) as u32;
+                            let f = [((v >> 11) & 31) as f32 / 31.0, ((v >> 5) & 63) as f32 / 63.0, (v & 31) as f32 / 31.0, 1.0];
+                            c.update(q, x, y, |d| fmt::pack_rgba(c.pf, d, &f));
+                        }
                     }
                 }
-            }
-            if let Some(ss) = &t.s {
-                let mut gs = [0u8];
-                m.read(tiled(s.sb, l.wp, x, y, 16, 1) as usize, &mut gs);
-                if gs[0] != b.s[i] {
-                    for p in 0..ss.planes {
-                        ss.update(p, x, y, |d| pack_s(ss.pf, d, gs[0]));
+                for (a, e) in t.extra.iter().enumerate().filter(|_| p == 0) {
+                    let mut ge = [0u8];
+                    m.read(tiled(s.att[a + 1], l.wp, x, y, 16, 1) as usize, &mut ge);
+                    if ge[0] != b.e[a * npx + px_i] {
+                        changed += 1;
+                        e.host.write(e.byte(x, y), &ge);
+                    }
+                }
+                if let Some(zs) = &t.z {
+                    let mut cur = [0u8; 4];
+                    let cur = &mut cur[..l.zpx as usize];
+                    m.read(l.depth(s, x, y, p), cur);
+                    if *cur != b.z[i * 4..i * 4 + l.zpx as usize] {
+                        let v = if l.d32 {
+                            f32::from_ne_bytes((&*cur).try_into().unwrap())
+                        } else {
+                            u16::from_ne_bytes((&*cur).try_into().unwrap()) as f32 / 65535.0
+                        };
+                        for q in planes(zs.planes) {
+                            zs.update(q, x, y, |d| pack_z(zs.pf, d, v));
+                        }
+                    }
+                }
+                if let Some(ss) = &t.s {
+                    let mut gs = [0u8];
+                    m.read(l.stencil(s, x, y, p), &mut gs);
+                    if gs[0] != b.s[i] {
+                        for q in planes(ss.planes) {
+                            ss.update(q, x, y, |d| pack_s(ss.pf, d, gs[0]));
+                        }
                     }
                 }
             }
@@ -521,7 +550,7 @@ fn start_servers(all: &mut [Server], np: usize, rows_per: u32, wp: u32, hp: u32,
 
 /// The device: upload the attachments, run the stream, download them and the writebacks.
 fn run_on_device(s: &Server, l: &Layout, t: &Targets, stream: &[u8], wb: &[Writeback]) {
-    let tiles16 = (l.wp >> 2) * (l.h.next_multiple_of(4) >> 2) * 16;
+    let tiles16 = (l.wp >> 2) * (l.h.next_multiple_of(4) >> 2) * 16 * l.ms;
     let mut ranges = Vec::new();
     if t.color.is_some() {
         ranges.push((s.fb, tiles16 * l.cpx));
@@ -582,7 +611,9 @@ pub fn run_pass(
         _ => 4,
     };
     let d32 = zimg.is_some_and(|z| depth_is_d32(z.vk.format));
-    let l = Layout { w, h, wp, fmt, cpx, d32, zpx: if d32 { 4 } else { 2 } };
+    let samples = color.or(zimg).or(simg).map_or(1, |i| i.vk.samples);
+    let ms = if per_sample(samples, wp, hp, !extra.is_empty()) { 4 } else { 1 };
+    let l = Layout { w, h, wp, fmt, cpx, d32, zpx: if d32 { 4 } else { 2 }, ms };
     let t = Targets {
         color: color.map(Surface::new),
         extra: extra.iter().map(|e| Surface::new(e)).collect(),
@@ -590,7 +621,8 @@ pub fn run_pass(
         s: simg.map(Surface::new),
     };
     let npx = (w * h) as usize;
-    let mut b = Before { c: vec![0; npx * 16], z: vec![0; npx * 4], s: vec![0; npx], e: vec![0; npx * 3] };
+    let n = npx * ms as usize;
+    let mut b = Before { c: vec![0; n * 16], z: vec![0; n * 4], s: vec![0; n], e: vec![0; npx * 3] };
 
     let direct = std::env::var_os("BORGVK_SIM_DIRECT");
     let hw = direct.is_none();
