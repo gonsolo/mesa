@@ -104,7 +104,7 @@ entrypoint! {
                 clear_rect(view, VK_IMAGE_ASPECT_COLOR_BIT, &att.clearValue, c.render_area, 0, layers);
                 if i == 0 {
                     c.has_clear = true;
-                    c.clear_color = unsafe { att.clearValue.color.float32 };
+                    c.clear_color = att.clearValue.color().float32();
                 }
             }
         }

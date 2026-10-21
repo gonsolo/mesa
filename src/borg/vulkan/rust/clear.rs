@@ -9,6 +9,7 @@ use crate::ffi::*;
 use crate::fmt;
 use crate::image::{blocks, shape, Image, ViewImage};
 use crate::memory::Host;
+use crate::vk::ClearValue;
 use crate::texel::{pack_clear_color, write_depth_stencil, Texel};
 use borg_layout::image::Blocks;
 
@@ -87,9 +88,9 @@ pub fn clear_rect(view: &vk_image_view, aspect: VkImageAspectFlags, value: &VkCl
     let Some(image) = view.image() else { return };
     let Some((host, pf, b)) = mapped(image) else { return };
     let mut pixel = [0u8; 16];
-    let (color, ds) = (aspect & VK_IMAGE_ASPECT_COLOR_BIT != 0, unsafe { value.depthStencil });
+    let (color, ds) = (aspect & VK_IMAGE_ASPECT_COLOR_BIT != 0, value.depth_stencil());
     if color {
-        pack_clear_color(image.vk.format, pf, &mut pixel, unsafe { &value.color });
+        pack_clear_color(image.vk.format, pf, &mut pixel, value.color());
     }
     let (x0, y0, w, h) = (rect.offset.x as u32, rect.offset.y as u32, rect.extent.width, rect.extent.height);
     let bs = b.bs as u64;

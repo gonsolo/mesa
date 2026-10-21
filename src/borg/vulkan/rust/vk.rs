@@ -32,3 +32,39 @@ members! {
 
     trait DescriptorSetLayoutCreateInfo for VkDescriptorSetLayoutCreateInfo { bindings: pBindings[bindingCount] -> VkDescriptorSetLayoutBinding }
 }
+
+// The clear unions: every member is plain data of the union's size, so any of them may be read.
+pub trait ClearValue {
+    fn color(&self) -> &VkClearColorValue;
+    fn depth_stencil(&self) -> VkClearDepthStencilValue;
+}
+
+impl ClearValue for VkClearValue {
+    fn color(&self) -> &VkClearColorValue {
+        unsafe { &self.color }
+    }
+
+    fn depth_stencil(&self) -> VkClearDepthStencilValue {
+        unsafe { self.depthStencil }
+    }
+}
+
+pub trait ClearColorValue {
+    fn float32(&self) -> [f32; 4];
+    fn int32(&self) -> [i32; 4];
+    fn uint32(&self) -> [u32; 4];
+}
+
+impl ClearColorValue for VkClearColorValue {
+    fn float32(&self) -> [f32; 4] {
+        unsafe { self.float32 }
+    }
+
+    fn int32(&self) -> [i32; 4] {
+        unsafe { self.int32 }
+    }
+
+    fn uint32(&self) -> [u32; 4] {
+        unsafe { self.uint32 }
+    }
+}

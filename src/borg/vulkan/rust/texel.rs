@@ -5,6 +5,7 @@
 
 use crate::ffi::*;
 use crate::fmt;
+use crate::vk::ClearColorValue;
 use crate::image::z16_pack;
 
 /// One texel's bytes, room for the widest format.
@@ -41,8 +42,7 @@ fn scaled_type(pf: pipe_format) -> Option<util_format_type> {
 pub fn pack_clear_color(vk: VkFormat, pf: pipe_format, pixel: &mut [u8; 16], c: &VkClearColorValue) {
     let ch = fmt::first_non_void_channel(pf);
     let wide = ch >= 0 && fmt::is_pure_integer(pf) && fmt::description(pf).is_some_and(|d| d.channel[ch as usize].size() == 64);
-    // Every member of the union is 16 bytes of plain data.
-    let (u, i, f) = unsafe { (c.uint32, c.int32, c.float32) };
+    let (u, i, f) = (c.uint32(), c.int32(), c.float32());
     if wide {
         let n = (fmt::blocksize(pf) as usize).min(16);
         let bytes: Vec<u8> = u.iter().flat_map(|w| w.to_ne_bytes()).collect();
