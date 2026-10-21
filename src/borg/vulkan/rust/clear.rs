@@ -4,7 +4,7 @@
 //! Clears of images and of attachments, written by the host into the image memory.
 
 use crate::cmd_buffer::CommandBuffer;
-use crate::entrypoint::{entrypoint, pointee, slice};
+use crate::entrypoint::{entrypoint, pointee};
 use crate::ffi::*;
 use crate::fmt;
 use crate::image::{blocks, shape, Image, ViewImage};
@@ -48,12 +48,12 @@ fn for_each_plane(image: &Image, ranges: &[VkImageSubresourceRange], b: Blocks, 
 pointee!(VkClearColorValue, VkClearDepthStencilValue);
 
 entrypoint! {
-    fn borgvk_CmdClearColorImage(_cmd: VkCommandBuffer, image: &Image, _layout: VkImageLayout, color: &VkClearColorValue, count: u32, ranges: *const VkImageSubresourceRange) {
+    fn borgvk_CmdClearColorImage(_cmd: VkCommandBuffer, image: &Image, _layout: VkImageLayout, color: &VkClearColorValue, _count: u32, ranges: &[VkImageSubresourceRange]) {
         let Some((host, pf, b)) = mapped(image) else { return };
         let mut pixel = [0u8; 16];
         pack_clear_color(image.vk.format, pf, &mut pixel, color);
         let bs = b.bs as usize;
-        for_each_plane(image, unsafe { slice(ranges, count) }, b, |off, n| {
+        for_each_plane(image, ranges, b, |off, n| {
             host.fill(off as usize, &pixel[..bs], n as usize);
         });
     }
@@ -69,10 +69,10 @@ fn write_ds(host: &Host, off: usize, bs: usize, pf: pipe_format, aspect: VkImage
 }
 
 entrypoint! {
-    fn borgvk_CmdClearDepthStencilImage(_cmd: VkCommandBuffer, image: &Image, _layout: VkImageLayout, ds: &VkClearDepthStencilValue, count: u32, ranges: *const VkImageSubresourceRange) {
+    fn borgvk_CmdClearDepthStencilImage(_cmd: VkCommandBuffer, image: &Image, _layout: VkImageLayout, ds: &VkClearDepthStencilValue, _count: u32, ranges: &[VkImageSubresourceRange]) {
         let Some((host, pf, b)) = mapped(image) else { return };
         let bs = b.bs as usize;
-        for r in unsafe { slice(ranges, count) } {
+        for r in ranges {
             for_each_plane(image, std::slice::from_ref(r), b, |off, n| {
                 for t in 0..n as usize {
                     write_ds(&host, off as usize + t * bs, bs, pf, r.aspectMask, ds);
@@ -112,13 +112,12 @@ pub fn clear_rect(view: &vk_image_view, aspect: VkImageAspectFlags, value: &VkCl
 }
 
 entrypoint! {
-    fn borgvk_CmdClearAttachments(c: &mut CommandBuffer, natt: u32, atts: *const VkClearAttachment, nrects: u32, rects: *const VkClearRect) {
+    fn borgvk_CmdClearAttachments(c: &mut CommandBuffer, _natt: u32, atts: &[VkClearAttachment], _nrects: u32, rects: &[VkClearRect]) {
         crate::draw::flush_draws(c); // the draws so far come first
         if !c.in_rendering {
             return;
         }
-        let rects = unsafe { slice(rects, nrects) };
-        for att in unsafe { slice(atts, natt) } {
+        for att in atts {
             let has = |a| att.aspectMask & a != 0;
             if has(VK_IMAGE_ASPECT_COLOR_BIT) {
                 if let Some(view) = (att.colorAttachment < c.color_attachment_count).then(|| c.color_view(att.colorAttachment as usize)).flatten() {

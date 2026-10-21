@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::device::Device;
-use crate::entrypoint::{entrypoint, handle, pointee, slice, vk_error, Handle};
+use crate::entrypoint::{entrypoint, handle, pointee, vk_error, Handle};
 use crate::ffi::*;
 use crate::fmt;
 use crate::memory::{DeviceMemory, Host};
@@ -125,8 +125,8 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_BindImageMemory2(_device: VkDevice, count: u32, infos: *const VkBindImageMemoryInfo) -> VkResult {
-        for i in unsafe { slice(infos, count) } {
+    fn borgvk_BindImageMemory2(_device: VkDevice, _count: u32, infos: &[VkBindImageMemoryInfo]) -> VkResult {
+        for i in infos {
             let image = unsafe { i.image.get() }.unwrap();
             (image.mem, image.offset) = (i.memory.ptr(), i.memoryOffset);
         }

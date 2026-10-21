@@ -240,8 +240,8 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_FreeDescriptorSets(device: &Device, _pool: VkDescriptorPool, count: u32, sets: *const VkDescriptorSet) -> VkResult {
-        for s in unsafe { slice(sets, count) }.iter().filter(|s| !s.is_null()) {
+    fn borgvk_FreeDescriptorSets(device: &Device, _pool: VkDescriptorPool, _count: u32, sets: &[VkDescriptorSet]) -> VkResult {
+        for s in sets.iter().filter(|s| !s.is_null()) {
             unsafe { free_set(device, s.ptr()) };
         }
         VK_SUCCESS
@@ -315,11 +315,11 @@ unsafe fn write(w: &VkWriteDescriptorSet) {
 }
 
 entrypoint! {
-    fn borgvk_UpdateDescriptorSets(_device: VkDevice, nwrites: u32, writes: *const VkWriteDescriptorSet, ncopies: u32, copies: *const VkCopyDescriptorSet) {
-        for w in unsafe { slice(writes, nwrites) } {
+    fn borgvk_UpdateDescriptorSets(_device: VkDevice, _nwrites: u32, writes: &[VkWriteDescriptorSet], _ncopies: u32, copies: &[VkCopyDescriptorSet]) {
+        for w in writes {
             unsafe { write(w) };
         }
-        for c in unsafe { slice(copies, ncopies) } {
+        for c in copies {
             let (src, dst) = (c.srcSet.ptr(), c.dstSet.ptr());
             for k in 0..c.descriptorCount {
                 let s = desc_slot(unsafe { &(*src).map }, c.srcBinding, c.srcArrayElement + k);

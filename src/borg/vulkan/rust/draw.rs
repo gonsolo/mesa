@@ -6,7 +6,7 @@
 
 use crate::cmd_buffer::CommandBuffer;
 use crate::corpus::{borgvk_corpus_log, borgvk_corpus_on, hash, hash_image};
-use crate::entrypoint::{entrypoint, slice, Handle};
+use crate::entrypoint::{entrypoint, Handle};
 use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
 use crate::fmt;
@@ -40,8 +40,7 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_CmdBindVertexBuffers(c: &mut CommandBuffer, first: u32, count: u32, buffers: *const VkBuffer, offsets: *const VkDeviceSize) {
-        let (buffers, offsets) = unsafe { (slice(buffers, count), slice(offsets, count)) };
+    fn borgvk_CmdBindVertexBuffers(c: &mut CommandBuffer, first: u32, _count: u32, buffers: &[VkBuffer], offsets: &[VkDeviceSize]) {
         for (i, (b, &off)) in buffers.iter().zip(offsets).enumerate() {
             let slot = first as usize + i;
             if slot >= BORGVK_MAX_VERTEX_BINDINGS as usize {
@@ -55,9 +54,8 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_CmdBindDescriptorSets(c: &mut CommandBuffer, bind_point: VkPipelineBindPoint, _layout: VkPipelineLayout, first_set: u32, count: u32, sets: *const VkDescriptorSet, dyn_count: u32, dyn_offsets: *const u32) {
+    fn borgvk_CmdBindDescriptorSets(c: &mut CommandBuffer, bind_point: VkPipelineBindPoint, _layout: VkPipelineLayout, first_set: u32, _count: u32, sets: &[VkDescriptorSet], _dyn_count: u32, dyn_offsets: &[u32]) {
         let cs = bind_point == VK_PIPELINE_BIND_POINT_COMPUTE;
-        let (sets, dyn_offsets) = unsafe { (slice(sets, count), slice(dyn_offsets, dyn_count)) };
         let mut k = 0;
         for (i, &h) in sets.iter().enumerate() {
             let si = first_set as usize + i;

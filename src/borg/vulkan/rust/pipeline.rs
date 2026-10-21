@@ -349,11 +349,10 @@ fn mrt_formats(formats: &[VkFormat]) -> bool {
 }
 
 entrypoint! {
-    fn borgvk_CreateGraphicsPipelines(device: &Device, _cache: VkPipelineCache, count: u32, infos: *const VkGraphicsPipelineCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkPipeline) -> Result<(), VkError> {
-        let out = unsafe { std::slice::from_raw_parts_mut(out, count as usize) };
+    fn borgvk_CreateGraphicsPipelines(device: &Device, _cache: VkPipelineCache, _count: u32, infos: &[VkGraphicsPipelineCreateInfo], alloc: *const VkAllocationCallbacks, out: &mut [VkPipeline]) -> Result<(), VkError> {
         let mut sc = device.scratch.lock().unwrap();
         let mut result = Ok(());
-        for (i, ci) in unsafe { slice(infos, count) }.iter().enumerate() {
+        for (i, ci) in infos.iter().enumerate() {
             let ri = unsafe { vk_get_pipeline_rendering_create_info(ci).as_ref() };
             let formats = ri.map_or(&[][..], |ri| unsafe { slice(ri.pColorAttachmentFormats, ri.colorAttachmentCount) });
             let emulate = (2..=4).contains(&formats.len()) && !mrt_formats(formats);
@@ -375,10 +374,9 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_CreateComputePipelines(device: &Device, _cache: VkPipelineCache, count: u32, infos: *const VkComputePipelineCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkPipeline) -> Result<(), VkError> {
-        let out = unsafe { std::slice::from_raw_parts_mut(out, count as usize) };
+    fn borgvk_CreateComputePipelines(device: &Device, _cache: VkPipelineCache, _count: u32, infos: &[VkComputePipelineCreateInfo], alloc: *const VkAllocationCallbacks, out: &mut [VkPipeline]) -> Result<(), VkError> {
         let mut sc = device.scratch.lock().unwrap();
-        for (i, ci) in unsafe { slice(infos, count) }.iter().enumerate() {
+        for (i, ci) in infos.iter().enumerate() {
             let pl = create(device, alloc).inspect_err(|_| out[i..].fill(null_mut()))?;
             let mut pl = Owned::new(pl, |p| destroy(device, p, alloc));
             sc.compile_layout = ci.layout;

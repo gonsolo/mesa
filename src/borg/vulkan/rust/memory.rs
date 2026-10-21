@@ -4,7 +4,7 @@
 //! Device memory, buffers and buffer views. Memory is a GEM buffer of the DRM device mapped into
 //! the process, or malloc'd without one; either way host-coherent.
 
-use crate::entrypoint::{chain, entrypoint, handle, pointee, slice, vk_error, Handle};
+use crate::entrypoint::{chain, entrypoint, handle, pointee, vk_error, Handle};
 use crate::drm::{gem_close, ioctl, GEM_CREATE, GEM_MMAP};
 use crate::ffi::*;
 use crate::object::{allocate, Owned, Zeroed};
@@ -281,8 +281,8 @@ entrypoint! {
 }
 
 entrypoint! {
-    fn borgvk_BindBufferMemory2(_device: VkDevice, count: u32, infos: *const VkBindBufferMemoryInfo) -> VkResult {
-        for i in unsafe { slice(infos, count) } {
+    fn borgvk_BindBufferMemory2(_device: VkDevice, _count: u32, infos: &[VkBindBufferMemoryInfo]) -> VkResult {
+        for i in infos {
             let b = unsafe { i.buffer.get() }.unwrap();
             (b.mem, b.offset) = (i.memory.ptr(), i.memoryOffset);
         }

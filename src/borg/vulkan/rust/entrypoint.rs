@@ -93,18 +93,20 @@ pub trait Pointee {
     unsafe fn ptr(raw: Self::Raw) -> *mut Self;
 }
 
-/// A parameter of a safe entry point, converted from its C type once, at the boundary.
+/// A parameter of a safe entry point, converted from its C type once, at the boundary. The
+/// parameters convert in order, and an array takes its length from the last `u32` before it
+/// (check_rust_signatures.py holds that against vk.xml).
 pub trait Param: Sized {
     type Raw;
 
     /// # Safety
-    /// `raw` meets the Vulkan valid usage of the command.
-    unsafe fn from_raw(raw: Self::Raw) -> Self;
+    /// `raw` meets the Vulkan valid usage of the command; `len` is the last `u32` so far.
+    unsafe fn from_raw(raw: Self::Raw, len: &mut u32) -> Self;
 }
 
 impl<T: Pointee> Param for &T {
     type Raw = T::Raw;
-    unsafe fn from_raw(raw: T::Raw) -> Self {
+    unsafe fn from_raw(raw: T::Raw, _: &mut u32) -> Self {
         let p = unsafe { T::ptr(raw) };
         debug_assert!(!p.is_null());
         unsafe { &*p }
@@ -114,7 +116,7 @@ impl<T: Pointee> Param for &T {
 /// For the externally synchronized parameters, which nothing else touches during the call.
 impl<T: Pointee> Param for &mut T {
     type Raw = T::Raw;
-    unsafe fn from_raw(raw: T::Raw) -> Self {
+    unsafe fn from_raw(raw: T::Raw, _: &mut u32) -> Self {
         let p = unsafe { T::ptr(raw) };
         debug_assert!(!p.is_null());
         unsafe { &mut *p }
@@ -123,28 +125,50 @@ impl<T: Pointee> Param for &mut T {
 
 impl<T: Pointee> Param for Option<&T> {
     type Raw = T::Raw;
-    unsafe fn from_raw(raw: T::Raw) -> Self {
+    unsafe fn from_raw(raw: T::Raw, _: &mut u32) -> Self {
         unsafe { T::ptr(raw).as_ref() }
     }
 }
 
 impl<T: Pointee> Param for Option<&mut T> {
     type Raw = T::Raw;
-    unsafe fn from_raw(raw: T::Raw) -> Self {
+    unsafe fn from_raw(raw: T::Raw, _: &mut u32) -> Self {
         unsafe { T::ptr(raw).as_mut() }
+    }
+}
+
+impl<T> Param for &[T] {
+    type Raw = *const T;
+    unsafe fn from_raw(raw: *const T, len: &mut u32) -> Self {
+        unsafe { slice(raw, *len) }
+    }
+}
+
+impl<T> Param for &mut [T] {
+    type Raw = *mut T;
+    unsafe fn from_raw(raw: *mut T, len: &mut u32) -> Self {
+        if *len == 0 { &mut [] } else { unsafe { std::slice::from_raw_parts_mut(raw, *len as usize) } }
     }
 }
 
 impl<T> Param for *const T {
     type Raw = Self;
-    unsafe fn from_raw(raw: Self) -> Self {
+    unsafe fn from_raw(raw: Self, _: &mut u32) -> Self {
         raw
     }
 }
 
 impl<T> Param for *mut T {
     type Raw = Self;
-    unsafe fn from_raw(raw: Self) -> Self {
+    unsafe fn from_raw(raw: Self, _: &mut u32) -> Self {
+        raw
+    }
+}
+
+impl Param for u32 {
+    type Raw = Self;
+    unsafe fn from_raw(raw: Self, len: &mut u32) -> Self {
+        *len = raw;
         raw
     }
 }
@@ -153,13 +177,13 @@ macro_rules! by_value {
     ($($t:ty),*) => {
         $(impl Param for $t {
             type Raw = Self;
-            unsafe fn from_raw(raw: Self) -> Self {
+            unsafe fn from_raw(raw: Self, _: &mut u32) -> Self {
                 raw
             }
         })*
     };
 }
-by_value!(u8, u32, i32, u64, f32, usize);
+by_value!(u8, i32, u64, f32, usize);
 
 /// Vulkan structs and plain values passed by pointer.
 macro_rules! pointee {
@@ -204,7 +228,9 @@ macro_rules! entrypoint {
         #[no_mangle]
         pub unsafe extern "C" fn $name($($p: <$t as $crate::entrypoint::Param>::Raw),*) -> $crate::ffi::VkResult {
             fn body($($p: $t),*) -> Result<(), $crate::entrypoint::VkError> $body
-            body($(unsafe { <$t as $crate::entrypoint::Param>::from_raw($p) }),*).map_or_else(|e| e.0, |()| $crate::ffi::VK_SUCCESS)
+            let mut len = 0u32;
+            $(let $p = unsafe { <$t as $crate::entrypoint::Param>::from_raw($p, &mut len) };)*
+            body($($p),*).map_or_else(|e| e.0, |()| $crate::ffi::VK_SUCCESS)
         }
     };
     (fn $name:ident($($p:ident: $t:ty),* $(,)?) $(-> $ret:ty)? $body:block) => {
@@ -213,7 +239,9 @@ macro_rules! entrypoint {
         #[no_mangle]
         pub unsafe extern "C" fn $name($($p: <$t as $crate::entrypoint::Param>::Raw),*) $(-> $ret)? {
             fn body($($p: $t),*) $(-> $ret)? $body
-            body($(unsafe { <$t as $crate::entrypoint::Param>::from_raw($p) }),*)
+            let mut len = 0u32;
+            $(let $p = unsafe { <$t as $crate::entrypoint::Param>::from_raw($p, &mut len) };)*
+            body($($p),*)
         }
     };
 }
