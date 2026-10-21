@@ -11,6 +11,7 @@ use crate::object::{allocate, Owned, Zeroed};
 use crate::device::Device;
 use crate::util::mmap;
 use std::ffi::c_void;
+use std::marker::PhantomData;
 use std::ptr::null_mut;
 
 handle!(VkDeviceMemory, DeviceMemory, VK_OBJECT_TYPE_DEVICE_MEMORY);
@@ -45,27 +46,27 @@ unsafe impl Zeroed for BufferView {}
 /// The host-visible bytes of a resource: its mapping from the binding offset on. Accesses are
 /// checked against the mapping, so a copy between two of them, even of the same memory, is safe.
 #[derive(Clone, Copy)]
-pub struct Host {
+pub struct Host<'a> {
     base: *mut u8,
     len: usize,
+    mem: PhantomData<&'a DeviceMemory>,
 }
 
-impl Host {
-    pub(crate) fn of(mem: *mut DeviceMemory, offset: VkDeviceSize) -> Option<Host> {
-        // `mem` comes from a bind with a valid handle, and memory is not freed while in use.
-        let m = unsafe { mem.as_ref() }.filter(|m| !m.map.is_null())?;
+impl<'a> Host<'a> {
+    pub(crate) fn of(mem: Option<&'a DeviceMemory>, offset: VkDeviceSize) -> Option<Self> {
+        let m = mem.filter(|m| !m.map.is_null())?;
         let off = offset as usize;
-        Some(Host { base: m.map.cast::<u8>().wrapping_add(off), len: m.size.saturating_sub(off) })
+        Some(Host { base: m.map.cast::<u8>().wrapping_add(off), len: m.size.saturating_sub(off), mem: PhantomData })
     }
 
-    pub const fn empty() -> Host {
-        Host { base: std::ptr::null_mut(), len: 0 }
+    pub const fn empty() -> Self {
+        Host { base: std::ptr::null_mut(), len: 0, mem: PhantomData }
     }
 
     /// # Safety
-    /// `base..base + len` is mapped while the Host is used.
-    pub unsafe fn new(base: *mut u8, len: usize) -> Host {
-        Host { base, len: if base.is_null() { 0 } else { len } }
+    /// `base..base + len` is mapped for `'a`.
+    pub unsafe fn new(base: *mut u8, len: usize) -> Self {
+        Host { base, len: if base.is_null() { 0 } else { len }, mem: PhantomData }
     }
 
     /// The address of `n` bytes at `off`, for a call that reads or writes them.
@@ -101,7 +102,7 @@ impl Host {
     }
 
     /// Copies `n` bytes at `from` to `to` at `at`; the ranges may overlap.
-    pub fn copy(&self, from: usize, to: &Host, at: usize, n: usize) -> bool {
+    pub fn copy(&self, from: usize, to: &Host<'_>, at: usize, n: usize) -> bool {
         let (Some(s), Some(d)) = (self.ptr(from, n), to.ptr(at, n)) else { return false };
         unsafe { std::ptr::copy(s, d, n) };
         true
@@ -109,8 +110,13 @@ impl Host {
 }
 
 impl Buffer {
-    pub fn host(&self) -> Option<Host> {
-        Host::of(self.mem, self.offset)
+    // The memory a bind gave it, which Vulkan keeps alive while the buffer is used.
+    pub fn memory(&self) -> Option<&DeviceMemory> {
+        unsafe { self.mem.as_ref() }
+    }
+
+    pub fn host(&self) -> Option<Host<'_>> {
+        Host::of(self.memory(), self.offset)
     }
 }
 

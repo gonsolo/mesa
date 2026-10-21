@@ -68,7 +68,7 @@ fn setup_already_done() -> bool {
 /// The set's uniform buffer from its offset on, as floats.
 fn ubo(set: &DescriptorSet) -> Option<&[f32]> {
     let b = set.buffer(0)?;
-    let mem = unsafe { b.mem.as_ref() }.filter(|m| !m.map.is_null())?;
+    let mem = b.memory().filter(|m| !m.map.is_null())?;
     let off = b.offset + set.offsets[0];
     if off >= b.vk.size {
         return None;
@@ -173,14 +173,14 @@ pub unsafe fn borgvk_submit_cube_live(device: *mut Device, submit: *mut vk_queue
     let Some(ubo) = ubo(set) else { return VK_SUCCESS };
     let d = unsafe { &*device };
     let sc = d.scratch.lock().unwrap();
-    let ubuf = unsafe { &*set.buffers[0] };
     let tex = texture(set);
     let done = || SETUP_DONE.load(Ordering::Relaxed);
     if d.drm_fd >= 0 {
-        let tex_mem = unsafe { set.images[1].as_ref().and_then(|t| t.mem.as_ref()) };
-        let ubo_gem = unsafe { (*ubuf.mem).gem_handle };
+        let tex_img = set.image(1);
+        let tex_mem = tex_img.and_then(|t| t.memory());
+        let ubo_gem = set.buffer(0).and_then(|b| b.memory()).map_or(0, |m| m.gem_handle); // ubo() checked it
         if !done() && ubo_gem != 0 && tex_mem.is_some_and(|m| m.gem_handle != 0) {
-            let t = unsafe { &*set.images[1] };
+            let t = tex_img.unwrap();
             upload_shaders(d, &sc); // borgc-compiled shaders, before geometry and texture
             let mut s = drm_borg_setup {
                 ubo_handle: ubo_gem,

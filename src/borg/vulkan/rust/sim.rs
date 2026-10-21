@@ -66,7 +66,7 @@ impl Server {
     }
 
     /// The memory shared with the simulator, mapped from start to stop.
-    fn host(&self) -> Host {
+    fn host(&self) -> Host<'_> {
         unsafe { Host::new(self.mem, MEM_BYTES) }
     }
 
@@ -273,17 +273,17 @@ fn pack_s(pf: pipe_format, t: &mut Texel, s: u8) {
 }
 
 /// One attachment of the pass on the host side.
-struct Surface {
+struct Surface<'a> {
     pf: pipe_format,
     bs: u32,
-    host: Host,
+    host: Host<'a>,
     width: usize,
     plane: usize,
     planes: u32,
 }
 
-impl Surface {
-    fn new(img: &Image) -> Self {
+impl<'a> Surface<'a> {
+    fn new(img: &'a Image) -> Self {
         let e = img.vk.extent;
         Surface {
             pf: fmt::pipe(img.vk.format),
@@ -320,11 +320,11 @@ impl Surface {
 }
 
 /// The pass's attachments on the host.
-struct Targets {
-    color: Option<Surface>,
-    extra: Vec<Surface>,
-    z: Option<Surface>,
-    s: Option<Surface>,
+struct Targets<'a> {
+    color: Option<Surface<'a>>,
+    extra: Vec<Surface<'a>>,
+    z: Option<Surface<'a>>,
+    s: Option<Surface<'a>>,
 }
 
 /// What the GPU holds of the pass and where.

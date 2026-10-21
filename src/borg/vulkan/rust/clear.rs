@@ -21,7 +21,7 @@ fn layer_count(image: &vk_image, r: &VkImageSubresourceRange) -> u32 {
 }
 
 /// The mapped image and its blocks, when it has memory and a block is one texel deep.
-fn mapped(image: &Image) -> Option<(Host, pipe_format, Blocks)> {
+fn mapped(image: &Image) -> Option<(Host<'_>, pipe_format, Blocks)> {
     let b = blocks(image.vk.format);
     (b.bd <= 1).then_some(())?;
     Some((image.host()?, fmt::pipe(image.vk.format), b))

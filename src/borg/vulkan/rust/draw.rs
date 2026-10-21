@@ -243,7 +243,7 @@ struct Ctx<'a> {
     nextra: usize,
     w: u32,
     h: u32,
-    idx: Host,
+    idx: Host<'a>,
     idx_base: usize,
     vmin: i64,
     vmax: i64,

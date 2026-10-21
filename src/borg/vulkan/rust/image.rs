@@ -23,8 +23,12 @@ pub struct Image {
 }
 
 impl Image {
-    pub fn host(&self) -> Option<Host> {
-        Host::of(self.mem, self.offset)
+    pub fn memory(&self) -> Option<&DeviceMemory> {
+        unsafe { self.mem.as_ref() }
+    }
+
+    pub fn host(&self) -> Option<Host<'_>> {
+        Host::of(self.memory(), self.offset)
     }
 }
 

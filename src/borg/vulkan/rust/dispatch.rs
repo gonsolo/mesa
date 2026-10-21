@@ -51,8 +51,8 @@ fn decoded(addr: u32, data: Vec<u8>, size: u32) -> CsBuf {
     CsBuf { host: std::ptr::null_mut(), decoded: Some(data), wb: false, skip: 0, size, addr, texels: std::ptr::null_mut(), pf: PIPE_FORMAT_NONE }
 }
 
-fn mapped(mem: *mut DeviceMemory) -> Option<*mut u8> {
-    unsafe { mem.as_ref() }.filter(|m| !m.map.is_null()).map(|m| m.map.cast())
+fn mapped(mem: Option<&DeviceMemory>) -> Option<*mut u8> {
+    mem.filter(|m| !m.map.is_null()).map(|m| m.map.cast())
 }
 
 fn unpack(pf: pipe_format, dst: &mut [u8], src: *const u8) {
@@ -77,7 +77,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                 let tb = unsafe { &*bv.buffer.cast::<Buffer>() };
                 let pf = fmt::pipe(bv.format);
                 let bs = fmt::blocksize(pf);
-                let Some(map) = mapped(tb.mem).filter(|_| pf != PIPE_FORMAT_NONE && bs != 0) else { continue };
+                let Some(map) = mapped(tb.memory()).filter(|_| pf != PIPE_FORMAT_NONE && bs != 0) else { continue };
                 let n = (bv.range / bs as u64).min(SLOT_BYTES as u64 / 16) as u32;
                 let mut dec = vec![0u8; n.max(1) as usize * 16];
                 let src = unsafe { map.add((tb.offset + bv.offset) as usize) };
@@ -88,7 +88,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                 continue;
             }
             if let Some(img) = img.filter(|i| buf.is_null() && bv.is_none() && i.vk.image_type == VK_IMAGE_TYPE_2D && i.vk.samples == 1) {
-                let Some(map) = mapped(img.mem) else { continue };
+                let Some(map) = mapped(img.memory()) else { continue };
                 let src = unsafe { map.add(img.offset as usize) };
                 let (w, h) = (img.vk.extent.width, img.vk.extent.height);
                 if set.sampled_mask >> b & 1 != 0 {
@@ -118,7 +118,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                 }
             }
             let Some(b_) = (unsafe { buf.as_ref() }) else { continue };
-            let Some(map) = mapped(b_.mem) else { continue };
+            let Some(map) = mapped(b_.memory()) else { continue };
             let off = set.offsets[b] + dyn_off[b];
             let avail = b_.vk.size.saturating_sub(off);
             let r = set.ranges[b];
