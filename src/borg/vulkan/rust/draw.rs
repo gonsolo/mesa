@@ -22,7 +22,7 @@ use crate::serial::{send_att, send_draw, send_mem, send_pass, send_target, send_
 use crate::sim::run_pass;
 use crate::sim_process::sim_run_stream;
 use crate::state_upload::{send_blend_state_serial, upload_shaders_serial};
-use crate::texture_upload::{borgvk_send_buffer_texture, borgvk_send_generic_texture};
+use crate::texture_upload::{send_buffer_texture, send_generic_texture};
 use crate::transport::{borgvk_transport_capture_begin, capture_end};
 use crate::cube::borgvk_set_is_cube;
 use crate::util::log;
@@ -763,10 +763,10 @@ impl Ctx<'_> {
             if want >= 0 && b as i32 != want {
                 continue;
             }
-            if !set.views[b].is_null() && unsafe { borgvk_send_generic_texture(set.views[b], set.images[b], set.samplers[b]) } {
+            if set.view(b).is_some_and(|v| send_generic_texture(v, set.image(b), set.sampler(b))) {
                 break;
             }
-            if !set.buffer_views[b].is_null() && unsafe { borgvk_send_buffer_texture(set.buffer_views[b]) } {
+            if set.buffer_view(b).is_some_and(send_buffer_texture) {
                 break;
             }
         }

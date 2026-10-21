@@ -16,25 +16,20 @@ use crate::state_upload::sampler_desc;
 use borg_layout::descriptor::{TexDesc, TexType};
 use borg_layout::tex_format::TexFormat;
 use borg_layout::tile::texture_index;
-use std::ptr::null;
 
 const CHUNK: u32 = BORGVK_TEXG_CHUNK;
 const DIM: u32 = BORGVK_TEX_DIM;
 
-fn send(data: &[u8], desc: &TexDesc, sampler: *const Sampler) {
+fn send(data: &[u8], desc: &TexDesc, sampler: Option<&Sampler>) {
     let d = desc.pack();
     for off in (0..data.len() as u32).step_by(CHUNK as usize) {
         let n = (data.len() as u32 - off).min(CHUNK);
-        send_texture_chunk(off, &data[off as usize..(off + n) as usize], d[..3].try_into().unwrap(), sampler_desc(unsafe { sampler.as_ref() }));
+        send_texture_chunk(off, &data[off as usize..(off + n) as usize], d[..3].try_into().unwrap(), sampler_desc(sampler));
     }
 }
 
 /// One row of the cube's texture, box-filtered from the RGBA8 image down to BORGVK_TEX_DIM.
-///
-/// # Safety
-/// `tex` is a mapped RGBA8 image, `sampler` null or valid.
-pub unsafe fn borgvk_send_texture_row(tex: *mut Image, sampler: *const Sampler, dy: i32) {
-    let t = unsafe { &*tex };
+pub fn send_texture_row(t: &Image, sampler: Option<&Sampler>, dy: i32) {
     let (sw, sh) = (t.vk.extent.width, t.vk.extent.height);
     let Some(host) = t.host().filter(|_| sw != 0 && sh != 0) else { return };
     let (sxs, sys) = ((sw / DIM).max(1), (sh / DIM).max(1));
@@ -56,11 +51,11 @@ pub unsafe fn borgvk_send_texture_row(tex: *mut Image, sampler: *const Sampler, 
             row[dx as usize * 4 + c] = ((sum[c] + n / 2) / n) as u8;
         }
     }
-    send_tex_row(dy as u8, &row, sampler_desc(unsafe { sampler.as_ref() }));
+    send_tex_row(dy as u8, &row, sampler_desc(sampler));
 }
 
 /// The view's levels and layers, converted and, unless it is one linear level, tiled.
-fn texture(view: &vk_image_view, img: &Image, sampler: *const Sampler) -> bool {
+fn texture(view: &vk_image_view, img: &Image, sampler: Option<&Sampler>) -> bool {
     let Some(host) = img.host() else { return false };
     let (mut w, mut h) = (img.vk.extent.width, img.vk.extent.height);
     if w == 0 || h == 0 || w > 4096 || h > 4096 {
@@ -198,10 +193,8 @@ fn texture(view: &vk_image_view, img: &Image, sampler: *const Sampler) -> bool {
     true
 }
 
-/// # Safety
-/// `view` is valid; `img` and `sampler` are null or valid.
-pub unsafe fn borgvk_send_generic_texture(view: *const vk_image_view, img: *const Image, sampler: *const Sampler) -> bool {
-    let (view, Some(img)) = (unsafe { &*view }, unsafe { img.as_ref() }) else { return false };
+pub fn send_generic_texture(view: &vk_image_view, img: Option<&Image>, sampler: Option<&Sampler>) -> bool {
+    let Some(img) = img else { return false };
     if img.host().is_none() {
         return false;
     }
@@ -223,11 +216,7 @@ pub unsafe fn borgvk_send_generic_texture(view: *const vk_image_view, img: *cons
 }
 
 /// A texel buffer as a linear 1D texture.
-///
-/// # Safety
-/// `bv` is valid.
-pub unsafe fn borgvk_send_buffer_texture(bv: *const vk_buffer_view) -> bool {
-    let bv = unsafe { &*bv };
+pub fn send_buffer_texture(bv: &vk_buffer_view) -> bool {
     let format = match bv.format {
         VK_FORMAT_R32_UINT => TexFormat::R32_UINT,
         VK_FORMAT_R32_SFLOAT => TexFormat::R32_SFLOAT,
@@ -239,6 +228,6 @@ pub unsafe fn borgvk_send_buffer_texture(bv: *const vk_buffer_view) -> bool {
         return false;
     }
     let desc = TexDesc { width: w, height: 1, ty: TexType::D1, linear: true, depth_or_layers: 1, levels: 1, format, swizzle: [0; 4], pitch: w * 4 };
-    host.with_bytes(bv.offset as usize, w as usize * 4, |src| send(src, &desc, null()));
+    host.with_bytes(bv.offset as usize, w as usize * 4, |src| send(src, &desc, None));
     true
 }

@@ -14,7 +14,7 @@ use crate::device::Device;
 use crate::serial::{send_geom, send_mvp};
 use crate::sim_process::sim_run_stream;
 use crate::state_upload::{borgvk_find_set, sampler_desc, send_blend_state, upload_shaders};
-use crate::texture_upload::borgvk_send_texture_row;
+use crate::texture_upload::send_texture_row;
 use crate::transport::{borgvk_transport_capture_begin, capture_end};
 use crate::util::{log, MESA_LOG_INFO, MESA_LOG_WARN};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -77,16 +77,13 @@ fn ubo(set: &DescriptorSet) -> Option<&[f32]> {
     Some(unsafe { std::slice::from_raw_parts(mem.map.byte_add(off as usize).cast(), n) })
 }
 
-fn texture(set: &DescriptorSet) -> Option<*mut Image> {
-    let t = set.images[1];
-    let ti = unsafe { t.as_ref() }?;
-    let mapped = ti.host().is_some();
-    (mapped && ti.vk.extent.width != 0 && ti.vk.extent.height != 0).then_some(t)
+fn texture(set: &DescriptorSet) -> Option<&Image> {
+    set.image(1).filter(|t| t.host().is_some() && t.vk.extent.width != 0 && t.vk.extent.height != 0)
 }
 
-fn send_texture(set: &DescriptorSet, tex: *mut Image) {
+fn send_texture(set: &DescriptorSet, tex: &Image) {
     for row in 0..BORGVK_TEX_DIM as i32 {
-        unsafe { borgvk_send_texture_row(tex, set.samplers[1], row) };
+        send_texture_row(tex, set.sampler(1), row);
     }
 }
 

@@ -63,6 +63,10 @@ impl DescriptorSet {
         unsafe { self.images[b].as_ref() }
     }
 
+    pub fn view(&self, b: usize) -> Option<&vk_image_view> {
+        unsafe { self.views[b].as_ref() }
+    }
+
     pub fn sampler(&self, b: usize) -> Option<&Sampler> {
         unsafe { self.samplers[b].as_ref() }
     }
