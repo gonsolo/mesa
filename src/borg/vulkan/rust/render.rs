@@ -7,8 +7,9 @@
 use crate::clear::clear_rect;
 use crate::cmd_buffer::CommandBuffer;
 use crate::copy::resolve_region;
-use crate::entrypoint::{entrypoint, pointee, slice, Handle};
+use crate::entrypoint::{entrypoint, pointee, Handle};
 use crate::ffi::*;
+use crate::vk::*;
 use crate::image::Image;
 use crate::image::{blocks, shape, ViewImage};
 use borg_layout::image::Blocks;
@@ -73,8 +74,8 @@ fn target_view(c: &mut CommandBuffer, view: Option<&vk_image_view>) -> *mut vk_i
 }
 
 /// The depth or stencil attachment's view, cleared on load.
-fn depth_stencil(c: &mut CommandBuffer, att: *const VkRenderingAttachmentInfo, aspect: VkImageAspectFlags, layers: u32) -> *mut vk_image_view {
-    let Some(att) = (unsafe { att.as_ref() }) else { return null_mut() };
+fn depth_stencil(c: &mut CommandBuffer, att: Option<&VkRenderingAttachmentInfo>, aspect: VkImageAspectFlags, layers: u32) -> *mut vk_image_view {
+    let Some(att) = att else { return null_mut() };
     let view = unsafe { att.imageView.get_ref() };
     let target = target_view(c, view);
     if let Some(v) = view.filter(|_| att.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
@@ -94,7 +95,7 @@ entrypoint! {
         // A subpass without colour must not draw into the previous one's attachment.
         (c.color_views, c.color_resolve_views) = (Default::default(), Default::default());
         let layers = c.layer_count;
-        let atts = unsafe { slice(ri.pColorAttachments, c.color_attachment_count) };
+        let atts = &ri.color_attachments()[..c.color_attachment_count as usize];
         for (i, att) in atts.iter().enumerate() {
             let view = unsafe { att.imageView.get_ref() };
             c.color_views[i] = target_view(c, view);
@@ -107,8 +108,8 @@ entrypoint! {
                 }
             }
         }
-        c.depth_view = depth_stencil(c, ri.pDepthAttachment, VK_IMAGE_ASPECT_DEPTH_BIT, layers);
-        c.stencil_view = depth_stencil(c, ri.pStencilAttachment, VK_IMAGE_ASPECT_STENCIL_BIT, layers);
+        c.depth_view = depth_stencil(c, ri.depth_attachment(), VK_IMAGE_ASPECT_DEPTH_BIT, layers);
+        c.stencil_view = depth_stencil(c, ri.stencil_attachment(), VK_IMAGE_ASPECT_STENCIL_BIT, layers);
     }
 }
 

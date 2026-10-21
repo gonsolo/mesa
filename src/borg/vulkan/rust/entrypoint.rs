@@ -271,3 +271,27 @@ pub unsafe fn chain(p: *mut std::ffi::c_void) -> impl Iterator<Item = *mut VkBas
     let next = |s: *mut VkBaseOutStructure| (!s.is_null()).then_some(s);
     std::iter::successors(next(p.cast()), move |&s| next(unsafe { (*s).pNext }))
 }
+
+/// Accessors for the arrays (`member[count]`) and optional pointers of Vulkan structs the app
+/// passes, which valid usage makes point at that many valid elements. check_rust_signatures.py
+/// holds each to vk.xml and rejects members vk.xml leaves unvalidated (noautovalidity).
+macro_rules! members {
+    ($(trait $tr:ident for $s:ty { $($m:ident: $f:ident $([$n:ident])? -> $t:ty),* $(,)? })*) => {
+        $(
+            pub trait $tr {
+                $(fn $m(&self) -> $crate::entrypoint::members!(@ret $t $(, $n)?);)*
+            }
+
+            impl $tr for $s {
+                $(fn $m(&self) -> $crate::entrypoint::members!(@ret $t $(, $n)?) {
+                    $crate::entrypoint::members!(@get self, $f $(, $n)?)
+                })*
+            }
+        )*
+    };
+    (@ret $t:ty, $n:ident) => { &[$t] };
+    (@ret $t:ty) => { Option<&$t> };
+    (@get $s:ident, $f:ident, $n:ident) => { if $s.$f.is_null() { &[] } else { unsafe { $crate::entrypoint::slice($s.$f, $s.$n) } } };
+    (@get $s:ident, $f:ident) => { unsafe { $s.$f.as_ref() } };
+}
+pub(crate) use members;

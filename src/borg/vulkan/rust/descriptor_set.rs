@@ -4,8 +4,9 @@
 //! Descriptor set layouts, pools and sets. A layout maps its (binding, array element) pairs to
 //! flat slots, at most BORGVK_MAX_BINDINGS of them; a set holds one descriptor per slot.
 
-use crate::entrypoint::{entrypoint, handle, pointee, slice, vk_error, Handle};
+use crate::entrypoint::{entrypoint, handle, pointee, vk_error, Handle};
 use crate::ffi::*;
+use crate::vk::*;
 use crate::memory::Buffer;
 use crate::sampler::Sampler;
 use crate::image::Image;
@@ -143,7 +144,7 @@ entrypoint! {
         let l = unsafe { allocate::<DescriptorSetLayout>(|n| vk_descriptor_set_layout_zalloc(device.vk_ptr(), n, info)) };
         let l = l.ok_or_else(|| vk_error!(device, VK_ERROR_OUT_OF_HOST_MEMORY))?;
         l.binding_count = info.bindingCount;
-        (l.map, l.dyn_mask) = layout_map(unsafe { slice(info.pBindings, info.bindingCount) });
+        (l.map, l.dyn_mask) = layout_map(info.bindings());
         *out = VkDescriptorSetLayout::from_object(l);
         Ok(())
     }

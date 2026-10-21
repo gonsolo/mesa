@@ -7,6 +7,7 @@
 use crate::compiler::{compile_compute_stage, compile_empty_frag, compile_stage, num_varyings, set_base};
 use crate::entrypoint::{entrypoint, handle, slice, vk_error, Handle, VkError};
 use crate::ffi::*;
+use crate::vk::*;
 use crate::fmt;
 use crate::device::{Device, Scratch};
 use crate::object::{allocate, Owned, Zeroed};
@@ -74,8 +75,7 @@ fn vertex_fetch(vi: Option<&VkPipelineVertexInputStateCreateInfo>, points: bool,
     let mut vfetch = 0;
     if let Some(vi) = vi.filter(|vi| vi.vertexAttributeDescriptionCount > 0) {
         vfetch = BORGC_VS_FETCH;
-        let attrs = unsafe { slice(vi.pVertexAttributeDescriptions, vi.vertexAttributeDescriptionCount) };
-        let bindings = unsafe { slice(vi.pVertexBindingDescriptions, vi.vertexBindingDescriptionCount) };
+        let (attrs, bindings) = (vi.attributes(), vi.bindings());
         for vb in bindings.iter().filter(|vb| vb.inputRate == VK_VERTEX_INPUT_RATE_INSTANCE) {
             for va in attrs.iter().filter(|va| va.binding == vb.binding && va.location < 16) {
                 vfetch |= 1 << va.location;
@@ -149,11 +149,11 @@ fn channel(func: pipe_blend_func, src_factor: pipe_blendfactor, dst_factor: pipe
 /// The blend state the fragment shader lowers, for one target that is neither RGBA8 nor
 /// BGRA8 (those blend in hardware); None when it writes every channel unblended.
 fn shader_blend(cb: Option<&VkPipelineColorBlendStateCreateInfo>, f0: VkFormat, mrt: bool) -> Option<borg_blend> {
-    let cb = cb.filter(|cb| cb.attachmentCount >= 1 && !cb.pAttachments.is_null())?;
+    let cb = cb?;
+    let a = cb.attachments().first()?;
     if mrt || f0 == VK_FORMAT_UNDEFINED || f0 == VK_FORMAT_R8G8B8A8_UNORM || f0 == VK_FORMAT_B8G8R8A8_UNORM {
         return None;
     }
-    let a = unsafe { &*cb.pAttachments };
     let enable = a.blendEnable != 0 && !fmt::vk_is_int(f0);
     if !enable && a.colorWriteMask & 0xF == 0xF {
         return None;
@@ -236,13 +236,13 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     pl.topology = topology;
     pl.restart = ia.is_some_and(|ia| ia.primitiveRestartEnable != 0);
     if let Some(vi) = vi {
-        for vb in unsafe { slice(vi.pVertexBindingDescriptions, vi.vertexBindingDescriptionCount) } {
+        for vb in vi.bindings() {
             if vb.binding < BORGVK_MAX_VERTEX_BINDINGS {
                 pl.binding_stride[vb.binding as usize] = vb.stride;
                 pl.binding_instance[vb.binding as usize] = vb.inputRate == VK_VERTEX_INPUT_RATE_INSTANCE;
             }
         }
-        for va in unsafe { slice(vi.pVertexAttributeDescriptions, vi.vertexAttributeDescriptionCount) } {
+        for va in vi.attributes() {
             if pl.attr_count >= BORGVK_MAX_VERTEX_ATTRS {
                 break;
             }
@@ -271,8 +271,8 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
 /// The static viewport and scissor; dynamic ones come from the command buffer.
 fn viewport(pl: &mut Pipeline, c: &VkGraphicsPipelineCreateInfo, discard: bool) {
     (pl.vp_dyn, pl.sc_dyn) = (false, false);
-    if let Some(d) = unsafe { c.pDynamicState.as_ref() } {
-        for &ds in unsafe { slice(d.pDynamicStates, d.dynamicStateCount) } {
+    if let Some(d) = c.dynamic_state() {
+        for &ds in d.dynamic_states() {
             pl.vp_dyn |= matches!(ds, VK_DYNAMIC_STATE_VIEWPORT | VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT);
             pl.sc_dyn |= matches!(ds, VK_DYNAMIC_STATE_SCISSOR | VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT);
         }

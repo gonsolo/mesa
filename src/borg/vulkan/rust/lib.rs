@@ -48,4 +48,5 @@ mod texture_upload;
 mod transport;
 mod types;
 mod util;
+mod vk;
 mod wsi;

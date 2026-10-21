@@ -5,6 +5,7 @@
 //! a marker byte, a payload and an XOR checksum over everything between them.
 
 use crate::ffi::*;
+use crate::vk::*;
 use crate::transport::capturing;
 use crate::util::{log, MESA_LOG_INFO, MESA_LOG_WARN};
 use std::sync::Mutex;
@@ -146,10 +147,9 @@ fn unorm8(f: f32) -> u32 {
 /// BLEND_CFG and BLEND_CONST of the first attachment; blending off and all channels written
 /// without one.
 pub fn blend_pack(cb: Option<&VkPipelineColorBlendStateCreateInfo>) -> (u32, u32) {
-    let Some(cb) = cb.filter(|cb| cb.attachmentCount >= 1 && !cb.pAttachments.is_null()) else {
+    let Some((cb, a)) = cb.and_then(|cb| Some((cb, cb.attachments().first()?))) else {
         return (0xF << 27, 0);
     };
-    let a = unsafe { &*cb.pAttachments };
     let cfg = (a.blendEnable != 0) as u32
         | (a.srcColorBlendFactor as u32 & 0x1F) << 1
         | (a.dstColorBlendFactor as u32 & 0x1F) << 6

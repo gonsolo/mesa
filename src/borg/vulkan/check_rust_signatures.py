@@ -2,6 +2,8 @@
 # The safe entry points in rust/ against vk.xml: `&mut` only where the app synchronizes the
 # parameter (externsync="true") or for an output pointer, a plain reference never where the
 # parameter may be null, and an array's length is the last u32 before it (entrypoint.rs's Param).
+# The struct accessors of members! name the member's type and length and never a member vk.xml
+# leaves unvalidated.
 import glob
 import re
 import sys
@@ -50,6 +52,36 @@ def commands(xml):
     return cmds
 
 
+def structs(root):
+    out = {}
+    for t in root.iter('type'):
+        if t.get('category') in ('struct', 'union') and t.get('api', 'vulkan') != 'vulkansc':
+            out[t.get('name')] = {m.findtext('name'): m for m in t.findall('member') if m.get('api', 'vulkan') != 'vulkansc'}
+    return out
+
+
+def check_members(paths, xml):
+    errors, found = [], 0
+    sts = structs(ET.parse(xml).getroot())
+    for path in paths:
+        for blk in re.finditer(r'trait \w+ for (\w+) \{([^}]*)\}', open(path).read()):
+            found += 1
+            s = sts.get(blk.group(1))
+            for m in re.finditer(r'(\w+): (\w+)(?:\[(\w+)\])? -> (\w+)', blk.group(2)):
+                _, field, n, ty = m.groups()
+                where = f'{path}: {blk.group(1)}.{field}'
+                mem = s.get(field) if s else None
+                if mem is None:
+                    errors.append(f'{where} is not in vk.xml')
+                elif mem.get('noautovalidity') == 'true':
+                    errors.append(f'{where}: vk.xml does not validate it')
+                elif '*' not in ''.join(mem.itertext()) or mem.findtext('type') != ty:
+                    errors.append(f'{where}: vk.xml has {"".join(mem.itertext()).strip()}')
+                elif mem.get('len') != n:
+                    errors.append(f'{where}: its length is {mem.get("len")}, not {n}')
+    return errors if found else ['no members! accessors found']
+
+
 def signatures(paths):
     for path in paths:
         for m in re.finditer(r'^\s*fn borgvk_(\w+)\(([^)]*)\)', open(path).read(), re.M):
@@ -74,7 +106,9 @@ def check(rust, p, last_u32):
 def main(xml, rust_dir):
     cmds = commands(xml)
     errors = []
-    sigs = list(signatures(sorted(glob.glob(rust_dir + '/*.rs'))))
+    paths = sorted(glob.glob(rust_dir + '/*.rs'))
+    sigs = list(signatures(paths))
+    errors += check_members(paths, xml)
     if not sigs:
         errors.append(f'no entry points found in {rust_dir}')
     for path, name, params in sigs:
