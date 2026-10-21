@@ -90,6 +90,10 @@ fn build(view: &vk_image_view, img: &Image) -> Option<Texture> {
         }
         _ => return None,
     };
+    let samples = img.vk.samples.max(1);
+    if samples > 1 && ty == TexType::D2 {
+        layers *= samples;
+    }
     if layers == 0 || layers > 1024 || depth > 1024 {
         return None;
     }
@@ -118,7 +122,7 @@ fn build(view: &vk_image_view, img: &Image) -> Option<Texture> {
     if ty == TexType::D3 {
         depth = ld[0];
     }
-    let layer_src = |layer: u32, l: usize| (view.base_array_layer as u64 + layer as u64) as usize * sum as usize + soff[l] as usize;
+    let layer_src = |layer: u32, l: usize| (view.base_array_layer as u64 * samples as u64 + layer as u64) as usize * sum as usize + soff[l] as usize;
     let convert = |out: &mut [u8], from: usize, n: u32| {
         host.with_bytes(from, src_len(&tc, n as usize), |s| tex_convert(&tc, out, s, n as usize));
     };
