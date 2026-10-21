@@ -867,7 +867,7 @@ fn storage_image(set: &DescriptorSet, b: usize) -> Option<&Image> {
 }
 
 fn draw_one(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
-    let Some(pl) = c.gfx_pipeline() else { return reject(Reject::Undrawable) };
+    let (Some(pl), c) = c.split_gfx_pipeline() else { return reject(Reject::Undrawable) };
     let mut g = Ctx {
         device,
         c,
@@ -917,7 +917,8 @@ fn draw_one(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
 /// Wide colour targets are one pipeline each, drawn in turn (no depth or stencil: a second pass would fail the test).
 fn generic_draw(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
     let first = c.gfx_pipeline;
-    let Some(fp) = (unsafe { first.as_ref() }).filter(|f| f.emul_n != 0) else { return draw_one(device, c, p) };
+    let (fp, c) = c.split_gfx_pipeline();
+    let Some(fp) = fp.filter(|f| f.emul_n != 0) else { return draw_one(device, c, p) };
     if !c.depth_view.is_null() || !c.stencil_view.is_null() {
         return reject(Reject::MrtFormats);
     }
@@ -939,7 +940,7 @@ fn generic_draw(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
 }
 
 fn sim_draw(c: &mut CommandBuffer, mut p: Params) {
-    let device = c.device();
+    let (device, c) = c.split_device();
     // Only the simulator renders; cube.c (UBO-driven) has its own path at submit.
     if !(std::env::var_os("BORGVK_SIM").is_some() || enabled()) || (!c.desc_set.is_null() && unsafe { borgvk_set_is_cube(c.desc_set) }) {
         return;

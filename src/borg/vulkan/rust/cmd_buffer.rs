@@ -74,20 +74,25 @@ pub struct CommandBuffer {
 
 impl CommandBuffer {
     /// The device the runtime created it on, which outlives it.
-    pub fn device<'a>(&self) -> &'a Device {
+    pub fn device(&self) -> &Device {
         unsafe { &*self.vk.base.device.cast::<Device>() }
     }
 
-    // What is bound stays alive while the command buffer records and runs.
-    pub fn gfx_pipeline<'a>(&self) -> Option<&'a Pipeline> {
-        unsafe { self.gfx_pipeline.as_ref() }
+    /// The device next to the command buffer, for as long as it is borrowed.
+    pub fn split_device(&mut self) -> (&Device, &mut Self) {
+        (unsafe { &*self.vk.base.device.cast::<Device>() }, self)
     }
 
-    pub fn cs_pipeline<'a>(&self) -> Option<&'a Pipeline> {
+    // What is bound stays alive while the command buffer records and runs.
+    pub fn split_gfx_pipeline(&mut self) -> (Option<&Pipeline>, &mut Self) {
+        (unsafe { self.gfx_pipeline.as_ref() }, self)
+    }
+
+    pub fn cs_pipeline(&self) -> Option<&Pipeline> {
         unsafe { self.cs_pipeline.as_ref() }
     }
 
-    pub fn desc_set<'a>(&self) -> Option<&'a DescriptorSet> {
+    pub fn desc_set(&self) -> Option<&DescriptorSet> {
         unsafe { self.desc_set.as_ref() }
     }
 }
