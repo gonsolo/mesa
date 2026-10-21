@@ -651,12 +651,17 @@ impl ShaderState {
         let is_pc = intr.intrinsic == nir_intrinsic_load_point_coord;
         let loc = if is_pc { 25 } else { intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F };
         let base_index = if loc == 25 { self.flags.pntc_base() } else { 4 * loc.wrapping_sub(VARYING_SLOT_VAR0) + intr.get_const_index(NIR_INTRINSIC_COMPONENT) as u32 };
-        let bary = [5u8, 6, 7].map(|r| {
-            let v = self.sel.next_vreg; self.sel.next_vreg += 1;
-            self.sel.loc.insert(v, Loc::Fixed(r));
-            self.frag.per_pixel_fixed.insert(v);
-            v
-        });
+        let centroid = !is_pc && self.frag.centroid >> loc.wrapping_sub(VARYING_SLOT_VAR0).min(63) & 1 != 0;
+        let bary = if centroid {
+            self.frag.centroid_bary
+        } else {
+            [5u8, 6, 7].map(|r| {
+                let v = self.sel.next_vreg; self.sel.next_vreg += 1;
+                self.sel.loc.insert(v, Loc::Fixed(r));
+                self.frag.per_pixel_fixed.insert(v);
+                v
+            })
+        };
         let n = intr.def.num_components as usize;
         // Integer varyings are flat (Vulkan): the provoking vertex's bits, not a blend.
         let dtype = if is_pc { 0x80 } else { intr.get_const_index(NIR_INTRINSIC_DEST_TYPE) };
@@ -685,6 +690,59 @@ impl ShaderState {
             })
             .collect();
         self.sel.vec_map.insert(intr.def.index, comps);
+    }
+
+    /// Barycentrics inside both the pixel and the triangle: the centre's when the centre is inside
+    /// all three edges, else the first covered sample's (`Ek + ak*ox + bk*oy`, normalized).
+    pub(crate) fn centroid_barycentrics(&mut self) -> [u32; 3] {
+        let fixed = |st: &mut Self, r: u8| {
+            let v = st.sel.fresh();
+            st.sel.loc.insert(v, Loc::Fixed(r));
+            st.frag.per_pixel_fixed.insert(v);
+            v
+        };
+        let e = [0u8, 1, 2].map(|r| fixed(self, r));
+        let one = self.konst(1.0f32.to_bits());
+        let not = |st: &mut Self, x: u32| {
+            let n = st.sel.op0(Op::Fneg, vec![x]);
+            st.sel.op0(Op::Fadd, vec![one, n])
+        };
+        let mut rest = one;
+        for &ek in &e {
+            let n = self.sel.op0(Op::Fneg, vec![ek]);
+            let out = self.sel.op0(Op::Fstep, vec![n]);
+            let inn = not(self, out);
+            rest = self.sel.op0(Op::Fmul, vec![rest, inn]);
+        }
+        rest = not(self, rest);
+        let mask = self.sel.op0(Op::Smask, vec![]);
+        let bit1 = self.konst(1);
+        let (mut ox, mut oy) = (None, None);
+        for (i, (x, y)) in [(-0.125f32, -0.375f32), (0.375, -0.125), (-0.375, 0.125), (0.125, 0.375)].into_iter().enumerate() {
+            let shifted = if i == 0 { mask } else { let k = self.konst(i as u32); self.sel.op0(Op::Isrl, vec![mask, k]) };
+            let b = self.sel.op0(Op::Iand, vec![shifted, bit1]);
+            let b = self.sel.op0(Op::I2f, vec![b]);
+            let w = self.sel.op0(Op::Fmul, vec![b, rest]);
+            if i < 3 {
+                let nb = not(self, b);
+                rest = self.sel.op0(Op::Fmul, vec![rest, nb]);
+            }
+            let (kx, ky) = (self.konst(x.to_bits()), self.konst(y.to_bits()));
+            ox = Some(match ox { None => self.sel.op0(Op::Fmul, vec![w, kx]), Some(o) => self.sel.op0(Op::Fmadd, vec![w, kx, o]) });
+            oy = Some(match oy { None => self.sel.op0(Op::Fmul, vec![w, ky]), Some(o) => self.sel.op0(Op::Fmadd, vec![w, ky, o]) });
+        }
+        let (ox, oy) = (ox.unwrap(), oy.unwrap());
+        let es = [0u8, 1, 2].map(|k| {
+            let (a, b) = (self.sel.fresh(), self.sel.fresh());
+            self.sel.loc.insert(a, Loc::Uniform(3 * k));
+            self.sel.loc.insert(b, Loc::Uniform(3 * k + 1));
+            let t = self.sel.op0(Op::Fmadd, vec![a, ox, e[k as usize]]);
+            self.sel.op0(Op::Fmadd, vec![b, oy, t])
+        });
+        let s01 = self.sel.op0(Op::Fadd, vec![es[0], es[1]]);
+        let sum = self.sel.op0(Op::Fadd, vec![s01, es[2]]);
+        let r = self.sel.op0(Op::Frcp, vec![sum]);
+        es.map(|x| self.sel.op0(Op::Fmul, vec![x, r]))
     }
 
     /// Push constants, from the uniform window or, with a buffer in the shader, the heap window.

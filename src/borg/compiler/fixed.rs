@@ -43,6 +43,9 @@ pub fn fixed_regs(
         if reads_bary {
             extra_reserved.extend_from_slice(&[5, 6, 7]);
         }
+        if cx.sel.prog.iter().flat_map(|i| i.srcs.iter()).any(|v| matches!(cx.sel.loc.get(v), Some(Loc::Fixed(0..=2)))) {
+            extra_reserved.extend_from_slice(&[0, 1, 2]);
+        }
         if !cx.fattr_dsts.is_empty() {
             extra_reserved.extend_from_slice(&[10, 11, 12]);
         }

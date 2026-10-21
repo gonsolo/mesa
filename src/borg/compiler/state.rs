@@ -128,6 +128,9 @@ pub struct Frag {
     /// The one colour output kept for a target drawn on its own, -1 for all.
     pub out_select: i32,
     pub dst_half: Option<([Option<u32>; 4], u32)>,
+    /// Input slots qualified `centroid`, and their barycentrics.
+    pub centroid: u64,
+    pub centroid_bary: [u32; 3],
 }
 
 /// What only a vertex shader has.
@@ -191,6 +194,8 @@ impl ShaderState {
                 push_window: false,
                 out_select: -1,
                 dst_half: None,
+                centroid: 0,
+                centroid_bary: [0; 3],
             },
             vert: Default::default(),
             spill: Default::default(),

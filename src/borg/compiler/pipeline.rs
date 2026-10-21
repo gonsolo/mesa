@@ -28,6 +28,20 @@ impl ShaderState {
         let mut st = ShaderState::new(regs, stage, flags);
         st.frag.push_window = push_window && stage == Stage::Fragment;
         st.frag.out_select = out_select;
+        if stage == Stage::Fragment {
+            for var in (*nir).iter_variables() {
+                let d = &var.data;
+                if d.mode() == nir_var_shader_in && d.centroid() != 0 && d.location >= VARYING_SLOT_VAR0 as i32 {
+                    let first = d.location as u32 - VARYING_SLOT_VAR0;
+                    for k in 0..glsl_count_attribute_slots(var.type_, false) {
+                        st.frag.centroid |= 1u64.checked_shl(first + k).unwrap_or(0);
+                    }
+                }
+            }
+            if st.frag.centroid != 0 {
+                st.frag.centroid_bary = st.centroid_barycentrics();
+            }
+        }
         (st, entry, total)
     }
 
