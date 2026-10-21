@@ -63,6 +63,7 @@ macro_rules! handle {
             }
         }
 
+        #[allow(unsafe_code)]
         impl $crate::entrypoint::Pointee for $obj {
             type Raw = $h;
             unsafe fn ptr(raw: $h) -> *mut $obj {
@@ -72,6 +73,7 @@ macro_rules! handle {
             }
         }
 
+        #[allow(unsafe_code)]
         impl $crate::entrypoint::Pointee for $h {
             type Raw = *mut $h;
             unsafe fn ptr(raw: *mut $h) -> *mut $h {
@@ -188,7 +190,8 @@ by_value!(u8, i32, u64, f32, usize);
 /// Vulkan structs and plain values passed by pointer.
 macro_rules! pointee {
     ($($t:ty),* $(,)?) => {
-        $(impl $crate::entrypoint::Pointee for $t {
+        $(#[allow(unsafe_code)]
+        impl $crate::entrypoint::Pointee for $t {
             type Raw = *mut $t;
             unsafe fn ptr(raw: *mut $t) -> *mut $t {
                 raw
@@ -206,6 +209,7 @@ macro_rules! entrypoint {
     (unsafe fn $name:ident($($p:ident: $t:ty),* $(,)?) -> Result<(), VkError> $body:block) => {
         /// # Safety
         /// The arguments meet the Vulkan valid usage of the command.
+        #[allow(unsafe_code)]
         #[no_mangle]
         pub unsafe extern "C" fn $name($($p: $t),*) -> $crate::ffi::VkResult {
             #[allow(unused_unsafe)]
@@ -216,6 +220,7 @@ macro_rules! entrypoint {
     (unsafe fn $name:ident($($p:ident: $t:ty),* $(,)?) $(-> $ret:ty)? $body:block) => {
         /// # Safety
         /// The arguments meet the Vulkan valid usage of the command.
+        #[allow(unsafe_code)]
         #[no_mangle]
         pub unsafe extern "C" fn $name($($p: $t),*) $(-> $ret)? {
             #[allow(unused_unsafe)]
@@ -225,6 +230,7 @@ macro_rules! entrypoint {
     (fn $name:ident($($p:ident: $t:ty),* $(,)?) -> Result<(), VkError> $body:block) => {
         /// # Safety
         /// The arguments meet the Vulkan valid usage of the command.
+        #[allow(unsafe_code)]
         #[no_mangle]
         pub unsafe extern "C" fn $name($($p: <$t as $crate::entrypoint::Param>::Raw),*) -> $crate::ffi::VkResult {
             fn body($($p: $t),*) -> Result<(), $crate::entrypoint::VkError> $body
@@ -236,6 +242,7 @@ macro_rules! entrypoint {
     (fn $name:ident($($p:ident: $t:ty),* $(,)?) $(-> $ret:ty)? $body:block) => {
         /// # Safety
         /// The arguments meet the Vulkan valid usage of the command.
+        #[allow(unsafe_code)]
         #[no_mangle]
         pub unsafe extern "C" fn $name($($p: <$t as $crate::entrypoint::Param>::Raw),*) $(-> $ret)? {
             fn body($($p: $t),*) $(-> $ret)? $body
@@ -282,6 +289,7 @@ macro_rules! members {
                 $(fn $m(&self) -> $crate::entrypoint::members!(@ret $t $(, $n)?);)*
             }
 
+            #[allow(unsafe_code)]
             impl $tr for $s {
                 $(fn $m(&self) -> $crate::entrypoint::members!(@ret $t $(, $n)?) {
                     $crate::entrypoint::members!(@get self, $f $(, $n)?)

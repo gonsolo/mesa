@@ -6,12 +6,14 @@ mod ffi {
     pub use borgvk_bindings_rs::*;
 }
 
+#[deny(unsafe_code)]
 mod clear;
 mod cmd_buffer;
 #[cfg(borgc)]
 mod compile;
 mod compiler;
 mod copy;
+#[deny(unsafe_code)]
 mod corpus;
 mod cube;
 mod descriptor_set;
@@ -22,6 +24,7 @@ mod drm;
 mod entrypoint;
 mod event;
 mod fmt;
+#[deny(unsafe_code)]
 mod format;
 mod hw;
 #[cfg(borgc)]
@@ -43,9 +46,12 @@ mod state_upload;
 mod sim;
 mod sim_process;
 mod sync;
+#[deny(unsafe_code)]
 mod texel;
+#[deny(unsafe_code)]
 mod texture_upload;
 mod transport;
+#[deny(unsafe_code)]
 mod types;
 mod util;
 mod vk;
