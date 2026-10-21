@@ -644,12 +644,11 @@ impl Ctx<'_> {
 
     fn buffers(&mut self) -> Result<(), Reject> {
         let pl = self.pl;
-        let c = &mut *self.c;
-        let set = c.desc_set;
-        let sets = [set, c.desc_sets[1], c.desc_sets[2], c.desc_sets[3]];
+        let set = self.c.desc_set;
+        let (sets, c) = self.c.split_sets();
         let (mut smask, mut any_dyn) = (0u32, false);
         for (si, s) in sets.iter().enumerate() {
-            let Some(s) = (unsafe { s.as_ref() }) else { continue };
+            let Some(s) = s else { continue };
             any_dyn |= s.dyn_mask != 0;
             for b in 0..BINDINGS.min(32usize.saturating_sub(pl.set_base[si] as usize)) {
                 let buf = s.storage_mask >> b & 1 != 0 && s.buffer(b).is_some_and(|u| u.host().is_some());
@@ -667,7 +666,7 @@ impl Ctx<'_> {
             } else {
                 1 + (32 - (smask | umask).leading_zeros())
             };
-            let reuse = c.region_set == set && c.batch_draws != 0 && umask == 0 && !any_dyn && sets[1].is_null() && !pl.spills;
+            let reuse = c.region_set == set && c.batch_draws != 0 && umask == 0 && !any_dyn && sets[1].is_none() && !pl.spills;
             let mut base = c.region_base;
             if !reuse {
                 base = (self.heap.top + 3) & !3;
@@ -676,7 +675,7 @@ impl Ctx<'_> {
                 }
                 self.heap.top = base + slots * SLOT_BYTES + 16;
                 for (si, ds) in sets.iter().enumerate() {
-                    let Some(ds) = (unsafe { ds.as_ref() }) else { continue };
+                    let Some(ds) = ds else { continue };
                     for b in 0..BINDINGS {
                         let fb = pl.set_base[si] as u32 + b as u32;
                         if let Some(simg) = storage_image(ds, b).filter(|_| fb < 32) {
@@ -727,7 +726,7 @@ impl Ctx<'_> {
             }
             self.ubo_base = base + 1;
         }
-        let set = unsafe { set.as_ref() };
+        let set = sets[0];
         if smask != 0 || umask != 0 || pl.spills || (pl.push_used && pl.ubo_mask == 0) {
             return Ok(());
         }

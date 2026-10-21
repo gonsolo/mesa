@@ -7,7 +7,7 @@
 use crate::copy::borgvk_decode_compressed_image;
 use crate::ffi::*;
 use crate::fmt;
-use crate::memory::{Buffer, DeviceMemory};
+use crate::memory::{DeviceMemory, ViewBuffer};
 use crate::sampler::Sampler;
 use crate::image::Image;
 use crate::format::{src_len, tex_convert, tex_format};
@@ -233,8 +233,7 @@ pub unsafe fn borgvk_send_buffer_texture(bv: *const vk_buffer_view) -> bool {
         VK_FORMAT_R32_SFLOAT => TexFormat::R32_SFLOAT,
         _ => return false,
     };
-    let buf = unsafe { &*bv.buffer.cast::<Buffer>() };
-    let Some(host) = buf.host() else { return false };
+    let Some(host) = bv.buffer().and_then(|b| b.host()) else { return false };
     let w = (bv.range / 4) as u32;
     if w == 0 || w > 65536 {
         return false;

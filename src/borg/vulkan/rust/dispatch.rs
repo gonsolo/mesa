@@ -9,7 +9,7 @@ use crate::corpus::{borgvk_corpus_log, borgvk_corpus_on, hash};
 use crate::entrypoint::entrypoint;
 use crate::ffi::*;
 use crate::fmt;
-use crate::memory::{Buffer, DeviceMemory};
+use crate::memory::{DeviceMemory, ViewBuffer};
 use crate::pipeline::Pipeline;
 use crate::hw::borgvk_hw_compute;
 use crate::util::{log, temp_file, MESA_LOG_WARN};
@@ -63,7 +63,7 @@ fn unpack(pf: pipe_format, dst: &mut [u8], src: *const u8) {
 fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
     let mut bufs = Vec::new();
     for si in 0..4 {
-        let Some(set) = (unsafe { c.cs_sets[si].as_ref() }) else { continue };
+        let Some(set) = c.cs_set(si) else { continue };
         let dyn_off = &c.cs_dyn_offs[si];
         let base = pl.set_base[si] as u32;
         for b in 0..BORGVK_MAX_BINDINGS as usize {
@@ -71,10 +71,10 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                 break;
             }
             let addr = BASE_BYTES + (base + b as u32) * SLOT_BYTES;
-            let (buf, bv, img) = (set.buffers[b], set.buffer_view(b), set.image(b));
-            if let Some(bv) = bv.filter(|_| buf.is_null()) {
+            let (buf, bv, img) = (set.buffer(b), set.buffer_view(b), set.image(b));
+            if let Some(bv) = bv.filter(|_| buf.is_none()) {
                 // A texel buffer, decoded to RGBA32 per texel.
-                let tb = unsafe { &*bv.buffer.cast::<Buffer>() };
+                let Some(tb) = bv.buffer() else { continue };
                 let pf = fmt::pipe(bv.format);
                 let bs = fmt::blocksize(pf);
                 let Some(map) = mapped(tb.memory()).filter(|_| pf != PIPE_FORMAT_NONE && bs != 0) else { continue };
@@ -87,7 +87,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                 bufs.push(CsBuf { texels: src, pf, ..decoded(addr, dec, n * 16) });
                 continue;
             }
-            if let Some(img) = img.filter(|i| buf.is_null() && bv.is_none() && i.vk.image_type == VK_IMAGE_TYPE_2D && i.vk.samples == 1) {
+            if let Some(img) = img.filter(|i| buf.is_none() && bv.is_none() && i.vk.image_type == VK_IMAGE_TYPE_2D && i.vk.samples == 1) {
                 let Some(map) = mapped(img.memory()) else { continue };
                 let src = unsafe { map.add(img.offset as usize) };
                 let (w, h) = (img.vk.extent.width, img.vk.extent.height);
@@ -117,7 +117,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                     continue;
                 }
             }
-            let Some(b_) = (unsafe { buf.as_ref() }) else { continue };
+            let Some(b_) = buf else { continue };
             let Some(map) = mapped(b_.memory()) else { continue };
             let off = set.offsets[b] + dyn_off[b];
             let avail = b_.vk.size.saturating_sub(off);

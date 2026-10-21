@@ -120,6 +120,17 @@ impl Buffer {
     }
 }
 
+/// The buffer a texel buffer view was created on, which outlives the view.
+pub trait ViewBuffer {
+    fn buffer(&self) -> Option<&Buffer>;
+}
+
+impl ViewBuffer for vk_buffer_view {
+    fn buffer(&self) -> Option<&Buffer> {
+        unsafe { self.buffer.cast::<Buffer>().as_ref() }
+    }
+}
+
 impl Default for DeviceMemory {
     fn default() -> Self {
         unsafe { std::mem::zeroed() }

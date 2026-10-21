@@ -96,6 +96,16 @@ impl CommandBuffer {
         unsafe { self.desc_set.as_ref() }
     }
 
+    pub fn cs_set(&self, i: usize) -> Option<&DescriptorSet> {
+        unsafe { self.cs_sets[i].as_ref() }
+    }
+
+    /// The graphics sets next to the command buffer, for as long as it is borrowed.
+    pub fn split_sets(&mut self) -> ([Option<&DescriptorSet>; 4], &mut Self) {
+        let sets = [self.desc_set, self.desc_sets[1], self.desc_sets[2], self.desc_sets[3]];
+        (sets.map(|s| unsafe { s.as_ref() }), self)
+    }
+
     // The open pass's attachments; a view of a target lives as long as the command buffer.
     pub fn color_view(&self, i: usize) -> Option<&vk_image_view> {
         unsafe { self.color_views[i].as_ref() }
