@@ -4,7 +4,7 @@
 //! The cube path: Vulkan-Tools' cube.c draws from a uniform buffer holding the MVP and every
 //! vertex; its frames go to the Borg as one geometry and texture upload, then an MVP per frame.
 
-use crate::corpus::{borgvk_corpus_hash, borgvk_corpus_image, borgvk_corpus_log, borgvk_corpus_on};
+use crate::corpus::{borgvk_corpus_log, borgvk_corpus_on, hash, hash_image};
 use crate::drm::{ioctl, SETUP, SUBMIT};
 use crate::cmd_buffer::CommandBuffer;
 use crate::descriptor_set::DescriptorSet;
@@ -26,13 +26,13 @@ const ATTR_FLOAT0: usize = MVP_FLOATS + NUM_VERTS * 4; // attr[36][4]
 const MIN_FLOATS: usize = ATTR_FLOAT0 + NUM_VERTS * 4; // 304 = 1216 B
 
 /// The first colour attachment of the submit's command buffers.
-fn color_attachment(s: &vk_queue_submit) -> *mut Image {
+fn color_attachment(s: &vk_queue_submit) -> Option<&Image> {
     for &cb in unsafe { crate::entrypoint::slice(s.command_buffers, s.command_buffer_count) } {
         if let Some(img) = unsafe { &*cb.cast::<CommandBuffer>() }.color_view(0).and_then(|v| v.image()) {
-            return std::ptr::from_ref(img).cast_mut();
+            return Some(img);
         }
     }
-    std::ptr::null_mut()
+    None
 }
 
 /// Positions deduplicated into at most BORGVK_GEOM_MAX_VERTS, with an index and a UV per vertex.
@@ -153,10 +153,10 @@ pub unsafe fn borgvk_submit_sim_cube(device: *mut Device, submit: *mut vk_queue_
     }
     let color = color_attachment(unsafe { &*submit });
     let rec = borgvk_corpus_on();
-    let key = if rec { unsafe { borgvk_corpus_hash(BORGVK_CORPUS_SEED as u64, bytes.as_ptr().cast(), bytes.len()) } } else { 0 };
-    let res = sim_run_stream(&bytes, unsafe { color.as_ref() }, 0);
+    let key = if rec { hash(BORGVK_CORPUS_SEED as u64, &bytes) } else { 0 };
+    let res = sim_run_stream(&bytes, color, 0);
     if rec {
-        borgvk_corpus_log(b'C' as _, key, unsafe { borgvk_corpus_image(BORGVK_CORPUS_SEED as u64, color) });
+        borgvk_corpus_log(b'C' as _, key, hash_image(BORGVK_CORPUS_SEED as u64, color));
     }
     res
 }

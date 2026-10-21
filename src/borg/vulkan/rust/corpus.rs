@@ -29,16 +29,8 @@ pub fn borgvk_corpus_on() -> bool {
     file().is_some()
 }
 
-/// # Safety
-/// `p` holds `n` bytes.
-pub unsafe fn borgvk_corpus_hash(h: u64, p: *const std::ffi::c_void, n: usize) -> u64 {
-    if n == 0 { h } else { hash(h, unsafe { std::slice::from_raw_parts(p.cast(), n) }) }
-}
-
-/// # Safety
-/// `img` is null or a valid image.
-pub unsafe fn borgvk_corpus_image(h: u64, img: *const Image) -> u64 {
-    let Some(img) = (unsafe { img.as_ref() }) else { return h };
+pub fn hash_image(h: u64, img: Option<&Image>) -> u64 {
+    let Some(img) = img else { return h };
     img.host().and_then(|m| m.with_bytes(0, img.size as usize, |b| hash(h, b))).unwrap_or(h)
 }
 

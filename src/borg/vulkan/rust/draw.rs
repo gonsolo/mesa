@@ -5,21 +5,21 @@
 //! into the open pass's stream, which the simulator runs at the pass's end.
 
 use crate::cmd_buffer::CommandBuffer;
-use crate::corpus::{borgvk_corpus_hash, borgvk_corpus_image, borgvk_corpus_log, borgvk_corpus_on};
+use crate::corpus::{borgvk_corpus_log, borgvk_corpus_on, hash, hash_image};
 use crate::entrypoint::{entrypoint, slice, Handle};
 use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
 use crate::fmt;
 use crate::memory::{Buffer, Host};
 use crate::texel::Texel;
-use crate::image::Image;
+use crate::image::{Image, ViewImage};
 use crate::device::Device;
 use crate::pipeline::Pipeline;
 use crate::format::{depth_is_d32, flush_format, raw32, vertex_fetch, Fetch};
 use crate::hw::{enabled, serves_extent};
 use crate::image::blocks;
 use crate::serial::{send_att, send_draw, send_mem, send_pass, send_target, send_vattr, Draw};
-use crate::sim::borgvk_sim_run_pass;
+use crate::sim::run_pass;
 use crate::sim_process::sim_run_stream;
 use crate::state_upload::{send_blend_state_serial, upload_shaders_serial};
 use crate::texture_upload::{borgvk_send_buffer_texture, borgvk_send_generic_texture};
@@ -146,21 +146,10 @@ fn bytes_of<T>(v: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(v.as_ptr().cast(), size_of_val(v)) }
 }
 
-fn corpus_state(
-    h: u64,
-    img: *const Image,
-    extra: &[*mut Image],
-    depth: *const vk_image_view,
-    stencil: *const vk_image_view,
-    wb: &[Writeback],
-) -> u64 {
-    let mut h = unsafe { borgvk_corpus_image(h, img) };
-    for &e in extra.iter().chain(&[view_image(depth), view_image(stencil)]) {
-        if !e.is_null() {
-            h = unsafe { borgvk_corpus_image(h, e) };
-        }
-    }
-    wb.iter().fold(h, |h, w| unsafe { borgvk_corpus_hash(h, w.host.cast(), w.size as usize) })
+fn corpus_state(h: u64, img: Option<&Image>, extra: &[&Image], depth: Option<&Image>, stencil: Option<&Image>, wb: &[Writeback]) -> u64 {
+    let h = extra.iter().copied().chain(depth).chain(stencil).fold(hash_image(h, img), |h, e| hash_image(h, Some(e)));
+    // A writeback's bytes are the app's mapped memory, alive until the submit ends.
+    wb.iter().fold(h, |h, w| if w.size == 0 { h } else { hash(h, unsafe { std::slice::from_raw_parts(w.host, w.size as usize) }) })
 }
 
 /// Runs the draws batched so far.
@@ -169,9 +158,12 @@ pub fn flush_draws(c: &mut CommandBuffer) {
         return;
     }
     let stream = c.stream.take();
-    let (bytes, n) = (stream.as_slice().as_ptr(), stream.as_slice().len());
-    let (img, extra, serve, area) = (c.batch_img, c.batch_extra, c.batch_serve, c.batch_area);
-    let (wb, nwb, nextra) = (c.wb, c.nwb as usize, c.batch_nextra as usize);
+    // The batch's attachments, kept as pointers across its draws; they live until the pass ends.
+    let img = unsafe { c.batch_img.as_ref() };
+    let extra: Vec<&Image> = c.batch_extra[..c.batch_nextra as usize].iter().filter_map(|&e| unsafe { e.as_ref() }).collect();
+    let depth = unsafe { c.batch_depth.as_ref() }.and_then(|v| v.image());
+    let stencil = unsafe { c.batch_stencil.as_ref() }.and_then(|v| v.image());
+    let (serve, area, wb, nwb) = (c.batch_serve, c.batch_area, c.wb, c.nwb as usize);
     c.nwb = 0;
     c.region_set = null_mut();
     (c.batch_pool, c.batch_vpool, c.batch_srgb) = (null(), null(), false);
@@ -179,12 +171,12 @@ pub fn flush_draws(c: &mut CommandBuffer) {
     drop(c.state_sent.take());
     let rec = borgvk_corpus_on();
     let seed = BORGVK_CORPUS_SEED as u64;
-    let state = |h| corpus_state(h, img, &extra[..nextra], c.batch_depth, c.batch_stencil, &wb[..nwb]);
-    let key = if rec { state(unsafe { borgvk_corpus_hash(seed, bytes.cast(), n) }) } else { seed };
+    let state = |h| corpus_state(h, img, &extra, depth, stencil, &wb[..nwb]);
+    let key = if rec { state(hash(seed, stream.as_slice())) } else { seed };
     if serve {
-        unsafe { borgvk_sim_run_pass(bytes, n, img, extra.as_ptr(), nextra as u32, c.batch_depth, c.batch_stencil, wb.as_ptr(), nwb as u32, area) };
+        run_pass(stream.as_slice(), img, &extra, depth, stencil, &wb[..nwb], area);
     } else {
-        sim_run_stream(stream.as_slice(), unsafe { img.as_ref() }, 0);
+        sim_run_stream(stream.as_slice(), img, 0);
     }
     if rec {
         borgvk_corpus_log(b'F' as _, key, state(seed));
