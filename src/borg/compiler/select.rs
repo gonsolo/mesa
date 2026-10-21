@@ -149,17 +149,34 @@ impl ShaderState {
                 };
                 self.sel.prog.push(BorgInstr { mnem: Op::Texa.into(), dst: NO_DST, srcs: vec![wv, lv, wz], swz: vec![wc, lc, 0], imm: 0 });
             }
+            // Constant texel offsets: u in bits 26:23, v in 30:27, a 3D image's w in 31 and 20:18.
+            let off = match srcs.iter().find(|s| s.src_type == nir_tex_src_offset) {
+                None => 0,
+                Some(s) => {
+                    let d = s.src.as_def();
+                    let Some(lc) = d.parent_instr().as_load_const() else {
+                        self.refuse("a texel offset that is not constant");
+                        return;
+                    };
+                    (0..d.num_components as usize).fold(0u32, |b, c| {
+                        let o = unsafe { lc.values()[c].u32_ } & 15;
+                        b | match c { 0 => o << 23, 1 => o << 27, _ => (o & 8) << 28 | (o & 7) << 18 }
+                    })
+                }
+            };
             let ctl = if is_tg4 {
                 // Operation 2 (gather) of the component in bits 19:18.
                 let bits = 2u32 << 16 | (tex.component() & 3) << 18;
-                self.konst(bits)
+                self.konst(bits | off)
             } else if has_bias {
                 // LOD mode 1: implicit LOD plus TEXA's bias.
-                self.konst(1u32 << 21)
+                self.konst(1u32 << 21 | off)
             } else if is_fetch || is_txl {
                 // A vertex shader's table is its attributes': the texture is borg_core's BORG_VTEX_SLOT copy.
                 let slot = if self.stage == Stage::Vertex { 128 + 43 } else { 0 };
-                self.konst(if is_txl { 2u32 << 21 | slot } else { 1u32 << 16 | slot })
+                self.konst(if is_txl { 2u32 << 21 | slot } else { 1u32 << 16 | slot } | off)
+            } else if off != 0 {
+                self.konst(off)
             } else {
                 match self.zero_ctl {
                 Some(v) => v,
