@@ -437,6 +437,10 @@ impl Ctx<'_> {
         borgvk_transport_capture_begin();
         d.shader_blob = pl.blob;
         (d.blend_cfg, d.blend_const, d.state_reg, d.state_valid, d.vp) = (pl.blend_cfg, pl.blend_const, pl.state_reg, pl.state_valid, pl.vp);
+        // Without a stencil attachment the stencil test always passes.
+        if c.stencil_view.is_null() {
+            d.state_reg[0] = 0;
+        }
         let dyn_state = &c.vk.dynamic_graphics_state;
         let set = |s: mesa_vk_dynamic_graphics_state| dyn_state.set[s as usize / 32] >> (s % 32) & 1 != 0;
         if pl.vp_dyn && set(MESA_VK_DYNAMIC_VP_VIEWPORTS) {
