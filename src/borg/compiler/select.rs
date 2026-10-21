@@ -100,7 +100,11 @@ impl ShaderState {
             let is_cube = tex.sampler_dim == GLSL_SAMPLER_DIM_CUBE;
             let has_w = !is_fetch && tex.coord_components >= 3 && !is_cube && self.stage == Stage::Fragment;
             let has_bias = (is_txb || tex.op == nir_texop_tex) && !is_fetch && srcs.iter().any(|s| s.src_type == nir_tex_src_bias);
-            if is_txl || has_w || has_bias || is_ms {
+            // texelFetch's level and its array layer (or 3D slice) reach the unit through TEXA.
+            let lod_src = srcs.iter().find(|s| s.src_type == nir_tex_src_lod).map(|s| s.src.as_def().index);
+            let fetch_lod = is_fetch && !is_ms && lod_src.is_some_and(|l| self.scalar_const(l) != Some(0));
+            let fetch_w = is_fetch && !is_ms && tex.coord_components == 3;
+            if is_txl || has_w || has_bias || is_ms || fetch_lod || fetch_w {
                 let ld = srcs.iter().find(|s| s.src_type == nir_tex_src_lod || s.src_type == nir_tex_src_bias).map(|s| s.src.as_def().index).unwrap_or(cd);
                 if let Some(&bits) = self.consts.get(&ld).filter(|_| is_txl || has_bias) {
                     if !self.sel.vec_map.contains_key(&ld) {
@@ -112,9 +116,19 @@ impl ShaderState {
                 self.sel.next_vreg += 1;
                 self.sel.loc.insert(wz, Loc::Fixed(30));
                 self.frag.per_pixel_fixed.insert(wz);
-                let (lv, lc) = if is_txl || has_bias { resolve_vm(&self.sel.vec_map, ld, 0) } else if is_ms { (self.konst(0), 0) } else { (wz, 0u8) };
+                let (lv, lc) = if is_txl || has_bias {
+                    resolve_vm(&self.sel.vec_map, ld, 0)
+                } else if let Some(l) = lod_src.filter(|_| fetch_lod) {
+                    self.scalar_of(l, 0).unwrap_or_else(|bits| (self.konst(bits), 0))
+                } else if is_fetch {
+                    (self.konst(0), 0)
+                } else {
+                    (wz, 0u8)
+                };
                 let (wv, wc) = if has_w {
                     resolve_vm(&self.sel.vec_map, cd, 2)
+                } else if fetch_w {
+                    self.scalar_of(cd, 2).unwrap_or_else(|bits| (self.konst(bits), 0))
                 } else if let Some(m) = srcs.iter().find(|s| is_ms && s.src_type == nir_tex_src_ms_index) {
                     let m = m.src.as_def().index;
                     let layer = (tex.coord_components == 3).then(|| self.scalar_of(cd, 2));
