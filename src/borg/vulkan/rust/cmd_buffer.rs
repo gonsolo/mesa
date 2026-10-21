@@ -1,7 +1,7 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-//! Command buffers: the runtime's, with the recorded stream and draw state of rust/serial.rs and
+//! Command buffers: the runtime's, with the recorded stream and draw state of rust/wire.rs and
 //! the C recorders; push constants.
 
 use crate::entrypoint::{entrypoint, handle, pointee};

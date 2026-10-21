@@ -18,7 +18,7 @@ use crate::pipeline::Pipeline;
 use crate::format::{depth_is_d32, flush_format, raw32, vertex_fetch, Fetch};
 use crate::hw::{enabled, serves_extent};
 use crate::image::blocks;
-use crate::serial::{send_att, send_draw, send_mem, send_pass, send_target, send_vattr, Draw};
+use crate::wire::{send_att, send_draw, send_mem, send_pass, send_target, send_vattr, Draw};
 use crate::sim::{per_sample, run_pass};
 use crate::sim_process::sim_run_stream;
 use crate::state_upload::{send_blend_state_serial, upload_shaders_serial};

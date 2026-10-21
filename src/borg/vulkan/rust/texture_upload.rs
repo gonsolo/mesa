@@ -11,7 +11,7 @@ use crate::memory::ViewBuffer;
 use crate::sampler::Sampler;
 use crate::image::Image;
 use crate::format::{src_len, tex_convert, tex_format};
-use crate::serial::*;
+use crate::wire::*;
 use crate::state_upload::sampler_desc;
 use borg_layout::descriptor::{TexDesc, TexType};
 use borg_layout::tex_format::TexFormat;

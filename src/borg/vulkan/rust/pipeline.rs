@@ -12,7 +12,7 @@ use crate::fmt;
 use crate::device::{Device, Scratch};
 use crate::object::{allocate, Owned, Zeroed};
 use crate::format::{bytes_packed, half1, half2, packed_info};
-use crate::serial::{blend_pack, state_pack};
+use crate::wire::{blend_pack, state_pack};
 use std::ptr::{null, null_mut};
 
 handle!(VkPipeline, Pipeline, VK_OBJECT_TYPE_PIPELINE);

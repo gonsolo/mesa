@@ -9,7 +9,7 @@ use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
 use crate::sampler::Sampler;
 use crate::device::{Device, Scratch};
-use crate::serial::*;
+use crate::wire::*;
 use crate::util::{log, MESA_LOG_WARN};
 
 /// The first descriptor set a submit binds; its command buffers and their recorded commands are

@@ -11,7 +11,7 @@ use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
 use crate::image::{Image, ViewImage};
 use crate::device::Device;
-use crate::serial::{send_geom, send_mvp};
+use crate::wire::{send_geom, send_mvp};
 use crate::sim_process::sim_run_stream;
 use crate::state_upload::{find_set, sampler_desc, send_blend_state, upload_shaders};
 use crate::texture_upload::send_texture_row;
