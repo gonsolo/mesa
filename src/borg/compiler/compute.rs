@@ -710,7 +710,14 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
     cx.refusal()?;
     let mut reserved: Vec<u8> = cx.cp.preset_regs().to_vec();
     reserved.extend([30u8, 31, 12, 13, 14]);
-    let alloc = crate::fixed::allocate(&cx, &HashMap::new(), &mut reserved).ok_or(OUT_OF_REGISTERS)?;
+    // TEX writes rd..rd+3: one block for every TEX.
+    let mut forced = HashMap::new();
+    if !cx.tex_dsts.is_empty() {
+        let rd = (0..=20u8).rev().find(|&r| (r..r + 4).all(|x| !reserved.contains(&x))).ok_or(OUT_OF_REGISTERS)?;
+        forced.extend(cx.tex_dsts.iter().map(|&t| (t, rd)));
+        reserved.extend(rd + 1..rd + 4);
+    }
+    let alloc = crate::fixed::allocate(&cx, &forced, &mut reserved).ok_or(OUT_OF_REGISTERS)?;
     let enc = crate::emit::encode_program(&cx, &alloc);
     if enc.pending > 0 || enc.n_preload > 0 {
         return Err(format!("{} operand(s) without a register", enc.pending));
