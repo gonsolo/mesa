@@ -215,7 +215,7 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     let frag_opt = frag_options(formats, mrt, mrt_opt);
     // Alpha to coverage takes location 0's alpha even without a target that keeps it.
     let a2c = unsafe { ci.pMultisampleState.as_ref() }.is_some_and(|ms| ms.alphaToCoverageEnable != 0);
-    let frag_opt = if frag_opt == 0 && a2c { BORGC_FS_ALPHA_OUTPUT } else { frag_opt };
+    let frag_opt = if a2c && !mrt { frag_opt | BORGC_FS_ALPHA_OUTPUT } else { frag_opt };
     let discard = rs.is_some_and(|r| r.rasterizerDiscardEnable != 0);
     let cb = if discard { None } else { unsafe { ci.pColorBlendState.as_ref() } };
     let blend = shader_blend(cb, formats.first().copied().unwrap_or(VK_FORMAT_UNDEFINED), mrt);
