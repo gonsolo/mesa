@@ -127,7 +127,9 @@ impl Job<'_> {
     }
 }
 
-fn compute(job: &[u8], outf: &std::ffi::CStr) -> bool {
+/// The register/memory program of direct_sim --compute (simulation/direct/main.cpp), on the
+/// device, its output written to `path`.
+pub fn compute(job: &[u8], path: &std::path::Path) -> bool {
     const GPR: u32 = 0;
     const IMEM: u32 = 128;
     const CONTROL: u32 = 424;
@@ -203,22 +205,7 @@ fn compute(job: &[u8], outf: &std::ffi::CStr) -> bool {
         unsafe { borg_hw_mem_read(addr, tmp.as_mut_ptr().cast(), tmp.len() as u32) };
         out.extend_from_slice(&tmp[..size as usize]);
     }
-    let path: &std::ffi::OsStr = std::os::unix::ffi::OsStrExt::from_bytes(outf.to_bytes());
     std::fs::write(path, out).is_ok()
-}
-
-/// The register/memory program of direct_sim --compute (simulation/direct/main.cpp), on the
-/// device; 0 on success.
-///
-/// # Safety
-/// `job` holds `len` bytes; `outf` is a C string.
-pub unsafe fn borgvk_hw_compute(job: *const u8, len: usize, outf: *const std::ffi::c_char) -> i32 {
-    let job = unsafe { std::slice::from_raw_parts(job, len) };
-    if compute(job, unsafe { std::ffi::CStr::from_ptr(outf) }) {
-        0
-    } else {
-        -1
-    }
 }
 
 #[cfg(test)]

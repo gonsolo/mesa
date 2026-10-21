@@ -11,7 +11,6 @@ use crate::ffi::*;
 use crate::fmt;
 use crate::memory::{DeviceMemory, ViewBuffer};
 use crate::pipeline::Pipeline;
-use crate::hw::borgvk_hw_compute;
 use crate::util::{log, temp_file, MESA_LOG_WARN};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::{Child, Command};
@@ -218,10 +217,7 @@ fn start(direct: Option<&std::ffi::OsStr>, hdr: &[u32; HDR], job: &[u8], ran: &m
     }
     let Some(direct) = direct else {
         match &p.out {
-            Some(out) => {
-                let o = std::ffi::CString::new(out.as_str()).unwrap();
-                p.device_ok = unsafe { borgvk_hw_compute(part.as_ptr(), part.len(), o.as_ptr()) } == 0;
-            }
+            Some(out) => p.device_ok = crate::hw::compute(&part, std::path::Path::new(out)),
             None => *ran = false,
         }
         return p;
