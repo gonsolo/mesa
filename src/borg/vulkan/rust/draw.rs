@@ -840,7 +840,7 @@ fn converts(f: VkFormat) -> bool {
 fn vattr_copy(f: VkFormat, conv: bool, dst: &mut [u8], src: &Texel, asz: usize) {
     if conv {
         // sRGB: as UNORM; the 16 bytes of RGBA32
-        unsafe { util_format_unpack_rgba(fmt::linear(fmt::pipe(f)), dst[..16].as_mut_ptr().cast(), src.as_ptr().cast(), 1) };
+        fmt::unpack_rgba(fmt::linear(fmt::pipe(f)), src, <&mut [u8; 16]>::try_from(&mut dst[..16]).unwrap());
     } else {
         let n = asz.min(dst.len());
         dst[..n].copy_from_slice(&src[..n]);

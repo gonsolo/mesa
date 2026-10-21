@@ -77,24 +77,18 @@ fn slice_offset(img: &Image, b: Blocks, level: u32, layer: u32, z: Option<u32>) 
 fn copy_depth_stencil(spf: pipe_format, s: &Texel, dpf: pipe_format, d: &mut Texel, stencil: bool) {
     let (sz16, dz16) = (spf == PIPE_FORMAT_Z16_UNORM_S8_UINT, dpf == PIPE_FORMAT_Z16_UNORM_S8_UINT);
     if stencil {
-        let mut v = if sz16 { s[2] } else { 0 };
-        if !sz16 {
-            unsafe { util_format_unpack_s_8uint(spf, &mut v, s.as_ptr().cast(), 1) };
-        }
+        let v = if sz16 { s[2] } else { fmt::unpack_s(spf, s) };
         if dz16 {
             d[2] = v;
         } else {
-            unsafe { util_format_pack_s_8uint(dpf, d.as_mut_ptr().cast(), &v, 1) };
+            fmt::pack_s(dpf, d, v);
         }
     } else {
-        let mut z = if sz16 { z16_unpack([s[0], s[1]]) } else { 0.0 };
-        if !sz16 {
-            unsafe { util_format_unpack_z_float(spf, &mut z, s.as_ptr().cast(), 1) };
-        }
+        let z = if sz16 { z16_unpack([s[0], s[1]]) } else { fmt::unpack_z(spf, s) };
         if dz16 {
             d[..2].copy_from_slice(&z16_pack(z));
         } else {
-            unsafe { util_format_pack_z_float(dpf, d.as_mut_ptr().cast(), &z, 1) };
+            fmt::pack_z(dpf, d, z);
         }
     }
 }
@@ -327,16 +321,14 @@ fn read_z(pf: pipe_format, t: &Texel) -> f32 {
     if pf == PIPE_FORMAT_Z16_UNORM_S8_UINT {
         return z16_unpack([t[0], t[1]]);
     }
-    let mut z = 0.0;
-    unsafe { util_format_unpack_z_float(pf, &mut z, t.as_ptr().cast(), 1) };
-    z
+    fmt::unpack_z(pf, t)
 }
 
 fn write_z(pf: pipe_format, t: &mut Texel, z: f32) {
     if pf == PIPE_FORMAT_Z16_UNORM_S8_UINT {
         t[..2].copy_from_slice(&z16_pack(z));
     } else {
-        unsafe { util_format_pack_z_float(pf, t.as_mut_ptr().cast(), &z, 1) };
+        fmt::pack_z(pf, t, z);
     }
 }
 
@@ -430,10 +422,8 @@ fn blit(src: &Image, dst: &Image, regions: &[VkImageBlit], filter: VkFilter) {
                                 if is_uint || is_sint {
                                     // The integer bit pattern either way.
                                     let mut v = [0u32; 4];
-                                    unsafe {
-                                        util_format_unpack_rgba(spf, v.as_mut_ptr().cast(), n.as_ptr().cast(), 1);
-                                        util_format_pack_rgba(dpf, d.as_mut_ptr().cast(), v.as_ptr().cast(), 1);
-                                    }
+                                    fmt::unpack_rgba(spf, &n, &mut v);
+                                    fmt::pack_rgba(dpf, &mut d, &v);
                                 } else {
                                     let mut v = [0.0; 4];
                                     unpack_rgba_float(src.vk.format, spf, &n, &mut v);

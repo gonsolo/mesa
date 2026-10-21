@@ -242,9 +242,7 @@ fn unpack_z(pf: pipe_format, t: &Texel) -> f32 {
     if pf == PIPE_FORMAT_Z16_UNORM_S8_UINT {
         return u16::from_ne_bytes([t[0], t[1]]) as f32 / 65535.0;
     }
-    let mut z = 0.0f32;
-    unsafe { util_format_unpack_z_float(pf, &mut z, t.as_ptr().cast(), 1) };
-    z
+    fmt::unpack_z(pf, t)
 }
 
 fn pack_z(pf: pipe_format, t: &mut Texel, z: f32) {
@@ -252,16 +250,14 @@ fn pack_z(pf: pipe_format, t: &mut Texel, z: f32) {
         t[..2].copy_from_slice(&z16(z).to_ne_bytes());
         return;
     }
-    unsafe { util_format_pack_z_float(pf, t.as_mut_ptr().cast(), &z, 1) };
+    fmt::pack_z(pf, t, z);
 }
 
 fn unpack_s(pf: pipe_format, t: &Texel) -> u8 {
     if pf == PIPE_FORMAT_Z16_UNORM_S8_UINT {
         return t[2];
     }
-    let mut s = 0u8;
-    unsafe { util_format_unpack_s_8uint(pf, &mut s, t.as_ptr().cast(), 1) };
-    s
+    fmt::unpack_s(pf, t)
 }
 
 fn pack_s(pf: pipe_format, t: &mut Texel, s: u8) {
@@ -269,7 +265,7 @@ fn pack_s(pf: pipe_format, t: &mut Texel, s: u8) {
         t[2] = s;
         return;
     }
-    unsafe { util_format_pack_s_8uint(pf, t.as_mut_ptr().cast(), &s, 1) };
+    fmt::pack_s(pf, t, s);
 }
 
 /// One attachment of the pass on the host side.
@@ -369,7 +365,7 @@ fn copy_in(s: &Server, l: &Layout, rows: Range<u32>, t: &Targets, b: &mut Before
                     px_put(&m, g, l.cpx, &px);
                 } else {
                     let mut f = [0f32; 4];
-                    unsafe { util_format_unpack_rgba(c.pf, f.as_mut_ptr().cast(), src.as_ptr().cast(), 1) };
+                    fmt::unpack_rgba(c.pf, &src, &mut f);
                     m.write(g, &to565(&f).to_ne_bytes());
                 }
             }
@@ -423,7 +419,7 @@ fn copy_out(s: &Server, l: &Layout, rows: Range<u32>, t: &Targets, b: &Before) -
                     } else {
                         let v = u16::from_ne_bytes([cur[0], cur[1]]) as u32;
                         let f = [((v >> 11) & 31) as f32 / 31.0, ((v >> 5) & 63) as f32 / 63.0, (v & 31) as f32 / 31.0, 1.0];
-                        c.update(p, x, y, |d| unsafe { util_format_pack_rgba(c.pf, d.as_mut_ptr().cast(), f.as_ptr().cast(), 1) });
+                        c.update(p, x, y, |d| fmt::pack_rgba(c.pf, d, &f));
                     }
                 }
             }

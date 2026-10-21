@@ -9,7 +9,7 @@ use crate::corpus::{borgvk_corpus_log, borgvk_corpus_on, hash};
 use crate::entrypoint::entrypoint;
 use crate::ffi::*;
 use crate::fmt;
-use crate::memory::{DeviceMemory, ViewBuffer};
+use crate::memory::{DeviceMemory, Host, ViewBuffer};
 use crate::pipeline::Pipeline;
 use crate::util::{log, temp_file, MESA_LOG_WARN};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -54,8 +54,10 @@ fn mapped(mem: Option<&DeviceMemory>) -> Option<*mut u8> {
     mem.filter(|m| !m.map.is_null()).map(|m| m.map.cast())
 }
 
-fn unpack(pf: pipe_format, dst: &mut [u8], src: *const u8) {
-    unsafe { util_format_unpack_rgba(pf, dst.as_mut_ptr().cast(), src.cast(), 1) };
+/// The texel at `off` of `host` as RGBA32 in the first 16 bytes of `dst`.
+fn unpack(pf: pipe_format, dst: &mut [u8], host: &Host, off: usize) {
+    let out = <&mut [u8; 16]>::try_from(&mut dst[..16]).unwrap();
+    host.with_bytes(off, fmt::blocksize(pf) as usize, |t| fmt::unpack_rgba(pf, t, out));
 }
 
 /// The windows of the bound sets, the push constants (slot 32) and the constant pool (slot 34).
@@ -80,8 +82,9 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                 let n = (bv.range / bs as u64).min(SLOT_BYTES as u64 / 16) as u32;
                 let mut dec = vec![0u8; n.max(1) as usize * 16];
                 let src = unsafe { map.add((tb.offset + bv.offset) as usize) };
+                let Some(host) = tb.host() else { continue };
                 for t in 0..n as usize {
-                    unpack(pf, &mut dec[t * 16..], unsafe { src.add(t * bs as usize) });
+                    unpack(pf, &mut dec[t * 16..], &host, bv.offset as usize + t * bs as usize);
                 }
                 bufs.push(CsBuf { texels: src, pf, ..decoded(addr, dec, n * 16) });
                 continue;
@@ -89,6 +92,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
             if let Some(img) = img.filter(|i| buf.is_none() && bv.is_none() && i.vk.image_type == VK_IMAGE_TYPE_2D && i.vk.samples == 1) {
                 let Some(map) = mapped(img.memory()) else { continue };
                 let src = unsafe { map.add(img.offset as usize) };
+                let Some(host) = img.host() else { continue };
                 let (w, h) = (img.vk.extent.width, img.vk.extent.height);
                 if set.sampled_mask >> b & 1 != 0 {
                     // A sampled image: its width, then RGBA32 texels.
@@ -101,7 +105,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                     let mut dec = vec![0u8; (1 + n) as usize * 16];
                     dec[..4].copy_from_slice(&w.to_ne_bytes());
                     for t in 0..n as usize {
-                        unpack(pf, &mut dec[16 + t * 16..], unsafe { src.add(t * bs as usize) });
+                        unpack(pf, &mut dec[16 + t * 16..], &host, t * bs as usize);
                     }
                     bufs.push(decoded(addr, dec, (1 + n) * 16));
                     continue;
@@ -276,7 +280,8 @@ fn apply(bufs: &[CsBuf], merged: &[Vec<u8>]) {
         let orig = b.data();
         for t in 0..b.size as usize / 16 {
             if m[t * 16..t * 16 + 16] != orig[t * 16..t * 16 + 16] {
-                unsafe { util_format_pack_rgba(b.pf, b.texels.add(t * bs).cast(), m[t * 16..].as_ptr().cast(), 1) };
+                let texel = unsafe { std::slice::from_raw_parts_mut(b.texels.add(t * bs), bs) };
+                fmt::pack_rgba(b.pf, texel, <&[u8; 16]>::try_from(&m[t * 16..t * 16 + 16]).unwrap());
             }
         }
     }

@@ -98,7 +98,7 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-type', 'vk_object_base|VkPipelineShaderStageCreateInfo|VkGraphicsPipelineCreateInfo|VkPipelineColorBlendStateCreateInfo|mesa_log_level',
     '--allowlist-type', 'vk_image_view|VkExtent2D|VkExtent3D|VkResult|pipe_swizzle|util_format_type|termios',
     '--allowlist-function', 'util_format_description|util_format_get_block(size|width|height|depth)|vk_format_to_pipe_format',
-    '--allowlist-function', 'util_format_(un)?pack_(rgba|z_float|s_8uint)',
+    '--allowlist-function', 'util_format_(un)?pack_description',
     '--allowlist-function', 'borg_core_.*|borg_hw_.*|bh_.*',
     '--allowlist-function', 'mesa_log|malloc|realloc|free|tcgetattr|tcsetattr|cfmakeraw|cfsetispeed|cfsetospeed|tcdrain',
     '--allowlist-function', 'memfd_create|close|signal|sysconf',

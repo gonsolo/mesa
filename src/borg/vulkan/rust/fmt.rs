@@ -71,3 +71,75 @@ pub fn vk_has_alpha(f: VkFormat) -> bool {
 pub fn aspect_format(f: VkFormat, aspect: VkImageAspectFlags) -> VkFormat {
     unsafe { vk_format_get_aspect_format(f, aspect) }
 }
+
+fn pack(pf: pipe_format) -> Option<&'static util_format_pack_description> {
+    description(pf)?;
+    unsafe { util_format_pack_description(pf).as_ref() }
+}
+
+fn unpack(pf: pipe_format) -> Option<&'static util_format_unpack_description> {
+    description(pf)?;
+    unsafe { util_format_unpack_description(pf).as_ref() }
+}
+
+/// RGBA as 16 bytes: four floats, or integers for pure-integer formats.
+///
+/// # Safety
+/// The type is 16 bytes of plain data.
+pub unsafe trait Rgba {}
+unsafe impl Rgba for [f32; 4] {}
+unsafe impl Rgba for [u32; 4] {}
+unsafe impl Rgba for [i32; 4] {}
+unsafe impl Rgba for [u8; 16] {}
+
+// The conversions below touch one texel at the front of `t`, and do nothing when `t` is shorter
+// than a block or the format has no such conversion.
+fn fits(pf: pipe_format, n: usize) -> bool {
+    blocksize(pf) != 0 && n >= blocksize(pf) as usize
+}
+
+pub fn unpack_rgba<R: Rgba>(pf: pipe_format, t: &[u8], out: &mut R) {
+    if let Some(f) = unpack(pf).and_then(|d| d.unpack_rgba).filter(|_| fits(pf, t.len())) {
+        unsafe { f(std::ptr::from_mut(out).cast(), t.as_ptr(), 1) }
+    }
+}
+
+pub fn pack_rgba<R: Rgba>(pf: pipe_format, t: &mut [u8], v: &R) {
+    let Some(d) = pack(pf).filter(|_| fits(pf, t.len())) else { return };
+    let (dst, src) = (t.as_mut_ptr(), std::ptr::from_ref(v));
+    if is_pure_uint(pf) {
+        d.pack_rgba_uint.inspect(|f| unsafe { f(dst, 0, src.cast(), 0, 1, 1) });
+    } else if is_pure_sint(pf) {
+        d.pack_rgba_sint.inspect(|f| unsafe { f(dst, 0, src.cast(), 0, 1, 1) });
+    } else {
+        d.pack_rgba_float.inspect(|f| unsafe { f(dst, 0, src.cast(), 0, 1, 1) });
+    }
+}
+
+pub fn unpack_z(pf: pipe_format, t: &[u8]) -> f32 {
+    let mut z = 0.0;
+    if let Some(f) = unpack(pf).and_then(|d| d.unpack_z_float).filter(|_| fits(pf, t.len())) {
+        unsafe { f(&mut z, 0, t.as_ptr(), 0, 1, 1) }
+    }
+    z
+}
+
+pub fn pack_z(pf: pipe_format, t: &mut [u8], z: f32) {
+    if let Some(f) = pack(pf).and_then(|d| d.pack_z_float).filter(|_| fits(pf, t.len())) {
+        unsafe { f(t.as_mut_ptr(), 0, &z, 0, 1, 1) }
+    }
+}
+
+pub fn unpack_s(pf: pipe_format, t: &[u8]) -> u8 {
+    let mut s = 0;
+    if let Some(f) = unpack(pf).and_then(|d| d.unpack_s_8uint).filter(|_| fits(pf, t.len())) {
+        unsafe { f(&mut s, 0, t.as_ptr(), 0, 1, 1) }
+    }
+    s
+}
+
+pub fn pack_s(pf: pipe_format, t: &mut [u8], s: u8) {
+    if let Some(f) = pack(pf).and_then(|d| d.pack_s_8uint).filter(|_| fits(pf, t.len())) {
+        unsafe { f(t.as_mut_ptr(), 0, &s, 0, 1, 1) }
+    }
+}

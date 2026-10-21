@@ -15,7 +15,7 @@ pub fn unpack_rgba_float(vk: VkFormat, pf: pipe_format, texel: &Texel, out: &mut
         let t = texel[0];
         *out = [(t >> 4 & 0xF) as f32 / 15.0, (t & 0xF) as f32 / 15.0, 0.0, 1.0];
     } else {
-        unsafe { util_format_unpack_rgba(pf, out.as_mut_ptr().cast(), texel.as_ptr().cast(), 1) };
+        fmt::unpack_rgba(pf, texel, out);
     }
 }
 
@@ -24,7 +24,7 @@ pub fn pack_rgba_float(vk: VkFormat, pf: pipe_format, texel: &mut Texel, v: &[f3
         let q = |x: f32| (x.clamp(0.0, 1.0) * 15.0 + 0.5) as u8;
         texel[0] = q(v[0]) << 4 | q(v[1]);
     } else {
-        unsafe { util_format_pack_rgba(pf, texel.as_mut_ptr().cast(), v.as_ptr().cast(), 1) };
+        fmt::pack_rgba(pf, texel, v);
     }
 }
 
@@ -41,25 +41,24 @@ fn scaled_type(pf: pipe_format) -> Option<util_format_type> {
 pub fn pack_clear_color(vk: VkFormat, pf: pipe_format, pixel: &mut [u8; 16], c: &VkClearColorValue) {
     let ch = fmt::first_non_void_channel(pf);
     let wide = ch >= 0 && fmt::is_pure_integer(pf) && fmt::description(pf).is_some_and(|d| d.channel[ch as usize].size() == 64);
-    unsafe {
-        if wide {
-            let n = (fmt::blocksize(pf) as usize).min(16);
-            std::ptr::copy_nonoverlapping(c.uint32.as_ptr().cast::<u8>(), pixel.as_mut_ptr(), n);
-        } else if fmt::is_pure_uint(pf) {
-            util_format_pack_rgba(pf, pixel.as_mut_ptr().cast(), c.uint32.as_ptr().cast(), 1);
-        } else if fmt::is_pure_sint(pf) {
-            util_format_pack_rgba(pf, pixel.as_mut_ptr().cast(), c.int32.as_ptr().cast(), 1);
-        } else if scaled_type(pf) == Some(UTIL_FORMAT_TYPE_UNSIGNED) {
-            let v = c.uint32.map(|x| x as f32);
-            util_format_pack_rgba(pf, pixel.as_mut_ptr().cast(), v.as_ptr().cast(), 1);
-        } else if scaled_type(pf) == Some(UTIL_FORMAT_TYPE_SIGNED) {
-            let v = c.int32.map(|x| x as f32);
-            util_format_pack_rgba(pf, pixel.as_mut_ptr().cast(), v.as_ptr().cast(), 1);
-        } else {
-            let mut t: Texel = [0; 32];
-            pack_rgba_float(vk, pf, &mut t, &c.float32);
-            pixel.copy_from_slice(&t[..16]);
-        }
+    // Every member of the union is 16 bytes of plain data.
+    let (u, i, f) = unsafe { (c.uint32, c.int32, c.float32) };
+    if wide {
+        let n = (fmt::blocksize(pf) as usize).min(16);
+        let bytes: Vec<u8> = u.iter().flat_map(|w| w.to_ne_bytes()).collect();
+        pixel[..n].copy_from_slice(&bytes[..n]);
+    } else if fmt::is_pure_uint(pf) {
+        fmt::pack_rgba(pf, pixel, &u);
+    } else if fmt::is_pure_sint(pf) {
+        fmt::pack_rgba(pf, pixel, &i);
+    } else if scaled_type(pf) == Some(UTIL_FORMAT_TYPE_UNSIGNED) {
+        fmt::pack_rgba(pf, pixel, &u.map(|x| x as f32));
+    } else if scaled_type(pf) == Some(UTIL_FORMAT_TYPE_SIGNED) {
+        fmt::pack_rgba(pf, pixel, &i.map(|x| x as f32));
+    } else {
+        let mut t: Texel = [0; 32];
+        pack_rgba_float(vk, pf, &mut t, &f);
+        pixel.copy_from_slice(&t[..16]);
     }
 }
 
@@ -76,10 +75,10 @@ pub fn write_depth_stencil(pf: pipe_format, texel: &mut Texel, aspect: VkImageAs
         return;
     }
     if d {
-        unsafe { util_format_pack_z_float(pf, texel.as_mut_ptr().cast(), &depth, 1) };
+        fmt::pack_z(pf, texel, depth);
     }
     if s {
-        unsafe { util_format_pack_s_8uint(pf, texel.as_mut_ptr().cast(), &stencil, 1) };
+        fmt::pack_s(pf, texel, stencil);
     }
 }
 
