@@ -4,10 +4,10 @@
 //! Textures to the Borg as wire packets: whole views in the sampler's layout and format, texel
 //! buffers, and the cube's downscaled RGBA8 rows.
 
-use crate::copy::borgvk_decode_compressed_image;
+use crate::copy::decode_compressed_image;
 use crate::ffi::*;
 use crate::fmt;
-use crate::memory::{DeviceMemory, ViewBuffer};
+use crate::memory::ViewBuffer;
 use crate::sampler::Sampler;
 use crate::image::Image;
 use crate::format::{src_len, tex_convert, tex_format};
@@ -203,16 +203,10 @@ pub fn send_generic_texture(view: &vk_image_view, img: Option<&Image>, sampler: 
         return texture(view, img, sampler);
     }
     // Block-compressed: decoded first.
-    let (mut dimg, mut dmem) = (Image::default(), DeviceMemory::default());
-    let buf = unsafe { borgvk_decode_compressed_image(img, &mut dimg, &mut dmem) };
-    if buf.is_null() {
-        return false;
-    }
+    let Some(d) = decode_compressed_image(img) else { return false };
     let mut dview = *view;
-    dview.format = dimg.vk.format;
-    let ok = texture(&dview, &dimg, sampler);
-    unsafe { free(buf) };
-    ok
+    dview.format = d.img.vk.format;
+    texture(&dview, &d.img, sampler)
 }
 
 /// A texel buffer as a linear 1D texture.

@@ -266,40 +266,47 @@ entrypoint! {
     }
 }
 
-/// A block-compressed image decoded to R32G32B32A32_SFLOAT in `out`, backed by `mem`; the
-/// buffer returned is malloc'd, for the caller to free.
-///
-/// # Safety
-/// `src` is a mapped image; `out` and `mem` are valid for writes.
-pub unsafe fn borgvk_decode_compressed_image(src: *const Image, out: *mut Image, mem: *mut DeviceMemory) -> *mut c_void {
-    let s = unsafe { &*src };
+/// A block-compressed image decoded to R32G32B32A32_SFLOAT, with the memory behind it.
+pub struct Decoded {
+    pub img: Image,
+    _buf: Vec<u8>,
+}
+
+impl Drop for Decoded {
+    fn drop(&mut self) {
+        drop(unsafe { Box::from_raw(self.img.mem) });
+    }
+}
+
+/// `s` is mapped.
+pub fn decode_compressed_image(s: &Image) -> Option<Decoded> {
     let pf = fmt::pipe(s.vk.format);
     let sb = Blocks { bd: 1, ..blocks(s.vk.format) };
     let rgba = Blocks { bs: 16, bw: 1, bh: 1, bd: 1 };
     let layers = s.vk.array_layers.max(1);
-    let o = unsafe { &mut *out };
-    *o = unsafe { std::ptr::read(s) };
+    let mut o = unsafe { std::ptr::read(s) };
     o.vk.format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    let total = shape(o).layer_size(rgba) * layers as u64;
-    let buf = unsafe { calloc(1, total as _) }.cast::<u8>();
-    if buf.is_null() {
-        return std::ptr::null_mut();
-    }
+    let total = (shape(&o).layer_size(rgba) * layers as u64) as usize;
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(total).ok()?;
+    buf.resize(total, 0u8);
     let sh = s.host().unwrap();
     let shr = |e: u32, l: u32| e.checked_shr(l).unwrap_or(0).max(1);
     for layer in 0..layers {
         for l in 0..s.vk.mip_levels {
             let (w, h, d) = (shr(s.vk.extent.width, l), shr(s.vk.extent.height, l), shr(s.vk.extent.depth, l));
             let (soff, wb) = shape(s).level_offset(l, layer, sb);
-            let (doff, _) = shape(o).level_offset(l, layer, rgba);
+            let (doff, _) = shape(&o).level_offset(l, layer, rgba);
             let sslice = wb as u64 * h.div_ceil(sb.bh) as u64 * sb.bs as u64;
             let dslice = w as u64 * h as u64 * 16;
             for z in 0..d as u64 {
                 let Some(src) = sh.ptr((soff + z * sslice) as usize, sslice as usize) else { continue };
+                let at = (doff + z * dslice) as usize;
+                let Some(dst) = buf.get_mut(at..at + dslice as usize) else { continue };
                 unsafe {
                     util_format_unpack_rgba_rect(
                         pf,
-                        buf.add((doff + z * dslice) as usize).cast(),
+                        dst.as_mut_ptr().cast(),
                         w * 16,
                         src.cast(),
                         wb * sb.bs,
@@ -310,11 +317,9 @@ pub unsafe fn borgvk_decode_compressed_image(src: *const Image, out: *mut Image,
             }
         }
     }
-    let m = unsafe { &mut *mem };
-    *m = unsafe { std::mem::zeroed() };
-    (m.map, m.size) = (buf.cast(), total as usize);
-    (o.mem, o.offset) = (mem, 0);
-    buf.cast()
+    let mem = DeviceMemory { map: buf.as_mut_ptr().cast(), size: total, ..Default::default() };
+    (o.mem, o.offset) = (Box::into_raw(Box::new(mem)), 0);
+    Some(Decoded { img: o, _buf: buf })
 }
 
 fn read_z(pf: pipe_format, t: &Texel) -> f32 {
@@ -350,15 +355,12 @@ fn blit(src: &Image, dst: &Image, regions: &[VkImageBlit], filter: VkFilter) {
     if db.bw > 1 || db.bh > 1 {
         return;
     }
-    let (mut dimg, mut dmem) = (Image::default(), DeviceMemory::default());
-    let mut decoded = std::ptr::null_mut();
+    let decoded;
     let sb = blocks(src.vk.format);
     let src = if sb.bw > 1 || sb.bh > 1 {
-        decoded = unsafe { borgvk_decode_compressed_image(src, &mut dimg, &mut dmem) };
-        if decoded.is_null() {
-            return;
-        }
-        &dimg
+        let Some(d) = decode_compressed_image(src) else { return };
+        decoded = d;
+        &decoded.img
     } else {
         src
     };
@@ -454,7 +456,6 @@ fn blit(src: &Image, dst: &Image, regions: &[VkImageBlit], filter: VkFilter) {
             }
         }
     }
-    unsafe { free(decoded) };
 }
 
 entrypoint! {
