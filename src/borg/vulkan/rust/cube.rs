@@ -9,7 +9,7 @@ use crate::drm::{ioctl, SETUP, SUBMIT};
 use crate::cmd_buffer::CommandBuffer;
 use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
-use crate::image::Image;
+use crate::image::{Image, ViewImage};
 use crate::device::Device;
 use crate::serial::{send_geom, send_mvp};
 use crate::sim_process::sim_run_stream;
@@ -28,9 +28,8 @@ const MIN_FLOATS: usize = ATTR_FLOAT0 + NUM_VERTS * 4; // 304 = 1216 B
 /// The first colour attachment of the submit's command buffers.
 fn color_attachment(s: &vk_queue_submit) -> *mut Image {
     for &cb in unsafe { crate::entrypoint::slice(s.command_buffers, s.command_buffer_count) } {
-        let v = unsafe { (*cb.cast::<CommandBuffer>()).color_views[0] };
-        if let Some(v) = unsafe { v.as_ref() }.filter(|v| !v.image.is_null()) {
-            return v.image.cast();
+        if let Some(img) = unsafe { &*cb.cast::<CommandBuffer>() }.color_view(0).and_then(|v| v.image()) {
+            return std::ptr::from_ref(img).cast_mut();
         }
     }
     std::ptr::null_mut()

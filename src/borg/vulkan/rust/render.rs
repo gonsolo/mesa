@@ -10,7 +10,7 @@ use crate::copy::resolve_region;
 use crate::entrypoint::{entrypoint, pointee, slice, Handle};
 use crate::ffi::*;
 use crate::image::Image;
-use crate::image::{blocks, shape};
+use crate::image::{blocks, shape, ViewImage};
 use borg_layout::image::Blocks;
 use std::ptr::null_mut;
 
@@ -32,12 +32,10 @@ pub fn free_targets(c: &mut CommandBuffer) {
 
 /// A view of a mip level or layer above 0 renders as the single-level, single-layer image it
 /// is: a copy of the image placed at that level, kept with the command buffer.
-fn target_view(c: &mut CommandBuffer, view: *mut vk_image_view) -> *mut vk_image_view {
-    let Some(v) = (unsafe { view.as_ref() }) else { return view };
-    if v.image.is_null() || (v.base_mip_level == 0 && v.base_array_layer == 0) {
-        return view;
-    }
-    let img = unsafe { &*v.image.cast::<Image>() };
+fn target_view(c: &mut CommandBuffer, view: Option<&vk_image_view>) -> *mut vk_image_view {
+    let Some(v) = view else { return null_mut() };
+    let view = std::ptr::from_ref(v).cast_mut();
+    let Some(img) = v.image().filter(|_| v.base_mip_level != 0 || v.base_array_layer != 0) else { return view };
     if img.vk.image_type == VK_IMAGE_TYPE_3D || v.layer_count != 1 || img.mem.is_null() {
         return view;
     }
@@ -76,11 +74,11 @@ fn target_view(c: &mut CommandBuffer, view: *mut vk_image_view) -> *mut vk_image
 
 /// The depth or stencil attachment's view, cleared on load.
 fn depth_stencil(c: &mut CommandBuffer, att: *const VkRenderingAttachmentInfo, aspect: VkImageAspectFlags, layers: u32) -> *mut vk_image_view {
-    let Some(att) = (unsafe { att.as_ref() }).filter(|a| !a.imageView.is_null()) else { return null_mut() };
-    let view = att.imageView.ptr();
+    let Some(att) = (unsafe { att.as_ref() }) else { return null_mut() };
+    let view = unsafe { att.imageView.get_ref() };
     let target = target_view(c, view);
-    if att.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR {
-        clear_rect(view, aspect, &att.clearValue, c.render_area, 0, layers);
+    if let Some(v) = view.filter(|_| att.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
+        clear_rect(v, aspect, &att.clearValue, c.render_area, 0, layers);
     }
     target
 }
@@ -98,10 +96,10 @@ entrypoint! {
         let layers = c.layer_count;
         let atts = unsafe { slice(ri.pColorAttachments, c.color_attachment_count) };
         for (i, att) in atts.iter().enumerate() {
-            let view = att.imageView.ptr();
+            let view = unsafe { att.imageView.get_ref() };
             c.color_views[i] = target_view(c, view);
             c.color_resolve_views[i] = att.resolveImageView.ptr();
-            if !view.is_null() && att.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR {
+            if let Some(view) = view.filter(|_| att.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
                 clear_rect(view, VK_IMAGE_ASPECT_COLOR_BIT, &att.clearValue, c.render_area, 0, layers);
                 if i == 0 {
                     c.has_clear = true;
@@ -129,7 +127,8 @@ entrypoint! {
         let ra = c.render_area;
         let at = VkOffset3D { x: ra.offset.x, y: ra.offset.y, z: 0 };
         for i in 0..c.color_attachment_count as usize {
-            let (Some(v), Some(r)) = (unsafe { (c.color_views[i].as_ref(), c.color_resolve_views[i].as_ref()) }) else { continue };
+            let (Some(v), Some(r)) = (c.color_view(i), c.resolve_view(i)) else { continue };
+            let (Some(src), Some(dst)) = (v.image(), r.image()) else { continue };
             let region = VkImageResolve {
                 srcSubresource: layers(v, c.layer_count),
                 srcOffset: at,
@@ -137,7 +136,7 @@ entrypoint! {
                 dstOffset: at,
                 extent: VkExtent3D { width: ra.extent.width, height: ra.extent.height, depth: 1 },
             };
-            resolve_region(unsafe { &*v.image.cast() }, unsafe { &*r.image.cast() }, &region);
+            resolve_region(src, dst, &region);
         }
         c.in_rendering = false;
         c.color_attachment_count = 0;

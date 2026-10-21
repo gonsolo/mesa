@@ -7,7 +7,7 @@ use crate::cmd_buffer::CommandBuffer;
 use crate::entrypoint::{entrypoint, pointee, slice};
 use crate::ffi::*;
 use crate::fmt;
-use crate::image::{blocks, shape, Image};
+use crate::image::{blocks, shape, Image, ViewImage};
 use crate::memory::Host;
 use crate::texel::{pack_clear_color, write_depth_stencil, Texel};
 use borg_layout::image::Blocks;
@@ -83,9 +83,8 @@ entrypoint! {
 }
 
 /// Clears `rect` of the attachment `view` in `aspect`, in layers from `base_layer` on.
-pub fn clear_rect(view: *mut vk_image_view, aspect: VkImageAspectFlags, value: &VkClearValue, rect: VkRect2D, base_layer: u32, layers: u32) {
-    let Some(view) = (unsafe { view.as_ref() }) else { return };
-    let image = unsafe { &*view.image.cast::<Image>() };
+pub fn clear_rect(view: &vk_image_view, aspect: VkImageAspectFlags, value: &VkClearValue, rect: VkRect2D, base_layer: u32, layers: u32) {
+    let Some(image) = view.image() else { return };
     let Some((host, pf, b)) = mapped(image) else { return };
     let mut pixel = [0u8; 16];
     let (color, ds) = (aspect & VK_IMAGE_ASPECT_COLOR_BIT != 0, unsafe { value.depthStencil });
@@ -120,23 +119,21 @@ entrypoint! {
         }
         let rects = unsafe { slice(rects, nrects) };
         for att in unsafe { slice(atts, natt) } {
-            let clear = |view, aspect| {
-                for r in rects {
-                    clear_rect(view, aspect, &att.clearValue, r.rect, r.baseArrayLayer, r.layerCount);
-                }
-            };
-            if att.aspectMask & VK_IMAGE_ASPECT_COLOR_BIT != 0 {
-                if att.colorAttachment < c.color_attachment_count {
-                    clear(c.color_views[att.colorAttachment as usize], VK_IMAGE_ASPECT_COLOR_BIT);
+            let has = |a| att.aspectMask & a != 0;
+            if has(VK_IMAGE_ASPECT_COLOR_BIT) {
+                if let Some(view) = (att.colorAttachment < c.color_attachment_count).then(|| c.color_view(att.colorAttachment as usize)).flatten() {
+                    for r in rects {
+                        clear_rect(view, VK_IMAGE_ASPECT_COLOR_BIT, &att.clearValue, r.rect, r.baseArrayLayer, r.layerCount);
+                    }
                 }
                 continue;
             }
             for r in rects {
-                if att.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT != 0 {
-                    clear_rect(c.depth_view, VK_IMAGE_ASPECT_DEPTH_BIT, &att.clearValue, r.rect, r.baseArrayLayer, r.layerCount);
+                if let Some(view) = c.depth_view().filter(|_| has(VK_IMAGE_ASPECT_DEPTH_BIT)) {
+                    clear_rect(view, VK_IMAGE_ASPECT_DEPTH_BIT, &att.clearValue, r.rect, r.baseArrayLayer, r.layerCount);
                 }
-                if att.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT != 0 {
-                    clear_rect(c.stencil_view, VK_IMAGE_ASPECT_STENCIL_BIT, &att.clearValue, r.rect, r.baseArrayLayer, r.layerCount);
+                if let Some(view) = c.stencil_view().filter(|_| has(VK_IMAGE_ASPECT_STENCIL_BIT)) {
+                    clear_rect(view, VK_IMAGE_ASPECT_STENCIL_BIT, &att.clearValue, r.rect, r.baseArrayLayer, r.layerCount);
                 }
             }
         }

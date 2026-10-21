@@ -9,7 +9,7 @@ use crate::ffi::*;
 use crate::memory::Host;
 use crate::texel::Texel;
 use crate::fmt;
-use crate::image::Image;
+use crate::image::{Image, ViewImage};
 use crate::format::{depth_is_d32, flush_format};
 use crate::util::{ftruncate, log, mmap, MESA_LOG_INFO, MESA_LOG_WARN};
 use std::ffi::OsStr;
@@ -218,15 +218,6 @@ fn px_put(h: &Host, g: usize, cpx: u32, px: &[u8; 16]) {
 
 fn blocksize(f: VkFormat) -> u32 {
     fmt::blocksize(fmt::pipe(f))
-}
-
-fn view_image(view: *const vk_image_view) -> Option<&'static Image> {
-    let image = unsafe { view.as_ref() }?.image;
-    if image.is_null() {
-        return None;
-    }
-    // container_of
-    unsafe { (image as *const u8).sub(std::mem::offset_of!(Image, vk)).cast::<Image>().as_ref() }
 }
 
 fn image_backed(img: &Image, w: u32, h: u32) -> bool {
@@ -666,7 +657,7 @@ pub unsafe fn borgvk_sim_run_pass(
     let stream = unsafe { std::slice::from_raw_parts(stream, n) };
     let extra: Vec<&Image> = (0..nextra as usize).map(|a| unsafe { &**extra.add(a) }).collect();
     let wb = if nwb == 0 { &[][..] } else { unsafe { std::slice::from_raw_parts(wb, nwb as usize) } };
-    run_pass(stream, unsafe { color.as_ref() }, &extra, view_image(depth_view), view_image(stencil_view), wb, area);
+    run_pass(stream, unsafe { color.as_ref() }, &extra, unsafe { depth_view.as_ref() }.and_then(|v| v.image()), unsafe { stencil_view.as_ref() }.and_then(|v| v.image()), wb, area);
     VK_SUCCESS
 }
 

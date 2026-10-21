@@ -95,6 +95,23 @@ impl CommandBuffer {
     pub fn desc_set(&self) -> Option<&DescriptorSet> {
         unsafe { self.desc_set.as_ref() }
     }
+
+    // The open pass's attachments; a view of a target lives as long as the command buffer.
+    pub fn color_view(&self, i: usize) -> Option<&vk_image_view> {
+        unsafe { self.color_views[i].as_ref() }
+    }
+
+    pub fn resolve_view(&self, i: usize) -> Option<&vk_image_view> {
+        unsafe { self.color_resolve_views[i].as_ref() }
+    }
+
+    pub fn depth_view(&self) -> Option<&vk_image_view> {
+        unsafe { self.depth_view.as_ref() }
+    }
+
+    pub fn stencil_view(&self) -> Option<&vk_image_view> {
+        unsafe { self.stencil_view.as_ref() }
+    }
 }
 
 impl crate::entrypoint::Pointee for CommandBuffer {

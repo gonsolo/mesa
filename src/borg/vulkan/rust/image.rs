@@ -28,6 +28,17 @@ impl Image {
     }
 }
 
+/// The image a view was created on, which outlives the view.
+pub trait ViewImage {
+    fn image(&self) -> Option<&Image>;
+}
+
+impl ViewImage for vk_image_view {
+    fn image(&self) -> Option<&Image> {
+        unsafe { self.image.cast::<Image>().as_ref() }
+    }
+}
+
 // Numbers, a raw pointer and the runtime's image, which it zero-allocates.
 unsafe impl Zeroed for Image {}
 
