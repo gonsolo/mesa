@@ -16,6 +16,7 @@ const MARKER_GEOM: u8 = 0xAE;
 const MARKER_TEX: u8 = 0xAF;
 const MARKER_SHADER: u8 = 0xB0;
 const MARKER_SHADER_BIG: u8 = 0xC1;
+const MARKER_SHADER_HUGE: u8 = 0xC3;
 const MARKER_PUSH: u8 = 0xB2;
 const MARKER_BLEND: u8 = 0xB3;
 const MARKER_STATE: u8 = 0xB4;
@@ -34,6 +35,7 @@ const GEOM_MAX_TRIS: usize = BORGVK_GEOM_MAX_TRIS as usize;
 const GEOM_PKT_LEN: usize = 1 + 2 + GEOM_MAX_VERTS * 12 + GEOM_MAX_TRIS * 3 + GEOM_MAX_TRIS * 24 + 1;
 const TEX_DIM: usize = BORGVK_TEX_DIM as usize;
 const SHADER_SMALL: usize = 512;
+const SHADER_BIG: usize = 4096;
 const SHADER_MAX: usize = BORGVK_SHADER_BLOB_MAX as usize;
 const PUSH_MAX_WORDS: u32 = 32;
 const TEXG_CHUNK: usize = BORGVK_TEXG_CHUNK as usize;
@@ -91,9 +93,14 @@ pub fn send_shader(stage: u8, blob: &[u8]) {
         log(MESA_LOG_WARN, format!("borgvk: refusing to send shader (stage {stage}, len {len})"));
         return;
     }
-    let big = len > SHADER_SMALL;
-    let mut pkt = vec![0u8; 1 + 1 + 2 + if big { SHADER_MAX } else { SHADER_SMALL } + 1];
-    pkt[0] = if big { MARKER_SHADER_BIG } else { MARKER_SHADER };
+    // The board takes blobs up to SHADER_BIG; 0xC3 is the host's.
+    let (marker, room) = match len {
+        ..=SHADER_SMALL => (MARKER_SHADER, SHADER_SMALL),
+        ..=SHADER_BIG => (MARKER_SHADER_BIG, SHADER_BIG),
+        _ => (MARKER_SHADER_HUGE, SHADER_MAX),
+    };
+    let mut pkt = vec![0u8; 1 + 1 + 2 + room + 1];
+    pkt[0] = marker;
     pkt[1] = stage;
     pkt[2..4].copy_from_slice(&(len as u16).to_le_bytes());
     pkt[4..4 + len].copy_from_slice(blob);
@@ -413,7 +420,9 @@ mod tests {
         let p = sent(|| send_shader(1, &[7, 8, 9]));
         assert_eq!((p.len(), p[0], p[1], &p[2..7]), (517, MARKER_SHADER, 1, &[3, 0, 7, 8, 9][..]));
         let p = sent(|| send_shader(0, &[1; 600]));
-        assert_eq!((p.len(), p[0], u16::from_le_bytes([p[2], p[3]])), (1 + 1 + 2 + SHADER_MAX + 1, MARKER_SHADER_BIG, 600));
+        assert_eq!((p.len(), p[0], u16::from_le_bytes([p[2], p[3]])), (1 + 1 + 2 + SHADER_BIG + 1, MARKER_SHADER_BIG, 600));
+        let p = sent(|| send_shader(1, &[1; 5000]));
+        assert_eq!((p.len(), p[0], u16::from_le_bytes([p[2], p[3]])), (1 + 1 + 2 + SHADER_MAX + 1, MARKER_SHADER_HUGE, 5000));
         assert!(captured(|| send_shader(0, &[])).is_empty(), "an empty shader is refused");
     }
 
