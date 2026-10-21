@@ -694,10 +694,9 @@ impl ShaderState {
                     self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: res, srcs: vec![fattr_rd, fattr_rd], swz: vec![0, 0], imm: 0 });
                     return (res, 0u8);
                 }
-                let t0 = self.sel.next_vreg; self.sel.next_vreg += 1;
-                self.sel.prog.push(BorgInstr { mnem: Op::Fmul.into(), dst: t0, srcs: vec![bary[0], fattr_rd], swz: vec![0, 0], imm: 0 });
+                // The record holds a0, a1 - a0 and a2 - a0 (sout_varying): v = a0 + l1*d1 + l2*d2.
                 let t1 = self.sel.next_vreg; self.sel.next_vreg += 1;
-                self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: t1, srcs: vec![bary[1], fattr_rd, t0], swz: vec![0, 1, 0], imm: 0 });
+                self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: t1, srcs: vec![bary[1], fattr_rd, fattr_rd], swz: vec![0, 1, 0], imm: 0 });
                 let res = self.sel.next_vreg; self.sel.next_vreg += 1;
                 self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: res, srcs: vec![bary[2], fattr_rd, t1], swz: vec![0, 2, 0], imm: 0 });
                 (res, 0u8)
@@ -1079,16 +1078,23 @@ impl ShaderState {
                 if index >= 256 {
                     self.refuse(format!("SOUT index {index} does not fit a byte"));
                 }
-                self.sel.prog.push(BorgInstr {
-                    mnem: Op::Sout.into(), dst: NO_DST, srcs: vec![vd], swz: vec![0],
-                    imm: index,
-                });
-                self.outs.roots.push(vd);
+                self.sout_varying(vd, index);
                 let _ = vc;
             }
         }
         self.outs.stores.insert(loc, comps);
     }
+    /// Varying `index` of the three corners as a0, a1 - a0 and a2 - a0: the corners are lanes 0-2,
+    /// so the coarse derivatives are the differences, and a constant interpolates exactly.
+    pub(crate) fn sout_varying(&mut self, v: u32, index: u32) {
+        let dx = self.sel.op0(Op::Ddx, vec![v]);
+        let dy = self.sel.op0(Op::Ddy, vec![v]);
+        for (src, corner) in [(v, 0), (dx, 2 << 8), (dy, 3 << 8)] {
+            self.sel.prog.push(BorgInstr { mnem: Op::Sout.into(), dst: NO_DST, srcs: vec![src], swz: vec![0], imm: index | corner });
+            self.outs.roots.push(src);
+        }
+    }
+
     /// A loop runs while EXANY sees an alive lane: `go` masks one trip, a jump clears it.
     fn loop_mark(&mut self, mnem: Mnem, id: usize, (alive, go, any): (u32, u32, u32)) {
         let one = if mnem == Mnem::LoopHead { self.konst(1) } else { 0 };

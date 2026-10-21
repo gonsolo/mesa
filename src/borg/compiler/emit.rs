@@ -235,7 +235,7 @@ pub fn build_blob(
     let num_varyings: u8 = cx.sel.prog
         .iter()
         .filter(|i| i.mnem == Op::Sout)
-        .map(|i| i.imm as u8 + 1)
+        .map(|i| (i.imm & 0xFF) as u8 + 1)
         .max()
         .unwrap_or(0);
     let blob = emit_blob(words, &outputs, cx.cp.presets(),
