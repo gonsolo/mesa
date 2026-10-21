@@ -72,7 +72,9 @@ impl ShaderState {
         let is_txl = tex.op == nir_texop_txl && matches!(self.stage, Stage::Fragment | Stage::Compute);
         let is_txb = tex.op == nir_texop_txb && self.stage == Stage::Fragment;
         let is_tg4 = tex.op == nir_texop_tg4 && self.stage == Stage::Fragment;
-        if tex.op != nir_texop_tex && tex.op != nir_texop_txf && !is_txl && !is_txb && !is_tg4 {
+        // A multisampled image is an array of its sample planes: layer = array layer * 4 + sample.
+        let is_ms = tex.op == nir_texop_txf_ms;
+        if tex.op != nir_texop_tex && tex.op != nir_texop_txf && !is_txl && !is_txb && !is_tg4 && !is_ms {
             self.refuse(format!("texture op {}", tex.op));
             return;
         }
@@ -88,7 +90,7 @@ impl ShaderState {
             .map(|s| s.src.as_def().index);
         if let Some(cd) = coord {
             let (ud, uc) = resolve_vm(&self.sel.vec_map, cd, 0);
-            let is_fetch = tex.op == nir_texop_txf;
+            let is_fetch = tex.op == nir_texop_txf || is_ms;
             // A 1D coordinate has no v: a fetch reuses u, a sample takes the centre of the one row.
             let (vd, vc) = match (is_fetch, tex.coord_components) {
                 (true, 1) => (ud, uc),
@@ -98,7 +100,7 @@ impl ShaderState {
             let is_cube = tex.sampler_dim == GLSL_SAMPLER_DIM_CUBE;
             let has_w = !is_fetch && tex.coord_components >= 3 && !is_cube && self.stage == Stage::Fragment;
             let has_bias = (is_txb || tex.op == nir_texop_tex) && !is_fetch && srcs.iter().any(|s| s.src_type == nir_tex_src_bias);
-            if is_txl || has_w || has_bias {
+            if is_txl || has_w || has_bias || is_ms {
                 let ld = srcs.iter().find(|s| s.src_type == nir_tex_src_lod || s.src_type == nir_tex_src_bias).map(|s| s.src.as_def().index).unwrap_or(cd);
                 if let Some(&bits) = self.consts.get(&ld).filter(|_| is_txl || has_bias) {
                     if !self.sel.vec_map.contains_key(&ld) {
@@ -110,8 +112,27 @@ impl ShaderState {
                 self.sel.next_vreg += 1;
                 self.sel.loc.insert(wz, Loc::Fixed(30));
                 self.frag.per_pixel_fixed.insert(wz);
-                let (lv, lc) = if is_txl || has_bias { resolve_vm(&self.sel.vec_map, ld, 0) } else { (wz, 0u8) };
-                let (wv, wc) = if has_w { resolve_vm(&self.sel.vec_map, cd, 2) } else { (wz, 0u8) };
+                let (lv, lc) = if is_txl || has_bias { resolve_vm(&self.sel.vec_map, ld, 0) } else if is_ms { (self.konst(0), 0) } else { (wz, 0u8) };
+                let (wv, wc) = if has_w {
+                    resolve_vm(&self.sel.vec_map, cd, 2)
+                } else if let Some(m) = srcs.iter().find(|s| is_ms && s.src_type == nir_tex_src_ms_index) {
+                    let m = m.src.as_def().index;
+                    let layer = (tex.coord_components == 3).then(|| self.scalar_of(cd, 2));
+                    match (layer, self.scalar_const(m)) {
+                        (Some(Err(l)), Some(s)) => (self.konst(l * 4 + s), 0),
+                        (Some(l), _) => {
+                            let l = l.unwrap_or_else(|bits| (self.konst(bits), 0));
+                            let s = self.scalar_of(m, 0).unwrap_or_else(|bits| (self.konst(bits), 0));
+                            let (four, t, ls) = (self.konst(4), self.sel.fresh(), self.sel.fresh());
+                            self.sel.prog.push(BorgInstr { mnem: Op::Imul.into(), dst: t, srcs: vec![l.0, four], swz: vec![l.1, 0], imm: 0 });
+                            self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: ls, srcs: vec![t, s.0], swz: vec![0, s.1], imm: 0 });
+                            (ls, 0)
+                        }
+                        (None, _) => self.scalar_of(m, 0).unwrap_or_else(|bits| (self.konst(bits), 0)),
+                    }
+                } else {
+                    (wz, 0u8)
+                };
                 self.sel.prog.push(BorgInstr { mnem: Op::Texa.into(), dst: NO_DST, srcs: vec![wv, lv, wz], swz: vec![wc, lc, 0], imm: 0 });
             }
             let ctl = if is_tg4 {
@@ -151,6 +172,20 @@ impl ShaderState {
                 tex.def.index,
                 vec![(tex_v, 0), (tex_v, 1), (tex_v, 2), (tex_v, 3)],
             );
+        }
+    }
+
+    /// A def's constant bits, if it is a scalar constant.
+    fn scalar_const(&self, d: u32) -> Option<u32> {
+        self.consts.get(&d).copied().filter(|_| !self.sel.vec_map.contains_key(&d))
+    }
+
+    /// Component `c` of `d` as (register, component), or the constant's bits.
+    fn scalar_of(&self, d: u32, c: u8) -> Result<(u32, u8), u32> {
+        let (v, vc) = resolve_vm(&self.sel.vec_map, d, c);
+        match self.scalar_const(v) {
+            Some(bits) => Err(bits),
+            None => Ok((v, vc)),
         }
     }
 
