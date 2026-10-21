@@ -1088,7 +1088,7 @@ impl ShaderState {
                     self.tex(tex);
                 } else if let Some(lc) = instr.as_load_const() {
                     self.load_const(lc);
-                } else if let Some(u) = instr.as_undef().filter(|_| self.stage == Stage::Compute) {
+                } else if let Some(u) = instr.as_undef() {
                     self.undef(u);
                 }
             }
