@@ -9,6 +9,30 @@ use crate::opcodes::Op;
 use crate::Mnem;
 
 impl ShaderState {
+    /// The texture and sampler descriptor indices; a vertex shader's table is its attributes', so its
+    /// textures are borg_core's BORG_VTEX_SLOT copies.
+    fn tex_slot(&self, tex: &nir_tex_instr) -> u32 {
+        let t = tex.texture_index + if self.stage == Stage::Vertex { 128 + 43 } else { 0 };
+        t | tex.sampler_index << 8
+    }
+
+    /// Run-time array elements: the texture and sampler offsets added to the control word.
+    unsafe fn tex_dyn_slot(&mut self, tex: &nir_tex_instr, mut ctl: u32) -> u32 {
+        for (ty, scale) in [(nir_tex_src_texture_offset, 1u32), (nir_tex_src_sampler_offset, 256)] {
+            let Some(s) = tex.srcs_as_slice().iter().find(|s| s.src_type == ty) else { continue };
+            let (mut v, mut c) = resolve_vm(&self.sel.vec_map, s.src.as_def().index, 0);
+            if scale != 1 {
+                let (k, m) = (self.konst(scale), self.sel.fresh());
+                self.sel.prog.push(BorgInstr { mnem: Op::Imul.into(), dst: m, srcs: vec![v, k], swz: vec![c, 0], imm: 0 });
+                (v, c) = (m, 0);
+            }
+            let sum = self.sel.fresh();
+            self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: sum, srcs: vec![ctl, v], swz: vec![0, c], imm: 0 });
+            ctl = sum;
+        }
+        ctl
+    }
+
     pub unsafe fn load_const(&mut self, lc: &nir_load_const_instr) {
         let n = lc.def.num_components as usize;
         if n == 1 {
@@ -28,9 +52,6 @@ impl ShaderState {
     /// height, depth or layers and levels.
     unsafe fn tex_size(&mut self, tex: &nir_tex_instr) {
         let srcs = tex.srcs_as_slice();
-        if let Some(t) = srcs.iter().find(|s| s.src_type == nir_tex_src_texture_deref) {
-            self.tex_derefs.insert(t.src.as_def().index);
-        }
         let ld = srcs.iter().find(|s| s.src_type == nir_tex_src_lod).map(|s| s.src.as_def().index);
         let wz = self.sel.next_vreg;
         self.sel.next_vreg += 1;
@@ -49,7 +70,8 @@ impl ShaderState {
             None => (wz, 0u8),
         };
         self.sel.prog.push(BorgInstr { mnem: Op::Texa.into(), dst: NO_DST, srcs: vec![wz, lv, wz], swz: vec![0, lc, 0], imm: 0 });
-        let ctl = self.konst(3u32 << 16);
+        let ctl = self.konst(3u32 << 16 | self.tex_slot(tex));
+        let ctl = self.tex_dyn_slot(tex, ctl);
         let tex_v = self.sel.next_vreg;
         self.sel.next_vreg += 1;
         self.sel.prog.push(BorgInstr { mnem: Op::Tex.into(), dst: tex_v, srcs: vec![wz, wz, ctl], swz: vec![0, 0, 0], imm: 0 });
@@ -77,12 +99,6 @@ impl ShaderState {
         if tex.op != nir_texop_tex && tex.op != nir_texop_txf && !is_txl && !is_txb && !is_tg4 && !is_ms {
             self.refuse(format!("texture op {}", tex.op));
             return;
-        }
-        if let Some(t) = srcs.iter().find(|s| s.src_type == nir_tex_src_texture_deref) {
-            self.tex_derefs.insert(t.src.as_def().index);
-            if self.tex_derefs.len() == 2 {
-                self.refuse("more than one texture");
-            }
         }
         let coord = srcs
             .iter()
@@ -164,6 +180,7 @@ impl ShaderState {
                     })
                 }
             };
+            let off = off | self.tex_slot(tex);
             let ctl = if is_tg4 {
                 // Operation 2 (gather) of the component in bits 19:18.
                 let bits = 2u32 << 16 | (tex.component() & 3) << 18;
@@ -172,9 +189,7 @@ impl ShaderState {
                 // LOD mode 1: implicit LOD plus TEXA's bias.
                 self.konst(1u32 << 21 | off)
             } else if is_fetch || is_txl {
-                // A vertex shader's table is its attributes': the texture is borg_core's BORG_VTEX_SLOT copy.
-                let slot = if self.stage == Stage::Vertex { 128 + 43 } else { 0 };
-                self.konst(if is_txl { 2u32 << 21 | slot } else { 1u32 << 16 | slot } | off)
+                self.konst(if is_txl { 2u32 << 21 } else { 1u32 << 16 } | off)
             } else if off != 0 {
                 self.konst(off)
             } else {
@@ -194,6 +209,7 @@ impl ShaderState {
                 }
                 }
             };
+            let ctl = self.tex_dyn_slot(tex, ctl);
             let tex_v = self.sel.next_vreg;
             self.sel.next_vreg += 1;
             self.sel.prog.push(BorgInstr {
