@@ -308,7 +308,7 @@ fn properties() -> vk_properties {
     (p.maxImageDimension1D, p.maxImageDimension2D, p.maxImageDimension3D, p.maxImageDimensionCube) = (4096, 4096, 256, 4096);
     (p.maxImageArrayLayers, p.maxTexelBufferElements, p.maxUniformBufferRange, p.maxStorageBufferRange) = (256, 65536, 65536, u32::MAX);
     (p.maxPushConstantsSize, p.maxMemoryAllocationCount, p.maxSamplerAllocationCount) = (128, 4096, 4000);
-    (p.bufferImageGranularity, p.maxBoundDescriptorSets, p.maxPerStageResources) = (1, 8, 128);
+    (p.bufferImageGranularity, p.maxBoundDescriptorSets, p.maxPerStageResources) = (1, 4, 128);
     (p.maxVertexInputAttributes, p.maxVertexInputBindings, p.maxVertexInputAttributeOffset, p.maxVertexInputBindingStride) = (16, 16, 2047, 2048);
     (p.maxVertexOutputComponents, p.maxFragmentInputComponents) = (64, 64);
     (p.maxFragmentOutputAttachments, p.maxFragmentCombinedOutputResources, p.maxColorAttachments) = (4, 4, 4);
