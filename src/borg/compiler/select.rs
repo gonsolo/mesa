@@ -114,7 +114,7 @@ impl ShaderState {
                 _ => resolve_vm(&self.sel.vec_map, cd, 1),
             };
             let is_cube = tex.sampler_dim == GLSL_SAMPLER_DIM_CUBE;
-            let has_w = !is_fetch && tex.coord_components >= 3 && !is_cube && self.stage == Stage::Fragment;
+            let has_w = !is_fetch && tex.coord_components >= 3 && !is_cube;
             let has_bias = (is_txb || tex.op == nir_texop_tex) && !is_fetch && srcs.iter().any(|s| s.src_type == nir_tex_src_bias);
             // texelFetch's level and its array layer (or 3D slice) reach the unit through TEXA.
             let lod_src = srcs.iter().find(|s| s.src_type == nir_tex_src_lod).map(|s| s.src.as_def().index);
