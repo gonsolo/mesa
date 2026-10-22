@@ -175,8 +175,12 @@ pub fn compile_compute_stage(dev: &Device, sc: &mut Scratch, si: &VkPipelineShad
         }
     };
     remap_array_bindings(sc, unsafe { &*nir });
+    unsafe { borg_lower_nir_for_borgc(nir) };
+    let mut pairs = Vec::new();
+    lower_tex_slots(sc, nir, &mut pairs);
+    p.tex_npairs = pairs.len() as u8;
+    p.tex_pairs[..pairs.len()].copy_from_slice(&pairs);
     let rc = unsafe {
-        borg_lower_nir_for_borgc(nir);
         borgc_compile_compute(
             nir,
             p.cs_words.as_mut_ptr(), BORGVK_CS_WORDS_MAX, &mut p.cs_nwords,
@@ -187,7 +191,6 @@ pub fn compile_compute_stage(dev: &Device, sc: &mut Scratch, si: &VkPipelineShad
     };
     p.cs_ok = rc == 0;
     p.set_base = set_base(sc);
-    p.cs_tex = filtered_binding(unsafe { &*nir }).map_or(-1, |(s, b)| p.set_base[s as usize & 3] as i32 + b as i32);
     let what = if rc == 0 { "compiled" } else { "REFUSED" };
     log(MESA_LOG_INFO, format!("borgvk: compute shader {what} ({} words, {} presets)", p.cs_nwords, p.cs_nregs));
     unsafe { ralloc_free(nir.cast()) };

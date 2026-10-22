@@ -11,6 +11,8 @@ use crate::ffi::*;
 use crate::fmt;
 use crate::memory::{DeviceMemory, Host, ViewBuffer};
 use crate::pipeline::Pipeline;
+use crate::descriptor_set::{find_flat, DescriptorSet};
+use crate::state_upload::DEFAULT_SAMPLER;
 use crate::texture_upload::generic_texture;
 use crate::util::{log, temp_file, MESA_LOG_WARN};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -23,6 +25,8 @@ const MAX_PARTS: u32 = 64;
 const TEX_BYTES: u32 = BASE_BYTES + 36 * SLOT_BYTES;
 const TEX_DESC_BASE: u32 = 0x378 / 4;
 const SAMPLER_DESC_BASE: u32 = 0x37C / 4;
+const SAMPLERS: u32 = 64 * BORGVK_TEX_PAIRS as u32;
+const TEXELS: u32 = SAMPLERS + 16 * BORGVK_TEX_PAIRS as u32;
 const HDR: usize = 12;
 
 /// One window of the job: a buffer, a decoded image or texel buffer, the push constants or the
@@ -68,7 +72,6 @@ fn unpack(pf: pipe_format, dst: &mut [u8], host: &Host, off: usize) {
 /// The windows of the bound sets, the push constants (slot 32) and the constant pool (slot 34).
 fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
     let mut bufs = Vec::new();
-    let mut tex = None;
     for si in 0..4 {
         let Some(set) = c.cs_set(si) else { continue };
         let dyn_off = &c.cs_dyn_offs[si];
@@ -79,9 +82,6 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
             }
             let addr = BASE_BYTES + (base + b as u32) * SLOT_BYTES;
             let (buf, bv, img) = (set.buffer(b), set.buffer_view(b), set.image(b));
-            if base as i32 + b as i32 == pl.cs_tex {
-                tex = set.view(b).zip(img).and_then(|(v, i)| generic_texture(v, i)).map(|t| (t, *set.sampler(b)));
-            }
             if let Some(bv) = bv.filter(|_| buf.is_none()) {
                 // A texel buffer, decoded to RGBA32 per texel.
                 let Some(tb) = bv.buffer() else { continue };
@@ -146,17 +146,35 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
         let pool: Vec<u8> = pl.cs_pool[..pl.cs_npool as usize].iter().flat_map(|w| w.to_ne_bytes()).collect();
         bufs.push(decoded(BASE_BYTES + 34 * SLOT_BYTES, pool, pl.cs_npool * 4));
     }
-    if let Some((t, samp)) = tex.filter(|_| bufs.len() < BORGVK_CS_MAX_BUFS as usize) {
-        let offs = if t.desc.levels > 1 { t.offs } else { [0; 12] };
-        let d = t.desc.pack();
-        let words = [TEX_BYTES + 256, d[0], d[1], d[2]].into_iter().chain(offs).chain(samp);
-        let mut data: Vec<u8> = words.flat_map(|w| w.to_ne_bytes()).collect();
-        data.resize(256, 0);
-        data.extend_from_slice(&t.data);
-        let n = data.len() as u32;
-        bufs.push(decoded(TEX_BYTES, data, n));
+    if pl.tex_npairs != 0 && bufs.len() < BORGVK_CS_MAX_BUFS as usize {
+        let n = textures(c, pl);
+        let len = n.len() as u32;
+        bufs.push(decoded(TEX_BYTES, n, len));
     }
     bufs
+}
+
+/// The texture window: descriptor k at 64 k, sampler k at SAMPLERS + 16 k, then each texture's texels.
+fn textures(c: &CommandBuffer, pl: &Pipeline) -> Vec<u8> {
+    let sets: [Option<&DescriptorSet>; 4] = std::array::from_fn(|i| c.cs_set(i));
+    let mut data = vec![0u8; TEXELS as usize];
+    for (k, &[ft, fs]) in pl.tex_pairs[..pl.tex_npairs as usize].iter().enumerate() {
+        let sampler = find_flat(&sets, &pl.set_base, fs).map_or(&DEFAULT_SAMPLER, |(s, b)| s.sampler(b));
+        let tex = find_flat(&sets, &pl.set_base, ft).and_then(|(s, b)| s.view(b).zip(s.image(b)));
+        let Some(t) = tex.and_then(|(v, i)| generic_texture(v, i)) else { continue };
+        let offs = if t.desc.levels > 1 { t.offs } else { [0; 12] };
+        let d = t.desc.pack();
+        let words = [TEX_BYTES + data.len() as u32, d[0], d[1], d[2]].into_iter().chain(offs);
+        for (w, v) in words.enumerate() {
+            data[64 * k + 4 * w..][..4].copy_from_slice(&v.to_ne_bytes());
+        }
+        for (w, v) in sampler.iter().enumerate() {
+            data[(SAMPLERS + 16 * k as u32) as usize + 4 * w..][..4].copy_from_slice(&v.to_ne_bytes());
+        }
+        data.extend_from_slice(&t.data);
+        data.resize(data.len().next_multiple_of(256), 0);
+    }
+    data
 }
 
 /// Header (program size, groups, local size, presets, windows, group base), program, register
@@ -184,7 +202,7 @@ fn build_job(pl: &Pipeline, g: [u32; 3], bufs: &[CsBuf]) -> Vec<u8> {
         put(&mut job, v);
     }
     if tex {
-        for (r, v) in [(TEX_DESC_BASE, TEX_BYTES), (SAMPLER_DESC_BASE, TEX_BYTES + 64)] {
+        for (r, v) in [(TEX_DESC_BASE, TEX_BYTES), (SAMPLER_DESC_BASE, TEX_BYTES + SAMPLERS)] {
             put(&mut job, r);
             put(&mut job, v);
         }

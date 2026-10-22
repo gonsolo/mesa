@@ -50,7 +50,6 @@ pub struct Pipeline {
     pub srgb_table: bool,    // the fragment shader decodes the destination
     pub state_valid: bool,
     pub cs_ok: bool,
-    pub cs_tex: i32,         // slot of the texture the compute shader filters, or -1
     pub cs_nwords: u32,
     pub cs_nregs: u32,
     pub cs_words: [u32; BORGVK_CS_WORDS_MAX as usize],
