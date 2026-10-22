@@ -395,22 +395,42 @@ impl ShaderState {
         let pool: Vec<u32> = order.iter().map(|&k| words[k]).collect();
         const GAP: usize = 16;
         let ngroups = (pool.len() + 3) / 4;
-        let mut last: Vec<Option<usize>> = vec![None; ngroups];
+        // The exec-mask region each instruction runs in: a fetch serves only uses in its region or one
+        // nested in it, never a sibling branch whose lanes did not run it.
+        let (mut stack, mut next) = (vec![0u32], 1u32);
+        let region: Vec<Vec<u32>> = self.sel.prog.iter().map(|i| {
+            let r = stack.clone();
+            if i.mnem == Op::Expush {
+                stack.push(next);
+            } else if i.mnem == Op::Exelse {
+                *stack.last_mut().unwrap() = next;
+            } else if i.mnem == Op::Expop {
+                stack.pop();
+            }
+            next += 1;
+            r
+        }).collect();
+        let mut last: Vec<Option<(usize, usize)>> = vec![None; ngroups];   // (last use, fetch point)
         let mut events: Vec<(usize, usize)> = Vec::new();   // (before instruction, group)
         for (at, i) in self.sel.prog.iter().enumerate() {
             for s in i.srcs.iter() {
                 let Some(k) = is_pool(s, &self.sel.loc) else { continue };
                 let g = slot_of[k as usize] / 4;
-                if last[g].map_or(true, |l| at - l > GAP) {
-                    let mut p = at;
-                    loop {
-                        let Some(t) = (0..p).rev().find(|&t| self.sel.prog[t].mnem == Op::Tex) else { break };
-                        let d = self.sel.prog[t].dst;
-                        if self.sel.prog[p..].iter().any(|i| i.srcs.contains(&d)) { p = t; } else { break; }
+                let fetch = match last[g] {
+                    Some((l, f)) if at - l <= GAP && region[at].starts_with(&region[f]) => f,
+                    _ => {
+                        let mut p = at;
+                        loop {
+                            let Some(t) = (0..p).rev().find(|&t| self.sel.prog[t].mnem == Op::Tex) else { break };
+                            let d = self.sel.prog[t].dst;
+                            let used = self.sel.prog[p..].iter().any(|i| i.srcs.contains(&d));
+                            if used && region[at].starts_with(&region[t]) { p = t; } else { break; }
+                        }
+                        events.push((p, g));
+                        p
                     }
-                    events.push((p, g));
-                }
-                last[g] = Some(at);
+                };
+                last[g] = Some((at, fetch));
             }
         }
         events.sort();
