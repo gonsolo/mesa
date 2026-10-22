@@ -773,7 +773,11 @@ impl ShaderState {
         });
         let s01 = self.sel.op0(Op::Fadd, vec![es[0], es[1]]);
         let sum = self.sel.op0(Op::Fadd, vec![s01, es[2]]);
+        // One Newton step, as the raster ROM's: 1 - l1 - l2 must not dip below 0 inside the triangle.
         let r = self.sel.op0(Op::Frcp, vec![sum]);
+        let ns = self.sel.op0(Op::Fneg, vec![sum]);
+        let err = self.sel.op0(Op::Fmadd, vec![ns, r, one]);
+        let r = self.sel.op0(Op::Fmadd, vec![r, err, r]);
         es.map(|x| self.sel.op0(Op::Fmul, vec![x, r]))
     }
 
