@@ -89,28 +89,26 @@ fn bit(slot: u32) -> u32 {
 }
 
 /// The slot map of a layout's bindings and the slots of its dynamic buffers: bindings in
-/// order, each array taking as many slots as it has elements.
+/// order, each array taking as many slots as it has elements. Bindings past the slot count
+/// follow the others.
 pub fn layout_map(bindings: &[VkDescriptorSetLayoutBinding]) -> (DescMap, u64) {
-    let (mut count_of, mut dyn_of) = ([0u32; MAX], [false; MAX]);
-    for b in bindings.iter().filter(|b| (b.binding as usize) < MAX) {
-        count_of[b.binding as usize] = b.descriptorCount.max(1).min(MAX as u32);
-        dyn_of[b.binding as usize] = matches!(
-            b.descriptorType,
-            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC | VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC
-        );
-    }
+    let mut sorted: Vec<_> = bindings.iter().map(|b| {
+        let dynamic = matches!(b.descriptorType, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC | VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC);
+        (b.binding, b.descriptorCount.max(1).min(MAX as u32), dynamic)
+    }).collect();
+    sorted.sort_by_key(|b| b.0);
     let (mut m, mut dyn_mask, mut extra) = (DescMap::default(), 0u64, 0u32);
-    for b in (0..MAX as u32).filter(|&b| count_of[b as usize] != 0) {
-        let slot = b + extra;
+    for (b, count, dynamic) in sorted {
+        let slot = if b < MAX as u32 { b + extra } else { m.total as u32 };
         if slot >= MAX as u32 {
             break;
         }
-        let cnt = count_of[b as usize].min(MAX as u32 - slot);
+        let cnt = count.min(MAX as u32 - slot);
         let n = m.n as usize;
-        (m.num[n], m.slot[n], m.count[n]) = (b as u8, slot as u8, cnt as u8);
+        (m.num[n], m.slot[n], m.count[n]) = (b, slot as u8, cnt as u8);
         m.n += 1;
         m.arrays |= cnt > 1;
-        if dyn_of[b as usize] {
+        if dynamic {
             dyn_mask |= ((1u64 << cnt) - 1) << slot;
         }
         extra += cnt - 1;
@@ -356,6 +354,14 @@ mod tests {
         assert_eq!(desc_slot(&m, 1, 3), Some(6));
         assert_eq!(desc_slot(&m, 4, 1), None);
         assert_eq!(desc_slot(&m, 2, 0), None);
+    }
+
+    #[test]
+    fn large_binding_numbers_follow_the_others() {
+        let ty = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        let (m, _) = layout_map(&[binding(65534, 1, ty), binding(2, 2, ty), binding(32766, 1, ty)]);
+        assert_eq!((m.n, &m.num[..3], &m.slot[..3], m.total), (3, &[2, 32766, 65534][..], &[2, 4, 5][..], 6));
+        assert_eq!(desc_slot(&m, 65534, 0), Some(5));
     }
 
     #[test]

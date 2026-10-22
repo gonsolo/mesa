@@ -64,7 +64,7 @@ pub struct Writeback {
 #[derive(Clone, Copy, Default)]
 pub struct DescMap {
     pub n: u8,
-    pub num: [u8; BORGVK_MAX_BINDINGS as usize],
+    pub num: [u32; BORGVK_MAX_BINDINGS as usize],
     pub slot: [u8; BORGVK_MAX_BINDINGS as usize],
     pub count: [u8; BORGVK_MAX_BINDINGS as usize],
     pub total: u8,
