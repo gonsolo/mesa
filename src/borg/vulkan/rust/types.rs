@@ -29,6 +29,7 @@ pub const BORGVK_TEXG_CHUNK: u32 = 256;
 pub const BORGVK_GEOM_MAX_VERTS: u32 = 16;
 pub const BORGVK_GEOM_MAX_TRIS: u32 = 12;
 pub const BORGVK_TEX_DIM: u32 = 64;
+pub const BORGVK_TEX_PAIRS: usize = 16;
 
 #[derive(Clone, Copy)]
 pub struct ShaderBlob {

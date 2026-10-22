@@ -100,6 +100,10 @@ impl CommandBuffer {
         unsafe { self.cs_sets[i].as_ref() }
     }
 
+    pub fn gfx_set(&self, i: usize) -> Option<&DescriptorSet> {
+        unsafe { if i == 0 { self.desc_set } else { self.desc_sets[i] }.as_ref() }
+    }
+
     /// The graphics sets next to the command buffer, for as long as it is borrowed.
     pub fn split_sets(&mut self) -> ([Option<&DescriptorSet>; 4], &mut Self) {
         let sets = [self.desc_set, self.desc_sets[1], self.desc_sets[2], self.desc_sets[3]];

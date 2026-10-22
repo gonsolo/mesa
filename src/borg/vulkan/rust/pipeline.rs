@@ -37,6 +37,8 @@ pub struct Pipeline {
     pub push_stage: u8,      // bit per stage: loads push constants, no UBO
     pub set_base: [u8; 4],
     pub tex_binding: i32,    // binding of the texture the draw samples (fragment, else vertex shader)
+    pub tex_pairs: [[u8; 2]; BORGVK_TEX_PAIRS], // texture and sampler slots of both stages
+    pub tex_npairs: u8,
     pub vfetch: u32,
     pub blob: [ShaderBlob; BORGVK_SHADER_STAGE_COUNT as usize],
     pub blend_cfg: u32,
@@ -209,6 +211,7 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     for b in &mut sc.shader_blob {
         b.len = 0;
     }
+    sc.tex_pairs.clear();
     let ri = unsafe { vk_get_pipeline_rendering_create_info(ci).as_ref() };
     let formats = ri.map_or(&[][..], |ri| unsafe { slice(ri.pColorAttachmentFormats, ri.colorAttachmentCount) });
     let (mrt, mrt_opt) = mrt(formats);
@@ -229,6 +232,8 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     pl.vfetch = vfetch;
     // One texture per draw: the fragment shader's, else the vertex shader's.
     pl.tex_binding = if sc.frag_tex_binding >= 0 { sc.frag_tex_binding } else { sc.vert_tex_binding };
+    pl.tex_npairs = sc.tex_pairs.len() as u8;
+    pl.tex_pairs[..sc.tex_pairs.len()].copy_from_slice(&sc.tex_pairs);
     pl.set_base = set_base(sc);
     pl.ubo_mask = sc.stage_ubo[0] | sc.stage_ubo[1];
     pl.push_used = sc.stage_push[0] || sc.stage_push[1];

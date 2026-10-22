@@ -28,6 +28,7 @@ const MARKER_DRAW: u8 = 0xBA;
 const MARKER_PASS: u8 = 0xBB;
 const MARKER_ATT: u8 = 0xBF;
 const MARKER_TEXL: u8 = 0xC0;
+const MARKER_TEXS: u8 = 0xC4;
 const MARKER_VP: u8 = 0xC2;
 
 const GEOM_MAX_VERTS: usize = BORGVK_GEOM_MAX_VERTS as usize;
@@ -331,6 +332,15 @@ pub fn send_texture_chunk(off: u32, data: &[u8], desc_w123: &[u32; 3], sampler: 
         put_u32(&mut pkt[7 + 4 * w..], v);
     }
     pkt[35..35 + data.len()].copy_from_slice(data);
+    emit(&mut pkt);
+}
+
+/// The texture and sampler slot and the texel byte base of the texture packets that follow.
+pub fn send_texture_slot(tex: u8, sampler: u8, base: u32) {
+    let mut pkt = [0u8; 1 + 1 + 1 + 4 + 1];
+    pkt[0] = MARKER_TEXS;
+    (pkt[1], pkt[2]) = (tex, sampler);
+    put_u32(&mut pkt[3..], base);
     emit(&mut pkt);
 }
 

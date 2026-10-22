@@ -7,7 +7,7 @@
 use crate::cmd_buffer::CommandBuffer;
 use crate::corpus::{borgvk_corpus_log, borgvk_corpus_on, hash, hash_image};
 use crate::entrypoint::{entrypoint, Handle};
-use crate::descriptor_set::DescriptorSet;
+use crate::descriptor_set::{find_flat, DescriptorSet};
 use crate::ffi::*;
 use crate::fmt;
 use crate::memory::{Buffer, Host};
@@ -18,10 +18,10 @@ use crate::pipeline::Pipeline;
 use crate::format::{depth_is_d32, flush_format, raw32, vertex_fetch, Fetch};
 use crate::hw::{enabled, serves_extent};
 use crate::image::blocks;
-use crate::wire::{send_att, send_draw, send_mem, send_pass, send_target, send_vattr, Draw};
+use crate::wire::{send_att, send_draw, send_mem, send_pass, send_target, send_texture_slot, send_vattr, Draw};
 use crate::sim::{per_sample, run_pass};
 use crate::sim_process::sim_run_stream;
-use crate::state_upload::{send_blend_state_serial, upload_shaders_serial};
+use crate::state_upload::{send_blend_state_serial, upload_shaders_serial, DEFAULT_SAMPLER};
 use crate::texture_upload::{send_buffer_texture, send_generic_texture};
 use crate::transport::{borgvk_transport_capture_begin, capture_end};
 use crate::cube::set_is_cube;
@@ -749,7 +749,27 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    /// Descriptor k from the pipeline's pair k of flat slots, its texels after the previous one's.
+    fn texture_slots(&self) {
+        let pl = self.pl;
+        let sets: [Option<&DescriptorSet>; 4] = std::array::from_fn(|i| self.c.gfx_set(i));
+        let at = |flat| find_flat(&sets, &pl.set_base, flat);
+        let mut base = 0u32;
+        for (k, &[ft, fs]) in pl.tex_pairs[..pl.tex_npairs as usize].iter().enumerate() {
+            let Some((s, b)) = at(ft) else { continue };
+            let sampler = at(fs).map_or(&DEFAULT_SAMPLER, |(ss, sb)| ss.sampler(sb));
+            send_texture_slot(k as u8, k as u8, base);
+            let n = s.view(b).and_then(|v| send_generic_texture(v, s.image(b), sampler));
+            if let Some(n) = n.or_else(|| s.buffer_view(b).and_then(send_buffer_texture)) {
+                base += (n + 255) & !255;
+            }
+        }
+    }
+
     fn textures(&self) {
+        if self.pl.tex_npairs != 0 {
+            return self.texture_slots();
+        }
         let Some(set) = self.c.desc_set() else { return };
         let tb = self.pl.tex_binding;
         let mut want = -1;
@@ -768,10 +788,10 @@ impl Ctx<'_> {
             if want >= 0 && b as i32 != want {
                 continue;
             }
-            if set.view(b).is_some_and(|v| send_generic_texture(v, set.image(b), set.sampler(b))) {
+            if set.view(b).and_then(|v| send_generic_texture(v, set.image(b), set.sampler(b))).is_some() {
                 break;
             }
-            if set.buffer_view(b).is_some_and(send_buffer_texture) {
+            if set.buffer_view(b).and_then(send_buffer_texture).is_some() {
                 break;
             }
         }

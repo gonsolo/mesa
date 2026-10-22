@@ -121,6 +121,15 @@ pub fn layout_map(bindings: &[VkDescriptorSetLayoutBinding]) -> (DescMap, u64) {
     (m, dyn_mask)
 }
 
+/// The bound set holding flat slot `flat` and the slot within it.
+pub fn find_flat<'a>(sets: &[Option<&'a DescriptorSet>; 4], base: &[u8; 4], flat: u8) -> Option<(&'a DescriptorSet, usize)> {
+    (0..4).rev().find_map(|si| {
+        let s = sets[si]?;
+        let b = (flat as usize).checked_sub(base[si] as usize)?;
+        (b < BINDINGS && (s.map.n == 0 || b < s.map.total as usize)).then_some((s, b))
+    })
+}
+
 /// The slot of element `elem` of `binding`; past the end of an array the next bindings follow.
 pub fn desc_slot(m: &DescMap, binding: u32, mut elem: u32) -> Option<u32> {
     if m.n == 0 {

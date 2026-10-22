@@ -8,7 +8,7 @@ use crate::ffi::*;
 use crate::device::{Device, Scratch};
 use crate::pipeline::Pipeline;
 use crate::nir_info::*;
-use crate::nir_passes::{lower_lines, remap_array_bindings};
+use crate::nir_passes::{lower_lines, lower_tex_slots, remap_array_bindings};
 use crate::shader_cache;
 use crate::util::{log, MESA_LOG_INFO, MESA_LOG_WARN};
 use borgc_rs::{borgc_compile_compute, borgc_compile_nir, BorgcInfo};
@@ -102,6 +102,9 @@ pub fn compile_stage(dev: &Device, sc: &mut Scratch, vfetch: u32, si: &VkPipelin
         sc.vert_tex_binding = sampled_binding(n);
     }
     if vs || fs {
+        let mut pairs = std::mem::take(&mut sc.tex_pairs);
+        lower_tex_slots(sc, nir, &mut pairs);
+        sc.tex_pairs = pairs;
         sc.stage_ubo[fs as usize] = ubo_mask(n);
         sc.stage_push[fs as usize] = uses_push_constants(n);
     }
@@ -130,17 +133,20 @@ fn compile_blob(
 ) {
     let fs = slot == FRAG;
     let out_select = if fs { sc.frag_select as i32 - 1 } else { -1 };
-    let b = &mut sc.shader_blob[slot];
     let (mut len, mut info) = (0, empty_info());
-    unsafe { borgc_compile_nir(nir, b.data.as_mut_ptr(), BLOB_MAX, &mut len, vfetch, out_select, &mut info) };
+    unsafe { borgc_compile_nir(nir, sc.shader_blob[slot].data.as_mut_ptr(), BLOB_MAX, &mut len, vfetch, out_select, &mut info) };
     if len == 0 && !retry.is_null() {
         unsafe {
             borg_lower_set_vertex_remat(true);
             borg_lower_nir_for_borgc_blend(retry, blend);
             borg_lower_set_vertex_remat(false);
-            borgc_compile_nir(retry, b.data.as_mut_ptr(), BLOB_MAX, &mut len, vfetch, out_select, &mut info);
+            let mut pairs = std::mem::take(&mut sc.tex_pairs);
+            lower_tex_slots(sc, retry, &mut pairs);
+            sc.tex_pairs = pairs;
+            borgc_compile_nir(retry, sc.shader_blob[slot].data.as_mut_ptr(), BLOB_MAX, &mut len, vfetch, out_select, &mut info);
         }
     }
+    let b = &mut sc.shader_blob[slot];
     let kind = if fs { "fragment" } else { "vertex" };
     if len > 0 && len <= BLOB_MAX {
         b.len = len;

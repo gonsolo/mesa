@@ -42,6 +42,7 @@ pub struct Scratch {
     pub stage_spill: [bool; 2], // the stage spills to the region's scratch slot
     pub frag_tex_binding: i32,
     pub vert_tex_binding: i32,
+    pub tex_pairs: Vec<[u8; 2]>, // the pipeline's descriptor indices: texture and sampler flat slots
     pub frag_select: u32, // 1 + the colour output the fragment shader keeps; 0 keeps all
     pub frag_reads_pntc: bool,
     pub blend_cfg: u32,
@@ -66,6 +67,7 @@ impl Default for Scratch {
             stage_spill: [false; 2],
             frag_tex_binding: 0,
             vert_tex_binding: -1,
+            tex_pairs: Default::default(),
             frag_select: 0,
             frag_reads_pntc: false,
             blend_cfg: 0,

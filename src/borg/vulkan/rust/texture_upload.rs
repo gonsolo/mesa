@@ -212,28 +212,29 @@ pub fn generic_texture(view: &vk_image_view, img: &Image) -> Option<Texture> {
     build(&dview, &d.img)
 }
 
-pub fn send_generic_texture(view: &vk_image_view, img: Option<&Image>, sampler: &[u32; 4]) -> bool {
-    let Some(t) = img.and_then(|i| generic_texture(view, i)) else { return false };
+/// Sends the view's texels and descriptor; returns the texel bytes.
+pub fn send_generic_texture(view: &vk_image_view, img: Option<&Image>, sampler: &[u32; 4]) -> Option<u32> {
+    let t = img.and_then(|i| generic_texture(view, i))?;
     if t.desc.levels > 1 {
         send_texture_levels(&t.offs);
     }
     send(&t.data, &t.desc, sampler);
-    true
+    Some(t.data.len() as u32)
 }
 
 /// A texel buffer as a linear 1D texture.
-pub fn send_buffer_texture(bv: &vk_buffer_view) -> bool {
+pub fn send_buffer_texture(bv: &vk_buffer_view) -> Option<u32> {
     let format = match bv.format {
         VK_FORMAT_R32_UINT => TexFormat::R32_UINT,
         VK_FORMAT_R32_SFLOAT => TexFormat::R32_SFLOAT,
-        _ => return false,
+        _ => return None,
     };
-    let Some(host) = bv.buffer().and_then(|b| b.host()) else { return false };
+    let host = bv.buffer().and_then(|b| b.host())?;
     let w = (bv.range / 4) as u32;
     if w == 0 || w > 65536 {
-        return false;
+        return None;
     }
     let desc = TexDesc { width: w, height: 1, ty: TexType::D1, linear: true, depth_or_layers: 1, levels: 1, format, swizzle: [0; 4], pitch: w * 4 };
     host.with_bytes(bv.offset as usize, w as usize * 4, |src| send(src, &desc, &DEFAULT_SAMPLER));
-    true
+    Some(w * 4)
 }
