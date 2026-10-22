@@ -11,7 +11,6 @@ use crate::ffi::*;
 use crate::fmt;
 use crate::memory::{DeviceMemory, Host, ViewBuffer};
 use crate::pipeline::Pipeline;
-use crate::state_upload::sampler_desc;
 use crate::texture_upload::generic_texture;
 use crate::util::{log, temp_file, MESA_LOG_WARN};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -81,7 +80,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
             let addr = BASE_BYTES + (base + b as u32) * SLOT_BYTES;
             let (buf, bv, img) = (set.buffer(b), set.buffer_view(b), set.image(b));
             if base as i32 + b as i32 == pl.cs_tex {
-                tex = set.view(b).zip(img).and_then(|(v, i)| generic_texture(v, i)).map(|t| (t, *sampler_desc(set.sampler(b))));
+                tex = set.view(b).zip(img).and_then(|(v, i)| generic_texture(v, i)).map(|t| (t, *set.sampler(b)));
             }
             if let Some(bv) = bv.filter(|_| buf.is_none()) {
                 // A texel buffer, decoded to RGBA32 per texel.

@@ -7,7 +7,6 @@ use crate::drm::{ioctl, BLEND, PUSH, SHADER, STATE};
 use crate::entrypoint::slice;
 use crate::descriptor_set::DescriptorSet;
 use crate::ffi::*;
-use crate::sampler::Sampler;
 use crate::device::{Device, Scratch};
 use crate::wire::*;
 use crate::util::{log, MESA_LOG_WARN};
@@ -36,12 +35,7 @@ pub fn find_set(s: &vk_queue_submit) -> Option<&DescriptorSet> {
 }
 
 /// Clamp to edge in U, V and W, nearest.
-static DEFAULT_SAMPLER: [u32; 4] = [2 << 3 | 2 << 6 | 2 << 9, 0, 0, 0];
-
-/// The sampler's descriptor, the default without one.
-pub fn sampler_desc(sampler: Option<&Sampler>) -> &[u32; 4] {
-    sampler.map_or(&DEFAULT_SAMPLER, |s| &s.desc)
-}
+pub static DEFAULT_SAMPLER: [u32; 4] = [2 << 3 | 2 << 6 | 2 << 9, 0, 0, 0];
 
 fn push_range(sc: &Scratch) -> Option<(u32, &[u32])> {
     (sc.push_lo < sc.push_hi).then(|| (sc.push_lo, &sc.push_words[sc.push_lo as usize..sc.push_hi as usize]))

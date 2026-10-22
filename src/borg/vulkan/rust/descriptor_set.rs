@@ -9,6 +9,7 @@ use crate::ffi::*;
 use crate::vk::*;
 use crate::memory::Buffer;
 use crate::sampler::Sampler;
+use crate::state_upload::DEFAULT_SAMPLER;
 use crate::image::Image;
 use crate::device::Device;
 use crate::object::{allocate, Owned, Zeroed};
@@ -24,6 +25,8 @@ pub struct DescriptorSetLayout {
     pub binding_count: u32,
     pub dyn_mask: u64, // slots of *_BUFFER_DYNAMIC descriptors
     pub map: DescMap,
+    pub immutable: [[u32; 4]; BINDINGS], // sampler descriptors of the immutable-sampler slots
+    pub immutable_mask: u32,
 }
 
 #[repr(C)]
@@ -44,11 +47,12 @@ pub struct DescriptorSet {
     pub ranges: [VkDeviceSize; BINDINGS],
     pub images: [*mut Image; BINDINGS],
     pub views: [*mut vk_image_view; BINDINGS], // behind images[]: view type, format, mip/layer range, swizzle
-    pub samplers: [*mut Sampler; BINDINGS],
+    pub sampler_hw: [[u32; 4]; BINDINGS], // sampler descriptors
     pub buffer_views: [*mut vk_buffer_view; BINDINGS], // texel buffers
     pub dyn_mask: u64,      // from the layout: dynamic-offset slots
     pub storage_mask: u32,  // slots whose buffer is a storage buffer
     pub sampled_mask: u32,  // slots whose image is sampled (not storage)
+    pub immutable_mask: u32, // slots whose sampler is the layout's
     pub map: DescMap,
 }
 
@@ -68,8 +72,8 @@ impl DescriptorSet {
         unsafe { self.views[b].as_ref() }
     }
 
-    pub fn sampler(&self, b: usize) -> Option<&Sampler> {
-        unsafe { self.samplers[b].as_ref() }
+    pub fn sampler(&self, b: usize) -> &[u32; 4] {
+        &self.sampler_hw[b]
     }
 
     pub fn buffer_view(&self, b: usize) -> Option<&vk_buffer_view> {
@@ -143,6 +147,20 @@ entrypoint! {
         let l = l.ok_or_else(|| vk_error!(device, VK_ERROR_OUT_OF_HOST_MEMORY))?;
         l.binding_count = info.bindingCount;
         (l.map, l.dyn_mask) = layout_map(info.bindings());
+        for b in info.bindings() {
+            let sampler = matches!(b.descriptorType, VK_DESCRIPTOR_TYPE_SAMPLER | VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            if !sampler || b.pImmutableSamplers.is_null() {
+                continue;
+            }
+            for e in 0..b.descriptorCount {
+                let Some(s) = desc_slot(&l.map, b.binding, e) else { break };
+                let p: *mut Sampler = unsafe { *b.pImmutableSamplers.add(e as usize) }.ptr();
+                if let Some(smp) = unsafe { p.as_ref() } {
+                    l.immutable[s as usize] = smp.desc;
+                    l.immutable_mask |= bit(s);
+                }
+            }
+        }
         *out = VkDescriptorSetLayout::from_object(l);
         Ok(())
     }
@@ -223,9 +241,13 @@ entrypoint! {
         for k in 0..out.len() {
             let set = unsafe { allocate::<DescriptorSet>(|n| vk_object_zalloc(dev.vk_ptr(), null(), n, VK_OBJECT_TYPE_DESCRIPTOR_SET)) };
             let set = set.ok_or_else(|| vk_error!(dev, VK_ERROR_OUT_OF_HOST_MEMORY))?;
+            set.sampler_hw = [DEFAULT_SAMPLER; BINDINGS];
             if !i.pSetLayouts.is_null() {
                 if let Some(l) = unsafe { (*i.pSetLayouts.add(k)).get_ref() } {
-                    (set.dyn_mask, set.map) = (l.dyn_mask, l.map);
+                    (set.dyn_mask, set.map, set.immutable_mask) = (l.dyn_mask, l.map, l.immutable_mask);
+                    for b in (0..BINDINGS).filter(|&b| l.immutable_mask & bit(b as u32) != 0) {
+                        set.sampler_hw[b] = l.immutable[b];
+                    }
                 }
             }
             set.pool = pool;
@@ -255,11 +277,14 @@ fn set_bit(mask: &mut u32, slot: u32, on: bool) {
 unsafe fn copy_slot(dst: *mut DescriptorSet, d: usize, src: *const DescriptorSet, s: usize) {
     let from = unsafe { &*src };
     let v = (from.buffers[s], from.offsets[s], from.ranges[s], from.images[s], from.views[s]);
-    let (sampled, sampler, bview) = (from.sampled_mask & bit(s as u32) != 0, from.samplers[s], from.buffer_views[s]);
+    let (sampled, sampler, bview) = (from.sampled_mask & bit(s as u32) != 0, from.sampler_hw[s], from.buffer_views[s]);
     let to = unsafe { &mut *dst };
     (to.buffers[d], to.offsets[d], to.ranges[d], to.images[d], to.views[d]) = v;
     set_bit(&mut to.sampled_mask, d as u32, sampled);
-    (to.samplers[d], to.buffer_views[d]) = (sampler, bview);
+    to.buffer_views[d] = bview;
+    if to.immutable_mask & bit(d as u32) == 0 {
+        to.sampler_hw[d] = sampler;
+    }
 }
 
 unsafe fn write(w: &VkWriteDescriptorSet) {
@@ -292,8 +317,10 @@ unsafe fn write(w: &VkWriteDescriptorSet) {
         }
         let image = if w.pImageInfo.is_null() { None } else { Some(unsafe { &*w.pImageInfo.add(k) }) };
         if let Some(info) = image {
-            if matches!(ty, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER | VK_DESCRIPTOR_TYPE_SAMPLER) && !info.sampler.is_null() {
-                set.samplers[s] = info.sampler.ptr();
+            let sampler: *mut Sampler = info.sampler.ptr();
+            let typed = matches!(ty, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER | VK_DESCRIPTOR_TYPE_SAMPLER);
+            if let Some(smp) = unsafe { sampler.as_ref() }.filter(|_| typed && set.immutable_mask & bit(slot) == 0) {
+                set.sampler_hw[s] = smp.desc;
             }
             let is_image = matches!(
                 ty,

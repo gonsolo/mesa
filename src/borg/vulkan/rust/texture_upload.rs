@@ -8,11 +8,10 @@ use crate::copy::decode_compressed_image;
 use crate::ffi::*;
 use crate::fmt;
 use crate::memory::ViewBuffer;
-use crate::sampler::Sampler;
 use crate::image::Image;
 use crate::format::{src_len, tex_convert, tex_format};
 use crate::wire::*;
-use crate::state_upload::sampler_desc;
+use crate::state_upload::DEFAULT_SAMPLER;
 use borg_layout::descriptor::{TexDesc, TexType};
 use borg_layout::tex_format::TexFormat;
 use borg_layout::tile::texture_index;
@@ -20,16 +19,16 @@ use borg_layout::tile::texture_index;
 const CHUNK: u32 = BORGVK_TEXG_CHUNK;
 const DIM: u32 = BORGVK_TEX_DIM;
 
-fn send(data: &[u8], desc: &TexDesc, sampler: Option<&Sampler>) {
+fn send(data: &[u8], desc: &TexDesc, sampler: &[u32; 4]) {
     let d = desc.pack();
     for off in (0..data.len() as u32).step_by(CHUNK as usize) {
         let n = (data.len() as u32 - off).min(CHUNK);
-        send_texture_chunk(off, &data[off as usize..(off + n) as usize], d[..3].try_into().unwrap(), sampler_desc(sampler));
+        send_texture_chunk(off, &data[off as usize..(off + n) as usize], d[..3].try_into().unwrap(), sampler);
     }
 }
 
 /// One row of the cube's texture, box-filtered from the RGBA8 image down to BORGVK_TEX_DIM.
-pub fn send_texture_row(t: &Image, sampler: Option<&Sampler>, dy: i32) {
+pub fn send_texture_row(t: &Image, sampler: &[u32; 4], dy: i32) {
     let (sw, sh) = (t.vk.extent.width, t.vk.extent.height);
     let Some(host) = t.host().filter(|_| sw != 0 && sh != 0) else { return };
     let (sxs, sys) = ((sw / DIM).max(1), (sh / DIM).max(1));
@@ -51,7 +50,7 @@ pub fn send_texture_row(t: &Image, sampler: Option<&Sampler>, dy: i32) {
             row[dx as usize * 4 + c] = ((sum[c] + n / 2) / n) as u8;
         }
     }
-    send_tex_row(dy as u8, &row, sampler_desc(sampler));
+    send_tex_row(dy as u8, &row, sampler);
 }
 
 /// The view's levels and layers, converted and, unless it is one linear level, tiled.
@@ -213,7 +212,7 @@ pub fn generic_texture(view: &vk_image_view, img: &Image) -> Option<Texture> {
     build(&dview, &d.img)
 }
 
-pub fn send_generic_texture(view: &vk_image_view, img: Option<&Image>, sampler: Option<&Sampler>) -> bool {
+pub fn send_generic_texture(view: &vk_image_view, img: Option<&Image>, sampler: &[u32; 4]) -> bool {
     let Some(t) = img.and_then(|i| generic_texture(view, i)) else { return false };
     if t.desc.levels > 1 {
         send_texture_levels(&t.offs);
@@ -235,6 +234,6 @@ pub fn send_buffer_texture(bv: &vk_buffer_view) -> bool {
         return false;
     }
     let desc = TexDesc { width: w, height: 1, ty: TexType::D1, linear: true, depth_or_layers: 1, levels: 1, format, swizzle: [0; 4], pitch: w * 4 };
-    host.with_bytes(bv.offset as usize, w as usize * 4, |src| send(src, &desc, None));
+    host.with_bytes(bv.offset as usize, w as usize * 4, |src| send(src, &desc, &DEFAULT_SAMPLER));
     true
 }

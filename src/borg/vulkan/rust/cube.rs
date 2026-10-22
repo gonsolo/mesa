@@ -13,7 +13,7 @@ use crate::image::{Image, ViewImage};
 use crate::device::Device;
 use crate::wire::{send_geom, send_mvp};
 use crate::sim_process::sim_run_stream;
-use crate::state_upload::{find_set, sampler_desc, send_blend_state, upload_shaders};
+use crate::state_upload::{find_set, send_blend_state, upload_shaders};
 use crate::texture_upload::send_texture_row;
 use crate::transport::{borgvk_transport_capture_begin, capture_end};
 use crate::util::{log, MESA_LOG_INFO, MESA_LOG_WARN};
@@ -170,7 +170,7 @@ pub fn submit_cube_live(d: &Device, submit: &vk_queue_submit) -> VkResult {
                 tex_offset: t.offset,
                 tex_width: t.vk.extent.width,
                 tex_height: t.vk.extent.height,
-                sampler: *sampler_desc(set.sampler(1)),
+                sampler: *set.sampler(1),
             };
             if ioctl(d.drm_fd, SETUP, &mut s) {
                 SETUP_DONE.store(true, Ordering::Relaxed);
