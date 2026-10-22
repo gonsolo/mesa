@@ -13,7 +13,6 @@ use crate::format::{src_len, tex_convert, tex_format};
 use crate::wire::*;
 use crate::state_upload::DEFAULT_SAMPLER;
 use borg_layout::descriptor::{TexDesc, TexType};
-use borg_layout::tex_format::TexFormat;
 use borg_layout::tile::texture_index;
 
 const CHUNK: u32 = BORGVK_TEXG_CHUNK;
@@ -224,17 +223,18 @@ pub fn send_generic_texture(view: &vk_image_view, img: Option<&Image>, sampler: 
 
 /// A texel buffer as a linear 1D texture.
 pub fn send_buffer_texture(bv: &vk_buffer_view) -> Option<u32> {
-    let format = match bv.format {
-        VK_FORMAT_R32_UINT => TexFormat::R32_UINT,
-        VK_FORMAT_R32_SFLOAT => TexFormat::R32_SFLOAT,
-        _ => return None,
-    };
+    let (format, tc) = tex_format(bv.format, false)?;
     let host = bv.buffer().and_then(|b| b.host())?;
-    let w = (bv.range / 4) as u32;
+    let bs = fmt::blocksize(fmt::pipe(bv.format)) as u64;
+    let w = if bs == 0 { 0 } else { (bv.range / bs) as u32 };
     if w == 0 || w > 65536 {
         return None;
     }
-    let desc = TexDesc { width: w, height: 1, ty: TexType::D1, linear: true, depth_or_layers: 1, levels: 1, format, swizzle: [0; 4], pitch: w * 4 };
-    host.with_bytes(bv.offset as usize, w as usize * 4, |src| send(src, &desc, &DEFAULT_SAMPLER));
-    Some(w * 4)
+    let mut out = vec![0u8; (w * tc.obpp).next_multiple_of(4) as usize];
+    host.with_bytes(bv.offset as usize, src_len(&tc, w as usize), |src| tex_convert(&tc, &mut out, src, w as usize));
+    let one = tc.sch != 0 && !fmt::has_alpha(fmt::pipe(bv.format));
+    let swizzle = [0, 0, 0, if one { VK_COMPONENT_SWIZZLE_ONE } else { 0 }];
+    let desc = TexDesc { width: w, height: 1, ty: TexType::D1, linear: true, depth_or_layers: 1, levels: 1, format, swizzle, pitch: w * tc.obpp };
+    send(&out, &desc, &DEFAULT_SAMPLER);
+    Some(out.len() as u32)
 }
