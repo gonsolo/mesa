@@ -287,9 +287,11 @@ unsafe fn copy_slot(dst: *mut DescriptorSet, d: usize, src: *const DescriptorSet
     let from = unsafe { &*src };
     let v = (from.buffers[s], from.offsets[s], from.ranges[s], from.images[s], from.views[s]);
     let (sampled, sampler, bview) = (from.sampled_mask & bit(s as u32) != 0, from.sampler_hw[s], from.buffer_views[s]);
+    let storage = from.storage_mask & bit(s as u32) != 0;
     let to = unsafe { &mut *dst };
     (to.buffers[d], to.offsets[d], to.ranges[d], to.images[d], to.views[d]) = v;
     set_bit(&mut to.sampled_mask, d as u32, sampled);
+    set_bit(&mut to.storage_mask, d as u32, storage);
     to.buffer_views[d] = bview;
     if to.immutable_mask & bit(d as u32) == 0 {
         to.sampler_hw[d] = sampler;
