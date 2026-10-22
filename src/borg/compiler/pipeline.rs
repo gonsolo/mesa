@@ -3,7 +3,8 @@ use crate::fixed::{allocate, fixed_regs};
 use crate::opt::{dce, fuse_fmadd, schedule_for_pressure};
 use crate::state::{ShaderState, Stage};
 use crate::survey::{survey, Survey};
-use crate::{Flags, Loc};
+use crate::{BorgInstr, Flags, Loc};
+use std::collections::HashSet;
 use compiler::bindings::*;
 use crate::opcodes::Op;
 
@@ -118,8 +119,37 @@ impl ShaderState {
         let loc = &self.sel.loc;
         fuse_fmadd(&mut self.sel.prog, &self.out_roots, &|v| matches!(loc.get(&v), Some(Loc::Uniform(_))));
         schedule_for_pressure(&mut self.sel.prog, &self.out_roots);
+        self.copy_tex_results();
         if self.stage == Stage::Fragment {
             self.log_uniformity();
+        }
+    }
+
+    /// Every TEX writes the same register block: a result still read after the next TEX is copied
+    /// out right after its own.
+    fn copy_tex_results(&mut self) {
+        let is_tex = |i: &BorgInstr, d: &HashSet<u32>| i.mnem == Op::Tex && d.contains(&i.dst);
+        let texs: Vec<usize> = (0..self.sel.prog.len()).filter(|&i| is_tex(&self.sel.prog[i], &self.tex_dsts)).collect();
+        for w in texs.windows(2).rev() {
+            let (p, next) = (w[0], w[1]);
+            let t = self.sel.prog[p].dst;
+            let mut comps: Vec<u8> = self.sel.prog[next + 1..]
+                .iter()
+                .flat_map(|i| i.srcs.iter().zip(&i.swz).filter(|(s, _)| **s == t).map(|(_, &c)| c))
+                .collect();
+            comps.sort();
+            comps.dedup();
+            let copies: Vec<(u8, u32)> = comps.iter().map(|&c| (c, self.sel.fresh())).collect();
+            for i in &mut self.sel.prog[next + 1..] {
+                for (s, c) in i.srcs.iter_mut().zip(i.swz.iter_mut()) {
+                    if let Some(&(_, v)) = copies.iter().find(|(k, _)| *s == t && k == c) {
+                        (*s, *c) = (v, 0);
+                    }
+                }
+            }
+            for (k, &(c, v)) in copies.iter().enumerate() {
+                self.sel.prog.insert(p + 1 + k, BorgInstr { mnem: Op::Ior.into(), dst: v, srcs: vec![t, t], swz: vec![c, c], imm: 0 });
+            }
         }
     }
 
