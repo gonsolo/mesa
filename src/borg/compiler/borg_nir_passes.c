@@ -948,9 +948,10 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       const nir_lower_tex_options tex_options = { .lower_txd_cube_map = true };
       NIR_PASS(_, nir, nir_lower_tex, &tex_options);
-      NIR_PASS(_, nir, nir_shader_instructions_pass, borg_lower_cube, nir_metadata_control_flow, NULL);
-      NIR_PASS(_, nir, nir_shader_lower_instructions, borg_flog2_filter, borg_flog2_lower, NULL);
    }
+   NIR_PASS(_, nir, nir_shader_instructions_pass, borg_lower_cube, nir_metadata_control_flow, NULL);
+   if (nir->info.stage == MESA_SHADER_FRAGMENT)
+      NIR_PASS(_, nir, nir_shader_lower_instructions, borg_flog2_filter, borg_flog2_lower, NULL);
    if (nir->info.stage == MESA_SHADER_COMPUTE)
       NIR_PASS(_, nir, nir_shader_lower_instructions, borg_precise_filter, borg_precise_lower, NULL);
    NIR_PASS(_, nir, nir_lower_flrp, 32, false);
