@@ -72,6 +72,8 @@ pub(crate) enum Op {
     Sra,
     Or,
     And,
+    Csrrw,
+    Csrrs,
 }
 
 /// The operand fields of a word; an instruction encodes those it has.
@@ -91,10 +93,11 @@ pub(crate) struct Fields {
     pub imm12: u32,
     pub imm20: u32,
     pub shamtw: u32,
+    pub csr: u32,
 }
 
 impl Op {
-    pub(crate) const ALL: [Op; 66] = [
+    pub(crate) const ALL: [Op; 68] = [
         Op::Fmadd,
         Op::Tex,
         Op::Texa,
@@ -161,6 +164,8 @@ impl Op {
         Op::Sra,
         Op::Or,
         Op::And,
+        Op::Csrrw,
+        Op::Csrrs,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -231,6 +236,8 @@ impl Op {
             Op::Sra => "SRA",
             Op::Or => "OR",
             Op::And => "AND",
+            Op::Csrrw => "CSRRW",
+            Op::Csrrs => "CSRRS",
         }
     }
 
@@ -302,6 +309,8 @@ impl Op {
             Op::Sra => 0x40005033,
             Op::Or => 0x00006033,
             Op::And => 0x00007033,
+            Op::Csrrw => 0x00001073,
+            Op::Csrrs => 0x00002073,
         }
     }
 
@@ -373,6 +382,8 @@ impl Op {
             Op::Sra => 0xfe00707f,
             Op::Or => 0xfe00707f,
             Op::And => 0xfe00707f,
+            Op::Csrrw => 0x0000707f,
+            Op::Csrrs => 0x0000707f,
         }
     }
 
@@ -444,6 +455,8 @@ impl Op {
             Op::Sra => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.rs2 & 0x1f) << 20),
             Op::Or => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.rs2 & 0x1f) << 20),
             Op::And => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.rs2 & 0x1f) << 20),
+            Op::Csrrw => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.csr & 0xfff) << 20),
+            Op::Csrrs => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.csr & 0xfff) << 20),
         }
     }
 }
