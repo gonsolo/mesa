@@ -155,7 +155,7 @@ impl ShaderState {
     }
 
     pub fn assemble(&mut self) -> Option<Vec<u8>> {
-        let (forced, mut extra_reserved) = fixed_regs(self, &self.vert.pos_out, &self.frag.out);
+        let (forced, mut extra_reserved) = fixed_regs(self, &self.vert.pos_out);
         self.split_window_reads();
         let Some(alloc) = allocate(self, &forced, &mut extra_reserved) else {
             self.spill.alloc_failed = true;

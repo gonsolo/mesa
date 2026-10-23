@@ -6,7 +6,6 @@ use std::collections::HashMap;
 pub fn fixed_regs(
     cx: &ShaderState,
     pos_out: &[Option<u32>; 4],
-    frag_out: &[Option<u32>; 4],
 ) -> (HashMap<u32, u8>, Vec<u8>) {
     let is_vertex = cx.stage == Stage::Vertex;
     let mut forced: HashMap<u32, u8> = HashMap::new();
@@ -27,18 +26,13 @@ pub fn fixed_regs(
         }
         extra_reserved.extend_from_slice(cx.cp.preset_regs());
     } else {
-        for (c, v) in frag_out.iter().enumerate() {
-            if let Some(def) = v {
-                forced.insert(*def, if c == 3 { 24 } else { 26 + c as u8 });
-            }
-        }
         for &t in &cx.tex_dsts {
             forced.insert(t, 20);
         }
         for &f in &cx.fattr_dsts {
             forced.insert(f, 10);
         }
-        extra_reserved.extend_from_slice(&[4, 21, 22, 23, 25, 26, 27, 28, 29]);   // r25 is the kill flag
+        extra_reserved.extend_from_slice(&[4, 21, 22, 23, 29]);
         let reads_bary = cx.sel.prog.iter().flat_map(|i| i.srcs.iter()).any(|v| matches!(cx.sel.loc.get(v), Some(Loc::Fixed(5..=7))));
         if reads_bary {
             extra_reserved.extend_from_slice(&[5, 6, 7]);
@@ -54,16 +48,13 @@ pub fn fixed_regs(
         }
 
         extra_reserved.extend_from_slice(cx.cp.preset_regs());
-        if frag_out[3].is_some() {
-            extra_reserved.push(24);
-        }
     }
     (forced, extra_reserved)
 }
 
 pub fn allocate(cx: &ShaderState, forced: &HashMap<u32, u8>, extra_reserved: &mut Vec<u8>) -> Option<HashMap<u32, u8>> {
     let is_fragment = cx.stage == Stage::Fragment;
-    let soft: Vec<u8> = if is_fragment { vec![20, 21, 22, 23, 24, 26, 27, 28] } else { Vec::new() };
+    let soft: Vec<u8> = if is_fragment { vec![20, 21, 22, 23] } else { Vec::new() };
     let mut block_len: HashMap<u32, u8> = HashMap::new();
     for &t in &cx.tex_dsts {
         block_len.insert(t, 4);
