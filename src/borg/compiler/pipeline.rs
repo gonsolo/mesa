@@ -3,7 +3,7 @@ use crate::fixed::{allocate, fixed_regs};
 use crate::opt::{dce, fuse_fmadd, schedule_for_pressure};
 use crate::state::{ShaderState, Stage};
 use crate::survey::{survey, Survey};
-use crate::encode::CSR_ROOT;
+use crate::encode::{CSR_BARY0, CSR_FRAG_X, CSR_GROUP_ID_X, CSR_LOCAL_INDEX, CSR_ROOT, CSR_VERTEX_INDEX};
 use crate::{BorgInstr, Flags, Loc, Mnem};
 use std::collections::{HashMap, HashSet};
 use compiler::bindings::*;
@@ -112,6 +112,7 @@ impl ShaderState {
 
     pub unsafe fn optimise(&mut self) {
         self.place_const_operands();
+        self.sys_reads();
         // Before spilling, so its pressure counts; again below for the pool's and the spills' loads.
         if matches!(self.stage, Stage::Vertex | Stage::Fragment) {
             self.root_accesses();
@@ -132,6 +133,48 @@ impl ShaderState {
         if self.stage == Stage::Fragment {
             self.log_uniformity();
         }
+    }
+
+    /// The CSR that holds what v1 keeps in a role register or window word, for this stage.
+    fn sys_csr(&self, v: u32) -> Option<u32> {
+        match (self.stage, self.sel.loc.get(&v)) {
+            (Stage::Fragment, Some(&Loc::Fixed(r @ (30 | 31)))) => Some(CSR_FRAG_X + r as u32 - 30),
+            (Stage::Fragment, Some(&Loc::Fixed(29))) => Some(CSR_FRAG_X + 2),
+            (Stage::Fragment, Some(&Loc::Fixed(8))) => Some(CSR_FRAG_X + 3),
+            (Stage::Fragment, Some(&Loc::Fixed(r @ 5..=7))) => Some(CSR_BARY0 + r as u32 - 5),
+            (Stage::Vertex, Some(&Loc::Fixed(r @ (30 | 31)))) => Some(CSR_VERTEX_INDEX + r as u32 - 30),
+            (Stage::Compute, Some(&Loc::Fixed(r @ (30 | 31)))) => Some(CSR_LOCAL_INDEX + r as u32 - 30),
+            (Stage::Compute, Some(&Loc::Uniform(u @ 29..=31))) => Some(CSR_GROUP_ID_X + u as u32 - 29),
+            _ => None,
+        }
+    }
+
+    /// ISA v2 (B8 step 7): system values are read with CSRRS, once per block; the role registers
+    /// and window words they live in today are no operands any more.
+    pub(crate) fn sys_reads(&mut self) {
+        let mut cache: HashMap<u32, u32> = HashMap::new();
+        let mut out = Vec::new();
+        for mut i in std::mem::take(&mut self.sel.prog) {
+            if matches!(i.mnem, Mnem::Op(Op::Expush | Op::Exelse | Op::Expop | Op::Brz | Op::Brnz | Op::Jmp | Op::Barrier) | Mnem::Label) {
+                cache.clear();
+            }
+            for k in 0..i.srcs.len() {
+                let Some(csr) = self.sys_csr(i.srcs[k]) else { continue };
+                let v = match cache.get(&csr) {
+                    Some(&v) => v,
+                    None => {
+                        let v = self.sel.fresh();
+                        out.push(BorgInstr { mnem: Op::Csrrs.into(), dst: v, srcs: vec![], swz: vec![], imm: csr });
+                        cache.insert(csr, v);
+                        v
+                    }
+                };
+                i.srcs[k] = v;
+                i.swz[k] = 0;
+            }
+            out.push(i);
+        }
+        self.sel.prog = out;
     }
 
     /// ISA v2 (B8 step 10): a vertex or fragment shader's LOAD and STORE of word `a` from LS_BASE

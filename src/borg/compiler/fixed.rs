@@ -1,5 +1,7 @@
 use crate::regalloc::regalloc;
 use crate::state::{ShaderState, Stage};
+use crate::encode::CSR_BARY0;
+use crate::opcodes::Op;
 use crate::{Loc, NO_DST};
 use std::collections::HashMap;
 
@@ -33,7 +35,9 @@ pub fn fixed_regs(
             forced.insert(f, 10);
         }
         extra_reserved.extend_from_slice(&[4, 21, 22, 23, 29]);
-        let reads_bary = cx.sel.prog.iter().flat_map(|i| i.srcs.iter()).any(|v| matches!(cx.sel.loc.get(v), Some(Loc::Fixed(5..=7))));
+        // The barycentrics' CSRs read r5-r7 until the raster ROM keeps them elsewhere.
+        let reads_bary = cx.sel.prog.iter().flat_map(|i| i.srcs.iter()).any(|v| matches!(cx.sel.loc.get(v), Some(Loc::Fixed(5..=7))))
+            || cx.sel.prog.iter().any(|i| i.mnem == Op::Csrrs && (CSR_BARY0..CSR_BARY0 + 3).contains(&i.imm));
         if reads_bary {
             extra_reserved.extend_from_slice(&[5, 6, 7]);
         }

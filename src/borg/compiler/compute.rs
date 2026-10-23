@@ -717,6 +717,7 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
     }
     cx.select_entry(entry);
     cx.check_selected()?;
+    cx.sys_reads();
     if compact {
         cx.sink_loads();
     }
