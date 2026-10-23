@@ -528,12 +528,25 @@ impl ShaderState {
 
     /// A value a RISC-V instruction can read: a window word is copied to a register.
     pub(crate) fn rv_reg(&mut self, v: (u32, u8)) -> (u32, u8) {
+        let (code, r) = self.window_copy(v);
+        self.sel.prog.extend(code);
+        r
+    }
+
+    /// The bits of a window word in a register: + 0 by integer IADD (FMOV is an FMA and would
+    /// change a NaN-looking integer); anything else is returned as it is.
+    pub(crate) fn window_copy(&mut self, v: (u32, u8)) -> (Vec<BorgInstr>, (u32, u8)) {
         if !matches!(self.sel.loc.get(&v.0), Some(Loc::Uniform(_))) {
-            return v;
+            return (Vec::new(), v);
         }
-        let t = self.sel.fresh();
-        self.sel.prog.push(BorgInstr { mnem: Op::Fmov.into(), dst: t, srcs: vec![v.0], swz: vec![v.1], imm: 0 });
-        (t, 0)
+        // FMOV keeps every other value: the FMA changes only NaNs and -0.
+        if self.bits_of(v.0).is_some_and(|b| b != 0x8000_0000 && (b >> 23) & 0xFF != 0xFF) && v.1 == 0 {
+            let t = self.sel.fresh();
+            return (vec![BorgInstr { mnem: Op::Fmov.into(), dst: t, srcs: vec![v.0], swz: vec![v.1], imm: 0 }], (t, 0));
+        }
+        let (x0, z, t) = (self.x0(), self.sel.fresh(), self.sel.fresh());
+        (vec![BorgInstr { mnem: Op::Addi.into(), dst: z, srcs: vec![x0.0], swz: vec![0], imm: 0 },
+              BorgInstr { mnem: Op::Iadd.into(), dst: t, srcs: vec![v.0, z], swz: vec![v.1, 0], imm: 0 }], (t, 0))
     }
 
     /// x0, the zero register of ISA v2 instructions (only they may read it).

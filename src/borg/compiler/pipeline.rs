@@ -180,13 +180,8 @@ impl ShaderState {
                     let (b, o) = at.unwrap_or_else(|| {
                         let (t, u) = (self.sel.fresh(), self.sel.fresh());
                         // A window word reaches a RISC-V instruction through a register.
-                        let (x, xc) = if matches!(self.sel.loc.get(&x), Some(Loc::Uniform(_))) {
-                            let w = self.sel.fresh();
-                            out.push(BorgInstr { mnem: Op::Fmov.into(), dst: w, srcs: vec![x], swz: vec![xc], imm: 0 });
-                            (w, 0)
-                        } else {
-                            (x, xc)
-                        };
+                        let (code, (x, xc)) = self.window_copy((x, xc));
+                        out.extend(code);
                         out.push(BorgInstr { mnem: Op::Slli.into(), dst: t, srcs: vec![x], swz: vec![xc], imm: 2 });
                         out.push(BorgInstr { mnem: Op::Add.into(), dst: u, srcs: vec![t, root], swz: vec![0, 0], imm: 0 });
                         if xc == 0 {
