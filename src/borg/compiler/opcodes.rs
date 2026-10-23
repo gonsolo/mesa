@@ -140,6 +140,9 @@ pub(crate) enum Op {
     AmominuW,
     AmomaxuW,
     AmocasW,
+    Texd,
+    Texad,
+    Texs,
     Csrrw,
     Csrrs,
 }
@@ -171,7 +174,7 @@ pub(crate) struct Fields {
 }
 
 impl Op {
-    pub(crate) const ALL: [Op; 136] = [
+    pub(crate) const ALL: [Op; 139] = [
         Op::Fmadd,
         Op::Tex,
         Op::Texa,
@@ -306,6 +309,9 @@ impl Op {
         Op::AmominuW,
         Op::AmomaxuW,
         Op::AmocasW,
+        Op::Texd,
+        Op::Texad,
+        Op::Texs,
         Op::Csrrw,
         Op::Csrrs,
     ];
@@ -446,6 +452,9 @@ impl Op {
             Op::AmominuW => "AMOMINU.W",
             Op::AmomaxuW => "AMOMAXU.W",
             Op::AmocasW => "AMOCAS.W",
+            Op::Texd => "TEXD",
+            Op::Texad => "TEXAD",
+            Op::Texs => "TEXS",
             Op::Csrrw => "CSRRW",
             Op::Csrrs => "CSRRS",
         }
@@ -587,6 +596,9 @@ impl Op {
             Op::AmominuW => 0xc000202f,
             Op::AmomaxuW => 0xe000202f,
             Op::AmocasW => 0x2800202f,
+            Op::Texd => 0x0000002b,
+            Op::Texad => 0x0200002b,
+            Op::Texs => 0x0000102b,
             Op::Csrrw => 0x00001073,
             Op::Csrrs => 0x00002073,
         }
@@ -728,6 +740,9 @@ impl Op {
             Op::AmominuW => 0xf800707f,
             Op::AmomaxuW => 0xf800707f,
             Op::AmocasW => 0xf800707f,
+            Op::Texd => 0x0600707f,
+            Op::Texad => 0x06007fff,
+            Op::Texs => 0xfe007fff,
             Op::Csrrw => 0x0000707f,
             Op::Csrrs => 0x0000707f,
         }
@@ -869,6 +884,9 @@ impl Op {
             Op::AmominuW => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.rs2 & 0x1f) << 20) | ((f.aq & 0x1) << 26) | ((f.rl & 0x1) << 25),
             Op::AmomaxuW => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.rs2 & 0x1f) << 20) | ((f.aq & 0x1) << 26) | ((f.rl & 0x1) << 25),
             Op::AmocasW => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.rs2 & 0x1f) << 20) | ((f.aq & 0x1) << 26) | ((f.rl & 0x1) << 25),
+            Op::Texd => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.rs2 & 0x1f) << 20) | ((f.rs3 & 0x1f) << 27),
+            Op::Texad => ((f.rs1 & 0x1f) << 15) | ((f.rs2 & 0x1f) << 20) | ((f.rs3 & 0x1f) << 27),
+            Op::Texs => ((f.rs1 & 0x1f) << 15) | ((f.rs2 & 0x1f) << 20),
             Op::Csrrw => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.csr & 0xfff) << 20),
             Op::Csrrs => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.csr & 0xfff) << 20),
         }
