@@ -109,6 +109,8 @@ pub struct ShaderState {
     pub fattr_dsts: HashSet<u32>,
     pub zero_ctl: Option<u32>,
     pub one_vreg: Option<u32>,
+    /// How many instructions a built constant is reused for (const_immediates).
+    pub const_gap: usize,
     pub push_const_reg: HashMap<u32, u32>,
     pub const_addr_chain: Option<(i32, u32)>,
     /// Why the shader is refused: the first reason, reported when the phase ends.
@@ -183,6 +185,7 @@ impl ShaderState {
             fattr_dsts: Default::default(),
             zero_ctl: Default::default(),
             one_vreg: Default::default(),
+            const_gap: 16,
             push_const_reg: Default::default(),
             const_addr_chain: Default::default(),
             refused: None,

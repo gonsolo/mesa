@@ -119,6 +119,7 @@ impl ShaderState {
         if matches!(self.stage, Stage::Vertex | Stage::Fragment) {
             self.root_accesses();
         }
+        self.const_immediates();
         if let Some(limit) = self.spill.limit {
             dce(&mut self.sel.prog, &self.out_roots);
             self.spill_to_pressure(limit);
@@ -129,6 +130,8 @@ impl ShaderState {
             self.root_accesses();
         }
         self.tex_addresses();
+        dce(&mut self.sel.prog, &self.out_roots);
+        self.const_immediates();
         let loc = &self.sel.loc;
         fuse_fmadd(&mut self.sel.prog, &self.out_roots, &|v| matches!(loc.get(&v), Some(Loc::Uniform(_))));
         schedule_for_pressure(&mut self.sel.prog, &self.out_roots);
@@ -136,6 +139,55 @@ impl ShaderState {
         if self.stage == Stage::Fragment {
             self.log_uniformity();
         }
+    }
+
+    /// `bits` in a register: ADDI, LUI, or LUI and ADDI.
+    pub(crate) fn materialize(&mut self, out: &mut Vec<BorgInstr>, bits: u32) -> u32 {
+        let (hi, lo) = (bits.wrapping_add(0x800) >> 12 & 0xF_FFFF, bits & 0xFFF);
+        let u = if hi == 0 { self.x0().0 } else {
+            let u = self.sel.fresh();
+            out.push(BorgInstr { mnem: Op::Lui.into(), dst: u, srcs: vec![], swz: vec![], imm: hi });
+            u
+        };
+        if lo == 0 && hi != 0 {
+            return u;
+        }
+        let d = self.sel.fresh();
+        out.push(BorgInstr { mnem: Op::Addi.into(), dst: d, srcs: vec![u], swz: vec![0], imm: lo });
+        d
+    }
+
+    /// ISA v2 (B8 step 9): a draw shader's constant operands by immediates, built near each use and
+    /// reused for `const_gap` instructions within a block (compute: pool_consts). A TEX's control
+    /// word stays for tex_addresses.
+    pub(crate) fn const_immediates(&mut self) {
+        if self.stage == Stage::Compute {
+            return;
+        }
+        let (mut near, mut built): (HashMap<u32, (u32, usize)>, usize) = (HashMap::new(), 0);
+        let mut out = Vec::with_capacity(self.sel.prog.len());
+        for (n, mut i) in std::mem::take(&mut self.sel.prog).into_iter().enumerate() {
+            if matches!(i.mnem, Mnem::Op(Op::Expush | Op::Exelse | Op::Expop | Op::Brz | Op::Brnz | Op::Bne | Op::Beq | Op::Jmp | Op::Barrier) | Mnem::Label) {
+                near.clear();
+            }
+            for k in 0..i.srcs.len() {
+                if k == 2 && i.mnem == Op::Tex {
+                    continue;
+                }
+                let Some(bits) = self.bits_of(i.srcs[k]) else { continue };
+                let v = match near.get(&bits) {
+                    Some(&(v, last)) if n - last <= self.const_gap => v,
+                    _ => self.materialize(&mut out, bits),
+                };
+                near.insert(bits, (v, n));
+                (i.srcs[k], i.swz[k]) = (v, 0);
+                built += 1;
+            }
+            out.push(i);
+        }
+        debug!("borgc: {built} constant operand(s) by immediates");
+        self.sel.prog = out;
+        self.prune_window();
     }
 
     /// `rd = rs + k` without a new constant: ADDI, or LUI and ADDI and ADD.

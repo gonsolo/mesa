@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT
 
 use crate::state::{Selector, ShaderState, Stage};
-use crate::compute::{POOL_BASE_WORDS, POOL_MAX as CS_POOL_MAX};
 use crate::{BorgInstr, Loc};
 use std::collections::{HashMap, HashSet};
 use crate::opcodes::Op;
@@ -263,12 +262,10 @@ impl ShaderState {
         v
     }
 
-    /// The `cap` most used constants become preset registers; the rest are loaded from the pool
-    /// near each use (a load is reused for 16 instructions), each load a word of its own, so the
-    /// pointer only steps forward. A load inside an `if` moves before its outermost EXPUSH: a
-    /// masked step would leave the inactive lanes' pointer behind. With `hoist` off a load stays
-    /// in place: after a mask change the pointer restarts from the one valid at the region's entry
-    /// and steps over the words the branch used.
+    /// The `cap` most used constants become preset registers; the rest are built by immediates near
+    /// each use and reused for 16 instructions. One inside an `if` moves before its outermost
+    /// EXPUSH, so the later uses find it in every lane; with `hoist` off it stays in place and a
+    /// mask change forgets it.
     pub(crate) fn pool_consts(&mut self, cap: usize, hoist: bool) -> Result<(), String> {
         let mut uses: HashMap<u32, usize> = HashMap::new();
         for i in &self.sel.prog {
@@ -280,53 +277,33 @@ impl ShaderState {
         }
         let mut ks: Vec<(u32, u32)> = uses.keys().map(|&v| (v, self.cs.kval[&v])).collect();
         ks.sort_by_key(|&(v, b)| (std::cmp::Reverse(uses[&v]), b));
-        let free = self.cp.free_regs();
-        // The pool base, one, and a pointer to restart from after each barrier, loop head and loop.
-        let ptrs = 2 + self.sel.prog.iter().filter(|i| matches!(i.mnem, Mnem::Op(Op::Barrier) | Mnem::Label | Mnem::Op(Op::Brnz))).count();
-        let pooled_n = if ks.len() <= free.min(cap) { 0 } else { ks.len() - free.saturating_sub(ptrs).min(cap) };
-        let (keep, pooled) = ks.split_at(ks.len() - pooled_n);
+        let (keep, built) = ks.split_at(ks.len().min(self.cp.free_regs().min(cap)));
         for &(v, bits) in keep {
             let r = self.preset(bits);
             self.sel.loc.insert(v, Loc::Fixed(r));
         }
-        if pooled.is_empty() {
+        if built.is_empty() {
             return Ok(());
         }
-        if free < ptrs {
-            return Err(format!("{} constants do not fit {free} registers", ks.len()));
-        }
-        let rb = self.preset(4 * POOL_BASE_WORDS);
-        let base = self.fixed(rb);
-        let r1 = self.preset(4);
-        let one = self.fixed(r1);
-        let pooled: HashMap<u32, u32> = pooled.iter().copied().collect();
+        let built: HashMap<u32, u32> = built.iter().copied().collect();
         const GAP: usize = 16;
-        let mut loaded: HashMap<u32, (u32, usize)> = HashMap::new();
-        // A pointer valid in the active lanes and the pool word it points at.
-        let mut ptr = (base, 0usize);
-        let mut frames: Vec<((u32, usize), HashMap<u32, (u32, usize)>)> = vec![];
+        let mut near: HashMap<u32, (u32, usize)> = HashMap::new();
+        let mut frames: Vec<HashMap<u32, (u32, usize)>> = vec![];
         let (mut depth, mut anchor) = (0usize, 0usize);
         let mut out: Vec<BorgInstr> = Vec::with_capacity(self.sel.prog.len());
         for (n, mut ins) in std::mem::take(&mut self.sel.prog).into_iter().enumerate() {
             for s in ins.srcs.iter_mut() {
-                let Some(&bits) = pooled.get(s) else { continue };
-                if loaded.get(s).map_or(true, |&(_, last)| n - last > GAP) {
+                let Some(&bits) = built.get(s) else { continue };
+                if near.get(s).map_or(true, |&(_, last)| n - last > GAP) {
+                    let mut code = Vec::new();
+                    let v = self.materialize(&mut code, bits);
                     let hoisted = hoist && depth > 0;
-                    while ptr.1 < self.cs.pool.len() {
-                        let p = self.sel.fresh();
-                        let at = if hoisted { anchor } else { out.len() };
-                        out.insert(at, BorgInstr { mnem: Op::Iadd.into(), dst: p, srcs: vec![ptr.0, one], swz: vec![0, 0], imm: 0 });
-                        anchor += hoisted as usize;
-                        ptr = (p, ptr.1 + 1);
-                    }
-                    let at = if hoisted { anchor } else { out.len() };
-                    let v = self.sel.fresh();
-                    out.insert(at, BorgInstr { mnem: Op::Lw.into(), dst: v, srcs: vec![ptr.0], swz: vec![0], imm: 0 });
-                    anchor += hoisted as usize;
-                    self.cs.pool.push(bits);
-                    loaded.insert(*s, (v, n));
+                    let (at, k) = (if hoisted { anchor } else { out.len() }, code.len());
+                    out.splice(at..at, code);
+                    anchor += if hoisted { k } else { 0 };
+                    near.insert(*s, (v, n));
                 }
-                let e = loaded.get_mut(s).unwrap();
+                let e = near.get_mut(s).unwrap();
                 e.1 = n;
                 *s = e.0;
             }
@@ -337,21 +314,16 @@ impl ShaderState {
                     }
                     depth += 1;
                     if !hoist {
-                        frames.push((ptr, loaded.clone()));
+                        frames.push(near.clone());
                     }
                 }
-                // Registers do not survive the other quads' turns, a pointer stepped in a loop
-                // differs between trips, and one stepped under its mask between lanes.
-                Mnem::Op(Op::Barrier) | Mnem::Label | Mnem::Op(Op::Brnz) => {
-                    let r = self.preset(4 * (POOL_BASE_WORDS + self.cs.pool.len() as u32));
-                    ptr = (self.fixed(r), self.cs.pool.len());
-                    loaded.clear();
-                }
-                Mnem::Op(Op::Exelse) if !hoist => (ptr, loaded) = frames.last().cloned().unwrap_or((ptr, loaded)),
+                // Registers do not survive the other quads' turns, nor a loop's back edge.
+                Mnem::Op(Op::Barrier | Op::Brz | Op::Brnz | Op::Bne | Op::Beq | Op::Jmp) | Mnem::Label => near.clear(),
+                Mnem::Op(Op::Exelse) if !hoist => near = frames.last().cloned().unwrap_or(near),
                 Mnem::Op(Op::Expop) => {
                     depth = depth.saturating_sub(1);
                     if let Some(f) = frames.pop() {
-                        (ptr, loaded) = f;
+                        near = f;
                     }
                 }
                 _ => {}
@@ -359,10 +331,6 @@ impl ShaderState {
             out.push(ins);
         }
         self.sel.prog = out;
-        if self.cs.pool.len() > CS_POOL_MAX {
-            return Err(format!("a constant pool of {} words ({CS_POOL_MAX} fit)", self.cs.pool.len()));
-        }
-        debug!("borgc[compute]: constant pool of {} word(s)", self.cs.pool.len());
         Ok(())
     }
 
@@ -498,6 +466,26 @@ impl ShaderState {
                         (*s, *sc) = (v, c);
                     }
                 }
+            }
+        }
+    }
+
+    /// Drops the window words no instruction reads and renumbers the rest.
+    pub fn prune_window(&mut self) {
+        let used: HashSet<u32> = self.sel.prog.iter().flat_map(|i| i.srcs.iter().copied()).collect();
+        let base = self.win.base;
+        let mut renum: HashMap<u8, u8> = HashMap::new();
+        for (u, b) in std::mem::take(&mut self.win.words) {
+            if self.win.vregs.get(&b).is_some_and(|v| used.contains(v)) {
+                renum.insert(u, base + self.win.words.len() as u8);
+                self.win.words.push((renum[&u], b));
+            } else {
+                self.win.vregs.remove(&b);
+            }
+        }
+        for m in self.sel.loc.values_mut() {
+            if let Loc::Uniform(u) = m {
+                *u = renum.get(u).copied().unwrap_or(*u);
             }
         }
     }
