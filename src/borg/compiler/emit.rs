@@ -117,15 +117,20 @@ impl Emitter<'_> {
             }
         }
         // RISC-V forms with an immediate: no window operand, and r0 is x0 there.
-        if let Mnem::Op(op @ (Op::Lw | Op::Sw | Op::Slli | Op::Csrrs)) = i.mnem {
-            let base = op != Op::Csrrs && r[0] == 0;
+        if let Mnem::Op(op @ (Op::Lw | Op::Sw | Op::Slli | Op::Srli | Op::Srai | Op::Addi | Op::Csrrs)) = i.mnem {
+            let base = matches!(op, Op::Lw | Op::Sw) && r[0] == 0;
             if f3 != 0 || base || (op == Op::Sw && r[1] == 0) || (op != Op::Sw && rd == 0) {
                 self.pending += 1;
             }
             self.push(encode_imm(op, rd, r[0], r[1], i.imm));
             return;
         }
-        self.push(encode(i.mnem, rd, r[0], r[1], r[2], f3));
+        let w = encode(i.mnem, rd, r[0], r[1], r[2], f3);
+        // A RISC-V form reads no window word.
+        if w.is_some_and(|w| !matches!(w & 0x7F, 0 | 4)) && f3 != 0 {
+            self.pending += 1;
+        }
+        self.push(w);
     }
 }
 

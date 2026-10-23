@@ -309,6 +309,8 @@ impl ShaderState {
             nir_op_bcsel => self.bcsel(alu),
             // max/min of integers: a + (a < b) * (b - a) for max, b + (a < b) * (a - b) for min.
             nir_op_umax | nir_op_umin | nir_op_imax | nir_op_imin => self.int_minmax(alu),
+            nir_op_bit_count | nir_op_ufind_msb | nir_op_ifind_msb | nir_op_find_lsb | nir_op_umul_high
+            | nir_op_imul_high => self.bit_op(alu),
             // |x|: clear the sign bit.
             nir_op_fabs => {
                 let sl = &alu.srcs_as_slice()[0];
@@ -524,20 +526,77 @@ impl ShaderState {
         }
     }
 
-    /// Integer min and max from ISLT or ISLTU and a multiply.
+    /// A value a RISC-V instruction can read: a window word is copied to a register.
+    pub(crate) fn rv_reg(&mut self, v: (u32, u8)) -> (u32, u8) {
+        if !matches!(self.sel.loc.get(&v.0), Some(Loc::Uniform(_))) {
+            return v;
+        }
+        let t = self.sel.fresh();
+        self.sel.prog.push(BorgInstr { mnem: Op::Fmov.into(), dst: t, srcs: vec![v.0], swz: vec![v.1], imm: 0 });
+        (t, 0)
+    }
+
+    /// x0, the zero register of ISA v2 instructions (only they may read it).
+    pub(crate) fn x0(&mut self) -> (u32, u8) {
+        let z = self.sel.fresh();
+        self.sel.loc.insert(z, Loc::Fixed(0));
+        (z, 0)
+    }
+
+    /// Integer min and max: Zbb MIN, MINU, MAX, MAXU.
     unsafe fn int_minmax(&mut self, alu: &nir_alu_instr) {
         let sl = alu.srcs_as_slice();
         let a = self.operand(sl[0].src.as_def().index, sl[0].swizzle[0]);
         let b = self.operand(sl[1].src.as_def().index, sl[1].swizzle[0]);
-        let lt = if matches!(alu.op, nir_op_umax | nir_op_umin) { Op::Isltu } else { Op::Islt };
-        let is_max = matches!(alu.op, nir_op_umax | nir_op_imax);
-        let (p, q) = if is_max { (a, b) } else { (b, a) };
-        let v = self.sel.next_vreg;
-        self.sel.next_vreg += 3;
-        self.sel.prog.push(BorgInstr { mnem: lt.into(), dst: v, srcs: vec![a.0, b.0], swz: vec![a.1, b.1], imm: 0 });
-        self.sel.prog.push(BorgInstr { mnem: Op::Isub.into(), dst: v + 1, srcs: vec![q.0, p.0], swz: vec![q.1, p.1], imm: 0 });
-        self.sel.prog.push(BorgInstr { mnem: Op::Imul.into(), dst: v + 2, srcs: vec![v, v + 1], swz: vec![0, 0], imm: 0 });
-        self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: alu.def.index, srcs: vec![p.0, v + 2], swz: vec![p.1, 0], imm: 0 });
+        let (a, b) = (self.rv_reg(a), self.rv_reg(b));
+        let op = match alu.op {
+            nir_op_umax => Op::Maxu,
+            nir_op_umin => Op::Minu,
+            nir_op_imax => Op::Max,
+            _ => Op::Min,
+        };
+        self.sel.prog.push(BorgInstr { mnem: op.into(), dst: alu.def.index, srcs: vec![a.0, b.0], swz: vec![a.1, b.1], imm: 0 });
+    }
+
+    /// bitCount, findMSB, findLSB and the high halves of products: Zbb and Zmmul.
+    unsafe fn bit_op(&mut self, alu: &nir_alu_instr) {
+        let sl = alu.srcs_as_slice();
+        let x = self.operand(sl[0].src.as_def().index, sl[0].swizzle[0]);
+        let x = self.rv_reg(x);
+        let op = |s: &mut Self, mnem: Op, srcs: &[(u32, u8)], imm: u32| {
+            let d = s.sel.fresh();
+            s.sel.prog.push(BorgInstr { mnem: mnem.into(), dst: d, srcs: srcs.iter().map(|v| v.0).collect(), swz: srcs.iter().map(|v| v.1).collect(), imm });
+            (d, 0u8)
+        };
+        let zero = self.x0();
+        // findMSB: 31 - CLZ, which is -1 for 0 (CLZ 32); a negative signed value counts its first 0.
+        let msb = |s: &mut Self, v: (u32, u8)| {
+            let c = op(s, Op::Clz, &[v], 0);
+            let k = op(s, Op::Addi, &[zero], 31);
+            op(s, Op::Sub, &[k, c], 0)
+        };
+        let r = match alu.op {
+            nir_op_bit_count => op(self, Op::Cpop, &[x], 0),
+            nir_op_ufind_msb => msb(self, x),
+            nir_op_ifind_msb => {
+                let sg = op(self, Op::Srai, &[x], 31);
+                let v = op(self, Op::Xor, &[x, sg], 0);
+                msb(self, v)
+            }
+            // findLSB: CTZ, and -1 for 0 (CTZ 32: bit 5 is set only then).
+            nir_op_find_lsb => {
+                let t = op(self, Op::Ctz, &[x], 0);
+                let b5 = op(self, Op::Srli, &[t], 5);
+                let m = op(self, Op::Sub, &[zero, b5], 0);
+                op(self, Op::Or, &[t, m], 0)
+            }
+            _ => {
+                let y = self.operand(sl[1].src.as_def().index, sl[1].swizzle[0]);
+                let y = self.rv_reg(y);
+                op(self, if alu.op == nir_op_umul_high { Op::Mulhu } else { Op::Mulh }, &[x, y], 0)
+            }
+        };
+        self.sel.vec_map.insert(alu.def.index, vec![r]);
     }
 
     pub unsafe fn intrinsic(&mut self, intr: &nir_intrinsic_instr) {

@@ -249,13 +249,12 @@ impl ShaderState {
 
     /// `t` where the condition `c` (1.0 or 0.0) holds, else `e`, bit for bit: an arithmetic blend
     /// turns an infinity into NaN and changes integer bits.
+    /// c ? t : e bit for bit: Zicond.
     fn select(&mut self, c: (u32, u8), t: (u32, u8), e: (u32, u8)) -> u32 {
-        let zero = self.vreg(Val::K(0));
         let ci = self.sel.opc(Op::F2i, &[c]);
-        let mask = self.sel.opc(Op::Isub, &[zero, (ci, 0)]);
-        let x = self.sel.opc(Op::Ixor, &[t, e]);
-        let xm = self.sel.opc(Op::Iand, &[(x, 0), (mask, 0)]);
-        self.sel.opc(Op::Ixor, &[e, (xm, 0)])
+        let tk = self.sel.opc(Op::CzeroEqz, &[t, (ci, 0)]);
+        let ek = self.sel.opc(Op::CzeroNez, &[e, (ci, 0)]);
+        self.sel.opc(Op::Or, &[(tk, 0), (ek, 0)])
     }
 
     pub(crate) unsafe fn exact_minmax(&mut self, alu: &nir_alu_instr) {
