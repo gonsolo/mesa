@@ -556,7 +556,10 @@ impl ShaderState {
 
     /// x0, the zero register of ISA v2 instructions (only they may read it).
     pub(crate) fn x0(&mut self) -> (u32, u8) {
-        let z = self.sel.fresh();
+        let z = *self.sel.x0.get_or_insert_with(|| self.sel.next_vreg);
+        if z == self.sel.next_vreg {
+            self.sel.next_vreg += 1;
+        }
         self.sel.loc.insert(z, Loc::Fixed(0));
         (z, 0)
     }

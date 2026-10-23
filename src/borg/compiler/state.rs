@@ -19,11 +19,13 @@ pub struct Selector {
     pub next_vreg: u32,
     /// Values that live outside the allocated registers.
     pub loc: HashMap<u32, crate::Loc>,
+    /// x0 of the RISC-V forms (Fixed(0), not the raster ROM's r0).
+    pub x0: Option<u32>,
 }
 
 impl Selector {
     pub fn new() -> Self {
-        Selector { vec_map: HashMap::new(), prog: Vec::new(), next_vreg: 1_000_000, loc: HashMap::new() }
+        Selector { vec_map: HashMap::new(), prog: Vec::new(), next_vreg: 1_000_000, loc: HashMap::new(), x0: None }
     }
 }
 
