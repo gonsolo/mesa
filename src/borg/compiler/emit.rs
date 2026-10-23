@@ -1,4 +1,4 @@
-use crate::encode::{emit_blob, encode, encode_branch, encode_csrw, encode_fattr, encode_jmp, encode_sout};
+use crate::encode::{emit_blob, encode, encode_branch, encode_csrw, encode_fattr, encode_imm, encode_jmp, encode_sout};
 use crate::state::{ShaderState, Stage};
 use crate::{BorgInstr, Loc};
 use std::collections::{HashMap, HashSet};
@@ -115,9 +115,14 @@ impl Emitter<'_> {
                 },
             }
         }
-        // LW and SW: no window operand, and r0 is x0 there.
-        if matches!(i.mnem, Mnem::Op(Op::Lw | Op::Sw)) && (f3 != 0 || r[0] == 0 || (i.mnem == Op::Sw && r[1] == 0) || (i.mnem == Op::Lw && rd == 0)) {
-            self.pending += 1;
+        // RISC-V forms with an immediate: no window operand, and r0 is x0 there.
+        if let Mnem::Op(op @ (Op::Lw | Op::Sw | Op::Slli | Op::Csrrs)) = i.mnem {
+            let base = op != Op::Csrrs && r[0] == 0;
+            if f3 != 0 || base || (op == Op::Sw && r[1] == 0) || (op != Op::Sw && rd == 0) {
+                self.pending += 1;
+            }
+            self.push(encode_imm(op, rd, r[0], r[1], i.imm));
+            return;
         }
         self.push(encode(i.mnem, rd, r[0], r[1], r[2], f3));
     }

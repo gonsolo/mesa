@@ -59,6 +59,20 @@ pub(crate) fn encode(mnem: Mnem, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
 
 /// The fragment output CSRs (docs/B8_isa_v2.md); out_c1..3 follow out_c0.
 pub(crate) const CSR_OUT_C0: u32 = 0x800;
+pub(crate) const CSR_ROOT: u32 = 0xCC0;
+
+/// LW, SW, SLLI and CSRRS: the RISC-V forms with an immediate (a CSR for CSRRS).
+pub(crate) fn encode_imm(op: Op, rd: u8, rs1: u8, rs2: u8, imm: u32) -> Option<u32> {
+    let (rd, rs1, rs2) = (rd as u32, rs1 as u32, rs2 as u32);
+    let f = match op {
+        Op::Lw => Fields { rd, rs1, imm12: imm, ..Default::default() },
+        Op::Sw => Fields { rs1, rs2, simm: imm, ..Default::default() },
+        Op::Slli => Fields { rd, rs1, shamtw: imm, ..Default::default() },
+        Op::Csrrs => Fields { rd, csr: imm, ..Default::default() },
+        _ => return None,
+    };
+    Some(op.encode(&f))
+}
 
 /// CSRRW x0, csr, rs1.
 pub(crate) fn encode_csrw(rs1: u8, csr: u32) -> Option<u32> {
