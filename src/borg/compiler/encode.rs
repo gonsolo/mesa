@@ -73,6 +73,18 @@ pub(crate) fn encode(mnem: Mnem, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
             return Some(r.encode(&Fields { rd, rs1, rs2, rs3, rm, ..Default::default() }));
         }
     }
+    // Custom-0..3 (B8 step 15) unless an operand is a window word; TLD's word moves to the rs2 field.
+    let custom = match op {
+        Op::Frcp => Some(Op::FrcpV2), Op::Frsq => Some(Op::FrsqV2), Op::Ddx => Some(Op::DdxV2),
+        Op::Ddy => Some(Op::DdyV2), Op::Ztest => Some(Op::ZtestV2), Op::Expush => Some(Op::ExpushV2),
+        Op::Exelse => Some(Op::ExelseV2), Op::Expop => Some(Op::ExpopV2), Op::Exany => Some(Op::ExanyV2),
+        Op::Barrier => Some(Op::BarrierV2), _ => None,
+    };
+    match custom {
+        Some(c) if f3 == 0 => return Some(c.encode(&Fields { rd, rs1, rs2, rs3, ..Default::default() })),
+        _ if op == Op::Tld => return Some(Op::TldV2.encode(&Fields { rd, fine: f3 & 1, ..Default::default() })),
+        _ => {}
+    }
     Some(op.encode(&Fields { rd, rs1, rs2, rs3, f3, ..Default::default() }))
 }
 
@@ -111,14 +123,15 @@ pub(crate) fn encode_sout(rs2: u8, index: u16, funct3: u32) -> Option<u32> {
     if index >= 1024 {
         return None; // 10 bits
     }
-    Some(Op::Sout.encode(&Fields { rs2: rs2 as u32, index: index as u32, f3: funct3, ..Default::default() }))
+    let op = if funct3 == 0 { Op::SoutV2 } else { Op::Sout };
+    Some(op.encode(&Fields { rs2: rs2 as u32, index: index as u32, f3: funct3, ..Default::default() }))
 }
 
 pub(crate) fn encode_fattr(rd: u8, index: u16) -> Option<u32> {
     if index >= 1024 {
         return None; // 10 bits
     }
-    Some(Op::Fattr.encode(&Fields { rd: rd as u32, aindex: index as u32, ..Default::default() }))
+    Some(Op::FattrV2.encode(&Fields { rd: rd as u32, aindex: index as u32, ..Default::default() }))
 }
 
 /// ISA v2: BEQ or BNE rs1, x0 by `offset` words (B-type: 1024 words either way).
