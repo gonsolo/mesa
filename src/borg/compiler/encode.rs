@@ -54,6 +54,25 @@ pub(crate) fn encode(mnem: Mnem, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
         Some(r) if f3 == 0 && rd != 0 && rs1 != 0 && rs2 != 0 => r,
         _ => op,
     };
+    // Zfinx and Zhinxmin (B8 step 4): FNEG and FMOV become sign injections of rs1 with itself.
+    let fp = match op {
+        Op::Fadd | Op::Fmul => Some((if op == Op::Fadd { Op::FaddS } else { Op::FmulS }, rs2, 0, 0)),
+        Op::Fmadd => Some((Op::FmaddS, rs2, rs3, 0)),
+        Op::Fneg => Some((Op::FsgnjnS, rs1, 0, 0)),
+        Op::Fmov => Some((Op::FsgnjS, rs1, 0, 0)),
+        Op::F2i => Some((Op::FcvtWS, 0, 0, 1)),
+        Op::I2f => Some((Op::FcvtSW, 0, 0, 0)),
+        Op::F2h => Some((Op::FcvtHS, 0, 0, 0)),
+        Op::H2f => Some((Op::FcvtSH, 0, 0, 0)),
+        _ => None,
+    };
+    if let Some((r, rs2, rs3, rm)) = fp {
+        let three = r == Op::FmaddS;
+        let two = matches!(r, Op::FaddS | Op::FmulS | Op::FsgnjnS | Op::FsgnjS) || three;
+        if f3 == 0 && rd != 0 && rs1 != 0 && (!two || rs2 != 0) && (!three || rs3 != 0) {
+            return Some(r.encode(&Fields { rd, rs1, rs2, rs3, rm, ..Default::default() }));
+        }
+    }
     Some(op.encode(&Fields { rd, rs1, rs2, rs3, f3, ..Default::default() }))
 }
 
@@ -183,10 +202,11 @@ mod tests {
     }
 
     #[test]
-    fn half_conversions_are_funct7_0x54_and_0x56() {
-        for (m, f7) in [(Op::F2h, 0x54u32), (Op::H2f, 0x56)] {
+    fn half_conversions_are_zhinxmin() {
+        // FCVT.H.S: funct7 0x22, rs2 0; FCVT.S.H: funct7 0x20, rs2 2; OP-FP.
+        for (m, f7, rs2) in [(Op::F2h, 0x22u32, 0u32), (Op::H2f, 0x20, 2)] {
             let w = encode(m.into(), 7, 5, 0, 0, 0).unwrap();
-            assert_eq!((w >> 25, (w >> 15) & 0x1F, (w >> 7) & 0x1F), (f7, 5, 7), "{m:?}: funct7, rs1, rd");
+            assert_eq!((w >> 25, (w >> 20) & 0x1F, (w >> 15) & 0x1F, (w >> 7) & 0x1F, w & 0x7F), (f7, rs2, 5, 7, 0x53), "{m:?}");
         }
     }
 
