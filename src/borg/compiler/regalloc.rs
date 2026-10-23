@@ -97,7 +97,8 @@ pub(crate) fn regalloc(
         .filter(|r| !soft.contains(r))
         .chain(extra_reserved.iter().copied())
         .collect();
-    let mut free: Vec<u8> = (0..NUM_GPRS).rev().filter(|r| !reserved.contains(r)).collect();
+    // r0 is x0 for ISA v2 instructions: only pinned values live there.
+    let mut free: Vec<u8> = (1..NUM_GPRS).rev().filter(|r| !reserved.contains(r)).collect();
     let mut active: Vec<(usize, u8)> = Vec::new(); // (live_end, phys_reg)
     let mut alloc: HashMap<u32, u8> = HashMap::new();
     let mut spills = 0usize;

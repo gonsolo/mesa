@@ -140,7 +140,7 @@ pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
             Mnem::Op(Op::Fattr) => e.push(encode_fattr(rd, i.imm as u16)),
             Mnem::Op(Op::Csrrw) => {
                 let (rs1, window) = e.operand(i.srcs[0], i.swz[0]);
-                e.pending += window as u32; // a window word is no register
+                e.pending += (window || rs1 == 0) as u32; // a window word is no register, r0 is x0
                 e.push(encode_csrw(rs1, i.imm));
             }
             _ => {
