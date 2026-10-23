@@ -25,6 +25,10 @@ const MAX_PARTS: u32 = 64;
 const TEX_BYTES: u32 = BASE_BYTES + 36 * SLOT_BYTES;
 const TEX_DESC_BASE: u32 = 0x378 / 4;
 const SAMPLER_DESC_BASE: u32 = 0x37C / 4;
+/// ISA v2 root table (docs/B8_isa_v2.md): LW/SW base (0: compute addresses are absolute), the
+/// texture and the sampler descriptor tables; below the windows, after the program.
+const ROOT: u32 = 0x3F8 / 4;
+const ROOT_BYTES: u32 = 0xF8000;
 const SAMPLERS: u32 = 64 * BORGVK_TEX_PAIRS as u32;
 const TEXELS: u32 = SAMPLERS + 16 * BORGVK_TEX_PAIRS as u32;
 const HDR: usize = 12;
@@ -77,7 +81,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
         let dyn_off = &c.cs_dyn_offs[si];
         let base = pl.set_base[si] as u32;
         for b in 0..BORGVK_MAX_BINDINGS as usize {
-            if base + b as u32 >= 32 || bufs.len() >= BORGVK_CS_MAX_BUFS as usize - 2 {
+            if base + b as u32 >= 32 || bufs.len() >= BORGVK_CS_MAX_BUFS as usize - 3 {
                 break;
             }
             let addr = BASE_BYTES + (base + b as u32) * SLOT_BYTES;
@@ -142,6 +146,8 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
     let pc: Vec<u8> = c.pc.iter().flat_map(|w| w.to_ne_bytes()).collect();
     let n = pc.len() as u32;
     bufs.push(decoded(BASE_BYTES + 32 * SLOT_BYTES, pc, n));
+    let root: Vec<u8> = [0, TEX_BYTES, TEX_BYTES + SAMPLERS, 0].iter().flat_map(|w: &u32| w.to_ne_bytes()).collect();
+    bufs.push(decoded(ROOT_BYTES, root, 16));
     if pl.cs_npool != 0 {
         let pool: Vec<u8> = pl.cs_pool[..pl.cs_npool as usize].iter().flat_map(|w| w.to_ne_bytes()).collect();
         bufs.push(decoded(BASE_BYTES + 34 * SLOT_BYTES, pool, pl.cs_npool * 4));
@@ -185,7 +191,7 @@ fn build_job(pl: &Pipeline, g: [u32; 3], bufs: &[CsBuf]) -> Vec<u8> {
     }
     let mut job = Vec::new();
     let tex = bufs.iter().any(|b| b.addr == TEX_BYTES);
-    let nregs = pl.cs_nregs + if tex { 2 } else { 0 };
+    let nregs = pl.cs_nregs + if tex { 2 } else { 0 } + 1;
     for v in [pl.cs_nwords, g[0], g[1], g[2], pl.cs_local[0], pl.cs_local[1], pl.cs_local[2], nregs, bufs.len() as u32, 0, 0, 0] {
         put(&mut job, v);
     }
@@ -201,6 +207,8 @@ fn build_job(pl: &Pipeline, g: [u32; 3], bufs: &[CsBuf]) -> Vec<u8> {
         put(&mut job, r);
         put(&mut job, v);
     }
+    put(&mut job, ROOT);
+    put(&mut job, ROOT_BYTES);
     if tex {
         for (r, v) in [(TEX_DESC_BASE, TEX_BYTES), (SAMPLER_DESC_BASE, TEX_BYTES + SAMPLERS)] {
             put(&mut job, r);

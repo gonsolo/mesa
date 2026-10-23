@@ -178,19 +178,22 @@ impl ShaderState {
     }
 
     /// ISA v2 (B8 step 10): a vertex or fragment shader's LOAD and STORE of word `a` from LS_BASE
-    /// become LW and SW at root + 4a; ROOT holds the same base. A constant word, or a constant
+    /// become LW and SW at base + 4a, the base the root table's first word. A constant word, or a constant
     /// step from an address already formed in this block, goes into the immediate.
     fn root_accesses(&mut self) {
         if !self.sel.prog.iter().any(|i| matches!(i.mnem, Mnem::Op(Op::Load | Op::Store))) {
             return;
         }
         let mut out = Vec::new();
-        let root = match self.sel.prog.first() {
-            Some(i) if i.mnem == Op::Csrrs && i.imm == CSR_ROOT => i.dst,
-            _ => {
-                let root = self.sel.fresh();
-                out.push(BorgInstr { mnem: Op::Csrrs.into(), dst: root, srcs: vec![], swz: vec![], imm: CSR_ROOT });
-                root
+        let table = self.sel.prog.iter().find(|i| i.mnem == Op::Csrrs && i.imm == CSR_ROOT).map(|i| i.dst);
+        let loaded = table.and_then(|t| self.sel.prog.iter().find(|i| i.mnem == Op::Lw && i.srcs == [t] && i.imm == 0)).map(|i| i.dst);
+        let root = match loaded {
+            Some(base) => base,
+            None => {
+                let (table, base) = (self.sel.fresh(), self.sel.fresh());
+                out.push(BorgInstr { mnem: Op::Csrrs.into(), dst: table, srcs: vec![], swz: vec![], imm: CSR_ROOT });
+                out.push(BorgInstr { mnem: Op::Lw.into(), dst: base, srcs: vec![table], swz: vec![0], imm: 0 });
+                base
             }
         };
         let mut byte: HashMap<u32, (u32, u32)> = HashMap::new();
