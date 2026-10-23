@@ -82,7 +82,7 @@ pub fn allocate(cx: &ShaderState, forced: &HashMap<u32, u8>, extra_reserved: &mu
                 _ => format!("?{v}"),
             };
             let s: Vec<String> = i.srcs.iter().zip(i.swz.iter()).map(|(v, c)| format!("{}.{}", r(v), c)).collect();
-            eprintln!("borgc:A {} {} <- {}", i.mnem, r(&i.dst), s.join(", "));
+            eprintln!("borgc:A {} {} <- {} #{:#x}", i.mnem, r(&i.dst), s.join(", "), i.imm);
         }
     }
     Some(alloc)
