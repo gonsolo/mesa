@@ -4,7 +4,7 @@ use crate::opt::{dce, fuse_fmadd, schedule_for_pressure};
 use crate::state::{ShaderState, Stage};
 use crate::survey::{survey, Survey};
 use crate::encode::{CSR_BARY0, CSR_FRAG_X, CSR_GROUP_ID_X, CSR_LOCAL_INDEX, CSR_ROOT, CSR_VERTEX_INDEX};
-use crate::{BorgInstr, Flags, Loc, Mnem};
+use crate::{BorgInstr, Flags, Loc, Mnem, NO_DST};
 use std::collections::{HashMap, HashSet};
 use compiler::bindings::*;
 use crate::opcodes::Op;
@@ -113,6 +113,8 @@ impl ShaderState {
     pub unsafe fn optimise(&mut self) {
         self.place_const_operands();
         self.sys_reads();
+        // Before spilling, so its pressure counts; again below for the pool's TEX.
+        self.tex_addresses();
         // Before spilling, so its pressure counts; again below for the pool's and the spills' loads.
         if matches!(self.stage, Stage::Vertex | Stage::Fragment) {
             self.root_accesses();
@@ -126,6 +128,7 @@ impl ShaderState {
         if matches!(self.stage, Stage::Vertex | Stage::Fragment) {
             self.root_accesses();
         }
+        self.tex_addresses();
         let loc = &self.sel.loc;
         fuse_fmadd(&mut self.sel.prog, &self.out_roots, &|v| matches!(loc.get(&v), Some(Loc::Uniform(_))));
         schedule_for_pressure(&mut self.sel.prog, &self.out_roots);
@@ -133,6 +136,132 @@ impl ShaderState {
         if self.stage == Stage::Fragment {
             self.log_uniformity();
         }
+    }
+
+    /// `rd = rs + k` without a new constant: ADDI, or LUI and ADDI and ADD.
+    fn add_const(&mut self, out: &mut Vec<BorgInstr>, rs: u32, k: u32) -> u32 {
+        if k == 0 {
+            return rs;
+        }
+        let d = self.sel.fresh();
+        if k < 2048 {
+            out.push(BorgInstr { mnem: Op::Addi.into(), dst: d, srcs: vec![rs], swz: vec![0], imm: k });
+            return d;
+        }
+        let (hi, lo) = (k.wrapping_add(0x800) >> 12, k & 0xFFF);
+        let (u, v) = (self.sel.fresh(), self.sel.fresh());
+        out.push(BorgInstr { mnem: Op::Lui.into(), dst: u, srcs: vec![], swz: vec![], imm: hi & 0xF_FFFF });
+        out.push(BorgInstr { mnem: Op::Addi.into(), dst: v, srcs: vec![u], swz: vec![0], imm: lo });
+        out.push(BorgInstr { mnem: Op::Add.into(), dst: d, srcs: vec![rs, v], swz: vec![0, 0], imm: 0 });
+        d
+    }
+
+    /// ISA v2 (B8 step 11): TEX and TEXA by descriptor address. v1's control word names the
+    /// texture (bits 7:0) and the sampler (15:8) by index; their descriptors lie in the tables
+    /// the root table holds (words 1 and 2), 64 and 16 bytes apiece. TEXS takes the sampler's
+    /// address and the rest of the word, TEX the texture's address. Per block: compute loses its
+    /// registers at a barrier.
+    fn tex_addresses(&mut self) {
+        if !self.sel.prog.iter().any(|i| matches!(i.mnem, Mnem::Op(Op::Tex | Op::Texa))) {
+            return;
+        }
+        let mut cache: HashMap<u32, u32> = HashMap::new();   // word of the root table -> its value
+        // A constant control word's (texture address, sampler address, rest); the last TEXS's operands.
+        let mut known: HashMap<u32, (u32, u32, u32)> = HashMap::new();
+        let mut texs: Option<(u32, u32)> = None;
+        let mut out = Vec::new();
+        for mut i in std::mem::take(&mut self.sel.prog) {
+            if matches!(i.mnem, Mnem::Op(Op::Expush | Op::Exelse | Op::Expop | Op::Brz | Op::Brnz | Op::Jmp | Op::Barrier) | Mnem::Label) {
+                cache.clear();
+                known.clear();
+                texs = None;
+            }
+            match i.mnem {
+                // An earlier run's TEXS.
+                Mnem::Op(Op::Texs) => texs = None,
+                Mnem::Op(Op::Texa) => {
+                    for k in 0..3 {
+                        let (code, (v, c)) = self.window_copy((i.srcs[k], i.swz[k]));
+                        out.extend(code);
+                        (i.srcs[k], i.swz[k]) = (v, c);
+                    }
+                    i.mnem = Op::Texad.into();
+                }
+                Mnem::Op(Op::Tex) => {
+                    let mut word = |s: &mut Self, out: &mut Vec<BorgInstr>, w: u32| -> u32 {
+                        if let Some(&v) = cache.get(&w) {
+                            return v;
+                        }
+                        let t = match cache.get(&0) {
+                            Some(&t) => t,
+                            None => {
+                                let t = s.sel.fresh();
+                                out.push(BorgInstr { mnem: Op::Csrrs.into(), dst: t, srcs: vec![], swz: vec![], imm: CSR_ROOT });
+                                cache.insert(0, t);
+                                t
+                            }
+                        };
+                        let v = s.sel.fresh();
+                        out.push(BorgInstr { mnem: Op::Lw.into(), dst: v, srcs: vec![t], swz: vec![0], imm: 4 * w });
+                        cache.insert(w, v);
+                        v
+                    };
+                    let bits = self.bits_of(i.srcs[2]);
+                    let (ta, sa, rest) = match bits {
+                        Some(b) if known.contains_key(&b) => known[&b],
+                        Some(bits) => {
+                            let (tb, sb) = (word(self, &mut out, 1), word(self, &mut out, 2));
+                            let ta = self.add_const(&mut out, tb, 64 * (bits & 0xFF));
+                            let sa = self.add_const(&mut out, sb, 16 * ((bits >> 8) & 0xFF));
+                            let rest = if bits >> 16 == 0 {
+                                self.x0().0
+                            } else {
+                                let r = self.sel.fresh();
+                                out.push(BorgInstr { mnem: Op::Lui.into(), dst: r, srcs: vec![], swz: vec![], imm: bits >> 12 & 0xF_FFF0 });
+                                r
+                            };
+                            known.insert(bits, (ta, sa, rest));
+                            (ta, sa, rest)
+                        }
+                        None => {
+                            let (tb, sb) = (word(self, &mut out, 1), word(self, &mut out, 2));
+                            let (code, c) = self.window_copy((i.srcs[2], i.swz[2]));
+                            out.extend(code);
+                            let mut op = |s: &mut Self, m: Op, srcs: Vec<(u32, u8)>, imm: u32| {
+                                let d = s.sel.fresh();
+                                let (srcs, swz) = srcs.into_iter().unzip();
+                                out.push(BorgInstr { mnem: m.into(), dst: d, srcs, swz, imm });
+                                (d, 0u8)
+                            };
+                            let t1 = op(self, Op::Andi, vec![c], 0xFF);
+                            let t2 = op(self, Op::Slli, vec![t1], 6);
+                            let ta = op(self, Op::Add, vec![(tb, 0), t2], 0);
+                            let s1 = op(self, Op::Srli, vec![c], 8);
+                            let s2 = op(self, Op::Andi, vec![s1], 0xFF);
+                            let s3 = op(self, Op::Slli, vec![s2], 4);
+                            let sa = op(self, Op::Add, vec![(sb, 0), s3], 0);
+                            let r1 = op(self, Op::Srli, vec![c], 16);
+                            let rest = op(self, Op::Slli, vec![r1], 16);
+                            (ta.0, sa.0, rest.0)
+                        }
+                    };
+                    if texs != Some((sa, rest)) {
+                        out.push(BorgInstr { mnem: Op::Texs.into(), dst: NO_DST, srcs: vec![sa, rest], swz: vec![0, 0], imm: 0 });
+                        texs = Some((sa, rest));
+                    }
+                    for k in 0..2 {
+                        let (code, (v, c)) = self.window_copy((i.srcs[k], i.swz[k]));
+                        out.extend(code);
+                        (i.srcs[k], i.swz[k]) = (v, c);
+                    }
+                    (i.srcs[2], i.swz[2]) = (ta, 0);
+                    i.mnem = Op::Texd.into();
+                }
+                _ => {}
+            }
+            out.push(i);
+        }
+        self.sel.prog = out;
     }
 
     /// The CSR that holds what v1 keeps in a role register or window word, for this stage.
@@ -250,7 +379,7 @@ impl ShaderState {
     /// Every TEX writes the same register block: a result still read after the next TEX is copied
     /// out right after its own.
     fn copy_tex_results(&mut self) {
-        let is_tex = |i: &BorgInstr, d: &HashSet<u32>| i.mnem == Op::Tex && d.contains(&i.dst);
+        let is_tex = |i: &BorgInstr, d: &HashSet<u32>| matches!(i.mnem, Mnem::Op(Op::Tex | Op::Texd)) && d.contains(&i.dst);
         let texs: Vec<usize> = (0..self.sel.prog.len()).filter(|&i| is_tex(&self.sel.prog[i], &self.tex_dsts)).collect();
         for w in texs.windows(2).rev() {
             let (p, next) = (w[0], w[1]);

@@ -80,7 +80,8 @@ impl ShaderState {
         match (self.stage, i.mnem) {
             (Stage::Compute, _) => false,
             (Stage::Vertex, m) => matches!(m, Mnem::Op(Op::Brz | Op::Brnz)),
-            (_, Mnem::Op(Op::Ddx | Op::Ddy | Op::Texa | Op::Brz | Op::Brnz)) => true,
+            // TEX by address: its operation is in the TEXS before it, so assume an implicit LOD.
+            (_, Mnem::Op(Op::Ddx | Op::Ddy | Op::Texa | Op::Texad | Op::Texd | Op::Brz | Op::Brnz | Op::Bne | Op::Beq)) => true,
             (_, Mnem::Op(Op::Tex)) => {
                 let op = i.srcs.get(2).and_then(|c| match self.sel.loc.get(c) {
                     Some(Loc::Uniform(_)) => self.bits_of(*c).map(|bits| (bits >> 16) & 3),

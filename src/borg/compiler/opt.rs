@@ -51,7 +51,7 @@ pub(crate) fn schedule_for_pressure(prog: &mut Vec<BorgInstr>, out_roots: &[u32]
     {
         let mut cur: Vec<BorgInstr> = Vec::new();
         for instr in prog.drain(..) {
-            if crate::has_effect(&instr) || instr.mnem == Op::Tex || instr.mnem == Op::Fattr {
+            if crate::has_effect(&instr) || matches!(instr.mnem, Mnem::Op(Op::Tex | Op::Texd | Op::Fattr)) {
                 runs.push((std::mem::take(&mut cur), Some(instr)));
             } else {
                 cur.push(instr);

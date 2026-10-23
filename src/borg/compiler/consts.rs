@@ -421,7 +421,7 @@ impl ShaderState {
                     _ => {
                         let mut p = at;
                         loop {
-                            let Some(t) = (0..p).rev().find(|&t| self.sel.prog[t].mnem == Op::Tex) else { break };
+                            let Some(t) = (0..p).rev().find(|&t| matches!(self.sel.prog[t].mnem, crate::Mnem::Op(Op::Tex | Op::Texd))) else { break };
                             let d = self.sel.prog[t].dst;
                             let used = self.sel.prog[p..].iter().any(|i| i.srcs.contains(&d));
                             if used && region[at].starts_with(&region[t]) { p = t; } else { break; }
