@@ -115,6 +115,10 @@ impl Emitter<'_> {
                 },
             }
         }
+        // LW and SW: no window operand, and r0 is x0 there.
+        if matches!(i.mnem, Mnem::Op(Op::Lw | Op::Sw)) && (f3 != 0 || r[0] == 0 || (i.mnem == Op::Sw && r[1] == 0) || (i.mnem == Op::Lw && rd == 0)) {
+            self.pending += 1;
+        }
         self.push(encode(i.mnem, rd, r[0], r[1], r[2], f3));
     }
 }

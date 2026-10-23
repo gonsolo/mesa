@@ -13,6 +13,9 @@ use crate::Mnem;
 
 pub(crate) const SLOT_BASE_WORDS: u32 = 0x40000;
 pub(crate) const SLOT_WORDS: u32 = 0x80000;
+/// The same windows as byte addresses, for LW and SW.
+const SLOT_BASE: u32 = 4 * SLOT_BASE_WORDS;
+const SLOT_BYTES: u32 = 4 * SLOT_WORDS;
 const LANES: u32 = 4; // BorgConfig.Simt: fragLanes
 const MAX_WORDS: usize = 4096; // the DRAM code region below the first slot holds 16k
 pub(crate) const WG_BASE_REG: u32 = 12;
@@ -65,12 +68,36 @@ impl ShaderState {
         self.cs.ws.iter().product()
     }
 
+    /// ISA v2 (B8 step 10): a LOAD or STORE of a word index becomes LW or SW of its byte address
+    /// (LS_BASE is 0 for compute).
+    fn byte_accesses(&mut self) {
+        let prog = std::mem::take(&mut self.sel.prog);
+        let mut out = Vec::with_capacity(prog.len());
+        for mut i in prog {
+            if let Mnem::Op(op @ (Op::Load | Op::Store)) = i.mnem {
+                let (a, c) = (i.srcs[0], i.swz[0]);
+                i.srcs[0] = match self.cs.kval.get(&a) {
+                    Some(&w) => self.konst(w.wrapping_mul(4)),
+                    None => {
+                        let (t, two) = (self.sel.fresh(), self.konst(2));
+                        out.push(BorgInstr { mnem: Op::Ishl.into(), dst: t, srcs: vec![a, two], swz: vec![c, 0], imm: 0 });
+                        t
+                    }
+                };
+                i.swz[0] = 0;
+                i.mnem = if op == Op::Load { Op::Lw.into() } else { Op::Sw.into() };
+            }
+            out.push(i);
+        }
+        self.sel.prog = out;
+    }
+
     /// Moves each load of a constant address down to its first use, past stores to other constant
     /// addresses: a whole-struct copy loads every word before it stores any.
     fn sink_loads(&mut self) {
         let (prog, kval) = (&mut self.sel.prog, &self.cs.kval);
         for i in (0..prog.len()).rev() {
-            if prog[i].mnem != Op::Load {
+            if !matches!(prog[i].mnem, Mnem::Op(Op::Load | Op::Lw)) {
                 continue;
             }
             let Some(&a) = kval.get(&prog[i].srcs[0]) else { continue };
@@ -79,7 +106,7 @@ impl ShaderState {
             while j < prog.len() {
                 let n = &prog[j];
                 let stop = n.dst == d || n.srcs.contains(&d) || match n.mnem {
-                    Mnem::Op(Op::Store) => kval.get(&n.srcs[0]).map_or(true, |&b| b == a),
+                    Mnem::Op(Op::Store | Op::Sw) => kval.get(&n.srcs[0]).map_or(true, |&b| b == a),
                     Mnem::Op(Op::Expush | Op::Exelse | Op::Expop | Op::Brz | Op::Brnz | Op::Barrier) | Mnem::Label => true,
                     _ => false,
                 };
@@ -178,8 +205,8 @@ impl ShaderState {
 
     fn mask(&mut self, a: Val) -> Val {
         match a {
-            Val::K(x) => Val::K(x & (SLOT_WORDS - 1)),
-            _ => self.bin(Op::Iand, a, Val::K(SLOT_WORDS - 1)),
+            Val::K(x) => Val::K(x & (SLOT_BYTES - 1)),
+            _ => self.bin(Op::Iand, a, Val::K(SLOT_BYTES - 1)),
         }
     }
 
@@ -338,17 +365,16 @@ impl ShaderState {
         self.set(u.def.index, &zeros);
     }
 
-    /// Word index of the byte offset `off` in the buffer named by `idx`'s first component.
+    /// Byte address of word `extra` from the byte offset `off` in the buffer named by `idx`.
     fn word_addr(&mut self, idx: &nir_src, off: &nir_src, extra: u32) -> Val {
         let m = resolve_vm(&self.sel.vec_map, idx.as_def().index, 0).0;
         let Some(&(set, binding)) = self.cs.desc.get(&m) else {
             self.fail("buffer index is not a known binding".into());
             return Val::K(0);
         };
-        let base = SLOT_BASE_WORDS + (set * 16 + binding) * SLOT_WORDS;
+        let base = SLOT_BASE + (set * 16 + binding) * SLOT_BYTES;
         let o = self.val(off, 0);
-        let w = self.shr(o, 2);
-        let w = self.add(w, Val::K(extra));
+        let w = self.add(o, Val::K(4 * extra));
         let w = self.mask(w);
         self.add(Val::K(base), w)
     }
@@ -357,10 +383,10 @@ impl ShaderState {
     fn word_n(&mut self, a0: Val, idx: &nir_src, off: &nir_src, c: u32) -> Val {
         match a0 {
             _ if c == 0 => a0,
-            Val::K(x) if x.wrapping_sub(SLOT_BASE_WORDS) % SLOT_WORDS + c >= SLOT_WORDS => Val::K(x.wrapping_add(c)),
+            Val::K(x) if x.wrapping_sub(SLOT_BASE) % SLOT_BYTES + 4 * c >= SLOT_BYTES => Val::K(x.wrapping_add(4 * c)),
             Val::K(_) => {
                 let r = self.vreg(a0);
-                self.bin(Op::Iadd, Val::R(r.0, r.1), Val::K(c))
+                self.bin(Op::Iadd, Val::R(r.0, r.1), Val::K(4 * c))
             }
             _ => self.word_addr(idx, off, c),
         }
@@ -368,12 +394,12 @@ impl ShaderState {
 
     fn load(&mut self, a: Val) -> Val {
         let a = self.vreg(a);
-        Val::R(self.sel.opc(Op::Load, &[a]), 0)
+        Val::R(self.sel.opc(Op::Lw, &[a]), 0)
     }
 
     fn store(&mut self, a: Val, v: Val) {
         let (a, v) = (self.vreg(a), self.vreg(v));
-        self.sel.prog.push(BorgInstr { mnem: Op::Store.into(), dst: NO_DST, srcs: vec![a.0, v.0], swz: vec![a.1, v.1], imm: 0 });
+        self.sel.prog.push(BorgInstr { mnem: Op::Sw.into(), dst: NO_DST, srcs: vec![a.0, v.0], swz: vec![a.1, v.1], imm: 0 });
     }
 
     /// The group the hardware runs: a packed quad holds four workgroups.
@@ -515,20 +541,19 @@ impl ShaderState {
     unsafe fn cs_push_constant(&mut self, i: &nir_intrinsic_instr) {
         let d = i.def.index;
         let o = self.val(i.get_src(0), 0);
-        let w = self.shr(o, 2);
-        let base_w = (i.base() as u32) / 4;
-        let pbase = SLOT_BASE_WORDS + 32 * SLOT_WORDS;
+        let base_b = i.base() as u32;
+        let pbase = SLOT_BASE + 32 * SLOT_BYTES;
         let mut v = vec![];
         for c in 0..i.def.num_components as u32 {
-            let a = match w {
+            let a = match o {
                 Val::K(x) => {
                     // Small steps from one base keep the distinct constants few.
-                    let mut r = ((x + base_w) & (SLOT_WORDS - 1)) + c;
+                    let mut r = (((x & !3) + base_b) & (SLOT_BYTES - 1)) + 4 * c;
                     let rb = self.konst(pbase);
                     let mut a = Val::R(rb, 0);
-                    while r >= 4 {
-                        a = self.bin(Op::Iadd, a, Val::K(4));
-                        r -= 4;
+                    while r >= 16 {
+                        a = self.bin(Op::Iadd, a, Val::K(16));
+                        r -= 16;
                     }
                     if r > 0 {
                         a = self.bin(Op::Iadd, a, Val::K(r));
@@ -536,8 +561,8 @@ impl ShaderState {
                     a
                 }
                 _ => {
-                    let w2 = self.add(w, Val::K(base_w + c));
-                    let w2 = self.bin(Op::Iand, w2, Val::K(SLOT_WORDS - 1));
+                    let w2 = self.add(o, Val::K(base_b + 4 * c));
+                    let w2 = self.bin(Op::Iand, w2, Val::K(SLOT_BYTES - 1));
                     self.add(Val::K(pbase), w2)
                 }
             };
@@ -551,17 +576,16 @@ impl ShaderState {
         let d = i.def.index;
         let store = i.intrinsic == nir_intrinsic_store_shared;
         let o = self.val(i.get_src(if store { 1 } else { 0 }), 0);
-        let w = self.shr(o, 2);
-        let base_w = (i.base() as u32) / 4;
+        let base_b = i.base() as u32;
         let n = if store { i.get_src(0).num_components() as u32 } else { i.def.num_components as u32 };
         let mut v = vec![];
         for c in 0..n {
             if store && i.write_mask() & (1 << c) == 0 {
                 continue;
             }
-            let w2 = self.add(w, Val::K(base_w + c));
+            let w2 = self.add(o, Val::K(base_b + 4 * c));
             let w2 = self.mask(w2);
-            let a = self.add(Val::K(SLOT_BASE_WORDS + 33 * SLOT_WORDS), w2);
+            let a = self.add(Val::K(SLOT_BASE + 33 * SLOT_BYTES), w2);
             if store {
                 let x = self.val(i.get_src(0), c as u8);
                 self.store(a, x);
@@ -583,10 +607,9 @@ impl ShaderState {
             self.word_addr(i.get_src(0), i.get_src(1), 0)
         } else {
             let o = self.val(i.get_src(0), 0);
-            let w = self.shr(o, 2);
-            let w = self.add(w, Val::K(i.base() as u32 / 4));
+            let w = self.add(o, Val::K(i.base() as u32));
             let w = self.mask(w);
-            self.add(Val::K(SLOT_BASE_WORDS + 33 * SLOT_WORDS), w)
+            self.add(Val::K(SLOT_BASE + 33 * SLOT_BYTES), w)
         };
         let s = if ssbo { 2 } else { 1 };
         let swap = i.atomic_op() == nir_atomic_op_cmpxchg;
@@ -633,7 +656,7 @@ impl ShaderState {
             };
             op(Op::Iseq, t, vec![(q, 0), (l, 0)]);
             op(Op::Expush, NO_DST, vec![(t, 0)]);
-            op(Op::Load, old, vec![a]);
+            op(Op::Lw, old, vec![a]);
             let v = if let Some(alu) = alu {
                 op(alu, new, vec![(old, 0), x]);
                 (new, 0)
@@ -655,7 +678,7 @@ impl ShaderState {
             } else {
                 x
             };
-            op(Op::Store, NO_DST, vec![a, v]);
+            op(Op::Sw, NO_DST, vec![a, v]);
             op(Op::Expop, NO_DST, vec![]);
         }
         self.set(d, &[Val::R(old, 0)]);
@@ -706,6 +729,7 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
     if cx.spill.slots > 0 {
         debug!("borgc[compute]: spilled {} value(s) to keep {:?} live", cx.spill.slots, limit);
     }
+    cx.byte_accesses();
     cx.pool_consts(cap, !compact)?;
     cx.refusal()?;
     let mut reserved: Vec<u8> = cx.cp.preset_regs().to_vec();

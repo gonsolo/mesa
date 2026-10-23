@@ -295,9 +295,9 @@ impl ShaderState {
         if free < ptrs {
             return Err(format!("{} constants do not fit {free} registers", ks.len()));
         }
-        let rb = self.preset(POOL_BASE_WORDS);
+        let rb = self.preset(4 * POOL_BASE_WORDS);
         let base = self.fixed(rb);
-        let r1 = self.preset(1);
+        let r1 = self.preset(4);
         let one = self.fixed(r1);
         let pooled: HashMap<u32, u32> = pooled.iter().copied().collect();
         const GAP: usize = 16;
@@ -321,7 +321,7 @@ impl ShaderState {
                     }
                     let at = if hoisted { anchor } else { out.len() };
                     let v = self.sel.fresh();
-                    out.insert(at, BorgInstr { mnem: Op::Load.into(), dst: v, srcs: vec![ptr.0], swz: vec![0], imm: 0 });
+                    out.insert(at, BorgInstr { mnem: Op::Lw.into(), dst: v, srcs: vec![ptr.0], swz: vec![0], imm: 0 });
                     anchor += hoisted as usize;
                     self.cs.pool.push(bits);
                     loaded.insert(*s, (v, n));
@@ -343,7 +343,7 @@ impl ShaderState {
                 // Registers do not survive the other quads' turns, a pointer stepped in a loop
                 // differs between trips, and one stepped under its mask between lanes.
                 Mnem::Op(Op::Barrier) | Mnem::Label | Mnem::Op(Op::Brnz) => {
-                    let r = self.preset(POOL_BASE_WORDS + self.cs.pool.len() as u32);
+                    let r = self.preset(4 * (POOL_BASE_WORDS + self.cs.pool.len() as u32));
                     ptr = (self.fixed(r), self.cs.pool.len());
                     loaded.clear();
                 }
