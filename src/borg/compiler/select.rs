@@ -1,3 +1,4 @@
+use crate::encode::CSR_OUT_C0;
 use crate::state::{ShaderState, Stage};
 use crate::isel::borg_isel;
 use crate::opt::classify_uniform;
@@ -1277,6 +1278,14 @@ impl ShaderState {
         self.out_roots.push(out);
     }
     
+    }
+    /// ISA v2 (B8 step 8): each fragment output also through its CSR, out_c0..out_c3.
+    pub fn csr_frag_outputs(&mut self) {
+        for c in 0..4 {
+            if let Some((v, comp)) = self.outs.frag[c] {
+                self.sel.prog.push(BorgInstr { mnem: Op::Csrrw.into(), dst: NO_DST, srcs: vec![v], swz: vec![comp], imm: CSR_OUT_C0 + c as u32 });
+            }
+        }
     }
     pub fn log_uniformity(&self) {
     let uniform_roots: std::collections::HashSet<u32> = self.sel.loc

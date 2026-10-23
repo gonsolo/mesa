@@ -1,4 +1,4 @@
-use crate::encode::{emit_blob, encode, encode_branch, encode_fattr, encode_jmp, encode_sout};
+use crate::encode::{emit_blob, encode, encode_branch, encode_csrw, encode_fattr, encode_jmp, encode_sout};
 use crate::state::{ShaderState, Stage};
 use crate::{BorgInstr, Loc};
 use std::collections::{HashMap, HashSet};
@@ -138,6 +138,11 @@ pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
                 e.push(encode_sout(rs2, i.imm as u16, 0));
             }
             Mnem::Op(Op::Fattr) => e.push(encode_fattr(rd, i.imm as u16)),
+            Mnem::Op(Op::Csrrw) => {
+                let (rs1, window) = e.operand(i.srcs[0], i.swz[0]);
+                e.pending += window as u32; // a window word is no register
+                e.push(encode_csrw(rs1, i.imm));
+            }
             _ => {
                 if !e.fold_pos_w(i, rd) {
                     e.instr(i, rd);

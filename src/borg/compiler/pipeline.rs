@@ -96,6 +96,7 @@ impl ShaderState {
         }
         if is_fragment {
             self.copy_frag_outputs();
+            self.csr_frag_outputs();
         }
         self.vert.pos_out = self.outs.pos.map(|v| v.map(|(d, _)| d));
         self.frag.out = self.outs.frag.map(|v| v.map(|(d, _)| d));

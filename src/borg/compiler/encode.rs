@@ -57,6 +57,14 @@ pub(crate) fn encode(mnem: Mnem, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
     Some(op.encode(&Fields { rd, rs1, rs2, rs3, f3, ..Default::default() }))
 }
 
+/// The fragment output CSRs (docs/B8_isa_v2.md); out_c1..3 follow out_c0.
+pub(crate) const CSR_OUT_C0: u32 = 0x800;
+
+/// CSRRW x0, csr, rs1.
+pub(crate) fn encode_csrw(rs1: u8, csr: u32) -> Option<u32> {
+    Some(Op::Csrrw.encode(&Fields { rs1: rs1 as u32, csr, ..Default::default() }))
+}
+
 pub(crate) fn encode_sout(rs2: u8, index: u16, funct3: u32) -> Option<u32> {
     if index >= 1024 {
         return None; // 10 bits
