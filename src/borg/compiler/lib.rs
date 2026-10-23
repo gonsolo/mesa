@@ -81,6 +81,12 @@ pub struct BorgcInfo {
 
 pub(crate) const NO_DST: u32 = u32::MAX;
 
+/// An instruction that changes memory or state: kept without a used result, never reordered.
+pub(crate) fn has_effect(i: &BorgInstr) -> bool {
+    i.dst == NO_DST || matches!(i.mnem, Mnem::Op(Op::AmoaddW | Op::AmoswapW | Op::AmoxorW | Op::AmoandW | Op::AmoorW
+        | Op::AmominW | Op::AmomaxW | Op::AmominuW | Op::AmomaxuW | Op::AmocasW))
+}
+
 pub(crate) struct CfMark {
     pub(crate) mnem: Mnem,
     /// Condition def index, for EXPUSH only.

@@ -10,7 +10,7 @@ pub(crate) fn dce(prog: &mut Vec<BorgInstr>, out_roots: &[u32]) {
     let pre_dce = prog.len();
     let mut live: std::collections::HashSet<u32> = out_roots.iter().copied().collect();
 
-    let side_effecting = |i: &BorgInstr| i.dst == crate::NO_DST;
+    let side_effecting = crate::has_effect;
     for i in prog.iter().filter(|i| side_effecting(i)) {
         for &s in &i.srcs {
             live.insert(s);
@@ -51,7 +51,7 @@ pub(crate) fn schedule_for_pressure(prog: &mut Vec<BorgInstr>, out_roots: &[u32]
     {
         let mut cur: Vec<BorgInstr> = Vec::new();
         for instr in prog.drain(..) {
-            if instr.dst == crate::NO_DST || instr.mnem == Op::Tex || instr.mnem == Op::Fattr {
+            if crate::has_effect(&instr) || instr.mnem == Op::Tex || instr.mnem == Op::Fattr {
                 runs.push((std::mem::take(&mut cur), Some(instr)));
             } else {
                 cur.push(instr);

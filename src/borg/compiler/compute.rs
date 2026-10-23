@@ -107,6 +107,7 @@ impl ShaderState {
                 let n = &prog[j];
                 let stop = n.dst == d || n.srcs.contains(&d) || match n.mnem {
                     Mnem::Op(Op::Store | Op::Sw) => kval.get(&n.srcs[0]).map_or(true, |&b| b == a),
+                    _ if crate::has_effect(n) => true,
                     Mnem::Op(Op::Expush | Op::Exelse | Op::Expop | Op::Brz | Op::Brnz | Op::Barrier) | Mnem::Label => true,
                     _ => false,
                 };
@@ -622,64 +623,34 @@ impl ShaderState {
         } else {
             None
         };
-        let lt = match i.atomic_op() {
-            nir_atomic_op_imin | nir_atomic_op_imax => Some(Op::Islt),
-            nir_atomic_op_umin | nir_atomic_op_umax => Some(Op::Isltu),
-            _ => None,
-        };
-        let alu = match i.atomic_op() {
-            nir_atomic_op_iadd => Some(Op::Iadd),
-            nir_atomic_op_iand => Some(Op::Iand),
-            nir_atomic_op_ior => Some(Op::Ior),
-            nir_atomic_op_ixor => Some(Op::Ixor),
-            nir_atomic_op_xchg | nir_atomic_op_cmpxchg => None,
-            _ if lt.is_some() => None,
+        // ISA v2 (B8 step 12): one AMO, the lanes served in turn by the memory unit.
+        let amo = match i.atomic_op() {
+            nir_atomic_op_iadd => Op::AmoaddW,
+            nir_atomic_op_iand => Op::AmoandW,
+            nir_atomic_op_ior => Op::AmoorW,
+            nir_atomic_op_ixor => Op::AmoxorW,
+            nir_atomic_op_imin => Op::AmominW,
+            nir_atomic_op_imax => Op::AmomaxW,
+            nir_atomic_op_umin => Op::AmominuW,
+            nir_atomic_op_umax => Op::AmomaxuW,
+            nir_atomic_op_xchg => Op::AmoswapW,
+            nir_atomic_op_cmpxchg => Op::AmocasW,
             _ => {
                 self.fail("unsupported atomic op".into());
                 return;
             }
         };
-        let is_min = matches!(i.atomic_op(), nir_atomic_op_imin | nir_atomic_op_umin);
-        // One lane at a time; the same registers in every lane's turn.
-        let (old, new, t, u, w) = (self.sel.fresh(), self.sel.fresh(), self.sel.fresh(), self.sel.fresh(), self.sel.fresh());
-        let r30 = self.fixed(30);
-        // r30 counts across the workgroup's quads; the lane is its low bits.
-        let (m, q) = (self.konst(LANES - 1), self.sel.fresh());
-        self.sel.prog.push(BorgInstr { mnem: Op::Iand.into(), dst: q, srcs: vec![r30, m], swz: vec![0, 0], imm: 0 });
-        for lane in 0..LANES {
-            let l = self.konst(lane);
-            let p = &mut self.sel.prog;
-            let mut op = |mnem: Op, dst: u32, srcs: Vec<(u32, u8)>| {
-                let (srcs, swz) = srcs.into_iter().unzip();
-                p.push(BorgInstr { mnem: mnem.into(), dst, srcs, swz, imm: 0 });
-            };
-            op(Op::Iseq, t, vec![(q, 0), (l, 0)]);
-            op(Op::Expush, NO_DST, vec![(t, 0)]);
-            op(Op::Lw, old, vec![a]);
-            let v = if let Some(alu) = alu {
-                op(alu, new, vec![(old, 0), x]);
-                (new, 0)
-            } else if let Some(c) = cmp {
-                // old + (old == cmp) * (x - old)
-                op(Op::Iseq, t, vec![(old, 0), c]);
-                op(Op::Isub, u, vec![x, (old, 0)]);
-                op(Op::Imul, w, vec![(t, 0), (u, 0)]);
-                op(Op::Iadd, new, vec![(old, 0), (w, 0)]);
-                (new, 0)
-            } else if let Some(lt) = lt {
-                // max: old + (old < x) * (x - old); min: x + (old < x) * (old - x)
-                let (p0, q0) = if is_min { (x, (old, 0)) } else { ((old, 0), x) };
-                op(lt, t, vec![(old, 0), x]);
-                op(Op::Isub, u, vec![q0, p0]);
-                op(Op::Imul, w, vec![(t, 0), (u, 0)]);
-                op(Op::Iadd, new, vec![p0, (w, 0)]);
-                (new, 0)
-            } else {
-                x
-            };
-            op(Op::Sw, NO_DST, vec![a, v]);
-            op(Op::Expop, NO_DST, vec![]);
-        }
+        let old = self.sel.fresh();
+        let srcs = match cmp {
+            // AMOCAS compares with rd and returns the old word in it.
+            Some(c) => {
+                self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: old, srcs: vec![c.0, c.0], swz: vec![c.1, c.1], imm: 0 });
+                vec![(a.0, a.1), x, (old, 0)]
+            }
+            None => vec![(a.0, a.1), x],
+        };
+        let (srcs, swz): (Vec<u32>, Vec<u8>) = srcs.into_iter().unzip();
+        self.sel.prog.push(BorgInstr { mnem: amo.into(), dst: old, srcs, swz, imm: 0 });
         self.set(d, &[Val::R(old, 0)]);
     }
 }
