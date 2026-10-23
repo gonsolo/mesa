@@ -121,7 +121,8 @@ impl ShaderState {
             let lod_src = srcs.iter().find(|s| s.src_type == nir_tex_src_lod).map(|s| s.src.as_def().index);
             let fetch_lod = is_fetch && !is_ms && lod_src.is_some_and(|l| self.scalar_const(l) != Some(0));
             let fetch_w = is_fetch && !is_ms && tex.coord_components == 3;
-            if is_txl || has_w || has_bias || is_ms || fetch_lod || fetch_w {
+            let dref = srcs.iter().find(|s| s.src_type == nir_tex_src_comparator && !is_fetch).map(|s| s.src.as_def().index);
+            if is_txl || has_w || has_bias || is_ms || fetch_lod || fetch_w || dref.is_some() {
                 let ld = srcs.iter().find(|s| s.src_type == nir_tex_src_lod || s.src_type == nir_tex_src_bias).map(|s| s.src.as_def().index).unwrap_or(cd);
                 if let Some(&bits) = self.consts.get(&ld).filter(|_| is_txl || has_bias) {
                     if !self.sel.vec_map.contains_key(&ld) {
@@ -164,7 +165,11 @@ impl ShaderState {
                 } else {
                     (wz, 0u8)
                 };
-                self.sel.prog.push(BorgInstr { mnem: Op::Texa.into(), dst: NO_DST, srcs: vec![wv, lv, wz], swz: vec![wc, lc, 0], imm: 0 });
+                let (dv, dc) = match dref {
+                    Some(d) => self.scalar_of(d, 0).unwrap_or_else(|bits| (self.konst(bits), 0)),
+                    None => (wz, 0u8),
+                };
+                self.sel.prog.push(BorgInstr { mnem: Op::Texa.into(), dst: NO_DST, srcs: vec![wv, lv, dv], swz: vec![wc, lc, dc], imm: 0 });
             }
             // Constant texel offsets: u in bits 26:23, v in 30:27, a 3D image's w in 31 and 20:18.
             let off = match srcs.iter().find(|s| s.src_type == nir_tex_src_offset) {
@@ -181,7 +186,7 @@ impl ShaderState {
                     })
                 }
             };
-            let off = off | self.tex_slot(tex);
+            let off = off | self.tex_slot(tex) | (dref.is_some() as u32) << 20;
             let ctl = if is_tg4 {
                 // Operation 2 (gather) of the component in bits 19:18.
                 let bits = 2u32 << 16 | (tex.component() & 3) << 18;
