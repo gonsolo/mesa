@@ -72,6 +72,12 @@ pub(crate) enum Op {
     Sra,
     Or,
     And,
+    Lb,
+    Lh,
+    Lw,
+    Lbu,
+    Lhu,
+    Sw,
     Csrrw,
     Csrrs,
 }
@@ -94,10 +100,11 @@ pub(crate) struct Fields {
     pub imm20: u32,
     pub shamtw: u32,
     pub csr: u32,
+    pub simm: u32,
 }
 
 impl Op {
-    pub(crate) const ALL: [Op; 68] = [
+    pub(crate) const ALL: [Op; 74] = [
         Op::Fmadd,
         Op::Tex,
         Op::Texa,
@@ -164,6 +171,12 @@ impl Op {
         Op::Sra,
         Op::Or,
         Op::And,
+        Op::Lb,
+        Op::Lh,
+        Op::Lw,
+        Op::Lbu,
+        Op::Lhu,
+        Op::Sw,
         Op::Csrrw,
         Op::Csrrs,
     ];
@@ -236,6 +249,12 @@ impl Op {
             Op::Sra => "SRA",
             Op::Or => "OR",
             Op::And => "AND",
+            Op::Lb => "LB",
+            Op::Lh => "LH",
+            Op::Lw => "LW",
+            Op::Lbu => "LBU",
+            Op::Lhu => "LHU",
+            Op::Sw => "SW",
             Op::Csrrw => "CSRRW",
             Op::Csrrs => "CSRRS",
         }
@@ -309,6 +328,12 @@ impl Op {
             Op::Sra => 0x40005033,
             Op::Or => 0x00006033,
             Op::And => 0x00007033,
+            Op::Lb => 0x00000003,
+            Op::Lh => 0x00001003,
+            Op::Lw => 0x00002003,
+            Op::Lbu => 0x00004003,
+            Op::Lhu => 0x00005003,
+            Op::Sw => 0x00002023,
             Op::Csrrw => 0x00001073,
             Op::Csrrs => 0x00002073,
         }
@@ -382,6 +407,12 @@ impl Op {
             Op::Sra => 0xfe00707f,
             Op::Or => 0xfe00707f,
             Op::And => 0xfe00707f,
+            Op::Lb => 0x0000707f,
+            Op::Lh => 0x0000707f,
+            Op::Lw => 0x0000707f,
+            Op::Lbu => 0x0000707f,
+            Op::Lhu => 0x0000707f,
+            Op::Sw => 0x0000707f,
             Op::Csrrw => 0x0000707f,
             Op::Csrrs => 0x0000707f,
         }
@@ -455,6 +486,12 @@ impl Op {
             Op::Sra => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.rs2 & 0x1f) << 20),
             Op::Or => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.rs2 & 0x1f) << 20),
             Op::And => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.rs2 & 0x1f) << 20),
+            Op::Lb => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.imm12 & 0xfff) << 20),
+            Op::Lh => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.imm12 & 0xfff) << 20),
+            Op::Lw => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.imm12 & 0xfff) << 20),
+            Op::Lbu => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.imm12 & 0xfff) << 20),
+            Op::Lhu => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.imm12 & 0xfff) << 20),
+            Op::Sw => (((f.simm >> 5) & 0x7f) << 25) | ((f.simm & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.rs2 & 0x1f) << 20),
             Op::Csrrw => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.csr & 0xfff) << 20),
             Op::Csrrs => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.csr & 0xfff) << 20),
         }
