@@ -93,20 +93,20 @@ pub(crate) fn encode_fattr(rd: u8, index: u16) -> Option<u32> {
     Some(Op::Fattr.encode(&Fields { rd: rd as u32, aindex: index as u32, ..Default::default() }))
 }
 
-/// JMP by `offset` words from the jump (18 bits, signed).
-pub(crate) fn encode_jmp(offset: i32) -> Option<u32> {
-    if !(-(1 << 17)..1 << 17).contains(&offset) {
+/// ISA v2: BEQ or BNE rs1, x0 by `offset` words (B-type: 1024 words either way).
+pub(crate) fn encode_rv_branch(op: Op, rs1: u8, offset: i32) -> Option<u32> {
+    if !(-1024..1024).contains(&offset) {
         return None;
     }
-    Some(Op::Jmp.encode(&Fields { joffset: offset as u32, ..Default::default() }))
+    Some(op.encode(&Fields { rs1: rs1 as u32, boff: (offset * 4) as u32, ..Default::default() }))
 }
 
-/// BRZ or BRNZ by `offset` words from the branch (10 bits, signed).
-pub(crate) fn encode_branch(op: Op, rs1: u8, offset: i32) -> Option<u32> {
-    if !(-512..512).contains(&offset) {
+/// ISA v2: JAL x0 by `offset` words (J-type: 2^18 words either way).
+pub(crate) fn encode_jal(offset: i32) -> Option<u32> {
+    if !(-(1 << 18)..1 << 18).contains(&offset) {
         return None;
     }
-    Some(op.encode(&Fields { rs1: rs1 as u32, offset: offset as u32, ..Default::default() }))
+    Some(Op::Jal.encode(&Fields { joff: (offset * 4) as u32, ..Default::default() }))
 }
 
 #[cfg(test)]
@@ -146,17 +146,11 @@ mod tests {
         // funct7 << 25, from hardware/borg/isa/opcodes.
         assert_eq!(encode(Op::Load.into(), 3, 5, 0, 0, 0).unwrap() & 0xFE00_0000, 0x22 << 25);
         assert_eq!(encode(Op::Store.into(), 0, 5, 7, 0, 0).unwrap() & 0xFE00_0000, 0x24 << 25);
-        assert_eq!(encode_branch(Op::Brz, 5, 0).unwrap() & 0xFE00_0000, 0x26 << 25);
-        assert_eq!(encode_branch(Op::Brnz, 5, 0).unwrap() & 0xFE00_0000, 0x28 << 25);
         assert_eq!(encode(Op::Expush.into(), 0, 5, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2A << 25);
         assert_eq!(encode(Op::Exelse.into(), 0, 0, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2C << 25);
         assert_eq!(encode(Op::Expop.into(), 0, 0, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2E << 25);
         assert_eq!(encode(Op::Barrier.into(), 0, 0, 0, 0, 0).unwrap(), 0x3C << 25);
         assert_eq!(encode(Op::Exany.into(), 3, 0, 0, 0, 0).unwrap(), 0x3E << 25 | 3 << 7);
-        // JMP by 0x1_5ABC: funct3 = 2, rs2 = 22, rs1 = 21, rd = 28; by -1: every offset bit set.
-        assert_eq!(encode_jmp(0x1_5ABC), Some(0x50 << 25 | 22 << 20 | 21 << 15 | 2 << 12 | 28 << 7));
-        assert_eq!(encode_jmp(-1), Some(0x50 << 25 | 31 << 20 | 31 << 15 | 7 << 12 | 31 << 7));
-        assert_eq!(encode_jmp(1 << 17), None);
         assert_eq!(encode_sout(0, 0, 0).unwrap() & 0xFE00_0000, 0x42 << 25);
         assert_eq!(encode_fattr(0, 0).unwrap() & 0xFE00_0000, 0x44 << 25);
     }
@@ -211,16 +205,21 @@ mod tests {
     }
 
     #[test]
-    fn branch_offset_splits_across_rs2_and_rd() {
-        // Offset 33 = 0b1_00001 -> high bits 1 in rs2, low bits 1 in rd.
-        let w = encode_branch(Op::Brz, 2, 33).unwrap();
-        assert_eq!(((w >> 20) & 0x1F, (w >> 7) & 0x1F, (w >> 15) & 0x1F), (1, 1, 2), "offset high, low, rs1");
-        // Every offset round-trips as a signed 10-bit value.
-        for t in -512..512i32 {
-            let w = encode_branch(Op::Brnz, 0, t).unwrap();
-            let back = ((((w >> 20) & 0x1F) << 5 | ((w >> 7) & 0x1F)) as i32) << 22 >> 22;
-            assert_eq!(back, t, "offset {t} did not round-trip");
+    fn rv_branch_and_jal_offsets_round_trip() {
+        // B-type: imm[12|10:5] in 31:25, imm[4:1|11] in 11:7; J-type: imm[20|10:1|11|19:12] in 31:12.
+        for t in -1024..1024i32 {
+            let w = encode_rv_branch(Op::Bne, 5, t).unwrap();
+            let b = ((w >> 31) << 12 | ((w >> 7) & 1) << 11 | ((w >> 25) & 0x3F) << 5 | ((w >> 8) & 0xF) << 1) as i32;
+            assert_eq!((b << 19 >> 19) / 4, t, "branch offset {t}");
+            assert_eq!((w >> 15) & 0x1F, 5);
         }
-        assert!(encode_branch(Op::Brz, 0, 512).is_none() && encode_branch(Op::Brz, 0, -513).is_none());
+        assert!(encode_rv_branch(Op::Beq, 5, 1024).is_none() && encode_rv_branch(Op::Beq, 5, -1025).is_none());
+        for t in [-(1 << 18), -1, 0, 1, (1 << 18) - 1] {
+            let w = encode_jal(t).unwrap();
+            let j = ((w >> 31) << 20 | ((w >> 12) & 0xFF) << 12 | ((w >> 20) & 1) << 11 | ((w >> 21) & 0x3FF) << 1) as i32;
+            assert_eq!((j << 11 >> 11) / 4, t, "jal offset {t}");
+            assert_eq!((w >> 7) & 0x1F, 0);
+        }
+        assert!(encode_jal(1 << 18).is_none());
     }
 }

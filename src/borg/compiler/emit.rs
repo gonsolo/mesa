@@ -1,4 +1,4 @@
-use crate::encode::{emit_blob, encode, encode_branch, encode_csrw, encode_fattr, encode_imm, encode_jmp, encode_sout};
+use crate::encode::{emit_blob, encode, encode_csrw, encode_fattr, encode_imm, encode_jal, encode_rv_branch, encode_sout};
 use crate::state::{ShaderState, Stage};
 use crate::{BorgInstr, Loc};
 use std::collections::{HashMap, HashSet};
@@ -58,15 +58,16 @@ impl Emitter<'_> {
         }
     }
 
-    /// BRNZ to the LABEL named in imm; a target out of its reach is a BRZ over a JMP.
+    /// BNE rs, x0 to the LABEL named in imm; a target out of its reach is a BEQ over a JAL.
     fn branch(&mut self, k: usize, i: &BorgInstr, labels: &HashMap<u32, usize>, far: &HashSet<usize>) {
         let t = labels[&i.imm] as i32;
-        let (rs1, at) = (self.operand(i.srcs[0], i.swz[0]).0, self.words.len() as i32);
+        let ((rs1, window), at) = (self.operand(i.srcs[0], i.swz[0]), self.words.len() as i32);
+        self.pending += (window || rs1 == 0) as u32; // r0 is x0
         if far.contains(&k) {
-            self.push(encode_branch(Op::Brz, rs1, 2));
-            self.push(encode_jmp(t - (at + 1)));
+            self.push(encode_rv_branch(Op::Beq, rs1, 2));
+            self.push(encode_jal(t - (at + 1)));
         } else {
-            self.push(encode_branch(Op::Brnz, rs1, t - at));
+            self.push(encode_rv_branch(Op::Bne, rs1, t - at));
         }
     }
 
@@ -164,7 +165,7 @@ pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
 }
 
 /// LABEL word addresses from the program's start, and the BRNZ whose label is out of a branch's
-/// reach: those become BRZ over a JMP, one word longer, so the layout repeats until it settles.
+/// reach: those become BEQ over a JAL, one word longer, so the layout repeats until it settles.
 fn branch_layout(prog: &[BorgInstr], start: usize) -> (HashMap<u32, usize>, HashSet<usize>) {
     let mut far = HashSet::new();
     loop {
@@ -184,7 +185,7 @@ fn branch_layout(prog: &[BorgInstr], start: usize) -> (HashMap<u32, usize>, Hash
         }
         let mut changed = false;
         for (k, a) in at {
-            if !(-512..512).contains(&(labels[&prog[k].imm] as i64 - a as i64)) {
+            if !(-1024..1024).contains(&(labels[&prog[k].imm] as i64 - a as i64)) {
                 changed |= far.insert(k);
             }
         }
@@ -282,16 +283,16 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_back_512_words_is_near() {
-        // Label at 3, BRNZ at 3 + 512: offset -512, the farthest a branch reaches back.
-        let (labels, far) = branch_layout(&prog(512), 3);
+    fn a_branch_back_1024_words_is_near() {
+        // Label at 3, BNE at 3 + 1024: offset -1024, the farthest a branch reaches back.
+        let (labels, far) = branch_layout(&prog(1024), 3);
         assert_eq!(labels[&7], 3);
         assert!(far.is_empty());
     }
 
     #[test]
-    fn a_branch_back_513_words_is_a_brz_over_a_jmp() {
-        let p = prog(513);
+    fn a_branch_back_1025_words_is_a_beq_over_a_jal() {
+        let p = prog(1025);
         let (_, far) = branch_layout(&p, 3);
         assert_eq!(far.into_iter().collect::<Vec<_>>(), vec![p.len() - 1]);
     }
