@@ -87,13 +87,14 @@ pub fn compile_stage(dev: &Device, sc: &mut Scratch, vfetch: u32, si: &VkPipelin
             return;
         }
     };
-    remap_array_bindings(sc, unsafe { &*nir });
     let lines = BORGC_VS_FETCH | BORGC_VS_POINT_QUADS | BORGC_VS_LINES_BIT;
     if vs && vfetch & lines == BORGC_VS_FETCH | BORGC_VS_LINES_BIT {
         lower_lines(nir, vfetch & 0xFFFF);
     }
     let retry = if vs { unsafe { nir_shader_clone(null_mut(), nir) } } else { null_mut() };
+    // After the lowering: a fragment shader's storage images become buffer accesses there.
     unsafe { borg_lower_nir_for_borgc_blend(nir, blend) };
+    remap_array_bindings(sc, unsafe { &*nir });
     let n = unsafe { &*nir };
     sc.frag_reads_pntc = fs && reads_point_coord(n);
     if fs {
@@ -140,6 +141,7 @@ fn compile_blob(
             borg_lower_set_vertex_remat(true);
             borg_lower_nir_for_borgc_blend(retry, blend);
             borg_lower_set_vertex_remat(false);
+            remap_array_bindings(sc, &*retry);
             let mut pairs = std::mem::take(&mut sc.tex_pairs);
             lower_tex_slots(sc, retry, &mut pairs);
             sc.tex_pairs = pairs;
