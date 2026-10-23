@@ -117,7 +117,7 @@ impl Emitter<'_> {
             }
         }
         // RISC-V forms with an immediate: no window operand, and r0 is x0 there.
-        if let Mnem::Op(op @ (Op::Lw | Op::Sw | Op::Slli | Op::Srli | Op::Srai | Op::Addi | Op::Andi | Op::Lui | Op::Csrrs)) = i.mnem {
+        if let Mnem::Op(op @ (Op::Lw | Op::Sw | Op::Slli | Op::Srli | Op::Srai | Op::Addi | Op::Andi | Op::Xori | Op::Sltiu | Op::Lui | Op::Csrrs)) = i.mnem {
             let base = matches!(op, Op::Lw | Op::Sw) && r[0] == 0;
             if f3 != 0 || base || (op == Op::Sw && r[1] == 0) || (op != Op::Sw && rd == 0) {
                 self.pending += 1;

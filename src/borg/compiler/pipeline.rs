@@ -136,9 +136,46 @@ impl ShaderState {
         fuse_fmadd(&mut self.sel.prog, &self.out_roots, &|v| matches!(loc.get(&v), Some(Loc::Uniform(_))));
         schedule_for_pressure(&mut self.sel.prog, &self.out_roots);
         self.copy_tex_results();
+        self.iseq_forms();
         if self.stage == Stage::Fragment {
             self.log_uniformity();
         }
+    }
+
+    /// ISA v2 (B8 step 15): ISEQ as XOR (XORI for a small constant) and SLTIU 1; SEQZ against 0.
+    fn iseq_forms(&mut self) {
+        if !self.sel.prog.iter().any(|i| i.mnem == Op::Iseq) {
+            return;
+        }
+        let small = |b: Option<u32>| b.filter(|&b| (b as i32) >= -2048 && (b as i32) < 2048);
+        let mut out = Vec::with_capacity(self.sel.prog.len());
+        for mut i in std::mem::take(&mut self.sel.prog) {
+            if i.mnem != Op::Iseq {
+                out.push(i);
+                continue;
+            }
+            let (a, b) = ((i.srcs[0], i.swz[0]), (i.srcs[1], i.swz[1]));
+            let (ka, kb) = (small(self.bits_of(a.0)), small(self.bits_of(b.0)));
+            let (x, k) = match (ka, kb) {
+                (_, Some(k)) => (a, k),
+                (Some(k), None) => (b, k),
+                (None, None) => {
+                    let t = self.sel.fresh();
+                    out.push(BorgInstr { mnem: Op::Ixor.into(), dst: t, srcs: vec![a.0, b.0], swz: vec![a.1, b.1], imm: 0 });
+                    ((t, 0), 0)
+                }
+            };
+            let (code, x) = self.window_copy(x);
+            out.extend(code);
+            let x = if k == 0 { x } else {
+                let t = self.sel.fresh();
+                out.push(BorgInstr { mnem: Op::Xori.into(), dst: t, srcs: vec![x.0], swz: vec![x.1], imm: k & 0xFFF });
+                (t, 0)
+            };
+            (i.mnem, i.srcs, i.swz, i.imm) = (Op::Sltiu.into(), vec![x.0], vec![x.1], 1);
+            out.push(i);
+        }
+        self.sel.prog = out;
     }
 
     /// `bits` in a register: ADDI, LUI, or LUI and ADDI.
