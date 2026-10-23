@@ -421,6 +421,11 @@ impl ShaderState {
                     _ => {
                         let mut p = at;
                         loop {
+                            // Not between a TEXAD or TEXS and its TEXD: the fetch would take their state.
+                            while let Some(t) = (0..p).rev().find(|&t| matches!(self.sel.prog[t].mnem, crate::Mnem::Op(Op::Tex | Op::Texd | Op::Texs | Op::Texad))) {
+                                if !matches!(self.sel.prog[t].mnem, crate::Mnem::Op(Op::Texs | Op::Texad)) { break; }
+                                p = t;
+                            }
                             let Some(t) = (0..p).rev().find(|&t| matches!(self.sel.prog[t].mnem, crate::Mnem::Op(Op::Tex | Op::Texd))) else { break };
                             let d = self.sel.prog[t].dst;
                             let used = self.sel.prog[p..].iter().any(|i| i.srcs.contains(&d));
