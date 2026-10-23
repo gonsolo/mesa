@@ -93,6 +93,14 @@ borg_frag_image_filter(const nir_instr *instr, const void *data)
           nir_intrinsic_image_dim(nir_instr_as_intrinsic(instr)) == GLSL_SAMPLER_DIM_2D;
 }
 
+/* The constant array element a deref names; the driver maps (binding, element) to a slot. */
+static nir_def *
+borg_deref_elem(nir_builder *b, nir_deref_instr *d)
+{
+   return d && d->deref_type == nir_deref_type_array && nir_src_is_const(d->arr.index)
+             ? nir_imm_int(b, nir_src_as_uint(d->arr.index)) : nir_imm_int(b, 0);
+}
+
 static nir_def *
 borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
 {
@@ -110,7 +118,7 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
          return NULL;
       const nir_address_format afmt = borg_spirv_options.ssbo_addr_format;
       nir_def *ridx = nir_vulkan_resource_index(b, nir_address_format_num_components(afmt),
-                                                nir_address_format_bit_size(afmt), nir_imm_int(b, 0),
+                                                nir_address_format_bit_size(afmt), borg_deref_elem(b, nir_src_as_deref(st->src[0])),
                                                 .desc_set = ivar->data.descriptor_set,
                                                 .binding = ivar->data.binding,
                                                 .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
@@ -165,7 +173,7 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
             return NULL;
          const nir_address_format tf = borg_spirv_options.ssbo_addr_format;
          nir_def *ti = nir_vulkan_resource_index(b, nir_address_format_num_components(tf),
-                                                 nir_address_format_bit_size(tf), nir_imm_int(b, 0),
+                                                 nir_address_format_bit_size(tf), borg_deref_elem(b, deref),
                                                  .desc_set = tvar->data.descriptor_set,
                                                  .binding = tvar->data.binding,
                                                  .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
@@ -189,7 +197,7 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
 
    const nir_address_format fmt = borg_spirv_options.ssbo_addr_format;
    nir_def *idx = nir_vulkan_resource_index(b, nir_address_format_num_components(fmt),
-                                            nir_address_format_bit_size(fmt), nir_imm_int(b, 0),
+                                            nir_address_format_bit_size(fmt), borg_deref_elem(b, deref),
                                             .desc_set = var->data.descriptor_set,
                                             .binding = var->data.binding,
                                             .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);

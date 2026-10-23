@@ -174,8 +174,9 @@ pub fn compile_compute_stage(dev: &Device, sc: &mut Scratch, si: &VkPipelineShad
             return;
         }
     };
-    remap_array_bindings(sc, unsafe { &*nir });
+    // After the lowering: texel buffers and images become buffer accesses there.
     unsafe { borg_lower_nir_for_borgc(nir) };
+    remap_array_bindings(sc, unsafe { &*nir });
     let mut pairs = Vec::new();
     lower_tex_slots(sc, nir, &mut pairs);
     p.tex_npairs = pairs.len() as u8;
