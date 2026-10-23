@@ -3,8 +3,9 @@ use crate::fixed::{allocate, fixed_regs};
 use crate::opt::{dce, fuse_fmadd, schedule_for_pressure};
 use crate::state::{ShaderState, Stage};
 use crate::survey::{survey, Survey};
-use crate::{BorgInstr, Flags, Loc};
-use std::collections::HashSet;
+use crate::encode::CSR_ROOT;
+use crate::{BorgInstr, Flags, Loc, Mnem};
+use std::collections::{HashMap, HashSet};
 use compiler::bindings::*;
 use crate::opcodes::Op;
 
@@ -111,12 +112,19 @@ impl ShaderState {
 
     pub unsafe fn optimise(&mut self) {
         self.place_const_operands();
+        // Before spilling, so its pressure counts; again below for the pool's and the spills' loads.
+        if matches!(self.stage, Stage::Vertex | Stage::Fragment) {
+            self.root_accesses();
+        }
         if let Some(limit) = self.spill.limit {
             dce(&mut self.sel.prog, &self.out_roots);
             self.spill_to_pressure(limit);
         }
         self.pool_window();
         dce(&mut self.sel.prog, &self.out_roots);
+        if matches!(self.stage, Stage::Vertex | Stage::Fragment) {
+            self.root_accesses();
+        }
         let loc = &self.sel.loc;
         fuse_fmadd(&mut self.sel.prog, &self.out_roots, &|v| matches!(loc.get(&v), Some(Loc::Uniform(_))));
         schedule_for_pressure(&mut self.sel.prog, &self.out_roots);
@@ -124,6 +132,78 @@ impl ShaderState {
         if self.stage == Stage::Fragment {
             self.log_uniformity();
         }
+    }
+
+    /// ISA v2 (B8 step 10): a vertex or fragment shader's LOAD and STORE of word `a` from LS_BASE
+    /// become LW and SW at root + 4a; ROOT holds the same base. A constant word, or a constant
+    /// step from an address already formed in this block, goes into the immediate.
+    fn root_accesses(&mut self) {
+        if !self.sel.prog.iter().any(|i| matches!(i.mnem, Mnem::Op(Op::Load | Op::Store))) {
+            return;
+        }
+        let mut out = Vec::new();
+        let root = match self.sel.prog.first() {
+            Some(i) if i.mnem == Op::Csrrs && i.imm == CSR_ROOT => i.dst,
+            _ => {
+                let root = self.sel.fresh();
+                out.push(BorgInstr { mnem: Op::Csrrs.into(), dst: root, srcs: vec![], swz: vec![], imm: CSR_ROOT });
+                root
+            }
+        };
+        let mut byte: HashMap<u32, (u32, u32)> = HashMap::new();
+        let mut plus: HashMap<u32, (u32, u32)> = HashMap::new();
+        for mut i in std::mem::take(&mut self.sel.prog) {
+            // Not every value is written once: what was formed from a rewritten one is stale.
+            let d = i.dst;
+            byte.retain(|&a, &mut (b, _)| a != d && b != d);
+            plus.retain(|&v, &mut (x, _)| v != d && x != d);
+            match i.mnem {
+                Mnem::Op(Op::Expush | Op::Exelse | Op::Expop | Op::Brz | Op::Brnz | Op::Jmp) | Mnem::Label => byte.clear(),
+                Mnem::Op(Op::Iadd) if i.swz == [0, 0] => {
+                    if let Some(k) = self.bits_of(i.srcs[1]) {
+                        plus.insert(i.dst, (i.srcs[0], k));
+                    }
+                }
+                Mnem::Op(op @ (Op::Load | Op::Store)) => {
+                    let (a, c) = (i.srcs[0], i.swz[0]);
+                    let near = |b: (u32, u32), k: u32| Some((b.0, b.1.wrapping_add(k.wrapping_mul(4)))).filter(|&(_, o)| o < 2048);
+                    let at = match (self.bits_of(a), plus.get(&a).and_then(|&(x, k)| byte.get(&x).map(|&b| (b, k)))) {
+                        (Some(k), _) if c == 0 => near((root, 0), k),
+                        (None, Some((b, k))) if c == 0 => near(b, k),
+                        _ => None,
+                    };
+                    // Else the byte address of x for x + k (spills: lane key + slot), or of a itself.
+                    let (x, k, xc) = match plus.get(&a) {
+                        Some(&(x, k)) if c == 0 && k.wrapping_mul(4) < 2048 => (x, k, 0),
+                        _ => (a, 0, c),
+                    };
+                    let (b, o) = at.unwrap_or_else(|| {
+                        let (t, u) = (self.sel.fresh(), self.sel.fresh());
+                        // A window word reaches a RISC-V instruction through a register.
+                        let (x, xc) = if matches!(self.sel.loc.get(&x), Some(Loc::Uniform(_))) {
+                            let w = self.sel.fresh();
+                            out.push(BorgInstr { mnem: Op::Fmov.into(), dst: w, srcs: vec![x], swz: vec![xc], imm: 0 });
+                            (w, 0)
+                        } else {
+                            (x, xc)
+                        };
+                        out.push(BorgInstr { mnem: Op::Slli.into(), dst: t, srcs: vec![x], swz: vec![xc], imm: 2 });
+                        out.push(BorgInstr { mnem: Op::Add.into(), dst: u, srcs: vec![t, root], swz: vec![0, 0], imm: 0 });
+                        if xc == 0 {
+                            byte.insert(x, (u, 0));
+                        }
+                        (u, k.wrapping_mul(4))
+                    });
+                    i.srcs[0] = b;
+                    i.swz[0] = 0;
+                    i.imm = o;
+                    i.mnem = if op == Op::Load { Op::Lw.into() } else { Op::Sw.into() };
+                }
+                _ => {}
+            }
+            out.push(i);
+        }
+        self.sel.prog = out;
     }
 
     /// Every TEX writes the same register block: a result still read after the next TEX is copied
