@@ -181,14 +181,20 @@ impl ShaderState {
     }
 
     fn spill(&mut self, v: u32) {
+        // A draw shader's lane key includes the scratch base: slot + key is a LW/SW immediate.
         let slot_bits = if self.stage == Stage::Compute {
             crate::compute::SPILL_BASE_WORDS + self.spill.slots * self.invocations()
         } else {
-            SCRATCH_WORDS + 4 * self.spill.slots
+            4 * self.spill.slots
         };
         let mut prog = std::mem::take(&mut self.sel.prog);
         if self.spill.lane.is_none() {
-            let head = self.lane_key();
+            let mut head = self.lane_key();
+            if self.stage != Stage::Compute {
+                let base = self.konst(SCRATCH_WORDS);
+                let key = self.op(&mut head, Op::Iadd, &[self.spill.lane.unwrap(), base]);
+                self.spill.lane = Some(key);
+            }
             prog.splice(0..0, head);
         }
         let lane = self.spill.lane.unwrap();
