@@ -133,7 +133,7 @@ impl ShaderState {
         if !room || self.sel.prog.iter().any(|i| self.needs_helper_lanes(i)) {
             return false;
         }
-        let pinned: Vec<u32> = self.out_roots.iter().copied().chain(self.tex_dsts.iter().copied()).chain(self.fattr_dsts.iter().copied()).chain(self.vert.pos_out.iter().flatten().copied()).chain(self.frag.out.iter().flatten().copied()).collect();
+        let pinned: Vec<u32> = self.out_roots.iter().copied().chain(self.tex_dsts.iter().copied()).chain(self.fattr_dsts.iter().copied()).chain(self.frag.out.iter().flatten().copied()).collect();
         let single_def = |prog: &[BorgInstr], v: u32| {
             prog.iter().filter(|i| i.dst == v).count() == 1
                 && prog.iter().all(|i| i.srcs.iter().zip(&i.swz).all(|(s, &c)| *s != v || c == 0))

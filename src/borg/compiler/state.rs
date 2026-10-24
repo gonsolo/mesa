@@ -138,7 +138,6 @@ pub struct Frag {
 /// What only a vertex shader has.
 #[derive(Default)]
 pub struct Vert {
-    pub pos_out: [Option<u32>; 4],
     pub vertex_id_def: Option<u32>,
     pub descriptor_defs: HashSet<u32>,
 }

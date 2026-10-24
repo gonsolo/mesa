@@ -5,20 +5,11 @@ use crate::opcodes::Op;
 use crate::{Loc, NO_DST};
 use std::collections::HashMap;
 
-pub fn fixed_regs(
-    cx: &ShaderState,
-    pos_out: &[Option<u32>; 4],
-) -> (HashMap<u32, u8>, Vec<u8>) {
+pub fn fixed_regs(cx: &ShaderState) -> (HashMap<u32, u8>, Vec<u8>) {
     let is_vertex = cx.stage == Stage::Vertex;
     let mut forced: HashMap<u32, u8> = HashMap::new();
     let mut extra_reserved: Vec<u8> = Vec::new();
     if is_vertex {
-        // gl_Position components → r0..r3.
-        for (c, v) in pos_out.iter().enumerate() {
-            if let Some(def) = v {
-                forced.insert(*def, c as u8);
-            }
-        }
         // A typed vertex fetch (TEX) writes rd..rd+3: one block, r20..r23, for all of them.
         for &t in &cx.tex_dsts {
             forced.insert(t, 20);

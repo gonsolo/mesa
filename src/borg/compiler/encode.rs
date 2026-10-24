@@ -99,6 +99,8 @@ pub(crate) fn encode(mnem: Mnem, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
 /// The fragment output CSRs (docs/B8_isa_v2.md); out_c1..3 follow out_c0.
 pub(crate) const CSR_OUT_C0: u32 = 0x800;
 pub(crate) const CSR_SAMPLE_MASK: u32 = 0x806;
+/// gl_Position, x..w.
+pub(crate) const CSR_OUT_POS0: u32 = 0x808;
 pub(crate) const CSR_ROOT: u32 = 0xCC0;
 /// System values (docs/B8_isa_v2.md), from 0xCC1: frag_x, frag_y, frag_z, inv_w, bary0..2,
 /// vertex_index, instance_index, local_index, local_id, group_id_x..z, attachment.

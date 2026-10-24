@@ -96,8 +96,9 @@ impl ShaderState {
         if is_fragment {
             self.copy_frag_outputs();
             self.csr_frag_outputs();
+        } else if is_vertex {
+            self.csr_vert_outputs();
         }
-        self.vert.pos_out = self.outs.pos.map(|v| v.map(|(d, _)| d));
         self.frag.out = self.outs.frag.map(|v| v.map(|(d, _)| d));
         self.out_roots.extend(self.outs.roots.iter().copied());
         debug!(
@@ -207,9 +208,7 @@ impl ShaderState {
             | Op::Isltu | Op::Fmov | Op::I2f | Op::F2i | Op::F2h | Op::H2f));
         let custom = |m: Mnem| matches!(m, Mnem::Op(Op::Frcp | Op::Frsq | Op::Fexp2 | Op::Flog2 | Op::Ddx | Op::Ddy | Op::Expush | Op::Exany));
         let x0 = self.sel.x0;
-        // gl_Position.x is forced to r0 (fixed_regs).
-        let pos_x = if self.stage == Stage::Vertex { self.vert.pos_out[0] } else { None };
-        let r0 = |s: &Self, v: u32| Some(v) != x0 && (matches!(s.sel.loc.get(&v), Some(Loc::Fixed(0))) || Some(v) == pos_x);
+        let r0 = |s: &Self, v: u32| Some(v) != x0 && matches!(s.sel.loc.get(&v), Some(Loc::Fixed(0)));
         let mut out = Vec::with_capacity(self.sel.prog.len());
         for mut i in std::mem::take(&mut self.sel.prog) {
             let (x, c) = (x0_forms(i.mnem), custom(i.mnem));
@@ -556,7 +555,7 @@ impl ShaderState {
     }
 
     pub fn assemble(&mut self) -> Option<Vec<u8>> {
-        let (forced, mut extra_reserved) = fixed_regs(self, &self.vert.pos_out);
+        let (forced, mut extra_reserved) = fixed_regs(self);
         self.split_window_reads();
         let Some(alloc) = allocate(self, &forced, &mut extra_reserved) else {
             self.spill.alloc_failed = true;

@@ -1,4 +1,4 @@
-use crate::encode::CSR_OUT_C0;
+use crate::encode::{CSR_OUT_C0, CSR_OUT_POS0};
 use crate::state::{ShaderState, Stage};
 use crate::isel::borg_isel;
 use crate::opt::classify_uniform;
@@ -1321,6 +1321,14 @@ impl ShaderState {
         for c in 0..4 {
             if let Some((v, comp)) = self.outs.frag[c] {
                 self.sel.prog.push(BorgInstr { mnem: Op::Csrrw.into(), dst: NO_DST, srcs: vec![v], swz: vec![comp], imm: CSR_OUT_C0 + c as u32 });
+            }
+        }
+    }
+    /// gl_Position through out_pos0..out_pos3.
+    pub fn csr_vert_outputs(&mut self) {
+        for c in 0..4 {
+            if let Some((v, comp)) = self.outs.pos[c] {
+                self.sel.prog.push(BorgInstr { mnem: Op::Csrrw.into(), dst: NO_DST, srcs: vec![v], swz: vec![comp], imm: CSR_OUT_POS0 + c as u32 });
             }
         }
     }
