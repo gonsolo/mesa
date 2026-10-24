@@ -43,10 +43,6 @@ pub(crate) fn encode(mnem: Mnem, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
         _ => return None,
     };
     let (rd, rs1, rs2, rs3) = (rd as u32, rs1 as u32, rs2 as u32, rs3 as u32);
-    let orig = op;
-    let v1_gone = matches!(op, Op::Iadd | Op::Isub | Op::Ishr | Op::Isrl | Op::Imul | Op::Islt | Op::Isltu | Op::Fmov
-        | Op::I2f | Op::F2i | Op::F2h | Op::H2f | Op::Frcp | Op::Frsq | Op::Ddx | Op::Ddy | Op::Ztest | Op::Expush
-        | Op::Exelse | Op::Expop | Op::Exany | Op::Barrier | Op::Tld | Op::Attidx | Op::Brz | Op::Brnz | Op::Jmp | Op::Fstep | Op::Load | Op::Store | Op::Tex | Op::Texa | Op::Smask | Op::Fsrgb);
     // ISA v2: register-only integer ops in RISC-V form, unless one names r0, which is x0 there.
     let rv = match op {
         Op::Iadd => Some(Op::Add), Op::Isub => Some(Op::Sub), Op::Ishl => Some(Op::Sll),
@@ -89,11 +85,9 @@ pub(crate) fn encode(mnem: Mnem, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
         _ if op == Op::Tld => return Some(Op::TldV2.encode(&Fields { rd, fine: f3 & 1, ..Default::default() })),
         _ => {}
     }
-    // Their v1 forms are gone (B8 v1 cleanup).
-    if v1_gone && op == orig {
-        return None;
-    }
-    Some(op.encode(&Fields { rd, rs1, rs2, rs3, f3, ..Default::default() }))
+    // v1's major opcodes 0x00 and 0x04 are gone (B8 step 7c).
+    let w = op.encode(&Fields { rd, rs1, rs2, rs3, f3, ..Default::default() });
+    (!matches!(w & 0x7f, 0x00 | 0x04)).then_some(w)
 }
 
 /// The fragment output CSRs (docs/B8_isa_v2.md); out_c1..3 follow out_c0.
@@ -132,11 +126,10 @@ pub(crate) fn encode_csrw(rs1: u8, csr: u32) -> Option<u32> {
 }
 
 pub(crate) fn encode_sout(rs2: u8, index: u16, funct3: u32) -> Option<u32> {
-    if index >= 1024 {
-        return None; // 10 bits
+    if index >= 1024 || funct3 != 0 {
+        return None; // 10 bits, no window operand
     }
-    let op = if funct3 == 0 { Op::SoutV2 } else { Op::Sout };
-    Some(op.encode(&Fields { rs2: rs2 as u32, index: index as u32, f3: funct3, ..Default::default() }))
+    Some(Op::SoutV2.encode(&Fields { rs2: rs2 as u32, index: index as u32, ..Default::default() }))
 }
 
 pub(crate) fn encode_fattr(rd: u8, index: u16) -> Option<u32> {
@@ -208,11 +201,11 @@ mod tests {
 
     #[test]
     fn sout_and_fattr_split_the_index_over_two_5_bit_fields() {
-        let s = encode_sout(9, 515, 2).unwrap();
+        let s = encode_sout(9, 515, 0).unwrap();
         assert_eq!((s >> 20) & 0x1F, 9, "rs2 = the stored value");
         assert_eq!((s >> 15) & 0x1F, 16, "index high 5 bits");
         assert_eq!((s >> 7) & 0x1F, 3, "index low 5 bits");
-        assert_eq!((s >> 12) & 0x7, 2, "funct3");
+        assert_eq!(encode_sout(9, 515, 2), None, "no window operand");
 
         let f = encode_fattr(20, 515).unwrap();
         assert_eq!((f >> 20) & 0x1F, 16, "index high 5 bits");
