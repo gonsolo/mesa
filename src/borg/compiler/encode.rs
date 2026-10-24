@@ -194,9 +194,6 @@ mod tests {
 
     #[test]
     fn extended_isa_bases_match_hardware() {
-        // funct7 << 25, from hardware/borg/isa/opcodes.
-        assert_eq!(encode(Op::Load.into(), 3, 5, 0, 0, 0).unwrap() & 0xFE00_0000, 0x22 << 25);
-        assert_eq!(encode(Op::Store.into(), 0, 5, 7, 0, 0).unwrap() & 0xFE00_0000, 0x24 << 25);
         // Custom-2 (0x5B) and custom-3 (0x7B), from hardware/borg/isa/rv_i.
         assert_eq!(encode(Op::Expush.into(), 0, 5, 0, 0, 0).unwrap(), 5 << 15 | 0x7B);
         assert_eq!(encode(Op::Exelse.into(), 0, 0, 0, 0, 0).unwrap(), 1 << 25 | 0x7B);
@@ -225,12 +222,20 @@ mod tests {
     }
 
     #[test]
-    fn tex_is_r4_type_funct2_2_with_the_control_word_in_rs3() {
-        let w = encode(Op::Tex.into(), 20, 15, 7, 9, 0).unwrap();
-        assert_eq!(w & 0x7F, 0x04, "R4-type opcode");
-        assert_eq!((w >> 25) & 0x3, 2, "funct2 = TEX");
+    fn texd_is_custom_1_r4_with_the_descriptor_address_in_rs3() {
+        let w = encode(Op::Texd.into(), 20, 15, 7, 9, 0).unwrap();
+        assert_eq!(w & 0x7F, 0x2B, "custom-1");
+        assert_eq!((w >> 25) & 0x3, 0, "funct2 = TEXD");
         assert_eq!((w >> 27, (w >> 20) & 0x1F, (w >> 15) & 0x1F, (w >> 7) & 0x1F),
-                   (9, 7, 15, 20), "rs3 ctl, rs2 v, rs1 u, rd");
+                   (9, 7, 15, 20), "rs3 descriptor, rs2 v, rs1 u, rd");
+    }
+
+    #[test]
+    fn the_replaced_v1_forms_have_no_encoding() {
+        for m in [Op::Load, Op::Store, Op::Tex, Op::Texa, Op::Smask, Op::Fstep, Op::Attidx] {
+            assert!(encode(m.into(), 7, 5, 6, 0, 0).is_none(), "{m:?}");
+        }
+        assert!(encode(Op::Iadd.into(), 7, 5, 6, 0, 1).is_none(), "IADD with a window operand");
     }
 
     #[test]
@@ -244,17 +249,18 @@ mod tests {
 
     #[test]
     fn load_places_operands_where_the_hardware_reads_them() {
-        let w = encode(Op::Load.into(), 7, 5, 0, 0, 0).unwrap();
-        assert_eq!((w >> 15) & 0x1F, 5, "rs1 = address index");
+        let w = encode_imm(Op::Lw, 7, 5, 0, 8).unwrap();
+        assert_eq!(w >> 20, 8, "imm12");
+        assert_eq!((w >> 15) & 0x1F, 5, "rs1 = address");
         assert_eq!((w >> 7) & 0x1F, 7, "rd = destination");
     }
 
     #[test]
     fn store_and_mask_ops_leave_no_destination() {
-        assert_eq!((encode(Op::Store.into(), 31, 5, 7, 0, 0).unwrap() >> 7) & 0x1F, 0);
+        assert_eq!((encode_imm(Op::Sw, 31, 5, 7, 0).unwrap() >> 7) & 0x1F, 0);
         assert_eq!((encode(Op::Expush.into(), 31, 5, 0, 0, 0).unwrap() >> 7) & 0x1F, 0);
-        // STORE's data operand is rs2.
-        assert_eq!((encode(Op::Store.into(), 0, 5, 7, 0, 0).unwrap() >> 20) & 0x1F, 7);
+        // SW's data operand is rs2.
+        assert_eq!((encode_imm(Op::Sw, 0, 5, 7, 0).unwrap() >> 20) & 0x1F, 7);
     }
 
     #[test]
