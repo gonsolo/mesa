@@ -172,22 +172,15 @@ impl ShaderState {
         }
     }
 
-    /// 1.0, built once: FSTEP of r30 in a fragment shader (no window word).
+    /// 1.0, built once.
     pub fn one(&mut self) -> u32 {
         if let Some(v) = self.one_vreg {
             return v;
         }
         let v = match self.stage {
             Stage::Compute => self.cs_const(1.0f32.to_bits()),
-            Stage::Fragment => {
-                let (v, c) = (self.sel.fresh(), self.sel.fresh());
-                self.sel.loc.insert(c, crate::Loc::Fixed(30));
-                self.frag.per_pixel_fixed.insert(c);
-                self.sel.prog.push(crate::BorgInstr { mnem: Op::Fstep.into(), dst: v, srcs: vec![c], swz: vec![0], imm: 0 });
-                v
-            }
             // A pinned register is not staged for a draw's vertex shader.
-            Stage::Vertex => self.window_word(1.0f32.to_bits()),
+            Stage::Vertex | Stage::Fragment => self.window_word(1.0f32.to_bits()),
             Stage::Other => {
                 let (v, reg) = (self.sel.fresh(), self.preset(1.0f32.to_bits()));
                 self.sel.loc.insert(v, crate::Loc::Fixed(reg));

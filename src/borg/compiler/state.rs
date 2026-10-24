@@ -107,7 +107,6 @@ pub struct ShaderState {
     pub prod: HashMap<u32, (nir_op, Vec<(u32, u8)>)>,
     pub tex_dsts: HashSet<u32>,
     pub fattr_dsts: HashSet<u32>,
-    pub zero_ctl: Option<u32>,
     pub one_vreg: Option<u32>,
     /// How many instructions a built constant is reused for (const_immediates).
     pub const_gap: usize,
@@ -183,7 +182,6 @@ impl ShaderState {
             prod: Default::default(),
             tex_dsts: Default::default(),
             fattr_dsts: Default::default(),
-            zero_ctl: Default::default(),
             one_vreg: Default::default(),
             const_gap: 16,
             push_const_reg: Default::default(),

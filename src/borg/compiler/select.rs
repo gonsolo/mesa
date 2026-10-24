@@ -196,24 +196,8 @@ impl ShaderState {
                 self.konst(1u32 << 21 | off)
             } else if is_fetch || is_txl {
                 self.konst(if is_txl { 2u32 << 21 } else { 1u32 << 16 } | off)
-            } else if off != 0 {
-                self.konst(off)
             } else {
-                match self.zero_ctl {
-                Some(v) => v,
-                None => {
-                    let c = self.sel.next_vreg;
-                    let neg = self.sel.next_vreg + 1;
-                    let z = self.sel.next_vreg + 2;
-                    self.sel.next_vreg += 3;
-                    self.sel.loc.insert(c, Loc::Fixed(30));
-                    self.frag.per_pixel_fixed.insert(c);
-                    self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: neg, srcs: vec![c], swz: vec![0], imm: 0 });
-                    self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: z, srcs: vec![neg], swz: vec![0], imm: 0 });
-                    self.zero_ctl = Some(z);
-                    z
-                }
-                }
+                self.konst(off)
             };
             let ctl = self.tex_dyn_slot(tex, ctl);
             let tex_v = self.sel.next_vreg;
