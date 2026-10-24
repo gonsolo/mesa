@@ -158,6 +158,8 @@ pub(crate) enum Op {
     ExpopV2,
     ExanyV2,
     BarrierV2,
+    Qballot,
+    Qshuf,
     Csrrw,
     Csrrs,
 }
@@ -189,7 +191,7 @@ pub(crate) struct Fields {
 }
 
 impl Op {
-    pub(crate) const ALL: [Op; 154] = [
+    pub(crate) const ALL: [Op; 156] = [
         Op::Fmadd,
         Op::Tex,
         Op::Texa,
@@ -342,6 +344,8 @@ impl Op {
         Op::ExpopV2,
         Op::ExanyV2,
         Op::BarrierV2,
+        Op::Qballot,
+        Op::Qshuf,
         Op::Csrrw,
         Op::Csrrs,
     ];
@@ -500,6 +504,8 @@ impl Op {
             Op::ExpopV2 => "EXPOP.V2",
             Op::ExanyV2 => "EXANY.V2",
             Op::BarrierV2 => "BARRIER.V2",
+            Op::Qballot => "QBALLOT",
+            Op::Qshuf => "QSHUF",
             Op::Csrrw => "CSRRW",
             Op::Csrrs => "CSRRS",
         }
@@ -659,6 +665,8 @@ impl Op {
             Op::ExpopV2 => 0x0400007b,
             Op::ExanyV2 => 0x0600007b,
             Op::BarrierV2 => 0x0000107b,
+            Op::Qballot => 0x0000207b,
+            Op::Qshuf => 0x0200207b,
             Op::Csrrw => 0x00001073,
             Op::Csrrs => 0x00002073,
         }
@@ -818,6 +826,8 @@ impl Op {
             Op::ExpopV2 => 0xffffffff,
             Op::ExanyV2 => 0xfffff07f,
             Op::BarrierV2 => 0xffffffff,
+            Op::Qballot => 0xfff0707f,
+            Op::Qshuf => 0xfe00707f,
             Op::Csrrw => 0x0000707f,
             Op::Csrrs => 0x0000707f,
         }
@@ -977,6 +987,8 @@ impl Op {
             Op::ExpopV2 => 0,
             Op::ExanyV2 => (f.rd & 0x1f) << 7,
             Op::BarrierV2 => 0,
+            Op::Qballot => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15),
+            Op::Qshuf => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.rs2 & 0x1f) << 20),
             Op::Csrrw => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.csr & 0xfff) << 20),
             Op::Csrrs => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.csr & 0xfff) << 20),
         }
