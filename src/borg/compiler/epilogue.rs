@@ -1,8 +1,16 @@
 use crate::state::ShaderState;
 use crate::{packed_layout, BorgInstr, Loc};
 use crate::opcodes::Op;
+use crate::encode::CSR_ATTACHMENT;
 
 impl ShaderState {
+    /// The colour attachment this tile pass renders, plus 4 * slice.
+    fn attachment(&mut self) -> u32 {
+        let d = self.sel.fresh();
+        self.sel.prog.push(BorgInstr { mnem: Op::Csrrs.into(), dst: d, srcs: vec![], swz: vec![], imm: CSR_ATTACHMENT });
+        d
+    }
+
     /// Vertex epilogue for points, which are drawn as quads of six vertices. Fetches the corner's
     /// clip-space offset and point coordinate by vertex index, scales the offset by gl_PointSize
     /// (clamped to 1..64) and w, and adds it to the position. The point coordinate also goes out
@@ -78,14 +86,14 @@ impl ShaderState {
         }
     }
     /// Multiple render targets: converts each target's value to its class (unorm8, snorm8 or
-    /// raw bits), then selects the one for the attachment being rendered (ATTIDX). A target the
+    /// raw bits), then selects the one for the attachment being rendered (CSR attachment). A target the
     /// shader does not write keeps its destination value (TLD).
     pub unsafe fn epilogue_multi_target(&mut self) {
         let n = self.flags.target_count();
         let flags = self.flags;
         let class = |k: usize| flags.target_class(k);
         let cff = self.konst(0xFF);
-        let idx = self.sel.op0(Op::Attidx, vec![]);
+        let idx = self.attachment();
         let zero = self.sel.op0(Op::Isub, vec![idx, idx]);
         let mut vals: Vec<u32> = Vec::new();
         for k in 0..n {
@@ -226,8 +234,8 @@ impl ShaderState {
                 out[w] = words[w].map(|v| (v, 0u8));
             }
         } else {
-            // RAW128: the slice this pass renders (ATTIDX / 4) picks words 0-1 or 2-3.
-            let idx = self.sel.op0(Op::Attidx, vec![]);
+            // RAW128: the slice this pass renders (attachment / 4) picks words 0-1 or 2-3.
+            let idx = self.attachment();
             let zero = self.sel.op0(Op::Isub, vec![idx, idx]);
             let four_w = self.konst(4);
             let four = self.sel.op0(Op::Iadd, vec![four_w, zero]);

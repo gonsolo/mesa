@@ -92,12 +92,13 @@ pub(crate) fn encode(mnem: Mnem, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
 pub(crate) const CSR_OUT_C0: u32 = 0x800;
 pub(crate) const CSR_ROOT: u32 = 0xCC0;
 /// System values (docs/B8_isa_v2.md), from 0xCC1: frag_x, frag_y, frag_z, inv_w, bary0..2,
-/// vertex_index, instance_index, local_index, local_id, group_id_x..z.
+/// vertex_index, instance_index, local_index, local_id, group_id_x..z, attachment.
 pub(crate) const CSR_FRAG_X: u32 = 0xCC1;
 pub(crate) const CSR_BARY0: u32 = 0xCC5;
 pub(crate) const CSR_VERTEX_INDEX: u32 = 0xCC8;
 pub(crate) const CSR_LOCAL_INDEX: u32 = 0xCCA;
 pub(crate) const CSR_GROUP_ID_X: u32 = 0xCCC;
+pub(crate) const CSR_ATTACHMENT: u32 = 0xCCF;
 
 /// LW, SW, SLLI and CSRRS: the RISC-V forms with an immediate (a CSR for CSRRS).
 pub(crate) fn encode_imm(op: Op, rd: u8, rs1: u8, rs2: u8, imm: u32) -> Option<u32> {
