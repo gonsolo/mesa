@@ -164,7 +164,7 @@ pub fn flush_draws(c: &mut CommandBuffer) {
     let (serve, area, wb, nwb) = (c.batch_serve, c.batch_area, c.wb, c.nwb as usize);
     c.nwb = 0;
     c.region_set = null_mut();
-    (c.batch_pool, c.batch_vpool, c.batch_srgb) = (null(), null(), false);
+    (c.batch_pool, c.batch_vpool) = (null(), null());
     (c.heap_top, c.batch_draws, c.batch_img, c.batch_nextra) = (0, 0, null_mut(), 0);
     drop(c.state_sent.take());
     let rec = borgvk_corpus_on();
@@ -589,18 +589,6 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    fn srgb_table(&mut self) -> Result<(), Reject> {
-        if !self.pl.srgb_table || self.c.batch_srgb {
-            return Ok(());
-        }
-        let t: Vec<f32> = (0..=255u8).map(|i| unsafe { util_format_srgb_8unorm_to_linear_float(i) }).collect();
-        let off = self.heap.upload(bytes_of(&t))?;
-        let f = fetch(VK_FORMAT_R32_SFLOAT)?;
-        send_vattr(BORGVK_SRGB_SLOT, f.code, off, 256, f.read_bytes, f.swz);
-        self.c.batch_srgb = true;
-        Ok(())
-    }
-
     fn line_consts(&mut self) -> Result<(), Reject> {
         if !self.lines {
             return Ok(());
@@ -816,7 +804,6 @@ impl Ctx<'_> {
         self.point_corners()?;
         self.pool_stage(false)?;
         self.pool_stage(true)?;
-        self.srgb_table()?;
         self.line_consts()?;
         self.indices()?;
         self.buffers()?;

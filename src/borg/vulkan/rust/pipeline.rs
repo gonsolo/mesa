@@ -47,7 +47,6 @@ pub struct Pipeline {
     pub vp: Vp,       // static viewport/scissor, if the pipeline has them
     pub vp_dyn: bool,        // taken from the command buffer
     pub sc_dyn: bool,
-    pub srgb_table: bool,    // the fragment shader decodes the destination
     pub state_valid: bool,
     pub cs_ok: bool,
     pub cs_nwords: u32,
@@ -272,9 +271,6 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
         sc.state_reg[4] &= !3; // points and lines are not culled
     }
     sc.state_valid = true;
-    // A packed sRGB target (R8, R8G8) decodes its destination through the table.
-    let f0 = formats.first().copied().unwrap_or(VK_FORMAT_UNDEFINED);
-    pl.srgb_table = blend.is_some() && f0 != VK_FORMAT_UNDEFINED && fmt::is_srgb(fmt::pipe(f0)) && packed_info(f0).is_some();
     (pl.blend_cfg, pl.blend_const, pl.state_reg) = (sc.blend_cfg, sc.blend_const, sc.state_reg);
     pl.state_valid = true;
     viewport(pl, &c, discard);

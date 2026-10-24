@@ -55,7 +55,6 @@ pub struct CommandBuffer {
     pub batch_stencil: *mut vk_image_view,
     pub wb: [Writeback; BORGVK_MAX_WRITEBACKS as usize],
     pub nwb: u32,
-    pub batch_srgb: bool,
     pub batch_pool: *const c_void,
     pub batch_vpool: *const c_void,
     pub region_set: *mut DescriptorSet, // the set whose buffer region is at region_base

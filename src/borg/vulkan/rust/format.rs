@@ -146,8 +146,9 @@ pub fn packed_info(f: VkFormat) -> Option<(u32, u32)> {
         };
         return Some((BORGC_FS_HALF | extra, bytes));
     }
+    // sRGB attachments are RGBA8 and BGRA8, converted in the tile path (srgb8888).
     let kind = if d.colorspace == UTIL_FORMAT_COLORSPACE_SRGB {
-        2
+        return None;
     } else if ch[0].pure_integer() != 0 || is_float {
         3
     } else if bits < 32 && ch[0].normalized() != 0 {
@@ -432,7 +433,7 @@ mod tests {
         assert_eq!(flush_format(VK_FORMAT_B8G8R8A8_UNORM), 2);
         assert_eq!(flush_format(VK_FORMAT_B8G8R8A8_SRGB), 2 | FLUSH_SRGB);
         assert_eq!(flush_format(VK_FORMAT_R8G8B8A8_SRGB), 1 | FLUSH_SRGB);
-        assert!(packed_info(VK_FORMAT_R8G8B8A8_SRGB).is_none() && packed_info(VK_FORMAT_R8_SRGB).is_some());
+        assert!(packed_info(VK_FORMAT_R8G8B8A8_SRGB).is_none() && packed_info(VK_FORMAT_R8_SRGB).is_none());
         assert_eq!(flush_format(VK_FORMAT_R32_SFLOAT), 3);
         assert_eq!(flush_format(VK_FORMAT_R16_SFLOAT), 4);
         assert_eq!(flush_format(VK_FORMAT_R8_UNORM), 5);

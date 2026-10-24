@@ -7,6 +7,7 @@
 use crate::entrypoint::{entrypoint, find_out, pointee, vk_error};
 use crate::ffi::*;
 use crate::fmt;
+use crate::format::srgb8888;
 use crate::object::{allocate, Owned, Zeroed};
 use crate::device::Instance;
 use crate::image::blocks;
@@ -96,6 +97,10 @@ fn optimal_features(f: VkFormat) -> VkFormatFeatureFlags {
         return common | VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
     }
     let mut r = common | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+    // The tile path converts sRGB for RGBA8 and BGRA8 only.
+    if fmt::is_srgb(fmt::pipe(f)) && srgb8888(f).is_none() {
+        r &= !VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+    }
     if matches!(
         f,
         VK_FORMAT_R5G6B5_UNORM_PACK16
