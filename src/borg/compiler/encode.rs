@@ -95,6 +95,8 @@ pub(crate) const CSR_OUT_C0: u32 = 0x800;
 pub(crate) const CSR_SAMPLE_MASK: u32 = 0x806;
 /// gl_Position, x..w.
 pub(crate) const CSR_OUT_POS0: u32 = 0x808;
+/// Uniform word k, the window's read port.
+pub(crate) const CSR_UNIFORM0: u32 = 0x840;
 pub(crate) const CSR_ROOT: u32 = 0xCC0;
 /// System values (docs/B8_isa_v2.md), from 0xCC1: frag_x, frag_y, frag_z, inv_w, bary0..2,
 /// vertex_index, instance_index, local_index, local_id, group_id_x..z, attachment.

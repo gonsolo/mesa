@@ -1,4 +1,4 @@
-use crate::encode::{CSR_OUT_C0, CSR_OUT_POS0};
+use crate::encode::{CSR_OUT_C0, CSR_OUT_POS0, CSR_UNIFORM0};
 use crate::state::{ShaderState, Stage};
 use crate::isel::borg_isel;
 use crate::opt::classify_uniform;
@@ -498,11 +498,16 @@ impl ShaderState {
     /// The bits of a window word in a register: + 0 by integer IADD (FMOV is an FMA and would
     /// change a NaN-looking integer); anything else is returned as it is.
     pub(crate) fn window_copy(&mut self, v: (u32, u8)) -> (Vec<BorgInstr>, (u32, u8)) {
-        if !matches!(self.sel.loc.get(&v.0), Some(Loc::Uniform(_))) {
+        let Some(&Loc::Uniform(u)) = self.sel.loc.get(&v.0) else {
             return (Vec::new(), v);
+        };
+        let t = self.sel.fresh();
+        if self.bits_of(v.0).is_none() {
+            // A word the hardware stages (the triangle's record): its CSR.
+            return (vec![BorgInstr { mnem: Op::Csrrs.into(), dst: t, srcs: vec![], swz: vec![], imm: CSR_UNIFORM0 + u as u32 }], (t, 0));
         }
-        // IOR is one of the v1 forms that still read the window.
-        let (x0, z, t) = (self.x0(), self.sel.fresh(), self.sel.fresh());
+        // A constant: an OR with 0 whose window operand the immediates pass replaces.
+        let (x0, z) = (self.x0(), self.sel.fresh());
         (vec![BorgInstr { mnem: Op::Addi.into(), dst: z, srcs: vec![x0.0], swz: vec![0], imm: 0 },
               BorgInstr { mnem: Op::Ior.into(), dst: t, srcs: vec![v.0, z], swz: vec![v.1, 0], imm: 0 }], (t, 0))
     }
