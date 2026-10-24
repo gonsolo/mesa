@@ -183,11 +183,8 @@ impl ShaderState {
             let (x, xc) = if matches!(self.sel.loc.get(&x), Some(Loc::Uniform(_))) {
                 (self.sel.op(Op::Fmov, vec![x], vec![xc]), 0)
             } else { (x, xc) };
-            let (x, xc) = if kind == 2 && comp != 3 {
-                (self.sel.op(Op::Fsrgb, vec![x], vec![xc]), 0)
-            } else { (x, xc) };
             let q = match kind {
-                0 | 2 => {
+                0 => {
                     let cmax = self.konst(((1u32 << bits) as f32 - 1.0).to_bits());
                     let c05 = self.konst(0.5f32.to_bits());
                     let m = self.sel.op(Op::Fmul, vec![x, cmax], vec![xc, 0]);

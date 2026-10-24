@@ -467,53 +467,25 @@ impl ShaderState {
         self.sel.prog.push(BorgInstr { mnem: Op::I2f.into(), dst: alu.def.index, srcs: vec![bits.0], swz: vec![bits.1], imm: 0 });
     }
 
-    /// A select as c * (a - b) + b; the select of the sRGB curve becomes FSRGB.
+    /// A select as c * (a - b) + b.
     unsafe fn bcsel(&mut self, alu: &nir_alu_instr) {
         let s = alu.srcs_as_slice();
-        let then_def = s[1].src.as_def().index;
-        let mut x: Option<(u32, u8)> = None;
-        if let Some((op, tsrcs)) = self.prod.get(&then_def) {
-            if *op == nir_op_fmul && tsrcs.len() == 2 {
-                // 12.92 is a NIR constant, or a window word once an arithmetic reader gave it one.
-                let is12 = |d: u32| {
-                    let bits = self.consts.get(&d).copied().or_else(|| match self.sel.loc.get(&d) {
-                        Some(Loc::Uniform(_)) => self.bits_of(d),
-                        _ => None,
-                    });
-                    bits.map_or(false, |b| (f32::from_bits(b) - 12.92).abs() < 0.1)
-                };
-                x = if is12(tsrcs[0].0) {
-                    Some(tsrcs[1])
-                } else if is12(tsrcs[1].0) {
-                    Some(tsrcs[0])
-                } else {
-                    None
-                };
-            }
+        let n = alu.def.num_components as usize;
+        let mut comps = Vec::new();
+        for k in 0..n {
+            let c = self.operand(s[0].src.as_def().index, s[0].swizzle[k]);
+            let t = self.operand(s[1].src.as_def().index, s[1].swizzle[k]);
+            let e = self.operand(s[2].src.as_def().index, s[2].swizzle[k]);
+            let ne = self.sel.next_vreg;
+            let d = self.sel.next_vreg + 1;
+            let r = self.sel.next_vreg + 2;
+            self.sel.next_vreg += 3;
+            self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: ne, srcs: vec![e.0], swz: vec![e.1], imm: 0 });
+            self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: d, srcs: vec![t.0, ne], swz: vec![t.1, 0], imm: 0 });
+            self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: r, srcs: vec![c.0, d, e.0], swz: vec![c.1, 0, e.1], imm: 0 });
+            comps.push((r, 0u8));
         }
-        if let Some(x) = x {
-            let v = self.sel.next_vreg;
-            self.sel.next_vreg += 1;
-            self.sel.prog.push(BorgInstr { mnem: Op::Fsrgb.into(), dst: v, srcs: vec![x.0], swz: vec![x.1], imm: 0 });
-            self.sel.vec_map.insert(alu.def.index, vec![(v, 0)]);
-        } else {
-            let n = alu.def.num_components as usize;
-            let mut comps = Vec::new();
-            for k in 0..n {
-                let c = self.operand(s[0].src.as_def().index, s[0].swizzle[k]);
-                let t = self.operand(s[1].src.as_def().index, s[1].swizzle[k]);
-                let e = self.operand(s[2].src.as_def().index, s[2].swizzle[k]);
-                let ne = self.sel.next_vreg;
-                let d = self.sel.next_vreg + 1;
-                let r = self.sel.next_vreg + 2;
-                self.sel.next_vreg += 3;
-                self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: ne, srcs: vec![e.0], swz: vec![e.1], imm: 0 });
-                self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: d, srcs: vec![t.0, ne], swz: vec![t.1, 0], imm: 0 });
-                self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: r, srcs: vec![c.0, d, e.0], swz: vec![c.1, 0, e.1], imm: 0 });
-                comps.push((r, 0u8));
-            }
-            self.sel.vec_map.insert(alu.def.index, comps);
-        }
+        self.sel.vec_map.insert(alu.def.index, comps);
     }
 
     /// A value a RISC-V instruction can read: a window word is copied to a register.
@@ -684,14 +656,7 @@ impl ShaderState {
                         f = self.sel.op0(Op::Iand, vec![f, m]);
                     }
                     let v = match kind {
-                        2 if comp != 3 => {
-                            // sRGB to linear: a fetch from the driver's 256-entry table (slot 41).
-                            let ctl = self.konst((1 << 16) | (128 + 41));
-                            let t = self.sel.op0(Op::Tex, vec![f, zero, ctl]);
-                            self.tex_dsts.insert(t);
-                            self.sel.op0(Op::Ior, vec![t, t])
-                        }
-                        0 | 2 => {
+                        0 => {
                             let i = self.sel.op0(Op::I2f, vec![f]);
                             let inv = self.konst((1.0f32 / ((1u64 << bits) - 1) as f32).to_bits());
                             self.sel.op0(Op::Fmul, vec![i, inv])

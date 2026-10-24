@@ -58,8 +58,6 @@ impl ShaderState {
                 eprintln!("borgc:   {} v{}, {}", i.mnem, i.dst, s.join(", "));
             }
         }
-        let srgb = self.sel.prog.iter().any(|i| i.mnem == Op::Fsrgb);
-        self.skipped.retain(|&op| !(op == "fge" && srgb));
         if !self.skipped.is_empty() {
             return Err(format!("unsupported: {}", self.skipped.join(", ")));
         }
