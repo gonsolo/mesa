@@ -719,7 +719,7 @@ impl ShaderState {
                 }).collect();
                 self.sel.vec_map.insert(intr.def.index, comps);
             }
-            _ if self.flags.half() => {
+            _ if self.flags.half() || self.flags.dst_half() => {
                 let nch = self.flags.half_channels();
                 let (rgba, zero) = if let Some(c) = self.frag.dst_half { c } else {
                     let w0 = self.sel.op0(Op::Tld, vec![]);

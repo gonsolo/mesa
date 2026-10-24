@@ -19,6 +19,8 @@
 #define BORGC_FS_HALF1              0x20u
 #define BORGC_FS_HALF3              0x40u
 #define BORGC_FS_HALF4              0x80u
+/* Single target: TLD reads the destination as four FP16 halves (an sRGB attachment's linear colour). */
+#define BORGC_FS_DST_HALF4          0x8000u
 #define BORGC_FS_MULTI_TARGET       0x100u
 #define BORGC_FS_TARGETS_SHIFT      9
 #define BORGC_FS_TARGET_CLASS_SHIFT 12

@@ -49,12 +49,13 @@ impl Flags {
     pub fn r8_unorm(self) -> bool { self.0 & BORGC_FS_R8_UNORM != 0 }
     pub fn alpha_output(self) -> bool { self.0 & BORGC_FS_ALPHA_OUTPUT != 0 }
     pub fn half(self) -> bool { self.0 & BORGC_FS_HALF != 0 }
+    pub fn dst_half(self) -> bool { !self.multi_target() && self.0 & BORGC_FS_DST_HALF4 != 0 }
     pub fn packed(self) -> bool { self.0 & BORGC_FS_PACKED != 0 }
     pub fn multi_target(self) -> bool { self.0 & BORGC_FS_MULTI_TARGET != 0 }
     pub fn target_count(self) -> usize { ((self.0 >> BORGC_FS_TARGETS_SHIFT) & 7) as usize + 1 }
     pub fn target_class(self, k: usize) -> u32 { (self.0 >> (BORGC_FS_TARGET_CLASS_SHIFT + 3 * k as u32)) & 7 }
     pub fn half_channels(self) -> usize {
-        if self.0 & BORGC_FS_HALF1 != 0 { 1 } else if self.0 & BORGC_FS_HALF3 != 0 { 3 } else if self.0 & BORGC_FS_HALF4 != 0 { 4 } else { 2 }
+        if self.0 & BORGC_FS_HALF1 != 0 { 1 } else if self.0 & BORGC_FS_HALF3 != 0 { 3 } else if self.0 & BORGC_FS_HALF4 != 0 || self.dst_half() { 4 } else { 2 }
     }
     pub fn pntc_base(self) -> u32 { self.0 >> BORGC_FS_PNTC_BASE_SHIFT }
 }
