@@ -137,6 +137,7 @@ impl ShaderState {
         schedule_for_pressure(&mut self.sel.prog, &self.out_roots);
         self.copy_tex_results();
         self.iseq_forms();
+        self.fstep_forms();
         if self.stage == Stage::Fragment {
             self.log_uniformity();
         }
@@ -173,6 +174,28 @@ impl ShaderState {
                 (t, 0)
             };
             (i.mnem, i.srcs, i.swz, i.imm) = (Op::Sltiu.into(), vec![x.0], vec![x.1], 1);
+            out.push(i);
+        }
+        self.sel.prog = out;
+    }
+
+    /// FSTEP as SLT from x0 and FCVT.S.W: 1.0 when the raw bits are a positive signed word.
+    fn fstep_forms(&mut self) {
+        if !self.sel.prog.iter().any(|i| i.mnem == Op::Fstep) {
+            return;
+        }
+        let x0 = self.x0().0;
+        let mut out = Vec::with_capacity(self.sel.prog.len());
+        for mut i in std::mem::take(&mut self.sel.prog) {
+            if i.mnem != Op::Fstep {
+                out.push(i);
+                continue;
+            }
+            let (code, x) = self.window_copy((i.srcs[0], i.swz[0]));
+            out.extend(code);
+            let t = self.sel.fresh();
+            out.push(BorgInstr { mnem: Op::Slt.into(), dst: t, srcs: vec![x0, x.0], swz: vec![0, x.1], imm: 0 });
+            (i.mnem, i.srcs, i.swz) = (Op::I2f.into(), vec![t], vec![0]);
             out.push(i);
         }
         self.sel.prog = out;
