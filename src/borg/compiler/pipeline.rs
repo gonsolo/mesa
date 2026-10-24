@@ -302,8 +302,9 @@ impl ShaderState {
                             let (tb, sb) = (word(self, &mut out, 1), word(self, &mut out, 2));
                             let ta = self.add_const(&mut out, tb, 64 * (bits & 0xFF));
                             let sa = self.add_const(&mut out, sb, 16 * ((bits >> 8) & 0xFF));
+                            // TEXS is no RISC-V form: r0 is a register there.
                             let rest = if bits >> 16 == 0 {
-                                self.x0().0
+                                self.materialize(&mut out, 0)
                             } else {
                                 let r = self.sel.fresh();
                                 out.push(BorgInstr { mnem: Op::Lui.into(), dst: r, srcs: vec![], swz: vec![], imm: bits >> 12 & 0xF_FFF0 });
