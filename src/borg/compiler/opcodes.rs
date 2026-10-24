@@ -145,6 +145,8 @@ pub(crate) enum Op {
     Texs,
     FrcpV2,
     FrsqV2,
+    Fexp2,
+    Flog2,
     DdxV2,
     DdyV2,
     TldV2,
@@ -187,7 +189,7 @@ pub(crate) struct Fields {
 }
 
 impl Op {
-    pub(crate) const ALL: [Op; 152] = [
+    pub(crate) const ALL: [Op; 154] = [
         Op::Fmadd,
         Op::Tex,
         Op::Texa,
@@ -327,6 +329,8 @@ impl Op {
         Op::Texs,
         Op::FrcpV2,
         Op::FrsqV2,
+        Op::Fexp2,
+        Op::Flog2,
         Op::DdxV2,
         Op::DdyV2,
         Op::TldV2,
@@ -483,6 +487,8 @@ impl Op {
             Op::Texs => "TEXS",
             Op::FrcpV2 => "FRCP.V2",
             Op::FrsqV2 => "FRSQ.V2",
+            Op::Fexp2 => "FEXP2",
+            Op::Flog2 => "FLOG2",
             Op::DdxV2 => "DDX.V2",
             Op::DdyV2 => "DDY.V2",
             Op::TldV2 => "TLD.V2",
@@ -640,6 +646,8 @@ impl Op {
             Op::Texs => 0x0000102b,
             Op::FrcpV2 => 0x0000000b,
             Op::FrsqV2 => 0x0200000b,
+            Op::Fexp2 => 0x0400000b,
+            Op::Flog2 => 0x0600000b,
             Op::DdxV2 => 0x0000100b,
             Op::DdyV2 => 0x0200100b,
             Op::TldV2 => 0x0000202b,
@@ -797,6 +805,8 @@ impl Op {
             Op::Texs => 0xfe007fff,
             Op::FrcpV2 => 0xfff0707f,
             Op::FrsqV2 => 0xfff0707f,
+            Op::Fexp2 => 0xfff0707f,
+            Op::Flog2 => 0xfff0707f,
             Op::DdxV2 => 0xfe00707f,
             Op::DdyV2 => 0xfe00707f,
             Op::TldV2 => 0xfe0ff07f,
@@ -954,6 +964,8 @@ impl Op {
             Op::Texs => ((f.rs1 & 0x1f) << 15) | ((f.rs2 & 0x1f) << 20),
             Op::FrcpV2 => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15),
             Op::FrsqV2 => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15),
+            Op::Fexp2 => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15),
+            Op::Flog2 => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15),
             Op::DdxV2 => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.fine & 0x1f) << 20),
             Op::DdyV2 => ((f.rd & 0x1f) << 7) | ((f.rs1 & 0x1f) << 15) | ((f.fine & 0x1f) << 20),
             Op::TldV2 => ((f.rd & 0x1f) << 7) | ((f.fine & 0x1f) << 20),
