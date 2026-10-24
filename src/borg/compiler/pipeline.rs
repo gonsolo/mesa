@@ -138,6 +138,7 @@ impl ShaderState {
         self.copy_tex_results();
         self.iseq_forms();
         self.fstep_forms();
+        self.v2_operands();
         if self.stage == Stage::Fragment {
             self.log_uniformity();
         }
@@ -196,6 +197,45 @@ impl ShaderState {
             let t = self.sel.fresh();
             out.push(BorgInstr { mnem: Op::Slt.into(), dst: t, srcs: vec![x0, x.0], swz: vec![0, x.1], imm: 0 });
             (i.mnem, i.srcs, i.swz) = (Op::I2f.into(), vec![t], vec![0]);
+            out.push(i);
+        }
+        self.sel.prog = out;
+    }
+
+    /// Ops without a v1 form: window operands through a register; r0 through a v1 IOR
+    /// copy where the RISC-V or Zfinx form would read it as x0.
+    fn v2_operands(&mut self) {
+        let x0_forms = |m: Mnem| matches!(m, Mnem::Op(Op::Iadd | Op::Isub | Op::Ishr | Op::Isrl | Op::Imul | Op::Islt
+            | Op::Isltu | Op::Fmov | Op::I2f | Op::F2i | Op::F2h | Op::H2f));
+        let custom = |m: Mnem| matches!(m, Mnem::Op(Op::Frcp | Op::Frsq | Op::Ddx | Op::Ddy | Op::Expush | Op::Exany));
+        let x0 = self.sel.x0;
+        // gl_Position.x is forced to r0 (fixed_regs).
+        let pos_x = if self.stage == Stage::Vertex { self.vert.pos_out[0] } else { None };
+        let r0 = |s: &Self, v: u32| Some(v) != x0 && (matches!(s.sel.loc.get(&v), Some(Loc::Fixed(0))) || Some(v) == pos_x);
+        let mut out = Vec::with_capacity(self.sel.prog.len());
+        for mut i in std::mem::take(&mut self.sel.prog) {
+            let (x, c) = (x0_forms(i.mnem), custom(i.mnem));
+            if !x && !c {
+                out.push(i);
+                continue;
+            }
+            for k in 0..i.srcs.len() {
+                let (code, v) = self.window_copy((i.srcs[k], i.swz[k]));
+                out.extend(code);
+                (i.srcs[k], i.swz[k]) = v;
+                if x && r0(self, v.0) {
+                    let t = self.sel.fresh();
+                    out.push(BorgInstr { mnem: Op::Ior.into(), dst: t, srcs: vec![v.0, v.0], swz: vec![v.1, v.1], imm: 0 });
+                    (i.srcs[k], i.swz[k]) = (t, 0);
+                }
+            }
+            if x && i.dst != NO_DST && r0(self, i.dst) {
+                let (d, t) = (i.dst, self.sel.fresh());
+                i.dst = t;
+                out.push(i);
+                out.push(BorgInstr { mnem: Op::Ior.into(), dst: d, srcs: vec![t, t], swz: vec![0, 0], imm: 0 });
+                continue;
+            }
             out.push(i);
         }
         self.sel.prog = out;
