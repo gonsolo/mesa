@@ -714,6 +714,9 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
     }
     let alloc = crate::fixed::allocate(&cx, &forced, &mut reserved).ok_or(OUT_OF_REGISTERS)?;
     let enc = crate::emit::encode_program(&cx, &alloc);
+    if enc.bad > 0 {
+        return Err(format!("{} instruction(s) without an encoding", enc.bad));
+    }
     if enc.pending > 0 || enc.n_preload > 0 {
         return Err(format!("{} operand(s) without a register", enc.pending));
     }

@@ -10,6 +10,8 @@ pub struct Encoded {
     pub n_preload: usize,
     pub n_body: usize,
     pub pending: u32,
+    /// Instructions without an encoding.
+    pub bad: u32,
 }
 
 /// Encodes the allocated program: physical registers for every operand, and the words.
@@ -19,10 +21,12 @@ struct Emitter<'a> {
     pos_gpr: HashMap<(u32, u8), u8>,
     words: Vec<u32>,
     pending: u32,
+    bad: u32,
 }
 
 impl Emitter<'_> {
     fn push(&mut self, w: Option<u32>) {
+        self.bad += w.is_none() as u32;
         self.words.extend(w);
     }
 
@@ -135,7 +139,7 @@ impl Emitter<'_> {
 }
 
 pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
-    let mut e = Emitter { cx, alloc, pos_gpr: HashMap::new(), words: Vec::new(), pending: 0 };
+    let mut e = Emitter { cx, alloc, pos_gpr: HashMap::new(), words: Vec::new(), pending: 0, bad: 0 };
     e.preload_positions();
     let n_preload = e.words.len();
     let (labels, far) = branch_layout(&cx.sel.prog, n_preload);
@@ -166,7 +170,7 @@ pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
         }
     }
     let n_body = e.words.len();
-    Encoded { words: e.words, n_preload, n_body, pending: e.pending }
+    Encoded { words: e.words, n_preload, n_body, pending: e.pending, bad: e.bad }
 }
 
 /// LABEL word addresses from the program's start, and the BRNZ whose label is out of a branch's
