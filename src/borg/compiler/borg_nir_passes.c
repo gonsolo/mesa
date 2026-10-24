@@ -279,25 +279,6 @@ borg_lower_cube(nir_builder *b, nir_instr *instr, void *data)
    return true;
 }
 
-/* log2(x) for x > 0: the exponent plus a polynomial of the mantissa (error under 0.0011). */
-static bool
-borg_flog2_filter(const nir_instr *instr, const void *data)
-{
-   return instr->type == nir_instr_type_alu && nir_instr_as_alu(instr)->op == nir_op_flog2;
-}
-
-static nir_def *
-borg_flog2_lower(nir_builder *b, nir_instr *instr, void *data)
-{
-   nir_def *x = nir_ssa_for_alu_src(b, nir_instr_as_alu(instr), 0);
-   nir_def *e = nir_iadd_imm(b, nir_ushr_imm(b, nir_iand_imm(b, x, 0x7fffffff), 23), -127);
-   nir_def *m = nir_ior_imm(b, nir_iand_imm(b, x, 0x7fffff), 0x3f800000);
-   nir_def *t = nir_fadd_imm(b, m, -1.0f);
-   nir_def *q = nir_ffma(b, t, nir_imm_float(b, -0.15638611f), nir_imm_float(b, 0.42086454f));
-   nir_def *tt = nir_fsub(b, t, nir_fmul(b, t, t));
-   return nir_fadd(b, nir_i2f32(b, e), nir_ffma(b, tt, q, t));
-}
-
 #ifdef BORG_SMALL_NIR
 /* nir_opt_algebraic's tables are 8.6 MB; the on-board build lowers only what the ISA lacks. */
 static bool
@@ -335,7 +316,7 @@ borg_precise_filter(const nir_instr *instr, const void *data)
    if (alu->def.bit_size != 32 || alu->fp_math_ctrl == nir_fp_no_fast_math)
       return false;
    return alu->op == nir_op_fdiv || alu->op == nir_op_fsqrt || alu->op == nir_op_frcp || alu->op == nir_op_frsq ||
-          alu->op == nir_op_fexp2 || alu->op == nir_op_flog2 || alu->op == nir_op_fpow || alu->op == nir_op_fmod;
+          alu->op == nir_op_fmod;
 }
 
 static nir_def *
@@ -372,61 +353,6 @@ borg_is_normal(nir_builder *b, nir_def *x)
    return nir_iand(b, nir_fge(b, ax, nir_imm_float(b, FLT_MIN)), borg_is_finite(b, x));
 }
 
-static nir_def *
-borg_poly(nir_builder *b, nir_def *t, const float *c, int n)
-{
-   nir_def *r = nir_imm_float(b, c[n - 1]);
-   for (int i = n - 2; i >= 0; i--)
-      r = nir_ffma(b, r, t, nir_imm_float(b, c[i]));
-   return r;
-}
-
-/* log2 of a positive normal x: exponent plus t * P(t), t = mantissa - 1 centred on 1 (abs error 1.4e-7). */
-static nir_def *
-borg_log2_core(nir_builder *b, nir_def *x)
-{
-   static const float c[] = { 1.44269490f, -0.72135276f, 0.48092404f, -0.36024198f,
-                              0.28707561f, -0.24882181f, 0.23420985f, -0.14620353f };
-   nir_def *e = nir_iadd_imm(b, nir_ushr_imm(b, nir_iand_imm(b, x, 0x7fffffff), 23), -127);
-   nir_def *m = nir_ior_imm(b, nir_iand_imm(b, x, 0x7fffff), 0x3f800000);
-   nir_def *big = nir_fge(b, m, nir_imm_float(b, 1.41421356f));
-   m = nir_bcsel(b, big, nir_fmul_imm(b, m, 0.5f), m);
-   e = nir_bcsel(b, big, nir_iadd_imm(b, e, 1), e);
-   nir_def *t = nir_fadd_imm(b, m, -1.0f);
-   return nir_fadd(b, nir_i2f32(b, e), nir_fmul(b, t, borg_poly(b, t, c, 8)));
-}
-
-static nir_def *
-borg_is_nan(nir_builder *b, nir_def *x)
-{
-   return nir_flt(b, nir_imm_float(b, INFINITY), nir_fabs(b, x));
-}
-
-static nir_def *
-borg_log2_precise(nir_builder *b, nir_def *x)
-{
-   nir_def *positive = nir_iand(b, borg_is_normal(b, x), nir_flt(b, nir_imm_float(b, 0.0f), x));
-   nir_def *tiny = nir_flt(b, nir_fabs(b, x), nir_imm_float(b, FLT_MIN));
-   nir_def *other = nir_bcsel(b, tiny, nir_imm_float(b, -INFINITY),
-                              nir_bcsel(b, nir_flt(b, x, nir_imm_float(b, 0.0f)), nir_imm_float(b, NAN), x));
-   return nir_bcsel(b, positive, borg_log2_core(b, x), other);
-}
-
-/* 2^x: round x to n, 2^(x-n) from a polynomial, then n added into the exponent field. */
-static nir_def *
-borg_exp2_precise(nir_builder *b, nir_def *x)
-{
-   static const float c[] = { 1.0f, 0.69314718f, 0.24022651f, 0.05550328f, 0.00961803f, 0.00134004f, 0.00015470f };
-   nir_def *xc = nir_bcsel(b, nir_flt(b, x, nir_imm_float(b, -127.0f)), nir_imm_float(b, -127.0f),
-                           nir_bcsel(b, nir_flt(b, nir_imm_float(b, 128.0f), x), nir_imm_float(b, 128.0f), x));
-   nir_def *half = nir_bcsel(b, nir_flt(b, xc, nir_imm_float(b, 0.0f)), nir_imm_float(b, -0.5f), nir_imm_float(b, 0.5f));
-   nir_def *n = nir_f2i32(b, nir_fadd(b, xc, half));
-   nir_def *f = nir_fsub(b, xc, nir_i2f32(b, n));
-   nir_def *bits = nir_iadd(b, borg_poly(b, f, c, 7), nir_ishl_imm(b, n, 23));
-   nir_def *r = nir_bcsel(b, nir_ilt_imm(b, bits, 0x00800000), nir_imm_float(b, 0.0f), bits);
-   return nir_bcsel(b, borg_is_nan(b, x), x, r);
-}
-
 /* x / y; a divisor of 2^120 and above is scaled down first so 1/y stays normal. */
 static nir_def *
 borg_fdiv_precise(nir_builder *b, nir_def *x, nir_def *y)
@@ -460,12 +386,6 @@ borg_precise_lower_exact(nir_builder *b, nir_instr *instr, void *data)
       nir_def *y = nir_ssa_for_alu_src(b, alu, 1);
       return nir_fsub(b, x, nir_fmul(b, y, nir_ffloor(b, borg_fdiv_precise(b, x, y))));
    }
-   case nir_op_flog2:
-      return borg_log2_precise(b, x);
-   case nir_op_fexp2:
-      return borg_exp2_precise(b, x);
-   case nir_op_fpow:
-      return borg_exp2_precise(b, nir_fmul(b, nir_ssa_for_alu_src(b, alu, 1), borg_log2_precise(b, x)));
    default: {
       nir_def *r = borg_rsq_refined(b, x);
       nir_def *s = nir_fmul(b, x, r);
@@ -958,8 +878,6 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(_, nir, nir_lower_tex, &tex_options);
    }
    NIR_PASS(_, nir, nir_shader_instructions_pass, borg_lower_cube, nir_metadata_control_flow, NULL);
-   if (nir->info.stage == MESA_SHADER_FRAGMENT)
-      NIR_PASS(_, nir, nir_shader_lower_instructions, borg_flog2_filter, borg_flog2_lower, NULL);
    if (nir->info.stage == MESA_SHADER_COMPUTE)
       NIR_PASS(_, nir, nir_shader_lower_instructions, borg_precise_filter, borg_precise_lower, NULL);
    NIR_PASS(_, nir, nir_lower_flrp, 32, false);

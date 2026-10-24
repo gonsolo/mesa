@@ -59,7 +59,7 @@ impl ShaderState {
             }
         }
         let srgb = self.sel.prog.iter().any(|i| i.mnem == Op::Fsrgb);
-        self.skipped.retain(|&op| !(matches!(op, "fpow" | "fge") && srgb));
+        self.skipped.retain(|&op| !(op == "fge" && srgb));
         if !self.skipped.is_empty() {
             return Err(format!("unsupported: {}", self.skipped.join(", ")));
         }
@@ -207,7 +207,7 @@ impl ShaderState {
     fn v2_operands(&mut self) {
         let x0_forms = |m: Mnem| matches!(m, Mnem::Op(Op::Iadd | Op::Isub | Op::Ishr | Op::Isrl | Op::Imul | Op::Islt
             | Op::Isltu | Op::Fmov | Op::I2f | Op::F2i | Op::F2h | Op::H2f));
-        let custom = |m: Mnem| matches!(m, Mnem::Op(Op::Frcp | Op::Frsq | Op::Ddx | Op::Ddy | Op::Expush | Op::Exany));
+        let custom = |m: Mnem| matches!(m, Mnem::Op(Op::Frcp | Op::Frsq | Op::Fexp2 | Op::Flog2 | Op::Ddx | Op::Ddy | Op::Expush | Op::Exany));
         let x0 = self.sel.x0;
         // gl_Position.x is forced to r0 (fixed_regs).
         let pos_x = if self.stage == Stage::Vertex { self.vert.pos_out[0] } else { None };

@@ -298,6 +298,7 @@ impl ShaderState {
             nir_op_bcsel => self.bcsel(alu),
             // max/min of integers: a + (a < b) * (b - a) for max, b + (a < b) * (a - b) for min.
             nir_op_umax | nir_op_umin | nir_op_imax | nir_op_imin => self.int_minmax(alu),
+            nir_op_fpow => self.fpow(alu),
             nir_op_bit_count | nir_op_ufind_msb | nir_op_ifind_msb | nir_op_find_lsb | nir_op_umul_high
             | nir_op_imul_high => self.bit_op(alu),
             // |x|: clear the sign bit.
@@ -545,6 +546,16 @@ impl ShaderState {
     }
 
     /// Integer min and max: Zbb MIN, MINU, MAX, MAXU.
+    /// pow(x, y) = FEXP2(y * FLOG2(x)), Vulkan's definition of its precision.
+    unsafe fn fpow(&mut self, alu: &nir_alu_instr) {
+        let sl = alu.srcs_as_slice();
+        let x = self.operand(sl[0].src.as_def().index, sl[0].swizzle[0]);
+        let y = self.operand(sl[1].src.as_def().index, sl[1].swizzle[0]);
+        let l = self.sel.opc(Op::Flog2, &[x]);
+        let m = self.sel.pair(Op::Fmul, y, (l, 0));
+        self.sel.prog.push(BorgInstr { mnem: Op::Fexp2.into(), dst: alu.def.index, srcs: vec![m.0], swz: vec![m.1], imm: 0 });
+    }
+
     unsafe fn int_minmax(&mut self, alu: &nir_alu_instr) {
         let sl = alu.srcs_as_slice();
         let a = self.operand(sl[0].src.as_def().index, sl[0].swizzle[0]);

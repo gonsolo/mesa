@@ -31,6 +31,8 @@ pub(crate) fn borg_isel(op: nir_op) -> Option<Mnem> {
         nir_op_fneg => Op::Fneg.into(),
         nir_op_frcp => Op::Frcp.into(),
         nir_op_frsq => Op::Frsq.into(),
+        nir_op_fexp2 => Op::Fexp2.into(),
+        nir_op_flog2 => Op::Flog2.into(),
         // Integer ops (the Borg core now has these — enables standard addressing).
         nir_op_iadd => Op::Iadd.into(),
         nir_op_ishl => Op::Ishl.into(),
