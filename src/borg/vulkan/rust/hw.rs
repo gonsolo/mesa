@@ -133,7 +133,6 @@ pub fn compute(job: &[u8], path: &std::path::Path) -> bool {
     const GPR: u32 = 0;
     const IMEM: u32 = 128;
     const CONTROL: u32 = 424;
-    const LS_BASE: u32 = 724;
     const C_CTRL: u32 = 752;
     const C_PC: u32 = 756;
     const C_XY: u32 = 760;
@@ -151,7 +150,6 @@ pub fn compute(job: &[u8], path: &std::path::Path) -> bool {
     let prog: Vec<u32> = (0..nprog).map(|_| j.take()).collect();
     let reg = |r: u32, v: u32| unsafe { bh_reg_write(r, v) };
     reg(CONTROL, 2);
-    reg(LS_BASE, 0);
     if nprog > IMEM_WORDS {
         let mut code = prog.clone();
         code.push(0);
