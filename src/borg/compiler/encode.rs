@@ -187,13 +187,14 @@ mod tests {
         // funct7 << 25, from hardware/borg/isa/opcodes.
         assert_eq!(encode(Op::Load.into(), 3, 5, 0, 0, 0).unwrap() & 0xFE00_0000, 0x22 << 25);
         assert_eq!(encode(Op::Store.into(), 0, 5, 7, 0, 0).unwrap() & 0xFE00_0000, 0x24 << 25);
-        assert_eq!(encode(Op::Expush.into(), 0, 5, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2A << 25);
-        assert_eq!(encode(Op::Exelse.into(), 0, 0, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2C << 25);
-        assert_eq!(encode(Op::Expop.into(), 0, 0, 0, 0, 0).unwrap() & 0xFE00_0000, 0x2E << 25);
-        assert_eq!(encode(Op::Barrier.into(), 0, 0, 0, 0, 0).unwrap(), 0x3C << 25);
-        assert_eq!(encode(Op::Exany.into(), 3, 0, 0, 0, 0).unwrap(), 0x3E << 25 | 3 << 7);
-        assert_eq!(encode_sout(0, 0, 0).unwrap() & 0xFE00_0000, 0x42 << 25);
-        assert_eq!(encode_fattr(0, 0).unwrap() & 0xFE00_0000, 0x44 << 25);
+        // Custom-2 (0x5B) and custom-3 (0x7B), from hardware/borg/isa/rv_i.
+        assert_eq!(encode(Op::Expush.into(), 0, 5, 0, 0, 0).unwrap(), 5 << 15 | 0x7B);
+        assert_eq!(encode(Op::Exelse.into(), 0, 0, 0, 0, 0).unwrap(), 1 << 25 | 0x7B);
+        assert_eq!(encode(Op::Expop.into(), 0, 0, 0, 0, 0).unwrap(), 2 << 25 | 0x7B);
+        assert_eq!(encode(Op::Barrier.into(), 0, 0, 0, 0, 0).unwrap(), 1 << 12 | 0x7B);
+        assert_eq!(encode(Op::Exany.into(), 3, 0, 0, 0, 0).unwrap(), 3 << 25 | 3 << 7 | 0x7B);
+        assert_eq!(encode_sout(0, 0, 0).unwrap(), 0x5B);
+        assert_eq!(encode_fattr(0, 0).unwrap(), 1 << 12 | 0x5B);
     }
 
     #[test]
