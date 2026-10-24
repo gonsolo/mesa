@@ -111,7 +111,7 @@ const UNEVEN: [(VkFormat, u32, u32, bool); 14] = [
 /// pixel; None for the natively flushed formats and those not packed.
 pub fn packed_info(f: VkFormat) -> Option<(u32, u32)> {
     if f == VK_FORMAT_R8_UNORM || f == VK_FORMAT_R8G8B8A8_UNORM || f == VK_FORMAT_B8G8R8A8_UNORM
-        || bytes_packed(f) || half1(f) || half2(f) || raw32(f)
+        || srgb8888(f).is_some() || bytes_packed(f) || half1(f) || half2(f) || raw32(f)
     {
         return None;
     }
@@ -170,8 +170,23 @@ pub fn packed_info(f: VkFormat) -> Option<(u32, u32)> {
     Some((opt, bytes))
 }
 
+/// An RGBA8 or BGRA8 sRGB attachment: its flush code (1, 2), which the tile path converts.
+pub fn srgb8888(f: VkFormat) -> Option<u8> {
+    match f {
+        VK_FORMAT_R8G8B8A8_SRGB | VK_FORMAT_A8B8G8R8_SRGB_PACK32 => Some(1),
+        VK_FORMAT_B8G8R8A8_SRGB => Some(2),
+        _ => None,
+    }
+}
+
+/// Bit 3 of a flush code: the attachment is sRGB.
+pub const FLUSH_SRGB: u8 = 8;
+
 /// The tile flusher's format code for a colour attachment.
 pub fn flush_format(f: VkFormat) -> u8 {
+    if let Some(code) = srgb8888(f) {
+        return code | FLUSH_SRGB;
+    }
     if let Some((_, bytes)) = packed_info(f) {
         return match bytes {
             1 => 5,
@@ -415,6 +430,9 @@ mod tests {
     fn flush_formats() {
         assert_eq!(flush_format(VK_FORMAT_R8G8B8A8_UNORM), 1);
         assert_eq!(flush_format(VK_FORMAT_B8G8R8A8_UNORM), 2);
+        assert_eq!(flush_format(VK_FORMAT_B8G8R8A8_SRGB), 2 | FLUSH_SRGB);
+        assert_eq!(flush_format(VK_FORMAT_R8G8B8A8_SRGB), 1 | FLUSH_SRGB);
+        assert!(packed_info(VK_FORMAT_R8G8B8A8_SRGB).is_none() && packed_info(VK_FORMAT_R8_SRGB).is_some());
         assert_eq!(flush_format(VK_FORMAT_R32_SFLOAT), 3);
         assert_eq!(flush_format(VK_FORMAT_R16_SFLOAT), 4);
         assert_eq!(flush_format(VK_FORMAT_R8_UNORM), 5);

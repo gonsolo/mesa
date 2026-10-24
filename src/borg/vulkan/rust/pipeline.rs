@@ -11,7 +11,7 @@ use crate::vk::*;
 use crate::fmt;
 use crate::device::{Device, Scratch};
 use crate::object::{allocate, Owned, Zeroed};
-use crate::format::{bytes_packed, half1, half2, packed_info};
+use crate::format::{bytes_packed, half1, half2, packed_info, srgb8888};
 use crate::wire::{blend_pack, state_pack};
 use std::ptr::{null, null_mut};
 
@@ -127,6 +127,8 @@ fn frag_options(formats: &[VkFormat], mrt: bool, mrt_opt: u32) -> u32 {
         BORGC_FS_R8_UNORM
     } else if packed != 0 {
         packed
+    } else if srgb8888(f).is_some() {
+        BORGC_FS_ALPHA_OUTPUT | BORGC_FS_DST_HALF4
     } else if half1(f) {
         BORGC_FS_HALF | BORGC_FS_HALF1
     } else if half2(f) {
@@ -165,7 +167,8 @@ fn shader_blend(cb: Option<&VkPipelineColorBlendStateCreateInfo>, f0: VkFormat, 
     let mut b = borg_blend::default();
     b.opts.rt = [blend_rt(PIPE_FORMAT_NONE, 0xF, pass, pass); 8];
     b.opts.rt[0] = blend_rt(
-        fmt::pipe(f0),
+        // The tile holds an sRGB attachment's colour linear: blend it as UNORM.
+        fmt::linear(fmt::pipe(f0)),
         a.colorWriteMask & 0xF,
         if enable { ch(a.colorBlendOp, a.srcColorBlendFactor, a.dstColorBlendFactor) } else { pass },
         if enable { ch(a.alphaBlendOp, a.srcAlphaBlendFactor, a.dstAlphaBlendFactor) } else { pass },
@@ -269,8 +272,9 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
         sc.state_reg[4] &= !3; // points and lines are not culled
     }
     sc.state_valid = true;
-    let rt0 = blend.map_or(PIPE_FORMAT_NONE, |b| b.opts.rt[0].format);
-    pl.srgb_table = rt0 != PIPE_FORMAT_NONE && fmt::is_srgb(rt0);
+    // A packed sRGB target (R8, R8G8) decodes its destination through the table.
+    let f0 = formats.first().copied().unwrap_or(VK_FORMAT_UNDEFINED);
+    pl.srgb_table = blend.is_some() && f0 != VK_FORMAT_UNDEFINED && fmt::is_srgb(fmt::pipe(f0)) && packed_info(f0).is_some();
     (pl.blend_cfg, pl.blend_const, pl.state_reg) = (sc.blend_cfg, sc.blend_const, sc.state_reg);
     pl.state_valid = true;
     viewport(pl, &c, discard);
