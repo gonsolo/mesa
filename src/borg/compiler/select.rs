@@ -528,14 +528,10 @@ impl ShaderState {
         if !matches!(self.sel.loc.get(&v.0), Some(Loc::Uniform(_))) {
             return (Vec::new(), v);
         }
-        // FMOV keeps every other value: the FMA changes only NaNs and -0.
-        if self.bits_of(v.0).is_some_and(|b| b != 0x8000_0000 && (b >> 23) & 0xFF != 0xFF) && v.1 == 0 {
-            let t = self.sel.fresh();
-            return (vec![BorgInstr { mnem: Op::Fmov.into(), dst: t, srcs: vec![v.0], swz: vec![v.1], imm: 0 }], (t, 0));
-        }
+        // IOR is one of the v1 forms that still read the window.
         let (x0, z, t) = (self.x0(), self.sel.fresh(), self.sel.fresh());
         (vec![BorgInstr { mnem: Op::Addi.into(), dst: z, srcs: vec![x0.0], swz: vec![0], imm: 0 },
-              BorgInstr { mnem: Op::Iadd.into(), dst: t, srcs: vec![v.0, z], swz: vec![v.1, 0], imm: 0 }], (t, 0))
+              BorgInstr { mnem: Op::Ior.into(), dst: t, srcs: vec![v.0, z], swz: vec![v.1, 0], imm: 0 }], (t, 0))
     }
 
     /// x0, the zero register of ISA v2 instructions (only they may read it).
