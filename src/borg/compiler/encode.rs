@@ -46,7 +46,7 @@ pub(crate) fn encode(mnem: Mnem, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
     let orig = op;
     let v1_gone = matches!(op, Op::Iadd | Op::Isub | Op::Ishr | Op::Isrl | Op::Imul | Op::Islt | Op::Isltu | Op::Fmov
         | Op::I2f | Op::F2i | Op::F2h | Op::H2f | Op::Frcp | Op::Frsq | Op::Ddx | Op::Ddy | Op::Ztest | Op::Expush
-        | Op::Exelse | Op::Expop | Op::Exany | Op::Barrier | Op::Tld | Op::Attidx | Op::Brz | Op::Brnz | Op::Jmp | Op::Fstep);
+        | Op::Exelse | Op::Expop | Op::Exany | Op::Barrier | Op::Tld | Op::Attidx | Op::Brz | Op::Brnz | Op::Jmp | Op::Fstep | Op::Load | Op::Store);
     // ISA v2: register-only integer ops in RISC-V form, unless one names r0, which is x0 there.
     let rv = match op {
         Op::Iadd => Some(Op::Add), Op::Isub => Some(Op::Sub), Op::Ishl => Some(Op::Sll),
