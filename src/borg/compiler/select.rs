@@ -824,7 +824,8 @@ impl ShaderState {
             rest = self.sel.op0(Op::Fmul, vec![rest, inn]);
         }
         rest = not(self, rest);
-        let mask = self.sel.op0(Op::Smask, vec![]);
+        let mask = self.sel.fresh();
+        self.sel.prog.push(BorgInstr { mnem: Op::Csrrs.into(), dst: mask, srcs: vec![], swz: vec![], imm: crate::encode::CSR_SAMPLE_MASK });
         let bit1 = self.konst(1);
         let (mut ox, mut oy) = (None, None);
         for (i, (x, y)) in [(-0.125f32, -0.375f32), (0.375, -0.125), (-0.375, 0.125), (0.125, 0.375)].into_iter().enumerate() {
