@@ -1,7 +1,7 @@
 use crate::state::ShaderState;
 use crate::{packed_layout, BorgInstr, Loc};
 use crate::opcodes::Op;
-use crate::encode::CSR_ATTACHMENT;
+use crate::opcodes::CSR_ATTACHMENT;
 
 impl ShaderState {
     /// The colour attachment this tile pass renders, plus 4 * slice.

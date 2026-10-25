@@ -91,23 +91,6 @@ pub(crate) fn encode(mnem: Mnem, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
     (!matches!(w & 0x7f, 0x00 | 0x04)).then_some(w)
 }
 
-/// The fragment output CSRs (docs/B8_isa_v2.md); out_c1..3 follow out_c0.
-pub(crate) const CSR_OUT_C0: u32 = 0x800;
-pub(crate) const CSR_SAMPLE_MASK: u32 = 0x806;
-/// gl_Position, x..w.
-pub(crate) const CSR_OUT_POS0: u32 = 0x808;
-/// Uniform word k, the window's read port.
-pub(crate) const CSR_UNIFORM0: u32 = 0x840;
-pub(crate) const CSR_ROOT: u32 = 0xCC0;
-/// System values (docs/B8_isa_v2.md), from 0xCC1: frag_x, frag_y, frag_z, inv_w, bary0..2,
-/// vertex_index, instance_index, local_index, local_id, group_id_x..z, attachment.
-pub(crate) const CSR_FRAG_X: u32 = 0xCC1;
-pub(crate) const CSR_BARY0: u32 = 0xCC5;
-pub(crate) const CSR_VERTEX_INDEX: u32 = 0xCC8;
-pub(crate) const CSR_LOCAL_INDEX: u32 = 0xCCA;
-pub(crate) const CSR_GROUP_ID_X: u32 = 0xCCC;
-pub(crate) const CSR_ATTACHMENT: u32 = 0xCCF;
-
 /// LW, SW, SLLI and CSRRS: the RISC-V forms with an immediate (a CSR for CSRRS).
 pub(crate) fn encode_imm(op: Op, rd: u8, rs1: u8, rs2: u8, imm: u32) -> Option<u32> {
     let (rd, rs1, rs2) = (rd as u32, rs1 as u32, rs2 as u32);

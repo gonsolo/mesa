@@ -1,6 +1,6 @@
 use crate::regalloc::regalloc;
 use crate::state::{ShaderState, Stage};
-use crate::encode::CSR_BARY0;
+use crate::opcodes::CSR_BARY0;
 use crate::opcodes::Op;
 use crate::{Loc, NO_DST};
 use std::collections::HashMap;

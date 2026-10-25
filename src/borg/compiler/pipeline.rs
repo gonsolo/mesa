@@ -3,7 +3,7 @@ use crate::fixed::{allocate, fixed_regs};
 use crate::opt::{dce, fuse_fmadd, schedule_for_pressure};
 use crate::state::{ShaderState, Stage};
 use crate::survey::{survey, Survey};
-use crate::encode::{CSR_BARY0, CSR_FRAG_X, CSR_GROUP_ID_X, CSR_LOCAL_INDEX, CSR_ROOT, CSR_VERTEX_INDEX};
+use crate::opcodes::{CSR_BARY0, CSR_FRAG_X, CSR_GROUP_ID_X, CSR_LOCAL_INDEX, CSR_ROOT, CSR_VERTEX_INDEX};
 use crate::{BorgInstr, Flags, Loc, Mnem, NO_DST};
 use std::collections::{HashMap, HashSet};
 use compiler::bindings::*;

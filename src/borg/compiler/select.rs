@@ -1,4 +1,4 @@
-use crate::encode::{CSR_OUT_C0, CSR_OUT_POS0, CSR_UNIFORM0};
+use crate::opcodes::{CSR_OUT_C0, CSR_OUT_POS0, CSR_UNIFORM0};
 use crate::state::{ShaderState, Stage};
 use crate::isel::borg_isel;
 use crate::opt::classify_uniform;
@@ -806,7 +806,7 @@ impl ShaderState {
         }
         rest = not(self, rest);
         let mask = self.sel.fresh();
-        self.sel.prog.push(BorgInstr { mnem: Op::Csrrs.into(), dst: mask, srcs: vec![], swz: vec![], imm: crate::encode::CSR_SAMPLE_MASK });
+        self.sel.prog.push(BorgInstr { mnem: Op::Csrrs.into(), dst: mask, srcs: vec![], swz: vec![], imm: crate::opcodes::CSR_SAMPLE_MASK });
         let bit1 = self.konst(1);
         let (mut ox, mut oy) = (None, None);
         for (i, (x, y)) in [(-0.125f32, -0.375f32), (0.375, -0.125), (-0.375, 0.125), (0.125, 0.375)].into_iter().enumerate() {
