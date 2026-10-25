@@ -10,3 +10,9 @@ borg_opcodes_rs = custom_target(
   output : 'opcodes.rs',
   command : [prog_python, '@INPUT0@', meson.current_source_dir(), '--rust', '@OUTPUT@'],
 )
+borg_tex_format_rs = custom_target(
+  'borg_tex_format_rs',
+  input : files('tex_format_gen.py', 'tex_formats.txt'),
+  output : 'tex_format_table.rs',
+  command : [prog_python, '@INPUT0@', '@INPUT1@', '--rust', '@OUTPUT@'],
+)
