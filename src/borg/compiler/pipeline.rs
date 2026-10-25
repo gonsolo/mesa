@@ -468,8 +468,11 @@ impl ShaderState {
             byte.retain(|&a, &mut (b, _)| a != d && b != d);
             plus.retain(|&v, &mut (x, _)| v != d && x != d);
             match i.mnem {
-                Mnem::Op(Op::Expush | Op::Exelse | Op::Expop | Op::Brz | Op::Brnz | Op::Jmp) | Mnem::Label => byte.clear(),
-                Mnem::Op(Op::Iadd) if i.swz == [0, 0] => {
+                Mnem::Op(Op::Expush | Op::Exelse | Op::Expop | Op::Brz | Op::Brnz | Op::Jmp) | Mnem::Label => {
+                    byte.clear();
+                    plus.clear();
+                }
+                Mnem::Op(Op::Iadd) if i.swz == [0, 0] && i.srcs[0] != d => {
                     if let Some(k) = self.bits_of(i.srcs[1]) {
                         plus.insert(i.dst, (i.srcs[0], k));
                     }
@@ -557,5 +560,51 @@ impl ShaderState {
         }
         words.push(0x0000_0000);
         Some(build_blob(self, &words, n_preload, n_body, pending, &self.frag.out))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::Flags;
+    use crate::opcodes::Op;
+    use crate::state::{ShaderState, Stage};
+    use crate::{BorgInstr, Mnem, NO_DST};
+
+    fn op(op: Op, dst: u32, srcs: Vec<u32>) -> BorgInstr {
+        let swz = vec![0; srcs.len()];
+        BorgInstr { mnem: op.into(), dst, srcs, swz, imm: 0 }
+    }
+
+    /// The register the last LW's address is shifted from, and its offset (the first LW reads the root table).
+    fn lw_base(c: &ShaderState) -> (u32, u32) {
+        let lw = c.sel.prog.iter().rposition(|i| i.mnem == Op::Lw).unwrap();
+        let slli = c.sel.prog[..lw].iter().rev().find(|i| i.mnem == Op::Slli).unwrap();
+        (slli.srcs[0], c.sel.prog[lw].imm)
+    }
+
+    #[test]
+    fn a_load_in_a_loop_uses_its_own_address() {
+        let mut c = ShaderState::new(&[17, 18, 19], Stage::Vertex, Flags(0));
+        let (x, v, y) = (c.sel.fresh(), c.sel.fresh(), c.sel.fresh());
+        let (k, one) = (c.konst(3), c.konst(1));
+        c.sel.prog = vec![
+            op(Op::Iadd, v, vec![x, k]),
+            BorgInstr { mnem: Mnem::Label, dst: NO_DST, srcs: vec![], swz: vec![], imm: 1 },
+            op(Op::Load, y, vec![v]),
+            op(Op::Iadd, x, vec![x, one]),
+            BorgInstr { mnem: Op::Brnz.into(), dst: NO_DST, srcs: vec![x], swz: vec![0], imm: 1 },
+        ];
+        c.root_accesses();
+        assert_eq!(lw_base(&c), (v, 0));
+    }
+
+    #[test]
+    fn an_address_incremented_in_place_is_not_its_own_base() {
+        let mut c = ShaderState::new(&[17, 18, 19], Stage::Vertex, Flags(0));
+        let (x, y) = (c.sel.fresh(), c.sel.fresh());
+        let k = c.konst(3);
+        c.sel.prog = vec![op(Op::Iadd, x, vec![x, k]), op(Op::Load, y, vec![x])];
+        c.root_accesses();
+        assert_eq!(lw_base(&c), (x, 0));
     }
 }
