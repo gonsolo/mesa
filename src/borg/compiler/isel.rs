@@ -44,7 +44,8 @@ pub(crate) fn borg_isel(op: nir_op) -> Option<Mnem> {
         nir_op_ixor => Op::Ixor.into(),
         nir_op_imul => Op::Imul.into(),
         nir_op_i2f16 | nir_op_i2f32 | nir_op_u2f16 | nir_op_u2f32 => Op::I2f.into(),
-        nir_op_f2i16 | nir_op_f2i32 | nir_op_f2u16 | nir_op_f2u32 => Op::F2i.into(),
+        nir_op_f2i16 | nir_op_f2i32 => Op::F2i.into(),
+        nir_op_f2u16 | nir_op_f2u32 => Op::FcvtWuS.into(),
         // Moves / vector (de)construction become register copies, no ISA op.
         nir_op_mov | nir_op_vec2 | nir_op_vec3 | nir_op_vec4 => Mnem::Mov,
         nir_op_i2i16 | nir_op_i2i32 | nir_op_u2u16 | nir_op_u2u32 => Mnem::Mov,

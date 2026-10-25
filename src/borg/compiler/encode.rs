@@ -61,6 +61,7 @@ pub(crate) fn encode(mnem: Mnem, rd: u8, rs1: u8, rs2: u8, rs3: u8, funct3: u32)
         Op::Fneg => Some((Op::FsgnjnS, rs1, 0, 0)),
         Op::Fmov => Some((Op::FsgnjS, rs1, 0, 0)),
         Op::F2i => Some((Op::FcvtWS, 0, 0, 1)),
+        Op::FcvtWuS => Some((Op::FcvtWuS, 0, 0, 1)),
         Op::I2f => Some((Op::FcvtSW, 0, 0, 0)),
         Op::F2h => Some((Op::FcvtHS, 0, 0, 0)),
         Op::H2f => Some((Op::FcvtSH, 0, 0, 0)),
