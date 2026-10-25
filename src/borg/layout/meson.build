@@ -3,7 +3,10 @@
 
 libborg_layout = static_library(
   'borg_layout',
-  files('lib.rs'),
+  structured_sources([
+    files('lib.rs', 'descriptor.rs', 'image.rs', 'tex_format.rs', 'tile.rs'),
+    borg_tex_format_rs,
+  ]),
   gnu_symbol_visibility : 'hidden',
   rust_abi : 'rust',
   rust_args : rust_global_args,

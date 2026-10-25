@@ -33,7 +33,7 @@ macro_rules! formats {
     };
 }
 
-include!("../../../../software/borg/borg_tex_format.rs");
+include!("tex_format_table.rs");
 
 #[cfg(test)]
 mod tests {
