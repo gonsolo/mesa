@@ -19,9 +19,16 @@ _libborgc_flags = static_library(
   rust_args : rust_global_args,
 )
 
+_borgc_sources = structured_sources([
+  files('lib.rs', 'compute.rs', 'config.rs', 'consts.rs', 'corpus.rs', 'emit.rs', 'encode.rs',
+        'epilogue.rs', 'fixed.rs', 'isel.rs', 'opt.rs', 'pipeline.rs', 'regalloc.rs', 'select.rs',
+        'spill.rs', 'state.rs', 'survey.rs'),
+  borg_opcodes_rs,
+])
+
 libborgc = static_library(
   'borgc',
-  files('lib.rs'),
+  _borgc_sources,
   gnu_symbol_visibility : 'hidden',
   rust_abi : 'c',
   rust_args : rust_global_args,
@@ -33,7 +40,7 @@ libborgc = static_library(
 # The same crate for Rust callers (the driver).
 libborgc_rs = static_library(
   'borgc_rs',
-  files('lib.rs'),
+  _borgc_sources,
   gnu_symbol_visibility : 'hidden',
   rust_abi : 'rust',
   rust_args : rust_global_args,
