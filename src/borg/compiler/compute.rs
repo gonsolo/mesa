@@ -108,8 +108,7 @@ impl ShaderState {
                 let stop = n.dst == d || n.srcs.contains(&d) || match n.mnem {
                     Mnem::Op(Op::Store | Op::Sw) => kval.get(&n.srcs[0]).map_or(true, |&b| b == a),
                     _ if crate::has_effect(n) => true,
-                    Mnem::Op(Op::Expush | Op::Exelse | Op::Expop | Op::Brz | Op::Brnz | Op::Barrier) | Mnem::Label => true,
-                    _ => false,
+                    m => crate::block::starts_block(m) || crate::block::ends_block(m),
                 };
                 if stop {
                     break;

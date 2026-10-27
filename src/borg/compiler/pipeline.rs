@@ -1,3 +1,4 @@
+use crate::block::block_starts;
 use crate::emit::{build_blob, encode_program, Encoded};
 use crate::fixed::{allocate, fixed_regs};
 use crate::opt::{dce, fuse_fmadd, schedule_for_latency, schedule_for_pressure};
@@ -251,8 +252,8 @@ impl ShaderState {
         }
         let (mut near, mut built): (HashMap<u32, (u32, usize)>, usize) = (HashMap::new(), 0);
         let mut out = Vec::with_capacity(self.sel.prog.len());
-        for (n, mut i) in std::mem::take(&mut self.sel.prog).into_iter().enumerate() {
-            if matches!(i.mnem, Mnem::Op(Op::Expush | Op::Exelse | Op::Expop | Op::Brz | Op::Brnz | Op::Bne | Op::Beq | Op::Jmp | Op::Barrier) | Mnem::Label) {
+        for (n, (start, mut i)) in block_starts(std::mem::take(&mut self.sel.prog)).enumerate() {
+            if start {
                 near.clear();
             }
             for k in 0..i.srcs.len() {
@@ -307,8 +308,8 @@ impl ShaderState {
         let mut known: HashMap<u32, (u32, u32, u32)> = HashMap::new();
         let mut texs: Option<(u32, u32)> = None;
         let mut out = Vec::new();
-        for mut i in std::mem::take(&mut self.sel.prog) {
-            if matches!(i.mnem, Mnem::Op(Op::Expush | Op::Exelse | Op::Expop | Op::Brz | Op::Brnz | Op::Jmp | Op::Barrier) | Mnem::Label) {
+        for (start, mut i) in block_starts(std::mem::take(&mut self.sel.prog)) {
+            if start {
                 cache.clear();
                 known.clear();
                 texs = None;
@@ -421,8 +422,8 @@ impl ShaderState {
     pub(crate) fn sys_reads(&mut self) {
         let mut cache: HashMap<u32, u32> = HashMap::new();
         let mut out = Vec::new();
-        for mut i in std::mem::take(&mut self.sel.prog) {
-            if matches!(i.mnem, Mnem::Op(Op::Expush | Op::Exelse | Op::Expop | Op::Brz | Op::Brnz | Op::Jmp | Op::Barrier) | Mnem::Label) {
+        for (start, mut i) in block_starts(std::mem::take(&mut self.sel.prog)) {
+            if start {
                 cache.clear();
             }
             for k in 0..i.srcs.len() {
@@ -465,16 +466,16 @@ impl ShaderState {
         };
         let mut byte: HashMap<u32, (u32, u32)> = HashMap::new();
         let mut plus: HashMap<u32, (u32, u32)> = HashMap::new();
-        for mut i in std::mem::take(&mut self.sel.prog) {
+        for (start, mut i) in block_starts(std::mem::take(&mut self.sel.prog)) {
+            if start {
+                byte.clear();
+                plus.clear();
+            }
             // Not every value is written once: what was formed from a rewritten one is stale.
             let d = i.dst;
             byte.retain(|&a, &mut (b, _)| a != d && b != d);
             plus.retain(|&v, &mut (x, _)| v != d && x != d);
             match i.mnem {
-                Mnem::Op(Op::Expush | Op::Exelse | Op::Expop | Op::Brz | Op::Brnz | Op::Jmp) | Mnem::Label => {
-                    byte.clear();
-                    plus.clear();
-                }
                 Mnem::Op(Op::Iadd) if i.swz == [0, 0] && i.srcs[0] != d => {
                     if let Some(k) = self.bits_of(i.srcs[1]) {
                         plus.insert(i.dst, (i.srcs[0], k));

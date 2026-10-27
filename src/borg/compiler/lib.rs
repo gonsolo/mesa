@@ -12,6 +12,7 @@ macro_rules! debug {
     };
 }
 
+mod block;
 mod compute;
 pub use compute::borgc_compile_compute;
 mod config;
