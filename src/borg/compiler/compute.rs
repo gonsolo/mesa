@@ -663,11 +663,11 @@ pub(crate) unsafe fn compile_unified(nir: *mut nir_shader) -> Result<Out, String
     let mut r = Err(String::new());
     for compact in [false, true] {
         for limit in [None, Some(10), Some(8), Some(6), Some(4)] {
-            for cap in [usize::MAX, 8, 4, 0] {
-                r = compile_unified_with(nir, cap, limit, compact, true);
+            for (cap, in_order) in [usize::MAX, 8, 4, 0].into_iter().flat_map(|c| [(c, false), (c, true)]) {
+                r = compile_unified_with(nir, cap, limit, compact, true, in_order);
                 // Packed runs merge by bytes changed: atomics would lose updates.
                 if matches!(&r, Ok(o) if o.flags & 5 == 5) {
-                    r = compile_unified_with(nir, cap, limit, compact, false);
+                    r = compile_unified_with(nir, cap, limit, compact, false, in_order);
                 }
                 if !matches!(&r, Err(e) if e == OUT_OF_REGISTERS) {
                     return r;
@@ -678,9 +678,10 @@ pub(crate) unsafe fn compile_unified(nir: *mut nir_shader) -> Result<Out, String
     r
 }
 
-unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<usize>, compact: bool, pack: bool) -> Result<Out, String> {
+unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<usize>, compact: bool, pack: bool,
+                               in_order: bool) -> Result<Out, String> {
     let (mut cx, entry, _) = ShaderState::start(nir, crate::config::Flags(0), -1);
-    cx.spill.limit = limit;
+    (cx.spill.limit, cx.spill.in_order) = (limit, in_order);
     let ws = (*nir).info.workgroup_size;
     cx.cs.ws = [ws[0] as u32, ws[1] as u32, ws[2] as u32];
     if pack && cx.cs.ws == [1, 1, 1] {

@@ -162,6 +162,142 @@ fn schedule_run(run: Vec<BorgInstr>, out_roots: &HashSet<u32>) -> Vec<BorgInstr>
     order.into_iter().map(|i| slots[i].take().unwrap()).collect()
 }
 
+/// Issue slots from an instruction to one that reads its result (B9 pipeline, with the bypass).
+const LATENCY: usize = 5;
+
+/// Nothing moves across these: the core drains its pipeline for them, or they change control flow
+/// or state the instructions around them see.
+fn barrier(i: &BorgInstr) -> bool {
+    crate::has_effect(i)
+        || !matches!(i.mnem, Mnem::Op(_) | Mnem::Mov | Mnem::Tld1)
+        || matches!(i.mnem, Mnem::Op(Op::Tex | Op::Texa | Op::Texd | Op::Texad | Op::Texs | Op::Fattr | Op::FattrV2
+            | Op::Sout | Op::SoutV2 | Op::Ztest | Op::ZtestV2 | Op::Fexp2 | Op::Flog2 | Op::Load | Op::Store
+            | Op::Lb | Op::Lh | Op::Lw | Op::Lbu | Op::Lhu | Op::Sw | Op::Jal | Op::Jmp | Op::Brz | Op::Brnz
+            | Op::Beq | Op::Bne | Op::Blt | Op::Bge | Op::Bltu | Op::Bgeu | Op::Expush | Op::Exelse | Op::Expop
+            | Op::Exany | Op::ExpushV2 | Op::ExelseV2 | Op::ExpopV2 | Op::ExanyV2 | Op::Barrier | Op::BarrierV2
+            | Op::Csrrw | Op::Smask | Op::Attidx))
+}
+
+/// Reorders each run between barriers so that an instruction issues LATENCY slots after the ones
+/// it reads, without more values live at any point than the program's peak before.
+pub(crate) fn schedule_for_latency(prog: &mut Vec<BorgInstr>, out_roots: &[u32]) {
+    let mut uses: HashMap<u32, usize> = HashMap::new();
+    for &s in prog.iter().flat_map(|i| i.srcs.iter()).chain(out_roots) {
+        *uses.entry(s).or_insert(0) += 1;
+    }
+    // Live values before each instruction, in the order as it is.
+    let defined: HashSet<u32> = prog.iter().map(|i| i.dst).collect();
+    let mut left = uses.clone();
+    let mut live = 0usize;
+    let mut live_before = Vec::with_capacity(prog.len());
+    for i in prog.iter() {
+        live_before.push(live);
+        live = live.saturating_add_signed(live_delta(i, &left, &uses, &defined));
+        for s in &i.srcs {
+            *left.get_mut(s).unwrap() -= 1;
+        }
+    }
+    let cap = live_before.iter().copied().max().unwrap_or(0).max(live);
+
+    let mut out = Vec::with_capacity(prog.len());
+    let mut run = Vec::new();
+    let mut start = 0;
+    let mut left = uses.clone();
+    for (k, i) in std::mem::take(prog).into_iter().enumerate() {
+        if barrier(&i) {
+            out.extend(latency_run(std::mem::take(&mut run), &mut left, &uses, &defined, cap - live_before[start]));
+            for s in &i.srcs {
+                *left.get_mut(s).unwrap() -= 1;
+            }
+            out.push(i);
+            start = k + 1;
+        } else {
+            run.push(i);
+        }
+    }
+    let room = cap - live_before.get(start).copied().unwrap_or(live);
+    out.extend(latency_run(run, &mut left, &uses, &defined, room));
+    *prog = out;
+}
+
+/// The change in live values when `i` issues: its result if anything reads it, less the sources
+/// it reads last.
+fn live_delta(i: &BorgInstr, left: &HashMap<u32, usize>, uses: &HashMap<u32, usize>, defined: &HashSet<u32>) -> isize {
+    let mut d = isize::from(uses.get(&i.dst).is_some_and(|&n| n > 0));
+    let mut seen = HashSet::new();
+    for s in &i.srcs {
+        if defined.contains(s) && seen.insert(*s) && left[s] == i.srcs.iter().filter(|&x| x == s).count() {
+            d -= 1;
+        }
+    }
+    d
+}
+
+fn latency_run(run: Vec<BorgInstr>, left: &mut HashMap<u32, usize>, uses: &HashMap<u32, usize>,
+               defined: &HashSet<u32>, room: usize) -> Vec<BorgInstr> {
+    let n = run.len();
+    let take = |left: &mut HashMap<u32, usize>, run: &[BorgInstr]| {
+        for s in run.iter().flat_map(|i| i.srcs.iter()) {
+            *left.get_mut(s).unwrap() -= 1;
+        }
+    };
+    let here: HashMap<u32, usize> = run.iter().enumerate().map(|(k, i)| (i.dst, k)).collect();
+    let mut seen = HashSet::new();
+    if n <= 2 || here.len() != n
+        || run.iter().any(|i| i.srcs.iter().any(|s| here.contains_key(s) && !seen.contains(s)) || !seen.insert(i.dst)) {
+        take(left, &run);
+        return run;
+    }
+    let preds: Vec<Vec<usize>> = run.iter().map(|i| i.srcs.iter().filter_map(|s| here.get(s).copied()).collect()).collect();
+    let mut height = vec![1usize; n];
+    for k in (0..n).rev() {
+        for &p in &preds[k] {
+            height[p] = height[p].max(height[k] + LATENCY);
+        }
+    }
+    // Issue slot of each instruction in the order given by `order`.
+    let slots = |order: &[usize]| {
+        let mut at = vec![0usize; n];
+        let mut next = 0;
+        for &k in order {
+            at[k] = preds[k].iter().map(|&p| at[p] + LATENCY).max().unwrap_or(0).max(next);
+            next = at[k] + 1;
+        }
+        next
+    };
+
+    let mut l = left.clone();
+    let (mut order, mut done, mut at) = (Vec::with_capacity(n), vec![false; n], vec![0usize; n]);
+    let (mut live, mut next) = (0isize, 0usize);
+    while order.len() < n {
+        let ready = (0..n).filter(|&k| !done[k] && preds[k].iter().all(|&p| done[p]));
+        let best = ready
+            .map(|k| {
+                let d = live_delta(&run[k], &l, uses, defined);
+                let issue = preds[k].iter().map(|&p| at[p] + LATENCY).max().unwrap_or(0).max(next);
+                (live + d > room as isize, issue, std::cmp::Reverse(height[k]), k, d)
+            })
+            .min()
+            .expect("an SSA run always has a ready instruction");
+        let (over, issue, _, k, d) = best;
+        if over {
+            take(left, &run);
+            return run;
+        }
+        (done[k], at[k], next, live) = (true, issue, issue + 1, live + d);
+        for s in &run[k].srcs {
+            *l.get_mut(s).unwrap() -= 1;
+        }
+        order.push(k);
+    }
+    take(left, &run);
+    if slots(&order) >= slots(&(0..n).collect::<Vec<_>>()) {
+        return run;
+    }
+    let mut slots_of: Vec<Option<BorgInstr>> = run.into_iter().map(Some).collect();
+    order.into_iter().map(|k| slots_of[k].take().unwrap()).collect()
+}
+
 pub(crate) fn fuse_fmadd(
     prog: &mut Vec<BorgInstr>,
     out_roots: &[u32],
@@ -242,4 +378,43 @@ pub(crate) fn classify_uniform(prog: &[BorgInstr], roots: &HashSet<u32>) -> Hash
         }
     }
     uniform
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn op(m: Op, dst: u32, srcs: &[u32]) -> BorgInstr {
+        BorgInstr { mnem: m.into(), dst, srcs: srcs.to_vec(), swz: vec![0; srcs.len()], imm: 0 }
+    }
+    fn dsts(p: &[BorgInstr]) -> Vec<u32> {
+        p.iter().map(|i| i.dst).collect()
+    }
+
+    #[test]
+    fn interleaves_two_dependent_chains() {
+        // 10 -> 11 -> 12 and 20 -> 21 -> 22, from inputs 1 and 2.
+        let mut p = vec![op(Op::Fadd, 10, &[1, 1]), op(Op::Fadd, 11, &[10, 1]), op(Op::Fadd, 12, &[11, 1]),
+                         op(Op::Fadd, 20, &[2, 2]), op(Op::Fadd, 21, &[20, 2]), op(Op::Fadd, 22, &[21, 2])];
+        schedule_for_latency(&mut p, &[12, 22]);
+        assert_eq!(dsts(&p), [10, 20, 11, 21, 12, 22]);
+    }
+
+    #[test]
+    fn nothing_moves_across_a_barrier() {
+        let mut p = vec![op(Op::Fadd, 10, &[1, 1]), op(Op::Fadd, 11, &[10, 1]), op(Op::Tex, 30, &[11, 11, 11]),
+                         op(Op::Fadd, 20, &[2, 2]), op(Op::Fadd, 21, &[20, 2]), op(Op::Fadd, 22, &[1, 2])];
+        schedule_for_latency(&mut p, &[21, 22, 30]);
+        assert_eq!(dsts(&p)[..3], [10, 11, 30]);
+    }
+
+    #[test]
+    fn keeps_the_order_when_it_would_need_more_registers() {
+        // One value live at a time as given; interleaving the chains would hold two.
+        let mut p = vec![op(Op::Fadd, 10, &[1, 1]), op(Op::Fadd, 11, &[10, 1]), op(Op::Fadd, 12, &[11, 1]),
+                         op(Op::Fadd, 20, &[2, 2]), op(Op::Fadd, 21, &[20, 2]), op(Op::Fadd, 22, &[21, 2])];
+        let before = dsts(&p);
+        schedule_for_latency(&mut p, &[]);
+        assert_eq!(dsts(&p), before);
+    }
 }

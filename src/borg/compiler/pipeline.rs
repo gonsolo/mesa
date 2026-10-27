@@ -1,6 +1,6 @@
 use crate::emit::{build_blob, encode_program, Encoded};
 use crate::fixed::{allocate, fixed_regs};
-use crate::opt::{dce, fuse_fmadd, schedule_for_pressure};
+use crate::opt::{dce, fuse_fmadd, schedule_for_latency, schedule_for_pressure};
 use crate::state::{ShaderState, Stage};
 use crate::survey::{survey, Survey};
 use crate::opcodes::{CSR_BARY0, CSR_FRAG_X, CSR_GROUP_ID_X, CSR_LOCAL_INDEX, CSR_ROOT, CSR_VERTEX_INDEX};
@@ -138,6 +138,9 @@ impl ShaderState {
         self.iseq_forms();
         self.fstep_forms();
         self.v2_operands();
+        if !self.spill.in_order {
+            schedule_for_latency(&mut self.sel.prog, &self.out_roots);
+        }
         if self.stage == Stage::Fragment {
             self.log_uniformity();
         }
