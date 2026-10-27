@@ -360,10 +360,11 @@ unsafe fn compile_nir_inner(
     let forced = config::env().spill_limit;
     // Last, constants built at each use: no register held between uses.
     let limits = [forced, Some(20), Some(18), Some(16), Some(14), Some(12), Some(10)];
-    for (gap, limit) in [16, 0].into_iter().flat_map(|g| limits.map(|l| (g, l))) {
+    let attempts = [16, 0].into_iter().flat_map(|g| limits.map(|l| (g, l)));
+    for ((gap, limit), in_order) in attempts.flat_map(|a| [(a, false), (a, true)]) {
         let (mut cx, entry, total) = ShaderState::start(nir, flags, out_select);
         (info.push_window, info.spill_slots) = (cx.frag.push_window as u32, 0);
-        (cx.spill.limit, cx.const_gap) = (limit, gap);
+        (cx.spill.limit, cx.const_gap, cx.spill.in_order) = (limit, gap, in_order);
         cx.select_entry(entry);
         if let Err(e) = cx.check_selected() {
             eprintln!("borgc: refused: {e}");

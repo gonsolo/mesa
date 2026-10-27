@@ -146,6 +146,8 @@ pub struct Vert {
 #[derive(Default)]
 pub struct Spill {
     pub limit: Option<usize>,
+    /// Keeps the pressure order: the retry when the latency order runs out of registers.
+    pub in_order: bool,
     pub alloc_failed: bool,
     pub slots: u32,
     pub lane: Option<u32>,
