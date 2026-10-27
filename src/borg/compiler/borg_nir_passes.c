@@ -328,7 +328,7 @@ borg_div_sqrt_lower(nir_builder *b, nir_instr *instr, void *data)
    return nir_fmul(b, nir_ssa_for_alu_src(b, alu, 0), nir_frsq(b, nir_ssa_for_alu_src(b, sq, 0)));
 }
 
-/* FRCP and FRSQ are 10-bit table lookups; compute shaders need full precision, so refine them. */
+/* FRCP and FRSQ are 10-bit table lookups; Vulkan wants 2.5 ULP for 1/x and division, 2 for inversesqrt. */
 static bool
 borg_precise_filter(const nir_instr *instr, const void *data)
 {
@@ -901,8 +901,7 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    }
    NIR_PASS(_, nir, nir_shader_instructions_pass, borg_lower_cube, nir_metadata_control_flow, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_div_sqrt_filter, borg_div_sqrt_lower, NULL);
-   if (nir->info.stage == MESA_SHADER_COMPUTE)
-      NIR_PASS(_, nir, nir_shader_lower_instructions, borg_precise_filter, borg_precise_lower, NULL);
+   NIR_PASS(_, nir, nir_shader_lower_instructions, borg_precise_filter, borg_precise_lower, NULL);
    NIR_PASS(_, nir, nir_lower_flrp, 32, false);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_frexp_filter, borg_frexp_lower, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_sincos_filter, borg_sincos_lower, NULL);
