@@ -306,6 +306,28 @@ borg_basic_alu_lower(nir_builder *b, nir_instr *instr, void *data)
 }
 #endif
 
+/* x / sqrt(y) as x * inversesqrt(y): one refined FRSQ instead of a refined sqrt and a division. */
+static bool
+borg_div_sqrt_filter(const nir_instr *instr, const void *data)
+{
+   if (instr->type != nir_instr_type_alu)
+      return false;
+   const nir_alu_instr *alu = nir_instr_as_alu(instr);
+   if (alu->op != nir_op_fdiv || alu->def.bit_size != 32)
+      return false;
+   nir_alu_instr *sq = nir_def_as_alu_or_null(alu->src[1].src.ssa);
+   return sq && sq->op == nir_op_fsqrt && sq->def.num_components == 1;
+}
+
+static nir_def *
+borg_div_sqrt_lower(nir_builder *b, nir_instr *instr, void *data)
+{
+   nir_alu_instr *alu = nir_instr_as_alu(instr);
+   nir_alu_instr *sq = nir_def_as_alu_or_null(alu->src[1].src.ssa);
+   b->fp_math_ctrl = alu->fp_math_ctrl;
+   return nir_fmul(b, nir_ssa_for_alu_src(b, alu, 0), nir_frsq(b, nir_ssa_for_alu_src(b, sq, 0)));
+}
+
 /* FRCP and FRSQ are 10-bit table lookups; compute shaders need full precision, so refine them. */
 static bool
 borg_precise_filter(const nir_instr *instr, const void *data)
@@ -878,6 +900,7 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(_, nir, nir_lower_tex, &tex_options);
    }
    NIR_PASS(_, nir, nir_shader_instructions_pass, borg_lower_cube, nir_metadata_control_flow, NULL);
+   NIR_PASS(_, nir, nir_shader_lower_instructions, borg_div_sqrt_filter, borg_div_sqrt_lower, NULL);
    if (nir->info.stage == MESA_SHADER_COMPUTE)
       NIR_PASS(_, nir, nir_shader_lower_instructions, borg_precise_filter, borg_precise_lower, NULL);
    NIR_PASS(_, nir, nir_lower_flrp, 32, false);
