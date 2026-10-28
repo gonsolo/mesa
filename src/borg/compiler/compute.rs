@@ -654,33 +654,32 @@ impl ShaderState {
     }
 }
 
-const OUT_OF_REGISTERS: &str = "out of registers";
+pub(crate) const OUT_OF_REGISTERS: &str = "out of registers";
 
-/// Fewer constants in registers leave more for values: retried like the graphics spill limits,
-/// last compact: loads sunk to their uses and pool loads kept inside branches.
+/// Fewer constants in registers leave more for values, the pressure order too, last compact:
+/// loads sunk to their uses and pool loads kept inside branches. Only then values spill.
 pub(crate) unsafe fn compile_unified(nir: *mut nir_shader) -> Result<Out, String> {
+    let tries = [false, true].into_iter().flat_map(|compact| {
+        [usize::MAX, 8, 4, 0].into_iter().flat_map(move |c| [(c, false), (c, true)]).map(move |(c, o)| (compact, c, o, false))
+    });
     let mut r = Err(String::new());
-    for compact in [false, true] {
-        for limit in [None, Some(10), Some(8), Some(6), Some(4)] {
-            for (cap, in_order) in [usize::MAX, 8, 4, 0].into_iter().flat_map(|c| [(c, false), (c, true)]) {
-                r = compile_unified_with(nir, cap, limit, compact, true, in_order);
-                // Packed runs merge by bytes changed: atomics would lose updates.
-                if matches!(&r, Ok(o) if o.flags & 5 == 5) {
-                    r = compile_unified_with(nir, cap, limit, compact, false, in_order);
-                }
-                if !matches!(&r, Err(e) if e == OUT_OF_REGISTERS) {
-                    return r;
-                }
-            }
+    for (compact, cap, in_order, spill) in tries.chain([(true, 0, true, true)]) {
+        r = compile_unified_with(nir, cap, spill, compact, true, in_order);
+        // Packed runs merge by bytes changed: atomics would lose updates.
+        if matches!(&r, Ok(o) if o.flags & 5 == 5) {
+            r = compile_unified_with(nir, cap, spill, compact, false, in_order);
+        }
+        if !matches!(&r, Err(e) if e == OUT_OF_REGISTERS) {
+            return r;
         }
     }
     r
 }
 
-unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<usize>, compact: bool, pack: bool,
+unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, spill: bool, compact: bool, pack: bool,
                                in_order: bool) -> Result<Out, String> {
     let (mut cx, entry, _) = ShaderState::start(nir, crate::config::Flags(0), -1);
-    (cx.spill.limit, cx.spill.in_order) = (limit, in_order);
+    cx.spill.in_order = in_order;
     let ws = (*nir).info.workgroup_size;
     cx.cs.ws = [ws[0] as u32, ws[1] as u32, ws[2] as u32];
     if pack && cx.cs.ws == [1, 1, 1] {
@@ -697,9 +696,6 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
         cx.spill_across_barriers()?;
     }
     cx.optimise();
-    if cx.spill.slots > 0 {
-        debug!("borgc[compute]: spilled {} value(s) to keep {:?} live", cx.spill.slots, limit);
-    }
     cx.byte_accesses();
     cx.pool_consts(cap, !compact)?;
     cx.refusal()?;
@@ -711,6 +707,12 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
         let rd = (0..=20u8).rev().find(|&r| (r..r + 4).all(|x| !reserved.contains(&x))).ok_or(OUT_OF_REGISTERS)?;
         forced.extend(cx.tex_dsts.iter().map(|&t| (t, rd)));
         reserved.extend(rd + 1..rd + 4);
+    }
+    if spill {
+        cx.spill_to_fit(&reserved)?;
+    }
+    if cx.spill.slots > 0 {
+        debug!("borgc[compute]: spilled {} value(s)", cx.spill.slots);
     }
     let alloc = crate::fixed::allocate(&cx, &forced, &mut reserved).ok_or(OUT_OF_REGISTERS)?;
     crate::legal::check(&cx, &alloc)?;

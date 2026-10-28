@@ -151,6 +151,8 @@ pub struct Spill {
     pub alloc_failed: bool,
     pub slots: u32,
     pub lane: Option<u32>,
+    /// The byte address of a compute lane's spill slot 0, for spills after allocation's passes.
+    pub base: Option<u32>,
     /// Values never spilled: the spill code's own.
     pub exempt: HashSet<u32>,
 }

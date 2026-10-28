@@ -197,4 +197,114 @@ impl ShaderState {
         }
         self.sel.prog = out;
     }
+
+    /// Compute, once its passes ran: while more values are live than `reserved` leaves registers,
+    /// the one used furthest ahead goes to memory, stored after each definition and loaded before
+    /// each use (LW and SW by the lane's slot address).
+    pub(crate) fn spill_to_fit(&mut self, reserved: &[u8]) -> Result<(), String> {
+        let free = (1..30u8).filter(|r| !reserved.contains(r)).count();
+        loop {
+            let ranges = crate::block::live_ranges(&self.sel.prog);
+            let held = |v: &u32| !self.sel.loc.contains_key(v) && !self.tex_dsts.contains(v);
+            let vals: Vec<(u32, usize, usize)> = ranges.iter().filter(|(v, _)| held(v)).map(|(&v, &(d, l))| (v, d, l)).collect();
+            let mut live = vec![0usize; self.sel.prog.len() + 1];
+            for &(_, d, l) in &vals {
+                live[d..=l].iter_mut().for_each(|n| *n += 1);
+            }
+            let Some(at) = live.iter().position(|&n| n > free) else { return Ok(()) };
+            let scalar = |v: u32| self.sel.prog.iter().all(|i| i.srcs.iter().zip(&i.swz).all(|(s, &c)| *s != v || c == 0));
+            let next_use = |v: u32| self.sel.prog[at + 1..].iter().position(|i| i.srcs.contains(&v)).unwrap_or(usize::MAX);
+            let pick = vals
+                .iter()
+                .filter(|&&(v, d, l)| d < at && l > at && !self.spill.exempt.contains(&v) && !self.out_roots.contains(&v) && scalar(v))
+                .max_by_key(|&&(v, _, _)| (next_use(v), std::cmp::Reverse(v)))
+                .map(|&(v, _, _)| v);
+            match pick {
+                Some(v) if self.spill.slots < MAX_COMPUTE_SPILL_SLOTS => self.spill_late(v),
+                _ => return Err(crate::compute::OUT_OF_REGISTERS.into()),
+            }
+        }
+    }
+
+    /// A slot is a word per invocation, as `spill`'s: the base is the lane's word of slot 0, built
+    /// again after each BARRIER, which leaves no register to the next quad.
+    fn spill_late(&mut self, v: u32) {
+        let base = *self.spill.base.get_or_insert_with(|| self.sel.next_vreg);
+        if base == self.sel.next_vreg {
+            self.sel.next_vreg += 1;
+            let (r30, t) = (self.sel.fresh(), self.sel.fresh());
+            self.sel.loc.insert(r30, Loc::Fixed(30));
+            let mut head = vec![BorgInstr { mnem: Op::Slli.into(), dst: t, srcs: vec![r30], swz: vec![0], imm: 2 }];
+            let k = self.materialize(&mut head, 4 * crate::compute::SPILL_BASE_WORDS);
+            head.push(BorgInstr { mnem: Op::Add.into(), dst: base, srcs: vec![t, k], swz: vec![0, 0], imm: 0 });
+            self.spill.exempt.extend(head.iter().map(|i| i.dst));
+            let mut prog = Vec::with_capacity(self.sel.prog.len() + 8);
+            prog.extend(head.iter().cloned());
+            for i in std::mem::take(&mut self.sel.prog) {
+                let bar = i.mnem == Op::Barrier;
+                prog.push(i);
+                if bar {
+                    prog.extend(head.iter().cloned());
+                }
+            }
+            self.sel.prog = prog;
+        }
+        let at = 4 * self.spill.slots * self.invocations();
+        self.spill.slots += 1;
+        let mut out = Vec::with_capacity(self.sel.prog.len() + 8);
+        // Slot offsets past an immediate's reach go through a register of their own.
+        let addr = |cx: &mut Self, out: &mut Vec<BorgInstr>| {
+            if at < 2048 {
+                return (base, at);
+            }
+            let k = cx.materialize(out, at);
+            let a = cx.op(out, Op::Add, &[base, k]);
+            cx.spill.exempt.insert(k);
+            (a, 0)
+        };
+        for mut i in std::mem::take(&mut self.sel.prog) {
+            if i.srcs.contains(&v) {
+                let (a, o) = addr(self, &mut out);
+                let t = self.sel.fresh();
+                self.spill.exempt.insert(t);
+                out.push(BorgInstr { mnem: Op::Lw.into(), dst: t, srcs: vec![a], swz: vec![0], imm: o });
+                i.srcs.iter_mut().filter(|s| **s == v).for_each(|s| *s = t);
+            }
+            let defines = i.dst == v;
+            out.push(i);
+            if defines {
+                let (a, o) = addr(self, &mut out);
+                out.push(BorgInstr { mnem: Op::Sw.into(), dst: NO_DST, srcs: vec![a, v], swz: vec![0, 0], imm: o });
+            }
+        }
+        self.sel.prog = out;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Flags;
+
+    #[test]
+    fn spill_to_fit_leaves_no_more_live_values_than_registers() {
+        let mut c = ShaderState::new(&[17, 18, 19], Stage::Compute, Flags(0));
+        let (f, vals): (u32, Vec<u32>) = (c.sel.fresh(), (0..6).map(|_| c.sel.fresh()).collect());
+        c.sel.loc.insert(f, Loc::Fixed(30));
+        let mut prog: Vec<BorgInstr> = vals.iter().map(|&v| BorgInstr { mnem: Op::Addi.into(), dst: v, srcs: vec![f], swz: vec![0], imm: v }).collect();
+        let sum = c.sel.fresh();
+        prog.extend(vals.iter().map(|&v| BorgInstr { mnem: Op::Add.into(), dst: sum, srcs: vec![sum, v], swz: vec![0, 0], imm: 0 }));
+        c.sel.prog = prog;
+        // 4 free registers: r1..r4.
+        let reserved: Vec<u8> = (5..30).collect();
+        c.spill_to_fit(&reserved).unwrap();
+        let ranges = crate::block::live_ranges(&c.sel.prog);
+        let peak = (0..c.sel.prog.len())
+            .map(|p| ranges.iter().filter(|(v, &(d, l))| !c.sel.loc.contains_key(v) && d <= p && p <= l).count())
+            .max();
+        assert!(peak <= Some(4), "{peak:?}");
+        let (lw, sw) = (c.sel.prog.iter().filter(|i| i.mnem == Op::Lw).count(), c.sel.prog.iter().filter(|i| i.mnem == Op::Sw).count());
+        assert_eq!((lw, sw), (c.spill.slots as usize, c.spill.slots as usize));
+        assert!(c.spill.slots > 0);
+    }
 }
