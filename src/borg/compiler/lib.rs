@@ -23,6 +23,7 @@ mod fixed;
 mod encode;
 mod epilogue;
 mod isel;
+mod legal;
 mod opcodes;
 mod opt;
 mod phis;

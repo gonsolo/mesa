@@ -553,17 +553,17 @@ impl ShaderState {
             self.spill.alloc_failed = true;
             return None;
         };
-        let Encoded { mut words, n_body, pending, bad } = encode_program(self, &alloc);
+        if let Err(e) = crate::legal::check(self, &alloc) {
+            self.refuse(e);
+            return None;
+        }
+        let Encoded { mut words, n_body, bad } = encode_program(self, &alloc);
         if bad > 0 {
             self.refuse(format!("{bad} instruction(s) without an encoding"));
             return None;
         }
-        if pending > 0 {
-            self.refuse(format!("{pending} operand(s) without a register"));
-            return None;
-        }
         words.push(0x0000_0000);
-        Some(build_blob(self, &words, n_body, pending, &self.frag.out))
+        Some(build_blob(self, &words, n_body, &self.frag.out))
     }
 }
 

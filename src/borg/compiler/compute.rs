@@ -713,12 +713,10 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
         reserved.extend(rd + 1..rd + 4);
     }
     let alloc = crate::fixed::allocate(&cx, &forced, &mut reserved).ok_or(OUT_OF_REGISTERS)?;
+    crate::legal::check(&cx, &alloc)?;
     let enc = crate::emit::encode_program(&cx, &alloc);
     if enc.bad > 0 {
         return Err(format!("{} instruction(s) without an encoding", enc.bad));
-    }
-    if enc.pending > 0 {
-        return Err(format!("{} operand(s) without a register", enc.pending));
     }
     if enc.words.len() > MAX_WORDS {
         return Err(format!("{} instructions exceed the {MAX_WORDS}-word program limit", enc.words.len()));

@@ -1,3 +1,4 @@
+use crate::legal::{imm_form, operands};
 use crate::encode::{emit_blob, encode, encode_csrw, encode_fattr, encode_imm, encode_jal, encode_rv_branch, encode_sout};
 use crate::state::{ShaderState, Stage};
 use crate::{BorgInstr, Loc};
@@ -8,7 +9,6 @@ use crate::Mnem;
 pub struct Encoded {
     pub words: Vec<u32>,
     pub n_body: usize,
-    pub pending: u32,
     /// Instructions without an encoding.
     pub bad: u32,
 }
@@ -18,7 +18,6 @@ struct Emitter<'a> {
     cx: &'a ShaderState,
     alloc: &'a HashMap<u32, u8>,
     words: Vec<u32>,
-    pending: u32,
     bad: u32,
 }
 
@@ -45,8 +44,7 @@ impl Emitter<'_> {
     /// BNE rs, x0 to the LABEL named in imm; a target out of its reach is a BEQ over a JAL.
     fn branch(&mut self, k: usize, i: &BorgInstr, labels: &HashMap<u32, usize>, far: &HashSet<usize>) {
         let t = labels[&i.imm] as i32;
-        let ((rs1, window), at) = (self.operand(i.srcs[0], i.swz[0]), self.words.len() as i32);
-        self.pending += (window || rs1 == 0) as u32; // r0 is x0
+        let (rs1, at) = (self.operand(i.srcs[0], i.swz[0]).0, self.words.len() as i32);
         if far.contains(&k) {
             self.push(encode_rv_branch(Op::Beq, rs1, 2));
             self.push(encode_jal(t - (at + 1)));
@@ -57,51 +55,17 @@ impl Emitter<'_> {
 
     /// Any other instruction: a register per operand, the first window word read through funct3.
     fn instr(&mut self, i: &BorgInstr, rd: u8) {
-        let (cx, alloc) = (self.cx, self.alloc);
-        let mut r = [0u8; 3];
-        let mut f3 = 0u32;
-        for (k, (s, &c)) in i.srcs.iter().zip(i.swz.iter()).take(3).enumerate() {
-            if cx.tex_dsts.contains(s) || cx.fattr_dsts.contains(s) {
-                r[k] = alloc.get(s).map_or(0, |&rr| rr + c);
-                continue;
-            }
-            match cx.sel.loc.get(s) {
-                Some(&Loc::Uniform(idx)) => {
-                    if f3 == 0 {
-                        r[k] = idx;
-                        f3 = k as u32 + 1;
-                    } else {
-                        self.pending += 1; // 2nd uniform in one op needs a preload
-                    }
-                }
-                Some(&Loc::Fixed(reg)) => r[k] = reg,
-                // ALU intermediate → allocated GPR (or pending if a stray input).
-                None => match alloc.get(s) {
-                    Some(&phys) => r[k] = phys,
-                    None => self.pending += 1,
-                },
-            }
-        }
-        // RISC-V forms with an immediate: no window operand, and r0 is x0 there.
-        if let Mnem::Op(op @ (Op::Lw | Op::Sw | Op::Slli | Op::Srli | Op::Srai | Op::Addi | Op::Andi | Op::Xori | Op::Sltiu | Op::Lui | Op::Csrrs)) = i.mnem {
-            let base = matches!(op, Op::Lw | Op::Sw) && r[0] == 0;
-            if f3 != 0 || base || (op == Op::Sw && r[1] == 0) || (op != Op::Sw && rd == 0) {
-                self.pending += 1;
-            }
-            self.push(encode_imm(op, rd, r[0], r[1], i.imm));
-            return;
-        }
-        let w = encode(i.mnem, rd, r[0], r[1], r[2], f3);
-        // A RISC-V form reads no window word.
-        if w.is_some_and(|w| !matches!(w & 0x7F, 0 | 4)) && f3 != 0 {
-            self.pending += 1;
-        }
+        let o = operands(self.cx, self.alloc, i);
+        let w = match imm_form(i.mnem) {
+            Some(op) => encode_imm(op, rd, o.r[0], o.r[1], i.imm),
+            None => encode(i.mnem, rd, o.r[0], o.r[1], o.r[2], o.f3),
+        };
         self.push(w);
     }
 }
 
 pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
-    let mut e = Emitter { cx, alloc, words: Vec::new(), pending: 0, bad: 0 };
+    let mut e = Emitter { cx, alloc, words: Vec::new(), bad: 0 };
     let (labels, far) = branch_layout(&cx.sel.prog, 0);
     for (k, i) in cx.sel.prog.iter().enumerate() {
         let rd = *alloc.get(&i.dst).unwrap_or(&0);
@@ -118,15 +82,14 @@ pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
             }
             Mnem::Op(Op::Fattr) => e.push(encode_fattr(rd, i.imm as u16)),
             Mnem::Op(Op::Csrrw) => {
-                let (rs1, window) = e.operand(i.srcs[0], i.swz[0]);
-                e.pending += (window || rs1 == 0) as u32; // a window word is no register, r0 is x0
+                let rs1 = e.operand(i.srcs[0], i.swz[0]).0;
                 e.push(encode_csrw(rs1, i.imm));
             }
             _ => e.instr(i, rd),
         }
     }
     let n_body = e.words.len();
-    Encoded { words: e.words, n_body, pending: e.pending, bad: e.bad }
+    Encoded { words: e.words, n_body, bad: e.bad }
 }
 
 /// LABEL word addresses from the program's start, and the BRNZ whose label is out of a branch's
@@ -164,16 +127,14 @@ pub fn build_blob(
     cx: &ShaderState,
     words: &[u32],
     n_body: usize,
-    pending: u32,
     frag_out: &[Option<u32>; 4],
 ) -> Vec<u8> {
     let is_vertex = cx.stage == Stage::Vertex;
     debug!(
-        "borgc: encoded {} word(s) = {} op(s) + {} epilogue ({} operand(s) still pending)",
+        "borgc: encoded {} word(s) = {} op(s) + {} epilogue",
         words.len(),
         n_body,
-        words.len() - n_body,
-        pending
+        words.len() - n_body
     );
     if !cx.cp.presets().is_empty() {
         let cs: Vec<String> = cx.cp.presets().iter().map(|(r, v)| format!("r{r}={v:#06x}")).collect();
