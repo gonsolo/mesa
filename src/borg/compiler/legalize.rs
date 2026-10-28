@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 /// What makes a program one `legal::check` takes.
 impl ShaderState {
-    /// After scheduling: TEX results, and window words where the encoder takes them.
+    /// Between the pressure and the latency schedule: TEX results, and window words where the encoder takes them.
     pub(crate) fn legalize(&mut self) {
         self.copy_tex_results();
         self.v2_operands();
