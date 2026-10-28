@@ -1217,16 +1217,33 @@ impl ShaderState {
         // Per loop: lanes still looping, lanes going round this time, and whether any lane is.
         let lv: Vec<(u32, u32, u32)> = (0..loops.count).map(|_| (self.sel.fresh(), self.sel.fresh(), self.sel.fresh())).collect();
 
-        // A phi is a register per component, written at the end of each predecessor.
+        // A phi web is a register per component: its phis read it, its other values are written
+        // to it, and a source outside it is copied at the end of the predecessor.
+        let webs = crate::phis::Webs::new(entry);
+        let mut web_regs: HashMap<usize, Vec<u32>> = HashMap::new();
+        let mut redirect: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (k, members) in webs.webs.iter().enumerate() {
+            if !members.iter().any(|&d| (*d).parent_instr().as_phi().is_some()) {
+                continue;
+            }
+            let regs: Vec<u32> = (0..(*members[0]).num_components).map(|_| self.sel.fresh()).collect();
+            for &d in members {
+                if (*d).parent_instr().as_phi().is_some() {
+                    self.sel.vec_map.insert((*d).index, regs.iter().map(|&r| (r, 0)).collect());
+                } else {
+                    redirect.insert((*d).index, regs.clone());
+                }
+            }
+            web_regs.insert(k, regs);
+        }
         let mut phi_copies: HashMap<usize, Vec<(u32, u32, u8)>> = HashMap::new();
         for block in (*entry).iter_blocks() {
             for phi in block.iter_instr_list().map_while(|i| i.as_phi()) {
-                let dsts: Vec<u32> = (0..phi.def.num_components).map(|_| self.sel.fresh()).collect();
+                let regs = &web_regs[&webs.of[&phi.def.index]];
                 for s in phi.iter_srcs() {
                     let pred = phi_copies.entry(s.pred() as *const nir_block as usize).or_default();
-                    pred.extend(dsts.iter().enumerate().map(|(c, &d)| (d, s.src.as_def().index, c as u8)));
+                    pred.extend(regs.iter().enumerate().map(|(c, &d)| (d, s.src.as_def().index, c as u8)));
                 }
-                self.sel.vec_map.insert(phi.def.index, dsts.iter().map(|&d| (d, 0)).collect());
             }
         }
         for block in (*entry).iter_blocks() {
@@ -1263,6 +1280,7 @@ impl ShaderState {
                     }
                     continue;
                 }
+                let (start, base) = (self.sel.prog.len(), self.sel.next_vreg);
                 if let Some(alu) = instr.as_alu() {
                     self.alu(alu);
                 } else if let Some(intr) = instr.as_intrinsic() {
@@ -1278,12 +1296,37 @@ impl ShaderState {
                 } else if let Some(u) = instr.as_undef() {
                     self.undef(u);
                 }
+                let def = nir_instr_def(instr as *const nir_instr as *mut nir_instr);
+                if let Some(regs) = def.as_ref().and_then(|d| redirect.get(&d.index)) {
+                    self.into_web((*def).index, regs, start, base);
+                }
             }
             if let Some(c) = phi_copies.get(&(block as *const nir_block as usize)) {
                 self.parallel_copy(c);
             }
         }
     
+    }
+    /// A value of a phi web, selected from `start` with registers from `base`: its own register
+    /// becomes the web's, or it is copied there when it is shared or a result block.
+    fn into_web(&mut self, d: u32, regs: &[u32], start: usize, base: u32) {
+        for (c, &w) in regs.iter().enumerate() {
+            let (v, vc) = self.operand(d, c as u8);
+            let fixed = self.tex_dsts.contains(&v) || self.fattr_dsts.contains(&v) || self.sel.loc.contains_key(&v);
+            let own = (v == d || v >= base) && self.sel.prog[start..].iter().filter(|i| i.dst == v).count() == 1;
+            if vc == 0 && own && !fixed {
+                for i in &mut self.sel.prog[start..] {
+                    if i.dst == v {
+                        i.dst = w;
+                    }
+                    i.srcs.iter_mut().filter(|s| **s == v).for_each(|s| *s = w);
+                }
+            } else {
+                self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: w, srcs: vec![v, v], swz: vec![vc, vc], imm: 0 });
+            }
+        }
+        self.sel.vec_map.insert(d, regs.iter().map(|&w| (w, 0)).collect());
+        self.const_addr_chain = None;
     }
     /// Phi copies on one edge: the pairs (destination, source) as one sequence of copies.
     fn parallel_copy(&mut self, copies: &[(u32, u32, u8)]) {

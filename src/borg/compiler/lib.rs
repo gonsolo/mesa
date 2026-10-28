@@ -25,6 +25,7 @@ mod epilogue;
 mod isel;
 mod opcodes;
 mod opt;
+mod phis;
 mod pipeline;
 mod regalloc;
 mod select;

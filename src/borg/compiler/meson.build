@@ -21,7 +21,7 @@ _libborgc_flags = static_library(
 
 _borgc_sources = structured_sources([
   files('lib.rs', 'block.rs', 'compute.rs', 'config.rs', 'consts.rs', 'corpus.rs', 'emit.rs', 'encode.rs',
-        'epilogue.rs', 'fixed.rs', 'isel.rs', 'opt.rs', 'pipeline.rs', 'regalloc.rs', 'select.rs',
+        'epilogue.rs', 'fixed.rs', 'isel.rs', 'opt.rs', 'phis.rs', 'pipeline.rs', 'regalloc.rs', 'select.rs',
         'spill.rs', 'state.rs', 'survey.rs'),
   borg_opcodes_rs,
 ])
