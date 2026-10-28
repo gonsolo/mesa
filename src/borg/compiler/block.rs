@@ -3,7 +3,7 @@
 use crate::opcodes::Op;
 use crate::{BorgInstr, Mnem, NO_DST};
 use compiler::cfg::{CFGBuilder, CFG};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 /// What the quad runs in order under one exec mask: a block starts at a loop's label, a barrier or
@@ -161,6 +161,77 @@ fn logical_edges(prog: &[BorgInstr], spans: &[Range<usize>]) -> Vec<(usize, usiz
         }
     }
     edges
+}
+
+/// The loops around each block, innermost last: a loop runs from its LABEL's block to its BRNZ's.
+fn loops_around(prog: &[BorgInstr], spans: &[Range<usize>]) -> Vec<Vec<usize>> {
+    let mut open = vec![];
+    spans
+        .iter()
+        .enumerate()
+        .map(|(b, r)| {
+            if prog[r.start].mnem == Mnem::Label {
+                open.push(b);
+            }
+            let around = open.clone();
+            if ends_block(prog[r.end - 1].mnem) {
+                open.pop();
+            }
+            around
+        })
+        .collect()
+}
+
+/// What an edge leaving a loop adds to a next-use distance: a use after the loop is far for a value
+/// the loop does not read (Braun & Hack, CC 2009).
+pub(crate) const LOOP_EXIT: u32 = 1 << 16;
+
+/// Per block, each value's distance from the block's start to its next read, on the logical CFG:
+/// in the block, or through its nearest successor. A value written before it is read is dead there.
+#[cfg_attr(not(test), expect(dead_code))]
+pub(crate) fn next_uses(prog: &[BorgInstr]) -> Vec<HashMap<u32, u32>> {
+    let spans = spans(prog);
+    let around = loops_around(prog, &spans);
+    let mut succs = vec![vec![]; spans.len()];
+    for (p, s) in logical_edges(prog, &spans) {
+        succs[p].push(s);
+    }
+    // Per block: the values it reads first, at their distance, and those it writes first.
+    let (mut first, mut killed) = (vec![HashMap::new(); spans.len()], vec![HashSet::new(); spans.len()]);
+    for (b, r) in spans.iter().enumerate() {
+        for (k, i) in prog[r.clone()].iter().enumerate() {
+            for &v in &i.srcs {
+                if !killed[b].contains(&v) {
+                    first[b].entry(v).or_insert(k as u32);
+                }
+            }
+            if i.dst != NO_DST && !first[b].contains_key(&i.dst) && !killed[b].contains(&i.dst) {
+                killed[b].insert(i.dst);
+            }
+        }
+    }
+    let mut at = first.clone();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for b in (0..spans.len()).rev() {
+            let len = spans[b].len() as u32;
+            for &s in &succs[b] {
+                let exit = if around[b].iter().all(|l| around[s].contains(l)) { 0 } else { LOOP_EXIT };
+                for (&v, &d) in &at[s].clone() {
+                    if killed[b].contains(&v) || first[b].contains_key(&v) {
+                        continue;
+                    }
+                    let d = d.saturating_add(len + exit);
+                    if at[b].get(&v).is_none_or(|&x| d < x) {
+                        at[b].insert(v, d);
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    at
 }
 
 /// Where each value holds its register, as a range of positions: from its first definition to
@@ -399,6 +470,62 @@ mod tests {
         assert_eq!(edges(&p), vec![(0, 1), (1, 2), (2, 3), (2, 4), (3, 1), (4, 5), (5, 6), (6, 7), (7, 8), (8, 9), (9, 10), (10, 1), (10, 11)]);
         let c = Cfg::new(&p);
         assert!(c.dominates(2, 10) && c.dominates(6, 11) && !c.dominates(3, 1) && c.dominates(1, 3));
+    }
+    #[test]
+    fn next_uses_take_the_nearer_side_and_end_at_a_write() {
+        // 1 from before; 0: 5 = ..; 1: then reads 1 at 2; 2: else writes 1 first; 3: join reads 1.
+        let p = vec![
+            m(Op::Fadd, 5, &[]),
+            m(Op::Expush, NO_DST, &[9]),
+            m(Op::Fadd, 2, &[]),
+            m(Op::Fadd, 3, &[1]),
+            m(Op::Exelse, NO_DST, &[]),
+            m(Op::Fadd, 1, &[]),
+            m(Op::Expop, NO_DST, &[]),
+            m(Op::Fadd, 4, &[1]),
+        ];
+        let n = next_uses(&p);
+        assert_eq!(n[1][&1], 2, "read in the then side");
+        assert_eq!(n[0][&1], 1 + 2, "the nearer side: block 0 is one long");
+        assert!(!n[2].contains_key(&1), "the else side writes it first");
+        assert_eq!(n[3][&1], 1);
+    }
+    #[test]
+    fn a_use_after_a_loop_is_far_from_inside_it() {
+        // 1 read in the loop, 7 defined before it and read only after it.
+        let mut p = in_loop(jump_then(Mnem::Break));
+        p.insert(0, m(Op::Fadd, 7, &[]));
+        p.push(m(Op::Fadd, 6, &[7]));
+        let n = next_uses(&p);
+        let after = n.len() - 1;
+        assert!(n[after].contains_key(&7));
+        assert!(n[1][&7] >= LOOP_EXIT, "from the head, 7 is only used after the loop");
+        assert!(n[1][&1] < LOOP_EXIT, "1 is read in the loop");
+    }
+    #[test]
+    fn a_value_carried_round_a_loop_is_near_at_its_end() {
+        // 7 read, then written again, on every trip.
+        let mut p = in_loop(vec![m(Op::Fadd, 6, &[7]), m(Op::Fadd, 7, &[6])]);
+        p.insert(0, m(Op::Fadd, 7, &[]));
+        let n = next_uses(&p);
+        let spans = spans(&p);
+        let end = (0..spans.len()).find(|&b| p[spans[b].end - 1].mnem == Op::Brnz).unwrap();
+        assert!(n[end][&7] < LOOP_EXIT, "the back edge does not leave the loop");
+    }
+    #[test]
+    fn two_loops_in_a_row_are_left_one_after_the_other() {
+        let mut p = in_loop(vec![]);
+        let second: Vec<BorgInstr> = in_loop(vec![]).into_iter().skip(1).collect();
+        p.extend(second);
+        p.push(m(Op::Fadd, 6, &[1]));
+        let n = next_uses(&p);
+        let spans = spans(&p);
+        let around = loops_around(&p, &spans);
+        let heads: Vec<usize> = (0..spans.len()).filter(|&b| p[spans[b].start].mnem == Mnem::Label).collect();
+        assert_eq!(heads.len(), 2);
+        assert!(around[heads[1]].len() == 1 && around[heads[1]] != around[heads[0]]);
+        // 1 is read by each loop's `go`: near from both heads.
+        assert!(n[heads[0]][&1] < LOOP_EXIT && n[heads[1]][&1] < LOOP_EXIT);
     }
     #[test]
     fn parallel_copies_keep_their_sources() {
