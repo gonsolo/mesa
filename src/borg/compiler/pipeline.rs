@@ -205,28 +205,6 @@ impl ShaderState {
         self.sel.prog = out;
     }
 
-    /// Window operands through a register.
-    fn v2_operands(&mut self) {
-        let x0_forms = |m: Mnem| matches!(m, Mnem::Op(Op::Iadd | Op::Isub | Op::Ishr | Op::Isrl | Op::Imul | Op::Islt
-            | Op::Isltu | Op::Fmov | Op::I2f | Op::F2i | Op::FcvtWuS | Op::F2h | Op::H2f));
-        let custom = |m: Mnem| matches!(m, Mnem::Op(Op::Frcp | Op::Frsq | Op::Fexp2 | Op::Flog2 | Op::Ddx | Op::Ddy | Op::Expush | Op::Exany));
-        let mut out = Vec::with_capacity(self.sel.prog.len());
-        for mut i in std::mem::take(&mut self.sel.prog) {
-            let (x, c) = (x0_forms(i.mnem), custom(i.mnem));
-            if !x && !c {
-                out.push(i);
-                continue;
-            }
-            for k in 0..i.srcs.len() {
-                let (code, v) = self.window_copy((i.srcs[k], i.swz[k]));
-                out.extend(code);
-                (i.srcs[k], i.swz[k]) = v;
-            }
-            out.push(i);
-        }
-        self.sel.prog = out;
-    }
-
     /// `bits` in a register: ADDI, LUI, or LUI and ADDI.
     pub(crate) fn materialize(&mut self, out: &mut Vec<BorgInstr>, bits: u32) -> u32 {
         let (hi, lo) = (bits.wrapping_add(0x800) >> 12 & 0xF_FFFF, bits & 0xFFF);
