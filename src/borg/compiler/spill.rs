@@ -215,8 +215,11 @@ impl ShaderState {
                     d < at && l > at && weight(&v) == 1 && (!self.spill.exempt.contains(&v) || self.spill.held.contains_key(&v))
                         && !self.out_roots.contains(&v) && scalar(v)
                 })
-                .max_by_key(|&&(v, _, _)| (nu.after(&self.sel.prog, at, v), std::cmp::Reverse(v)))
-                .map(|&(v, _, _)| v);
+                .map(|&(v, ..)| (v, nu.after(&self.sel.prog, at, v)))
+                // One read by the next instruction would be back in a register at once.
+                .filter(|&(_, n)| n > 1)
+                .max_by_key(|&(v, n)| (n, std::cmp::Reverse(v)))
+                .map(|(v, _)| v);
             match pick {
                 Some(v) if self.spill.held.contains_key(&v) => self.reload_later(v, at),
                 Some(v) if self.spill.slots < max => self.spill_late(v, nu.split(at, v)),
