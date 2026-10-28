@@ -144,11 +144,8 @@ pub struct Vert {
 #[derive(Default)]
 pub struct Spill {
     pub slots: u32,
-    pub lane: Option<u32>,
-    /// The byte address of a compute lane's spill slot 0, for spills after allocation's passes.
+    /// The byte address of the lane's spill slot 0.
     pub base: Option<u32>,
-    /// The word addresses of spill slots.
-    pub addrs: HashSet<u32>,
     /// Values never spilled: the spill code's own.
     pub exempt: HashSet<u32>,
     /// Values a slot holds too, by the slot's byte offset: late reloads and stored definitions.

@@ -686,10 +686,6 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, compact: bool, pack: bool) 
     if compact {
         cx.sink_loads();
     }
-    if cx.sel.prog.iter().any(|i| i.mnem == Op::Barrier) {
-        crate::opt::dce(&mut cx.sel.prog, &cx.out_roots);
-        cx.spill_across_barriers()?;
-    }
     cx.optimise();
     cx.byte_accesses();
     cx.pool_consts(!compact)?;

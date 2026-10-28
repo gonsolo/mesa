@@ -21,66 +21,8 @@ impl ShaderState {
         dst
     }
 
-    /// Compute's lane key: LocalInvocationIndex.
-    fn lane_key(&mut self) {
-        let r30 = self.sel.fresh();
-        self.sel.loc.insert(r30, Loc::Fixed(30));
-        self.spill.lane = Some(r30);
-    }
-
-    /// Every quad of a workgroup runs up to a BARRIER on the same registers before any goes on,
-    /// so a value live across one is kept in memory.
-    pub fn spill_across_barriers(&mut self) -> Result<(), String> {
-        loop {
-            let bars: Vec<usize> = self.sel.prog.iter().enumerate().filter(|(_, i)| i.mnem == Op::Barrier).map(|(at, _)| at).collect();
-            let crossing = crate::block::live_ranges(&self.sel.prog)
-                .iter()
-                .filter(|(v, &(d, l))| !self.sel.loc.contains_key(v) && bars.iter().any(|&b| d < b && b < l))
-                .map(|(&v, _)| v)
-                .min();
-            let Some(v) = crossing else { return Ok(()) };
-            let single = self.sel.prog.iter().filter(|i| i.dst == v).count() == 1
-                && self.sel.prog.iter().all(|i| i.srcs.iter().zip(&i.swz).all(|(s, &c)| *s != v || c == 0));
-            if !single || self.spill.slots >= MAX_COMPUTE_SPILL_SLOTS {
-                return Err("a value live across barrier() cannot be spilled".into());
-            }
-            self.spill(v);
-        }
-    }
-
-    fn spill(&mut self, v: u32) {
-        let slot_bits = crate::compute::SPILL_BASE_WORDS + self.spill.slots * self.invocations();
-        let prog = std::mem::take(&mut self.sel.prog);
-        if self.spill.lane.is_none() {
-            self.lane_key();
-        }
-        let lane = self.spill.lane.unwrap();
-        let k = self.konst(slot_bits);
-        self.spill.slots += 1;
-        let mut out = Vec::with_capacity(prog.len() + 8);
-        for mut i in prog {
-            if i.srcs.contains(&v) {
-                let a = self.op(&mut out, Op::Iadd, &[lane, k]);
-                let t = self.sel.fresh();
-                self.spill.exempt.insert(t);
-                out.push(BorgInstr { mnem: Op::Load.into(), dst: t, srcs: vec![a], swz: vec![0], imm: 0 });
-                for s in i.srcs.iter_mut().filter(|s| **s == v) {
-                    *s = t;
-                }
-            }
-            let defines = i.dst == v;
-            out.push(i);
-            if defines {
-                let a = self.op(&mut out, Op::Iadd, &[lane, k]);
-                self.spill.addrs.insert(a);
-                out.push(BorgInstr { mnem: Op::Store.into(), dst: NO_DST, srcs: vec![a, v], swz: vec![0, 0], imm: 0 });
-            }
-        }
-        self.sel.prog = out;
-    }
-
-    /// Once the passes ran: while more values are live than the free registers, one leaves its
-    /// register. First a constant (`remat_later`), then a preset constant for the whole program,
+    /// Once the passes ran: while more values are live than the free registers, or any across a
+    /// BARRIER, one leaves its register. First a constant (`remat_later`), then a preset constant for the whole program,
     /// then the value with the furthest next use (`spill_late`). A forced value takes no free
     /// register, unless its register is `soft` (a draw shader's TEX block, 4 while live).
     pub(crate) fn spill_to_fit(&mut self, forced: &HashMap<u32, u8>, reserved: &mut Vec<u8>, soft: &[u8], margin: usize) -> Result<(), String> {
@@ -102,7 +44,12 @@ impl ShaderState {
                 live[l + 1] -= weight(&v) as isize;
             }
             let live: Vec<usize> = live.iter().scan(0, |n, &x| { *n += x; Some(*n as usize) }).collect();
-            let Some(at) = live.iter().position(|&n| n > free + freed) else { return Ok(()) };
+            let pressure = live.iter().position(|&n| n > free + freed);
+            // Every quad of a workgroup runs up to a BARRIER on the same registers before any goes on.
+            let barrier = self.sel.prog.iter().enumerate().filter(|(_, i)| i.mnem == Op::Barrier).map(|(b, _)| b)
+                .find(|&b| vals.iter().any(|&(v, d, l)| d < b && l > b && !self.spill.exempt.contains(&v)));
+            let Some(at) = pressure.into_iter().chain(barrier).min() else { return Ok(()) };
+            let bar = barrier == Some(at);
             let vector: HashSet<u32> = self.sel.prog.iter().flat_map(|i| i.srcs.iter().zip(&i.swz).filter(|(_, &c)| c != 0).map(|(&s, _)| s)).collect();
             let scalar = |v: u32| !vector.contains(&v);
             let nu = crate::block::NextUse::new(&self.sel.prog);
@@ -113,13 +60,14 @@ impl ShaderState {
                         && !self.out_roots.contains(&v) && scalar(v) && !self.sel.prog[at].srcs.contains(&v)
                 })
                 .map(|&(v, ..)| (v, nu.after(&self.sel.prog, at, v)))
-                // One read at `at` or right after it would be back in a register at once.
-                .filter(|&(_, n)| n > 1)
+                // One read at `at` or right after it would be back in a register at once; past a
+                // barrier it has to go anyway.
+                .filter(|&(_, n)| n > 1 || bar)
                 .max_by_key(|&(v, n)| (self.spill.remat.contains_key(&v), n, std::cmp::Reverse(v)))
                 .map(|(v, _)| v);
             match pick {
                 Some(v) if self.spill.remat.contains_key(&v) => self.remat_later(v, nu.split(at, v)),
-                _ if !self.spill.pinned.is_empty() => {
+                _ if !bar && !self.spill.pinned.is_empty() => {
                     let (v, r, bits) = self.spill.pinned.pop().unwrap();
                     self.sel.loc.remove(&v);
                     self.cp.unpreset(r);
