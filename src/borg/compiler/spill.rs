@@ -213,10 +213,10 @@ impl ShaderState {
                 .iter()
                 .filter(|&&(v, d, l)| {
                     d < at && l > at && weight(&v) == 1 && (!self.spill.exempt.contains(&v) || self.spill.held.contains_key(&v))
-                        && !self.out_roots.contains(&v) && scalar(v)
+                        && !self.out_roots.contains(&v) && scalar(v) && !self.sel.prog[at].srcs.contains(&v)
                 })
                 .map(|&(v, ..)| (v, nu.after(&self.sel.prog, at, v)))
-                // One read by the next instruction would be back in a register at once.
+                // One read at `at` or right after it would be back in a register at once.
                 .filter(|&(_, n)| n > 1)
                 .max_by_key(|&(v, n)| (n, std::cmp::Reverse(v)))
                 .map(|(v, _)| v);
