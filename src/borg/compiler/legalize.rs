@@ -7,8 +7,15 @@ use std::collections::{HashMap, HashSet};
 
 /// What makes a program one `legal::check` takes.
 impl ShaderState {
+    /// After scheduling: TEX results, and window words where the encoder takes them.
+    pub(crate) fn legalize(&mut self) {
+        self.copy_tex_results();
+        self.v2_operands();
+        self.split_window_reads();
+    }
+
     /// An instruction reads one window word; the others reach it through a register.
-    pub(crate) fn split_window_reads(&mut self) {
+    fn split_window_reads(&mut self) {
         let is_win = |v: &u32, loc: &HashMap<u32, Loc>| matches!(loc.get(v), Some(Loc::Uniform(_)));
         if self.sel.prog.iter().any(|i| i.srcs.iter().filter(|v| is_win(v, &self.sel.loc)).count() > 1) {
             let f = self.sel.next_vreg;
@@ -39,7 +46,7 @@ impl ShaderState {
     }
 
     /// Window operands through a register.
-    pub(crate) fn v2_operands(&mut self) {
+    fn v2_operands(&mut self) {
         let x0_forms = |m: Mnem| matches!(m, Mnem::Op(Op::Iadd | Op::Isub | Op::Ishr | Op::Isrl | Op::Imul | Op::Islt
             | Op::Isltu | Op::Fmov | Op::I2f | Op::F2i | Op::FcvtWuS | Op::F2h | Op::H2f));
         let custom = |m: Mnem| matches!(m, Mnem::Op(Op::Frcp | Op::Frsq | Op::Fexp2 | Op::Flog2 | Op::Ddx | Op::Ddy | Op::Expush | Op::Exany));
@@ -79,7 +86,7 @@ impl ShaderState {
 
     /// Every TEX writes the same register block: a result still read after the next TEX is copied
     /// out right after its own.
-    pub(crate) fn copy_tex_results(&mut self) {
+    fn copy_tex_results(&mut self) {
         let is_tex = |i: &BorgInstr, d: &HashSet<u32>| matches!(i.mnem, Mnem::Op(Op::Tex | Op::Texd)) && d.contains(&i.dst);
         let texs: Vec<usize> = (0..self.sel.prog.len()).filter(|&i| is_tex(&self.sel.prog[i], &self.tex_dsts)).collect();
         for w in texs.windows(2).rev() {

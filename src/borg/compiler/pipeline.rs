@@ -135,10 +135,9 @@ impl ShaderState {
         let loc = &self.sel.loc;
         fuse_fmadd(&mut self.sel.prog, &self.out_roots, &|v| matches!(loc.get(&v), Some(Loc::Uniform(_))));
         schedule_for_pressure(&mut self.sel.prog, &self.out_roots);
-        self.copy_tex_results();
         self.iseq_forms();
         self.fstep_forms();
-        self.v2_operands();
+        self.legalize();
         if !self.spill.in_order {
             schedule_for_latency(&mut self.sel.prog, &self.out_roots);
         }
@@ -498,7 +497,6 @@ impl ShaderState {
 
     pub fn assemble(&mut self) -> Option<Vec<u8>> {
         let (forced, mut extra_reserved) = fixed_regs(self);
-        self.split_window_reads();
         let Some(alloc) = allocate(self, &forced, &mut extra_reserved) else {
             self.spill.alloc_failed = true;
             return None;
