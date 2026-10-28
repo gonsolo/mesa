@@ -2,53 +2,6 @@
 // SPDX-License-Identifier: MIT
 
 use crate::BorgInstr;
-use crate::opcodes::Op;
-use crate::Mnem;
-
-/// A value live into a loop or carried round it lives for the whole loop, and so does one defined
-/// in it and live after it: a lane that left early keeps its last trip's value.
-pub(crate) fn extend_for_loops(
-    prog: &[BorgInstr],
-    def_at: &mut std::collections::HashMap<u32, usize>,
-    last: &mut std::collections::HashMap<u32, usize>,
-) {
-    let mut heads = std::collections::HashMap::new();
-    let mut spans = Vec::new();
-    for (k, i) in prog.iter().enumerate() {
-        match i.mnem {
-            Mnem::Label => {
-                heads.insert(i.imm, k);
-            }
-            Mnem::Op(Op::Brnz) => spans.push((heads[&i.imm], k)),
-            _ => {}
-        }
-    }
-    let mut changed = !spans.is_empty();
-    while changed {
-        changed = false;
-        for &(s, e) in &spans {
-            let mut first_use = std::collections::HashMap::new();
-            for (k, i) in prog.iter().enumerate().take(e + 1).skip(s) {
-                for &v in &i.srcs {
-                    first_use.entry(v).or_insert(k);
-                }
-            }
-            for (v, d) in def_at.iter_mut() {
-                let Some(l) = last.get_mut(v) else { continue };
-                let inside = (s..=e).contains(d);
-                let carried = inside && first_use.get(v).is_some_and(|&u| u <= *d);
-                if (*d < s && *l >= s || carried) && *l < e {
-                    *l = e;
-                    changed = true;
-                }
-                if (carried || inside && *l > e) && *d > s {
-                    *d = s;
-                    changed = true;
-                }
-            }
-        }
-    }
-}
 
 pub(crate) fn regalloc(
     prog: &[BorgInstr],
@@ -61,20 +14,9 @@ pub(crate) fn regalloc(
 
     const NUM_GPRS: u8 = 30; // r0..r29; r30/r31 reserved for coordinates
 
-    // Def position (first) and last-use position for every value.
-    let mut def_at: HashMap<u32, usize> = HashMap::new();
-    let mut last_use: HashMap<u32, usize> = HashMap::new();
-    for (i, instr) in prog.iter().enumerate() {
-        if instr.dst != crate::NO_DST {
-            def_at.entry(instr.dst).or_insert(i);
-            last_use.insert(instr.dst, i);
-        }
-        for &s in &instr.srcs {
-            last_use.insert(s, i);
-        }
-    }
-
-    extend_for_loops(prog, &mut def_at, &mut last_use);
+    let ranges = crate::block::live_ranges(prog);
+    let def_at: HashMap<u32, usize> = ranges.iter().map(|(&v, &(d, _))| (v, d)).collect();
+    let last_use: HashMap<u32, usize> = ranges.iter().map(|(&v, &(_, l))| (v, l)).collect();
 
     // Allocate only values we define (ALU results), in def order.
     let mut defs: Vec<u32> = def_at.keys().copied().collect();
@@ -152,42 +94,10 @@ pub(crate) fn regalloc(
 
 #[cfg(test)]
 mod tests {
-    use super::{extend_for_loops, regalloc};
+    use super::regalloc;
     use crate::opcodes::Op;
-    use crate::{BorgInstr, Mnem, NO_DST};
+    use crate::BorgInstr;
     use std::collections::HashMap;
-
-    fn op(mnem: impl Into<Mnem>, dst: u32, srcs: &[u32]) -> BorgInstr {
-        BorgInstr { mnem: mnem.into(), dst, srcs: srcs.to_vec(), swz: vec![0; srcs.len()], imm: 0 }
-    }
-
-    #[test]
-    fn loop_values_live_for_the_whole_loop() {
-        // 1 = before; LABEL; 3 = 2 + 1 (2 carried: read, then written); 4 defined, used after.
-        let prog = vec![
-            op(Op::Ior, 1, &[9, 9]),
-            op(Op::Ior, 2, &[9, 9]),
-            BorgInstr { mnem: Mnem::Label, dst: NO_DST, srcs: vec![], swz: vec![], imm: 0 },
-            op(Op::Iadd, 3, &[2, 1]),
-            op(Op::Ior, 2, &[3, 3]),
-            op(Op::Ior, 4, &[3, 3]),
-            op(Op::Iadd, 5, &[1, 1]),
-            BorgInstr { mnem: Op::Brnz.into(), dst: NO_DST, srcs: vec![5], swz: vec![0], imm: 0 },
-            op(Op::Iadd, 6, &[4, 4]),
-        ];
-        let (mut d, mut l) = (HashMap::new(), HashMap::new());
-        for (k, i) in prog.iter().enumerate() {
-            d.entry(i.dst).or_insert(k);
-            for s in &i.srcs {
-                l.insert(*s, k);
-            }
-        }
-        extend_for_loops(&prog, &mut d, &mut l);
-        assert_eq!((d[&1], l[&1]), (0, 7), "live into the loop");
-        assert_eq!((d[&2], l[&2]), (1, 7), "carried round it");
-        assert_eq!((d[&4], l[&4]), (2, 8), "defined in it, live after it");
-        assert_eq!((d[&3], l[&3]), (3, 5), "a value of one trip");
-    }
 
     fn chain(n: u32) -> Vec<BorgInstr> {
         (1..=n)

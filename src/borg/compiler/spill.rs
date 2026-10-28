@@ -1,7 +1,6 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-use std::collections::HashMap;
 use crate::state::{ShaderState, Stage};
 use crate::{BorgInstr, Loc, NO_DST};
 use crate::opcodes::Op;
@@ -95,20 +94,9 @@ impl ShaderState {
 
     /// The first position with more than `limit` live values, with the values that cross it.
     fn over_limit(&self, limit: usize) -> Option<Vec<(u32, usize)>> {
-        let mut def_at: HashMap<u32, usize> = HashMap::new();
-        let mut last: HashMap<u32, usize> = HashMap::new();
-        for (at, i) in self.sel.prog.iter().enumerate() {
-            if i.dst != NO_DST {
-                def_at.entry(i.dst).or_insert(at);
-                last.insert(i.dst, at);
-            }
-            for s in &i.srcs {
-                last.insert(*s, at);
-            }
-        }
-        crate::regalloc::extend_for_loops(&self.sel.prog, &mut def_at, &mut last);
         let pinned = |v: &u32| self.sel.loc.contains_key(v);
-        let vals: Vec<(u32, usize, usize)> = def_at.iter().filter(|(v, _)| !pinned(v)).map(|(&v, &d)| (v, d, last[&v])).collect();
+        let ranges = crate::block::live_ranges(&self.sel.prog);
+        let vals: Vec<(u32, usize, usize)> = ranges.iter().filter(|(v, _)| !pinned(v)).map(|(&v, &(d, l))| (v, d, l)).collect();
         let at = (0..self.sel.prog.len()).find(|&p| vals.iter().filter(|&&(_, d, l)| d <= p && p <= l).count() > limit)?;
         Some(vals.iter().filter(|&&(_, d, l)| d < at && l > at).map(|&(v, _, l)| (v, l)).collect())
     }
@@ -154,20 +142,9 @@ impl ShaderState {
     pub fn spill_across_barriers(&mut self) -> Result<(), String> {
         loop {
             let bars: Vec<usize> = self.sel.prog.iter().enumerate().filter(|(_, i)| i.mnem == Op::Barrier).map(|(at, _)| at).collect();
-            let mut def_at: HashMap<u32, usize> = HashMap::new();
-            let mut last: HashMap<u32, usize> = HashMap::new();
-            for (at, i) in self.sel.prog.iter().enumerate() {
-                if i.dst != NO_DST {
-                    def_at.entry(i.dst).or_insert(at);
-                }
-                for s in &i.srcs {
-                    last.insert(*s, at);
-                }
-            }
-            crate::regalloc::extend_for_loops(&self.sel.prog, &mut def_at, &mut last);
-            let crossing = def_at
+            let crossing = crate::block::live_ranges(&self.sel.prog)
                 .iter()
-                .filter(|(v, &d)| !self.sel.loc.contains_key(v) && last.get(v).is_some_and(|&l| bars.iter().any(|&b| d < b && b < l)))
+                .filter(|(v, &(d, l))| !self.sel.loc.contains_key(v) && bars.iter().any(|&b| d < b && b < l))
                 .map(|(&v, _)| v)
                 .min();
             let Some(v) = crossing else { return Ok(()) };
