@@ -97,6 +97,11 @@ impl ConstPool {
         Some(r)
     }
 
+    /// `r` holds no constant after all.
+    pub fn unpreset(&mut self, r: u8) {
+        self.uniforms.retain(|&(x, _)| x != r);
+    }
+
     /// The registers handed out as presets so far.
     pub fn preset_regs(&self) -> &[u8] {
         &self.regs[..self.count]
@@ -274,6 +279,7 @@ impl ShaderState {
         for &(v, bits) in keep {
             let r = self.preset(bits);
             self.sel.loc.insert(v, Loc::Fixed(r));
+            self.spill.pinned.push((v, r, bits));
         }
         if built.is_empty() {
             return Ok(());
@@ -290,6 +296,7 @@ impl ShaderState {
                 if near.get(s).map_or(true, |&(_, last)| n - last > GAP) {
                     let mut code = Vec::new();
                     let v = self.materialize(&mut code, bits);
+                    self.spill.remat.insert(v, bits);
                     let hoisted = hoist && depth > 0;
                     let (at, k) = (if hoisted { anchor } else { out.len() }, code.len());
                     out.splice(at..at, code);

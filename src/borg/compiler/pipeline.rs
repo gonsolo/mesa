@@ -240,7 +240,11 @@ impl ShaderState {
                 let Some(bits) = self.bits_of(i.srcs[k]) else { continue };
                 let v = match near.get(&bits) {
                     Some(&(v, last)) if n - last <= self.const_gap => v,
-                    _ => self.materialize(&mut out, bits),
+                    _ => {
+                        let v = self.materialize(&mut out, bits);
+                        self.spill.remat.insert(v, bits);
+                        v
+                    }
                 };
                 near.insert(bits, (v, n));
                 (i.srcs[k], i.swz[k]) = (v, 0);
@@ -509,7 +513,7 @@ impl ShaderState {
             if alloc.is_some() {
                 break;
             }
-            if self.spill_to_fit(&forced, &extra_reserved, &[20, 21, 22, 23], margin).is_err() {
+            if self.spill_to_fit(&forced, &mut extra_reserved, &[20, 21, 22, 23], margin).is_err() {
                 break;
             }
             let (forced, mut extra_reserved) = fixed_regs(self);

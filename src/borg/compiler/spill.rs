@@ -183,13 +183,15 @@ impl ShaderState {
         self.sel.prog = out;
     }
 
-    /// Once the passes ran: while more values are live than the free registers, the one with the
-    /// furthest next use leaves its register (`spill_late`). A forced value takes no free register,
-    /// unless its register is `soft` (a draw shader's TEX block, 4 while live).
-    pub(crate) fn spill_to_fit(&mut self, forced: &HashMap<u32, u8>, reserved: &[u8], soft: &[u8], margin: usize) -> Result<(), String> {
+    /// Once the passes ran: while more values are live than the free registers, one leaves its
+    /// register. First a constant (`remat_later`), then a preset constant for the whole program,
+    /// then the value with the furthest next use (`spill_late`). A forced value takes no free
+    /// register, unless its register is `soft` (a draw shader's TEX block, 4 while live).
+    pub(crate) fn spill_to_fit(&mut self, forced: &HashMap<u32, u8>, reserved: &mut Vec<u8>, soft: &[u8], margin: usize) -> Result<(), String> {
         let hard: Vec<u8> = forced.values().copied().filter(|r| !soft.contains(r)).chain(reserved.iter().copied()).collect();
         let free = (1..30u8).filter(|r| !hard.contains(r)).count().saturating_sub(margin);
         let max = if self.stage == Stage::Compute { MAX_COMPUTE_SPILL_SLOTS } else { MAX_LATE_SLOTS };
+        let mut freed = 0;
         loop {
             let ranges = crate::block::live_ranges(&self.sel.prog);
             let weight = |v: &u32| match forced.get(v) {
@@ -202,11 +204,7 @@ impl ShaderState {
             for &(v, d, l) in &vals {
                 live[d..=l].iter_mut().for_each(|n| *n += weight(&v));
             }
-            let Some(at) = live.iter().position(|&n| n > free) else { return Ok(()) };
-            if self.spill.base.is_none() {
-                self.late_head();
-                continue;
-            }
+            let Some(at) = live.iter().position(|&n| n > free + freed) else { return Ok(()) };
             let scalar = |v: u32| self.sel.prog.iter().all(|i| i.srcs.iter().zip(&i.swz).all(|(s, &c)| *s != v || c == 0));
             let nu = crate::block::NextUse::new(&self.sel.prog);
             let pick = vals
@@ -218,10 +216,21 @@ impl ShaderState {
                 .map(|&(v, ..)| (v, nu.after(&self.sel.prog, at, v)))
                 // One read at `at` or right after it would be back in a register at once.
                 .filter(|&(_, n)| n > 1)
-                .max_by_key(|&(v, n)| (n, std::cmp::Reverse(v)))
+                .max_by_key(|&(v, n)| (self.spill.remat.contains_key(&v), n, std::cmp::Reverse(v)))
                 .map(|(v, _)| v);
             match pick {
+                Some(v) if self.spill.remat.contains_key(&v) => self.remat_later(v, nu.split(at, v)),
+                _ if !self.spill.pinned.is_empty() => {
+                    let (v, r, bits) = self.spill.pinned.pop().unwrap();
+                    self.sel.loc.remove(&v);
+                    self.cp.unpreset(r);
+                    reserved.retain(|&x| x != r);
+                    self.spill.remat.insert(v, bits);
+                    self.remat_later(v, 0);
+                    freed += 1;
+                }
                 Some(v) if self.spill.held.contains_key(&v) => self.reload_later(v, at),
+                Some(_) if self.spill.base.is_none() => self.late_head(),
                 Some(v) if self.spill.slots < max => self.spill_late(v, nu.split(at, v)),
                 _ => return Err(crate::compute::OUT_OF_REGISTERS.into()),
             }
@@ -311,6 +320,36 @@ impl ShaderState {
         t
     }
 
+    /// `v`, a constant, leaves its register from `from` on: a block that reads it builds it again.
+    fn remat_later(&mut self, v: u32, from: usize) {
+        let bits = self.spill.remat[&v];
+        let mut out = Vec::with_capacity(self.sel.prog.len() + 8);
+        let mut built = None;
+        for (k, mut i) in std::mem::take(&mut self.sel.prog).into_iter().enumerate() {
+            if crate::block::starts_block(i.mnem) {
+                built = None;
+            }
+            if k >= from && i.srcs.contains(&v) {
+                let r = match built {
+                    Some(r) => r,
+                    None => {
+                        let r = self.materialize(&mut out, bits);
+                        self.spill.remat.insert(r, bits);
+                        r
+                    }
+                };
+                built = Some(r);
+                i.srcs.iter_mut().filter(|s| **s == v).for_each(|s| *s = r);
+            }
+            let ends = crate::block::ends_block(i.mnem);
+            out.push(i);
+            if ends {
+                built = None;
+            }
+        }
+        self.sel.prog = out;
+    }
+
     /// `t`, which its slot holds too, leaves its register after `at`: its next read loads it again.
     fn reload_later(&mut self, t: u32, at: usize) {
         let slot = self.spill.held[&t];
@@ -391,7 +430,8 @@ mod tests {
         c.sel.prog = prog;
         // 4 free registers: r1..r4.
         let reserved: Vec<u8> = (5..30).collect();
-        c.spill_to_fit(&HashMap::new(), &reserved, &[], 0).unwrap();
+        let mut reserved = reserved;
+        c.spill_to_fit(&HashMap::new(), &mut reserved, &[], 0).unwrap();
         let ranges = crate::block::live_ranges(&c.sel.prog);
         let peak = (0..c.sel.prog.len())
             .map(|p| ranges.iter().filter(|(v, &(d, l))| !c.sel.loc.contains_key(v) && d <= p && p <= l).count())

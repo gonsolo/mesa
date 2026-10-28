@@ -709,7 +709,7 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, spill: bool, co
         reserved.extend(rd + 1..rd + 4);
     }
     if spill {
-        cx.spill_to_fit(&forced, &reserved, &[], 0)?;
+        cx.spill_to_fit(&forced, &mut reserved, &[], 0)?;
     }
     if cx.spill.slots > 0 {
         debug!("borgc[compute]: spilled {} value(s)", cx.spill.slots);

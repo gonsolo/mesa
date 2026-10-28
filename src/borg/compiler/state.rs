@@ -161,6 +161,10 @@ pub struct Spill {
     pub exempt: HashSet<u32>,
     /// Values a slot holds too, by the slot's byte offset: late reloads and stored definitions.
     pub held: HashMap<u32, u32>,
+    /// Constants built near their reads, by their bits: spilling one builds it again.
+    pub remat: HashMap<u32, u32>,
+    /// Compute's preset constants, most read first: value, register, bits.
+    pub pinned: Vec<(u32, u8, u32)>,
 }
 
 impl ShaderState {
