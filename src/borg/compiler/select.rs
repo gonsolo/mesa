@@ -1313,8 +1313,9 @@ impl ShaderState {
         for (c, &w) in regs.iter().enumerate() {
             let (v, vc) = self.operand(d, c as u8);
             let fixed = self.tex_dsts.contains(&v) || self.fattr_dsts.contains(&v) || self.sel.loc.contains_key(&v);
+            let cached = self.cp.zero == Some(v) || self.one_vreg == Some(v) || self.push_const_reg.values().any(|&r| r == v);
             let own = (v == d || v >= base) && self.sel.prog[start..].iter().filter(|i| i.dst == v).count() == 1;
-            if vc == 0 && own && !fixed {
+            if vc == 0 && own && !fixed && !cached {
                 for i in &mut self.sel.prog[start..] {
                     if i.dst == v {
                         i.dst = w;

@@ -64,7 +64,7 @@ pub struct ConstPool {
     regs: &'static [u8],
     count: usize,
     uniforms: Vec<(u8, u32)>,
-    zero: Option<u32>,
+    pub(crate) zero: Option<u32>,
 }
 
 impl ConstPool {
