@@ -75,6 +75,7 @@ _compiler_bindgen_args = [
   '--allowlist-function', 'nir_.*',
   '--allowlist-function', 'compiler_rs.*',
   '--allowlist-function', 'u_memstream.*',
+  '--allowlist-function', 'u_sparse_bitset_test',
   '--allowlist-function', 'util_dynarray.*',
   '--allowlist-type', 'u_memstream',
   '--no-prepend-enum-name',
