@@ -4,7 +4,7 @@
 use crate::state::{ShaderState, Stage};
 use crate::{BorgInstr, Loc, NO_DST};
 use crate::opcodes::{Op, CSR_ROOT};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const SCRATCH_WORDS: u32 = 16384 * 34;
 const MAX_SPILL_SLOTS: u32 = 16;
@@ -200,12 +200,15 @@ impl ShaderState {
                 None => !self.sel.loc.contains_key(v) as usize,
             };
             let vals: Vec<(u32, usize, usize)> = ranges.iter().filter(|(v, _)| weight(v) > 0).map(|(&v, &(d, l))| (v, d, l)).collect();
-            let mut live = vec![0usize; self.sel.prog.len() + 1];
+            let mut live = vec![0isize; self.sel.prog.len() + 2];
             for &(v, d, l) in &vals {
-                live[d..=l].iter_mut().for_each(|n| *n += weight(&v));
+                live[d] += weight(&v) as isize;
+                live[l + 1] -= weight(&v) as isize;
             }
+            let live: Vec<usize> = live.iter().scan(0, |n, &x| { *n += x; Some(*n as usize) }).collect();
             let Some(at) = live.iter().position(|&n| n > free + freed) else { return Ok(()) };
-            let scalar = |v: u32| self.sel.prog.iter().all(|i| i.srcs.iter().zip(&i.swz).all(|(s, &c)| *s != v || c == 0));
+            let vector: HashSet<u32> = self.sel.prog.iter().flat_map(|i| i.srcs.iter().zip(&i.swz).filter(|(_, &c)| c != 0).map(|(&s, _)| s)).collect();
+            let scalar = |v: u32| !vector.contains(&v);
             let nu = crate::block::NextUse::new(&self.sel.prog);
             let pick = vals
                 .iter()

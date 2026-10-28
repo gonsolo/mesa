@@ -224,20 +224,22 @@ impl NextUse {
             changed = false;
             for b in (0..n.spans.len()).rev() {
                 let len = n.spans[b].len() as u32;
-                for k in 0..n.succs[b].len() {
-                    let s = n.succs[b][k];
+                let mut mine = std::mem::take(&mut n.at[b]);
+                // Through itself a value comes no nearer.
+                for &s in n.succs[b].iter().filter(|&&s| s != b) {
                     let exit = n.exit(b, s);
-                    for (v, d) in n.at[s].clone() {
+                    for (&v, &d) in &n.at[s] {
                         if killed[b].contains(&v) || first[b].contains_key(&v) {
                             continue;
                         }
                         let d = d.saturating_add(len + exit);
-                        if n.at[b].get(&v).is_none_or(|&x| d < x) {
-                            n.at[b].insert(v, d);
+                        if mine.get(&v).is_none_or(|&x| d < x) {
+                            mine.insert(v, d);
                             changed = true;
                         }
                     }
                 }
+                n.at[b] = mine;
             }
         }
         n
@@ -335,16 +337,37 @@ pub(crate) fn live_ranges(prog: &[BorgInstr]) -> HashMap<u32, (usize, usize)> {
             live_out[b] = out;
         }
     }
-    for (v, x) in range.iter_mut() {
-        let k = id[v];
-        for (b, r) in spans.iter().enumerate() {
-            if has(&live_out[b], k) {
-                x.1 = x.1.max(r.end - 1);
+    let value: Vec<u32> = {
+        let mut v = vec![0; id.len()];
+        id.iter().for_each(|(&x, &k)| v[k] = x);
+        v
+    };
+    let bits = |b: &[u64]| -> Vec<u32> {
+        let mut out = vec![];
+        for (w, &x) in b.iter().enumerate() {
+            let mut x = x;
+            while x != 0 {
+                out.push(value[w * 64 + x.trailing_zeros() as usize]);
+                x &= x - 1;
             }
         }
-        for &(l, e) in &loops {
-            let (head, end) = (spans[l].start, spans[e].end - 1);
-            if (head..=end).contains(&x.0) && (has(&live_in[l], k) || live_in.get(e + 1).is_some_and(|a| has(a, k))) {
+        out
+    };
+    for (b, r) in spans.iter().enumerate() {
+        for v in bits(&live_out[b]) {
+            let x = range.get_mut(&v).unwrap();
+            x.1 = x.1.max(r.end - 1);
+        }
+    }
+    for &(l, e) in &loops {
+        let (head, end) = (spans[l].start, spans[e].end - 1);
+        let mut through = live_in[l].clone();
+        if let Some(a) = live_in.get(e + 1) {
+            through.iter_mut().zip(a).for_each(|(t, x)| *t |= x);
+        }
+        for v in bits(&through) {
+            let x = range.get_mut(&v).unwrap();
+            if (head..=end).contains(&x.0) {
                 *x = (x.0.min(head), x.1.max(end));
             }
         }
