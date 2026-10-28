@@ -9,7 +9,7 @@ use crate::Mnem;
 
 const SCRATCH_WORDS: u32 = 16384 * 34;
 const MAX_SPILL_SLOTS: u32 = 16;
-// A fragment shader's late slots: 4 words each, by a 12-bit immediate from the base.
+// A draw shader's late slots: 4 words each, by a 12-bit immediate from the base.
 const MAX_LATE_SLOTS: u32 = 128;
 const MAX_COMPUTE_SPILL_SLOTS: u32 = 64;
 // The vertex lane key's two words, after the slots; the word after the second takes the other lanes' store.
@@ -186,10 +186,9 @@ impl ShaderState {
         self.sel.prog = out;
     }
 
-    /// Once the passes ran (compute, or a fragment shader the ladder could not place): while more
-    /// values are live than the free registers, the one used furthest ahead goes to memory, stored
-    /// after each definition and loaded before each use. A forced value takes no free register,
-    /// unless its register is `soft` (a fragment shader's TEX block, 4 while it is live).
+    /// Once the passes ran: while more values are live than the free registers, the one with the
+    /// furthest next use leaves its register (`spill_late`). A forced value takes no free register,
+    /// unless its register is `soft` (a draw shader's TEX block, 4 while live).
     pub(crate) fn spill_to_fit(&mut self, forced: &HashMap<u32, u8>, reserved: &[u8], soft: &[u8], margin: usize) -> Result<(), String> {
         let hard: Vec<u8> = forced.values().copied().filter(|r| !soft.contains(r)).chain(reserved.iter().copied()).collect();
         let free = (1..30u8).filter(|r| !hard.contains(r)).count().saturating_sub(margin);
@@ -230,7 +229,7 @@ impl ShaderState {
     }
 
     /// The byte address of the lane's word of slot 0, in `spill`'s layout: compute's from
-    /// LocalInvocationIndex, a fragment's from its place in the quad and the root table.
+    /// LocalInvocationIndex, a fragment's from its place in the quad, a vertex's from the lane key.
     fn late_base(&mut self, base: u32) -> Vec<BorgInstr> {
         let fixed = |cx: &mut Self, r: u8| {
             let f = cx.sel.fresh();
@@ -243,6 +242,19 @@ impl ShaderState {
             let (r30, t) = (fixed(self, 30), self.sel.fresh());
             head.push(i(Op::Slli, t, vec![r30], 2));
             (t, 4 * crate::compute::SPILL_BASE_WORDS)
+        } else if self.stage == Stage::Vertex {
+            // vertex_lane_key in RISC-V forms.
+            let vi = fixed(self, 30);
+            let [table, root, a0, t0, d0, e0, s0, a1, t1, d1, e1, n0, n1, k1, key, kb, t] = [(); 17].map(|_| self.sel.fresh());
+            head.extend([i(Op::Csrrs, table, vec![], CSR_ROOT), i(Op::Lw, root, vec![table], 0)]);
+            let kw = self.materialize(&mut head, 4 * KEY_WORDS);
+            head.extend([i(Op::Add, a0, vec![root, kw], 0), i(Op::Sw, NO_DST, vec![a0, vi], 0),
+                i(Op::Lw, t0, vec![a0], 0), i(Op::Sub, d0, vec![vi, t0], 0), i(Op::Sltiu, e0, vec![d0], 1),
+                i(Op::Slli, s0, vec![e0], 2), i(Op::Add, a1, vec![a0, s0], 0), i(Op::Sw, NO_DST, vec![a1, vi], 8),
+                i(Op::Lw, t1, vec![a0], 8), i(Op::Sub, d1, vec![vi, t1], 0), i(Op::Sltiu, e1, vec![d1], 1),
+                i(Op::Xori, n0, vec![e0], 1), i(Op::Xori, n1, vec![e1], 1), i(Op::And, k1, vec![n0, n1], 0),
+                i(Op::Add, key, vec![n0, k1], 0), i(Op::Slli, kb, vec![key], 2), i(Op::Add, t, vec![kb, root], 0)]);
+            (t, 4 * SCRATCH_WORDS)
         } else {
             let (r30, r31) = (fixed(self, 30), fixed(self, 31));
             self.frag.per_pixel_fixed.extend([r30, r31]);

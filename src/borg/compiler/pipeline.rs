@@ -504,7 +504,7 @@ impl ShaderState {
         let (forced, mut extra_reserved) = fixed_regs(self);
         let mut alloc = allocate(self, &forced, &mut extra_reserved);
         // The fit counts live values; the allocator may still need a register or two more.
-        let late = self.spill.late && self.stage == Stage::Fragment;
+        let late = self.spill.late && matches!(self.stage, Stage::Fragment | Stage::Vertex);
         for margin in (0..4).take_while(|_| late) {
             if alloc.is_some() {
                 break;
