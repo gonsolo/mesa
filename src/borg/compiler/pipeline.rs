@@ -486,7 +486,12 @@ impl ShaderState {
                     i.srcs[0] = b;
                     i.swz[0] = 0;
                     i.imm = o;
-                    i.mnem = if op == Op::Load { Op::Lw.into() } else { Op::Sw.into() };
+                    // A spill slot's store runs in helper lanes too.
+                    i.mnem = match op {
+                        Op::Load => Op::Lw.into(),
+                        _ if self.spill.addrs.contains(&a) => Op::Sws.into(),
+                        _ => Op::Sw.into(),
+                    };
                 }
                 _ => {}
             }

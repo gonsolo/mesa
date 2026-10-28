@@ -74,24 +74,6 @@ impl ShaderState {
         out
     }
 
-    /// Helper lanes skip STOREs, so their spilled values would come back wrong: derivatives and implicit LOD need them.
-    fn needs_helper_lanes(&self, i: &BorgInstr) -> bool {
-        match (self.stage, i.mnem) {
-            (Stage::Compute, _) => false,
-            (Stage::Vertex, m) => matches!(m, Mnem::Op(Op::Brz | Op::Brnz)),
-            // TEX by address: its operation is in the TEXS before it, so assume an implicit LOD.
-            (_, Mnem::Op(Op::Ddx | Op::Ddy | Op::Texa | Op::Texad | Op::Texd | Op::Brz | Op::Brnz | Op::Bne | Op::Beq)) => true,
-            (_, Mnem::Op(Op::Tex)) => {
-                let op = i.srcs.get(2).and_then(|c| match self.sel.loc.get(c) {
-                    Some(Loc::Uniform(_)) => self.bits_of(*c).map(|bits| (bits >> 16) & 3),
-                    _ => None,
-                });
-                !matches!(op, Some(1 | 3))
-            }
-            _ => false,
-        }
-    }
-
     /// The first position with more than `limit` live values, with the values that cross it.
     fn over_limit(&self, limit: usize) -> Option<Vec<(u32, usize)>> {
         let pinned = |v: &u32| self.sel.loc.contains_key(v);
@@ -118,7 +100,9 @@ impl ShaderState {
             Stage::Vertex => self.win.room(5),
             Stage::Other => false,
         };
-        if !room || self.sel.prog.iter().any(|i| self.needs_helper_lanes(i)) {
+        // As before, a vertex shader that branches does not spill.
+        let apart = self.stage == Stage::Vertex && self.sel.prog.iter().any(|i| matches!(i.mnem, Mnem::Op(Op::Brz | Op::Brnz)));
+        if !room || apart {
             return false;
         }
         let pinned: Vec<u32> = self.out_roots.iter().copied().chain(self.tex_dsts.iter().copied()).chain(self.fattr_dsts.iter().copied()).chain(self.frag.out.iter().flatten().copied()).collect();
@@ -192,6 +176,7 @@ impl ShaderState {
             out.push(i);
             if defines {
                 let a = self.op(&mut out, Op::Iadd, &[lane, k]);
+                self.spill.addrs.insert(a);
                 out.push(BorgInstr { mnem: Op::Store.into(), dst: NO_DST, srcs: vec![a, v], swz: vec![0, 0], imm: 0 });
             }
         }

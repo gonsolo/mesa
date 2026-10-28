@@ -153,6 +153,8 @@ pub struct Spill {
     pub lane: Option<u32>,
     /// The byte address of a compute lane's spill slot 0, for spills after allocation's passes.
     pub base: Option<u32>,
+    /// The word addresses of spill slots.
+    pub addrs: HashSet<u32>,
     /// Values never spilled: the spill code's own.
     pub exempt: HashSet<u32>,
 }

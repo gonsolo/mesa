@@ -17,7 +17,7 @@ pub(crate) struct Operands {
 /// RISC-V forms with an immediate: no window operand, and r0 is x0 there.
 pub(crate) fn imm_form(m: Mnem) -> Option<Op> {
     match m {
-        Mnem::Op(op @ (Op::Lw | Op::Sw | Op::Slli | Op::Srli | Op::Srai | Op::Addi | Op::Andi | Op::Xori | Op::Sltiu | Op::Lui | Op::Csrrs)) => Some(op),
+        Mnem::Op(op @ (Op::Lw | Op::Sw | Op::Sws | Op::Slli | Op::Srli | Op::Srai | Op::Addi | Op::Andi | Op::Xori | Op::Sltiu | Op::Lui | Op::Csrrs)) => Some(op),
         _ => None,
     }
 }
@@ -69,11 +69,11 @@ fn illegal(cx: &ShaderState, alloc: &HashMap<u32, u8>, i: &BorgInstr) -> Option<
             if let Some(op) = imm_form(m) {
                 return if o.f3 != 0 {
                     Some("reads a window word in an immediate form")
-                } else if matches!(op, Op::Lw | Op::Sw) && o.r[0] == 0 {
+                } else if matches!(op, Op::Lw | Op::Sw | Op::Sws) && o.r[0] == 0 {
                     Some("has x0 as base")
-                } else if op == Op::Sw && o.r[1] == 0 {
+                } else if matches!(op, Op::Sw | Op::Sws) && o.r[1] == 0 {
                     Some("stores x0")
-                } else if op != Op::Sw && rd == 0 {
+                } else if !matches!(op, Op::Sw | Op::Sws) && rd == 0 {
                     Some("writes x0")
                 } else {
                     None

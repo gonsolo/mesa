@@ -96,7 +96,7 @@ pub(crate) fn encode_imm(op: Op, rd: u8, rs1: u8, rs2: u8, imm: u32) -> Option<u
     let (rd, rs1, rs2) = (rd as u32, rs1 as u32, rs2 as u32);
     let f = match op {
         Op::Lw => Fields { rd, rs1, imm12: imm, ..Default::default() },
-        Op::Sw => Fields { rs1, rs2, simm: imm, ..Default::default() },
+        Op::Sw | Op::Sws => Fields { rs1, rs2, simm: imm, ..Default::default() },
         Op::Slli | Op::Srli | Op::Srai => Fields { rd, rs1, shamtw: imm, ..Default::default() },
         Op::Addi | Op::Andi | Op::Xori | Op::Sltiu => Fields { rd, rs1, imm12: imm, ..Default::default() },
         Op::Lui => Fields { rd, imm20: imm, ..Default::default() },
