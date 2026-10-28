@@ -104,4 +104,34 @@ impl ShaderState {
             }
         }
     }
+
+    /// A constant a live instruction reads without a register (integer math the selector left as an
+    /// immediate, a vertex shader's `% 3`, say): the register it got later, or one of its own.
+    pub(crate) fn place_const_operands(&mut self) {
+        let mut live = self.sel.prog.clone();
+        crate::opt::dce(&mut live, &self.out_roots);
+        let defs: HashSet<u32> = self.sel.prog.iter().map(|i| i.dst).collect();
+        let mut need: Vec<u32> = live
+            .iter()
+            .flat_map(|i| i.srcs.iter().copied())
+            .filter(|s| !defs.contains(s) && !self.sel.loc.contains_key(s) && self.consts.contains_key(s))
+            .filter(|s| !self.tex_dsts.contains(s) && !self.fattr_dsts.contains(s))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        need.sort();
+        for d in need {
+            let (v, c) = match self.sel.vec_map.get(&d) {
+                Some(_) => crate::resolve_vm(&self.sel.vec_map, d, 0),
+                None => (self.konst(self.consts[&d]), 0),
+            };
+            for ins in self.sel.prog.iter_mut() {
+                for (s, sc) in ins.srcs.iter_mut().zip(ins.swz.iter_mut()) {
+                    if *s == d {
+                        (*s, *sc) = (v, c);
+                    }
+                }
+            }
+        }
+    }
 }
