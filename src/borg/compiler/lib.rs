@@ -365,12 +365,8 @@ unsafe fn compile_nir_inner(
         return 0;
     }
     let forced = config::env().spill_limit;
-    // Last, constants built at each use: no register held between uses.
-    let limits = [forced, Some(20), Some(18), Some(16), Some(14), Some(12), Some(10)];
-    let attempts = [16, 0].into_iter().flat_map(|g| limits.map(|l| (g, l)));
-    // Then spilling once the passes ran, which also takes values written more than once.
-    let attempts = attempts.flat_map(|a| [(a, false, false), (a, true, false)]).chain([((0, None), true, true)]);
-    for ((gap, limit), in_order, late) in attempts {
+    // One compile; the late spill makes it fit.
+    for ((gap, limit), in_order, late) in [((16, forced), false, true)] {
         let (mut cx, entry, total) = ShaderState::start(nir, flags, out_select);
         (info.push_window, info.spill_slots) = (cx.frag.push_window as u32, 0);
         (cx.spill.limit, cx.const_gap, cx.spill.in_order, cx.spill.late) = (limit, gap, in_order, late);
@@ -413,6 +409,6 @@ unsafe fn compile_nir_inner(
         info.npool = n as u32;
         return total;
     }
-    eprintln!("borgc: ERROR out of registers at every spill limit, refusing the shader");
+    eprintln!("borgc: ERROR out of registers, refusing the shader");
     0
 }

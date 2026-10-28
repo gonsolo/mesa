@@ -656,18 +656,15 @@ impl ShaderState {
 
 pub(crate) const OUT_OF_REGISTERS: &str = "out of registers";
 
-/// Fewer constants in registers leave more for values, the pressure order too, last compact:
-/// loads sunk to their uses and pool loads kept inside branches. Only then values spill.
+/// One compile with every constant in a register; the late spill makes it fit. Only when it runs
+/// out of registers: loads sunk to their uses and pool loads kept inside branches.
 pub(crate) unsafe fn compile_unified(nir: *mut nir_shader) -> Result<Out, String> {
-    let tries = [false, true].into_iter().flat_map(|compact| {
-        [usize::MAX, 8, 4, 0].into_iter().flat_map(move |c| [(c, false), (c, true)]).map(move |(c, o)| (compact, c, o, false))
-    });
     let mut r = Err(String::new());
-    for (compact, cap, in_order, spill) in tries.chain([(true, 0, true, true)]) {
-        r = compile_unified_with(nir, cap, spill, compact, true, in_order);
+    for compact in [false, true] {
+        r = compile_unified_with(nir, usize::MAX, true, compact, true, false);
         // Packed runs merge by bytes changed: atomics would lose updates.
         if matches!(&r, Ok(o) if o.flags & 5 == 5) {
-            r = compile_unified_with(nir, cap, spill, compact, false, in_order);
+            r = compile_unified_with(nir, usize::MAX, true, compact, false, false);
         }
         if !matches!(&r, Err(e) if e == OUT_OF_REGISTERS) {
             return r;
