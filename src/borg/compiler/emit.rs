@@ -146,7 +146,7 @@ pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
     for (k, i) in cx.sel.prog.iter().enumerate() {
         let rd = *alloc.get(&i.dst).unwrap_or(&0);
         match i.mnem {
-            Mnem::Mov | Mnem::Label => {}
+            Mnem::Mov | Mnem::Label | Mnem::Break | Mnem::Continue => {}
             Mnem::Op(Op::Brnz) => e.branch(k, i, &labels, &far),
             Mnem::Op(Op::Expush | Op::Exelse | Op::Expop) => {
                 let rs1 = if i.srcs.is_empty() { 0 } else { e.operand(i.srcs[0], i.swz[0]).0 };
@@ -181,7 +181,7 @@ fn branch_layout(prog: &[BorgInstr], start: usize) -> (HashMap<u32, usize>, Hash
         let (mut a, mut labels, mut at) = (start, HashMap::new(), Vec::new());
         for (k, i) in prog.iter().enumerate() {
             match i.mnem {
-                Mnem::Mov => {}
+                Mnem::Mov | Mnem::Break | Mnem::Continue => {}
                 Mnem::Label => {
                     labels.insert(i.imm, a);
                 }

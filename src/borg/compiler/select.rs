@@ -1268,15 +1268,17 @@ impl ShaderState {
                     });
                 }
             }
+            let mut jump = None;
             for instr in block.iter_instr_list() {
                 if let Some(j) = instr.as_jump() {
                     if let Some(&id) = loops.jumps.get(&(block as *const nir_block as usize)) {
                         let (alive, go, _) = lv[id];
                         let zero = self.konst(0);
-                        let clear = if j.type_ == nir_jump_break { vec![alive, go] } else { vec![go] };
+                        let (clear, mnem) = if j.type_ == nir_jump_break { (vec![alive, go], Mnem::Break) } else { (vec![go], Mnem::Continue) };
                         for d in clear {
                             self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: d, srcs: vec![zero, zero], swz: vec![0, 0], imm: 0 });
                         }
+                        jump = Some(BorgInstr { mnem, dst: NO_DST, srcs: vec![], swz: vec![], imm: id as u32 });
                     }
                     continue;
                 }
@@ -1304,6 +1306,8 @@ impl ShaderState {
             if let Some(c) = phi_copies.get(&(block as *const nir_block as usize)) {
                 self.parallel_copy(c);
             }
+            // After the copies, so the block's last run stays as it was.
+            self.sel.prog.extend(jump);
         }
     
     }

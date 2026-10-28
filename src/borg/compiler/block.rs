@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 use crate::opcodes::Op;
 use crate::{BorgInstr, Mnem, NO_DST};
+use compiler::cfg::{CFGBuilder, CFG};
 use std::collections::HashMap;
 use std::ops::Range;
 
@@ -61,6 +62,105 @@ fn linear_succs(prog: &[BorgInstr], spans: &[Range<usize>]) -> Vec<Vec<usize>> {
             s
         })
         .collect()
+}
+
+/// How a lane goes from block to block: it takes one side of an if, a break leaves the loop and
+/// a continue goes back to its head. A lane that has left is masked where it is skipped, so the
+/// blocks after a REPUSH and at a loop's end only see lanes still in the loop.
+#[cfg_attr(not(test), expect(dead_code))]
+pub(crate) struct Cfg {
+    cfg: CFG<usize>,
+    node: Vec<Option<usize>>,
+}
+
+#[cfg_attr(not(test), expect(dead_code))]
+impl Cfg {
+    pub(crate) fn new(prog: &[BorgInstr]) -> Cfg {
+        let spans = spans(prog);
+        let mut b = CFGBuilder::<usize, usize, std::hash::RandomState>::new();
+        for k in 0..spans.len().max(1) {
+            b.add_node(k, k);
+        }
+        for (p, s) in logical_edges(prog, &spans) {
+            b.add_edge(p, s);
+        }
+        let cfg = b.as_cfg(false);
+        let mut node = vec![None; spans.len().max(1)];
+        for (k, n) in cfg.iter().enumerate() {
+            node[**n] = Some(k);
+        }
+        Cfg { cfg, node }
+    }
+
+    /// Whether every lane that runs block `b` ran block `a` before it. No lane runs a block
+    /// without a path to it.
+    pub(crate) fn dominates(&self, a: usize, b: usize) -> bool {
+        match (self.node[a], self.node[b]) {
+            (Some(x), Some(y)) => self.cfg.dominates(x, y),
+            _ => a == b,
+        }
+    }
+}
+
+/// The edges of `Cfg`. A push no lane skips is a loop's (its body, its EXANY) or a REPUSH of the
+/// loop's `go`: lanes it masks have left already.
+fn logical_edges(prog: &[BorgInstr], spans: &[Range<usize>]) -> Vec<(usize, usize)> {
+    // Per push: for an if, the blocks its lanes came from and the end of its then side.
+    let mut ifs: Vec<Option<(Vec<usize>, Option<Vec<usize>>)>> = vec![];
+    // Per loop: its head, its `go` and its breaks.
+    let mut loops: Vec<(usize, u32, Vec<usize>)> = vec![];
+    let (mut edges, mut live) = (vec![], vec![]);
+    for (b, r) in spans.iter().enumerate() {
+        let i = &prog[r.start];
+        let mut from = std::mem::take(&mut live);
+        match i.mnem {
+            Mnem::Label => loops.push((b, NO_DST, vec![])),
+            Mnem::Op(Op::Expush) => {
+                let body = b > 0 && prog[spans[b - 1].start].mnem == Mnem::Label;
+                if let Some(l) = loops.last_mut().filter(|_| body) {
+                    l.1 = i.srcs[0];
+                }
+                let any = prog.get(r.start + 1).is_some_and(|n| n.mnem == Op::Exany);
+                let repush = loops.last().is_some_and(|l| l.1 == i.srcs[0]);
+                ifs.push((!body && !any && !repush).then(|| (from.clone(), None)));
+            }
+            Mnem::Op(Op::Exelse) => {
+                if let Some(Some((entry, then))) = ifs.last_mut() {
+                    *then = Some(std::mem::replace(&mut from, entry.clone()));
+                }
+            }
+            Mnem::Op(Op::Expop) => {
+                if let Some(Some((entry, then))) = ifs.pop() {
+                    from.extend(then.unwrap_or(entry));
+                }
+            }
+            _ => {}
+        }
+        edges.extend(from.into_iter().map(|p| (p, b)));
+        live = vec![b];
+        for i in &prog[r.clone()] {
+            match (i.mnem, loops.last_mut()) {
+                (Mnem::Break, Some(l)) => {
+                    l.2.push(b);
+                    live.clear();
+                }
+                (Mnem::Continue, Some(l)) => {
+                    edges.push((b, l.0));
+                    live.clear();
+                }
+                (Mnem::Op(Op::Brnz), Some(_)) => {
+                    let (head, _, breaks) = loops.pop().unwrap();
+                    edges.extend(live.iter().map(|&p| (p, head)));
+                    // Without a break the loop never ends; its exit still has a block before it.
+                    if !breaks.is_empty() {
+                        live = breaks;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    edges
 }
 
 /// Where each value holds its register, as a range of positions: from its first definition to
@@ -212,6 +312,93 @@ mod tests {
         assert_eq!(r[&2], (1, 7), "carried round it");
         assert_eq!(r[&4], (2, 8), "defined in it, live after it");
         assert_eq!(r[&3], (3, 5), "a value of one trip");
+    }
+    fn m(mnem: impl Into<Mnem>, dst: u32, srcs: &[u32]) -> BorgInstr {
+        BorgInstr { mnem: mnem.into(), dst, srcs: srcs.to_vec(), swz: vec![0; srcs.len()], imm: 0 }
+    }
+
+    fn edges(prog: &[BorgInstr]) -> Vec<(usize, usize)> {
+        let mut e = logical_edges(prog, &spans(prog));
+        e.sort();
+        e
+    }
+
+    /// A loop as selection marks it: alive 1, go 2, any 3; `body` between its push and its end.
+    fn in_loop(body: Vec<BorgInstr>) -> Vec<BorgInstr> {
+        let mut p = vec![m(Op::Ior, 1, &[9, 9]), m(Mnem::Label, NO_DST, &[]), m(Op::Ior, 2, &[1, 1]), m(Op::Expush, NO_DST, &[2])];
+        p.extend(body);
+        p.extend([
+            m(Op::Expop, NO_DST, &[]),
+            m(Op::Expush, NO_DST, &[1]),
+            m(Op::Exany, 3, &[]),
+            m(Op::Expop, NO_DST, &[]),
+            m(Op::Brnz, NO_DST, &[3]),
+            m(Op::Fadd, 8, &[]),
+        ]);
+        p
+    }
+
+    /// `if (c) { jump; }` and the REPUSH after it, with `b` under it.
+    fn jump_then(jump: Mnem) -> Vec<BorgInstr> {
+        vec![
+            m(Op::Fadd, 4, &[]),
+            m(Op::Expush, NO_DST, &[4]),
+            m(Op::Ior, 2, &[9, 9]),
+            m(jump, NO_DST, &[]),
+            m(Op::Exelse, NO_DST, &[]),
+            m(Op::Expop, NO_DST, &[]),
+            m(Op::Expush, NO_DST, &[2]),
+            m(Op::Fadd, 5, &[]),
+            m(Op::Expop, NO_DST, &[]),
+        ]
+    }
+
+    #[test]
+    fn an_if_goes_to_either_side_and_joins() {
+        let p = vec![
+            m(Op::Fadd, 1, &[]),
+            m(Op::Expush, NO_DST, &[1]),
+            m(Op::Fadd, 2, &[]),
+            m(Op::Exelse, NO_DST, &[]),
+            m(Op::Fadd, 3, &[]),
+            m(Op::Expop, NO_DST, &[]),
+            m(Op::Fadd, 4, &[]),
+        ];
+        assert_eq!(edges(&p), vec![(0, 1), (0, 2), (1, 3), (2, 3)]);
+        let c = Cfg::new(&p);
+        assert!(c.dominates(0, 3) && !c.dominates(1, 3) && !c.dominates(2, 3));
+    }
+    #[test]
+    fn a_nested_if_joins_before_the_outer_else() {
+        let p = vec![
+            m(Op::Fadd, 1, &[]),
+            m(Op::Expush, NO_DST, &[1]),
+            m(Op::Expush, NO_DST, &[1]),
+            m(Op::Fadd, 2, &[]),
+            m(Op::Exelse, NO_DST, &[]),
+            m(Op::Expop, NO_DST, &[]),
+            m(Op::Exelse, NO_DST, &[]),
+            m(Op::Fadd, 3, &[]),
+            m(Op::Expop, NO_DST, &[]),
+        ];
+        assert_eq!(edges(&p), vec![(0, 1), (0, 5), (1, 2), (1, 3), (2, 4), (3, 4), (4, 6), (5, 6)]);
+        let c = Cfg::new(&p);
+        assert!(c.dominates(1, 4) && !c.dominates(2, 4) && !c.dominates(1, 6) && c.dominates(0, 6));
+    }
+    #[test]
+    fn a_break_leaves_the_loop() {
+        // 0 pre, 1 head, 2 body, 3 break, 4 else, 5 join, 6 REPUSH, 7 its pop, 8..10 loop end, 11 after.
+        let p = in_loop(jump_then(Mnem::Break));
+        assert_eq!(edges(&p), vec![(0, 1), (1, 2), (2, 3), (2, 4), (3, 11), (4, 5), (5, 6), (6, 7), (7, 8), (8, 9), (9, 10), (10, 1)]);
+        let c = Cfg::new(&p);
+        assert!(c.dominates(2, 11) && c.dominates(3, 11) && !c.dominates(6, 11) && c.dominates(6, 10));
+    }
+    #[test]
+    fn a_continue_goes_back_to_the_head() {
+        let p = in_loop(jump_then(Mnem::Continue));
+        assert_eq!(edges(&p), vec![(0, 1), (1, 2), (2, 3), (2, 4), (3, 1), (4, 5), (5, 6), (6, 7), (7, 8), (8, 9), (9, 10), (10, 1), (10, 11)]);
+        let c = Cfg::new(&p);
+        assert!(c.dominates(2, 10) && c.dominates(6, 11) && !c.dominates(3, 1) && c.dominates(1, 3));
     }
     #[test]
     fn parallel_copies_keep_their_sources() {

@@ -112,6 +112,9 @@ pub(crate) enum Mnem {
     /// A register copy, coalesced or emitted as a move.
     Mov,
     Label,
+    /// The end of a block that leaves its loop, or goes round it again.
+    Break,
+    Continue,
     LoopHead,
     LoopEnd,
     Repush,
@@ -137,6 +140,8 @@ impl std::fmt::Display for Mnem {
             Mnem::Op(op) => op.name(),
             Mnem::Mov => "mov",
             Mnem::Label => "LABEL",
+            Mnem::Break => "BREAK",
+            Mnem::Continue => "CONTINUE",
             Mnem::LoopHead => "LOOP_HEAD",
             Mnem::LoopEnd => "LOOP_END",
             Mnem::Repush => "REPUSH",
@@ -151,7 +156,7 @@ pub(crate) struct BorgInstr {
     pub(crate) dst: u32,
     pub(crate) srcs: Vec<u32>,
     pub(crate) swz: Vec<u8>,
-    /// SOUT and FATTR: the component index; LABEL and a loop's BRNZ: the label.
+    /// SOUT and FATTR: the component index; LABEL, BREAK, CONTINUE and a loop's BRNZ: the label.
     pub(crate) imm: u32,
 }
 
