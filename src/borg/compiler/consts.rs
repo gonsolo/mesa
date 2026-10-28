@@ -255,11 +255,11 @@ impl ShaderState {
         v
     }
 
-    /// The `cap` most used constants become preset registers; the rest are built by immediates near
+    /// The most used constants become preset registers, as many as are free; the rest are built near
     /// each use and reused for 16 instructions. One inside an `if` moves before its outermost
     /// EXPUSH, so the later uses find it in every lane; with `hoist` off it stays in place and a
     /// mask change forgets it.
-    pub(crate) fn pool_consts(&mut self, cap: usize, hoist: bool) -> Result<(), String> {
+    pub(crate) fn pool_consts(&mut self, hoist: bool) -> Result<(), String> {
         let mut uses: HashMap<u32, usize> = HashMap::new();
         for i in &self.sel.prog {
             for s in &i.srcs {
@@ -270,7 +270,7 @@ impl ShaderState {
         }
         let mut ks: Vec<(u32, u32)> = uses.keys().map(|&v| (v, self.cs.kval[&v])).collect();
         ks.sort_by_key(|&(v, b)| (std::cmp::Reverse(uses[&v]), b));
-        let (keep, built) = ks.split_at(ks.len().min(self.cp.free_regs().min(cap)));
+        let (keep, built) = ks.split_at(ks.len().min(self.cp.free_regs()));
         for &(v, bits) in keep {
             let r = self.preset(bits);
             self.sel.loc.insert(v, Loc::Fixed(r));

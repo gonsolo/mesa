@@ -661,10 +661,10 @@ pub(crate) const OUT_OF_REGISTERS: &str = "out of registers";
 pub(crate) unsafe fn compile_unified(nir: *mut nir_shader) -> Result<Out, String> {
     let mut r = Err(String::new());
     for compact in [false, true] {
-        r = compile_unified_with(nir, usize::MAX, true, compact, true, false);
+        r = compile_unified_with(nir, compact, true);
         // Packed runs merge by bytes changed: atomics would lose updates.
         if matches!(&r, Ok(o) if o.flags & 5 == 5) {
-            r = compile_unified_with(nir, usize::MAX, true, compact, false, false);
+            r = compile_unified_with(nir, compact, false);
         }
         if !matches!(&r, Err(e) if e == OUT_OF_REGISTERS) {
             return r;
@@ -673,10 +673,8 @@ pub(crate) unsafe fn compile_unified(nir: *mut nir_shader) -> Result<Out, String
     r
 }
 
-unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, spill: bool, compact: bool, pack: bool,
-                               in_order: bool) -> Result<Out, String> {
+unsafe fn compile_unified_with(nir: *mut nir_shader, compact: bool, pack: bool) -> Result<Out, String> {
     let (mut cx, entry, _) = ShaderState::start(nir, crate::config::Flags(0), -1);
-    cx.spill.in_order = in_order;
     let ws = (*nir).info.workgroup_size;
     cx.cs.ws = [ws[0] as u32, ws[1] as u32, ws[2] as u32];
     if pack && cx.cs.ws == [1, 1, 1] {
@@ -694,7 +692,7 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, spill: bool, co
     }
     cx.optimise();
     cx.byte_accesses();
-    cx.pool_consts(cap, !compact)?;
+    cx.pool_consts(!compact)?;
     cx.refusal()?;
     let mut reserved: Vec<u8> = cx.cp.preset_regs().to_vec();
     reserved.extend([30u8, 31, 12, 13, 14]);
@@ -705,9 +703,7 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, spill: bool, co
         forced.extend(cx.tex_dsts.iter().map(|&t| (t, rd)));
         reserved.extend(rd + 1..rd + 4);
     }
-    if spill {
-        cx.spill_to_fit(&forced, &mut reserved, &[], 0)?;
-    }
+    cx.spill_to_fit(&forced, &mut reserved, &[], 0)?;
     if cx.spill.slots > 0 {
         debug!("borgc[compute]: spilled {} value(s)", cx.spill.slots);
     }

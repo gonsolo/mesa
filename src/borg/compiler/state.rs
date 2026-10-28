@@ -108,8 +108,6 @@ pub struct ShaderState {
     pub tex_dsts: HashSet<u32>,
     pub fattr_dsts: HashSet<u32>,
     pub one_vreg: Option<u32>,
-    /// How many instructions a built constant is reused for (const_immediates).
-    pub const_gap: usize,
     pub push_const_reg: HashMap<u32, u32>,
     pub const_addr_chain: Option<(i32, u32)>,
     /// Why the shader is refused: the first reason, reported when the phase ends.
@@ -145,11 +143,6 @@ pub struct Vert {
 /// Spilling: its outcome and the scratch slots used.
 #[derive(Default)]
 pub struct Spill {
-    /// Keeps the pressure order: the retry when the latency order runs out of registers.
-    pub in_order: bool,
-    pub alloc_failed: bool,
-    /// Spill once the passes ran, when allocation fails (fragment shaders).
-    pub late: bool,
     pub slots: u32,
     pub lane: Option<u32>,
     /// The byte address of a compute lane's spill slot 0, for spills after allocation's passes.
@@ -195,7 +188,6 @@ impl ShaderState {
             tex_dsts: Default::default(),
             fattr_dsts: Default::default(),
             one_vreg: Default::default(),
-            const_gap: 16,
             push_const_reg: Default::default(),
             const_addr_chain: Default::default(),
             refused: None,

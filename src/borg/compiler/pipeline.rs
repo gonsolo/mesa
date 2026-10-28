@@ -133,9 +133,7 @@ impl ShaderState {
         self.iseq_forms();
         self.fstep_forms();
         self.legalize();
-        if !self.spill.in_order {
-            schedule_for_latency(&mut self.sel.prog, &self.out_roots);
-        }
+        schedule_for_latency(&mut self.sel.prog, &self.out_roots);
         if self.stage == Stage::Fragment {
             self.log_uniformity();
         }
@@ -216,7 +214,7 @@ impl ShaderState {
     }
 
     /// ISA v2 (B8 step 9): a draw shader's constant operands by immediates, built near each use and
-    /// reused for `const_gap` instructions within a block (compute: pool_consts). A TEX's control
+    /// reused for 16 instructions within a block (compute: pool_consts). A TEX's control
     /// word stays for tex_addresses.
     pub(crate) fn const_immediates(&mut self) {
         if self.stage == Stage::Compute {
@@ -234,7 +232,7 @@ impl ShaderState {
                 }
                 let Some(bits) = self.bits_of(i.srcs[k]) else { continue };
                 let v = match near.get(&bits) {
-                    Some(&(v, last)) if n - last <= self.const_gap => v,
+                    Some(&(v, last)) if n - last <= 16 => v,
                     _ => {
                         let v = self.materialize(&mut out, bits);
                         self.spill.remat.insert(v, bits);
@@ -503,7 +501,7 @@ impl ShaderState {
         let (forced, mut extra_reserved) = fixed_regs(self);
         let mut alloc = allocate(self, &forced, &mut extra_reserved);
         // The fit counts live values; the allocator may still need a register or two more.
-        let late = self.spill.late && matches!(self.stage, Stage::Fragment | Stage::Vertex);
+        let late = matches!(self.stage, Stage::Fragment | Stage::Vertex);
         for margin in (0..4).take_while(|_| late) {
             if alloc.is_some() {
                 break;
@@ -514,10 +512,7 @@ impl ShaderState {
             let (forced, mut extra_reserved) = fixed_regs(self);
             alloc = allocate(self, &forced, &mut extra_reserved);
         }
-        let Some(alloc) = alloc else {
-            self.spill.alloc_failed = true;
-            return None;
-        };
+        let alloc = alloc?;
         if let Err(e) = crate::legal::check(self, &alloc) {
             self.refuse(e);
             return None;

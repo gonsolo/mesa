@@ -42,7 +42,6 @@ use opcodes::Op;
 use config::Flags;
 use isel::resolve_vm;
 use state::ShaderState;
-use crate::state::Stage;
 
 fn packed_layout(flags: Flags) -> (u32, Vec<(usize, u32, u32)>) {
     let vfetch = flags.0;
@@ -364,47 +363,35 @@ unsafe fn compile_nir_inner(
     if nir.is_null() {
         return 0;
     }
-    // One compile; the late spill makes it fit.
-    for (gap, in_order, late) in [(16, false, true)] {
-        let (mut cx, entry, total) = ShaderState::start(nir, flags, out_select);
-        (info.push_window, info.spill_slots) = (cx.frag.push_window as u32, 0);
-        (cx.const_gap, cx.spill.in_order, cx.spill.late) = (gap, in_order, late);
-        cx.select_entry(entry);
-        if let Err(e) = cx.check_selected() {
-            eprintln!("borgc: refused: {e}");
-            return 0;
-        }
-        cx.lower_outputs();
-        cx.optimise();
-        info.spill_slots = cx.spill.slots;
-        if let Err(e) = cx.refusal() {
-            eprintln!("borgc: refused: {e}");
-            return 0;
-        }
-        let blob = match cx.assemble() {
-            Some(blob) => {
-                info.spill_slots = cx.spill.slots;
-                blob
-            }
-            None if matches!(cx.stage, Stage::Fragment | Stage::Vertex) && cx.spill.alloc_failed => continue,
-            None => {
-                if let Err(e) = cx.refusal() {
-                    eprintln!("borgc: refused: {e}");
-                }
-                return 0;
-            }
-        };
-        if !out_len.is_null() {
-            *out_len = blob.len() as u32;
-        }
-        if !out_buf.is_null() && (blob.len() as u32) <= buf_cap {
-            std::ptr::copy_nonoverlapping(blob.as_ptr(), out_buf, blob.len());
-        }
-        let n = cx.pool.len().min(info.pool.len());
-        info.pool[..n].copy_from_slice(&cx.pool[..n]);
-        info.npool = n as u32;
-        return total;
+    let (mut cx, entry, total) = ShaderState::start(nir, flags, out_select);
+    (info.push_window, info.spill_slots) = (cx.frag.push_window as u32, 0);
+    cx.select_entry(entry);
+    if let Err(e) = cx.check_selected() {
+        eprintln!("borgc: refused: {e}");
+        return 0;
     }
-    eprintln!("borgc: ERROR out of registers, refusing the shader");
-    0
+    cx.lower_outputs();
+    cx.optimise();
+    if let Err(e) = cx.refusal() {
+        eprintln!("borgc: refused: {e}");
+        return 0;
+    }
+    let Some(blob) = cx.assemble() else {
+        match cx.refusal() {
+            Err(e) => eprintln!("borgc: refused: {e}"),
+            Ok(()) => eprintln!("borgc: ERROR out of registers, refusing the shader"),
+        }
+        return 0;
+    };
+    info.spill_slots = cx.spill.slots;
+    if !out_len.is_null() {
+        *out_len = blob.len() as u32;
+    }
+    if !out_buf.is_null() && (blob.len() as u32) <= buf_cap {
+        std::ptr::copy_nonoverlapping(blob.as_ptr(), out_buf, blob.len());
+    }
+    let n = cx.pool.len().min(info.pool.len());
+    info.pool[..n].copy_from_slice(&cx.pool[..n]);
+    info.npool = n as u32;
+    total
 }
