@@ -6,7 +6,7 @@ use crate::state::{ShaderState, Stage};
 use crate::survey::{survey, Survey};
 use crate::opcodes::{CSR_BARY0, CSR_FRAG_X, CSR_GROUP_ID_X, CSR_LOCAL_INDEX, CSR_ROOT, CSR_VERTEX_INDEX};
 use crate::{BorgInstr, Flags, Loc, Mnem, NO_DST};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use compiler::bindings::*;
 use crate::opcodes::Op;
 
@@ -494,34 +494,6 @@ impl ShaderState {
             out.push(i);
         }
         self.sel.prog = out;
-    }
-
-    /// Every TEX writes the same register block: a result still read after the next TEX is copied
-    /// out right after its own.
-    fn copy_tex_results(&mut self) {
-        let is_tex = |i: &BorgInstr, d: &HashSet<u32>| matches!(i.mnem, Mnem::Op(Op::Tex | Op::Texd)) && d.contains(&i.dst);
-        let texs: Vec<usize> = (0..self.sel.prog.len()).filter(|&i| is_tex(&self.sel.prog[i], &self.tex_dsts)).collect();
-        for w in texs.windows(2).rev() {
-            let (p, next) = (w[0], w[1]);
-            let t = self.sel.prog[p].dst;
-            let mut comps: Vec<u8> = self.sel.prog[next + 1..]
-                .iter()
-                .flat_map(|i| i.srcs.iter().zip(&i.swz).filter(|(s, _)| **s == t).map(|(_, &c)| c))
-                .collect();
-            comps.sort();
-            comps.dedup();
-            let copies: Vec<(u8, u32)> = comps.iter().map(|&c| (c, self.sel.fresh())).collect();
-            for i in &mut self.sel.prog[next + 1..] {
-                for (s, c) in i.srcs.iter_mut().zip(i.swz.iter_mut()) {
-                    if let Some(&(_, v)) = copies.iter().find(|(k, _)| *s == t && k == c) {
-                        (*s, *c) = (v, 0);
-                    }
-                }
-            }
-            for (k, &(c, v)) in copies.iter().enumerate() {
-                self.sel.prog.insert(p + 1 + k, BorgInstr { mnem: Op::Ior.into(), dst: v, srcs: vec![t, t], swz: vec![c, c], imm: 0 });
-            }
-        }
     }
 
     pub fn assemble(&mut self) -> Option<Vec<u8>> {
