@@ -553,7 +553,7 @@ impl ShaderState {
             self.spill.alloc_failed = true;
             return None;
         };
-        let Encoded { mut words, n_preload, n_body, pending, bad } = encode_program(self, &alloc);
+        let Encoded { mut words, n_body, pending, bad } = encode_program(self, &alloc);
         if bad > 0 {
             self.refuse(format!("{bad} instruction(s) without an encoding"));
             return None;
@@ -563,7 +563,7 @@ impl ShaderState {
             return None;
         }
         words.push(0x0000_0000);
-        Some(build_blob(self, &words, n_preload, n_body, pending, &self.frag.out))
+        Some(build_blob(self, &words, n_body, pending, &self.frag.out))
     }
 }
 

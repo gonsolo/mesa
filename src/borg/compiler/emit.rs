@@ -7,7 +7,6 @@ use crate::Mnem;
 
 pub struct Encoded {
     pub words: Vec<u32>,
-    pub n_preload: usize,
     pub n_body: usize,
     pub pending: u32,
     /// Instructions without an encoding.
@@ -18,7 +17,6 @@ pub struct Encoded {
 struct Emitter<'a> {
     cx: &'a ShaderState,
     alloc: &'a HashMap<u32, u8>,
-    pos_gpr: HashMap<(u32, u8), u8>,
     words: Vec<u32>,
     pending: u32,
     bad: u32,
@@ -30,23 +28,6 @@ impl Emitter<'_> {
         self.words.extend(w);
     }
 
-    /// Loads the position components the program reads into r24..r29; pos.w (1.0) is folded.
-    fn preload_positions(&mut self) {
-        let cx = self.cx;
-        let mut next_pre: u8 = 24; // above regalloc's low-GPR fill
-        for i in cx.sel.prog.iter().filter(|i| i.mnem != Mnem::Mov) {
-            for (s, &c) in i.srcs.iter().zip(i.swz.iter()) {
-                if cx.sel.loc.get(s) == Some(&Loc::Pos) && c != 3 && !self.pos_gpr.contains_key(&(*s, c)) && next_pre <= 29 {
-                    let g = next_pre;
-                    next_pre += 1;
-                    self.pos_gpr.insert((*s, c), g);
-                    // g = u[c] (position component c → uniform u0..u2), funct3=1.
-                    self.push(encode(Op::Fadd.into(), g, c, 30, 0, 1));
-                }
-            }
-        }
-    }
-
     /// One source operand as (physical register, read from the uniform window).
     fn operand(&self, s: u32, c: u8) -> (u8, bool) {
         let (cx, alloc) = (self.cx, self.alloc);
@@ -55,7 +36,6 @@ impl Emitter<'_> {
             return (alloc.get(&s).map_or(0, |&r| r + c), false);
         }
         match cx.sel.loc.get(&s) {
-            Some(&Loc::Pos) => (*self.pos_gpr.get(&(s, c)).unwrap_or(&0), false),
             Some(&Loc::Uniform(idx)) => (idx, true),
             Some(&Loc::Fixed(reg)) => (reg, false),
             _ => (*alloc.get(&s).unwrap_or(&0), false),
@@ -75,23 +55,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// FMUL or FMADD by pos.w (1.0) becomes FADD of the other operand; false for anything else.
-    fn fold_pos_w(&mut self, i: &BorgInstr, rd: u8) -> bool {
-        let cx = self.cx;
-        let posw = i.srcs.iter().zip(i.swz.iter())
-            .take(2) // only the multiply operands (rs1/rs2) can be pos.w
-            .position(|(s, &c)| cx.sel.loc.get(s) == Some(&Loc::Pos) && c == 3);
-        let Some(k) = posw else { return false };
-        if i.mnem != Op::Fmul && i.mnem != Op::Fmadd {
-            return false;
-        }
-        let (oreg, ouni) = self.operand(i.srcs[1 - k], i.swz[1 - k]);
-        // FMUL → FADD(rd, other, 0); FMADD → FADD(rd, other, acc); r30 = 0.
-        let addend = if i.mnem == Op::Fmadd { self.operand(i.srcs[2], i.swz[2]).0 } else { 30 };
-        self.push(encode(Op::Fadd.into(), rd, oreg, addend, 0, ouni as u32));
-        true
-    }
-
     /// Any other instruction: a register per operand, the first window word read through funct3.
     fn instr(&mut self, i: &BorgInstr, rd: u8) {
         let (cx, alloc) = (self.cx, self.alloc);
@@ -103,7 +66,6 @@ impl Emitter<'_> {
                 continue;
             }
             match cx.sel.loc.get(s) {
-                Some(&Loc::Pos) => r[k] = *self.pos_gpr.get(&(*s, c)).unwrap_or(&0),
                 Some(&Loc::Uniform(idx)) => {
                     if f3 == 0 {
                         r[k] = idx;
@@ -139,10 +101,8 @@ impl Emitter<'_> {
 }
 
 pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
-    let mut e = Emitter { cx, alloc, pos_gpr: HashMap::new(), words: Vec::new(), pending: 0, bad: 0 };
-    e.preload_positions();
-    let n_preload = e.words.len();
-    let (labels, far) = branch_layout(&cx.sel.prog, n_preload);
+    let mut e = Emitter { cx, alloc, words: Vec::new(), pending: 0, bad: 0 };
+    let (labels, far) = branch_layout(&cx.sel.prog, 0);
     for (k, i) in cx.sel.prog.iter().enumerate() {
         let rd = *alloc.get(&i.dst).unwrap_or(&0);
         match i.mnem {
@@ -162,15 +122,11 @@ pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
                 e.pending += (window || rs1 == 0) as u32; // a window word is no register, r0 is x0
                 e.push(encode_csrw(rs1, i.imm));
             }
-            _ => {
-                if !e.fold_pos_w(i, rd) {
-                    e.instr(i, rd);
-                }
-            }
+            _ => e.instr(i, rd),
         }
     }
     let n_body = e.words.len();
-    Encoded { words: e.words, n_preload, n_body, pending: e.pending, bad: e.bad }
+    Encoded { words: e.words, n_body, pending: e.pending, bad: e.bad }
 }
 
 /// LABEL word addresses from the program's start, and the BRNZ whose label is out of a branch's
@@ -207,18 +163,15 @@ fn branch_layout(prog: &[BorgInstr], start: usize) -> (HashMap<u32, usize>, Hash
 pub fn build_blob(
     cx: &ShaderState,
     words: &[u32],
-    n_preload: usize,
     n_body: usize,
     pending: u32,
     frag_out: &[Option<u32>; 4],
 ) -> Vec<u8> {
     let is_vertex = cx.stage == Stage::Vertex;
     debug!(
-        "borgc: encoded {} word(s) = {} uniform pre-load(s) + {} op(s) + {} epilogue \
-         ({} operand(s) still pending)",
+        "borgc: encoded {} word(s) = {} op(s) + {} epilogue ({} operand(s) still pending)",
         words.len(),
-        n_preload,
-        n_body - n_preload,
+        n_body,
         words.len() - n_body,
         pending
     );

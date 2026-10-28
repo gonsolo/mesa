@@ -717,7 +717,7 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, cap: usize, limit: Option<u
     if enc.bad > 0 {
         return Err(format!("{} instruction(s) without an encoding", enc.bad));
     }
-    if enc.pending > 0 || enc.n_preload > 0 {
+    if enc.pending > 0 {
         return Err(format!("{} operand(s) without a register", enc.pending));
     }
     if enc.words.len() > MAX_WORDS {
