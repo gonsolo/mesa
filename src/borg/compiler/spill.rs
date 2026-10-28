@@ -207,15 +207,23 @@ impl ShaderState {
                 live[d..=l].iter_mut().for_each(|n| *n += weight(&v));
             }
             let Some(at) = live.iter().position(|&n| n > free) else { return Ok(()) };
+            if self.spill.base.is_none() {
+                self.late_head();
+                continue;
+            }
             let scalar = |v: u32| self.sel.prog.iter().all(|i| i.srcs.iter().zip(&i.swz).all(|(s, &c)| *s != v || c == 0));
-            let next_use = |v: u32| self.sel.prog[at + 1..].iter().position(|i| i.srcs.contains(&v)).unwrap_or(usize::MAX);
+            let nu = crate::block::NextUse::new(&self.sel.prog);
             let pick = vals
                 .iter()
-                .filter(|&&(v, d, l)| d < at && l > at && weight(&v) == 1 && !self.spill.exempt.contains(&v) && !self.out_roots.contains(&v) && scalar(v))
-                .max_by_key(|&&(v, _, _)| (next_use(v), std::cmp::Reverse(v)))
+                .filter(|&&(v, d, l)| {
+                    d < at && l > at && weight(&v) == 1 && (!self.spill.exempt.contains(&v) || self.spill.held.contains_key(&v))
+                        && !self.out_roots.contains(&v) && scalar(v)
+                })
+                .max_by_key(|&&(v, _, _)| (nu.after(&self.sel.prog, at, v), std::cmp::Reverse(v)))
                 .map(|&(v, _, _)| v);
             match pick {
-                Some(v) if self.spill.slots < max => self.spill_late(v),
+                Some(v) if self.spill.held.contains_key(&v) => self.reload_later(v, at),
+                Some(v) if self.spill.slots < max => self.spill_late(v, nu.split(at, v)),
                 _ => return Err(crate::compute::OUT_OF_REGISTERS.into()),
             }
         }
@@ -251,56 +259,104 @@ impl ShaderState {
         head
     }
 
-    /// A slot as `spill` lays it out; compute builds the base again after each BARRIER, which
-    /// leaves no register to the next quad.
-    fn spill_late(&mut self, v: u32) {
-        let base = *self.spill.base.get_or_insert_with(|| self.sel.next_vreg);
-        if base == self.sel.next_vreg {
-            self.sel.next_vreg += 1;
-            let head = self.late_base(base);
-            let mut prog = Vec::with_capacity(self.sel.prog.len() + 8);
-            prog.extend(head.iter().cloned());
-            for i in std::mem::take(&mut self.sel.prog) {
-                let bar = i.mnem == Op::Barrier;
-                prog.push(i);
-                if bar {
-                    prog.extend(head.iter().cloned());
-                }
+    /// The slots' base at the start, and in compute again after each BARRIER, which leaves no
+    /// register to the next quad.
+    fn late_head(&mut self) {
+        let base = self.sel.next_vreg;
+        self.sel.next_vreg += 1;
+        self.spill.base = Some(base);
+        let head = self.late_base(base);
+        let mut prog = Vec::with_capacity(self.sel.prog.len() + 8);
+        prog.extend(head.iter().cloned());
+        for i in std::mem::take(&mut self.sel.prog) {
+            let bar = i.mnem == Op::Barrier;
+            prog.push(i);
+            if bar {
+                prog.extend(head.iter().cloned());
             }
-            self.sel.prog = prog;
         }
-        let at = 4 * self.spill.slots * if self.stage == Stage::Compute { self.invocations() } else { 4 };
+        self.sel.prog = prog;
+    }
+
+    /// A slot's address: the base and an immediate, or past the immediate's reach a register.
+    fn slot_addr(&mut self, out: &mut Vec<BorgInstr>, slot: u32) -> (u32, u32) {
+        let base = self.spill.base.unwrap();
+        if slot < 2048 {
+            return (base, slot);
+        }
+        let k = self.materialize(out, slot);
+        let a = self.op(out, Op::Add, &[base, k]);
+        self.spill.exempt.insert(k);
+        (a, 0)
+    }
+
+    fn reload(&mut self, out: &mut Vec<BorgInstr>, slot: u32) -> u32 {
+        let (a, o) = self.slot_addr(out, slot);
+        let t = self.sel.fresh();
+        self.spill.exempt.insert(t);
+        self.spill.held.insert(t, slot);
+        out.push(BorgInstr { mnem: Op::Lw.into(), dst: t, srcs: vec![a], swz: vec![0], imm: o });
+        t
+    }
+
+    /// `t`, which its slot holds too, leaves its register after `at`: its next read loads it again.
+    fn reload_later(&mut self, t: u32, at: usize) {
+        let slot = self.spill.held[&t];
+        let mut out = Vec::with_capacity(self.sel.prog.len() + 2);
+        let mut again = None;
+        for (k, mut i) in std::mem::take(&mut self.sel.prog).into_iter().enumerate() {
+            if k > at && i.srcs.contains(&t) {
+                let r = match again {
+                    Some(r) => r,
+                    None => self.reload(&mut out, slot),
+                };
+                again = Some(r);
+                i.srcs.iter_mut().filter(|s| **s == t).for_each(|s| *s = r);
+            }
+            out.push(i);
+        }
+        self.sel.prog = out;
+    }
+
+    /// `v` in a slot as `spill` lays it out, stored after each definition. From `from` on, a block
+    /// that reads it loads it once; a definition there gets a register of its own.
+    fn spill_late(&mut self, v: u32, from: usize) {
+        let slot = 4 * self.spill.slots * if self.stage == Stage::Compute { self.invocations() } else { 4 };
         let store = if self.stage == Stage::Compute { Op::Sw } else { Op::Sws };
         self.spill.slots += 1;
         let mut out = Vec::with_capacity(self.sel.prog.len() + 8);
-        // Slot offsets past an immediate's reach go through a register of their own.
-        let addr = |cx: &mut Self, out: &mut Vec<BorgInstr>| {
-            if at < 2048 {
-                return (base, at);
+        let addr = |cx: &mut Self, out: &mut Vec<BorgInstr>| cx.slot_addr(out, slot);
+        let mut held = None;
+        for (k, mut i) in std::mem::take(&mut self.sel.prog).into_iter().enumerate() {
+            if crate::block::starts_block(i.mnem) {
+                held = None;
             }
-            let k = cx.materialize(out, at);
-            let a = cx.op(out, Op::Add, &[base, k]);
-            cx.spill.exempt.insert(k);
-            (a, 0)
-        };
-        for mut i in std::mem::take(&mut self.sel.prog) {
-            if i.srcs.contains(&v) {
-                let (a, o) = addr(self, &mut out);
-                let t = self.sel.fresh();
-                self.spill.exempt.insert(t);
-                out.push(BorgInstr { mnem: Op::Lw.into(), dst: t, srcs: vec![a], swz: vec![0], imm: o });
+            let after = k >= from;
+            if after && i.srcs.contains(&v) {
+                let t = match held {
+                    Some(t) => t,
+                    None => self.reload(&mut out, slot),
+                };
+                held = Some(t);
                 i.srcs.iter_mut().filter(|s| **s == v).for_each(|s| *s = t);
             }
-            // Each definition gets a register of its own, live only up to its store.
             let defined = (i.dst == v).then(|| {
-                i.dst = self.sel.fresh();
-                self.spill.exempt.insert(i.dst);
+                if after {
+                    i.dst = self.sel.fresh();
+                    self.spill.exempt.insert(i.dst);
+                    self.spill.held.insert(i.dst, slot);
+                }
                 i.dst
             });
+            let ends = crate::block::ends_block(i.mnem);
             out.push(i);
             if let Some(d) = defined {
                 let (a, o) = addr(self, &mut out);
                 out.push(BorgInstr { mnem: store.into(), dst: NO_DST, srcs: vec![a, d], swz: vec![0, 0], imm: o });
+                held = after.then_some(d);
+            }
+            if ends {
+                held = None;
             }
         }
         self.sel.prog = out;

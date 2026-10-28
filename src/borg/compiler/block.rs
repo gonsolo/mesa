@@ -186,52 +186,96 @@ fn loops_around(prog: &[BorgInstr], spans: &[Range<usize>]) -> Vec<Vec<usize>> {
 /// the loop does not read (Braun & Hack, CC 2009).
 pub(crate) const LOOP_EXIT: u32 = 1 << 16;
 
-/// Per block, each value's distance from the block's start to its next read, on the logical CFG:
-/// in the block, or through its nearest successor. A value written before it is read is dead there.
-#[cfg_attr(not(test), expect(dead_code))]
-pub(crate) fn next_uses(prog: &[BorgInstr]) -> Vec<HashMap<u32, u32>> {
-    let spans = spans(prog);
-    let around = loops_around(prog, &spans);
-    let mut succs = vec![vec![]; spans.len()];
-    for (p, s) in logical_edges(prog, &spans) {
-        succs[p].push(s);
-    }
-    // Per block: the values it reads first, at their distance, and those it writes first.
-    let (mut first, mut killed) = (vec![HashMap::new(); spans.len()], vec![HashSet::new(); spans.len()]);
-    for (b, r) in spans.iter().enumerate() {
-        for (k, i) in prog[r.clone()].iter().enumerate() {
-            for &v in &i.srcs {
-                if !killed[b].contains(&v) {
-                    first[b].entry(v).or_insert(k as u32);
-                }
-            }
-            if i.dst != NO_DST && !first[b].contains_key(&i.dst) && !killed[b].contains(&i.dst) {
-                killed[b].insert(i.dst);
-            }
+/// Next-use distances (Braun & Hack, CC 2009) on the logical CFG: per block, each value's distance
+/// from the block's start to its next read, in the block or through its nearest successor. A value
+/// written before it is read is dead there.
+pub(crate) struct NextUse {
+    pub(crate) at: Vec<HashMap<u32, u32>>,
+    spans: Vec<Range<usize>>,
+    succs: Vec<Vec<usize>>,
+    around: Vec<Vec<usize>>,
+}
+
+impl NextUse {
+    pub(crate) fn new(prog: &[BorgInstr]) -> NextUse {
+        let spans = spans(prog);
+        let around = loops_around(prog, &spans);
+        let mut succs = vec![vec![]; spans.len()];
+        for (p, s) in logical_edges(prog, &spans) {
+            succs[p].push(s);
         }
-    }
-    let mut at = first.clone();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for b in (0..spans.len()).rev() {
-            let len = spans[b].len() as u32;
-            for &s in &succs[b] {
-                let exit = if around[b].iter().all(|l| around[s].contains(l)) { 0 } else { LOOP_EXIT };
-                for (&v, &d) in &at[s].clone() {
-                    if killed[b].contains(&v) || first[b].contains_key(&v) {
-                        continue;
+        // Per block: the values it reads first, at their distance, and those it writes first.
+        let (mut first, mut killed) = (vec![HashMap::new(); spans.len()], vec![HashSet::new(); spans.len()]);
+        for (b, r) in spans.iter().enumerate() {
+            for (k, i) in prog[r.clone()].iter().enumerate() {
+                for &v in &i.srcs {
+                    if !killed[b].contains(&v) {
+                        first[b].entry(v).or_insert(k as u32);
                     }
-                    let d = d.saturating_add(len + exit);
-                    if at[b].get(&v).is_none_or(|&x| d < x) {
-                        at[b].insert(v, d);
-                        changed = true;
-                    }
+                }
+                if i.dst != NO_DST && !first[b].contains_key(&i.dst) {
+                    killed[b].insert(i.dst);
                 }
             }
         }
+        let mut n = NextUse { at: first.clone(), spans, succs, around };
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for b in (0..n.spans.len()).rev() {
+                let len = n.spans[b].len() as u32;
+                for k in 0..n.succs[b].len() {
+                    let s = n.succs[b][k];
+                    let exit = n.exit(b, s);
+                    for (v, d) in n.at[s].clone() {
+                        if killed[b].contains(&v) || first[b].contains_key(&v) {
+                            continue;
+                        }
+                        let d = d.saturating_add(len + exit);
+                        if n.at[b].get(&v).is_none_or(|&x| d < x) {
+                            n.at[b].insert(v, d);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        n
     }
-    at
+
+    fn exit(&self, b: usize, s: usize) -> u32 {
+        if self.around[b].iter().all(|l| self.around[s].contains(l)) { 0 } else { LOOP_EXIT }
+    }
+
+    fn block_of(&self, pos: usize) -> usize {
+        self.spans.partition_point(|r| r.end <= pos)
+    }
+
+    /// From after position `pos`: the distance to `v`'s next read; MAX if written first or never.
+    pub(crate) fn after(&self, prog: &[BorgInstr], pos: usize, v: u32) -> u32 {
+        let b = self.block_of(pos);
+        for k in pos + 1..self.spans[b].end {
+            if prog[k].srcs.contains(&v) {
+                return (k - pos) as u32;
+            }
+            if prog[k].dst == v {
+                return u32::MAX;
+            }
+        }
+        let rest = (self.spans[b].end - pos) as u32;
+        self.succs[b]
+            .iter()
+            .filter_map(|&s| self.at[s].get(&v).map(|d| d.saturating_add(rest + self.exit(b, s))))
+            .min()
+            .unwrap_or(u32::MAX)
+    }
+
+    /// Where `v` leaves its register to relieve `pos`: the start of the outermost loop around `pos`
+    /// it enters live, as a lane runs that loop's earlier blocks again; else `pos`.
+    pub(crate) fn split(&self, pos: usize, v: u32) -> usize {
+        let b = self.block_of(pos);
+        self.around[b].iter().find(|&&l| self.at[l].contains_key(&v)).map_or(pos, |&l| self.spans[l].start)
+    }
 }
 
 /// Where each value holds its register, as a range of positions: from its first definition to
@@ -484,7 +528,7 @@ mod tests {
             m(Op::Expop, NO_DST, &[]),
             m(Op::Fadd, 4, &[1]),
         ];
-        let n = next_uses(&p);
+        let n = NextUse::new(&p).at;
         assert_eq!(n[1][&1], 2, "read in the then side");
         assert_eq!(n[0][&1], 1 + 2, "the nearer side: block 0 is one long");
         assert!(!n[2].contains_key(&1), "the else side writes it first");
@@ -496,7 +540,7 @@ mod tests {
         let mut p = in_loop(jump_then(Mnem::Break));
         p.insert(0, m(Op::Fadd, 7, &[]));
         p.push(m(Op::Fadd, 6, &[7]));
-        let n = next_uses(&p);
+        let n = NextUse::new(&p).at;
         let after = n.len() - 1;
         assert!(n[after].contains_key(&7));
         assert!(n[1][&7] >= LOOP_EXIT, "from the head, 7 is only used after the loop");
@@ -507,10 +551,23 @@ mod tests {
         // 7 read, then written again, on every trip.
         let mut p = in_loop(vec![m(Op::Fadd, 6, &[7]), m(Op::Fadd, 7, &[6])]);
         p.insert(0, m(Op::Fadd, 7, &[]));
-        let n = next_uses(&p);
+        let n = NextUse::new(&p).at;
         let spans = spans(&p);
         let end = (0..spans.len()).find(|&b| p[spans[b].end - 1].mnem == Op::Brnz).unwrap();
         assert!(n[end][&7] < LOOP_EXIT, "the back edge does not leave the loop");
+    }
+    #[test]
+    fn a_split_in_a_loop_starts_at_the_head_for_a_value_it_enters_with() {
+        // 7 from before the loop, read in its body; 6 defined and read within one trip.
+        let mut p = in_loop(vec![m(Op::Fadd, 6, &[7]), m(Op::Fadd, 5, &[6]), m(Op::Fadd, 4, &[6])]);
+        p.insert(0, m(Op::Fadd, 7, &[]));
+        let n = NextUse::new(&p);
+        let head = p.iter().position(|i| i.mnem == Mnem::Label).unwrap();
+        let mid = p.iter().position(|i| i.dst == 5).unwrap();
+        assert_eq!(n.split(mid, 7), head, "7 is read again on the next trip");
+        assert_eq!(n.split(mid, 6), mid, "6 is not live at the head");
+        assert_eq!(n.split(0, 7), 0, "outside any loop");
+        assert_eq!(n.after(&p, mid, 6), 1);
     }
     #[test]
     fn two_loops_in_a_row_are_left_one_after_the_other() {
@@ -518,7 +575,7 @@ mod tests {
         let second: Vec<BorgInstr> = in_loop(vec![]).into_iter().skip(1).collect();
         p.extend(second);
         p.push(m(Op::Fadd, 6, &[1]));
-        let n = next_uses(&p);
+        let n = NextUse::new(&p).at;
         let spans = spans(&p);
         let around = loops_around(&p, &spans);
         let heads: Vec<usize> = (0..spans.len()).filter(|&b| p[spans[b].start].mnem == Mnem::Label).collect();

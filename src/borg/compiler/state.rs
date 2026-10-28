@@ -159,6 +159,8 @@ pub struct Spill {
     pub addrs: HashSet<u32>,
     /// Values never spilled: the spill code's own.
     pub exempt: HashSet<u32>,
+    /// Values a slot holds too, by the slot's byte offset: late reloads and stored definitions.
+    pub held: HashMap<u32, u32>,
 }
 
 impl ShaderState {
