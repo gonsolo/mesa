@@ -11,7 +11,6 @@ pub struct Env {
     /// Writes each blob to <prefix>.vert.borg or .frag.borg.
     pub emit_blob: Option<String>,
     /// The first live-value limit tried before the built-in ones.
-    pub spill_limit: Option<usize>,
     /// Every fragment shader writes alpha.
     pub frag_alpha: bool,
     /// Records each compile's NIR hash and result for scripts/borgc_corpus.
@@ -28,7 +27,6 @@ pub fn env() -> &'static Env {
             dump_isa: set("BORGC_DUMP_ISA"),
             dump_alloc: set("BORGC_DUMP_ALLOC"),
             emit_blob: std::env::var("BORGC_EMIT_BLOB").ok(),
-            spill_limit: std::env::var("BORGC_SPILL_LIMIT").ok().and_then(|v| v.parse().ok()),
             frag_alpha: set("BORGC_FRAG_ALPHA"),
             corpus_dir: std::env::var("BORGC_CORPUS_DIR").ok(),
         }

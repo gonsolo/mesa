@@ -142,10 +142,9 @@ pub struct Vert {
     pub descriptor_defs: HashSet<u32>,
 }
 
-/// Spilling: the live-value limit of this attempt, its outcome and the scratch slots used.
+/// Spilling: its outcome and the scratch slots used.
 #[derive(Default)]
 pub struct Spill {
-    pub limit: Option<usize>,
     /// Keeps the pressure order: the retry when the latency order runs out of registers.
     pub in_order: bool,
     pub alloc_failed: bool,

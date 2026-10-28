@@ -53,11 +53,6 @@ impl Window {
         self.vregs.insert(bits, v);
         Some(v)
     }
-
-    /// Room for `n` more words before the pool pass.
-    pub fn room(&self, n: usize) -> bool {
-        self.words.len() + n < self.max()
-    }
 }
 
 pub struct ConstPool {

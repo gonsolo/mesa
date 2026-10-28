@@ -113,17 +113,12 @@ impl ShaderState {
     pub unsafe fn optimise(&mut self) {
         self.place_const_operands();
         self.sys_reads();
-        // Before spilling, so its pressure counts; again below for the pool's TEX.
+        // Once before the window pool too: without it 24 of 137 replayed draw shaders grow by 13%.
         self.tex_addresses();
-        // Before spilling, so its pressure counts; again below for the pool's and the spills' loads.
         if matches!(self.stage, Stage::Vertex | Stage::Fragment) {
             self.root_accesses();
         }
         self.const_immediates();
-        if let Some(limit) = self.spill.limit {
-            dce(&mut self.sel.prog, &self.out_roots);
-            self.spill_to_pressure(limit);
-        }
         self.pool_window();
         dce(&mut self.sel.prog, &self.out_roots);
         if matches!(self.stage, Stage::Vertex | Stage::Fragment) {

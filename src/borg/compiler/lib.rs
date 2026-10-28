@@ -364,12 +364,11 @@ unsafe fn compile_nir_inner(
     if nir.is_null() {
         return 0;
     }
-    let forced = config::env().spill_limit;
     // One compile; the late spill makes it fit.
-    for ((gap, limit), in_order, late) in [((16, forced), false, true)] {
+    for (gap, in_order, late) in [(16, false, true)] {
         let (mut cx, entry, total) = ShaderState::start(nir, flags, out_select);
         (info.push_window, info.spill_slots) = (cx.frag.push_window as u32, 0);
-        (cx.spill.limit, cx.const_gap, cx.spill.in_order, cx.spill.late) = (limit, gap, in_order, late);
+        (cx.const_gap, cx.spill.in_order, cx.spill.late) = (gap, in_order, late);
         cx.select_entry(entry);
         if let Err(e) = cx.check_selected() {
             eprintln!("borgc: refused: {e}");
@@ -381,9 +380,6 @@ unsafe fn compile_nir_inner(
         if let Err(e) = cx.refusal() {
             eprintln!("borgc: refused: {e}");
             return 0;
-        }
-        if cx.spill.slots > 0 {
-            debug!("borgc: spilled {} value(s) to keep {:?} live", cx.spill.slots, limit);
         }
         let blob = match cx.assemble() {
             Some(blob) => {

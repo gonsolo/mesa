@@ -7,7 +7,6 @@ use crate::opcodes::{Op, CSR_ROOT};
 use std::collections::{HashMap, HashSet};
 
 const SCRATCH_WORDS: u32 = 16384 * 34;
-const MAX_SPILL_SLOTS: u32 = 16;
 // A draw shader's late slots: 4 words each, by a 12-bit immediate from the base.
 const MAX_LATE_SLOTS: u32 = 128;
 const MAX_COMPUTE_SPILL_SLOTS: u32 = 64;
@@ -22,103 +21,11 @@ impl ShaderState {
         dst
     }
 
-    /// A per-lane word in 0..3. Memory ops run lane by lane, so the last lane's VertexIndex wins a
-    /// shared word: lanes holding it get 0, the rest repeat that on a second word. Lanes with equal
-    /// VertexIndex share a key, and their values are equal too.
-    fn vertex_lane_key(&mut self) -> Vec<BorgInstr> {
-        let mut out = Vec::new();
-        let vi = self.sel.fresh();
-        self.sel.loc.insert(vi, Loc::Fixed(30));
-        let (k0, k1, c1, c2) = (self.konst(KEY_WORDS), self.konst(KEY_WORDS + 2), self.konst(1), self.konst(2));
-        let z = self.op(&mut out, Op::Isub, &[vi, vi]);
-        let a0 = self.op(&mut out, Op::Iadd, &[z, k0]);
-        out.push(BorgInstr { mnem: Op::Store.into(), dst: NO_DST, srcs: vec![a0, vi], swz: vec![0, 0], imm: 0 });
-        let t0 = self.op(&mut out, Op::Load, &[a0]);
-        let e0 = self.op(&mut out, Op::Iseq, &[vi, t0]);
-        let a1 = self.op(&mut out, Op::Iadd, &[e0, k1]);
-        out.push(BorgInstr { mnem: Op::Store.into(), dst: NO_DST, srcs: vec![a1, vi], swz: vec![0, 0], imm: 0 });
-        let a2 = self.op(&mut out, Op::Iadd, &[z, k1]);
-        let t1 = self.op(&mut out, Op::Load, &[a2]);
-        let e1 = self.op(&mut out, Op::Iseq, &[vi, t1]);
-        let n0 = self.op(&mut out, Op::Isub, &[c1, e0]);
-        let m = self.op(&mut out, Op::Isub, &[c2, e1]);
-        let key = self.op(&mut out, Op::Imul, &[n0, m]);
-        self.spill.lane = Some(key);
-        out
-    }
-
-    /// A per-lane word in 0..4, unique within a quad; in compute the LocalInvocationIndex.
-    fn lane_key(&mut self) -> Vec<BorgInstr> {
-        match self.stage {
-            Stage::Compute => {
-                let r30 = self.sel.fresh();
-                self.sel.loc.insert(r30, Loc::Fixed(30));
-                self.spill.lane = Some(r30);
-                return Vec::new();
-            }
-            Stage::Vertex => return self.vertex_lane_key(),
-            _ => {}
-        }
-        let mut out = Vec::new();
-        let (f30, f31) = (self.sel.fresh(), self.sel.fresh());
-        for (f, r) in [(f30, 30), (f31, 31)] {
-            self.sel.loc.insert(f, Loc::Fixed(r));
-            self.frag.per_pixel_fixed.insert(f);
-        }
-        let c1 = self.konst(1);
-        let xi = self.op(&mut out, Op::F2i, &[f30]);
-        let yi = self.op(&mut out, Op::F2i, &[f31]);
-        let xb = self.op(&mut out, Op::Iand, &[xi, c1]);
-        let yb = self.op(&mut out, Op::Iand, &[yi, c1]);
-        let y2 = self.op(&mut out, Op::Ishl, &[yb, c1]);
-        let key = self.op(&mut out, Op::Ior, &[xb, y2]);
-        self.spill.lane = Some(key);
-        out
-    }
-
-    /// The first position with more than `limit` live values, with the values that cross it.
-    fn over_limit(&self, limit: usize) -> Option<Vec<(u32, usize)>> {
-        let pinned = |v: &u32| self.sel.loc.contains_key(v);
-        let ranges = crate::block::live_ranges(&self.sel.prog);
-        let vals: Vec<(u32, usize, usize)> = ranges.iter().filter(|(v, _)| !pinned(v)).map(|(&v, &(d, l))| (v, d, l)).collect();
-        let at = (0..self.sel.prog.len()).find(|&p| vals.iter().filter(|&&(_, d, l)| d <= p && p <= l).count() > limit)?;
-        Some(vals.iter().filter(|&&(_, d, l)| d < at && l > at).map(|&(v, _, l)| (v, l)).collect())
-    }
-
-    pub fn spill_to_pressure(&mut self, limit: usize) {
-        let max = if self.stage == Stage::Compute { MAX_COMPUTE_SPILL_SLOTS } else { MAX_SPILL_SLOTS };
-        while self.spill.slots < max {
-            let Some(live) = self.over_limit(limit) else { return };
-            if !self.spill_one(&live) {
-                return;
-            }
-        }
-    }
-
-    /// Spills the live value with the furthest next use; false when nothing can be spilled.
-    fn spill_one(&mut self, live: &[(u32, usize)]) -> bool {
-        let room = match self.stage {
-            Stage::Fragment | Stage::Compute => true,
-            Stage::Vertex => self.win.room(5),
-            Stage::Other => false,
-        };
-        if !room {
-            return false;
-        }
-        let pinned: Vec<u32> = self.out_roots.iter().copied().chain(self.tex_dsts.iter().copied()).chain(self.fattr_dsts.iter().copied()).chain(self.frag.out.iter().flatten().copied()).collect();
-        let single_def = |prog: &[BorgInstr], v: u32| {
-            prog.iter().filter(|i| i.dst == v).count() == 1
-                && prog.iter().all(|i| i.srcs.iter().zip(&i.swz).all(|(s, &c)| *s != v || c == 0))
-        };
-        let Some(&(v, _)) = live
-            .iter()
-            .filter(|(v, _)| !self.spill.exempt.contains(v) && !pinned.contains(v) && single_def(&self.sel.prog, *v))
-            .max_by_key(|&&(v, end)| (end, std::cmp::Reverse(v)))
-        else {
-            return false;
-        };
-        self.spill(v);
-        true
+    /// Compute's lane key: LocalInvocationIndex.
+    fn lane_key(&mut self) {
+        let r30 = self.sel.fresh();
+        self.sel.loc.insert(r30, Loc::Fixed(30));
+        self.spill.lane = Some(r30);
     }
 
     /// Every quad of a workgroup runs up to a BARRIER on the same registers before any goes on,
@@ -142,21 +49,10 @@ impl ShaderState {
     }
 
     fn spill(&mut self, v: u32) {
-        // A draw shader's lane key includes the scratch base: slot + key is a LW/SW immediate.
-        let slot_bits = if self.stage == Stage::Compute {
-            crate::compute::SPILL_BASE_WORDS + self.spill.slots * self.invocations()
-        } else {
-            4 * self.spill.slots
-        };
-        let mut prog = std::mem::take(&mut self.sel.prog);
+        let slot_bits = crate::compute::SPILL_BASE_WORDS + self.spill.slots * self.invocations();
+        let prog = std::mem::take(&mut self.sel.prog);
         if self.spill.lane.is_none() {
-            let mut head = self.lane_key();
-            if self.stage != Stage::Compute {
-                let base = self.konst(SCRATCH_WORDS);
-                let key = self.op(&mut head, Op::Iadd, &[self.spill.lane.unwrap(), base]);
-                self.spill.lane = Some(key);
-            }
-            prog.splice(0..0, head);
+            self.lane_key();
         }
         let lane = self.spill.lane.unwrap();
         let k = self.konst(slot_bits);
