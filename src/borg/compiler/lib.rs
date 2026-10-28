@@ -24,6 +24,7 @@ mod encode;
 mod epilogue;
 mod isel;
 mod legal;
+mod legalize;
 mod opcodes;
 mod opt;
 mod phis;
