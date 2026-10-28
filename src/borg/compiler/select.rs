@@ -1217,7 +1217,18 @@ impl ShaderState {
         // Per loop: lanes still looping, lanes going round this time, and whether any lane is.
         let lv: Vec<(u32, u32, u32)> = (0..loops.count).map(|_| (self.sel.fresh(), self.sel.fresh(), self.sel.fresh())).collect();
 
-        let mut reg_vregs: HashMap<u32, Vec<u32>> = HashMap::new();
+        // A phi is a register per component, written at the end of each predecessor.
+        let mut phi_copies: HashMap<usize, Vec<(u32, u32, u8)>> = HashMap::new();
+        for block in (*entry).iter_blocks() {
+            for phi in block.iter_instr_list().map_while(|i| i.as_phi()) {
+                let dsts: Vec<u32> = (0..phi.def.num_components).map(|_| self.sel.fresh()).collect();
+                for s in phi.iter_srcs() {
+                    let pred = phi_copies.entry(s.pred() as *const nir_block as usize).or_default();
+                    pred.extend(dsts.iter().enumerate().map(|(c, &d)| (d, s.src.as_def().index, c as u8)));
+                }
+                self.sel.vec_map.insert(phi.def.index, dsts.iter().map(|&d| (d, 0)).collect());
+            }
+        }
         for block in (*entry).iter_blocks() {
             // A chained address is only valid in the lanes of the block that computed it.
             self.const_addr_chain = None;
@@ -1252,33 +1263,6 @@ impl ShaderState {
                     }
                     continue;
                 }
-                if let Some(intr) = instr.as_intrinsic() {
-                    if intr.intrinsic == nir_intrinsic_decl_reg {
-                        let n = intr.get_const_index(NIR_INTRINSIC_NUM_COMPONENTS);
-                        let v: Vec<u32> = (0..n).map(|_| { let r = self.sel.next_vreg; self.sel.next_vreg += 1; r }).collect();
-                        reg_vregs.insert(intr.def.index, v);
-                        continue;
-                    }
-                    if intr.intrinsic == nir_intrinsic_load_reg {
-                        let h = intr.get_src(0).as_def().index;
-                        let comps: Vec<(u32, u8)> = reg_vregs[&h].iter().map(|&r| (r, 0u8)).collect();
-                        self.sel.vec_map.insert(intr.def.index, comps);
-                        continue;
-                    }
-                    if intr.intrinsic == nir_intrinsic_store_reg {
-                        let h = intr.get_src(1).as_def().index;
-                        let src = intr.get_src(0).as_def().index;
-                        for c in 0..intr.get_src(0).num_components() as usize {
-                            if intr.write_mask() & (1 << c) == 0 {
-                                continue;
-                            }
-                            let (v, comp) = self.operand(src, c as u8);
-                            // Copy the bits: a float move flushes an integer that looks denormal.
-                            self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: reg_vregs[&h][c], srcs: vec![v, v], swz: vec![comp, comp], imm: 0 });
-                        }
-                        continue;
-                    }
-                }
                 if let Some(alu) = instr.as_alu() {
                     self.alu(alu);
                 } else if let Some(intr) = instr.as_intrinsic() {
@@ -1295,8 +1279,18 @@ impl ShaderState {
                     self.undef(u);
                 }
             }
+            if let Some(c) = phi_copies.get(&(block as *const nir_block as usize)) {
+                self.parallel_copy(c);
+            }
         }
     
+    }
+    /// Phi copies on one edge: the pairs (destination, source) as one sequence of copies.
+    fn parallel_copy(&mut self, copies: &[(u32, u32, u8)]) {
+        let pairs = copies.iter().map(|&(d, s, c)| (d, self.operand(s, c))).collect();
+        for (dst, (v, c)) in crate::block::sequence_copies(pairs, &mut || self.sel.fresh()) {
+            self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst, srcs: vec![v, v], swz: vec![c, c], imm: 0 });
+        }
     }
     /// Gives each fragment output a register of its own where the value lives elsewhere (a
     /// uniform, a TEX or FATTR result block), so it can be placed in the output register.

@@ -137,6 +137,24 @@ pub(crate) fn live_ranges(prog: &[BorgInstr]) -> HashMap<u32, (usize, usize)> {
     range
 }
 
+/// Parallel copies, which all read before any writes, in an order that keeps that: a copy whose
+/// destination another still reads waits, and a cycle goes through a temporary.
+pub(crate) fn sequence_copies(mut todo: Vec<(u32, (u32, u8))>, fresh: &mut dyn FnMut() -> u32) -> Vec<(u32, (u32, u8))> {
+    todo.retain(|&(d, s)| s != (d, 0));
+    let mut out = vec![];
+    while !todo.is_empty() {
+        match todo.iter().position(|&(d, _)| !todo.iter().any(|&(_, (v, _))| v == d)) {
+            Some(k) => out.push(todo.remove(k)),
+            None => {
+                let (d, t) = (todo[0].0, fresh());
+                out.push((t, (d, 0)));
+                todo.iter_mut().filter(|x| x.1 .0 == d).for_each(|x| x.1 .0 = t);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +212,17 @@ mod tests {
         assert_eq!(r[&2], (1, 7), "carried round it");
         assert_eq!(r[&4], (2, 8), "defined in it, live after it");
         assert_eq!(r[&3], (3, 5), "a value of one trip");
+    }
+    #[test]
+    fn parallel_copies_keep_their_sources() {
+        let mut n = 100;
+        let mut fresh = || { n += 1; n };
+        // 1 <- 2 and 2 <- 3: 1 first, while 2 still holds its old value.
+        assert_eq!(sequence_copies(vec![(2, (3, 0)), (1, (2, 0))], &mut fresh), vec![(1, (2, 0)), (2, (3, 0))]);
+        // A swap needs a temporary; a copy of itself goes.
+        assert_eq!(
+            sequence_copies(vec![(1, (2, 0)), (2, (1, 0)), (3, (3, 0))], &mut fresh),
+            vec![(101, (1, 0)), (1, (2, 0)), (2, (101, 0))]
+        );
     }
 }

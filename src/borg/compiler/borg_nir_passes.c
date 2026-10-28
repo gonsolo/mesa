@@ -962,9 +962,6 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(_, nir, nir_shader_alu_pass, borg_dup_addr, nir_metadata_control_flow, NULL);
       NIR_PASS(_, nir, nir_opt_move, nir_move_load_ubo | nir_move_load_input | nir_move_const_undef | nir_move_alu);
    }
-   /* Phis become registers for every stage. */
-   NIR_PASS(_, nir, nir_convert_from_ssa, true, false);
-
    if (getenv("BORGC_DUMP_NIR"))
       nir_print_shader(nir, stderr);
 }

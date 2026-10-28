@@ -97,6 +97,8 @@ replay(const char *in, const char *out)
    struct blob_reader r;
    blob_reader_init(&r, (const uint8_t *)data + sizeof head, sz - sizeof head);
    nir_shader *nir = nir_deserialize(NULL, &borg_nir_options, &r);
+   /* Captures from before borgc took phis hold NIR registers. */
+   nir_lower_reg_intrinsics_to_ssa(nir);
    struct blob o;
    blob_init(&o);
    if (head[1] == BORGC_CAPTURE_COMPUTE)
