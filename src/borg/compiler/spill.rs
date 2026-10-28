@@ -5,7 +5,6 @@ use crate::state::{ShaderState, Stage};
 use crate::{BorgInstr, Loc, NO_DST};
 use crate::opcodes::{Op, CSR_ROOT};
 use std::collections::HashMap;
-use crate::Mnem;
 
 const SCRATCH_WORDS: u32 = 16384 * 34;
 const MAX_SPILL_SLOTS: u32 = 16;
@@ -103,9 +102,7 @@ impl ShaderState {
             Stage::Vertex => self.win.room(5),
             Stage::Other => false,
         };
-        // As before, a vertex shader that branches does not spill.
-        let apart = self.stage == Stage::Vertex && self.sel.prog.iter().any(|i| matches!(i.mnem, Mnem::Op(Op::Brz | Op::Brnz)));
-        if !room || apart {
+        if !room {
             return false;
         }
         let pinned: Vec<u32> = self.out_roots.iter().copied().chain(self.tex_dsts.iter().copied()).chain(self.fattr_dsts.iter().copied()).chain(self.frag.out.iter().flatten().copied()).collect();
