@@ -149,6 +149,8 @@ pub struct Spill {
     /// Keeps the pressure order: the retry when the latency order runs out of registers.
     pub in_order: bool,
     pub alloc_failed: bool,
+    /// Spill once the passes ran, when allocation fails (fragment shaders).
+    pub late: bool,
     pub slots: u32,
     pub lane: Option<u32>,
     /// The byte address of a compute lane's spill slot 0, for spills after allocation's passes.

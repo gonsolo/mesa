@@ -3,14 +3,17 @@
 
 use crate::state::{ShaderState, Stage};
 use crate::{BorgInstr, Loc, NO_DST};
-use crate::opcodes::Op;
+use crate::opcodes::{Op, CSR_ROOT};
+use std::collections::HashMap;
 use crate::Mnem;
 
 const SCRATCH_WORDS: u32 = 16384 * 34;
 const MAX_SPILL_SLOTS: u32 = 16;
+// A fragment shader's late slots: 4 words each, by a 12-bit immediate from the base.
+const MAX_LATE_SLOTS: u32 = 128;
 const MAX_COMPUTE_SPILL_SLOTS: u32 = 64;
 // The vertex lane key's two words, after the slots; the word after the second takes the other lanes' store.
-const KEY_WORDS: u32 = SCRATCH_WORDS + 4 * MAX_SPILL_SLOTS;
+const KEY_WORDS: u32 = SCRATCH_WORDS + 4 * MAX_LATE_SLOTS;
 
 impl ShaderState {
     fn op(&mut self, at: &mut Vec<BorgInstr>, op: Op, srcs: &[u32]) -> u32 {
@@ -183,46 +186,78 @@ impl ShaderState {
         self.sel.prog = out;
     }
 
-    /// Compute, once its passes ran: while more values are live than `reserved` leaves registers,
-    /// the one used furthest ahead goes to memory, stored after each definition and loaded before
-    /// each use (LW and SW by the lane's slot address).
-    pub(crate) fn spill_to_fit(&mut self, reserved: &[u8]) -> Result<(), String> {
-        let free = (1..30u8).filter(|r| !reserved.contains(r)).count();
+    /// Once the passes ran (compute, or a fragment shader the ladder could not place): while more
+    /// values are live than the free registers, the one used furthest ahead goes to memory, stored
+    /// after each definition and loaded before each use. A forced value takes no free register,
+    /// unless its register is `soft` (a fragment shader's TEX block, 4 while it is live).
+    pub(crate) fn spill_to_fit(&mut self, forced: &HashMap<u32, u8>, reserved: &[u8], soft: &[u8], margin: usize) -> Result<(), String> {
+        let hard: Vec<u8> = forced.values().copied().filter(|r| !soft.contains(r)).chain(reserved.iter().copied()).collect();
+        let free = (1..30u8).filter(|r| !hard.contains(r)).count().saturating_sub(margin);
+        let max = if self.stage == Stage::Compute { MAX_COMPUTE_SPILL_SLOTS } else { MAX_LATE_SLOTS };
         loop {
             let ranges = crate::block::live_ranges(&self.sel.prog);
-            let held = |v: &u32| !self.sel.loc.contains_key(v) && !self.tex_dsts.contains(v);
-            let vals: Vec<(u32, usize, usize)> = ranges.iter().filter(|(v, _)| held(v)).map(|(&v, &(d, l))| (v, d, l)).collect();
+            let weight = |v: &u32| match forced.get(v) {
+                Some(r) if soft.contains(r) => 4,
+                Some(_) => 0,
+                None => !self.sel.loc.contains_key(v) as usize,
+            };
+            let vals: Vec<(u32, usize, usize)> = ranges.iter().filter(|(v, _)| weight(v) > 0).map(|(&v, &(d, l))| (v, d, l)).collect();
             let mut live = vec![0usize; self.sel.prog.len() + 1];
-            for &(_, d, l) in &vals {
-                live[d..=l].iter_mut().for_each(|n| *n += 1);
+            for &(v, d, l) in &vals {
+                live[d..=l].iter_mut().for_each(|n| *n += weight(&v));
             }
             let Some(at) = live.iter().position(|&n| n > free) else { return Ok(()) };
             let scalar = |v: u32| self.sel.prog.iter().all(|i| i.srcs.iter().zip(&i.swz).all(|(s, &c)| *s != v || c == 0));
             let next_use = |v: u32| self.sel.prog[at + 1..].iter().position(|i| i.srcs.contains(&v)).unwrap_or(usize::MAX);
             let pick = vals
                 .iter()
-                .filter(|&&(v, d, l)| d < at && l > at && !self.spill.exempt.contains(&v) && !self.out_roots.contains(&v) && scalar(v))
+                .filter(|&&(v, d, l)| d < at && l > at && weight(&v) == 1 && !self.spill.exempt.contains(&v) && !self.out_roots.contains(&v) && scalar(v))
                 .max_by_key(|&&(v, _, _)| (next_use(v), std::cmp::Reverse(v)))
                 .map(|&(v, _, _)| v);
             match pick {
-                Some(v) if self.spill.slots < MAX_COMPUTE_SPILL_SLOTS => self.spill_late(v),
+                Some(v) if self.spill.slots < max => self.spill_late(v),
                 _ => return Err(crate::compute::OUT_OF_REGISTERS.into()),
             }
         }
     }
 
-    /// A slot is a word per invocation, as `spill`'s: the base is the lane's word of slot 0, built
-    /// again after each BARRIER, which leaves no register to the next quad.
+    /// The byte address of the lane's word of slot 0, in `spill`'s layout: compute's from
+    /// LocalInvocationIndex, a fragment's from its place in the quad and the root table.
+    fn late_base(&mut self, base: u32) -> Vec<BorgInstr> {
+        let fixed = |cx: &mut Self, r: u8| {
+            let f = cx.sel.fresh();
+            cx.sel.loc.insert(f, Loc::Fixed(r));
+            f
+        };
+        let i = |m: Op, dst: u32, srcs: Vec<u32>, imm: u32| BorgInstr { mnem: m.into(), dst, swz: vec![0; srcs.len()], srcs, imm };
+        let mut head = Vec::new();
+        let (lane, bytes) = if self.stage == Stage::Compute {
+            let (r30, t) = (fixed(self, 30), self.sel.fresh());
+            head.push(i(Op::Slli, t, vec![r30], 2));
+            (t, 4 * crate::compute::SPILL_BASE_WORDS)
+        } else {
+            let (r30, r31) = (fixed(self, 30), fixed(self, 31));
+            self.frag.per_pixel_fixed.extend([r30, r31]);
+            let [xi, yi, xb, yb, y2, key, kb, table, root, t] = [(); 10].map(|_| self.sel.fresh());
+            head.extend([i(Op::F2i, xi, vec![r30], 0), i(Op::F2i, yi, vec![r31], 0), i(Op::Andi, xb, vec![xi], 1),
+                i(Op::Andi, yb, vec![yi], 1), i(Op::Slli, y2, vec![yb], 1), i(Op::Ior, key, vec![xb, y2], 0),
+                i(Op::Slli, kb, vec![key], 2), i(Op::Csrrs, table, vec![], CSR_ROOT), i(Op::Lw, root, vec![table], 0),
+                i(Op::Add, t, vec![kb, root], 0)]);
+            (t, 4 * SCRATCH_WORDS)
+        };
+        let k = self.materialize(&mut head, bytes);
+        head.push(i(Op::Add, base, vec![lane, k], 0));
+        self.spill.exempt.extend(head.iter().map(|i| i.dst));
+        head
+    }
+
+    /// A slot as `spill` lays it out; compute builds the base again after each BARRIER, which
+    /// leaves no register to the next quad.
     fn spill_late(&mut self, v: u32) {
         let base = *self.spill.base.get_or_insert_with(|| self.sel.next_vreg);
         if base == self.sel.next_vreg {
             self.sel.next_vreg += 1;
-            let (r30, t) = (self.sel.fresh(), self.sel.fresh());
-            self.sel.loc.insert(r30, Loc::Fixed(30));
-            let mut head = vec![BorgInstr { mnem: Op::Slli.into(), dst: t, srcs: vec![r30], swz: vec![0], imm: 2 }];
-            let k = self.materialize(&mut head, 4 * crate::compute::SPILL_BASE_WORDS);
-            head.push(BorgInstr { mnem: Op::Add.into(), dst: base, srcs: vec![t, k], swz: vec![0, 0], imm: 0 });
-            self.spill.exempt.extend(head.iter().map(|i| i.dst));
+            let head = self.late_base(base);
             let mut prog = Vec::with_capacity(self.sel.prog.len() + 8);
             prog.extend(head.iter().cloned());
             for i in std::mem::take(&mut self.sel.prog) {
@@ -234,7 +269,8 @@ impl ShaderState {
             }
             self.sel.prog = prog;
         }
-        let at = 4 * self.spill.slots * self.invocations();
+        let at = 4 * self.spill.slots * if self.stage == Stage::Compute { self.invocations() } else { 4 };
+        let store = if self.stage == Stage::Compute { Op::Sw } else { Op::Sws };
         self.spill.slots += 1;
         let mut out = Vec::with_capacity(self.sel.prog.len() + 8);
         // Slot offsets past an immediate's reach go through a register of their own.
@@ -255,11 +291,16 @@ impl ShaderState {
                 out.push(BorgInstr { mnem: Op::Lw.into(), dst: t, srcs: vec![a], swz: vec![0], imm: o });
                 i.srcs.iter_mut().filter(|s| **s == v).for_each(|s| *s = t);
             }
-            let defines = i.dst == v;
+            // Each definition gets a register of its own, live only up to its store.
+            let defined = (i.dst == v).then(|| {
+                i.dst = self.sel.fresh();
+                self.spill.exempt.insert(i.dst);
+                i.dst
+            });
             out.push(i);
-            if defines {
+            if let Some(d) = defined {
                 let (a, o) = addr(self, &mut out);
-                out.push(BorgInstr { mnem: Op::Sw.into(), dst: NO_DST, srcs: vec![a, v], swz: vec![0, 0], imm: o });
+                out.push(BorgInstr { mnem: store.into(), dst: NO_DST, srcs: vec![a, d], swz: vec![0, 0], imm: o });
             }
         }
         self.sel.prog = out;
@@ -282,7 +323,7 @@ mod tests {
         c.sel.prog = prog;
         // 4 free registers: r1..r4.
         let reserved: Vec<u8> = (5..30).collect();
-        c.spill_to_fit(&reserved).unwrap();
+        c.spill_to_fit(&HashMap::new(), &reserved, &[], 0).unwrap();
         let ranges = crate::block::live_ranges(&c.sel.prog);
         let peak = (0..c.sel.prog.len())
             .map(|p| ranges.iter().filter(|(v, &(d, l))| !c.sel.loc.contains_key(v) && d <= p && p <= l).count())

@@ -368,10 +368,12 @@ unsafe fn compile_nir_inner(
     // Last, constants built at each use: no register held between uses.
     let limits = [forced, Some(20), Some(18), Some(16), Some(14), Some(12), Some(10)];
     let attempts = [16, 0].into_iter().flat_map(|g| limits.map(|l| (g, l)));
-    for ((gap, limit), in_order) in attempts.flat_map(|a| [(a, false), (a, true)]) {
+    // Then spilling once the passes ran, which also takes values written more than once.
+    let attempts = attempts.flat_map(|a| [(a, false, false), (a, true, false)]).chain([((0, None), true, true)]);
+    for ((gap, limit), in_order, late) in attempts {
         let (mut cx, entry, total) = ShaderState::start(nir, flags, out_select);
         (info.push_window, info.spill_slots) = (cx.frag.push_window as u32, 0);
-        (cx.spill.limit, cx.const_gap, cx.spill.in_order) = (limit, gap, in_order);
+        (cx.spill.limit, cx.const_gap, cx.spill.in_order, cx.spill.late) = (limit, gap, in_order, late);
         cx.select_entry(entry);
         if let Err(e) = cx.check_selected() {
             eprintln!("borgc: refused: {e}");
@@ -388,7 +390,10 @@ unsafe fn compile_nir_inner(
             debug!("borgc: spilled {} value(s) to keep {:?} live", cx.spill.slots, limit);
         }
         let blob = match cx.assemble() {
-            Some(blob) => blob,
+            Some(blob) => {
+                info.spill_slots = cx.spill.slots;
+                blob
+            }
             None if matches!(cx.stage, Stage::Fragment | Stage::Vertex) && cx.spill.alloc_failed => continue,
             None => {
                 if let Err(e) = cx.refusal() {

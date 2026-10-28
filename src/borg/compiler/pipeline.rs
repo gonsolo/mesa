@@ -502,7 +502,20 @@ impl ShaderState {
 
     pub fn assemble(&mut self) -> Option<Vec<u8>> {
         let (forced, mut extra_reserved) = fixed_regs(self);
-        let Some(alloc) = allocate(self, &forced, &mut extra_reserved) else {
+        let mut alloc = allocate(self, &forced, &mut extra_reserved);
+        // The fit counts live values; the allocator may still need a register or two more.
+        let late = self.spill.late && self.stage == Stage::Fragment;
+        for margin in (0..4).take_while(|_| late) {
+            if alloc.is_some() {
+                break;
+            }
+            if self.spill_to_fit(&forced, &extra_reserved, &[20, 21, 22, 23], margin).is_err() {
+                break;
+            }
+            let (forced, mut extra_reserved) = fixed_regs(self);
+            alloc = allocate(self, &forced, &mut extra_reserved);
+        }
+        let Some(alloc) = alloc else {
             self.spill.alloc_failed = true;
             return None;
         };
