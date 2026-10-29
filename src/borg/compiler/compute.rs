@@ -19,6 +19,8 @@ const SLOT_BYTES: u32 = 4 * SLOT_WORDS;
 const LANES: u32 = 4; // BorgConfig.Simt: fragLanes
 const MAX_WORDS: usize = 4096; // the DRAM code region below the first slot holds 16k
 pub(crate) const WG_BASE_REG: u32 = 12;
+/// Each binding slot's buffer size in bytes, after the 32 push constant words in slot 32.
+const SIZES_BASE: u32 = SLOT_BASE + 32 * SLOT_BYTES + 128;
 
 pub(crate) struct Out {
     pub words: Vec<u32>,
@@ -364,14 +366,20 @@ impl ShaderState {
         self.set(u.def.index, &zeros);
     }
 
+    /// The slot of the buffer named by `idx`.
+    fn slot(&mut self, idx: &nir_src) -> Option<u32> {
+        let m = resolve_vm(&self.sel.vec_map, idx.as_def().index, 0).0;
+        let s = self.cs.desc.get(&m).map(|&(set, binding)| set * 16 + binding);
+        if s.is_none() {
+            self.fail("buffer index is not a known binding".into());
+        }
+        s
+    }
+
     /// Byte address of word `extra` from the byte offset `off` in the buffer named by `idx`.
     fn word_addr(&mut self, idx: &nir_src, off: &nir_src, extra: u32) -> Val {
-        let m = resolve_vm(&self.sel.vec_map, idx.as_def().index, 0).0;
-        let Some(&(set, binding)) = self.cs.desc.get(&m) else {
-            self.fail("buffer index is not a known binding".into());
-            return Val::K(0);
-        };
-        let base = SLOT_BASE + (set * 16 + binding) * SLOT_BYTES;
+        let Some(slot) = self.slot(idx) else { return Val::K(0) };
+        let base = SLOT_BASE + slot * SLOT_BYTES;
         let o = self.val(off, 0);
         let w = self.add(o, Val::K(4 * extra));
         let w = self.mask(w);
@@ -481,6 +489,11 @@ impl ShaderState {
                     let v = self.val(i.get_src(0), c as u8);
                     self.store(a, v);
                 }
+            }
+            nir_intrinsic_get_ssbo_size => {
+                let Some(slot) = self.slot(i.get_src(0)) else { return };
+                let v = self.load(Val::K(SIZES_BASE + 4 * slot));
+                self.set(d, &[v]);
             }
             nir_intrinsic_barrier => {
                 let ws = self.cs.ws;

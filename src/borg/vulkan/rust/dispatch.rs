@@ -73,9 +73,10 @@ fn unpack(pf: pipe_format, dst: &mut [u8], host: &Host, off: usize) {
     host.with_bytes(off, fmt::blocksize(pf) as usize, |t| fmt::unpack_rgba(pf, t, out));
 }
 
-/// The windows of the bound sets, the push constants (slot 32) and the constant pool (slot 34).
+/// The windows of the bound sets, the push constants and buffer sizes (slot 32) and the constant pool (slot 34).
 fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
     let mut bufs = Vec::new();
+    let mut sizes = [0u32; 32];
     for si in 0..4 {
         let Some(set) = c.cs_set(si) else { continue };
         let dyn_off = &c.cs_dyn_offs[si];
@@ -139,11 +140,12 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
             let avail = b_.vk.size.saturating_sub(off);
             let r = set.ranges[b];
             let size = if r == VK_WHOLE_SIZE as u64 || r > avail { avail } else { r }.min(SLOT_BYTES as u64) as u32;
+            sizes[(base + b as u32) as usize] = size;
             let host = unsafe { map.add((b_.offset + off) as usize) };
             bufs.push(CsBuf { host, decoded: None, wb: true, skip: 0, size, addr, texels: std::ptr::null_mut(), pf: PIPE_FORMAT_NONE });
         }
     }
-    let pc: Vec<u8> = c.pc.iter().flat_map(|w| w.to_ne_bytes()).collect();
+    let pc: Vec<u8> = c.pc.iter().chain(&sizes).flat_map(|w| w.to_ne_bytes()).collect();
     let n = pc.len() as u32;
     bufs.push(decoded(BASE_BYTES + 32 * SLOT_BYTES, pc, n));
     let root: Vec<u8> = [0, TEX_BYTES, TEX_BYTES + SAMPLERS, 0].iter().flat_map(|w: &u32| w.to_ne_bytes()).collect();
