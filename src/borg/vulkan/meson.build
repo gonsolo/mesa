@@ -123,7 +123,7 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-type', 'vk_buffer_view|VkComponentSwizzle|VkBufferCopy|VkCopyBufferInfo2|VkImageCopy|VkCopyImageInfo2|VkImageBlit|VkBlitImageInfo2|VkFilter',
     '--allowlist-var', 'VK_WHOLE_SIZE',
     '--allowlist-function', 'util_format_(linear|is_depth_or_stencil|srgb_8unorm_to_linear_float)',
-    '--allowlist-type', 'mesa_vk_dynamic_graphics_state|VkDraw(Indexed)?IndirectCommand',
+    '--allowlist-type', 'mesa_vk_dynamic_graphics_state|VkDraw(Indexed)?IndirectCommand|VkDispatchIndirectCommand',
     '--allowlist-type', 'VkFormatFeatureFlagBits|VkImageCreateFlagBits|VkFormatProperties[23]|VkPhysicalDeviceImageFormatInfo2|VkImageFormatProperties2|VkPhysicalDeviceSparseImageFormatInfo2|VkSparseImageFormatProperties2|VkPhysicalDeviceExternalBufferInfo|VkExternalBufferProperties',
     '--allowlist-var', 'VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT',
     '--allowlist-function', 'vk_physical_device_(init|finish|dispatch_table_from_entrypoints)|drm(Get|Free)Version|close',

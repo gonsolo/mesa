@@ -982,7 +982,7 @@ entrypoint! {
 }
 
 /// The `count` commands of type `T` in `buffer`; zeros for one past the memory.
-fn indirect<T: Copy + Default>(buffer: Option<&Buffer>, offset: VkDeviceSize, count: u32, stride: u32) -> Vec<T> {
+pub(crate) fn indirect<T: Copy + Default>(buffer: Option<&Buffer>, offset: VkDeviceSize, count: u32, stride: u32) -> Vec<T> {
     let Some(h) = buffer.and_then(|b| b.host()) else { return Vec::new() };
     let stride = if stride != 0 { stride as usize } else { size_of::<T>() };
     (0..count as usize)

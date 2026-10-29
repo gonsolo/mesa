@@ -9,7 +9,7 @@ use crate::corpus::{borgvk_corpus_log, borgvk_corpus_on, hash};
 use crate::entrypoint::entrypoint;
 use crate::ffi::*;
 use crate::fmt;
-use crate::memory::{DeviceMemory, Host, ViewBuffer};
+use crate::memory::{Buffer, DeviceMemory, Host, ViewBuffer};
 use crate::pipeline::Pipeline;
 use crate::descriptor_set::{find_flat, DescriptorSet};
 use crate::state_upload::DEFAULT_SAMPLER;
@@ -344,36 +344,48 @@ fn apply(bufs: &[CsBuf], merged: &[Vec<u8>]) {
 
 entrypoint! {
     fn borgvk_CmdDispatch(c: &mut CommandBuffer, gx: u32, gy: u32, gz: u32) {
-        let direct = std::env::var_os("BORGVK_SIM_DIRECT").filter(|d| !d.is_empty());
-        let Some(pl) = c.cs_pipeline().filter(|p| p.cs_ok) else { return };
-        if gx == 0 || gy == 0 || gz == 0 || (direct.is_none() && !crate::hw::enabled()) {
-            return;
+        dispatch(c, gx, gy, gz);
+    }
+}
+
+entrypoint! {
+    fn borgvk_CmdDispatchIndirect(c: &mut CommandBuffer, buffer: Option<&Buffer>, offset: VkDeviceSize) {
+        for d in crate::draw::indirect::<VkDispatchIndirectCommand>(buffer, offset, 1, 0) {
+            dispatch(c, d.x, d.y, d.z);
         }
-        let bufs = gather(c, pl);
-        let g = [gx, gy, gz];
-        let job = build_job(pl, g, &bufs);
-        let mut ran = true;
-        let mut parts: Vec<Part> = part_headers(pl, direct.is_some(), g, &job)
-            .iter()
-            .map(|h| start(direct.as_deref(), h, &job, &mut ran))
-            .collect();
-        let merged = merge(&bufs, &mut parts, &mut ran);
-        if borgvk_corpus_on() {
-            let out = merged.iter().zip(&bufs).fold(hash(BORGVK_CORPUS_SEED as u64, &[ran as u8]), |h, (m, b)| hash(h, &m[..b.size as usize]));
-            borgvk_corpus_log(b'D' as _, hash(BORGVK_CORPUS_SEED as u64, &job), out);
+    }
+}
+
+fn dispatch(c: &mut CommandBuffer, gx: u32, gy: u32, gz: u32) {
+    let direct = std::env::var_os("BORGVK_SIM_DIRECT").filter(|d| !d.is_empty());
+    let Some(pl) = c.cs_pipeline().filter(|p| p.cs_ok) else { return };
+    if gx == 0 || gy == 0 || gz == 0 || (direct.is_none() && !crate::hw::enabled()) {
+        return;
+    }
+    let bufs = gather(c, pl);
+    let g = [gx, gy, gz];
+    let job = build_job(pl, g, &bufs);
+    let mut ran = true;
+    let mut parts: Vec<Part> = part_headers(pl, direct.is_some(), g, &job)
+        .iter()
+        .map(|h| start(direct.as_deref(), h, &job, &mut ran))
+        .collect();
+    let merged = merge(&bufs, &mut parts, &mut ran);
+    if borgvk_corpus_on() {
+        let out = merged.iter().zip(&bufs).fold(hash(BORGVK_CORPUS_SEED as u64, &[ran as u8]), |h, (m, b)| hash(h, &m[..b.size as usize]));
+        borgvk_corpus_log(b'D' as _, hash(BORGVK_CORPUS_SEED as u64, &job), out);
+    }
+    if ran {
+        apply(&bufs, &merged);
+        c.dispatched = true;
+    }
+    let keep = std::env::var_os("BORGVK_KEEP_JOB").is_some();
+    for p in &parts {
+        if let Some(j) = p.job.as_ref().filter(|_| !keep) {
+            let _ = std::fs::remove_file(j);
         }
-        if ran {
-            apply(&bufs, &merged);
-            c.dispatched = true;
-        }
-        let keep = std::env::var_os("BORGVK_KEEP_JOB").is_some();
-        for p in &parts {
-            if let Some(j) = p.job.as_ref().filter(|_| !keep) {
-                let _ = std::fs::remove_file(j);
-            }
-            if let Some(o) = &p.out {
-                let _ = std::fs::remove_file(o);
-            }
+        if let Some(o) = &p.out {
+            let _ = std::fs::remove_file(o);
         }
     }
 }
