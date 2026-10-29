@@ -607,6 +607,16 @@ borg_dup_addr(nir_builder *b, nir_alu_instr *alu, void *data)
 
 /* iabs's lowering is in nir_opt_algebraic_late, which borgc does not run. */
 static bool
+borg_has_local_array(nir_shader *nir)
+{
+   nir_foreach_function_temp_variable(var, nir_shader_get_entrypoint(nir)) {
+      if (glsl_type_is_array(var->type))
+         return true;
+   }
+   return false;
+}
+
+static bool
 borg_iabs_filter(const nir_instr *instr, const void *data)
 {
    return instr->type == nir_instr_type_alu && nir_instr_as_alu(instr)->op == nir_op_iabs;
@@ -919,6 +929,14 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    /* A constant array indexed by gl_VertexIndex (the usual vertex-less fullscreen
     * triangle/quad) becomes a bcsel chain. */
    NIR_PASS(_, nir, nir_lower_global_vars_to_local);
+   /* A constant array read by a dynamic index: one TEX of its row (borgc constant_load). Its
+    * stores' indices must fold first (arr[i++] = c). */
+   if ((nir->info.stage == MESA_SHADER_VERTEX || nir->info.stage == MESA_SHADER_FRAGMENT) && borg_has_local_array(nir)) {
+      NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+      NIR_PASS(_, nir, nir_opt_copy_prop);
+      NIR_PASS(_, nir, nir_opt_constant_folding);
+      NIR_PASS(_, nir, nir_opt_large_constants, glsl_get_vec4_size_align_bytes, 0);
+   }
    NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees, nir_var_function_temp | nir_var_shader_temp, UINT32_MAX);
    /* A vertex shader that writes an output in a branch: turn the branches into selects. */
    if (nir->info.stage == MESA_SHADER_VERTEX || nir->info.stage == MESA_SHADER_FRAGMENT) {
