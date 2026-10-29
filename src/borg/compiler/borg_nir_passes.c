@@ -70,6 +70,12 @@ borg_type_size(const struct glsl_type *type, bool bindless)
  * four-word layout (RGBA as the shader's declared type: float, uint or int bits) before the
  * dispatch; the shader never sees the format. */
 static bool
+borg_image_atomic(const nir_intrinsic_instr *i)
+{
+   return i->intrinsic == nir_intrinsic_image_deref_atomic || i->intrinsic == nir_intrinsic_image_deref_atomic_swap;
+}
+
+static bool
 borg_texel_buffer_filter(const nir_instr *instr, const void *data)
 {
    if (instr->type == nir_instr_type_tex) {
@@ -81,7 +87,8 @@ borg_texel_buffer_filter(const nir_instr *instr, const void *data)
       const nir_intrinsic_instr *i = nir_instr_as_intrinsic(instr);
       return ((i->intrinsic == nir_intrinsic_image_deref_load || i->intrinsic == nir_intrinsic_image_deref_store) &&
               nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_BUF) ||
-             ((i->intrinsic == nir_intrinsic_image_deref_store || i->intrinsic == nir_intrinsic_image_deref_load) &&
+             ((i->intrinsic == nir_intrinsic_image_deref_store || i->intrinsic == nir_intrinsic_image_deref_load ||
+               borg_image_atomic(i)) &&
               nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_2D &&
               !nir_intrinsic_image_array(i));
    }
@@ -107,7 +114,8 @@ static bool
 borg_frag_image_filter(const nir_instr *instr, const void *data)
 {
    return instr->type == nir_instr_type_intrinsic && borg_texel_buffer_filter(instr, data) &&
-          nir_intrinsic_image_dim(nir_instr_as_intrinsic(instr)) == GLSL_SAMPLER_DIM_2D;
+          nir_intrinsic_image_dim(nir_instr_as_intrinsic(instr)) == GLSL_SAMPLER_DIM_2D &&
+          !borg_image_atomic(nir_instr_as_intrinsic(instr));
 }
 
 /* The constant array element a deref names; the driver maps (binding, element) to a slot. */
@@ -125,7 +133,8 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
    nir_def *coord;
    if (instr->type == nir_instr_type_intrinsic &&
        (nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_deref_store ||
-        nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_deref_load) &&
+        nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_deref_load ||
+        borg_image_atomic(nir_instr_as_intrinsic(instr))) &&
        nir_intrinsic_image_dim(nir_instr_as_intrinsic(instr)) != GLSL_SAMPLER_DIM_BUF) {
       /* A 2D image store (single 32-bit texel formats): the binding's window holds the image's
        * width in word 0, then the texels row by row; the host copies the image in and back. */
@@ -150,6 +159,12 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
       const enum pipe_format fmt = nir_intrinsic_format(st);
       const bool rgba8 = fmt == PIPE_FORMAT_R8G8B8A8_UNORM;
       const bool rgba8i = fmt == PIPE_FORMAT_R8G8B8A8_UINT || fmt == PIPE_FORMAT_R8G8B8A8_SINT;
+      if (st->intrinsic == nir_intrinsic_image_deref_atomic)
+         return nir_ssbo_atomic(b, 32, buf, nir_ishl_imm(b, word, 2), st->src[3].ssa,
+                                .atomic_op = nir_intrinsic_atomic_op(st));
+      if (st->intrinsic == nir_intrinsic_image_deref_atomic_swap)
+         return nir_ssbo_atomic_swap(b, 32, buf, nir_ishl_imm(b, word, 2), st->src[3].ssa, st->src[4].ssa,
+                                     .atomic_op = nir_intrinsic_atomic_op(st));
       if (st->intrinsic == nir_intrinsic_image_deref_load) {
          nir_def *v = nir_load_ssbo(b, 1, 32, buf, nir_ishl_imm(b, word, 2), .align_mul = 4);
          if (rgba8i) {
