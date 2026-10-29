@@ -51,6 +51,9 @@ const struct nir_shader_compiler_options borg_nir_options = {
    .lower_isign = true,
    .lower_iabs = true,
    .lower_mul_2x32_64 = true,
+   .lower_uadd_sat = true,
+   .lower_usub_sat = true,
+   .lower_iadd_sat = true,
    .max_unroll_iterations = 32,   /* graphics shaders have no loops: constant loops are unrolled */
 };
 
