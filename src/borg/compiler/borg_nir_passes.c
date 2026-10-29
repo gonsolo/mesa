@@ -797,6 +797,30 @@ borg_lower_set_vertex_remat(bool on)
    remat_vertex_inputs = on;
 }
 
+/* An atomic on a private variable: load, the operation, store; the old value is the result. */
+static bool
+borg_private_atomic(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_deref_atomic && intr->intrinsic != nir_intrinsic_deref_atomic_swap)
+      return false;
+   nir_deref_instr *deref = nir_src_as_deref(intr->src[0]);
+   if (!nir_deref_mode_is_one_of(deref, nir_var_shader_temp | nir_var_function_temp))
+      return false;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *old = nir_load_deref(b, deref), *v = intr->src[1].ssa;
+   const nir_atomic_op op = nir_intrinsic_atomic_op(intr);
+   nir_def *new;
+   if (op == nir_atomic_op_cmpxchg || op == nir_atomic_op_fcmpxchg)
+      new = nir_bcsel(b, op == nir_atomic_op_cmpxchg ? nir_ieq(b, old, v) : nir_feq(b, old, v), intr->src[2].ssa, old);
+   else if (op == nir_atomic_op_xchg)
+      new = v;
+   else
+      new = nir_build_alu2(b, nir_atomic_op_to_alu(op), old, v);
+   nir_store_deref(b, deref, new, 1);
+   nir_def_replace(&intr->def, old);
+   return true;
+}
+
 void
 borg_lower_nir_for_borgc(struct nir_shader *nir)
 {
@@ -812,6 +836,7 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       nir_foreach_variable_with_modes(var, nir, nir_var_mem_shared)
          var->data.mode = nir_var_shader_temp;
       nir_fixup_deref_modes(nir);
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, borg_private_atomic, nir_metadata_control_flow, NULL);
    }
    /* The Vulkan-runtime preamble.
     *
