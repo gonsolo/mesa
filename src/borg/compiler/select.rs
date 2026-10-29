@@ -77,6 +77,10 @@ impl ShaderState {
         self.sel.next_vreg += 1;
         self.sel.prog.push(BorgInstr { mnem: Op::Tex.into(), dst: tex_v, srcs: vec![wz, wz, ctl], swz: vec![0, 0, 0], imm: 0 });
         self.tex_dsts.insert(tex_v);
+        if tex.op == nir_texop_query_levels {
+            self.sel.vec_map.insert(tex.def.index, vec![(tex_v, 3)]);
+            return;
+        }
         let n = tex.def.num_components as usize;
         // A 1D array's second size component is its layer count, the third word.
         let one_d_array = tex.sampler_dim == GLSL_SAMPLER_DIM_1D && tex.is_array;
@@ -88,8 +92,14 @@ impl ShaderState {
 
     pub unsafe fn tex(&mut self, tex: &nir_tex_instr) {
         let srcs = tex.srcs_as_slice();
-        if tex.op == nir_texop_txs {
+        if tex.op == nir_texop_txs || tex.op == nir_texop_query_levels {
             self.tex_size(tex);
+            return;
+        }
+        // An MS image has 4 samples: the only multisampled count the device offers.
+        if tex.op == nir_texop_texture_samples {
+            let v = self.konst(4);
+            self.sel.vec_map.insert(tex.def.index, vec![(v, 0u8)]);
             return;
         }
         let is_txl = tex.op == nir_texop_txl && matches!(self.stage, Stage::Fragment | Stage::Compute | Stage::Vertex);
@@ -1336,7 +1346,7 @@ impl ShaderState {
                 } else if let Some(intr) = instr.as_intrinsic() {
                     self.intrinsic(intr);
                 } else if let Some(tex) = instr.as_tex() {
-                    if self.stage == Stage::Compute && tex.op != nir_texop_txl && tex.op != nir_texop_txs {
+                    if self.stage == Stage::Compute && !matches!(tex.op, nir_texop_txl | nir_texop_txs | nir_texop_query_levels | nir_texop_texture_samples) {
                         self.skipped.push("tex");
                         continue;
                     }
