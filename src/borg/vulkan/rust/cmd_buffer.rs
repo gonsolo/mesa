@@ -18,7 +18,6 @@ use std::ptr::null_mut;
 
 handle!(VkCommandBuffer, vk_command_buffer, VK_OBJECT_TYPE_COMMAND_BUFFER);
 
-#[repr(C)]
 /// What the draws render to, as images: set at the start of rendering.
 #[derive(Clone, Copy)]
 pub struct Rendering {
@@ -29,6 +28,7 @@ pub struct Rendering {
     pub extent: [u32; 2],
 }
 
+#[repr(C)]
 pub struct CommandBuffer {
     pub vk: vk_command_buffer,
 
