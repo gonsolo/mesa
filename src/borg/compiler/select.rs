@@ -591,6 +591,7 @@ impl ShaderState {
                 }
             }
             nir_intrinsic_load_ssbo | nir_intrinsic_store_ssbo => self.ssbo(intr),
+            nir_intrinsic_load_constant => self.constant_load(intr),
             nir_intrinsic_load_frag_coord if self.stage == Stage::Fragment => self.frag_coord(intr),
             nir_intrinsic_load_vertex_id => {
                 self.sel.loc.insert(intr.def.index, Loc::Fixed(30));
@@ -954,6 +955,60 @@ impl ShaderState {
             })
             .collect();
         self.frag.coord_w = true;
+        self.sel.vec_map.insert(intr.def.index, comps);
+    }
+
+    /// nir_opt_large_constants' data: a constant offset is immediates, else the 16-byte row
+    /// (every element starts one, vec4 layout) by TEX from vertex slot 23 or 41.
+    unsafe fn constant_load(&mut self, intr: &nir_intrinsic_instr) {
+        let n = intr.def.num_components as usize;
+        let base = intr.get_const_index(NIR_INTRINSIC_BASE) as u32;
+        if intr.def.bit_size != 32 {
+            self.refuse("load_constant of a non-32-bit value");
+            return;
+        }
+        let comps: Vec<(u32, u8)> = match intr.get_src(0).comp_as_uint(0) {
+            Some(off) => (0..n).map(|c| {
+                let w = self.cdata.get(((base + off as u32) / 4) as usize + c).copied().unwrap_or(0);
+                (self.konst(w), 0)
+            }).collect(),
+            None => {
+                let (mul, at) = (intr.get_const_index(NIR_INTRINSIC_ALIGN_MUL) as u32, intr.get_const_index(NIR_INTRINSIC_ALIGN_OFFSET) as u32);
+                let c0 = (base + at) % 16 / 4;
+                if mul % 16 != 0 || c0 as usize + n > 4 {
+                    self.refuse("load_constant across a 16-byte row");
+                    return;
+                }
+                let o = resolve_vm(&self.sel.vec_map, intr.get_src(0).as_def().index, 0);
+                let four = self.konst(4);
+                let mut row = self.sel.fresh();
+                self.sel.prog.push(BorgInstr { mnem: Op::Isrl.into(), dst: row, srcs: vec![o.0, four], swz: vec![o.1, 0], imm: 0 });
+                if base / 16 != 0 {
+                    let k = self.konst(base / 16);
+                    let r = self.sel.fresh();
+                    self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: r, srcs: vec![row, k], swz: vec![0, 0], imm: 0 });
+                    row = r;
+                }
+                let slot = if self.stage == Stage::Vertex { 23 } else { 41 };
+                let ctl = self.konst((1 << 16) | (128 + slot));
+                let f = self.sel.fresh();
+                self.sel.loc.insert(f, Loc::Fixed(30));
+                if self.stage == Stage::Fragment {
+                    self.frag.per_pixel_fixed.insert(f);
+                }
+                let zero = self.sel.fresh();
+                self.sel.prog.push(BorgInstr { mnem: Op::Isub.into(), dst: zero, srcs: vec![f, f], swz: vec![0, 0], imm: 0 });
+                let t = self.sel.fresh();
+                self.sel.prog.push(BorgInstr { mnem: Op::Tex.into(), dst: t, srcs: vec![row, zero, ctl], swz: vec![0, 0, 0], imm: 0 });
+                self.tex_dsts.insert(t);
+                (0..n as u8).map(|c| {
+                    let m = self.sel.fresh();
+                    let k = c0 as u8 + c;
+                    self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: m, srcs: vec![t, t], swz: vec![k, k], imm: 0 });
+                    (m, 0)
+                }).collect()
+            }
+        };
         self.sel.vec_map.insert(intr.def.index, comps);
     }
 

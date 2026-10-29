@@ -1,5 +1,6 @@
 use crate::isel::borg_isel;
 use compiler::bindings::*;
+use compiler::nir::AsDef;
 
 /// Instruction counts of a shader; `tex` picks the fragment register set.
 pub struct Survey {
@@ -39,6 +40,7 @@ pub unsafe fn survey(entry: *mut nir_function_impl, stage: mesa_shader_stage) ->
                     tex += 1; // → TEX
                 } else if let Some(i) = instr.as_intrinsic() {
                     intrinsics += 1;
+                    tex += (i.intrinsic == nir_intrinsic_load_constant && i.get_src(0).comp_as_uint(0).is_none()) as u32; // → TEX
                     push |= i.intrinsic == nir_intrinsic_load_push_constant;
                     mem |= i.intrinsic == nir_intrinsic_load_ubo || i.intrinsic == nir_intrinsic_load_ssbo
                         || i.intrinsic == nir_intrinsic_store_ssbo;

@@ -302,6 +302,15 @@ extern "C" {
 }
 
 /// Self-test: confirms the Rust crate is linked and callable across the FFI.
+/// Little-endian words of `b`, the last one zero-padded.
+pub fn words(b: &[u8]) -> Vec<u32> {
+    b.chunks(4).map(|c| {
+        let mut w = [0u8; 4];
+        w[..c.len()].copy_from_slice(c);
+        u32::from_le_bytes(w)
+    }).collect()
+}
+
 #[no_mangle]
 pub extern "C" fn borgc_selftest() -> u32 {
     0xB0_06

@@ -29,6 +29,9 @@ impl ShaderState {
             _ => &[17, 18, 19, 23],
         };
         let mut st = ShaderState::new(regs, stage, flags);
+        if stage != Stage::Compute && !(*nir).constant_data.is_null() {
+            st.cdata = crate::words(std::slice::from_raw_parts((*nir).constant_data as *const u8, (*nir).constant_data_size as usize));
+        }
         st.frag.push_window = push_window && stage == Stage::Fragment;
         st.frag.out_select = out_select;
         if stage == Stage::Fragment {

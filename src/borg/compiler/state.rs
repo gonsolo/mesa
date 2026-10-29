@@ -106,6 +106,8 @@ pub struct ShaderState {
     pub flags: Flags,
     pub skipped: Vec<&'static str>,
     pub pool: Vec<u32>,
+    /// nir_opt_large_constants' data, fetched a row of four words per TEX.
+    pub cdata: Vec<u32>,
     pub res_binding: HashMap<u32, u32>,
     pub prod: HashMap<u32, (nir_op, Vec<(u32, u8)>)>,
     pub tex_dsts: HashSet<u32>,
@@ -183,6 +185,7 @@ impl ShaderState {
             flags,
             skipped: Default::default(),
             pool: Vec::new(),
+            cdata: Vec::new(),
             res_binding: Default::default(),
             prod: Default::default(),
             tex_dsts: Default::default(),
