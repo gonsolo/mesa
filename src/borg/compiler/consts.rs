@@ -120,12 +120,10 @@ impl ConstPool {
 
 impl ShaderState {
     fn window_word(&mut self, bits: u32) -> u32 {
+        // Beyond the window: a placeholder const_immediates builds in code.
         match self.win.word(&mut self.sel, bits) {
             Some(v) => v,
-            None => {
-                self.refuse(format!("more than {} constants", self.win.max()));
-                self.sel.fresh()
-            }
+            None => self.cs_const(bits),
         }
     }
 

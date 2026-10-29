@@ -127,6 +127,9 @@ impl ShaderState {
         self.tex_addresses();
         dce(&mut self.sel.prog, &self.out_roots);
         self.const_immediates();
+        if self.stage != Stage::Compute && self.sel.prog.iter().any(|i| i.srcs.iter().any(|s| self.cs.kval.contains_key(s))) {
+            self.refuse(format!("more than {} constants", self.win.max()));
+        }
         let loc = &self.sel.loc;
         fuse_fmadd(&mut self.sel.prog, &self.out_roots, &|v| matches!(loc.get(&v), Some(Loc::Uniform(_))));
         schedule_for_pressure(&mut self.sel.prog, &self.out_roots);
