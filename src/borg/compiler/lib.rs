@@ -80,6 +80,7 @@ pub struct BorgcInfo {
     pub npool: u32,
     pub spill_slots: u32,
     pub push_window: u32,
+    pub sample_mask: u32,
 }
 
 pub(crate) const NO_DST: u32 = u32::MAX;
@@ -322,7 +323,7 @@ pub unsafe extern "C" fn borgc_compile_nir(
     } else {
         None
     };
-    let mut inf = BorgcInfo { pool: [0; 64], npool: 0, spill_slots: 0, push_window: 0 };
+    let mut inf = BorgcInfo { pool: [0; 64], npool: 0, spill_slots: 0, push_window: 0, sample_mask: 0 };
     // A compiler bug refuses the shader instead of aborting the driver.
     let ret = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         compile_nir_inner(nir, out_buf, buf_cap, out_len, Flags(vfetch), out_select, &mut inf)
@@ -384,6 +385,7 @@ unsafe fn compile_nir_inner(
         return 0;
     };
     info.spill_slots = cx.spill.slots;
+    info.sample_mask = cx.outs.mask.is_some() as u32;
     if !out_len.is_null() {
         *out_len = blob.len() as u32;
     }

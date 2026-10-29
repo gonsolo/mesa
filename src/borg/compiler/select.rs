@@ -1,4 +1,4 @@
-use crate::opcodes::{CSR_OUT_C0, CSR_OUT_POS0};
+use crate::opcodes::{CSR_OUT_C0, CSR_OUT_DEPTH, CSR_OUT_POS0, CSR_SAMPLE_MASK};
 use crate::state::{ShaderState, Stage};
 use crate::isel::borg_isel;
 use crate::opt::classify_uniform;
@@ -1115,6 +1115,16 @@ impl ShaderState {
                 self.outs.pos[c] = Some(v);
                 self.outs.roots.push(v.0);
             }
+        } else if self.stage == Stage::Fragment && loc == FRAG_RESULT_DEPTH {
+            let v = self.sel.reg(comps[0]);
+            self.outs.depth = Some(v);
+            self.outs.roots.push(v.0);
+        } else if self.stage == Stage::Fragment && loc == FRAG_RESULT_SAMPLE_MASK {
+            let v = self.sel.reg(comps[0]);
+            self.outs.mask = Some(v);
+            self.outs.roots.push(v.0);
+        } else if self.stage == Stage::Fragment && loc == FRAG_RESULT_STENCIL {
+            self.skipped.push("stencil export");
         } else if self.stage == Stage::Fragment && self.flags.multi_target() && (4..8).contains(&loc) {
             self.outs.mrt[(loc - 4) as usize] = Some(comps[0]);
         } else if self.stage == Stage::Fragment {
@@ -1351,6 +1361,11 @@ impl ShaderState {
         for c in 0..4 {
             if let Some((v, comp)) = self.outs.frag[c] {
                 self.sel.prog.push(BorgInstr { mnem: Op::Csrrw.into(), dst: NO_DST, srcs: vec![v], swz: vec![comp], imm: CSR_OUT_C0 + c as u32 });
+            }
+        }
+        for (o, csr) in [(self.outs.depth, CSR_OUT_DEPTH), (self.outs.mask, CSR_SAMPLE_MASK)] {
+            if let Some((v, comp)) = o {
+                self.sel.prog.push(BorgInstr { mnem: Op::Csrrw.into(), dst: NO_DST, srcs: vec![v], swz: vec![comp], imm: csr });
             }
         }
     }

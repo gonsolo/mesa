@@ -270,6 +270,9 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     if points || lines {
         sc.state_reg[4] &= !3; // points and lines are not culled
     }
+    if sc.frag_sample_mask {
+        sc.state_reg[4] |= 1 << 13; // SAMPLE_MASK_CFG bit 5 (borg_sample_cfg)
+    }
     sc.state_valid = true;
     (pl.blend_cfg, pl.blend_const, pl.state_reg) = (sc.blend_cfg, sc.blend_const, sc.state_reg);
     pl.state_valid = true;

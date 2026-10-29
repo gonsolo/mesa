@@ -62,6 +62,7 @@ struct borgc_info {
    uint32_t npool;
    uint32_t spill_slots;          /* scratch slots of the draw's buffer region */
    uint32_t push_window;          /* push constants read from the heap window */
+   uint32_t sample_mask;          /* the fragment shader writes gl_SampleMask */
 };
 uint32_t borgc_compile_nir(struct nir_shader *nir, uint8_t *out_buf,
                            uint32_t buf_cap, uint32_t *out_len, uint32_t vfetch,

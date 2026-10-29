@@ -40,6 +40,7 @@ pub struct Scratch {
     pub stage_push: [bool; 2],
     pub stage_pwin: [bool; 2],  // the stage reads push constants from the heap window
     pub stage_spill: [bool; 2], // the stage spills to the region's scratch slot
+    pub frag_sample_mask: bool, // the fragment shader writes gl_SampleMask
     pub frag_tex_binding: i32,
     pub vert_tex_binding: i32,
     pub tex_pairs: Vec<[u8; 2]>, // the pipeline's descriptor indices: texture and sampler flat slots
@@ -65,6 +66,7 @@ impl Default for Scratch {
             stage_push: [false; 2],
             stage_pwin: [false; 2],
             stage_spill: [false; 2],
+            frag_sample_mask: false,
             frag_tex_binding: 0,
             vert_tex_binding: -1,
             tex_pairs: Default::default(),

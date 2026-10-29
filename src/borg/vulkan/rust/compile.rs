@@ -27,7 +27,7 @@ fn to_nir(dev: &Device, si: &VkPipelineShaderStageCreateInfo) -> Result<*mut nir
 }
 
 fn empty_info() -> BorgcInfo {
-    BorgcInfo { pool: [0; 64], npool: 0, spill_slots: 0, push_window: 0 }
+    BorgcInfo { pool: [0; 64], npool: 0, spill_slots: 0, push_window: 0, sample_mask: 0 }
 }
 
 /// A pipeline without a fragment stage (depth only): a shader that writes nothing.
@@ -47,6 +47,7 @@ pub fn compile_empty_frag(sc: &mut Scratch, opt: u32) {
     sc.stage_push = [false; 2];
     sc.stage_pwin[1] = false;
     sc.stage_spill[1] = false;
+    sc.frag_sample_mask = false;
     unsafe { ralloc_free(nb.shader.cast()) };
 }
 
@@ -66,6 +67,9 @@ fn from_cache(sc: &mut Scratch, si: &VkPipelineShaderStageCreateInfo, vfetch: u3
     sc.stage_push[fs as usize] = false;
     sc.stage_pwin[fs as usize] = false;
     sc.stage_spill[fs as usize] = false;
+    if fs {
+        sc.frag_sample_mask = false;
+    }
     sc.shader_blob[slot].npool = 0;
     log(MESA_LOG_INFO, format!("borgvk: shader blob from the cache ({} bytes)", sc.shader_blob[slot].len));
     true
@@ -165,6 +169,9 @@ fn compile_blob(
     }
     sc.stage_pwin[fs as usize] = info.push_window != 0;
     sc.stage_spill[fs as usize] = info.spill_slots > 0;
+    if fs {
+        sc.frag_sample_mask = info.sample_mask != 0;
+    }
 }
 
 /// Compute pipeline: SPIR-V to NIR to borgc's compute backend.

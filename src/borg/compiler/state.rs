@@ -11,6 +11,9 @@ pub struct DrawOutputs {
     pub psize: Option<(u32, u8)>,
     pub mrt: [Option<(u32, u8)>; 4],
     pub frag: [Option<(u32, u8)>; 4],
+    /// gl_FragDepth and gl_SampleMask.
+    pub depth: Option<(u32, u8)>,
+    pub mask: Option<(u32, u8)>,
     pub roots: Vec<u32>,
 }
 pub struct Selector {
