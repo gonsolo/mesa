@@ -213,6 +213,8 @@ struct Params {
     first: u32,
     vertex_offset: i32,
     first_instance: u32,
+    viewport: Option<[f32; 6]>, // dynamic state, if set
+    scissor: Option<[u32; 4]>,  // x0, y0, x1, y1
 }
 
 fn fetch(f: VkFormat) -> Result<Fetch, Reject> {
@@ -438,18 +440,11 @@ impl Ctx<'_> {
         if c.stencil_view.is_null() {
             d.state_reg[0] = 0;
         }
-        let dyn_state = &c.vk.dynamic_graphics_state;
-        let set = |s: mesa_vk_dynamic_graphics_state| dyn_state.set[s as usize / 32] >> (s % 32) & 1 != 0;
-        if pl.vp_dyn && set(MESA_VK_DYNAMIC_VP_VIEWPORTS) {
-            let v = &dyn_state.vp.viewports[0];
-            d.vp.v = [v.x, v.y, v.width, v.height, v.minDepth, v.maxDepth];
-            d.vp.valid = true;
+        if let Some(v) = self.p.viewport.filter(|_| pl.vp_dyn) {
+            (d.vp.v, d.vp.valid) = (v, true);
         }
-        if pl.sc_dyn && set(MESA_VK_DYNAMIC_VP_SCISSORS) {
-            let r = &dyn_state.vp.scissors[0];
-            let (x1, y1) = (r.offset.x.wrapping_add(r.extent.width as i32), r.offset.y.wrapping_add(r.extent.height as i32));
-            d.vp.sc = [r.offset.x.max(0) as u32, r.offset.y.max(0) as u32, x1.max(0) as u32, y1.max(0) as u32];
-            d.vp.valid = true;
+        if let Some(sc) = self.p.scissor.filter(|_| pl.sc_dyn) {
+            (d.vp.sc, d.vp.valid) = (sc, true);
         }
         upload_shaders_serial(&d);
         send_blend_state_serial(&d);
@@ -968,6 +963,7 @@ fn sim_draw(c: &mut CommandBuffer, mut p: Params) {
         return;
     }
     p.index_size = c.index_size;
+    (p.viewport, p.scissor) = (c.dyn_viewport(), c.dyn_scissor());
     if p.indexed && p.index_size == 0 {
         return;
     }

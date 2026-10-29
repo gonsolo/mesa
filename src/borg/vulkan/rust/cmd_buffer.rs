@@ -91,6 +91,23 @@ impl CommandBuffer {
         unsafe { self.cs_pipeline.as_ref() }
     }
 
+    fn dyn_set(&self, s: mesa_vk_dynamic_graphics_state) -> bool {
+        self.vk.dynamic_graphics_state.set[s as usize / 32] >> (s % 32) & 1 != 0
+    }
+
+    /// Viewport 0 as x, y, width, height, min and max depth, if set as dynamic state.
+    pub fn dyn_viewport(&self) -> Option<[f32; 6]> {
+        let v = &self.vk.dynamic_graphics_state.vp.viewports[0];
+        self.dyn_set(MESA_VK_DYNAMIC_VP_VIEWPORTS).then(|| [v.x, v.y, v.width, v.height, v.minDepth, v.maxDepth])
+    }
+
+    /// Scissor 0 as x0, y0, x1, y1, clamped at 0, if set as dynamic state.
+    pub fn dyn_scissor(&self) -> Option<[u32; 4]> {
+        let r = &self.vk.dynamic_graphics_state.vp.scissors[0];
+        let (x1, y1) = (r.offset.x.wrapping_add(r.extent.width as i32), r.offset.y.wrapping_add(r.extent.height as i32));
+        self.dyn_set(MESA_VK_DYNAMIC_VP_SCISSORS).then(|| [r.offset.x.max(0) as u32, r.offset.y.max(0) as u32, x1.max(0) as u32, y1.max(0) as u32])
+    }
+
     pub fn desc_set(&self) -> Option<&DescriptorSet> {
         unsafe { self.desc_set.as_ref() }
     }
