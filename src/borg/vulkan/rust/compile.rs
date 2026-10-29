@@ -140,7 +140,9 @@ fn compile_blob(
     let out_select = if fs { sc.frag_select as i32 - 1 } else { -1 };
     let (mut len, mut info) = (0, empty_info());
     unsafe { borgc_compile_nir(nir, sc.shader_blob[slot].data.as_mut_ptr(), BLOB_MAX, &mut len, vfetch, out_select, &mut info) };
+    let mut used = nir;
     if len == 0 && !retry.is_null() {
+        used = retry;
         unsafe {
             borg_lower_set_vertex_remat(true);
             borg_lower_nir_for_borgc_blend(retry, blend);
@@ -159,7 +161,18 @@ fn compile_blob(
         b.npool = info.npool.min(BORGVK_POOL_MAX);
         let n = b.npool as usize;
         b.pool[..n].copy_from_slice(&info.pool[..n]);
-        if blend.is_null() && n == 0 {
+        let cdata = match unsafe { ((*used).constant_data as *const u8).as_ref() } {
+            Some(d) => borgc_rs::words(unsafe { std::slice::from_raw_parts(d, (*used).constant_data_size as usize) }),
+            None => Vec::new(),
+        };
+        if cdata.len() > BORGVK_CDATA_MAX as usize {
+            b.len = 0;
+            log(MESA_LOG_WARN, format!("borgvk: {kind} shader constant data of {} words not captured", cdata.len()));
+            return;
+        }
+        b.ncdata = cdata.len() as u32;
+        b.cdata[..cdata.len()].copy_from_slice(&cdata);
+        if blend.is_null() && n == 0 && cdata.is_empty() {
             shader_cache::record(si, vfetch, b, sc.frag_reads_pntc);
         }
         log(MESA_LOG_INFO, format!("borgvk: captured {kind} shader blob ({len} bytes) for upload"));

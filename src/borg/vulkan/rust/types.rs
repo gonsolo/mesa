@@ -12,6 +12,10 @@ pub const BORGVK_SHADER_BLOB_MAX: u32 = 16384;
 pub const BORGVK_POOL_MAX: u32 = 64;
 pub const BORGVK_POOL_SLOT: u32 = 40;
 pub const BORGVK_VPOOL_SLOT: u32 = 42;
+// borgc constant_load: a stage's constant data, rows of four words.
+pub const BORGVK_CDATA_SLOT: u32 = 41;
+pub const BORGVK_VCDATA_SLOT: u32 = 23;
+pub const BORGVK_CDATA_MAX: u32 = 4096;
 pub const BORGVK_LINE_SLOT: u32 = 16;
 pub const BORGVK_LINE_OTHER: u32 = 24;
 pub const BORGVK_MAX_COLOR_ATTACHMENTS: u32 = 8;
@@ -36,11 +40,13 @@ pub struct ShaderBlob {
     pub len: u32, // 0: not compiled, or did not fit
     pub pool: [u32; BORGVK_POOL_MAX as usize],
     pub npool: u32,
+    pub cdata: [u32; BORGVK_CDATA_MAX as usize],
+    pub ncdata: u32,
 }
 
 impl Default for ShaderBlob {
     fn default() -> Self {
-        Self { data: [0; BORGVK_SHADER_BLOB_MAX as usize], len: 0, pool: [0; BORGVK_POOL_MAX as usize], npool: 0 }
+        Self { data: [0; BORGVK_SHADER_BLOB_MAX as usize], len: 0, pool: [0; BORGVK_POOL_MAX as usize], npool: 0, cdata: [0; BORGVK_CDATA_MAX as usize], ncdata: 0 }
     }
 }
 

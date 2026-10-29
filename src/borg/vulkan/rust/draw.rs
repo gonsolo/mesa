@@ -576,6 +576,13 @@ impl Ctx<'_> {
         let (stage, slot) = if vert { (BORGVK_STAGE_VERT, BORGVK_VPOOL_SLOT) } else { (BORGVK_STAGE_FRAG, BORGVK_POOL_SLOT) };
         let batch = if vert { &mut self.c.batch_vpool } else { &mut self.c.batch_pool };
         let fb = &pl.blob[stage as usize];
+        if fb.ncdata > 0 {
+            let mut words = vec![0u32; fb.ncdata.next_multiple_of(4) as usize];
+            words[..fb.ncdata as usize].copy_from_slice(&fb.cdata[..fb.ncdata as usize]);
+            let off = self.heap.upload(bytes_of(&words))?;
+            let f = fetch(VK_FORMAT_R32G32B32A32_UINT)?;
+            send_vattr(if vert { BORGVK_VCDATA_SLOT } else { BORGVK_CDATA_SLOT }, f.code, off, words.len() as u32 / 4, f.read_bytes, f.swz);
+        }
         if fb.npool == 0 || *batch == me {
             return Ok(());
         }
