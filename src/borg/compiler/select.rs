@@ -108,9 +108,10 @@ impl ShaderState {
         let is_txl = tex.op == nir_texop_txl && matches!(self.stage, Stage::Fragment | Stage::Compute | Stage::Vertex);
         let is_txb = tex.op == nir_texop_txb && self.stage == Stage::Fragment;
         let is_tg4 = tex.op == nir_texop_tg4 && self.stage == Stage::Fragment;
+        let is_lod = tex.op == nir_texop_lod && self.stage == Stage::Fragment;
         // A multisampled image is an array of its sample planes: layer = array layer * 4 + sample.
         let is_ms = tex.op == nir_texop_txf_ms;
-        if tex.op != nir_texop_tex && tex.op != nir_texop_txf && !is_txl && !is_txb && !is_tg4 && !is_ms {
+        if tex.op != nir_texop_tex && tex.op != nir_texop_txf && !is_txl && !is_txb && !is_tg4 && !is_ms && !is_lod {
             self.refuse(format!("texture op {}", tex.op));
             return;
         }
@@ -204,6 +205,9 @@ impl ShaderState {
                 // Operation 2 (gather) of the component in bits 19:18.
                 let bits = 2u32 << 16 | (tex.component() & 3) << 18;
                 self.konst(bits | off)
+            } else if is_lod {
+                // LOD mode 3: the level and lambda instead of texels.
+                self.konst(3u32 << 21 | off)
             } else if has_bias {
                 // LOD mode 1: implicit LOD plus TEXA's bias.
                 self.konst(1u32 << 21 | off)
