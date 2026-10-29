@@ -19,6 +19,16 @@ use std::ptr::null_mut;
 handle!(VkCommandBuffer, vk_command_buffer, VK_OBJECT_TYPE_COMMAND_BUFFER);
 
 #[repr(C)]
+/// What the draws render to, as images: set at the start of rendering.
+#[derive(Clone, Copy)]
+pub struct Rendering {
+    pub color: [*mut Image; 4],
+    pub depth: *mut Image,
+    pub stencil: *mut Image,
+    pub offset: [i32; 2],
+    pub extent: [u32; 2],
+}
+
 pub struct CommandBuffer {
     pub vk: vk_command_buffer,
 
@@ -31,6 +41,7 @@ pub struct CommandBuffer {
     pub depth_view: *mut vk_image_view,
     pub stencil_view: *mut vk_image_view,
     pub color_resolve_views: [*mut vk_image_view; BORGVK_MAX_COLOR_ATTACHMENTS as usize],
+    pub rendering: Rendering,
     pub has_clear: bool,
     pub clear_color: [f32; 4],
     // Draw state, tracked as the recorded commands replay at submit.
@@ -50,9 +61,9 @@ pub struct CommandBuffer {
     pub batch_extra: [*mut Image; 3], // colour attachments 1-3 of the batch
     pub batch_nextra: u32,
     pub batch_serve: bool,
-    pub batch_area: VkExtent2D, // the pass size when it has no attachment
-    pub batch_depth: *mut vk_image_view,
-    pub batch_stencil: *mut vk_image_view,
+    pub batch_area: [u32; 2], // the pass size when it has no attachment
+    pub batch_depth: *mut Image,
+    pub batch_stencil: *mut Image,
     pub wb: [Writeback; BORGVK_MAX_WRITEBACKS as usize],
     pub nwb: u32,
     pub batch_pool: *const c_void,
@@ -185,6 +196,7 @@ unsafe extern "C" fn reset(vk: *mut vk_command_buffer, _flags: VkCommandBufferRe
     (c.in_rendering, c.has_clear, c.generic_drawn, c.dispatched) = (false, false, false, false);
     unsafe { (c.vb, c.vb_avail, c.cs_sets, c.desc_sets) = (zeroed(), zeroed(), zeroed(), zeroed()) };
     (c.color_attachment_count, c.depth_view, c.stencil_view) = (0, null_mut(), null_mut());
+    (c.rendering.depth, c.rendering.stencil) = (null_mut(), null_mut());
     unsafe { vk_command_buffer_reset(vk) };
 }
 

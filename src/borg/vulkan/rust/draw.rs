@@ -12,7 +12,7 @@ use crate::ffi::*;
 use crate::fmt;
 use crate::memory::{Buffer, Host};
 use crate::texel::Texel;
-use crate::image::{Image, ViewImage};
+use crate::image::Image;
 use crate::device::Device;
 use crate::pipeline::{Pipeline, Topology};
 use crate::format::{depth_is_d32, flush_format, raw32, vertex_fetch, Fetch};
@@ -136,10 +136,6 @@ fn reject(why: Reject) -> bool {
     false
 }
 
-fn view_image(v: *const vk_image_view) -> *mut Image {
-    unsafe { v.as_ref() }.map_or(null_mut(), |v| v.image.cast())
-}
-
 fn bytes_of<T>(v: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(v.as_ptr().cast(), size_of_val(v)) }
 }
@@ -159,8 +155,7 @@ pub fn flush_draws(c: &mut CommandBuffer) {
     // The batch's attachments, kept as pointers across its draws; they live until the pass ends.
     let img = unsafe { c.batch_img.as_ref() };
     let extra: Vec<&Image> = c.batch_extra[..c.batch_nextra as usize].iter().filter_map(|&e| unsafe { e.as_ref() }).collect();
-    let depth = unsafe { c.batch_depth.as_ref() }.and_then(|v| v.image());
-    let stencil = unsafe { c.batch_stencil.as_ref() }.and_then(|v| v.image());
+    let (depth, stencil) = unsafe { (c.batch_depth.as_ref(), c.batch_stencil.as_ref()) };
     let (serve, area, wb, nwb) = (c.batch_serve, c.batch_area, c.wb, c.nwb as usize);
     c.nwb = 0;
     c.region_set = null_mut();
@@ -255,7 +250,7 @@ struct Ctx<'a> {
 
 impl Ctx<'_> {
     fn has_ds(&self) -> bool {
-        !self.c.depth_view.is_null() || !self.c.stencil_view.is_null()
+        !self.c.rendering.depth.is_null() || !self.c.rendering.stencil.is_null()
     }
 
     fn index(&self, i: u32) -> u32 {
@@ -285,21 +280,22 @@ impl Ctx<'_> {
         self.lines = matches!(pl.topology, Topology::Lines | Topology::LineStrip);
 
         let c = &mut *self.c;
-        self.color = view_image(c.color_views[0]);
+        let r = c.rendering;
+        self.color = r.color[0];
         // Depth only: no colour attachment, the depth or stencil image gives the size.
-        let ds_view = if c.depth_view.is_null() { c.stencil_view } else { c.depth_view };
-        let size_img = if self.color.is_null() { view_image(ds_view) } else { self.color };
+        let ds = if r.depth.is_null() { r.stencil } else { r.depth };
+        let size_img = if self.color.is_null() { ds } else { self.color };
         if let Some(s) = unsafe { size_img.as_ref() } {
             if s.host().is_none() {
                 return Err(Reject::NoTargetMemory);
             }
             (self.w, self.h) = (s.vk.extent.width, s.vk.extent.height);
-            let ra = c.render_area;
-            if ra.offset.x == 0 && ra.offset.y == 0 && ra.extent.width != 0 && ra.extent.width <= self.w && ra.extent.height <= self.h {
-                (self.w, self.h) = (ra.extent.width, ra.extent.height);
+            let [ew, eh] = r.extent;
+            if r.offset == [0, 0] && ew != 0 && ew <= self.w && eh <= self.h {
+                (self.w, self.h) = (ew, eh);
             }
         } else {
-            (self.w, self.h) = (c.render_area.extent.width, c.render_area.extent.height);
+            [self.w, self.h] = r.extent;
         }
         if self.color.is_null() && !serves_extent(self.w, self.h, true) {
             return Err(Reject::NoTargetMemory);
@@ -309,7 +305,7 @@ impl Ctx<'_> {
             return Err(Reject::MrtFormats);
         }
         for k in 0..self.nextra {
-            let e = view_image(c.color_views[k + 1]);
+            let e = r.color[k + 1];
             self.extra[k] = e;
             match unsafe { e.as_ref() } {
                 Some(e) if e.host().is_some() && e.vk.extent.width >= self.w && e.vk.extent.height >= self.h => {}
@@ -325,10 +321,9 @@ impl Ctx<'_> {
         if c.batch_draws != 0
             && (!same_extra
                 || c.batch_img != self.color
-                || c.batch_area.width != self.w
-                || c.batch_area.height != self.h
-                || c.batch_depth != c.depth_view
-                || c.batch_stencil != c.stencil_view)
+                || c.batch_area != [self.w, self.h]
+                || c.batch_depth != r.depth
+                || c.batch_stencil != r.stencil)
         {
             flush_draws(c);
         }
@@ -437,7 +432,7 @@ impl Ctx<'_> {
         d.shader_blob = pl.blob;
         (d.blend_cfg, d.blend_const, d.state_reg, d.state_valid, d.vp) = (pl.blend_cfg, pl.blend_const, pl.state_reg, pl.state_valid, pl.vp);
         // Without a stencil attachment the stencil test always passes.
-        if c.stencil_view.is_null() {
+        if c.rendering.stencil.is_null() {
             d.state_reg[0] = 0;
         }
         if let Some(v) = self.p.viewport.filter(|_| pl.vp_dyn) {
@@ -458,21 +453,22 @@ impl Ctx<'_> {
         borgvk_transport_capture_begin();
         if first {
             c.batch_serve = serves_extent(self.w, self.h, has_ds);
-            c.batch_area = VkExtent2D { width: self.w, height: self.h };
+            c.batch_area = [self.w, self.h];
         }
         let color = unsafe { self.color.as_ref() };
         self.load = if first { 0 } else { 1 };
         if c.batch_serve {
-            let (has_z, has_s) = (!c.depth_view.is_null(), !c.stencil_view.is_null());
+            let r = c.rendering;
+            let (has_z, has_s) = (!r.depth.is_null(), !r.stencil.is_null());
             self.load = 1 | (has_z as u32) << 1 | (has_s as u32) << 2 | 8;
             if first {
                 let fmt = if self.nextra != 0 { 5 } else { color.map_or(0, |i| flush_format(i.vk.format)) };
-                let zf = has_z.then(|| unsafe { (*(*c.depth_view).image).format });
+                let zf = has_z.then(|| unsafe { (*r.depth).vk.format });
                 let d32 = zf.is_some_and(depth_is_d32);
                 // D24 renders as FP32 and needs Vulkan's clamp to [0, 1].
                 let d24 = zf.is_some_and(|f| f == VK_FORMAT_X8_D24_UNORM_PACK32 || f == VK_FORMAT_D24_UNORM_S8_UINT);
-                let zs = if has_z { c.depth_view } else { c.stencil_view };
-                let samples = color.map(|i| i.vk.samples).or_else(|| (has_z || has_s).then(|| unsafe { (*(*zs).image).samples })).unwrap_or(1);
+                let zs = if has_z { r.depth } else { r.stencil };
+                let samples = color.map(|i| i.vk.samples).or_else(|| (has_z || has_s).then(|| unsafe { (*zs).vk.samples })).unwrap_or(1);
                 let ms = per_sample(samples, (self.w + 3) & !3, (self.h + 3) & !3, self.nextra != 0);
                 send_pass(fmt, has_z as u8 | (has_s as u8) << 1 | if color.is_none() { 8 } else { 0 } | if d32 { 4 } else { 0 } | (ms as u8) << 4 | (d24 as u8) << 5);
                 send_att(self.nextra as u8 + 1, &[5, 5, 5]);
@@ -832,7 +828,7 @@ impl Ctx<'_> {
         c.batch_draws += 1;
         c.batch_push = self.device.scratch.lock().unwrap().push_words;
         (c.batch_img, c.batch_nextra, c.batch_extra) = (self.color, self.nextra as u32, self.extra);
-        (c.batch_depth, c.batch_stencil) = (c.depth_view, c.stencil_view);
+        (c.batch_depth, c.batch_stencil) = (c.rendering.depth, c.rendering.stencil);
         true
     }
 }
@@ -936,10 +932,10 @@ fn generic_draw(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
     let first = c.gfx_pipeline;
     let (fp, c) = c.split_gfx_pipeline();
     let Some(fp) = fp.filter(|f| f.emul_n != 0) else { return draw_one(device, c, p) };
-    if !c.depth_view.is_null() || !c.stencil_view.is_null() {
+    if !c.rendering.depth.is_null() || !c.rendering.stencil.is_null() {
         return reject(Reject::MrtFormats);
     }
-    let views: [*mut vk_image_view; 4] = c.color_views[..4].try_into().unwrap();
+    let colors = c.rendering.color;
     let mut ok = true;
     for k in 0..fp.emul_n as usize {
         if !ok {
@@ -948,10 +944,10 @@ fn generic_draw(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
         if k != 0 {
             c.gfx_pipeline = fp.emul[k - 1].ptr();
         }
-        c.color_views[0] = views[k];
+        c.rendering.color[0] = colors[k];
         ok = draw_one(device, c, p);
     }
-    c.color_views[..4].copy_from_slice(&views);
+    c.rendering.color = colors;
     c.gfx_pipeline = first;
     ok
 }

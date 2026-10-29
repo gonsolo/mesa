@@ -587,11 +587,11 @@ pub fn run_pass(
     zimg: Option<&Image>,
     simg: Option<&Image>,
     wb: &[Writeback],
-    area: VkExtent2D,
+    area: [u32; 2],
 ) {
     // Depth only: no colour attachment, nothing of it goes in or comes back.
     let (w, h) = match color.or(zimg).or(simg) {
-        _ if area.width != 0 => (area.width, area.height),
+        _ if area[0] != 0 => (area[0], area[1]),
         Some(size) => (size.vk.extent.width, size.vk.extent.height),
         None => return,
     };

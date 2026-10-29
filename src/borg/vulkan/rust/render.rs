@@ -5,7 +5,7 @@
 //! runtime's, which call these.
 
 use crate::clear::clear_rect;
-use crate::cmd_buffer::CommandBuffer;
+use crate::cmd_buffer::{CommandBuffer, Rendering};
 use crate::copy::resolve_region;
 use crate::entrypoint::{entrypoint, pointee, Handle};
 use crate::ffi::*;
@@ -110,6 +110,15 @@ entrypoint! {
         }
         c.depth_view = depth_stencil(c, ri.depth_attachment(), VK_IMAGE_ASPECT_DEPTH_BIT, layers);
         c.stencil_view = depth_stencil(c, ri.stencil_attachment(), VK_IMAGE_ASPECT_STENCIL_BIT, layers);
+        let image = |v: *mut vk_image_view| unsafe { v.as_ref() }.map_or(null_mut(), |v| v.image.cast::<Image>());
+        let ra = c.render_area;
+        c.rendering = Rendering {
+            color: std::array::from_fn(|i| image(c.color_views[i])),
+            depth: image(c.depth_view),
+            stencil: image(c.stencil_view),
+            offset: [ra.offset.x, ra.offset.y],
+            extent: [ra.extent.width, ra.extent.height],
+        };
     }
 }
 
@@ -142,6 +151,7 @@ entrypoint! {
         c.in_rendering = false;
         c.color_attachment_count = 0;
         (c.depth_view, c.stencil_view) = (null_mut(), null_mut());
+        (c.rendering.depth, c.rendering.stencil) = (null_mut(), null_mut());
     }
 }
 
