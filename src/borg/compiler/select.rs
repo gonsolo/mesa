@@ -68,7 +68,7 @@ impl ShaderState {
                 }
                 resolve_vm(&self.sel.vec_map, ld, 0)
             }
-            None => (wz, 0u8),
+            None => (self.konst(0), 0u8),
         };
         self.sel.prog.push(BorgInstr { mnem: Op::Texa.into(), dst: NO_DST, srcs: vec![wz, lv, wz], swz: vec![0, lc, 0], imm: 0 });
         let ctl = self.konst(3u32 << 16 | self.tex_slot(tex));
@@ -88,7 +88,7 @@ impl ShaderState {
 
     pub unsafe fn tex(&mut self, tex: &nir_tex_instr) {
         let srcs = tex.srcs_as_slice();
-        if tex.op == nir_texop_txs && self.stage == Stage::Fragment {
+        if tex.op == nir_texop_txs {
             self.tex_size(tex);
             return;
         }
@@ -1336,7 +1336,7 @@ impl ShaderState {
                 } else if let Some(intr) = instr.as_intrinsic() {
                     self.intrinsic(intr);
                 } else if let Some(tex) = instr.as_tex() {
-                    if self.stage == Stage::Compute && tex.op != nir_texop_txl {
+                    if self.stage == Stage::Compute && tex.op != nir_texop_txl && tex.op != nir_texop_txs {
                         self.skipped.push("tex");
                         continue;
                     }
