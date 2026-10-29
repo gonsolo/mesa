@@ -28,7 +28,7 @@ const SAMPLER_DESC_BASE: u32 = 0x37C / 4;
 /// ISA v2 root table (docs/B8_isa_v2.md): LW/SW base (0: compute addresses are absolute), the
 /// texture and the sampler descriptor tables; below the windows, after the program.
 const ROOT: u32 = 0x3F8 / 4;
-const ROOT_BYTES: u32 = 0xF8000;
+const ROOT_BYTES: u32 = 0xFFFF0;
 const SAMPLERS: u32 = 64 * BORGVK_TEX_PAIRS as u32;
 const TEXELS: u32 = SAMPLERS + 16 * BORGVK_TEX_PAIRS as u32;
 const HDR: usize = 12;

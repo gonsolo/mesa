@@ -21,7 +21,7 @@
 
 #define BLOB_MAX 4096
 #define POOL_MAX 64
-#define CS_WORDS_MAX 4096
+#define CS_WORDS_MAX 16384
 #define CS_REGS_MAX 32
 #define CS_POOL_MAX 4096
 

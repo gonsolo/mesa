@@ -17,7 +17,7 @@ pub(crate) const SLOT_WORDS: u32 = 0x80000;
 const SLOT_BASE: u32 = 4 * SLOT_BASE_WORDS;
 const SLOT_BYTES: u32 = 4 * SLOT_WORDS;
 const LANES: u32 = 4; // BorgConfig.Simt: fragLanes
-const MAX_WORDS: usize = 4096; // the DRAM code region below the first slot holds 16k
+const MAX_WORDS: usize = 16379; // the code at 0xF0000 up to the root table at 0xFFFF0, with its HALT
 pub(crate) const WG_BASE_REG: u32 = 12;
 /// Each binding slot's buffer size in bytes, after the 32 push constant words in slot 32.
 const SIZES_BASE: u32 = SLOT_BASE + 32 * SLOT_BYTES + 128;
