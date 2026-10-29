@@ -502,11 +502,12 @@ mod tests {
     }
 
     #[test]
-    fn fragment_window_overflow_refuses() {
+    fn fragment_window_overflow_is_built_in_code() {
         let mut c = cx(false);
-        for b in 0..=Window::fragment().max() as u32 {
-            c.konst(b);
-        }
-        assert!(c.refusal().is_err());
+        let n = Window::fragment().max() as u32;
+        let vs: Vec<u32> = (0..=n).map(|b| c.konst(b)).collect();
+        assert!(c.refusal().is_ok());
+        assert_eq!(c.bits_of(vs[n as usize]), Some(n));
+        assert!(c.cs.kval.contains_key(&vs[n as usize]));
     }
 }
