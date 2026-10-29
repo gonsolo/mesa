@@ -37,6 +37,14 @@ const struct nir_shader_compiler_options borg_nir_options = {
    .lower_extract_word = true,
    .lower_unpack_unorm_4x8 = true,
    .lower_pack_unorm_4x8 = true,
+   .lower_bitfield_extract = true,
+   .lower_bitfield_insert = true,
+   .lower_bitfield_reverse = true,
+   .lower_uadd_carry = true,
+   .lower_usub_borrow = true,
+   .lower_isign = true,
+   .lower_iabs = true,
+   .lower_mul_2x32_64 = true,
    .max_unroll_iterations = 32,   /* graphics shaders have no loops: constant loops are unrolled */
 };
 
@@ -543,6 +551,20 @@ borg_dup_addr(nir_builder *b, nir_alu_instr *alu, void *data)
    return k > 1;
 }
 
+/* iabs's lowering is in nir_opt_algebraic_late, which borgc does not run. */
+static bool
+borg_iabs_filter(const nir_instr *instr, const void *data)
+{
+   return instr->type == nir_instr_type_alu && nir_instr_as_alu(instr)->op == nir_op_iabs;
+}
+
+static nir_def *
+borg_iabs_lower(nir_builder *b, nir_instr *instr, void *data)
+{
+   nir_def *x = nir_ssa_for_alu_src(b, nir_instr_as_alu(instr), 0);
+   return nir_imax(b, x, nir_ineg(b, x));
+}
+
 static bool
 borg_idiv_filter(const nir_instr *instr, const void *data)
 {
@@ -906,6 +928,8 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_frexp_filter, borg_frexp_lower, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_sincos_filter, borg_sincos_lower, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_idiv_filter, borg_idiv_lower, NULL);
+   NIR_PASS(_, nir, nir_shader_lower_instructions, borg_iabs_filter, borg_iabs_lower, NULL);
+   NIR_PASS(_, nir, nir_lower_alu);
    NIR_PASS(_, nir, nir_lower_alu_to_scalar, NULL, NULL);
    const bool wide = (nir->info.stage == MESA_SHADER_FRAGMENT || (nir->info.stage == MESA_SHADER_VERTEX && remat_vertex_inputs)) &&
                      borg_wide_loads(nir);
