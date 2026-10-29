@@ -60,8 +60,103 @@ entrypoint! {
     }
 }
 
-pub fn layers(image: &vk_image, s: &VkImageSubresourceLayers) -> u32 {
-    if s.layerCount == VK_REMAINING_ARRAY_LAYERS as u32 { image.array_layers.wrapping_sub(s.baseArrayLayer) } else { s.layerCount }
+/// A mip level and a run of layers; `layers` may be Vulkan's "remaining".
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Sub {
+    pub aspect: u32,
+    pub level: u32,
+    pub layer: u32,
+    pub layers: u32,
+}
+
+impl From<VkImageSubresourceLayers> for Sub {
+    fn from(s: VkImageSubresourceLayers) -> Self {
+        Sub { aspect: s.aspectMask, level: s.mipLevel, layer: s.baseArrayLayer, layers: s.layerCount }
+    }
+}
+
+/// An image copy or resolve.
+#[derive(Clone, Copy)]
+pub struct Region {
+    pub src: Sub,
+    pub src_offset: [i32; 3],
+    pub dst: Sub,
+    pub dst_offset: [i32; 3],
+    pub extent: [u32; 3],
+}
+
+/// Laid out as VkBufferImageCopy: the corpus key hashes its bytes.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BufferRegion {
+    buffer_offset: u64,
+    row_length: u32,
+    image_height: u32,
+    sub: Sub,
+    offset: [i32; 3],
+    extent: [u32; 3],
+}
+const _: () = assert!(size_of::<BufferRegion>() == size_of::<VkBufferImageCopy>());
+
+struct BlitRegion {
+    src: Sub,
+    src_offsets: [[i32; 3]; 2],
+    dst: Sub,
+    dst_offsets: [[i32; 3]; 2],
+}
+
+fn xyz(o: VkOffset3D) -> [i32; 3] {
+    [o.x, o.y, o.z]
+}
+
+fn whd(e: VkExtent3D) -> [u32; 3] {
+    [e.width, e.height, e.depth]
+}
+
+macro_rules! from_vk {
+    ($t:ty, Region) => {
+        impl From<&$t> for Region {
+            fn from(r: &$t) -> Self {
+                let (src, dst) = (r.srcSubresource.into(), r.dstSubresource.into());
+                Region { src, src_offset: xyz(r.srcOffset), dst, dst_offset: xyz(r.dstOffset), extent: whd(r.extent) }
+            }
+        }
+    };
+    ($t:ty, BufferRegion) => {
+        impl From<&$t> for BufferRegion {
+            fn from(r: &$t) -> Self {
+                BufferRegion {
+                    buffer_offset: r.bufferOffset,
+                    row_length: r.bufferRowLength,
+                    image_height: r.bufferImageHeight,
+                    sub: r.imageSubresource.into(),
+                    offset: xyz(r.imageOffset),
+                    extent: whd(r.imageExtent),
+                }
+            }
+        }
+    };
+    ($t:ty, BlitRegion) => {
+        impl From<&$t> for BlitRegion {
+            fn from(r: &$t) -> Self {
+                let (src, dst) = (r.srcSubresource.into(), r.dstSubresource.into());
+                BlitRegion { src, src_offsets: r.srcOffsets.map(xyz), dst, dst_offsets: r.dstOffsets.map(xyz) }
+            }
+        }
+    };
+}
+from_vk!(VkImageCopy, Region);
+from_vk!(VkImageCopy2, Region);
+from_vk!(VkImageResolve, Region);
+from_vk!(VkImageResolve2, Region);
+from_vk!(VkBufferImageCopy, BufferRegion);
+from_vk!(VkBufferImageCopy2, BufferRegion);
+from_vk!(VkImageBlit, BlitRegion);
+from_vk!(VkImageBlit2, BlitRegion);
+
+fn layers(image: &vk_image, s: &Sub) -> u32 {
+    if s.layers == VK_REMAINING_ARRAY_LAYERS as u32 { image.array_layers.wrapping_sub(s.layer) } else { s.layers }
 }
 
 /// Offset of a 2D layer or 3D slice of a level, and its row stride in blocks.
@@ -101,30 +196,30 @@ fn move_depth_stencil(sh: &Host, so: usize, sbs: usize, spf: pipe_format, dh: &H
     dh.write(doff, &d[..dbs]);
 }
 
-fn copy_image(src: &Image, dst: &Image, reg: &VkImageCopy) {
+fn copy_image(src: &Image, dst: &Image, reg: &Region) {
     let (Some(sh), Some(dh)) = (src.host(), dst.host()) else { return };
     let (sb, db) = (blocks(src.vk.format), blocks(dst.vk.format));
     if sb.bd > 1 || db.bd > 1 {
         return;
     }
     let (spf, dpf) = (fmt::pipe(src.vk.format), fmt::pipe(dst.vk.format));
-    let (se, de) = (aspect_blocks(src.vk.format, reg.srcSubresource.aspectMask), aspect_blocks(dst.vk.format, reg.dstSubresource.aspectMask));
+    let (se, de) = (aspect_blocks(src.vk.format, reg.src.aspect), aspect_blocks(dst.vk.format, reg.dst.aspect));
     let elem_bs = se.bs.min(de.bs) as usize;
-    let w_blocks = reg.extent.width.div_ceil(se.bw);
-    let h_blocks = reg.extent.height.div_ceil(se.bh);
+    let w_blocks = reg.extent[0].div_ceil(se.bw);
+    let h_blocks = reg.extent[1].div_ceil(se.bh);
     let (s3d, d3d) = (src.vk.image_type == VK_IMAGE_TYPE_3D, dst.vk.image_type == VK_IMAGE_TYPE_3D);
     let slice_bd = if s3d { sb.bd } else if d3d { db.bd } else { 1 };
-    let slices = if s3d || d3d { reg.extent.depth.div_ceil(slice_bd) } else { layers(&src.vk, &reg.srcSubresource) };
-    let (so, dof) = (reg.srcOffset, reg.dstOffset);
+    let slices = if s3d || d3d { reg.extent[2].div_ceil(slice_bd) } else { layers(&src.vk, &reg.src) };
+    let ([sx, sy, sz0], [dx, dy, dz0]) = (reg.src_offset, reg.dst_offset);
     let (sbs, dbs) = (sb.bs as usize, db.bs as usize);
     for l in 0..slices {
-        let sz = s3d.then(|| so.z as u32 / sb.bd + l);
-        let dz = d3d.then(|| dof.z as u32 / db.bd + l);
-        let (soff, sstride) = slice_offset(src, sb, reg.srcSubresource.mipLevel, reg.srcSubresource.baseArrayLayer + l, sz);
-        let (doff, dstride) = slice_offset(dst, db, reg.dstSubresource.mipLevel, reg.dstSubresource.baseArrayLayer + l, dz);
+        let sz = s3d.then(|| sz0 as u32 / sb.bd + l);
+        let dz = d3d.then(|| dz0 as u32 / db.bd + l);
+        let (soff, sstride) = slice_offset(src, sb, reg.src.level, reg.src.layer + l, sz);
+        let (doff, dstride) = slice_offset(dst, db, reg.dst.level, reg.dst.layer + l, dz);
         let (srow, drow) = (sstride as usize * sbs, dstride as usize * dbs);
-        let s = soff as usize + (so.y as u32 / sb.bh) as usize * srow + (so.x as u32 / sb.bw) as usize * sbs;
-        let d = doff as usize + (dof.y as u32 / db.bh) as usize * drow + (dof.x as u32 / db.bw) as usize * dbs;
+        let s = soff as usize + (sy as u32 / sb.bh) as usize * srow + (sx as u32 / sb.bw) as usize * sbs;
+        let d = doff as usize + (dy as u32 / db.bh) as usize * drow + (dx as u32 / db.bw) as usize * dbs;
         if se.bs == sb.bs && de.bs == db.bs {
             let (splane, dplane) = (shape(src).sample_plane_size(sb) as usize, shape(dst).sample_plane_size(db) as usize);
             for smp in 0..src.vk.samples.max(1) as usize {
@@ -135,7 +230,7 @@ fn copy_image(src: &Image, dst: &Image, reg: &VkImageCopy) {
             continue;
         }
         // One aspect of a combined depth/stencil format: texel by texel.
-        let stencil = reg.srcSubresource.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT != 0;
+        let stencil = reg.src.aspect & VK_IMAGE_ASPECT_STENCIL_BIT != 0;
         for row in 0..h_blocks as usize {
             for col in 0..w_blocks as usize {
                 move_depth_stencil(&sh, s + row * srow + col * sbs, sbs, spf, &dh, d + row * drow + col * dbs, dbs, dpf, stencil);
@@ -147,7 +242,7 @@ fn copy_image(src: &Image, dst: &Image, reg: &VkImageCopy) {
 entrypoint! {
     fn borgvk_CmdCopyImage(_cmd: VkCommandBuffer, src: &Image, _sl: VkImageLayout, dst: &Image, _dl: VkImageLayout, _count: u32, regions: &[VkImageCopy]) {
         for r in regions {
-            copy_image(src, dst, r);
+            copy_image(src, dst, &r.into());
         }
     }
 }
@@ -156,33 +251,33 @@ entrypoint! {
     fn borgvk_CmdCopyImage2(_cmd: VkCommandBuffer, i: &VkCopyImageInfo2) {
         let (Some(s), Some(d)) = (unsafe { (i.srcImage.get_ref(), i.dstImage.get_ref()) }) else { return };
         for r in i.regions() {
-            let r = VkImageCopy { srcSubresource: r.srcSubresource, srcOffset: r.srcOffset, dstSubresource: r.dstSubresource, dstOffset: r.dstOffset, extent: r.extent };
-            copy_image(s, d, &r);
+            copy_image(s, d, &r.into());
         }
     }
 }
 
 /// One region between an image and a buffer, towards the buffer when `to_buffer`.
-fn buffer_image(img: &Image, buf: &Buffer, reg: &VkBufferImageCopy, to_buffer: bool) {
+fn buffer_image(img: &Image, buf: &Buffer, reg: &BufferRegion, to_buffer: bool) {
     let (Some(ih), Some(bh)) = (img.host(), buf.host()) else { return };
-    let (ib, sub) = (blocks(img.vk.format), reg.imageSubresource);
-    let a = aspect_blocks(img.vk.format, sub.aspectMask);
-    let w_blocks = reg.imageExtent.width.div_ceil(a.bw) as usize;
-    let h_blocks = reg.imageExtent.height.div_ceil(a.bh) as usize;
+    let (ib, sub) = (blocks(img.vk.format), reg.sub);
+    let a = aspect_blocks(img.vk.format, sub.aspect);
+    let w_blocks = reg.extent[0].div_ceil(a.bw) as usize;
+    let h_blocks = reg.extent[1].div_ceil(a.bh) as usize;
     // 0 means tightly packed.
-    let row_len = if reg.bufferRowLength != 0 { reg.bufferRowLength.div_ceil(a.bw) as usize } else { w_blocks };
-    let img_h = if reg.bufferImageHeight != 0 { reg.bufferImageHeight.div_ceil(a.bh) as usize } else { h_blocks };
+    let row_len = if reg.row_length != 0 { reg.row_length.div_ceil(a.bw) as usize } else { w_blocks };
+    let img_h = if reg.image_height != 0 { reg.image_height.div_ceil(a.bh) as usize } else { h_blocks };
     let is3d = img.vk.image_type == VK_IMAGE_TYPE_3D;
-    let slices = if is3d { reg.imageExtent.depth.max(1) } else { sub.layerCount.max(1) };
-    let partial = is_partial_ds_aspect(img.vk.format, sub.aspectMask);
+    let slices = if is3d { reg.extent[2].max(1) } else { sub.layers.max(1) };
+    let partial = is_partial_ds_aspect(img.vk.format, sub.aspect);
     let (ibs, abs) = (ib.bs as usize, a.bs as usize);
     let brow = row_len * abs;
     for l in 0..slices {
-        let z = is3d.then(|| reg.imageOffset.z as u32 + l);
-        let (off, stride) = slice_offset(img, ib, sub.mipLevel, sub.baseArrayLayer + l, z);
+        let [ox, oy, oz] = reg.offset;
+        let z = is3d.then(|| oz as u32 + l);
+        let (off, stride) = slice_offset(img, ib, sub.level, sub.layer + l, z);
         let irow = stride as usize * ibs;
-        let it = off as usize + (reg.imageOffset.y as u32 / ib.bh) as usize * irow + (reg.imageOffset.x as u32 / ib.bw) as usize * ibs;
-        let bt = reg.bufferOffset as usize + l as usize * img_h * brow;
+        let it = off as usize + (oy as u32 / ib.bh) as usize * irow + (ox as u32 / ib.bw) as usize * ibs;
+        let bt = reg.buffer_offset as usize + l as usize * img_h * brow;
         if a.bs == ib.bs && !partial {
             for row in 0..h_blocks {
                 let (i, b) = (it + row * irow, bt + row * brow);
@@ -190,7 +285,7 @@ fn buffer_image(img: &Image, buf: &Buffer, reg: &VkBufferImageCopy, to_buffer: b
             }
             continue;
         }
-        let stencil = sub.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT != 0;
+        let stencil = sub.aspect & VK_IMAGE_ASPECT_STENCIL_BIT != 0;
         let aspect = if stencil { VK_IMAGE_ASPECT_STENCIL_BIT } else { VK_IMAGE_ASPECT_DEPTH_BIT };
         let (ipf, bpf) = (fmt::pipe(img.vk.format), fmt::pipe(fmt::aspect_format(img.vk.format, aspect)));
         for row in 0..h_blocks {
@@ -206,7 +301,7 @@ fn buffer_image(img: &Image, buf: &Buffer, reg: &VkBufferImageCopy, to_buffer: b
     }
 }
 
-fn buffer_image_copies(img: &Image, buf: &Buffer, regions: &[VkBufferImageCopy], to_buffer: bool) {
+fn buffer_image_copies(img: &Image, buf: &Buffer, regions: &[BufferRegion], to_buffer: bool) {
     let (Some(_), Some(bh)) = (img.host(), buf.host()) else { return };
     if blocks(img.vk.format).bd > 1 {
         return;
@@ -222,42 +317,36 @@ fn buffer_image_copies(img: &Image, buf: &Buffer, regions: &[VkBufferImageCopy],
     }
 }
 
-fn buffer_image_copy(r: &VkBufferImageCopy2) -> VkBufferImageCopy {
-    VkBufferImageCopy {
-        bufferOffset: r.bufferOffset,
-        bufferRowLength: r.bufferRowLength,
-        bufferImageHeight: r.bufferImageHeight,
-        imageSubresource: r.imageSubresource,
-        imageOffset: r.imageOffset,
-        imageExtent: r.imageExtent,
-    }
+fn buffer_regions<T>(regions: &[T]) -> Vec<BufferRegion>
+where
+    for<'a> &'a T: Into<BufferRegion>,
+{
+    regions.iter().map(Into::into).collect()
 }
 
 entrypoint! {
     fn borgvk_CmdCopyImageToBuffer(_cmd: VkCommandBuffer, src: &Image, _sl: VkImageLayout, dst: &Buffer, _count: u32, regions: &[VkBufferImageCopy]) {
-        buffer_image_copies(src, dst, regions, true);
+        buffer_image_copies(src, dst, &buffer_regions(regions), true);
     }
 }
 
 entrypoint! {
     fn borgvk_CmdCopyBufferToImage(_cmd: VkCommandBuffer, src: &Buffer, dst: &Image, _dl: VkImageLayout, _count: u32, regions: &[VkBufferImageCopy]) {
-        buffer_image_copies(dst, src, regions, false);
+        buffer_image_copies(dst, src, &buffer_regions(regions), false);
     }
 }
 
 entrypoint! {
     fn borgvk_CmdCopyImageToBuffer2(_cmd: VkCommandBuffer, i: &VkCopyImageToBufferInfo2) {
         let (Some(img), Some(buf)) = (unsafe { (i.srcImage.get_ref(), i.dstBuffer.get_ref()) }) else { return };
-        let regions: Vec<_> = i.regions().iter().map(buffer_image_copy).collect();
-        buffer_image_copies(img, buf, &regions, true);
+        buffer_image_copies(img, buf, &buffer_regions(i.regions()), true);
     }
 }
 
 entrypoint! {
     fn borgvk_CmdCopyBufferToImage2(_cmd: VkCommandBuffer, i: &VkCopyBufferToImageInfo2) {
         let (Some(img), Some(buf)) = (unsafe { (i.dstImage.get_ref(), i.srcBuffer.get_ref()) }) else { return };
-        let regions: Vec<_> = i.regions().iter().map(buffer_image_copy).collect();
-        buffer_image_copies(img, buf, &regions, false);
+        buffer_image_copies(img, buf, &buffer_regions(i.regions()), false);
     }
 }
 
@@ -340,7 +429,7 @@ fn taps(f: f32, size: u32) -> ([i32; 2], [f32; 2]) {
     ([c(i0), c(i0 + 1)], [1.0 - t, t])
 }
 
-fn blit(src: &Image, dst: &Image, regions: &[VkImageBlit], filter: VkFilter) {
+fn blit(src: &Image, dst: &Image, regions: &[BlitRegion], nearest: bool) {
     if src.host().is_none() || dst.host().is_none() {
         return;
     }
@@ -364,30 +453,30 @@ fn blit(src: &Image, dst: &Image, regions: &[VkImageBlit], filter: VkFilter) {
     let (s3d, d3d) = (src.vk.image_type == VK_IMAGE_TYPE_3D, dst.vk.image_type == VK_IMAGE_TYPE_3D);
     let shr = |e: u32, l: u32| e.checked_shr(l).unwrap_or(0).max(1);
     for reg in regions {
-        let aspect = reg.srcSubresource.aspectMask;
+        let aspect = reg.src.aspect;
         let (depth, stencil) = (aspect & VK_IMAGE_ASPECT_DEPTH_BIT != 0, aspect & VK_IMAGE_ASPECT_STENCIL_BIT != 0);
-        let ([s0, s1], [d0, d1]) = (reg.srcOffsets, reg.dstOffsets);
-        let (dex, dey, dez) = ((d1.x - d0.x) as f32, (d1.y - d0.y) as f32, (d1.z - d0.z) as f32);
-        let (sex, sey, sez) = ((s1.x - s0.x) as f32, (s1.y - s0.y) as f32, (s1.z - s0.z) as f32);
-        let (sl, dl) = (reg.srcSubresource.mipLevel, reg.dstSubresource.mipLevel);
-        let nlayers = if s3d || d3d { 1 } else { layers(&src.vk, &reg.srcSubresource) };
+        let ([s0, s1], [d0, d1]) = (reg.src_offsets, reg.dst_offsets);
+        let (dex, dey, dez) = ((d1[0] - d0[0]) as f32, (d1[1] - d0[1]) as f32, (d1[2] - d0[2]) as f32);
+        let (sex, sey, sez) = ((s1[0] - s0[0]) as f32, (s1[1] - s0[1]) as f32, (s1[2] - s0[2]) as f32);
+        let (sl, dl) = (reg.src.level, reg.dst.level);
+        let nlayers = if s3d || d3d { 1 } else { layers(&src.vk, &reg.src) };
         for l in 0..nlayers {
             let (sw, sh_) = (shr(src.vk.extent.width, sl), shr(src.vk.extent.height, sl));
             let sd = if s3d { shr(src.vk.extent.depth, sl) } else { 1 };
             let dhgt = shr(dst.vk.extent.height, dl);
             let one = |bs| Blocks { bs, bw: 1, bh: 1, bd: 1 };
-            let (soff, sstride) = shape(src).level_offset(sl, if s3d { 0 } else { reg.srcSubresource.baseArrayLayer + l }, one(sbs));
-            let (doff, dstride) = shape(dst).level_offset(dl, if d3d { 0 } else { reg.dstSubresource.baseArrayLayer + l }, one(dbs));
+            let (soff, sstride) = shape(src).level_offset(sl, if s3d { 0 } else { reg.src.layer + l }, one(sbs));
+            let (doff, dstride) = shape(dst).level_offset(dl, if d3d { 0 } else { reg.dst.layer + l }, one(dbs));
             let st = |x: i32, y: i32, z: i32| soff as usize + (((z as u64 * sh_ as u64 + y as u64) * sstride as u64 + x as u64) * sbs as u64) as usize;
             let rd = |off: usize| texel(&sh, off, sbs as usize);
             let w = |d: i32, o: i32, e: f32| if e != 0.0 { (d as f32 + 0.5 - o as f32) / e } else { 0.5 };
-            for dz in d0.z.min(d1.z)..d0.z.max(d1.z) {
-                let sz = s0.z as f32 + w(dz, d0.z, dez) * sez;
-                for dy in d0.y.min(d1.y)..d0.y.max(d1.y) {
-                    let sy = s0.y as f32 + w(dy, d0.y, dey) * sey;
+            for dz in d0[2].min(d1[2])..d0[2].max(d1[2]) {
+                let sz = s0[2] as f32 + w(dz, d0[2], dez) * sez;
+                for dy in d0[1].min(d1[1])..d0[1].max(d1[1]) {
+                    let sy = s0[1] as f32 + w(dy, d0[1], dey) * sey;
                     let drow = (dz as i64 as u64).wrapping_mul(dhgt as u64).wrapping_add(dy as i64 as u64).wrapping_mul(dstride as u64 * dbs as u64);
-                    for dx in d0.x.min(d1.x)..d0.x.max(d1.x) {
-                        let sx = s0.x as f32 + w(dx, d0.x, dex) * sex;
+                    for dx in d0[0].min(d1[0])..d0[0].max(d1[0]) {
+                        let sx = s0[0] as f32 + w(dx, d0[0], dex) * sex;
                         let dt = (doff as usize).wrapping_add(drow.wrapping_add((dx as i64 as u64).wrapping_mul(dbs as u64)) as usize);
                         let Some(mut d) = texel(&dh, dt, dbs as usize) else { continue };
                         let near = || {
@@ -410,7 +499,7 @@ fn blit(src: &Image, dst: &Image, regions: &[VkImageBlit], filter: VkFilter) {
                             copy_depth_stencil(spf, &n, dpf, &mut d, true);
                         }
                         if depth {
-                            if filter == VK_FILTER_NEAREST {
+                            if nearest {
                                 copy_depth_stencil(spf, &n, dpf, &mut d, false);
                             } else {
                                 let acc = linear().fold(0.0, |acc, (t, wt)| acc + read_z(spf, &t) * wt);
@@ -418,7 +507,7 @@ fn blit(src: &Image, dst: &Image, regions: &[VkImageBlit], filter: VkFilter) {
                             }
                         }
                         if !(depth || stencil) {
-                            if filter == VK_FILTER_NEAREST {
+                            if nearest {
                                 if is_uint || is_sint {
                                     // The integer bit pattern either way.
                                     let mut v = [0u32; 4];
@@ -451,23 +540,21 @@ fn blit(src: &Image, dst: &Image, regions: &[VkImageBlit], filter: VkFilter) {
 
 entrypoint! {
     fn borgvk_CmdBlitImage(_cmd: VkCommandBuffer, src: &Image, _sl: VkImageLayout, dst: &Image, _dl: VkImageLayout, _count: u32, regions: &[VkImageBlit], filter: VkFilter) {
-        blit(src, dst, regions, filter);
+        let regions: Vec<BlitRegion> = regions.iter().map(Into::into).collect();
+        blit(src, dst, &regions, filter == VK_FILTER_NEAREST);
     }
 }
 
 entrypoint! {
     fn borgvk_CmdBlitImage2(_cmd: VkCommandBuffer, i: &VkBlitImageInfo2) {
         let (Some(s), Some(d)) = (unsafe { (i.srcImage.get_ref(), i.dstImage.get_ref()) }) else { return };
-        let regions: Vec<VkImageBlit> = i.regions()
-            .iter()
-            .map(|r| VkImageBlit { srcSubresource: r.srcSubresource, srcOffsets: r.srcOffsets, dstSubresource: r.dstSubresource, dstOffsets: r.dstOffsets })
-            .collect();
-        blit(s, d, &regions, i.filter);
+        let regions: Vec<BlitRegion> = i.regions().iter().map(Into::into).collect();
+        blit(s, d, &regions, i.filter == VK_FILTER_NEAREST);
     }
 }
 
 /// Averages the samples of one region into a single-sampled image.
-pub fn resolve_region(src: &Image, dst: &Image, reg: &VkImageResolve) {
+pub fn resolve_region(src: &Image, dst: &Image, reg: &Region) {
     let (Some(sh), Some(dh)) = (src.host(), dst.host()) else { return };
     let (spf, dpf) = (fmt::pipe(src.vk.format), fmt::pipe(dst.vk.format));
     let texel_blocks = |f: VkFormat| Blocks { bs: blocks(f).bs, bw: 1, bh: 1, bd: 1 };
@@ -476,14 +563,14 @@ pub fn resolve_region(src: &Image, dst: &Image, reg: &VkImageResolve) {
     let samples = src.vk.samples.max(1);
     let plane = shape(src).sample_plane_size(sb) as usize;
     let int_copy = fmt::is_pure_integer(spf) && sbs == dbs;
-    let (ss, ds) = (reg.srcSubresource, reg.dstSubresource);
+    let (ss, ds) = (reg.src, reg.dst);
     for l in 0..layers(&src.vk, &ss) {
-        let (soff, sstride) = shape(src).level_offset(ss.mipLevel, ss.baseArrayLayer + l, sb);
-        let (doff, dstride) = shape(dst).level_offset(ds.mipLevel, ds.baseArrayLayer + l, db);
-        for y in 0..reg.extent.height as usize {
-            let (sy, dy) = (reg.srcOffset.y as usize + y, reg.dstOffset.y as usize + y);
-            for x in 0..reg.extent.width as usize {
-                let (sx, dx) = (reg.srcOffset.x as usize + x, reg.dstOffset.x as usize + x);
+        let (soff, sstride) = shape(src).level_offset(ss.level, ss.layer + l, sb);
+        let (doff, dstride) = shape(dst).level_offset(ds.level, ds.layer + l, db);
+        for y in 0..reg.extent[1] as usize {
+            let (sy, dy) = (reg.src_offset[1] as usize + y, reg.dst_offset[1] as usize + y);
+            for x in 0..reg.extent[0] as usize {
+                let (sx, dx) = (reg.src_offset[0] as usize + x, reg.dst_offset[0] as usize + x);
                 let st = soff as usize + (sy * sstride as usize + sx) * sbs;
                 let dt = doff as usize + (dy * dstride as usize + dx) * dbs;
                 if int_copy {
@@ -508,7 +595,7 @@ pub fn resolve_region(src: &Image, dst: &Image, reg: &VkImageResolve) {
 entrypoint! {
     fn borgvk_CmdResolveImage(_cmd: VkCommandBuffer, src: &Image, _sl: VkImageLayout, dst: &Image, _dl: VkImageLayout, _count: u32, regions: &[VkImageResolve]) {
         for r in regions {
-            resolve_region(src, dst, r);
+            resolve_region(src, dst, &r.into());
         }
     }
 }
@@ -517,8 +604,7 @@ entrypoint! {
     fn borgvk_CmdResolveImage2(_cmd: VkCommandBuffer, i: &VkResolveImageInfo2) {
         let (Some(s), Some(d)) = (unsafe { (i.srcImage.get_ref(), i.dstImage.get_ref()) }) else { return };
         for r in i.regions() {
-            let r = VkImageResolve { srcSubresource: r.srcSubresource, srcOffset: r.srcOffset, dstSubresource: r.dstSubresource, dstOffset: r.dstOffset, extent: r.extent };
-            resolve_region(s, d, &r);
+            resolve_region(s, d, &r.into());
         }
     }
 }

@@ -6,7 +6,7 @@
 
 use crate::clear::clear_rect;
 use crate::cmd_buffer::{CommandBuffer, Rendering};
-use crate::copy::resolve_region;
+use crate::copy::{resolve_region, Region, Sub};
 use crate::entrypoint::{entrypoint, pointee, Handle};
 use crate::ffi::*;
 use crate::vk::*;
@@ -122,29 +122,24 @@ entrypoint! {
     }
 }
 
-fn layers(view: &vk_image_view, count: u32) -> VkImageSubresourceLayers {
-    VkImageSubresourceLayers {
-        aspectMask: VK_IMAGE_ASPECT_COLOR_BIT,
-        mipLevel: view.base_mip_level,
-        baseArrayLayer: view.base_array_layer,
-        layerCount: count,
-    }
+fn layers(view: &vk_image_view, count: u32) -> Sub {
+    Sub { aspect: VK_IMAGE_ASPECT_COLOR_BIT, level: view.base_mip_level, layer: view.base_array_layer, layers: count }
 }
 
 entrypoint! {
     fn borgvk_CmdEndRendering2EXT(c: &mut CommandBuffer, _info: *const VkRenderingEndInfoEXT) {
         crate::draw::flush_draws(c);
         let ra = c.render_area;
-        let at = VkOffset3D { x: ra.offset.x, y: ra.offset.y, z: 0 };
+        let at = [ra.offset.x, ra.offset.y, 0];
         for i in 0..c.color_attachment_count as usize {
             let (Some(v), Some(r)) = (c.color_view(i), c.resolve_view(i)) else { continue };
             let (Some(src), Some(dst)) = (v.image(), r.image()) else { continue };
-            let region = VkImageResolve {
-                srcSubresource: layers(v, c.layer_count),
-                srcOffset: at,
-                dstSubresource: layers(r, c.layer_count),
-                dstOffset: at,
-                extent: VkExtent3D { width: ra.extent.width, height: ra.extent.height, depth: 1 },
+            let region = Region {
+                src: layers(v, c.layer_count),
+                src_offset: at,
+                dst: layers(r, c.layer_count),
+                dst_offset: at,
+                extent: [ra.extent.width, ra.extent.height, 1],
             };
             resolve_region(src, dst, &region);
         }
