@@ -75,6 +75,18 @@ borg_image_atomic(const nir_intrinsic_instr *i)
    return i->intrinsic == nir_intrinsic_image_deref_atomic || i->intrinsic == nir_intrinsic_image_deref_atomic_swap;
 }
 
+/* A 2D image of R32 or RGBA8 texels: one word per texel, packed in the shader. Every other
+ * storage image is RGBA32 per texel, decoded and packed by the driver (dispatch.rs). */
+static bool
+borg_image_words(const nir_intrinsic_instr *i)
+{
+   const enum pipe_format f = nir_intrinsic_format(i);
+   return nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_2D && !nir_intrinsic_image_array(i) &&
+          (f == PIPE_FORMAT_NONE || f == PIPE_FORMAT_R32_UINT || f == PIPE_FORMAT_R32_SINT ||
+           f == PIPE_FORMAT_R32_FLOAT || f == PIPE_FORMAT_R8G8B8A8_UNORM || f == PIPE_FORMAT_R8G8B8A8_UINT ||
+           f == PIPE_FORMAT_R8G8B8A8_SINT);
+}
+
 static bool
 borg_texel_buffer_filter(const nir_instr *instr, const void *data)
 {
@@ -89,8 +101,8 @@ borg_texel_buffer_filter(const nir_instr *instr, const void *data)
               nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_BUF) ||
              ((i->intrinsic == nir_intrinsic_image_deref_store || i->intrinsic == nir_intrinsic_image_deref_load ||
                borg_image_atomic(i)) &&
-              nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_2D &&
-              !nir_intrinsic_image_array(i));
+              (nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_1D || nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_2D ||
+               nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_3D));
    }
    return false;
 }
@@ -114,8 +126,7 @@ static bool
 borg_frag_image_filter(const nir_instr *instr, const void *data)
 {
    return instr->type == nir_instr_type_intrinsic && borg_texel_buffer_filter(instr, data) &&
-          nir_intrinsic_image_dim(nir_instr_as_intrinsic(instr)) == GLSL_SAMPLER_DIM_2D &&
-          !borg_image_atomic(nir_instr_as_intrinsic(instr));
+          borg_image_words(nir_instr_as_intrinsic(instr)) && !borg_image_atomic(nir_instr_as_intrinsic(instr));
 }
 
 /* The constant array element a deref names; the driver maps (binding, element) to a slot. */
@@ -153,6 +164,25 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
                                                   .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
       nir_def *buf = nir_channel(b, rdesc, 0);
       nir_def *width = nir_load_ssbo(b, 1, 32, buf, nir_imm_int(b, 0), .align_mul = 4);
+      if (!borg_image_words(st)) {
+         /* Width and height in the window's first 16 bytes, then the texels of every layer. */
+         const unsigned nc = nir_image_intrinsic_coord_components(st);
+         nir_def *c[3];
+         for (unsigned k = 0; k < 3; k++)
+            c[k] = k < nc ? nir_channel(b, st->src[1].ssa, k) : nir_imm_int(b, 0);
+         nir_def *height = nir_load_ssbo(b, 1, 32, buf, nir_imm_int(b, 4), .align_mul = 4);
+         nir_def *t = nir_iadd(b, nir_imul(b, nir_iadd(b, nir_imul(b, c[2], height), c[1]), width), c[0]);
+         nir_def *at = nir_iadd_imm(b, nir_ishl_imm(b, t, 4), 16);
+         if (borg_image_atomic(st))
+            return st->intrinsic == nir_intrinsic_image_deref_atomic
+                      ? nir_ssbo_atomic(b, 32, buf, at, st->src[3].ssa, .atomic_op = nir_intrinsic_atomic_op(st))
+                      : nir_ssbo_atomic_swap(b, 32, buf, at, st->src[3].ssa, st->src[4].ssa,
+                                             .atomic_op = nir_intrinsic_atomic_op(st));
+         if (st->intrinsic == nir_intrinsic_image_deref_load)
+            return nir_load_ssbo(b, 4, 32, buf, at, .align_mul = 16);
+         nir_store_ssbo(b, st->src[3].ssa, buf, at, .write_mask = 0xf, .align_mul = 16);
+         return NIR_LOWER_INSTR_PROGRESS_REPLACE;
+      }
       nir_def *x = nir_channel(b, st->src[1].ssa, 0);
       nir_def *y = nir_channel(b, st->src[1].ssa, 1);
       nir_def *word = nir_iadd(b, nir_iadd(b, nir_imul(b, y, width), x), nir_imm_int(b, 1));

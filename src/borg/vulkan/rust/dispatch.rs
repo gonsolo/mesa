@@ -44,6 +44,8 @@ struct CsBuf {
     addr: u32,
     texels: *mut u8,
     pf: pipe_format,
+    /// A decoded image's texels per layer and the bytes from one layer to the next.
+    layer: (u32, u64),
 }
 
 impl CsBuf {
@@ -60,7 +62,7 @@ impl CsBuf {
 }
 
 fn decoded(addr: u32, data: Vec<u8>, size: u32) -> CsBuf {
-    CsBuf { host: std::ptr::null_mut(), decoded: Some(data), wb: false, skip: 0, size, addr, texels: std::ptr::null_mut(), pf: PIPE_FORMAT_NONE }
+    CsBuf { host: std::ptr::null_mut(), decoded: Some(data), wb: false, skip: 0, size, addr, texels: std::ptr::null_mut(), pf: PIPE_FORMAT_NONE, layer: (u32::MAX, 0) }
 }
 
 fn mapped(mem: Option<&DeviceMemory>) -> Option<*mut u8> {
@@ -103,12 +105,16 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                 bufs.push(CsBuf { texels: src, pf, ..decoded(addr, dec, n * 16) });
                 continue;
             }
-            if let Some(img) = img.filter(|i| buf.is_none() && bv.is_none() && i.vk.image_type == VK_IMAGE_TYPE_2D && i.vk.samples == 1) {
+            if let Some(img) = img.filter(|i| buf.is_none() && bv.is_none() && i.vk.samples == 1) {
                 let Some(map) = mapped(img.memory()) else { continue };
                 let src = unsafe { map.add(img.offset as usize) };
                 let Some(host) = img.host() else { continue };
                 let (w, h) = (img.vk.extent.width, img.vk.extent.height);
-                if set.sampled_mask >> b & 1 != 0 {
+                let flat = img.vk.image_type == VK_IMAGE_TYPE_2D;
+                let view = set.view(b);
+                let vf = view.map_or(img.vk.format, |v| v.format);
+                let layered = view.is_some_and(|v| v.view_type != VK_IMAGE_VIEW_TYPE_2D);
+                if set.sampled_mask >> b & 1 != 0 && flat {
                     // A sampled image: its width, then RGBA32 texels.
                     let pf = fmt::pipe(img.vk.format);
                     let bs = fmt::blocksize(pf);
@@ -124,8 +130,21 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                     bufs.push(decoded(addr, dec, (1 + n) * 16));
                     continue;
                 }
-                if fmt::blocksize(fmt::pipe(img.vk.format)) == 4 {
-                    // A storage image of 4-byte texels: its width, then the texels, written back.
+                if set.sampled_mask >> b & 1 != 0 {
+                    continue;
+                }
+                // The view's mip level and layers.
+                let (lvl, l0, nl) = view.map_or((0, 0, img.vk.array_layers), |v| (v.base_mip_level, v.base_array_layer, v.layer_count));
+                let sh = crate::image::shape(img);
+                let blk = crate::image::blocks(img.vk.format);
+                let off0 = sh.level_offset(lvl, l0, blk).0;
+                let src = unsafe { src.add(off0 as usize) };
+                let mip = |e: u32| (e >> lvl).max(1);
+                let (w, h, d) = (mip(w), mip(h), mip(img.vk.extent.depth));
+                let words = [PIPE_FORMAT_R32_UINT, PIPE_FORMAT_R32_SINT, PIPE_FORMAT_R32_FLOAT, PIPE_FORMAT_R8G8B8A8_UNORM,
+                             PIPE_FORMAT_R8G8B8A8_UINT, PIPE_FORMAT_R8G8B8A8_SINT];
+                if flat && !layered && words.contains(&fmt::pipe(vf)) {
+                    // R32 or RGBA8 texels, packed by the shader (borg_image_words): the width, then the texels.
                     let n = (w * h).min(SLOT_BYTES / 4 - 1);
                     let mut dec = vec![0u8; (1 + n) as usize * 4];
                     dec[..4].copy_from_slice(&w.to_ne_bytes());
@@ -133,6 +152,24 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                     bufs.push(CsBuf { host: src, wb: true, skip: 4, ..decoded(addr, dec, (1 + n) * 4) });
                     continue;
                 }
+                // Any other storage image: width and height, then every layer's texels as RGBA32.
+                let pf = fmt::pipe(vf);
+                let bs = fmt::blocksize(pf);
+                if pf == PIPE_FORMAT_NONE || bs == 0 || fmt::is_compressed(pf) {
+                    continue;
+                }
+                let per = w * h * d;
+                let lb = sh.layer_size(blk);
+                let n = (per * nl).min(SLOT_BYTES / 16 - 1);
+                let mut dec = vec![0u8; (1 + n) as usize * 16];
+                dec[..4].copy_from_slice(&w.to_ne_bytes());
+                dec[4..8].copy_from_slice(&h.to_ne_bytes());
+                for t in 0..n {
+                    let at = off0 + (t / per) as u64 * lb + (t % per) as u64 * bs as u64;
+                    unpack(pf, &mut dec[16 + 16 * t as usize..], &host, at as usize);
+                }
+                bufs.push(CsBuf { texels: src, pf, skip: 16, layer: (per, lb), ..decoded(addr, dec, (1 + n) * 16) });
+                continue;
             }
             let Some(b_) = buf else { continue };
             let Some(map) = mapped(b_.memory()) else { continue };
@@ -142,7 +179,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
             let size = if r == VK_WHOLE_SIZE as u64 || r > avail { avail } else { r }.min(SLOT_BYTES as u64) as u32;
             sizes[(base + b as u32) as usize] = size;
             let host = unsafe { map.add((b_.offset + off) as usize) };
-            bufs.push(CsBuf { host, decoded: None, wb: true, skip: 0, size, addr, texels: std::ptr::null_mut(), pf: PIPE_FORMAT_NONE });
+            bufs.push(CsBuf { host, decoded: None, wb: true, skip: 0, size, addr, texels: std::ptr::null_mut(), pf: PIPE_FORMAT_NONE, layer: (u32::MAX, 0) });
         }
     }
     let pc: Vec<u8> = c.pc.iter().chain(&sizes).flat_map(|w| w.to_ne_bytes()).collect();
@@ -333,9 +370,11 @@ fn apply(bufs: &[CsBuf], merged: &[Vec<u8>]) {
     for (b, m) in bufs.iter().zip(merged).filter(|(b, _)| !b.texels.is_null()) {
         let bs = fmt::blocksize(b.pf) as usize;
         let orig = b.data();
-        for t in 0..b.size as usize / 16 {
+        let (per, lb) = (b.layer.0 as usize, b.layer.1 as usize);
+        for t in b.skip as usize / 16..b.size as usize / 16 {
             if m[t * 16..t * 16 + 16] != orig[t * 16..t * 16 + 16] {
-                let texel = unsafe { std::slice::from_raw_parts_mut(b.texels.add(t * bs), bs) };
+                let k = t - b.skip as usize / 16;
+                let texel = unsafe { std::slice::from_raw_parts_mut(b.texels.add(k / per * lb + k % per * bs), bs) };
                 fmt::pack_rgba(b.pf, texel, <&[u8; 16]>::try_from(&m[t * 16..t * 16 + 16]).unwrap());
             }
         }
