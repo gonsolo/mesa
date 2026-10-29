@@ -318,6 +318,26 @@ impl ShaderState {
             nir_op_fpow => self.fpow(alu),
             nir_op_bit_count | nir_op_ufind_msb | nir_op_ifind_msb | nir_op_find_lsb | nir_op_umul_high
             | nir_op_imul_high => self.bit_op(alu),
+            // F2H leaves the half in the low 16 bits, H2F reads only those.
+            nir_op_pack_half_2x16 => {
+                let s = &alu.srcs_as_slice()[0];
+                let x = resolve_vm(&self.sel.vec_map, s.src.as_def().index, s.swizzle[0]);
+                let y = resolve_vm(&self.sel.vec_map, s.src.as_def().index, s.swizzle[1]);
+                let lo = self.sel.opc(Op::F2h, &[x]);
+                let hi = self.sel.opc(Op::F2h, &[y]);
+                let c16 = self.konst(16);
+                let hi = self.sel.op0(Op::Ishl, vec![hi, c16]);
+                self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: alu.def.index, srcs: vec![lo, hi], swz: vec![0, 0], imm: 0 });
+            }
+            nir_op_unpack_half_2x16 => {
+                let s = &alu.srcs_as_slice()[0];
+                let x = resolve_vm(&self.sel.vec_map, s.src.as_def().index, s.swizzle[0]);
+                let c16 = self.konst(16);
+                let lo = self.sel.opc(Op::H2f, &[x]);
+                let y = self.sel.opc(Op::Isrl, &[x, (c16, 0)]);
+                let hi = self.sel.op0(Op::H2f, vec![y]);
+                self.sel.vec_map.insert(alu.def.index, vec![(lo, 0), (hi, 0)]);
+            }
             // |x|: clear the sign bit.
             nir_op_fabs => {
                 let sl = &alu.srcs_as_slice()[0];
