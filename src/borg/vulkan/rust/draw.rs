@@ -14,7 +14,7 @@ use crate::memory::{Buffer, Host};
 use crate::texel::Texel;
 use crate::image::{Image, ViewImage};
 use crate::device::Device;
-use crate::pipeline::Pipeline;
+use crate::pipeline::{Pipeline, Topology};
 use crate::format::{depth_is_d32, flush_format, raw32, vertex_fetch, Fetch};
 use crate::hw::{enabled, serves_extent};
 use crate::image::blocks;
@@ -269,21 +269,18 @@ impl Ctx<'_> {
             return Err(Reject::Undrawable);
         }
         self.topo = match pl.topology {
-            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP => 1,
-            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN => 2,
-            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
-            | VK_PRIMITIVE_TOPOLOGY_POINT_LIST
-            | VK_PRIMITIVE_TOPOLOGY_LINE_LIST
-            | VK_PRIMITIVE_TOPOLOGY_LINE_STRIP => 0,
-            _ => return Err(Reject::Undrawable),
+            Topology::Strip => 1,
+            Topology::Fan => 2,
+            Topology::Triangles | Topology::Points | Topology::Lines | Topology::LineStrip => 0,
+            Topology::Unsupported => return Err(Reject::Undrawable),
         };
         if pl.blob[BORGVK_STAGE_VERT as usize].len == 0 || pl.blob[BORGVK_STAGE_FRAG as usize].len == 0 {
             return Err(Reject::NoShader);
         }
-        self.points = pl.topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+        self.points = pl.topology == Topology::Points;
         self.x = if self.points { 6 } else { 1 };
         // A line is a quad too, but its six rows are gathered per line (see `pairs`).
-        self.lines = matches!(pl.topology, VK_PRIMITIVE_TOPOLOGY_LINE_LIST | VK_PRIMITIVE_TOPOLOGY_LINE_STRIP);
+        self.lines = matches!(pl.topology, Topology::Lines | Topology::LineStrip);
 
         let c = &mut *self.c;
         self.color = view_image(c.color_views[0]);
@@ -372,7 +369,7 @@ impl Ctx<'_> {
         (self.vmin, self.vmax) = (vmin, vmax);
         // Lines: the two vertex rows of each line.
         if self.lines {
-            let strip = pl.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+            let strip = pl.topology == Topology::LineStrip;
             let mut prev = -1i64;
             for i in 0..p.count {
                 let mut r = p.first as i64 + i as i64;

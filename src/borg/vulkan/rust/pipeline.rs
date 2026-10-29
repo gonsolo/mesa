@@ -17,10 +17,35 @@ use std::ptr::{null, null_mut};
 
 handle!(VkPipeline, Pipeline, VK_OBJECT_TYPE_PIPELINE);
 
+// Zero, a zeroed pipeline's value, is a triangle list as before.
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Topology {
+    Triangles,
+    Strip,
+    Fan,
+    Points,
+    Lines,
+    LineStrip,
+    Unsupported,
+}
+
+fn topology(t: VkPrimitiveTopology) -> Topology {
+    match t {
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST => Topology::Triangles,
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP => Topology::Strip,
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN => Topology::Fan,
+        VK_PRIMITIVE_TOPOLOGY_POINT_LIST => Topology::Points,
+        VK_PRIMITIVE_TOPOLOGY_LINE_LIST => Topology::Lines,
+        VK_PRIMITIVE_TOPOLOGY_LINE_STRIP => Topology::LineStrip,
+        _ => Topology::Unsupported,
+    }
+}
+
 #[repr(C)]
 pub struct Pipeline {
     pub base: vk_object_base,
-    pub topology: VkPrimitiveTopology,
+    pub topology: Topology,
     pub binding_stride: [u32; VB],
     pub attr_count: u32,
     pub attrs: [VertexAttr; BORGVK_MAX_VERTEX_ATTRS as usize],
@@ -205,9 +230,9 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     let vi = unsafe { ci.pVertexInputState.as_ref() };
     let ia = unsafe { ci.pInputAssemblyState.as_ref() };
     let rs = unsafe { ci.pRasterizationState.as_ref() };
-    let topology = ia.map_or(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, |ia| ia.topology);
-    let points = ia.is_some_and(|ia| ia.topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST);
-    let lines = matches!(topology, VK_PRIMITIVE_TOPOLOGY_LINE_LIST | VK_PRIMITIVE_TOPOLOGY_LINE_STRIP);
+    let topology = ia.map_or(Topology::Triangles, |ia| topology(ia.topology));
+    let points = topology == Topology::Points;
+    let lines = matches!(topology, Topology::Lines | Topology::LineStrip);
     let vfetch = vertex_fetch(vi, points, lines);
     for b in &mut sc.shader_blob {
         b.len = 0;
