@@ -84,10 +84,13 @@ impl ShaderState {
         let n = tex.def.num_components as usize;
         // A 1D array's second size component is its layer count, the third word.
         let one_d_array = tex.sampler_dim == GLSL_SAMPLER_DIM_1D && tex.is_array;
-        self.sel.vec_map.insert(
-            tex.def.index,
-            (0..n).map(|k| (tex_v, if one_d_array && k == 1 { 2 } else { k as u8 })).collect(),
-        );
+        let mut c: Vec<(u32, u8)> = (0..n).map(|k| (tex_v, if one_d_array && k == 1 { 2 } else { k as u8 })).collect();
+        // An MS array stores a layer per sample.
+        if tex.sampler_dim == GLSL_SAMPLER_DIM_MS && tex.is_array {
+            let two = self.konst(2);
+            c[2] = (self.sel.opc(Op::Isrl, &[(tex_v, 2), (two, 0)]), 0);
+        }
+        self.sel.vec_map.insert(tex.def.index, c);
     }
 
     pub unsafe fn tex(&mut self, tex: &nir_tex_instr) {
