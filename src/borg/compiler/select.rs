@@ -309,10 +309,10 @@ impl ShaderState {
             nir_op_flt | nir_op_fge | nir_op_fneu | nir_op_feq | nir_op_slt | nir_op_sge | nir_op_sne | nir_op_seq => self.float_compare(alu),
             // fmax(0, x) → x · FSTEP(x)  (FSTEP(x)=1 if x>0 else 0).
             nir_op_fmax | nir_op_fmin if self.stage == Stage::Compute => self.exact_minmax(alu),
-            nir_op_bcsel if self.stage == Stage::Compute => self.exact_bcsel(alu),
             nir_op_fmax | nir_op_fmin => self.float_minmax(alu),
             nir_op_ieq | nir_op_ine | nir_op_ilt | nir_op_ige | nir_op_ult | nir_op_uge => self.int_compare(alu),
-            nir_op_bcsel => self.bcsel(alu),
+            // Bit for bit: a blend c*(t-e)+e turns an unselected infinity or NaN into NaN.
+            nir_op_bcsel => self.exact_bcsel(alu),
             // max/min of integers: a + (a < b) * (b - a) for max, b + (a < b) * (a - b) for min.
             nir_op_umax | nir_op_umin | nir_op_imax | nir_op_imin => self.int_minmax(alu),
             nir_op_fpow => self.fpow(alu),
@@ -502,27 +502,6 @@ impl ShaderState {
             }
         };
         self.sel.prog.push(BorgInstr { mnem: Op::I2f.into(), dst: alu.def.index, srcs: vec![bits.0], swz: vec![bits.1], imm: 0 });
-    }
-
-    /// A select as c * (a - b) + b.
-    unsafe fn bcsel(&mut self, alu: &nir_alu_instr) {
-        let s = alu.srcs_as_slice();
-        let n = alu.def.num_components as usize;
-        let mut comps = Vec::new();
-        for k in 0..n {
-            let c = self.operand(s[0].src.as_def().index, s[0].swizzle[k]);
-            let t = self.operand(s[1].src.as_def().index, s[1].swizzle[k]);
-            let e = self.operand(s[2].src.as_def().index, s[2].swizzle[k]);
-            let ne = self.sel.next_vreg;
-            let d = self.sel.next_vreg + 1;
-            let r = self.sel.next_vreg + 2;
-            self.sel.next_vreg += 3;
-            self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: ne, srcs: vec![e.0], swz: vec![e.1], imm: 0 });
-            self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: d, srcs: vec![t.0, ne], swz: vec![t.1, 0], imm: 0 });
-            self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: r, srcs: vec![c.0, d, e.0], swz: vec![c.1, 0, e.1], imm: 0 });
-            comps.push((r, 0u8));
-        }
-        self.sel.vec_map.insert(alu.def.index, comps);
     }
 
     /// A value a RISC-V instruction can read: a window word is copied to a register.
