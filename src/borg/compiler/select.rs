@@ -1,4 +1,4 @@
-use crate::opcodes::{CSR_OUT_C0, CSR_OUT_DEPTH, CSR_OUT_POS0, CSR_SAMPLE_MASK};
+use crate::opcodes::{CSR_DISCARD, CSR_OUT_C0, CSR_OUT_DEPTH, CSR_OUT_POS0, CSR_SAMPLE_MASK};
 use crate::state::{ShaderState, Stage};
 use crate::isel::borg_isel;
 use crate::opt::classify_uniform;
@@ -620,6 +620,8 @@ impl ShaderState {
             nir_intrinsic_load_ubo => self.uniform_load(intr),
             nir_intrinsic_load_input if self.stage == Stage::Vertex => self.uniform_load(intr),
             nir_intrinsic_store_output => self.store_output(intr),
+            nir_intrinsic_terminate | nir_intrinsic_demote | nir_intrinsic_terminate_if | nir_intrinsic_demote_if
+                if self.stage == Stage::Fragment => self.discard(intr),
             nir_intrinsic_load_output
                 if self.stage == Stage::Fragment && intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) >> 14 & 1 != 0 =>
             {
@@ -634,6 +636,20 @@ impl ShaderState {
             }
             _ => {}
         }
+    }
+
+    /// The discard CSR is sticky: the lane keeps running as a helper, its writes dropped.
+    unsafe fn discard(&mut self, intr: &nir_intrinsic_instr) {
+        let (v, c) = if matches!(intr.intrinsic, nir_intrinsic_terminate | nir_intrinsic_demote) {
+            (self.konst(1), 0)
+        } else {
+            let d = resolve_vm(&self.sel.vec_map, intr.get_src(0).as_def().index, 0);
+            match self.consts.get(&d.0) {
+                Some(&b) if !self.sel.vec_map.contains_key(&d.0) => (self.konst(b), 0),
+                _ => d,
+            }
+        };
+        self.sel.prog.push(BorgInstr { mnem: Op::Csrrw.into(), dst: NO_DST, srcs: vec![v], swz: vec![c], imm: CSR_DISCARD });
     }
 
     /// A blend's read of the destination: the colour attachment's current value at this pixel.
