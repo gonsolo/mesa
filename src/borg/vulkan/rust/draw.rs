@@ -18,7 +18,7 @@ use crate::pipeline::{Pipeline, Topology};
 use crate::format::{depth_is_d32, flush_format, raw32, vertex_fetch, Fetch};
 use crate::hw::{enabled, serves_extent};
 use crate::image::blocks;
-use crate::wire::{send_att, send_draw, send_mem, send_pass, send_target, send_texture_slot, send_vattr, Draw};
+use crate::wire::{blend_const_pack, send_att, send_draw, send_mem, send_pass, send_target, send_texture_slot, send_vattr, Draw};
 use crate::sim::{per_sample, run_pass};
 use crate::sim_process::sim_run_stream;
 use crate::state_upload::{send_blend_state_serial, upload_shaders_serial, DEFAULT_SAMPLER};
@@ -440,6 +440,21 @@ impl Ctx<'_> {
         }
         if let Some(sc) = self.p.scissor.filter(|_| pl.sc_dyn) {
             (d.vp.sc, d.vp.valid) = (sc, true);
+        }
+        let g = &c.vk.dynamic_graphics_state;
+        if pl.bc_dyn && c.dyn_set(MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS) {
+            d.blend_const = blend_const_pack(g.cb.blend_constants);
+        }
+        // STENCIL_FRONT/BACK: compare mask, write mask and reference, a byte each.
+        let st = [MESA_VK_DYNAMIC_DS_STENCIL_COMPARE_MASK, MESA_VK_DYNAMIC_DS_STENCIL_WRITE_MASK, MESA_VK_DYNAMIC_DS_STENCIL_REFERENCE];
+        for (k, s) in st.into_iter().enumerate() {
+            if pl.st_dyn >> k & 1 == 0 || !c.dyn_set(s) {
+                continue;
+            }
+            for (r, f) in [(1, &g.ds.stencil.front), (2, &g.ds.stencil.back)] {
+                let v = [f.compare_mask, f.write_mask, f.reference][k] as u32;
+                d.state_reg[r] = d.state_reg[r] & !(0xFF << (8 * k)) | v << (8 * k);
+            }
         }
         upload_shaders_serial(&d);
         send_blend_state_serial(&d);

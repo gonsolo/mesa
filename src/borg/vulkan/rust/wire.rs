@@ -166,8 +166,13 @@ pub fn blend_pack(cb: Option<&VkPipelineColorBlendStateCreateInfo>) -> (u32, u32
         | (a.dstAlphaBlendFactor as u32 & 0x1F) << 19
         | (a.alphaBlendOp as u32 & 7) << 24
         | (a.colorWriteMask & 0xF) << 27;
-    let k = cb.blendConstants.map(unorm8);
-    (cfg, k[0] | k[1] << 8 | k[2] << 16 | k[3] << 24)
+    (cfg, blend_const_pack(cb.blendConstants))
+}
+
+/// BLEND_CONST: the four constants as UNORM8.
+pub fn blend_const_pack(k: [f32; 4]) -> u32 {
+    let k = k.map(unorm8);
+    k[0] | k[1] << 8 | k[2] << 16 | k[3] << 24
 }
 
 static PACING: Mutex<Option<Instant>> = Mutex::new(None);

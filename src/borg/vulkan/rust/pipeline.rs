@@ -72,6 +72,8 @@ pub struct Pipeline {
     pub vp: Vp,       // static viewport/scissor, if the pipeline has them
     pub vp_dyn: bool,        // taken from the command buffer
     pub sc_dyn: bool,
+    pub bc_dyn: bool,        // blend constants
+    pub st_dyn: u8,          // stencil compare mask, write mask, reference: bits 0, 1, 2
     pub state_valid: bool,
     pub cs_ok: bool,
     pub cs_nwords: u32,
@@ -307,11 +309,18 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
 
 /// The static viewport and scissor; dynamic ones come from the command buffer.
 fn viewport(pl: &mut Pipeline, c: &VkGraphicsPipelineCreateInfo, discard: bool) {
-    (pl.vp_dyn, pl.sc_dyn) = (false, false);
+    (pl.vp_dyn, pl.sc_dyn, pl.bc_dyn, pl.st_dyn) = (false, false, false, 0);
     if let Some(d) = c.dynamic_state() {
         for &ds in d.dynamic_states() {
             pl.vp_dyn |= matches!(ds, VK_DYNAMIC_STATE_VIEWPORT | VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT);
             pl.sc_dyn |= matches!(ds, VK_DYNAMIC_STATE_SCISSOR | VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT);
+            pl.bc_dyn |= ds == VK_DYNAMIC_STATE_BLEND_CONSTANTS;
+            pl.st_dyn |= match ds {
+                VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK => 1,
+                VK_DYNAMIC_STATE_STENCIL_WRITE_MASK => 2,
+                VK_DYNAMIC_STATE_STENCIL_REFERENCE => 4,
+                _ => 0,
+            };
         }
     }
     pl.vp = Vp::default();

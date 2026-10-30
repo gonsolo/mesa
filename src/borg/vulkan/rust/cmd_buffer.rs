@@ -102,7 +102,7 @@ impl CommandBuffer {
         unsafe { self.cs_pipeline.as_ref() }
     }
 
-    fn dyn_set(&self, s: mesa_vk_dynamic_graphics_state) -> bool {
+    pub fn dyn_set(&self, s: mesa_vk_dynamic_graphics_state) -> bool {
         self.vk.dynamic_graphics_state.set[s as usize / 32] >> (s % 32) & 1 != 0
     }
 
