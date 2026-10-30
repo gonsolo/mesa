@@ -1014,10 +1014,9 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    /* Lower/optimize toward the Borg ISA: scalarize, then fold and lower ALU ops
     * (fsub→fadd, fdiv→fmul·frcp via lower_fdiv, fdot→fmul+ffma, constant
     * folding) so the backend sees the small supported op set. */
-   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      const nir_lower_tex_options tex_options = { .lower_txd_cube_map = true };
-      NIR_PASS(_, nir, nir_lower_tex, &tex_options);
-   }
+   /* Projection divided out; explicit gradients become an explicit LOD (the sampler has none). */
+   const nir_lower_tex_options tex_options = { .lower_txp = ~0u, .lower_txd = true };
+   NIR_PASS(_, nir, nir_lower_tex, &tex_options);
    NIR_PASS(_, nir, nir_shader_instructions_pass, borg_lower_cube, nir_metadata_control_flow, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_div_sqrt_filter, borg_div_sqrt_lower, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_precise_filter, borg_precise_lower, NULL);
