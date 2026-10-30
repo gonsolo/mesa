@@ -475,11 +475,14 @@ impl Ctx<'_> {
             self.load = 1 | (has_z as u32) << 1 | (has_s as u32) << 2 | 8;
             if first {
                 let fmt = if self.nextra != 0 { 5 } else { color.map_or(0, |i| flush_format(i.vk.format)) };
-                let d32 = has_z && depth_is_d32(unsafe { (*(*c.depth_view).image).format });
+                let zf = has_z.then(|| unsafe { (*(*c.depth_view).image).format });
+                let d32 = zf.is_some_and(depth_is_d32);
+                // D24 renders as FP32 and needs Vulkan's clamp to [0, 1].
+                let d24 = zf.is_some_and(|f| f == VK_FORMAT_X8_D24_UNORM_PACK32 || f == VK_FORMAT_D24_UNORM_S8_UINT);
                 let zs = if has_z { c.depth_view } else { c.stencil_view };
                 let samples = color.map(|i| i.vk.samples).or_else(|| (has_z || has_s).then(|| unsafe { (*(*zs).image).samples })).unwrap_or(1);
                 let ms = per_sample(samples, (self.w + 3) & !3, (self.h + 3) & !3, self.nextra != 0);
-                send_pass(fmt, has_z as u8 | (has_s as u8) << 1 | if color.is_none() { 8 } else { 0 } | if d32 { 4 } else { 0 } | (ms as u8) << 4);
+                send_pass(fmt, has_z as u8 | (has_s as u8) << 1 | if color.is_none() { 8 } else { 0 } | if d32 { 4 } else { 0 } | (ms as u8) << 4 | (d24 as u8) << 5);
                 send_att(self.nextra as u8 + 1, &[5, 5, 5]);
             }
         } else if first {
