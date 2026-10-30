@@ -252,6 +252,12 @@ entrypoint! {
         if cd.CmdExecuteCommands.is_none() {
             cd.CmdExecuteCommands = vk_common_device_entrypoints.CmdExecuteCommands;
         }
+        // Dynamic state goes to the command buffer's vk_dynamic_graphics_state, which draws read.
+        let vc = &vk_common_device_entrypoints;
+        (cd.CmdSetViewport, cd.CmdSetScissor, cd.CmdSetLineWidth, cd.CmdSetDepthBias, cd.CmdSetBlendConstants) =
+            (vc.CmdSetViewport, vc.CmdSetScissor, vc.CmdSetLineWidth, vc.CmdSetDepthBias, vc.CmdSetBlendConstants);
+        (cd.CmdSetDepthBounds, cd.CmdSetStencilCompareMask, cd.CmdSetStencilWriteMask, cd.CmdSetStencilReference) =
+            (vc.CmdSetDepthBounds, vc.CmdSetStencilCompareMask, vc.CmdSetStencilWriteMask, vc.CmdSetStencilReference);
         let n = size_of::<vk_device_dispatch_table>() / size_of::<*const c_void>();
         let slots = std::slice::from_raw_parts_mut(std::ptr::from_mut(&mut d.cmd_dispatch).cast::<*const c_void>(), n);
         for s in slots.iter_mut().filter(|s| s.is_null()) {
