@@ -445,6 +445,12 @@ impl Ctx<'_> {
         if pl.bc_dyn && c.dyn_set(MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS) {
             d.blend_const = blend_const_pack(g.cb.blend_constants);
         }
+        d.bias = match pl.bias {
+            Some(_) if pl.bias_dyn && c.dyn_set(MESA_VK_DYNAMIC_RS_DEPTH_BIAS_FACTORS) => {
+                [g.rs.depth_bias.constant_factor, g.rs.depth_bias.slope_factor]
+            }
+            b => b.unwrap_or_default(),
+        };
         // STENCIL_FRONT/BACK: compare mask, write mask and reference, a byte each.
         let st = [MESA_VK_DYNAMIC_DS_STENCIL_COMPARE_MASK, MESA_VK_DYNAMIC_DS_STENCIL_WRITE_MASK, MESA_VK_DYNAMIC_DS_STENCIL_REFERENCE];
         for (k, s) in st.into_iter().enumerate() {

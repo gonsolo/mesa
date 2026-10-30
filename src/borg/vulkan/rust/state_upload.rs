@@ -51,6 +51,9 @@ pub fn send_blend_state_serial(sc: &Scratch) {
     if sc.vp.valid {
         send_viewport(&sc.vp);
     }
+    if sc.bias != [0.0; 2] {
+        send_depth_bias(sc.bias);
+    }
     if sc.blend_cfg != 0 {
         send_blend(sc.blend_cfg, sc.blend_const);
     }

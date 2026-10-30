@@ -74,6 +74,8 @@ pub struct Pipeline {
     pub sc_dyn: bool,
     pub bc_dyn: bool,        // blend constants
     pub st_dyn: u8,          // stencil compare mask, write mask, reference: bits 0, 1, 2
+    pub bias: Option<[f32; 2]>, // depth bias constant and slope factors, triangles only
+    pub bias_dyn: bool,
     pub state_valid: bool,
     pub cs_ok: bool,
     pub cs_nwords: u32,
@@ -302,6 +304,9 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     }
     sc.state_valid = true;
     (pl.blend_cfg, pl.blend_const, pl.state_reg) = (sc.blend_cfg, sc.blend_const, sc.state_reg);
+    pl.bias = rs.filter(|r| r.depthBiasEnable != 0 && !discard && !points && !lines)
+        .map(|r| [r.depthBiasConstantFactor, r.depthBiasSlopeFactor]);
+    sc.bias = pl.bias.unwrap_or_default();
     pl.state_valid = true;
     viewport(pl, &c, discard);
     Ok(VkPipeline::from_object(pl))
@@ -309,12 +314,13 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
 
 /// The static viewport and scissor; dynamic ones come from the command buffer.
 fn viewport(pl: &mut Pipeline, c: &VkGraphicsPipelineCreateInfo, discard: bool) {
-    (pl.vp_dyn, pl.sc_dyn, pl.bc_dyn, pl.st_dyn) = (false, false, false, 0);
+    (pl.vp_dyn, pl.sc_dyn, pl.bc_dyn, pl.st_dyn, pl.bias_dyn) = (false, false, false, 0, false);
     if let Some(d) = c.dynamic_state() {
         for &ds in d.dynamic_states() {
             pl.vp_dyn |= matches!(ds, VK_DYNAMIC_STATE_VIEWPORT | VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT);
             pl.sc_dyn |= matches!(ds, VK_DYNAMIC_STATE_SCISSOR | VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT);
             pl.bc_dyn |= ds == VK_DYNAMIC_STATE_BLEND_CONSTANTS;
+            pl.bias_dyn |= ds == VK_DYNAMIC_STATE_DEPTH_BIAS;
             pl.st_dyn |= match ds {
                 VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK => 1,
                 VK_DYNAMIC_STATE_STENCIL_WRITE_MASK => 2,

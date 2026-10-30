@@ -30,6 +30,7 @@ const MARKER_ATT: u8 = 0xBF;
 const MARKER_TEXL: u8 = 0xC0;
 const MARKER_TEXS: u8 = 0xC4;
 const MARKER_VP: u8 = 0xC2;
+const MARKER_BIAS: u8 = 0xC5;
 
 const GEOM_MAX_VERTS: usize = BORGVK_GEOM_MAX_VERTS as usize;
 const GEOM_MAX_TRIS: usize = BORGVK_GEOM_MAX_TRIS as usize;
@@ -132,6 +133,15 @@ pub fn send_push_constants(offset: u32, values: &[u8]) {
     emit(&mut pkt);
     let what = if capturing() { "captured" } else { "sent" };
     log(MESA_LOG_INFO, format!("borgvk: {what} {size} B of push constants at offset {offset}"));
+}
+
+/// Depth bias constant and slope factors of the next draw.
+pub fn send_depth_bias(b: [f32; 2]) {
+    let mut pkt = [0u8; 10];
+    pkt[0] = MARKER_BIAS;
+    put_u32(&mut pkt[1..], b[0].to_bits());
+    put_u32(&mut pkt[5..], b[1].to_bits());
+    emit(&mut pkt);
 }
 
 pub fn send_blend(cfg: u32, konst: u32) {
@@ -568,6 +578,8 @@ mod tests {
     fn fixed_packets() {
         let p = sent(|| send_blend(0x11223344, 0x55667788));
         assert_eq!((p.len(), u32_at(&p, 1), u32_at(&p, 5)), (10, 0x11223344, 0x55667788));
+        let p = sent(|| send_depth_bias([2.0, -0.5]));
+        assert_eq!((p.len(), p[0], u32_at(&p, 1), u32_at(&p, 5)), (10, 0xC5, 2f32.to_bits(), (-0.5f32).to_bits()));
         let p = sent(|| send_state(&[1, 2, 3, 4, 0xdeadbeef]));
         assert_eq!((p.len(), u32_at(&p, 17)), (22, 0xdeadbeef));
         let p = sent(|| send_target(2, &[0.0, 0.5, 1.0, 0.25]));

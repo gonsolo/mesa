@@ -50,6 +50,7 @@ pub struct Scratch {
     pub blend_const: u32,
     pub state_reg: [u32; 5],
     pub vp: Vp, // the viewport and scissor of the draw being queued
+    pub bias: [f32; 2],
     pub state_valid: bool,
     pub push_words: [u32; 32], // set by vkCmdPushConstants, replayed at submit (DRM path)
     pub push_lo: u32,          // word range written so far; empty when lo >= hi
@@ -76,6 +77,7 @@ impl Default for Scratch {
             blend_const: 0,
             state_reg: [0; 5],
             vp: Vp::default(),
+            bias: [0.0; 2],
             state_valid: false,
             push_words: [0; 32],
             push_lo: 0,
