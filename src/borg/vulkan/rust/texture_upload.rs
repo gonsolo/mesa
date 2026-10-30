@@ -20,6 +20,9 @@ const DIM: u32 = BORGVK_TEX_DIM;
 
 fn send(data: &[u8], desc: &TexDesc, sampler: &[u32; 4]) {
     let d = desc.pack();
+    if data.is_empty() {
+        send_texture_chunk(0, data, d[..3].try_into().unwrap(), sampler);   // the descriptor alone
+    }
     for off in (0..data.len() as u32).step_by(CHUNK as usize) {
         let n = (data.len() as u32 - off).min(CHUNK);
         send_texture_chunk(off, &data[off as usize..(off + n) as usize], d[..3].try_into().unwrap(), sampler);
@@ -140,15 +143,17 @@ fn build(view: &vk_image_view, img: &Image) -> Option<Texture> {
             ltotal = ltotal.wrapping_add(size);
         }
         let total = ltotal.wrapping_mul(layers);
-        // The board's texture region is 512 KB, the direct simulator's 6 MB.
+        // The board's texture region is 512 KB, the direct simulator's 6 MB. A larger texture sends
+        // its descriptor alone, so size queries still answer; its texels read whatever is there.
         let direct = std::env::var_os("BORGVK_SIM_DIRECT").is_some_and(|d| !d.is_empty());
-        if total > if direct { 0x60_0000 } else { 0x7_0000 } {
-            return None;
+        let fits = total <= if direct { 0x60_0000 } else { 0x7_0000 };
+        if !fits {
+            crate::util::log(crate::util::MESA_LOG_WARN, format!("borgvk: a {total}-byte texture exceeds the texture region"));
         }
-        let mut out = vec![0u8; total as usize];
+        let mut out = vec![0u8; if fits { total as usize } else { 0 }];
         let mut lin = vec![0u8; w as usize * h as usize * depth as usize * obpp as usize];
         let ob = obpp as usize;
-        for layer in 0..layers {
+        for layer in 0..if fits { layers } else { 0 } {
             for l in 0..levels as usize {
                 let tw = lw[l].div_ceil(4);
                 let lev = layer as usize * ltotal as usize + if l > 0 { offs[l - 1] as usize } else { 0 };
