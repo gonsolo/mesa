@@ -199,6 +199,18 @@ entrypoint! {
 /// The body of the vkCmd* entries borgvk does not implement, for replay.
 unsafe extern "C" fn noop_cmd() {}
 
+// The common CmdSetDepthBias goes through the device's table, which records: replay calls 2EXT itself.
+unsafe extern "C" fn replay_set_depth_bias(cb: VkCommandBuffer, constant: f32, clamp: f32, slope: f32) {
+    let i = VkDepthBiasInfoEXT {
+        sType: VK_STRUCTURE_TYPE_DEPTH_BIAS_INFO_EXT,
+        pNext: null(),
+        depthBiasConstantFactor: constant,
+        depthBiasClamp: clamp,
+        depthBiasSlopeFactor: slope,
+    };
+    unsafe { vk_common_device_entrypoints.CmdSetDepthBias2EXT.unwrap()(cb, &i) };
+}
+
 entrypoint! {
     unsafe fn borgvk_CreateDevice(physical_device: VkPhysicalDevice, info: *const VkDeviceCreateInfo, alloc: *const VkAllocationCallbacks, out: *mut VkDevice) -> VkResult {
         let pdev = physical_device.get().unwrap();
@@ -256,8 +268,9 @@ entrypoint! {
         }
         // Dynamic state goes to the command buffer's vk_dynamic_graphics_state, which draws read.
         let vc = &vk_common_device_entrypoints;
-        (cd.CmdSetViewport, cd.CmdSetScissor, cd.CmdSetLineWidth, cd.CmdSetDepthBias, cd.CmdSetBlendConstants) =
-            (vc.CmdSetViewport, vc.CmdSetScissor, vc.CmdSetLineWidth, vc.CmdSetDepthBias, vc.CmdSetBlendConstants);
+        (cd.CmdSetViewport, cd.CmdSetScissor, cd.CmdSetLineWidth, cd.CmdSetBlendConstants) =
+            (vc.CmdSetViewport, vc.CmdSetScissor, vc.CmdSetLineWidth, vc.CmdSetBlendConstants);
+        cd.CmdSetDepthBias = Some(replay_set_depth_bias);
         (cd.CmdSetDepthBounds, cd.CmdSetStencilCompareMask, cd.CmdSetStencilWriteMask, cd.CmdSetStencilReference) =
             (vc.CmdSetDepthBounds, vc.CmdSetStencilCompareMask, vc.CmdSetStencilWriteMask, vc.CmdSetStencilReference);
         let n = size_of::<vk_device_dispatch_table>() / size_of::<*const c_void>();
