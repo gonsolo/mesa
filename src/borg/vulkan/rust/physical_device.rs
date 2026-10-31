@@ -379,6 +379,7 @@ unsafe fn create(instance: &mut Instance, drm_fd: i32) -> VkResult {
     features.robustBufferAccess = true;
     features.textureCompressionBC = true; // the spec wants one compressed family
     features.largePoints = true;
+    features.occlusionQueryPrecise = true; // OCC_COUNT is exact
     let r = unsafe { vk_physical_device_init(&mut d.vk, &mut instance.vk, &extensions, &features, &properties(), &dispatch) };
     if r != VK_SUCCESS {
         return r;
