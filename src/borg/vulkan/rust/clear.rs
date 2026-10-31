@@ -90,7 +90,8 @@ pub fn clear_rect(view: &vk_image_view, aspect: VkImageAspectFlags, value: &VkCl
     let mut pixel = [0u8; 16];
     let (color, ds) = (aspect & VK_IMAGE_ASPECT_COLOR_BIT != 0, value.depth_stencil());
     if color {
-        pack_clear_color(image.vk.format, pf, &mut pixel, value.color());
+        // In the view's format, which may differ from the image's (mutable formats).
+        pack_clear_color(view.format, fmt::pipe(view.format), &mut pixel, value.color());
     }
     let (x0, y0, w, h) = (rect.offset.x as u32, rect.offset.y as u32, rect.extent.width, rect.extent.height);
     let bs = b.bs as u64;
