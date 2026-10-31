@@ -115,8 +115,8 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                 let vf = view.map_or(img.vk.format, |v| v.format);
                 let layered = view.is_some_and(|v| v.view_type != VK_IMAGE_VIEW_TYPE_2D);
                 if set.sampled_mask >> b & 1 != 0 && flat {
-                    // A sampled image: its width, then RGBA32 texels.
-                    let pf = fmt::pipe(img.vk.format);
+                    // A sampled image: its width, then RGBA32 texels, read as the view's format.
+                    let pf = fmt::pipe(vf);
                     let bs = fmt::blocksize(pf);
                     if pf == PIPE_FORMAT_NONE || bs == 0 || fmt::is_compressed(pf) {
                         continue;
