@@ -588,16 +588,18 @@ pub fn run_pass(
     simg: Option<&Image>,
     wb: &[Writeback],
     area: [u32; 2],
-) {
+    occ: &[u32],
+) -> Vec<u64> {
+    let none = vec![0; occ.len()];
     // Depth only: no colour attachment, nothing of it goes in or comes back.
     let (w, h) = match color.or(zimg).or(simg) {
         _ if area[0] != 0 => (area[0], area[1]),
         Some(size) => (size.vk.extent.width, size.vk.extent.height),
-        None => return,
+        None => return none,
     };
     let (wp, hp) = ((w + 3) & !3, (h + 3) & !3);
     if color.is_some_and(|c| !image_backed(c, w, h)) || extra.iter().any(|e| !image_backed(e, w, h)) {
-        return;
+        return none;
     }
     let zimg = zimg.filter(|z| image_backed(z, w, h));
     let simg = simg.filter(|s| image_backed(s, w, h));
@@ -633,13 +635,14 @@ pub fn run_pass(
     if !start_servers(&mut all[..], np, rows_per, wp, hp, direct.as_deref()) {
         log(MESA_LOG_WARN, "borgvk: cannot start the simulator".into());
         stop_all(&mut all[..]);
-        return;
+        return none;
     }
     for part in 0..np {
         copy_in(&all[part], &l, rows(part), &t, &mut b);
     }
     if hw {
         run_on_device(&all[0], &l, &t, stream, wb);
+        hw_download(&all[0], &occ.iter().map(|&o| (all[0].heap + o, 4)).collect::<Vec<_>>());
     } else {
         keep_stream(stream);
         let servers = &mut all[..np];
@@ -648,7 +651,7 @@ pub fn run_pass(
         if !answered {
             log(MESA_LOG_WARN, "borgvk: the simulator stopped answering".into());
             stop_all(&mut all[..]);
-            return;
+            return none;
         }
     }
     let mut changed = 0;
@@ -665,6 +668,8 @@ pub fn run_pass(
     if std::env::var_os("BORGVK_DEBUG").is_some() {
         log(MESA_LOG_INFO, format!("borgvk: pass of {} bytes changed {changed} of {npx} pixels (format {fmt})", stream.len()));
     }
+    // Each strip counts its own tiles.
+    occ.iter().map(|&o| all[..np].iter().map(|s| unsafe { s.mem(s.heap + o).cast::<u32>().read_unaligned() } as u64).sum()).collect()
 }
 
 #[cfg(test)]

@@ -12,13 +12,15 @@ use crate::ffi::*;
 use crate::fmt;
 use crate::memory::{Buffer, Host};
 use crate::texel::Texel;
+use std::sync::atomic::Ordering::Relaxed;
 use crate::image::Image;
 use crate::device::Device;
 use crate::pipeline::{Pipeline, Topology};
+use crate::query::OccRun;
 use crate::format::{depth_is_d32, flush_format, raw32, vertex_fetch, Fetch};
 use crate::hw::{enabled, serves_extent};
 use crate::image::blocks;
-use crate::wire::{blend_const_pack, send_att, send_draw, send_mem, send_pass, send_target, send_texture_slot, send_vattr, Draw};
+use crate::wire::{blend_const_pack, occ_packet, send_att, send_draw, send_mem, send_pass, send_target, send_texture_slot, send_vattr, Draw};
 use crate::sim::{per_sample, run_pass};
 use crate::sim_process::sim_run_stream;
 use crate::state_upload::{send_blend_state_serial, upload_shaders_serial, DEFAULT_SAMPLER};
@@ -151,6 +153,11 @@ pub fn flush_draws(c: &mut CommandBuffer) {
     if c.stream.is_empty() {
         return;
     }
+    if c.occ_open {
+        close_query(c, false);
+    }
+    let (occ, nocc) = (c.occ, c.nocc as usize);
+    c.nocc = 0;
     let stream = c.stream.take();
     // The batch's attachments, kept as pointers across its draws; they live until the pass ends.
     let img = unsafe { c.batch_img.as_ref() };
@@ -166,10 +173,18 @@ pub fn flush_draws(c: &mut CommandBuffer) {
     let seed = BORGVK_CORPUS_SEED as u64;
     let state = |h| corpus_state(h, img, &extra, depth, stencil, &wb[..nwb]);
     let key = if rec { state(hash(seed, stream.as_slice())) } else { seed };
-    if serve {
-        run_pass(stream.as_slice(), img, &extra, depth, stencil, &wb[..nwb], area);
+    let words: Vec<u32> = occ[..nocc].iter().map(|r| r.off).collect();
+    let counts = if serve {
+        run_pass(stream.as_slice(), img, &extra, depth, stencil, &wb[..nwb], area, &words)
     } else {
         sim_run_stream(stream.as_slice(), img, 0);
+        vec![0; nocc]
+    };
+    for (r, n) in occ[..nocc].iter().zip(counts) {
+        if let Some(s) = unsafe { &*r.pool }.slot(r.query) {
+            s.result.fetch_add(n, Relaxed);
+            s.avail.fetch_or(r.end, Relaxed);
+        }
     }
     if rec {
         borgvk_corpus_log(b'F' as _, key, state(seed));
@@ -409,7 +424,8 @@ impl Ctx<'_> {
             need = self.pairs.len() as u64 * 6 * (16 + 2 * 16 * pl.attr_count as u64) + 64;
         }
         let c = &mut *self.c;
-        if c.batch_draws != 0 && c.heap_top as u64 + need > HEAP_BYTES as u64 {
+        let full = !c.occ_pool.is_null() && !c.occ_open && c.nocc as usize == c.occ.len();
+        if c.batch_draws != 0 && (c.heap_top as u64 + need + 4 > HEAP_BYTES as u64 || full) {
             flush_draws(c);
         }
         if c.batch_draws != 0 && pl.push_used && c.batch_push != self.device.scratch.lock().unwrap().push_words {
@@ -838,6 +854,12 @@ impl Ctx<'_> {
         if !ok || bytes.is_empty() {
             return ok;
         }
+        if !c.occ_pool.is_null() && !c.occ_open && (c.nocc as usize) < c.occ.len() {
+            let off = self.heap.top;
+            self.heap.top += 4;
+            c.occ[c.nocc as usize] = OccRun { off, pool: c.occ_pool, query: c.occ_query, end: false };
+            (c.nocc, c.occ_open) = (c.nocc + 1, c.stream.extend(&occ_packet(true, off)));
+        }
         let appended = (self.state_same || state.is_empty() || c.stream.extend(&state)) && c.stream.extend(&bytes);
         if !self.state_same && !state.is_empty() && appended {
             c.state_sent.set(&state);
@@ -852,6 +874,15 @@ impl Ctx<'_> {
         (c.batch_depth, c.batch_stencil) = (c.rendering.depth, c.rendering.stencil);
         true
     }
+}
+
+/// Stops counting the active query in the open batch.
+pub fn close_query(c: &mut CommandBuffer, end: bool) {
+    let r = &mut c.occ[c.nocc as usize - 1];
+    r.end = end;
+    let p = occ_packet(false, r.off);
+    c.stream.extend(&p);
+    c.occ_open = false;
 }
 
 fn push_writeback(c: &mut CommandBuffer, off: u32, size: u32, host: *mut u8) {

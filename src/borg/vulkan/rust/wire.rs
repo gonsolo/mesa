@@ -31,6 +31,7 @@ const MARKER_TEXL: u8 = 0xC0;
 const MARKER_TEXS: u8 = 0xC4;
 const MARKER_VP: u8 = 0xC2;
 const MARKER_BIAS: u8 = 0xC5;
+const MARKER_OCC: u8 = 0xC6;
 
 const GEOM_MAX_VERTS: usize = BORGVK_GEOM_MAX_VERTS as usize;
 const GEOM_MAX_TRIS: usize = BORGVK_GEOM_MAX_TRIS as usize;
@@ -133,6 +134,14 @@ pub fn send_push_constants(offset: u32, values: &[u8]) {
     emit(&mut pkt);
     let what = if capturing() { "captured" } else { "sent" };
     log(MESA_LOG_INFO, format!("borgvk: {what} {size} B of push constants at offset {offset}"));
+}
+
+/// Begins or ends counting an occlusion query into the heap word at `off`, for a draw stream.
+pub fn occ_packet(begin: bool, off: u32) -> [u8; 7] {
+    let mut pkt = [MARKER_OCC, begin as u8, 0, 0, 0, 0, 0];
+    put_u32(&mut pkt[2..], off);
+    pkt[6] = pkt[1..6].iter().fold(0, |c, b| c ^ b);
+    pkt
 }
 
 /// Depth bias constant and slope factors of the next draw.
@@ -578,6 +587,8 @@ mod tests {
     fn fixed_packets() {
         let p = sent(|| send_blend(0x11223344, 0x55667788));
         assert_eq!((p.len(), u32_at(&p, 1), u32_at(&p, 5)), (10, 0x11223344, 0x55667788));
+        let p = occ_packet(true, 0x1234);
+        assert_eq!((p[0], p[1], u32_at(&p, 2), p[1..].iter().fold(0, |c, b| c ^ b)), (0xC6, 1, 0x1234, 0));
         let p = sent(|| send_depth_bias([2.0, -0.5]));
         assert_eq!((p.len(), p[0], u32_at(&p, 1), u32_at(&p, 5)), (10, 0xC5, 2f32.to_bits(), (-0.5f32).to_bits()));
         let p = sent(|| send_state(&[1, 2, 3, 4, 0xdeadbeef]));

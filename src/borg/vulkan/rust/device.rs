@@ -251,7 +251,8 @@ entrypoint! {
             CmdCopyBufferToImage2, CmdCopyImage, CmdCopyImage2, CmdCopyImageToBuffer, CmdCopyImageToBuffer2,
             CmdResolveImage, CmdResolveImage2, CmdFillBuffer, CmdUpdateBuffer, CmdSetEvent, CmdResetEvent, CmdSetEvent2,
             CmdResetEvent2, CmdBindPipeline, CmdBindVertexBuffers, CmdBindDescriptorSets, CmdDraw, CmdDrawIndexed,
-            CmdBindIndexBuffer, CmdDispatch, CmdDispatchIndirect, CmdDrawIndirect, CmdDrawIndexedIndirect
+            CmdBindIndexBuffer, CmdDispatch, CmdDispatchIndirect, CmdDrawIndirect, CmdDrawIndexedIndirect, CmdBeginQuery,
+            CmdEndQuery, CmdResetQueryPool, CmdCopyQueryPoolResults
         );
         let mut dt: vk_device_dispatch_table = std::mem::zeroed();
         vk_device_dispatch_table_from_entrypoints(&mut dt, &rec, true);

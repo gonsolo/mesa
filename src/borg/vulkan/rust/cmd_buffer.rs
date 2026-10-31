@@ -10,11 +10,12 @@ use crate::ffi::*;
 use crate::image::Image;
 use crate::device::Device;
 use crate::pipeline::Pipeline;
+use crate::query::{OccRun, QueryPool};
 use crate::object::{allocate, Owned, VkBuf, Zeroed};
 use crate::render::Target;
 use std::ffi::c_void;
 use std::mem::zeroed;
-use std::ptr::null_mut;
+use std::ptr::{null, null_mut};
 
 handle!(VkCommandBuffer, vk_command_buffer, VK_OBJECT_TYPE_COMMAND_BUFFER);
 
@@ -66,6 +67,11 @@ pub struct CommandBuffer {
     pub batch_stencil: *mut Image,
     pub wb: [Writeback; BORGVK_MAX_WRITEBACKS as usize],
     pub nwb: u32,
+    pub occ_pool: *const QueryPool, // the active occlusion query
+    pub occ_query: u32,
+    pub occ_open: bool, // counted in the open batch, its run is the last
+    pub occ: [OccRun; 16],
+    pub nocc: u32,
     pub batch_pool: *const c_void,
     pub batch_vpool: *const c_void,
     pub region_set: *mut DescriptorSet, // the set whose buffer region is at region_base
@@ -192,6 +198,7 @@ unsafe extern "C" fn reset(vk: *mut vk_command_buffer, _flags: VkCommandBufferRe
     drop((c.stream.take(), c.state_sent.take()));
     crate::render::free_targets(c);
     (c.heap_top, c.batch_draws) = (0, 0);
+    (c.occ_pool, c.occ_open, c.nocc) = (null(), false, 0);
     (c.batch_img, c.index_ptr, c.gfx_pipeline, c.desc_set, c.cs_pipeline) = (null_mut(), null_mut(), null_mut(), null_mut(), null_mut());
     (c.in_rendering, c.has_clear, c.generic_drawn, c.dispatched) = (false, false, false, false);
     unsafe { (c.vb, c.vb_avail, c.cs_sets, c.desc_sets) = (zeroed(), zeroed(), zeroed(), zeroed()) };
