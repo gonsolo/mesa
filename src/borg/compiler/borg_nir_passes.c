@@ -99,12 +99,12 @@ borg_texel_buffer_filter(const nir_instr *instr, const void *data)
    }
    if (instr->type == nir_instr_type_intrinsic) {
       const nir_intrinsic_instr *i = nir_instr_as_intrinsic(instr);
-      return ((i->intrinsic == nir_intrinsic_image_deref_load || i->intrinsic == nir_intrinsic_image_deref_store) &&
-              nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_BUF) ||
+      return i->intrinsic == nir_intrinsic_image_deref_size ||
              ((i->intrinsic == nir_intrinsic_image_deref_store || i->intrinsic == nir_intrinsic_image_deref_load ||
                borg_image_atomic(i)) &&
-              (nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_1D || nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_2D ||
-               nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_3D));
+              (nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_BUF || nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_1D ||
+               nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_2D || nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_3D ||
+               nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_CUBE));
    }
    return false;
 }
@@ -128,6 +128,7 @@ static bool
 borg_frag_image_filter(const nir_instr *instr, const void *data)
 {
    return instr->type == nir_instr_type_intrinsic && borg_texel_buffer_filter(instr, data) &&
+          nir_instr_as_intrinsic(instr)->intrinsic != nir_intrinsic_image_deref_size &&
           (borg_image_words(nir_instr_as_intrinsic(instr)) ||
            nir_intrinsic_image_dim(nir_instr_as_intrinsic(instr)) == GLSL_SAMPLER_DIM_BUF) &&
           !borg_image_atomic(nir_instr_as_intrinsic(instr));
@@ -141,11 +142,45 @@ borg_deref_elem(nir_builder *b, nir_deref_instr *d)
              ? nir_imm_int(b, nir_src_as_uint(d->arr.index)) : nir_imm_int(b, 0);
 }
 
+/* imageSize: the driver keeps width, height and depth or layers in the last 16 bytes of the
+ * binding's window. */
+static nir_def *
+borg_image_size(nir_builder *b, nir_intrinsic_instr *i)
+{
+   nir_deref_instr *deref = nir_src_as_deref(i->src[0]);
+   nir_variable *var = nir_deref_instr_get_variable(deref);
+   if (!var)
+      return NULL;
+   const nir_address_format f = borg_spirv_options.ssbo_addr_format;
+   nir_def *idx = nir_vulkan_resource_index(b, nir_address_format_num_components(f), nir_address_format_bit_size(f),
+                                            borg_deref_elem(b, deref), .desc_set = var->data.descriptor_set,
+                                            .binding = var->data.binding,
+                                            .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+   nir_def *desc = nir_load_vulkan_descriptor(b, nir_address_format_num_components(f), nir_address_format_bit_size(f),
+                                              idx, .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+   nir_def *size = nir_load_ssbo(b, 3, 32, nir_channel(b, desc, 0), nir_imm_int(b, BORG_CS_SLOT_BYTES - 16), .align_mul = 16);
+   nir_def *w = nir_channel(b, size, 0), *h = nir_channel(b, size, 1), *d = nir_channel(b, size, 2);
+   switch (nir_intrinsic_image_dim(i)) {
+   case GLSL_SAMPLER_DIM_1D:
+      return nir_intrinsic_image_array(i) ? nir_vec2(b, w, d) : w;
+   case GLSL_SAMPLER_DIM_BUF:
+      return w;
+   case GLSL_SAMPLER_DIM_2D:
+   case GLSL_SAMPLER_DIM_CUBE:
+      return nir_intrinsic_image_array(i) ? nir_vec3(b, w, h, d) : nir_vec2(b, w, h);
+   default:
+      return nir_vec3(b, w, h, d);
+   }
+}
+
 static nir_def *
 borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
 {
    nir_deref_instr *deref;
    nir_def *coord;
+   if (instr->type == nir_instr_type_intrinsic &&
+       nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_deref_size)
+      return borg_image_size(b, nir_instr_as_intrinsic(instr));
    if (instr->type == nir_instr_type_intrinsic &&
        (nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_deref_store ||
         nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_deref_load ||
@@ -275,6 +310,13 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
                                               nir_address_format_bit_size(fmt), idx,
                                               .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
    nir_def *off = nir_imul_imm(b, coord, 16);
+   if (instr->type == nir_instr_type_intrinsic && borg_image_atomic(nir_instr_as_intrinsic(instr))) {
+      nir_intrinsic_instr *at = nir_instr_as_intrinsic(instr);
+      return at->intrinsic == nir_intrinsic_image_deref_atomic
+                ? nir_ssbo_atomic(b, 32, nir_channel(b, desc, 0), off, at->src[3].ssa, .atomic_op = nir_intrinsic_atomic_op(at))
+                : nir_ssbo_atomic_swap(b, 32, nir_channel(b, desc, 0), off, at->src[3].ssa, at->src[4].ssa,
+                                       .atomic_op = nir_intrinsic_atomic_op(at));
+   }
    if (instr->type == nir_instr_type_intrinsic &&
        nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_deref_store) {
       /* The driver encodes the changed texels back into the view's format after the dispatch. */

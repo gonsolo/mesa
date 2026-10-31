@@ -61,6 +61,11 @@ impl CsBuf {
     }
 }
 
+/// imageSize's words at the end of the binding's window (borg_image_size).
+fn size_header(addr: u32, size: [u32; 3]) -> CsBuf {
+    decoded(addr + SLOT_BYTES - 16, size.iter().flat_map(|v| v.to_ne_bytes()).collect(), 12)
+}
+
 fn decoded(addr: u32, data: Vec<u8>, size: u32) -> CsBuf {
     CsBuf { host: std::ptr::null_mut(), decoded: Some(data), wb: false, skip: 0, size, addr, texels: std::ptr::null_mut(), pf: PIPE_FORMAT_NONE, layer: (u32::MAX, 0) }
 }
@@ -102,7 +107,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                 let pf = fmt::pipe(bv.format);
                 let bs = fmt::blocksize(pf);
                 let Some(map) = mapped(tb.memory()).filter(|_| pf != PIPE_FORMAT_NONE && bs != 0) else { continue };
-                let n = (bv.range / bs as u64).min(SLOT_BYTES as u64 / 16) as u32;
+                let n = (bv.range / bs as u64).min(SLOT_BYTES as u64 / 16 - 1) as u32;
                 let mut dec = vec![0u8; n.max(1) as usize * 16];
                 let src = unsafe { map.add((tb.offset + bv.offset) as usize) };
                 let Some(host) = tb.host() else { continue };
@@ -110,6 +115,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                     unpack(pf, &mut dec[t * 16..], &host, bv.offset as usize + t * bs as usize);
                 }
                 bufs.push(CsBuf { texels: src, pf, ..decoded(addr, dec, n * 16) });
+                bufs.push(size_header(addr, [n, 1, 1]));
                 continue;
             }
             if let Some(img) = img.filter(|i| buf.is_none() && bv.is_none() && i.vk.samples == 1) {
@@ -155,11 +161,12 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                              PIPE_FORMAT_R8G8B8A8_UINT, PIPE_FORMAT_R8G8B8A8_SINT];
                 if flat && !layered && words.contains(&fmt::pipe(vf)) {
                     // R32 or RGBA8 texels, packed by the shader (borg_image_words): the width, then the texels.
-                    let n = (w * h).min(SLOT_BYTES / 4 - 1);
+                    let n = (w * h).min(SLOT_BYTES / 4 - 5);
                     let mut dec = vec![0u8; (1 + n) as usize * 4];
                     dec[..4].copy_from_slice(&w.to_ne_bytes());
                     dec[4..].copy_from_slice(unsafe { std::slice::from_raw_parts(src, n as usize * 4) });
                     bufs.push(CsBuf { host: src, wb: true, skip: 4, ..decoded(addr, dec, (1 + n) * 4) });
+                    bufs.push(size_header(addr, [w, h, 1]));
                     continue;
                 }
                 // Any other storage image: width and height, then every layer's texels as RGBA32.
@@ -170,7 +177,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                 }
                 let per = w * h * d;
                 let lb = sh.layer_size(blk);
-                let n = (per * nl).min(SLOT_BYTES / 16 - 1);
+                let n = (per * nl).min(SLOT_BYTES / 16 - 2);
                 let mut dec = vec![0u8; (1 + n) as usize * 16];
                 dec[..4].copy_from_slice(&w.to_ne_bytes());
                 dec[4..8].copy_from_slice(&h.to_ne_bytes());
@@ -178,6 +185,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                     let at = off0 + (t / per) as u64 * lb + (t % per) as u64 * bs as u64;
                     unpack(pf, &mut dec[16 + 16 * t as usize..], &host, at as usize);
                 }
+                bufs.push(size_header(addr, [w, h, if img.vk.image_type == VK_IMAGE_TYPE_3D { d } else { nl }]));
                 bufs.push(CsBuf { texels: src, pf, skip: 16, layer: (per, lb), ..decoded(addr, dec, (1 + n) * 16) });
                 continue;
             }

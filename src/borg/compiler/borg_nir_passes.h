@@ -58,6 +58,8 @@ void borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_bl
 /* out_select: a fragment shader keeps only colour output k (-1: all), for a target drawn on its
  * own. info, if not NULL, gets what the driver stages beside the blob. */
 #define BORGC_POOL_MAX 64
+/* A compute binding's window (compute.rs, dispatch.rs). */
+#define BORG_CS_SLOT_BYTES (0x80000 * 4)
 struct borgc_info {
    uint32_t pool[BORGC_POOL_MAX]; /* with a blob: words fetched from vertex slot 40 (fragment) or 42 */
    uint32_t npool;
