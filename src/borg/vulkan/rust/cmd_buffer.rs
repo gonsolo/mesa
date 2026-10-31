@@ -57,6 +57,7 @@ pub struct CommandBuffer {
     pub stream: VkBuf,
     pub heap_top: u32,
     pub batch_draws: u32,
+    pub batch_tris: u32, // at most, over the batch's draws
     pub state_sent: VkBuf,
     pub batch_img: *mut Image,
     pub batch_extra: [*mut Image; 3], // colour attachments 1-3 of the batch
@@ -197,7 +198,7 @@ unsafe extern "C" fn reset(vk: *mut vk_command_buffer, _flags: VkCommandBufferRe
     let c = unsafe { cmd(vk) };
     drop((c.stream.take(), c.state_sent.take()));
     crate::render::free_targets(c);
-    (c.heap_top, c.batch_draws) = (0, 0);
+    (c.heap_top, c.batch_draws, c.batch_tris) = (0, 0, 0);
     (c.occ_pool, c.occ_open, c.nocc) = (null(), false, 0);
     (c.batch_img, c.index_ptr, c.gfx_pipeline, c.desc_set, c.cs_pipeline) = (null_mut(), null_mut(), null_mut(), null_mut(), null_mut());
     (c.in_rendering, c.has_clear, c.generic_drawn, c.dispatched) = (false, false, false, false);

@@ -163,7 +163,8 @@ pub fn flush_draws(c: &mut CommandBuffer) {
     let img = unsafe { c.batch_img.as_ref() };
     let extra: Vec<&Image> = c.batch_extra[..c.batch_nextra as usize].iter().filter_map(|&e| unsafe { e.as_ref() }).collect();
     let (depth, stencil) = unsafe { (c.batch_depth.as_ref(), c.batch_stencil.as_ref()) };
-    let (serve, area, wb, nwb) = (c.batch_serve, c.batch_area, c.wb, c.nwb as usize);
+    let (serve, area, wb, nwb, tris) = (c.batch_serve, c.batch_area, c.wb, c.nwb as usize, c.batch_tris);
+    c.batch_tris = 0;
     c.nwb = 0;
     c.region_set = null_mut();
     (c.batch_pool, c.batch_vpool) = (null(), null());
@@ -175,7 +176,7 @@ pub fn flush_draws(c: &mut CommandBuffer) {
     let key = if rec { state(hash(seed, stream.as_slice())) } else { seed };
     let words: Vec<u32> = occ[..nocc].iter().map(|r| r.off).collect();
     let counts = if serve {
-        run_pass(stream.as_slice(), img, &extra, depth, stencil, &wb[..nwb], area, &words)
+        run_pass(stream.as_slice(), img, &extra, depth, stencil, &wb[..nwb], area, &words, tris)
     } else {
         sim_run_stream(stream.as_slice(), img, 0);
         vec![0; nocc]
@@ -869,6 +870,7 @@ impl Ctx<'_> {
         }
         c.heap_top = self.heap.top;
         c.batch_draws += 1;
+        c.batch_tris = c.batch_tris.saturating_add(self.p.count.saturating_mul(self.p.instances.max(1)) / 3);
         c.batch_push = self.device.scratch.lock().unwrap().push_words;
         (c.batch_img, c.batch_nextra, c.batch_extra) = (self.color, self.nextra as u32, self.extra);
         (c.batch_depth, c.batch_stencil) = (c.rendering.depth, c.rendering.stencil);
