@@ -93,7 +93,7 @@ borg_texel_buffer_filter(const nir_instr *instr, const void *data)
    if (instr->type == nir_instr_type_tex) {
       const nir_tex_instr *tex = nir_instr_as_tex(instr);
       return tex->op == nir_texop_txf &&
-             (tex->sampler_dim == GLSL_SAMPLER_DIM_BUF || (tex->sampler_dim == GLSL_SAMPLER_DIM_2D && !tex->is_array));
+             (tex->sampler_dim == GLSL_SAMPLER_DIM_BUF || tex->sampler_dim == GLSL_SAMPLER_DIM_2D);
    }
    if (instr->type == nir_instr_type_intrinsic) {
       const nir_intrinsic_instr *i = nir_instr_as_intrinsic(instr);
@@ -228,8 +228,8 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
       deref = nir_src_as_deref(tex->src[di].src);
       coord = nir_channel(b, tex->src[ci].src.ssa, 0);
       if (tex->sampler_dim == GLSL_SAMPLER_DIM_2D) {
-         /* A sampled 2D image (level 0): the window is 16 bytes of header (word 0 = width),
-          * then the canonical texels row by row. */
+         /* A sampled 2D image or array (the view's base level): the window is 16 bytes of header
+          * (word 0 = width, word 1 = height), then the canonical texels row by row, layer by layer. */
          nir_variable *tvar = deref ? nir_deref_instr_get_variable(deref) : NULL;
          if (!tvar)
             return NULL;
@@ -245,6 +245,10 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
          nir_def *tb = nir_channel(b, td, 0);
          nir_def *w = nir_load_ssbo(b, 1, 32, tb, nir_imm_int(b, 0), .align_mul = 16);
          nir_def *y = nir_channel(b, tex->src[ci].src.ssa, 1);
+         if (tex->is_array) {
+            nir_def *h = nir_load_ssbo(b, 1, 32, tb, nir_imm_int(b, 4), .align_mul = 4);
+            y = nir_iadd(b, nir_imul(b, nir_channel(b, tex->src[ci].src.ssa, 2), h), y);
+         }
          nir_def *texel = nir_iadd_imm(b, nir_iadd(b, nir_imul(b, y, w), coord), 1);
          return nir_load_ssbo(b, 4, 32, tb, nir_imul_imm(b, texel, 16), .align_mul = 16);
       }

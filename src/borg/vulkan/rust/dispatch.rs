@@ -114,18 +114,28 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                 let view = set.view(b);
                 let vf = view.map_or(img.vk.format, |v| v.format);
                 let layered = view.is_some_and(|v| v.view_type != VK_IMAGE_VIEW_TYPE_2D);
+                // The view's mip level and layers.
+                let (lvl, l0, nl) = view.map_or((0, 0, img.vk.array_layers), |v| (v.base_mip_level, v.base_array_layer, v.layer_count));
+                let sh = crate::image::shape(img);
+                let blk = crate::image::blocks(img.vk.format);
+                let off0 = sh.level_offset(lvl, l0, blk).0;
+                let mip = |e: u32| (e >> lvl).max(1);
+                let (w, h, d) = (mip(w), mip(h), mip(img.vk.extent.depth));
                 if set.sampled_mask >> b & 1 != 0 && flat {
-                    // A sampled image: its width, then RGBA32 texels, read as the view's format.
+                    // A sampled image: width and height, then every layer's RGBA32 texels, read as the view's format.
                     let pf = fmt::pipe(vf);
                     let bs = fmt::blocksize(pf);
                     if pf == PIPE_FORMAT_NONE || bs == 0 || fmt::is_compressed(pf) {
                         continue;
                     }
-                    let n = (w * h).min(SLOT_BYTES / 16 - 1);
+                    let (per, lb) = (w * h, sh.layer_size(blk));
+                    let n = (per * nl).min(SLOT_BYTES / 16 - 1);
                     let mut dec = vec![0u8; (1 + n) as usize * 16];
                     dec[..4].copy_from_slice(&w.to_ne_bytes());
-                    for t in 0..n as usize {
-                        unpack(pf, &mut dec[16 + t * 16..], &host, t * bs as usize);
+                    dec[4..8].copy_from_slice(&h.to_ne_bytes());
+                    for t in 0..n {
+                        let at = off0 + (t / per) as u64 * lb + (t % per) as u64 * bs as u64;
+                        unpack(pf, &mut dec[16 + 16 * t as usize..], &host, at as usize);
                     }
                     bufs.push(decoded(addr, dec, (1 + n) * 16));
                     continue;
@@ -133,14 +143,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                 if set.sampled_mask >> b & 1 != 0 {
                     continue;
                 }
-                // The view's mip level and layers.
-                let (lvl, l0, nl) = view.map_or((0, 0, img.vk.array_layers), |v| (v.base_mip_level, v.base_array_layer, v.layer_count));
-                let sh = crate::image::shape(img);
-                let blk = crate::image::blocks(img.vk.format);
-                let off0 = sh.level_offset(lvl, l0, blk).0;
                 let src = unsafe { src.add(off0 as usize) };
-                let mip = |e: u32| (e >> lvl).max(1);
-                let (w, h, d) = (mip(w), mip(h), mip(img.vk.extent.depth));
                 let words = [PIPE_FORMAT_R32_UINT, PIPE_FORMAT_R32_SINT, PIPE_FORMAT_R32_FLOAT, PIPE_FORMAT_R8G8B8A8_UNORM,
                              PIPE_FORMAT_R8G8B8A8_UINT, PIPE_FORMAT_R8G8B8A8_SINT];
                 if flat && !layered && words.contains(&fmt::pipe(vf)) {
