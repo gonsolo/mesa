@@ -1036,7 +1036,10 @@ fn generic_draw(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
 fn sim_draw(c: &mut CommandBuffer, mut p: Params) {
     let (device, c) = c.split_device();
     // Only the simulator renders; cube.c (UBO-driven) has its own path at submit.
-    if !(std::env::var_os("BORGVK_SIM").is_some() || enabled()) || c.desc_set().is_some_and(set_is_cube) {
+    // cube.c pulls its vertices from the UBO; a draw with vertex attributes is never the cube.
+    let (fp, c) = c.split_gfx_pipeline();
+    let cube = fp.is_some_and(|p| p.attr_count == 0) && c.desc_set().is_some_and(set_is_cube);
+    if !(std::env::var_os("BORGVK_SIM").is_some() || enabled()) || cube {
         return;
     }
     p.index_size = c.index_size;

@@ -105,7 +105,8 @@ pub fn set_is_cube(set: &DescriptorSet) -> bool {
 }
 
 pub fn submit_is_cube(submit: &vk_queue_submit) -> bool {
-    find_set(submit).is_some_and(set_is_cube)
+    let cbs = unsafe { crate::entrypoint::slice(submit.command_buffers, submit.command_buffer_count) };
+    !cbs.iter().any(|&cb| unsafe { &*cb.cast::<CommandBuffer>() }.generic_drawn) && find_set(submit).is_some_and(set_is_cube)
 }
 
 /// One frame's whole wire stream rendered by the simulator or the device into the colour
