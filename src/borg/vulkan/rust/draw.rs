@@ -1008,17 +1008,31 @@ fn draw_batched(device: &Device, c: &mut CommandBuffer, p: &Params) -> Result<bo
     r.map(|_| ok)
 }
 
-/// Wide colour targets are one pipeline each, drawn in turn (no depth or stencil: a second pass would fail the test).
+/// A depth or stencil image's bytes: every target's pass starts from them.
+fn ds_snapshot(img: *mut Image) -> Option<(*mut Image, Vec<u8>)> {
+    let i = unsafe { img.as_ref() }?;
+    let e = i.vk.extent;
+    let n = e.width as usize * e.height as usize * blocks(i.vk.format).bs as usize * i.vk.samples.max(1) as usize;
+    let mut b = vec![0u8; n];
+    i.host()?.read(0, &mut b);
+    Some((img, b))
+}
+
+/// Wide colour targets are one pipeline each, drawn in turn. Each pass runs from the same depth
+/// and stencil, or a later one would fail the test; the last one's stand, and only it counts queries.
 fn generic_draw(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
     let first = c.gfx_pipeline;
     let (fp, c) = c.split_gfx_pipeline();
     let Some(fp) = fp.filter(|f| f.emul_n != 0) else { return draw_one(device, c, p) };
-    if !c.rendering.depth.is_null() || !c.rendering.stencil.is_null() {
-        return reject(Reject::MrtFormats);
+    let (depth, stencil) = (c.rendering.depth, c.rendering.stencil);
+    let has_ds = !depth.is_null() || !stencil.is_null();
+    if has_ds {
+        flush_draws(c);
     }
-    let colors = c.rendering.color;
+    let snaps: Vec<_> = [depth, if stencil == depth { null_mut() } else { stencil }].into_iter().filter_map(ds_snapshot).collect();
+    let (colors, n, occ) = (c.rendering.color, fp.emul_n as usize, c.occ_pool);
     let mut ok = true;
-    for k in 0..fp.emul_n as usize {
+    for k in 0..n {
         if !ok {
             break;
         }
@@ -1026,8 +1040,24 @@ fn generic_draw(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
             c.gfx_pipeline = fp.emul[k - 1].ptr();
         }
         c.rendering.color[0] = colors[k];
+        if has_ds && k + 1 != n {
+            c.occ_pool = null();
+        } else {
+            c.occ_pool = occ;
+        }
         ok = draw_one(device, c, p);
+        if has_ds {
+            flush_draws(c);
+            if k + 1 != n {
+                for (img, b) in &snaps {
+                    if let Some(h) = unsafe { img.as_ref() }.and_then(|i| i.host()) {
+                        h.write(0, b);
+                    }
+                }
+            }
+        }
     }
+    c.occ_pool = occ;
     c.rendering.color = colors;
     c.gfx_pipeline = first;
     ok
