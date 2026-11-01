@@ -957,7 +957,31 @@ fn draw_one(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
         }
         r => r,
     };
-    r.unwrap_or_else(reject)
+    match r {
+        Err(Reject::Upload) => draw_split(device, c, p).unwrap_or_else(|| reject(Reject::Upload)),
+        r => r.unwrap_or_else(reject),
+    }
+}
+
+/// A draw too large for the heap runs as two, in primitive order: instances, then lists.
+fn draw_split(device: &Device, c: &mut CommandBuffer, p: &Params) -> Option<bool> {
+    let (a, b) = if p.instances > 1 {
+        let n = p.instances / 2;
+        (Params { instances: n, ..*p }, Params { instances: p.instances - n, first_instance: p.first_instance + n, ..*p })
+    } else {
+        let per = match c.split_gfx_pipeline().0?.topology {
+            Topology::Points => 1,
+            Topology::Lines => 2,
+            Topology::Triangles => 3,
+            _ => return None,
+        };
+        let n = p.count / per / 2 * per;
+        if n == 0 {
+            return None;
+        }
+        (Params { count: n, ..*p }, Params { count: p.count - n, first: p.first + n, ..*p })
+    };
+    Some(draw_one(device, c, &a) && draw_one(device, c, &b))
 }
 
 fn draw_batched(device: &Device, c: &mut CommandBuffer, p: &Params) -> Result<bool, Reject> {
