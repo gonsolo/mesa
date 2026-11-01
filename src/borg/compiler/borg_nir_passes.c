@@ -27,6 +27,7 @@ const struct spirv_to_nir_options borg_spirv_options = {
 };
 
 const struct nir_shader_compiler_options borg_nir_options = {
+   .lower_int64_options = nir_lower_shift64 | nir_lower_bcsel64,   /* nir_opt_large_constants' small tables */
    .lower_fdiv = true,
    .lower_fceil = true,
    .lower_fsat = true,
@@ -961,6 +962,7 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(_, nir, nir_opt_copy_prop);
       NIR_PASS(_, nir, nir_opt_constant_folding);
       NIR_PASS(_, nir, nir_opt_large_constants, glsl_get_vec4_size_align_bytes, 0);
+      NIR_PASS(_, nir, nir_lower_int64);
    }
    NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees, nir_var_function_temp | nir_var_shader_temp, UINT32_MAX);
    /* A vertex shader that writes an output in a branch: turn the branches into selects. */
