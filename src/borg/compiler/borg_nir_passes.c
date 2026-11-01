@@ -636,46 +636,6 @@ borg_iabs_lower(nir_builder *b, nir_instr *instr, void *data)
    return nir_imax(b, x, nir_ineg(b, x));
 }
 
-static bool
-borg_idiv_filter(const nir_instr *instr, const void *data)
-{
-   if (instr->type != nir_instr_type_alu)
-      return false;
-   const nir_op op = nir_instr_as_alu(instr)->op;
-   return op == nir_op_idiv || op == nir_op_udiv || op == nir_op_imod || op == nir_op_umod || op == nir_op_irem;
-}
-
-static nir_def *
-borg_idiv_lower(nir_builder *b, nir_instr *instr, void *data)
-{
-   nir_alu_instr *alu = nir_instr_as_alu(instr);
-   nir_def *x = nir_ssa_for_alu_src(b, alu, 0), *y = nir_ssa_for_alu_src(b, alu, 1);
-   const bool sgn = alu->op == nir_op_idiv || alu->op == nir_op_imod || alu->op == nir_op_irem;
-   nir_def *sx = nir_ishr_imm(b, x, 31), *sy = nir_ishr_imm(b, y, 31);
-   nir_def *a = sgn ? nir_isub(b, nir_ixor(b, x, sx), sx) : x;
-   nir_def *d = sgn ? nir_isub(b, nir_ixor(b, y, sy), sy) : y;
-   nir_def *q = nir_f2i32(b, nir_fmul(b, nir_i2f32(b, a), nir_frcp(b, nir_i2f32(b, d))));
-   nir_def *r = nir_isub(b, a, nir_imul(b, q, d));
-   nir_def *lo = nir_ilt_imm(b, r, 0);
-   q = nir_bcsel(b, lo, nir_iadd_imm(b, q, -1), q);
-   r = nir_bcsel(b, lo, nir_iadd(b, r, d), r);
-   nir_def *hi = nir_uge(b, r, d);
-   q = nir_bcsel(b, hi, nir_iadd_imm(b, q, 1), q);
-   r = nir_isub(b, a, nir_imul(b, q, d));
-   const bool quot = alu->op == nir_op_idiv || alu->op == nir_op_udiv;
-   if (!sgn)
-      return quot ? q : r;
-   if (quot) {
-      nir_def *sq = nir_ixor(b, sx, sy);
-      return nir_isub(b, nir_ixor(b, q, sq), sq);
-   }
-   r = nir_isub(b, nir_ixor(b, r, sx), sx);
-   if (alu->op == nir_op_irem)
-      return r;
-   nir_def *nz = nir_ishr_imm(b, nir_ior(b, r, nir_ineg(b, r)), 31);
-   return nir_iadd(b, r, nir_iand(b, nir_iand(b, nz, nir_ishr_imm(b, nir_ixor(b, r, y), 31)), y));
-}
-
 /* Lines and points are drawn as triangles but are always front-facing. */
 static bool borg_front_always;
 
@@ -1049,12 +1009,13 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    const nir_lower_tex_options tex_options = { .lower_txp = ~0u, .lower_txd = true };
    NIR_PASS(_, nir, nir_lower_tex, &tex_options);
    NIR_PASS(_, nir, nir_shader_instructions_pass, borg_lower_cube, nir_metadata_control_flow, NULL);
+   /* Before frcp's refinement below: it needs the exact reciprocal. */
+   NIR_PASS(_, nir, nir_lower_idiv, &(nir_lower_idiv_options){ 0 });
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_div_sqrt_filter, borg_div_sqrt_lower, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_precise_filter, borg_precise_lower, NULL);
    NIR_PASS(_, nir, nir_lower_flrp, 32, false);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_frexp_filter, borg_frexp_lower, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_sincos_filter, borg_sincos_lower, NULL);
-   NIR_PASS(_, nir, nir_shader_lower_instructions, borg_idiv_filter, borg_idiv_lower, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_iabs_filter, borg_iabs_lower, NULL);
    NIR_PASS(_, nir, nir_lower_alu);
    NIR_PASS(_, nir, nir_lower_alu_to_scalar, NULL, NULL);
