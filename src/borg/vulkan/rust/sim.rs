@@ -663,7 +663,22 @@ pub fn run_pass(
     }
     // The writebacks from every strip; the first strip's bytes stand.
     for r in wb {
-        let host = unsafe { std::slice::from_raw_parts_mut(r.host, r.size as usize) };
+        let host = unsafe { std::slice::from_raw_parts_mut(r.host, r.host_size()) };
+        if r.pf != PIPE_FORMAT_NONE {
+            let bs = crate::fmt::blocksize(r.pf) as usize;
+            for s in all[..np].iter() {
+                let win = unsafe { std::slice::from_raw_parts(s.mem(s.heap + r.off), r.size as usize) };
+                for (t, new) in host.chunks_exact_mut(bs).zip(win.chunks_exact(16)) {
+                    let new = <&[u8; 16]>::try_from(new).unwrap();
+                    let mut old = [0u8; 16];
+                    crate::fmt::unpack_rgba(r.pf, t, &mut old);
+                    if old != *new {
+                        crate::fmt::pack_rgba(r.pf, t, new);
+                    }
+                }
+            }
+            continue;
+        }
         for s in all[..np].iter().rev() {
             host.copy_from_slice(unsafe { std::slice::from_raw_parts(s.mem(s.heap + r.off), r.size as usize) });
         }

@@ -70,7 +70,7 @@ fn mapped(mem: Option<&DeviceMemory>) -> Option<*mut u8> {
 }
 
 /// The texel at `off` of `host` as RGBA32 in the first 16 bytes of `dst`.
-fn unpack(pf: pipe_format, dst: &mut [u8], host: &Host, off: usize) {
+pub fn unpack(pf: pipe_format, dst: &mut [u8], host: &Host, off: usize) {
     let out = <&mut [u8; 16]>::try_from(&mut dst[..16]).unwrap();
     host.with_bytes(off, fmt::blocksize(pf) as usize, |t| fmt::unpack_rgba(pf, t, out));
 }

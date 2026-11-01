@@ -3,7 +3,7 @@
 
 //! The driver's limits and plain data, shared by the modules through `ffi`.
 
-use crate::ffi::VkFormat;
+use crate::ffi::{pipe_format, VkFormat, PIPE_FORMAT_NONE};
 
 pub const BORGVK_STAGE_VERT: u32 = 0;
 pub const BORGVK_STAGE_FRAG: u32 = 1;
@@ -64,6 +64,13 @@ pub struct Writeback {
     pub off: u32,
     pub size: u32,
     pub host: *mut u8,
+    pub pf: pipe_format, // not NONE: the window holds RGBA32 per texel, the host this format
+}
+
+impl Writeback {
+    pub fn host_size(&self) -> usize {
+        if self.pf == PIPE_FORMAT_NONE { self.size as usize } else { self.size as usize / 16 * crate::fmt::blocksize(self.pf) as usize }
+    }
 }
 
 /// Bindings to the flat slots borgc addresses.

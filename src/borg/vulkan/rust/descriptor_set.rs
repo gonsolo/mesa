@@ -323,6 +323,7 @@ unsafe fn write(w: &VkWriteDescriptorSet) {
             && matches!(ty, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER | VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)
         {
             set.buffer_views[s] = unsafe { *w.pTexelBufferView.add(k) }.ptr().cast();
+            set_bit(&mut set.storage_mask, slot, ty == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER);
         }
         let image = if w.pImageInfo.is_null() { None } else { Some(unsafe { &*w.pImageInfo.add(k) }) };
         if let Some(info) = image {

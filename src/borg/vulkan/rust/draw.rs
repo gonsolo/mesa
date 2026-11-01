@@ -10,7 +10,7 @@ use crate::entrypoint::{entrypoint, Handle};
 use crate::descriptor_set::{find_flat, DescriptorSet};
 use crate::ffi::*;
 use crate::fmt;
-use crate::memory::{Buffer, Host};
+use crate::memory::{Buffer, Host, ViewBuffer};
 use crate::texel::Texel;
 use std::sync::atomic::Ordering::Relaxed;
 use crate::image::Image;
@@ -150,7 +150,7 @@ fn bytes_of<T>(v: &[T]) -> &[u8] {
 fn corpus_state(h: u64, img: Option<&Image>, extra: &[&Image], depth: Option<&Image>, stencil: Option<&Image>, wb: &[Writeback]) -> u64 {
     let h = extra.iter().copied().chain(depth).chain(stencil).fold(hash_image(h, img), |h, e| hash_image(h, Some(e)));
     // A writeback's bytes are the app's mapped memory, alive until the submit ends.
-    wb.iter().fold(h, |h, w| if w.size == 0 { h } else { hash(h, unsafe { std::slice::from_raw_parts(w.host, w.size as usize) }) })
+    wb.iter().fold(h, |h, w| if w.size == 0 { h } else { hash(h, unsafe { std::slice::from_raw_parts(w.host, w.host_size()) }) })
 }
 
 /// Runs the draws batched so far.
@@ -678,7 +678,7 @@ impl Ctx<'_> {
             any_dyn |= s.dyn_mask != 0;
             for b in 0..BINDINGS {
                 let buf = s.storage_mask >> b & 1 != 0 && s.buffer(b).is_some_and(|u| u.host().is_some());
-                if buf || storage_image(s, b).is_some() {
+                if buf || storage_image(s, b).is_some() || storage_texels(s, b).is_some() {
                     smask |= 1 << (pl.set_base[si] as usize + b);
                 }
             }
@@ -700,6 +700,10 @@ impl Ctx<'_> {
                     let Some(ds) = ds else { continue };
                     for b in 0..BINDINGS {
                         let fb = pl.set_base[si] as u32 + b as u32;
+                        if let Some(bv) = storage_texels(ds, b) {
+                            upload_storage_texels(c, bv, base + window_slot(fb) * SLOT_BYTES);
+                            continue;
+                        }
                         if let Some(simg) = storage_image(ds, b) {
                             let n = (simg.vk.extent.width.wrapping_mul(simg.vk.extent.height)).min(SLOT_BYTES / 4 - 1);
                             let host = simg.host().unwrap();
@@ -710,7 +714,7 @@ impl Ctx<'_> {
                                 send_mem(at + i as u32 * 256, chunk);
                             }
                             if let Some(p) = host.ptr(0, n as usize * 4) {
-                                push_writeback(c, at + 4, n * 4, p);
+                                push_writeback(c, at + 4, n * 4, p, PIPE_FORMAT_NONE);
                             }
                             continue;
                         }
@@ -737,7 +741,7 @@ impl Ctx<'_> {
                             send_mem(at + i, &tmp[..((n + 3) & !3) as usize]);
                         }
                         if let Some(p) = uhost.ptr(off as usize, len as usize).filter(|_| st) {
-                            push_writeback(c, at, len, p);
+                            push_writeback(c, at, len, p, PIPE_FORMAT_NONE);
                         }
                     }
                 }
@@ -888,9 +892,9 @@ pub fn close_query(c: &mut CommandBuffer, end: bool) {
     c.occ_open = false;
 }
 
-fn push_writeback(c: &mut CommandBuffer, off: u32, size: u32, host: *mut u8) {
+fn push_writeback(c: &mut CommandBuffer, off: u32, size: u32, host: *mut u8, pf: pipe_format) {
     if c.nwb < BORGVK_MAX_WRITEBACKS {
-        c.wb[c.nwb as usize] = Writeback { off, size, host };
+        c.wb[c.nwb as usize] = Writeback { off, size, host, pf };
         c.nwb += 1;
     }
 }
@@ -911,6 +915,28 @@ fn vattr_copy(f: VkFormat, conv: bool, dst: &mut [u8], src: &Texel, asz: usize) 
     } else {
         let n = asz.min(dst.len());
         dst[..n].copy_from_slice(&src[..n]);
+    }
+}
+
+fn storage_texels(set: &DescriptorSet, b: usize) -> Option<&vk_buffer_view> {
+    set.buffer_view(b).filter(|_| set.storage_mask >> b & 1 != 0)
+}
+
+/// A storage texel buffer's window: RGBA32 per texel, encoded back after the pass.
+fn upload_storage_texels(c: &mut CommandBuffer, bv: &vk_buffer_view, at: u32) {
+    let pf = fmt::pipe(bv.format);
+    let bs = fmt::blocksize(pf) as u64;
+    let Some(host) = bv.buffer().and_then(|b| b.host()).filter(|_| bs != 0) else { return };
+    let n = (bv.range / bs).min(SLOT_BYTES as u64 / 16) as usize;
+    let mut win = vec![0u8; n * 16];
+    for t in 0..n {
+        crate::dispatch::unpack(pf, &mut win[t * 16..], &host, bv.offset as usize + t * bs as usize);
+    }
+    for (i, chunk) in win.chunks(256).enumerate() {
+        send_mem(at + i as u32 * 256, chunk);
+    }
+    if let Some(p) = host.ptr(bv.offset as usize, n * bs as usize) {
+        push_writeback(c, at, n as u32 * 16, p, pf);
     }
 }
 

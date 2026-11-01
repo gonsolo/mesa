@@ -126,7 +126,9 @@ static bool
 borg_frag_image_filter(const nir_instr *instr, const void *data)
 {
    return instr->type == nir_instr_type_intrinsic && borg_texel_buffer_filter(instr, data) &&
-          borg_image_words(nir_instr_as_intrinsic(instr)) && !borg_image_atomic(nir_instr_as_intrinsic(instr));
+          (borg_image_words(nir_instr_as_intrinsic(instr)) ||
+           nir_intrinsic_image_dim(nir_instr_as_intrinsic(instr)) == GLSL_SAMPLER_DIM_BUF) &&
+          !borg_image_atomic(nir_instr_as_intrinsic(instr));
 }
 
 /* The constant array element a deref names; the driver maps (binding, element) to a slot. */
