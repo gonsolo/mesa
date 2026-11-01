@@ -496,7 +496,6 @@ borg_precise_lower(nir_builder *b, nir_instr *instr, void *data)
    return res;
 }
 
-/* Integer division through the float reciprocal, one correction step: exact for operands below 2^24. */
 /* A fragment shader that loads many inputs and uniform vectors up front runs out of registers:
  * load the components one at a time and sink each load to its first use. */
 static bool
