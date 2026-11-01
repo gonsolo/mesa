@@ -44,6 +44,7 @@ pub fn compile_empty_frag(sc: &mut Scratch, opt: u32) {
     sc.frag_reads_pntc = false;
     sc.frag_tex_binding = -1;
     sc.stage_ubo[1] = 0;
+    sc.stage_ubo_window[1] = 0;
     sc.stage_push = [false; 2];
     sc.stage_pwin[1] = false;
     sc.stage_spill[1] = false;
@@ -64,6 +65,7 @@ fn from_cache(sc: &mut Scratch, si: &VkPipelineShaderStageCreateInfo, vfetch: u3
         sc.vert_tex_binding = -1;
     }
     sc.stage_ubo[fs as usize] = 0;
+    sc.stage_ubo_window[fs as usize] = 0;
     sc.stage_push[fs as usize] = false;
     sc.stage_pwin[fs as usize] = false;
     sc.stage_spill[fs as usize] = false;
@@ -111,6 +113,7 @@ pub fn compile_stage(dev: &Device, sc: &mut Scratch, vfetch: u32, si: &VkPipelin
         lower_tex_slots(sc, nir, &mut pairs);
         sc.tex_pairs = pairs;
         sc.stage_ubo[fs as usize] = ubo_mask(n);
+        sc.stage_ubo_window[fs as usize] = ubo_window_mask(n);
         sc.stage_push[fs as usize] = uses_push_constants(n);
     }
     match slot {

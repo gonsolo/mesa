@@ -53,6 +53,7 @@ pub struct Pipeline {
     pub restart: bool,                // primitiveRestartEnable
     pub color_count: u32,             // colour attachments of the pipeline's render pass
     pub mrt: bool,
+    pub ubo_window_mask: u128,
     pub ubo_mask: u128,       // the uniform buffer bindings the draw loads from
     pub push_used: bool,     // a shader loads push constants
     pub emul_n: u8,          // wide colour targets: this and emul[] draw one each
@@ -269,6 +270,7 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     pl.tex_pairs[..sc.tex_pairs.len()].copy_from_slice(&sc.tex_pairs);
     pl.set_base = set_base(sc);
     pl.ubo_mask = sc.stage_ubo[0] | sc.stage_ubo[1];
+    pl.ubo_window_mask = sc.stage_ubo_window[0] | sc.stage_ubo_window[1];
     pl.push_used = sc.stage_push[0] || sc.stage_push[1];
     pl.push_window = sc.stage_pwin[0] || sc.stage_pwin[1];
     pl.spills = sc.stage_spill[0] || sc.stage_spill[1];

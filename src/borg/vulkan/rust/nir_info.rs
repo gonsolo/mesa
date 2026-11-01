@@ -21,8 +21,17 @@ fn intrinsics(nir: &nir_shader) -> impl Iterator<Item = &nir_intrinsic_instr> {
 /// The uniform-buffer bindings the shader loads from, as a bit mask: each load_ubo's resource
 /// index, found within 8 steps back through ALU ops and descriptor loads.
 pub fn ubo_mask(nir: &nir_shader) -> u128 {
+    mask_of(nir, |_| true)
+}
+
+/// The uniform buffers read at a run-time offset: through a memory window, not the uniform pages.
+pub fn ubo_window_mask(nir: &nir_shader) -> u128 {
+    mask_of(nir, |ld| ld.get_src(1).comp_as_uint(0).is_none())
+}
+
+fn mask_of(nir: &nir_shader, want: impl Fn(&nir_intrinsic_instr) -> bool) -> u128 {
     let mut mask = 0;
-    for ld in intrinsics(nir).filter(|i| i.intrinsic == nir_intrinsic_load_ubo) {
+    for ld in intrinsics(nir).filter(|i| i.intrinsic == nir_intrinsic_load_ubo && want(i)) {
         let mut d = Some(ld.get_src(0).as_def());
         for _ in 0..8 {
             let Some(def) = d else { break };

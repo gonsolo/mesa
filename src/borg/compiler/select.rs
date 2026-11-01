@@ -921,7 +921,9 @@ impl ShaderState {
             match self.prod.get(&bd) { Some((_, srcs)) if !srcs.is_empty() => bd = resolve_vm(&self.sel.vec_map, srcs[0].0, 0).0, _ => break }
         }
         let binding = self.res_binding.get(&bd).copied().unwrap_or(0);
-        let slot = SSBO_SLOT_WORDS * crate::window_slot(binding);
+        // A uniform buffer at binding 0 sits at the region's start (draw.rs).
+        let window = if intr.intrinsic == nir_intrinsic_load_ubo && binding == 0 { 0 } else { crate::window_slot(binding) };
+        let slot = SSBO_SLOT_WORDS * window;
         // A register holding 0, to copy window words through (an instruction reads one).
         let f = self.sel.next_vreg; self.sel.next_vreg += 1;
         self.sel.loc.insert(f, Loc::Fixed(30));
@@ -1098,6 +1100,7 @@ impl ShaderState {
                 self.vert.vertex_id_def.unwrap_or(u32::MAX), offset_def,
             )) {
             Some(bs) => bs,
+            None if !is_input => return self.ssbo(intr),
             None => {
                 self.refuse(format!("load_ubo offset (def {offset_def}) of an unknown address shape"));
                 (-1, 0)

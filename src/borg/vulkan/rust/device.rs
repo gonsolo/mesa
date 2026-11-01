@@ -37,6 +37,7 @@ pub struct Scratch {
     pub shader_blob: [ShaderBlob; BORGVK_SHADER_STAGE_COUNT as usize],
     pub compile_layout: VkPipelineLayout,
     pub stage_ubo: [u128; 2],
+    pub stage_ubo_window: [u128; 2],
     pub stage_push: [bool; 2],
     pub stage_pwin: [bool; 2],  // the stage reads push constants from the heap window
     pub stage_spill: [bool; 2], // the stage spills to the region's scratch slot
@@ -64,6 +65,7 @@ impl Default for Scratch {
             shader_blob: Default::default(),
             compile_layout: std::ptr::null_mut(),
             stage_ubo: [0; 2],
+            stage_ubo_window: [0; 2],
             stage_push: [false; 2],
             stage_pwin: [false; 2],
             stage_spill: [false; 2],

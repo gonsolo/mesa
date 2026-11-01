@@ -683,7 +683,7 @@ impl Ctx<'_> {
                 }
             }
         }
-        let umask = pl.ubo_mask & !1;
+        let umask = pl.ubo_mask & !1 | pl.ubo_window_mask;
         if smask != 0 || umask != 0 || pl.push_window || pl.spills {
             let high = 128 - (smask | umask).leading_zeros();
             let fixed = if pl.spills { SPILL_SLOT + 1 } else if pl.push_window { PUSH_WINDOW_SLOT + 1 } else { 1 };
