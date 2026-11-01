@@ -134,7 +134,7 @@ impl ShaderState {
             self.refuse(format!("more than {} constants", self.win.max()));
         }
         let loc = &self.sel.loc;
-        fuse_fmadd(&mut self.sel.prog, &self.out_roots, &|v| matches!(loc.get(&v), Some(Loc::Uniform(_))));
+        fuse_fmadd(&mut self.sel.prog, &self.out_roots, &|v| matches!(loc.get(&v), Some(Loc::Uniform(_))), &self.sel.no_contract);
         schedule_for_pressure(&mut self.sel.prog, &self.out_roots);
         self.iseq_forms();
         self.fstep_forms();

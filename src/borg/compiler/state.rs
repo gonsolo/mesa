@@ -20,6 +20,8 @@ pub struct Selector {
     pub vec_map: HashMap<u32, Vec<(u32, u8)>>,
     pub prog: Vec<crate::BorgInstr>,
     pub next_vreg: u32,
+    /// FADD and FMUL results the shader forbids fusing (NoContraction).
+    pub no_contract: std::collections::HashSet<u32>,
     /// Values that live outside the allocated registers.
     pub loc: HashMap<u32, crate::Loc>,
     /// x0 of the RISC-V forms (Fixed(0), not the raster ROM's r0).
@@ -28,7 +30,7 @@ pub struct Selector {
 
 impl Selector {
     pub fn new() -> Self {
-        Selector { vec_map: HashMap::new(), prog: Vec::new(), next_vreg: 1_000_000, loc: HashMap::new(), x0: None }
+        Selector { vec_map: HashMap::new(), prog: Vec::new(), next_vreg: 1_000_000, no_contract: Default::default(), loc: HashMap::new(), x0: None }
     }
 }
 

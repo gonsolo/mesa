@@ -302,6 +302,7 @@ pub(crate) fn fuse_fmadd(
     prog: &mut Vec<BorgInstr>,
     out_roots: &[u32],
     uniform_like: &dyn Fn(u32) -> bool,
+    no_contract: &std::collections::HashSet<u32>,
 ) {
     let pre_fuse = prog.len();
     {
@@ -320,7 +321,7 @@ pub(crate) fn fuse_fmadd(
         }
         let mut remove = vec![false; prog.len()];
         for i in 0..prog.len() {
-            if prog[i].mnem != Op::Fadd || prog[i].srcs.len() != 2 {
+            if prog[i].mnem != Op::Fadd || prog[i].srcs.len() != 2 || no_contract.contains(&prog[i].dst) {
                 continue;
             }
             for k in 0..2 {
@@ -330,6 +331,7 @@ pub(crate) fn fuse_fmadd(
                     && !remove[mi]
                     && prog[mi].mnem == Op::Fmul
                     && prog[mi].srcs.len() == 2
+                    && !no_contract.contains(&m)
                     && uses.get(&m) == Some(&1)
                 {
                     let (a, b) = (prog[mi].srcs[0], prog[mi].srcs[1]);

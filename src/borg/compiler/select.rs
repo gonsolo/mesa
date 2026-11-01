@@ -246,6 +246,9 @@ impl ShaderState {
     }
 
     pub unsafe fn alu(&mut self, alu: &nir_alu_instr) {
+        if matches!(alu.op, nir_op_fadd | nir_op_fmul) && alu.fp_math_ctrl() as u32 & nir_fp_no_contract as u32 != 0 {
+            self.sel.no_contract.insert(alu.def.index);
+        }
         if self.stage == Stage::Compute && self.fold_const(alu) {
             return;
         }
