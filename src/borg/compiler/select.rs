@@ -36,15 +36,15 @@ impl ShaderState {
 
     pub unsafe fn load_const(&mut self, lc: &nir_load_const_instr) {
         let n = lc.def.num_components as usize;
+        // A graphics condition is 1.0 or 0.0, also a constant one.
+        let float_bool = lc.def.bit_size == 1 && self.stage != Stage::Compute;
+        let value = |c: usize| unsafe {
+            if float_bool { if lc.values()[c].b { 1.0f32.to_bits() } else { 0 } } else { lc.values()[c].u32_ }
+        };
         if n == 1 {
-            self.consts.insert(lc.def.index, unsafe { lc.values()[0].u32_ });
+            self.consts.insert(lc.def.index, value(0));
         } else {
-            let comps: Vec<(u32, u8)> = (0..n)
-                .map(|c| {
-                    let bits = unsafe { lc.values()[c].u32_ };
-                    (self.konst(bits), 0u8)
-                })
-                .collect();
+            let comps: Vec<(u32, u8)> = (0..n).map(|c| (self.konst(value(c)), 0u8)).collect();
             self.sel.vec_map.insert(lc.def.index, comps);
         }
     }
