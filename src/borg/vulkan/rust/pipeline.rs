@@ -53,7 +53,7 @@ pub struct Pipeline {
     pub restart: bool,                // primitiveRestartEnable
     pub color_count: u32,             // colour attachments of the pipeline's render pass
     pub mrt: bool,
-    pub ubo_mask: u64,       // the uniform buffer bindings the draw loads from
+    pub ubo_mask: u128,       // the uniform buffer bindings the draw loads from
     pub push_used: bool,     // a shader loads push constants
     pub emul_n: u8,          // wide colour targets: this and emul[] draw one each
     pub emul: [VkPipeline; 3],

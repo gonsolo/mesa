@@ -26,7 +26,7 @@ pub struct DescriptorSetLayout {
     pub dyn_mask: u64, // slots of *_BUFFER_DYNAMIC descriptors
     pub map: DescMap,
     pub immutable: [[u32; 4]; BINDINGS], // sampler descriptors of the immutable-sampler slots
-    pub immutable_mask: u32,
+    pub immutable_mask: u64,
 }
 
 #[repr(C)]
@@ -50,9 +50,9 @@ pub struct DescriptorSet {
     pub sampler_hw: [[u32; 4]; BINDINGS], // sampler descriptors
     pub buffer_views: [*mut vk_buffer_view; BINDINGS], // texel buffers
     pub dyn_mask: u64,      // from the layout: dynamic-offset slots
-    pub storage_mask: u32,  // slots whose buffer is a storage buffer
-    pub sampled_mask: u32,  // slots whose image is sampled (not storage)
-    pub immutable_mask: u32, // slots whose sampler is the layout's
+    pub storage_mask: u64,  // slots whose buffer is a storage buffer
+    pub sampled_mask: u64,  // slots whose image is sampled (not storage)
+    pub immutable_mask: u64, // slots whose sampler is the layout's
     pub map: DescMap,
 }
 
@@ -88,8 +88,8 @@ unsafe impl Zeroed for DescriptorSet {}
 
 const MAX: usize = BORGVK_MAX_BINDINGS as usize;
 
-fn bit(slot: u32) -> u32 {
-    1u32.wrapping_shl(slot)
+fn bit(slot: u32) -> u64 {
+    1u64.wrapping_shl(slot)
 }
 
 /// The slot map of a layout's bindings and the slots of its dynamic buffers: bindings in
@@ -112,7 +112,7 @@ pub fn layout_map(bindings: &[VkDescriptorSetLayoutBinding]) -> (DescMap, u64) {
         m.n += 1;
         m.arrays |= cnt > 1;
         if dynamic {
-            dyn_mask |= ((1u64 << cnt) - 1) << slot;
+            dyn_mask |= (1u64.checked_shl(cnt).unwrap_or(0).wrapping_sub(1)) << slot;
         }
         m.total = m.total.max((slot + cnt) as u8);
     }
@@ -276,7 +276,7 @@ entrypoint! {
     }
 }
 
-fn set_bit(mask: &mut u32, slot: u32, on: bool) {
+fn set_bit(mask: &mut u64, slot: u32, on: bool) {
     *mask = (*mask & !bit(slot)) | if on { bit(slot) } else { 0 };
 }
 
@@ -404,12 +404,12 @@ mod tests {
     fn without_a_map_bindings_are_slots() {
         let m = DescMap::default();
         assert_eq!(desc_slot(&m, 3, 2), Some(5));
-        assert_eq!(desc_slot(&m, 15, 1), None);
+        assert_eq!(desc_slot(&m, 63, 1), None);
     }
 
     #[test]
     fn slots_stop_at_the_limit() {
-        let (m, _) = layout_map(&[binding(0, 20, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE), binding(1, 1, VK_DESCRIPTOR_TYPE_SAMPLER)]);
-        assert_eq!((m.n, m.count[0], m.total), (1, 16, 16));
+        let (m, _) = layout_map(&[binding(0, 70, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE), binding(1, 1, VK_DESCRIPTOR_TYPE_SAMPLER)]);
+        assert_eq!((m.n, m.count[0], m.total), (1, 64, 64));
     }
 }

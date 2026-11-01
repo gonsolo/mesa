@@ -21,7 +21,7 @@ pub const BORGVK_LINE_OTHER: u32 = 24;
 pub const BORGVK_MAX_COLOR_ATTACHMENTS: u32 = 8;
 pub const BORGVK_MAX_VERTEX_BINDINGS: u32 = 16;
 pub const BORGVK_MAX_VERTEX_ATTRS: u32 = 16;
-pub const BORGVK_MAX_BINDINGS: u32 = 16;
+pub const BORGVK_MAX_BINDINGS: u32 = 64;
 pub const BORGVK_MAX_WRITEBACKS: u32 = 16;
 pub const BORGVK_SSBO_SLOT_BYTES: u32 = 65536;
 pub const BORGVK_CS_MAX_BUFS: u32 = 36; // 32 binding slots, the push constants, the constant pool and the root table
@@ -67,7 +67,7 @@ pub struct Writeback {
 }
 
 /// Bindings to the flat slots borgc addresses.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct DescMap {
     pub n: u8,
     pub num: [u32; BORGVK_MAX_BINDINGS as usize],
@@ -75,6 +75,13 @@ pub struct DescMap {
     pub count: [u8; BORGVK_MAX_BINDINGS as usize],
     pub total: u8,
     pub arrays: bool,
+}
+
+impl Default for DescMap {
+    fn default() -> Self {
+        const N: usize = BORGVK_MAX_BINDINGS as usize;
+        Self { n: 0, num: [0; N], slot: [0; N], count: [0; N], total: 0, arrays: false }
+    }
 }
 
 #[derive(Clone, Copy)]

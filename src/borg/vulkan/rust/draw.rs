@@ -672,7 +672,7 @@ impl Ctx<'_> {
         let pl = self.pl;
         let set = self.c.desc_set;
         let (sets, c) = self.c.split_sets();
-        let (mut smask, mut any_dyn) = (0u64, false);
+        let (mut smask, mut any_dyn) = (0u128, false);
         for (si, s) in sets.iter().enumerate() {
             let Some(s) = s else { continue };
             any_dyn |= s.dyn_mask != 0;
@@ -685,7 +685,7 @@ impl Ctx<'_> {
         }
         let umask = pl.ubo_mask & !1;
         if smask != 0 || umask != 0 || pl.push_window || pl.spills {
-            let high = 64 - (smask | umask).leading_zeros();
+            let high = 128 - (smask | umask).leading_zeros();
             let fixed = if pl.spills { SPILL_SLOT + 1 } else if pl.push_window { PUSH_WINDOW_SLOT + 1 } else { 1 };
             let slots = fixed.max(if high > 0 { 1 + window_slot(high - 1) } else { 1 });
             let reuse = c.region_set == set && c.batch_draws != 0 && umask == 0 && !any_dyn && sets[1].is_none() && !pl.spills;
