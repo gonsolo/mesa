@@ -3,7 +3,7 @@
 
 use crate::state::{ShaderState, Stage};
 use crate::{BorgInstr, Loc, NO_DST};
-use crate::opcodes::{Op, CSR_ROOT};
+use crate::opcodes::{Op, CSR_ROOT, CSR_SLOT};
 use std::collections::{HashMap, HashSet};
 
 const SCRATCH_WORDS: u32 = 16384 * 34;
@@ -101,8 +101,10 @@ impl ShaderState {
         } else if self.stage == Stage::Vertex {
             // vertex_lane_key in RISC-V forms.
             let vi = fixed(self, 30);
-            let [table, root, a0, t0, d0, e0, s0, a1, t1, d1, e1, n0, n1, k1, key, kb, t] = [(); 17].map(|_| self.sel.fresh());
-            head.extend([i(Op::Csrrs, table, vec![], CSR_ROOT), i(Op::Lw, root, vec![table], 0)]);
+            let [table, root0, id, cell, root, a0, t0, d0, e0, s0, a1, t1, d1, e1, n0, n1, k1, key, kb, t] = [(); 20].map(|_| self.sel.fresh());
+            // Each quad slot its own: slots and keys take under 4 KB per slot.
+            head.extend([i(Op::Csrrs, table, vec![], CSR_ROOT), i(Op::Lw, root0, vec![table], 0), i(Op::Csrrs, id, vec![], CSR_SLOT),
+                i(Op::Slli, cell, vec![id], 12), i(Op::Add, root, vec![root0, cell], 0)]);
             let kw = self.materialize(&mut head, 4 * KEY_WORDS);
             head.extend([i(Op::Add, a0, vec![root, kw], 0), i(Op::Sw, NO_DST, vec![a0, vi], 0),
                 i(Op::Lw, t0, vec![a0], 0), i(Op::Sub, d0, vec![vi, t0], 0), i(Op::Sltiu, e0, vec![d0], 1),
@@ -114,10 +116,11 @@ impl ShaderState {
         } else {
             let (r30, r31) = (fixed(self, 30), fixed(self, 31));
             self.frag.per_pixel_fixed.extend([r30, r31]);
-            let [xi, yi, xb, yb, y2, key, kb, table, root, t] = [(); 10].map(|_| self.sel.fresh());
+            let [xi, yi, xb, yb, y2, key, kb, table, root0, id, cell, root, t] = [(); 13].map(|_| self.sel.fresh());
             head.extend([i(Op::F2i, xi, vec![r30], 0), i(Op::F2i, yi, vec![r31], 0), i(Op::Andi, xb, vec![xi], 1),
                 i(Op::Andi, yb, vec![yi], 1), i(Op::Slli, y2, vec![yb], 1), i(Op::Ior, key, vec![xb, y2], 0),
-                i(Op::Slli, kb, vec![key], 2), i(Op::Csrrs, table, vec![], CSR_ROOT), i(Op::Lw, root, vec![table], 0),
+                i(Op::Slli, kb, vec![key], 2), i(Op::Csrrs, table, vec![], CSR_ROOT), i(Op::Lw, root0, vec![table], 0), i(Op::Csrrs, id, vec![], CSR_SLOT),
+                i(Op::Slli, cell, vec![id], 12), i(Op::Add, root, vec![root0, cell], 0),
                 i(Op::Add, t, vec![kb, root], 0)]);
             (t, 4 * SCRATCH_WORDS)
         };
