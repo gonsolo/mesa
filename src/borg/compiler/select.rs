@@ -1225,8 +1225,9 @@ impl ShaderState {
             self.outs.mrt[(loc - 4) as usize] = Some(comps[0]);
         } else if self.stage == Stage::Fragment {
             let ncomp2 = if self.frag.alpha || self.flags.bytes_packed() { 4 } else { 3 };
-            for (c, &v) in comps.iter().enumerate().take(ncomp2) {
-                self.outs.frag[c] = Some(v);
+            let first = intr.get_const_index(NIR_INTRINSIC_COMPONENT) as usize;
+            for (c, &v) in comps.iter().enumerate().filter(|&(c, _)| first + c < ncomp2) {
+                self.outs.frag[first + c] = Some(v);
                 self.outs.roots.push(v.0);
             }
         } else if self.stage == Stage::Vertex && loc == 12 {
