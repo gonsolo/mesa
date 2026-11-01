@@ -44,8 +44,10 @@ impl Shape {
     /// Offset of `level` in `layer`, and that level's row stride in blocks.
     pub fn level_offset(&self, level: u32, layer: u32, b: Blocks) -> (u64, u32) {
         let before: u64 = (0..level).map(|l| mip_level_size(self.extent, l, b).0).sum();
-        let stride = mip_level_size(self.extent, level, b).1;
-        (layer as u64 * self.layer_size(b) + before, stride)
+        let (size, stride) = mip_level_size(self.extent, level, b);
+        // A view's layer of a 3D image is a slice of that level.
+        let step = if self.extent[2] > 1 { size / (self.extent[2] >> level).max(1) as u64 } else { self.layer_size(b) };
+        (layer as u64 * step + before, stride)
     }
 
     /// Bytes the image needs in memory, a multiple of 256.
@@ -60,6 +62,13 @@ mod tests {
     use super::*;
 
     const RGBA8: Blocks = Blocks { bs: 4, bw: 1, bh: 1, bd: 1 };
+
+    #[test]
+    fn slice_of_a_3d_level() {
+        let s = Shape { extent: [4, 4, 4], levels: 2, layers: 1, samples: 1 };
+        assert_eq!(s.level_offset(0, 3, RGBA8).0, 3 * 64);
+        assert_eq!(s.level_offset(1, 1, RGBA8).0, 256 + 16);
+    }
 
     #[test]
     fn mip_sizes() {
