@@ -1403,6 +1403,8 @@ impl ShaderState {
     /// A value of a phi web, selected from `start` with registers from `base`: its own register
     /// becomes the web's, or it is copied there when it is shared or a result block.
     fn into_web(&mut self, d: u32, regs: &[u32], start: usize, base: u32) {
+        // Together: a vec's sources can be this web's own registers (t = t.zyx).
+        let mut copies = vec![];
         for (c, &w) in regs.iter().enumerate() {
             let (v, vc) = self.operand(d, c as u8);
             let fixed = self.tex_dsts.contains(&v) || self.fattr_dsts.contains(&v) || self.sel.loc.contains_key(&v);
@@ -1416,8 +1418,11 @@ impl ShaderState {
                     i.srcs.iter_mut().filter(|s| **s == v).for_each(|s| *s = w);
                 }
             } else {
-                self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: w, srcs: vec![v, v], swz: vec![vc, vc], imm: 0 });
+                copies.push((w, (v, vc)));
             }
+        }
+        for (dst, (v, c)) in crate::block::sequence_copies(copies, &mut || self.sel.fresh()) {
+            self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst, srcs: vec![v, v], swz: vec![c, c], imm: 0 });
         }
         self.sel.vec_map.insert(d, regs.iter().map(|&w| (w, 0)).collect());
         self.const_addr_chain = None;
