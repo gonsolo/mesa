@@ -8,7 +8,7 @@ use crate::ffi::*;
 use crate::device::{Device, Scratch};
 use crate::pipeline::Pipeline;
 use crate::nir_info::*;
-use crate::nir_passes::{lower_lines, lower_tex_slots, remap_array_bindings};
+use crate::nir_passes::{compact_windows, lower_lines, lower_tex_slots, remap_array_bindings};
 use crate::shader_cache;
 use crate::util::{log, MESA_LOG_INFO, MESA_LOG_WARN};
 use borgc_rs::{borgc_compile_compute, borgc_compile_nir, BorgcInfo};
@@ -199,6 +199,14 @@ pub fn compile_compute_stage(dev: &Device, sc: &mut Scratch, si: &VkPipelineShad
     // After the lowering: texel buffers and images become buffer accesses there.
     unsafe { borg_lower_nir_for_borgc(nir) };
     remap_array_bindings(sc, unsafe { &*nir });
+    if let Some(w) = compact_windows(unsafe { &*nir }) {
+        if w.len() > p.cs_windows.len() {
+            log(MESA_LOG_WARN, format!("borgvk: compute shader uses {} descriptors, the last are unbound", w.len()));
+        }
+        let n = w.len().min(p.cs_windows.len());
+        p.cs_windows[..n].copy_from_slice(&w[..n]);
+        (p.cs_nwindows, p.cs_compact) = (n as u8, true);
+    }
     let mut pairs = Vec::new();
     lower_tex_slots(sc, nir, &mut pairs);
     p.tex_npairs = pairs.len() as u8;

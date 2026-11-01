@@ -36,6 +36,25 @@ pub fn remap_array_bindings(sc: &Scratch, nir: &nir_shader) {
     }
 }
 
+/// Numbers a compute shader's windows by use, so that unused descriptors take none: the flat
+/// slots in window order, or None when a run-time array index needs them in sequence.
+pub fn compact_windows(nir: &nir_shader) -> Option<Vec<u8>> {
+    let res: Vec<_> = nir.iter_functions().filter_map(|f| f.get_impl()).flat_map(|i| i.iter_blocks())
+        .flat_map(|b| b.iter_instr_list()).filter_map(|i| i.as_intrinsic())
+        .filter(|i| i.intrinsic == nir_intrinsic_vulkan_resource_index).collect();
+    if !res.iter().all(|i| unsafe { nir_src_is_const(*i.get_src(0)) }) {
+        return None;
+    }
+    let mut used: Vec<u8> = res.iter().map(|i| i.get_const_index(NIR_INTRINSIC_BINDING) as u8).collect();
+    used.sort_unstable();
+    used.dedup();
+    for i in &res {
+        let window = used.binary_search(&(i.get_const_index(NIR_INTRINSIC_BINDING) as u8)).ok()?;
+        unsafe { nir_intrinsic_set_binding(std::ptr::from_ref(*i).cast_mut(), window as u32) };
+    }
+    Some(used)
+}
+
 fn flat_slot(pl: &vk_pipeline_layout, base: &[u8; 4], set: u32, binding: u32, elem: u32) -> Option<u32> {
     if set >= pl.set_count || set >= 4 {
         return None;

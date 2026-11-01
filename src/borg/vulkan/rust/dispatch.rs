@@ -84,10 +84,17 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
         let dyn_off = &c.cs_dyn_offs[si];
         let base = pl.set_base[si] as u32;
         for b in 0..BORGVK_MAX_BINDINGS as usize {
-            if base + b as u32 >= 32 || bufs.len() >= BORGVK_CS_MAX_BUFS as usize - 3 {
+            let flat = base + b as u32;
+            let window = if pl.cs_compact {
+                pl.cs_windows[..pl.cs_nwindows as usize].iter().position(|&f| f as u32 == flat).map(|p| p as u32)
+            } else {
+                Some(flat)
+            };
+            let Some(window) = window.filter(|&w| w < 32) else { continue };
+            if bufs.len() >= BORGVK_CS_MAX_BUFS as usize - 3 {
                 break;
             }
-            let addr = BASE_BYTES + (base + b as u32) * SLOT_BYTES;
+            let addr = BASE_BYTES + window * SLOT_BYTES;
             let (buf, bv, img) = (set.buffer(b), set.buffer_view(b), set.image(b));
             if let Some(bv) = bv.filter(|_| buf.is_none()) {
                 // A texel buffer, decoded to RGBA32 per texel.
@@ -180,7 +187,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
             let avail = b_.vk.size.saturating_sub(off);
             let r = set.ranges[b];
             let size = if r == VK_WHOLE_SIZE as u64 || r > avail { avail } else { r }.min(SLOT_BYTES as u64) as u32;
-            sizes[(base + b as u32) as usize] = size;
+            sizes[window as usize] = size;
             let host = unsafe { map.add((b_.offset + off) as usize) };
             bufs.push(CsBuf { host, decoded: None, wb: true, skip: 0, size, addr, texels: std::ptr::null_mut(), pf: PIPE_FORMAT_NONE, layer: (u32::MAX, 0) });
         }
