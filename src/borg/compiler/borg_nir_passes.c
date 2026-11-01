@@ -655,6 +655,28 @@ borg_front_always_pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 }
 
 static bool
+borg_quantize_filter(const nir_instr *instr, const void *data)
+{
+   return instr->type == nir_instr_type_alu && nir_instr_as_alu(instr)->op == nir_op_fquantize2f16;
+}
+
+/* Through F2H and H2F; what would be a float16 denormal is a signed zero. */
+static nir_def *
+borg_quantize_lower(nir_builder *b, nir_instr *instr, void *data)
+{
+   nir_alu_instr *alu = nir_instr_as_alu(instr);
+   nir_def *v = nir_ssa_for_alu_src(b, alu, 0), *r[NIR_MAX_VEC_COMPONENTS];
+   b->fp_math_ctrl = nir_fp_exact;
+   for (unsigned c = 0; c < v->num_components; c++) {
+      nir_def *x = nir_channel(b, v, c);
+      nir_def *half = nir_unpack_half_2x16(b, nir_pack_half_2x16(b, nir_vec2(b, x, nir_imm_float(b, 0.0f))));
+      r[c] = nir_bcsel(b, nir_flt_imm(b, nir_fabs(b, x), ldexpf(1.0f, -14)), nir_iand_imm(b, x, 0x80000000),
+                       nir_channel(b, half, 0));
+   }
+   return nir_vec(b, r, v->num_components);
+}
+
+static bool
 borg_frexp_filter(const nir_instr *instr, const void *data)
 {
    return instr->type == nir_instr_type_alu &&
@@ -1013,6 +1035,7 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_div_sqrt_filter, borg_div_sqrt_lower, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_precise_filter, borg_precise_lower, NULL);
    NIR_PASS(_, nir, nir_lower_flrp, 32, false);
+   NIR_PASS(_, nir, nir_shader_lower_instructions, borg_quantize_filter, borg_quantize_lower, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_frexp_filter, borg_frexp_lower, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_sincos_filter, borg_sincos_lower, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_iabs_filter, borg_iabs_lower, NULL);
