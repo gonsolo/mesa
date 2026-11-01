@@ -418,7 +418,9 @@ entrypoint! {
         for (i, ci) in infos.iter().enumerate() {
             let ri = unsafe { vk_get_pipeline_rendering_create_info(ci).as_ref() };
             let formats = ri.map_or(&[][..], |ri| unsafe { slice(ri.pColorAttachmentFormats, ri.colorAttachmentCount) });
-            let emulate = (2..=4).contains(&formats.len()) && !mrt_formats(formats);
+            // The shared R8 targets have one value per pixel: multisampled ones draw in turn.
+            let ms = unsafe { ci.pMultisampleState.as_ref() }.is_some_and(|m| m.rasterizationSamples > 1);
+            let emulate = (2..=4).contains(&formats.len()) && (ms || !mrt_formats(formats));
             let r = match ri {
                 Some(ri) if emulate => build_emulated(device, &mut sc, alloc, ci, ri),
                 _ => build_graphics(device, &mut sc, alloc, ci),
