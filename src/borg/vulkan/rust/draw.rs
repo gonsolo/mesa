@@ -1008,8 +1008,8 @@ fn draw_batched(device: &Device, c: &mut CommandBuffer, p: &Params) -> Result<bo
     r.map(|_| ok)
 }
 
-/// A depth or stencil image's bytes: every target's pass starts from them.
-fn ds_snapshot(img: *mut Image) -> Option<(*mut Image, Vec<u8>)> {
+/// A target's bytes, to restore between the passes of a draw.
+fn target_bytes(img: *mut Image) -> Option<(*mut Image, Vec<u8>)> {
     let i = unsafe { img.as_ref() }?;
     let e = i.vk.extent;
     let n = e.width as usize * e.height as usize * blocks(i.vk.format).bs as usize * i.vk.samples.max(1) as usize;
@@ -1029,8 +1029,15 @@ fn generic_draw(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
     if has_ds {
         flush_draws(c);
     }
-    let snaps: Vec<_> = [depth, if stencil == depth { null_mut() } else { stencil }].into_iter().filter_map(ds_snapshot).collect();
+    let snaps: Vec<_> = [depth, if stencil == depth { null_mut() } else { stencil }].into_iter().filter_map(target_bytes).collect();
     let (colors, n, occ) = (c.rendering.color, fp.emul_n as usize, c.occ_pool);
+    // Targets the draw also reads keep their old values until the last pass.
+    let (sets, c) = c.split_sets();
+    let read = sets.iter().flatten().any(|s| (0..BINDINGS).any(|b| s.sampled_mask >> b & 1 != 0 && colors[..n].contains(&s.images[b])));
+    if read && !has_ds {
+        flush_draws(c);
+    }
+    let mut old: Vec<_> = colors[..n].iter().filter(|_| read).filter_map(|&i| target_bytes(i)).collect();
     let mut ok = true;
     for k in 0..n {
         if !ok {
@@ -1056,6 +1063,18 @@ fn generic_draw(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
                 }
             }
         }
+        if read {
+            flush_draws(c);
+            if let Some((_, b)) = old.iter_mut().find(|(i, _)| *i == colors[k]) {
+                let h = unsafe { colors[k].as_ref() }.and_then(|i| i.host());
+                let mut new = vec![0; b.len()];
+                h.as_ref().map(|h| (h.read(0, &mut new), h.write(0, b)));
+                *b = new;
+            }
+        }
+    }
+    for (i, b) in &old {
+        unsafe { i.as_ref() }.and_then(|i| i.host()).map(|h| h.write(0, b));
     }
     c.occ_pool = occ;
     c.rendering.color = colors;
