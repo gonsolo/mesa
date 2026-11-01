@@ -950,6 +950,8 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(_, nir, nir_lower_global_vars_to_local);
       NIR_PASS(_, nir, nir_split_var_copies);
       NIR_PASS(_, nir, nir_lower_var_copies);
+      /* An output array written at a run-time index is now a local one. */
+      NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees, nir_var_function_temp, UINT32_MAX);
    }
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
    NIR_PASS(_, nir, nir_lower_system_values);
