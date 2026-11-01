@@ -21,8 +21,8 @@ pub fn serves_extent(w: u32, h: u32, has_depth_stencil: bool) -> bool {
     if !env_set("BORGVK_SIM_DIRECT") && !enabled() {
         return false;
     }
-    let max = if has_depth_stencil { 1024 } else { 4096 };
-    (1..=max).contains(&w) && (1..=max).contains(&h)
+    // Depth and stencil take memory by area: a wide, low pass fits.
+    (1..=4096).contains(&w) && (1..=4096).contains(&h) && (!has_depth_stencil || w * h <= 1 << 20)
 }
 
 /// Pixel (x, y) of a flushed 4x4-tiled frame: RGB for R5G6B5 (0), RGBA8 (1) and BGRA8 (2), the
