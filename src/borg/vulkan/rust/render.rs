@@ -39,7 +39,7 @@ fn target_view(c: &mut CommandBuffer, view: Option<&vk_image_view>) -> *mut vk_i
     // A colour view of another format (VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) renders as that format.
     let recast = |i: &Image| v.format != i.vk.format && !crate::fmt::is_depth_or_stencil(crate::fmt::pipe(v.format));
     let Some(img) = v.image().filter(|i| v.base_mip_level != 0 || v.base_array_layer != 0 || recast(i)) else { return view };
-    if img.vk.image_type == VK_IMAGE_TYPE_3D || v.layer_count != 1 || img.mem.is_null() {
+    if img.mem.is_null() {
         return view;
     }
     let mut t = c.targets;
@@ -68,7 +68,7 @@ fn target_view(c: &mut CommandBuffer, view: Option<&vk_image_view>) -> *mut vk_i
     i.size = img.size.saturating_sub(off);
     i.vk.extent.width = img.vk.extent.width.checked_shr(level).unwrap_or(0).max(1);
     i.vk.extent.height = img.vk.extent.height.checked_shr(level).unwrap_or(0).max(1);
-    (i.vk.mip_levels, i.vk.array_layers) = (1, 1);
+    (i.vk.mip_levels, i.vk.array_layers, i.vk.extent.depth, i.vk.image_type) = (1, 1, 1, VK_IMAGE_TYPE_2D);
     i.vk.format = v.format;
     t.view.image = &mut t.image.vk;
     (t.view.base_mip_level, t.view.base_array_layer) = (0, 0);
