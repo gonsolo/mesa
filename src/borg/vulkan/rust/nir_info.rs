@@ -20,7 +20,7 @@ fn intrinsics(nir: &nir_shader) -> impl Iterator<Item = &nir_intrinsic_instr> {
 
 /// The uniform-buffer bindings the shader loads from, as a bit mask: each load_ubo's resource
 /// index, found within 8 steps back through ALU ops and descriptor loads.
-pub fn ubo_mask(nir: &nir_shader) -> u32 {
+pub fn ubo_mask(nir: &nir_shader) -> u64 {
     let mut mask = 0;
     for ld in intrinsics(nir).filter(|i| i.intrinsic == nir_intrinsic_load_ubo) {
         let mut d = Some(ld.get_src(0).as_def());
@@ -31,7 +31,7 @@ pub fn ubo_mask(nir: &nir_shader) -> u32 {
                 d = Some(alu.get_src(0).src.as_def());
             } else if let Some(r) = di.as_intrinsic() {
                 if r.intrinsic == nir_intrinsic_vulkan_resource_index {
-                    mask |= 1u32.wrapping_shl(r.get_const_index(NIR_INTRINSIC_BINDING));
+                    mask |= 1u64.wrapping_shl(r.get_const_index(NIR_INTRINSIC_BINDING));
                     break;
                 }
                 d = (r.intrinsic == nir_intrinsic_load_vulkan_descriptor).then(|| r.get_src(0).as_def());

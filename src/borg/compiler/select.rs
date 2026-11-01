@@ -921,7 +921,7 @@ impl ShaderState {
             match self.prod.get(&bd) { Some((_, srcs)) if !srcs.is_empty() => bd = resolve_vm(&self.sel.vec_map, srcs[0].0, 0).0, _ => break }
         }
         let binding = self.res_binding.get(&bd).copied().unwrap_or(0);
-        let slot = SSBO_SLOT_WORDS * (1 + binding);
+        let slot = SSBO_SLOT_WORDS * crate::window_slot(binding);
         // A register holding 0, to copy window words through (an instruction reads one).
         let f = self.sel.next_vreg; self.sel.next_vreg += 1;
         self.sel.loc.insert(f, Loc::Fixed(30));
@@ -1110,7 +1110,7 @@ impl ShaderState {
                 match self.prod.get(&d) { Some((_, srcs)) if !srcs.is_empty() => d = resolve_vm(&self.sel.vec_map, srcs[0].0, 0).0, _ => break }
             }
             let b = self.res_binding.get(&d).copied().unwrap_or(0);
-            if b == 0 { base_words } else { base_words + 16384 * (1 + b as i32) }
+            if b == 0 { base_words } else { base_words + 16384 * crate::window_slot(b as u32) as i32 }
         } else {
             base_words
         };

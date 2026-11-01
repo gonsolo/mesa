@@ -109,6 +109,11 @@ const POINT_SLOT: u32 = 16;
 const PUSH_WINDOW_SLOT: u32 = 33; // borgc: PUSH_WINDOW_WORDS
 const SPILL_SLOT: u32 = 34; // borgc: spill.rs SCRATCH_WORDS
 const SLOT_BYTES: u32 = BORGVK_SSBO_SLOT_BYTES;
+
+/// The region slot of a flat descriptor; slots 33 and 34 are the push words and the spills.
+const fn window_slot(flat: u32) -> u32 { // borgc: window_slot
+    if flat < 32 { 1 + flat } else { 3 + flat }
+}
 const MAX_ROWS: i64 = 4096 * 4096;
 const VB: usize = BORGVK_MAX_VERTEX_BINDINGS as usize;
 const BINDINGS: usize = BORGVK_MAX_BINDINGS as usize;
@@ -667,11 +672,11 @@ impl Ctx<'_> {
         let pl = self.pl;
         let set = self.c.desc_set;
         let (sets, c) = self.c.split_sets();
-        let (mut smask, mut any_dyn) = (0u32, false);
+        let (mut smask, mut any_dyn) = (0u64, false);
         for (si, s) in sets.iter().enumerate() {
             let Some(s) = s else { continue };
             any_dyn |= s.dyn_mask != 0;
-            for b in 0..BINDINGS.min(32usize.saturating_sub(pl.set_base[si] as usize)) {
+            for b in 0..BINDINGS {
                 let buf = s.storage_mask >> b & 1 != 0 && s.buffer(b).is_some_and(|u| u.host().is_some());
                 if buf || storage_image(s, b).is_some() {
                     smask |= 1 << (pl.set_base[si] as usize + b);
@@ -680,13 +685,9 @@ impl Ctx<'_> {
         }
         let umask = pl.ubo_mask & !1;
         if smask != 0 || umask != 0 || pl.push_window || pl.spills {
-            let slots = if pl.spills {
-                SPILL_SLOT + 1
-            } else if pl.push_window {
-                PUSH_WINDOW_SLOT + 1
-            } else {
-                1 + (32 - (smask | umask).leading_zeros())
-            };
+            let high = 64 - (smask | umask).leading_zeros();
+            let fixed = if pl.spills { SPILL_SLOT + 1 } else if pl.push_window { PUSH_WINDOW_SLOT + 1 } else { 1 };
+            let slots = fixed.max(if high > 0 { 1 + window_slot(high - 1) } else { 1 });
             let reuse = c.region_set == set && c.batch_draws != 0 && umask == 0 && !any_dyn && sets[1].is_none() && !pl.spills;
             let mut base = c.region_base;
             if !reuse {
@@ -699,10 +700,10 @@ impl Ctx<'_> {
                     let Some(ds) = ds else { continue };
                     for b in 0..BINDINGS {
                         let fb = pl.set_base[si] as u32 + b as u32;
-                        if let Some(simg) = storage_image(ds, b).filter(|_| fb < 32) {
+                        if let Some(simg) = storage_image(ds, b) {
                             let n = (simg.vk.extent.width.wrapping_mul(simg.vk.extent.height)).min(SLOT_BYTES / 4 - 1);
                             let host = simg.host().unwrap();
-                            let at = base + (1 + fb) * SLOT_BYTES;
+                            let at = base + window_slot(fb) * SLOT_BYTES;
                             let mut win = simg.vk.extent.width.to_ne_bytes().to_vec();
                             host.with_bytes(0, n as usize * 4, |b| win.extend_from_slice(b));
                             for (i, chunk) in win.chunks(256).enumerate() {
@@ -714,7 +715,7 @@ impl Ctx<'_> {
                             continue;
                         }
                         let Some(ub) = ds.buffer(b) else { continue };
-                        let Some(uhost) = ub.host().filter(|_| fb < 32) else { continue };
+                        let Some(uhost) = ub.host() else { continue };
                         let st = smask >> fb & 1 != 0;
                         if !st && pl.ubo_mask != 0 && pl.ubo_mask >> fb & 1 == 0 {
                             continue;
@@ -728,7 +729,7 @@ impl Ctx<'_> {
                         let range = ds.ranges[b];
                         let len = if range == VK_WHOLE_SIZE as u64 || range == 0 { size - off } else { range };
                         let len = len.min((size - off).min(SLOT_BYTES as u64)) as u32;
-                        let at = base + if st || (fb != 0 && pl.ubo_mask != 0) { (1 + fb) * SLOT_BYTES } else { 0 };
+                        let at = base + if st || (fb != 0 && pl.ubo_mask != 0) { window_slot(fb) * SLOT_BYTES } else { 0 };
                         for i in (0..len).step_by(256) {
                             let n = 256.min(len - i);
                             let mut tmp = [0u8; 256];

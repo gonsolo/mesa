@@ -73,6 +73,11 @@ fn packed_layout(flags: Flags) -> (u32, Vec<(usize, u32, u32)>) {
 /// Where a window shader finds its push words: the heap region's slot 33, past the 32 binding slots.
 pub(crate) const PUSH_WINDOW_WORDS: u32 = 16384 * 33;
 
+/// The heap region's slot of a flat descriptor: the 32 before the push words and spills (33, 34), then the rest.
+pub(crate) const fn window_slot(flat: u32) -> u32 {
+    if flat < 32 { 1 + flat } else { 3 + flat }
+}
+
 /// What the driver stages beside a graphics blob (borgc_info in borg_nir_passes.h).
 #[repr(C)]
 pub struct BorgcInfo {
