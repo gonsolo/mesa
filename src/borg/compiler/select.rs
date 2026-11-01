@@ -620,6 +620,12 @@ impl ShaderState {
             nir_intrinsic_load_ubo => self.uniform_load(intr),
             nir_intrinsic_load_input if self.stage == Stage::Vertex => self.uniform_load(intr),
             nir_intrinsic_store_output => self.store_output(intr),
+            nir_intrinsic_load_front_face => {
+                let bit = self.sel.fresh();
+                self.sel.prog.push(BorgInstr { mnem: Op::Csrrs.into(), dst: bit, srcs: vec![], swz: vec![], imm: crate::opcodes::CSR_FRONT_FACING });
+                let b = self.sel.op0(Op::I2f, vec![bit]);
+                self.sel.vec_map.insert(intr.def.index, vec![(b, 0)]);
+            }
             nir_intrinsic_terminate | nir_intrinsic_demote | nir_intrinsic_terminate_if | nir_intrinsic_demote_if
                 if self.stage == Stage::Fragment => self.discard(intr),
             nir_intrinsic_load_output

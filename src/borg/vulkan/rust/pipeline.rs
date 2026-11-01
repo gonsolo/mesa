@@ -242,6 +242,7 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     let points = topology == Topology::Points;
     let lines = matches!(topology, Topology::Lines | Topology::LineStrip);
     let vfetch = vertex_fetch(vi, points, lines);
+    unsafe { borg_lower_set_front_always(points || lines) };
     for b in &mut sc.shader_blob {
         b.len = 0;
     }
@@ -260,6 +261,7 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     let stages = unsafe { slice(ci.pStages, ci.stageCount) };
     compile_stages(dev, sc, stages, vfetch, frag_opt, points);
     sc.blend_lower = null();
+    unsafe { borg_lower_set_front_always(false) };
 
     let pl = create(dev, alloc)?;
     pl.blob = sc.shader_blob;
@@ -301,6 +303,10 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     }
     (sc.blend_cfg, sc.blend_const) = blend_pack(unsafe { c.pColorBlendState.as_ref() });
     sc.state_reg = state_pack(&c);
+    // Only polygons are culled; lines and points are drawn as triangles.
+    if points || lines {
+        sc.state_reg[4] &= !3;
+    }
     if points || lines {
         sc.state_reg[4] &= !3; // points and lines are not culled
     }

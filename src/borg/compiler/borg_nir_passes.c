@@ -675,6 +675,25 @@ borg_idiv_lower(nir_builder *b, nir_instr *instr, void *data)
    return nir_iadd(b, r, nir_iand(b, nir_iand(b, nz, nir_ishr_imm(b, nir_ixor(b, r, y), 31)), y));
 }
 
+/* Lines and points are drawn as triangles but are always front-facing. */
+static bool borg_front_always;
+
+void
+borg_lower_set_front_always(bool on)
+{
+   borg_front_always = on;
+}
+
+static bool
+borg_front_always_pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_front_face)
+      return false;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def_replace(&intr->def, nir_imm_true(b));
+   return true;
+}
+
 static bool
 borg_frexp_filter(const nir_instr *instr, const void *data)
 {
@@ -955,6 +974,8 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    }
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
    NIR_PASS(_, nir, nir_lower_system_values);
+   if (borg_front_always)
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, borg_front_always_pass, nir_metadata_control_flow, NULL);
    if (nir->info.stage == MESA_SHADER_VERTEX) {
       bool progress;
       NIR_PASS(_, nir, borg_hoist_vertex_ids);
