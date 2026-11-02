@@ -936,11 +936,18 @@ borg_clamp_color(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 }
 
 static bool remat_vertex_inputs;
+static bool no_flatten;
 
 void
 borg_lower_set_vertex_remat(bool on)
 {
    remat_vertex_inputs = on;
+}
+
+void
+borg_lower_set_no_flatten(bool on)
+{
+   no_flatten = on;
 }
 
 /* An atomic on a private variable: load, the operation, store; the old value is the result. */
@@ -1169,7 +1176,7 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
        * flattening -- the whole select then collapses to one FSRGB op. */
       /* BORGC_NO_FLATTEN keeps every `if` as control flow, to exercise the mask path. */
       const nir_opt_peephole_select_options peephole_opts = {
-         .limit = getenv("BORGC_NO_FLATTEN") ? 1 : 64, .indirect_load_ok = true, .expensive_alu_ok = true,
+         .limit = no_flatten || getenv("BORGC_NO_FLATTEN") ? 1 : 64, .indirect_load_ok = true, .expensive_alu_ok = true,
       };
       NIR_PASS(progress, nir, nir_opt_peephole_select, &peephole_opts);
    } while (progress);

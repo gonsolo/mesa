@@ -97,7 +97,7 @@ pub fn compile_stage(dev: &Device, sc: &mut Scratch, vfetch: u32, si: &VkPipelin
     if vs && vfetch & lines == BORGC_VS_FETCH | BORGC_VS_LINES_BIT {
         lower_lines(nir, vfetch & 0xFFFF);
     }
-    let retry = if vs { unsafe { nir_shader_clone(null_mut(), nir) } } else { null_mut() };
+    let retry = if vs || fs { unsafe { nir_shader_clone(null_mut(), nir) } } else { null_mut() };
     // After the lowering: a fragment shader's storage images become buffer accesses there.
     unsafe { borg_lower_nir_for_borgc_blend(nir, blend) };
     remap_array_bindings(sc, unsafe { &*nir });
@@ -128,8 +128,8 @@ pub fn compile_stage(dev: &Device, sc: &mut Scratch, vfetch: u32, si: &VkPipelin
     }
 }
 
-/// borgc's blob for `slot`; a vertex shader that does not fit is retried with rematerialized
-/// values from `retry`, its unlowered clone.
+/// borgc's blob for `slot`; a shader that does not fit is retried from `retry`, its unlowered
+/// clone: a vertex shader with rematerialized inputs, a fragment shader without flattened ifs.
 fn compile_blob(
     sc: &mut Scratch,
     si: &VkPipelineShaderStageCreateInfo,
@@ -144,12 +144,13 @@ fn compile_blob(
     let (mut len, mut info) = (0, empty_info());
     unsafe { borgc_compile_nir(nir, sc.shader_blob[slot].data.as_mut_ptr(), BLOB_MAX, &mut len, vfetch, out_select, &mut info) };
     let mut used = nir;
-    if len == 0 && !retry.is_null() {
+    if (len == 0 || len > BLOB_MAX) && !retry.is_null() {
         used = retry;
         unsafe {
-            borg_lower_set_vertex_remat(true);
+            let set = if fs { borg_lower_set_no_flatten } else { borg_lower_set_vertex_remat };
+            set(true);
             borg_lower_nir_for_borgc_blend(retry, blend);
-            borg_lower_set_vertex_remat(false);
+            set(false);
             remap_array_bindings(sc, &*retry);
             let mut pairs = std::mem::take(&mut sc.tex_pairs);
             lower_tex_slots(sc, retry, &mut pairs);
