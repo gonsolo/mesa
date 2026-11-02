@@ -89,7 +89,7 @@ fn send_texture(set: &DescriptorSet, tex: &Image) {
 
 /// True when the set is cube.c's UBO-driven frame, not a CTS draw from vertex buffers.
 pub fn set_is_cube(set: &DescriptorSet) -> bool {
-    let Some(b) = set.buffer(0) else { return false };
+    let Some(b) = set.buffer(0).filter(|_| set.storage_mask & 1 == 0) else { return false };
     if b.host().is_none() {
         return false;
     }
