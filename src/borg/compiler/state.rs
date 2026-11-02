@@ -138,6 +138,9 @@ pub struct Frag {
     /// Input slots qualified `centroid`, and their barycentrics.
     pub centroid: u64,
     pub centroid_bary: [u32; 3],
+    /// Input slots qualified `noperspective`, and their screen-space barycentrics.
+    pub noperspective: u64,
+    pub noperspective_bary: [u32; 3],
 }
 
 /// What only a vertex shader has.
@@ -206,6 +209,8 @@ impl ShaderState {
                 dst_half: None,
                 centroid: 0,
                 centroid_bary: [0; 3],
+                noperspective: 0,
+                noperspective_bary: [0; 3],
             },
             vert: Default::default(),
             spill: Default::default(),
