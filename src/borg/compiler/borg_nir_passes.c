@@ -806,7 +806,8 @@ borg_trunc_filter(const nir_instr *instr, const void *data)
    if (instr->type != nir_instr_type_alu)
       return false;
    const nir_op op = nir_instr_as_alu(instr)->op;
-   return op == nir_op_ftrunc || op == nir_op_ffloor || op == nir_op_fround_even || op == nir_op_fmod;
+   return op == nir_op_ftrunc || op == nir_op_ffloor || op == nir_op_fround_even || op == nir_op_fmod ||
+          (op == nir_op_frem && nir_instr_as_alu(instr)->def.bit_size == 32);
 }
 
 static nir_def *
@@ -817,6 +818,20 @@ borg_trunc_lower(nir_builder *b, nir_instr *instr, void *data)
    if (alu->op == nir_op_fmod) {
       nir_def *y = nir_ssa_for_alu_src(b, alu, 1);
       return nir_fsub(b, x, nir_fmul(b, y, nir_ffloor(b, nir_fmul(b, x, nir_frcp(b, y)))));
+   }
+   if (alu->op == nir_op_frem) {
+      /* x - y trunc(x/y) by FMA, then the quotient corrected by one, as rounding can still move
+       * trunc to a neighbour. The result takes x's sign, |r| < |y|. */
+      nir_def *y = nir_ssa_for_alu_src(b, alu, 1);
+      nir_def *rcp = nir_frcp(b, y);
+      for (int k = 0; k < 2; k++)   /* the reciprocal is a table lookup: two Newton steps */
+         rcp = nir_ffma(b, rcp, nir_ffma(b, nir_fneg(b, y), rcp, nir_imm_float(b, 1.0f)), rcp);
+      nir_def *q = nir_ftrunc(b, nir_fmul(b, x, rcp));
+      nir_def *r = nir_ffma(b, nir_fneg(b, q), y, x);
+      nir_def *ay = nir_fabs(b, y);
+      nir_def *step = nir_bcsel(b, nir_flt_imm(b, x, 0.0), nir_fneg(b, ay), ay);
+      r = nir_bcsel(b, nir_flt_imm(b, nir_fmul(b, r, x), 0.0), nir_fadd(b, r, step), r);
+      return nir_bcsel(b, nir_fge(b, nir_fabs(b, r), ay), nir_fsub(b, r, step), r);
    }
    const uint32_t fp = b->fp_math_ctrl;
    b->fp_math_ctrl = nir_fp_exact;   /* else nir_opt_algebraic turns i2f(f2i(x)) back into ftrunc, forever */
