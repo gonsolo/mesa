@@ -66,12 +66,31 @@ impl Emitter<'_> {
 
 pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
     let mut e = Emitter { cx, alloc, words: Vec::new(), bad: 0 };
-    let (labels, far) = branch_layout(&cx.sel.prog, 0);
+    let regions = uniform_regions(&cx.sel.prog);
+    let (labels, far, addr) = branch_layout(&cx.sel.prog, 0, &regions);
     for (k, i) in cx.sel.prog.iter().enumerate() {
+        debug_assert!(e.bad > 0 || e.words.len() == addr[k]);
         let rd = *alloc.get(&i.dst).unwrap_or(&0);
         match i.mnem {
             Mnem::Mov | Mnem::Label | Mnem::Break | Mnem::Continue => {}
             Mnem::Op(Op::Brnz) => e.branch(k, i, &labels, &far),
+            // A uniform push skips its side when no lane takes it: BEQ, and the then side's JAL.
+            Mnem::Op(Op::Expush) if regions.contains_key(&k) => {
+                let r = &regions[&k];
+                let t = r.els.filter(|&x| r.jal(x)).map_or(addr[r.pop], |x| addr[x] + 1) as i32;
+                let (rs1, at) = (e.operand(i.srcs[0], i.swz[0]).0, e.words.len() as i32);
+                if far.contains(&k) {
+                    e.push(encode_rv_branch(Op::Bne, rs1, 2));
+                    e.push(encode_jal(t - (at + 1)));
+                } else {
+                    e.push(encode_rv_branch(Op::Beq, rs1, t - at));
+                }
+            }
+            Mnem::Op(Op::Exelse | Op::Expop) if regions.values().any(|r| r.els == Some(k) || r.pop == k) => {
+                if let Some(r) = regions.values().find(|r| r.els == Some(k) && r.jal(k)) {
+                    e.push(encode_jal(addr[r.pop] as i32 - e.words.len() as i32));
+                }
+            }
             Mnem::Op(Op::Expush | Op::Exelse | Op::Expop) => {
                 let rs1 = if i.srcs.is_empty() { 0 } else { e.operand(i.srcs[0], i.swz[0]).0 };
                 e.push(encode(i.mnem, 0, rs1, 0, 0, 0));
@@ -92,33 +111,81 @@ pub fn encode_program(cx: &ShaderState, alloc: &HashMap<u32, u8>) -> Encoded {
     Encoded { words: e.words, n_body, bad: e.bad }
 }
 
-/// LABEL word addresses from the program's start, and the BRNZ whose label is out of a branch's
-/// reach: those become BEQ over a JAL, one word longer, so the layout repeats until it settles.
-fn branch_layout(prog: &[BorgInstr], start: usize) -> (HashMap<u32, usize>, HashSet<usize>) {
+/// The EXELSE and EXPOP of a uniform EXPUSH (imm 1).
+struct Region {
+    els: Option<usize>,
+    pop: usize,
+    // Whether anything is emitted between the EXELSE and the EXPOP.
+    full_else: bool,
+}
+
+impl Region {
+    /// The then side ends with a JAL over the else side.
+    fn jal(&self, els: usize) -> bool {
+        self.els == Some(els) && self.full_else
+    }
+}
+
+fn emits(m: Mnem) -> bool {
+    !matches!(m, Mnem::Mov | Mnem::Label | Mnem::Break | Mnem::Continue)
+}
+
+fn uniform_regions(prog: &[BorgInstr]) -> HashMap<usize, Region> {
+    let (mut open, mut out): (Vec<(usize, Option<usize>)>, HashMap<usize, Region>) = (vec![], HashMap::new());
+    for (k, i) in prog.iter().enumerate() {
+        match i.mnem {
+            Mnem::Op(Op::Expush) => open.push((k, None)),
+            Mnem::Op(Op::Exelse) => open.last_mut().unwrap().1 = Some(k),
+            Mnem::Op(Op::Expop) => {
+                let (p, els) = open.pop().unwrap();
+                if prog[p].imm == 1 {
+                    let full_else = els.is_some_and(|x| prog[x + 1..k].iter().any(|i| emits(i.mnem)));
+                    out.insert(p, Region { els, pop: k, full_else });
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// LABEL word addresses from the program's start, the branches out of a BEQ's reach (a BRNZ, or a
+/// uniform EXPUSH: one word longer as a branch over a JAL, so the layout repeats until it
+/// settles) and each instruction's word address.
+fn branch_layout(prog: &[BorgInstr], start: usize, regions: &HashMap<usize, Region>) -> (HashMap<u32, usize>, HashSet<usize>, Vec<usize>) {
     let mut far = HashSet::new();
+    let skipped: HashSet<usize> = regions.values().flat_map(|r| [Some(r.pop), r.els.filter(|&x| !r.jal(x))]).flatten().collect();
     loop {
-        let (mut a, mut labels, mut at) = (start, HashMap::new(), Vec::new());
+        let (mut a, mut labels, mut addr) = (start, HashMap::new(), Vec::with_capacity(prog.len()));
         for (k, i) in prog.iter().enumerate() {
+            addr.push(a);
             match i.mnem {
-                Mnem::Mov | Mnem::Break | Mnem::Continue => {}
-                Mnem::Label => {
-                    labels.insert(i.imm, a);
+                _ if !emits(i.mnem) => {
+                    if i.mnem == Mnem::Label {
+                        labels.insert(i.imm, a);
+                    }
                 }
-                Mnem::Op(Op::Brnz) => {
-                    at.push((k, a));
-                    a += if far.contains(&k) { 2 } else { 1 };
-                }
+                _ if skipped.contains(&k) => {}
+                Mnem::Op(Op::Brnz | Op::Expush) => a += if far.contains(&k) { 2 } else { 1 },
                 _ => a += 1,
             }
         }
         let mut changed = false;
-        for (k, a) in at {
-            if !(-1024..1024).contains(&(labels[&prog[k].imm] as i64 - a as i64)) {
+        for (k, i) in prog.iter().enumerate() {
+            let t = match i.mnem {
+                Mnem::Op(Op::Brnz) => labels[&i.imm],
+                Mnem::Op(Op::Expush) => match regions.get(&k) {
+                    Some(r) => r.els.filter(|&x| r.jal(x)).map_or(addr[r.pop], |x| addr[x] + 1),
+                    None => continue,
+                },
+                _ => continue,
+            };
+            if !(-1024..1024).contains(&(t as i64 - addr[k] as i64)) {
                 changed |= far.insert(k);
             }
         }
         if !changed {
-            return (labels, far);
+            return (labels, far, addr);
         }
     }
 }
@@ -194,7 +261,8 @@ pub fn build_blob(
 
 #[cfg(test)]
 mod tests {
-    use super::branch_layout;
+    use super::{branch_layout, uniform_regions};
+    use std::collections::HashMap;
     use crate::opcodes::Op;
     use crate::{BorgInstr, Mnem, NO_DST};
 
@@ -208,7 +276,7 @@ mod tests {
     #[test]
     fn a_branch_back_1024_words_is_near() {
         // Label at 3, BNE at 3 + 1024: offset -1024, the farthest a branch reaches back.
-        let (labels, far) = branch_layout(&prog(1024), 3);
+        let (labels, far, _) = branch_layout(&prog(1024), 3, &HashMap::new());
         assert_eq!(labels[&7], 3);
         assert!(far.is_empty());
     }
@@ -216,7 +284,26 @@ mod tests {
     #[test]
     fn a_branch_back_1025_words_is_a_beq_over_a_jal() {
         let p = prog(1025);
-        let (_, far) = branch_layout(&p, 3);
+        let (_, far, _) = branch_layout(&p, 3, &HashMap::new());
         assert_eq!(far.into_iter().collect::<Vec<_>>(), vec![p.len() - 1]);
+    }
+
+    #[test]
+    fn a_uniform_if_takes_no_mask_level() {
+        let i = |m: Op, imm: u32| BorgInstr { mnem: m.into(), dst: NO_DST, srcs: vec![1], swz: vec![0], imm };
+        // EXPUSH (uniform) 0, IADD 1, EXELSE as JAL 2, IADD 3, EXPOP nothing: 4.
+        let p = vec![i(Op::Expush, 1), i(Op::Iadd, 0), i(Op::Exelse, 0), i(Op::Iadd, 0), i(Op::Expop, 0)];
+        let r = uniform_regions(&p);
+        let (_, far, addr) = branch_layout(&p, 0, &r);
+        assert!(far.is_empty() && r[&0].jal(2));
+        assert_eq!((addr[2] + 1, addr[4]), (3, 4));
+        // An empty else side: no JAL, the BEQ goes to the end.
+        let p = vec![i(Op::Expush, 1), i(Op::Iadd, 0), i(Op::Exelse, 0), i(Op::Expop, 0), i(Op::Iadd, 0)];
+        let r = uniform_regions(&p);
+        let (_, _, addr) = branch_layout(&p, 0, &r);
+        assert!(!r[&0].jal(2));
+        assert_eq!((addr[3], addr[4]), (2, 2));
+        // A divergent push is no region.
+        assert!(uniform_regions(&[i(Op::Expush, 0), i(Op::Expop, 0)]).is_empty());
     }
 }

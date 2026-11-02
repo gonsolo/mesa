@@ -1317,8 +1317,9 @@ impl ShaderState {
         }
     }
 
-    /// A loop runs while EXANY sees an alive lane: `go` masks one trip, a jump clears it.
-    fn loop_mark(&mut self, mnem: Mnem, id: usize, (alive, go, any): (u32, u32, u32)) {
+    /// A loop runs while EXANY sees an alive lane: `go` masks one trip, a jump clears it. In a
+    /// uniform loop the pushes of `go` are branches (imm 1).
+    fn loop_mark(&mut self, mnem: Mnem, id: usize, (alive, go, any): (u32, u32, u32), uniform: bool) {
         let one = if mnem == Mnem::LoopHead { self.konst(1) } else { 0 };
         let i = |mnem: Mnem, dst: u32, srcs: Vec<u32>, swz: Vec<u8>| BorgInstr { mnem, dst, srcs, swz, imm: 0 };
         let label = BorgInstr { mnem: Mnem::Label, dst: NO_DST, srcs: vec![], swz: vec![], imm: id as u32 };
@@ -1327,7 +1328,7 @@ impl ShaderState {
                 i(Op::Ior.into(), alive, vec![one, one], vec![0, 0]),
                 label,
                 i(Op::Ior.into(), go, vec![alive, alive], vec![0, 0]),
-                i(Op::Expush.into(), NO_DST, vec![go], vec![0]),
+                BorgInstr { imm: uniform as u32, ..i(Op::Expush.into(), NO_DST, vec![go], vec![0]) },
             ],
             Mnem::LoopEnd => vec![
                 i(Op::Expop.into(), NO_DST, vec![], vec![]),
@@ -1336,7 +1337,7 @@ impl ShaderState {
                 i(Op::Expop.into(), NO_DST, vec![], vec![]),
                 BorgInstr { mnem: Op::Brnz.into(), dst: NO_DST, srcs: vec![any], swz: vec![0], imm: id as u32 },
             ],
-            _ => vec![i(Op::Expush.into(), NO_DST, vec![go], vec![0])],
+            _ => vec![BorgInstr { imm: uniform as u32, ..i(Op::Expush.into(), NO_DST, vec![go], vec![0]) }],
         };
         self.sel.prog.extend(seq);
     }
@@ -1347,6 +1348,8 @@ impl ShaderState {
         let mut cf_marks: std::collections::HashMap<usize, Vec<CfMark>> =
             std::collections::HashMap::new();
         let mut loops = crate::Loops::default();
+        // A quad may hold several workgroups, and lanes load at different times.
+        nir_divergence_analysis_impl(entry, nir_divergence_multiple_workgroup_per_compute_subgroup | nir_divergence_uniform_load_tears);
         collect_cf_marks((*entry).iter_body(), &mut cf_marks, &mut loops, None);
         if loops.count > 256 {
             loops.err = Some(format!("{} loops; labels are 8 bits", loops.count));
@@ -1392,7 +1395,7 @@ impl ShaderState {
             if let Some(ms) = cf_marks.get(&(block as *const nir_block as usize)) {
                 for m in ms {
                     if let Some(id) = m.lp {
-                        self.loop_mark(m.mnem, id, lv[id]);
+                        self.loop_mark(m.mnem, id, lv[id], loops.uniform[id]);
                         continue;
                     }
                     let cond = m.cond.map(|c| match self.consts.get(&c) {
@@ -1404,7 +1407,7 @@ impl ShaderState {
                         dst: NO_DST,
                         srcs: cond.map(|c| vec![c.0]).unwrap_or_default(),
                         swz: cond.map(|c| vec![c.1]).unwrap_or_default(),
-                        imm: 0,
+                        imm: m.uniform as u32,
                     });
                 }
             }

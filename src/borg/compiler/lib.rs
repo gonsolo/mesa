@@ -102,6 +102,8 @@ pub(crate) struct CfMark {
     pub(crate) cond: Option<u32>,
     /// The loop of a LOOP_HEAD, LOOP_END or REPUSH.
     pub(crate) lp: Option<usize>,
+    /// EXPUSH: every active lane has the same condition, so the emitter branches instead.
+    pub(crate) uniform: bool,
 }
 
 /// Compute loops: the loop each break or continue block jumps out of.
@@ -110,6 +112,8 @@ pub(crate) struct Loops {
     pub(crate) count: usize,
     pub(crate) jumps: std::collections::HashMap<usize, usize>,
     pub(crate) err: Option<String>,
+    /// Per loop: no lane leaves it or goes round without the others.
+    pub(crate) uniform: Vec<bool>,
 }
 
 /// What a BorgInstr is: a Borg instruction, or a marker the emitter resolves.
@@ -237,7 +241,7 @@ pub(crate) unsafe fn collect_cf_marks(
     cur: Option<usize>,
 ) -> (bool, bool) {
     let key = |b: &nir_block| b as *const nir_block as usize;
-    let mark = |mnem, cond, lp| CfMark { mnem, cond, lp };
+    let mark = |mnem, cond, lp| CfMark { mnem, cond, lp, uniform: false };
     let (mut jumps, mut repushed) = (false, false);
     for node in nodes {
         if let Some(b) = node.as_block() {
@@ -255,7 +259,8 @@ pub(crate) unsafe fn collect_cf_marks(
         if let Some(nif) = node.as_if() {
             let (tj, tr) = collect_cf_marks(nif.iter_then_list(), marks, loops, cur);
             let (ej, er) = collect_cf_marks(nif.iter_else_list(), marks, loops, cur);
-            marks.entry(key(nif.first_then_block())).or_default().push(mark(Op::Expush.into(), Some(nif.condition.as_def().index), None));
+            let c = nif.condition.as_def();
+            marks.entry(key(nif.first_then_block())).or_default().push(CfMark { uniform: !c.divergent, ..mark(Op::Expush.into(), Some(c.index), None) });
             let e = marks.entry(key(nif.first_else_block())).or_default();
             if tr {
                 e.push(mark(Op::Expop.into(), None, None));
@@ -276,6 +281,7 @@ pub(crate) unsafe fn collect_cf_marks(
         } else if let Some(nloop) = node.as_loop() {
             let id = loops.count;
             loops.count += 1;
+            loops.uniform.push(!nloop.divergent_break && !nloop.divergent_continue);
             let cl = &nloop.continue_list;
             if !std::ptr::eq(cl.head_sentinel.next, &cl.tail_sentinel) {
                 loops.err = Some("a loop with a continue construct".into());
