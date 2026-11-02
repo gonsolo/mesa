@@ -126,7 +126,7 @@ impl Region {
     }
 }
 
-fn emits(m: Mnem) -> bool {
+pub(crate) fn emits(m: Mnem) -> bool {
     !matches!(m, Mnem::Mov | Mnem::Label | Mnem::Break | Mnem::Continue)
 }
 

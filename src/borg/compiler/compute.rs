@@ -712,6 +712,10 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, compact: bool, pack: bool) 
         forced.extend(cx.tex_dsts.iter().map(|&t| (t, rd)));
         reserved.extend(rd + 1..rd + 4);
     }
+    let n = cx.sel.prog.iter().filter(|i| crate::emit::emits(i.mnem)).count();
+    if n > MAX_WORDS {
+        return Err(format!("{n} instructions exceed the {MAX_WORDS}-word program limit"));
+    }
     cx.spill_to_fit(&forced, &mut reserved, &[], 0)?;
     if cx.spill.slots > 0 {
         debug!("borgc[compute]: spilled {} value(s)", cx.spill.slots);

@@ -9,6 +9,9 @@ use crate::{BorgInstr, Flags, Loc, Mnem, NO_DST};
 use std::collections::HashMap;
 use compiler::bindings::*;
 
+/// A draw shader's slot (borg_layout.h DRAW_VERT/FRAG_SHADER_MAX_WORDS).
+const MAX_DRAW_WORDS: usize = 8188;
+
 const INTERP_MODE_NOPERSPECTIVE: u32 = 3; // glsl_interp_mode
 use crate::opcodes::Op;
 
@@ -510,6 +513,12 @@ impl ShaderState {
     }
 
     pub fn assemble(&mut self) -> Option<Vec<u8>> {
+        // Spilling only adds code: a program over the limit already is refused before it.
+        let n = self.sel.prog.iter().filter(|i| crate::emit::emits(i.mnem)).count();
+        if n > MAX_DRAW_WORDS {
+            self.refuse(format!("{n} instructions exceed the {MAX_DRAW_WORDS}-word draw shader limit"));
+            return None;
+        }
         let (forced, mut extra_reserved) = fixed_regs(self);
         let mut alloc = allocate(self, &forced, &mut extra_reserved);
         // The fit counts live values; the allocator may still need a register or two more.
