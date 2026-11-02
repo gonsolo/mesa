@@ -8,7 +8,7 @@ use crate::ffi::{pipe_format, VkFormat, PIPE_FORMAT_NONE};
 pub const BORGVK_STAGE_VERT: u32 = 0;
 pub const BORGVK_STAGE_FRAG: u32 = 1;
 pub const BORGVK_SHADER_STAGE_COUNT: u32 = 2;
-pub const BORGVK_SHADER_BLOB_MAX: u32 = 16384;
+pub const BORGVK_SHADER_BLOB_MAX: u32 = 32768;
 pub const BORGVK_POOL_MAX: u32 = 64;
 pub const BORGVK_POOL_SLOT: u32 = 40;
 pub const BORGVK_VPOOL_SLOT: u32 = 42;
