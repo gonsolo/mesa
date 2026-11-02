@@ -10,7 +10,6 @@ const SCRATCH_WORDS: u32 = 16384 * 34;
 // Each of the 4 quad slots has a 16 KB cell of the 64 KB scratch slot: 4-word late slots, then the key.
 const CELL_SHIFT: u32 = 14;
 const MAX_LATE_SLOTS: u32 = (1 << CELL_SHIFT) / 16 - 1;
-const MAX_COMPUTE_SPILL_SLOTS: u32 = 64;
 // The vertex lane key's two words, after the slots; the word after the second takes the other lanes' store.
 const KEY_WORDS: u32 = SCRATCH_WORDS + 4 * MAX_LATE_SLOTS;
 
@@ -29,7 +28,12 @@ impl ShaderState {
     pub(crate) fn spill_to_fit(&mut self, forced: &HashMap<u32, u8>, reserved: &mut Vec<u8>, soft: &[u8], margin: usize) -> Result<(), String> {
         let hard: Vec<u8> = forced.values().copied().filter(|r| !soft.contains(r)).chain(reserved.iter().copied()).collect();
         let free = (1..30u8).filter(|r| !hard.contains(r)).count().saturating_sub(margin);
-        let max = if self.stage == Stage::Compute { MAX_COMPUTE_SPILL_SLOTS } else { MAX_LATE_SLOTS };
+        // Compute slots fill the rest of slot 34 after the pool.
+        let max = if self.stage == Stage::Compute {
+            (crate::compute::SLOT_WORDS - crate::compute::POOL_MAX as u32) / self.invocations().max(1)
+        } else {
+            MAX_LATE_SLOTS
+        };
         let mut freed = 0;
         loop {
             let ranges = crate::block::live_ranges(&self.sel.prog);
