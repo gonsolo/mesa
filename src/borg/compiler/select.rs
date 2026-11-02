@@ -816,7 +816,7 @@ impl ShaderState {
             st.frag.per_pixel_fixed.insert(v);
             v
         };
-        let e = [0u8, 1, 2].map(|r| fixed(self, r));
+        let e = [1u8, 2, 3].map(|r| fixed(self, r));
         let one = self.konst(1.0f32.to_bits());
         let not = |st: &mut Self, x: u32| {
             let n = st.sel.op0(Op::Fneg, vec![x]);
@@ -848,10 +848,13 @@ impl ShaderState {
             oy = Some(match oy { None => self.sel.op0(Op::Fmul, vec![w, ky]), Some(o) => self.sel.op0(Op::Fmadd, vec![w, ky, o]) });
         }
         let (ox, oy) = (ox.unwrap(), oy.unwrap());
+        // The planes' window words, copied: an FMADD cannot read the window.
+        let zero = self.sel.op0(Op::Isub, vec![e[0], e[0]]);
         let es = [0u8, 1, 2].map(|k| {
             let (a, b) = (self.sel.fresh(), self.sel.fresh());
             self.sel.loc.insert(a, Loc::Uniform(3 * k));
             self.sel.loc.insert(b, Loc::Uniform(3 * k + 1));
+            let (a, b) = (self.sel.op0(Op::Iadd, vec![a, zero]), self.sel.op0(Op::Iadd, vec![b, zero]));
             let t = self.sel.op0(Op::Fmadd, vec![a, ox, e[k as usize]]);
             self.sel.op0(Op::Fmadd, vec![b, oy, t])
         });
