@@ -77,13 +77,14 @@ borg_image_atomic(const nir_intrinsic_instr *i)
    return i->intrinsic == nir_intrinsic_image_deref_atomic || i->intrinsic == nir_intrinsic_image_deref_atomic_swap;
 }
 
-/* A 2D image of R32 or RGBA8 texels: one word per texel, packed in the shader. Every other
+/* A 2D or 3D image of R32 or RGBA8 texels: one word per texel, packed in the shader. Every other
  * storage image is RGBA32 per texel, decoded and packed by the driver (dispatch.rs). */
 static bool
 borg_image_words(const nir_intrinsic_instr *i)
 {
    const enum pipe_format f = nir_intrinsic_format(i);
-   return nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_2D && !nir_intrinsic_image_array(i) &&
+   const enum glsl_sampler_dim dim = nir_intrinsic_image_dim(i);
+   return (dim == GLSL_SAMPLER_DIM_2D || dim == GLSL_SAMPLER_DIM_3D) && !nir_intrinsic_image_array(i) &&
           (f == PIPE_FORMAT_NONE || f == PIPE_FORMAT_R32_UINT || f == PIPE_FORMAT_R32_SINT ||
            f == PIPE_FORMAT_R32_FLOAT || f == PIPE_FORMAT_R8G8B8A8_UNORM || f == PIPE_FORMAT_R8G8B8A8_UINT ||
            f == PIPE_FORMAT_R8G8B8A8_SINT);
@@ -129,7 +130,8 @@ borg_frag_image_filter(const nir_instr *instr, const void *data)
 {
    return instr->type == nir_instr_type_intrinsic && borg_texel_buffer_filter(instr, data) &&
           nir_instr_as_intrinsic(instr)->intrinsic != nir_intrinsic_image_deref_size &&
-          (borg_image_words(nir_instr_as_intrinsic(instr)) ||
+          ((borg_image_words(nir_instr_as_intrinsic(instr)) &&
+            nir_intrinsic_image_dim(nir_instr_as_intrinsic(instr)) == GLSL_SAMPLER_DIM_2D) ||
            nir_intrinsic_image_dim(nir_instr_as_intrinsic(instr)) == GLSL_SAMPLER_DIM_BUF) &&
           !borg_image_atomic(nir_instr_as_intrinsic(instr));
 }
@@ -224,6 +226,11 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
       }
       nir_def *x = nir_channel(b, st->src[1].ssa, 0);
       nir_def *y = nir_channel(b, st->src[1].ssa, 1);
+      if (nir_intrinsic_image_dim(st) == GLSL_SAMPLER_DIM_3D) {
+         /* Slices follow each other; the height is in the size words at the window's end. */
+         nir_def *height = nir_load_ssbo(b, 1, 32, buf, nir_imm_int(b, BORG_CS_SLOT_BYTES - 12), .align_mul = 4);
+         y = nir_iadd(b, nir_imul(b, nir_channel(b, st->src[1].ssa, 2), height), y);
+      }
       nir_def *word = nir_iadd(b, nir_iadd(b, nir_imul(b, y, width), x), nir_imm_int(b, 1));
       const enum pipe_format fmt = nir_intrinsic_format(st);
       const bool rgba8 = fmt == PIPE_FORMAT_R8G8B8A8_UNORM;
