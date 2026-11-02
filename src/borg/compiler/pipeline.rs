@@ -8,6 +8,8 @@ use crate::opcodes::{CSR_BARY0, CSR_FRAG_X, CSR_GROUP_ID_X, CSR_LOCAL_INDEX, CSR
 use crate::{BorgInstr, Flags, Loc, Mnem, NO_DST};
 use std::collections::HashMap;
 use compiler::bindings::*;
+
+const INTERP_MODE_NOPERSPECTIVE: u32 = 3; // glsl_interp_mode
 use crate::opcodes::Op;
 
 impl ShaderState {
@@ -37,15 +39,24 @@ impl ShaderState {
         if stage == Stage::Fragment {
             for var in (*nir).iter_variables() {
                 let d = &var.data;
-                if d.mode() == nir_var_shader_in && d.centroid() != 0 && d.location >= VARYING_SLOT_VAR0 as i32 {
+                if d.mode() == nir_var_shader_in && d.location >= VARYING_SLOT_VAR0 as i32 {
                     let first = d.location as u32 - VARYING_SLOT_VAR0;
                     for k in 0..glsl_count_attribute_slots(var.type_, false) {
-                        st.frag.centroid |= 1u64.checked_shl(first + k).unwrap_or(0);
+                        let bit = 1u64.checked_shl(first + k).unwrap_or(0);
+                        if d.centroid() != 0 {
+                            st.frag.centroid |= bit;
+                        }
+                        if d.interpolation() == INTERP_MODE_NOPERSPECTIVE {
+                            st.frag.noperspective |= bit;
+                        }
                     }
                 }
             }
             if st.frag.centroid != 0 {
                 st.frag.centroid_bary = st.centroid_barycentrics();
+            }
+            if st.frag.noperspective != 0 {
+                st.frag.noperspective_bary = st.noperspective_barycentrics();
             }
         }
         (st, entry, total)

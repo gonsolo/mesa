@@ -768,8 +768,11 @@ impl ShaderState {
         let loc = if is_pc { 25 } else { intr.get_const_index(NIR_INTRINSIC_IO_SEMANTICS) & 0x7F };
         let base_index = if loc == 25 { self.flags.pntc_base() } else { 4 * loc.wrapping_sub(VARYING_SLOT_VAR0) + intr.get_const_index(NIR_INTRINSIC_COMPONENT) as u32 };
         let centroid = !is_pc && self.frag.centroid >> loc.wrapping_sub(VARYING_SLOT_VAR0).min(63) & 1 != 0;
+        let noperspective = !is_pc && self.frag.noperspective >> loc.wrapping_sub(VARYING_SLOT_VAR0).min(63) & 1 != 0;
         let bary = if centroid {
             self.frag.centroid_bary
+        } else if noperspective {
+            self.frag.noperspective_bary
         } else {
             [5u8, 6, 7].map(|r| {
                 let v = self.sel.next_vreg; self.sel.next_vreg += 1;
@@ -812,6 +815,34 @@ impl ShaderState {
         let t = self.sel.fresh();
         self.sel.prog.push(BorgInstr { mnem: Op::Csrrs.into(), dst: t, srcs: vec![], swz: vec![], imm: crate::opcodes::CSR_UNIFORM0 + u as u32 });
         t
+    }
+
+    /// Screen-space barycentrics `lk wk / sum(lj wj)` from the perspective-correct ones (r5-r7).
+    /// The corners' w, up to a common factor, is the last row of the planes' inverse:
+    /// `wk ~ a(k+1) b(k+2) - b(k+1) a(k+2)`.
+    pub(crate) fn noperspective_barycentrics(&mut self) -> [u32; 3] {
+        let lam = [5u8, 6, 7].map(|r| {
+            let v = self.sel.fresh();
+            self.sel.loc.insert(v, Loc::Fixed(r));
+            self.frag.per_pixel_fixed.insert(v);
+            v
+        });
+        let ab = [0u8, 1, 2].map(|k| [0u8, 1].map(|c| self.record_word(3 * k + c)));
+        let p = [0usize, 1, 2].map(|k| {
+            let ([a1, b1], [a2, b2]) = (ab[(k + 1) % 3], ab[(k + 2) % 3]);
+            let t = self.sel.op0(Op::Fmul, vec![b1, a2]);
+            let nt = self.sel.op0(Op::Fneg, vec![t]);
+            let w = self.sel.op0(Op::Fmadd, vec![a1, b2, nt]);
+            self.sel.op0(Op::Fmul, vec![lam[k], w])
+        });
+        let s01 = self.sel.op0(Op::Fadd, vec![p[0], p[1]]);
+        let sum = self.sel.op0(Op::Fadd, vec![s01, p[2]]);
+        let one = self.konst(1.0f32.to_bits());
+        let r = self.sel.op0(Op::Frcp, vec![sum]);
+        let ns = self.sel.op0(Op::Fneg, vec![sum]);
+        let err = self.sel.op0(Op::Fmadd, vec![ns, r, one]);
+        let r = self.sel.op0(Op::Fmadd, vec![r, err, r]);
+        p.map(|x| self.sel.op0(Op::Fmul, vec![x, r]))
     }
 
     /// Barycentrics inside both the pixel and the triangle: the centre's when the centre is inside
