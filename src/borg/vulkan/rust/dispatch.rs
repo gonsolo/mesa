@@ -159,14 +159,17 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                 let src = unsafe { src.add(off0 as usize) };
                 let words = [PIPE_FORMAT_R32_UINT, PIPE_FORMAT_R32_SINT, PIPE_FORMAT_R32_FLOAT, PIPE_FORMAT_R8G8B8A8_UNORM,
                              PIPE_FORMAT_R8G8B8A8_UINT, PIPE_FORMAT_R8G8B8A8_SINT];
-                if flat && !layered && words.contains(&fmt::pipe(vf)) {
-                    // R32 or RGBA8 texels, packed by the shader (borg_image_words): the width, then the texels.
-                    let n = (w * h).min(SLOT_BYTES / 4 - 5);
+                let solid = img.vk.image_type == VK_IMAGE_TYPE_3D && view.is_none_or(|v| v.view_type == VK_IMAGE_VIEW_TYPE_3D);
+                if (flat && !layered || solid) && words.contains(&fmt::pipe(vf)) {
+                    // R32 or RGBA8 texels, packed by the shader (borg_image_words): the width, then the
+                    // texels, slice after slice.
+                    let d = if solid { d } else { 1 };
+                    let n = (w * h * d).min(SLOT_BYTES / 4 - 5);
                     let mut dec = vec![0u8; (1 + n) as usize * 4];
                     dec[..4].copy_from_slice(&w.to_ne_bytes());
                     dec[4..].copy_from_slice(unsafe { std::slice::from_raw_parts(src, n as usize * 4) });
                     bufs.push(CsBuf { host: src, wb: true, skip: 4, ..decoded(addr, dec, (1 + n) * 4) });
-                    bufs.push(size_header(addr, [w, h, 1]));
+                    bufs.push(size_header(addr, [w, h, d]));
                     continue;
                 }
                 // Any other storage image: width and height, then every layer's texels as RGBA32.
