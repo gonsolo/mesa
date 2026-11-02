@@ -815,7 +815,7 @@ impl ShaderState {
     }
 
     /// Barycentrics inside both the pixel and the triangle: the centre's when the centre is inside
-    /// all three edges, else the first covered sample's (`Ek + ak*ox + bk*oy`, normalized).
+    /// all three edges, else the first covered sample's (`Ek` there, normalized).
     pub(crate) fn centroid_barycentrics(&mut self) -> [u32; 3] {
         let fixed = |st: &mut Self, r: u8| {
             let v = st.sel.fresh();
@@ -823,7 +823,6 @@ impl ShaderState {
             st.frag.per_pixel_fixed.insert(v);
             v
         };
-        let e = [1u8, 2, 3].map(|r| fixed(self, r));
         let one = self.konst(1.0f32.to_bits());
         let not = |st: &mut Self, x: u32| {
             let n = st.sel.op0(Op::Fneg, vec![x]);
@@ -857,11 +856,14 @@ impl ShaderState {
             ox = Some(match ox { None => self.sel.op0(Op::Fmul, vec![w, kx]), Some(o) => self.sel.op0(Op::Fmadd, vec![w, kx, o]) });
             oy = Some(match oy { None => self.sel.op0(Op::Fmul, vec![w, ky]), Some(o) => self.sel.op0(Op::Fmadd, vec![w, ky, o]) });
         }
-        let (ox, oy) = (ox.unwrap(), oy.unwrap());
+        // The planes at the sample, from the record as the raster ROM evaluates them.
+        let (px, py) = (fixed(self, 30), fixed(self, 31));
+        let x = self.sel.op0(Op::Fadd, vec![px, ox.unwrap()]);
+        let y = self.sel.op0(Op::Fadd, vec![py, oy.unwrap()]);
         let es = [0u8, 1, 2].map(|k| {
-            let (a, b) = (self.record_word(3 * k), self.record_word(3 * k + 1));
-            let t = self.sel.op0(Op::Fmadd, vec![a, ox, e[k as usize]]);
-            self.sel.op0(Op::Fmadd, vec![b, oy, t])
+            let (a, b, c) = (self.record_word(3 * k), self.record_word(3 * k + 1), self.record_word(3 * k + 2));
+            let t = self.sel.op0(Op::Fmadd, vec![b, y, c]);
+            self.sel.op0(Op::Fmadd, vec![a, x, t])
         });
         let s01 = self.sel.op0(Op::Fadd, vec![es[0], es[1]]);
         let sum = self.sel.op0(Op::Fadd, vec![s01, es[2]]);
