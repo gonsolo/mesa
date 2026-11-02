@@ -15,7 +15,7 @@ use crate::descriptor_set::{find_flat, DescriptorSet};
 use crate::state_upload::DEFAULT_SAMPLER;
 use crate::texture_upload::generic_texture;
 use crate::util::{log, temp_file, MESA_LOG_WARN};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::process::{Child, Command};
 
 const SLOT_BYTES: u32 = 0x80000 * 4;
@@ -371,7 +371,6 @@ fn merge(bufs: &[CsBuf], parts: &mut [Part], ran: &mut bool) -> Vec<Vec<u8>> {
                     }
                 }
             }
-            let _ = f.seek(SeekFrom::Current((b.padded() - b.size) as i64));
         }
     }
     merged
