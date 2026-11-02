@@ -363,7 +363,7 @@ borg_lower_cube(nir_builder *b, nir_instr *instr, void *data)
    nir_def *half_inv = nir_fmul_imm(b, nir_frcp(b, r[0]), 0.5f);
    nir_def *half = nir_imm_float(b, 0.5f);
    nir_def *st = nir_vec3(b, nir_ffma(b, r[1], half_inv, half), nir_ffma(b, r[2], half_inv, half), r[3]);
-   if (tex->op == nir_texop_tex) {
+   if (tex->op == nir_texop_tex || tex->op == nir_texop_txb) {
       /* With w = c x dc, d(s, t) * 2 |ma|^2 are w's two components off the major axis, so
        * |ds| + |dt| = (|wx| + |wy| + |wz| - |w[major]|) / (2 |ma|^2). */
       nir_def *rho = NULL;
@@ -381,10 +381,16 @@ borg_lower_cube(nir_builder *b, nir_instr *instr, void *data)
       nir_def *width = nir_i2f32(b, nir_channel(b, nir_get_texture_size(b, tex), 0));
       /* rho in face units * 2 |ma|^2 -> texels per pixel: * width / (2 |ma|^2) */
       rho = nir_fmul(b, nir_fmul(b, rho, width), nir_fmul_imm(b, nir_fmul(b, half_inv, half_inv), 2.0f));
-      nir_tex_instr_add_src(tex, nir_tex_src_lod, nir_flog2(b, rho));
+      nir_def *lod = nir_flog2(b, rho);
+      const int bias = nir_tex_instr_src_index(tex, nir_tex_src_bias);
+      if (bias >= 0) {
+         lod = nir_fadd(b, lod, tex->src[bias].src.ssa);
+         nir_tex_instr_remove_src(tex, bias);
+      }
+      nir_tex_instr_add_src(tex, nir_tex_src_lod, lod);
       tex->op = nir_texop_txl;
    }
-   nir_src_rewrite(&tex->src[ci].src, st);
+   nir_src_rewrite(&tex->src[nir_tex_instr_src_index(tex, nir_tex_src_coord)].src, st);
    tex->coord_components = 3;
    tex->is_array = true;
    tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
