@@ -807,6 +807,13 @@ impl ShaderState {
         self.sel.vec_map.insert(intr.def.index, comps);
     }
 
+    /// A word of the triangle's record (u0-u19), through its CSR as the raster ROM reads it.
+    fn record_word(&mut self, u: u8) -> u32 {
+        let t = self.sel.fresh();
+        self.sel.prog.push(BorgInstr { mnem: Op::Csrrs.into(), dst: t, srcs: vec![], swz: vec![], imm: crate::opcodes::CSR_UNIFORM0 + u as u32 });
+        t
+    }
+
     /// Barycentrics inside both the pixel and the triangle: the centre's when the centre is inside
     /// all three edges, else the first covered sample's (`Ek + ak*ox + bk*oy`, normalized).
     pub(crate) fn centroid_barycentrics(&mut self) -> [u32; 3] {
@@ -822,14 +829,17 @@ impl ShaderState {
             let n = st.sel.op0(Op::Fneg, vec![x]);
             st.sel.op0(Op::Fadd, vec![one, n])
         };
+        // Inside by the barycentrics (r5-r7): the planes' sign depends on the winding.
+        let lam = [5u8, 6, 7].map(|r| fixed(self, r));
         let mut rest = one;
-        for &ek in &e {
-            let n = self.sel.op0(Op::Fneg, vec![ek]);
+        for &lk in &lam {
+            let n = self.sel.op0(Op::Fneg, vec![lk]);
             let out = self.sel.op0(Op::Fstep, vec![n]);
             let inn = not(self, out);
             rest = self.sel.op0(Op::Fmul, vec![rest, inn]);
         }
         rest = not(self, rest);
+        let outside = rest;
         let mask = self.sel.fresh();
         self.sel.prog.push(BorgInstr { mnem: Op::Csrrs.into(), dst: mask, srcs: vec![], swz: vec![], imm: crate::opcodes::CSR_SAMPLE_MASK });
         let bit1 = self.konst(1);
@@ -848,13 +858,8 @@ impl ShaderState {
             oy = Some(match oy { None => self.sel.op0(Op::Fmul, vec![w, ky]), Some(o) => self.sel.op0(Op::Fmadd, vec![w, ky, o]) });
         }
         let (ox, oy) = (ox.unwrap(), oy.unwrap());
-        // The planes' window words, copied: an FMADD cannot read the window.
-        let zero = self.sel.op0(Op::Isub, vec![e[0], e[0]]);
         let es = [0u8, 1, 2].map(|k| {
-            let (a, b) = (self.sel.fresh(), self.sel.fresh());
-            self.sel.loc.insert(a, Loc::Uniform(3 * k));
-            self.sel.loc.insert(b, Loc::Uniform(3 * k + 1));
-            let (a, b) = (self.sel.op0(Op::Iadd, vec![a, zero]), self.sel.op0(Op::Iadd, vec![b, zero]));
+            let (a, b) = (self.record_word(3 * k), self.record_word(3 * k + 1));
             let t = self.sel.op0(Op::Fmadd, vec![a, ox, e[k as usize]]);
             self.sel.op0(Op::Fmadd, vec![b, oy, t])
         });
@@ -865,7 +870,13 @@ impl ShaderState {
         let ns = self.sel.op0(Op::Fneg, vec![sum]);
         let err = self.sel.op0(Op::Fmadd, vec![ns, r, one]);
         let r = self.sel.op0(Op::Fmadd, vec![r, err, r]);
-        es.map(|x| self.sel.op0(Op::Fmul, vec![x, r]))
+        // A centre inside keeps the raster ROM's barycentrics bit for bit.
+        [0usize, 1, 2].map(|k| {
+            let c = self.sel.op0(Op::Fmul, vec![es[k], r]);
+            let nl = self.sel.op0(Op::Fneg, vec![lam[k]]);
+            let d = self.sel.op0(Op::Fadd, vec![c, nl]);
+            self.sel.op0(Op::Fmadd, vec![outside, d, lam[k]])
+        })
     }
 
     /// Push constants, from the uniform window or, with a buffer in the shader, the heap window.
