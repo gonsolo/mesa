@@ -684,6 +684,19 @@ borg_iabs_lower(nir_builder *b, nir_instr *instr, void *data)
    return nir_imax(b, x, nir_ineg(b, x));
 }
 
+/* A boolean read from memory (shared, buffers) is true when not zero. */
+static bool
+borg_b2b1_filter(const nir_instr *instr, const void *data)
+{
+   return instr->type == nir_instr_type_alu && nir_instr_as_alu(instr)->op == nir_op_b2b1;
+}
+
+static nir_def *
+borg_b2b1_lower(nir_builder *b, nir_instr *instr, void *data)
+{
+   return nir_ine_imm(b, nir_ssa_for_alu_src(b, nir_instr_as_alu(instr), 0), 0);
+}
+
 /* Lines and points are drawn as triangles but are always front-facing. */
 static bool borg_front_always;
 
@@ -1088,6 +1101,7 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_frexp_filter, borg_frexp_lower, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_sincos_filter, borg_sincos_lower, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_iabs_filter, borg_iabs_lower, NULL);
+   NIR_PASS(_, nir, nir_shader_lower_instructions, borg_b2b1_filter, borg_b2b1_lower, NULL);
    NIR_PASS(_, nir, nir_lower_alu);
    NIR_PASS(_, nir, nir_lower_alu_to_scalar, NULL, NULL);
    const bool wide = (nir->info.stage == MESA_SHADER_FRAGMENT || (nir->info.stage == MESA_SHADER_VERTEX && remat_vertex_inputs)) &&
