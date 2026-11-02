@@ -350,10 +350,7 @@ fn viewport(pl: &mut Pipeline, c: &VkGraphicsPipelineCreateInfo, discard: bool) 
         pl.vp.valid = true;
     }
     if !vs.pScissors.is_null() && vs.scissorCount != 0 && !pl.sc_dyn {
-        let r = unsafe { &*vs.pScissors };
-        let (x, y) = (r.offset.x, r.offset.y);
-        let (x1, y1) = (x.wrapping_add(r.extent.width as i32), y.wrapping_add(r.extent.height as i32));
-        pl.vp.sc = [x.max(0) as u32, y.max(0) as u32, x1.max(0) as u32, y1.max(0) as u32];
+        pl.vp.sc = scissor_box(unsafe { &*vs.pScissors });
         pl.vp.valid = true;
     }
 }
@@ -504,4 +501,11 @@ mod tests {
         assert_eq!(vertex_fetch(Some(&vi), false, false), BORGC_VS_FETCH | 1 << 3);
         assert_eq!(vertex_fetch(None, true, false), BORGC_VS_FETCH | BORGC_VS_POINT_QUADS);
     }
+}
+
+/// A scissor as x0, y0, x1, y1 inside the largest framebuffer (offset + extent may reach i32::MAX).
+pub fn scissor_box(r: &VkRect2D) -> [u32; 4] {
+    let c = |v: i64| v.clamp(0, 4096) as u32;
+    let (x, y) = (r.offset.x as i64, r.offset.y as i64);
+    [c(x), c(y), c(x + r.extent.width as i64), c(y + r.extent.height as i64)]
 }
