@@ -37,6 +37,11 @@ impl ShaderState {
         if stage != Stage::Compute && !(*nir).constant_data.is_null() {
             st.cdata = crate::words(std::slice::from_raw_parts((*nir).constant_data as *const u8, (*nir).constant_data_size as usize));
         }
+        // Private arrays a run-time index reaches take the first spill slots, a word each.
+        if stage != Stage::Compute && (*nir).scratch_size > 0 {
+            st.spill.slots = (*nir).scratch_size.div_ceil(4);
+            st.late_head();
+        }
         st.frag.push_window = push_window && stage == Stage::Fragment;
         st.frag.out_select = out_select;
         if stage == Stage::Fragment {

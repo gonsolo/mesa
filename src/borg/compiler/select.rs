@@ -667,6 +667,7 @@ impl ShaderState {
             nir_intrinsic_load_ubo => self.uniform_load(intr),
             nir_intrinsic_load_input if self.stage == Stage::Vertex => self.uniform_load(intr),
             nir_intrinsic_store_output => self.store_output(intr),
+            nir_intrinsic_load_scratch | nir_intrinsic_store_scratch => self.scratch(intr),
             nir_intrinsic_load_front_face => {
                 let bit = self.sel.fresh();
                 self.sel.prog.push(BorgInstr { mnem: Op::Csrrs.into(), dst: bit, srcs: vec![], swz: vec![], imm: crate::opcodes::CSR_FRONT_FACING });
@@ -688,6 +689,42 @@ impl ShaderState {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A private array in the lane's spill slots: word w at 16·w from the lane's base.
+    unsafe fn scratch(&mut self, intr: &nir_intrinsic_instr) {
+        let store = intr.intrinsic == nir_intrinsic_store_scratch;
+        let base = self.spill.base.unwrap();
+        let off = intr.get_src(store as usize);
+        let (addr, imm) = match off.comp_as_uint(0) {
+            Some(o) => (base, 4 * o as u32),
+            None => {
+                let o = self.operand(off.as_def().index, 0);
+                let c2 = self.konst(2);
+                let s = self.sel.opc(Op::Ishl, &[o, (c2, 0)]);
+                (self.sel.op0(Op::Iadd, vec![base, s]), 0)
+            }
+        };
+        let n = if store { intr.get_src(0).as_def().num_components } else { intr.def.num_components } as u32;
+        if imm + 16 * n > 2047 {
+            self.refuse("a private array past the immediate's reach");
+            return;
+        }
+        if store {
+            let v = intr.get_src(0).as_def().index;
+            let mask = intr.get_const_index(NIR_INTRINSIC_WRITE_MASK) as u32;
+            for c in (0..n).filter(|c| mask >> c & 1 != 0) {
+                let x = self.operand(v, c as u8);
+                self.sel.prog.push(BorgInstr { mnem: Op::Sw.into(), dst: NO_DST, srcs: vec![addr, x.0], swz: vec![0, x.1], imm: imm + 16 * c });
+            }
+        } else {
+            let comps = (0..n).map(|c| {
+                let t = self.sel.fresh();
+                self.sel.prog.push(BorgInstr { mnem: Op::Lw.into(), dst: t, srcs: vec![addr], swz: vec![0], imm: imm + 16 * c });
+                (t, 0u8)
+            }).collect();
+            self.sel.vec_map.insert(intr.def.index, comps);
         }
     }
 
