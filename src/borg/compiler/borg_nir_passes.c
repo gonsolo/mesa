@@ -598,6 +598,15 @@ borg_use_order(const void *a, const void *b)
    return x->index < y->index ? -1 : x->index > y->index;
 }
 
+static nir_def *
+borg_clone_before(nir_builder *b, nir_instr *instr, nir_instr *use)
+{
+   b->cursor = nir_before_instr(use);
+   nir_instr *c = nir_instr_clone(b->shader, instr);
+   nir_builder_instr_insert(b, c);
+   return nir_instr_def(c);
+}
+
 static bool
 borg_dup_load(nir_builder *b, nir_intrinsic_instr *ld, void *data)
 {
@@ -632,10 +641,7 @@ borg_dup_load(nir_builder *b, nir_intrinsic_instr *ld, void *data)
          nir_src_rewrite(uses[i], def);
          continue;
       }
-      b->cursor = nir_before_instr(u);
-      nir_instr *c = nir_instr_clone(b->shader, &ld->instr);
-      nir_builder_instr_insert(b, c);
-      def = &nir_instr_as_intrinsic(c)->def;
+      def = borg_clone_before(b, &ld->instr, u);
       nir_src_rewrite(uses[i], def);
       cur = u;
       changed = true;
@@ -674,10 +680,7 @@ borg_dup_compare(nir_builder *b, nir_alu_instr *alu, void *data)
    for (unsigned i = 0; i < k; i++) {
       nir_instr *u = nir_src_use_instr(uses[i]);
       if (u->block != cur) {
-         b->cursor = nir_before_instr(u);
-         nir_instr *c = nir_instr_clone(b->shader, &alu->instr);
-         nir_builder_instr_insert(b, c);
-         def = &nir_instr_as_alu(c)->def;
+         def = borg_clone_before(b, &alu->instr, u);
          cur = u->block;
       }
       nir_src_rewrite(uses[i], def);
@@ -700,12 +703,8 @@ borg_dup_addr(nir_builder *b, nir_alu_instr *alu, void *data)
          return false;
       uses[k++] = use;
    }
-   for (unsigned i = 1; i < k; i++) {
-      b->cursor = nir_before_instr(nir_src_use_instr(uses[i]));
-      nir_instr *c = nir_instr_clone(b->shader, &alu->instr);
-      nir_builder_instr_insert(b, c);
-      nir_src_rewrite(uses[i], &nir_instr_as_alu(c)->def);
-   }
+   for (unsigned i = 1; i < k; i++)
+      nir_src_rewrite(uses[i], borg_clone_before(b, &alu->instr, nir_src_use_instr(uses[i])));
    return k > 1;
 }
 
