@@ -1050,6 +1050,22 @@ borg_has_indirect_io(nir_shader *nir, nir_variable_mode mode, bool in_loop)
    return false;
 }
 
+/* A loop over an array unrolls, its trip count bounded by the array: the indices become constants. */
+static void
+borg_unroll_early(nir_shader *nir)
+{
+   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+   bool progress;
+   do {
+      progress = false;
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
+      NIR_PASS(progress, nir, nir_opt_constant_folding);
+      NIR_PASS(progress, nir, nir_opt_dce);
+      NIR_PASS(progress, nir, nir_opt_loop_unroll);
+      NIR_PASS(progress, nir, nir_opt_deref);
+   } while (progress);
+}
+
 static bool
 borg_has_16bit(nir_shader *nir)
 {
@@ -1169,7 +1185,11 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(_, nir, nir_opt_large_constants, glsl_get_vec4_size_align_bytes, 0);
       NIR_PASS(_, nir, nir_lower_int64);
    }
-   /* The inputs copied to a local array in scratch, which a run-time index outside a loop reads. */
+   /* An I/O array at a run-time index: in a loop the loop is unrolled first, else fragment inputs
+    * are copied to a local array in scratch (vertex outputs below). */
+   const nir_variable_mode io = nir->info.stage == MESA_SHADER_FRAGMENT ? nir_var_shader_in : nir_var_shader_out;
+   if (borg_has_indirect_io(nir, io, true))
+      borg_unroll_early(nir);
    if (nir->info.stage == MESA_SHADER_FRAGMENT && borg_has_indirect_io(nir, nir_var_shader_in, false)) {
       NIR_PASS(_, nir, nir_lower_io_vars_to_temporaries, nir_shader_get_entrypoint(nir), nir_var_shader_in);
       NIR_PASS(_, nir, nir_lower_global_vars_to_local);
