@@ -175,6 +175,8 @@ fn schedule_run(run: Vec<BorgInstr>, out_roots: &HashSet<u32>) -> Vec<BorgInstr>
 
 /// Issue slots from an instruction to one that reads its result (B9 pipeline, with the bypass).
 const LATENCY: usize = 5;
+/// Live values the latency order may reach: the free registers of a draw shader, about.
+const LATENCY_REGS: usize = 24;
 
 /// Nothing moves across these: the core drains its pipeline for them, or they change control flow
 /// or state the instructions around them see.
@@ -208,15 +210,19 @@ pub(crate) fn schedule_for_latency(prog: &mut Vec<BorgInstr>, out_roots: &[u32])
             *left.get_mut(s).unwrap() -= 1;
         }
     }
-    let cap = live_before.iter().copied().max().unwrap_or(0).max(live);
+    live_before.push(live);
+    // A run may fill up to the registers there are, never above its own peak beyond that.
+    let cap = live_before.iter().copied().max().unwrap_or(0).min(LATENCY_REGS);
+    let room = |start: usize, end: usize| live_before[start..=end].iter().copied().max().unwrap().max(cap) - live_before[start];
 
     let mut out = Vec::with_capacity(prog.len());
     let mut run = Vec::new();
     let mut start = 0;
     let mut left = uses.clone();
+    let n = prog.len();
     for (k, i) in std::mem::take(prog).into_iter().enumerate() {
         if barrier(&i) {
-            out.extend(latency_run(std::mem::take(&mut run), &mut left, &uses, &defined, cap - live_before[start]));
+            out.extend(latency_run(std::mem::take(&mut run), &mut left, &uses, &defined, room(start, k)));
             for s in &i.srcs {
                 *left.get_mut(s).unwrap() -= 1;
             }
@@ -226,8 +232,7 @@ pub(crate) fn schedule_for_latency(prog: &mut Vec<BorgInstr>, out_roots: &[u32])
             run.push(i);
         }
     }
-    let room = cap - live_before.get(start).copied().unwrap_or(live);
-    out.extend(latency_run(run, &mut left, &uses, &defined, room));
+    out.extend(latency_run(run, &mut left, &uses, &defined, room(start.min(n), n)));
     *prog = out;
 }
 
