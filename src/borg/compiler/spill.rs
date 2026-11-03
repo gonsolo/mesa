@@ -26,7 +26,7 @@ impl ShaderState {
     /// then the value with the furthest next use (`spill_late`). A forced value takes no free
     /// register, unless its register is `soft` (a draw shader's TEX block, 4 while live).
     pub(crate) fn spill_to_fit(&mut self, forced: &HashMap<u32, u8>, reserved: &mut Vec<u8>, soft: &[u8], margin: usize) -> Result<(), String> {
-        let hard: Vec<u8> = forced.values().copied().filter(|r| !soft.contains(r)).chain(reserved.iter().copied()).collect();
+        let hard: Vec<u8> = forced.values().chain(reserved.iter()).copied().filter(|r| !soft.contains(r)).collect();
         let free = (1..30u8).filter(|r| !hard.contains(r)).count().saturating_sub(margin);
         // Compute slots fill the rest of slot 34 after the pool.
         let max = if self.stage == Stage::Compute {
