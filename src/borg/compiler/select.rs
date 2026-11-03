@@ -508,6 +508,7 @@ impl ShaderState {
             }
         };
         self.sel.prog.push(BorgInstr { mnem: Op::I2f.into(), dst: alu.def.index, srcs: vec![bits.0], swz: vec![bits.1], imm: 0 });
+        self.sel.int_bool.insert(alu.def.index, bits);
     }
 
     /// A value a RISC-V instruction can read: a window word is copied to a register.

@@ -26,11 +26,13 @@ pub struct Selector {
     pub loc: HashMap<u32, crate::Loc>,
     /// x0 of the RISC-V forms (Fixed(0), not the raster ROM's r0).
     pub x0: Option<u32>,
+    /// A compare's 0/1 integer, by the float boolean I2F made of it.
+    pub int_bool: HashMap<u32, (u32, u8)>,
 }
 
 impl Selector {
     pub fn new() -> Self {
-        Selector { vec_map: HashMap::default(), prog: Vec::new(), next_vreg: 1_000_000, no_contract: Default::default(), loc: HashMap::default(), x0: None }
+        Selector { vec_map: HashMap::default(), prog: Vec::new(), next_vreg: 1_000_000, no_contract: Default::default(), loc: HashMap::default(), x0: None, int_bool: HashMap::default() }
     }
 }
 

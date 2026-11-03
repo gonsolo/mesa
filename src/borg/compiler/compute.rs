@@ -253,9 +253,12 @@ impl ShaderState {
     /// turns an infinity into NaN and changes integer bits.
     /// c ? t : e bit for bit: Zicond.
     fn select(&mut self, c: (u32, u8), t: (u32, u8), e: (u32, u8)) -> u32 {
-        let ci = self.sel.opc(Op::F2i, &[c]);
-        let tk = self.sel.opc(Op::CzeroEqz, &[t, (ci, 0)]);
-        let ek = self.sel.opc(Op::CzeroNez, &[e, (ci, 0)]);
+        let ci = match self.sel.int_bool.get(&c.0) {
+            Some(&b) if c.1 == 0 => b,
+            _ => (self.sel.opc(Op::F2i, &[c]), 0),
+        };
+        let tk = self.sel.opc(Op::CzeroEqz, &[t, ci]);
+        let ek = self.sel.opc(Op::CzeroNez, &[e, ci]);
         self.sel.opc(Op::Or, &[(tk, 0), (ek, 0)])
     }
 
