@@ -643,6 +643,48 @@ borg_dup_load(nir_builder *b, nir_intrinsic_instr *ld, void *data)
    return changed;
 }
 
+static nir_cf_node *
+borg_loop_of(nir_block *blk)
+{
+   nir_cf_node *n = blk->cf_node.parent;
+   while (n && n->type != nir_cf_node_loop)
+      n = n->parent;
+   return n;
+}
+
+/* A comparison with a constant is built again in each other block that reads it, outside new
+ * loops: only its other operand stays live, not one bool per comparison. */
+static bool
+borg_dup_compare(nir_builder *b, nir_alu_instr *alu, void *data)
+{
+   if (!nir_alu_instr_is_comparison(alu) || nir_op_infos[alu->op].num_inputs != 2 || alu->def.num_components != 1 ||
+       !(nir_src_is_const(alu->src[0].src) || nir_src_is_const(alu->src[1].src)))
+      return false;
+   nir_block *home = alu->instr.block;
+   nir_src *uses[64];
+   unsigned k = 0;
+   nir_foreach_use(use, &alu->def) {
+      nir_instr *u = nir_src_use_instr(use);
+      if (k < 64 && u->type != nir_instr_type_phi && u->block != home && borg_loop_of(u->block) == borg_loop_of(home))
+         uses[k++] = use;
+   }
+   qsort(uses, k, sizeof(uses[0]), borg_use_order);
+   nir_block *cur = NULL;
+   nir_def *def = NULL;
+   for (unsigned i = 0; i < k; i++) {
+      nir_instr *u = nir_src_use_instr(uses[i]);
+      if (u->block != cur) {
+         b->cursor = nir_before_instr(u);
+         nir_instr *c = nir_instr_clone(b->shader, &alu->instr);
+         nir_builder_instr_insert(b, c);
+         def = &nir_instr_as_alu(c)->def;
+         cur = u->block;
+      }
+      nir_src_rewrite(uses[i], def);
+   }
+   return k > 0;
+}
+
 /* Same for the constant + descriptor address a UBO load adds, so it does not stay live between loads. */
 static bool
 borg_dup_addr(nir_builder *b, nir_alu_instr *alu, void *data)
@@ -1181,6 +1223,9 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(progress, nir, nir_opt_peephole_select, &peephole_opts);
    } while (progress);
 
+   nir_foreach_function_impl(impl, nir)
+      nir_index_instrs(impl);
+   NIR_PASS(_, nir, nir_shader_alu_pass, borg_dup_compare, nir_metadata_control_flow, NULL);
    if (wide) {
       nir_foreach_function_impl(impl, nir)
          nir_index_instrs(impl);
