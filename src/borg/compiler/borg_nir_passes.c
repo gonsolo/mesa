@@ -990,6 +990,82 @@ borg_lower_set_no_flatten(bool on)
    no_flatten = on;
 }
 
+/* 16-bit storage: memory is accessed in words; a 16-bit store is an AND and an OR on its word. */
+static nir_mem_access_size_align
+borg_mem_size_align(nir_intrinsic_op intrin, uint8_t bytes, uint8_t bit_size, uint32_t align_mul,
+                    uint32_t align_offset, bool offset_is_const, enum gl_access_qualifier access,
+                    const void *data)
+{
+   const bool load = nir_intrinsic_infos[intrin].has_dest;
+   const unsigned words = load ? DIV_ROUND_UP(bytes, 4) : nir_combined_align(align_mul, align_offset) < 4 ? 1 : MAX2(bytes / 4, 1);
+   return (nir_mem_access_size_align){
+      .num_components = MIN2(words, 4), .bit_size = 32, .align = 4,
+      .shift = nir_mem_access_shift_method_scalar,
+   };
+}
+
+/* A 16-bit load at an unknown 2-byte alignment (nir_lower_mem_access_bit_sizes cannot): each
+ * component from its word. */
+static bool
+borg_load_16bit_unaligned(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if ((intr->intrinsic != nir_intrinsic_load_ubo && intr->intrinsic != nir_intrinsic_load_ssbo &&
+        intr->intrinsic != nir_intrinsic_load_push_constant) ||
+       intr->def.bit_size != 16 || nir_intrinsic_align_mul(intr) >= 4)
+      return false;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *off = nir_get_io_offset_src(intr)->ssa, *comps[NIR_MAX_VEC_COMPONENTS];
+   if (nir_intrinsic_has_base(intr)) {
+      off = nir_iadd_imm(b, off, nir_intrinsic_base(intr));
+      nir_intrinsic_set_range(intr, nir_intrinsic_base(intr) + nir_intrinsic_range(intr));
+      nir_intrinsic_set_base(intr, 0);
+   }
+   for (unsigned c = 0; c < intr->def.num_components; c++) {
+      nir_def *addr = nir_iadd_imm(b, off, 2 * c), *word = nir_iand_imm(b, addr, ~3);
+      nir_intrinsic_instr *w = nir_instr_as_intrinsic(nir_instr_clone(b->shader, &intr->instr));
+      w->num_components = w->def.num_components = 1;
+      w->def.bit_size = 32;
+      nir_intrinsic_set_align(w, 4, 0);
+      nir_builder_instr_insert(b, &w->instr);
+      nir_src_rewrite(nir_get_io_offset_src(w), word);
+      comps[c] = nir_u2u16(b, nir_ushr(b, &w->def, nir_imul_imm(b, nir_iand_imm(b, addr, 2), 8)));
+   }
+   nir_def_replace(&intr->def, nir_vec(b, comps, intr->def.num_components));
+   return true;
+}
+
+static bool
+borg_has_16bit(nir_shader *nir)
+{
+   nir_foreach_function_impl(impl, nir)
+      nir_foreach_block(block, impl)
+         nir_foreach_instr(instr, block) {
+            nir_def *def = nir_instr_def(instr);
+            if (def && def->bit_size == 16)
+               return true;
+         }
+   return false;
+}
+
+/* A 16-bit value sits in the low half of a register; the selector converts it, the rest is widened. */
+static unsigned
+borg_bit_size(const nir_instr *instr, void *data)
+{
+   if (instr->type != nir_instr_type_alu)
+      return 0;
+   const nir_alu_instr *alu = nir_instr_as_alu(instr);
+   if (nir_op_infos[alu->op].is_conversion || nir_op_is_vec_or_mov(alu->op) || alu->op == nir_op_bcsel ||
+       alu->op == nir_op_pack_32_2x16_split || alu->op == nir_op_unpack_32_2x16_split_x ||
+       alu->op == nir_op_unpack_32_2x16_split_y)
+      return 0;
+   if (alu->def.bit_size == 16)
+      return 32;
+   for (unsigned i = 0; i < nir_op_infos[alu->op].num_inputs; i++)
+      if (alu->src[i].src.ssa->bit_size == 16)
+         return 32;
+   return 0;
+}
+
 /* An atomic on a private variable: load, the operation, store; the old value is the result. */
 static bool
 borg_private_atomic(nir_builder *b, nir_intrinsic_instr *intr, void *data)
@@ -1133,6 +1209,17 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       /* `shared` variables: one more memory window (compute.rs, slot 33). */
       NIR_PASS(_, nir, nir_lower_vars_to_explicit_types, nir_var_mem_shared, glsl_get_natural_size_align_bytes);
       NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_shared, nir_address_format_32bit_offset);
+   }
+   if (borg_has_16bit(nir)) {
+      const nir_lower_mem_access_bit_sizes_options mem = {
+         .callback = borg_mem_size_align, .may_lower_unaligned_stores_to_atomics = true,
+         .modes = nir_var_mem_ubo | nir_var_mem_ssbo | nir_var_mem_push_const | nir_var_mem_shared,
+      };
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, borg_load_16bit_unaligned, nir_metadata_control_flow, NULL);
+      NIR_PASS(_, nir, nir_lower_mem_access_bit_sizes, &mem);
+      NIR_PASS(_, nir, nir_lower_fp16_casts, nir_lower_fp16_rtz | nir_lower_fp16_rtne);
+      NIR_PASS(_, nir, nir_lower_pack);
+      NIR_PASS(_, nir, nir_lower_bit_size, borg_bit_size, NULL);
    }
    uint64_t flat_slots = 0;
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
