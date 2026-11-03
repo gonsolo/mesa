@@ -490,18 +490,21 @@ impl ShaderState {
         let a = self.operand(sl[0].src.as_def().index, sl[0].swizzle[0]);
         let b = self.operand(sl[1].src.as_def().index, sl[1].swizzle[0]);
         let lt = if matches!(alu.op, nir_op_ult | nir_op_uge) { Op::Isltu } else { Op::Islt };
+        let not = |s: &mut Self, v: (u32, u8)| {
+            let d = s.sel.fresh();
+            s.sel.prog.push(BorgInstr { mnem: Op::Xori.into(), dst: d, srcs: vec![v.0], swz: vec![v.1], imm: 1 });
+            (d, 0u8)
+        };
         let bits = match alu.op {
             nir_op_ieq => self.sel.pair(Op::Iseq, a, b),
             nir_op_ilt | nir_op_ult => self.sel.pair(lt, a, b),
             nir_op_ine => {
-                let l = self.sel.pair(Op::Islt, a, b);
-                let g = self.sel.pair(Op::Islt, b, a);
-                self.sel.pair(Op::Iadd, l, g)
+                let e = self.sel.pair(Op::Iseq, a, b);
+                not(self, e)
             }
             _ => {
-                let g = self.sel.pair(lt, b, a);
-                let e = self.sel.pair(Op::Iseq, a, b);
-                self.sel.pair(Op::Iadd, g, e)
+                let l = self.sel.pair(lt, a, b);
+                not(self, l)
             }
         };
         self.sel.prog.push(BorgInstr { mnem: Op::I2f.into(), dst: alu.def.index, srcs: vec![bits.0], swz: vec![bits.1], imm: 0 });
