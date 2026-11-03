@@ -48,8 +48,7 @@ pub fn fixed_regs(cx: &ShaderState) -> (HashMap<u32, u8>, Vec<u8>) {
 }
 
 pub fn allocate(cx: &ShaderState, forced: &HashMap<u32, u8>, extra_reserved: &mut Vec<u8>) -> Option<HashMap<u32, u8>> {
-    let is_fragment = cx.stage == Stage::Fragment;
-    let soft: Vec<u8> = if is_fragment { vec![20, 21, 22, 23] } else { Vec::new() };
+    let soft: Vec<u8> = if cx.stage != Stage::Compute { vec![20, 21, 22, 23] } else { Vec::new() };
     let mut block_len: HashMap<u32, u8> = HashMap::default();
     for &t in &cx.tex_dsts {
         block_len.insert(t, 4);
