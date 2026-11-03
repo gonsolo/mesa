@@ -2,7 +2,7 @@ use crate::legal::{imm_form, operands};
 use crate::encode::{emit_blob, encode, encode_csrw, encode_fattr, encode_imm, encode_jal, encode_rv_branch, encode_sout};
 use crate::state::{ShaderState, Stage};
 use crate::{BorgInstr, Loc};
-use std::collections::{HashMap, HashSet};
+use crate::{HashMap, HashSet};
 use crate::opcodes::Op;
 use crate::Mnem;
 
@@ -131,7 +131,7 @@ pub(crate) fn emits(m: Mnem) -> bool {
 }
 
 fn uniform_regions(prog: &[BorgInstr]) -> HashMap<usize, Region> {
-    let (mut open, mut out): (Vec<(usize, Option<usize>)>, HashMap<usize, Region>) = (vec![], HashMap::new());
+    let (mut open, mut out): (Vec<(usize, Option<usize>)>, HashMap<usize, Region>) = (vec![], HashMap::default());
     for (k, i) in prog.iter().enumerate() {
         match i.mnem {
             Mnem::Op(Op::Expush) => open.push((k, None)),
@@ -153,10 +153,10 @@ fn uniform_regions(prog: &[BorgInstr]) -> HashMap<usize, Region> {
 /// uniform EXPUSH: one word longer as a branch over a JAL, so the layout repeats until it
 /// settles) and each instruction's word address.
 fn branch_layout(prog: &[BorgInstr], start: usize, regions: &HashMap<usize, Region>) -> (HashMap<u32, usize>, HashSet<usize>, Vec<usize>) {
-    let mut far = HashSet::new();
+    let mut far = HashSet::default();
     let skipped: HashSet<usize> = regions.values().flat_map(|r| [Some(r.pop), r.els.filter(|&x| !r.jal(x))]).flatten().collect();
     loop {
-        let (mut a, mut labels, mut addr) = (start, HashMap::new(), Vec::with_capacity(prog.len()));
+        let (mut a, mut labels, mut addr) = (start, HashMap::default(), Vec::with_capacity(prog.len()));
         for (k, i) in prog.iter().enumerate() {
             addr.push(a);
             match i.mnem {
@@ -262,7 +262,7 @@ pub fn build_blob(
 #[cfg(test)]
 mod tests {
     use super::{branch_layout, uniform_regions};
-    use std::collections::HashMap;
+    use crate::HashMap;
     use crate::opcodes::Op;
     use crate::{BorgInstr, Mnem, NO_DST};
 
@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn a_branch_back_1024_words_is_near() {
         // Label at 3, BNE at 3 + 1024: offset -1024, the farthest a branch reaches back.
-        let (labels, far, _) = branch_layout(&prog(1024), 3, &HashMap::new());
+        let (labels, far, _) = branch_layout(&prog(1024), 3, &HashMap::default());
         assert_eq!(labels[&7], 3);
         assert!(far.is_empty());
     }
@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn a_branch_back_1025_words_is_a_beq_over_a_jal() {
         let p = prog(1025);
-        let (_, far, _) = branch_layout(&p, 3, &HashMap::new());
+        let (_, far, _) = branch_layout(&p, 3, &HashMap::default());
         assert_eq!(far.into_iter().collect::<Vec<_>>(), vec![p.len() - 1]);
     }
 

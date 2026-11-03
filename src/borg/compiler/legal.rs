@@ -4,7 +4,7 @@ use crate::encode::encode;
 use crate::opcodes::Op;
 use crate::state::ShaderState;
 use crate::{BorgInstr, Loc, Mnem};
-use std::collections::HashMap;
+use crate::HashMap;
 
 /// An instruction's first three operands as registers, the first window word read through funct3.
 pub(crate) struct Operands {
@@ -110,7 +110,7 @@ mod tests {
         let (a, b, d, u, w) = (c.sel.fresh(), c.sel.fresh(), c.sel.fresh(), c.sel.fresh(), c.sel.fresh());
         c.sel.loc.insert(u, Loc::Uniform(21));
         c.sel.loc.insert(w, Loc::Uniform(22));
-        let alloc: HashMap<u32, u8> = [(a, 1), (b, 2), (d, 3)].into();
+        let alloc: HashMap<u32, u8> = HashMap::from_iter([(a, 1), (b, 2), (d, 3)]);
         let case = |c: &mut ShaderState, i: BorgInstr| {
             c.sel.prog = vec![i];
             check(c, &alloc)

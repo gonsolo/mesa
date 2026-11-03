@@ -4,7 +4,7 @@
 use crate::state::{ShaderState, Stage};
 use crate::{BorgInstr, Loc, NO_DST};
 use crate::opcodes::{Op, CSR_ROOT, CSR_SLOT};
-use std::collections::{HashMap, HashSet};
+use crate::{HashMap, HashSet};
 
 const SCRATCH_WORDS: u32 = 16384 * 34;
 // Each of the 4 quad slots has a 16 KB cell of the 64 KB scratch slot: 4-word late slots, then the key.
@@ -285,7 +285,7 @@ mod tests {
         // 4 free registers: r1..r4.
         let reserved: Vec<u8> = (5..30).collect();
         let mut reserved = reserved;
-        c.spill_to_fit(&HashMap::new(), &mut reserved, &[], 0).unwrap();
+        c.spill_to_fit(&HashMap::default(), &mut reserved, &[], 0).unwrap();
         let ranges = crate::block::live_ranges(&c.sel.prog);
         let peak = (0..c.sel.prog.len())
             .map(|p| ranges.iter().filter(|(v, &(d, l))| !c.sel.loc.contains_key(v) && d <= p && p <= l).count())

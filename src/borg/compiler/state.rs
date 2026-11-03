@@ -3,7 +3,7 @@ use crate::opcodes::Op;
 use crate::Mnem;
 use crate::consts::{ConstPool, Window};
 use compiler::bindings::*;
-use std::collections::{HashMap, HashSet};
+use crate::{HashMap, HashSet};
 #[derive(Default)]
 pub struct DrawOutputs {
     pub stores: HashMap<u32, Vec<(u32, u8)>>,
@@ -21,7 +21,7 @@ pub struct Selector {
     pub prog: Vec<crate::BorgInstr>,
     pub next_vreg: u32,
     /// FADD and FMUL results the shader forbids fusing (NoContraction).
-    pub no_contract: std::collections::HashSet<u32>,
+    pub no_contract: crate::HashSet<u32>,
     /// Values that live outside the allocated registers.
     pub loc: HashMap<u32, crate::Loc>,
     /// x0 of the RISC-V forms (Fixed(0), not the raster ROM's r0).
@@ -30,7 +30,7 @@ pub struct Selector {
 
 impl Selector {
     pub fn new() -> Self {
-        Selector { vec_map: HashMap::new(), prog: Vec::new(), next_vreg: 1_000_000, no_contract: Default::default(), loc: HashMap::new(), x0: None }
+        Selector { vec_map: HashMap::default(), prog: Vec::new(), next_vreg: 1_000_000, no_contract: Default::default(), loc: HashMap::default(), x0: None }
     }
 }
 
@@ -184,7 +184,7 @@ impl ShaderState {
             cp: ConstPool::new(regs),
             win: if stage == Stage::Vertex { Window::vertex() } else { Window::fragment() },
             outs: DrawOutputs::default(),
-            consts: HashMap::new(),
+            consts: HashMap::default(),
             out_roots: Vec::new(),
             stage,
             flags,

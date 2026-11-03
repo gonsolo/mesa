@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 use crate::BorgInstr;
-use std::collections::{HashMap, HashSet};
+use crate::{HashMap, HashSet};
 use crate::opcodes::Op;
 use crate::Mnem;
 
 pub(crate) fn dce(prog: &mut Vec<BorgInstr>, out_roots: &[u32]) {
     let pre_dce = prog.len();
-    let mut live: std::collections::HashSet<u32> = out_roots.iter().copied().collect();
+    let mut live: crate::HashSet<u32> = out_roots.iter().copied().collect();
 
     let side_effecting = crate::has_effect;
     for i in prog.iter().filter(|i| side_effecting(i)) {
@@ -79,14 +79,14 @@ fn schedule_run(run: Vec<BorgInstr>, out_roots: &HashSet<u32>) -> Vec<BorgInstr>
     let defined_here: HashSet<u32> = run.iter().map(|i| i.dst).collect();
     // The order below follows def-use edges, so a value redefined or read before its definition
     // here (a NIR register, a loop counter) keeps the run as it is.
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for i in &run {
         if i.srcs.iter().any(|s| defined_here.contains(s) && !seen.contains(s)) || !seen.insert(i.dst) {
             return run;
         }
     }
 
-    let mut remaining_uses: HashMap<u32, i32> = HashMap::new();
+    let mut remaining_uses: HashMap<u32, i32> = HashMap::default();
     for instr in &run {
         for &s in &instr.srcs {
             *remaining_uses.entry(s).or_insert(0) += 1;
@@ -102,7 +102,7 @@ fn schedule_run(run: Vec<BorgInstr>, out_roots: &HashSet<u32>) -> Vec<BorgInstr>
         .iter()
         .map(|i| i.srcs.iter().filter(|s| defined_here.contains(s)).count() as i32)
         .collect();
-    let mut consumers: HashMap<u32, Vec<usize>> = HashMap::new();
+    let mut consumers: HashMap<u32, Vec<usize>> = HashMap::default();
     for (i, instr) in run.iter().enumerate() {
         for &s in &instr.srcs {
             if defined_here.contains(&s) {
@@ -192,7 +192,7 @@ fn barrier(i: &BorgInstr) -> bool {
 /// Reorders each run between barriers so that an instruction issues LATENCY slots after the ones
 /// it reads, without more values live at any point than the program's peak before.
 pub(crate) fn schedule_for_latency(prog: &mut Vec<BorgInstr>, out_roots: &[u32]) {
-    let mut uses: HashMap<u32, usize> = HashMap::new();
+    let mut uses: HashMap<u32, usize> = HashMap::default();
     for &s in prog.iter().flat_map(|i| i.srcs.iter()).chain(out_roots) {
         *uses.entry(s).or_insert(0) += 1;
     }
@@ -235,7 +235,7 @@ pub(crate) fn schedule_for_latency(prog: &mut Vec<BorgInstr>, out_roots: &[u32])
 /// it reads last.
 fn live_delta(i: &BorgInstr, left: &HashMap<u32, usize>, uses: &HashMap<u32, usize>, defined: &HashSet<u32>) -> isize {
     let mut d = isize::from(uses.get(&i.dst).is_some_and(|&n| n > 0));
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for s in &i.srcs {
         if defined.contains(s) && seen.insert(*s) && left[s] == i.srcs.iter().filter(|&x| x == s).count() {
             d -= 1;
@@ -253,7 +253,7 @@ fn latency_run(run: Vec<BorgInstr>, left: &mut HashMap<u32, usize>, uses: &HashM
         }
     };
     let here: HashMap<u32, usize> = run.iter().enumerate().map(|(k, i)| (i.dst, k)).collect();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     if n <= 2 || here.len() != n
         || run.iter().any(|i| i.srcs.iter().any(|s| here.contains_key(s) && !seen.contains(s)) || !seen.insert(i.dst)) {
         take(left, &run);
@@ -313,15 +313,15 @@ pub(crate) fn fuse_fmadd(
     prog: &mut Vec<BorgInstr>,
     out_roots: &[u32],
     uniform_like: &dyn Fn(u32) -> bool,
-    no_contract: &std::collections::HashSet<u32>,
+    no_contract: &crate::HashSet<u32>,
 ) {
     let pre_fuse = prog.len();
     {
-        let mut def_idx: HashMap<u32, usize> = HashMap::new();
+        let mut def_idx: HashMap<u32, usize> = HashMap::default();
         for (i, instr) in prog.iter().enumerate() {
             def_idx.insert(instr.dst, i);
         }
-        let mut uses: HashMap<u32, u32> = HashMap::new();
+        let mut uses: HashMap<u32, u32> = HashMap::default();
         for instr in prog.iter() {
             for &s in &instr.srcs {
                 *uses.entry(s).or_insert(0) += 1;

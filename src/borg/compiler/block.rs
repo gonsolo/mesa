@@ -3,7 +3,7 @@
 use crate::opcodes::Op;
 use crate::{BorgInstr, Mnem, NO_DST};
 use compiler::cfg::{CFGBuilder, CFG};
-use std::collections::{HashMap, HashSet};
+use crate::{HashMap, HashSet};
 use std::ops::Range;
 
 /// What the quad runs in order under one exec mask: a block starts at a loop's label, a barrier or
@@ -205,7 +205,7 @@ impl NextUse {
             succs[p].push(s);
         }
         // Per block: the values it reads first, at their distance, and those it writes first.
-        let (mut first, mut killed) = (vec![HashMap::new(); spans.len()], vec![HashSet::new(); spans.len()]);
+        let (mut first, mut killed) = (vec![HashMap::default(); spans.len()], vec![HashSet::default(); spans.len()]);
         for (b, r) in spans.iter().enumerate() {
             for (k, i) in prog[r.clone()].iter().enumerate() {
                 for &v in &i.srcs {
@@ -284,7 +284,7 @@ impl NextUse {
 /// where it is last live on the linear CFG. A value a loop defines and needs on its next trip or
 /// after it holds it for the whole loop: a lane that left early keeps its last trip's value.
 pub(crate) fn live_ranges(prog: &[BorgInstr]) -> HashMap<u32, (usize, usize)> {
-    let mut range: HashMap<u32, (usize, usize)> = HashMap::new();
+    let mut range: HashMap<u32, (usize, usize)> = HashMap::default();
     for (k, i) in prog.iter().enumerate() {
         for s in &i.srcs {
             if let Some(r) = range.get_mut(s) {

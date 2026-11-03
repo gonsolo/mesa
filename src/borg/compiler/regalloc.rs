@@ -5,12 +5,12 @@ use crate::BorgInstr;
 
 pub(crate) fn regalloc(
     prog: &[BorgInstr],
-    forced: &std::collections::HashMap<u32, u8>,
+    forced: &crate::HashMap<u32, u8>,
     extra_reserved: &[u8],
     soft: &[u8],
-    block_len: &std::collections::HashMap<u32, u8>,
-) -> std::collections::HashMap<u32, u8> {
-    use std::collections::HashMap;
+    block_len: &crate::HashMap<u32, u8>,
+) -> crate::HashMap<u32, u8> {
+    use crate::HashMap;
 
     const NUM_GPRS: u8 = 30; // r0..r29; r30/r31 reserved for coordinates
 
@@ -22,7 +22,7 @@ pub(crate) fn regalloc(
     let mut defs: Vec<u32> = def_at.keys().copied().collect();
     defs.sort_by_key(|v| def_at[v]);
 
-    let mut busy: HashMap<u8, Vec<(usize, usize)>> = HashMap::new();
+    let mut busy: HashMap<u8, Vec<(usize, usize)>> = HashMap::default();
     for (&v, &r) in forced {
         if !soft.contains(&r) {
             continue;
@@ -33,7 +33,7 @@ pub(crate) fn regalloc(
             busy.entry(r + k).or_default().push((st, en));
         }
     }
-    let reserved: std::collections::HashSet<u8> = forced
+    let reserved: crate::HashSet<u8> = forced
         .values()
         .copied()
         .filter(|r| !soft.contains(r))
@@ -42,7 +42,7 @@ pub(crate) fn regalloc(
     // r0 is x0 for ISA v2 instructions: only pinned values live there.
     let mut free: Vec<u8> = (1..NUM_GPRS).rev().filter(|r| !reserved.contains(r)).collect();
     let mut active: Vec<(usize, u8)> = Vec::new(); // (live_end, phys_reg)
-    let mut alloc: HashMap<u32, u8> = HashMap::new();
+    let mut alloc: HashMap<u32, u8> = HashMap::default();
     let mut spills = 0usize;
     let mut peak = 0usize;
 
@@ -97,7 +97,7 @@ mod tests {
     use super::regalloc;
     use crate::opcodes::Op;
     use crate::BorgInstr;
-    use std::collections::HashMap;
+    use crate::HashMap;
 
     fn chain(n: u32) -> Vec<BorgInstr> {
         (1..=n)
@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn every_value_gets_a_register_and_overlaps_differ() {
         let prog = chain(60);
-        let a = regalloc(&prog, &HashMap::new(), &[], &[], &HashMap::new());
+        let a = regalloc(&prog, &HashMap::default(), &[], &[], &HashMap::default());
         assert_eq!(a.len(), 60);
         for d in 1..=58u32 {
             assert_ne!(a[&d], a[&(d + 1)]);
@@ -119,8 +119,8 @@ mod tests {
     #[test]
     fn forced_registers_are_honoured_and_reserved_ones_avoided() {
         let prog = chain(20);
-        let forced = HashMap::from([(5u32, 9u8)]);
-        let a = regalloc(&prog, &forced, &[0, 1, 2, 3], &[], &HashMap::new());
+        let forced = HashMap::from_iter([(5u32, 9u8)]);
+        let a = regalloc(&prog, &forced, &[0, 1, 2, 3], &[], &HashMap::default());
         assert_eq!(a[&5], 9);
         assert!(a.iter().all(|(&v, &r)| v == 5 || ![0, 1, 2, 3].contains(&r)));
     }

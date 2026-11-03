@@ -3,7 +3,7 @@
 
 use crate::state::{Selector, ShaderState, Stage};
 use crate::{BorgInstr, Loc};
-use std::collections::{HashMap, HashSet};
+use crate::{HashMap, HashSet};
 use crate::opcodes::Op;
 use crate::Mnem;
 
@@ -25,11 +25,11 @@ pub struct Window {
 
 impl Window {
     pub fn fragment() -> Self {
-        Window { base: 20, size: 11, slot: 40, words: Vec::new(), vregs: HashMap::new() }
+        Window { base: 20, size: 11, slot: 40, words: Vec::new(), vregs: HashMap::default() }
     }
 
     pub fn vertex() -> Self {
-        Window { base: 25, size: 6, slot: 42, words: Vec::new(), vregs: HashMap::new() }
+        Window { base: 25, size: 6, slot: 42, words: Vec::new(), vregs: HashMap::default() }
     }
 
     /// The words a shader may have: those the window keeps beside the constant 1 and the pool's
@@ -196,7 +196,7 @@ impl ShaderState {
             return;
         }
         let (base, words) = (self.win.base, std::mem::take(&mut self.win.words));
-        let mut uses: HashMap<u8, usize> = HashMap::new();
+        let mut uses: HashMap<u8, usize> = HashMap::default();
         for s in self.sel.prog.iter().flat_map(|i| i.srcs.iter()) {
             if let Some(&Loc::Uniform(u)) = self.sel.loc.get(s) {
                 *uses.entry(u).or_insert(0) += 1;
@@ -258,7 +258,7 @@ impl ShaderState {
     /// EXPUSH, so the later uses find it in every lane; with `hoist` off it stays in place and a
     /// mask change forgets it.
     pub(crate) fn pool_consts(&mut self, hoist: bool) -> Result<(), String> {
-        let mut uses: HashMap<u32, usize> = HashMap::new();
+        let mut uses: HashMap<u32, usize> = HashMap::default();
         for i in &self.sel.prog {
             for s in &i.srcs {
                 if self.cs.kval.contains_key(s) {
@@ -279,7 +279,7 @@ impl ShaderState {
         }
         let built: HashMap<u32, u32> = built.iter().copied().collect();
         const GAP: usize = 16;
-        let mut near: HashMap<u32, (u32, usize)> = HashMap::new();
+        let mut near: HashMap<u32, (u32, usize)> = HashMap::default();
         let mut frames: Vec<HashMap<u32, (u32, usize)>> = vec![];
         let (mut depth, mut anchor) = (0usize, 0usize);
         let mut out: Vec<BorgInstr> = Vec::with_capacity(self.sel.prog.len());
@@ -438,7 +438,7 @@ impl ShaderState {
     pub fn prune_window(&mut self) {
         let used: HashSet<u32> = self.sel.prog.iter().flat_map(|i| i.srcs.iter().copied()).collect();
         let base = self.win.base;
-        let mut renum: HashMap<u8, u8> = HashMap::new();
+        let mut renum: HashMap<u8, u8> = HashMap::default();
         for (u, b) in std::mem::take(&mut self.win.words) {
             if self.win.vregs.get(&b).is_some_and(|v| used.contains(v)) {
                 renum.insert(u, base + self.win.words.len() as u8);

@@ -3,11 +3,11 @@ use crate::state::{ShaderState, Stage};
 use crate::opcodes::CSR_BARY0;
 use crate::opcodes::Op;
 use crate::{Loc, NO_DST};
-use std::collections::HashMap;
+use crate::HashMap;
 
 pub fn fixed_regs(cx: &ShaderState) -> (HashMap<u32, u8>, Vec<u8>) {
     let is_vertex = cx.stage == Stage::Vertex;
-    let mut forced: HashMap<u32, u8> = HashMap::new();
+    let mut forced: HashMap<u32, u8> = HashMap::default();
     let mut extra_reserved: Vec<u8> = Vec::new();
     if is_vertex {
         // A typed vertex fetch (TEX) writes rd..rd+3: one block, r20..r23, for all of them.
@@ -50,7 +50,7 @@ pub fn fixed_regs(cx: &ShaderState) -> (HashMap<u32, u8>, Vec<u8>) {
 pub fn allocate(cx: &ShaderState, forced: &HashMap<u32, u8>, extra_reserved: &mut Vec<u8>) -> Option<HashMap<u32, u8>> {
     let is_fragment = cx.stage == Stage::Fragment;
     let soft: Vec<u8> = if is_fragment { vec![20, 21, 22, 23] } else { Vec::new() };
-    let mut block_len: HashMap<u32, u8> = HashMap::new();
+    let mut block_len: HashMap<u32, u8> = HashMap::default();
     for &t in &cx.tex_dsts {
         block_len.insert(t, 4);
     }
