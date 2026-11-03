@@ -1034,6 +1034,22 @@ borg_load_16bit_unaligned(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    return true;
 }
 
+/* An I/O array reached at a run-time index inside a loop, or outside any. */
+static bool
+borg_has_indirect_io(nir_shader *nir, nir_variable_mode mode, bool in_loop)
+{
+   nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
+      bool loop = false;
+      for (nir_cf_node *n = block->cf_node.parent; n; n = n->parent)
+         loop |= n->type == nir_cf_node_loop;
+      nir_foreach_instr(instr, block)
+         if (loop == in_loop && instr->type == nir_instr_type_deref && nir_instr_as_deref(instr)->modes == mode &&
+             nir_deref_instr_has_indirect(nir_instr_as_deref(instr)))
+            return true;
+   }
+   return false;
+}
+
 static bool
 borg_has_16bit(nir_shader *nir)
 {
@@ -1152,6 +1168,14 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(_, nir, nir_opt_constant_folding);
       NIR_PASS(_, nir, nir_opt_large_constants, glsl_get_vec4_size_align_bytes, 0);
       NIR_PASS(_, nir, nir_lower_int64);
+   }
+   /* The inputs copied to a local array in scratch, which a run-time index outside a loop reads. */
+   if (nir->info.stage == MESA_SHADER_FRAGMENT && borg_has_indirect_io(nir, nir_var_shader_in, false)) {
+      NIR_PASS(_, nir, nir_lower_io_vars_to_temporaries, nir_shader_get_entrypoint(nir), nir_var_shader_in);
+      NIR_PASS(_, nir, nir_lower_global_vars_to_local);
+      NIR_PASS(_, nir, nir_split_var_copies);
+      NIR_PASS(_, nir, nir_lower_var_copies);
+      NIR_PASS(_, nir, nir_lower_vars_to_scratch, 0, glsl_get_natural_size_align_bytes, glsl_get_natural_size_align_bytes);
    }
    NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees, nir_var_function_temp | nir_var_shader_temp | nir_var_shader_in, UINT32_MAX);
    /* A vertex shader that writes an output in a branch: turn the branches into selects. */
