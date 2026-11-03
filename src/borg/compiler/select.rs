@@ -249,6 +249,14 @@ impl ShaderState {
         if matches!(alu.op, nir_op_fadd | nir_op_fmul) && alu.fp_math_ctrl() as u32 & nir_fp_no_contract as u32 != 0 {
             self.sel.no_contract.insert(alu.def.index);
         }
+        let half = alu.def.bit_size == 16 || alu.srcs_as_slice().iter().any(|s| s.src.as_def().bit_size == 16);
+        if half && !matches!(alu.op, nir_op_mov | nir_op_vec2 | nir_op_vec3 | nir_op_vec4 | nir_op_bcsel
+            | nir_op_u2u32 | nir_op_i2i32 | nir_op_u2u16 | nir_op_i2i16 | nir_op_f2f32 | nir_op_f2f16
+            | nir_op_pack_32_2x16_split | nir_op_unpack_32_2x16_split_x | nir_op_unpack_32_2x16_split_y)
+        {
+            self.refuse(format!("16-bit {}", alu.info().name()));
+            return;
+        }
         if self.stage == Stage::Compute && self.fold_const(alu) {
             return;
         }
@@ -285,9 +293,41 @@ impl ShaderState {
                     .collect();
                 self.sel.vec_map.insert(alu.def.index, c);
             }
+            // A 16-bit value is the low half of its register, the upper half undefined.
+            nir_op_u2u32 | nir_op_i2i32 if alu.srcs_as_slice()[0].src.as_def().bit_size == 16 => {
+                let s = &alu.srcs_as_slice()[0];
+                let x = resolve_vm(&self.sel.vec_map, s.src.as_def().index, s.swizzle[0]);
+                let c16 = self.konst(16);
+                let (op, srcs, swz) = if alu.op == nir_op_u2u32 {
+                    (Op::Iand, vec![x.0, self.konst(0xffff)], vec![x.1, 0])
+                } else {
+                    (Op::Ishr, vec![self.sel.opc(Op::Ishl, &[x, (c16, 0)]), c16], vec![0, 0])
+                };
+                self.sel.prog.push(BorgInstr { mnem: op.into(), dst: alu.def.index, srcs, swz, imm: 0 });
+            }
+            nir_op_f2f32 | nir_op_f2f16 | nir_op_unpack_32_2x16_split_y => {
+                let s = &alu.srcs_as_slice()[0];
+                let x = resolve_vm(&self.sel.vec_map, s.src.as_def().index, s.swizzle[0]);
+                let (op, srcs, swz) = match alu.op {
+                    nir_op_f2f32 => (Op::H2f, vec![x.0], vec![x.1]),
+                    nir_op_f2f16 => (Op::F2h, vec![x.0], vec![x.1]),
+                    _ => (Op::Isrl, vec![x.0, self.konst(16)], vec![x.1, 0]),
+                };
+                self.sel.prog.push(BorgInstr { mnem: op.into(), dst: alu.def.index, srcs, swz, imm: 0 });
+            }
+            nir_op_pack_32_2x16_split => {
+                let sl = alu.srcs_as_slice();
+                let lo = resolve_vm(&self.sel.vec_map, sl[0].src.as_def().index, sl[0].swizzle[0]);
+                let hi = resolve_vm(&self.sel.vec_map, sl[1].src.as_def().index, sl[1].swizzle[0]);
+                let m = self.konst(0xffff);
+                let c16 = self.konst(16);
+                let lo = self.sel.opc(Op::Iand, &[lo, (m, 0)]);
+                let hi = self.sel.opc(Op::Ishl, &[hi, (c16, 0)]);
+                self.sel.prog.push(BorgInstr { mnem: Op::Ior.into(), dst: alu.def.index, srcs: vec![lo, hi], swz: vec![0, 0], imm: 0 });
+            }
             // A graphics condition already is 1.0 or 0.0 (comparisons below), so b2f is a copy.
             nir_op_mov | nir_op_b2f16 | nir_op_b2f32 | nir_op_i2i16 | nir_op_i2i32 | nir_op_u2u16
-            | nir_op_u2u32 => {
+            | nir_op_u2u32 | nir_op_unpack_32_2x16_split_x => {
                 let s = &alu.srcs_as_slice()[0];
                 let n = alu.def.num_components as usize;
                 let c: Vec<(u32, u8)> =
