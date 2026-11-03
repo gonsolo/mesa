@@ -1078,7 +1078,7 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(_, nir, nir_opt_large_constants, glsl_get_vec4_size_align_bytes, 0);
       NIR_PASS(_, nir, nir_lower_int64);
    }
-   NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees, nir_var_function_temp | nir_var_shader_temp, UINT32_MAX);
+   NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees, nir_var_function_temp | nir_var_shader_temp | nir_var_shader_in, UINT32_MAX);
    /* A vertex shader that writes an output in a branch: turn the branches into selects. */
    if (nir->info.stage == MESA_SHADER_VERTEX || nir->info.stage == MESA_SHADER_FRAGMENT) {
       NIR_PASS(_, nir, nir_lower_io_vars_to_temporaries, nir_shader_get_entrypoint(nir), nir_var_shader_out);
