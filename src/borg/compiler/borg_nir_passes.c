@@ -708,7 +708,6 @@ borg_dup_addr(nir_builder *b, nir_alu_instr *alu, void *data)
    return k > 1;
 }
 
-/* iabs's lowering is in nir_opt_algebraic_late, which borgc does not run. */
 static bool
 borg_has_local_array(nir_shader *nir)
 {
@@ -719,6 +718,7 @@ borg_has_local_array(nir_shader *nir)
    return false;
 }
 
+/* iabs's lowering is in nir_opt_algebraic_late, which borgc does not run. */
 static bool
 borg_iabs_filter(const nir_instr *instr, const void *data)
 {
