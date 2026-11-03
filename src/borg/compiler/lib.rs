@@ -12,6 +12,11 @@ macro_rules! debug {
     };
 }
 
+// Fixed keys: the same shader compiles to the same blob on every run.
+type FixedHash = std::hash::BuildHasherDefault<std::hash::DefaultHasher>;
+pub(crate) type HashMap<K, V> = std::collections::HashMap<K, V, FixedHash>;
+pub(crate) type HashSet<K> = std::collections::HashSet<K, FixedHash>;
+
 mod block;
 mod compute;
 pub use compute::borgc_compile_compute;
@@ -110,7 +115,7 @@ pub(crate) struct CfMark {
 #[derive(Default)]
 pub(crate) struct Loops {
     pub(crate) count: usize,
-    pub(crate) jumps: std::collections::HashMap<usize, usize>,
+    pub(crate) jumps: crate::HashMap<usize, usize>,
     pub(crate) err: Option<String>,
     /// Per loop: no lane leaves it or goes round without the others.
     pub(crate) uniform: Vec<bool>,
@@ -172,18 +177,18 @@ pub(crate) struct BorgInstr {
 }
 
 fn decompose_vertex_offset(
-    vec_map: &std::collections::HashMap<u32, Vec<(u32, u8)>>,
-    prod: &std::collections::HashMap<u32, (nir_op, Vec<(u32, u8)>)>,
-    consts: &std::collections::HashMap<u32, u32>,
-    descriptor_defs: &std::collections::HashSet<u32>,
+    vec_map: &crate::HashMap<u32, Vec<(u32, u8)>>,
+    prod: &crate::HashMap<u32, (nir_op, Vec<(u32, u8)>)>,
+    consts: &crate::HashMap<u32, u32>,
+    descriptor_defs: &crate::HashSet<u32>,
     vertex_id_def: u32,
     offset_def: u32,
 ) -> Option<(i32, i32)> {
     fn walk(
-        vec_map: &std::collections::HashMap<u32, Vec<(u32, u8)>>,
-        prod: &std::collections::HashMap<u32, (nir_op, Vec<(u32, u8)>)>,
-        consts: &std::collections::HashMap<u32, u32>,
-        descriptor_defs: &std::collections::HashSet<u32>,
+        vec_map: &crate::HashMap<u32, Vec<(u32, u8)>>,
+        prod: &crate::HashMap<u32, (nir_op, Vec<(u32, u8)>)>,
+        consts: &crate::HashMap<u32, u32>,
+        descriptor_defs: &crate::HashSet<u32>,
         vertex_id_def: u32,
         d: u32,
     ) -> Option<(i32, Option<i32>)> {
@@ -236,7 +241,7 @@ fn decompose_vertex_offset(
 /// Returns whether the list holds a jump and whether it needs that extra pop.
 pub(crate) unsafe fn collect_cf_marks(
     nodes: compiler::nir::ExecListIter<'_, nir_cf_node>,
-    marks: &mut std::collections::HashMap<usize, Vec<CfMark>>,
+    marks: &mut crate::HashMap<usize, Vec<CfMark>>,
     loops: &mut Loops,
     cur: Option<usize>,
 ) -> (bool, bool) {

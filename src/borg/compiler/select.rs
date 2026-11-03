@@ -2,7 +2,7 @@ use crate::opcodes::{CSR_DISCARD, CSR_OUT_C0, CSR_OUT_DEPTH, CSR_OUT_POS0, CSR_S
 use crate::state::{ShaderState, Stage};
 use crate::isel::borg_isel;
 use crate::opt::classify_uniform;
-use std::collections::HashMap;
+use crate::HashMap;
 use crate::{collect_cf_marks, decompose_vertex_offset, packed_layout, CfMark, resolve_vm, BorgInstr, Loc, NO_DST, PUSH_WINDOW_WORDS};
 use compiler::bindings::*;
 use compiler::nir::AsDef;
@@ -1345,8 +1345,8 @@ impl ShaderState {
     /// Selects Borg instructions for the entry function in virtual registers, one NIR instruction
     /// at a time.
     pub unsafe fn select_entry(&mut self, entry: *mut nir_function_impl) {
-        let mut cf_marks: std::collections::HashMap<usize, Vec<CfMark>> =
-            std::collections::HashMap::new();
+        let mut cf_marks: crate::HashMap<usize, Vec<CfMark>> =
+            crate::HashMap::default();
         let mut loops = crate::Loops::default();
         // A quad may hold several workgroups, and lanes load at different times.
         nir_divergence_analysis_impl(entry, nir_divergence_multiple_workgroup_per_compute_subgroup | nir_divergence_uniform_load_tears);
@@ -1363,8 +1363,8 @@ impl ShaderState {
         // A phi web is a register per component: its phis read it, its other values are written
         // to it, and a source outside it is copied at the end of the predecessor.
         let webs = crate::phis::Webs::new(entry);
-        let mut web_regs: HashMap<usize, Vec<u32>> = HashMap::new();
-        let mut redirect: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut web_regs: HashMap<usize, Vec<u32>> = HashMap::default();
+        let mut redirect: HashMap<u32, Vec<u32>> = HashMap::default();
         for (k, members) in webs.webs.iter().enumerate() {
             if !members.iter().any(|&d| (*d).parent_instr().as_phi().is_some()) {
                 continue;
@@ -1379,7 +1379,7 @@ impl ShaderState {
             }
             web_regs.insert(k, regs);
         }
-        let mut phi_copies: HashMap<usize, Vec<(u32, u32, u8)>> = HashMap::new();
+        let mut phi_copies: HashMap<usize, Vec<(u32, u32, u8)>> = HashMap::default();
         for block in (*entry).iter_blocks() {
             for phi in block.iter_instr_list().map_while(|i| i.as_phi()) {
                 let regs = &web_regs[&webs.of[&phi.def.index]];
@@ -1491,7 +1491,7 @@ impl ShaderState {
     /// Gives each fragment output a register of its own where the value lives elsewhere (a
     /// uniform, a TEX or FATTR result block), so it can be placed in the output register.
     pub unsafe fn copy_frag_outputs(&mut self) {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::HashSet::default();
     for c in 0..4 {
         let Some((v, comp)) = self.outs.frag[c] else { continue };
         // A TEX result block (r20-r23) or FATTR block is not the output register: copy that too;
@@ -1533,7 +1533,7 @@ impl ShaderState {
         }
     }
     pub fn log_uniformity(&self) {
-    let uniform_roots: std::collections::HashSet<u32> = self.sel.loc
+    let uniform_roots: crate::HashSet<u32> = self.sel.loc
         .iter()
         .filter_map(|(&v, u)| match u {
             Loc::Uniform(_) => Some(v),

@@ -8,7 +8,7 @@ use compiler::bindings::*;
 /// The value component c of d stands for, following vec_map's copies to their end. A chain is
 /// at most as long as the map; a cycle is a compiler bug.
 pub(crate) fn resolve_vm(
-    vec_map: &std::collections::HashMap<u32, Vec<(u32, u8)>>,
+    vec_map: &crate::HashMap<u32, Vec<(u32, u8)>>,
     d0: u32,
     c0: u8,
 ) -> (u32, u8) {
@@ -56,7 +56,7 @@ pub(crate) fn borg_isel(op: nir_op) -> Option<Mnem> {
 #[cfg(test)]
 mod tests {
     use super::resolve_vm;
-    use std::collections::HashMap;
+    use crate::HashMap;
 
     #[test]
     fn follows_a_chain_longer_than_64_copies() {

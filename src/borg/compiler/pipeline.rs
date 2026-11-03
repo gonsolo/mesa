@@ -6,7 +6,7 @@ use crate::state::{ShaderState, Stage};
 use crate::survey::{survey, Survey};
 use crate::opcodes::{CSR_BARY0, CSR_FRAG_X, CSR_GROUP_ID_X, CSR_LOCAL_INDEX, CSR_ROOT, CSR_VERTEX_INDEX};
 use crate::{BorgInstr, Flags, Loc, Mnem, NO_DST};
-use std::collections::HashMap;
+use crate::HashMap;
 use compiler::bindings::*;
 
 /// A draw shader's slot (borg_layout.h DRAW_VERT/FRAG_SHADER_MAX_WORDS).
@@ -240,7 +240,7 @@ impl ShaderState {
         if self.stage == Stage::Compute {
             return;
         }
-        let (mut near, mut built): (HashMap<u32, (u32, usize)>, usize) = (HashMap::new(), 0);
+        let (mut near, mut built): (HashMap<u32, (u32, usize)>, usize) = (HashMap::default(), 0);
         let mut out = Vec::with_capacity(self.sel.prog.len());
         for (n, (start, mut i)) in block_starts(std::mem::take(&mut self.sel.prog)).enumerate() {
             if start {
@@ -297,9 +297,9 @@ impl ShaderState {
         if !self.sel.prog.iter().any(|i| matches!(i.mnem, Mnem::Op(Op::Tex | Op::Texa))) {
             return;
         }
-        let mut cache: HashMap<u32, u32> = HashMap::new();   // word of the root table -> its value
+        let mut cache: HashMap<u32, u32> = HashMap::default();   // word of the root table -> its value
         // A constant control word's (texture address, sampler address, rest); the last TEXS's operands.
-        let mut known: HashMap<u32, (u32, u32, u32)> = HashMap::new();
+        let mut known: HashMap<u32, (u32, u32, u32)> = HashMap::default();
         let mut texs: Option<(u32, u32)> = None;
         let mut out = Vec::new();
         for (start, mut i) in block_starts(std::mem::take(&mut self.sel.prog)) {
@@ -414,7 +414,7 @@ impl ShaderState {
     /// ISA v2 (B8 step 7): system values are read with CSRRS, once per block; the role registers
     /// and window words they live in today are no operands any more.
     pub(crate) fn sys_reads(&mut self) {
-        let mut cache: HashMap<u32, u32> = HashMap::new();
+        let mut cache: HashMap<u32, u32> = HashMap::default();
         let mut out = Vec::new();
         for (start, mut i) in block_starts(std::mem::take(&mut self.sel.prog)) {
             if start {
@@ -458,8 +458,8 @@ impl ShaderState {
                 base
             }
         };
-        let mut byte: HashMap<u32, (u32, u32)> = HashMap::new();
-        let mut plus: HashMap<u32, (u32, u32)> = HashMap::new();
+        let mut byte: HashMap<u32, (u32, u32)> = HashMap::default();
+        let mut plus: HashMap<u32, (u32, u32)> = HashMap::default();
         for (start, mut i) in block_starts(std::mem::take(&mut self.sel.prog)) {
             if start {
                 byte.clear();

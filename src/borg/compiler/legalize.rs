@@ -3,7 +3,7 @@
 use crate::opcodes::{Op, CSR_UNIFORM0};
 use crate::state::ShaderState;
 use crate::{BorgInstr, Loc, Mnem};
-use std::collections::{HashMap, HashSet};
+use crate::{HashMap, HashSet};
 
 /// What makes a program one `legal::check` takes.
 impl ShaderState {

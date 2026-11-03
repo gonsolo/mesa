@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 use compiler::bindings::*;
 use compiler::nir::AsDef;
-use std::collections::HashMap;
+use crate::HashMap;
 
 /// NIR values that share one register: a phi with the phis and sources it takes without a copy.
 /// Liveness is per lane (NIR's CFG): a masked lane keeps its register, so only the lanes that
@@ -14,7 +14,7 @@ pub(crate) struct Webs {
 
 impl Webs {
     pub(crate) unsafe fn new(imp: *mut nir_function_impl) -> Webs {
-        let mut w = Webs { webs: vec![], of: HashMap::new() };
+        let mut w = Webs { webs: vec![], of: HashMap::default() };
         let mut phis = vec![];
         for block in (*imp).iter_blocks() {
             for phi in block.iter_instr_list().map_while(|i| i.as_phi()) {

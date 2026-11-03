@@ -7,7 +7,7 @@ use crate::state::ShaderState;
 use crate::Loc;
 use compiler::bindings::*;
 use compiler::nir::AsDef;
-use std::collections::HashMap;
+use crate::HashMap;
 use crate::opcodes::Op;
 use crate::Mnem;
 
@@ -706,7 +706,7 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, compact: bool, pack: bool) 
     let mut reserved: Vec<u8> = cx.cp.preset_regs().to_vec();
     reserved.extend([30u8, 31, 12, 13, 14]);
     // TEX writes rd..rd+3: one block for every TEX.
-    let mut forced = HashMap::new();
+    let mut forced = HashMap::default();
     if !cx.tex_dsts.is_empty() {
         let rd = (0..=20u8).rev().find(|&r| (r..r + 4).all(|x| !reserved.contains(&x))).ok_or(OUT_OF_REGISTERS)?;
         forced.extend(cx.tex_dsts.iter().map(|&t| (t, rd)));
