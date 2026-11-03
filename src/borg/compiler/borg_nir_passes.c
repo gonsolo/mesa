@@ -1160,6 +1160,7 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    NIR_PASS(_, nir, nir_lower_tex, &tex_options);
    NIR_PASS(_, nir, nir_shader_instructions_pass, borg_lower_cube, nir_metadata_control_flow, NULL);
    /* Before frcp's refinement below: it needs the exact reciprocal. */
+   NIR_PASS(_, nir, nir_opt_idiv_const, 32);
    NIR_PASS(_, nir, nir_lower_idiv, &(nir_lower_idiv_options){ 0 });
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_div_sqrt_filter, borg_div_sqrt_lower, NULL);
    NIR_PASS(_, nir, nir_shader_lower_instructions, borg_precise_filter, borg_precise_lower, NULL);
