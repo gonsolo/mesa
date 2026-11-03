@@ -1229,6 +1229,7 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    NIR_PASS(_, nir, nir_opt_copy_prop);
    NIR_PASS(_, nir, nir_opt_dce);
 #endif
+   NIR_PASS(_, nir, nir_opt_gcm, false);
    NIR_PASS(_, nir, nir_opt_sink, nir_move_const_undef | nir_move_load_ubo | nir_move_load_input | nir_move_comparisons | nir_move_copies | nir_move_alu);
 
    nir_foreach_function_impl(impl, nir)
