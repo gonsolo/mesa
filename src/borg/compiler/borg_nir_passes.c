@@ -1049,6 +1049,7 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    NIR_PASS(_, nir, nir_lower_variable_initializers, nir_var_function_temp);
    NIR_PASS(_, nir, nir_lower_returns);
    NIR_PASS(_, nir, nir_inline_functions);
+   nir_remove_non_entrypoints(nir);
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
       NIR_PASS(_, nir, nir_lower_input_attachments, &(nir_input_attachment_options){ 0 });
    NIR_PASS(_, nir, nir_opt_copy_prop);
