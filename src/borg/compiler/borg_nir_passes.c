@@ -1189,6 +1189,7 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(progress, nir, nir_opt_remove_phis);
       NIR_PASS(progress, nir, nir_opt_copy_prop);
       NIR_PASS(progress, nir, nir_opt_loop);
+      NIR_PASS(progress, nir, nir_opt_undef);
       NIR_PASS(progress, nir, nir_opt_loop_unroll);
       NIR_PASS(progress, nir, nir_shader_lower_instructions, borg_trunc_filter, borg_trunc_lower, NULL);
 #ifdef BORG_SMALL_NIR
