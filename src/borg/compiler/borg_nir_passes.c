@@ -1160,7 +1160,10 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(_, nir, nir_lower_global_vars_to_local);
       NIR_PASS(_, nir, nir_split_var_copies);
       NIR_PASS(_, nir, nir_lower_var_copies);
-      /* An output array written at a run-time index is now a local one. */
+      /* An output array written at a run-time index is now a local one, kept in scratch. */
+      if (nir->info.stage == MESA_SHADER_VERTEX)
+         NIR_PASS(_, nir, nir_lower_vars_to_scratch, 0, glsl_get_natural_size_align_bytes,
+                  glsl_get_natural_size_align_bytes);
       NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees, nir_var_function_temp, UINT32_MAX);
    }
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);

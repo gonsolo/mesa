@@ -136,7 +136,7 @@ impl ShaderState {
 
     /// The slots' base at the start, and in compute again after each BARRIER, which leaves no
     /// register to the next quad.
-    fn late_head(&mut self) {
+    pub(crate) fn late_head(&mut self) {
         let base = self.sel.next_vreg;
         self.sel.next_vreg += 1;
         self.spill.base = Some(base);
