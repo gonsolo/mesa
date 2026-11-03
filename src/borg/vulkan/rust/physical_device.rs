@@ -375,11 +375,17 @@ unsafe fn create(instance: &mut Instance, drm_fd: i32) -> VkResult {
         vk_physical_device_dispatch_table_from_entrypoints(&mut dispatch, &borgvk_physical_device_entrypoints, true);
         vk_physical_device_dispatch_table_from_entrypoints(&mut dispatch, &wsi_physical_device_entrypoints, false);
         extensions.__bindgen_anon_1.__bindgen_anon_1.KHR_swapchain = true;
+        extensions.__bindgen_anon_1.__bindgen_anon_1.KHR_16bit_storage = true;
+        extensions.__bindgen_anon_1.__bindgen_anon_1.KHR_storage_buffer_storage_class = true;
     }
     features.robustBufferAccess = true;
     features.textureCompressionBC = true; // the spec wants one compressed family
     features.largePoints = true;
     features.occlusionQueryPrecise = true; // OCC_COUNT is exact
+    // 16-bit values are loaded from and stored to 32-bit words (borg_nir_passes.c).
+    features.storageBuffer16BitAccess = true;
+    features.uniformAndStorageBuffer16BitAccess = true;
+    features.storagePushConstant16 = true;
     let r = unsafe { vk_physical_device_init(&mut d.vk, &mut instance.vk, &extensions, &features, &properties(), &dispatch) };
     if r != VK_SUCCESS {
         return r;
