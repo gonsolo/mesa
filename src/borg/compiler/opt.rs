@@ -68,6 +68,8 @@ pub(crate) fn schedule_for_pressure(prog: &mut Vec<BorgInstr>, out_roots: &[u32]
     }
 }
 
+const WINDOW: usize = 64;
+
 fn schedule_run(run: Vec<BorgInstr>, out_roots: &HashSet<u32>) -> Vec<BorgInstr> {
     let n = run.len();
     if n <= 1 {
@@ -121,10 +123,18 @@ fn schedule_run(run: Vec<BorgInstr>, out_roots: &HashSet<u32>) -> Vec<BorgInstr>
     let mut ready: Vec<usize> = (0..n).filter(|&i| pending_deps[i] == 0).collect();
     let mut order: Vec<usize> = Vec::with_capacity(n);
     let mut last_dst: Option<u32> = None;
+    let mut done = vec![false; n];
+    let mut oldest = 0;
 
     for _ in 0..n {
+        // Nothing runs more than WINDOW ahead of the oldest instruction left, which is always ready:
+        // a greedy pick could otherwise starve a chain and hold every value it would have freed.
+        while done[oldest] {
+            oldest += 1;
+        }
         let best = *ready
             .iter()
+            .filter(|&&i| i < oldest + WINDOW)
             .min_by_key(|&&i| {
                 let instr = slots[i].as_ref().unwrap();
                 let produces = i32::from(remaining_uses.get(&instr.dst).copied().unwrap_or(0) > 0);
@@ -140,6 +150,7 @@ fn schedule_run(run: Vec<BorgInstr>, out_roots: &HashSet<u32>) -> Vec<BorgInstr>
             .expect("ready is non-empty while instructions remain");
         ready.retain(|&i| i != best);
         order.push(best);
+        done[best] = true;
 
         let instr = slots[best].as_ref().unwrap();
         for &s in &instr.srcs {
