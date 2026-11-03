@@ -1396,6 +1396,7 @@ impl ShaderState {
         for block in (*entry).iter_blocks() {
             // A chained address is only valid in the lanes of the block that computed it.
             self.const_addr_chain = None;
+            self.sel.cond_int.clear();
             if let Some(ms) = cf_marks.get(&(block as *const nir_block as usize)) {
                 for m in ms {
                     if let Some(id) = m.lp {
