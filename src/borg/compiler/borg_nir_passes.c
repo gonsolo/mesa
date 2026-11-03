@@ -36,6 +36,8 @@ const struct nir_shader_compiler_options borg_nir_options = {
    .lower_fsign = true,
    .lower_extract_byte = true,
    .lower_extract_word = true,
+   .lower_insert_byte = true,
+   .lower_insert_word = true,
    .lower_unpack_unorm_4x8 = true,
    .lower_pack_unorm_4x8 = true,
    .lower_pack_snorm_4x8 = true,
@@ -1221,6 +1223,12 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       };
       NIR_PASS(progress, nir, nir_opt_peephole_select, &peephole_opts);
    } while (progress);
+#ifndef BORG_SMALL_NIR
+   NIR_PASS(_, nir, nir_opt_algebraic_late);
+   NIR_PASS(_, nir, nir_opt_constant_folding);
+   NIR_PASS(_, nir, nir_opt_copy_prop);
+   NIR_PASS(_, nir, nir_opt_dce);
+#endif
    NIR_PASS(_, nir, nir_opt_sink, nir_move_const_undef | nir_move_load_ubo | nir_move_load_input | nir_move_comparisons | nir_move_copies | nir_move_alu);
 
    nir_foreach_function_impl(impl, nir)
