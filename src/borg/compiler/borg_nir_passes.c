@@ -865,10 +865,7 @@ borg_trunc_lower(nir_builder *b, nir_instr *instr, void *data)
       /* x - y trunc(x/y) by FMA, then the quotient corrected by one, as rounding can still move
        * trunc to a neighbour. The result takes x's sign, |r| < |y|. */
       nir_def *y = nir_ssa_for_alu_src(b, alu, 1);
-      nir_def *rcp = nir_frcp(b, y);
-      for (int k = 0; k < 2; k++)   /* the reciprocal is a table lookup: two Newton steps */
-         rcp = nir_ffma(b, rcp, nir_ffma(b, nir_fneg(b, y), rcp, nir_imm_float(b, 1.0f)), rcp);
-      nir_def *q = nir_ftrunc(b, nir_fmul(b, x, rcp));
+      nir_def *q = nir_ftrunc(b, nir_fmul(b, x, borg_rcp_refined(b, y)));
       nir_def *r = nir_ffma(b, nir_fneg(b, q), y, x);
       nir_def *ay = nir_fabs(b, y);
       nir_def *step = nir_bcsel(b, nir_flt_imm(b, x, 0.0), nir_fneg(b, ay), ay);
