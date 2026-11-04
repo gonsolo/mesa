@@ -46,6 +46,8 @@ struct CsBuf {
     pf: pipe_format,
     /// A decoded image's texels per layer and the bytes from one layer to the next.
     layer: (u32, u64),
+    /// A buffer the shader reads and writes in device memory: not in the job.
+    in_place: bool,
 }
 
 impl CsBuf {
@@ -67,7 +69,7 @@ fn size_header(addr: u32, size: [u32; 3]) -> CsBuf {
 }
 
 fn decoded(addr: u32, data: Vec<u8>, size: u32) -> CsBuf {
-    CsBuf { host: std::ptr::null_mut(), decoded: Some(data), wb: false, skip: 0, size, addr, texels: std::ptr::null_mut(), pf: PIPE_FORMAT_NONE, layer: (u32::MAX, 0) }
+    CsBuf { host: std::ptr::null_mut(), decoded: Some(data), wb: false, skip: 0, size, addr, texels: std::ptr::null_mut(), pf: PIPE_FORMAT_NONE, layer: (u32::MAX, 0), in_place: false }
 }
 
 fn mapped(mem: Option<&DeviceMemory>) -> Option<*mut u8> {
@@ -84,6 +86,8 @@ pub fn unpack(pf: pipe_format, dst: &mut [u8], host: &Host, off: usize) {
 fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
     let mut bufs = Vec::new();
     let mut sizes = [0u32; 32];
+    // Each binding's base and offset limit (borgc's TABLE_BASE): its buffer, else its window.
+    let mut table: Vec<u32> = (0..32).flat_map(|w| [BASE_BYTES + w * SLOT_BYTES, SLOT_BYTES - 4]).collect();
     for si in 0..4 {
         let Some(set) = c.cs_set(si) else { continue };
         let dyn_off = &c.cs_dyn_offs[si];
@@ -203,13 +207,24 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
             let off = set.offsets[b] + dyn_off[b];
             let avail = b_.vk.size.saturating_sub(off);
             let r = set.ranges[b];
-            let size = if r == VK_WHOLE_SIZE as u64 || r > avail { avail } else { r }.min(SLOT_BYTES as u64) as u32;
-            sizes[window as usize] = size;
+            let whole = if r == VK_WHOLE_SIZE as u64 || r > avail { avail } else { r };
             let host = unsafe { map.add((b_.offset + off) as usize) };
-            bufs.push(CsBuf { host, decoded: None, wb: true, skip: 0, size, addr, texels: std::ptr::null_mut(), pf: PIPE_FORMAT_NONE, layer: (u32::MAX, 0) });
+            // In the device heap the shader reads and writes the buffer where it is.
+            let gpu = b_.memory().map_or(0, |m| m.gpu);
+            if gpu != 0 {
+                let (addr, size) = (gpu + (b_.offset + off) as u32, whole.min(u32::MAX as u64 - 3) as u32);
+                sizes[window as usize] = size;
+                table[2 * window as usize..][..2].copy_from_slice(&[addr, (size.max(4) - 4) & !3]);
+                bufs.push(CsBuf { host, decoded: None, wb: false, skip: 0, size, addr, texels: std::ptr::null_mut(), pf: PIPE_FORMAT_NONE, layer: (u32::MAX, 0), in_place: true });
+                continue;
+            }
+            let size = whole.min(SLOT_BYTES as u64) as u32;
+            sizes[window as usize] = size;
+            bufs.push(CsBuf { host, decoded: None, wb: true, skip: 0, size, addr, texels: std::ptr::null_mut(), pf: PIPE_FORMAT_NONE, layer: (u32::MAX, 0), in_place: false });
         }
     }
-    let pc: Vec<u8> = c.pc.iter().chain(&sizes).flat_map(|w| w.to_ne_bytes()).collect();
+
+    let pc: Vec<u8> = c.pc.iter().chain(&sizes).chain(&table).flat_map(|w| w.to_ne_bytes()).collect();
     let n = pc.len() as u32;
     bufs.push(decoded(BASE_BYTES + 32 * SLOT_BYTES, pc, n));
     let root: Vec<u8> = [0, TEX_BYTES, TEX_BYTES + SAMPLERS, 0].iter().flat_map(|w: &u32| w.to_ne_bytes()).collect();
@@ -258,7 +273,8 @@ fn build_job(pl: &Pipeline, g: [u32; 3], bufs: &[CsBuf]) -> Vec<u8> {
     let mut job = Vec::new();
     let tex = bufs.iter().any(|b| b.addr == TEX_BYTES);
     let nregs = pl.cs_nregs + if tex { 2 } else { 0 } + 1;
-    for v in [pl.cs_nwords, g[0], g[1], g[2], pl.cs_local[0], pl.cs_local[1], pl.cs_local[2], nregs, bufs.len() as u32, 0, 0, 0] {
+    let staged = bufs.iter().filter(|b| !b.in_place).count() as u32;
+    for v in [pl.cs_nwords, g[0], g[1], g[2], pl.cs_local[0], pl.cs_local[1], pl.cs_local[2], nregs, staged, 0, 0, 0] {
         put(&mut job, v);
     }
     for &w in &pl.cs_words[..pl.cs_nwords as usize] {
@@ -281,7 +297,7 @@ fn build_job(pl: &Pipeline, g: [u32; 3], bufs: &[CsBuf]) -> Vec<u8> {
             put(&mut job, v);
         }
     }
-    for b in bufs {
+    for b in bufs.iter().filter(|b| !b.in_place) {
         put(&mut job, b.addr);
         put(&mut job, b.size);
         job.extend_from_slice(b.data());
@@ -353,7 +369,12 @@ fn start(direct: Option<&std::ffi::OsStr>, hdr: &[u32; HDR], job: &[u8], ran: &m
     };
     let _ = f.write_all(&part);
     drop(f);
-    p.child = Command::new(direct).arg("--compute").arg(&jpath).arg(&out).env("BORG_SIM_CFG", "simt").spawn().ok();
+    let mut cmd = Command::new(direct);
+    cmd.arg("--compute").arg(&jpath).arg(&out);
+    if let Some(h) = crate::heap::get() {
+        cmd.arg(h.fd().to_string());
+    }
+    p.child = cmd.env("BORG_SIM_CFG", "simt").spawn().ok();
     p
 }
 
@@ -371,7 +392,7 @@ fn merge(bufs: &[CsBuf], parts: &mut [Part], ran: &mut bool) -> Vec<Vec<u8>> {
             *ran = false;
             continue;
         };
-        for (b, m) in bufs.iter().zip(merged.iter_mut()) {
+        for (b, m) in bufs.iter().zip(merged.iter_mut()).filter(|(b, _)| !b.in_place) {
             let mut tmp = vec![0u8; b.size as usize];
             if f.read_exact(&mut tmp).is_ok() {
                 for ((t, o), m) in tmp.iter().zip(b.data()).zip(m.iter_mut()) {
@@ -381,6 +402,9 @@ fn merge(bufs: &[CsBuf], parts: &mut [Part], ran: &mut bool) -> Vec<Vec<u8>> {
                 }
             }
         }
+    }
+    for (b, m) in bufs.iter().zip(merged.iter_mut()).filter(|(b, _)| b.in_place) {
+        *m = b.data().to_vec();
     }
     merged
 }
