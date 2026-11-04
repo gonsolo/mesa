@@ -6,7 +6,7 @@
 
 libborg_drm_shim = shared_library(
   'borg_drm_shim',
-  ['borg_shim.c', 'borg_serial.c'],
+  'borg_shim.c',
   include_directories : [inc_include, inc_src],
   dependencies : dep_drm_shim,
   gnu_symbol_visibility : 'hidden',

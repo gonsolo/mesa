@@ -1,13 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * Borg GPU DRM uAPI — shared between the borgvk Mesa Vulkan driver and
- * libborg_drm_shim.so.  When a real Linux kernel driver exists, this header
- * will be a copy of the in-kernel <uapi/drm/borg_drm.h>.
- *
- * Layout of cube.c's vktexcube_vs_uniform (binding 0 UBO):
- *   float mvp[4][4];           bytes   0.. 63   (16 floats, updated per frame)
- *   float position[36][4];     bytes  64..639   (static mesh positions)
- *   float attr[36][4];         bytes 640..1215  (static UVs)
+ * Borg GPU DRM uAPI, the part borgvk and libborg_drm_shim.so share with the kernel
+ * driver (software/linux/overlay/include/uapi/drm/borg_drm.h): GEM buffers.
  */
 #ifndef BORG_DRM_H
 #define BORG_DRM_H
@@ -24,36 +18,9 @@
 #  define DRM_IOWR(nr, type)  _IOWR(BORG_DRM_IOCTL_BASE, nr, type)
 #endif
 
-/* ---- UBO byte offsets ------------------------------------------------- */
-#define BORG_UBO_MVP_BYTE_OFFSET    0u
-#define BORG_UBO_POS_BYTE_OFFSET    64u   /* after 16 MVP floats            */
-#define BORG_UBO_ATTR_BYTE_OFFSET   640u  /* after 16 + 36×4 = 160 floats  */
-#define BORG_UBO_MIN_BYTES          1216u /* minimum valid UBO size         */
-#define BORG_UBO_NUM_VERTS          36    /* expanded triangles (12 × 3)    */
-
-/* ---- Geometry packet limits (firmware RX_GEOM_* must agree) ----------- */
-#define BORG_GEOM_MAX_VERTS   16
-#define BORG_GEOM_MAX_TRIS    12
-
-/* ---- Texture (firmware BORGVK_TEX_DIM must agree) --------------------- */
-#define BORG_TEX_DIM   64
-
-/* ---- Driver-specific ioctl offsets ------------------------------------ */
-/* 0x00-0x04 belong to the kernel driver (register and memory access, software/linux/overlay/include/uapi/drm/borg_drm.h);
- * GEM_CREATE and GEM_MMAP are the kernel's too. SETUP and above exist only in the drm-shim. */
+/* 0x00-0x04 are the kernel driver's register and memory access. */
 #define DRM_BORG_GEM_CREATE   0x05
 #define DRM_BORG_GEM_MMAP     0x06
-#define DRM_BORG_SETUP        0x07   /* one-time mesh+texture upload        */
-#define DRM_BORG_SUBMIT       0x08   /* per-frame MVP send                  */
-#define DRM_BORG_SHADER       0x09   /* upload a borgc-compiled shader blob */
-#define DRM_BORG_BLEND        0x0a   /* colour-blend state (BLEND_CFG/CONST) */
-#define DRM_BORG_STATE        0x0b   /* stencil/depth/cull state registers */
-#define DRM_BORG_PUSH         0x0c   /* push-constant words */
-
-/* Max .borg blob the shader-upload path carries (must match the Vulkan side's
- * BORGVK_SHADER_BLOB_MAX and the firmware RX shader packet). cube.frag = 255 B
- * today; 512 leaves headroom. */
-#define BORG_SHADER_MAX       1024u
 
 /* Allocate a GEM buffer object backed by anonymous memory. */
 struct drm_borg_gem_create {
@@ -69,75 +36,9 @@ struct drm_borg_gem_mmap {
    uint64_t offset;   /* out: mmap offset                        */
 };
 
-/* Upload mesh + texture to the FPGA (called once per power cycle).
- * The shim reads geometry from the UBO BO at BORG_UBO_POS/ATTR_BYTE_OFFSET
- * and texture (RGBA8 linear) from the tex BO at tex_offset.
- * A sentinel file prevents re-upload when the FPGA already has the data. */
-struct drm_borg_setup {
-   uint32_t ubo_handle;
-   uint32_t tex_handle;
-   uint64_t tex_offset;    /* byte offset of pixel data within tex BO */
-   uint32_t tex_width;
-   uint32_t tex_height;
-   uint32_t sampler[4];    /* the texture unit's sampler descriptor, packed by
-                            * borgvk from the app's VkSampler */
-};
-
-/* Send the per-frame MVP (16 floats at UBO byte offset 0) to the FPGA. */
-struct drm_borg_submit {
-   uint32_t ubo_handle;
-   uint32_t pad;
-};
-
-/* Upload a borgc-compiled shader blob to the firmware. `stage` selects the slot
- * (0 = vertex, 1 = fragment); `len` bytes of `data` are the .borg blob. The blob
- * is carried inline so the shim/kernel needs no BO for it. */
-struct drm_borg_shader {
-   uint32_t stage;
-   uint32_t len;
-   uint8_t  data[BORG_SHADER_MAX];
-};
-
-/* Colour-blend state, already packed in the BLEND_CFG / BLEND_CONST register
- * layout (hardware/rdl/borg.rdl); the firmware stores both words as is. */
-struct drm_borg_blend {
-   uint32_t cfg;
-   uint32_t constant;
-};
-
 #define DRM_IOCTL_BORG_GEM_CREATE \
    DRM_IOWR(DRM_COMMAND_BASE + DRM_BORG_GEM_CREATE, struct drm_borg_gem_create)
 #define DRM_IOCTL_BORG_GEM_MMAP \
    DRM_IOWR(DRM_COMMAND_BASE + DRM_BORG_GEM_MMAP,   struct drm_borg_gem_mmap)
-#define DRM_IOCTL_BORG_SETUP \
-   DRM_IOW (DRM_COMMAND_BASE + DRM_BORG_SETUP,       struct drm_borg_setup)
-#define DRM_IOCTL_BORG_SUBMIT \
-   DRM_IOW (DRM_COMMAND_BASE + DRM_BORG_SUBMIT,      struct drm_borg_submit)
-#define DRM_IOCTL_BORG_SHADER \
-   DRM_IOW (DRM_COMMAND_BASE + DRM_BORG_SHADER,      struct drm_borg_shader)
-
-#define DRM_IOCTL_BORG_BLEND \
-   DRM_IOW (DRM_COMMAND_BASE + DRM_BORG_BLEND,       struct drm_borg_blend)
-
-/* Fixed-function raster state in register layout (hardware/rdl/borg.rdl):
- * STENCIL_CFG, STENCIL_FRONT, STENCIL_BACK, DEPTH_CFG, CULL_CFG. */
-#define DRM_BORG_STATE_REGS 5
-struct drm_borg_state {
-   uint32_t reg[DRM_BORG_STATE_REGS];
-};
-
-#define DRM_IOCTL_BORG_STATE \
-   DRM_IOW (DRM_COMMAND_BASE + DRM_BORG_STATE,       struct drm_borg_state)
-
-/* Push-constant words [off_words, off_words + n_words) of the 32-word window. */
-#define DRM_BORG_PUSH_WORDS 32
-struct drm_borg_push {
-   uint32_t off_words;
-   uint32_t n_words;
-   uint32_t words[DRM_BORG_PUSH_WORDS];
-};
-
-#define DRM_IOCTL_BORG_PUSH \
-   DRM_IOW (DRM_COMMAND_BASE + DRM_BORG_PUSH,        struct drm_borg_push)
 
 #endif /* BORG_DRM_H */

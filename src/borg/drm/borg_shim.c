@@ -1,149 +1,24 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * Borg GPU drm-shim — makes the borgvk Mesa driver work without a real kernel
- * driver.  Intercepts DRM ioctls via Mesa's drm-shim framework:
- *
- *   BORG_GEM_CREATE / BORG_GEM_MMAP / GEM_CLOSE:
- *       Back each BO with anonymous memory (malloc-equivalent via shim_bo).
- *       The borgvk driver mmap()s the BO exactly as it will on real hardware.
- *
- *   BORG_SETUP:
- *       Read geometry from the UBO BO (at BORG_UBO_POS/ATTR_BYTE_OFFSET) and
- *       texture from the image BO (RGBA8).  Dedup vertices, downsample texture
- *       rows, ship everything over serial.  A sentinel file in /tmp prevents
- *       re-upload across restarts within the same FPGA power cycle.
- *
- *   BORG_SUBMIT:
- *       Read the 16-float MVP from byte 0 of the UBO BO, right-multiply by an
- *       externally-supplied rotation matrix if scripts/mouse_rotation.py is
- *       running (see read_mouse_rotation() below), and ship the result as a
- *       0xAD serial packet.
+ * Borg GPU drm-shim: a borg render node for the host, so borgvk finds a DRM device
+ * without the kernel driver. GEM_CREATE, GEM_MMAP and GEM_CLOSE back each BO with
+ * anonymous memory (shim_bo), mapped by borgvk as on the board.
  *
  * Usage:
- *   LD_PRELOAD=libborg_drm_shim.so VK_DRIVER_FILES=.../borg_devenv_icd.json vkcube
- *
- * When the real Linux kernel driver exists, remove this file; nothing in
- * libvulkan_borg.so needs to change.
+ *   LD_PRELOAD=libborg_drm_shim.so VK_DRIVER_FILES=.../borg_devenv_icd.json <app>
  */
 #include "drm-shim/drm_shim.h"
 #include "drm-uapi/borg_drm.h"
-#include "borg_serial.h"
 
 #include <errno.h>
-#include <fcntl.h>
-#include <math.h>
-#include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
-#include <time.h>
-#include <unistd.h>
-
-/* ---- Sentinel (skip upload if FPGA already has the data) -------------- */
-
-static void
-sentinel_path(char *buf, size_t n)
-{
-   const char *dev = getenv("BORGVK_SERIAL");
-   if (!dev || !dev[0]) dev = "/dev/ttyUSB0";
-   const char *base = strrchr(dev, '/');
-   base = base ? base + 1 : dev;
-   snprintf(buf, n, "/tmp/borgvk_%s_setup", base);
-}
-
-static int
-setup_already_done(void)
-{
-   if (getenv("BORGVK_FORCE_UPLOAD")) return 0;
-   char path[256];
-   sentinel_path(path, sizeof(path));
-   return access(path, F_OK) == 0;
-}
-
-static void
-mark_setup_done(void)
-{
-   char path[256];
-   sentinel_path(path, sizeof(path));
-   int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-   if (fd >= 0) close(fd);
-}
-
-/* ---- Vertex dedup + geometry send ------------------------------------- */
-
-static void
-send_geometry(const float *ubo)
-{
-   const float *pos = (const float *)((const char *)ubo + BORG_UBO_POS_BYTE_OFFSET);
-   const float *att = (const float *)((const char *)ubo + BORG_UBO_ATTR_BYTE_OFFSET);
-
-   float verts[BORG_GEOM_MAX_VERTS * 3];
-   uint8_t idx[BORG_UBO_NUM_VERTS];
-   float uv[BORG_UBO_NUM_VERTS * 2];
-   int nverts = 0;
-
-   for (int i = 0; i < BORG_UBO_NUM_VERTS; i++) {
-      float x = pos[i*4+0], y = pos[i*4+1], z = pos[i*4+2];
-      int u = -1;
-      for (int j = 0; j < nverts; j++) {
-         if (verts[j*3+0]==x && verts[j*3+1]==y && verts[j*3+2]==z) { u=j; break; }
-      }
-      if (u < 0) {
-         if (nverts >= BORG_GEOM_MAX_VERTS) return;
-         u = nverts++;
-         verts[u*3+0]=x; verts[u*3+1]=y; verts[u*3+2]=z;
-      }
-      idx[i] = (uint8_t)u;
-      uv[i*2+0] = att[i*4+0];
-      uv[i*2+1] = att[i*4+1];
-   }
-
-   borg_serial_send_geom(verts, nverts, idx, uv, BORG_UBO_NUM_VERTS / 3);
-}
-
-/* ---- Texture downsample + send ---------------------------------------- */
-
-static void
-send_texture(const uint8_t *pixels, uint32_t sw, uint32_t sh,
-             const uint32_t sampler[4])
-{
-   if (!sw || !sh) return;
-   uint32_t pitch = sw * 4;
-   int sxs = (int)(sw / BORG_TEX_DIM); if (sxs < 1) sxs = 1;
-   int sys = (int)(sh / BORG_TEX_DIM); if (sys < 1) sys = 1;
-
-   for (int dy = 0; dy < BORG_TEX_DIM; dy++) {
-      uint8_t row[BORG_TEX_DIM * 4];
-      for (int dx = 0; dx < BORG_TEX_DIM; dx++) {
-         uint32_t sum[4] = { 0, 0, 0, 0 }, n = 0;
-         for (int oy = 0; oy < sys; oy++) {
-            uint32_t sy = (uint32_t)dy * sys + oy;
-            if (sy >= sh) break;
-            for (int ox = 0; ox < sxs; ox++) {
-               uint32_t sx = (uint32_t)dx * sxs + ox;
-               if (sx >= sw) break;
-               const uint8_t *p = pixels + sy * pitch + sx * 4;
-               for (int c = 0; c < 4; c++)
-                  sum[c] += p[c];
-               n++;
-            }
-         }
-         if (!n) n = 1;
-         for (int c = 0; c < 4; c++)
-            row[dx * 4 + c] = (uint8_t)((sum[c] + n / 2) / n);
-      }
-      borg_serial_send_tex_row(dy, row, sampler);
-   }
-}
 
 /* ---- drm-shim ioctl handlers ------------------------------------------ */
 
 /* drm_shim_bo_init() allocates virtual address space in shim_device.mem_fd
- * but does NOT set bo->map.  We mmap the memfd ourselves so SETUP/SUBMIT can
- * read the BO contents directly.  driver_bo_free unmaps on GEM_CLOSE. */
+ * but does NOT set bo->map.  We mmap the memfd ourselves; driver_bo_free unmaps
+ * on GEM_CLOSE. */
 static void
 borg_bo_free(struct shim_bo *bo)
 {
@@ -164,7 +39,6 @@ borg_ioctl_gem_create(int fd, unsigned long req, void *arg)
    int ret = drm_shim_bo_init(bo, size);
    if (ret) { free(bo); return ret; }
 
-   /* Map the backing store so SETUP/SUBMIT can read CPU-written data. */
    bo->map = mmap(NULL, size, PROT_READ | PROT_WRITE,
                   MAP_SHARED, shim_device.mem_fd, (off_t)bo->mem_addr);
    if (bo->map == MAP_FAILED) {
@@ -191,163 +65,9 @@ borg_ioctl_gem_mmap(int fd, unsigned long req, void *arg)
    return 0;
 }
 
-static int
-borg_ioctl_setup(int fd, unsigned long req, void *arg)
-{
-   struct shim_fd *shim_fd = drm_shim_fd_lookup(fd);
-   struct drm_borg_setup *s = arg;
-
-   if (setup_already_done()) {
-      fprintf(stderr, "borg-shim: skipping upload (sentinel present); "
-              "set BORGVK_FORCE_UPLOAD=1 to re-upload\n");
-      return 0;
-   }
-
-   struct shim_bo *ubo_bo = drm_shim_bo_lookup(shim_fd, (int)s->ubo_handle);
-   if (!ubo_bo) return -ENOENT;
-   struct shim_bo *tex_bo = drm_shim_bo_lookup(shim_fd, (int)s->tex_handle);
-   if (!tex_bo) { drm_shim_bo_put(ubo_bo); return -ENOENT; }
-
-   fprintf(stderr, "borg-shim: uploading geometry + texture...\n");
-   send_geometry((const float *)ubo_bo->map);
-   send_texture((const uint8_t *)tex_bo->map + s->tex_offset,
-                s->tex_width, s->tex_height, s->sampler);
-   mark_setup_done();
-   fprintf(stderr, "borg-shim: upload complete\n");
-
-   drm_shim_bo_put(tex_bo);
-   drm_shim_bo_put(ubo_bo);
-   return 0;
-}
-
-/* ---- Mouse/touchpad rotation overlay ----------------------------------
- * scripts/mouse_rotation.py runs independently of cube.c (which free-spins on
- * its own internal timer with no input hooks) and has no wire protocol of its
- * own to the firmware — the old firmware supported a direct 0xAC packet, but
- * that relied on a local hardcoded-geometry TS bake that no longer exists now
- * that geometry and the full MVP both always come from the host.  Instead the
- * script writes its column-major 3x3 rotation matrix to a plain file; we read
- * it here and fold it into the model-space side of the MVP cube.c already
- * computed: mvp_new = mvp_baked * R.  Matrix associativity makes this exact
- * regardless of how mvp_baked was itself composed (it's equivalent to
- * rotating the model-space vertices by R before cube's own transform), so it
- * layers on top of (rather than replacing) cube's continuous auto-spin. */
-#define MOUSE_ROTATION_PATH "/tmp/borg_mouse_rotation.bin"
-
-static int
-read_mouse_rotation(float rot3x3[9])
-{
-   struct stat st;
-   if (stat(MOUSE_ROTATION_PATH, &st) != 0)
-      return 0;
-   /* Ignore a rotation left behind by a script that is no longer running,
-    * rather than freezing the cube at whatever it last wrote. */
-   time_t now = time(NULL);
-   if (now - st.st_mtime > 1)
-      return 0;
-
-   int fd = open(MOUSE_ROTATION_PATH, O_RDONLY);
-   if (fd < 0)
-      return 0;
-   float buf[9];
-   ssize_t n = read(fd, buf, sizeof(buf));
-   close(fd);
-   if (n != (ssize_t)sizeof(buf))
-      return 0;
-
-   for (int i = 0; i < 9; i++) {
-      if (!isfinite(buf[i]) || fabsf(buf[i]) > 1.5f)
-         return 0;  /* corruption/torn-write guard: a rotation matrix entry is in [-1,1] */
-   }
-   memcpy(rot3x3, buf, sizeof(buf));
-   return 1;
-}
-
-static void
-apply_extra_rotation(float mvp[16], const float rot3x3[9])
-{
-   /* mvp is column-major (mvp[col*4+row]); rot3x3 likewise (rot3x3[col*3+row]). */
-   float result[16];
-   for (int j = 0; j < 3; j++)
-      for (int row = 0; row < 4; row++) {
-         float sum = 0.0f;
-         for (int k = 0; k < 3; k++)
-            sum += mvp[k * 4 + row] * rot3x3[j * 3 + k];
-         result[j * 4 + row] = sum;
-      }
-   for (int row = 0; row < 4; row++)
-      result[3 * 4 + row] = mvp[3 * 4 + row];
-   memcpy(mvp, result, sizeof(result));
-}
-
-static int
-borg_ioctl_submit(int fd, unsigned long req, void *arg)
-{
-   struct shim_fd *shim_fd = drm_shim_fd_lookup(fd);
-   struct drm_borg_submit *s = arg;
-
-   struct shim_bo *bo = drm_shim_bo_lookup(shim_fd, (int)s->ubo_handle);
-   if (!bo) return -ENOENT;
-
-   float mvp[16];
-   memcpy(mvp, bo->map, sizeof(mvp));
-   float rot3x3[9];
-   if (read_mouse_rotation(rot3x3))
-      apply_extra_rotation(mvp, rot3x3);
-
-   borg_serial_send_mvp(mvp);
-   drm_shim_bo_put(bo);
-   return 0;
-}
-
-/* Upload a borgc-compiled shader blob (carried inline in the ioctl) to the
- * firmware over serial. When a real kernel driver exists, it would stage the
- * blob into GPU memory instead. */
-static int
-borg_ioctl_shader(int fd, unsigned long req, void *arg)
-{
-   struct drm_borg_shader *s = arg;
-   if (s->len == 0 || s->len > BORG_SHADER_MAX)
-      return -EINVAL;
-   borg_serial_send_shader((uint8_t)s->stage, s->data, s->len);
-   return 0;
-}
-
-static int
-borg_ioctl_blend(int fd, unsigned long req, void *arg)
-{
-   struct drm_borg_blend *b = arg;
-   borg_serial_send_blend(b->cfg, b->constant);
-   return 0;
-}
-
-static int
-borg_ioctl_state(int fd, unsigned long req, void *arg)
-{
-   struct drm_borg_state *s = arg;
-   borg_serial_send_state(s->reg);
-   return 0;
-}
-
-static int
-borg_ioctl_push(int fd, unsigned long req, void *arg)
-{
-   struct drm_borg_push *p = arg;
-   if (p->off_words >= DRM_BORG_PUSH_WORDS || p->n_words > DRM_BORG_PUSH_WORDS - p->off_words)
-      return -1;
-   borg_serial_send_push(p->off_words, p->n_words, p->words);
-   return 0;
-}
-
 static int (*driver_ioctls[])(int, unsigned long, void *) = {
    [DRM_BORG_GEM_CREATE] = borg_ioctl_gem_create,
    [DRM_BORG_GEM_MMAP]   = borg_ioctl_gem_mmap,
-   [DRM_BORG_SETUP]      = borg_ioctl_setup,
-   [DRM_BORG_SUBMIT]     = borg_ioctl_submit,
-   [DRM_BORG_SHADER]     = borg_ioctl_shader,
-   [DRM_BORG_BLEND]      = borg_ioctl_blend,
-   [DRM_BORG_STATE]      = borg_ioctl_state,
-   [DRM_BORG_PUSH]       = borg_ioctl_push,
 };
 
 /* ---- drm_shim_driver_init — called once on library load --------------- */
