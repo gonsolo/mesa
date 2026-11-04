@@ -42,13 +42,17 @@ impl Job<'_> {
     }
 }
 
-/// The register/memory program of direct_sim --compute (simulation/direct/main.cpp), on the
-/// device, its output written to `path`.
-pub fn compute(job: &[u8], path: &std::path::Path) -> bool {
-    job.len() >= 48 && crate::dev::with(|d| run_job(d, job, path)).unwrap_or(false)
+/// A compute job on the device: the buffers' bytes after it, in job order.
+pub fn compute(job: &[u8]) -> Option<Vec<u8>> {
+    crate::dev::with(|d| run_job(d, job)).flatten()
 }
 
-fn run_job(d: &mut crate::dev::Dev, job: &[u8], path: &std::path::Path) -> bool {
+/// The job as register and memory accesses: program, presets and buffers in, one dispatch, the
+/// buffers out.
+pub fn run_job(d: &mut crate::dev::Dev, job: &[u8]) -> Option<Vec<u8>> {
+    if job.len() < 48 {
+        return None;
+    }
     const GPR: u32 = 0;
     const IMEM: u32 = 128;
     const CONTROL: u32 = 424;
@@ -87,7 +91,7 @@ fn run_job(d: &mut crate::dev::Dev, job: &[u8], path: &std::path::Path) -> bool 
         d.reg(GPR + 4 * 14, bz);
     }
     if nbufs > BORGVK_CS_MAX_BUFS {
-        return false;
+        return None;
     }
     let mut bufs = Vec::new();
     for _ in 0..nbufs {
@@ -102,15 +106,9 @@ fn run_job(d: &mut crate::dev::Dev, job: &[u8], path: &std::path::Path) -> bool 
     d.reg(C_Z, gz);
     d.reg(C_LOCAL, lx | ly << 8 | lx.wrapping_mul(ly).wrapping_mul(lz) << 16);
     d.reg(C_CTRL, 1);
-    let mut st = 0;
-    for _ in 0..2_000_000 {
-        st = d.read(C_CTRL);
-        if st & 1 != 0 {
-            break;
-        }
-    }
-    if st & 1 == 0 || st & 8 != 0 {
-        return false;
+    let st = d.wait(C_CTRL, 1, 1);
+    if st & 1 == 0 || st & 8 != 0 || !d.ok {
+        return None;
     }
     let mut out = Vec::new();
     for (addr, size) in bufs {
@@ -118,7 +116,7 @@ fn run_job(d: &mut crate::dev::Dev, job: &[u8], path: &std::path::Path) -> bool 
         d.mem_read(addr, &mut tmp);
         out.extend_from_slice(&tmp[..size as usize]);
     }
-    std::fs::write(path, out).is_ok()
+    d.ok.then_some(out)
 }
 
 #[cfg(test)]
