@@ -410,6 +410,14 @@ impl Ctx<'_> {
                 return Err(Reject::NoIndexBuffer);
             }
         }
+        // Pulled from the device heap, indices and vertices: the CPU needs no index.
+        let c = &*self.c;
+        let in_heap = |b: usize| c.vb_gpu[b] != 0;
+        if pl.pulled && !self.lines && !self.points && (!p.indexed || c.index_gpu != 0)
+            && pl.attrs[..pl.attr_count as usize].iter().all(|a| in_heap(a.binding as usize)) {
+            (self.vmin, self.vmax) = (0, 0);
+            return Ok(());
+        }
         let restart = if p.index_size == 2 { 0xffff } else { 0xffff_ffff };
         let (mut vmin, mut vmax) = (i64::MAX, -1);
         if p.indexed {
