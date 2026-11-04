@@ -168,16 +168,6 @@ impl Dev {
             self.get(p);
         }
     }
-
-    /// Sends what is batched; a simulator answers once it has run it.
-    pub fn flush(&mut self) {
-        self.flush_mem();
-        self.flush_regs();
-        if matches!(self.link, Link::Pipe(..)) {
-            self.put(b"S");
-            self.get(&mut [0u8]);
-        }
-    }
 }
 
 impl crate::list::Gpu for Dev {

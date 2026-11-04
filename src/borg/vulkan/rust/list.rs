@@ -272,15 +272,6 @@ impl Builder {
         self.apply_layout(g);
     }
 
-    /// The clear colour (FP16 RGB) of a render whose stream sets no target.
-    pub fn set_clear(&mut self, c: [u16; 3]) {
-        self.clear = c;
-    }
-
-    pub fn flush_format(&self) -> u32 {
-        self.flush_format
-    }
-
     pub fn set_strip(&mut self, k: u32, n: u32, rows: u32) {
         self.strip = (k, n.max(1), rows);
     }

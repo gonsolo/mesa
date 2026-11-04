@@ -1,12 +1,10 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-//! The Borg device (`BORGVK_HW`, `dev`): renders through the list builder and compute jobs, in
-//! this process.
+//! The Borg device (`BORGVK_HW`, `dev`): whether passes render on it, and compute jobs.
 
 use crate::ffi::*;
 use crate::list::Gpu;
-use crate::util::{log, MESA_LOG_WARN};
 
 fn env_set(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|v| !v.is_empty())
@@ -24,80 +22,6 @@ pub fn serves_extent(w: u32, h: u32, has_depth_stencil: bool) -> bool {
     }
     // Depth and stencil take memory by area: a wide, low pass fits.
     (1..=4096).contains(&w) && (1..=4096).contains(&h) && (!has_depth_stencil || w * h <= 1 << 20)
-}
-
-/// Pixel (x, y) of a flushed 4x4-tiled frame: RGB for R5G6B5 (0), RGBA8 (1) and BGRA8 (2), the
-/// raw word for RAW32 (3).
-fn pixel(fmt: i32, words: &[u32], w: u32, x: u32, y: u32) -> ([u8; 4], usize) {
-    let (tile, ti) = borg_layout::tile::index(w, x, y);
-    match fmt {
-        3 => (words[tile * 16 + ti].to_ne_bytes(), 4),
-        0 => {
-            let word = words[tile * 8 + (ti >> 1)];
-            let px = if ti & 1 != 0 { word >> 16 } else { word & 0xFFFF };
-            let (r, g, b) = ((((px >> 11) & 0x1F) << 3) as u8, (((px >> 5) & 0x3F) << 2) as u8, ((px & 0x1F) << 3) as u8);
-            ([r | r >> 5, g | g >> 6, b | b >> 5, 0], 3)
-        }
-        _ => {
-            let [b0, b1, b2, _] = words[tile * 16 + ti].to_le_bytes();
-            let (r, b) = if fmt == 1 { (b0, b2) } else { (b2, b0) };
-            ([r, b1, b, 0], 3)
-        }
-    }
-}
-
-/// Renders the stream on the device into `out`: `w * h` pixels of 3 bytes, 4 for RAW32.
-pub fn render(b: &[u8], w: u32, h: u32, out: *mut u8) -> usize {
-    let frame = crate::dev::with(|d| {
-        d.build(w, h, |l, d| {
-            l.flush(d);
-            l.init(d, w, h);
-            let (mut draws, mut target_seen, mut i) = (0, false, 0);
-            while i < b.len() {
-                let len = crate::list::packet_len(b[i]);
-                if len == 0 || i + len > b.len() {
-                    log(MESA_LOG_WARN, format!("borgvk: bad packet 0x{:02x} at byte {i}", b[i]));
-                    break;
-                }
-                if !l.packet(d, &b[i..i + len]) {
-                    log(MESA_LOG_WARN, format!("borgvk: rejected packet 0x{:02x} at byte {i}", b[i]));
-                    break;
-                }
-                target_seen |= b[i] == 0xB6;
-                if b[i] == 0xBA {
-                    if !target_seen {
-                        l.set_clear([0x3266; 3]);
-                    }
-                    l.draw(d);
-                    draws += 1;
-                }
-                i += len;
-            }
-            l.flush(d);
-            d.flush();
-            let fmt = l.flush_format();
-            let mut words = vec![0u32; (w * h * if fmt != 0 { 4 } else { 2 }) as usize / 4];
-            d.mem_read(DRAM_OUT_BASE_SPI, unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast(), words.len() * 4) });
-            (draws != 0 && d.ok).then_some((fmt as i32, words))
-        })
-    });
-    let Some(frame) = frame else {
-        log(MESA_LOG_WARN, "borgvk: cannot open the Borg device".into());
-        return 0;
-    };
-    let Some((fmt, words)) = frame else {
-        return 0;
-    };
-    let mut n = 0;
-    for y in 0..h {
-        for x in 0..w {
-            let (px, bpp) = pixel(fmt, &words, w, x, y);
-            let o = (y * w + x) as usize * bpp;
-            unsafe { std::ptr::copy_nonoverlapping(px.as_ptr(), out.add(o), bpp) };
-            n = bpp;
-        }
-    }
-    (w * h) as usize * n
 }
 
 /// A compute job as borgvk builds it (borgvk_cmd_dispatch.c): 12 header words, the program,
@@ -200,24 +124,6 @@ fn run_job(d: &mut crate::dev::Dev, job: &[u8], path: &std::path::Path) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn rgb565_pixels_expand_to_eight_bits() {
-        // Tile 0 of a 4-wide frame: pixel 0 white in the low half, pixel 1 red in the high half.
-        let mut words = vec![0u32; 8];
-        words[0] = 0xF800 << 16 | 0xFFFF;
-        assert_eq!(pixel(0, &words, 4, 0, 0), ([255, 255, 255, 0], 3));
-        assert_eq!(pixel(0, &words, 4, 1, 0), ([255, 0, 0, 0], 3));
-    }
-
-    #[test]
-    fn rgba_and_bgra_pixels() {
-        let mut words = vec![0u32; 32];
-        words[16 + 5] = 0x0044_3322; // tile 1, pixel (1, 1) of a frame 8 wide
-        assert_eq!(pixel(1, &words, 8, 5, 1).0[..3], [0x22, 0x33, 0x44]);
-        assert_eq!(pixel(2, &words, 8, 5, 1).0[..3], [0x44, 0x33, 0x22]);
-        assert_eq!(pixel(3, &words, 8, 5, 1), (0x0044_3322u32.to_ne_bytes(), 4));
-    }
 
     #[test]
     fn serves_needs_a_backend() {
