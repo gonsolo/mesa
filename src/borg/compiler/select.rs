@@ -629,6 +629,18 @@ impl ShaderState {
                 }
             }
             nir_intrinsic_load_ssbo | nir_intrinsic_store_ssbo => self.ssbo(intr),
+            nir_intrinsic_load_global | nir_intrinsic_load_global_constant => {
+                let a = self.val(intr.get_src(0), 0);
+                let comps = (0..intr.def.num_components as u32).map(|c| match self.load_at(a, c) { Val::R(r, k) => (r, k), Val::K(_) => unreachable!() }).collect();
+                self.sel.vec_map.insert(intr.def.index, comps);
+            }
+            nir_intrinsic_store_global => {
+                let a = self.val(intr.get_src(1), 0);
+                for c in (0..intr.get_src(0).num_components() as u32).filter(|c| intr.write_mask() & (1 << c) != 0) {
+                    let v = self.val(intr.get_src(0), c as u8);
+                    self.store_at(a, c, v);
+                }
+            }
             nir_intrinsic_load_constant => self.constant_load(intr),
             nir_intrinsic_load_frag_coord if self.stage == Stage::Fragment => self.frag_coord(intr),
             nir_intrinsic_load_vertex_id => {
