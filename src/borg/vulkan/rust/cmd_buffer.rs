@@ -77,6 +77,7 @@ pub struct CommandBuffer {
     pub batch_vpool: *const c_void,
     pub region_set: *mut DescriptorSet, // the set whose buffer region is at region_base
     pub region_base: u32,
+    pub region_table: u32, // its binding table
     pub index_ptr: *const u8, // bound index buffer, at its offset
     pub index_avail: VkDeviceSize,
     pub index_size: u32,         // 2, 4, or 0 for an unsupported type

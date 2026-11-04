@@ -272,6 +272,29 @@ struct Ctx<'a> {
     index_code: u32,
     voff_out: u32,
     ubo_base: u32,
+    table: u32,
+}
+
+/// A binding's entry in the draw's binding table: base address and offset limit (borgc reads
+/// `base + min(offset, limit)`).
+/// The binding table into the draw heap; the draw packet's word (its offset + 1, 0 for none).
+fn send_table(heap: &mut Heap, table: &[[u32; 2]]) -> Result<u32, Reject> {
+    if table.is_empty() {
+        return Ok(0);
+    }
+    let words: Vec<u32> = table.iter().flatten().copied().collect();
+    Ok(heap.upload(bytes_of(&words))? + 1)
+}
+
+fn set_entry(table: &mut Vec<[u32; 2]>, slot: u32, e: [u32; 2]) {
+    if table.len() <= slot as usize {
+        table.resize(slot as usize + 1, [0, 0]);
+    }
+    table[slot as usize] = e;
+}
+
+fn entry(addr: u32, len: u64) -> [u32; 2] {
+    [addr, (len.min(u32::MAX as u64 - 3).max(4) as u32 - 4) & !3]
 }
 
 impl Ctx<'_> {
@@ -712,7 +735,9 @@ impl Ctx<'_> {
             let slots = fixed.max(if high > 0 { 1 + window_slot(high - 1) } else { 1 });
             let reuse = c.region_set == set && c.batch_draws != 0 && umask == 0 && !any_dyn && sets[1].is_none() && !pl.spills;
             let mut base = c.region_base;
+            self.table = c.region_table;
             if !reuse {
+                let mut table = Vec::new();
                 base = (self.heap.top + 3) & !3;
                 if base as u64 + slots as u64 * SLOT_BYTES as u64 + 16 > HEAP_BYTES as u64 {
                     return Err(Reject::Upload);
@@ -754,8 +779,14 @@ impl Ctx<'_> {
                         }
                         let range = ds.ranges[b];
                         let len = if range == VK_WHOLE_SIZE as u64 || range == 0 { size - off } else { range };
+                        // In the device heap the shader reads and writes the buffer where it is.
+                        if let Some(gpu) = ub.memory().map(|m| m.gpu).filter(|&g| g != 0) {
+                            set_entry(&mut table, fb, entry(gpu + (ub.offset + off) as u32, len.min(size - off)));
+                            continue;
+                        }
                         let len = len.min((size - off).min(SLOT_BYTES as u64)) as u32;
                         let at = base + if st || (fb != 0 && pl.ubo_mask != 0) { window_slot(fb) * SLOT_BYTES } else { 0 };
+                        set_entry(&mut table, fb, entry(BORG_HEAP_SPI + at, len as u64));
                         for i in (0..len).step_by(256) {
                             let n = 256.min(len - i);
                             let mut tmp = [0u8; 256];
@@ -770,7 +801,8 @@ impl Ctx<'_> {
                 if pl.push_window {
                     send_mem(base + PUSH_WINDOW_SLOT * SLOT_BYTES, bytes_of(&self.device.scratch.lock().unwrap().push_words));
                 }
-                (c.region_set, c.region_base) = (set, base);
+                self.table = send_table(&mut self.heap, &table)?;
+                (c.region_set, c.region_base, c.region_table) = (set, base, self.table);
             }
             self.ubo_base = base + 1;
         }
@@ -792,13 +824,22 @@ impl Ctx<'_> {
             }
             let range = s.ranges[b];
             let len = if range == VK_WHOLE_SIZE as u64 || range == 0 { size - off } else { range };
+            let mut table = Vec::new();
+            if let Some(gpu) = ub.memory().map(|m| m.gpu).filter(|&g| g != 0) {
+                set_entry(&mut table, b as u32, entry(gpu + (ub.offset + off) as u32, len.min(size - off)));
+                self.table = send_table(&mut self.heap, &table)?;
+                break;
+            }
             let len = len.min((size - off).min(65536)) as usize;
             let at = uhost.with_bytes(off as usize, len, |b| self.heap.upload(b)).ok_or(Reject::Upload)??;
             self.ubo_base = at + 1;
+            set_entry(&mut table, b as u32, entry(BORG_HEAP_SPI + at, len as u64));
+            self.table = send_table(&mut self.heap, &table)?;
             break;
         }
         Ok(())
     }
+
 
     /// Descriptor k from the pipeline's pair k of flat slots, its texels after the previous one's.
     fn texture_slots(&self) {
@@ -852,11 +893,11 @@ impl Ctx<'_> {
         let (p, pl) = (self.p, self.pl);
         let bits = self.load << 1 | (pl.push_stage as u32) << 5;
         let d = if self.lines {
-            let words = [self.pairs.len() as u32 * 6, p.instances, 0, p.first_instance, 0, 0, self.ubo_base];
+            let words = [self.pairs.len() as u32 * 6, p.instances, 0, p.first_instance, 0, 0, self.ubo_base, self.table];
             Draw { topology: 0, index_type: 0, restart: bits, words }
         } else {
             let first = if p.indexed { 0 } else { p.first.wrapping_mul(self.x) };
-            let words = [p.count.wrapping_mul(self.x), p.instances, first, p.first_instance, self.voff_out, self.idx_off, self.ubo_base];
+            let words = [p.count.wrapping_mul(self.x), p.instances, first, p.first_instance, self.voff_out, self.idx_off, self.ubo_base, self.table];
             Draw { topology: self.topo, index_type: if p.indexed { self.index_code } else { 0 }, restart: pl.restart as u32 | bits, words }
         };
         send_draw(&d);
@@ -1038,6 +1079,7 @@ fn draw_batched(device: &Device, c: &mut CommandBuffer, p: &Params) -> Result<bo
         index_code: 0,
         voff_out: 0,
         ubo_base: 0,
+        table: 0,
     };
     g.validate().and_then(|_| g.index_range())?;
     g.reserve();

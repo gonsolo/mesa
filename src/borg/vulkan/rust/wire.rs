@@ -211,11 +211,11 @@ pub struct Draw {
     pub topology: u32,
     pub index_type: u32,
     pub restart: u32,
-    pub words: [u32; 7],
+    pub words: [u32; 8],
 }
 
 pub fn send_draw(d: &Draw) {
-    let mut pkt = [0u8; 1 + 3 + 7 * 4 + 1];
+    let mut pkt = [0u8; 1 + 3 + 8 * 4 + 1];
     pkt[0] = MARKER_DRAW;
     pkt[1..4].copy_from_slice(&[d.topology as u8, d.index_type as u8, d.restart as u8]);
     for (i, &v) in d.words.iter().enumerate() {
@@ -470,9 +470,9 @@ mod tests {
         let p = sent(|| send_vattr(3, 41, 0x100, 12, 16, 0x40000000));
         assert_eq!((p.len(), p[0], p[1], p[2]), (20, 0xB9, 3, 41));
         assert_eq!([u32_at(&p, 3), u32_at(&p, 7), u32_at(&p, 11), u32_at(&p, 15)], [0x100, 12, 16, 0x40000000]);
-        let p = sent(|| send_draw(&Draw { topology: 1, index_type: 2, restart: 1, words: [30, 4, 5, 6, -7i32 as u32, 0x200, 0x300] }));
-        assert_eq!((p.len(), p[0], p[1], p[2], p[3]), (33, 0xBA, 1, 2, 1));
-        assert_eq!((4..11).map(|i| u32_at(&p, 4 * i - 12)).collect::<Vec<_>>(), [30, 4, 5, 6, -7i32 as u32, 0x200, 0x300]);
+        let p = sent(|| send_draw(&Draw { topology: 1, index_type: 2, restart: 1, words: [30, 4, 5, 6, -7i32 as u32, 0x200, 0x300, 0x400] }));
+        assert_eq!((p.len(), p[0], p[1], p[2], p[3]), (37, 0xBA, 1, 2, 1));
+        assert_eq!((4..12).map(|i| u32_at(&p, 4 * i - 12)).collect::<Vec<_>>(), [30, 4, 5, 6, -7i32 as u32, 0x200, 0x300, 0x400]);
         let p = sent(|| send_att(3, &[5, 6, 7]));
         assert_eq!((p.len(), p[0], p[1], p[4]), (6, 0xBF, 3, 7));
         let p = sent(|| send_pass(4, 9));
