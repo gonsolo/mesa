@@ -27,6 +27,7 @@ const MARKER_VATTR: u8 = 0xB9;
 const MARKER_DRAW: u8 = 0xBA;
 const MARKER_PASS: u8 = 0xBB;
 const MARKER_ATT: u8 = 0xBF;
+const MARKER_PLACE: u8 = 0xC7;
 const MARKER_TEXL: u8 = 0xC0;
 const MARKER_TEXS: u8 = 0xC4;
 const MARKER_VP: u8 = 0xC2;
@@ -308,6 +309,17 @@ pub fn send_att(count: u8, fmt: &[u8; 3]) {
 
 pub fn send_pass(flush_format: u8, flags: u8) {
     emit(&mut [MARKER_PASS, flush_format, flags, 0]);
+}
+
+/// The pass's attachments in device memory (colour, depth, stencil, 1-3) and their pitch in
+/// tiles; zeros: the simulator's fixed planes.
+pub fn send_place(at: &[u32; 6], pitch: u32) {
+    let mut pkt = [0u8; 30];
+    pkt[0] = MARKER_PLACE;
+    for (i, v) in at.iter().chain(&[pitch]).enumerate() {
+        put_u32(&mut pkt[1 + 4 * i..], *v);
+    }
+    emit(&mut pkt);
 }
 
 fn stencil_face_pack(f: &VkStencilOpState) -> u32 {

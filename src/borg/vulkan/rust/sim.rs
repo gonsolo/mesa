@@ -8,7 +8,7 @@
 use crate::ffi::*;
 use crate::memory::Host;
 use crate::texel::Texel;
-use crate::texels::Texels;
+use crate::texels::{Planes, Texels};
 use crate::fmt;
 use crate::image::Image;
 use crate::format::{depth_is_d32, flush_format};
@@ -345,6 +345,61 @@ impl Layout {
     }
 }
 
+/// Bytes per pixel of a flush format in the GPU's tile.
+fn flush_bytes(fmt: u8) -> u32 {
+    match fmt {
+        5 => 1,
+        4 | 0 => 2,
+        6 => 8,
+        7 => 16,
+        _ => 4,
+    }
+}
+
+/// Where a pass renders when its attachments are tiled images in device memory that hold what
+/// the GPU stores: the addresses of colour, depth, stencil and attachments 1-3, and the pitch in
+/// tiles they share. None: the pass copies them in and out of the fixed planes.
+pub fn placement(color: Option<&Image>, extra: &[&Image], zimg: Option<&Image>, simg: Option<&Image>, area: [u32; 2]) -> Option<([u32; 6], u32)> {
+    let (w, h) = match color.or(zimg).or(simg) {
+        _ if area[0] != 0 => (area[0], area[1]),
+        Some(i) => (i.vk.extent.width, i.vk.extent.height),
+        None => return None,
+    };
+    let fmt = if !extra.is_empty() { 5 } else { color.map_or(0, |c| flush_format(c.vk.format)) };
+    let samples = color.or(zimg).or(simg).map_or(1, |i| i.vk.samples);
+    let ms = if per_sample(samples, (w + 3) & !3, (h + 3) & !3, !extra.is_empty()) { 4 } else { 1 };
+    let mut pitch = None;
+    let mut base = |img: &Image, p: usize| -> Option<u32> {
+        let gpu = img.memory()?.gpu;
+        let (t, _) = Texels::of(img)?.tiled()?;
+        let tiles = img.vk.extent.width.div_ceil(4);
+        if gpu == 0 || img.vk.samples.max(1) != ms || !image_backed(img, w, h) || *pitch.get_or_insert(tiles) != tiles {
+            return None;
+        }
+        Some(gpu + (img.offset + t.texel(p, 0, 0, [0, 0, 0], 0)) as u32)
+    };
+    let mut at = [0u32; 6];
+    if let Some(c) = color {
+        let same = if fmt == 0 { c.vk.format == VK_FORMAT_R5G6B5_UNORM_PACK16 } else { fmt != 7 && blocksize(c.vk.format) == flush_bytes(fmt) };
+        at[0] = base(c, 0).filter(|_| same)?;
+    }
+    for (k, e) in extra.iter().enumerate() {
+        at[3 + k] = base(e, 0).filter(|_| blocksize(e.vk.format) == 1)?;
+    }
+    if let Some(z) = zimg {
+        at[1] = base(z, 0)?;
+    }
+    if let Some(s) = simg {
+        let p = match Texels::of(s)?.tiled()?.1 {
+            Planes::Depth { stencil: true, .. } => 1,
+            Planes::Stencil => 0,
+            _ => return None,
+        };
+        at[2] = base(s, p)?;
+    }
+    Some((at, pitch?))
+}
+
 /// A 4x pass small enough to keep every sample in each attachment region is stored per sample.
 pub fn per_sample(samples: u32, wp: u32, hp: u32, extra: bool) -> bool {
     samples == 4 && !extra && wp * hp <= 1 << 16
@@ -581,6 +636,7 @@ pub fn run_pass(
     area: [u32; 2],
     occ: &[u32],
     tris: u32,
+    placed: bool,
 ) -> Vec<u64> {
     let none = vec![0; occ.len()];
     // Depth only: no colour attachment, nothing of it goes in or comes back.
@@ -597,13 +653,7 @@ pub fn run_pass(
     let simg = simg.filter(|s| image_backed(s, w, h));
     // Several colour attachments are all one byte per pixel (RAW8).
     let fmt = if !extra.is_empty() { 5 } else { color.map_or(0, |c| flush_format(c.vk.format)) };
-    let cpx = match fmt {
-        5 => 1,
-        4 | 0 => 2,
-        6 => 8,
-        7 => 16,
-        _ => 4,
-    };
+    let cpx = flush_bytes(fmt);
     let d32 = zimg.is_some_and(|z| depth_is_d32(z.vk.format));
     let samples = color.or(zimg).or(simg).map_or(1, |i| i.vk.samples);
     let ms = if per_sample(samples, wp, hp, !extra.is_empty()) { 4 } else { 1 };
@@ -616,7 +666,9 @@ pub fn run_pass(
     };
     let npx = (w * h) as usize;
     let n = npx * ms as usize;
-    let mut b = Before { c: vec![0; n * 16], z: vec![0; n * 4], s: vec![0; n], e: vec![0; npx * 3] };
+    // In place, the GPU renders at the attachments: nothing goes in or comes back.
+    let n = if placed { 0 } else { n };
+    let mut b = Before { c: vec![0; n * 16], z: vec![0; n * 4], s: vec![0; n], e: vec![0; if placed { 0 } else { npx * 3 }] };
 
     let direct = std::env::var_os("BORGVK_SIM_DIRECT");
     let hw = direct.is_none();
@@ -630,7 +682,9 @@ pub fn run_pass(
         return none;
     }
     for part in 0..np {
-        copy_in(&all[part], &l, rows(part), &t, &mut b);
+        if !placed {
+            copy_in(&all[part], &l, rows(part), &t, &mut b);
+        }
     }
     if hw {
         run_on_device(&all[0], &l, &t, stream, wb);
@@ -648,7 +702,9 @@ pub fn run_pass(
     }
     let mut changed = 0;
     for part in 0..np {
-        changed += copy_out(&all[part], &l, rows(part), &t, &b);
+        if !placed {
+            changed += copy_out(&all[part], &l, rows(part), &t, &b);
+        }
     }
     // The writebacks from every strip; the first strip's bytes stand.
     for r in wb {
