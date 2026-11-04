@@ -20,7 +20,7 @@ use crate::query::OccRun;
 use crate::format::{depth_is_d32, flush_format, raw32, vertex_fetch, Fetch};
 use crate::hw::{enabled, serves_extent};
 use crate::image::blocks;
-use crate::wire::{blend_const_pack, occ_packet, send_att, send_draw, send_mem, send_pass, send_target, send_texture_slot, send_vattr, Draw};
+use crate::wire::{blend_const_pack, occ_packet, send_att, send_draw, send_mem, send_pass, send_place, send_target, send_texture_slot, send_vattr, Draw};
 use crate::sim::{per_sample, run_pass};
 use crate::sim_process::sim_run_stream;
 use crate::state_upload::{send_blend_state_serial, upload_shaders_serial, DEFAULT_SAMPLER};
@@ -168,7 +168,7 @@ pub fn flush_draws(c: &mut CommandBuffer) {
     let img = unsafe { c.batch_img.as_ref() };
     let extra: Vec<&Image> = c.batch_extra[..c.batch_nextra as usize].iter().filter_map(|&e| unsafe { e.as_ref() }).collect();
     let (depth, stencil) = unsafe { (c.batch_depth.as_ref(), c.batch_stencil.as_ref()) };
-    let (serve, area, wb, nwb, tris) = (c.batch_serve, c.batch_area, c.wb, c.nwb as usize, c.batch_tris);
+    let (serve, area, wb, nwb, tris, placed) = (c.batch_serve, c.batch_area, c.wb, c.nwb as usize, c.batch_tris, c.batch_in_place);
     c.batch_tris = 0;
     c.nwb = 0;
     c.region_set = null_mut();
@@ -181,7 +181,7 @@ pub fn flush_draws(c: &mut CommandBuffer) {
     let key = if rec { state(hash(seed, stream.as_slice())) } else { seed };
     let words: Vec<u32> = occ[..nocc].iter().map(|r| r.off).collect();
     let counts = if serve {
-        run_pass(stream.as_slice(), img, &extra, depth, stencil, &wb[..nwb], area, &words, tris)
+        run_pass(stream.as_slice(), img, &extra, depth, stencil, &wb[..nwb], area, &words, tris, placed)
     } else {
         sim_run_stream(stream.as_slice(), img, 0);
         vec![0; nocc]
@@ -274,6 +274,19 @@ impl Ctx<'_> {
         !self.c.rendering.depth.is_null() || !self.c.rendering.stencil.is_null()
     }
 
+    /// The pass's attachments in device memory, when it renders there.
+    fn placement(&self) -> Option<([u32; 6], u32)> {
+        let r = &self.c.rendering;
+        let extra: Vec<&Image> = self.extra[..self.nextra].iter().filter_map(|&e| unsafe { e.as_ref() }).collect();
+        unsafe { crate::sim::placement(self.color.as_ref(), &extra, r.depth.as_ref(), r.stencil.as_ref(), [self.w, self.h]) }
+    }
+
+    /// Whether the simulator or the device renders the pass: depth and stencil in the fixed
+    /// planes limit its area, in place they do not.
+    fn served(&self, has_ds: bool) -> bool {
+        serves_extent(self.w, self.h, has_ds && self.placement().is_none())
+    }
+
     fn index(&self, i: u32) -> u32 {
         let n = self.p.index_size as usize;
         let mut b = [0u8; 4];
@@ -318,9 +331,6 @@ impl Ctx<'_> {
         } else {
             [self.w, self.h] = r.extent;
         }
-        if self.color.is_null() && !serves_extent(self.w, self.h, true) {
-            return Err(Reject::NoTargetMemory);
-        }
         self.nextra = if pl.mrt { pl.color_count as usize - 1 } else { 0 };
         if pl.color_count >= 2 && !pl.mrt {
             return Err(Reject::MrtFormats);
@@ -334,10 +344,13 @@ impl Ctx<'_> {
             }
         }
         let has_ds = self.has_ds();
-        let c = &mut *self.c;
-        if self.nextra != 0 && !serves_extent(self.w, self.h, has_ds) {
+        if self.color.is_null() && !self.served(true) {
+            return Err(Reject::NoTargetMemory);
+        }
+        if self.nextra != 0 && !self.served(has_ds) {
             return Err(Reject::MrtNotServed);
         }
+        let c = &mut *self.c;
         let same_extra = c.batch_nextra as usize == self.nextra && c.batch_extra[..self.nextra] == self.extra[..self.nextra];
         if c.batch_draws != 0
             && (!same_extra
@@ -492,11 +505,12 @@ impl Ctx<'_> {
 
     fn begin_pass(&mut self) {
         let has_ds = self.has_ds();
+        let (served, place) = (self.served(has_ds), self.placement());
         let (c, first) = (&mut *self.c, self.first_of_batch);
         borgvk_transport_capture_begin();
         if first {
-            c.batch_serve = serves_extent(self.w, self.h, has_ds);
-            c.batch_area = [self.w, self.h];
+            c.batch_serve = served;
+            (c.batch_area, c.batch_in_place) = ([self.w, self.h], false);
         }
         let color = unsafe { self.color.as_ref() };
         self.load = if first { 0 } else { 1 };
@@ -515,6 +529,9 @@ impl Ctx<'_> {
                 let ms = per_sample(samples, (self.w + 3) & !3, (self.h + 3) & !3, self.nextra != 0);
                 send_pass(fmt, has_z as u8 | (has_s as u8) << 1 | if color.is_none() { 8 } else { 0 } | if d32 { 4 } else { 0 } | (ms as u8) << 4 | (d24 as u8) << 5);
                 send_att(self.nextra as u8 + 1, &[5, 5, 5]);
+                c.batch_in_place = place.is_some();
+                let (at, pitch) = place.unwrap_or(([0; 6], 0));
+                send_place(&at, pitch);
             }
         } else if first {
             let fmt = color.map_or(0, |i| match i.vk.format {

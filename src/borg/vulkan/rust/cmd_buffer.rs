@@ -63,6 +63,7 @@ pub struct CommandBuffer {
     pub batch_extra: [*mut Image; 3], // colour attachments 1-3 of the batch
     pub batch_nextra: u32,
     pub batch_serve: bool,
+    pub batch_in_place: bool, // the batch renders at its attachments' device addresses
     pub batch_area: [u32; 2], // the pass size when it has no attachment
     pub batch_depth: *mut Image,
     pub batch_stencil: *mut Image,
