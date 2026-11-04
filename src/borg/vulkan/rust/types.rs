@@ -31,7 +31,6 @@ pub const BORGVK_CORPUS_SEED: u64 = 0xcbf2_9ce4_8422_2325;
 pub const BORGVK_TEXG_CHUNK: u32 = 256;
 pub const BORGVK_GEOM_MAX_VERTS: u32 = 16;
 pub const BORGVK_GEOM_MAX_TRIS: u32 = 12;
-pub const BORGVK_TEX_DIM: u32 = 64;
 pub const BORGVK_TEX_PAIRS: usize = 32;
 
 #[derive(Clone, Copy)]

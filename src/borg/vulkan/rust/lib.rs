@@ -15,7 +15,6 @@ mod compiler;
 mod copy;
 #[deny(unsafe_code)]
 mod corpus;
-mod cube;
 mod descriptor_set;
 mod device;
 mod dispatch;

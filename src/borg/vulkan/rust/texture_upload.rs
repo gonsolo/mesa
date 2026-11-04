@@ -16,7 +16,6 @@ use borg_layout::descriptor::{TexDesc, TexType};
 use borg_layout::tile::texture_index;
 
 const CHUNK: u32 = BORGVK_TEXG_CHUNK;
-const DIM: u32 = BORGVK_TEX_DIM;
 
 fn send(data: &[u8], desc: &TexDesc, sampler: &[u32; 4]) {
     let d = desc.pack();
@@ -27,32 +26,6 @@ fn send(data: &[u8], desc: &TexDesc, sampler: &[u32; 4]) {
         let n = (data.len() as u32 - off).min(CHUNK);
         send_texture_chunk(off, &data[off as usize..(off + n) as usize], d[..3].try_into().unwrap(), sampler);
     }
-}
-
-/// One row of the cube's texture, box-filtered from the RGBA8 image down to BORGVK_TEX_DIM.
-pub fn send_texture_row(t: &Image, sampler: &[u32; 4], dy: i32) {
-    let (sw, sh) = (t.vk.extent.width, t.vk.extent.height);
-    let Some(texels) = crate::texels::Texels::of(t).filter(|_| sw != 0 && sh != 0) else { return };
-    let (sxs, sys) = ((sw / DIM).max(1), (sh / DIM).max(1));
-    let mut row = [0u8; DIM as usize * 4];
-    for dx in 0..DIM {
-        let (mut sum, mut n) = ([0u32; 4], 0u32);
-        for sy in (0..sys).map(|oy| dy as u32 * sys + oy).take_while(|&sy| sy < sh) {
-            for sx in (0..sxs).map(|ox| dx * sxs + ox).take_while(|&sx| sx < sw) {
-                let mut p = [0u8; 4];
-                texels.read(0, 0, [sx, sy, 0], 0, &mut p);
-                for (s, &v) in sum.iter_mut().zip(&p) {
-                    *s += v as u32;
-                }
-                n += 1;
-            }
-        }
-        let n = n.max(1);
-        for c in 0..4 {
-            row[dx as usize * 4 + c] = ((sum[c] + n / 2) / n) as u8;
-        }
-    }
-    send_tex_row(dy as u8, &row, sampler);
 }
 
 /// The view's levels and layers, converted and, unless it is one linear level, tiled.
