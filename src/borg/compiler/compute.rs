@@ -21,6 +21,9 @@ const MAX_WORDS: usize = 16379; // the code at 0xF0000 up to the root table at 0
 pub(crate) const WG_BASE_REG: u32 = 12;
 /// Each binding slot's buffer size in bytes, after the 32 push constant words in slot 32.
 const SIZES_BASE: u32 = SLOT_BASE + 32 * SLOT_BYTES + 128;
+/// Each binding's base address and offset limit (range - 4), after the sizes: the driver points a
+/// binding at its buffer in device memory or at a staged window.
+pub(crate) const TABLE_BASE: u32 = SIZES_BASE + 128;
 
 pub(crate) struct Out {
     pub words: Vec<u32>,
@@ -50,6 +53,8 @@ pub struct ComputeState {
     pub(crate) kreg: HashMap<u32, u32>, // constant bits -> placeholder vreg, placed by pool_consts
     pub(crate) kval: HashMap<u32, u32>,
     pub pool: Vec<u32>,
+    slots: HashMap<u32, (u32, u32)>, // binding slot -> base and limit vregs, loaded in the prologue
+    pub(crate) prologue: Vec<BorgInstr>,
 }
 
 /// A value while selecting: a known constant or a register component.
@@ -384,27 +389,46 @@ impl ShaderState {
         s
     }
 
-    /// Byte address of word `extra` from the byte offset `off` in the buffer named by `idx`.
-    fn word_addr(&mut self, idx: &nir_src, off: &nir_src, extra: u32) -> Val {
-        let Some(slot) = self.slot(idx) else { return Val::K(0) };
-        let base = SLOT_BASE + slot * SLOT_BYTES;
-        let o = self.val(off, 0);
-        let w = self.add(o, Val::K(4 * extra));
-        let w = self.mask(w);
-        self.add(Val::K(base), w)
+    /// A binding's base address and offset limit from the table, loaded once at the start.
+    fn slot_regs(&mut self, slot: u32) -> (u32, u32) {
+        if let Some(&r) = self.cs.slots.get(&slot) {
+            return r;
+        }
+        let start = self.sel.prog.len();
+        let base = self.load(Val::K(TABLE_BASE + 8 * slot));
+        let lim = self.load(Val::K(TABLE_BASE + 8 * slot + 4));
+        let moved: Vec<BorgInstr> = self.sel.prog.drain(start..).collect();
+        self.cs.prologue.extend(moved);
+        let (Val::R(b, _), Val::R(l, _)) = (base, lim) else { unreachable!() };
+        self.cs.slots.insert(slot, (b, l));
+        (b, l)
     }
 
-    /// Component `c` of a buffer access starting at `a0`.
-    fn word_n(&mut self, a0: Val, idx: &nir_src, off: &nir_src, c: u32) -> Val {
-        match a0 {
-            _ if c == 0 => a0,
-            Val::K(x) if x.wrapping_sub(SLOT_BASE) % SLOT_BYTES + 4 * c >= SLOT_BYTES => Val::K(x.wrapping_add(4 * c)),
-            Val::K(_) => {
-                let r = self.vreg(a0);
-                self.bin(Op::Iadd, Val::R(r.0, r.1), Val::K(4 * c))
-            }
-            _ => self.word_addr(idx, off, c),
+    /// Address of an access of `n` words at the byte offset `off` in the buffer named by `idx`,
+    /// the offset clamped so that all n words stay in the binding's range (robustBufferAccess).
+    fn access_addr(&mut self, idx: &nir_src, off: &nir_src, n: u32) -> Val {
+        let Some(slot) = self.slot(idx) else { return Val::K(0) };
+        let (base, lim) = self.slot_regs(slot);
+        let o = self.val(off, 0);
+        if matches!(o, Val::K(0)) {
+            return Val::R(base, 0);
         }
+        let lim = if n > 1 { self.add(Val::R(lim, 0), Val::K((4 * (n - 1)).wrapping_neg())) } else { Val::R(lim, 0) };
+        let w = self.bin(Op::Minu, o, lim);
+        self.add(Val::R(base, 0), w)
+    }
+
+    /// Word `c` of an access at `a`: LW and SW take it as their immediate.
+    fn load_at(&mut self, a: Val, c: u32) -> Val {
+        let a = self.vreg(a);
+        let d = self.sel.fresh();
+        self.sel.prog.push(BorgInstr { mnem: Op::Lw.into(), dst: d, srcs: vec![a.0], swz: vec![a.1], imm: 4 * c });
+        Val::R(d, 0)
+    }
+
+    fn store_at(&mut self, a: Val, c: u32, v: Val) {
+        let (a, v) = (self.vreg(a), self.vreg(v));
+        self.sel.prog.push(BorgInstr { mnem: Op::Sw.into(), dst: NO_DST, srcs: vec![a.0, v.0], swz: vec![a.1, v.1], imm: 4 * c });
     }
 
     fn load(&mut self, a: Val) -> Val {
@@ -479,23 +503,17 @@ impl ShaderState {
             }
             nir_intrinsic_load_push_constant => self.cs_push_constant(i),
             nir_intrinsic_load_ubo | nir_intrinsic_load_ssbo => {
-                let a0 = self.word_addr(i.get_src(0), i.get_src(1), 0);
-                let mut v = vec![];
-                for c in 0..i.def.num_components as u32 {
-                    let a = self.word_n(a0, i.get_src(0), i.get_src(1), c);
-                    v.push(self.load(a));
-                }
+                let n = i.def.num_components as u32;
+                let a0 = self.access_addr(i.get_src(0), i.get_src(1), n);
+                let v: Vec<Val> = (0..n).map(|c| self.load_at(a0, c)).collect();
                 self.set(d, &v);
             }
             nir_intrinsic_store_ssbo => {
-                let a0 = self.word_addr(i.get_src(1), i.get_src(2), 0);
-                for c in 0..i.get_src(0).num_components() as u32 {
-                    if i.write_mask() & (1 << c) == 0 {
-                        continue;
-                    }
-                    let a = self.word_n(a0, i.get_src(1), i.get_src(2), c);
+                let n = i.get_src(0).num_components() as u32;
+                let a0 = self.access_addr(i.get_src(1), i.get_src(2), n);
+                for c in (0..n).filter(|c| i.write_mask() & (1 << c) != 0) {
                     let v = self.val(i.get_src(0), c as u8);
-                    self.store(a, v);
+                    self.store_at(a0, c, v);
                 }
             }
             nir_intrinsic_get_ssbo_size => {
@@ -624,7 +642,7 @@ impl ShaderState {
         let ssbo = matches!(i.intrinsic, nir_intrinsic_ssbo_atomic | nir_intrinsic_ssbo_atomic_swap);
         let a = if ssbo {
             self.cs.atomics = true;
-            self.word_addr(i.get_src(0), i.get_src(1), 0)
+            self.access_addr(i.get_src(0), i.get_src(1), 1)
         } else {
             let o = self.val(i.get_src(0), 0);
             let w = self.add(o, Val::K(i.base() as u32));
@@ -702,6 +720,9 @@ unsafe fn compile_unified_with(nir: *mut nir_shader, compact: bool, pack: bool) 
         (cx.cs.ws, cx.cs.packed) = ([LANES, 1, 1], true);
     }
     cx.select_entry(entry);
+    let mut prog = std::mem::take(&mut cx.cs.prologue);
+    prog.append(&mut cx.sel.prog);
+    cx.sel.prog = prog;
     cx.check_selected()?;
     cx.sys_reads();
     if compact {
