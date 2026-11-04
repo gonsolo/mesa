@@ -1,8 +1,8 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-//! Device memory, buffers and buffer views. Memory is a GEM buffer of the DRM device mapped into
-//! the process, or malloc'd without one; either way host-coherent.
+//! Device memory, buffers and buffer views. Memory comes from the simulator's device heap, a GEM
+//! buffer of the DRM device mapped into the process, or malloc; either way host-coherent.
 
 use crate::entrypoint::{chain, entrypoint, handle, pointee, vk_error, Handle};
 use crate::drm::{gem_close, ioctl, GEM_CREATE, GEM_MMAP};
@@ -24,6 +24,7 @@ pub struct DeviceMemory {
     pub map: *mut c_void,  // mmap(drm_fd, gem_offset) or malloc'd
     pub size: usize,       // allocation size for munmap
     pub gem_handle: u32,   // 0 = malloc path (no DRM)
+    pub gpu: u32,          // the GPU address in the device heap, 0 off it
 }
 
 #[repr(C)]
@@ -138,11 +139,15 @@ impl Default for DeviceMemory {
 }
 
 /// Backing for `size` bytes and its GEM handle, 0 for malloc'd memory.
-fn back(dev: &Device, size: usize) -> Result<(*mut c_void, u32), VkResult> {
+fn back(dev: &Device, size: usize) -> Result<(*mut c_void, u32, u32), VkResult> {
+    if let Some(h) = crate::heap::get() {
+        let (map, gpu) = h.alloc(size).ok_or(VK_ERROR_OUT_OF_DEVICE_MEMORY)?;
+        return Ok((map.cast(), 0, gpu));
+    }
     let fd = dev.drm_fd;
     if fd < 0 {
         let map = unsafe { malloc(size as _) };
-        return if map.is_null() { Err(VK_ERROR_OUT_OF_HOST_MEMORY) } else { Ok((map, 0)) };
+        return if map.is_null() { Err(VK_ERROR_OUT_OF_HOST_MEMORY) } else { Ok((map, 0, 0)) };
     }
     let mut create = drm_borg_gem_create { size: size as u64, ..Default::default() };
     if !ioctl(fd, GEM_CREATE, &mut create) {
@@ -158,7 +163,7 @@ fn back(dev: &Device, size: usize) -> Result<(*mut c_void, u32), VkResult> {
         gem_close(fd, create.handle);
         return Err(VK_ERROR_OUT_OF_HOST_MEMORY);
     }
-    Ok((map, create.handle))
+    Ok((map, create.handle, 0))
 }
 
 pointee!(VkMemoryAllocateInfo, VkMemoryMapInfo, VkBufferCreateInfo, VkBufferViewCreateInfo, VkDeviceBufferMemoryRequirements, VkMemoryRequirements2, *mut c_void);
@@ -169,8 +174,8 @@ entrypoint! {
         let mem = mem.ok_or_else(|| vk_error!(device, VK_ERROR_OUT_OF_HOST_MEMORY))?;
         let mut mem = Owned::new(mem, |m| unsafe { vk_device_memory_destroy(device.vk_ptr(), alloc, &mut m.vk) });
         let size = (info.allocationSize as usize).max(1);
-        let (map, gem_handle) = back(device, size).map_err(|r| vk_error!(device, r))?;
-        (mem.map, mem.size, mem.gem_handle) = (map, size, gem_handle);
+        let (map, gem_handle, gpu) = back(device, size).map_err(|r| vk_error!(device, r))?;
+        (mem.map, mem.size, mem.gem_handle, mem.gpu) = (map, size, gem_handle, gpu);
         *out = VkDeviceMemory::from_object(mem.keep());
         Ok(())
     }
@@ -180,7 +185,9 @@ entrypoint! {
     fn borgvk_FreeMemory(device: &Device, memory: Option<&mut DeviceMemory>, alloc: *const VkAllocationCallbacks) {
         let Some(mem) = memory else { return };
         unsafe {
-            if mem.gem_handle != 0 {
+            if let Some(h) = crate::heap::get().filter(|_| mem.gpu != 0) {
+                h.free(mem.gpu, mem.size);
+            } else if mem.gem_handle != 0 {
                 munmap(mem.map, mem.size as _);
                 gem_close(device.drm_fd, mem.gem_handle);
             } else {

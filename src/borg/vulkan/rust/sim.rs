@@ -100,9 +100,12 @@ impl Server {
             (self.mem, self.memfd) = (m.cast(), fd);
         }
         unsafe { signal(SIGPIPE as i32, std::mem::transmute::<usize, __sighandler_t>(1)) }; // SIG_IGN
-        let child = Command::new(bin)
-            .arg("--serve")
-            .arg(self.memfd.to_string())
+        let mut cmd = Command::new(bin);
+        cmd.arg("--serve").arg(self.memfd.to_string());
+        if let Some(h) = crate::heap::get() {
+            cmd.arg(h.fd().to_string());
+        }
+        let child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn();

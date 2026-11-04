@@ -394,7 +394,7 @@ unsafe fn create(instance: &mut Instance, drm_fd: i32) -> VkResult {
     // One host-visible coherent heap: host RAM, staged to the board.
     let m = &mut d.memory;
     m.memoryHeapCount = 1;
-    m.memoryHeaps[0].size = 256 << 20;
+    m.memoryHeaps[0].size = BORG_DEVICE_BYTES as u64;
     m.memoryHeaps[0].flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
     m.memoryTypeCount = 1;
     m.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
