@@ -57,6 +57,79 @@ impl Shape {
     }
 }
 
+/// Optimal images on the GPU (B2, "Layouts"): per plane every array layer, per layer every mip
+/// level, per level 4x4 tiles of texels, each tile's samples after each other as the flusher
+/// stores them. Depth and stencil are two planes; `planes[1].bs == 0` is one plane. `plane1`
+/// places the second plane when the image is a level or layer of a larger one (0: after plane 0).
+#[derive(Clone, Copy, Debug)]
+pub struct Tiled {
+    pub shape: Shape,
+    pub planes: [Blocks; 2],
+    pub plane1: u64,
+}
+
+impl Tiled {
+    fn dims(&self, level: u32) -> [u32; 3] {
+        self.shape.extent.map(|e| e.checked_shr(level).unwrap_or(0).max(1))
+    }
+
+    /// Bytes of one tile of plane `p`: 16 texels of every sample.
+    pub fn tile_bytes(&self, p: usize) -> u64 {
+        16 * self.planes[p].bs as u64 * self.shape.samples.max(1) as u64
+    }
+
+    fn level_bytes(&self, p: usize, level: u32) -> u64 {
+        let [w, h, d] = self.dims(level);
+        w.div_ceil(4) as u64 * h.div_ceil(4) as u64 * d as u64 * self.tile_bytes(p)
+    }
+
+    /// Offset of `level` within a layer of plane `p`.
+    pub fn level_offset(&self, p: usize, level: u32) -> u64 {
+        (0..level).map(|l| self.level_bytes(p, l)).sum()
+    }
+
+    /// Bytes of one array layer of plane `p`: all its levels.
+    pub fn layer_size(&self, p: usize) -> u64 {
+        self.level_offset(p, self.shape.levels.max(1))
+    }
+
+    fn plane_offset(&self, p: usize) -> u64 {
+        match (p, self.plane1) {
+            (0, _) => 0,
+            (_, 0) => (self.layer_size(0) * self.shape.layers.max(1) as u64).next_multiple_of(256),
+            (_, o) => o,
+        }
+    }
+
+    /// Where `level` of `layer` in plane `p` starts.
+    pub fn level_base(&self, p: usize, level: u32, layer: u32) -> u64 {
+        self.plane_offset(p) + layer as u64 * self.layer_size(p) + self.level_offset(p, level)
+    }
+
+    /// Offset of texel `xyz` of sample `s` from its level's base; a 16-byte texel's second half
+    /// is 128 bytes further.
+    pub fn in_level(&self, p: usize, level: u32, [x, y, z]: [u32; 3], s: u32) -> u64 {
+        let [w, h, _] = self.dims(level);
+        let tpr = w.div_ceil(4) as u64;
+        let tile = (z as u64 * h.div_ceil(4) as u64 + (y >> 2) as u64) * tpr + (x >> 2) as u64;
+        let i = ((x & 3) | (y & 3) << 2) as u64;
+        let bs = self.planes[p].bs as u64;
+        let within = if bs == 16 { i * 8 } else { i * bs };
+        (tile * self.shape.samples.max(1) as u64 + s as u64) * 16 * bs + within
+    }
+
+    pub fn texel(&self, p: usize, level: u32, layer: u32, xyz: [u32; 3], s: u32) -> u64 {
+        self.level_base(p, level, layer) + self.in_level(p, level, xyz, s)
+    }
+
+    /// Bytes the image needs in memory, a multiple of 256.
+    pub fn size(&self) -> u64 {
+        let layers = self.shape.layers.max(1) as u64;
+        let two = self.planes[1].bs != 0;
+        (if two { self.plane_offset(1) + self.layer_size(1) * layers } else { self.layer_size(0) * layers }).next_multiple_of(256)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +163,25 @@ mod tests {
         assert_eq!(s.level_offset(2, 1, RGBA8), (4 * 84 + 80, 1));
         assert_eq!(s.size(RGBA8), (2 * 4 * 84u64).next_multiple_of(256));
         assert_eq!(Shape { levels: 0, layers: 0, samples: 0, ..s }.size(RGBA8), 256);
+    }
+
+    #[test]
+    fn tiled_texels() {
+        let t = Tiled { shape: Shape { extent: [6, 5, 1], levels: 2, layers: 2, samples: 1 }, planes: [RGBA8, Blocks { bs: 0, ..RGBA8 }], plane1: 0 };
+        assert_eq!(t.texel(0, 0, 0, [1, 2, 0], 0), (2 * 4 + 1) * 4);
+        assert_eq!(t.texel(0, 0, 0, [5, 4, 0], 0), (3 * 16 + 1) * 4);
+        assert_eq!(t.layer_size(0), 4 * 64 + 64);
+        assert_eq!(t.texel(0, 1, 1, [2, 1, 0], 0), 320 + 256 + (4 + 2) * 4);
+        assert_eq!(t.size(), 768);
+    }
+
+    #[test]
+    fn tiled_samples_planes_and_halves() {
+        let ms = Tiled { shape: Shape { extent: [8, 4, 1], levels: 1, layers: 1, samples: 4 }, planes: [RGBA8, Blocks { bs: 1, ..RGBA8 }], plane1: 0 };
+        assert_eq!(ms.texel(0, 0, 0, [4, 0, 0], 2), (4 + 2) * 64);
+        assert_eq!(ms.texel(1, 0, 0, [0, 0, 0], 0), 512);
+        assert_eq!(ms.size(), 512 + 128 + 128);
+        let wide = Tiled { shape: Shape { extent: [4, 4, 2], levels: 1, layers: 1, samples: 1 }, planes: [Blocks { bs: 16, ..RGBA8 }; 2], plane1: 0 };
+        assert_eq!(wide.texel(0, 0, 0, [1, 0, 1], 0), 256 + 8);
     }
 }
