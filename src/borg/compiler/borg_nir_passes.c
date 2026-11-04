@@ -201,12 +201,16 @@ static nir_def *
 borg_image_addr(nir_builder *b, nir_intrinsic_instr *i, nir_variable *var)
 {
    nir_deref_instr *deref = nir_src_as_deref(i->src[0]);
-   nir_def *d = borg_image_desc(b, deref, var, 0, 3);
-   const unsigned nc = nir_image_intrinsic_coord_components(i);
    const enum glsl_sampler_dim dim = nir_intrinsic_image_dim(i);
+   const bool buf = dim == GLSL_SAMPLER_DIM_BUF;
+   nir_def *d = borg_image_desc(b, deref, var, 0, buf ? 4 : 3);
+   const unsigned nc = nir_image_intrinsic_coord_components(i);
    nir_def *c = i->src[1].ssa;
    nir_def *x = nir_channel(b, c, 0);
-   nir_def *y = dim == GLSL_SAMPLER_DIM_1D ? nir_imm_int(b, 0) : nir_channel(b, c, 1);
+   /* A texel buffer is robust: an index past its end stays in it. */
+   if (buf)
+      x = nir_umin(b, x, nir_iadd_imm(b, nir_channel(b, d, 3), -1));
+   nir_def *y = dim == GLSL_SAMPLER_DIM_1D || buf ? nir_imm_int(b, 0) : nir_channel(b, c, 1);
    nir_def *l = nc == 2 && dim == GLSL_SAMPLER_DIM_1D ? nir_channel(b, c, 1)
                 : nc >= 3                            ? nir_channel(b, c, 2) : nir_imm_int(b, 0);
    const unsigned bpp = util_format_get_blocksize(var->data.image.format);
@@ -284,10 +288,11 @@ borg_image_size(nir_builder *b, nir_intrinsic_instr *i)
    nir_variable *var = nir_deref_instr_get_variable(deref);
    if (!var)
       return NULL;
-   if (borg_image_direct(b, var) && nir_intrinsic_image_dim(i) != GLSL_SAMPLER_DIM_BUF) {
+   if (borg_image_direct(b, var)) {
       nir_def *s = borg_image_desc(b, deref, var, 3, 3);
       nir_def *w = nir_channel(b, s, 0), *h = nir_channel(b, s, 1), *dl = nir_channel(b, s, 2);
       switch (nir_intrinsic_image_dim(i)) {
+      case GLSL_SAMPLER_DIM_BUF:
       case GLSL_SAMPLER_DIM_1D:
          return nir_intrinsic_image_array(i) ? nir_vec2(b, w, dl) : w;
       case GLSL_SAMPLER_DIM_2D:
@@ -327,6 +332,16 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
    if (instr->type == nir_instr_type_intrinsic &&
        nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_deref_size)
       return borg_image_size(b, nir_instr_as_intrinsic(instr));
+   if (instr->type == nir_instr_type_intrinsic &&
+       (nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_deref_store ||
+        nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_deref_load ||
+        borg_image_atomic(nir_instr_as_intrinsic(instr))) &&
+       nir_intrinsic_image_dim(nir_instr_as_intrinsic(instr)) == GLSL_SAMPLER_DIM_BUF) {
+      nir_intrinsic_instr *st = nir_instr_as_intrinsic(instr);
+      nir_variable *bvar = nir_deref_instr_get_variable(nir_src_as_deref(st->src[0]));
+      if (bvar && borg_image_direct(b, bvar))
+         return borg_image_direct_lower(b, st, bvar);
+   }
    if (instr->type == nir_instr_type_intrinsic &&
        (nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_deref_store ||
         nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_image_deref_load ||
