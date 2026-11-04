@@ -45,7 +45,6 @@ mod sampler;
 mod shader_cache;
 mod state_upload;
 mod sim;
-mod sim_process;
 mod sync;
 #[deny(unsafe_code)]
 mod texel;

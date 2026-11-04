@@ -22,7 +22,6 @@ use crate::hw::{enabled, serves_extent};
 use crate::image::blocks;
 use crate::wire::{blend_const_pack, occ_packet, send_att, send_draw, send_mem, send_pass, send_place, send_target, send_texture_slot, send_vattr, Draw};
 use crate::sim::{per_sample, run_pass};
-use crate::sim_process::sim_run_stream;
 use crate::state_upload::{send_draw_state, send_shaders, DEFAULT_SAMPLER};
 use crate::texture_upload::{send_buffer_texture, send_generic_texture};
 use crate::transport::{borgvk_transport_capture_begin, capture_end};
@@ -186,7 +185,10 @@ pub fn flush_draws(c: &mut CommandBuffer) {
         }
         n
     } else {
-        sim_run_stream(stream.as_slice(), img, 0);
+        if enabled() || std::env::var_os("BORGVK_SIM_DIRECT").is_some_and(|d| !d.is_empty()) {
+            let (w, h) = img.map_or((0, 0), |i| (i.vk.extent.width, i.vk.extent.height));
+            log(MESA_LOG_WARN, format!("borgvk: a pass of {w}x{h} is too large to render"));
+        }
         vec![0; nocc]
     };
     for (r, n) in occ[..nocc].iter().zip(counts) {

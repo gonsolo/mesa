@@ -668,7 +668,6 @@ fn run_on_device(d: &mut Dev, s: &Server, l: &Layout, t: &Targets, stream: &[u8]
         ranges.push((s.sb, tiles16));
     }
     hw_upload(d, s, &ranges);
-    keep_stream(stream);
     d.build(s.w, s.h, |b, d| {
         b.flush(d);
         b.set_strip(0, 1, rows_per);
@@ -680,13 +679,6 @@ fn run_on_device(d: &mut Dev, s: &Server, l: &Layout, t: &Targets, stream: &[u8]
         hw_download(d, s, &[(a0, a1 - a0)]);
     }
     hw_download(d, s, &occ.iter().map(|&o| (s.heap + o, 4)).collect::<Vec<_>>());
-}
-
-/// `BORGVK_SIM_KEEP`: the stream, for replaying it by hand.
-fn keep_stream(stream: &[u8]) {
-    if let Some(keep) = std::env::var_os("BORGVK_SIM_KEEP").filter(|k| !k.is_empty()) {
-        let _ = std::fs::write(keep, stream);
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -753,8 +745,7 @@ pub fn run_pass(
     if hw {
         crate::dev::with(|d| run_on_device(d, &all[0], &l, &t, stream, wb, occ, rows_per));
     } else {
-        keep_stream(stream);
-        if !build_all(&mut all[..np], stream, rows_per) {
+            if !build_all(&mut all[..np], stream, rows_per) {
             log(MESA_LOG_WARN, "borgvk: the simulator stopped answering".into());
             stop_all(&mut all[..]);
             return none;
