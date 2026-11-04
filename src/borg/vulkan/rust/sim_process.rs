@@ -120,30 +120,13 @@ fn parts(nwx: u32, direct: bool) -> u32 {
     n.min(nwx * nwx).min(64)
 }
 
-/// Starts process `k` of `n`: the direct simulator, or the firmware simulator when that fails.
+/// Starts direct simulator `k` of `n`.
 fn spawn(k: u32, n: u32, nwx: u32, uart: &OsStr, dim: &str) -> Option<Child> {
-    let direct = env_set("BORGVK_SIM_DIRECT");
-    let windowed = |c: &mut Command| {
-        if direct.is_some() && nwx > 1 {
-            c.env("BORG_PART", format!("{k}/{n}")).env("BORG_WINDOW_TILES", "32");
-        }
-        c.stdout(Stdio::piped());
-    };
-    if let Some(d) = &direct {
-        let mut c = Command::new(d);
-        c.arg(uart).arg(dim).arg(dim);
-        windowed(&mut c);
-        if let Ok(child) = c.spawn() {
-            return Some(child);
-        }
+    let mut c = Command::new(env_set("BORGVK_SIM_DIRECT")?);
+    c.arg(uart).arg(dim).arg(dim).stdout(Stdio::piped());
+    if nwx > 1 {
+        c.env("BORG_PART", format!("{k}/{n}")).env("BORG_WINDOW_TILES", "32");
     }
-    let mut c = Command::new(std::env::var_os("BORGVK_SIM")?);
-    c.arg("--cts-uart").arg(uart);
-    // As execlp: without firmware the argument list ends there.
-    if let Some(fw) = std::env::var_os("BORGVK_SIM_FW") {
-        c.arg(fw).arg(dim).arg(dim);
-    }
-    windowed(&mut c);
     c.spawn().ok()
 }
 
