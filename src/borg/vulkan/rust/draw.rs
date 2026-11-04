@@ -180,7 +180,11 @@ pub fn flush_draws(c: &mut CommandBuffer) {
     let key = if rec { state(hash(seed, stream.as_slice())) } else { seed };
     let words: Vec<u32> = occ[..nocc].iter().map(|r| r.off).collect();
     let counts = if serve {
-        run_pass(stream.as_slice(), img, &extra, depth, stencil, &wb[..nwb], area, &words, tris, placed)
+        let n = run_pass(stream.as_slice(), img, &extra, depth, stencil, &wb[..nwb], area, &words, tris, placed);
+        if let (Some(path), Some(i)) = (std::env::var_os("BORGVK_DUMP_PPM").filter(|p| !p.is_empty()), img) {
+            dump_ppm(i, std::path::Path::new(&path));
+        }
+        n
     } else {
         sim_run_stream(stream.as_slice(), img, 0);
         vec![0; nocc]
@@ -1184,4 +1188,23 @@ entrypoint! {
             sim_draw(c, p);
         }
     }
+}
+
+/// `BORGVK_DUMP_PPM`: the colour attachment after each pass, as a binary PPM.
+fn dump_ppm(img: &Image, path: &std::path::Path) {
+    let Some(t) = crate::texels::Texels::of(img) else { return };
+    let (w, h) = (img.vk.extent.width, img.vk.extent.height);
+    let pf = crate::fmt::pipe(img.vk.format);
+    let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+    let mut texel: Texel = [0; 32];
+    for y in 0..h {
+        for x in 0..w {
+            let mut v = [0f32; 4];
+            if t.read(0, 0, [x, y, 0], 0, &mut texel) {
+                crate::fmt::unpack_rgba(pf, &texel, &mut v);
+            }
+            out.extend(v[..3].iter().map(|c| (c.clamp(0.0, 1.0) * 255.0 + 0.5) as u8));
+        }
+    }
+    let _ = std::fs::write(path, out);
 }
