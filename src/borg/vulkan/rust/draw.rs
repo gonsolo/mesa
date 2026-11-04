@@ -91,7 +91,7 @@ entrypoint! {
 
 entrypoint! {
     fn borgvk_CmdBindIndexBuffer(c: &mut CommandBuffer, buffer: Option<&Buffer>, offset: VkDeviceSize, index_type: VkIndexType) {
-        (c.index_ptr, c.index_avail) = (null(), 0);
+        (c.index_ptr, c.index_avail, c.index_gpu) = (null(), 0, 0);
         c.index_size = match index_type {
             VK_INDEX_TYPE_UINT16 => 2,
             VK_INDEX_TYPE_UINT32 => 4,
@@ -100,6 +100,7 @@ entrypoint! {
         let Some(b) = buffer else { return };
         if let Some(p) = b.host().and_then(|h| h.ptr(0, 0)).filter(|_| b.vk.size > offset) {
             (c.index_ptr, c.index_avail) = (p.wrapping_add(offset as usize), b.vk.size - offset);
+            c.index_gpu = b.memory().map(|m| m.gpu).filter(|&g| g != 0).map_or(0, |g| g + (b.offset + offset) as u32);
         }
     }
 }
@@ -742,11 +743,14 @@ impl Ctx<'_> {
                 .collect();
             let off = self.heap.upload(bytes_of(&ex));
             (self.index_code, self.voff_out) = (2, 0);
-            self.idx_off = off?;
+            self.idx_off = BORG_HEAP_SPI + off?;
+        } else if self.c.index_gpu != 0 {
+            // In the device heap the hardware reads the indices where they are.
+            self.idx_off = self.c.index_gpu + self.idx_base as u32;
         } else {
             let n = p.count as usize * p.index_size as usize;
             let (idx, base) = (self.idx, self.idx_base);
-            self.idx_off = idx.with_bytes(base, n, |b| self.heap.upload(b)).ok_or(Reject::Upload)??;
+            self.idx_off = BORG_HEAP_SPI + idx.with_bytes(base, n, |b| self.heap.upload(b)).ok_or(Reject::Upload)??;
         }
         Ok(())
     }
