@@ -1,8 +1,8 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-//! Renders a pass's packet stream on `direct_sim --serve` processes (`BORGVK_SIM_DIRECT`), or on
-//! the Borg device through `borg_core` in this process. A large pass is split into horizontal
+//! Renders a pass's packet stream on `direct_sim --raw` processes (`BORGVK_SIM_DIRECT`), the driver
+//! building the render lists, or on the Borg device through `borg_core` in this process. A large pass is split into horizontal
 //! strips of tile rows, one simulator each.
 
 use crate::ffi::*;
@@ -38,8 +38,7 @@ struct Server {
     sb: u32,
     heap: u32,
     att: [u32; 4],
-    /// The raw device's list builder, its state kept across passes as the server's was; and the
-    /// size it was set up for.
+    /// The raw device's list builder, its state kept across passes; and the size it was set up for.
     builder: Option<Box<crate::list::Builder>>,
     built: (u32, u32),
 }
@@ -108,7 +107,7 @@ impl Server {
         }
         unsafe { signal(SIGPIPE as i32, std::mem::transmute::<usize, __sighandler_t>(1)) }; // SIG_IGN
         let mut cmd = Command::new(bin);
-        cmd.arg(if raw() { "--raw" } else { "--serve" }).arg(self.memfd.to_string());
+        cmd.arg("--raw").arg(self.memfd.to_string());
         if let Some(h) = crate::heap::get() {
             cmd.arg(h.fd().to_string());
         }
@@ -129,32 +128,17 @@ impl Server {
         if (self.w, self.h) == (w, h) {
             return true;
         }
-        if self.hw || raw() {
-            if self.hw {
-                unsafe {
-                    borg_core_list_flush();
-                    borg_core_set_flush_format(0);
-                    borg_core_init(w as i32, h as i32);
-                }
+        if self.hw {
+            unsafe {
+                borg_core_list_flush();
+                borg_core_set_flush_format(0);
+                borg_core_init(w as i32, h as i32);
             }
-            (self.fb, self.zb, self.sb, self.heap) = (DRAM_OUT_BASE_SPI, BORG_ZB_SPI, BORG_SB_SPI, BORG_HEAP_SPI);
-            for a in 1..4u32 {
-                self.att[a as usize] = 0x4A0_0000 + (a - 1) * 0x100_0000; // BORG_ATT_SPI(a)
-            }
-            (self.w, self.h) = (w, h);
-            return true;
         }
-        let cmd = [0xBC, w as u8, (w >> 8) as u8, h as u8, (h >> 8) as u8];
-        let mut r = [0u8; 28];
-        let (Some(to), Some(from)) = (&mut self.to, &mut self.from) else {
-            return false;
-        };
-        if to.write_all(&cmd).is_err() || from.read_exact(&mut r).is_err() {
-            return false;
+        (self.fb, self.zb, self.sb, self.heap) = (DRAM_OUT_BASE_SPI, BORG_ZB_SPI, BORG_SB_SPI, BORG_HEAP_SPI);
+        for a in 1..4u32 {
+            self.att[a as usize] = 0x4A0_0000 + (a - 1) * 0x100_0000; // BORG_ATT_SPI(a)
         }
-        let a: [u32; 7] = std::array::from_fn(|i| u32::from_ne_bytes(r[4 * i..4 * i + 4].try_into().unwrap()));
-        (self.fb, self.zb, self.sb, self.heap) = (a[0], a[1], a[2], a[3]);
-        self.att[1..4].copy_from_slice(&a[4..7]);
         (self.w, self.h) = (w, h);
         true
     }
@@ -174,7 +158,7 @@ fn stop_all(s: &mut [Server]) {
     s.iter_mut().for_each(Server::stop);
 }
 
-/// The server's packet loop (simulation/direct/driver.cpp, Driver::serve), in this process.
+/// The device's packet loop, in this process.
 fn hw_feed(p: &[u8]) {
     let mut i = 0;
     while i < p.len() {
@@ -573,11 +557,6 @@ fn strips(n: usize, wp: u32, hp: u32, hw: bool, tris: u32) -> (usize, u32) {
     (ftiles.div_ceil(rows_per) as usize, rows_per)
 }
 
-/// `BORGVK_RAW`: the simulator is a bare device; the driver builds the render lists.
-fn raw() -> bool {
-    std::env::var_os("BORGVK_RAW").is_some_and(|v| !v.is_empty())
-}
-
 /// The raw device of one server: register writes in batches, memory through the shared mappings.
 struct Raw<'a> {
     s: &'a mut Server,
@@ -686,34 +665,18 @@ fn build_all(servers: &mut [Server], stream: &[u8], rows_per: u32) -> bool {
     })
 }
 
-fn feed_all(servers: &mut [Server], stream: &[u8]) -> bool {
-    std::thread::scope(|sc| {
-        let feeds: Vec<_> = servers
-            .iter_mut()
-            .map(|s| sc.spawn(move || s.to.as_mut().is_some_and(|to| to.write_all(stream).is_ok() && to.write_all(&[0xBD]).is_ok())))
-            .collect();
-        feeds.into_iter().fold(true, |ok, f| f.join().unwrap_or(false) && ok)
-    })
-}
-
 fn start_servers(all: &mut [Server], np: usize, rows_per: u32, wp: u32, hp: u32, direct: Option<&OsStr>) -> bool {
     let hw = direct.is_none();
     (0..np).all(|part| {
         let s = &mut all[part];
-        let strip = [0xBE, part as u8, np as u8, rows_per as u8, (rows_per >> 8) as u8];
         s.start(direct)
             && s.set_size(wp, hp)
-            && if hw {
-                unsafe {
+            && (!hw
+                || unsafe {
                     borg_core_list_flush();
                     borg_core_set_strip(part as i32, np as i32, rows_per as i32);
-                }
-                true
-            } else if raw() {
-                true
-            } else {
-                s.to.as_mut().is_some_and(|to| to.write_all(&strip).is_ok())
-            }
+                    true
+                })
     })
 }
 
@@ -814,13 +777,7 @@ pub fn run_pass(
         hw_download(&all[0], &occ.iter().map(|&o| (all[0].heap + o, 4)).collect::<Vec<_>>());
     } else {
         keep_stream(stream);
-        let servers = &mut all[..np];
-        let answered = if raw() {
-            build_all(servers, stream, rows_per)
-        } else {
-            feed_all(servers, stream) && servers.iter_mut().all(|s| s.from.as_mut().is_some_and(|f| f.read_exact(&mut [0u8]).is_ok()))
-        };
-        if !answered {
+        if !build_all(&mut all[..np], stream, rows_per) {
             log(MESA_LOG_WARN, "borgvk: the simulator stopped answering".into());
             stop_all(&mut all[..]);
             return none;
