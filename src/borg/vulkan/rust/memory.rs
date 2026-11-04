@@ -66,6 +66,11 @@ impl<'a> Host<'a> {
 
     /// # Safety
     /// `base..base + len` is mapped for `'a`.
+    /// Bytes the caller owns, as a mapping.
+    pub fn of_bytes(b: &'a mut [u8]) -> Self {
+        Host { base: b.as_mut_ptr(), len: b.len(), mem: PhantomData }
+    }
+
     pub unsafe fn new(base: *mut u8, len: usize) -> Self {
         Host { base, len: if base.is_null() { 0 } else { len }, mem: PhantomData }
     }

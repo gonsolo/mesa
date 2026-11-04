@@ -32,7 +32,7 @@ fn send(data: &[u8], desc: &TexDesc, sampler: &[u32; 4]) {
 /// One row of the cube's texture, box-filtered from the RGBA8 image down to BORGVK_TEX_DIM.
 pub fn send_texture_row(t: &Image, sampler: &[u32; 4], dy: i32) {
     let (sw, sh) = (t.vk.extent.width, t.vk.extent.height);
-    let Some(host) = t.host().filter(|_| sw != 0 && sh != 0) else { return };
+    let Some(texels) = crate::texels::Texels::of(t).filter(|_| sw != 0 && sh != 0) else { return };
     let (sxs, sys) = ((sw / DIM).max(1), (sh / DIM).max(1));
     let mut row = [0u8; DIM as usize * 4];
     for dx in 0..DIM {
@@ -40,7 +40,7 @@ pub fn send_texture_row(t: &Image, sampler: &[u32; 4], dy: i32) {
         for sy in (0..sys).map(|oy| dy as u32 * sys + oy).take_while(|&sy| sy < sh) {
             for sx in (0..sxs).map(|ox| dx * sxs + ox).take_while(|&sx| sx < sw) {
                 let mut p = [0u8; 4];
-                host.read((sy * sw * 4 + sx * 4) as usize, &mut p);
+                texels.read(0, 0, [sx, sy, 0], 0, &mut p);
                 for (s, &v) in sum.iter_mut().zip(&p) {
                     *s += v as u32;
                 }
@@ -64,7 +64,11 @@ pub struct Texture {
 }
 
 fn build(view: &vk_image_view, img: &Image) -> Option<Texture> {
-    let host = img.host()?;
+    let mut host = img.host()?;
+    let mut lin = crate::texels::linear_copy(img);
+    if let Some(l) = &mut lin {
+        host = crate::memory::Host::of_bytes(l);
+    }
     let (mut w, mut h) = (img.vk.extent.width, img.vk.extent.height);
     if w == 0 || h == 0 || w > 4096 || h > 4096 {
         return None;

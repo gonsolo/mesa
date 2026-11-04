@@ -48,6 +48,7 @@ mod sim_process;
 mod sync;
 #[deny(unsafe_code)]
 mod texel;
+mod texels;
 #[deny(unsafe_code)]
 mod texture_upload;
 mod transport;

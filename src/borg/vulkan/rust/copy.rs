@@ -9,17 +9,12 @@ use crate::entrypoint::{entrypoint, pointee, Handle};
 use crate::ffi::*;
 use crate::fmt;
 use crate::image::{aspect_blocks, blocks, shape, z16_pack, z16_unpack, Image};
-use crate::memory::{Buffer, DeviceMemory, Host};
+use crate::memory::{Buffer, DeviceMemory};
 use crate::vk::*;
 use crate::texel::{is_partial_ds_aspect, pack_rgba_float, unpack_rgba_float, Texel};
-use borg_layout::image::{mip_level_size, Blocks};
+use crate::texels::Texels;
+use borg_layout::image::Blocks;
 use std::ffi::c_void;
-
-/// The texel of `n` bytes at `off`.
-fn texel(h: &Host, off: usize, n: usize) -> Option<Texel> {
-    let mut t: Texel = [0; 32];
-    h.read(off, &mut t[..n]).then_some(t)
-}
 
 pointee!(VkCopyBufferInfo2, VkCopyImageInfo2, VkCopyImageToBufferInfo2, VkCopyBufferToImageInfo2, VkBlitImageInfo2, VkResolveImageInfo2);
 
@@ -159,14 +154,6 @@ fn layers(image: &vk_image, s: &Sub) -> u32 {
     if s.layers == VK_REMAINING_ARRAY_LAYERS as u32 { image.array_layers.wrapping_sub(s.layer) } else { s.layers }
 }
 
-/// Offset of a 2D layer or 3D slice of a level, and its row stride in blocks.
-fn slice_offset(img: &Image, b: Blocks, level: u32, layer: u32, z: Option<u32>) -> (u64, u32) {
-    let (off, stride) = shape(img).level_offset(level, if z.is_some() { 0 } else { layer }, b);
-    let e = img.vk.extent;
-    let z = z.map_or(0, |z| z as u64 * mip_level_size([e.width, e.height, 1], level, b).0);
-    (off + z, stride)
-}
-
 /// One depth or stencil texel from one combined format to another; `d` holds the destination
 /// texel, whose other aspect stays.
 fn copy_depth_stencil(spf: pipe_format, s: &Texel, dpf: pipe_format, d: &mut Texel, stencil: bool) {
@@ -188,52 +175,42 @@ fn copy_depth_stencil(spf: pipe_format, s: &Texel, dpf: pipe_format, d: &mut Tex
     }
 }
 
-/// A depth or stencil texel at `so` in `sh` to `doff` in `dh`.
-#[allow(clippy::too_many_arguments)]
-fn move_depth_stencil(sh: &Host, so: usize, sbs: usize, spf: pipe_format, dh: &Host, doff: usize, dbs: usize, dpf: pipe_format, stencil: bool) {
-    let (Some(s), Some(mut d)) = (texel(sh, so, sbs), texel(dh, doff, dbs)) else { return };
-    copy_depth_stencil(spf, &s, dpf, &mut d, stencil);
-    dh.write(doff, &d[..dbs]);
-}
-
 fn copy_image(src: &Image, dst: &Image, reg: &Region) {
-    let (Some(sh), Some(dh)) = (src.host(), dst.host()) else { return };
+    let (Some(st), Some(dt)) = (Texels::of(src), Texels::of(dst)) else { return };
     let (sb, db) = (blocks(src.vk.format), blocks(dst.vk.format));
     if sb.bd > 1 || db.bd > 1 {
         return;
     }
     let (spf, dpf) = (fmt::pipe(src.vk.format), fmt::pipe(dst.vk.format));
     let (se, de) = (aspect_blocks(src.vk.format, reg.src.aspect), aspect_blocks(dst.vk.format, reg.dst.aspect));
-    let elem_bs = se.bs.min(de.bs) as usize;
     let w_blocks = reg.extent[0].div_ceil(se.bw);
     let h_blocks = reg.extent[1].div_ceil(se.bh);
     let (s3d, d3d) = (src.vk.image_type == VK_IMAGE_TYPE_3D, dst.vk.image_type == VK_IMAGE_TYPE_3D);
     let slice_bd = if s3d { sb.bd } else if d3d { db.bd } else { 1 };
     let slices = if s3d || d3d { reg.extent[2].div_ceil(slice_bd) } else { layers(&src.vk, &reg.src) };
     let ([sx, sy, sz0], [dx, dy, dz0]) = (reg.src_offset, reg.dst_offset);
-    let (sbs, dbs) = (sb.bs as usize, db.bs as usize);
+    // One aspect of a combined depth/stencil format goes texel by texel into the other's.
+    let whole = se.bs == sb.bs && de.bs == db.bs;
+    let stencil = reg.src.aspect & VK_IMAGE_ASPECT_STENCIL_BIT != 0;
+    let (mut s, mut d): (Texel, Texel) = ([0; 32], [0; 32]);
     for l in 0..slices {
-        let sz = s3d.then(|| sz0 as u32 / sb.bd + l);
-        let dz = d3d.then(|| dz0 as u32 / db.bd + l);
-        let (soff, sstride) = slice_offset(src, sb, reg.src.level, reg.src.layer + l, sz);
-        let (doff, dstride) = slice_offset(dst, db, reg.dst.level, reg.dst.layer + l, dz);
-        let (srow, drow) = (sstride as usize * sbs, dstride as usize * dbs);
-        let s = soff as usize + (sy as u32 / sb.bh) as usize * srow + (sx as u32 / sb.bw) as usize * sbs;
-        let d = doff as usize + (dy as u32 / db.bh) as usize * drow + (dx as u32 / db.bw) as usize * dbs;
-        if se.bs == sb.bs && de.bs == db.bs {
-            let (splane, dplane) = (shape(src).sample_plane_size(sb) as usize, shape(dst).sample_plane_size(db) as usize);
-            for smp in 0..src.vk.samples.max(1) as usize {
-                for row in 0..h_blocks as usize {
-                    sh.copy(s + smp * splane + row * srow, &dh, d + smp * dplane + row * drow, w_blocks as usize * elem_bs);
+        let (sl, sz) = if s3d { (0, sz0 as u32 / sb.bd + l) } else { (reg.src.layer + l, 0) };
+        let (dl, dz) = if d3d { (0, dz0 as u32 / db.bd + l) } else { (reg.dst.layer + l, 0) };
+        for smp in 0..if whole { src.vk.samples.max(1) } else { 1 } {
+            for row in 0..h_blocks {
+                for col in 0..w_blocks {
+                    let sxyz = [sx as u32 / sb.bw + col, sy as u32 / sb.bh + row, sz];
+                    let dxyz = [dx as u32 / db.bw + col, dy as u32 / db.bh + row, dz];
+                    if !st.read(reg.src.level, sl, sxyz, smp, &mut s) {
+                        continue;
+                    }
+                    if whole {
+                        dt.write(reg.dst.level, dl, dxyz, smp, &s);
+                    } else if dt.read(reg.dst.level, dl, dxyz, smp, &mut d) {
+                        copy_depth_stencil(spf, &s, dpf, &mut d, stencil);
+                        dt.write(reg.dst.level, dl, dxyz, smp, &d);
+                    }
                 }
-            }
-            continue;
-        }
-        // One aspect of a combined depth/stencil format: texel by texel.
-        let stencil = reg.src.aspect & VK_IMAGE_ASPECT_STENCIL_BIT != 0;
-        for row in 0..h_blocks as usize {
-            for col in 0..w_blocks as usize {
-                move_depth_stencil(&sh, s + row * srow + col * sbs, sbs, spf, &dh, d + row * drow + col * dbs, dbs, dpf, stencil);
             }
         }
     }
@@ -258,43 +235,47 @@ entrypoint! {
 
 /// One region between an image and a buffer, towards the buffer when `to_buffer`.
 fn buffer_image(img: &Image, buf: &Buffer, reg: &BufferRegion, to_buffer: bool) {
-    let (Some(ih), Some(bh)) = (img.host(), buf.host()) else { return };
+    let (Some(it), Some(bh)) = (Texels::of(img), buf.host()) else { return };
     let (ib, sub) = (blocks(img.vk.format), reg.sub);
     let a = aspect_blocks(img.vk.format, sub.aspect);
-    let w_blocks = reg.extent[0].div_ceil(a.bw) as usize;
-    let h_blocks = reg.extent[1].div_ceil(a.bh) as usize;
+    let w_blocks = reg.extent[0].div_ceil(a.bw);
+    let h_blocks = reg.extent[1].div_ceil(a.bh);
     // 0 means tightly packed.
-    let row_len = if reg.row_length != 0 { reg.row_length.div_ceil(a.bw) as usize } else { w_blocks };
-    let img_h = if reg.image_height != 0 { reg.image_height.div_ceil(a.bh) as usize } else { h_blocks };
+    let row_len = if reg.row_length != 0 { reg.row_length.div_ceil(a.bw) } else { w_blocks } as usize;
+    let img_h = if reg.image_height != 0 { reg.image_height.div_ceil(a.bh) } else { h_blocks } as usize;
     let is3d = img.vk.image_type == VK_IMAGE_TYPE_3D;
     let slices = if is3d { reg.extent[2].max(1) } else { sub.layers.max(1) };
-    let partial = is_partial_ds_aspect(img.vk.format, sub.aspect);
-    let (ibs, abs) = (ib.bs as usize, a.bs as usize);
+    let whole = a.bs == ib.bs && !is_partial_ds_aspect(img.vk.format, sub.aspect);
+    let abs = a.bs as usize;
     let brow = row_len * abs;
+    let stencil = sub.aspect & VK_IMAGE_ASPECT_STENCIL_BIT != 0;
+    let aspect = if stencil { VK_IMAGE_ASPECT_STENCIL_BIT } else { VK_IMAGE_ASPECT_DEPTH_BIT };
+    let (ipf, bpf) = (fmt::pipe(img.vk.format), if whole { PIPE_FORMAT_NONE } else { fmt::pipe(fmt::aspect_format(img.vk.format, aspect)) });
+    let (mut t, mut b): (Texel, Texel) = ([0; 32], [0; 32]);
+    let [ox, oy, oz] = reg.offset;
     for l in 0..slices {
-        let [ox, oy, oz] = reg.offset;
-        let z = is3d.then(|| oz as u32 + l);
-        let (off, stride) = slice_offset(img, ib, sub.level, sub.layer + l, z);
-        let irow = stride as usize * ibs;
-        let it = off as usize + (oy as u32 / ib.bh) as usize * irow + (ox as u32 / ib.bw) as usize * ibs;
+        let (layer, z) = if is3d { (0, oz as u32 + l) } else { (sub.layer + l, 0) };
         let bt = reg.buffer_offset as usize + l as usize * img_h * brow;
-        if a.bs == ib.bs && !partial {
-            for row in 0..h_blocks {
-                let (i, b) = (it + row * irow, bt + row * brow);
-                if to_buffer { ih.copy(i, &bh, b, w_blocks * abs) } else { bh.copy(b, &ih, i, w_blocks * abs) };
-            }
-            continue;
-        }
-        let stencil = sub.aspect & VK_IMAGE_ASPECT_STENCIL_BIT != 0;
-        let aspect = if stencil { VK_IMAGE_ASPECT_STENCIL_BIT } else { VK_IMAGE_ASPECT_DEPTH_BIT };
-        let (ipf, bpf) = (fmt::pipe(img.vk.format), fmt::pipe(fmt::aspect_format(img.vk.format, aspect)));
         for row in 0..h_blocks {
             for col in 0..w_blocks {
-                let (i, b) = (it + row * irow + col * ibs, bt + row * brow + col * abs);
-                if to_buffer {
-                    move_depth_stencil(&ih, i, ibs, ipf, &bh, b, abs, bpf, stencil);
-                } else {
-                    move_depth_stencil(&bh, b, abs, bpf, &ih, i, ibs, ipf, stencil);
+                let xyz = [ox as u32 / ib.bw + col, oy as u32 / ib.bh + row, z];
+                let bo = bt + row as usize * brow + col as usize * abs;
+                if whole {
+                    if to_buffer {
+                        if it.read(sub.level, layer, xyz, 0, &mut t) {
+                            bh.write(bo, &t[..abs]);
+                        }
+                    } else if bh.read(bo, &mut t[..abs]) {
+                        it.write(sub.level, layer, xyz, 0, &t);
+                    }
+                } else if it.read(sub.level, layer, xyz, 0, &mut t) && bh.read(bo, &mut b[..abs]) {
+                    if to_buffer {
+                        copy_depth_stencil(ipf, &t, bpf, &mut b, stencil);
+                        bh.write(bo, &b[..abs]);
+                    } else {
+                        copy_depth_stencil(bpf, &b, ipf, &mut t, stencil);
+                        it.write(sub.level, layer, xyz, 0, &t);
+                    }
                 }
             }
         }
@@ -369,7 +350,7 @@ pub fn decode_compressed_image(s: &Image) -> Option<Decoded> {
     let rgba = Blocks { bs: 16, bw: 1, bh: 1, bd: 1 };
     let layers = s.vk.array_layers.max(1);
     let mut o = unsafe { std::ptr::read(s) };
-    o.vk.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    (o.vk.format, o.vk.tiling) = (VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_TILING_LINEAR);
     let total = (shape(&o).layer_size(rgba) * layers as u64) as usize;
     let mut buf = Vec::new();
     buf.try_reserve_exact(total).ok()?;
@@ -446,9 +427,8 @@ fn blit(src: &Image, dst: &Image, regions: &[BlitRegion], nearest: bool) {
     } else {
         src
     };
-    let (sh, dh) = (src.host().unwrap(), dst.host().unwrap());
+    let (Some(stx), Some(dtx)) = (Texels::of(src), Texels::of(dst)) else { return };
     let (spf, dpf) = (fmt::pipe(src.vk.format), fmt::pipe(dst.vk.format));
-    let (sbs, dbs) = (blocks(src.vk.format).bs, db.bs);
     let (is_uint, is_sint) = (fmt::is_pure_uint(spf), fmt::is_pure_sint(spf));
     let (s3d, d3d) = (src.vk.image_type == VK_IMAGE_TYPE_3D, dst.vk.image_type == VK_IMAGE_TYPE_3D);
     let shr = |e: u32, l: u32| e.checked_shr(l).unwrap_or(0).max(1);
@@ -463,25 +443,26 @@ fn blit(src: &Image, dst: &Image, regions: &[BlitRegion], nearest: bool) {
         for l in 0..nlayers {
             let (sw, sh_) = (shr(src.vk.extent.width, sl), shr(src.vk.extent.height, sl));
             let sd = if s3d { shr(src.vk.extent.depth, sl) } else { 1 };
-            let dhgt = shr(dst.vk.extent.height, dl);
-            let one = |bs| Blocks { bs, bw: 1, bh: 1, bd: 1 };
-            let (soff, sstride) = shape(src).level_offset(sl, if s3d { 0 } else { reg.src.layer + l }, one(sbs));
-            let (doff, dstride) = shape(dst).level_offset(dl, if d3d { 0 } else { reg.dst.layer + l }, one(dbs));
-            let st = |x: i32, y: i32, z: i32| soff as usize + (((z as u64 * sh_ as u64 + y as u64) * sstride as u64 + x as u64) * sbs as u64) as usize;
-            let rd = |off: usize| texel(&sh, off, sbs as usize);
+            let (slay, dlay) = (if s3d { 0 } else { reg.src.layer + l }, if d3d { 0 } else { reg.dst.layer + l });
+            let rd = |x: i32, y: i32, z: i32| {
+                let mut t: Texel = [0; 32];
+                stx.read(sl, slay, [x as u32, y as u32, if s3d { z as u32 } else { 0 }], 0, &mut t).then_some(t)
+            };
             let w = |d: i32, o: i32, e: f32| if e != 0.0 { (d as f32 + 0.5 - o as f32) / e } else { 0.5 };
             for dz in d0[2].min(d1[2])..d0[2].max(d1[2]) {
                 let sz = s0[2] as f32 + w(dz, d0[2], dez) * sez;
                 for dy in d0[1].min(d1[1])..d0[1].max(d1[1]) {
                     let sy = s0[1] as f32 + w(dy, d0[1], dey) * sey;
-                    let drow = (dz as i64 as u64).wrapping_mul(dhgt as u64).wrapping_add(dy as i64 as u64).wrapping_mul(dstride as u64 * dbs as u64);
                     for dx in d0[0].min(d1[0])..d0[0].max(d1[0]) {
                         let sx = s0[0] as f32 + w(dx, d0[0], dex) * sex;
-                        let dt = (doff as usize).wrapping_add(drow.wrapping_add((dx as i64 as u64).wrapping_mul(dbs as u64)) as usize);
-                        let Some(mut d) = texel(&dh, dt, dbs as usize) else { continue };
+                        let dxyz = [dx as u32, dy as u32, if d3d { dz as u32 } else { 0 }];
+                        let mut d: Texel = [0; 32];
+                        if !dtx.read(dl, dlay, dxyz, 0, &mut d) {
+                            continue;
+                        }
                         let near = || {
                             let c = |f: f32, n: u32| (f.floor() as i32).clamp(0, n as i32 - 1);
-                            rd(st(c(sx, sw), c(sy, sh_), c(sz, sd)))
+                            rd(c(sx, sw), c(sy, sh_), c(sz, sd))
                         };
                         let (xs, xw) = taps(sx - 0.5, sw);
                         let (ys, yw) = taps(sy - 0.5, sh_);
@@ -491,7 +472,7 @@ fn blit(src: &Image, dst: &Image, regions: &[BlitRegion], nearest: bool) {
                             (0..8).filter_map(move |i| {
                                 let (ix, iy, iz) = (i & 1, i >> 1 & 1, i >> 2);
                                 let weight = xw[ix] * yw[iy] * zw[iz];
-                                (weight != 0.0).then(|| (rd(st(xs[ix], ys[iy], zs[iz])).unwrap_or([0; 32]), weight))
+                                (weight != 0.0).then(|| (rd(xs[ix], ys[iy], zs[iz]).unwrap_or([0; 32]), weight))
                             })
                         };
                         let Some(n) = near() else { continue };
@@ -530,7 +511,7 @@ fn blit(src: &Image, dst: &Image, regions: &[BlitRegion], nearest: bool) {
                                 pack_rgba_float(dst.vk.format, dpf, &mut d, &acc);
                             }
                         }
-                        dh.write(dt, &d[..dbs as usize]);
+                        dtx.write(dl, dlay, dxyz, 0, &d);
                     }
                 }
             }
@@ -555,38 +536,37 @@ entrypoint! {
 
 /// Averages the samples of one region into a single-sampled image.
 pub fn resolve_region(src: &Image, dst: &Image, reg: &Region) {
-    let (Some(sh), Some(dh)) = (src.host(), dst.host()) else { return };
+    let (Some(st), Some(dt)) = (Texels::of(src), Texels::of(dst)) else { return };
     let (spf, dpf) = (fmt::pipe(src.vk.format), fmt::pipe(dst.vk.format));
-    let texel_blocks = |f: VkFormat| Blocks { bs: blocks(f).bs, bw: 1, bh: 1, bd: 1 };
-    let (sb, db) = (texel_blocks(src.vk.format), texel_blocks(dst.vk.format));
-    let (sbs, dbs) = (sb.bs as usize, db.bs as usize);
     let samples = src.vk.samples.max(1);
-    let plane = shape(src).sample_plane_size(sb) as usize;
-    let int_copy = fmt::is_pure_integer(spf) && sbs == dbs;
+    let int_copy = fmt::is_pure_integer(spf) && st.bs() == dt.bs();
     let (ss, ds) = (reg.src, reg.dst);
+    let (mut s, mut d): (Texel, Texel) = ([0; 32], [0; 32]);
     for l in 0..layers(&src.vk, &ss) {
-        let (soff, sstride) = shape(src).level_offset(ss.level, ss.layer + l, sb);
-        let (doff, dstride) = shape(dst).level_offset(ds.level, ds.layer + l, db);
-        for y in 0..reg.extent[1] as usize {
-            let (sy, dy) = (reg.src_offset[1] as usize + y, reg.dst_offset[1] as usize + y);
-            for x in 0..reg.extent[0] as usize {
-                let (sx, dx) = (reg.src_offset[0] as usize + x, reg.dst_offset[0] as usize + x);
-                let st = soff as usize + (sy * sstride as usize + sx) * sbs;
-                let dt = doff as usize + (dy * dstride as usize + dx) * dbs;
+        for y in 0..reg.extent[1] {
+            for x in 0..reg.extent[0] {
+                let sxyz = [reg.src_offset[0] as u32 + x, reg.src_offset[1] as u32 + y, 0];
+                let dxyz = [reg.dst_offset[0] as u32 + x, reg.dst_offset[1] as u32 + y, 0];
                 if int_copy {
-                    sh.copy(st, &dh, dt, sbs);
+                    if st.read(ss.level, ss.layer + l, sxyz, 0, &mut s) {
+                        dt.write(ds.level, ds.layer + l, dxyz, 0, &s);
+                    }
                     continue;
                 }
-                let Some(mut d) = texel(&dh, dt, dbs) else { continue };
+                if !dt.read(ds.level, ds.layer + l, dxyz, 0, &mut d) {
+                    continue;
+                }
                 let mut acc = [0.0f32; 4];
-                for s in 0..samples as usize {
+                for smp in 0..samples {
+                    s = [0; 32];
+                    st.read(ss.level, ss.layer + l, sxyz, smp, &mut s);
                     let mut v = [0.0; 4];
-                    unpack_rgba_float(src.vk.format, spf, &texel(&sh, st + s * plane, sbs).unwrap_or([0; 32]), &mut v);
+                    unpack_rgba_float(src.vk.format, spf, &s, &mut v);
                     acc.iter_mut().zip(v).for_each(|(a, v)| *a += v);
                 }
                 acc.iter_mut().for_each(|a| *a /= samples as f32);
                 pack_rgba_float(dst.vk.format, dpf, &mut d, &acc);
-                dh.write(dt, &d[..dbs]);
+                dt.write(ds.level, ds.layer + l, dxyz, 0, &d);
             }
         }
     }

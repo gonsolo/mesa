@@ -29,8 +29,12 @@ pub fn borgvk_corpus_on() -> bool {
     file().is_some()
 }
 
+/// The image's texels in the linear layout, so the hash does not depend on how it is stored.
 pub fn hash_image(h: u64, img: Option<&Image>) -> u64 {
     let Some(img) = img else { return h };
+    if let Some(lin) = crate::texels::linear_copy(img) {
+        return hash(h, &lin);
+    }
     img.host().and_then(|m| m.with_bytes(0, img.size as usize, |b| hash(h, b))).unwrap_or(h)
 }
 

@@ -20,6 +20,7 @@ pub struct Image {
     pub size: VkDeviceSize, // bytes needed to back this image
     pub mem: *mut DeviceMemory,
     pub offset: VkDeviceSize,
+    pub plane1: u64, // the stencil plane from `offset` in a level or layer of another image, 0 otherwise
 }
 
 impl Image {
@@ -73,7 +74,10 @@ pub fn aspect_blocks(fmt: VkFormat, aspect: VkImageAspectFlags) -> Blocks {
 fn size(i: &VkImageCreateInfo) -> u64 {
     let e = i.extent;
     let s = Shape { extent: [e.width, e.height, e.depth], levels: i.mipLevels, layers: i.arrayLayers, samples: i.samples };
-    s.size(blocks(i.format))
+    match crate::texels::planes(i.format, i.tiling, i.usage) {
+        Some(p) => crate::texels::tiled_layout(Shape { levels: s.levels.max(1), ..s }, i.format, p).size(),
+        None => s.size(blocks(i.format)),
+    }
 }
 
 fn subresource_layout(image: &Image, sub: &VkImageSubresource) -> VkSubresourceLayout {
