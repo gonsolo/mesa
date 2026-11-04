@@ -142,6 +142,8 @@ struct DrawParams {
     first_instance: u32,
     index_base: u32,
     ubo_base: u32,
+    /// The draw's buffer binding table: base address and offset limit per binding (borgc).
+    table: u32,
     push_stage: u32,
     vertex_offset: i32,
 }
@@ -152,6 +154,7 @@ struct List {
     top: u32,
     state: Vec<[u32; 2]>,
     state_addr: u32,
+    table: u32,
     vtab_addr: u32,
     load: u32,
     shift: u32,
@@ -331,8 +334,8 @@ impl Builder {
         g.reg(r!(desc_flush), 0);
     }
 
-    fn root_table(g: &mut dyn Gpu, at: u32, ls: u32, tex: u32, samp: u32) -> u32 {
-        for (i, v) in [ls, tex, samp, 0].into_iter().enumerate() {
+    fn root_table(g: &mut dyn Gpu, at: u32, ls: u32, tex: u32, samp: u32, table: u32) -> u32 {
+        for (i, v) in [ls, tex, samp, table].into_iter().enumerate() {
             g.mem(at + 4 * i as u32, v);
         }
         at
@@ -473,14 +476,14 @@ impl Builder {
         }
         let dp = self.dp;
         st.push([r!(draw_cfg), 1 | dp.topology << 1 | dp.index_type << 3 | dp.restart << 5 | shift << 6]);
-        if self.list.state_addr == 0 || self.list.state != st {
-            self.list.state = st.clone();
+        if self.list.state_addr == 0 || self.list.state != st || self.list.table != dp.table {
+            (self.list.state, self.list.table) = (st.clone(), dp.table);
             let at = self.alloc(16);
-            st[root_i][1] = Self::root_table(g, at, self.ls_base(1), TEX_DESC_TABLE_ADDR, SAMPLER_DESC_TABLE_ADDR);
+            st[root_i][1] = Self::root_table(g, at, self.ls_base(1), TEX_DESC_TABLE_ADDR, SAMPLER_DESC_TABLE_ADDR, dp.table);
             self.list.state_addr = self.block(g, &st);
         }
         let at = self.alloc(16);
-        let root = Self::root_table(g, at, self.ls_base(0), self.list.vtab_addr - BORG_VATTR_SLOT0 * 64, SAMPLER_DESC_TABLE_ADDR);
+        let root = Self::root_table(g, at, self.ls_base(0), self.list.vtab_addr - BORG_VATTR_SLOT0 * 64, SAMPLER_DESC_TABLE_ADDR, dp.table);
         let pr = [
             [r!(draw_vertex_count), self.vertex_count],
             [r!(draw_instance_count), dp.instance_count],
@@ -591,7 +594,7 @@ impl Builder {
                 for i in 0..nw {
                     g.mem(BORG_PUSH_CONST_SPI + (off + i) * 4, w(3 + 4 * i as usize));
                 }
-                let root = Self::root_table(g, DRAW_ROOT_SPI, BORG_PUSH_CONST_SPI, TEX_DESC_TABLE_ADDR, SAMPLER_DESC_TABLE_ADDR);
+                let root = Self::root_table(g, DRAW_ROOT_SPI, BORG_PUSH_CONST_SPI, TEX_DESC_TABLE_ADDR, SAMPLER_DESC_TABLE_ADDR, 0);
                 g.reg(r!(root), root);
                 self.push_used = true;
             }
@@ -728,6 +731,7 @@ impl Builder {
                     vertex_offset: w(20) as i32,
                     index_base: if p[2] != 0 { BORG_HEAP_SPI + w(24) } else { 0 },
                     ubo_base: if w(28) != 0 { BORG_HEAP_SPI + w(28) - 1 } else { 0 },
+                    table: if w(32) != 0 { BORG_HEAP_SPI + w(32) - 1 } else { 0 },
                 };
                 self.vertex_count = w(4);
                 (self.tex_slot, self.samp_slot, self.tex_base) = (0, 0, 0);
@@ -785,7 +789,7 @@ mod tests {
 
     #[test]
     fn packet_lengths() {
-        assert_eq!(packet_len(0xBA), 1 + 3 + 7 * 4 + 1);
+        assert_eq!(packet_len(0xBA), 1 + 3 + 8 * 4 + 1);
         assert_eq!(packet_len(0xB6), 1 + 1 + 16 + 1);
         assert_eq!(packet_len(0xAD), 0);
     }

@@ -53,13 +53,13 @@ pub struct ComputeState {
     pub(crate) kreg: HashMap<u32, u32>, // constant bits -> placeholder vreg, placed by pool_consts
     pub(crate) kval: HashMap<u32, u32>,
     pub pool: Vec<u32>,
-    slots: HashMap<u32, (u32, u32)>, // binding slot -> base and limit vregs, loaded in the prologue
+    pub(crate) slots: HashMap<u32, (u32, u32)>, // binding slot -> base and limit vregs, loaded in the prologue
     pub(crate) prologue: Vec<BorgInstr>,
 }
 
 /// A value while selecting: a known constant or a register component.
 #[derive(Clone, Copy)]
-enum Val {
+pub(crate) enum Val {
     K(u32),
     R(u32, u8),
 }
@@ -159,7 +159,7 @@ impl ShaderState {
         }
     }
 
-    fn val(&mut self, s: &nir_src, c: u8) -> Val {
+    pub(crate) fn val(&mut self, s: &nir_src, c: u8) -> Val {
         let d = s.as_def().index;
         match self.known(d, c) {
             Some(b) => Val::K(b),
@@ -170,7 +170,7 @@ impl ShaderState {
         }
     }
 
-    fn vreg(&mut self, v: Val) -> (u32, u8) {
+    pub(crate) fn vreg(&mut self, v: Val) -> (u32, u8) {
         match v {
             Val::K(b) => (self.konst(b), 0),
             Val::R(r, c) => (r, c),
@@ -183,12 +183,12 @@ impl ShaderState {
         v
     }
 
-    fn bin(&mut self, mnem: Op, a: Val, b: Val) -> Val {
+    pub(crate) fn bin(&mut self, mnem: Op, a: Val, b: Val) -> Val {
         let (a, b) = (self.vreg(a), self.vreg(b));
         Val::R(self.sel.opc(mnem, &[a, b]), 0)
     }
 
-    fn add(&mut self, a: Val, b: Val) -> Val {
+    pub(crate) fn add(&mut self, a: Val, b: Val) -> Val {
         match (a, b) {
             (Val::K(x), Val::K(y)) => Val::K(x.wrapping_add(y)),
             (Val::K(0), o) | (o, Val::K(0)) => o,
@@ -419,14 +419,14 @@ impl ShaderState {
     }
 
     /// Word `c` of an access at `a`: LW and SW take it as their immediate.
-    fn load_at(&mut self, a: Val, c: u32) -> Val {
+    pub(crate) fn load_at(&mut self, a: Val, c: u32) -> Val {
         let a = self.vreg(a);
         let d = self.sel.fresh();
         self.sel.prog.push(BorgInstr { mnem: Op::Lw.into(), dst: d, srcs: vec![a.0], swz: vec![a.1], imm: 4 * c });
         Val::R(d, 0)
     }
 
-    fn store_at(&mut self, a: Val, c: u32, v: Val) {
+    pub(crate) fn store_at(&mut self, a: Val, c: u32, v: Val) {
         let (a, v) = (self.vreg(a), self.vreg(v));
         self.sel.prog.push(BorgInstr { mnem: Op::Sw.into(), dst: NO_DST, srcs: vec![a.0, v.0], swz: vec![a.1, v.1], imm: 4 * c });
     }

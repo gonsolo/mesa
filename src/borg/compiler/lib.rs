@@ -392,6 +392,9 @@ unsafe fn compile_nir_inner(
     let (mut cx, entry, total) = ShaderState::start(nir, flags, out_select);
     (info.push_window, info.spill_slots) = (cx.frag.push_window as u32, 0);
     cx.select_entry(entry);
+    let mut prog = std::mem::take(&mut cx.cs.prologue);
+    prog.append(&mut cx.sel.prog);
+    cx.sel.prog = prog;
     if let Err(e) = cx.check_selected() {
         eprintln!("borgc: refused: {e}");
         return 0;

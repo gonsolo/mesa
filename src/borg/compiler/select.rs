@@ -1,4 +1,5 @@
 use crate::opcodes::{CSR_DISCARD, CSR_OUT_C0, CSR_OUT_DEPTH, CSR_OUT_POS0, CSR_SAMPLE_MASK};
+use crate::compute::Val;
 use crate::state::{ShaderState, Stage};
 use crate::isel::borg_isel;
 use crate::opt::classify_uniform;
@@ -629,7 +630,7 @@ impl ShaderState {
                 self.sel.loc.insert(intr.def.index, Loc::Fixed(31));
             }
             nir_intrinsic_load_input if self.stage == Stage::Vertex && self.flags.fetching() => self.vertex_fetch(intr),
-            nir_intrinsic_load_ubo => self.uniform_load(intr),
+            nir_intrinsic_load_ubo => self.ssbo(intr),
             nir_intrinsic_load_input if self.stage == Stage::Vertex => self.uniform_load(intr),
             nir_intrinsic_store_output => self.store_output(intr),
             nir_intrinsic_load_scratch | nir_intrinsic_store_scratch => self.scratch(intr),
@@ -1012,9 +1013,9 @@ impl ShaderState {
         }
     }
 
-    /// A storage buffer load or store.
+    /// A uniform or storage buffer load or store, at the binding's base from the draw's binding
+    /// table (root table word 3) plus the offset clamped to its limit (robustBufferAccess).
     unsafe fn ssbo(&mut self, intr: &nir_intrinsic_instr) {
-        const SSBO_SLOT_WORDS: u32 = 16384;
         let store = intr.intrinsic == nir_intrinsic_store_ssbo;
         let (bsrc, osrc) = if store { (1, 2) } else { (0, 1) };
         let mut bd = resolve_vm(&self.sel.vec_map, intr.get_src(bsrc).as_def().index, 0).0;
@@ -1023,59 +1024,50 @@ impl ShaderState {
             match self.prod.get(&bd) { Some((_, srcs)) if !srcs.is_empty() => bd = resolve_vm(&self.sel.vec_map, srcs[0].0, 0).0, _ => break }
         }
         let binding = self.res_binding.get(&bd).copied().unwrap_or(0);
-        // A uniform buffer at binding 0 sits at the region's start (draw.rs).
-        let window = if intr.intrinsic == nir_intrinsic_load_ubo && binding == 0 { 0 } else { crate::window_slot(binding) };
-        let slot = SSBO_SLOT_WORDS * window;
-        // A register holding 0, to copy window words through (an instruction reads one).
-        let f = self.sel.next_vreg; self.sel.next_vreg += 1;
-        self.sel.loc.insert(f, Loc::Fixed(30));
-        let zero = self.sel.next_vreg; self.sel.next_vreg += 1;
-        self.sel.prog.push(BorgInstr { mnem: Op::Isub.into(), dst: zero, srcs: vec![f, f], swz: vec![0, 0], imm: 0 });
-        // The descriptor's own offset component (a dynamic buffer's) is the window base: 0.
+        let n = if store { intr.get_src(0).num_components() as u32 } else { intr.def.num_components as u32 };
+        let (base, lim) = self.binding_regs(binding);
+        // The descriptor's own offset component (a dynamic buffer's) is in the table's base: 0.
         let off_is_descriptor = self.vert.descriptor_defs.contains(&resolve_vm(&self.sel.vec_map, intr.get_src(osrc).as_def().index, 0).0);
-        let word = match intr.get_src(osrc).comp_as_uint(0) {
-            Some(_) => None,
-            None if off_is_descriptor => None,
-            None => {
-                let o = resolve_vm(&self.sel.vec_map, intr.get_src(osrc).as_def().index, 0);
-                let two = self.konst(2);
-                let w = self.sel.next_vreg; self.sel.next_vreg += 1;
-                self.sel.prog.push(BorgInstr { mnem: Op::Isrl.into(), dst: w, srcs: vec![o.0, two], swz: vec![o.1, 0], imm: 0 });
-                Some(w)
+        let o = if off_is_descriptor { Val::K(0) } else { self.val(intr.get_src(osrc), 0) };
+        let a0 = match o {
+            Val::K(0) => Val::R(base, 0),
+            o => {
+                let lim = if n > 1 { self.add(Val::R(lim, 0), Val::K((4 * (n - 1)).wrapping_neg())) } else { Val::R(lim, 0) };
+                let w = self.bin(Op::Minu, o, lim);
+                self.add(Val::R(base, 0), w)
             }
         };
-        let const_word = intr.get_src(osrc).comp_as_uint(0).map(|o| o as u32 / 4);
-        let n = if store { intr.get_src(0).num_components() as usize } else { intr.def.num_components as usize };
-        let mut comps = Vec::with_capacity(n);
-        for c in 0..n {
-            if store && intr.write_mask() & (1 << c) == 0 {
-                continue;
+        if store {
+            for c in (0..n).filter(|c| intr.write_mask() & (1 << c) != 0) {
+                let v = self.val(intr.get_src(0), c as u8);
+                self.store_at(a0, c, v);
             }
-            let k = self.konst(slot + const_word.unwrap_or(0) + c as u32);
-            let addr = self.sel.next_vreg; self.sel.next_vreg += 1;
-            self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: addr, srcs: vec![word.unwrap_or(zero), k], swz: vec![0, 0], imm: 0 });
-            if store {
-                let src = intr.get_src(0).as_def().index;
-                let d = resolve_vm(&self.sel.vec_map, src, c as u8);
-                let val = match self.consts.get(&d.0) {
-                    Some(&bits) if !self.sel.vec_map.contains_key(&d.0) => {
-                        let kv = self.konst(bits);
-                        let t = self.sel.next_vreg; self.sel.next_vreg += 1;
-                        self.sel.prog.push(BorgInstr { mnem: Op::Iadd.into(), dst: t, srcs: vec![zero, kv], swz: vec![0, 0], imm: 0 });
-                        (t, 0u8)
-                    }
-                    _ => d,
-                };
-                self.sel.prog.push(BorgInstr { mnem: Op::Store.into(), dst: NO_DST, srcs: vec![addr, val.0], swz: vec![0, val.1], imm: 0 });
-            } else {
-                let dst = self.sel.next_vreg; self.sel.next_vreg += 1;
-                self.sel.prog.push(BorgInstr { mnem: Op::Load.into(), dst, srcs: vec![addr], swz: vec![0], imm: 0 });
-                comps.push((dst, 0u8));
+            return;
+        }
+        let comps = (0..n).map(|c| match self.load_at(a0, c) { Val::R(r, k) => (r, k), Val::K(_) => unreachable!() }).collect();
+        self.sel.vec_map.insert(intr.def.index, comps);
+    }
+
+    /// A binding's base and offset limit, loaded once in the shader's prologue.
+    fn binding_regs(&mut self, slot: u32) -> (u32, u32) {
+        if let Some(&r) = self.cs.slots.get(&slot) {
+            return r;
+        }
+        let table = match self.cs.slots.get(&u32::MAX) {
+            Some(&(t, _)) => t,
+            None => {
+                let (root, t) = (self.sel.fresh(), self.sel.fresh());
+                self.cs.prologue.push(BorgInstr { mnem: Op::Csrrs.into(), dst: root, srcs: vec![], swz: vec![], imm: crate::opcodes::CSR_ROOT });
+                self.cs.prologue.push(BorgInstr { mnem: Op::Lw.into(), dst: t, srcs: vec![root], swz: vec![0], imm: 12 });
+                self.cs.slots.insert(u32::MAX, (t, 0));
+                t
             }
-        }
-        if !store {
-            self.sel.vec_map.insert(intr.def.index, comps);
-        }
+        };
+        let (base, lim) = (self.sel.fresh(), self.sel.fresh());
+        self.cs.prologue.push(BorgInstr { mnem: Op::Lw.into(), dst: base, srcs: vec![table], swz: vec![0], imm: 8 * slot });
+        self.cs.prologue.push(BorgInstr { mnem: Op::Lw.into(), dst: lim, srcs: vec![table], swz: vec![0], imm: 8 * slot + 4 });
+        self.cs.slots.insert(slot, (base, lim));
+        (base, lim)
     }
 
     /// gl_FragCoord.
@@ -1183,7 +1175,7 @@ impl ShaderState {
         self.sel.vec_map.insert(intr.def.index, comps);
     }
 
-    /// A uniform buffer load, or a vertex input pulled from the vertex buffer.
+    /// A vertex input pulled from the vertex buffer.
     unsafe fn uniform_load(&mut self, intr: &nir_intrinsic_instr) {
         let is_input = intr.intrinsic == nir_intrinsic_load_input;
         let offset_def = if is_input { 0 } else { intr.get_src(1).as_def().index };
