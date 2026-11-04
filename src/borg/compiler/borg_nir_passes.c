@@ -147,6 +147,15 @@ borg_flat_input(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 static bool
 borg_frag_image_filter(const nir_instr *instr, const void *data)
 {
+   /* A storage image in place (a 2D one: draw.rs binds no other). */
+   if (instr->type == nir_instr_type_intrinsic && borg_texel_buffer_filter(instr, data)) {
+      const nir_intrinsic_instr *i = nir_instr_as_intrinsic(instr);
+      nir_variable *var = i->intrinsic != nir_intrinsic_image_deref_size
+                             ? nir_deref_instr_get_variable(nir_src_as_deref(i->src[0])) : NULL;
+      if (var && !borg_image_atomic(i) && nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_2D &&
+          !nir_intrinsic_image_array(i) && borg_lower_image_in_place(var->data.image.format))
+         return true;
+   }
    return instr->type == nir_instr_type_intrinsic && borg_texel_buffer_filter(instr, data) &&
           nir_instr_as_intrinsic(instr)->intrinsic != nir_intrinsic_image_deref_size &&
           ((borg_image_words(nir_instr_as_intrinsic(instr)) &&
@@ -170,7 +179,8 @@ static nir_def *borg_pull_channel(nir_builder *b, nir_def *const *words,
 static bool
 borg_image_direct(nir_builder *b, nir_variable *var)
 {
-   return b->shader->info.stage == MESA_SHADER_COMPUTE && borg_lower_image_in_place(var->data.image.format);
+   return (b->shader->info.stage == MESA_SHADER_COMPUTE || b->shader->info.stage == MESA_SHADER_FRAGMENT) &&
+          borg_lower_image_in_place(var->data.image.format);
 }
 
 static nir_def *

@@ -815,6 +815,11 @@ impl Ctx<'_> {
                             continue;
                         }
                         if let Some(simg) = storage_image(ds, b) {
+                            let at = base + window_slot(fb) * SLOT_BYTES;
+                            if let Some(e) = image_in_place(c, ds, b, simg, at) {
+                                set_entry(&mut table, fb, e);
+                                continue;
+                            }
                             let n = (simg.vk.extent.width.wrapping_mul(simg.vk.extent.height)).min(SLOT_BYTES / 4 - 1);
                             let host = simg.host().unwrap();
                             let at = base + window_slot(fb) * SLOT_BYTES;
@@ -1074,7 +1079,46 @@ fn storage_image(set: &DescriptorSet, b: usize) -> Option<&Image> {
         return None;
     }
     let img = set.image(b).filter(|i| i.host().is_some())?;
-    (img.vk.image_type == VK_IMAGE_TYPE_2D && img.vk.samples == 1 && blocks(img.vk.format).bs == 4).then_some(img)
+    let fits = blocks(img.vk.format).bs == 4 || in_place_format(set, b, img);
+    (img.vk.image_type == VK_IMAGE_TYPE_2D && img.vk.samples == 1 && fits).then_some(img)
+}
+
+fn in_place_format(set: &DescriptorSet, b: usize, img: &Image) -> bool {
+    let vf = set.view(b).map_or(img.vk.format, |v| v.format);
+    unsafe { borg_lower_image_in_place(fmt::pipe(vf)) }
+}
+
+/// A storage image the fragment shader addresses itself (borgc: borg_lower_image_in_place): its
+/// window holds the view's descriptor, base, row pitch, layer stride, width, height, layers; the
+/// texels follow it when the image is not in the device heap. The binding table entry.
+fn image_in_place(c: &mut CommandBuffer, set: &DescriptorSet, b: usize, img: &Image, at: u32) -> Option<[u32; 2]> {
+    if !in_place_format(set, b, img) {
+        return None;
+    }
+    let (lvl, l0) = set.view(b).map_or((0, 0), |v| (v.base_mip_level, v.base_array_layer));
+    let (sh, blk) = (crate::image::shape(img), blocks(img.vk.format));
+    let (off, stride) = sh.level_offset(lvl, l0, blk);
+    let mip = |e: u32| (e >> lvl).max(1);
+    let (w, h, pitch) = (mip(img.vk.extent.width), mip(img.vk.extent.height), stride * blk.bs);
+    let bytes = pitch as u64 * h as u64;
+    let gpu = img.memory().map_or(0, |m| m.gpu);
+    let base = if gpu != 0 { gpu + (img.offset + off) as u32 } else { BORG_HEAP_SPI + at + 64 };
+    let desc = [base, pitch, sh.layer_size(blk) as u32, w, h, 1];
+    send_mem(at, bytes_of(&desc));
+    if gpu == 0 {
+        if 64 + bytes > SLOT_BYTES as u64 {
+            return None;
+        }
+        let host = img.host()?;
+        host.with_bytes(off as usize, bytes as usize, |t| {
+            for (i, chunk) in t.chunks(256).enumerate() {
+                send_mem(at + 64 + i as u32 * 256, chunk);
+            }
+        })?;
+        let p = host.ptr(off as usize, bytes as usize)?;
+        push_writeback(c, at + 64, bytes as u32, p, PIPE_FORMAT_NONE);
+    }
+    Some(entry(BORG_HEAP_SPI + at, 24))
 }
 
 fn draw_one(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
