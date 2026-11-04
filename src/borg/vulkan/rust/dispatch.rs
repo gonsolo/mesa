@@ -122,6 +122,12 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                 let Some(map) = mapped(img.memory()) else { continue };
                 let src = unsafe { map.add(img.offset as usize) };
                 let Some(host) = img.host() else { continue };
+                // Storage images are linear; a sampled one is read from a linear copy.
+                let lin = crate::texels::linear_copy(img);
+                let (src, host) = match &lin {
+                    Some(l) => (l.as_ptr().cast_mut(), unsafe { Host::new(l.as_ptr().cast_mut(), l.len()) }),
+                    None => (src, host),
+                };
                 let (w, h) = (img.vk.extent.width, img.vk.extent.height);
                 let flat = img.vk.image_type == VK_IMAGE_TYPE_2D;
                 let view = set.view(b);

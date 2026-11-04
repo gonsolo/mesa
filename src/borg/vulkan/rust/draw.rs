@@ -1035,9 +1035,7 @@ fn draw_batched(device: &Device, c: &mut CommandBuffer, p: &Params) -> Result<bo
 /// A target's bytes, to restore between the passes of a draw.
 fn target_bytes(img: *mut Image) -> Option<(*mut Image, Vec<u8>)> {
     let i = unsafe { img.as_ref() }?;
-    let e = i.vk.extent;
-    let n = e.width as usize * e.height as usize * blocks(i.vk.format).bs as usize * i.vk.samples.max(1) as usize;
-    let mut b = vec![0u8; n];
+    let mut b = vec![0u8; i.size as usize];
     i.host()?.read(0, &mut b);
     Some((img, b))
 }

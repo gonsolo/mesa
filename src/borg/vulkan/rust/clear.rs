@@ -7,11 +7,10 @@ use crate::cmd_buffer::CommandBuffer;
 use crate::entrypoint::{entrypoint, pointee};
 use crate::ffi::*;
 use crate::fmt;
-use crate::image::{blocks, shape, Image, ViewImage};
-use crate::memory::Host;
+use crate::image::{blocks, Image, ViewImage};
+use crate::texels::Texels;
 use crate::vk::ClearValue;
 use crate::texel::{pack_clear_color, write_depth_stencil, Texel};
-use borg_layout::image::Blocks;
 
 fn level_count(image: &vk_image, r: &VkImageSubresourceRange) -> u32 {
     if r.levelCount == VK_REMAINING_MIP_LEVELS as u32 { image.mip_levels.wrapping_sub(r.baseMipLevel) } else { r.levelCount }
@@ -21,25 +20,29 @@ fn layer_count(image: &vk_image, r: &VkImageSubresourceRange) -> u32 {
     if r.layerCount == VK_REMAINING_ARRAY_LAYERS as u32 { image.array_layers.wrapping_sub(r.baseArrayLayer) } else { r.layerCount }
 }
 
-/// The mapped image and its blocks, when it has memory and a block is one texel deep.
-fn mapped(image: &Image) -> Option<(Host<'_>, pipe_format, Blocks)> {
-    let b = blocks(image.vk.format);
-    (b.bd <= 1).then_some(())?;
-    Some((image.host()?, fmt::pipe(image.vk.format), b))
+/// The image's texels and format, when it has memory and a block is one texel deep.
+fn mapped(image: &Image) -> Option<(Texels<'_>, pipe_format)> {
+    (blocks(image.vk.format).bd <= 1).then_some(())?;
+    Some((Texels::of(image)?, fmt::pipe(image.vk.format)))
 }
 
-/// Calls `f` with the start and texel count of every sample plane of every level and layer in
-/// the ranges.
-fn for_each_plane(image: &Image, ranges: &[VkImageSubresourceRange], b: Blocks, mut f: impl FnMut(u64, u64)) {
-    let dim = |e: u32, level: u32, block: u32| e.checked_shr(level).unwrap_or(0).max(1).div_ceil(block) as u64;
-    let plane = shape(image).sample_plane_size(b);
+/// Calls `f` with every texel (level, layer, block, sample) of the ranges.
+fn for_each_texel(image: &Image, ranges: &[VkImageSubresourceRange], mut f: impl FnMut(u32, u32, [u32; 3], u32)) {
+    let b = blocks(image.vk.format);
+    let dim = |e: u32, level: u32, block: u32| e.checked_shr(level).unwrap_or(0).max(1).div_ceil(block);
     for r in ranges {
         for level in (0..level_count(&image.vk, r)).map(|l| r.baseMipLevel + l) {
-            let (h, d) = (dim(image.vk.extent.height, level, b.bh), dim(image.vk.extent.depth, level, b.bd));
+            let e = image.vk.extent;
+            let (w, h, d) = (dim(e.width, level, b.bw), dim(e.height, level, b.bh), dim(e.depth, level, b.bd));
             for layer in (0..layer_count(&image.vk, r)).map(|l| r.baseArrayLayer + l) {
-                let (off, stride) = shape(image).level_offset(level, layer, b);
-                for s in 0..image.vk.samples.max(1) as u64 {
-                    f(off + s * plane, stride as u64 * h * d);
+                for s in 0..image.vk.samples.max(1) {
+                    for z in 0..d {
+                        for y in 0..h {
+                            for x in 0..w {
+                                f(level, layer, [x, y, z], s);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -50,35 +53,29 @@ pointee!(VkClearColorValue, VkClearDepthStencilValue);
 
 entrypoint! {
     fn borgvk_CmdClearColorImage(_cmd: VkCommandBuffer, image: &Image, _layout: VkImageLayout, color: &VkClearColorValue, _count: u32, ranges: &[VkImageSubresourceRange]) {
-        let Some((host, pf, b)) = mapped(image) else { return };
+        let Some((t, pf)) = mapped(image) else { return };
         let mut pixel = [0u8; 16];
         pack_clear_color(image.vk.format, pf, &mut pixel, color);
-        let bs = b.bs as usize;
-        for_each_plane(image, ranges, b, |off, n| {
-            host.fill(off as usize, &pixel[..bs], n as usize);
+        for_each_texel(image, ranges, |level, layer, xyz, s| {
+            t.write(level, layer, xyz, s, &pixel);
         });
     }
 }
 
-/// Writes the depth and stencil in `aspect` of the texel at `off`, keeping the other aspect.
-fn write_ds(host: &Host, off: usize, bs: usize, pf: pipe_format, aspect: VkImageAspectFlags, ds: &VkClearDepthStencilValue) {
-    let mut t: Texel = [0; 32];
-    if host.read(off, &mut t[..bs]) {
-        write_depth_stencil(pf, &mut t, aspect, ds.depth, ds.stencil as u8);
-        host.write(off, &t[..bs]);
+/// Writes the depth and stencil in `aspect` of a texel, keeping the other aspect.
+fn write_ds(t: &Texels, at: (u32, u32, [u32; 3], u32), pf: pipe_format, aspect: VkImageAspectFlags, ds: &VkClearDepthStencilValue) {
+    let mut v: Texel = [0; 32];
+    if t.read(at.0, at.1, at.2, at.3, &mut v) {
+        write_depth_stencil(pf, &mut v, aspect, ds.depth, ds.stencil as u8);
+        t.write(at.0, at.1, at.2, at.3, &v);
     }
 }
 
 entrypoint! {
     fn borgvk_CmdClearDepthStencilImage(_cmd: VkCommandBuffer, image: &Image, _layout: VkImageLayout, ds: &VkClearDepthStencilValue, _count: u32, ranges: &[VkImageSubresourceRange]) {
-        let Some((host, pf, b)) = mapped(image) else { return };
-        let bs = b.bs as usize;
+        let Some((t, pf)) = mapped(image) else { return };
         for r in ranges {
-            for_each_plane(image, std::slice::from_ref(r), b, |off, n| {
-                for t in 0..n as usize {
-                    write_ds(&host, off as usize + t * bs, bs, pf, r.aspectMask, ds);
-                }
-            });
+            for_each_texel(image, std::slice::from_ref(r), |level, layer, xyz, s| write_ds(&t, (level, layer, xyz, s), pf, r.aspectMask, ds));
         }
     }
 }
@@ -86,7 +83,7 @@ entrypoint! {
 /// Clears `rect` of the attachment `view` in `aspect`, in layers from `base_layer` on.
 pub fn clear_rect(view: &vk_image_view, aspect: VkImageAspectFlags, value: &VkClearValue, rect: VkRect2D, base_layer: u32, layers: u32) {
     let Some(image) = view.image() else { return };
-    let Some((host, pf, b)) = mapped(image) else { return };
+    let Some((t, pf)) = mapped(image) else { return };
     let mut pixel = [0u8; 16];
     let (color, ds) = (aspect & VK_IMAGE_ASPECT_COLOR_BIT != 0, value.depth_stencil());
     if color {
@@ -94,18 +91,18 @@ pub fn clear_rect(view: &vk_image_view, aspect: VkImageAspectFlags, value: &VkCl
         pack_clear_color(view.format, fmt::pipe(view.format), &mut pixel, value.color());
     }
     let (x0, y0, w, h) = (rect.offset.x as u32, rect.offset.y as u32, rect.extent.width, rect.extent.height);
-    let bs = b.bs as u64;
-    let plane = shape(image).sample_plane_size(b);
+    let is3d = image.vk.image_type == VK_IMAGE_TYPE_3D;
     for l in 0..layers {
-        let (off, stride) = shape(image).level_offset(view.base_mip_level, view.base_array_layer + base_layer + l, b);
-        for s in 0..image.vk.samples.max(1) as u64 {
+        // A layer of a 3D image's view is a slice.
+        let layer = view.base_array_layer + base_layer + l;
+        let (layer, z) = if is3d { (0, layer) } else { (layer, 0) };
+        for s in 0..image.vk.samples.max(1) {
             for y in y0..y0.wrapping_add(h) {
                 for x in x0..x0.wrapping_add(w) {
-                    let t = (off + s * plane + (y as u64 * stride as u64 + x as u64) * bs) as usize;
                     if color {
-                        host.write(t, &pixel[..bs as usize]);
+                        t.write(view.base_mip_level, layer, [x, y, z], s, &pixel);
                     } else {
-                        write_ds(&host, t, bs as usize, pf, aspect, &ds);
+                        write_ds(&t, (view.base_mip_level, layer, [x, y, z], s), pf, aspect, &ds);
                     }
                 }
             }

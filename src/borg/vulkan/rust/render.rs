@@ -54,7 +54,14 @@ fn target_view(c: &mut CommandBuffer, view: Option<&vk_image_view>) -> *mut vk_i
         return view;
     }
     let level = v.base_mip_level;
-    let off = shape(img).level_offset(level, v.base_array_layer, Blocks { bw: 1, bh: 1, bd: 1, ..b }).0;
+    let (off, plane1) = match crate::texels::Texels::of(img).and_then(|t| t.tiled()) {
+        Some((t, _)) => {
+            let (layer, z) = if img.vk.image_type == VK_IMAGE_TYPE_3D { (0, v.base_array_layer) } else { (v.base_array_layer, 0) };
+            let off = t.texel(0, level, layer, [0, 0, z], 0);
+            (off, if t.planes[1].bs != 0 { t.texel(1, level, layer, [0, 0, z], 0) - off } else { 0 })
+        }
+        None => (shape(img).level_offset(level, v.base_array_layer, Blocks { bw: 1, bh: 1, bd: 1, ..b }).0, 0),
+    };
     let alloc = unsafe { &(*c.vk.pool).alloc };
     let p = unsafe { vk_alloc(alloc, size_of::<Target>(), align_of::<Target>(), VK_SYSTEM_ALLOCATION_SCOPE_OBJECT) }.cast::<Target>();
     if p.is_null() {
@@ -64,7 +71,7 @@ fn target_view(c: &mut CommandBuffer, view: Option<&vk_image_view>) -> *mut vk_i
     unsafe { p.write(Target { next: c.targets, orig: view, image: std::ptr::read(img), view: std::ptr::read(v) }) };
     let t = unsafe { &mut *p };
     let i = &mut t.image;
-    i.offset += off;
+    (i.offset, i.plane1) = (i.offset + off, plane1);
     i.size = img.size.saturating_sub(off);
     i.vk.extent.width = img.vk.extent.width.checked_shr(level).unwrap_or(0).max(1);
     i.vk.extent.height = img.vk.extent.height.checked_shr(level).unwrap_or(0).max(1);

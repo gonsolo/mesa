@@ -35,28 +35,22 @@ fn store_rgb(img: &Image, rgb: Option<&[u8]>, raw32: bool, sw: u32, sh: u32) {
         }
     }
     let samples = img.vk.samples.max(1);
-    let mapped = img.host().is_some();
-    if !mapped || width as u64 * height as u64 * 4 * samples as u64 > img.size {
-        return;
-    }
-    let base = unsafe { ((*img.mem).map as *mut u8).add(img.offset as usize) };
+    let Some(t) = crate::texels::Texels::of(img).filter(|t| t.bs() == 4) else { return };
     if raw32 {
-        unsafe { std::ptr::copy_nonoverlapping(rgb.as_ptr(), base, rgb.len()) };
+        for (i, px) in rgb.chunks_exact(4).enumerate().take(width as usize * height as usize) {
+            t.write(0, 0, [i as u32 % width, i as u32 / width, 0], 0, px);
+        }
         return;
     }
     let crop = sw >= width && sh >= height && sw - width < 4 && sh - height < 4;
     let pick = |i: u32, n: u32, s: u32| if crop { i } else { ((2 * i as u64 + 1) * s as u64 / (2 * n as u64)) as u32 };
-    let plane = width as usize * height as usize * 4;
-    for smp in 0..samples as usize {
-        let dst = unsafe { std::slice::from_raw_parts_mut(base.add(smp * plane), plane) };
+    for smp in 0..samples {
         for y in 0..height {
             let sy = pick(y, height, sh);
             for x in 0..width {
                 let sx = pick(x, width, sw);
                 let s = (sy as usize * sw as usize + sx as usize) * 3;
-                let d = (y as usize * width as usize + x as usize) * 4;
-                dst[d..d + 3].copy_from_slice(&rgb[s..s + 3]);
-                dst[d + 3] = 255;
+                t.write(0, 0, [x, y, 0], smp, &[rgb[s], rgb[s + 1], rgb[s + 2], 255]);
             }
         }
     }

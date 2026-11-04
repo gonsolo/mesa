@@ -8,6 +8,7 @@
 use crate::ffi::*;
 use crate::memory::Host;
 use crate::texel::Texel;
+use crate::texels::Texels;
 use crate::fmt;
 use crate::image::Image;
 use crate::format::{depth_is_d32, flush_format};
@@ -225,11 +226,7 @@ fn blocksize(f: VkFormat) -> u32 {
 
 fn image_backed(img: &Image, w: u32, h: u32) -> bool {
     let e = img.vk.extent;
-    let mapped = img.host().is_some();
-    mapped
-        && e.width >= w
-        && e.height >= h
-        && e.width as u64 * e.height as u64 * blocksize(img.vk.format) as u64 * (img.vk.samples as u64).max(1) <= img.size
+    img.host().is_some() && e.width >= w && e.height >= h
 }
 
 fn to565(c: &[f32; 4]) -> u16 {
@@ -275,46 +272,36 @@ fn pack_s(pf: pipe_format, t: &mut Texel, s: u8) {
 struct Surface<'a> {
     pf: pipe_format,
     bs: u32,
-    host: Host<'a>,
-    width: usize,
-    plane: usize,
+    texels: Texels<'a>,
     planes: u32,
 }
 
 impl<'a> Surface<'a> {
     fn new(img: &'a Image) -> Self {
-        let e = img.vk.extent;
         Surface {
             pf: fmt::pipe(img.vk.format),
             bs: blocksize(img.vk.format),
-            host: img.host().unwrap(),
-            width: e.width as usize,
-            plane: e.width as usize * e.height as usize,
+            texels: Texels::of(img).unwrap(),
             planes: img.vk.samples.max(1),
         }
     }
 
-    /// Offset of texel (x, y) of sample plane `p`.
-    fn texel(&self, p: u32, x: u32, y: u32) -> usize {
-        (p as usize * self.plane + y as usize * self.width + x as usize) * self.bs as usize
-    }
-
-    /// Offset of byte (x, y): extra colour attachments are one byte per pixel.
-    fn byte(&self, x: u32, y: u32) -> usize {
-        y as usize * self.width + x as usize
-    }
-
     fn read(&self, p: u32, x: u32, y: u32) -> Texel {
         let mut t: Texel = [0; 32];
-        self.host.read(self.texel(p, x, y), &mut t[..self.bs as usize]);
+        self.texels.read(0, 0, [x, y, 0], p, &mut t);
         t
     }
 
-    /// Changes texel (x, y) of plane `p` in place: `f` sees its current bytes.
+    /// Changes texel (x, y) of sample `p` in place: `f` sees its current bytes.
     fn update(&self, p: u32, x: u32, y: u32, f: impl FnOnce(&mut Texel)) {
         let mut t = self.read(p, x, y);
         f(&mut t);
-        self.host.write(self.texel(p, x, y), &t[..self.bs as usize]);
+        self.texels.write(0, 0, [x, y, 0], p, &t);
+    }
+
+    /// The first `src.len()` bytes of texel (x, y) of sample `p`.
+    fn put(&self, p: u32, x: u32, y: u32, src: &[u8]) {
+        self.update(p, x, y, |t| t[..src.len()].copy_from_slice(src));
     }
 }
 
@@ -398,8 +385,7 @@ fn copy_in(s: &Server, l: &Layout, rows: Range<u32>, t: &Targets, b: &mut Before
                 b.c[i * 16..i * 16 + 16].copy_from_slice(&px_get(&m, g, l.cpx));
                 for (a, e) in t.extra.iter().enumerate().filter(|_| p == 0) {
                     let ge = tiled(s.att[a + 1], l.wp, x, y, 16, 1) as usize;
-                    let mut v = [0u8];
-                    e.host.read(e.byte(x, y), &mut v);
+                    let mut v = [e.read(0, x, y)[0]];
                     m.write(ge, &v);
                     m.read(ge, &mut v);
                     b.e[a * npx + px_i] = v[0];
@@ -446,7 +432,7 @@ fn copy_out(s: &Server, l: &Layout, rows: Range<u32>, t: &Targets, b: &Before) -
                     changed += 1;
                     for q in planes(c.planes) {
                         if l.fmt != 0 {
-                            c.host.write(c.texel(q, x, y), &cur[..c.bs.min(l.cpx) as usize]);
+                            c.put(q, x, y, &cur[..c.bs.min(l.cpx) as usize]);
                         } else {
                             let v = u16::from_ne_bytes([cur[0], cur[1]]) as u32;
                             let f = [((v >> 11) & 31) as f32 / 31.0, ((v >> 5) & 63) as f32 / 63.0, (v & 31) as f32 / 31.0, 1.0];
@@ -459,7 +445,7 @@ fn copy_out(s: &Server, l: &Layout, rows: Range<u32>, t: &Targets, b: &Before) -
                     m.read(tiled(s.att[a + 1], l.wp, x, y, 16, 1) as usize, &mut ge);
                     if ge[0] != b.e[a * npx + px_i] {
                         changed += 1;
-                        e.host.write(e.byte(x, y), &ge);
+                        e.put(0, x, y, &ge);
                     }
                 }
                 if let Some(zs) = &t.z {
