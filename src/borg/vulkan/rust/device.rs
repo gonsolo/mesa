@@ -34,6 +34,7 @@ pub struct Device {
 /// What pipeline creation compiles into, and draws and submits upload from.
 pub struct Scratch {
     pub blend_lower: *const borg_blend,
+    pub pull: bool, // the vertex shader being compiled pulls its attributes: no shader cache
     pub shader_blob: [ShaderBlob; BORGVK_SHADER_STAGE_COUNT as usize],
     pub compile_layout: VkPipelineLayout,
     pub stage_ubo: [u128; 2],
@@ -62,6 +63,7 @@ impl Default for Scratch {
     fn default() -> Self {
         Scratch {
             blend_lower: null(),
+            pull: false,
             shader_blob: Default::default(),
             compile_layout: std::ptr::null_mut(),
             stage_ubo: [0; 2],

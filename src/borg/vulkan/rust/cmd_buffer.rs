@@ -49,6 +49,7 @@ pub struct CommandBuffer {
     pub gfx_pipeline: *mut Pipeline,
     pub vb: [*const u8; BORGVK_MAX_VERTEX_BINDINGS as usize],
     pub vb_avail: [VkDeviceSize; BORGVK_MAX_VERTEX_BINDINGS as usize], // bytes from vb[] to the buffer's end
+    pub vb_gpu: [u32; BORGVK_MAX_VERTEX_BINDINGS as usize], // vb[]'s GPU address in the device heap, or 0
     pub desc_set: *mut DescriptorSet,
     pub cs_pipeline: *const Pipeline,
     pub dispatched: bool, // ran a compute dispatch at replay
@@ -202,7 +203,7 @@ unsafe extern "C" fn reset(vk: *mut vk_command_buffer, _flags: VkCommandBufferRe
     (c.occ_pool, c.occ_open, c.nocc) = (null(), false, 0);
     (c.batch_img, c.index_ptr, c.gfx_pipeline, c.desc_set, c.cs_pipeline) = (null_mut(), null_mut(), null_mut(), null_mut(), null_mut());
     (c.in_rendering, c.has_clear, c.dispatched) = (false, false, false);
-    unsafe { (c.vb, c.vb_avail, c.cs_sets, c.desc_sets) = (zeroed(), zeroed(), zeroed(), zeroed()) };
+    unsafe { (c.vb, c.vb_avail, c.vb_gpu, c.cs_sets, c.desc_sets) = (zeroed(), zeroed(), zeroed(), zeroed(), zeroed()) };
     (c.color_attachment_count, c.depth_view, c.stencil_view) = (0, null_mut(), null_mut());
     (c.rendering.depth, c.rendering.stencil) = (null_mut(), null_mut());
     unsafe { vk_command_buffer_reset(vk) };

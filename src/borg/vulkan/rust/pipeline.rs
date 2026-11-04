@@ -50,6 +50,7 @@ pub struct Pipeline {
     pub attr_count: u32,
     pub attrs: [VertexAttr; BORGVK_MAX_VERTEX_ATTRS as usize],
     pub binding_instance: [bool; VB], // per-instance rate
+    pub pulled: bool,                 // the vertex shader loads its attributes (vertex_pull)
     pub restart: bool,                // primitiveRestartEnable
     pub color_count: u32,             // colour attachments of the pipeline's render pass
     pub mrt: bool,
@@ -123,6 +124,38 @@ fn vertex_fetch(vi: Option<&VkPipelineVertexInputStateCreateInfo>, points: bool,
         vfetch |= BORGC_VS_FETCH | BORGC_VS_LINES_BIT;
     }
     vfetch
+}
+
+/// A format the vertex shader converts itself: plain, at most four channels of 8 to 32 bits (16 or
+/// 32 for floats), none across a word.
+fn pullable(pf: pipe_format) -> bool {
+    let Some(d) = crate::fmt::description(pf) else { return false };
+    let n = d.nr_channels() as usize;
+    d.layout == UTIL_FORMAT_LAYOUT_PLAIN && d.block.width == 1 && (1..=4).contains(&n) && d.block.bits <= 128
+        && d.colorspace != UTIL_FORMAT_COLORSPACE_SRGB
+        && d.channel[..n].iter().all(|c| {
+            let (sz, sh) = (c.size() as u32, c.shift() as u32);
+            let float = c.type_() == UTIL_FORMAT_TYPE_FLOAT;
+            (1..=32).contains(&sz) && sh / 32 == (sh + sz - 1) / 32 && (!float || sz == 16 || sz == 32)
+                && matches!(c.type_(), UTIL_FORMAT_TYPE_UNSIGNED | UTIL_FORMAT_TYPE_SIGNED | UTIL_FORMAT_TYPE_FLOAT)
+        })
+}
+
+/// Vertex pulling: a triangle pipeline whose attributes all convert in the shader, at offsets and
+/// strides that are multiples of 4.
+fn vertex_pull(vi: Option<&VkPipelineVertexInputStateCreateInfo>, triangles: bool) -> Option<borg_vertex_pull> {
+    let vi = vi.filter(|vi| vi.vertexAttributeDescriptionCount > 0 && triangles)?;
+    let mut p = borg_vertex_pull::default();
+    for va in vi.attributes() {
+        let vb = vi.bindings().iter().find(|b| b.binding == va.binding)?;
+        let pf = crate::fmt::pipe(va.format);
+        if va.location >= 16 || va.binding as usize >= VB || va.offset % 4 != 0 || vb.stride % 4 != 0 || !pullable(pf) {
+            return None;
+        }
+        let instance = vb.inputRate == VK_VERTEX_INPUT_RATE_INSTANCE;
+        p.attr[va.location as usize] = borg_vertex_attr { format: pf, offset: va.offset, stride: vb.stride, binding: va.binding, instance };
+    }
+    Some(p)
 }
 
 /// Two to four R8 targets drawn by one fragment shader, and their class bits.
@@ -241,8 +274,11 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     let topology = ia.map_or(Topology::Triangles, |ia| topology(ia.topology));
     let points = topology == Topology::Points;
     let lines = matches!(topology, Topology::Lines | Topology::LineStrip);
-    let vfetch = vertex_fetch(vi, points, lines);
+    let pull = vertex_pull(vi, !points && !lines);
+    let vfetch = if pull.is_some() { 0 } else { vertex_fetch(vi, points, lines) };
     unsafe { borg_lower_set_front_always(points || lines) };
+    unsafe { borg_lower_set_vertex_pull(pull.as_ref().map_or(null(), |p| p)) };
+    sc.pull = pull.is_some();
     for b in &mut sc.shader_blob {
         b.len = 0;
     }
@@ -262,10 +298,13 @@ fn build_graphics(dev: &Device, sc: &mut Scratch, alloc: *const VkAllocationCall
     compile_stages(dev, sc, stages, vfetch, frag_opt, points);
     sc.blend_lower = null();
     unsafe { borg_lower_set_front_always(false) };
+    unsafe { borg_lower_set_vertex_pull(null()) };
+    sc.pull = false;
 
     let pl = create(dev, alloc)?;
     pl.blob = sc.shader_blob;
     pl.vfetch = vfetch;
+    pl.pulled = pull.is_some();
     // One texture per draw: the fragment shader's, else the vertex shader's.
     pl.tex_binding = if sc.frag_tex_binding >= 0 { sc.frag_tex_binding } else { sc.vert_tex_binding };
     pl.tex_npairs = sc.tex_pairs.len() as u8;

@@ -43,6 +43,19 @@ void borg_lower_set_vertex_remat(bool on);
 /* Fragment shaders: keep every `if` as control flow (a retry for a shader that does not fit). */
 void borg_lower_set_no_flatten(bool on);
 void borg_lower_set_front_always(bool on);
+/* Vertex pulling (docs/B13_device_memory.md, 1.7): each attribute with a format is loaded at
+ * index * stride + offset from binding 128 + binding of the draw's binding table and converted
+ * in the shader. NULL: inputs stay load_input. */
+struct borg_vertex_attr {
+   uint32_t format; /* enum pipe_format, 0 for none */
+   uint32_t offset, stride, binding;
+   bool instance;
+};
+struct borg_vertex_pull {
+   struct borg_vertex_attr attr[16];
+};
+#define BORG_VB_SLOT0 128
+void borg_lower_set_vertex_pull(const struct borg_vertex_pull *pull);
 
 /* Blending in the fragment shader (docs/B3_colour_formats.md): the attachment's blend state for
  * nir_lower_blend, and the blend constants. */
