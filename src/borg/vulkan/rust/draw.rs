@@ -26,7 +26,6 @@ use crate::sim_process::sim_run_stream;
 use crate::state_upload::{send_blend_state_serial, upload_shaders_serial, DEFAULT_SAMPLER};
 use crate::texture_upload::{send_buffer_texture, send_generic_texture};
 use crate::transport::{borgvk_transport_capture_begin, capture_end};
-use crate::cube::set_is_cube;
 use crate::util::log;
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
@@ -1123,11 +1122,8 @@ fn generic_draw(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
 
 fn sim_draw(c: &mut CommandBuffer, mut p: Params) {
     let (device, c) = c.split_device();
-    // Only the simulator renders; cube.c (UBO-driven) has its own path at submit.
-    // cube.c pulls its vertices from the UBO; a draw with vertex attributes is never the cube.
-    let (fp, c) = c.split_gfx_pipeline();
-    let cube = fp.is_some_and(|p| p.attr_count == 0) && c.desc_set().is_some_and(set_is_cube);
-    if !(std::env::var_os("BORGVK_SIM").is_some() || enabled()) || cube {
+    // Only the simulator or the device renders.
+    if !(std::env::var_os("BORGVK_SIM").is_some() || std::env::var_os("BORGVK_SIM_DIRECT").is_some() || enabled()) {
         return;
     }
     p.index_size = c.index_size;

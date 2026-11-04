@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 //! Queue submission: the waits, the recorded commands replayed through the device's dispatch
-//! table, the cube path, the signals.
+//! table, the signals.
 
-use crate::cube::{submit_cube_live, submit_is_cube, submit_sim_cube};
 use crate::ffi::*;
 use crate::device::Device;
 
@@ -16,13 +15,7 @@ unsafe fn work(q: &mut vk_queue, submit: &mut vk_queue_submit) -> VkResult {
             crate::draw::flush_draws(&mut *cb.cast()); // draws outside a pass end
         }
     }
-    if std::env::var_os("BORGVK_SIM").is_some() || crate::hw::enabled() {
-        if submit_is_cube(submit) {
-            return submit_sim_cube(device, submit);
-        }
-        return VK_SUCCESS;
-    }
-    submit_cube_live(device, submit)
+    VK_SUCCESS
 }
 
 /// # Safety
