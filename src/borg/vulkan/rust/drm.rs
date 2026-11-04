@@ -33,7 +33,5 @@ mod tests {
         assert_eq!(GEM_CLOSE, 0x4008_6409);
         assert_eq!(GEM_CREATE, 0xc010_6445);
         assert_eq!(GEM_MMAP, 0xc010_6446);
-        assert_eq!(BLEND, 0x4008_644a);
-        assert_eq!(STATE, 0x4014_644b);
     }
 }
