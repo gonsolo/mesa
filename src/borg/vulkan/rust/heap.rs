@@ -42,6 +42,12 @@ impl Heap {
         self.fd
     }
 
+    /// The mapping of GPU address `gpu`, inside the heap.
+    pub fn host(&self, gpu: u32) -> Option<*mut u8> {
+        let off = gpu.checked_sub(BORG_DEVICE_BASE)? as usize;
+        (off < BYTES).then(|| self.base.wrapping_add(off))
+    }
+
     /// `size` bytes of zeros, page aligned: the mapping and the GPU address.
     pub fn alloc(&self, size: usize) -> Option<(*mut u8, u32)> {
         let n = size.max(1).next_multiple_of(PAGE);

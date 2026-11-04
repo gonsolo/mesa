@@ -38,6 +38,10 @@ struct Server {
     sb: u32,
     heap: u32,
     att: [u32; 4],
+    /// The raw device's list builder, its state kept across passes as the server's was; and the
+    /// size it was set up for.
+    builder: Option<Box<crate::list::Builder>>,
+    built: (u32, u32),
 }
 
 // The memory is only touched under SERVERS' lock.
@@ -59,6 +63,8 @@ impl Server {
             sb: 0,
             heap: 0,
             att: [0; 4],
+            builder: None,
+            built: (0, 0),
         }
     }
 
@@ -102,7 +108,7 @@ impl Server {
         }
         unsafe { signal(SIGPIPE as i32, std::mem::transmute::<usize, __sighandler_t>(1)) }; // SIG_IGN
         let mut cmd = Command::new(bin);
-        cmd.arg("--serve").arg(self.memfd.to_string());
+        cmd.arg(if raw() { "--raw" } else { "--serve" }).arg(self.memfd.to_string());
         if let Some(h) = crate::heap::get() {
             cmd.arg(h.fd().to_string());
         }
@@ -123,11 +129,13 @@ impl Server {
         if (self.w, self.h) == (w, h) {
             return true;
         }
-        if self.hw {
-            unsafe {
-                borg_core_list_flush();
-                borg_core_set_flush_format(0);
-                borg_core_init(w as i32, h as i32);
+        if self.hw || raw() {
+            if self.hw {
+                unsafe {
+                    borg_core_list_flush();
+                    borg_core_set_flush_format(0);
+                    borg_core_init(w as i32, h as i32);
+                }
             }
             (self.fb, self.zb, self.sb, self.heap) = (DRAM_OUT_BASE_SPI, BORG_ZB_SPI, BORG_SB_SPI, BORG_HEAP_SPI);
             for a in 1..4u32 {
@@ -156,7 +164,7 @@ impl Server {
         if let Some(mut child) = self.child.take() {
             let _ = child.wait();
         }
-        (self.w, self.h) = (0, 0);
+        (self.w, self.h, self.builder, self.built) = (0, 0, None, (0, 0));
     }
 }
 
@@ -565,6 +573,119 @@ fn strips(n: usize, wp: u32, hp: u32, hw: bool, tris: u32) -> (usize, u32) {
     (ftiles.div_ceil(rows_per) as usize, rows_per)
 }
 
+/// `BORGVK_RAW`: the simulator is a bare device; the driver builds the render lists.
+fn raw() -> bool {
+    std::env::var_os("BORGVK_RAW").is_some_and(|v| !v.is_empty())
+}
+
+/// The raw device of one server: register writes in batches, memory through the shared mappings.
+struct Raw<'a> {
+    s: &'a mut Server,
+    regs: Vec<u8>,
+    n: u32,
+    ok: bool,
+}
+
+impl Raw<'_> {
+    fn send(&mut self) {
+        if self.n == 0 {
+            return;
+        }
+        let mut b = vec![b'W'];
+        b.extend_from_slice(&self.n.to_le_bytes());
+        b.append(&mut self.regs);
+        self.n = 0;
+        self.ok &= self.s.to.as_mut().is_some_and(|to| to.write_all(&b).is_ok());
+    }
+
+    fn ask(&mut self, q: &[u8]) -> u32 {
+        self.send();
+        let mut r = [0u8; 4];
+        self.ok &= self.s.to.as_mut().is_some_and(|to| to.write_all(q).is_ok()) && self.s.from.as_mut().is_some_and(|f| f.read_exact(&mut r).is_ok());
+        u32::from_le_bytes(r)
+    }
+}
+
+impl crate::list::Gpu for Raw<'_> {
+    fn reg(&mut self, off: u32, v: u32) {
+        self.regs.extend_from_slice(&off.to_le_bytes());
+        self.regs.extend_from_slice(&v.to_le_bytes());
+        self.n += 1;
+        if self.n == 4096 {
+            self.send();
+        }
+    }
+
+    fn read(&mut self, off: u32) -> u32 {
+        let mut q = vec![b'R'];
+        q.extend_from_slice(&off.to_le_bytes());
+        self.ask(&q)
+    }
+
+    fn wait(&mut self, off: u32, mask: u32, val: u32) -> u32 {
+        let mut q = vec![b'P'];
+        for w in [off, mask, val] {
+            q.extend_from_slice(&w.to_le_bytes());
+        }
+        self.ask(&q)
+    }
+
+    fn mem(&mut self, addr: u32, v: u32) {
+        let p = match crate::heap::get().and_then(|h| h.host(addr)) {
+            Some(p) => p,
+            None if (addr as usize) + 4 <= MEM_BYTES => self.s.mem(addr),
+            None => return,
+        };
+        unsafe { p.cast::<u32>().write_unaligned(v) };
+    }
+}
+
+/// Every server builds and renders the stream's lists, each its strip of tile rows.
+fn build_all(servers: &mut [Server], stream: &[u8], rows_per: u32) -> bool {
+    let np = servers.len() as u32;
+    std::thread::scope(|sc| {
+        let runs: Vec<_> = servers
+            .iter_mut()
+            .enumerate()
+            .map(|(k, s)| {
+                sc.spawn(move || {
+                    let mut b = s.builder.take().unwrap_or_else(|| Box::new(crate::list::Builder::new()));
+                    let size = (s.w, s.h);
+                    let built = s.built;
+                    let mut g = Raw { s, regs: Vec::new(), n: 0, ok: true };
+                    if built != size {
+                        b.flush(&mut g);
+                        b.init(&mut g, size.0, size.1);
+                    }
+                    b.flush(&mut g);
+                    b.set_strip(k as u32, np, rows_per);
+                    let mut i = 0;
+                    while i < stream.len() {
+                        let n = unsafe { borg_core_pkt_len(stream[i]) } as usize;
+                        if n == 0 || i + n > stream.len() {
+                            break;
+                        }
+                        if b.packet(&mut g, &stream[i..i + n]) && stream[i] == 0xBA {
+                            b.draw(&mut g);
+                        }
+                        i += n;
+                    }
+                    b.flush(&mut g);
+                    g.send();
+                    let mut sync = [0u8];
+                    let ok = g.ok
+                        && g.s.to.as_mut().is_some_and(|to| to.write_all(b"S").is_ok())
+                        && g.s.from.as_mut().is_some_and(|f| f.read_exact(&mut sync).is_ok());
+                    g.s.built = size;
+                    g.s.builder = Some(b);
+                    ok
+                })
+            })
+            .collect();
+        runs.into_iter().fold(true, |ok, r| r.join().unwrap_or(false) && ok)
+    })
+}
+
 fn feed_all(servers: &mut [Server], stream: &[u8]) -> bool {
     std::thread::scope(|sc| {
         let feeds: Vec<_> = servers
@@ -587,6 +708,8 @@ fn start_servers(all: &mut [Server], np: usize, rows_per: u32, wp: u32, hp: u32,
                     borg_core_list_flush();
                     borg_core_set_strip(part as i32, np as i32, rows_per as i32);
                 }
+                true
+            } else if raw() {
                 true
             } else {
                 s.to.as_mut().is_some_and(|to| to.write_all(&strip).is_ok())
@@ -692,8 +815,11 @@ pub fn run_pass(
     } else {
         keep_stream(stream);
         let servers = &mut all[..np];
-        let answered = feed_all(servers, stream)
-            && servers.iter_mut().all(|s| s.from.as_mut().is_some_and(|f| f.read_exact(&mut [0u8]).is_ok()));
+        let answered = if raw() {
+            build_all(servers, stream, rows_per)
+        } else {
+            feed_all(servers, stream) && servers.iter_mut().all(|s| s.from.as_mut().is_some_and(|f| f.read_exact(&mut [0u8]).is_ok()))
+        };
         if !answered {
             log(MESA_LOG_WARN, "borgvk: the simulator stopped answering".into());
             stop_all(&mut all[..]);
@@ -771,3 +897,4 @@ mod tests {
         assert_eq!(to565(&[1.0, 0.0, 0.0, 1.0]), 0xF800);
     }
 }
+
