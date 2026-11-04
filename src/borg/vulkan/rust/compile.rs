@@ -54,7 +54,7 @@ pub fn compile_empty_frag(sc: &mut Scratch, opt: u32) {
 
 /// The blob from the shader cache, which knows neither the blend state nor a constant pool.
 fn from_cache(sc: &mut Scratch, si: &VkPipelineShaderStageCreateInfo, vfetch: u32, slot: usize) -> bool {
-    let Some(pntc) = shader_cache::get(si, vfetch, &mut sc.shader_blob[slot]) else {
+    let Some(pntc) = shader_cache::get(si, vfetch, &mut sc.shader_blob[slot]).filter(|_| !sc.pull) else {
         return false;
     };
     let fs = slot == FRAG;
@@ -177,7 +177,9 @@ fn compile_blob(
         b.ncdata = cdata.len() as u32;
         b.cdata[..cdata.len()].copy_from_slice(&cdata);
         if blend.is_null() && n == 0 && cdata.is_empty() {
-            shader_cache::record(si, vfetch, b, sc.frag_reads_pntc);
+            if !sc.pull {
+                shader_cache::record(si, vfetch, b, sc.frag_reads_pntc);
+            }
         }
         log(MESA_LOG_INFO, format!("borgvk: captured {kind} shader blob ({len} bytes) for upload"));
     } else {

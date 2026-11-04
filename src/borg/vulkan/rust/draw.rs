@@ -49,6 +49,8 @@ entrypoint! {
             let buf = unsafe { b.get_ref() };
             c.vb[slot] = buf.and_then(|b| b.host()?.ptr(0, 0)).map_or(null(), |p| p.wrapping_add(off as usize));
             c.vb_avail[slot] = buf.filter(|b| b.vk.size > off).map_or(0, |b| b.vk.size - off);
+            let gpu = buf.and_then(|b| Some((b.memory()?.gpu, b.offset))).filter(|&(g, _)| g != 0);
+            c.vb_gpu[slot] = gpu.map_or(0, |(g, o)| g + (o + off) as u32);
         }
     }
 }
@@ -273,6 +275,8 @@ struct Ctx<'a> {
     voff_out: u32,
     ubo_base: u32,
     table: u32,
+    /// The binding table's entries for the vertex buffers a pulling vertex shader reads.
+    vb_entries: Vec<(u32, [u32; 2])>,
 }
 
 /// A binding's entry in the draw's binding table: base address and offset limit (borgc reads
@@ -572,7 +576,41 @@ impl Ctx<'_> {
         }
     }
 
+    /// A pulling vertex shader's vertex buffers: in place, else the rows the draw reads copied.
+    fn pulled_buffers(&mut self) -> Result<(), Reject> {
+        let pl = self.pl;
+        let mut done = 0u32;
+        for at in &pl.attrs[..pl.attr_count as usize] {
+            let b = at.binding as usize;
+            if done >> b & 1 != 0 {
+                continue;
+            }
+            done |= 1 << b;
+            if self.c.vb[b].is_null() {
+                return Err(Reject::VertexInput);
+            }
+            let (avail, gpu) = (self.c.vb_avail[b], self.c.vb_gpu[b]);
+            if gpu != 0 {
+                self.vb_entries.push((BORG_VB_SLOT0 + b as u32, entry(gpu, avail)));
+                continue;
+            }
+            let stride = pl.binding_stride[b] as u64;
+            let (r0, r1) = if pl.binding_instance[b] { (self.imin, self.imax) } else { (self.vmin, self.vmax) };
+            let end = pl.attrs[..pl.attr_count as usize].iter().filter(|a| a.binding as usize == b)
+                .map(|a| a.offset as u64 + blocks(a.format).bs as u64).max().unwrap_or(0);
+            let lo = (r0.max(0) as u64).wrapping_mul(stride).min(avail);
+            let hi = ((r1.max(0) as u64).wrapping_mul(stride) + stride.max(end)).min(avail);
+            let vb = unsafe { Host::new(self.c.vb[b].cast_mut(), avail as usize) };
+            let at = vb.with_bytes(lo as usize, (hi - lo) as usize, |d| self.heap.upload(d)).ok_or(Reject::Upload)??;
+            self.vb_entries.push((BORG_VB_SLOT0 + b as u32, entry((BORG_HEAP_SPI + at).wrapping_sub(lo as u32), hi)));
+        }
+        Ok(())
+    }
+
     fn vertex_attrs(&mut self) -> Result<(), Reject> {
+        if self.pl.pulled {
+            return self.pulled_buffers();
+        }
         let (pl, x) = (self.pl, self.x);
         let nrows_lines = self.pairs.len() as u32 * 6;
         for at in &pl.attrs[..pl.attr_count as usize] {
@@ -714,6 +752,19 @@ impl Ctx<'_> {
     }
 
     fn buffers(&mut self) -> Result<(), Reject> {
+        let vbe = std::mem::take(&mut self.vb_entries);
+        self.buffer_table(&vbe)?;
+        if self.table == 0 && !vbe.is_empty() {
+            let mut table = Vec::new();
+            vbe.iter().for_each(|&(slot, e)| set_entry(&mut table, slot, e));
+            self.table = send_table(&mut self.heap, &table)?;
+        }
+        Ok(())
+    }
+
+    /// The draw's buffers: the binding table, the windows of the copied ones; `vbe` the vertex
+    /// buffer entries to add.
+    fn buffer_table(&mut self, vbe: &[(u32, [u32; 2])]) -> Result<(), Reject> {
         let pl = self.pl;
         let set = self.c.desc_set;
         let (sets, c) = self.c.split_sets();
@@ -733,7 +784,7 @@ impl Ctx<'_> {
             let high = 128 - (smask | umask).leading_zeros();
             let fixed = if pl.spills { SPILL_SLOT + 1 } else if pl.push_window { PUSH_WINDOW_SLOT + 1 } else { 1 };
             let slots = fixed.max(if high > 0 { 1 + window_slot(high - 1) } else { 1 });
-            let reuse = c.region_set == set && c.batch_draws != 0 && umask == 0 && !any_dyn && sets[1].is_none() && !pl.spills;
+            let reuse = c.region_set == set && c.batch_draws != 0 && umask == 0 && !any_dyn && sets[1].is_none() && !pl.spills && vbe.is_empty();
             let mut base = c.region_base;
             self.table = c.region_table;
             if !reuse {
@@ -801,6 +852,7 @@ impl Ctx<'_> {
                 if pl.push_window {
                     send_mem(base + PUSH_WINDOW_SLOT * SLOT_BYTES, bytes_of(&self.device.scratch.lock().unwrap().push_words));
                 }
+                vbe.iter().for_each(|&(slot, e)| set_entry(&mut table, slot, e));
                 self.table = send_table(&mut self.heap, &table)?;
                 (c.region_set, c.region_base, c.region_table) = (set, base, self.table);
             }
@@ -827,6 +879,7 @@ impl Ctx<'_> {
             let mut table = Vec::new();
             if let Some(gpu) = ub.memory().map(|m| m.gpu).filter(|&g| g != 0) {
                 set_entry(&mut table, b as u32, entry(gpu + (ub.offset + off) as u32, len.min(size - off)));
+                vbe.iter().for_each(|&(slot, e)| set_entry(&mut table, slot, e));
                 self.table = send_table(&mut self.heap, &table)?;
                 break;
             }
@@ -834,6 +887,7 @@ impl Ctx<'_> {
             let at = uhost.with_bytes(off as usize, len, |b| self.heap.upload(b)).ok_or(Reject::Upload)??;
             self.ubo_base = at + 1;
             set_entry(&mut table, b as u32, entry(BORG_HEAP_SPI + at, len as u64));
+            vbe.iter().for_each(|&(slot, e)| set_entry(&mut table, slot, e));
             self.table = send_table(&mut self.heap, &table)?;
             break;
         }
@@ -1080,6 +1134,7 @@ fn draw_batched(device: &Device, c: &mut CommandBuffer, p: &Params) -> Result<bo
         voff_out: 0,
         ubo_base: 0,
         table: 0,
+        vb_entries: Vec::new(),
     };
     g.validate().and_then(|_| g.index_range())?;
     g.reserve();

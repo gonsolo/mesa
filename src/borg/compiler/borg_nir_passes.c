@@ -748,6 +748,75 @@ borg_b2b1_lower(nir_builder *b, nir_instr *instr, void *data)
 }
 
 /* Lines and points are drawn as triangles but are always front-facing. */
+static const struct borg_vertex_pull *borg_vpull;
+
+void
+borg_lower_set_vertex_pull(const struct borg_vertex_pull *pull)
+{
+   borg_vpull = pull;
+}
+
+/* One channel of a vertex attribute from its words, as the shader reads it. */
+static nir_def *
+borg_pull_channel(nir_builder *b, nir_def *const *words, const struct util_format_channel_description *ch)
+{
+   nir_def *w = words[ch->shift / 32];
+   const unsigned sh = ch->shift % 32, sz = ch->size;
+   nir_def *v = w;
+   if (sz < 32)
+      v = ch->type == UTIL_FORMAT_TYPE_SIGNED ? nir_ishr_imm(b, nir_ishl_imm(b, w, 32 - sh - sz), 32 - sz)
+                                              : nir_iand_imm(b, nir_ushr_imm(b, w, sh), (1u << sz) - 1);
+   if (ch->type == UTIL_FORMAT_TYPE_FLOAT)
+      return sz == 16 ? nir_channel(b, nir_unpack_half_2x16(b, v), 0) : v;
+   if (ch->pure_integer)
+      return v;
+   const bool sgn = ch->type == UTIL_FORMAT_TYPE_SIGNED;
+   nir_def *f = sgn ? nir_i2f32(b, v) : nir_u2f32(b, v);
+   if (!ch->normalized)
+      return f;
+   f = nir_fdiv(b, f, nir_imm_float(b, (float)((1u << (sz - sgn)) - 1)));
+   return sgn ? nir_fmax(b, f, nir_imm_float(b, -1.0f)) : f;
+}
+
+static bool
+borg_vertex_pull(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_input)
+      return false;
+   if (!nir_src_is_const(intr->src[0]))
+      return false;
+   const int loc = (int)nir_intrinsic_io_semantics(intr).location - VERT_ATTRIB_GENERIC0 + (int)nir_src_as_uint(intr->src[0]);
+   if (loc < 0 || loc >= 16 || !borg_vpull->attr[loc].format)
+      return false;
+   const struct borg_vertex_attr *a = &borg_vpull->attr[loc];
+   const struct util_format_description *d = util_format_description(a->format);
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *idx = a->instance ? nir_load_instance_id(b) : nir_load_vertex_id(b);
+   nir_def *off = nir_iadd_imm(b, nir_imul_imm(b, idx, a->stride), a->offset);
+   const nir_address_format f = borg_spirv_options.ssbo_addr_format;
+   nir_def *res = nir_vulkan_resource_index(b, nir_address_format_num_components(f), nir_address_format_bit_size(f),
+                                            nir_imm_int(b, 0), .desc_set = 0, .binding = BORG_VB_SLOT0 + a->binding,
+                                            .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+   nir_def *desc = nir_load_vulkan_descriptor(b, nir_address_format_num_components(f), nir_address_format_bit_size(f),
+                                              res, .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+   const unsigned nw = DIV_ROUND_UP(d->block.bits, 32);
+   nir_def *ld = nir_load_ssbo(b, nw, 32, nir_channel(b, desc, 0), off, .align_mul = 4);
+   nir_def *words[4];
+   for (unsigned i = 0; i < nw; i++)
+      words[i] = nir_channel(b, ld, i);
+   const bool pure = util_format_is_pure_integer(a->format);
+   nir_def *chan[4];
+   for (unsigned c = 0; c < 4; c++) {
+      const unsigned s = d->swizzle[c];
+      if (s <= PIPE_SWIZZLE_W)
+         chan[c] = borg_pull_channel(b, words, &d->channel[s]);
+      else
+         chan[c] = s == PIPE_SWIZZLE_1 ? (pure ? nir_imm_int(b, 1) : nir_imm_float(b, 1.0f)) : nir_imm_int(b, 0);
+   }
+   nir_def_replace(&intr->def, nir_vec(b, chan + nir_intrinsic_component(intr), intr->def.num_components));
+   return true;
+}
+
 static bool borg_front_always;
 
 void
@@ -1286,6 +1355,11 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    /* Varying I/O → load_input/store_output(location). vec4-slot sizing. */
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
             borg_type_size, 0);
+   if (borg_vpull && nir->info.stage == MESA_SHADER_VERTEX) {
+      /* A matrix column's offset into its location first. */
+      NIR_PASS(_, nir, nir_opt_constant_folding);
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, borg_vertex_pull, nir_metadata_control_flow, NULL);
+   }
    if (flat_slots)
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, borg_flat_input, nir_metadata_control_flow, &flat_slots);
    if (blend && nir->info.stage == MESA_SHADER_FRAGMENT) {
