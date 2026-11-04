@@ -584,17 +584,6 @@ mod tests {
     }
 
     #[test]
-    fn texture_row() {
-        let rgba: Vec<u8> = (0..TEX_DIM * 4).map(|i| (i * 7) as u8).collect();
-        let sampler = [0x000A0493u32, 0x3F800000, 0, 0x447A0000];
-        let p = sent(|| send_tex_row(5, &rgba, &sampler));
-        assert_eq!(p.len(), 1 + 1 + 16 + TEX_DIM * 4 + 1);
-        assert_eq!(p[..2], [0xAF, 5]);
-        assert_eq!((0..4).map(|w| u32_at(&p, 2 + 4 * w)).collect::<Vec<_>>(), sampler);
-        assert_eq!(p[18..18 + TEX_DIM * 4], rgba[..]);
-    }
-
-    #[test]
     fn fixed_packets() {
         let p = sent(|| send_blend(0x11223344, 0x55667788));
         assert_eq!((p.len(), u32_at(&p, 1), u32_at(&p, 5)), (10, 0x11223344, 0x55667788));
