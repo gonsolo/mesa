@@ -350,9 +350,7 @@ impl ShaderState {
                 if self.stage == Stage::Compute => self.exact_compare(alu),
             // slt and friends are the same compares with a float result, which a condition is here.
             nir_op_flt | nir_op_fge | nir_op_fneu | nir_op_feq | nir_op_slt | nir_op_sge | nir_op_sne | nir_op_seq => self.float_compare(alu),
-            // fmax(0, x) → x · FSTEP(x)  (FSTEP(x)=1 if x>0 else 0).
-            nir_op_fmax | nir_op_fmin if self.stage == Stage::Compute => self.exact_minmax(alu),
-            nir_op_fmax | nir_op_fmin => self.float_minmax(alu),
+            nir_op_fmax | nir_op_fmin => self.exact_minmax(alu),
             nir_op_ieq | nir_op_ine | nir_op_ilt | nir_op_ige | nir_op_ult | nir_op_uge => self.int_compare(alu),
             // Bit for bit: a blend c*(t-e)+e turns an unselected infinity or NaN into NaN.
             nir_op_bcsel => self.exact_bcsel(alu),
@@ -487,39 +485,6 @@ impl ShaderState {
                 self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: nne, srcs: vec![ne], swz: vec![0], imm: 0 });
                 let one = self.one();
                 self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: alu.def.index, srcs: vec![one, nne], swz: vec![0, 0], imm: 0 });
-            }
-        }
-    }
-
-    /// Float min and max as b + (a >= b) * (a - b), with FSTEP for the comparison.
-    unsafe fn float_minmax(&mut self, alu: &nir_alu_instr) {
-        let s = alu.srcs_as_slice();
-        let a_zero = s[0].comp_as_uint(0) == Some(0);
-        let b_zero = s[1].comp_as_uint(0) == Some(0);
-        if alu.op == nir_op_fmax && (a_zero || b_zero) {
-            let xs = if a_zero { &s[1] } else { &s[0] };
-            let x = resolve_vm(&self.sel.vec_map, xs.src.as_def().index, xs.swizzle[0]);
-            let vstep = self.sel.next_vreg;
-            self.sel.next_vreg += 1;
-            self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: vstep, srcs: vec![x.0], swz: vec![x.1], imm: 0 });
-            self.sel.prog.push(BorgInstr { mnem: Op::Fmul.into(), dst: alu.def.index, srcs: vec![x.0, vstep], swz: vec![x.1, 0], imm: 0 });
-        } else {
-            // max(a, b) = b + (a >= b) * (a - b); min(a, b) = a + (a >= b) * (b - a)
-            let a = self.operand(s[0].src.as_def().index, s[0].swizzle[0]);
-            let b = self.operand(s[1].src.as_def().index, s[1].swizzle[0]);
-            let one = self.one();
-            let v = self.sel.next_vreg;
-            self.sel.next_vreg += 8;
-            self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: v, srcs: vec![a.0], swz: vec![a.1], imm: 0 });          // -a
-            self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: v + 1, srcs: vec![b.0, v], swz: vec![b.1, 0], imm: 0 }); // b - a
-            self.sel.prog.push(BorgInstr { mnem: Op::Fstep.into(), dst: v + 2, srcs: vec![v + 1], swz: vec![0], imm: 0 });      // a < b
-            self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: v + 3, srcs: vec![v + 2], swz: vec![0], imm: 0 });
-            self.sel.prog.push(BorgInstr { mnem: Op::Fadd.into(), dst: v + 4, srcs: vec![one, v + 3], swz: vec![0, 0], imm: 0 }); // a >= b
-            if alu.op == nir_op_fmax {
-                self.sel.prog.push(BorgInstr { mnem: Op::Fneg.into(), dst: v + 5, srcs: vec![v + 1], swz: vec![0], imm: 0 });    // a - b
-                self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: alu.def.index, srcs: vec![v + 4, v + 5, b.0], swz: vec![0, 0, b.1], imm: 0 });
-            } else {
-                self.sel.prog.push(BorgInstr { mnem: Op::Fmadd.into(), dst: alu.def.index, srcs: vec![v + 4, v + 1, a.0], swz: vec![0, 0, a.1], imm: 0 });
             }
         }
     }
