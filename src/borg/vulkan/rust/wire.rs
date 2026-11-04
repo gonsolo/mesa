@@ -28,6 +28,7 @@ const MARKER_DRAW: u8 = 0xBA;
 const MARKER_PASS: u8 = 0xBB;
 const MARKER_ATT: u8 = 0xBF;
 const MARKER_PLACE: u8 = 0xC7;
+const MARKER_TEXD: u8 = 0xC8;
 const MARKER_TEXL: u8 = 0xC0;
 const MARKER_TEXS: u8 = 0xC4;
 const MARKER_VP: u8 = 0xC2;
@@ -377,6 +378,17 @@ pub fn send_texture_slot(tex: u8, sampler: u8, base: u32) {
     pkt[0] = MARKER_TEXS;
     (pkt[1], pkt[2]) = (tex, sampler);
     put_u32(&mut pkt[3..], base);
+    emit(&mut pkt);
+}
+
+/// A texture the sampler reads in device memory: its descriptor and the sampler's, into the slots
+/// of the last [`send_texture_slot`].
+pub fn send_texture_desc(desc: &[u32; 16], sampler: &[u32; 4]) {
+    let mut pkt = [0u8; 1 + 20 * 4 + 1];
+    pkt[0] = MARKER_TEXD;
+    for (w, &v) in desc.iter().chain(sampler).enumerate() {
+        put_u32(&mut pkt[1 + 4 * w..], v);
+    }
     emit(&mut pkt);
 }
 

@@ -220,8 +220,58 @@ pub fn generic_texture(view: &vk_image_view, img: &Image) -> Option<Texture> {
     build(&dview, &d.img)
 }
 
-/// Sends the view's texels and descriptor; returns the texel bytes.
+/// The descriptor of a view the sampler reads where it is: a tiled colour image of one sample
+/// in device memory, in a format it takes unconverted.
+fn in_place(view: &vk_image_view, img: &Image) -> Option<[u32; 16]> {
+    let gpu = img.memory()?.gpu;
+    let (t, planes) = crate::texels::Texels::of(img)?.tiled()?;
+    if gpu == 0 || planes != crate::texels::Planes::Color || img.vk.samples > 1 {
+        return None;
+    }
+    let (format, tc) = tex_format(view.format, false)?;
+    if tc.sch != 0 || tc.pack16 != 0 || tc.zstride != 0 || tc.obpp != crate::image::blocks(img.vk.format).bs {
+        return None;
+    }
+    let is3d = img.vk.image_type == VK_IMAGE_TYPE_3D;
+    let (ty, layers) = match view.view_type {
+        VK_IMAGE_VIEW_TYPE_1D_ARRAY => (TexType::D1, view.layer_count),
+        VK_IMAGE_VIEW_TYPE_1D => (TexType::D1, 1),
+        VK_IMAGE_VIEW_TYPE_2D_ARRAY => (TexType::D2, view.layer_count),
+        VK_IMAGE_VIEW_TYPE_2D => (TexType::D2, 1),
+        VK_IMAGE_VIEW_TYPE_CUBE => (TexType::Cube, 6),
+        VK_IMAGE_VIEW_TYPE_3D => (TexType::D3, 1),
+        _ => return None,
+    };
+    // A 2D view of a 3D image's slice is not a layer of the layout.
+    if is3d != (ty == TexType::D3) {
+        return None;
+    }
+    let base = view.base_mip_level;
+    let levels = if base < img.vk.mip_levels { view.level_count.min(img.vk.mip_levels - base) } else { 0 };
+    let shr = |e: u32, l: u32| e.checked_shr(l).unwrap_or(0).max(1);
+    let (w, h) = (shr(img.vk.extent.width, base), if ty == TexType::D1 { 1 } else { shr(img.vk.extent.height, base) });
+    let depth = if is3d { shr(img.vk.extent.depth, base) } else { layers };
+    if levels == 0 || levels > 13 || w > 4096 || h > 4096 || depth == 0 || depth > 1024 {
+        return None;
+    }
+    let sw = [view.swizzle.r, view.swizzle.g, view.swizzle.b, view.swizzle.a];
+    let desc = TexDesc { width: w, height: h, ty, linear: false, depth_or_layers: depth, levels, format, swizzle: sw, pitch: t.layer_size(0) as u32 };
+    let mut d = [0u32; 16];
+    d[0] = gpu + (img.offset + t.level_base(0, base, if is3d { 0 } else { view.base_array_layer })) as u32;
+    d[1..4].copy_from_slice(&desc.pack());
+    for l in 1..levels {
+        d[3 + l as usize] = (t.level_offset(0, base + l) - t.level_offset(0, base)) as u32;
+    }
+    Some(d)
+}
+
+/// Sends the view's texels and descriptor, or only the descriptor of a texture in place; returns
+/// the texel bytes sent.
 pub fn send_generic_texture(view: &vk_image_view, img: Option<&Image>, sampler: &[u32; 4]) -> Option<u32> {
+    if let Some(d) = img.and_then(|i| in_place(view, i)) {
+        send_texture_desc(&d, sampler);
+        return Some(0);
+    }
     let t = img.and_then(|i| generic_texture(view, i))?;
     if t.desc.levels > 1 {
         send_texture_levels(&t.offs);
