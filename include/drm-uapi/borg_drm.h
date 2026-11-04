@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 /*
  * Borg GPU DRM uAPI, the part borgvk and libborg_drm_shim.so share with the kernel
- * driver (software/linux/overlay/include/uapi/drm/borg_drm.h): GEM buffers.
+ * driver (software/linux/overlay/include/uapi/drm/borg_drm.h): register and memory access,
+ * GEM buffers.
  */
 #ifndef BORG_DRM_H
 #define BORG_DRM_H
@@ -18,9 +19,31 @@
 #  define DRM_IOWR(nr, type)  _IOWR(BORG_DRM_IOCTL_BASE, nr, type)
 #endif
 
-/* 0x00-0x04 are the kernel driver's register and memory access. */
+#define DRM_BORG_REG_WRITES   0x01
+#define DRM_BORG_REG_READ     0x02
+#define DRM_BORG_MEM_WRITE    0x03
+#define DRM_BORG_MEM_READ     0x04
 #define DRM_BORG_GEM_CREATE   0x05
 #define DRM_BORG_GEM_MMAP     0x06
+
+/* `writes` points to `count` pairs of uint32_t {offset, value}. */
+struct drm_borg_reg_writes {
+   uint64_t writes;
+   uint32_t count;
+   uint32_t pad;
+};
+
+struct drm_borg_reg_read {
+   uint32_t offset;
+   uint32_t value;
+};
+
+/* `length` bytes at GPU memory `offset` from or to `data`. */
+struct drm_borg_mem {
+   uint64_t data;
+   uint32_t offset;
+   uint32_t length;
+};
 
 /* Allocate a GEM buffer object backed by anonymous memory. */
 struct drm_borg_gem_create {
