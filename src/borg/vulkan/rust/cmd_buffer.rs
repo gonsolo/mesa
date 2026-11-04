@@ -80,6 +80,7 @@ pub struct CommandBuffer {
     pub region_base: u32,
     pub region_table: u32, // its binding table
     pub index_ptr: *const u8, // bound index buffer, at its offset
+    pub index_gpu: u32,       // its GPU address in the device heap, or 0
     pub index_avail: VkDeviceSize,
     pub index_size: u32,         // 2, 4, or 0 for an unsupported type
     pub batch_push: [u32; 32],   // the push words the open batch was drawn with
@@ -202,6 +203,7 @@ unsafe extern "C" fn reset(vk: *mut vk_command_buffer, _flags: VkCommandBufferRe
     (c.heap_top, c.batch_draws, c.batch_tris) = (0, 0, 0);
     (c.occ_pool, c.occ_open, c.nocc) = (null(), false, 0);
     (c.batch_img, c.index_ptr, c.gfx_pipeline, c.desc_set, c.cs_pipeline) = (null_mut(), null_mut(), null_mut(), null_mut(), null_mut());
+    c.index_gpu = 0;
     (c.in_rendering, c.has_clear, c.dispatched) = (false, false, false);
     unsafe { (c.vb, c.vb_avail, c.vb_gpu, c.cs_sets, c.desc_sets) = (zeroed(), zeroed(), zeroed(), zeroed(), zeroed()) };
     (c.color_attachment_count, c.depth_view, c.stencil_view) = (0, null_mut(), null_mut());

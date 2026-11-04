@@ -729,7 +729,7 @@ impl Builder {
                     first_vertex: w(12),
                     first_instance: w(16),
                     vertex_offset: w(20) as i32,
-                    index_base: if p[2] != 0 { BORG_HEAP_SPI + w(24) } else { 0 },
+                    index_base: if p[2] != 0 { w(24) } else { 0 },
                     ubo_base: if w(28) != 0 { BORG_HEAP_SPI + w(28) - 1 } else { 0 },
                     table: if w(32) != 0 { BORG_HEAP_SPI + w(32) - 1 } else { 0 },
                 };
