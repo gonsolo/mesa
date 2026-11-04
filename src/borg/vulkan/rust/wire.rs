@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 
 const MARKER_MVP: u8 = 0xAD;
 const MARKER_GEOM: u8 = 0xAE;
-const MARKER_TEX: u8 = 0xAF;
 const MARKER_SHADER: u8 = 0xB0;
 const MARKER_SHADER_BIG: u8 = 0xC1;
 const MARKER_SHADER_HUGE: u8 = 0xC3;
@@ -38,7 +37,6 @@ const MARKER_OCC: u8 = 0xC6;
 const GEOM_MAX_VERTS: usize = BORGVK_GEOM_MAX_VERTS as usize;
 const GEOM_MAX_TRIS: usize = BORGVK_GEOM_MAX_TRIS as usize;
 const GEOM_PKT_LEN: usize = 1 + 2 + GEOM_MAX_VERTS * 12 + GEOM_MAX_TRIS * 3 + GEOM_MAX_TRIS * 24 + 1;
-const TEX_DIM: usize = BORGVK_TEX_DIM as usize;
 const SHADER_SMALL: usize = 512;
 const SHADER_BIG: usize = 4096;
 const SHADER_MAX: usize = BORGVK_SHADER_BLOB_MAX as usize;
@@ -78,17 +76,6 @@ pub fn send_geom(verts: &[f32], idx: &[u8], uv: &[f32]) {
     for (i, &u) in uv[..ntris * 6].iter().enumerate() {
         put_f32(&mut pkt[ubase + i * 4..], u);
     }
-    emit(&mut pkt);
-}
-
-pub fn send_tex_row(y: u8, rgba: &[u8], sampler: &[u32; 4]) {
-    let mut pkt = [0u8; 1 + 1 + 16 + TEX_DIM * 4 + 1];
-    pkt[0] = MARKER_TEX;
-    pkt[1] = y;
-    for (w, &s) in sampler.iter().enumerate() {
-        put_u32(&mut pkt[2 + 4 * w..], s);
-    }
-    pkt[18..18 + TEX_DIM * 4].copy_from_slice(&rgba[..TEX_DIM * 4]);
     emit(&mut pkt);
 }
 

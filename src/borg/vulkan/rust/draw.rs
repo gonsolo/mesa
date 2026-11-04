@@ -23,7 +23,7 @@ use crate::image::blocks;
 use crate::wire::{blend_const_pack, occ_packet, send_att, send_draw, send_mem, send_pass, send_place, send_target, send_texture_slot, send_vattr, Draw};
 use crate::sim::{per_sample, run_pass};
 use crate::sim_process::sim_run_stream;
-use crate::state_upload::{send_blend_state_serial, upload_shaders_serial, DEFAULT_SAMPLER};
+use crate::state_upload::{send_draw_state, send_shaders, DEFAULT_SAMPLER};
 use crate::texture_upload::{send_buffer_texture, send_generic_texture};
 use crate::transport::{borgvk_transport_capture_begin, capture_end};
 use crate::util::log;
@@ -496,8 +496,8 @@ impl Ctx<'_> {
                 d.state_reg[r] = d.state_reg[r] & !(0xFF << (8 * k)) | v << (8 * k);
             }
         }
-        upload_shaders_serial(&d);
-        send_blend_state_serial(&d);
+        send_shaders(&d);
+        send_draw_state(&d);
         self.state = capture_end();
         self.state_same = !self.state.is_empty() && self.state == c.state_sent.as_slice();
     }
