@@ -109,6 +109,25 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                 let pf = fmt::pipe(bv.format);
                 let bs = fmt::blocksize(pf);
                 let Some(map) = mapped(tb.memory()).filter(|_| pf != PIPE_FORMAT_NONE && bs != 0) else { continue };
+                // In place (borgc: borg_lower_image_in_place): the descriptor, base and element count.
+                if set.storage_mask >> b & 1 != 0 && unsafe { borg_lower_image_in_place(pf) } {
+                    let gpu = tb.memory().map_or(0, |m| m.gpu);
+                    let off = tb.offset + bv.offset;
+                    let max = if gpu != 0 { u32::MAX } else { (SLOT_BYTES - 64) / bs };
+                    let n = (bv.range / bs as u64).min(max as u64) as u32;
+                    let base = if gpu != 0 { gpu + off as u32 } else { addr + 64 };
+                    let mut data: Vec<u8> = [base, 0, 0, n, 1, 1].iter().flat_map(|v| v.to_ne_bytes()).collect();
+                    data.resize(64, 0);
+                    if gpu != 0 {
+                        bufs.push(decoded(addr, data, 64));
+                        continue;
+                    }
+                    let at = unsafe { map.add(off as usize) };
+                    data.extend_from_slice(unsafe { std::slice::from_raw_parts(at, (n * bs) as usize) });
+                    let size = data.len() as u32;
+                    bufs.push(CsBuf { host: at, wb: true, skip: 64, ..decoded(addr, data, size) });
+                    continue;
+                }
                 let n = (bv.range / bs as u64).min(SLOT_BYTES as u64 / 16 - 1) as u32;
                 let mut dec = vec![0u8; n.max(1) as usize * 16];
                 let src = unsafe { map.add((tb.offset + bv.offset) as usize) };

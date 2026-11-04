@@ -811,7 +811,11 @@ impl Ctx<'_> {
                     for b in 0..BINDINGS {
                         let fb = pl.set_base[si] as u32 + b as u32;
                         if let Some(bv) = storage_texels(ds, b) {
-                            upload_storage_texels(c, bv, base + window_slot(fb) * SLOT_BYTES);
+                            let at = base + window_slot(fb) * SLOT_BYTES;
+                            match texels_in_place(c, bv, at) {
+                                Some(e) => set_entry(&mut table, fb, e),
+                                None => upload_storage_texels(c, bv, at),
+                            }
                             continue;
                         }
                         if let Some(simg) = storage_image(ds, b) {
@@ -1054,6 +1058,34 @@ fn vattr_copy(f: VkFormat, conv: bool, dst: &mut [u8], src: &Texel, asz: usize) 
 
 fn storage_texels(set: &DescriptorSet, b: usize) -> Option<&vk_buffer_view> {
     set.buffer_view(b).filter(|_| set.storage_mask >> b & 1 != 0)
+}
+
+/// A storage texel buffer the shader addresses itself (borgc: borg_lower_image_in_place): its
+/// window holds the descriptor, base and element count, then the texels when not in the heap.
+fn texels_in_place(c: &mut CommandBuffer, bv: &vk_buffer_view, at: u32) -> Option<[u32; 2]> {
+    let pf = fmt::pipe(bv.format);
+    let bs = fmt::blocksize(pf);
+    if bs == 0 || !unsafe { borg_lower_image_in_place(pf) } {
+        return None;
+    }
+    let tb = bv.buffer()?;
+    let host = tb.host()?;
+    let gpu = tb.memory().map_or(0, |m| m.gpu);
+    let max = if gpu != 0 { u32::MAX } else { (SLOT_BYTES - 64) / bs };
+    let n = (bv.range / bs as u64).min(max as u64) as u32;
+    let base = if gpu != 0 { gpu + (tb.offset + bv.offset) as u32 } else { BORG_HEAP_SPI + at + 64 };
+    send_mem(at, bytes_of(&[base, 0, 0, n, 1, 1]));
+    if gpu == 0 {
+        let bytes = (n * bs) as usize;
+        host.with_bytes(bv.offset as usize, bytes, |t| {
+            for (i, chunk) in t.chunks(256).enumerate() {
+                send_mem(at + 64 + i as u32 * 256, chunk);
+            }
+        })?;
+        let p = host.ptr(bv.offset as usize, bytes)?;
+        push_writeback(c, at + 64, bytes as u32, p, PIPE_FORMAT_NONE);
+    }
+    Some(entry(BORG_HEAP_SPI + at, 24))
 }
 
 /// A storage texel buffer's window: RGBA32 per texel, encoded back after the pass.
