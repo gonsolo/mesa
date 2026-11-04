@@ -531,7 +531,19 @@ impl ShaderState {
             }
             nir_intrinsic_load_shared | nir_intrinsic_store_shared => self.shared_access(i),
             nir_intrinsic_ssbo_atomic | nir_intrinsic_shared_atomic | nir_intrinsic_ssbo_atomic_swap
-            | nir_intrinsic_shared_atomic_swap => self.atomic(i),
+            | nir_intrinsic_shared_atomic_swap | nir_intrinsic_global_atomic | nir_intrinsic_global_atomic_swap => self.atomic(i),
+            nir_intrinsic_load_global | nir_intrinsic_load_global_constant => {
+                let a = self.val(i.get_src(0), 0);
+                let v: Vec<Val> = (0..i.def.num_components as u32).map(|c| self.load_at(a, c)).collect();
+                self.set(d, &v);
+            }
+            nir_intrinsic_store_global => {
+                let a = self.val(i.get_src(1), 0);
+                for c in (0..i.get_src(0).num_components() as u32).filter(|c| i.write_mask() & (1 << c) != 0) {
+                    let v = self.val(i.get_src(0), c as u8);
+                    self.store_at(a, c, v);
+                }
+            }
             _ => self.fail(format!("unsupported intrinsic {}", i.info().name())),
         }
     }
@@ -640,9 +652,13 @@ impl ShaderState {
     unsafe fn atomic(&mut self, i: &nir_intrinsic_instr) {
         let d = i.def.index;
         let ssbo = matches!(i.intrinsic, nir_intrinsic_ssbo_atomic | nir_intrinsic_ssbo_atomic_swap);
+        let global = matches!(i.intrinsic, nir_intrinsic_global_atomic | nir_intrinsic_global_atomic_swap);
         let a = if ssbo {
             self.cs.atomics = true;
             self.access_addr(i.get_src(0), i.get_src(1), 1)
+        } else if global {
+            self.cs.atomics = true;
+            self.val(i.get_src(0), 0)
         } else {
             let o = self.val(i.get_src(0), 0);
             let w = self.add(o, Val::K(i.base() as u32));
