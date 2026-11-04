@@ -1127,7 +1127,7 @@ fn generic_draw(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
 fn sim_draw(c: &mut CommandBuffer, mut p: Params) {
     let (device, c) = c.split_device();
     // Only the simulator or the device renders.
-    if !(std::env::var_os("BORGVK_SIM").is_some() || std::env::var_os("BORGVK_SIM_DIRECT").is_some() || enabled()) {
+    if !(std::env::var_os("BORGVK_SIM_DIRECT").is_some() || enabled()) {
         return;
     }
     p.index_size = c.index_size;
