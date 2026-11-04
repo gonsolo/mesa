@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 //! The Borg device the list builder drives (`BORGVK_HW`): the DRM render node (`BORG_HW_NODE`,
-//! default /dev/dri/renderD128), or on a host a `direct_sim --raw` process (`BORG_HW_RAW`) or the
+//! default /dev/dri/renderD128), or on a host a `direct_sim` process (`BORG_HW_RAW`) or the
 //! pipes to one a launcher started (`BORG_HW_FDS=to,from`). Register writes and memory words are
 //! batched; a read or another kind of access sends the batch first.
 
@@ -54,7 +54,7 @@ fn open() -> Option<Dev> {
         let (to, from) = unsafe { (File::from_raw_fd(to), File::from_raw_fd(from)) };
         Link::Pipe(Box::new(to), Box::new(from), None)
     } else if let Some(raw) = std::env::var_os("BORG_HW_RAW") {
-        let mut c = Command::new(raw).arg("--raw").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().ok()?;
+        let mut c = Command::new(raw).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().ok()?;
         let (to, from) = (c.stdin.take()?, c.stdout.take()?);
         Link::Pipe(Box::new(to), Box::new(from), Some(c))
     } else {
@@ -70,10 +70,10 @@ fn open() -> Option<Dev> {
     Some(Dev::new(link))
 }
 
-/// A `direct_sim --raw` of its own: its memory private, the device heap shared.
+/// A `direct_sim` of its own: its memory private, the device heap shared.
 pub fn spawn(bin: &std::ffi::OsStr) -> Option<Dev> {
     let mut c = Command::new(bin);
-    c.arg("--raw").arg("-1");
+    c.arg("-1");
     if let Some(h) = crate::heap::get() {
         c.arg(h.fd().to_string());
     }

@@ -1,7 +1,7 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-//! Renders a pass's packet stream on `direct_sim --raw` processes (`BORGVK_SIM_DIRECT`), the driver
+//! Renders a pass's packet stream on `direct_sim` processes (`BORGVK_SIM_DIRECT`), the driver
 //! building the render lists, or on the Borg device (`dev`). A large pass is split into horizontal
 //! strips of tile rows, one simulator each.
 
@@ -108,7 +108,7 @@ impl Server {
         }
         unsafe { signal(SIGPIPE as i32, std::mem::transmute::<usize, __sighandler_t>(1)) }; // SIG_IGN
         let mut cmd = Command::new(bin);
-        cmd.arg("--raw").arg(self.memfd.to_string());
+        cmd.arg(self.memfd.to_string());
         if let Some(h) = crate::heap::get() {
             cmd.arg(h.fd().to_string());
         }
