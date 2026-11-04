@@ -34,7 +34,6 @@
 #include "borgvk_drm_compat.h"
 
 #include "software/borg/borg_core.h"
-#include "software/borg/borg_hw.h"
 #include "software/borg/borg_layout.h"
 #include "software/borg/borg_spirb.h"
 #include "software/borg/borg_fpu.h"

@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 //! Render lists built in the driver (docs/B1_geometry_front_end.md, "Render lists";
-//! docs/B13_device_memory.md, step 2): the host path of `software/borg/borg_core.c` with its
-//! state in a struct. The GPU is three primitives, as there.
+//! docs/B13_device_memory.md, step 2), as `software/borg/borg_core.c` built them, with the state
+//! in a struct. The GPU is three primitives, as there.
 
 use crate::ffi::*;
 
@@ -33,6 +33,33 @@ const TEXEL_BYTES: u32 = 0x60_0000;
 const SHIFT_MIN: u32 = 8;
 const SHIFT_MAX: u32 = 10;
 const LIST_MAX_REGS: usize = 40;
+
+/// A packet's length from its marker, 0 for an unknown one.
+pub fn packet_len(marker: u8) -> usize {
+    (match marker {
+        0xB0 => BC_PKT_LEN_SHADER,
+        0xC1 => BC_PKT_LEN_SHADER_BIG,
+        0xC3 => BC_PKT_LEN_SHADER_HUGE,
+        0xB2 => BC_PKT_LEN_PUSH,
+        0xB3 => BC_PKT_LEN_BLEND,
+        0xB4 => BC_PKT_LEN_STATE,
+        0xB5 => BC_PKT_LEN_TEXG,
+        0xC2 => BC_PKT_LEN_VP,
+        0xB6 => BC_PKT_LEN_TARGET,
+        0xB8 => BC_PKT_LEN_MEM,
+        0xBB => BC_PKT_LEN_PASS,
+        0xC0 => BC_PKT_LEN_TEXL,
+        0xC4 => BC_PKT_LEN_TEXS,
+        0xC5 => BC_PKT_LEN_BIAS,
+        0xC6 => BC_PKT_LEN_OCC,
+        0xBF => BC_PKT_LEN_ATT,
+        0xC7 => BC_PKT_LEN_PLACE,
+        0xC8 => BC_PKT_LEN_TEXD,
+        0xB9 => BC_PKT_LEN_VATTR,
+        0xBA => BC_PKT_LEN_DRAW,
+        _ => 0,
+    }) as usize
+}
 
 fn le32(b: &[u8]) -> u32 {
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
@@ -243,6 +270,15 @@ impl Builder {
         (self.fb_w, self.fb_h, self.place, self.pitch) = (w, h, [0; 6], 0);
         (self.half_w, self.half_h) = (float_from_uint(w / 2), float_from_uint(h / 2));
         self.apply_layout(g);
+    }
+
+    /// The clear colour (FP16 RGB) of a render whose stream sets no target.
+    pub fn set_clear(&mut self, c: [u16; 3]) {
+        self.clear = c;
+    }
+
+    pub fn flush_format(&self) -> u32 {
+        self.flush_format
     }
 
     pub fn set_strip(&mut self, k: u32, n: u32, rows: u32) {
@@ -537,12 +573,12 @@ impl Builder {
         }
     }
 
-    /// One packet of the stream (`borg_core_packet`); false when it is malformed.
+    /// One packet of the stream; false when it is malformed.
     pub fn packet(&mut self, g: &mut dyn Gpu, p: &[u8]) -> bool {
         if matches!(p[0], 0xB2 | 0xB5 | 0xB6 | 0xBB | 0xBF | 0xC6 | 0xC7 | 0xC8) {
             self.flush(g);
         }
-        let n = unsafe { borg_core_pkt_len(p[0]) } as usize;
+        let n = packet_len(p[0]);
         if n == 0 || p.len() < n || p[1..n - 1].iter().fold(0, |c, b| c ^ b) != p[n - 1] {
             return false;
         }
@@ -754,6 +790,13 @@ mod tests {
         assert_eq!(f32_to_fp16(65504.0f32.to_bits()), 0x7BFF);
         assert_eq!(f32_to_fp16(1e9f32.to_bits()), 0x7BFF);
         assert_eq!(f32_to_fp16(6e-8f32.to_bits()), 1);
+    }
+
+    #[test]
+    fn packet_lengths() {
+        assert_eq!(packet_len(0xBA), 1 + 3 + 7 * 4 + 1);
+        assert_eq!(packet_len(0xB6), 1 + 1 + 16 + 1);
+        assert_eq!(packet_len(0xAD), 0);
     }
 
     #[test]

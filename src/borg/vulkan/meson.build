@@ -15,17 +15,16 @@ borgvk_entrypoints = custom_target(
 
 libborgvk_files = []
 
-# The Borg's own driver code (software/borg), host build, with its hooks over the DRM render node.
+# The SPIR-B parser of software/borg, host build; its headers give the packet and memory layout.
 borg_sw = '../../../../software/borg/'
 borg_sw_inc = include_directories(
   '../../../../software/borg',
-  '../../../../software/linux/overlay/include/uapi',
   '../../../../out/hardware/borg/rdl',
   '../../../include/drm-uapi',
 )
 libborg_host = static_library(
   'borg_host',
-  files(borg_sw + 'borg_core.c', borg_sw + 'borg_hw.c', borg_sw + 'borg_spirb.c'),
+  files(borg_sw + 'borg_spirb.c'),
   c_args : ['-DBORG_HOST', '-Wno-unused-parameter'],
   include_directories : borg_sw_inc,
 )
@@ -100,15 +99,14 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-type', 'vk_image_view|VkExtent2D|VkExtent3D|VkResult|pipe_swizzle|util_format_type',
     '--allowlist-function', 'util_format_description|util_format_get_block(size|width|height|depth)|vk_format_to_pipe_format',
     '--allowlist-function', 'util_format_(un)?pack_description',
-    '--allowlist-function', 'borg_core_.*|borg_hw_.*|bh_.*',
     '--allowlist-function', 'mesa_log|malloc|realloc|free',
     '--allowlist-function', 'memfd_create|close|signal|sysconf',
     '--allowlist-function', 'vk_object_zalloc|vk_object_free|__vk_errorf|vk_sampler_(create|destroy)',
     '--allowlist-function', 'vk_device_memory_(create|destroy)|vk_buffer_(view_)?(create|destroy)|drmIoctl|munmap|madvise',
     '--allowlist-type', 'vk_shader_module|VkShaderModuleCreateInfo|VkMemoryAllocateInfo|VkMemoryMapInfo|VkMemoryUnmapInfo|VkMappedMemoryRange',
     '--allowlist-type', 'VkBufferCreateInfo|VkBufferViewCreateInfo|VkDeviceBufferMemoryRequirements|VkMemoryRequirements2',
-    '--allowlist-type', 'VkMemoryDedicatedRequirements|VkBindBufferMemoryInfo|VkBaseOutStructure|drm_borg_(gem_create|gem_mmap)|drm_gem_close',
-    '--allowlist-var', 'DRM_COMMAND_BASE|DRM_BORG_GEM_.*|VK_(TRUE|FALSE)',
+    '--allowlist-type', 'VkMemoryDedicatedRequirements|VkBindBufferMemoryInfo|VkBaseOutStructure|drm_borg_(gem_create|gem_mmap|reg_writes|reg_read|mem)|drm_gem_close',
+    '--allowlist-var', 'DRM_COMMAND_BASE|DRM_BORG_.*|VK_(TRUE|FALSE)',
     '--allowlist-function', 'vk_image_(view_)?(create|destroy)|vk_format_get_aspect_format|os_time_get_nano',
     '--allowlist-function', 'vk_descriptor_set_layout_zalloc|list_(inithead|addtail|del)',
     '--allowlist-function', 'vk_blend_(op|factor)_to_pipe|vk_get_pipeline_rendering_create_info|vk_format_(is_int|has_alpha)|util_format_is_srgb',
