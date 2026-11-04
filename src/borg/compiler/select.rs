@@ -10,6 +10,18 @@ use compiler::nir::AsDef;
 use crate::opcodes::Op;
 use crate::Mnem;
 
+/// Whether borgc selects texture op `op` in `stage`: what needs derivatives only in fragment
+/// shaders, compute only what it has been measured with.
+fn tex_op_ok(op: nir_texop, stage: Stage) -> bool {
+    match op {
+        nir_texop_txs | nir_texop_query_levels | nir_texop_texture_samples => true,
+        nir_texop_txl => stage != Stage::Other,
+        nir_texop_tex | nir_texop_txf | nir_texop_txf_ms => stage != Stage::Compute,
+        nir_texop_txb | nir_texop_tg4 | nir_texop_lod => stage == Stage::Fragment,
+        _ => false,
+    }
+}
+
 impl ShaderState {
     /// The texture and sampler descriptor indices; a vertex shader's table is its attributes', so its
     /// textures are borg_core's BORG_VTEX_SLOT copies.
@@ -106,16 +118,13 @@ impl ShaderState {
             self.sel.vec_map.insert(tex.def.index, vec![(v, 0u8)]);
             return;
         }
-        let is_txl = tex.op == nir_texop_txl && matches!(self.stage, Stage::Fragment | Stage::Compute | Stage::Vertex);
-        let is_txb = tex.op == nir_texop_txb && self.stage == Stage::Fragment;
-        let is_tg4 = tex.op == nir_texop_tg4 && self.stage == Stage::Fragment;
-        let is_lod = tex.op == nir_texop_lod && self.stage == Stage::Fragment;
-        // A multisampled image is an array of its sample planes: layer = array layer * 4 + sample.
-        let is_ms = tex.op == nir_texop_txf_ms;
-        if tex.op != nir_texop_tex && tex.op != nir_texop_txf && !is_txl && !is_txb && !is_tg4 && !is_ms && !is_lod {
+        if !tex_op_ok(tex.op, self.stage) {
             self.refuse(format!("texture op {}", tex.op));
             return;
         }
+        let (is_txl, is_txb, is_tg4, is_lod) = (tex.op == nir_texop_txl, tex.op == nir_texop_txb, tex.op == nir_texop_tg4, tex.op == nir_texop_lod);
+        // A multisampled image is an array of its sample planes: layer = array layer * 4 + sample.
+        let is_ms = tex.op == nir_texop_txf_ms;
         let coord = srcs
             .iter()
             .find(|s| s.src_type == nir_tex_src_coord)
@@ -1470,7 +1479,7 @@ impl ShaderState {
                 } else if let Some(intr) = instr.as_intrinsic() {
                     self.intrinsic(intr);
                 } else if let Some(tex) = instr.as_tex() {
-                    if self.stage == Stage::Compute && !matches!(tex.op, nir_texop_txl | nir_texop_txs | nir_texop_query_levels | nir_texop_texture_samples) {
+                    if self.stage == Stage::Compute && !tex_op_ok(tex.op, self.stage) {
                         self.skipped.push("tex");
                         continue;
                     }
