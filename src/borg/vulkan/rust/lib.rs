@@ -16,6 +16,7 @@ mod copy;
 #[deny(unsafe_code)]
 mod corpus;
 mod descriptor_set;
+mod dev;
 mod device;
 mod dispatch;
 mod draw;

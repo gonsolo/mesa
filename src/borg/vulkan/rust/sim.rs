@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: MIT
 
 //! Renders a pass's packet stream on `direct_sim --raw` processes (`BORGVK_SIM_DIRECT`), the driver
-//! building the render lists, or on the Borg device through `borg_core` in this process. A large pass is split into horizontal
+//! building the render lists, or on the Borg device (`dev`). A large pass is split into horizontal
 //! strips of tile rows, one simulator each.
 
+use crate::dev::Dev;
 use crate::ffi::*;
 use crate::memory::Host;
 use crate::texel::Texel;
@@ -82,7 +83,7 @@ impl Server {
         }
         let prot = (PROT_READ | PROT_WRITE) as i32;
         let Some(bin) = bin else {
-            if !crate::hw::enabled() || unsafe { borg_hw_open() } != 0 {
+            if !crate::hw::enabled() || crate::dev::with(|_| ()).is_none() {
                 return false;
             }
             let flags = (MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE) as i32;
@@ -128,13 +129,6 @@ impl Server {
         if (self.w, self.h) == (w, h) {
             return true;
         }
-        if self.hw {
-            unsafe {
-                borg_core_list_flush();
-                borg_core_set_flush_format(0);
-                borg_core_init(w as i32, h as i32);
-            }
-        }
         (self.fb, self.zb, self.sb, self.heap) = (DRAM_OUT_BASE_SPI, BORG_ZB_SPI, BORG_SB_SPI, BORG_HEAP_SPI);
         for a in 1..4u32 {
             self.att[a as usize] = 0x4A0_0000 + (a - 1) * 0x100_0000; // BORG_ATT_SPI(a)
@@ -158,31 +152,31 @@ fn stop_all(s: &mut [Server]) {
     s.iter_mut().for_each(Server::stop);
 }
 
-/// The device's packet loop, in this process.
-fn hw_feed(p: &[u8]) {
+/// The stream's packets through the builder: the draws are queued, then rendered.
+fn feed(b: &mut crate::list::Builder, g: &mut dyn crate::list::Gpu, stream: &[u8]) {
     let mut i = 0;
-    while i < p.len() {
-        let len = unsafe { borg_core_pkt_len(p[i]) } as usize;
-        if len == 0 || i + len > p.len() {
+    while i < stream.len() {
+        let n = crate::list::packet_len(stream[i]);
+        if n == 0 || i + n > stream.len() {
             break;
         }
-        if unsafe { borg_core_packet(p[i..].as_ptr()) } == BC_DRAW as i32 {
-            unsafe { borg_core_list_draw() };
+        if b.packet(g, &stream[i..i + n]) && stream[i] == 0xBA {
+            b.draw(g);
         }
-        i += len;
+        i += n;
     }
-    unsafe { borg_core_list_flush() };
+    b.flush(g);
 }
 
-fn hw_upload(s: &Server, ranges: &[(u32, u32)]) {
+fn hw_upload(d: &mut Dev, s: &Server, ranges: &[(u32, u32)]) {
     for &(addr, size) in ranges {
-        unsafe { borg_hw_mem_write(addr, s.mem(addr).cast(), size) };
+        d.mem_write(addr, unsafe { std::slice::from_raw_parts(s.mem(addr), size as usize) });
     }
 }
 
-fn hw_download(s: &Server, ranges: &[(u32, u32)]) {
+fn hw_download(d: &mut Dev, s: &Server, ranges: &[(u32, u32)]) {
     for &(addr, size) in ranges {
-        unsafe { borg_hw_mem_read(addr, s.mem(addr).cast(), size) };
+        d.mem_read(addr, unsafe { std::slice::from_raw_parts_mut(s.mem(addr), size as usize) });
     }
 }
 
@@ -638,18 +632,7 @@ fn build_all(servers: &mut [Server], stream: &[u8], rows_per: u32) -> bool {
                     }
                     b.flush(&mut g);
                     b.set_strip(k as u32, np, rows_per);
-                    let mut i = 0;
-                    while i < stream.len() {
-                        let n = unsafe { borg_core_pkt_len(stream[i]) } as usize;
-                        if n == 0 || i + n > stream.len() {
-                            break;
-                        }
-                        if b.packet(&mut g, &stream[i..i + n]) && stream[i] == 0xBA {
-                            b.draw(&mut g);
-                        }
-                        i += n;
-                    }
-                    b.flush(&mut g);
+                    feed(&mut b, &mut g, stream);
                     g.send();
                     let mut sync = [0u8];
                     let ok = g.ok
@@ -665,23 +648,13 @@ fn build_all(servers: &mut [Server], stream: &[u8], rows_per: u32) -> bool {
     })
 }
 
-fn start_servers(all: &mut [Server], np: usize, rows_per: u32, wp: u32, hp: u32, direct: Option<&OsStr>) -> bool {
-    let hw = direct.is_none();
-    (0..np).all(|part| {
-        let s = &mut all[part];
-        s.start(direct)
-            && s.set_size(wp, hp)
-            && (!hw
-                || unsafe {
-                    borg_core_list_flush();
-                    borg_core_set_strip(part as i32, np as i32, rows_per as i32);
-                    true
-                })
-    })
+fn start_servers(all: &mut [Server], np: usize, wp: u32, hp: u32, direct: Option<&OsStr>) -> bool {
+    all[..np].iter_mut().all(|s| s.start(direct) && s.set_size(wp, hp))
 }
 
-/// The device: upload the attachments, run the stream, download them and the writebacks.
-fn run_on_device(s: &Server, l: &Layout, t: &Targets, stream: &[u8], wb: &[Writeback]) {
+/// The device: upload the attachments, run the stream, download them, the writebacks and the
+/// occlusion counters.
+fn run_on_device(d: &mut Dev, s: &Server, l: &Layout, t: &Targets, stream: &[u8], wb: &[Writeback], occ: &[u32], rows_per: u32) {
     let tiles16 = (l.wp >> 2) * (l.h.next_multiple_of(4) >> 2) * 16 * l.ms;
     let mut ranges = Vec::new();
     if t.color.is_some() {
@@ -694,14 +667,19 @@ fn run_on_device(s: &Server, l: &Layout, t: &Targets, stream: &[u8], wb: &[Write
     if t.s.is_some() {
         ranges.push((s.sb, tiles16));
     }
-    hw_upload(s, &ranges);
+    hw_upload(d, s, &ranges);
     keep_stream(stream);
-    hw_feed(stream);
-    hw_download(s, &ranges);
+    d.build(s.w, s.h, |b, d| {
+        b.flush(d);
+        b.set_strip(0, 1, rows_per);
+        feed(b, d, stream);
+    });
+    hw_download(d, s, &ranges);
     for r in wb {
         let (a0, a1) = ((s.heap + r.off) & !3, (s.heap + r.off + r.size + 3) & !3);
-        hw_download(s, &[(a0, a1 - a0)]);
+        hw_download(d, s, &[(a0, a1 - a0)]);
     }
+    hw_download(d, s, &occ.iter().map(|&o| (s.heap + o, 4)).collect::<Vec<_>>());
 }
 
 /// `BORGVK_SIM_KEEP`: the stream, for replaying it by hand.
@@ -762,7 +740,7 @@ pub fn run_pass(
     let rows = |part: usize| part as u32 * rows_per * 4..h.min((part as u32 + 1) * rows_per * 4);
 
     let mut all = SERVERS.lock().unwrap_or_else(|e| e.into_inner());
-    if !start_servers(&mut all[..], np, rows_per, wp, hp, direct.as_deref()) {
+    if !start_servers(&mut all[..], np, wp, hp, direct.as_deref()) {
         log(MESA_LOG_WARN, "borgvk: cannot start the simulator".into());
         stop_all(&mut all[..]);
         return none;
@@ -773,8 +751,7 @@ pub fn run_pass(
         }
     }
     if hw {
-        run_on_device(&all[0], &l, &t, stream, wb);
-        hw_download(&all[0], &occ.iter().map(|&o| (all[0].heap + o, 4)).collect::<Vec<_>>());
+        crate::dev::with(|d| run_on_device(d, &all[0], &l, &t, stream, wb, occ, rows_per));
     } else {
         keep_stream(stream);
         if !build_all(&mut all[..np], stream, rows_per) {

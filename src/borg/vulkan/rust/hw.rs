@@ -1,17 +1,18 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-//! The Borg device (`BORGVK_HW`): renders and compute jobs run by `borg_core` and `borg_hw` in
-//! this process, over the DRM render node.
+//! The Borg device (`BORGVK_HW`, `dev`): renders through the list builder and compute jobs, in
+//! this process.
 
 use crate::ffi::*;
+use crate::list::Gpu;
 use crate::util::{log, MESA_LOG_WARN};
 
 fn env_set(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|v| !v.is_empty())
 }
 
-/// Whether passes and the cube path render on the device.
+/// Whether passes render on the device.
 pub fn enabled() -> bool {
     env_set("BORGVK_HW")
 }
@@ -47,48 +48,46 @@ fn pixel(fmt: i32, words: &[u32], w: u32, x: u32, y: u32) -> ([u8; 4], usize) {
 
 /// Renders the stream on the device into `out`: `w * h` pixels of 3 bytes, 4 for RAW32.
 pub fn render(b: &[u8], w: u32, h: u32, out: *mut u8) -> usize {
-    if unsafe { borg_hw_open() } != 0 {
+    let frame = crate::dev::with(|d| {
+        d.build(w, h, |l, d| {
+            l.flush(d);
+            l.init(d, w, h);
+            let (mut draws, mut target_seen, mut i) = (0, false, 0);
+            while i < b.len() {
+                let len = crate::list::packet_len(b[i]);
+                if len == 0 || i + len > b.len() {
+                    log(MESA_LOG_WARN, format!("borgvk: bad packet 0x{:02x} at byte {i}", b[i]));
+                    break;
+                }
+                if !l.packet(d, &b[i..i + len]) {
+                    log(MESA_LOG_WARN, format!("borgvk: rejected packet 0x{:02x} at byte {i}", b[i]));
+                    break;
+                }
+                target_seen |= b[i] == 0xB6;
+                if b[i] == 0xBA {
+                    if !target_seen {
+                        l.set_clear([0x3266; 3]);
+                    }
+                    l.draw(d);
+                    draws += 1;
+                }
+                i += len;
+            }
+            l.flush(d);
+            d.flush();
+            let fmt = l.flush_format();
+            let mut words = vec![0u32; (w * h * if fmt != 0 { 4 } else { 2 }) as usize / 4];
+            d.mem_read(DRAM_OUT_BASE_SPI, unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast(), words.len() * 4) });
+            (draws != 0 && d.ok).then_some((fmt as i32, words))
+        })
+    });
+    let Some(frame) = frame else {
         log(MESA_LOG_WARN, "borgvk: cannot open the Borg device".into());
         return 0;
-    }
-    unsafe {
-        borg_core_set_flush_format(0);
-        borg_core_init(w as i32, h as i32);
-    }
-    let (mut draws, mut target_seen, mut i) = (0, false, 0);
-    while i < b.len() {
-        let len = unsafe { borg_core_pkt_len(b[i]) } as usize;
-        if len == 0 || i + len > b.len() {
-            log(MESA_LOG_WARN, format!("borgvk: bad packet 0x{:02x} at byte {i}", b[i]));
-            break;
-        }
-        let kind = unsafe { borg_core_packet(b[i..].as_ptr()) };
-        if kind == BC_BAD as i32 {
-            log(MESA_LOG_WARN, format!("borgvk: rejected packet 0x{:02x} at byte {i}", b[i]));
-            break;
-        }
-        target_seen |= kind == BC_TARGET as i32;
-        if kind == BC_DRAW as i32 {
-            unsafe {
-                if !target_seen {
-                    borg_core_set_clear(0x3266, 0x3266, 0x3266);
-                }
-                borg_core_list_draw();
-            }
-            draws += 1;
-        }
-        i += len;
-    }
-    unsafe {
-        borg_core_list_flush();
-        borg_hw_flush();
-    }
-    if draws == 0 {
+    };
+    let Some((fmt, words)) = frame else {
         return 0;
-    }
-    let fmt = unsafe { borg_core_flush_format() };
-    let mut words = vec![0u32; (w * h * if fmt != 0 { 4 } else { 2 }) as usize / 4];
-    unsafe { borg_hw_mem_read(DRAM_OUT_BASE_SPI, words.as_mut_ptr().cast(), (words.len() * 4) as u32) };
+    };
     let mut n = 0;
     for y in 0..h {
         for x in 0..w {
@@ -122,6 +121,10 @@ impl Job<'_> {
 /// The register/memory program of direct_sim --compute (simulation/direct/main.cpp), on the
 /// device, its output written to `path`.
 pub fn compute(job: &[u8], path: &std::path::Path) -> bool {
+    job.len() >= 48 && crate::dev::with(|d| run_job(d, job, path)).unwrap_or(false)
+}
+
+fn run_job(d: &mut crate::dev::Dev, job: &[u8], path: &std::path::Path) -> bool {
     const GPR: u32 = 0;
     const IMEM: u32 = 128;
     const CONTROL: u32 = 424;
@@ -133,35 +136,31 @@ pub fn compute(job: &[u8], path: &std::path::Path) -> bool {
     const CODE_BASE: u32 = 0x318;
     const IMEM_WORDS: u32 = 72;
     const CODE_ADDR: u32 = 0xF0000;
-    if job.len() < 48 || unsafe { borg_hw_open() } != 0 {
-        return false;
-    }
     let mut j = Job { b: job, p: 0 };
     let h: [u32; 12] = std::array::from_fn(|_| j.take());
     let [nprog, gx, gy, gz, lx, ly, lz, nregs, nbufs, bx, by, bz] = h;
     let prog: Vec<u32> = (0..nprog).map(|_| j.take()).collect();
-    let reg = |r: u32, v: u32| unsafe { bh_reg_write(r, v) };
-    reg(CONTROL, 2);
+    d.reg(CONTROL, 2);
     if nprog > IMEM_WORDS {
         let mut code = prog.clone();
         code.push(0);
-        unsafe { borg_hw_mem_write(CODE_ADDR, code.as_ptr().cast(), (code.len() * 4) as u32) };
-        reg(CODE_BASE, CODE_ADDR);
+        d.mem_write(CODE_ADDR, unsafe { std::slice::from_raw_parts(code.as_ptr().cast(), code.len() * 4) });
+        d.reg(CODE_BASE, CODE_ADDR);
     }
     for (i, &w) in prog.iter().take(IMEM_WORDS as usize).enumerate() {
-        reg(IMEM + 4 * i as u32, w);
+        d.reg(IMEM + 4 * i as u32, w);
     }
     if nprog < IMEM_WORDS {
-        reg(IMEM + 4 * nprog, 0);
+        d.reg(IMEM + 4 * nprog, 0);
     }
     for _ in 0..nregs {
         let (r, v) = (j.take(), j.take());
-        reg(GPR + 4 * r, v);
+        d.reg(GPR + 4 * r, v);
     }
     if bx | by | bz != 0 {
-        reg(GPR + 4 * 12, bx);
-        reg(GPR + 4 * 13, by);
-        reg(GPR + 4 * 14, bz);
+        d.reg(GPR + 4 * 12, bx);
+        d.reg(GPR + 4 * 13, by);
+        d.reg(GPR + 4 * 14, bz);
     }
     if nbufs > BORGVK_CS_MAX_BUFS {
         return false;
@@ -170,18 +169,18 @@ pub fn compute(job: &[u8], path: &std::path::Path) -> bool {
     for _ in 0..nbufs {
         let (addr, size) = (j.take(), j.take());
         let padded = (size + 3) & !3;
-        unsafe { borg_hw_mem_write(addr, job[j.p..].as_ptr().cast(), padded) };
+        d.mem_write(addr, &job[j.p..j.p + padded as usize]);
         j.p += padded as usize;
         bufs.push((addr, size));
     }
-    reg(C_PC, 0);
-    reg(C_XY, gx | gy << 16);
-    reg(C_Z, gz);
-    reg(C_LOCAL, lx | ly << 8 | lx.wrapping_mul(ly).wrapping_mul(lz) << 16);
-    reg(C_CTRL, 1);
+    d.reg(C_PC, 0);
+    d.reg(C_XY, gx | gy << 16);
+    d.reg(C_Z, gz);
+    d.reg(C_LOCAL, lx | ly << 8 | lx.wrapping_mul(ly).wrapping_mul(lz) << 16);
+    d.reg(C_CTRL, 1);
     let mut st = 0;
     for _ in 0..2_000_000 {
-        st = unsafe { bh_reg_read(C_CTRL) };
+        st = d.read(C_CTRL);
         if st & 1 != 0 {
             break;
         }
@@ -192,7 +191,7 @@ pub fn compute(job: &[u8], path: &std::path::Path) -> bool {
     let mut out = Vec::new();
     for (addr, size) in bufs {
         let mut tmp = vec![0u8; ((size + 3) & !3) as usize];
-        unsafe { borg_hw_mem_read(addr, tmp.as_mut_ptr().cast(), tmp.len() as u32) };
+        d.mem_read(addr, &mut tmp);
         out.extend_from_slice(&tmp[..size as usize]);
     }
     std::fs::write(path, out).is_ok()
