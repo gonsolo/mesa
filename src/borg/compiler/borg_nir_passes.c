@@ -92,6 +92,23 @@ borg_image_words(const nir_intrinsic_instr *i)
            f == PIPE_FORMAT_R8G8B8A8_SINT);
 }
 
+bool
+borg_lower_image_in_place(enum pipe_format f)
+{
+   const struct util_format_description *d = util_format_description(f);
+   if (!d || d->layout != UTIL_FORMAT_LAYOUT_PLAIN || d->block.width != 1 || d->block.bits % 32 ||
+       d->block.bits > 128 || d->nr_channels < 1 || d->nr_channels > 4)
+      return false;
+   for (unsigned i = 0; i < d->nr_channels; i++) {
+      const struct util_format_channel_description *c = &d->channel[i];
+      if (c->size == 0 || c->size > 32 || c->shift / 32 != (c->shift + c->size - 1) / 32 ||
+          (c->type == UTIL_FORMAT_TYPE_FLOAT && c->size != 16 && c->size != 32) ||
+          (c->type != UTIL_FORMAT_TYPE_FLOAT && c->type != UTIL_FORMAT_TYPE_UNSIGNED && c->type != UTIL_FORMAT_TYPE_SIGNED))
+         return false;
+   }
+   return true;
+}
+
 static bool
 borg_texel_buffer_filter(const nir_instr *instr, const void *data)
 {
@@ -146,8 +163,110 @@ borg_deref_elem(nir_builder *b, nir_deref_instr *d)
              ? nir_imm_int(b, nir_src_as_uint(d->arr.index)) : nir_imm_int(b, 0);
 }
 
+static nir_def *borg_pull_channel(nir_builder *b, nir_def *const *words,
+                                  const struct util_format_channel_description *ch);
+
+/* A compute storage image in place (borg_lower_image_in_place): its descriptor's words. */
+static bool
+borg_image_direct(nir_builder *b, nir_variable *var)
+{
+   return b->shader->info.stage == MESA_SHADER_COMPUTE && borg_lower_image_in_place(var->data.image.format);
+}
+
+static nir_def *
+borg_image_desc(nir_builder *b, nir_deref_instr *deref, nir_variable *var, unsigned word, unsigned n)
+{
+   const nir_address_format f = borg_spirv_options.ssbo_addr_format;
+   nir_def *idx = nir_vulkan_resource_index(b, nir_address_format_num_components(f), nir_address_format_bit_size(f),
+                                            borg_deref_elem(b, deref), .desc_set = var->data.descriptor_set,
+                                            .binding = var->data.binding,
+                                            .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+   nir_def *desc = nir_load_vulkan_descriptor(b, nir_address_format_num_components(f), nir_address_format_bit_size(f),
+                                              idx, .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+   return nir_load_ssbo(b, n, 32, nir_channel(b, desc, 0), nir_imm_int(b, 4 * word), .align_mul = 4);
+}
+
+/* The texel's address: base + layer or slice * stride + y * pitch + x * texel size. */
+static nir_def *
+borg_image_addr(nir_builder *b, nir_intrinsic_instr *i, nir_variable *var)
+{
+   nir_deref_instr *deref = nir_src_as_deref(i->src[0]);
+   nir_def *d = borg_image_desc(b, deref, var, 0, 3);
+   const unsigned nc = nir_image_intrinsic_coord_components(i);
+   const enum glsl_sampler_dim dim = nir_intrinsic_image_dim(i);
+   nir_def *c = i->src[1].ssa;
+   nir_def *x = nir_channel(b, c, 0);
+   nir_def *y = dim == GLSL_SAMPLER_DIM_1D ? nir_imm_int(b, 0) : nir_channel(b, c, 1);
+   nir_def *l = nc == 2 && dim == GLSL_SAMPLER_DIM_1D ? nir_channel(b, c, 1)
+                : nc >= 3                            ? nir_channel(b, c, 2) : nir_imm_int(b, 0);
+   const unsigned bpp = util_format_get_blocksize(var->data.image.format);
+   nir_def *at = nir_iadd(b, nir_imul(b, l, nir_channel(b, d, 2)), nir_imul(b, y, nir_channel(b, d, 1)));
+   return nir_iadd(b, nir_channel(b, d, 0), nir_iadd(b, at, nir_imul_imm(b, x, bpp)));
+}
+
+/* A texel's words from the shader's RGBA value, in the image's format. */
+static nir_def *
+borg_image_pack(nir_builder *b, nir_def *v, enum pipe_format f)
+{
+   const struct util_format_description *d = util_format_description(f);
+   nir_def *w[4] = { NULL };
+   for (unsigned k = 0; k < 4; k++) {
+      const unsigned i = d->swizzle[k];
+      if (i > PIPE_SWIZZLE_W)
+         continue;
+      const struct util_format_channel_description *ch = &d->channel[i];
+      const unsigned sz = ch->size, max = sz == 32 ? UINT32_MAX : (1u << sz) - 1;
+      nir_def *c = nir_channel(b, v, k);
+      if (ch->type == UTIL_FORMAT_TYPE_FLOAT && sz == 16)
+         c = nir_iand_imm(b, nir_pack_half_2x16(b, nir_vec2(b, c, nir_imm_float(b, 0))), 0xffff);
+      else if (ch->normalized && ch->type == UTIL_FORMAT_TYPE_UNSIGNED)
+         c = nir_f2u32(b, nir_fround_even(b, nir_fmul_imm(b, nir_fsat(b, c), (float)max)));
+      else if (ch->normalized)
+         c = nir_f2i32(b, nir_fround_even(b, nir_fmul_imm(b, nir_fmin(b, nir_fmax(b, c, nir_imm_float(b, -1)), nir_imm_float(b, 1)),
+                                                          (float)(max >> 1))));
+      if (sz < 32)
+         c = nir_ishl_imm(b, nir_iand_imm(b, c, max), ch->shift % 32);
+      nir_def **word = &w[ch->shift / 32];
+      *word = *word ? nir_ior(b, *word, c) : c;
+   }
+   const unsigned nw = d->block.bits / 32;
+   for (unsigned k = 0; k < nw; k++)
+      if (!w[k])
+         w[k] = nir_imm_int(b, 0);
+   return nir_vec(b, w, nw);
+}
+
+static nir_def *
+borg_image_direct_lower(nir_builder *b, nir_intrinsic_instr *st, nir_variable *var)
+{
+   const enum pipe_format f = var->data.image.format;
+   nir_def *addr = borg_image_addr(b, st, var);
+   if (st->intrinsic == nir_intrinsic_image_deref_atomic)
+      return nir_global_atomic(b, 32, addr, st->src[3].ssa, .atomic_op = nir_intrinsic_atomic_op(st));
+   if (st->intrinsic == nir_intrinsic_image_deref_atomic_swap)
+      return nir_global_atomic_swap(b, 32, addr, st->src[3].ssa, st->src[4].ssa, .atomic_op = nir_intrinsic_atomic_op(st));
+   if (st->intrinsic == nir_intrinsic_image_deref_store) {
+      nir_def *w = borg_image_pack(b, st->src[3].ssa, f);
+      nir_store_global(b, w, addr, .write_mask = BITFIELD_MASK(w->num_components), .align_mul = 4);
+      return NIR_LOWER_INSTR_PROGRESS_REPLACE;
+   }
+   const struct util_format_description *d = util_format_description(f);
+   nir_def *ld = nir_load_global(b, d->block.bits / 32, 32, addr, .align_mul = 4);
+   nir_def *words[4];
+   for (unsigned k = 0; k < ld->num_components; k++)
+      words[k] = nir_channel(b, ld, k);
+   const bool pure = util_format_is_pure_integer(f);
+   nir_def *chan[4];
+   for (unsigned k = 0; k < 4; k++) {
+      const unsigned s = d->swizzle[k];
+      chan[k] = s <= PIPE_SWIZZLE_W ? borg_pull_channel(b, words, &d->channel[s])
+                : s == PIPE_SWIZZLE_1 ? (pure ? nir_imm_int(b, 1) : nir_imm_float(b, 1.0f)) : nir_imm_int(b, 0);
+   }
+   return nir_vec(b, chan, st->def.num_components);
+}
+
 /* imageSize: the driver keeps width, height and depth or layers in the last 16 bytes of the
- * binding's window. */
+ * binding's window, or in words 3 to 5 of an image in place. */
 static nir_def *
 borg_image_size(nir_builder *b, nir_intrinsic_instr *i)
 {
@@ -155,6 +274,19 @@ borg_image_size(nir_builder *b, nir_intrinsic_instr *i)
    nir_variable *var = nir_deref_instr_get_variable(deref);
    if (!var)
       return NULL;
+   if (borg_image_direct(b, var) && nir_intrinsic_image_dim(i) != GLSL_SAMPLER_DIM_BUF) {
+      nir_def *s = borg_image_desc(b, deref, var, 3, 3);
+      nir_def *w = nir_channel(b, s, 0), *h = nir_channel(b, s, 1), *dl = nir_channel(b, s, 2);
+      switch (nir_intrinsic_image_dim(i)) {
+      case GLSL_SAMPLER_DIM_1D:
+         return nir_intrinsic_image_array(i) ? nir_vec2(b, w, dl) : w;
+      case GLSL_SAMPLER_DIM_2D:
+      case GLSL_SAMPLER_DIM_CUBE:
+         return nir_intrinsic_image_array(i) ? nir_vec3(b, w, h, dl) : nir_vec2(b, w, h);
+      default:
+         return nir_vec3(b, w, h, dl);
+      }
+   }
    const nir_address_format f = borg_spirv_options.ssbo_addr_format;
    nir_def *idx = nir_vulkan_resource_index(b, nir_address_format_num_components(f), nir_address_format_bit_size(f),
                                             borg_deref_elem(b, deref), .desc_set = var->data.descriptor_set,
@@ -196,6 +328,8 @@ borg_texel_buffer_lower(nir_builder *b, nir_instr *instr, void *data)
       nir_variable *ivar = nir_deref_instr_get_variable(nir_src_as_deref(st->src[0]));
       if (!ivar)
          return NULL;
+      if (borg_image_direct(b, ivar))
+         return borg_image_direct_lower(b, st, ivar);
       const nir_address_format afmt = borg_spirv_options.ssbo_addr_format;
       nir_def *ridx = nir_vulkan_resource_index(b, nir_address_format_num_components(afmt),
                                                 nir_address_format_bit_size(afmt), borg_deref_elem(b, nir_src_as_deref(st->src[0])),

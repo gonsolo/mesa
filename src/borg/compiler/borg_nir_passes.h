@@ -56,6 +56,10 @@ struct borg_vertex_pull {
 };
 #define BORG_VB_SLOT0 128
 void borg_lower_set_vertex_pull(const struct borg_vertex_pull *pull);
+/* A compute storage image of this format is read and written where it is, through a descriptor of
+ * six words the binding table points at: base, row pitch, slice or layer stride, width, height,
+ * depth or layers (docs/B13_device_memory.md, step 3). Other formats keep their window. */
+bool borg_lower_image_in_place(enum pipe_format f);
 
 /* Blending in the fragment shader (docs/B3_colour_formats.md): the attachment's blend state for
  * nir_lower_blend, and the blend constants. */

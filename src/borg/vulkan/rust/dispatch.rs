@@ -164,6 +164,30 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
                 if set.sampled_mask >> b & 1 != 0 {
                     continue;
                 }
+                // In place (borgc: borg_lower_image_in_place): the window holds the view's descriptor,
+                // base, row pitch, slice or layer stride, width, height, depth or layers.
+                if unsafe { borg_lower_image_in_place(fmt::pipe(vf)) } && lin.is_none() {
+                    let (off, stride) = sh.level_offset(lvl, l0, blk);
+                    let pitch = stride * blk.bs;
+                    let solid = img.vk.image_type == VK_IMAGE_TYPE_3D;
+                    let step = if solid { pitch as u64 * h as u64 } else { sh.layer_size(blk) };
+                    let n = if solid { d } else { nl };
+                    let bytes = if solid { step * d as u64 } else { step * nl as u64 } as usize;
+                    let gpu = img.memory().map_or(0, |m| m.gpu);
+                    let base = if gpu != 0 { gpu + (img.offset + off) as u32 } else { addr + 64 };
+                    let mut data: Vec<u8> = [base, pitch, step as u32, w, h, n].iter().flat_map(|v| v.to_ne_bytes()).collect();
+                    data.resize(64, 0);
+                    if gpu != 0 || 64 + bytes > SLOT_BYTES as usize {
+                        let size = data.len() as u32;
+                        bufs.push(decoded(addr, data, size));
+                        continue;
+                    }
+                    let at = unsafe { src.add(off as usize) };
+                    data.extend_from_slice(unsafe { std::slice::from_raw_parts(at, bytes) });
+                    let size = data.len() as u32;
+                    bufs.push(CsBuf { host: at, wb: true, skip: 64, ..decoded(addr, data, size) });
+                    continue;
+                }
                 let src = unsafe { src.add(off0 as usize) };
                 let words = [PIPE_FORMAT_R32_UINT, PIPE_FORMAT_R32_SINT, PIPE_FORMAT_R32_FLOAT, PIPE_FORMAT_R8G8B8A8_UNORM,
                              PIPE_FORMAT_R8G8B8A8_UINT, PIPE_FORMAT_R8G8B8A8_SINT];
