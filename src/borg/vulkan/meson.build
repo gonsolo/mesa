@@ -97,18 +97,18 @@ _borgvk_bindings_rs = rust.bindgen(
     bindgen_output_args, borgvk_bindgen_args, '--no-prepend-enum-name', '--with-derive-default',
     '--allowlist-type', 'vk_device|vk_device_dispatch_table|borg_blend|vk_descriptor_set_layout|list_head|vk_pipeline_layout|VkFormat|pipe_format',
     '--allowlist-type', 'vk_object_base|VkPipelineShaderStageCreateInfo|VkGraphicsPipelineCreateInfo|VkPipelineColorBlendStateCreateInfo|mesa_log_level',
-    '--allowlist-type', 'vk_image_view|VkExtent2D|VkExtent3D|VkResult|pipe_swizzle|util_format_type|termios',
+    '--allowlist-type', 'vk_image_view|VkExtent2D|VkExtent3D|VkResult|pipe_swizzle|util_format_type',
     '--allowlist-function', 'util_format_description|util_format_get_block(size|width|height|depth)|vk_format_to_pipe_format',
     '--allowlist-function', 'util_format_(un)?pack_description',
     '--allowlist-function', 'borg_core_.*|borg_hw_.*|bh_.*',
-    '--allowlist-function', 'mesa_log|malloc|realloc|free|tcgetattr|tcsetattr|cfmakeraw|cfsetispeed|cfsetospeed|tcdrain',
+    '--allowlist-function', 'mesa_log|malloc|realloc|free',
     '--allowlist-function', 'memfd_create|close|signal|sysconf',
     '--allowlist-function', 'vk_object_zalloc|vk_object_free|__vk_errorf|vk_sampler_(create|destroy)',
     '--allowlist-function', 'vk_device_memory_(create|destroy)|vk_buffer_(view_)?(create|destroy)|drmIoctl|munmap|madvise',
     '--allowlist-type', 'vk_shader_module|VkShaderModuleCreateInfo|VkMemoryAllocateInfo|VkMemoryMapInfo|VkMemoryUnmapInfo|VkMappedMemoryRange',
     '--allowlist-type', 'VkBufferCreateInfo|VkBufferViewCreateInfo|VkDeviceBufferMemoryRequirements|VkMemoryRequirements2',
-    '--allowlist-type', 'VkMemoryDedicatedRequirements|VkBindBufferMemoryInfo|VkBaseOutStructure|drm_borg_(gem_create|gem_mmap|shader|blend|state|push|setup|submit)|drm_gem_close',
-    '--allowlist-var', 'DRM_COMMAND_BASE|DRM_BORG_(GEM_.*|SHADER|BLEND|STATE|PUSH|SETUP|SUBMIT)|VK_(TRUE|FALSE)',
+    '--allowlist-type', 'VkMemoryDedicatedRequirements|VkBindBufferMemoryInfo|VkBaseOutStructure|drm_borg_(gem_create|gem_mmap)|drm_gem_close',
+    '--allowlist-var', 'DRM_COMMAND_BASE|DRM_BORG_GEM_.*|VK_(TRUE|FALSE)',
     '--allowlist-function', 'vk_image_(view_)?(create|destroy)|vk_format_get_aspect_format|os_time_get_nano',
     '--allowlist-function', 'vk_descriptor_set_layout_zalloc|list_(inithead|addtail|del)',
     '--allowlist-function', 'vk_blend_(op|factor)_to_pipe|vk_get_pipeline_rendering_create_info|vk_format_(is_int|has_alpha)|util_format_is_srgb',
@@ -141,7 +141,6 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-var', 'BORGC_.*|BC_.*|BORG_(ZB|SB|HEAP)_SPI|BORG_DEVICE_(BASE|BYTES)|DRAM_OUT_BASE_SPI',
     '--allowlist-var', 'STATUS_REG_T__(SEQ_BUSY|IDLE)_bm|CULL_CFG_REG_T__CULL_MODE_bp|BORG_.*|DRAW_.*|TBR_.*|TEX_DESC_TABLE_ADDR|SAMPLER_DESC_TABLE_ADDR|FP16_MAX_DEPTH|DRAM_SPI_BASE|DRAM_OUT_OFFSET',
     '--allowlist-type', 'borg_gpu_t|spirb_shader_t', '--allowlist-function', 'spirb_parse',
-    '--allowlist-var', 'B115200|TCSANOW|CLOCAL|CREAD|CRTSCTS|O_NOCTTY',
     '--allowlist-var', 'PROT_(READ|WRITE)|MAP_(PRIVATE|ANONYMOUS|NORESERVE|SHARED)|MADV_REMOVE|SIGPIPE|_SC_NPROCESSORS_ONLN',
   ],
   include_directories : [borgvk_inc, include_directories('.')],
@@ -233,20 +232,6 @@ test(
   prog_python,
   args : [files('check_rust_signatures.py'), vk_api_xml, meson.current_source_dir() / 'rust'],
   suite : ['borg'],
-)
-
-# Generates a replayable wire burst for the simulator's push-constant
-# end-to-end test, with the driver's own senders rather than a reimplementation.
-borgvk_burst_gen = executable(
-  'borgvk_burst_gen',
-  ['borgvk_burst_gen.c', borgvk_rust_h],
-  include_directories : [
-    inc_include, inc_src, inc_util,
-    include_directories('../../../../'),   # Borg repo root → software/borg/borg_layout.h
-  ],
-  link_with : [libborgvk_rs],
-  dependencies : borgvk_deps,
-  link_args : ld_args_gc_sections,
 )
 
 if with_symbols_check

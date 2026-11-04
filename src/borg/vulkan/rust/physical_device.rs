@@ -358,7 +358,7 @@ fn properties() -> vk_properties {
 
     set_name(&mut p.deviceName, "Borg (ULX3S)");
     set_name(&mut p.driverName, "borgvk");
-    set_name(&mut p.driverInfo, "Mesa borgvk (serial/FPGA)");
+    set_name(&mut p.driverInfo, "Mesa borgvk");
     p
 }
 
@@ -433,7 +433,7 @@ pub unsafe extern "C" fn enumerate_devices(instance: *mut vk_instance) -> VkResu
     if fd >= 0 {
         log(MESA_LOG_INFO, format!("borgvk: found borg DRM device (fd {fd})"));
     } else {
-        log(MESA_LOG_INFO, "borgvk: no borg DRM device; using malloc+serial fallback".into());
+        log(MESA_LOG_INFO, "borgvk: no borg DRM device; device memory is malloc'd".into());
     }
     unsafe { create(&mut *instance.cast(), fd) }
 }
