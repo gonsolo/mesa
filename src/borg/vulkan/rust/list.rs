@@ -243,11 +243,6 @@ impl Builder {
         (self.fb_w, self.fb_h, self.place, self.pitch) = (w, h, [0; 6], 0);
         (self.half_w, self.half_h) = (float_from_uint(w / 2), float_from_uint(h / 2));
         self.apply_layout(g);
-        for y in 0..BC_TEX_DIM {
-            for x in 0..BC_TEX_DIM {
-                g.mem(TEXEL_BASE + (y * BC_TEX_DIM + x) * 4, 0xFFFF_FFFF);
-            }
-        }
     }
 
     pub fn set_strip(&mut self, k: u32, n: u32, rows: u32) {

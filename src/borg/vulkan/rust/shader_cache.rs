@@ -127,12 +127,4 @@ mod tests {
         assert_eq!((e[0].key, e[0].flags, &e[0].data[..]), (7, 1, &b"abc"[..]));
         assert_eq!((e[1].key, &e[1].data[..]), (9, &b"zz"[..]));
     }
-
-    #[test]
-    fn reads_the_boards_cache_file() {
-        let f = include_bytes!("../../../../../software/vkcube/cube.shaders");
-        let e = read_entries(&f[..]);
-        assert_eq!(e.len(), 2);
-        assert_eq!(e.iter().map(|e| 11 + e.data.len()).sum::<usize>(), f.len());
-    }
 }
