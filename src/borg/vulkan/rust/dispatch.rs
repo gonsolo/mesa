@@ -1,8 +1,8 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-//! vkCmdDispatch: the bound buffers and images as one compute job for direct_sim --compute
-//! (split over processes along one axis) or the device; what the shader wrote goes back.
+//! vkCmdDispatch: the bound buffers and images as one compute job (`hw::run_job`) on the device or
+//! on raw simulators, split along one axis; what the shader wrote goes back.
 
 use crate::cmd_buffer::CommandBuffer;
 use crate::corpus::{borgvk_corpus_log, borgvk_corpus_on, hash};
@@ -14,9 +14,7 @@ use crate::pipeline::Pipeline;
 use crate::descriptor_set::{find_flat, DescriptorSet};
 use crate::state_upload::DEFAULT_SAMPLER;
 use crate::texture_upload::generic_texture;
-use crate::util::{log, temp_file, MESA_LOG_WARN};
-use std::io::{Read, Write};
-use std::process::{Child, Command};
+use crate::util::{log, MESA_LOG_WARN};
 
 const SLOT_BYTES: u32 = 0x80000 * 4;
 const BASE_BYTES: u32 = 0x40000 * 4;
@@ -340,67 +338,50 @@ fn part_headers(pl: &Pipeline, direct: bool, g: [u32; 3], job: &[u8]) -> Vec<[u3
     hdrs
 }
 
-/// A part on its way: direct_sim running, or the device done; with its files.
-struct Part {
-    job: Option<String>,
-    out: Option<String>,
-    child: Option<Child>,
-    device_ok: bool,
-}
-
-fn start(direct: Option<&std::ffi::OsStr>, hdr: &[u32; HDR], job: &[u8], ran: &mut bool) -> Part {
-    let mut p = Part { job: None, out: temp_file("/tmp/borgvk_cs_out_XXXXXX").map(|(path, _)| path), child: None, device_ok: false };
-    let mut part = job.to_vec();
-    for (i, w) in hdr.iter().enumerate() {
-        part[i * 4..i * 4 + 4].copy_from_slice(&w.to_ne_bytes());
-    }
-    let Some(direct) = direct else {
-        match &p.out {
-            Some(out) => p.device_ok = crate::hw::compute(&part, std::path::Path::new(out)),
-            None => *ran = false,
+/// Runs the parts: each on a simulator of its own, all at once, or one after the other on the
+/// device. Each answer is the buffers' bytes after the part, in job order.
+fn run_parts(direct: Option<&std::ffi::OsStr>, hdrs: &[[u32; HDR]], job: &[u8]) -> Vec<Option<Vec<u8>>> {
+    let part = |hdr: &[u32; HDR]| {
+        let mut p = job.to_vec();
+        for (i, w) in hdr.iter().enumerate() {
+            p[i * 4..i * 4 + 4].copy_from_slice(&w.to_ne_bytes());
         }
-        return p;
+        p
     };
-    let jf = temp_file("/tmp/borgvk_cs_job_XXXXXX");
-    p.job = jf.as_ref().map(|(path, _)| path.clone());
-    let (Some((jpath, mut f)), Some(out)) = (jf, p.out.clone()) else {
-        *ran = false;
-        return p;
+    let Some(direct) = direct else {
+        return hdrs.iter().map(|h| crate::hw::compute(&part(h))).collect();
     };
-    let _ = f.write_all(&part);
-    drop(f);
-    let mut cmd = Command::new(direct);
-    cmd.arg("--compute").arg(&jpath).arg(&out);
-    if let Some(h) = crate::heap::get() {
-        cmd.arg(h.fd().to_string());
-    }
-    p.child = cmd.env("BORG_SIM_CFG", "simt").spawn().ok();
-    p
+    std::thread::scope(|sc| {
+        let runs: Vec<_> = hdrs
+            .iter()
+            .map(|h| {
+                let p = part(h);
+                sc.spawn(move || crate::dev::spawn(direct).and_then(|mut d| crate::hw::run_job(&mut d, &p)))
+            })
+            .collect();
+        runs.into_iter().map(|r| r.join().ok().flatten()).collect()
+    })
 }
 
 /// Every window as the job had it, with each byte a part changed.
-fn merge(bufs: &[CsBuf], parts: &mut [Part], ran: &mut bool) -> Vec<Vec<u8>> {
+fn merge(bufs: &[CsBuf], outs: &[Option<Vec<u8>>], ran: &mut bool) -> Vec<Vec<u8>> {
     let mut merged: Vec<Vec<u8>> = bufs.iter().map(|b| b.data().to_vec()).collect();
-    for p in parts.iter_mut() {
-        let ok = match p.child.as_mut() {
-            Some(c) => c.wait().is_ok_and(|s| s.success()),
-            None => p.device_ok,
-        };
-        let f = p.out.as_ref().filter(|_| ok).and_then(|o| std::fs::File::open(o).ok());
-        let Some(mut f) = f else {
+    for out in outs {
+        let Some(out) = out else {
             log(MESA_LOG_WARN, "borgvk: compute sim failed".into());
             *ran = false;
             continue;
         };
+        let mut at = 0;
         for (b, m) in bufs.iter().zip(merged.iter_mut()).filter(|(b, _)| !b.in_place) {
-            let mut tmp = vec![0u8; b.size as usize];
-            if f.read_exact(&mut tmp).is_ok() {
-                for ((t, o), m) in tmp.iter().zip(b.data()).zip(m.iter_mut()) {
+            if let Some(new) = out.get(at..at + b.size as usize) {
+                for ((t, o), m) in new.iter().zip(b.data()).zip(m.iter_mut()) {
                     if t != o {
                         *m = *t;
                     }
                 }
             }
+            at += b.size as usize;
         }
     }
     for (b, m) in bufs.iter().zip(merged.iter_mut()).filter(|(b, _)| b.in_place) {
@@ -455,11 +436,8 @@ fn dispatch(c: &mut CommandBuffer, gx: u32, gy: u32, gz: u32) {
     let g = [gx, gy, gz];
     let job = build_job(pl, g, &bufs);
     let mut ran = true;
-    let mut parts: Vec<Part> = part_headers(pl, direct.is_some(), g, &job)
-        .iter()
-        .map(|h| start(direct.as_deref(), h, &job, &mut ran))
-        .collect();
-    let merged = merge(&bufs, &mut parts, &mut ran);
+    let outs = run_parts(direct.as_deref(), &part_headers(pl, direct.is_some(), g, &job), &job);
+    let merged = merge(&bufs, &outs, &mut ran);
     if borgvk_corpus_on() {
         let out = merged.iter().zip(&bufs).fold(hash(BORGVK_CORPUS_SEED as u64, &[ran as u8]), |h, (m, b)| hash(h, &m[..b.size as usize]));
         borgvk_corpus_log(b'D' as _, hash(BORGVK_CORPUS_SEED as u64, &job), out);
@@ -467,14 +445,5 @@ fn dispatch(c: &mut CommandBuffer, gx: u32, gy: u32, gz: u32) {
     if ran {
         apply(&bufs, &merged);
         c.dispatched = true;
-    }
-    let keep = std::env::var_os("BORGVK_KEEP_JOB").is_some();
-    for p in &parts {
-        if let Some(j) = p.job.as_ref().filter(|_| !keep) {
-            let _ = std::fs::remove_file(j);
-        }
-        if let Some(o) = &p.out {
-            let _ = std::fs::remove_file(o);
-        }
     }
 }

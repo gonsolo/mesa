@@ -19,8 +19,8 @@ const MAX_MEM: usize = 4096;
 
 enum Link {
     Drm(i32),
-    /// The simulator, its process kept while the device lives (all of the driver's life).
-    Pipe(Box<dyn Write + Send>, Box<dyn Read + Send>, #[allow(dead_code)] Option<Child>),
+    /// A simulator, and its process when this device started it.
+    Pipe(Box<dyn Write + Send>, Box<dyn Read + Send>, Option<Child>),
 }
 
 pub struct Dev {
@@ -67,10 +67,26 @@ fn open() -> Option<Dev> {
         })?;
         Link::Drm(f.into_raw_fd())
     };
-    Some(Dev { link, regs: Vec::with_capacity(MAX_REGS), mem: Vec::with_capacity(MAX_MEM), mem_off: 0, ok: true, list: None, size: (0, 0) })
+    Some(Dev::new(link))
+}
+
+/// A `direct_sim --raw` of its own: its memory private, the device heap shared.
+pub fn spawn(bin: &std::ffi::OsStr) -> Option<Dev> {
+    let mut c = Command::new(bin);
+    c.arg("--raw").arg("-1");
+    if let Some(h) = crate::heap::get() {
+        c.arg(h.fd().to_string());
+    }
+    let mut c = c.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().ok()?;
+    let (to, from) = (c.stdin.take()?, c.stdout.take()?);
+    Some(Dev::new(Link::Pipe(Box::new(to), Box::new(from), Some(c))))
 }
 
 impl Dev {
+    fn new(link: Link) -> Self {
+        Dev { link, regs: Vec::with_capacity(MAX_REGS), mem: Vec::with_capacity(MAX_MEM), mem_off: 0, ok: true, list: None, size: (0, 0) }
+    }
+
     /// `f` with the builder, set up for `w` x `h`.
     pub fn build<R>(&mut self, w: u32, h: u32, f: impl FnOnce(&mut crate::list::Builder, &mut Dev) -> R) -> R {
         let mut l = self.list.take().unwrap_or_else(|| Box::new(crate::list::Builder::new()));
@@ -195,6 +211,29 @@ impl crate::list::Gpu for Dev {
         u32::from_le_bytes(r)
     }
 
+    /// On a simulator the poll runs there, which answers after a bounded time even if the value
+    /// never comes.
+    fn wait(&mut self, off: u32, mask: u32, val: u32) -> u32 {
+        if matches!(self.link, Link::Drm(_)) {
+            loop {
+                let v = self.read(off);
+                if v & mask == val {
+                    return v;
+                }
+            }
+        }
+        self.flush_mem();
+        self.flush_regs();
+        let mut q = vec![b'P'];
+        for w in [off, mask, val] {
+            q.extend_from_slice(&w.to_le_bytes());
+        }
+        self.put(&q);
+        let mut r = [0u8; 4];
+        self.get(&mut r);
+        u32::from_le_bytes(r)
+    }
+
     fn mem(&mut self, addr: u32, v: u32) {
         self.flush_regs();
         if !self.mem.is_empty() && (addr != self.mem_off + self.mem.len() as u32 * 4 || self.mem.len() == MAX_MEM) {
@@ -204,5 +243,14 @@ impl crate::list::Gpu for Dev {
             self.mem_off = addr;
         }
         self.mem.push(v);
+    }
+}
+
+impl Drop for Dev {
+    fn drop(&mut self) {
+        if let Link::Pipe(to, _, Some(c)) = &mut self.link {
+            *to = Box::new(std::io::sink());
+            let _ = c.wait();
+        }
     }
 }
