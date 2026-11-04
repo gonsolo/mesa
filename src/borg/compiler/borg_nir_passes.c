@@ -1139,6 +1139,13 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       nir_fixup_deref_modes(nir);
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, borg_private_atomic, nir_metadata_control_flow, NULL);
    }
+   /* Early fragment tests take the rasterized depth and stencil: the shader's are dead. */
+   if (nir->info.stage == MESA_SHADER_FRAGMENT && nir->info.fs.early_fragment_tests) {
+      nir_foreach_shader_out_variable(var, nir)
+         if (var->data.location == FRAG_RESULT_DEPTH || var->data.location == FRAG_RESULT_STENCIL)
+            var->data.mode = nir_var_shader_temp;
+      nir_fixup_deref_modes(nir);
+   }
    /* The Vulkan-runtime preamble.
     *
     * The driver gets this from vk_spirv_to_nir before its own passes run; the
