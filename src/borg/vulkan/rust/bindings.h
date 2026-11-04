@@ -36,6 +36,9 @@
 #include "software/borg/borg_core.h"
 #include "software/borg/borg_hw.h"
 #include "software/borg/borg_layout.h"
+#include "software/borg/borg_spirb.h"
+#include "software/borg/borg_fpu.h"
+#include "out/hardware/borg/rdl/borg_regs.h"
 
 #include <fcntl.h>
 #include <signal.h>

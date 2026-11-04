@@ -27,6 +27,7 @@ mod fmt;
 #[deny(unsafe_code)]
 mod format;
 mod heap;
+mod list;
 mod hw;
 #[cfg(borgc)]
 mod nir_info;
