@@ -26,7 +26,7 @@ pub struct Device {
     pub vk: vk_device,
     pub cmd_dispatch: vk_device_dispatch_table,
     pub queue: vk_queue,
-    pub drm_fd: i32, // the physical device's; -1 is the malloc and serial fallback
+    pub drm_fd: i32, // the physical device's; -1 without one (malloc'd memory)
     // Locked: the runtime's submit thread replays draws while the app builds pipelines.
     pub scratch: Mutex<Scratch>,
 }

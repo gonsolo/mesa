@@ -1131,9 +1131,7 @@ fn sim_draw(c: &mut CommandBuffer, mut p: Params) {
     if p.indexed && p.index_size == 0 {
         return;
     }
-    if generic_draw(device, c, &p) {
-        c.generic_drawn = true;
-    }
+    generic_draw(device, c, &p);
 }
 
 entrypoint! {

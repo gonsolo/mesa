@@ -57,10 +57,6 @@ pub fn render(b: &[u8], w: u32, h: u32, out: *mut u8) -> usize {
     }
     let (mut draws, mut target_seen, mut i) = (0, false, 0);
     while i < b.len() {
-        if b[i] == 0xB1 {
-            i += 1; // serial-reload trigger: not a draw packet
-            continue;
-        }
         let len = unsafe { borg_core_pkt_len(b[i]) } as usize;
         if len == 0 || i + len > b.len() {
             log(MESA_LOG_WARN, format!("borgvk: bad packet 0x{:02x} at byte {i}", b[i]));
@@ -72,16 +68,12 @@ pub fn render(b: &[u8], w: u32, h: u32, out: *mut u8) -> usize {
             break;
         }
         target_seen |= kind == BC_TARGET as i32;
-        if kind == BC_DRAW as i32 || (kind == BC_MVP as i32 && unsafe { borg_core_ready() } != 0) {
+        if kind == BC_DRAW as i32 {
             unsafe {
                 if !target_seen {
                     borg_core_set_clear(0x3266, 0x3266, 0x3266);
                 }
-                if kind == BC_DRAW as i32 {
-                    borg_core_list_draw();
-                } else {
-                    borg_core_draw(std::ptr::null(), 0);
-                }
+                borg_core_list_draw();
             }
             draws += 1;
         }

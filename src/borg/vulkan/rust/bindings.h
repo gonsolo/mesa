@@ -45,7 +45,6 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <stdlib.h>
-#include <termios.h>
 
 /* The firmware headers have their own FP16 constants; NIR brings Mesa's. */
 #undef FP16_ONE

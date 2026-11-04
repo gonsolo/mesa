@@ -8,11 +8,7 @@ use crate::ffi::*;
 use crate::vk::*;
 use crate::transport::capturing;
 use crate::util::{log, MESA_LOG_INFO, MESA_LOG_WARN};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
-const MARKER_MVP: u8 = 0xAD;
-const MARKER_GEOM: u8 = 0xAE;
 const MARKER_SHADER: u8 = 0xB0;
 const MARKER_SHADER_BIG: u8 = 0xC1;
 const MARKER_SHADER_HUGE: u8 = 0xC3;
@@ -34,9 +30,6 @@ const MARKER_VP: u8 = 0xC2;
 const MARKER_BIAS: u8 = 0xC5;
 const MARKER_OCC: u8 = 0xC6;
 
-const GEOM_MAX_VERTS: usize = BORGVK_GEOM_MAX_VERTS as usize;
-const GEOM_MAX_TRIS: usize = BORGVK_GEOM_MAX_TRIS as usize;
-const GEOM_PKT_LEN: usize = 1 + 2 + GEOM_MAX_VERTS * 12 + GEOM_MAX_TRIS * 3 + GEOM_MAX_TRIS * 24 + 1;
 const SHADER_SMALL: usize = 512;
 const SHADER_BIG: usize = 4096;
 const SHADER_MAX: usize = BORGVK_SHADER_BLOB_MAX as usize;
@@ -56,27 +49,6 @@ fn put_u32(d: &mut [u8], v: u32) {
 
 fn put_f32(d: &mut [u8], f: f32) {
     put_u32(d, f.to_bits());
-}
-
-pub fn send_geom(verts: &[f32], idx: &[u8], uv: &[f32]) {
-    let (nverts, ntris) = (verts.len() / 3, idx.len() / 3);
-    if !(1..=GEOM_MAX_VERTS).contains(&nverts) || !(1..=GEOM_MAX_TRIS).contains(&ntris) {
-        return;
-    }
-    let mut pkt = [0u8; GEOM_PKT_LEN];
-    pkt[0] = MARKER_GEOM;
-    pkt[1] = nverts as u8;
-    pkt[2] = ntris as u8;
-    let (vbase, ibase) = (3, 3 + GEOM_MAX_VERTS * 12);
-    let ubase = ibase + GEOM_MAX_TRIS * 3;
-    for (i, &v) in verts.iter().enumerate() {
-        put_f32(&mut pkt[vbase + i * 4..], v);
-    }
-    pkt[ibase..ibase + idx.len()].copy_from_slice(idx);
-    for (i, &u) in uv[..ntris * 6].iter().enumerate() {
-        put_f32(&mut pkt[ubase + i * 4..], u);
-    }
-    emit(&mut pkt);
 }
 
 pub fn send_shader(stage: u8, blob: &[u8]) {
@@ -181,45 +153,6 @@ pub fn blend_pack(cb: Option<&VkPipelineColorBlendStateCreateInfo>) -> (u32, u32
 pub fn blend_const_pack(k: [f32; 4]) -> u32 {
     let k = k.map(unorm8);
     k[0] | k[1] << 8 | k[2] << 16 | k[3] << 24
-}
-
-static PACING: Mutex<Option<Instant>> = Mutex::new(None);
-
-/// Holds frames to the period `BORGVK_FRAME_MS` asks for; a late frame resyncs instead of
-/// building up debt.
-fn pace_frame() {
-    // atol: the leading digits count.
-    let ms: u64 = std::env::var("BORGVK_FRAME_MS")
-        .map(|v| v.trim_start().chars().take_while(char::is_ascii_digit).collect::<String>())
-        .ok()
-        .and_then(|d| d.parse().ok())
-        .unwrap_or(0);
-    if ms == 0 {
-        return;
-    }
-    let period = Duration::from_millis(ms);
-    let mut next = PACING.lock().unwrap_or_else(|e| e.into_inner());
-    let now = Instant::now();
-    let target = match *next {
-        Some(t) if t > now => {
-            std::thread::sleep(t - now);
-            t
-        }
-        _ => now,
-    };
-    *next = Some(target + period);
-}
-
-pub fn send_mvp(mvp: &[f32; 16]) {
-    let mut pkt = [0u8; 66];
-    pkt[0] = MARKER_MVP;
-    for (i, &v) in mvp.iter().enumerate() {
-        pkt[1 + 4 * i..5 + 4 * i].copy_from_slice(&v.to_ne_bytes());
-    }
-    emit(&mut pkt);
-    if !capturing() {
-        pace_frame();
-    }
 }
 
 pub fn send_state(reg: &[u32; 5]) {
@@ -388,46 +321,6 @@ pub fn send_texture_levels(offs: &[u32; 12]) {
     emit(&mut pkt);
 }
 
-// The C interface; pointers come from the C callers and are valid for the sizes stated.
-
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_serial_send_geom(verts: *const f32, nverts: i32, idx: *const u8, uv: *const f32, ntris: i32) {
-    if !(1..=GEOM_MAX_VERTS as i32).contains(&nverts) || !(1..=GEOM_MAX_TRIS as i32).contains(&ntris) {
-        return;
-    }
-    let (nv, nt) = (nverts as usize, ntris as usize);
-    unsafe {
-        send_geom(
-            std::slice::from_raw_parts(verts, nv * 3),
-            std::slice::from_raw_parts(idx, nt * 3),
-            std::slice::from_raw_parts(uv, nt * 6),
-        )
-    };
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_serial_send_shader(stage: u8, blob: *const u8, len: u32) {
-    if blob.is_null() || len == 0 || len as usize > SHADER_MAX {
-        log(MESA_LOG_WARN, format!("borgvk: refusing to send shader (stage {stage}, len {len})"));
-        return;
-    }
-    send_shader(stage, unsafe { std::slice::from_raw_parts(blob, len as usize) });
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_serial_send_push_constants(offset: u32, size: u32, values: *const std::ffi::c_void) {
-    if values.is_null() {
-        log(MESA_LOG_WARN, format!("borgvk: bad push-constant range (offset {offset}, size {size})"));
-        return;
-    }
-    send_push_constants(offset, unsafe { std::slice::from_raw_parts(values as *const u8, size as usize) });
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn borgvk_serial_send_mvp(mvp: *const f32) {
-    send_mvp(unsafe { &*(mvp as *const [f32; 16]) });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,15 +362,6 @@ mod tests {
         let p = sent(|| send_shader(1, &[1; 5000]));
         assert_eq!((p.len(), p[0], u16::from_le_bytes([p[2], p[3]])), (1 + 1 + 2 + SHADER_MAX + 1, MARKER_SHADER_HUGE, 5000));
         assert!(captured(|| send_shader(0, &[])).is_empty(), "an empty shader is refused");
-    }
-
-    #[test]
-    fn mvp() {
-        let mut m = [0.0f32; 16];
-        m[15] = 1.0;
-        let p = sent(|| send_mvp(&m));
-        assert_eq!((p.len(), p[0]), (66, MARKER_MVP));
-        assert_eq!(f32::from_ne_bytes(p[61..65].try_into().unwrap()), 1.0);
     }
 
     #[test]
@@ -541,14 +425,15 @@ mod tests {
         assert_eq!(state_pack(&ci), [1 | ops << 1 | ops << 13, 0xFF | 0xAB << 8 | 0xCD << 16, 0xFF | 0xAB << 8 | 0xCD << 16, 3, 1 | 1 << 2 | 1 << 31 | 0xF << 8]);
     }
 
-    fn push(offset: u32, size: u32, values: *const u32) -> Vec<u8> {
-        captured(|| unsafe { borgvk_serial_send_push_constants(offset, size, values.cast()) })
+    fn push(offset: u32, words: &[u32], size: u32) -> Vec<u8> {
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).chain(std::iter::repeat(0)).take(size as usize).collect();
+        captured(|| send_push_constants(offset, &bytes))
     }
 
     #[test]
     fn push_constants() {
         let words = [0xB2B20000u32, 0xB2B20001, 0xB2B20002, 0xB2B20003];
-        let p = push(8 * 4, 16, words.as_ptr());
+        let p = push(8 * 4, &words, 16);
         assert_eq!(p.len(), 132);
         assert_eq!(p[..3], [0xB2, 8, 4]); // 0xB1 is the serial-reload trigger
         for (i, &w) in words.iter().enumerate() {
@@ -558,29 +443,13 @@ mod tests {
         assert_eq!(p[1..].iter().fold(0, |c, b| c ^ b), 0, "checksum");
 
         let full: Vec<u32> = (0..32).map(|i| 0xA5A50000 + i).collect();
-        let p = push(0, 128, full.as_ptr());
+        let p = push(0, &full, 128);
         assert_eq!((p.len(), p[1], p[2]), (132, 0, 32));
 
         let v = [1u32, 2];
         for (offset, size) in [(2, 8), (0, 6), (0, 33 * 4), (32 * 4, 4), (0, 0)] {
-            assert!(push(offset, size, v.as_ptr()).is_empty(), "{offset} {size}");
+            assert!(push(offset, &v, size).is_empty(), "{offset} {size}");
         }
-        assert!(push(0, 4, std::ptr::null()).is_empty());
-    }
-
-    #[test]
-    fn geometry() {
-        let verts = [-1.0f32, 0.5, 0.1, 1.0, -0.25, 3.0];
-        let (idx, uv) = ([0u8, 1, 1], [0.0f32, 1.0, 0.75, 0.5, 0.1, 0.9]);
-        let p = sent(|| unsafe { borgvk_serial_send_geom(verts.as_ptr(), 2, idx.as_ptr(), uv.as_ptr(), 1) });
-        assert_eq!(p.len(), GEOM_PKT_LEN);
-        assert_eq!(p[..3], [0xAE, 2, 1]);
-        let (vb, ib) = (3, 3 + GEOM_MAX_VERTS * 12);
-        let ub = ib + GEOM_MAX_TRIS * 3;
-        assert_eq!([u32_at(&p, vb), u32_at(&p, vb + 4), u32_at(&p, vb + 8), u32_at(&p, vb + 20)], [0xBF800000, 0x3F000000, 0x3DCCCCCD, 0x40400000]);
-        assert_eq!(p[ib..ib + 3], [0, 1, 1]);
-        assert_eq!([u32_at(&p, ub + 8), u32_at(&p, ub + 12)], [0x3F400000, 0x3F000000]);
-        assert!(p[vb + 24..ib].iter().chain(&p[ub + 24..GEOM_PKT_LEN - 1]).all(|&b| b == 0));
     }
 
     #[test]
