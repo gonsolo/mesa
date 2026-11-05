@@ -23,7 +23,7 @@ use std::sync::Mutex;
 
 const MEM_BYTES: usize = 0x800_0000;
 const MAX_PARTS: usize = 24;
-const PARALLEL_BYTES: usize = 65536;
+const PARALLEL_PIXELS: u32 = 64 * 64;
 
 /// One simulator: a server process sharing `mem` through a memfd, or the device itself.
 struct Server {
@@ -520,13 +520,13 @@ pub(crate) fn atoi(s: &str) -> i64 {
 
 /// Strips of tile rows: how many simulators and how many rows each. Every strip shades all the
 /// vertices, so a pass with fewer than 16 pixels per triangle stays on one.
-fn strips(n: usize, wp: u32, hp: u32, hw: bool, tris: u32) -> (usize, u32) {
+fn strips(wp: u32, hp: u32, hw: bool, tris: u32) -> (usize, u32) {
     let np = match std::env::var_os("BORGVK_SERVE_PARTS") {
         Some(v) => atoi(&v.to_string_lossy()),
         None => (unsafe { sysconf(_SC_NPROCESSORS_ONLN as i32) } as i64).clamp(1, 12),
     };
     let fragment_bound = (wp as u64 * hp as u64) >= 16 * tris as u64;
-    let np = if !hw && n >= PARALLEL_BYTES && fragment_bound { np.clamp(1, MAX_PARTS as i64) as u32 } else { 1 };
+    let np = if !hw && wp * hp >= PARALLEL_PIXELS && fragment_bound { np.clamp(1, MAX_PARTS as i64) as u32 } else { 1 };
     let ftiles = hp >> 2;
     let rows_per = ftiles.div_ceil(np);
     (ftiles.div_ceil(rows_per) as usize, rows_per)
@@ -657,7 +657,6 @@ pub fn extent(color: Option<&Image>, zimg: Option<&Image>, simg: Option<&Image>,
 #[allow(clippy::too_many_arguments)]
 pub fn run_pass(
     prog: &Prog,
-    bytes: usize,
     color: Option<&Image>,
     extra: &[&Image],
     zimg: Option<&Image>,
@@ -697,7 +696,7 @@ pub fn run_pass(
 
     let direct = std::env::var_os("BORGVK_SIM_DIRECT");
     let hw = direct.is_none();
-    let (np, rows_per) = strips(bytes, wp, hp, hw, tris);
+    let (np, rows_per) = strips(wp, hp, hw, tris);
     let rows = |part: usize| part as u32 * rows_per * 4..h.min((part as u32 + 1) * rows_per * 4);
 
     let mut all = SERVERS.lock().unwrap_or_else(|e| e.into_inner());
@@ -749,7 +748,7 @@ pub fn run_pass(
         }
     }
     if std::env::var_os("BORGVK_DEBUG").is_some() {
-        log(MESA_LOG_INFO, format!("borgvk: pass of {bytes} bytes changed {changed} of {npx} pixels (format {fmt})"));
+        log(MESA_LOG_INFO, format!("borgvk: pass changed {changed} of {npx} pixels (format {fmt})"));
     }
     // Each strip counts its own tiles.
     occ.iter().map(|&o| all[..np].iter().map(|s| unsafe { s.mem(s.heap + o).cast::<u32>().read_unaligned() } as u64).sum()).collect()
@@ -778,10 +777,11 @@ mod tests {
 
     #[test]
     fn strips_cover_all_tile_rows() {
-        assert_eq!(strips(10, 64, 64, true, 0), (1, 16));
+        assert_eq!(strips(64, 64, true, 0), (1, 16));
         std::env::set_var("BORGVK_SERVE_PARTS", "3");
-        assert_eq!(strips(PARALLEL_BYTES, 64, 64, false, 0), (3, 6));
-        assert_eq!(strips(PARALLEL_BYTES, 64, 64, false, 4096), (1, 16));
+        assert_eq!(strips(64, 64, false, 0), (3, 6));
+        assert_eq!(strips(64, 64, false, 4096), (1, 16));
+        assert_eq!(strips(32, 32, false, 0), (1, 8));
         std::env::remove_var("BORGVK_SERVE_PARTS");
     }
 

@@ -803,10 +803,6 @@ impl Prog {
         self.run.push(v);
     }
 
-    pub fn len(&self) -> usize {
-        self.buf.as_slice().len()
-    }
-
     fn reg(&mut self, off: u32, v: u32) {
         self.op(&[REG, off, v]);
     }

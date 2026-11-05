@@ -158,7 +158,6 @@ fn corpus_state(h: u64, img: Option<&Image>, extra: &[&Image], depth: Option<&Im
 /// A batch of draws, taken at its end: its lists, attachments, writebacks and query runs.
 pub struct Run {
     prog: Option<crate::list::Prog>,
-    bytes: usize,
     key: u64,
     img: *mut Image,
     extra: Vec<*mut Image>,
@@ -195,7 +194,6 @@ pub fn take_run(c: &mut CommandBuffer) -> Option<Run> {
     build(c);
     let (prog, key) = c.list.take().unwrap().end();
     let r = Run {
-        bytes: prog.as_ref().map_or(0, |p| p.len()),
         prog,
         key,
         img: c.batch_img,
@@ -245,7 +243,7 @@ pub fn run(r: &Run) {
     let words: Vec<u32> = r.occ.iter().map(|o| o.off).collect();
     let counts = if r.serve {
         let n = match &r.prog {
-            Some(p) if p.ok => run_pass(p, r.bytes, img, &extra, depth, stencil, &r.wb, r.area, &words, r.tris, r.placed),
+            Some(p) if p.ok => run_pass(p, img, &extra, depth, stencil, &r.wb, r.area, &words, r.tris, r.placed),
             _ => vec![0; r.occ.len()],
         };
         if let (Some(path), Some(i)) = (std::env::var_os("BORGVK_DUMP_PPM").filter(|p| !p.is_empty()), img) {
