@@ -84,7 +84,9 @@ pub struct CommandBuffer {
     pub index_avail: VkDeviceSize,
     pub index_size: u32,         // 2, 4, or 0 for an unsupported type
     pub batch_push: [u32; 32],   // the push words the open batch was drawn with
-    pub pc: [u32; 32],           // push-constant bytes, for compute
+    pub pc: [u32; 32],           // push-constant bytes
+    pub push_lo: u32,            // word range written so far; empty when lo >= hi
+    pub push_hi: u32,
     pub dyn_off: [VkDeviceSize; BORGVK_MAX_BINDINGS as usize], // dynamic offsets of desc_set
     pub cs_sets: [*mut DescriptorSet; 4], // the compute bind point's own sets
     pub cs_dyn_offs: [[VkDeviceSize; BORGVK_MAX_BINDINGS as usize]; 4],
@@ -93,9 +95,9 @@ pub struct CommandBuffer {
 }
 
 impl CommandBuffer {
-    /// The device the runtime created it on, which outlives it.
-    pub fn device(&self) -> &Device {
-        unsafe { &*self.vk.base.device.cast::<Device>() }
+    /// The push-constant words written so far and the first one's index.
+    pub fn push_range(&self) -> Option<(u32, &[u32])> {
+        (self.push_lo < self.push_hi).then(|| (self.push_lo, &self.pc[self.push_lo as usize..self.push_hi as usize]))
     }
 
     /// The device next to the command buffer, for as long as it is borrowed.
@@ -203,7 +205,7 @@ unsafe extern "C" fn reset(vk: *mut vk_command_buffer, _flags: VkCommandBufferRe
     (c.heap_top, c.batch_draws, c.batch_tris) = (0, 0, 0);
     (c.occ_pool, c.occ_open, c.nocc) = (null(), false, 0);
     (c.batch_img, c.index_ptr, c.gfx_pipeline, c.desc_set, c.cs_pipeline) = (null_mut(), null_mut(), null_mut(), null_mut(), null_mut());
-    c.index_gpu = 0;
+    (c.index_gpu, c.push_lo, c.push_hi) = (0, 0, 0);
     (c.in_rendering, c.has_clear, c.dispatched) = (false, false, false);
     unsafe { (c.vb, c.vb_avail, c.vb_gpu, c.cs_sets, c.desc_sets) = (zeroed(), zeroed(), zeroed(), zeroed(), zeroed()) };
     (c.color_attachment_count, c.depth_view, c.stencil_view) = (0, null_mut(), null_mut());
@@ -255,16 +257,14 @@ fn put(dst: &mut [u32], offset: u32, values: &[u8]) -> bool {
 entrypoint! {
     fn borgvk_CmdPushConstants(c: &mut CommandBuffer, _layout: VkPipelineLayout, _stages: VkShaderStageFlags, offset: u32, size: u32, values: *const c_void) {
         let values = if size == 0 { &[][..] } else { unsafe { std::slice::from_raw_parts(values.cast::<u8>(), size as usize) } };
-        put(&mut c.pc, offset, values);
-        let mut dev = c.device().scratch.lock().unwrap();
-        if size == 0 || !put(&mut dev.push_words, offset, values) {
+        if size == 0 || !put(&mut c.pc, offset, values) {
             return;
         }
         let (lo, hi) = (offset / 4, (offset + size + 3) / 4);
-        if dev.push_lo >= dev.push_hi {
-            (dev.push_lo, dev.push_hi) = (lo, hi);
+        if c.push_lo >= c.push_hi {
+            (c.push_lo, c.push_hi) = (lo, hi);
         } else {
-            (dev.push_lo, dev.push_hi) = (dev.push_lo.min(lo), dev.push_hi.max(hi));
+            (c.push_lo, c.push_hi) = (c.push_lo.min(lo), c.push_hi.max(hi));
         }
     }
 }

@@ -54,9 +54,6 @@ pub struct Scratch {
     pub vp: Vp, // the viewport and scissor of the draw being queued
     pub bias: [f32; 2],
     pub state_valid: bool,
-    pub push_words: [u32; 32], // set by vkCmdPushConstants, replayed at submit (DRM path)
-    pub push_lo: u32,          // word range written so far; empty when lo >= hi
-    pub push_hi: u32,
 }
 
 impl Default for Scratch {
@@ -83,9 +80,6 @@ impl Default for Scratch {
             vp: Vp::default(),
             bias: [0.0; 2],
             state_valid: false,
-            push_words: [0; 32],
-            push_lo: 0,
-            push_hi: 0,
         }
     }
 }

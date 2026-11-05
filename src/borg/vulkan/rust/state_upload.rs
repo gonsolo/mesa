@@ -9,15 +9,11 @@ use crate::wire::*;
 /// Clamp to edge in U, V and W, nearest.
 pub static DEFAULT_SAMPLER: [u32; 4] = [2 << 3 | 2 << 6 | 2 << 9, 0, 0, 0];
 
-fn push_range(sc: &Scratch) -> Option<(u32, &[u32])> {
-    (sc.push_lo < sc.push_hi).then(|| (sc.push_lo, &sc.push_words[sc.push_lo as usize..sc.push_hi as usize]))
-}
-
-pub fn send_draw_state(sc: &Scratch) {
+pub fn send_draw_state(sc: &Scratch, push: Option<(u32, &[u32])>) {
     if sc.state_valid {
         send_state(&sc.state_reg);
     }
-    if let Some((lo, words)) = push_range(sc) {
+    if let Some((lo, words)) = push {
         send_push_constants(lo * 4, &words.iter().flat_map(|w| w.to_ne_bytes()).collect::<Vec<u8>>());
     }
     if sc.vp.valid {
