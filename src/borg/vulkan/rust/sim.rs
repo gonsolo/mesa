@@ -1,8 +1,8 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-//! Renders a pass's packet stream on `direct_sim` processes (`BORGVK_SIM_DIRECT`), the driver
-//! building the render lists, or on the Borg device (`dev`). A large pass is split into horizontal
+//! Renders a pass's recorded lists on `direct_sim` processes (`BORGVK_SIM_DIRECT`) or on the
+//! Borg device (`dev`). A large pass is split into horizontal
 //! strips of tile rows, one simulator each.
 
 use crate::dev::Dev;
@@ -13,6 +13,7 @@ use crate::texels::{Planes, Texels};
 use crate::fmt;
 use crate::image::Image;
 use crate::format::{depth_is_d32, flush_format};
+use crate::list::Prog;
 use crate::util::{ftruncate, log, mmap, MESA_LOG_INFO, MESA_LOG_WARN};
 use std::ffi::OsStr;
 use std::io::{Read, Write};
@@ -39,9 +40,6 @@ struct Server {
     sb: u32,
     heap: u32,
     att: [u32; 4],
-    /// The raw device's list builder, its state kept across passes; and the size it was set up for.
-    builder: Option<Box<crate::list::Builder>>,
-    built: (u32, u32),
 }
 
 // The memory is only touched under SERVERS' lock.
@@ -63,8 +61,6 @@ impl Server {
             sb: 0,
             heap: 0,
             att: [0; 4],
-            builder: None,
-            built: (0, 0),
         }
     }
 
@@ -142,7 +138,7 @@ impl Server {
         if let Some(mut child) = self.child.take() {
             let _ = child.wait();
         }
-        (self.w, self.h, self.builder, self.built) = (0, 0, None, (0, 0));
+        (self.w, self.h) = (0, 0);
     }
 }
 
@@ -152,21 +148,6 @@ fn stop_all(s: &mut [Server]) {
     s.iter_mut().for_each(Server::stop);
 }
 
-/// The stream's packets through the builder: the draws are queued, then rendered.
-fn feed(b: &mut crate::list::Builder, g: &mut dyn crate::list::Gpu, stream: &[u8]) {
-    let mut i = 0;
-    while i < stream.len() {
-        let n = crate::list::packet_len(stream[i]);
-        if n == 0 || i + n > stream.len() {
-            break;
-        }
-        if b.packet(g, &stream[i..i + n]) && stream[i] == 0xBA {
-            b.draw(g);
-        }
-        i += n;
-    }
-    b.flush(g);
-}
 
 fn hw_upload(d: &mut Dev, s: &Server, ranges: &[(u32, u32)]) {
     for &(addr, size) in ranges {
@@ -613,8 +594,8 @@ impl crate::list::Gpu for Raw<'_> {
     }
 }
 
-/// Every server builds and renders the stream's lists, each its strip of tile rows.
-fn build_all(servers: &mut [Server], stream: &[u8], rows_per: u32) -> bool {
+/// Every server renders the lists, each its strip of tile rows.
+fn run_all(servers: &mut [Server], prog: &Prog, rows_per: u32) -> bool {
     let np = servers.len() as u32;
     std::thread::scope(|sc| {
         let runs: Vec<_> = servers
@@ -622,25 +603,12 @@ fn build_all(servers: &mut [Server], stream: &[u8], rows_per: u32) -> bool {
             .enumerate()
             .map(|(k, s)| {
                 sc.spawn(move || {
-                    let mut b = s.builder.take().unwrap_or_else(|| Box::new(crate::list::Builder::new()));
-                    let size = (s.w, s.h);
-                    let built = s.built;
                     let mut g = Raw { s, regs: Vec::new(), n: 0, ok: true };
-                    if built != size {
-                        b.flush(&mut g);
-                        b.init(&mut g, size.0, size.1);
-                    }
-                    b.flush(&mut g);
-                    b.set_strip(k as u32, np, rows_per);
-                    feed(&mut b, &mut g, stream);
+                    prog.run(&mut g, (k as u32, np, rows_per));
                     g.send();
                     let mut sync = [0u8];
-                    let ok = g.ok
-                        && g.s.to.as_mut().is_some_and(|to| to.write_all(b"S").is_ok())
-                        && g.s.from.as_mut().is_some_and(|f| f.read_exact(&mut sync).is_ok());
-                    g.s.built = size;
-                    g.s.builder = Some(b);
-                    ok
+                    g.ok && g.s.to.as_mut().is_some_and(|to| to.write_all(b"S").is_ok())
+                        && g.s.from.as_mut().is_some_and(|f| f.read_exact(&mut sync).is_ok())
                 })
             })
             .collect();
@@ -654,7 +622,7 @@ fn start_servers(all: &mut [Server], np: usize, wp: u32, hp: u32, direct: Option
 
 /// The device: upload the attachments, run the stream, download them, the writebacks and the
 /// occlusion counters.
-fn run_on_device(d: &mut Dev, s: &Server, l: &Layout, t: &Targets, stream: &[u8], wb: &[Writeback], occ: &[u32], rows_per: u32) {
+fn run_on_device(d: &mut Dev, s: &Server, l: &Layout, t: &Targets, prog: &Prog, wb: &[Writeback], occ: &[u32], rows_per: u32) {
     let tiles16 = (l.wp >> 2) * (l.h.next_multiple_of(4) >> 2) * 16 * l.ms;
     let mut ranges = Vec::new();
     if t.color.is_some() {
@@ -668,11 +636,7 @@ fn run_on_device(d: &mut Dev, s: &Server, l: &Layout, t: &Targets, stream: &[u8]
         ranges.push((s.sb, tiles16));
     }
     hw_upload(d, s, &ranges);
-    d.build(s.w, s.h, |b, d| {
-        b.flush(d);
-        b.set_strip(0, 1, rows_per);
-        feed(b, d, stream);
-    });
+    prog.run(d, (0, 1, rows_per));
     hw_download(d, s, &ranges);
     for r in wb {
         let (a0, a1) = ((s.heap + r.off) & !3, (s.heap + r.off + r.size + 3) & !3);
@@ -681,9 +645,19 @@ fn run_on_device(d: &mut Dev, s: &Server, l: &Layout, t: &Targets, stream: &[u8]
     hw_download(d, s, &occ.iter().map(|&o| (s.heap + o, 4)).collect::<Vec<_>>());
 }
 
+/// A pass's size; depth only: no colour attachment, nothing of it goes in or comes back.
+pub fn extent(color: Option<&Image>, zimg: Option<&Image>, simg: Option<&Image>, area: [u32; 2]) -> Option<(u32, u32)> {
+    match color.or(zimg).or(simg) {
+        _ if area[0] != 0 => Some((area[0], area[1])),
+        Some(size) => Some((size.vk.extent.width, size.vk.extent.height)),
+        None => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_pass(
-    stream: &[u8],
+    prog: &Prog,
+    bytes: usize,
     color: Option<&Image>,
     extra: &[&Image],
     zimg: Option<&Image>,
@@ -695,12 +669,7 @@ pub fn run_pass(
     placed: bool,
 ) -> Vec<u64> {
     let none = vec![0; occ.len()];
-    // Depth only: no colour attachment, nothing of it goes in or comes back.
-    let (w, h) = match color.or(zimg).or(simg) {
-        _ if area[0] != 0 => (area[0], area[1]),
-        Some(size) => (size.vk.extent.width, size.vk.extent.height),
-        None => return none,
-    };
+    let Some((w, h)) = extent(color, zimg, simg, area) else { return none };
     let (wp, hp) = ((w + 3) & !3, (h + 3) & !3);
     if color.is_some_and(|c| !image_backed(c, w, h)) || extra.iter().any(|e| !image_backed(e, w, h)) {
         return none;
@@ -728,7 +697,7 @@ pub fn run_pass(
 
     let direct = std::env::var_os("BORGVK_SIM_DIRECT");
     let hw = direct.is_none();
-    let (np, rows_per) = strips(stream.len(), wp, hp, hw, tris);
+    let (np, rows_per) = strips(bytes, wp, hp, hw, tris);
     let rows = |part: usize| part as u32 * rows_per * 4..h.min((part as u32 + 1) * rows_per * 4);
 
     let mut all = SERVERS.lock().unwrap_or_else(|e| e.into_inner());
@@ -743,9 +712,9 @@ pub fn run_pass(
         }
     }
     if hw {
-        crate::dev::with(|d| run_on_device(d, &all[0], &l, &t, stream, wb, occ, rows_per));
+        crate::dev::with(|d| run_on_device(d, &all[0], &l, &t, prog, wb, occ, rows_per));
     } else {
-            if !build_all(&mut all[..np], stream, rows_per) {
+        if !run_all(&mut all[..np], prog, rows_per) {
             log(MESA_LOG_WARN, "borgvk: the simulator stopped answering".into());
             stop_all(&mut all[..]);
             return none;
@@ -780,7 +749,7 @@ pub fn run_pass(
         }
     }
     if std::env::var_os("BORGVK_DEBUG").is_some() {
-        log(MESA_LOG_INFO, format!("borgvk: pass of {} bytes changed {changed} of {npx} pixels (format {fmt})", stream.len()));
+        log(MESA_LOG_INFO, format!("borgvk: pass of {bytes} bytes changed {changed} of {npx} pixels (format {fmt})"));
     }
     // Each strip counts its own tiles.
     occ.iter().map(|&o| all[..np].iter().map(|s| unsafe { s.mem(s.heap + o).cast::<u32>().read_unaligned() } as u64).sum()).collect()

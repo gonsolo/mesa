@@ -1,7 +1,7 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-//! The Borg device the list builder drives (`BORGVK_HW`): the DRM render node (`BORG_HW_NODE`,
+//! The Borg device the recorded lists run on (`BORGVK_HW`): the DRM render node (`BORG_HW_NODE`,
 //! default /dev/dri/renderD128), or on a host a `direct_sim` process (`BORG_HW_RAW`) or the
 //! pipes to one a launcher started (`BORG_HW_FDS=to,from`). Register writes and memory words are
 //! batched; a read or another kind of access sends the batch first.
@@ -29,9 +29,6 @@ pub struct Dev {
     mem: Vec<u32>,
     mem_off: u32,
     pub ok: bool,
-    /// The device's list builder, its state kept across renders, and the size it was set up for.
-    pub list: Option<Box<crate::list::Builder>>,
-    pub size: (u32, u32),
 }
 
 static DEV: Mutex<Option<Dev>> = Mutex::new(None);
@@ -84,20 +81,7 @@ pub fn spawn(bin: &std::ffi::OsStr) -> Option<Dev> {
 
 impl Dev {
     fn new(link: Link) -> Self {
-        Dev { link, regs: Vec::with_capacity(MAX_REGS), mem: Vec::with_capacity(MAX_MEM), mem_off: 0, ok: true, list: None, size: (0, 0) }
-    }
-
-    /// `f` with the builder, set up for `w` x `h`.
-    pub fn build<R>(&mut self, w: u32, h: u32, f: impl FnOnce(&mut crate::list::Builder, &mut Dev) -> R) -> R {
-        let mut l = self.list.take().unwrap_or_else(|| Box::new(crate::list::Builder::new()));
-        if self.size != (w, h) {
-            l.flush(self);
-            l.init(self, w, h);
-            self.size = (w, h);
-        }
-        let r = f(&mut l, self);
-        self.list = Some(l);
-        r
+        Dev { link, regs: Vec::with_capacity(MAX_REGS), mem: Vec::with_capacity(MAX_MEM), mem_off: 0, ok: true }
     }
 
     fn put(&mut self, b: &[u8]) {
