@@ -694,13 +694,10 @@ impl ShaderState {
             }
         };
         let n = if store { intr.get_src(0).as_def().num_components } else { intr.def.num_components } as u32;
-        // Past the immediate's reach the word's address is added in.
-        let (addr, imm) = if imm + 16 * n > 2047 {
-            let k = self.konst(imm);
-            (self.sel.op0(Op::Iadd, vec![addr, k]), 0)
-        } else {
-            (addr, imm)
-        };
+        if imm + 16 * n > 2047 {
+            self.refuse("a private array past the immediate's reach");
+            return;
+        }
         if store {
             let v = intr.get_src(0).as_def().index;
             let mask = intr.get_const_index(NIR_INTRINSIC_WRITE_MASK) as u32;
