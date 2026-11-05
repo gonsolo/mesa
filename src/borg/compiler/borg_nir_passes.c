@@ -1492,7 +1492,7 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_push_const,
             nir_address_format_32bit_offset);
    if (nir->info.stage == MESA_SHADER_COMPUTE) {
-      /* `shared` variables: one more memory window (compute.rs, slot 33). */
+      /* `shared` variables: one more memory window (compute.rs, after the binding windows). */
       NIR_PASS(_, nir, nir_lower_vars_to_explicit_types, nir_var_mem_shared, glsl_get_natural_size_align_bytes);
       NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_shared, nir_address_format_32bit_offset);
    }

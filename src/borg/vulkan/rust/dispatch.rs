@@ -20,7 +20,8 @@ const SLOT_BYTES: u32 = 0x80000 * 4;
 const BASE_BYTES: u32 = 0x40000 * 4;
 const MAX_PARTS: u32 = 64;
 // The filtered texture: its descriptor, the sampler's at +64, the texels at +256.
-const TEX_BYTES: u32 = BASE_BYTES + 36 * SLOT_BYTES;
+const WINDOWS: u32 = 40; // borgc's compute.rs
+const TEX_BYTES: u32 = BASE_BYTES + (WINDOWS + 4) * SLOT_BYTES;
 const TEX_DESC_BASE: u32 = 0x378 / 4;
 const SAMPLER_DESC_BASE: u32 = 0x37C / 4;
 /// ISA v2 root table (docs/B8_isa_v2.md): LW/SW base (0: compute addresses are absolute), the
@@ -80,12 +81,12 @@ pub fn unpack(pf: pipe_format, dst: &mut [u8], host: &Host, off: usize) {
     host.with_bytes(off, fmt::blocksize(pf) as usize, |t| fmt::unpack_rgba(pf, t, out));
 }
 
-/// The windows of the bound sets, the push constants and buffer sizes (slot 32) and the constant pool (slot 34).
+/// The windows of the bound sets, the push constants and buffer sizes (slot WINDOWS) and the constant pool (slot WINDOWS + 2).
 fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
     let mut bufs = Vec::new();
-    let mut sizes = [0u32; 32];
+    let mut sizes = [0u32; WINDOWS as usize];
     // Each binding's base and offset limit (borgc's TABLE_BASE): its buffer, else its window.
-    let mut table: Vec<u32> = (0..32).flat_map(|w| [BASE_BYTES + w * SLOT_BYTES, SLOT_BYTES - 4]).collect();
+    let mut table: Vec<u32> = (0..WINDOWS).flat_map(|w| [BASE_BYTES + w * SLOT_BYTES, SLOT_BYTES - 4]).collect();
     for si in 0..4 {
         let Some(set) = c.cs_set(si) else { continue };
         let dyn_off = &c.cs_dyn_offs[si];
@@ -97,7 +98,7 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
             } else {
                 Some(flat)
             };
-            let Some(window) = window.filter(|&w| w < 32) else { continue };
+            let Some(window) = window.filter(|&w| w < WINDOWS) else { continue };
             if bufs.len() >= BORGVK_CS_MAX_BUFS as usize - 3 {
                 break;
             }
@@ -267,12 +268,12 @@ fn gather(c: &CommandBuffer, pl: &Pipeline) -> Vec<CsBuf> {
 
     let pc: Vec<u8> = c.pc.iter().chain(&sizes).chain(&table).flat_map(|w| w.to_ne_bytes()).collect();
     let n = pc.len() as u32;
-    bufs.push(decoded(BASE_BYTES + 32 * SLOT_BYTES, pc, n));
+    bufs.push(decoded(BASE_BYTES + WINDOWS * SLOT_BYTES, pc, n));
     let root: Vec<u8> = [0, TEX_BYTES, TEX_BYTES + SAMPLERS, 0].iter().flat_map(|w: &u32| w.to_ne_bytes()).collect();
     bufs.push(decoded(ROOT_BYTES, root, 16));
     if pl.cs_npool != 0 {
         let pool: Vec<u8> = pl.cs_pool[..pl.cs_npool as usize].iter().flat_map(|w| w.to_ne_bytes()).collect();
-        bufs.push(decoded(BASE_BYTES + 34 * SLOT_BYTES, pool, pl.cs_npool * 4));
+        bufs.push(decoded(BASE_BYTES + (WINDOWS + 2) * SLOT_BYTES, pool, pl.cs_npool * 4));
     }
     if pl.tex_npairs != 0 && bufs.len() < BORGVK_CS_MAX_BUFS as usize {
         let n = textures(c, pl);

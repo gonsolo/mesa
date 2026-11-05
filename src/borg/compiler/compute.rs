@@ -19,11 +19,14 @@ const SLOT_BYTES: u32 = 4 * SLOT_WORDS;
 const LANES: u32 = 4; // BorgConfig.Simt: fragLanes
 const MAX_WORDS: usize = 16379; // the code at 0xF0000 up to the root table at 0xFFFF0, with its HALT
 pub(crate) const WG_BASE_REG: u32 = 12;
-/// Each binding slot's buffer size in bytes, after the 32 push constant words in slot 32.
-const SIZES_BASE: u32 = SLOT_BASE + 32 * SLOT_BYTES + 128;
+/// Binding windows, enough for Vulkan 1.0's per-stage limits (12 uniform, 4 storage buffers, 16
+/// sampled and 4 storage images); the push constants, shared memory and the pool follow.
+pub(crate) const WINDOWS: u32 = 40;
+/// Each binding slot's buffer size in bytes, after the 32 push constant words in slot WINDOWS.
+const SIZES_BASE: u32 = SLOT_BASE + WINDOWS * SLOT_BYTES + 128;
 /// Each binding's base address and offset limit (range - 4), after the sizes: the driver points a
 /// binding at its buffer in device memory or at a staged window.
-pub(crate) const TABLE_BASE: u32 = SIZES_BASE + 128;
+pub(crate) const TABLE_BASE: u32 = SIZES_BASE + 4 * WINDOWS;
 
 pub(crate) struct Out {
     pub words: Vec<u32>,
@@ -64,10 +67,10 @@ pub(crate) enum Val {
     R(u32, u8),
 }
 
-/// Word index of the constant pool, the compute job's slot 34.
-pub(crate) const POOL_BASE_WORDS: u32 = SLOT_BASE_WORDS + 34 * SLOT_WORDS;
+/// Word index of the constant pool, the compute job's slot WINDOWS + 2.
+pub(crate) const POOL_BASE_WORDS: u32 = SLOT_BASE_WORDS + (WINDOWS + 2) * SLOT_WORDS;
 pub(crate) const POOL_MAX: usize = 4096;
-/// Spill slots follow the pool in slot 34, one word per invocation of the workgroup.
+/// Spill slots follow the pool in slot WINDOWS + 2, one word per invocation of the workgroup.
 pub(crate) const SPILL_BASE_WORDS: u32 = POOL_BASE_WORDS + POOL_MAX as u32;
 
 impl ShaderState {
@@ -587,12 +590,12 @@ impl ShaderState {
         self.set(d, &v);
     }
 
-    /// Push constant words, loaded from the job's slot 32.
+    /// Push constant words, loaded from the job's slot WINDOWS.
     unsafe fn cs_push_constant(&mut self, i: &nir_intrinsic_instr) {
         let d = i.def.index;
         let o = self.val(i.get_src(0), 0);
         let base_b = i.base() as u32;
-        let pbase = SLOT_BASE + 32 * SLOT_BYTES;
+        let pbase = SLOT_BASE + WINDOWS * SLOT_BYTES;
         let mut v = vec![];
         for c in 0..i.def.num_components as u32 {
             let a = match o {
@@ -635,7 +638,7 @@ impl ShaderState {
             }
             let w2 = self.add(o, Val::K(base_b + 4 * c));
             let w2 = self.mask(w2);
-            let a = self.add(Val::K(SLOT_BASE + 33 * SLOT_BYTES), w2);
+            let a = self.add(Val::K(SLOT_BASE + (WINDOWS + 1) * SLOT_BYTES), w2);
             if store {
                 let x = self.val(i.get_src(0), c as u8);
                 self.store(a, x);
@@ -663,7 +666,7 @@ impl ShaderState {
             let o = self.val(i.get_src(0), 0);
             let w = self.add(o, Val::K(i.base() as u32));
             let w = self.mask(w);
-            self.add(Val::K(SLOT_BASE + 33 * SLOT_BYTES), w)
+            self.add(Val::K(SLOT_BASE + (WINDOWS + 1) * SLOT_BYTES), w)
         };
         let s = if ssbo { 2 } else { 1 };
         let swap = i.atomic_op() == nir_atomic_op_cmpxchg;
