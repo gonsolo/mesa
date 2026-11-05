@@ -488,7 +488,7 @@ impl Ctx<'_> {
         if c.batch_draws != 0 && (c.heap_top as u64 + need + 4 > HEAP_BYTES as u64 || full) {
             flush_draws(c);
         }
-        if c.batch_draws != 0 && pl.push_used && c.batch_push != self.device.scratch.lock().unwrap().push_words {
+        if c.batch_draws != 0 && pl.push_used && c.batch_push != c.pc {
             flush_draws(c);
         }
         // The constant pool's slot is one per pass.
@@ -539,7 +539,7 @@ impl Ctx<'_> {
             }
         }
         send_shaders(&d);
-        send_draw_state(&d);
+        send_draw_state(&d, c.push_range());
         self.state = capture_end();
         self.state_same = !self.state.is_empty() && self.state == c.state_sent.as_slice();
     }
@@ -871,7 +871,7 @@ impl Ctx<'_> {
                     }
                 }
                 if pl.push_window {
-                    send_mem(base + PUSH_WINDOW_SLOT * SLOT_BYTES, bytes_of(&self.device.scratch.lock().unwrap().push_words));
+                    send_mem(base + PUSH_WINDOW_SLOT * SLOT_BYTES, bytes_of(&c.pc));
                 }
                 vbe.iter().for_each(|&(slot, e)| set_entry(&mut table, slot, e));
                 self.table = send_table(&mut self.heap, &table)?;
@@ -1014,7 +1014,7 @@ impl Ctx<'_> {
         c.heap_top = self.heap.top;
         c.batch_draws += 1;
         c.batch_tris = c.batch_tris.saturating_add(self.p.count.saturating_mul(self.p.instances.max(1)) / 3);
-        c.batch_push = self.device.scratch.lock().unwrap().push_words;
+        c.batch_push = c.pc;
         (c.batch_img, c.batch_nextra, c.batch_extra) = (self.color, self.nextra as u32, self.extra);
         (c.batch_depth, c.batch_stencil) = (c.rendering.depth, c.rendering.stencil);
         true
