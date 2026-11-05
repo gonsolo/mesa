@@ -13,7 +13,7 @@ use crate::memory::{Buffer, DeviceMemory, Host, ViewBuffer};
 use crate::pipeline::Pipeline;
 use crate::descriptor_set::{find_flat, DescriptorSet};
 use crate::state_upload::DEFAULT_SAMPLER;
-use crate::texture_upload::generic_texture;
+use crate::texture_upload::{generic_texture, in_place};
 use crate::util::{log, MESA_LOG_WARN};
 
 const SLOT_BYTES: u32 = 0x80000 * 4;
@@ -289,16 +289,23 @@ fn textures(c: &CommandBuffer, pl: &Pipeline) -> Vec<u8> {
     for (k, &[ft, fs]) in pl.tex_pairs[..pl.tex_npairs as usize].iter().enumerate() {
         let sampler = find_flat(&sets, &pl.set_base, fs).map_or(&DEFAULT_SAMPLER, |(s, b)| s.sampler(b));
         let tex = find_flat(&sets, &pl.set_base, ft).and_then(|(s, b)| s.view(b).zip(s.image(b)));
-        let Some(t) = tex.and_then(|(v, i)| generic_texture(v, i)) else { continue };
-        let offs = if t.desc.levels > 1 { t.offs } else { [0; 12] };
-        let d = t.desc.pack();
-        let words = [TEX_BYTES + data.len() as u32, d[0], d[1], d[2]].into_iter().chain(offs);
-        for (w, v) in words.enumerate() {
-            data[64 * k + 4 * w..][..4].copy_from_slice(&v.to_ne_bytes());
-        }
         for (w, v) in sampler.iter().enumerate() {
             data[(SAMPLERS + 16 * k as u32) as usize + 4 * w..][..4].copy_from_slice(&v.to_ne_bytes());
         }
+        let put = |data: &mut Vec<u8>, words: &mut dyn Iterator<Item = u32>| {
+            for (w, v) in words.enumerate() {
+                data[64 * k + 4 * w..][..4].copy_from_slice(&v.to_ne_bytes());
+            }
+        };
+        if let Some(d) = tex.and_then(|(v, i)| in_place(v, i)) {
+            put(&mut data, &mut d.into_iter());
+            continue;
+        }
+        let Some(t) = tex.and_then(|(v, i)| generic_texture(v, i)) else { continue };
+        let offs = if t.desc.levels > 1 { t.offs } else { [0; 12] };
+        let d = t.desc.pack();
+        let at = TEX_BYTES + data.len() as u32;
+        put(&mut data, &mut [at, d[0], d[1], d[2]].into_iter().chain(offs));
         data.extend_from_slice(&t.data);
         data.resize(data.len().next_multiple_of(256), 0);
     }
