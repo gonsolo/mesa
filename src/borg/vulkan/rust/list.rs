@@ -848,24 +848,39 @@ impl Prog {
     }
 }
 
-/// The lists of a `w` x `h` pass's packet stream, built into `buf`.
-pub fn build(stream: &[u8], w: u32, h: u32, buf: VkBuf) -> Prog {
-    let (mut b, mut g) = (Builder::new(), Prog { buf, at: 0, run: Vec::new(), ok: true });
-    b.init(&mut g, w, h);
-    let mut i = 0;
-    while i < stream.len() {
-        let n = packet_len(stream[i]);
-        if n == 0 || i + n > stream.len() {
-            break;
-        }
-        if b.packet(&mut g, &stream[i..i + n]) && stream[i] == 0xBA {
-            b.draw(&mut g);
-        }
-        i += n;
+/// The open batch's lists, built draw by draw.
+pub struct Batch {
+    b: Builder,
+    g: Prog,
+}
+
+impl Batch {
+    /// For a `w` x `h` pass, built into `buf`.
+    pub fn new(w: u32, h: u32, buf: VkBuf) -> Box<Self> {
+        let mut l = Box::new(Batch { b: Builder::new(), g: Prog { buf, at: 0, run: Vec::new(), ok: true } });
+        l.b.init(&mut l.g, w, h);
+        l
     }
-    b.flush(&mut g);
-    g.end_mem();
-    g
+
+    pub fn feed(&mut self, stream: &[u8]) {
+        let mut i = 0;
+        while i < stream.len() {
+            let n = packet_len(stream[i]);
+            if n == 0 || i + n > stream.len() {
+                break;
+            }
+            if self.b.packet(&mut self.g, &stream[i..i + n]) && stream[i] == 0xBA {
+                self.b.draw(&mut self.g);
+            }
+            i += n;
+        }
+    }
+
+    pub fn end(mut self) -> Prog {
+        self.b.flush(&mut self.g);
+        self.g.end_mem();
+        self.g
+    }
 }
 
 #[cfg(test)]

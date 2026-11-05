@@ -54,8 +54,11 @@ pub struct CommandBuffer {
     pub desc_set: *mut DescriptorSet,
     pub cs_pipeline: *const Pipeline,
     pub dispatched: bool, // ran a compute dispatch at replay
-    // Draws of the open render pass, as one wire stream the simulator runs at its end.
+    // The open batch's packets not yet built, its lists, its size in packet bytes and corpus key.
     pub stream: VkBuf,
+    pub list: Option<Box<crate::list::Batch>>,
+    pub batch_bytes: usize,
+    pub batch_key: u64,
     pub heap_top: u32,
     pub batch_draws: u32,
     pub batch_tris: u32, // at most, over the batch's draws
@@ -269,7 +272,7 @@ unsafe extern "C" fn create(pool: *mut vk_command_pool, level: VkCommandBufferLe
 
 unsafe extern "C" fn reset(vk: *mut vk_command_buffer, _flags: VkCommandBufferResetFlags) {
     let c = unsafe { cmd(vk) };
-    drop((c.stream.take(), c.state_sent.take(), c.record.take()));
+    drop((c.stream.take(), c.state_sent.take(), c.record.take(), c.list.take()));
     crate::render::free_targets(c);
     clear_state(c);
     unsafe { vk_command_buffer_reset(vk) };
@@ -291,7 +294,7 @@ unsafe extern "C" fn destroy(vk: *mut vk_command_buffer) {
     let c = unsafe { cmd(vk) };
     unsafe {
         vk_command_buffer_finish(&mut c.vk);
-        drop((c.stream.take(), c.state_sent.take(), c.record.take()));
+        drop((c.stream.take(), c.state_sent.take(), c.record.take(), c.list.take()));
         crate::render::free_targets(c);
         vk_free(&(*c.vk.pool).alloc, (c as *mut CommandBuffer).cast());
     }
