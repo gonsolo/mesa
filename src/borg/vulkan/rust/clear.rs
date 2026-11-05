@@ -112,7 +112,7 @@ pub fn clear_rect(view: &vk_image_view, aspect: VkImageAspectFlags, value: &VkCl
 
 entrypoint! {
     fn borgvk_CmdClearAttachments(c: &mut CommandBuffer, _natt: u32, atts: &[VkClearAttachment], _nrects: u32, rects: &[VkClearRect]) {
-        if c.skipping() {
+        if !crate::record::gate(c) {
             return;
         }
         crate::draw::flush_draws(c); // the draws so far come first
@@ -123,7 +123,8 @@ entrypoint! {
         let clear = |c: &mut CommandBuffer, view: &vk_image_view, aspect, value: &VkClearValue, r: &VkClearRect| {
             if rec {
                 let step = Step::Clear { view, aspect, value: *value, rect: r.rect, layer: r.baseArrayLayer, layers: r.layerCount };
-                c.rec().steps.push(step);
+                let r = c.rec();
+                r.steps.push(crate::cmd_buffer::Placed { at: r.cur, first: r.cur, step });
             } else {
                 clear_rect(view, aspect, value, r.rect, r.baseArrayLayer, r.layerCount);
             }

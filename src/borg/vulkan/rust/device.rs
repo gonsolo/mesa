@@ -263,9 +263,7 @@ entrypoint! {
         // Replay of a recorded queue: borgvk's own entry points, no-ops for the rest.
         vk_device_dispatch_table_from_entrypoints(&mut d.cmd_dispatch, &borgvk_device_entrypoints, true);
         let cd = &mut d.cmd_dispatch;
-        if cd.CmdExecuteCommands.is_none() {
-            cd.CmdExecuteCommands = vk_common_device_entrypoints.CmdExecuteCommands;
-        }
+        cd.CmdExecuteCommands = Some(crate::record::replay_execute_commands);
         // Dynamic state goes to the command buffer's vk_dynamic_graphics_state, which draws read.
         let vc = &vk_common_device_entrypoints;
         (cd.CmdSetViewport, cd.CmdSetScissor, cd.CmdSetLineWidth, cd.CmdSetBlendConstants) =

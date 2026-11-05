@@ -101,10 +101,30 @@ pub struct CommandBuffer {
 pub struct Recorded {
     pub key: usize, // the open pass's recorded VkRenderingInfo
     pub active: bool,
-    pub pure: bool,
-    pub steps: Vec<Step>,
-    pub passes: Vec<(usize, Vec<Step>)>,
+    pub seq: u32,   // its draws, clears and secondaries so far
+    pub cur: u32,   // the one being recorded
+    pub first: u32, // the open batch's first
+    pub live: bool, // the open batch replays live
+    pub steps: Vec<Placed>,
+    pub lives: Vec<bool>, // per command: replays live
+    pub passes: Vec<Pass>,
     pub skip: Option<usize>, // replay: the pass whose steps replace its draws and clears
+    pub rseq: u32,           // replay: its next command
+    pub cursor: usize,       // replay: its next step
+    pub nested: bool,        // replay: a secondary's command, part of a live one
+}
+
+/// A step and the command it runs before; a batch's first command.
+pub struct Placed {
+    pub at: u32,
+    pub first: u32,
+    pub step: Step,
+}
+
+pub struct Pass {
+    pub key: usize,
+    pub steps: Vec<Placed>,
+    pub lives: Vec<bool>,
 }
 
 /// What a pass built while recording does at submit, in order.
