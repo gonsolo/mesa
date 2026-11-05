@@ -1,7 +1,7 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-//! A draw's state and shaders as wire packets.
+//! A draw's state and shaders as list builder commands.
 
 use crate::device::Scratch;
 use crate::wire::*;

@@ -47,7 +47,7 @@ impl Default for ShaderBlob {
     }
 }
 
-/// A viewport and scissor as the firmware takes them (packet 0xC2).
+/// A viewport and scissor as the list builder takes them.
 #[derive(Clone, Copy, Default)]
 pub struct Vp {
     pub valid: bool,

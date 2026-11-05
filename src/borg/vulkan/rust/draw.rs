@@ -1,8 +1,8 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-//! Draws: the bound pipeline, vertex, index and descriptor state, and each draw as packets
-//! into the open pass's stream, which the simulator runs at the pass's end.
+//! Draws: the bound pipeline, vertex, index and descriptor state, and each draw as commands into
+//! the open batch's lists, which the simulator runs at submit.
 
 use crate::cmd_buffer::CommandBuffer;
 use crate::corpus::{borgvk_corpus_log, borgvk_corpus_on, hash, hash_image};
@@ -20,7 +20,8 @@ use crate::query::OccRun;
 use crate::format::{depth_is_d32, flush_format, raw32, vertex_fetch, Fetch};
 use crate::hw::{enabled, serves_extent};
 use crate::image::blocks;
-use crate::wire::{blend_const_pack, occ_packet, send_att, send_draw, send_mem, send_pass, send_place, send_target, send_texture_slot, send_vattr, Draw};
+use crate::list::Cmd;
+use crate::wire::{blend_const_pack, send_att, send_draw, send_mem, send_pass, send_place, send_target, send_texture_slot, send_vattr, Draw};
 use crate::sim::{extent, per_sample, run_pass};
 use crate::state_upload::{send_draw_state, send_shaders, DEFAULT_SAMPLER};
 use crate::texture_upload::{send_buffer_texture, send_generic_texture};
@@ -187,17 +188,16 @@ pub fn flush_draws(c: &mut CommandBuffer) {
 
 /// Ends the batch.
 pub fn take_run(c: &mut CommandBuffer) -> Option<Run> {
-    if c.stream.is_empty() && c.batch_bytes == 0 {
-        return None;
-    }
+    c.list.as_ref()?;
     if c.occ_open {
         close_query(c, false);
     }
     build(c);
+    let (prog, key) = c.list.take().unwrap().end();
     let r = Run {
-        prog: c.list.take().map(|l| l.end()),
-        bytes: std::mem::take(&mut c.batch_bytes),
-        key: std::mem::take(&mut c.batch_key),
+        bytes: prog.as_ref().map_or(0, |p| p.len()),
+        prog,
+        key,
         img: c.batch_img,
         extra: c.batch_extra[..c.batch_nextra as usize].to_vec(),
         depth: c.batch_depth,
@@ -215,30 +215,22 @@ pub fn take_run(c: &mut CommandBuffer) -> Option<Run> {
     c.region_set = null_mut();
     (c.batch_pool, c.batch_vpool) = (null(), null());
     (c.heap_top, c.batch_draws, c.batch_img, c.batch_nextra) = (0, 0, null_mut(), 0);
-    drop(c.state_sent.take());
     Some(r)
 }
 
-/// The batch's packets so far into its lists.
+/// The batch's commands so far into its lists.
 fn build(c: &mut CommandBuffer) {
-    let s = c.stream.as_slice();
-    if s.is_empty() {
-        return;
-    }
-    if borgvk_corpus_on() {
-        c.batch_key = hash(if c.batch_bytes == 0 { BORGVK_CORPUS_SEED as u64 } else { c.batch_key }, s);
-    }
-    c.batch_bytes += s.len();
     let (img, depth, stencil) = unsafe { (c.batch_img.as_ref(), c.batch_depth.as_ref(), c.batch_stencil.as_ref()) };
-    if c.list.is_none() && c.batch_serve {
-        let (pending, buf) = (c.stream.take(), c.stream.take());
-        c.list = extent(img, depth, stencil, c.batch_area).map(|(w, h)| crate::list::Batch::new((w + 3) & !3, (h + 3) & !3, buf));
-        c.stream = pending;
-    }
+    let size = extent(img, depth, stencil, c.batch_area).filter(|_| c.batch_serve).map(|(w, h)| ((w + 3) & !3, (h + 3) & !3));
+    let alloc = unsafe { &(*c.vk.pool).alloc } as *const VkAllocationCallbacks;
     if let Some(l) = c.list.as_mut() {
-        l.feed(c.stream.as_slice());
+        l.build(size, alloc);
     }
-    c.stream.set(&[]);
+}
+
+/// The open batch, started if there is none.
+fn batch(c: &mut CommandBuffer) -> &mut crate::list::Batch {
+    c.list.get_or_insert_with(crate::list::Batch::new)
 }
 
 /// Renders a batch; its attachments live until the pass ends.
@@ -339,7 +331,7 @@ struct Ctx<'a> {
     imin: i64,
     imax: i64,
     first_of_batch: bool,
-    state: Vec<u8>,
+    state: Vec<Cmd>,
     state_same: bool,
     load: u32,
     pairs: Vec<[u32; 2]>,
@@ -355,7 +347,7 @@ struct Ctx<'a> {
 
 /// A binding's entry in the draw's binding table: base address and offset limit (borgc reads
 /// `base + min(offset, limit)`).
-/// The binding table into the draw heap; the draw packet's word (its offset + 1, 0 for none).
+/// The binding table into the draw heap; the draw's word (its offset + 1, 0 for none).
 fn send_table(heap: &mut Heap, table: &[[u32; 2]]) -> Result<u32, Reject> {
     if table.is_empty() {
         return Ok(0);
@@ -614,7 +606,7 @@ impl Ctx<'_> {
         send_shaders(&d);
         send_draw_state(&d, c.push_range());
         self.state = capture_end();
-        self.state_same = !self.state.is_empty() && self.state == c.state_sent.as_slice();
+        self.state_same = !self.state.is_empty() && c.list.as_ref().is_some_and(|b| b.sent == self.state);
     }
 
     fn begin_pass(&mut self) {
@@ -1075,15 +1067,15 @@ impl Ctx<'_> {
             let off = self.heap.top;
             self.heap.top += 4;
             c.occ[c.nocc as usize] = OccRun { off, pool: c.occ_pool, query: c.occ_query, end: false };
-            (c.nocc, c.occ_open) = (c.nocc + 1, c.stream.extend(&occ_packet(true, off)));
+            (c.nocc, c.occ_open) = (c.nocc + 1, true);
+            batch(c).pending.push(Cmd::Occ(true, off));
         }
-        let appended = (self.state_same || state.is_empty() || c.stream.extend(&state)) && c.stream.extend(&bytes);
-        if !self.state_same && !state.is_empty() && appended {
-            c.state_sent.set(&state);
+        let b = batch(c);
+        if !self.state_same && !state.is_empty() {
+            b.pending.extend_from_slice(&state);
+            b.sent = state;
         }
-        if !appended {
-            return false;
-        }
+        b.pending.extend(bytes);
         c.heap_top = self.heap.top;
         c.batch_draws += 1;
         c.batch_tris = c.batch_tris.saturating_add(self.p.count.saturating_mul(self.p.instances.max(1)) / 3);
@@ -1099,8 +1091,8 @@ impl Ctx<'_> {
 pub fn close_query(c: &mut CommandBuffer, end: bool) {
     let r = &mut c.occ[c.nocc as usize - 1];
     r.end = end;
-    let p = occ_packet(false, r.off);
-    c.stream.extend(&p);
+    let off = r.off;
+    batch(c).pending.push(Cmd::Occ(false, off));
     c.occ_open = false;
 }
 
