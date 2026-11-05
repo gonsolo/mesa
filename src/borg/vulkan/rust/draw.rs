@@ -17,12 +17,11 @@ use crate::image::Image;
 use crate::device::Device;
 use crate::pipeline::{Pipeline, Topology};
 use crate::query::OccRun;
-use crate::object::VkBuf;
 use crate::format::{depth_is_d32, flush_format, raw32, vertex_fetch, Fetch};
 use crate::hw::{enabled, serves_extent};
 use crate::image::blocks;
 use crate::wire::{blend_const_pack, occ_packet, send_att, send_draw, send_mem, send_pass, send_place, send_target, send_texture_slot, send_vattr, Draw};
-use crate::sim::{per_sample, run_pass};
+use crate::sim::{extent, per_sample, run_pass};
 use crate::state_upload::{send_draw_state, send_shaders, DEFAULT_SAMPLER};
 use crate::texture_upload::{send_buffer_texture, send_generic_texture};
 use crate::transport::{borgvk_transport_capture_begin, capture_end};
@@ -155,9 +154,11 @@ fn corpus_state(h: u64, img: Option<&Image>, extra: &[&Image], depth: Option<&Im
     wb.iter().fold(h, |h, w| if w.size == 0 { h } else { hash(h, unsafe { std::slice::from_raw_parts(w.host, w.host_size()) }) })
 }
 
-/// A batch of draws, taken at its end: its stream, attachments, writebacks and query runs.
+/// A batch of draws, taken at its end: its lists, attachments, writebacks and query runs.
 pub struct Run {
-    stream: VkBuf,
+    prog: Option<crate::list::Prog>,
+    bytes: usize,
+    key: u64,
     img: *mut Image,
     extra: Vec<*mut Image>,
     depth: *mut Image,
@@ -192,8 +193,13 @@ pub fn take_run(c: &mut CommandBuffer) -> Option<Run> {
     if c.occ_open {
         close_query(c, false);
     }
+    let (stream, buf) = (c.stream.take(), c.stream.take());
+    let (img, depth, stencil) = unsafe { (c.batch_img.as_ref(), c.batch_depth.as_ref(), c.batch_stencil.as_ref()) };
+    let size = extent(img, depth, stencil, c.batch_area).filter(|_| c.batch_serve);
     let r = Run {
-        stream: c.stream.take(),
+        prog: size.map(|(w, h)| crate::list::build(stream.as_slice(), (w + 3) & !3, (h + 3) & !3, buf)),
+        bytes: stream.as_slice().len(),
+        key: if borgvk_corpus_on() { hash(BORGVK_CORPUS_SEED as u64, stream.as_slice()) } else { 0 },
         img: c.batch_img,
         extra: c.batch_extra[..c.batch_nextra as usize].to_vec(),
         depth: c.batch_depth,
@@ -223,10 +229,13 @@ pub fn run(r: &Run) {
     let rec = borgvk_corpus_on();
     let seed = BORGVK_CORPUS_SEED as u64;
     let state = |h| corpus_state(h, img, &extra, depth, stencil, &r.wb);
-    let key = if rec { state(hash(seed, r.stream.as_slice())) } else { seed };
+    let key = if rec { state(r.key) } else { seed };
     let words: Vec<u32> = r.occ.iter().map(|o| o.off).collect();
     let counts = if r.serve {
-        let n = run_pass(r.stream.as_slice(), img, &extra, depth, stencil, &r.wb, r.area, &words, r.tris, r.placed);
+        let n = match &r.prog {
+            Some(p) if p.ok => run_pass(p, r.bytes, img, &extra, depth, stencil, &r.wb, r.area, &words, r.tris, r.placed),
+            _ => vec![0; r.occ.len()],
+        };
         if let (Some(path), Some(i)) = (std::env::var_os("BORGVK_DUMP_PPM").filter(|p| !p.is_empty()), img) {
             dump_ppm(i, std::path::Path::new(&path));
         }

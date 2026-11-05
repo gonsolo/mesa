@@ -3,9 +3,11 @@
 
 //! Render lists built in the driver (docs/B1_geometry_front_end.md, "Render lists";
 //! docs/B13_device_memory.md, step 2), as `software/borg/borg_core.c` built them, with the state
-//! in a struct. The GPU is three primitives, as there.
+//! in a struct. They are built when a batch ends, into a `Prog` the command buffer keeps, which a
+//! device replays at submit.
 
 use crate::ffi::*;
+use crate::object::VkBuf;
 
 pub trait Gpu {
     fn reg(&mut self, off: u32, v: u32);
@@ -197,8 +199,7 @@ pub struct Builder {
     tex_lvl: [u32; 12],
     push_used: bool,
     list: List,
-    strip: (u32, u32, u32),
-    occ: (bool, u32, u32),
+    occ: (bool, u32),
     window_tiles: u32,
 }
 
@@ -241,8 +242,7 @@ impl Builder {
             tex_lvl: [0; 12],
             push_used: false,
             list: List { top: BORG_LIST_ENTRY_BYTES, ..Default::default() },
-            strip: (0, 1, 0),
-            occ: (false, 0, 0),
+            occ: (false, 0),
             window_tiles: wt,
         }
     }
@@ -256,7 +256,7 @@ impl Builder {
         self.fb_w * self.fb_h * flush_bytes(self.flush_format) / 4 * if self.ms != 0 { 4 } else { 1 } + 1
     }
 
-    fn apply_layout(&mut self, g: &mut dyn Gpu) {
+    fn apply_layout(&mut self, g: &mut Prog) {
         let stride = self.frame_stride_words();
         g.reg(r!(flush_fb_base), if self.place[0] != 0 { self.place[0] } else { DRAM_SPI_BASE + DRAM_OUT_OFFSET });
         g.reg(r!(flush_format), self.flush_format | self.nocolor << 3 | self.srgb << 4);
@@ -268,18 +268,14 @@ impl Builder {
     }
 
     /// The target size, as the 0xBC request sets it.
-    pub fn init(&mut self, g: &mut dyn Gpu, w: u32, h: u32) {
+    pub fn init(&mut self, g: &mut Prog, w: u32, h: u32) {
         self.flush_format = 0;
         (self.fb_w, self.fb_h, self.place, self.pitch) = (w, h, [0; 6], 0);
         (self.half_w, self.half_h) = (float_from_uint(w / 2), float_from_uint(h / 2));
         self.apply_layout(g);
     }
 
-    pub fn set_strip(&mut self, k: u32, n: u32, rows: u32) {
-        self.strip = (k, n.max(1), rows);
-    }
-
-    fn stage_shader(&mut self, g: &mut dyn Gpu, stage: usize, blob: &[u8]) {
+    fn stage_shader(&mut self, g: &mut Prog, stage: usize, blob: &[u8]) {
         let n = blob_instrs(blob);
         if n > DRAW_VERT_SHADER_MAX_WORDS {
             return;
@@ -316,7 +312,7 @@ impl Builder {
         }
     }
 
-    fn tex_desc_store(&mut self, g: &mut dyn Gpu, d: &[u32; 16]) {
+    fn tex_desc_store(&mut self, g: &mut Prog, d: &[u32; 16]) {
         let s = self.tex_slot;
         self.tex_desc[s as usize] = *d;
         for (w, &v) in d.iter().enumerate() {
@@ -327,14 +323,14 @@ impl Builder {
         self.vtab_dirty = true;
     }
 
-    fn sampler_store(&self, g: &mut dyn Gpu, samp: &[u32]) {
+    fn sampler_store(&self, g: &mut Prog, samp: &[u32]) {
         for (i, &v) in samp.iter().enumerate() {
             g.mem(SAMPLER_DESC_TABLE_ADDR + self.samp_slot * 16 + i as u32 * 4, v);
         }
         g.reg(r!(desc_flush), 0);
     }
 
-    fn root_table(g: &mut dyn Gpu, at: u32, ls: u32, tex: u32, samp: u32, table: u32) -> u32 {
+    fn root_table(g: &mut Prog, at: u32, ls: u32, tex: u32, samp: u32, table: u32) -> u32 {
         for (i, v) in [ls, tex, samp, table].into_iter().enumerate() {
             g.mem(at + 4 * i as u32, v);
         }
@@ -359,7 +355,7 @@ impl Builder {
         a
     }
 
-    fn block(&mut self, g: &mut dyn Gpu, regs: &[[u32; 2]]) -> u32 {
+    fn block(&mut self, g: &mut Prog, regs: &[[u32; 2]]) -> u32 {
         let a = self.alloc(4 + regs.len() as u32 * 8);
         g.mem(a, regs.len() as u32);
         for (i, [o, v]) in regs.iter().enumerate() {
@@ -369,7 +365,7 @@ impl Builder {
         a
     }
 
-    fn list_stage(&mut self, g: &mut dyn Gpu, stage: usize) {
+    fn list_stage(&mut self, g: &mut Prog, stage: usize) {
         if self.sh[stage].code != 0 {
             return;
         }
@@ -403,7 +399,7 @@ impl Builder {
     }
 
     /// Queues the draw the last 0xBA described.
-    pub fn draw(&mut self, g: &mut dyn Gpu) {
+    pub fn draw(&mut self, g: &mut Prog) {
         let (bias_c, bias_s) = (self.bias[0], self.bias[1]);
         self.bias = [0; 2];
         let Some(vert) = self.vert else { return };
@@ -500,11 +496,7 @@ impl Builder {
         self.list.n += 1;
     }
 
-    fn wait(g: &mut dyn Gpu, bit: u32, set: bool) {
-        g.wait(r!(status), bit, if set { bit } else { 0 });
-    }
-
-    fn trigger(&mut self, g: &mut dyn Gpu, list: u32, load: u32) {
+    fn trigger(&mut self, g: &mut Prog, list: u32, load: u32) {
         let cc_lo = (self.clear[2] as u32) << 16 | FP16_MAX_DEPTH;
         let cc_hi = (self.clear[0] as u32) << 16 | self.clear[1] as u32;
         g.reg(r!(seq_fb_base), if self.place[0] != 0 { self.place[0] } else { DRAM_SPI_BASE + DRAM_OUT_OFFSET });
@@ -532,27 +524,12 @@ impl Builder {
                 g.reg(reg, a);
             }
         }
-        let fb_rows = self.fb_h >> 2;
-        let (k, n, per) = self.strip;
-        let (y0, rows) = if n > 1 { (k * per, per.min(fb_rows.saturating_sub(k * per))) } else { (0, fb_rows) };
-        let mut wy = y0;
-        while wy < y0 + rows {
-            let mut wx = 0;
-            while wx < fb_tiles {
-                g.reg(r!(seq_tile_rows), (y0 + rows - wy).min(win));
-                g.reg(r!(fb_origin), wx | wy << 16);
-                g.reg(r!(seq_trigger), 1);
-                Self::wait(g, STATUS_REG_T__SEQ_BUSY_bm, false);
-                wx += win;
-            }
-            wy += win;
-        }
-        Self::wait(g, STATUS_REG_T__IDLE_bm, true);
+        g.op(&[TILES, fb_tiles, self.fb_h >> 2, win]);
         g.reg(r!(render_list), 0);
     }
 
     /// Renders what is queued.
-    pub fn flush(&mut self, g: &mut dyn Gpu) {
+    pub fn flush(&mut self, g: &mut Prog) {
         if self.list.n == 0 {
             return;
         }
@@ -561,14 +538,12 @@ impl Builder {
         self.trigger(g, BORG_LIST_SPI, self.list.load);
         self.list_reset();
         if self.occ.0 {
-            self.occ.2 = self.occ.2.wrapping_add(g.read(r!(occ_count)));
-            g.mem(self.occ.1, self.occ.2);
-            g.reg(r!(occ_ctrl), 3);
+            g.op(&[OCC, self.occ.1]);
         }
     }
 
     /// One packet of the stream; false when it is malformed.
-    pub fn packet(&mut self, g: &mut dyn Gpu, p: &[u8]) -> bool {
+    pub fn packet(&mut self, g: &mut Prog, p: &[u8]) -> bool {
         if matches!(p[0], 0xB2 | 0xB5 | 0xB6 | 0xBB | 0xBF | 0xC6 | 0xC7 | 0xC8) {
             self.flush(g);
         }
@@ -627,7 +602,8 @@ impl Builder {
                 if p[1] > 1 || off & 3 != 0 || off >= BORG_HEAP_BYTES {
                     return false;
                 }
-                self.occ = (p[1] != 0, BORG_HEAP_SPI + off, 0);
+                self.occ = (p[1] != 0, BORG_HEAP_SPI + off);
+                g.op(&[OCC_BEGIN]);
                 if self.occ.0 {
                     g.mem(self.occ.1, 0);
                 }
@@ -773,6 +749,123 @@ impl Builder {
         }
         true
     }
+}
+
+const MEM: u32 = 0;
+const REG: u32 = 1;
+const TILES: u32 = 2;
+const OCC_BEGIN: u32 = 3;
+const OCC: u32 = 4;
+
+/// What the builder writes, kept with the command buffer: memory, registers, the renders of the
+/// tile windows and the occlusion counts. A device replays it as one strip of tile rows.
+pub struct Prog {
+    buf: VkBuf,
+    at: u32,
+    run: Vec<u32>,
+    pub ok: bool,
+}
+
+// Shared only to be read, by the threads of the strips.
+unsafe impl Sync for Prog {}
+
+impl Prog {
+    fn put(&mut self, w: &[u32]) {
+        self.ok &= self.buf.extend(unsafe { std::slice::from_raw_parts(w.as_ptr().cast(), w.len() * 4) });
+    }
+
+    fn end_mem(&mut self) {
+        if !self.run.is_empty() {
+            let run = std::mem::take(&mut self.run);
+            self.put(&[MEM, self.at, run.len() as u32]);
+            self.put(&run);
+        }
+    }
+
+    fn mem(&mut self, addr: u32, v: u32) {
+        if !self.run.is_empty() && addr != self.at + 4 * self.run.len() as u32 {
+            self.end_mem();
+        }
+        if self.run.is_empty() {
+            self.at = addr;
+        }
+        self.run.push(v);
+    }
+
+    fn reg(&mut self, off: u32, v: u32) {
+        self.op(&[REG, off, v]);
+    }
+
+    fn op(&mut self, w: &[u32]) {
+        self.end_mem();
+        self.put(w);
+    }
+
+    /// Replays on `g` as strip `k` of `n`, `per` tile rows each.
+    pub fn run(&self, g: &mut dyn Gpu, (k, n, per): (u32, u32, u32)) {
+        let b = self.buf.as_slice();
+        let w = |i: usize| le32(&b[4 * i..]);
+        let (mut i, mut occ) = (0, 0u32);
+        while 4 * i < b.len() {
+            match w(i) {
+                MEM => {
+                    let (a, m) = (w(i + 1), w(i + 2) as usize);
+                    for j in 0..m {
+                        g.mem(a + 4 * j as u32, w(i + 3 + j));
+                    }
+                    i += 3 + m;
+                }
+                REG => {
+                    g.reg(w(i + 1), w(i + 2));
+                    i += 3;
+                }
+                TILES => {
+                    let (fb_tiles, fb_rows, win) = (w(i + 1), w(i + 2), w(i + 3));
+                    let (y0, rows) = if n > 1 { (k * per, per.min(fb_rows.saturating_sub(k * per))) } else { (0, fb_rows) };
+                    for wy in (y0..y0 + rows).step_by(win.max(1) as usize) {
+                        for wx in (0..fb_tiles).step_by(win.max(1) as usize) {
+                            g.reg(r!(seq_tile_rows), (y0 + rows - wy).min(win));
+                            g.reg(r!(fb_origin), wx | wy << 16);
+                            g.reg(r!(seq_trigger), 1);
+                            g.wait(r!(status), STATUS_REG_T__SEQ_BUSY_bm, 0);
+                        }
+                    }
+                    g.wait(r!(status), STATUS_REG_T__IDLE_bm, STATUS_REG_T__IDLE_bm);
+                    i += 4;
+                }
+                OCC_BEGIN => {
+                    occ = 0;
+                    i += 1;
+                }
+                _ => {
+                    occ = occ.wrapping_add(g.read(r!(occ_count)));
+                    g.mem(w(i + 1), occ);
+                    g.reg(r!(occ_ctrl), 3);
+                    i += 2;
+                }
+            }
+        }
+    }
+}
+
+/// The lists of a `w` x `h` pass's packet stream, built into `buf`.
+pub fn build(stream: &[u8], w: u32, h: u32, buf: VkBuf) -> Prog {
+    let (mut b, mut g) = (Builder::new(), Prog { buf, at: 0, run: Vec::new(), ok: true });
+    b.init(&mut g, w, h);
+    let mut i = 0;
+    while i < stream.len() {
+        let n = packet_len(stream[i]);
+        if n == 0 || i + n > stream.len() {
+            break;
+        }
+        if b.packet(&mut g, &stream[i..i + n]) && stream[i] == 0xBA {
+            b.draw(&mut g);
+        }
+        i += n;
+    }
+    b.flush(&mut g);
+    g.end_mem();
+    g
 }
 
 #[cfg(test)]
