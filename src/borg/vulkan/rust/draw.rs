@@ -187,19 +187,17 @@ pub fn flush_draws(c: &mut CommandBuffer) {
 
 /// Ends the batch.
 pub fn take_run(c: &mut CommandBuffer) -> Option<Run> {
-    if c.stream.is_empty() {
+    if c.stream.is_empty() && c.batch_bytes == 0 {
         return None;
     }
     if c.occ_open {
         close_query(c, false);
     }
-    let (stream, buf) = (c.stream.take(), c.stream.take());
-    let (img, depth, stencil) = unsafe { (c.batch_img.as_ref(), c.batch_depth.as_ref(), c.batch_stencil.as_ref()) };
-    let size = extent(img, depth, stencil, c.batch_area).filter(|_| c.batch_serve);
+    build(c);
     let r = Run {
-        prog: size.map(|(w, h)| crate::list::build(stream.as_slice(), (w + 3) & !3, (h + 3) & !3, buf)),
-        bytes: stream.as_slice().len(),
-        key: if borgvk_corpus_on() { hash(BORGVK_CORPUS_SEED as u64, stream.as_slice()) } else { 0 },
+        prog: c.list.take().map(|l| l.end()),
+        bytes: std::mem::take(&mut c.batch_bytes),
+        key: std::mem::take(&mut c.batch_key),
         img: c.batch_img,
         extra: c.batch_extra[..c.batch_nextra as usize].to_vec(),
         depth: c.batch_depth,
@@ -219,6 +217,28 @@ pub fn take_run(c: &mut CommandBuffer) -> Option<Run> {
     (c.heap_top, c.batch_draws, c.batch_img, c.batch_nextra) = (0, 0, null_mut(), 0);
     drop(c.state_sent.take());
     Some(r)
+}
+
+/// The batch's packets so far into its lists.
+fn build(c: &mut CommandBuffer) {
+    let s = c.stream.as_slice();
+    if s.is_empty() {
+        return;
+    }
+    if borgvk_corpus_on() {
+        c.batch_key = hash(if c.batch_bytes == 0 { BORGVK_CORPUS_SEED as u64 } else { c.batch_key }, s);
+    }
+    c.batch_bytes += s.len();
+    let (img, depth, stencil) = unsafe { (c.batch_img.as_ref(), c.batch_depth.as_ref(), c.batch_stencil.as_ref()) };
+    if c.list.is_none() && c.batch_serve {
+        let (pending, buf) = (c.stream.take(), c.stream.take());
+        c.list = extent(img, depth, stencil, c.batch_area).map(|(w, h)| crate::list::Batch::new((w + 3) & !3, (h + 3) & !3, buf));
+        c.stream = pending;
+    }
+    if let Some(l) = c.list.as_mut() {
+        l.feed(c.stream.as_slice());
+    }
+    c.stream.set(&[]);
 }
 
 /// Renders a batch; its attachments live until the pass ends.
@@ -1070,6 +1090,7 @@ impl Ctx<'_> {
         c.batch_push = c.pc;
         (c.batch_img, c.batch_nextra, c.batch_extra) = (self.color, self.nextra as u32, self.extra);
         (c.batch_depth, c.batch_stencil) = (c.rendering.depth, c.rendering.stencil);
+        build(c);
         true
     }
 }
