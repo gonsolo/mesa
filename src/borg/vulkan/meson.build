@@ -136,7 +136,7 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-type', 'VkDescriptorSetAllocateInfo|VkWriteDescriptorSet|VkCopyDescriptorSet|VkDescriptorPoolResetFlags',
     '--allowlist-type', 'vk_sync_type|vk_sync_wait|vk_sync_features|vk_sync_wait_flags|VkQueryPoolCreateInfo|VkQueryPool|VkImageMemoryRequirementsInfo2|VkImageSubresource2KHR|VkSubresourceLayout2KHR|VkBindImageMemoryInfo|VkImageViewCreateInfo',
     '--allowlist-type', 'VkSamplerCreateInfo|VkImageCreateInfo|vk_object_base|VkEventCreateInfo|VkQueryPoolCreateInfo|VkQueryResultFlagBits|VkDependencyInfo|VkCommandBuffer|VkEvent|VkPipelineStageFlags2?',
-    '--allowlist-var', 'BORGC_.*|BC_.*|BORG_(ZB|SB|HEAP)_SPI|BORG_DEVICE_(BASE|BYTES)|DRAM_OUT_BASE_SPI',
+    '--allowlist-var', 'BORGC_.*|BORG_(ZB|SB|HEAP)_SPI|BORG_DEVICE_(BASE|BYTES)|DRAM_OUT_BASE_SPI',
     '--allowlist-var', 'STATUS_REG_T__(SEQ_BUSY|IDLE)_bm|CULL_CFG_REG_T__CULL_MODE_bp|BORG_.*|DRAW_.*|TBR_.*|TEX_DESC_TABLE_ADDR|SAMPLER_DESC_TABLE_ADDR|FP16_MAX_DEPTH|DRAM_SPI_BASE|DRAM_OUT_OFFSET',
     '--allowlist-type', 'borg_gpu_t|spirb_shader_t', '--allowlist-function', 'spirb_parse',
     '--allowlist-var', 'PROT_(READ|WRITE)|MAP_(PRIVATE|ANONYMOUS|NORESERVE|SHARED)|MADV_REMOVE|SIGPIPE|_SC_NPROCESSORS_ONLN',
