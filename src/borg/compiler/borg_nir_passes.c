@@ -150,8 +150,7 @@ borg_frag_image_filter(const nir_instr *instr, const void *data)
    /* A storage image in place (a 2D one: draw.rs binds no other). */
    if (instr->type == nir_instr_type_intrinsic && borg_texel_buffer_filter(instr, data)) {
       const nir_intrinsic_instr *i = nir_instr_as_intrinsic(instr);
-      nir_variable *var = i->intrinsic != nir_intrinsic_image_deref_size
-                             ? nir_deref_instr_get_variable(nir_src_as_deref(i->src[0])) : NULL;
+      nir_variable *var = nir_deref_instr_get_variable(nir_src_as_deref(i->src[0]));
       if (var && !borg_image_atomic(i) && nir_intrinsic_image_dim(i) == GLSL_SAMPLER_DIM_2D &&
           !nir_intrinsic_image_array(i) && borg_lower_image_in_place(var->data.image.format))
          return true;
