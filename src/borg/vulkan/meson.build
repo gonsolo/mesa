@@ -16,19 +16,12 @@ borgvk_entrypoints = custom_target(
 libborgvk_files = []
 
 # The SPIR-B parser of software/borg, host build; its headers give the packet and memory layout.
-borg_sw = '../../../../software/borg/'
 borg_sw_inc = include_directories(
   '../../../../software/borg',
   '../../../../out/hardware/borg/rdl',
   '../../../include/drm-uapi',
 )
-libborg_host = static_library(
-  'borg_host',
-  files(borg_sw + 'borg_spirb.c'),
-  c_args : ['-DBORG_HOST', '-Wno-unused-parameter'],
-  include_directories : borg_sw_inc,
-)
-idep_borg_host = declare_dependency(link_with : libborg_host, include_directories : borg_sw_inc)
+idep_borg_host = declare_dependency(include_directories : borg_sw_inc)
 
 if with_borgc
   borgvk_compiler_deps = [idep_borg_nir_passes, idep_nir]
@@ -138,7 +131,7 @@ _borgvk_bindings_rs = rust.bindgen(
     '--allowlist-type', 'VkSamplerCreateInfo|VkImageCreateInfo|vk_object_base|VkEventCreateInfo|VkQueryPoolCreateInfo|VkQueryResultFlagBits|VkDependencyInfo|VkCommandBuffer|VkEvent|VkPipelineStageFlags2?',
     '--allowlist-var', 'BORGC_.*|BORG_(ZB|SB|HEAP)_SPI|BORG_DEVICE_(BASE|BYTES)|DRAM_OUT_BASE_SPI',
     '--allowlist-var', 'STATUS_REG_T__(SEQ_BUSY|IDLE)_bm|CULL_CFG_REG_T__CULL_MODE_bp|BORG_.*|DRAW_.*|TBR_.*|TEX_DESC_TABLE_ADDR|SAMPLER_DESC_TABLE_ADDR|FP16_MAX_DEPTH|DRAM_SPI_BASE|DRAM_OUT_OFFSET',
-    '--allowlist-type', 'borg_gpu_t|spirb_shader_t', '--allowlist-function', 'spirb_parse',
+    '--allowlist-type', 'borg_gpu_t',
     '--allowlist-var', 'PROT_(READ|WRITE)|MAP_(PRIVATE|ANONYMOUS|NORESERVE|SHARED)|MADV_REMOVE|SIGPIPE|_SC_NPROCESSORS_ONLN',
   ],
   include_directories : [borgvk_inc, include_directories('.')],
