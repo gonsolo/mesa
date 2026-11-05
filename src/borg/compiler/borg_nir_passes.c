@@ -1431,10 +1431,6 @@ borg_lower_nir_for_borgc_blend(struct nir_shader *nir, const struct borg_blend *
       NIR_PASS(_, nir, nir_lower_var_copies);
       NIR_PASS(_, nir, nir_lower_vars_to_scratch, 0, glsl_get_natural_size_align_bytes, glsl_get_natural_size_align_bytes);
    }
-   /* A local array over 4 words at a run-time index lives in scratch: an access is an address and a
-    * load or store, where the if/else tree below touches every element. */
-   if (nir->info.stage == MESA_SHADER_FRAGMENT || nir->info.stage == MESA_SHADER_VERTEX)
-      NIR_PASS(_, nir, nir_lower_vars_to_scratch, 16, glsl_get_natural_size_align_bytes, glsl_get_natural_size_align_bytes);
    NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees, nir_var_function_temp | nir_var_shader_temp | nir_var_shader_in, UINT32_MAX);
    /* A vertex shader that writes an output in a branch: turn the branches into selects. */
    if (nir->info.stage == MESA_SHADER_VERTEX || nir->info.stage == MESA_SHADER_FRAGMENT) {
