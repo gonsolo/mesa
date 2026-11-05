@@ -140,7 +140,8 @@ entrypoint! {
             crate::draw::close_query(c, true);
         } else if c.recording() {
             if c.in_rendering {
-                c.rec().steps.push(crate::cmd_buffer::Step::Avail(pool, query));
+                let r = c.rec();
+                r.steps.push(crate::cmd_buffer::Placed { at: r.seq, first: r.seq, step: crate::cmd_buffer::Step::Avail(pool, query) });
             }
         } else if c.skipping() {
             // The pass's steps make it available.

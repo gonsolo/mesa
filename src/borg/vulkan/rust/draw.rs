@@ -174,7 +174,11 @@ pub struct Run {
 pub fn flush_draws(c: &mut CommandBuffer) {
     let Some(r) = take_run(c) else { return };
     if c.recording() {
-        c.rec().steps.push(crate::cmd_buffer::Step::Run(r));
+        let rec = c.rec();
+        if !rec.live {
+            rec.steps.push(crate::cmd_buffer::Placed { at: rec.cur, first: rec.first, step: crate::cmd_buffer::Step::Run(r) });
+        }
+        (rec.live, rec.first) = (false, rec.cur);
     } else {
         run(&r);
     }
@@ -1352,9 +1356,6 @@ fn generic_draw(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
 }
 
 fn sim_draw(c: &mut CommandBuffer, mut p: Params) {
-    if c.skipping() {
-        return;
-    }
     let (device, c) = c.split_device();
     // Only the simulator or the device renders.
     if !(std::env::var_os("BORGVK_SIM_DIRECT").is_some() || enabled()) {
@@ -1370,12 +1371,18 @@ fn sim_draw(c: &mut CommandBuffer, mut p: Params) {
 
 entrypoint! {
     fn borgvk_CmdDraw(c: &mut CommandBuffer, count: u32, instances: u32, first: u32, first_instance: u32) {
+        if !crate::record::gate(c) {
+            return;
+        }
         sim_draw(c, Params { count, instances, first, first_instance, ..Default::default() });
     }
 }
 
 entrypoint! {
     fn borgvk_CmdDrawIndexed(c: &mut CommandBuffer, count: u32, instances: u32, first: u32, vertex_offset: i32, first_instance: u32) {
+        if !crate::record::gate(c) {
+            return;
+        }
         sim_draw(c, Params { indexed: true, count, instances, first, vertex_offset, first_instance, ..Default::default() });
     }
 }
@@ -1396,6 +1403,9 @@ pub(crate) fn indirect<T: Copy + Default>(buffer: Option<&Buffer>, offset: VkDev
 
 entrypoint! {
     fn borgvk_CmdDrawIndirect(c: &mut CommandBuffer, buffer: Option<&Buffer>, offset: VkDeviceSize, count: u32, stride: u32) {
+        if !crate::record::gate(c) {
+            return;
+        }
         for d in indirect::<VkDrawIndirectCommand>(buffer, offset, count, stride) {
             let p = Params { count: d.vertexCount, instances: d.instanceCount, first: d.firstVertex, first_instance: d.firstInstance, ..Default::default() };
             sim_draw(c, p);
@@ -1405,6 +1415,9 @@ entrypoint! {
 
 entrypoint! {
     fn borgvk_CmdDrawIndexedIndirect(c: &mut CommandBuffer, buffer: Option<&Buffer>, offset: VkDeviceSize, count: u32, stride: u32) {
+        if !crate::record::gate(c) {
+            return;
+        }
         for d in indirect::<VkDrawIndexedIndirectCommand>(buffer, offset, count, stride) {
             let p = Params {
                 indexed: true,

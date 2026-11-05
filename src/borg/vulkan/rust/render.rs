@@ -103,7 +103,7 @@ entrypoint! {
         if !rec {
             let key = std::ptr::from_ref(ri) as usize;
             let r = c.rec();
-            r.skip = r.passes.iter().position(|(k, _)| *k == key);
+            (r.skip, r.rseq, r.cursor) = (r.passes.iter().position(|p| p.key == key), 0, 0);
         }
         c.in_rendering = true;
         c.render_area = ri.renderArea;
@@ -147,20 +147,23 @@ fn layers(view: &vk_image_view, count: u32) -> Sub {
 
 entrypoint! {
     fn borgvk_CmdEndRendering2EXT(c: &mut CommandBuffer, _info: *const VkRenderingEndInfoEXT) {
+        if c.recording() && c.rec().active {
+            let r = c.rec();
+            r.cur = r.seq;
+        }
         crate::draw::flush_draws(c);
         if c.recording() {
             let r = c.rec();
-            let steps = std::mem::take(&mut r.steps);
-            if r.pure && !crate::memory::touched() {
-                r.passes.push((r.key, steps));
+            if r.active {
+                let pass = crate::cmd_buffer::Pass { key: r.key, steps: std::mem::take(&mut r.steps), lives: std::mem::take(&mut r.lives) };
+                r.passes.push(pass);
             }
             r.active = false;
             return end_pass(c);
         }
-        if let Some(i) = c.rec().skip.take() {
-            for s in &c.rec().passes[i].1 {
-                s.run();
-            }
+        if c.skipping() {
+            crate::record::steps_until(c, u32::MAX);
+            c.rec().skip = None;
         }
         let ra = c.render_area;
         let at = [ra.offset.x, ra.offset.y, 0];
