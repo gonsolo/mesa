@@ -88,7 +88,7 @@ pub struct Pipeline {
     pub cs_flags: u32,
     pub cs_pool: [u32; BORGVK_CS_POOL_MAX as usize],
     pub cs_npool: u32,
-    pub cs_windows: [u8; 32], // flat slot of each window, when cs_compact
+    pub cs_windows: [u8; 40], // flat slot of each window, when cs_compact
     pub cs_nwindows: u8,
     pub cs_compact: bool,
 }
