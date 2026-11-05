@@ -138,6 +138,12 @@ entrypoint! {
     fn borgvk_CmdEndQuery(c: &mut CommandBuffer, pool: &QueryPool, query: u32) {
         if c.occ_open {
             crate::draw::close_query(c, true);
+        } else if c.recording() {
+            if c.in_rendering {
+                c.rec().steps.push(crate::cmd_buffer::Step::Avail(pool, query));
+            }
+        } else if c.skipping() {
+            // The pass's steps make it available.
         } else if let Some(s) = pool.slot(query) {
             s.avail.store(true, Relaxed);
         }

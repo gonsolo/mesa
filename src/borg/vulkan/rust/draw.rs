@@ -174,7 +174,7 @@ pub struct Run {
 pub fn flush_draws(c: &mut CommandBuffer) {
     let Some(r) = take_run(c) else { return };
     if c.recording() {
-        c.rec().runs.push(r);
+        c.rec().steps.push(crate::cmd_buffer::Step::Run(r));
     } else {
         run(&r);
     }
@@ -1352,7 +1352,7 @@ fn generic_draw(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
 }
 
 fn sim_draw(c: &mut CommandBuffer, mut p: Params) {
-    if c.record.as_ref().is_some_and(|r| r.skip.is_some()) {
+    if c.skipping() {
         return;
     }
     let (device, c) = c.split_device();
