@@ -17,6 +17,7 @@ use crate::image::Image;
 use crate::device::Device;
 use crate::pipeline::{Pipeline, Topology};
 use crate::query::OccRun;
+use crate::object::VkBuf;
 use crate::format::{depth_is_d32, flush_format, raw32, vertex_fetch, Fetch};
 use crate::hw::{enabled, serves_extent};
 use crate::image::blocks;
@@ -154,35 +155,71 @@ fn corpus_state(h: u64, img: Option<&Image>, extra: &[&Image], depth: Option<&Im
     wb.iter().fold(h, |h, w| if w.size == 0 { h } else { hash(h, unsafe { std::slice::from_raw_parts(w.host, w.host_size()) }) })
 }
 
+/// A batch of draws, taken at its end: its stream, attachments, writebacks and query runs.
+pub struct Run {
+    stream: VkBuf,
+    img: *mut Image,
+    extra: Vec<*mut Image>,
+    depth: *mut Image,
+    stencil: *mut Image,
+    serve: bool,
+    area: [u32; 2],
+    wb: Vec<Writeback>,
+    tris: u32,
+    placed: bool,
+    occ: Vec<OccRun>,
+}
+
 /// Runs the draws batched so far.
 pub fn flush_draws(c: &mut CommandBuffer) {
+    if let Some(r) = take_run(c) {
+        run(&r);
+    }
+}
+
+/// Ends the batch.
+pub fn take_run(c: &mut CommandBuffer) -> Option<Run> {
     if c.stream.is_empty() {
-        return;
+        return None;
     }
     if c.occ_open {
         close_query(c, false);
     }
-    let (occ, nocc) = (c.occ, c.nocc as usize);
+    let r = Run {
+        stream: c.stream.take(),
+        img: c.batch_img,
+        extra: c.batch_extra[..c.batch_nextra as usize].to_vec(),
+        depth: c.batch_depth,
+        stencil: c.batch_stencil,
+        serve: c.batch_serve,
+        area: c.batch_area,
+        wb: c.wb[..c.nwb as usize].to_vec(),
+        tris: c.batch_tris,
+        placed: c.batch_in_place,
+        occ: c.occ[..c.nocc as usize].to_vec(),
+    };
     c.nocc = 0;
-    let stream = c.stream.take();
-    // The batch's attachments, kept as pointers across its draws; they live until the pass ends.
-    let img = unsafe { c.batch_img.as_ref() };
-    let extra: Vec<&Image> = c.batch_extra[..c.batch_nextra as usize].iter().filter_map(|&e| unsafe { e.as_ref() }).collect();
-    let (depth, stencil) = unsafe { (c.batch_depth.as_ref(), c.batch_stencil.as_ref()) };
-    let (serve, area, wb, nwb, tris, placed) = (c.batch_serve, c.batch_area, c.wb, c.nwb as usize, c.batch_tris, c.batch_in_place);
     c.batch_tris = 0;
     c.nwb = 0;
     c.region_set = null_mut();
     (c.batch_pool, c.batch_vpool) = (null(), null());
     (c.heap_top, c.batch_draws, c.batch_img, c.batch_nextra) = (0, 0, null_mut(), 0);
     drop(c.state_sent.take());
+    Some(r)
+}
+
+/// Renders a batch; its attachments live until the pass ends.
+pub fn run(r: &Run) {
+    let img = unsafe { r.img.as_ref() };
+    let extra: Vec<&Image> = r.extra.iter().filter_map(|&e| unsafe { e.as_ref() }).collect();
+    let (depth, stencil) = unsafe { (r.depth.as_ref(), r.stencil.as_ref()) };
     let rec = borgvk_corpus_on();
     let seed = BORGVK_CORPUS_SEED as u64;
-    let state = |h| corpus_state(h, img, &extra, depth, stencil, &wb[..nwb]);
-    let key = if rec { state(hash(seed, stream.as_slice())) } else { seed };
-    let words: Vec<u32> = occ[..nocc].iter().map(|r| r.off).collect();
-    let counts = if serve {
-        let n = run_pass(stream.as_slice(), img, &extra, depth, stencil, &wb[..nwb], area, &words, tris, placed);
+    let state = |h| corpus_state(h, img, &extra, depth, stencil, &r.wb);
+    let key = if rec { state(hash(seed, r.stream.as_slice())) } else { seed };
+    let words: Vec<u32> = r.occ.iter().map(|o| o.off).collect();
+    let counts = if r.serve {
+        let n = run_pass(r.stream.as_slice(), img, &extra, depth, stencil, &r.wb, r.area, &words, r.tris, r.placed);
         if let (Some(path), Some(i)) = (std::env::var_os("BORGVK_DUMP_PPM").filter(|p| !p.is_empty()), img) {
             dump_ppm(i, std::path::Path::new(&path));
         }
@@ -192,12 +229,12 @@ pub fn flush_draws(c: &mut CommandBuffer) {
             let (w, h) = img.map_or((0, 0), |i| (i.vk.extent.width, i.vk.extent.height));
             log(MESA_LOG_WARN, format!("borgvk: a pass of {w}x{h} is too large to render"));
         }
-        vec![0; nocc]
+        vec![0; r.occ.len()]
     };
-    for (r, n) in occ[..nocc].iter().zip(counts) {
-        if let Some(s) = unsafe { &*r.pool }.slot(r.query) {
+    for (o, n) in r.occ.iter().zip(counts) {
+        if let Some(s) = unsafe { &*o.pool }.slot(o.query) {
             s.result.fetch_add(n, Relaxed);
-            s.avail.fetch_or(r.end, Relaxed);
+            s.avail.fetch_or(o.end, Relaxed);
         }
     }
     if rec {
