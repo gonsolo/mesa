@@ -13,6 +13,7 @@ use crate::format::{src_len, tex_convert, tex_format};
 use crate::wire::*;
 use crate::state_upload::DEFAULT_SAMPLER;
 use borg_layout::descriptor::{TexDesc, TexType};
+use borg_layout::tex_format::TexFormat;
 use borg_layout::tile::texture_index;
 
 const CHUNK: u32 = BORGVK_TEXG_CHUNK;
@@ -195,16 +196,27 @@ pub fn generic_texture(view: &vk_image_view, img: &Image) -> Option<Texture> {
 
 /// The descriptor of a view the sampler reads where it is: a tiled colour image of one sample
 /// in device memory, in a format it takes unconverted.
-fn in_place(view: &vk_image_view, img: &Image) -> Option<[u32; 16]> {
+pub fn in_place(view: &vk_image_view, img: &Image) -> Option<[u32; 16]> {
     let gpu = img.memory()?.gpu;
-    let (t, planes) = crate::texels::Texels::of(img)?.tiled()?;
-    if gpu == 0 || planes != crate::texels::Planes::Color || img.vk.samples > 1 {
+    let texels = crate::texels::Texels::of(img)?;
+    if gpu == 0 || img.vk.samples > 1 {
         return None;
     }
-    let (format, tc) = tex_format(view.format, false)?;
-    if tc.sch != 0 || tc.pack16 != 0 || tc.zstride != 0 || tc.obpp != crate::image::blocks(img.vk.format).bs {
-        return None;
-    }
+    let unconverted = || {
+        let (format, tc) = tex_format(view.format, false)?;
+        (tc.sch == 0 && tc.pack16 == 0 && tc.zstride == 0 && tc.obpp == crate::image::blocks(img.vk.format).bs).then_some(format)
+    };
+    let Some((t, planes)) = texels.tiled() else { return linear_in_place(view, img, gpu, unconverted()?) };
+    // Depth planes hold D16 or float texels (D24 as float too: not the sampler's format).
+    let stencil = view.aspects & VK_IMAGE_ASPECT_STENCIL_BIT != 0;
+    let (p, format) = match planes {
+        crate::texels::Planes::Color => (0, unconverted()?),
+        crate::texels::Planes::Stencil => (0, TexFormat::R8_UINT),
+        crate::texels::Planes::Depth { stencil: true, .. } if stencil => (1, TexFormat::R8_UINT),
+        crate::texels::Planes::Depth { z16: true, .. } if !stencil => (0, TexFormat::D16_UNORM),
+        crate::texels::Planes::Depth { .. } if !stencil && matches!(img.vk.format, VK_FORMAT_D32_SFLOAT | VK_FORMAT_D32_SFLOAT_S8_UINT) => (0, TexFormat::D32_SFLOAT),
+        _ => return None,
+    };
     let is3d = img.vk.image_type == VK_IMAGE_TYPE_3D;
     let (ty, layers) = match view.view_type {
         VK_IMAGE_VIEW_TYPE_1D_ARRAY => (TexType::D1, view.layer_count),
@@ -228,13 +240,41 @@ fn in_place(view: &vk_image_view, img: &Image) -> Option<[u32; 16]> {
         return None;
     }
     let sw = [view.swizzle.r, view.swizzle.g, view.swizzle.b, view.swizzle.a];
-    let desc = TexDesc { width: w, height: h, ty, linear: false, depth_or_layers: depth, levels, format, swizzle: sw, pitch: t.layer_size(0) as u32 };
+    let desc = TexDesc { width: w, height: h, ty, linear: false, depth_or_layers: depth, levels, format, swizzle: sw, pitch: t.layer_size(p) as u32 };
     let mut d = [0u32; 16];
-    d[0] = gpu + (img.offset + t.level_base(0, base, if is3d { 0 } else { view.base_array_layer })) as u32;
+    d[0] = gpu + (img.offset + t.level_base(p, base, if is3d { 0 } else { view.base_array_layer })) as u32;
     d[1..4].copy_from_slice(&desc.pack());
     for l in 1..levels {
-        d[3 + l as usize] = (t.level_offset(0, base + l) - t.level_offset(0, base)) as u32;
+        d[3 + l as usize] = (t.level_offset(p, base + l) - t.level_offset(p, base)) as u32;
     }
+    Some(d)
+}
+
+/// A linear image's view of one level and layer, read where it is with its row pitch.
+fn linear_in_place(view: &vk_image_view, img: &Image, gpu: u32, format: TexFormat) -> Option<[u32; 16]> {
+    let base = view.base_mip_level;
+    let one = base < img.vk.mip_levels && view.level_count.min(img.vk.mip_levels - base) == 1;
+    let ty = match view.view_type {
+        VK_IMAGE_VIEW_TYPE_1D => TexType::D1,
+        VK_IMAGE_VIEW_TYPE_2D => TexType::D2,
+        _ => return None,
+    };
+    if !one || img.vk.image_type == VK_IMAGE_TYPE_3D {
+        return None;
+    }
+    let blk = crate::image::blocks(img.vk.format);
+    let (off, stride) = crate::image::shape(img).level_offset(base, view.base_array_layer, blk);
+    let shr = |e: u32| e.checked_shr(base).unwrap_or(0).max(1);
+    let (w, h) = (shr(img.vk.extent.width), if ty == TexType::D1 { 1 } else { shr(img.vk.extent.height) });
+    let addr = gpu + (img.offset + off) as u32;
+    if w > 4096 || h > 4096 || blk.bs >= 4 && addr & 3 != 0 {
+        return None;
+    }
+    let sw = [view.swizzle.r, view.swizzle.g, view.swizzle.b, view.swizzle.a];
+    let desc = TexDesc { width: w, height: h, ty, linear: true, depth_or_layers: 1, levels: 1, format, swizzle: sw, pitch: stride * blk.bs };
+    let mut d = [0u32; 16];
+    d[0] = addr;
+    d[1..4].copy_from_slice(&desc.pack());
     Some(d)
 }
 
@@ -261,6 +301,16 @@ pub fn send_buffer_texture(bv: &vk_buffer_view) -> Option<u32> {
     let w = if bs == 0 { 0 } else { (bv.range / bs) as u32 };
     if w == 0 || w > 65536 {
         return None;
+    }
+    // In the device heap and unconverted: read where it is.
+    let gpu = bv.buffer().and_then(|b| b.memory()).map_or(0, |m| m.gpu);
+    if gpu != 0 && tc.sch == 0 && tc.pack16 == 0 && tc.zstride == 0 && tc.obpp as u64 == bs {
+        let desc = TexDesc { width: w, height: 1, ty: TexType::D1, linear: true, depth_or_layers: 1, levels: 1, format, swizzle: [0; 4], pitch: w * tc.obpp };
+        let mut d = [0u32; 16];
+        d[0] = gpu + (bv.buffer()?.offset + bv.offset) as u32;
+        d[1..4].copy_from_slice(&desc.pack());
+        send_texture_desc(&d, &DEFAULT_SAMPLER);
+        return Some(0);
     }
     let mut out = vec![0u8; (w * tc.obpp).next_multiple_of(4) as usize];
     host.with_bytes(bv.offset as usize, src_len(&tc, w as usize), |src| tex_convert(&tc, &mut out, src, w as usize));
