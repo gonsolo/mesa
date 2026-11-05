@@ -33,7 +33,7 @@
 #include "drm-uapi/borg_drm.h"
 #include "borgvk_drm_compat.h"
 
-#include "software/borg/borg_layout.h"
+#include "out/hardware/borg/rdl/borg_layout.h"
 #include "out/hardware/borg/rdl/borg_regs.h"
 
 #include <fcntl.h>
