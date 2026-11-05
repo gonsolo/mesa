@@ -8,6 +8,7 @@
 
 use crate::ffi::*;
 use crate::object::VkBuf;
+use crate::wire::Draw;
 
 pub trait Gpu {
     fn reg(&mut self, off: u32, v: u32);
@@ -36,31 +37,35 @@ const SHIFT_MIN: u32 = 8;
 const SHIFT_MAX: u32 = 10;
 const LIST_MAX_REGS: usize = 40;
 
-/// A packet's length from its marker, 0 for an unknown one.
-pub fn packet_len(marker: u8) -> usize {
-    (match marker {
-        0xB0 => BC_PKT_LEN_SHADER,
-        0xC1 => BC_PKT_LEN_SHADER_BIG,
-        0xC3 => BC_PKT_LEN_SHADER_HUGE,
-        0xB2 => BC_PKT_LEN_PUSH,
-        0xB3 => BC_PKT_LEN_BLEND,
-        0xB4 => BC_PKT_LEN_STATE,
-        0xB5 => BC_PKT_LEN_TEXG,
-        0xC2 => BC_PKT_LEN_VP,
-        0xB6 => BC_PKT_LEN_TARGET,
-        0xB8 => BC_PKT_LEN_MEM,
-        0xBB => BC_PKT_LEN_PASS,
-        0xC0 => BC_PKT_LEN_TEXL,
-        0xC4 => BC_PKT_LEN_TEXS,
-        0xC5 => BC_PKT_LEN_BIAS,
-        0xC6 => BC_PKT_LEN_OCC,
-        0xBF => BC_PKT_LEN_ATT,
-        0xC7 => BC_PKT_LEN_PLACE,
-        0xC8 => BC_PKT_LEN_TEXD,
-        0xB9 => BC_PKT_LEN_VATTR,
-        0xBA => BC_PKT_LEN_DRAW,
-        _ => 0,
-    }) as usize
+/// What the driver records for the list builder.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Cmd {
+    Shader(u8, Vec<u8>),
+    Push(u32, Vec<u32>),
+    Blend(u32, u32),
+    State([u32; 5]),
+    Viewport([f32; 6], [u32; 4]),
+    Target(u8, [f32; 4]),
+    Mem(u32, Vec<u8>),
+    Vattr([u32; 6]),
+    Draw(Draw),
+    Att(u8, [u8; 3]),
+    Pass(u8, u8),
+    Place([u32; 6], u32),
+    Bias(u32, u32),
+    Occ(bool, u32),
+    TexChunk(u32, Vec<u8>, [u32; 3], [u32; 4]),
+    TexSlot(u8, u8, u32),
+    TexDesc([u32; 16], [u32; 4]),
+    TexLevels([u32; 12]),
+}
+
+/// Word `i` of `b`, bytes past its end as zeros.
+fn word(b: &[u8], i: usize) -> u32 {
+    let mut w = [0u8; 4];
+    let n = b.len().saturating_sub(i).min(4);
+    w[..n].copy_from_slice(&b[i..i + n]);
+    u32::from_le_bytes(w)
 }
 
 fn le32(b: &[u8]) -> u32 {
@@ -267,7 +272,7 @@ impl Builder {
         self.setup_base = self.bin_base + (ww >> 2) * (wh >> 2) * TBR_BIN_ROW_BYTES;
     }
 
-    /// The target size, as the 0xBC request sets it.
+    /// The target size.
     pub fn init(&mut self, g: &mut Prog, w: u32, h: u32) {
         self.flush_format = 0;
         (self.fb_w, self.fb_h, self.place, self.pitch) = (w, h, [0; 6], 0);
@@ -398,7 +403,7 @@ impl Builder {
         self.vtab_dirty = true;
     }
 
-    /// Queues the draw the last 0xBA described.
+    /// Queues the draw the last `Cmd::Draw` described.
     pub fn draw(&mut self, g: &mut Prog) {
         let (bias_c, bias_s) = (self.bias[0], self.bias[1]);
         self.bias = [0; 2];
@@ -542,98 +547,88 @@ impl Builder {
         }
     }
 
-    /// One packet of the stream; false when it is malformed.
-    pub fn packet(&mut self, g: &mut Prog, p: &[u8]) -> bool {
-        if matches!(p[0], 0xB2 | 0xB5 | 0xB6 | 0xBB | 0xBF | 0xC6 | 0xC7 | 0xC8) {
+    /// One command; false when it is malformed.
+    pub fn apply(&mut self, g: &mut Prog, c: &Cmd) -> bool {
+        if matches!(c, Cmd::Push(..) | Cmd::TexChunk(..) | Cmd::Target(..) | Cmd::Pass(..) | Cmd::Att(..) | Cmd::Occ(..) | Cmd::Place(..) | Cmd::TexDesc(..)) {
             self.flush(g);
         }
-        let n = packet_len(p[0]);
-        if n == 0 || p.len() < n || p[1..n - 1].iter().fold(0, |c, b| c ^ b) != p[n - 1] {
-            return false;
-        }
-        let w = |i: usize| le32(&p[i..]);
-        match p[0] {
-            0xB0 | 0xC1 | 0xC3 => {
-                let (stage, blen) = (p[1] as usize, p[2] as usize | (p[3] as usize) << 8);
-                if stage > 1 || blen < 6 || 4 + blen > n {
+        match c {
+            Cmd::Shader(stage, blob) => {
+                if *stage > 1 || blob.len() < 6 {
                     return false;
                 }
-                self.stage_shader(g, stage, &p[4..4 + blen]);
+                self.stage_shader(g, *stage as usize, blob);
             }
-            0xB2 => {
-                let (off, nw) = (p[1] as u32, p[2] as u32);
+            Cmd::Push(off, words) => {
+                let (off, nw) = (*off, words.len() as u32);
                 if nw < 1 || nw > BC_PUSH_MAX_WORDS || off >= BC_PUSH_MAX_WORDS || nw > BC_PUSH_MAX_WORDS - off {
                     return false;
                 }
                 let nw = nw.min(BORG_PUSH_CONST_MAX_WORDS - off);
                 for i in 0..nw {
-                    g.mem(BORG_PUSH_CONST_SPI + (off + i) * 4, w(3 + 4 * i as usize));
+                    g.mem(BORG_PUSH_CONST_SPI + (off + i) * 4, words[i as usize]);
                 }
                 let root = Self::root_table(g, DRAW_ROOT_SPI, BORG_PUSH_CONST_SPI, TEX_DESC_TABLE_ADDR, SAMPLER_DESC_TABLE_ADDR, 0);
                 g.reg(r!(root), root);
                 self.push_used = true;
             }
-            0xB3 => {
-                g.reg(r!(blend_cfg), w(1));
-                g.reg(r!(blend_const), w(5));
-                (self.st[0], self.st[1]) = (w(1), w(5));
+            &Cmd::Blend(cfg, k) => {
+                g.reg(r!(blend_cfg), cfg);
+                g.reg(r!(blend_const), k);
+                (self.st[0], self.st[1]) = (cfg, k);
             }
-            0xB4 => {
-                g.reg(r!(stencil_cfg), w(1));
-                g.reg(r!(stencil_front), w(5));
-                g.reg(r!(stencil_back), w(9));
-                g.reg(r!(depth_cfg), w(13));
-                self.cull_cfg = w(17);
-                self.st[2..6].copy_from_slice(&[w(1), w(5), w(9), w(13)]);
+            Cmd::State(s) => {
+                g.reg(r!(stencil_cfg), s[0]);
+                g.reg(r!(stencil_front), s[1]);
+                g.reg(r!(stencil_back), s[2]);
+                g.reg(r!(depth_cfg), s[3]);
+                self.cull_cfg = s[4];
+                self.st[2..6].copy_from_slice(&s[..4]);
                 self.raster_valid = true;
             }
-            0xC2 => {
-                let f: [f32; 6] = std::array::from_fn(|k| f32::from_bits(w(1 + 4 * k)));
+            Cmd::Viewport(f, sc) => {
                 let v = [f[2] / 2.0, f[3] / 2.0, f[0] + f[2] / 2.0, f[1] + f[3] / 2.0, f[5] - f[4], f[4]];
-                let (x0, y0, x1, y1) = (w(25), w(29), w(33), w(37));
+                let [x0, y0, x1, y1] = *sc;
                 if x0 > x1 || y0 > y1 || x1 > 4096 || y1 > 4096 {
                     return false;
                 }
                 let b = v.map(f32::to_bits);
                 self.vp = Some([b[0], b[1], b[2], b[3], b[4], b[5], x0 | x1 << 13, y0 | y1 << 13 | 1 << 26]);
             }
-            0xC6 => {
-                let off = w(2);
-                if p[1] > 1 || off & 3 != 0 || off >= BORG_HEAP_BYTES {
+            &Cmd::Occ(on, off) => {
+                if off & 3 != 0 || off >= BORG_HEAP_BYTES {
                     return false;
                 }
-                self.occ = (p[1] != 0, BORG_HEAP_SPI + off);
+                self.occ = (on, BORG_HEAP_SPI + off);
                 g.op(&[OCC_BEGIN]);
-                if self.occ.0 {
+                if on {
                     g.mem(self.occ.1, 0);
                 }
-                g.reg(r!(occ_ctrl), if p[1] != 0 { 3 } else { 0 });
+                g.reg(r!(occ_ctrl), if on { 3 } else { 0 });
             }
-            0xC5 => self.bias = [w(1), w(5)],
-            0xB6 => {
-                let Some((fmt, srgb)) = wire_format(p[1]) else { return false };
+            &Cmd::Bias(k, s) => self.bias = [k, s],
+            Cmd::Target(f, clear) => {
+                let Some((fmt, srgb)) = wire_format(*f) else { return false };
                 if fmt != self.flush_format || srgb != self.srgb {
                     (self.flush_format, self.srgb) = (fmt, srgb);
                     self.apply_layout(g);
                 }
-                self.clear = [f32_to_fp16(w(2)), f32_to_fp16(w(6)), f32_to_fp16(w(10))];
+                self.clear = [0, 1, 2].map(|k| f32_to_fp16(clear[k].to_bits()));
             }
-            0xBF => {
-                if p[1] < 1 || p[1] > 4 {
+            Cmd::Att(n, f) => {
+                if *n < 1 || *n > 4 {
                     return false;
                 }
                 let mut att = 0;
                 for k in 0..3 {
-                    let Some((fmt, srgb)) = wire_format(p[2 + k]) else { return false };
+                    let Some((fmt, srgb)) = wire_format(f[k]) else { return false };
                     att |= fmt << (3 * k) | srgb << (9 + k);
                 }
-                (self.natt, self.att_fmt) = (p[1] as u32, att);
+                (self.natt, self.att_fmt) = (*n as u32, att);
             }
-            0xC7 => {
-                for k in 0..6 {
-                    self.place[k] = w(1 + 4 * k);
-                }
-                self.pitch = w(25);
+            Cmd::Place(at, pitch) => {
+                self.place = *at;
+                self.pitch = *pitch;
                 if self.pitch > 4095 {
                     return false;
                 }
@@ -645,34 +640,33 @@ impl Builder {
                     g.reg(r!(flush_sb_base), self.place[2]);
                 }
             }
-            0xBB => {
-                let Some((fmt, srgb)) = wire_format(p[1]) else { return false };
-                if p[2] > 63 {
+            &Cmd::Pass(f, flags) => {
+                let Some((fmt, srgb)) = wire_format(f) else { return false };
+                if flags > 63 {
                     return false;
                 }
-                let (nocolor, ms) = ((p[2] >> 3 & 1) as u32, (p[2] >> 4 & 1) as u32);
+                let (nocolor, ms) = ((flags >> 3 & 1) as u32, (flags >> 4 & 1) as u32);
                 if fmt != self.flush_format || srgb != self.srgb || nocolor != self.nocolor || ms != self.ms {
                     (self.flush_format, self.srgb, self.nocolor, self.ms) = (fmt, srgb, nocolor, ms);
                     self.apply_layout(g);
                 }
                 let pl = |k: usize, fixed: u32, b: &Self| if b.place[k] != 0 { b.place[k] } else { fixed };
-                g.reg(r!(flush_zb_base), if p[2] & 1 != 0 { pl(1, BORG_ZB_SPI, self) } else { 0 });
-                g.reg(r!(flush_sb_base), if p[2] & 2 != 0 { pl(2, BORG_SB_SPI, self) } else { 0 });
-                g.reg(r!(depth_format), (p[2] >> 2 & 1) as u32 | ((p[2] >> 5 & 1) as u32) << 1);
+                g.reg(r!(flush_zb_base), if flags & 1 != 0 { pl(1, BORG_ZB_SPI, self) } else { 0 });
+                g.reg(r!(flush_sb_base), if flags & 2 != 0 { pl(2, BORG_SB_SPI, self) } else { 0 });
+                g.reg(r!(depth_format), (flags >> 2 & 1) as u32 | ((flags >> 5 & 1) as u32) << 1);
                 g.reg(r!(attach_ms), self.ms);
             }
-            0xB8 => {
-                let (off, nb) = (w(1), p[5] as u32 | (p[6] as u32) << 8);
+            Cmd::Mem(off, data) => {
+                let (off, nb) = (*off, data.len() as u32);
                 if nb > BC_MEM_DATA || off & 3 != 0 || off + nb > BORG_HEAP_BYTES {
                     return false;
                 }
                 for i in (0..nb).step_by(4) {
-                    g.mem(BORG_HEAP_SPI + off + i, w(7 + i as usize));
+                    g.mem(BORG_HEAP_SPI + off + i, word(data, i as usize));
                 }
             }
-            0xB9 => {
-                let (slot, fmt) = (p[1] as u32, p[2] as u32);
-                let (base, count, stride, swz) = (BORG_HEAP_SPI.wrapping_add(w(3)), w(7), w(11), w(15));
+            &Cmd::Vattr([slot, fmt, base, count, stride, swz]) => {
+                let base = BORG_HEAP_SPI.wrapping_add(base);
                 if slot >= BORG_MAX_VATTRS || fmt == 0 || fmt > 51 || count < 1 || count > 4096 * 4096 || stride == 0 || stride > 16 {
                     return false;
                 }
@@ -690,62 +684,58 @@ impl Builder {
                 }
                 g.reg(r!(desc_flush), 0);
             }
-            0xBA => {
-                if p[1] > 2 || p[2] > 2 || p[3] > 127 {
+            Cmd::Draw(d) => {
+                if d.topology > 2 || d.index_type > 2 || d.restart > 127 {
                     return false;
                 }
-                let load = (p[3] >> 1 & 15) as u32;
+                let (p3, w) = (d.restart, d.words);
+                let load = p3 >> 1 & 15;
                 self.dp = DrawParams {
-                    topology: p[1] as u32,
-                    index_type: p[2] as u32,
-                    restart: (p[3] & 1) as u32,
+                    topology: d.topology,
+                    index_type: d.index_type,
+                    restart: p3 & 1,
                     load: if load == 1 { 9 } else { load },
-                    push_stage: (p[3] >> 5 & 3) as u32,
-                    instance_count: w(8),
-                    first_vertex: w(12),
-                    first_instance: w(16),
-                    vertex_offset: w(20) as i32,
-                    index_base: if p[2] != 0 { w(24) } else { 0 },
-                    ubo_base: if w(28) != 0 { BORG_HEAP_SPI + w(28) - 1 } else { 0 },
-                    table: if w(32) != 0 { BORG_HEAP_SPI + w(32) - 1 } else { 0 },
+                    push_stage: p3 >> 5 & 3,
+                    instance_count: w[1],
+                    first_vertex: w[2],
+                    first_instance: w[3],
+                    vertex_offset: w[4] as i32,
+                    index_base: if d.index_type != 0 { w[5] } else { 0 },
+                    ubo_base: if w[6] != 0 { BORG_HEAP_SPI + w[6] - 1 } else { 0 },
+                    table: if w[7] != 0 { BORG_HEAP_SPI + w[7] - 1 } else { 0 },
                 };
-                self.vertex_count = w(4);
+                self.vertex_count = w[0];
                 (self.tex_slot, self.samp_slot, self.tex_base) = (0, 0, 0);
             }
-            0xC0 => self.tex_lvl = std::array::from_fn(|i| w(1 + 4 * i)),
-            0xC4 => {
-                if p[1] as u32 >= BC_TEX_SLOTS || p[2] as u32 >= BC_TEX_SLOTS || w(3) & 255 != 0 || w(3) >= TEXEL_BYTES {
+            Cmd::TexLevels(l) => self.tex_lvl = *l,
+            &Cmd::TexSlot(t, s, base) => {
+                if t as u32 >= BC_TEX_SLOTS || s as u32 >= BC_TEX_SLOTS || base & 255 != 0 || base >= TEXEL_BYTES {
                     return false;
                 }
-                (self.tex_slot, self.samp_slot, self.tex_base) = (p[1] as u32, p[2] as u32, w(3));
+                (self.tex_slot, self.samp_slot, self.tex_base) = (t as u32, s as u32, base);
             }
-            0xB5 => {
-                let (off, nb) = (w(1), p[5] as u32 | (p[6] as u32) << 8);
+            Cmd::TexChunk(off, data, d3, samp) => {
+                let (off, nb) = (*off, data.len() as u32);
                 if nb > BC_TEXG_DATA || off & 3 != 0 || self.tex_base + off + nb > TEXEL_BYTES {
                     return false;
                 }
-                let d3 = [w(7), w(11), w(15)];
                 if (d3[1] >> 10) & 15 == 0 {
                     self.tex_lvl = [0; 12];
                 }
                 let mut d = [0u32; 16];
                 d[0] = TEXEL_BASE + self.tex_base;
-                d[1..4].copy_from_slice(&d3);
+                d[1..4].copy_from_slice(d3);
                 d[4..].copy_from_slice(&self.tex_lvl);
                 self.tex_desc_store(g, &d);
-                let samp = [w(19), w(23), w(27), w(31)];
-                self.sampler_store(g, &samp);
+                self.sampler_store(g, samp);
                 for i in (0..nb).step_by(4) {
-                    g.mem(TEXEL_BASE + self.tex_base + off + i, w(35 + i as usize));
+                    g.mem(TEXEL_BASE + self.tex_base + off + i, word(data, i as usize));
                 }
             }
-            0xC8 => {
-                let d: [u32; 16] = std::array::from_fn(|i| w(1 + 4 * i));
-                self.tex_desc_store(g, &d);
-                let samp = [w(65), w(69), w(73), w(77)];
-                self.sampler_store(g, &samp);
+            Cmd::TexDesc(d, samp) => {
+                self.tex_desc_store(g, d);
+                self.sampler_store(g, samp);
             }
-            _ => return false,
         }
         true
     }
@@ -790,6 +780,10 @@ impl Prog {
             self.at = addr;
         }
         self.run.push(v);
+    }
+
+    pub fn len(&self) -> usize {
+        self.buf.as_slice().len()
     }
 
     fn reg(&mut self, off: u32, v: u32) {
@@ -848,38 +842,48 @@ impl Prog {
     }
 }
 
-/// The open batch's lists, built draw by draw.
+/// The open batch: its commands not yet built, the last draw state sent, its lists and its corpus
+/// key.
 pub struct Batch {
-    b: Builder,
-    g: Prog,
+    lists: Option<(Builder, Prog)>,
+    pub pending: Vec<Cmd>,
+    pub sent: Vec<Cmd>,
+    key: u64,
 }
 
 impl Batch {
-    /// For a `w` x `h` pass, built into `buf`.
-    pub fn new(w: u32, h: u32, buf: VkBuf) -> Box<Self> {
-        let mut l = Box::new(Batch { b: Builder::new(), g: Prog { buf, at: 0, run: Vec::new(), ok: true } });
-        l.b.init(&mut l.g, w, h);
-        l
+    pub fn new() -> Box<Self> {
+        Box::new(Batch { lists: None, pending: Vec::new(), sent: Vec::new(), key: BORGVK_CORPUS_SEED as u64 })
     }
 
-    pub fn feed(&mut self, stream: &[u8]) {
-        let mut i = 0;
-        while i < stream.len() {
-            let n = packet_len(stream[i]);
-            if n == 0 || i + n > stream.len() {
-                break;
-            }
-            if self.b.packet(&mut self.g, &stream[i..i + n]) && stream[i] == 0xBA {
-                self.b.draw(&mut self.g);
-            }
-            i += n;
+    /// The pending commands into the lists of a `w` x `h` pass, in a buffer from `alloc`; without
+    /// a size the pass is not rendered.
+    pub fn build(&mut self, size: Option<(u32, u32)>, alloc: *const VkAllocationCallbacks) {
+        if crate::corpus::borgvk_corpus_on() {
+            self.key = self.pending.iter().fold(self.key, |h, c| crate::corpus::hash(h, format!("{c:?}").as_bytes()));
         }
+        if let (None, Some((w, h))) = (&self.lists, size) {
+            let (mut b, mut g) = (Builder::new(), Prog { buf: unsafe { VkBuf::new(alloc) }, at: 0, run: Vec::new(), ok: true });
+            b.init(&mut g, w, h);
+            self.lists = Some((b, g));
+        }
+        if let Some((b, g)) = self.lists.as_mut() {
+            for c in &self.pending {
+                if b.apply(g, c) && matches!(c, Cmd::Draw(_)) {
+                    b.draw(g);
+                }
+            }
+        }
+        self.pending.clear();
     }
 
-    pub fn end(mut self) -> Prog {
-        self.b.flush(&mut self.g);
-        self.g.end_mem();
-        self.g
+    pub fn end(self) -> (Option<Prog>, u64) {
+        let prog = self.lists.map(|(mut b, mut g)| {
+            b.flush(&mut g);
+            g.end_mem();
+            g
+        });
+        (prog, self.key)
     }
 }
 
@@ -896,10 +900,9 @@ mod tests {
     }
 
     #[test]
-    fn packet_lengths() {
-        assert_eq!(packet_len(0xBA), 1 + 3 + 8 * 4 + 1);
-        assert_eq!(packet_len(0xB6), 1 + 1 + 16 + 1);
-        assert_eq!(packet_len(0xAD), 0);
+    fn words_pad_with_zeros() {
+        assert_eq!(word(&[1, 2, 3, 4, 5], 0), 0x0403_0201);
+        assert_eq!(word(&[1, 2, 3, 4, 5], 4), 5);
     }
 
     #[test]

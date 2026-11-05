@@ -620,7 +620,7 @@ fn start_servers(all: &mut [Server], np: usize, wp: u32, hp: u32, direct: Option
     all[..np].iter_mut().all(|s| s.start(direct) && s.set_size(wp, hp))
 }
 
-/// The device: upload the attachments, run the stream, download them, the writebacks and the
+/// The device: upload the attachments, run the lists, download them, the writebacks and the
 /// occlusion counters.
 fn run_on_device(d: &mut Dev, s: &Server, l: &Layout, t: &Targets, prog: &Prog, wb: &[Writeback], occ: &[u32], rows_per: u32) {
     let tiles16 = (l.wp >> 2) * (l.h.next_multiple_of(4) >> 2) * 16 * l.ms;

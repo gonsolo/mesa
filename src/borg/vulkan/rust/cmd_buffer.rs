@@ -1,8 +1,8 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-//! Command buffers: the runtime's, with the recorded stream and draw state of rust/wire.rs and
-//! the C recorders; push constants.
+//! Command buffers: the runtime's, with the open batch's lists and draw state, and the C
+//! recorders; push constants.
 
 use crate::entrypoint::{entrypoint, handle, pointee};
 use crate::descriptor_set::DescriptorSet;
@@ -12,7 +12,7 @@ use crate::image::Image;
 use crate::device::Device;
 use crate::pipeline::Pipeline;
 use crate::query::{OccRun, QueryPool};
-use crate::object::{allocate, Owned, VkBuf, Zeroed};
+use crate::object::{allocate, Owned, Zeroed};
 use crate::render::Target;
 use std::ffi::c_void;
 use std::mem::zeroed;
@@ -54,15 +54,11 @@ pub struct CommandBuffer {
     pub desc_set: *mut DescriptorSet,
     pub cs_pipeline: *const Pipeline,
     pub dispatched: bool, // ran a compute dispatch at replay
-    // The open batch's packets not yet built, its lists, its size in packet bytes and corpus key.
-    pub stream: VkBuf,
-    pub list: Option<Box<crate::list::Batch>>,
-    pub batch_bytes: usize,
-    pub batch_key: u64,
+    pub list: Option<Box<crate::list::Batch>>, // the open batch
+
     pub heap_top: u32,
     pub batch_draws: u32,
     pub batch_tris: u32, // at most, over the batch's draws
-    pub state_sent: VkBuf,
     pub batch_img: *mut Image,
     pub batch_extra: [*mut Image; 3], // colour attachments 1-3 of the batch
     pub batch_nextra: u32,
@@ -260,7 +256,6 @@ unsafe extern "C" fn create(pool: *mut vk_command_pool, level: VkCommandBufferLe
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     };
     let mut c = Owned::new(c, |c| unsafe { vk_free(alloc, std::ptr::from_mut(c).cast()) });
-    unsafe { (c.stream, c.state_sent) = (VkBuf::new(alloc), VkBuf::new(alloc)) };
     let mut params = vk_command_buffer_init_params { pool, ops: &CMD_BUFFER_OPS, level, needs_cmd_queue: true, ..unsafe { zeroed() } };
     let r = unsafe { vk_command_buffer_init_with_params(&mut c.vk, &mut params) };
     if r != VK_SUCCESS {
@@ -272,7 +267,7 @@ unsafe extern "C" fn create(pool: *mut vk_command_pool, level: VkCommandBufferLe
 
 unsafe extern "C" fn reset(vk: *mut vk_command_buffer, _flags: VkCommandBufferResetFlags) {
     let c = unsafe { cmd(vk) };
-    drop((c.stream.take(), c.state_sent.take(), c.record.take(), c.list.take()));
+    drop((c.record.take(), c.list.take()));
     crate::render::free_targets(c);
     clear_state(c);
     unsafe { vk_command_buffer_reset(vk) };
@@ -294,7 +289,7 @@ unsafe extern "C" fn destroy(vk: *mut vk_command_buffer) {
     let c = unsafe { cmd(vk) };
     unsafe {
         vk_command_buffer_finish(&mut c.vk);
-        drop((c.stream.take(), c.state_sent.take(), c.record.take(), c.list.take()));
+        drop((c.record.take(), c.list.take()));
         crate::render::free_targets(c);
         vk_free(&(*c.vk.pool).alloc, (c as *mut CommandBuffer).cast());
     }

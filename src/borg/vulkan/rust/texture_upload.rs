@@ -1,7 +1,7 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-//! Textures to the Borg as wire packets: whole views in the sampler's layout and format, texel
+//! Textures to the Borg as list builder commands: whole views in the sampler's layout and format, texel
 //! buffers, and the cube's downscaled RGBA8 rows.
 
 use crate::copy::decode_compressed_image;

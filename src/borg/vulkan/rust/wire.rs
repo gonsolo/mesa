@@ -1,54 +1,20 @@
 // Copyright © 2026 Andreas Wendleder
 // SPDX-License-Identifier: MIT
 
-//! The wire packets borgvk sends to the firmware, the simulator or the DRM driver. Each packet is
-//! a marker byte, a payload and an XOR checksum over everything between them.
+//! The commands a recorded draw sends the list builder, and the state words they carry.
 
 use crate::ffi::*;
+use crate::list::Cmd;
 use crate::vk::*;
 use crate::transport::capturing;
 use crate::util::{log, MESA_LOG_INFO, MESA_LOG_WARN};
 
-const MARKER_SHADER: u8 = 0xB0;
-const MARKER_SHADER_BIG: u8 = 0xC1;
-const MARKER_SHADER_HUGE: u8 = 0xC3;
-const MARKER_PUSH: u8 = 0xB2;
-const MARKER_BLEND: u8 = 0xB3;
-const MARKER_STATE: u8 = 0xB4;
-const MARKER_TEXG: u8 = 0xB5;
-const MARKER_TARGET: u8 = 0xB6;
-const MARKER_MEM: u8 = 0xB8;
-const MARKER_VATTR: u8 = 0xB9;
-const MARKER_DRAW: u8 = 0xBA;
-const MARKER_PASS: u8 = 0xBB;
-const MARKER_ATT: u8 = 0xBF;
-const MARKER_PLACE: u8 = 0xC7;
-const MARKER_TEXD: u8 = 0xC8;
-const MARKER_TEXL: u8 = 0xC0;
-const MARKER_TEXS: u8 = 0xC4;
-const MARKER_VP: u8 = 0xC2;
-const MARKER_BIAS: u8 = 0xC5;
-const MARKER_OCC: u8 = 0xC6;
-
-const SHADER_SMALL: usize = 512;
-const SHADER_BIG: usize = 4096;
 const SHADER_MAX: usize = BORGVK_SHADER_BLOB_MAX as usize;
 const PUSH_MAX_WORDS: u32 = 32;
 const TEXG_CHUNK: usize = BORGVK_TEXG_CHUNK as usize;
 
-/// Fills in the checksum and hands the packet to the transport.
-fn emit(pkt: &mut [u8]) {
-    let n = pkt.len();
-    pkt[n - 1] = pkt[1..n - 1].iter().fold(0, |c, b| c ^ b);
-    crate::transport::emit(pkt);
-}
-
-fn put_u32(d: &mut [u8], v: u32) {
-    d[..4].copy_from_slice(&v.to_le_bytes());
-}
-
-fn put_f32(d: &mut [u8], f: f32) {
-    put_u32(d, f.to_bits());
+fn emit(c: Cmd) {
+    crate::transport::emit(c);
 }
 
 pub fn send_shader(stage: u8, blob: &[u8]) {
@@ -57,18 +23,7 @@ pub fn send_shader(stage: u8, blob: &[u8]) {
         log(MESA_LOG_WARN, format!("borgvk: refusing to send shader (stage {stage}, len {len})"));
         return;
     }
-    // The board takes blobs up to SHADER_BIG; 0xC3 is the host's.
-    let (marker, room) = match len {
-        ..=SHADER_SMALL => (MARKER_SHADER, SHADER_SMALL),
-        ..=SHADER_BIG => (MARKER_SHADER_BIG, SHADER_BIG),
-        _ => (MARKER_SHADER_HUGE, SHADER_MAX),
-    };
-    let mut pkt = vec![0u8; 1 + 1 + 2 + room + 1];
-    pkt[0] = marker;
-    pkt[1] = stage;
-    pkt[2..4].copy_from_slice(&(len as u16).to_le_bytes());
-    pkt[4..4 + len].copy_from_slice(blob);
-    emit(&mut pkt);
+    emit(Cmd::Shader(stage, blob.to_vec()));
     let (what, kind) = (if capturing() { "captured" } else { "uploaded" }, if stage == 0 { "vertex" } else { "fragment" });
     log(MESA_LOG_INFO, format!("borgvk: {what} {kind} shader ({len} bytes)"));
 }
@@ -87,39 +42,19 @@ pub fn send_push_constants(offset: u32, values: &[u8]) {
         );
         return;
     }
-    let mut pkt = [0u8; 1 + 1 + 1 + PUSH_MAX_WORDS as usize * 4 + 1];
-    pkt[0] = MARKER_PUSH;
-    pkt[1] = off_words as u8;
-    pkt[2] = n_words as u8;
-    pkt[3..3 + values.len()].copy_from_slice(values);
-    emit(&mut pkt);
+    emit(Cmd::Push(off_words, values.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect()));
     let what = if capturing() { "captured" } else { "sent" };
     log(MESA_LOG_INFO, format!("borgvk: {what} {size} B of push constants at offset {offset}"));
 }
 
-/// Begins or ends counting an occlusion query into the heap word at `off`, for a draw stream.
-pub fn occ_packet(begin: bool, off: u32) -> [u8; 7] {
-    let mut pkt = [MARKER_OCC, begin as u8, 0, 0, 0, 0, 0];
-    put_u32(&mut pkt[2..], off);
-    pkt[6] = pkt[1..6].iter().fold(0, |c, b| c ^ b);
-    pkt
-}
 
 /// Depth bias constant and slope factors of the next draw.
 pub fn send_depth_bias(b: [f32; 2]) {
-    let mut pkt = [0u8; 10];
-    pkt[0] = MARKER_BIAS;
-    put_u32(&mut pkt[1..], b[0].to_bits());
-    put_u32(&mut pkt[5..], b[1].to_bits());
-    emit(&mut pkt);
+    emit(Cmd::Bias(b[0].to_bits(), b[1].to_bits()));
 }
 
 pub fn send_blend(cfg: u32, konst: u32) {
-    let mut pkt = [0u8; 10];
-    pkt[0] = MARKER_BLEND;
-    put_u32(&mut pkt[1..], cfg);
-    put_u32(&mut pkt[5..], konst);
-    emit(&mut pkt);
+    emit(Cmd::Blend(cfg, konst));
 }
 
 fn unorm8(f: f32) -> u32 {
@@ -156,57 +91,27 @@ pub fn blend_const_pack(k: [f32; 4]) -> u32 {
 }
 
 pub fn send_state(reg: &[u32; 5]) {
-    let mut pkt = [0u8; 22];
-    pkt[0] = MARKER_STATE;
-    for (r, &v) in reg.iter().enumerate() {
-        put_u32(&mut pkt[1 + 4 * r..], v);
-    }
-    emit(&mut pkt);
+    emit(Cmd::State(*reg));
 }
 
 pub fn send_viewport(vp: &Vp) {
-    let mut pkt = [0u8; 42];
-    pkt[0] = MARKER_VP;
-    for (k, &v) in vp.v.iter().enumerate() {
-        pkt[1 + 4 * k..5 + 4 * k].copy_from_slice(&v.to_ne_bytes());
-    }
-    for (k, &s) in vp.sc.iter().enumerate() {
-        put_u32(&mut pkt[25 + 4 * k..], s);
-    }
-    emit(&mut pkt);
+    emit(Cmd::Viewport(vp.v, vp.sc));
 }
 
 pub fn send_target(flush_format: u8, clear: &[f32; 4]) {
-    let mut pkt = [0u8; 19];
-    pkt[0] = MARKER_TARGET;
-    pkt[1] = flush_format;
-    for (i, &c) in clear.iter().enumerate() {
-        put_f32(&mut pkt[2 + 4 * i..], c);
-    }
-    emit(&mut pkt);
+    emit(Cmd::Target(flush_format, *clear));
 }
 
 pub fn send_mem(off: u32, data: &[u8]) {
-    let mut pkt = [0u8; 1 + 4 + 2 + 256 + 1];
-    pkt[0] = MARKER_MEM;
-    put_u32(&mut pkt[1..], off);
-    pkt[5..7].copy_from_slice(&(data.len() as u16).to_le_bytes());
-    pkt[7..7 + data.len()].copy_from_slice(data);
-    emit(&mut pkt);
+    emit(Cmd::Mem(off, data.to_vec()));
 }
 
 pub fn send_vattr(slot: u32, fmt: u32, base: u32, count: u32, stride: u32, swz: u32) {
-    let mut pkt = [0u8; 20];
-    pkt[0] = MARKER_VATTR;
-    pkt[1] = slot as u8;
-    pkt[2] = fmt as u8;
-    for (i, v) in [base, count, stride, swz].into_iter().enumerate() {
-        put_u32(&mut pkt[3 + 4 * i..], v);
-    }
-    emit(&mut pkt);
+    emit(Cmd::Vattr([slot, fmt, base, count, stride, swz]));
 }
 
-/// The fields of a 0xBA draw packet, in wire order after the three byte fields.
+/// A draw: topology, index type, the restart, load and push-stage bits, and its words.
+#[derive(Clone, PartialEq, Debug)]
 pub struct Draw {
     pub topology: u32,
     pub index_type: u32,
@@ -215,32 +120,21 @@ pub struct Draw {
 }
 
 pub fn send_draw(d: &Draw) {
-    let mut pkt = [0u8; 1 + 3 + 8 * 4 + 1];
-    pkt[0] = MARKER_DRAW;
-    pkt[1..4].copy_from_slice(&[d.topology as u8, d.index_type as u8, d.restart as u8]);
-    for (i, &v) in d.words.iter().enumerate() {
-        put_u32(&mut pkt[4 + 4 * i..], v);
-    }
-    emit(&mut pkt);
+    emit(Cmd::Draw(d.clone()));
 }
 
 pub fn send_att(count: u8, fmt: &[u8; 3]) {
-    emit(&mut [MARKER_ATT, count, fmt[0], fmt[1], fmt[2], 0]);
+    emit(Cmd::Att(count, *fmt));
 }
 
 pub fn send_pass(flush_format: u8, flags: u8) {
-    emit(&mut [MARKER_PASS, flush_format, flags, 0]);
+    emit(Cmd::Pass(flush_format, flags));
 }
 
 /// The pass's attachments in device memory (colour, depth, stencil, 1-3) and their pitch in
 /// tiles; zeros: the simulator's fixed planes.
 pub fn send_place(at: &[u32; 6], pitch: u32) {
-    let mut pkt = [0u8; 30];
-    pkt[0] = MARKER_PLACE;
-    for (i, v) in at.iter().chain(&[pitch]).enumerate() {
-        put_u32(&mut pkt[1 + 4 * i..], *v);
-    }
-    emit(&mut pkt);
+    emit(Cmd::Place(*at, pitch));
 }
 
 fn stencil_face_pack(f: &VkStencilOpState) -> u32 {
@@ -280,103 +174,41 @@ pub fn state_pack(ci: &VkGraphicsPipelineCreateInfo) -> [u32; 5] {
 }
 
 pub fn send_texture_chunk(off: u32, data: &[u8], desc_w123: &[u32; 3], sampler: &[u32; 4]) {
-    let data = &data[..data.len().min(TEXG_CHUNK)];
-    let mut pkt = [0u8; 1 + 4 + 2 + 12 + 16 + TEXG_CHUNK + 1];
-    pkt[0] = MARKER_TEXG;
-    put_u32(&mut pkt[1..], off);
-    pkt[5..7].copy_from_slice(&(data.len() as u16).to_le_bytes());
-    for (w, &v) in desc_w123.iter().chain(sampler).enumerate() {
-        put_u32(&mut pkt[7 + 4 * w..], v);
-    }
-    pkt[35..35 + data.len()].copy_from_slice(data);
-    emit(&mut pkt);
+    emit(Cmd::TexChunk(off, data[..data.len().min(TEXG_CHUNK)].to_vec(), *desc_w123, *sampler));
 }
 
 /// The texture and sampler slot and the texel byte base of the texture packets that follow.
 pub fn send_texture_slot(tex: u8, sampler: u8, base: u32) {
-    let mut pkt = [0u8; 1 + 1 + 1 + 4 + 1];
-    pkt[0] = MARKER_TEXS;
-    (pkt[1], pkt[2]) = (tex, sampler);
-    put_u32(&mut pkt[3..], base);
-    emit(&mut pkt);
+    emit(Cmd::TexSlot(tex, sampler, base));
 }
 
 /// A texture the sampler reads in device memory: its descriptor and the sampler's, into the slots
 /// of the last [`send_texture_slot`].
 pub fn send_texture_desc(desc: &[u32; 16], sampler: &[u32; 4]) {
-    let mut pkt = [0u8; 1 + 20 * 4 + 1];
-    pkt[0] = MARKER_TEXD;
-    for (w, &v) in desc.iter().chain(sampler).enumerate() {
-        put_u32(&mut pkt[1 + 4 * w..], v);
-    }
-    emit(&mut pkt);
+    emit(Cmd::TexDesc(*desc, *sampler));
 }
 
 pub fn send_texture_levels(offs: &[u32; 12]) {
-    let mut pkt = [0u8; 1 + 48 + 1];
-    pkt[0] = MARKER_TEXL;
-    for (w, &v) in offs.iter().enumerate() {
-        put_u32(&mut pkt[1 + 4 * w..], v);
-    }
-    emit(&mut pkt);
+    emit(Cmd::TexLevels(*offs));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Runs `f` under a capture and returns what it sent; empty if nothing.
-    fn captured(f: impl FnOnce()) -> Vec<u8> {
+    /// Runs `f` under a capture and returns what it sent.
+    fn captured(f: impl FnOnce()) -> Vec<Cmd> {
         crate::transport::borgvk_transport_capture_begin();
         f();
         crate::transport::capture_end()
     }
 
-    /// Runs `f` and returns the one packet it sent, after checking its checksum.
-    fn sent(f: impl FnOnce()) -> Vec<u8> {
-        let p = captured(f);
-        assert!(!p.is_empty());
-        assert_eq!(p[1..].iter().fold(0, |c, b| c ^ b), 0, "checksum");
-        p
-    }
-
-    fn u32_at(p: &[u8], i: usize) -> u32 {
-        u32::from_le_bytes(p[i..i + 4].try_into().unwrap())
-    }
-
     #[test]
-    fn viewport() {
-        let vp = Vp { valid: true, v: [1.0, 2.0, 3.0, 4.0, 0.0, 1.0], sc: [5, 6, 7, 8] };
-        let p = sent(|| send_viewport(&vp));
-        assert_eq!((p.len(), p[0]), (42, MARKER_VP));
-        assert_eq!(f32::from_le_bytes(p[9..13].try_into().unwrap()), 3.0);
-        assert_eq!(u32_at(&p, 37), 8);
-    }
-
-    #[test]
-    fn shaders_small_and_big() {
-        let p = sent(|| send_shader(1, &[7, 8, 9]));
-        assert_eq!((p.len(), p[0], p[1], &p[2..7]), (517, MARKER_SHADER, 1, &[3, 0, 7, 8, 9][..]));
-        let p = sent(|| send_shader(0, &[1; 600]));
-        assert_eq!((p.len(), p[0], u16::from_le_bytes([p[2], p[3]])), (1 + 1 + 2 + SHADER_BIG + 1, MARKER_SHADER_BIG, 600));
-        let p = sent(|| send_shader(1, &[1; 5000]));
-        assert_eq!((p.len(), p[0], u16::from_le_bytes([p[2], p[3]])), (1 + 1 + 2 + SHADER_MAX + 1, MARKER_SHADER_HUGE, 5000));
+    fn shaders_and_texture_chunks() {
+        assert_eq!(captured(|| send_shader(1, &[7, 8, 9])), [Cmd::Shader(1, vec![7, 8, 9])]);
         assert!(captured(|| send_shader(0, &[])).is_empty(), "an empty shader is refused");
-    }
-
-    #[test]
-    fn texture_chunk_is_capped() {
-        let p = sent(|| send_texture_chunk(0x1234, &[5; 300], &[1, 2, 3], &[4, 5, 6, 7]));
-        assert_eq!((p.len(), p[0], u32_at(&p, 1)), (1 + 4 + 2 + 12 + 16 + TEXG_CHUNK + 1, MARKER_TEXG, 0x1234));
-        assert_eq!(u16::from_le_bytes([p[5], p[6]]), TEXG_CHUNK as u16);
-        assert_eq!((u32_at(&p, 7), u32_at(&p, 31)), (1, 7));
-    }
-
-    #[test]
-    fn texture_levels() {
-        let offs: [u32; 12] = std::array::from_fn(|i| i as u32 * 16);
-        let p = sent(|| send_texture_levels(&offs));
-        assert_eq!((p.len(), p[0], u32_at(&p, 1 + 4 * 11)), (50, MARKER_TEXL, 176));
+        let c = captured(|| send_texture_chunk(0x1234, &[5; 300], &[1, 2, 3], &[4, 5, 6, 7]));
+        assert_eq!(c, [Cmd::TexChunk(0x1234, vec![5; TEXG_CHUNK], [1, 2, 3], [4, 5, 6, 7])]);
     }
 
     #[test]
@@ -425,7 +257,7 @@ mod tests {
         assert_eq!(state_pack(&ci), [1 | ops << 1 | ops << 13, 0xFF | 0xAB << 8 | 0xCD << 16, 0xFF | 0xAB << 8 | 0xCD << 16, 3, 1 | 1 << 2 | 1 << 31 | 0xF << 8]);
     }
 
-    fn push(offset: u32, words: &[u32], size: u32) -> Vec<u8> {
+    fn push(offset: u32, words: &[u32], size: u32) -> Vec<Cmd> {
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).chain(std::iter::repeat(0)).take(size as usize).collect();
         captured(|| send_push_constants(offset, &bytes))
     }
@@ -433,50 +265,10 @@ mod tests {
     #[test]
     fn push_constants() {
         let words = [0xB2B20000u32, 0xB2B20001, 0xB2B20002, 0xB2B20003];
-        let p = push(8 * 4, &words, 16);
-        assert_eq!(p.len(), 132);
-        assert_eq!(p[..3], [0xB2, 8, 4]); // 0xB1 is the serial-reload trigger
-        for (i, &w) in words.iter().enumerate() {
-            assert_eq!(u32_at(&p, 3 + 4 * i), w);
-        }
-        assert!(p[3 + 16..131].iter().all(|&b| b == 0));
-        assert_eq!(p[1..].iter().fold(0, |c, b| c ^ b), 0, "checksum");
-
-        let full: Vec<u32> = (0..32).map(|i| 0xA5A50000 + i).collect();
-        let p = push(0, &full, 128);
-        assert_eq!((p.len(), p[1], p[2]), (132, 0, 32));
-
+        assert_eq!(push(8 * 4, &words, 16), [Cmd::Push(8, words.to_vec())]);
         let v = [1u32, 2];
         for (offset, size) in [(2, 8), (0, 6), (0, 33 * 4), (32 * 4, 4), (0, 0)] {
             assert!(push(offset, &v, size).is_empty(), "{offset} {size}");
         }
-    }
-
-    #[test]
-    fn fixed_packets() {
-        let p = sent(|| send_blend(0x11223344, 0x55667788));
-        assert_eq!((p.len(), u32_at(&p, 1), u32_at(&p, 5)), (10, 0x11223344, 0x55667788));
-        let p = occ_packet(true, 0x1234);
-        assert_eq!((p[0], p[1], u32_at(&p, 2), p[1..].iter().fold(0, |c, b| c ^ b)), (0xC6, 1, 0x1234, 0));
-        let p = sent(|| send_depth_bias([2.0, -0.5]));
-        assert_eq!((p.len(), p[0], u32_at(&p, 1), u32_at(&p, 5)), (10, 0xC5, 2f32.to_bits(), (-0.5f32).to_bits()));
-        let p = sent(|| send_state(&[1, 2, 3, 4, 0xdeadbeef]));
-        assert_eq!((p.len(), u32_at(&p, 17)), (22, 0xdeadbeef));
-        let p = sent(|| send_target(2, &[0.0, 0.5, 1.0, 0.25]));
-        assert_eq!((p.len(), p[1]), (19, 2));
-        let p = sent(|| send_mem(0x1000, &[1, 2, 3, 4, 5, 6, 7, 8]));
-        assert_eq!(p.len(), 1 + 4 + 2 + 256 + 1);
-        assert_eq!((p[0], u32_at(&p, 1), p[5], p[6], p[7], p[14]), (0xB8, 0x1000, 8, 0, 1, 8));
-        let p = sent(|| send_vattr(3, 41, 0x100, 12, 16, 0x40000000));
-        assert_eq!((p.len(), p[0], p[1], p[2]), (20, 0xB9, 3, 41));
-        assert_eq!([u32_at(&p, 3), u32_at(&p, 7), u32_at(&p, 11), u32_at(&p, 15)], [0x100, 12, 16, 0x40000000]);
-        let p = sent(|| send_draw(&Draw { topology: 1, index_type: 2, restart: 1, words: [30, 4, 5, 6, -7i32 as u32, 0x200, 0x300, 0x400] }));
-        assert_eq!((p.len(), p[0], p[1], p[2], p[3]), (37, 0xBA, 1, 2, 1));
-        assert_eq!((4..12).map(|i| u32_at(&p, 4 * i - 12)).collect::<Vec<_>>(), [30, 4, 5, 6, -7i32 as u32, 0x200, 0x300, 0x400]);
-        let p = sent(|| send_att(3, &[5, 6, 7]));
-        assert_eq!((p.len(), p[0], p[1], p[4]), (6, 0xBF, 3, 7));
-        let p = sent(|| send_pass(4, 9));
-        assert_eq!(p[..3], [0xBB, 4, 9]);
-        assert_eq!(p.len(), 4);
     }
 }

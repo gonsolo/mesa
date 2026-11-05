@@ -89,15 +89,6 @@ impl VkBuf {
         if self.ptr.is_null() { &[] } else { unsafe { std::slice::from_raw_parts(self.ptr, self.len) } }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// The contents, leaving an empty buffer on the same allocator.
-    pub fn take(&mut self) -> Self {
-        std::mem::replace(self, Self { alloc: self.alloc, ptr: std::ptr::null_mut(), len: 0, cap: 0 })
-    }
-
     /// Appends `data`; false if the allocator fails.
     pub fn extend(&mut self, data: &[u8]) -> bool {
         if data.is_empty() {
@@ -114,16 +105,6 @@ impl VkBuf {
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), self.ptr.add(self.len), data.len()) };
         self.len += data.len();
         true
-    }
-
-    /// Replaces the contents; empty if the allocator fails.
-    pub fn set(&mut self, data: &[u8]) -> bool {
-        self.len = 0;
-        let ok = self.extend(data);
-        if !ok {
-            self.len = 0;
-        }
-        ok
     }
 }
 
@@ -154,12 +135,9 @@ mod tests {
     }
 
     #[test]
-    fn vkbuf_grows_and_takes() {
+    fn vkbuf_grows() {
         let mut b = unsafe { VkBuf::new(std::ptr::null()) };
         assert!(b.extend(&[1, 2]) && b.extend(&[3; 5000]) && b.extend(&[]));
         assert_eq!((b.as_slice().len(), b.as_slice()[..3].to_vec()), (5002, vec![1, 2, 3]));
-        let t = b.take();
-        assert!(b.is_empty() && t.as_slice().len() == 5002);
-        assert!(b.set(&[7]) && b.set(&[8, 9]) && b.as_slice() == [8, 9]);
     }
 }
