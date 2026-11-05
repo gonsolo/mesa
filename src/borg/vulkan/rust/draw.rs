@@ -172,7 +172,10 @@ pub struct Run {
 
 /// Runs the draws batched so far.
 pub fn flush_draws(c: &mut CommandBuffer) {
-    if let Some(r) = take_run(c) {
+    let Some(r) = take_run(c) else { return };
+    if c.recording() {
+        c.rec().runs.push(r);
+    } else {
         run(&r);
     }
 }
@@ -1349,6 +1352,9 @@ fn generic_draw(device: &Device, c: &mut CommandBuffer, p: &Params) -> bool {
 }
 
 fn sim_draw(c: &mut CommandBuffer, mut p: Params) {
+    if c.record.as_ref().is_some_and(|r| r.skip.is_some()) {
+        return;
+    }
     let (device, c) = c.split_device();
     // Only the simulator or the device renders.
     if !(std::env::var_os("BORGVK_SIM_DIRECT").is_some() || enabled()) {

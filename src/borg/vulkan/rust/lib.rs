@@ -39,6 +39,7 @@ mod memory;
 mod physical_device;
 mod pipeline;
 mod query;
+mod record;
 mod queue;
 mod render;
 mod sampler;

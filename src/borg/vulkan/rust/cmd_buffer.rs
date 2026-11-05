@@ -6,6 +6,7 @@
 
 use crate::entrypoint::{entrypoint, handle, pointee};
 use crate::descriptor_set::DescriptorSet;
+use crate::draw::Run;
 use crate::ffi::*;
 use crate::image::Image;
 use crate::device::Device;
@@ -87,6 +88,7 @@ pub struct CommandBuffer {
     pub pc: [u32; 32],           // push-constant bytes
     pub push_lo: u32,            // word range written so far; empty when lo >= hi
     pub push_hi: u32,
+    pub record: Option<Box<Recorded>>, // passes built while recording
     pub dyn_off: [VkDeviceSize; BORGVK_MAX_BINDINGS as usize], // dynamic offsets of desc_set
     pub cs_sets: [*mut DescriptorSet; 4], // the compute bind point's own sets
     pub cs_dyn_offs: [[VkDeviceSize; BORGVK_MAX_BINDINGS as usize]; 4],
@@ -94,7 +96,27 @@ pub struct CommandBuffer {
     pub dyn_offs: [[VkDeviceSize; BORGVK_MAX_BINDINGS as usize]; 4],
 }
 
+/// Passes built while recording (record.rs), and the one replay runs.
+#[derive(Default)]
+pub struct Recorded {
+    pub key: usize, // the open pass's recorded VkRenderingInfo
+    pub active: bool,
+    pub pure: bool,
+    pub queries: u32, // open at this point of the recording
+    pub runs: Vec<Run>,
+    pub passes: Vec<(usize, Vec<Run>)>,
+    pub skip: Option<usize>, // replay: the pass whose runs replace its draws
+}
+
 impl CommandBuffer {
+    pub fn recording(&self) -> bool {
+        self.vk.state == MESA_VK_COMMAND_BUFFER_STATE_RECORDING
+    }
+
+    pub fn rec(&mut self) -> &mut Recorded {
+        self.record.get_or_insert_with(Default::default)
+    }
+
     /// The push-constant words written so far and the first one's index.
     pub fn push_range(&self) -> Option<(u32, &[u32])> {
         (self.push_lo < self.push_hi).then(|| (self.push_lo, &self.pc[self.push_lo as usize..self.push_hi as usize]))
@@ -200,8 +222,14 @@ unsafe extern "C" fn create(pool: *mut vk_command_pool, level: VkCommandBufferLe
 
 unsafe extern "C" fn reset(vk: *mut vk_command_buffer, _flags: VkCommandBufferResetFlags) {
     let c = unsafe { cmd(vk) };
-    drop((c.stream.take(), c.state_sent.take()));
+    drop((c.stream.take(), c.state_sent.take(), c.record.take()));
     crate::render::free_targets(c);
+    clear_state(c);
+    unsafe { vk_command_buffer_reset(vk) };
+}
+
+/// The state commands set, as a replay starts.
+pub fn clear_state(c: &mut CommandBuffer) {
     (c.heap_top, c.batch_draws, c.batch_tris) = (0, 0, 0);
     (c.occ_pool, c.occ_open, c.nocc) = (null(), false, 0);
     (c.batch_img, c.index_ptr, c.gfx_pipeline, c.desc_set, c.cs_pipeline) = (null_mut(), null_mut(), null_mut(), null_mut(), null_mut());
@@ -210,14 +238,13 @@ unsafe extern "C" fn reset(vk: *mut vk_command_buffer, _flags: VkCommandBufferRe
     unsafe { (c.vb, c.vb_avail, c.vb_gpu, c.cs_sets, c.desc_sets) = (zeroed(), zeroed(), zeroed(), zeroed(), zeroed()) };
     (c.color_attachment_count, c.depth_view, c.stencil_view) = (0, null_mut(), null_mut());
     (c.rendering.depth, c.rendering.stencil) = (null_mut(), null_mut());
-    unsafe { vk_command_buffer_reset(vk) };
 }
 
 unsafe extern "C" fn destroy(vk: *mut vk_command_buffer) {
     let c = unsafe { cmd(vk) };
     unsafe {
         vk_command_buffer_finish(&mut c.vk);
-        drop((c.stream.take(), c.state_sent.take()));
+        drop((c.stream.take(), c.state_sent.take(), c.record.take()));
         crate::render::free_targets(c);
         vk_free(&(*c.vk.pool).alloc, (c as *mut CommandBuffer).cast());
     }

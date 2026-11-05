@@ -88,7 +88,7 @@ fn depth_stencil(c: &mut CommandBuffer, att: Option<&VkRenderingAttachmentInfo>,
     let Some(att) = att else { return null_mut() };
     let view = unsafe { att.imageView.get_ref() };
     let target = target_view(c, view);
-    if let Some(v) = view.filter(|_| att.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
+    if let Some(v) = view.filter(|_| att.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR && !c.recording()) {
         clear_rect(v, aspect, &att.clearValue, c.render_area, 0, layers);
     }
     target
@@ -98,6 +98,13 @@ pointee!(VkRenderingInfo);
 
 entrypoint! {
     fn borgvk_CmdBeginRendering(c: &mut CommandBuffer, ri: &VkRenderingInfo) {
+        // Load clears write memory: at submit. A pass built while recording replays as its runs.
+        let rec = c.recording();
+        if !rec {
+            let key = std::ptr::from_ref(ri) as usize;
+            let r = c.rec();
+            r.skip = r.passes.iter().position(|(k, _)| *k == key);
+        }
         c.in_rendering = true;
         c.render_area = ri.renderArea;
         c.layer_count = ri.layerCount.max(1);
@@ -111,7 +118,9 @@ entrypoint! {
             c.color_views[i] = target_view(c, view);
             c.color_resolve_views[i] = target_view(c, unsafe { att.resolveImageView.get_ref() });
             if let Some(view) = view.filter(|_| att.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
-                clear_rect(view, VK_IMAGE_ASPECT_COLOR_BIT, &att.clearValue, c.render_area, 0, layers);
+                if !rec {
+                    clear_rect(view, VK_IMAGE_ASPECT_COLOR_BIT, &att.clearValue, c.render_area, 0, layers);
+                }
                 if i == 0 {
                     c.has_clear = true;
                     c.clear_color = att.clearValue.color().float32();
@@ -139,6 +148,20 @@ fn layers(view: &vk_image_view, count: u32) -> Sub {
 entrypoint! {
     fn borgvk_CmdEndRendering2EXT(c: &mut CommandBuffer, _info: *const VkRenderingEndInfoEXT) {
         crate::draw::flush_draws(c);
+        if c.recording() {
+            let r = c.rec();
+            let runs = std::mem::take(&mut r.runs);
+            if r.pure && !crate::memory::touched() {
+                r.passes.push((r.key, runs));
+            }
+            r.active = false;
+            return end_pass(c);
+        }
+        if let Some(i) = c.rec().skip.take() {
+            for run in &c.rec().passes[i].1 {
+                crate::draw::run(run);
+            }
+        }
         let ra = c.render_area;
         let at = [ra.offset.x, ra.offset.y, 0];
         for i in 0..c.color_attachment_count as usize {
@@ -153,11 +176,15 @@ entrypoint! {
             };
             resolve_region(src, dst, &region);
         }
-        c.in_rendering = false;
-        c.color_attachment_count = 0;
-        (c.depth_view, c.stencil_view) = (null_mut(), null_mut());
-        (c.rendering.depth, c.rendering.stencil) = (null_mut(), null_mut());
+        end_pass(c);
     }
+}
+
+fn end_pass(c: &mut CommandBuffer) {
+    c.in_rendering = false;
+    c.color_attachment_count = 0;
+    (c.depth_view, c.stencil_view) = (null_mut(), null_mut());
+    (c.rendering.depth, c.rendering.stencil) = (null_mut(), null_mut());
 }
 
 // By hand: bindgen leaves out vk_common_entrypoints.h's hidden declarations.

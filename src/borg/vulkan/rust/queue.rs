@@ -11,6 +11,7 @@ unsafe fn work(q: &mut vk_queue, submit: &mut vk_queue_submit) -> VkResult {
     let device = unsafe { &*q.base.device.cast::<Device>() };
     for &cb in unsafe { crate::entrypoint::slice(submit.command_buffers, submit.command_buffer_count) } {
         unsafe {
+            crate::cmd_buffer::clear_state(&mut *cb.cast());
             vk_cmd_queue_execute(&mut (*cb).cmd_queue, cb.cast(), &device.cmd_dispatch);
             crate::draw::flush_draws(&mut *cb.cast()); // draws outside a pass end
         }
